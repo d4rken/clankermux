@@ -124,7 +124,13 @@ export function ensureSchema(db: Database): void {
 			context_tool_result_chars INTEGER,
 			context_largest_tool_chars INTEGER,
 			context_largest_tool_name TEXT,
-			context_binary_chars INTEGER
+			context_binary_chars INTEGER,
+			-- When a persistable token vector first became known, ms epoch. The
+			-- row's own timestamp column is written at PERSISTENCE time (after the
+			-- async writer drains), so it lags the moment the usage was actually
+			-- true by the response duration plus queue depth. NULL = no usable
+			-- usage ever arrived (waived, or a summary carrying no model).
+			usage_finalized_at INTEGER
 		)
 	`);
 
@@ -435,7 +441,8 @@ export function ensureSchema(db: Database): void {
 	//
 	// account_id CASCADE mirrors the snapshot tables: deleting an account removes
 	// its history.
-	db.run(`
+	db.run(
+		`
 		CREATE TABLE IF NOT EXISTS unified_claim_observations (
 			request_id TEXT NOT NULL,
 			account_id TEXT NOT NULL,
@@ -447,10 +454,15 @@ export function ensureSchema(db: Database): void {
 			status TEXT NOT NULL,
 			utilization REAL,
 			reset_at INTEGER,
+			-- The claim's own surpassed-threshold line: the utilization band the
+			-- provider says the claim has crossed. Recorded, never interpreted —
+			-- NULL means no reading, 0 is a reading.
+			surpassed_threshold REAL,
 			PRIMARY KEY (request_id, claim),
 			FOREIGN KEY (account_id) REFERENCES accounts(id) ON DELETE CASCADE
 		)
-	`);
+	`,
+	);
 
 	// Per-account series reads; the bare observed_at index serves retention
 	// pruning, which scans the whole table by time regardless of account.
@@ -459,6 +471,119 @@ export function ensureSchema(db: Database): void {
 	);
 	db.run(
 		`CREATE INDEX IF NOT EXISTS idx_unified_claim_obs_observed_at ON unified_claim_observations(observed_at)`,
+	);
+
+	// Create unified_summary_observations table — the SUMMARY-level sibling of
+	// unified_claim_observations. One row per Anthropic response that carried any
+	// summary-level unified field, keyed by the request that received it.
+	//
+	// Not derivable from the claim rows: a per-IP burst 429 carries a bare
+	// `retry-after` and no claim lines at all, and the summary's status/reset
+	// describe whichever claim the provider chose to REPRESENT the account by —
+	// the exact field the 2026-08-02 scoped-rejection incidents turned on.
+	//
+	// Every column past the identity block is nullable and NULL means the header
+	// was absent (or did not parse). `remaining` and `retry_after` are stored
+	// VERBATIM as text: their units are not documented, and a number here would
+	// be a guess baked into the series forever.
+	//
+	// Deliberately NO foreign key to requests(id), and account_id CASCADE — same
+	// reasoning as unified_claim_observations.
+	db.run(`
+		CREATE TABLE IF NOT EXISTS unified_summary_observations (
+			request_id TEXT PRIMARY KEY,
+			account_id TEXT NOT NULL,
+			source TEXT NOT NULL,
+			http_status INTEGER NOT NULL,
+			request_started_at INTEGER NOT NULL,
+			observed_at INTEGER NOT NULL,
+			status TEXT,
+			reset_at INTEGER,
+			remaining TEXT,
+			representative_claim TEXT,
+			fallback TEXT,
+			fallback_percentage REAL,
+			overage_status TEXT,
+			overage_disabled_reason TEXT,
+			retry_after TEXT,
+			FOREIGN KEY (account_id) REFERENCES accounts(id) ON DELETE CASCADE
+		)
+	`);
+
+	db.run(
+		`CREATE INDEX IF NOT EXISTS idx_unified_summary_obs_account_time ON unified_summary_observations(account_id, observed_at)`,
+	);
+	db.run(
+		`CREATE INDEX IF NOT EXISTS idx_unified_summary_obs_observed_at ON unified_summary_observations(observed_at)`,
+	);
+
+	// Create internal_dispatch_spend table — per-dispatch token vectors for the
+	// proxy's OWN upstream traffic (cache-keepalive replays, auto-refresh probes).
+	//
+	// That traffic consumes real quota but is excluded from `requests` by
+	// shouldRecordRequest, so the proxy's own burn is otherwise invisible to every
+	// analysis built on the request series. `id` is the dispatch's request id —
+	// the SAME id its unified_claim_observations rows carry — so a probe's spend
+	// and the claim state its response reported join without a heuristic.
+	//
+	// Token columns are nullable: NULL = no reading (the response carried no
+	// usage), while a reported 0 is stored as 0. account_id CASCADE mirrors the
+	// observation tables.
+	db.run(`
+		CREATE TABLE IF NOT EXISTS internal_dispatch_spend (
+			id TEXT PRIMARY KEY,
+			account_id TEXT NOT NULL,
+			source TEXT NOT NULL,
+			model TEXT,
+			http_status INTEGER NOT NULL,
+			started_at INTEGER NOT NULL,
+			completed_at INTEGER,
+			input_tokens INTEGER,
+			output_tokens INTEGER,
+			cache_read_input_tokens INTEGER,
+			cache_creation_input_tokens INTEGER,
+			FOREIGN KEY (account_id) REFERENCES accounts(id) ON DELETE CASCADE
+		)
+	`);
+
+	// Per-account series reads; the bare started_at index serves retention
+	// pruning, which scans the whole table by time regardless of account.
+	db.run(
+		`CREATE INDEX IF NOT EXISTS idx_internal_dispatch_spend_account_time ON internal_dispatch_spend(account_id, started_at)`,
+	);
+	db.run(
+		`CREATE INDEX IF NOT EXISTS idx_internal_dispatch_spend_started_at ON internal_dispatch_spend(started_at)`,
+	);
+
+	// Create account_tier_history table — the effective-dated record of each
+	// account's plan tier and rate-limit tier.
+	//
+	// The accounts row only carries TODAY's value, so any analysis attributing
+	// historical usage to a tier refiles the whole history under whatever the
+	// account moved to most recently — and a tier change reads exactly like a
+	// change in what the subscription buys, which is the one thing such an
+	// analysis must be able to tell apart.
+	//
+	// Rows are appended on CHANGE only (an incoming null preserves the stored
+	// tier and is therefore not a change) plus one `seed` row per account from
+	// the one-shot backfill. NOT pruned: the series is one row per actual tier
+	// change, and losing the early rows destroys exactly the comparison it exists
+	// for. account_id CASCADE — the history dies with the account.
+	db.run(`
+		CREATE TABLE IF NOT EXISTS account_tier_history (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			account_id TEXT NOT NULL,
+			observed_at INTEGER NOT NULL,
+			plan_tier TEXT,
+			rate_limit_tier TEXT,
+			source TEXT NOT NULL,
+			app_version TEXT,
+			FOREIGN KEY (account_id) REFERENCES accounts(id) ON DELETE CASCADE
+		)
+	`);
+
+	db.run(
+		`CREATE INDEX IF NOT EXISTS idx_account_tier_history_account_time ON account_tier_history(account_id, observed_at)`,
 	);
 
 	// Create quota_drift_results table — the precomputed quota-drift analysis.
@@ -1020,6 +1145,23 @@ export const ADDITIVE_COLUMNS: ReadonlyArray<{
 		table: "usage_snapshots",
 		column: "rate_limit_tier",
 		ddl: "ALTER TABLE usage_snapshots ADD COLUMN rate_limit_tier TEXT",
+	},
+	// When a persistable token vector first became known for the request, ms
+	// epoch. The row's `timestamp` is written at PERSISTENCE time, which lags
+	// this by the response duration plus writer-queue depth — an unknown amount
+	// that anything correlating spend against a rate-limit clock is wrong by.
+	// NULL on pre-column rows and on rows whose usage was never usable.
+	{
+		table: "requests",
+		column: "usage_finalized_at",
+		ddl: "ALTER TABLE requests ADD COLUMN usage_finalized_at INTEGER",
+	},
+	// The per-claim `-surpassed-threshold` reading, which the first version of
+	// the claim series parsed past. NULL = no reading; 0 is a reading.
+	{
+		table: "unified_claim_observations",
+		column: "surpassed_threshold",
+		ddl: "ALTER TABLE unified_claim_observations ADD COLUMN surpassed_threshold REAL",
 	},
 ];
 

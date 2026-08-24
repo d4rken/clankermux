@@ -24,7 +24,9 @@ export class UnifiedClaimObservationRepository extends BaseRepository<UnifiedCla
 	 */
 	async insertMany(rows: UnifiedClaimObservationRow[]): Promise<void> {
 		if (rows.length === 0) return;
-		const values = rows.map(() => "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)").join(", ");
+		const values = rows
+			.map(() => "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
+			.join(", ");
 		const params: unknown[] = [];
 		for (const row of rows) {
 			params.push(
@@ -38,13 +40,14 @@ export class UnifiedClaimObservationRepository extends BaseRepository<UnifiedCla
 				row.status,
 				row.utilization ?? null,
 				row.resetAt ?? null,
+				row.surpassedThreshold ?? null,
 			);
 		}
 		await this.run(
 			`
 			INSERT INTO unified_claim_observations (
 				request_id, account_id, source, request_started_at, observed_at,
-				http_status, claim, status, utilization, reset_at
+				http_status, claim, status, utilization, reset_at, surpassed_threshold
 			)
 			VALUES ${values}
 			ON CONFLICT (request_id, claim) DO NOTHING

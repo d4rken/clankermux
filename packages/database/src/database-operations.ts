@@ -18,6 +18,7 @@ import type {
 	ComboSlot,
 	ComboWithSlots,
 	IntegrityStatus,
+	InternalDispatchSpendRow,
 	MemoryHistoryPoint,
 	MemorySnapshotRow,
 	PaymentSource,
@@ -29,6 +30,7 @@ import type {
 	StrategyStore,
 	ToolCallStat,
 	UnifiedClaimObservationRow,
+	UnifiedSummaryObservationRow,
 	UsageSnapshotRow,
 	UsageSnapshotSample,
 } from "@clankermux/types";
@@ -65,6 +67,7 @@ import {
 	type CodexResetCreditEventRow,
 } from "./repositories/codex-reset-credit-event.repository";
 import { ComboRepository } from "./repositories/combo.repository";
+import { InternalDispatchSpendRepository } from "./repositories/internal-dispatch-spend.repository";
 import { MemorySnapshotRepository } from "./repositories/memory-snapshot.repository";
 import { OAuthRepository } from "./repositories/oauth.repository";
 import {
@@ -79,6 +82,7 @@ import {
 import { StatsRepository } from "./repositories/stats.repository";
 import { StrategyRepository } from "./repositories/strategy.repository";
 import { UnifiedClaimObservationRepository } from "./repositories/unified-claim-observation.repository";
+import { UnifiedSummaryObservationRepository } from "./repositories/unified-summary-observation.repository";
 import { UsageScopedSnapshotRepository } from "./repositories/usage-scoped-snapshot.repository";
 import { UsageSnapshotRepository } from "./repositories/usage-snapshot.repository";
 import { withRetryingMethods } from "./retry";
@@ -291,6 +295,21 @@ const DEFAULT_MEMORY_SNAPSHOT_RETENTION_MS = 14 * TIME_CONSTANTS.DAY;
 export const UNIFIED_CLAIM_OBSERVATION_RETENTION_MS = 90 * TIME_CONSTANTS.DAY;
 
 /**
+ * Retention for the `unified_summary_observations` series. FIXED, and
+ * deliberately the SAME 90 days as the claim series: the two are captured from
+ * one response and are only useful together, so a shorter window on either side
+ * would silently half-orphan every joined read.
+ */
+export const UNIFIED_SUMMARY_OBSERVATION_RETENTION_MS = 90 * TIME_CONSTANTS.DAY;
+
+/**
+ * Retention for the `internal_dispatch_spend` series. FIXED at 90 days, matching
+ * the claim series it is joined against by request id — a probe's spend is only
+ * interpretable next to the claim state its response reported.
+ */
+export const INTERNAL_DISPATCH_SPEND_RETENTION_MS = 90 * TIME_CONSTANTS.DAY;
+
+/**
  * How long a per-data-type storage-usage measurement is reused before the next
  * dashboard read triggers a fresh scan. The byte sums require a full-table
  * scan, so we cache to keep them off the proxy's hot path; 5 minutes is small
@@ -317,6 +336,15 @@ const RETENTION_USAGE_TABLES: ReadonlyArray<{
 	// it is the same kind of data, but it rides a FIXED retention of its own
 	// (UNIFIED_CLAIM_OBSERVATION_RETENTION_MS), not the usage-snapshot control.
 	{ key: "unified_claim_observations", table: "unified_claim_observations" },
+	// The summary-level sibling of the claim series, on its own fixed retention
+	// (UNIFIED_SUMMARY_OBSERVATION_RETENTION_MS) for the same reason.
+	{
+		key: "unified_summary_observations",
+		table: "unified_summary_observations",
+	},
+	// The proxy's own probe spend, on a fixed retention matching the claim series
+	// it joins against (INTERNAL_DISPATCH_SPEND_RETENTION_MS).
+	{ key: "internal_dispatch_spend", table: "internal_dispatch_spend" },
 	// Precomputed analysis output, kept to a handful of rows by the cleanup pass
 	// rather than by a retention control of its own.
 	{ key: "quota_drift_results", table: "quota_drift_results" },
@@ -420,6 +448,8 @@ export class DatabaseOperations implements StrategyStore, Disposable {
 	private usageSnapshots: UsageSnapshotRepository;
 	private usageScopedSnapshots: UsageScopedSnapshotRepository;
 	private unifiedClaimObservations: UnifiedClaimObservationRepository;
+	private unifiedSummaryObservations: UnifiedSummaryObservationRepository;
+	private internalDispatchSpend: InternalDispatchSpendRepository;
 	private memorySnapshots: MemorySnapshotRepository;
 	private cacheKeepaliveSnapshots: CacheKeepaliveSnapshotRepository;
 	private accountPayments: AccountPaymentRepository;
@@ -512,6 +542,14 @@ export class DatabaseOperations implements StrategyStore, Disposable {
 		this.unifiedClaimObservations = retrying(
 			new UnifiedClaimObservationRepository(this.adapter),
 			"unifiedClaimObservations",
+		);
+		this.unifiedSummaryObservations = retrying(
+			new UnifiedSummaryObservationRepository(this.adapter),
+			"unifiedSummaryObservations",
+		);
+		this.internalDispatchSpend = retrying(
+			new InternalDispatchSpendRepository(this.adapter),
+			"internalDispatchSpend",
 		);
 		this.quotaDriftResults = retrying(
 			new QuotaDriftResultRepository(this.adapter),
@@ -1301,8 +1339,9 @@ OAuth tokens will need to be re-authenticated.
 	async updateRequestUsage(
 		requestId: string,
 		usage: RequestData["usage"],
+		usageFinalizedAt?: number | null,
 	): Promise<void> {
-		await this.requests.updateUsage(requestId, usage);
+		await this.requests.updateUsage(requestId, usage, usageFinalizedAt);
 	}
 
 	/**
@@ -1542,6 +1581,8 @@ OAuth tokens will need to be re-authenticated.
 		removedSnapshots: number;
 		removedMemorySnapshots: number;
 		removedUnifiedClaimObservations: number;
+		removedUnifiedSummaryObservations: number;
+		removedInternalDispatchSpend: number;
 	}> {
 		const now = Date.now();
 
@@ -1573,6 +1614,12 @@ OAuth tokens will need to be re-authenticated.
 		// every caller (see UNIFIED_CLAIM_OBSERVATION_RETENTION_MS).
 		const unifiedClaimObservationCutoff =
 			now - UNIFIED_CLAIM_OBSERVATION_RETENTION_MS;
+		// Same story for the summary sibling and the probe-spend series: one fixed
+		// retention each, no parameter, no fallback.
+		const unifiedSummaryObservationCutoff =
+			now - UNIFIED_SUMMARY_OBSERVATION_RETENTION_MS;
+		const internalDispatchSpendCutoff =
+			now - INTERNAL_DISPATCH_SPEND_RETENTION_MS;
 
 		const empty = {
 			removedRequests: 0,
@@ -1581,6 +1628,8 @@ OAuth tokens will need to be re-authenticated.
 			removedSnapshots: 0,
 			removedMemorySnapshots: 0,
 			removedUnifiedClaimObservations: 0,
+			removedUnifiedSummaryObservations: 0,
+			removedInternalDispatchSpend: 0,
 		};
 
 		const worker = this.spawnIncrementalVacuumWorker();
@@ -1599,6 +1648,8 @@ OAuth tokens will need to be re-authenticated.
 					usageSnapshotCutoff,
 					memorySnapshotCutoff,
 					unifiedClaimObservationCutoff,
+					unifiedSummaryObservationCutoff,
+					internalDispatchSpendCutoff,
 					payloadMaxBytes,
 				});
 			});
@@ -2367,6 +2418,31 @@ OAuth tokens will need to be re-authenticated.
 		rows: UnifiedClaimObservationRow[],
 	): Promise<void> {
 		await this.unifiedClaimObservations.insertMany(rows);
+	}
+
+	/**
+	 * Record one response's SUMMARY-level unified reading. Idempotent on
+	 * request_id; real constraint violations still throw. Written from the same
+	 * capture site as the claim rows and sharing their `observedAt`, but
+	 * independently: a response can carry a summary and no claim lines at all.
+	 */
+	async saveUnifiedSummaryObservation(
+		row: UnifiedSummaryObservationRow,
+	): Promise<void> {
+		await this.unifiedSummaryObservations.insert(row);
+	}
+
+	// ── Internal-dispatch spend ───────────────────────────────────────────────
+
+	/**
+	 * Record one internal probe dispatch's token vector (keepalive replay /
+	 * auto-refresh probe). Idempotent on the dispatch's request id. Retention is
+	 * the cleanup worker's, not a repository method.
+	 */
+	async saveInternalDispatchSpend(
+		row: InternalDispatchSpendRow,
+	): Promise<void> {
+		await this.internalDispatchSpend.insert(row);
 	}
 
 	// ── Precomputed quota-drift results ───────────────────────────────────────

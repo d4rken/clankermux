@@ -1,4 +1,5 @@
 import type { Database } from "bun:sqlite";
+import { getVersionSync } from "@clankermux/core";
 import { Logger } from "@clankermux/logger";
 
 const log = new Logger("DatabaseBackfills");
@@ -22,6 +23,7 @@ const log = new Logger("DatabaseBackfills");
  */
 export function runOneShotBackfills(db: Database): void {
 	backfillAutoPauseOverageDefault(db);
+	seedAccountTierHistory(db);
 }
 
 const AUTO_PAUSE_OVERAGE_MARKER = "backfill:auto-pause-overage-default";
@@ -83,5 +85,64 @@ function backfillAutoPauseOverageDefault(db: Database): void {
 
 	log.info(
 		`Backfill ${AUTO_PAUSE_OVERAGE_MARKER}: enabled overage auto-pause on ${updated} account(s)`,
+	);
+}
+
+const ACCOUNT_TIER_HISTORY_SEED_MARKER = "backfill:account-tier-history-seed";
+
+/**
+ * Give `account_tier_history` a starting point: one row per existing account
+ * carrying its CURRENT tier pair, `source = 'seed'`.
+ *
+ * Without it the series only ever gains a row when a tier CHANGES, so every
+ * account that never changes tier would be absent entirely — and an absent
+ * account is indistinguishable from one whose tier is unknown. The seed row's
+ * `observed_at` is this pass's own clock, NOT when the tier was adopted; the
+ * `seed` source says so, and nothing may read it as a transition.
+ *
+ * One-shot for the usual reason plus one specific to this table: re-running it
+ * every boot would append a duplicate row per account per restart, turning a
+ * change log into a restart log.
+ */
+function seedAccountTierHistory(db: Database): void {
+	let claimed = false;
+	let seeded = 0;
+	const tx = db.transaction(() => {
+		// Marker first, inside the transaction — see the rationale on
+		// backfillAutoPauseOverageDefault.
+		claimed =
+			db
+				.prepare(
+					`INSERT OR IGNORE INTO strategies (name, config, updated_at)
+					 VALUES (?, ?, ?)`,
+				)
+				.run(ACCOUNT_TIER_HISTORY_SEED_MARKER, "{}", Date.now()).changes > 0;
+		if (!claimed) return;
+
+		const now = Date.now();
+		seeded = db
+			.prepare(
+				`INSERT INTO account_tier_history (
+					account_id, observed_at, plan_tier, rate_limit_tier, source, app_version
+				)
+				SELECT id, ?, identity_plan_tier, identity_rate_limit_tier, 'seed', ?
+				FROM accounts`,
+			)
+			.run(now, getVersionSync()).changes;
+
+		db.prepare(
+			`UPDATE strategies SET config = ?, updated_at = ? WHERE name = ?`,
+		).run(
+			JSON.stringify({ accountsSeeded: seeded, appliedAt: now }),
+			now,
+			ACCOUNT_TIER_HISTORY_SEED_MARKER,
+		);
+	});
+	tx();
+
+	if (!claimed) return;
+
+	log.info(
+		`Backfill ${ACCOUNT_TIER_HISTORY_SEED_MARKER}: seeded tier history for ${seeded} account(s)`,
 	);
 }

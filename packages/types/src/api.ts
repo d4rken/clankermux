@@ -166,6 +166,8 @@ export interface StorageUsageType {
 		| "usage_snapshots"
 		| "usage_scoped_snapshots"
 		| "unified_claim_observations"
+		| "unified_summary_observations"
+		| "internal_dispatch_spend"
 		| "quota_drift_results"
 		| "memory_snapshots"
 		| "tool_calls"

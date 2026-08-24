@@ -157,6 +157,17 @@ export type IncrementalVacuumRequest =
 			 * UNIFIED_CLAIM_OBSERVATION_RETENTION_MS in database-operations.ts.
 			 */
 			unifiedClaimObservationCutoff: number;
+			/**
+			 * Cutoff for `unified_summary_observations`. Fixed retention, matching
+			 * the claim series it is captured alongside — see
+			 * UNIFIED_SUMMARY_OBSERVATION_RETENTION_MS in database-operations.ts.
+			 */
+			unifiedSummaryObservationCutoff: number;
+			/**
+			 * Cutoff for `internal_dispatch_spend`, aged by `started_at`. Fixed
+			 * retention — see INTERNAL_DISPATCH_SPEND_RETENTION_MS.
+			 */
+			internalDispatchSpendCutoff: number;
 			// Byte budget for retained payload CONTENT (not file size); 0 disables
 			// the size pass. Applied on top of payloadCutoff — whichever rule
 			// deletes more wins.
@@ -177,6 +188,10 @@ export type CleanupCounts = {
 	 * deletions to the usage-snapshot control would misreport what that knob does.
 	 */
 	removedUnifiedClaimObservations: number;
+	/** Summary-level sibling of the claim series; same fixed-retention story. */
+	removedUnifiedSummaryObservations: number;
+	/** The proxy's own probe spend, aged by `started_at`. */
+	removedInternalDispatchSpend: number;
 };
 
 export type IncrementalVacuumResult =
@@ -414,7 +429,7 @@ export async function deleteBatched(
  * free string: the column name is interpolated into SQL, so the set of legal
  * values is fixed here rather than trusted from a call site.
  */
-type TimeColumn = "sampled_at" | "observed_at";
+type TimeColumn = "sampled_at" | "observed_at" | "started_at";
 
 /**
  * Best-effort BATCHED delete of aged rows from a time-series table by its own
@@ -498,6 +513,8 @@ async function runCleanup(
 	usageSnapshotCutoff: number,
 	memorySnapshotCutoff: number,
 	unifiedClaimObservationCutoff: number,
+	unifiedSummaryObservationCutoff: number,
+	internalDispatchSpendCutoff: number,
 	payloadMaxBytes: number,
 ): Promise<void> {
 	let db: Database | undefined;
@@ -582,6 +599,25 @@ async function runCleanup(
 			"unified_claim_observations",
 			unifiedClaimObservationCutoff,
 			"observed_at",
+		);
+
+		// The summary-level sibling, on its own (identical) fixed cutoff. Pruned
+		// separately rather than folded into the claim count: they are two tables
+		// with two row shapes, and one number for both would misreport either.
+		const removedUnifiedSummaryObservations = await tryDeleteSnapshotsBatched(
+			db,
+			"unified_summary_observations",
+			unifiedSummaryObservationCutoff,
+			"observed_at",
+		);
+
+		// The proxy's own probe spend. Aged by `started_at` — the row has no
+		// `observed_at`; its time axis is when the dispatch began.
+		const removedInternalDispatchSpend = await tryDeleteSnapshotsBatched(
+			db,
+			"internal_dispatch_spend",
+			internalDispatchSpendCutoff,
+			"started_at",
 		);
 
 		// Precomputed quota-drift payloads: keep the most recent few, drop the
@@ -673,6 +709,8 @@ async function runCleanup(
 				removedSnapshots,
 				removedMemorySnapshots,
 				removedUnifiedClaimObservations,
+				removedUnifiedSummaryObservations,
+				removedInternalDispatchSpend,
 			},
 		} satisfies IncrementalVacuumResult);
 	} catch (err) {
@@ -698,6 +736,8 @@ self.onmessage = (event: MessageEvent<IncrementalVacuumRequest>) => {
 			request.usageSnapshotCutoff,
 			request.memorySnapshotCutoff,
 			request.unifiedClaimObservationCutoff,
+			request.unifiedSummaryObservationCutoff,
+			request.internalDispatchSpendCutoff,
 			request.payloadMaxBytes,
 		);
 	} else {

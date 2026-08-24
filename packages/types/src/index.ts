@@ -1,5 +1,6 @@
 // Re-export all types organized by domain
 export * from "./account";
+export * from "./account-tier-history";
 // Keep existing exports for backward compatibility
 export * from "./api";
 export * from "./api-key";
@@ -8,6 +9,7 @@ export * from "./cache-keepalive";
 export * from "./combo";
 export * from "./constants";
 export * from "./conversation";
+export * from "./internal-dispatch-spend";
 export * from "./logging";
 export * from "./memory-snapshot";
 export * from "./native-responses";
@@ -20,6 +22,7 @@ export * from "./stats";
 export * from "./strategy";
 export * from "./system";
 export * from "./unified-claim-observation";
+export * from "./unified-summary-observation";
 export * from "./upstream-error";
 export * from "./usage-prediction";
 export * from "./usage-snapshot";

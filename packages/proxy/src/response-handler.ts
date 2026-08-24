@@ -1,6 +1,7 @@
 import {
 	BUFFER_SIZES,
 	extractUnifiedClaimReadings,
+	extractUnifiedSummaryReading,
 	requestEvents,
 	TIME_CONSTANTS,
 } from "@clankermux/core";
@@ -13,12 +14,15 @@ import { Logger } from "@clankermux/logger";
 import {
 	type Account,
 	type ContextComposition,
+	type InternalDispatchSpendRow,
+	type InternalDispatchSpendSource,
 	NATIVE_RESPONSES_RESPONSE_HEADER,
 	type ProjectAttributionSource,
 	type RequestRoutingMeta,
 	type ToolCallStat,
 	type UnifiedClaimObservationRow,
 	type UnifiedClaimObservationSource,
+	type UnifiedSummaryObservationRow,
 } from "@clankermux/types";
 import { cacheBodyStore } from "./cache-body-store";
 import type { ProxyContext } from "./handlers";
@@ -229,6 +233,156 @@ function claimObservationSource(
 }
 
 /**
+ * Which internal scheduler produced this dispatch, or null for client traffic.
+ *
+ * Derived from {@link claimObservationSource} so the spend rows and the claim
+ * rows of one dispatch can never disagree about what produced it — same
+ * trust-gated `internal` flag, same marker headers, one place.
+ */
+function internalDispatchSpendSource(
+	requestHeaders: Headers,
+	internal: boolean,
+): InternalDispatchSpendSource | null {
+	const source = claimObservationSource(requestHeaders, internal);
+	return source === "client" ? null : source;
+}
+
+/**
+ * The token vector a probe's response reported, with absences preserved.
+ *
+ * A fresh `UsageState` initialises every counter to 0, so the counters alone
+ * cannot tell "the provider reported zero" from "the response carried no usage
+ * at all" — the discriminator is whether anything usage-bearing was ever parsed
+ * (`message_start` for Anthropic SSE, or an authoritative report for the
+ * non-stream / Codex-terminal shapes). Without a reading every field is null.
+ *
+ * Deliberately NOT `finalizeUsage`: that resolves output via the bytes/4
+ * approximation when the provider stayed silent, which is the right answer for a
+ * cost estimate and the wrong one for a record of what upstream said.
+ */
+function probeUsageVector(state: UsageState): {
+	model: string | null;
+	inputTokens: number | null;
+	outputTokens: number | null;
+	cacheReadInputTokens: number | null;
+	cacheCreationInputTokens: number | null;
+} {
+	const sawUsage = state.sawMessageStart || state.providerReportedOutput;
+	if (!sawUsage) {
+		return {
+			model: state.model ?? null,
+			inputTokens: null,
+			outputTokens: null,
+			cacheReadInputTokens: null,
+			cacheCreationInputTokens: null,
+		};
+	}
+	return {
+		model: state.model ?? null,
+		inputTokens: state.inputTokens,
+		cacheReadInputTokens: state.cacheReadInputTokens,
+		cacheCreationInputTokens: state.cacheCreationInputTokens,
+		// Only an AUTHORITATIVE count goes in; a stream that never reported one
+		// records null rather than an estimate.
+		outputTokens: state.providerReportedOutput
+			? (state.providerFinalOutputTokens ?? null)
+			: null,
+	};
+}
+
+/** Per-dispatch spend sink for internal probes; see {@link createProbeSpendSink}. */
+interface ProbeSpendSink {
+	/** Feed one streamed response chunk. */
+	feed(chunk: Uint8Array): void;
+	/** Feed a fully-read non-streaming body. */
+	feedBody(bodyText: string): void;
+	/** Emit the row. Idempotent — the first terminal wins. */
+	finish(completedAt: number | null): void;
+}
+
+/**
+ * Sink that records what ONE internal probe dispatch (a cache-keepalive replay
+ * or an auto-refresh prime) actually spent.
+ *
+ * These dispatches are excluded from `requests` by `shouldRecordRequest`, and
+ * they get `usageState = null` for exactly that reason — so the proxy's own
+ * upstream burn is invisible to every analysis built on the request series, even
+ * though it comes out of the same quota as user traffic. This sink is the one
+ * place that keeps it.
+ *
+ * Placed HERE and not in the schedulers on purpose: only this site has the
+ * dispatch's request id (the id its claim-observation rows carry), the account,
+ * the response status, the start time and the body stream all at once, and only
+ * this site runs once per UPSTREAM ATTEMPT — the auto-refresh scheduler's retry
+ * loop dispatches several, and a scheduler-side hook would see only the last.
+ *
+ * Returns null for client traffic, for unauthenticated dispatches, and whenever
+ * the marker headers are not backed by the unspoofable in-process flag.
+ */
+function createProbeSpendSink(
+	args: {
+		requestId: string;
+		account: Account | null;
+		requestHeaders: Headers;
+		internal: boolean;
+		response: Response;
+		/** Request start (the handler's `timestamp` input), epoch ms. */
+		timestamp: number;
+	},
+	ctx: ProxyContext,
+): ProbeSpendSink | null {
+	const source = internalDispatchSpendSource(
+		args.requestHeaders,
+		args.internal,
+	);
+	const account = args.account;
+	if (source === null || !account) return null;
+
+	const state = createUsageState();
+	let done = false;
+	return {
+		feed(chunk: Uint8Array): void {
+			if (done) return;
+			feedChunk(state, chunk, Date.now());
+		},
+		feedBody(bodyText: string): void {
+			if (done) return;
+			feedNonStreamBody(state, bodyText);
+		},
+		finish(completedAt: number | null): void {
+			if (done) return;
+			done = true;
+			// A provider that closed right after the last `data:` byte can leave a
+			// complete usage-bearing line unterminated in the buffer.
+			flushPendingSseLine(state);
+			const vector = probeUsageVector(state);
+			const row: InternalDispatchSpendRow = {
+				id: args.requestId,
+				accountId: account.id,
+				source,
+				model: vector.model,
+				httpStatus: args.response.status,
+				startedAt: args.timestamp,
+				completedAt,
+				inputTokens: vector.inputTokens,
+				outputTokens: vector.outputTokens,
+				cacheReadInputTokens: vector.cacheReadInputTokens,
+				cacheCreationInputTokens: vector.cacheCreationInputTokens,
+			};
+			const accepted = ctx.asyncWriter.enqueue(() =>
+				ctx.dbOps.saveInternalDispatchSpend(row),
+			);
+			if (!accepted) {
+				log.warn(
+					`Dropped internal dispatch spend row for request ${args.requestId} ` +
+						`(account=${account.name}, source=${source}): the metadata write queue is at capacity`,
+				);
+			}
+		},
+	};
+}
+
+/**
  * Record the per-claim rate-limit readings this response carried, as one row
  * per claim aligned to the request that received them.
  *
@@ -243,6 +397,13 @@ function claimObservationSource(
  * no other provider emits these headers. Responses the proxy synthesised itself
  * carry no upstream headers, so the extractor yields nothing for them and no row
  * is written. A DELIVERED 429 does get captured — it carries real claim state.
+ *
+ * The response's SUMMARY block is captured here too, and INDEPENDENTLY: a
+ * summary-only response exists (a per-IP burst 429 carries a bare `retry-after`
+ * and no claim lines at all), so nesting the summary behind a non-empty claim
+ * list would drop exactly the shapes that are otherwise unrecorded. Both sides
+ * share ONE `observedAt` and one source, and go out as ONE writer job — two jobs
+ * could be split by a queue rejection into a half-recorded response.
  */
 function captureUnifiedClaimObservations(
 	args: {
@@ -260,10 +421,12 @@ function captureUnifiedClaimObservations(
 	if (account?.provider !== "anthropic" || account.custom_endpoint) return;
 
 	const readings = extractUnifiedClaimReadings(args.response.headers);
-	if (readings.length === 0) return;
+	const summary = extractUnifiedSummaryReading(args.response.headers);
+	if (readings.length === 0 && summary === null) return;
 
 	// Headers-arrival time, captured HERE: the row must say when the reading was
-	// true, not when the queued write happened to run.
+	// true, not when the queued write happened to run. Shared by both sides so a
+	// joined read never has to reconcile two clocks for one response.
 	const observedAt = Date.now();
 	const source = claimObservationSource(args.requestHeaders, args.internal);
 	const rows: UnifiedClaimObservationRow[] = readings.map((reading) => ({
@@ -277,14 +440,34 @@ function captureUnifiedClaimObservations(
 		status: reading.status,
 		utilization: reading.utilization,
 		resetAt: reading.resetMs,
+		surpassedThreshold: reading.surpassedThreshold,
 	}));
+	const summaryRow: UnifiedSummaryObservationRow | null = summary && {
+		requestId: args.requestId,
+		accountId: account.id,
+		source,
+		httpStatus: args.response.status,
+		requestStartedAt: args.timestamp,
+		observedAt,
+		status: summary.status,
+		resetAt: summary.resetMs,
+		remaining: summary.remaining,
+		representativeClaim: summary.representativeClaim,
+		fallback: summary.fallback,
+		fallbackPercentage: summary.fallbackPercentage,
+		overageStatus: summary.overageStatus,
+		overageDisabledReason: summary.overageDisabledReason,
+		retryAfter: summary.retryAfter,
+	};
 
-	const accepted = ctx.asyncWriter.enqueue(() =>
-		ctx.dbOps.saveUnifiedClaimObservations(rows),
-	);
+	const accepted = ctx.asyncWriter.enqueue(async () => {
+		if (rows.length > 0) await ctx.dbOps.saveUnifiedClaimObservations(rows);
+		if (summaryRow) await ctx.dbOps.saveUnifiedSummaryObservation(summaryRow);
+	});
 	if (!accepted) {
 		log.warn(
-			`Dropped ${rows.length} claim observation rows for request ${args.requestId} ` +
+			`Dropped ${rows.length} claim observation rows` +
+				`${summaryRow ? " and the summary row" : ""} for request ${args.requestId} ` +
 				`(account=${account.name}): the metadata write queue is at capacity`,
 		);
 	}
@@ -458,6 +641,21 @@ async function forwardToClientInner(
 	// the recordable-request gate below, because internal probes must be captured
 	// even though they are excluded from Request History.
 	captureUnifiedClaimObservations(
+		{
+			requestId,
+			account,
+			requestHeaders,
+			internal: internalDispatch,
+			response,
+			timestamp,
+		},
+		ctx,
+	);
+
+	// Spend sink for the proxy's OWN dispatches. Null for client traffic, which
+	// is recorded in `requests` instead — and for everything whose probe marker
+	// isn't backed by the in-process dispatch flag.
+	const probeSpend = createProbeSpendSink(
 		{
 			requestId,
 			account,
@@ -664,6 +862,9 @@ async function forwardToClientInner(
 			chunkTimeoutMs: CHUNK_TIMEOUT_MS,
 			bumpIdleTimeout: options.bumpIdleTimeout,
 			onChunk: (value) => {
+				// Internal probes have no usageState (they are kept out of Request
+				// History), so their tokens are collected here instead.
+				probeSpend?.feed(value);
 				if (usageState) {
 					// Feed the chunk to the inline usage collector (decode + cheap
 					// substring guard; only message_start/message_delta are parsed).
@@ -816,6 +1017,7 @@ async function forwardToClientInner(
 				}
 			},
 			onEnd: () => {
+				probeSpend?.finish(Date.now());
 				// Fallback probe verdict on natural stream end, for a token still
 				// UNSETTLED here — a stream that produced `message_start` already
 				// settled in onChunk, and a fired sniffer settled at that frame, so
@@ -888,6 +1090,9 @@ async function forwardToClientInner(
 				}
 			},
 			onError: (err) => {
+				// A cut stream still spent whatever the provider had already reported;
+				// record it rather than losing the dispatch entirely.
+				probeSpend?.finish(Date.now());
 				// Flush BEFORE classifying (same rationale as onEnd): a provider that
 				// closes abruptly right after the last data byte can leave the terminal
 				// event's line unterminated in the SSE line buffer — which is exactly
@@ -999,6 +1204,9 @@ async function forwardToClientInner(
 		response.ok ? "non_stream_2xx" : "non_stream_non_2xx",
 	);
 	if (!response.body) {
+		// No body to read — the dispatch still happened and its status is real, so
+		// the row is written with null tokens (no reading, never a fabricated 0).
+		probeSpend?.finish(Date.now());
 		if (usageState) {
 			// No body to parse — finish transport, then finalize (empty usage state
 			// → zero output, no provider count). Keeps the same record lifecycle as
@@ -1119,6 +1327,12 @@ async function forwardToClientInner(
 				}
 				cappedBuf = Buffer.concat(chunks);
 			}
+			if (probeSpend) {
+				if (cappedBuf.byteLength > 0) {
+					probeSpend.feedBody(cappedBuf.toString("utf8"));
+				}
+				probeSpend.finish(Date.now());
+			}
 			if (usageState) {
 				const success = isExpectedResponse(path, analyticsResponse);
 				// Capture the (256KB-capped) body for Request History, then — INSIDE
@@ -1152,6 +1366,9 @@ async function forwardToClientInner(
 				);
 			}
 		} catch (err) {
+			// The read failed, so no usage was learned — the row records the
+			// dispatch and its status with null tokens.
+			probeSpend?.finish(Date.now());
 			if (usageState) {
 				// Body read failed — finish transport as an error, then finalize on
 				// whatever (empty) state we have so the staging path is still driven.
