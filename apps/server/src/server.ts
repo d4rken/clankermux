@@ -835,7 +835,14 @@ export default async function startServer(options?: {
 	// mounts rather than under `/api/*`, so the management session gate cannot
 	// reach it and no exemption list has to keep a credential-less device
 	// working.
-	const publicRouter = new PublicRouter({ dbOps, config });
+	// `getStrategy` is the same closure the management router gets, so the
+	// routing candidate this surface publishes is the one the dashboard badge
+	// shows rather than a second prediction made from a second snapshot.
+	const publicRouter = new PublicRouter({
+		dbOps,
+		config,
+		getStrategy: () => currentStrategy,
+	});
 
 	// Initialize AuthService for proxy authentication. It also answers the
 	// front door's `session` requirement for `/api/*`, so it is handed the same

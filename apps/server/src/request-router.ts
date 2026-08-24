@@ -33,7 +33,10 @@ import type {
 	AuthenticationResult,
 	AuthRequirement,
 } from "@clankermux/http-api";
-import { managementAuthRequirement } from "@clankermux/http-api";
+import {
+	managementAuthRequirement,
+	NO_STORE_HEADERS,
+} from "@clankermux/http-api";
 import {
 	createIdentityBoundRefusalResponse,
 	isIdentityBoundPath,
@@ -100,10 +103,15 @@ export interface RequestRouterDeps {
 	): Response;
 }
 
-function jsonError(status: number, type: string, message: string): Response {
+function jsonError(
+	status: number,
+	type: string,
+	message: string,
+	headers: Record<string, string> = {},
+): Response {
 	return new Response(
 		JSON.stringify({ type: "error", error: { type, message } }),
-		{ status, headers: { "Content-Type": "application/json" } },
+		{ status, headers: { "Content-Type": "application/json", ...headers } },
 	);
 }
 
@@ -342,10 +350,14 @@ async function routeRootRequest(
 	if (isPublicApiPath(p)) {
 		const publicResponse = await deps.handlePublicRequest(req, url);
 		if (publicResponse) return publicResponse;
+		// `no-store` like every other response on this surface: each one describes
+		// one instant and every consumer polls, so a cached 404 would keep telling
+		// a device a route is gone after it was added.
 		return jsonError(
 			HTTP_STATUS.NOT_FOUND,
 			"not_found",
 			`Unknown public API route: ${p}`,
+			NO_STORE_HEADERS,
 		);
 	}
 

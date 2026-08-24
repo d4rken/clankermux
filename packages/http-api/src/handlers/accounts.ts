@@ -731,6 +731,10 @@ export function createAccountsListHandler(
 							? Number(account.codex_usage_observed_at)
 							: null,
 						account.last_used != null ? Number(account.last_used) : null,
+						// The management accounts page is the surface that has always
+						// owned this recovery, and it is the one entitled to refresh what
+						// the proxy can see.
+						{ seedCache: true },
 					);
 					usageData = resolved.data;
 					usageIsLiveCacheEntry = resolved.source === "cache";
