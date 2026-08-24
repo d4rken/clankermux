@@ -152,6 +152,12 @@ export { sessionCacheStore } from "./session-cache-store";
 export { sessionPromotionTracker } from "./session-promotion";
 export type { ProxyRequest, ProxyResponse } from "./types";
 export {
+	clearUsageRevisionAnchors,
+	getUsageRevisionAnchor,
+	observeUsageReading,
+	REVISION_MIN_DROP_PCT,
+} from "./usage-revision-anchor";
+export {
 	getWeeklyBurnSlope,
 	recordWeeklyBurnSlope,
 	resolveEffectiveWeeklySlope,

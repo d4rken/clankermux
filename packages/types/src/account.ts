@@ -1,5 +1,8 @@
 import { microsToUsd } from "./payment";
-import type { AccountUsagePrediction } from "./usage-prediction";
+import type {
+	AccountBurnAnchors,
+	AccountUsagePrediction,
+} from "./usage-prediction";
 
 /**
  * Normalized, machine-readable reason an account is (or is not) limited right
@@ -506,6 +509,14 @@ export interface AccountResponse {
 	 */
 	usageAsOfIso?: string | null;
 	prediction?: AccountUsagePrediction | null; // Server-computed regression-backed exhaustion prediction per window
+	/**
+	 * Last observed mid-window downward usage revision per account-wide window
+	 * (a provider "gift" reset or an applied reset credit), keyed to the SAME
+	 * reading this response serves. The lifetime-average projections re-anchor
+	 * their elapsed time here; see `UsageBurnAnchor`. Null/absent when nothing
+	 * was detected for the served window instances. DISPLAY-ONLY input.
+	 */
+	burnAnchors?: AccountBurnAnchors | null;
 	usageRateLimitedUntil: number | null; // Timestamp (ms) until usage API 429 clears; null if not rate-limited
 	usageThrottledUntil: number | null; // Timestamp (ms) until proactive usage throttling clears; null if not throttled
 	usageThrottledWindows: string[]; // Exact usage windows currently being throttled

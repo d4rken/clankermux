@@ -49,7 +49,7 @@ import {
 } from "@clankermux/core";
 import { Logger } from "@clankermux/logger";
 import type { AnyUsageData, UsageData } from "@clankermux/providers";
-import { recordWeeklyBurnSlope } from "@clankermux/proxy";
+import { observeUsageReading, recordWeeklyBurnSlope } from "@clankermux/proxy";
 import type {
 	Account,
 	AnthropicUsageData,
@@ -69,6 +69,14 @@ export const SAMPLE_INTERVAL_MS = 120_000;
  * dashboard prediction service's 7d lookback: recent pace, not the whole window.
  */
 export const BURN_SLOPE_LOOKBACK_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * How far back the boot-time revision-anchor seed replays persisted snapshots.
+ * The full weekly span, NOT the burn-slope fit's 24h: a gift reset from three
+ * days ago is still the correct burn origin for the current weekly window, and
+ * a shorter replay would silently forget it on every restart.
+ */
+export const ANCHOR_SEED_LOOKBACK_MS = 7 * 24 * 60 * 60 * 1000;
 
 /**
  * Minimal cache surface the pure projection needs (matches `usageCache`). The
@@ -348,6 +356,10 @@ export class UsageSnapshotSampler {
 		// the whole startup deferral. Best-effort and non-throwing by construction,
 		// so it can never prevent the interval from being registered.
 		await this.refreshBurnSlopes();
+		// Same reasoning for the revision anchors: a gift reset from days ago is
+		// still the current window's burn origin, and without this replay every
+		// restart would silently revert the projections to the structural start.
+		await this.seedRevisionAnchors();
 	}
 
 	/** Stop the sampler: cancel the deferral timer and unregister the interval. */
@@ -397,6 +409,24 @@ export class UsageSnapshotSampler {
 			now,
 			freshnessMs,
 		);
+
+		// Feed the revision-anchor detector BEFORE any insert: the registry is a
+		// pure observer of the readings and must not depend on DB success. Rows
+		// already passed the freshness gate and carry a real observation time
+		// (buildSamplerRows drops entries without one).
+		for (const row of rows) {
+			if (row.observedAt == null) continue;
+			observeUsageReading(row.accountId, "five_hour", {
+				pct: row.fiveHourPct,
+				resetMs: row.fiveHourReset,
+				observedAtMs: row.observedAt,
+			});
+			observeUsageReading(row.accountId, "seven_day", {
+				pct: row.sevenDayPct,
+				resetMs: row.sevenDayReset,
+				observedAtMs: row.observedAt,
+			});
+		}
 
 		if (rows.length === 0 && scopedRows.length === 0) {
 			log.debug("Snapshot sampler: no fresh windowed accounts this tick");
@@ -449,6 +479,60 @@ export class UsageSnapshotSampler {
 	 *  - `lowConfidence` fits are recorded as-is; the store filters them on read,
 	 *    so exactly one place decides usability.
 	 */
+	/**
+	 * Seed the revision-anchor registry from PERSISTED snapshot history — the
+	 * restart path. Replays up to {@link ANCHOR_SEED_LOOKBACK_MS} of stored
+	 * samples chronologically through `observeUsageReading`, the SAME detection
+	 * path the live tick feeds, so replay + live cannot disagree; the registry's
+	 * own observation-order guard makes re-feeding already-seen readings a
+	 * no-op.
+	 *
+	 * Rows without observation provenance (pre-`observed_at` history) are
+	 * skipped: they cannot place a revision honestly, and `sampled_at` is only
+	 * an upper bound the schema explicitly forbids substituting.
+	 *
+	 * Best-effort and non-throwing, like the burn-slope bootstrap beside it.
+	 */
+	async seedRevisionAnchors(): Promise<void> {
+		try {
+			const now = Date.now();
+			const accountIds = (await this.deps.getAccounts())
+				.filter((a) => a.provider === "anthropic" || a.provider === "codex")
+				.map((a) => a.id);
+			if (accountIds.length === 0) return;
+
+			const samples = await this.deps.getRecentSnapshots(
+				accountIds,
+				now - ANCHOR_SEED_LOOKBACK_MS,
+			);
+
+			// Ordered (account_id, sampled_at) by the repository; state is keyed
+			// per account, so per-account chronology is all that matters.
+			let fed = 0;
+			for (const s of samples) {
+				if (s.observedAt == null) continue;
+				observeUsageReading(s.accountId, "five_hour", {
+					pct: s.fiveHourPct,
+					resetMs: s.fiveHourReset,
+					observedAtMs: s.observedAt,
+				});
+				observeUsageReading(s.accountId, "seven_day", {
+					pct: s.sevenDayPct,
+					resetMs: s.sevenDayReset,
+					observedAtMs: s.observedAt,
+				});
+				fed++;
+			}
+			if (fed > 0) {
+				log.debug(
+					`Snapshot sampler: seeded revision anchors from ${fed} stored sample(s)`,
+				);
+			}
+		} catch (err) {
+			log.warn(`Snapshot sampler: revision-anchor seed failed: ${err}`);
+		}
+	}
+
 	async refreshBurnSlopes(): Promise<void> {
 		try {
 			const now = Date.now();

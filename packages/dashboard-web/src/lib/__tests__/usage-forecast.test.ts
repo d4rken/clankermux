@@ -292,3 +292,112 @@ describe("computeWindowForecast — held (unavailable) accounts", () => {
 		expect(pool?.bridgePct).toBeCloseTo(70, 5);
 	});
 });
+
+describe("computeWindowForecast — burn anchor + shared ETA", () => {
+	const DAY = 24 * HOUR;
+
+	function sevenDayUsage(pct: number, resetMs: number): FullUsageData {
+		return {
+			five_hour: { utilization: null, resets_at: null },
+			seven_day: {
+				utilization: pct,
+				resets_at: new Date(resetMs).toISOString(),
+			},
+		} as unknown as FullUsageData;
+	}
+
+	it("re-anchors the weekly line at a served burn anchor", () => {
+		// Gift 12h ago, 40% burned since; reset 1.5d out. Un-anchored the line is
+		// safe (40% over 5.5d clears the reset); anchored it lands 100% at +18h.
+		const resetMs = NOW + 1.5 * DAY;
+		const base = mkAccount({
+			id: "gifted",
+			usageData: sevenDayUsage(40, resetMs),
+			usageAsOfIso: new Date(NOW).toISOString(),
+		});
+
+		const [safe] = computeWindowForecast(
+			[base],
+			"seven_day",
+			NOW,
+			HOUR,
+			FAR_HORIZON,
+		);
+		expect(safe.isSafe).toBe(true);
+
+		const [anchored] = computeWindowForecast(
+			[
+				mkAccount({
+					...base,
+					burnAnchors: {
+						sevenDay: {
+							anchorMs: NOW - 12 * HOUR,
+							anchorPct: 0,
+							windowResetMs: resetMs,
+						},
+					},
+				}),
+			],
+			"seven_day",
+			NOW,
+			HOUR,
+			FAR_HORIZON,
+		);
+		expect(anchored.isSafe).toBe(false);
+		expect(anchored.exhaustsAtMs).toBe(NOW + 18 * HOUR);
+		expect(anchored.bridgePct).toBe(40);
+		const last = anchored.points[anchored.points.length - 1];
+		expect(last.pct).toBeCloseTo(100, 5);
+		expect(last.ts).toBeCloseTo(NOW + 18 * HOUR, 5);
+	});
+
+	it("lands 100% at the estimator's observation-anchored ETA, not a now-derived one", () => {
+		// The reading is 6h old. The full-confidence weekly estimate anchors its
+		// ETA at the OBSERVATION; re-deriving the landing from `now` would push
+		// it 6h later. elapsed = obs − windowStart = 4.75d, so
+		// eta = obs + (20/80)·4.75d = obs + 28.5h = NOW + 22.5h.
+		const obs = NOW - 6 * HOUR;
+		const resetMs = NOW + 2 * DAY;
+		const [series] = computeWindowForecast(
+			[
+				mkAccount({
+					id: "aged",
+					usageData: sevenDayUsage(80, resetMs),
+					usageAsOfIso: new Date(obs).toISOString(),
+				}),
+			],
+			"seven_day",
+			NOW,
+			HOUR,
+			FAR_HORIZON,
+		);
+
+		expect(series.isSafe).toBe(false);
+		expect(series.exhaustsAtMs).toBe(obs + 28.5 * HOUR);
+		// Still bridges at the live reading at `now`.
+		expect(series.bridgePct).toBe(80);
+	});
+
+	it("clamps a past-ETA aged reading to an immediate run-out", () => {
+		// 99.5% observed 20h ago on a window whose anchored ETA already passed:
+		// hold flat and report the run-out as now rather than inventing a ramp.
+		const obs = NOW - 20 * HOUR;
+		const resetMs = NOW + 1 * DAY;
+		const [series] = computeWindowForecast(
+			[
+				mkAccount({
+					id: "overdue",
+					usageData: sevenDayUsage(99.5, resetMs),
+					usageAsOfIso: new Date(obs).toISOString(),
+				}),
+			],
+			"seven_day",
+			NOW,
+			HOUR,
+			FAR_HORIZON,
+		);
+
+		expect(series.isSafe).toBe(false);
+		expect(series.exhaustsAtMs).toBe(NOW);
+	});
+});

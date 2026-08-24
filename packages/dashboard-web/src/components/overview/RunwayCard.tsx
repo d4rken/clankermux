@@ -4,6 +4,7 @@ import type { RunwayAccountSummary } from "@clankermux/types";
 import { Hourglass } from "lucide-react";
 import { formatDurationDhm } from "../../lib/format-prediction";
 import {
+	assumedCreditCount,
 	describeRunwayCause,
 	formatRunwayValue,
 	runwayUnavailableReason,
@@ -192,6 +193,20 @@ export function RunwayCard({
 			label: "Unobserved",
 			value: parts.join(" · "),
 			tooltip: tooltipParts.join(" "),
+		});
+	}
+
+	// A runway extended by modeled reset-credit redemptions is an ASSUMPTION,
+	// not a measurement: the auto-applier still has to redeem those credits when
+	// the exhaustions actually happen. Undisclosed, the figure would read as
+	// pure observation while silently depending on future actions.
+	const assumedCredits = worst ? assumedCreditCount(worst.outcome) : 0;
+	if (assumedCredits > 0) {
+		subRows.push({
+			label: "Assumes",
+			value: `${assumedCredits} reset credit${assumedCredits === 1 ? "" : "s"}`,
+			tooltip:
+				"The figure assumes banked usage-reset credits get auto-applied when the weekly window runs out. If a redemption fails or the credits are spent elsewhere, the real runway is shorter.",
 		});
 	}
 

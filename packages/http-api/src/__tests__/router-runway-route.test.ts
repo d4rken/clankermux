@@ -1,7 +1,14 @@
 import { afterEach, describe, expect, it } from "bun:test";
 import type { Config } from "@clankermux/config";
 import type { BunSqlAdapter, DatabaseOperations } from "@clankermux/database";
-import { usageCache } from "@clankermux/providers";
+import {
+	codexRateLimitResetCreditsCache,
+	usageCache,
+} from "@clankermux/providers";
+import {
+	clearUsageRevisionAnchors,
+	observeUsageReading,
+} from "@clankermux/proxy";
 import type { RunwayResponse } from "@clankermux/types";
 import { APIRouter } from "../router";
 import type { APIContext } from "../types";
@@ -57,6 +64,7 @@ function makeContext(): APIContext {
 describe("router: GET /api/runway", () => {
 	afterEach(() => {
 		usageCache.delete(ACCOUNT_ID);
+		clearUsageRevisionAnchors(ACCOUNT_ID);
 	});
 
 	it("is registered and serves the documented top-level shape", async () => {
@@ -110,5 +118,174 @@ describe("router: GET /api/runway", () => {
 		);
 
 		expect(response).toBeNull();
+	});
+
+	it("models banked reset credits end-to-end and discloses the assumption", async () => {
+		const now = Date.now();
+		const HOUR = 60 * 60 * 1000;
+		const sevenReset = now + 2 * 24 * HOUR;
+
+		// Codex account, weekly window spent, auto-apply-on-weekly-limit enabled,
+		// one available credit in a fresh cache reading.
+		const codexContext = makeContext();
+		(
+			codexContext.dbOps as unknown as {
+				getAllAccounts: () => Promise<unknown[]>;
+			}
+		).getAllAccounts = async () => [
+			{
+				id: ACCOUNT_ID,
+				name: "Router account",
+				provider: "codex",
+				codex_auto_apply_reset_credits_enabled: false,
+				codex_auto_apply_reset_on_weekly_limit_enabled: true,
+			},
+		];
+		usageCache.set(ACCOUNT_ID, {
+			five_hour: null,
+			seven_day: {
+				utilization: 100,
+				resets_at: new Date(sevenReset).toISOString(),
+			},
+		} as never);
+		codexRateLimitResetCreditsCache.set(
+			ACCOUNT_ID,
+			{
+				availableCount: 1,
+				credits: [
+					{
+						id: "credit-1",
+						resetType: "usage",
+						status: "available",
+						grantedAt: Math.floor(now / 1000) - 3600,
+						expiresAt: null,
+						title: null,
+						description: null,
+					},
+				],
+			} as never,
+			now,
+		);
+
+		try {
+			const router = new APIRouter(codexContext);
+			const url = new URL("http://localhost/api/runway");
+			const response = await router.handleRequest(
+				url,
+				new Request(url, { method: "GET" }),
+			);
+			const body = (await response?.json()) as RunwayResponse;
+
+			const key = body.keys[0];
+			// Without the credit this pool is out now; the modeled redemption
+			// revives it and the outcome discloses the assumption.
+			expect(key.outcome.kind).toBe("beyond-horizon");
+			if (key.outcome.kind === "beyond-horizon") {
+				expect(key.outcome.assumedResetCredits).toEqual([
+					{ accountId: ACCOUNT_ID, count: 1 },
+				]);
+			}
+		} finally {
+			codexRateLimitResetCreditsCache.delete(ACCOUNT_ID);
+		}
+	});
+
+	it("ignores a stale credit-cache reading (no bank, no assumption)", async () => {
+		const now = Date.now();
+		const HOUR = 60 * 60 * 1000;
+		const sevenReset = now + 2 * 24 * HOUR;
+
+		const codexContext = makeContext();
+		(
+			codexContext.dbOps as unknown as {
+				getAllAccounts: () => Promise<unknown[]>;
+			}
+		).getAllAccounts = async () => [
+			{
+				id: ACCOUNT_ID,
+				name: "Router account",
+				provider: "codex",
+				codex_auto_apply_reset_credits_enabled: false,
+				codex_auto_apply_reset_on_weekly_limit_enabled: true,
+			},
+		];
+		usageCache.set(ACCOUNT_ID, {
+			five_hour: null,
+			seven_day: {
+				utilization: 100,
+				resets_at: new Date(sevenReset).toISOString(),
+			},
+		} as never);
+		codexRateLimitResetCreditsCache.set(
+			ACCOUNT_ID,
+			{ availableCount: 1, credits: null } as never,
+			// Fetched 25h ago: past CREDIT_BANK_MAX_AGE_MS, so no bank is modeled.
+			now - 25 * HOUR,
+		);
+
+		try {
+			const router = new APIRouter(codexContext);
+			const url = new URL("http://localhost/api/runway");
+			const response = await router.handleRequest(
+				url,
+				new Request(url, { method: "GET" }),
+			);
+			const body = (await response?.json()) as RunwayResponse;
+
+			expect(body.keys[0].outcome.kind).toBe("out-now");
+		} finally {
+			codexRateLimitResetCreditsCache.delete(ACCOUNT_ID);
+		}
+	});
+
+	it("a seeded gift anchor shortens the weekly runway end-to-end", async () => {
+		const now = Date.now();
+		const HOUR = 60 * 60 * 1000;
+		const sevenReset = now + 1.5 * 24 * HOUR;
+		const giftAt = now - 12 * HOUR;
+
+		// The registry sees the gift: 60% → 1% with the reset unchanged, then the
+		// post-gift burn to 40%. Fed exactly the way the sampler feeds it.
+		observeUsageReading(ACCOUNT_ID, "seven_day", {
+			pct: 60,
+			resetMs: sevenReset,
+			observedAtMs: giftAt - 2 * 60_000,
+		});
+		observeUsageReading(ACCOUNT_ID, "seven_day", {
+			pct: 1,
+			resetMs: sevenReset,
+			observedAtMs: giftAt,
+		});
+
+		usageCache.set(ACCOUNT_ID, {
+			five_hour: {
+				utilization: 10,
+				resets_at: new Date(now + 4 * HOUR).toISOString(),
+			},
+			seven_day: {
+				utilization: 40,
+				resets_at: new Date(sevenReset).toISOString(),
+			},
+		});
+
+		const router = new APIRouter(makeContext());
+		const url = new URL("http://localhost/api/runway");
+		const response = await router.handleRequest(
+			url,
+			new Request(url, { method: "GET" }),
+		);
+		const body = (await response?.json()) as RunwayResponse;
+
+		// Structurally, 40% over 5.5 days clears the reset with days to spare —
+		// the pre-anchor bug. Anchored at the gift, the true 40%-in-12h pace
+		// exhausts ~18h out (< the 36h reset), so the key reports a runway.
+		const key = body.keys[0];
+		expect(key.outcome.kind).toBe("runway");
+		if (key.outcome.kind === "runway") {
+			// The ETA is observation-anchored on the CACHE WRITE instant, which the
+			// route stamps itself — assert the window, not an exact instant.
+			expect(key.outcome.exhaustsAtMs).toBeGreaterThan(now + 17 * HOUR);
+			expect(key.outcome.exhaustsAtMs).toBeLessThan(now + 19 * HOUR);
+		}
 	});
 });

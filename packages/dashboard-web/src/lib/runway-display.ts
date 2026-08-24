@@ -130,6 +130,26 @@ export function unprojectableCount(outcome: RunwayOutcome): number {
 }
 
 /**
+ * How many banked reset credits the scan ASSUMED get auto-applied. Non-zero
+ * means the figure depends on those future redemptions actually happening —
+ * the card must disclose it, because an assumed credit can only LENGTHEN the
+ * reported runway.
+ */
+export function assumedCreditCount(outcome: RunwayOutcome): number {
+	switch (outcome.kind) {
+		case "out-now":
+		case "beyond-horizon":
+		case "runway":
+			return (outcome.assumedResetCredits ?? []).reduce(
+				(sum, entry) => sum + entry.count,
+				0,
+			);
+		default:
+			return 0;
+	}
+}
+
+/**
  * The note that qualifies the headline: what the `beyond-horizon` glyph
  * actually checked, or how many accounts the figure could not see.
  */

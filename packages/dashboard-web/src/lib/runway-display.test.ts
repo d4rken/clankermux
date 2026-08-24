@@ -2,6 +2,7 @@ import { describe, expect, it } from "bun:test";
 import type { RunwayCause, RunwayOutcome } from "@clankermux/core";
 import { effectiveRunwayOutcome } from "@clankermux/core";
 import {
+	assumedCreditCount,
 	BEYOND_HORIZON_GLYPH,
 	describeRunwayCause,
 	formatRunwayValue,
@@ -290,5 +291,34 @@ describe("runwayQualifier", () => {
 				NOW,
 			),
 		).toBeNull();
+	});
+});
+
+describe("assumedCreditCount", () => {
+	it("sums the assumed credits across accounts", () => {
+		const outcome: RunwayOutcome = {
+			kind: "runway",
+			exhaustsAtMs: NOW + DAY,
+			durationMs: DAY,
+			causes: [],
+			unprojectableAccountIds: [],
+			assumedResetCredits: [
+				{ accountId: "acc-1", count: 2 },
+				{ accountId: "acc-2", count: 1 },
+			],
+		};
+		expect(assumedCreditCount(outcome)).toBe(3);
+	});
+
+	it("is zero when the field is absent or the outcome carries no evidence", () => {
+		expect(
+			assumedCreditCount({
+				kind: "beyond-horizon",
+				horizonMs: DAY,
+				unprojectableAccountIds: [],
+			}),
+		).toBe(0);
+		expect(assumedCreditCount({ kind: "unknown" })).toBe(0);
+		expect(assumedCreditCount({ kind: "no-accounts" })).toBe(0);
 	});
 });
