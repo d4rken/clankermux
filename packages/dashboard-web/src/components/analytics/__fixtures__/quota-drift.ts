@@ -148,9 +148,20 @@ export function retiredModel(
 	return {
 		key,
 		points,
-		// No column in the latest fit at all, which is what the compute path
-		// emits for a model with no exposure left.
-		latest: null,
+		// No column in the latest fit at all, so the entry is unidentified with a
+		// stated reason and a real (zero) share — NOT null. A null here made the
+		// cost table fall back to "Not enough independent traffic" while the
+		// chart's gap list said "Not in use during this period" about the same
+		// model, in the same tab.
+		latest: {
+			pointEstimate: null,
+			ciLow: null,
+			ciHigh: null,
+			impliedCapacityMtok: null,
+			shareOfWindow: 0,
+			identified: false,
+			unidentifiedReasons: ["no-exposure"],
+		},
 		changes: [],
 		verdict: "insufficient-evidence",
 	};

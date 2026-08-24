@@ -84,6 +84,7 @@ import {
 	type QuotaSegment,
 	type QuotaWindowKind,
 	type SeriesPoint,
+	shareByKey,
 	type TierProvenance,
 	type WindowSample,
 } from "@clankermux/core";
@@ -949,16 +950,24 @@ function fitWindow(
 	// pure composition change as quota drift.
 	keys.delete(OTHER_MODEL_KEY);
 
+	// Raw (unpooled) share of the latest window per key, for the models that got
+	// NO column in that fit. Passing every key as kept makes `shareByKey` return
+	// each one's own share instead of pooling it into `other`, and for a key that
+	// DID get a column the number is the same one the coefficient already
+	// carries — this cannot restate an existing share differently.
+	const latestShares = shareByKey(latestSegments, [...keys]);
+
 	const models: QuotaDriftModel[] = [];
 	for (const key of [...keys].sort()) {
 		const coef = latestFit.coefficients.find((c) => c.key === key) ?? null;
+		const points = series.get(key) ?? [];
 		const scan = detectChanges(segments, key, {
 			bootstrapB: opts.inferenceB,
 			seedParts: [...seedParts, key],
 		});
 		models.push({
 			key,
-			points: (series.get(key) ?? []).map(toWirePoint),
+			points: points.map(toWirePoint),
 			latest: coef
 				? {
 						pointEstimate: coef.pointEstimate,
@@ -969,7 +978,7 @@ function fitWindow(
 						identified: coef.identified,
 						unidentifiedReasons: [...coef.unidentifiedReasons],
 					}
-				: null,
+				: latestUnidentified(points, latestShares.get(key) ?? 0),
 			changes: scan.changes.map((change): QuotaDriftChange => ({ ...change })),
 			verdict: scan.verdict,
 		});
@@ -981,6 +990,47 @@ function fitWindow(
 		r2: latestFit.r2,
 		zeroObservedTokenDeltaShare: latestFit.zeroObservedTokenDeltaShare,
 		models,
+	};
+}
+
+/**
+ * The `latest` entry for a model the latest fit gave NO column at all.
+ *
+ * Returning null here — which is what this used to do — throws away the one
+ * thing the reader needed. A model with zero exposure in the latest window is
+ * not in `selectKeys`, so it has no coefficient, and the cost table fell back
+ * to its generic "Not enough independent traffic" wording. The chart's gap list
+ * said "Not in use during this period" about the very same fact, so one tab
+ * gave two different answers and contradicted the distinction `no-exposure`
+ * exists to draw.
+ *
+ * The reasons come from the model's LAST series point, which is the same fit:
+ * `fitRolling`'s final grid window and the `latest` fit cover an identical
+ * segment set under an identical seed. Nothing is estimated here — the entry is
+ * unidentified, every number in it is null, and `shareOfWindow` is a counted
+ * ratio of eq-tokens rather than a fitted quantity.
+ *
+ * `shareOfWindow` is the model's REAL share, not a hard 0. Zero exposure and
+ * sub-floor exposure both miss the column, and printing 0.0% for a model that
+ * genuinely carried 1.5% of the window would be exactly the kind of fabricated
+ * number this panel refuses everywhere else.
+ */
+function latestUnidentified(
+	points: readonly SeriesPoint[],
+	shareOfWindow: number,
+): QuotaDriftModel["latest"] {
+	const last = points.at(-1);
+	// No column AND no series point: nothing observed this model in the window
+	// at all, and there is no reason on record to attribute the absence to.
+	if (!last) return null;
+	return {
+		pointEstimate: null,
+		ciLow: null,
+		ciHigh: null,
+		impliedCapacityMtok: null,
+		shareOfWindow,
+		identified: false,
+		unidentifiedReasons: [...last.unidentifiedReasons],
 	};
 }
 

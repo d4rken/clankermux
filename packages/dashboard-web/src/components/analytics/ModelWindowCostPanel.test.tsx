@@ -12,6 +12,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import {
 	cohort,
 	measuredModel,
+	retiredModel,
 	unidentifiedModel,
 	windowResult,
 } from "./__fixtures__/quota-drift";
@@ -84,6 +85,28 @@ describe("ModelWindowCostPanel", () => {
 		// Its share IS known and is shown — it is what makes "too little traffic"
 		// checkable rather than an assertion.
 		expect(html).toContain("11.0%");
+	});
+
+	it("says a retired model was not in use, not that it was too small", () => {
+		// The same model the chart's gap list calls "not in use during this
+		// period". Before this the table had no coefficient to read, fell back to
+		// "Not enough independent traffic", and the two halves of one tab gave a
+		// reader two different reasons for the same fact.
+		const html = renderToStaticMarkup(
+			<ModelWindowCostPanel
+				cohort={cohort([
+					windowResult("five_hour", [measuredModel(), retiredModel()]),
+				])}
+			/>,
+		);
+
+		expect(html).toContain("claude-opus-4-8");
+		expect(html).toContain("Not in use during this period");
+		expect(html).not.toContain("Too little of this window");
+		// Zero exposure is a real, counted share, so it is shown as one rather
+		// than as an em dash that would read as "unknown".
+		expect(html).toContain("0.0%");
+		expect(html).not.toContain("0.00%");
 	});
 
 	it("discloses an assumed tier in the panel description", () => {

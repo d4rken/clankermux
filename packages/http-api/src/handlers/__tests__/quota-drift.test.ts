@@ -582,6 +582,140 @@ function tieredAccountSamples(): WindowSample[] {
 	}));
 }
 
+/* -- Models with no exposure left --------------------------------------- */
+
+const RETIRED_ACCOUNT = "qd-acct-retired";
+/** Sampler cadence the retired-model fixture imitates. */
+const RETIRED_STEP_MS = 10 * 60_000;
+const RETIRED_MAIN_MODEL = "gpt-5.6-codex";
+const RETIRED_MODEL = "gpt-5.1-codex-mini";
+
+/**
+ * A database where one model ran for the first third of the history and then
+ * stopped, while another kept running throughout.
+ *
+ * The LATEST rolling window is the point: it contains zero eq-tokens for the
+ * retired model, so `selectKeys` gives it no column and the latest fit has no
+ * coefficient for it at all. 30 days of history is enough for the 14-day
+ * rolling window to have moved entirely past the retired model's traffic.
+ */
+function seedRetiredModel(): Database {
+	const db = new Database(":memory:");
+	ensureSchema(db);
+	const count = Math.floor((30 * 24 * 60 * 60_000) / RETIRED_STEP_MS);
+	const startMs = FIXTURE_NOW - count * RETIRED_STEP_MS;
+	const retiredUntilMs = startMs + 10 * 24 * 60 * 60_000;
+	const fiveHourMs = 5 * 60 * 60_000;
+
+	db.run(
+		`INSERT INTO accounts (id, name, provider, created_at,
+			identity_plan_tier, identity_rate_limit_tier)
+		 VALUES (?, ?, 'codex', ?, 'pro', NULL)`,
+		[RETIRED_ACCOUNT, RETIRED_ACCOUNT, startMs - 24 * 60 * 60_000],
+	);
+	const insertSnapshot = db.prepare(
+		`INSERT INTO usage_snapshots (
+			account_id, provider, sampled_at, five_hour_pct, five_hour_reset,
+			seven_day_pct, seven_day_reset, observed_at, plan_tier, rate_limit_tier
+		) VALUES (?, 'codex', ?, ?, ?, NULL, NULL, ?, 'pro', NULL)`,
+	);
+	const insertRequest = db.prepare(
+		`INSERT INTO requests (
+			id, timestamp, method, path, account_used, status_code, success,
+			response_time_ms, failover_attempts, model, total_tokens, cost_usd,
+			input_tokens, cache_read_input_tokens, cache_creation_input_tokens,
+			output_tokens, billing_type
+		) VALUES (?, ?, 'POST', '/v1/responses', ?, 200, 1, 800, 0,
+			?, ?, 0.4, ?, 0, 0, 0, 'plan')`,
+	);
+
+	let pct = 0;
+	let currentWindow = Math.floor(startMs / fiveHourMs);
+	db.transaction(() => {
+		for (let i = 0; i < count; i++) {
+			const t = startMs + i * RETIRED_STEP_MS;
+			const windowIndex = Math.floor(t / fiveHourMs);
+			if (windowIndex !== currentWindow) {
+				currentWindow = windowIndex;
+				pct = 0;
+			}
+			const mainEq = 200_000;
+			const retiredEq = t < retiredUntilMs ? 150_000 : 0;
+			pct = Math.min(100, pct + ((mainEq + retiredEq) / 1e6) * 2);
+			insertSnapshot.run(
+				RETIRED_ACCOUNT,
+				t,
+				pct,
+				Math.ceil((t + 1) / fiveHourMs) * fiveHourMs,
+				t,
+			);
+			insertRequest.run(
+				`${RETIRED_ACCOUNT}-m${i}`,
+				t + 60_000,
+				RETIRED_ACCOUNT,
+				RETIRED_MAIN_MODEL,
+				mainEq,
+				mainEq,
+			);
+			if (retiredEq > 0) {
+				insertRequest.run(
+					`${RETIRED_ACCOUNT}-r${i}`,
+					t + 90_000,
+					RETIRED_ACCOUNT,
+					RETIRED_MODEL,
+					retiredEq,
+					retiredEq,
+				);
+			}
+		}
+	})();
+	return db;
+}
+
+describe("quota-drift models with no exposure left", () => {
+	it("states the reason on `latest` instead of leaving it null", () => {
+		// A model with zero exposure in the latest window gets no column, so there
+		// is no coefficient to report. Returning null made the cost table fall
+		// back to "not enough independent traffic" while the chart's gap list said
+		// "not in use" about the same model — one tab, two answers, and the wrong
+		// one is the measurement claim.
+		const retiredDb = seedRetiredModel();
+		const payload = computeQuotaDrift(retiredDb, {
+			now: FIXTURE_NOW,
+			...TEST_BOOTSTRAP,
+		});
+		retiredDb.close();
+
+		const window = payload.cohorts
+			.find((c) => c.provider === "codex")
+			?.windows.find((w) => w.window === "five_hour");
+		const retired = window?.models.find((m) => m.key === RETIRED_MODEL);
+		const running = window?.models.find((m) => m.key === RETIRED_MAIN_MODEL);
+
+		expect(retired).toBeDefined();
+		// The series still covers it, which is what the gap list reads.
+		expect(retired?.points.length).toBeGreaterThan(1);
+		expect(retired?.points.at(-1)?.unidentifiedReasons).toContain(
+			"no-exposure",
+		);
+
+		expect(retired?.latest).not.toBeNull();
+		expect(retired?.latest?.identified).toBe(false);
+		expect(retired?.latest?.unidentifiedReasons).toContain("no-exposure");
+		// Never a number: the entry says why there is none, it does not supply a
+		// small one.
+		expect(retired?.latest?.pointEstimate).toBeNull();
+		expect(retired?.latest?.ciLow).toBeNull();
+		expect(retired?.latest?.ciHigh).toBeNull();
+		expect(retired?.latest?.impliedCapacityMtok).toBeNull();
+		// Zero exposure really is zero share — a counted ratio, not an estimate.
+		expect(retired?.latest?.shareOfWindow).toBe(0);
+
+		// The model still running is unaffected and keeps a real share.
+		expect(running?.latest?.shareOfWindow).toBeGreaterThan(0.9);
+	});
+});
+
 /* -- Windows that never moved ------------------------------------------- */
 
 const MINUTE_MS = 60_000;
