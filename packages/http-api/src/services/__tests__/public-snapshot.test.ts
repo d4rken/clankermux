@@ -20,6 +20,7 @@
 import { Database } from "bun:sqlite";
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import type { Config } from "@clankermux/config";
+import { RUNWAY_HORIZON_MS } from "@clankermux/core";
 import type { DatabaseOperations } from "@clankermux/database";
 import { BunSqlAdapter, ensureSchema } from "@clankermux/database";
 import { USAGE_CACHE_TTL_MS, usageCache } from "@clankermux/providers";
@@ -400,5 +401,168 @@ describe("limits", () => {
 	it("emits nothing for a provider with no usage windows", async () => {
 		insertAccount({ id: "ollama-1", provider: "ollama" });
 		expect((await read()).accounts[0]?.limits).toEqual([]);
+	});
+});
+
+describe("quota runway", () => {
+	/** 5-hour window only, so the test does not depend on the weekly estimator. */
+	function fiveHourOnly(pct: number): AnthropicUsageData {
+		return anthropicUsage(pct, null);
+	}
+
+	/**
+	 * The 5-hour window in the fixture resets an hour from NOW, so it opened four
+	 * hours ago. With no regression the lifetime average projects 100% at
+	 * `NOW + ((100 - pct) / pct) * 4h`.
+	 */
+	const FOUR_HOURS_MS = 4 * 60 * 60 * 1000;
+	const projected = (pct: number): number =>
+		Math.round(NOW + ((100 - pct) / pct) * FOUR_HOURS_MS);
+
+	it("projects a run-out inside the horizon from the shared capacity scan", async () => {
+		insertAccount();
+		usageCache.set("acct-1", fiveHourOnly(90));
+		const snapshot = await read();
+		expect(snapshot.accounts[0]?.runwayKind).toBe("runway");
+		expect(snapshot.accounts[0]?.runwayExhaustsAtMs).toBe(projected(90));
+		expect(snapshot.runway.kind).toBe("runway");
+		expect(snapshot.runway.exhaustsAtMs).toBe(projected(90));
+		expect(snapshot.runway.horizonMs).toBe(RUNWAY_HORIZON_MS);
+	});
+
+	it("rounds the projected instant to whole epoch milliseconds", async () => {
+		// 95% four hours in lands on NOW + 757894.7368…, which a fixed-point
+		// scanner on the device cannot read.
+		insertAccount();
+		usageCache.set("acct-1", fiveHourOnly(95));
+		const snapshot = await read();
+		const instant = snapshot.accounts[0]?.runwayExhaustsAtMs;
+		expect(Number.isInteger(instant)).toBe(true);
+		expect(Number.isInteger(snapshot.runway.exhaustsAtMs)).toBe(true);
+	});
+
+	it("reports unknown with a null instant when nothing is projectable", async () => {
+		// A windowed account with no reading at all: the honest answer is that the
+		// runway cannot be determined, never a fabricated instant.
+		insertAccount();
+		const snapshot = await read();
+		expect(snapshot.accounts[0]?.runwayKind).toBe("unknown");
+		expect(snapshot.accounts[0]?.runwayExhaustsAtMs).toBeNull();
+		expect(snapshot.runway.kind).toBe("unknown");
+		expect(snapshot.runway.exhaustsAtMs).toBeNull();
+		// Nothing stateable, so the headline names no account rather than pointing
+		// at the one whose own fields are null.
+		expect(snapshot.runway.worstAccountId).toBeNull();
+	});
+
+	it("refuses to project from a reading past the routing bar", async () => {
+		// The reading is still SERVED (fiveHourPct below) because an observation
+		// with an age is data; a projection modelling "now" is not allowed to be
+		// built on it.
+		insertAccount();
+		usageCache.setWithAgeForTests(
+			"acct-1",
+			fiveHourOnly(90),
+			USAGE_CACHE_TTL_MS + 60_000,
+		);
+		const snapshot = await read();
+		expect(snapshot.accounts[0]?.fiveHourPct).toBe(90);
+		expect(snapshot.accounts[0]?.runwayKind).toBe("unknown");
+		expect(snapshot.accounts[0]?.runwayExhaustsAtMs).toBeNull();
+	});
+
+	it("treats a provider with no quota window as never running out", async () => {
+		// `unmetered`, which is positively known to be in quota — NOT unknown.
+		insertAccount({ id: "ollama-1", provider: "ollama" });
+		const snapshot = await read();
+		expect(snapshot.accounts[0]?.runwayKind).toBe("beyond-horizon");
+		expect(snapshot.accounts[0]?.runwayExhaustsAtMs).toBeNull();
+	});
+
+	it("reports no-accounts on an empty pool", async () => {
+		expect((await read()).runway.kind).toBe("no-accounts");
+	});
+
+	it("names the worst account, and accounts[] agrees about it", async () => {
+		insertAccount({ id: "hot", name: "hot" });
+		insertAccount({ id: "warm", name: "warm" });
+		usageCache.set("hot", fiveHourOnly(95));
+		usageCache.set("warm", fiveHourOnly(90));
+		const snapshot = await read();
+
+		expect(snapshot.runway.worstAccountId).toBe("hot");
+		const worst = snapshot.accounts.find(
+			(a) => a.id === snapshot.runway.worstAccountId,
+		);
+		expect(worst?.runwayKind).toBe("runway");
+		expect(worst?.runwayExhaustsAtMs).toBe(projected(95));
+		// The pool runs out when BOTH are out, which is the later of the two — so
+		// the pool figure is not the worst account's figure and must not be
+		// mistaken for it.
+		expect(snapshot.runway.exhaustsAtMs).toBe(projected(90));
+	});
+
+	it("still names a worst account when the pool as a whole never runs out", async () => {
+		// `warm` is never projected to run out, so the pool is beyond the horizon
+		// while one account inside it has a finite runway.
+		insertAccount({ id: "hot", name: "hot" });
+		insertAccount({ id: "warm", name: "warm" });
+		usageCache.set("hot", fiveHourOnly(90));
+		usageCache.set("warm", fiveHourOnly(60));
+		const snapshot = await read();
+		expect(snapshot.runway.kind).toBe("beyond-horizon");
+		expect(snapshot.runway.exhaustsAtMs).toBeNull();
+		expect(snapshot.runway.worstAccountId).toBe("hot");
+	});
+
+	it("skips an unreadable account when naming the worst one", async () => {
+		// `unknown` outranks every finite outcome for RANKING, and is exactly wrong
+		// for a single-figure headline: one cold account would otherwise take the
+		// field and point a device at an account whose own runway fields are null.
+		insertAccount({ id: "cold", name: "cold" });
+		insertAccount({ id: "hot", name: "hot" });
+		usageCache.set("hot", fiveHourOnly(90));
+		const snapshot = await read();
+		expect(snapshot.accounts.find((a) => a.id === "cold")?.runwayKind).toBe(
+			"unknown",
+		);
+		expect(snapshot.runway.worstAccountId).toBe("hot");
+	});
+
+	it("carries no API key data — the per-key breakdown stays on /api/runway", async () => {
+		// `/api/runway` reports a row per API KEY, carrying the key's NAME, its
+		// routing pin and two further id arrays. None of that may reach an
+		// unauthenticated surface, and the reader must not start reading api_keys
+		// to compute a runway.
+		db.run(
+			`INSERT INTO api_keys (id, name, hashed_key, prefix_last_8, created_at, is_active)
+			 VALUES ('key-1', 'impatience (claude)', 'sha256$deadbeef', '12345678', ?, 1)`,
+			[NOW - 1_000],
+		);
+		insertAccount();
+		usageCache.set("acct-1", fiveHourOnly(90));
+		const wire = JSON.stringify(await read());
+		expect(wire).not.toContain("impatience");
+		for (const forbidden of [
+			"keyName",
+			"pin",
+			"eligibleAccountIds",
+			"unprojectableAccountIds",
+			"causes",
+		]) {
+			expect(wire).not.toContain(forbidden);
+		}
+	});
+
+	it("adds no array to an account record", async () => {
+		// `accounts[]` + `limits[]` spends the device scanner's entire budget.
+		insertAccount();
+		usageCache.set("acct-1", anthropicUsage(90, 10));
+		const account = (await read()).accounts[0];
+		if (!account) throw new Error("expected an account");
+		const arrayFields = Object.entries(account)
+			.filter(([, value]) => Array.isArray(value))
+			.map(([key]) => key);
+		expect(arrayFields).toEqual(["limits"]);
 	});
 });

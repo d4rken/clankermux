@@ -161,6 +161,50 @@ export function toPublicPauseReason(
 	return "other";
 }
 
+/**
+ * Quota-runway outcome, as a CLOSED set.
+ *
+ * Mirrors `RunwayOutcome["kind"]` value for value, in this surface's snake_case
+ * rather than core's kebab-case, with `other` for a kind added later. Mapping a
+ * future kind onto `beyond_horizon` would be the worst possible default — it
+ * reads as "nothing runs out" — so the escape hatch is what keeps a new outcome
+ * from being silently reassuring.
+ *
+ * QUOTA, not availability: an account that is paused or cooling off still counts
+ * as capacity here, exactly as it does for `/api/runway`. Copy built on this
+ * must say "quota", never "available".
+ */
+export type PublicRunwayKind =
+	/** Projected to run out within the horizon; an instant is reported. */
+	| "runway"
+	/** Out of quota right now. No future instant, so the instant is null. */
+	| "out_now"
+	/** No run-out modelled inside the horizon the scan checked. */
+	| "beyond_horizon"
+	/** No readable window anywhere; cannot be determined. */
+	| "unknown"
+	/** Nothing to route to at all. */
+	| "no_accounts"
+	| "other";
+
+/** Total over today's `RunwayOutcome["kind"]`; anything later becomes `other`. */
+export function toPublicRunwayKind(kind: string): PublicRunwayKind {
+	switch (kind) {
+		case "runway":
+			return "runway";
+		case "out-now":
+			return "out_now";
+		case "beyond-horizon":
+			return "beyond_horizon";
+		case "unknown":
+			return "unknown";
+		case "no-accounts":
+			return "no_accounts";
+		default:
+			return "other";
+	}
+}
+
 /** One usage window on the wire. */
 export interface PublicLimitDto {
 	kind: PublicLimitSnapshot["kind"];
@@ -187,6 +231,9 @@ export interface PublicAccountDto {
 	rateLimitResetAt: number | null;
 	providerOverloadedUntil: number | null;
 	providerWideOverloadedUntil: number | null;
+	/** This account's own quota runway. SCALARS — the array budget is spent. */
+	runwayKind: PublicRunwayKind;
+	runwayExhaustsAt: number | null;
 	stale: boolean;
 	limits: PublicLimitDto[];
 }
@@ -210,6 +257,8 @@ export function toPublicAccountDto(
 		rateLimitResetAt: account.rateLimitResetAt,
 		providerOverloadedUntil: account.providerOverloadedUntil,
 		providerWideOverloadedUntil: account.providerWideOverloadedUntil,
+		runwayKind: toPublicRunwayKind(account.runwayKind),
+		runwayExhaustsAt: account.runwayExhaustsAtMs,
 		stale: account.stale,
 		limits: account.limits.map((limit) => ({
 			kind: limit.kind,
@@ -241,6 +290,20 @@ export interface PublicStatusDto {
 		fiveHourPct: number | null;
 		sevenDayPct: number | null;
 		worstAccountPct: number | null;
+	};
+	/**
+	 * Pool quota runway, flat and scalar-only. The per-API-key breakdown
+	 * `/api/runway` serves is deliberately absent: key names are management data,
+	 * and its `pin` / `eligibleAccountIds` / `unprojectableAccountIds` are array
+	 * levels this surface's reader cannot descend into.
+	 */
+	runway: {
+		kind: PublicRunwayKind;
+		/** Projected all-out instant, epoch ms, or null on every other kind. */
+		exhaustsAt: number | null;
+		horizonMs: number;
+		/** An account ID, joinable against `accounts[].id`. Never a key name. */
+		worstAccountId: string | null;
 	};
 	stale: boolean;
 }
@@ -280,6 +343,15 @@ export function toPublicStatusDto(
 			fiveHourPct: snapshot.usage.fiveHourPct,
 			sevenDayPct: snapshot.usage.sevenDayPct,
 			worstAccountPct: snapshot.usage.worstAccountPct,
+		},
+		runway: {
+			kind: toPublicRunwayKind(snapshot.runway.kind),
+			exhaustsAt: snapshot.runway.exhaustsAtMs,
+			horizonMs: snapshot.runway.horizonMs,
+			// Truncated with the SAME rule `PublicAccountDto.id` is truncated by, so
+			// a device can join the two. Truncating one and not the other would break
+			// the join for exactly the ids long enough to need it.
+			worstAccountId: str(snapshot.runway.worstAccountId),
 		},
 		stale: snapshot.stale,
 	};

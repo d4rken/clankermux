@@ -10,6 +10,7 @@
  * unauthenticated surface — that no field arrives here that was not named.
  */
 import { describe, expect, it } from "bun:test";
+import { RUNWAY_HORIZON_MS } from "@clankermux/core";
 import type { RequestResponse } from "@clankermux/types";
 import type {
 	PublicAccountSnapshot,
@@ -22,6 +23,7 @@ import {
 	toPublicHealth,
 	toPublicPauseReason,
 	toPublicRequestDoneDto,
+	toPublicRunwayKind,
 	toPublicStatusDto,
 	toPublicStatusLevel,
 	truncateUtf8,
@@ -46,6 +48,8 @@ function account(
 		rateLimitResetAt: null,
 		providerOverloadedUntil: null,
 		providerWideOverloadedUntil: null,
+		runwayKind: "beyond-horizon",
+		runwayExhaustsAtMs: null,
 		stale: false,
 		limits: [
 			{
@@ -71,6 +75,12 @@ function snapshot(over: Partial<PublicSnapshot> = {}): PublicSnapshot {
 			nextAvailableAt: null,
 		},
 		usage: { fiveHourPct: 42, sevenDayPct: 11, worstAccountPct: 42 },
+		runway: {
+			kind: "beyond-horizon",
+			exhaustsAtMs: null,
+			horizonMs: RUNWAY_HORIZON_MS,
+			worstAccountId: "acct-1",
+		},
 		accounts: [account()],
 		stale: false,
 		...over,
@@ -101,6 +111,12 @@ describe("golden: GET /public/v1/status", () => {
 				nextAvailableAt: null,
 			},
 			usage: { fiveHourPct: 42, sevenDayPct: 11, worstAccountPct: 42 },
+			runway: {
+				kind: "beyond_horizon",
+				exhaustsAt: null,
+				horizonMs: RUNWAY_HORIZON_MS,
+				worstAccountId: "acct-1",
+			},
 			stale: false,
 		});
 	});
@@ -153,6 +169,8 @@ describe("golden: GET /public/v1/accounts", () => {
 					rateLimitResetAt: null,
 					providerOverloadedUntil: null,
 					providerWideOverloadedUntil: null,
+					runwayKind: "beyond_horizon",
+					runwayExhaustsAt: null,
 					stale: false,
 					limits: [
 						{
@@ -189,6 +207,8 @@ describe("golden: GET /public/v1/accounts", () => {
 			"providerOverloadedUntil",
 			"providerWideOverloadedUntil",
 			"rateLimitResetAt",
+			"runwayExhaustsAt",
+			"runwayKind",
 			"sevenDayPct",
 			"sevenDayResetsAt",
 			"stale",
@@ -283,6 +303,186 @@ describe("structural limits", () => {
 		]) {
 			expect(typeof value).toBe("number");
 			expect(Number.isInteger(value)).toBe(true);
+		}
+	});
+});
+
+// ---------------------------------------------------------------------------
+// Quota runway
+// ---------------------------------------------------------------------------
+
+describe("runway kind is a closed set with an escape hatch", () => {
+	const mapping: Array<[string, string]> = [
+		["runway", "runway"],
+		["out-now", "out_now"],
+		["beyond-horizon", "beyond_horizon"],
+		["unknown", "unknown"],
+		["no-accounts", "no_accounts"],
+	];
+
+	for (const [internal, wire] of mapping) {
+		it(`maps ${internal} to ${wire}`, () => {
+			expect(toPublicRunwayKind(internal)).toBe(
+				wire as ReturnType<typeof toPublicRunwayKind>,
+			);
+		});
+	}
+
+	it("maps an outcome kind the vocabulary has never seen to other", () => {
+		// The dangerous default would be `beyond_horizon`, which reads as "nothing
+		// runs out". A future outcome must land on the value the firmware warns on.
+		expect(toPublicRunwayKind("some_future_outcome")).toBe("other");
+		expect(toPublicRunwayKind("")).toBe("other");
+		// The internal spelling is kebab-case; the snake_case wire spelling is NOT
+		// an accepted input, so a round-trip mistake shows up rather than passing.
+		expect(toPublicRunwayKind("beyond_horizon")).toBe("other");
+	});
+
+	it("degrades an unrecognized kind on both payloads, not just one", () => {
+		const snap = snapshot({
+			runway: {
+				kind: "quantum-superposition" as PublicSnapshot["runway"]["kind"],
+				exhaustsAtMs: null,
+				horizonMs: RUNWAY_HORIZON_MS,
+				worstAccountId: null,
+			},
+			accounts: [
+				account({
+					runwayKind:
+						"quantum-superposition" as PublicAccountSnapshot["runwayKind"],
+				}),
+			],
+		});
+		expect(
+			toPublicStatusDto(snap, { uptimeS: 1, version: "v" }).runway.kind,
+		).toBe("other");
+		expect(toPublicAccountsDto(snap).accounts[0]?.runwayKind).toBe("other");
+	});
+});
+
+describe("runway on GET /public/v1/status", () => {
+	it("carries the projected instant as epoch ms and the horizon it checked", () => {
+		const dto = toPublicStatusDto(
+			snapshot({
+				runway: {
+					kind: "runway",
+					exhaustsAtMs: 1_700_040_000_000,
+					horizonMs: RUNWAY_HORIZON_MS,
+					worstAccountId: "acct-1",
+				},
+			}),
+			{ uptimeS: 1, version: "v" },
+		);
+		expect(dto.runway.kind).toBe("runway");
+		expect(Number.isInteger(dto.runway.exhaustsAt)).toBe(true);
+		expect(dto.runway.exhaustsAt).toBe(1_700_040_000_000);
+		expect(dto.runway.horizonMs).toBe(RUNWAY_HORIZON_MS);
+		expect(dto.runway.worstAccountId).toBe("acct-1");
+	});
+
+	it("reports a null instant when nothing is projected", () => {
+		for (const kind of ["unknown", "beyond-horizon", "out-now"] as const) {
+			const dto = toPublicStatusDto(
+				snapshot({
+					runway: {
+						kind,
+						exhaustsAtMs: null,
+						horizonMs: RUNWAY_HORIZON_MS,
+						worstAccountId: null,
+					},
+				}),
+				{ uptimeS: 1, version: "v" },
+			);
+			expect(dto.runway.exhaustsAt).toBeNull();
+			expect(dto.runway.worstAccountId).toBeNull();
+		}
+	});
+
+	it("adds no array — the status response still has none", () => {
+		const dto = toPublicStatusDto(snapshot(), { uptimeS: 1, version: "v" });
+		expect(JSON.stringify(dto)).not.toContain("[");
+		expect(Object.keys(dto.runway).sort()).toEqual([
+			"exhaustsAt",
+			"horizonMs",
+			"kind",
+			"worstAccountId",
+		]);
+	});
+
+	it("truncates worstAccountId exactly as accounts[].id is truncated", () => {
+		// The field only means anything as a join key, so the two must be cut by
+		// the same rule or the join breaks for precisely the long ids.
+		const longId = "a".repeat(MAX_STRING_BYTES + 20);
+		const snap = snapshot({
+			runway: {
+				kind: "out-now",
+				exhaustsAtMs: null,
+				horizonMs: RUNWAY_HORIZON_MS,
+				worstAccountId: longId,
+			},
+			accounts: [account({ id: longId })],
+		});
+		const status = toPublicStatusDto(snap, { uptimeS: 1, version: "v" });
+		expect(status.runway.worstAccountId).toBe(
+			toPublicAccountsDto(snap).accounts[0]?.id ?? null,
+		);
+	});
+});
+
+describe("runway on GET /public/v1/accounts", () => {
+	it("adds SCALARS only — no second nested array", () => {
+		const dto = toPublicAccountsDto(
+			snapshot({
+				accounts: [
+					account({
+						runwayKind: "runway",
+						runwayExhaustsAtMs: 1_700_040_000_000,
+					}),
+				],
+			}),
+		);
+		// accounts[] + limits[] and nothing deeper, still.
+		expect(arrayNesting(dto)).toBe(2);
+		const first = dto.accounts[0];
+		if (!first) throw new Error("expected an account");
+		const arrayFields = Object.entries(first)
+			.filter(([, value]) => Array.isArray(value))
+			.map(([key]) => key);
+		expect(arrayFields).toEqual(["limits"]);
+		expect(typeof first.runwayKind).toBe("string");
+		expect(Number.isInteger(first.runwayExhaustsAt)).toBe(true);
+	});
+
+	it("reports null for an account with no projectable window", () => {
+		const dto = toPublicAccountsDto(
+			snapshot({
+				accounts: [
+					account({ runwayKind: "unknown", runwayExhaustsAtMs: null }),
+				],
+			}),
+		);
+		expect(dto.accounts[0]?.runwayKind).toBe("unknown");
+		expect(dto.accounts[0]?.runwayExhaustsAt).toBeNull();
+	});
+
+	it("carries no API key data — no keys, names or pins reach the wire", () => {
+		// `/api/runway` reports a row PER API KEY, carrying `keyName`, `pin`,
+		// `eligibleAccountIds` and `outcome.unprojectableAccountIds`. None of that
+		// may appear on an unauthenticated surface, and three array levels would be
+		// unparseable by the device regardless.
+		const wire = `${JSON.stringify(toPublicAccountsDto(snapshot()))}${JSON.stringify(
+			toPublicStatusDto(snapshot(), { uptimeS: 1, version: "v" }),
+		)}`;
+		for (const forbidden of [
+			"keys",
+			"keyId",
+			"keyName",
+			"pin",
+			"eligibleAccountIds",
+			"unprojectableAccountIds",
+			"causes",
+		]) {
+			expect(wire).not.toContain(forbidden);
 		}
 	});
 });
