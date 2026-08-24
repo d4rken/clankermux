@@ -29,6 +29,12 @@ export interface KeyedSemaphore {
 	 */
 	count(key?: string): number;
 	/**
+	 * Keys with at least one held slot. For observability: a holder's key is
+	 * frozen at acquisition, so occupancy can outlive whatever the key referred
+	 * to and a caller reporting only its own live entities would miss it.
+	 */
+	occupiedKeys(): string[];
+	/**
 	 * Reset all counters. For tests.
 	 */
 	reset(): void;
@@ -52,6 +58,9 @@ export function createKeyedSemaphore(cap: number): KeyedSemaphore {
 				return;
 			}
 			counts.set(key, current - 1);
+		},
+		occupiedKeys(): string[] {
+			return [...counts.keys()];
 		},
 		count(key?: string): number {
 			if (key !== undefined) {

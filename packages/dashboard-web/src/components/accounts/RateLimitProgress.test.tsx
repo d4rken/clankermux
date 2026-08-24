@@ -1361,3 +1361,81 @@ describe("reset endpoint highlights", () => {
 		expect(render(resetIso, tied, tied)).not.toContain("font-bold");
 	});
 });
+
+describe("burn-anchored weekly projection", () => {
+	const HOUR = 60 * 60 * 1000;
+
+	function render(opts: {
+		pct: number;
+		resetMs: number;
+		asOfMs: number;
+		anchor: {
+			anchorMs: number;
+			anchorPct: number;
+			windowResetMs: number;
+		} | null;
+	}) {
+		return renderToStaticMarkup(
+			<RateLimitProgress
+				resetIso={null}
+				usageData={
+					{
+						five_hour: { utilization: 5, resets_at: null },
+						seven_day: {
+							utilization: opts.pct,
+							resets_at: new Date(opts.resetMs).toISOString(),
+						},
+					} as never
+				}
+				usageAsOfIso={new Date(opts.asOfMs).toISOString()}
+				burnAnchors={opts.anchor ? { sevenDay: opts.anchor } : null}
+				provider="anthropic"
+				showWeekly
+				inlineProjection
+			/>,
+		);
+	}
+
+	it("renders the anchored run-out in danger after the evidence ramp", () => {
+		const now = Date.now();
+		const resetMs = now + 1.5 * 24 * HOUR;
+		// Gift 12h ago; 40% burned since. True pace exhausts ~18h out — 18h
+		// before the reset, far past the certainty threshold (10% of 7d).
+		// Un-anchored, the same reading projects past the reset and reads safe.
+		const anchored = render({
+			pct: 40,
+			resetMs,
+			asOfMs: now,
+			anchor: {
+				anchorMs: now - 12 * HOUR,
+				anchorPct: 0,
+				windowResetMs: resetMs,
+			},
+		});
+		expect(anchored).toContain("Runs out");
+		expect(anchored).toContain("text-destructive-strong");
+
+		const unanchored = render({ pct: 40, resetMs, asOfMs: now, anchor: null });
+		expect(unanchored).toContain("On track to reset before running out");
+	});
+
+	it("caps the anchored run-out at amber within the first hour of evidence", () => {
+		const now = Date.now();
+		const resetMs = now + 1.5 * 24 * HOUR;
+		// Anchor 30 minutes ago: the arithmetic already projects a run-out, but
+		// the tone must not reach red on half an hour of evidence.
+		const html = render({
+			pct: 10,
+			resetMs,
+			asOfMs: now,
+			anchor: {
+				anchorMs: now - 30 * 60_000,
+				anchorPct: 0,
+				windowResetMs: resetMs,
+			},
+		});
+		expect(html).toContain("Runs out");
+		expect(html).toContain("text-warning-strong");
+		expect(html).not.toContain("text-destructive-strong");
+	});
+});

@@ -6,9 +6,13 @@
  * irrelevant to what gets recorded. The timer/scheduling path is still exercised
  * via integration in the running server.
  */
-import { describe, expect, it } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import type { AnyUsageData, UsageData } from "@clankermux/providers";
-import { getWeeklyBurnSlope } from "@clankermux/proxy";
+import {
+	clearUsageRevisionAnchors,
+	getUsageRevisionAnchor,
+	getWeeklyBurnSlope,
+} from "@clankermux/proxy";
 import type {
 	Account,
 	ScopedUsageSnapshotRow,
@@ -1053,5 +1057,233 @@ describe("UsageSnapshotSampler weekly burn-slope feed", () => {
 		await h.sampler.refreshBurnSlopes();
 
 		expect(h.snapshotQueries()).toHaveLength(0);
+	});
+});
+
+describe("UsageSnapshotSampler revision-anchor feed", () => {
+	beforeEach(() => {
+		clearUsageRevisionAnchors();
+	});
+	afterEach(() => {
+		clearUsageRevisionAnchors();
+	});
+
+	let anchorSeq = 0;
+	function anchorAccountId(): string {
+		anchorSeq += 1;
+		return `anchor-acct-${anchorSeq}`;
+	}
+
+	/** A full sample row with explicit observation provenance. */
+	function sampleRow(opts: {
+		accountId: string;
+		sampledAt: number;
+		sevenDayPct: number | null;
+		sevenDayReset: number | null;
+		fiveHourPct?: number | null;
+		fiveHourReset?: number | null;
+		observedAt?: number | null;
+	}): UsageSnapshotSample {
+		return {
+			accountId: opts.accountId,
+			provider: "anthropic",
+			sampledAt: opts.sampledAt,
+			fiveHourPct: opts.fiveHourPct ?? null,
+			fiveHourReset: opts.fiveHourReset ?? null,
+			sevenDayPct: opts.sevenDayPct,
+			sevenDayReset: opts.sevenDayReset,
+			observedAt:
+				opts.observedAt === undefined ? opts.sampledAt : opts.observedAt,
+			planTier: null,
+			rateLimitTier: null,
+		};
+	}
+
+	it("live ticks detect a mid-window drop across cache refreshes", async () => {
+		const id = anchorAccountId();
+		const resetMs = NOW + 3 * 24 * HOUR_MS;
+		const resetIso = new Date(resetMs).toISOString();
+		// A mutable cache: the second tick sees the post-gift reading.
+		let entry: SeedEntry = {
+			ageMs: 1_000,
+			data: usageData({ sevenDayUtil: 60, sevenDayReset: resetIso }),
+			observedAtMs: NOW - 10 * MINUTE,
+		};
+		const cache: SamplerCache = {
+			peekWithAge() {
+				return entry.data === null || entry.ageMs === null
+					? null
+					: {
+							data: entry.data,
+							ageMs: entry.ageMs,
+							observedAtMs: entry.observedAtMs ?? null,
+						};
+			},
+		};
+		const h = makeSampler({
+			accounts: [acct(id, "anthropic")],
+			cache,
+		});
+
+		await h.sampler.tick();
+		expect(getUsageRevisionAnchor(id, "seven_day", resetMs)).toBeNull();
+
+		entry = {
+			ageMs: 1_000,
+			data: usageData({ sevenDayUtil: 2, sevenDayReset: resetIso }),
+			observedAtMs: NOW - 8 * MINUTE,
+		};
+		await h.sampler.tick();
+
+		expect(getUsageRevisionAnchor(id, "seven_day", resetMs)).toEqual({
+			anchorMs: NOW - 8 * MINUTE,
+			anchorPct: 2,
+			windowResetMs: resetMs,
+		});
+	});
+
+	it("boot seed recovers a days-old gift from persisted history", async () => {
+		const now = Date.now();
+		const id = anchorAccountId();
+		const resetMs = now + 2 * 24 * HOUR_MS;
+		const giftAt = now - 3 * 24 * HOUR_MS;
+		const rows = [
+			sampleRow({
+				accountId: id,
+				sampledAt: giftAt - 2 * MINUTE,
+				sevenDayPct: 70,
+				sevenDayReset: resetMs,
+			}),
+			sampleRow({
+				accountId: id,
+				sampledAt: giftAt,
+				sevenDayPct: 1,
+				sevenDayReset: resetMs,
+			}),
+			sampleRow({
+				accountId: id,
+				sampledAt: giftAt + 2 * MINUTE,
+				sevenDayPct: 3,
+				sevenDayReset: resetMs,
+			}),
+		];
+		const h = makeSampler({
+			accounts: [acct(id, "anthropic")],
+			cache: makeCache({}),
+			storedSnapshots: () => rows,
+		});
+
+		const before = Date.now();
+		await h.sampler.seedRevisionAnchors();
+		const after = Date.now();
+
+		expect(getUsageRevisionAnchor(id, "seven_day", resetMs)).toEqual({
+			anchorMs: giftAt,
+			anchorPct: 1,
+			windowResetMs: resetMs,
+		});
+
+		// The seed reads a 7-DAY lookback — the whole span a weekly anchor can
+		// still be valid over — not the burn-slope fit's 24h.
+		const q = h.snapshotQueries();
+		expect(q).toHaveLength(1);
+		expect(q[0]?.sinceMs).toBeGreaterThanOrEqual(before - 7 * 24 * HOUR_MS);
+		expect(q[0]?.sinceMs).toBeLessThanOrEqual(after - 7 * 24 * HOUR_MS);
+	});
+
+	it("seed then live tick replaying the same reading is idempotent", async () => {
+		// Real wall-clock base: the seed's 7d lookback is computed from the
+		// sampler's own Date.now(), so fixture times must live inside it.
+		const base = Date.now();
+		const id = anchorAccountId();
+		const resetMs = base + 3 * 24 * HOUR_MS;
+		const resetIso = new Date(resetMs).toISOString();
+		const giftAt = base - 6 * HOUR_MS;
+		const rows = [
+			sampleRow({
+				accountId: id,
+				sampledAt: giftAt - 2 * MINUTE,
+				sevenDayPct: 55,
+				sevenDayReset: resetMs,
+			}),
+			sampleRow({
+				accountId: id,
+				sampledAt: giftAt,
+				sevenDayPct: 4,
+				sevenDayReset: resetMs,
+			}),
+		];
+		// The live cache still holds the SAME post-gift observation the seed saw.
+		const h = makeSampler({
+			accounts: [acct(id, "anthropic")],
+			cache: makeCache({
+				[id]: {
+					ageMs: 1_000,
+					data: usageData({ sevenDayUtil: 4, sevenDayReset: resetIso }),
+					observedAtMs: giftAt,
+				},
+			}),
+			storedSnapshots: () => rows,
+		});
+
+		await h.sampler.seedRevisionAnchors();
+		const seeded = getUsageRevisionAnchor(id, "seven_day", resetMs);
+		expect(seeded?.anchorMs).toBe(giftAt);
+
+		await h.sampler.tick();
+		expect(getUsageRevisionAnchor(id, "seven_day", resetMs)).toEqual(seeded);
+	});
+
+	it("skips seed rows with no observation provenance", async () => {
+		const now = Date.now();
+		const id = anchorAccountId();
+		const resetMs = now + 2 * 24 * HOUR_MS;
+		const rows = [
+			sampleRow({
+				accountId: id,
+				sampledAt: now - 20 * MINUTE,
+				sevenDayPct: 70,
+				sevenDayReset: resetMs,
+				observedAt: null,
+			}),
+			sampleRow({
+				accountId: id,
+				sampledAt: now - 18 * MINUTE,
+				sevenDayPct: 1,
+				sevenDayReset: resetMs,
+				observedAt: null,
+			}),
+		];
+		const h = makeSampler({
+			accounts: [acct(id, "anthropic")],
+			cache: makeCache({}),
+			storedSnapshots: () => rows,
+		});
+
+		await h.sampler.seedRevisionAnchors();
+
+		// Pre-provenance rows cannot place the revision honestly; no anchor.
+		expect(getUsageRevisionAnchor(id, "seven_day", resetMs)).toBeNull();
+	});
+
+	it("a stale cache entry feeds nothing on a live tick", async () => {
+		const id = anchorAccountId();
+		const resetMs = NOW + 3 * 24 * HOUR_MS;
+		const resetIso = new Date(resetMs).toISOString();
+		const h = makeSampler({
+			accounts: [acct(id, "anthropic")],
+			cache: makeCache({
+				[id]: {
+					// Older than the freshness gate: the row projection drops it,
+					// so the anchor feed must see nothing either.
+					ageMs: FRESHNESS + 60_000,
+					data: usageData({ sevenDayUtil: 2, sevenDayReset: resetIso }),
+				},
+			}),
+		});
+
+		await h.sampler.tick();
+
+		expect(getUsageRevisionAnchor(id, "seven_day", resetMs)).toBeNull();
 	});
 });

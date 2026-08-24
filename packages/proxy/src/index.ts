@@ -107,12 +107,26 @@ export {
 	startFullIntegrityCheckBackground,
 	startIntegrityScheduler,
 } from "./integrity-scheduler";
-export { peekPrimaryAccountId } from "./peek-primary";
+export {
+	getActiveOverloadHoldCount,
+	getOccupiedOverloadHoldKeys,
+} from "./overload-hold";
+export {
+	DEFAULT_ROUTING_CONTEXT,
+	type DefaultCandidateEvaluation,
+	earliestExclusionRecoveryMs,
+	evaluateDefaultCandidates,
+	type PeekExclusion,
+	type PeekExclusionReason,
+	peekDefaultCandidateIds,
+	peekPrimaryAccountId,
+} from "./peek-primary";
 export {
 	ANTHROPIC_UPSTREAM_OVERLOAD_KEY,
 	applyProviderOverloadCooldown,
 	clearProviderOverloadCooldown,
 	completeProviderOverloadProbe,
+	getOverloadDiagnostics,
 	getProbeLeaseSafetyTtlMs,
 	getProviderOverloadKey,
 	getProviderOverloadSnapshot,
@@ -124,6 +138,7 @@ export {
 	type OverloadBreakerState,
 	type OverloadBreakerStatus,
 	type OverloadBucketSnapshot,
+	type OverloadDiagnosticBucket,
 	type OverloadProbeToken,
 	type ProbeAdmission,
 	tryAcquireProviderOverloadProbe,
@@ -151,6 +166,12 @@ export {
 export { sessionCacheStore } from "./session-cache-store";
 export { sessionPromotionTracker } from "./session-promotion";
 export type { ProxyRequest, ProxyResponse } from "./types";
+export {
+	clearUsageRevisionAnchors,
+	getUsageRevisionAnchor,
+	observeUsageReading,
+	REVISION_MIN_DROP_PCT,
+} from "./usage-revision-anchor";
 export {
 	getWeeklyBurnSlope,
 	recordWeeklyBurnSlope,

@@ -164,6 +164,7 @@ export class APIRouter {
 			getIntegrityStatus,
 			getStrategy,
 			getEventLoopLag,
+			getProviderOverload,
 		} = this.context;
 
 		// The management login. Built from `dbOps` when the caller did not inject
@@ -251,13 +252,12 @@ export class APIRouter {
 		);
 		const cleanupHandler = createCleanupHandler(dbOps, config);
 		const systemInfoHandler = createSystemInfoHandler();
-		const systemStatusHandler = createSystemStatusHandler(
-			dbOps,
-			config,
+		const systemStatusHandler = createSystemStatusHandler(dbOps, config, {
 			getAsyncWriterHealth,
 			getIntegrityStatus,
 			getEventLoopLag,
-		);
+			getProviderOverload,
+		});
 		const versionCheckHandler = createVersionCheckHandler();
 
 		// Debug/profiling handlers

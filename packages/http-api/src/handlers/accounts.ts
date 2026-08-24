@@ -3,6 +3,8 @@ import type { Config } from "@clankermux/config";
 import {
 	ACCOUNT_WIDE_HARD_STATUSES,
 	accountWideExhaustion,
+	extractFiveHour,
+	extractSevenDay,
 	isAnthropicUsageShape,
 	isIndependentBlock,
 	patterns,
@@ -48,11 +50,13 @@ import {
 	clearAccountRefreshCache,
 	clearCapacityRestoredProbePending,
 	clearProviderOverloadCooldown,
+	clearUsageRevisionAnchors,
 	consumeCodexResetCreditForAccount,
 	getForcedAccount,
 	getProviderOverloadKey,
 	getProviderOverloadSnapshot,
 	getProviderOverloadUntil,
+	getUsageRevisionAnchor,
 	getUsageThrottleStatus,
 	peekPrimaryAccountId,
 	refreshCodexResetCreditsForAccount,
@@ -731,6 +735,10 @@ export function createAccountsListHandler(
 							? Number(account.codex_usage_observed_at)
 							: null,
 						account.last_used != null ? Number(account.last_used) : null,
+						// The management accounts page is the surface that has always
+						// owned this recovery, and it is the one entitled to refresh what
+						// the proxy can see.
+						{ seedCache: true },
 					);
 					usageData = resolved.data;
 					usageIsLiveCacheEntry = resolved.source === "cache";
@@ -1047,6 +1055,33 @@ export function createAccountsListHandler(
 					}
 				}
 
+				// Revision anchors for the reading this response actually serves,
+				// keyed to ITS window resets — an anchor from another window instance
+				// must not ship with a reading it cannot re-anchor. Only the windowed
+				// providers ever have registry state.
+				let burnAnchors: AccountResponse["burnAnchors"] = null;
+				if (
+					(provider === "anthropic" || provider === "codex") &&
+					usageData != null
+				) {
+					const fiveHourAnchor = getUsageRevisionAnchor(
+						account.id,
+						"five_hour",
+						extractFiveHour(usageData)?.resetMs ?? null,
+					);
+					const sevenDayAnchor = getUsageRevisionAnchor(
+						account.id,
+						"seven_day",
+						extractSevenDay(usageData)?.resetMs ?? null,
+					);
+					if (fiveHourAnchor !== null || sevenDayAnchor !== null) {
+						burnAnchors = {
+							fiveHour: fiveHourAnchor,
+							sevenDay: sevenDayAnchor,
+						};
+					}
+				}
+
 				return {
 					id: account.id,
 					name: account.name,
@@ -1129,6 +1164,7 @@ export function createAccountsListHandler(
 								? new Date(usageObservedAtMs).toISOString()
 								: null,
 					prediction: predictionByAccount.get(account.id) ?? null,
+					burnAnchors,
 					usageRateLimitedUntil: usageCache.getRateLimitedUntil(account.id),
 					usageThrottledUntil,
 					usageThrottledWindows,
@@ -1463,6 +1499,7 @@ export function createAccountRemoveHandler(dbOps: DatabaseOperations) {
 			// Clear usage cache for removed account to prevent memory leaks
 			usageCache.delete(accountId);
 			codexRateLimitResetCreditsCache.delete(accountId);
+			clearUsageRevisionAnchors(accountId);
 			// Evict any warm session-cache slots owned by the removed account so
 			// the keepalive scheduler never tries to replay against a deleted id.
 			sessionCacheStore.evictAccount(accountId);

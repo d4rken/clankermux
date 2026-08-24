@@ -378,3 +378,86 @@ describe("requests filtering — real SQLite", () => {
 		expect(((await codeRes.json()) as { total: number }).total).toBe(1);
 	});
 });
+
+/**
+ * The failure-reason filter, against a real engine.
+ *
+ * Worth its own database because the reason strings are the point. The unit
+ * tests only inspect the generated SQL string, which cannot catch the two ways
+ * this clause fails for real: a missing `ESCAPE` (SQLite has no default escape
+ * character, so `provider_overloaded` would silently match nothing) and the
+ * `success = 0` narrowing that keeps the scan off the whole table.
+ */
+function makeErrorDb(): BunSqlAdapter {
+	const db = new Database(":memory:");
+	db.run(`
+		CREATE TABLE accounts (id TEXT PRIMARY KEY, name TEXT);
+		CREATE TABLE api_keys (id TEXT PRIMARY KEY, name TEXT);
+		CREATE TABLE requests (
+			id TEXT PRIMARY KEY,
+			timestamp INTEGER NOT NULL,
+			status_code INTEGER,
+			success INTEGER,
+			error_message TEXT,
+			account_used TEXT,
+			api_key_id TEXT,
+			api_key_name TEXT,
+			project TEXT
+		);
+	`);
+	const insert = db.prepare(
+		`INSERT INTO requests (id, timestamp, status_code, success, error_message)
+		 VALUES (?, ?, ?, ?, ?)`,
+	);
+	// The three real shapes, taken from production rows.
+	insert.run("synth-1", 1000, 529, 0, "provider_overloaded");
+	insert.run("synth-2", 1100, 529, 0, "provider_overloaded");
+	insert.run("fwd-1", 1200, 529, 0, "529 overloaded_error: Overloaded");
+	// HTTP 200 that died mid-stream: the kind no `codes=` filter can see.
+	insert.run("inband-1", 1300, 200, 0, "200 overloaded_error: Overloaded");
+	insert.run("inband-2", 1400, 200, 0, "200 overloaded_error: Overloaded");
+	insert.run("other", 1500, 500, 0, "pool_exhausted");
+	insert.run("fine", 1600, 200, 1, null);
+	return {
+		query: async <T>(sql: string, params: unknown[] = []) =>
+			db.prepare(sql).all(...(params as never[])) as T[],
+	} as unknown as BunSqlAdapter;
+}
+
+describe("failure-reason filter against real SQLite", () => {
+	const count = async (filters: Record<string, unknown>) => {
+		const res = await createRequestsCountHandler(makeErrorDb())(filters);
+		return ((await res.json()) as { total: number }).total;
+	};
+
+	it("matches an underscore-bearing reason literally", async () => {
+		// Without ESCAPE the `_` is a single-character wildcard and this would
+		// also match e.g. `providerXoverloaded` — or, with the escaping but no
+		// ESCAPE clause, match nothing at all.
+		expect(await count({ error: "provider_overloaded" })).toBe(2);
+	});
+
+	it("spans every overload shape from the shared stem", async () => {
+		// 2 synthetic + 1 forwarded + 2 in-band. The in-band pair is invisible to
+		// any status-code filter, which is the whole reason this filter exists.
+		expect(await count({ error: "overload" })).toBe(5);
+	});
+
+	it("finds strictly more than a 529 status filter does", async () => {
+		const byStatus = await count({ codes: [529] });
+		const byReason = await count({ error: "overload" });
+		expect(byStatus).toBe(3);
+		expect(byReason).toBeGreaterThan(byStatus);
+	});
+
+	it("does not match successful rows", async () => {
+		expect(await count({ error: "pool_exhausted" })).toBe(1);
+		// The narrowing clause is `success = 0`; a reason never appears on a
+		// successful row, so it must not change any result.
+		expect(await count({ error: "overload", status: "error" })).toBe(5);
+	});
+
+	it("treats a literal percent as text, not a wildcard", async () => {
+		expect(await count({ error: "%" })).toBe(0);
+	});
+});

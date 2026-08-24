@@ -4,9 +4,11 @@ import {
 	registerUIRefresh,
 } from "@clankermux/core";
 import type {
+	AccountBurnAnchors,
 	AccountUsagePrediction,
 	FullUsageData,
 	StaleUsageInfo,
+	UsageBurnAnchor,
 	UsagePrediction,
 } from "@clankermux/types";
 import { isUsablePrediction } from "@clankermux/types";
@@ -22,6 +24,7 @@ import {
 import {
 	usageObservedAtMs,
 	weeklyLifetimeConfidence,
+	windowBurnAnchor,
 } from "../../lib/lifetime-confidence";
 import {
 	classifyUsageCard,
@@ -47,6 +50,9 @@ interface RateLimitProgressProps {
 	showWeekly?: boolean; // Whether to show weekly usage as well
 	inlineProjection?: boolean; // Render projection message as visible text instead of a click popover
 	prediction?: AccountUsagePrediction | null; // Server-computed regression prediction (Anthropic 5h/7d only)
+	// Server-detected mid-window downward revisions (gift reset / applied
+	// credit) per account-wide window; re-anchors the lifetime projection.
+	burnAnchors?: AccountBurnAnchors | null;
 	compact?: boolean; // Tighter card padding and a single-row window strip on wide viewports
 	// Still-future reset endpoints per window category across all accounts on the
 	// page, from `computeWindowResetExtremes`. Matching countdowns are emphasized
@@ -209,6 +215,7 @@ function computeProjectedMessage(
 	prediction: UsagePrediction | undefined,
 	windowDurationMs: number | null,
 	observedAtMs: number | null,
+	anchor: UsageBurnAnchor | null,
 ): ProjectedUsage | null {
 	if (!resetTime || !window || percentage === null) return null;
 	const resetMs = new Date(resetTime).getTime();
@@ -222,6 +229,7 @@ function computeProjectedMessage(
 			prediction,
 			lifetimeConfidence: weeklyLifetimeConfidence(window),
 			observedAtMs,
+			anchor,
 		},
 		now,
 	);
@@ -430,6 +438,7 @@ export function RateLimitProgress({
 	showWeekly = false,
 	inlineProjection = false,
 	prediction = null,
+	burnAnchors = null,
 	compact = false,
 	earliestResets,
 	latestResets,
@@ -687,6 +696,7 @@ export function RateLimitProgress({
 								windowPrediction,
 								windowDurationMs,
 								observedAtMs,
+								windowBurnAnchor(burnAnchors, usage.window),
 							);
 				// The one tone every surface reads: the bar's fill, the click popover
 				// and the inline line all derive from this, so none of them can

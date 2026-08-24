@@ -23,7 +23,10 @@ import type { Account } from "@clankermux/types";
 import type { ProxyContext } from "../handlers";
 import {
 	getActiveOverloadHoldCount,
+	getOverloadHoldBudgetMs,
 	OVERLOAD_HOLD_MAX_CONCURRENT_PER_BUCKET,
+	OVERLOAD_HOLD_MAX_MS,
+	OVERLOAD_HOLD_MAX_MS_NO_REARM,
 	resetOverloadHoldSlots,
 	setOverloadHoldBudgetOverrideForTests,
 	tryAcquireOverloadHoldSlot,
@@ -287,6 +290,48 @@ describe("transparent overload hold", () => {
 		expect(inspectProviderOverload("anthropic", MODEL).state).toBe("closed");
 	}, 10_000);
 
+	it("holds a cooldown at the breaker's own 300s cap instead of fast-failing it", async () => {
+		// The budget (330s) now EXCEEDS MAX_PROVIDER_OVERLOAD_COOLDOWN_MS (300s),
+		// so no fresh trip can be "beyond budget" any more — every overload is
+		// waited out rather than bounced. Pin that inversion: it is the whole
+		// point of the budget change, and a future budget cut would silently
+		// undo it.
+		let fetchCalls = 0;
+		globalThis.fetch = upstreamOnlyFetch(async () => {
+			fetchCalls++;
+			return ok200(MODEL);
+		}) as never;
+
+		// Ask for far more than the cap; the breaker clamps it to 300s.
+		const until = applyProviderOverloadCooldown(
+			"anthropic",
+			Date.now() + 60 * 60_000,
+			MODEL,
+		);
+		expect(until - Date.now()).toBeLessThanOrEqual(5 * 60_000);
+		expect(until - Date.now()).toBeGreaterThan(4 * 60_000);
+		// That clamped deadline is inside the production budget → the request
+		// must ENTER the hold, not take the immediate 529 terminal.
+		expect(until - Date.now()).toBeLessThan(getOverloadHoldBudgetMs(true));
+
+		const ctx = makeContext([makeAccount()]);
+		const controller = new AbortController();
+		const p = callHandleProxy(
+			modelRequest(MODEL, controller.signal),
+			new URL("https://proxy.local/v1/messages"),
+			ctx,
+		);
+		// Give it time to enter the hold, then hang up rather than wait 5 minutes.
+		await sleep(300);
+		expect(
+			getActiveOverloadHoldCount(getOverloadHoldSlotKey("anthropic", MODEL)),
+		).toBe(1);
+		controller.abort();
+		const res = await p;
+		expect(res.status).toBe(499);
+		expect(fetchCalls).toBe(0);
+	}, 10_000);
+
 	it("returns an immediate 529 when the cooldown is beyond the hold budget", async () => {
 		let fetchCalls = 0;
 		globalThis.fetch = upstreamOnlyFetch(async () => {
@@ -294,7 +339,12 @@ describe("transparent overload hold", () => {
 			return ok200(MODEL);
 		}) as never;
 
-		// 200s out — beyond the 120s budget → no hold, current behavior.
+		// The breaker clamps every trip to MAX_PROVIDER_OVERLOAD_COOLDOWN_MS
+		// (300s), which is BELOW the real hold budget — so with production
+		// values a fresh cooldown can never be beyond budget. Shrink the budget
+		// instead of picking a cooldown that outruns it, so this stays a test of
+		// the beyond-budget branch rather than of a particular constant.
+		setOverloadHoldBudgetOverrideForTests(30_000);
 		applyProviderOverloadCooldown("anthropic", Date.now() + 200_000, MODEL);
 		const ctx = makeContext([makeAccount()]);
 
@@ -386,7 +436,7 @@ describe("transparent overload hold", () => {
 		const res2 = await p2;
 		expect(res2.status).toBe(200);
 		expect(fetchCalls).toBe(2);
-		// Promptly — one probe-poll interval, nowhere near the 120s budget.
+		// Promptly — one probe-poll interval, nowhere near the hold budget.
 		expect(Date.now() - holderServedBy).toBeLessThan(8_000);
 	}, 15_000);
 
@@ -397,6 +447,9 @@ describe("transparent overload hold", () => {
 			return ok200(MODEL);
 		}) as never;
 
+		// Shrink the budget for the same reason as the beyond-budget test: a real
+		// trip is clamped to 300s, which now FITS inside the production budget.
+		setOverloadHoldBudgetOverrideForTests(30_000);
 		await tripToHalfOpen();
 		// An external holder owns the probe, so the request's attempts are
 		// suppressed and it holds.
@@ -646,4 +699,29 @@ describe("transparent overload hold", () => {
 		expect(res.status).toBe(200);
 		expect(fetchCalls).toBe(1);
 	}, 15_000);
+});
+
+describe("overload hold budget selection", () => {
+	afterEach(() => {
+		setOverloadHoldBudgetOverrideForTests(null);
+	});
+
+	it("shortens the budget when the connection's idle timer cannot be re-armed", () => {
+		// The no-re-arm budget must stay under Bun's 180s base idleTimeout: on
+		// that path the socket is closed by US, so a longer budget would drop the
+		// client mid-hold rather than serve it.
+		expect(OVERLOAD_HOLD_MAX_MS_NO_REARM).toBeLessThan(180_000);
+		expect(OVERLOAD_HOLD_MAX_MS).toBeGreaterThan(OVERLOAD_HOLD_MAX_MS_NO_REARM);
+
+		expect(getOverloadHoldBudgetMs(true)).toBe(OVERLOAD_HOLD_MAX_MS);
+		expect(getOverloadHoldBudgetMs(false)).toBe(OVERLOAD_HOLD_MAX_MS_NO_REARM);
+		// Default is the re-armable path — the overwhelming majority of traffic.
+		expect(getOverloadHoldBudgetMs()).toBe(OVERLOAD_HOLD_MAX_MS);
+	});
+
+	it("lets a test override win over both paths", () => {
+		setOverloadHoldBudgetOverrideForTests(1_234);
+		expect(getOverloadHoldBudgetMs(true)).toBe(1_234);
+		expect(getOverloadHoldBudgetMs(false)).toBe(1_234);
+	});
 });

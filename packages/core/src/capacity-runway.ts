@@ -1,9 +1,14 @@
 import type {
+	RunwayAssumedCredits,
 	RunwayCause,
 	RunwayOutcome,
+	UsageBurnAnchor,
 	UsagePrediction,
 } from "@clankermux/types";
-import { isUsablePrediction } from "@clankermux/types";
+import {
+	isUsablePrediction,
+	RESET_JITTER_TOLERANCE_MS,
+} from "@clankermux/types";
 import { TIME_CONSTANTS } from "./constants";
 
 /**
@@ -12,7 +17,7 @@ import { TIME_CONSTANTS } from "./constants";
  * types package depend on core. Re-exported here so this module stays the one
  * import site for everything runway-shaped on the server and the dashboard.
  */
-export type { RunwayCause, RunwayOutcome };
+export type { RunwayAssumedCredits, RunwayCause, RunwayOutcome };
 
 /**
  * Quota-exhaustion estimation, and the pool-level "runway" built on top of it.
@@ -93,7 +98,9 @@ export interface WindowExhaustionInput {
 	 * source cannot honestly say (a payload-reconstructed reading), which is a
 	 * real answer and never `Date.now()` at render time.
 	 *
-	 * Read ONLY by the `lifetimeConfidence: "full"` path, and required there.
+	 * Required by the `lifetimeConfidence: "full"` path, and by ANY anchored
+	 * estimate (see `anchor` below) — an anchor only applies to a reading that
+	 * can be placed at/after it.
 	 * The lifetime ETA is `anchor + ((100 - pct) / pct) · (anchor - windowStart)`,
 	 * so anchoring it at `now` moves it later by MORE than a second per second of
 	 * wall clock on evidence that has not changed. Amber-capped that is invisible;
@@ -103,6 +110,20 @@ export interface WindowExhaustionInput {
 	 * next refetch.
 	 */
 	observedAtMs?: number | null;
+	/**
+	 * The last mid-window downward revision observed for this window — a
+	 * provider "gift" reset or an applied reset credit. When present AND valid
+	 * for this window instance (reset identity within jitter tolerance, instant
+	 * inside the window span, and a known `observedAtMs` at/after the anchor —
+	 * a reading that predates the revision or cannot be placed must not be mixed
+	 * with it), BOTH lifetime paths measure elapsed time and
+	 * consumed percentage from it instead of from the structural window start:
+	 * after such an event the structural start overstates the elapsed time and
+	 * the slope collapses (an 11x-optimistic weekly ETA has been observed).
+	 * The regression path ignores it — `isFitBoundary` already restarts the fit
+	 * on a drop.
+	 */
+	anchor?: UsageBurnAnchor | null;
 }
 
 export interface WindowExhaustion {
@@ -118,7 +139,22 @@ export interface WindowExhaustion {
 	 * red" rule survives the consolidation.
 	 */
 	lowConfidence: boolean;
+	/**
+	 * True when a valid {@link WindowExhaustionInput.anchor} re-anchored a
+	 * lifetime estimate. Absent/false otherwise. Informational — callers keep
+	 * switching tone on `lowConfidence` and copy on `source`.
+	 */
+	anchored?: boolean;
 }
+
+/**
+ * Post-anchor evidence span below which a re-anchored FULL-confidence estimate
+ * stays amber-capped. Minutes after a gift reset the anchored slope is built on
+ * a couple of samples; the arithmetic is corrected immediately, but a red
+ * rendered on that little evidence would be noise. One hour ≈ 30 sampler ticks.
+ * Inline named constant — NO env var / feature gate.
+ */
+export const ANCHOR_FULL_CONFIDENCE_MIN_SPAN_MS = 60 * 60_000;
 
 const NO_EVIDENCE: WindowExhaustion = {
 	source: "none",
@@ -162,6 +198,7 @@ export function estimateWindowExhaustion(
 		prediction,
 		lifetimeConfidence,
 		observedAtMs,
+		anchor,
 	} = input;
 
 	if (!Number.isFinite(pct)) return NO_EVIDENCE;
@@ -201,6 +238,26 @@ export function estimateWindowExhaustion(
 		};
 	}
 
+	// A valid burn anchor replaces the structural origin on BOTH lifetime paths
+	// below: elapsed time and consumed percentage are measured from the last
+	// mid-window revision instead of from `windowStartMs` / 0%. Resolved once,
+	// here, so the two paths cannot disagree about whether it applies.
+	//
+	// Beyond the window-identity guards, the anchor applies only to a reading
+	// KNOWN to have been observed at/after it: a stale reading from BEFORE the
+	// revision paired with the post-revision anchor would compute a slope from
+	// evidence on opposite sides of the event, and a reading with no observation
+	// time cannot be placed relative to the event at all — both degrade to the
+	// structural estimate instead.
+	const windowAnchor = usableAnchor(anchor, resetsAtMs, windowStartMs);
+	const activeAnchor =
+		windowAnchor !== null &&
+		observedAtMs != null &&
+		Number.isFinite(observedAtMs) &&
+		observedAtMs >= windowAnchor.anchorMs
+			? windowAnchor
+			: null;
+
 	// Full confidence is earned by the pair (policy AND observation time), never
 	// by the policy alone: without an instant to anchor to, the only estimate
 	// available is the now-anchored one, and that one may not reach red. So a
@@ -213,12 +270,63 @@ export function estimateWindowExhaustion(
 		Number.isFinite(observedAtMs) &&
 		observedAtMs > windowStartMs
 	) {
+		if (activeAnchor !== null) {
+			const anchoredElapsed = observedAtMs - activeAnchor.anchorMs;
+			const burned = pct - activeAnchor.anchorPct;
+			if (burned <= 0 || anchoredElapsed <= 0) {
+				// A refund after the anchor, or the reading AT the anchor itself
+				// (zero elapsed): hold flat, no ETA — the regression's
+				// non-positive-slope precedent. Never fall back to the structural
+				// start, which is exactly the overestimate the anchor removes.
+				return {
+					source: "lifetime-primary",
+					slopePctPerHour: 0,
+					exhaustsAtMs: null,
+					lowConfidence: anchoredElapsed < ANCHOR_FULL_CONFIDENCE_MIN_SPAN_MS,
+					anchored: true,
+				};
+			}
+			return {
+				source: "lifetime-primary",
+				slopePctPerHour: (burned / anchoredElapsed) * HOUR_MS,
+				exhaustsAtMs: observedAtMs + ((100 - pct) / burned) * anchoredElapsed,
+				// The arithmetic is corrected immediately; the TONE waits for an
+				// hour of post-anchor evidence before it may reach red — minutes
+				// after a gift the slope stands on a couple of samples.
+				lowConfidence: anchoredElapsed < ANCHOR_FULL_CONFIDENCE_MIN_SPAN_MS,
+				anchored: true,
+			};
+		}
 		const observedElapsed = observedAtMs - windowStartMs;
 		return {
 			source: "lifetime-primary",
 			slopePctPerHour: (pct / observedElapsed) * HOUR_MS,
 			exhaustsAtMs: observedAtMs + ((100 - pct) / pct) * observedElapsed,
 			lowConfidence: false,
+		};
+	}
+
+	if (activeAnchor !== null) {
+		const anchoredElapsed = now - activeAnchor.anchorMs;
+		const burned = pct - activeAnchor.anchorPct;
+		if (burned <= 0 || anchoredElapsed <= 0) {
+			return {
+				source: "lifetime-average",
+				slopePctPerHour: 0,
+				exhaustsAtMs: null,
+				lowConfidence: true,
+				anchored: true,
+			};
+		}
+		return {
+			source: "lifetime-average",
+			slopePctPerHour: (burned / anchoredElapsed) * HOUR_MS,
+			// Now-anchored, like every other low-path estimate: the low path is
+			// amber-capped, so the per-tick drift the observation anchor exists to
+			// stop cannot cross a red threshold here.
+			exhaustsAtMs: now + ((100 - pct) / burned) * anchoredElapsed,
+			lowConfidence: true,
+			anchored: true,
 		};
 	}
 
@@ -231,6 +339,36 @@ export function estimateWindowExhaustion(
 		exhaustsAtMs: now + ((100 - pct) / pct) * elapsed,
 		lowConfidence: true,
 	};
+}
+
+/**
+ * Whether `anchor` may re-anchor an estimate for the window instance described
+ * by `resetsAtMs`/`windowStartMs`. Two independent guards:
+ *
+ *  - IDENTITY: the anchor's `windowResetMs` must match the projected reading's
+ *    reset within the shared jitter tolerance. Real polls report the same reset
+ *    instant with ~±1s wobble; a larger difference means the anchor belongs to
+ *    another window instance and would poison this one.
+ *  - SPAN: the anchor instant must lie inside `(windowStartMs, resetsAtMs)`.
+ *    An anchor outside the span cannot describe accumulation within it — and
+ *    an anchor at/before the structural start would silently widen the elapsed
+ *    time it exists to narrow.
+ */
+function usableAnchor(
+	anchor: UsageBurnAnchor | null | undefined,
+	resetsAtMs: number,
+	windowStartMs: number,
+): UsageBurnAnchor | null {
+	if (anchor == null) return null;
+	if (!Number.isFinite(anchor.anchorMs)) return null;
+	if (!Number.isFinite(anchor.anchorPct)) return null;
+	if (!Number.isFinite(anchor.windowResetMs)) return null;
+	if (Math.abs(anchor.windowResetMs - resetsAtMs) > RESET_JITTER_TOLERANCE_MS) {
+		return null;
+	}
+	if (anchor.anchorMs <= windowStartMs) return null;
+	if (anchor.anchorMs >= resetsAtMs) return null;
+	return anchor;
 }
 
 /**
@@ -263,10 +401,40 @@ export interface RunwayWindowInput {
 	lifetimeConfidence?: LifetimeConfidence;
 	/**
 	 * When this window's reading was observed. Threaded verbatim to
-	 * {@link WindowExhaustionInput.observedAtMs}, where it is required by (and
-	 * read only by) the `"full"` confidence path.
+	 * {@link WindowExhaustionInput.observedAtMs}, where the `"full"` confidence
+	 * path requires it and any anchored estimate uses it to place the reading
+	 * relative to the anchor; the credit model's re-exhaustion pace reads it
+	 * for the same epoch check.
 	 */
 	observedAtMs?: number | null;
+	/**
+	 * Threaded verbatim to {@link WindowExhaustionInput.anchor}; validated
+	 * there, not here.
+	 */
+	anchor?: UsageBurnAnchor | null;
+}
+
+/**
+ * The banked OpenAI usage-reset credits the runway scan may ASSUME get applied
+ * to this account's weekly window, plus the auto-applier opt-ins that govern
+ * WHEN the real applier would redeem one:
+ *
+ *  - `onWeeklyLimitEnabled` — redeems when the weekly window reaches 100%. In
+ *    the model, an exhaustion instant consumes a credit and revives the window.
+ *  - `onExpiryEnabled` — redeems a credit shortly before it expires. In the
+ *    model, a credit whose expiry falls inside a dead span revives the window
+ *    AT the expiry instant (a credit expiring while the window is alive just
+ *    leaves the bank; the ~10-minute application lead is ignored as noise).
+ *
+ * The weekly window ONLY, by design: an applied credit does also reset other
+ * windows upstream, but ignoring the 5h side is conservative (never lengthens
+ * the runway) and the 5h window self-heals within hours anyway.
+ */
+export interface RunwayResetCreditBank {
+	onWeeklyLimitEnabled: boolean;
+	onExpiryEnabled: boolean;
+	/** Available credits; `expiresAtMs` null = no known expiry. */
+	credits: Array<{ expiresAtMs: number | null }>;
 }
 
 export interface RunwayAccountInput {
@@ -274,6 +442,12 @@ export interface RunwayAccountInput {
 	/** Provider exposes no account-wide quota window at all (ollama, PayG). */
 	unmetered: boolean;
 	windows: RunwayWindowInput[];
+	/**
+	 * Present only for accounts with a fresh credit reading AND at least one
+	 * auto-apply opt-in. Absent/null → the scan models no credits (identical to
+	 * today's behaviour).
+	 */
+	codexResetCredits?: RunwayResetCreditBank | null;
 }
 
 /** A half-open [startMs, endMs) span during which something has no quota. */
@@ -361,6 +535,159 @@ function windowDeadIntervals(
 	return intervals;
 }
 
+/**
+ * How long a freshly revived weekly window takes to burn back to 100%, or null
+ * when no honest pace exists.
+ *
+ * Preference order mirrors the evidence quality: the estimator's own slope
+ * (regression or lifetime); else, for an `already-exhausted` reading (null
+ * slope), the time the CURRENT fill observably took — from the anchor when one
+ * is valid (scaled by `100/(100 − anchorPct)`, since only that share was burned
+ * post-anchor), else from the structural start. Null when even that is unknown;
+ * the caller then lets one credit suppress a dead span once without modeling a
+ * re-exhaustion, which errs optimistic for at most that one span and is
+ * disclosed via `assumedResetCredits`.
+ */
+function weeklyTimeToFull(
+	window: RunwayWindowInput,
+	estimate: WindowExhaustion,
+	now: number,
+): number | null {
+	if (estimate.slopePctPerHour != null && estimate.slopePctPerHour > 0) {
+		return (100 / estimate.slopePctPerHour) * HOUR_MS;
+	}
+	if (estimate.source !== "already-exhausted") return null;
+	// The fill was complete BY the reading's observation, so the elapsed time is
+	// measured to that instant when it is known — `now` would count wall-clock
+	// that passed after the window was already full and overstate the pace.
+	const observedAtMs =
+		window.observedAtMs != null && Number.isFinite(window.observedAtMs)
+			? window.observedAtMs
+			: null;
+	const filledByMs = observedAtMs ?? now;
+	const anchor =
+		window.resetsAtMs != null && window.windowStartMs != null
+			? usableAnchor(window.anchor, window.resetsAtMs, window.windowStartMs)
+			: null;
+	// Same epoch gate as the estimator: the anchor applies only to a reading
+	// KNOWN to be at/after it — a pre-anchor or unplaceable 100% reading must
+	// not be scaled by the post-revision anchor.
+	if (
+		anchor !== null &&
+		anchor.anchorPct < 100 &&
+		observedAtMs !== null &&
+		observedAtMs > anchor.anchorMs
+	) {
+		return ((observedAtMs - anchor.anchorMs) * 100) / (100 - anchor.anchorPct);
+	}
+	if (window.windowStartMs != null && filledByMs > window.windowStartMs) {
+		return filledByMs - window.windowStartMs;
+	}
+	return null;
+}
+
+/**
+ * Apply an account's modeled reset-credit bank to its weekly dead intervals.
+ *
+ * Chronological single pass: intervals are processed in ascending start order
+ * and credits are consumed earliest-expiring first (unknown expiry last), so an
+ * expiring credit is never wasted on an exhaustion a later credit could cover.
+ * At each dead-span start, the weekly-limit trigger (when enabled) consumes an
+ * applicable credit and revives the window; the window re-exhausts
+ * `timeToFullMs` later, leaving a residual dead span that is processed the same
+ * way. When only the expiry trigger is enabled, a credit whose expiry falls
+ * INSIDE a dead span truncates it there instead.
+ *
+ * Termination: every loop iteration either consumes a credit or emits a span
+ * and moves on, so the pass is bounded by `credits.length + intervals.length`.
+ *
+ * Returns the surviving dead intervals plus how many credits the model
+ * consumed — the count the outcome discloses, because the extended runway is
+ * an ASSUMPTION about future redemptions, not a measurement.
+ */
+function applyResetCreditsToWeeklyIntervals(
+	intervals: WindowDeadInterval[],
+	timeToFullMs: number | null,
+	bank: RunwayResetCreditBank,
+): { intervals: WindowDeadInterval[]; consumed: number } {
+	if (
+		bank.credits.length === 0 ||
+		(!bank.onWeeklyLimitEnabled && !bank.onExpiryEnabled)
+	) {
+		return { intervals, consumed: 0 };
+	}
+
+	// Earliest-expiring first; unknown expiry last.
+	const credits = [...bank.credits].sort((a, b) => {
+		if (a.expiresAtMs == null && b.expiresAtMs == null) return 0;
+		if (a.expiresAtMs == null) return 1;
+		if (b.expiresAtMs == null) return -1;
+		return a.expiresAtMs - b.expiresAtMs;
+	});
+	const sorted = [...intervals].sort((a, b) => a.startMs - b.startMs);
+
+	// First credit applicable at `t` (not yet expired), removed on consumption.
+	const takeCreditAt = (t: number): boolean => {
+		const idx = credits.findIndex(
+			(c) => c.expiresAtMs == null || c.expiresAtMs > t,
+		);
+		if (idx === -1) return false;
+		credits.splice(idx, 1);
+		return true;
+	};
+	// Earliest credit whose expiry lies strictly inside (t0, t1).
+	const expiryInside = (t0: number, t1: number): number | null => {
+		for (const c of credits) {
+			if (c.expiresAtMs != null && c.expiresAtMs > t0 && c.expiresAtMs < t1) {
+				return c.expiresAtMs;
+			}
+		}
+		return null;
+	};
+
+	const out: WindowDeadInterval[] = [];
+	let consumed = 0;
+	const modeledReExhaustion = (
+		revivedAtMs: number,
+		endMs: number,
+	): number | null =>
+		timeToFullMs != null &&
+		timeToFullMs > 0 &&
+		revivedAtMs + timeToFullMs < endMs
+			? revivedAtMs + timeToFullMs
+			: null;
+
+	for (const interval of sorted) {
+		let startMs = interval.startMs;
+		const endMs = interval.endMs;
+		for (;;) {
+			if (bank.onWeeklyLimitEnabled && takeCreditAt(startMs)) {
+				consumed++;
+				const reExhaustsAtMs = modeledReExhaustion(startMs, endMs);
+				if (reExhaustsAtMs === null) break; // span fully covered
+				startMs = reExhaustsAtMs;
+				continue;
+			}
+			if (bank.onExpiryEnabled) {
+				const expiryMs = expiryInside(startMs, endMs);
+				if (expiryMs !== null && takeCreditAt(startMs)) {
+					// Dead until the near-expiry auto-apply fires, revived there.
+					consumed++;
+					out.push({ ...interval, startMs, endMs: expiryMs });
+					const reExhaustsAtMs = modeledReExhaustion(expiryMs, endMs);
+					if (reExhaustsAtMs === null) break;
+					startMs = reExhaustsAtMs;
+					continue;
+				}
+			}
+			out.push({ ...interval, startMs, endMs });
+			break;
+		}
+	}
+
+	return { intervals: out, consumed };
+}
+
 /** Merge overlapping or touching intervals into a minimal ascending set. */
 function unionIntervals(intervals: DeadInterval[]): DeadInterval[] {
 	if (intervals.length === 0) return [];
@@ -405,6 +732,7 @@ export function computeCapacityRunway(
 	const horizonEndMs = now + horizonMs;
 	const pooled: PooledAccount[] = [];
 	const unprojectableAccountIds: string[] = [];
+	const assumedCredits: RunwayAssumedCredits[] = [];
 
 	for (const account of accounts) {
 		if (account.unmetered) {
@@ -419,6 +747,12 @@ export function computeCapacityRunway(
 		}
 
 		const windowIntervals: WindowDeadInterval[] = [];
+		// Weekly intervals are held aside when the account has a modeled credit
+		// bank: applying the bank must see ALL of that window's dead spans (the
+		// current one and the projected later cycles) in chronological order.
+		const weeklyIntervals: WindowDeadInterval[] = [];
+		let weeklyTimeToFullMs: number | null = null;
+		const bank = account.codexResetCredits ?? null;
 		let readable = false;
 		for (const window of account.windows) {
 			const estimate = estimateWindowExhaustion(
@@ -429,6 +763,7 @@ export function computeCapacityRunway(
 					prediction: window.prediction,
 					lifetimeConfidence: window.lifetimeConfidence,
 					observedAtMs: window.observedAtMs,
+					anchor: window.anchor,
 				},
 				now,
 			);
@@ -437,14 +772,40 @@ export function computeCapacityRunway(
 			// window that emits NO dead interval is positively known to stay
 			// available, which is the opposite of unknown.
 			readable = true;
-			windowIntervals.push(
-				...windowDeadIntervals(window, estimate, now, horizonEndMs),
+			const intervals = windowDeadIntervals(
+				window,
+				estimate,
+				now,
+				horizonEndMs,
 			);
+			if (bank !== null && window.windowKind === "seven_day") {
+				weeklyIntervals.push(...intervals);
+				weeklyTimeToFullMs = weeklyTimeToFull(window, estimate, now);
+			} else {
+				windowIntervals.push(...intervals);
+			}
 		}
 
 		if (!readable) {
 			unprojectableAccountIds.push(account.accountId);
 			continue;
+		}
+
+		if (bank !== null && weeklyIntervals.length > 0) {
+			const applied = applyResetCreditsToWeeklyIntervals(
+				weeklyIntervals,
+				weeklyTimeToFullMs,
+				bank,
+			);
+			windowIntervals.push(...applied.intervals);
+			if (applied.consumed > 0) {
+				assumedCredits.push({
+					accountId: account.accountId,
+					count: applied.consumed,
+				});
+			}
+		} else {
+			windowIntervals.push(...weeklyIntervals);
 		}
 
 		pooled.push({
@@ -487,15 +848,34 @@ export function computeCapacityRunway(
 			}
 		}
 
-		if (t === now) return { kind: "out-now", causes, unprojectableAccountIds };
+		if (t === now) {
+			return {
+				kind: "out-now",
+				causes,
+				unprojectableAccountIds,
+				...(assumedCredits.length > 0
+					? { assumedResetCredits: assumedCredits }
+					: {}),
+			};
+		}
 		return {
 			kind: "runway",
 			exhaustsAtMs: t,
 			durationMs: t - now,
 			causes,
 			unprojectableAccountIds,
+			...(assumedCredits.length > 0
+				? { assumedResetCredits: assumedCredits }
+				: {}),
 		};
 	}
 
-	return { kind: "beyond-horizon", horizonMs, unprojectableAccountIds };
+	return {
+		kind: "beyond-horizon",
+		horizonMs,
+		unprojectableAccountIds,
+		...(assumedCredits.length > 0
+			? { assumedResetCredits: assumedCredits }
+			: {}),
+	};
 }

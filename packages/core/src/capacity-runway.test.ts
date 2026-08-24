@@ -5,6 +5,7 @@ import {
 	estimateWindowExhaustion,
 	RUNWAY_HORIZON_MS,
 	type RunwayAccountInput,
+	type RunwayResetCreditBank,
 	type RunwayWindowInput,
 } from "./capacity-runway";
 
@@ -424,6 +425,272 @@ describe("estimateWindowExhaustion", () => {
 	});
 });
 
+describe("estimateWindowExhaustion with a burn anchor", () => {
+	// The motivating case: a provider "gift" reset five days into a weekly
+	// window (utilization back to ~0, resets_at unchanged), then 40% burned in
+	// the next 12 hours. The structural lifetime average divides 40% by 5.5 days
+	// of elapsed window (0.30 %/h, ~8 days of headroom); the true post-gift rate
+	// is 40%/12h = 3.33 %/h, which exhausts in 18 hours — well before the reset.
+	const WINDOW_START = NOW - 5.5 * DAY;
+	const RESET = NOW + 1.5 * DAY;
+	const GIFT_AT = NOW - 12 * HOUR;
+	const giftAnchor = { anchorMs: GIFT_AT, anchorPct: 0, windowResetMs: RESET };
+	const fullInput = {
+		utilizationPct: 40,
+		resetsAtMs: RESET,
+		windowStartMs: WINDOW_START,
+		prediction: null,
+		lifetimeConfidence: "full" as const,
+		observedAtMs: NOW,
+	};
+
+	it("re-anchors the full-confidence slope and ETA at the revision", () => {
+		const result = estimateWindowExhaustion(
+			{ ...fullInput, anchor: giftAnchor },
+			NOW,
+		);
+
+		expect(result.source).toBe("lifetime-primary");
+		expect(result.anchored).toBe(true);
+		// (40 - 0) over the 12h since the gift, not over 5.5 days of window.
+		expect(result.slopePctPerHour).toBeCloseTo(40 / 12, 9);
+		// Observation-anchored: obs + ((100 - 40) / (40 - 0)) * 12h = obs + 18h.
+		expect(result.exhaustsAtMs).toBe(NOW + 18 * HOUR);
+	});
+
+	it("without the anchor the same reading projects past the reset", () => {
+		const result = estimateWindowExhaustion(fullInput, NOW);
+		expect(result.anchored ?? false).toBe(false);
+		// The un-anchored estimate is the bug being fixed: it must clear the
+		// reset so the pair of tests PINS the 11x divergence rather than
+		// asserting two arbitrary numbers.
+		expect(result.exhaustsAtMs).toBeGreaterThan(RESET);
+	});
+
+	it("keeps the anchored estimate observation-stable across ticks", () => {
+		const first = estimateWindowExhaustion(
+			{ ...fullInput, anchor: giftAnchor },
+			NOW,
+		);
+		const later = estimateWindowExhaustion(
+			{ ...fullInput, anchor: giftAnchor },
+			NOW + 25 * 60_000,
+		);
+		expect(later).toEqual(first);
+	});
+
+	it("stays amber-capped until an hour of post-anchor evidence exists", () => {
+		// Observation 30 minutes after the gift: the arithmetic is corrected
+		// immediately, but the tone must not reach red on minutes of evidence.
+		const soonAfter = estimateWindowExhaustion(
+			{
+				...fullInput,
+				utilizationPct: 10,
+				observedAtMs: GIFT_AT + 30 * 60_000,
+				anchor: giftAnchor,
+			},
+			NOW,
+		);
+		expect(soonAfter.anchored).toBe(true);
+		expect(soonAfter.lowConfidence).toBe(true);
+		expect(soonAfter.slopePctPerHour).toBeCloseTo(10 / 0.5, 9);
+
+		const afterAnHour = estimateWindowExhaustion(
+			{
+				...fullInput,
+				utilizationPct: 10,
+				observedAtMs: GIFT_AT + 60 * 60_000,
+				anchor: giftAnchor,
+			},
+			NOW,
+		);
+		expect(afterAnHour.lowConfidence).toBe(false);
+	});
+
+	it("re-anchors the low-confidence path too, still now-anchored", () => {
+		const result = estimateWindowExhaustion(
+			{
+				utilizationPct: 40,
+				resetsAtMs: RESET,
+				windowStartMs: WINDOW_START,
+				prediction: null,
+				observedAtMs: NOW,
+				anchor: giftAnchor,
+			},
+			NOW,
+		);
+
+		expect(result.source).toBe("lifetime-average");
+		expect(result.anchored).toBe(true);
+		expect(result.lowConfidence).toBe(true);
+		expect(result.slopePctPerHour).toBeCloseTo(40 / 12, 9);
+		// Now-anchored, like every other low-path estimate.
+		expect(result.exhaustsAtMs).toBe(NOW + 18 * HOUR);
+	});
+
+	it("handles a gift that reset to a non-zero percentage", () => {
+		const result = estimateWindowExhaustion(
+			{
+				...fullInput,
+				anchor: { ...giftAnchor, anchorPct: 15 },
+			},
+			NOW,
+		);
+		// Burned 25 points in 12h since the revision.
+		expect(result.slopePctPerHour).toBeCloseTo(25 / 12, 9);
+		expect(result.exhaustsAtMs).toBe(NOW + (60 / 25) * 12 * HOUR);
+	});
+
+	it("ignores an anchor whose window identity does not match", () => {
+		const result = estimateWindowExhaustion(
+			{
+				...fullInput,
+				anchor: { ...giftAnchor, windowResetMs: RESET + 2 * HOUR },
+			},
+			NOW,
+		);
+		expect(result.anchored ?? false).toBe(false);
+		expect(result).toEqual(estimateWindowExhaustion(fullInput, NOW));
+	});
+
+	it("tolerates reset jitter on the anchor's window identity", () => {
+		const result = estimateWindowExhaustion(
+			{
+				...fullInput,
+				anchor: { ...giftAnchor, windowResetMs: RESET + 30_000 },
+			},
+			NOW,
+		);
+		expect(result.anchored).toBe(true);
+	});
+
+	it("ignores an anchor lying outside the current window span", () => {
+		const before = estimateWindowExhaustion(
+			{
+				...fullInput,
+				anchor: { ...giftAnchor, anchorMs: WINDOW_START - HOUR },
+			},
+			NOW,
+		);
+		expect(before.anchored ?? false).toBe(false);
+
+		const after = estimateWindowExhaustion(
+			{
+				...fullInput,
+				anchor: { ...giftAnchor, anchorMs: RESET + HOUR },
+			},
+			NOW,
+		);
+		expect(after.anchored ?? false).toBe(false);
+	});
+
+	it("holds flat when utilization sits at or below the anchor percentage", () => {
+		// A refund landing after the anchor can put the reading below anchorPct.
+		// The precedent is the regression's non-positive slope: hold, no ETA,
+		// and never fall back to the structural start (which would resurrect
+		// the very overestimate the anchor exists to remove).
+		const result = estimateWindowExhaustion(
+			{
+				...fullInput,
+				utilizationPct: 10,
+				anchor: { ...giftAnchor, anchorPct: 15 },
+			},
+			NOW,
+		);
+		expect(result.anchored).toBe(true);
+		expect(result.slopePctPerHour).toBe(0);
+		expect(result.exhaustsAtMs).toBeNull();
+	});
+
+	it("never outranks a usable regression", () => {
+		const reg = prediction({
+			resetsAtMs: RESET,
+			slopePerHour: 2,
+			etaExhaustMs: NOW + 5 * HOUR,
+		});
+		const result = estimateWindowExhaustion(
+			{ ...fullInput, prediction: reg, anchor: giftAnchor },
+			NOW,
+		);
+		expect(result.source).toBe("regression");
+		expect(result.exhaustsAtMs).toBe(NOW + 5 * HOUR);
+	});
+
+	it("treats the reading AT the anchor as anchored, not structural", () => {
+		// The first post-revision sample IS the anchor: observedAtMs equals
+		// anchorMs and the reading's pct equals anchorPct. Falling through to
+		// the structural estimate here would render a confident projection from
+		// PRE-revision burn — the exact number the anchor exists to retire.
+		const result = estimateWindowExhaustion(
+			{
+				...fullInput,
+				utilizationPct: 30,
+				observedAtMs: GIFT_AT,
+				anchor: { ...giftAnchor, anchorPct: 30 },
+			},
+			NOW,
+		);
+		expect(result.anchored).toBe(true);
+		expect(result.slopePctPerHour).toBe(0);
+		expect(result.exhaustsAtMs).toBeNull();
+		expect(result.lowConfidence).toBe(true);
+	});
+
+	it("ignores an anchor newer than the projected reading", () => {
+		// A stale reading from BEFORE the revision must not be mixed with the
+		// post-revision anchor — the pair spans opposite sides of the event.
+		const result = estimateWindowExhaustion(
+			{
+				...fullInput,
+				observedAtMs: GIFT_AT - 2 * HOUR,
+				anchor: giftAnchor,
+			},
+			NOW,
+		);
+		expect(result.anchored ?? false).toBe(false);
+	});
+
+	it("ignores an anchor when the reading's observation time is unknown", () => {
+		// Without an observation time the reading cannot be placed relative to
+		// the revision; the low path degrades to the structural estimate rather
+		// than guessing.
+		const withAnchor = estimateWindowExhaustion(
+			{
+				utilizationPct: 40,
+				resetsAtMs: RESET,
+				windowStartMs: WINDOW_START,
+				prediction: null,
+				anchor: giftAnchor,
+			},
+			NOW,
+		);
+		const without = estimateWindowExhaustion(
+			{
+				utilizationPct: 40,
+				resetsAtMs: RESET,
+				windowStartMs: WINDOW_START,
+				prediction: null,
+			},
+			NOW,
+		);
+		expect(withAnchor).toEqual(without);
+	});
+
+	it("does not disturb the terminal branches", () => {
+		const spent = estimateWindowExhaustion(
+			{ ...fullInput, utilizationPct: 100, anchor: giftAnchor },
+			NOW,
+		);
+		expect(spent.source).toBe("already-exhausted");
+
+		const idle = estimateWindowExhaustion(
+			{ ...fullInput, utilizationPct: 0, anchor: giftAnchor },
+			NOW,
+		);
+		expect(idle.source).toBe("no-usage");
+	});
+});
+
 function window(overrides: Partial<RunwayWindowInput> = {}): RunwayWindowInput {
 	return {
 		windowKind: "five_hour",
@@ -829,5 +1096,335 @@ describe("computeCapacityRunway", () => {
 		expect(result.kind).toBe("beyond-horizon");
 		if (result.kind !== "beyond-horizon") throw new Error("unreachable");
 		expect(result.unprojectableAccountIds).toEqual([]);
+	});
+});
+
+describe("computeCapacityRunway with a reset-credit bank", () => {
+	const DAY = 24 * HOUR;
+
+	function bank(
+		credits: Array<{ expiresAtMs: number | null }>,
+		flags: { weekly?: boolean; expiry?: boolean } = {},
+	): RunwayResetCreditBank {
+		return {
+			onWeeklyLimitEnabled: flags.weekly ?? true,
+			onExpiryEnabled: flags.expiry ?? false,
+			credits,
+		};
+	}
+
+	/** Weekly window already at 100%, reset 2d out, structural start known. */
+	function exhaustedWeekly(): RunwayWindowInput {
+		return window({
+			windowKind: "seven_day",
+			utilizationPct: 100,
+			resetsAtMs: NOW + 2 * DAY,
+			windowStartMs: NOW + 2 * DAY - 7 * DAY,
+		});
+	}
+
+	/**
+	 * Weekly window projected (via regression) to exhaust at NOW+12h, burning
+	 * 100% per 24h — so a revived window re-exhausts 24h after each revival.
+	 */
+	function burningWeekly(): RunwayWindowInput {
+		return window({
+			windowKind: "seven_day",
+			utilizationPct: 50,
+			resetsAtMs: NOW + 2 * DAY,
+			windowStartMs: NOW + 2 * DAY - 7 * DAY,
+			prediction: prediction({
+				resetsAtMs: NOW + 2 * DAY,
+				slopePerHour: 100 / 24,
+				etaExhaustMs: NOW + 12 * HOUR,
+			}),
+		});
+	}
+
+	it("revives an exhausted-now weekly window instead of reporting out-now", () => {
+		const result = computeCapacityRunway(
+			[
+				{
+					accountId: "codex-1",
+					unmetered: false,
+					windows: [exhaustedWeekly()],
+					codexResetCredits: bank([{ expiresAtMs: null }]),
+				},
+			],
+			NOW,
+		);
+
+		// Revived at NOW; it took 5d to burn the window, so the re-exhaustion
+		// lands past the 2d reset — nothing dead remains.
+		expect(result.kind).toBe("beyond-horizon");
+		if (result.kind !== "beyond-horizon") throw new Error("unreachable");
+		expect(result.assumedResetCredits).toEqual([
+			{ accountId: "codex-1", count: 1 },
+		]);
+	});
+
+	it("without the bank the same pool is out now (baseline)", () => {
+		const result = computeCapacityRunway(
+			[
+				{
+					accountId: "codex-1",
+					unmetered: false,
+					windows: [exhaustedWeekly()],
+				},
+			],
+			NOW,
+		);
+		expect(result.kind).toBe("out-now");
+		if (result.kind !== "out-now") throw new Error("unreachable");
+		expect(result.assumedResetCredits).toBeUndefined();
+	});
+
+	it("consumes one credit per exhaustion and re-exhausts at the modeled pace", () => {
+		const result = computeCapacityRunway(
+			[
+				{
+					accountId: "codex-1",
+					unmetered: false,
+					windows: [burningWeekly()],
+					codexResetCredits: bank([{ expiresAtMs: null }]),
+				},
+			],
+			NOW,
+		);
+
+		// Exhausts at +12h, credit revives it, 24h to burn again → dead from
+		// +36h to the +48h reset. The single credit is spent, so that tail (and
+		// the later cycles) stand.
+		expect(result.kind).toBe("runway");
+		if (result.kind !== "runway") throw new Error("unreachable");
+		expect(result.exhaustsAtMs).toBe(NOW + 36 * HOUR);
+		expect(result.assumedResetCredits).toEqual([
+			{ accountId: "codex-1", count: 1 },
+		]);
+	});
+
+	it("drains the bank chronologically and then the dead tail stands", () => {
+		const result = computeCapacityRunway(
+			[
+				{
+					accountId: "codex-1",
+					unmetered: false,
+					windows: [burningWeekly()],
+					codexResetCredits: bank([
+						{ expiresAtMs: null },
+						{ expiresAtMs: null },
+					]),
+				},
+			],
+			NOW,
+		);
+
+		// Two revivals: +12h and +36h; the second re-exhaustion lands at +60h,
+		// past the +48h reset, so the current window survives. The NEXT cycle
+		// (starting +48h, dead from +72h) finds an empty bank.
+		expect(result.kind).toBe("runway");
+		if (result.kind !== "runway") throw new Error("unreachable");
+		expect(result.exhaustsAtMs).toBe(NOW + 72 * HOUR);
+		expect(result.assumedResetCredits).toEqual([
+			{ accountId: "codex-1", count: 2 },
+		]);
+	});
+
+	it("never consumes a credit that expired before the exhaustion instant", () => {
+		const result = computeCapacityRunway(
+			[
+				{
+					accountId: "codex-1",
+					unmetered: false,
+					windows: [burningWeekly()],
+					codexResetCredits: bank([{ expiresAtMs: NOW + 6 * HOUR }]),
+				},
+			],
+			NOW,
+		);
+
+		// The only credit expires at +6h; exhaustion is at +12h. No assumption.
+		expect(result.kind).toBe("runway");
+		if (result.kind !== "runway") throw new Error("unreachable");
+		expect(result.exhaustsAtMs).toBe(NOW + 12 * HOUR);
+		expect(result.assumedResetCredits).toBeUndefined();
+	});
+
+	it("expiry trigger revives a dead window at the credit's expiry instant", () => {
+		const result = computeCapacityRunway(
+			[
+				{
+					accountId: "codex-1",
+					unmetered: false,
+					windows: [exhaustedWeekly()],
+					codexResetCredits: bank([{ expiresAtMs: NOW + 6 * HOUR }], {
+						weekly: false,
+						expiry: true,
+					}),
+				},
+			],
+			NOW,
+		);
+
+		// Weekly-limit auto-apply is OFF, so the window stays dead from NOW —
+		// the pool is out now — but the near-expiry auto-apply redeems the
+		// credit at +6h, so the modeled outage ends there instead of at the
+		// reset, and the assumption is disclosed.
+		expect(result.kind).toBe("out-now");
+		if (result.kind !== "out-now") throw new Error("unreachable");
+		expect(result.assumedResetCredits).toEqual([
+			{ accountId: "codex-1", count: 1 },
+		]);
+	});
+
+	it("expiry truncation actually shortens the dead span (pool-visible)", () => {
+		// Account A is weekly-dead from NOW; its credit's expiry at +6h truncates
+		// that span. Account B is 5h-dead over [+7h, +20h). Without the
+		// truncation the pool's first all-dead instant is +7h (a 7h runway);
+		// with it, A is alive again by +6h and the pool never goes all-dead.
+		const a: RunwayAccountInput = {
+			accountId: "codex-1",
+			unmetered: false,
+			windows: [exhaustedWeekly()],
+			codexResetCredits: bank([{ expiresAtMs: NOW + 6 * HOUR }], {
+				weekly: false,
+				expiry: true,
+			}),
+		};
+		const b: RunwayAccountInput = {
+			accountId: "other",
+			unmetered: false,
+			windows: [
+				window({
+					windowKind: "five_hour",
+					utilizationPct: 50,
+					resetsAtMs: NOW + 20 * HOUR,
+					windowStartMs: NOW + 15 * HOUR,
+					prediction: prediction({
+						resetsAtMs: NOW + 20 * HOUR,
+						slopePerHour: 100 / 24,
+						etaExhaustMs: NOW + 7 * HOUR,
+					}),
+				}),
+			],
+		};
+
+		const withCredit = computeCapacityRunway([a, b], NOW);
+		expect(withCredit.kind).toBe("beyond-horizon");
+
+		const withoutCredit = computeCapacityRunway(
+			[{ ...a, codexResetCredits: undefined }, b],
+			NOW,
+		);
+		expect(withoutCredit.kind).toBe("runway");
+		if (withoutCredit.kind === "runway") {
+			expect(withoutCredit.exhaustsAtMs).toBe(NOW + 7 * HOUR);
+		}
+	});
+
+	it("expiry-only flags consume nothing at an exhaustion instant", () => {
+		const result = computeCapacityRunway(
+			[
+				{
+					accountId: "codex-1",
+					unmetered: false,
+					windows: [burningWeekly()],
+					codexResetCredits: bank([{ expiresAtMs: null }], {
+						weekly: false,
+						expiry: true,
+					}),
+				},
+			],
+			NOW,
+		);
+
+		// A never-expiring credit has no expiry instant inside the dead span,
+		// and the weekly-limit trigger is off — behaviour identical to no bank.
+		expect(result.kind).toBe("runway");
+		if (result.kind !== "runway") throw new Error("unreachable");
+		expect(result.exhaustsAtMs).toBe(NOW + 12 * HOUR);
+		expect(result.assumedResetCredits).toBeUndefined();
+	});
+
+	it("suppresses once with no modeled re-exhaustion when the pace is unknowable", () => {
+		const result = computeCapacityRunway(
+			[
+				{
+					accountId: "codex-1",
+					unmetered: false,
+					windows: [
+						window({
+							windowKind: "seven_day",
+							utilizationPct: 100,
+							resetsAtMs: NOW + 2 * DAY,
+							// No structural start: the re-exhaustion pace cannot be
+							// modeled, so the credit suppresses the interval once.
+							windowStartMs: null,
+						}),
+					],
+					codexResetCredits: bank([{ expiresAtMs: null }]),
+				},
+			],
+			NOW,
+		);
+
+		expect(result.kind).toBe("beyond-horizon");
+		if (result.kind !== "beyond-horizon") throw new Error("unreachable");
+		expect(result.assumedResetCredits).toEqual([
+			{ accountId: "codex-1", count: 1 },
+		]);
+	});
+
+	it("leaves non-weekly windows untouched by the bank", () => {
+		const result = computeCapacityRunway(
+			[
+				{
+					accountId: "codex-1",
+					unmetered: false,
+					windows: [
+						window({
+							windowKind: "five_hour",
+							utilizationPct: 100,
+							resetsAtMs: NOW + 2 * HOUR,
+							windowStartMs: NOW - 3 * HOUR,
+						}),
+					],
+					codexResetCredits: bank([{ expiresAtMs: null }]),
+				},
+			],
+			NOW,
+		);
+
+		// A credit resets USAGE LIMITS on the weekly model only (deliberate
+		// scope): the spent 5h window stays dead.
+		expect(result.kind).toBe("out-now");
+		if (result.kind !== "out-now") throw new Error("unreachable");
+		expect(result.assumedResetCredits).toBeUndefined();
+	});
+
+	it("an untouched bank produces byte-identical output to no bank", () => {
+		const healthy = () =>
+			window({
+				windowKind: "seven_day",
+				utilizationPct: 5,
+				resetsAtMs: NOW + 6 * DAY,
+				windowStartMs: NOW - DAY,
+			});
+		const withBank = computeCapacityRunway(
+			[
+				{
+					accountId: "a",
+					unmetered: false,
+					windows: [healthy()],
+					codexResetCredits: bank([{ expiresAtMs: null }]),
+				},
+			],
+			NOW,
+		);
+		const without = computeCapacityRunway(
+			[{ accountId: "a", unmetered: false, windows: [healthy()] }],
+			NOW,
+		);
+		expect(withBank).toEqual(without);
 	});
 });

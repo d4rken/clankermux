@@ -8,6 +8,7 @@ import type { AccountResponse } from "@clankermux/types";
 import {
 	usageObservedAtMs,
 	weeklyLifetimeConfidence,
+	windowBurnAnchor,
 } from "./lifetime-confidence";
 import type { PoolWindow } from "./pool-usage";
 
@@ -93,6 +94,10 @@ function deriveLiveState(
 	const pct = extracted.pct;
 	const resetMs = extracted.resetMs;
 	// 0% carries no headroom signal, and a rolled window has nothing to project.
+	// KNOWN LIMITATION: this also drops a freshly gifted/credited account from
+	// the pool mean until its first non-zero reading, which nudges the pool line
+	// up. Deliberate for now — a 0% account genuinely has no burn evidence, and
+	// fabricating a slope for it would be worse than a one-tick gap.
 	if (pct <= 0) return null;
 	if (resetMs <= now) return null;
 
@@ -119,8 +124,6 @@ function deriveLiveState(
 	const elapsed = now - burnStartMs;
 	if (elapsed <= 0) return null;
 
-	const remainingMs = resetMs - now;
-
 	// Slope source: the shared estimator, which prefers a trustworthy server-side
 	// regression prediction for this window and otherwise falls back to the
 	// lifetime-average burn rate. Only the *slope* is taken from it — the
@@ -138,40 +141,63 @@ function deriveLiveState(
 		window === "five_hour"
 			? account.prediction?.fiveHour
 			: account.prediction?.sevenDay;
-	const slopePerHour =
-		estimateWindowExhaustion(
-			{
-				utilizationPct: pct,
-				resetsAtMs: resetMs,
-				windowStartMs: burnStartMs,
-				prediction: pred,
-				// Only the slope is read here — passed so this line cannot silently
-				// drift from the policy the message and the at-risk list apply. The
-				// pair matters for the slope too: a full-confidence lifetime slope is
-				// `pct` over the elapsed time AT THE OBSERVATION, so the forecast line
-				// stops shallowing out between refetches as `now` walks forward.
-				lifetimeConfidence: weeklyLifetimeConfidence(window),
-				observedAtMs: usageObservedAtMs(account.usageAsOfIso),
-			},
-			now,
-		).slopePctPerHour ?? 0;
+	const estimate = estimateWindowExhaustion(
+		{
+			utilizationPct: pct,
+			resetsAtMs: resetMs,
+			windowStartMs: burnStartMs,
+			prediction: pred,
+			// Passed so this line cannot silently drift from the policy the
+			// message and the at-risk list apply. The pair matters for the slope
+			// too: a full-confidence lifetime slope is `pct` over the elapsed time
+			// AT THE OBSERVATION, so the forecast line stops shallowing out
+			// between refetches as `now` walks forward.
+			lifetimeConfidence: weeklyLifetimeConfidence(window),
+			observedAtMs: usageObservedAtMs(account.usageAsOfIso),
+			anchor: windowBurnAnchor(account.burnAnchors, window),
+		},
+		now,
+	);
+	const slopePerHour = estimate.slopePctPerHour ?? 0;
 
 	let slopePerMs: number;
 	let startMs: number;
-	let timeToExhaustMs: number;
-	if (slopePerHour > 0) {
-		slopePerMs = slopePerHour / 3_600_000; // % per hour -> % per ms
-		startMs = now - pct / slopePerMs; // virtual origin so pct(now) === pct
-		timeToExhaustMs = (100 - pct) / slopePerMs;
-	} else {
+	let exhaustsAtMs: number | null;
+	if (slopePerHour <= 0) {
 		// A non-positive recent slope (stable / recently idle / refunded) holds
 		// FLAT at the current utilization — it must NOT revert to the
 		// lifetime-average burn rate, which is exactly the copy this replaces.
 		slopePerMs = 0; // flat hold (projectAt returns `pct` for slope 0)
 		startMs = now;
-		timeToExhaustMs = Number.POSITIVE_INFINITY;
+		exhaustsAtMs = null;
+	} else {
+		// The 100% landing comes from the ESTIMATOR's ETA, never re-derived as
+		// `now + (100 - pct) / slope`: for an observation-anchored estimate that
+		// re-derivation moves the landing later by the reading's age on every
+		// render tick, undoing exactly the drift the observation anchor removes.
+		// The line still bridges at (now, pct); only where it reaches 100 is
+		// pinned to the shared ETA.
+		const eta =
+			estimate.exhaustsAtMs ?? now + ((100 - pct) / slopePerHour) * 3_600_000;
+		if (eta >= resetMs) {
+			// Safe: draw with the estimator's own slope; the line ends at reset.
+			slopePerMs = slopePerHour / 3_600_000;
+			startMs = now - pct / slopePerMs; // virtual origin so pct(now) === pct
+			exhaustsAtMs = null;
+		} else if (eta <= now) {
+			// The projected landing is already behind the wall clock (an aged
+			// reading). Nothing sensible is left to draw as a ramp: hold flat and
+			// report the run-out as immediate rather than inventing a slope.
+			slopePerMs = 0;
+			startMs = now;
+			exhaustsAtMs = now;
+		} else {
+			slopePerMs = (100 - pct) / (eta - now);
+			startMs = now - pct / slopePerMs;
+			exhaustsAtMs = eta;
+		}
 	}
-	const isSafe = timeToExhaustMs >= remainingMs;
+	const isSafe = exhaustsAtMs === null;
 
 	return {
 		accountId: account.id,
@@ -180,7 +206,7 @@ function deriveLiveState(
 		resetMs,
 		slopePerMs,
 		isSafe,
-		exhaustsAtMs: isSafe ? null : now + timeToExhaustMs,
+		exhaustsAtMs,
 		held: false,
 	};
 }
