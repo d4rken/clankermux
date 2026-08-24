@@ -634,6 +634,37 @@ describe("identifiers are never truncated", () => {
 		expect(dto.worstStatedOutcome?.causes[0]?.accountId).toBe(longId);
 	});
 
+	it("passes a long provider through whole on BOTH resources it joins", () => {
+		// `accounts[].provider` and `providers[].provider` are the two ends of one
+		// join. Truncating either would make two providers sharing a 96-byte
+		// prefix collide, and account-to-provider correlation stops being
+		// lossless — silently, and only for the names long enough to be cut.
+		const longProvider = `${"p".repeat(MAX_STRING_BYTES + 40)}-tail`;
+		const accountsDto = toPublicAccountsDto(
+			snapshot({ accounts: [account({ provider: longProvider })] }),
+		);
+		expect(accountsDto.accounts[0]?.provider).toBe(longProvider);
+
+		const statusDto = toPublicStatusDto(
+			snapshot({
+				providers: [
+					{
+						provider: longProvider,
+						anyOverload: { state: "closed", untilMs: null, probeActive: false },
+						providerWideOverload: {
+							state: "closed",
+							untilMs: null,
+							probeActive: false,
+						},
+						scopedLimits: [],
+					},
+				],
+			}),
+			{ uptimeS: 1, version: "v" },
+		);
+		expect(statusDto.providers[0]?.provider).toBe(longProvider);
+	});
+
 	it("still truncates DISPLAY text beside those ids", () => {
 		const dto = toPublicAccountsDto(
 			snapshot({
@@ -963,15 +994,15 @@ describe("UTF-8-safe truncation", () => {
 	});
 
 	it("applies to every free-text field on the wire", () => {
+		// DISPLAY text only. `provider` is deliberately absent from this list —
+		// see the identifier cases above.
 		const dto = toPublicAccountDto(
 			account({
 				name: "n".repeat(200),
-				provider: "p".repeat(200),
 				windows: [window({ label: "L".repeat(200) })],
 			}),
 		);
 		expect(Buffer.byteLength(dto.name, "utf8")).toBe(MAX_STRING_BYTES);
-		expect(Buffer.byteLength(dto.provider, "utf8")).toBe(MAX_STRING_BYTES);
 		expect(Buffer.byteLength(dto.windows[0]?.label ?? "", "utf8")).toBe(
 			MAX_STRING_BYTES,
 		);

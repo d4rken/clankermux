@@ -540,6 +540,7 @@ export interface PublicAccountDto {
 	/** Stable id, so a stream event can be joined to a name. NEVER truncated. */
 	id: string;
 	name: string;
+	/** A join key against `providers[].provider` on status. NEVER truncated. */
 	provider: string;
 	/**
 	 * The ONE account a fresh, unpinned, nominal-size request would be routed to
@@ -568,7 +569,11 @@ export function toPublicAccountDto(
 	return {
 		id: identifier(account.id),
 		name: truncateUtf8(account.name),
-		provider: truncateUtf8(account.provider),
+		// An IDENTIFIER, not display text: it is what joins this record to
+		// `providers[].provider` on the status resource. Two provider names
+		// sharing their first 96 bytes would collide under truncation and the
+		// correlation would stop being lossless.
+		provider: identifier(account.provider),
 		isDefaultCandidate: account.isDefaultCandidate,
 		availability: {
 			state: toPublicAvailabilityState(account.cause, account.paused),
@@ -667,6 +672,7 @@ export interface PublicOverloadDto {
  * a client to notice they were the same fact.
  */
 export interface PublicProviderDto {
+	/** A join key against `accounts[].provider`, so NEVER truncated. */
 	provider: string;
 	/** Worst state across ALL this provider's buckets, family ones included. */
 	anyOverload: PublicOverloadDto;
@@ -770,7 +776,8 @@ export function toPublicStatusDto(
 			worstAccountUtilizationPct: snapshot.usage.worstAccountUtilizationPct,
 		},
 		providers: snapshot.providers.map((provider) => ({
-			provider: truncateUtf8(provider.provider),
+			// The join key for `accounts[].provider`, so never truncated.
+			provider: identifier(provider.provider),
 			anyOverload: toPublicOverloadDto(provider.anyOverload),
 			providerWideOverload: toPublicOverloadDto(provider.providerWideOverload),
 			scopedLimits: provider.scopedLimits.map((limit) => ({
