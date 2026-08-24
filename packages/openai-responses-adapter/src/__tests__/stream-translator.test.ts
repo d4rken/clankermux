@@ -349,4 +349,147 @@ describe("translateAnthropicStreamToResponses", () => {
 		expect(resp.model).toBe("test-model");
 		expect(resp.status).toBe("completed");
 	});
+
+	test("Anthropic ping is forwarded as an SSE comment, not a Responses event", async () => {
+		const upstream = makeAnthropicStream([
+			sseEvent("message_start", {
+				type: "message_start",
+				message: { id: "msg_p", usage: { input_tokens: 5, output_tokens: 0 } },
+			}),
+			sseEvent("ping", { type: "ping" }),
+			sseEvent("content_block_start", {
+				type: "content_block_start",
+				index: 0,
+				content_block: { type: "text", text: "" },
+			}),
+			sseEvent("ping", { type: "ping" }),
+			sseEvent("content_block_delta", {
+				type: "content_block_delta",
+				index: 0,
+				delta: { type: "text_delta", text: "hi" },
+			}),
+			sseEvent("content_block_stop", { type: "content_block_stop", index: 0 }),
+			sseEvent("message_stop", { type: "message_stop" }),
+		]);
+
+		const raw = await translateAnthropicStreamToResponses(
+			upstream,
+			"resp_ping",
+			"test-model",
+		).text();
+
+		// Each ping becomes a bare SSE comment. A comment carries no `event:` or
+		// `data:` line, so a conformant client ignores it while any intermediary's
+		// idle timer still sees bytes.
+		expect(raw.split(": keepalive\n\n").length - 1).toBe(2);
+		expect(raw).not.toContain("event: ping");
+		expect(raw).not.toContain('"type":"ping"');
+	});
+
+	test("ping does not consume a sequence_number", async () => {
+		const streamWith = (withPing: boolean) =>
+			makeAnthropicStream([
+				sseEvent("message_start", {
+					type: "message_start",
+					message: {
+						id: "msg_a",
+						usage: { input_tokens: 1, output_tokens: 0 },
+					},
+				}),
+				...(withPing
+					? [
+							sseEvent("ping", { type: "ping" }),
+							sseEvent("ping", { type: "ping" }),
+						]
+					: []),
+				sseEvent("message_stop", { type: "message_stop" }),
+			]);
+
+		const seqOf = async (upstream: Response) =>
+			(
+				await collectSseEvents(
+					translateAnthropicStreamToResponses(upstream, "resp_s", "m"),
+				)
+			).map((e) => (e.data as { sequence_number: number }).sequence_number);
+
+		expect(await seqOf(streamWith(true))).toEqual(
+			await seqOf(streamWith(false)),
+		);
+	});
+
+	test("a leading ping keepalive precedes response.created without shifting it", async () => {
+		const upstream = makeAnthropicStream([
+			sseEvent("ping", { type: "ping" }),
+			sseEvent("message_start", {
+				type: "message_start",
+				message: { id: "msg_l", usage: { input_tokens: 3, output_tokens: 0 } },
+			}),
+			sseEvent("message_stop", { type: "message_stop" }),
+		]);
+
+		const raw = await translateAnthropicStreamToResponses(
+			upstream,
+			"resp_lead",
+			"m",
+		).text();
+
+		// The whole point of the keepalive is the pre-first-token gap, so it must
+		// survive before any Responses event has been emitted. Asserted as a
+		// prefix rather than by comparing indexOf results: a missing keepalive
+		// gives -1, which would compare "before" everything and pass vacuously.
+		expect(raw.startsWith(": keepalive\n\n")).toBe(true);
+		expect(raw).toContain("event: response.created");
+	});
+
+	test.each([
+		["message_stop", { type: "message_stop" }],
+		[
+			"error",
+			{ type: "error", error: { type: "overloaded_error", message: "x" } },
+		],
+	])("no keepalive is emitted after a terminal %s", async (terminal, payload) => {
+		const upstream = makeAnthropicStream([
+			sseEvent("message_start", {
+				type: "message_start",
+				message: { id: "msg_t", usage: { input_tokens: 1, output_tokens: 0 } },
+			}),
+			sseEvent(terminal, payload),
+			sseEvent("ping", { type: "ping" }),
+			sseEvent("ping", { type: "ping" }),
+		]);
+
+		const raw = await translateAnthropicStreamToResponses(
+			upstream,
+			"resp_term",
+			"m",
+		).text();
+
+		// Holding a finished connection open is how a hung request stays hung.
+		expect(raw).not.toContain(": keepalive");
+	});
+
+	test("a ping either side of the terminal keeps only the pre-terminal one", async () => {
+		const upstream = makeAnthropicStream([
+			sseEvent("message_start", {
+				type: "message_start",
+				message: { id: "msg_b", usage: { input_tokens: 1, output_tokens: 0 } },
+			}),
+			sseEvent("ping", { type: "ping" }),
+			sseEvent("message_stop", { type: "message_stop" }),
+			sseEvent("ping", { type: "ping" }),
+		]);
+
+		const raw = await translateAnthropicStreamToResponses(
+			upstream,
+			"resp_both",
+			"m",
+		).text();
+
+		expect(raw.split(": keepalive\n\n").length - 1).toBe(1);
+		// The suppression must not have swallowed the terminal event itself.
+		expect(raw).toContain("event: response.completed");
+		expect(raw.indexOf(": keepalive")).toBeLessThan(
+			raw.indexOf("event: response.completed"),
+		);
+	});
 });
