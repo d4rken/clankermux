@@ -1,4 +1,9 @@
-import { BUFFER_SIZES, requestEvents, TIME_CONSTANTS } from "@clankermux/core";
+import {
+	BUFFER_SIZES,
+	extractUnifiedClaimReadings,
+	requestEvents,
+	TIME_CONSTANTS,
+} from "@clankermux/core";
 import {
 	sanitizeRequestHeaders,
 	stripHopByHopHeaders,
@@ -12,6 +17,8 @@ import {
 	type ProjectAttributionSource,
 	type RequestRoutingMeta,
 	type ToolCallStat,
+	type UnifiedClaimObservationRow,
+	type UnifiedClaimObservationSource,
 } from "@clankermux/types";
 import { cacheBodyStore } from "./cache-body-store";
 import type { ProxyContext } from "./handlers";
@@ -199,6 +206,91 @@ export async function drainPendingUsageFinalizers(
 }
 
 /**
+ * Which dispatch produced this request, for the claim-observation row.
+ *
+ * Trust-gated exactly like `isInternalProbe` in should-record-request.ts: the
+ * marker headers are client-settable, so without the unspoofable in-process
+ * dispatch flag any caller could file its traffic under an internal source and
+ * corrupt the demand signal the series exists to carry. The two markers stay
+ * separate checks so neither can borrow the other's label.
+ */
+function claimObservationSource(
+	requestHeaders: Headers,
+	internal: boolean,
+): UnifiedClaimObservationSource {
+	if (!internal) return "client";
+	if (requestHeaders.get("x-clankermux-keepalive") === "true") {
+		return "keepalive";
+	}
+	if (requestHeaders.get("x-clankermux-auto-refresh") === "true") {
+		return "auto-refresh";
+	}
+	return "client";
+}
+
+/**
+ * Record the per-claim rate-limit readings this response carried, as one row
+ * per claim aligned to the request that received them.
+ *
+ * Deliberately OUTSIDE the `shouldRecordRequest` gate: cache-keepalive replays
+ * and auto-refresh probes are kept out of Request History because they are not
+ * user traffic, but they consume real quota and their responses report the same
+ * claim state. Omitting them would leave gaps in the series exactly where the
+ * proxy's own spend happened, which is one of the limits the ledger-burn
+ * feasibility study ran into.
+ *
+ * Anthropic OAuth accounts only: a custom endpoint is some other upstream, and
+ * no other provider emits these headers. Responses the proxy synthesised itself
+ * carry no upstream headers, so the extractor yields nothing for them and no row
+ * is written. A DELIVERED 429 does get captured — it carries real claim state.
+ */
+function captureUnifiedClaimObservations(
+	args: {
+		requestId: string;
+		account: Account | null;
+		requestHeaders: Headers;
+		internal: boolean;
+		response: Response;
+		/** Request start (the handler's `timestamp` input), epoch ms. */
+		timestamp: number;
+	},
+	ctx: ProxyContext,
+): void {
+	const { account } = args;
+	if (account?.provider !== "anthropic" || account.custom_endpoint) return;
+
+	const readings = extractUnifiedClaimReadings(args.response.headers);
+	if (readings.length === 0) return;
+
+	// Headers-arrival time, captured HERE: the row must say when the reading was
+	// true, not when the queued write happened to run.
+	const observedAt = Date.now();
+	const source = claimObservationSource(args.requestHeaders, args.internal);
+	const rows: UnifiedClaimObservationRow[] = readings.map((reading) => ({
+		requestId: args.requestId,
+		accountId: account.id,
+		source,
+		requestStartedAt: args.timestamp,
+		observedAt,
+		httpStatus: args.response.status,
+		claim: reading.claim,
+		status: reading.status,
+		utilization: reading.utilization,
+		resetAt: reading.resetMs,
+	}));
+
+	const accepted = ctx.asyncWriter.enqueue(() =>
+		ctx.dbOps.saveUnifiedClaimObservations(rows),
+	);
+	if (!accepted) {
+		log.warn(
+			`Dropped ${rows.length} claim observation rows for request ${args.requestId} ` +
+				`(account=${account.name}): the metadata write queue is at capacity`,
+		);
+	}
+}
+
+/**
  * Check if a response should be considered successful/expected
  * Treats certain well-known paths that return 404 as expected
  */
@@ -361,6 +453,21 @@ async function forwardToClientInner(
 
 	// Always strip compression headers *before* we do anything else
 	const response = withSanitizedProxyHeaders(responseRaw);
+
+	// The single capture site for the request-aligned claim series. Runs before
+	// the recordable-request gate below, because internal probes must be captured
+	// even though they are excluded from Request History.
+	captureUnifiedClaimObservations(
+		{
+			requestId,
+			account,
+			requestHeaders,
+			internal: internalDispatch,
+			response,
+			timestamp,
+		},
+		ctx,
+	);
 
 	// Prepare objects once for serialisation - sanitize headers before storing
 	const sanitizedReq = sanitizeRequestHeaders(requestHeaders);
