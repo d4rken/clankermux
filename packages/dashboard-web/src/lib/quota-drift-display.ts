@@ -343,13 +343,11 @@ export interface QuotaModelGaps {
  * ALL of them, not the longest one. A model can be below the share floor early,
  * measurable in the middle and out of use at the end, and those are three
  * different answers to "why is the line missing here". Reducing them to one
- * discards the reader's actual question, and the reason that would be discarded
- * is disproportionately the CURRENT one: an older stretch only has to be one
- * fit window longer to hide the reason the line stops now.
+ * discards the reader's actual question.
  *
- * This deliberately covers models the chart draws NO line for at all: a model
- * that was never separable has no series to look at, so the list is the only
- * place a reader can find out it exists and why it is missing.
+ * This is the COLLAPSED history behind the panel's expander, not body copy:
+ * rendered open it is a fifty-line ledger nobody reads. The part worth screen
+ * space by default is {@link summarizeCurrentGaps}.
  */
 export function summarizeModelGaps(
 	models: readonly QuotaDriftModel[],
@@ -366,6 +364,35 @@ export function summarizeModelGaps(
 				text: gapStretchText(stretch),
 			})),
 		});
+	}
+	return out;
+}
+
+/** A model the newest fit could not measure: one line, current reason only. */
+export interface QuotaCurrentGap {
+	key: string;
+	text: string;
+}
+
+/**
+ * One line per model that is not separately measurable RIGHT NOW — the
+ * always-visible slice of the gap report. A model whose gaps all ended before
+ * the newest fit recovered, and explaining its past by default is what turned
+ * the panel into a wall of text; its history stays reachable through
+ * {@link summarizeModelGaps}.
+ *
+ * This still covers models the chart draws NO line for at all: a model that
+ * was never separable has no series to look at, so this line is the only place
+ * a reader can find out it exists and why it is missing.
+ */
+export function summarizeCurrentGaps(
+	models: readonly QuotaDriftModel[],
+): QuotaCurrentGap[] {
+	const out: QuotaCurrentGap[] = [];
+	for (const model of models) {
+		const last = summarizeGaps(model.points).at(-1);
+		if (!last?.ongoing) continue;
+		out.push({ key: model.key, text: gapStretchText(last) });
 	}
 	return out;
 }
