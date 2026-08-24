@@ -190,6 +190,43 @@ describe("periodic revalidation", () => {
 		expect(store.sessions.has(hashSessionToken(token))).toBe(true);
 	});
 
+	it("closes a protected stream at its deadline despite successful ticks", async () => {
+		const store = new FakeStore();
+		store.password = { ...PASSWORD };
+		const svc = new SessionAuthService(store);
+		const { token } = await svc.createSession(BINDING);
+		let liveChecks = 0;
+		const readSession = store.getManagementSession.bind(store);
+		store.getManagementSession = async (tokenHash: string) => {
+			liveChecks++;
+			return readSession(tokenHash);
+		};
+		// A lifetime long enough for many revalidations to answer inside it, so an
+		// erroneous re-arm on the PROTECTED branch would actually get to act: each
+		// successful tick would push the deadline out past the next one and the
+		// connection would run forever on the strength of its own revalidations.
+		// That is the opposite of what the ceiling is for — this stream presented a
+		// cookie, and bounding the connection is what forces the re-handshake that
+		// re-runs the auth check. The sibling zero-lifetime test cannot see this:
+		// its deadline has already fired before any tick could re-arm it.
+		const lifetimeMs = TICK_MS * 20;
+		const guard = createSessionStreamGuard(svc, TICK_MS, lifetimeMs);
+		let closed = 0;
+		const startedAt = Date.now();
+		const detach = guard.attach(streamRequest(token), () => {
+			closed++;
+		});
+		await waitFor(() => closed > 0);
+		const elapsedMs = Date.now() - startedAt;
+		detach();
+		// Several revalidations ran, and every one of them found the session live.
+		expect(liveChecks).toBeGreaterThan(2);
+		expect(store.sessions.has(hashSessionToken(token))).toBe(true);
+		// It closed anyway, and not before its deadline.
+		expect(closed).toBe(1);
+		expect(elapsedMs).toBeGreaterThanOrEqual(lifetimeMs);
+	});
+
 	it("keeps a live session's stream open", async () => {
 		const store = new FakeStore();
 		store.password = { ...PASSWORD };
