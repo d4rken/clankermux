@@ -137,6 +137,15 @@ export function getActiveOverloadHoldCount(bucketKey: string): number {
 }
 
 /**
+ * Every bucket key with at least one holder. Distinct from the breaker's own
+ * bucket list: a hold freezes its slot key at entry, so occupancy survives the
+ * bucket being cleared or the effective gate moving to a provider-wide bucket.
+ */
+export function getOccupiedOverloadHoldKeys(): string[] {
+	return holdSlots.occupiedKeys();
+}
+
+/**
  * Reset all hold-slot counters. For tests.
  */
 export function resetOverloadHoldSlots(): void {

@@ -16,6 +16,77 @@ export interface EventLoopLagStats {
 }
 
 /**
+ * The single-flight probe holding a bucket's lease.
+ *
+ * `active` distinguishes a probe still legitimately in flight from an ORPHANED
+ * one whose owner died: past its TTL the lease no longer blocks a takeover, but
+ * it is still stored and still the thing an operator wants to see. Reporting
+ * only live leases would hide the dead owner until some later request happens
+ * to replace it.
+ */
+export interface ProviderOverloadLease {
+	id: string;
+	ageMs: number;
+	ttlMs: number;
+	/** False once `ageMs` exceeds `ttlMs`: an orphan awaiting takeover. */
+	active: boolean;
+}
+
+interface ProviderOverloadBucketFields {
+	/**
+	 * Bucket identity. OPAQUE — the internal key vocabulary
+	 * (`anthropic-upstream`, `anthropic-upstream:opus`) is not a stable API and
+	 * must not be parsed. Use it for grouping and for matching log lines.
+	 */
+	key: string;
+	/** Trip counter — ties a hold or probe log line to this exact trip. */
+	generation: number;
+	lease: ProviderOverloadLease | null;
+	/**
+	 * Holder slots currently occupied under this key.
+	 *
+	 * Occupancy, NOT an exhaustive count of requests waiting on this bucket: a
+	 * hold freezes its slot key at entry, so if the bucket is cleared or a
+	 * provider-wide bucket appears and moves the effective gate, existing
+	 * holders keep their original key. The `closed` variant exists precisely to
+	 * surface those still draining after their bucket is gone.
+	 */
+	activeHoldSlots: number;
+}
+
+/**
+ * One overload bucket (or the draining remains of one) as reported by
+ * `/api/system/status`.
+ *
+ * Answers "what is wedged right now" during an incident, which the journal can
+ * only answer afterwards. A discriminated union so the deadline's availability
+ * follows from the state rather than being a convention to remember.
+ */
+export type ProviderOverloadStatus =
+	| (ProviderOverloadBucketFields & {
+			/** Gating traffic until `until`. */
+			state: "open";
+			until: number;
+	  })
+	| (ProviderOverloadBucketFields & {
+			/** Deadline lapsed; exactly one probe may test recovery. */
+			state: "half-open";
+			until: null;
+	  })
+	| {
+			/**
+			 * No bucket remains — it recovered or was cleared — but holders
+			 * acquired under this key are still draining.
+			 */
+			state: "closed";
+			key: string;
+			until: null;
+			generation: null;
+			lease: null;
+			activeHoldSlots: number;
+	  };
+
+/**
  * Live operational snapshot for the dashboard's System Status tile.
  *
  * Served by `GET /api/system/status`. Unlike `/health` (consumed by external
@@ -29,27 +100,6 @@ export interface EventLoopLagStats {
  * client-side across polls, it would reset on every navigation and disagree
  * with the chart.
  */
-/**
- * One live overload bucket as reported by `/api/system/status`.
- *
- * Answers "what is wedged right now" during an incident, which the journal can
- * only answer afterwards. `activeHolds` is the count of client connections
- * currently parked on this bucket waiting for it to recover.
- */
-export interface ProviderOverloadStatus {
-	/** Raw bucket key, e.g. `anthropic-upstream:opus`. */
-	key: string;
-	state: "open" | "half-open" | "closed";
-	/** Block deadline (epoch ms) while open; null when half-open. */
-	until: number | null;
-	/** Trip counter — ties a hold or probe log line to this exact trip. */
-	generation: number;
-	/** The single-flight probe holding this bucket's lease, if any. */
-	probe: { id: string; ageMs: number; ttlMs: number } | null;
-	/** Client connections currently held waiting on this bucket. */
-	activeHolds: number;
-}
-
 export interface SystemStatusResponse {
 	/** Rollup health, computed identically to `/health` (runtime + pool). */
 	status: "ok" | "degraded" | "unhealthy";

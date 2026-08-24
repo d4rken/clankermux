@@ -260,6 +260,35 @@ describe("failure-reason filtering", () => {
 		expect(params).toEqual(["%provider\\_overloaded%"]);
 	});
 
+	it("narrows to failures so the scan can use an index", () => {
+		// Not cosmetic: error_message is unindexed and bun:sqlite's .all() is
+		// synchronous, so an unbounded scan blocks the event loop for every
+		// in-flight proxy request. Measured at ~600k rows: 3.5s without this
+		// clause, 0.19s with it, same results.
+		const { sql } = buildRequestFilterClause({ error: "overload" });
+		expect(sql).toContain("r.success = 0");
+	});
+
+	it("does not emit the failure clause twice alongside status=error", () => {
+		const { sql } = buildRequestFilterClause({
+			status: "error",
+			error: "overload",
+		});
+		expect(sql.match(/r\.success = 0/g)).toHaveLength(1);
+	});
+
+	it("still narrows to failures when explicit codes suppress the status filter", () => {
+		// `codes` takes precedence over `status`, so the status branch never runs
+		// and cannot be relied on to have added the clause.
+		const { sql } = buildRequestFilterClause({
+			codes: [529],
+			status: "error",
+			error: "overload",
+		});
+		expect(sql.match(/r\.success = 0/g)).toHaveLength(1);
+		expect(sql).toContain("r.status_code IN (?)");
+	});
+
 	it("escapes every LIKE metacharacter, not just the underscore", () => {
 		const { params } = buildRequestFilterClause({ error: "a_b%c\\d" });
 		expect(params).toEqual(["%a\\_b\\%c\\\\d%"]);

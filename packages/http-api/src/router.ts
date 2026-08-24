@@ -252,15 +252,12 @@ export class APIRouter {
 		);
 		const cleanupHandler = createCleanupHandler(dbOps, config);
 		const systemInfoHandler = createSystemInfoHandler();
-		const systemStatusHandler = createSystemStatusHandler(
-			dbOps,
-			config,
+		const systemStatusHandler = createSystemStatusHandler(dbOps, config, {
 			getAsyncWriterHealth,
 			getIntegrityStatus,
 			getEventLoopLag,
-			undefined,
 			getProviderOverload,
-		);
+		});
 		const versionCheckHandler = createVersionCheckHandler();
 
 		// Debug/profiling handlers

@@ -45,15 +45,33 @@ type ProviderOverloadFn = () => ProviderOverloadStatus[];
  * checks, and a model missing from the pricing catalogue must never take the
  * proxy out of rotation. It is reported alongside the rollup without feeding it.
  */
+/**
+ * The optional runtime probes this handler reads. An options object rather
+ * than a positional tail: they are all optional and all the same shape, so
+ * positionally every new one forces callers to pass `undefined` placeholders
+ * past the ones they don't care about, and a mis-ordered argument would type-
+ * check silently.
+ */
+export interface SystemStatusHandlerOptions {
+	getAsyncWriterHealth?: AsyncWriterHealthFn;
+	getIntegrityStatus?: IntegrityStatusFn;
+	getEventLoopLag?: EventLoopLagFn;
+	getPricingGaps?: PricingGapsFn;
+	getProviderOverload?: ProviderOverloadFn;
+}
+
 export function createSystemStatusHandler(
 	dbOps: DatabaseOperations,
 	config: Config,
-	getAsyncWriterHealth?: AsyncWriterHealthFn,
-	getIntegrityStatus?: IntegrityStatusFn,
-	getEventLoopLag?: EventLoopLagFn,
-	getPricingGapsFn?: PricingGapsFn,
-	getProviderOverload?: ProviderOverloadFn,
+	options: SystemStatusHandlerOptions = {},
 ) {
+	const {
+		getAsyncWriterHealth,
+		getIntegrityStatus,
+		getEventLoopLag,
+		getPricingGaps: getPricingGapsFn,
+		getProviderOverload,
+	} = options;
 	return async (): Promise<Response> => {
 		try {
 			const accounts = await dbOps.getAllAccounts();
@@ -94,10 +112,13 @@ export function createSystemStatusHandler(
 				// zeros when the monitor was never started (e.g. bare handler in
 				// tests).
 				eventLoop: (getEventLoopLag ?? getEventLoopStats)(),
-				// Injected rather than imported: @clankermux/http-api must not
-				// depend on @clankermux/proxy (the dependency runs the other way).
-				// Absent injection — bare handler in tests — reports no live
-				// buckets, which is also the honest steady state.
+				// Injected rather than imported. Not a dependency constraint (this
+				// package already depends on @clankermux/proxy): the join of breaker
+				// buckets with hold-slot occupancy belongs at the server layer, which
+				// is the only place that sees both module-level maps, and keeping it
+				// out of here leaves the handler testable without a proxy runtime.
+				// Absent injection — bare handler in tests — reports no live buckets,
+				// which is also the honest steady state.
 				providerOverload: getProviderOverload ? getProviderOverload() : [],
 				strategy: config.getStrategy(),
 				timestamp: new Date().toISOString(),

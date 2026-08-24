@@ -362,7 +362,7 @@ describe("overload diagnostics snapshot", () => {
 		// still gates traffic.
 		expect(wide?.state).toBe("half-open");
 		expect(wide?.until).toBeNull();
-		expect(family?.probe).toBeNull();
+		expect(family?.lease).toBeNull();
 
 		// An admitted probe surfaces with its identity and age, which is what
 		// makes "what is wedged right now" answerable without grepping.
@@ -375,10 +375,33 @@ describe("overload diagnostics snapshot", () => {
 		await new Promise((r) => setTimeout(r, 20));
 
 		const during = getOverloadDiagnostics();
-		const probed = during.find((b) => b.probe !== null);
-		expect(probed?.probe?.id).toBe(token?.probeId as string);
-		expect(probed?.probe?.ageMs).toBeGreaterThanOrEqual(15);
-		expect(probed?.probe?.ttlMs).toBeGreaterThan(0);
+		const probed = during.find((b) => b.lease !== null);
+		expect(probed?.lease?.id).toBe(token?.probeId as string);
+		expect(probed?.lease?.ageMs).toBeGreaterThanOrEqual(15);
+		expect(probed?.lease?.ttlMs).toBeGreaterThan(0);
+		expect(probed?.lease?.active).toBe(true);
+	});
+
+	it("still reports an ORPHANED lease, flagged inactive", async () => {
+		// An expired-but-stored lease means the probe's owner died and nobody has
+		// taken it over yet — the wedged state an operator is chasing. Nulling it
+		// out once isLeaseActive goes false would make that indistinguishable
+		// from "no probe at all", hiding the only case worth looking at.
+		await tripToHalfOpen("claude-opus-4-5");
+		const admission = tryAcquireProviderOverloadProbe(
+			"anthropic",
+			"claude-opus-4-5",
+		);
+		const token = admission.admitted ? admission.token : null;
+		expect(token).not.toBeNull();
+
+		const wayLater = Date.now() + 2 * 60 * 60_000;
+		const stale = getOverloadDiagnostics(wayLater).find(
+			(b) => b.lease !== null,
+		);
+		expect(stale?.lease?.id).toBe(token?.probeId as string);
+		expect(stale?.lease?.active).toBe(false);
+		expect(stale?.lease?.ageMs).toBeGreaterThan(stale?.lease?.ttlMs as number);
 	});
 
 	it("returns an empty list when nothing is live", () => {

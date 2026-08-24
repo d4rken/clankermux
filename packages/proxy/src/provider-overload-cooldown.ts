@@ -621,8 +621,16 @@ export interface OverloadDiagnosticBucket {
 	/** Block deadline while open; null when half-open. */
 	until: number | null;
 	generation: number;
-	/** The in-flight probe, when one holds this bucket's lease. */
-	probe: { id: string; ageMs: number; ttlMs: number } | null;
+	/**
+	 * The stored lease, live OR orphaned.
+	 *
+	 * Reported whenever one exists rather than only while `isLeaseActive`:
+	 * an expired-but-present lease means the probe's owner died and nobody has
+	 * taken it over yet, which is exactly the wedged state worth surfacing.
+	 * Nulling it there would make an orphan indistinguishable from no probe at
+	 * all, and the orphan is the interesting one.
+	 */
+	lease: { id: string; ageMs: number; ttlMs: number; active: boolean } | null;
 }
 
 /**
@@ -641,14 +649,14 @@ export function getOverloadDiagnostics(
 			state: open ? "open" : "half-open",
 			until: open ? bucket.until : null,
 			generation: bucket.generation,
-			probe:
-				bucket.probe && isLeaseActive(bucket, now)
-					? {
-							id: bucket.probe.probeId,
-							ageMs: now - bucket.probe.acquiredAt,
-							ttlMs: bucket.probe.ttlMs,
-						}
-					: null,
+			lease: bucket.probe
+				? {
+						id: bucket.probe.probeId,
+						ageMs: now - bucket.probe.acquiredAt,
+						ttlMs: bucket.probe.ttlMs,
+						active: isLeaseActive(bucket, now),
+					}
+				: null,
 		});
 	}
 	return out;

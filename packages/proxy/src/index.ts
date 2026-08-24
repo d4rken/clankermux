@@ -107,7 +107,10 @@ export {
 	startFullIntegrityCheckBackground,
 	startIntegrityScheduler,
 } from "./integrity-scheduler";
-export { getActiveOverloadHoldCount } from "./overload-hold";
+export {
+	getActiveOverloadHoldCount,
+	getOccupiedOverloadHoldKeys,
+} from "./overload-hold";
 export { peekPrimaryAccountId } from "./peek-primary";
 export {
 	ANTHROPIC_UPSTREAM_OVERLOAD_KEY,
