@@ -12,6 +12,7 @@ import { Logger } from "@clankermux/logger";
 import { USAGE_CACHE_TTL_MS, usageCache } from "@clankermux/providers";
 import {
 	DEFAULT_ROUTING_CONTEXT,
+	earliestExclusionRecoveryMs,
 	evaluateDefaultCandidates,
 	getProviderOverloadSnapshot,
 } from "@clankermux/proxy";
@@ -828,9 +829,15 @@ export function createPublicSnapshotReader(
 		// proactive usage throttling is waiting on a clock exactly as one emptied
 		// by cooldowns is, and omitting these instants published it as
 		// `unhealthy` when it was recoverable.
-		for (const exclusion of routingEvaluation.exclusions) {
-			recoveryTimes.push(exclusion.recoversAtMs);
-		}
+		//
+		// ONE instant, not one per gate: an account held by both gates recovers
+		// when its LATER deadline passes, so pushing each raw entry into a list
+		// this line then takes the minimum of would publish the earlier of two
+		// holds on the same account as the moment the pool comes back.
+		const gateRecoveryMs = earliestExclusionRecoveryMs(
+			routingEvaluation.exclusions,
+		);
+		if (gateRecoveryMs !== null) recoveryTimes.push(gateRecoveryMs);
 
 		const pool: PublicPoolSnapshot = {
 			configured: rows.length,

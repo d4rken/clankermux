@@ -110,6 +110,7 @@ export {
 export {
 	DEFAULT_ROUTING_CONTEXT,
 	type DefaultCandidateEvaluation,
+	earliestExclusionRecoveryMs,
 	evaluateDefaultCandidates,
 	type PeekExclusion,
 	type PeekExclusionReason,

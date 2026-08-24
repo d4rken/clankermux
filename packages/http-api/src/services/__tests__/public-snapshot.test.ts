@@ -191,8 +191,9 @@ afterEach(() => {
 function read(
 	strategy: LoadBalancingStrategy | null = fakeStrategy(),
 	config: Config = fakeConfig,
+	now: number = NOW,
 ) {
-	return createPublicSnapshotReader(fakeDbOps(), config, () => strategy)(NOW);
+	return createPublicSnapshotReader(fakeDbOps(), config, () => strategy)(now);
 }
 
 /** The window of a given kind on the first account, or undefined. */
@@ -832,6 +833,39 @@ describe("pool rollup", () => {
 		const snapshot = await read();
 		expect(snapshot.pool.defaultRoutable).toBe(0);
 		expect(snapshot.pool.nextAvailableAtMs).toBe(until);
+	});
+
+	it("waits for the LAST gate on an account held by both, not the first", async () => {
+		// Simultaneously under the provider-wide breaker until T1 and usage-throttled
+		// until a later T2. The account is routable again only at T2, so publishing
+		// T1 beside `defaultRoutable: 0` tells a client the pool recovers in a minute
+		// when in fact nothing can be routed for hours.
+		//
+		// Real-clock based: the overload breaker stamps its deadline from
+		// `Date.now()`, so the throttle window has to be anchored to the same clock
+		// for T2 to be the later of the two.
+		const base = Date.now();
+		insertAccount();
+		const t1 = applyProviderOverloadCooldown("anthropic", base + 60_000);
+		usageCache.set("acct-1", {
+			// 90% of a 5-hour window that opened a minute ago: the pace-based resume
+			// lands at start + 90% of the window, ~4.5 hours out.
+			five_hour: {
+				utilization: 90,
+				resets_at: new Date(base + 5 * 3_600_000 - 60_000).toISOString(),
+			},
+			seven_day: {
+				utilization: 0,
+				resets_at: new Date(base + 7 * 86_400_000).toISOString(),
+			},
+		} as AnthropicUsageData);
+
+		const snapshot = await read(fakeStrategy(), throttlingConfig, base);
+		const t2 = base - 60_000 + 0.9 * 5 * 3_600_000;
+
+		expect(t2).toBeGreaterThan(t1);
+		expect(snapshot.pool.defaultRoutable).toBe(0);
+		expect(snapshot.pool.nextAvailableAtMs).toBe(t2);
 	});
 
 	it("reports the throttle's resume instant when proactive throttling emptied the pool", async () => {

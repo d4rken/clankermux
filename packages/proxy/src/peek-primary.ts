@@ -41,12 +41,18 @@ export const DEFAULT_ROUTING_CONTEXT = "fresh_unpinned_nominal";
 export type PeekExclusionReason = "provider_overload" | "usage_throttled";
 
 /**
- * A ranked account the prediction excluded, and WHEN the exclusion lifts.
+ * A ranked account the prediction excluded, and WHEN that ONE exclusion lifts.
  *
  * Both modelled exclusions are timed: the provider-wide overload breaker and
  * the proactive usage throttle each hold until a known instant. That is what
  * lets a caller publishing `candidateIds.length` also say when a pool of zero
  * recovers, instead of reporting an empty pool with no known recovery.
+ *
+ * One entry per ACTIVE GATE, not per account: an account under a provider-wide
+ * overload that is ALSO usage-throttled appears twice, once per gate. It is
+ * routable again only when its LAST gate lifts, so a caller deriving a recovery
+ * instant must take the MAXIMUM across one account's entries — see
+ * {@link earliestExclusionRecoveryMs}, which is that derivation.
  */
 export interface PeekExclusion {
 	accountId: string;
@@ -68,7 +74,10 @@ export interface PeekExclusion {
 export interface DefaultCandidateEvaluation {
 	/** Candidates, best first. Empty when every ranked account is gated. */
 	candidateIds: string[];
-	/** Accounts the two hard gates removed, each with its recovery instant. */
+	/**
+	 * The gate exclusions the two hard gates produced, one entry per ACTIVE
+	 * gate — an account held by both is listed twice.
+	 */
 	exclusions: PeekExclusion[];
 	/**
 	 * Accounts the pool-liveness reserve DEMOTED. They are still in
@@ -150,6 +159,17 @@ export function evaluateDefaultCandidates(
 	// prediction skip an account that real routing keeps.
 	const survivors: Account[] = [];
 	for (const account of strategy.peekRanked(accounts)) {
+		// EVERY active gate is recorded, not just the first one that hits. The two
+		// gates are independent holds on the same account and can run to different
+		// deadlines: a provider-wide overload until T1 alongside a usage throttle
+		// until a later T2 leaves the account gated until T2. Stopping at the first
+		// gate would leave the second deadline undiscovered, and a caller taking
+		// the earliest recovery across the pool would then publish T1 — a moment at
+		// which nothing is actually routable. Both reads are pure (a non-evicting
+		// `usageCache.peek` and a breaker inspection), so evaluating the second gate
+		// for an already-gated account costs nothing and mutates nothing.
+		let gated = false;
+
 		const ov = getProviderWideOverloadUntil(account.provider, now);
 		if (ov && ov > now) {
 			exclusions.push({
@@ -157,7 +177,7 @@ export function evaluateDefaultCandidates(
 				reason: "provider_overload",
 				recoversAtMs: ov,
 			});
-			continue;
+			gated = true;
 		}
 
 		if (throttlingActive) {
@@ -172,9 +192,13 @@ export function evaluateDefaultCandidates(
 					reason: "usage_throttled",
 					recoversAtMs: tu,
 				});
-				continue;
+				gated = true;
 			}
 		}
+
+		// Membership is unchanged by the above: an account survives exactly when
+		// NEITHER gate held it, as before.
+		if (gated) continue;
 
 		survivors.push(account);
 	}
@@ -255,6 +279,38 @@ export function evaluateDefaultCandidates(
 		exclusions,
 		livenessReservedIds: skippedLivenessReserved,
 	};
+}
+
+/**
+ * The earliest instant at which the pool regains a routable account, judged
+ * only by the gate exclusions — or null when no account was gated.
+ *
+ * MAXIMUM within one account, MINIMUM across accounts. An account held by two
+ * gates at once is not routable when the first of them lifts, it is routable
+ * when its LAST one does; taking the global minimum over the raw entries would
+ * publish the earlier deadline and promise a recovery that does not happen.
+ * Across accounts the minimum is right, because the pool recovers as soon as
+ * ANY one account does.
+ *
+ * Pure: derived entirely from the passed evaluation, so two callers can never
+ * read each other's.
+ */
+export function earliestExclusionRecoveryMs(
+	exclusions: readonly PeekExclusion[],
+): number | null {
+	const lastGateByAccount = new Map<string, number>();
+	for (const exclusion of exclusions) {
+		const held = lastGateByAccount.get(exclusion.accountId);
+		if (held === undefined || exclusion.recoversAtMs > held) {
+			lastGateByAccount.set(exclusion.accountId, exclusion.recoversAtMs);
+		}
+	}
+
+	let earliest: number | null = null;
+	for (const recoversAtMs of lastGateByAccount.values()) {
+		if (earliest === null || recoversAtMs < earliest) earliest = recoversAtMs;
+	}
+	return earliest;
 }
 
 /**

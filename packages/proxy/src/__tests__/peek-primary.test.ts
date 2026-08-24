@@ -5,7 +5,11 @@ import type {
 	AnthropicUsageData,
 	LoadBalancingStrategy,
 } from "@clankermux/types";
-import { peekPrimaryAccountId } from "../peek-primary";
+import {
+	earliestExclusionRecoveryMs,
+	evaluateDefaultCandidates,
+	peekPrimaryAccountId,
+} from "../peek-primary";
 import {
 	applyProviderOverloadCooldown,
 	clearProviderOverloadCooldown,
@@ -379,6 +383,83 @@ describe("peekPrimaryAccountId", () => {
 				now,
 			),
 		).toBe("codex");
+	});
+
+	// --- stacked gates: an account can be held by BOTH hard gates at once ---
+
+	it("(p) records BOTH gates holding one account, not just the first", () => {
+		const now = Date.now();
+		const a = makeAccount({ id: "anthropicA", provider: "anthropic" });
+		const strategy = makeStrategy([a]);
+
+		// Held by the provider-wide breaker until T1, and by the proactive usage
+		// throttle until a LATER T2 (90% of a 5h window that opened a minute ago
+		// resumes ~4.5h out). Stopping at the first gate would leave T2 undiscovered.
+		applyProviderOverloadCooldown("anthropic", now + 60_000);
+		usageCache.set("anthropicA", makeThrottlingUsage(now));
+
+		const evaluation = evaluateDefaultCandidates(
+			[a],
+			strategy,
+			throttleEnabledConfig,
+			now,
+		);
+
+		// Membership is what it always was: the account is out, nothing survives.
+		expect(evaluation.candidateIds).toEqual([]);
+		expect(evaluation.exclusions.map((e) => e.reason)).toEqual([
+			"provider_overload",
+			"usage_throttled",
+		]);
+		const [overload, throttle] = evaluation.exclusions;
+		expect(overload?.accountId).toBe("anthropicA");
+		expect(throttle?.accountId).toBe("anthropicA");
+		expect(overload?.recoversAtMs).toBe(now + 60_000);
+		expect(throttle?.recoversAtMs).toBeGreaterThan(now + 60_000);
+	});
+
+	it("(q) recovers on the account's LAST gate, not its first", () => {
+		const now = Date.now();
+		const a = makeAccount({ id: "anthropicA", provider: "anthropic" });
+		const strategy = makeStrategy([a]);
+
+		applyProviderOverloadCooldown("anthropic", now + 60_000);
+		usageCache.set("anthropicA", makeThrottlingUsage(now));
+
+		const evaluation = evaluateDefaultCandidates(
+			[a],
+			strategy,
+			throttleEnabledConfig,
+			now,
+		);
+		const throttleAt = evaluation.exclusions.find(
+			(e) => e.reason === "usage_throttled",
+		)?.recoversAtMs;
+
+		// The overload lifts in a minute and the account is still throttled for
+		// hours: reporting T1 would promise a recovery that does not happen.
+		expect(earliestExclusionRecoveryMs(evaluation.exclusions)).toBe(
+			throttleAt as number,
+		);
+	});
+
+	it("(r) MAX within an account, MIN across accounts", () => {
+		// Pure derivation, independent of the gates that produced the entries.
+		expect(
+			earliestExclusionRecoveryMs([
+				{ accountId: "a", reason: "provider_overload", recoversAtMs: 100 },
+				{ accountId: "a", reason: "usage_throttled", recoversAtMs: 900 },
+				{ accountId: "b", reason: "provider_overload", recoversAtMs: 500 },
+			]),
+		).toBe(500);
+		// …and with `b` gone, the pool waits for `a`'s later gate, not its earlier.
+		expect(
+			earliestExclusionRecoveryMs([
+				{ accountId: "a", reason: "provider_overload", recoversAtMs: 100 },
+				{ accountId: "a", reason: "usage_throttled", recoversAtMs: 900 },
+			]),
+		).toBe(900);
+		expect(earliestExclusionRecoveryMs([])).toBeNull();
 	});
 
 	it("(n) stays non-evicting: the reserved account's cache entry survives the peek", () => {
