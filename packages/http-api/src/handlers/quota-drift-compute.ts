@@ -78,6 +78,7 @@ import {
 	fitRolling,
 	fitWithIntervals,
 	INFERENCE_BOOTSTRAP_B,
+	MAX_SAMPLE_GAP_MS,
 	normalizeModelKey,
 	OTHER_MODEL_KEY,
 	type QuotaSegment,
@@ -188,15 +189,23 @@ export function computeQuotaDrift(
 		for (const window of WINDOWS) {
 			const segments = cohort.segmentsByWindow.get(window);
 			if (!segments || segments.length === 0) continue;
-			windows.push(
-				fitWindow(segments, {
+			windows.push({
+				...fitWindow(segments, {
 					cohortKey: cohort.key,
 					window,
 					provenance: cohort.tierProvenance,
 					displayB,
 					inferenceB,
 				}),
-			);
+				// Whether the window MOVED is not something a fit can answer — a
+				// constant response variable yields no coefficients at all — so it
+				// comes from the samples, alongside rather than inside the fit.
+				...summarizeFlatWindow(
+					cohort.observationsByWindow.get(window) ?? [],
+					window,
+					segments,
+				),
+			});
 		}
 		if (windows.length === 0) continue;
 		out.push({
@@ -240,6 +249,13 @@ export interface CohortSegments {
 	tierProvenance: TierProvenance;
 	/** Per-window segments, tokens already attached. */
 	segmentsByWindow: Map<QuotaWindowKind, QuotaSegment[]>;
+	/**
+	 * Per-window movement facts, one entry per contributing account.
+	 *
+	 * Kept separate from the segments because they answer a different question:
+	 * segments say how the window moved, these say WHETHER it moved at all.
+	 */
+	observationsByWindow: Map<QuotaWindowKind, WindowObservation[]>;
 }
 
 /**
@@ -259,6 +275,10 @@ export function collectCohortSegments(db: Database): CohortSegments[] {
 		REQUEST_SCAN_SQL,
 	);
 	const cohorts = new Map<string, CohortSegments>();
+	const observations = new Map<
+		string,
+		Map<QuotaWindowKind, WindowObservation[]>
+	>();
 
 	for (const account of loadAccounts(db)) {
 		const rows = loadSnapshots(db, account.id, hasObservedAt, hasTierColumns);
@@ -299,7 +319,28 @@ export function collectCohortSegments(db: Database): CohortSegments[] {
 				if (tier === null) continue;
 				addSegmentToCohort(cohorts, account, entry.window, tier, segment);
 			}
+			// Movement facts come from the SAMPLES, not the segments: a window that
+			// never moves still produces segments (a constant percentage is monotone),
+			// so stillness is invisible on the segment side.
+			for (const [key, observation] of collectWindowObservations(
+				account,
+				rows,
+				entry.window,
+			)) {
+				const forCohort = observations.get(key) ?? new Map();
+				const forWindow = forCohort.get(entry.window) ?? [];
+				forWindow.push(observation);
+				forCohort.set(entry.window, forWindow);
+				observations.set(key, forCohort);
+			}
 		}
+	}
+
+	// Attached only at the END, so an observation never depends on whether its
+	// cohort happened to exist yet when the account producing it was scanned.
+	for (const cohort of cohorts.values()) {
+		const forCohort = observations.get(cohort.key);
+		if (forCohort) cohort.observationsByWindow = forCohort;
 	}
 
 	return [...cohorts.values()].sort((a, b) => a.key.localeCompare(b.key));
@@ -324,6 +365,7 @@ function addSegmentToCohort(
 			accountIds: new Set(),
 			tierProvenance: "recorded",
 			segmentsByWindow: new Map(),
+			observationsByWindow: new Map(),
 		};
 		cohorts.set(key, cohort);
 	}
@@ -334,6 +376,224 @@ function addSegmentToCohort(
 	const existing = cohort.segmentsByWindow.get(window);
 	if (existing) existing.push(segment);
 	else cohort.segmentsByWindow.set(window, [segment]);
+}
+
+/* ── Whether a window moved at all ──────────────────────────────────────── */
+
+/**
+ * How long a window must sit unchanged before its stillness says anything.
+ *
+ * Per window kind, because a weekly percentage legitimately sits still far
+ * longer than a 5-hour one: two full reset cycles for the weekly window, one
+ * week for the 5-hour window (which resets 33 times in that period).
+ */
+export const FLAT_WINDOW_THRESHOLD_MS: Record<QuotaWindowKind, number> = {
+	five_hour: 7 * 24 * 60 * 60 * 1000,
+	seven_day: 14 * 24 * 60 * 60 * 1000,
+};
+
+/**
+ * Eq-tokens that must have been charged against a window during its flat
+ * period before the flatness is reported.
+ *
+ * THE crux of this whole computation. A window that did not move because we
+ * sent no traffic against it is a fact about us, not about the provider, and
+ * the two are indistinguishable in the percentage series alone. 1M eq-tokens
+ * over a period of at least a week is unambiguously real usage.
+ */
+export const MIN_FLAT_TRAFFIC_EQ_TOKENS = 1_000_000;
+
+/**
+ * How far behind the cohort's newest reading an account may be and still count
+ * as currently observed.
+ *
+ * An account that stopped reporting a month ago cannot testify to whether the
+ * window is moving NOW, so it is excluded from the decision entirely rather
+ * than counted as flat — counting it would let a decommissioned account either
+ * freeze a live cohort or, worse, be the only evidence for a flat claim.
+ */
+export const CURRENT_MEMBER_MS = 24 * 60 * 60 * 1000;
+
+/** What one account's samples say about whether one window moved. */
+export interface WindowObservation {
+	accountId: string;
+	/** Oldest non-null sample in this cohort's stretch, ms since epoch. */
+	firstObservedMs: number;
+	/** Newest non-null sample, ms since epoch. */
+	lastObservedMs: number;
+	/** Newest observed CHANGE, ms, or null when the value never moved. */
+	lastMovementMs: number | null;
+	/** Start of the current unbroken constant run, ms. */
+	flatStartMs: number;
+	/** The value that run has been reporting. */
+	flatValuePct: number;
+}
+
+/**
+ * Walk ONE account's samples for ONE window and record whether it moved,
+ * splitting the record by the cohort each sample belongs to.
+ *
+ * Four rules, each of which is a way of NOT claiming stillness that was never
+ * observed:
+ *
+ *  - movement is a change between two CONSECUTIVE samples of this account. Two
+ *    accounts reading different values is not movement, so accounts are never
+ *    compared with each other;
+ *  - a null sample breaks the streak. Absence of evidence is not a flat line,
+ *    and the reading either side of it may be hours apart in meaning;
+ *  - so does a gap wider than the sampler's freshness bound
+ *    (`MAX_SAMPLE_GAP_MS`): the window was unobserved across it and may have
+ *    moved and come back;
+ *  - so does a change of tier. A cohort's stillness must be measured from
+ *    samples that belong to that cohort, or movement lands on the wrong one.
+ *
+ * The clock is the effective one (`observed_at ?? sampled_at`), matching what
+ * segment boundaries use.
+ */
+export function collectWindowObservations(
+	account: ComputeAccount,
+	rows: readonly SnapshotScanRow[],
+	window: QuotaWindowKind,
+): Map<string, WindowObservation> {
+	const out = new Map<string, WindowObservation>();
+	let prev: { ms: number; pct: number; cohort: string } | null = null;
+
+	for (const row of rows) {
+		const pct = nullableNumber(
+			window === "five_hour" ? row.five_hour_pct : row.seven_day_pct,
+		);
+		const ms = effectiveMs(row);
+		if (pct === null) {
+			prev = null;
+			continue;
+		}
+		const key = cohortKey(account.provider, resolveRowTier(account, row));
+		const continuous =
+			prev !== null && prev.cohort === key && ms - prev.ms <= MAX_SAMPLE_GAP_MS;
+		const existing = out.get(key);
+		if (!existing) {
+			out.set(key, {
+				accountId: account.id,
+				firstObservedMs: ms,
+				lastObservedMs: ms,
+				lastMovementMs: null,
+				flatStartMs: ms,
+				flatValuePct: pct,
+			});
+		} else {
+			existing.lastObservedMs = ms;
+			if (!continuous) {
+				// Unobserved time is not stillness: the streak restarts here rather
+				// than bridging whatever happened across the break.
+				existing.flatStartMs = ms;
+				existing.flatValuePct = pct;
+			} else if (prev !== null && pct !== prev.pct) {
+				existing.lastMovementMs = ms;
+				existing.flatStartMs = ms;
+				existing.flatValuePct = pct;
+			}
+		}
+		prev = { ms, pct, cohort: key };
+	}
+
+	return out;
+}
+
+/** The movement facts one cohort reports for one window. */
+export interface FlatWindowFacts {
+	lastMovementMs: number | null;
+	lastObservedMs: number | null;
+	flatValuePct: number | null;
+	flatSince: number | null;
+}
+
+const NO_MOVEMENT_FACTS: FlatWindowFacts = {
+	lastMovementMs: null,
+	lastObservedMs: null,
+	flatValuePct: null,
+	flatSince: null,
+};
+
+/**
+ * Aggregate one cohort's per-account observations into the facts the panel
+ * renders.
+ *
+ * `flatSince` is set only when every one of the four conditions holds, and
+ * every one of them exists to prevent a specific false claim:
+ *
+ *  - EVERY currently-observed account is flat. One account still moving means
+ *    the window is not frozen, whatever the others show;
+ *  - each of them has been flat for longer than the window's threshold, over an
+ *    observed span longer than that threshold. A three-day-old database cannot
+ *    establish a two-week absence of movement;
+ *  - observation was continuous through the period — already guaranteed by how
+ *    `collectWindowObservations` breaks its streaks;
+ *  - material traffic really was charged against the window in that period. A
+ *    window that did not move because we sent nothing is not a provider fact.
+ *
+ * The cohort's `flatSince` is the LATEST member's, because that is when the
+ * cohort as a whole became still.
+ */
+export function summarizeFlatWindow(
+	observations: readonly WindowObservation[],
+	window: QuotaWindowKind,
+	segments: readonly QuotaSegment[],
+): FlatWindowFacts {
+	if (observations.length === 0) return NO_MOVEMENT_FACTS;
+
+	const lastObservedMs = Math.max(...observations.map((o) => o.lastObservedMs));
+	const movements = observations
+		.map((o) => o.lastMovementMs)
+		.filter((ms): ms is number => ms !== null);
+	const observed: FlatWindowFacts = {
+		lastMovementMs: movements.length > 0 ? Math.max(...movements) : null,
+		lastObservedMs,
+		flatValuePct: null,
+		flatSince: null,
+	};
+
+	const threshold = FLAT_WINDOW_THRESHOLD_MS[window];
+	const current = observations.filter(
+		(o) => lastObservedMs - o.lastObservedMs <= CURRENT_MEMBER_MS,
+	);
+	if (current.length === 0) return observed;
+
+	const allFlat = current.every(
+		(o) =>
+			o.lastObservedMs - o.flatStartMs >= threshold &&
+			o.lastObservedMs - o.firstObservedMs > threshold,
+	);
+	if (!allFlat) return observed;
+
+	const flatSince = Math.max(...current.map((o) => o.flatStartMs));
+	const accountIds = new Set(current.map((o) => o.accountId));
+	if (!hasMaterialTraffic(segments, accountIds, flatSince)) return observed;
+
+	const values = new Set(current.map((o) => o.flatValuePct));
+	return {
+		...observed,
+		// Accounts constant at DIFFERENT values are each flat, so the cohort is
+		// flat, but there is no single number to name.
+		flatValuePct: values.size === 1 ? current[0].flatValuePct : null,
+		flatSince,
+	};
+}
+
+/** Whether enough exposure was charged against a window since `sinceMs`. */
+function hasMaterialTraffic(
+	segments: readonly QuotaSegment[],
+	accountIds: ReadonlySet<string>,
+	sinceMs: number,
+): boolean {
+	let total = 0;
+	for (const segment of segments) {
+		if (segment.t0 < sinceMs) continue;
+		if (!accountIds.has(segment.accountId)) continue;
+		for (const tokens of Object.values(segment.eqTokensByModel))
+			total += tokens;
+		if (total >= MIN_FLAT_TRAFFIC_EQ_TOKENS) return true;
+	}
+	return false;
 }
 
 /** Stable cohort key: `provider|planTier|rateLimitTier`. */

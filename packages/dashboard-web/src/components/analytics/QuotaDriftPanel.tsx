@@ -20,6 +20,7 @@ import { CHART_HEIGHTS, CHART_PROPS } from "../../constants";
 import { useSeriesPalette } from "../../hooks/useSeriesPalette";
 import {
 	cohortLabel,
+	flatWindowNotice,
 	quotaWindowLabel,
 	summarizeModelGaps,
 } from "../../lib/quota-drift-display";
@@ -89,6 +90,7 @@ export function QuotaDriftPanel({
 						<WindowSeries
 							key={window.window}
 							window={window}
+							provider={cohort?.provider ?? ""}
 							loading={loading}
 						/>
 					))
@@ -101,9 +103,11 @@ export function QuotaDriftPanel({
 
 function WindowSeries({
 	window,
+	provider = "",
 	loading = false,
 }: {
 	window?: QuotaDriftWindowResult;
+	provider?: string;
 	loading?: boolean;
 }) {
 	const palette = useSeriesPalette();
@@ -152,6 +156,10 @@ function WindowSeries({
 		() => (window ? summarizeModelGaps(window.models) : []),
 		[window],
 	);
+	// A window the provider has never moved. Stated below the chart rather than
+	// drawn into it: the historical series stays exactly as it was, and the
+	// reason it stops being informative is written out in words.
+	const flatNotice = window ? flatWindowNotice(provider, window) : null;
 
 	return (
 		<div className="space-y-item">
@@ -250,6 +258,11 @@ function WindowSeries({
 					</ComposedChart>
 				</ResponsiveContainer>
 			</ChartContainer>
+			{flatNotice ? (
+				<p className="text-xs text-muted-foreground max-w-prose">
+					{flatNotice}
+				</p>
+			) : null}
 			{gaps.length > 0 ? (
 				<div className="space-y-0.5 max-w-prose">
 					<p className="text-xs font-medium">

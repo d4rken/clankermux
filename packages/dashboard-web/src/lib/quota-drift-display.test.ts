@@ -12,10 +12,12 @@ import type {
 	QuotaDriftModel,
 	QuotaDriftPoint,
 	QuotaDriftUnidentifiedReason,
+	QuotaDriftWindowResult,
 } from "@clankermux/types";
 import {
 	cohortLabel,
 	dominantGap,
+	flatWindowNotice,
 	formatCapacity,
 	formatCoefficient,
 	formatInterval,
@@ -400,5 +402,92 @@ describe("summarizeModelGaps", () => {
 			"claude-haiku-4-5 — always runs alongside another model, so its own cost cannot be separated",
 			"claude-sonnet-5 — estimate too imprecise on this window",
 		]);
+	});
+});
+
+/* -- Windows that never moved ------------------------------------------- */
+
+/** 2026-07-12T12:00:00Z, the day the motivating window last moved. */
+const FLAT_SINCE = Date.UTC(2026, 6, 12, 12, 0, 0, 0);
+/** 2026-08-21T12:00:00Z, the newest reading we have of it. */
+const LAST_OBSERVED = Date.UTC(2026, 7, 21, 12, 0, 0, 0);
+
+function flatWindow(
+	over: Partial<QuotaDriftWindowResult> = {},
+): QuotaDriftWindowResult {
+	return {
+		window: "five_hour",
+		nSegments: 400,
+		r2: 0,
+		zeroObservedTokenDeltaShare: 0,
+		models: [],
+		lastMovementMs: null,
+		lastObservedMs: LAST_OBSERVED,
+		flatValuePct: 0,
+		flatSince: FLAT_SINCE,
+		...over,
+	};
+}
+
+describe("flatWindowNotice", () => {
+	it("states what was measured, over which period, and nothing more", () => {
+		expect(flatWindowNotice("codex", flatWindow())).toBe(
+			"OpenAI has reported 0% for this window since 12 Jul 2026, " +
+				"through the latest reading on 21 Aug 2026, while this proxy kept " +
+				"sending traffic against it. There is nothing here to measure.",
+		);
+	});
+
+	it("never claims the provider removed or changed a limit", () => {
+		const text = flatWindowNotice("codex", flatWindow()) ?? "";
+
+		// The percentage series cannot support any of these, however obvious the
+		// inference feels.
+		expect(text).not.toContain("removed");
+		expect(text).not.toContain("no longer");
+		expect(text).not.toContain("retired");
+	});
+
+	it("drops the value when the cohort's accounts disagree on it", () => {
+		const text = flatWindowNotice(
+			"anthropic",
+			flatWindow({ flatValuePct: null }),
+		);
+
+		expect(text).toContain(
+			"has reported an unchanged value for this window on every account",
+		);
+		expect(text).not.toContain("null");
+	});
+
+	it("closes on the LAST READING, so a stalled sampler is visible", () => {
+		// A window frozen because nobody looked at it for a month is not a
+		// provider fact. The date is the only thing that distinguishes the two.
+		const text =
+			flatWindowNotice(
+				"codex",
+				flatWindow({ lastObservedMs: Date.UTC(2026, 6, 20, 12, 0, 0, 0) }),
+			) ?? "";
+
+		expect(text).toContain("the latest reading on 20 Jul 2026");
+	});
+
+	it("says nothing about a window that moved, or one we cannot vouch for", () => {
+		expect(
+			flatWindowNotice("codex", flatWindow({ flatSince: null })),
+		).toBeNull();
+		expect(
+			flatWindowNotice("codex", flatWindow({ lastObservedMs: null })),
+		).toBeNull();
+		// A pre-change cached payload carries none of these fields at all.
+		expect(
+			flatWindowNotice("codex", {
+				window: "five_hour",
+				nSegments: 1,
+				r2: 0,
+				zeroObservedTokenDeltaShare: 0,
+				models: [],
+			}),
+		).toBeNull();
 	});
 });

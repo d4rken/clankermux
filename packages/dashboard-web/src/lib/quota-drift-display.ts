@@ -3,8 +3,10 @@ import type {
 	QuotaDriftModel,
 	QuotaDriftPoint,
 	QuotaDriftUnidentifiedReason,
+	QuotaDriftWindowResult,
 } from "@clankermux/types";
 import { format } from "date-fns";
+import { providerDisplayName } from "../utils/provider-utils";
 
 /**
  * Display helpers for the Analytics "Quota" tab.
@@ -325,4 +327,57 @@ export function summarizeModelGaps(
 		lines.push({ key: model.key, stretch, text: gapStretchText(stretch) });
 	}
 	return lines;
+}
+
+/* ── Windows that never moved ───────────────────────────────────────────── */
+
+/** Full day label for a flat-window boundary, e.g. `12 Jul 2026`. */
+function formatFlatDate(ms: number): string {
+	return format(new Date(ms), "d MMM yyyy");
+}
+
+/** `0%`, `12.5%` — the constant value a window has been reporting. */
+function formatFlatValue(pct: number): string {
+	return `${pct.toFixed(1).replace(/\.0$/, "")}%`;
+}
+
+/**
+ * One sentence for a window the provider has reported without change, or null
+ * when it did move (or when we cannot say it did not).
+ *
+ * The wording states a MEASUREMENT and nothing else: what was reported, over
+ * which period, ending at the newest reading we have. Two things it must never
+ * become:
+ *
+ *  - an inference about the provider ("the limit was removed", "this window no
+ *    longer applies"). The percentage series cannot support any of that;
+ *  - a claim that spans time we did not observe. The closing date is the last
+ *    actual reading, so a window frozen by a STALLED SAMPLER is visible as an
+ *    old end date instead of reading like a live provider fact.
+ *
+ * `flatSince` is already gated on traffic having been sent against the window,
+ * so the sentence may say so.
+ */
+export function flatWindowNotice(
+	provider: string,
+	window: QuotaDriftWindowResult,
+): string | null {
+	const since = window.flatSince ?? null;
+	const lastObserved = window.lastObservedMs ?? null;
+	if (since === null || lastObserved === null) return null;
+
+	const name = providerDisplayName(provider);
+	const value = window.flatValuePct ?? null;
+	const what =
+		value === null
+			? // Each account is constant, at values that disagree — so there is no
+				// single number to name, and inventing one would be a fabrication.
+				"has reported an unchanged value for this window on every account"
+			: `has reported ${formatFlatValue(value)} for this window`;
+	return (
+		`${name} ${what} since ${formatFlatDate(since)}, ` +
+		`through the latest reading on ${formatFlatDate(lastObserved)}, ` +
+		"while this proxy kept sending traffic against it. " +
+		"There is nothing here to measure."
+	);
 }

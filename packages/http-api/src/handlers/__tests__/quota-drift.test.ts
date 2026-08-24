@@ -42,8 +42,11 @@ import type { QuotaDriftResponse } from "@clankermux/types";
 import {
 	attachRequestTokens,
 	collectCohortSegments,
+	collectWindowObservations,
 	computeQuotaDrift,
 	REQUEST_SCAN_SQL,
+	summarizeFlatWindow,
+	type WindowObservation,
 } from "../quota-drift-compute";
 import {
 	COMPUTING_RESPONSE,
@@ -577,3 +580,340 @@ function tieredAccountSamples(): WindowSample[] {
 		resetAt: TIERED_RESET,
 	}));
 }
+
+/* -- Windows that never moved ------------------------------------------- */
+
+const MINUTE_MS = 60_000;
+const DAY_MS = 24 * 60 * MINUTE_MS;
+/** Sampler cadence the flat fixtures imitate - inside MAX_SAMPLE_GAP_MS (15m). */
+const FLAT_STEP_MS = 10 * MINUTE_MS;
+const FLAT_ACCOUNT = "qd-acct-flat";
+
+interface FlatFixture {
+	/** Days of continuous samples ending at FIXTURE_NOW. */
+	days: number;
+	/** The constant percentage reported throughout. */
+	pct: number;
+	/** Whether requests were charged against the window in that period. */
+	withTraffic: boolean;
+	/** Blank out this many samples in the middle of the run. */
+	nullSamples?: number;
+	/** Skip this many samples in the middle, producing a sampling gap. */
+	skipSamples?: number;
+	/** End the samples this long before FIXTURE_NOW (a stalled sampler). */
+	staleForMs?: number;
+	accountId?: string;
+}
+
+/**
+ * A database holding ONE account whose 5-hour window never moves.
+ *
+ * The 7-day percentage is left null throughout: a null yields no runs and so no
+ * segments at all, which keeps each fixture to the single axis under test.
+ * `five_hour_reset` is null too, matching what the provider reports for the
+ * window this case came from, so no rollover splits the run.
+ */
+function seedFlatWindow(opts: FlatFixture): Database {
+	const db = new Database(":memory:");
+	ensureSchema(db);
+	const accountId = opts.accountId ?? FLAT_ACCOUNT;
+	const endMs = FIXTURE_NOW - (opts.staleForMs ?? 0);
+	const count = Math.floor((opts.days * DAY_MS) / FLAT_STEP_MS);
+	const startMs = endMs - count * FLAT_STEP_MS;
+
+	db.run(
+		`INSERT INTO accounts (id, name, provider, created_at,
+			identity_plan_tier, identity_rate_limit_tier)
+		 VALUES (?, ?, 'codex', ?, 'pro', NULL)`,
+		[accountId, accountId, startMs - DAY_MS],
+	);
+	const insertSnapshot = db.prepare(
+		`INSERT INTO usage_snapshots (
+			account_id, provider, sampled_at, five_hour_pct, five_hour_reset,
+			seven_day_pct, seven_day_reset, observed_at, plan_tier, rate_limit_tier
+		) VALUES (?, 'codex', ?, ?, NULL, NULL, NULL, ?, 'pro', NULL)`,
+	);
+	const insertRequest = db.prepare(
+		`INSERT INTO requests (
+			id, timestamp, method, path, account_used, status_code, success,
+			response_time_ms, failover_attempts, model, total_tokens, cost_usd,
+			input_tokens, cache_read_input_tokens, cache_creation_input_tokens,
+			output_tokens, billing_type
+		) VALUES (?, ?, 'POST', '/v1/responses', ?, 200, 1, 800, 0,
+			'gpt-5.6-codex', 400000, 0.4, 400000, 0, 0, 0, 'plan')`,
+	);
+	// The middle of the run, where a null or a gap is planted.
+	const breakAt = Math.floor(count / 2);
+	db.transaction(() => {
+		for (let i = 0; i < count; i++) {
+			const sampledAt = startMs + i * FLAT_STEP_MS;
+			if (opts.skipSamples && i >= breakAt && i < breakAt + opts.skipSamples) {
+				continue;
+			}
+			const blanked =
+				opts.nullSamples != null &&
+				i >= breakAt &&
+				i < breakAt + opts.nullSamples;
+			insertSnapshot.run(
+				accountId,
+				sampledAt,
+				blanked ? null : opts.pct,
+				sampledAt,
+			);
+			// 400k eq-tokens per request, one every 24 samples: material usage
+			// throughout, without seeding a request per sample.
+			if (opts.withTraffic && i % 24 === 0) {
+				insertRequest.run(`${accountId}-r${i}`, sampledAt + 60_000, accountId);
+			}
+		}
+	})();
+	return db;
+}
+
+/** The 5-hour window of the only cohort a flat fixture produces. */
+function flatWindowOf(db: Database) {
+	const payload = computeQuotaDrift(db, {
+		now: FIXTURE_NOW,
+		...TEST_BOOTSTRAP,
+	});
+	const cohort = payload.cohorts.find((c) => c.provider === "codex");
+	return cohort?.windows.find((w) => w.window === "five_hour");
+}
+
+describe("quota-drift flat windows", () => {
+	it("reports a window flat for 43 days while traffic was being sent", () => {
+		// The motivating case: the provider's 5-hour window has reported the same
+		// value for six weeks while the sampler kept reading it every few minutes.
+		const db = seedFlatWindow({ days: 43, pct: 0, withTraffic: true });
+		const window = flatWindowOf(db);
+		db.close();
+
+		expect(window).toBeDefined();
+		expect(window?.flatSince).not.toBeNull();
+		expect(window?.flatValuePct).toBe(0);
+		// It never moved inside the observed span, which is not the same as
+		// "moved long ago" and must not be reported as a timestamp.
+		expect(window?.lastMovementMs).toBeNull();
+		expect(FIXTURE_NOW - (window?.lastObservedMs ?? 0)).toBeLessThanOrEqual(
+			FLAT_STEP_MS,
+		);
+		expect(FIXTURE_NOW - (window?.flatSince ?? 0)).toBeGreaterThan(42 * DAY_MS);
+	});
+
+	it("says nothing about a window that has only been flat for three days", () => {
+		// Below the 5-hour window's 7-day threshold. Three quiet days is an
+		// ordinary weekend, not a provider fact.
+		const db = seedFlatWindow({ days: 3, pct: 0, withTraffic: true });
+		const window = flatWindowOf(db);
+		db.close();
+
+		expect(window?.flatSince).toBeNull();
+		// The observation itself is still reported - only the CLAIM is withheld.
+		expect(window?.lastObservedMs).not.toBeNull();
+	});
+
+	it("says nothing when the window was flat because we sent nothing", () => {
+		// THE case this gate exists for. A window that did not move because no
+		// traffic was charged against it is a fact about us, not the provider,
+		// and the percentage series alone cannot tell the two apart.
+		const db = seedFlatWindow({ days: 43, pct: 0, withTraffic: false });
+		const window = flatWindowOf(db);
+		db.close();
+
+		expect(window?.flatSince).toBeNull();
+	});
+});
+
+describe("collectWindowObservations", () => {
+	const account = {
+		id: FLAT_ACCOUNT,
+		provider: "codex",
+		currentPlanTier: "pro",
+		currentRateLimitTier: null,
+	};
+
+	function observationsFor(opts: FlatFixture): WindowObservation {
+		const db = seedFlatWindow(opts);
+		const rows = db
+			.prepare<
+				{
+					sampled_at: number;
+					observed_at: number | null;
+					five_hour_pct: number | null;
+					five_hour_reset: number | null;
+					seven_day_pct: number | null;
+					seven_day_reset: number | null;
+					plan_tier: string | null;
+					rate_limit_tier: string | null;
+				},
+				[]
+			>(
+				`SELECT sampled_at, observed_at, five_hour_pct, five_hour_reset,
+				        seven_day_pct, seven_day_reset, plan_tier, rate_limit_tier
+				 FROM usage_snapshots ORDER BY sampled_at`,
+			)
+			.all();
+		db.close();
+		const byCohort = collectWindowObservations(account, rows, "five_hour");
+		const observation = [...byCohort.values()][0];
+		expect(observation).toBeDefined();
+		return observation;
+	}
+
+	it("breaks the flat streak at a null sample rather than bridging it", () => {
+		// Absence of evidence is never a flat line: the readings either side of a
+		// blank may be hours apart in meaning.
+		const observation = observationsFor({
+			days: 43,
+			pct: 0,
+			withTraffic: true,
+			nullSamples: 3,
+		});
+
+		// The streak restarts halfway, so it covers ~21 days rather than 43.
+		expect(observation.lastObservedMs - observation.flatStartMs).toBeLessThan(
+			22 * DAY_MS,
+		);
+		expect(observation.flatStartMs).toBeGreaterThan(
+			observation.firstObservedMs,
+		);
+	});
+
+	it("breaks the flat streak at a sampling gap rather than bridging it", () => {
+		// Two hours unobserved: the window may have moved and come back, and
+		// nothing here can rule that out.
+		const observation = observationsFor({
+			days: 43,
+			pct: 0,
+			withTraffic: true,
+			skipSamples: 12,
+		});
+
+		expect(observation.lastObservedMs - observation.flatStartMs).toBeLessThan(
+			22 * DAY_MS,
+		);
+	});
+
+	it("surfaces a stalled sampler as an old last observation", () => {
+		// A window that has not moved because nobody has looked at it for 30 days
+		// is not a provider fact. The percentage series cannot tell the two apart,
+		// so the panel is handed the date and has to disclose it.
+		const observation = observationsFor({
+			days: 43,
+			pct: 0,
+			withTraffic: true,
+			staleForMs: 30 * DAY_MS,
+		});
+
+		expect(FIXTURE_NOW - observation.lastObservedMs).toBeGreaterThan(
+			29 * DAY_MS,
+		);
+	});
+});
+
+describe("summarizeFlatWindow", () => {
+	const FLAT_START = FIXTURE_NOW - 40 * DAY_MS;
+
+	function observation(
+		over: Partial<WindowObservation> & { accountId: string },
+	): WindowObservation {
+		return {
+			firstObservedMs: FIXTURE_NOW - 60 * DAY_MS,
+			lastObservedMs: FIXTURE_NOW,
+			lastMovementMs: null,
+			flatStartMs: FLAT_START,
+			flatValuePct: 0,
+			...over,
+		};
+	}
+
+	/** One segment carrying enough exposure to clear the traffic gate. */
+	function traffic(accountId: string, t0: number): QuotaSegment {
+		return {
+			runId: `${accountId}:1`,
+			accountId,
+			t0,
+			t1: t0 + 60 * MINUTE_MS,
+			dpct: 0,
+			eqTokensByModel: { "gpt-5.6-codex": 5_000_000 },
+		};
+	}
+
+	it("is not flat when one account in the cohort is still moving", () => {
+		// One account still seeing the window move settles it: the window is not
+		// frozen, whatever the rest report.
+		const facts = summarizeFlatWindow(
+			[
+				observation({ accountId: "a" }),
+				observation({
+					accountId: "b",
+					lastMovementMs: FIXTURE_NOW - 2 * DAY_MS,
+					flatStartMs: FIXTURE_NOW - 2 * DAY_MS,
+					flatValuePct: 12,
+				}),
+			],
+			"five_hour",
+			[traffic("a", FLAT_START), traffic("b", FLAT_START)],
+		);
+
+		expect(facts.flatSince).toBeNull();
+		expect(facts.flatValuePct).toBeNull();
+		// The movement itself is still reported.
+		expect(facts.lastMovementMs).toBe(FIXTURE_NOW - 2 * DAY_MS);
+	});
+
+	it("names no value when the accounts are constant at different ones", () => {
+		// Each account is flat, so the cohort is flat - but there is no single
+		// number to name, and inventing one would be a fabrication.
+		const facts = summarizeFlatWindow(
+			[
+				observation({ accountId: "a", flatValuePct: 0 }),
+				observation({ accountId: "b", flatValuePct: 43 }),
+			],
+			"five_hour",
+			[traffic("a", FLAT_START), traffic("b", FLAT_START)],
+		);
+
+		expect(facts.flatSince).toBe(FLAT_START);
+		expect(facts.flatValuePct).toBeNull();
+	});
+
+	it("agrees on a value the whole cohort reports", () => {
+		const facts = summarizeFlatWindow(
+			[
+				observation({ accountId: "a" }),
+				observation({ accountId: "b", flatStartMs: FLAT_START + DAY_MS }),
+			],
+			"five_hour",
+			[traffic("a", FLAT_START), traffic("b", FLAT_START + DAY_MS)],
+		);
+
+		// The cohort has only been uniformly flat since its LAST member went flat.
+		expect(facts.flatSince).toBe(FLAT_START + DAY_MS);
+		expect(facts.flatValuePct).toBe(0);
+	});
+
+	it("holds the weekly window to two reset cycles, not one week", () => {
+		// A weekly percentage legitimately sits still far longer than a 5-hour one.
+		const eightDaysFlat = [
+			observation({ accountId: "a", flatStartMs: FIXTURE_NOW - 8 * DAY_MS }),
+		];
+		const segments = [traffic("a", FIXTURE_NOW - 8 * DAY_MS)];
+
+		expect(
+			summarizeFlatWindow(eightDaysFlat, "five_hour", segments).flatSince,
+		).not.toBeNull();
+		expect(
+			summarizeFlatWindow(eightDaysFlat, "seven_day", segments).flatSince,
+		).toBeNull();
+	});
+
+	it("reports nothing at all when the window was never observed", () => {
+		expect(summarizeFlatWindow([], "five_hour", [])).toEqual({
+			lastMovementMs: null,
+			lastObservedMs: null,
+			flatValuePct: null,
+			flatSince: null,
+		});
+	});
+});

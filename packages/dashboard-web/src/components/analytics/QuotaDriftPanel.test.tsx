@@ -126,6 +126,52 @@ describe("QuotaDriftPanel", () => {
 		expect(html).not.toContain("What this analysis could not measure");
 	});
 
+	it("states a window the provider never moved, below the chart", () => {
+		// The chart keeps its full x-axis and its historical series; the reason it
+		// stops being informative is written out rather than drawn.
+		const html = renderToStaticMarkup(
+			<QuotaDriftPanel
+				cohort={cohort(
+					[
+						windowResult("five_hour", [measuredModel()], {
+							flatSince: Date.UTC(2026, 6, 12, 12, 0, 0, 0),
+							lastObservedMs: Date.UTC(2026, 7, 21, 12, 0, 0, 0),
+							lastMovementMs: null,
+							flatValuePct: 0,
+						}),
+					],
+					{ provider: "codex" },
+				)}
+			/>,
+		);
+
+		expect(html).toContain("OpenAI has reported 0% for this window since");
+		expect(html).toContain("12 Jul 2026");
+		expect(html).toContain("the latest reading on 21 Aug 2026");
+		expect(html).toContain("while this proxy kept sending traffic against it");
+		// Never an inference about the provider: the percentage series cannot
+		// support one, however obvious it feels.
+		expect(html).not.toContain("removed");
+		expect(html).not.toContain("no longer");
+	});
+
+	it("says nothing about a window that is still moving", () => {
+		const html = renderToStaticMarkup(
+			<QuotaDriftPanel
+				cohort={cohort([
+					windowResult("five_hour", [measuredModel()], {
+						flatSince: null,
+						lastObservedMs: Date.UTC(2026, 7, 21, 12, 0, 0, 0),
+						lastMovementMs: Date.UTC(2026, 7, 21, 11, 0, 0, 0),
+						flatValuePct: null,
+					}),
+				])}
+			/>,
+		);
+
+		expect(html).not.toContain("There is nothing here to measure");
+	});
+
 	it("renders one series block per window", () => {
 		const html = renderToStaticMarkup(
 			<QuotaDriftPanel

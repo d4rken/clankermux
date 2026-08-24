@@ -136,6 +136,56 @@ export interface QuotaDriftWindowResult {
 	 */
 	zeroObservedTokenDeltaShare: number;
 	models: QuotaDriftModel[];
+
+	/* ── Whether the window moved at all ──────────────────────────────────
+	 *
+	 * A window can be reported continuously and still never change. The Codex
+	 * 5-hour window has been at the same value since 2026-07-12 while it was
+	 * still being sampled every few minutes, and no fit over it can produce
+	 * anything, because the response variable is constant.
+	 *
+	 * All four fields are OPTIONAL for the same reason as
+	 * `QuotaDriftPoint.unidentifiedReasons`: the payload is a cached blob and
+	 * the newest one can predate them by up to a refresh interval. The handler
+	 * normalizes each absent value to null.
+	 */
+
+	/**
+	 * When the reported percentage last CHANGED, ms since epoch, or null when it
+	 * never changed within the observed span.
+	 *
+	 * Compared between consecutive samples of ONE account: two accounts reading
+	 * different values is not movement.
+	 */
+	lastMovementMs?: number | null;
+	/**
+	 * The most recent non-null sample of this window, ms since epoch, or null
+	 * when nothing was ever reported.
+	 *
+	 * Present so a reader can tell a FROZEN window from a STALLED SAMPLER. A
+	 * window that has not moved because nobody has looked at it for a month is
+	 * not a statement about the provider, and the two are indistinguishable
+	 * without this.
+	 */
+	lastObservedMs?: number | null;
+	/**
+	 * The constant value the window has been reporting, in percent, or null when
+	 * the cohort's accounts are constant at DIFFERENT values (each is flat, so
+	 * the cohort is flat, but there is no single number to name).
+	 */
+	flatValuePct?: number | null;
+	/**
+	 * When the current unbroken flat stretch began, ms since epoch, or null.
+	 *
+	 * Set only when ALL of these hold, and the last one is the point of the
+	 * field: no movement for longer than this window's threshold; the observed
+	 * span extends beyond that threshold; observation was CONTINUOUS through it;
+	 * and material proxy traffic was charged against the window in that period.
+	 *
+	 * A window that did not move because we sent nothing is not a provider fact,
+	 * and must not be reported as one.
+	 */
+	flatSince?: number | null;
 }
 
 /** One cohort of accounts fitted together. */
