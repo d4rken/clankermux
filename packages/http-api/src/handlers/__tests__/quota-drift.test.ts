@@ -1861,6 +1861,8 @@ function stripNewFields(payload: QuotaDriftResponse): QuotaDriftResponse {
 			legacy.flatValuePct = undefined;
 			legacy.flatSince = undefined;
 			legacy.flatScope = undefined;
+			legacy.notReportedSince = undefined;
+			legacy.notReportedScope = undefined;
 			for (const model of window.models) {
 				for (const point of model.points) {
 					(point as unknown as Record<string, unknown>).unidentifiedReasons =
@@ -1882,6 +1884,7 @@ describe("quota-drift payload normalization", () => {
 		// The fixture really is missing them, or the test proves nothing.
 		const legacyWindow = legacy.cohorts[0].windows[0];
 		expect("flatSince" in legacyWindow).toBe(false);
+		expect("notReportedSince" in legacyWindow).toBe(false);
 		expect("unidentifiedReasons" in legacyWindow.models[0].points[0]).toBe(
 			false,
 		);
@@ -1899,6 +1902,8 @@ describe("quota-drift payload normalization", () => {
 				expect(window.lastObservedMs).toBeNull();
 				expect(window.lastObservedValuePct).toBeNull();
 				expect(window.flatValuePct).toBeNull();
+				expect(window.notReportedSince).toBeNull();
+				expect(window.notReportedScope).toBeNull();
 				for (const model of window.models) {
 					expect(model.points.length).toBeGreaterThan(0);
 					for (const point of model.points) {
