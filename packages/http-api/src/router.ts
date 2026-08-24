@@ -103,6 +103,7 @@ import {
 	createPaymentsSeedHandler,
 	createPaymentsSummaryHandler,
 } from "./handlers/payments";
+import { createQuotaDriftHandler } from "./handlers/quota-drift";
 import { parseRequestFilters } from "./handlers/request-filters";
 import {
 	createRequestPayloadHandler,
@@ -221,6 +222,7 @@ export class APIRouter {
 			this.context,
 		);
 		const usageHistoryHandler = createUsageHistoryHandler(this.context);
+		const quotaDriftHandler = createQuotaDriftHandler(this.context);
 		const memoryHistoryHandler = createMemoryHistoryHandler(this.context);
 		const cacheKeepaliveHandler = createCacheKeepaliveHandler(this.context);
 		const cacheKeepaliveHistoryHandler = createCacheKeepaliveHistoryHandler(
@@ -459,6 +461,12 @@ export class APIRouter {
 		this.handlers.set("GET:/api/analytics/usage-history", (_req, url) => {
 			return usageHistoryHandler(url.searchParams);
 		});
+		// Precomputed quota-drift analysis. Takes no params: the pass fits the
+		// whole retained history, and a range filter would silently change which
+		// evidence a verdict rests on.
+		this.handlers.set("GET:/api/analytics/quota-drift", () =>
+			quotaDriftHandler(new URLSearchParams()),
+		);
 		this.handlers.set("GET:/api/analytics/memory-history", (_req, url) => {
 			return memoryHistoryHandler(url.searchParams);
 		});

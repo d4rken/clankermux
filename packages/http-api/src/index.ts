@@ -33,6 +33,12 @@ export {
 } from "./handlers/public/dto";
 export { PublicRouter, type PublicRouterDeps } from "./handlers/public/router";
 export { toPublicStreamEvent } from "./handlers/public/stream";
+export {
+	__setQuotaDriftWorkerFactoryForTests,
+	QUOTA_DRIFT_PASS_TIMEOUT_MS,
+	type QuotaDriftPassResult,
+	runQuotaDriftPass,
+} from "./handlers/quota-drift-precompute";
 export * from "./handlers/storage";
 export { APIRouter } from "./router";
 // Export admin service functions (account + API-key management)

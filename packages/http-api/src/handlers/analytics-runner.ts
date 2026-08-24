@@ -21,6 +21,7 @@ import { createCacheEffectivenessHandler as createDirectCacheEffectivenessHandle
 import { createCacheKeepaliveHistoryHandler as createDirectCacheKeepaliveHistoryHandler } from "./cache-keepalive-history-direct";
 import { createMemoryHistoryHandler as createDirectMemoryHistoryHandler } from "./memory-history-direct";
 import { createPaymentsSummaryDataHandler as createDirectPaymentsSummaryDataHandler } from "./payments-summary-direct";
+import { createQuotaDriftHandler as createDirectQuotaDriftHandler } from "./quota-drift-direct";
 import { createStatsHandler as createDirectStatsHandler } from "./stats-direct";
 import { createUsageHistoryHandler as createDirectUsageHistoryHandler } from "./usage-history-direct";
 
@@ -55,6 +56,7 @@ const WORKER_SOFT_TIMEOUT_MS_BY_KIND: Record<DashboardWorkerKind, number> = {
 	"cache-effectiveness": DEFAULT_WORKER_TIMEOUT_MS,
 	"payments-summary": DEFAULT_WORKER_TIMEOUT_MS,
 	"filter-options": DEFAULT_WORKER_TIMEOUT_MS,
+	"quota-drift": DEFAULT_WORKER_TIMEOUT_MS,
 };
 
 // Per-kind response-cache TTL. The filter-options lists change only when a new
@@ -168,6 +170,10 @@ const LANE_BY_KIND: Record<DashboardWorkerKind, WorkerLane> = {
 	"cache-effectiveness": "light",
 	"payments-summary": "light",
 	"filter-options": "light",
+	// Light despite the analysis behind it: the endpoint reads ONE precomputed
+	// row. The seconds-long pass that produced it runs on its own dedicated
+	// worker (quota-drift-worker.ts), never on a lane serving panel reads.
+	"quota-drift": "light",
 };
 
 const WORKER_LANES: readonly WorkerLane[] = ["heavy", "light"];
@@ -240,6 +246,11 @@ const KIND_LABELS: Record<
 		failureMessage: "Failed to fetch analytics filter options",
 		tooManyMessage: "Too many analytics filter option requests",
 	},
+	"quota-drift": {
+		timeoutMessage: "Quota drift request timed out",
+		failureMessage: "Failed to fetch quota drift data",
+		tooManyMessage: "Too many quota drift requests",
+	},
 };
 
 export function createIsolatedAnalyticsHandler(context: APIContext) {
@@ -310,6 +321,18 @@ export function createIsolatedCacheEffectivenessHandler(context: APIContext) {
 		context,
 		"cache-effectiveness",
 		createDirectCacheEffectivenessHandler(context),
+	);
+}
+
+/**
+ * Worker-routed read of the newest PRECOMPUTED quota-drift payload. The fit
+ * itself never runs here — see quota-drift-precompute.ts.
+ */
+export function createIsolatedQuotaDriftHandler(context: APIContext) {
+	return createIsolatedDashboardHandler(
+		context,
+		"quota-drift",
+		createDirectQuotaDriftHandler(context),
 	);
 }
 

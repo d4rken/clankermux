@@ -450,6 +450,13 @@ async function tryDeleteSnapshotsBatched(
 }
 
 /**
+ * How many precomputed quota-drift payloads survive a cleanup pass. Only the
+ * newest is ever read; the spares exist so an in-flight read cannot race the
+ * prune, and so a bad pass can be compared against its predecessor by hand.
+ */
+const QUOTA_DRIFT_RESULTS_KEEP = 3;
+
+/**
  * Retention DELETEs, off the main thread. Previously these ran synchronously on
  * the main connection inside the hourly tick; deleting a batch of large payload
  * blobs froze the event loop for seconds. Here the heavy payload/request deletes
@@ -519,16 +526,48 @@ async function runCleanup(
 		// millions of rows, so it must not run as one writer-slot-holding
 		// statement. Deletes rows only — page reclamation to disk is the hourly
 		// "vacuum" kind's job.
-		const removedSnapshots = await tryDeleteSnapshotsBatched(
-			db,
-			"usage_snapshots",
-			usageSnapshotCutoff,
-		);
+		//
+		// `usage_scoped_snapshots` is pruned on the SAME cutoff and its deletions
+		// are FOLDED INTO removedSnapshots. Both tables are the per-account usage
+		// series and are governed by the one `usage_snapshot_retention_days`
+		// control, so splitting the report would offer a second number for a knob
+		// that has only one.
+		const removedSnapshots =
+			(await tryDeleteSnapshotsBatched(
+				db,
+				"usage_snapshots",
+				usageSnapshotCutoff,
+			)) +
+			(await tryDeleteSnapshotsBatched(
+				db,
+				"usage_scoped_snapshots",
+				usageSnapshotCutoff,
+			));
 		const removedMemorySnapshots = await tryDeleteSnapshotsBatched(
 			db,
 			"memory_snapshots",
 			memorySnapshotCutoff,
 		);
+
+		// Precomputed quota-drift payloads: keep the most recent few, drop the
+		// rest. Age is the wrong rule here — a scheduler that has been down for a
+		// week must not have its one surviving result aged out from under the
+		// panel, and a single blob is small enough that "a few" is the whole
+		// budget. Not counted in any reported figure: it is a cache, not data.
+		try {
+			db.run(
+				`DELETE FROM quota_drift_results
+				 WHERE computed_at NOT IN (
+					SELECT computed_at FROM quota_drift_results
+					ORDER BY computed_at DESC LIMIT ?
+				 )`,
+				[QUOTA_DRIFT_RESULTS_KEEP],
+			);
+		} catch (err) {
+			console.warn(
+				`[cleanup-worker] quota_drift_results prune failed: ${err instanceof Error ? err.message : String(err)}`,
+			);
+		}
 
 		// Byte-budget pass — LAST, deliberately: it must run AFTER the `requests`
 		// age pass and its FK cascades. A payload whose parent request row is

@@ -11,10 +11,12 @@ import type { AnyUsageData, UsageData } from "@clankermux/providers";
 import { getWeeklyBurnSlope } from "@clankermux/proxy";
 import type {
 	Account,
+	ScopedUsageSnapshotRow,
 	UsageSnapshotRow,
 	UsageSnapshotSample,
 } from "@clankermux/types";
 import {
+	buildSamplerRows,
 	buildSnapshotRows,
 	type SamplerCache,
 	UsageSnapshotSampler,
@@ -30,17 +32,27 @@ const FRESHNESS = 150_000; // 150s freshness window
 interface SeedEntry {
 	data: AnyUsageData | null;
 	ageMs: number | null;
+	/**
+	 * Observation provenance of the entry. Omitted means "a live reading", i.e.
+	 * observed when it was written (`NOW - ageMs`) — what `usageCache.set()`
+	 * records. Pass `null` explicitly for a RECONSTRUCTED entry with no
+	 * trustworthy observation time (`usageCache.setUntimed()`).
+	 */
+	observedAtMs?: number | null;
 }
 
 /** Minimal SamplerCache backed by a plain map of accountId → {data, age}. */
 function makeCache(entries: Record<string, SeedEntry>): SamplerCache {
 	return {
-		peek(id: string): AnyUsageData | null {
-			return entries[id]?.data ?? null;
-		},
-		peekAge(id: string): number | null {
+		peekWithAge(id: string) {
 			const e = entries[id];
-			return e ? e.ageMs : null;
+			if (!e || e.ageMs === null || e.data === null) return null;
+			return {
+				data: e.data,
+				ageMs: e.ageMs,
+				observedAtMs:
+					e.observedAtMs === undefined ? NOW - e.ageMs : e.observedAtMs,
+			};
 		},
 	};
 }
@@ -67,9 +79,35 @@ function usageData(opts: {
 	return data as UsageData;
 }
 
+/**
+ * Usage payload carrying per-family `weekly_scoped` limits (the generic
+ * `limits[]` form) alongside optional flat account-wide windows.
+ */
+function usageDataWithScoped(
+	scoped: Array<{
+		displayName: string;
+		percent: number;
+		resetsAt: string;
+		isActive?: boolean;
+	}>,
+	flat?: Parameters<typeof usageData>[0],
+): UsageData {
+	const data = (flat ? usageData(flat) : {}) as Record<string, unknown>;
+	data.limits = scoped.map((s) => ({
+		kind: "weekly_scoped",
+		percent: s.percent,
+		resets_at: s.resetsAt,
+		is_active: s.isActive ?? true,
+		scope: { model: { display_name: s.displayName } },
+	}));
+	return data as UsageData;
+}
+
 interface Acct {
 	id: string;
 	provider: string;
+	identity_plan_tier?: string | null;
+	identity_rate_limit_tier?: string | null;
 }
 
 // ---------------------------------------------------------------------------
@@ -117,6 +155,10 @@ describe("buildSnapshotRows", () => {
 			fiveHourReset: new Date(fiveReset).getTime(),
 			sevenDayPct: 7,
 			sevenDayReset: new Date(sevenReset).getTime(),
+			// The reading is as old as the cache entry, not as old as the tick.
+			observedAt: NOW - 1_000,
+			planTier: null,
+			rateLimitTier: null,
 		});
 		const codex = rows.find((r) => r.accountId === "codex-1");
 		expect(codex?.fiveHourPct).toBe(90);
@@ -322,7 +364,73 @@ describe("buildSnapshotRows", () => {
 			fiveHourReset: new Date(fiveReset).getTime(),
 			sevenDayPct: 8,
 			sevenDayReset: new Date(sevenReset).getTime(),
+			observedAt: NOW - 1_000,
+			planTier: null,
+			rateLimitTier: null,
 		});
+	});
+
+	it("stamps the observation clock and the tiers as of the sample", () => {
+		const accounts: Acct[] = [
+			{
+				id: "anth-1",
+				provider: "anthropic",
+				identity_plan_tier: "max",
+				identity_rate_limit_tier: "20x",
+			},
+		];
+		const cache = makeCache({
+			"anth-1": { ageMs: 45_000, data: usageData({ fiveHourUtil: 42 }) },
+		});
+
+		const rows = buildSnapshotRows(accounts, cache, NOW, FRESHNESS);
+
+		expect(rows[0].observedAt).toBe(NOW - 45_000);
+		expect(rows[0].planTier).toBe("max");
+		expect(rows[0].rateLimitTier).toBe("20x");
+	});
+
+	it("takes the entry's observation time even when it long predates the write", () => {
+		// A reading observed 3h before it was cached, but written 1s ago: the
+		// freshness gate runs on the WRITE age, the row records the OBSERVATION.
+		const observed = NOW - 3 * 60 * 60 * 1000;
+		const accounts: Acct[] = [{ id: "codex-1", provider: "codex" }];
+		const cache = makeCache({
+			"codex-1": {
+				ageMs: 1_000,
+				observedAtMs: observed,
+				data: usageData({ fiveHourUtil: 88 }),
+			},
+		});
+
+		const rows = buildSnapshotRows(accounts, cache, NOW, FRESHNESS);
+
+		expect(rows).toHaveLength(1);
+		expect(rows[0].sampledAt).toBe(NOW);
+		expect(rows[0].observedAt).toBe(observed);
+	});
+
+	it("writes no row when the reading has no observation time (never substitutes the tick clock)", () => {
+		// What `usageCache.setUntimed()` produces: a fresh WRITE whose reading was
+		// observed at an unknowable time (Codex usage recovered from a retained
+		// payload). Fabricating `now` here would look authoritative forever.
+		const accounts: Acct[] = [
+			{ id: "recovered", provider: "codex" },
+			{ id: "live", provider: "anthropic" },
+		];
+		const cache = makeCache({
+			recovered: {
+				ageMs: 1_000,
+				observedAtMs: null,
+				data: usageData({ fiveHourUtil: 99, sevenDayUtil: 71 }),
+			},
+			live: { ageMs: 1_000, data: usageData({ fiveHourUtil: 12 }) },
+		});
+
+		const rows = buildSnapshotRows(accounts, cache, NOW, FRESHNESS);
+
+		// The untimed account is an honest gap; its neighbour is unaffected.
+		expect(rows.map((r) => r.accountId)).toEqual(["live"]);
 	});
 });
 
@@ -338,6 +446,7 @@ function acct(id: string, provider: string, paused = false): Account {
 interface SamplerHarness {
 	sampler: UsageSnapshotSampler;
 	insertedRows: () => UsageSnapshotRow[];
+	insertedScopedRows: () => ScopedUsageSnapshotRow[];
 	snapshotQueries: () => Array<{ accountIds: string[]; sinceMs: number }>;
 }
 
@@ -354,11 +463,15 @@ function makeSampler(opts: {
 	storedSnapshots?: () => UsageSnapshotSample[];
 }): SamplerHarness {
 	const inserted: UsageSnapshotRow[] = [];
+	const insertedScoped: ScopedUsageSnapshotRow[] = [];
 	const queries: Array<{ accountIds: string[]; sinceMs: number }> = [];
 	const sampler = new UsageSnapshotSampler({
 		getAccounts: async () => opts.accounts,
 		insertSnapshots: async (rows) => {
 			inserted.push(...rows);
+		},
+		insertScopedSnapshots: async (rows) => {
+			insertedScoped.push(...rows);
 		},
 		getRecentSnapshots: async (accountIds, sinceMs) => {
 			queries.push({ accountIds, sinceMs });
@@ -373,9 +486,144 @@ function makeSampler(opts: {
 	return {
 		sampler,
 		insertedRows: () => inserted,
+		insertedScopedRows: () => insertedScoped,
 		snapshotQueries: () => queries,
 	};
 }
+
+describe("buildSamplerRows scoped (per-family weekly) projection", () => {
+	const RESET = "2023-11-21T22:13:20.000Z";
+
+	it("emits one scoped row per reported family, carrying the display name", () => {
+		const accounts: Acct[] = [{ id: "anth-1", provider: "anthropic" }];
+		const cache = makeCache({
+			"anth-1": {
+				ageMs: 1_000,
+				data: usageDataWithScoped(
+					[
+						{ displayName: "Claude Opus 5", percent: 63, resetsAt: RESET },
+						{ displayName: "Claude Sonnet 4.6", percent: 12, resetsAt: RESET },
+					],
+					{ fiveHourUtil: 42 },
+				),
+			},
+		});
+
+		const { rows, scopedRows } = buildSamplerRows(
+			accounts,
+			cache,
+			NOW,
+			FRESHNESS,
+		);
+
+		expect(rows).toHaveLength(1);
+		expect(scopedRows).toHaveLength(2);
+		expect(scopedRows).toContainEqual({
+			accountId: "anth-1",
+			sampledAt: NOW,
+			family: "opus",
+			displayName: "Claude Opus 5",
+			pct: 63,
+			resetAt: new Date(RESET).getTime(),
+		});
+		expect(scopedRows.find((r) => r.family === "sonnet")?.displayName).toBe(
+			"Claude Sonnet 4.6",
+		);
+	});
+
+	it("writes nothing at all when the cache entry is stale", () => {
+		const accounts: Acct[] = [{ id: "anth-1", provider: "anthropic" }];
+		const cache = makeCache({
+			"anth-1": {
+				ageMs: FRESHNESS + 1,
+				data: usageDataWithScoped([
+					{ displayName: "Claude Opus 5", percent: 63, resetsAt: RESET },
+				]),
+			},
+		});
+
+		const { rows, scopedRows } = buildSamplerRows(
+			accounts,
+			cache,
+			NOW,
+			FRESHNESS,
+		);
+
+		expect(rows).toHaveLength(0);
+		expect(scopedRows).toHaveLength(0);
+	});
+
+	it("writes nothing at all when the reading has no observation time", () => {
+		// The scoped series carries only the tick clock, so an unknown observation
+		// time would file these percentages under a time they were not observed at.
+		const accounts: Acct[] = [{ id: "anth-1", provider: "anthropic" }];
+		const cache = makeCache({
+			"anth-1": {
+				ageMs: 1_000,
+				observedAtMs: null,
+				data: usageDataWithScoped(
+					[{ displayName: "Claude Opus 5", percent: 63, resetsAt: RESET }],
+					{ fiveHourUtil: 42 },
+				),
+			},
+		});
+
+		const { rows, scopedRows } = buildSamplerRows(
+			accounts,
+			cache,
+			NOW,
+			FRESHNESS,
+		);
+
+		expect(rows).toHaveLength(0);
+		expect(scopedRows).toHaveLength(0);
+	});
+
+	it("records scoped windows even when no account-wide window is reported", () => {
+		const accounts: Acct[] = [{ id: "anth-1", provider: "anthropic" }];
+		const cache = makeCache({
+			"anth-1": {
+				ageMs: 1_000,
+				data: usageDataWithScoped([
+					{ displayName: "Claude Fable 5", percent: 90, resetsAt: RESET },
+				]),
+			},
+		});
+
+		const { rows, scopedRows } = buildSamplerRows(
+			accounts,
+			cache,
+			NOW,
+			FRESHNESS,
+		);
+
+		// No 5h/7d evidence, so no account-wide row - but the scoped evidence is
+		// real and must not be discarded with it.
+		expect(rows).toHaveLength(0);
+		expect(scopedRows).toHaveLength(1);
+		expect(scopedRows[0].family).toBe("fable");
+	});
+
+	it("drops a scoped window whose reset is already in the past", () => {
+		const accounts: Acct[] = [{ id: "anth-1", provider: "anthropic" }];
+		const cache = makeCache({
+			"anth-1": {
+				ageMs: 1_000,
+				data: usageDataWithScoped([
+					{
+						displayName: "Claude Opus 5",
+						percent: 63,
+						resetsAt: new Date(NOW - 1000).toISOString(),
+					},
+				]),
+			},
+		});
+
+		const { scopedRows } = buildSamplerRows(accounts, cache, NOW, FRESHNESS);
+
+		expect(scopedRows).toHaveLength(0);
+	});
+});
 
 describe("UsageSnapshotSampler read-through tick", () => {
 	it("records rows purely from the cache for both codex and anthropic", async () => {
@@ -393,6 +641,53 @@ describe("UsageSnapshotSampler read-through tick", () => {
 		expect(rows).toHaveLength(2);
 		expect(rows.find((r) => r.accountId === "codex-1")?.fiveHourPct).toBe(7);
 		expect(rows.find((r) => r.accountId === "anth-1")?.fiveHourPct).toBe(42);
+	});
+
+	it("persists scoped rows from the same tick as the account-wide rows", async () => {
+		// tick() stamps the real clock, so the window must reset in the FUTURE or
+		// the normalizer drops it as a rolled-over window.
+		const reset = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString();
+		const h = makeSampler({
+			accounts: [acct("anth-1", "anthropic")],
+			cache: makeCache({
+				"anth-1": {
+					ageMs: 1_000,
+					data: usageDataWithScoped(
+						[{ displayName: "Claude Opus 5", percent: 63, resetsAt: reset }],
+						{ fiveHourUtil: 42 },
+					),
+				},
+			}),
+		});
+
+		await h.sampler.tick();
+
+		expect(h.insertedRows()).toHaveLength(1);
+		const scoped = h.insertedScopedRows();
+		expect(scoped).toHaveLength(1);
+		expect(scoped[0].family).toBe("opus");
+		// Both series share the tick's single `now`.
+		expect(scoped[0].sampledAt).toBe(h.insertedRows()[0].sampledAt);
+	});
+
+	it("writes no scoped rows when the cache is stale", async () => {
+		const reset = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString();
+		const h = makeSampler({
+			accounts: [acct("anth-1", "anthropic")],
+			cache: makeCache({
+				"anth-1": {
+					ageMs: FRESHNESS + 1,
+					data: usageDataWithScoped([
+						{ displayName: "Claude Opus 5", percent: 63, resetsAt: reset },
+					]),
+				},
+			}),
+		});
+
+		await h.sampler.tick();
+
+		expect(h.insertedRows()).toHaveLength(0);
+		expect(h.insertedScopedRows()).toHaveLength(0);
 	});
 
 	it("writes an honest gap (no row) when a codex cache entry is missing", async () => {
@@ -420,6 +715,28 @@ describe("UsageSnapshotSampler read-through tick", () => {
 		await h.sampler.tick();
 
 		expect(h.insertedRows()).toHaveLength(0);
+	});
+
+	it("writes an honest gap (no row, either series) when the reading has no observation time", async () => {
+		const reset = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString();
+		const h = makeSampler({
+			accounts: [acct("codex-1", "codex")],
+			cache: makeCache({
+				"codex-1": {
+					ageMs: 1_000, // freshly WRITTEN...
+					observedAtMs: null, // ...but observed at an unknowable time
+					data: usageDataWithScoped(
+						[{ displayName: "Claude Opus 5", percent: 63, resetsAt: reset }],
+						{ fiveHourUtil: 99 },
+					),
+				},
+			}),
+		});
+
+		await h.sampler.tick();
+
+		expect(h.insertedRows()).toHaveLength(0);
+		expect(h.insertedScopedRows()).toHaveLength(0);
 	});
 
 	it("still records a PAUSED codex account with a fresh cache entry (pause is irrelevant to reading)", async () => {
@@ -683,6 +1000,7 @@ describe("UsageSnapshotSampler weekly burn-slope feed", () => {
 			insertSnapshots: async () => {
 				throw new Error("db down");
 			},
+			insertScopedSnapshots: async () => {},
 			getRecentSnapshots: async () =>
 				risingSeries({
 					accountId: id,
@@ -711,6 +1029,7 @@ describe("UsageSnapshotSampler weekly burn-slope feed", () => {
 		const sampler = new UsageSnapshotSampler({
 			getAccounts: async () => [acct(id, "anthropic")],
 			insertSnapshots: async () => {},
+			insertScopedSnapshots: async () => {},
 			getRecentSnapshots: async () => {
 				throw new Error("db down");
 			},

@@ -125,6 +125,7 @@ describe("dashboard worker per-kind timeouts", () => {
 			"cache-effectiveness",
 			"payments-summary",
 			"filter-options",
+			"quota-drift",
 		] as const) {
 			expect(getWorkerTimeoutMs(kind)).toBe(15_000);
 			expect(getWorkerTimeoutMs("analytics")).toBeGreaterThan(

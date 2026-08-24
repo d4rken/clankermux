@@ -26,15 +26,19 @@ export class UsageSnapshotRepository extends BaseRepository<UsageSnapshotRow> {
 				`
 				INSERT INTO usage_snapshots (
 					account_id, provider, sampled_at,
-					five_hour_pct, five_hour_reset, seven_day_pct, seven_day_reset
+					five_hour_pct, five_hour_reset, seven_day_pct, seven_day_reset,
+					observed_at, plan_tier, rate_limit_tier
 				)
-				VALUES (?, ?, ?, ?, ?, ?, ?)
+				VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 				ON CONFLICT (account_id, sampled_at) DO UPDATE SET
 					provider = EXCLUDED.provider,
 					five_hour_pct = EXCLUDED.five_hour_pct,
 					five_hour_reset = EXCLUDED.five_hour_reset,
 					seven_day_pct = EXCLUDED.seven_day_pct,
-					seven_day_reset = EXCLUDED.seven_day_reset
+					seven_day_reset = EXCLUDED.seven_day_reset,
+					observed_at = EXCLUDED.observed_at,
+					plan_tier = EXCLUDED.plan_tier,
+					rate_limit_tier = EXCLUDED.rate_limit_tier
 			`,
 				[
 					row.accountId,
@@ -44,6 +48,9 @@ export class UsageSnapshotRepository extends BaseRepository<UsageSnapshotRow> {
 					row.fiveHourReset ?? null,
 					row.sevenDayPct ?? null,
 					row.sevenDayReset ?? null,
+					row.observedAt ?? null,
+					row.planTier ?? null,
+					row.rateLimitTier ?? null,
 				],
 			);
 		}
@@ -201,9 +208,13 @@ export class UsageSnapshotRepository extends BaseRepository<UsageSnapshotRow> {
 			five_hour_reset: number | null;
 			seven_day_pct: number | null;
 			seven_day_reset: number | null;
+			observed_at: number | null;
+			plan_tier: string | null;
+			rate_limit_tier: string | null;
 		}>(
 			`SELECT account_id, provider, sampled_at,
-			        five_hour_pct, five_hour_reset, seven_day_pct, seven_day_reset
+			        five_hour_pct, five_hour_reset, seven_day_pct, seven_day_reset,
+			        observed_at, plan_tier, rate_limit_tier
 			 FROM usage_snapshots
 			 WHERE account_id IN (${placeholders}) AND sampled_at >= ?
 			 ORDER BY account_id, sampled_at`,
@@ -220,6 +231,9 @@ export class UsageSnapshotRepository extends BaseRepository<UsageSnapshotRow> {
 			sevenDayPct: row.seven_day_pct == null ? null : Number(row.seven_day_pct),
 			sevenDayReset:
 				row.seven_day_reset == null ? null : Number(row.seven_day_reset),
+			observedAt: row.observed_at == null ? null : Number(row.observed_at),
+			planTier: row.plan_tier ?? null,
+			rateLimitTier: row.rate_limit_tier ?? null,
 		}));
 	}
 

@@ -23,6 +23,8 @@ import type {
 	PaymentSource,
 	RankedSnapshot,
 	RateLimitReason,
+	ScopedUsageSnapshotRow,
+	ScopedUsageSnapshotSample,
 	StorageUsageType,
 	StrategyStore,
 	ToolCallStat,
@@ -65,12 +67,17 @@ import { ComboRepository } from "./repositories/combo.repository";
 import { MemorySnapshotRepository } from "./repositories/memory-snapshot.repository";
 import { OAuthRepository } from "./repositories/oauth.repository";
 import {
+	QuotaDriftResultRepository,
+	type QuotaDriftResultRow,
+} from "./repositories/quota-drift-result.repository";
+import {
 	type RequestData,
 	RequestRepository,
 	type RequestRoutingData,
 } from "./repositories/request.repository";
 import { StatsRepository } from "./repositories/stats.repository";
 import { StrategyRepository } from "./repositories/strategy.repository";
+import { UsageScopedSnapshotRepository } from "./repositories/usage-scoped-snapshot.repository";
 import { UsageSnapshotRepository } from "./repositories/usage-snapshot.repository";
 import { withRetryingMethods } from "./retry";
 
@@ -288,6 +295,12 @@ const RETENTION_USAGE_TABLES: ReadonlyArray<{
 	{ key: "payloads", table: "request_payloads" },
 	{ key: "requests", table: "requests" },
 	{ key: "usage_snapshots", table: "usage_snapshots" },
+	// Rides the usage-snapshot retention control (one knob for one series
+	// family), so it has no control of its own — the card sums the two.
+	{ key: "usage_scoped_snapshots", table: "usage_scoped_snapshots" },
+	// Precomputed analysis output, kept to a handful of rows by the cleanup pass
+	// rather than by a retention control of its own.
+	{ key: "quota_drift_results", table: "quota_drift_results" },
 	{ key: "memory_snapshots", table: "memory_snapshots" },
 	// Riders on the requests retention (FK cascade) — no control of their own.
 	{ key: "tool_calls", table: "request_tool_calls" },
@@ -386,10 +399,12 @@ export class DatabaseOperations implements StrategyStore, Disposable {
 	private auth: AuthRepository;
 	private combo: ComboRepository;
 	private usageSnapshots: UsageSnapshotRepository;
+	private usageScopedSnapshots: UsageScopedSnapshotRepository;
 	private memorySnapshots: MemorySnapshotRepository;
 	private cacheKeepaliveSnapshots: CacheKeepaliveSnapshotRepository;
 	private accountPayments: AccountPaymentRepository;
 	private codexResetCreditEvents: CodexResetCreditEventRepository;
+	private quotaDriftResults: QuotaDriftResultRepository;
 
 	constructor(
 		dbPath?: string,
@@ -469,6 +484,14 @@ export class DatabaseOperations implements StrategyStore, Disposable {
 		this.usageSnapshots = retrying(
 			new UsageSnapshotRepository(this.adapter),
 			"usageSnapshots",
+		);
+		this.usageScopedSnapshots = retrying(
+			new UsageScopedSnapshotRepository(this.adapter),
+			"usageScopedSnapshots",
+		);
+		this.quotaDriftResults = retrying(
+			new QuotaDriftResultRepository(this.adapter),
+			"quotaDriftResults",
 		);
 		this.memorySnapshots = retrying(
 			new MemorySnapshotRepository(this.adapter),
@@ -2275,6 +2298,44 @@ OAuth tokens will need to be re-authenticated.
 
 	async deleteUsageSnapshotsOlderThan(cutoffMs: number): Promise<number> {
 		return this.usageSnapshots.deleteOlderThan(cutoffMs);
+	}
+
+	// ── Scoped (per-model-family weekly) usage snapshot operations ────────────
+
+	async insertScopedUsageSnapshots(
+		rows: ScopedUsageSnapshotRow[],
+	): Promise<void> {
+		await this.usageScopedSnapshots.insertSnapshots(rows);
+	}
+
+	async getRecentScopedUsageSnapshotsForAccounts(
+		accountIds: string[],
+		sinceMs: number,
+	): Promise<ScopedUsageSnapshotSample[]> {
+		return this.usageScopedSnapshots.getRecentSnapshotsForAccounts(
+			accountIds,
+			sinceMs,
+		);
+	}
+
+	async deleteScopedUsageSnapshotsOlderThan(cutoffMs: number): Promise<number> {
+		return this.usageScopedSnapshots.deleteOlderThan(cutoffMs);
+	}
+
+	// ── Precomputed quota-drift results ───────────────────────────────────────
+
+	/**
+	 * Store one completed quota-drift precompute pass. Written from the MAIN
+	 * thread: the pass itself runs on a read-only worker connection, which
+	 * cannot write.
+	 */
+	async insertQuotaDriftResult(row: QuotaDriftResultRow): Promise<void> {
+		await this.quotaDriftResults.insertResult(row);
+	}
+
+	/** The newest stored quota-drift payload, or null before the first pass. */
+	async getLatestQuotaDriftResult(): Promise<QuotaDriftResultRow | null> {
+		return this.quotaDriftResults.getLatest();
 	}
 
 	// ── Memory snapshot operations delegated to repository ─────────────────────

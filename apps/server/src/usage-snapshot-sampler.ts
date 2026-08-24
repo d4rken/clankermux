@@ -26,14 +26,20 @@
  *    it never probes, paused Codex accounts are treated no differently from any
  *    other: pause is irrelevant to reading, so a paused account with a fresh cache
  *    entry is still recorded.
- *  - Freshness is honest: if the cache for an account is missing or older than
- *    `freshnessMs`, no row is written (gaps are real, never carried forward).
+ *  - Freshness is honest: if the cache for an account is missing, older than
+ *    `freshnessMs`, or carries no observation time at all, no row is written
+ *    (gaps are real, never carried forward, and never invented).
  *    This is the WRITE path — the DB stores only what was actually observed.
  *    The READ path (the usage-history handler) is where a paused/maxed account's
  *    last value is carried forward across those gaps until its recorded window
  *    reset, so the pool-average chart line doesn't falsely drop when the highest
  *    account stops reporting. Gap-vs-carry is the write/read boundary: see
  *    `packages/http-api/src/handlers/usage-history.ts`.
+ *  - The SAME tick also records the per-model-family weekly windows into
+ *    `usage_scoped_snapshots` (capture only — nothing reads them yet). They come
+ *    from the same normalized reading under the same freshness gate; history for
+ *    that axis cannot be backfilled, so recording starts before there is a
+ *    consumer.
  */
 
 import {
@@ -48,6 +54,7 @@ import type {
 	Account,
 	AnthropicUsageData,
 	PredictionPoint,
+	ScopedUsageSnapshotRow,
 	UsageSnapshotRow,
 	UsageSnapshotSample,
 } from "@clankermux/types";
@@ -65,19 +72,36 @@ export const BURN_SLOPE_LOOKBACK_MS = 24 * 60 * 60 * 1000;
 
 /**
  * Minimal cache surface the pure projection needs (matches `usageCache`). The
- * sampler is a pure observer, so it uses the NON-evicting reads: leaving stale
+ * sampler is a pure observer, so it uses the NON-evicting read: leaving stale
  * entries in place keeps its sampling side-effect-free (no impact on routing or
  * window-reset comparisons that read the raw cache).
+ *
+ * One ATOMIC read, deliberately: data, age and observation provenance must all
+ * describe the SAME cache entry. Composing `peek()` + `peekAge()` took two
+ * reads, so a write landing between them let the sampler pair one entry's data
+ * with another entry's age — and provenance was not readable at all that way.
  */
 export interface SamplerCache {
-	peek(accountId: string): AnyUsageData | null;
-	peekAge(accountId: string): number | null;
+	peekWithAge(accountId: string): {
+		data: AnyUsageData;
+		ageMs: number;
+		/**
+		 * When the reading was OBSERVED at the provider, or null when the cache's
+		 * writer could not honestly say (a reconstruction — e.g. Codex usage
+		 * recovered from a retained payload, written via `usageCache.setUntimed`).
+		 */
+		observedAtMs: number | null;
+	} | null;
 }
 
 /** The slice of an account the sampler reasons about. */
 interface SamplerAccount {
 	id: string;
 	provider: string;
+	/** Plan tier as of now (e.g. "pro", "max"); undefined/null when uncaptured. */
+	identity_plan_tier?: string | null;
+	/** Rate-limit tier as of now (e.g. "20x"); undefined/null when uncaptured. */
+	identity_rate_limit_tier?: string | null;
 }
 
 /**
@@ -86,12 +110,17 @@ interface SamplerAccount {
  *
  * Per account:
  *  - skip non-(anthropic|codex) providers entirely;
- *  - skip when cache age is null or `> freshnessMs` (no carry-forward);
+ *  - skip when the cache entry is absent or older than `freshnessMs` (no
+ *    carry-forward);
+ *  - skip when the entry carries NO observation time (see `buildSamplerRows`);
  *  - pull the session (5h) / account-wide weekly (7d) utilization + reset via
  *    `normalizeAnthropicUsage`, so a `limits[]`-only payload (upstream is
  *    dropping the flat five_hour/seven_day keys) still yields a row — otherwise
  *    the sawtooth graph and stale-usage recovery go blank for those accounts;
- *  - skip when BOTH windows are absent/null (nothing meaningful to record).
+ *  - skip when BOTH windows are absent/null (nothing meaningful to record);
+ *  - stamp the cache entry's own observation clock and the account's tiers as
+ *    of this sample, so a later reader is not left inferring either from
+ *    today's values.
  */
 export function buildSnapshotRows(
 	accounts: ReadonlyArray<SamplerAccount>,
@@ -99,17 +128,69 @@ export function buildSnapshotRows(
 	now: number,
 	freshnessMs: number,
 ): UsageSnapshotRow[] {
+	return buildSamplerRows(accounts, cache, now, freshnessMs).rows;
+}
+
+/** Both write-ready row sets produced by one sampler tick. */
+export interface SamplerRows {
+	/** Account-wide 5h/7d rows for `usage_snapshots`. */
+	rows: UsageSnapshotRow[];
+	/** Per-model-family weekly rows for `usage_scoped_snapshots`. */
+	scopedRows: ScopedUsageSnapshotRow[];
+}
+
+/**
+ * PURE projection producing BOTH snapshot series for one tick from one pass over
+ * the cache — the account-wide 5h/7d windows and the per-model-family weekly
+ * windows. Same `now`, same freshness gate, same no-carry-forward rule for both.
+ *
+ * The two series are gated independently once an account clears freshness: a
+ * provider can report scoped windows with no account-wide utilization (and vice
+ * versa), and dropping one because the other is absent would fabricate a gap in
+ * a series that had evidence.
+ *
+ * UNKNOWN OBSERVATION TIME IS A GAP, for BOTH series. A cache entry whose
+ * `observedAtMs` is null (today: Codex usage rebuilt from a retained payload
+ * after a restart, seeded via `usageCache.setUntimed`) says "this reading was
+ * observed at a time we cannot state" — the headers behind it can predate the
+ * cache write by hours. Placing such a reading on the tick clock would mint a
+ * confident timestamp out of an admitted unknown, and the row is indistinguish-
+ * able from an honestly-stamped one forever after: `usage_snapshots.observed_at`
+ * is permanent history, and the quota-drift compute treats a null `observed_at`
+ * as "use `sampled_at`", so writing null instead of skipping fabricates the very
+ * same instant one indirection later. The scoped series is dropped with it for
+ * the same reason: it carries only the tick clock, so recording it would file
+ * per-family percentages under a time they were not observed at. Skipping is the
+ * same answer the sampler already gives a stale cache — gaps are real.
+ *
+ * Scoped rows come from `normalizeAnthropicUsage(...).weeklyScoped`, which
+ * already drops entries whose reset is in the past — a rolled-over window is
+ * stale, not a zero. `displayName` is carried through because the routing family
+ * alone cannot distinguish two generations of the same family, which is exactly
+ * the axis a later quota analysis would need.
+ */
+export function buildSamplerRows(
+	accounts: ReadonlyArray<SamplerAccount>,
+	cache: SamplerCache,
+	now: number,
+	freshnessMs: number,
+): SamplerRows {
 	const rows: UsageSnapshotRow[] = [];
+	const scopedRows: ScopedUsageSnapshotRow[] = [];
 
 	for (const account of accounts) {
 		const { id, provider } = account;
 		if (provider !== "anthropic" && provider !== "codex") continue;
 
-		const age = cache.peekAge(id);
-		if (age === null || age > freshnessMs) continue; // missing/stale → honest gap
+		// ONE read: data, age and provenance must describe the same entry.
+		const entry = cache.peekWithAge(id);
+		if (entry === null) continue; // missing → honest gap
+		if (entry.ageMs > freshnessMs) continue; // stale → honest gap
+		// No observation time → honest gap. Never substitute `now`/`sampledAt`.
+		if (entry.observedAtMs === null) continue;
 
-		const data = cache.peek(id) as UsageData | null;
-		if (!data) continue;
+		const data = entry.data as UsageData;
+		const observedAt = entry.observedAtMs;
 
 		const normalized = normalizeAnthropicUsage(
 			data as unknown as AnthropicUsageData,
@@ -119,20 +200,37 @@ export function buildSnapshotRows(
 		const sevenDayPct = normalized.weeklyAll?.utilization ?? null;
 
 		// If neither window contributes a utilization, there is nothing to plot.
-		if (fiveHourPct === null && sevenDayPct === null) continue;
+		if (fiveHourPct !== null || sevenDayPct !== null) {
+			rows.push({
+				accountId: id,
+				provider,
+				sampledAt: now,
+				fiveHourPct,
+				fiveHourReset: normalized.session?.resetMs ?? null,
+				sevenDayPct,
+				sevenDayReset: normalized.weeklyAll?.resetMs ?? null,
+				// The entry's OWN observation time, never the tick clock and never
+				// reconstructed from an age: the cache is the only place that knows
+				// when this reading was actually observed.
+				observedAt,
+				planTier: account.identity_plan_tier ?? null,
+				rateLimitTier: account.identity_rate_limit_tier ?? null,
+			});
+		}
 
-		rows.push({
-			accountId: id,
-			provider,
-			sampledAt: now,
-			fiveHourPct,
-			fiveHourReset: normalized.session?.resetMs ?? null,
-			sevenDayPct,
-			sevenDayReset: normalized.weeklyAll?.resetMs ?? null,
-		});
+		for (const scoped of normalized.weeklyScoped) {
+			scopedRows.push({
+				accountId: id,
+				sampledAt: now,
+				family: scoped.family,
+				displayName: scoped.displayName,
+				pct: scoped.percent,
+				resetAt: scoped.resetsAtMs,
+			});
+		}
 	}
 
-	return rows;
+	return { rows, scopedRows };
 }
 
 /** The sample cadence shared by the usage and cache-keepalive samplers. */
@@ -146,6 +244,12 @@ export interface UsageSnapshotSamplerDeps {
 	getAccounts: () => Promise<Account[]>;
 	/** Persist a batch of snapshot rows. */
 	insertSnapshots: (rows: UsageSnapshotRow[]) => Promise<void>;
+	/**
+	 * Persist a batch of per-model-family weekly snapshot rows. Written from the
+	 * same tick as `insertSnapshots`, under the same freshness gate, but with its
+	 * own failure boundary: neither write may suppress the other.
+	 */
+	insertScopedSnapshots: (rows: ScopedUsageSnapshotRow[]) => Promise<void>;
 	/**
 	 * Read back the raw (un-bucketed) snapshots sampled at/after `sinceMs` for the
 	 * given accounts — the history the weekly burn-slope fit regresses over.
@@ -287,19 +391,43 @@ export class UsageSnapshotSampler {
 		}
 
 		const freshnessMs = this.deps.getFreshnessMs();
-		const rows = buildSnapshotRows(accounts, this.deps.cache, now, freshnessMs);
+		const { rows, scopedRows } = buildSamplerRows(
+			accounts,
+			this.deps.cache,
+			now,
+			freshnessMs,
+		);
 
-		if (rows.length === 0) {
+		if (rows.length === 0 && scopedRows.length === 0) {
 			log.debug("Snapshot sampler: no fresh windowed accounts this tick");
 			return;
 		}
 
-		try {
-			await this.deps.insertSnapshots(rows);
-			log.debug(`Snapshot sampler: recorded ${rows.length} usage snapshot(s)`);
-		} catch (err) {
-			// A DB error must not kill the interval — log and move on.
-			log.error(`Snapshot sampler: failed to persist snapshots: ${err}`);
+		if (rows.length > 0) {
+			try {
+				await this.deps.insertSnapshots(rows);
+				log.debug(
+					`Snapshot sampler: recorded ${rows.length} usage snapshot(s)`,
+				);
+			} catch (err) {
+				// A DB error must not kill the interval — log and move on.
+				log.error(`Snapshot sampler: failed to persist snapshots: ${err}`);
+			}
+		}
+
+		// Separate try: a failure writing one series must not discard the other,
+		// and neither series is a precondition of the other.
+		if (scopedRows.length > 0) {
+			try {
+				await this.deps.insertScopedSnapshots(scopedRows);
+				log.debug(
+					`Snapshot sampler: recorded ${scopedRows.length} scoped usage snapshot(s)`,
+				);
+			} catch (err) {
+				log.error(
+					`Snapshot sampler: failed to persist scoped snapshots: ${err}`,
+				);
+			}
 		}
 	}
 

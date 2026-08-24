@@ -78,6 +78,20 @@ function seed(
 		db.prepare(
 			"INSERT INTO usage_snapshots (account_id, sampled_at) VALUES (?, ?)",
 		).run("acct", recentTs);
+		// Scoped (per-family weekly) snapshots ride the SAME usage-snapshot cutoff
+		// and their deletions are folded into removedSnapshots.
+		const insScoped = db.prepare(
+			"INSERT INTO usage_scoped_snapshots (account_id, sampled_at, family, display_name, pct, reset_at) VALUES (?, ?, ?, ?, ?, ?)",
+		);
+		insScoped.run("acct", oldTs, "opus", "Claude Opus 5", 12.0, oldTs + 1000);
+		insScoped.run(
+			"acct",
+			recentTs,
+			"opus",
+			"Claude Opus 5",
+			14.0,
+			recentTs + 1000,
+		);
 		const insMem = db.prepare(
 			"INSERT INTO memory_snapshots (sampled_at, rss_bytes, heap_used_bytes) VALUES (?, ?, ?)",
 		);
@@ -164,13 +178,17 @@ describe("incremental-vacuum worker: cleanup kind", () => {
 		expect(result.ok).toBe(true);
 		expect(result.cleanup?.removedPayloads).toBe(oldCount);
 		expect(result.cleanup?.removedRequests).toBe(oldCount);
-		expect(result.cleanup?.removedSnapshots).toBe(1);
+		// One aged row from EACH usage-snapshot table — the worker folds the
+		// scoped table's deletions into removedSnapshots (one retention control,
+		// one reported number).
+		expect(result.cleanup?.removedSnapshots).toBe(2);
 		expect(result.cleanup?.removedMemorySnapshots).toBe(1);
 
 		// Only the recent rows survive.
 		expect(count(dbPath, "request_payloads")).toBe(recentCount);
 		expect(count(dbPath, "requests")).toBe(recentCount);
 		expect(count(dbPath, "usage_snapshots")).toBe(1);
+		expect(count(dbPath, "usage_scoped_snapshots")).toBe(1);
 		expect(count(dbPath, "memory_snapshots")).toBe(1);
 
 		// Cascade children (no own age/orphan pass) must be cleaned via FK
@@ -192,7 +210,7 @@ describe("incremental-vacuum worker: cleanup kind", () => {
 			const res = await dbOps.cleanupOldRequests(HOUR, HOUR, HOUR, HOUR);
 			expect(res.removedPayloads).toBe(20);
 			expect(res.removedRequests).toBe(20);
-			expect(res.removedSnapshots).toBe(1);
+			expect(res.removedSnapshots).toBe(2);
 			expect(res.removedMemorySnapshots).toBe(1);
 		} finally {
 			await dbOps.close();

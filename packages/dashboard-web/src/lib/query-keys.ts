@@ -35,6 +35,9 @@ export const queryKeys = {
 		[...queryKeys.all, "usage-history", { range }] as const,
 	memoryHistory: (range?: string) =>
 		[...queryKeys.all, "memory-history", { range }] as const,
+	// Unkeyed: the payload is precomputed over the whole retained history, so
+	// there is no range or filter axis to fork the cache on.
+	quotaDrift: () => [...queryKeys.all, "quota-drift"] as const,
 	cacheKeepalive: () => [...queryKeys.all, "cache-keepalive"] as const,
 	cacheKeepaliveHistory: (range?: string) =>
 		[...queryKeys.all, "cache-keepalive-history", { range }] as const,

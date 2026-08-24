@@ -104,6 +104,7 @@ import {
 import { runCodexIdentityBackfill } from "./codex-identity-backfill";
 import { waitForDrainIdle } from "./drain-idle";
 import { handleModelsRoute } from "./models-route";
+import { QuotaDriftScheduler } from "./quota-drift-scheduler";
 import { type RequestRouterDeps, routeRequest } from "./request-router";
 import { SubscriptionPaymentRecorder } from "./subscription-payment-recorder";
 import { shouldStopPollingPausedAccount } from "./usage-polling-halt";
@@ -263,6 +264,7 @@ let cacheKeepaliveSnapshotSampler: CacheKeepaliveSnapshotSampler | null = null;
 let subscriptionPaymentRecorder: SubscriptionPaymentRecorder | null = null;
 let codexResetCreditApplyScheduler: CodexResetCreditApplyScheduler | null =
 	null;
+let quotaDriftScheduler: QuotaDriftScheduler | null = null;
 let memoryMonitorInterval: Timer | null = null;
 // Track usage polling retry timeouts for cleanup
 const usagePollingRetryTimeouts = new Map<string, NodeJS.Timeout>();
@@ -1603,6 +1605,10 @@ Available endpoints:
 	usageSnapshotSampler = new UsageSnapshotSampler({
 		getAccounts: () => dbOps.getAllAccounts(),
 		insertSnapshots: (rows) => dbOps.insertUsageSnapshots(rows),
+		// Per-model-family weekly windows, recorded from the same tick. Capture
+		// only for now: nothing reads this series yet, but it cannot be
+		// reconstructed after the fact.
+		insertScopedSnapshots: (rows) => dbOps.insertScopedUsageSnapshots(rows),
 		// Persisted history for the weekly burn-slope fit that sizes the
 		// pool-liveness reserve's release horizon.
 		getRecentSnapshots: (accountIds, sinceMs) =>
@@ -1653,6 +1659,17 @@ Available endpoints:
 		getPollIntervalMs: () => config.getUsagePollIntervalMs(),
 	});
 	cacheKeepaliveSnapshotSampler.start();
+
+	// Start the quota-drift scheduler: recomputes the implied per-model cost of
+	// each usage window (the Analytics "Quota" tab) every 30 minutes. The fit
+	// runs on its own read-only worker; only the resulting row is written here,
+	// because that worker's connection is query_only. Purely a read-side
+	// projection — it never touches routing, cooldowns or account selection.
+	quotaDriftScheduler = new QuotaDriftScheduler({
+		getDbPath: () => dbOps.getResolvedDbPath(),
+		storeResult: (row) => dbOps.insertQuotaDriftResult(row),
+	});
+	quotaDriftScheduler.start();
 
 	// Start the subscription-payment auto-recorder: books each subscription
 	// account's renewal due dates into the account_payments ledger (immediate
@@ -1830,6 +1847,10 @@ async function handleGracefulShutdown(signal: string) {
 		if (codexResetCreditApplyScheduler) {
 			codexResetCreditApplyScheduler.stop();
 			codexResetCreditApplyScheduler = null;
+		}
+		if (quotaDriftScheduler) {
+			quotaDriftScheduler.stop();
+			quotaDriftScheduler = null;
 		}
 
 		// Stop memory monitoring
