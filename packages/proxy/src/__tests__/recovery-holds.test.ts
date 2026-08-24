@@ -47,6 +47,7 @@ import {
 } from "../provider-overload-cooldown";
 import {
 	createRecoveryHolds,
+	isAccountWideFailure,
 	isOrdinaryAttemptFailure,
 	type RecoveryHolds,
 	type RecoveryHoldsDeps,
@@ -750,5 +751,40 @@ describe("gatedModel on a recorded skip", () => {
 		// is closed, and falls back to the short horizon — the bug this pins.
 		const rederived = holds.refreshOverloadUntils([{ account, until }]);
 		expect(rederived[0].until).toBeLessThan(until);
+	});
+});
+
+describe("isAccountWideFailure", () => {
+	// Narrower than isOrdinaryAttemptFailure on purpose. The exclusion set is
+	// keyed by ACCOUNT ID, so a failure whose real cause is one model or one
+	// family must not exclude the account for the rest of the request.
+	it("excludes failures whose cause is narrower than the account", () => {
+		// A fact about the model the attempt sent; a combo fallback can go on to
+		// wait for a different model's breaker on the same account.
+		expect(isAccountWideFailure({ kind: "model_not_found" })).toBe(false);
+		// The catch-all, through which family-weekly exhaustion is reported —
+		// deliberately without an account-wide cooldown at its fail() site.
+		expect(isAccountWideFailure({ kind: "other" })).toBe(false);
+	});
+
+	it("still excludes what the hold is waiting on", () => {
+		expect(
+			isAccountWideFailure({ kind: "overload_529", cooldownUntil: 1 }),
+		).toBe(false);
+		expect(
+			isAccountWideFailure({ kind: "overload_suppressed", until: null }),
+		).toBe(false);
+	});
+
+	it("accepts failures that really are account-wide", () => {
+		expect(isAccountWideFailure({ kind: "auth" })).toBe(true);
+		expect(isAccountWideFailure({ kind: "network_error" })).toBe(true);
+		expect(isAccountWideFailure({ kind: "hard_429" })).toBe(true);
+		expect(
+			isAccountWideFailure({
+				kind: "retryable_429",
+				confidence: "fresh_headroom",
+			}),
+		).toBe(true);
 	});
 });

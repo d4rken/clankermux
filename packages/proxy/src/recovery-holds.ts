@@ -131,15 +131,26 @@ export function isOrdinaryAttemptFailure(
  * Whether an ordinary failure may be held against the ACCOUNT for the rest of
  * the request, rather than only against the attempt that produced it.
  *
- * `model_not_found` may not: the exclusion set is keyed by account id alone, but
- * that failure is a fact about the MODEL the attempt sent. A combo slot can fail
- * entitlement on model A, the combo-fallback pass then clears the override and
- * waits on model B's breaker, and excluding by id would refuse the account after
- * B recovers — for a reason that never applied to B.
+ * The exclusion set is keyed by account id alone, so anything whose cause is
+ * narrower than the account must stay out of it:
+ *
+ * - `model_not_found` is a fact about the MODEL the attempt sent. A combo slot
+ *   can fail entitlement on model A, the combo-fallback pass then clears the
+ *   override and waits on model B's breaker; excluding by id would refuse the
+ *   account after B recovers, for a reason that never applied to B.
+ * - `other` is the catch-all, and family-weekly exhaustion is emitted through
+ *   it — deliberately WITHOUT an account-wide cooldown (see the fail() call in
+ *   proxy-operations.ts). Same shape of bug, one family instead of one model.
+ *
+ * Erring toward NOT excluding is the safe direction: the cost is a redundant
+ * retry on wake, whereas a wrong exclusion can refuse the only account able to
+ * serve the request.
  */
 export function isAccountWideFailure(outcome: ProxyAttemptOutcome): boolean {
 	return (
-		isOrdinaryAttemptFailure(outcome) && outcome.kind !== "model_not_found"
+		isOrdinaryAttemptFailure(outcome) &&
+		outcome.kind !== "model_not_found" &&
+		outcome.kind !== "other"
 	);
 }
 

@@ -373,6 +373,11 @@ describe("transparent overload hold", () => {
 
 		const ctx = makeContext([first, second]);
 
+		let letSecondFinish: () => void = () => {};
+		const releaseSecond = new Promise<void>((resolve) => {
+			letSecondFinish = resolve;
+		});
+
 		const attempts: string[] = [];
 		globalThis.fetch = upstreamOnlyFetch(async (input) => {
 			const headers = input instanceof Request ? input.headers : new Headers();
@@ -393,6 +398,12 @@ describe("transparent overload hold", () => {
 				applyProviderOverloadCooldown("anthropic", Date.now() + 400, MODEL);
 				throw new Error("upstream connection reset");
 			}
+			// Park the winning attempt until the test has observed the hold slot.
+			// Polling occupancy alone can MISS a real hold: under preemption the
+			// hold can acquire, attempt and release between two polls, failing a
+			// test whose subject is working correctly. Holding the response open
+			// makes the observation window deterministic.
+			await releaseSecond;
 			return ok200(MODEL);
 		}) as never;
 
@@ -408,6 +419,7 @@ describe("transparent overload hold", () => {
 		);
 		const slotKey = getOverloadHoldSlotKey("anthropic", MODEL);
 		await waitFor(() => getActiveOverloadHoldCount(slotKey) > 0);
+		letSecondFinish();
 
 		const res = await pending;
 		expect(res.status).toBe(200);
