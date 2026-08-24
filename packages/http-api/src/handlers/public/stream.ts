@@ -60,7 +60,8 @@ export function publicStreamConnectionCount(): number {
 	return openStreams;
 }
 
-const { instant, identifier, optionalIdentifier, text } = streamHelpers;
+const { instant, identifier, optionalIdentifier, text, toPublicRequestPhase } =
+	streamHelpers;
 
 /**
  * Translate one internal bus event into its public form, or null for an event
@@ -89,7 +90,10 @@ export function toPublicStreamEvent(
 					path: truncateUtf8(entry.path),
 					project: text(entry.project),
 					model: text(entry.model),
-					phase: entry.phase,
+					// Mapped, never forwarded: a phase the internal bus adds later must
+					// reach the firmware as `other` rather than as a value it does not
+					// know, or it can reject the replay snapshot whole.
+					phase: toPublicRequestPhase(entry.phase),
 					accountId: optionalIdentifier(entry.accountId),
 					statusCode: entry.statusCode,
 				})),

@@ -28,6 +28,7 @@ import {
 	toPublicOverloadState,
 	toPublicPredictionState,
 	toPublicRequestDoneDto,
+	toPublicRequestPhase,
 	toPublicRunwayDto,
 	toPublicRunwayKind,
 	toPublicStatusDto,
@@ -873,6 +874,22 @@ describe("overload state is a closed set with an escape hatch", () => {
 		// Both have a null deadline; only the STATE tells them apart.
 		expect(provider?.providerWideOverload.until).toBeNull();
 		expect(provider?.providerWideOverload.state).toBe("closed");
+	});
+});
+
+describe("request phase is a closed set with an escape hatch", () => {
+	it("maps the two real phases", () => {
+		expect(toPublicRequestPhase("pending")).toBe("pending");
+		expect(toPublicRequestPhase("streaming")).toBe("streaming");
+	});
+
+	it("maps a phase the vocabulary has never seen to other", () => {
+		// `phase` DESCRIBES a record the client renders either way, so it takes
+		// the `other` escape hatch — unlike the event-type discriminator, where an
+		// unknown event is simply not emitted. A raw internal phase reaching the
+		// firmware is what makes it reject the replay snapshot whole.
+		expect(toPublicRequestPhase("queued")).toBe("other");
+		expect(toPublicRequestPhase("")).toBe("other");
 	});
 });
 

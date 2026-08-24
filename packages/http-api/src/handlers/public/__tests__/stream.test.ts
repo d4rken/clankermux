@@ -387,6 +387,37 @@ describe("event translation", () => {
 		).toBe("request.upstream");
 	});
 
+	it("maps an unrecognized snapshot phase to other rather than forwarding it", () => {
+		// The snapshot is the one record a device cannot afford to reject: it is
+		// the signal that replay finished. A phase added to the internal bus later
+		// must therefore arrive as `other`, not as a value the firmware has never
+		// been taught.
+		const event = toPublicStreamEvent(
+			{
+				type: "snapshot",
+				active: [
+					{
+						id: "a",
+						timestamp: 1,
+						method: "GET",
+						path: "/p",
+						project: null,
+						model: null,
+						// biome-ignore lint/suspicious/noExplicitAny: modelling a future phase
+						phase: "queued" as any,
+						accountId: null,
+						statusCode: null,
+					},
+				],
+			},
+			0,
+		);
+		expect(
+			(event as { active?: Array<{ phase?: string }> } | null)?.active?.[0]
+				?.phase,
+		).toBe("other");
+	});
+
 	it("drops an event this surface does not carry rather than forwarding it raw", () => {
 		expect(
 			toPublicStreamEvent(

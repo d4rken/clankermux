@@ -323,6 +323,25 @@ export function toPublicMeasurementState(
 		: "other";
 }
 
+/**
+ * The phase of a request that has not produced a terminal event yet.
+ *
+ * DESCRIPTIVE, not a discriminator: the value describes a record the client
+ * renders either way, so it carries `other` like every other descriptive enum
+ * here. Forwarding the internal phase verbatim would hand a device a value its
+ * firmware does not know, and the record it sits in — the connect-time replay
+ * snapshot — is the one a client cannot afford to reject.
+ */
+export type PublicRequestPhaseDto = "pending" | "streaming" | "other";
+
+const KNOWN_REQUEST_PHASES = new Set(["pending", "streaming"]);
+
+export function toPublicRequestPhase(phase: string): PublicRequestPhaseDto {
+	return KNOWN_REQUEST_PHASES.has(phase)
+		? (phase as PublicRequestPhaseDto)
+		: "other";
+}
+
 /** The quota windows this surface names. */
 export type PublicWindowKind =
 	| "five_hour"
@@ -878,7 +897,7 @@ export interface PublicActiveRequestDto {
 	path: string;
 	project: string | null;
 	model: string | null;
-	phase: "pending" | "streaming";
+	phase: PublicRequestPhaseDto;
 	accountId: string | null;
 	statusCode: number | null;
 }
@@ -1021,4 +1040,5 @@ export const streamHelpers = {
 	identifier,
 	optionalIdentifier,
 	text,
+	toPublicRequestPhase,
 };
