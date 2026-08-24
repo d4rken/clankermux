@@ -231,9 +231,6 @@ export interface PublicAccountDto {
 	rateLimitResetAt: number | null;
 	providerOverloadedUntil: number | null;
 	providerWideOverloadedUntil: number | null;
-	/** This account's own quota runway. SCALARS — the array budget is spent. */
-	runwayKind: PublicRunwayKind;
-	runwayExhaustsAt: number | null;
 	stale: boolean;
 	limits: PublicLimitDto[];
 }
@@ -257,8 +254,6 @@ export function toPublicAccountDto(
 		rateLimitResetAt: account.rateLimitResetAt,
 		providerOverloadedUntil: account.providerOverloadedUntil,
 		providerWideOverloadedUntil: account.providerWideOverloadedUntil,
-		runwayKind: toPublicRunwayKind(account.runwayKind),
-		runwayExhaustsAt: account.runwayExhaustsAtMs,
 		stale: account.stale,
 		limits: account.limits.map((limit) => ({
 			kind: limit.kind,
@@ -290,20 +285,6 @@ export interface PublicStatusDto {
 		fiveHourPct: number | null;
 		sevenDayPct: number | null;
 		worstAccountPct: number | null;
-	};
-	/**
-	 * Pool quota runway, flat and scalar-only. The per-API-key breakdown
-	 * `/api/runway` serves is deliberately absent: key names are management data,
-	 * and its `pin` / `eligibleAccountIds` / `unprojectableAccountIds` are array
-	 * levels this surface's reader cannot descend into.
-	 */
-	runway: {
-		kind: PublicRunwayKind;
-		/** Projected all-out instant, epoch ms, or null on every other kind. */
-		exhaustsAt: number | null;
-		horizonMs: number;
-		/** An account ID, joinable against `accounts[].id`. Never a key name. */
-		worstAccountId: string | null;
 	};
 	stale: boolean;
 }
@@ -343,15 +324,6 @@ export function toPublicStatusDto(
 			fiveHourPct: snapshot.usage.fiveHourPct,
 			sevenDayPct: snapshot.usage.sevenDayPct,
 			worstAccountPct: snapshot.usage.worstAccountPct,
-		},
-		runway: {
-			kind: toPublicRunwayKind(snapshot.runway.kind),
-			exhaustsAt: snapshot.runway.exhaustsAtMs,
-			horizonMs: snapshot.runway.horizonMs,
-			// Truncated with the SAME rule `PublicAccountDto.id` is truncated by, so
-			// a device can join the two. Truncating one and not the other would break
-			// the join for exactly the ids long enough to need it.
-			worstAccountId: str(snapshot.runway.worstAccountId),
 		},
 		stale: snapshot.stale,
 	};

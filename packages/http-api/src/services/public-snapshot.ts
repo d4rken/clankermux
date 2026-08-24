@@ -1,15 +1,8 @@
 import type { Config } from "@clankermux/config";
 import {
 	accountWideExhaustion,
-	computeCapacityRunway,
 	isAccountAvailable,
 	normalizeAnthropicUsage,
-	RUNWAY_HORIZON_MS,
-	type RunwayAccountInput,
-	type RunwayAccountSource,
-	type RunwayOutcome,
-	toRunwayAccountInput,
-	worstRunwayEntry,
 } from "@clankermux/core";
 import type { DatabaseOperations } from "@clankermux/database";
 import { Logger } from "@clankermux/logger";
@@ -70,46 +63,8 @@ export interface PublicAccountSnapshot {
 	 * model family is cooling off" without walking a third array level.
 	 */
 	providerWideOverloadedUntil: number | null;
-	/**
-	 * This account's OWN quota-runway outcome kind, from the shared capacity
-	 * scan run over this account alone.
-	 *
-	 * QUOTA, not availability: pauses, rate-limit cooldowns and the
-	 * provider-overload breaker are not read, exactly as `/api/runway` does not
-	 * read them. An account can be `beyond-horizon` here and `paused` above.
-	 */
-	runwayKind: RunwayOutcome["kind"];
-	/**
-	 * The projected instant this account's quota runs out, or null — including
-	 * for `out-now`, where the kind already says it and no future instant
-	 * exists.
-	 */
-	runwayExhaustsAtMs: number | null;
 	stale: boolean;
 	limits: PublicLimitSnapshot[];
-}
-
-/**
- * The POOL's quota runway: how long every account together can keep going at
- * the current pace before all of them are out of account-wide quota at once.
- *
- * Deliberately NOT the per-API-key breakdown `/api/runway` serves. Key names
- * are management data and a key's pin, eligible accounts and unprojectable
- * accounts are three further array levels the device cannot parse; the pool is
- * the one runway an unauthenticated widget can both read and act on.
- */
-export interface PublicRunwaySnapshot {
-	kind: RunwayOutcome["kind"];
-	/** Projected all-out instant, or null for every other outcome kind. */
-	exhaustsAtMs: number | null;
-	/** The horizon the scan modelled, so no client hardcodes 14 days. */
-	horizonMs: number;
-	/**
-	 * The account with the worst STATEABLE runway, or null when none can be
-	 * stated. An account ID — never a key name, which is not on this surface at
-	 * all.
-	 */
-	worstAccountId: string | null;
 }
 
 /** Pool rollup, mirroring `/health`'s but with epoch-ms timestamps. */
@@ -134,7 +89,6 @@ export interface PublicSnapshot {
 	now: number;
 	pool: PublicPoolSnapshot;
 	usage: PublicUsageAggregate;
-	runway: PublicRunwaySnapshot;
 	accounts: PublicAccountSnapshot[];
 	/** True when ANY windowed account's reading is missing or past the routing TTL. */
 	stale: boolean;
@@ -156,19 +110,6 @@ export function clampPct(value: number | null | undefined): number | null {
 	const clamped = Math.min(100, Math.max(0, value));
 	// One decimal: enough for a bar, short enough not to inflate the payload.
 	return Math.round(clamped * 10) / 10;
-}
-
-/**
- * Round a DERIVED instant to whole epoch milliseconds.
- *
- * The runway projection is arithmetic over percentages, so it lands on
- * fractions routinely (a 95% window four hours in exhausts at
- * `now + 757894.7368…`). The wire contract promises integer epoch ms on every
- * timestamp, and a device parsing with a fixed-point scanner is exactly the
- * consumer a fractional one breaks.
- */
-function toEpochMs(value: number | null): number | null {
-	return value == null || !Number.isFinite(value) ? null : Math.round(value);
 }
 
 function parseResetMs(resetsAt: string | null | undefined): number | null {
@@ -347,60 +288,6 @@ export function createPublicSnapshotReader(
 			return new Map();
 		});
 
-		// Quota runway, from the SAME scan `/api/runway` runs — `computeCapacityRunway`
-		// over accounts mapped by core's `toRunwayAccountInput`, so window
-		// eligibility, the window-start derivation and the per-window lifetime
-		// confidence policy are core's and not restated here. Reimplementing any of
-		// it would give a widget a runway that quietly disagrees with the dashboard.
-		//
-		// What this deliberately does NOT reuse is `/api/runway`'s COMPOSITION: that
-		// endpoint resolves each API key's routing pin to its eligible accounts and
-		// reports a row per key. Key names are management data, and `keys[].pin`,
-		// `eligibleAccountIds` and `unprojectableAccountIds` are three more array
-		// levels than this surface's reader can parse. The pool is the one runway an
-		// unauthenticated widget can read.
-		//
-		// ROUTING-FRESH input only, matching the runway endpoint's scan tier: a
-		// projection modelling "now" must not be built on a reading that stopped
-		// being worth routing on. An account whose cache is cold is therefore
-		// `unknown` rather than projected from stale evidence.
-		const runwayInputs = new Map<string, RunwayAccountInput>(
-			rows.map((row) => {
-				const entry = readings.get(row.id) ?? null;
-				const fresh = (routingFresh.get(row.id) ??
-					null) as FullUsageData | null;
-				const source: RunwayAccountSource = {
-					id: row.id,
-					name: row.name,
-					provider: row.provider || "anthropic",
-					usageData: fresh,
-					prediction: predictions.get(row.id) ?? null,
-					// The reading's OBSERVATION time, and only when that reading is the
-					// one being projected from — the weekly window anchors its ETA
-					// there, and an observation time belonging to a reading the routing
-					// bar rejected would anchor a projection to evidence it never used.
-					usageObservedAtMs: fresh ? (entry?.observedAtMs ?? null) : null,
-				};
-				return [row.id, toRunwayAccountInput(source)] as const;
-			}),
-		);
-		const poolRunway = computeCapacityRunway(
-			[...runwayInputs.values()],
-			now,
-			RUNWAY_HORIZON_MS,
-		);
-		// Each account scanned ALONE, which is what makes a per-account figure
-		// meaningful: the pool outcome is the instant every account is out at once,
-		// and attributing that instant to one account would misreport it. Same
-		// function, same inputs, one-element pool — so an account's own outcome and
-		// the pool's can never come from two different models.
-		const accountRunways = new Map<string, RunwayOutcome>(
-			[...runwayInputs].map(([id, input]) => [
-				id,
-				computeCapacityRunway([input], now, RUNWAY_HORIZON_MS),
-			]),
-		);
-
 		const accounts: PublicAccountSnapshot[] = rows.map((row) => {
 			const provider = row.provider || "anthropic";
 			const windowed = WINDOWED_PROVIDERS.has(provider);
@@ -465,13 +352,6 @@ export function createPublicSnapshotReader(
 			const fiveHourPct = clampPct(normalized.session?.utilization ?? null);
 			const sevenDayPct = clampPct(normalized.weeklyAll?.utilization ?? null);
 
-			// Never absent: every row went into `runwayInputs` above. The fallback
-			// states the honest answer for a row that somehow did not, rather than
-			// letting a missing key read as a projection.
-			const accountRunway: RunwayOutcome = accountRunways.get(row.id) ?? {
-				kind: "unknown",
-			};
-
 			return {
 				id: row.id,
 				name: row.name,
@@ -491,10 +371,6 @@ export function createPublicSnapshotReader(
 				rateLimitResetAt: presentation.resetMs,
 				providerOverloadedUntil: getProviderOverloadUntil(provider, now),
 				providerWideOverloadedUntil: providerWide?.until ?? null,
-				runwayKind: accountRunway.kind,
-				runwayExhaustsAtMs: toEpochMs(
-					accountRunway.kind === "runway" ? accountRunway.exhaustsAtMs : null,
-				),
 				stale,
 				limits: buildLimits(windowed ? usage : null, now),
 			};
@@ -551,34 +427,9 @@ export function createPublicSnapshotReader(
 				recoveryTimes.length > 0 ? Math.min(...recoveryTimes) : null,
 		};
 
-		// The worst account the headline may NAME, ranked by the one severity table
-		// `worstKeyRunway` ranks keys with. `unknown` is set aside exactly as
-		// `summarizeKeyRunways` sets it aside for a key headline: it outranks every
-		// finite outcome because it could be worse than any of them, which is right
-		// for ranking and wrong for a single-figure summary — one unreadable account
-		// would otherwise take the whole field and point a device at the one account
-		// whose own runway fields are null.
-		const worstAccount = worstRunwayEntry(
-			[...accountRunways]
-				.map(([id, outcome]) => ({ id, outcome }))
-				.filter((entry) => entry.outcome.kind !== "unknown"),
-			now,
-		);
-
 		return {
 			now,
 			pool,
-			runway: {
-				kind: poolRunway.kind,
-				exhaustsAtMs: toEpochMs(
-					poolRunway.kind === "runway" ? poolRunway.exhaustsAtMs : null,
-				),
-				// The horizon this scan was GIVEN, not one read back off the outcome:
-				// only `beyond-horizon` carries it, and the field must mean the same
-				// thing on every kind.
-				horizonMs: RUNWAY_HORIZON_MS,
-				worstAccountId: worstAccount?.id ?? null,
-			},
 			usage: {
 				fiveHourPct: meanOfPresent(accounts.map((a) => a.fiveHourPct)),
 				sevenDayPct: meanOfPresent(accounts.map((a) => a.sevenDayPct)),
