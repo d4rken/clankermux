@@ -57,7 +57,7 @@ import {
 	getProviderOverloadUntil,
 	isOfficialAnthropicProvider,
 } from "./provider-overload-cooldown";
-import { createRecoveryHolds } from "./recovery-holds";
+import { createRecoveryHolds, isAccountWideFailure } from "./recovery-holds";
 import { type IngressContext, ingestProxyRequest } from "./request-ingress";
 import type { RecordMeta, RequestRecorder } from "./request-recorder";
 import { hashRoutingAffinityKey } from "./routing-telemetry";
@@ -979,8 +979,15 @@ async function handleIngestedProxy(
 								onOutcome: (o) => {
 									firstOutcome = o;
 									// The normal loop below skips the held account (attempted-id
-									// guard), so its suppression must be recorded here.
+									// guard), so its suppression must be recorded here — and so
+									// must an ordinary failure, for the same reason. Without
+									// it a hold entered later can re-select and be served by
+									// this very account, leaving the gated sibling it was
+									// waiting for untried.
 									holds.noteOverloadSuppression(heldAccount, o);
+									if (isAccountWideFailure(o)) {
+										holds.noteOrdinaryFailure(heldAccount.id);
+									}
 								},
 							},
 						);
@@ -1159,10 +1166,9 @@ async function handleIngestedProxy(
 			// sonnet bucket today and would stop being — and that is a routing
 			// decision, separate from the skip-recording below.
 			//
-			// Consequence worth knowing: the hold re-derives the bucket per
-			// account, so with per-account model mapping the gate and the hold can
-			// key on different buckets. Pre-existing and narrow; not introduced by
-			// the recording below, and not silently changed by it either.
+			// The hold no longer disagrees about which bucket that was: the skip
+			// records this model as `gatedModel`, and holdability, slot keying and
+			// the terminal's refresh all follow it rather than re-deriving one.
 			const overloadedUntil = getProviderOverloadUntil(
 				list[i].provider,
 				Date.now(),
@@ -1256,13 +1262,15 @@ async function handleIngestedProxy(
 						signal: req.signal,
 						onOutcome: (o) => {
 							holds.noteOverloadSuppression(list[i], o);
-							// An ORDINARY failure (auth / network / 429 / model) — not
-							// an overload suppression, which has its own verdict to
-							// wait on. Recorded so a hold entered later in THIS request
-							// does not re-attempt, and get served by, the account that
-							// just failed, leaving the gated one it was waiting for
-							// untried.
-							if (o.kind !== "overload_suppressed") {
+							// An ORDINARY failure — no overload verdict to wait on.
+							// Recorded so a hold entered later in THIS request does not
+							// re-attempt, and get served by, the account that just
+							// failed, leaving the gated one it was waiting for untried.
+							//
+							// Uses the hold's OWN predicate rather than restating it: a
+							// 529 must not count here, or the hold would refuse to retry
+							// the account whose recovery it is waiting for.
+							if (isAccountWideFailure(o)) {
 								holds.noteOrdinaryFailure(list[i].id);
 							}
 						},

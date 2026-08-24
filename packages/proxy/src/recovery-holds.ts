@@ -107,6 +107,42 @@ const OVERLOAD_PROBE_SUPPRESSED_RETRY_AFTER_MS = 5_000;
 // than waiting out a cooldown deadline that no longer exists.
 const OVERLOAD_HOLD_PROBE_POLL_MS = 1_500;
 
+/**
+ * Whether an attempt outcome is an ORDINARY failure — one with no overload
+ * verdict to wait on, so a hold must stop re-attempting that account.
+ *
+ * The two exclusions are the whole point. `overload_suppressed` has a probe in
+ * flight; `overload_529` IS the condition a hold exists to wait out, and
+ * treating it as ordinary would make the hold refuse to retry the very account
+ * whose recovery it is waiting for.
+ *
+ * Shared so the hold's own per-round classification and the pre-hold seeding
+ * cannot drift apart — they did, and the seeding folded `overload_529` in.
+ */
+export function isOrdinaryAttemptFailure(
+	outcome: ProxyAttemptOutcome,
+): boolean {
+	return (
+		outcome.kind !== "overload_suppressed" && outcome.kind !== "overload_529"
+	);
+}
+
+/**
+ * Whether an ordinary failure may be held against the ACCOUNT for the rest of
+ * the request, rather than only against the attempt that produced it.
+ *
+ * `model_not_found` may not: the exclusion set is keyed by account id alone, but
+ * that failure is a fact about the MODEL the attempt sent. A combo slot can fail
+ * entitlement on model A, the combo-fallback pass then clears the override and
+ * waits on model B's breaker, and excluding by id would refuse the account after
+ * B recovers — for a reason that never applied to B.
+ */
+export function isAccountWideFailure(outcome: ProxyAttemptOutcome): boolean {
+	return (
+		isOrdinaryAttemptFailure(outcome) && outcome.kind !== "model_not_found"
+	);
+}
+
 // Outcome of a burst hold once it has run. `served` carries the real upstream
 // Response; `aborted` means the client disconnected mid-hold (Finding 2) and
 // the caller must NOT fall through to more upstream requests; `gave-up` means
@@ -581,7 +617,7 @@ export function createRecoveryHolds(deps: RecoveryHoldsDeps): RecoveryHolds {
 								round.sawOverloadSuppression = true;
 							} else if (o.kind === "overload_529") {
 								round.sawRetrip = true;
-							} else {
+							} else if (isOrdinaryAttemptFailure(o)) {
 								// Attributed to the candidate, so a later poll can skip
 								// exactly this account rather than the whole round.
 								round.ordinaryFailedAccountIds.add(candidate.id);

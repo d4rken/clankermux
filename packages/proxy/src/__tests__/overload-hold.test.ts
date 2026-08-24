@@ -396,16 +396,26 @@ describe("transparent overload hold", () => {
 			return ok200(MODEL);
 		}) as never;
 
-		const res = await callHandleProxy(
+		// Do NOT await yet. A cooldown short enough to keep the test fast can
+		// expire before the loop's second iteration under worker preemption, in
+		// which case `second` is attempted directly and the sequence below passes
+		// with no hold ever entered. Observing the slot while the request is
+		// pending is what distinguishes the two.
+		const pending = callHandleProxy(
 			modelRequest(MODEL),
 			new URL("https://proxy.local/v1/messages"),
 			ctx,
 		);
+		const slotKey = getOverloadHoldSlotKey("anthropic", MODEL);
+		await waitFor(() => getActiveOverloadHoldCount(slotKey) > 0);
 
+		const res = await pending;
 		expect(res.status).toBe(200);
 		// Held through the cooldown, woke, and served from the account the gate
 		// had skipped — NOT by retrying the one that already failed.
 		expect(attempts).toEqual(["First", "Second"]);
+		// And the slot is returned afterwards.
+		expect(getActiveOverloadHoldCount(slotKey)).toBe(0);
 	}, 15_000);
 
 	it("does NOT hold for a gated candidate that could never serve the path", async () => {
