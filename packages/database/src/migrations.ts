@@ -409,6 +409,58 @@ export function ensureSchema(db: Database): void {
 		`CREATE INDEX IF NOT EXISTS idx_usage_scoped_snapshots_sampled_at ON usage_scoped_snapshots(sampled_at)`,
 	);
 
+	// Create unified_claim_observations table — the REQUEST-ALIGNED time-series
+	// of Anthropic's per-claim rate-limit readings
+	// (`anthropic-ratelimit-unified-<claim>-utilization`), one row per claim per
+	// response. A third axis beside the two snapshot tables: those are sampled on
+	// the poller's own cadence (~120 s) and record what the usage endpoint says,
+	// while this records what the request itself was told, at the moment it was
+	// told, including the responses the sampler never sees.
+	//
+	// utilization is nullable and NULL means NO READING — a reported utilization
+	// of 0 is stored as 0. Same for reset_at, which is NULL when the claim's
+	// `-reset` line is absent or does not parse to an epoch-ms instant.
+	//
+	// `request_started_at` is stored beside `observed_at` because neither
+	// substitutes for the other: `observed_at` is headers-arrival time, and the
+	// `requests` row's own timestamp is written at PERSISTENCE time (after the
+	// stream finishes), so a series joined on it would be skewed by the response
+	// duration.
+	//
+	// Deliberately NO foreign key to requests(id): internal traffic (cache
+	// keepalive replays, auto-refresh probes) consumes real quota and must be
+	// captured, but is deliberately absent from Request History, so those rows
+	// have no parent to point at. The two also have independent retention (see
+	// UNIFIED_CLAIM_OBSERVATION_RETENTION_MS), which a cascade would couple.
+	//
+	// account_id CASCADE mirrors the snapshot tables: deleting an account removes
+	// its history.
+	db.run(`
+		CREATE TABLE IF NOT EXISTS unified_claim_observations (
+			request_id TEXT NOT NULL,
+			account_id TEXT NOT NULL,
+			source TEXT NOT NULL,
+			request_started_at INTEGER NOT NULL,
+			observed_at INTEGER NOT NULL,
+			http_status INTEGER NOT NULL,
+			claim TEXT NOT NULL,
+			status TEXT NOT NULL,
+			utilization REAL,
+			reset_at INTEGER,
+			PRIMARY KEY (request_id, claim),
+			FOREIGN KEY (account_id) REFERENCES accounts(id) ON DELETE CASCADE
+		)
+	`);
+
+	// Per-account series reads; the bare observed_at index serves retention
+	// pruning, which scans the whole table by time regardless of account.
+	db.run(
+		`CREATE INDEX IF NOT EXISTS idx_unified_claim_obs_account_time ON unified_claim_observations(account_id, observed_at)`,
+	);
+	db.run(
+		`CREATE INDEX IF NOT EXISTS idx_unified_claim_obs_observed_at ON unified_claim_observations(observed_at)`,
+	);
+
 	// Create quota_drift_results table — the precomputed quota-drift analysis.
 	// One row per completed precompute pass; the latest row wins and the cleanup
 	// pass keeps only the most recent few.

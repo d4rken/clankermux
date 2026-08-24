@@ -28,6 +28,7 @@ import {
 	AsyncDbWriter,
 	DatabaseFactory,
 	initPayloadEncryption,
+	UNIFIED_CLAIM_OBSERVATION_RETENTION_MS,
 } from "@clankermux/database";
 import {
 	APIRouter,
@@ -294,6 +295,7 @@ async function runStartupMaintenance(
 			removedPayloadsBySize,
 			removedSnapshots,
 			removedMemorySnapshots,
+			removedUnifiedClaimObservations,
 		} = await dbOps.cleanupOldRequests(
 			config.getPayloadRetentionMs(),
 			requestDays * 24 * 60 * 60 * 1000,
@@ -302,7 +304,7 @@ async function runStartupMaintenance(
 			config.getPayloadMaxBytes(),
 		);
 		log.info(
-			`Startup cleanup removed ${removedRequests} requests, ${removedPayloads} payloads (${removedPayloadsBySize} of them over the byte budget), ${removedSnapshots} usage snapshots, and ${removedMemorySnapshots} memory snapshots (payload=${payloadHours}h/${payloadMaxMb > 0 ? `${payloadMaxMb}MB` : "no byte budget"}, requests=${requestDays}d, snapshots=${snapshotDays}d, memory=${memorySnapshotDays}d)`,
+			`Startup cleanup removed ${removedRequests} requests, ${removedPayloads} payloads (${removedPayloadsBySize} of them over the byte budget), ${removedSnapshots} usage snapshots, ${removedMemorySnapshots} memory snapshots, and ${removedUnifiedClaimObservations} claim observations (payload=${payloadHours}h/${payloadMaxMb > 0 ? `${payloadMaxMb}MB` : "no byte budget"}, requests=${requestDays}d, snapshots=${snapshotDays}d, memory=${memorySnapshotDays}d, claims=${UNIFIED_CLAIM_OBSERVATION_RETENTION_MS / TIME_CONSTANTS.DAY}d fixed)`,
 		);
 		// Prune the cache-keepalive economics time-series (separate table, separate
 		// retention). Mirrors the memory/usage snapshot cutoff math above.
@@ -992,6 +994,7 @@ export default async function startServer(options?: {
 				removedPayloadsBySize,
 				removedSnapshots,
 				removedMemorySnapshots,
+				removedUnifiedClaimObservations,
 			} = await dbOps.cleanupOldRequests(
 				config.getPayloadRetentionMs(),
 				requestDays * TIME_CONSTANTS.DAY,
@@ -1012,13 +1015,14 @@ export default async function startServer(options?: {
 				removedPayloads > 0 ||
 				removedSnapshots > 0 ||
 				removedMemorySnapshots > 0 ||
-				removedKeepaliveSnapshots > 0
+				removedKeepaliveSnapshots > 0 ||
+				removedUnifiedClaimObservations > 0
 			) {
 				log.info(
 					// Payload removals are split so the age rule and the byte budget
 					// are distinguishable in the journal — they delete for different
 					// reasons and only one of them is operator-tunable by size.
-					`Periodic cleanup: removed ${removedRequests} requests, ${removedPayloads} payloads (${removedPayloadsBySize} of them over the byte budget), ${removedSnapshots} usage snapshots, ${removedMemorySnapshots} memory snapshots, ${removedKeepaliveSnapshots} cache keepalive snapshots in ${Date.now() - startTime}ms`,
+					`Periodic cleanup: removed ${removedRequests} requests, ${removedPayloads} payloads (${removedPayloadsBySize} of them over the byte budget), ${removedSnapshots} usage snapshots, ${removedMemorySnapshots} memory snapshots, ${removedKeepaliveSnapshots} cache keepalive snapshots, ${removedUnifiedClaimObservations} claim observations in ${Date.now() - startTime}ms`,
 				);
 				// Reclaim freed pages to the OS, off-thread via the incremental-
 				// vacuum worker, which batches the budget into slot-releasing

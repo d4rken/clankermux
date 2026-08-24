@@ -97,6 +97,7 @@ export function DataRetentionCard() {
 			| "requests"
 			| "usage_snapshots"
 			| "usage_scoped_snapshots"
+			| "unified_claim_observations"
 			| "memory_snapshots"
 		>
 	) => {
@@ -246,11 +247,17 @@ export function DataRetentionCard() {
 							Save
 						</Button>
 					</div>
-					{usageHint("usage_snapshots", "usage_scoped_snapshots")}
+					{usageHint(
+						"usage_snapshots",
+						"usage_scoped_snapshots",
+						"unified_claim_observations",
+					)}
 					<p className="text-xs text-muted-foreground mt-1">
 						How long per-account limit-usage history is kept for the Limits
 						graph. Covers both the account-wide windows and the per-model-family
-						weekly windows recorded alongside them.
+						weekly windows recorded alongside them. The size above also includes
+						the per-request limit readings, which are kept 90 days regardless of
+						this setting.
 					</p>
 				</div>
 

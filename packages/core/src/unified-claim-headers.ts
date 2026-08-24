@@ -45,7 +45,13 @@ const HEADROOM_STATUSES: ReadonlySet<string> = new Set([
 
 export function parseStrictDecimal(value: string | null): number | null {
 	if (value === null || !STRICT_DECIMAL_RE.test(value)) return null;
-	return Number.parseFloat(value);
+	const parsed = Number.parseFloat(value);
+	// The shape test alone is not enough: a digit string long enough to overflow
+	// the double range matches it and parses to Infinity, which then reads as a
+	// finite number to every consumer (an Infinity utilization compares `>= 1`
+	// only by luck of the current predicate, and an Infinity reset would be
+	// turned into a deadline). No reading beats a wrong one.
+	return Number.isFinite(parsed) ? parsed : null;
 }
 
 /** One account-wide claim's per-claim header values. */
@@ -138,6 +144,72 @@ export function getScopedClaimRejection(
 	return {
 		soonestResetMs: Number.isFinite(soonestResetMs) ? soonestResetMs : null,
 	};
+}
+
+/**
+ * One claim line as it arrived, with no interpretation applied. Unlike
+ * {@link UnifiedClaimReading} (which only ever describes a claim that already
+ * passed a predicate) every field here is reported as observed, including the
+ * absences: `utilization`/`resetMs` are null when the header is missing or
+ * unparseable, and null NEVER stands in for a valid zero.
+ */
+export interface ExtractedClaimReading {
+	/** Claim token: `5h`, `7d`, or a scoped window such as `7d_oi`. */
+	claim: string;
+	/** The `-status` header value verbatim — unknown vocabulary included. */
+	status: string;
+	/** The `-utilization` reading; null = no reading, `0` = a reading of zero. */
+	utilization: number | null;
+	/** Epoch ms from the claim's own `-reset` line; null when unparseable. */
+	resetMs: number | null;
+}
+
+/**
+ * EVERY per-claim line on this response, for recording rather than for
+ * deciding. The other helpers in this file each answer one routing question and
+ * discard the rest of the evidence; this one keeps all of it so the observation
+ * can be stored as a time series and interpreted later.
+ *
+ * Enumeration is driven by the `-status` lines, so a claim with only a
+ * utilization or reset line yields nothing (there is no claim without a status
+ * to attach it to). The `overage` axis is excluded by construction — its token
+ * is neither account-wide nor scoped-window-shaped.
+ *
+ * Pure: no clock, no account knowledge, no trust decisions. A response with no
+ * per-claim lines (e.g. a per-IP burst 429) yields `[]`.
+ */
+export function extractUnifiedClaimReadings(
+	headers: Headers,
+): ExtractedClaimReading[] {
+	const readings: ExtractedClaimReading[] = [];
+	headers.forEach((value, name) => {
+		const token = UNIFIED_STATUS_HEADER_RE.exec(name)?.[1];
+		if (!token) return;
+		if (
+			token !== "5h" &&
+			token !== "7d" &&
+			!SCOPED_WINDOW_TOKEN_RE.test(token)
+		) {
+			return;
+		}
+		const resetSec = parseStrictDecimal(
+			headers.get(`anthropic-ratelimit-unified-${token}-reset`),
+		);
+		const resetMs = resetSec === null ? null : resetSec * 1000;
+		readings.push({
+			claim: token,
+			status: value,
+			utilization: parseStrictDecimal(
+				headers.get(`anthropic-ratelimit-unified-${token}-utilization`),
+			),
+			// A reset that is fractional in ms, or so large it leaves the exactly
+			// representable integer range, is not an epoch-ms instant — store no
+			// reset rather than a rounded or lossy one.
+			resetMs:
+				resetMs !== null && Number.isSafeInteger(resetMs) ? resetMs : null,
+		});
+	});
+	return readings;
 }
 
 /**
