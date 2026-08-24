@@ -192,6 +192,8 @@ export {
 export { TtlCache } from "./ttl-cache";
 export {
 	type AccountWideClaimHeadroom,
+	type ExtractedClaimReading,
+	extractUnifiedClaimReadings,
 	getAccountWideClaimHeadroom,
 	getScopedClaimRejection,
 	hasAccountWideUnifiedRejection,
