@@ -7,39 +7,71 @@
  * `AccountResponse` in particular carries identity, tokens and endpoint
  * configuration, none of which may cross this boundary.
  *
- * The consumer is a streaming JSON scanner on an ESP32-C6, so the shape
- * constraints below are structural limits of the reader, not preferences:
+ * The consumers are a Cinnamon panel applet and an ESP32-C6 running a streaming
+ * JSON scanner, so the shape constraints below are structural limits of the
+ * reader, not preferences:
  *
- *  - ONE record array, and at most ONE array nested inside it. `accounts[]`
- *    with `limits[]` inside spends the entire budget; there is no third level
- *    anywhere in this surface and none may be added.
+ *  - ONE record array, and at most ONE array nested inside it. There is no third
+ *    array level anywhere on this surface and none may be added.
  *  - Object nesting stays far below 16 deep.
- *  - Every timestamp is epoch MILLISECONDS as an integer. The single exception
- *    is `nowIso` on `/public/v1/status`, which exists because that field is the
- *    device's only wall clock.
- *  - Strings are truncated to 96 bytes, UTF-8 safe.
- *  - Every closed enum has an explicit `other` member and maps anything
- *    unrecognized to it. The firmware treats these as closed sets and lights a
- *    warning on an unknown value, so without `other` any future enum addition
- *    would be a breaking change for it.
- *  - NO field name begins with `identity`. The device asserts their absence.
+ *  - Strings are truncated to 96 bytes, UTF-8 safe — DISPLAY TEXT ONLY. An
+ *    IDENTIFIER is never truncated: a cut join key still looks like a key and
+ *    silently binds an event to the wrong record.
+ *  - Every DESCRIPTIVE closed enum has an explicit `other` member and maps
+ *    anything unrecognized to it. The firmware treats these as closed sets and
+ *    lights a warning on an unknown value, so without `other` any future enum
+ *    addition would be a breaking change for it. The one enum that is NOT
+ *    descriptive is the stream's event-type discriminator — see there.
+ *  - NO field name begins with `identity`. The device asserts their absence,
+ *    but the named-field allowlist is the actual privacy boundary; the prefix
+ *    check is a smoke alarm, not the wall.
+ *
+ * TIME. Two kinds of quantity, two representations, and the names say which:
+ *
+ *  - An INSTANT is an RFC3339 / ISO-8601 string, and its field name never
+ *    carries a unit suffix (`generatedAt`, `resetsAt`, `exhaustsAt`).
+ *  - A DURATION is a number with its unit in the name (`horizonMs`, `uptimeS`,
+ *    `responseTimeMs`).
+ *
+ * The trap this rule exists for is real and in this codebase: the internal
+ * `UsagePrediction.etaExhaustMs` is `last.t + offset`, an absolute epoch
+ * instant wearing a duration's name. It is published here as `exhaustsAt`, an
+ * ISO string. Do not propagate the misnomer.
+ *
+ * ONE CANONICAL HOME per raw fact. Derived rollups are legitimate and are
+ * labelled as such (`accounts[].utilizationPct`); re-expressing the same
+ * measurement in a second place is not, which is why the account-wide windows
+ * exist once, in `windows[]`, and provider-level overload lives on the provider
+ * rather than being copied onto each of its accounts.
+ *
+ * VERSIONING. Adding a field changes neither the path nor the schema id. A
+ * removal, a rename, a unit change or a semantic change would require
+ * `/public/v2` — the consumers pin the schema id and cannot be redeployed on
+ * our schedule.
  */
 
-import type { RequestResponse } from "@clankermux/types";
+import type { RequestResponse, UsagePrediction } from "@clankermux/types";
+import type { PublicRunwaySnapshot } from "../../services/public-runway";
 import type {
 	PublicAccountSnapshot,
-	PublicLimitSnapshot,
 	PublicSnapshot,
+	PublicWindowSnapshot,
 } from "../../services/public-snapshot";
 
 /**
- * Wire schema identifier, carried on every response and on the stream's
- * snapshot. A device pins this and refuses a payload it does not know, so it
- * changes only when the shape changes incompatibly.
+ * Wire schema identifiers, one PER RESOURCE.
+ *
+ * Per resource rather than one for the whole surface: a device pins the schema
+ * of the payload it parses and refuses one it does not know, and a single
+ * shared id would force every consumer of every resource to be updated whenever
+ * any one of them changed shape.
  */
-export const PUBLIC_SCHEMA = "clankermux.public.v1";
+export const PUBLIC_STATUS_SCHEMA = "clankermux.public.status.v1";
+export const PUBLIC_ACCOUNTS_SCHEMA = "clankermux.public.accounts.v1";
+export const PUBLIC_RUNWAY_SCHEMA = "clankermux.public.runway.v1";
+export const PUBLIC_STREAM_SCHEMA = "clankermux.public.stream.v1";
 
-/** Byte ceiling on every string this surface emits. */
+/** Byte ceiling on every DISPLAY string this surface emits. */
 export const MAX_STRING_BYTES = 96;
 
 /**
@@ -51,6 +83,8 @@ export const MAX_STRING_BYTES = 96;
  * boundary", so the scan walks codepoints and stops before the one that would
  * overflow. Surrogate pairs are handled by iterating the string (which yields
  * whole codepoints) rather than by index.
+ *
+ * DISPLAY TEXT ONLY. See {@link identifier} for why an id must never come here.
  */
 export function truncateUtf8(
 	value: string,
@@ -71,19 +105,58 @@ export function truncateUtf8(
 	return out;
 }
 
-/** Truncate, preserving null. */
-function str(value: string | null | undefined): string | null {
+/** Truncate DISPLAY TEXT, preserving null. */
+function text(value: string | null | undefined): string | null {
 	return value == null ? null : truncateUtf8(value);
 }
 
 /**
- * Account health, as a CLOSED set with an explicit escape hatch.
+ * An IDENTIFIER, passed through verbatim.
  *
- * `other` is not a bug bucket: it is the honest answer when the provider
- * reported a rate-limit status our vocabulary has not been taught. Reporting
- * `available` there is exactly how `rejected` went unnoticed once already.
+ * Truncation is forbidden here and the reason is not aesthetic: every id on this
+ * surface is a JOIN KEY (a stream event's `accountId` against
+ * `accounts[].id`, a runway cause's `accountId` against the same). A truncated
+ * key is still a syntactically valid key, so it does not fail — it binds the
+ * event to whichever record happens to share the surviving prefix, or to none
+ * at all, and does so only for the ids long enough to need cutting. A wrong
+ * join is worse than a long field.
  */
-export type PublicHealth =
+function identifier(value: string): string {
+	return value;
+}
+
+/** As {@link identifier}, preserving null. */
+function optionalIdentifier(value: string | null | undefined): string | null {
+	return value == null ? null : value;
+}
+
+/**
+ * An INSTANT on the wire: RFC3339 / ISO-8601, or null.
+ *
+ * The consumers parse both ISO-8601 and epoch, so this is not a capability
+ * question — it is that a bare number cannot say whether it is a moment or a
+ * length, and this surface carries both.
+ */
+function instant(ms: number | null | undefined): string | null {
+	if (ms == null || !Number.isFinite(ms)) return null;
+	return new Date(ms).toISOString();
+}
+
+// ---------------------------------------------------------------------------
+// Descriptive enums
+// ---------------------------------------------------------------------------
+
+/**
+ * Whether an account can be routed to, and why not.
+ *
+ * ORTHOGONAL to {@link PublicCredentialStateDto}: a valid credential on a
+ * rate-limited account and an expired credential on an idle one are different
+ * situations, and the deployed shape's single `health` axis could express
+ * neither. `other` is not a bug bucket — it is the honest answer when the
+ * provider reported a rate-limit status our vocabulary has not been taught.
+ * Reporting `available` there is exactly how `rejected` went unnoticed once.
+ */
+export type PublicAvailabilityState =
 	| "available"
 	| "paused"
 	| "rate_limited"
@@ -92,7 +165,7 @@ export type PublicHealth =
 	| "other";
 
 /**
- * Map the internal rate-limit cause to public health.
+ * Map the internal rate-limit cause to an availability state.
  *
  * Paused outranks everything: a paused account is not routable for a reason
  * that has nothing to do with quota, and reporting its stale quota state would
@@ -102,7 +175,10 @@ export type PublicHealth =
  * is what makes a FUTURE cause degrade to `other` rather than silently reading
  * as healthy.
  */
-export function toPublicHealth(cause: string, paused: boolean): PublicHealth {
+export function toPublicAvailabilityState(
+	cause: string,
+	paused: boolean,
+): PublicAvailabilityState {
 	if (paused) return "paused";
 	switch (cause) {
 		case "ok":
@@ -125,11 +201,16 @@ export function toPublicHealth(cause: string, paused: boolean): PublicHealth {
 }
 
 /**
- * Why an account is paused, as a CLOSED set. Mirrors the values the proxy and
- * the dashboard actually write; anything else becomes `other` rather than
- * leaking a free-form string a device would have to render blind.
+ * The finer reason behind an availability state, or null when the state already
+ * says everything there is to say.
+ *
+ * Emitted ONLY where it adds information: a `usage_exhausted` state needs no
+ * reason repeating it back, but a `paused` state has seven quite different
+ * meanings and a `rate_limited` state does not distinguish the provider
+ * throttling us from our own queue holding a request back.
  */
-export type PublicPauseReason =
+export type PublicAvailabilityReason =
+	// Pause reasons.
 	| "manual"
 	| "failure_threshold"
 	| "overage"
@@ -137,9 +218,12 @@ export type PublicPauseReason =
 	| "oauth_invalid_grant"
 	| "rate_limit_window"
 	| "subscription_expired"
+	// Refinements of a non-paused state.
+	| "queueing"
+	| "payment_required"
 	| "other";
 
-const KNOWN_PAUSE_REASONS = new Set<PublicPauseReason>([
+const KNOWN_PAUSE_REASONS = new Set([
 	"manual",
 	"failure_threshold",
 	"overage",
@@ -149,16 +233,151 @@ const KNOWN_PAUSE_REASONS = new Set<PublicPauseReason>([
 	"subscription_expired",
 ]);
 
-/** Null when the account is not paused; never a free-form string. */
-export function toPublicPauseReason(
-	reason: string | null,
+/**
+ * Resolve the availability reason. Null when the state is self-explanatory.
+ *
+ * A paused account ALWAYS carries one (falling back to `other` rather than
+ * leaking a free-form column a device would have to render blind), because
+ * "paused" without a reason is the one state an operator cannot act on.
+ */
+export function toPublicAvailabilityReason(
+	cause: string,
 	paused: boolean,
-): PublicPauseReason | null {
-	if (!paused) return null;
-	if (reason && KNOWN_PAUSE_REASONS.has(reason as PublicPauseReason)) {
-		return reason as PublicPauseReason;
+	pauseReason: string | null,
+): PublicAvailabilityReason | null {
+	if (paused) {
+		return pauseReason && KNOWN_PAUSE_REASONS.has(pauseReason)
+			? (pauseReason as PublicAvailabilityReason)
+			: "other";
 	}
-	return "other";
+	switch (cause) {
+		case "queueing_hard":
+			return "queueing";
+		case "payment_required":
+			return "payment_required";
+		default:
+			return null;
+	}
+}
+
+/**
+ * The stored credential's state — an axis of its own, deliberately not folded
+ * into availability.
+ *
+ * A `refreshable` credential blocks nothing (the proxy renews it on the next
+ * request), an `invalid` one needs a human at a browser, and `not_applicable`
+ * is the honest answer for an API-key provider that has no token lifecycle.
+ * Collapsing all three into one `blocked` destroys exactly the distinction the
+ * applet renders.
+ */
+export type PublicCredentialStateDto =
+	| "valid"
+	| "refreshable"
+	| "expired"
+	| "invalid"
+	| "missing"
+	| "not_applicable"
+	| "other";
+
+const KNOWN_CREDENTIAL_STATES = new Set([
+	"valid",
+	"refreshable",
+	"expired",
+	"invalid",
+	"missing",
+	"not_applicable",
+]);
+
+export function toPublicCredentialState(
+	state: string,
+): PublicCredentialStateDto {
+	return KNOWN_CREDENTIAL_STATES.has(state)
+		? (state as PublicCredentialStateDto)
+		: "other";
+}
+
+/**
+ * How well the account's usage is measured. Replaces a boolean `stale` that
+ * conflated an old reading, no reading at all, and a provider that has no such
+ * window to read.
+ */
+export type PublicMeasurementStateDto =
+	| "fresh"
+	| "stale"
+	| "missing"
+	| "not_applicable"
+	| "other";
+
+const KNOWN_MEASUREMENT_STATES = new Set([
+	"fresh",
+	"stale",
+	"missing",
+	"not_applicable",
+]);
+
+export function toPublicMeasurementState(
+	state: string,
+): PublicMeasurementStateDto {
+	return KNOWN_MEASUREMENT_STATES.has(state)
+		? (state as PublicMeasurementStateDto)
+		: "other";
+}
+
+/** The quota windows this surface names. */
+export type PublicWindowKind =
+	| "five_hour"
+	| "seven_day"
+	| "weekly_scoped"
+	| "other";
+
+const KNOWN_WINDOW_KINDS = new Set(["five_hour", "seven_day", "weekly_scoped"]);
+
+/**
+ * Total over the window classes the read model produces. Anthropic's separate
+ * Claude-Code weekly allowance lands on `other` with a scope id, which is the
+ * escape hatch working as intended rather than a gap.
+ */
+export function toPublicWindowKind(kind: string): PublicWindowKind {
+	return KNOWN_WINDOW_KINDS.has(kind) ? (kind as PublicWindowKind) : "other";
+}
+
+/**
+ * What the usage estimator found for a window.
+ *
+ * `insufficient_data` is absent by construction: a prediction with no
+ * established trend is not served at all (the record is null), because its
+ * `slopePerHour` is a placeholder 0 that would read as a measured flat trend.
+ */
+export type PublicPredictionState = "rising" | "stable" | "exhausted" | "other";
+
+const KNOWN_PREDICTION_STATES = new Set(["rising", "stable", "exhausted"]);
+
+export function toPublicPredictionState(state: string): PublicPredictionState {
+	return KNOWN_PREDICTION_STATES.has(state)
+		? (state as PublicPredictionState)
+		: "other";
+}
+
+/**
+ * The provider-overload breaker, as a CLOSED set.
+ *
+ * `half_open` is why this is a state rather than a deadline: a half-open
+ * breaker has no `until` at all and is emphatically not closed, so a flat
+ * timestamp reports the one case worth showing as "fine".
+ */
+export type PublicOverloadStateDto = "closed" | "open" | "half_open" | "other";
+
+export function toPublicOverloadState(state: string): PublicOverloadStateDto {
+	switch (state) {
+		case "closed":
+			return "closed";
+		case "open":
+			return "open";
+		case "half-open":
+			return "half_open";
+		default:
+			return "other";
+	}
 }
 
 /**
@@ -205,88 +424,267 @@ export function toPublicRunwayKind(kind: string): PublicRunwayKind {
 	}
 }
 
-/** One usage window on the wire. */
-export interface PublicLimitDto {
-	kind: PublicLimitSnapshot["kind"];
-	pct: number | null;
-	resetsAt: number | null;
+// ---------------------------------------------------------------------------
+// GET /public/v1/accounts
+// ---------------------------------------------------------------------------
+
+/**
+ * The estimator's projection for ONE window, or null when there is none.
+ *
+ * Lives INSIDE the window rather than on a resource of its own: a measurement
+ * and the projection built from it describe the same thing and change together,
+ * and splitting them lets a client pair a fresh percentage with a projection
+ * computed from an older reading without any way to notice.
+ */
+export interface PublicPredictionDto {
+	/** Where the window is projected to land at its reset, 0..100. */
+	predictedUtilizationAtResetPct: number | null;
+	/** INSTANT the window is projected to hit 100%. */
+	exhaustsAt: string | null;
+	willExhaustBeforeReset: boolean;
+	/**
+	 * The estimator's own confidence flag. A low-confidence projection is real
+	 * evidence but must never be rendered at full severity.
+	 */
+	lowConfidence: boolean;
+	state: PublicPredictionState;
+}
+
+function toPublicPredictionDto(
+	prediction: UsagePrediction | null,
+): PublicPredictionDto | null {
+	if (!prediction) return null;
+	return {
+		predictedUtilizationAtResetPct: prediction.predictedAtReset,
+		// `etaExhaustMs` is an absolute epoch INSTANT despite its name (it is
+		// `last.t + offset`). Published under a name that says so.
+		exhaustsAt: instant(prediction.etaExhaustMs),
+		willExhaustBeforeReset: prediction.willExhaustBeforeReset === true,
+		lowConfidence: prediction.lowConfidence === true,
+		state: toPublicPredictionState(prediction.state),
+	};
+}
+
+/**
+ * One quota window on the wire.
+ *
+ * REPLACES the deployed `limits[]`, `fiveHourPct`, `fiveHourResetsAt`,
+ * `sevenDayPct` and `sevenDayResetsAt` together: those represented one
+ * observation three times in two vocabularies, and a client had no way to know
+ * which copy to believe when they disagreed.
+ */
+export interface PublicWindowDto {
+	kind: PublicWindowKind;
+	/** Stable scope key for a scoped window; null for the account-wide ones. */
+	scopeId: string | null;
+	/** Display text only. Join on `scopeId`, never on this. */
 	label: string | null;
+	utilizationPct: number | null;
+	/** INSTANT the reading was observed. */
+	observedAt: string | null;
+	/** INSTANT the window rolls over. */
+	resetsAt: string | null;
+	prediction: PublicPredictionDto | null;
+}
+
+function toPublicWindowDto(window: PublicWindowSnapshot): PublicWindowDto {
+	return {
+		kind: toPublicWindowKind(window.kind),
+		// A scope id is a JOIN KEY against `providers[].scopedLimits[].scopeId`,
+		// so it is never truncated.
+		scopeId: optionalIdentifier(window.scopeId),
+		label: text(window.label),
+		utilizationPct: window.utilizationPct,
+		observedAt: instant(window.observedAtMs),
+		resetsAt: instant(window.resetsAtMs),
+		prediction: toPublicPredictionDto(window.prediction),
+	};
+}
+
+/** Whether the account can be routed to, and until when it cannot. */
+export interface PublicAvailabilityDto {
+	state: PublicAvailabilityState;
+	reason: PublicAvailabilityReason | null;
+	/** INSTANT the current block lifts; null when nothing schedules it. */
+	availableAt: string | null;
+}
+
+/** The stored credential, on its own axis. */
+export interface PublicCredentialDto {
+	state: PublicCredentialStateDto;
+	/** INSTANT the access token expires; null when there is no such deadline. */
+	expiresAt: string | null;
 }
 
 /** One account on the wire. Field list is exhaustive and hand-maintained. */
 export interface PublicAccountDto {
-	/** Stable id, so a stream event can be joined to a name. */
+	/** Stable id, so a stream event can be joined to a name. NEVER truncated. */
 	id: string;
 	name: string;
 	provider: string;
-	paused: boolean;
-	pauseReason: PublicPauseReason | null;
-	health: PublicHealth;
+	/**
+	 * The ONE account a fresh, unpinned, nominal-size request would be routed to
+	 * right now — not "the account the load balancer is using", which is not a
+	 * thing that exists. `routing.context` on `/public/v1/status` names the
+	 * question this answers, and the gates it deliberately omits.
+	 */
+	isDefaultCandidate: boolean;
+	availability: PublicAvailabilityDto;
+	credential: PublicCredentialDto;
+	measurementState: PublicMeasurementStateDto;
+	/** INSTANT the reading behind every window below was observed. */
+	usageObservedAt: string | null;
+	/**
+	 * DERIVED: the max `utilizationPct` across the account-wide windows below.
+	 * Served because both clients render an overall gauge; it is a rollup of
+	 * `windows[]` and never a separate measurement.
+	 */
 	utilizationPct: number | null;
-	fiveHourPct: number | null;
-	fiveHourResetsAt: number | null;
-	sevenDayPct: number | null;
-	sevenDayResetsAt: number | null;
-	willExhaustBeforeReset: boolean;
-	rateLimitResetAt: number | null;
-	providerOverloadedUntil: number | null;
-	providerWideOverloadedUntil: number | null;
-	stale: boolean;
-	limits: PublicLimitDto[];
+	windows: PublicWindowDto[];
 }
 
 export function toPublicAccountDto(
 	account: PublicAccountSnapshot,
 ): PublicAccountDto {
 	return {
-		id: truncateUtf8(account.id),
+		id: identifier(account.id),
 		name: truncateUtf8(account.name),
 		provider: truncateUtf8(account.provider),
-		paused: account.paused,
-		pauseReason: toPublicPauseReason(account.pauseReason, account.paused),
-		health: toPublicHealth(account.cause, account.paused),
+		isDefaultCandidate: account.isDefaultCandidate,
+		availability: {
+			state: toPublicAvailabilityState(account.cause, account.paused),
+			reason: toPublicAvailabilityReason(
+				account.cause,
+				account.paused,
+				account.pauseReason,
+			),
+			availableAt: instant(account.availableAtMs),
+		},
+		credential: {
+			state: toPublicCredentialState(account.credentialState),
+			expiresAt: instant(account.credentialExpiresAtMs),
+		},
+		measurementState: toPublicMeasurementState(account.measurementState),
+		usageObservedAt: instant(account.usageObservedAtMs),
 		utilizationPct: account.utilizationPct,
-		fiveHourPct: account.fiveHourPct,
-		fiveHourResetsAt: account.fiveHourResetsAt,
-		sevenDayPct: account.sevenDayPct,
-		sevenDayResetsAt: account.sevenDayResetsAt,
-		willExhaustBeforeReset: account.willExhaustBeforeReset,
-		rateLimitResetAt: account.rateLimitResetAt,
-		providerOverloadedUntil: account.providerOverloadedUntil,
-		providerWideOverloadedUntil: account.providerWideOverloadedUntil,
-		stale: account.stale,
-		limits: account.limits.map((limit) => ({
-			kind: limit.kind,
-			pct: limit.pct,
-			resetsAt: limit.resetsAt,
-			label: str(limit.label),
-		})),
+		windows: account.windows.map(toPublicWindowDto),
 	};
 }
 
-/** `GET /public/v1/status`. No arrays at all. */
+/**
+ * `GET /public/v1/accounts`. One record array (`accounts`), one nested array
+ * inside it (`windows`), and nothing deeper.
+ *
+ * Ordered by account NAME, ascending. The order is a stable display order and
+ * carries no routing meaning: the routing answer is `isDefaultCandidate`, which
+ * says so on the record rather than hiding in an array index.
+ */
+export interface PublicAccountsDto {
+	schema: string;
+	/** INSTANT this payload describes. */
+	generatedAt: string;
+	accounts: PublicAccountDto[];
+}
+
+export function toPublicAccountsDto(
+	snapshot: PublicSnapshot,
+): PublicAccountsDto {
+	return {
+		schema: PUBLIC_ACCOUNTS_SCHEMA,
+		generatedAt: new Date(snapshot.nowMs).toISOString(),
+		accounts: snapshot.accounts.map(toPublicAccountDto),
+	};
+}
+
+// ---------------------------------------------------------------------------
+// GET /public/v1/status
+// ---------------------------------------------------------------------------
+
+/** A pooled aggregate over one window class. */
+export interface PublicWindowAggregateDto {
+	/**
+	 * UNWEIGHTED ARITHMETIC MEAN over the accounts that reported the window,
+	 * paused and stale ones included. Named for what it is: the deployed
+	 * `fiveHourPct` was this number under a name that implied a pool utilization.
+	 *
+	 * The percentages behind it may derive from DIFFERENT PLAN CAPACITIES — a
+	 * Max-20 account and a Pro account both report "62%" of quotas that are not
+	 * the same size — so it is a mean of percentages and never a statement about
+	 * how much work the pool can still do.
+	 */
+	meanUtilizationPct: number | null;
+	contributingAccountCount: number;
+	/** Every account in scope that did not contribute. The two counts sum. */
+	unknownAccountCount: number;
+	/**
+	 * EARLIEST reset among the contributors, as an INSTANT. Never a mean of reset
+	 * instants — the mean of two reset times is a moment at which nothing
+	 * happens.
+	 */
+	earliestResetsAt: string | null;
+}
+
+/** One provider-scoped limit, pooled. */
+export interface PublicScopedLimitDto extends PublicWindowAggregateDto {
+	/** Stable key, joinable against `accounts[].windows[].scopeId`. */
+	scopeId: string;
+	/** Display text only. */
+	label: string | null;
+}
+
+/** The overload breaker for one provider. */
+export interface PublicOverloadDto {
+	state: PublicOverloadStateDto;
+	/** INSTANT the block lifts. Null while closed AND while half-open. */
+	until: string | null;
+	probeActive: boolean;
+}
+
+/**
+ * One provider on the wire.
+ *
+ * Provider-level facts belong HERE, not copied onto every account of the
+ * provider: the deployed shape published one overload deadline N times and left
+ * a client to notice they were the same fact.
+ */
+export interface PublicProviderDto {
+	provider: string;
+	/** Worst state across ALL this provider's buckets, family ones included. */
+	anyOverload: PublicOverloadDto;
+	/** The provider-WIDE bucket alone, which gates every model family at once. */
+	providerWideOverload: PublicOverloadDto;
+	scopedLimits: PublicScopedLimitDto[];
+}
+
+/** `GET /public/v1/status`. One record array (`providers`), one nested. */
 export interface PublicStatusDto {
 	schema: string;
+	/** INSTANT this payload describes. Also the device's only wall clock. */
+	generatedAt: string;
 	status: "ok" | "degraded" | "unhealthy";
-	now: number;
-	/** The one non-epoch timestamp on this surface: the device's wall clock. */
-	nowIso: string;
+	/** DURATION, seconds. */
 	uptimeS: number;
 	version: string;
 	pool: {
 		configured: number;
-		routable: number;
+		/** Routable in `routing.context` — the same question, so the same answer. */
+		defaultRoutable: number;
 		paused: number;
 		rateLimited: number;
 		usageExhausted: number;
-		nextAvailableAt: number | null;
+		/** INSTANT. */
+		nextAvailableAt: string | null;
+	};
+	routing: {
+		context: string;
+		defaultCandidateAccountId: string | null;
 	};
 	usage: {
-		fiveHourPct: number | null;
-		sevenDayPct: number | null;
-		worstAccountPct: number | null;
+		fiveHour: PublicWindowAggregateDto;
+		sevenDay: PublicWindowAggregateDto;
+		worstAccountUtilizationPct: number | null;
 	};
-	stale: boolean;
+	providers: PublicProviderDto[];
 }
 
 /**
@@ -297,8 +695,29 @@ export function toPublicStatusLevel(
 	pool: PublicSnapshot["pool"],
 ): PublicStatusDto["status"] {
 	if (pool.configured === 0) return "unhealthy";
-	if (pool.routable > 0) return "ok";
-	return pool.nextAvailableAt !== null ? "degraded" : "unhealthy";
+	if (pool.defaultRoutable > 0) return "ok";
+	return pool.nextAvailableAtMs !== null ? "degraded" : "unhealthy";
+}
+
+function toPublicWindowAggregateDto(
+	aggregate: PublicSnapshot["usage"]["fiveHour"],
+): PublicWindowAggregateDto {
+	return {
+		meanUtilizationPct: aggregate.meanUtilizationPct,
+		contributingAccountCount: aggregate.contributingAccountCount,
+		unknownAccountCount: aggregate.unknownAccountCount,
+		earliestResetsAt: instant(aggregate.earliestResetsAtMs),
+	};
+}
+
+function toPublicOverloadDto(
+	overload: PublicSnapshot["providers"][number]["anyOverload"],
+): PublicOverloadDto {
+	return {
+		state: toPublicOverloadState(overload.state),
+		until: instant(overload.untilMs),
+		probeActive: overload.probeActive,
+	};
 }
 
 export function toPublicStatusDto(
@@ -306,51 +725,121 @@ export function toPublicStatusDto(
 	runtime: { uptimeS: number; version: string },
 ): PublicStatusDto {
 	return {
-		schema: PUBLIC_SCHEMA,
+		schema: PUBLIC_STATUS_SCHEMA,
+		generatedAt: new Date(snapshot.nowMs).toISOString(),
 		status: toPublicStatusLevel(snapshot.pool),
-		now: snapshot.now,
-		nowIso: new Date(snapshot.now).toISOString(),
 		uptimeS: runtime.uptimeS,
 		version: truncateUtf8(runtime.version),
 		pool: {
 			configured: snapshot.pool.configured,
-			routable: snapshot.pool.routable,
+			defaultRoutable: snapshot.pool.defaultRoutable,
 			paused: snapshot.pool.paused,
 			rateLimited: snapshot.pool.rateLimited,
 			usageExhausted: snapshot.pool.usageExhausted,
-			nextAvailableAt: snapshot.pool.nextAvailableAt,
+			nextAvailableAt: instant(snapshot.pool.nextAvailableAtMs),
+		},
+		routing: {
+			context: snapshot.routing.context,
+			// A join key against `accounts[].id`, so never truncated.
+			defaultCandidateAccountId: optionalIdentifier(
+				snapshot.routing.defaultCandidateAccountId,
+			),
 		},
 		usage: {
-			fiveHourPct: snapshot.usage.fiveHourPct,
-			sevenDayPct: snapshot.usage.sevenDayPct,
-			worstAccountPct: snapshot.usage.worstAccountPct,
+			fiveHour: toPublicWindowAggregateDto(snapshot.usage.fiveHour),
+			sevenDay: toPublicWindowAggregateDto(snapshot.usage.sevenDay),
+			worstAccountUtilizationPct: snapshot.usage.worstAccountUtilizationPct,
 		},
-		stale: snapshot.stale,
+		providers: snapshot.providers.map((provider) => ({
+			provider: truncateUtf8(provider.provider),
+			anyOverload: toPublicOverloadDto(provider.anyOverload),
+			providerWideOverload: toPublicOverloadDto(provider.providerWideOverload),
+			scopedLimits: provider.scopedLimits.map((limit) => ({
+				scopeId: identifier(limit.scopeId),
+				label: text(limit.label),
+				...toPublicWindowAggregateDto(limit),
+			})),
+		})),
 	};
 }
 
-/** `GET /public/v1/accounts`. One record array, one nested array inside it. */
-export interface PublicAccountsDto {
+// ---------------------------------------------------------------------------
+// GET /public/v1/runway
+// ---------------------------------------------------------------------------
+
+/** The account + window that runs out at the reported instant. */
+export interface PublicRunwayCauseDto {
+	/** A join key against `accounts[].id`, so never truncated. */
+	accountId: string;
+	windowKind: PublicWindowKind;
+}
+
+/**
+ * The pool's worst STATEABLE quota outcome.
+ *
+ * "Stated", not "active", and the distinction is the whole point: an UNOBSERVED
+ * key could be worse than every stated one, so a name implying this covers
+ * everything would be a claim the data does not support. `coverage` is what
+ * says how much of the pool the figure speaks for, and a client rendering this
+ * without it is claiming more than it knows.
+ */
+export interface PublicWorstOutcomeDto {
+	kind: PublicRunwayKind;
+	/** INSTANT the pool is projected to be out; null on every other kind. */
+	exhaustsAt: string | null;
+	causes: PublicRunwayCauseDto[];
+}
+
+/**
+ * `GET /public/v1/runway` — the POOL-LEVEL quota projection and nothing else.
+ *
+ * Deliberately absent, and none of it may be added back:
+ *
+ *  - API key ids, key NAMES (they look like `"impatience (claude)"`), routing
+ *    pins and per-key eligible-account mappings. All of it is management data
+ *    on an unauthenticated surface, and the per-key breakdown is three array
+ *    levels past what the device's scanner can descend into.
+ *  - Per-account utilization, resets and observation times. That is the
+ *    accounts resource's job; re-serving it here would be the same measurement
+ *    in two places, and the two would drift. A cause REFERENCING an account id
+ *    is a resource reference, which is a different thing.
+ */
+export interface PublicRunwayDto {
 	schema: string;
-	now: number;
-	pooled: {
-		fiveHourPct: number | null;
-		sevenDayPct: number | null;
+	/** INSTANT this payload describes. */
+	generatedAt: string;
+	/** DURATION, ms — the horizon the scan modelled, so no client hardcodes it. */
+	horizonMs: number;
+	coverage: {
+		activeKeyCount: number;
+		statedKeyCount: number;
+		unobservedKeyCount: number;
 	};
-	accounts: PublicAccountDto[];
+	worstStatedOutcome: PublicWorstOutcomeDto | null;
 }
 
-export function toPublicAccountsDto(
-	snapshot: PublicSnapshot,
-): PublicAccountsDto {
+export function toPublicRunwayDto(
+	snapshot: PublicRunwaySnapshot,
+): PublicRunwayDto {
 	return {
-		schema: PUBLIC_SCHEMA,
-		now: snapshot.now,
-		pooled: {
-			fiveHourPct: snapshot.usage.fiveHourPct,
-			sevenDayPct: snapshot.usage.sevenDayPct,
+		schema: PUBLIC_RUNWAY_SCHEMA,
+		generatedAt: new Date(snapshot.generatedAtMs).toISOString(),
+		horizonMs: snapshot.horizonMs,
+		coverage: {
+			activeKeyCount: snapshot.coverage.activeKeyCount,
+			statedKeyCount: snapshot.coverage.statedKeyCount,
+			unobservedKeyCount: snapshot.coverage.unobservedKeyCount,
 		},
-		accounts: snapshot.accounts.map(toPublicAccountDto),
+		worstStatedOutcome: snapshot.worstStatedOutcome
+			? {
+					kind: toPublicRunwayKind(snapshot.worstStatedOutcome.kind),
+					exhaustsAt: instant(snapshot.worstStatedOutcome.exhaustsAtMs),
+					causes: snapshot.worstStatedOutcome.causes.map((cause) => ({
+						accountId: identifier(cause.accountId),
+						windowKind: toPublicWindowKind(cause.windowKind),
+					})),
+				}
+			: null,
 	};
 }
 
@@ -365,6 +854,13 @@ export function toPublicAccountsDto(
  * bus is free to rename, split or add events as the proxy changes; forwarding
  * its discriminator would make every one of those an unannounced breaking
  * change for a device in a wall socket. Same DATA, separate vocabulary.
+ *
+ * NO `other` MEMBER, and that is not an oversight. The `other` convention is for
+ * DESCRIPTIVE enums, where the value describes something and an unknown value
+ * still has to be rendered. This is a DISCRIMINATOR: an event type the surface
+ * does not carry is simply not emitted, and a client ignores what it does not
+ * recognise. An `other` event would be a record with no fields a client could
+ * read, forwarded for no purpose.
  */
 export type PublicStreamEventType =
 	| "active.snapshot"
@@ -376,7 +872,8 @@ export type PublicStreamEventType =
 /** One in-flight request inside the snapshot. */
 export interface PublicActiveRequestDto {
 	id: string;
-	startedAt: number;
+	/** INSTANT. */
+	startedAt: string | null;
 	method: string;
 	path: string;
 	project: string | null;
@@ -395,7 +892,8 @@ export interface PublicActiveRequestDto {
 export interface PublicSnapshotEventDto {
 	type: "active.snapshot";
 	schema: string;
-	now: number;
+	/** INSTANT. */
+	generatedAt: string;
 	active: PublicActiveRequestDto[];
 }
 
@@ -403,7 +901,8 @@ export interface PublicSnapshotEventDto {
 export interface PublicRequestOpenedDto {
 	type: "request.opened";
 	id: string;
-	at: number;
+	/** INSTANT. */
+	at: string | null;
 	method: string;
 	path: string;
 	project: string | null;
@@ -426,7 +925,8 @@ export interface PublicRequestDroppedDto {
 export interface PublicRequestUpstreamDto {
 	type: "request.upstream";
 	id: string;
-	at: number;
+	/** INSTANT. */
+	at: string | null;
 	method: string;
 	path: string;
 	accountId: string | null;
@@ -446,13 +946,15 @@ export interface PublicRequestUpstreamDto {
 export interface PublicRequestDoneDto {
 	type: "request.done";
 	id: string;
-	at: number;
+	/** INSTANT. */
+	at: string;
 	method: string;
 	path: string;
 	accountId: string | null;
 	statusCode: number | null;
 	success: boolean;
 	rateLimited: boolean;
+	/** DURATION, ms. */
 	responseTimeMs: number | null;
 	failoverAttempts: number;
 	model: string | null;
@@ -469,21 +971,15 @@ export type PublicStreamEventDto =
 	| PublicRequestUpstreamDto
 	| PublicRequestDoneDto;
 
-function isoToMs(value: string | null | undefined): number | null {
-	if (!value) return null;
-	const ms = Date.parse(value);
-	return Number.isFinite(ms) ? ms : null;
-}
-
 /**
  * Map the internal summary payload.
  *
  * Two normalizations the internal event does not do, both because the internal
  * bus grew them separately and a device should not have to know that:
  *
- *  - `timestamp` is an ISO STRING internally and epoch ms here, like every
- *    other timestamp on this surface.
- *  - `accountUsed` is called `accountId` here, matching the `start`/`ingress`
+ *  - `timestamp` is re-emitted as `at`, normalized through `Date.parse` so a
+ *    non-RFC3339 spelling cannot reach the wire.
+ *  - `accountUsed` is called `accountId` here, matching the `opened`/`upstream`
  *    events and `PublicAccountDto.id`, so a device can join on one field name.
  *
  * A summary whose timestamp will not parse falls back to `now` rather than
@@ -494,13 +990,16 @@ export function toPublicRequestDoneDto(
 	payload: RequestResponse,
 	now: number,
 ): PublicRequestDoneDto {
+	const parsed = payload.timestamp ? Date.parse(payload.timestamp) : Number.NaN;
 	return {
 		type: "request.done",
-		id: truncateUtf8(payload.id),
-		at: isoToMs(payload.timestamp) ?? now,
+		// A join key against the `request.opened` / `request.upstream` events for
+		// the same request. Truncating it would bind a completion to the wrong row.
+		id: identifier(payload.id),
+		at: new Date(Number.isFinite(parsed) ? parsed : now).toISOString(),
 		method: truncateUtf8(payload.method),
 		path: truncateUtf8(payload.path),
-		accountId: str(payload.accountUsed),
+		accountId: optionalIdentifier(payload.accountUsed),
 		statusCode: payload.statusCode ?? null,
 		success: payload.success === true,
 		rateLimited: payload.rateLimited === true,
@@ -508,10 +1007,18 @@ export function toPublicRequestDoneDto(
 		failoverAttempts: payload.failoverAttempts ?? 0,
 		// The model actually used, falling back to the one the request named —
 		// a failed request has the second and not the first.
-		model: str(payload.model ?? payload.requestedModel ?? null),
-		project: str(payload.project ?? null),
+		model: text(payload.model ?? payload.requestedModel ?? null),
+		project: text(payload.project ?? null),
 		totalTokens: payload.totalTokens ?? null,
 		costUsd: payload.costUsd ?? null,
-		errorMessage: str(payload.errorMessage),
+		errorMessage: text(payload.errorMessage),
 	};
 }
+
+/** Shared by the stream handler for the non-summary events. */
+export const streamHelpers = {
+	instant,
+	identifier,
+	optionalIdentifier,
+	text,
+};

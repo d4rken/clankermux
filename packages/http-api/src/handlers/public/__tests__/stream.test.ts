@@ -31,6 +31,7 @@ import {
 	publicStreamConnectionCount,
 	toPublicStreamEvent,
 } from "../stream";
+import { assertInstantsAreIso } from "./wire-contract";
 
 /** Publish on the internal bus, exactly as the proxy does. */
 function emit(evt: RequestEvt): void {
@@ -97,7 +98,7 @@ describe("connect handshake", () => {
 			new Request("http://localhost/public/v1/stream"),
 		);
 		const frames = await readFrames(res, 2);
-		expect(dataOf(frames[1] ?? "")?.schema).toBe("clankermux.public.v1");
+		expect(dataOf(frames[1] ?? "")?.schema).toBe("clankermux.public.stream.v1");
 	});
 
 	it("SUBSCRIBES BEFORE it builds the snapshot", async () => {
@@ -139,7 +140,7 @@ describe("connect handshake", () => {
 		expect(snapshot?.active).toEqual([
 			{
 				id: "req-live",
-				startedAt: 1_700_000_000_000,
+				startedAt: "2023-11-14T22:13:20.000Z",
 				method: "POST",
 				path: "/v1/messages",
 				project: "clankermux",
@@ -396,6 +397,95 @@ describe("event translation", () => {
 		).toBeNull();
 	});
 
+	it("does NOT give the discriminator an `other` member", () => {
+		// The `other` convention on this surface is for DESCRIPTIVE enums, where
+		// an unrecognized value still has to be rendered. A discriminator is not
+		// one: an `other` event would be a record with no fields a client could
+		// read. An event we do not carry is simply not emitted, and a client
+		// ignores what it does not recognize.
+		const unknown = toPublicStreamEvent(
+			// biome-ignore lint/suspicious/noExplicitAny: modelling a future bus event
+			{ type: "something-new" } as any,
+			0,
+		);
+		expect(unknown).toBeNull();
+		expect(JSON.stringify(unknown)).not.toContain("other");
+	});
+
+	it("emits every instant as an ISO string and no duration as one", () => {
+		const events = [
+			toPublicStreamEvent(
+				{
+					type: "snapshot",
+					active: [
+						{
+							id: "a",
+							timestamp: 1_700_000_000_000,
+							method: "GET",
+							path: "/p",
+							project: null,
+							model: null,
+							phase: "pending",
+							accountId: null,
+							statusCode: null,
+						},
+					],
+				},
+				1_700_000_000_000,
+			),
+			toPublicStreamEvent(
+				{
+					type: "ingress",
+					id: "a",
+					timestamp: 1_700_000_000_000,
+					method: "GET",
+					path: "/p",
+					project: null,
+					model: null,
+				},
+				0,
+			),
+			toPublicStreamEvent(
+				{
+					type: "start",
+					id: "a",
+					timestamp: 1_700_000_000_000,
+					method: "GET",
+					path: "/p",
+					accountId: null,
+					statusCode: 200,
+					project: null,
+					model: null,
+				},
+				0,
+			),
+			toPublicStreamEvent(
+				{
+					type: "summary",
+					payload: {
+						id: "a",
+						timestamp: new Date(1_700_000_000_000).toISOString(),
+						method: "GET",
+						path: "/p",
+						accountUsed: null,
+						statusCode: 200,
+						success: true,
+						errorMessage: null,
+						responseTimeMs: 1_234,
+						failoverAttempts: 0,
+					},
+				},
+				0,
+			),
+		];
+		for (const event of events) {
+			assertInstantsAreIso(event);
+		}
+		// `responseTimeMs` is a DURATION and stays a number.
+		const done = events[3] as { responseTimeMs?: unknown } | null;
+		expect(typeof done?.responseTimeMs).toBe("number");
+	});
+
 	it("keeps project and model — full DATA parity with the internal lane", () => {
 		const event = toPublicStreamEvent(
 			{
@@ -412,7 +502,7 @@ describe("event translation", () => {
 		expect(event).toEqual({
 			type: "request.opened",
 			id: "a",
-			at: 5,
+			at: "1970-01-01T00:00:00.005Z",
 			method: "POST",
 			path: "/v1/messages",
 			project: "clankermux",
