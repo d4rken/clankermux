@@ -53,7 +53,7 @@ describe("changepoint detection", () => {
 		});
 
 		expect(result.changes).toEqual([]);
-		expect(result.verdict).toBe("stable");
+		expect(result.verdict).toBe("no-change-detected");
 	});
 
 	it("finds exactly one change on a stepped series", () => {
@@ -415,7 +415,7 @@ describe("changepoint detection", () => {
 			maxDepth: 1,
 		});
 
-		expect(result.verdict).toBe("stable");
+		expect(result.verdict).toBe("no-change-detected");
 		expect(result.changes).toEqual([]);
 	});
 });

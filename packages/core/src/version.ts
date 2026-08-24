@@ -2,6 +2,12 @@
  * Version utility that works in both development and production environments
  */
 
+// Read the ClankerMux release version straight from the repo-root package.json,
+// the same way the dashboard does. A static import so the value is resolved by
+// the bundler/runtime rather than by a filesystem probe that has no answer under
+// a compiled binary.
+import rootPackageJson from "../../../package.json";
+
 // Claude CLI version to use in user-agent headers
 export const CLAUDE_CLI_VERSION = "2.1.143";
 
@@ -52,6 +58,31 @@ export function getVersionSync(): string {
 	// 2. Final fallback
 	cachedVersion = CLAUDE_CLI_VERSION;
 	return cachedVersion;
+}
+
+/** Cache for {@link getAppVersionSync}; deliberately NOT shared with getVersion. */
+let cachedAppVersion: string | null = null;
+
+/**
+ * The ClankerMux release version, or null when it genuinely cannot be read.
+ *
+ * Deliberately NOT {@link getVersionSync}, and the difference matters wherever
+ * the value is RECORDED rather than sent upstream. `getVersionSync` exists to
+ * produce a Claude-CLI-shaped version for user-agent purposes, so its
+ * no-environment fallback is {@link CLAUDE_CLI_VERSION} — under systemd, where
+ * `npm_package_version` is unset, it returns "2.1.x". Stamping that into a
+ * provenance column (`account_tier_history.app_version`) records the CLI compat
+ * version as the build that made the observation, which is simply false.
+ *
+ * So: the repo-root package.json only, its own cache, and NO fallback. A null is
+ * an honest "unknown build", which the nullable column already allows.
+ */
+export function getAppVersionSync(): string | null {
+	if (cachedAppVersion !== null) return cachedAppVersion;
+	const version = (rootPackageJson as { version?: string }).version;
+	if (typeof version !== "string" || version.trim() === "") return null;
+	cachedAppVersion = version;
+	return cachedAppVersion;
 }
 
 /**

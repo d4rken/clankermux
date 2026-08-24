@@ -6,6 +6,7 @@ import {
 	formatCoefficient,
 	formatInterval,
 	quotaWindowLabel,
+	supportText,
 	unidentifiedReasonText,
 } from "../../lib/quota-drift-display";
 import { Badge } from "../ui/badge";
@@ -49,10 +50,11 @@ export function ModelWindowCostPanel({
 					) : null}
 				</CardTitle>
 				<CardDescription className="text-xs max-w-prose">
-					Percentage of the window consumed per 1M equivalent tokens (input,
-					output and cache weighted by the provider's own list-price ratios),
-					with a 90% interval. "Implied capacity" is what the whole window would
-					buy at that rate if nothing else ran.
+					Percentage of the window consumed per 1M price-equivalent tokens
+					(input, output and cache weighted by the provider's own list-price
+					ratios), with a 90% interval. "Implied capacity" is what the whole
+					window would buy at that rate if nothing else ran — in the same
+					price-equivalent unit, not raw tokens.
 					{cohort?.tierProvenance === "assumed" ? (
 						<>
 							{" "}
@@ -93,7 +95,13 @@ export function ModelWindowCostPanel({
 										<thead>
 											<tr className="text-xs text-muted-foreground text-left">
 												<th className="font-normal pb-1">Model</th>
-												<th className="font-normal pb-1">% of window / 1M</th>
+												{/* The unit is in the HEADER, not only in the prose
+												    above: a reader scanning the table takes "/ 1M" as
+												    raw tokens, and the whole column is in
+												    list-price-weighted equivalents. */}
+												<th className="font-normal pb-1">
+													% of window / 1M eq-tokens
+												</th>
 												<th className="font-normal pb-1">90% interval</th>
 												<th className="font-normal pb-1">Implied capacity</th>
 												<th className="font-normal pb-1">Share of traffic</th>
@@ -136,9 +144,22 @@ function ModelRow({ model }: { model: QuotaDriftModel }) {
 		);
 	}
 
+	const support = supportText(model);
+
 	return (
 		<tr className="border-t">
-			<td className="py-1.5 font-medium">{model.key}</td>
+			<td className="py-1.5 font-medium">
+				{model.key}
+				{/* How many independent clusters actually carried this model. The
+				    interval cannot express it: the bootstrap resamples whole runs, so
+				    two runs and forty can print the same width. Rendered only on rows
+				    that print a number — see supportText. */}
+				{support ? (
+					<span className="block text-xs font-normal text-muted-foreground">
+						{support}
+					</span>
+				) : null}
+			</td>
 			<td className="py-1.5 font-medium">
 				{formatCoefficient(model.latest?.pointEstimate ?? null)}
 			</td>
@@ -149,7 +170,14 @@ function ModelRow({ model }: { model: QuotaDriftModel }) {
 				)}
 			</td>
 			<td className="py-1.5">
-				{formatCapacity(model.latest?.impliedCapacityMtok ?? null)} tokens
+				{/* "eq-tokens", never bare "tokens": the capacity is 100/coefficient
+				    in the same price-equivalent unit the coefficient is denominated
+				    in, and calling it tokens invites a reader to compare it against a
+				    raw-token budget it is not. formatCapacity already carries the
+				    millions multiplier ("45.0M"), so the unit written here is
+				    eq-tokens rather than Mtok-eq — the latter would state the million
+				    twice. */}
+				{formatCapacity(model.latest?.impliedCapacityMtok ?? null)} eq-tokens
 			</td>
 			<td className="py-1.5 text-muted-foreground">
 				{share == null ? "—" : `${(share * 100).toFixed(1)}%`}

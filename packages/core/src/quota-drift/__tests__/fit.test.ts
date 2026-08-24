@@ -1,6 +1,7 @@
 import { describe, expect, it } from "bun:test";
 import {
 	actualModelKeys,
+	exposureSupport,
 	fitRolling,
 	fitWithIntervals,
 	MIN_SEGMENTS_FOR_FIT,
@@ -442,5 +443,56 @@ describe("actualModelKeys", () => {
 		const segments = [segment({ eqTokensByModel: { real: 10, other: 5 } })];
 
 		expect(actualModelKeys(segments)).toEqual(["real"]);
+	});
+});
+
+describe("exposureSupport", () => {
+	it("counts only the clusters that carried THIS model", () => {
+		// The fit-wide totals here are 3 runs and 2 accounts. Quoting those as one
+		// model's support credits it with clusters that never ran it.
+		const segments = [
+			segment({ runId: "r1", accountId: "a", eqTokensByModel: { opus: 10 } }),
+			segment({ runId: "r1", accountId: "a", eqTokensByModel: { opus: 5 } }),
+			segment({ runId: "r2", accountId: "b", eqTokensByModel: { sonnet: 10 } }),
+			segment({ runId: "r3", accountId: "b", eqTokensByModel: { sonnet: 7 } }),
+		];
+
+		expect(exposureSupport(segments, "opus")).toEqual({
+			nRuns: 1,
+			nAccounts: 1,
+		});
+		expect(exposureSupport(segments, "sonnet")).toEqual({
+			nRuns: 2,
+			nAccounts: 1,
+		});
+	});
+
+	it("counts runs and accounts independently of each other", () => {
+		const segments = [
+			segment({ runId: "r1", accountId: "a", eqTokensByModel: { m: 1 } }),
+			segment({ runId: "r2", accountId: "a", eqTokensByModel: { m: 1 } }),
+			segment({ runId: "r3", accountId: "b", eqTokensByModel: { m: 1 } }),
+		];
+
+		expect(exposureSupport(segments, "m")).toEqual({ nRuns: 3, nAccounts: 2 });
+	});
+
+	it("ignores a zero-token appearance — presence in the map is not exposure", () => {
+		const segments = [
+			segment({ runId: "r1", accountId: "a", eqTokensByModel: { m: 0 } }),
+		];
+
+		expect(exposureSupport(segments, "m")).toEqual({ nRuns: 0, nAccounts: 0 });
+	});
+
+	it("reports nothing for the pooled column, which segments never carry", () => {
+		const segments = [
+			segment({ runId: "r1", accountId: "a", eqTokensByModel: { tiny: 1 } }),
+		];
+
+		expect(exposureSupport(segments, "other")).toEqual({
+			nRuns: 0,
+			nAccounts: 0,
+		});
 	});
 });

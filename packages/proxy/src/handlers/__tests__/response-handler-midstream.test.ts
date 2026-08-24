@@ -117,6 +117,7 @@ function makeCtxWithReason() {
 				run: async () => {},
 			}),
 			updateRequestUsage: async () => {},
+			saveInternalDispatchSpend: async () => {},
 		},
 		asyncWriter: {
 			enqueue: (job: () => void | Promise<void>) => {
@@ -261,6 +262,7 @@ function makeStreamCtx(
 				run: async () => {},
 			}),
 			updateRequestUsage: async () => {},
+			saveInternalDispatchSpend: async () => {},
 		},
 		runtime: { port: 8080, tlsEnabled: false },
 		config: { getStorePayloads: () => false },

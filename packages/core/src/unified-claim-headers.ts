@@ -162,6 +162,13 @@ export interface ExtractedClaimReading {
 	utilization: number | null;
 	/** Epoch ms from the claim's own `-reset` line; null when unparseable. */
 	resetMs: number | null;
+	/**
+	 * The `-surpassed-threshold` reading — the utilization band the provider says
+	 * this claim has crossed. null = no reading, `0` = a reading of zero. Kept
+	 * because it is the only header that says anything about where the provider's
+	 * own warning bands sit; nothing here interprets it.
+	 */
+	surpassedThreshold: number | null;
 }
 
 /**
@@ -207,9 +214,103 @@ export function extractUnifiedClaimReadings(
 			// reset rather than a rounded or lossy one.
 			resetMs:
 				resetMs !== null && Number.isSafeInteger(resetMs) ? resetMs : null,
+			surpassedThreshold: parseStrictDecimal(
+				headers.get(`anthropic-ratelimit-unified-${token}-surpassed-threshold`),
+			),
 		});
 	});
 	return readings;
+}
+
+/**
+ * The SUMMARY block of a response, as it arrived, with no interpretation.
+ *
+ * Sibling of {@link ExtractedClaimReading}: that one describes a per-claim
+ * line, this one the response-level fields those lines sit under. Every field
+ * is null when its header was absent or did not parse, and null never stands in
+ * for a valid zero.
+ *
+ * `remaining` and `retryAfter` are kept as STRINGS deliberately. Their units are
+ * not documented (`remaining` has been observed carrying values that are neither
+ * a token count nor a percentage), and coercing an unknown unit to a number
+ * bakes a guess into the series permanently. A reader that later learns the unit
+ * can parse the stored text; a reader handed a number cannot un-parse it.
+ */
+export interface ExtractedSummaryReading {
+	/** `anthropic-ratelimit-unified-status`, verbatim. */
+	status: string | null;
+	/** Epoch ms from `anthropic-ratelimit-unified-reset`. */
+	resetMs: number | null;
+	/** `anthropic-ratelimit-unified-remaining`, VERBATIM — units unknown. */
+	remaining: string | null;
+	/** Which claim the provider says the summary represents. */
+	representativeClaim: string | null;
+	/** `anthropic-ratelimit-unified-fallback`, verbatim. */
+	fallback: string | null;
+	/** `anthropic-ratelimit-unified-fallback-percentage` as a strict decimal. */
+	fallbackPercentage: number | null;
+	/** `anthropic-ratelimit-unified-overage-status`, verbatim. */
+	overageStatus: string | null;
+	/** `anthropic-ratelimit-unified-overage-disabled-reason`, verbatim. */
+	overageDisabledReason: string | null;
+	/** `retry-after`, VERBATIM. */
+	retryAfter: string | null;
+}
+
+/**
+ * The response's summary-level unified fields, for recording rather than for
+ * deciding. Returns null when the response carried NONE of them — there is
+ * nothing to record then, and an all-null row would only dilute the series.
+ *
+ * Must be called INDEPENDENTLY of {@link extractUnifiedClaimReadings}, never
+ * nested behind a non-empty claim list: summary-only responses exist (a per-IP
+ * burst 429 carries a bare `retry-after` and no claim lines at all), and those
+ * are precisely the responses whose shape is otherwise unrecorded.
+ *
+ * Pure: no clock, no account knowledge, no trust decisions.
+ */
+export function extractUnifiedSummaryReading(
+	headers: Headers,
+): ExtractedSummaryReading | null {
+	const resetSec = parseStrictDecimal(
+		headers.get("anthropic-ratelimit-unified-reset"),
+	);
+	const resetMs = resetSec === null ? null : resetSec * 1000;
+	const reading: ExtractedSummaryReading = {
+		status: headers.get("anthropic-ratelimit-unified-status"),
+		// Same safe-integer rule as the per-claim reset: a fractional or
+		// out-of-range value is not an epoch-ms instant, so store no reset rather
+		// than a lossy one.
+		resetMs: resetMs !== null && Number.isSafeInteger(resetMs) ? resetMs : null,
+		remaining: headers.get("anthropic-ratelimit-unified-remaining"),
+		representativeClaim: headers.get(
+			"anthropic-ratelimit-unified-representative-claim",
+		),
+		fallback: headers.get("anthropic-ratelimit-unified-fallback"),
+		fallbackPercentage: parseStrictDecimal(
+			headers.get("anthropic-ratelimit-unified-fallback-percentage"),
+		),
+		overageStatus: headers.get("anthropic-ratelimit-unified-overage-status"),
+		overageDisabledReason: headers.get(
+			"anthropic-ratelimit-unified-overage-disabled-reason",
+		),
+		retryAfter: headers.get("retry-after"),
+	};
+	// "No row" is decided on the RAW presence of any summary header, not on the
+	// parsed fields: a `-reset` that fails the strict parse still proves the
+	// response carried a summary block, and dropping it would hide exactly the
+	// malformed shapes worth seeing.
+	const sawAnyHeader =
+		reading.status !== null ||
+		headers.get("anthropic-ratelimit-unified-reset") !== null ||
+		reading.remaining !== null ||
+		reading.representativeClaim !== null ||
+		reading.fallback !== null ||
+		headers.get("anthropic-ratelimit-unified-fallback-percentage") !== null ||
+		reading.overageStatus !== null ||
+		reading.overageDisabledReason !== null ||
+		reading.retryAfter !== null;
+	return sawAnyHeader ? reading : null;
 }
 
 /**

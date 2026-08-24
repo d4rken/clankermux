@@ -26,12 +26,21 @@ export type QuotaDriftWindow = "five_hour" | "seven_day";
 /**
  * A verdict about one model on one window.
  *
- * `stable` means the changepoint test RAN and found nothing.
+ * `no-change-detected` means the changepoint test RAN and found nothing.
  * `insufficient-evidence` means it could not run. They are not interchangeable:
- * an underpowered scan reporting `stable` would claim a negative result it
- * never established.
+ * an underpowered scan reporting `no-change-detected` would claim a negative
+ * result it never established.
+ *
+ * Named for what the test establishes, not for what a reader might infer from
+ * it. The previous name, `stable`, was a claim about the PROVIDER; a
+ * non-significant scan over indirect evidence supports only a claim about the
+ * scan. Semantics are identical — see normalizeQuotaDriftPayload, which maps the
+ * legacy value forward so cached payloads keep parsing.
  */
-export type QuotaDriftVerdict = "changed" | "stable" | "insufficient-evidence";
+export type QuotaDriftVerdict =
+	| "changed"
+	| "no-change-detected"
+	| "insufficient-evidence";
 
 /**
  * Why a point or estimate is unidentified, so the UI can explain the gap.
@@ -146,6 +155,27 @@ export interface QuotaDriftModel {
 		shareOfWindow: number;
 		identified: boolean;
 		unidentifiedReasons: QuotaDriftUnidentifiedReason[];
+		/**
+		 * Distinct monotone RUNS whose segments carried positive exposure of THIS
+		 * model, in the fit behind this estimate.
+		 *
+		 * The bootstrap resamples whole runs, so runs — not segments — are what the
+		 * interval is built from, and one run's segments are not independent draws.
+		 * A coefficient supported by two runs and one supported by forty can print
+		 * indistinguishable intervals, and only this number tells them apart.
+		 *
+		 * Counted on the model's OWN unpooled exposure, never fit-wide: the fit's
+		 * run count includes every run that moved the window, most of which never
+		 * carried this model at all, and quoting it here would overstate the
+		 * support behind this row.
+		 *
+		 * OPTIONAL on the wire and null when absent (a payload predating the field,
+		 * or a model the latest fit gave no column). Never 0 — that would read as
+		 * "counted, and nothing supports it".
+		 */
+		nRuns?: number | null;
+		/** Distinct ACCOUNTS with positive unpooled exposure of this model; see nRuns. */
+		nAccounts?: number | null;
 	} | null;
 	changes: QuotaDriftChange[];
 	verdict: QuotaDriftVerdict;
@@ -309,6 +339,78 @@ export interface QuotaDriftCohort {
 	windows: QuotaDriftWindowResult[];
 }
 
+/** One value of the claim series and how often it occurred. */
+export interface QuotaClaimValueCount {
+	value: number;
+	count: number;
+}
+
+/** One label of the claim series and how often it occurred. */
+export interface QuotaClaimLabelCount {
+	label: string;
+	count: number;
+}
+
+/**
+ * How the CAPTURED claim rows break down. Deliberately not "coverage": these
+ * counts say nothing about responses that were never captured.
+ */
+export interface QuotaClaimComposition {
+	bySource: QuotaClaimLabelCount[];
+	byStatus: QuotaClaimLabelCount[];
+	byHttpStatus: QuotaClaimLabelCount[];
+}
+
+/**
+ * The audit of ONE claim token's observation series.
+ *
+ * Descriptive throughout: counts, shares of a stated denominator, and
+ * quantiles. Nothing here concludes anything about the provider — it says what
+ * is in the series that any later analysis would have to be built on.
+ *
+ * Same null rule as everything else on this wire: an output with no denominator
+ * is null, never 0.
+ */
+export interface QuotaClaimAuditEntry {
+	claim: string;
+	nSeries: number;
+	nAccounts: number;
+	rows: number;
+	firstObservedAt: number | null;
+	lastObservedAt: number | null;
+	/** Rows per day over the OBSERVED span, or null when the span is zero. */
+	rowsPerDay: number | null;
+	nullUtilizationRows: number;
+	nullUtilizationShare: number | null;
+	/** A LOWER BOUND when `distinctValuesExact` is false (tracker capped). */
+	distinctValues: number;
+	distinctValuesExact: boolean;
+	topValues: QuotaClaimValueCount[];
+	onGrid01: number;
+	onGrid001: number;
+	gridShare01: number | null;
+	gridShare001: number | null;
+	transitions: number;
+	positiveIncrements: number;
+	minPositiveIncrement: number | null;
+	/** Null when there were none, and also when the tracker was truncated. */
+	medianPositiveIncrement: number | null;
+	/** Transitions where both readings carried the SAME window's reset. */
+	stableResetTransitions: number;
+	stableResetNegatives: number;
+	giftDrops: number;
+	giftDropsOrderingSuspect: number;
+	giftDropsUnexplained: number;
+	composition: QuotaClaimComposition;
+}
+
+/** The claim-series audit block: one entry per claim, plus the span covered. */
+export interface QuotaClaimAudit {
+	fromMs: number;
+	toMs: number;
+	claims: QuotaClaimAuditEntry[];
+}
+
 /**
  * Response from `GET /api/analytics/quota-drift`.
  *
@@ -323,4 +425,15 @@ export interface QuotaDriftResponse {
 	/** Wall-clock the precompute pass took, ms; null while computing. */
 	computeMs: number | null;
 	cohorts: QuotaDriftCohort[];
+	/**
+	 * The standing claim-series audit, or null when the payload predates it.
+	 *
+	 * OPTIONAL for the same reason as the window-movement fields: the blob is a
+	 * cache refreshed every 30 minutes and served without schema validation, so
+	 * for up to one refresh interval after a deploy the newest stored payload was
+	 * written by a version that had no audit. Normalized to null, never to an
+	 * empty audit — an empty `claims` list would render as "the series is empty",
+	 * which is a claim, and the opposite of "we have not measured it".
+	 */
+	claimAudit?: QuotaClaimAudit | null;
 }

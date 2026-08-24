@@ -44,6 +44,7 @@ function row(
 		status: "allowed",
 		utilization: 0.42,
 		resetAt: 9_000,
+		surpassedThreshold: null,
 		...overrides,
 	};
 }
@@ -59,6 +60,7 @@ interface StoredRow {
 	status: string;
 	utilization: number | null;
 	reset_at: number | null;
+	surpassed_threshold: number | null;
 }
 
 function readAll(db: Database): StoredRow[] {
@@ -103,7 +105,19 @@ describe("UnifiedClaimObservationRepository", () => {
 			status: "allowed",
 			utilization: 0.42,
 			reset_at: 9_000,
+			surpassed_threshold: null,
 		});
+	});
+
+	it("stores a zero surpassed-threshold as 0 and an absent one as NULL", async () => {
+		await repo.insertMany([
+			row({ claim: "5h", surpassedThreshold: 0 }),
+			row({ claim: "7d", surpassedThreshold: 0.75 }),
+			row({ claim: "7d_oi", surpassedThreshold: null }),
+		]);
+
+		const stored = readAll(db);
+		expect(stored.map((r) => r.surpassed_threshold)).toEqual([0, 0.75, null]);
 	});
 
 	it("is a no-op for an empty batch", async () => {
@@ -201,6 +215,7 @@ describe("unified_claim_observations schema", () => {
 				"status",
 				"utilization",
 				"reset_at",
+				"surpassed_threshold",
 			]);
 			expect(indexNames(db)).toEqual([
 				"idx_unified_claim_obs_account_time",

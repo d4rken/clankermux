@@ -74,6 +74,22 @@ function makeDb(): { db: Database; repo: AccountRepository } {
 		)
 	`);
 
+	// The identity writes append to the tier history in the SAME transaction, so
+	// the minimal schema has to carry it. Deliberately not made optional in the
+	// repository: a missing table here would be a real migration failure, and
+	// swallowing it would hide the loss of the whole series.
+	db.run(`
+		CREATE TABLE account_tier_history (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			account_id TEXT NOT NULL,
+			observed_at INTEGER NOT NULL,
+			plan_tier TEXT,
+			rate_limit_tier TEXT,
+			source TEXT NOT NULL,
+			app_version TEXT
+		)
+	`);
+
 	const adapter = new BunSqlAdapter(db);
 	const repo = new AccountRepository(adapter);
 	return { db, repo };

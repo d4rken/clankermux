@@ -35,6 +35,8 @@ export {
 	CI_COVERAGE,
 	columnTolerances,
 	DISPLAY_BOOTSTRAP_B,
+	type ExposureSupport,
+	exposureSupport,
 	type FitOptions,
 	fitOnce,
 	fitRolling,

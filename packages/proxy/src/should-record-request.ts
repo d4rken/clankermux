@@ -1,3 +1,5 @@
+import type { UnifiedClaimObservationSource as DispatchObservationSource } from "@clankermux/types";
+
 /**
  * Canonical "should we record this request?" predicate.
  *
@@ -134,6 +136,33 @@ function isInternalProbe(
 		getHeader("x-clankermux-auto-refresh") === "true" ||
 		getHeader("x-clankermux-keepalive") === "true"
 	);
+}
+
+/**
+ * Which dispatch produced a response, for an observation row.
+ *
+ * Lives beside {@link shouldRecordRequest} because it is the SAME trust-gated
+ * decision read the other way round: that predicate decides whether a dispatch
+ * belongs in Request History, this one names the dispatch for the series that
+ * deliberately keep the excluded traffic. Sharing the derivation is what
+ * guarantees a keepalive replay cannot be absent from Request History and
+ * labelled `client` in an observation table at the same time.
+ *
+ * Trust-gated on `internal` for the reason spelled out on
+ * {@link ShouldRecordRequestInput.internal}: the marker headers are
+ * client-settable, so without the unspoofable in-process flag any caller could
+ * file its traffic under an internal source and corrupt the demand signal these
+ * series exist to carry. The two markers stay SEPARATE checks so neither can
+ * borrow the other's label.
+ */
+export function dispatchObservationSource(
+	getHeader: ShouldRecordRequestInput["getHeader"],
+	internal: boolean,
+): DispatchObservationSource {
+	if (!internal) return "client";
+	if (getHeader("x-clankermux-keepalive") === "true") return "keepalive";
+	if (getHeader("x-clankermux-auto-refresh") === "true") return "auto-refresh";
+	return "client";
 }
 
 /**
