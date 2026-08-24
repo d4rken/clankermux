@@ -24,40 +24,61 @@ const log = new Logger("PrimaryAccountPeek");
 let lastPrimaryAccountId: string | null | undefined;
 
 /**
- * Predict the account a FRESH, no-affinity, NOMINAL-size request would route to
- * RIGHT NOW, applying the same proxy gates the real request path applies — in
- * the same order: provider-overload (the shared 529 `anthropic-upstream`
- * cooldown) THEN usage-throttle THEN the pool-liveness reserve. Used to drive
- * the dashboard "Primary" badge so it reflects where traffic actually goes
- * during an outage instead of the raw, gate-blind strategy ranking.
+ * The name of the routing context these predictions are made in, so a surface
+ * that publishes a candidate can say WHICH question it answered.
+ *
+ * "Fresh" (no affinity to an earlier turn), "unpinned" (no API-key pin) and
+ * "nominal" (a normal-size prompt, so the context-window gate is not modelled).
+ * Every exclusion listed on {@link peekDefaultCandidateIds} is a property of
+ * this context, not a bug in the prediction — a caller that publishes the
+ * candidate without publishing the context invites a client to read it as "the
+ * account the load balancer is currently using", which is not a thing that
+ * exists.
+ */
+export const DEFAULT_ROUTING_CONTEXT = "fresh_unpinned_nominal";
+
+/**
+ * The accounts a FRESH, no-affinity, unpinned, NOMINAL-size request would
+ * consider RIGHT NOW, best first, applying the same proxy gates the real
+ * request path applies in the same order: provider-overload (the shared 529
+ * `anthropic-upstream` cooldown) THEN usage-throttle THEN the pool-liveness
+ * reserve.
  *
  * Modeled scope (intentionally narrow — a single fresh nominal request):
- *  - Walks the strategy's `peekRanked()` ordering and returns the first account
- *    that passes both hard gates and is not liveness-reserved. Because the
- *    ranking spans providers, **cross-provider fallback to Codex IS modeled**:
- *    when every Anthropic account is gated, a healthy Codex account further down
- *    the ranking becomes the primary.
- *  - The pool-liveness reserve is a SOFT demotion in routing, so a reserved
- *    account is still the primary when nothing else survives.
- *  - Returns `null` when every ranked account is gated (badge shows on no one).
+ *  - Walks the strategy's `peekRanked()` ordering, which has already dropped
+ *    everything `isPeekAvailable` rejects (paused without a simulatable
+ *    auto-unpause, cooling off), and drops the accounts the two hard gates
+ *    reject. Because the ranking spans providers, **cross-provider fallback to
+ *    Codex IS modeled**: when every Anthropic account is gated, a healthy Codex
+ *    account further down the ranking becomes the candidate.
+ *  - The pool-liveness reserve is a SOFT demotion in routing, never a removal,
+ *    so reserved accounts are moved to the BACK rather than dropped. That is
+ *    what keeps the head of this list equal to the account routing would pick
+ *    while the list itself stays a count of what can be routed to at all.
+ *  - Empty when every ranked account is gated.
  *
- * Deliberately NOT modeled (would require request-specific inputs the badge has
- * no business assuming):
- *  - The context-window gate — we assume a normal-size request, so Codex stays
+ * Deliberately NOT modeled (would require request-specific inputs a pool-level
+ * prediction has no business assuming):
+ *  - The context-window gate — a nominal request is assumed, so Codex stays
  *    eligible (a huge prompt that wouldn't fit Codex is not the "next session").
  *  - Burst-throttle — it only delays a request, it does not change its target.
  *  - Combo / model-family routing — request-shape dependent.
+ *  - API-key pins — key-shape dependent, and the pool has no key in hand.
  *  - Family-scoped overload buckets — request-shape dependent for the same
  *    reason: which family bucket applies depends on the request's model. Only
  *    a PROVIDER-WIDE open bucket skips an account here (via
  *    `getProviderWideOverloadUntil`); a Haiku-only incident must not move the
- *    badge while Sonnet/Opus traffic still routes to the account.
+ *    prediction while Sonnet/Opus traffic still routes to the account.
  *
  * Purity note: this reads usage via `usageCache.peek`, which is fully read-only —
- * it returns null for a stale entry but never evicts it. (The badge inspection
- * must not mutate cache state that routing / window-reset comparisons depend on.)
+ * it returns null for a stale entry but never evicts it. (The inspection must
+ * not mutate cache state that routing / window-reset comparisons depend on.)
+ *
+ * Silent, unlike {@link peekPrimaryAccountId}: the change-only diagnostic there
+ * describes the DASHBOARD's badge moving, and an unauthenticated widget polling
+ * every few seconds must not be able to drive that log.
  */
-export function peekPrimaryAccountId(
+export function peekDefaultCandidateIds(
 	accounts: Account[],
 	strategy: LoadBalancingStrategy | null | undefined,
 	config: Pick<
@@ -65,8 +86,8 @@ export function peekPrimaryAccountId(
 		"getUsageThrottlingFiveHourEnabled" | "getUsageThrottlingWeeklyEnabled"
 	>,
 	now = Date.now(),
-): string | null {
-	if (!strategy) return null;
+): string[] {
+	if (!strategy) return [];
 
 	// Mirror applyUsageThrottling() in proxy.ts exactly.
 	const settings = {
@@ -78,12 +99,11 @@ export function peekPrimaryAccountId(
 	const skippedOverloaded: string[] = [];
 	const skippedThrottled: string[] = [];
 	const skippedLivenessReserved: string[] = [];
-	let primaryId: string | null = null;
 
 	// PASS 1 — the hard gates. Everything that survives BOTH is the pool the
 	// liveness reserve is then evaluated against. Order matters: counting an
-	// overloaded or throttled account as an absorbable peer would make the badge
-	// skip an account that real routing keeps.
+	// overloaded or throttled account as an absorbable peer would make the
+	// prediction skip an account that real routing keeps.
 	const survivors: Account[] = [];
 	for (const account of strategy.peekRanked(accounts)) {
 		const ov = getProviderWideOverloadUntil(account.provider, now);
@@ -131,16 +151,17 @@ export function peekPrimaryAccountId(
 
 	// PASS 3 — the pool-liveness reserve, via the same pure helpers routing uses.
 	// The family-reservation input is `false` here for the same reason the family
-	// gate itself is not modeled: it is request-shape dependent and the badge
-	// assumes a fresh, nominal request.
+	// gate itself is not modeled: it is request-shape dependent and this models a
+	// fresh, nominal request.
 	//
-	// TIER CONVENTION: a generic fresh request is modeled, so the badge always
-	// uses the NON-PROTECTED tier — the deeper protected tier is a privilege of
-	// actual Fable traffic, and assuming it here would report a primary that
+	// TIER CONVENTION: a generic fresh request is modeled, so this always uses
+	// the NON-PROTECTED tier — the deeper protected tier is a privilege of
+	// actual Fable traffic, and assuming it here would report a candidate that
 	// ordinary traffic would never be routed to. The burn slope IS per account and
 	// is validated exactly as routing validates it (same helper, same binding
 	// weekly-window check), so the modeled release horizon matches routing's.
 	const reserveThresholdPct = resolveLivenessReserveThreshold(false);
+	const unreserved: string[] = [];
 	for (const account of survivors) {
 		let absorbablePeerCount = 0;
 		for (const peer of survivors) {
@@ -170,29 +191,70 @@ export function peekPrimaryAccountId(
 			skippedLivenessReserved.push(account.id);
 			continue;
 		}
-		primaryId = account.id;
-		break;
+		unreserved.push(account.id);
 	}
 
-	// Routing DEMOTES rather than excludes, so a reserved account is still served
-	// when nothing else is left. Mirror that: fall back to the first reserved
-	// account rather than reporting no primary.
-	if (primaryId === null && skippedLivenessReserved.length > 0) {
-		primaryId = skippedLivenessReserved[0];
-	}
+	// Routing DEMOTES rather than excludes, so the reserved accounts go to the
+	// BACK of the ranking rather than out of it: they are still routed to when
+	// nothing else is left, and dropping them here would understate what the
+	// pool can serve.
+	const candidates = [...unreserved, ...skippedLivenessReserved];
+
+	lastPeekSkips = {
+		overloaded: skippedOverloaded,
+		throttled: skippedThrottled,
+		livenessReserved: skippedLivenessReserved,
+	};
+
+	return candidates;
+}
+
+/**
+ * The skip lists produced by the most recent {@link peekDefaultCandidateIds}
+ * call, for the change-only diagnostic below. Held here rather than returned so
+ * the widget surface, which wants the candidate list and nothing else, is not
+ * handed a second value it has no use for.
+ */
+let lastPeekSkips: {
+	overloaded: string[];
+	throttled: string[];
+	livenessReserved: string[];
+} = { overloaded: [], throttled: [], livenessReserved: [] };
+
+/**
+ * The single account a fresh, unpinned, nominal-size request would route to
+ * right now — the head of {@link peekDefaultCandidateIds}, which is where the
+ * whole prediction lives. Drives the dashboard "Primary" badge, and emits the
+ * change-only diagnostic that goes with it.
+ *
+ * `null` when every ranked account is gated (the badge shows on no one).
+ */
+export function peekPrimaryAccountId(
+	accounts: Account[],
+	strategy: LoadBalancingStrategy | null | undefined,
+	config: Pick<
+		Config,
+		"getUsageThrottlingFiveHourEnabled" | "getUsageThrottlingWeeklyEnabled"
+	>,
+	now = Date.now(),
+): string | null {
+	const primaryId =
+		peekDefaultCandidateIds(accounts, strategy, config, now)[0] ?? null;
 
 	// Cheap, change-only diagnostic: only emit when the chosen primary actually
 	// moves (mirrors the spirit of the old strategy-level logPeekChange).
 	if (primaryId !== lastPrimaryAccountId) {
 		const skips: string[] = [];
-		if (skippedOverloaded.length) {
-			skips.push(`overload-skipped=[${skippedOverloaded.join(", ")}]`);
+		if (lastPeekSkips.overloaded.length) {
+			skips.push(`overload-skipped=[${lastPeekSkips.overloaded.join(", ")}]`);
 		}
-		if (skippedThrottled.length) {
-			skips.push(`throttle-skipped=[${skippedThrottled.join(", ")}]`);
+		if (lastPeekSkips.throttled.length) {
+			skips.push(`throttle-skipped=[${lastPeekSkips.throttled.join(", ")}]`);
 		}
-		if (skippedLivenessReserved.length) {
-			skips.push(`liveness-reserved=[${skippedLivenessReserved.join(", ")}]`);
+		if (lastPeekSkips.livenessReserved.length) {
+			skips.push(
+				`liveness-reserved=[${lastPeekSkips.livenessReserved.join(", ")}]`,
+			);
 		}
 		log.info(
 			`Primary account → ${primaryId ?? "none"}${

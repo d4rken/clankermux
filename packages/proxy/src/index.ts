@@ -107,7 +107,11 @@ export {
 	startFullIntegrityCheckBackground,
 	startIntegrityScheduler,
 } from "./integrity-scheduler";
-export { peekPrimaryAccountId } from "./peek-primary";
+export {
+	DEFAULT_ROUTING_CONTEXT,
+	peekDefaultCandidateIds,
+	peekPrimaryAccountId,
+} from "./peek-primary";
 export {
 	ANTHROPIC_UPSTREAM_OVERLOAD_KEY,
 	applyProviderOverloadCooldown,
