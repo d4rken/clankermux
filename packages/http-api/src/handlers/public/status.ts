@@ -1,6 +1,7 @@
 import { getVersion } from "@clankermux/core";
 import { jsonResponse } from "@clankermux/http-common";
 import type { PublicSnapshotReader } from "../../services/public-snapshot";
+import { NO_STORE_HEADERS } from "./cache-headers";
 import { type PublicStatusDto, toPublicStatusDto } from "./dto";
 
 /**
@@ -27,6 +28,6 @@ export function createPublicStatusHandler(
 			uptimeS: Math.round(process.uptime()),
 			version,
 		});
-		return jsonResponse(dto);
+		return jsonResponse(dto, 200, NO_STORE_HEADERS);
 	};
 }
