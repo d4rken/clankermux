@@ -323,6 +323,79 @@ weekly budget" before designing this — the distinction between a *rate* limit 
 a *budget* is the whole reason the two need different estimators, and misreading
 it has caused two reverted features already.
 
+#### Measured outcome (2026-08-23)
+
+**Half landed.** The premise held: the two horizons do want different
+estimators, and the winners on them differ. What did not hold is that a
+purpose-built estimator would be either winner. Six candidates were added to
+the item-0 harness — endpoint-segmented lifetime averages at 30 min / 1 h / 2 h,
+OLS over a 1-hour lookback, trailing 3-day and 7-day daily-consumption
+averages, and a day-of-week seasonal profile — and on the tuning range **all six
+lost to a baseline on their own horizon**:
+
+- **`five_hour`** — naive persistence won at selection F1 **0.413**, against
+  **0.412** for `endpoint-seg-1h`, **0.411** for `endpoint-seg-30m`, **0.409**
+  for `ols-1h` and **0.395** for `endpoint-seg-2h`. The first three sit inside
+  0.004 of the winner, i.e. inside the noise of a metric whose account-grouped
+  CI is roughly ±0.05 wide. Segmenting on the endpoint changes almost nothing
+  because on this horizon there is rarely more than one segment to segment.
+- **`seven_day`** — the lifetime average won at selection F1 **0.604**, against
+  **0.554** for `trailing-3d`, **0.504** for `dow-seasonal` and **0.440** for
+  `trailing-7d`. The last two also failed the error and coverage criteria, not
+  just F1: fitting a daily profile needs days of history inside the current
+  window, so they abstain on 20–27% of instants, and a "how much does this
+  account usually burn on a Tuesday" answer is not the same answer as "how far
+  into THIS window is it".
+
+Both winners were therefore **baselines**, and each went to its own held-out
+gate:
+
+- **`five_hour` naive — FAILED.** F1 **0.200** against **0.180** for OLS, but
+  median absolute ETA error **43.1 min** against **20.0 min**. Naive persistence
+  buys a slightly better run-out/no-run-out call by more than doubling the error
+  on the number the UI actually prints. The 5-hour display path **keeps OLS**,
+  unchanged.
+- **`seven_day` lifetime — PASSED.** F1 **0.691** against **0.600** for OLS,
+  median absolute ETA error **1176 min** against **1508 min**, coverage equal,
+  and — the criterion that decides what a user actually sees — precision of the
+  display's own red rule **0.674** against **0.632**. It won on every axis at
+  once.
+
+The weekly result **landed** (see `capacity-runway.ts` and
+`build-account-predictions.ts`): the server no longer fits a weekly regression
+at all, and the weekly display path reads the lifetime average as its PRIMARY
+estimator rather than as a fallback. That took a second change, because the
+lifetime average is capped at amber everywhere it appears: `estimateWindowExhaustion`
+gained a caller-supplied per-window `lifetimeConfidence` policy, and the
+account-wide weekly window is the only window declared `"full"`. Red on that
+window now comes from the ordinary `CERTAIN_MARGIN_FRACTION` rule, the same one
+the 5-hour regression goes through.
+
+Read the win with its uncertainty: the **account-grouped bootstrap CI on the F1
+delta straddles zero** — `[-0.048, +0.089, +0.247]` over 6 accounts. The point
+estimate has the right sign and every secondary criterion agrees with it, which
+is why it was accepted, but 6 accounts cannot make that interval narrow. This is
+a display change only; the **routing-side weekly burn slope is untouched**, and
+a re-measurement on more accounts is free to reverse it.
+
+One thing in the regenerated report needs reading carefully before anyone cites
+it. On the HELD-OUT weekly range `trailing-7d` scores F1 **0.711** and passes
+all three gate criteria — better than the lifetime average's 0.691 — and the
+report says so in as many words ("the in-range ranking would have picked
+trailing-7d; the winner stays locked to lifetime from Tuning range"). That is
+not a missed opportunity, it is the protocol working: `trailing-7d` was the
+WORST weekly candidate on the tuning range (F1 0.440, coverage 79.9%), and
+promoting it on a held-out score is precisely the peeking the split exists to
+prevent. Its two ranges disagree by 0.27 F1, which is itself evidence that its
+score is unstable rather than that it is good.
+
+So no plumbing follow-up is warranted for the trailing and seasonal candidates
+yet. They need more than 24 h of weekly history at prediction time, and the
+server refresh path queries a 24 h lookback, so landing one means widening that
+query first. If someone wants to reopen this, the honest route is a fresh
+tuning/held-out split over a longer range where `trailing-7d` can win the
+SELECTION — not a citation of the number above.
+
 ### Item 5 — emit uncertainty instead of a boolean
 
 `lowConfidence` is just "span < 5 minutes". OLS already yields residual variance

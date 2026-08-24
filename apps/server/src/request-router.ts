@@ -33,6 +33,7 @@ import type {
 	AuthenticationResult,
 	AuthRequirement,
 } from "@clankermux/http-api";
+import { managementAuthRequirement } from "@clankermux/http-api";
 import {
 	createIdentityBoundRefusalResponse,
 	isIdentityBoundPath,
@@ -54,6 +55,12 @@ import {
 export interface RequestRouterDeps {
 	/** The management REST surface. Returns null when no route matched. */
 	handleApiRequest(url: URL, req: Request): Promise<Response | null>;
+	/**
+	 * The read-only widget surface at `/public/*`. Returns null when no route
+	 * matched, so this router owns the namespace's 404 rather than leaking the
+	 * path into proxy dispatch.
+	 */
+	handlePublicRequest(req: Request, url: URL): Promise<Response | null>;
 	authenticate(
 		req: Request,
 		path: string,
@@ -122,6 +129,11 @@ function isApiPath(pathname: string): boolean {
 	return pathname === "/api" || pathname.startsWith("/api/");
 }
 
+/** The read-only widget namespace. A sibling of the wire mounts, not of `/api`. */
+function isPublicApiPath(pathname: string): boolean {
+	return pathname === "/public" || pathname.startsWith("/public/");
+}
+
 const RESPONSES_PATHS = new Set(["/v1/responses", "/v1/responses/compact"]);
 
 /**
@@ -168,8 +180,10 @@ export async function routeRequest(
  * deliberate. Every request on this mount is API-key gated, so refusing an
  * identity-bound path before authenticating would let an unauthenticated caller
  * enumerate the refusal set and would leave those requests unattributed to any
- * key. At the root the opposite ordering is correct, because root `/api/*` is
- * genuinely public and the refusal must not be reachable only by key-holders.
+ * key. At the root the opposite ordering is correct: the refusal set overlaps
+ * `/api/*`, whose gate is a DASHBOARD session that agent clients neither hold
+ * nor could obtain, so gating first would answer them 401 instead of the
+ * deliberate 501.
  *
  * The API router, the dashboard branches and the `/api/*` 404 are all
  * unreachable from here. That is the entire point of the mount.
@@ -249,9 +263,10 @@ async function routeMountedRequest(
  * which branch happens to match first.
  *
  * The parameter type states the same thing at compile time: this function is
- * handed only the management and dashboard dependencies, so reaching
- * authentication or proxy dispatch from root code would take a deliberate
- * widening of the type.
+ * handed only the management, session-gate and dashboard dependencies, so
+ * reaching proxy dispatch from root code would take a deliberate widening of
+ * the type. `authenticate` is in that list for one reason only — the management
+ * session gate below — and never for agent traffic.
  */
 async function routeRootRequest(
 	req: Request,
@@ -259,6 +274,8 @@ async function routeRootRequest(
 	deps: Pick<
 		RequestRouterDeps,
 		| "handleApiRequest"
+		| "handlePublicRequest"
+		| "authenticate"
 		| "withDashboard"
 		| "dashboardManifest"
 		| "serveDashboardFile"
@@ -283,26 +300,94 @@ async function routeRootRequest(
 		);
 	}
 
-	// Try API routes first
-	const apiResponse = await deps.handleApiRequest(url, req);
-	if (apiResponse) {
-		return apiResponse;
-	}
-
-	// Identity-bound endpoints are refused before any remaining routing. At the
-	// root this arm covers `/api/oauth/*`, the part of the set the API router
-	// does not own. Ahead of the dashboard branch specifically: that branch
-	// decides by raw pathname, so an encoded spelling would be answered with the
-	// dashboard's index.html — no credential leaked, but not the deliberate,
-	// visible refusal this is supposed to give. Ahead of any auth gate too,
-	// which is fine: `policyFor` already treats `/api/*` as public, and
-	// declining to serve an endpoint needs no credential.
+	// Identity-bound endpoints are refused before ANY remaining routing. At the
+	// root this arm covers `/api/oauth/*`, the part of the set the management
+	// router does not own; the `/v1/code/…` half is answered by the legacy 404
+	// above, because the root has no dispatch left for this refusal to stop.
+	//
+	// Ahead of the dashboard branch specifically: that branch decides by raw
+	// pathname, so an encoded spelling like `/%61pi/oauth/profile` does not look
+	// like an `/api/` path to it and would be answered with the dashboard's
+	// index.html — no credential leaked, but not the deliberate, visible
+	// refusal this is supposed to give.
+	//
+	// Ahead of the MANAGEMENT GATE below too, and that ordering is
+	// load-bearing rather than incidental. Three of these paths sit under
+	// `/api/` (`/api/oauth/files…`, `/api/oauth/file_upload`,
+	// `/api/oauth/profile`) but they are AGENT traffic, not our management
+	// surface — they arrive from a Claude Code client that has no dashboard
+	// cookie and never will. Gated first, they would collect a 401 instead of
+	// the deliberate 501, and an agent client reads an auth failure as a dead
+	// session rather than as "this endpoint is not served". Declining to serve
+	// a fixed, source-visible path list discloses nothing and needs no
+	// credential.
 	//
 	// The proxy's ingest prologue calls the same predicate, and that is what
 	// guarantees no request reaching the proxy by any route can be served with
 	// a pooled token.
 	if (isIdentityBoundPath(p)) {
 		return createIdentityBoundRefusalResponse(p);
+	}
+
+	// The read-only widget surface. Its own namespace, checked BEFORE the
+	// management gate and before the dashboard branch.
+	//
+	// Outside `/api/*` on purpose: the session gate is a path-prefix decision,
+	// so putting a credential-free surface underneath it would mean the
+	// exemption list is the only thing keeping a desk panel working. As a
+	// sibling of the wire mounts it is unreachable from the gate by
+	// construction. The 404 for an unknown `/public/*` path is answered here so
+	// the namespace never falls through to the dashboard shell or to proxy
+	// dispatch.
+	if (isPublicApiPath(p)) {
+		const publicResponse = await deps.handlePublicRequest(req, url);
+		if (publicResponse) return publicResponse;
+		return jsonError(
+			HTTP_STATUS.NOT_FOUND,
+			"not_found",
+			`Unknown public API route: ${p}`,
+		);
+	}
+
+	// The management gate, and it has to be HERE — above `handleApiRequest`,
+	// not inside it.
+	//
+	// `handleApiRequest` returns its response to this function, which returns it
+	// to the client; a check placed inside the API router would run after the
+	// handler had already done its work, and `handleRequest` is reachable from
+	// anywhere else that holds the router. So the boundary is the router's, and
+	// it is expressed the same way the `/wire/*` mount expresses its own: an
+	// EXPLICIT requirement passed to the auth service, rather than a
+	// classification inferred a second time from the path.
+	//
+	// `managementAuthRequirement` is the single shared classification (the auth
+	// service's `policyFor` reads the same function), so the exemptions cannot
+	// drift between the two enforcement points: the three auth endpoints, and
+	// the two Claude Code telemetry paths that a client configured the old way
+	// still sends to the root. The telemetry pair is answered under
+	// `/wire/anthropic` now, so at the root the exemption buys them the
+	// management 404 below instead of a 401 a CLI would read as a dead
+	// session.
+	if (managementAuthRequirement(p) === "session") {
+		let sessionResult: AuthenticationResult;
+		try {
+			sessionResult = await deps.authenticate(req, p, req.method, "session");
+		} catch (authError) {
+			return terminalForRequestError(req, authError, "auth", p);
+		}
+		if (!sessionResult.isAuthenticated) {
+			return jsonError(
+				401,
+				"authentication_error",
+				sessionResult.error || "Authentication failed",
+			);
+		}
+	}
+
+	// Try API routes first
+	const apiResponse = await deps.handleApiRequest(url, req);
+	if (apiResponse) {
+		return apiResponse;
 	}
 
 	// Dashboard routes (only if enabled and assets are available)

@@ -57,7 +57,6 @@ describe("buildAccountUsagePredictions", () => {
 				// Off the extrapolated line (history slope 10 => would be 40 at NOW):
 				// 60 bends the slope up and pulls the ETA in.
 				fiveHour: { utilization: 60, resetsAtMs: RESET },
-				sevenDay: null,
 			},
 		];
 
@@ -103,9 +102,7 @@ describe("buildAccountUsagePredictions", () => {
 				fiveHourReset: RESET,
 			}),
 		);
-		const inputs: AccountPredictionInput[] = [
-			{ accountId, fiveHour: null, sevenDay: null },
-		];
+		const inputs: AccountPredictionInput[] = [{ accountId, fiveHour: null }];
 
 		const result = buildAccountUsagePredictions(inputs, samples, NOW);
 		const pred = result.get(accountId);
@@ -120,7 +117,7 @@ describe("buildAccountUsagePredictions", () => {
 		expect(pred?.fiveHour).toEqual(expected);
 	});
 
-	test("7d uses the 24h window: a ~20h-old sample feeds 7d but not 5h", () => {
+	test("a ~20h-old sample feeds nothing: past the 6h cap, and 7d is not computed", () => {
 		const accountId = "acc-windows";
 		const samples: UsageSnapshotSample[] = [
 			sample({
@@ -132,18 +129,39 @@ describe("buildAccountUsagePredictions", () => {
 				sevenDayReset: RESET,
 			}),
 		];
+		const inputs: AccountPredictionInput[] = [{ accountId, fiveHour: null }];
+
+		const result = buildAccountUsagePredictions(inputs, samples, NOW);
+		// 20h > 6h => excluded from the 5h fit => no points at all. The weekly
+		// column is present in the sample and deliberately ignored, so the account
+		// drops out of the map entirely rather than carrying a weekly regression.
+		expect(result.has(accountId)).toBe(false);
+	});
+
+	test("weekly is never predicted, even with a full weekly history and a live weekly reading", () => {
+		// The lifetime average beat the regression on this horizon, so the server
+		// emits no weekly prediction and the client's fallback IS the estimator.
+		const accountId = "acc-weekly";
+		const samples: UsageSnapshotSample[] = [3, 2, 1].map((hoursAgo, index) =>
+			sample({
+				accountId,
+				sampledAt: NOW - hoursAgo * HOUR_MS,
+				fiveHourPct: 10 * (index + 1),
+				fiveHourReset: RESET,
+				sevenDayPct: 10 * (index + 1),
+				sevenDayReset: RESET,
+			}),
+		);
 		const inputs: AccountPredictionInput[] = [
-			{ accountId, fiveHour: null, sevenDay: null },
+			{ accountId, fiveHour: { utilization: 60, resetsAtMs: RESET } },
 		];
 
 		const result = buildAccountUsagePredictions(inputs, samples, NOW);
 		const pred = result.get(accountId);
-		expect(pred).toBeDefined();
-		// 20h > 6h => excluded from 5h => no points => window omitted.
-		expect(pred?.fiveHour).toBeUndefined();
-		// 20h < 24h => included in 7d => present (single point => insufficient_data).
-		expect(pred?.sevenDay).toBeDefined();
-		expect(pred?.sevenDay?.state).toBe("insufficient_data");
+		// The 5-hour regression is untouched by the weekly change.
+		expect(pred?.fiveHour?.state).toBe("rising");
+		expect(pred?.sevenDay).toBeUndefined();
+		expect(Object.keys(pred ?? {})).toEqual(["fiveHour"]);
 	});
 
 	test("live-point injection with no history => single point => insufficient_data (present, not omitted)", () => {
@@ -152,7 +170,6 @@ describe("buildAccountUsagePredictions", () => {
 			{
 				accountId,
 				fiveHour: { utilization: 25, resetsAtMs: RESET },
-				sevenDay: null,
 			},
 		];
 
@@ -166,9 +183,7 @@ describe("buildAccountUsagePredictions", () => {
 
 	test("no data at all => account absent from the Map", () => {
 		const accountId = "acc-empty";
-		const inputs: AccountPredictionInput[] = [
-			{ accountId, fiveHour: null, sevenDay: null },
-		];
+		const inputs: AccountPredictionInput[] = [{ accountId, fiveHour: null }];
 
 		const result = buildAccountUsagePredictions(inputs, [], NOW);
 		expect(result.has(accountId)).toBe(false);
@@ -206,8 +221,8 @@ describe("buildAccountUsagePredictions", () => {
 			),
 		];
 		const inputs: AccountPredictionInput[] = [
-			{ accountId: a, fiveHour: null, sevenDay: null },
-			{ accountId: b, fiveHour: null, sevenDay: null },
+			{ accountId: a, fiveHour: null },
+			{ accountId: b, fiveHour: null },
 		];
 
 		const result = buildAccountUsagePredictions(inputs, samples, NOW);
@@ -252,7 +267,6 @@ describe("buildAccountUsagePredictions", () => {
 				accountId,
 				// utilization null => the live point must not be appended.
 				fiveHour: { utilization: null, resetsAtMs: RESET },
-				sevenDay: null,
 			},
 		];
 

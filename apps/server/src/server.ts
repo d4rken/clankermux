@@ -33,6 +33,8 @@ import {
 	APIRouter,
 	AuthService,
 	closeAllSseStreams,
+	PublicRouter,
+	SessionAuthService,
 	terminateAnalyticsWorker,
 } from "@clankermux/http-api";
 import { LeastUsedStrategy, SessionStrategy } from "@clankermux/load-balancer";
@@ -102,6 +104,7 @@ import {
 import { runCodexIdentityBackfill } from "./codex-identity-backfill";
 import { waitForDrainIdle } from "./drain-idle";
 import { handleModelsRoute } from "./models-route";
+import { QuotaDriftScheduler } from "./quota-drift-scheduler";
 import { type RequestRouterDeps, routeRequest } from "./request-router";
 import { SubscriptionPaymentRecorder } from "./subscription-payment-recorder";
 import { shouldStopPollingPausedAccount } from "./usage-polling-halt";
@@ -249,6 +252,7 @@ let serverInstance: ReturnType<typeof serve> | null = null;
 let registeredServerId: string | null = null;
 let stopRetentionJob: (() => void) | null = null;
 let stopOAuthCleanupJob: (() => void) | null = null;
+let stopManagementSessionSweepJob: (() => void) | null = null;
 let stopRateLimitCleanupJob: (() => void) | null = null;
 let stopDataCleanupJob: (() => void) | null = null;
 let stopWalCheckpointJob: (() => void) | null = null;
@@ -260,6 +264,7 @@ let cacheKeepaliveSnapshotSampler: CacheKeepaliveSnapshotSampler | null = null;
 let subscriptionPaymentRecorder: SubscriptionPaymentRecorder | null = null;
 let codexResetCreditApplyScheduler: CodexResetCreditApplyScheduler | null =
 	null;
+let quotaDriftScheduler: QuotaDriftScheduler | null = null;
 let memoryMonitorInterval: Timer | null = null;
 // Track usage polling retry timeouts for cleanup
 const usagePollingRetryTimeouts = new Map<string, NodeJS.Timeout>();
@@ -804,10 +809,18 @@ export default async function startServer(options?: {
 	// accepts a getter so it can read the live (post-hot-reload) instance.
 	let currentStrategy: LoadBalancingStrategy | null = null;
 
+	// The management login. Built BEFORE the API router so both it and the
+	// proxy's AuthService share one instance — the router hands it to the auth
+	// endpoints and to the SSE revocation guard, while the front-door gate
+	// reaches it through `authService`. Two instances would work but would make
+	// "is a password configured" two independent reads of the same row.
+	const sessionAuth = new SessionAuthService(dbOps);
+
 	const apiRouter = new APIRouter({
 		db,
 		config,
 		dbOps,
+		sessionAuth,
 		runtime: {
 			port,
 			tlsEnabled,
@@ -818,8 +831,40 @@ export default async function startServer(options?: {
 		getEventLoopLag: () => getEventLoopStats(),
 	});
 
-	// Initialize AuthService for proxy authentication
-	const authService = new AuthService(dbOps);
+	// The read-only widget API. Its own router, mounted as a sibling of the wire
+	// mounts rather than under `/api/*`, so the management session gate cannot
+	// reach it and no exemption list has to keep a credential-less device
+	// working.
+	const publicRouter = new PublicRouter({ dbOps, config });
+
+	// Initialize AuthService for proxy authentication. It also answers the
+	// front door's `session` requirement for `/api/*`, so it is handed the same
+	// SessionAuthService the API router uses.
+	const authService = new AuthService(dbOps, undefined, sessionAuth);
+
+	// Expired management sessions: swept once at startup and hourly after that.
+	// Neither ceiling depends on this running — validation enforces both on
+	// every read and deletes what it rejects — so this is housekeeping that
+	// keeps the table from accumulating rows nobody will ever look up again.
+	void sessionAuth.sweepExpiredSessions().catch((err) => {
+		log.debug(`Startup management-session sweep failed: ${err}`);
+	});
+	const unregisterSessionSweep = registerCleanup({
+		id: "management-session-sweep",
+		callback: async () => {
+			try {
+				const removed = await sessionAuth.sweepExpiredSessions();
+				if (removed > 0) {
+					log.debug(`Swept ${removed} expired management session(s)`);
+				}
+			} catch (err) {
+				log.error(`Management session sweep error: ${err}`);
+			}
+		},
+		minutes: 60,
+		description: "Management session sweep",
+	});
+	stopManagementSessionSweepJob = unregisterSessionSweep;
 
 	// Run startup maintenance once (cleanup only) - fire and forget
 	runStartupMaintenance(config, dbOps).catch((err) => {
@@ -1235,6 +1280,7 @@ export default async function startServer(options?: {
 	// from a test instead of living inside a Bun.serve closure.
 	const routerDeps: RequestRouterDeps = {
 		handleApiRequest: (url, req) => apiRouter.handleRequest(url, req),
+		handlePublicRequest: (req, url) => publicRouter.handle(req, url),
 		authenticate: (req, path, method, requirement) =>
 			authService.authenticateRequest(req, path, method, requirement),
 		dispatchProxy: (req, url, apiKeyId, apiKeyName) =>
@@ -1559,6 +1605,10 @@ Available endpoints:
 	usageSnapshotSampler = new UsageSnapshotSampler({
 		getAccounts: () => dbOps.getAllAccounts(),
 		insertSnapshots: (rows) => dbOps.insertUsageSnapshots(rows),
+		// Per-model-family weekly windows, recorded from the same tick. Capture
+		// only for now: nothing reads this series yet, but it cannot be
+		// reconstructed after the fact.
+		insertScopedSnapshots: (rows) => dbOps.insertScopedUsageSnapshots(rows),
 		// Persisted history for the weekly burn-slope fit that sizes the
 		// pool-liveness reserve's release horizon.
 		getRecentSnapshots: (accountIds, sinceMs) =>
@@ -1609,6 +1659,17 @@ Available endpoints:
 		getPollIntervalMs: () => config.getUsagePollIntervalMs(),
 	});
 	cacheKeepaliveSnapshotSampler.start();
+
+	// Start the quota-drift scheduler: recomputes the implied per-model cost of
+	// each usage window (the Analytics "Quota" tab) every 30 minutes. The fit
+	// runs on its own read-only worker; only the resulting row is written here,
+	// because that worker's connection is query_only. Purely a read-side
+	// projection — it never touches routing, cooldowns or account selection.
+	quotaDriftScheduler = new QuotaDriftScheduler({
+		getDbPath: () => dbOps.getResolvedDbPath(),
+		storeResult: (row) => dbOps.insertQuotaDriftResult(row),
+	});
+	quotaDriftScheduler.start();
 
 	// Start the subscription-payment auto-recorder: books each subscription
 	// account's renewal due dates into the account_payments ledger (immediate
@@ -1743,6 +1804,10 @@ async function handleGracefulShutdown(signal: string) {
 			stopOAuthCleanupJob();
 			stopOAuthCleanupJob = null;
 		}
+		if (stopManagementSessionSweepJob) {
+			stopManagementSessionSweepJob();
+			stopManagementSessionSweepJob = null;
+		}
 		if (stopRateLimitCleanupJob) {
 			stopRateLimitCleanupJob();
 			stopRateLimitCleanupJob = null;
@@ -1782,6 +1847,10 @@ async function handleGracefulShutdown(signal: string) {
 		if (codexResetCreditApplyScheduler) {
 			codexResetCreditApplyScheduler.stop();
 			codexResetCreditApplyScheduler = null;
+		}
+		if (quotaDriftScheduler) {
+			quotaDriftScheduler.stop();
+			quotaDriftScheduler = null;
 		}
 
 		// Stop memory monitoring

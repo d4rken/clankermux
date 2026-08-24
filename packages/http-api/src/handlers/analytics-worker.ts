@@ -7,6 +7,7 @@ import { createCacheEffectivenessHandler } from "./cache-effectiveness-direct";
 import { createCacheKeepaliveHistoryHandler } from "./cache-keepalive-history-direct";
 import { createMemoryHistoryHandler } from "./memory-history-direct";
 import { createPaymentsSummaryDataHandler } from "./payments-summary-direct";
+import { createQuotaDriftHandler } from "./quota-drift-direct";
 import { createStatsHandler } from "./stats-direct";
 import { createUsageHistoryHandler } from "./usage-history-direct";
 
@@ -24,7 +25,8 @@ export type DashboardWorkerKind =
 	| "cache-keepalive-history"
 	| "cache-effectiveness"
 	| "payments-summary"
-	| "filter-options";
+	| "filter-options"
+	| "quota-drift";
 
 export interface AnalyticsWorkerRequest {
 	id: string;
@@ -82,7 +84,9 @@ self.onmessage = async (event: MessageEvent<AnalyticsWorkerRequest>) => {
 									? createPaymentsSummaryDataHandler(context)
 									: kind === "filter-options"
 										? createAnalyticsFilterOptionsHandler(context)
-										: createAnalyticsHandler(context);
+										: kind === "quota-drift"
+											? createQuotaDriftHandler(context)
+											: createAnalyticsHandler(context);
 		const response = await handler(new URLSearchParams(params));
 		const body = await response.text();
 		db.close();

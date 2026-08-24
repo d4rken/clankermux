@@ -70,7 +70,6 @@ interface HealthTestBody {
 		usageWorker?: unknown;
 		[key: string]: unknown;
 	};
-	accounts_detail?: Array<Record<string, unknown>>;
 	[key: string]: unknown;
 }
 
@@ -88,8 +87,7 @@ describe("health runtime payload", () => {
 		} as unknown as import("@clankermux/config").Config;
 
 		const handler = createHealthHandler(db, config);
-		const url = new URL("http://localhost/health");
-		const response = await handler(url);
+		const response = await handler();
 		const body = (await response.json()) as Record<string, unknown>;
 
 		expect(response.status).toBe(503);
@@ -117,8 +115,7 @@ describe("health runtime payload", () => {
 			queuedJobs: 2,
 		}));
 
-		const url = new URL("http://localhost/health");
-		const response = await handler(url);
+		const response = await handler();
 		const body = (await response.json()) as HealthTestBody;
 
 		expect(response.status).toBe(200);
@@ -148,8 +145,7 @@ describe("health runtime payload", () => {
 		} as unknown as import("@clankermux/config").Config;
 
 		const handler = createHealthHandler(db, config);
-		const url = new URL("http://localhost/health");
-		const response = await handler(url);
+		const response = await handler();
 		const body = (await response.json()) as Record<string, unknown>;
 
 		expect(body).not.toHaveProperty("runtime");
@@ -499,10 +495,7 @@ describe("HTTP status codes", () => {
 		const config = {
 			getStrategy: () => "session",
 		} as unknown as import("@clankermux/config").Config;
-		const response = await createHealthHandler(
-			db,
-			config,
-		)(new URL("http://localhost/health"));
+		const response = await createHealthHandler(db, config)();
 		expect(response.status).toBe(200);
 	});
 
@@ -519,10 +512,7 @@ describe("HTTP status codes", () => {
 		const config = {
 			getStrategy: () => "session",
 		} as unknown as import("@clankermux/config").Config;
-		const response = await createHealthHandler(
-			db,
-			config,
-		)(new URL("http://localhost/health"));
+		const response = await createHealthHandler(db, config)();
 		const body = (await response.json()) as Record<string, unknown>;
 		expect(body.status).toBe("degraded");
 		expect(response.status).toBe(503);
@@ -537,10 +527,7 @@ describe("HTTP status codes", () => {
 		const config = {
 			getStrategy: () => "session",
 		} as unknown as import("@clankermux/config").Config;
-		const response = await createHealthHandler(
-			db,
-			config,
-		)(new URL("http://localhost/health"));
+		const response = await createHealthHandler(db, config)();
 		expect(response.status).toBe(503);
 	});
 
@@ -572,10 +559,7 @@ describe("HTTP status codes", () => {
 			const config = {
 				getStrategy: () => "session",
 			} as unknown as import("@clankermux/config").Config;
-			const response = await createHealthHandler(
-				db,
-				config,
-			)(new URL("http://localhost/health"));
+			const response = await createHealthHandler(db, config)();
 			const body = (await response.json()) as HealthTestBody;
 
 			expect(body.status).toBe("degraded");
@@ -603,729 +587,67 @@ describe("HTTP status codes", () => {
 		const config = {
 			getStrategy: () => "session",
 		} as unknown as import("@clankermux/config").Config;
-		const response = await createHealthHandler(
-			db,
-			config,
-		)(new URL("http://localhost/health"));
+		const response = await createHealthHandler(db, config)();
 		const body = (await response.json()) as Record<string, unknown>;
 		expect(body.status).toBe("ok");
 		expect(response.status).toBe(200);
 	});
 });
 
-describe("?detail=1 parameter", () => {
-	it("includes accounts_detail array when detail=1", async () => {
-		const db = {
-			getAllAccounts: async () => [
-				{
-					name: "acc1",
-					paused: false,
-					rate_limited_until: null,
-					rate_limited_reason: null,
-					rate_limited_at: null,
-				},
-				{
-					name: "acc2",
-					paused: true,
-					rate_limited_until: null,
-					rate_limited_reason: null,
-					rate_limited_at: null,
-				},
-				{
-					name: "acc3",
-					paused: false,
-					rate_limited_until: Date.now() + 3600000,
-					rate_limited_reason: "upstream_429_with_reset",
-					rate_limited_at: Date.now() - 60000,
-				},
-			],
-		} as unknown as import("@clankermux/database").DatabaseOperations;
-
-		const config = {
-			getStrategy: () => "session",
-		} as unknown as import("@clankermux/config").Config;
-
-		const handler = createHealthHandler(db, config);
-		const url = new URL("http://localhost/health?detail=1");
-		const response = await handler(url);
-		const body = (await response.json()) as HealthTestBody;
-
-		expect(body.accounts_detail).toBeDefined();
-		expect(body.accounts_detail).toHaveLength(3);
-		expect(body.accounts_detail[0]).toEqual({
-			name: "acc1",
-			status: "available",
-			rate_limited_until: null,
-			rate_limited_reason: null,
-			rate_limited_at: null,
-		});
-		expect(body.accounts_detail[1]).toEqual({
-			name: "acc2",
-			status: "paused",
-			rate_limited_until: null,
-			rate_limited_reason: null,
-			rate_limited_at: null,
-		});
-		expect(body.accounts_detail[2]).toEqual({
-			name: "acc3",
-			status: "rate_limited",
-			rate_limited_until: expect.any(Number),
-			rate_limited_reason: "upstream_429_with_reset",
-			rate_limited_at: expect.any(Number),
-		});
-	});
-
-	it("omits accounts_detail when detail parameter absent", async () => {
-		const db = {
-			getAllAccounts: async () => [
-				{ name: "acc1", paused: false, rate_limited_until: null },
-			],
-		} as unknown as import("@clankermux/database").DatabaseOperations;
-
-		const config = {
-			getStrategy: () => "session",
-		} as unknown as import("@clankermux/config").Config;
-
-		const handler = createHealthHandler(db, config);
-		const url = new URL("http://localhost/health");
-		const response = await handler(url);
-		const body = (await response.json()) as Record<string, unknown>;
-
-		expect(body).not.toHaveProperty("accounts_detail");
-	});
-
-	it("marks a 100%-weekly account as usage_exhausted in accounts_detail", async () => {
-		const id = "health-exh-acct-1";
-		// The handler uses real Date.now(), so the reset must be genuinely future.
-		const futureIso = new Date(Date.now() + 3_600_000).toISOString();
-		usageCache.set(id, weeklyAllUsage(100, futureIso));
-		try {
-			const db = {
-				getAllAccounts: async () => [
-					{
-						id,
-						name: "exhausted",
-						provider: "anthropic",
-						paused: false,
-						rate_limited_until: null,
-						rate_limited_reason: null,
-						rate_limited_at: null,
-					},
-				],
-			} as unknown as import("@clankermux/database").DatabaseOperations;
-			const config = {
-				getStrategy: () => "session",
-			} as unknown as import("@clankermux/config").Config;
-
-			const handler = createHealthHandler(db, config);
-			const response = await handler(
-				new URL("http://localhost/health?detail=1"),
-			);
-			const body = (await response.json()) as HealthTestBody;
-
-			expect(body.accounts_detail).toBeDefined();
-			expect(body.accounts_detail?.[0]?.status).toBe("usage_exhausted");
-			expect(typeof body.accounts_detail?.[0]?.usage_exhausted_until).toBe(
-				"number",
-			);
-		} finally {
-			usageCache.delete(id);
-		}
-	});
-
-	it("reports usage_exhausted for a LOCKED weekly-exhausted account (cause over mechanism)", async () => {
-		// The lock is the MECHANISM (a cooldown row exists); the spent weekly window
-		// is the CAUSE. Previously the detail view skipped the weekly evaluation
-		// entirely for locked accounts and reported "rate_limited".
-		const id = "health-exh-locked-1";
-		const futureIso = new Date(Date.now() + 3_600_000).toISOString();
-		usageCache.set(id, weeklyAllUsage(100, futureIso));
-		try {
-			const db = {
-				getAllAccounts: async () => [
-					{
-						id,
-						name: "exhausted-and-locked",
-						provider: "anthropic",
-						paused: false,
-						rate_limited_until: Date.now() + 600_000,
-						rate_limited_reason: "weekly_exhausted_429",
-						rate_limited_at: Date.now(),
-					},
-				],
-			} as unknown as import("@clankermux/database").DatabaseOperations;
-			const config = {
-				getStrategy: () => "session",
-			} as unknown as import("@clankermux/config").Config;
-
-			const handler = createHealthHandler(db, config);
-			const response = await handler(
-				new URL("http://localhost/health?detail=1"),
-			);
-			const body = (await response.json()) as HealthTestBody;
-
-			expect(body.accounts_detail?.[0]?.status).toBe("usage_exhausted");
-			expect(typeof body.accounts_detail?.[0]?.usage_exhausted_until).toBe(
-				"number",
-			);
-			// The lock is still reported as detail — only the headline changes.
-			expect(typeof body.accounts_detail?.[0]?.rate_limited_until).toBe(
-				"number",
-			);
-			expect(body.accounts_detail?.[0]?.rate_limited_reason).toBe(
-				"weekly_exhausted_429",
-			);
-		} finally {
-			usageCache.delete(id);
-		}
-	});
-
+describe("terseness", () => {
 	/**
-	 * …with ONE carve-out, shared with /api/accounts via `isIndependentBlock`:
-	 * an administrative/billing block is not explained by a spent quota, so a
-	 * LOCKED account in that state keeps `rate_limited`. Otherwise the two API
-	 * surfaces would disagree and the operator would be told to wait for a weekly
-	 * reset when the real action is to pay.
+	 * The reason `?detail=1` is gone: this endpoint is unauthenticated, because
+	 * a container health check has to reach it before anything else works, and
+	 * the detail view answered it with account names and per-account
+	 * availability. Anyone who could reach the port could enumerate the pool.
 	 */
-	describe("independent-block carve-out", () => {
-		async function detailStatusFor(row: {
-			id: string;
-			rate_limit_status?: string | null;
-			rate_limited_reason?: string | null;
-			rate_limited_until?: number | null;
-		}): Promise<string | undefined> {
-			const db = {
-				getAllAccounts: async () => [
-					{
-						id: row.id,
-						name: row.id,
-						provider: "anthropic",
-						paused: false,
-						rate_limit_status: row.rate_limit_status ?? null,
-						rate_limited_until: row.rate_limited_until ?? null,
-						rate_limited_reason: row.rate_limited_reason ?? null,
-						rate_limited_at: row.rate_limited_until ? Date.now() : null,
-					},
-				],
-			} as unknown as import("@clankermux/database").DatabaseOperations;
-			const config = {
-				getStrategy: () => "session",
-			} as unknown as import("@clankermux/config").Config;
-			const handler = createHealthHandler(db, config);
-			const response = await handler(
-				new URL("http://localhost/health?detail=1"),
-			);
-			const body = (await response.json()) as HealthTestBody;
-			return body.accounts_detail?.[0]?.status as string | undefined;
-		}
+	const db = {
+		getAllAccounts: async () => [
+			{ name: "secret-account-name", paused: false, rate_limited_until: null },
+			{ name: "another-one", paused: true, rate_limited_until: null },
+		],
+	} as unknown as import("@clankermux/database").DatabaseOperations;
+	const config = {
+		getStrategy: () => "session",
+	} as unknown as import("@clankermux/config").Config;
 
-		/** Run `fn` with a 100%-weekly usage payload seeded for `id`. */
-		async function withExhaustedUsage(
-			id: string,
-			fn: () => Promise<void>,
-		): Promise<void> {
-			usageCache.set(
-				id,
-				weeklyAllUsage(100, new Date(Date.now() + 3_600_000).toISOString()),
-			);
-			try {
-				await fn();
-			} finally {
-				usageCache.delete(id);
-			}
-		}
-
-		it("locked + out_of_credits + weekly 100% ⇒ rate_limited (pay, don't wait)", async () => {
-			const id = "health-exh-credits";
-			await withExhaustedUsage(id, async () => {
-				expect(
-					await detailStatusFor({
-						id,
-						rate_limited_reason: "out_of_credits",
-						rate_limited_until: Date.now() + 600_000,
-					}),
-				).toBe("rate_limited");
-			});
-		});
-
-		// The `usage_exhausted_*` fields are gated on the same condition as the
-		// headline. Emitting them next to `status: "rate_limited"` would make the
-		// response contradict itself — an operator (or a script) reading the fields
-		// would be told to wait for a window reset when the real action is to pay.
-		it("locked + out_of_credits + session 100% ⇒ rate_limited with NO usage_exhausted_* fields", async () => {
-			const id = "health-exh-credits-session";
-			usageCache.set(
-				id,
-				sessionSpentUsage(new Date(Date.now() + 12 * 60_000).toISOString()),
-			);
-			try {
-				const db = {
-					getAllAccounts: async () => [
-						{
-							id,
-							name: id,
-							provider: "anthropic",
-							paused: false,
-							rate_limited_until: Date.now() + 600_000,
-							rate_limited_reason: "out_of_credits",
-							rate_limited_at: Date.now(),
-						},
-					],
-				} as unknown as import("@clankermux/database").DatabaseOperations;
-				const config = {
-					getStrategy: () => "session",
-				} as unknown as import("@clankermux/config").Config;
-				const handler = createHealthHandler(db, config);
-				const response = await handler(
-					new URL("http://localhost/health?detail=1"),
-				);
-				const body = (await response.json()) as HealthTestBody;
-
-				expect(body.accounts_detail?.[0]?.status).toBe("rate_limited");
-				expect(
-					body.accounts_detail?.[0]?.usage_exhausted_until,
-				).toBeUndefined();
-				expect(
-					body.accounts_detail?.[0]?.usage_exhausted_binding,
-				).toBeUndefined();
-			} finally {
-				usageCache.delete(id);
-			}
-		});
-
-		it("locked + stored payment_required + weekly 100% ⇒ rate_limited", async () => {
-			const id = "health-exh-payment";
-			await withExhaustedUsage(id, async () => {
-				expect(
-					await detailStatusFor({
-						id,
-						rate_limit_status: "payment_required",
-						rate_limited_reason: "model_fallback_429",
-						rate_limited_until: Date.now() + 600_000,
-					}),
-				).toBe("rate_limited");
-			});
-		});
-
-		it("locked + GENERIC reason + weekly 100% ⇒ usage_exhausted (cause still wins)", async () => {
-			const id = "health-exh-generic";
-			await withExhaustedUsage(id, async () => {
-				expect(
-					await detailStatusFor({
-						id,
-						rate_limit_status: "rejected",
-						rate_limited_reason: "model_fallback_429",
-						rate_limited_until: Date.now() + 600_000,
-					}),
-				).toBe("usage_exhausted");
-			});
-		});
-
-		it("UNLOCKED + stored payment_required + weekly 100% ⇒ usage_exhausted", async () => {
-			// An unlocked account is still routable (isAccountAvailable is true), so
-			// its spent weekly window is the more accurate health headline.
-			const id = "health-exh-unlocked";
-			await withExhaustedUsage(id, async () => {
-				expect(
-					await detailStatusFor({
-						id,
-						rate_limit_status: "payment_required",
-						rate_limited_until: null,
-					}),
-				).toBe("usage_exhausted");
-			});
-		});
+	it("never discloses an account name", async () => {
+		const response = await createHealthHandler(db, config)();
+		const text = await response.text();
+		expect(text).not.toContain("secret-account-name");
+		expect(text).not.toContain("another-one");
 	});
 
-	it("marks a 100%-session account as usage_exhausted with binding `session`", async () => {
-		const id = "health-session-detail";
-		const sessionReset = new Date(Date.now() + 12 * 60_000).toISOString();
-		usageCache.set(id, sessionSpentUsage(sessionReset));
-		try {
-			const db = {
-				getAllAccounts: async () => [
-					{
-						id,
-						name: "session-exhausted",
-						provider: "anthropic",
-						paused: false,
-						rate_limited_until: null,
-						rate_limited_reason: null,
-						rate_limited_at: null,
-					},
-				],
-			} as unknown as import("@clankermux/database").DatabaseOperations;
-			const config = {
-				getStrategy: () => "session",
-			} as unknown as import("@clankermux/config").Config;
-
-			const handler = createHealthHandler(db, config);
-			const response = await handler(
-				new URL("http://localhost/health?detail=1"),
-			);
-			const body = (await response.json()) as HealthTestBody;
-
-			expect(body.accounts_detail?.[0]?.status).toBe("usage_exhausted");
-			expect(body.accounts_detail?.[0]?.usage_exhausted_binding).toBe(
-				"session",
-			);
-			expect(body.accounts_detail?.[0]?.usage_exhausted_until).toBe(
-				Date.parse(sessionReset),
-			);
-		} finally {
-			usageCache.delete(id);
-		}
+	it("carries a rollup and nothing per-account", async () => {
+		const response = await createHealthHandler(db, config)();
+		const body = (await response.json()) as Record<string, unknown>;
+		expect(body).not.toHaveProperty("accounts_detail");
+		expect(body.accounts).toBe(2);
+		expect(body.pool).toMatchObject({ configured: 2, paused: 1 });
 	});
 
-	it("reports binding `weekly` for a weekly-exhausted account", async () => {
-		const id = "health-weekly-binding";
-		const futureIso = new Date(Date.now() + 3_600_000).toISOString();
-		usageCache.set(id, weeklyAllUsage(100, futureIso));
-		try {
-			const db = {
-				getAllAccounts: async () => [
-					{
-						id,
-						name: "weekly-exhausted",
-						provider: "anthropic",
-						paused: false,
-						rate_limited_until: null,
-						rate_limited_reason: null,
-						rate_limited_at: null,
-					},
-				],
-			} as unknown as import("@clankermux/database").DatabaseOperations;
-			const config = {
-				getStrategy: () => "session",
-			} as unknown as import("@clankermux/config").Config;
-
-			const handler = createHealthHandler(db, config);
-			const response = await handler(
-				new URL("http://localhost/health?detail=1"),
-			);
-			const body = (await response.json()) as HealthTestBody;
-
-			expect(body.accounts_detail?.[0]?.usage_exhausted_binding).toBe("weekly");
-		} finally {
-			usageCache.delete(id);
-		}
-	});
-
-	it("keeps paused ahead of a spent session window too", async () => {
-		const id = "health-paused-session";
-		usageCache.set(
-			id,
-			sessionSpentUsage(new Date(Date.now() + 12 * 60_000).toISOString()),
-		);
-		try {
-			const db = {
-				getAllAccounts: async () => [
-					{
-						id,
-						name: "paused-session-exhausted",
-						provider: "anthropic",
-						paused: true,
-						rate_limited_until: null,
-						rate_limited_reason: null,
-						rate_limited_at: null,
-					},
-				],
-			} as unknown as import("@clankermux/database").DatabaseOperations;
-			const config = {
-				getStrategy: () => "session",
-			} as unknown as import("@clankermux/config").Config;
-
-			const handler = createHealthHandler(db, config);
-			const response = await handler(
-				new URL("http://localhost/health?detail=1"),
-			);
-			const body = (await response.json()) as HealthTestBody;
-
-			expect(body.accounts_detail?.[0]?.status).toBe("paused");
-			expect(body.accounts_detail?.[0]?.usage_exhausted_until).toBeUndefined();
-			expect(
-				body.accounts_detail?.[0]?.usage_exhausted_binding,
-			).toBeUndefined();
-		} finally {
-			usageCache.delete(id);
-		}
-	});
-
-	it("keeps rate_limited for a locked account whose weekly window has headroom", async () => {
-		const id = "health-locked-healthy-1";
-		const futureIso = new Date(Date.now() + 3_600_000).toISOString();
-		usageCache.set(id, weeklyAllUsage(42, futureIso));
-		try {
-			const db = {
-				getAllAccounts: async () => [
-					{
-						id,
-						name: "locked-only",
-						provider: "anthropic",
-						paused: false,
-						rate_limited_until: Date.now() + 600_000,
-						rate_limited_reason: "model_fallback_429",
-						rate_limited_at: Date.now(),
-					},
-				],
-			} as unknown as import("@clankermux/database").DatabaseOperations;
-			const config = {
-				getStrategy: () => "session",
-			} as unknown as import("@clankermux/config").Config;
-
-			const handler = createHealthHandler(db, config);
-			const response = await handler(
-				new URL("http://localhost/health?detail=1"),
-			);
-			const body = (await response.json()) as HealthTestBody;
-
-			expect(body.accounts_detail?.[0]?.status).toBe("rate_limited");
-		} finally {
-			usageCache.delete(id);
-		}
-	});
-
-	it("keeps paused ahead of usage_exhausted (a paused account is not routable for another reason)", async () => {
-		const id = "health-paused-exhausted-1";
-		const futureIso = new Date(Date.now() + 3_600_000).toISOString();
-		usageCache.set(id, weeklyAllUsage(100, futureIso));
-		try {
-			const db = {
-				getAllAccounts: async () => [
-					{
-						id,
-						name: "paused-and-exhausted",
-						provider: "anthropic",
-						paused: true,
-						rate_limited_until: null,
-						rate_limited_reason: null,
-						rate_limited_at: null,
-					},
-				],
-			} as unknown as import("@clankermux/database").DatabaseOperations;
-			const config = {
-				getStrategy: () => "session",
-			} as unknown as import("@clankermux/config").Config;
-
-			const handler = createHealthHandler(db, config);
-			const response = await handler(
-				new URL("http://localhost/health?detail=1"),
-			);
-			const body = (await response.json()) as HealthTestBody;
-
-			expect(body.accounts_detail?.[0]?.status).toBe("paused");
-			expect(body.accounts_detail?.[0]?.usage_exhausted_until).toBeUndefined();
-		} finally {
-			usageCache.delete(id);
-		}
-	});
-
-	it("marks an account with a spent seven_day_oauth_apps as usage_exhausted in accounts_detail", async () => {
-		const id = "health-oauth-acct-1";
-		const futureIso = new Date(Date.now() + 3_600_000).toISOString();
-		usageCache.set(id, {
-			five_hour: { utilization: 10, resets_at: futureIso },
-			seven_day: { utilization: 50, resets_at: futureIso },
-			seven_day_oauth_apps: { utilization: 100, resets_at: futureIso },
-		} as AnthropicUsageData);
-		try {
-			const db = {
-				getAllAccounts: async () => [
-					{
-						id,
-						name: "oauth-exhausted",
-						provider: "anthropic",
-						paused: false,
-						rate_limited_until: null,
-						rate_limited_reason: null,
-						rate_limited_at: null,
-					},
-				],
-			} as unknown as import("@clankermux/database").DatabaseOperations;
-			const config = {
-				getStrategy: () => "session",
-			} as unknown as import("@clankermux/config").Config;
-
-			const handler = createHealthHandler(db, config);
-			const response = await handler(
-				new URL("http://localhost/health?detail=1"),
-			);
-			const body = (await response.json()) as HealthTestBody;
-
-			expect(body.accounts_detail?.[0]?.status).toBe("usage_exhausted");
-			expect(typeof body.accounts_detail?.[0]?.usage_exhausted_until).toBe(
-				"number",
-			);
-		} finally {
-			usageCache.delete(id);
-		}
-	});
-
-	it("keeps a scoped-only exhausted account available but lists the scoped family", async () => {
-		const id = "health-scoped-acct-1";
-		const futureIso = new Date(Date.now() + 3_600_000).toISOString();
-		usageCache.set(id, {
-			limits: [
-				{
-					kind: "weekly_scoped",
-					group: "weekly",
-					percent: 100,
-					resets_at: futureIso,
-					scope: { model: { id: "claude-fable-5", display_name: "Fable" } },
-					is_active: true,
-				},
-			],
-		} as AnthropicUsageData);
-		try {
-			const db = {
-				getAllAccounts: async () => [
-					{
-						id,
-						name: "scoped",
-						provider: "anthropic",
-						paused: false,
-						rate_limited_until: null,
-						rate_limited_reason: null,
-						rate_limited_at: null,
-					},
-				],
-			} as unknown as import("@clankermux/database").DatabaseOperations;
-			const config = {
-				getStrategy: () => "session",
-			} as unknown as import("@clankermux/config").Config;
-
-			const handler = createHealthHandler(db, config);
-			const response = await handler(
-				new URL("http://localhost/health?detail=1"),
-			);
-			const body = (await response.json()) as HealthTestBody;
-
-			expect(body.accounts_detail?.[0]?.status).toBe("available");
-			expect(body.accounts_detail?.[0]?.usage_exhausted_families).toEqual([
-				"fable",
-			]);
-		} finally {
-			usageCache.delete(id);
-		}
-	});
-
-	it("shows available status for accounts with expired rate limits", async () => {
-		const db = {
-			getAllAccounts: async () => [
-				{
-					name: "expired",
-					paused: false,
-					rate_limited_until: Date.now() - 1000,
-				},
-			],
-		} as unknown as import("@clankermux/database").DatabaseOperations;
-
-		const config = {
-			getStrategy: () => "session",
-		} as unknown as import("@clankermux/config").Config;
-
+	it("ignores a legacy ?detail=1 rather than failing an old caller", async () => {
+		// The query string never reaches the handler now, so an old health check
+		// still gets a valid answer instead of an error.
 		const handler = createHealthHandler(db, config);
-		const url = new URL("http://localhost/health?detail=1");
-		const response = await handler(url);
-		const body = (await response.json()) as HealthTestBody;
-
-		expect(body.accounts_detail[0].status).toBe("available");
-		expect(body.accounts_detail[0].rate_limited_until).toBeNull();
+		const first = await handler();
+		const body = (await first.json()) as Record<string, unknown>;
+		expect(body).not.toHaveProperty("accounts_detail");
+		expect(first.status).toBe(200);
 	});
-});
 
-describe("cache isolation between detail and non-detail", () => {
-	it("does not serve cached detail response to non-detail request", async () => {
-		let callCount = 0;
-		const db = {
+	it("serves one cache for every caller", async () => {
+		let calls = 0;
+		const counting = {
 			getAllAccounts: async () => {
-				callCount++;
-				return [
-					{ name: `acc-${callCount}`, paused: false, rate_limited_until: null },
-				];
+				calls++;
+				return [{ name: "a", paused: false, rate_limited_until: null }];
 			},
 		} as unknown as import("@clankermux/database").DatabaseOperations;
-
-		const config = {
-			getStrategy: () => "session",
-		} as unknown as import("@clankermux/config").Config;
-
-		const handler = createHealthHandler(db, config);
-
-		// First request with detail=1
-		const detailResp = await handler(
-			new URL("http://localhost/health?detail=1"),
-		);
-		const detailBody = (await detailResp.json()) as HealthTestBody;
-		expect(detailBody.accounts_detail).toBeDefined();
-		expect(detailBody.accounts_detail[0].name).toBe("acc-1");
-		expect(callCount).toBe(1);
-
-		// Second request without detail — should NOT hit the detail cache
-		const normalResp = await handler(new URL("http://localhost/health"));
-		const normalBody = (await normalResp.json()) as Record<string, unknown>;
-		expect(normalBody).not.toHaveProperty("accounts_detail");
-		expect(callCount).toBe(2);
-	});
-
-	it("does not serve cached non-detail response to detail request", async () => {
-		let callCount = 0;
-		const db = {
-			getAllAccounts: async () => {
-				callCount++;
-				return [
-					{ name: `acc-${callCount}`, paused: false, rate_limited_until: null },
-				];
-			},
-		} as unknown as import("@clankermux/database").DatabaseOperations;
-
-		const config = {
-			getStrategy: () => "session",
-		} as unknown as import("@clankermux/config").Config;
-
-		const handler = createHealthHandler(db, config);
-
-		// First request without detail
-		const normalResp = await handler(new URL("http://localhost/health"));
-		const normalBody = (await normalResp.json()) as Record<string, unknown>;
-		expect(normalBody).not.toHaveProperty("accounts_detail");
-		expect(callCount).toBe(1);
-
-		// Second request with detail=1 — should NOT hit the non-detail cache
-		const detailResp = await handler(
-			new URL("http://localhost/health?detail=1"),
-		);
-		const detailBody = (await detailResp.json()) as HealthTestBody;
-		expect(detailBody.accounts_detail).toBeDefined();
-		expect(callCount).toBe(2);
-	});
-
-	it("caches same-mode repeated requests (hits cache, no extra DB call)", async () => {
-		let callCount = 0;
-		const db = {
-			getAllAccounts: async () => {
-				callCount++;
-				return [
-					{ name: `acc-${callCount}`, paused: false, rate_limited_until: null },
-				];
-			},
-		} as unknown as import("@clankermux/database").DatabaseOperations;
-
-		const config = {
-			getStrategy: () => "session",
-		} as unknown as import("@clankermux/config").Config;
-
-		const handler = createHealthHandler(db, config);
-
-		const resp1 = await handler(new URL("http://localhost/health"));
-		const body1 = (await resp1.json()) as HealthTestBody;
-		expect(body1.accounts_detail).toBeUndefined();
-		expect(callCount).toBe(1);
-
-		// Repeated non-detail request — should hit cache
-		const resp2 = await handler(new URL("http://localhost/health"));
-		const body2 = (await resp2.json()) as HealthTestBody;
-		expect(body2.accounts_detail).toBeUndefined();
-		expect(callCount).toBe(1); // no extra DB call
+		const handler = createHealthHandler(counting, config);
+		await handler();
+		await handler();
+		// One cache, not one per query-string shape.
+		expect(calls).toBe(1);
 	});
 });

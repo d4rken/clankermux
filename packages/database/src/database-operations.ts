@@ -23,6 +23,8 @@ import type {
 	PaymentSource,
 	RankedSnapshot,
 	RateLimitReason,
+	ScopedUsageSnapshotRow,
+	ScopedUsageSnapshotSample,
 	StorageUsageType,
 	StrategyStore,
 	ToolCallStat,
@@ -45,6 +47,12 @@ import { AccountRepository } from "./repositories/account.repository";
 import { AccountPaymentRepository } from "./repositories/account-payment.repository";
 import { ApiKeyRepository } from "./repositories/api-key.repository";
 import {
+	AuthRepository,
+	type AuthSessionRecord,
+	type PasswordBinding,
+	type StoredPasswordVerifier,
+} from "./repositories/auth.repository";
+import {
 	type CacheKeepaliveHistoryPoint,
 	CacheKeepaliveSnapshotRepository,
 	type CacheKeepaliveSnapshotRow,
@@ -59,12 +67,17 @@ import { ComboRepository } from "./repositories/combo.repository";
 import { MemorySnapshotRepository } from "./repositories/memory-snapshot.repository";
 import { OAuthRepository } from "./repositories/oauth.repository";
 import {
+	QuotaDriftResultRepository,
+	type QuotaDriftResultRow,
+} from "./repositories/quota-drift-result.repository";
+import {
 	type RequestData,
 	RequestRepository,
 	type RequestRoutingData,
 } from "./repositories/request.repository";
 import { StatsRepository } from "./repositories/stats.repository";
 import { StrategyRepository } from "./repositories/strategy.repository";
+import { UsageScopedSnapshotRepository } from "./repositories/usage-scoped-snapshot.repository";
 import { UsageSnapshotRepository } from "./repositories/usage-snapshot.repository";
 import { withRetryingMethods } from "./retry";
 
@@ -282,6 +295,12 @@ const RETENTION_USAGE_TABLES: ReadonlyArray<{
 	{ key: "payloads", table: "request_payloads" },
 	{ key: "requests", table: "requests" },
 	{ key: "usage_snapshots", table: "usage_snapshots" },
+	// Rides the usage-snapshot retention control (one knob for one series
+	// family), so it has no control of its own — the card sums the two.
+	{ key: "usage_scoped_snapshots", table: "usage_scoped_snapshots" },
+	// Precomputed analysis output, kept to a handful of rows by the cleanup pass
+	// rather than by a retention control of its own.
+	{ key: "quota_drift_results", table: "quota_drift_results" },
 	{ key: "memory_snapshots", table: "memory_snapshots" },
 	// Riders on the requests retention (FK cascade) — no control of their own.
 	{ key: "tool_calls", table: "request_tool_calls" },
@@ -377,12 +396,15 @@ export class DatabaseOperations implements StrategyStore, Disposable {
 	private strategy: StrategyRepository;
 	private stats: StatsRepository;
 	private apiKeys: ApiKeyRepository;
+	private auth: AuthRepository;
 	private combo: ComboRepository;
 	private usageSnapshots: UsageSnapshotRepository;
+	private usageScopedSnapshots: UsageScopedSnapshotRepository;
 	private memorySnapshots: MemorySnapshotRepository;
 	private cacheKeepaliveSnapshots: CacheKeepaliveSnapshotRepository;
 	private accountPayments: AccountPaymentRepository;
 	private codexResetCreditEvents: CodexResetCreditEventRepository;
+	private quotaDriftResults: QuotaDriftResultRepository;
 
 	constructor(
 		dbPath?: string,
@@ -457,10 +479,19 @@ export class DatabaseOperations implements StrategyStore, Disposable {
 		this.strategy = retrying(new StrategyRepository(this.adapter), "strategy");
 		this.stats = retrying(new StatsRepository(this.adapter), "stats");
 		this.apiKeys = retrying(new ApiKeyRepository(this.adapter), "apiKeys");
+		this.auth = retrying(new AuthRepository(this.adapter), "auth");
 		this.combo = retrying(new ComboRepository(this.adapter), "combo");
 		this.usageSnapshots = retrying(
 			new UsageSnapshotRepository(this.adapter),
 			"usageSnapshots",
+		);
+		this.usageScopedSnapshots = retrying(
+			new UsageScopedSnapshotRepository(this.adapter),
+			"usageScopedSnapshots",
+		);
+		this.quotaDriftResults = retrying(
+			new QuotaDriftResultRepository(this.adapter),
+			"quotaDriftResults",
 		);
 		this.memorySnapshots = retrying(
 			new MemorySnapshotRepository(this.adapter),
@@ -1318,6 +1349,67 @@ OAuth tokens will need to be re-authenticated.
 
 	async cleanupExpiredOAuthSessions(): Promise<number> {
 		return this.oauth.cleanupExpiredSessions();
+	}
+
+	// Management session auth, delegated to repository. The rotation methods
+	// (`setManagementPassword` / `clearManagementPassword`) revoke every session
+	// in the same transaction as the verifier write — see AuthRepository.
+	async getManagementPassword(): Promise<StoredPasswordVerifier | null> {
+		return this.auth.getPassword();
+	}
+
+	async setManagementPassword(
+		verifier: string,
+		params: string,
+		updatedAt: number,
+	): Promise<number> {
+		return this.auth.setPassword(verifier, params, updatedAt);
+	}
+
+	async clearManagementPassword(): Promise<number> {
+		return this.auth.clearPassword();
+	}
+
+	/**
+	 * Insert a session bound to the password that authorized it. Returns the rows
+	 * inserted: 0 means the verifier changed while the login was hashing, so the
+	 * session belongs to a password that no longer exists. The binding is
+	 * required — there is no way to mint a session that names no password.
+	 */
+	async createManagementSession(
+		record: AuthSessionRecord,
+		boundTo: PasswordBinding,
+	): Promise<number> {
+		return this.auth.createSession(record, boundTo);
+	}
+
+	async getManagementSession(
+		tokenHash: string,
+	): Promise<AuthSessionRecord | null> {
+		return this.auth.getSession(tokenHash);
+	}
+
+	async touchManagementSession(
+		tokenHash: string,
+		now: number,
+		staleBeforeMs: number,
+	): Promise<number> {
+		return this.auth.touchSession(tokenHash, now, staleBeforeMs);
+	}
+
+	async deleteManagementSession(tokenHash: string): Promise<number> {
+		return this.auth.deleteSession(tokenHash);
+	}
+
+	async deleteAllManagementSessions(): Promise<number> {
+		return this.auth.deleteAllSessions();
+	}
+
+	async cleanupExpiredManagementSessions(
+		now: number,
+		idleCutoff: number,
+	): Promise<number> {
+		return this.auth.deleteExpiredSessions(now, idleCutoff);
 	}
 
 	// Strategy operations delegated to repository
@@ -2206,6 +2298,44 @@ OAuth tokens will need to be re-authenticated.
 
 	async deleteUsageSnapshotsOlderThan(cutoffMs: number): Promise<number> {
 		return this.usageSnapshots.deleteOlderThan(cutoffMs);
+	}
+
+	// ── Scoped (per-model-family weekly) usage snapshot operations ────────────
+
+	async insertScopedUsageSnapshots(
+		rows: ScopedUsageSnapshotRow[],
+	): Promise<void> {
+		await this.usageScopedSnapshots.insertSnapshots(rows);
+	}
+
+	async getRecentScopedUsageSnapshotsForAccounts(
+		accountIds: string[],
+		sinceMs: number,
+	): Promise<ScopedUsageSnapshotSample[]> {
+		return this.usageScopedSnapshots.getRecentSnapshotsForAccounts(
+			accountIds,
+			sinceMs,
+		);
+	}
+
+	async deleteScopedUsageSnapshotsOlderThan(cutoffMs: number): Promise<number> {
+		return this.usageScopedSnapshots.deleteOlderThan(cutoffMs);
+	}
+
+	// ── Precomputed quota-drift results ───────────────────────────────────────
+
+	/**
+	 * Store one completed quota-drift precompute pass. Written from the MAIN
+	 * thread: the pass itself runs on a read-only worker connection, which
+	 * cannot write.
+	 */
+	async insertQuotaDriftResult(row: QuotaDriftResultRow): Promise<void> {
+		await this.quotaDriftResults.insertResult(row);
+	}
+
+	/** The newest stored quota-drift payload, or null before the first pass. */
+	async getLatestQuotaDriftResult(): Promise<QuotaDriftResultRow | null> {
+		return this.quotaDriftResults.getLatest();
 	}
 
 	// ── Memory snapshot operations delegated to repository ─────────────────────

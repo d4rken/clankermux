@@ -16,11 +16,13 @@ import {
 } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Link, useLocation } from "react-router";
+import { useAuthStatus } from "../hooks/useAuthStatus";
 import { cn } from "../lib/utils";
 import { version } from "../lib/version";
 import { BrandMark } from "./BrandMark";
 import { SidebarStatus } from "./overview/system-status/SidebarStatus";
 import { ThemeToggle } from "./theme-toggle";
+import { UnprotectedApiNotice } from "./UnprotectedApiNotice";
 import {
 	RESTART_COMMAND,
 	UPDATE_COMMAND,
@@ -62,6 +64,15 @@ export function Navigation() {
 	const [updateError, setUpdateError] = useState<string | null>(null);
 	const location = useLocation();
 	const isMountedRef = useRef(true);
+
+	// Same signal AuthGate runs the fail-open branch on. React Query dedupes this
+	// against the gate's own read, so it is a shared cache entry, not a second
+	// request. Shown ONLY once the probe has answered `configured: false`: while
+	// it is pending or errored the deployment's protection is unknown, and a
+	// warning that flashes on every load or appears whenever the server is
+	// unreachable is worse than none.
+	const { data: authStatus } = useAuthStatus();
+	const showUnprotectedNotice = authStatus?.configured === false;
 
 	// Cleanup on unmount to prevent memory leaks
 	useEffect(() => {
@@ -257,6 +268,10 @@ export function Navigation() {
 
 					{/* Footer */}
 					<div className="p-4 space-y-group">
+						{/* Above the status group on purpose: a security condition
+						    outranks deployment info. */}
+						{showUnprotectedNotice && <UnprotectedApiNotice />}
+
 						<SidebarStatus />
 
 						{/* Deployment status: repo freshness AND process freshness */}

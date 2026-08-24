@@ -162,6 +162,10 @@ class FakeDbOps {
 		row.prefixLast8 = prefix;
 		return true;
 	}
+	/** No management password configured — the session policy is fail-open. */
+	async getManagementPassword(): Promise<null> {
+		return null;
+	}
 }
 
 const build = (db: FakeDbOps, crypto: CryptoUtils) =>

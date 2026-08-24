@@ -14,6 +14,10 @@ import type {
 	AnthropicUsageData,
 	UsagePrediction,
 } from "@clankermux/types";
+import {
+	usageObservedAtMs,
+	weeklyLifetimeConfidence,
+} from "./lifetime-confidence";
 
 export type PoolWindow = "five_hour" | "seven_day";
 
@@ -382,6 +386,10 @@ export function computePoolUsage(
 	// reach each contribution's server-side prediction. Keyed by account id —
 	// NEVER by name, which is user-set and need not be unique.
 	const predictions = new Map<string, UsagePrediction | undefined>();
+	// Likewise for WHEN each contribution's reading was sampled: the weekly
+	// window's full-confidence estimate anchors its ETA there instead of at
+	// `now`, so a list rebuilt on an unchanged poll reports the same instants.
+	const observedAt = new Map<string, number | null>();
 
 	const eligible = eligibleProvidersFor(window);
 
@@ -442,6 +450,7 @@ export function computePoolUsage(
 				? account.prediction?.fiveHour
 				: account.prediction?.sevenDay,
 		);
+		observedAt.set(account.id, usageObservedAtMs(account.usageAsOfIso));
 	}
 
 	const activeAverage =
@@ -498,6 +507,8 @@ export function computePoolUsage(
 				resetsAtMs: c.resetMs,
 				windowStartMs: computeWindowStartMs(c.resetMs, window),
 				prediction: predictions.get(c.accountId),
+				lifetimeConfidence: weeklyLifetimeConfidence(window),
+				observedAtMs: observedAt.get(c.accountId) ?? null,
 			},
 			now,
 		);

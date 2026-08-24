@@ -86,16 +86,30 @@ export function DataRetentionCard() {
 		cacheKeepaliveSnapshotDays <= 3650;
 
 	// Per-data-type storage usage, keyed for inline lookup next to each control.
+	// A control may govern more than one table (the usage-snapshot retention
+	// prunes both the account-wide and the per-family series on one cutoff), so
+	// the hint takes a key LIST and reports the total: a key nothing renders is a
+	// figure the user never sees.
 	const usageByKey = new Map((usage?.types ?? []).map((t) => [t.key, t]));
 	const usageHint = (
-		key: "payloads" | "requests" | "usage_snapshots" | "memory_snapshots",
+		...keys: Array<
+			| "payloads"
+			| "requests"
+			| "usage_snapshots"
+			| "usage_scoped_snapshots"
+			| "memory_snapshots"
+		>
 	) => {
 		if (!usage?.available) return null;
-		const t = usageByKey.get(key);
-		if (!t) return null;
+		const present = keys
+			.map((k) => usageByKey.get(k))
+			.filter((t): t is NonNullable<typeof t> => t != null);
+		if (present.length === 0) return null;
+		const approxBytes = present.reduce((sum, t) => sum + t.approxBytes, 0);
+		const rowCount = present.reduce((sum, t) => sum + t.rowCount, 0);
 		return (
 			<p className="text-xs text-muted-foreground tabular-nums mt-1">
-				~{formatBytes(t.approxBytes)} · {t.rowCount.toLocaleString()} rows
+				~{formatBytes(approxBytes)} · {rowCount.toLocaleString()} rows
 			</p>
 		);
 	};
@@ -232,10 +246,11 @@ export function DataRetentionCard() {
 							Save
 						</Button>
 					</div>
-					{usageHint("usage_snapshots")}
+					{usageHint("usage_snapshots", "usage_scoped_snapshots")}
 					<p className="text-xs text-muted-foreground mt-1">
 						How long per-account limit-usage history is kept for the Limits
-						graph.
+						graph. Covers both the account-wide windows and the per-model-family
+						weekly windows recorded alongside them.
 					</p>
 				</div>
 

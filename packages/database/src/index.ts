@@ -34,6 +34,12 @@ export {
 // memory-history and payments-summary all run there)
 export { AccountPaymentRepository } from "./repositories/account-payment.repository";
 export {
+	AuthRepository,
+	type AuthSessionRecord,
+	type PasswordBinding,
+	type StoredPasswordVerifier,
+} from "./repositories/auth.repository";
+export {
 	type CacheKeepaliveHistoryPoint,
 	CacheKeepaliveSnapshotRepository,
 	type CacheKeepaliveSnapshotRow,
@@ -47,7 +53,12 @@ export {
 	type CodexResetCreditEventRow,
 } from "./repositories/codex-reset-credit-event.repository";
 export { MemorySnapshotRepository } from "./repositories/memory-snapshot.repository";
+export {
+	QuotaDriftResultRepository,
+	type QuotaDriftResultRow,
+} from "./repositories/quota-drift-result.repository";
 export { StatsRepository } from "./repositories/stats.repository";
+export { UsageScopedSnapshotRepository } from "./repositories/usage-scoped-snapshot.repository";
 export { UsageSnapshotRepository } from "./repositories/usage-snapshot.repository";
 // Re-export retry utilities for external use (from your improvements)
 export { withDatabaseRetry } from "./retry";

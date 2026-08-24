@@ -384,6 +384,25 @@ export const useUsageHistory = (range: string) => {
 };
 
 /**
+ * Precomputed quota-drift analysis for the Analytics "Quota" tab.
+ *
+ * The server recomputes it every 30 minutes, so polling faster would only
+ * re-fetch the same blob: 5-minute staleness, 5-minute refetch, paused in the
+ * background. `status: "computing"` is a normal answer (no pass has completed
+ * yet), not an error, so it is left to the panels to render rather than retried.
+ */
+export const useQuotaDrift = () => {
+	return useQuery({
+		queryKey: queryKeys.quotaDrift(),
+		queryFn: () => api.getQuotaDrift(),
+		staleTime: 5 * 60_000,
+		refetchInterval: 5 * 60_000,
+		refetchIntervalInBackground: false,
+		retry: shouldRetryDashboardQuery,
+	});
+};
+
+/**
  * Process memory footprint (RSS + JS heap) time-series, feeding the System
  * Health page's "Memory Usage" chart and the Overview health strip's RSS
  * sparkline. Keyed by range, so the two share a cache entry only when the

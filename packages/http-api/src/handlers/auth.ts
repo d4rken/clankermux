@@ -1,0 +1,224 @@
+import type { PasswordBinding } from "@clankermux/database";
+import { jsonResponse } from "@clankermux/http-common";
+import { Logger } from "@clankermux/logger";
+import {
+	LOGIN_MAX_BODY_BYTES,
+	LoginThrottle,
+} from "../services/login-throttle";
+import {
+	clearedSessionCookieHeader,
+	MAX_PASSWORD_BYTES,
+	type SessionAuthService,
+	sessionCookieHeader,
+} from "../services/session-auth-service";
+import { closeStreamsForSession } from "../services/session-stream-registry";
+
+const log = new Logger("AuthHandlers");
+
+/** Response of `GET /api/auth/status`. */
+export interface AuthStatusResponse {
+	/** A management password is set — the API is gated. */
+	configured: boolean;
+	/** This request carried a live session cookie. */
+	authenticated: boolean;
+}
+
+/**
+ * A bounded read's outcome. `tooLarge` is carried separately from every other
+ * unusable body because it is the one the CALLER cannot see in what they sent:
+ * a perfectly well-formed payload is refused purely for its size, and telling
+ * them the password field was missing sends them looking at the wrong thing on
+ * the one endpoint people reach for when something is already broken.
+ */
+type BoundedJsonResult =
+	| { ok: true; body: Record<string, unknown> }
+	| { ok: false; tooLarge: boolean };
+
+const UNUSABLE_BODY: BoundedJsonResult = { ok: false, tooLarge: false };
+const OVERSIZE_BODY: BoundedJsonResult = { ok: false, tooLarge: true };
+
+/**
+ * Read a bounded JSON body. Refuses an absent, oversized or non-object body —
+ * every one of which must be settled BEFORE anything expensive runs.
+ *
+ * The body is consumed INCREMENTALLY and the reader is cancelled the moment
+ * the cap is passed. `await req.text()` would buffer the whole thing first,
+ * which on an unauthenticated endpoint means any caller who can reach the port
+ * can make this process hold an arbitrary amount of memory — before the
+ * throttle is even claimed, and while the same process is serving AI traffic.
+ * Nothing over the cap is ever decoded, either: decoding is itself work
+ * proportional to what was sent.
+ */
+async function readBoundedJson(
+	req: Request,
+	maxBytes: number,
+): Promise<BoundedJsonResult> {
+	// A declared length over the cap is refused without reading the body at all.
+	// It is only a claim, though: it can lie, and a chunked body has none.
+	const declared = Number(req.headers.get("content-length"));
+	if (Number.isFinite(declared) && declared > maxBytes) return OVERSIZE_BODY;
+	if (!req.body) return UNUSABLE_BODY;
+
+	const reader = req.body.getReader();
+	const chunks: Uint8Array[] = [];
+	let total = 0;
+	try {
+		while (true) {
+			const { done, value } = await reader.read();
+			if (done) break;
+			if (!value) continue;
+			total += value.byteLength;
+			if (total > maxBytes) {
+				// Cancelling propagates to the sender's side of the stream, so the
+				// rest of an oversized body is never pulled in at all.
+				await reader.cancel().catch(() => {});
+				return OVERSIZE_BODY;
+			}
+			chunks.push(value);
+		}
+	} catch {
+		await reader.cancel().catch(() => {});
+		return UNUSABLE_BODY;
+	}
+
+	const body = new Uint8Array(total);
+	let offset = 0;
+	for (const chunk of chunks) {
+		body.set(chunk, offset);
+		offset += chunk.byteLength;
+	}
+
+	try {
+		const parsed = JSON.parse(new TextDecoder().decode(body));
+		return parsed && typeof parsed === "object" && !Array.isArray(parsed)
+			? { ok: true, body: parsed as Record<string, unknown> }
+			: UNUSABLE_BODY;
+	} catch {
+		return UNUSABLE_BODY;
+	}
+}
+
+/**
+ * `POST /api/auth/login` — exchange the management password for a session
+ * cookie.
+ *
+ * The order of the checks is the point. Body size, JSON shape and password
+ * length are all settled before the throttle is claimed, and the throttle
+ * before scrypt runs, so a caller sending garbage cannot spend either the
+ * derivation budget or the CPU.
+ */
+export function createAuthLoginHandler(
+	sessionAuth: SessionAuthService,
+	throttle: LoginThrottle = new LoginThrottle(),
+) {
+	return async (req: Request): Promise<Response> => {
+		const read = await readBoundedJson(req, LOGIN_MAX_BODY_BYTES);
+		if (!read.ok && read.tooLarge) {
+			// Answered before the missing-password check, and named: the size bound
+			// refuses valid payloads too, and "Password required" would send an
+			// operator hunting a field that was there all along.
+			return jsonResponse(
+				{ error: "Request body too large", limit: LOGIN_MAX_BODY_BYTES },
+				413,
+			);
+		}
+		const password = read.ok ? read.body.password : undefined;
+		if (typeof password !== "string" || password.length === 0) {
+			return jsonResponse({ error: "Password required" }, 400);
+		}
+		if (Buffer.byteLength(password, "utf8") > MAX_PASSWORD_BYTES) {
+			return jsonResponse({ error: "Password too long" }, 400);
+		}
+
+		// Nothing to log in to. Reported rather than silently succeeding: a client
+		// that got a 200 here would believe it holds a session it does not have.
+		if (!(await sessionAuth.isConfigured())) {
+			return jsonResponse(
+				{
+					error:
+						"No management password is configured. Set one with: bun run auth:password --set",
+				},
+				409,
+			);
+		}
+
+		const claim = throttle.tryAcquire();
+		if (!claim.ok) {
+			return jsonResponse({ error: "Too many login attempts" }, 429, {
+				"Retry-After": String(claim.rejection.retryAfterSeconds),
+			});
+		}
+
+		let binding: PasswordBinding | null;
+		try {
+			binding = await sessionAuth.verifyPassword(password);
+		} finally {
+			claim.release();
+		}
+
+		if (!binding) {
+			// Deliberately no lockout and no attempt counter: on a single-user box
+			// a lockout is a self-DoS. The throttle above is the whole defence.
+			return jsonResponse({ error: "Invalid password" }, 401);
+		}
+
+		// The session is minted against the verifier the check actually ran on.
+		// Derivation takes ~35ms, and an operator rotating the password inside
+		// that window has already deleted every session; issuing one here anyway
+		// would hand the revoked password 30 more days of access.
+		const session = await sessionAuth.createSession(binding);
+		if (!session) {
+			log.warn(
+				"A login raced a password rotation; no session was issued for the replaced password",
+			);
+			return jsonResponse({ error: "Invalid password" }, 401);
+		}
+
+		log.info("Management session established");
+		return jsonResponse({ authenticated: true }, 200, {
+			"Set-Cookie": sessionCookieHeader(session.token),
+		});
+	};
+}
+
+/**
+ * `POST /api/auth/logout` — drop the session row, clear the cookie, and close
+ * the SSE streams that session opened. Without the last part a logged-out tab
+ * keeps receiving management events until its stream's next revalidation tick.
+ *
+ * Always 200: logging out with no session is the state the caller asked for.
+ */
+export function createAuthLogoutHandler(sessionAuth: SessionAuthService) {
+	return async (req: Request): Promise<Response> => {
+		const tokenHash = await sessionAuth.destroySession(req);
+		if (tokenHash) {
+			const closed = closeStreamsForSession(tokenHash);
+			if (closed > 0) {
+				log.debug(`Closed ${closed} stream(s) for the logged-out session`);
+			}
+		}
+		return jsonResponse({ authenticated: false }, 200, {
+			"Set-Cookie": clearedSessionCookieHeader(),
+		});
+	};
+}
+
+/**
+ * `GET /api/auth/status` — is the API gated, and does this caller hold a
+ * session?
+ *
+ * Uses the OPTIONAL-session check, never the request gate. The gate answers
+ * "may this proceed", which for a public route is always yes — routing this
+ * endpoint through it would make it report a session on every call, including
+ * to a browser that has never logged in.
+ */
+export function createAuthStatusHandler(sessionAuth: SessionAuthService) {
+	return async (req: Request): Promise<Response> => {
+		const check = await sessionAuth.checkRequest(req);
+		const response: AuthStatusResponse = {
+			configured: check.configured,
+			authenticated: check.authenticated,
+		};
+		return jsonResponse(response);
+	};
+}

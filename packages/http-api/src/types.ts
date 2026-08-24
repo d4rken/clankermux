@@ -6,6 +6,7 @@ import type {
 	IntegrityStatus,
 	LoadBalancingStrategy,
 } from "@clankermux/types";
+import type { SessionAuthService } from "./services/session-auth-service";
 
 /**
  * Request-scoped context handed to every HTTP handler in this package.
@@ -19,6 +20,14 @@ export interface APIContext {
 	db: BunSqlAdapter;
 	config: Config;
 	dbOps: DatabaseOperations;
+	/**
+	 * The management login. Optional so a caller that only wants the read
+	 * handlers can build a router without it; when absent the auth endpoints
+	 * fall back to a service built from `dbOps`, which is the same thing the
+	 * server injects. The SSE lanes lose their revocation guard without it, so
+	 * production always passes one.
+	 */
+	sessionAuth?: SessionAuthService;
 	auth?: {
 		isAuthenticated: boolean;
 		apiKey?: ApiKey;
