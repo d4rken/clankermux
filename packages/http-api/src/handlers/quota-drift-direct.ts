@@ -133,6 +133,12 @@ export function normalizeQuotaDriftPayload(
 						// defaulting to the unqualified reading would restore exactly the
 						// overclaim the field was added to prevent.
 						flatScope: window.flatScope ?? null,
+						notReportedSince: window.notReportedSince ?? null,
+						// Null for the same reason, and the scope matters more here: an
+						// unqualified absence claim reads as "no account carries this
+						// window any more", which a payload that predates the field
+						// cannot vouch for.
+						notReportedScope: window.notReportedScope ?? null,
 						models: asArray(window.models).map(
 							(model): QuotaDriftModel => ({
 								...model,

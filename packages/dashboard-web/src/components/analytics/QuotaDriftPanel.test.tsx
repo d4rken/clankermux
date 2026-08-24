@@ -176,6 +176,32 @@ describe("QuotaDriftPanel", () => {
 		expect(html).not.toContain("no longer");
 	});
 
+	it("states a window our readings no longer include, below the chart", () => {
+		// The series simply ends, and without this the panel gives no reason for
+		// it. The sentence covers our readings and stops there.
+		const html = renderToStaticMarkup(
+			<QuotaDriftPanel
+				cohort={cohort(
+					[
+						windowResult("five_hour", [measuredModel()], {
+							lastObservedMs: Date.UTC(2026, 7, 21, 11, 58, 0, 0),
+							notReportedSince: Date.UTC(2026, 7, 21, 12, 0, 0, 0),
+							notReportedScope: "all-accounts",
+						}),
+					],
+					{ provider: "codex" },
+				)}
+			/>,
+		);
+
+		expect(html).toContain(
+			"No OpenAI usage reading since 21 Aug 2026 has included a 5-hour value",
+		);
+		expect(html).not.toContain("retired");
+		expect(html).not.toContain("removed");
+		expect(html).not.toContain("no longer");
+	});
+
 	it("says nothing about a window that is still moving", () => {
 		const html = renderToStaticMarkup(
 			<QuotaDriftPanel
@@ -203,6 +229,7 @@ describe("QuotaDriftPanel", () => {
 
 		expect(html).toContain("5-hour window");
 		expect(html).not.toContain("There is nothing here to measure");
+		expect(html).not.toContain("has included a 5-hour value");
 		// The gap is still stated, but only as far as the payload supports: the
 		// stretch is real, the cause is unknown and must not be guessed.
 		expect(html).toContain("claude-haiku-4-5");

@@ -893,6 +893,256 @@ describe("quota-drift flat windows", () => {
 	});
 });
 
+/* -- Windows our readings no longer include ------------------------------ */
+
+/**
+ * One account whose readings carry a 5-hour value and then stop carrying one.
+ *
+ * The sibling weekly window keeps reporting throughout unless a case says
+ * otherwise, because that is what separates "this window is absent from the
+ * payload" from "the sampler fetched nothing": a reading with neither window
+ * is not evidence about which windows a reading contains.
+ */
+interface AbsentFixture {
+	/** Days of readings that DID carry a 5-hour value. */
+	reportedDays: number;
+	/** Hours of readings that did not, following those. */
+	absentHours: number;
+	/**
+	 * Time between the last reading with a value and the first without.
+	 *
+	 * THE gate that dates the transition: past MAX_SAMPLE_GAP_MS we were not
+	 * watching when the value went absent and cannot say when it did.
+	 * Defaults to one sampler step.
+	 */
+	boundaryGapMs?: number;
+	/** Drop this many readings from the middle of the absent run. */
+	tailGapSamples?: number;
+	/** Blank the sibling window across the absent run too. */
+	siblingAbsent?: boolean;
+	/** Readings at the very end that carry a value again. */
+	resumedSamples?: number;
+	/** End this account's readings this long before FIXTURE_NOW. */
+	staleForMs?: number;
+	/** Never let this account's readings stop carrying the value. */
+	neverAbsent?: boolean;
+	accountId?: string;
+}
+
+/** The weekly percentage the sibling window reports throughout. */
+const SIBLING_PCT = 19;
+
+interface AbsentRow {
+	at: number;
+	pct: number | null;
+	sibling: number | null;
+}
+
+/** The readings one `AbsentFixture` account produces, oldest first. */
+function absentRows(opts: AbsentFixture): AbsentRow[] {
+	const reportedCount = Math.round((opts.reportedDays * DAY_MS) / FLAT_STEP_MS);
+	const absentCount = opts.neverAbsent
+		? 0
+		: Math.round((opts.absentHours * 60 * MINUTE_MS) / FLAT_STEP_MS);
+	const rows: AbsentRow[] = [];
+	let at = 0;
+	for (let i = 0; i < reportedCount; i++) {
+		rows.push({ at, pct: 0, sibling: SIBLING_PCT });
+		at += FLAT_STEP_MS;
+	}
+	// The boundary is measured from the LAST reading that carried a value, so
+	// the first absent reading is placed relative to it rather than to the grid.
+	at = rows[rows.length - 1].at + (opts.boundaryGapMs ?? FLAT_STEP_MS);
+	const gapAt = Math.floor(absentCount / 2);
+	for (let i = 0; i < absentCount; i++) {
+		// The demand-aware poller backing off while the proxy is idle. Ordinary
+		// operation, and irrelevant to whether a reading included the value.
+		if (opts.tailGapSamples && i >= gapAt && i < gapAt + opts.tailGapSamples) {
+			at += FLAT_STEP_MS;
+			continue;
+		}
+		rows.push({
+			at,
+			pct: null,
+			sibling: opts.siblingAbsent ? null : SIBLING_PCT,
+		});
+		at += FLAT_STEP_MS;
+	}
+	for (let i = 0; i < (opts.resumedSamples ?? 0); i++) {
+		rows.push({ at, pct: 0, sibling: SIBLING_PCT });
+		at += FLAT_STEP_MS;
+	}
+	// Shift the whole series so its newest reading lands where the case wants it.
+	const shift = FIXTURE_NOW - (opts.staleForMs ?? 0) - rows[rows.length - 1].at;
+	return rows.map((row) => ({ ...row, at: row.at + shift }));
+}
+
+/** Seed one such account into an open database. */
+function seedAbsentAccount(db: Database, opts: AbsentFixture): AbsentRow[] {
+	const accountId = opts.accountId ?? FLAT_ACCOUNT;
+	const rows = absentRows(opts);
+	db.run(
+		`INSERT INTO accounts (id, name, provider, created_at,
+			identity_plan_tier, identity_rate_limit_tier)
+		 VALUES (?, ?, 'codex', ?, 'pro', NULL)`,
+		[accountId, accountId, rows[0].at - DAY_MS],
+	);
+	const insertSnapshot = db.prepare(
+		`INSERT INTO usage_snapshots (
+			account_id, provider, sampled_at, five_hour_pct, five_hour_reset,
+			seven_day_pct, seven_day_reset, observed_at, plan_tier, rate_limit_tier
+		) VALUES (?, 'codex', ?, ?, NULL, ?, NULL, ?, 'pro', NULL)`,
+	);
+	db.transaction(() => {
+		for (const row of rows) {
+			insertSnapshot.run(accountId, row.at, row.pct, row.sibling, row.at);
+		}
+	})();
+	return rows;
+}
+
+/** The first reading that did not carry a 5-hour value. */
+function firstAbsentMs(rows: readonly AbsentRow[]): number {
+	const row = rows.find((r) => r.pct === null);
+	expect(row).toBeDefined();
+	return row?.at ?? 0;
+}
+
+describe("quota-drift windows that stopped being reported", () => {
+	function absentWindowOf(opts: AbsentFixture) {
+		const db = new Database(":memory:");
+		ensureSchema(db);
+		const rows = seedAbsentAccount(db, opts);
+		const window = flatWindowOf(db);
+		db.close();
+		return { window, rows };
+	}
+
+	it("dates the absence from the first reading without a value", () => {
+		// The live shape: a run of readings that carried a 5-hour value, a
+		// two-minute boundary we watched it disappear across, then three days of
+		// readings that did not, with the weekly window reporting throughout.
+		const { window, rows } = absentWindowOf({
+			reportedDays: 3,
+			absentHours: 30,
+			boundaryGapMs: 2 * MINUTE_MS,
+		});
+
+		expect(window?.notReportedSince).toBe(firstAbsentMs(rows));
+		expect(window?.notReportedScope).toBe("all-accounts");
+		// The last reading that DID carry one is a different instant, and still
+		// reported separately.
+		expect(window?.lastObservedMs).toBeLessThan(window?.notReportedSince ?? 0);
+	});
+
+	it("refuses to date a transition it did not watch", () => {
+		// Nothing was read across the boundary, so the value may have gone absent
+		// at any point inside it. A date we cannot support is worse than silence.
+		const { window } = absentWindowOf({
+			reportedDays: 3,
+			absentHours: 30,
+			boundaryGapMs: 45 * MINUTE_MS,
+		});
+
+		expect(window?.notReportedSince).toBeNull();
+		expect(window?.notReportedScope).toBeNull();
+	});
+
+	it("says nothing until the absence has held for a day", () => {
+		// These fields are expected on every poll, so a few hours without one is
+		// still inside what a single bad response explains.
+		const { window } = absentWindowOf({
+			reportedDays: 3,
+			absentHours: 12,
+			boundaryGapMs: 2 * MINUTE_MS,
+		});
+
+		expect(window?.notReportedSince).toBeNull();
+	});
+
+	it("says nothing when the sibling window went absent too", () => {
+		// A reading carrying NEITHER window is a sampler that fetched nothing.
+		// Reporting that as a window dropping out of the payload would attribute
+		// our own failure to the provider.
+		const { window } = absentWindowOf({
+			reportedDays: 3,
+			absentHours: 30,
+			boundaryGapMs: 2 * MINUTE_MS,
+			siblingAbsent: true,
+		});
+
+		expect(window?.notReportedSince).toBeNull();
+	});
+
+	it("still reports it across wide gaps INSIDE the absent run", () => {
+		// The resolved case, and the one most likely to be "fixed" into
+		// continuity: 11 hours unobserved in the middle of the run. A reading
+		// never taken cannot have included a value, so unobserved time cannot
+		// falsify this claim - unlike a flat streak, which it can.
+		const { window, rows } = absentWindowOf({
+			reportedDays: 3,
+			absentHours: 30,
+			boundaryGapMs: 2 * MINUTE_MS,
+			tailGapSamples: 66,
+		});
+
+		expect(window?.notReportedSince).toBe(firstAbsentMs(rows));
+		expect(window?.notReportedScope).toBe("all-accounts");
+	});
+
+	it("clears as soon as a reading carries the value again", () => {
+		// The claim is about a period that was observed, not a state that
+		// continues: a transient omission has to stop being reported.
+		const { window } = absentWindowOf({
+			reportedDays: 3,
+			absentHours: 30,
+			boundaryGapMs: 2 * MINUTE_MS,
+			resumedSamples: 3,
+		});
+
+		expect(window?.notReportedSince).toBeNull();
+		expect(window?.notReportedScope).toBeNull();
+	});
+
+	it("says nothing when nobody has been sampled since yesterday", () => {
+		// A cohort whose newest reading is two days old cannot testify to what
+		// today's readings contain, however long its last known absence ran.
+		const { window } = absentWindowOf({
+			reportedDays: 3,
+			absentHours: 30,
+			boundaryGapMs: 2 * MINUTE_MS,
+			staleForMs: 2 * DAY_MS,
+		});
+
+		expect(window?.notReportedSince).toBeNull();
+	});
+
+	it("calls a partial rollout what it is", () => {
+		// One account's readings stopped carrying the window and another's did
+		// not. Stating that cohort-wide would claim something none of the
+		// readings support.
+		const db = new Database(":memory:");
+		ensureSchema(db);
+		const rows = seedAbsentAccount(db, {
+			accountId: "qd-acct-absent",
+			reportedDays: 3,
+			absentHours: 30,
+			boundaryGapMs: 2 * MINUTE_MS,
+		});
+		seedAbsentAccount(db, {
+			accountId: "qd-acct-reporting",
+			reportedDays: 3,
+			absentHours: 30,
+			neverAbsent: true,
+		});
+		const window = flatWindowOf(db);
+		db.close();
+
+		expect(window?.notReportedSince).toBe(firstAbsentMs(rows));
+		expect(window?.notReportedScope).toBe("reporting-subset");
+	});
+});
+
 describe("collectWindowObservations", () => {
 	const account = {
 		id: FLAT_ACCOUNT,
@@ -1019,6 +1269,8 @@ describe("summarizeFlatWindow", () => {
 			lastMovementMs: null,
 			flatStartMs: FLAT_START,
 			flatValuePct: 0,
+			// Still carrying the window; the absence cases set this explicitly.
+			notReportingSinceMs: null,
 			...over,
 		};
 	}
@@ -1050,6 +1302,7 @@ describe("summarizeFlatWindow", () => {
 			],
 			"five_hour",
 			[traffic("a", FLAT_START), traffic("b", FLAT_START)],
+			FIXTURE_NOW,
 		);
 
 		expect(facts.flatSince).toBeNull();
@@ -1068,6 +1321,7 @@ describe("summarizeFlatWindow", () => {
 			],
 			"five_hour",
 			[traffic("a", FLAT_START), traffic("b", FLAT_START)],
+			FIXTURE_NOW,
 		);
 
 		expect(facts.flatSince).toBe(FLAT_START);
@@ -1082,6 +1336,7 @@ describe("summarizeFlatWindow", () => {
 			],
 			"five_hour",
 			[traffic("a", FLAT_START), traffic("b", FLAT_START + DAY_MS)],
+			FIXTURE_NOW,
 		);
 
 		// The cohort has only been uniformly flat since its LAST member went flat.
@@ -1097,20 +1352,24 @@ describe("summarizeFlatWindow", () => {
 		const segments = [traffic("a", FIXTURE_NOW - 8 * DAY_MS)];
 
 		expect(
-			summarizeFlatWindow(eightDaysFlat, "five_hour", segments).flatSince,
+			summarizeFlatWindow(eightDaysFlat, "five_hour", segments, FIXTURE_NOW)
+				.flatSince,
 		).not.toBeNull();
 		expect(
-			summarizeFlatWindow(eightDaysFlat, "seven_day", segments).flatSince,
+			summarizeFlatWindow(eightDaysFlat, "seven_day", segments, FIXTURE_NOW)
+				.flatSince,
 		).toBeNull();
 	});
 
 	it("reports nothing at all when the window was never observed", () => {
-		expect(summarizeFlatWindow([], "five_hour", [])).toEqual({
+		expect(summarizeFlatWindow([], "five_hour", [], FIXTURE_NOW)).toEqual({
 			lastMovementMs: null,
 			lastObservedMs: null,
 			flatValuePct: null,
 			flatSince: null,
 			flatScope: null,
+			notReportedSince: null,
+			notReportedScope: null,
 		});
 	});
 
@@ -1119,6 +1378,7 @@ describe("summarizeFlatWindow", () => {
 			[observation({ accountId: "a" }), observation({ accountId: "b" })],
 			"five_hour",
 			[traffic("a", FLAT_START), traffic("b", FLAT_START)],
+			FIXTURE_NOW,
 		);
 
 		expect(facts.flatSince).toBe(FLAT_START);
@@ -1142,6 +1402,7 @@ describe("summarizeFlatWindow", () => {
 			],
 			"five_hour",
 			[traffic("a", FLAT_START), traffic("b", FLAT_START)],
+			FIXTURE_NOW,
 		);
 
 		expect(facts.flatSince).not.toBeNull();
@@ -1168,6 +1429,7 @@ describe("summarizeFlatWindow", () => {
 				traffic("b", FLAT_START),
 				traffic("c", FLAT_START),
 			],
+			FIXTURE_NOW,
 		);
 
 		expect(facts.flatValuePct).toBeNull();
@@ -1188,6 +1450,7 @@ describe("summarizeFlatWindow", () => {
 			],
 			"five_hour",
 			[traffic("a", FLAT_START)],
+			FIXTURE_NOW,
 		);
 
 		expect(facts.flatSince).toBe(FLAT_START);
@@ -1205,6 +1468,7 @@ describe("summarizeFlatWindow", () => {
 			],
 			"five_hour",
 			[traffic("a", FLAT_START)],
+			FIXTURE_NOW,
 		);
 
 		expect(facts.flatSince).toBeNull();
@@ -1232,6 +1496,7 @@ describe("summarizeFlatWindow", () => {
 			],
 			"five_hour",
 			[traffic("a", FLAT_START), traffic("b", FLAT_START)],
+			FIXTURE_NOW,
 		);
 
 		expect(facts.flatSince).toBeNull();

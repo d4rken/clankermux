@@ -434,3 +434,63 @@ export function flatWindowNotice(
 		"There is nothing here to measure."
 	);
 }
+
+/* ── Windows our readings no longer include ─────────────────────────────── */
+
+/** How a notice names the value a window reports. */
+function windowValueLabel(window: string): string {
+	if (window === "five_hour") return "a 5-hour value";
+	if (window === "seven_day") return "a weekly value";
+	return "a value for this window";
+}
+
+/**
+ * One sentence for a window our readings have stopped carrying a value for, or
+ * null when they still carry one (or when we cannot say when they stopped).
+ *
+ * ## The claim is about OUR readings, and the wording has to stay inside that
+ *
+ * What the payload records is a null percentage, which proves absence from the
+ * NORMALIZED reading and nothing else: a missing field, an explicit null, a
+ * non-finite value and an unrecognised limits shape all reduce to the same
+ * null, so a normalizer bug and a provider change are indistinguishable from
+ * here. The sentence therefore says what our readings did not include, and
+ * never that the provider retired, removed or stopped anything — the same
+ * discipline {@link flatWindowNotice} keeps, for the same reason.
+ *
+ * It also carries no permanence. A transient omission produces this sentence
+ * and then clears when readings resume, which is correct: it describes a period
+ * that was observed, not a state that will continue.
+ *
+ * A partial rollout gets its own wording. `notReportedScope` says whether every
+ * still-sampled account in the cohort has stopped carrying the window or only
+ * some have, and an ABSENT scope — a cached payload written before the field
+ * existed — reads as the qualified form, which is true either way.
+ *
+ * Both this and {@link flatWindowNotice} can be present at once, on a cohort
+ * split between accounts that still report the window and accounts that do not.
+ * They are then two facts about two sets of accounts, each already qualified by
+ * its own scope, so the panel states both rather than merging them into one
+ * history no single account had.
+ */
+export function notReportedNotice(
+	provider: string,
+	window: QuotaDriftWindowResult,
+): string | null {
+	const since = window.notReportedSince ?? null;
+	if (since === null) return null;
+
+	const name = providerDisplayName(provider);
+	const value = windowValueLabel(window.window);
+	const date = formatFlatDate(since);
+	if (window.notReportedScope !== "all-accounts") {
+		return (
+			`Some ${name} accounts have included ${value} in no reading ` +
+			`since ${date}, while others still report one.`
+		);
+	}
+	return (
+		`No ${name} usage reading since ${date} has included ${value}. ` +
+		"There is nothing after that date for this chart to measure."
+	);
+}

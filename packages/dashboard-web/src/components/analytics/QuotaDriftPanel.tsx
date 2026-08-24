@@ -21,6 +21,7 @@ import { useSeriesPalette } from "../../hooks/useSeriesPalette";
 import {
 	cohortLabel,
 	flatWindowNotice,
+	notReportedNotice,
 	quotaWindowLabel,
 	summarizeModelGaps,
 } from "../../lib/quota-drift-display";
@@ -160,6 +161,11 @@ function WindowSeries({
 	// drawn into it: the historical series stays exactly as it was, and the
 	// reason it stops being informative is written out in words.
 	const flatNotice = window ? flatWindowNotice(provider, window) : null;
+	// A window our readings stopped carrying a value for. Stated FIRST: it is
+	// why the series ends where it does, and on a cohort that is split between
+	// accounts that still report it and accounts that do not, both notices
+	// appear and each is scoped to the accounts it was established on.
+	const absentNotice = window ? notReportedNotice(provider, window) : null;
 
 	return (
 		<div className="space-y-item">
@@ -258,6 +264,11 @@ function WindowSeries({
 					</ComposedChart>
 				</ResponsiveContainer>
 			</ChartContainer>
+			{absentNotice ? (
+				<p className="text-xs text-muted-foreground max-w-prose">
+					{absentNotice}
+				</p>
+			) : null}
 			{flatNotice ? (
 				<p className="text-xs text-muted-foreground max-w-prose">
 					{flatNotice}

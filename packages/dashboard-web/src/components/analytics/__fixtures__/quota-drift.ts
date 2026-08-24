@@ -291,6 +291,8 @@ export function preChangeCohort(): QuotaDriftCohort {
 			"flatValuePct",
 			"flatSince",
 			"flatScope",
+			"notReportedSince",
+			"notReportedScope",
 		]) {
 			delete legacy[key];
 		}

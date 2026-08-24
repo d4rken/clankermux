@@ -199,13 +199,17 @@ export function computeQuotaDrift(
 					displayB,
 					inferenceB,
 				}),
-				// Whether the window MOVED is not something a fit can answer — a
-				// constant response variable yields no coefficients at all — so it
-				// comes from the samples, alongside rather than inside the fit.
+				// Whether the window MOVED, and whether our readings still include it
+				// at all, are not things a fit can answer — a constant response
+				// variable yields no coefficients and an absent one yields no samples
+				// — so both come from the samples, alongside rather than inside the
+				// fit. `now` is the same clock the payload is stamped with, which is
+				// what lets the absence claim be checked against it.
 				...summarizeFlatWindow(
 					cohort.observationsByWindow.get(window) ?? [],
 					window,
 					segments,
+					now,
 				),
 			});
 		}
@@ -445,6 +449,20 @@ export interface WindowObservation {
 	flatStartMs: number;
 	/** The value that run has been reporting. */
 	flatValuePct: number;
+	/**
+	 * The first reading of the trailing run whose readings carry NO value for
+	 * this window, ms, or null when the newest reading still carries one or the
+	 * transition into that run cannot be dated.
+	 *
+	 * A claim about our readings, never about the provider's payload: the
+	 * normalizer maps a missing field, an explicit null, a non-finite value and
+	 * an unrecognised `limits[]` shape all to the same null, and the sampler
+	 * persists normalized output.
+	 *
+	 * See {@link findAbsenceOnset} for which of those conditions are decided
+	 * here and which are left to {@link summarizeFlatWindow}.
+	 */
+	notReportingSinceMs: number | null;
 }
 
 /**
@@ -504,6 +522,7 @@ export function collectWindowObservations(
 				lastMovementMs: null,
 				flatStartMs: ms,
 				flatValuePct: pct,
+				notReportingSinceMs: null,
 			});
 		} else {
 			existing.lastObservedMs = ms;
@@ -522,7 +541,102 @@ export function collectWindowObservations(
 		prev = { ms, pct, cohort: key };
 	}
 
+	// Attached after the walk because it is decided from the END of the series
+	// backwards, and only for the cohort that actually reported a value before
+	// the run began — `out` has an entry for exactly those.
+	const absence = findAbsenceOnset(account, rows, window);
+	const observation = absence ? out.get(absence.cohort) : undefined;
+	if (absence && observation) {
+		observation.notReportingSinceMs = absence.sinceMs;
+	}
+
 	return out;
+}
+
+/**
+ * When ONE account's readings stopped carrying a value for this window, or null
+ * when they still do, when it never carried one, or when the transition cannot
+ * be dated.
+ *
+ * Decided here, because each needs the rows:
+ *
+ *  - the NEWEST reading has no value for this window. Anything else is not an
+ *    ongoing absence;
+ *  - a value was reported immediately before the run, in the SAME cohort. A run
+ *    with no reading before it establishes nothing, and one whose tier changed
+ *    across the boundary belongs to two cohorts;
+ *  - the BOUNDARY gap — last reading with a value to first reading without one
+ *    — is within `MAX_SAMPLE_GAP_MS`;
+ *  - the sibling window carried a value on EVERY reading of the run. A reading
+ *    that carries neither window is a sampler that fetched nothing, and a run
+ *    of those says nothing about which windows the payload contains.
+ *
+ * Left to {@link summarizeFlatWindow}: how long the absence must have held, how
+ * fresh the newest reading must be, and who in the cohort it covers.
+ *
+ * ## Why only the BOUNDARY gap is checked, and never the gaps inside the run
+ *
+ * Deliberate, and the opposite of the rule `collectWindowObservations` applies
+ * to flat streaks. The two claims fail differently:
+ *
+ *  - `flatSince` claims the value did not MOVE. An unobserved interval can
+ *    falsify that — the value may have moved and moved back unseen — so every
+ *    gap has to break the streak;
+ *  - this claims our readings did not INCLUDE a value. An unobserved interval
+ *    cannot falsify that: a reading never taken cannot have included anything.
+ *
+ * What does matter is the boundary, because it is what DATES the transition. If
+ * we were not observing when the value went absent, we cannot say when it went
+ * absent, and the gate refuses rather than naming a date it cannot support.
+ *
+ * The gaps inside the run are the demand-aware poller backing off while the
+ * proxy is idle — ordinary operation, and irrelevant to this claim. Do not
+ * "fix" this into intra-run continuity: it would refuse the very case the field
+ * exists for while establishing nothing.
+ */
+function findAbsenceOnset(
+	account: ComputeAccount,
+	rows: readonly SnapshotScanRow[],
+	window: QuotaWindowKind,
+): { cohort: string; sinceMs: number } | null {
+	if (rows.length === 0) return null;
+	const targetPct = (row: SnapshotScanRow) =>
+		nullableNumber(
+			window === "five_hour" ? row.five_hour_pct : row.seven_day_pct,
+		);
+	const siblingPct = (row: SnapshotScanRow) =>
+		nullableNumber(
+			window === "five_hour" ? row.seven_day_pct : row.five_hour_pct,
+		);
+
+	if (targetPct(rows[rows.length - 1]) !== null) return null;
+
+	let index = rows.length - 1;
+	while (index >= 0 && targetPct(rows[index]) === null) {
+		// Neither window present: nothing was read, so this run cannot testify to
+		// what a reading contains.
+		if (siblingPct(rows[index]) === null) return null;
+		index--;
+	}
+	if (index < 0) return null;
+
+	const lastValueRow = rows[index];
+	const firstAbsentRow = rows[index + 1];
+	const sinceMs = effectiveMs(firstAbsentRow);
+	if (sinceMs - effectiveMs(lastValueRow) > MAX_SAMPLE_GAP_MS) return null;
+
+	const cohort = cohortKey(
+		account.provider,
+		resolveRowTier(account, lastValueRow),
+	);
+	for (let i = index + 1; i < rows.length; i++) {
+		const rowCohort = cohortKey(
+			account.provider,
+			resolveRowTier(account, rows[i]),
+		);
+		if (rowCohort !== cohort) return null;
+	}
+	return { cohort, sinceMs };
 }
 
 /** The movement facts one cohort reports for one window. */
@@ -532,6 +646,8 @@ export interface FlatWindowFacts {
 	flatValuePct: number | null;
 	flatSince: number | null;
 	flatScope: QuotaDriftAccountScope | null;
+	notReportedSince: number | null;
+	notReportedScope: QuotaDriftAccountScope | null;
 }
 
 const NO_MOVEMENT_FACTS: FlatWindowFacts = {
@@ -540,6 +656,8 @@ const NO_MOVEMENT_FACTS: FlatWindowFacts = {
 	flatValuePct: null,
 	flatSince: null,
 	flatScope: null,
+	notReportedSince: null,
+	notReportedScope: null,
 };
 
 /**
@@ -582,11 +700,19 @@ const NO_MOVEMENT_FACTS: FlatWindowFacts = {
  *
  * The cohort's `flatSince` is the LATEST member's, because that is when the
  * cohort as a whole became still.
+ *
+ * ## `notReportedSince` is a separate state, on the OTHER side of the split
+ *
+ * It is established on the accounts whose readings no longer carry the window,
+ * so it survives every early return below — including the one taken when
+ * NOTHING reports the window, which is precisely when it is the only thing left
+ * to say. See {@link summarizeAbsentWindow}.
  */
 export function summarizeFlatWindow(
 	observations: readonly WindowObservation[],
 	window: QuotaWindowKind,
 	segments: readonly QuotaSegment[],
+	nowMs: number,
 ): FlatWindowFacts {
 	if (observations.length === 0) return NO_MOVEMENT_FACTS;
 
@@ -595,11 +721,9 @@ export function summarizeFlatWindow(
 		.map((o) => o.lastMovementMs)
 		.filter((ms): ms is number => ms !== null);
 	const observed: FlatWindowFacts = {
+		...NO_MOVEMENT_FACTS,
 		lastMovementMs: movements.length > 0 ? Math.max(...movements) : null,
 		lastObservedMs,
-		flatValuePct: null,
-		flatSince: null,
-		flatScope: null,
 	};
 
 	const newestSampleMs = Math.max(...observations.map((o) => o.lastSampleMs));
@@ -608,6 +732,14 @@ export function summarizeFlatWindow(
 	);
 	if (active.length === 0) return observed;
 
+	// Carried by every return from here on: whether our readings still include
+	// the window is decided on the accounts that are NOT reporting it, and the
+	// flat gates below can only ever withhold a claim about the ones that are.
+	const base: FlatWindowFacts = {
+		...observed,
+		...summarizeAbsentWindow(active, newestSampleMs, nowMs),
+	};
+
 	// Still sampled AND still carrying a value for this window. An active
 	// account that is not in here has not gone quiet — its readings simply no
 	// longer include the window, which is a different fact and cannot be settled
@@ -615,7 +747,7 @@ export function summarizeFlatWindow(
 	const reporting = active.filter(
 		(o) => newestSampleMs - o.lastObservedMs <= CURRENT_MEMBER_MS,
 	);
-	if (reporting.length === 0) return observed;
+	if (reporting.length === 0) return base;
 
 	const threshold = FLAT_WINDOW_THRESHOLD_MS[window];
 	const allFlat = reporting.every(
@@ -623,21 +755,76 @@ export function summarizeFlatWindow(
 			o.lastObservedMs - o.flatStartMs >= threshold &&
 			o.lastObservedMs - o.firstObservedMs > threshold,
 	);
-	if (!allFlat) return observed;
+	if (!allFlat) return base;
 
 	const flatSince = Math.max(...reporting.map((o) => o.flatStartMs));
 	const accountIds = new Set(reporting.map((o) => o.accountId));
-	if (!hasMaterialTraffic(segments, accountIds, flatSince)) return observed;
+	if (!hasMaterialTraffic(segments, accountIds, flatSince)) return base;
 
 	const values = new Set(reporting.map((o) => o.flatValuePct));
 	return {
-		...observed,
+		...base,
 		// Accounts constant at DIFFERENT values are each flat, so the cohort is
 		// flat, but there is no single number to name.
 		flatValuePct: values.size === 1 ? reporting[0].flatValuePct : null,
 		flatSince,
 		flatScope:
 			reporting.length === active.length ? "all-accounts" : "reporting-subset",
+	};
+}
+
+/**
+ * How long a window's value must have been absent from every reading before the
+ * absence is reported.
+ *
+ * A day, and deliberately NOT scaled by the window's reset duration the way
+ * {@link FLAT_WINDOW_THRESHOLD_MS} is. Stillness has to outlast the thing that
+ * would make it move, so a weekly percentage needs weeks; presence does not —
+ * these fields are expected on every poll, so a day without one is already far
+ * longer than any cadence or backoff explains.
+ */
+export const WINDOW_ABSENT_THRESHOLD_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * Whether the cohort's readings have stopped including this window, decided on
+ * the still-sampled accounts that are NOT reporting it.
+ *
+ * The per-account half of the question — that a value was reported before, that
+ * the transition was observed closely enough to be dated, and that the sibling
+ * window kept reporting through the run — is already settled in
+ * {@link findAbsenceOnset}. What is left is the cohort's half:
+ *
+ *  - the absence has held for at least {@link WINDOW_ABSENT_THRESHOLD_MS};
+ *  - the newest reading is itself recent. A cohort nobody has sampled since
+ *    yesterday says nothing about what today's readings contain, and reporting
+ *    its last known state as current would be exactly the stalled-sampler
+ *    confusion `lastObservedMs` exists to expose;
+ *  - who it covers. Some accounts absent and others still reporting is a
+ *    PARTIAL rollout, and stating it as a cohort-wide observation would claim
+ *    something none of the readings support.
+ *
+ * The cohort's `notReportedSince` is the LATEST member's, because that is when
+ * the cohort as a whole stopped carrying the window.
+ */
+function summarizeAbsentWindow(
+	active: readonly WindowObservation[],
+	newestSampleMs: number,
+	nowMs: number,
+): Pick<FlatWindowFacts, "notReportedSince" | "notReportedScope"> {
+	const none = { notReportedSince: null, notReportedScope: null } as const;
+	if (nowMs - newestSampleMs > CURRENT_MEMBER_MS) return none;
+
+	const onsets = active.flatMap((o) => {
+		const since = o.notReportingSinceMs;
+		if (since === null) return [];
+		return o.lastSampleMs - since >= WINDOW_ABSENT_THRESHOLD_MS ? [since] : [];
+	});
+	if (onsets.length === 0) return none;
+
+	return {
+		notReportedSince: Math.max(...onsets),
+		notReportedScope:
+			onsets.length === active.length ? "all-accounts" : "reporting-subset",
 	};
 }
 

@@ -57,9 +57,14 @@ export type QuotaDriftTierProvenance = "recorded" | "assumed";
  * Who a cohort-level window claim actually covers.
  *
  * `all-accounts` means every account still being sampled in this cohort was
- * checked and agreed. `reporting-subset` means at least one account is still
- * being sampled but its value for THIS window is absent from those readings, so
- * the claim could only be established on the accounts that still report it.
+ * checked and agreed. `reporting-subset` means the still-sampled accounts do
+ * NOT all carry this window in their readings, so the cohort is split and any
+ * claim covers one side of that split only.
+ *
+ * Both sides of that split can carry a claim, and which one does depends on the
+ * claim: `flatSince` is established on the accounts that still report the
+ * window, `notReportedSince` on the accounts whose readings no longer include
+ * it. The scope says the same thing either way — the cohort was not unanimous.
  *
  * The distinction is not cosmetic. A cohort-wide claim built from a subset,
  * with the rest silently dropped, is a false statement about provider
@@ -158,7 +163,7 @@ export interface QuotaDriftWindowResult {
 	 * still being sampled every few minutes, and no fit over it can produce
 	 * anything, because the response variable is constant.
 	 *
-	 * All four fields are OPTIONAL for the same reason as
+	 * Every field in this block is OPTIONAL for the same reason as
 	 * `QuotaDriftPoint.unidentifiedReasons`: the payload is a cached blob and
 	 * the newest one can predate them by up to a refresh interval. The handler
 	 * normalizes each absent value to null.
@@ -211,6 +216,37 @@ export interface QuotaDriftWindowResult {
 	 * would say "every account" while a member had been silently excluded.
 	 */
 	flatScope?: QuotaDriftAccountScope | null;
+	/**
+	 * When our readings stopped including a value for this window at all, ms
+	 * since epoch (the first reading without one), or null.
+	 *
+	 * A DIFFERENT state from `flatSince`, and the only one that can still be
+	 * established when nothing reports the window: a window pinned at one value
+	 * is still being read, a window absent from the payload is not being read at
+	 * all, and no fit exists for either.
+	 *
+	 * The claim is about OUR readings and nothing else. A null percentage in the
+	 * database proves absence from the NORMALIZED reading, never from the
+	 * provider's raw payload: a shape the normalizer does not recognise, a
+	 * non-finite value and a genuinely dropped field all reduce to the same
+	 * null, so a normalizer bug and a provider change are indistinguishable
+	 * here. Copy built on this field must say what we observed and must never
+	 * say the provider retired, removed or changed anything.
+	 *
+	 * Set only when a value WAS reported before, the transition itself was
+	 * observed (so it can be dated), the absence has held for at least a day,
+	 * the sibling window kept reporting throughout (otherwise this is a stalled
+	 * sampler, not a dropped window), and the newest reading is recent.
+	 */
+	notReportedSince?: number | null;
+	/**
+	 * Who `notReportedSince` covers, or null when there is no such claim.
+	 *
+	 * `all-accounts` means no still-sampled account in the cohort carries the
+	 * window any more. `reporting-subset` means some still do — a partial
+	 * rollout, which must never be stated as a cohort-wide observation.
+	 */
+	notReportedScope?: QuotaDriftAccountScope | null;
 }
 
 /** One cohort of accounts fitted together. */

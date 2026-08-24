@@ -23,6 +23,7 @@ import {
 	formatRelativeChange,
 	gapStretchText,
 	isReportableVerdict,
+	notReportedNotice,
 	primaryReason,
 	quotaWindowLabel,
 	summarizeGaps,
@@ -620,5 +621,114 @@ describe("flatWindowNotice", () => {
 				models: [],
 			}),
 		).toBeNull();
+	});
+});
+
+/* -- Windows our readings no longer include ------------------------------ */
+
+/** 2026-08-21T12:00:00Z, the first reading that carried no 5-hour value. */
+const NOT_REPORTED_SINCE = Date.UTC(2026, 7, 21, 12, 0, 0, 0);
+
+function absentWindow(
+	over: Partial<QuotaDriftWindowResult> = {},
+): QuotaDriftWindowResult {
+	return flatWindow({
+		flatSince: null,
+		flatValuePct: null,
+		flatScope: null,
+		notReportedSince: NOT_REPORTED_SINCE,
+		notReportedScope: "all-accounts",
+		...over,
+	});
+}
+
+describe("notReportedNotice", () => {
+	it("states what our readings did not include, and nothing more", () => {
+		expect(notReportedNotice("codex", absentWindow())).toBe(
+			"No OpenAI usage reading since 21 Aug 2026 has included a 5-hour " +
+				"value. There is nothing after that date for this chart to measure.",
+		);
+	});
+
+	it("never says the provider retired, removed or stopped anything", () => {
+		// A null percentage proves absence from OUR normalized reading. A
+		// normalizer bug and a provider change are indistinguishable from here,
+		// so every one of these words would claim more than the payload contains.
+		const text = notReportedNotice("codex", absentWindow()) ?? "";
+
+		expect(text).not.toContain("retired");
+		expect(text).not.toContain("removed");
+		expect(text).not.toContain("no longer");
+		expect(text).not.toContain("stopped");
+	});
+
+	it("names the weekly window's value correctly", () => {
+		const text =
+			notReportedNotice("anthropic", absentWindow({ window: "seven_day" })) ??
+			"";
+
+		expect(text).toContain("has included a weekly value");
+	});
+
+	it("calls a partial rollout what it is", () => {
+		// Some accounts still report the window. An unqualified sentence would
+		// state a cohort-wide observation none of the readings support.
+		const text =
+			notReportedNotice(
+				"codex",
+				absentWindow({ notReportedScope: "reporting-subset" }),
+			) ?? "";
+
+		expect(text).toBe(
+			"Some OpenAI accounts have included a 5-hour value in no reading " +
+				"since 21 Aug 2026, while others still report one.",
+		);
+	});
+
+	it("reads a payload with no scope as the qualified claim", () => {
+		// A cached blob written before the field existed cannot vouch for whether
+		// every account stopped carrying the window.
+		const text =
+			notReportedNotice(
+				"codex",
+				absentWindow({ notReportedScope: undefined }),
+			) ?? "";
+
+		expect(text).toContain("Some OpenAI accounts");
+	});
+
+	it("says nothing while readings still carry the value", () => {
+		expect(
+			notReportedNotice("codex", absentWindow({ notReportedSince: null })),
+		).toBeNull();
+		// A pre-change cached payload carries neither field at all.
+		expect(
+			notReportedNotice("codex", {
+				window: "five_hour",
+				nSegments: 1,
+				r2: 0,
+				zeroObservedTokenDeltaShare: 0,
+				models: [],
+			}),
+		).toBeNull();
+	});
+
+	it("stands alongside the flat notice on a cohort that is split", () => {
+		// Two facts about two sets of accounts, each already qualified by its own
+		// scope. Merging them into one history would describe an account that
+		// does not exist.
+		const window = absentWindow({
+			flatSince: FLAT_SINCE,
+			flatValuePct: 0,
+			flatScope: "reporting-subset",
+			notReportedScope: "reporting-subset",
+		});
+
+		expect(notReportedNotice("codex", window)).toContain(
+			"Some OpenAI accounts",
+		);
+		expect(flatWindowNotice("codex", window)).toContain(
+			"on the accounts still reporting it",
+		);
 	});
 });
