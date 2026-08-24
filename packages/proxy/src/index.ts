@@ -107,12 +107,14 @@ export {
 	startFullIntegrityCheckBackground,
 	startIntegrityScheduler,
 } from "./integrity-scheduler";
+export { getActiveOverloadHoldCount } from "./overload-hold";
 export { peekPrimaryAccountId } from "./peek-primary";
 export {
 	ANTHROPIC_UPSTREAM_OVERLOAD_KEY,
 	applyProviderOverloadCooldown,
 	clearProviderOverloadCooldown,
 	completeProviderOverloadProbe,
+	getOverloadDiagnostics,
 	getProbeLeaseSafetyTtlMs,
 	getProviderOverloadKey,
 	getProviderOverloadSnapshot,
@@ -124,6 +126,7 @@ export {
 	type OverloadBreakerState,
 	type OverloadBreakerStatus,
 	type OverloadBucketSnapshot,
+	type OverloadDiagnosticBucket,
 	type OverloadProbeToken,
 	type ProbeAdmission,
 	tryAcquireProviderOverloadProbe,

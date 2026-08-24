@@ -607,6 +607,63 @@ export function completeProviderOverloadProbe(
 }
 
 /**
+ * One live overload bucket, for operator diagnostics. Distinct from
+ * {@link OverloadBucketSnapshot}, which is per-provider and shaped for the
+ * dashboard's account chips: this one is GLOBAL, carries the raw bucket key,
+ * and exposes the generation and probe age an incident actually turns on.
+ * Kept separate so the dashboard's shape is not dragged around by an
+ * operator-facing field.
+ */
+export interface OverloadDiagnosticBucket {
+	/** Raw bucket key, e.g. `anthropic-upstream:opus`. */
+	key: string;
+	state: OverloadBreakerState;
+	/** Block deadline while open; null when half-open. */
+	until: number | null;
+	generation: number;
+	/** The in-flight probe, when one holds this bucket's lease. */
+	probe: { id: string; ageMs: number; ttlMs: number } | null;
+}
+
+/**
+ * Every live bucket across every provider. Answers "what is wedged right now",
+ * which the logs can only answer after the fact. Pure — never mutates state,
+ * so a diagnostic read can never disturb an incident it is observing.
+ */
+export function getOverloadDiagnostics(
+	now = Date.now(),
+): OverloadDiagnosticBucket[] {
+	const out: OverloadDiagnosticBucket[] = [];
+	for (const [key, bucket] of buckets) {
+		const open = bucket.until > now;
+		out.push({
+			key,
+			state: open ? "open" : "half-open",
+			until: open ? bucket.until : null,
+			generation: bucket.generation,
+			probe:
+				bucket.probe && isLeaseActive(bucket, now)
+					? {
+							id: bucket.probe.probeId,
+							ageMs: now - bucket.probe.acquiredAt,
+							ttlMs: bucket.probe.ttlMs,
+						}
+					: null,
+		});
+	}
+	return out;
+}
+
+/**
+ * Current generation of `key`, or null when the bucket is closed. Lets a hold
+ * name the exact trip it is waiting on, so concurrent family incidents stay
+ * separable in one journal.
+ */
+export function getOverloadBucketGeneration(key: string): number | null {
+	return buckets.get(key)?.generation ?? null;
+}
+
+/**
  * Operator clear (dashboard force-reset). With a provider: removes all of
  * its buckets, family and provider-wide. Without: removes everything.
  * Outstanding probe tokens are implicitly invalidated — their buckets are

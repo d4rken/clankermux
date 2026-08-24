@@ -14,6 +14,8 @@ import {
 	applyProviderOverloadCooldown,
 	clearProviderOverloadCooldown,
 	completeProviderOverloadProbe,
+	getOverloadBucketGeneration,
+	getOverloadDiagnostics,
 	type ProbeAdmission,
 	tryAcquireProviderOverloadProbe,
 } from "../provider-overload-cooldown";
@@ -333,5 +335,74 @@ describe("overload breaker telemetry", () => {
 		expect(firstToken?.probeId).toBeDefined();
 		expect(secondToken?.probeId).toBeDefined();
 		expect(firstToken?.probeId).not.toBe(secondToken?.probeId);
+	});
+});
+
+describe("overload diagnostics snapshot", () => {
+	afterEach(() => {
+		clearProviderOverloadCooldown();
+	});
+
+	it("reports every live bucket globally, with generation and probe age", async () => {
+		applyProviderOverloadCooldown(
+			"anthropic",
+			Date.now() + 60_000,
+			"claude-opus-4-5",
+		);
+		applyProviderOverloadCooldown("anthropic", Date.now() + 5);
+		await new Promise((r) => setTimeout(r, 15));
+
+		const before = getOverloadDiagnostics();
+		const family = before.find((b) => b.key === "anthropic-upstream:opus");
+		const wide = before.find((b) => b.key === "anthropic-upstream");
+		expect(family?.state).toBe("open");
+		expect(family?.until).toBeGreaterThan(Date.now());
+		// The provider-wide bucket's deadline has lapsed, so it reads half-open
+		// with a null deadline. The two must not be conflated: only one of them
+		// still gates traffic.
+		expect(wide?.state).toBe("half-open");
+		expect(wide?.until).toBeNull();
+		expect(family?.probe).toBeNull();
+
+		// An admitted probe surfaces with its identity and age, which is what
+		// makes "what is wedged right now" answerable without grepping.
+		const admission = tryAcquireProviderOverloadProbe(
+			"anthropic",
+			"claude-haiku-4-5",
+		);
+		const token = admission.admitted ? admission.token : null;
+		expect(token).not.toBeNull();
+		await new Promise((r) => setTimeout(r, 20));
+
+		const during = getOverloadDiagnostics();
+		const probed = during.find((b) => b.probe !== null);
+		expect(probed?.probe?.id).toBe(token?.probeId as string);
+		expect(probed?.probe?.ageMs).toBeGreaterThanOrEqual(15);
+		expect(probed?.probe?.ttlMs).toBeGreaterThan(0);
+	});
+
+	it("returns an empty list when nothing is live", () => {
+		expect(getOverloadDiagnostics()).toEqual([]);
+	});
+
+	it("exposes the generation a hold can name", () => {
+		expect(getOverloadBucketGeneration("anthropic-upstream:opus")).toBeNull();
+		applyProviderOverloadCooldown(
+			"anthropic",
+			Date.now() + 60_000,
+			"claude-opus-4-5",
+		);
+		const first = getOverloadBucketGeneration("anthropic-upstream:opus");
+		expect(first).not.toBeNull();
+		// Every trip mints a new generation, so a log line carrying it pins the
+		// exact trip rather than merely the bucket.
+		applyProviderOverloadCooldown(
+			"anthropic",
+			Date.now() + 60_000,
+			"claude-opus-4-5",
+		);
+		expect(
+			getOverloadBucketGeneration("anthropic-upstream:opus"),
+		).toBeGreaterThan(first as number);
 	});
 });

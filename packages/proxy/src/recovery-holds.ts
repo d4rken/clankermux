@@ -47,6 +47,7 @@ import {
 	tryAcquireOverloadHoldSlot,
 } from "./overload-hold";
 import {
+	getOverloadBucketGeneration,
 	getOverloadHoldSlotKey,
 	getProviderOverloadKey,
 	getProviderOverloadUntil,
@@ -627,13 +628,25 @@ export function createRecoveryHolds(deps: RecoveryHoldsDeps): RecoveryHolds {
 					releaseOverloadHoldSlot(held);
 				}
 				log.warn(
-					`Overload hold overflow for ${key} — returning the immediate synthetic 529`,
+					`Overload hold ${requestMeta.id} overflow for ${key} — returning the immediate synthetic 529`,
 				);
 				return null;
 			}
 			acquiredSlotKeys.push(key);
 		}
-		log.info(`Overload hold entered for ${slotKeys.join(", ")}`);
+		// Naming the request AND the bucket generation is what makes a
+		// multi-family storm readable: with up to
+		// OVERLOAD_HOLD_MAX_CONCURRENT_PER_BUCKET holders per bucket and several
+		// buckets live at once, the entry/exit lines otherwise interleave with
+		// nothing to group them by.
+		log.info(
+			`Overload hold ${requestMeta.id} entered for ${slotKeys
+				.map((k) => {
+					const gen = getOverloadBucketGeneration(k);
+					return gen === null ? k : `${k}@g${gen}`;
+				})
+				.join(", ")} (budget ${holdBudgetMs}ms)`,
+		);
 		// Re-arm the connection's idle timer while we hold (the base 180s
 		// timeout would otherwise reap a silently-held connection).
 		bumpIdleTimeout();
@@ -874,7 +887,7 @@ export function createRecoveryHolds(deps: RecoveryHoldsDeps): RecoveryHolds {
 			// The one INFO line the hold emits on the way out — the per-attempt
 			// admission refusals it replaces are DEBUG inside a hold.
 			log.info(
-				`Overload hold exited for ${slotKeys.join(", ")} after ${Date.now() - holdStart}ms ` +
+				`Overload hold ${requestMeta.id} exited for ${slotKeys.join(", ")} after ${Date.now() - holdStart}ms ` +
 					`(${exitReason}, budget ${holdBudgetMs}ms): ` +
 					`${rounds} round(s), ${suppressedAttempts} suppressed attempt(s), ` +
 					`${openSleepMs}ms sleeping on an open breaker, ` +

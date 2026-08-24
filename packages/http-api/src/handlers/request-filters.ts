@@ -42,6 +42,25 @@ export interface RequestFilters {
 	project?: string;
 	/** Restrict to requests that carried no project at all. */
 	noProject?: boolean;
+	/**
+	 * SUBSTRING match against the recorded failure reason (`error_message`).
+	 *
+	 * Status codes cannot answer "how did overload hurt clients": a synthetic
+	 * bounce and a forwarded upstream 529 are both HTTP 529, and an Anthropic
+	 * stream that dies in an `overloaded_error` frame is recorded as HTTP 200
+	 * with `success = 0` — invisible to any `codes=` filter. The reason string
+	 * is the only column that separates them, and it is already written.
+	 *
+	 * Substring rather than exact because the values are a small stable set with
+	 * a shared stem: `provider_overloaded` (our synthetic terminal),
+	 * `529 overloaded_error: Overloaded` (forwarded upstream),
+	 * `200 overloaded_error: Overloaded` (in-band, mid-stream). `error=overload`
+	 * gets the whole class; the full string gets exactly one kind.
+	 *
+	 * `error_message` is not indexed, so pair this with `from`/`to` (which are)
+	 * on a large history rather than scanning it unbounded.
+	 */
+	error?: string;
 }
 
 /**
@@ -76,6 +95,21 @@ export function buildRequestFilterClause(filters: RequestFilters): {
 		// Outcome, not status code: Anthropic can return HTTP 200 and later send a
 		// terminal overloaded_error/rate_limit_error inside the SSE stream.
 		clauses.push("r.success = 0");
+	}
+
+	if (filters.error) {
+		// The ESCAPE clause is REQUIRED, not decoration: SQLite's LIKE has no
+		// default escape character, so without it the backslashes below would be
+		// matched literally and `provider_overloaded` would find nothing.
+		clauses.push("r.error_message LIKE ? ESCAPE '\\'");
+		// Escape the LIKE metacharacters so a reason string containing `_`
+		// (every one of ours does — `provider_overloaded`) matches literally
+		// instead of treating it as a single-character wildcard.
+		const escaped = filters.error
+			.replace(/\\/g, "\\\\")
+			.replace(/%/g, "\\%")
+			.replace(/_/g, "\\_");
+		params.push(`%${escaped}%`);
 	}
 
 	if (typeof filters.from === "number") {
@@ -167,6 +201,11 @@ export function parseRequestFilters(params: URLSearchParams): RequestFilters {
 	const account = params.get("account");
 	if (account) {
 		filters.account = account;
+	}
+
+	const error = params.get("error");
+	if (error) {
+		filters.error = error;
 	}
 
 	if (params.get("noApiKey") === "1") {

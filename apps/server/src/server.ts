@@ -62,6 +62,8 @@ import {
 	createCodexResetCreditApplyScheduler,
 	dispatchProxyRequest,
 	drainPendingUsageFinalizers,
+	getActiveOverloadHoldCount,
+	getOverloadDiagnostics,
 	getValidAccessToken,
 	handleProxy,
 	markCapacityRestoredProbePending,
@@ -829,6 +831,15 @@ export default async function startServer(options?: {
 		getIntegrityStatus: () => dbOps.getIntegrityStatus(),
 		getStrategy: () => currentStrategy,
 		getEventLoopLag: () => getEventLoopStats(),
+		// Joins the breaker's live buckets with the hold semaphore's per-bucket
+		// holder counts — two module-level maps that only this layer can see
+		// together, and the pairing is the useful part: an open bucket with many
+		// holders is an incident actively costing client connections.
+		getProviderOverload: () =>
+			getOverloadDiagnostics().map((bucket) => ({
+				...bucket,
+				activeHolds: getActiveOverloadHoldCount(bucket.key),
+			})),
 	});
 
 	// The read-only widget API. Its own router, mounted as a sibling of the wire

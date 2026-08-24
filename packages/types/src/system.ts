@@ -29,6 +29,27 @@ export interface EventLoopLagStats {
  * client-side across polls, it would reset on every navigation and disagree
  * with the chart.
  */
+/**
+ * One live overload bucket as reported by `/api/system/status`.
+ *
+ * Answers "what is wedged right now" during an incident, which the journal can
+ * only answer afterwards. `activeHolds` is the count of client connections
+ * currently parked on this bucket waiting for it to recover.
+ */
+export interface ProviderOverloadStatus {
+	/** Raw bucket key, e.g. `anthropic-upstream:opus`. */
+	key: string;
+	state: "open" | "half-open" | "closed";
+	/** Block deadline (epoch ms) while open; null when half-open. */
+	until: number | null;
+	/** Trip counter — ties a hold or probe log line to this exact trip. */
+	generation: number;
+	/** The single-flight probe holding this bucket's lease, if any. */
+	probe: { id: string; ageMs: number; ttlMs: number } | null;
+	/** Client connections currently held waiting on this bucket. */
+	activeHolds: number;
+}
+
 export interface SystemStatusResponse {
 	/** Rollup health, computed identically to `/health` (runtime + pool). */
 	status: "ok" | "degraded" | "unhealthy";
@@ -54,6 +75,17 @@ export interface SystemStatusResponse {
 	};
 	/** Event-loop lag from the in-process monitor (zeros when not running). */
 	eventLoop: EventLoopLagStats;
+	/**
+	 * Live provider-overload breaker buckets, newest incident state first-hand.
+	 *
+	 * Deliberately NOT part of the `status` rollup: an overloaded upstream is a
+	 * transient condition the proxy is actively handling (gating, holding,
+	 * probing), not a proxy fault, and `/health` 503s on a non-ok status and is
+	 * consumed by container health checks. Same reasoning as `pricingGaps`.
+	 *
+	 * Empty array when no bucket is live, which is the normal steady state.
+	 */
+	providerOverload: ProviderOverloadStatus[];
 	strategy: string;
 	timestamp: string;
 }

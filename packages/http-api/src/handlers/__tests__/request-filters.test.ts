@@ -233,4 +233,42 @@ describe("parseRequestFilters", () => {
 			project: "my-proj",
 		});
 	});
+
+	it("parses the failure-reason filter", () => {
+		expect(parse("error=provider_overloaded")).toEqual({
+			error: "provider_overloaded",
+		});
+		expect(parse("error=")).toEqual({});
+	});
+});
+
+describe("failure-reason filtering", () => {
+	// Status codes cannot separate these three. A synthetic bounce and a
+	// forwarded upstream 529 are BOTH HTTP 529, and an Anthropic stream that
+	// dies in an overloaded_error frame is HTTP 200 with success = 0, so no
+	// `codes=` filter can see it at all. During the 2026-08-24 incident that
+	// last kind was 53 of the 88 overload failures — the majority, invisible.
+	it("matches the reason substring with LIKE, escaped", () => {
+		const { sql, params } = buildRequestFilterClause({
+			error: "provider_overloaded",
+		});
+		expect(sql).toContain("r.error_message LIKE ?");
+		// The ESCAPE clause is required: SQLite's LIKE has no default escape
+		// character, so without it the backslash below is matched literally and
+		// every underscore-bearing reason string silently returns nothing.
+		expect(sql).toContain("ESCAPE");
+		expect(params).toEqual(["%provider\\_overloaded%"]);
+	});
+
+	it("escapes every LIKE metacharacter, not just the underscore", () => {
+		const { params } = buildRequestFilterClause({ error: "a_b%c\\d" });
+		expect(params).toEqual(["%a\\_b\\%c\\\\d%"]);
+	});
+
+	it("lets a stem match the whole overload class", () => {
+		// `error=overload` is the one query that spans our synthetic terminal,
+		// a forwarded upstream 529, and an in-band mid-stream failure.
+		const { params } = buildRequestFilterClause({ error: "overload" });
+		expect(params).toEqual(["%overload%"]);
+	});
 });

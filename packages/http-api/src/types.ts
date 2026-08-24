@@ -5,6 +5,7 @@ import type {
 	EventLoopLagStats,
 	IntegrityStatus,
 	LoadBalancingStrategy,
+	ProviderOverloadStatus,
 } from "@clankermux/types";
 import type { SessionAuthService } from "./services/session-auth-service";
 
@@ -45,6 +46,11 @@ export interface APIContext {
 	getIntegrityStatus?: () => IntegrityStatus;
 	getStrategy?: () => LoadBalancingStrategy | null;
 	getEventLoopLag?: () => EventLoopLagStats;
+	/**
+	 * Live provider-overload breaker buckets. Injected because the breaker lives
+	 * in @clankermux/proxy and this package must not depend on it.
+	 */
+	getProviderOverload?: () => ProviderOverloadStatus[];
 }
 
 // Re-export all types from the centralized types package

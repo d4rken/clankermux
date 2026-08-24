@@ -10,6 +10,7 @@ import type {
 	EventLoopLagStats,
 	IntegrityStatus,
 	PricingGap,
+	ProviderOverloadStatus,
 	SystemStatusResponse,
 } from "@clankermux/types";
 import {
@@ -27,6 +28,7 @@ type AsyncWriterHealthFn = () => { healthy: boolean };
 type IntegrityStatusFn = () => IntegrityStatus;
 type EventLoopLagFn = () => EventLoopLagStats;
 type PricingGapsFn = () => PricingGap[];
+type ProviderOverloadFn = () => ProviderOverloadStatus[];
 
 /**
  * `GET /api/system/status` — live operational snapshot for the dashboard's
@@ -50,6 +52,7 @@ export function createSystemStatusHandler(
 	getIntegrityStatus?: IntegrityStatusFn,
 	getEventLoopLag?: EventLoopLagFn,
 	getPricingGapsFn?: PricingGapsFn,
+	getProviderOverload?: ProviderOverloadFn,
 ) {
 	return async (): Promise<Response> => {
 		try {
@@ -91,6 +94,11 @@ export function createSystemStatusHandler(
 				// zeros when the monitor was never started (e.g. bare handler in
 				// tests).
 				eventLoop: (getEventLoopLag ?? getEventLoopStats)(),
+				// Injected rather than imported: @clankermux/http-api must not
+				// depend on @clankermux/proxy (the dependency runs the other way).
+				// Absent injection — bare handler in tests — reports no live
+				// buckets, which is also the honest steady state.
+				providerOverload: getProviderOverload ? getProviderOverload() : [],
 				strategy: config.getStrategy(),
 				timestamp: new Date().toISOString(),
 			};
