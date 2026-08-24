@@ -70,7 +70,8 @@ const ANALYZE_ANALYSIS_LIMIT = 400;
  * Three kinds (discriminated by `kind`, defaulting to "vacuum" for backward
  * compatibility with kind-less messages):
  *   - "vacuum"   — the original incremental_vacuum behavior (below).
- *   - "cleanup"  — runs the retention DELETEs (payloads/requests/snapshots) in
+ *   - "cleanup"  — runs the retention DELETEs (payloads/requests/snapshots/
+ *     claim observations) in
  *     small slot-releasing batches. Previously synchronous on the main thread,
  *     where deleting a batch of large payload blobs froze the loop for seconds.
  *   - "optimize" — runs `PRAGMA optimize` + `PRAGMA wal_checkpoint(TRUNCATE)`
@@ -150,6 +151,12 @@ export type IncrementalVacuumRequest =
 			requestCutoff: number | null;
 			usageSnapshotCutoff: number;
 			memorySnapshotCutoff: number;
+			/**
+			 * Cutoff for `unified_claim_observations`. Derived from a FIXED
+			 * retention, not from an operator control — see
+			 * UNIFIED_CLAIM_OBSERVATION_RETENTION_MS in database-operations.ts.
+			 */
+			unifiedClaimObservationCutoff: number;
 			// Byte budget for retained payload CONTENT (not file size); 0 disables
 			// the size pass. Applied on top of payloadCutoff — whichever rule
 			// deletes more wins.
@@ -164,6 +171,12 @@ export type CleanupCounts = {
 	removedPayloadsBySize: number;
 	removedSnapshots: number;
 	removedMemorySnapshots: number;
+	/**
+	 * Reported on its own rather than folded into `removedSnapshots`: the claim
+	 * series is governed by a fixed retention of its own, and attributing its
+	 * deletions to the usage-snapshot control would misreport what that knob does.
+	 */
+	removedUnifiedClaimObservations: number;
 };
 
 export type IncrementalVacuumResult =
@@ -397,8 +410,17 @@ export async function deleteBatched(
 }
 
 /**
- * Best-effort BATCHED delete of aged rows from a snapshot table by `sampled_at`.
- * `table` is a trusted internal constant, not caller input.
+ * The time column each batched-prune table is aged by. A closed union, not a
+ * free string: the column name is interpolated into SQL, so the set of legal
+ * values is fixed here rather than trusted from a call site.
+ */
+type TimeColumn = "sampled_at" | "observed_at";
+
+/**
+ * Best-effort BATCHED delete of aged rows from a time-series table by its own
+ * time column (`sampled_at` for the snapshot tables, `observed_at` for the
+ * request-aligned claim observations). `table` is a trusted internal constant,
+ * not caller input, and `timeColumn` is restricted to {@link TimeColumn}.
  *
  * Was a single `DELETE ... WHERE sampled_at < ?` — fine while the table stayed
  * tiny, but the usage-snapshot retention default dropped 3650 → 90 days, so the
@@ -411,9 +433,9 @@ export async function deleteBatched(
  *
  * Portable delete pattern — `DELETE ... WHERE rowid IN (SELECT rowid ... LIMIT
  * N)` works regardless of whether this SQLite build was compiled with
- * SQLITE_ENABLE_UPDATE_DELETE_LIMIT (DELETE ... LIMIT). Both snapshot tables have
- * an implicit rowid and no child tables, so `.changes` is an accurate per-table
- * count and a short batch reliably signals "drained".
+ * SQLITE_ENABLE_UPDATE_DELETE_LIMIT (DELETE ... LIMIT). Every table pruned this
+ * way has an implicit rowid and no child tables, so `.changes` is an accurate
+ * per-table count and a short batch reliably signals "drained".
  *
  * NOTE (disk): this deletes rows but does NOT run incremental_vacuum, so freed
  * pages return to the freelist for reuse, not to the OS — the DB file will not
@@ -430,8 +452,9 @@ async function tryDeleteSnapshotsBatched(
 	db: Database,
 	table: string,
 	cutoff: number,
+	timeColumn: TimeColumn = "sampled_at",
 ): Promise<number> {
-	const sql = `DELETE FROM ${table} WHERE rowid IN (SELECT rowid FROM ${table} WHERE sampled_at < ? LIMIT ?)`;
+	const sql = `DELETE FROM ${table} WHERE rowid IN (SELECT rowid FROM ${table} WHERE ${timeColumn} < ? LIMIT ?)`;
 	let total = 0;
 	try {
 		for (;;) {
@@ -474,6 +497,7 @@ async function runCleanup(
 	requestCutoff: number | null,
 	usageSnapshotCutoff: number,
 	memorySnapshotCutoff: number,
+	unifiedClaimObservationCutoff: number,
 	payloadMaxBytes: number,
 ): Promise<void> {
 	let db: Database | undefined;
@@ -547,6 +571,17 @@ async function runCleanup(
 			db,
 			"memory_snapshots",
 			memorySnapshotCutoff,
+		);
+
+		// The request-aligned claim series, aged by `observed_at` on its own FIXED
+		// cutoff (see UNIFIED_CLAIM_OBSERVATION_RETENTION_MS). Same batching
+		// rationale as the snapshot tables and then some: this table grows with
+		// REQUEST volume times claims-per-response, not with a poll cadence.
+		const removedUnifiedClaimObservations = await tryDeleteSnapshotsBatched(
+			db,
+			"unified_claim_observations",
+			unifiedClaimObservationCutoff,
+			"observed_at",
 		);
 
 		// Precomputed quota-drift payloads: keep the most recent few, drop the
@@ -637,6 +672,7 @@ async function runCleanup(
 				removedPayloadsBySize,
 				removedSnapshots,
 				removedMemorySnapshots,
+				removedUnifiedClaimObservations,
 			},
 		} satisfies IncrementalVacuumResult);
 	} catch (err) {
@@ -661,6 +697,7 @@ self.onmessage = (event: MessageEvent<IncrementalVacuumRequest>) => {
 			request.requestCutoff,
 			request.usageSnapshotCutoff,
 			request.memorySnapshotCutoff,
+			request.unifiedClaimObservationCutoff,
 			request.payloadMaxBytes,
 		);
 	} else {

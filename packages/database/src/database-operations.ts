@@ -278,6 +278,19 @@ const DEFAULT_USAGE_SNAPSHOT_RETENTION_MS = 90 * TIME_CONSTANTS.DAY;
 const DEFAULT_MEMORY_SNAPSHOT_RETENTION_MS = 14 * TIME_CONSTANTS.DAY;
 
 /**
+ * Retention for the request-aligned `unified_claim_observations` series. FIXED,
+ * with no operator control and no fallback parameter: every caller of
+ * `cleanupOldRequests()` prunes it on this value.
+ *
+ * Deliberately NOT the `usage_snapshot_retention_days` knob, whose default is
+ * 3650 days — this table grows with request volume times claims-per-response,
+ * so a decade of it is a different order of magnitude from a decade of poll
+ * ticks. 90 days is long enough to fit a full weekly-window analysis several
+ * times over.
+ */
+export const UNIFIED_CLAIM_OBSERVATION_RETENTION_MS = 90 * TIME_CONSTANTS.DAY;
+
+/**
  * How long a per-data-type storage-usage measurement is reused before the next
  * dashboard read triggers a fresh scan. The byte sums require a full-table
  * scan, so we cache to keep them off the proxy's hot path; 5 minutes is small
@@ -1493,12 +1506,15 @@ OAuth tokens will need to be re-authenticated.
 		return this.requests.getRequestsByAccount(since);
 	}
 
-	// Cleanup operations — five explicit passes:
+	// Cleanup operations — six explicit passes:
 	// Pass 1: delete payloads older than payloadRetentionMs (+ orphan sweep)
 	// Pass 2: delete request metadata older than requestRetentionMs
 	// Pass 3: delete usage snapshots older than snapshotRetentionMs
 	// Pass 4: delete memory snapshots older than memorySnapshotRetentionMs
-	// Pass 5: evict oldest payloads until their content fits payloadMaxBytes
+	// Pass 5: delete claim observations older than the FIXED
+	//         UNIFIED_CLAIM_OBSERVATION_RETENTION_MS (no parameter — that series
+	//         has no operator control)
+	// Pass 6: evict oldest payloads until their content fits payloadMaxBytes
 	//
 	// `snapshotRetentionMs` and `memorySnapshotRetentionMs` are optional so
 	// existing callers (including the http-api "Clean up now" handler) prune
@@ -1521,6 +1537,7 @@ OAuth tokens will need to be re-authenticated.
 		removedPayloadsBySize: number;
 		removedSnapshots: number;
 		removedMemorySnapshots: number;
+		removedUnifiedClaimObservations: number;
 	}> {
 		const now = Date.now();
 
@@ -1548,6 +1565,10 @@ OAuth tokens will need to be re-authenticated.
 			Number.isFinite(memorySnapshotRetentionMs)
 				? memorySnapshotRetentionMs
 				: DEFAULT_MEMORY_SNAPSHOT_RETENTION_MS);
+		// No parameter and no fallback: this series has one fixed retention for
+		// every caller (see UNIFIED_CLAIM_OBSERVATION_RETENTION_MS).
+		const unifiedClaimObservationCutoff =
+			now - UNIFIED_CLAIM_OBSERVATION_RETENTION_MS;
 
 		const empty = {
 			removedRequests: 0,
@@ -1555,6 +1576,7 @@ OAuth tokens will need to be re-authenticated.
 			removedPayloadsBySize: 0,
 			removedSnapshots: 0,
 			removedMemorySnapshots: 0,
+			removedUnifiedClaimObservations: 0,
 		};
 
 		const worker = this.spawnIncrementalVacuumWorker();
@@ -1572,6 +1594,7 @@ OAuth tokens will need to be re-authenticated.
 					requestCutoff,
 					usageSnapshotCutoff,
 					memorySnapshotCutoff,
+					unifiedClaimObservationCutoff,
 					payloadMaxBytes,
 				});
 			});

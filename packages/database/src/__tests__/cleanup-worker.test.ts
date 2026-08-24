@@ -15,7 +15,10 @@ import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { DatabaseOperations } from "../database-operations";
+import {
+	DatabaseOperations,
+	UNIFIED_CLAIM_OBSERVATION_RETENTION_MS,
+} from "../database-operations";
 import {
 	CLEANUP_DELETE_BATCH_ROWS,
 	SNAPSHOT_DELETE_BATCH_ROWS,
@@ -97,6 +100,13 @@ function seed(
 		);
 		insMem.run(oldTs, 1, 1);
 		insMem.run(recentTs, 1, 1);
+		// Request-aligned claim observations: pruned by `observed_at` on their OWN
+		// fixed cutoff, not the usage-snapshot control.
+		const insObs = db.prepare(
+			"INSERT INTO unified_claim_observations (request_id, account_id, source, request_started_at, observed_at, http_status, claim, status, utilization, reset_at) VALUES (?, 'acct', 'client', ?, ?, 200, '5h', 'allowed', 0.5, NULL)",
+		);
+		insObs.run("obs-old", oldTs, oldTs);
+		insObs.run("obs-recent", recentTs, recentTs);
 		db.exec("COMMIT");
 	} finally {
 		db.close();
@@ -152,6 +162,7 @@ describe("incremental-vacuum worker: cleanup kind", () => {
 				removedPayloadsBySize: number;
 				removedSnapshots: number;
 				removedMemorySnapshots: number;
+				removedUnifiedClaimObservations: number;
 			};
 			error?: string;
 		};
@@ -167,6 +178,7 @@ describe("incremental-vacuum worker: cleanup kind", () => {
 					requestCutoff: CUTOFF,
 					usageSnapshotCutoff: CUTOFF,
 					memorySnapshotCutoff: CUTOFF,
+					unifiedClaimObservationCutoff: CUTOFF,
 					// Byte budget disabled — these cases exercise the age rules only.
 					payloadMaxBytes: 0,
 				});
@@ -183,6 +195,10 @@ describe("incremental-vacuum worker: cleanup kind", () => {
 		// one reported number).
 		expect(result.cleanup?.removedSnapshots).toBe(2);
 		expect(result.cleanup?.removedMemorySnapshots).toBe(1);
+		// Reported separately: the claim series has its own fixed retention, so
+		// folding it into removedSnapshots would attribute it to a knob that does
+		// not govern it.
+		expect(result.cleanup?.removedUnifiedClaimObservations).toBe(1);
 
 		// Only the recent rows survive.
 		expect(count(dbPath, "request_payloads")).toBe(recentCount);
@@ -190,6 +206,7 @@ describe("incremental-vacuum worker: cleanup kind", () => {
 		expect(count(dbPath, "usage_snapshots")).toBe(1);
 		expect(count(dbPath, "usage_scoped_snapshots")).toBe(1);
 		expect(count(dbPath, "memory_snapshots")).toBe(1);
+		expect(count(dbPath, "unified_claim_observations")).toBe(1);
 
 		// Cascade children (no own age/orphan pass) must be cleaned via FK
 		// ON DELETE CASCADE when their parent request is deleted — regression
@@ -212,12 +229,102 @@ describe("incremental-vacuum worker: cleanup kind", () => {
 			expect(res.removedRequests).toBe(20);
 			expect(res.removedSnapshots).toBe(2);
 			expect(res.removedMemorySnapshots).toBe(1);
+			// The claim series is on its own FIXED 90-day cutoff, so a 2-hour-old
+			// observation survives a pass that deletes every other table's aged
+			// rows at a 1-hour retention.
+			expect(res.removedUnifiedClaimObservations).toBe(0);
 		} finally {
 			await dbOps.close();
 		}
 
 		expect(count(dbPath, "request_payloads")).toBe(5);
 		expect(count(dbPath, "requests")).toBe(5);
+		expect(count(dbPath, "unified_claim_observations")).toBe(2);
+	});
+
+	it("prunes claim observations older than the fixed retention, keeping newer ones", async () => {
+		const now = Date.now();
+		const aged = now - (UNIFIED_CLAIM_OBSERVATION_RETENTION_MS + 60_000);
+		const fresh = now - UNIFIED_CLAIM_OBSERVATION_RETENTION_MS / 2;
+
+		const seedDb = new Database(dbPath);
+		try {
+			const ins = seedDb.prepare(
+				"INSERT INTO unified_claim_observations (request_id, account_id, source, request_started_at, observed_at, http_status, claim, status, utilization, reset_at) VALUES (?, 'acct', 'client', ?, ?, 200, '7d', 'allowed', 0.5, NULL)",
+			);
+			seedDb.exec("BEGIN");
+			ins.run("aged", aged, aged);
+			ins.run("fresh", fresh, fresh);
+			seedDb.exec("COMMIT");
+		} finally {
+			seedDb.close();
+		}
+
+		const dbOps = new DatabaseOperations(dbPath);
+		try {
+			const res = await dbOps.cleanupOldRequests(60 * 60 * 1000);
+			expect(res.removedUnifiedClaimObservations).toBe(1);
+		} finally {
+			await dbOps.close();
+		}
+		expect(count(dbPath, "unified_claim_observations")).toBe(1);
+	});
+
+	it("prunes a large claim-observation table across many batches", async () => {
+		// Same batching contract as the usage-snapshot prune: one
+		// writer-slot-holding DELETE over a table this hot would balloon the WAL,
+		// so seed > 2 * batch aged rows and a few recent ones that must survive.
+		const OLD_BASE = 1_000_000;
+		const RECENT = 9_000_000_000_000;
+		const CUTOFF = 5_000_000_000_000;
+		const oldCount = 2 * SNAPSHOT_DELETE_BATCH_ROWS + 37;
+		const recentCount = 4;
+
+		const seedDb = new Database(dbPath);
+		try {
+			const ins = seedDb.prepare(
+				"INSERT INTO unified_claim_observations (request_id, account_id, source, request_started_at, observed_at, http_status, claim, status, utilization, reset_at) VALUES (?, 'acct', 'client', ?, ?, 200, '5h', 'allowed', 0.5, NULL)",
+			);
+			seedDb.exec("BEGIN");
+			for (let i = 0; i < oldCount; i++)
+				ins.run(`old-${i}`, OLD_BASE, OLD_BASE);
+			for (let i = 0; i < recentCount; i++) ins.run(`new-${i}`, RECENT, RECENT);
+			seedDb.exec("COMMIT");
+		} finally {
+			seedDb.close();
+		}
+
+		const worker = new Worker(
+			new URL("../incremental-vacuum-worker.ts", import.meta.url).href,
+		);
+		let result: {
+			ok: boolean;
+			cleanup?: { removedUnifiedClaimObservations: number };
+			error?: string;
+		};
+		try {
+			result = await new Promise((resolve, reject) => {
+				worker.onmessage = (e: MessageEvent) => resolve(e.data);
+				worker.onerror = (e: ErrorEvent) =>
+					reject(new Error(e.message ?? "worker error"));
+				worker.postMessage({
+					dbPath,
+					kind: "cleanup",
+					payloadCutoff: CUTOFF,
+					requestCutoff: CUTOFF,
+					usageSnapshotCutoff: CUTOFF,
+					memorySnapshotCutoff: CUTOFF,
+					unifiedClaimObservationCutoff: CUTOFF,
+					payloadMaxBytes: 0,
+				});
+			});
+		} finally {
+			worker.terminate();
+		}
+
+		expect(result.ok).toBe(true);
+		expect(result.cleanup?.removedUnifiedClaimObservations).toBe(oldCount);
+		expect(count(dbPath, "unified_claim_observations")).toBe(recentCount);
 	});
 
 	it("reports orphaned payloads (no matching request) in removedPayloads", async () => {
@@ -292,6 +399,7 @@ describe("incremental-vacuum worker: cleanup kind", () => {
 					requestCutoff: CUTOFF,
 					usageSnapshotCutoff: CUTOFF,
 					memorySnapshotCutoff: CUTOFF,
+					unifiedClaimObservationCutoff: CUTOFF,
 					// Byte budget disabled — these cases exercise the age rules only.
 					payloadMaxBytes: 0,
 				});
@@ -324,6 +432,7 @@ describe("incremental-vacuum worker: cleanup kind", () => {
 				removedPayloadsBySize: 0,
 				removedSnapshots: 0,
 				removedMemorySnapshots: 0,
+				removedUnifiedClaimObservations: 0,
 			});
 		} finally {
 			await dbOps.close();
