@@ -309,14 +309,16 @@ const RETENTION_USAGE_TABLES: ReadonlyArray<{
 ];
 
 /**
- * bun:sqlite treats both `":memory:"` and `""` as a private in-memory
- * database, and SQLite URI filenames can spell it too (`file::memory:`,
- * optionally with query parameters). None of these can be opened by the scan
- * worker — a worker would get its own unrelated empty DB and report confident
- * zeros — so every spelling routes to the inline scan path.
+ * bun:sqlite treats exactly `":memory:"` and `""` as a private in-memory
+ * database. Neither can be opened by the scan worker — it would get its own
+ * unrelated empty DB and report confident zeros — so both route to the inline
+ * scan path. Exact matches only: the constructor opens without SQLITE_OPEN_URI,
+ * so URI-looking strings (`file::memory:`) are LITERAL disk filenames here and
+ * must go through the worker like any other file, not get substring-matched
+ * into the inline path where a real multi-GB file would block the loop again.
  */
 function isInMemoryDbPath(path: string): boolean {
-	return path === "" || path === ":memory:" || path.includes(":memory:");
+	return path === "" || path === ":memory:";
 }
 
 /**
