@@ -8,6 +8,7 @@ import type {
 	RunwayResponse,
 	UsageSnapshotSample,
 } from "@clankermux/types";
+import { clearCodexPayloadScanMemo } from "../../services/resolve-codex-usage";
 import { createRunwayHandler } from "../runway";
 
 const MINUTE_MS = 60 * 1000;
@@ -1006,10 +1007,14 @@ describe("GET /api/runway payload-recovered Codex usage", () => {
 	beforeEach(() => {
 		nowSpy = spyOn(Date, "now").mockReturnValue(BASE);
 		usageCache.delete(ACCOUNT_ID);
+		// The stored-payload recovery is memoized per account for read-only
+		// resolutions; these cases count the scans it performs.
+		clearCodexPayloadScanMemo();
 	});
 
 	afterEach(() => {
 		usageCache.delete(ACCOUNT_ID);
+		clearCodexPayloadScanMemo();
 		nowSpy.mockRestore();
 	});
 

@@ -14,6 +14,7 @@ import { type AnyUsageData, usageCache } from "@clankermux/providers";
 import type { Account, ApiKey } from "@clankermux/types";
 import { toPublicRunwayDto } from "../../handlers/public/dto";
 import { createPublicRunwayReader } from "../public-runway";
+import { clearCodexPayloadScanMemo } from "../resolve-codex-usage";
 
 const MINUTE_MS = 60 * 1000;
 const HOUR_MS = 60 * MINUTE_MS;
@@ -95,17 +96,43 @@ function makeDbOps(options: {
 	 * query so the persisted-column query beside it still reads empty.
 	 */
 	payloadRows?: Array<{ json: string; timestamp: number }>;
+	/**
+	 * `accounts.codex_usage_json` / `codex_usage_observed_at`, MUTABLE between
+	 * reads so a test can land newer persisted evidence mid-flight.
+	 */
+	codexColumns?: Array<{
+		id: string;
+		codex_usage_json: string | null;
+		codex_usage_observed_at: number | null;
+	}>;
+	/** Every SQL string the reader issued, in order. */
+	queryLog?: string[];
+	/** Blocks the payload query until resolved, so scans can overlap. */
+	payloadGate?: Promise<void>;
 }): DatabaseOperations {
 	return {
 		getAllAccounts: async () => options.accounts ?? [],
 		getApiKeys: async () => options.keys ?? [],
 		getAdapter: () => ({
-			query: async (sql: string) =>
-				sql.includes("request_payloads") ? (options.payloadRows ?? []) : [],
+			query: async (sql: string) => {
+				options.queryLog?.push(sql);
+				if (sql.includes("request_payloads")) {
+					// Held open so several readers can be inside the scan at once.
+					if (options.payloadGate) await options.payloadGate;
+					return options.payloadRows ?? [];
+				}
+				if (sql.includes("codex_usage_json")) return options.codexColumns ?? [];
+				return [];
+			},
 			get: async () => null,
 		}),
 		getRecentUsageSnapshotsForAccounts: async () => [],
 	} as unknown as DatabaseOperations;
+}
+
+/** How many `request_payloads` scans a query log recorded. */
+function payloadScans(queryLog: string[]): number {
+	return queryLog.filter((sql) => sql.includes("request_payloads")).length;
 }
 
 /**
@@ -165,10 +192,12 @@ describe("GET /public/v1/runway", () => {
 	beforeEach(() => {
 		nowSpy = spyOn(Date, "now").mockReturnValue(BASE);
 		for (const id of SEEDED_IDS) usageCache.delete(id);
+		clearCodexPayloadScanMemo();
 	});
 
 	afterEach(() => {
 		for (const id of SEEDED_IDS) usageCache.delete(id);
+		clearCodexPayloadScanMemo();
 		nowSpy.mockRestore();
 	});
 
@@ -368,5 +397,120 @@ describe("GET /public/v1/runway", () => {
 		expect(snapshot.worstStatedOutcome?.causes).toEqual([
 			{ accountId: "acc-1", windowKind: "seven_day" },
 		]);
+	});
+
+	// --- what an unauthenticated caller may make the database do ---
+
+	/** A codex account whose only usable channel is the stored-payload scan. */
+	const coldCodexAccount = () =>
+		makeAccount({ id: "codex-1", provider: "codex", last_used: BASE });
+	const codexKey = () => makeKey({ pinnedProviders: ["codex"] });
+	/**
+	 * A persisted column that CANNOT serve — its weekly window has already reset —
+	 * so the payload scan still runs while the column's observation time is free
+	 * to move as newer evidence lands.
+	 */
+	const spentColumnJson = JSON.stringify({
+		five_hour: null,
+		seven_day: {
+			utilization: 50,
+			resets_at: new Date(BASE - DAY_MS).toISOString(),
+		},
+	});
+
+	it("re-reads the payload channel ONCE across repeated cold-cache polls", async () => {
+		// Unauthenticated and cold: without a memo every poll re-runs the
+		// `request_payloads` query and re-parses up to 20 payloads per account, so
+		// anything on the LAN can drive that load at whatever rate it likes.
+		const queryLog: string[] = [];
+		const dbOps = makeDbOps({
+			accounts: [coldCodexAccount()],
+			keys: [codexKey()],
+			payloadRows: [codexPayloadRow(80, BASE + 3 * DAY_MS, BASE - MINUTE_MS)],
+			queryLog,
+		});
+
+		const snapshots = [];
+		for (let poll = 0; poll < 4; poll++) snapshots.push(await read(dbOps));
+
+		expect(payloadScans(queryLog)).toBe(1);
+		// The ANSWER is unchanged — this is a repetition fix, not a coverage one.
+		for (const snapshot of snapshots) {
+			expect(snapshot.coverage.statedKeyCount).toBe(1);
+			expect(snapshot.worstStatedOutcome).not.toBeNull();
+		}
+	});
+
+	it("re-scans once newer persisted evidence lands", async () => {
+		// The memo is keyed on the evidence that could change the answer, so a new
+		// observation retires it rather than pinning a stale recovery in place.
+		const queryLog: string[] = [];
+		const codexColumns = [
+			{
+				id: "codex-1",
+				codex_usage_json: spentColumnJson,
+				codex_usage_observed_at: BASE - 2 * HOUR_MS,
+			},
+		];
+		const dbOps = makeDbOps({
+			accounts: [coldCodexAccount()],
+			keys: [codexKey()],
+			payloadRows: [codexPayloadRow(80, BASE + 3 * DAY_MS, BASE - MINUTE_MS)],
+			codexColumns,
+			queryLog,
+		});
+
+		await read(dbOps);
+		await read(dbOps);
+		expect(payloadScans(queryLog)).toBe(1);
+
+		codexColumns[0].codex_usage_observed_at = BASE - HOUR_MS;
+		await read(dbOps);
+		expect(payloadScans(queryLog)).toBe(2);
+	});
+
+	it("coalesces concurrent readers onto ONE in-flight scan", async () => {
+		const queryLog: string[] = [];
+		let release: () => void = () => {};
+		const payloadGate = new Promise<void>((resolve) => {
+			release = resolve;
+		});
+		const dbOps = makeDbOps({
+			accounts: [coldCodexAccount()],
+			keys: [codexKey()],
+			payloadRows: [codexPayloadRow(80, BASE + 3 * DAY_MS, BASE - MINUTE_MS)],
+			queryLog,
+			payloadGate,
+		});
+
+		// Three readers in flight together, all still inside the held-open scan.
+		const inFlight = [read(dbOps), read(dbOps), read(dbOps)];
+		await new Promise((resolve) => setTimeout(resolve, 0));
+		release();
+		const snapshots = await Promise.all(inFlight);
+
+		expect(payloadScans(queryLog)).toBe(1);
+		for (const snapshot of snapshots) {
+			expect(snapshot.coverage.statedKeyCount).toBe(1);
+		}
+	});
+
+	it("keeps the memo out of the usage cache the proxy reads", async () => {
+		// The memo is a read-only device: it may make the scan cheaper, never
+		// give a recovered reading a path into routing state.
+		const setUntimed = spyOn(usageCache, "setUntimed");
+		try {
+			const dbOps = makeDbOps({
+				accounts: [coldCodexAccount()],
+				keys: [codexKey()],
+				payloadRows: [codexPayloadRow(80, BASE + 3 * DAY_MS, BASE - MINUTE_MS)],
+			});
+			await read(dbOps);
+			await read(dbOps);
+			expect(setUntimed).not.toHaveBeenCalled();
+			expect(usageCache.peekWithAge("codex-1")).toBeNull();
+		} finally {
+			setUntimed.mockRestore();
+		}
 	});
 });

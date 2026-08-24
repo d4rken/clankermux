@@ -133,6 +133,100 @@ async function scanCodexUsageFromPayloads(
 	return null;
 }
 
+/** One stored-payload recovery, as it is remembered between read-only calls. */
+type CodexPayloadScan = { data: UsageData; timestampMs: number } | null;
+
+/**
+ * How long one account's stored-payload recovery is remembered for READ-ONLY
+ * resolutions.
+ *
+ * Short on purpose. The memo's real invalidation is its KEY (a new request bumps
+ * `accounts.last_used`, and a new observation moves
+ * `codex_usage_observed_at`), so this bound only covers the gap in which a
+ * request has already bumped `last_used` while its payload row is still being
+ * written off-thread: within that gap the key is already new, and the worst a
+ * stale memo can do is repeat a "nothing found" answer for a few more seconds.
+ */
+const CODEX_PAYLOAD_SCAN_MEMO_TTL_MS = 10_000;
+
+interface CodexPayloadScanMemoEntry {
+	/** The evidence the remembered scan was run against. */
+	key: string;
+	expiresAtMs: number;
+	/** In flight or settled — sharing it is what coalesces concurrent scans. */
+	scan: Promise<CodexPayloadScan>;
+}
+
+/**
+ * Per-account memo of the stored-payload recovery, for READ-ONLY resolutions
+ * only.
+ *
+ * Deliberately NOT the usage cache, and deliberately not reachable from the
+ * resolution that writes to it: routing, throttling and capacity decisions read
+ * the usage cache, and the whole point of serving a public GET with
+ * `seedCache: false` is that an unauthenticated caller cannot move that state.
+ * This memo is consulted and populated only under that policy, so nothing it
+ * holds can reach a routing input by any path — it exists purely so that
+ * repeated cold-cache polls stop re-running the `request_payloads` query and
+ * re-parsing up to 20 payloads per account per poll.
+ */
+const codexPayloadScanMemo = new Map<string, CodexPayloadScanMemoEntry>();
+
+/**
+ * The evidence that could make a NEW payload scan return something different:
+ * the account's last request (no payload can be newer than it) and the recorded
+ * observation time of the persisted column. Either moving retires the memo.
+ */
+function codexPayloadScanMemoKey(
+	lastUsed: number | null,
+	persistedObservedAt: number | null,
+): string {
+	return `${lastUsed ?? "-"}|${persistedObservedAt ?? "-"}`;
+}
+
+/**
+ * The stored-payload recovery, run at most once per account per key per memo
+ * window, and shared while it is in flight.
+ *
+ * Concurrent callers for the same account await the SAME promise rather than
+ * each issuing the query — a rejected scan is forgotten immediately, so a
+ * transient database error is never the answer a later caller inherits.
+ */
+function scanCodexUsageFromPayloadsMemoized(
+	db: ReturnType<DatabaseOperations["getAdapter"]>,
+	accountId: string,
+	accountName: string,
+	key: string,
+): Promise<CodexPayloadScan> {
+	const now = Date.now();
+	// Bounded by the number of codex accounts, but an account that goes away must
+	// not linger: expired entries are dropped on the way past.
+	for (const [id, entry] of codexPayloadScanMemo) {
+		if (entry.expiresAtMs <= now) codexPayloadScanMemo.delete(id);
+	}
+
+	const memoized = codexPayloadScanMemo.get(accountId);
+	if (memoized && memoized.key === key) return memoized.scan;
+
+	const scan = scanCodexUsageFromPayloads(db, accountId, accountName);
+	codexPayloadScanMemo.set(accountId, {
+		key,
+		expiresAtMs: now + CODEX_PAYLOAD_SCAN_MEMO_TTL_MS,
+		scan,
+	});
+	scan.catch(() => {
+		if (codexPayloadScanMemo.get(accountId)?.scan === scan) {
+			codexPayloadScanMemo.delete(accountId);
+		}
+	});
+	return scan;
+}
+
+/** Forget every remembered stored-payload recovery. */
+export function clearCodexPayloadScanMemo(): void {
+	codexPayloadScanMemo.clear();
+}
+
 /**
  * The persisted `accounts.codex_usage_json` snapshot, split into the part that
  * expires and the part that does not.
@@ -181,6 +275,12 @@ function readPersistedCodexUsageColumn(
  * rather than inheriting a write it did not ask for. The resolution itself is
  * identical either way: the same tier wins, under the same `source`, with the
  * same stamp.
+ *
+ * The policy also decides whether the stored-payload scan may be SHARED. A
+ * read-only resolution goes through the memo below, so repeated polls and
+ * concurrent readers cost one query between them; a writing resolution always
+ * runs its own scan, which is what keeps a remembered result off every path
+ * that reaches `usageCache`.
  */
 export interface CodexUsageResolutionPolicy {
 	/**
@@ -221,7 +321,8 @@ export interface CodexUsageResolutionPolicy {
  *
  * `policy` decides whether this resolution may WRITE — see
  * {@link CodexUsageResolutionPolicy}. It changes nothing about WHICH reading is
- * returned or how it is labelled; only the cache re-seed disappears.
+ * returned or how it is labelled; only the cache re-seed disappears, and the
+ * payload scan is served from the read-only memo instead of being re-run.
  */
 export async function getCachedOrPersistedCodexUsage(
 	db: ReturnType<DatabaseOperations["getAdapter"]>,
@@ -281,11 +382,18 @@ export async function getCachedOrPersistedCodexUsage(
 		return serveColumn();
 	}
 
-	const payloadCandidate = await scanCodexUsageFromPayloads(
-		db,
-		accountId,
-		accountName,
-	);
+	// A resolution entitled to WRITE always runs the scan itself: the memo is a
+	// read-only device, and letting a remembered result reach `usageCache` would
+	// give it a path into routing state that the `seedCache: false` policy exists
+	// to close.
+	const payloadCandidate = policy.seedCache
+		? await scanCodexUsageFromPayloads(db, accountId, accountName)
+		: await scanCodexUsageFromPayloadsMemoized(
+				db,
+				accountId,
+				accountName,
+				codexPayloadScanMemoKey(lastUsed, persistedObservedAt),
+			);
 
 	if (
 		columnData &&
