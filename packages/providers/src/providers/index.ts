@@ -15,6 +15,7 @@ export {
 } from "./anthropic-compatible/index";
 export type {
 	CodexCreditsInfo,
+	CodexModelCatalogResult,
 	CodexRateLimitResetCredit,
 	CodexRateLimitResetCreditStatus,
 	CodexRateLimitResetCreditsCacheEntry,
@@ -22,11 +23,13 @@ export type {
 	CodexRateLimitResetCreditsSummary,
 	CodexRateLimitResetType,
 	CodexUsageStatus,
+	FetchCodexModelCatalogArgs,
 	FetchCodexUsageStatusArgs,
 	NormalizedCodexInputUsage,
 } from "./codex/index";
 export {
 	CODEX_DEFAULT_ENDPOINT,
+	CODEX_MODEL_CATALOG_URL,
 	CODEX_RATE_LIMIT_RESET_CREDITS_CONSUME_ENDPOINT,
 	CODEX_RATE_LIMIT_RESET_CREDITS_ENDPOINT,
 	CODEX_RESET_CREDITS_REFRESH_MS,
@@ -37,6 +40,7 @@ export {
 	codexRateLimitResetCreditsCache,
 	consumeCodexRateLimitResetCredit,
 	extractCodexIdentity,
+	fetchCodexModelCatalog,
 	fetchCodexRateLimitResetCredits,
 	fetchCodexUsageStatus,
 	isCodexOnCredits,

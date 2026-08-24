@@ -501,11 +501,11 @@ export class APIRouter {
 		const key = `${method}:${path}`;
 
 		// Auth is intentionally NOT called here. The router only dispatches
-		// /api/* paths, which are all public under the post-#216 policy. The
-		// upstream-traffic paths (/v1/*, /messages/*) don't match any handler
-		// here and fall through to the server.ts proxy dispatch, which runs
-		// authenticateRequest exactly once. Authing here would double-increment
-		// usage_count on every proxied request.
+		// /api/* paths, which are all public under the post-#216 policy.
+		// Upstream traffic never arrives here at all: it comes in on the wire
+		// mounts, which authenticate exactly once before dispatch, and the root
+		// spellings (/v1/*, /messages/*) are refused by the front door. Authing
+		// here would double-increment usage_count on every proxied request.
 
 		// Check for exact match
 		const handler = this.handlers.get(key);

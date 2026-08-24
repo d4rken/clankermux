@@ -237,7 +237,7 @@ function accountSummary(
  */
 interface ResolvedCodexUsage {
 	data: FullUsageData | null;
-	sampledAtMs: number | null;
+	observedAtMs: number | null;
 }
 
 /**
@@ -371,14 +371,23 @@ export function createRunwayHandler(
 						account.last_used != null ? Number(account.last_used) : null,
 					);
 					codexUsageByAccount.set(account.id, {
+						// Only two sources can honestly stamp a reading: the cache entry's
+						// own OBSERVATION time, and the column's recorded observation time.
+						// A payload-reconstructed reading gets null rather than a borrowed
+						// timestamp — the same rule `/api/accounts` applies.
+						//
+						// The cache branch reads `observedAtMs`, NEVER the entry's write
+						// time: the payload recovery re-seeds this cache, so on the next
+						// refresh that same reconstruction comes back through the `"cache"`
+						// branch. Taking the write time there would hand it the recovery
+						// instant as an observation time and promote it from the degraded
+						// estimate to a full-confidence one, with no new provider evidence
+						// behind the change. An untimed entry carries null through every
+						// later read instead.
 						data: resolved.data,
-						// Only two sources can honestly stamp a reading: the live cache
-						// entry's own write time, and the column's recorded observation
-						// time. A payload-reconstructed reading gets null rather than a
-						// borrowed timestamp — the same rule `/api/accounts` applies.
-						sampledAtMs:
+						observedAtMs:
 							resolved.source === "cache"
-								? (entry?.sampledAtMs ?? null)
+								? (entry?.observedAtMs ?? null)
 								: resolved.source === "column"
 									? resolved.observedAtMs
 									: null,
@@ -440,9 +449,12 @@ export function createRunwayHandler(
 				if (live) {
 					candidates.push({
 						windows: live,
+						// The entry's OBSERVATION time, not its write time — they differ
+						// for exactly one kind of entry (a payload-recovered reading, which
+						// carries none) and that is the one this must not misreport.
 						observedAtMs: resolvedCodex
-							? resolvedCodex.sampledAtMs
-							: (entry?.sampledAtMs ?? null),
+							? resolvedCodex.observedAtMs
+							: (entry?.observedAtMs ?? null),
 						// Every Codex reading is labelled `codex-persisted`, including
 						// one that actually came from the cache. That is exact rather
 						// than sloppy: a cache-sourced reading inside the bar wins on its
@@ -482,9 +494,19 @@ export function createRunwayHandler(
 		// Never a merge across candidates: a runway projected from a live 5-hour
 		// reading and an older weekly one would be anchored to two different
 		// instants.
+		//
+		// The winner's OBSERVATION TIME travels with its windows. The weekly
+		// window's full-confidence estimate anchors its ETA there rather than at
+		// `now`, so a reading that has not changed cannot walk its own projection
+		// later between two polls. A candidate that cannot say when it was observed
+		// (the Codex payload reconstruction) carries null, and the weekly window
+		// falls back to the amber-capped now-anchored estimate.
 		const scanObservationsByAccount = new Map<
 			string,
-			RunwayWindowObservations | null
+			{
+				windows: RunwayWindowObservations;
+				observedAtMs: number | null;
+			} | null
 		>(
 			accounts.map((a) => {
 				const candidates = candidatesByAccount.get(a.id) ?? [];
@@ -497,28 +519,39 @@ export function createRunwayHandler(
 				if (!winner) return [a.id, null];
 				return [
 					a.id,
-					// A snapshot's windows may have rolled over since the row was
-					// written; a live reading's cannot have.
-					winner.source === "snapshot"
-						? projectableWindows(
-								{ ...winner.windows, sampledAtMs: winner.observedAtMs ?? now },
-								now,
-							)
-						: winner.windows,
+					{
+						// A snapshot's windows may have rolled over since the row was
+						// written; a live reading's cannot have.
+						windows:
+							winner.source === "snapshot"
+								? projectableWindows(
+										{
+											...winner.windows,
+											sampledAtMs: winner.observedAtMs ?? now,
+										},
+										now,
+									)
+								: winner.windows,
+						observedAtMs: winner.observedAtMs,
+					},
 				];
 			}),
 		);
 
-		const sources: RunwayAccountSource[] = accounts.map((account) => ({
-			id: account.id,
-			name: account.name,
-			provider: account.provider || "anthropic",
-			// Already extracted above, so the scan and the evidence block below
-			// cannot end up reading two different resolutions of the same account.
-			usageData: null,
-			windowObservations: scanObservationsByAccount.get(account.id) ?? null,
-			prediction: predictionByAccount.get(account.id) ?? null,
-		}));
+		const sources: RunwayAccountSource[] = accounts.map((account) => {
+			const scan = scanObservationsByAccount.get(account.id) ?? null;
+			return {
+				id: account.id,
+				name: account.name,
+				provider: account.provider || "anthropic",
+				// Already extracted above, so the scan and the evidence block below
+				// cannot end up reading two different resolutions of the same account.
+				usageData: null,
+				windowObservations: scan?.windows ?? null,
+				usageObservedAtMs: scan?.observedAtMs ?? null,
+				prediction: predictionByAccount.get(account.id) ?? null,
+			};
+		});
 
 		const runways = computeApiKeyRunways(keys, sources, now);
 		const worst = worstKeyRunway(runways, now);

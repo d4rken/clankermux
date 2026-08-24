@@ -53,7 +53,21 @@ const log = new Logger("UsageFetcher");
  *    stale entry (data plus its true age) so the UI can render an honest "as of"
  *    age instead of claiming the data is unavailable; it returns null only when
  *    no entry exists or the entry is past the much longer
- *    {@link UI_STALE_HORIZON_MS}. Never used by routing.
+ *    {@link UI_STALE_HORIZON_MS}. Never used by routing. Reports `observedAtMs`
+ *    alongside the write time — see the provenance note below.
+ *
+ * WRITE TIME IS NOT OBSERVATION TIME. Every entry carries both:
+ *  - `timestamp`, the moment it was WRITTEN here. It is what all the freshness
+ *    and TTL logic above runs on, and nothing else.
+ *  - `observedAtMs`, when the reading itself was OBSERVED at the provider, or
+ *    null when the writer cannot honestly say.
+ * They coincide for a live fetch and diverge for a RECONSTRUCTED reading — the
+ * Codex stored-payload recovery re-seeds this cache with headers that may
+ * predate the write by hours, and it seeds through {@link UsageCache.setUntimed}
+ * so the entry keeps saying "observation time unknown" on every later read.
+ * Anything deriving an "as of" stamp or anchoring a projection MUST read
+ * `observedAtMs`; taking the write time instead is how a recovered reading
+ * silently gains a fresh, confident timestamp on the second refetch.
  */
 export const USAGE_CACHE_TTL_MS = 10 * 60 * 1000;
 
@@ -889,10 +903,25 @@ export function getFreshCapacity(
 export type AccessTokenProvider = () => Promise<string>;
 
 /**
+ * One cached reading, with its two independent instants kept apart.
+ *
+ * `timestamp` is the WRITE time and the sole input to every freshness/TTL
+ * decision in this class. `observedAtMs` is the OBSERVATION time — when the
+ * provider actually reported this reading — and is null when the writer cannot
+ * honestly say. See the provenance note on {@link USAGE_CACHE_TTL_MS} for why
+ * collapsing the two is a defect rather than a simplification.
+ */
+interface UsageCacheEntry {
+	data: AnyUsageData;
+	timestamp: number;
+	observedAtMs: number | null;
+}
+
+/**
  * In-memory cache for usage data per account
  */
 class UsageCache {
-	private cache = new Map<string, { data: AnyUsageData; timestamp: number }>();
+	private cache = new Map<string, UsageCacheEntry>();
 	private pollTimeouts = new Map<string, NodeJS.Timeout>();
 	// Monotonic per-account poll generation. Bumped on every startPolling and read
 	// on every (re)arm: a timer or async cold-start resolver left over from a
@@ -962,6 +991,20 @@ class UsageCache {
 		string,
 		{ wakeAt: number; isIdle: boolean; activeBaseMs: number }
 	>();
+
+	/**
+	 * Write a reading that was just FETCHED from the provider.
+	 *
+	 * The single clock read is deliberate: for a live fetch the write time and the
+	 * observation time are the same instant, and taking `Date.now()` twice would
+	 * record them a millisecond apart for no reason. The only writers that must
+	 * NOT come through here are reconstructions with no trustworthy observation
+	 * time — see {@link UsageCache.setUntimed}.
+	 */
+	private writeFetchedEntry(accountId: string, data: AnyUsageData): void {
+		const observedAtMs = Date.now();
+		this.cache.set(accountId, { data, timestamp: observedAtMs, observedAtMs });
+	}
 
 	/**
 	 * Schedule the next poll with exponential backoff on failures.
@@ -1704,7 +1747,7 @@ class UsageCache {
 					const callback = this.windowResetCallbacks.get(accountId);
 					if (callback)
 						this.notifyWindowReset(accountId, data, "zai", callback);
-					this.cache.set(accountId, { data, timestamp: Date.now() });
+					this.writeFetchedEntry(accountId, data);
 					const utilization = getRepresentativeZaiUtilization(
 						data as ZaiUsageData,
 					);
@@ -1720,7 +1763,7 @@ class UsageCache {
 				if (!this.isLiveFetchGeneration(accountId, generation, tokenProvider))
 					return superseded;
 				if (data) {
-					this.cache.set(accountId, { data, timestamp: Date.now() });
+					this.writeFetchedEntry(accountId, data);
 					const utilization = getRepresentativeKiloUtilization(
 						data as KiloUsageData,
 					);
@@ -1745,7 +1788,7 @@ class UsageCache {
 					const callback = this.windowResetCallbacks.get(accountId);
 					if (callback)
 						this.notifyWindowReset(accountId, data, "minimax", callback);
-					this.cache.set(accountId, { data, timestamp: Date.now() });
+					this.writeFetchedEntry(accountId, data);
 					const utilization = getRepresentativeMinimaxUtilization(
 						data as MinimaxUsageData,
 					);
@@ -1763,7 +1806,7 @@ class UsageCache {
 				if (!this.isLiveFetchGeneration(accountId, generation, tokenProvider))
 					return superseded;
 				if (data) {
-					this.cache.set(accountId, { data, timestamp: Date.now() });
+					this.writeFetchedEntry(accountId, data);
 					const utilization = getRepresentativeAlibabaCodingPlanUtilization(
 						data as AlibabaCodingPlanUsageData,
 					);
@@ -1810,10 +1853,7 @@ class UsageCache {
 							"anthropic",
 							callback,
 						);
-					this.cache.set(accountId, {
-						data: result.data,
-						timestamp: Date.now(),
-					});
+					this.writeFetchedEntry(accountId, result.data);
 					const utilization = getRepresentativeUtilization(
 						result.data as UsageData,
 					);
@@ -1964,35 +2004,82 @@ class UsageCache {
 	 * use for routing/throttling/capacity decisions; those must keep using
 	 * get()/getAge()/getFreshCapacity, which enforce the routing TTL.
 	 *
-	 * Returns BOTH forms of the timestamp on purpose:
-	 *  - `sampledAtMs` is the entry's ABSOLUTE write time. Serialize this. Callers
-	 *    must never reconstruct it as `theirNow - ageMs`: a request handler's
-	 *    `now` is captured before its DB round-trips, so that subtraction reports
-	 *    the reading as older than it is by the handler's own elapsed time.
+	 * Returns THREE fields on purpose, and the first two are NOT interchangeable:
+	 *  - `sampledAtMs` is the entry's ABSOLUTE WRITE time, i.e. the anchor of the
+	 *    `ageMs` this read is built around. Callers must never reconstruct it as
+	 *    `theirNow - ageMs`: a request handler's `now` is captured before its DB
+	 *    round-trips, so that subtraction reports the reading as older than it is
+	 *    by the handler's own elapsed time.
+	 *  - `observedAtMs` is when the reading was OBSERVED at the provider, or null
+	 *    when the writer could not honestly say (a reconstruction — see
+	 *    {@link UsageCache.setUntimed}). This is the field to serialize as an "as
+	 *    of" stamp and the only one a projection may anchor to. It equals
+	 *    `sampledAtMs` for every live fetch, which is exactly why substituting one
+	 *    for the other looks correct until a recovered reading is re-read.
 	 *  - `ageMs` is the age against the clock AT READ TIME, for freshness gating
 	 *    (e.g. "is this still within the routing TTL?") without a second clock
 	 *    read that could disagree with the one that admitted the entry.
 	 */
-	peekWithAge(
-		accountId: string,
-	): { data: AnyUsageData; ageMs: number; sampledAtMs: number } | null {
+	peekWithAge(accountId: string): {
+		data: AnyUsageData;
+		ageMs: number;
+		sampledAtMs: number;
+		observedAtMs: number | null;
+	} | null {
 		const cached = this.cache.get(accountId);
 		if (!cached) return null;
 
 		const ageMs = Date.now() - cached.timestamp;
 		if (ageMs > UI_STALE_HORIZON_MS) return null; // too old to show — do NOT evict
 
-		return { data: cached.data, ageMs, sampledAtMs: cached.timestamp };
+		return {
+			data: cached.data,
+			ageMs,
+			sampledAtMs: cached.timestamp,
+			observedAtMs: cached.observedAtMs,
+		};
 	}
 
 	/**
-	 * Set cached usage data for an account
+	 * Cache a reading that was JUST OBSERVED — a live usage fetch, or usage
+	 * headers parsed off a response that has only now come back. Both the write
+	 * time and the observation time are `now`.
+	 *
+	 * A writer holding a reading it did not just observe must NOT use this: it
+	 * would stamp reconstructed data with the insertion instant and hand every
+	 * later reader a confident, wrong observation time. Use
+	 * {@link UsageCache.setUntimed}.
 	 */
 	set(accountId: string, data: AnyUsageData): void {
-		this.cache.set(accountId, { data, timestamp: Date.now() });
+		this.writeFetchedEntry(accountId, data);
 
 		// Periodic cleanup of stale entries to prevent memory bloat
 		// Run cleanup every 100 sets to balance performance and memory
+		if (this.cache.size % 100 === 0) {
+			this.cleanupStaleEntries();
+		}
+	}
+
+	/**
+	 * Cache a RECONSTRUCTED reading — one recovered from a stored artefact rather
+	 * than observed now, with no trustworthy observation time.
+	 *
+	 * Today's single caller is the Codex stored-payload recovery: it rebuilds
+	 * usage from whatever request payload happened to be retained, so the headers
+	 * can predate this write by hours. The entry's FRESHNESS is deliberately the
+	 * write time (the routing/TTL contract is about how long the proxy may keep
+	 * acting on a re-seeded reading, and that is unchanged); its OBSERVATION time
+	 * is null, and stays null for every subsequent read, so display stamps and
+	 * observation-anchored projections keep degrading exactly as they did on the
+	 * request that performed the recovery.
+	 */
+	setUntimed(accountId: string, data: AnyUsageData): void {
+		this.cache.set(accountId, {
+			data,
+			timestamp: Date.now(),
+			observedAtMs: null,
+		});
+
 		if (this.cache.size % 100 === 0) {
 			this.cleanupStaleEntries();
 		}
@@ -2013,7 +2100,14 @@ class UsageCache {
 		data: AnyUsageData,
 		ageMs: number,
 	): void {
-		this.cache.set(accountId, { data, timestamp: Date.now() - ageMs });
+		// A live fetch that happened `ageMs` ago: both instants move back together,
+		// because that is what the entry this constructs stands in for.
+		const writtenAt = Date.now() - ageMs;
+		this.cache.set(accountId, {
+			data,
+			timestamp: writtenAt,
+			observedAtMs: writtenAt,
+		});
 	}
 
 	/**

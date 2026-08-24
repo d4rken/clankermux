@@ -1108,19 +1108,23 @@ export function createAccountsListHandler(
 					codexCredits, // Codex-only credits state (null otherwise)
 					codexRateLimitResetCredits,
 					staleUsage,
-					// When the reading in `usageData` was sampled. Two honest sources:
-					// the live cache entry's own write time, and — for a Codex reading
-					// restored from `accounts.codex_usage_observed_at` — the time that
-					// observation was actually made. A reading reconstructed from an
+					// When the reading in `usageData` was OBSERVED. Two honest sources:
+					// the live cache entry's own observation time, and — for a Codex
+					// reading restored from `accounts.codex_usage_observed_at` — the time
+					// that observation was actually made. A reading reconstructed from an
 					// old stored request payload still gets null rather than a borrowed
-					// timestamp. Uses ABSOLUTE times, never `now - ageMs`: `now`
-					// predates this response's DB round-trips, so the subtraction would
-					// report the reading as older than it is. The dashboard annotates
-					// the bars with this once the reading is older than the routing TTL
-					// — an honest age beats claiming the data is unavailable.
+					// timestamp, INCLUDING on every refresh after the one that recovered
+					// it: that recovery re-seeds the usage cache, so the reconstruction
+					// comes back as a cache entry, and reading the entry's write time
+					// here would quietly stamp it with the recovery instant. Uses
+					// ABSOLUTE times, never `now - ageMs`: `now` predates this response's
+					// DB round-trips, so the subtraction would report the reading as
+					// older than it is. The dashboard annotates the bars with this once
+					// the reading is older than the routing TTL — an honest age beats
+					// claiming the data is unavailable.
 					usageAsOfIso:
-						usageIsLiveCacheEntry && liveUsageEntry
-							? new Date(liveUsageEntry.sampledAtMs).toISOString()
+						usageIsLiveCacheEntry && liveUsageEntry?.observedAtMs != null
+							? new Date(liveUsageEntry.observedAtMs).toISOString()
 							: usageObservedAtMs != null
 								? new Date(usageObservedAtMs).toISOString()
 								: null,

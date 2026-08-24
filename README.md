@@ -8,7 +8,7 @@
 # ClankerMux <picture><source media="(prefers-color-scheme: dark)" srcset="docs/media/logo-dark.svg"><img src="docs/media/logo-light.svg" alt="" height="30" align="center" /></picture>
 
 [![CI](https://github.com/d4rken/clankermux/actions/workflows/ci.yml/badge.svg)](https://github.com/d4rken/clankermux/actions/workflows/ci.yml)
-[![Bun](https://img.shields.io/badge/runtime-Bun%20%E2%89%A51.2.8-000000?logo=bun&logoColor=white)](https://bun.sh)
+[![Bun](https://img.shields.io/badge/runtime-Bun%20%E2%89%A51.4.0-000000?logo=bun&logoColor=white)](https://bun.sh)
 [![TypeScript](https://img.shields.io/badge/TypeScript-3178C6?logo=typescript&logoColor=white)](https://www.typescriptlang.org)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
 
@@ -67,7 +67,11 @@ Features:
 
 ## Build from source
 
-Requires [Bun](https://bun.sh).
+Requires [Bun](https://bun.sh) 1.4.0 or newer. On older runtimes a client
+aborting a streaming response segfaults the process
+([oven-sh/bun#32111](https://github.com/oven-sh/bun/issues/32111)), which is
+routine traffic for a proxy, so ClankerMux refuses to start on them. The exact
+version CI builds and tests against is pinned in `.bun-version`.
 
 ```bash
 git clone https://github.com/d4rken/clankermux
@@ -79,13 +83,20 @@ bun start           # serves the proxy + dashboard on http://localhost:8080
 
 Add your provider accounts in the dashboard, then point your coding client at the proxy.
 
+Agent traffic is served only under the wire mounts: `/wire/anthropic` for clients that
+speak the Anthropic Messages API and `/wire/openai` for clients that speak the OpenAI
+Responses API. The mount names the wire format the client speaks, not the account pool
+the request is served from. The old root endpoints (`/v1/*` and `/messages/*` directly
+on the port) have been removed and now answer 404, so a client still configured with a
+bare base URL has to be repointed at the mount for its format.
+
 ## Use it with Claude Code
 
 Set `ANTHROPIC_BASE_URL` to the ClankerMux endpoint. With a logged-in Claude Pro/Team
 CLI you don't need a token:
 
 ```bash
-export ANTHROPIC_BASE_URL=http://localhost:8080
+export ANTHROPIC_BASE_URL=http://localhost:8080/wire/anthropic
 claude
 ```
 
@@ -94,7 +105,7 @@ also set a token — `dummy-key` when ClankerMux runs open, or a generated key w
 protected:
 
 ```bash
-export ANTHROPIC_BASE_URL=http://localhost:8080
+export ANTHROPIC_BASE_URL=http://localhost:8080/wire/anthropic
 export ANTHROPIC_AUTH_TOKEN=dummy-key     # or a key generated in the dashboard
 claude
 ```
@@ -112,7 +123,7 @@ model_provider = "clankermux"
 
 [model_providers.clankermux]
 name = "ClankerMux"
-base_url = "http://localhost:8080/v1"
+base_url = "http://localhost:8080/wire/openai/v1"
 wire_api = "responses"
 env_key = "CLANKERMUX_API_KEY"
 ```

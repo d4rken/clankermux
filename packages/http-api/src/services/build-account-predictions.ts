@@ -5,9 +5,8 @@ import type {
 	UsageSnapshotSample,
 } from "@clankermux/types";
 
-// Lookback windows (inline named constants — NO env vars, per project rule).
+// Lookback window (inline named constant — NO env vars, per project rule).
 const FIVE_HOUR_LOOKBACK_MS = 6 * 60 * 60 * 1000; // cap 5h-window points to last 6h
-const SEVEN_DAY_LOOKBACK_MS = 24 * 60 * 60 * 1000; // recent pace for the 7d window
 
 export interface LiveWindowUsage {
 	utilization: number | null;
@@ -18,16 +17,29 @@ export interface AccountPredictionInput {
 	accountId: string;
 	/** Live current 5h reading (from usageData), or null if unknown. */
 	fiveHour: LiveWindowUsage | null;
-	/** Live current 7d reading, or null. */
-	sevenDay: LiveWindowUsage | null;
 }
 
 /**
- * Build per-account, per-window predictions from stored snapshots + the live
- * reading. Pure & deterministic (pass `now`). Injects the live point so the
- * prediction never lags the ~2-min sampler and self-corrects across a reset
- * (stale-window points get segmented out by computeUsagePrediction ->
- * insufficient_data -> the client falls back to the legacy burn-rate).
+ * Build per-account predictions from stored snapshots + the live reading. Pure
+ * & deterministic (pass `now`). Injects the live point so the prediction never
+ * lags the ~2-min sampler and self-corrects across a reset (stale-window points
+ * get segmented out by computeUsagePrediction -> insufficient_data -> the
+ * client falls back to the legacy burn-rate).
+ *
+ * The FIVE-HOUR window only. The weekly window used to get the same
+ * least-squares fit over a 24h lookback, and an offline backtest over ~12 weeks
+ * of stored snapshots showed the plain lifetime average beating it on held-out
+ * data — on run-out F1, on median ETA error, and on the precision of the red
+ * rule the display keys off. So there is nothing left for a weekly regression
+ * to do: emitting one would only give the client a worse estimator to prefer
+ * over the better one it already falls back to. `AccountUsagePrediction.sevenDay`
+ * is therefore never set, and every consumer treats its absence as "use the
+ * lifetime average" — which is now that window's PRIMARY estimator, carried by
+ * the `lifetimeConfidence` policy in `estimateWindowExhaustion` rather than by
+ * a prediction object.
+ *
+ * The routing-side weekly burn slope is a different computation with different
+ * inputs and is unaffected.
  */
 export function buildAccountUsagePredictions(
 	inputs: AccountPredictionInput[],
@@ -43,27 +55,18 @@ export function buildAccountUsagePredictions(
 	}
 
 	const fiveHourCutoff = now - FIVE_HOUR_LOOKBACK_MS;
-	const sevenDayCutoff = now - SEVEN_DAY_LOOKBACK_MS;
 	const result = new Map<string, AccountUsagePrediction>();
 
 	for (const input of inputs) {
 		const accountSamples = byAccount.get(input.accountId) ?? [];
 
 		const fiveHourPoints: PredictionPoint[] = [];
-		const sevenDayPoints: PredictionPoint[] = [];
 		for (const s of accountSamples) {
 			if (s.fiveHourPct != null && s.sampledAt >= fiveHourCutoff) {
 				fiveHourPoints.push({
 					t: s.sampledAt,
 					utilization: s.fiveHourPct,
 					resetsAt: s.fiveHourReset,
-				});
-			}
-			if (s.sevenDayPct != null && s.sampledAt >= sevenDayCutoff) {
-				sevenDayPoints.push({
-					t: s.sampledAt,
-					utilization: s.sevenDayPct,
-					resetsAt: s.sevenDayReset,
 				});
 			}
 		}
@@ -76,25 +79,11 @@ export function buildAccountUsagePredictions(
 				resetsAt: input.fiveHour.resetsAtMs,
 			});
 		}
-		if (input.sevenDay?.utilization != null) {
-			sevenDayPoints.push({
-				t: now,
-				utilization: input.sevenDay.utilization,
-				resetsAt: input.sevenDay.resetsAtMs,
-			});
-		}
 
-		const prediction: AccountUsagePrediction = {};
-		if (fiveHourPoints.length > 0) {
-			prediction.fiveHour = computeUsagePrediction(fiveHourPoints);
-		}
-		if (sevenDayPoints.length > 0) {
-			prediction.sevenDay = computeUsagePrediction(sevenDayPoints);
-		}
-
-		if (prediction.fiveHour || prediction.sevenDay) {
-			result.set(input.accountId, prediction);
-		}
+		if (fiveHourPoints.length === 0) continue;
+		result.set(input.accountId, {
+			fiveHour: computeUsagePrediction(fiveHourPoints),
+		});
 	}
 
 	return result;
