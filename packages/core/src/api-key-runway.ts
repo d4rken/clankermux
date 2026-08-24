@@ -140,13 +140,13 @@ function windowInput(
  * token window but no weekly one) contributes just that window and stays
  * metered.
  *
- * EXPORTED because it is the only correct way to feed {@link
- * computeCapacityRunway}: window eligibility, `windowStartMs` derivation and the
- * per-window {@link LifetimeConfidence} policy are decided here, and a caller
- * that assembles `RunwayAccountInput` by hand silently opts out of all three.
- * `/public/v1/*` scans the same accounts without any API key in the picture, so
- * it maps through this and calls the scan directly rather than going through
- * {@link computeApiKeyRunways}.
+ * The only correct way to feed {@link computeCapacityRunway}: window
+ * eligibility, `windowStartMs` derivation and the per-window {@link
+ * LifetimeConfidence} policy are all decided here, so a caller that assembles a
+ * `RunwayAccountInput` by hand silently opts out of all three. Every scan in the
+ * codebase therefore reaches the model through {@link computeApiKeyRunways},
+ * which maps through this — including `/public/v1/runway`, which serves a
+ * de-identified projection of that one scan rather than running its own.
  */
 export function toRunwayAccountInput(
 	account: RunwayAccountSource,
@@ -300,9 +300,10 @@ const OUTCOME_SEVERITY: Record<RunwayOutcome["kind"], number> = {
 
 /**
  * The worst outcome among a set of runway-carrying rows, or null when the set is
- * empty. Generic over the row because the same ordering ranks API keys and,
- * on `/public/v1/*`, individual accounts — restating the severity table for the
- * second consumer is how a headline comes to contradict the rows beneath it.
+ * empty. Generic over the row so the severity table and the shortest-remaining
+ * tiebreak have exactly one home: a surface that ranks something other than
+ * keys cannot restate them slightly differently and contradict the rows beneath
+ * its own headline.
  *
  * Ranks the outcomes AT `now` rather than as served. The rows come from a poll,
  * so a `runway` whose deadline has since passed is already out of quota; ranking
@@ -358,8 +359,7 @@ export function worstRunwayEntry<T extends { outcome: RunwayOutcome }>(
  *
  * Filtering is all this adds over {@link worstRunwayEntry}: "active" is a
  * property of an API key and of nothing else the scan ranks, so the ordering
- * itself lives in the generic helper and every surface — keys, and the pool's
- * own accounts on `/public/v1/*` — ranks by one severity table.
+ * itself lives in the generic helper.
  */
 export function worstKeyRunway(
 	runways: KeyRunway[],

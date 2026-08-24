@@ -13,10 +13,8 @@ export {
 	type RunwayHeadline,
 	type RunwayWindowObservations,
 	summarizeKeyRunways,
-	toRunwayAccountInput,
 	UNAUTHENTICATED_POOL_KEY_NAME,
 	worstKeyRunway,
-	worstRunwayEntry,
 } from "./api-key-runway";
 export {
 	// Test-only handle (forget the captured boot commit). NOT a runtime API:
