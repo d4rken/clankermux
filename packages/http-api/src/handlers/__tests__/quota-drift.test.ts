@@ -51,6 +51,7 @@ import {
 import {
 	COMPUTING_RESPONSE,
 	createQuotaDriftHandlerFromSources,
+	normalizeQuotaDriftPayload,
 } from "../quota-drift-direct";
 import {
 	ACCOUNT_ASSUMED,
@@ -915,5 +916,119 @@ describe("summarizeFlatWindow", () => {
 			flatValuePct: null,
 			flatSince: null,
 		});
+	});
+});
+
+/* -- Payloads written before these fields existed ------------------------ */
+
+/**
+ * The payload shape a PREVIOUS version of the precompute stored: no per-point
+ * reasons, no movement facts on any window.
+ *
+ * Not hypothetical, and not a migration concern that resolves itself at deploy
+ * time: the pass refreshes every 30 minutes and the blob is handed out without
+ * schema validation, so this is exactly what the endpoint serves for the first
+ * half hour after any deploy.
+ */
+function stripNewFields(payload: QuotaDriftResponse): QuotaDriftResponse {
+	const clone = JSON.parse(JSON.stringify(payload)) as QuotaDriftResponse;
+	for (const cohort of clone.cohorts) {
+		for (const window of cohort.windows) {
+			const legacy = window as unknown as Record<string, unknown>;
+			legacy.lastMovementMs = undefined;
+			legacy.lastObservedMs = undefined;
+			legacy.flatValuePct = undefined;
+			legacy.flatSince = undefined;
+			for (const model of window.models) {
+				for (const point of model.points) {
+					(point as unknown as Record<string, unknown>).unidentifiedReasons =
+						undefined;
+				}
+			}
+		}
+	}
+	// A JSON round-trip drops the undefined keys, which is what a payload
+	// written before the fields existed actually looks like.
+	return JSON.parse(JSON.stringify(clone)) as QuotaDriftResponse;
+}
+
+describe("quota-drift payload normalization", () => {
+	it("defaults every field a pre-change payload is missing", () => {
+		const legacy = stripNewFields(
+			computeQuotaDrift(db, { now: FIXTURE_NOW, ...TEST_BOOTSTRAP }),
+		);
+		// The fixture really is missing them, or the test proves nothing.
+		const legacyWindow = legacy.cohorts[0].windows[0];
+		expect("flatSince" in legacyWindow).toBe(false);
+		expect("unidentifiedReasons" in legacyWindow.models[0].points[0]).toBe(
+			false,
+		);
+
+		const normalized = normalizeQuotaDriftPayload(legacy);
+
+		expect(normalized.cohorts.length).toBeGreaterThan(0);
+		for (const cohort of normalized.cohorts) {
+			for (const window of cohort.windows) {
+				// Null, never 0: a concrete timestamp would claim a measurement the
+				// payload does not contain.
+				expect(window.flatSince).toBeNull();
+				expect(window.lastMovementMs).toBeNull();
+				expect(window.lastObservedMs).toBeNull();
+				expect(window.flatValuePct).toBeNull();
+				for (const model of window.models) {
+					expect(model.points.length).toBeGreaterThan(0);
+					for (const point of model.points) {
+						expect(point.unidentifiedReasons).toEqual([]);
+					}
+				}
+			}
+		}
+	});
+
+	it("leaves a current payload's values alone", () => {
+		const payload = computeQuotaDrift(db, {
+			now: FIXTURE_NOW,
+			...TEST_BOOTSTRAP,
+		});
+
+		expect(normalizeQuotaDriftPayload(payload)).toEqual(payload);
+	});
+
+	it("serves a pre-change cached row without inventing anything", async () => {
+		const legacy = stripNewFields(
+			computeQuotaDrift(db, { now: FIXTURE_NOW, ...TEST_BOOTSTRAP }),
+		);
+		const handler = createQuotaDriftHandlerFromSources({
+			getLatest: async () => ({
+				computedAt: FIXTURE_NOW,
+				payload: JSON.stringify(legacy),
+			}),
+		});
+
+		const body = (await (
+			await handler(new URLSearchParams())
+		).json()) as QuotaDriftResponse;
+
+		expect(body.status).toBe("ready");
+		const window = body.cohorts[0].windows[0];
+		expect(window.flatSince).toBeNull();
+		expect(window.models[0].points[0].unidentifiedReasons).toEqual([]);
+	});
+
+	it("survives a payload whose arrays are missing entirely", async () => {
+		// A hand-inserted or half-written row. It must not throw the panel's
+		// request into a 500.
+		const handler = createQuotaDriftHandlerFromSources({
+			getLatest: async () => ({
+				computedAt: FIXTURE_NOW,
+				payload: JSON.stringify({ status: "ready", computedAt: FIXTURE_NOW }),
+			}),
+		});
+
+		const response = await handler(new URLSearchParams());
+		const body = (await response.json()) as QuotaDriftResponse;
+
+		expect(response.status).toBe(200);
+		expect(body.cohorts).toEqual([]);
 	});
 });

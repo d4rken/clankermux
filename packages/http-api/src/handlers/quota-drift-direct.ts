@@ -5,7 +5,13 @@ import {
 	jsonResponse,
 } from "@clankermux/http-common";
 import { Logger } from "@clankermux/logger";
-import type { QuotaDriftResponse } from "@clankermux/types";
+import type {
+	QuotaDriftCohort,
+	QuotaDriftModel,
+	QuotaDriftPoint,
+	QuotaDriftResponse,
+	QuotaDriftWindowResult,
+} from "@clankermux/types";
 import type { APIContext } from "../types";
 
 const log = new Logger("QuotaDriftHandler");
@@ -15,9 +21,21 @@ const log = new Logger("QuotaDriftHandler");
  *
  * A single-row read: the analysis itself is precomputed by the scheduler (see
  * apps/server/src/quota-drift-scheduler.ts) and stored as one JSON blob, so
- * this handler only picks the newest row and hands it over verbatim. Nothing
- * here re-derives or re-shapes the payload — the wire contract is written by
- * the pass that produced it.
+ * this handler only picks the newest row. Nothing here re-derives the payload;
+ * the wire contract is written by the pass that produced it.
+ *
+ * ## Why the payload is normalized rather than handed over verbatim
+ *
+ * The blob is stored JSON and is NOT schema-validated on the way out, and the
+ * precompute only refreshes every 30 minutes. So for up to one refresh interval
+ * after any deploy, the newest stored payload is one that a PREVIOUS version of
+ * the code wrote, missing whatever fields that version did not have. Declaring
+ * those fields required on the wire type would not protect this path — it would
+ * only make TypeScript assert something false about it.
+ *
+ * They are therefore optional on the type and defaulted here, once, so every
+ * reader downstream sees one shape: absent numbers become null (never 0, which
+ * would read as a measurement) and absent lists become empty.
  */
 export interface QuotaDriftSources {
 	getLatest(): Promise<{ computedAt: number; payload: string } | null>;
@@ -67,7 +85,7 @@ export function createQuotaDriftHandlerFromSources(sources: QuotaDriftSources) {
 			// authoritative one — they are written together, and trusting the key
 			// keeps a hand-inserted or half-migrated blob from claiming a time.
 			return jsonResponse({
-				...payload,
+				...normalizeQuotaDriftPayload(payload),
 				status: "ready",
 				computedAt: row.computedAt,
 			} satisfies QuotaDriftResponse);
@@ -77,5 +95,61 @@ export function createQuotaDriftHandlerFromSources(sources: QuotaDriftSources) {
 				InternalServerError("Failed to fetch quota drift data"),
 			);
 		}
+	};
+}
+
+/** `[]` for anything that is not an array — a cached blob is untrusted input. */
+function asArray<T>(value: readonly T[] | undefined | null): T[] {
+	return Array.isArray(value) ? [...value] : [];
+}
+
+/**
+ * Fill in every field a payload written by an older version of the precompute
+ * would be missing.
+ *
+ * Exported so a test can drive it with a pre-change payload directly: this is
+ * the only thing standing between a 30-minute-old cache row and a panel that
+ * reads `window.flatSince` on an object that has never heard of it.
+ */
+export function normalizeQuotaDriftPayload(
+	payload: QuotaDriftResponse,
+): QuotaDriftResponse {
+	return {
+		...payload,
+		cohorts: asArray(payload.cohorts).map(
+			(cohort): QuotaDriftCohort => ({
+				...cohort,
+				windows: asArray(cohort.windows).map(
+					(window): QuotaDriftWindowResult => ({
+						...window,
+						// Null, never 0: a concrete timestamp or percentage would claim a
+						// measurement the payload does not contain.
+						lastMovementMs: window.lastMovementMs ?? null,
+						lastObservedMs: window.lastObservedMs ?? null,
+						flatValuePct: window.flatValuePct ?? null,
+						flatSince: window.flatSince ?? null,
+						models: asArray(window.models).map(
+							(model): QuotaDriftModel => ({
+								...model,
+								points: asArray(model.points).map(
+									(point): QuotaDriftPoint => ({
+										...point,
+										unidentifiedReasons: asArray(point.unidentifiedReasons),
+									}),
+								),
+								latest: model.latest
+									? {
+											...model.latest,
+											unidentifiedReasons: asArray(
+												model.latest.unidentifiedReasons,
+											),
+										}
+									: null,
+							}),
+						),
+					}),
+				),
+			}),
+		),
 	};
 }

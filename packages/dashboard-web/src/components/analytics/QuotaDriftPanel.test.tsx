@@ -18,6 +18,7 @@ import {
 	changedModel,
 	cohort,
 	measuredModel,
+	preChangeCohort,
 	retiredModel,
 	unidentifiedModel,
 	windowResult,
@@ -170,6 +171,24 @@ describe("QuotaDriftPanel", () => {
 		);
 
 		expect(html).not.toContain("There is nothing here to measure");
+	});
+
+	it("renders a payload written before any of these fields existed", () => {
+		// The cached blob is up to 30 minutes old and carries no schema version,
+		// so the panel has to render the previous shape without inventing a
+		// reason, a date, or a flat-window claim from the absence.
+		const html = renderToStaticMarkup(
+			<QuotaDriftPanel cohort={preChangeCohort()} />,
+		);
+
+		expect(html).toContain("5-hour window");
+		expect(html).not.toContain("There is nothing here to measure");
+		// The gap is still stated, but only as far as the payload supports: the
+		// stretch is real, the cause is unknown and must not be guessed.
+		expect(html).toContain("claude-haiku-4-5");
+		expect(html).toContain("not measurable on this window");
+		expect(html).not.toContain("undefined");
+		expect(html).not.toContain("NaN");
 	});
 
 	it("renders one series block per window", () => {

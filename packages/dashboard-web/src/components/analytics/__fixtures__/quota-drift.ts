@@ -218,6 +218,38 @@ export function cohort(
 	};
 }
 
+/**
+ * A cohort as a payload written BEFORE per-point reasons and the movement
+ * facts existed: every one of those keys physically absent, not null.
+ *
+ * The precompute refreshes every 30 minutes and the blob is served without
+ * schema validation, so this is what the panel is handed for the first half
+ * hour after any deploy.
+ */
+export function preChangeCohort(): QuotaDriftCohort {
+	const built = cohort([
+		windowResult("five_hour", [measuredModel(), unidentifiedModel()]),
+	]);
+	for (const window of built.windows) {
+		const legacy = window as unknown as Record<string, unknown>;
+		for (const key of [
+			"lastMovementMs",
+			"lastObservedMs",
+			"flatValuePct",
+			"flatSince",
+		]) {
+			delete legacy[key];
+		}
+		for (const model of window.models) {
+			for (const point of model.points) {
+				delete (point as unknown as Record<string, unknown>)
+					.unidentifiedReasons;
+			}
+		}
+	}
+	return built;
+}
+
 export function readyResponse(cohorts: QuotaDriftCohort[]): QuotaDriftResponse {
 	return {
 		status: "ready",
