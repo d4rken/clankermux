@@ -53,8 +53,10 @@ import {
 	resolveOverloadAttributionModel,
 	tryAcquireProviderOverloadProbe,
 } from "../provider-overload-cooldown";
+import { captureRawUpstreamObservation } from "../raw-response-observations";
 import { RequestBodyContext } from "../request-body-context";
 import { forwardToClient } from "../response-handler";
+import { dispatchObservationSource } from "../should-record-request";
 import { markAnthropicBurstThrottle } from "./burst-cooldown";
 // Direct leaf import (not via the `handlers` barrel, which re-exports this
 // module) — see the module comment.
@@ -2343,6 +2345,26 @@ export async function proxyWithAccount(
 		// new owner so a processResponse throw releases it.
 		liveUpstream = taggedRawResponse;
 
+		// The single capture site for the RAW provider rate-limit evidence: the
+		// `x-codex-*` window lines and the `x-ratelimit-*` buckets, taken BEFORE
+		// processResponse normalizes the first and deletes the second. After this
+		// call neither survives in a recordable form.
+		captureRawUpstreamObservation(
+			{
+				requestId: requestMeta.id,
+				account,
+				source: dispatchObservationSource(
+					(name) => req.headers.get(name),
+					requestMeta.internal === true,
+				),
+				requestStartedAt: requestMeta.timestamp,
+				endpoint: url.pathname,
+				httpStatus: taggedRawResponse.status,
+				headers: taggedRawResponse.headers,
+			},
+			ctx,
+		);
+
 		// Process response (transform format, sanitize headers, etc.) using account-specific provider
 		const response = await provider.processResponse(
 			taggedRawResponse,
@@ -2948,6 +2970,26 @@ export async function proxyForcedAccount(
 			statusText: rawResponse.statusText,
 			headers: responseHeaders,
 		});
+
+		// The single capture site for the RAW provider rate-limit evidence: the
+		// `x-codex-*` window lines and the `x-ratelimit-*` buckets, taken BEFORE
+		// processResponse normalizes the first and deletes the second. After this
+		// call neither survives in a recordable form.
+		captureRawUpstreamObservation(
+			{
+				requestId: requestMeta.id,
+				account,
+				source: dispatchObservationSource(
+					(name) => req.headers.get(name),
+					requestMeta.internal === true,
+				),
+				requestStartedAt: requestMeta.timestamp,
+				endpoint: url.pathname,
+				httpStatus: taggedRawResponse.status,
+				headers: taggedRawResponse.headers,
+			},
+			ctx,
+		);
 
 		// Process response (format transform, header sanitize) — but do NOT run
 		// processProxyResponse (which applies cooldowns + signals failover) and

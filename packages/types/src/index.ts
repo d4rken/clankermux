@@ -6,6 +6,7 @@ export * from "./api";
 export * from "./api-key";
 export * from "./cache-effectiveness";
 export * from "./cache-keepalive";
+export * from "./codex-window-observation";
 export * from "./combo";
 export * from "./constants";
 export * from "./conversation";

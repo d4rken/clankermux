@@ -45,7 +45,10 @@ import {
 	type TransportOutcome,
 } from "./request-recorder";
 import { hashRoutingAffinityKey } from "./routing-telemetry";
-import { shouldRecordRequest } from "./should-record-request";
+import {
+	dispatchObservationSource,
+	shouldRecordRequest,
+} from "./should-record-request";
 import { createStreamAnalyticsPassthrough } from "./stream-analytics";
 import {
 	getStreamForwardChunkTimeoutMs,
@@ -222,14 +225,10 @@ function claimObservationSource(
 	requestHeaders: Headers,
 	internal: boolean,
 ): UnifiedClaimObservationSource {
-	if (!internal) return "client";
-	if (requestHeaders.get("x-clankermux-keepalive") === "true") {
-		return "keepalive";
-	}
-	if (requestHeaders.get("x-clankermux-auto-refresh") === "true") {
-		return "auto-refresh";
-	}
-	return "client";
+	return dispatchObservationSource(
+		(name) => requestHeaders.get(name),
+		internal,
+	);
 }
 
 /**

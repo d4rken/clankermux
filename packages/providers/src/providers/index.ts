@@ -23,9 +23,12 @@ export type {
 	CodexRateLimitResetCreditsSummary,
 	CodexRateLimitResetType,
 	CodexUsageStatus,
+	CodexWindowScope,
+	CodexWindowSlot,
 	FetchCodexModelCatalogArgs,
 	FetchCodexUsageStatusArgs,
 	NormalizedCodexInputUsage,
+	RawCodexWindowReading,
 } from "./codex/index";
 export {
 	CODEX_DEFAULT_ENDPOINT,
@@ -40,6 +43,7 @@ export {
 	codexRateLimitResetCreditsCache,
 	consumeCodexRateLimitResetCredit,
 	extractCodexIdentity,
+	extractRawCodexWindows,
 	fetchCodexModelCatalog,
 	fetchCodexRateLimitResetCredits,
 	fetchCodexUsageStatus,

@@ -12,6 +12,7 @@ import type {
 	Account,
 	AccountIdentity,
 	AccountPaymentRow,
+	CodexWindowObservationRow,
 	Combo,
 	ComboFamily,
 	ComboFamilyAssignment,
@@ -21,6 +22,7 @@ import type {
 	InternalDispatchSpendRow,
 	MemoryHistoryPoint,
 	MemorySnapshotRow,
+	OpenAiBucketObservationRow,
 	PaymentSource,
 	RankedSnapshot,
 	RateLimitReason,
@@ -66,10 +68,12 @@ import {
 	type CodexResetCreditEventResolvedStatus,
 	type CodexResetCreditEventRow,
 } from "./repositories/codex-reset-credit-event.repository";
+import { CodexWindowObservationRepository } from "./repositories/codex-window-observation.repository";
 import { ComboRepository } from "./repositories/combo.repository";
 import { InternalDispatchSpendRepository } from "./repositories/internal-dispatch-spend.repository";
 import { MemorySnapshotRepository } from "./repositories/memory-snapshot.repository";
 import { OAuthRepository } from "./repositories/oauth.repository";
+import { OpenAiBucketObservationRepository } from "./repositories/openai-bucket-observation.repository";
 import {
 	QuotaDriftResultRepository,
 	type QuotaDriftResultRow,
@@ -310,6 +314,13 @@ export const UNIFIED_SUMMARY_OBSERVATION_RETENTION_MS = 90 * TIME_CONSTANTS.DAY;
 export const INTERNAL_DISPATCH_SPEND_RETENTION_MS = 90 * TIME_CONSTANTS.DAY;
 
 /**
+ * Retention for the raw provider window/bucket observation series. FIXED at 90
+ * days, matching the claim series: these are the Codex/OpenAI analogue of it,
+ * and an analysis that spans one has to be able to span the other.
+ */
+export const PROVIDER_WINDOW_OBSERVATION_RETENTION_MS = 90 * TIME_CONSTANTS.DAY;
+
+/**
  * How long a per-data-type storage-usage measurement is reused before the next
  * dashboard read triggers a fresh scan. The byte sums require a full-table
  * scan, so we cache to keep them off the proxy's hot path; 5 minutes is small
@@ -345,6 +356,10 @@ const RETENTION_USAGE_TABLES: ReadonlyArray<{
 	// The proxy's own probe spend, on a fixed retention matching the claim series
 	// it joins against (INTERNAL_DISPATCH_SPEND_RETENTION_MS).
 	{ key: "internal_dispatch_spend", table: "internal_dispatch_spend" },
+	// The Codex/OpenAI analogue of the claim series, on the same fixed retention
+	// (PROVIDER_WINDOW_OBSERVATION_RETENTION_MS).
+	{ key: "codex_window_observations", table: "codex_window_observations" },
+	{ key: "openai_bucket_observations", table: "openai_bucket_observations" },
 	// Precomputed analysis output, kept to a handful of rows by the cleanup pass
 	// rather than by a retention control of its own.
 	{ key: "quota_drift_results", table: "quota_drift_results" },
@@ -450,6 +465,8 @@ export class DatabaseOperations implements StrategyStore, Disposable {
 	private unifiedClaimObservations: UnifiedClaimObservationRepository;
 	private unifiedSummaryObservations: UnifiedSummaryObservationRepository;
 	private internalDispatchSpend: InternalDispatchSpendRepository;
+	private codexWindowObservations: CodexWindowObservationRepository;
+	private openAiBucketObservations: OpenAiBucketObservationRepository;
 	private memorySnapshots: MemorySnapshotRepository;
 	private cacheKeepaliveSnapshots: CacheKeepaliveSnapshotRepository;
 	private accountPayments: AccountPaymentRepository;
@@ -550,6 +567,14 @@ export class DatabaseOperations implements StrategyStore, Disposable {
 		this.internalDispatchSpend = retrying(
 			new InternalDispatchSpendRepository(this.adapter),
 			"internalDispatchSpend",
+		);
+		this.codexWindowObservations = retrying(
+			new CodexWindowObservationRepository(this.adapter),
+			"codexWindowObservations",
+		);
+		this.openAiBucketObservations = retrying(
+			new OpenAiBucketObservationRepository(this.adapter),
+			"openAiBucketObservations",
 		);
 		this.quotaDriftResults = retrying(
 			new QuotaDriftResultRepository(this.adapter),
@@ -1583,6 +1608,8 @@ OAuth tokens will need to be re-authenticated.
 		removedUnifiedClaimObservations: number;
 		removedUnifiedSummaryObservations: number;
 		removedInternalDispatchSpend: number;
+		removedCodexWindowObservations: number;
+		removedOpenAiBucketObservations: number;
 	}> {
 		const now = Date.now();
 
@@ -1620,6 +1647,8 @@ OAuth tokens will need to be re-authenticated.
 			now - UNIFIED_SUMMARY_OBSERVATION_RETENTION_MS;
 		const internalDispatchSpendCutoff =
 			now - INTERNAL_DISPATCH_SPEND_RETENTION_MS;
+		const providerWindowObservationCutoff =
+			now - PROVIDER_WINDOW_OBSERVATION_RETENTION_MS;
 
 		const empty = {
 			removedRequests: 0,
@@ -1630,6 +1659,8 @@ OAuth tokens will need to be re-authenticated.
 			removedUnifiedClaimObservations: 0,
 			removedUnifiedSummaryObservations: 0,
 			removedInternalDispatchSpend: 0,
+			removedCodexWindowObservations: 0,
+			removedOpenAiBucketObservations: 0,
 		};
 
 		const worker = this.spawnIncrementalVacuumWorker();
@@ -1650,6 +1681,7 @@ OAuth tokens will need to be re-authenticated.
 					unifiedClaimObservationCutoff,
 					unifiedSummaryObservationCutoff,
 					internalDispatchSpendCutoff,
+					providerWindowObservationCutoff,
 					payloadMaxBytes,
 				});
 			});
@@ -2443,6 +2475,28 @@ OAuth tokens will need to be re-authenticated.
 		row: InternalDispatchSpendRow,
 	): Promise<void> {
 		await this.internalDispatchSpend.insert(row);
+	}
+
+	// ── Raw provider window / bucket observations ─────────────────────────────
+
+	/**
+	 * Record one upstream attempt's RAW Codex window lines. Idempotent on
+	 * (observation_id, scope, family_codename, slot).
+	 */
+	async saveCodexWindowObservations(
+		rows: CodexWindowObservationRow[],
+	): Promise<void> {
+		await this.codexWindowObservations.insertMany(rows);
+	}
+
+	/**
+	 * Record one upstream attempt's OpenAI-compatible bucket readings. Idempotent
+	 * on (observation_id, bucket).
+	 */
+	async saveOpenAiBucketObservations(
+		rows: OpenAiBucketObservationRow[],
+	): Promise<void> {
+		await this.openAiBucketObservations.insertMany(rows);
 	}
 
 	// ── Precomputed quota-drift results ───────────────────────────────────────

@@ -330,6 +330,189 @@ export function parseCodexScopedLimits(
 	return limits;
 }
 
+/* ── Raw window extraction (recording, not deciding) ──────────────────────── */
+
+/** Which limit a raw window reading belongs to. */
+export type CodexWindowScope = "root" | "family";
+
+/** Which of a limit's two window slots a raw reading came from. */
+export type CodexWindowSlot = "primary" | "secondary";
+
+/**
+ * One `x-codex-*` window line as it arrived, with no interpretation applied.
+ *
+ * Deliberately NOT a {@link UsageWindow}. Everything the normalized path does to
+ * make a reading usable — slotting by duration, collapsing placeholder windows,
+ * substituting a default utilization — destroys information this shape keeps:
+ *
+ *  - absent and malformed both read as `null`, and a REPORTED zero stays `0`;
+ *  - the per-family `primary` (5-hour) slots the normalized path discards are
+ *    emitted, because "the 5h window was retired" is a claim the series should
+ *    be able to check rather than assume;
+ *  - the 429 default-100 substitution never happens here. That default is a
+ *    routing decision; recording it as an observation would put a number the
+ *    provider never sent into a series built to measure what it does send.
+ */
+export interface RawCodexWindowReading {
+	scope: CodexWindowScope;
+	/**
+	 * The family codename for `family` rows, and the EMPTY STRING for `root`.
+	 *
+	 * Empty rather than null on purpose: the storage key is
+	 * (observation, scope, family, slot), and SQLite treats NULLs as distinct in
+	 * a UNIQUE index — so a nullable column would leave the root rows' uniqueness
+	 * unenforced. `''` makes the binding exact.
+	 */
+	familyCodename: string;
+	slot: CodexWindowSlot;
+	/** The family's human display name (`-limit-name`); null for root rows. */
+	limitName: string | null;
+	/** `-used-percent`; null = no reading, `0` = a reading of zero. */
+	usedPercent: number | null;
+	/** `-window-minutes` as reported; null when absent or unparseable. */
+	windowMinutes: number | null;
+	/** Absolute reset instant, ms epoch; null when neither reset line parses. */
+	resetAtMs: number | null;
+	/** `x-codex-active-limit` verbatim — which limit the backend says is binding. */
+	activeLimit: string | null;
+}
+
+/** Full-string finite decimal, optionally signed. A prefix match is not a reading. */
+const STRICT_NUMBER_RE = /^-?\d+(?:\.\d+)?$/;
+
+/**
+ * A strict numeric reading, or null.
+ *
+ * Unlike {@link parseNumber} (which the normalized path uses) this refuses
+ * `parseFloat`'s prefix tolerance: `"93%"` and `"0x1"` are malformed headers,
+ * and turning them into 93 and 0 would put values the provider never sent into
+ * the series.
+ */
+function parseStrictNumber(value: string | null): number | null {
+	if (value === null || !STRICT_NUMBER_RE.test(value)) return null;
+	const parsed = Number.parseFloat(value);
+	return Number.isFinite(parsed) ? parsed : null;
+}
+
+/**
+ * One slot's raw reading, or null when the response carried NO line for it.
+ *
+ * Presence is decided on the raw headers, not on the parsed values: a slot whose
+ * `-used-percent` is present but malformed is a real observation of a
+ * malformed header, and dropping it would hide exactly the shapes worth seeing.
+ */
+function readRawSlot(
+	headers: Headers,
+	prefix: string,
+	observedAtMs: number,
+): {
+	usedPercent: number | null;
+	windowMinutes: number | null;
+	resetAtMs: number | null;
+} | null {
+	const usedPercentRaw = headers.get(`x-codex-${prefix}-used-percent`);
+	const windowMinutesRaw = headers.get(`x-codex-${prefix}-window-minutes`);
+	const resetAtRaw = headers.get(`x-codex-${prefix}-reset-at`);
+	const resetAfterRaw = headers.get(`x-codex-${prefix}-reset-after-seconds`);
+	if (
+		usedPercentRaw === null &&
+		windowMinutesRaw === null &&
+		resetAtRaw === null &&
+		resetAfterRaw === null
+	) {
+		return null;
+	}
+
+	const resetAtSeconds = parseStrictNumber(resetAtRaw);
+	const resetAfterSeconds = parseStrictNumber(resetAfterRaw);
+	const resetAtMs =
+		resetAtSeconds !== null
+			? resetAtSeconds * 1000
+			: // The relative line is resolved against the ONE captured observation
+				// instant, never against a fresh clock read: a second `Date.now()`
+				// here would date two lines of the same response differently.
+				resetAfterSeconds !== null
+				? observedAtMs + resetAfterSeconds * 1000
+				: null;
+
+	return {
+		usedPercent: parseStrictNumber(usedPercentRaw),
+		windowMinutes: parseStrictNumber(windowMinutesRaw),
+		resetAtMs:
+			resetAtMs !== null && Number.isSafeInteger(Math.trunc(resetAtMs))
+				? Math.trunc(resetAtMs)
+				: null,
+	};
+}
+
+/**
+ * EVERY `x-codex-*` window line on this response, for recording rather than for
+ * deciding.
+ *
+ * The account-wide (`root`) primary/secondary pair plus every per-family pair
+ * the response advertises via `x-codex-<family>-limit-name`. Families are
+ * emitted in alphabetical order and slots in primary-then-secondary order, so
+ * two passes over one response produce byte-identical rows.
+ *
+ * `x-codex-active-limit` is read DIRECTLY here. The family-discovery regex used
+ * by the normalized path excludes it deliberately (it is not a family), which
+ * means the one header saying which limit the backend considers binding was
+ * being dropped on the floor.
+ *
+ * Pure: `observedAtMs` is supplied by the caller so the whole response shares
+ * one instant. A response with no window lines yields `[]`.
+ */
+export function extractRawCodexWindows(
+	headers: Headers,
+	observedAtMs: number,
+): RawCodexWindowReading[] {
+	const activeLimit = headers.get("x-codex-active-limit");
+	const readings: RawCodexWindowReading[] = [];
+
+	const push = (
+		scope: CodexWindowScope,
+		familyCodename: string,
+		slot: CodexWindowSlot,
+		limitName: string | null,
+		prefix: string,
+	): void => {
+		const raw = readRawSlot(headers, prefix, observedAtMs);
+		if (raw === null) return;
+		readings.push({
+			scope,
+			familyCodename,
+			slot,
+			limitName,
+			usedPercent: raw.usedPercent,
+			windowMinutes: raw.windowMinutes,
+			resetAtMs: raw.resetAtMs,
+			activeLimit,
+		});
+	};
+
+	push("root", "", "primary", null, "primary");
+	push("root", "", "secondary", null, "secondary");
+
+	// Same discovery rule as parseCodexScopedLimits: the `-limit-name` suffix is
+	// what keeps `x-codex-active-limit` from matching as a family.
+	const familyNamePattern = /^x-codex-([a-z0-9]+)-limit-name$/i;
+	const families = new Map<string, string>();
+	headers.forEach((value, key) => {
+		const match = familyNamePattern.exec(key);
+		if (!match) return;
+		families.set(match[1].toLowerCase(), value);
+	});
+	for (const codename of [...families.keys()].sort()) {
+		const displayName = families.get(codename) as string;
+		// BOTH slots, including the 5-hour primary the normalized path drops on
+		// the floor once the weekly window moved into the primary slot.
+		push("family", codename, "primary", displayName, `${codename}-primary`);
+		push("family", codename, "secondary", displayName, `${codename}-secondary`);
+	}
+
+	return readings;
+}
+
 export function parseCodexUsageHeaders(
 	headers: Headers,
 	options: ParseCodexUsageHeadersOptions = {},

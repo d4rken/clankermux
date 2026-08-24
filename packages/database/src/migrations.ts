@@ -586,6 +586,108 @@ export function ensureSchema(db: Database): void {
 		`CREATE INDEX IF NOT EXISTS idx_account_tier_history_account_time ON account_tier_history(account_id, observed_at)`,
 	);
 
+	// Create codex_window_observations table — the RAW Codex window lines a
+	// response carried, one row per window slot per upstream attempt.
+	//
+	// A different axis from the normalized UsageData the routing path consumes.
+	// Normalization is lossy in exactly the dimensions a later analysis needs: it
+	// slots windows by duration (discarding the per-family 5-hour slots),
+	// collapses placeholder windows to nothing, and substitutes a default
+	// utilization on a 429. Each of those is right for a routing decision and
+	// wrong for a record of what the provider said.
+	//
+	// observation_id is unique per UPSTREAM ATTEMPT, not per request: a retry or
+	// failover produces several responses for one logical request, possibly from
+	// different accounts, and folding them together would average readings that
+	// describe different quota states. request_id correlates them and is
+	// deliberately NOT unique.
+	//
+	// Window identity is decomposed into columns rather than a synthetic key so
+	// the series can be queried by scope, family or slot without string surgery.
+	// family_codename is NOT NULL and carries the EMPTY STRING on root rows:
+	// SQLite treats NULLs as distinct in a UNIQUE index, so a nullable column
+	// would leave the root rows' uniqueness unenforced.
+	//
+	// used_percent / window_minutes / reset_at are nullable and NULL means NO
+	// READING (absent or malformed); a reported zero is stored as 0.
+	//
+	// Deliberately NO foreign key to requests(id) — internal probes are captured
+	// here and have no Request-History parent — and account_id CASCADE, as for
+	// the claim series.
+	db.run(`
+		CREATE TABLE IF NOT EXISTS codex_window_observations (
+			observation_id TEXT NOT NULL,
+			request_id TEXT NOT NULL,
+			account_id TEXT NOT NULL,
+			source TEXT NOT NULL,
+			http_status INTEGER NOT NULL,
+			request_started_at INTEGER NOT NULL,
+			observed_at INTEGER NOT NULL,
+			scope TEXT NOT NULL,
+			family_codename TEXT NOT NULL,
+			slot TEXT NOT NULL,
+			limit_name TEXT,
+			used_percent REAL,
+			window_minutes INTEGER,
+			reset_at INTEGER,
+			active_limit TEXT,
+			FOREIGN KEY (account_id) REFERENCES accounts(id) ON DELETE CASCADE
+		)
+	`);
+
+	// One row per (attempt, window). A UNIQUE INDEX rather than a table-level
+	// PRIMARY KEY so the row key stays independent of the column order above.
+	db.run(
+		`CREATE UNIQUE INDEX IF NOT EXISTS idx_codex_window_obs_key
+			ON codex_window_observations(observation_id, scope, family_codename, slot)`,
+	);
+	db.run(
+		`CREATE INDEX IF NOT EXISTS idx_codex_window_obs_account_time ON codex_window_observations(account_id, observed_at)`,
+	);
+	db.run(
+		`CREATE INDEX IF NOT EXISTS idx_codex_window_obs_observed_at ON codex_window_observations(observed_at)`,
+	);
+
+	// Create openai_bucket_observations table — the OpenAI-compatible
+	// `x-ratelimit-*` bucket readings, one row per bucket per upstream attempt.
+	//
+	// Captured before the openai-formats header sanitizer deletes the whole
+	// x-ratelimit family on the way to the client, which is the only window in
+	// which these readings exist at all.
+	//
+	// reset_raw is stored VERBATIM: the value is a duration string ("6m0s") whose
+	// grammar is undocumented and has changed, so a parsed number would bake this
+	// build's guess into the series permanently. limit_value / remaining are
+	// nullable — a row IS written when a header was present but malformed, and
+	// the nulls record that presence.
+	db.run(`
+		CREATE TABLE IF NOT EXISTS openai_bucket_observations (
+			observation_id TEXT NOT NULL,
+			request_id TEXT NOT NULL,
+			account_id TEXT NOT NULL,
+			bucket TEXT NOT NULL,
+			request_started_at INTEGER NOT NULL,
+			observed_at INTEGER NOT NULL,
+			http_status INTEGER NOT NULL,
+			endpoint TEXT,
+			limit_value INTEGER,
+			remaining INTEGER,
+			reset_raw TEXT,
+			FOREIGN KEY (account_id) REFERENCES accounts(id) ON DELETE CASCADE
+		)
+	`);
+
+	db.run(
+		`CREATE UNIQUE INDEX IF NOT EXISTS idx_openai_bucket_obs_key
+			ON openai_bucket_observations(observation_id, bucket)`,
+	);
+	db.run(
+		`CREATE INDEX IF NOT EXISTS idx_openai_bucket_obs_account_time ON openai_bucket_observations(account_id, observed_at)`,
+	);
+	db.run(
+		`CREATE INDEX IF NOT EXISTS idx_openai_bucket_obs_observed_at ON openai_bucket_observations(observed_at)`,
+	);
+
 	// Create quota_drift_results table — the precomputed quota-drift analysis.
 	// One row per completed precompute pass; the latest row wins and the cleanup
 	// pass keeps only the most recent few.

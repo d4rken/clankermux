@@ -168,6 +168,12 @@ export type IncrementalVacuumRequest =
 			 * retention — see INTERNAL_DISPATCH_SPEND_RETENTION_MS.
 			 */
 			internalDispatchSpendCutoff: number;
+			/**
+			 * Cutoff for the raw Codex/OpenAI observation tables, both aged by
+			 * `observed_at`. Fixed retention — see
+			 * PROVIDER_WINDOW_OBSERVATION_RETENTION_MS.
+			 */
+			providerWindowObservationCutoff: number;
 			// Byte budget for retained payload CONTENT (not file size); 0 disables
 			// the size pass. Applied on top of payloadCutoff — whichever rule
 			// deletes more wins.
@@ -192,6 +198,10 @@ export type CleanupCounts = {
 	removedUnifiedSummaryObservations: number;
 	/** The proxy's own probe spend, aged by `started_at`. */
 	removedInternalDispatchSpend: number;
+	/** Raw Codex window lines. */
+	removedCodexWindowObservations: number;
+	/** Raw OpenAI-compatible bucket readings. */
+	removedOpenAiBucketObservations: number;
 };
 
 export type IncrementalVacuumResult =
@@ -515,6 +525,7 @@ async function runCleanup(
 	unifiedClaimObservationCutoff: number,
 	unifiedSummaryObservationCutoff: number,
 	internalDispatchSpendCutoff: number,
+	providerWindowObservationCutoff: number,
 	payloadMaxBytes: number,
 ): Promise<void> {
 	let db: Database | undefined;
@@ -620,6 +631,22 @@ async function runCleanup(
 			"started_at",
 		);
 
+		// The Codex/OpenAI analogue of the claim series. Counted separately from
+		// each other because they are two tables with two row shapes; one number
+		// for both would misreport either.
+		const removedCodexWindowObservations = await tryDeleteSnapshotsBatched(
+			db,
+			"codex_window_observations",
+			providerWindowObservationCutoff,
+			"observed_at",
+		);
+		const removedOpenAiBucketObservations = await tryDeleteSnapshotsBatched(
+			db,
+			"openai_bucket_observations",
+			providerWindowObservationCutoff,
+			"observed_at",
+		);
+
 		// Precomputed quota-drift payloads: keep the most recent few, drop the
 		// rest. Age is the wrong rule here — a scheduler that has been down for a
 		// week must not have its one surviving result aged out from under the
@@ -711,6 +738,8 @@ async function runCleanup(
 				removedUnifiedClaimObservations,
 				removedUnifiedSummaryObservations,
 				removedInternalDispatchSpend,
+				removedCodexWindowObservations,
+				removedOpenAiBucketObservations,
 			},
 		} satisfies IncrementalVacuumResult);
 	} catch (err) {
@@ -738,6 +767,7 @@ self.onmessage = (event: MessageEvent<IncrementalVacuumRequest>) => {
 			request.unifiedClaimObservationCutoff,
 			request.unifiedSummaryObservationCutoff,
 			request.internalDispatchSpendCutoff,
+			request.providerWindowObservationCutoff,
 			request.payloadMaxBytes,
 		);
 	} else {
