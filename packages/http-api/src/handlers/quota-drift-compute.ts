@@ -425,13 +425,29 @@ export const MIN_FLAT_TRAFFIC_EQ_TOKENS = 1_000_000;
  */
 export const CURRENT_MEMBER_MS = 24 * 60 * 60 * 1000;
 
-/** What one account's samples say about whether one window moved. */
+/**
+ * What one account's samples say about whether one window moved.
+ *
+ * An observation records TWO things that are related but independent: that the
+ * account was being sampled in this cohort, and what its readings said about
+ * this window. The second can be empty while the first holds - an account
+ * sampled every few minutes whose value for this window has always been null is
+ * a member of the cohort with no target history at all - so every field
+ * describing the window's values is nullable and `lastSampleMs` is not.
+ *
+ * Tying membership to the target history is not a hypothetical error: it hid a
+ * live, actively-sampled account from a cohort claim entirely, letting the one
+ * account that did report the window say "all-accounts" about it.
+ */
 export interface WindowObservation {
 	accountId: string;
-	/** Oldest non-null sample in this cohort's stretch, ms since epoch. */
-	firstObservedMs: number;
-	/** Newest non-null sample, ms since epoch. */
-	lastObservedMs: number;
+	/**
+	 * Oldest non-null sample in this cohort's stretch, ms since epoch, or null
+	 * when this account has never reported the window in this cohort.
+	 */
+	firstObservedMs: number | null;
+	/** Newest non-null sample, ms since epoch, or null for the same reason. */
+	lastObservedMs: number | null;
 	/**
 	 * Newest snapshot of ANY kind in this cohort, ms since epoch.
 	 *
@@ -458,10 +474,13 @@ export interface WindowObservation {
 	latestIncludesWindow: boolean;
 	/** Newest observed CHANGE, ms, or null when the value never moved. */
 	lastMovementMs: number | null;
-	/** Start of the current unbroken constant run, ms. */
-	flatStartMs: number;
-	/** The value that run has been reporting. */
-	flatValuePct: number;
+	/**
+	 * Start of the current unbroken constant run, ms, or null when no value was
+	 * ever observed.
+	 */
+	flatStartMs: number | null;
+	/** The value that run has been reporting, or null for the same reason. */
+	flatValuePct: number | null;
 	/**
 	 * The first reading of the trailing run whose readings carry NO value for
 	 * this window, ms, or null when the newest reading still carries one or the
@@ -498,6 +517,13 @@ export interface WindowObservation {
  *
  * The clock is the effective one (`observed_at ?? sampled_at`), matching what
  * segment boundaries use.
+ *
+ * Every reading produces or updates an observation, including a reading that
+ * carries no value for this window. Membership in the cohort is a fact about
+ * SAMPLING, and an account whose value for this window has always been null is
+ * still being polled and still has to be counted - otherwise it is invisible to
+ * every cohort-level claim, and the accounts that do report the window speak
+ * for it unqualified.
  */
 export function collectWindowObservations(
 	account: ComputeAccount,
@@ -522,6 +548,12 @@ export function collectWindowObservations(
 			if (existing) {
 				existing.lastSampleMs = ms;
 				existing.latestIncludesWindow = false;
+			} else {
+				// No value for this window has ever been read from this account in
+				// this cohort. It is a member all the same - the sampler is polling
+				// it - and recording that is what keeps a sibling-only account from
+				// dropping out of the cohort it belongs to.
+				out.set(key, sampledWithoutValue(account.id, ms));
 			}
 			prev = null;
 			continue;
@@ -545,6 +577,9 @@ export function collectWindowObservations(
 			existing.lastObservedMs = ms;
 			existing.lastSampleMs = ms;
 			existing.latestIncludesWindow = true;
+			// The account was already a member on its sampling alone; this is the
+			// first value it has reported here, so the target history starts now.
+			existing.firstObservedMs ??= ms;
 			if (!continuous) {
 				// Unobserved time is not stillness: the streak restarts here rather
 				// than bridging whatever happened across the break.
@@ -569,6 +604,28 @@ export function collectWindowObservations(
 	}
 
 	return out;
+}
+
+/**
+ * A cohort member the sampler is reading that has never reported this window.
+ *
+ * Every target-history field is null: there is no first observation, no run, no
+ * value. What the record asserts is only that a reading was taken at `ms` and
+ * did not include this window - which is exactly what a cohort-level claim has
+ * to account for before it can say "every account".
+ */
+function sampledWithoutValue(accountId: string, ms: number): WindowObservation {
+	return {
+		accountId,
+		firstObservedMs: null,
+		lastObservedMs: null,
+		lastSampleMs: ms,
+		latestIncludesWindow: false,
+		lastMovementMs: null,
+		flatStartMs: null,
+		flatValuePct: null,
+		notReportingSinceMs: null,
+	};
 }
 
 /**
@@ -679,6 +736,35 @@ const NO_MOVEMENT_FACTS: FlatWindowFacts = {
 };
 
 /**
+ * An observation whose account carried a value for this window in its newest
+ * reading.
+ *
+ * The narrowing is the point: an account currently reporting the window has
+ * necessarily reported it at least once, so its target history is populated and
+ * the flat gates can read it without null checks. The guard asserts that rather
+ * than assuming it, because the two properties are stored separately by design
+ * - a member with no target history is exactly what a sibling-only account is.
+ */
+type ReportingObservation = WindowObservation & {
+	firstObservedMs: number;
+	lastObservedMs: number;
+	flatStartMs: number;
+	flatValuePct: number;
+};
+
+function isReportingObservation(
+	observation: WindowObservation,
+): observation is ReportingObservation {
+	return (
+		observation.latestIncludesWindow &&
+		observation.firstObservedMs !== null &&
+		observation.lastObservedMs !== null &&
+		observation.flatStartMs !== null &&
+		observation.flatValuePct !== null
+	);
+}
+
+/**
  * Aggregate one cohort's per-account observations into the facts the panel
  * renders.
  *
@@ -740,7 +826,13 @@ export function summarizeFlatWindow(
 ): FlatWindowFacts {
 	if (observations.length === 0) return NO_MOVEMENT_FACTS;
 
-	const lastObservedMs = Math.max(...observations.map((o) => o.lastObservedMs));
+	// Only the accounts that have reported the window at least once contribute a
+	// timestamp; a cohort where none ever did has no last observation to name.
+	const observedTimes = observations
+		.map((o) => o.lastObservedMs)
+		.filter((ms): ms is number => ms !== null);
+	const lastObservedMs =
+		observedTimes.length > 0 ? Math.max(...observedTimes) : null;
 	const movements = observations
 		.map((o) => o.lastMovementMs)
 		.filter((ms): ms is number => ms !== null);
@@ -768,7 +860,7 @@ export function summarizeFlatWindow(
 	// account that is not in here has not gone quiet — its readings simply no
 	// longer include the window, which is a different fact and cannot be settled
 	// by the accounts that do report it.
-	const reporting = active.filter((o) => o.latestIncludesWindow);
+	const reporting = active.filter(isReportingObservation);
 	if (reporting.length === 0) return base;
 
 	const threshold = FLAT_WINDOW_THRESHOLD_MS[window];

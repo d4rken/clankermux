@@ -813,6 +813,45 @@ function seedFlatWindow(opts: FlatFixture): Database {
 	return db;
 }
 
+/**
+ * A second account in the SAME cohort that is sampled throughout and never
+ * reports the 5-hour window.
+ *
+ * The live shape of an account added after the provider stopped sending the
+ * window, or one whose plan never carried it: the sampler polls it every few
+ * minutes and its readings carry a weekly value and nothing else. It has no
+ * 5-hour history at all, which is exactly why it used to be invisible to the
+ * 5-hour cohort - and its absence let the one account that does report the
+ * window claim to speak for every account in the cohort.
+ */
+function seedSiblingOnlyAccount(db: Database, days: number): string {
+	const accountId = "qd-acct-sibling-only";
+	const count = Math.floor((days * DAY_MS) / FLAT_STEP_MS);
+	const startMs = FIXTURE_NOW - count * FLAT_STEP_MS;
+
+	db.run(
+		`INSERT INTO accounts (id, name, provider, created_at,
+			identity_plan_tier, identity_rate_limit_tier)
+		 VALUES (?, ?, 'codex', ?, 'pro', NULL)`,
+		[accountId, accountId, startMs - DAY_MS],
+	);
+	const insertSnapshot = db.prepare(
+		`INSERT INTO usage_snapshots (
+			account_id, provider, sampled_at, five_hour_pct, five_hour_reset,
+			seven_day_pct, seven_day_reset, observed_at, plan_tier, rate_limit_tier
+		) VALUES (?, 'codex', ?, NULL, NULL, ?, NULL, ?, 'pro', NULL)`,
+	);
+	db.transaction(() => {
+		for (let i = 0; i < count; i++) {
+			const sampledAt = startMs + i * FLAT_STEP_MS;
+			// A weekly percentage that creeps upward, so this account produces real
+			// runs and segments of its own rather than being an inert row source.
+			insertSnapshot.run(accountId, sampledAt, (i % 400) / 10, sampledAt);
+		}
+	})();
+	return accountId;
+}
+
 /** The 5-hour window of the only cohort a flat fixture produces. */
 function flatWindowOf(db: Database) {
 	const payload = computeQuotaDrift(db, {
@@ -879,6 +918,30 @@ describe("quota-drift flat windows", () => {
 		expect(FIXTURE_NOW - (window?.lastObservedMs ?? 0)).toBeGreaterThan(
 			24 * 60 * MINUTE_MS,
 		);
+	});
+
+	it("counts a same-cohort account that has never reported the window", () => {
+		// THE case membership-on-target-observations could not reach. The flat
+		// account is not the whole cohort: a second account in it is sampled every
+		// few minutes and reports only the weekly window, so its 5-hour value has
+		// always been null. With no 5-hour observation it never entered the
+		// cohort's membership at all, and the flat account alone produced an
+		// "all-accounts" claim while a live member was unaccounted for.
+		const db = seedFlatWindow({ days: 43, pct: 0, withTraffic: true });
+		seedSiblingOnlyAccount(db, 43);
+		const window = flatWindowOf(db);
+		db.close();
+
+		// The flat claim itself stands - one account really has been flat for six
+		// weeks under real traffic - but it covers that account only.
+		expect(window?.flatSince).not.toBeNull();
+		expect(window?.flatValuePct).toBe(0);
+		expect(window?.flatScope).toBe("reporting-subset");
+		// Nothing is claimed about the sibling-only account either: it never
+		// reported the window, so there is no transition to date and no absence to
+		// establish.
+		expect(window?.notReportedSince).toBeNull();
+		expect(window?.notReportedScope).toBeNull();
 	});
 
 	it("says nothing when the window was flat because we sent nothing", () => {
@@ -1265,6 +1328,64 @@ describe("collectWindowObservations", () => {
 		expect(FIXTURE_NOW - observation.lastObservedMs).toBeGreaterThan(
 			24 * 60 * MINUTE_MS,
 		);
+	});
+
+	it("records an account sampled without ever reporting the window", () => {
+		// Sampling membership does not depend on the target window ever having
+		// produced a value. Without this the account has no observation at all and
+		// cannot qualify anything the cohort's other accounts claim.
+		const rows = Array.from({ length: 6 }, (_, i) => ({
+			sampled_at: FIXTURE_NOW - (5 - i) * FLAT_STEP_MS,
+			observed_at: FIXTURE_NOW - (5 - i) * FLAT_STEP_MS,
+			five_hour_pct: null,
+			five_hour_reset: null,
+			seven_day_pct: 19,
+			seven_day_reset: null,
+			plan_tier: "pro",
+			rate_limit_tier: null,
+		}));
+
+		const observation = [
+			...collectWindowObservations(account, rows, "five_hour").values(),
+		][0];
+
+		expect(observation).toBeDefined();
+		expect(observation.lastSampleMs).toBe(FIXTURE_NOW);
+		expect(observation.latestIncludesWindow).toBe(false);
+		// No target history whatsoever - and no fabricated one either.
+		expect(observation.firstObservedMs).toBeNull();
+		expect(observation.lastObservedMs).toBeNull();
+		expect(observation.flatStartMs).toBeNull();
+		expect(observation.flatValuePct).toBeNull();
+		expect(observation.notReportingSinceMs).toBeNull();
+	});
+
+	it("adopts the first value an already-sampled account reports", () => {
+		// The same account starts reporting the window. The observation it already
+		// had must take up the target history rather than keeping the null one:
+		// `firstObservedMs` dates the observed span the flat threshold is measured
+		// against, and leaving it null would make that span unmeasurable.
+		const rows = Array.from({ length: 6 }, (_, i) => ({
+			sampled_at: FIXTURE_NOW - (5 - i) * FLAT_STEP_MS,
+			observed_at: FIXTURE_NOW - (5 - i) * FLAT_STEP_MS,
+			five_hour_pct: i < 3 ? null : 7,
+			five_hour_reset: null,
+			seven_day_pct: 19,
+			seven_day_reset: null,
+			plan_tier: "pro",
+			rate_limit_tier: null,
+		}));
+
+		const observation = [
+			...collectWindowObservations(account, rows, "five_hour").values(),
+		][0];
+
+		expect(observation.firstObservedMs).toBe(FIXTURE_NOW - 2 * FLAT_STEP_MS);
+		expect(observation.lastObservedMs).toBe(FIXTURE_NOW);
+		expect(observation.latestIncludesWindow).toBe(true);
+		expect(observation.flatValuePct).toBe(7);
+		// It never moved: one constant value across the readings that carried one.
+		expect(observation.lastMovementMs).toBeNull();
 	});
 
 	it("surfaces a stalled sampler as an old last observation", () => {
