@@ -19,5 +19,8 @@
 		"@clankermux/providers": "workspace:*",
 		"@clankermux/proxy": "workspace:*",
 		"@clankermux/types": "workspace:*"
+	},
+	"devDependencies": {
+		"@clankermux/test-support": "workspace:*"
 	}
 }

@@ -22,5 +22,8 @@
 		"@clankermux/http-api": "workspace:*",
 		"@clankermux/security": "workspace:*",
 		"@clankermux/types": "workspace:*"
+	},
+	"devDependencies": {
+		"@clankermux/test-support": "workspace:*"
 	}
 }
