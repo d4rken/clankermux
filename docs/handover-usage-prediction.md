@@ -268,6 +268,110 @@ Cautions:
   explicitly-gated decision.
 - Preserve the null-means-unknown invariant: no evidence ⇒ `null`, never `0`.
 
+#### Measured outcome (2026-08-24)
+
+**Not feasible with the currently recorded data.** A dedicated feasibility study
+— committed at `docs/ledger-burn-feasibility.md`, reproducible read-only with
+`bun scripts/ledger-feasibility.ts` — asked the prior question this item skips:
+can snapshot percent-deltas be *causally attributed* to ledger tokens at all?
+**Every evaluated group failed its capability matrix**, so no coefficient fit
+was attempted and nothing landed in the estimator.
+
+- **`anthropic` / `five_hour` — FAIL on the aggregate relation.** The selected
+  cell (lag 0, 10-minute bins) scored an evaluation R-squared of **0.522**,
+  which does clear the 0.5 threshold, and was then refuted by two measured
+  checks. The future-token placebo — tokens drawn from an interval lying wholly
+  *after* the bin — scored **0.388**, a margin of **0.134** against the
+  pre-declared **0.15**; and the R-squared did not plateau across a contiguous
+  run of adjacent lags (1 lag cleared the threshold, 2 were needed). A relation
+  a placebo nearly reproduces is not attribution.
+- **`anthropic` / `seven_day` — FAIL, and by more.** Evaluation R-squared
+  **0.236**, below the threshold outright, with the future-token control beaten
+  by only **0.058** and **zero** contiguous lags clearing.
+- **`codex` / `seven_day` — FAIL on structure rather than on fit.** **0.0%** of
+  its clean-bin token mass resolves to any model family (**3.13 billion** tokens
+  unresolved — `getModelFamily` recognises Claude slugs only), and it is a
+  **single account**, so the account-permutation placebo cannot even be run.
+  Its aggregate relation is therefore *insufficient evidence*, never a pass,
+  whatever the 0.550 R-squared looks like.
+- **`codex` / `five_hour` — excluded.** OpenAI retired that window on
+  2026-07-12; there is no consumed quota to correlate tokens against.
+
+**Why the recorded data cannot answer it**, in the order the limits bite:
+
+- The utilization percent is **integer-quantised and polled every 120 s**, so it
+  cannot resolve short-horizon burn. On the weekly window **49.7%** of clean
+  10-minute bins that carry tokens show **no percent movement at all** (codex:
+  50.2%). Roughly half the evidence is a zero that means "less than one point",
+  not "no burn".
+- **Snapshot sample times lag their cache reads**, and **request timestamps are
+  terminal-persist times** — when the row was written, not when the tokens were
+  charged. That is why lag was swept at all; at every group the best cell was
+  still lag 0, with R-squared decaying monotonically as lag grew.
+- **Keepalive and auto-refresh burn is deliberately unrecorded**, so the ledger
+  is known to be incomplete by construction. Separately, the study bounds how
+  much percent movement the ledger fails to explain at all: **1.0–6.1%** of
+  positive percent mass per group sits in clean bins with no ledger tokens
+  whatsoever. That is a *lower* bound on all ledger-unexplained positive percent
+  mass whatever its cause — timing misalignment and other omissions are
+  indistinguishable from unrecorded spend here — and a lower bound because a bin
+  whose ledger explains part of its rise counts as matched.
+
+**What IS in place.** The study tool is the durable deliverable:
+`packages/core/src/ledger-feasibility.ts` holds the pure analyses (no DB, no
+clock, unit-tested), `scripts/ledger-feasibility.ts` is the read-only runner,
+and the report is byte-deterministic for a frozen range — no generation
+timestamp, no run durations, and no live account values in the artifact (the
+runner still reads them and prints them to stderr). Byte-identity holds for
+unchanged in-range history *and* identical CLI flags: the reproduce command is
+embedded in the report, so a different `--out` changes the bytes. It carries
+blocked cell selection (the (lag, width, anchor) cell is chosen on an early
+selection block, and the metrics that drive the verdict come from a disjoint
+later evaluation block, with the selection-block scores and range diagnostics
+still disclosed in the report), both mandatory
+placebo controls (future tokens, seeded account permutation), clean-cohort
+construction (reset-lifecycle splitting, pro-rated straddling deltas,
+refund / saturation / overage exclusion) and a per-group capability matrix whose
+thresholds are declared ahead of the numbers.
+
+One result is genuinely positive: **the family-by-token-class design matrix is
+fully identifiable on anthropic data** — rank **16 of 16** active columns,
+condition number **~8** against a 10,000 ceiling, no column pair correlated
+above 0.9. Keeping `input` / `output` / `cache_read` / `cache_creation` separate
+per family is not the problem. If attribution were ever solved, the coefficient
+fit itself would be well-posed.
+
+**What would change the answer** — entry requirements for any retry, in priority
+order:
+
+1. **Higher-resolution or fractional utilization sampling**, or provider-side
+   token accounting. This is the leading observability prerequisite for the
+   weekly windows, where half the token-bearing bins read zero. It is not the
+   only one: the `anthropic` / `five_hour` group fails on the placebo margin and
+   the missing lag plateau even at **15.4%** silent bins. The requirements
+   below are independent capability gates, not consequences of this one.
+2. **Request start or charge timestamps** rather than terminal-persist times, so
+   a lag sweep measures a physical delay instead of a persistence artefact.
+3. **Recording synthetic keepalive/refresh spend**, so completeness becomes a
+   measured quantity instead of a bound.
+4. **A non-Claude model-family resolver**, without which codex token mass has no
+   *family-resolved* design matrix suitable for the per-family coefficients this
+   item proposes — its tokens all land in the unresolved-family columns, which
+   measured rank **3 of 3** at condition **2.078**.
+5. **Tier history.** The schema records no historical tier, so the pooled
+   single-price assumption is unverifiable (schema work — item 7 territory).
+6. **More than one Codex account**, so the account-permutation control can run.
+
+Re-run the committed study after any of these. Its thresholds are pre-declared
+and its report is frozen per range, so a later run is a comparison rather than a
+fresh hunt for a cell that scores well.
+
+**Consequence for item 1.** Item 1 (pool load redistribution) was planned to
+take its demand figure from this model, and that prerequisite is gone for now.
+Re-plan it against per-account slopes — the ones `estimateWindowExhaustion`
+already produces — or defer it until one of the entry requirements above is met.
+Do not build it on a ledger-derived demand model the data cannot support.
+
 ### Item 3 — weight recent evidence
 
 The fit is unweighted, so a reading from 6 hours ago counts as much as one from
