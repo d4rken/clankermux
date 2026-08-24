@@ -978,16 +978,20 @@ describe("GET /api/runway persisted snapshot fallback", () => {
 /**
  * A Codex reading reconstructed from a stored request payload has NO honest
  * observation time — the headers belong to whatever request happened to be
- * retained. The recovery re-seeds the usage cache (deliberately: that is how the
- * proxy gets to see the reading too), so on the NEXT refresh the very same
- * reconstruction comes back through the cache branch.
+ * retained.
  *
- * The point of these cases is that the re-seed writes a FRESHNESS stamp and not
- * an observation: taking the entry's write time as its observation time would
- * hand the reconstruction a confident timestamp anchored to the recovery
- * instant, promoting the weekly window from the degraded now-anchored estimate
- * to the full-confidence observation-anchored one between two refetches, with no
- * new provider evidence behind the change.
+ * The point of these cases is that the reconstruction never gains a confident
+ * timestamp between two refetches with no new provider evidence behind the
+ * change: taking any WRITE time for an observation time would promote the
+ * weekly window from the degraded now-anchored estimate to the full-confidence
+ * observation-anchored one.
+ *
+ * The scan resolves with `seedCache: false` — it is served to the
+ * unauthenticated `GET /public/v1/runway` as well, and a public read may not
+ * move the cache routing reads — so the recovery leaves nothing behind and the
+ * next refresh reconstructs from the same retained payload. The stamp rule is
+ * the same either way, and `/api/accounts`, which does re-seed, has its own
+ * coverage of the cache branch.
  */
 describe("GET /api/runway payload-recovered Codex usage", () => {
 	let nowSpy: ReturnType<typeof spyOn>;
@@ -1094,23 +1098,19 @@ describe("GET /api/runway payload-recovered Codex usage", () => {
 		const adapterQueries: string[] = [];
 		const dbOps = recoveredCodex(adapterQueries);
 
-		// Request 1 performs the recovery and re-seeds the cache.
+		// Request 1 performs the recovery and writes NOTHING: this scan is served
+		// to an unauthenticated GET, so it may not move the cache routing reads.
 		await runway(dbOps);
-		const seeded = usageCache.peekWithAge(ACCOUNT_ID);
-		expect(seeded).not.toBeNull();
-		// The entry exists and is FRESH (that is the point of the re-seed), while
-		// saying nothing about when its reading was observed.
-		expect(seeded?.sampledAtMs).toBe(BASE);
-		expect(seeded?.observedAtMs).toBeNull();
+		expect(usageCache.peekWithAge(ACCOUNT_ID)).toBeNull();
 
-		// Request 2, five minutes later: same data, now served off that entry.
+		// Request 2, five minutes later: the same reading, reconstructed from the
+		// same retained payload rather than off an entry this read planted.
 		nowSpy.mockReturnValue(REFETCH_AT);
 		const body = await runway(dbOps);
 
-		// Served from the cache — the payload scan did not run a second time.
 		expect(
 			adapterQueries.filter((sql) => sql.includes("request_payloads")),
-		).toHaveLength(1);
+		).toHaveLength(2);
 		const weekly = body.accounts[0].windows.find((w) => w.kind === "seven_day");
 		expect(weekly?.utilizationPct).toBe(WEEKLY_PCT);
 
