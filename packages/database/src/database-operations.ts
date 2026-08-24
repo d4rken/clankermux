@@ -313,6 +313,10 @@ const RETENTION_USAGE_TABLES: ReadonlyArray<{
 	// Rides the usage-snapshot retention control (one knob for one series
 	// family), so it has no control of its own — the card sums the two.
 	{ key: "usage_scoped_snapshots", table: "usage_scoped_snapshots" },
+	// Request-aligned claim series. Measured beside the usage snapshots because
+	// it is the same kind of data, but it rides a FIXED retention of its own
+	// (UNIFIED_CLAIM_OBSERVATION_RETENTION_MS), not the usage-snapshot control.
+	{ key: "unified_claim_observations", table: "unified_claim_observations" },
 	// Precomputed analysis output, kept to a handful of rows by the cleanup pass
 	// rather than by a retention control of its own.
 	{ key: "quota_drift_results", table: "quota_drift_results" },
