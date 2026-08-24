@@ -196,6 +196,23 @@ export const POST_FLOOR_TABLE_BASELINES: Readonly<
 		columns: ["computed_at", "payload"],
 		source: "create-table-at-intro",
 	},
+	unified_claim_observations: {
+		shipped: "2026-08-24",
+		commit: "unreleased",
+		columns: [
+			"request_id",
+			"account_id",
+			"source",
+			"request_started_at",
+			"observed_at",
+			"http_status",
+			"claim",
+			"status",
+			"utilization",
+			"reset_at",
+		],
+		source: "create-table-at-intro",
+	},
 	cache_keepalive_snapshots: {
 		shipped: "2026-06-18",
 		commit: "b0873329",

@@ -28,6 +28,7 @@ import type {
 	StorageUsageType,
 	StrategyStore,
 	ToolCallStat,
+	UnifiedClaimObservationRow,
 	UsageSnapshotRow,
 	UsageSnapshotSample,
 } from "@clankermux/types";
@@ -77,6 +78,7 @@ import {
 } from "./repositories/request.repository";
 import { StatsRepository } from "./repositories/stats.repository";
 import { StrategyRepository } from "./repositories/strategy.repository";
+import { UnifiedClaimObservationRepository } from "./repositories/unified-claim-observation.repository";
 import { UsageScopedSnapshotRepository } from "./repositories/usage-scoped-snapshot.repository";
 import { UsageSnapshotRepository } from "./repositories/usage-snapshot.repository";
 import { withRetryingMethods } from "./retry";
@@ -400,6 +402,7 @@ export class DatabaseOperations implements StrategyStore, Disposable {
 	private combo: ComboRepository;
 	private usageSnapshots: UsageSnapshotRepository;
 	private usageScopedSnapshots: UsageScopedSnapshotRepository;
+	private unifiedClaimObservations: UnifiedClaimObservationRepository;
 	private memorySnapshots: MemorySnapshotRepository;
 	private cacheKeepaliveSnapshots: CacheKeepaliveSnapshotRepository;
 	private accountPayments: AccountPaymentRepository;
@@ -488,6 +491,10 @@ export class DatabaseOperations implements StrategyStore, Disposable {
 		this.usageScopedSnapshots = retrying(
 			new UsageScopedSnapshotRepository(this.adapter),
 			"usageScopedSnapshots",
+		);
+		this.unifiedClaimObservations = retrying(
+			new UnifiedClaimObservationRepository(this.adapter),
+			"unifiedClaimObservations",
 		);
 		this.quotaDriftResults = retrying(
 			new QuotaDriftResultRepository(this.adapter),
@@ -2320,6 +2327,19 @@ OAuth tokens will need to be re-authenticated.
 
 	async deleteScopedUsageSnapshotsOlderThan(cutoffMs: number): Promise<number> {
 		return this.usageScopedSnapshots.deleteOlderThan(cutoffMs);
+	}
+
+	// ── Request-aligned unified claim observations ────────────────────────────
+
+	/**
+	 * Record one response's per-claim rate-limit readings. Idempotent on
+	 * (request_id, claim); real constraint violations still throw. Retention for
+	 * this series is the cleanup worker's, not a repository method.
+	 */
+	async saveUnifiedClaimObservations(
+		rows: UnifiedClaimObservationRow[],
+	): Promise<void> {
+		await this.unifiedClaimObservations.insertMany(rows);
 	}
 
 	// ── Precomputed quota-drift results ───────────────────────────────────────

@@ -19,6 +19,7 @@ export * from "./runway";
 export * from "./stats";
 export * from "./strategy";
 export * from "./system";
+export * from "./unified-claim-observation";
 export * from "./upstream-error";
 export * from "./usage-prediction";
 export * from "./usage-snapshot";
