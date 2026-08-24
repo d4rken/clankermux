@@ -26,6 +26,10 @@ import type { Config } from "@clankermux/config";
 import type { DatabaseOperations } from "@clankermux/database";
 import { BunSqlAdapter, ensureSchema } from "@clankermux/database";
 import { USAGE_CACHE_TTL_MS, usageCache } from "@clankermux/providers";
+import {
+	applyProviderOverloadCooldown,
+	clearProviderOverloadCooldown,
+} from "@clankermux/proxy";
 import type {
 	Account,
 	AnthropicUsageData,
@@ -86,7 +90,8 @@ function insertAccount(
 	over: Partial<{
 		id: string;
 		name: string;
-		provider: string;
+		/** Nullable, as the column is: legacy rows predate the default. */
+		provider: string | null;
 		paused: 0 | 1;
 		pause_reason: string | null;
 		rate_limited_until: number | null;
@@ -101,7 +106,7 @@ function insertAccount(
 	const row = {
 		id: "acct-1",
 		name: "primary",
-		provider: "anthropic",
+		provider: "anthropic" as string | null,
 		paused: 0 as 0 | 1,
 		pause_reason: null,
 		rate_limited_until: null,
@@ -168,10 +173,12 @@ beforeEach(() => {
 	ensureSchema(db);
 	adapter = new BunSqlAdapter(db);
 	usageCache.clear();
+	clearProviderOverloadCooldown();
 });
 
 afterEach(() => {
 	usageCache.clear();
+	clearProviderOverloadCooldown();
 	db.close();
 });
 
@@ -726,6 +733,20 @@ describe("the routing prediction and the count it belongs to", () => {
 		expect(snapshot.pool.defaultRoutable).toBe(0);
 		expect(snapshot.routing.defaultCandidateAccountId).toBeNull();
 		expect(snapshot.accounts.some((a) => a.isDefaultCandidate)).toBe(false);
+	});
+
+	it("reads a legacy null provider as anthropic, so a provider-wide overload still applies", async () => {
+		// The column is nullable and the domain conversion maps null to
+		// "anthropic", as does the account record this same response serves.
+		// Reading it as an unnamed provider in the prediction inputs would leave
+		// the row eligible through an Anthropic overload, and the published count
+		// and candidate would then contradict real routing.
+		insertAccount({ id: "legacy", name: "legacy", provider: null });
+		applyProviderOverloadCooldown("anthropic");
+		const snapshot = await read();
+		expect(snapshot.accounts[0]?.provider).toBe("anthropic");
+		expect(snapshot.pool.defaultRoutable).toBe(0);
+		expect(snapshot.routing.defaultCandidateAccountId).toBeNull();
 	});
 
 	it("states nothing when the routing context cannot be evaluated", async () => {

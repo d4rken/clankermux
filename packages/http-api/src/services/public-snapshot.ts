@@ -656,7 +656,14 @@ export function createPublicSnapshotReader(
 				(row) =>
 					({
 						id: row.id,
-						provider: row.provider ?? "",
+						// A null `provider` column means anthropic, everywhere: the
+						// domain conversion says so, and so does the account record this
+						// same response serves. Mapping it to `""` here instead would
+						// hide a legacy row from provider-wide overload and from
+						// provider-sensitive capacity ranking, so `pool.defaultRoutable`
+						// and `routing.defaultCandidateAccountId` would disagree with the
+						// routing they claim to predict.
+						provider: row.provider || "anthropic",
 						paused: row.paused === 1,
 						pause_reason: row.pause_reason ?? null,
 						rate_limited_until:
