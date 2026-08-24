@@ -82,6 +82,7 @@ import { UnifiedClaimObservationRepository } from "./repositories/unified-claim-
 import { UsageScopedSnapshotRepository } from "./repositories/usage-scoped-snapshot.repository";
 import { UsageSnapshotRepository } from "./repositories/usage-snapshot.repository";
 import { withRetryingMethods } from "./retry";
+import { runStorageUsageScanInWorker } from "./storage-usage-runner";
 
 export interface DatabaseConfig {
 	/** Enable WAL (Write-Ahead Logging) mode for better concurrency */
@@ -327,6 +328,19 @@ const RETENTION_USAGE_TABLES: ReadonlyArray<{
 ];
 
 /**
+ * bun:sqlite treats exactly `":memory:"` and `""` as a private in-memory
+ * database. Neither can be opened by the scan worker — it would get its own
+ * unrelated empty DB and report confident zeros — so both route to the inline
+ * scan path. Exact matches only: the constructor opens without SQLITE_OPEN_URI,
+ * so URI-looking strings (`file::memory:`) are LITERAL disk filenames here and
+ * must go through the worker like any other file, not get substring-matched
+ * into the inline path where a real multi-GB file would block the loop again.
+ */
+function isInMemoryDbPath(path: string): boolean {
+	return path === "" || path === ":memory:";
+}
+
+/**
  * Approximate per-data-type storage usage. `measuredAt` is epoch ms (the
  * http-api handler converts to ISO for the wire). See `StorageUsageResponse`
  * for the meaning of `approxBytes` (logical content bytes, not on-disk pages).
@@ -407,6 +421,13 @@ export class DatabaseOperations implements StrategyStore, Disposable {
 	} | null = null;
 	/** Dedups concurrent storage-usage computations so a slow scan runs once. */
 	private retentionUsageInFlight: Promise<RetentionStorageUsage> | null = null;
+	/**
+	 * Bumped by every cleanup so a scan that STARTED before the cleanup cannot
+	 * write its pre-cleanup counts into the cache after the invalidation — a
+	 * multi-minute worker scan can easily straddle a cleanup, and without this
+	 * the stale measurement would win and stick for the whole TTL.
+	 */
+	private retentionUsageGeneration = 0;
 
 	// Repositories
 	private accounts: AccountRepository;
@@ -853,13 +874,21 @@ export class DatabaseOperations implements StrategyStore, Disposable {
 		if (this.retentionUsageInFlight) {
 			return this.retentionUsageInFlight;
 		}
+		const generation = this.retentionUsageGeneration;
 		const inFlight = this.computeRetentionStorageUsage()
 			.then((value) => {
-				this.retentionUsageCache = { value, computedAt: Date.now() };
+				// A cleanup may have invalidated mid-scan; its bump makes this
+				// scan's snapshot stale, so return it to the callers who asked
+				// for it but keep it out of the cache.
+				if (generation === this.retentionUsageGeneration) {
+					this.retentionUsageCache = { value, computedAt: Date.now() };
+				}
 				return value;
 			})
 			.finally(() => {
-				this.retentionUsageInFlight = null;
+				if (this.retentionUsageInFlight === inFlight) {
+					this.retentionUsageInFlight = null;
+				}
 			});
 		this.retentionUsageInFlight = inFlight;
 		return inFlight;
@@ -870,24 +899,62 @@ export class DatabaseOperations implements StrategyStore, Disposable {
 		const dbBytes = await this.getDbSizeBytes();
 		const walBytes = await this.getWalSizeBytes();
 
-		const types = await Promise.all(
-			RETENTION_USAGE_TABLES.map(async ({ key, table }) => {
-				const { rowCount, approxBytes } =
-					await this.measureTableLogicalSize(table);
-				return { key, table, rowCount, approxBytes };
-			}),
-		);
+		// The byte sums are full-table scans, and bun:sqlite is synchronous —
+		// run here they block the event loop for the whole scan (observed
+		// 94–130 s against a cold OS page cache after a restart, freezing ALL
+		// HTTP serving). The worker opens its own readonly handle instead; WAL
+		// readers don't block this connection's writer. An in-memory DB cannot
+		// be shared with a worker, so it scans inline — it is by definition
+		// small enough not to block anything.
+		if (isInMemoryDbPath(this.resolvedDbPath)) {
+			const types = await Promise.all(
+				RETENTION_USAGE_TABLES.map(async ({ key, table }) => {
+					const { rowCount, approxBytes } =
+						await this.measureTableLogicalSize(table);
+					return { key, table, rowCount, approxBytes };
+				}),
+			);
+			return { available: true, measuredAt, dbBytes, walBytes, types };
+		}
 
+		const scan = await runStorageUsageScanInWorker(this.resolvedDbPath, {
+			tables: RETENTION_USAGE_TABLES,
+			busyTimeoutMs: 10000,
+		});
+		if (!scan.ok) {
+			console.warn(`[storage-usage] scan worker failed: ${scan.error}`);
+			return {
+				available: false,
+				measuredAt,
+				dbBytes,
+				walBytes,
+				types: RETENTION_USAGE_TABLES.map(({ key, table }) => ({
+					key,
+					table,
+					rowCount: 0,
+					approxBytes: 0,
+				})),
+			};
+		}
+		// Re-key by table so response order is the constant list's order even if
+		// a worker ever reordered its output.
+		const byTable = new Map(scan.types.map((t) => [t.table, t]));
+		const types = RETENTION_USAGE_TABLES.map(({ key, table }) => ({
+			key,
+			table,
+			rowCount: byTable.get(table)?.rowCount ?? 0,
+			approxBytes: byTable.get(table)?.approxBytes ?? 0,
+		}));
 		return { available: true, measuredAt, dbBytes, walBytes, types };
 	}
 
 	/**
-	 * Approximate logical byte size + row count of a single SQLite table,
-	 * computed as `SUM(LENGTH(col))` over every column (discovered via
-	 * `PRAGMA table_info`). LENGTH counts the text representation of values
-	 * (raw bytes for BLOBs), so this undercounts SQLite's varint integer
-	 * encoding and ignores index/page overhead — an intentional "content
-	 * bytes" approximation, labeled as such in the UI. Returns zeros (never
+	 * Inline fallback for in-memory databases ONLY — a `:memory:` DB cannot be
+	 * opened by the scan worker, and is small enough that the synchronous scan
+	 * cannot meaningfully block. File-backed databases always go through
+	 * `runStorageUsageScanInWorker`; this method blocks the event loop for the
+	 * whole scan and must not be pointed at one. Same approximation as the
+	 * worker: `SUM(LENGTH(col))` over every column, zeros on error (never
 	 * throws) so one bad table can't sink the whole measurement.
 	 */
 	private async measureTableLogicalSize(
@@ -1621,7 +1688,13 @@ OAuth tokens will need to be re-authenticated.
 			// Row counts/sizes may have changed (even a partial/failed run) — drop
 			// the cached storage-usage measurement so the next dashboard read
 			// recomputes. Must happen on THIS instance; the worker can't touch it.
+			// The generation bump stops an in-flight pre-cleanup scan from
+			// re-caching its stale snapshot, and detaching the in-flight promise
+			// makes the dashboard's immediate post-cleanup refetch start a fresh
+			// scan instead of adopting the pre-cleanup one.
+			this.retentionUsageGeneration += 1;
 			this.retentionUsageCache = null;
+			this.retentionUsageInFlight = null;
 		}
 	}
 

@@ -11,6 +11,7 @@ import {
 	writeMarker,
 } from "./build-guard.ts";
 import { buildTargets } from "./guarded-build.ts";
+import { WORKERS } from "../packages/database/scripts/workers-manifest.ts";
 
 let root: string;
 
@@ -236,75 +237,35 @@ describe("db-workers target output check", () => {
 		await write(`packages/database/src/${name}`, body);
 	}
 
+	async function writeAllFilled(): Promise<void> {
+		for (const worker of WORKERS) {
+			await writeInline(
+				worker.inline,
+				`export const ${worker.constName} = "AAAA";`,
+			);
+		}
+	}
+
 	it("treats an empty EMBEDDED placeholder as NOT built", async () => {
+		await writeAllFilled();
+		const [first] = WORKERS;
 		await writeInline(
-			"inline-vacuum-worker.ts",
-			'export const EMBEDDED_VACUUM_WORKER_CODE = "AAAA";',
-		);
-		await writeInline(
-			"inline-integrity-check-worker.ts",
-			'export const EMBEDDED_INTEGRITY_CHECK_WORKER_CODE = "";',
-		);
-		await writeInline(
-			"inline-incremental-vacuum-worker.ts",
-			'export const EMBEDDED_INCREMENTAL_VACUUM_WORKER_CODE = "AAAA";',
-		);
-		await writeInline(
-			"inline-payload-write-worker.ts",
-			'export const EMBEDDED_PAYLOAD_WRITE_WORKER_CODE = "AAAA";',
+			first.inline,
+			`export const ${first.constName} = "";`,
 		);
 		expect(await dbTarget().checkOutput(root)).toBe(false);
 	});
 
-	it("treats all-four-filled as built", async () => {
-		await writeInline(
-			"inline-vacuum-worker.ts",
-			'export const EMBEDDED_VACUUM_WORKER_CODE = "AAAA";',
-		);
-		await writeInline(
-			"inline-integrity-check-worker.ts",
-			'export const EMBEDDED_INTEGRITY_CHECK_WORKER_CODE = "BBBB";',
-		);
-		await writeInline(
-			"inline-incremental-vacuum-worker.ts",
-			'export const EMBEDDED_INCREMENTAL_VACUUM_WORKER_CODE = "CCCC";',
-		);
-		await writeInline(
-			"inline-payload-write-worker.ts",
-			'export const EMBEDDED_PAYLOAD_WRITE_WORKER_CODE = "DDDD";',
-		);
+	it("treats every-inline-filled as built", async () => {
+		await writeAllFilled();
 		expect(await dbTarget().checkOutput(root)).toBe(true);
 	});
 
 	it("treats a missing inline file as NOT built", async () => {
-		await writeInline(
-			"inline-vacuum-worker.ts",
-			'export const EMBEDDED_VACUUM_WORKER_CODE = "AAAA";',
-		);
-		// two of four present
-		await writeInline(
-			"inline-integrity-check-worker.ts",
-			'export const EMBEDDED_INTEGRITY_CHECK_WORKER_CODE = "BBBB";',
-		);
+		await writeAllFilled();
+		const last = WORKERS[WORKERS.length - 1];
+		await rm(join(root, "packages/database/src", last.inline));
 		expect(await dbTarget().checkOutput(root)).toBe(false);
 	});
 
-	it("treats a missing payload-write inline file as NOT built", async () => {
-		// The payload writer is the newest entry in DB_WORKER_INLINE_FILES; an
-		// omission there would make the systemd guard skip the rebuild and boot
-		// with an empty EMBEDDED_* constant, silently losing all payload writes.
-		await writeInline(
-			"inline-vacuum-worker.ts",
-			'export const EMBEDDED_VACUUM_WORKER_CODE = "AAAA";',
-		);
-		await writeInline(
-			"inline-integrity-check-worker.ts",
-			'export const EMBEDDED_INTEGRITY_CHECK_WORKER_CODE = "BBBB";',
-		);
-		await writeInline(
-			"inline-incremental-vacuum-worker.ts",
-			'export const EMBEDDED_INCREMENTAL_VACUUM_WORKER_CODE = "CCCC";',
-		);
-		expect(await dbTarget().checkOutput(root)).toBe(false);
-	});
 });
