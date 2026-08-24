@@ -6,12 +6,12 @@ import {
 	expect,
 	it,
 } from "bun:test";
-import { existsSync, unlinkSync } from "node:fs";
 import type { DatabaseOperations } from "@clankermux/database";
 import { DatabaseFactory } from "@clankermux/database";
+import { tempDbTracker } from "@clankermux/test-support";
 import { createApiKeyRenameHandler } from "../api-keys";
 
-const TEST_DB_PATH = "/tmp/test-api-keys-rename.db";
+const tmpDb = tempDbTracker("test-api-keys-rename");
 
 /** Insert a minimal active API key row and return its generated id. */
 async function insertApiKey(
@@ -52,18 +52,17 @@ describe("createApiKeyRenameHandler", () => {
 	let handler: (req: Request, idOrName: string) => Promise<Response>;
 
 	beforeAll(() => {
-		if (existsSync(TEST_DB_PATH)) unlinkSync(TEST_DB_PATH);
-		DatabaseFactory.initialize(TEST_DB_PATH);
+		DatabaseFactory.initialize(tmpDb.next());
 		dbOps = DatabaseFactory.getInstance();
 		handler = createApiKeyRenameHandler(dbOps);
 	});
 
 	afterAll(() => {
-		DatabaseFactory.reset();
+		// reset() closes the singleton connection before the files go away.
 		try {
-			if (existsSync(TEST_DB_PATH)) unlinkSync(TEST_DB_PATH);
-		} catch {
-			// ignore
+			DatabaseFactory.reset();
+		} finally {
+			tmpDb.cleanup();
 		}
 	});
 

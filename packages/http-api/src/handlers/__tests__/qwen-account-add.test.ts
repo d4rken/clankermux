@@ -9,10 +9,10 @@
  */
 import { Database } from "bun:sqlite";
 import { afterEach, beforeEach, describe, expect, it, mock } from "bun:test";
-import { existsSync, unlinkSync } from "node:fs";
 import type { DatabaseOperations } from "@clankermux/database";
 import { DatabaseFactory, ensureSchema } from "@clankermux/database";
 import * as qwenDeviceFlow from "@clankermux/providers/qwen";
+import { tempDbTracker } from "@clankermux/test-support";
 
 // The real module is spread back in so this mock replaces exactly the two
 // network functions and nothing else — bun's mock.module is process-wide, and a
@@ -41,7 +41,7 @@ mock.module("@clankermux/providers/qwen", () => ({
 const { createQwenDeviceFlowInitHandler, createQwenDeviceFlowStatusHandler } =
 	await import("../oauth");
 
-const LEGACY_DB_PATH = "/tmp/test-qwen-account-add-legacy-default.db";
+const tmpDb = tempDbTracker("test-qwen-account-add-legacy-default");
 
 function post(body: unknown): Request {
 	return new Request("http://localhost/api/oauth/qwen/init", {
@@ -56,7 +56,7 @@ function post(body: unknown): Request {
  * reverted, then let DatabaseFactory open it: `CREATE TABLE IF NOT EXISTS`
  * leaves the existing table, and its default, alone.
  */
-function seedLegacyDefaultDb(): void {
+function seedLegacyDefaultDb(dbPath: string): void {
 	const template = new Database(":memory:");
 	ensureSchema(template);
 	const { sql } = template
@@ -76,7 +76,7 @@ function seedLegacyDefaultDb(): void {
 		);
 	}
 
-	const db = new Database(LEGACY_DB_PATH, { create: true });
+	const db = new Database(dbPath, { create: true });
 	db.run(legacy);
 	db.close();
 }
@@ -102,15 +102,19 @@ describe("Qwen device flow account creation on a database with the old default",
 	let dbOps: DatabaseOperations;
 
 	beforeEach(() => {
-		if (existsSync(LEGACY_DB_PATH)) unlinkSync(LEGACY_DB_PATH);
-		seedLegacyDefaultDb();
-		DatabaseFactory.initialize(LEGACY_DB_PATH);
+		const legacyDbPath = tmpDb.next();
+		seedLegacyDefaultDb(legacyDbPath);
+		DatabaseFactory.initialize(legacyDbPath);
 		dbOps = DatabaseFactory.getInstance();
 	});
 
 	afterEach(() => {
-		DatabaseFactory.reset();
-		if (existsSync(LEGACY_DB_PATH)) unlinkSync(LEGACY_DB_PATH);
+		// reset() closes the singleton connection before the files go away.
+		try {
+			DatabaseFactory.reset();
+		} finally {
+			tmpDb.cleanup();
+		}
 	});
 
 	it("enables overage auto-pause explicitly instead of inheriting the default", async () => {

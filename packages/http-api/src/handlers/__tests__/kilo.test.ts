@@ -1,28 +1,19 @@
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
-import { existsSync, unlinkSync } from "node:fs";
 import type { DatabaseOperations } from "@clankermux/database";
 import { DatabaseFactory } from "@clankermux/database";
+import { tempDbTracker } from "@clankermux/test-support";
 import { createKiloAccountAddHandler } from "../accounts";
 
 // Test database path
-const TEST_DB_PATH = "/tmp/test-kilo-handler.db";
+const tmpDb = tempDbTracker("test-kilo-handler");
 
 describe("Kilo Gateway Handler", () => {
 	let dbOps: DatabaseOperations;
 	let handler: (req: Request) => Promise<Response>;
 
 	beforeAll(async () => {
-		// Clean up any existing test database
-		try {
-			if (existsSync(TEST_DB_PATH)) {
-				unlinkSync(TEST_DB_PATH);
-			}
-		} catch (error) {
-			console.warn("Failed to clean up existing test database:", error);
-		}
-
 		// Initialize test database
-		DatabaseFactory.initialize(TEST_DB_PATH);
+		DatabaseFactory.initialize(tmpDb.next());
 		dbOps = DatabaseFactory.getInstance();
 
 		// Create handler
@@ -30,15 +21,12 @@ describe("Kilo Gateway Handler", () => {
 	});
 
 	afterAll(() => {
-		// Clean up test database
+		// reset() closes the singleton connection before the files go away.
 		try {
-			if (existsSync(TEST_DB_PATH)) {
-				unlinkSync(TEST_DB_PATH);
-			}
-		} catch (error) {
-			console.warn("Failed to clean up test database:", error);
+			DatabaseFactory.reset();
+		} finally {
+			tmpDb.cleanup();
 		}
-		DatabaseFactory.reset();
 	});
 
 	describe("Kilo Gateway Account Creation", () => {

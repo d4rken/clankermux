@@ -1,14 +1,14 @@
 import { Database } from "bun:sqlite";
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
-import { existsSync, unlinkSync } from "node:fs";
 import type { DatabaseOperations } from "@clankermux/database";
 import { DatabaseFactory, ensureSchema } from "@clankermux/database";
+import { tempDbTracker } from "@clankermux/test-support";
 import {
 	API_KEY_PROVIDERS,
 	createApiKeyAccountAddHandler,
 } from "../api-key-account-add";
 
-const TEST_DB_PATH = "/tmp/test-api-key-account-add.db";
+const tmpDb = tempDbTracker("test-api-key-account-add");
 
 function post(body: unknown): Request {
 	return new Request("http://localhost/api/accounts/x", {
@@ -22,14 +22,17 @@ describe("createApiKeyAccountAddHandler", () => {
 	let dbOps: DatabaseOperations;
 
 	beforeEach(() => {
-		if (existsSync(TEST_DB_PATH)) unlinkSync(TEST_DB_PATH);
-		DatabaseFactory.initialize(TEST_DB_PATH);
+		DatabaseFactory.initialize(tmpDb.next());
 		dbOps = DatabaseFactory.getInstance();
 	});
 
 	afterEach(() => {
-		DatabaseFactory.reset();
-		if (existsSync(TEST_DB_PATH)) unlinkSync(TEST_DB_PATH);
+		// reset() closes the singleton connection before the files go away.
+		try {
+			DatabaseFactory.reset();
+		} finally {
+			tmpDb.cleanup();
+		}
 	});
 
 	function row(name: string) {
@@ -403,8 +406,8 @@ describe("createApiKeyAccountAddHandler", () => {
  * auto-pause OFF there and ON here, forever.
  */
 describe("createApiKeyAccountAddHandler on a database with the old default", () => {
-	const LEGACY_DB_PATH = "/tmp/test-api-key-account-add-legacy-default.db";
 	let dbOps: DatabaseOperations;
+	let legacyDbPath: string;
 
 	/**
 	 * Build the accounts table from the CURRENT DDL with only the default
@@ -431,21 +434,25 @@ describe("createApiKeyAccountAddHandler on a database with the old default", () 
 			);
 		}
 
-		const db = new Database(LEGACY_DB_PATH, { create: true });
+		const db = new Database(legacyDbPath, { create: true });
 		db.run(legacy);
 		db.close();
 	}
 
 	beforeEach(() => {
-		if (existsSync(LEGACY_DB_PATH)) unlinkSync(LEGACY_DB_PATH);
+		legacyDbPath = tmpDb.next();
 		seedLegacyDefaultDb();
-		DatabaseFactory.initialize(LEGACY_DB_PATH);
+		DatabaseFactory.initialize(legacyDbPath);
 		dbOps = DatabaseFactory.getInstance();
 	});
 
 	afterEach(() => {
-		DatabaseFactory.reset();
-		if (existsSync(LEGACY_DB_PATH)) unlinkSync(LEGACY_DB_PATH);
+		// reset() closes the singleton connection before the files go away.
+		try {
+			DatabaseFactory.reset();
+		} finally {
+			tmpDb.cleanup();
+		}
 	});
 
 	it("enables overage auto-pause explicitly instead of inheriting the default", async () => {
