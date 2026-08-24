@@ -260,6 +260,68 @@ describe("router: GET /api/runway", () => {
 		}
 	});
 
+	it("trusts availableCount 0 over a listed available row", async () => {
+		const now = Date.now();
+		const HOUR = 60 * 60 * 1000;
+		const sevenReset = now + 2 * 24 * HOUR;
+
+		const codexContext = makeContext();
+		(
+			codexContext.dbOps as unknown as {
+				getAllAccounts: () => Promise<unknown[]>;
+			}
+		).getAllAccounts = async () => [
+			{
+				id: ACCOUNT_ID,
+				name: "Router account",
+				provider: "codex",
+				codex_auto_apply_reset_credits_enabled: false,
+				codex_auto_apply_reset_on_weekly_limit_enabled: true,
+			},
+		];
+		usageCache.set(ACCOUNT_ID, {
+			five_hour: null,
+			seven_day: {
+				utilization: 100,
+				resets_at: new Date(sevenReset).toISOString(),
+			},
+		} as never);
+		// The count is authoritative in BOTH directions: a stray listed row must
+		// not conjure a bank the provider says is empty.
+		codexRateLimitResetCreditsCache.set(
+			ACCOUNT_ID,
+			{
+				availableCount: 0,
+				credits: [
+					{
+						id: "phantom",
+						resetType: "usage",
+						status: "available",
+						grantedAt: Math.floor(now / 1000) - 3600,
+						expiresAt: null,
+						title: null,
+						description: null,
+					},
+				],
+			} as never,
+			now,
+		);
+
+		try {
+			const router = new APIRouter(codexContext);
+			const url = new URL("http://localhost/api/runway");
+			const response = await router.handleRequest(
+				url,
+				new Request(url, { method: "GET" }),
+			);
+			const body = (await response?.json()) as RunwayResponse;
+
+			expect(body.keys[0].outcome.kind).toBe("out-now");
+		} finally {
+			codexRateLimitResetCreditsCache.delete(ACCOUNT_ID);
+		}
+	});
+
 	it("ignores a stale credit-cache reading (no bank, no assumption)", async () => {
 		const now = Date.now();
 		const HOUR = 60 * 60 * 1000;

@@ -338,17 +338,28 @@ function buildCreditBank(
 	if (now - entry.fetchedAt > CREDIT_BANK_MAX_AGE_MS) return null;
 
 	const summary = entry.summary;
-	const credits: Array<{ expiresAtMs: number | null }> = (summary.credits ?? [])
+	// `availableCount` is the authoritative bank SIZE — in both directions. The
+	// detail list only refines expiries: capped short of the count, the missing
+	// credits are modeled with unknown expiry (with no details at all this
+	// degenerates to `availableCount` synthetic credits); listing MORE available
+	// rows than the count must not inflate the bank, so the earliest-expiring
+	// `availableCount` of them are kept (those are consumed first anyway, so the
+	// refinement that survives is the conservative one).
+	const listed = (summary.credits ?? [])
 		.filter((credit) => credit.status === "available")
 		.map((credit) => ({
 			// Wire seconds → ms; null stays "no known expiry".
 			expiresAtMs: credit.expiresAt != null ? credit.expiresAt * 1000 : null,
-		}));
-	// `availableCount` is the authoritative TOTAL and the detail list may be
-	// capped short of it (or absent entirely). Model the difference as credits
-	// of unknown expiry rather than silently undercounting the bank — with no
-	// details at all this degenerates to `availableCount` synthetic credits.
-	for (let i = credits.length; i < summary.availableCount; i++) {
+		}))
+		.sort((a, b) => {
+			if (a.expiresAtMs == null && b.expiresAtMs == null) return 0;
+			if (a.expiresAtMs == null) return 1;
+			if (b.expiresAtMs == null) return -1;
+			return a.expiresAtMs - b.expiresAtMs;
+		});
+	const bankSize = Math.max(0, Math.trunc(summary.availableCount));
+	const credits = listed.slice(0, bankSize);
+	for (let i = credits.length; i < bankSize; i++) {
 		credits.push({ expiresAtMs: null });
 	}
 	if (credits.length === 0) return null;

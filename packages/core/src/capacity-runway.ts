@@ -401,8 +401,10 @@ export interface RunwayWindowInput {
 	lifetimeConfidence?: LifetimeConfidence;
 	/**
 	 * When this window's reading was observed. Threaded verbatim to
-	 * {@link WindowExhaustionInput.observedAtMs}, where it is required by (and
-	 * read only by) the `"full"` confidence path.
+	 * {@link WindowExhaustionInput.observedAtMs}, where the `"full"` confidence
+	 * path requires it and any anchored estimate uses it to place the reading
+	 * relative to the anchor; the credit model's re-exhaustion pace reads it
+	 * for the same epoch check.
 	 */
 	observedAtMs?: number | null;
 	/**
@@ -555,15 +557,31 @@ function weeklyTimeToFull(
 		return (100 / estimate.slopePctPerHour) * HOUR_MS;
 	}
 	if (estimate.source !== "already-exhausted") return null;
+	// The fill was complete BY the reading's observation, so the elapsed time is
+	// measured to that instant when it is known — `now` would count wall-clock
+	// that passed after the window was already full and overstate the pace.
+	const observedAtMs =
+		window.observedAtMs != null && Number.isFinite(window.observedAtMs)
+			? window.observedAtMs
+			: null;
+	const filledByMs = observedAtMs ?? now;
 	const anchor =
 		window.resetsAtMs != null && window.windowStartMs != null
 			? usableAnchor(window.anchor, window.resetsAtMs, window.windowStartMs)
 			: null;
-	if (anchor !== null && anchor.anchorPct < 100 && now > anchor.anchorMs) {
-		return ((now - anchor.anchorMs) * 100) / (100 - anchor.anchorPct);
+	// Same epoch gate as the estimator: the anchor applies only to a reading
+	// KNOWN to be at/after it — a pre-anchor or unplaceable 100% reading must
+	// not be scaled by the post-revision anchor.
+	if (
+		anchor !== null &&
+		anchor.anchorPct < 100 &&
+		observedAtMs !== null &&
+		observedAtMs > anchor.anchorMs
+	) {
+		return ((observedAtMs - anchor.anchorMs) * 100) / (100 - anchor.anchorPct);
 	}
-	if (window.windowStartMs != null && now > window.windowStartMs) {
-		return now - window.windowStartMs;
+	if (window.windowStartMs != null && filledByMs > window.windowStartMs) {
+		return filledByMs - window.windowStartMs;
 	}
 	return null;
 }
