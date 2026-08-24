@@ -1,5 +1,5 @@
 import {
-	computeWindowStartMs,
+	computeThrottleResumeAt,
 	isAnthropicUsageShape,
 	normalizeAnthropicUsage,
 	type SupportedWindow,
@@ -199,25 +199,13 @@ export function getUsageThrottleStatus(
 
 	for (const window of windows) {
 		if (!isWindowThrottlingEnabled(window.window, settings)) continue;
-		if (window.resetAtMs <= now) continue;
-		const startMs = computeWindowStartMs(window.resetAtMs, window.window);
-		if (startMs === null || startMs >= window.resetAtMs) continue;
-
-		const durationMs = window.resetAtMs - startMs;
-		const elapsedMs = now - startMs;
-		if (elapsedMs <= 0) continue;
-
-		const expectedPct = Math.min(
-			100,
-			Math.max(0, (elapsedMs / durationMs) * 100),
-		);
-		if (window.utilization <= expectedPct) continue;
-
-		const resumeAt = Math.min(
-			startMs + (window.utilization / 100) * durationMs,
+		const resumeAt = computeThrottleResumeAt(
 			window.resetAtMs,
+			window.window,
+			window.utilization,
+			now,
 		);
-		if (resumeAt <= now) continue;
+		if (resumeAt === null) continue;
 		throttledWindows.push(window.window);
 		if (throttleUntil === null || resumeAt > throttleUntil) {
 			throttleUntil = resumeAt;

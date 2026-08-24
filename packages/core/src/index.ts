@@ -185,6 +185,8 @@ export {
 } from "./scoped-limits";
 export * from "./strategy";
 export {
+	computeExpectedPct,
+	computeThrottleResumeAt,
 	computeWindowStartMs,
 	FIXED_WINDOW_DURATION_MS,
 	type SupportedWindow,

@@ -343,13 +343,13 @@ export interface QuotaModelGaps {
  * ALL of them, not the longest one. A model can be below the share floor early,
  * measurable in the middle and out of use at the end, and those are three
  * different answers to "why is the line missing here". Reducing them to one
- * discards the reader's actual question, and the reason that would be discarded
- * is disproportionately the CURRENT one: an older stretch only has to be one
- * fit window longer to hide the reason the line stops now.
+ * discards the reader's actual question.
  *
- * This deliberately covers models the chart draws NO line for at all: a model
- * that was never separable has no series to look at, so the list is the only
- * place a reader can find out it exists and why it is missing.
+ * This is the COLLAPSED content behind the panel's expander, not body copy:
+ * rendered open it is a fifty-line ledger nobody reads. The default view
+ * carries none of it — the cost table above the charts already names each
+ * model's current reason, so the expander exists for the reader who wants
+ * the dated history.
  */
 export function summarizeModelGaps(
 	models: readonly QuotaDriftModel[],

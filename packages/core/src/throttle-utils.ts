@@ -73,3 +73,56 @@ export function computeWindowStartMs(
 	const durationMs = FIXED_WINDOW_DURATION_MS[window];
 	return durationMs ? resetMs - durationMs : null;
 }
+
+/**
+ * Where a window's utilization would sit (0-100) if it were burned perfectly
+ * evenly — pure clock arithmetic, no forecasting. This positions the pace tick
+ * on dashboard usage bars and is the pace baseline the proactive usage
+ * throttle compares real utilization against, so both must share this one
+ * definition. Null when the reset is not a finite timestamp or the window name
+ * has no known duration.
+ */
+export function computeExpectedPct(
+	resetMs: number,
+	window: SupportedWindow | string,
+	now: number,
+): number | null {
+	if (!Number.isFinite(resetMs)) return null;
+	const startMs = computeWindowStartMs(resetMs, window);
+	if (startMs === null) return null;
+	const durationMs = resetMs - startMs;
+	if (durationMs <= 0) return null;
+	const elapsedMs = now - startMs;
+	return Math.min(100, Math.max(0, (elapsedMs / durationMs) * 100));
+}
+
+/**
+ * The instant an even burn would catch up with the window's actual
+ * utilization: the moment proactive usage throttling would release a request,
+ * capped at the window reset. Null when the window is not throttleable right
+ * now — reset passed or window not yet started (clock skew), utilization at or
+ * behind pace, or the window/reset unusable. Both the server's throttle
+ * decision and the dashboard's "delayed until" line derive from this one
+ * function so the UI can never disagree with the behaviour it explains.
+ */
+export function computeThrottleResumeAt(
+	resetMs: number,
+	window: SupportedWindow | string,
+	utilizationPct: number,
+	now: number,
+): number | null {
+	if (!Number.isFinite(resetMs) || resetMs <= now) return null;
+	const startMs = computeWindowStartMs(resetMs, window);
+	if (startMs === null || startMs >= resetMs) return null;
+	if (now - startMs <= 0) return null;
+
+	const expectedPct = computeExpectedPct(resetMs, window, now);
+	if (expectedPct === null || utilizationPct <= expectedPct) return null;
+
+	const durationMs = resetMs - startMs;
+	const resumeAt = Math.min(
+		startMs + (utilizationPct / 100) * durationMs,
+		resetMs,
+	);
+	return resumeAt > now ? resumeAt : null;
+}

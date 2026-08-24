@@ -102,6 +102,34 @@ describe("getUsageThrottleUntil", () => {
 		expect(throttleUntil).toBeNull();
 	});
 
+	it("reports the latest resume time when two windows throttle at once", () => {
+		const now = Date.UTC(2026, 3, 28, 12, 0, 0);
+		const HOUR_MS = 60 * 60 * 1000;
+		const DAY_MS = 24 * HOUR_MS;
+		const throttleStatus = getUsageThrottleStatus(
+			{
+				// 5h: 60% elapsed, 80% used → resumes at now + 1h
+				five_hour: {
+					utilization: 80,
+					resets_at: new Date(now + 2 * HOUR_MS).toISOString(),
+				},
+				// 7d: ~71% elapsed, 90% used → resumes at now + 1.3d (the later one)
+				seven_day: {
+					utilization: 90,
+					resets_at: new Date(now + 2 * DAY_MS).toISOString(),
+				},
+			},
+			{ fiveHourEnabled: true, weeklyEnabled: true },
+			now,
+		);
+
+		expect(throttleStatus.throttledWindows.sort()).toEqual([
+			"five_hour",
+			"seven_day",
+		]);
+		expect(throttleStatus.throttleUntil).toBe(now + 1.3 * DAY_MS);
+	});
+
 	it("can throttle weekly usage independently from the 5-hour window", () => {
 		const now = Date.UTC(2026, 3, 28, 12, 0, 0);
 		const throttleStatus = getUsageThrottleStatus(

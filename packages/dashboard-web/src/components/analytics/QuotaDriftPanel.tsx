@@ -2,7 +2,7 @@ import type {
 	QuotaDriftCohort,
 	QuotaDriftWindowResult,
 } from "@clankermux/types";
-import { Activity } from "lucide-react";
+import { Activity, ChevronDown } from "lucide-react";
 import { useMemo } from "react";
 import {
 	Area,
@@ -285,11 +285,12 @@ function WindowSeries({
 				</p>
 			) : null}
 			{gaps.length > 0 ? (
-				<div className="space-y-0.5 max-w-prose">
-					<p className="text-xs font-medium">
+				<details className="group max-w-prose">
+					<summary className="flex cursor-pointer list-none items-center gap-1 text-xs font-medium text-muted-foreground hover:text-foreground focus:outline-none focus-visible:ring-2 focus-visible:ring-ring [&::-webkit-details-marker]:hidden">
 						What this analysis could not measure, and why
-					</p>
-					<ul className="text-xs text-muted-foreground space-y-0.5">
+						<ChevronDown className="h-3.5 w-3.5 transition-transform group-open:rotate-180" />
+					</summary>
+					<ul className="mt-1 text-xs text-muted-foreground space-y-0.5">
 						{gaps.map((model) => (
 							<li key={model.key}>
 								<span className="font-medium">{model.key}</span>
@@ -308,7 +309,7 @@ function WindowSeries({
 							</li>
 						))}
 					</ul>
-				</div>
+				</details>
 			) : null}
 		</div>
 	);
