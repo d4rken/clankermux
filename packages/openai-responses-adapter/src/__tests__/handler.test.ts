@@ -41,6 +41,75 @@ describe("handleResponsesRequest", () => {
 		expect(body.error.type).toBe("invalid_request_error");
 	});
 
+	test("Test 1b: non-boolean `stream` → 400 invalid_request_error naming the field", async () => {
+		// `stream` now decides between two very different response legs, so a
+		// string "false" must be rejected rather than read as truthy.
+		let proxyCalls = 0;
+		const mockHandleProxy: HandleProxyFn = async () => {
+			proxyCalls++;
+			return new Response(ANTHROPIC_MESSAGE_BODY, { status: 200 });
+		};
+
+		const req = new Request("http://localhost/v1/responses", {
+			method: "POST",
+			body: JSON.stringify({
+				model: "gpt-5.5-codex",
+				input: [
+					{
+						type: "message",
+						role: "user",
+						content: [{ type: "input_text", text: "Hi" }],
+					},
+				],
+				stream: "false",
+			}),
+			headers: { "Content-Type": "application/json" },
+		});
+
+		const resp = await handleResponsesRequest(
+			req,
+			new URL(req.url),
+			mockHandleProxy,
+			{},
+		);
+
+		expect(resp.status).toBe(400);
+		expect(proxyCalls).toBe(0);
+		const body = await resp.json();
+		expect(body.error.type).toBe("invalid_request_error");
+		expect(body.error.message).toContain("stream");
+	});
+
+	test("Test 1c: an absent `stream` field is still accepted (non-stream default)", async () => {
+		const mockHandleProxy: HandleProxyFn = async () =>
+			new Response(ANTHROPIC_MESSAGE_BODY, {
+				status: 200,
+				headers: { "Content-Type": "application/json" },
+			});
+		const req = new Request("http://localhost/v1/responses", {
+			method: "POST",
+			body: JSON.stringify({
+				model: "claude-haiku-4-5",
+				input: [
+					{
+						type: "message",
+						role: "user",
+						content: [{ type: "input_text", text: "Hi" }],
+					},
+				],
+			}),
+			headers: { "Content-Type": "application/json" },
+		});
+
+		const resp = await handleResponsesRequest(
+			req,
+			new URL(req.url),
+			mockHandleProxy,
+			{},
+		);
+		expect(resp.status).toBe(200);
+	});
+
 	test("Test 2: non-streaming path → calls handleProxy with /v1/messages, returns translated response", async () => {
 		let capturedUrl: URL | null = null;
 
@@ -231,6 +300,25 @@ describe("handleResponsesRequest", () => {
 	});
 
 	describe("native Responses passthrough (Stage B, response leg)", () => {
+		// The `response` envelope the backend's terminal event carries — what a
+		// non-streaming client must receive verbatim.
+		const TERMINAL_RESPONSE = {
+			id: "resp_backend_1",
+			object: "response",
+			status: "completed",
+			model: "gpt-5.5-codex",
+			output: [
+				{
+					type: "message",
+					id: "msg_backend_1",
+					role: "assistant",
+					status: "completed",
+					content: [{ type: "output_text", text: "Hello" }],
+				},
+			],
+			usage: { input_tokens: 3, output_tokens: 2, total_tokens: 5 },
+		};
+
 		// Raw Codex-backend Responses SSE — distinctively NOT Anthropic SSE and
 		// carrying the backend's own response id, which must survive untouched.
 		const RAW_CODEX_SSE = [
@@ -249,10 +337,7 @@ describe("handleResponsesRequest", () => {
 			"event: response.completed",
 			`data: ${JSON.stringify({
 				type: "response.completed",
-				response: {
-					id: "resp_backend_1",
-					usage: { input_tokens: 3, output_tokens: 2 },
-				},
+				response: TERMINAL_RESPONSE,
 			})}`,
 			"",
 			"",
@@ -356,16 +441,15 @@ describe("handleResponsesRequest", () => {
 			expect(rawBody).not.toContain("message_start");
 		});
 
-		test("marked response with body.stream false → warns and falls back to translation", async () => {
-			// Should be impossible (Stage A only goes native when clientStream is
-			// true) — the defensive fallback must still produce a translated
-			// non-stream response from an Anthropic JSON body.
+		test("non-streaming client → the terminal `response` envelope as JSON, no proxy headers", async () => {
 			const mockHandleProxy: HandleProxyFn = async () =>
-				new Response(ANTHROPIC_MESSAGE_BODY, {
+				new Response(RAW_CODEX_SSE, {
 					status: 200,
 					headers: {
-						"Content-Type": "application/json",
+						"Content-Type": "text/event-stream",
+						"Content-Length": String(RAW_CODEX_SSE.length),
 						[NATIVE_RESPONSES_RESPONSE_HEADER]: "1",
+						"x-clankermux-account-id": "acc-1",
 					},
 				});
 
@@ -377,11 +461,118 @@ describe("handleResponsesRequest", () => {
 			);
 
 			expect(resp.status).toBe(200);
+			expect(resp.headers.get("content-type")).toBe("application/json");
+			// Fresh headers: no internal marker, no stale SSE content-type/length,
+			// and no x-clankermux-* header of any kind.
 			expect(resp.headers.get(NATIVE_RESPONSES_RESPONSE_HEADER)).toBeNull();
+			for (const [name] of resp.headers.entries()) {
+				expect(name.startsWith("x-clankermux-")).toBe(false);
+			}
+
+			// The backend's own envelope, verbatim — not a translation, and not
+			// re-ided with the adapter's synthetic resp_*.
 			const body = await resp.json();
-			// The JSON translation path ran, not the passthrough.
-			expect(body.object).toBe("response");
-			expect(Array.isArray(body.output)).toBe(true);
+			expect(body).toEqual(TERMINAL_RESPONSE);
+		});
+
+		test("non-streaming client → response.incomplete / response.failed keep their status", async () => {
+			for (const [type, status] of [
+				["response.incomplete", "incomplete"],
+				["response.failed", "failed"],
+			] as const) {
+				const response = { ...TERMINAL_RESPONSE, status };
+				const sse = `event: ${type}\ndata: ${JSON.stringify({ type, response })}\n\n`;
+				const mockHandleProxy: HandleProxyFn = async () =>
+					new Response(sse, {
+						status: 200,
+						headers: {
+							"Content-Type": "text/event-stream",
+							[NATIVE_RESPONSES_RESPONSE_HEADER]: "1",
+						},
+					});
+
+				const resp = await handleResponsesRequest(
+					streamingRequest(false),
+					new URL("http://localhost/v1/responses"),
+					mockHandleProxy,
+					{},
+				);
+
+				expect(resp.status).toBe(200);
+				expect(await resp.json()).toEqual(response);
+			}
+		});
+
+		test("non-streaming client + no terminal event → 502 in the OpenAI error shape", async () => {
+			const truncated = [
+				"event: response.created",
+				`data: ${JSON.stringify({ type: "response.created", response: { id: "resp_backend_1" } })}`,
+				"",
+				"",
+			].join("\n");
+			const mockHandleProxy: HandleProxyFn = async () =>
+				new Response(truncated, {
+					status: 200,
+					headers: {
+						"Content-Type": "text/event-stream",
+						[NATIVE_RESPONSES_RESPONSE_HEADER]: "1",
+					},
+				});
+
+			const resp = await handleResponsesRequest(
+				streamingRequest(false),
+				new URL("http://localhost/v1/responses"),
+				mockHandleProxy,
+				{},
+			);
+
+			expect(resp.status).toBe(502);
+			expect(resp.headers.get("content-type")).toBe("application/json");
+			const body = await resp.json();
+			expect(body.error.type).toBe("api_error");
+			expect(body.error.code).toBe("api_error");
+			expect(typeof body.error.message).toBe("string");
+			// Never the Anthropic-translation fallback.
+			expect(body.object).toBeUndefined();
+		});
+
+		test("non-streaming client + malformed terminal event → 502", async () => {
+			const mockHandleProxy: HandleProxyFn = async () =>
+				new Response("event: response.completed\ndata: {broken\n\n", {
+					status: 200,
+					headers: {
+						"Content-Type": "text/event-stream",
+						[NATIVE_RESPONSES_RESPONSE_HEADER]: "1",
+					},
+				});
+
+			const resp = await handleResponsesRequest(
+				streamingRequest(false),
+				new URL("http://localhost/v1/responses"),
+				mockHandleProxy,
+				{},
+			);
+
+			expect(resp.status).toBe(502);
+			expect((await resp.json()).error.type).toBe("api_error");
+		});
+
+		test("marked 200 with a null body → 502, never an empty success", async () => {
+			const mockHandleProxy: HandleProxyFn = async () =>
+				new Response(null, {
+					status: 200,
+					headers: { [NATIVE_RESPONSES_RESPONSE_HEADER]: "1" },
+				});
+
+			const resp = await handleResponsesRequest(
+				streamingRequest(false),
+				new URL("http://localhost/v1/responses"),
+				mockHandleProxy,
+				{},
+			);
+
+			expect(resp.status).toBe(502);
+			expect((await resp.json()).error.type).toBe("api_error");
 		});
 
 		test("non-200 keeps error translation even if a marker were present (ordering)", async () => {
