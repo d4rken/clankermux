@@ -364,6 +364,34 @@ function processEvent(
 		);
 		return;
 	}
+
+	// Anthropic emits `ping` as a keepalive during long gaps between content —
+	// most visibly while an extended-thinking model reasons before its first
+	// token. Every other branch above translates an event into a Responses
+	// event; `ping` has no Responses counterpart, so before this it fell through
+	// and the stream simply went silent for the duration of the gap, long enough
+	// to trip a byte-idle timeout in Caddy, in the client, or in an intermediary
+	// and kill a request that is progressing normally upstream.
+	//
+	// Forward it as a bare SSE comment rather than a translated event. Per the
+	// SSE spec a conformant client discards a comment line without dispatching
+	// anything, while every hop that forwards it promptly sees fresh bytes. That
+	// is the limit of what this buys: a hop that buffers, or that enforces an
+	// ABSOLUTE rather than idle deadline, is unaffected.
+	//
+	// Deliberately NOT emitSse — that would consume a `sequence_number` and put
+	// a junk event in a stream whose numbering the client reads as contiguous.
+	//
+	// Suppressed once a terminal event has been emitted. A trailing comment is
+	// legal SSE but useless (the client already has `response.completed` /
+	// `response.failed` and can act on it) and actively unhelpful, since holding
+	// a finished connection open is how a hung request stays hung.
+	if (eventType === "ping") {
+		if (!state.doneSent) {
+			controller.enqueue(encoder.encode(": keepalive\n\n"));
+		}
+		return;
+	}
 }
 
 function parseAndProcessChunk(

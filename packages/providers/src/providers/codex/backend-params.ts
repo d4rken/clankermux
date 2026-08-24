@@ -126,6 +126,51 @@ const REJECTED_TOP_LEVEL_PARAMS = [
 export type ChatGptBackendRejectedParam =
 	(typeof REJECTED_TOP_LEVEL_PARAMS)[number];
 
+/**
+ * `reasoning.context` — ACCEPTED by this backend, and deliberately never
+ * INJECTED by us. Note the distinction: on the native passthrough a
+ * client-supplied `reasoning.context` reaches the backend untouched, because
+ * that path forwards reasoning siblings verbatim and the sanitation below does
+ * not strip it. What is ruled out here is this proxy adding the field on its
+ * own.
+ *
+ * Verified live 2026-08-24 with the usual single-field probe: omitted → 200,
+ * `"all_turns"` → 200, `"current_turn"` → 200, and a junk value → 400
+ * `{"error":{"message":"Invalid value: '…'. Supported values are: 'auto',
+ * 'current_turn', and 'all_turns'.","param":"reasoning.context",
+ * "code":"invalid_value"}}`. Recorded here because the 200s are the surprising
+ * half: this is not a field we omit because it fails.
+ *
+ * `context` selects a PERSISTED-REASONING policy across responses, not a
+ * quality knob within one generation. The Codex CLI ships guidance saying not
+ * to enable persisted reasoning merely because it exists, and that under
+ * `store: false` it requires requesting and replaying
+ * `reasoning.encrypted_content`.
+ *
+ * The TRANSLATED path structurally cannot satisfy that: it rebuilds `input`
+ * from Anthropic messages, so prior reasoning items do not survive at all.
+ * Injecting `all_turns` there would opt into a persistence policy with nothing
+ * persistable attached. The NATIVE passthrough is different — it preserves the
+ * client's `include` and its `input` array, so a client that asks for and
+ * replays encrypted reasoning keeps working — but it too forces `store: false`
+ * and drops `previous_response_id`, and either way the choice belongs to the
+ * client that owns the conversation, not to a load balancer sitting in the
+ * middle of it.
+ *
+ * Omitted rather than pinned to `"current_turn"` on purpose. A 200 with the
+ * field absent proves only that it is optional; it does NOT prove the implicit
+ * default equals any of the three named values, so pinning would be asserting
+ * something unverified. Omission is also the only form that stays safe on a
+ * custom Codex-compatible endpoint that has never heard of the field. Pin it
+ * only behind `targetsChatGptCodexBackend` and only once a behavioural test
+ * (capture and replay `reasoning.encrypted_content` across two requests) shows
+ * the setting actually moves something.
+ *
+ * Upstream better-ccflare v3.5.66 sets `context: "all_turns"` unconditionally.
+ * That is accepted, not broken — it is just unsupported by anything else in
+ * that request.
+ */
+
 /** What {@link sanitizeChatGptBackendBody} actually changed, for logging. */
 export interface ChatGptBackendBodySanitation {
 	/** Top-level fields removed because the backend 400s on them. */
