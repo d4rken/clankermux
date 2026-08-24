@@ -382,6 +382,28 @@ describe("windows replace three representations of one observation", () => {
 		expect(oauthApps?.utilizationPct).toBe(55);
 	});
 
+	it("keeps the Claude-Code weekly window when its utilization is null", async () => {
+		// `utilization` is nullable on the wire. Dropping the record then says
+		// "the provider has no such window", when what happened is that a window
+		// it DID report could not be read — and this is the one window that was
+		// deliberately preserved rather than folded into `seven_day`.
+		insertAccount();
+		usageCache.set(
+			"acct-1",
+			anthropicUsage(10, 20, {
+				seven_day_oauth_apps: {
+					utilization: null,
+					resets_at: new Date(NOW + 3_000).toISOString(),
+				},
+			} as Partial<AnthropicUsageData>),
+		);
+		const oauthApps = windowOf(await read(), "seven_day_oauth_apps");
+		expect(oauthApps).toBeDefined();
+		expect(oauthApps?.utilizationPct).toBeNull();
+		// The observation is still reported: a reset it DID give us.
+		expect(oauthApps?.resetsAtMs).toBe(NOW + 3_000);
+	});
+
 	it("rolls utilizationPct up from the ACCOUNT-WIDE windows only", async () => {
 		// One spent model family is not the account.
 		insertAccount();

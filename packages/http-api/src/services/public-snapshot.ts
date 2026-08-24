@@ -391,8 +391,15 @@ function buildWindows(
 	// name in the public vocabulary, so it is carried under the `other` kind
 	// with a scope id rather than dropped or smuggled in as a second
 	// `seven_day` entry, which would make the account-wide window ambiguous.
+	//
+	// Emitted whenever the provider REPORTED the window, value or no value:
+	// `utilization` is nullable, and an observed window whose reading is unknown
+	// is a window with a null `utilizationPct` — the same rule the two
+	// account-wide windows above follow. Requiring a number here would delete the
+	// record entirely, which is exactly the "absent means the provider has no
+	// such window" confusion this vocabulary exists to prevent.
 	const oauthApps = usage?.seven_day_oauth_apps;
-	if (oauthApps && typeof oauthApps.utilization === "number") {
+	if (oauthApps) {
 		windows.push({
 			kind: "seven_day_oauth_apps",
 			scopeId: "seven_day_oauth_apps",
