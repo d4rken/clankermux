@@ -4,6 +4,7 @@
 export { terminateAnalyticsWorker } from "./handlers/analytics-runner";
 // Management session auth: the app-level login behind /api/*
 export type { AuthStatusResponse } from "./handlers/auth";
+export { NO_STORE_HEADERS } from "./handlers/public/cache-headers";
 // The read-only widget API at /public/v1/*
 export {
 	MAX_STRING_BYTES,
