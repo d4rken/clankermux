@@ -26,27 +26,69 @@ const log = new Logger("OverloadHold");
  * Exported so tests that need to reason about the cap (e.g. to saturate it)
  * read the single source of truth rather than re-hardcoding the literal.
  */
-export const OVERLOAD_HOLD_MAX_CONCURRENT_PER_BUCKET = 8;
+export const OVERLOAD_HOLD_MAX_CONCURRENT_PER_BUCKET = 16;
 
 /**
  * Max time (ms) proxy.ts holds a live client connection at an overload
  * terminal — every candidate overload-gated, or every attempt suppressed
  * behind an in-flight half-open probe — before falling back to the synthetic
- * 529. 120s matches CW_HOLD_MAX_MS / FAMILY_WEEKLY_COOLDOWN_HOLD_MAX_MS /
- * PIN_HOLD_MAX_MS / BURST_RETRY_MAX_HOLD_MS: every bound on holding a live
- * client connection. Lives here (next to the per-bucket holder cap) so the
- * hold's two limits share one home.
+ * 529.
+ *
+ * 330s, matching CW_HOLD_MAX_MS_NO_CODEX_FALLBACK. A 60s breaker cooldown
+ * inside a 120s budget bought at most ONE probe opportunity: the hold's
+ * `waitMs > remaining` guard refuses to start a sleep it cannot finish, so a
+ * probe that re-tripped left no room for the next cooldown and the hold gave
+ * up. 330s covers roughly five, which is what an intermittent upstream
+ * incident (re-tripping about once a minute) actually needs.
+ *
+ * The ceiling is the CLIENT's request timeout, not ours: the Anthropic SDK
+ * defaults to 600s, measured from request ingress rather than from
+ * `holdStart`, and body buffering, selection, token refresh and the original
+ * failed attempts all come out of it before the hold begins — as does the
+ * response the client still has to receive afterwards. 330s keeps a real
+ * margin under that; 500s would not.
+ *
+ * Bun's 180s socket idleTimeout is not the binding limit here: the hold
+ * re-arms it on entry and every IDLE_REARM_INTERVAL_MS (150s), and each
+ * re-arm grants a fresh 180s. That re-arm is a documented no-op on the
+ * translated Codex `/v1/responses` path — see OVERLOAD_HOLD_MAX_MS_NO_REARM.
  */
-export const OVERLOAD_HOLD_MAX_MS = 120_000;
+export const OVERLOAD_HOLD_MAX_MS = 330_000;
+
+/**
+ * Hold budget for requests whose connection CANNOT be kept alive past Bun's
+ * 180s base idleTimeout, i.e. the translated Codex `/v1/responses` path, where
+ * `bumpIdleTimeout`'s `server.timeout(req, …)` targets a `Request` that does
+ * not map to the original socket (see request-ingress.ts). There the 180s runs
+ * from before the hold even starts, so it is an absolute upper bound rather
+ * than a budget — holding longer would have OUR server close the connection
+ * mid-hold. The Codex CLI's own `stream_idle_timeout_ms` (300s default) cannot
+ * rescue a socket we already closed.
+ *
+ * Kept at the previous global value, which has run in production under this
+ * ceiling without incident.
+ */
+export const OVERLOAD_HOLD_MAX_MS_NO_REARM = 120_000;
 
 // Test-only budget override (same spirit as the injectable
 // `maxConcurrentHolds` parameter below): the budget-expiry paths are
-// untestable against the real 120s without it. Production never sets it.
+// untestable against the real 330s without it. Production never sets it.
 let overloadHoldBudgetOverrideMs: number | null = null;
 
-/** Effective hold budget: the fixed constant unless a test override is set. */
-export function getOverloadHoldBudgetMs(): number {
-	return overloadHoldBudgetOverrideMs ?? OVERLOAD_HOLD_MAX_MS;
+/**
+ * Effective hold budget for this request.
+ *
+ * `canRearmIdleTimeout` is false for connections whose Bun idle timer we
+ * cannot refresh (the translated Codex `/v1/responses` path) — those are
+ * capped by the 180s socket timeout regardless of what we would like to wait,
+ * so they get the shorter no-re-arm budget. A test override wins over both.
+ */
+export function getOverloadHoldBudgetMs(canRearmIdleTimeout = true): number {
+	if (overloadHoldBudgetOverrideMs !== null)
+		return overloadHoldBudgetOverrideMs;
+	return canRearmIdleTimeout
+		? OVERLOAD_HOLD_MAX_MS
+		: OVERLOAD_HOLD_MAX_MS_NO_REARM;
 }
 
 /** Test-only override of the hold budget. Pass null to restore the default. */

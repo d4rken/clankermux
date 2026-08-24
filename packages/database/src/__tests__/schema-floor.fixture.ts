@@ -177,6 +177,25 @@ export const POST_FLOOR_TABLE_BASELINES: Readonly<
 		columns: ["sampled_at", "rss_bytes", "heap_used_bytes"],
 		source: "executed",
 	},
+	usage_scoped_snapshots: {
+		shipped: "2026-08-23",
+		commit: "unreleased",
+		columns: [
+			"account_id",
+			"sampled_at",
+			"family",
+			"display_name",
+			"pct",
+			"reset_at",
+		],
+		source: "create-table-at-intro",
+	},
+	quota_drift_results: {
+		shipped: "2026-08-23",
+		commit: "unreleased",
+		columns: ["computed_at", "payload"],
+		source: "create-table-at-intro",
+	},
 	cache_keepalive_snapshots: {
 		shipped: "2026-06-18",
 		commit: "b0873329",
@@ -211,6 +230,18 @@ export const POST_FLOOR_TABLE_BASELINES: Readonly<
 			"notes",
 			"deleted_at",
 		],
+		source: "create-table-at-intro",
+	},
+	auth_password: {
+		shipped: "2026-08-23",
+		commit: "unreleased",
+		columns: ["id", "verifier", "params", "updated_at"],
+		source: "create-table-at-intro",
+	},
+	auth_sessions: {
+		shipped: "2026-08-23",
+		commit: "unreleased",
+		columns: ["token_hash", "created_at", "expires_at", "last_seen_at"],
 		source: "create-table-at-intro",
 	},
 	codex_reset_credit_events: {

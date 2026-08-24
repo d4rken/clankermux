@@ -355,6 +355,9 @@ export function ensureSchema(db: Database): void {
 			five_hour_reset INTEGER,
 			seven_day_pct REAL,
 			seven_day_reset INTEGER,
+			observed_at INTEGER,
+			plan_tier TEXT,
+			rate_limit_tier TEXT,
 			PRIMARY KEY (account_id, sampled_at),
 			FOREIGN KEY (account_id) REFERENCES accounts(id) ON DELETE CASCADE
 		)
@@ -365,6 +368,61 @@ export function ensureSchema(db: Database): void {
 	db.run(
 		`CREATE INDEX IF NOT EXISTS idx_usage_snapshots_sampled_at ON usage_snapshots(sampled_at)`,
 	);
+
+	// Create usage_scoped_snapshots table — append-only time-series of the
+	// PER-MODEL-FAMILY weekly windows Anthropic reports in its generic `limits[]`
+	// array (`kind: "weekly_scoped"`). A different axis from usage_snapshots,
+	// which records the account-wide 5h/7d windows only; a family can be spent
+	// while the account-wide weekly window still has headroom, and that is
+	// invisible in the account-wide series.
+	//
+	// `family` is the ROUTING family (opus/sonnet/haiku/fable) resolved by
+	// getModelFamily(). `display_name` is stored alongside it because that
+	// resolution is lossy in exactly the dimension a quota-drift analysis cares
+	// about: "Claude Opus 4.8" and "Claude Opus 5" both map to `opus`. If a
+	// provider ever scopes a weekly window per generation, the family column
+	// alone could not tell them apart, and history cannot be backfilled.
+	//
+	// display_name is therefore part of the KEY, and NOT NULL. Keyed on
+	// (account, tick, family) alone, one response carrying scoped limits for two
+	// generations of one family would insert the first row and then overwrite it
+	// with the second, losing a whole scoped series irrecoverably — the exact
+	// loss the column exists to prevent.
+	//
+	// account_id CASCADE: deleting an account removes its history.
+	db.run(`
+		CREATE TABLE IF NOT EXISTS usage_scoped_snapshots (
+			account_id TEXT NOT NULL,
+			sampled_at INTEGER NOT NULL,
+			family TEXT NOT NULL,
+			display_name TEXT NOT NULL,
+			pct REAL,
+			reset_at INTEGER,
+			PRIMARY KEY (account_id, sampled_at, family, display_name),
+			FOREIGN KEY (account_id) REFERENCES accounts(id) ON DELETE CASCADE
+		)
+	`);
+
+	// Index on sampled_at for retention pruning; (account_id, sampled_at, family,
+	// display_name) lookups are served by the primary key.
+	db.run(
+		`CREATE INDEX IF NOT EXISTS idx_usage_scoped_snapshots_sampled_at ON usage_scoped_snapshots(sampled_at)`,
+	);
+
+	// Create quota_drift_results table — the precomputed quota-drift analysis.
+	// One row per completed precompute pass; the latest row wins and the cleanup
+	// pass keeps only the most recent few.
+	//
+	// A cache, not a record: the fit is a pure function of `usage_snapshots` and
+	// `requests`, so losing every row costs one scheduler tick and nothing else.
+	// The whole payload is one JSON blob because nothing queries INTO it — the
+	// endpoint hands it to the dashboard verbatim.
+	db.run(`
+		CREATE TABLE IF NOT EXISTS quota_drift_results (
+			computed_at INTEGER PRIMARY KEY,
+			payload TEXT NOT NULL
+		)
+	`);
 
 	// Create memory_snapshots table — append-only time-series of the proxy
 	// process's own memory footprint (RSS + JS heap), backing the dashboard
@@ -493,6 +551,44 @@ export function ensureSchema(db: Database): void {
 	db.run(
 		`CREATE INDEX IF NOT EXISTS idx_codex_reset_credit_events_account
 			ON codex_reset_credit_events(account_id, created_at DESC)`,
+	);
+
+	// Dashboard/management session auth.
+	//
+	// `auth_password` holds AT MOST ONE row — the CHECK on the primary key is
+	// what enforces that, so "the password" cannot silently become a set of
+	// passwords. `verifier` is a scrypt output over an operator-chosen secret;
+	// `params` carries the versioned cost parameters that produced it, so the
+	// cost can be raised later without invalidating verifiers written under the
+	// old one. Absence of the row is the FAIL-OPEN state: no password
+	// configured, management API ungated.
+	db.run(`
+		CREATE TABLE IF NOT EXISTS auth_password (
+			id INTEGER PRIMARY KEY CHECK (id = 1),
+			verifier TEXT NOT NULL,
+			params TEXT NOT NULL,
+			updated_at INTEGER NOT NULL
+		)
+	`);
+
+	// One row per live session cookie. `token_hash` is an unsalted SHA-256 of
+	// the cookie value and is the PRIMARY KEY, so validating a session is ONE
+	// indexed lookup and never a key-derivation — scrypt-per-request is exactly
+	// what caused the ~300ms API-key stalls. Unsalted is safe here for the same
+	// reason as api_keys.hashed_key: the token is 32 random bytes we minted, not
+	// a secret a human chose.
+	db.run(`
+		CREATE TABLE IF NOT EXISTS auth_sessions (
+			token_hash TEXT PRIMARY KEY,
+			created_at INTEGER NOT NULL,
+			expires_at INTEGER NOT NULL,
+			last_seen_at INTEGER NOT NULL
+		)
+	`);
+
+	// Drives the startup + hourly expiry sweep.
+	db.run(
+		`CREATE INDEX IF NOT EXISTS idx_auth_sessions_expires ON auth_sessions(expires_at)`,
 	);
 
 	// Performance indexes (covering/partial indexes for hot query paths)
@@ -843,6 +939,35 @@ export const ADDITIVE_COLUMNS: ReadonlyArray<{
 		table: "accounts",
 		column: "refresh_token_expires_at",
 		ddl: "ALTER TABLE accounts ADD COLUMN refresh_token_expires_at INTEGER",
+	},
+	// When the usage reading a snapshot row reports was actually OBSERVED, as
+	// opposed to `sampled_at`, which is the sampler tick's own clock. The tick
+	// accepts any cache entry younger than the freshness bound
+	// (max(2 * pollInterval, 150s)), so the two can legitimately differ by up to
+	// that bound — and anything correlating the percentage clock against the
+	// request clock is wrong by exactly that unknown amount without this column.
+	// NULL on every row written before it existed: unknown, never "the same as
+	// sampled_at".
+	{
+		table: "usage_snapshots",
+		column: "observed_at",
+		ddl: "ALTER TABLE usage_snapshots ADD COLUMN observed_at INTEGER",
+	},
+	// The account's plan tier and rate-limit tier AS OF THE SAMPLE. Both are
+	// otherwise only available as today's value on the accounts row, which would
+	// refile the whole history under a tier the account may have moved to
+	// yesterday — and a tier change reads exactly like a change in what the
+	// subscription buys. NULL on pre-column rows; a reader must fall back to the
+	// account's present-day value and mark that inference as assumed.
+	{
+		table: "usage_snapshots",
+		column: "plan_tier",
+		ddl: "ALTER TABLE usage_snapshots ADD COLUMN plan_tier TEXT",
+	},
+	{
+		table: "usage_snapshots",
+		column: "rate_limit_tier",
+		ddl: "ALTER TABLE usage_snapshots ADD COLUMN rate_limit_tier TEXT",
 	},
 ];
 

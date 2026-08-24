@@ -291,6 +291,7 @@ async function handleIngestedProxy(
 		projectAttributionSource,
 		requestMeta,
 		bumpIdleTimeout,
+		canRearmIdleTimeout,
 	} = ingressContext;
 
 	// 4b. Global force-account override (Feature 3). When a forced account is
@@ -722,6 +723,7 @@ async function handleIngestedProxy(
 		effectiveRequestModel,
 		gates,
 		bumpIdleTimeout,
+		canRearmIdleTimeout,
 		burstHoldTimingOverride,
 		logFinalOrderOnce,
 		attemptThroughProbeGate: countedAttemptThroughProbeGate,

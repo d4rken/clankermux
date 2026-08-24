@@ -87,8 +87,44 @@ interface ProbeLease {
  * provider-wide). Pass it back to {@link completeProviderOverloadProbe}.
  */
 export interface OverloadProbeToken {
+	/**
+	 * Admission-level identity, stable across every lease of this probe.
+	 *
+	 * Carried on the TOKEN — alongside {@link acquiredAt} — because the token is
+	 * the only copy that SURVIVES a re-trip. Both re-trip paths call
+	 * {@link applyProviderOverloadCooldown} BEFORE settling, which mints a new
+	 * bucket generation and clears `bucket.probe`, so by the time a "reopened"
+	 * completion arrives the bucket can no longer say who the probe was or when
+	 * it started. (The id is ALSO mirrored onto `bucket.probe`, for the separate
+	 * job of letting a TTL takeover name whoever it displaced.)
+	 */
+	readonly probeId: string;
+	/** Admission timestamp, for the settle line's duration. */
+	readonly acquiredAt: number;
 	readonly leases: readonly ProbeLease[];
 }
+
+/**
+ * Why a probe settled the way it did. A closed union: every settle site names
+ * its own evidence, and adding a new settle path should mean adding a case
+ * here rather than passing a bare string.
+ */
+export type OverloadProbeEvidence =
+	| "message_start"
+	| "clean_eof"
+	| "stream_not_success"
+	| "sse_overloaded_error"
+	| "sse_rate_limit_error"
+	| "terminal_event_before_cut"
+	| "stream_read_error"
+	| "http_529"
+	| "non_stream_2xx"
+	| "non_stream_non_2xx"
+	| "forward_setup_threw"
+	| "attempt_failed"
+	| "model_not_found"
+	| "model_switch"
+	| "stale_token_retry";
 
 export type ProbeAdmission =
 	| { admitted: true; token: OverloadProbeToken | null }
@@ -114,18 +150,49 @@ interface OverloadBucket {
 	 * env-aware stream timeout (see {@link getProbeLeaseSafetyTtlMs}) so a
 	 * runtime override change never shortens an already-issued lease.
 	 */
-	probe: { leaseId: number; acquiredAt: number; ttlMs: number } | null;
+	probe: {
+		leaseId: number;
+		acquiredAt: number;
+		ttlMs: number;
+		/** Admission identity, so a TTL takeover can name who it displaced. */
+		probeId: string;
+	} | null;
 }
 
 const buckets = new Map<string, OverloadBucket>();
 let generationCounter = 0;
 let leaseIdCounter = 0;
+let probeIdCounter = 0;
 
-function normalizeUntil(candidate: number | undefined, now: number): number {
+/**
+ * Where a trip's deadline came from. `hint` means upstream gave us a usable
+ * reset hint; `hint_capped` means it did but we clamped it to the 5-minute
+ * ceiling; `no_usable_reset_default` means it gave us nothing usable and we
+ * fell back to 60s.
+ *
+ * Coarse ON PURPOSE: it answers "usable upstream hint, or our own fallback?",
+ * which previously had to be inferred by diffing log timestamps against ISO
+ * deadlines by hand. It does NOT say WHICH header the hint came from — the
+ * Anthropic parser may pick the unified reset, Retry-After, or
+ * x-ratelimit-reset — because that origin is not threaded through
+ * RateLimitInfo. Do not read `hint` as "Retry-After was present".
+ */
+type ResetSource = "hint" | "hint_capped" | "no_usable_reset_default";
+
+function normalizeUntil(
+	candidate: number | undefined,
+	now: number,
+): { until: number; source: ResetSource } {
 	if (candidate && Number.isFinite(candidate) && candidate > now) {
-		return Math.min(candidate, now + MAX_PROVIDER_OVERLOAD_COOLDOWN_MS);
+		const capped = now + MAX_PROVIDER_OVERLOAD_COOLDOWN_MS;
+		return candidate > capped
+			? { until: capped, source: "hint_capped" }
+			: { until: candidate, source: "hint" };
 	}
-	return now + DEFAULT_PROVIDER_OVERLOAD_COOLDOWN_MS;
+	return {
+		until: now + DEFAULT_PROVIDER_OVERLOAD_COOLDOWN_MS,
+		source: "no_usable_reset_default",
+	};
 }
 
 /**
@@ -241,21 +308,56 @@ export function applyProviderOverloadCooldown(
 	provider: string,
 	resetTime?: number,
 	model?: string | null,
+	context?: {
+		/**
+		 * Set by callers that synthesize `resetTime` from a local default rather
+		 * than an upstream header — the mid-stream SSE overload path has no
+		 * headers to read, so its hint would otherwise be logged as if upstream
+		 * had supplied one.
+		 */
+		syntheticReset?: boolean;
+		/** Account whose attempt produced the overload, for attribution. */
+		accountName?: string;
+	},
 ): number {
 	const now = Date.now();
 	const key = bucketKey(provider, model);
-	const until = normalizeUntil(resetTime, now);
+	const { until, source } = normalizeUntil(resetTime, now);
 	const bucket = buckets.get(key);
 	// A half-open bucket's stale past deadline loses the max() naturally.
 	const effectiveUntil = bucket ? Math.max(bucket.until, until) : until;
 
+	// Distinguish a first trip, a re-trip of a breaker that had already lapsed
+	// to half-open, a re-trip that actually pushed an open breaker's deadline
+	// out, and one whose older deadline won the max() — four states that used to
+	// render as one identical line.
+	const transition = !bucket
+		? "opened"
+		: bucket.until <= now
+			? // A pure STATE label: the breaker had already lapsed to half-open when
+				// this trip landed. Do NOT read it as "the probe failed" — a request
+				// admitted while the bucket was CLOSED can stay in flight past a whole
+				// cooldown cycle (30-minute request timeout vs ~60s cooldowns) and
+				// 529 with no probe token at all, landing here too.
+				"re-tripped(from half-open)"
+			: effectiveUntil > bucket.until
+				? "re-tripped(extended)"
+				: "re-tripped(deadline retained)";
+	const generation = ++generationCounter;
+
 	buckets.set(key, {
 		until: effectiveUntil,
-		generation: ++generationCounter,
+		generation,
 		probe: null,
 	});
+	const resetSource = context?.syntheticReset
+		? "midstream_no_headers_default"
+		: source;
 	log.warn(
-		`Overload breaker ${key} open until ${new Date(effectiveUntil).toISOString()}`,
+		`Overload breaker ${key} ${transition} until ${new Date(effectiveUntil).toISOString()} ` +
+			`(remaining=${effectiveUntil - now}ms, reset=${resetSource}, generation=${generation}` +
+			`${model ? `, model=${model}` : ""}` +
+			`${context?.accountName ? `, account=${context.accountName}` : ""})`,
 	);
 	return effectiveUntil;
 }
@@ -390,17 +492,32 @@ export function tryAcquireProviderOverloadProbe(
 	// TTL snapshot at acquisition: every lease of this admission shares the
 	// same env-aware deadline.
 	const ttlMs = getProbeLeaseSafetyTtlMs();
+	const probeId = `p${++probeIdCounter}`;
 	for (const key of halfOpenKeys) {
 		const bucket = buckets.get(key);
 		if (!bucket) continue;
+		// An expired lease being overwritten is the ONE lifecycle that otherwise
+		// ends with no line at all: its owner died without ever completing, so no
+		// settle arrives to report it. Say so at WARN — a bucket that keeps
+		// producing these is leaking probe owners, which nothing else reveals.
+		if (bucket.probe) {
+			log.warn(
+				`Overload probe ${bucket.probe.probeId} lease expired for ${key} ` +
+					`after ${now - bucket.probe.acquiredAt}ms (ttl ${bucket.probe.ttlMs}ms); ` +
+					`admitting replacement ${probeId}`,
+			);
+		}
 		const leaseId = ++leaseIdCounter;
-		bucket.probe = { leaseId, acquiredAt: now, ttlMs };
+		bucket.probe = { leaseId, acquiredAt: now, ttlMs, probeId };
 		leases.push({ key, generation: bucket.generation, leaseId });
 	}
 	log.info(
-		`Overload probe admitted for ${halfOpenKeys.join(", ")} (single-flight)`,
+		`Overload probe ${probeId} admitted for ${halfOpenKeys
+			.map((k) => `${k}@g${buckets.get(k)?.generation ?? "?"}`)
+			.join(", ")} (single-flight, ttl ${ttlMs}ms` +
+			`${model ? `, model=${model}` : ""})`,
 	);
-	return { admitted: true, token: { leases } };
+	return { admitted: true, token: { probeId, acquiredAt: now, leases } };
 }
 
 /**
@@ -417,21 +534,76 @@ export function tryAcquireProviderOverloadProbe(
 export function completeProviderOverloadProbe(
 	token: OverloadProbeToken | null,
 	outcome: "recovered" | "reopened" | "abandoned",
+	evidence?: OverloadProbeEvidence,
 ): void {
 	if (!token) return;
+	// Computed from the TOKEN so the duration survives a re-trip having already
+	// superseded every lease — see OverloadProbeToken.probeId.
+	const durationMs = Date.now() - token.acquiredAt;
+	const applied: string[] = [];
+	const superseded: string[] = [];
+
 	for (const lease of token.leases) {
 		const bucket = buckets.get(lease.key);
-		if (!bucket) continue;
-		if (bucket.generation !== lease.generation) continue;
-		if (!bucket.probe || bucket.probe.leaseId !== lease.leaseId) continue;
+		if (
+			!bucket ||
+			bucket.generation !== lease.generation ||
+			!bucket.probe ||
+			bucket.probe.leaseId !== lease.leaseId
+		) {
+			superseded.push(lease.key);
+			continue;
+		}
 
+		applied.push(lease.key);
 		if (outcome === "recovered") {
 			buckets.delete(lease.key);
-			log.info(`Overload breaker ${lease.key} closed (probe recovered)`);
 		} else {
 			bucket.probe = null;
 		}
 	}
+
+	const detail =
+		`after ${durationMs}ms` + `${evidence ? ` (evidence=${evidence})` : ""}`;
+	// A composite probe (family + provider-wide) is routinely PARTIALLY
+	// superseded: a 529 re-trips only the family bucket, so the family lease is
+	// gone while the provider-wide one still applies. Naming only the applied
+	// keys would drop the very bucket that re-tripped from the settle line,
+	// while admission had named both — so report both sides.
+	const supersededNote =
+		superseded.length > 0 ? ` (superseded: ${superseded.join(", ")})` : "";
+	if (applied.length > 0) {
+		// THE line this whole lifecycle exists for: how long the elected probe
+		// held the bucket, and what decided it. A long duration here with many
+		// holders polling is the convoy signature.
+		log.info(
+			`Overload probe ${token.probeId} settled ${outcome} for ${applied.join(", ")} ${detail}${supersededNote}`,
+		);
+		return;
+	}
+	if (outcome === "reopened") {
+		// A "reopened" verdict ALWAYS lands here in the single-family case, and it
+		// must not be demoted to DEBUG for it: both production re-trip paths call
+		// applyProviderOverloadCooldown BEFORE settling, which bumps the
+		// generation and so guarantees `applied` is empty. The lease mutation was
+		// indeed a no-op, but the VERDICT is real, and it is exactly the outcome
+		// an operator is looking for — the probe went out and the provider was
+		// still overloaded. At DEBUG it would be hidden behind a level that is off
+		// by default, i.e. hidden precisely during the incident it describes.
+		log.info(
+			`Overload probe ${token.probeId} settled reopened for ` +
+				`${token.leases.map((l) => l.key).join(", ")} ${detail} ` +
+				`(lease already superseded by the re-trip)`,
+		);
+		return;
+	}
+	// A recovered/abandoned completion that changed nothing: the bucket was
+	// cleared by an operator, or a TTL takeover reassigned the lease. The probe
+	// ran, but it reached no verdict anyone is still waiting on.
+	log.debug(
+		`Overload probe ${token.probeId} completion ignored ${detail} ` +
+			`(outcome=${outcome}, reason=superseded)`,
+	);
 }
 
 /**

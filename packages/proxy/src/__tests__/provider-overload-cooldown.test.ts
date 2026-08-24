@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, mock } from "bun:test";
 import { getProvider } from "@clankermux/providers";
 import type { Account } from "@clankermux/types";
 import type { ProxyContext } from "../handlers";
+import { setOverloadHoldBudgetOverrideForTests } from "../overload-hold";
 import {
 	applyProviderOverloadCooldown,
 	clearProviderOverloadCooldown,
@@ -121,6 +122,7 @@ describe("provider overload cooldown", () => {
 	afterEach(() => {
 		globalThis.fetch = originalFetch;
 		clearProviderOverloadCooldown();
+		setOverloadHoldBudgetOverrideForTests(null);
 	});
 
 	it("skips remaining Anthropic accounts after official Anthropic 529 and falls back cross-provider", async () => {
@@ -280,8 +282,12 @@ describe("provider overload cooldown", () => {
 
 		Date.now = () => now;
 		try {
-			// Beyond the 120s transparent-hold budget → the immediate 529 terminal
-			// (a within-budget cooldown would hold the connection instead — Stage D).
+			// The immediate 529 terminal requires a cooldown OUTSIDE the hold
+			// budget. A real trip is clamped to MAX_PROVIDER_OVERLOAD_COOLDOWN_MS
+			// (300s), which now fits inside the production budget, so shrink the
+			// budget rather than chase it with an ever-larger cooldown. Scoped to
+			// this test: siblings here rely on a within-budget cooldown holding.
+			setOverloadHoldBudgetOverrideForTests(30_000);
 			applyProviderOverloadCooldown("anthropic", now + 200_000);
 			const ctx = makeContext([
 				makeAccount({ id: "anthropic-a", provider: "anthropic" }),

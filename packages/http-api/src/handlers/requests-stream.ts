@@ -3,6 +3,7 @@ import {
 	type RequestStreamEvt,
 	requestEvents,
 } from "@clankermux/core";
+import type { StreamSessionGuard } from "../services/session-stream-registry";
 import { registerSseCloser } from "../sse-registry";
 
 // Periodic SSE comment so the socket never sits idle long enough for
@@ -12,6 +13,13 @@ const SSE_HEARTBEAT_INTERVAL_MS = 30_000;
 
 export function createRequestsStreamHandler(
 	heartbeatIntervalMs = SSE_HEARTBEAT_INTERVAL_MS,
+	/**
+	 * Binds the connection to the session that opened it: periodic
+	 * revalidation plus a bounded lifetime. Without it this stream
+	 * authenticates once at the handshake and then runs forever, so a copied
+	 * cookie keeps receiving management events after its session is gone.
+	 */
+	sessionGuard?: StreamSessionGuard,
 ) {
 	return (req: Request): Response => {
 		// Store the write handler outside to access it in cancel
@@ -22,6 +30,7 @@ export function createRequestsStreamHandler(
 		let streamController: ReadableStreamDefaultController<Uint8Array> | null =
 			null;
 		let unregisterCloser: (() => void) | null = null;
+		let detachSessionGuard: (() => void) | null = null;
 
 		const cleanup = () => {
 			isClosed = true;
@@ -36,6 +45,10 @@ export function createRequestsStreamHandler(
 			if (unregisterCloser) {
 				unregisterCloser();
 				unregisterCloser = null;
+			}
+			if (detachSessionGuard) {
+				detachSessionGuard();
+				detachSessionGuard = null;
 			}
 		};
 
@@ -96,6 +109,22 @@ export function createRequestsStreamHandler(
 				// Register for proactive close at shutdown: this endless stream
 				// would otherwise hold Bun's graceful drain until the watchdog.
 				streamController = controller;
+
+				// Revocation. Closing is safe and self-healing: browser EventSource
+				// reconnects, and the reconnect re-runs the full auth check at the
+				// handshake — which is exactly what a revoked session must fail.
+				const closeForRevocation = () => {
+					if (isClosed) return;
+					cleanup();
+					try {
+						controller.close();
+					} catch {
+						// Already closed/errored.
+					}
+				};
+				detachSessionGuard =
+					sessionGuard?.attach(req, closeForRevocation) ?? null;
+
 				unregisterCloser = registerSseCloser(() => {
 					if (isClosed) return;
 					try {

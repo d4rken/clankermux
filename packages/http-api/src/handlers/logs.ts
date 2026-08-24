@@ -1,6 +1,7 @@
 import { sseResponse } from "@clankermux/http-common";
 import { Logger, logBus, safeStringifyLogEvent } from "@clankermux/logger";
 import type { LogEvent } from "@clankermux/types";
+import type { StreamSessionGuard } from "../services/session-stream-registry";
 import { registerSseCloser } from "../sse-registry";
 
 const log = new Logger("LogsHandler");
@@ -15,6 +16,13 @@ const SSE_HEARTBEAT_INTERVAL_MS = 30_000;
  */
 export function createLogsStreamHandler(
 	heartbeatIntervalMs = SSE_HEARTBEAT_INTERVAL_MS,
+	/**
+	 * Binds the connection to the session that opened it: periodic revalidation
+	 * plus a bounded lifetime. Without it this stream authenticates once at the
+	 * handshake and then runs forever, so a copied cookie keeps receiving
+	 * management logs after its session is gone.
+	 */
+	sessionGuard?: StreamSessionGuard,
 ) {
 	return (req: Request): Response => {
 		// Use TransformStream for better Bun compatibility
@@ -25,6 +33,7 @@ export function createLogsStreamHandler(
 		let handleLogEvent: ((event: LogEvent) => Promise<void>) | null = null;
 		let heartbeat: ReturnType<typeof setInterval> | null = null;
 		let unregisterCloser: (() => void) | null = null;
+		let detachSessionGuard: (() => void) | null = null;
 
 		const cleanup = () => {
 			closed = true;
@@ -39,6 +48,10 @@ export function createLogsStreamHandler(
 			if (unregisterCloser) {
 				unregisterCloser();
 				unregisterCloser = null;
+			}
+			if (detachSessionGuard) {
+				detachSessionGuard();
+				detachSessionGuard = null;
 			}
 		};
 
@@ -89,6 +102,18 @@ export function createLogsStreamHandler(
 				} catch {}
 			}
 		}, heartbeatIntervalMs);
+
+		// Revocation. Closing is safe and self-healing: browser EventSource
+		// reconnects, and the reconnect re-runs the full auth check at the
+		// handshake — which is exactly what a revoked session must fail.
+		detachSessionGuard =
+			sessionGuard?.attach(req, () => {
+				if (closed) return;
+				cleanup();
+				try {
+					writer.close().catch(() => {});
+				} catch {}
+			}) ?? null;
 
 		// Register for proactive close at shutdown: this endless stream would
 		// otherwise hold Bun's graceful drain until the watchdog.

@@ -35,7 +35,12 @@
 		// database/out-path guards both tools share.
 		"scripts/db-tool-io.ts",
 		"scripts/ledger-feasibility.ts",
-		"scripts/ledger-feasibility.test.ts"
+		"scripts/ledger-feasibility.test.ts",
+		// Same reasoning, and more load-bearing: this is the only way to set the
+		// management password and the only way to recover from a forgotten one,
+		// so it must not be the one file a type error can reach production in.
+		"scripts/auth-password.ts",
+		"scripts/auth-password.test.ts"
 	],
 	"exclude": [
 		"**/__tests__",

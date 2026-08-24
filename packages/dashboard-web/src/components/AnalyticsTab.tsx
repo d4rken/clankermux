@@ -11,6 +11,7 @@ import { EMPTY_FILTERS, type FilterState } from "./analytics/AnalyticsFilters";
 import { CachingTab } from "./analytics/tabs/CachingTab";
 import { ModelsTab } from "./analytics/tabs/ModelsTab";
 import { ProjectsReliabilityTab } from "./analytics/tabs/ProjectsReliabilityTab";
+import { QuotaTab } from "./analytics/tabs/QuotaTab";
 import { TrafficTab } from "./analytics/tabs/TrafficTab";
 import type { SharedFilterProps } from "./analytics/tabs/types";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "./ui/tabs";
@@ -89,11 +90,12 @@ export const AnalyticsTab = React.memo(() => {
 				value={activeTab}
 				onValueChange={(v) => setActiveTab(v as AnalyticsTabId)}
 			>
-				<TabsList className="grid w-full grid-cols-4">
+				<TabsList className="grid w-full grid-cols-5">
 					<TabsTrigger value="traffic">Traffic</TabsTrigger>
 					<TabsTrigger value="models">Models & Speed</TabsTrigger>
 					<TabsTrigger value="caching">Caching</TabsTrigger>
 					<TabsTrigger value="projects">Projects & Reliability</TabsTrigger>
+					<TabsTrigger value="quota">Quota</TabsTrigger>
 				</TabsList>
 				<TabsContent value="traffic" className="space-y-section">
 					<TrafficTab
@@ -125,6 +127,11 @@ export const AnalyticsTab = React.memo(() => {
 						range={ranges.projects}
 						onRangeChange={(r) => setRange("projects", r)}
 					/>
+				</TabsContent>
+				{/* No range or filter props: the quota fit is precomputed over the
+				    whole retained history and its endpoint takes no parameters. */}
+				<TabsContent value="quota" className="space-y-section">
+					<QuotaTab />
 				</TabsContent>
 			</Tabs>
 		</div>

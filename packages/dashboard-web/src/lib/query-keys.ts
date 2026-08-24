@@ -3,6 +3,8 @@ import type { QueryClient } from "@tanstack/react-query";
 
 export const queryKeys = {
 	all: ["clankermux"] as const,
+	/** The management login gate. Public by policy, so it answers even signed out. */
+	authStatus: () => [...queryKeys.all, "auth-status"] as const,
 	accounts: () => [...queryKeys.all, "accounts"] as const,
 	// Server-computed per-key quota runway. Derived from BOTH the account state
 	// and the API-key set (with their routing pins), so it is invalidated
@@ -33,6 +35,9 @@ export const queryKeys = {
 		[...queryKeys.all, "usage-history", { range }] as const,
 	memoryHistory: (range?: string) =>
 		[...queryKeys.all, "memory-history", { range }] as const,
+	// Unkeyed: the payload is precomputed over the whole retained history, so
+	// there is no range or filter axis to fork the cache on.
+	quotaDrift: () => [...queryKeys.all, "quota-drift"] as const,
 	cacheKeepalive: () => [...queryKeys.all, "cache-keepalive"] as const,
 	cacheKeepaliveHistory: (range?: string) =>
 		[...queryKeys.all, "cache-keepalive-history", { range }] as const,

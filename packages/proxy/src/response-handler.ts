@@ -24,6 +24,7 @@ import { missingMessageStopStats } from "./missing-message-stop-stats";
 import {
 	applyProviderOverloadCooldown,
 	completeProviderOverloadProbe,
+	type OverloadProbeEvidence,
 	type OverloadProbeToken,
 } from "./provider-overload-cooldown";
 import { RequestBodyContext } from "./request-body-context";
@@ -258,9 +259,15 @@ export interface ResponseHandlerOptions {
 	/**
 	 * Half-open overload-probe token whose OWNERSHIP transfers to
 	 * forwardToClient at CALL time — the caller must not settle it after
-	 * passing it here, on ANY outcome including a throw. The verdict is judged
-	 * on FULL transport completion — mid-stream overloads arrive after 200
-	 * headers, so headers alone prove nothing:
+	 * passing it here, on ANY outcome including a throw. Headers alone never
+	 * decide it (mid-stream overloads arrive after 200 headers); a qualifying
+	 * stream settles "recovered" at the first healthy `message_start`, and the
+	 * EOF / error / read-error paths are the fallback verdict for everything
+	 * that never produced one:
+	 * Each row below applies only while the token is still UNSETTLED — the first
+	 * verdict wins, so a mid-stream `overloaded_error` AFTER a `message_start`
+	 * does not settle "reopened"; it opens a fresh breaker generation instead.
+	 *   - streaming `message_start` + success + sniffer silent → "recovered"
 	 *   - streaming clean EOF + success + sniffer silent → "recovered"
 	 *   - sniffer `overloaded_error`                     → "reopened"
 	 *   - sniffer `rate_limit_error` / stream error      → "abandoned"
@@ -316,6 +323,7 @@ export async function forwardToClient(
 		completeProviderOverloadProbe(
 			options.overloadProbeToken ?? null,
 			"abandoned",
+			"forward_setup_threw",
 		);
 		throw err;
 	}
@@ -528,6 +536,22 @@ async function forwardToClientInner(
 			),
 		});
 
+		// Single mutable owner of the probe lease for the whole stream. Every
+		// settle site below reads and then CLEARS it, so the lease is reported
+		// exactly once no matter which verdict fires first. (Completion is also
+		// idempotent via generation + lease identity, but an explicit single
+		// owner keeps the early-settle below from reading as a double-settle.)
+		let streamProbeToken = overloadProbeToken ?? null;
+		const settleStreamProbe = (
+			outcome: "recovered" | "reopened" | "abandoned",
+			evidence: OverloadProbeEvidence,
+		): void => {
+			if (!streamProbeToken) return;
+			const token = streamProbeToken;
+			streamProbeToken = null;
+			completeProviderOverloadProbe(token, outcome, evidence);
+		};
+
 		const clientStream = createStreamAnalyticsPassthrough(response.body, {
 			totalTimeoutMs: STREAM_TIMEOUT_MS,
 			chunkTimeoutMs: CHUNK_TIMEOUT_MS,
@@ -562,14 +586,15 @@ async function forwardToClientInner(
 							account.provider,
 							Date.now() + MID_STREAM_RATE_LIMIT_COOLDOWN_MS,
 							options.upstreamModel ?? null,
+							// The SSE error frame carries no headers, so this deadline is
+							// OUR default, not upstream's hint — say so, or the trip line
+							// claims a reset source that never existed.
+							{ syntheticReset: true, accountName: account.name },
 						);
 						// Probe verdict: the probe stream itself carried the overload.
 						// The trip above invalidated the tripped bucket's lease;
 						// "reopened" releases any sibling-bucket lease too.
-						completeProviderOverloadProbe(
-							overloadProbeToken ?? null,
-							"reopened",
-						);
+						settleStreamProbe("reopened", "sse_overloaded_error");
 					} else {
 						// Synthetic cache-keepalive replays are NOT authoritative evidence
 						// of an account limit. The keepalive scheduler replays warm bodies
@@ -611,10 +636,7 @@ async function forwardToClientInner(
 						// A mid-stream rate_limit_error is a per-ACCOUNT signal, not an
 						// overload-health verdict for the family — release the probe
 						// lease without closing or re-opening the bucket.
-						completeProviderOverloadProbe(
-							overloadProbeToken ?? null,
-							"abandoned",
-						);
+						settleStreamProbe("abandoned", "sse_rate_limit_error");
 
 						// Reliable burst marker (storm-affinity-hold Part 1). A mid-stream
 						// `rate_limit_error` frame arrives after the 200 headers were
@@ -639,12 +661,59 @@ async function forwardToClientInner(
 						}
 					}
 				}
+
+				// Probe verdict AS SOON AS the provider has demonstrated health,
+				// rather than when this generation finishes.
+				//
+				// Settling at stream end meant the half-open bucket stayed leased
+				// for the entire turn: a probe that got healthy headers in ~2s held
+				// the lease for the 60-120s of generation that followed, and every
+				// other holder sat in `holdForOverloadRecovery` polling
+				// `probe-active` until its own budget ran out — waiting on an
+				// upstream that had already recovered. That convoy, not the breaker
+				// cooldown, is what burned the hold budget during the 2026-08-24
+				// incident (holds exiting at the 120s ceiling with 30+ suppressed
+				// rounds against a breaker that only ever tripped for 60s).
+				//
+				// `message_start` is the provider committing to a turn, and the SSE
+				// overload shape arrives as an `error` frame INSTEAD of it — so a
+				// seen `message_start` with a silent sniffer is real evidence. It is
+				// also strictly stronger than what onEnd already accepts as
+				// "recovered": that path deliberately counts a TRUNCATED stream as
+				// health evidence on the grounds that 200 headers plus streamed
+				// bytes prove the family is not overloaded.
+				//
+				// A later mid-stream `overloaded_error` is not lost: its branch
+				// above re-trips the breaker via applyProviderOverloadCooldown,
+				// which mints a fresh bucket generation. The cost of being early is
+				// bounded by that window — between `message_start` and an error
+				// frame — during which waiting holders are released and may hit an
+				// upstream that turns out to still be sick, re-tripping it. Closing
+				// at stream end has the same release-everyone-at-once shape; this
+				// only moves it earlier.
+				//
+				// Requires an EXPLICIT positive event, never merely "bytes arrived
+				// and the sniffer stayed quiet". A silent sniffer is not evidence:
+				// the chunk may be an SSE ping or comment, the first half of an
+				// `event: error` envelope whose type has not arrived yet, or a
+				// stream shape this proxy does not model. Streams with no parsed
+				// `message_start` — and requests with usage tracking off, where we
+				// cannot observe one — keep the original end-of-stream verdict.
+				if (
+					streamProbeToken &&
+					success &&
+					rateLimitSniffer.firedReason == null &&
+					usageState?.sawMessageStart === true
+				) {
+					settleStreamProbe("recovered", "message_start");
+				}
 			},
 			onEnd: () => {
-				// Probe verdict on natural stream end: recovered only when the
-				// response was successful AND the sniffer never fired mid-stream
-				// (a fired sniffer already settled the token — idempotent no-op
-				// here). A non-success stream that drained cleanly is no health
+				// Fallback probe verdict on natural stream end, for a token still
+				// UNSETTLED here — a stream that produced `message_start` already
+				// settled in onChunk, and a fired sniffer settled at that frame, so
+				// both reach this as a no-op. Recovered only when the response was
+				// successful AND the sniffer never fired mid-stream. A non-success stream that drained cleanly is no health
 				// proof, so its lease is released without closing the bucket.
 				// Outside the usageState guard: filtered requests still settle.
 				//
@@ -652,11 +721,10 @@ async function forwardToClientInner(
 				// stream still means the provider returned 200 headers and streamed
 				// bytes, which IS evidence the family is not overloaded. Marking it
 				// "abandoned" would keep a healthy bucket half-open for no reason.
-				completeProviderOverloadProbe(
-					overloadProbeToken ?? null,
-					success && rateLimitSniffer?.firedReason == null
-						? "recovered"
-						: "abandoned",
+				const cleanEof = success && rateLimitSniffer?.firedReason == null;
+				settleStreamProbe(
+					cleanEof ? "recovered" : "abandoned",
+					cleanEof ? "clean_eof" : "stream_not_success",
 				);
 				if (usageState) {
 					// Flush BEFORE classifying. A provider may close right after the
@@ -750,9 +818,11 @@ async function forwardToClientInner(
 				// Probe verdict: a complete-then-cut stream is the same family-health
 				// evidence as a clean EOF (mirrors onEnd's success verdict); a
 				// genuinely cut stream releases the lease so another request may probe.
-				completeProviderOverloadProbe(
-					overloadProbeToken ?? null,
+				settleStreamProbe(
 					completedBeforeCut ? "recovered" : "abandoned",
+					completedBeforeCut
+						? "terminal_event_before_cut"
+						: "stream_read_error",
 				);
 				if (usageState) {
 					// The read error's message is surfaced nowhere else — log it so
@@ -819,6 +889,7 @@ async function forwardToClientInner(
 	completeProviderOverloadProbe(
 		overloadProbeToken ?? null,
 		response.ok ? "recovered" : "abandoned",
+		response.ok ? "non_stream_2xx" : "non_stream_non_2xx",
 	);
 	if (!response.body) {
 		if (usageState) {

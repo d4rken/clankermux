@@ -57,6 +57,10 @@ class FakeDbOps {
 	async rotateApiKeySecret(): Promise<boolean> {
 		return true;
 	}
+	/** No management password configured — the session policy is fail-open. */
+	async getManagementPassword(): Promise<null> {
+		return null;
+	}
 }
 
 function keyRow(secret: string): ApiKey {
