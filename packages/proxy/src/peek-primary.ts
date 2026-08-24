@@ -29,13 +29,54 @@ let lastPrimaryAccountId: string | null | undefined;
  *
  * "Fresh" (no affinity to an earlier turn), "unpinned" (no API-key pin) and
  * "nominal" (a normal-size prompt, so the context-window gate is not modelled).
- * Every exclusion listed on {@link peekDefaultCandidateIds} is a property of
+ * Every exclusion listed on {@link evaluateDefaultCandidates} is a property of
  * this context, not a bug in the prediction — a caller that publishes the
  * candidate without publishing the context invites a client to read it as "the
  * account the load balancer is currently using", which is not a thing that
  * exists.
  */
 export const DEFAULT_ROUTING_CONTEXT = "fresh_unpinned_nominal";
+
+/** Why one of the two hard gates removed a ranked account from the candidates. */
+export type PeekExclusionReason = "provider_overload" | "usage_throttled";
+
+/**
+ * A ranked account the prediction excluded, and WHEN the exclusion lifts.
+ *
+ * Both modelled exclusions are timed: the provider-wide overload breaker and
+ * the proactive usage throttle each hold until a known instant. That is what
+ * lets a caller publishing `candidateIds.length` also say when a pool of zero
+ * recovers, instead of reporting an empty pool with no known recovery.
+ */
+export interface PeekExclusion {
+	accountId: string;
+	reason: PeekExclusionReason;
+	/** INSTANT the exclusion lifts, always in the future relative to `now`. */
+	recoversAtMs: number;
+}
+
+/**
+ * One evaluation of the default routing context: the candidates, and what the
+ * gates did to everything else.
+ *
+ * Returned together on purpose. The candidate COUNT, the HEAD candidate and the
+ * earliest recovery instant are three readings of one evaluation, and a caller
+ * that recomputed any of them separately could publish "nothing is routable"
+ * beside "nothing is waiting on a clock" while an overload breaker was
+ * plainly counting down.
+ */
+export interface DefaultCandidateEvaluation {
+	/** Candidates, best first. Empty when every ranked account is gated. */
+	candidateIds: string[];
+	/** Accounts the two hard gates removed, each with its recovery instant. */
+	exclusions: PeekExclusion[];
+	/**
+	 * Accounts the pool-liveness reserve DEMOTED. They are still in
+	 * `candidateIds`, at the back — routing demotes rather than excludes, so
+	 * they are not exclusions and have no recovery instant.
+	 */
+	livenessReservedIds: string[];
+}
 
 /**
  * The accounts a FRESH, no-affinity, unpinned, NOMINAL-size request would
@@ -76,9 +117,11 @@ export const DEFAULT_ROUTING_CONTEXT = "fresh_unpinned_nominal";
  *
  * Silent, unlike {@link peekPrimaryAccountId}: the change-only diagnostic there
  * describes the DASHBOARD's badge moving, and an unauthenticated widget polling
- * every few seconds must not be able to drive that log.
+ * every few seconds must not be able to drive that log. Nothing outside this
+ * call is mutated either — the skip lists travel in the RETURN VALUE, so two
+ * callers can never read each other's evaluation.
  */
-export function peekDefaultCandidateIds(
+export function evaluateDefaultCandidates(
 	accounts: Account[],
 	strategy: LoadBalancingStrategy | null | undefined,
 	config: Pick<
@@ -86,8 +129,10 @@ export function peekDefaultCandidateIds(
 		"getUsageThrottlingFiveHourEnabled" | "getUsageThrottlingWeeklyEnabled"
 	>,
 	now = Date.now(),
-): string[] {
-	if (!strategy) return [];
+): DefaultCandidateEvaluation {
+	if (!strategy) {
+		return { candidateIds: [], exclusions: [], livenessReservedIds: [] };
+	}
 
 	// Mirror applyUsageThrottling() in proxy.ts exactly.
 	const settings = {
@@ -96,8 +141,7 @@ export function peekDefaultCandidateIds(
 	};
 	const throttlingActive = settings.fiveHourEnabled || settings.weeklyEnabled;
 
-	const skippedOverloaded: string[] = [];
-	const skippedThrottled: string[] = [];
+	const exclusions: PeekExclusion[] = [];
 	const skippedLivenessReserved: string[] = [];
 
 	// PASS 1 — the hard gates. Everything that survives BOTH is the pool the
@@ -108,7 +152,11 @@ export function peekDefaultCandidateIds(
 	for (const account of strategy.peekRanked(accounts)) {
 		const ov = getProviderWideOverloadUntil(account.provider, now);
 		if (ov && ov > now) {
-			skippedOverloaded.push(account.id);
+			exclusions.push({
+				accountId: account.id,
+				reason: "provider_overload",
+				recoversAtMs: ov,
+			});
 			continue;
 		}
 
@@ -119,7 +167,11 @@ export function peekDefaultCandidateIds(
 				now,
 			);
 			if (tu && tu > now) {
-				skippedThrottled.push(account.id);
+				exclusions.push({
+					accountId: account.id,
+					reason: "usage_throttled",
+					recoversAtMs: tu,
+				});
 				continue;
 			}
 		}
@@ -198,28 +250,28 @@ export function peekDefaultCandidateIds(
 	// BACK of the ranking rather than out of it: they are still routed to when
 	// nothing else is left, and dropping them here would understate what the
 	// pool can serve.
-	const candidates = [...unreserved, ...skippedLivenessReserved];
-
-	lastPeekSkips = {
-		overloaded: skippedOverloaded,
-		throttled: skippedThrottled,
-		livenessReserved: skippedLivenessReserved,
+	return {
+		candidateIds: [...unreserved, ...skippedLivenessReserved],
+		exclusions,
+		livenessReservedIds: skippedLivenessReserved,
 	};
-
-	return candidates;
 }
 
 /**
- * The skip lists produced by the most recent {@link peekDefaultCandidateIds}
- * call, for the change-only diagnostic below. Held here rather than returned so
- * the widget surface, which wants the candidate list and nothing else, is not
- * handed a second value it has no use for.
+ * The ids alone, for a caller that has no use for WHY an account is out.
  */
-let lastPeekSkips: {
-	overloaded: string[];
-	throttled: string[];
-	livenessReserved: string[];
-} = { overloaded: [], throttled: [], livenessReserved: [] };
+export function peekDefaultCandidateIds(
+	accounts: Account[],
+	strategy: LoadBalancingStrategy | null | undefined,
+	config: Pick<
+		Config,
+		"getUsageThrottlingFiveHourEnabled" | "getUsageThrottlingWeeklyEnabled"
+	>,
+	now = Date.now(),
+): string[] {
+	return evaluateDefaultCandidates(accounts, strategy, config, now)
+		.candidateIds;
+}
 
 /**
  * The single account a fresh, unpinned, nominal-size request would route to
@@ -238,22 +290,28 @@ export function peekPrimaryAccountId(
 	>,
 	now = Date.now(),
 ): string | null {
-	const primaryId =
-		peekDefaultCandidateIds(accounts, strategy, config, now)[0] ?? null;
+	const evaluation = evaluateDefaultCandidates(accounts, strategy, config, now);
+	const primaryId = evaluation.candidateIds[0] ?? null;
 
 	// Cheap, change-only diagnostic: only emit when the chosen primary actually
 	// moves (mirrors the spirit of the old strategy-level logPeekChange).
 	if (primaryId !== lastPrimaryAccountId) {
+		const idsExcludedFor = (reason: PeekExclusionReason): string[] =>
+			evaluation.exclusions
+				.filter((exclusion) => exclusion.reason === reason)
+				.map((exclusion) => exclusion.accountId);
+		const overloaded = idsExcludedFor("provider_overload");
+		const throttled = idsExcludedFor("usage_throttled");
 		const skips: string[] = [];
-		if (lastPeekSkips.overloaded.length) {
-			skips.push(`overload-skipped=[${lastPeekSkips.overloaded.join(", ")}]`);
+		if (overloaded.length) {
+			skips.push(`overload-skipped=[${overloaded.join(", ")}]`);
 		}
-		if (lastPeekSkips.throttled.length) {
-			skips.push(`throttle-skipped=[${lastPeekSkips.throttled.join(", ")}]`);
+		if (throttled.length) {
+			skips.push(`throttle-skipped=[${throttled.join(", ")}]`);
 		}
-		if (lastPeekSkips.livenessReserved.length) {
+		if (evaluation.livenessReservedIds.length) {
 			skips.push(
-				`liveness-reserved=[${lastPeekSkips.livenessReserved.join(", ")}]`,
+				`liveness-reserved=[${evaluation.livenessReservedIds.join(", ")}]`,
 			);
 		}
 		log.info(

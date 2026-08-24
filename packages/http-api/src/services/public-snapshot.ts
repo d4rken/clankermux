@@ -12,8 +12,8 @@ import { Logger } from "@clankermux/logger";
 import { USAGE_CACHE_TTL_MS, usageCache } from "@clankermux/providers";
 import {
 	DEFAULT_ROUTING_CONTEXT,
+	evaluateDefaultCandidates,
 	getProviderOverloadSnapshot,
-	peekDefaultCandidateIds,
 } from "@clankermux/proxy";
 import type {
 	Account,
@@ -166,6 +166,18 @@ export interface PublicPoolSnapshot {
 	paused: number;
 	rateLimited: number;
 	usageExhausted: number;
+	/**
+	 * The soonest instant anything currently blocked is scheduled to come back:
+	 * a stored cooldown, a spent quota window's reset, or one of the gates the
+	 * candidate evaluation applies (the provider-wide overload breaker, the
+	 * proactive usage throttle). Null only when nothing blocked is waiting on a
+	 * clock.
+	 *
+	 * It has to cover the SAME gates `defaultRoutable` applies, because the two
+	 * are read together: `defaultRoutable: 0` with a null instant is what a
+	 * client renders as `unhealthy`, and an overloaded pool that recovers in two
+	 * minutes is `degraded`.
+	 */
 	nextAvailableAtMs: number | null;
 }
 
@@ -651,7 +663,13 @@ export function createPublicSnapshotReader(
 		// candidate lands on a row whose paused/rate-limited fields this very
 		// response reports as blocked. Only the fields `peekRanked` and the two
 		// gates read are mapped; the rest of `Account` is unused.
-		const candidateIds = peekDefaultCandidateIds(
+		//
+		// ONE evaluation, three published facts: `pool.defaultRoutable` (its
+		// count), `routing.defaultCandidateAccountId` (its head) and the gate
+		// recoveries feeding `pool.nextAvailableAtMs` (its exclusions). Deriving
+		// any of them separately is how a pool reads "nothing routable, nothing
+		// scheduled" while an overload breaker is plainly counting down.
+		const routingEvaluation = evaluateDefaultCandidates(
 			rows.map(
 				(row) =>
 					({
@@ -684,6 +702,7 @@ export function createPublicSnapshotReader(
 			config,
 			now,
 		);
+		const candidateIds = routingEvaluation.candidateIds;
 		const defaultCandidateAccountId = candidateIds[0] ?? null;
 
 		const accounts: PublicAccountSnapshot[] = rows.map((row) => {
@@ -797,6 +816,14 @@ export function createPublicSnapshotReader(
 			return min === null ? Number(until) : Math.min(min, Number(until));
 		}, null);
 		if (earliestLock !== null) recoveryTimes.push(earliestLock);
+		// The gates the candidate evaluation applied, from that SAME evaluation.
+		// A pool emptied only by the provider-wide overload breaker or by
+		// proactive usage throttling is waiting on a clock exactly as one emptied
+		// by cooldowns is, and omitting these instants published it as
+		// `unhealthy` when it was recoverable.
+		for (const exclusion of routingEvaluation.exclusions) {
+			recoveryTimes.push(exclusion.recoversAtMs);
+		}
 
 		const pool: PublicPoolSnapshot = {
 			configured: rows.length,

@@ -109,6 +109,10 @@ export {
 } from "./integrity-scheduler";
 export {
 	DEFAULT_ROUTING_CONTEXT,
+	type DefaultCandidateEvaluation,
+	evaluateDefaultCandidates,
+	type PeekExclusion,
+	type PeekExclusionReason,
 	peekDefaultCandidateIds,
 	peekPrimaryAccountId,
 } from "./peek-primary";

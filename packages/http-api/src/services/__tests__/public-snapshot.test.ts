@@ -66,6 +66,12 @@ const fakeConfig = {
 	getUsageThrottlingWeeklyEnabled: () => false,
 } as unknown as Config;
 
+/** The same two getters, with proactive usage throttling switched on. */
+const throttlingConfig = {
+	getUsageThrottlingFiveHourEnabled: () => true,
+	getUsageThrottlingWeeklyEnabled: () => true,
+} as unknown as Config;
+
 /**
  * The simplest honest strategy: rank by priority, and drop nothing the proxy
  * would not drop. Ranking is not what these tests are about — that the count
@@ -182,12 +188,11 @@ afterEach(() => {
 	db.close();
 });
 
-function read(strategy: LoadBalancingStrategy | null = fakeStrategy()) {
-	return createPublicSnapshotReader(
-		fakeDbOps(),
-		fakeConfig,
-		() => strategy,
-	)(NOW);
+function read(
+	strategy: LoadBalancingStrategy | null = fakeStrategy(),
+	config: Config = fakeConfig,
+) {
+	return createPublicSnapshotReader(fakeDbOps(), config, () => strategy)(NOW);
 }
 
 /** The window of a given kind on the first account, or undefined. */
@@ -793,6 +798,40 @@ describe("pool rollup", () => {
 	it("reports null recovery when nothing is waiting on a clock", async () => {
 		insertAccount();
 		expect((await read()).pool.nextAvailableAtMs).toBeNull();
+	});
+
+	it("reports the breaker's deadline when only a provider overload emptied the pool", async () => {
+		// `defaultRoutable: 0` beside a null recovery is what a client renders as
+		// `unhealthy`. An overloaded provider has a known deadline, so the honest
+		// answer is `degraded` — and the gate that emptied the count has to be the
+		// same gate the instant comes from.
+		insertAccount();
+		const until = applyProviderOverloadCooldown("anthropic");
+		const snapshot = await read();
+		expect(snapshot.pool.defaultRoutable).toBe(0);
+		expect(snapshot.pool.nextAvailableAtMs).toBe(until);
+	});
+
+	it("reports the throttle's resume instant when proactive throttling emptied the pool", async () => {
+		// The second gate the candidate evaluation applies, and it recovers on a
+		// clock too. Nothing else about this account is blocked: it is neither
+		// paused, nor cooling off, nor at 100%.
+		insertAccount();
+		usageCache.set("acct-1", {
+			five_hour: {
+				// Far ahead of the elapsed pace of a window that opened a minute ago.
+				utilization: 90,
+				resets_at: new Date(NOW + 5 * 3_600_000 - 60_000).toISOString(),
+			},
+			seven_day: {
+				utilization: 0,
+				resets_at: new Date(NOW + 7 * 86_400_000).toISOString(),
+			},
+		} as AnthropicUsageData);
+		const snapshot = await read(fakeStrategy(), throttlingConfig);
+		expect(snapshot.accounts[0]?.cause).toBe("ok");
+		expect(snapshot.pool.defaultRoutable).toBe(0);
+		expect(snapshot.pool.nextAvailableAtMs).toBeGreaterThan(NOW);
 	});
 });
 
