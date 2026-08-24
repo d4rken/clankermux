@@ -10,6 +10,7 @@ import type {
 	QuotaDriftModel,
 	QuotaDriftPoint,
 	QuotaDriftResponse,
+	QuotaDriftVerdict,
 	QuotaDriftWindowResult,
 } from "@clankermux/types";
 import type { APIContext } from "../types";
@@ -98,6 +99,28 @@ export function createQuotaDriftHandlerFromSources(sources: QuotaDriftSources) {
 	};
 }
 
+/**
+ * The verdict a stored payload's value means today.
+ *
+ * The old name was renamed to `no-change-detected` — same semantics, a name
+ * that states what the test established rather than what a reader might infer.
+ * The cached blob can be up to one refresh interval old, so a payload written
+ * before the rename is a shape this handler must still parse; narrowing from
+ * `unknown` (rather than from the public union, which no longer contains the old
+ * name) is what lets the legacy value be mapped instead of passed through as an
+ * unknown verdict.
+ *
+ * Anything unrecognised becomes `insufficient-evidence`: the one verdict that
+ * claims nothing. A payload we cannot read must never assert a negative result.
+ */
+function normalizeVerdict(verdict: unknown): QuotaDriftVerdict {
+	if (verdict === "changed") return "changed";
+	if (verdict === "no-change-detected" || verdict === "stable") {
+		return "no-change-detected";
+	}
+	return "insufficient-evidence";
+}
+
 /** `[]` for anything that is not an array — a cached blob is untrusted input. */
 function asArray<T>(value: readonly T[] | undefined | null): T[] {
 	return Array.isArray(value) ? [...value] : [];
@@ -147,6 +170,11 @@ export function normalizeQuotaDriftPayload(
 						models: asArray(window.models).map(
 							(model): QuotaDriftModel => ({
 								...model,
+								// Narrowed from the STORED shape, which may still carry the
+								// pre-rename verdict; the public union no longer does.
+								verdict: normalizeVerdict(
+									(model as { verdict?: unknown }).verdict,
+								),
 								points: asArray(model.points).map(
 									(point): QuotaDriftPoint => ({
 										...point,
@@ -159,6 +187,11 @@ export function normalizeQuotaDriftPayload(
 											unidentifiedReasons: asArray(
 												model.latest.unidentifiedReasons,
 											),
+											// Null, never 0: a payload that predates the support
+											// counts vouches for no runs and no accounts, and a 0
+											// would read as "counted, and nothing supports it".
+											nRuns: model.latest.nRuns ?? null,
+											nAccounts: model.latest.nAccounts ?? null,
 										}
 									: null,
 							}),

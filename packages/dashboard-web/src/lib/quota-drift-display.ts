@@ -132,18 +132,44 @@ export function formatRelativeChange(relative: number): string {
 }
 
 /**
- * Whether a `stable` verdict may be REPORTED as stable.
+ * Whether a `no-change-detected` verdict may be REPORTED as such.
  *
- * The changepoint scan can run, find nothing and return `stable` for a model
- * whose coefficient is not identified in the first place. Presenting that as
- * "no change detected" would claim a negative result about a quantity the panel
- * refuses to print — so the tab downgrades it to the same "not enough
- * independent traffic" answer it gives everywhere else.
+ * The changepoint scan can run, find nothing and return `no-change-detected`
+ * for a model whose coefficient is not identified in the first place.
+ * Presenting that as "no change detected" would claim a negative result about a
+ * quantity the panel refuses to print — so the tab downgrades it to the same
+ * "not enough independent traffic" answer it gives everywhere else.
  */
 export function isReportableVerdict(model: QuotaDriftModel): boolean {
 	if (model.verdict === "changed") return model.changes.length > 0;
-	if (model.verdict === "stable") return model.latest?.identified === true;
+	if (model.verdict === "no-change-detected") {
+		return model.latest?.identified === true;
+	}
 	return false;
+}
+
+/**
+ * How many independent clusters a printed coefficient actually rests on, or
+ * null when there is nothing to say.
+ *
+ * The interval cannot carry this. The bootstrap resamples whole RUNS, so a
+ * coefficient supported by two runs on one account and one supported by forty
+ * runs across five can print indistinguishable widths — and a reader has no
+ * other way to tell them apart.
+ *
+ * Null in three cases, all of which mean "do not dress an absence up as
+ * support": the row prints a stated reason rather than a number, the payload
+ * predates the counts (they arrive null), or the model had no coefficient in
+ * the latest fit at all.
+ */
+export function supportText(model: QuotaDriftModel): string | null {
+	if (!model.latest?.identified) return null;
+	const runs = model.latest.nRuns ?? null;
+	const accounts = model.latest.nAccounts ?? null;
+	if (runs == null || accounts == null) return null;
+	const runWord = runs === 1 ? "run" : "runs";
+	const accountWord = accounts === 1 ? "account" : "accounts";
+	return `exposure in ${runs} ${runWord} across ${accounts} ${accountWord}`;
 }
 
 /* ── Gap summaries ──────────────────────────────────────────────────────── */

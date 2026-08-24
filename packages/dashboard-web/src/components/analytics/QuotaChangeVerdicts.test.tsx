@@ -64,7 +64,7 @@ describe("QuotaChangeVerdicts", () => {
 		expect(html).not.toContain("Anthropic reduced");
 	});
 
-	it("does not report stable for a coefficient it refuses to print", () => {
+	it("does not report a no-change verdict for a coefficient it refuses to print", () => {
 		const html = renderToStaticMarkup(
 			<QuotaChangeVerdicts
 				data={readyResponse([
@@ -73,7 +73,8 @@ describe("QuotaChangeVerdicts", () => {
 			/>,
 		);
 
-		// The model's verdict IS "stable" on the wire, but its estimate is not
+		// The model's verdict IS "no-change-detected" on the wire, but its
+		// estimate is not
 		// identified: reporting it would claim a negative result about a number
 		// the panel never shows.
 		expect(html).not.toContain("claude-haiku-4-5");
@@ -83,7 +84,7 @@ describe("QuotaChangeVerdicts", () => {
 		expect(html).toContain("Nothing measurable yet");
 	});
 
-	it("keeps insufficient-evidence out of the stable list", () => {
+	it("keeps insufficient-evidence out of the no-change list", () => {
 		const html = renderToStaticMarkup(
 			<QuotaChangeVerdicts
 				data={readyResponse([
@@ -136,6 +137,23 @@ describe("QuotaChangeVerdicts", () => {
 		);
 		expect(html).not.toContain("coverage of");
 		expect(html).not.toContain("fully observed");
+	});
+
+	it("qualifies implied capacity as conditional on list-price ratios", () => {
+		// The number is 100/coefficient in PRICE-EQUIVALENT tokens. Presented
+		// without that condition it reads as a measured raw-token quota, which is
+		// the one thing it is not.
+		const html = renderToStaticMarkup(
+			<QuotaChangeVerdicts
+				data={readyResponse([
+					cohort([windowResult("five_hour", [measuredModel()])]),
+				])}
+			/>,
+		);
+
+		expect(html).toContain("price-equivalent tokens");
+		expect(html).toContain("list-price ratios");
+		expect(html).toContain("not a measurement of a raw-token quota");
 	});
 
 	it("discloses an assumed tier and omits the line when every tier was recorded", () => {

@@ -1914,6 +1914,96 @@ describe("quota-drift payload normalization", () => {
 		}
 	});
 
+	it("maps the legacy verdict forward so a cached payload keeps parsing", () => {
+		// The verdict was renamed; the semantics were not. A payload written
+		// before the rename is up to one refresh interval old and is exactly what
+		// this handler is served for that half hour.
+		const legacy = JSON.parse(
+			JSON.stringify(
+				computeQuotaDrift(db, { now: FIXTURE_NOW, ...TEST_BOOTSTRAP }),
+			),
+		) as QuotaDriftResponse;
+		let rewritten = 0;
+		for (const cohort of legacy.cohorts) {
+			for (const window of cohort.windows) {
+				for (const model of window.models) {
+					(model as unknown as Record<string, unknown>).verdict = "stable";
+					rewritten++;
+				}
+			}
+		}
+		expect(rewritten).toBeGreaterThan(0);
+
+		const normalized = normalizeQuotaDriftPayload(legacy);
+		for (const cohort of normalized.cohorts) {
+			for (const window of cohort.windows) {
+				for (const model of window.models) {
+					expect(model.verdict).toBe("no-change-detected");
+				}
+			}
+		}
+	});
+
+	it("downgrades an unreadable verdict to insufficient-evidence", () => {
+		// A verdict this build does not know cannot be reported as a result, and
+		// least of all as a NEGATIVE one — that is the claim the whole panel is
+		// built to avoid making without evidence.
+		const payload = JSON.parse(
+			JSON.stringify(
+				computeQuotaDrift(db, { now: FIXTURE_NOW, ...TEST_BOOTSTRAP }),
+			),
+		) as QuotaDriftResponse;
+		for (const cohort of payload.cohorts) {
+			for (const window of cohort.windows) {
+				for (const model of window.models) {
+					(model as unknown as Record<string, unknown>).verdict = "who-knows";
+				}
+			}
+		}
+
+		const normalized = normalizeQuotaDriftPayload(payload);
+		for (const cohort of normalized.cohorts) {
+			for (const window of cohort.windows) {
+				for (const model of window.models) {
+					expect(model.verdict).toBe("insufficient-evidence");
+				}
+			}
+		}
+	});
+
+	it("defaults the cluster-support counts to null, never 0", () => {
+		const legacy = JSON.parse(
+			JSON.stringify(
+				computeQuotaDrift(db, { now: FIXTURE_NOW, ...TEST_BOOTSTRAP }),
+			),
+		) as QuotaDriftResponse;
+		let stripped = 0;
+		for (const cohort of legacy.cohorts) {
+			for (const window of cohort.windows) {
+				for (const model of window.models) {
+					if (!model.latest) continue;
+					const latest = model.latest as unknown as Record<string, unknown>;
+					delete latest.nRuns;
+					delete latest.nAccounts;
+					stripped++;
+				}
+			}
+		}
+		expect(stripped).toBeGreaterThan(0);
+
+		const normalized = normalizeQuotaDriftPayload(legacy);
+		for (const cohort of normalized.cohorts) {
+			for (const window of cohort.windows) {
+				for (const model of window.models) {
+					if (!model.latest) continue;
+					// A 0 would read as "counted, and nothing supports it".
+					expect(model.latest.nRuns).toBeNull();
+					expect(model.latest.nAccounts).toBeNull();
+				}
+			}
+		}
+	});
+
 	it("leaves a current payload's values alone", () => {
 		const payload = computeQuotaDrift(db, {
 			now: FIXTURE_NOW,

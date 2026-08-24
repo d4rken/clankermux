@@ -473,6 +473,44 @@ export function actualModelKeys(segments: readonly QuotaSegment[]): string[] {
 	return [...keys].sort();
 }
 
+/** How many independent clusters actually carried one model's traffic. */
+export interface ExposureSupport {
+	/** Distinct runs with positive unpooled exposure of the model. */
+	nRuns: number;
+	/** Distinct accounts with positive unpooled exposure of the model. */
+	nAccounts: number;
+}
+
+/**
+ * The clusters behind ONE model's coefficient: runs and accounts whose segments
+ * carried positive exposure of that model specifically.
+ *
+ * Deliberately per-model and UNPOOLED. The fit's own run/account totals count
+ * every cluster that moved the window, most of which may never have carried this
+ * model at all, so quoting them as this coefficient's support overstates it —
+ * and the interval alone cannot correct the impression: the bootstrap resamples
+ * whole runs, so a coefficient resting on two runs and one resting on forty can
+ * print the same width.
+ *
+ * `eqTokensByModel` never contains the pooled `other` key (pooling happens in
+ * `buildFitInput`, not in the segments), so a query for that column correctly
+ * yields zeros — its membership is a changing mixture and has no support to
+ * report.
+ */
+export function exposureSupport(
+	segments: readonly QuotaSegment[],
+	key: string,
+): ExposureSupport {
+	const runs = new Set<string>();
+	const accounts = new Set<string>();
+	for (const seg of segments) {
+		if (!(seg.eqTokensByModel[key] > 0)) continue;
+		runs.add(seg.runId);
+		accounts.add(seg.accountId);
+	}
+	return { nRuns: runs.size, nAccounts: accounts.size };
+}
+
 /** Total eq-tokens per model key across a segment set, unpooled. */
 function exposureByKey(segments: readonly QuotaSegment[]): Map<string, number> {
 	const totals = new Map<string, number>();

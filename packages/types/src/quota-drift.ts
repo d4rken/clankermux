@@ -26,12 +26,21 @@ export type QuotaDriftWindow = "five_hour" | "seven_day";
 /**
  * A verdict about one model on one window.
  *
- * `stable` means the changepoint test RAN and found nothing.
+ * `no-change-detected` means the changepoint test RAN and found nothing.
  * `insufficient-evidence` means it could not run. They are not interchangeable:
- * an underpowered scan reporting `stable` would claim a negative result it
- * never established.
+ * an underpowered scan reporting `no-change-detected` would claim a negative
+ * result it never established.
+ *
+ * Named for what the test establishes, not for what a reader might infer from
+ * it. The previous name, `stable`, was a claim about the PROVIDER; a
+ * non-significant scan over indirect evidence supports only a claim about the
+ * scan. Semantics are identical — see normalizeQuotaDriftPayload, which maps the
+ * legacy value forward so cached payloads keep parsing.
  */
-export type QuotaDriftVerdict = "changed" | "stable" | "insufficient-evidence";
+export type QuotaDriftVerdict =
+	| "changed"
+	| "no-change-detected"
+	| "insufficient-evidence";
 
 /**
  * Why a point or estimate is unidentified, so the UI can explain the gap.
@@ -146,6 +155,27 @@ export interface QuotaDriftModel {
 		shareOfWindow: number;
 		identified: boolean;
 		unidentifiedReasons: QuotaDriftUnidentifiedReason[];
+		/**
+		 * Distinct monotone RUNS whose segments carried positive exposure of THIS
+		 * model, in the fit behind this estimate.
+		 *
+		 * The bootstrap resamples whole runs, so runs — not segments — are what the
+		 * interval is built from, and one run's segments are not independent draws.
+		 * A coefficient supported by two runs and one supported by forty can print
+		 * indistinguishable intervals, and only this number tells them apart.
+		 *
+		 * Counted on the model's OWN unpooled exposure, never fit-wide: the fit's
+		 * run count includes every run that moved the window, most of which never
+		 * carried this model at all, and quoting it here would overstate the
+		 * support behind this row.
+		 *
+		 * OPTIONAL on the wire and null when absent (a payload predating the field,
+		 * or a model the latest fit gave no column). Never 0 — that would read as
+		 * "counted, and nothing supports it".
+		 */
+		nRuns?: number | null;
+		/** Distinct ACCOUNTS with positive unpooled exposure of this model; see nRuns. */
+		nAccounts?: number | null;
 	} | null;
 	changes: QuotaDriftChange[];
 	verdict: QuotaDriftVerdict;

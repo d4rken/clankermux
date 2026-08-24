@@ -75,6 +75,7 @@ import {
 	detectChanges,
 	eqTokenProviderFor,
 	eqTokens,
+	exposureSupport,
 	fitRolling,
 	fitWithIntervals,
 	INFERENCE_BOOTSTRAP_B,
@@ -1389,6 +1390,11 @@ function fitWindow(
 	for (const key of [...keys].sort()) {
 		const coef = latestFit.coefficients.find((c) => c.key === key) ?? null;
 		const points = series.get(key) ?? [];
+		// Support for THIS coefficient, counted on the model's own unpooled
+		// exposure within the very segments the latest fit consumed. The fit-wide
+		// counts would include every run that moved the window — most of which
+		// never carried this model — and reading as this row's support.
+		const support = exposureSupport(latestSegments, key);
 		const scan = detectChanges(segments, key, {
 			bootstrapB: opts.inferenceB,
 			seedParts: [...seedParts, key],
@@ -1405,6 +1411,8 @@ function fitWindow(
 						shareOfWindow: coef.shareOfWindow,
 						identified: coef.identified,
 						unidentifiedReasons: [...coef.unidentifiedReasons],
+						nRuns: support.nRuns,
+						nAccounts: support.nAccounts,
 					}
 				: latestUnidentified(points, latestShares.get(key) ?? 0),
 			changes: scan.changes.map((change): QuotaDriftChange => ({ ...change })),
@@ -1459,6 +1467,11 @@ function latestUnidentified(
 		shareOfWindow,
 		identified: false,
 		unidentifiedReasons: [...last.unidentifiedReasons],
+		// No coefficient, so no support to report. The counts describe what backs
+		// a NUMBER; attaching them to a row that prints a reason instead would
+		// dress the absence up as a partial measurement.
+		nRuns: null,
+		nAccounts: null,
 	};
 }
 
