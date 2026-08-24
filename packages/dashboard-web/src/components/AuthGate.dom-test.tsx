@@ -107,10 +107,10 @@ describe("gated, signed out", () => {
 });
 
 describe("gated, signed in", () => {
-	it("mounts the app with no banner", async () => {
+	it("mounts the app and nothing else", async () => {
 		await mount({ configured: true, authenticated: true });
 		expect(appMounted()).toBe(true);
-		expect(text()).not.toContain("unprotected");
+		expect(text()).toBe("the app");
 	});
 });
 
@@ -121,12 +121,14 @@ describe("fail-open", () => {
 		expect(appMounted()).toBe(true);
 	});
 
-	it("says so, permanently and without a setter button", async () => {
+	it("renders the children ALONE — the notice belongs to the sidebar", async () => {
 		await mount({ configured: false, authenticated: false });
-		expect(text()).toContain("The management API is unprotected");
-		expect(text()).toContain("bun run auth:password --set");
-		// No HTTP setter: while fail-open, an unauthenticated setter lets any LAN
-		// caller win the first-set race and lock the operator out.
+		// The gate used to render the "unprotected" warning itself, as a
+		// full-width bar above every page. It now only decides; the warning is a
+		// card in the navigation sidebar's footer, driven off the same
+		// `configured === false` read. That the operator is still told, and still
+		// gets the command, is asserted in Navigation.unprotected.dom-test.tsx.
+		expect(text()).toBe("the app");
 		expect(host?.querySelectorAll("button")).toHaveLength(0);
 	});
 });

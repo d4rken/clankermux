@@ -40,7 +40,10 @@ import {
 	resetHoldSlots,
 } from "../handlers/burst-cooldown";
 import { resetRateLimitProbeGatesForTests } from "../handlers/rate-limit-cooldown";
-import { resetOverloadHoldSlots } from "../overload-hold";
+import {
+	resetOverloadHoldSlots,
+	setOverloadHoldBudgetOverrideForTests,
+} from "../overload-hold";
 import {
 	applyProviderOverloadCooldown,
 	clearProviderOverloadCooldown,
@@ -304,6 +307,7 @@ describe("handleProxy burst-hold bookkeeping", () => {
 	afterEach(() => {
 		globalThis.fetch = originalFetch;
 		resetSingletons();
+		setOverloadHoldBudgetOverrideForTests(null);
 	});
 
 	it("records the held account as attempted on give-up, and the candidate loop skips EXACTLY it", async () => {
@@ -382,8 +386,11 @@ describe("handleProxy burst-hold bookkeeping", () => {
 		// Marker active: without the breaker precedence, the storm-degrade branch
 		// would enter the hold and re-probe the held account.
 		markAnthropicBurstThrottle();
-		// 5 minutes (the breaker's own cap) ≫ the 120s overload-hold budget, so the
-		// overload hold is not entered either and the terminal is immediate.
+		// The overload hold must not be entered either, so the terminal is
+		// immediate. The breaker's own 5-minute cap now sits INSIDE the real hold
+		// budget, so shrink the budget rather than reach for a cooldown the
+		// breaker would clamp away. Scoped to this test.
+		setOverloadHoldBudgetOverrideForTests(30_000);
 		applyProviderOverloadCooldown("anthropic", Date.now() + 5 * 60_000, MODEL);
 
 		let upstreamCalls = 0;

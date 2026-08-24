@@ -11,6 +11,7 @@
 import { afterEach, beforeEach, describe, expect, it, mock } from "bun:test";
 import type { Account } from "@clankermux/types";
 import type { ProxyContext } from "../handlers";
+import { setOverloadHoldBudgetOverrideForTests } from "../overload-hold";
 import {
 	applyProviderOverloadCooldown,
 	clearProviderOverloadCooldown,
@@ -170,6 +171,7 @@ describe("family-scoped provider-overload gate", () => {
 	afterEach(() => {
 		globalThis.fetch = originalFetch;
 		clearProviderOverloadCooldown();
+		setOverloadHoldBudgetOverrideForTests(null);
 	});
 
 	it("an open haiku bucket lets a sonnet request through on the same account", async () => {
@@ -187,6 +189,9 @@ describe("family-scoped provider-overload gate", () => {
 	});
 
 	it("an open haiku bucket gates a haiku request with the 529 terminal naming the family", async () => {
+		// Immediate-terminal test: shrink the budget so the 200s cooldown lands
+		// outside it (a real trip is clamped to 300s, inside the real budget).
+		setOverloadHoldBudgetOverrideForTests(30_000);
 		globalThis.fetch = mock(async () => ok200("claude-haiku-4-5"));
 		// Beyond the 120s transparent-hold budget → the immediate 529 terminal
 		// (a within-budget cooldown would hold the connection instead — Stage D).
@@ -213,6 +218,8 @@ describe("family-scoped provider-overload gate", () => {
 	});
 
 	it("a provider-wide bucket (no model attribution) still gates every family", async () => {
+		// Immediate-terminal test — see the sibling above.
+		setOverloadHoldBudgetOverrideForTests(30_000);
 		globalThis.fetch = mock(async () => ok200("claude-sonnet-4-5"));
 		// Beyond the hold budget for the same reason as above.
 		applyProviderOverloadCooldown("anthropic", Date.now() + 200_000);
