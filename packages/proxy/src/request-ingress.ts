@@ -59,6 +59,15 @@ export interface IngressContext {
 	projectAttributionSource: ProjectAttributionSource | null;
 	requestMeta: RequestMeta;
 	bumpIdleTimeout: () => void;
+	/**
+	 * Whether {@link bumpIdleTimeout} can actually reach this connection's
+	 * socket. False on the translated Codex `/v1/responses` path, where the
+	 * `Request` handed to handleProxy is synthetic and `server.timeout` is a
+	 * no-op — such connections are hard-capped by Bun's base idleTimeout and
+	 * must not be held past it. Derived from the adapter's unspoofable
+	 * per-request context, NOT from a client-visible header.
+	 */
+	canRearmIdleTimeout: boolean;
 }
 
 /**
@@ -123,10 +132,13 @@ export async function ingestProxyRequest(
 	// timer during long holds (CW hold) and long quiet streaming gaps so a
 	// connection held without bytes isn't reaped by the 180s base idleTimeout.
 	// Best-effort by design: on the Codex /v1/responses translation path the
-	// `req` handed to handleProxy may not map to the original socket, so
-	// server.timeout is a no-op there and the connection degrades to the 180s
-	// base — acceptable, since Codex requests are the ones being *excluded*
-	// from the hold, not held. ctx.server is unset in unit tests (optional).
+	// `req` handed to handleProxy is synthetic and does not map to the original
+	// socket, so server.timeout is a no-op there and the connection degrades to
+	// the flat 180s base. That is NOT universally harmless: the CW / burst holds
+	// exclude Codex, but the OVERLOAD hold does not, so a hold budget above 180s
+	// would have us close such a connection mid-hold. `canRearmIdleTimeout`
+	// below is the capability those holds read to pick a safe budget.
+	// ctx.server is unset in unit tests (optional).
 	const bumpIdleTimeout = () => {
 		try {
 			ctx.server?.timeout(req, NETWORK.SERVER_IDLE_TIMEOUT_SECONDS);
@@ -326,6 +338,10 @@ export async function ingestProxyRequest(
 			projectAttributionSource,
 			requestMeta,
 			bumpIdleTimeout,
+			// The adapter's context is set from an in-process WeakMap keyed on the
+			// Request object, so unlike the deny-official-anthropic header it
+			// cannot be forged by a client to change its own hold budget.
+			canRearmIdleTimeout: nativeResponsesCtx === undefined,
 		},
 	};
 }
