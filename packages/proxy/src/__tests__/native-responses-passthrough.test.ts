@@ -131,7 +131,13 @@ function makeContext(accounts: Account[]): ProxyContext {
 				statusHeader: undefined,
 				remaining: undefined,
 			}),
-			isStreamingResponse: () => false,
+			// Real classification, not a constant false: the recorded row's
+			// is_stream and the whole streaming analytics path hang off this, so a
+			// harness that always says "not a stream" would hide exactly the
+			// regression the integration lane below exists to catch.
+			isStreamingResponse: (response: Response) =>
+				response.headers.get("content-type")?.includes("text/event-stream") ??
+				false,
 		} as never,
 		refreshInFlight: new Map(),
 		asyncWriter: {
@@ -674,4 +680,164 @@ describe("native Responses passthrough — request recording", () => {
 			expect(o.outcome).toBe("success");
 		}
 	});
+});
+
+/**
+ * Non-streaming client, end to end: adapter handler → real handleProxy →
+ * analytics passthrough → adapter extraction. The upstream is a mocked Codex
+ * backend serving genuine Responses SSE, so this covers the part no unit test
+ * can — that consuming the SSE inside the adapter leaves the proxy's accounting
+ * intact. Three things are easy to get wrong here and each is asserted per
+ * terminal kind: the client must get the backend's own envelope, the row must
+ * still describe an SSE upstream, and reading the stream to its end must record
+ * a clean completion carrying the backend's exact token counts rather than a
+ * client disconnect with a bytes/4 estimate.
+ */
+describe("native Responses passthrough — non-streaming client (integration)", () => {
+	let originalFetch: typeof globalThis.fetch;
+
+	beforeEach(() => {
+		originalFetch = globalThis.fetch;
+	});
+
+	afterEach(() => {
+		globalThis.fetch = originalFetch;
+	});
+
+	// Long enough that a bytes/4 estimate (~100 tokens) could never be mistaken
+	// for the backend's reported 7 output tokens.
+	const OUTPUT_TEXT =
+		"Sure — here is a paragraph of model output that is comfortably longer " +
+		"than four times the reported output-token count, so an estimate cannot " +
+		"pass for the real number.";
+
+	function terminalResponse(status: string) {
+		return {
+			id: "resp_backend_native",
+			object: "response",
+			status,
+			model: "gpt-5.5-codex",
+			output: [
+				{
+					type: "message",
+					id: "msg_backend_native",
+					role: "assistant",
+					status: status === "completed" ? "completed" : "incomplete",
+					content: [{ type: "output_text", text: OUTPUT_TEXT }],
+				},
+			],
+			usage: {
+				input_tokens: 11,
+				input_tokens_details: { cached_tokens: 0 },
+				output_tokens: 7,
+				total_tokens: 18,
+			},
+		};
+	}
+
+	function nativeSse(type: string, response: Record<string, unknown>): string {
+		return [
+			"event: response.created",
+			`data: ${JSON.stringify({
+				type: "response.created",
+				response: { id: response.id, model: response.model },
+			})}`,
+			"",
+			"event: response.output_text.delta",
+			`data: ${JSON.stringify({
+				type: "response.output_text.delta",
+				delta: OUTPUT_TEXT,
+			})}`,
+			"",
+			`event: ${type}`,
+			`data: ${JSON.stringify({ type, response })}`,
+			"",
+			"",
+		].join("\n");
+	}
+
+	function nonStreamingResponsesRequest(): Request {
+		return new Request("https://proxy.local/v1/responses", {
+			method: "POST",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify({ ...NATIVE_RESPONSES_BODY, stream: false }),
+		});
+	}
+
+	for (const [type, status] of [
+		["response.completed", "completed"],
+		["response.incomplete", "incomplete"],
+		["response.failed", "failed"],
+	] as const) {
+		it(`${type}: client gets the terminal envelope, the row stays a stream with exact usage`, async () => {
+			const { handleResponsesRequest } = await import(
+				"@clankermux/openai-responses-adapter"
+			);
+			const { handleProxy } = await import("../proxy");
+			const { drainPendingUsageFinalizers } = await import(
+				"../response-handler"
+			);
+			const response = terminalResponse(status);
+
+			globalThis.fetch = mock(
+				async (input: RequestInfo | URL, init?: RequestInit) => {
+					if (!isProxyCall(input)) return originalFetch(input as never, init);
+					// No content-type, like the real backend — the provider's fix-up is
+					// what makes this classify as a stream downstream.
+					return new Response(nativeSse(type, response), { status: 200 });
+				},
+			) as never;
+
+			const ctx = makeContext([makeCodexAccount()]);
+			const recorder = ctx.requestRecorder as unknown as {
+				begin: { mock: { calls: unknown[][] } };
+				finishTransport: { mock: { calls: unknown[][] } };
+				attachUsageSummary: { mock: { calls: unknown[][] } };
+			};
+
+			const req = nonStreamingResponsesRequest();
+			const res = await handleResponsesRequest(
+				req,
+				new URL(req.url),
+				handleProxy as never,
+				ctx,
+			);
+
+			// 1. The client gets one JSON document: the backend's own envelope,
+			// including its honest status, and no SSE framing.
+			expect(res.status).toBe(200);
+			expect(res.headers.get("content-type")).toBe("application/json");
+			expect(await res.json()).toEqual(response);
+
+			// 2. is_stream describes the UPSTREAM transport, which was SSE.
+			const meta = recorder.begin.mock.calls[0]?.[0] as { isStream: boolean };
+			expect(meta).toBeDefined();
+			expect(meta.isStream).toBe(true);
+
+			// 3. Reading the stream to EOF inside the adapter is a clean completion,
+			// not the client disconnect a cancel() would have recorded.
+			const outcomes = recorder.finishTransport.mock.calls.map((call) => ({
+				outcome: call[1],
+				reason: call[2],
+			}));
+			expect(outcomes.length).toBeGreaterThan(0);
+			for (const o of outcomes) {
+				expect(o.outcome).toBe("success");
+				expect(o.reason).toBeUndefined();
+			}
+
+			// 4. Usage comes from the terminal event verbatim — no bytes/4 floor,
+			// which for incomplete/failed is exactly what a cancelled stream would
+			// have produced.
+			await drainPendingUsageFinalizers(2_000);
+			const summary = recorder.attachUsageSummary.mock.calls[0]?.[1] as {
+				usage: { inputTokens?: number; outputTokens?: number };
+				outputApproximate?: boolean;
+			};
+			expect(summary).toBeDefined();
+			expect(summary.usage.outputTokens).toBe(7);
+			expect(summary.usage.inputTokens).toBe(11);
+			expect(summary.outputApproximate).toBeFalsy();
+		});
+	}
 });
