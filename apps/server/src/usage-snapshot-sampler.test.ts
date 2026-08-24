@@ -32,17 +32,27 @@ const FRESHNESS = 150_000; // 150s freshness window
 interface SeedEntry {
 	data: AnyUsageData | null;
 	ageMs: number | null;
+	/**
+	 * Observation provenance of the entry. Omitted means "a live reading", i.e.
+	 * observed when it was written (`NOW - ageMs`) — what `usageCache.set()`
+	 * records. Pass `null` explicitly for a RECONSTRUCTED entry with no
+	 * trustworthy observation time (`usageCache.setUntimed()`).
+	 */
+	observedAtMs?: number | null;
 }
 
 /** Minimal SamplerCache backed by a plain map of accountId → {data, age}. */
 function makeCache(entries: Record<string, SeedEntry>): SamplerCache {
 	return {
-		peek(id: string): AnyUsageData | null {
-			return entries[id]?.data ?? null;
-		},
-		peekAge(id: string): number | null {
+		peekWithAge(id: string) {
 			const e = entries[id];
-			return e ? e.ageMs : null;
+			if (!e || e.ageMs === null || e.data === null) return null;
+			return {
+				data: e.data,
+				ageMs: e.ageMs,
+				observedAtMs:
+					e.observedAtMs === undefined ? NOW - e.ageMs : e.observedAtMs,
+			};
 		},
 	};
 }
@@ -379,6 +389,49 @@ describe("buildSnapshotRows", () => {
 		expect(rows[0].planTier).toBe("max");
 		expect(rows[0].rateLimitTier).toBe("20x");
 	});
+
+	it("takes the entry's observation time even when it long predates the write", () => {
+		// A reading observed 3h before it was cached, but written 1s ago: the
+		// freshness gate runs on the WRITE age, the row records the OBSERVATION.
+		const observed = NOW - 3 * 60 * 60 * 1000;
+		const accounts: Acct[] = [{ id: "codex-1", provider: "codex" }];
+		const cache = makeCache({
+			"codex-1": {
+				ageMs: 1_000,
+				observedAtMs: observed,
+				data: usageData({ fiveHourUtil: 88 }),
+			},
+		});
+
+		const rows = buildSnapshotRows(accounts, cache, NOW, FRESHNESS);
+
+		expect(rows).toHaveLength(1);
+		expect(rows[0].sampledAt).toBe(NOW);
+		expect(rows[0].observedAt).toBe(observed);
+	});
+
+	it("writes no row when the reading has no observation time (never substitutes the tick clock)", () => {
+		// What `usageCache.setUntimed()` produces: a fresh WRITE whose reading was
+		// observed at an unknowable time (Codex usage recovered from a retained
+		// payload). Fabricating `now` here would look authoritative forever.
+		const accounts: Acct[] = [
+			{ id: "recovered", provider: "codex" },
+			{ id: "live", provider: "anthropic" },
+		];
+		const cache = makeCache({
+			recovered: {
+				ageMs: 1_000,
+				observedAtMs: null,
+				data: usageData({ fiveHourUtil: 99, sevenDayUtil: 71 }),
+			},
+			live: { ageMs: 1_000, data: usageData({ fiveHourUtil: 12 }) },
+		});
+
+		const rows = buildSnapshotRows(accounts, cache, NOW, FRESHNESS);
+
+		// The untimed account is an honest gap; its neighbour is unaffected.
+		expect(rows.map((r) => r.accountId)).toEqual(["live"]);
+	});
 });
 
 // ---------------------------------------------------------------------------
@@ -486,6 +539,32 @@ describe("buildSamplerRows scoped (per-family weekly) projection", () => {
 				data: usageDataWithScoped([
 					{ displayName: "Claude Opus 5", percent: 63, resetsAt: RESET },
 				]),
+			},
+		});
+
+		const { rows, scopedRows } = buildSamplerRows(
+			accounts,
+			cache,
+			NOW,
+			FRESHNESS,
+		);
+
+		expect(rows).toHaveLength(0);
+		expect(scopedRows).toHaveLength(0);
+	});
+
+	it("writes nothing at all when the reading has no observation time", () => {
+		// The scoped series carries only the tick clock, so an unknown observation
+		// time would file these percentages under a time they were not observed at.
+		const accounts: Acct[] = [{ id: "anth-1", provider: "anthropic" }];
+		const cache = makeCache({
+			"anth-1": {
+				ageMs: 1_000,
+				observedAtMs: null,
+				data: usageDataWithScoped(
+					[{ displayName: "Claude Opus 5", percent: 63, resetsAt: RESET }],
+					{ fiveHourUtil: 42 },
+				),
 			},
 		});
 
@@ -636,6 +715,28 @@ describe("UsageSnapshotSampler read-through tick", () => {
 		await h.sampler.tick();
 
 		expect(h.insertedRows()).toHaveLength(0);
+	});
+
+	it("writes an honest gap (no row, either series) when the reading has no observation time", async () => {
+		const reset = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString();
+		const h = makeSampler({
+			accounts: [acct("codex-1", "codex")],
+			cache: makeCache({
+				"codex-1": {
+					ageMs: 1_000, // freshly WRITTEN...
+					observedAtMs: null, // ...but observed at an unknowable time
+					data: usageDataWithScoped(
+						[{ displayName: "Claude Opus 5", percent: 63, resetsAt: reset }],
+						{ fiveHourUtil: 99 },
+					),
+				},
+			}),
+		});
+
+		await h.sampler.tick();
+
+		expect(h.insertedRows()).toHaveLength(0);
+		expect(h.insertedScopedRows()).toHaveLength(0);
 	});
 
 	it("still records a PAUSED codex account with a fresh cache entry (pause is irrelevant to reading)", async () => {
