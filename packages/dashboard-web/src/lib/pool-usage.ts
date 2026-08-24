@@ -81,9 +81,15 @@ export interface FamilyWeeklyAccountUsage {
 	 * a different numerator, so that slope is in %/hour of the wrong quantity —
 	 * feeding it in here would emit a `lowConfidence: false` projection built on
 	 * a mismatched denominator. Passing `prediction: null` makes
-	 * `estimateWindowExhaustion` take its lifetime-average branch, which is
-	 * honest about being low-confidence and (per the shared tone rule) never
-	 * renders red.
+	 * `estimateWindowExhaustion` take its lifetime-average branch.
+	 *
+	 * It takes the LOW-confidence, now-anchored form of that branch, because
+	 * {@link weeklyLifetimeConfidence} grants `"full"` to the account-wide weekly
+	 * window only — the scoped family windows were never measured against a
+	 * regression and reset on their own schedules. That policy is asked rather
+	 * than assumed, so if the measurement is ever extended to family windows this
+	 * projection follows it without another edit here. Low confidence is why the
+	 * popover renders it muted and never red.
 	 */
 	exhaustsAtMs: number | null;
 }
@@ -236,6 +242,13 @@ function classifyQuotaExhaustion(
  *    loop; the family path keeps them, because a family-exhausted account is
  *    still a live member of the pool for every other family.
  */
+/**
+ * The window kind for a per-model-family weekly cap. Used for BOTH the duration
+ * lookup and the lifetime-confidence policy, so the two can never be asked about
+ * different windows.
+ */
+const SCOPED_WEEKLY_WINDOW = "seven_day_scoped";
+
 /** Earlier of two projected instants, treating null as "not projected". */
 function soonerOf(a: number | null, b: number | null): number | null {
 	if (a === null) return b;
@@ -253,8 +266,13 @@ function projectFamilyExhaustion(
 		{
 			utilizationPct: pct,
 			resetsAtMs: resetMs,
-			windowStartMs: computeWindowStartMs(resetMs, "seven_day_scoped"),
+			windowStartMs: computeWindowStartMs(resetMs, SCOPED_WEEKLY_WINDOW),
 			prediction: null,
+			// Asked, not assumed: today this returns undefined (= "low") for the
+			// scoped kind, which is the same as omitting the field, but going
+			// through the policy keeps this projection tied to the one definition
+			// the progress bar, the pool at-risk list and the forecast line share.
+			lifetimeConfidence: weeklyLifetimeConfidence(SCOPED_WEEKLY_WINDOW),
 		},
 		now,
 	);
