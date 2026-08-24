@@ -383,7 +383,12 @@ export function fitWithIntervals(
 		const reasons: UnidentifiedReason[] = [];
 		if (!(estimate > 0)) reasons.push("zero-estimate");
 		if (segments.length < MIN_SEGMENTS_FOR_FIT) reasons.push("few-segments");
-		if (share < MIN_MODEL_SHARE) reasons.push("low-share");
+		// Zero exposure and sub-floor exposure fail the SAME criterion but are
+		// different facts, and only the second one is about measurement. A model
+		// that was not routed at all in this window gets `no-exposure`, never
+		// `low-share` as well.
+		if (!(share > 0)) reasons.push("no-exposure");
+		else if (share < MIN_MODEL_SHARE) reasons.push("low-share");
 		if (tolerance < MIN_TOLERANCE) reasons.push("collinear");
 		if (
 			estimate > 0 &&
@@ -468,6 +473,43 @@ export function actualModelKeys(segments: readonly QuotaSegment[]): string[] {
 	return [...keys].sort();
 }
 
+/** Total eq-tokens per model key across a segment set, unpooled. */
+function exposureByKey(segments: readonly QuotaSegment[]): Map<string, number> {
+	const totals = new Map<string, number>();
+	for (const seg of segments) {
+		for (const [key, tokens] of Object.entries(seg.eqTokensByModel)) {
+			if (!(tokens > 0)) continue;
+			totals.set(key, (totals.get(key) ?? 0) + tokens);
+		}
+	}
+	return totals;
+}
+
+/**
+ * Why a model has no number in a window whose fit gave it NO COLUMN at all.
+ *
+ * `selectKeys` only admits models at or above the share floor, so a model can
+ * be missing from a fit for two unrelated reasons, and the panel has to be able
+ * to tell a reader which one it was:
+ *
+ *  - zero eq-tokens in the window — the model was not routed here at all;
+ *  - positive but sub-floor exposure — it ran, and there is too little of it to
+ *    separate from everything else.
+ *
+ * Before this the point simply carried no reason, and both cases rendered as
+ * the same unexplained break in the line.
+ */
+function reasonsWithoutColumn(
+	exposure: number,
+	nSegments: number,
+): UnidentifiedReason[] {
+	const reasons: UnidentifiedReason[] = [
+		exposure > 0 ? "low-share" : "no-exposure",
+	];
+	if (nSegments < MIN_SEGMENTS_FOR_FIT) reasons.push("few-segments");
+	return reasons;
+}
+
 /**
  * Rolling fits over a sliding window — the display series.
  *
@@ -515,6 +557,7 @@ export function fitRolling(
 						seedParts: [...(options.seedParts ?? []), start],
 					})
 				: null;
+		const exposure = exposureByKey(inWindow);
 		for (const key of modelKeys) {
 			const coef = result?.coefficients.find((c) => c.key === key) ?? null;
 			const list = series.get(key) ?? [];
@@ -527,6 +570,9 @@ export function fitRolling(
 				impliedCapacityMtok: coef?.impliedCapacityMtok ?? null,
 				identified: coef?.identified ?? false,
 				nSegments: inWindow.length,
+				unidentifiedReasons: coef
+					? coef.unidentifiedReasons
+					: reasonsWithoutColumn(exposure.get(key) ?? 0, inWindow.length),
 			});
 			series.set(key, list);
 		}

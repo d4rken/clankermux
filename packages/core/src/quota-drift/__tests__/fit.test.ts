@@ -334,6 +334,98 @@ describe("fitRolling", () => {
 	it("returns an empty series for no segments", () => {
 		expect(fitRolling([]).size).toBe(0);
 	});
+
+	it("calls a window with zero exposure `no-exposure`, never `low-share`", () => {
+		// The largest empty stretches on the live chart are models that simply
+		// stopped being routed. Reporting those as "too little of this window's
+		// traffic to measure" states a measurement problem where there was
+		// nothing to measure at all.
+		const early = makeSyntheticSegments({
+			weights: { "claude-opus-5": 2.4, "claude-sonnet-5": 0.9 },
+			runs: 20,
+			segmentsPerRun: 23,
+			segmentMs: HOUR,
+			meanTokens: 2_000_000,
+			startMs: START,
+			seed: 101,
+		});
+		// The later stretch drops claude-sonnet-5 entirely: same shape as a model
+		// falling out of routing.
+		const late = makeSyntheticSegments({
+			weights: { "claude-opus-5": 2.4 },
+			runs: 20,
+			segmentsPerRun: 23,
+			segmentMs: HOUR,
+			meanTokens: 2_000_000,
+			startMs: START + 40 * DAY_MS,
+			seed: 102,
+		});
+
+		const points =
+			fitRolling([...early, ...late], {
+				windowMs: 14 * DAY_MS,
+				stepMs: 2 * DAY_MS,
+				bootstrapB: 20,
+			}).get("claude-sonnet-5") ?? [];
+
+		const retired = points.filter(
+			(p) => p.windowStartMs >= START + 40 * DAY_MS,
+		);
+		expect(retired.length).toBeGreaterThan(0);
+		for (const point of retired) {
+			expect(point.identified).toBe(false);
+			expect(point.unidentifiedReasons).toContain("no-exposure");
+			expect(point.unidentifiedReasons).not.toContain("low-share");
+		}
+	});
+
+	it("still calls exposure just under the share floor `low-share`", () => {
+		// The other side of the same distinction: this model DID run, there is
+		// just too little of it to separate. That is a statement about
+		// measurement and must keep saying so.
+		const base = makeSyntheticSegments({
+			weights: { "claude-opus-5": 2.4 },
+			runs: 30,
+			segmentsPerRun: 23,
+			segmentMs: HOUR,
+			meanTokens: 2_000_000,
+			startMs: START,
+			seed: 103,
+		});
+		// Exactly 1.9% of EVERY segment's eq-tokens: positive, and just under
+		// MIN_MODEL_SHARE. Scaling per segment rather than adding a flat amount
+		// holds the share at 1.9% inside every rolling sub-window too, so the
+		// case under test cannot drift above the floor in one of them.
+		const RARE_SHARE = 0.019;
+		const segments = base.map((s) => {
+			const total = Object.values(s.eqTokensByModel).reduce((a, b) => a + b, 0);
+			return {
+				...s,
+				eqTokensByModel: {
+					...s.eqTokensByModel,
+					"claude-haiku-4-5": (total * RARE_SHARE) / (1 - RARE_SHARE),
+				},
+			};
+		});
+		expect(selectKeys(segments)).not.toContain("claude-haiku-4-5");
+		expect(
+			shareByKey(segments, ["claude-haiku-4-5"]).get("claude-haiku-4-5"),
+		).toBeCloseTo(RARE_SHARE, 6);
+
+		const points =
+			fitRolling(segments, {
+				windowMs: 14 * DAY_MS,
+				stepMs: 2 * DAY_MS,
+				bootstrapB: 20,
+			}).get("claude-haiku-4-5") ?? [];
+
+		const withTraffic = points.filter((p) => p.nSegments > 0);
+		expect(withTraffic.length).toBeGreaterThan(0);
+		for (const point of withTraffic) {
+			expect(point.unidentifiedReasons).toContain("low-share");
+			expect(point.unidentifiedReasons).not.toContain("no-exposure");
+		}
+	});
 });
 
 describe("actualModelKeys", () => {

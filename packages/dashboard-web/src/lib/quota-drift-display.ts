@@ -22,27 +22,58 @@ export const UNIDENTIFIED_COPY: Record<QuotaDriftUnidentifiedReason, string> = {
 	"wide-interval": "Not enough independent traffic (estimate too imprecise)",
 	collinear:
 		"Not enough independent traffic (always runs alongside another model)",
+	// NOT a measurement statement: the model simply was not routed here in this
+	// period, so there was nothing to measure in the first place. Kept distinct
+	// from `low-share`, which really does mean "it ran, and too little of it".
+	"no-exposure": "Not in use during this period",
 	"low-share": "Too little of this window's traffic to measure",
 	"few-segments": "Not enough observations yet",
 	"zero-estimate": "Not enough independent traffic (no measurable cost)",
 };
 
+/**
+ * Priority order for turning a set of reasons into ONE sentence, most
+ * informative first.
+ *
+ * `no-exposure` outranks everything: a model with no traffic at all in the
+ * period cannot meaningfully be called collinear or imprecise, and saying it
+ * was not in use is the answer the reader wanted. Below it, a model that is
+ * BOTH collinear and wide-intervalled is collinear, and saying so is more
+ * useful than describing the interval the collinearity caused.
+ */
+export const REASON_PRIORITY = [
+	"no-exposure",
+	"collinear",
+	"low-share",
+	"few-segments",
+	"wide-interval",
+	"zero-estimate",
+] as const satisfies readonly QuotaDriftUnidentifiedReason[];
+
 /** One line explaining why a model has no number, or null when it has one. */
 export function unidentifiedReasonText(model: QuotaDriftModel): string | null {
 	if (model.latest?.identified) return null;
 	const reasons = model.latest?.unidentifiedReasons ?? [];
-	// Priority order, most informative first: a model that is BOTH collinear and
-	// wide-intervalled is collinear, and saying so is more useful.
-	for (const reason of [
-		"collinear",
-		"low-share",
-		"few-segments",
-		"wide-interval",
-		"zero-estimate",
-	] as const) {
-		if (reasons.includes(reason)) return UNIDENTIFIED_COPY[reason];
+	const primary = primaryReason(reasons);
+	return primary
+		? UNIDENTIFIED_COPY[primary]
+		: "Not enough independent traffic";
+}
+
+/**
+ * The one reason that speaks for a set of them, or null when the set is empty.
+ *
+ * Empty is a real case the wire can produce (a payload written before point
+ * reasons existed), and it must stay distinguishable from a known reason so
+ * callers can fall back to generic wording rather than inventing a cause.
+ */
+export function primaryReason(
+	reasons: readonly QuotaDriftUnidentifiedReason[],
+): QuotaDriftUnidentifiedReason | null {
+	for (const reason of REASON_PRIORITY) {
+		if (reasons.includes(reason)) return reason;
 	}
-	return "Not enough independent traffic";
+	return null;
 }
 
 /** Human label for a usage window. */

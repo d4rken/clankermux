@@ -33,9 +33,18 @@ export type QuotaDriftWindow = "five_hour" | "seven_day";
  */
 export type QuotaDriftVerdict = "changed" | "stable" | "insufficient-evidence";
 
-/** Why a point or estimate is unidentified, so the UI can explain the gap. */
+/**
+ * Why a point or estimate is unidentified, so the UI can explain the gap.
+ *
+ * `no-exposure` and `low-share` are deliberately separate. A model with ZERO
+ * eq-tokens in a fit window was not routed here at all; one just under the
+ * share floor ran and is too small to separate. Only the second is a statement
+ * about measurement, and the panel must not tell a reader that a model it
+ * stopped using is "too little traffic to measure".
+ */
 export type QuotaDriftUnidentifiedReason =
 	| "wide-interval"
+	| "no-exposure"
 	| "low-share"
 	| "few-segments"
 	| "collinear"
@@ -58,6 +67,16 @@ export interface QuotaDriftPoint {
 	impliedCapacityMtok: number | null;
 	identified: boolean;
 	nSegments: number;
+	/**
+	 * Why this point has no number, empty when it has one.
+	 *
+	 * OPTIONAL on the wire because the payload is a cached JSON blob refreshed
+	 * every 30 minutes and handed through without schema validation: for up to
+	 * one refresh interval after a deploy the newest stored payload predates
+	 * this field. The handler normalizes an absent value to `[]`; readers must
+	 * still treat it as possibly missing rather than assuming a required field.
+	 */
+	unidentifiedReasons?: QuotaDriftUnidentifiedReason[];
 }
 
 /** A detected step change in one model's implied cost. */

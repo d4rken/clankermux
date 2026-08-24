@@ -15,7 +15,9 @@ import {
 	formatInterval,
 	formatRelativeChange,
 	isReportableVerdict,
+	primaryReason,
 	quotaWindowLabel,
+	UNIDENTIFIED_COPY,
 	unidentifiedReasonText,
 } from "./quota-drift-display";
 
@@ -125,6 +127,21 @@ describe("unidentifiedReasonText", () => {
 				}),
 			),
 		).toBe("Not enough independent traffic");
+	});
+
+	it("says a model was not in use rather than too small to measure", () => {
+		// The two failed the same criterion before this and read identically.
+		// Only `low-share` is about measurement; `no-exposure` says the model was
+		// not routed here at all, so it wins whenever both are present.
+		expect(UNIDENTIFIED_COPY["no-exposure"]).toBe(
+			"Not in use during this period",
+		);
+		expect(primaryReason(["low-share", "no-exposure"])).toBe("no-exposure");
+		expect(primaryReason(["no-exposure", "collinear"])).toBe("no-exposure");
+		expect(primaryReason(["low-share", "wide-interval"])).toBe("low-share");
+		// An empty set stays distinguishable from a known reason so callers fall
+		// back to generic wording instead of inventing a cause.
+		expect(primaryReason([])).toBeNull();
 	});
 
 	it("treats a missing latest fit as unidentified", () => {

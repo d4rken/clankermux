@@ -103,9 +103,19 @@ export interface CoefficientEstimate {
 	unidentifiedReasons: readonly UnidentifiedReason[];
 }
 
-/** Why a coefficient failed the identifiability gate. */
+/**
+ * Why a coefficient failed the identifiability gate.
+ *
+ * `no-exposure` and `low-share` are NOT interchangeable, and conflating them
+ * was the original defect: a model with ZERO eq-tokens in the fit window was
+ * reported with the same "too little traffic to measure" wording as one sitting
+ * just under the share floor. Only the second is a statement about
+ * measurement — the first says the model simply was not routed here. It
+ * therefore takes precedence wherever both would apply.
+ */
 export type UnidentifiedReason =
 	| "wide-interval"
+	| "no-exposure"
 	| "low-share"
 	| "few-segments"
 	| "collinear"
@@ -153,6 +163,15 @@ export interface SeriesPoint {
 	impliedCapacityMtok: number | null;
 	identified: boolean;
 	nSegments: number;
+	/**
+	 * Why this point has no number, empty when it has one.
+	 *
+	 * Carried PER POINT rather than only on the latest fit because the gap in
+	 * the chart is what a reader actually asks about, and the answer differs
+	 * along the series: the same model can be pooled out early, separable in the
+	 * middle, and absent from the traffic entirely at the end.
+	 */
+	unidentifiedReasons: readonly UnidentifiedReason[];
 }
 
 /** A detected step change in one model's coefficient. */

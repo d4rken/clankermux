@@ -734,5 +734,6 @@ function toWirePoint(point: SeriesPoint): QuotaDriftPoint {
 		impliedCapacityMtok: point.impliedCapacityMtok,
 		identified: point.identified,
 		nSegments: point.nSegments,
+		unidentifiedReasons: [...point.unidentifiedReasons],
 	};
 }
