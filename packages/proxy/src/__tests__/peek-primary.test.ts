@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, spyOn } from "bun:test";
+import { Logger } from "@clankermux/logger";
 import { usageCache } from "@clankermux/providers";
 import type {
 	Account,
@@ -103,6 +104,9 @@ describe("peekPrimaryAccountId", () => {
 		usageCache.delete("anthropicA");
 		usageCache.delete("anthropicB");
 		usageCache.delete("codex");
+		usageCache.delete("codexPeer");
+		usageCache.delete("otherPoolAccount");
+		usageCache.delete("zaiA");
 		usageCache.delete("acc-1");
 	});
 
@@ -460,6 +464,103 @@ describe("peekPrimaryAccountId", () => {
 			]),
 		).toBe(900);
 		expect(earliestExclusionRecoveryMs([])).toBeNull();
+	});
+
+	// --- the shape of ONE evaluation, and whose evaluation it is ---
+
+	it("(s) returns candidates, exclusions and reservations from a single evaluation", () => {
+		// The whole return value, not just its head: a refactor that recomputed the
+		// count, the candidate or the recovery separately would still satisfy a test
+		// that only looked at the primary id.
+		const now = Date.now();
+		const gated = makeAccount({ id: "zaiA", provider: "zai" });
+		const reserved = makeAccount({ id: "anthropicA", provider: "anthropic" });
+		const peer = makeAccount({ id: "codex", provider: "codex" });
+		const strategy = makeStrategy([gated, reserved, peer]);
+
+		applyProviderOverloadCooldown("zai", now + 90_000);
+		usageCache.set("anthropicA", usage(now, 0, 95)); // 5% weekly headroom
+		usageCache.set("codex", usage(now, 20, 20)); // absorbable
+
+		expect(
+			evaluateDefaultCandidates(
+				[gated, reserved, peer],
+				strategy,
+				throttleDisabledConfig,
+				now,
+			),
+		).toEqual({
+			// The reserved account is DEMOTED, not dropped: still routable, at the back.
+			candidateIds: ["codex", "anthropicA"],
+			exclusions: [
+				{
+					accountId: "zaiA",
+					reason: "provider_overload",
+					recoversAtMs: now + 90_000,
+				},
+			],
+			livenessReservedIds: ["anthropicA"],
+		});
+	});
+
+	it("(t) logs the badge diagnostic from its OWN evaluation, not shared state", () => {
+		// A module-level skip accumulator would work for a single caller and leak
+		// across two. The public snapshot evaluates its own pool silently, and the
+		// badge must describe only the pool IT evaluated.
+		const now = Date.now();
+
+		// Force the change-only gate open: after this the last primary is `null`, so
+		// the call under test necessarily logs.
+		peekPrimaryAccountId([], makeStrategy([]), throttleDisabledConfig, now);
+
+		const infoSpy = spyOn(Logger.prototype, "info").mockImplementation(
+			() => undefined,
+		);
+		try {
+			// A DIFFERENT caller, a DIFFERENT pool, one exclusion of its own.
+			const otherAccount = makeAccount({
+				id: "otherPoolAccount",
+				provider: "zai",
+			});
+			applyProviderOverloadCooldown("zai", now + 60_000);
+			const otherEvaluation = evaluateDefaultCandidates(
+				[otherAccount],
+				makeStrategy([otherAccount]),
+				throttleDisabledConfig,
+				now,
+			);
+			expect(otherEvaluation.exclusions.map((e) => e.accountId)).toEqual([
+				"otherPoolAccount",
+			]);
+			// …and it is silent, so nothing it excluded can even reach this log.
+			expect(infoSpy).not.toHaveBeenCalled();
+
+			const gated = makeAccount({ id: "anthropicA", provider: "anthropic" });
+			const reserved = makeAccount({ id: "codex", provider: "codex" });
+			const peer = makeAccount({ id: "codexPeer", provider: "codex" });
+			applyProviderOverloadCooldown("anthropic", now + 60_000);
+			usageCache.set("codex", usage(now, 0, 95));
+			usageCache.set("codexPeer", usage(now, 20, 20));
+
+			expect(
+				peekPrimaryAccountId(
+					[gated, reserved, peer],
+					makeStrategy([gated, reserved, peer]),
+					throttleDisabledConfig,
+					now,
+				),
+			).toBe("codexPeer");
+
+			expect(infoSpy).toHaveBeenCalledTimes(1);
+			const message = String(infoSpy.mock.calls[0]?.[0]);
+			expect(message).toContain("Primary account → codexPeer");
+			expect(message).toContain("overload-skipped=[anthropicA]");
+			expect(message).toContain("liveness-reserved=[codex]");
+			// The other caller's pool is nowhere in it.
+			expect(message).not.toContain("otherPoolAccount");
+		} finally {
+			infoSpy.mockRestore();
+		}
 	});
 
 	it("(n) stays non-evicting: the reserved account's cache entry survives the peek", () => {

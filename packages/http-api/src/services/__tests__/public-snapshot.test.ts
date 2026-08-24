@@ -92,6 +92,28 @@ function fakeStrategy(): LoadBalancingStrategy {
 	} as any;
 }
 
+/**
+ * The same honest ranking, counting how many times it was asked for. The count
+ * is the property: a snapshot that re-ranks per published fact can hand a client
+ * a candidate, a count and a recovery instant drawn from three different moments.
+ */
+function countingStrategy(): LoadBalancingStrategy & {
+	peekRankedCalls: number;
+} {
+	const base = fakeStrategy();
+	const wrapper = {
+		...base,
+		peekRankedCalls: 0,
+		peekRanked(accounts: Account[]) {
+			wrapper.peekRankedCalls += 1;
+			return base.peekRanked(accounts);
+		},
+	};
+	return wrapper as unknown as LoadBalancingStrategy & {
+		peekRankedCalls: number;
+	};
+}
+
 function insertAccount(
 	over: Partial<{
 		id: string;
@@ -741,6 +763,37 @@ describe("the routing prediction and the count it belongs to", () => {
 		expect(snapshot.routing.defaultCandidateAccountId).toBe(
 			snapshot.accounts.find((a) => a.isDefaultCandidate)?.id ?? null,
 		);
+	});
+
+	it("ranks the pool exactly ONCE per snapshot", async () => {
+		// The count, the candidate and the gate recoveries are three readings of ONE
+		// evaluation. Recomputing any of them would re-rank, and a pool that changed
+		// between two rankings would be published as a state it was never in.
+		insertAccount({ id: "a", name: "a" });
+		insertAccount({ id: "b", name: "b" });
+		const strategy = countingStrategy();
+
+		const snapshot = await read(strategy);
+
+		expect(strategy.peekRankedCalls).toBe(1);
+		expect(snapshot.pool.defaultRoutable).toBe(2);
+		expect(snapshot.routing.defaultCandidateAccountId).toBe("a");
+	});
+
+	it("draws the count, the candidate AND the recovery from that one ranking", async () => {
+		// The gated case, where all three facts are non-trivial at once: an empty
+		// count, no candidate, and a recovery instant that only the same evaluation
+		// knows about.
+		insertAccount();
+		const until = applyProviderOverloadCooldown("anthropic");
+		const strategy = countingStrategy();
+
+		const snapshot = await read(strategy);
+
+		expect(strategy.peekRankedCalls).toBe(1);
+		expect(snapshot.pool.defaultRoutable).toBe(0);
+		expect(snapshot.routing.defaultCandidateAccountId).toBeNull();
+		expect(snapshot.pool.nextAvailableAtMs).toBe(until);
 	});
 
 	it("flags exactly ONE account, never a set", async () => {
