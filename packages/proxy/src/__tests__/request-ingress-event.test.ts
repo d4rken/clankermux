@@ -115,6 +115,7 @@ function makeContext(accounts: Account[]): ProxyContext {
 			updateAccountRateLimitMeta: mock(async () => {}),
 			resetConsecutiveRateLimits: mock(async () => {}),
 			updateRequestUsage: mock(async () => {}),
+			saveInternalDispatchSpend: mock(async () => {}),
 			getApiKeyPin: mock(async () => null),
 			getAdapter: mock(() => ({
 				run: mock(async () => {}),

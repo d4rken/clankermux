@@ -8,7 +8,11 @@
  */
 import { describe, expect, it, mock, spyOn } from "bun:test";
 import { Logger } from "@clankermux/logger";
-import type { Account, UnifiedClaimObservationRow } from "@clankermux/types";
+import type {
+	Account,
+	UnifiedClaimObservationRow,
+	UnifiedSummaryObservationRow,
+} from "@clankermux/types";
 import type { ProxyContext } from "../handlers";
 import { forwardToClient } from "../response-handler";
 
@@ -56,15 +60,19 @@ interface Harness {
 	begin: ReturnType<typeof mock>;
 	/** Rows handed to dbOps, after the enqueued job has been run. */
 	saved: UnifiedClaimObservationRow[][];
+	/** Summary rows handed to dbOps, after the enqueued job has been run. */
+	savedSummaries: UnifiedSummaryObservationRow[];
 	enqueueCalls: number;
 }
 
 function makeHarness(opts: { enqueueAccepts?: boolean } = {}): Harness {
 	const accepts = opts.enqueueAccepts ?? true;
 	const saved: UnifiedClaimObservationRow[][] = [];
+	const savedSummaries: UnifiedSummaryObservationRow[] = [];
 	const harness: Harness = {
 		begin: mock(() => {}),
 		saved,
+		savedSummaries,
 		enqueueCalls: 0,
 		ctx: undefined as unknown as ProxyContext,
 	};
@@ -77,6 +85,12 @@ function makeHarness(opts: { enqueueAccepts?: boolean } = {}): Harness {
 					saved.push(rows);
 				},
 			),
+			saveUnifiedSummaryObservation: mock(
+				async (row: UnifiedSummaryObservationRow) => {
+					savedSummaries.push(row);
+				},
+			),
+			saveInternalDispatchSpend: mock(async () => {}),
 		},
 		asyncWriter: {
 			enqueue: (job: () => Promise<void>) => {
@@ -166,6 +180,7 @@ describe("response-handler — unified claim capture", () => {
 			status: "allowed",
 			utilization: 0.12,
 			resetAt: 1_785_685_200_000,
+			surpassedThreshold: null,
 		});
 		expect(rows[0].observedAt).toBeGreaterThan(1_700_000_000_000);
 		expect(rows[1].utilization).toBe(0.94);
@@ -269,5 +284,85 @@ describe("response-handler — unified claim capture", () => {
 		} finally {
 			spy.mockRestore();
 		}
+	});
+});
+
+describe("response-handler — unified summary capture", () => {
+	it("records the summary block alongside the claim rows, in ONE job", async () => {
+		const h = makeHarness();
+		const response = new Response(JSON.stringify({ type: "error" }), {
+			status: 429,
+			headers: {
+				"Content-Type": "application/json",
+				"anthropic-ratelimit-unified-5h-status": "allowed",
+				"anthropic-ratelimit-unified-5h-utilization": "0.12",
+				"anthropic-ratelimit-unified-status": "rejected",
+				"anthropic-ratelimit-unified-reset": "1785736800",
+				"anthropic-ratelimit-unified-representative-claim":
+					"seven_day_overage_included",
+				"retry-after": "51811",
+			},
+		});
+		await forward(h, {
+			account: makeAccount(),
+			response,
+			timestamp: 1_700_000_000_000,
+		});
+
+		// One enqueue for both sides — a queue rejection can never half-record a
+		// response.
+		expect(h.enqueueCalls).toBe(1);
+		expect(h.saved).toHaveLength(1);
+		expect(h.savedSummaries).toHaveLength(1);
+		const summary = h.savedSummaries[0];
+		expect(summary.requestId).toBe("req-1");
+		expect(summary.status).toBe("rejected");
+		expect(summary.representativeClaim).toBe("seven_day_overage_included");
+		expect(summary.retryAfter).toBe("51811");
+		expect(summary.httpStatus).toBe(429);
+		// Both sides share ONE observed_at, so a joined read never reconciles two
+		// clocks for one response.
+		expect(summary.observedAt).toBe(h.saved[0][0].observedAt);
+		expect(summary.source).toBe("client");
+	});
+
+	it("records a summary-only burst 429 that carries no claim lines at all", async () => {
+		const h = makeHarness();
+		await forward(h, {
+			account: makeAccount(),
+			response: new Response(JSON.stringify({ type: "error" }), {
+				status: 429,
+				headers: {
+					"Content-Type": "application/json",
+					"retry-after": "5",
+				},
+			}),
+		});
+
+		// The claim extractor yields nothing here; the summary must not be gated
+		// behind it, or the burst shape would go unrecorded entirely.
+		expect(h.saved).toHaveLength(0);
+		expect(h.savedSummaries).toHaveLength(1);
+		expect(h.savedSummaries[0].retryAfter).toBe("5");
+		expect(h.savedSummaries[0].status).toBeNull();
+	});
+
+	it("labels an internal probe's summary with the probe source", async () => {
+		const h = makeHarness();
+		await forward(h, {
+			account: makeAccount(),
+			requestHeaders: new Headers({ "x-clankermux-keepalive": "true" }),
+			internal: true,
+			response: new Response(JSON.stringify({ type: "error" }), {
+				status: 429,
+				headers: {
+					"Content-Type": "application/json",
+					"anthropic-ratelimit-unified-status": "rejected",
+					"retry-after": "60",
+				},
+			}),
+		});
+		expect(h.savedSummaries).toHaveLength(1);
+		expect(h.savedSummaries[0].source).toBe("keepalive");
 	});
 });

@@ -9,6 +9,7 @@ export { AnalyticsControls } from "./AnalyticsControls";
 export { AnalyticsFilters, type FilterState } from "./AnalyticsFilters";
 export { CacheFlowPanel } from "./CacheFlowPanel";
 export { CacheKeepaliveSection } from "./CacheKeepaliveSection";
+export { ClaimSeriesAuditPanel } from "./ClaimSeriesAuditPanel";
 export { ContextCompositionPanel } from "./ContextCompositionPanel";
 export { MissingSectionsNotice } from "./MissingSectionsNotice";
 export { ModelAnalytics } from "./ModelAnalytics";

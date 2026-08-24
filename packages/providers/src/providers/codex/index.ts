@@ -41,8 +41,15 @@ export {
 	parseCodexRateLimitResetCredits,
 	readChatgptAccountId,
 } from "./rate-limit-reset-credits";
-export type { CodexCreditsInfo, NormalizedCodexInputUsage } from "./usage";
+export type {
+	CodexCreditsInfo,
+	CodexWindowScope,
+	CodexWindowSlot,
+	NormalizedCodexInputUsage,
+	RawCodexWindowReading,
+} from "./usage";
 export {
+	extractRawCodexWindows,
 	isCodexOnCredits,
 	normalizeCodexInputUsage,
 	parseCodexCreditsHeaders,

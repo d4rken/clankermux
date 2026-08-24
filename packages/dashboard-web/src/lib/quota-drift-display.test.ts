@@ -29,6 +29,7 @@ import {
 	quotaWindowLabel,
 	summarizeGaps,
 	summarizeModelGaps,
+	supportText,
 	UNIDENTIFIED_COPY,
 	unidentifiedReasonText,
 } from "./quota-drift-display";
@@ -47,7 +48,7 @@ function model(overrides: Partial<QuotaDriftModel> = {}): QuotaDriftModel {
 			unidentifiedReasons: [],
 		},
 		changes: [],
-		verdict: "stable",
+		verdict: "no-change-detected",
 		...overrides,
 	};
 }
@@ -165,11 +166,13 @@ describe("unidentifiedReasonText", () => {
 
 describe("isReportableVerdict", () => {
 	it("reports stable only for an identified coefficient", () => {
-		expect(isReportableVerdict(model({ verdict: "stable" }))).toBe(true);
+		expect(isReportableVerdict(model({ verdict: "no-change-detected" }))).toBe(
+			true,
+		);
 		expect(
 			isReportableVerdict(
 				model({
-					verdict: "stable",
+					verdict: "no-change-detected",
 					latest: {
 						pointEstimate: null,
 						ciLow: null,
@@ -212,6 +215,91 @@ describe("isReportableVerdict", () => {
 				}),
 			),
 		).toBe(true);
+	});
+});
+
+describe("supportText", () => {
+	it("names the runs and accounts a printed coefficient rests on", () => {
+		expect(
+			supportText(
+				model({
+					latest: {
+						pointEstimate: 2.2,
+						ciLow: 2,
+						ciHigh: 2.4,
+						impliedCapacityMtok: 45,
+						shareOfWindow: 0.6,
+						identified: true,
+						unidentifiedReasons: [],
+						nRuns: 12,
+						nAccounts: 3,
+					},
+				}),
+			),
+		).toBe("exposure in 12 runs across 3 accounts");
+	});
+
+	it("agrees with itself in the singular", () => {
+		expect(
+			supportText(
+				model({
+					latest: {
+						pointEstimate: 2.2,
+						ciLow: 2,
+						ciHigh: 2.4,
+						impliedCapacityMtok: 45,
+						shareOfWindow: 0.6,
+						identified: true,
+						unidentifiedReasons: [],
+						nRuns: 1,
+						nAccounts: 1,
+					},
+				}),
+			),
+		).toBe("exposure in 1 run across 1 account");
+	});
+
+	it("says nothing for a row that prints a reason instead of a number", () => {
+		expect(
+			supportText(
+				model({
+					latest: {
+						pointEstimate: null,
+						ciLow: null,
+						ciHigh: null,
+						impliedCapacityMtok: null,
+						shareOfWindow: 0.1,
+						identified: false,
+						unidentifiedReasons: ["collinear"],
+						nRuns: 12,
+						nAccounts: 3,
+					},
+				}),
+			),
+		).toBeNull();
+	});
+
+	it("says nothing when the payload predates the counts", () => {
+		// Null arrives from the normalizer for a pre-change cached blob. Inventing
+		// "0 runs" there would read as counted-and-unsupported.
+		expect(
+			supportText(
+				model({
+					latest: {
+						pointEstimate: 2.2,
+						ciLow: 2,
+						ciHigh: 2.4,
+						impliedCapacityMtok: 45,
+						shareOfWindow: 0.6,
+						identified: true,
+						unidentifiedReasons: [],
+						nRuns: null,
+						nAccounts: null,
+					},
+				}),
+			),
+		).toBeNull();
+		expect(supportText(model({ latest: null }))).toBeNull();
 	});
 });
 

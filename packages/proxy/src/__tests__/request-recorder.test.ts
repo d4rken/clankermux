@@ -44,7 +44,11 @@ class FakeDbOps {
 	saveRoutingCalls: Array<Record<string, unknown>> = [];
 	saveToolCallsCalls: Array<{ requestId: string; stats: unknown[] }> = [];
 	savePayloadCalls: Array<{ id: string; json: string }> = [];
-	updateUsageCalls: Array<{ id: string; usage: unknown }> = [];
+	updateUsageCalls: Array<{
+		id: string;
+		usage: unknown;
+		usageFinalizedAt?: number | null;
+	}> = [];
 	pauseCalls: Array<{ accountId: string; reason: string }> = [];
 	updateAccountUsageCalls: string[] = [];
 	// Shared ordered log: pushed synchronously at invocation (before any await
@@ -81,6 +85,7 @@ class FakeDbOps {
 		contextComposition?: unknown;
 		requestedModel?: string | null;
 		projectAttributionSource: string | null;
+		usageFinalizedAt?: number | null;
 	}): Promise<void> {
 		this.order.push("request");
 		if (this.failSaveRequest) throw new Error("saveRequest failed");
@@ -103,6 +108,7 @@ class FakeDbOps {
 			reasoningEffort: data.reasoningEffort,
 			requestedModel: data.requestedModel,
 			projectAttributionSource: data.projectAttributionSource,
+			usageFinalizedAt: data.usageFinalizedAt,
 		});
 	}
 
@@ -133,8 +139,12 @@ class FakeDbOps {
 		return json;
 	}
 
-	async updateRequestUsage(requestId: string, usage: unknown): Promise<void> {
-		this.updateUsageCalls.push({ id: requestId, usage });
+	async updateRequestUsage(
+		requestId: string,
+		usage: unknown,
+		usageFinalizedAt?: number | null,
+	): Promise<void> {
+		this.updateUsageCalls.push({ id: requestId, usage, usageFinalizedAt });
 	}
 
 	async pauseAccount(accountId: string, reason: string): Promise<void> {
@@ -1963,5 +1973,97 @@ describe("RequestRecorder — payload ordering and reservation", () => {
 				order.slice(0, i).filter((k) => k === "payload").length + 1,
 			);
 		}
+	});
+});
+
+describe("RequestRecorder — usage_finalized_at", () => {
+	it("stamps the recorder's clock when a usable summary arrives", async () => {
+		const h = makeHarness();
+		h.recorder.begin(makeMeta());
+		const stampedAt = h.timers.current;
+		h.recorder.attachUsageSummary("req-1", makeSummary());
+		h.recorder.finishTransport("req-1", "success");
+		await h.flush();
+
+		expect(h.dbOps.saveRequestCalls[0].usageFinalizedAt).toBe(stampedAt);
+	});
+
+	it("uses the injected clock, not the wall clock", async () => {
+		const h = makeHarness();
+		h.recorder.begin(makeMeta());
+		h.timers.advance(37);
+		h.recorder.attachUsageSummary("req-1", makeSummary());
+		h.recorder.finishTransport("req-1", "success");
+		await h.flush();
+
+		// The FakeTimers clock starts at 1_000_000 — a Date.now() stamp would be
+		// thirteen digits and could never equal this.
+		expect(h.dbOps.saveRequestCalls[0].usageFinalizedAt).toBe(1_000_037);
+	});
+
+	it("keeps the FIRST stamp when a second usable summary arrives", async () => {
+		const h = makeHarness();
+		h.recorder.begin(makeMeta());
+		h.recorder.attachUsageSummary("req-1", makeSummary());
+		h.timers.advance(500);
+		h.recorder.attachUsageSummary("req-1", makeSummary());
+		h.recorder.finishTransport("req-1", "success");
+		await h.flush();
+
+		expect(h.dbOps.saveRequestCalls[0].usageFinalizedAt).toBe(1_000_000);
+	});
+
+	it("is null when usage was waived", async () => {
+		const h = makeHarness();
+		h.recorder.begin(makeMeta());
+		h.recorder.finishTransport("req-1", "success");
+		h.recorder.markUsageUnavailable("req-1");
+		await h.flush();
+
+		expect(h.dbOps.saveRequestCalls).toHaveLength(1);
+		expect(h.dbOps.saveRequestCalls[0].usageFinalizedAt).toBeNull();
+	});
+
+	it("is null when the summary carried no model (nothing persistable arrived)", async () => {
+		const h = makeHarness();
+		h.recorder.begin(makeMeta());
+		// toRequestUsage() drops a model-less summary WHOLE, so no token vector
+		// ever became known — a stamp here would claim usage the row lacks.
+		h.recorder.attachUsageSummary(
+			"req-1",
+			makeSummary({
+				usage: {
+					model: undefined as unknown as string,
+					inputTokens: 100,
+					outputTokens: 50,
+					cacheReadInputTokens: 10,
+					cacheCreationInputTokens: 5,
+					totalTokens: 165,
+					costUsd: 0.0123,
+				},
+			}),
+		);
+		h.recorder.finishTransport("req-1", "success");
+		await h.flush();
+
+		expect(h.dbOps.saveRequestCalls[0].usage).toBeUndefined();
+		expect(h.dbOps.saveRequestCalls[0].usageFinalizedAt).toBeNull();
+	});
+
+	it("carries the stamp on a LATE patch, so the persisted NULL is filled in", async () => {
+		const h = makeHarness();
+		h.recorder.begin(makeMeta());
+		h.recorder.finishTransport("req-1", "success");
+		// Grace elapses with no usage → the row persists without a stamp.
+		h.timers.advance(150);
+		await h.flush();
+		expect(h.dbOps.saveRequestCalls[0].usageFinalizedAt).toBeNull();
+
+		const lateAt = h.timers.current;
+		h.recorder.attachUsageSummary("req-1", makeSummary());
+		await h.flush();
+
+		expect(h.dbOps.updateUsageCalls).toHaveLength(1);
+		expect(h.dbOps.updateUsageCalls[0].usageFinalizedAt).toBe(lateAt);
 	});
 });

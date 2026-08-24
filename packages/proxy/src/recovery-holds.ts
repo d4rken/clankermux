@@ -107,6 +107,53 @@ const OVERLOAD_PROBE_SUPPRESSED_RETRY_AFTER_MS = 5_000;
 // than waiting out a cooldown deadline that no longer exists.
 const OVERLOAD_HOLD_PROBE_POLL_MS = 1_500;
 
+/**
+ * Whether an attempt outcome is an ORDINARY failure — one with no overload
+ * verdict to wait on, so a hold must stop re-attempting that account.
+ *
+ * The two exclusions are the whole point. `overload_suppressed` has a probe in
+ * flight; `overload_529` IS the condition a hold exists to wait out, and
+ * treating it as ordinary would make the hold refuse to retry the very account
+ * whose recovery it is waiting for.
+ *
+ * Shared so the hold's own per-round classification and the pre-hold seeding
+ * cannot drift apart — they did, and the seeding folded `overload_529` in.
+ */
+export function isOrdinaryAttemptFailure(
+	outcome: ProxyAttemptOutcome,
+): boolean {
+	return (
+		outcome.kind !== "overload_suppressed" && outcome.kind !== "overload_529"
+	);
+}
+
+/**
+ * Whether an ordinary failure may be held against the ACCOUNT for the rest of
+ * the request, rather than only against the attempt that produced it.
+ *
+ * The exclusion set is keyed by account id alone, so anything whose cause is
+ * narrower than the account must stay out of it:
+ *
+ * - `model_not_found` is a fact about the MODEL the attempt sent. A combo slot
+ *   can fail entitlement on model A, the combo-fallback pass then clears the
+ *   override and waits on model B's breaker; excluding by id would refuse the
+ *   account after B recovers, for a reason that never applied to B.
+ * - `other` is the catch-all, and family-weekly exhaustion is emitted through
+ *   it — deliberately WITHOUT an account-wide cooldown (see the fail() call in
+ *   proxy-operations.ts). Same shape of bug, one family instead of one model.
+ *
+ * Erring toward NOT excluding is the safe direction: the cost is a redundant
+ * retry on wake, whereas a wrong exclusion can refuse the only account able to
+ * serve the request.
+ */
+export function isAccountWideFailure(outcome: ProxyAttemptOutcome): boolean {
+	return (
+		isOrdinaryAttemptFailure(outcome) &&
+		outcome.kind !== "model_not_found" &&
+		outcome.kind !== "other"
+	);
+}
+
 // Outcome of a burst hold once it has run. `served` carries the real upstream
 // Response; `aborted` means the client disconnected mid-hold (Finding 2) and
 // the caller must NOT fall through to more upstream requests; `gave-up` means
@@ -216,6 +263,30 @@ export interface RecoveryHolds {
 	): ProviderOverloadedAccount[];
 	noteOverloadSuppression(account: Account, outcome: ProxyAttemptOutcome): void;
 	/**
+	 * Record a candidate the attempt loop's LATE overload gate skipped — the
+	 * breaker tripped after selection, while this request was already walking
+	 * its list.
+	 *
+	 * Separate entry point from {@link noteOverloadSuppression} because that one
+	 * reads a ProxyAttemptOutcome, and these candidates were never attempted at
+	 * all: they are refused before `proxyWithAccount` is reached, so no outcome
+	 * exists to inspect. Both feed the same list, because both mean the same
+	 * thing to the terminal — this request was blocked by an overload.
+	 */
+	noteOverloadGateSkip(
+		account: Account,
+		until: number,
+		gatedModel: string | null,
+	): void;
+	/**
+	 * Record that `accountId` failed for an ORDINARY reason outside any hold.
+	 *
+	 * The attempt loop owns this: by the time a hold is entered, the candidates
+	 * that already failed are invisible to it, and re-attempting them on wake
+	 * lets the hold be satisfied by the same failure it was waiting past.
+	 */
+	noteOrdinaryFailure(accountId: string): void;
+	/**
 	 * Record that the caller ATTEMPTED the held account outside a hold (the
 	 * affinity-first preflight). The one bookkeeping write the holds do not own
 	 * themselves, so the double-attempt guard has a single home either way.
@@ -276,11 +347,18 @@ export function createRecoveryHolds(deps: RecoveryHoldsDeps): RecoveryHolds {
 	// `burstHeldAccountForGiveUp`) rather than the generic ALL_ACCOUNTS_FAILED.
 	let burstHoldDeclined = false;
 	let burstHeldAccountForGiveUp: Account | null = null;
-	// Attempts refused by half-open overload-probe admission (another request is
-	// probing, or an open bucket won a race against the gate). When the loops
-	// exhaust with at least one suppression recorded, the terminal must be the
-	// provider-overloaded 529 (retry in seconds — a probe is in flight), NOT the
-	// generic ALL_ACCOUNTS_FAILED / pool_exhausted error.
+	// Candidates an OVERLOAD stopped from reaching upstream, from either of two
+	// routes: refused by half-open probe admission (another request is probing,
+	// or an open bucket won a race against the gate), or dropped by the attempt
+	// loop's late gate when the breaker tripped mid-walk. When the loops exhaust
+	// with at least one recorded, the terminal must be the provider-overloaded
+	// 529 — the request was blocked by an overload and can wait for recovery —
+	// NOT the generic ALL_ACCOUNTS_FAILED / pool_exhausted error.
+	//
+	// Retry-After is NOT taken from the `until` recorded here: the terminal runs
+	// `refreshOverloadUntils` over this list to re-read each bucket's CURRENT
+	// deadline, so a re-trip during the hold is reflected instead of a stale
+	// pre-hold value.
 	const overloadSuppressedAttempts: ProviderOverloadedAccount[] = [];
 	const noteOverloadSuppression = (
 		account: Account,
@@ -294,6 +372,28 @@ export function createRecoveryHolds(deps: RecoveryHoldsDeps): RecoveryHolds {
 					Date.now() + OVERLOAD_PROBE_SUPPRESSED_RETRY_AFTER_MS,
 			});
 		}
+	};
+	// The late-gate counterpart, for candidates dropped when the breaker tripped
+	// while this request was already walking its list.
+	//
+	// `until` is the deadline the gate had already resolved to decide the skip.
+	// It is a snapshot for the record, NOT what drives behaviour: the hold
+	// re-inspects the live buckets, and the terminal runs `refreshOverloadUntils`
+	// to re-read them, so both follow the CURRENT deadline rather than this one.
+	// Accounts that failed ORDINARILY outside any hold — in the attempt loop
+	// before a hold was entered. Seeds `ordinaryFailedIds` so a hold does not
+	// re-attempt, and be served by, the very account whose failure led to it.
+	const preHoldOrdinaryFailures = new Set<string>();
+	const noteOrdinaryFailure = (accountId: string): void => {
+		preHoldOrdinaryFailures.add(accountId);
+	};
+
+	const noteOverloadGateSkip = (
+		account: Account,
+		until: number,
+		gatedModel: string | null,
+	): void => {
+		overloadSuppressedAttempts.push({ account, until, gatedModel });
 	};
 	// The cache-affinity-pinned account id recorded by the routing strategy (set
 	// on affinity_hit, affinity_hold, and the zero-siblings storm-degrade hold).
@@ -312,8 +412,9 @@ export function createRecoveryHolds(deps: RecoveryHoldsDeps): RecoveryHolds {
 	};
 
 	// Transparent overload hold. When EVERY candidate is overload-gated (the
-	// zero-available terminal) or every attempt was suppressed behind an
-	// in-flight half-open probe (the suppressed-exhaustion terminal), a
+	// zero-available terminal), or every remaining candidate was stopped by an
+	// overload inside the loop — probe-suppressed or late-gated (the
+	// overload-blocked terminal) — a
 	// synthetic 529 bounced to the client forces a client-side retry loop for a
 	// condition that typically clears in seconds. Instead, hold the live
 	// connection and serve the request when the family recovers — bounded by
@@ -332,8 +433,16 @@ export function createRecoveryHolds(deps: RecoveryHoldsDeps): RecoveryHolds {
 		gated: readonly ProviderOverloadedAccount[],
 	): Array<{ provider: string; model: string | null }> => {
 		const pairs = new Map<string, { provider: string; model: string | null }>();
-		for (const { account } of gated) {
-			const model = gates.modelForAccount(account);
+		for (const entry of gated) {
+			const { account } = entry;
+			// The model the GATE decided on, when it resolved one. Re-deriving via
+			// modelForAccount would pick a different bucket for an account with
+			// per-account model mapping, so the hold would wait on (or find closed)
+			// a bucket that had nothing to do with the skip.
+			const model =
+				entry.gatedModel !== undefined
+					? entry.gatedModel
+					: gates.modelForAccount(account);
 			pairs.set(
 				`${getProviderOverloadKey(account.provider)}\u0000${model ?? ""}`,
 				{
@@ -353,13 +462,15 @@ export function createRecoveryHolds(deps: RecoveryHoldsDeps): RecoveryHolds {
 		gated: readonly ProviderOverloadedAccount[],
 	): ProviderOverloadedAccount[] => {
 		const now = Date.now();
-		return gated.map(({ account }) => ({
-			account,
+		return gated.map((entry) => ({
+			...entry,
 			until:
 				getProviderOverloadUntil(
-					account.provider,
+					entry.account.provider,
 					now,
-					gates.modelForAccount(account),
+					entry.gatedModel !== undefined
+						? entry.gatedModel
+						: gates.modelForAccount(entry.account),
 				) ?? now + OVERLOAD_PROBE_SUPPRESSED_RETRY_AFTER_MS,
 		}));
 	};
@@ -517,7 +628,7 @@ export function createRecoveryHolds(deps: RecoveryHoldsDeps): RecoveryHolds {
 								round.sawOverloadSuppression = true;
 							} else if (o.kind === "overload_529") {
 								round.sawRetrip = true;
-							} else {
+							} else if (isOrdinaryAttemptFailure(o)) {
 								// Attributed to the candidate, so a later poll can skip
 								// exactly this account rather than the whole round.
 								round.ordinaryFailedAccountIds.add(candidate.id);
@@ -664,13 +775,21 @@ export function createRecoveryHolds(deps: RecoveryHoldsDeps): RecoveryHolds {
 			NETWORK.IDLE_REARM_INTERVAL_MS,
 		);
 		const holdStart = Date.now();
-		// Accounts that were ATTEMPTED in an earlier round of this hold and failed
-		// for an ordinary reason (auth / network / 429 / model). Nothing is in
-		// flight for them, so re-attempting them on every ~1.5s poll is exactly the
-		// hammering this loop's classification exists to prevent — and for a 429 it
-		// can deepen a real rate limit. They stay excluded for the rest of the hold;
-		// the hold itself still ends (below) when a round has no verdict to wait on.
-		const ordinaryFailedIds = new Set<string>();
+		// Accounts that failed for an ordinary reason (auth / network / 429 /
+		// model). Nothing is in flight for them, so re-attempting them on every
+		// ~1.5s poll is exactly the hammering this loop's classification exists to
+		// prevent — and for a 429 it can deepen a real rate limit. They stay
+		// excluded for the rest of the hold; the hold itself still ends (below)
+		// when a round has no verdict to wait on.
+		//
+		// SEEDED from failures that happened BEFORE the hold. A request reaching
+		// the late overload gate has, by definition, already failed candidates in
+		// the attempt loop — that is how it got mid-walk — so starting empty means
+		// the first wake re-attempts the account that just failed, and can be
+		// served by it while the account the hold was actually waiting for is
+		// never tried. Left empty, the hold silently becomes a retry of the
+		// failure rather than a wait for the overload.
+		const ordinaryFailedIds = new Set<string>(preHoldOrdinaryFailures);
 		// Hold-exit summary counters. ONE INFO line per hold, at exit — not per
 		// round: at a ~1.5s poll and up to OVERLOAD_HOLD_MAX_CONCURRENT_PER_BUCKET
 		// holders per bucket, a per-round line would be noisier than the
@@ -1213,6 +1332,8 @@ export function createRecoveryHolds(deps: RecoveryHoldsDeps): RecoveryHolds {
 		runBurstHold,
 		refreshOverloadUntils,
 		noteOverloadSuppression,
+		noteOverloadGateSkip,
+		noteOrdinaryFailure,
 		noteBurstAttempt,
 		get overloadSuppressedAttempts() {
 			return overloadSuppressedAttempts;

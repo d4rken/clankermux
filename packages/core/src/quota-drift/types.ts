@@ -201,8 +201,18 @@ export interface DetectedChange {
 /**
  * A verdict about one model on one window.
  *
- * `insufficient-evidence` and `stable` are NOT interchangeable: `stable` means
- * the test ran and found nothing, `insufficient-evidence` means it could not
- * run. An underpowered scan must never report `stable`.
+ * `insufficient-evidence` and `no-change-detected` are NOT interchangeable:
+ * `no-change-detected` means the test ran and found nothing,
+ * `insufficient-evidence` means it could not run. An underpowered scan must
+ * never report `no-change-detected`.
+ *
+ * Named for what it establishes rather than for what a reader might infer.
+ * "Stable" is a claim about the provider; "no change detected" is a statement
+ * about this test, which is all a non-significant result on ~80 days of
+ * indirect evidence can support. The semantics are unchanged — only the word
+ * stopped overselling them.
  */
-export type QuotaVerdict = "changed" | "stable" | "insufficient-evidence";
+export type QuotaVerdict =
+	| "changed"
+	| "no-change-detected"
+	| "insufficient-evidence";

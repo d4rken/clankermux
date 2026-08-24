@@ -152,6 +152,9 @@ function makeContext(accounts: Account[]): ProxyContext {
 			attachUsageSummary: mock(() => {}),
 			markUsageUnavailable: mock(() => {}),
 			recordSynthetic: mock(() => {}),
+			// Read by the all-accounts-failed terminal's collision guard. Absent
+			// here until a test actually reached that terminal.
+			hasRecord: mock(() => false),
 			sweep: mock(() => {}),
 			dispose: mock(() => {}),
 		} as never,
@@ -330,6 +333,171 @@ describe("transparent overload hold", () => {
 		const res = await p;
 		expect(res.status).toBe(499);
 		expect(fetchCalls).toBe(0);
+	}, 10_000);
+
+	it("holds a request whose remaining candidates were gated MID-LOOP", async () => {
+		// Observed in production 2026-08-24 18:43:08. A request already walking
+		// its candidate list when the breaker trips has its remaining candidates
+		// dropped by the loop's late overload gate. That gate skips without
+		// recording anything, so `overloadSuppressedAttempts` stays empty, the
+		// post-loop hold never fires, and the request falls through to
+		// ALL_ACCOUNTS_FAILED — a hard 503. Two requests one second later, which
+		// found zero available candidates UP FRONT, were held and served 200s.
+		// Same incident, same breaker, opposite outcomes, decided purely by
+		// whether the loop had already started.
+		//
+		// The cooldown is SHORTER than the hold budget on purpose, and attempts
+		// are identified BY ACCOUNT rather than counted. Two earlier versions of
+		// this test passed for the wrong reason: one paired a 60s cooldown with a
+		// 300ms budget, which the holdability check rejects outright; the next
+		// counted calls, and was satisfied by the hold simply RE-ATTEMPTING the
+		// account that had already failed, while the gated account it was
+		// supposedly waiting for was never tried at all.
+		//
+		// The invariant that matters: `first` fails, and the account that serves
+		// the request afterwards is `second` — the one the late gate skipped.
+		// Distinct credentials so each attempt is attributable on the wire. NOT
+		// via a ctx.provider override: `proxyWithAccount` resolves the REAL
+		// provider per account (`getProvider(account.provider)`), so ctx.provider
+		// is only a fallback and overriding it does nothing for these.
+		const first = makeAccount({
+			id: "acc-first",
+			name: "First",
+			api_key: "key-first",
+		});
+		const second = makeAccount({
+			id: "acc-second",
+			name: "Second",
+			api_key: "key-second",
+		});
+
+		const ctx = makeContext([first, second]);
+
+		let letSecondFinish: () => void = () => {};
+		const releaseSecond = new Promise<void>((resolve) => {
+			letSecondFinish = resolve;
+		});
+
+		const attempts: string[] = [];
+		globalThis.fetch = upstreamOnlyFetch(async (input) => {
+			const headers = input instanceof Request ? input.headers : new Headers();
+			const key =
+				headers.get("x-api-key") ??
+				headers.get("authorization")?.replace(/^Bearer /, "") ??
+				"unknown";
+			const who =
+				key === "key-first" ? "First" : key === "key-second" ? "Second" : key;
+			attempts.push(who);
+			if (who === "First") {
+				// Fails ORDINARILY, so nothing records an overload suppression. It
+				// must FAIL OVER rather than be forwarded — a non-2xx response goes
+				// back to the client as-is and never reaches the end of the loop —
+				// so throw, as the production attempts did. Meanwhile the breaker
+				// trips, as it would from another request's 529, leaving `second`
+				// to be dropped by the late gate.
+				applyProviderOverloadCooldown("anthropic", Date.now() + 400, MODEL);
+				throw new Error("upstream connection reset");
+			}
+			// Park the winning attempt until the test has observed the hold slot.
+			// Polling occupancy alone can MISS a real hold: under preemption the
+			// hold can acquire, attempt and release between two polls, failing a
+			// test whose subject is working correctly. Holding the response open
+			// makes the observation window deterministic.
+			await releaseSecond;
+			return ok200(MODEL);
+		}) as never;
+
+		// Do NOT await yet. A cooldown short enough to keep the test fast can
+		// expire before the loop's second iteration under worker preemption, in
+		// which case `second` is attempted directly and the sequence below passes
+		// with no hold ever entered. Observing the slot while the request is
+		// pending is what distinguishes the two.
+		const pending = callHandleProxy(
+			modelRequest(MODEL),
+			new URL("https://proxy.local/v1/messages"),
+			ctx,
+		);
+		const slotKey = getOverloadHoldSlotKey("anthropic", MODEL);
+		// On failure, release the parked attempt AND let the request settle before
+		// rethrowing. Releasing alone is not enough: if the hold was entered, its
+		// own `finally` — which frees the slot and clears the idle re-arm
+		// interval — cannot run until the request completes, and `afterEach`
+		// resets counters but cannot clear a live interval. Without this a failing
+		// assertion leaks a timer into the rest of the file.
+		try {
+			await waitFor(() => getActiveOverloadHoldCount(slotKey) > 0);
+		} catch (err) {
+			letSecondFinish();
+			await pending.catch(() => {});
+			throw err;
+		}
+		letSecondFinish();
+
+		const res = await pending;
+		expect(res.status).toBe(200);
+		// Held through the cooldown, woke, and served from the account the gate
+		// had skipped — NOT by retrying the one that already failed.
+		expect(attempts).toEqual(["First", "Second"]);
+		// And the slot is returned afterwards.
+		expect(getActiveOverloadHoldCount(slotKey)).toBe(0);
+	}, 15_000);
+
+	it("does NOT hold for a gated candidate that could never serve the path", async () => {
+		// The candidate list still contains accounts that would fail over on
+		// routing grounds alone: per-account path validation runs inside
+		// `proxyWithAccount`, AFTER this gate. A Codex account asked for
+		// /v1/chat/completions is gated by an open bucket but could never have
+		// served the request, so it is not evidence that an overload blocked
+		// anything. Recording it would make the request wait out a cooldown that
+		// cannot help it, turning an honest fast failure into a long hold.
+		//
+		// The codex bucket must trip DURING the loop, not before it: an
+		// already-open bucket is removed by the pre-loop gate, which empties the
+		// pool and routes to the zero-accounts terminal instead — a different
+		// path that never reaches the late gate this test is about.
+		const anthropic = makeAccount({ id: "acc-anthropic", name: "Anthropic" });
+		const codex = makeAccount({
+			id: "acc-codex",
+			name: "Codex",
+			provider: "codex",
+			api_key: null,
+			access_token: "at",
+			refresh_token: "rt",
+			expires_at: Date.now() + 3_600_000,
+		});
+
+		let calls = 0;
+		globalThis.fetch = upstreamOnlyFetch(async () => {
+			calls++;
+			applyProviderOverloadCooldown("codex", Date.now() + 60_000, MODEL);
+			throw new Error("upstream connection reset");
+		}) as never;
+
+		const ctx = makeContext([anthropic, codex]);
+		const started = Date.now();
+		// The honest generic terminal, which THROWS rather than returning a
+		// response — the point is that it is reached at all, and promptly.
+		await expect(
+			callHandleProxy(
+				new Request("https://proxy.local/v1/chat/completions", {
+					method: "POST",
+					headers: { "Content-Type": "application/json" },
+					body: JSON.stringify({
+						model: MODEL,
+						messages: [{ role: "user", content: "hello" }],
+						max_tokens: 16,
+					}),
+				}),
+				new URL("https://proxy.local/v1/chat/completions"),
+				ctx,
+			),
+		).rejects.toThrow(/All accounts failed/);
+
+		// PROMPT — no hold was entered for a bucket that could not have helped.
+		// Only the Anthropic account was attempted; the gated Codex one was
+		// skipped and, correctly, not recorded as overload evidence.
+		expect(Date.now() - started).toBeLessThan(2_000);
+		expect(calls).toBe(1);
 	}, 10_000);
 
 	it("returns an immediate 529 when the cooldown is beyond the hold budget", async () => {

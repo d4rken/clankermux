@@ -47,4 +47,11 @@ export interface UnifiedClaimObservationRow {
 	utilization: number | null;
 	/** Claim reset time, ms since epoch, or null when unknown. */
 	resetAt: number | null;
+	/**
+	 * The claim's `-surpassed-threshold` reading — the utilization level the
+	 * provider says this claim has crossed. Null when absent/unparseable; `0` is
+	 * a reading. Recorded rather than interpreted: it is the only header that
+	 * says anything about where the provider's own warning bands sit.
+	 */
+	surpassedThreshold: number | null;
 }

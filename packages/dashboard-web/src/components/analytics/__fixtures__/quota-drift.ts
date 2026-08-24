@@ -65,7 +65,7 @@ export function unidentifiedPoints(
 	}));
 }
 
-/** A fully measured model: a number, an interval and a `stable` verdict. */
+/** A fully measured model: a number, an interval and a no-change verdict. */
 export function measuredModel(
 	key = "claude-opus-5",
 	capacityMtok = 45,
@@ -82,9 +82,12 @@ export function measuredModel(
 			shareOfWindow: 0.64,
 			identified: true,
 			unidentifiedReasons: [],
+			// Cluster support behind the coefficient: what the interval cannot say.
+			nRuns: 12,
+			nAccounts: 3,
 		},
 		changes: [],
-		verdict: "stable",
+		verdict: "no-change-detected",
 	};
 }
 
@@ -105,7 +108,7 @@ export function unidentifiedModel(key = "claude-haiku-4-5"): QuotaDriftModel {
 		changes: [],
 		// The scan RAN and found nothing — but on a coefficient that is not
 		// identified, so the panel must not report it as "no change detected".
-		verdict: "stable",
+		verdict: "no-change-detected",
 	};
 }
 

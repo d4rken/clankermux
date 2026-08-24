@@ -137,6 +137,41 @@ describe("BunSqlAdapter withBusyRetry", () => {
 		});
 	});
 
+	describe("runTransaction() retries on SQLITE_BUSY", () => {
+		it("re-runs the whole body on a second attempt after one SQLITE_BUSY", async () => {
+			// Multi-statement writes that need atomicity used to call
+			// db.transaction(fn)() on the raw handle, which drops them to the bare
+			// C-level busy_timeout — a token refresh racing the vacuum worker for the
+			// writer slot then fails outright instead of retrying.
+			const sqliteDb = (adapter as unknown as { sqliteDb: Database }).sqliteDb;
+			const restore = stubBusyOnce(sqliteDb, "run");
+			let bodyRuns = 0;
+			try {
+				const changes = await adapter.runTransaction(() => {
+					bodyRuns++;
+					sqliteDb.run("INSERT INTO t (id, val) VALUES (?, ?)", [
+						5,
+						"in-transaction",
+					]);
+					return sqliteDb.run("UPDATE t SET val = ? WHERE id = ?", [
+						"retried",
+						5,
+					]).changes;
+				});
+				expect(changes).toBe(1);
+				// The busy attempt was rolled back in full, so the retry starts from
+				// the same state and the row exists exactly once.
+				expect(bodyRuns).toBe(2);
+				const rows = sqliteDb.query("SELECT val FROM t WHERE id = 5").all() as {
+					val: string;
+				}[];
+				expect(rows).toEqual([{ val: "retried" }]);
+			} finally {
+				restore();
+			}
+		});
+	});
+
 	describe("non-SQLITE_BUSY errors are not retried", () => {
 		it("propagates a non-busy error immediately without retrying", async () => {
 			// Inject an error whose code is NOT SQLITE_BUSY

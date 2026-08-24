@@ -32,9 +32,9 @@ import type { DetectedChange, QuotaSegment, QuotaVerdict } from "./types";
  * `viable: true` means the test RAN — both sides were measured and compared —
  * whatever it concluded. `viable: false` means it could not be evaluated at
  * all. Every return path below is deliberate under that rule, because the two
- * map onto `stable` and `insufficient-evidence`, and reporting "no change
- * detected" about a comparison that never happened is the failure mode this
- * module exists to avoid.
+ * map onto `no-change-detected` and `insufficient-evidence`, and reporting "no
+ * change detected" about a comparison that never happened is the failure mode
+ * this module exists to avoid.
  */
 
 /** Fewest days of segments each side of a boundary must span. */
@@ -89,12 +89,12 @@ export interface ChangepointResult {
 	/** Detected changes, earliest first. */
 	changes: DetectedChange[];
 	/**
-	 * `changed` when at least one change cleared the adjusted level; `stable`
-	 * when the test RAN and found nothing; `insufficient-evidence` when it could
-	 * not run at all.
+	 * `changed` when at least one change cleared the adjusted level;
+	 * `no-change-detected` when the test RAN and found nothing;
+	 * `insufficient-evidence` when it could not run at all.
 	 *
 	 * The last two are not interchangeable. An underpowered scan reporting
-	 * `stable` would claim a negative result it never established.
+	 * `no-change-detected` would claim a negative result it never established.
 	 */
 	verdict: QuotaVerdict;
 	/** Candidate boundaries scanned at the top level (0 when none were viable). */
@@ -123,7 +123,7 @@ export function detectChanges(
 	if (top.change === null) {
 		return {
 			changes: [],
-			verdict: top.viable ? "stable" : "insufficient-evidence",
+			verdict: top.viable ? "no-change-detected" : "insufficient-evidence",
 			nCandidates: top.nCandidates,
 		};
 	}
@@ -153,7 +153,7 @@ interface ScanOutcome {
 	 * Whether the comparison was actually EVALUATED: a boundary was selected,
 	 * both restricted sides identified the key, and the difference bootstrap
 	 * produced usable draws. False on every path where the scan could not get
-	 * that far — those must never surface as `stable`.
+	 * that far — those must never surface as `no-change-detected`.
 	 *
 	 * A no-change outcome additionally requires the candidate grid to be
 	 * CONNECTED: an internal hole leaves a stretch of history no comparison could
@@ -286,7 +286,7 @@ function scanOnce(
 	}
 	if (scorable === 0 || best === null) {
 		// No candidate yielded a comparable coefficient on both sides, so nothing
-		// was ever compared. NOT `stable`.
+		// was ever compared. NOT `no-change-detected`.
 		return { change: null, viable: false, nCandidates: candidates.length };
 	}
 	const bestT = best.t;
@@ -319,7 +319,7 @@ function scanOnce(
 	const relativeChange = (after - before) / before;
 	if (Math.abs(relativeChange) < minRelative) {
 		// A completed test: both sides measured, the move is too small to report.
-		// Only reportable as `stable` if the scan's coverage was connected — a
+		// Only reportable as `no-change-detected` if the coverage was connected — a
 		// finding of nothing across a hole is a finding about a comparison that
 		// could not be made.
 		return {
@@ -381,7 +381,7 @@ function scanOnce(
 	const hi = difference + halfWidth;
 	const excludesZero = lo > 0 || hi < 0;
 	if (!excludesZero) {
-		// Measured and not significant — `stable` only where the coverage was
+		// Measured and not significant — `no-change-detected` only where coverage was
 		// connected, for the same reason as above.
 		return {
 			change: null,

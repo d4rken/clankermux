@@ -218,6 +218,13 @@ interface SaveRequestData {
 	reasoningEffort?: string | null;
 	contextComposition?: ContextComposition | null;
 	requestedModel?: string | null;
+	/**
+	 * Ms epoch at which a persistable token vector first became known for this
+	 * request. Mirrors `RequestData.usageFinalizedAt`: the repository COALESCEs
+	 * the STORED value first in both the upsert and the late-patch UPDATE, so the
+	 * earliest stamp survives. Null/absent = no usable usage ever arrived.
+	 */
+	usageFinalizedAt?: number | null;
 }
 
 /** Fails to compile unless `T` is exactly `true`. */
@@ -245,7 +252,11 @@ interface DbOpsLike {
 	 * main-thread payload write for the recorder to call.
 	 */
 	encryptPayloadForStorage(json: string): Promise<string>;
-	updateRequestUsage(requestId: string, usage: unknown): Promise<void>;
+	updateRequestUsage(
+		requestId: string,
+		usage: unknown,
+		usageFinalizedAt?: number | null,
+	): Promise<void>;
 	pauseAccount(accountId: string, reason: string): Promise<void>;
 	updateAccountUsage(accountId: string): Promise<void>;
 }
@@ -335,6 +346,13 @@ interface InternalRecord {
 	/** Enriched error string computed at persist time; reused by a late patch re-emit. */
 	errorMessage: string | null;
 	usage: SlimUsageSummary | null;
+	/**
+	 * When the FIRST summary yielding a persistable usage vector arrived, from
+	 * the recorder's injected clock. Null until then — including for a summary
+	 * that carried no model, which `toRequestUsage` drops entirely and which
+	 * therefore never made a token vector known.
+	 */
+	usageFinalizedAt: number | null;
 	usageWaived: boolean;
 	bodyDiscarded: boolean;
 	persisted: boolean;
@@ -483,6 +501,7 @@ export class RequestRecorder {
 			transport: null,
 			errorMessage: null,
 			usage: null,
+			usageFinalizedAt: null,
 			usageWaived: false,
 			bodyDiscarded,
 			persisted: false,
@@ -560,6 +579,17 @@ export class RequestRecorder {
 	attachUsageSummary(requestId: string, summary: SlimUsageSummary): void {
 		const record = this.records.get(requestId);
 		if (!record) return;
+		// Stamp the moment a PERSISTABLE token vector became known — which is not
+		// the same as "a summary arrived". `toRequestUsage` drops a model-less
+		// summary whole, so such a summary never made a token vector known and
+		// must not stamp. First qualifying summary only: the column records when
+		// usage first existed, so a re-attach cannot move it forward.
+		if (
+			record.usageFinalizedAt === null &&
+			this.toRequestUsage(summary) !== undefined
+		) {
+			record.usageFinalizedAt = this.now();
+		}
 		if (record.persisted) {
 			this.patchUsage(record, summary);
 			return;
@@ -676,6 +706,8 @@ export class RequestRecorder {
 			transport: { outcome },
 			errorMessage: error,
 			usage: null,
+			// A synthetic terminal has no provider usage at all — never a stamp.
+			usageFinalizedAt: null,
 			usageWaived: true,
 			bodyDiscarded: !storePayloads,
 			persisted: true,
@@ -883,6 +915,7 @@ export class RequestRecorder {
 					reasoningEffort: meta.reasoningEffort ?? null,
 					contextComposition: meta.contextComposition ?? null,
 					requestedModel: meta.requestedModel ?? null,
+					usageFinalizedAt: record.usageFinalizedAt,
 				});
 				requestRowSaved = true;
 			} catch (error) {
@@ -971,9 +1004,17 @@ export class RequestRecorder {
 
 	private patchUsage(record: InternalRecord, summary: SlimUsageSummary): void {
 		const usage = this.toRequestUsage(summary);
+		// The stamp rides along with the late patch — the row was persisted before
+		// usage existed, so its column is still NULL. The repository COALESCEs the
+		// stored value first, so this can only ever fill it in, never move it.
+		const usageFinalizedAt = record.usageFinalizedAt;
 		this.asyncWriter.enqueue(async () => {
 			try {
-				await this.dbOps.updateRequestUsage(record.meta.requestId, usage);
+				await this.dbOps.updateRequestUsage(
+					record.meta.requestId,
+					usage,
+					usageFinalizedAt,
+				);
 			} catch (error) {
 				log.error(`Failed to patch usage for ${record.meta.requestId}:`, error);
 			}
