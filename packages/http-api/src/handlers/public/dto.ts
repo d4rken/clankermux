@@ -524,7 +524,16 @@ function toPublicWindowDto(window: PublicWindowSnapshot): PublicWindowDto {
 export interface PublicAvailabilityDto {
 	state: PublicAvailabilityState;
 	reason: PublicAvailabilityReason | null;
-	/** INSTANT the current block lifts; null when nothing schedules it. */
+	/**
+	 * INSTANT the block named by `state` lifts, and null whenever `state` is
+	 * `available` — an account nothing is holding has no future moment at which
+	 * it becomes available, so any instant beside that state is a different fact
+	 * wearing this field's name.
+	 *
+	 * Null on a gated state too whenever nothing schedules the lift: a pause ends
+	 * when an operator says so, and a spent window whose reset the provider never
+	 * reported has no known turnover.
+	 */
 	availableAt: string | null;
 }
 
@@ -566,6 +575,9 @@ export interface PublicAccountDto {
 export function toPublicAccountDto(
 	account: PublicAccountSnapshot,
 ): PublicAccountDto {
+	// Computed ONCE and used for both fields below: the state decides whether an
+	// instant is emitted at all, so deriving it twice would let the two disagree.
+	const state = toPublicAvailabilityState(account.cause, account.paused);
 	return {
 		id: identifier(account.id),
 		name: truncateUtf8(account.name),
@@ -576,13 +588,25 @@ export function toPublicAccountDto(
 		provider: identifier(account.provider),
 		isDefaultCandidate: account.isDefaultCandidate,
 		availability: {
-			state: toPublicAvailabilityState(account.cause, account.paused),
+			state,
 			reason: toPublicAvailabilityReason(
 				account.cause,
 				account.paused,
 				account.pauseReason,
 			),
-			availableAt: instant(account.availableAtMs),
+			// Only where something is actually holding the account. The snapshot's
+			// instant is the resolved rate-limit reset, which a NON-limiting cause
+			// still carries — a soft provider status is published beside the stored
+			// window reset — and that reset is a quota fact about a window binding
+			// nothing. Emitting it beside `available` is what made a healthy account
+			// render as "available at 03:00 tomorrow".
+			//
+			// The test is the STATE, not the cause: this is the one place the public
+			// availability vocabulary is decided, and a second cause-to-state rule
+			// upstream would be free to disagree with it (it does not, for instance,
+			// read `queueing_soft` as available).
+			availableAt:
+				state === "available" ? null : instant(account.availableAtMs),
 		},
 		credential: {
 			state: toPublicCredentialState(account.credentialState),

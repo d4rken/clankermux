@@ -10,7 +10,7 @@
  * unauthenticated surface — that no field arrives here that was not named.
  */
 import { describe, expect, it } from "bun:test";
-import type { RequestResponse } from "@clankermux/types";
+import type { RateLimitCause, RequestResponse } from "@clankermux/types";
 import type { PublicRunwaySnapshot } from "../../../services/public-runway";
 import type {
 	PublicAccountSnapshot,
@@ -741,6 +741,73 @@ describe("availability is a closed set with an escape hatch", () => {
 		for (const [cause] of mapping) {
 			expect(toPublicAvailabilityState(cause, true)).toBe("paused");
 		}
+	});
+});
+
+describe("availableAt belongs to a state that is NOT available", () => {
+	/** The availability object the DTO builds for one snapshot account. */
+	const availabilityOf = (over: Partial<PublicAccountSnapshot>) =>
+		toPublicAccountDto(account(over)).availability;
+
+	// Every cause the state mapping calls `available`. The snapshot still carries
+	// an instant for these: `resolveRateLimitPresentation` surfaces the stored
+	// provider reset beside a soft status, and that reset is a QUOTA fact, not a
+	// block.
+	for (const cause of ["ok", "allowed", "allowed_warning", "queueing_soft"]) {
+		it(`emits no lift instant beside an available account (${cause})`, () => {
+			// An available account has no future instant at which it becomes
+			// available. The deployed shape published one anyway — a healthy
+			// account read as "available at 03:00 tomorrow", a day away from a
+			// window that was not binding anything.
+			const availability = availabilityOf({
+				cause: cause as RateLimitCause,
+				availableAtMs: 1_700_000_000_000,
+			});
+			expect(availability.state).toBe("available");
+			expect(availability.availableAt).toBeNull();
+		});
+	}
+
+	it("emits the instant a rate-limited account's block lifts", () => {
+		const availability = availabilityOf({
+			cause: "rate_limited",
+			availableAtMs: 1_700_000_000_000,
+		});
+		expect(availability.state).toBe("rate_limited");
+		expect(availability.availableAt).toBe("2023-11-14T22:13:20.000Z");
+	});
+
+	it("emits the instant a spent window resets", () => {
+		const availability = availabilityOf({
+			cause: "usage_exhausted",
+			availableAtMs: 1_700_000_000_000,
+		});
+		expect(availability.state).toBe("usage_exhausted");
+		expect(availability.availableAt).toBe("2023-11-14T22:13:20.000Z");
+	});
+
+	it("emits no instant for a pause, which no clock lifts", () => {
+		// The snapshot already refuses to promise one; the state axis agrees
+		// rather than reintroducing it.
+		const availability = availabilityOf({
+			paused: true,
+			pauseReason: "manual",
+			cause: "rate_limited",
+			availableAtMs: null,
+		});
+		expect(availability.state).toBe("paused");
+		expect(availability.availableAt).toBeNull();
+	});
+
+	it("keeps the instant beside a state the vocabulary has never seen", () => {
+		// `other` is not "fine": we cannot tell that the account is usable, so
+		// whatever recovery instant we have is still the honest answer.
+		const availability = availabilityOf({
+			cause: "unknown",
+			availableAtMs: 1_700_000_000_000,
+		});
+		expect(availability.state).toBe("other");
+		expect(availability.availableAt).toBe("2023-11-14T22:13:20.000Z");
 	});
 });
 

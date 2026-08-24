@@ -135,7 +135,18 @@ export interface PublicAccountSnapshot {
 	pauseReason: string | null;
 	/** The resolved rate-limit cause, before it is mapped to the public enum. */
 	cause: RateLimitCause;
-	/** When the current block is scheduled to lift; null when nothing does. */
+	/**
+	 * When the LAST gate currently holding this account lifts: the later of the
+	 * resolved rate-limit reset and the proxy's own cooldown lock, because an
+	 * account held by both is not routable until the later of the two passes.
+	 * Null when nothing schedules a lift — a pause has no clock.
+	 *
+	 * A NON-limiting `cause` still resolves an instant here (a soft provider
+	 * status is presented beside the stored window reset), and that instant is a
+	 * quota fact rather than a block. Whether it is PUBLISHED is decided beside
+	 * the availability STATE, in the DTO layer that owns that vocabulary: a
+	 * second cause-to-state rule here would be free to disagree with it.
+	 */
 	availableAtMs: number | null;
 	credentialState: PublicCredentialState;
 	/** The ACCESS token's expiry — the instant `credentialState` turns over. */
@@ -752,6 +763,14 @@ export function createPublicSnapshotReader(
 				accountWideExhausted,
 			);
 
+			// The proxy's OWN cooldown lock, while it is still holding. A gate in its
+			// own right: the presentation resolves the CAUSE, and the cause it picks
+			// may be counting down on a different clock entirely.
+			const cooldownLockMs =
+				row.rate_limited_until != null && Number(row.rate_limited_until) > now
+					? Number(row.rate_limited_until)
+					: null;
+
 			const windows = buildWindows(
 				provider,
 				metered ? usage : null,
@@ -776,7 +795,18 @@ export function createPublicSnapshotReader(
 				// A pause has no scheduled end — it lifts when an operator or an
 				// auto-unpause rule says so, not on a clock — so reporting the stored
 				// rate-limit reset here would promise a recovery that will not happen.
-				availableAtMs: row.paused === 1 ? null : presentation.resetMs,
+				//
+				// Otherwise the LAST gate to lift, never the first. The presentation
+				// folds the cooldown lock into its countdown for a spent window but not
+				// for every cause: a provider reset an hour out beside a proxy lock two
+				// hours out resolves to the reset, and an account held by both is
+				// unavailable until the later one passes. Same max-within-account rule
+				// `earliestExclusionRecoveryMs` applies to the routing gates before it
+				// takes its minimum ACROSS accounts.
+				availableAtMs:
+					row.paused === 1
+						? null
+						: maxOfPresent([presentation.resetMs, cooldownLockMs]),
 				credentialState: credential.state,
 				credentialExpiresAtMs: credential.expiresAtMs,
 				measurementState,

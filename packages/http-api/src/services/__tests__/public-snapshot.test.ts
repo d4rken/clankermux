@@ -35,6 +35,7 @@ import type {
 	AnthropicUsageData,
 	LoadBalancingStrategy,
 } from "@clankermux/types";
+import { toPublicAccountsDto } from "../../handlers/public/dto";
 import {
 	clampPct,
 	createPublicSnapshotReader,
@@ -474,6 +475,41 @@ describe("availability and credential are orthogonal axes", () => {
 		const account = (await read()).accounts[0];
 		expect(account?.cause).toBe("rate_limited");
 		expect(account?.availableAtMs).toBe(NOW + 60_000);
+	});
+
+	it("publishes the LAST gate to lift when two hold one account", async () => {
+		// The provider's own reset and the proxy's cooldown lock are two gates on
+		// one account, and it is routable again only once the LATER of them
+		// passes. Publishing the earlier promises a recovery that does not
+		// happen. Same max-within-account rule `earliestExclusionRecoveryMs`
+		// applies to the routing gates before it takes its minimum ACROSS
+		// accounts.
+		insertAccount({
+			rate_limit_status: "rate_limited",
+			rate_limit_reset: NOW + 3_600_000,
+			rate_limited_until: NOW + 7_200_000,
+		});
+		usageCache.set("acct-1", anthropicUsage(10, 10));
+		const account = (await read()).accounts[0];
+		expect(account?.cause).toBe("rate_limited");
+		expect(account?.availableAtMs).toBe(NOW + 7_200_000);
+	});
+
+	it("publishes no lift instant on the wire for an account nothing holds", async () => {
+		// The deployed defect end to end: a healthy account carrying a stored
+		// provider reset published `availableAt` a day out beside
+		// `state: "available"`. The reset is a quota fact — the window it names
+		// is not binding anything — so the availability axis must say nothing.
+		insertAccount({
+			rate_limit_status: "allowed",
+			rate_limit_reset: NOW + 86_400_000,
+		});
+		usageCache.set("acct-1", anthropicUsage(10, 20));
+		const snapshot = await read();
+		expect(snapshot.accounts[0]?.cause).toBe("allowed");
+		const wire = toPublicAccountsDto(snapshot).accounts[0];
+		expect(wire?.availability.state).toBe("available");
+		expect(wire?.availability.availableAt).toBeNull();
 	});
 
 	it("keeps an administrative block distinct from a spent quota", async () => {
