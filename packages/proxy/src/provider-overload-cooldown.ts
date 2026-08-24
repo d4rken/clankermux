@@ -90,13 +90,13 @@ export interface OverloadProbeToken {
 	/**
 	 * Admission-level identity, stable across every lease of this probe.
 	 *
-	 * Lives on the TOKEN, not the bucket, and so does {@link acquiredAt}. Both
-	 * re-trip paths call {@link applyProviderOverloadCooldown} BEFORE settling,
-	 * which mints a new bucket generation and clears `bucket.probe` — so by the
-	 * time a "reopened" completion arrives, every per-lease guard below fails
-	 * and the bucket can no longer say who the probe was or when it started.
-	 * Reading identity from the bucket would silently emit nothing for the most
-	 * interesting outcome.
+	 * Carried on the TOKEN — alongside {@link acquiredAt} — because the token is
+	 * the only copy that SURVIVES a re-trip. Both re-trip paths call
+	 * {@link applyProviderOverloadCooldown} BEFORE settling, which mints a new
+	 * bucket generation and clears `bucket.probe`, so by the time a "reopened"
+	 * completion arrives the bucket can no longer say who the probe was or when
+	 * it started. (The id is ALSO mirrored onto `bucket.probe`, for the separate
+	 * job of letting a TTL takeover name whoever it displaced.)
 	 */
 	readonly probeId: string;
 	/** Admission timestamp, for the settle line's duration. */
@@ -105,8 +105,9 @@ export interface OverloadProbeToken {
 }
 
 /**
- * Why a probe settled the way it did. Free-form by design (call sites know
- * their own evidence); these are the ones in use today.
+ * Why a probe settled the way it did. A closed union: every settle site names
+ * its own evidence, and adding a new settle path should mean adding a case
+ * here rather than passing a bare string.
  */
 export type OverloadProbeEvidence =
 	| "message_start"
@@ -326,16 +327,18 @@ export function applyProviderOverloadCooldown(
 	// A half-open bucket's stale past deadline loses the max() naturally.
 	const effectiveUntil = bucket ? Math.max(bucket.until, until) : until;
 
-	// Distinguish a first trip from a re-trip, and a re-trip that actually
-	// pushed the deadline out from one whose older deadline won the max() —
-	// three states that used to render as one identical line.
+	// Distinguish a first trip, a re-trip of a breaker that had already lapsed
+	// to half-open, a re-trip that actually pushed an open breaker's deadline
+	// out, and one whose older deadline won the max() — four states that used to
+	// render as one identical line.
 	const transition = !bucket
 		? "opened"
 		: bucket.until <= now
-			? // The breaker had already lapsed to half-open, so this is a recovery
-				// attempt failing rather than an ongoing storm pushing the deadline
-				// out. Both move the deadline forward; only this one means "a probe
-				// went out and came back bad".
+			? // A pure STATE label: the breaker had already lapsed to half-open when
+				// this trip landed. Do NOT read it as "the probe failed" — a request
+				// admitted while the bucket was CLOSED can stay in flight past a whole
+				// cooldown cycle (30-minute request timeout vs ~60s cooldowns) and
+				// 529 with no probe token at all, landing here too.
 				"re-tripped(from half-open)"
 			: effectiveUntil > bucket.until
 				? "re-tripped(extended)"
@@ -538,12 +541,19 @@ export function completeProviderOverloadProbe(
 	// superseded every lease — see OverloadProbeToken.probeId.
 	const durationMs = Date.now() - token.acquiredAt;
 	const applied: string[] = [];
+	const superseded: string[] = [];
 
 	for (const lease of token.leases) {
 		const bucket = buckets.get(lease.key);
-		if (!bucket) continue;
-		if (bucket.generation !== lease.generation) continue;
-		if (!bucket.probe || bucket.probe.leaseId !== lease.leaseId) continue;
+		if (
+			!bucket ||
+			bucket.generation !== lease.generation ||
+			!bucket.probe ||
+			bucket.probe.leaseId !== lease.leaseId
+		) {
+			superseded.push(lease.key);
+			continue;
+		}
 
 		applied.push(lease.key);
 		if (outcome === "recovered") {
@@ -555,12 +565,19 @@ export function completeProviderOverloadProbe(
 
 	const detail =
 		`after ${durationMs}ms` + `${evidence ? ` (evidence=${evidence})` : ""}`;
+	// A composite probe (family + provider-wide) is routinely PARTIALLY
+	// superseded: a 529 re-trips only the family bucket, so the family lease is
+	// gone while the provider-wide one still applies. Naming only the applied
+	// keys would drop the very bucket that re-tripped from the settle line,
+	// while admission had named both — so report both sides.
+	const supersededNote =
+		superseded.length > 0 ? ` (superseded: ${superseded.join(", ")})` : "";
 	if (applied.length > 0) {
 		// THE line this whole lifecycle exists for: how long the elected probe
 		// held the bucket, and what decided it. A long duration here with many
 		// holders polling is the convoy signature.
 		log.info(
-			`Overload probe ${token.probeId} settled ${outcome} for ${applied.join(", ")} ${detail}`,
+			`Overload probe ${token.probeId} settled ${outcome} for ${applied.join(", ")} ${detail}${supersededNote}`,
 		);
 		return;
 	}

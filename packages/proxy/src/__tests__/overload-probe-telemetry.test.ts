@@ -14,6 +14,7 @@ import {
 	applyProviderOverloadCooldown,
 	clearProviderOverloadCooldown,
 	completeProviderOverloadProbe,
+	type ProbeAdmission,
 	tryAcquireProviderOverloadProbe,
 } from "../provider-overload-cooldown";
 
@@ -196,6 +197,48 @@ describe("overload breaker telemetry", () => {
 		);
 	});
 
+	it("names both the applied and the superseded bucket on a composite probe", async () => {
+		// A probe that leased BOTH the family bucket and the provider-wide one is
+		// routinely PARTIALLY superseded: a 529 re-trips only the family bucket,
+		// so that lease is gone while the provider-wide lease still applies.
+		// Reporting only the applied keys would drop the bucket that actually
+		// re-tripped, even though admission had named both.
+		applyProviderOverloadCooldown(
+			"anthropic",
+			Date.now() + 5,
+			"claude-opus-4-5",
+		);
+		applyProviderOverloadCooldown("anthropic", Date.now() + 5);
+		await new Promise((r) => setTimeout(r, 15));
+
+		const admission = tryAcquireProviderOverloadProbe(
+			"anthropic",
+			"claude-opus-4-5",
+		);
+		const token = admission.admitted ? admission.token : null;
+		expect(token?.leases.length).toBe(2);
+
+		// Re-trip the FAMILY bucket only — exactly what a family-attributed 529
+		// does — leaving the provider-wide lease intact.
+		applyProviderOverloadCooldown(
+			"anthropic",
+			Date.now() + 60_000,
+			"claude-opus-4-5",
+		);
+
+		const cap = captureLogs("info");
+		try {
+			completeProviderOverloadProbe(token, "reopened", "http_529");
+		} finally {
+			cap.restore();
+		}
+		const line = cap.lines.find((l) => l.includes("settled reopened"));
+		expect(line).toBeDefined();
+		expect(line).toContain("anthropic-upstream:opus");
+		expect(line).toContain("anthropic-upstream");
+		expect(line).toContain("superseded:");
+	});
+
 	it("distinguishes a re-trip from half-open from an ongoing storm", async () => {
 		// Both push the deadline forward, so a naive "did the deadline move?"
 		// check calls them both extended. They mean different things: one is a
@@ -229,14 +272,25 @@ describe("overload breaker telemetry", () => {
 		// is the only silently-orphaned lifecycle left.
 		const wayLater = Date.now() + 2 * 60 * 60_000;
 		const cap = captureLogs("warn");
+		let replacement: ProbeAdmission | null = null;
 		try {
-			tryAcquireProviderOverloadProbe("anthropic", "claude-opus-4-5", wayLater);
+			replacement = tryAcquireProviderOverloadProbe(
+				"anthropic",
+				"claude-opus-4-5",
+				wayLater,
+			);
 		} finally {
 			cap.restore();
 		}
+		expect(replacement?.admitted).toBe(true);
+		const replacementToken = replacement?.admitted ? replacement.token : null;
+		expect(replacementToken).not.toBeNull();
+
 		const line = cap.lines.find((l) => l.includes("lease expired"));
 		expect(line).toBeDefined();
+		// BOTH identities, or the line cannot be used to follow a handover.
 		expect(line).toContain(firstToken?.probeId as string);
+		expect(line).toContain(replacementToken?.probeId as string);
 		expect(line).toContain("admitting replacement");
 	});
 
