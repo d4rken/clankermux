@@ -730,8 +730,10 @@ export class CodexProvider extends BaseProvider {
 
 			const requestId = request.headers.get("x-clankermux-request-id");
 			if (requestId) {
-				// Client stream intent is always true in native mode (guarded
-				// upstream in proxy-operations before choosing the native body).
+				// `stream: true` records the UPSTREAM transport, which native mode
+				// forces above regardless of what the client asked for. A client that
+				// wanted one JSON document gets it from the adapter, which reduces
+				// this SSE itself; nothing on this leg differs for it.
 				this.requestStreamById.set(requestId, {
 					stream: true,
 					native: true,

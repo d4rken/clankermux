@@ -249,11 +249,12 @@ export async function handleResponsesRequest(
 	});
 	// Native Responses passthrough (Stage A): carry the original (normalized)
 	// Responses body alongside the translated request. When the proxy selects a
-	// codex account for a streaming client, it forwards this body verbatim
-	// instead of double-translating — handleProxy re-keys it onto RequestMeta.
+	// codex account it forwards this body verbatim instead of double-translating
+	// — handleProxy re-keys it onto RequestMeta. The client's own stream intent
+	// is not part of that decision (see step 8): the upstream leg is SSE either
+	// way, so it stays a property of `body` here in the adapter.
 	setNativeResponsesRequestContext(syntheticReq, {
 		nativeBody: JSON.stringify(body),
-		clientStream: body.stream === true,
 		// Captured from the ORIGINAL body before translation; the real effort
 		// vocabulary is wider than the narrow type in types.ts, so treat it as an
 		// arbitrary string.

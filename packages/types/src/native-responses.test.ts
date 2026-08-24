@@ -20,7 +20,6 @@ function makeMeta(): RequestMeta {
 function makeContext(): NativeResponsesContext {
 	return {
 		nativeBody: JSON.stringify({ model: "gpt-5.5-codex", input: "hi" }),
-		clientStream: true,
 	};
 }
 

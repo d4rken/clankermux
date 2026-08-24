@@ -643,13 +643,12 @@ describe("handleResponsesRequest", () => {
 			);
 		}
 
-		test("attaches the original body with clientStream:true for stream:true", async () => {
+		test("attaches the original body for stream:true", async () => {
 			const ctx = await captureContext({
 				stream: true,
 				tools: [{ type: "web_search" }],
 			});
 			expect(ctx).toBeDefined();
-			expect(ctx?.clientStream).toBe(true);
 			const native = JSON.parse(ctx?.nativeBody ?? "{}");
 			expect(native.model).toBe("gpt-5.5-codex");
 			expect(native.tools).toEqual([{ type: "web_search" }]);
@@ -662,16 +661,19 @@ describe("handleResponsesRequest", () => {
 			]);
 		});
 
-		test("clientStream:false for stream:false", async () => {
-			const ctx = await captureContext({ stream: false });
-			expect(ctx).toBeDefined();
-			expect(ctx?.clientStream).toBe(false);
-		});
-
-		test("clientStream:false when stream is absent", async () => {
-			const ctx = await captureContext({});
-			expect(ctx).toBeDefined();
-			expect(ctx?.clientStream).toBe(false);
+		test("attaches the original body for stream:false and for an absent stream", async () => {
+			// A non-streaming client is native-eligible too, and its own `stream`
+			// value rides along inside nativeBody — the context carries no separate
+			// copy of the client's intent.
+			for (const overrides of [{ stream: false }, {}]) {
+				const ctx = await captureContext(overrides);
+				expect(ctx).toBeDefined();
+				const native = JSON.parse(ctx?.nativeBody ?? "{}");
+				expect(native.model).toBe("gpt-5.5-codex");
+				expect(native.stream).toBe(
+					(overrides as { stream?: boolean }).stream ?? undefined,
+				);
+			}
 		});
 
 		test("carries the original reasoning.effort string", async () => {

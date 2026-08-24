@@ -16,11 +16,12 @@ mock.module("../inline-worker", () => ({ EMBEDDED_WORKER_CODE: "" }));
  * Stage A native Responses passthrough — per-attempt branch in
  * proxyWithAccount (driven end-to-end through handleProxy so the
  * Request→RequestMeta re-keying in proxy.ts is covered too):
- * - codex account + native context + clientStream:true → upstream fetch
- *   receives the ORIGINAL Responses body (model override / built-in tools
- *   intact) and the response comes back as raw Codex SSE with the marker.
+ * - codex account + native context → upstream fetch receives the ORIGINAL
+ *   Responses body (model override / built-in tools intact) and the response
+ *   comes back as raw Codex SSE with the marker. This holds whatever the client
+ *   asked for: the upstream transport is SSE either way, and the adapter
+ *   reduces it to one JSON document for a non-streaming client.
  * - non-codex account (same request) → receives the TRANSLATED body.
- * - clientStream:false → translated even on a codex account.
  */
 
 async function callHandleProxy(req: Request, url: URL, ctx: ProxyContext) {
@@ -171,7 +172,6 @@ function makeNativeContext(
 ): NativeResponsesContext {
 	return {
 		nativeBody: JSON.stringify(NATIVE_RESPONSES_BODY),
-		clientStream: true,
 		...overrides,
 	};
 }
@@ -242,7 +242,7 @@ describe("native Responses passthrough (Stage A, request leg)", () => {
 		globalThis.fetch = originalFetch;
 	});
 
-	it("codex account + clientStream:true → upstream receives the NATIVE body, response is raw marked SSE", async () => {
+	it("codex account → upstream receives the NATIVE body, response is raw marked SSE", async () => {
 		const codex = makeCodexAccount();
 		let capturedBody: string | null = null;
 		let capturedNativeHeader: string | null = null;
@@ -339,39 +339,105 @@ describe("native Responses passthrough (Stage A, request leg)", () => {
 		expect(res.headers.get(NATIVE_RESPONSES_RESPONSE_HEADER)).toBeNull();
 	});
 
-	it("clientStream:false → translated body even on a codex account", async () => {
+	it("non-streaming client on a codex account → still the NATIVE body, forced to stream upstream", async () => {
 		const codex = makeCodexAccount();
 		let capturedBody: string | null = null;
-		let capturedNativeHeader: string | null = null;
 
 		globalThis.fetch = mock(
 			async (input: RequestInfo | URL, init?: RequestInit) => {
 				if (!isProxyCall(input)) return originalFetch(input as never, init);
-				const upstreamReq = input as Request;
-				capturedBody = await upstreamReq.clone().text();
-				capturedNativeHeader = upstreamReq.headers.get(
-					NATIVE_RESPONSES_REQUEST_HEADER,
-				);
+				capturedBody = await (input as Request).clone().text();
 				return codexSseResponse();
 			},
 		) as never;
 
 		const ctx = makeContext([codex]);
 		const req = makeTranslatedRequest(
-			makeNativeContext({ clientStream: false }),
+			makeNativeContext({
+				nativeBody: JSON.stringify({
+					...NATIVE_RESPONSES_BODY,
+					stream: false,
+				}),
+			}),
 		);
 		const res = await callHandleProxy(req, new URL(req.url), ctx);
 
 		expect(res.status).toBe(200);
 		expect(capturedBody).not.toBeNull();
 		const upstreamBody = JSON.parse(capturedBody ?? "{}");
-		// Translated path: Anthropic→Codex conversion ran (input items, no
-		// built-in web_search tool, model mapped by family default).
-		expect(JSON.stringify(upstreamBody)).toContain("translated marker hello");
-		expect(JSON.stringify(upstreamBody)).not.toContain("native marker hello");
-		expect(JSON.stringify(upstreamBody)).not.toContain("web_search");
-		expect(Array.isArray(upstreamBody.input)).toBe(true);
-		expect(capturedNativeHeader).toBeNull();
+		// The client's `stream: false` does not cost it the native path: the
+		// double translation is skipped exactly as for a streaming client, and the
+		// provider forces the SSE transport the backend serves reliably. The
+		// adapter turns that SSE back into one JSON document.
+		expect(JSON.stringify(upstreamBody)).toContain("native marker hello");
+		expect(JSON.stringify(upstreamBody)).not.toContain(
+			"translated marker hello",
+		);
+		expect(upstreamBody.tools).toEqual([{ type: "web_search" }]);
+		expect(upstreamBody.stream).toBe(true);
+		expect(upstreamBody.store).toBe(false);
+		expect(res.headers.get(NATIVE_RESPONSES_RESPONSE_HEADER)).toBe("1");
+	});
+
+	it("non-streaming client: failover to a non-codex sibling still uses the TRANSLATED body", async () => {
+		const codex = makeCodexAccount({ priority: 0 });
+		const generic = makeAccount({
+			id: "generic-3",
+			name: "Generic3",
+			provider: "test-provider" as Account["provider"],
+			api_key: "test-key",
+			refresh_token: "",
+			access_token: null,
+			expires_at: null,
+			priority: 1,
+		});
+		const bodiesByTarget: Record<string, string> = {};
+
+		globalThis.fetch = mock(
+			async (input: RequestInfo | URL, init?: RequestInit) => {
+				if (!isProxyCall(input)) return originalFetch(input as never, init);
+				const upstreamReq = input as Request;
+				const text = await upstreamReq.clone().text();
+				if (upstreamReq.url.includes("chatgpt.com")) {
+					bodiesByTarget.codex = text;
+					return new Response(JSON.stringify({ error: "unauthorized" }), {
+						status: 401,
+						headers: { "content-type": "application/json" },
+					});
+				}
+				bodiesByTarget.generic = text;
+				return new Response(
+					JSON.stringify({
+						id: "msg_1",
+						type: "message",
+						role: "assistant",
+						content: [{ type: "text", text: "hi" }],
+						model: "claude-sonnet-4-5",
+						stop_reason: "end_turn",
+						usage: { input_tokens: 1, output_tokens: 1 },
+					}),
+					{ status: 200, headers: { "content-type": "application/json" } },
+				);
+			},
+		) as never;
+
+		const ctx = makeContext([codex, generic]);
+		const req = makeTranslatedRequest(
+			makeNativeContext({
+				nativeBody: JSON.stringify({
+					...NATIVE_RESPONSES_BODY,
+					stream: false,
+				}),
+			}),
+		);
+		const res = await callHandleProxy(req, new URL(req.url), ctx);
+
+		expect(res.status).toBe(200);
+		// The native body is a per-attempt choice; the translated Anthropic buffer
+		// is still intact for an account that cannot speak Responses.
+		expect(bodiesByTarget.codex).toContain("native marker hello");
+		expect(bodiesByTarget.generic).toContain("translated marker hello");
+		expect(bodiesByTarget.generic).not.toContain("native marker hello");
 		expect(res.headers.get(NATIVE_RESPONSES_RESPONSE_HEADER)).toBeNull();
 	});
 

@@ -672,6 +672,14 @@ async function forwardToClientInner(
 
 	const responseHeadersObj = Object.fromEntries(response.headers.entries());
 
+	// `requests.is_stream` means the UPSTREAM TRANSPORT, not what the client
+	// asked for. A native Responses request with `"stream": false` records
+	// is_stream = true: the Codex leg really was SSE, and the adapter reduced it
+	// to one JSON document after this row was begun. Recording client intent
+	// instead would break every consumer that reads this column to reason about
+	// the upstream (usage collection, truncation checks); the client's own answer
+	// stays recoverable from the stored request payload's `"stream"` field, which
+	// is why this stayed one column rather than becoming two.
 	const isStream = ctx.provider.isStreamingResponse?.(response) ?? false;
 	const shouldStorePayloads = ctx.config.getStorePayloads?.() ?? true;
 
