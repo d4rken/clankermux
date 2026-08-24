@@ -93,10 +93,13 @@ export const PIN_HOLD_MAX_MS = 120_000;
 // in flight, so recovery (or a re-trip) is expected within seconds — not a
 // full cooldown window. Used when the admission refusal carried no deadline.
 const OVERLOAD_PROBE_SUPPRESSED_RETRY_AFTER_MS = 5_000;
-// The overload-hold budget (OVERLOAD_HOLD_MAX_MS, 120s — matching every other
-// bound on holding a live client connection) and the per-bucket holder cap
-// both live in overload-hold.ts; the hold reads the budget via
-// getOverloadHoldBudgetMs().
+// The overload-hold budget and the per-bucket holder cap both live in
+// overload-hold.ts; the hold reads the budget via getOverloadHoldBudgetMs(),
+// which is path-aware — 330s normally, and the shorter no-re-arm budget for
+// connections whose Bun idle timer we cannot refresh. Unlike the other holds
+// here it is deliberately NOT pinned to the shared 120s value: the others
+// wait out a per-account cooldown, this one waits out a provider incident
+// that can re-trip several times before it settles.
 // Short-poll interval (ms) while a half-open probe is in flight: holders must
 // not sleep past a probe completion, so they re-check (and re-attempt — the
 // admission chokepoint keeps all but one suppressed) on this cadence rather
@@ -133,6 +136,15 @@ export interface RecoveryHoldsDeps {
 	effectiveRequestModel: string | null;
 	gates: AdmissionGates;
 	bumpIdleTimeout: () => void;
+	/**
+	 * Whether {@link bumpIdleTimeout} can actually reach the client's socket.
+	 * False on the translated Codex `/v1/responses` path (see request-ingress).
+	 * The overload hold reads this to pick a budget it can actually honor —
+	 * holding an un-re-armable connection past Bun's 180s base idleTimeout
+	 * would have US close it mid-hold. Defaults true for callers that predate
+	 * the flag (tests); production always passes it.
+	 */
+	canRearmIdleTimeout?: boolean;
 	/**
 	 * Deterministic-timing seam for the burst-retry hold, forwarded verbatim to
 	 * `holdAndRetryCacheAccount`. Production never passes it.
@@ -230,6 +242,7 @@ export function createRecoveryHolds(deps: RecoveryHoldsDeps): RecoveryHolds {
 		effectiveRequestModel,
 		gates,
 		bumpIdleTimeout,
+		canRearmIdleTimeout = true,
 		burstHoldTimingOverride,
 		nonCodexHoldTimingOverride,
 		logFinalOrderOnce,
@@ -571,7 +584,15 @@ export function createRecoveryHolds(deps: RecoveryHoldsDeps): RecoveryHolds {
 		if (req.signal.aborted) return createClientAbortResponse();
 
 		const pairs = overloadHoldPairs(gated);
-		const holdBudgetMs = getOverloadHoldBudgetMs();
+		// A connection whose Bun idle timer we cannot refresh is capped by the
+		// flat 180s base idleTimeout no matter how long we would like to wait, so
+		// it gets the shorter no-re-arm budget. The capability comes from ingress
+		// (derived from the adapter's unspoofable per-request context) rather
+		// than from `excludeOfficialAnthropic`: that flag is ROUTING policy read
+		// from a client-visible header, so it is both forgeable and not
+		// equivalent — a future synthetic dispatch could be un-re-armable without
+		// carrying it.
+		const holdBudgetMs = getOverloadHoldBudgetMs(canRearmIdleTimeout);
 		const entryNow = Date.now();
 		// Hold only when recovery can land within budget: a half-open bucket's
 		// probe may report a verdict any moment; an open bucket must expire
@@ -629,10 +650,22 @@ export function createRecoveryHolds(deps: RecoveryHoldsDeps): RecoveryHolds {
 		// the hold itself still ends (below) when a round has no verdict to wait on.
 		const ordinaryFailedIds = new Set<string>();
 		// Hold-exit summary counters. ONE INFO line per hold, at exit — not per
-		// round: at a ~1.5s poll and up to 8 holders per bucket, a per-round line
-		// would be noisier than the per-attempt refusals it replaces.
+		// round: at a ~1.5s poll and up to OVERLOAD_HOLD_MAX_CONCURRENT_PER_BUCKET
+		// holders per bucket, a per-round line would be noisier than the
+		// per-attempt refusals it replaces.
 		let rounds = 0;
 		let suppressedAttempts = 0;
+		// Exit accounting. Round counts alone cannot distinguish "waited out
+		// repeated breaker cooldowns" from "queued behind ONE in-flight probe",
+		// and the 2026-08-24 incident was initially misread that way: holds
+		// ending at the ceiling with 30+ suppressed rounds looked like a breaker
+		// that would not settle, when the breaker had recovered and the holders
+		// were waiting on another request's generation. Splitting the elapsed
+		// time into open-bucket sleep vs probe-wait makes that visible directly,
+		// and the exit reason removes the need to infer anything from duration.
+		let exitReason = "budget_exhausted";
+		let openSleepMs = 0;
+		let probeWaitMs = 0;
 		try {
 			while (true) {
 				const nowMs = Date.now();
@@ -653,8 +686,20 @@ export function createRecoveryHolds(deps: RecoveryHoldsDeps): RecoveryHolds {
 					const waitMs =
 						Math.max(0, soonest - nowMs) +
 						Math.floor(Math.random() * CW_HOLD_JITTER_MS);
-					if (waitMs > remaining) break; // recovery beyond budget
-					if (!(await abortableSleep(waitMs, req.signal))) {
+					if (waitMs > remaining) {
+						// The next cooldown does not fit in what is left — starting a
+						// sleep we cannot finish would just burn the connection.
+						exitReason = "cooldown_beyond_budget";
+						break;
+					}
+					// Measured around the sleep, not assumed from `waitMs`: an abort
+					// after 100s of waiting must still report 100s, or the split is
+					// useless for exactly the incidents it exists to explain.
+					const sleepStart = Date.now();
+					const slept = await abortableSleep(waitMs, req.signal);
+					openSleepMs += Date.now() - sleepStart;
+					if (!slept) {
+						exitReason = "client_abort";
 						return createClientAbortResponse();
 					}
 					continue;
@@ -745,13 +790,27 @@ export function createRecoveryHolds(deps: RecoveryHoldsDeps): RecoveryHolds {
 				for (const id of round.ordinaryFailedAccountIds) {
 					ordinaryFailedIds.add(id);
 				}
-				if (round.response) return round.response;
-				if (req.signal.aborted) return createClientAbortResponse();
-				if (round.budgetAborted) break; // budget expiry → synthetic 529
+				if (round.response) {
+					// `attemptCandidates` returns the 499 marker when the client hangs
+					// up mid-attempt, so a returned Response is NOT proof of a serve —
+					// test the signal first or every abort is miscounted as success.
+					exitReason = req.signal.aborted ? "client_abort" : "served";
+					return round.response;
+				}
+				if (req.signal.aborted) {
+					exitReason = "client_abort";
+					return createClientAbortResponse();
+				}
+				if (round.budgetAborted) {
+					// An attempt ran past the budget deadline and was aborted.
+					exitReason = "attempt_budget_abort";
+					break; // budget expiry → synthetic 529
+				}
 				if (candidates.length === 0) {
 					if (statuses.every((s) => s.state === "closed")) {
 						// The breaker recovered but the pool is empty for a non-overload
 						// reason — nothing left for THIS hold to wait on.
+						exitReason = "pool_empty_after_recovery";
 						break;
 					}
 					// No candidates while a bucket is still open/half-open (the gate
@@ -773,6 +832,7 @@ export function createRecoveryHolds(deps: RecoveryHoldsDeps): RecoveryHolds {
 					// within budget rather than returning a synthetic 529 immediately —
 					// while the ordinary-failure exclusion above keeps that polling off
 					// the siblings that already failed.
+					exitReason = "no_verdict_pending";
 					break;
 				}
 				// Suppressed behind the in-flight overload probe or the single-flight
@@ -784,8 +844,15 @@ export function createRecoveryHolds(deps: RecoveryHoldsDeps): RecoveryHolds {
 					OVERLOAD_HOLD_PROBE_POLL_MS +
 					Math.floor(Math.random() * CW_HOLD_JITTER_MS);
 				const postAttemptRemaining = holdBudgetMs - (Date.now() - holdStart);
-				if (pollMs > postAttemptRemaining) break;
-				if (!(await abortableSleep(pollMs, req.signal))) {
+				if (pollMs > postAttemptRemaining) {
+					exitReason = "probe_wait_beyond_budget";
+					break;
+				}
+				const pollStart = Date.now();
+				const polled = await abortableSleep(pollMs, req.signal);
+				probeWaitMs += Date.now() - pollStart;
+				if (!polled) {
+					exitReason = "client_abort";
 					return createClientAbortResponse();
 				}
 			}
@@ -794,8 +861,11 @@ export function createRecoveryHolds(deps: RecoveryHoldsDeps): RecoveryHolds {
 			// The one INFO line the hold emits on the way out — the per-attempt
 			// admission refusals it replaces are DEBUG inside a hold.
 			log.info(
-				`Overload hold exited for ${slotKeys.join(", ")} after ${Date.now() - holdStart}ms: ` +
-					`${rounds} round(s), ${suppressedAttempts} suppressed attempt(s)`,
+				`Overload hold exited for ${slotKeys.join(", ")} after ${Date.now() - holdStart}ms ` +
+					`(${exitReason}, budget ${holdBudgetMs}ms): ` +
+					`${rounds} round(s), ${suppressedAttempts} suppressed attempt(s), ` +
+					`${openSleepMs}ms waiting on an open breaker, ` +
+					`${probeWaitMs}ms waiting behind a probe`,
 			);
 			clearInterval(holdRearm);
 			for (const held of acquiredSlotKeys) {

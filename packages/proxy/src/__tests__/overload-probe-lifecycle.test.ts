@@ -3,9 +3,13 @@
  *
  * A half-open bucket (cooldown expired, entry persisted) admits exactly ONE
  * probe request through `proxyWithAccount`; concurrent requests are suppressed
- * (fail over / 529 terminal) until the probe reaches a verdict. The verdict is
- * judged on FULL stream completion — the incident's overloads arrive mid-stream
- * after 200 headers — not on response headers:
+ * (fail over / 529 terminal) until the probe reaches a verdict.
+ *
+ * The verdict is NOT judged on response headers, and no longer waits for the
+ * whole generation either: a healthy `message_start` closes the bucket while
+ * the stream is still running, so followers stop queueing behind another
+ * request's turn. A later mid-stream overload simply re-trips.
+ *   - `message_start`, sniffer silent    → "recovered" (bucket closed early)
  *   - clean EOF on a successful response  → "recovered" (bucket closed)
  *   - mid-stream `overloaded_error` frame → "reopened" (fresh cooldown)
  *   - pre-stream 529                      → "reopened" (re-trip at the trip site)
@@ -224,6 +228,33 @@ function sseErroringResponse() {
 	});
 }
 
+/**
+ * SSE 200 that emits `frames`, then holds the stream OPEN until `finish()` is
+ * called. Lets a test observe breaker state while the probe's generation is
+ * still running — the exact window the probe-convoy fix targets.
+ */
+function sseStallingResponse(frames: string[]): {
+	response: Response;
+	finish: () => void;
+} {
+	let release: (() => void) | null = null;
+	const stream = new ReadableStream<Uint8Array>({
+		start(controller) {
+			for (const frame of frames) {
+				controller.enqueue(encoder.encode(frame));
+			}
+			release = () => controller.close();
+		},
+	});
+	return {
+		response: new Response(stream, {
+			status: 200,
+			headers: { "content-type": "text/event-stream" },
+		}),
+		finish: () => release?.(),
+	};
+}
+
 const HEALTHY_SSE_FRAMES = [
 	'event: message_start\ndata: {"type":"message_start","message":{"model":"claude-haiku-4-5","usage":{"input_tokens":10}}}\n\n',
 	'event: content_block_delta\ndata: {"type":"content_block_delta","delta":{"type":"text_delta","text":"hi"}}\n\n',
@@ -402,8 +433,9 @@ describe("half-open overload probe lifecycle", () => {
 			ctx,
 		);
 		expect(res.status).toBe(200);
-		// The verdict is judged on FULL stream completion, not headers: still
-		// half-open (probe in flight) until the client drains the stream.
+		// Headers alone are not the verdict, and nothing has been read yet — the
+		// health signal rides on the first chunk, so the bucket is still half-open
+		// until the client starts draining.
 		expect(inspectProviderOverload("anthropic", "claude-haiku-4-5").state).toBe(
 			"half-open",
 		);
@@ -421,6 +453,138 @@ describe("half-open overload probe lifecycle", () => {
 			ctx,
 		);
 		expect(res2.status).toBe(200);
+	});
+
+	it("closes the bucket at message_start, while the probe's stream is still open", async () => {
+		const stalling = sseStallingResponse([HEALTHY_SSE_FRAMES[0]]);
+		globalThis.fetch = upstreamOnlyFetch(
+			async () => stalling.response,
+		) as never;
+
+		await tripToHalfOpen();
+		const ctx = makeContext([makeAccount()]);
+
+		const res = await callHandleProxy(
+			modelRequest("claude-haiku-4-5"),
+			new URL("https://proxy.local/v1/messages"),
+			ctx,
+		);
+		expect(res.status).toBe(200);
+
+		// Read exactly the first chunk. The generation is still in flight — the
+		// upstream stream has NOT closed.
+		const reader = (res.body as ReadableStream<Uint8Array>).getReader();
+		await reader.read();
+
+		// `message_start` is proof the family answered. The bucket must close now
+		// rather than staying half-open for the rest of the generation, which is
+		// what made every other holder wait out a full Opus turn (probe convoy).
+		await waitFor(
+			() =>
+				inspectProviderOverload("anthropic", "claude-haiku-4-5").state ===
+				"closed",
+		);
+
+		stalling.finish();
+		await reader.cancel();
+	});
+
+	it("admits a second request while the probe's stream is still open", async () => {
+		const stalling = sseStallingResponse([HEALTHY_SSE_FRAMES[0]]);
+		let calls = 0;
+		globalThis.fetch = upstreamOnlyFetch(async () => {
+			calls++;
+			return calls === 1 ? stalling.response : sseResponse(HEALTHY_SSE_FRAMES);
+		}) as never;
+
+		await tripToHalfOpen();
+		const ctx = makeContext([makeAccount()]);
+
+		const probeRes = await callHandleProxy(
+			modelRequest("claude-haiku-4-5"),
+			new URL("https://proxy.local/v1/messages"),
+			ctx,
+		);
+		expect(probeRes.status).toBe(200);
+		const reader = (probeRes.body as ReadableStream<Uint8Array>).getReader();
+		await reader.read();
+		await waitFor(
+			() =>
+				inspectProviderOverload("anthropic", "claude-haiku-4-5").state ===
+				"closed",
+		);
+
+		// The follower is served from upstream instead of being suppressed behind
+		// the still-running probe.
+		const second = await callHandleProxy(
+			modelRequest("claude-haiku-4-5"),
+			new URL("https://proxy.local/v1/messages"),
+			ctx,
+		);
+		expect(second.status).toBe(200);
+		await second.text();
+		expect(calls).toBe(2);
+
+		stalling.finish();
+		await reader.cancel();
+	});
+
+	it("does NOT settle early on a ping chunk that carries no message_start", async () => {
+		// Regression pin: a silent rate-limit sniffer is not health evidence on
+		// its own. An SSE comment/ping arrives before any real event, and settling
+		// on it would close the breaker off a frame that proves nothing — the
+		// upstream may still be about to send an error envelope.
+		const stalling = sseStallingResponse([": ping\n\n"]);
+		globalThis.fetch = upstreamOnlyFetch(
+			async () => stalling.response,
+		) as never;
+
+		await tripToHalfOpen();
+		const ctx = makeContext([makeAccount()]);
+
+		const res = await callHandleProxy(
+			modelRequest("claude-haiku-4-5"),
+			new URL("https://proxy.local/v1/messages"),
+			ctx,
+		);
+		expect(res.status).toBe(200);
+		const reader = (res.body as ReadableStream<Uint8Array>).getReader();
+		await reader.read();
+		await sleep(50);
+
+		// Still leased — the probe has produced no positive signal yet.
+		expect(inspectProviderOverload("anthropic", "claude-haiku-4-5").state).toBe(
+			"half-open",
+		);
+
+		stalling.finish();
+		await reader.cancel();
+	});
+
+	it("gives an error frame precedence over a message_start in the SAME chunk", async () => {
+		// The sniffer is fed before the early-recovery check, so a chunk carrying
+		// both must re-trip rather than close the bucket.
+		const bothInOneChunk =
+			MIDSTREAM_OVERLOAD_FRAMES[0] + MIDSTREAM_OVERLOAD_FRAMES[1];
+		globalThis.fetch = upstreamOnlyFetch(async () =>
+			sseResponse([bothInOneChunk]),
+		) as never;
+
+		await tripToHalfOpen();
+		const ctx = makeContext([makeAccount()]);
+
+		const res = await callHandleProxy(
+			modelRequest("claude-haiku-4-5"),
+			new URL("https://proxy.local/v1/messages"),
+			ctx,
+		);
+		expect(res.status).toBe(200);
+		await res.text();
+		await sleep(20);
+
+		const status = inspectProviderOverload("anthropic", "claude-haiku-4-5");
+		expect(status.state).toBe("open");
+		expect(status.probeActive).toBe(false);
 	});
 
 	it("re-opens the bucket on a mid-stream overloaded_error during the probe", async () => {
