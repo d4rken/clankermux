@@ -264,6 +264,9 @@ export interface ResponseHandlerOptions {
 	 * stream settles "recovered" at the first healthy `message_start`, and the
 	 * EOF / error / read-error paths are the fallback verdict for everything
 	 * that never produced one:
+	 * Each row below applies only while the token is still UNSETTLED — the first
+	 * verdict wins, so a mid-stream `overloaded_error` AFTER a `message_start`
+	 * does not settle "reopened"; it opens a fresh breaker generation instead.
 	 *   - streaming `message_start` + success + sniffer silent → "recovered"
 	 *   - streaming clean EOF + success + sniffer silent → "recovered"
 	 *   - sniffer `overloaded_error`                     → "reopened"

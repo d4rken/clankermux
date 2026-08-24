@@ -120,7 +120,10 @@ export type OverloadProbeEvidence =
 	| "non_stream_2xx"
 	| "non_stream_non_2xx"
 	| "forward_setup_threw"
-	| "suppressed_or_unused";
+	| "attempt_failed"
+	| "model_not_found"
+	| "model_switch"
+	| "stale_token_retry";
 
 export type ProbeAdmission =
 	| { admitted: true; token: OverloadProbeToken | null }
@@ -146,7 +149,13 @@ interface OverloadBucket {
 	 * env-aware stream timeout (see {@link getProbeLeaseSafetyTtlMs}) so a
 	 * runtime override change never shortens an already-issued lease.
 	 */
-	probe: { leaseId: number; acquiredAt: number; ttlMs: number } | null;
+	probe: {
+		leaseId: number;
+		acquiredAt: number;
+		ttlMs: number;
+		/** Admission identity, so a TTL takeover can name who it displaced. */
+		probeId: string;
+	} | null;
 }
 
 const buckets = new Map<string, OverloadBucket>();
@@ -156,11 +165,16 @@ let probeIdCounter = 0;
 
 /**
  * Where a trip's deadline came from. `hint` means upstream gave us a usable
- * number; `hint_capped` means it did but we clamped it to the 5-minute ceiling;
- * `no_usable_reset_default` means it gave us nothing we could use and we fell
- * back to 60s. That last one is the whole answer to "did these 529s carry a
- * retry-after?", which previously had to be inferred by diffing log timestamps
- * against ISO deadlines by hand.
+ * reset hint; `hint_capped` means it did but we clamped it to the 5-minute
+ * ceiling; `no_usable_reset_default` means it gave us nothing usable and we
+ * fell back to 60s.
+ *
+ * Coarse ON PURPOSE: it answers "usable upstream hint, or our own fallback?",
+ * which previously had to be inferred by diffing log timestamps against ISO
+ * deadlines by hand. It does NOT say WHICH header the hint came from — the
+ * Anthropic parser may pick the unified reset, Retry-After, or
+ * x-ratelimit-reset — because that origin is not threaded through
+ * RateLimitInfo. Do not read `hint` as "Retry-After was present".
  */
 type ResetSource = "hint" | "hint_capped" | "no_usable_reset_default";
 
@@ -317,9 +331,15 @@ export function applyProviderOverloadCooldown(
 	// three states that used to render as one identical line.
 	const transition = !bucket
 		? "opened"
-		: effectiveUntil > bucket.until
-			? "re-tripped(extended)"
-			: "re-tripped(deadline retained)";
+		: bucket.until <= now
+			? // The breaker had already lapsed to half-open, so this is a recovery
+				// attempt failing rather than an ongoing storm pushing the deadline
+				// out. Both move the deadline forward; only this one means "a probe
+				// went out and came back bad".
+				"re-tripped(from half-open)"
+			: effectiveUntil > bucket.until
+				? "re-tripped(extended)"
+				: "re-tripped(deadline retained)";
 	const generation = ++generationCounter;
 
 	buckets.set(key, {
@@ -469,14 +489,25 @@ export function tryAcquireProviderOverloadProbe(
 	// TTL snapshot at acquisition: every lease of this admission shares the
 	// same env-aware deadline.
 	const ttlMs = getProbeLeaseSafetyTtlMs();
+	const probeId = `p${++probeIdCounter}`;
 	for (const key of halfOpenKeys) {
 		const bucket = buckets.get(key);
 		if (!bucket) continue;
+		// An expired lease being overwritten is the ONE lifecycle that otherwise
+		// ends with no line at all: its owner died without ever completing, so no
+		// settle arrives to report it. Say so at WARN — a bucket that keeps
+		// producing these is leaking probe owners, which nothing else reveals.
+		if (bucket.probe) {
+			log.warn(
+				`Overload probe ${bucket.probe.probeId} lease expired for ${key} ` +
+					`after ${now - bucket.probe.acquiredAt}ms (ttl ${bucket.probe.ttlMs}ms); ` +
+					`admitting replacement ${probeId}`,
+			);
+		}
 		const leaseId = ++leaseIdCounter;
-		bucket.probe = { leaseId, acquiredAt: now, ttlMs };
+		bucket.probe = { leaseId, acquiredAt: now, ttlMs, probeId };
 		leases.push({ key, generation: bucket.generation, leaseId });
 	}
-	const probeId = `p${++probeIdCounter}`;
 	log.info(
 		`Overload probe ${probeId} admitted for ${halfOpenKeys
 			.map((k) => `${k}@g${buckets.get(k)?.generation ?? "?"}`)
@@ -533,9 +564,25 @@ export function completeProviderOverloadProbe(
 		);
 		return;
 	}
-	// Every lease was superseded (a re-trip bumped the generation, an operator
-	// cleared the bucket, or a TTL takeover reassigned it). The probe still ran,
-	// so its duration is still worth having, but it changed nothing.
+	if (outcome === "reopened") {
+		// A "reopened" verdict ALWAYS lands here in the single-family case, and it
+		// must not be demoted to DEBUG for it: both production re-trip paths call
+		// applyProviderOverloadCooldown BEFORE settling, which bumps the
+		// generation and so guarantees `applied` is empty. The lease mutation was
+		// indeed a no-op, but the VERDICT is real, and it is exactly the outcome
+		// an operator is looking for — the probe went out and the provider was
+		// still overloaded. At DEBUG it would be hidden behind a level that is off
+		// by default, i.e. hidden precisely during the incident it describes.
+		log.info(
+			`Overload probe ${token.probeId} settled reopened for ` +
+				`${token.leases.map((l) => l.key).join(", ")} ${detail} ` +
+				`(lease already superseded by the re-trip)`,
+		);
+		return;
+	}
+	// A recovered/abandoned completion that changed nothing: the bucket was
+	// cleared by an operator, or a TTL takeover reassigned the lease. The probe
+	// ran, but it reached no verdict anyone is still waiting on.
 	log.debug(
 		`Overload probe ${token.probeId} completion ignored ${detail} ` +
 			`(outcome=${outcome}, reason=superseded)`,

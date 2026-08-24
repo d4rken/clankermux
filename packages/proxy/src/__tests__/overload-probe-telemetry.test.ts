@@ -48,7 +48,8 @@ describe("overload breaker telemetry", () => {
 		}
 		const line = cap.lines.find((l) => l.includes("Overload breaker"));
 		expect(line).toBeDefined();
-		// The whole question "did these 529s carry a retry-after?" answered inline.
+		// "Usable upstream hint, or our own fallback?" answered inline, instead of
+		// being derived from the spacing of ISO deadlines across dozens of lines.
 		expect(line).toContain("reset=no_usable_reset_default");
 		expect(line).toContain("opened");
 		expect(line).toContain("model=claude-opus-4-5");
@@ -67,7 +68,7 @@ describe("overload breaker telemetry", () => {
 		}
 		const lines = cap.lines.filter((l) => l.includes("Overload breaker"));
 		expect(lines).toHaveLength(3);
-		expect(lines[0]).toContain("reset=hint");
+		expect(lines[0]).toMatch(/reset=hint[,)]/);
 		expect(lines[0]).toContain("opened");
 		expect(lines[1]).toContain("reset=hint_capped");
 		expect(lines[1]).toContain("re-tripped(extended)");
@@ -117,11 +118,11 @@ describe("overload breaker telemetry", () => {
 		expect(ms).toBeGreaterThanOrEqual(20);
 	});
 
-	it("still reports the duration when a re-trip superseded the lease", async () => {
-		// THE trap. Both re-trip paths call applyProviderOverloadCooldown BEFORE
-		// settling, which bumps the generation and clears bucket.probe — so a
-		// settle that reads identity from the BUCKET finds nothing and logs
-		// nothing, for precisely the outcome an operator most wants to see.
+	it("keeps a genuinely no-op completion on DEBUG", async () => {
+		// The counterpart to the reopened case below: an abandoned completion
+		// whose bucket an operator cleared underneath it reached no verdict
+		// anyone is waiting on, so it stays out of the default-level journal.
+		// Only the duration is still worth recording.
 		await tripToHalfOpen("claude-opus-4-5");
 		const admission = tryAcquireProviderOverloadProbe(
 			"anthropic",
@@ -131,25 +132,128 @@ describe("overload breaker telemetry", () => {
 		expect(token).not.toBeNull();
 
 		await new Promise((r) => setTimeout(r, 25));
-		// The probe hit an overload: re-trip lands first, exactly as production.
+		clearProviderOverloadCooldown("anthropic");
+
+		const info = captureLogs("info");
+		const debug = captureLogs("debug");
+		try {
+			completeProviderOverloadProbe(token, "abandoned", "stream_read_error");
+		} finally {
+			info.restore();
+			debug.restore();
+		}
+		const line = debug.lines.find((l) => l.includes("completion ignored"));
+		expect(line).toBeDefined();
+		expect(line).toContain("reason=superseded");
+		expect(line).toContain("evidence=stream_read_error");
+		const ms = Number(/after (\d+)ms/.exec(line as string)?.[1]);
+		expect(ms).toBeGreaterThanOrEqual(20);
+		// It must NOT be promoted to the default level — that is reserved for
+		// verdicts, and a no-op during an incident would just be noise.
+		expect(info.lines.some((l) => l.includes("settled"))).toBe(false);
+	});
+
+	it("reports a reopened probe on INFO, not DEBUG", async () => {
+		// The regression this pins: BOTH production re-trip paths call
+		// applyProviderOverloadCooldown before settling, so `applied` is always
+		// empty for a single-family reopened verdict. Routing that to DEBUG hides
+		// the probe's verdict and duration behind a level that is OFF by default,
+		// i.e. hides it during exactly the incident it describes.
+		//
+		// Spying on Logger.prototype bypasses the level guard, so asserting the
+		// message text alone would prove nothing about visibility. The CHANNEL is
+		// the invariant: INFO is emitted at the default level, DEBUG is not.
+		await tripToHalfOpen("claude-opus-4-5");
+		const admission = tryAcquireProviderOverloadProbe(
+			"anthropic",
+			"claude-opus-4-5",
+		);
+		const token = admission.admitted ? admission.token : null;
+		expect(token).not.toBeNull();
+
+		// Production ordering: the trip lands first and supersedes the lease.
 		applyProviderOverloadCooldown(
 			"anthropic",
 			Date.now() + 60_000,
 			"claude-opus-4-5",
 		);
 
-		const cap = captureLogs("debug");
+		const info = captureLogs("info");
+		const debug = captureLogs("debug");
 		try {
 			completeProviderOverloadProbe(token, "reopened", "sse_overloaded_error");
 		} finally {
+			info.restore();
+			debug.restore();
+		}
+		const line = info.lines.find((l) => l.includes("settled reopened"));
+		expect(line).toBeDefined();
+		expect(line).toContain("evidence=sse_overloaded_error");
+		expect(line).toMatch(/after \d+ms/);
+		// Nothing about this verdict may be DEBUG-only.
+		expect(debug.lines.some((l) => l.includes("completion ignored"))).toBe(
+			false,
+		);
+	});
+
+	it("distinguishes a re-trip from half-open from an ongoing storm", async () => {
+		// Both push the deadline forward, so a naive "did the deadline move?"
+		// check calls them both extended. They mean different things: one is a
+		// recovery attempt that failed, the other is the storm still running.
+		await tripToHalfOpen("claude-opus-4-5");
+		const cap = captureLogs("warn");
+		try {
+			applyProviderOverloadCooldown(
+				"anthropic",
+				Date.now() + 60_000,
+				"claude-opus-4-5",
+			);
+		} finally {
 			cap.restore();
 		}
-		const line = cap.lines.find((l) => l.includes("completion ignored"));
+		const line = cap.lines.find((l) => l.includes("Overload breaker"));
+		expect(line).toContain("re-tripped(from half-open)");
+	});
+
+	it("warns when an expired lease is taken over, naming both probes", async () => {
+		await tripToHalfOpen("claude-opus-4-5");
+		const first = tryAcquireProviderOverloadProbe(
+			"anthropic",
+			"claude-opus-4-5",
+		);
+		const firstToken = first.admitted ? first.token : null;
+		expect(firstToken).not.toBeNull();
+
+		// The owner never completes. Past the lease TTL another request may probe;
+		// without this WARN that first admission ends with no line at all, which
+		// is the only silently-orphaned lifecycle left.
+		const wayLater = Date.now() + 2 * 60 * 60_000;
+		const cap = captureLogs("warn");
+		try {
+			tryAcquireProviderOverloadProbe("anthropic", "claude-opus-4-5", wayLater);
+		} finally {
+			cap.restore();
+		}
+		const line = cap.lines.find((l) => l.includes("lease expired"));
 		expect(line).toBeDefined();
-		expect(line).toContain("reason=superseded");
-		expect(line).toContain("evidence=sse_overloaded_error");
-		const ms = Number(/after (\d+)ms/.exec(line as string)?.[1]);
-		expect(ms).toBeGreaterThanOrEqual(20);
+		expect(line).toContain(firstToken?.probeId as string);
+		expect(line).toContain("admitting replacement");
+	});
+
+	it("names the bucket generation on the admission line", async () => {
+		await tripToHalfOpen("claude-opus-4-5");
+		const cap = captureLogs("info");
+		try {
+			tryAcquireProviderOverloadProbe("anthropic", "claude-opus-4-5");
+		} finally {
+			cap.restore();
+		}
+		const line = cap.lines.find((l) => l.includes("admitted for"));
+		expect(line).toBeDefined();
+		// Generation ties the probe to the exact trip it is testing, so
+		// concurrent family incidents stay distinguishable in one journal.
+		expect(line).toMatch(/anthropic-upstream:opus@g\d+/);
+		expect(line).toContain("single-flight");
 	});
 
 	it("gives each admitted probe a distinct id", async () => {

@@ -848,16 +848,17 @@ export function createRecoveryHolds(deps: RecoveryHoldsDeps): RecoveryHolds {
 					break;
 				}
 				// Suppressed behind the in-flight overload probe or the single-flight
-				// recovery probe, or re-tripped mid-attempt:
-				// short-poll so a probe verdict wakes us promptly (holders must not
-				// sleep past a probe completion). Recompute the remaining budget —
+				// per-account recovery probe, or re-tripped mid-attempt: short-poll
+				// so a verdict wakes us promptly (holders must not sleep past a probe
+				// completion). All three causes are charged to verdictPollMs, which
+				// is why it is NOT named after the overload probe alone. Recompute the remaining budget —
 				// the wake attempt above may have consumed a meaningful slice of it.
 				const pollMs =
 					OVERLOAD_HOLD_PROBE_POLL_MS +
 					Math.floor(Math.random() * CW_HOLD_JITTER_MS);
 				const postAttemptRemaining = holdBudgetMs - (Date.now() - holdStart);
 				if (pollMs > postAttemptRemaining) {
-					exitReason = "probe_wait_beyond_budget";
+					exitReason = "verdict_poll_beyond_budget";
 					break;
 				}
 				const pollStart = Date.now();

@@ -959,7 +959,7 @@ export async function proxyWithAccount(
 		response?: Response | null,
 		onDrained?: (report: DrainReport) => void,
 	): Promise<null> => {
-		settleOverloadProbe("abandoned");
+		settleOverloadProbe("abandoned", "attempt_failed");
 		options?.onOutcome?.(outcome);
 		discardUpstreamBody(response, onDrained);
 		return null;
@@ -2071,7 +2071,7 @@ export async function proxyWithAccount(
 					cacheBodyStore.discardStaged(requestMeta.id);
 					// Direct return that bypasses forwardToClient — no stream verdict
 					// will ever arrive, so release a held probe lease here.
-					settleOverloadProbe("abandoned");
+					settleOverloadProbe("abandoned", "model_not_found");
 					options?.onOutcome?.({ kind: "model_not_found" });
 					return withSanitizedProxyHeaders(rawResponse);
 				}
@@ -2083,7 +2083,7 @@ export async function proxyWithAccount(
 					// lease held for the previous model's family must be released
 					// (never "recovered": the response that got us here was a
 					// model-unavailable/429, not a health verdict).
-					settleOverloadProbe("abandoned");
+					settleOverloadProbe("abandoned", "model_switch");
 
 					// Family-overload gate: a fallback list can cross model families
 					// (e.g. a Haiku request falling back into Sonnet, or vice versa).
@@ -2403,7 +2403,7 @@ export async function proxyWithAccount(
 					);
 					// The recursion acquires its own admission — release this attempt's
 					// lease first, or the retry would suppress itself ("probe-active").
-					settleOverloadProbe("abandoned");
+					settleOverloadProbe("abandoned", "stale_token_retry");
 					return await proxyWithAccount(
 						req,
 						url,
