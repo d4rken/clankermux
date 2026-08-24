@@ -1098,6 +1098,22 @@ describe("quota-drift windows that stopped being reported", () => {
 		expect(window?.lastObservedMs).toBeLessThan(window?.notReportedSince ?? 0);
 	});
 
+	it("carries what the window showed when it went absent", () => {
+		// The live Codex shape: a 5-hour window sitting at 0% that stops appearing
+		// in the readings. Without the paired value the panel can date the
+		// disappearance and say nothing about how full the window was.
+		const { window, rows } = absentWindowOf({
+			reportedDays: 3,
+			absentHours: 30,
+			boundaryGapMs: 2 * MINUTE_MS,
+		});
+
+		expect(window?.notReportedSince).toBe(firstAbsentMs(rows));
+		expect(window?.lastObservedValuePct).toBe(0);
+		// And it is NOT sourced from the flat fields, which this case leaves null.
+		expect(window?.flatValuePct).toBeNull();
+	});
+
 	it("refuses to date a transition it did not watch", () => {
 		// Nothing was read across the boundary, so the value may have gone absent
 		// at any point inside it. A date we cannot support is worse than silence.
@@ -1424,6 +1440,9 @@ describe("summarizeFlatWindow", () => {
 			// longer include the window.
 			latestIncludesWindow:
 				(over.lastSampleMs ?? lastObservedMs) === lastObservedMs,
+			// The newest reading that carried a value carried the run's value: a
+			// run is constant, and it ends at that reading.
+			lastObservedValuePct: over.flatValuePct ?? 0,
 			lastMovementMs: null,
 			flatStartMs: FLAT_START,
 			flatValuePct: 0,
@@ -1523,6 +1542,7 @@ describe("summarizeFlatWindow", () => {
 		expect(summarizeFlatWindow([], "five_hour", [], FIXTURE_NOW)).toEqual({
 			lastMovementMs: null,
 			lastObservedMs: null,
+			lastObservedValuePct: null,
 			flatValuePct: null,
 			flatSince: null,
 			flatScope: null,
@@ -1669,6 +1689,88 @@ describe("summarizeFlatWindow", () => {
 		expect(facts.flatScope).toBe("reporting-subset");
 	});
 
+	it("quotes the value the newest reading with one actually carried", () => {
+		// The pairing the panel needs: a date and what that reading showed. The
+		// flat gates are irrelevant to it - this account is not currently
+		// reporting the window, so `flatValuePct` stays null and would render the
+		// sentence empty in precisely the case it exists for.
+		const facts = summarizeFlatWindow(
+			[
+				observation({
+					accountId: "a",
+					lastObservedMs: FIXTURE_NOW - 3 * DAY_MS,
+					lastSampleMs: FIXTURE_NOW,
+					flatValuePct: 0,
+				}),
+			],
+			"five_hour",
+			[traffic("a", FLAT_START)],
+			FIXTURE_NOW,
+		);
+
+		expect(facts.lastObservedMs).toBe(FIXTURE_NOW - 3 * DAY_MS);
+		expect(facts.lastObservedValuePct).toBe(0);
+		expect(facts.flatValuePct).toBeNull();
+	});
+
+	it("quotes nothing when two accounts read that instant differently", () => {
+		// Both accounts' newest value lands on the same timestamp at different
+		// percentages, so there is no single recorded reading to quote. The field
+		// is what ONE reading contained, and averaging or picking would invent a
+		// reading nobody took.
+		const shared = FIXTURE_NOW - 3 * DAY_MS;
+		const facts = summarizeFlatWindow(
+			[
+				observation({
+					accountId: "a",
+					lastObservedMs: shared,
+					lastSampleMs: FIXTURE_NOW,
+					flatValuePct: 0,
+				}),
+				observation({
+					accountId: "b",
+					lastObservedMs: shared,
+					lastSampleMs: FIXTURE_NOW,
+					flatValuePct: 61,
+				}),
+			],
+			"five_hour",
+			[traffic("a", FLAT_START)],
+			FIXTURE_NOW,
+		);
+
+		expect(facts.lastObservedMs).toBe(shared);
+		expect(facts.lastObservedValuePct).toBeNull();
+	});
+
+	it("quotes the newest reading, not the newest account", () => {
+		// One account's readings stopped a day earlier than the other's. The
+		// sentence names a date, so the value has to be the one belonging to THAT
+		// date rather than to whichever account is listed first.
+		const facts = summarizeFlatWindow(
+			[
+				observation({
+					accountId: "older",
+					lastObservedMs: FIXTURE_NOW - 4 * DAY_MS,
+					lastSampleMs: FIXTURE_NOW,
+					flatValuePct: 61,
+				}),
+				observation({
+					accountId: "newer",
+					lastObservedMs: FIXTURE_NOW - 3 * DAY_MS,
+					lastSampleMs: FIXTURE_NOW,
+					flatValuePct: 0,
+				}),
+			],
+			"five_hour",
+			[traffic("older", FLAT_START)],
+			FIXTURE_NOW,
+		);
+
+		expect(facts.lastObservedMs).toBe(FIXTURE_NOW - 3 * DAY_MS);
+		expect(facts.lastObservedValuePct).toBe(0);
+	});
+
 	it("still drops an account that stopped being sampled altogether", () => {
 		// Not the same case: this account produces NO readings at all, so it
 		// cannot testify either way and its absence does not qualify anything.
@@ -1755,6 +1857,7 @@ function stripNewFields(payload: QuotaDriftResponse): QuotaDriftResponse {
 			const legacy = window as unknown as Record<string, unknown>;
 			legacy.lastMovementMs = undefined;
 			legacy.lastObservedMs = undefined;
+			legacy.lastObservedValuePct = undefined;
 			legacy.flatValuePct = undefined;
 			legacy.flatSince = undefined;
 			legacy.flatScope = undefined;
@@ -1794,6 +1897,7 @@ describe("quota-drift payload normalization", () => {
 				expect(window.flatScope).toBeNull();
 				expect(window.lastMovementMs).toBeNull();
 				expect(window.lastObservedMs).toBeNull();
+				expect(window.lastObservedValuePct).toBeNull();
 				expect(window.flatValuePct).toBeNull();
 				for (const model of window.models) {
 					expect(model.points.length).toBeGreaterThan(0);

@@ -449,6 +449,16 @@ export interface WindowObservation {
 	/** Newest non-null sample, ms since epoch, or null for the same reason. */
 	lastObservedMs: number | null;
 	/**
+	 * The percentage that newest non-null sample carried, or null when there is
+	 * none.
+	 *
+	 * Paired with `lastObservedMs` and never derived from `flatValuePct`: the
+	 * flat gates leave that null whenever the stillness cannot be claimed, which
+	 * is precisely the case a reader most wants a value for - a window that
+	 * disappeared from the readings.
+	 */
+	lastObservedValuePct: number | null;
+	/**
 	 * Newest snapshot of ANY kind in this cohort, ms since epoch.
 	 *
 	 * The account-activity signal, and deliberately not the same thing as
@@ -566,6 +576,7 @@ export function collectWindowObservations(
 				accountId: account.id,
 				firstObservedMs: ms,
 				lastObservedMs: ms,
+				lastObservedValuePct: pct,
 				lastSampleMs: ms,
 				latestIncludesWindow: true,
 				lastMovementMs: null,
@@ -575,6 +586,7 @@ export function collectWindowObservations(
 			});
 		} else {
 			existing.lastObservedMs = ms;
+			existing.lastObservedValuePct = pct;
 			existing.lastSampleMs = ms;
 			existing.latestIncludesWindow = true;
 			// The account was already a member on its sampling alone; this is the
@@ -619,6 +631,7 @@ function sampledWithoutValue(accountId: string, ms: number): WindowObservation {
 		accountId,
 		firstObservedMs: null,
 		lastObservedMs: null,
+		lastObservedValuePct: null,
 		lastSampleMs: ms,
 		latestIncludesWindow: false,
 		lastMovementMs: null,
@@ -718,6 +731,7 @@ function findAbsenceOnset(
 export interface FlatWindowFacts {
 	lastMovementMs: number | null;
 	lastObservedMs: number | null;
+	lastObservedValuePct: number | null;
 	flatValuePct: number | null;
 	flatSince: number | null;
 	flatScope: QuotaDriftAccountScope | null;
@@ -728,6 +742,7 @@ export interface FlatWindowFacts {
 const NO_MOVEMENT_FACTS: FlatWindowFacts = {
 	lastMovementMs: null,
 	lastObservedMs: null,
+	lastObservedValuePct: null,
 	flatValuePct: null,
 	flatSince: null,
 	flatScope: null,
@@ -840,6 +855,7 @@ export function summarizeFlatWindow(
 		...NO_MOVEMENT_FACTS,
 		lastMovementMs: movements.length > 0 ? Math.max(...movements) : null,
 		lastObservedMs,
+		lastObservedValuePct: valueAtLatestReading(observations, lastObservedMs),
 	};
 
 	const newestSampleMs = Math.max(...observations.map((o) => o.lastSampleMs));
@@ -964,6 +980,32 @@ function summarizeAbsentWindow(
 				: "partial-cohort";
 
 	return { notReportedSince: Math.max(...onsets), notReportedScope: scope };
+}
+
+/**
+ * What the reading identified by `lastObservedMs` showed, or null when the
+ * cohort does not settle that on its own.
+ *
+ * Two accounts can share the newest observation timestamp while reporting
+ * different percentages, and there is then no single reading to quote: the
+ * field is not "the cohort's current level", it is what ONE recorded reading
+ * contained, so an ambiguous answer has to be no answer. Copy built on this
+ * asserts a single reading and nothing about any interval, which is the only
+ * claim a lone percentage can support.
+ */
+function valueAtLatestReading(
+	observations: readonly WindowObservation[],
+	lastObservedMs: number | null,
+): number | null {
+	if (lastObservedMs === null) return null;
+	const values = new Set(
+		observations
+			.filter((o) => o.lastObservedMs === lastObservedMs)
+			.map((o) => o.lastObservedValuePct),
+	);
+	if (values.size !== 1) return null;
+	const [only] = values;
+	return only ?? null;
 }
 
 /** Whether enough exposure was charged against a window since `sinceMs`. */

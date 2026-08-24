@@ -126,6 +126,11 @@ export function normalizeQuotaDriftPayload(
 						// measurement the payload does not contain.
 						lastMovementMs: window.lastMovementMs ?? null,
 						lastObservedMs: window.lastObservedMs ?? null,
+						// Null, not the flat value: a payload that predates this field
+						// records no percentage for its newest reading, and substituting
+						// one from another field would quote a reading that was never
+						// taken.
+						lastObservedValuePct: window.lastObservedValuePct ?? null,
 						flatValuePct: window.flatValuePct ?? null,
 						flatSince: window.flatSince ?? null,
 						// Null, not "all-accounts". A payload written before the scope

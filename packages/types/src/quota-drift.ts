@@ -203,6 +203,21 @@ export interface QuotaDriftWindowResult {
 	 */
 	lastObservedMs?: number | null;
 	/**
+	 * What the reading `lastObservedMs` identifies showed, in percent, or null.
+	 *
+	 * Answers the question a reader has as soon as a window disappears from the
+	 * readings: was it near exhaustion when we last saw it? A separate field
+	 * from `flatValuePct`, which carries a value only when the flat claim was
+	 * made and is therefore null in exactly that case.
+	 *
+	 * Null when nothing was ever observed, and also when two accounts share that
+	 * newest timestamp reporting DIFFERENT percentages: the field states what
+	 * one recorded reading contained, so with no single reading to quote there
+	 * is nothing to state. It says nothing about any interval, about the cohort
+	 * as a whole, or about what the window shows now.
+	 */
+	lastObservedValuePct?: number | null;
+	/**
 	 * The constant value the window has been reporting, in percent, or null when
 	 * the cohort's accounts are constant at DIFFERENT values (each is flat, so
 	 * the cohort is flat, but there is no single number to name).

@@ -516,3 +516,41 @@ export function notReportedNotice(
 		"was not established."
 	);
 }
+
+/**
+ * What the last reading that DID carry a value for this window showed, or null
+ * when the panel cannot quote one.
+ *
+ * The reader's next question once a window drops out of the readings is whether
+ * it was near exhaustion when it went, and the series alone cannot answer it:
+ * the chart plots implied cost per model, not the window percentage, and the
+ * flat-window value is null whenever the flat claim was withheld - which is the
+ * live case this sentence exists for.
+ *
+ * ## What it asserts, and what it deliberately does not
+ *
+ * ONE recorded reading: a date and the percentage that reading contained. Not a
+ * level the window "was at" over any period, not the cohort's state, and not
+ * anything about now. Two accounts sharing that newest timestamp at different
+ * percentages leave nothing to quote, and the server sends null rather than
+ * picking one - so an absent value here means the sentence is omitted, never
+ * that it renders empty or with a substitute.
+ *
+ * Shown only alongside {@link notReportedNotice}. While readings still carry
+ * the window the newest value is just current usage, which the dashboard states
+ * elsewhere and in a form that keeps up with it.
+ */
+export function lastObservedValueNotice(
+	window: QuotaDriftWindowResult,
+): string | null {
+	if ((window.notReportedSince ?? null) === null) return null;
+	const at = window.lastObservedMs ?? null;
+	const pct = window.lastObservedValuePct ?? null;
+	if (at === null || pct === null) return null;
+
+	return (
+		"The most recent reading in this cohort that included " +
+		`${windowValueLabel(window.window)}, on ${formatFlatDate(at)}, ` +
+		`showed ${formatFlatValue(pct)}.`
+	);
+}

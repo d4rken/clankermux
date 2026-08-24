@@ -23,6 +23,7 @@ import {
 	formatRelativeChange,
 	gapStretchText,
 	isReportableVerdict,
+	lastObservedValueNotice,
 	notReportedNotice,
 	primaryReason,
 	quotaWindowLabel,
@@ -733,6 +734,17 @@ describe("notReportedNotice", () => {
 		).toBeNull();
 	});
 
+	it("stands alongside the value the window last showed", () => {
+		// The absence sentence dates the disappearance; this one says how full the
+		// window was when it went. Two claims, each about something recorded.
+		const window = absentWindow({ lastObservedValuePct: 0 });
+
+		expect(lastObservedValueNotice(window)).toBe(
+			"The most recent reading in this cohort that included a 5-hour value, " +
+				"on 21 Aug 2026, showed 0%.",
+		);
+	});
+
 	it("stands alongside the flat notice on a cohort that is split", () => {
 		// Two facts about two sets of accounts, each already qualified by its own
 		// scope. Merging them into one history would describe an account that
@@ -750,5 +762,76 @@ describe("notReportedNotice", () => {
 		expect(flatWindowNotice("codex", window)).toContain(
 			"on the accounts still reporting it",
 		);
+	});
+});
+
+describe("lastObservedValueNotice", () => {
+	it("quotes one recorded reading, and claims nothing beyond it", () => {
+		const text = lastObservedValueNotice(
+			absentWindow({ lastObservedValuePct: 43.5 }),
+		);
+
+		expect(text).toBe(
+			"The most recent reading in this cohort that included a 5-hour value, " +
+				"on 21 Aug 2026, showed 43.5%.",
+		);
+		// Never a claim about a period, a trend, or the present.
+		expect(text).not.toContain("since");
+		expect(text).not.toContain("still");
+	});
+
+	it("names the weekly window's value correctly", () => {
+		const text =
+			lastObservedValueNotice(
+				absentWindow({ window: "seven_day", lastObservedValuePct: 12 }),
+			) ?? "";
+
+		expect(text).toContain("that included a weekly value");
+	});
+
+	it("says nothing when the cohort had no single reading to quote", () => {
+		// Two accounts share the newest observation at different percentages, so
+		// the server sends null. Rendering an empty or substituted value here
+		// would be worst in exactly the case the sentence exists for.
+		expect(
+			lastObservedValueNotice(absentWindow({ lastObservedValuePct: null })),
+		).toBeNull();
+		expect(
+			lastObservedValueNotice(
+				absentWindow({ lastObservedValuePct: 0, lastObservedMs: null }),
+			),
+		).toBeNull();
+	});
+
+	it("is not sourced from the flat value, which is null in this case", () => {
+		// The live shape: the flat gate failed, so `flatValuePct` is null while the
+		// window plainly showed something the last time a reading carried it.
+		const text = lastObservedValueNotice(
+			absentWindow({ flatValuePct: null, lastObservedValuePct: 0 }),
+		);
+
+		expect(text).toContain("showed 0%");
+	});
+
+	it("says nothing while the readings still carry the window", () => {
+		// A cohort still reporting the window has current usage on the dashboard
+		// already, in a form that keeps up with it.
+		expect(
+			lastObservedValueNotice(
+				absentWindow({ notReportedSince: null, lastObservedValuePct: 0 }),
+			),
+		).toBeNull();
+	});
+
+	it("renders nothing from a payload written before the field existed", () => {
+		expect(
+			lastObservedValueNotice({
+				window: "five_hour",
+				nSegments: 1,
+				r2: 0,
+				zeroObservedTokenDeltaShare: 0,
+				models: [],
+			}),
+		).toBeNull();
 	});
 });

@@ -202,6 +202,55 @@ describe("QuotaDriftPanel", () => {
 		expect(html).not.toContain("no longer");
 	});
 
+	it("says what that window showed the last time a reading carried it", () => {
+		// Dating the disappearance leaves the reader's actual question open: was
+		// the window near exhaustion when it went? One recorded reading answers it.
+		const html = renderToStaticMarkup(
+			<QuotaDriftPanel
+				cohort={cohort(
+					[
+						windowResult("five_hour", [measuredModel()], {
+							lastObservedMs: Date.UTC(2026, 7, 21, 11, 58, 0, 0),
+							lastObservedValuePct: 0,
+							notReportedSince: Date.UTC(2026, 7, 21, 12, 0, 0, 0),
+							notReportedScope: "all-accounts",
+						}),
+					],
+					{ provider: "codex" },
+				)}
+			/>,
+		);
+
+		expect(html).toContain(
+			"The most recent reading in this cohort that included a 5-hour value, " +
+				"on 21 Aug 2026, showed 0%.",
+		);
+	});
+
+	it("omits that sentence when no single reading answers it", () => {
+		// Two accounts share the newest observation at different percentages, so
+		// the server sends no value. An empty or substituted figure would be worst
+		// in exactly the case the sentence exists for.
+		const html = renderToStaticMarkup(
+			<QuotaDriftPanel
+				cohort={cohort(
+					[
+						windowResult("five_hour", [measuredModel()], {
+							lastObservedMs: Date.UTC(2026, 7, 21, 11, 58, 0, 0),
+							lastObservedValuePct: null,
+							notReportedSince: Date.UTC(2026, 7, 21, 12, 0, 0, 0),
+							notReportedScope: "all-accounts",
+						}),
+					],
+					{ provider: "codex" },
+				)}
+			/>,
+		);
+
+		expect(html).toContain("has included a 5-hour value");
+		expect(html).not.toContain("The most recent reading in this cohort");
+	});
+
 	it("says nothing about a window that is still moving", () => {
 		const html = renderToStaticMarkup(
 			<QuotaDriftPanel

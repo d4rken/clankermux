@@ -21,6 +21,7 @@ import { useSeriesPalette } from "../../hooks/useSeriesPalette";
 import {
 	cohortLabel,
 	flatWindowNotice,
+	lastObservedValueNotice,
 	notReportedNotice,
 	quotaWindowLabel,
 	summarizeModelGaps,
@@ -166,6 +167,10 @@ function WindowSeries({
 	// accounts that still report it and accounts that do not, both notices
 	// appear and each is scoped to the accounts it was established on.
 	const absentNotice = window ? notReportedNotice(provider, window) : null;
+	// What that window showed the last time a reading carried it. Quoted only
+	// beside the absence, and only when one recorded reading answers it: a
+	// reader's first question about a vanished quota window is how full it was.
+	const lastValueNotice = window ? lastObservedValueNotice(window) : null;
 
 	return (
 		<div className="space-y-item">
@@ -267,6 +272,11 @@ function WindowSeries({
 			{absentNotice ? (
 				<p className="text-xs text-muted-foreground max-w-prose">
 					{absentNotice}
+				</p>
+			) : null}
+			{lastValueNotice ? (
+				<p className="text-xs text-muted-foreground max-w-prose">
+					{lastValueNotice}
 				</p>
 			) : null}
 			{flatNotice ? (
