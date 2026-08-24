@@ -162,7 +162,13 @@ export function isReportableVerdict(model: QuotaDriftModel): boolean {
 export interface QuotaGapStretch {
 	/** The reason that speaks for the stretch, or null when none was recorded. */
 	reason: QuotaDriftUnidentifiedReason | null;
-	/** Start of the stretch's first unmeasured fit window, ms since epoch. */
+	/**
+	 * The earliest instant the stretch's claim is established for, ms since epoch.
+	 *
+	 * REASON-SENSITIVE, because the two kinds of reason establish different
+	 * things — see {@link gapFromMs}. `no-exposure` names the first window's
+	 * START; every other reason names the first window's END.
+	 */
 	fromMs: number;
 	/** End of the stretch's last unmeasured fit window, ms since epoch. */
 	toMs: number;
@@ -172,6 +178,30 @@ export interface QuotaGapStretch {
 	ongoing: boolean;
 	/** Whether the stretch covers the whole series. */
 	entireSeries: boolean;
+}
+
+/**
+ * The earliest instant one unmeasured point's reason is established for.
+ *
+ * A rolling point is plotted at its window END and summarises the whole
+ * 14-day window behind it, so which of the two boundaries the claim reaches
+ * back to depends entirely on WHAT is being claimed:
+ *
+ *  - `no-exposure` is a statement about the window's CONTENTS. Zero eq-tokens
+ *    across the whole window means the model was already absent when the window
+ *    opened, so the claim holds from the window's start;
+ *  - every other reason — collinearity, sub-floor share, too few segments, a
+ *    wide interval, or a reasonless legacy point — is a statement about the FIT
+ *    plotted at the window's end. That one fit failed. Nothing about it
+ *    establishes that a fit ending 14 days earlier would have, so dating the
+ *    failure at the window's start would claim it up to two weeks before the
+ *    evidence supports.
+ */
+function gapFromMs(
+	reason: QuotaDriftUnidentifiedReason | null,
+	point: QuotaDriftPoint,
+): number {
+	return reason === "no-exposure" ? point.windowStartMs : point.windowEndMs;
 }
 
 /**
@@ -207,11 +237,7 @@ export function summarizeGaps(
 		} else {
 			current = {
 				reason,
-				// The window START, not its end: a rolling window carrying no
-				// exposure means the model was already absent when the window
-				// opened, so that is the earliest instant the claim actually holds
-				// for. Naming the end instead would understate the stretch.
-				fromMs: point.windowStartMs,
+				fromMs: gapFromMs(reason, point),
 				toMs: point.windowEndMs,
 				nPoints: 1,
 				ongoing: false,
@@ -268,13 +294,25 @@ export function gapStretchText(stretch: QuotaGapStretch): string {
 		// carried them. Say only what is known rather than picking a cause.
 		return stretch.entireSeries
 			? "not measurable on this window"
-			: `not measurable since ${formatGapDate(stretch.fromMs)}`;
+			: `not measurable ${gapPeriodText(stretch)}`;
 	}
 	if (stretch.entireSeries) return GAP_THROUGHOUT[stretch.reason];
-	const phrase = GAP_WITH_PERIOD[stretch.reason];
-	return stretch.ongoing
-		? `${phrase} since ${formatGapDate(stretch.fromMs)}`
-		: `${phrase} from ${formatGapDate(stretch.fromMs)} to ${formatGapDate(stretch.toMs)}`;
+	return `${GAP_WITH_PERIOD[stretch.reason]} ${gapPeriodText(stretch)}`;
+}
+
+/**
+ * The period suffix a stretch's sentence ends with.
+ *
+ * The single-window case gets its own wording rather than "from X to X".
+ * Repeating one date either side of "to" reads as a span; what actually
+ * happened is that ONE fit failed, and only a reason dated at the window's end
+ * (see {@link gapFromMs}) can collapse this way.
+ */
+function gapPeriodText(stretch: QuotaGapStretch): string {
+	if (stretch.ongoing) return `since ${formatGapDate(stretch.fromMs)}`;
+	if (stretch.fromMs === stretch.toMs)
+		return `in the fit ending ${formatGapDate(stretch.toMs)}`;
+	return `from ${formatGapDate(stretch.fromMs)} to ${formatGapDate(stretch.toMs)}`;
 }
 
 /** One model's line in the gap list. */
@@ -292,6 +330,12 @@ export interface QuotaGapLine {
  * mostly empty", and the stretch that occupies most of it is the answer. Recency
  * only breaks ties so a model whose situation changed does not report the older
  * of two equal stretches.
+ *
+ * Recency is read off `toMs`, never `fromMs`: `fromMs` is reason-sensitive (see
+ * {@link gapFromMs}), so comparing it across two stretches with different
+ * reasons compares a window start against a window end and can rank an OLDER
+ * stretch as the more recent one. `toMs` is the last window end for every
+ * reason, so it is the only boundary the two are commensurable on.
  */
 export function dominantGap(
 	stretches: readonly QuotaGapStretch[],
@@ -301,7 +345,7 @@ export function dominantGap(
 		if (
 			best === null ||
 			stretch.nPoints > best.nPoints ||
-			(stretch.nPoints === best.nPoints && stretch.fromMs > best.fromMs)
+			(stretch.nPoints === best.nPoints && stretch.toMs > best.toMs)
 		) {
 			best = stretch;
 		}

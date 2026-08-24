@@ -356,9 +356,78 @@ describe("gapStretchText", () => {
 			point(2, null),
 		]);
 
+		// 15 Aug, not 1 Aug: a sub-floor share is a fact about the FIT plotted at
+		// the window's end, and the first failing fit ended on the 15th.
 		expect(gapStretchText(stretches[0])).toBe(
-			"too little of this window's traffic to measure from 1 Aug to 17 Aug",
+			"too little of this window's traffic to measure from 15 Aug to 17 Aug",
 		);
+	});
+
+	it("names ONE failed fit rather than printing the same date twice", () => {
+		const stretches = summarizeGaps([
+			point(0, null),
+			point(1, ["wide-interval"]),
+			point(2, null),
+		]);
+
+		expect(stretches[0].fromMs).toBe(stretches[0].toMs);
+		expect(gapStretchText(stretches[0])).toBe(
+			"estimate too imprecise in the fit ending 17 Aug",
+		);
+	});
+});
+
+describe("gap boundaries", () => {
+	it("dates a no-exposure gap from the window it opened in", () => {
+		// Zero eq-tokens across a whole rolling window means the model was already
+		// absent when that window opened, so the claim reaches back to its start.
+		const stretches = summarizeGaps([
+			point(0, null),
+			point(1, ["no-exposure"]),
+		]);
+
+		expect(stretches[0].fromMs).toBe(ORIGIN + 2 * DAY);
+		expect(gapStretchText(stretches[0])).toBe("not in use since 3 Aug");
+	});
+
+	it("dates every other reason from the fit that actually failed", () => {
+		// The ONLY established fact is that the fit plotted at the window's END
+		// could not identify the model. Dating it at the start would state the
+		// failure 14 days before the evidence supports.
+		for (const reason of [
+			"collinear",
+			"low-share",
+			"few-segments",
+			"wide-interval",
+			"zero-estimate",
+		] as const) {
+			const stretches = summarizeGaps([point(0, null), point(1, [reason])]);
+			expect(stretches[0].fromMs).toBe(ORIGIN + 2 * DAY + 14 * DAY);
+		}
+	});
+
+	it("dates a reasonless legacy point from the fit's end too", () => {
+		// No reason recorded means no basis for the wider claim either.
+		const stretches = summarizeGaps([point(0, null), point(1, [])]);
+
+		expect(stretches[0].reason).toBeNull();
+		expect(stretches[0].fromMs).toBe(ORIGIN + 2 * DAY + 14 * DAY);
+	});
+
+	it("closes both kinds of gap on the last window's end", () => {
+		const exposure = summarizeGaps([
+			point(0, ["no-exposure"]),
+			point(1, ["no-exposure"]),
+			point(2, null),
+		]);
+		const quality = summarizeGaps([
+			point(0, ["collinear"]),
+			point(1, ["collinear"]),
+			point(2, null),
+		]);
+
+		expect(exposure[0].toMs).toBe(ORIGIN + 2 * DAY + 14 * DAY);
+		expect(quality[0].toMs).toBe(ORIGIN + 2 * DAY + 14 * DAY);
 	});
 });
 
@@ -373,6 +442,10 @@ describe("dominantGap", () => {
 
 		expect(dominantGap(stretches)?.reason).toBe("no-exposure");
 
+		// Ties break on the LAST window end, the one boundary both reasons place
+		// the same way. Comparing `fromMs` here would rank the older low-share
+		// stretch first, because its end-dated boundary outruns the newer
+		// no-exposure stretch's start-dated one.
 		const tied = summarizeGaps([
 			point(0, ["low-share"]),
 			point(1, null),
