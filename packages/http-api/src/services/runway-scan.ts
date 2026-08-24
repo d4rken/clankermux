@@ -120,6 +120,13 @@ import {
  * claim). The runway is a display projection and never feeds routing, so
  * display-only data is a valid input to it. Do not "fix" this back.
  *
+ * The resolution runs with `seedCache: false`, so the payload tier does NOT
+ * write its reconstruction back into the usage cache here. This scan is served
+ * to an UNAUTHENTICATED GET, and a read that mutates the state routing,
+ * throttling and capacity decisions consume is a side effect no public GET may
+ * have. Nothing else changes: the same tier wins under the same source with the
+ * same stamp, so the served scan is identical either way.
+ *
  * It deliberately does NOT feed the PREDICTIONS, which stay routing-fresh-only:
  * `buildPredictionsForAccounts` appends the live reading as a data point stamped
  * `t: now`, so a column reading observed hours ago would enter the regression
@@ -317,10 +324,11 @@ export interface RunwayScan {
 /**
  * Run the scan once.
  *
- * DB and in-memory cache only: no provider I/O on any path. The usage cache is
- * read through the non-evicting `peekWithAge`, the persisted Codex column and
- * the bounded (LIMIT 20) stored-payload scan are ordinary reads, and the
- * predictions regress rows already in the database.
+ * PURE: DB and in-memory cache reads only, on any path. No provider I/O, and no
+ * WRITE either — the usage cache is read through the non-evicting
+ * `peekWithAge`, the persisted Codex column and the bounded (LIMIT 20)
+ * stored-payload scan are ordinary reads resolved with `seedCache: false`, and
+ * the predictions regress rows already in the database.
  */
 export async function computeRunwayScan(
 	dbOps: DatabaseOperations,
@@ -393,6 +401,13 @@ export async function computeRunwayScan(
 					columns?.persistedJson ?? null,
 					columns?.persistedObservedAtMs ?? null,
 					account.last_used != null ? Number(account.last_used) : null,
+					// PURE: the scan is a read-only projection served to
+					// `GET /api/runway` and to the UNAUTHENTICATED
+					// `GET /public/v1/runway`, so it must not re-seed the usage cache
+					// that routing, throttling and capacity decisions read. Only the
+					// write is withheld — the same tier still wins, under the same
+					// source and the same stamp, so both responses are unchanged.
+					{ seedCache: false },
 				);
 				codexUsageByAccount.set(account.id, {
 					// Only two sources can honestly stamp a reading: the cache entry's

@@ -32,9 +32,12 @@ import { computeRunwayScan } from "./runway-scan";
  * the provider-overload breaker are deliberately not read by the scan. Copy
  * built on this must say "quota", never "available".
  *
- * NO PROVIDER I/O, like every other route on this surface: the scan reads the
- * database and the in-memory usage cache (through the non-evicting `peekWithAge`
- * and a bounded stored-payload lookup) and nothing else.
+ * NO PROVIDER I/O and NO WRITES, like every other route on this surface: the
+ * scan reads the database and the in-memory usage cache (through the
+ * non-evicting `peekWithAge` and a bounded stored-payload lookup) and nothing
+ * else. The Codex payload tier's cache re-seed is withheld here
+ * (`seedCache: false` in `computeRunwayScan`) — an unauthenticated GET must not
+ * change what routing, throttling and capacity decisions read.
  */
 
 /**

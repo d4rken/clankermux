@@ -89,16 +89,48 @@ function makeKey(partial: Partial<ApiKey>): ApiKey {
 function makeDbOps(options: {
 	accounts?: Account[];
 	keys?: ApiKey[];
+	/**
+	 * Rows the stored-payload recovery scan finds, i.e. the LEGACY Codex channel
+	 * a restart-emptied cache falls back to. Keyed off the `request_payloads`
+	 * query so the persisted-column query beside it still reads empty.
+	 */
+	payloadRows?: Array<{ json: string; timestamp: number }>;
 }): DatabaseOperations {
 	return {
 		getAllAccounts: async () => options.accounts ?? [],
 		getApiKeys: async () => options.keys ?? [],
 		getAdapter: () => ({
-			query: async () => [],
+			query: async (sql: string) =>
+				sql.includes("request_payloads") ? (options.payloadRows ?? []) : [],
 			get: async () => null,
 		}),
 		getRecentUsageSnapshotsForAccounts: async () => [],
 	} as unknown as DatabaseOperations;
+}
+
+/**
+ * A retained request payload carrying Codex usage headers, exactly as the
+ * stored-payload recovery reads them.
+ */
+function codexPayloadRow(
+	weeklyPct: number,
+	resetMs: number,
+	timestampMs: number,
+): { json: string; timestamp: number } {
+	return {
+		json: JSON.stringify({
+			response: {
+				status: 200,
+				headers: {
+					"x-codex-secondary-window-minutes": String(7 * 24 * 60),
+					"x-codex-secondary-used-percent": String(weeklyPct),
+					"x-codex-secondary-reset-at": String(Math.floor(resetMs / 1000)),
+				},
+			},
+			meta: { timestamp: timestampMs },
+		}),
+		timestamp: timestampMs,
+	};
 }
 
 /** Anthropic-shaped payload with both account-wide windows. */
@@ -279,6 +311,37 @@ describe("GET /public/v1/runway", () => {
 		expect(JSON.stringify(toPublicRunwayDto(snapshot))).not.toContain(
 			"unauthenticated",
 		);
+	});
+
+	it("performs NO cache write — a public GET may not move routing state", async () => {
+		// The Codex resolution's payload tier normally re-seeds the usage cache so
+		// the proxy can see what it reconstructed. That write mutates the state
+		// routing, throttling and capacity decisions read, for ten minutes, and
+		// this endpoint is unauthenticated: anything on the LAN could drive it.
+		const setUntimed = spyOn(usageCache, "setUntimed");
+		try {
+			const dbOps = makeDbOps({
+				accounts: [
+					makeAccount({ id: "codex-1", provider: "codex", last_used: BASE }),
+				],
+				keys: [makeKey({ pinnedProviders: ["codex"] })],
+				payloadRows: [codexPayloadRow(80, BASE + 3 * DAY_MS, BASE - MINUTE_MS)],
+			});
+			// Empty cache, as after a restart.
+			expect(usageCache.peekWithAge("codex-1")).toBeNull();
+
+			const snapshot = await read(dbOps);
+
+			// The RESULT is unchanged: the recovered reading still reached the scan,
+			// so the key is stated rather than blind.
+			expect(snapshot.coverage.statedKeyCount).toBe(1);
+			expect(snapshot.worstStatedOutcome).not.toBeNull();
+			// Only the write disappeared.
+			expect(setUntimed).not.toHaveBeenCalled();
+			expect(usageCache.peekWithAge("codex-1")).toBeNull();
+		} finally {
+			setUntimed.mockRestore();
+		}
 	});
 
 	it("reports an elapsed projection as out-now, matching the ranking that chose it", async () => {

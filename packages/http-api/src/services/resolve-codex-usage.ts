@@ -168,6 +168,30 @@ function readPersistedCodexUsageColumn(
 }
 
 /**
+ * Whether a resolution is allowed to WRITE.
+ *
+ * The stored-payload tier re-seeds the live usage cache so the PROXY can see
+ * the reading it reconstructed. That write is a mutation of the state routing,
+ * throttling and capacity decisions read, and it must never be performed on
+ * behalf of a caller that is only reading — an unauthenticated
+ * `GET /public/v1/runway` after a restart would otherwise change the pool's
+ * routing inputs for the next ten minutes.
+ *
+ * Required rather than defaulted, so a new call site has to decide which it is
+ * rather than inheriting a write it did not ask for. The resolution itself is
+ * identical either way: the same tier wins, under the same `source`, with the
+ * same stamp.
+ */
+export interface CodexUsageResolutionPolicy {
+	/**
+	 * `true` only for a request path that is entitled to refresh what the proxy
+	 * can see (`/api/accounts`, which is the surface that has always owned this
+	 * recovery). `false` for every read-only projection.
+	 */
+	seedCache: boolean;
+}
+
+/**
  * Resolve a Codex account's usage, reporting WHERE it came from and (for the
  * persisted column) WHEN it was observed.
  *
@@ -183,7 +207,8 @@ function readPersistedCodexUsageColumn(
  *      may predate the account's current window by hours.
  *
  * The distinction matters beyond labelling: only `"cache"` and `"payload"` are
- * reflected in the live usage cache (the payload scan re-seeds it), so only they
+ * reflected in the live usage cache (the payload scan re-seeds it, when the
+ * caller's {@link CodexUsageResolutionPolicy} permits a write), so only they
  * describe a reading the PROXY can also see. A `"column"` reading is
  * display-only.
  *
@@ -193,6 +218,10 @@ function readPersistedCodexUsageColumn(
  * the scan is skipped entirely. A winning column candidate is deliberately NOT
  * written back into the usage cache — re-seeding would relabel aged data as a
  * fresh live reading, which is the exact defect this resolution order fixes.
+ *
+ * `policy` decides whether this resolution may WRITE — see
+ * {@link CodexUsageResolutionPolicy}. It changes nothing about WHICH reading is
+ * returned or how it is labelled; only the cache re-seed disappears.
  */
 export async function getCachedOrPersistedCodexUsage(
 	db: ReturnType<DatabaseOperations["getAdapter"]>,
@@ -202,6 +231,7 @@ export async function getCachedOrPersistedCodexUsage(
 	persistedJson: string | null,
 	persistedObservedAt: number | null,
 	lastUsed: number | null,
+	policy: CodexUsageResolutionPolicy,
 ): Promise<{
 	data: FullUsageData | null;
 	source: "cache" | "column" | "payload" | null;
@@ -274,7 +304,13 @@ export async function getCachedOrPersistedCodexUsage(
 		// refresh would classify it as a live cache reading with a confident
 		// observation time — the same reading gaining full confidence between two
 		// refetches with no new provider evidence behind it.
-		usageCache.setUntimed(accountId, payloadCandidate.data);
+		//
+		// Gated on the caller's policy: this is the only write in the whole
+		// resolution, and a read-only projection must not perform it. The reading
+		// itself is returned either way.
+		if (policy.seedCache) {
+			usageCache.setUntimed(accountId, payloadCandidate.data);
+		}
 		log.debug(`Recovered Codex usage from stored payload for ${accountName}`);
 		return {
 			data: payloadCandidate.data as FullUsageData,
