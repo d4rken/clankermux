@@ -697,6 +697,7 @@ export function AccountListItem({
 					provider={account.provider}
 					showWeekly={providerShowsWeeklyUsage(account.provider)}
 					prediction={account.prediction}
+					burnAnchors={account.burnAnchors}
 					earliestResets={earliestResets}
 					latestResets={latestResets}
 					compact

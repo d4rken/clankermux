@@ -36,13 +36,16 @@ export {
 	UNSUPPORTED_RUNTIME_EXIT_CODE,
 } from "./bun-runtime-floor";
 export {
+	ANCHOR_FULL_CONFIDENCE_MIN_SPAN_MS,
 	computeCapacityRunway,
 	estimateWindowExhaustion,
 	type LifetimeConfidence,
 	RUNWAY_HORIZON_MS,
 	type RunwayAccountInput,
+	type RunwayAssumedCredits,
 	type RunwayCause,
 	type RunwayOutcome,
+	type RunwayResetCreditBank,
 	type RunwayWindowInput,
 	type WindowExhaustion,
 	type WindowExhaustionInput,

@@ -474,6 +474,108 @@ describe("windowObservations fallback", () => {
 	});
 });
 
+describe("burn anchors", () => {
+	it("threads a weekly anchor into the projection", () => {
+		const sevenReset = NOW + 1.5 * DAY;
+		// 40% weekly at 1.5d-to-reset: structurally that is 40% over 5.5 days —
+		// far too slow to exhaust before reset. With the gift anchored 12h ago
+		// the true rate is 40%/12h, which exhausts in 18h (< 1.5d), so the
+		// anchor is what flips the outcome to a runway.
+		const accounts = [
+			mkAccount({
+				id: "gifted",
+				name: "gifted",
+				usageData: usage(10, NOW + 4 * HOUR, 40, sevenReset),
+				usageObservedAtMs: NOW,
+				burnAnchors: {
+					sevenDay: {
+						anchorMs: NOW - 12 * HOUR,
+						anchorPct: 0,
+						windowResetMs: sevenReset,
+					},
+				},
+			}),
+		];
+
+		const runways = computeApiKeyRunways([mkKey({ id: "k1" })], accounts, NOW);
+		const outcome = byId(runways, "k1").outcome;
+
+		expect(outcome.kind).toBe("runway");
+		if (outcome.kind === "runway") {
+			expect(outcome.exhaustsAtMs).toBe(NOW + 18 * HOUR);
+		}
+	});
+
+	it("ignores an anchor keyed to a different window instance", () => {
+		const sevenReset = NOW + 1.5 * DAY;
+		const anchored = mkAccount({
+			id: "stale-anchor",
+			name: "stale-anchor",
+			usageData: usage(10, NOW + 4 * HOUR, 40, sevenReset),
+			usageObservedAtMs: NOW,
+			burnAnchors: {
+				sevenDay: {
+					anchorMs: NOW - 12 * HOUR,
+					anchorPct: 0,
+					// A reset from the PREVIOUS window instance.
+					windowResetMs: sevenReset - 7 * DAY,
+				},
+			},
+		});
+		const plain = mkAccount({
+			id: "stale-anchor",
+			name: "stale-anchor",
+			usageData: usage(10, NOW + 4 * HOUR, 40, sevenReset),
+			usageObservedAtMs: NOW,
+		});
+
+		const withAnchor = computeApiKeyRunways(
+			[mkKey({ id: "k1" })],
+			[anchored],
+			NOW,
+		);
+		const without = computeApiKeyRunways([mkKey({ id: "k1" })], [plain], NOW);
+
+		expect(byId(withAnchor, "k1").outcome).toEqual(byId(without, "k1").outcome);
+	});
+});
+
+describe("reset-credit bank pass-through", () => {
+	it("threads the bank into the scan and surfaces the assumption", () => {
+		const accounts = [
+			mkAccount({
+				id: "codex-1",
+				name: "codex-1",
+				provider: "codex",
+				usageData: {
+					five_hour: null,
+					seven_day: {
+						utilization: 100,
+						resets_at: new Date(NOW + 2 * DAY).toISOString(),
+					},
+				} as never,
+				codexResetCredits: {
+					onWeeklyLimitEnabled: true,
+					onExpiryEnabled: false,
+					credits: [{ expiresAtMs: null }],
+				},
+			}),
+		];
+
+		const runways = computeApiKeyRunways([mkKey({ id: "k1" })], accounts, NOW);
+		const outcome = byId(runways, "k1").outcome;
+
+		// Without the bank this pool is out now; the modeled revival (5d to
+		// re-burn a 7d window with 2d left) clears the horizon instead.
+		expect(outcome.kind).toBe("beyond-horizon");
+		if (outcome.kind === "beyond-horizon") {
+			expect(outcome.assumedResetCredits).toEqual([
+				{ accountId: "codex-1", count: 1 },
+			]);
+		}
+	});
+});
+
 describe("summarizeKeyRunways", () => {
 	function rowWith(
 		keyId: string,

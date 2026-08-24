@@ -19,6 +19,19 @@ export interface RunwayCause {
 	windowKind: string;
 }
 
+/**
+ * Reset credits the scan ASSUMED will be applied for one account — banked
+ * OpenAI usage-reset credits the auto-applier is configured to redeem at
+ * exhaustion. The outcome depends on those redemptions actually happening, so
+ * the display must disclose the assumption instead of presenting the extended
+ * runway as pure measurement.
+ */
+export interface RunwayAssumedCredits {
+	accountId: string;
+	/** How many credits the scan consumed from this account's modeled bank. */
+	count: number;
+}
+
 export type RunwayOutcome =
 	| { kind: "no-accounts" }
 	| { kind: "unknown" }
@@ -26,11 +39,14 @@ export type RunwayOutcome =
 			kind: "out-now";
 			causes: RunwayCause[];
 			unprojectableAccountIds: string[];
+			/** Present (non-empty) only when a credit assumption shaped the scan. */
+			assumedResetCredits?: RunwayAssumedCredits[];
 	  }
 	| {
 			kind: "beyond-horizon";
 			horizonMs: number;
 			unprojectableAccountIds: string[];
+			assumedResetCredits?: RunwayAssumedCredits[];
 	  }
 	| {
 			kind: "runway";
@@ -38,6 +54,7 @@ export type RunwayOutcome =
 			durationMs: number;
 			causes: RunwayCause[];
 			unprojectableAccountIds: string[];
+			assumedResetCredits?: RunwayAssumedCredits[];
 	  };
 
 /** The account-wide quota windows the runway scan models. */

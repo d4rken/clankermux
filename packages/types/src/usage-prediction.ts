@@ -25,6 +25,38 @@ export interface AccountUsagePrediction {
 	sevenDay?: UsagePrediction;
 }
 
+/**
+ * The last observed mid-window downward usage revision for one account window —
+ * a provider "gift" reset or an applied reset credit, detected as a drop in the
+ * reported percentage while `resets_at` stayed put.
+ *
+ * Consumed by the lifetime-average paths of `estimateWindowExhaustion`: after
+ * such an event the structural window start no longer describes when the
+ * reported percentage began accumulating, so a slope computed against it is
+ * underestimated by up to an order of magnitude. The anchor supplies the
+ * honest origin: slope = (pct − anchorPct) / (elapsed since anchorMs).
+ *
+ * `anchorPct` exists because gifts need not reset to zero — a partial refund
+ * anchors at whatever the post-revision reading was. `windowResetMs` binds the
+ * anchor to ONE window instance; consumers must drop an anchor whose reset does
+ * not match the projected reading's reset (within jitter tolerance), so a
+ * stale anchor can never distort the next window.
+ */
+export interface UsageBurnAnchor {
+	/** Observation time of the first post-revision reading, ms since epoch. */
+	anchorMs: number;
+	/** The reported percentage at that reading (0-100). */
+	anchorPct: number;
+	/** Reset instant of the window the revision happened in, ms since epoch. */
+	windowResetMs: number;
+}
+
+/** Per-window burn anchors for one account, as served on `AccountResponse`. */
+export interface AccountBurnAnchors {
+	fiveHour?: UsageBurnAnchor | null;
+	sevenDay?: UsageBurnAnchor | null;
+}
+
 // Real Anthropic polls report the SAME reset instant but the stored epoch-ms
 // jitters by ~±1s. Shared with the pure algorithm's segmentation and the
 // usable-gate reset match.

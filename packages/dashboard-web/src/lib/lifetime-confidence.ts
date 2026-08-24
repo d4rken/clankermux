@@ -1,4 +1,5 @@
 import type { LifetimeConfidence } from "@clankermux/core";
+import type { AccountBurnAnchors, UsageBurnAnchor } from "@clankermux/types";
 
 /**
  * Which windows the dashboard trusts the lifetime average on.
@@ -51,4 +52,26 @@ export function usageObservedAtMs(
 	if (!usageAsOfIso) return null;
 	const asOfMs = new Date(usageAsOfIso).getTime();
 	return Number.isFinite(asOfMs) ? asOfMs : null;
+}
+
+/**
+ * The third leg of the projection input set, beside
+ * {@link weeklyLifetimeConfidence} and {@link usageObservedAtMs}: the burn
+ * anchor the server detected for one account-wide window, out of
+ * `AccountResponse.burnAnchors`.
+ *
+ * Lives here for the same reason the other two do: every surface that calls
+ * `estimateWindowExhaustion` (progress message, pool at-risk list, forecast
+ * line) must map window kind → anchor identically, or two surfaces could
+ * project the same reading from two different origins. Only the account-wide
+ * windows exist in the registry; any other window kind returns null.
+ */
+export function windowBurnAnchor(
+	burnAnchors: AccountBurnAnchors | null | undefined,
+	windowKind: string | null,
+): UsageBurnAnchor | null {
+	if (!burnAnchors || !windowKind) return null;
+	if (windowKind === "five_hour") return burnAnchors.fiveHour ?? null;
+	if (windowKind === "seven_day") return burnAnchors.sevenDay ?? null;
+	return null;
 }

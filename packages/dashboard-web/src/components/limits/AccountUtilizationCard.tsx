@@ -145,6 +145,7 @@ export function AccountUtilizationCard({
 									usageWindow={account.usageWindow}
 									usageData={account.usageData}
 									prediction={account.prediction}
+									burnAnchors={account.burnAnchors}
 									staleUsage={account.staleUsage}
 									usageAsOfIso={account.usageAsOfIso}
 									usageRateLimitedUntil={account.usageRateLimitedUntil}

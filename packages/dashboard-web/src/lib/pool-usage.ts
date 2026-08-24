@@ -12,11 +12,13 @@ import {
 import type {
 	AccountResponse,
 	AnthropicUsageData,
+	UsageBurnAnchor,
 	UsagePrediction,
 } from "@clankermux/types";
 import {
 	usageObservedAtMs,
 	weeklyLifetimeConfidence,
+	windowBurnAnchor,
 } from "./lifetime-confidence";
 
 export type PoolWindow = "five_hour" | "seven_day";
@@ -422,6 +424,9 @@ export function computePoolUsage(
 	// window's full-confidence estimate anchors its ETA there instead of at
 	// `now`, so a list rebuilt on an unchanged poll reports the same instants.
 	const observedAt = new Map<string, number | null>();
+	// And the server-detected mid-window revision (gift reset / applied credit)
+	// for this window, which re-anchors the lifetime slope's origin.
+	const anchors = new Map<string, UsageBurnAnchor | null>();
 
 	const eligible = eligibleProvidersFor(window);
 
@@ -483,6 +488,7 @@ export function computePoolUsage(
 				: account.prediction?.sevenDay,
 		);
 		observedAt.set(account.id, usageObservedAtMs(account.usageAsOfIso));
+		anchors.set(account.id, windowBurnAnchor(account.burnAnchors, window));
 	}
 
 	const activeAverage =
@@ -541,6 +547,7 @@ export function computePoolUsage(
 				prediction: predictions.get(c.accountId),
 				lifetimeConfidence: weeklyLifetimeConfidence(window),
 				observedAtMs: observedAt.get(c.accountId) ?? null,
+				anchor: anchors.get(c.accountId) ?? null,
 			},
 			now,
 		);

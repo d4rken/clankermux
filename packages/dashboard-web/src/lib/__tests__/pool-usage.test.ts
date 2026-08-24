@@ -428,6 +428,71 @@ describe("computePoolUsage", () => {
 	describe("atRisk projection", () => {
 		const FIVE_HOUR_MS = 5 * 60 * 60 * 1000;
 		const SEVEN_DAY_MS = 7 * 24 * 60 * 60 * 1000;
+		const HOUR_MS = 60 * 60 * 1000;
+
+		it("re-anchors the weekly at-risk projection at a served burn anchor", () => {
+			// Gift reset 12h ago (60% → ~0), then 40% burned since. Structurally,
+			// 40% over 5.5 elapsed days clears the reset with days to spare; the
+			// anchored pace of 40%/12h exhausts 18h out — inside the 36h left.
+			const resetMs = NOW + 1.5 * 24 * HOUR_MS;
+			const account = mkAccount({
+				name: "gifted",
+				provider: "anthropic",
+				usageData: {
+					five_hour: { utilization: 5, resets_at: null },
+					seven_day: {
+						utilization: 40,
+						resets_at: new Date(resetMs).toISOString(),
+					},
+				} as never,
+				usageAsOfIso: new Date(NOW).toISOString(),
+				burnAnchors: {
+					sevenDay: {
+						anchorMs: NOW - 12 * HOUR_MS,
+						anchorPct: 0,
+						windowResetMs: resetMs,
+					},
+				},
+			});
+
+			const withAnchor = computePoolUsage([account], "seven_day", NOW);
+			expect(withAnchor.atRisk).toHaveLength(1);
+			expect(withAnchor.atRisk[0].exhaustsAtMs).toBe(NOW + 18 * HOUR_MS);
+
+			const plain = mkAccount({
+				...account,
+				burnAnchors: null,
+			});
+			const without = computePoolUsage([plain], "seven_day", NOW);
+			expect(without.atRisk).toHaveLength(0);
+		});
+
+		it("ignores an anchor keyed to another window instance", () => {
+			const resetMs = NOW + 1.5 * 24 * HOUR_MS;
+			const account = mkAccount({
+				name: "stale-anchored",
+				provider: "anthropic",
+				usageData: {
+					five_hour: { utilization: 5, resets_at: null },
+					seven_day: {
+						utilization: 40,
+						resets_at: new Date(resetMs).toISOString(),
+					},
+				} as never,
+				usageAsOfIso: new Date(NOW).toISOString(),
+				burnAnchors: {
+					sevenDay: {
+						anchorMs: NOW - 12 * HOUR_MS,
+						anchorPct: 0,
+						// The PREVIOUS window's reset: must not re-anchor this one.
+						windowResetMs: resetMs - SEVEN_DAY_MS,
+					},
+				},
+			});
+
+			const result = computePoolUsage([account], "seven_day", NOW);
+			expect(result.atRisk).toHaveLength(0);
+		});
 
 		function mkAnthropicAt(
 			name: string,

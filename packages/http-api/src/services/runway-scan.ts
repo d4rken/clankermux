@@ -7,16 +7,19 @@ import {
 	type KeyRunway,
 	RUNWAY_HORIZON_MS,
 	type RunwayAccountSource,
+	type RunwayResetCreditBank,
 	type RunwayWindowObservations,
 	SEVEN_DAY_ELIGIBLE_PROVIDERS,
 } from "@clankermux/core";
 import type { DatabaseOperations } from "@clankermux/database";
 import {
 	type AnyUsageData,
+	codexRateLimitResetCreditsCache,
 	UI_STALE_HORIZON_MS,
 	USAGE_CACHE_TTL_MS,
 	usageCache,
 } from "@clankermux/providers";
+import { getUsageRevisionAnchor } from "@clankermux/proxy";
 import type {
 	Account,
 	AccountUsagePrediction,
@@ -141,6 +144,70 @@ import {
  * it is a module singleton, and `accounts.ts` / `health.ts` reach it the same
  * way.
  */
+
+/**
+ * Oldest a credit-cache reading may be and still seed the runway's modeled
+ * bank. The cache refreshes on the account page and on applier ticks, so a
+ * reading older than a day usually means nothing has looked at this account's
+ * credits lately — and a stale bank could only LENGTHEN the runway, so absence
+ * degrades conservatively to "no credits modeled". Inline named constant — NO
+ * env var / feature gate.
+ */
+const CREDIT_BANK_MAX_AGE_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * The reset-credit bank the scan may model for one account, or null.
+ *
+ * Null unless ALL of: a Codex account, at least one auto-apply opt-in enabled
+ * (the scan must never assume a redemption the applier would not perform), and
+ * a fresh credit-cache reading with at least one available credit.
+ *
+ * `availableCount` is the authoritative bank SIZE — in both directions. The
+ * detail list only refines expiries: capped short of the count, the missing
+ * credits are modeled with unknown expiry (with no details at all this
+ * degenerates to `availableCount` synthetic credits); listing MORE available
+ * rows than the count must not inflate the bank, so the earliest-expiring
+ * `availableCount` of them are kept (those are consumed first anyway, so the
+ * refinement that survives is the conservative one). The "Assumes N reset
+ * credit(s)" display row discloses the assumption either way.
+ */
+function buildCreditBank(
+	account: Account,
+	now: number,
+): RunwayResetCreditBank | null {
+	if (account.provider !== "codex") return null;
+	const onExpiryEnabled =
+		account.codex_auto_apply_reset_credits_enabled === true;
+	const onWeeklyLimitEnabled =
+		account.codex_auto_apply_reset_on_weekly_limit_enabled === true;
+	if (!onExpiryEnabled && !onWeeklyLimitEnabled) return null;
+
+	const entry = codexRateLimitResetCreditsCache.get(account.id);
+	if (!entry) return null;
+	if (now - entry.fetchedAt > CREDIT_BANK_MAX_AGE_MS) return null;
+
+	const summary = entry.summary;
+	const listed = (summary.credits ?? [])
+		.filter((credit) => credit.status === "available")
+		.map((credit) => ({
+			// Wire seconds → ms; null stays "no known expiry".
+			expiresAtMs: credit.expiresAt != null ? credit.expiresAt * 1000 : null,
+		}))
+		.sort((a, b) => {
+			if (a.expiresAtMs == null && b.expiresAtMs == null) return 0;
+			if (a.expiresAtMs == null) return 1;
+			if (b.expiresAtMs == null) return -1;
+			return a.expiresAtMs - b.expiresAtMs;
+		});
+	const bankSize = Math.max(0, Math.trunc(summary.availableCount));
+	const credits = listed.slice(0, bankSize);
+	for (let i = credits.length; i < bankSize; i++) {
+		credits.push({ expiresAtMs: null });
+	}
+	if (credits.length === 0) return null;
+
+	return { onWeeklyLimitEnabled, onExpiryEnabled, credits };
+}
 
 /**
  * A prediction is only served when the estimator actually established a trend.
@@ -577,6 +644,24 @@ export async function computeRunwayScan(
 
 	const sources: RunwayAccountSource[] = accounts.map((account) => {
 		const scan = scanObservationsByAccount.get(account.id) ?? null;
+		// Anchors are keyed to the SCAN WINNER's window resets — the reading the
+		// runway actually projects from. An anchor from another window instance
+		// returns null here rather than shipping something the estimator would
+		// reject anyway.
+		const fiveHourAnchor = scan
+			? getUsageRevisionAnchor(
+					account.id,
+					"five_hour",
+					scan.windows.fiveHour?.resetMs ?? null,
+				)
+			: null;
+		const sevenDayAnchor = scan
+			? getUsageRevisionAnchor(
+					account.id,
+					"seven_day",
+					scan.windows.sevenDay?.resetMs ?? null,
+				)
+			: null;
 		return {
 			id: account.id,
 			name: account.name,
@@ -587,6 +672,11 @@ export async function computeRunwayScan(
 			windowObservations: scan?.windows ?? null,
 			usageObservedAtMs: scan?.observedAtMs ?? null,
 			prediction: predictionByAccount.get(account.id) ?? null,
+			burnAnchors:
+				fiveHourAnchor !== null || sevenDayAnchor !== null
+					? { fiveHour: fiveHourAnchor, sevenDay: sevenDayAnchor }
+					: null,
+			codexResetCredits: buildCreditBank(account, now),
 		};
 	});
 

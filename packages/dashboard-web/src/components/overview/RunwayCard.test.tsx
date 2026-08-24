@@ -421,4 +421,45 @@ describe("RunwayCard", () => {
 		expect(html).toContain("1 key");
 		expect(html).not.toContain(UNAUTHENTICATED_POOL_KEY_NAME);
 	});
+
+	describe("assumed reset credits", () => {
+		it("discloses when the figure depends on assumed credit redemptions", () => {
+			const html = render({
+				runways: [
+					row({
+						outcome: {
+							kind: "runway",
+							exhaustsAtMs: NOW + 2 * DAY,
+							durationMs: 2 * DAY,
+							causes: [{ accountId: "acc-1", windowKind: "seven_day" }],
+							unprojectableAccountIds: [],
+							assumedResetCredits: [{ accountId: "acc-1", count: 2 }],
+						},
+					}),
+				],
+			});
+
+			expect(html).toContain("Assumes");
+			expect(html).toContain("2 reset credits");
+		});
+
+		it("shows nothing when no credit was assumed", () => {
+			const html = render({
+				runways: [
+					row({
+						outcome: {
+							kind: "runway",
+							exhaustsAtMs: NOW + 2 * DAY,
+							durationMs: 2 * DAY,
+							causes: [],
+							unprojectableAccountIds: [],
+						},
+					}),
+				],
+			});
+
+			expect(html).not.toContain("Assumes");
+			expect(html).not.toContain("reset credit");
+		});
+	});
 });

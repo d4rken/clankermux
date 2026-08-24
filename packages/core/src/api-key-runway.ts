@@ -1,15 +1,18 @@
 import type {
+	AccountBurnAnchors,
 	AccountUsagePrediction,
 	ApiKeyResponse,
 	FullUsageData,
 	RunwayKeyEntry,
 	RunwayOutcome,
+	UsageBurnAnchor,
 } from "@clankermux/types";
 import { isAccountAllowedByPin, type RoutingPin } from "./api-key-pin";
 import {
 	computeCapacityRunway,
 	type LifetimeConfidence,
 	type RunwayAccountInput,
+	type RunwayResetCreditBank,
 	type RunwayWindowInput,
 } from "./capacity-runway";
 import { computeWindowStartMs } from "./throttle-utils";
@@ -85,6 +88,20 @@ export interface RunwayAccountSource {
 	 * amber-capped now-anchored estimate — never a substituted `Date.now()`.
 	 */
 	usageObservedAtMs?: number | null;
+	/**
+	 * Last observed mid-window downward revision per window (gift reset /
+	 * applied reset credit), keyed to the SAME resolved reading as
+	 * `usageObservedAtMs`. The estimator validates each anchor against the
+	 * projected window's reset identity, so a stale entry degrades to the
+	 * structural estimate rather than distorting it.
+	 */
+	burnAnchors?: AccountBurnAnchors | null;
+	/**
+	 * Modeled reset-credit bank for the scan (see
+	 * {@link RunwayResetCreditBank}). Assembled by the caller from the credit
+	 * cache and the account's auto-apply opt-ins; absent → no credits modeled.
+	 */
+	codexResetCredits?: RunwayResetCreditBank | null;
 }
 
 /**
@@ -110,6 +127,7 @@ function windowInput(
 	extracted: ExtractedValue | null,
 	prediction: RunwayWindowInput["prediction"],
 	observedAtMs: number | null,
+	anchor: UsageBurnAnchor | null,
 	lifetimeConfidence?: LifetimeConfidence,
 ): RunwayWindowInput | null {
 	if (extracted == null || extracted.pct == null) return null;
@@ -128,6 +146,7 @@ function windowInput(
 		// describes both, and stating it only where the current policy happens to
 		// consume it would make the field look like a property of the weekly window.
 		observedAtMs,
+		anchor,
 	};
 }
 
@@ -172,6 +191,7 @@ export function toRunwayAccountInput(
 			usageData ? extractFiveHour(usageData) : (observations?.fiveHour ?? null),
 			account.prediction?.fiveHour,
 			observedAtMs,
+			account.burnAnchors?.fiveHour ?? null,
 		);
 		if (window) windows.push(window);
 	}
@@ -181,6 +201,7 @@ export function toRunwayAccountInput(
 			usageData ? extractSevenDay(usageData) : (observations?.sevenDay ?? null),
 			account.prediction?.sevenDay,
 			observedAtMs,
+			account.burnAnchors?.sevenDay ?? null,
 			// The weekly display estimator IS the lifetime average (it beat the
 			// regression on held-out data), so its projection is a measured best
 			// estimate rather than a fallback nobody checked. It reaches red, so it
@@ -191,7 +212,12 @@ export function toRunwayAccountInput(
 		if (window) windows.push(window);
 	}
 
-	return { accountId: account.id, unmetered: false, windows };
+	return {
+		accountId: account.id,
+		unmetered: false,
+		windows,
+		codexResetCredits: account.codexResetCredits ?? null,
+	};
 }
 
 function runwayFor(
@@ -276,6 +302,11 @@ export function effectiveRunwayOutcome(
 		kind: "out-now",
 		causes: outcome.causes,
 		unprojectableAccountIds: outcome.unprojectableAccountIds,
+		// Carried through: an outage the scan reached only by ASSUMING credit
+		// redemptions is still assumption-dependent after the ETA lapses.
+		...(outcome.assumedResetCredits !== undefined
+			? { assumedResetCredits: outcome.assumedResetCredits }
+			: {}),
 	};
 }
 
