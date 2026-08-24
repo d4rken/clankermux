@@ -418,7 +418,19 @@ describe("transparent overload hold", () => {
 			ctx,
 		);
 		const slotKey = getOverloadHoldSlotKey("anthropic", MODEL);
-		await waitFor(() => getActiveOverloadHoldCount(slotKey) > 0);
+		// On failure, release the parked attempt AND let the request settle before
+		// rethrowing. Releasing alone is not enough: if the hold was entered, its
+		// own `finally` — which frees the slot and clears the idle re-arm
+		// interval — cannot run until the request completes, and `afterEach`
+		// resets counters but cannot clear a live interval. Without this a failing
+		// assertion leaks a timer into the rest of the file.
+		try {
+			await waitFor(() => getActiveOverloadHoldCount(slotKey) > 0);
+		} catch (err) {
+			letSecondFinish();
+			await pending.catch(() => {});
+			throw err;
+		}
 		letSecondFinish();
 
 		const res = await pending;
