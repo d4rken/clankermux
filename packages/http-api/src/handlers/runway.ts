@@ -338,20 +338,18 @@ function buildCreditBank(
 	if (now - entry.fetchedAt > CREDIT_BANK_MAX_AGE_MS) return null;
 
 	const summary = entry.summary;
-	let credits: Array<{ expiresAtMs: number | null }>;
-	if (summary.credits != null) {
-		credits = summary.credits
-			.filter((credit) => credit.status === "available")
-			.map((credit) => ({
-				// Wire seconds → ms; null stays "no known expiry".
-				expiresAtMs: credit.expiresAt != null ? credit.expiresAt * 1000 : null,
-			}));
-	} else if (summary.availableCount > 0) {
-		credits = Array.from({ length: summary.availableCount }, () => ({
-			expiresAtMs: null,
+	const credits: Array<{ expiresAtMs: number | null }> = (summary.credits ?? [])
+		.filter((credit) => credit.status === "available")
+		.map((credit) => ({
+			// Wire seconds → ms; null stays "no known expiry".
+			expiresAtMs: credit.expiresAt != null ? credit.expiresAt * 1000 : null,
 		}));
-	} else {
-		credits = [];
+	// `availableCount` is the authoritative TOTAL and the detail list may be
+	// capped short of it (or absent entirely). Model the difference as credits
+	// of unknown expiry rather than silently undercounting the bank — with no
+	// details at all this degenerates to `availableCount` synthetic credits.
+	for (let i = credits.length; i < summary.availableCount; i++) {
+		credits.push({ expiresAtMs: null });
 	}
 	if (credits.length === 0) return null;
 

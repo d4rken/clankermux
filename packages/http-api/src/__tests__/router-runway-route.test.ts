@@ -190,6 +190,76 @@ describe("router: GET /api/runway", () => {
 		}
 	});
 
+	it("pads a capped detail list up to the authoritative availableCount", async () => {
+		const now = Date.now();
+		const HOUR = 60 * 60 * 1000;
+		const sevenReset = now + 2 * 24 * HOUR;
+
+		const codexContext = makeContext();
+		(
+			codexContext.dbOps as unknown as {
+				getAllAccounts: () => Promise<unknown[]>;
+			}
+		).getAllAccounts = async () => [
+			{
+				id: ACCOUNT_ID,
+				name: "Router account",
+				provider: "codex",
+				codex_auto_apply_reset_credits_enabled: false,
+				codex_auto_apply_reset_on_weekly_limit_enabled: true,
+			},
+		];
+		usageCache.set(ACCOUNT_ID, {
+			five_hour: null,
+			seven_day: {
+				utilization: 100,
+				resets_at: new Date(sevenReset).toISOString(),
+			},
+		} as never);
+		// availableCount says 2, but the detail list carries only ONE row — and
+		// that one already expired, so it cannot cover the exhaustion at `now`.
+		// Only the padded synthetic credit (unknown expiry) can revive the
+		// window; modeling the list alone would report the pool out now.
+		codexRateLimitResetCreditsCache.set(
+			ACCOUNT_ID,
+			{
+				availableCount: 2,
+				credits: [
+					{
+						id: "credit-exp",
+						resetType: "usage",
+						status: "available",
+						grantedAt: Math.floor(now / 1000) - 7200,
+						expiresAt: Math.floor(now / 1000) - 3600,
+						title: null,
+						description: null,
+					},
+				],
+			} as never,
+			now,
+		);
+
+		try {
+			const router = new APIRouter(codexContext);
+			const url = new URL("http://localhost/api/runway");
+			const response = await router.handleRequest(
+				url,
+				new Request(url, { method: "GET" }),
+			);
+			const body = (await response?.json()) as RunwayResponse;
+
+			const key = body.keys[0];
+			expect(key.outcome.kind).toBe("beyond-horizon");
+			if (key.outcome.kind === "beyond-horizon") {
+				expect(key.outcome.assumedResetCredits).toEqual([
+					{ accountId: ACCOUNT_ID, count: 1 },
+				]);
+			}
+		} finally {
+			codexRateLimitResetCreditsCache.delete(ACCOUNT_ID);
+		}
+	});
+
 	it("ignores a stale credit-cache reading (no bank, no assumption)", async () => {
 		const now = Date.now();
 		const HOUR = 60 * 60 * 1000;

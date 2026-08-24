@@ -292,6 +292,11 @@ export function effectiveRunwayOutcome(
 		kind: "out-now",
 		causes: outcome.causes,
 		unprojectableAccountIds: outcome.unprojectableAccountIds,
+		// Carried through: an outage the scan reached only by ASSUMING credit
+		// redemptions is still assumption-dependent after the ETA lapses.
+		...(outcome.assumedResetCredits !== undefined
+			? { assumedResetCredits: outcome.assumedResetCredits }
+			: {}),
 	};
 }
 

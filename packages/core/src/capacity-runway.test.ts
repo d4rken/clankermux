@@ -514,6 +514,7 @@ describe("estimateWindowExhaustion with a burn anchor", () => {
 				resetsAtMs: RESET,
 				windowStartMs: WINDOW_START,
 				prediction: null,
+				observedAtMs: NOW,
 				anchor: giftAnchor,
 			},
 			NOW,
@@ -613,6 +614,66 @@ describe("estimateWindowExhaustion with a burn anchor", () => {
 		);
 		expect(result.source).toBe("regression");
 		expect(result.exhaustsAtMs).toBe(NOW + 5 * HOUR);
+	});
+
+	it("treats the reading AT the anchor as anchored, not structural", () => {
+		// The first post-revision sample IS the anchor: observedAtMs equals
+		// anchorMs and the reading's pct equals anchorPct. Falling through to
+		// the structural estimate here would render a confident projection from
+		// PRE-revision burn — the exact number the anchor exists to retire.
+		const result = estimateWindowExhaustion(
+			{
+				...fullInput,
+				utilizationPct: 30,
+				observedAtMs: GIFT_AT,
+				anchor: { ...giftAnchor, anchorPct: 30 },
+			},
+			NOW,
+		);
+		expect(result.anchored).toBe(true);
+		expect(result.slopePctPerHour).toBe(0);
+		expect(result.exhaustsAtMs).toBeNull();
+		expect(result.lowConfidence).toBe(true);
+	});
+
+	it("ignores an anchor newer than the projected reading", () => {
+		// A stale reading from BEFORE the revision must not be mixed with the
+		// post-revision anchor — the pair spans opposite sides of the event.
+		const result = estimateWindowExhaustion(
+			{
+				...fullInput,
+				observedAtMs: GIFT_AT - 2 * HOUR,
+				anchor: giftAnchor,
+			},
+			NOW,
+		);
+		expect(result.anchored ?? false).toBe(false);
+	});
+
+	it("ignores an anchor when the reading's observation time is unknown", () => {
+		// Without an observation time the reading cannot be placed relative to
+		// the revision; the low path degrades to the structural estimate rather
+		// than guessing.
+		const withAnchor = estimateWindowExhaustion(
+			{
+				utilizationPct: 40,
+				resetsAtMs: RESET,
+				windowStartMs: WINDOW_START,
+				prediction: null,
+				anchor: giftAnchor,
+			},
+			NOW,
+		);
+		const without = estimateWindowExhaustion(
+			{
+				utilizationPct: 40,
+				resetsAtMs: RESET,
+				windowStartMs: WINDOW_START,
+				prediction: null,
+			},
+			NOW,
+		);
+		expect(withAnchor).toEqual(without);
 	});
 
 	it("does not disturb the terminal branches", () => {
@@ -1214,6 +1275,51 @@ describe("computeCapacityRunway with a reset-credit bank", () => {
 		expect(result.assumedResetCredits).toEqual([
 			{ accountId: "codex-1", count: 1 },
 		]);
+	});
+
+	it("expiry truncation actually shortens the dead span (pool-visible)", () => {
+		// Account A is weekly-dead from NOW; its credit's expiry at +6h truncates
+		// that span. Account B is 5h-dead over [+7h, +20h). Without the
+		// truncation the pool's first all-dead instant is +7h (a 7h runway);
+		// with it, A is alive again by +6h and the pool never goes all-dead.
+		const a: RunwayAccountInput = {
+			accountId: "codex-1",
+			unmetered: false,
+			windows: [exhaustedWeekly()],
+			codexResetCredits: bank([{ expiresAtMs: NOW + 6 * HOUR }], {
+				weekly: false,
+				expiry: true,
+			}),
+		};
+		const b: RunwayAccountInput = {
+			accountId: "other",
+			unmetered: false,
+			windows: [
+				window({
+					windowKind: "five_hour",
+					utilizationPct: 50,
+					resetsAtMs: NOW + 20 * HOUR,
+					windowStartMs: NOW + 15 * HOUR,
+					prediction: prediction({
+						resetsAtMs: NOW + 20 * HOUR,
+						slopePerHour: 100 / 24,
+						etaExhaustMs: NOW + 7 * HOUR,
+					}),
+				}),
+			],
+		};
+
+		const withCredit = computeCapacityRunway([a, b], NOW);
+		expect(withCredit.kind).toBe("beyond-horizon");
+
+		const withoutCredit = computeCapacityRunway(
+			[{ ...a, codexResetCredits: undefined }, b],
+			NOW,
+		);
+		expect(withoutCredit.kind).toBe("runway");
+		if (withoutCredit.kind === "runway") {
+			expect(withoutCredit.exhaustsAtMs).toBe(NOW + 7 * HOUR);
+		}
 	});
 
 	it("expiry-only flags consume nothing at an exhaustion instant", () => {

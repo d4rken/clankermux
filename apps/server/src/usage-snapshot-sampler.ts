@@ -319,6 +319,13 @@ export class UsageSnapshotSampler {
 	async start(): Promise<void> {
 		const intervalMs = resolveSampleIntervalMs();
 
+		// Seed the revision anchors BEFORE any live feed can run: the registry's
+		// write-side ordering guard rejects readings older than the newest it has
+		// seen, so a live tick landing first would permanently block the replay of
+		// the current window's history — the exact revision the seed exists to
+		// recover. Best-effort and non-throwing, like the burn-slope bootstrap.
+		await this.seedRevisionAnchors();
+
 		let accountCount = 0;
 		try {
 			accountCount = (await this.deps.getAccounts()).length;
@@ -356,10 +363,6 @@ export class UsageSnapshotSampler {
 		// the whole startup deferral. Best-effort and non-throwing by construction,
 		// so it can never prevent the interval from being registered.
 		await this.refreshBurnSlopes();
-		// Same reasoning for the revision anchors: a gift reset from days ago is
-		// still the current window's burn origin, and without this replay every
-		// restart would silently revert the projections to the structural start.
-		await this.seedRevisionAnchors();
 	}
 
 	/** Stop the sampler: cancel the deferral timer and unregister the interval. */

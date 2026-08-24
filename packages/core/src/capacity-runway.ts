@@ -98,7 +98,9 @@ export interface WindowExhaustionInput {
 	 * source cannot honestly say (a payload-reconstructed reading), which is a
 	 * real answer and never `Date.now()` at render time.
 	 *
-	 * Read ONLY by the `lifetimeConfidence: "full"` path, and required there.
+	 * Required by the `lifetimeConfidence: "full"` path, and by ANY anchored
+	 * estimate (see `anchor` below) — an anchor only applies to a reading that
+	 * can be placed at/after it.
 	 * The lifetime ETA is `anchor + ((100 - pct) / pct) · (anchor - windowStart)`,
 	 * so anchoring it at `now` moves it later by MORE than a second per second of
 	 * wall clock on evidence that has not changed. Amber-capped that is invisible;
@@ -112,7 +114,9 @@ export interface WindowExhaustionInput {
 	 * The last mid-window downward revision observed for this window — a
 	 * provider "gift" reset or an applied reset credit. When present AND valid
 	 * for this window instance (reset identity within jitter tolerance, instant
-	 * inside the window span), BOTH lifetime paths measure elapsed time and
+	 * inside the window span, and a known `observedAtMs` at/after the anchor —
+	 * a reading that predates the revision or cannot be placed must not be mixed
+	 * with it), BOTH lifetime paths measure elapsed time and
 	 * consumed percentage from it instead of from the structural window start:
 	 * after such an event the structural start overstates the elapsed time and
 	 * the slope collapses (an 11x-optimistic weekly ETA has been observed).
@@ -238,7 +242,21 @@ export function estimateWindowExhaustion(
 	// below: elapsed time and consumed percentage are measured from the last
 	// mid-window revision instead of from `windowStartMs` / 0%. Resolved once,
 	// here, so the two paths cannot disagree about whether it applies.
-	const activeAnchor = usableAnchor(anchor, resetsAtMs, windowStartMs);
+	//
+	// Beyond the window-identity guards, the anchor applies only to a reading
+	// KNOWN to have been observed at/after it: a stale reading from BEFORE the
+	// revision paired with the post-revision anchor would compute a slope from
+	// evidence on opposite sides of the event, and a reading with no observation
+	// time cannot be placed relative to the event at all — both degrade to the
+	// structural estimate instead.
+	const windowAnchor = usableAnchor(anchor, resetsAtMs, windowStartMs);
+	const activeAnchor =
+		windowAnchor !== null &&
+		observedAtMs != null &&
+		Number.isFinite(observedAtMs) &&
+		observedAtMs >= windowAnchor.anchorMs
+			? windowAnchor
+			: null;
 
 	// Full confidence is earned by the pair (policy AND observation time), never
 	// by the policy alone: without an instant to anchor to, the only estimate
@@ -252,18 +270,19 @@ export function estimateWindowExhaustion(
 		Number.isFinite(observedAtMs) &&
 		observedAtMs > windowStartMs
 	) {
-		if (activeAnchor !== null && observedAtMs > activeAnchor.anchorMs) {
+		if (activeAnchor !== null) {
 			const anchoredElapsed = observedAtMs - activeAnchor.anchorMs;
 			const burned = pct - activeAnchor.anchorPct;
-			if (burned <= 0) {
-				// A refund after the anchor: hold flat, no ETA — the regression's
+			if (burned <= 0 || anchoredElapsed <= 0) {
+				// A refund after the anchor, or the reading AT the anchor itself
+				// (zero elapsed): hold flat, no ETA — the regression's
 				// non-positive-slope precedent. Never fall back to the structural
 				// start, which is exactly the overestimate the anchor removes.
 				return {
 					source: "lifetime-primary",
 					slopePctPerHour: 0,
 					exhaustsAtMs: null,
-					lowConfidence: false,
+					lowConfidence: anchoredElapsed < ANCHOR_FULL_CONFIDENCE_MIN_SPAN_MS,
 					anchored: true,
 				};
 			}
@@ -287,10 +306,10 @@ export function estimateWindowExhaustion(
 		};
 	}
 
-	if (activeAnchor !== null && now > activeAnchor.anchorMs) {
+	if (activeAnchor !== null) {
 		const anchoredElapsed = now - activeAnchor.anchorMs;
 		const burned = pct - activeAnchor.anchorPct;
-		if (burned <= 0) {
+		if (burned <= 0 || anchoredElapsed <= 0) {
 			return {
 				source: "lifetime-average",
 				slopePctPerHour: 0,
