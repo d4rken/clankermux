@@ -24,7 +24,6 @@ import {
 	lastObservedValueNotice,
 	notReportedNotice,
 	quotaWindowLabel,
-	summarizeCurrentGaps,
 	summarizeModelGaps,
 } from "../../lib/quota-drift-display";
 import { formatAxisTime } from "../../lib/time-format";
@@ -155,10 +154,6 @@ function WindowSeries({
 	// window, including the ones with no line at all — a model that was never
 	// separable has no series to inspect, so this list is the only place a
 	// reader learns it exists and why it is missing.
-	const currentGaps = useMemo(
-		() => (window ? summarizeCurrentGaps(window.models) : []),
-		[window],
-	);
 	const gaps = useMemo(
 		() => (window ? summarizeModelGaps(window.models) : []),
 		[window],
@@ -288,20 +283,6 @@ function WindowSeries({
 				<p className="text-xs text-muted-foreground max-w-prose">
 					{flatNotice}
 				</p>
-			) : null}
-			{currentGaps.length > 0 ? (
-				<div className="space-y-0.5 max-w-prose">
-					<p className="text-xs font-medium">
-						Not separately measurable right now
-					</p>
-					<ul className="text-xs text-muted-foreground space-y-0.5">
-						{currentGaps.map((gap) => (
-							<li key={gap.key}>
-								<span className="font-medium">{gap.key}</span> — {gap.text}
-							</li>
-						))}
-					</ul>
-				</div>
 			) : null}
 			{gaps.length > 0 ? (
 				<details className="group max-w-prose">

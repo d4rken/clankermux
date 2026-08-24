@@ -55,7 +55,7 @@ describe("QuotaDriftPanel", () => {
 		// No line is drawn, so there is no chart to carry a legend entry — but the
 		// model still has to be accounted for in words, or it vanishes from the
 		// page entirely and the reader never learns it exists.
-		expect(html).toContain("Not separately measurable right now");
+		expect(html).toContain("What this analysis could not measure, and why");
 		expect(html).toContain("claude-haiku-4-5");
 		expect(html).toContain(
 			"always runs alongside another model, so its own cost cannot be separated",
@@ -101,11 +101,11 @@ describe("QuotaDriftPanel", () => {
 		);
 	});
 
-	it("shows a still-unmeasurable model without expanding, and tucks history away", () => {
-		// One model recovered before the newest fit, one is still out of use. Only
-		// the second earns always-visible space; the first is reachable through
-		// the collapsed stretch history, so past gaps stay explainable without
-		// the default view carrying the whole ledger.
+	it("keeps the whole gap report collapsed, with nothing visible by default", () => {
+		// The cost table above the charts already names each model's current
+		// reason, so the chart section renders NO gap prose until the reader
+		// opens the expander. Static markup still contains the <details>
+		// children, so the split is asserted by position relative to the tag.
 		const html = renderToStaticMarkup(
 			<QuotaDriftPanel
 				cohort={cohort([
@@ -119,16 +119,19 @@ describe("QuotaDriftPanel", () => {
 		);
 
 		const visible = html.slice(0, html.indexOf("<details"));
-		expect(visible).toContain("Not separately measurable right now");
-		expect(visible).toMatch(
-			/claude-opus-4-8<\/span> — not in use since \d+ \w+/,
-		);
+		expect(visible).not.toContain("Not separately measurable");
+		expect(visible).not.toContain("claude-opus-4-8</span>");
 		expect(visible).not.toContain("claude-sonnet-4-6");
 
-		const history = html.slice(html.indexOf("<details"));
-		expect(history).toContain("What this analysis could not measure, and why");
-		expect(history).toContain("claude-sonnet-4-6");
-		expect(history).toMatch(
+		const collapsed = html.slice(html.indexOf("<details"));
+		expect(collapsed).toContain(
+			"What this analysis could not measure, and why",
+		);
+		expect(collapsed).toMatch(
+			/claude-opus-4-8<\/span> — not in use since \d+ \w+/,
+		);
+		expect(collapsed).toContain("claude-sonnet-4-6");
+		expect(collapsed).toMatch(
 			/too little of this window.{0,6}s traffic to measure from/,
 		);
 	});
@@ -177,7 +180,7 @@ describe("QuotaDriftPanel", () => {
 		);
 
 		expect(html).not.toContain("What this analysis could not measure");
-		expect(html).not.toContain("Not separately measurable right now");
+		expect(html).not.toContain("<details");
 	});
 
 	it("states a window the provider never moved, below the chart", () => {
