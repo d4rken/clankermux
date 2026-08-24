@@ -114,10 +114,16 @@ class NativeSseScanner {
 	private dataLines: string[] = [];
 	private dataBytes = 0;
 	private eventName: string | null = null;
+	private eventNameBytes = 0;
 
-	/** Bytes currently held: incomplete line + assembled event payload. */
+	/**
+	 * Bytes currently held: incomplete line + assembled event payload + the
+	 * current event's name. The name is small in every real stream, but it is
+	 * retained across lines exactly like the payload is, so it belongs in the
+	 * number the cap is measured against.
+	 */
 	get retainedBytes(): number {
-		return this.pendingBytes + this.dataBytes;
+		return this.pendingBytes + this.dataBytes + this.eventNameBytes;
 	}
 
 	/**
@@ -183,6 +189,9 @@ class NativeSseScanner {
 			this.dataBytes += utf8Length(value) + 1;
 		} else if (field === "event") {
 			this.eventName = value;
+			// Assignment, not accumulation: a repeated `event:` line replaces the
+			// name it retains rather than adding to it.
+			this.eventNameBytes = utf8Length(value);
 		}
 		// `id:` / `retry:` / unknown fields carry nothing this scanner needs.
 		return NONE;
@@ -195,6 +204,7 @@ class NativeSseScanner {
 		this.dataLines = [];
 		this.dataBytes = 0;
 		this.eventName = null;
+		this.eventNameBytes = 0;
 
 		// Blank line with nothing buffered (stream padding, repeated delimiters).
 		if (data === "" && name === null) return NONE;
@@ -275,6 +285,25 @@ export async function extractNativeTerminalResponse(
 		const value = chunk.value;
 		if (!value || value.byteLength === 0) continue;
 
+		if (
+			scanner.retainedBytes + value.byteLength >
+			MAX_NATIVE_NONSTREAM_SSE_BYTES
+		) {
+			// Checked BEFORE the chunk is decoded and scanned, because scanning it
+			// is what would allocate past the cap: a terminal event completing
+			// inside an over-cap chunk would otherwise be parsed, re-serialized and
+			// returned as a 200, and the cap would never be consulted. The bound has
+			// to hold for the bytes this module is about to touch, not only for what
+			// it still holds afterwards.
+			//
+			// The price is that a chunk larger than the remaining budget is refused
+			// even when it would have reduced into small, discardable events. That
+			// is the correct trade: a single chunk that big is already outside the
+			// shape of any real Codex-Responses stream.
+			cancelQuietly(reader);
+			return { ok: false, reason: "oversized" };
+		}
+
 		const outcome = scanner.push(
 			decoder.decode(value, { stream: true }),
 			value.byteLength,
@@ -289,11 +318,10 @@ export async function extractNativeTerminalResponse(
 		}
 
 		if (scanner.retainedBytes > MAX_NATIVE_NONSTREAM_SSE_BYTES) {
-			// Checked AFTER processing so a chunk that happens to be large but
-			// splits into complete, discardable events is not punished for its
-			// framing. What trips the cap is retention — an event (or a line) that
-			// genuinely cannot be reduced, whether it grew across chunks or arrived
-			// as one oversized chunk.
+			// Defensive backstop. The pre-check above already refuses any chunk that
+			// could carry retention past the cap, so reaching here means the
+			// scanner's incremental byte accounting drifted upward from the raw
+			// chunk sizes. Fail closed rather than trust the discrepancy.
 			cancelQuietly(reader);
 			return { ok: false, reason: "oversized" };
 		}

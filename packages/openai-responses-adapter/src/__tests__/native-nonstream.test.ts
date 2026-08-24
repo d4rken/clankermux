@@ -284,6 +284,33 @@ describe("extractNativeTerminalResponse", () => {
 		expect(result).toEqual({ ok: false, reason: "oversized" });
 	});
 
+	test("a terminal event completing inside an over-cap chunk → oversized, not success", async () => {
+		// The cap must be decided before the chunk is scanned. Otherwise a stream
+		// that has already retained almost the whole budget can hand over one more
+		// oversized chunk, have its terminal event found inside it, and be answered
+		// with a 200 that the bound was supposed to have refused.
+		const retained = 30 * 1024 * 1024;
+		const chunks = [
+			// No newline: nothing can be discarded, so all of it stays retained.
+			"a".repeat(retained),
+			// Closes that line and carries a perfectly valid terminal event, but the
+			// chunk itself pushes retention past the cap.
+			`${"b".repeat(3 * 1024 * 1024)}\n\n${sseEvent("response.completed", {
+				type: "response.completed",
+				response: COMPLETED_RESPONSE,
+			})}`,
+		];
+		expect(retained + chunks[1].length).toBeGreaterThan(
+			MAX_NATIVE_NONSTREAM_SSE_BYTES,
+		);
+		const { stream, state } = instrumentedStream(chunks);
+
+		const result = await extractNativeTerminalResponse(stream, {});
+
+		expect(result).toEqual({ ok: false, reason: "oversized" });
+		expect(state.cancelled).toBe(1);
+	});
+
 	test("client abort mid-scan (reader rejects) → read-error, never ok", async () => {
 		let pulls = 0;
 		const stream = new ReadableStream<Uint8Array>({
