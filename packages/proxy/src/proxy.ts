@@ -565,6 +565,7 @@ async function handleIngestedProxy(
 
 	const createProviderOverloadedResponse = async (
 		overloaded: ProviderOverloadedAccount[],
+		opts?: { failoverAttempts?: number },
 	): Promise<Response> => {
 		const now = Date.now();
 		const nextAvailableAt = Math.min(...overloaded.map(({ until }) => until));
@@ -606,7 +607,13 @@ async function handleIngestedProxy(
 				},
 			},
 		);
-		await recordSyntheticErrorResponse(response, "provider_overloaded");
+		// Carry the REAL attempt count. A request gated mid-loop reaches this
+		// terminal having already made upstream attempts, and recording 0 would
+		// understate what happened in exactly the way the all-accounts-failed
+		// terminal was fixed not to.
+		await recordSyntheticErrorResponse(response, "provider_overloaded", {
+			failoverAttempts: opts?.failoverAttempts,
+		});
 		return response;
 	};
 
@@ -1114,6 +1121,16 @@ async function handleIngestedProxy(
 				log.debug(
 					`Skipping ${label} ${list[i].name}; provider ${list[i].provider} is overloaded until ${new Date(overloadedUntil).toISOString()}`,
 				);
+				// Record it, or this request is worse off than one that arrived a
+				// moment later. The gate fires when the breaker trips AFTER
+				// selection, while this request is already walking its list; the
+				// skip used to be silent, so `overloadSuppressedAttempts` stayed
+				// empty, the post-loop hold never fired, and the request fell
+				// through to ALL_ACCOUNTS_FAILED. Meanwhile a request that found
+				// zero available candidates UP FRONT took the zero-accounts path,
+				// held, and was served. Observed in production 2026-08-24 18:43:08:
+				// one 503 alongside two 200s, one second apart, same breaker.
+				holds.noteOverloadGateSkip(list[i], overloadedUntil);
 				continue;
 			}
 
@@ -1287,15 +1304,17 @@ async function handleIngestedProxy(
 			cacheBodyStore.discardStaged(requestMeta.id);
 			return await createProviderOverloadedResponse(
 				holds.refreshOverloadUntils(providerFallbackOverloadedAccounts),
+				{ failoverAttempts: upstreamAttempts },
 			);
 		}
 	}
 
-	// Suppressed-only correctness: at least one candidate was refused by the
-	// half-open overload-probe admission (a probe is in flight, or an open
-	// bucket won a race against the gate) and nothing else served the request.
-	// Surface the provider-overloaded 529 with a short Retry-After — the probe
-	// resolves within seconds — instead of the misleading ALL_ACCOUNTS_FAILED.
+	// Overload-blocked correctness: at least one candidate never reached upstream
+	// because of an overload — refused by half-open probe admission (a probe is
+	// in flight, or an open bucket won a race against the gate), or dropped by
+	// the loop's late gate when the breaker tripped mid-walk. Either way the
+	// request was blocked by an overload and must be told so, rather than
+	// getting the misleading ALL_ACCOUNTS_FAILED.
 	if (holds.overloadSuppressedAttempts.length > 0) {
 		// Hold (bounded, capped) behind the in-flight probe instead of bouncing
 		// the short-Retry-After 529; overflow and budget expiry fall back to it.
@@ -1306,6 +1325,7 @@ async function handleIngestedProxy(
 		cacheBodyStore.discardStaged(requestMeta.id);
 		return await createProviderOverloadedResponse(
 			holds.refreshOverloadUntils(holds.overloadSuppressedAttempts),
+			{ failoverAttempts: upstreamAttempts },
 		);
 	}
 

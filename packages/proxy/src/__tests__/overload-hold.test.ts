@@ -152,6 +152,9 @@ function makeContext(accounts: Account[]): ProxyContext {
 			attachUsageSummary: mock(() => {}),
 			markUsageUnavailable: mock(() => {}),
 			recordSynthetic: mock(() => {}),
+			// Read by the all-accounts-failed terminal's collision guard. Absent
+			// here until a test actually reached that terminal.
+			hasRecord: mock(() => false),
 			sweep: mock(() => {}),
 			dispose: mock(() => {}),
 		} as never,
@@ -330,6 +333,56 @@ describe("transparent overload hold", () => {
 		const res = await p;
 		expect(res.status).toBe(499);
 		expect(fetchCalls).toBe(0);
+	}, 10_000);
+
+	it("holds a request whose remaining candidates were gated MID-LOOP", async () => {
+		// Observed in production 2026-08-24 18:43:08. A request already walking
+		// its candidate list when the breaker trips has its remaining candidates
+		// dropped by the loop's late overload gate. That gate skips without
+		// recording anything, so `overloadSuppressedAttempts` stays empty, the
+		// post-loop hold never fires, and the request falls through to
+		// ALL_ACCOUNTS_FAILED — a hard 503. Two requests one second later, which
+		// found zero available candidates UP FRONT, were held and served 200s.
+		// Same incident, same breaker, opposite outcomes, decided purely by
+		// whether the loop had already started.
+		//
+		// Budget shrunk so the hold gives up quickly: the assertion is about
+		// WHICH terminal is reached, not about waiting out a real cooldown.
+		setOverloadHoldBudgetOverrideForTests(300);
+
+		const first = makeAccount({ id: "acc-first", name: "First" });
+		const second = makeAccount({ id: "acc-second", name: "Second" });
+
+		let calls = 0;
+		globalThis.fetch = upstreamOnlyFetch(async () => {
+			calls++;
+			// The first candidate fails ORDINARILY, so nothing about this attempt
+			// records an overload suppression. It must FAIL OVER rather than be
+			// forwarded — a non-2xx response would be returned to the client as-is
+			// and never reach the end of the loop — so throw, which is also what
+			// the production attempts did (they returned null and moved on).
+			// Meanwhile the breaker trips, as it would from another request's 529,
+			// leaving the second candidate to be dropped by the late gate.
+			applyProviderOverloadCooldown("anthropic", Date.now() + 60_000, MODEL);
+			throw new Error("upstream connection reset");
+		}) as never;
+
+		const ctx = makeContext([first, second]);
+		const res = await callHandleProxy(
+			modelRequest(MODEL),
+			new URL("https://proxy.local/v1/messages"),
+			ctx,
+		);
+
+		// Exactly one upstream attempt: the second candidate was gated, never tried.
+		expect(calls).toBe(1);
+		// The overload terminal, NOT the generic all-accounts-failed 503 — the
+		// request was blocked by an overload and must be told so, with a
+		// Retry-After, exactly like every other overload-gated request.
+		expect(res.status).toBe(529);
+		const body = (await res.json()) as { error?: { type?: string } };
+		expect(body.error?.type).toBe("overloaded_error");
+		expect(Number(res.headers.get("Retry-After"))).toBeGreaterThan(0);
 	}, 10_000);
 
 	it("returns an immediate 529 when the cooldown is beyond the hold budget", async () => {

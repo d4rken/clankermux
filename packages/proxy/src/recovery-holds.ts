@@ -216,6 +216,18 @@ export interface RecoveryHolds {
 	): ProviderOverloadedAccount[];
 	noteOverloadSuppression(account: Account, outcome: ProxyAttemptOutcome): void;
 	/**
+	 * Record a candidate the attempt loop's LATE overload gate skipped — the
+	 * breaker tripped after selection, while this request was already walking
+	 * its list.
+	 *
+	 * Separate entry point from {@link noteOverloadSuppression} because that one
+	 * reads a ProxyAttemptOutcome, and these candidates were never attempted at
+	 * all: they are refused before `proxyWithAccount` is reached, so no outcome
+	 * exists to inspect. Both feed the same list, because both mean the same
+	 * thing to the terminal — this request was blocked by an overload.
+	 */
+	noteOverloadGateSkip(account: Account, until: number): void;
+	/**
 	 * Record that the caller ATTEMPTED the held account outside a hold (the
 	 * affinity-first preflight). The one bookkeeping write the holds do not own
 	 * themselves, so the double-attempt guard has a single home either way.
@@ -294,6 +306,13 @@ export function createRecoveryHolds(deps: RecoveryHoldsDeps): RecoveryHolds {
 					Date.now() + OVERLOAD_PROBE_SUPPRESSED_RETRY_AFTER_MS,
 			});
 		}
+	};
+	// The late-gate counterpart. Carries the bucket's real deadline (the gate
+	// already resolved it to decide the skip), so the hold's within-budget check
+	// and the terminal's Retry-After are both driven by the actual cooldown
+	// rather than the short probe-suppressed horizon.
+	const noteOverloadGateSkip = (account: Account, until: number): void => {
+		overloadSuppressedAttempts.push({ account, until });
 	};
 	// The cache-affinity-pinned account id recorded by the routing strategy (set
 	// on affinity_hit, affinity_hold, and the zero-siblings storm-degrade hold).
@@ -1213,6 +1232,7 @@ export function createRecoveryHolds(deps: RecoveryHoldsDeps): RecoveryHolds {
 		runBurstHold,
 		refreshOverloadUntils,
 		noteOverloadSuppression,
+		noteOverloadGateSkip,
 		noteBurstAttempt,
 		get overloadSuppressedAttempts() {
 			return overloadSuppressedAttempts;

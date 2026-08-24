@@ -27,7 +27,10 @@ import { usageCache } from "@clankermux/providers";
 import type { Account } from "@clankermux/types";
 import type { ProxyContext } from "../handlers";
 import { resetRateLimitProbeGatesForTests } from "../handlers/rate-limit-cooldown";
-import { resetOverloadHoldSlots } from "../overload-hold";
+import {
+	resetOverloadHoldSlots,
+	setOverloadHoldBudgetOverrideForTests,
+} from "../overload-hold";
 import {
 	applyProviderOverloadCooldown,
 	clearProviderOverloadCooldown,
@@ -260,6 +263,7 @@ describe("all-accounts-failed terminal", () => {
 		clearProviderOverloadCooldown();
 		resetOverloadHoldSlots();
 		resetRateLimitProbeGatesForTests();
+		setOverloadHoldBudgetOverrideForTests(null);
 	});
 
 	it("records the generic exhaustion terminal with the real attempt count", async () => {
@@ -334,8 +338,20 @@ describe("all-accounts-failed terminal", () => {
 	});
 
 	it("persists attempts actually made, not the candidate count", async () => {
-		// The first attempt trips the breaker, so the second candidate is skipped
-		// before any upstream work: two candidates, ONE attempt.
+		// Two candidates, ONE attempt: the first is tried and fails, and that
+		// attempt trips the breaker, so the second is dropped by the loop's late
+		// overload gate before any upstream work.
+		//
+		// This now lands on the provider-overloaded terminal rather than
+		// ALL_ACCOUNTS_FAILED: a request blocked by an overload is told so, and
+		// can wait for recovery instead of eating a hard 503 (production
+		// 2026-08-24 18:43:08 — one such 503 alongside two 200s a second apart).
+		//
+		// The accounting invariant is the same at either terminal and is the
+		// point of this test: the row records ATTEMPTS, not candidates. Recording
+		// 0 here would understate what happened in exactly the way this file
+		// exists to prevent. Budget shrunk so the hold gives up promptly.
+		setOverloadHoldBudgetOverrideForTests(300);
 		let fetchCalls = 0;
 		globalThis.fetch = upstreamOnlyFetch(async () => {
 			fetchCalls++;
@@ -347,19 +363,18 @@ describe("all-accounts-failed terminal", () => {
 		for (const a of [first, second]) usageCache.delete(a.id);
 		const ctx = makeContext([first, second]);
 
-		await expect(
-			callHandleProxy(
-				makeRequest(),
-				new URL("https://proxy.local/v1/messages"),
-				ctx,
-			),
-		).rejects.toThrow(/All accounts failed/);
+		const res = await callHandleProxy(
+			makeRequest(),
+			new URL("https://proxy.local/v1/messages"),
+			ctx,
+		);
 
+		expect(res.status).toBe(529);
 		expect(fetchCalls).toBe(1);
-		const { meta } = syntheticCall(ctx.recorder);
-		// The thrown message counts CANDIDATES (2); the row counts ATTEMPTS.
+		const { meta, label } = syntheticCall(ctx.recorder);
+		expect(label).toBe("provider_overloaded");
 		expect(meta.failoverAttempts).toBe(1);
-	});
+	}, 10_000);
 
 	it("fails over past a path-incompatible candidate without an ERROR", async () => {
 		// CodexProvider serves only /v1/messages(+count_tokens). The incompatible
