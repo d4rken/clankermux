@@ -128,6 +128,11 @@ export function normalizeQuotaDriftPayload(
 						lastObservedMs: window.lastObservedMs ?? null,
 						flatValuePct: window.flatValuePct ?? null,
 						flatSince: window.flatSince ?? null,
+						// Null, not "all-accounts". A payload written before the scope
+						// existed cannot vouch for who its flat claim covered, and
+						// defaulting to the unqualified reading would restore exactly the
+						// overclaim the field was added to prevent.
+						flatScope: window.flatScope ?? null,
 						models: asArray(window.models).map(
 							(model): QuotaDriftModel => ({
 								...model,

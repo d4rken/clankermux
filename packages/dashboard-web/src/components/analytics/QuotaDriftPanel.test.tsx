@@ -158,6 +158,7 @@ describe("QuotaDriftPanel", () => {
 							lastObservedMs: Date.UTC(2026, 7, 21, 12, 0, 0, 0),
 							lastMovementMs: null,
 							flatValuePct: 0,
+							flatScope: "all-accounts",
 						}),
 					],
 					{ provider: "codex" },

@@ -515,6 +515,7 @@ function flatWindow(
 		lastObservedMs: LAST_OBSERVED,
 		flatValuePct: 0,
 		flatSince: FLAT_SINCE,
+		flatScope: "all-accounts",
 		...over,
 	};
 }
@@ -560,6 +561,46 @@ describe("flatWindowNotice", () => {
 			) ?? "";
 
 		expect(text).toContain("the latest reading on 20 Jul 2026");
+	});
+
+	it("qualifies a claim that only covers the accounts still reporting", () => {
+		// A cohort where one live account's readings no longer carry this window.
+		// The remaining accounts cannot speak for it, and an unqualified sentence
+		// would state a cohort-wide provider fact established on a subset.
+		const text =
+			flatWindowNotice(
+				"codex",
+				flatWindow({ flatScope: "reporting-subset" }),
+			) ?? "";
+
+		expect(text).toContain(
+			"has reported 0% for this window on the accounts still reporting it since",
+		);
+	});
+
+	it("qualifies the differing-value wording too", () => {
+		// The branch where a dropped member does the most damage: this wording
+		// asserts agreement ACROSS accounts, so it must never say "every account"
+		// when one was excluded from the decision.
+		const text =
+			flatWindowNotice(
+				"anthropic",
+				flatWindow({ flatValuePct: null, flatScope: "reporting-subset" }),
+			) ?? "";
+
+		expect(text).toContain(
+			"on every account still reporting it since 12 Jul 2026",
+		);
+	});
+
+	it("reads a payload with no scope as the qualified claim", () => {
+		// A cached blob written before the field existed cannot vouch for who its
+		// flat claim covered. The narrower sentence is true either way; the wider
+		// one is the overclaim the field was added to prevent.
+		const text =
+			flatWindowNotice("codex", flatWindow({ flatScope: undefined })) ?? "";
+
+		expect(text).toContain("on the accounts still reporting it");
 	});
 
 	it("says nothing about a window that moved, or one we cannot vouch for", () => {

@@ -89,6 +89,7 @@ import {
 	type WindowSample,
 } from "@clankermux/core";
 import type {
+	QuotaDriftAccountScope,
 	QuotaDriftChange,
 	QuotaDriftCohort,
 	QuotaDriftModel,
@@ -405,13 +406,17 @@ export const FLAT_WINDOW_THRESHOLD_MS: Record<QuotaWindowKind, number> = {
 export const MIN_FLAT_TRAFFIC_EQ_TOKENS = 1_000_000;
 
 /**
- * How far behind the cohort's newest reading an account may be and still count
- * as currently observed.
+ * How far behind the cohort's newest SNAPSHOT an account may be and still count
+ * as currently sampled.
  *
- * An account that stopped reporting a month ago cannot testify to whether the
- * window is moving NOW, so it is excluded from the decision entirely rather
+ * An account that stopped being sampled a month ago cannot testify to whether
+ * the window is moving NOW, so it is excluded from the decision entirely rather
  * than counted as flat — counting it would let a decommissioned account either
  * freeze a live cohort or, worse, be the only evidence for a flat claim.
+ *
+ * The same bound separately decides whether a still-sampled account is
+ * REPORTING this window. The two questions are deliberately distinct; see
+ * {@link summarizeFlatWindow}.
  */
 export const CURRENT_MEMBER_MS = 24 * 60 * 60 * 1000;
 
@@ -422,6 +427,18 @@ export interface WindowObservation {
 	firstObservedMs: number;
 	/** Newest non-null sample, ms since epoch. */
 	lastObservedMs: number;
+	/**
+	 * Newest snapshot of ANY kind in this cohort, ms since epoch.
+	 *
+	 * The account-activity signal, and deliberately not the same thing as
+	 * `lastObservedMs`. A snapshot whose value for THIS window is null is still
+	 * a reading the sampler took: the account is alive and being polled, it just
+	 * is not reporting this particular window. Conflating the two lets an
+	 * account that has gone quiet and an account whose window dropped out of the
+	 * payload look identical, and only the first may be dropped from a cohort
+	 * claim without qualifying it.
+	 */
+	lastSampleMs: number;
 	/** Newest observed CHANGE, ms, or null when the value never moved. */
 	lastMovementMs: number | null;
 	/** Start of the current unbroken constant run, ms. */
@@ -464,11 +481,17 @@ export function collectWindowObservations(
 			window === "five_hour" ? row.five_hour_pct : row.seven_day_pct,
 		);
 		const ms = effectiveMs(row);
+		const key = cohortKey(account.provider, resolveRowTier(account, row));
 		if (pct === null) {
+			// The sampler DID take a reading here; it just did not include this
+			// window. That is account activity, and recording it is what keeps a
+			// live account whose window went absent from being mistaken for one
+			// that stopped being polled.
+			const existing = out.get(key);
+			if (existing) existing.lastSampleMs = ms;
 			prev = null;
 			continue;
 		}
-		const key = cohortKey(account.provider, resolveRowTier(account, row));
 		const continuous =
 			prev !== null && prev.cohort === key && ms - prev.ms <= MAX_SAMPLE_GAP_MS;
 		const existing = out.get(key);
@@ -477,12 +500,14 @@ export function collectWindowObservations(
 				accountId: account.id,
 				firstObservedMs: ms,
 				lastObservedMs: ms,
+				lastSampleMs: ms,
 				lastMovementMs: null,
 				flatStartMs: ms,
 				flatValuePct: pct,
 			});
 		} else {
 			existing.lastObservedMs = ms;
+			existing.lastSampleMs = ms;
 			if (!continuous) {
 				// Unobserved time is not stillness: the streak restarts here rather
 				// than bridging whatever happened across the break.
@@ -506,6 +531,7 @@ export interface FlatWindowFacts {
 	lastObservedMs: number | null;
 	flatValuePct: number | null;
 	flatSince: number | null;
+	flatScope: QuotaDriftAccountScope | null;
 }
 
 const NO_MOVEMENT_FACTS: FlatWindowFacts = {
@@ -513,17 +539,39 @@ const NO_MOVEMENT_FACTS: FlatWindowFacts = {
 	lastObservedMs: null,
 	flatValuePct: null,
 	flatSince: null,
+	flatScope: null,
 };
 
 /**
  * Aggregate one cohort's per-account observations into the facts the panel
  * renders.
  *
- * `flatSince` is set only when every one of the four conditions holds, and
- * every one of them exists to prevent a specific false claim:
+ * ## Two different questions about an account, deliberately kept apart
  *
- *  - EVERY currently-observed account is flat. One account still moving means
- *    the window is not frozen, whatever the others show;
+ * "Is this account still being sampled?" is answered by `lastSampleMs`, the
+ * newest snapshot of any kind. "Is it still reporting THIS window?" is answered
+ * by `lastObservedMs`, the newest non-null value.
+ *
+ * Using the second for both is a false-claim generator, and not a subtle one.
+ * Take an account A that still reports the 5-hour window and has been flat for
+ * eight days, and an account B producing fresh weekly readings whose 5-hour
+ * value has been null for 25 hours. Judged on target-window freshness alone B
+ * drops out of the decision entirely, so A speaks for the cohort — and the
+ * differing-value branch below would go on to say "on every account" about a
+ * cohort where one member had been silently excluded. The cohort is mixed
+ * (flat on A, absent on B) and the copy has to say so.
+ *
+ * So membership is decided on sampling, and the still-sampled accounts are then
+ * split into the ones reporting the window and the ones that are not. Only the
+ * REPORTING ones can be flat or moving; the rest make the claim a subset claim,
+ * which `flatScope` carries to the panel.
+ *
+ * ## What `flatSince` still requires
+ *
+ * Every one of these exists to prevent a specific false claim:
+ *
+ *  - EVERY reporting account is flat. One account still moving means the window
+ *    is not frozen, whatever the others show, and no scope qualifies that away;
  *  - each of them has been flat for longer than the window's threshold, over an
  *    observed span longer than that threshold. A three-day-old database cannot
  *    establish a two-week absence of movement;
@@ -551,32 +599,45 @@ export function summarizeFlatWindow(
 		lastObservedMs,
 		flatValuePct: null,
 		flatSince: null,
+		flatScope: null,
 	};
 
-	const threshold = FLAT_WINDOW_THRESHOLD_MS[window];
-	const current = observations.filter(
-		(o) => lastObservedMs - o.lastObservedMs <= CURRENT_MEMBER_MS,
+	const newestSampleMs = Math.max(...observations.map((o) => o.lastSampleMs));
+	const active = observations.filter(
+		(o) => newestSampleMs - o.lastSampleMs <= CURRENT_MEMBER_MS,
 	);
-	if (current.length === 0) return observed;
+	if (active.length === 0) return observed;
 
-	const allFlat = current.every(
+	// Still sampled AND still carrying a value for this window. An active
+	// account that is not in here has not gone quiet — its readings simply no
+	// longer include the window, which is a different fact and cannot be settled
+	// by the accounts that do report it.
+	const reporting = active.filter(
+		(o) => newestSampleMs - o.lastObservedMs <= CURRENT_MEMBER_MS,
+	);
+	if (reporting.length === 0) return observed;
+
+	const threshold = FLAT_WINDOW_THRESHOLD_MS[window];
+	const allFlat = reporting.every(
 		(o) =>
 			o.lastObservedMs - o.flatStartMs >= threshold &&
 			o.lastObservedMs - o.firstObservedMs > threshold,
 	);
 	if (!allFlat) return observed;
 
-	const flatSince = Math.max(...current.map((o) => o.flatStartMs));
-	const accountIds = new Set(current.map((o) => o.accountId));
+	const flatSince = Math.max(...reporting.map((o) => o.flatStartMs));
+	const accountIds = new Set(reporting.map((o) => o.accountId));
 	if (!hasMaterialTraffic(segments, accountIds, flatSince)) return observed;
 
-	const values = new Set(current.map((o) => o.flatValuePct));
+	const values = new Set(reporting.map((o) => o.flatValuePct));
 	return {
 		...observed,
 		// Accounts constant at DIFFERENT values are each flat, so the cohort is
 		// flat, but there is no single number to name.
-		flatValuePct: values.size === 1 ? current[0].flatValuePct : null,
+		flatValuePct: values.size === 1 ? reporting[0].flatValuePct : null,
 		flatSince,
+		flatScope:
+			reporting.length === active.length ? "all-accounts" : "reporting-subset",
 	};
 }
 

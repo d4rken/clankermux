@@ -733,6 +733,13 @@ interface FlatFixture {
 	withTraffic: boolean;
 	/** Blank out this many samples in the middle of the run. */
 	nullSamples?: number;
+	/**
+	 * Blank out this many samples at the END of the run.
+	 *
+	 * The rows are still written: the sampler kept polling, and the account is
+	 * still alive - its readings just stopped carrying a value for this window.
+	 */
+	nullTailSamples?: number;
 	/** Skip this many samples in the middle, producing a sampling gap. */
 	skipSamples?: number;
 	/** End the samples this long before FIXTURE_NOW (a stalled sampler). */
@@ -786,9 +793,10 @@ function seedFlatWindow(opts: FlatFixture): Database {
 				continue;
 			}
 			const blanked =
-				opts.nullSamples != null &&
-				i >= breakAt &&
-				i < breakAt + opts.nullSamples;
+				(opts.nullSamples != null &&
+					i >= breakAt &&
+					i < breakAt + opts.nullSamples) ||
+				(opts.nullTailSamples != null && i >= count - opts.nullTailSamples);
 			insertSnapshot.run(
 				accountId,
 				sampledAt,
@@ -826,6 +834,9 @@ describe("quota-drift flat windows", () => {
 		expect(window).toBeDefined();
 		expect(window?.flatSince).not.toBeNull();
 		expect(window?.flatValuePct).toBe(0);
+		// The only account is both sampled and reporting, so the claim really does
+		// cover the whole cohort.
+		expect(window?.flatScope).toBe("all-accounts");
 		// It never moved inside the observed span, which is not the same as
 		// "moved long ago" and must not be reported as a timestamp.
 		expect(window?.lastMovementMs).toBeNull();
@@ -845,6 +856,29 @@ describe("quota-drift flat windows", () => {
 		expect(window?.flatSince).toBeNull();
 		// The observation itself is still reported - only the CLAIM is withheld.
 		expect(window?.lastObservedMs).not.toBeNull();
+	});
+
+	it("withdraws the claim once the only account stops reporting the window", () => {
+		// Same 43 flat days, but the readings stopped carrying a 5-hour value ~34
+		// hours ago while the sampler kept polling. Nothing currently reporting
+		// the window is left to establish that it is still flat, so the claim goes
+		// - it does not quietly survive on stale readings.
+		const db = seedFlatWindow({
+			days: 43,
+			pct: 0,
+			withTraffic: true,
+			nullTailSamples: 200,
+		});
+		const window = flatWindowOf(db);
+		db.close();
+
+		expect(window?.flatSince).toBeNull();
+		expect(window?.flatScope).toBeNull();
+		// What WAS seen is still reported, including how old it is.
+		expect(window?.lastObservedMs).not.toBeNull();
+		expect(FIXTURE_NOW - (window?.lastObservedMs ?? 0)).toBeGreaterThan(
+			24 * 60 * MINUTE_MS,
+		);
 	});
 
 	it("says nothing when the window was flat because we sent nothing", () => {
@@ -929,6 +963,29 @@ describe("collectWindowObservations", () => {
 		);
 	});
 
+	it("keeps counting a snapshot whose value for THIS window is null", () => {
+		// The sampler is still polling and the row is still written; the reading
+		// just no longer carries this window. That is account activity, and losing
+		// it is what let a live account be silently dropped from a cohort claim.
+		const observation = observationsFor({
+			days: 43,
+			pct: 0,
+			withTraffic: true,
+			// ~34 hours of null values at the end of an otherwise unbroken run.
+			nullTailSamples: 200,
+		});
+
+		expect(observation.lastSampleMs).toBeGreaterThan(
+			observation.lastObservedMs,
+		);
+		expect(FIXTURE_NOW - observation.lastSampleMs).toBeLessThanOrEqual(
+			FLAT_STEP_MS,
+		);
+		expect(FIXTURE_NOW - observation.lastObservedMs).toBeGreaterThan(
+			24 * 60 * MINUTE_MS,
+		);
+	});
+
 	it("surfaces a stalled sampler as an old last observation", () => {
 		// A window that has not moved because nobody has looked at it for 30 days
 		// is not a provider fact. The percentage series cannot tell the two apart,
@@ -952,9 +1009,13 @@ describe("summarizeFlatWindow", () => {
 	function observation(
 		over: Partial<WindowObservation> & { accountId: string },
 	): WindowObservation {
+		const lastObservedMs = over.lastObservedMs ?? FIXTURE_NOW;
 		return {
 			firstObservedMs: FIXTURE_NOW - 60 * DAY_MS,
-			lastObservedMs: FIXTURE_NOW,
+			lastObservedMs,
+			// An account reporting normally is sampled and observed at the same
+			// instant; the cases where the two diverge set this explicitly.
+			lastSampleMs: lastObservedMs,
 			lastMovementMs: null,
 			flatStartMs: FLAT_START,
 			flatValuePct: 0,
@@ -1049,7 +1110,132 @@ describe("summarizeFlatWindow", () => {
 			lastObservedMs: null,
 			flatValuePct: null,
 			flatSince: null,
+			flatScope: null,
 		});
+	});
+
+	it("marks a whole-cohort claim as covering every account", () => {
+		const facts = summarizeFlatWindow(
+			[observation({ accountId: "a" }), observation({ accountId: "b" })],
+			"five_hour",
+			[traffic("a", FLAT_START), traffic("b", FLAT_START)],
+		);
+
+		expect(facts.flatSince).toBe(FLAT_START);
+		expect(facts.flatScope).toBe("all-accounts");
+	});
+
+	it("qualifies the claim when a live account stopped reporting the window", () => {
+		// THE defect this partition exists for. Account b is still being sampled
+		// - its weekly readings are fresh - but its 5-hour value has been null for
+		// 25 hours. Judged on the TARGET window's freshness it vanishes from the
+		// decision, and account a alone produces an unqualified cohort claim for a
+		// cohort that is actually mixed.
+		const facts = summarizeFlatWindow(
+			[
+				observation({ accountId: "a" }),
+				observation({
+					accountId: "b",
+					lastObservedMs: FIXTURE_NOW - 25 * 60 * MINUTE_MS,
+					lastSampleMs: FIXTURE_NOW,
+				}),
+			],
+			"five_hour",
+			[traffic("a", FLAT_START), traffic("b", FLAT_START)],
+		);
+
+		expect(facts.flatSince).not.toBeNull();
+		expect(facts.flatScope).toBe("reporting-subset");
+	});
+
+	it("never says every account when one was excluded from the decision", () => {
+		// The differing-value branch is where a dropped member does real damage:
+		// its wording claims the cohort agreed, so the panel would state a
+		// cohort-wide provider fact established on a subset.
+		const facts = summarizeFlatWindow(
+			[
+				observation({ accountId: "a", flatValuePct: 0 }),
+				observation({ accountId: "b", flatValuePct: 43 }),
+				observation({
+					accountId: "c",
+					lastObservedMs: FIXTURE_NOW - 30 * 60 * MINUTE_MS,
+					lastSampleMs: FIXTURE_NOW,
+				}),
+			],
+			"five_hour",
+			[
+				traffic("a", FLAT_START),
+				traffic("b", FLAT_START),
+				traffic("c", FLAT_START),
+			],
+		);
+
+		expect(facts.flatValuePct).toBeNull();
+		expect(facts.flatScope).toBe("reporting-subset");
+	});
+
+	it("still drops an account that stopped being sampled altogether", () => {
+		// Not the same case: this account produces NO readings at all, so it
+		// cannot testify either way and its absence does not qualify anything.
+		const facts = summarizeFlatWindow(
+			[
+				observation({ accountId: "a" }),
+				observation({
+					accountId: "gone",
+					lastObservedMs: FIXTURE_NOW - 30 * DAY_MS,
+					lastSampleMs: FIXTURE_NOW - 30 * DAY_MS,
+				}),
+			],
+			"five_hour",
+			[traffic("a", FLAT_START)],
+		);
+
+		expect(facts.flatSince).toBe(FLAT_START);
+		expect(facts.flatScope).toBe("all-accounts");
+	});
+
+	it("says nothing at all when NO active account still reports the window", () => {
+		const facts = summarizeFlatWindow(
+			[
+				observation({
+					accountId: "a",
+					lastObservedMs: FIXTURE_NOW - 3 * DAY_MS,
+					lastSampleMs: FIXTURE_NOW,
+				}),
+			],
+			"five_hour",
+			[traffic("a", FLAT_START)],
+		);
+
+		expect(facts.flatSince).toBeNull();
+		expect(facts.flatScope).toBeNull();
+		// The observation itself is still reported.
+		expect(facts.lastObservedMs).toBe(FIXTURE_NOW - 3 * DAY_MS);
+	});
+
+	it("is still not flat when a reporting account is moving, whatever the scope", () => {
+		// No qualification rescues a moving account: the window is not frozen.
+		const facts = summarizeFlatWindow(
+			[
+				observation({ accountId: "a" }),
+				observation({
+					accountId: "b",
+					lastMovementMs: FIXTURE_NOW - 2 * DAY_MS,
+					flatStartMs: FIXTURE_NOW - 2 * DAY_MS,
+					flatValuePct: 12,
+				}),
+				observation({
+					accountId: "c",
+					lastObservedMs: FIXTURE_NOW - 25 * 60 * MINUTE_MS,
+					lastSampleMs: FIXTURE_NOW,
+				}),
+			],
+			"five_hour",
+			[traffic("a", FLAT_START), traffic("b", FLAT_START)],
+		);
+
+		expect(facts.flatSince).toBeNull();
+		expect(facts.flatScope).toBeNull();
 	});
 });
 
@@ -1073,6 +1259,7 @@ function stripNewFields(payload: QuotaDriftResponse): QuotaDriftResponse {
 			legacy.lastObservedMs = undefined;
 			legacy.flatValuePct = undefined;
 			legacy.flatSince = undefined;
+			legacy.flatScope = undefined;
 			for (const model of window.models) {
 				for (const point of model.points) {
 					(point as unknown as Record<string, unknown>).unidentifiedReasons =
@@ -1106,6 +1293,7 @@ describe("quota-drift payload normalization", () => {
 				// Null, never 0: a concrete timestamp would claim a measurement the
 				// payload does not contain.
 				expect(window.flatSince).toBeNull();
+				expect(window.flatScope).toBeNull();
 				expect(window.lastMovementMs).toBeNull();
 				expect(window.lastObservedMs).toBeNull();
 				expect(window.flatValuePct).toBeNull();

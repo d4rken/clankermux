@@ -53,6 +53,20 @@ export type QuotaDriftUnidentifiedReason =
 /** Whether a cohort's tier was recorded per sample or inferred from today. */
 export type QuotaDriftTierProvenance = "recorded" | "assumed";
 
+/**
+ * Who a cohort-level window claim actually covers.
+ *
+ * `all-accounts` means every account still being sampled in this cohort was
+ * checked and agreed. `reporting-subset` means at least one account is still
+ * being sampled but its value for THIS window is absent from those readings, so
+ * the claim could only be established on the accounts that still report it.
+ *
+ * The distinction is not cosmetic. A cohort-wide claim built from a subset,
+ * with the rest silently dropped, is a false statement about provider
+ * behaviour — the one class of error this whole analysis exists not to make.
+ */
+export type QuotaDriftAccountScope = "all-accounts" | "reporting-subset";
+
 /** One point of a model's rolling series. */
 export interface QuotaDriftPoint {
 	/** Rolling window start, ms since epoch. */
@@ -186,6 +200,17 @@ export interface QuotaDriftWindowResult {
 	 * and must not be reported as one.
 	 */
 	flatSince?: number | null;
+	/**
+	 * Who `flatSince` covers, or null when there is no flat claim.
+	 *
+	 * Membership is decided on whether an account is still being SAMPLED, never
+	 * on whether this particular window appears in its readings. An account that
+	 * is still producing snapshots but whose value for this window has been
+	 * absent for a day cannot be dropped from the decision: doing so let the
+	 * remaining accounts speak for a cohort that is actually mixed, and the copy
+	 * would say "every account" while a member had been silently excluded.
+	 */
+	flatScope?: QuotaDriftAccountScope | null;
 }
 
 /** One cohort of accounts fitted together. */

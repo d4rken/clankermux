@@ -398,6 +398,13 @@ function formatFlatValue(pct: number): string {
  *
  * `flatSince` is already gated on traffic having been sent against the window,
  * so the sentence may say so.
+ *
+ * The third thing it must never become is a claim about accounts it was not
+ * established on. `flatScope` says whether every still-sampled account in the
+ * cohort was checked, or only the ones whose readings still carry this window,
+ * and the wording is qualified accordingly. An ABSENT scope — a cached payload
+ * written before the field existed — reads as the qualified form: it cannot
+ * vouch for the wider claim, and the narrower one is true either way.
  */
 export function flatWindowNotice(
 	provider: string,
@@ -409,12 +416,17 @@ export function flatWindowNotice(
 
 	const name = providerDisplayName(provider);
 	const value = window.flatValuePct ?? null;
+	const everyAccount = window.flatScope === "all-accounts";
 	const what =
 		value === null
 			? // Each account is constant, at values that disagree — so there is no
 				// single number to name, and inventing one would be a fabrication.
-				"has reported an unchanged value for this window on every account"
-			: `has reported ${formatFlatValue(value)} for this window`;
+				`has reported an unchanged value for this window on every account${
+					everyAccount ? "" : " still reporting it"
+				}`
+			: `has reported ${formatFlatValue(value)} for this window${
+					everyAccount ? "" : " on the accounts still reporting it"
+				}`;
 	return (
 		`${name} ${what} since ${formatFlatDate(since)}, ` +
 		`through the latest reading on ${formatFlatDate(lastObserved)}, ` +
