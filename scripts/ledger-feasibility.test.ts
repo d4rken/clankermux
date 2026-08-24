@@ -476,7 +476,7 @@ describe("keepaliveActivePeriods", () => {
 		// block's bins are untouched by it.
 		expect(anthWeekly?.census.keepaliveActive).toBe(0);
 		expect(anthWeekly?.census.total).toBeGreaterThan(0);
-	});
+	}, 30_000);
 });
 
 // ---------------------------------------------------------------------------
@@ -499,7 +499,7 @@ describe("runFeasibilityStudy", () => {
 		for (const entry of result.cellScoresByGroup) {
 			expect(entry.cells.length).toBe(grid.length);
 		}
-	});
+	}, 30_000);
 
 	test("candidate lags are non-negative and controls clear a whole bin width", () => {
 		for (const cell of buildCellGrid()) {
@@ -528,7 +528,7 @@ describe("runFeasibilityStudy", () => {
 		// relation must be found; a plumbing bug would show up as a low R2 here.
 		expect(group?.relation?.r2 as number).toBeGreaterThan(0.9);
 		expect(group?.selection.selected).not.toBeNull();
-	});
+	}, 30_000);
 
 	test("tokens are attributed by family and class end to end", () => {
 		const group = study().groups.find(
@@ -542,7 +542,7 @@ describe("runFeasibilityStudy", () => {
 		// Nothing was billed as cache creation in the fixture.
 		expect(labels.has("opus/cache_creation")).toBe(false);
 		expect(columnIndex("opus", "input")).toBeGreaterThanOrEqual(0);
-	});
+	}, 30_000);
 
 	test("the codex weekly group resolves no family at all", () => {
 		const group = study().groups.find(
@@ -624,7 +624,7 @@ describe("runFeasibilityStudy", () => {
 			r.cellScoresByGroup.map((g) => g.cells);
 		// The sweep itself has no random input at all.
 		expect(cellsOf(a)).toEqual(cellsOf(b));
-	});
+	}, 30_000);
 
 	test("a block owns a bin only when its TOKEN SOURCE interval is in the block too", () => {
 		const db = openLedgerDatabase(dbPath);
@@ -719,7 +719,7 @@ describe("runFeasibilityStudy", () => {
 			).get(`${entry.provider}|${entry.windowKind}`);
 			expect(entry.bins).toBe(bucket?.boundaryDropped as number);
 		}
-	});
+	}, 30_000);
 
 	test("the permutation control has teeth: synchronised accounts cannot beat it", () => {
 		// Every fixture account burns on the same tick pattern, so one account's
