@@ -156,6 +156,48 @@ export function retiredModel(
 	};
 }
 
+/**
+ * A model whose reason for being unmeasurable CHANGED over the series: below
+ * the share floor early, measurable in the middle, out of use at the end.
+ *
+ * The case a single "dominant" line gets wrong. The early stretch is longer, so
+ * picking one would report "too little traffic to measure" and bury the reason
+ * the line actually stops now — which is that the model is no longer routed.
+ */
+export function multiGapModel(key = "claude-sonnet-4-5"): QuotaDriftModel {
+	const capacityMtok = 80;
+	const estimate = 100 / capacityMtok;
+	const reasonsAt: (QuotaDriftUnidentifiedReason | null)[] = [
+		"low-share",
+		"low-share",
+		"low-share",
+		null,
+		null,
+		"no-exposure",
+	];
+	const points: QuotaDriftPoint[] = reasonsAt.map((reason, index) => {
+		const windowEndMs = FIXED_NOW - (reasonsAt.length - index) * 2 * DAY;
+		return {
+			windowStartMs: windowEndMs - 14 * DAY,
+			windowEndMs,
+			pointEstimate: reason === null ? estimate : null,
+			ciLow: reason === null ? estimate * 0.95 : null,
+			ciHigh: reason === null ? estimate * 1.05 : null,
+			impliedCapacityMtok: reason === null ? capacityMtok : null,
+			identified: reason === null,
+			nSegments: 130,
+			unidentifiedReasons: reason === null ? [] : [reason],
+		};
+	});
+	return {
+		key,
+		points,
+		latest: null,
+		changes: [],
+		verdict: "insufficient-evidence",
+	};
+}
+
 /** A model with a detected step change. */
 export function changedModel(key = "claude-sonnet-5"): QuotaDriftModel {
 	const model = measuredModel(key, 120);

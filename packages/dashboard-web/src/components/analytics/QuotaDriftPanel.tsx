@@ -269,9 +269,21 @@ function WindowSeries({
 						What this analysis could not measure, and why
 					</p>
 					<ul className="text-xs text-muted-foreground space-y-0.5">
-						{gaps.map((gap) => (
-							<li key={gap.key}>
-								<span className="font-medium">{gap.key}</span> — {gap.text}
+						{gaps.map((model) => (
+							<li key={model.key}>
+								<span className="font-medium">{model.key}</span>
+								{/* A single stretch reads better inline; several become a
+								    nested list so each stretch keeps its own period rather
+								    than being run together into one sentence. */}
+								{model.lines.length === 1 ? (
+									` — ${model.lines[0].text}`
+								) : (
+									<ul className="pl-4 space-y-0.5">
+										{model.lines.map((line) => (
+											<li key={line.id}>{line.text}</li>
+										))}
+									</ul>
+								)}
 							</li>
 						))}
 					</ul>

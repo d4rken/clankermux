@@ -16,7 +16,6 @@ import type {
 } from "@clankermux/types";
 import {
 	cohortLabel,
-	dominantGap,
 	flatWindowNotice,
 	formatCapacity,
 	formatCoefficient,
@@ -431,34 +430,9 @@ describe("gap boundaries", () => {
 	});
 });
 
-describe("dominantGap", () => {
-	it("picks the longest stretch, and the more recent of equals", () => {
-		const stretches = summarizeGaps([
-			point(0, ["low-share"]),
-			point(1, null),
-			point(2, ["no-exposure"]),
-			point(3, ["no-exposure"]),
-		]);
-
-		expect(dominantGap(stretches)?.reason).toBe("no-exposure");
-
-		// Ties break on the LAST window end, the one boundary both reasons place
-		// the same way. Comparing `fromMs` here would rank the older low-share
-		// stretch first, because its end-dated boundary outruns the newer
-		// no-exposure stretch's start-dated one.
-		const tied = summarizeGaps([
-			point(0, ["low-share"]),
-			point(1, null),
-			point(2, ["no-exposure"]),
-		]);
-		expect(dominantGap(tied)?.reason).toBe("no-exposure");
-		expect(dominantGap([])).toBeNull();
-	});
-});
-
 describe("summarizeModelGaps", () => {
-	it("gives one line per model with an unexplained stretch, and none otherwise", () => {
-		const lines = summarizeModelGaps([
+	it("groups every model with an unexplained stretch, and skips the rest", () => {
+		const gaps = summarizeModelGaps([
 			gapModel("claude-opus-4-8", [
 				null,
 				null,
@@ -470,11 +444,54 @@ describe("summarizeModelGaps", () => {
 			gapModel("claude-opus-5", [null, null]),
 		]);
 
-		expect(lines.map((l) => `${l.key} — ${l.text}`)).toEqual([
+		expect(
+			gaps.map((m) => `${m.key} — ${m.lines.map((l) => l.text).join(" | ")}`),
+		).toEqual([
 			"claude-opus-4-8 — not in use since 5 Aug",
 			"claude-haiku-4-5 — always runs alongside another model, so its own cost cannot be separated",
 			"claude-sonnet-5 — estimate too imprecise on this window",
 		]);
+	});
+
+	it("keeps every stretch of a model whose reason changed over time", () => {
+		// Below the share floor early, measurable in the middle, out of use at the
+		// end. Reducing this to the longest stretch would answer a question the
+		// reader did not ask and hide the reason the line stops NOW.
+		const gaps = summarizeModelGaps([
+			gapModel("claude-opus-4-8", [
+				["low-share"],
+				["low-share"],
+				["low-share"],
+				null,
+				["no-exposure"],
+			]),
+		]);
+
+		expect(gaps).toHaveLength(1);
+		expect(gaps[0].lines.map((l) => l.text)).toEqual([
+			"too little of this window's traffic to measure from 15 Aug to 19 Aug",
+			"not in use since 9 Aug",
+		]);
+		// The ongoing stretch is the SHORTER one, and it survives.
+		expect(gaps[0].lines.at(-1)?.stretch.ongoing).toBe(true);
+		expect(gaps[0].lines.at(-1)?.stretch.nPoints).toBe(1);
+	});
+
+	it("gives each stretch of one model a distinct render key", () => {
+		const gaps = summarizeModelGaps([
+			gapModel("claude-opus-4-8", [
+				["low-share"],
+				null,
+				["collinear"],
+				null,
+				["no-exposure"],
+			]),
+		]);
+
+		const ids = gaps[0].lines.map((l) => l.id);
+		expect(ids).toHaveLength(3);
+		expect(new Set(ids).size).toBe(3);
+		for (const id of ids) expect(id.startsWith("claude-opus-4-8@")).toBe(true);
 	});
 });
 

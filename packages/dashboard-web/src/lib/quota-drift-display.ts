@@ -315,47 +315,37 @@ function gapPeriodText(stretch: QuotaGapStretch): string {
 	return `from ${formatGapDate(stretch.fromMs)} to ${formatGapDate(stretch.toMs)}`;
 }
 
-/** One model's line in the gap list. */
+/** One unmeasured stretch, ready to render. */
 export interface QuotaGapLine {
-	key: string;
+	/**
+	 * Stable identity for this stretch, `<model>@<toMs>`.
+	 *
+	 * A model can contribute several lines, so the model key alone is not unique
+	 * and would collide as a React key. `toMs` is the discriminator because it is
+	 * the one boundary every reason places the same way, and two stretches of one
+	 * model can never end on the same fit window.
+	 */
+	id: string;
 	stretch: QuotaGapStretch;
 	text: string;
 }
 
-/**
- * The stretch that speaks for a model: the longest one, and the most recent of
- * those when several tie.
- *
- * Longest rather than newest because the line is answering "why is this chart
- * mostly empty", and the stretch that occupies most of it is the answer. Recency
- * only breaks ties so a model whose situation changed does not report the older
- * of two equal stretches.
- *
- * Recency is read off `toMs`, never `fromMs`: `fromMs` is reason-sensitive (see
- * {@link gapFromMs}), so comparing it across two stretches with different
- * reasons compares a window start against a window end and can rank an OLDER
- * stretch as the more recent one. `toMs` is the last window end for every
- * reason, so it is the only boundary the two are commensurable on.
- */
-export function dominantGap(
-	stretches: readonly QuotaGapStretch[],
-): QuotaGapStretch | null {
-	let best: QuotaGapStretch | null = null;
-	for (const stretch of stretches) {
-		if (
-			best === null ||
-			stretch.nPoints > best.nPoints ||
-			(stretch.nPoints === best.nPoints && stretch.toMs > best.toMs)
-		) {
-			best = stretch;
-		}
-	}
-	return best;
+/** Every unmeasured stretch of one model, oldest first. */
+export interface QuotaModelGaps {
+	key: string;
+	lines: QuotaGapLine[];
 }
 
 /**
- * One line per model that has an unexplained stretch, in the order the models
- * arrive. Models that were measurable throughout contribute nothing.
+ * Every unmeasured stretch of every model, grouped by model and in the order
+ * the models arrive. Models that were measurable throughout contribute nothing.
+ *
+ * ALL of them, not the longest one. A model can be below the share floor early,
+ * measurable in the middle and out of use at the end, and those are three
+ * different answers to "why is the line missing here". Reducing them to one
+ * discards the reader's actual question, and the reason that would be discarded
+ * is disproportionately the CURRENT one: an older stretch only has to be one
+ * fit window longer to hide the reason the line stops now.
  *
  * This deliberately covers models the chart draws NO line for at all: a model
  * that was never separable has no series to look at, so the list is the only
@@ -363,14 +353,21 @@ export function dominantGap(
  */
 export function summarizeModelGaps(
 	models: readonly QuotaDriftModel[],
-): QuotaGapLine[] {
-	const lines: QuotaGapLine[] = [];
+): QuotaModelGaps[] {
+	const out: QuotaModelGaps[] = [];
 	for (const model of models) {
-		const stretch = dominantGap(summarizeGaps(model.points));
-		if (!stretch) continue;
-		lines.push({ key: model.key, stretch, text: gapStretchText(stretch) });
+		const stretches = summarizeGaps(model.points);
+		if (stretches.length === 0) continue;
+		out.push({
+			key: model.key,
+			lines: stretches.map((stretch) => ({
+				id: `${model.key}@${stretch.toMs}`,
+				stretch,
+				text: gapStretchText(stretch),
+			})),
+		});
 	}
-	return lines;
+	return out;
 }
 
 /* ── Windows that never moved ───────────────────────────────────────────── */

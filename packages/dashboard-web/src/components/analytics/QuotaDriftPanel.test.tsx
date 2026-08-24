@@ -18,6 +18,7 @@ import {
 	changedModel,
 	cohort,
 	measuredModel,
+	multiGapModel,
 	preChangeCohort,
 	retiredModel,
 	unidentifiedModel,
@@ -115,6 +116,24 @@ describe("QuotaDriftPanel", () => {
 		expect(html).toMatch(/claude-opus-4-8<\/span> — not in use since \d+ \w+/);
 		// The measured model has no gap, so it contributes no line.
 		expect(html).not.toContain("claude-opus-5</span> —");
+	});
+
+	it("names every stretch of a model, not just the longest one", () => {
+		// Below the share floor early, measurable in the middle, out of use at the
+		// end. The early stretch is the longer one, so reporting only the dominant
+		// gap would answer "too little traffic to measure" and hide the reason the
+		// line stops NOW.
+		const html = renderToStaticMarkup(
+			<QuotaDriftPanel
+				cohort={cohort([
+					windowResult("five_hour", [measuredModel(), multiGapModel()]),
+				])}
+			/>,
+		);
+
+		expect(html).toContain("claude-sonnet-4-5");
+		expect(html).toMatch(/too little of this window.{0,6}s traffic to measure/);
+		expect(html).toContain("not in use since");
 	});
 
 	it("omits the gap list entirely when nothing is unexplained", () => {
