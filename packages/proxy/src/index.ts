@@ -108,6 +108,10 @@ export {
 	startIntegrityScheduler,
 } from "./integrity-scheduler";
 export {
+	getActiveOverloadHoldCount,
+	getOccupiedOverloadHoldKeys,
+} from "./overload-hold";
+export {
 	DEFAULT_ROUTING_CONTEXT,
 	type DefaultCandidateEvaluation,
 	earliestExclusionRecoveryMs,
@@ -122,6 +126,7 @@ export {
 	applyProviderOverloadCooldown,
 	clearProviderOverloadCooldown,
 	completeProviderOverloadProbe,
+	getOverloadDiagnostics,
 	getProbeLeaseSafetyTtlMs,
 	getProviderOverloadKey,
 	getProviderOverloadSnapshot,
@@ -133,6 +138,7 @@ export {
 	type OverloadBreakerState,
 	type OverloadBreakerStatus,
 	type OverloadBucketSnapshot,
+	type OverloadDiagnosticBucket,
 	type OverloadProbeToken,
 	type ProbeAdmission,
 	tryAcquireProviderOverloadProbe,

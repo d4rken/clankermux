@@ -42,6 +42,26 @@ export interface RequestFilters {
 	project?: string;
 	/** Restrict to requests that carried no project at all. */
 	noProject?: boolean;
+	/**
+	 * SUBSTRING match against the recorded failure reason (`error_message`).
+	 *
+	 * Status codes cannot answer "how did overload hurt clients": a synthetic
+	 * bounce and a forwarded upstream 529 are both HTTP 529, and an Anthropic
+	 * stream that dies in an `overloaded_error` frame is recorded as HTTP 200
+	 * with `success = 0` — invisible to any `codes=` filter. The reason string
+	 * is the only column that separates them, and it is already written.
+	 *
+	 * Substring rather than exact because the values are a small stable set with
+	 * a shared stem: `provider_overloaded` (our synthetic terminal),
+	 * `529 overloaded_error: Overloaded` (forwarded upstream),
+	 * `200 overloaded_error: Overloaded` (in-band, mid-stream). `error=overload`
+	 * gets the whole class; the full string gets exactly one kind.
+	 *
+	 * Implies `r.success = 0` (see the clause builder) — a failure reason only
+	 * exists on a failed row, and stating it lets the planner use an index
+	 * instead of reading the whole table on a synchronous connection.
+	 */
+	error?: string;
 }
 
 /**
@@ -57,6 +77,9 @@ export function buildRequestFilterClause(filters: RequestFilters): {
 } {
 	const clauses: string[] = [];
 	const params: (string | number)[] = [];
+	// Whether `r.success = 0` is already in the clause list, so the failure-reason
+	// filter below doesn't emit it twice.
+	let failureClauseAdded = false;
 
 	// First, so the positional params keep a stable, documented order.
 	if (filters.id) {
@@ -76,6 +99,37 @@ export function buildRequestFilterClause(filters: RequestFilters): {
 		// Outcome, not status code: Anthropic can return HTTP 200 and later send a
 		// terminal overloaded_error/rate_limit_error inside the SSE stream.
 		clauses.push("r.success = 0");
+		failureClauseAdded = true;
+	}
+
+	if (filters.error) {
+		// `r.success = 0` is not an optimization bolted on here — a failure reason
+		// only ever exists on a failed row (`recordSynthetic` nulls it on success,
+		// and every `finishTransport` call that passes one also passes an error
+		// outcome), so it is implied by asking about one at all. Stating it
+		// explicitly is what makes the query survivable: `error_message` is
+		// unindexed, the requests table runs to hundreds of thousands of rows, and
+		// bun:sqlite's `.all()` is SYNCHRONOUS — an unbounded scan blocks the event
+		// loop for every in-flight proxy request, not just this one. Measured on
+		// the production database at ~600k rows: 3.5s without this clause, 0.19s
+		// with it (identical results), because it lets the planner use
+		// idx_requests_success_timestamp instead of reading every row.
+		if (!failureClauseAdded) {
+			clauses.push("r.success = 0");
+			failureClauseAdded = true;
+		}
+		// The ESCAPE clause is REQUIRED, not decoration: SQLite's LIKE has no
+		// default escape character, so without it the backslashes below would be
+		// matched literally and `provider_overloaded` would find nothing.
+		clauses.push("r.error_message LIKE ? ESCAPE '\\'");
+		// Escape the LIKE metacharacters so a reason string containing `_`
+		// (every one of ours does — `provider_overloaded`) matches literally
+		// instead of treating it as a single-character wildcard.
+		const escaped = filters.error
+			.replace(/\\/g, "\\\\")
+			.replace(/%/g, "\\%")
+			.replace(/_/g, "\\_");
+		params.push(`%${escaped}%`);
 	}
 
 	if (typeof filters.from === "number") {
@@ -167,6 +221,11 @@ export function parseRequestFilters(params: URLSearchParams): RequestFilters {
 	const account = params.get("account");
 	if (account) {
 		filters.account = account;
+	}
+
+	const error = params.get("error");
+	if (error) {
+		filters.error = error;
 	}
 
 	if (params.get("noApiKey") === "1") {

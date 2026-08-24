@@ -62,6 +62,9 @@ import {
 	createCodexResetCreditApplyScheduler,
 	dispatchProxyRequest,
 	drainPendingUsageFinalizers,
+	getActiveOverloadHoldCount,
+	getOccupiedOverloadHoldKeys,
+	getOverloadDiagnostics,
 	getValidAccessToken,
 	handleProxy,
 	markCapacityRestoredProbePending,
@@ -87,6 +90,7 @@ import {
 	type Account,
 	type CapacitySignal,
 	type LoadBalancingStrategy,
+	type ProviderOverloadStatus,
 	StrategyName,
 	type StrategyStore,
 } from "@clankermux/types";
@@ -829,6 +833,51 @@ export default async function startServer(options?: {
 		getIntegrityStatus: () => dbOps.getIntegrityStatus(),
 		getStrategy: () => currentStrategy,
 		getEventLoopLag: () => getEventLoopStats(),
+		// Joins the breaker's live buckets with the hold semaphore's per-bucket
+		// occupancy — two module-level maps that only this layer sees together,
+		// and the pairing is the useful part: an open bucket with many holders is
+		// an incident actively costing client connections.
+		//
+		// The UNION, not just the breaker's rows. A hold freezes its slot key at
+		// entry, so holders outlive the bucket they were admitted against — an
+		// operator clear, or a provider-wide bucket appearing and moving the
+		// effective gate, leaves occupancy under a key the breaker no longer
+		// knows. Reporting only live buckets would silently drop those still
+		// draining, which is the case an operator is most likely to be chasing.
+		getProviderOverload: () => {
+			const live = getOverloadDiagnostics();
+			const rows: ProviderOverloadStatus[] = live.map((bucket) =>
+				bucket.state === "open" && bucket.until !== null
+					? {
+							state: "open" as const,
+							key: bucket.key,
+							until: bucket.until,
+							generation: bucket.generation,
+							lease: bucket.lease,
+							activeHoldSlots: getActiveOverloadHoldCount(bucket.key),
+						}
+					: {
+							state: "half-open" as const,
+							key: bucket.key,
+							until: null,
+							generation: bucket.generation,
+							lease: bucket.lease,
+							activeHoldSlots: getActiveOverloadHoldCount(bucket.key),
+						},
+			);
+			for (const key of getOccupiedOverloadHoldKeys()) {
+				if (rows.some((row) => row.key === key)) continue;
+				rows.push({
+					state: "closed",
+					key,
+					until: null,
+					generation: null,
+					lease: null,
+					activeHoldSlots: getActiveOverloadHoldCount(key),
+				});
+			}
+			return rows;
+		},
 	});
 
 	// The read-only widget API. Its own router, mounted as a sibling of the wire

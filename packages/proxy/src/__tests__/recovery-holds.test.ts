@@ -622,12 +622,15 @@ describe("createRecoveryHolds", () => {
 			);
 
 			expect(result).toBeNull();
-			const summaries = lines.filter((l) =>
-				l.startsWith("Overload hold exited"),
-			);
+			// Matched on the stable middle of the line, not its prefix: the request
+			// id sits between "Overload hold" and "exited", so a startsWith check
+			// silently matches nothing the moment correlation is added.
+			const summaries = lines.filter((l) => l.includes("exited for"));
 			expect(summaries).toHaveLength(1);
 			expect(summaries[0]).toContain("1 round");
 			expect(summaries[0]).toContain("1 suppressed");
+			// The correlation id is what makes concurrent incidents separable.
+			expect(summaries[0]).toMatch(/Overload hold \S+ exited for/);
 			completeProviderOverloadProbe(token, "abandoned");
 		});
 	});
