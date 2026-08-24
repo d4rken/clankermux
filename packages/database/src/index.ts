@@ -10,6 +10,7 @@ export type {
 	DatabaseRetryConfig,
 	RetentionStorageUsage,
 } from "./database-operations";
+export { UNIFIED_CLAIM_OBSERVATION_RETENTION_MS } from "./database-operations";
 export { DatabaseFactory } from "./factory";
 export type { IntegrityCheckKind } from "./integrity-check-runner";
 export { runIntegrityCheckInWorker } from "./integrity-check-runner";
