@@ -252,6 +252,45 @@ describe("a session is bound to the password that authorized it", () => {
 	});
 });
 
+describe("the binding is enforced by the STATEMENT, not by the signature", () => {
+	// The required parameter is the first line of defence and the reason no
+	// caller can forget it today. It is not the guard: a future optional
+	// parameter with an unconditional fallback would compile at every call site
+	// and be caught by no existing test, because every existing test passes a
+	// binding. What has to hold under that change is the SQL, so these two
+	// deliberately defeat the types to reach it.
+
+	it("refuses a call that omits the binding entirely", async () => {
+		await repo.setPassword("v1", "{}", 1);
+		// Cast purely to write a call the compiler forbids — `createSession`
+		// requires a PasswordBinding, so this cannot exist in production code.
+		const unbound = repo.createSession as unknown as (
+			record: ReturnType<typeof session>,
+		) => Promise<number>;
+		await expect(unbound.call(repo, session("a"))).rejects.toThrow();
+		expect(await repo.getSession("a")).toBeNull();
+	});
+
+	it("inserts NOTHING when the binding names no password", async () => {
+		await repo.setPassword("v1", "{}", 1);
+		// The shape a reinstated fallback would produce: the statement really
+		// runs, against a database whose password row is present and correct, and
+		// still inserts nothing because `WHERE EXISTS` has nothing to match. That
+		// is the guard failing closed on its own — a login that cannot name the
+		// password it verified against gets no session, whatever the types above
+		// it were persuaded to allow.
+		const unbound = repo.createSession as unknown as (
+			record: ReturnType<typeof session>,
+			boundTo: { verifier?: string; params?: string },
+		) => Promise<number>;
+		expect(await unbound.call(repo, session("a"), {})).toBe(0);
+		expect(await repo.getSession("a")).toBeNull();
+		expect(db.query(`SELECT COUNT(*) as n FROM auth_sessions`).get()).toEqual({
+			n: 0,
+		});
+	});
+});
+
 describe("session lifecycle", () => {
 	it("round-trips a session by its token hash", async () => {
 		await mintSession(
