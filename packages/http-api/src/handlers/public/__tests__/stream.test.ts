@@ -24,6 +24,7 @@ import {
 	resetRequestEventRegistry,
 } from "@clankermux/core";
 import { closeAllSseStreams } from "../../../sse-registry";
+import { MAX_STRING_BYTES } from "../dto";
 import {
 	createPublicStreamHandler,
 	PUBLIC_STREAM_MAX_CONNECTIONS,
@@ -85,7 +86,10 @@ describe("connect handshake", () => {
 			new Request("http://localhost/public/v1/stream"),
 		);
 		const frames = await readFrames(res, 2);
-		expect(frames[0]).toContain("event: connected");
+		// The EXACT preamble, not merely the event name: the applet waits for
+		// `data: ok` on the `connected` event before it starts its reducer, so a
+		// changed payload is a client-visible break that `toContain` would miss.
+		expect(frames[0]).toBe("event: connected\ndata: ok");
 		const snapshot = dataOf(frames[1] ?? "");
 		expect(snapshot?.type).toBe("active.snapshot");
 		// An EMPTY snapshot is meaningful: it retracts rows the device still
@@ -99,6 +103,19 @@ describe("connect handshake", () => {
 		);
 		const frames = await readFrames(res, 2);
 		expect(dataOf(frames[1] ?? "")?.schema).toBe("clankermux.public.stream.v1");
+	});
+
+	it("sends a comment heartbeat that a reader actually receives", async () => {
+		// The heartbeat is what keeps Bun.serve's 255s idleTimeout from killing a
+		// quiet overnight stream. It is an SSE COMMENT, which EventSource ignores
+		// and which must therefore never be mistaken for a frame with data.
+		const res = createPublicStreamHandler(5)(
+			new Request("http://localhost/public/v1/stream"),
+		);
+		// connected + snapshot, then the first heartbeat.
+		const frames = await readFrames(res, 3);
+		expect(frames[2]).toBe(": ping");
+		expect(dataOf(frames[2] ?? "")).toBeNull();
 	});
 
 	it("SUBSCRIBES BEFORE it builds the snapshot", async () => {
@@ -515,6 +532,110 @@ describe("event translation", () => {
 		// `responseTimeMs` is a DURATION and stays a number.
 		const done = events[3] as { responseTimeMs?: unknown } | null;
 		expect(typeof done?.responseTimeMs).toBe("number");
+	});
+
+	it("passes a long id and accountId through whole on EVERY event", () => {
+		// Truncation would leave a syntactically valid key that binds an event to
+		// the wrong record — and the join runs across ALL of these events, not
+		// just the completion summary: `opened` and `upstream` are what a device
+		// holds a row under until `done` arrives, and the snapshot is what it
+		// rebuilds them from after a reconnect.
+		const longId = `${"r".repeat(MAX_STRING_BYTES + 40)}-tail`;
+		const longAccountId = `${"a".repeat(MAX_STRING_BYTES + 40)}-tail`;
+		type IdBearing = {
+			id?: string;
+			accountId?: string | null;
+			active?: Array<{ id: string; accountId: string | null }>;
+		};
+		const cases: Array<{
+			label: string;
+			evt: Parameters<typeof toPublicStreamEvent>[0];
+			/** Every id the mapped event carries, in no particular order. */
+			idsOf: (dto: IdBearing) => Array<string | null | undefined>;
+		}> = [
+			{
+				label: "active.snapshot",
+				evt: {
+					type: "snapshot",
+					active: [
+						{
+							id: longId,
+							timestamp: 1,
+							method: "GET",
+							path: "/p",
+							project: null,
+							model: null,
+							phase: "streaming",
+							accountId: longAccountId,
+							statusCode: 200,
+						},
+					],
+				},
+				idsOf: (dto) => [dto.active?.[0]?.id, dto.active?.[0]?.accountId],
+			},
+			{
+				label: "request.opened",
+				evt: {
+					type: "ingress",
+					id: longId,
+					timestamp: 1,
+					method: "GET",
+					path: "/p",
+					project: null,
+					model: null,
+				},
+				idsOf: (dto) => [dto.id],
+			},
+			{
+				label: "request.dropped",
+				evt: { type: "ingress-end", id: longId, statusCode: 400 },
+				idsOf: (dto) => [dto.id],
+			},
+			{
+				label: "request.upstream",
+				evt: {
+					type: "start",
+					id: longId,
+					timestamp: 1,
+					method: "GET",
+					path: "/p",
+					accountId: longAccountId,
+					statusCode: 200,
+					project: null,
+					model: null,
+				},
+				idsOf: (dto) => [dto.id, dto.accountId],
+			},
+			{
+				label: "request.done",
+				evt: {
+					type: "summary",
+					payload: {
+						id: longId,
+						timestamp: new Date(1).toISOString(),
+						method: "GET",
+						path: "/p",
+						accountUsed: longAccountId,
+						statusCode: 200,
+						success: true,
+						errorMessage: null,
+						responseTimeMs: 1,
+						failoverAttempts: 0,
+					},
+				},
+				idsOf: (dto) => [dto.id, dto.accountId],
+			},
+		];
+
+		for (const { label, evt, idsOf } of cases) {
+			const mapped = toPublicStreamEvent(evt, 0) as unknown as IdBearing | null;
+			expect(mapped, label).not.toBeNull();
+			const ids = idsOf(mapped as IdBearing);
+			expect(ids.length, label).toBeGreaterThan(0);
+			for (const id of ids) {
+				expect([longId, longAccountId], label).toContain(id);
+			}
+		}
 	});
 
 	it("keeps project and model — full DATA parity with the internal lane", () => {
