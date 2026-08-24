@@ -1,12 +1,12 @@
 import type { Database } from "bun:sqlite";
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
-import { existsSync, unlinkSync } from "node:fs";
-import { DatabaseFactory, type DatabaseOperations } from "@clankermux/database";
+import { DatabaseOperations } from "@clankermux/database";
+import { tempDbTracker } from "@clankermux/test-support";
 import { AutoRefreshScheduler } from "../auto-refresh-scheduler";
 import type { ProxyContext } from "../proxy";
 
 // Test database path
-const TEST_DB_PATH = "/tmp/test-token-refresh-hierarchy.db";
+const tmpDb = tempDbTracker("test-token-refresh-hierarchy");
 
 describe("Auto-Refresh Token Hierarchy", () => {
 	let db: Database;
@@ -15,18 +15,9 @@ describe("Auto-Refresh Token Hierarchy", () => {
 	let mockProxyContext: ProxyContext;
 
 	beforeAll(async () => {
-		// Clean up any existing test database
-		try {
-			if (existsSync(TEST_DB_PATH)) {
-				unlinkSync(TEST_DB_PATH);
-			}
-		} catch (error) {
-			console.warn("Failed to clean up existing test database:", error);
-		}
-
-		// Initialize test database
-		DatabaseFactory.initialize(TEST_DB_PATH);
-		dbOps = DatabaseFactory.getInstance();
+		// Own connection rather than the DatabaseFactory singleton: the
+		// singleton outlives this file and other suites reset it.
+		dbOps = new DatabaseOperations(tmpDb.next());
 		db = dbOps.getDatabase();
 
 		// Create mock proxy context
@@ -41,16 +32,12 @@ describe("Auto-Refresh Token Hierarchy", () => {
 		scheduler = new AutoRefreshScheduler(db, mockProxyContext);
 	});
 
-	afterAll(() => {
-		// Clean up test database
+	afterAll(async () => {
 		try {
-			if (existsSync(TEST_DB_PATH)) {
-				unlinkSync(TEST_DB_PATH);
-			}
-		} catch (error) {
-			console.warn("Failed to clean up test database:", error);
+			await dbOps?.close();
+		} finally {
+			tmpDb.cleanup();
 		}
-		DatabaseFactory.reset();
 	});
 
 	describe("Window Refresh Logic", () => {

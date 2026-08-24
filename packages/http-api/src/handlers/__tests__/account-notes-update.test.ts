@@ -6,12 +6,12 @@ import {
 	expect,
 	it,
 } from "bun:test";
-import { existsSync, unlinkSync } from "node:fs";
 import type { DatabaseOperations } from "@clankermux/database";
 import { DatabaseFactory } from "@clankermux/database";
+import { tempDbTracker } from "@clankermux/test-support";
 import { createAccountNotesUpdateHandler } from "../accounts";
 
-const TEST_DB_PATH = "/tmp/test-account-notes-update.db";
+const tmpDb = tempDbTracker("test-account-notes-update");
 
 /** Insert a minimal account row and return its generated id. */
 async function insertAccount(
@@ -55,18 +55,17 @@ describe("createAccountNotesUpdateHandler", () => {
 	let handler: (req: Request, accountId: string) => Promise<Response>;
 
 	beforeAll(() => {
-		if (existsSync(TEST_DB_PATH)) unlinkSync(TEST_DB_PATH);
-		DatabaseFactory.initialize(TEST_DB_PATH);
+		DatabaseFactory.initialize(tmpDb.next());
 		dbOps = DatabaseFactory.getInstance();
 		handler = createAccountNotesUpdateHandler(dbOps);
 	});
 
 	afterAll(() => {
-		DatabaseFactory.reset();
+		// reset() closes the singleton connection before the files go away.
 		try {
-			if (existsSync(TEST_DB_PATH)) unlinkSync(TEST_DB_PATH);
-		} catch {
-			// ignore
+			DatabaseFactory.reset();
+		} finally {
+			tmpDb.cleanup();
 		}
 	});
 

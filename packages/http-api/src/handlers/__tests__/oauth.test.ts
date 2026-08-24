@@ -1,5 +1,4 @@
 import { afterAll, beforeAll, describe, expect, it, mock } from "bun:test";
-import { existsSync, unlinkSync } from "node:fs";
 import type { DatabaseOperations } from "@clankermux/database";
 import {
 	DatabaseFactory,
@@ -14,6 +13,7 @@ import {
 	registerCodexUsageRefresher,
 	unregisterCodexUsageRefresher,
 } from "@clankermux/proxy";
+import { tempDbTracker } from "@clankermux/test-support";
 import {
 	createAnthropicReauthCallbackHandler,
 	createAnthropicReauthInitHandler,
@@ -21,25 +21,17 @@ import {
 	createOAuthInitHandler,
 } from "../oauth";
 
-// Test database path
-const TEST_DB_PATH = "/tmp/test-oauth-handler.db";
+// Every fixture database in this file lives inside one tracked temp
+// directory, so teardown takes the DB and its -wal/-shm sidecars with it.
+const tmpDb = tempDbTracker("test-oauth-handler");
 
 describe("OAuth Handler - Backward Compatibility", () => {
 	let dbOps: DatabaseOperations;
 	let handler: (req: Request) => Promise<Response>;
 
 	beforeAll(async () => {
-		// Clean up any existing test database
-		try {
-			if (existsSync(TEST_DB_PATH)) {
-				unlinkSync(TEST_DB_PATH);
-			}
-		} catch (error) {
-			console.warn("Failed to clean up existing test database:", error);
-		}
-
 		// Initialize test database
-		DatabaseFactory.initialize(TEST_DB_PATH);
+		DatabaseFactory.initialize(tmpDb.next());
 		dbOps = DatabaseFactory.getInstance();
 
 		// Create handler
@@ -47,15 +39,12 @@ describe("OAuth Handler - Backward Compatibility", () => {
 	});
 
 	afterAll(() => {
-		// Clean up test database
+		// reset() closes the singleton connection before the files go away.
 		try {
-			if (existsSync(TEST_DB_PATH)) {
-				unlinkSync(TEST_DB_PATH);
-			}
-		} catch (error) {
-			console.warn("Failed to clean up test database:", error);
+			DatabaseFactory.reset();
+		} finally {
+			tmpDb.cleanup();
 		}
-		DatabaseFactory.reset();
 	});
 
 	describe('Deprecated "max" mode handling', () => {
@@ -241,35 +230,22 @@ mock.module("@clankermux/providers/codex", () => ({
 	extractCodexIdentity: () => null,
 }));
 
-const CODEX_REAUTH_DB_PATH = "/tmp/test-codex-reauth-handler.db";
-
 describe("createCodexReauthHandler", () => {
 	let dbOps: DatabaseOperations;
 	let handler: (req: Request) => Promise<Response>;
 
 	beforeAll(async () => {
-		try {
-			if (existsSync(CODEX_REAUTH_DB_PATH)) {
-				unlinkSync(CODEX_REAUTH_DB_PATH);
-			}
-		} catch {
-			// ignore
-		}
-
 		// Use DirectDbOps to avoid polluting the DatabaseFactory singleton
 		// (multiple describe blocks each closing the singleton causes "Database has closed").
-		dbOps = new DirectDbOps(CODEX_REAUTH_DB_PATH);
+		dbOps = new DirectDbOps(tmpDb.next());
 		handler = createCodexReauthHandler(dbOps);
 	});
 
 	afterAll(async () => {
-		await dbOps.close();
 		try {
-			if (existsSync(CODEX_REAUTH_DB_PATH)) {
-				unlinkSync(CODEX_REAUTH_DB_PATH);
-			}
-		} catch {
-			// ignore
+			await dbOps?.close();
+		} finally {
+			tmpDb.cleanup();
 		}
 	});
 
@@ -506,9 +482,6 @@ describe("createCodexReauthHandler", () => {
 // Anthropic reauth init handler
 // ---------------------------------------------------------------------------
 
-const ANTHROPIC_REAUTH_INIT_DB_PATH =
-	"/tmp/test-anthropic-reauth-init-handler.db";
-
 describe("createAnthropicReauthInitHandler", () => {
 	let dbOps: DatabaseOperations;
 	// Config is required by this handler — use a minimal stub
@@ -519,26 +492,15 @@ describe("createAnthropicReauthInitHandler", () => {
 	let handler: (req: Request) => Promise<Response>;
 
 	beforeAll(async () => {
-		try {
-			if (existsSync(ANTHROPIC_REAUTH_INIT_DB_PATH)) {
-				unlinkSync(ANTHROPIC_REAUTH_INIT_DB_PATH);
-			}
-		} catch {
-			// ignore
-		}
-
-		dbOps = new DirectDbOps(ANTHROPIC_REAUTH_INIT_DB_PATH);
+		dbOps = new DirectDbOps(tmpDb.next());
 		handler = createAnthropicReauthInitHandler(dbOps, stubConfig);
 	});
 
 	afterAll(async () => {
-		await dbOps.close();
 		try {
-			if (existsSync(ANTHROPIC_REAUTH_INIT_DB_PATH)) {
-				unlinkSync(ANTHROPIC_REAUTH_INIT_DB_PATH);
-			}
-		} catch {
-			// ignore
+			await dbOps?.close();
+		} finally {
+			tmpDb.cleanup();
 		}
 	});
 
@@ -607,9 +569,6 @@ describe("createAnthropicReauthInitHandler", () => {
 // Anthropic reauth callback handler
 // ---------------------------------------------------------------------------
 
-const ANTHROPIC_REAUTH_CALLBACK_DB_PATH =
-	"/tmp/test-anthropic-reauth-callback-handler.db";
-
 describe("createAnthropicReauthCallbackHandler", () => {
 	let dbOps: DatabaseOperations;
 	const stubConfig = {
@@ -619,26 +578,15 @@ describe("createAnthropicReauthCallbackHandler", () => {
 	let handler: (req: Request) => Promise<Response>;
 
 	beforeAll(async () => {
-		try {
-			if (existsSync(ANTHROPIC_REAUTH_CALLBACK_DB_PATH)) {
-				unlinkSync(ANTHROPIC_REAUTH_CALLBACK_DB_PATH);
-			}
-		} catch {
-			// ignore
-		}
-
-		dbOps = new DirectDbOps(ANTHROPIC_REAUTH_CALLBACK_DB_PATH);
+		dbOps = new DirectDbOps(tmpDb.next());
 		handler = createAnthropicReauthCallbackHandler(dbOps, stubConfig);
 	});
 
 	afterAll(async () => {
-		await dbOps.close();
 		try {
-			if (existsSync(ANTHROPIC_REAUTH_CALLBACK_DB_PATH)) {
-				unlinkSync(ANTHROPIC_REAUTH_CALLBACK_DB_PATH);
-			}
-		} catch {
-			// ignore
+			await dbOps?.close();
+		} finally {
+			tmpDb.cleanup();
 		}
 	});
 

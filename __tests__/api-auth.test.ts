@@ -1,7 +1,3 @@
-import { randomBytes } from "node:crypto";
-import { existsSync, unlinkSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { DatabaseOperations } from "@clankermux/database";
 import {
@@ -13,10 +9,9 @@ import {
 	listApiKeys,
 	regenerateApiKey,
 } from "@clankermux/http-api";
+import { tempDbTracker } from "@clankermux/test-support";
 
-function tempDbPath(): string {
-	return join(tmpdir(), `test-api-auth-${randomBytes(6).toString("hex")}.db`);
-}
+const tmpDb = tempDbTracker("test-api-auth");
 
 function makeRequest(opts: {
 	apiKey?: string;
@@ -33,19 +28,20 @@ function makeRequest(opts: {
 }
 
 describe("AuthService", () => {
-	let dbPath: string;
 	let dbOps: DatabaseOperations;
 	let authService: AuthService;
 
 	beforeEach(() => {
-		dbPath = tempDbPath();
-		dbOps = new DatabaseOperations(dbPath);
+		dbOps = new DatabaseOperations(tmpDb.next());
 		authService = new AuthService(dbOps);
 	});
 
-	afterEach(() => {
-		dbOps.dispose?.();
-		if (existsSync(dbPath)) unlinkSync(dbPath);
+	afterEach(async () => {
+		try {
+			await dbOps?.dispose();
+		} finally {
+			tmpDb.cleanup();
+		}
 	});
 
 	describe("isAuthenticationEnabled()", () => {
@@ -209,17 +205,18 @@ describe("AuthService", () => {
 });
 
 describe("API Key lifecycle", () => {
-	let dbPath: string;
 	let dbOps: DatabaseOperations;
 
 	beforeEach(() => {
-		dbPath = tempDbPath();
-		dbOps = new DatabaseOperations(dbPath);
+		dbOps = new DatabaseOperations(tmpDb.next());
 	});
 
-	afterEach(() => {
-		dbOps.dispose?.();
-		if (existsSync(dbPath)) unlinkSync(dbPath);
+	afterEach(async () => {
+		try {
+			await dbOps?.dispose();
+		} finally {
+			tmpDb.cleanup();
+		}
 	});
 
 	test("generateApiKey produces a btr-prefixed key with metadata", async () => {
