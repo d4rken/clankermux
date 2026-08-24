@@ -1141,6 +1141,37 @@ describe("quota-drift windows that stopped being reported", () => {
 		expect(window?.notReportedSince).toBe(firstAbsentMs(rows));
 		expect(window?.notReportedScope).toBe("reporting-subset");
 	});
+
+	it("never says the others still report when their absence is just young", () => {
+		// THE false statement this partition exists for. Both accounts stopped
+		// carrying the window; one 30 hours ago, one 12. Only the first clears the
+		// day-long threshold, so only it produces an onset - and reading "not in
+		// the onsets" as "still reporting" put a sentence on the panel saying the
+		// second account still reports a window whose newest readings are null.
+		const db = new Database(":memory:");
+		ensureSchema(db);
+		const rows = seedAbsentAccount(db, {
+			accountId: "qd-acct-absent-30h",
+			reportedDays: 3,
+			absentHours: 30,
+			boundaryGapMs: 2 * MINUTE_MS,
+		});
+		seedAbsentAccount(db, {
+			accountId: "qd-acct-absent-12h",
+			reportedDays: 3,
+			absentHours: 12,
+			boundaryGapMs: 2 * MINUTE_MS,
+		});
+		const window = flatWindowOf(db);
+		db.close();
+
+		// The established absence is still reported, dated from the account it
+		// was established on.
+		expect(window?.notReportedSince).toBe(firstAbsentMs(rows));
+		// Neither cohort-wide (the 12-hour absence is not established) nor a
+		// reporting subset (nothing in this cohort is currently reporting).
+		expect(window?.notReportedScope).toBe("partial-cohort");
+	});
 });
 
 describe("collectWindowObservations", () => {
@@ -1265,7 +1296,13 @@ describe("summarizeFlatWindow", () => {
 			lastObservedMs,
 			// An account reporting normally is sampled and observed at the same
 			// instant; the cases where the two diverge set this explicitly.
-			lastSampleMs: lastObservedMs,
+			lastSampleMs: over.lastSampleMs ?? lastObservedMs,
+			// The invariant the walk maintains: the newest reading carried a value
+			// exactly when the newest sample IS the newest observation. Cases that
+			// separate the two are describing an account whose latest readings no
+			// longer include the window.
+			latestIncludesWindow:
+				(over.lastSampleMs ?? lastObservedMs) === lastObservedMs,
 			lastMovementMs: null,
 			flatStartMs: FLAT_START,
 			flatValuePct: 0,
@@ -1407,6 +1444,81 @@ describe("summarizeFlatWindow", () => {
 
 		expect(facts.flatSince).not.toBeNull();
 		expect(facts.flatScope).toBe("reporting-subset");
+	});
+
+	it("drops an account whose latest reading is null, however fresh it is", () => {
+		// Flat membership is CURRENT PRESENCE, not target-value freshness. Account
+		// b stopped carrying the window two hours ago, well inside any age bound,
+		// and has nothing to say about what the window currently shows. Counting
+		// it would put an unqualified "every account" on a cohort where one member
+		// is not reporting at all.
+		const facts = summarizeFlatWindow(
+			[
+				observation({ accountId: "a" }),
+				observation({
+					accountId: "b",
+					lastObservedMs: FIXTURE_NOW - 2 * 60 * MINUTE_MS,
+					lastSampleMs: FIXTURE_NOW,
+				}),
+			],
+			"five_hour",
+			[traffic("a", FLAT_START), traffic("b", FLAT_START)],
+			FIXTURE_NOW,
+		);
+
+		expect(facts.flatSince).not.toBeNull();
+		expect(facts.flatScope).toBe("reporting-subset");
+	});
+
+	it("separates an established absence from a young one in the scope", () => {
+		// Maturity is not presence. Account b's absence is 30 hours old and
+		// datable, account c's is two hours old; both are absent NOW. The claim
+		// covers b, and the scope must not imply that c still reports the window.
+		const facts = summarizeFlatWindow(
+			[
+				observation({ accountId: "a" }),
+				observation({
+					accountId: "b",
+					lastObservedMs: FIXTURE_NOW - 30 * 60 * MINUTE_MS,
+					lastSampleMs: FIXTURE_NOW,
+					notReportingSinceMs: FIXTURE_NOW - 30 * 60 * MINUTE_MS,
+				}),
+				observation({
+					accountId: "c",
+					lastObservedMs: FIXTURE_NOW - 2 * 60 * MINUTE_MS,
+					lastSampleMs: FIXTURE_NOW,
+					notReportingSinceMs: FIXTURE_NOW - 2 * 60 * MINUTE_MS,
+				}),
+			],
+			"five_hour",
+			[traffic("a", FLAT_START)],
+			FIXTURE_NOW,
+		);
+
+		expect(facts.notReportedSince).toBe(FIXTURE_NOW - 30 * 60 * MINUTE_MS);
+		expect(facts.notReportedScope).toBe("partial-cohort");
+	});
+
+	it("says the others still report only when every one of them does", () => {
+		// The narrow case the `reporting-subset` wording is actually true for:
+		// one established absence, and every other active account carrying the
+		// window in its newest reading.
+		const facts = summarizeFlatWindow(
+			[
+				observation({ accountId: "a" }),
+				observation({
+					accountId: "b",
+					lastObservedMs: FIXTURE_NOW - 30 * 60 * MINUTE_MS,
+					lastSampleMs: FIXTURE_NOW,
+					notReportingSinceMs: FIXTURE_NOW - 30 * 60 * MINUTE_MS,
+				}),
+			],
+			"five_hour",
+			[traffic("a", FLAT_START)],
+			FIXTURE_NOW,
+		);
+
+		expect(facts.notReportedScope).toBe("reporting-subset");
 	});
 
 	it("never says every account when one was excluded from the decision", () => {

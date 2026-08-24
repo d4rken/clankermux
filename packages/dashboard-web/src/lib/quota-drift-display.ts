@@ -462,10 +462,22 @@ function windowValueLabel(window: string): string {
  * and then clears when readings resume, which is correct: it describes a period
  * that was observed, not a state that will continue.
  *
- * A partial rollout gets its own wording. `notReportedScope` says whether every
- * still-sampled account in the cohort has stopped carrying the window or only
- * some have, and an ABSENT scope — a cached payload written before the field
- * existed — reads as the qualified form, which is true either way.
+ * ## Three scopes, because the accounts outside the claim are not one group
+ *
+ * `notReportedScope` says who the absence was established on, and the wording
+ * differs by what is known about the rest:
+ *
+ *  - `all-accounts` — every still-sampled account stopped carrying the window;
+ *  - `reporting-subset` — every account outside the claim carries the window in
+ *    its newest reading, so the sentence may say the others still report one;
+ *  - `partial-cohort` — at least one account outside the claim is not reporting
+ *    the window either, and its absence is simply too young or undatable. The
+ *    sentence states what was established and stops there.
+ *
+ * An ABSENT scope — a cached payload written before the field existed — reads
+ * as the LAST of those, not the second. Whether the remaining accounts still
+ * report the window is exactly what such a payload cannot vouch for, and saying
+ * they do would be a false statement about them rather than a cautious one.
  *
  * Both this and {@link flatWindowNotice} can be present at once, on a cohort
  * split between accounts that still report the window and accounts that do not.
@@ -483,14 +495,24 @@ export function notReportedNotice(
 	const name = providerDisplayName(provider);
 	const value = windowValueLabel(window.window);
 	const date = formatFlatDate(since);
-	if (window.notReportedScope !== "all-accounts") {
+	if (window.notReportedScope === "all-accounts") {
+		return (
+			`No ${name} usage reading since ${date} has included ${value}. ` +
+			"There is nothing after that date for this chart to measure."
+		);
+	}
+	if (window.notReportedScope === "reporting-subset") {
 		return (
 			`Some ${name} accounts have included ${value} in no reading ` +
 			`since ${date}, while others still report one.`
 		);
 	}
+	// `partial-cohort`, or a payload with no scope at all. What the rest of the
+	// cohort's readings currently contain was not established, and the sentence
+	// says that instead of guessing which way it went.
 	return (
-		`No ${name} usage reading since ${date} has included ${value}. ` +
-		"There is nothing after that date for this chart to measure."
+		`Some ${name} accounts have included ${value} in no reading ` +
+		`since ${date}. Whether the cohort's other accounts still report one ` +
+		"was not established."
 	);
 }

@@ -685,9 +685,28 @@ describe("notReportedNotice", () => {
 		);
 	});
 
-	it("reads a payload with no scope as the qualified claim", () => {
+	it("never claims the rest of the cohort still reports the window", () => {
+		// Both accounts stopped carrying it; only one absence is old enough to
+		// report. "While others still report one" would be a false statement
+		// about an account whose newest readings are null.
+		const text =
+			notReportedNotice(
+				"codex",
+				absentWindow({ notReportedScope: "partial-cohort" }),
+			) ?? "";
+
+		expect(text).toBe(
+			"Some OpenAI accounts have included a 5-hour value in no reading " +
+				"since 21 Aug 2026. Whether the cohort's other accounts still " +
+				"report one was not established.",
+		);
+		expect(text).not.toContain("while others still report one");
+	});
+
+	it("reads a payload with no scope as the claim that asserts least", () => {
 		// A cached blob written before the field existed cannot vouch for whether
-		// every account stopped carrying the window.
+		// every account stopped carrying the window - and just as importantly, it
+		// cannot vouch for the ones it does not cover still reporting it.
 		const text =
 			notReportedNotice(
 				"codex",
@@ -695,6 +714,7 @@ describe("notReportedNotice", () => {
 			) ?? "";
 
 		expect(text).toContain("Some OpenAI accounts");
+		expect(text).not.toContain("while others still report one");
 	});
 
 	it("says nothing while readings still carry the value", () => {

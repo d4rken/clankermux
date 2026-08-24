@@ -418,9 +418,10 @@ export const MIN_FLAT_TRAFFIC_EQ_TOKENS = 1_000_000;
  * than counted as flat — counting it would let a decommissioned account either
  * freeze a live cohort or, worse, be the only evidence for a flat claim.
  *
- * The same bound separately decides whether a still-sampled account is
- * REPORTING this window. The two questions are deliberately distinct; see
- * {@link summarizeFlatWindow}.
+ * This bound decides SAMPLING membership and nothing else. Whether a
+ * still-sampled account is REPORTING this window is a different question with a
+ * different answer — `latestIncludesWindow`, read off its newest reading — and
+ * no age bound substitutes for it; see {@link summarizeFlatWindow}.
  */
 export const CURRENT_MEMBER_MS = 24 * 60 * 60 * 1000;
 
@@ -443,6 +444,18 @@ export interface WindowObservation {
 	 * claim without qualifying it.
 	 */
 	lastSampleMs: number;
+	/**
+	 * Whether the NEWEST reading of this account in this cohort carried a value
+	 * for this window.
+	 *
+	 * Current presence, and deliberately not derived from how old
+	 * `lastObservedMs` is or from whether an absence cleared the gates in
+	 * {@link summarizeAbsentWindow}. Claim MATURITY — is the absence old enough,
+	 * and can it be dated? — and current PRESENCE are different properties, and
+	 * using the first as a proxy for the second states that an account still
+	 * reports a window whose latest readings are null.
+	 */
+	latestIncludesWindow: boolean;
 	/** Newest observed CHANGE, ms, or null when the value never moved. */
 	lastMovementMs: number | null;
 	/** Start of the current unbroken constant run, ms. */
@@ -506,7 +519,10 @@ export function collectWindowObservations(
 			// live account whose window went absent from being mistaken for one
 			// that stopped being polled.
 			const existing = out.get(key);
-			if (existing) existing.lastSampleMs = ms;
+			if (existing) {
+				existing.lastSampleMs = ms;
+				existing.latestIncludesWindow = false;
+			}
 			prev = null;
 			continue;
 		}
@@ -519,6 +535,7 @@ export function collectWindowObservations(
 				firstObservedMs: ms,
 				lastObservedMs: ms,
 				lastSampleMs: ms,
+				latestIncludesWindow: true,
 				lastMovementMs: null,
 				flatStartMs: ms,
 				flatValuePct: pct,
@@ -527,6 +544,7 @@ export function collectWindowObservations(
 		} else {
 			existing.lastObservedMs = ms;
 			existing.lastSampleMs = ms;
+			existing.latestIncludesWindow = true;
 			if (!continuous) {
 				// Unobserved time is not stillness: the streak restarts here rather
 				// than bridging whatever happened across the break.
@@ -668,9 +686,9 @@ const NO_MOVEMENT_FACTS: FlatWindowFacts = {
  *
  * "Is this account still being sampled?" is answered by `lastSampleMs`, the
  * newest snapshot of any kind. "Is it still reporting THIS window?" is answered
- * by `lastObservedMs`, the newest non-null value.
+ * by `latestIncludesWindow`, whether its newest reading carried a value.
  *
- * Using the second for both is a false-claim generator, and not a subtle one.
+ * Using the first for both is a false-claim generator, and not a subtle one.
  * Take an account A that still reports the 5-hour window and has been flat for
  * eight days, and an account B producing fresh weekly readings whose 5-hour
  * value has been null for 25 hours. Judged on target-window freshness alone B
@@ -678,6 +696,12 @@ const NO_MOVEMENT_FACTS: FlatWindowFacts = {
  * differing-value branch below would go on to say "on every account" about a
  * cohort where one member had been silently excluded. The cohort is mixed
  * (flat on A, absent on B) and the copy has to say so.
+ *
+ * Presence is read from the newest reading rather than from how OLD the newest
+ * value is, because a freshness bound answers a third question again. An
+ * account whose 5-hour value went null two hours ago is inside any freshness
+ * bound and is still not reporting the window; counting it as reporting puts an
+ * account with nothing to say into a claim about what the window shows.
  *
  * So membership is decided on sampling, and the still-sampled accounts are then
  * split into the ones reporting the window and the ones that are not. Only the
@@ -744,9 +768,7 @@ export function summarizeFlatWindow(
 	// account that is not in here has not gone quiet — its readings simply no
 	// longer include the window, which is a different fact and cannot be settled
 	// by the accounts that do report it.
-	const reporting = active.filter(
-		(o) => newestSampleMs - o.lastObservedMs <= CURRENT_MEMBER_MS,
-	);
+	const reporting = active.filter((o) => o.latestIncludesWindow);
 	if (reporting.length === 0) return base;
 
 	const threshold = FLAT_WINDOW_THRESHOLD_MS[window];
@@ -805,6 +827,18 @@ export const WINDOW_ABSENT_THRESHOLD_MS = 24 * 60 * 60 * 1000;
  *
  * The cohort's `notReportedSince` is the LATEST member's, because that is when
  * the cohort as a whole stopped carrying the window.
+ *
+ * ## Maturity is not presence
+ *
+ * Whether an absence is ESTABLISHED (old enough, datable) and whether a window
+ * is currently PRESENT are separate properties, and the scope has to be decided
+ * on the second. Two accounts that both stopped reporting, 30 hours ago and 12
+ * hours ago, produce exactly one onset — and reading "not in the onsets" as
+ * "still reporting" made the panel tell a reader that the 12-hour account still
+ * reports a window whose newest readings are null. That is the failure class
+ * this whole analysis exists to avoid, so the remainder is partitioned on
+ * `latestIncludesWindow` and the uncertain case gets copy that asserts nothing
+ * about it.
  */
 function summarizeAbsentWindow(
 	active: readonly WindowObservation[],
@@ -814,18 +848,30 @@ function summarizeAbsentWindow(
 	const none = { notReportedSince: null, notReportedScope: null } as const;
 	if (nowMs - newestSampleMs > CURRENT_MEMBER_MS) return none;
 
-	const onsets = active.flatMap((o) => {
+	// The accounts this claim can be about at all: the ones whose NEWEST reading
+	// carried no value for the window. Membership here is current presence, and
+	// nothing below may widen it.
+	const absent = active.filter((o) => !o.latestIncludesWindow);
+	const onsets = absent.flatMap((o) => {
 		const since = o.notReportingSinceMs;
 		if (since === null) return [];
 		return o.lastSampleMs - since >= WINDOW_ABSENT_THRESHOLD_MS ? [since] : [];
 	});
 	if (onsets.length === 0) return none;
 
-	return {
-		notReportedSince: Math.max(...onsets),
-		notReportedScope:
-			onsets.length === active.length ? "all-accounts" : "reporting-subset",
-	};
+	// Three-way, because the accounts the claim does NOT cover are not one
+	// group. Some are reporting the window right now; the rest are not reporting
+	// it either but their absence is too young or could not be dated. Collapsing
+	// the second into the first is how the partial notice came to tell a reader
+	// that an account still reports a window whose newest readings were null.
+	const scope: QuotaDriftAccountScope =
+		onsets.length === active.length
+			? "all-accounts"
+			: onsets.length === absent.length
+				? "reporting-subset"
+				: "partial-cohort";
+
+	return { notReportedSince: Math.max(...onsets), notReportedScope: scope };
 }
 
 /** Whether enough exposure was charged against a window since `sinceMs`. */

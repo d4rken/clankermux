@@ -57,20 +57,35 @@ export type QuotaDriftTierProvenance = "recorded" | "assumed";
  * Who a cohort-level window claim actually covers.
  *
  * `all-accounts` means every account still being sampled in this cohort was
- * checked and agreed. `reporting-subset` means the still-sampled accounts do
- * NOT all carry this window in their readings, so the cohort is split and any
- * claim covers one side of that split only.
+ * checked and agreed. The other two both mean the cohort was not unanimous, and
+ * they differ in what is known about the accounts the claim does NOT cover:
  *
- * Both sides of that split can carry a claim, and which one does depends on the
+ *  - `reporting-subset` — every account outside the claim currently reports the
+ *    window. The split is fully characterised, so copy may say so;
+ *  - `partial-cohort` — at least one account outside the claim neither carries
+ *    the window in its newest reading nor has an absence this pass could
+ *    establish. Its current state is unknown, and copy must not fill that in.
+ *
+ * Both sides of a split can carry a claim, and which one does depends on the
  * claim: `flatSince` is established on the accounts that still report the
  * window, `notReportedSince` on the accounts whose readings no longer include
- * it. The scope says the same thing either way — the cohort was not unanimous.
+ * it.
+ *
+ * `partial-cohort` is reachable only for `notReportedSince`. A flat claim is
+ * established on the accounts currently reporting the window, and everything
+ * outside it is by construction not reporting — there is no third state to
+ * distinguish, and the flat copy already names the subset it covers.
  *
  * The distinction is not cosmetic. A cohort-wide claim built from a subset,
  * with the rest silently dropped, is a false statement about provider
  * behaviour — the one class of error this whole analysis exists not to make.
+ * Saying the remaining accounts still report the window when nothing checked
+ * that they do is the same error one level down.
  */
-export type QuotaDriftAccountScope = "all-accounts" | "reporting-subset";
+export type QuotaDriftAccountScope =
+	| "all-accounts"
+	| "reporting-subset"
+	| "partial-cohort";
 
 /** One point of a model's rolling series. */
 export interface QuotaDriftPoint {
@@ -243,8 +258,17 @@ export interface QuotaDriftWindowResult {
 	 * Who `notReportedSince` covers, or null when there is no such claim.
 	 *
 	 * `all-accounts` means no still-sampled account in the cohort carries the
-	 * window any more. `reporting-subset` means some still do — a partial
-	 * rollout, which must never be stated as a cohort-wide observation.
+	 * window any more. `reporting-subset` means every account this claim does
+	 * not cover carries the window in its newest reading — a partial rollout,
+	 * which must never be stated as a cohort-wide observation.
+	 *
+	 * `partial-cohort` means the rest of the cohort is not in that state either:
+	 * at least one account has also stopped carrying the window, but its absence
+	 * is too young to report or could not be dated. Whether an absence is
+	 * ESTABLISHED and whether a window is currently PRESENT are different
+	 * properties, and reading the first as the second is what let the partial
+	 * wording tell a reader that an account "still reports" a window whose
+	 * newest readings were null.
 	 */
 	notReportedScope?: QuotaDriftAccountScope | null;
 }
