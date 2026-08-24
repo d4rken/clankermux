@@ -48,6 +48,7 @@ import {
 	completeProviderOverloadProbe,
 	getProviderOverloadUntil,
 	isOfficialAnthropicProvider,
+	type OverloadProbeEvidence,
 	type OverloadProbeToken,
 	resolveOverloadAttributionModel,
 	tryAcquireProviderOverloadProbe,
@@ -911,8 +912,9 @@ export async function proxyWithAccount(
 
 	// Half-open overload-probe token held by THIS attempt (null = closed buckets
 	// or admission not yet acquired). Ownership either transfers into
-	// forwardToClient (which judges the verdict on full stream completion) or is
-	// completed locally on every non-forwarding exit. Completion is idempotent
+	// forwardToClient (which settles it at the first healthy `message_start`,
+	// falling back to the stream's end/error verdict) or is completed locally on
+	// every non-forwarding exit. Completion is idempotent
 	// and generation-checked, so belt-and-suspenders double-completion is safe.
 	let overloadProbeToken: OverloadProbeToken | null = null;
 	// Release the held probe lease locally and drop ownership. `fail()` calls
@@ -920,8 +922,9 @@ export async function proxyWithAccount(
 	// it with "reopened" first (fail's later "abandoned" then no-ops on null).
 	const settleOverloadProbe = (
 		outcome: "recovered" | "reopened" | "abandoned",
+		evidence?: OverloadProbeEvidence,
 	): void => {
-		completeProviderOverloadProbe(overloadProbeToken, outcome);
+		completeProviderOverloadProbe(overloadProbeToken, outcome, evidence);
 		overloadProbeToken = null;
 	};
 
@@ -956,7 +959,7 @@ export async function proxyWithAccount(
 		response?: Response | null,
 		onDrained?: (report: DrainReport) => void,
 	): Promise<null> => {
-		settleOverloadProbe("abandoned");
+		settleOverloadProbe("abandoned", "attempt_failed");
 		options?.onOutcome?.(outcome);
 		discardUpstreamBody(response, onDrained);
 		return null;
@@ -2068,7 +2071,7 @@ export async function proxyWithAccount(
 					cacheBodyStore.discardStaged(requestMeta.id);
 					// Direct return that bypasses forwardToClient — no stream verdict
 					// will ever arrive, so release a held probe lease here.
-					settleOverloadProbe("abandoned");
+					settleOverloadProbe("abandoned", "model_not_found");
 					options?.onOutcome?.({ kind: "model_not_found" });
 					return withSanitizedProxyHeaders(rawResponse);
 				}
@@ -2080,7 +2083,7 @@ export async function proxyWithAccount(
 					// lease held for the previous model's family must be released
 					// (never "recovered": the response that got us here was a
 					// model-unavailable/429, not a health verdict).
-					settleOverloadProbe("abandoned");
+					settleOverloadProbe("abandoned", "model_switch");
 
 					// Family-overload gate: a fallback list can cross model families
 					// (e.g. a Haiku request falling back into Sonnet, or vice versa).
@@ -2400,7 +2403,7 @@ export async function proxyWithAccount(
 					);
 					// The recursion acquires its own admission — release this attempt's
 					// lease first, or the retry would suppress itself ("probe-active").
-					settleOverloadProbe("abandoned");
+					settleOverloadProbe("abandoned", "stale_token_retry");
 					return await proxyWithAccount(
 						req,
 						url,
@@ -2441,11 +2444,12 @@ export async function proxyWithAccount(
 				account.provider,
 				rateLimitInfo.resetTime,
 				overloadAttributionModel,
+				{ accountName: account.name },
 			);
 			// Probe verdict: the probe itself hit the overload. The trip above
 			// already invalidated the lease on the tripped bucket (generation
 			// bump); "reopened" releases any remaining sibling-bucket lease too.
-			settleOverloadProbe("reopened");
+			settleOverloadProbe("reopened", "http_529");
 
 			if (isTerminalAttempt()) {
 				log.warn(
@@ -2586,9 +2590,10 @@ export async function proxyWithAccount(
 		}
 
 		// Forward response to client. Ownership of a held overload-probe token
-		// TRANSFERS to forwardToClient at CALL time — it judges the probe verdict
-		// on full stream completion (clean EOF vs mid-stream overloaded_error vs
-		// error), and on a throw during ITS setup it settles the token
+		// TRANSFERS to forwardToClient at CALL time — it settles the probe at the
+		// first healthy `message_start`, else on the stream's end/error verdict
+		// (clean EOF vs mid-stream overloaded_error vs error), and on a throw
+		// during ITS setup it settles the token
 		// "abandoned" itself before rethrowing (see forwardToClient). Null out
 		// the local reference so this side can't double-settle via the catch's
 		// fail() — single owner: after this line the token is forwardToClient's.

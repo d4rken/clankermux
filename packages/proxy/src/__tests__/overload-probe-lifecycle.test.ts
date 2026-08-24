@@ -587,7 +587,10 @@ describe("half-open overload probe lifecycle", () => {
 		expect(status.probeActive).toBe(false);
 	});
 
-	it("re-opens the bucket on a mid-stream overloaded_error during the probe", async () => {
+	it("re-opens the bucket when a mid-stream overloaded_error follows message_start", async () => {
+		// NB: the probe token already settled "recovered" at message_start, so
+		// this exercises the RE-TRIP, not a "reopened" probe verdict. The bucket
+		// ending up open is what matters either way.
 		globalThis.fetch = upstreamOnlyFetch(async () =>
 			sseResponse(MIDSTREAM_OVERLOAD_FRAMES),
 		) as never;

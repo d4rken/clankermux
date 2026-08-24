@@ -665,7 +665,12 @@ export function createRecoveryHolds(deps: RecoveryHoldsDeps): RecoveryHolds {
 		// and the exit reason removes the need to infer anything from duration.
 		let exitReason = "budget_exhausted";
 		let openSleepMs = 0;
-		let probeWaitMs = 0;
+		// NOT "time behind an overload probe": the short poll below is also
+		// charged after a re-trip, after an admission race, and behind a
+		// per-ACCOUNT single-flight recovery probe. Calling it probe-wait would
+		// reproduce, in the telemetry, the exact confusion this accounting was
+		// added to remove.
+		let verdictPollMs = 0;
 		try {
 			while (true) {
 				const nowMs = Date.now();
@@ -794,7 +799,14 @@ export function createRecoveryHolds(deps: RecoveryHoldsDeps): RecoveryHolds {
 					// `attemptCandidates` returns the 499 marker when the client hangs
 					// up mid-attempt, so a returned Response is NOT proof of a serve —
 					// test the signal first or every abort is miscounted as success.
-					exitReason = req.signal.aborted ? "client_abort" : "served";
+					//
+					// And a returned Response is not proof of SUCCESS either: it is
+					// whatever the wake attempt produced, 2xx or not. Report the status
+					// rather than claiming "served"; the request-history transport
+					// outcome stays authoritative for how it actually ended.
+					exitReason = req.signal.aborted
+						? "client_abort"
+						: `response_returned(status=${round.response.status})`;
 					return round.response;
 				}
 				if (req.signal.aborted) {
@@ -836,21 +848,22 @@ export function createRecoveryHolds(deps: RecoveryHoldsDeps): RecoveryHolds {
 					break;
 				}
 				// Suppressed behind the in-flight overload probe or the single-flight
-				// recovery probe, or re-tripped mid-attempt:
-				// short-poll so a probe verdict wakes us promptly (holders must not
-				// sleep past a probe completion). Recompute the remaining budget —
+				// per-account recovery probe, or re-tripped mid-attempt: short-poll
+				// so a verdict wakes us promptly (holders must not sleep past a probe
+				// completion). All three causes are charged to verdictPollMs, which
+				// is why it is NOT named after the overload probe alone. Recompute the remaining budget —
 				// the wake attempt above may have consumed a meaningful slice of it.
 				const pollMs =
 					OVERLOAD_HOLD_PROBE_POLL_MS +
 					Math.floor(Math.random() * CW_HOLD_JITTER_MS);
 				const postAttemptRemaining = holdBudgetMs - (Date.now() - holdStart);
 				if (pollMs > postAttemptRemaining) {
-					exitReason = "probe_wait_beyond_budget";
+					exitReason = "verdict_poll_beyond_budget";
 					break;
 				}
 				const pollStart = Date.now();
 				const polled = await abortableSleep(pollMs, req.signal);
-				probeWaitMs += Date.now() - pollStart;
+				verdictPollMs += Date.now() - pollStart;
 				if (!polled) {
 					exitReason = "client_abort";
 					return createClientAbortResponse();
@@ -864,8 +877,8 @@ export function createRecoveryHolds(deps: RecoveryHoldsDeps): RecoveryHolds {
 				`Overload hold exited for ${slotKeys.join(", ")} after ${Date.now() - holdStart}ms ` +
 					`(${exitReason}, budget ${holdBudgetMs}ms): ` +
 					`${rounds} round(s), ${suppressedAttempts} suppressed attempt(s), ` +
-					`${openSleepMs}ms waiting on an open breaker, ` +
-					`${probeWaitMs}ms waiting behind a probe`,
+					`${openSleepMs}ms sleeping on an open breaker, ` +
+					`${verdictPollMs}ms polling for a recovery verdict`,
 			);
 			clearInterval(holdRearm);
 			for (const held of acquiredSlotKeys) {
