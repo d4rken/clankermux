@@ -27,6 +27,7 @@ import {
 	spyOn,
 } from "bun:test";
 import {
+	CODEX_PING_MODEL,
 	type CodexCreditsInfo,
 	type CodexRateLimitResetCreditsFetchResult,
 	type CodexUsageStatus,
@@ -39,6 +40,7 @@ import type {
 	Account,
 	CodexRateLimitResetCreditConsumeRequest,
 	CodexRateLimitResetCreditConsumeResult,
+	InternalDispatchSpendRow,
 } from "@clankermux/types";
 import { CodexSpendCoordinator } from "../codex-spend-coordinator";
 import {
@@ -257,11 +259,17 @@ function makeCtx() {
 		errorMessage: string | null;
 	}> = [];
 	const manualLedgerEvents: Array<Record<string, unknown>> = [];
+	// Every internal_dispatch_spend row the coordinator booked — one per native
+	// ping, the record of the proxy's own quota burn.
+	const spendRows: InternalDispatchSpendRow[] = [];
 	// Toggle: when true, every ledger write throws (proves writes never break
 	// the consume flow).
 	const ledgerFailure = { throwOnWrite: false };
 	const ctx = {
 		dbOps: {
+			saveInternalDispatchSpend: mock(async (row: InternalDispatchSpendRow) => {
+				spendRows.push(row);
+			}),
 			// Return a shallow COPY so a mid-flight mutation of the stored account
 			// only affects a subsequent getAccount (mirrors a fresh DB re-read).
 			getAccount: mock(async (id: string) => {
@@ -303,6 +311,7 @@ function makeCtx() {
 		forceResetCalls,
 		resolveLedgerCalls,
 		manualLedgerEvents,
+		spendRows,
 		ledgerFailure,
 		setAccount: (a: Account) => accounts.set(a.id, a),
 		mutateAccount: (id: string, patch: Partial<Account>) => {
@@ -351,6 +360,7 @@ function makeRealCoordinator() {
 				const a = accounts.get(id);
 				return a ? { ...a } : null;
 			},
+			saveInternalDispatchSpend: async () => {},
 			updateAccountUsage: () => {},
 			updateAccountRateLimitMeta: () => {},
 			resetConsecutiveRateLimits: async () => {},
@@ -961,6 +971,89 @@ describe("CodexSpendCoordinator.observe — accounting", () => {
 
 		expect(applyCalls[0]?.opts.requestAccounting).toBe("none");
 		expect(applyCalls[0]?.opts.source).toBe("manual-refresh");
+	});
+});
+
+// ---------------------------------------------------------------------------
+// internal_dispatch_spend — the ping is a real quota spend and has to be booked
+// ---------------------------------------------------------------------------
+
+describe("CodexSpendCoordinator.observe — internal dispatch spend", () => {
+	it("books one row per native ping, source auto-refresh, every token field null", async () => {
+		const { coordinator, setAccount, spendRows } = makeCoordinator();
+		setAccount(makeCodexAccount({ id: "a", auto_refresh_enabled: true }));
+		const before = Date.now();
+
+		await coordinator.observe("a", "scheduled-prime");
+
+		expect(spendRows).toHaveLength(1);
+		const row = spendRows[0];
+		expect(row.accountId).toBe("a");
+		expect(row.source).toBe("auto-refresh");
+		expect(row.model).toBe(CODEX_PING_MODEL);
+		expect(row.httpStatus).toBe(200);
+		// Null is a READING here, not a gap: the transport cancels the response body
+		// to bound generation, so no usage is ever parsed. A zero would claim the
+		// provider reported zero.
+		expect(row.inputTokens).toBeNull();
+		expect(row.outputTokens).toBeNull();
+		expect(row.cacheReadInputTokens).toBeNull();
+		expect(row.cacheCreationInputTokens).toBeNull();
+		expect(row.startedAt).toBeGreaterThanOrEqual(before);
+		expect(row.completedAt).not.toBeNull();
+		expect(row.completedAt as number).toBeGreaterThanOrEqual(row.startedAt);
+		// No forwardToClient request id exists here, so the id is minted.
+		expect(row.id).not.toBe("a");
+		expect(row.id.length).toBeGreaterThan(0);
+	});
+
+	it("books the spend on a 429 too — the quota was consumed either way", async () => {
+		const { coordinator, setAccount, spendRows } = makeCoordinator();
+		setAccount(makeCodexAccount({ id: "a", auto_refresh_enabled: true }));
+		fetchImpl = async () =>
+			new Response("rate limited", {
+				status: 429,
+				headers: { "x-codex-primary-reset-at": "1775000000" },
+			});
+
+		await coordinator.observe("a", "scheduled-prime");
+
+		expect(spendRows.map((r) => r.httpStatus)).toEqual([429]);
+	});
+
+	it("books nothing when the transport never produced a response", async () => {
+		const { coordinator, setAccount, spendRows } = makeCoordinator();
+		setAccount(makeCodexAccount({ id: "a", auto_refresh_enabled: true }));
+		fetchImpl = async () => {
+			throw new Error("network down");
+		};
+
+		await coordinator.observe("a", "scheduled-prime");
+
+		// No status, and no evidence the request reached the backend.
+		expect(spendRows).toHaveLength(0);
+	});
+
+	it("books one row per PHYSICAL ping when concurrent causes share the request", async () => {
+		const { coordinator, setAccount, spendRows } = makeCoordinator();
+		setAccount(makeCodexAccount({ id: "a", auto_refresh_enabled: true }));
+		let release!: () => void;
+		const gate = new Promise<void>((res) => {
+			release = res;
+		});
+		tokenImpl = async () => {
+			await gate;
+			return "token";
+		};
+
+		const first = coordinator.observe("a", "scheduled-prime");
+		const second = coordinator.observe("a", "manual-refresh");
+		release();
+		await Promise.all([first, second]);
+
+		// One shared physical ping ⇒ one spend, never one per joined cause.
+		expect(fetchCalls.length).toBe(1);
+		expect(spendRows).toHaveLength(1);
 	});
 });
 
@@ -1687,6 +1780,7 @@ describe("CodexSpendCoordinator — cross-transport application ordering (SF1)",
 					const a = accounts.get(i);
 					return a ? { ...a } : null;
 				},
+				saveInternalDispatchSpend: async () => {},
 			},
 			asyncWriter: {
 				enqueue: (job: () => void | Promise<void>) => {
@@ -1756,6 +1850,7 @@ describe("CodexSpendCoordinator — cross-transport application ordering (SF1)",
 					const a = accounts.get(i);
 					return a ? { ...a } : null;
 				},
+				saveInternalDispatchSpend: async () => {},
 			},
 			asyncWriter: {
 				enqueue: (job: () => void | Promise<void>) => {

@@ -247,6 +247,7 @@ export {
 export {
 	CLAUDE_CLI_VERSION,
 	extractClaudeVersion,
+	getAppVersionSync,
 	getClientVersion,
 	getVersion,
 	getVersionSync,

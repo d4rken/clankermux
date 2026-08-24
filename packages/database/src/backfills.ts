@@ -1,5 +1,5 @@
 import type { Database } from "bun:sqlite";
-import { getVersionSync } from "@clankermux/core";
+import { getAppVersionSync } from "@clankermux/core";
 import { Logger } from "@clankermux/logger";
 
 const log = new Logger("DatabaseBackfills");
@@ -128,7 +128,11 @@ function seedAccountTierHistory(db: Database): void {
 				SELECT id, ?, identity_plan_tier, identity_rate_limit_tier, 'seed', ?
 				FROM accounts`,
 			)
-			.run(now, getVersionSync()).changes;
+			// getAppVersionSync, NEVER getVersionSync: the latter falls back to
+			// CLAUDE_CLI_VERSION when npm_package_version is unset, which is exactly
+			// the case under systemd — so every seeded row would claim the Claude CLI
+			// compat version was the build that took the observation.
+			.run(now, getAppVersionSync()).changes;
 
 		db.prepare(
 			`UPDATE strategies SET config = ?, updated_at = ? WHERE name = ?`,

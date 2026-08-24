@@ -2,6 +2,7 @@ import { PAUSE_REASON_NEEDS_REAUTH } from "@clankermux/core";
 import { Logger } from "@clankermux/logger";
 import {
 	CODEX_DEFAULT_ENDPOINT,
+	CODEX_PING_MODEL,
 	codexRateLimitResetCreditsCache,
 	consumeCodexRateLimitResetCredit,
 	fetchCodexRateLimitResetCredits,
@@ -16,6 +17,7 @@ import type {
 	CodexRateLimitResetCreditConsumeRequest,
 	CodexRateLimitResetCreditConsumeResult,
 	CodexResetCreditEventStatus,
+	InternalDispatchSpendRow,
 } from "@clankermux/types";
 import {
 	applyCodexObservation,
@@ -918,6 +920,55 @@ export class CodexSpendCoordinator {
 	}
 
 	/**
+	 * Record ONE native ping as an `internal_dispatch_spend` row.
+	 *
+	 * The ping is a real quota spend — it is the operation that STARTS a 5h window
+	 * — but it never touches `forwardToClient`, so the response-handler's probe
+	 * spend sink (the only other producer of these rows) cannot see it. Without
+	 * this call every auto-refresh prime is missing from the series that exists to
+	 * account for the proxy's own burn, which is exactly the gap the series was
+	 * added to close.
+	 *
+	 * A synthetic `crypto.randomUUID()` id, because this dispatch has no
+	 * `forwardToClient` request id to key on and nothing else in the database
+	 * refers to it.
+	 *
+	 * Every token field is NULL, and that is a reading rather than a gap:
+	 * `sendCodexNativePing` deliberately cancels the response body to bound
+	 * generation, so no usage is ever parsed and there is nothing to report. A
+	 * zero would claim the provider said zero.
+	 */
+	private recordNativePingSpend(
+		account: Account,
+		httpStatus: number,
+		startedAt: number,
+		completedAt: number,
+	): void {
+		const row: InternalDispatchSpendRow = {
+			id: crypto.randomUUID(),
+			accountId: account.id,
+			source: "auto-refresh",
+			model: CODEX_PING_MODEL,
+			httpStatus,
+			startedAt,
+			completedAt,
+			inputTokens: null,
+			outputTokens: null,
+			cacheReadInputTokens: null,
+			cacheCreationInputTokens: null,
+		};
+		const accepted = this.ctx.asyncWriter.enqueue(() =>
+			this.ctx.dbOps.saveInternalDispatchSpend(row),
+		);
+		if (!accepted) {
+			log.warn(
+				`Dropped internal dispatch spend row for request ${row.id} ` +
+					`(account=${account.name}, source=auto-refresh): the metadata write queue is at capacity`,
+			);
+		}
+	}
+
+	/**
 	 * The shared spend body: token → last-moment scheduled gate → single native
 	 * ping → single rate-limit parse → single applicator call. Runs once per
 	 * in-flight entry; every joined cause observes its result.
@@ -975,6 +1026,19 @@ export class CodexSpendCoordinator {
 				message: `Codex request failed for '${account.name}': ${message}`,
 			};
 		}
+		// Booked BEFORE any of the interpretation below, and outside every guard
+		// that follows: the quota was spent the moment the ping was answered, so no
+		// supersession check, cooldown decision or applicator skip may suppress the
+		// record of it. `issuedAtMs` is the pre-call clock read this row wants; the
+		// body is already fully cancelled inside the transport, so "now" is the
+		// completion instant. A transport THROW is deliberately not recorded — there
+		// is no status, and no evidence the request reached the backend.
+		this.recordNativePingSpend(
+			account,
+			response.status,
+			issuedAtMs,
+			Date.now(),
+		);
 
 		// 8. Parse rate-limit ONCE with the codex provider.
 		const provider = this.getProvider("codex");

@@ -115,6 +115,27 @@ export class BunSqlAdapter {
 	}
 
 	/**
+	 * Run a caller-supplied SYNCHRONOUS transaction body under the same async
+	 * busy-retry loop {@link runWithChanges} uses, returning whatever it produced.
+	 *
+	 * Multi-statement writes that need atomicity used to bypass the adapter and
+	 * call `db.transaction(fn)()` on the raw handle. That silently downgrades them
+	 * to the bounded C-level busy_timeout (250ms in production), so a write racing
+	 * the vacuum/cleanup worker for the writer slot fails outright instead of
+	 * retrying for up to ten minutes — and the writes doing this are token
+	 * refreshes, whose failure takes an account out of the pool.
+	 *
+	 * Retrying is safe because a SQLITE_BUSY transaction is rolled back in full:
+	 * each attempt starts from the same state the first one saw. The body must
+	 * therefore be idempotent-by-construction (no external side effects), which is
+	 * the same contract `db.transaction` itself imposes.
+	 */
+	async runTransaction<T>(body: () => T): Promise<T> {
+		const db = this.sqliteDb;
+		return this.withBusyRetry(() => db.transaction(body)());
+	}
+
+	/**
 	 * Close the database connection.
 	 *
 	 * Best-effort WAL truncate first: the main connection's busy_timeout is

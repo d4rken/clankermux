@@ -282,6 +282,7 @@ export const POST_FLOOR_TABLE_BASELINES: Readonly<
 			"observation_id",
 			"request_id",
 			"account_id",
+			"source",
 			"bucket",
 			"request_started_at",
 			"observed_at",

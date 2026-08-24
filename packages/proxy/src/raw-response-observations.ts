@@ -134,6 +134,7 @@ export function captureRawUpstreamObservation(
 				observationId,
 				requestId: input.requestId,
 				accountId: account.id,
+				source: input.source,
 				bucket: reading.bucket,
 				requestStartedAt: input.requestStartedAt,
 				observedAt,

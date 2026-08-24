@@ -66,6 +66,7 @@ function bucketRow(
 		observationId: "obs-1",
 		requestId: "req-1",
 		accountId: "acct-a",
+		source: "client",
 		bucket: "tokens",
 		requestStartedAt: 1_000,
 		observedAt: 1_250,
@@ -237,6 +238,7 @@ describe("OpenAiBucketObservationRepository", () => {
 			observation_id: "obs-1",
 			request_id: "req-1",
 			account_id: "acct-a",
+			source: "client",
 			bucket: "tokens",
 			request_started_at: 1_000,
 			observed_at: 1_250,
@@ -247,6 +249,25 @@ describe("OpenAiBucketObservationRepository", () => {
 			// Verbatim, never a parsed duration.
 			reset_raw: "6m0s",
 		});
+	});
+
+	it("records the dispatch that produced the attempt", async () => {
+		// Without this column a keepalive replay through an openai-compatible
+		// account is indistinguishable from client traffic in the bucket series.
+		await repo.insertMany([
+			bucketRow({ observationId: "obs-probe", source: "keepalive" }),
+		]);
+		const stored = readBuckets(db).find(
+			(r) => r.observation_id === "obs-probe",
+		);
+		expect(stored?.source).toBe("keepalive");
+	});
+
+	it("throws on a missing source rather than dropping the row", async () => {
+		await expect(
+			repo.insertMany([bucketRow({ source: null as unknown as "client" })]),
+		).rejects.toThrow();
+		expect(readBuckets(db)).toHaveLength(0);
 	});
 
 	it("keeps a remaining of zero as zero", async () => {

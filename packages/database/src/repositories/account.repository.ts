@@ -1,4 +1,4 @@
-import { getVersionSync } from "@clankermux/core";
+import { getAppVersionSync } from "@clankermux/core";
 import {
 	type Account,
 	type AccountIdentity,
@@ -57,29 +57,42 @@ export class AccountRepository extends BaseRepository<Account> {
 	 *  3. **Atomic.** A crash between the two writes would either lose the
 	 *     transition or invent one; one transaction cannot.
 	 *
+	 * ## Why it runs through the adapter and not the raw handle
+	 *
+	 * The transaction goes to {@link BunSqlAdapter.runTransaction}, which wraps it
+	 * in the SAME async SQLITE_BUSY retry loop every other write on this
+	 * connection gets. Calling `db.transaction(fn)()` directly would drop these
+	 * writes to the bare C-level busy_timeout (250ms), and the writes coming
+	 * through here are token refreshes: when the cleanup/vacuum worker holds the
+	 * writer slot, a fail-fast refresh takes the account out of the pool until the
+	 * next attempt.
+	 *
+	 * A no-identity call has nothing to compare and no history row to append, so
+	 * it stays the single `runWithChanges` statement it has always been — same
+	 * retry envelope, no transaction it does not need.
+	 *
 	 * Returns the UPDATE's affected-row count so CAS callers can report it.
 	 */
-	private writeIdentityWithTierHistory(
+	private async writeIdentityWithTierHistory(
 		accountId: string,
 		sql: string,
 		params: unknown[],
 		identity: AccountIdentity | null | undefined,
-	): number {
-		const db = this.adapter.getSQLiteDb();
-		let changes = 0;
-		db.transaction(() => {
-			const before = identity
-				? (db
-						.query(
-							`SELECT identity_plan_tier AS plan_tier,
-							        identity_rate_limit_tier AS rate_limit_tier
-							 FROM accounts WHERE id = ?`,
-						)
-						.get(accountId) as StoredTiers | null | undefined)
-				: null;
+	): Promise<number> {
+		if (!identity) return this.runWithChanges(sql, params);
 
-			changes = db.run(sql, params as never[]).changes;
-			if (!identity || changes === 0 || !before) return;
+		const db = this.adapter.getSQLiteDb();
+		return this.adapter.runTransaction(() => {
+			const before = db
+				.query(
+					`SELECT identity_plan_tier AS plan_tier,
+					        identity_rate_limit_tier AS rate_limit_tier
+					 FROM accounts WHERE id = ?`,
+				)
+				.get(accountId) as StoredTiers | null | undefined;
+
+			const changes = db.run(sql, params as never[]).changes;
+			if (changes === 0 || !before) return changes;
 
 			// COALESCE-merged effective values — exactly what the UPDATE just wrote.
 			const planTier = identity.planTier ?? before.plan_tier;
@@ -88,7 +101,7 @@ export class AccountRepository extends BaseRepository<Account> {
 				planTier === before.plan_tier &&
 				rateLimitTier === before.rate_limit_tier
 			) {
-				return;
+				return changes;
 			}
 
 			db.run(
@@ -100,11 +113,14 @@ export class AccountRepository extends BaseRepository<Account> {
 					Date.now(),
 					planTier,
 					rateLimitTier,
-					getVersionSync(),
+					// getAppVersionSync, NEVER getVersionSync — see the note in
+					// backfills.ts: getVersionSync's no-environment fallback is the Claude
+					// CLI compat version, which is not the build that made this record.
+					getAppVersionSync(),
 				] as never[],
 			);
-		})();
-		return changes;
+			return changes;
+		});
 	}
 
 	async findAll(): Promise<Account[]> {
@@ -253,7 +269,7 @@ export class AccountRepository extends BaseRepository<Account> {
 			expectedRefreshToken != null ? [expectedRefreshToken] : [];
 		const newRefreshTokenExpiresAt = options?.refreshTokenExpiresAt ?? null;
 		if (refreshToken) {
-			const changes = this.writeIdentityWithTierHistory(
+			const changes = await this.writeIdentityWithTierHistory(
 				accountId,
 				`UPDATE accounts SET access_token = ?, expires_at = ?, refresh_token = ?, refresh_token_issued_at = ?, refresh_token_expires_at = CASE WHEN ? IS NOT NULL THEN ? WHEN refresh_token = ? THEN refresh_token_expires_at ELSE NULL END${identitySet} WHERE id = ?${casClause}`,
 				[
@@ -272,7 +288,7 @@ export class AccountRepository extends BaseRepository<Account> {
 			);
 			return changes > 0;
 		}
-		const changes = this.writeIdentityWithTierHistory(
+		const changes = await this.writeIdentityWithTierHistory(
 			accountId,
 			`UPDATE accounts SET access_token = ?, expires_at = ?${identitySet} WHERE id = ?${casClause}`,
 			[accessToken, expiresAt, ...identityParams, accountId, ...casParams],
@@ -301,7 +317,7 @@ export class AccountRepository extends BaseRepository<Account> {
 		identity: AccountIdentity,
 	): Promise<void> {
 		const now = Date.now();
-		this.writeIdentityWithTierHistory(
+		await this.writeIdentityWithTierHistory(
 			accountId,
 			`UPDATE accounts SET
 				${IDENTITY_COALESCE_SET},
@@ -331,7 +347,7 @@ export class AccountRepository extends BaseRepository<Account> {
 		identity: AccountIdentity,
 	): Promise<void> {
 		const now = Date.now();
-		this.writeIdentityWithTierHistory(
+		await this.writeIdentityWithTierHistory(
 			accountId,
 			`UPDATE accounts SET
 				${IDENTITY_COALESCE_SET},

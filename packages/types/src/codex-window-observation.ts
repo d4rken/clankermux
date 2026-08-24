@@ -74,6 +74,12 @@ export interface OpenAiBucketObservationRow {
 	/** Logical request id — correlation only, NOT unique. */
 	requestId: string;
 	accountId: string;
+	/**
+	 * Which dispatch produced the attempt. Probe traffic (keepalive replays,
+	 * auto-refresh primes) consumes the same buckets as client traffic, and
+	 * without this the two are indistinguishable in the series.
+	 */
+	source: UnifiedClaimObservationSource;
 	bucket: OpenAiBucketName;
 	/** Request start, ms since epoch. */
 	requestStartedAt: number;

@@ -78,6 +78,58 @@ describe("extractRawCodexWindows", () => {
 		expect(normalized?.limits?.[0].percent).toBe(88);
 	});
 
+	it("emits a family discovered from its SLOT lines alone, with a null limitName", () => {
+		// The partial shape the normalized path deletes: slot lines with no
+		// `-limit-name` beside them. Reusing the normalized discovery rule here
+		// dropped every spark window on such a response — precisely the evidence
+		// the series exists to hold. limitName is null (unnamed), not "".
+		const readings = extractRawCodexWindows(
+			h({
+				"x-codex-primary-used-percent": "43.5",
+				"x-codex-spark-primary-used-percent": "12",
+				"x-codex-spark-primary-window-minutes": "300",
+				"x-codex-spark-secondary-reset-after-seconds": "600",
+			}),
+			OBSERVED_AT,
+		);
+
+		expect(
+			readings.map((r) => `${r.scope}:${r.familyCodename}:${r.slot}`),
+		).toEqual([
+			"root::primary",
+			"family:spark:primary",
+			"family:spark:secondary",
+		]);
+		const family = readings.filter((r) => r.scope === "family");
+		expect(family.every((r) => r.limitName === null)).toBe(true);
+		expect(family[0].usedPercent).toBe(12);
+		expect(family[0].windowMinutes).toBe(300);
+		expect(family[1].resetAtMs).toBe(OBSERVED_AT + 600_000);
+
+		// The normalized path still sees no family at all — the difference is the
+		// point, and this extractor must not have taught it the wider rule.
+		const normalized = parseCodexUsageHeaders(
+			h({
+				"x-codex-primary-used-percent": "43.5",
+				"x-codex-spark-primary-used-percent": "12",
+				"x-codex-spark-primary-window-minutes": "300",
+				"x-codex-spark-secondary-reset-after-seconds": "600",
+			}),
+			{ baseTimeMs: OBSERVED_AT },
+		);
+		expect(normalized?.limits).toBeUndefined();
+	});
+
+	it("still names a family that DOES carry its limit-name line", () => {
+		const readings = extractRawCodexWindows(h(fullHeaders()), OBSERVED_AT);
+		const family = readings.filter((r) => r.scope === "family");
+
+		expect(family).toHaveLength(2);
+		expect(family.every((r) => r.limitName === "GPT-5.3-Codex-Spark")).toBe(
+			true,
+		);
+	});
+
 	it("records a reported zero as zero and an absent line as null", () => {
 		const readings = extractRawCodexWindows(h(fullHeaders()), OBSERVED_AT);
 		const rootSecondary = readings.find(

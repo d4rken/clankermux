@@ -14,8 +14,9 @@
  *    turning into a restart log.
  */
 import { Database } from "bun:sqlite";
-import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, spyOn } from "bun:test";
 import type { AccountIdentity } from "@clankermux/types";
+import rootPackageJson from "../../../../package.json";
 import { BunSqlAdapter } from "../adapters/bun-sql-adapter";
 import { runOneShotBackfills } from "../backfills";
 import { ensureSchema } from "../migrations";
@@ -108,7 +109,10 @@ describe("account_tier_history — identity-capture chokepoints", () => {
 			// COALESCE-merged: the incoming null kept the stored multiplier.
 			expect(rows[0].rate_limit_tier).toBe("5x");
 			expect(rows[0].source).toBe("identity-capture");
-			expect(rows[0].app_version).toBeTruthy();
+			// The ClankerMux release version, NOT the Claude CLI compat version that
+			// getVersionSync falls back to when npm_package_version is unset (which
+			// is every systemd start).
+			expect(rows[0].app_version).toBe(rootPackageJson.version);
 		});
 
 		it("appends a row when only the rate-limit tier changes", async () => {
@@ -251,6 +255,75 @@ describe("account_tier_history — identity-capture chokepoints", () => {
 	});
 });
 
+describe("account_tier_history — the write's SQLITE_BUSY envelope", () => {
+	let db: Database;
+	let adapter: BunSqlAdapter;
+	let repo: AccountRepository;
+
+	beforeEach(() => {
+		db = makeDb();
+		adapter = new BunSqlAdapter(db);
+		repo = new AccountRepository(adapter);
+	});
+
+	afterEach(() => {
+		db.close();
+	});
+
+	it("keeps the no-identity write on the plain runWithChanges path", async () => {
+		insertAccount(db, "acct-a", { planTier: "max" });
+		const runWithChanges = spyOn(adapter, "runWithChanges");
+		const runTransaction = spyOn(adapter, "runTransaction");
+
+		await repo.updateTokens("acct-a", "access-1", 123);
+
+		// No identity means nothing to compare and no history row to append, so the
+		// write stays the single statement it was before the series existed.
+		expect(runWithChanges).toHaveBeenCalledTimes(1);
+		expect(runTransaction).not.toHaveBeenCalled();
+	});
+
+	it("retries the identity write when the writer slot is held", async () => {
+		// The regression: running db.transaction(fn)() on the raw handle drops a
+		// token refresh to the bare C-level busy_timeout, so a refresh racing the
+		// vacuum/cleanup worker fails and takes the account out of the pool.
+		insertAccount(db, "acct-a", { planTier: "pro", rateLimitTier: "5x" });
+		const runTransaction = spyOn(adapter, "runTransaction");
+
+		const original = db.run.bind(db);
+		let calls = 0;
+		// biome-ignore lint/suspicious/noExplicitAny: test stub replacing internal DB method
+		(db as any).run = (...args: any[]) => {
+			calls++;
+			if (calls === 1) {
+				throw Object.assign(new Error("database is locked"), {
+					code: "SQLITE_BUSY",
+				});
+			}
+			// biome-ignore lint/suspicious/noExplicitAny: delegating to real implementation
+			return (original as any)(...args);
+		};
+
+		try {
+			const applied = await repo.updateTokens(
+				"acct-a",
+				"access-1",
+				123,
+				undefined,
+				identity({ planTier: "max" }),
+			);
+			expect(applied).toBe(true);
+		} finally {
+			// biome-ignore lint/suspicious/noExplicitAny: restoring original
+			(db as any).run = original;
+		}
+
+		expect(runTransaction).toHaveBeenCalledTimes(1);
+		// The busy attempt rolled back in full, so the retry left exactly one row.
+		expect(history(db).map((r) => r.plan_tier)).toEqual(["max"]);
+	});
+});
+
 describe("account_tier_history — one-shot seed backfill", () => {
 	let db: Database;
 
@@ -271,6 +344,11 @@ describe("account_tier_history — one-shot seed backfill", () => {
 		const rows = history(db);
 		expect(rows).toHaveLength(2);
 		expect(rows.every((r) => r.source === "seed")).toBe(true);
+		// Same rule as the identity-capture rows: the seeded provenance must name
+		// the ClankerMux build, never CLAUDE_CLI_VERSION.
+		expect(rows.every((r) => r.app_version === rootPackageJson.version)).toBe(
+			true,
+		);
 		expect(
 			rows.map((r) => [r.account_id, r.plan_tier, r.rate_limit_tier]),
 		).toEqual([

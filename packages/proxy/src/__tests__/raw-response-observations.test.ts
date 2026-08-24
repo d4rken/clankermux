@@ -201,6 +201,7 @@ describe("captureRawUpstreamObservation", () => {
 			resetRaw: "6m0s",
 			endpoint: "/v1/chat/completions",
 			httpStatus: 429,
+			source: "client",
 		});
 	});
 
@@ -208,6 +209,15 @@ describe("captureRawUpstreamObservation", () => {
 		const h = makeHarness();
 		capture(h, { headers: CODEX_HEADERS, source: "auto-refresh" });
 		expect(h.codex[0].every((r) => r.source === "auto-refresh")).toBe(true);
+
+		// Buckets too: a probe routed through an openai-compatible account spends
+		// the same buckets client traffic does, and an unlabelled row folds that
+		// burn into the demand signal.
+		const buckets = makeHarness();
+		capture(buckets, { headers: BUCKET_HEADERS, source: "keepalive" });
+		expect(buckets.buckets[0].every((r) => r.source === "keepalive")).toBe(
+			true,
+		);
 	});
 
 	it("writes nothing when the response carries neither kind of header", () => {

@@ -450,9 +450,20 @@ function readRawSlot(
  * deciding.
  *
  * The account-wide (`root`) primary/secondary pair plus every per-family pair
- * the response advertises via `x-codex-<family>-limit-name`. Families are
- * emitted in alphabetical order and slots in primary-then-secondary order, so
- * two passes over one response produce byte-identical rows.
+ * the response advertises. Families are emitted in alphabetical order and slots
+ * in primary-then-secondary order, so two passes over one response produce
+ * byte-identical rows.
+ *
+ * ## Family discovery is WIDER here than on the normalized path
+ *
+ * The normalized path (`parseCodexScopedLimits`) discovers a family only via
+ * `x-codex-<family>-limit-name`, because a limit it cannot label is of no use to
+ * a routing decision. For a RECORD that rule silently deletes evidence: a
+ * response carrying `x-codex-spark-primary-used-percent` without a
+ * `spark-limit-name` line would lose every spark window, which is exactly the
+ * partial shape a series exists to capture. So any recognized family SLOT header
+ * discovers the codename too, and `limitName` is read separately — null when the
+ * response never named the limit.
  *
  * `x-codex-active-limit` is read DIRECTLY here. The family-discovery regex used
  * by the normalized path excludes it deliberately (it is not a family), which
@@ -493,17 +504,30 @@ export function extractRawCodexWindows(
 	push("root", "", "primary", null, "primary");
 	push("root", "", "secondary", null, "secondary");
 
-	// Same discovery rule as parseCodexScopedLimits: the `-limit-name` suffix is
-	// what keeps `x-codex-active-limit` from matching as a family.
+	// `-limit-name` NAMES a family; a slot line PROVES one exists. Both discover
+	// the codename, and neither can match `x-codex-active-limit` (no slot, no
+	// `-limit-name` suffix) or the root `x-codex-primary-*` lines (which have no
+	// codename segment before the slot).
 	const familyNamePattern = /^x-codex-([a-z0-9]+)-limit-name$/i;
-	const families = new Map<string, string>();
+	const familySlotPattern =
+		/^x-codex-([a-z0-9]+)-(?:primary|secondary)-(?:used-percent|window-minutes|reset-at|reset-after-seconds)$/i;
+	const limitNames = new Map<string, string>();
+	const codenames = new Set<string>();
 	headers.forEach((value, key) => {
-		const match = familyNamePattern.exec(key);
-		if (!match) return;
-		families.set(match[1].toLowerCase(), value);
+		const named = familyNamePattern.exec(key);
+		if (named) {
+			const codename = named[1].toLowerCase();
+			codenames.add(codename);
+			limitNames.set(codename, value);
+			return;
+		}
+		const slotted = familySlotPattern.exec(key);
+		if (slotted) codenames.add(slotted[1].toLowerCase());
 	});
-	for (const codename of [...families.keys()].sort()) {
-		const displayName = families.get(codename) as string;
+	for (const codename of [...codenames].sort()) {
+		// null, not "": the family exists but the response never named it, which is
+		// a different fact from a root row's inapplicable name.
+		const displayName = limitNames.get(codename) ?? null;
 		// BOTH slots, including the 5-hour primary the normalized path drops on
 		// the floor once the weekly window moved into the primary slot.
 		push("family", codename, "primary", displayName, `${codename}-primary`);

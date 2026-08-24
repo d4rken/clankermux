@@ -660,11 +660,18 @@ export function ensureSchema(db: Database): void {
 	// build's guess into the series permanently. limit_value / remaining are
 	// nullable — a row IS written when a header was present but malformed, and
 	// the nulls record that presence.
+	//
+	// `source` names the dispatch that produced the attempt, exactly as on the
+	// codex/claim series. Without it a keepalive replay or an auto-refresh prime
+	// routed through an openai-compatible account is indistinguishable from client
+	// traffic, and the proxy's own burn would be silently folded into the demand
+	// signal the series carries.
 	db.run(`
 		CREATE TABLE IF NOT EXISTS openai_bucket_observations (
 			observation_id TEXT NOT NULL,
 			request_id TEXT NOT NULL,
 			account_id TEXT NOT NULL,
+			source TEXT NOT NULL,
 			bucket TEXT NOT NULL,
 			request_started_at INTEGER NOT NULL,
 			observed_at INTEGER NOT NULL,

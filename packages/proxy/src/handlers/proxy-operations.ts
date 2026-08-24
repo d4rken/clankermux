@@ -850,6 +850,68 @@ export async function proxyUnauthenticated(
 }
 
 /**
+ * Capture the RAW rate-limit evidence of ONE authenticated upstream attempt, the
+ * instant it arrives, and hand the response straight back.
+ *
+ * ## Why it wraps the fetch instead of sitting on the forwarding path
+ *
+ * The capture used to live at the two terminal forwarding sites, which is after
+ * the retry/model-cycling/thinking-signature/cache-control/stale-token branches
+ * have already inspected, replaced or DISCARDED the response. The attempts those
+ * branches throw away are exactly the ones the series exists to record — a 429
+ * that triggered model cycling, a 401 that triggered a token refresh — so the
+ * shapes worth having were the shapes systematically missing. Routing every
+ * `makeProxyRequest` result through here means an attempt is recorded because it
+ * HAPPENED, not because it survived.
+ *
+ * Called BEFORE any inspection of the response, because several of those
+ * branches read (and one of them discards) the body, and `processResponse` later
+ * normalizes the Codex window headers and deletes the whole `x-ratelimit-*`
+ * family outright.
+ *
+ * `endpoint` comes from the ATTEMPT's own request URL, never the client-facing
+ * `url.pathname`: an Anthropic-shaped `/v1/messages` request reaches an
+ * openai-compatible backend as `/v1/chat/completions`, and the bucket rows have
+ * to name the path whose limits they describe. Each retry builds its own
+ * transformed request, so each attempt reports its own path.
+ *
+ * One call = one attempt = one `observation_id` (the hook mints it per call).
+ */
+function captureUpstreamAttempt(
+	attemptRequest: Request,
+	response: Response,
+	account: Account,
+	requestMeta: RequestMeta,
+	clientHeaders: Headers,
+	ctx: ProxyContext,
+): Response {
+	let endpoint: string | null = null;
+	try {
+		endpoint = new URL(attemptRequest.url).pathname;
+	} catch {
+		// A non-absolute URL cannot happen for a fetched Request, but an unknown
+		// path is a legitimate row while a throw here would take down a response
+		// that already succeeded upstream.
+	}
+	captureRawUpstreamObservation(
+		{
+			requestId: requestMeta.id,
+			account,
+			source: dispatchObservationSource(
+				(name) => clientHeaders.get(name),
+				requestMeta.internal === true,
+			),
+			requestStartedAt: requestMeta.timestamp,
+			endpoint,
+			httpStatus: response.status,
+			headers: response.headers,
+		},
+		ctx,
+	);
+	return response;
+}
+
+/**
  * Attempts to proxy a request with a specific account
  * @param req - The incoming request
  * @param url - The parsed URL
@@ -1259,17 +1321,37 @@ export async function proxyWithAccount(
 			overloadProbeToken = overloadAdmission.token;
 		}
 
+		// Every authenticated upstream attempt in this function goes through this
+		// wrapper, so the raw window/bucket evidence is recorded before anything
+		// below can inspect, replace or discard the response. See
+		// captureUpstreamAttempt.
+		const captureAttempt = (
+			attemptRequest: Request,
+			response: Response,
+		): Response =>
+			captureUpstreamAttempt(
+				attemptRequest,
+				response,
+				account,
+				requestMeta,
+				req.headers,
+				ctx,
+			);
+
 		// Make the request. Thread the caller's AbortSignal (if any) into the
 		// upstream fetch so a client disconnect aborts it immediately — essential
 		// in re-probe mode so a disconnect releases the hold slot promptly. When
 		// absent, makeProxyRequest installs its own timeout controller as before.
-		let rawResponse = await makeProxyRequest(
+		let rawResponse = captureAttempt(
 			transformedRequest,
-			undefined,
-			undefined,
-			undefined,
-			undefined,
-			options?.signal,
+			await makeProxyRequest(
+				transformedRequest,
+				undefined,
+				undefined,
+				undefined,
+				undefined,
+				options?.signal,
+			),
 		);
 		liveUpstream = rawResponse;
 
@@ -1306,13 +1388,16 @@ export async function proxyWithAccount(
 				// socket + ~512 KB read buffer is released. Acquiring first means a
 				// throw here leaves the original intact for the outer catch/failover
 				// instead of proceeding with an already-discarded body.
-				const retryResponse = await makeProxyRequest(
+				const retryResponse = captureAttempt(
 					retryTransformedRequest,
-					undefined,
-					undefined,
-					undefined,
-					undefined,
-					options?.signal,
+					await makeProxyRequest(
+						retryTransformedRequest,
+						undefined,
+						undefined,
+						undefined,
+						undefined,
+						options?.signal,
+					),
 				);
 				discardUpstreamBody(rawResponse);
 				rawResponse = retryResponse;
@@ -1350,13 +1435,16 @@ export async function proxyWithAccount(
 				// catch below continues with the original 400 still intact (its body
 				// not yet discarded), preserving the "forward the original 400 on
 				// retry failure" contract.
-				const retryResponse = await makeProxyRequest(
+				const retryResponse = captureAttempt(
 					retryRequest,
-					undefined,
-					undefined,
-					undefined,
-					undefined,
-					options?.signal,
+					await makeProxyRequest(
+						retryRequest,
+						undefined,
+						undefined,
+						undefined,
+						undefined,
+						options?.signal,
+					),
 				);
 				discardUpstreamBody(rawResponse);
 				rawResponse = retryResponse;
@@ -2185,13 +2273,16 @@ export async function proxyWithAccount(
 
 					// Acquire the retry first, then discard the previous attempt's
 					// body — a throw here leaves the prior body for the outer catch.
-					const retryResponse = await makeProxyRequest(
+					const retryResponse = captureAttempt(
 						retryTransformedRequest,
-						undefined,
-						undefined,
-						undefined,
-						undefined,
-						options?.signal,
+						await makeProxyRequest(
+							retryTransformedRequest,
+							undefined,
+							undefined,
+							undefined,
+							undefined,
+							options?.signal,
+						),
 					);
 					discardUpstreamBody(rawResponse);
 					rawResponse = retryResponse;
@@ -2345,25 +2436,10 @@ export async function proxyWithAccount(
 		// new owner so a processResponse throw releases it.
 		liveUpstream = taggedRawResponse;
 
-		// The single capture site for the RAW provider rate-limit evidence: the
-		// `x-codex-*` window lines and the `x-ratelimit-*` buckets, taken BEFORE
-		// processResponse normalizes the first and deletes the second. After this
-		// call neither survives in a recordable form.
-		captureRawUpstreamObservation(
-			{
-				requestId: requestMeta.id,
-				account,
-				source: dispatchObservationSource(
-					(name) => req.headers.get(name),
-					requestMeta.internal === true,
-				),
-				requestStartedAt: requestMeta.timestamp,
-				endpoint: url.pathname,
-				httpStatus: taggedRawResponse.status,
-				headers: taggedRawResponse.headers,
-			},
-			ctx,
-		);
+		// No capture here: the raw window/bucket evidence of THIS attempt — and of
+		// every attempt that never reached this point — was already recorded at the
+		// fetch, by captureAttempt. Capturing on the forwarding path recorded only
+		// the responses that survived every retry branch.
 
 		// Process response (transform format, sanitize headers, etc.) using account-specific provider
 		const response = await provider.processResponse(
@@ -2945,13 +3021,23 @@ export async function proxyForcedAccount(
 		// in (composed with the internal timeout inside makeProxyRequest) so a
 		// disconnect tears the upstream request down instead of letting it run to
 		// completion for a client that has gone.
-		const rawResponse = await makeProxyRequest(
+		// Captured at the fetch, like every attempt on the normal path: this
+		// function issues exactly one, and the evidence must not depend on what
+		// happens to the response afterwards.
+		const rawResponse = captureUpstreamAttempt(
 			transformedRequest,
-			undefined,
-			undefined,
-			undefined,
-			undefined,
-			req.signal,
+			await makeProxyRequest(
+				transformedRequest,
+				undefined,
+				undefined,
+				undefined,
+				undefined,
+				req.signal,
+			),
+			account,
+			requestMeta,
+			req.headers,
+			ctx,
 		);
 		liveForcedUpstream = rawResponse;
 
@@ -2970,26 +3056,6 @@ export async function proxyForcedAccount(
 			statusText: rawResponse.statusText,
 			headers: responseHeaders,
 		});
-
-		// The single capture site for the RAW provider rate-limit evidence: the
-		// `x-codex-*` window lines and the `x-ratelimit-*` buckets, taken BEFORE
-		// processResponse normalizes the first and deletes the second. After this
-		// call neither survives in a recordable form.
-		captureRawUpstreamObservation(
-			{
-				requestId: requestMeta.id,
-				account,
-				source: dispatchObservationSource(
-					(name) => req.headers.get(name),
-					requestMeta.internal === true,
-				),
-				requestStartedAt: requestMeta.timestamp,
-				endpoint: url.pathname,
-				httpStatus: taggedRawResponse.status,
-				headers: taggedRawResponse.headers,
-			},
-			ctx,
-		);
 
 		// Process response (format transform, header sanitize) — but do NOT run
 		// processProxyResponse (which applies cooldowns + signals failover) and

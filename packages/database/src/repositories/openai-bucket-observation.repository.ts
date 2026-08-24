@@ -18,7 +18,7 @@ export class OpenAiBucketObservationRepository extends BaseRepository<OpenAiBuck
 	async insertMany(rows: OpenAiBucketObservationRow[]): Promise<void> {
 		if (rows.length === 0) return;
 		const values = rows
-			.map(() => "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
+			.map(() => "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
 			.join(", ");
 		const params: unknown[] = [];
 		for (const row of rows) {
@@ -26,6 +26,7 @@ export class OpenAiBucketObservationRepository extends BaseRepository<OpenAiBuck
 				row.observationId,
 				row.requestId,
 				row.accountId,
+				row.source,
 				row.bucket,
 				row.requestStartedAt,
 				row.observedAt,
@@ -41,8 +42,9 @@ export class OpenAiBucketObservationRepository extends BaseRepository<OpenAiBuck
 		await this.run(
 			`
 			INSERT INTO openai_bucket_observations (
-				observation_id, request_id, account_id, bucket, request_started_at,
-				observed_at, http_status, endpoint, limit_value, remaining, reset_raw
+				observation_id, request_id, account_id, source, bucket,
+				request_started_at, observed_at, http_status, endpoint, limit_value,
+				remaining, reset_raw
 			)
 			VALUES ${values}
 			ON CONFLICT (observation_id, bucket) DO NOTHING

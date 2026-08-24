@@ -229,12 +229,19 @@ export function computeQuotaDrift(
 		});
 	}
 
+	// Hoisted ABOVE the return object: the audit is a full scan of the retained
+	// observation window, and evaluating it in a field position after `computeMs`
+	// would leave the reported duration excluding the most expensive query in the
+	// pass. `computeMs` is what the scheduler and the panel use to judge the cost
+	// of a pass, so it has to cover all of it.
+	const claimAudit = auditClaimObservations(db, now);
+
 	return {
 		status: "ready",
 		computedAt: now,
 		computeMs: Math.round(performance.now() - startedAt),
 		cohorts: out,
-		claimAudit: auditClaimObservations(db, now),
+		claimAudit,
 	};
 }
 
