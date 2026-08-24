@@ -139,8 +139,18 @@ function windowInput(
  * be in quota, NOT unknown. A provider eligible for one window only (zai has a
  * token window but no weekly one) contributes just that window and stays
  * metered.
+ *
+ * EXPORTED because it is the only correct way to feed {@link
+ * computeCapacityRunway}: window eligibility, `windowStartMs` derivation and the
+ * per-window {@link LifetimeConfidence} policy are decided here, and a caller
+ * that assembles `RunwayAccountInput` by hand silently opts out of all three.
+ * `/public/v1/*` scans the same accounts without any API key in the picture, so
+ * it maps through this and calls the scan directly rather than going through
+ * {@link computeApiKeyRunways}.
  */
-function toRunwayAccount(account: RunwayAccountSource): RunwayAccountInput {
+export function toRunwayAccountInput(
+	account: RunwayAccountSource,
+): RunwayAccountInput {
 	const hasFiveHour = FIVE_HOUR_ELIGIBLE_PROVIDERS.has(account.provider);
 	const hasSevenDay = SEVEN_DAY_ELIGIBLE_PROVIDERS.has(account.provider);
 	if (!hasFiveHour && !hasSevenDay) {
@@ -196,7 +206,7 @@ function runwayFor(
 		// The IDS, not a count: a consumer that wants the count takes `.length`,
 		// but nothing can recover which accounts a key reaches from a number.
 		eligibleAccountIds: eligible.map((account) => account.id),
-		outcome: computeCapacityRunway(eligible.map(toRunwayAccount), now),
+		outcome: computeCapacityRunway(eligible.map(toRunwayAccountInput), now),
 	};
 }
 
@@ -289,7 +299,10 @@ const OUTCOME_SEVERITY: Record<RunwayOutcome["kind"], number> = {
 };
 
 /**
- * The worst runway across ACTIVE keys, or null when none is active.
+ * The worst outcome among a set of runway-carrying rows, or null when the set is
+ * empty. Generic over the row because the same ordering ranks API keys and,
+ * on `/public/v1/*`, individual accounts — restating the severity table for the
+ * second consumer is how a headline comes to contradict the rows beneath it.
  *
  * Ranks the outcomes AT `now` rather than as served. The rows come from a poll,
  * so a `runway` whose deadline has since passed is already out of quota; ranking
@@ -299,15 +312,18 @@ const OUTCOME_SEVERITY: Record<RunwayOutcome["kind"], number> = {
  * The shortest-first tiebreak compares REMAINING time for the same reason: the
  * ordering must not depend on when the response was generated, which is what
  * the served `durationMs` encodes.
+ *
+ * Rows the caller does not want ranked are filtered out BEFORE the call — see
+ * {@link worstKeyRunway} for inactive keys and {@link summarizeKeyRunways} for
+ * the `unknown` exclusion a headline needs.
  */
-export function worstKeyRunway(
-	runways: KeyRunway[],
+export function worstRunwayEntry<T extends { outcome: RunwayOutcome }>(
+	entries: readonly T[],
 	now: number,
-): KeyRunway | null {
-	let worst: KeyRunway | null = null;
+): T | null {
+	let worst: T | null = null;
 	let worstOutcome: RunwayOutcome | null = null;
-	for (const candidate of runways) {
-		if (!candidate.isActive) continue;
+	for (const candidate of entries) {
 		const candidateOutcome = effectiveRunwayOutcome(candidate.outcome, now);
 		if (worst === null || worstOutcome === null) {
 			worst = candidate;
@@ -335,6 +351,24 @@ export function worstKeyRunway(
 		}
 	}
 	return worst;
+}
+
+/**
+ * The worst runway across ACTIVE keys, or null when none is active.
+ *
+ * Filtering is all this adds over {@link worstRunwayEntry}: "active" is a
+ * property of an API key and of nothing else the scan ranks, so the ordering
+ * itself lives in the generic helper and every surface — keys, and the pool's
+ * own accounts on `/public/v1/*` — ranks by one severity table.
+ */
+export function worstKeyRunway(
+	runways: KeyRunway[],
+	now: number,
+): KeyRunway | null {
+	return worstRunwayEntry(
+		runways.filter((runway) => runway.isActive),
+		now,
+	);
 }
 
 /**
