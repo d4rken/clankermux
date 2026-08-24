@@ -5,10 +5,15 @@ import {
 	isPinActive,
 	requestEvents,
 	ServiceUnavailableError,
+	ValidationError,
 } from "@clankermux/core";
 import { sanitizeRequestHeaders } from "@clankermux/http-common";
 import { Logger, LogLevel } from "@clankermux/logger";
-import { getFreshCapacity, usageCache } from "@clankermux/providers";
+import {
+	getFreshCapacity,
+	getProvider,
+	usageCache,
+} from "@clankermux/providers";
 import type { Account, ComboSlotInfo } from "@clankermux/types";
 import {
 	createAdmissionGates,
@@ -38,6 +43,7 @@ import {
 	resolveFamilyWeeklyExclusion,
 	selectAccountsForRequest,
 	setForcedAccount,
+	validateProviderPath,
 } from "./handlers";
 // Direct leaf import (not via the `handlers` barrel) — see the module comment.
 import { createClientAbortResponse } from "./handlers/client-abort-response";
@@ -607,13 +613,21 @@ async function handleIngestedProxy(
 				},
 			},
 		);
-		// Carry the REAL attempt count. A request gated mid-loop reaches this
-		// terminal having already made upstream attempts, and recording 0 would
-		// understate what happened in exactly the way the all-accounts-failed
-		// terminal was fixed not to.
-		await recordSyntheticErrorResponse(response, "provider_overloaded", {
-			failoverAttempts: opts?.failoverAttempts,
-		});
+		// Same collision guard as the give-up terminal (`recordGiveUpTerminal`):
+		// an earlier attempt can have called `begin()` and then failed during
+		// forwarding setup, and `recordSynthetic` bypasses the live-record map,
+		// so writing here would overwrite that row or emit a second summary.
+		// Newly load-bearing: this terminal is now reachable by requests that
+		// already attempted upstream, which is exactly when a live record exists.
+		if (!ctx.requestRecorder.hasRecord(requestMeta.id)) {
+			// Carry the REAL attempt count. A request gated mid-loop reaches this
+			// terminal having already made upstream attempts, and recording 0
+			// would understate what happened in exactly the way the
+			// all-accounts-failed terminal was fixed not to.
+			await recordSyntheticErrorResponse(response, "provider_overloaded", {
+				failoverAttempts: opts?.failoverAttempts,
+			});
+		}
 		return response;
 	};
 
@@ -694,6 +708,31 @@ async function handleIngestedProxy(
 		);
 	};
 
+	/**
+	 * Whether this account's provider can serve the requested path at all.
+	 *
+	 * Mirrors the `validateProviderPath` check inside `proxyWithAccount`, which
+	 * runs AFTER the attempt loop's gates — so the candidate list legitimately
+	 * contains accounts that will fail over on routing grounds alone (only
+	 * CodexProvider restricts paths). Used by the late overload gate to decide
+	 * whether a skipped candidate is real evidence that an overload blocked this
+	 * request, or merely an account that was never going to serve it.
+	 *
+	 * Fails OPEN on an unknown provider: `getProvider` returning undefined means
+	 * we cannot say, and treating that as "cannot serve" would silently narrow
+	 * the fix back to nothing.
+	 */
+	const canAccountServePath = (account: Account): boolean => {
+		const provider = getProvider(account.provider) ?? ctx.provider;
+		try {
+			validateProviderPath(provider, url.pathname);
+			return true;
+		} catch (error) {
+			if (error instanceof ValidationError) return false;
+			throw error;
+		}
+	};
+
 	// Real upstream attempts made for this request, counted at the probe-gate
 	// callback — the last point before `proxyWithAccount` runs. Candidates that
 	// were never attempted (probe-gate suppressed, overload-skipped, burst
@@ -760,6 +799,7 @@ async function handleIngestedProxy(
 			holds,
 			recordSyntheticErrorResponse,
 			createProviderOverloadedResponse,
+			getUpstreamAttempts: () => upstreamAttempts,
 			logFinalOrderOnce,
 			attemptThroughProbeGate: countedAttemptThroughProbeGate,
 		});
@@ -1112,6 +1152,17 @@ async function handleIngestedProxy(
 				}
 			}
 
+			// Keyed on the combo override or the request's LOGICAL model, not the
+			// account's mapped model. Deliberately unchanged: switching it to the
+			// canonical per-account model changes WHICH candidate is skipped
+			// during an overload — an account mapping sonnet→opus is gated on the
+			// sonnet bucket today and would stop being — and that is a routing
+			// decision, separate from the skip-recording below.
+			//
+			// Consequence worth knowing: the hold re-derives the bucket per
+			// account, so with per-account model mapping the gate and the hold can
+			// key on different buckets. Pre-existing and narrow; not introduced by
+			// the recording below, and not silently changed by it either.
 			const overloadedUntil = getProviderOverloadUntil(
 				list[i].provider,
 				Date.now(),
@@ -1130,7 +1181,19 @@ async function handleIngestedProxy(
 				// zero available candidates UP FRONT took the zero-accounts path,
 				// held, and was served. Observed in production 2026-08-24 18:43:08:
 				// one 503 alongside two 200s, one second apart, same breaker.
-				holds.noteOverloadGateSkip(list[i], overloadedUntil);
+				//
+				// ONLY when this account could actually have served the request.
+				// Per-account path validation happens inside `proxyWithAccount`,
+				// AFTER this gate, so the candidate list still contains accounts
+				// that would fail over on routing grounds alone — a Codex account
+				// asked for /v1/chat/completions, say. Recording one of those as
+				// overload-blocked would make the request wait out a cooldown that
+				// could never help it, turning an honest fast 503 into a
+				// multi-minute hold and then a 529. A candidate that cannot serve
+				// the path is not evidence of anything about the breaker.
+				if (canAccountServePath(list[i])) {
+					holds.noteOverloadGateSkip(list[i], overloadedUntil);
+				}
 				continue;
 			}
 

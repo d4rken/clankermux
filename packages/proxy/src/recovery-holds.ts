@@ -288,11 +288,18 @@ export function createRecoveryHolds(deps: RecoveryHoldsDeps): RecoveryHolds {
 	// `burstHeldAccountForGiveUp`) rather than the generic ALL_ACCOUNTS_FAILED.
 	let burstHoldDeclined = false;
 	let burstHeldAccountForGiveUp: Account | null = null;
-	// Attempts refused by half-open overload-probe admission (another request is
-	// probing, or an open bucket won a race against the gate). When the loops
-	// exhaust with at least one suppression recorded, the terminal must be the
-	// provider-overloaded 529 (retry in seconds — a probe is in flight), NOT the
-	// generic ALL_ACCOUNTS_FAILED / pool_exhausted error.
+	// Candidates an OVERLOAD stopped from reaching upstream, from either of two
+	// routes: refused by half-open probe admission (another request is probing,
+	// or an open bucket won a race against the gate), or dropped by the attempt
+	// loop's late gate when the breaker tripped mid-walk. When the loops exhaust
+	// with at least one recorded, the terminal must be the provider-overloaded
+	// 529 — the request was blocked by an overload and can wait for recovery —
+	// NOT the generic ALL_ACCOUNTS_FAILED / pool_exhausted error.
+	//
+	// Retry-After is NOT taken from the `until` recorded here: the terminal runs
+	// `refreshOverloadUntils` over this list to re-read each bucket's CURRENT
+	// deadline, so a re-trip during the hold is reflected instead of a stale
+	// pre-hold value.
 	const overloadSuppressedAttempts: ProviderOverloadedAccount[] = [];
 	const noteOverloadSuppression = (
 		account: Account,
@@ -307,10 +314,13 @@ export function createRecoveryHolds(deps: RecoveryHoldsDeps): RecoveryHolds {
 			});
 		}
 	};
-	// The late-gate counterpart. Carries the bucket's real deadline (the gate
-	// already resolved it to decide the skip), so the hold's within-budget check
-	// and the terminal's Retry-After are both driven by the actual cooldown
-	// rather than the short probe-suppressed horizon.
+	// The late-gate counterpart, for candidates dropped when the breaker tripped
+	// while this request was already walking its list.
+	//
+	// `until` is the deadline the gate had already resolved to decide the skip.
+	// It is a snapshot for the record, NOT what drives behaviour: the hold
+	// re-inspects the live buckets, and the terminal runs `refreshOverloadUntils`
+	// to re-read them, so both follow the CURRENT deadline rather than this one.
 	const noteOverloadGateSkip = (account: Account, until: number): void => {
 		overloadSuppressedAttempts.push({ account, until });
 	};
@@ -331,8 +341,9 @@ export function createRecoveryHolds(deps: RecoveryHoldsDeps): RecoveryHolds {
 	};
 
 	// Transparent overload hold. When EVERY candidate is overload-gated (the
-	// zero-available terminal) or every attempt was suppressed behind an
-	// in-flight half-open probe (the suppressed-exhaustion terminal), a
+	// zero-available terminal), or every remaining candidate was stopped by an
+	// overload inside the loop — probe-suppressed or late-gated (the
+	// overload-blocked terminal) — a
 	// synthetic 529 bounced to the client forces a client-side retry loop for a
 	// condition that typically clears in seconds. Instead, hold the live
 	// connection and serve the request when the family recovers — bounded by

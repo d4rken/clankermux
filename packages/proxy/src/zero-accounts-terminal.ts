@@ -108,7 +108,15 @@ export interface ZeroAccountsOutcomeDeps {
 	/** handleProxy's synthetic provider-overloaded 529 (records itself). */
 	createProviderOverloadedResponse: (
 		overloaded: ProviderOverloadedAccount[],
+		opts?: { failoverAttempts?: number },
 	) => Promise<Response>;
+	/**
+	 * handleProxy's live count of real upstream attempts. Read at the moment a
+	 * terminal fires, NOT captured at construction: the holds below make wake
+	 * attempts through the counted probe gate, so a zero-accounts request can
+	 * reach its terminal having genuinely tried upstream several times.
+	 */
+	getUpstreamAttempts: () => number;
 	/**
 	 * handleProxy's once-per-request post-gate routing log. Called from every
 	 * admission point here, exactly as it is from the ones outside.
@@ -154,6 +162,7 @@ export async function resolveZeroAccountsOutcome(
 		holds,
 		recordSyntheticErrorResponse,
 		createProviderOverloadedResponse,
+		getUpstreamAttempts,
 		logFinalOrderOnce,
 		attemptThroughProbeGate,
 	} = deps;
@@ -704,6 +713,7 @@ export async function resolveZeroAccountsOutcome(
 		if (held) return held;
 		return await createProviderOverloadedResponse(
 			holds.refreshOverloadUntils(providerOverloadedAccounts),
+			{ failoverAttempts: getUpstreamAttempts() },
 		);
 	}
 
