@@ -1,9 +1,12 @@
 import type { Config } from "@clankermux/config";
 import type { DatabaseOperations } from "@clankermux/database";
 import { jsonResponse } from "@clankermux/http-common";
+import type { LoadBalancingStrategy } from "@clankermux/types";
+import { createPublicRunwayReader } from "../../services/public-runway";
 import { createPublicSnapshotReader } from "../../services/public-snapshot";
 import { createPublicAccountsHandler } from "./accounts";
-import { PUBLIC_SCHEMA } from "./dto";
+import { NO_STORE_HEADERS } from "./cache-headers";
+import { createPublicRunwayHandler } from "./runway";
 import { createPublicStatusHandler } from "./status";
 import { createPublicStreamHandler } from "./stream";
 
@@ -22,6 +25,13 @@ import { createPublicStreamHandler } from "./stream";
 export interface PublicRouterDeps {
 	dbOps: DatabaseOperations;
 	config: Config;
+	/**
+	 * The live load-balancing strategy, for the routing prediction `status` and
+	 * `accounts` publish. Optional so a test can mount the router without one;
+	 * absent means the routing context cannot be evaluated and both the candidate
+	 * and the count derived from it say so.
+	 */
+	getStrategy?: () => LoadBalancingStrategy | null;
 }
 
 export class PublicRouter {
@@ -30,12 +40,18 @@ export class PublicRouter {
 		(req: Request) => Promise<Response> | Response
 	>;
 
-	constructor({ dbOps, config }: PublicRouterDeps) {
-		// One snapshot reader shared by both JSON routes, so the two can never
+	constructor({ dbOps, config, getStrategy }: PublicRouterDeps) {
+		// One snapshot reader shared by both pool routes, so the two can never
 		// disagree about the pool they are describing.
-		const readSnapshot = createPublicSnapshotReader(dbOps, config);
+		const readSnapshot = createPublicSnapshotReader(dbOps, config, getStrategy);
 		const statusHandler = createPublicStatusHandler(readSnapshot);
 		const accountsHandler = createPublicAccountsHandler(readSnapshot);
+		// The runway has its own reader: it is a different, much more expensive
+		// computation, and folding it into the shared snapshot would make every
+		// `status` poll pay for a scan nobody asked for.
+		const runwayHandler = createPublicRunwayHandler(
+			createPublicRunwayReader(dbOps),
+		);
 		const streamHandler = createPublicStreamHandler();
 
 		this.handlers = new Map<
@@ -44,6 +60,7 @@ export class PublicRouter {
 		>([
 			["/public/v1/status", () => statusHandler()],
 			["/public/v1/accounts", () => accountsHandler()],
+			["/public/v1/runway", () => runwayHandler()],
 			["/public/v1/stream", (req) => streamHandler(req)],
 		]);
 	}
@@ -67,12 +84,11 @@ export class PublicRouter {
 		if (req.method !== "GET") {
 			return jsonResponse(
 				{
-					schema: PUBLIC_SCHEMA,
 					error: "method_not_allowed",
 					message: `${url.pathname} is read-only.`,
 				},
 				405,
-				{ Allow: "GET" },
+				{ ...NO_STORE_HEADERS, Allow: "GET" },
 			);
 		}
 		return await handler(req);

@@ -7,9 +7,11 @@ import {
 import { jsonResponse } from "@clankermux/http-common";
 import { Logger } from "@clankermux/logger";
 import { registerSseCloser } from "../../sse-registry";
+import { NO_STORE_HEADERS } from "./cache-headers";
 import {
-	PUBLIC_SCHEMA,
+	PUBLIC_STREAM_SCHEMA,
 	type PublicStreamEventDto,
+	streamHelpers,
 	toPublicRequestDoneDto,
 	truncateUtf8,
 } from "./dto";
@@ -58,9 +60,8 @@ export function publicStreamConnectionCount(): number {
 	return openStreams;
 }
 
-function str(value: string | null | undefined): string | null {
-	return value == null ? null : truncateUtf8(value);
-}
+const { instant, identifier, optionalIdentifier, text, toPublicRequestPhase } =
+	streamHelpers;
 
 /**
  * Translate one internal bus event into its public form, or null for an event
@@ -78,47 +79,52 @@ export function toPublicStreamEvent(
 		case "snapshot":
 			return {
 				type: "active.snapshot",
-				schema: PUBLIC_SCHEMA,
-				now,
+				schema: PUBLIC_STREAM_SCHEMA,
+				generatedAt: new Date(now).toISOString(),
 				active: evt.active.map((entry) => ({
-					id: truncateUtf8(entry.id),
-					startedAt: entry.timestamp,
+					// A join key against the later events for the same request, and
+					// against `accounts[].id` for `accountId`. Never truncated.
+					id: identifier(entry.id),
+					startedAt: instant(entry.timestamp),
 					method: truncateUtf8(entry.method),
 					path: truncateUtf8(entry.path),
-					project: str(entry.project),
-					model: str(entry.model),
-					phase: entry.phase,
-					accountId: str(entry.accountId),
+					project: text(entry.project),
+					model: text(entry.model),
+					// Mapped, never forwarded: a phase the internal bus adds later must
+					// reach the firmware as `other` rather than as a value it does not
+					// know, or it can reject the replay snapshot whole.
+					phase: toPublicRequestPhase(entry.phase),
+					accountId: optionalIdentifier(entry.accountId),
 					statusCode: entry.statusCode,
 				})),
 			};
 		case "ingress":
 			return {
 				type: "request.opened",
-				id: truncateUtf8(evt.id),
-				at: evt.timestamp,
+				id: identifier(evt.id),
+				at: instant(evt.timestamp),
 				method: truncateUtf8(evt.method),
 				path: truncateUtf8(evt.path),
-				project: str(evt.project),
-				model: str(evt.model),
+				project: text(evt.project),
+				model: text(evt.model),
 			};
 		case "ingress-end":
 			return {
 				type: "request.dropped",
-				id: truncateUtf8(evt.id),
+				id: identifier(evt.id),
 				statusCode: evt.statusCode,
 			};
 		case "start":
 			return {
 				type: "request.upstream",
-				id: truncateUtf8(evt.id),
-				at: evt.timestamp,
+				id: identifier(evt.id),
+				at: instant(evt.timestamp),
 				method: truncateUtf8(evt.method),
 				path: truncateUtf8(evt.path),
-				accountId: str(evt.accountId),
+				accountId: optionalIdentifier(evt.accountId),
 				statusCode: evt.statusCode,
-				project: str(evt.project),
-				model: str(evt.model),
+				project: text(evt.project),
+				model: text(evt.model),
 			};
 		case "summary":
 			return toPublicRequestDoneDto(evt.payload, now);
@@ -162,12 +168,14 @@ export function createPublicStreamHandler(
 		if (openStreams >= PUBLIC_STREAM_MAX_CONNECTIONS) {
 			return jsonResponse(
 				{
-					schema: PUBLIC_SCHEMA,
 					error: "too_many_streams",
 					message: `At most ${PUBLIC_STREAM_MAX_CONNECTIONS} concurrent stream connections are served.`,
 				},
 				503,
-				{ "Retry-After": String(PUBLIC_STREAM_RETRY_AFTER_SECONDS) },
+				{
+					...NO_STORE_HEADERS,
+					"Retry-After": String(PUBLIC_STREAM_RETRY_AFTER_SECONDS),
+				},
 			);
 		}
 		openStreams++;

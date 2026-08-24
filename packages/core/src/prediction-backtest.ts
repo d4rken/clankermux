@@ -728,8 +728,14 @@ export interface BootstrapCi {
 	iterations: number;
 }
 
-/** xorshift128. Deterministic and seedable; `Math.random` is not allowed here. */
-function makePrng(seed: number): () => number {
+/**
+ * xorshift128. Deterministic and seedable; `Math.random` is not allowed here.
+ *
+ * Exported so the sibling offline analyses (`ledger-feasibility.ts`) draw their
+ * controls from the SAME generator rather than growing a second copy that could
+ * drift.
+ */
+export function makePrng(seed: number): () => number {
 	let x = seed >>> 0 || 0x9e3779b9;
 	let y = 0x243f6a88;
 	let z = 0xb7e15162;

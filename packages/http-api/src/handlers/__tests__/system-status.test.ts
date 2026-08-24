@@ -30,13 +30,14 @@ function makeConfig() {
 
 describe("system status handler — eventLoop", () => {
 	it("surfaces the injected event-loop lag stats", async () => {
-		const handler = createSystemStatusHandler(
-			makeDbOps(),
-			makeConfig(),
-			() => ({ healthy: true }),
-			undefined,
-			() => ({ lastLagMs: 12, maxLagMs: 3400, maxRecentLagMs: 250 }),
-		);
+		const handler = createSystemStatusHandler(makeDbOps(), makeConfig(), {
+			getAsyncWriterHealth: () => ({ healthy: true }),
+			getEventLoopLag: () => ({
+				lastLagMs: 12,
+				maxLagMs: 3400,
+				maxRecentLagMs: 250,
+			}),
+		});
 
 		const response = await handler();
 		const body = (await response.json()) as SystemStatusResponse;
@@ -77,14 +78,10 @@ describe("system status handler — pricing gaps", () => {
 	};
 
 	it("surfaces the injected pricing gaps on the runtime block", async () => {
-		const handler = createSystemStatusHandler(
-			makeDbOps(),
-			makeConfig(),
-			() => ({ healthy: true }),
-			undefined,
-			undefined,
-			() => [gap],
-		);
+		const handler = createSystemStatusHandler(makeDbOps(), makeConfig(), {
+			getAsyncWriterHealth: () => ({ healthy: true }),
+			getPricingGaps: () => [gap],
+		});
 
 		const response = await handler();
 		const body = (await response.json()) as SystemStatusResponse;
@@ -97,14 +94,10 @@ describe("system status handler — pricing gaps", () => {
 		// `/health` answers 503 for a non-ok status and is consumed by container
 		// health checks. A model missing from the pricing catalogue degrades
 		// costing, not serving — it must never take the proxy out of rotation.
-		const handler = createSystemStatusHandler(
-			makeDbOps(),
-			makeConfig(),
-			() => ({ healthy: true }),
-			undefined,
-			undefined,
-			() => [gap],
-		);
+		const handler = createSystemStatusHandler(makeDbOps(), makeConfig(), {
+			getAsyncWriterHealth: () => ({ healthy: true }),
+			getPricingGaps: () => [gap],
+		});
 
 		const body = (await (await handler()).json()) as SystemStatusResponse;
 
@@ -152,9 +145,9 @@ describe("system status handler — usage-exhaustion consistency with /health", 
 				],
 			} as unknown as import("@clankermux/database").DatabaseOperations;
 
-			const handler = createSystemStatusHandler(dbOps, makeConfig(), () => ({
-				healthy: true,
-			}));
+			const handler = createSystemStatusHandler(dbOps, makeConfig(), {
+				getAsyncWriterHealth: () => ({ healthy: true }),
+			});
 			const response = await handler();
 			const body = (await response.json()) as SystemStatusResponse;
 
