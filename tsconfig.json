@@ -31,6 +31,11 @@
 		// The other scripts/ files stay as they are.
 		"scripts/prediction-backtest.ts",
 		"scripts/prediction-backtest.test.ts",
+		// Same deal for the ledger-burn feasibility study, plus the read-only
+		// database/out-path guards both tools share.
+		"scripts/db-tool-io.ts",
+		"scripts/ledger-feasibility.ts",
+		"scripts/ledger-feasibility.test.ts",
 		// Same reasoning, and more load-bearing: this is the only way to set the
 		// management password and the only way to recover from a forgotten one,
 		// so it must not be the one file a type error can reach production in.
