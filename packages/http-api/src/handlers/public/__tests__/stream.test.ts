@@ -24,6 +24,7 @@ import {
 	resetRequestEventRegistry,
 } from "@clankermux/core";
 import { closeAllSseStreams } from "../../../sse-registry";
+import { MAX_STRING_BYTES } from "../dto";
 import {
 	createPublicStreamHandler,
 	PUBLIC_STREAM_MAX_CONNECTIONS,
@@ -31,6 +32,7 @@ import {
 	publicStreamConnectionCount,
 	toPublicStreamEvent,
 } from "../stream";
+import { assertInstantsAreIso } from "./wire-contract";
 
 /** Publish on the internal bus, exactly as the proxy does. */
 function emit(evt: RequestEvt): void {
@@ -84,7 +86,10 @@ describe("connect handshake", () => {
 			new Request("http://localhost/public/v1/stream"),
 		);
 		const frames = await readFrames(res, 2);
-		expect(frames[0]).toContain("event: connected");
+		// The EXACT preamble, not merely the event name: the applet waits for
+		// `data: ok` on the `connected` event before it starts its reducer, so a
+		// changed payload is a client-visible break that `toContain` would miss.
+		expect(frames[0]).toBe("event: connected\ndata: ok");
 		const snapshot = dataOf(frames[1] ?? "");
 		expect(snapshot?.type).toBe("active.snapshot");
 		// An EMPTY snapshot is meaningful: it retracts rows the device still
@@ -97,7 +102,20 @@ describe("connect handshake", () => {
 			new Request("http://localhost/public/v1/stream"),
 		);
 		const frames = await readFrames(res, 2);
-		expect(dataOf(frames[1] ?? "")?.schema).toBe("clankermux.public.v1");
+		expect(dataOf(frames[1] ?? "")?.schema).toBe("clankermux.public.stream.v1");
+	});
+
+	it("sends a comment heartbeat that a reader actually receives", async () => {
+		// The heartbeat is what keeps Bun.serve's 255s idleTimeout from killing a
+		// quiet overnight stream. It is an SSE COMMENT, which EventSource ignores
+		// and which must therefore never be mistaken for a frame with data.
+		const res = createPublicStreamHandler(5)(
+			new Request("http://localhost/public/v1/stream"),
+		);
+		// connected + snapshot, then the first heartbeat.
+		const frames = await readFrames(res, 3);
+		expect(frames[2]).toBe(": ping");
+		expect(dataOf(frames[2] ?? "")).toBeNull();
 	});
 
 	it("SUBSCRIBES BEFORE it builds the snapshot", async () => {
@@ -139,7 +157,7 @@ describe("connect handshake", () => {
 		expect(snapshot?.active).toEqual([
 			{
 				id: "req-live",
-				startedAt: 1_700_000_000_000,
+				startedAt: "2023-11-14T22:13:20.000Z",
 				method: "POST",
 				path: "/v1/messages",
 				project: "clankermux",
@@ -386,6 +404,37 @@ describe("event translation", () => {
 		).toBe("request.upstream");
 	});
 
+	it("maps an unrecognized snapshot phase to other rather than forwarding it", () => {
+		// The snapshot is the one record a device cannot afford to reject: it is
+		// the signal that replay finished. A phase added to the internal bus later
+		// must therefore arrive as `other`, not as a value the firmware has never
+		// been taught.
+		const event = toPublicStreamEvent(
+			{
+				type: "snapshot",
+				active: [
+					{
+						id: "a",
+						timestamp: 1,
+						method: "GET",
+						path: "/p",
+						project: null,
+						model: null,
+						// biome-ignore lint/suspicious/noExplicitAny: modelling a future phase
+						phase: "queued" as any,
+						accountId: null,
+						statusCode: null,
+					},
+				],
+			},
+			0,
+		);
+		expect(
+			(event as { active?: Array<{ phase?: string }> } | null)?.active?.[0]
+				?.phase,
+		).toBe("other");
+	});
+
 	it("drops an event this surface does not carry rather than forwarding it raw", () => {
 		expect(
 			toPublicStreamEvent(
@@ -394,6 +443,199 @@ describe("event translation", () => {
 				0,
 			),
 		).toBeNull();
+	});
+
+	it("does NOT give the discriminator an `other` member", () => {
+		// The `other` convention on this surface is for DESCRIPTIVE enums, where
+		// an unrecognized value still has to be rendered. A discriminator is not
+		// one: an `other` event would be a record with no fields a client could
+		// read. An event we do not carry is simply not emitted, and a client
+		// ignores what it does not recognize.
+		const unknown = toPublicStreamEvent(
+			// biome-ignore lint/suspicious/noExplicitAny: modelling a future bus event
+			{ type: "something-new" } as any,
+			0,
+		);
+		expect(unknown).toBeNull();
+		expect(JSON.stringify(unknown)).not.toContain("other");
+	});
+
+	it("emits every instant as an ISO string and no duration as one", () => {
+		const events = [
+			toPublicStreamEvent(
+				{
+					type: "snapshot",
+					active: [
+						{
+							id: "a",
+							timestamp: 1_700_000_000_000,
+							method: "GET",
+							path: "/p",
+							project: null,
+							model: null,
+							phase: "pending",
+							accountId: null,
+							statusCode: null,
+						},
+					],
+				},
+				1_700_000_000_000,
+			),
+			toPublicStreamEvent(
+				{
+					type: "ingress",
+					id: "a",
+					timestamp: 1_700_000_000_000,
+					method: "GET",
+					path: "/p",
+					project: null,
+					model: null,
+				},
+				0,
+			),
+			toPublicStreamEvent(
+				{
+					type: "start",
+					id: "a",
+					timestamp: 1_700_000_000_000,
+					method: "GET",
+					path: "/p",
+					accountId: null,
+					statusCode: 200,
+					project: null,
+					model: null,
+				},
+				0,
+			),
+			toPublicStreamEvent(
+				{
+					type: "summary",
+					payload: {
+						id: "a",
+						timestamp: new Date(1_700_000_000_000).toISOString(),
+						method: "GET",
+						path: "/p",
+						accountUsed: null,
+						statusCode: 200,
+						success: true,
+						errorMessage: null,
+						responseTimeMs: 1_234,
+						failoverAttempts: 0,
+					},
+				},
+				0,
+			),
+		];
+		for (const event of events) {
+			assertInstantsAreIso(event);
+		}
+		// `responseTimeMs` is a DURATION and stays a number.
+		const done = events[3] as { responseTimeMs?: unknown } | null;
+		expect(typeof done?.responseTimeMs).toBe("number");
+	});
+
+	it("passes a long id and accountId through whole on EVERY event", () => {
+		// Truncation would leave a syntactically valid key that binds an event to
+		// the wrong record — and the join runs across ALL of these events, not
+		// just the completion summary: `opened` and `upstream` are what a device
+		// holds a row under until `done` arrives, and the snapshot is what it
+		// rebuilds them from after a reconnect.
+		const longId = `${"r".repeat(MAX_STRING_BYTES + 40)}-tail`;
+		const longAccountId = `${"a".repeat(MAX_STRING_BYTES + 40)}-tail`;
+		type IdBearing = {
+			id?: string;
+			accountId?: string | null;
+			active?: Array<{ id: string; accountId: string | null }>;
+		};
+		const cases: Array<{
+			label: string;
+			evt: Parameters<typeof toPublicStreamEvent>[0];
+			/** Every id the mapped event carries, in no particular order. */
+			idsOf: (dto: IdBearing) => Array<string | null | undefined>;
+		}> = [
+			{
+				label: "active.snapshot",
+				evt: {
+					type: "snapshot",
+					active: [
+						{
+							id: longId,
+							timestamp: 1,
+							method: "GET",
+							path: "/p",
+							project: null,
+							model: null,
+							phase: "streaming",
+							accountId: longAccountId,
+							statusCode: 200,
+						},
+					],
+				},
+				idsOf: (dto) => [dto.active?.[0]?.id, dto.active?.[0]?.accountId],
+			},
+			{
+				label: "request.opened",
+				evt: {
+					type: "ingress",
+					id: longId,
+					timestamp: 1,
+					method: "GET",
+					path: "/p",
+					project: null,
+					model: null,
+				},
+				idsOf: (dto) => [dto.id],
+			},
+			{
+				label: "request.dropped",
+				evt: { type: "ingress-end", id: longId, statusCode: 400 },
+				idsOf: (dto) => [dto.id],
+			},
+			{
+				label: "request.upstream",
+				evt: {
+					type: "start",
+					id: longId,
+					timestamp: 1,
+					method: "GET",
+					path: "/p",
+					accountId: longAccountId,
+					statusCode: 200,
+					project: null,
+					model: null,
+				},
+				idsOf: (dto) => [dto.id, dto.accountId],
+			},
+			{
+				label: "request.done",
+				evt: {
+					type: "summary",
+					payload: {
+						id: longId,
+						timestamp: new Date(1).toISOString(),
+						method: "GET",
+						path: "/p",
+						accountUsed: longAccountId,
+						statusCode: 200,
+						success: true,
+						errorMessage: null,
+						responseTimeMs: 1,
+						failoverAttempts: 0,
+					},
+				},
+				idsOf: (dto) => [dto.id, dto.accountId],
+			},
+		];
+
+		for (const { label, evt, idsOf } of cases) {
+			const mapped = toPublicStreamEvent(evt, 0) as unknown as IdBearing | null;
+			expect(mapped, label).not.toBeNull();
+			const ids = idsOf(mapped as IdBearing);
+			expect(ids.length, label).toBeGreaterThan(0);
+			for (const id of ids) {
+				expect([longId, longAccountId], label).toContain(id);
+			}
+		}
 	});
 
 	it("keeps project and model — full DATA parity with the internal lane", () => {
@@ -412,7 +654,7 @@ describe("event translation", () => {
 		expect(event).toEqual({
 			type: "request.opened",
 			id: "a",
-			at: 5,
+			at: "1970-01-01T00:00:00.005Z",
 			method: "POST",
 			path: "/v1/messages",
 			project: "clankermux",

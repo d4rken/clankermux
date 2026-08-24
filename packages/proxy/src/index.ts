@@ -111,7 +111,16 @@ export {
 	getActiveOverloadHoldCount,
 	getOccupiedOverloadHoldKeys,
 } from "./overload-hold";
-export { peekPrimaryAccountId } from "./peek-primary";
+export {
+	DEFAULT_ROUTING_CONTEXT,
+	type DefaultCandidateEvaluation,
+	earliestExclusionRecoveryMs,
+	evaluateDefaultCandidates,
+	type PeekExclusion,
+	type PeekExclusionReason,
+	peekDefaultCandidateIds,
+	peekPrimaryAccountId,
+} from "./peek-primary";
 export {
 	ANTHROPIC_UPSTREAM_OVERLOAD_KEY,
 	applyProviderOverloadCooldown,

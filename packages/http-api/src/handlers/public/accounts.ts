@@ -1,5 +1,6 @@
 import { jsonResponse } from "@clankermux/http-common";
 import type { PublicSnapshotReader } from "../../services/public-snapshot";
+import { NO_STORE_HEADERS } from "./cache-headers";
 import { type PublicAccountsDto, toPublicAccountsDto } from "./dto";
 
 /**
@@ -18,6 +19,6 @@ export function createPublicAccountsHandler(
 	return async (): Promise<Response> => {
 		const snapshot = await readSnapshot();
 		const dto: PublicAccountsDto = toPublicAccountsDto(snapshot);
-		return jsonResponse(dto);
+		return jsonResponse(dto, 200, NO_STORE_HEADERS);
 	};
 }

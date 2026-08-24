@@ -337,6 +337,9 @@ describe("surfaces outside the management namespace stay ungated", () => {
 		const res = await routeRequest(request("/public/v1/nope"), deps);
 		expect(res.status).toBe(404);
 		expect(calls.dispatch).toEqual([]);
+		// Every response on this surface is uncacheable, this one included: a
+		// cached 404 keeps telling a device a route is gone after it was added.
+		expect(res.headers.get("cache-control")).toBe("no-store");
 	});
 
 	it("serves the dashboard shell for a client-side route", async () => {
