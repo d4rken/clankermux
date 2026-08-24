@@ -259,6 +259,7 @@ function soonerOf(a: number | null, b: number | null): number | null {
 function projectFamilyExhaustion(
 	pct: number,
 	resetMs: number,
+	observedAtMs: number | null,
 	now: number,
 ): number | null {
 	if (pct >= 100) return null;
@@ -273,6 +274,11 @@ function projectFamilyExhaustion(
 			// through the policy keeps this projection tied to the one definition
 			// the progress bar, the pool at-risk list and the forecast line share.
 			lifetimeConfidence: weeklyLifetimeConfidence(SCOPED_WEEKLY_WINDOW),
+			// Supplied even though the low path ignores it. The estimator needs the
+			// policy AND an observation instant together, and degrades to "low"
+			// when either is missing — so passing only the policy would make a
+			// future "full" for scoped windows silently do nothing.
+			observedAtMs,
 		},
 		now,
 	);
@@ -307,6 +313,9 @@ export function computeFamilyWeeklyUsage(
 			account.usageData as AnthropicUsageData,
 			now,
 		).weeklyScoped;
+		// One reading time for every scoped window this account reports: they all
+		// come out of the same `usageData` payload.
+		const observedAtMs = usageObservedAtMs(account.usageAsOfIso);
 
 		for (const limit of scoped) {
 			let bucket = buckets.get(limit.family);
@@ -344,7 +353,12 @@ export function computeFamilyWeeklyUsage(
 				...binding,
 				exhaustsAtMs: soonerOf(
 					previous?.exhaustsAtMs ?? null,
-					projectFamilyExhaustion(limit.percent, limit.resetsAtMs, now),
+					projectFamilyExhaustion(
+						limit.percent,
+						limit.resetsAtMs,
+						observedAtMs,
+						now,
+					),
 				),
 			});
 		}
