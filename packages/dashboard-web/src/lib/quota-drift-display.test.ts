@@ -7,16 +7,25 @@
  * merely checks a model's name appears.
  */
 import { describe, expect, it } from "bun:test";
-import type { QuotaDriftCohort, QuotaDriftModel } from "@clankermux/types";
+import type {
+	QuotaDriftCohort,
+	QuotaDriftModel,
+	QuotaDriftPoint,
+	QuotaDriftUnidentifiedReason,
+} from "@clankermux/types";
 import {
 	cohortLabel,
+	dominantGap,
 	formatCapacity,
 	formatCoefficient,
 	formatInterval,
 	formatRelativeChange,
+	gapStretchText,
 	isReportableVerdict,
 	primaryReason,
 	quotaWindowLabel,
+	summarizeGaps,
+	summarizeModelGaps,
 	UNIDENTIFIED_COPY,
 	unidentifiedReasonText,
 } from "./quota-drift-display";
@@ -200,5 +209,196 @@ describe("isReportableVerdict", () => {
 				}),
 			),
 		).toBe(true);
+	});
+});
+
+/* ── Gap summaries ──────────────────────────────────────────────────────── */
+
+const DAY = 24 * 60 * 60 * 1000;
+/**
+ * 2026-08-01T12:00:00Z — the grid origin the gap fixtures step from.
+ *
+ * MIDDAY rather than midnight: the formatter renders in local time, so a
+ * midnight-UTC grid would name the previous day in any negative-offset zone
+ * and the expected strings below would depend on where the suite runs.
+ */
+const ORIGIN = Date.UTC(2026, 7, 1, 12, 0, 0, 0);
+
+/** One rolling point on a 2-day grid: `index` 0 is the oldest. */
+function point(
+	index: number,
+	reasons: QuotaDriftUnidentifiedReason[] | null,
+): QuotaDriftPoint {
+	const windowStartMs = ORIGIN + index * 2 * DAY;
+	return {
+		windowStartMs,
+		windowEndMs: windowStartMs + 14 * DAY,
+		pointEstimate: reasons === null ? 2 : null,
+		ciLow: reasons === null ? 1.9 : null,
+		ciHigh: reasons === null ? 2.1 : null,
+		impliedCapacityMtok: reasons === null ? 50 : null,
+		identified: reasons === null,
+		nSegments: 100,
+		unidentifiedReasons: reasons ?? [],
+	};
+}
+
+function gapModel(
+	key: string,
+	series: (QuotaDriftUnidentifiedReason[] | null)[],
+): QuotaDriftModel {
+	return {
+		key,
+		points: series.map((reasons, index) => point(index, reasons)),
+		latest: null,
+		changes: [],
+		verdict: "insufficient-evidence",
+	};
+}
+
+describe("summarizeGaps", () => {
+	it("collapses a contiguous same-reason stretch into one entry", () => {
+		const stretches = summarizeGaps(
+			[null, ["no-exposure"], ["no-exposure"], ["no-exposure"]].map(
+				(reasons, index) =>
+					point(index, reasons as QuotaDriftUnidentifiedReason[] | null),
+			),
+		);
+
+		expect(stretches).toHaveLength(1);
+		expect(stretches[0].reason).toBe("no-exposure");
+		expect(stretches[0].nPoints).toBe(3);
+		// The window START, not its end: a rolling window with no exposure means
+		// the model was already absent when it opened.
+		expect(stretches[0].fromMs).toBe(ORIGIN + 2 * DAY);
+		expect(stretches[0].ongoing).toBe(true);
+		expect(stretches[0].entireSeries).toBe(false);
+	});
+
+	it("starts a new stretch when the reason changes", () => {
+		// Pooled out first, then out of use entirely. Merging the two would report
+		// whichever ran longer as the whole story.
+		const stretches = summarizeGaps(
+			[["low-share"], ["low-share"], ["no-exposure"]].map((reasons, index) =>
+				point(index, reasons as QuotaDriftUnidentifiedReason[]),
+			),
+		);
+
+		expect(stretches.map((s) => s.reason)).toEqual([
+			"low-share",
+			"no-exposure",
+		]);
+		expect(stretches.map((s) => s.nPoints)).toEqual([2, 1]);
+		expect(stretches[0].ongoing).toBe(false);
+		expect(stretches[1].ongoing).toBe(true);
+	});
+
+	it("reduces a point that failed several criteria to its dominant reason", () => {
+		const stretches = summarizeGaps([
+			point(0, ["wide-interval", "collinear"]),
+			point(1, ["collinear"]),
+		]);
+
+		expect(stretches).toHaveLength(1);
+		expect(stretches[0].reason).toBe("collinear");
+	});
+
+	it("produces nothing for a model that was measurable throughout", () => {
+		expect(summarizeGaps([point(0, null), point(1, null)])).toEqual([]);
+		expect(summarizeGaps([])).toEqual([]);
+	});
+
+	it("marks a gap covering the whole series", () => {
+		const stretches = summarizeGaps([
+			point(0, ["collinear"]),
+			point(1, ["collinear"]),
+		]);
+
+		expect(stretches[0].entireSeries).toBe(true);
+	});
+
+	it("keeps a reasonless point distinguishable from a known reason", () => {
+		// A payload written before points carried reasons. The gap is real; the
+		// cause is not known, and must not be invented.
+		const stretches = summarizeGaps([point(0, [])]);
+
+		expect(stretches[0].reason).toBeNull();
+		expect(gapStretchText(stretches[0])).toBe("not measurable on this window");
+	});
+});
+
+describe("gapStretchText", () => {
+	it("names the period only when the gap is not the whole series", () => {
+		const retired = summarizeGaps([
+			point(0, null),
+			point(1, ["no-exposure"]),
+			point(2, ["no-exposure"]),
+		]);
+		expect(gapStretchText(retired[0])).toBe("not in use since 3 Aug");
+
+		const throughout = summarizeGaps([point(0, ["collinear"])]);
+		expect(gapStretchText(throughout[0])).toBe(
+			"always runs alongside another model, so its own cost cannot be separated",
+		);
+
+		const imprecise = summarizeGaps([point(0, ["wide-interval"])]);
+		expect(gapStretchText(imprecise[0])).toBe(
+			"estimate too imprecise on this window",
+		);
+	});
+
+	it("gives both ends of a gap that closed again", () => {
+		const stretches = summarizeGaps([
+			point(0, ["low-share"]),
+			point(1, ["low-share"]),
+			point(2, null),
+		]);
+
+		expect(gapStretchText(stretches[0])).toBe(
+			"too little of this window's traffic to measure from 1 Aug to 17 Aug",
+		);
+	});
+});
+
+describe("dominantGap", () => {
+	it("picks the longest stretch, and the more recent of equals", () => {
+		const stretches = summarizeGaps([
+			point(0, ["low-share"]),
+			point(1, null),
+			point(2, ["no-exposure"]),
+			point(3, ["no-exposure"]),
+		]);
+
+		expect(dominantGap(stretches)?.reason).toBe("no-exposure");
+
+		const tied = summarizeGaps([
+			point(0, ["low-share"]),
+			point(1, null),
+			point(2, ["no-exposure"]),
+		]);
+		expect(dominantGap(tied)?.reason).toBe("no-exposure");
+		expect(dominantGap([])).toBeNull();
+	});
+});
+
+describe("summarizeModelGaps", () => {
+	it("gives one line per model with an unexplained stretch, and none otherwise", () => {
+		const lines = summarizeModelGaps([
+			gapModel("claude-opus-4-8", [
+				null,
+				null,
+				["no-exposure"],
+				["no-exposure"],
+			]),
+			gapModel("claude-haiku-4-5", [["collinear"], ["collinear"]]),
+			gapModel("claude-sonnet-5", [["wide-interval"], ["wide-interval"]]),
+			gapModel("claude-opus-5", [null, null]),
+		]);
+
+		expect(lines.map((l) => `${l.key} — ${l.text}`)).toEqual([
+			"claude-opus-4-8 — not in use since 5 Aug",
+			"claude-haiku-4-5 — always runs alongside another model, so its own cost cannot be separated",
+			"claude-sonnet-5 — estimate too imprecise on this window",
+		]);
 	});
 });

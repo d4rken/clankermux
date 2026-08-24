@@ -13,6 +13,7 @@ import type {
 	QuotaDriftModel,
 	QuotaDriftPoint,
 	QuotaDriftResponse,
+	QuotaDriftUnidentifiedReason,
 	QuotaDriftWindowResult,
 } from "@clankermux/types";
 
@@ -35,12 +36,22 @@ export function identifiedPoints(
 			impliedCapacityMtok: capacityMtok,
 			identified: true,
 			nSegments: 120,
+			unidentifiedReasons: [],
 		};
 	});
 }
 
-/** A run of unidentified points — nulls all the way down, never zeros. */
-export function unidentifiedPoints(count: number): QuotaDriftPoint[] {
+/**
+ * A run of unidentified points — nulls all the way down, never zeros.
+ *
+ * The reason is a parameter because the panel's gap list has to say something
+ * different for each: a stretch the fit could not separate reads nothing like
+ * a stretch where the model was not routed at all.
+ */
+export function unidentifiedPoints(
+	count: number,
+	reason: QuotaDriftUnidentifiedReason = "collinear",
+): QuotaDriftPoint[] {
 	return Array.from({ length: count }, (_, i) => ({
 		windowStartMs: FIXED_NOW - (count - i) * 2 * DAY - 14 * DAY,
 		windowEndMs: FIXED_NOW - (count - i) * 2 * DAY,
@@ -50,6 +61,7 @@ export function unidentifiedPoints(count: number): QuotaDriftPoint[] {
 		impliedCapacityMtok: null,
 		identified: false,
 		nSegments: 120,
+		unidentifiedReasons: [reason],
 	}));
 }
 
@@ -94,6 +106,53 @@ export function unidentifiedModel(key = "claude-haiku-4-5"): QuotaDriftModel {
 		// The scan RAN and found nothing — but on a coefficient that is not
 		// identified, so the panel must not report it as "no change detected".
 		verdict: "stable",
+	};
+}
+
+/**
+ * A model that was measured and then stopped being routed: identified points
+ * first, `no-exposure` ones after.
+ *
+ * The shape of the biggest empty regions on the live chart, and the case that
+ * must NOT read as "too little traffic to measure" — there was no traffic at
+ * all, so there was nothing to measure.
+ */
+export function retiredModel(
+	key = "claude-opus-4-8",
+	measuredCount = 4,
+	retiredCount = 4,
+): QuotaDriftModel {
+	const capacityMtok = 60;
+	const total = measuredCount + retiredCount;
+	const at = (
+		index: number,
+	): { windowStartMs: number; windowEndMs: number } => {
+		const windowEndMs = FIXED_NOW - (total - index) * 2 * DAY;
+		return { windowStartMs: windowEndMs - 14 * DAY, windowEndMs };
+	};
+	const points: QuotaDriftPoint[] = [];
+	for (let i = 0; i < total; i++) {
+		const measured = i < measuredCount;
+		const estimate = 100 / capacityMtok;
+		points.push({
+			...at(i),
+			pointEstimate: measured ? estimate : null,
+			ciLow: measured ? estimate * 0.94 : null,
+			ciHigh: measured ? estimate * 1.06 : null,
+			impliedCapacityMtok: measured ? capacityMtok : null,
+			identified: measured,
+			nSegments: measured ? 140 : 0,
+			unidentifiedReasons: measured ? [] : ["no-exposure"],
+		});
+	}
+	return {
+		key,
+		points,
+		// No column in the latest fit at all, which is what the compute path
+		// emits for a model with no exposure left.
+		latest: null,
+		changes: [],
+		verdict: "insufficient-evidence",
 	};
 }
 

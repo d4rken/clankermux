@@ -1,8 +1,10 @@
 import type {
 	QuotaDriftCohort,
 	QuotaDriftModel,
+	QuotaDriftPoint,
 	QuotaDriftUnidentifiedReason,
 } from "@clankermux/types";
+import { format } from "date-fns";
 
 /**
  * Display helpers for the Analytics "Quota" tab.
@@ -140,4 +142,187 @@ export function isReportableVerdict(model: QuotaDriftModel): boolean {
 	if (model.verdict === "changed") return model.changes.length > 0;
 	if (model.verdict === "stable") return model.latest?.identified === true;
 	return false;
+}
+
+/* ── Gap summaries ──────────────────────────────────────────────────────── */
+
+/**
+ * One contiguous stretch of a model's series that carries no number, plus the
+ * reason that speaks for it.
+ *
+ * The chart breaks its line at every such stretch and says nothing about why.
+ * These stretches are what turns that silence into a sentence, and they are
+ * derived here — in a pure function over the wire points — rather than in the
+ * panel, because `ResponsiveContainer` renders no inspectable geometry under
+ * `renderToStaticMarkup`: anything expressed as chart shape would ship
+ * untested.
+ */
+export interface QuotaGapStretch {
+	/** The reason that speaks for the stretch, or null when none was recorded. */
+	reason: QuotaDriftUnidentifiedReason | null;
+	/** Start of the stretch's first unmeasured fit window, ms since epoch. */
+	fromMs: number;
+	/** End of the stretch's last unmeasured fit window, ms since epoch. */
+	toMs: number;
+	/** Fit windows the stretch covers. */
+	nPoints: number;
+	/** Whether the stretch runs to the newest point of the series. */
+	ongoing: boolean;
+	/** Whether the stretch covers the whole series. */
+	entireSeries: boolean;
+}
+
+/**
+ * Split one model's series into its unmeasured stretches.
+ *
+ * Two collapsing rules, and the second is the one that matters:
+ *
+ *  - consecutive unmeasured points sharing a reason become ONE stretch, so a
+ *    model that has been out of use for a month yields one line rather than
+ *    fifteen;
+ *  - a point that failed several criteria at once is reduced to a single
+ *    reason by `REASON_PRIORITY` first, so a stretch is never mixed by the time
+ *    it is compared. A change of reason genuinely starts a new stretch: a model
+ *    that was pooled out and then stopped being routed altogether has two
+ *    different things to say, and merging them would report whichever was
+ *    longer as the whole story.
+ */
+export function summarizeGaps(
+	points: readonly QuotaDriftPoint[],
+): QuotaGapStretch[] {
+	const stretches: QuotaGapStretch[] = [];
+	let current: QuotaGapStretch | null = null;
+
+	points.forEach((point, index) => {
+		if (point.identified) {
+			current = null;
+			return;
+		}
+		const reason = primaryReason(point.unidentifiedReasons ?? []);
+		if (current && current.reason === reason) {
+			current.toMs = point.windowEndMs;
+			current.nPoints += 1;
+		} else {
+			current = {
+				reason,
+				// The window START, not its end: a rolling window carrying no
+				// exposure means the model was already absent when the window
+				// opened, so that is the earliest instant the claim actually holds
+				// for. Naming the end instead would understate the stretch.
+				fromMs: point.windowStartMs,
+				toMs: point.windowEndMs,
+				nPoints: 1,
+				ongoing: false,
+				entireSeries: false,
+			};
+			stretches.push(current);
+		}
+		current.ongoing = index === points.length - 1;
+		current.entireSeries = current.nPoints === points.length;
+	});
+
+	return stretches;
+}
+
+/**
+ * Wording for a gap that covers the WHOLE series — there is no period to name,
+ * because the model was never measurable on this window at all.
+ */
+const GAP_THROUGHOUT: Record<QuotaDriftUnidentifiedReason, string> = {
+	"no-exposure": "not in use during this period",
+	collinear:
+		"always runs alongside another model, so its own cost cannot be separated",
+	"wide-interval": "estimate too imprecise on this window",
+	"low-share": "too little of this window's traffic to measure",
+	"few-segments": "not enough observations on this window yet",
+	"zero-estimate": "no separately measurable cost on this window",
+};
+
+/** Wording that takes a period suffix, as in "not in use since 7 Aug". */
+const GAP_WITH_PERIOD: Record<QuotaDriftUnidentifiedReason, string> = {
+	"no-exposure": "not in use",
+	collinear: "not separable from the traffic beside it",
+	"wide-interval": "estimate too imprecise",
+	"low-share": "too little of this window's traffic to measure",
+	"few-segments": "not enough observations",
+	"zero-estimate": "no separately measurable cost",
+};
+
+/** Compact day label for a gap boundary, e.g. `7 Aug`. */
+function formatGapDate(ms: number): string {
+	return format(new Date(ms), "d MMM");
+}
+
+/**
+ * One sentence for one stretch.
+ *
+ * Every phrase describes what THIS analysis could not do, never the model. "Not
+ * separable from the traffic beside it" is a fact about the evidence; "this
+ * model has no cost" would be a claim the fit cannot support.
+ */
+export function gapStretchText(stretch: QuotaGapStretch): string {
+	if (stretch.reason === null) {
+		// The wire listed no reason at all — a payload written before points
+		// carried them. Say only what is known rather than picking a cause.
+		return stretch.entireSeries
+			? "not measurable on this window"
+			: `not measurable since ${formatGapDate(stretch.fromMs)}`;
+	}
+	if (stretch.entireSeries) return GAP_THROUGHOUT[stretch.reason];
+	const phrase = GAP_WITH_PERIOD[stretch.reason];
+	return stretch.ongoing
+		? `${phrase} since ${formatGapDate(stretch.fromMs)}`
+		: `${phrase} from ${formatGapDate(stretch.fromMs)} to ${formatGapDate(stretch.toMs)}`;
+}
+
+/** One model's line in the gap list. */
+export interface QuotaGapLine {
+	key: string;
+	stretch: QuotaGapStretch;
+	text: string;
+}
+
+/**
+ * The stretch that speaks for a model: the longest one, and the most recent of
+ * those when several tie.
+ *
+ * Longest rather than newest because the line is answering "why is this chart
+ * mostly empty", and the stretch that occupies most of it is the answer. Recency
+ * only breaks ties so a model whose situation changed does not report the older
+ * of two equal stretches.
+ */
+export function dominantGap(
+	stretches: readonly QuotaGapStretch[],
+): QuotaGapStretch | null {
+	let best: QuotaGapStretch | null = null;
+	for (const stretch of stretches) {
+		if (
+			best === null ||
+			stretch.nPoints > best.nPoints ||
+			(stretch.nPoints === best.nPoints && stretch.fromMs > best.fromMs)
+		) {
+			best = stretch;
+		}
+	}
+	return best;
+}
+
+/**
+ * One line per model that has an unexplained stretch, in the order the models
+ * arrive. Models that were measurable throughout contribute nothing.
+ *
+ * This deliberately covers models the chart draws NO line for at all: a model
+ * that was never separable has no series to look at, so the list is the only
+ * place a reader can find out it exists and why it is missing.
+ */
+export function summarizeModelGaps(
+	models: readonly QuotaDriftModel[],
+): QuotaGapLine[] {
+	const lines: QuotaGapLine[] = [];
+	for (const model of models) {
+		const stretch = dominantGap(summarizeGaps(model.points));
+		if (!stretch) continue;
+		lines.push({ key: model.key, stretch, text: gapStretchText(stretch) });
+	}
+	return lines;
 }

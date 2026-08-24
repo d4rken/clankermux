@@ -18,7 +18,11 @@ import {
 } from "recharts";
 import { CHART_HEIGHTS, CHART_PROPS } from "../../constants";
 import { useSeriesPalette } from "../../hooks/useSeriesPalette";
-import { cohortLabel, quotaWindowLabel } from "../../lib/quota-drift-display";
+import {
+	cohortLabel,
+	quotaWindowLabel,
+	summarizeModelGaps,
+} from "../../lib/quota-drift-display";
 import { formatAxisTime } from "../../lib/time-format";
 import { ChartContainer } from "../charts/ChartContainer";
 import { getTooltipStyles } from "../charts/chart-utils";
@@ -140,6 +144,15 @@ function WindowSeries({
 
 	const colorFor = (key: string, index: number) => palette.forModel(key, index);
 
+	// Why the chart is empty where it is empty. Covers every model in the
+	// window, including the ones with no line at all — a model that was never
+	// separable has no series to inspect, so this list is the only place a
+	// reader learns it exists and why it is missing.
+	const gaps = useMemo(
+		() => (window ? summarizeModelGaps(window.models) : []),
+		[window],
+	);
+
 	return (
 		<div className="space-y-item">
 			<h3 className="text-sm font-medium">
@@ -237,6 +250,20 @@ function WindowSeries({
 					</ComposedChart>
 				</ResponsiveContainer>
 			</ChartContainer>
+			{gaps.length > 0 ? (
+				<div className="space-y-0.5 max-w-prose">
+					<p className="text-xs font-medium">
+						What this analysis could not measure, and why
+					</p>
+					<ul className="text-xs text-muted-foreground space-y-0.5">
+						{gaps.map((gap) => (
+							<li key={gap.key}>
+								<span className="font-medium">{gap.key}</span> — {gap.text}
+							</li>
+						))}
+					</ul>
+				</div>
+			) : null}
 		</div>
 	);
 }
