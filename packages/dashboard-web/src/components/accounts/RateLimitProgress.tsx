@@ -1,4 +1,6 @@
 import {
+	computeExpectedPct as computeExpectedPctForReset,
+	computeThrottleResumeAt,
 	computeWindowStartMs,
 	estimateWindowExhaustion,
 	registerUIRefresh,
@@ -112,18 +114,15 @@ function primaryCardClass(compact: boolean): string {
 	);
 }
 
+// ISO-string adapter over the shared core pace calculation, which is also what
+// the server's proactive usage throttle compares against.
 function computeExpectedPct(
 	resetTime: string | null,
 	window: string | null,
 	now: number,
 ): number | null {
 	if (!resetTime || !window) return null;
-	const resetMs = new Date(resetTime).getTime();
-	const startMs = computeWindowStartMs(resetMs, window);
-	if (startMs === null) return null;
-	const durationMs = resetMs - startMs;
-	const elapsed = now - startMs;
-	return Math.min(100, Math.max(0, (elapsed / durationMs) * 100));
+	return computeExpectedPctForReset(new Date(resetTime).getTime(), window, now);
 }
 
 /**
@@ -143,6 +142,9 @@ function computeWindowDurationMs(
 	return durationMs > 0 ? durationMs : null;
 }
 
+// ISO-string adapter over the shared core throttle-resume calculation — the
+// same function the proxy's usage throttle runs, so the "delayed until" time
+// shown here is the time the server actually enforces.
 function computeWindowThrottleUntil(
 	resetTime: string | null,
 	window: string | null,
@@ -150,25 +152,12 @@ function computeWindowThrottleUntil(
 	now: number,
 ): number | null {
 	if (!resetTime || !window || percentage === null) return null;
-
-	const resetMs = new Date(resetTime).getTime();
-	if (!Number.isFinite(resetMs) || resetMs <= now) return null;
-
-	const startMs = computeWindowStartMs(resetMs, window);
-	if (startMs === null || startMs >= resetMs) return null;
-
-	const durationMs = resetMs - startMs;
-	const elapsedMs = now - startMs;
-	if (elapsedMs <= 0) return null;
-
-	const expectedPct = Math.min(
-		100,
-		Math.max(0, (elapsedMs / durationMs) * 100),
+	return computeThrottleResumeAt(
+		new Date(resetTime).getTime(),
+		window,
+		percentage,
+		now,
 	);
-	if (percentage <= expectedPct) return null;
-
-	const resumeAt = Math.min(startMs + (percentage / 100) * durationMs, resetMs);
-	return resumeAt > now ? resumeAt : null;
 }
 
 function formatThrottledUntil(throttledUntilMs: number, now: number): string {
