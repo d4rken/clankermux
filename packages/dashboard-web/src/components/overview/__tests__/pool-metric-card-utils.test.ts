@@ -16,9 +16,13 @@ function makeFamily(
 		worstAccountName: "acct-a",
 		earliestResetMs: 0,
 		elevated: worstPct >= FAMILY_WEEKLY_ELEVATED_THRESHOLD_PCT,
-		accounts: [{ name: "acct-a", pct: worstPct, resetMs: 0 }],
+		accounts: [
+			{ name: "acct-a", pct: worstPct, resetMs: 0, exhaustsAtMs: null },
+		],
 		exhaustedCount: 0,
 		elevatedCount: 0,
+		atRiskCount: 0,
+		soonestExhaustsAtMs: null,
 		...overrides,
 	};
 	// Derive the counts and the worst-account name from the account rows so a
@@ -39,6 +43,17 @@ function makeFamily(
 			merged.accounts.filter(
 				(a) => a.pct >= FAMILY_WEEKLY_ELEVATED_THRESHOLD_PCT,
 			).length,
+		atRiskCount:
+			overrides.atRiskCount ??
+			merged.accounts.filter((a) => a.exhaustsAtMs !== null).length,
+		soonestExhaustsAtMs:
+			overrides.soonestExhaustsAtMs ??
+			(() => {
+				const projected = merged.accounts
+					.map((a) => a.exhaustsAtMs)
+					.filter((ms): ms is number => ms !== null);
+				return projected.length === 0 ? null : Math.min(...projected);
+			})(),
 	};
 }
 
@@ -48,6 +63,7 @@ function accountRows(total: number, elevatedPcts: number[]) {
 		name: `acct-${i}`,
 		pct: elevatedPcts[i] ?? 5,
 		resetMs: 0,
+		exhaustsAtMs: null,
 	}));
 }
 

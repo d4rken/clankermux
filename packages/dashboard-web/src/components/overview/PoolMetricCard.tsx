@@ -341,6 +341,21 @@ export function PoolDetailSection({
 										{scope.prefix}
 										resets {windowTimeLabel(scope.resetMs, "seven_day")}
 									</div>
+									{/*
+									 * Deliberately muted, never a warning/destructive tone: this
+									 * projection is always the lifetime-average branch of the
+									 * shared estimator (no per-family regression exists), and the
+									 * tile's rule is that a low-confidence projection does not
+									 * drive alarm colour.
+									 */}
+									{f.soonestExhaustsAtMs !== null && (
+										<div className="text-muted-foreground">
+											{f.accounts.length > 1
+												? `${f.atRiskCount} of ${f.accounts.length} projected to run out · first `
+												: "projected to run out "}
+											{windowTimeLabel(f.soonestExhaustsAtMs, "seven_day")}
+										</div>
+									)}
 									{f.accounts.length > 1 && (
 										<ul className="ml-2 space-y-tight">
 											{f.accounts.map((a) => (
@@ -351,7 +366,13 @@ export function PoolDetailSection({
 													<span className="truncate" title={a.name}>
 														{a.name}
 													</span>
-													<span className="tabular-nums">
+													<span className="tabular-nums whitespace-nowrap">
+														{a.exhaustsAtMs !== null && (
+															<span className="text-muted-foreground">
+																out{" "}
+																{windowTimeLabel(a.exhaustsAtMs, "seven_day")} ·{" "}
+															</span>
+														)}
 														{displayPct(a.pct)}
 													</span>
 												</li>
