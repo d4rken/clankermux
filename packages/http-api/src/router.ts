@@ -524,10 +524,11 @@ export class APIRouter {
 		// Auth is intentionally NOT called here, and that is now load-bearing in
 		// BOTH directions.
 		//
-		// API keys: the upstream-traffic paths (/v1/*, /messages/*) match no
-		// handler here and fall through to the server's proxy dispatch, which
-		// runs authenticateRequest exactly once. Authing here would
-		// double-increment usage_count on every proxied request.
+		// API keys: upstream traffic never arrives here at all. It comes in on
+		// the wire mounts, which authenticate exactly once before dispatch, and
+		// the root spellings (/v1/*, /messages/*) are refused by the front door.
+		// Authing here would double-increment usage_count on every proxied
+		// request.
 		//
 		// Sessions: the management gate runs in `routeRootRequest` BEFORE this
 		// method is ever called, because this method returns its response to the

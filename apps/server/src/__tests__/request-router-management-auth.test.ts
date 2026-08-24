@@ -11,10 +11,10 @@
  *
  * The exemptions get individual coverage for the same reason: each one is a
  * different failure if it regresses. Gating the auth endpoints makes logging in
- * require being logged in; gating the two Claude Code telemetry paths breaks
- * agent clients that never had a dashboard cookie; gating an identity-bound
- * path turns a deliberate 501 into an auth failure a CLI reads as a dead
- * session.
+ * require being logged in; gating the two Claude Code telemetry paths answers
+ * agent clients that never had a dashboard cookie with an auth failure instead
+ * of a plain "no such route"; gating an identity-bound path turns a deliberate
+ * 501 into an auth failure a CLI reads as a dead session.
  */
 
 import { describe, expect, it } from "bun:test";
@@ -232,15 +232,25 @@ describe("exempt paths", () => {
 		});
 	}
 
+	// The root stopped proxying these when the legacy root surface was removed:
+	// a client configured for this proxy sends them to `/wire/anthropic`, which
+	// answers them. What the exemption still buys at the root is the SHAPE of
+	// the refusal — the management 404 rather than a 401 the CLI would read as
+	// a dead session — so that is what these pin down.
 	for (const path of [
 		"/api/event_logging/batch",
 		"/api/system/package-manager",
 	]) {
-		it(`lets the Claude Code telemetry path ${path} reach the proxy on a gated deployment`, async () => {
+		it(`answers the Claude Code telemetry path ${path} without gating it on a gated deployment`, async () => {
 			const { deps, calls } = makeDeps();
 			const res = await routeRequest(request(path, { method: "POST" }), deps);
-			expect(res.status).toBe(200);
-			expect(calls.dispatch).toEqual([{ pathname: path }]);
+			expect(res.status).toBe(404);
+			expect(await res.json()).toEqual({
+				type: "error",
+				error: { type: "not_found", message: `Unknown API route: ${path}` },
+			});
+			expect(calls.auth).toEqual([]);
+			expect(calls.dispatch).toEqual([]);
 		});
 	}
 
@@ -272,24 +282,33 @@ describe("identity-bound refusals outrank the gate", () => {
 		});
 	}
 
-	it("still refuses the /v1/code surface", async () => {
-		const { deps } = makeDeps();
+	// The `/v1/code/…` half of the identity-bound set is answered one branch
+	// earlier now: the root serves no agent traffic at all, so it gets the
+	// legacy 404 rather than the 501. Either way the gate never sees it, which
+	// is the property this block is about. The 501 keeps its job on the mount
+	// and in the proxy's ingest prologue.
+	it("leaves the /v1/code surface to the legacy root refusal, ungated", async () => {
+		const { deps, calls } = makeDeps();
 		const res = await routeRequest(request("/v1/code/sessions"), deps);
-		expect(res.status).toBe(501);
+		expect(res.status).toBe(404);
+		expect(calls.auth).toEqual([]);
+		expect(calls.api).toEqual([]);
 	});
 });
 
 describe("surfaces outside the management namespace stay ungated", () => {
-	it("leaves upstream AI traffic on its API-key policy", async () => {
+	it("refuses the root spelling of upstream AI traffic without gating it", async () => {
 		const { deps, calls } = makeDeps();
 		const res = await routeRequest(
 			request("/v1/messages", { method: "POST" }),
 			deps,
 		);
-		expect(res.status).toBe(200);
-		expect(calls.dispatch).toEqual([{ pathname: "/v1/messages" }]);
-		// One auth call, and it was not the session one.
-		expect(calls.auth.map((c) => c.requirement)).toEqual([undefined]);
+		// The root serves no agent traffic; the refusal is the front door's
+		// first branch, so the session gate is never consulted and nothing
+		// dispatches. The mount below is where this traffic lives now.
+		expect(res.status).toBe(404);
+		expect(calls.auth).toEqual([]);
+		expect(calls.dispatch).toEqual([]);
 	});
 
 	it("leaves the wire mounts on their explicit api_key requirement", async () => {

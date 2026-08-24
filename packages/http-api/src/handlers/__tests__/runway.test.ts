@@ -311,6 +311,12 @@ describe("GET /api/runway", () => {
 		expect(bare?.windows.find((w) => w.kind === "five_hour")?.prediction).toBe(
 			null,
 		);
+		// The weekly window is served with `prediction: null` even though the same
+		// snapshots carry a full weekly history: the server no longer fits one,
+		// because the lifetime average the client falls back to measured better.
+		expect(
+			rising?.windows.find((w) => w.kind === "seven_day")?.prediction,
+		).toBe(null);
 	});
 
 	it("reports no as-of time when the utilization it would describe is null", async () => {
@@ -966,5 +972,183 @@ describe("GET /api/runway persisted snapshot fallback", () => {
 		// fallback", never take the endpoint down.
 		expect(body.keys[0].outcome.kind).toBe("unknown");
 		expect(body.accounts[0].usageAsOfMs).toBeNull();
+	});
+});
+
+/**
+ * A Codex reading reconstructed from a stored request payload has NO honest
+ * observation time — the headers belong to whatever request happened to be
+ * retained. The recovery re-seeds the usage cache (deliberately: that is how the
+ * proxy gets to see the reading too), so on the NEXT refresh the very same
+ * reconstruction comes back through the cache branch.
+ *
+ * The point of these cases is that the re-seed writes a FRESHNESS stamp and not
+ * an observation: taking the entry's write time as its observation time would
+ * hand the reconstruction a confident timestamp anchored to the recovery
+ * instant, promoting the weekly window from the degraded now-anchored estimate
+ * to the full-confidence observation-anchored one between two refetches, with no
+ * new provider evidence behind the change.
+ */
+describe("GET /api/runway payload-recovered Codex usage", () => {
+	let nowSpy: ReturnType<typeof spyOn>;
+
+	const ACCOUNT_ID = "codex-recovered";
+	const WEEKLY_PCT = 45;
+	const SEVEN_RESET = BASE + 4 * DAY_MS;
+	/** `computeWindowStartMs(SEVEN_RESET, "seven_day")`. */
+	const WINDOW_START = SEVEN_RESET - 7 * DAY_MS;
+	const REFETCH_AT = BASE + 5 * MINUTE_MS;
+
+	beforeEach(() => {
+		nowSpy = spyOn(Date, "now").mockReturnValue(BASE);
+		usageCache.delete(ACCOUNT_ID);
+	});
+
+	afterEach(() => {
+		usageCache.delete(ACCOUNT_ID);
+		nowSpy.mockRestore();
+	});
+
+	/** A retained request payload carrying Codex weekly-usage response headers. */
+	function payloadRow(timestampMs: number): {
+		json: string;
+		timestamp: number;
+	} {
+		return {
+			timestamp: timestampMs,
+			json: JSON.stringify({
+				response: {
+					status: 200,
+					headers: {
+						"x-codex-secondary-window-minutes": String(7 * 24 * 60),
+						"x-codex-secondary-used-percent": String(WEEKLY_PCT),
+						"x-codex-secondary-reset-at": String(
+							Math.floor(SEVEN_RESET / 1000),
+						),
+					},
+				},
+				meta: { timestamp: timestampMs },
+			}),
+		};
+	}
+
+	function recoveredCodex(adapterQueries: string[]): DatabaseOperations {
+		return makeDbOps({
+			accounts: [
+				makeAccount({
+					id: ACCOUNT_ID,
+					name: "Codex",
+					provider: "codex",
+					last_used: BASE - 10 * MINUTE_MS,
+				}),
+			],
+			keys: [makeKey({ id: "k1" })],
+			// No persisted column: the stored-payload scan is the only channel left.
+			codexColumns: [],
+			payloads: [payloadRow(BASE - 2 * HOUR_MS)],
+			adapterQueries,
+		});
+	}
+
+	/**
+	 * The DEGRADED weekly estimate: the lifetime average over the window elapsed
+	 * at `now`, anchored at `now`. This is what a reading with no observation time
+	 * must produce, on the first request and on every one after it.
+	 */
+	const nowAnchoredExhaustion = (now: number): number =>
+		now + ((100 - WEEKLY_PCT) / WEEKLY_PCT) * (now - WINDOW_START);
+
+	/**
+	 * The FULL-CONFIDENCE estimate the defect produced on the second request: the
+	 * same lifetime average anchored at the entry's write time, i.e. the moment
+	 * the recovery happened.
+	 */
+	const observationAnchoredExhaustion = (observedAtMs: number): number =>
+		observedAtMs +
+		((100 - WEEKLY_PCT) / WEEKLY_PCT) * (observedAtMs - WINDOW_START);
+
+	it("reports a recovered reading with no observation time and no prediction", async () => {
+		const adapterQueries: string[] = [];
+		const body = await runway(recoveredCodex(adapterQueries));
+
+		const weekly = body.accounts[0].windows.find((w) => w.kind === "seven_day");
+		expect(weekly?.utilizationPct).toBe(WEEKLY_PCT);
+		// The scan really did read the payload channel.
+		expect(
+			adapterQueries.filter((sql) => sql.includes("request_payloads")),
+		).toHaveLength(1);
+		// No trustworthy observation time, so none is claimed…
+		expect(body.accounts[0].usageAsOfMs).toBeNull();
+		// …and nothing is derived that would need one.
+		expect(body.accounts[0].windows.map((w) => w.prediction)).toEqual([
+			null,
+			null,
+		]);
+		const outcome = body.keys[0].outcome;
+		if (outcome.kind !== "runway") throw new Error("expected a runway outcome");
+		// The degraded, now-anchored lifetime average — the amber-capped estimate.
+		expect(outcome.exhaustsAtMs).toBe(nowAnchoredExhaustion(BASE));
+	});
+
+	it("keeps the recovered reading degraded on the next refresh", async () => {
+		const adapterQueries: string[] = [];
+		const dbOps = recoveredCodex(adapterQueries);
+
+		// Request 1 performs the recovery and re-seeds the cache.
+		await runway(dbOps);
+		const seeded = usageCache.peekWithAge(ACCOUNT_ID);
+		expect(seeded).not.toBeNull();
+		// The entry exists and is FRESH (that is the point of the re-seed), while
+		// saying nothing about when its reading was observed.
+		expect(seeded?.sampledAtMs).toBe(BASE);
+		expect(seeded?.observedAtMs).toBeNull();
+
+		// Request 2, five minutes later: same data, now served off that entry.
+		nowSpy.mockReturnValue(REFETCH_AT);
+		const body = await runway(dbOps);
+
+		// Served from the cache — the payload scan did not run a second time.
+		expect(
+			adapterQueries.filter((sql) => sql.includes("request_payloads")),
+		).toHaveLength(1);
+		const weekly = body.accounts[0].windows.find((w) => w.kind === "seven_day");
+		expect(weekly?.utilizationPct).toBe(WEEKLY_PCT);
+
+		// The reading has not changed, so neither has what may be claimed about it:
+		// still no observation time, still no prediction.
+		expect(body.accounts[0].usageAsOfMs).toBeNull();
+		expect(body.accounts[0].windows.map((w) => w.prediction)).toEqual([
+			null,
+			null,
+		]);
+
+		const outcome = body.keys[0].outcome;
+		if (outcome.kind !== "runway") throw new Error("expected a runway outcome");
+		// Still the degraded now-anchored estimate…
+		expect(outcome.exhaustsAtMs).toBe(nowAnchoredExhaustion(REFETCH_AT));
+		// …and specifically NOT the full-confidence estimate anchored at the moment
+		// the recovery wrote the cache entry.
+		expect(outcome.exhaustsAtMs).not.toBe(observationAnchoredExhaustion(BASE));
+	});
+
+	it("still reports a live-fetched reading's own observation time", async () => {
+		// The control: a genuine live write keeps its real observation time on
+		// every later read, so the fix costs an honest stamp nothing.
+		usageCache.set(ACCOUNT_ID, {
+			five_hour: null,
+			seven_day: {
+				utilization: WEEKLY_PCT,
+				resets_at: new Date(SEVEN_RESET).toISOString(),
+			},
+		} as unknown as AnyUsageData);
+
+		nowSpy.mockReturnValue(REFETCH_AT);
+		const body = await runway(recoveredCodex([]));
+
+		expect(body.accounts[0].usageAsOfMs).toBe(BASE);
+		const outcome = body.keys[0].outcome;
+		if (outcome.kind !== "runway") throw new Error("expected a runway outcome");
+		// Observation-anchored, because there IS an observation to anchor to.
+		expect(outcome.exhaustsAtMs).toBe(observationAnchoredExhaustion(BASE));
 	});
 });

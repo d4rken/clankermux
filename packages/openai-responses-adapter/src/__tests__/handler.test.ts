@@ -516,4 +516,204 @@ describe("handleResponsesRequest", () => {
 			]);
 		});
 	});
+
+	describe("non-200 error translation (issue #5)", () => {
+		const errorRequest = () =>
+			new Request("http://localhost/v1/responses", {
+				method: "POST",
+				body: JSON.stringify({
+					model: "gpt-5.3-codex",
+					input: [
+						{
+							type: "message",
+							role: "user",
+							content: [{ type: "input_text", text: "Hi" }],
+						},
+					],
+				}),
+				headers: { "Content-Type": "application/json" },
+			});
+
+		const translate = async (upstream: Response) =>
+			handleResponsesRequest(
+				errorRequest(),
+				new URL("http://localhost/v1/responses"),
+				async () => upstream,
+				{},
+			);
+
+		test("surfaces a FastAPI `detail` string instead of 'Unknown error'", async () => {
+			// The proxy forwards a codex 400 verbatim, so this is the ChatGPT
+			// backend's own envelope — not an Anthropic one.
+			const resp = await translate(
+				new Response(
+					JSON.stringify({
+						detail: "Unsupported parameter: max_output_tokens",
+					}),
+					{ status: 400, headers: { "Content-Type": "application/json" } },
+				),
+			);
+
+			expect(resp.status).toBe(400);
+			const body = await resp.json();
+			expect(body.error.message).toBe(
+				"Unsupported parameter: max_output_tokens",
+			);
+		});
+
+		test("surfaces a structured FastAPI validation detail", async () => {
+			const resp = await translate(
+				new Response(
+					JSON.stringify({
+						detail: [
+							{
+								loc: ["body", "max_output_tokens"],
+								msg: "Extra inputs are not permitted",
+								type: "extra_forbidden",
+								input: 4096,
+							},
+						],
+					}),
+					{ status: 422, headers: { "Content-Type": "application/json" } },
+				),
+			);
+
+			const body = await resp.json();
+			expect(body.error.message).toBe(
+				"body.max_output_tokens: Extra inputs are not permitted",
+			);
+		});
+
+		test("keeps an Anthropic error.message verbatim and unprefixed", async () => {
+			const resp = await translate(
+				new Response(
+					JSON.stringify({
+						type: "error",
+						error: { type: "invalid_request_error", message: "bad model" },
+					}),
+					{ status: 400, headers: { "Content-Type": "application/json" } },
+				),
+			);
+
+			const body = await resp.json();
+			expect(body.error.message).toBe("bad model");
+			expect(body.error.type).toBe("invalid_request_error");
+			expect(body.error.code).toBe("invalid_request_error");
+		});
+
+		test("falls back to 'Unknown error' for an unrecognized body, never raw bytes", async () => {
+			// An unrecognized body may hold credentials or prompt text, so the
+			// handler must not excerpt it into the client-facing message.
+			const resp = await translate(
+				new Response("<html>Bearer sk-live-SECRET</html>", {
+					status: 502,
+					headers: { "Content-Type": "text/html" },
+				}),
+			);
+
+			const body = await resp.json();
+			expect(body.error.message).toBe("Unknown error");
+			expect(body.error.type).toBe("api_error");
+		});
+
+		test("still recovers a message from a JSON body sent with the wrong content-type", async () => {
+			const resp = await translate(
+				new Response(JSON.stringify({ detail: "Not authenticated" }), {
+					status: 401,
+					headers: { "Content-Type": "text/plain" },
+				}),
+			);
+
+			const body = await resp.json();
+			expect(body.error.message).toBe("Not authenticated");
+		});
+
+		test("recovers an Anthropic envelope sent with the wrong content-type", async () => {
+			const resp = await translate(
+				new Response(
+					JSON.stringify({
+						type: "error",
+						error: { type: "invalid_request_error", message: "bad model" },
+					}),
+					{ status: 400, headers: { "Content-Type": "text/plain" } },
+				),
+			);
+
+			const body = await resp.json();
+			// Unprefixed message and the real type, same as a correctly-labelled body.
+			expect(body.error.message).toBe("bad model");
+			expect(body.error.type).toBe("invalid_request_error");
+		});
+
+		test("a body stream that fails before any bytes still yields the upstream status", async () => {
+			// The status code is meaningful on its own; a broken body must not turn
+			// into a rejected promise out of the handler.
+			const failing = new ReadableStream<Uint8Array>({
+				start(controller) {
+					controller.error(new Error("connection reset"));
+				},
+			});
+			const resp = await translate(
+				new Response(failing, {
+					status: 502,
+					headers: { "Content-Type": "application/json" },
+				}),
+			);
+
+			expect(resp.status).toBe(502);
+			const body = await resp.json();
+			expect(body.error.message).toBe("Unknown error");
+		});
+
+		test("a stream that errors after delivering a partial envelope falls back", async () => {
+			// One chunk is delivered on the first pull and the stream errors on the
+			// next, so the handler really does hold a truncated body. It must not
+			// throw, and the unparseable fragment must not reach the client.
+			let pulls = 0;
+			const failing = new ReadableStream<Uint8Array>({
+				pull(controller) {
+					pulls++;
+					if (pulls === 1) {
+						controller.enqueue(
+							new TextEncoder().encode('{"detail":"Unsupported par'),
+						);
+						return;
+					}
+					controller.error(new Error("connection reset"));
+				},
+			});
+			const resp = await translate(
+				new Response(failing, {
+					status: 400,
+					headers: { "Content-Type": "application/json" },
+				}),
+			);
+
+			expect(resp.status).toBe(400);
+			const body = await resp.json();
+			expect(body.error.message).toBe("Unknown error");
+		});
+
+		test("a single oversized chunk is truncated rather than buffered whole", async () => {
+			// A stream may hand back a chunk of any size; the read has to copy only
+			// what fits so one huge chunk cannot defeat the cap.
+			const huge = new Uint8Array(512 * 1024).fill(0x61); // 512KB of "a"
+			const resp = await translate(
+				new Response(huge, {
+					status: 500,
+					headers: { "Content-Type": "text/plain" },
+				}),
+			);
+
+			expect(resp.status).toBe(500);
+			const body = await resp.json();
+			expect(body.error.message).toBe("Unknown error");
+		});
+
+		test("an empty body falls back to the generic message", async () => {
+			const resp = await translate(new Response(null, { status: 504 }));
+			expect(resp.status).toBe(504);
+			expect((await resp.json()).error.message).toBe("Unknown error");
+		});
+	});
 });
