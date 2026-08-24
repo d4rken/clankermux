@@ -30,7 +30,12 @@
 		// unit-tested core, so both it and its integration test are typechecked.
 		// The other scripts/ files stay as they are.
 		"scripts/prediction-backtest.ts",
-		"scripts/prediction-backtest.test.ts"
+		"scripts/prediction-backtest.test.ts",
+		// Same deal for the ledger-burn feasibility study, plus the read-only
+		// database/out-path guards both tools share.
+		"scripts/db-tool-io.ts",
+		"scripts/ledger-feasibility.ts",
+		"scripts/ledger-feasibility.test.ts"
 	],
 	"exclude": [
 		"**/__tests__",
