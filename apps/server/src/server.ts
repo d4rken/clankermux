@@ -33,6 +33,8 @@ import {
 	APIRouter,
 	AuthService,
 	closeAllSseStreams,
+	PublicRouter,
+	SessionAuthService,
 	terminateAnalyticsWorker,
 } from "@clankermux/http-api";
 import { LeastUsedStrategy, SessionStrategy } from "@clankermux/load-balancer";
@@ -250,6 +252,7 @@ let serverInstance: ReturnType<typeof serve> | null = null;
 let registeredServerId: string | null = null;
 let stopRetentionJob: (() => void) | null = null;
 let stopOAuthCleanupJob: (() => void) | null = null;
+let stopManagementSessionSweepJob: (() => void) | null = null;
 let stopRateLimitCleanupJob: (() => void) | null = null;
 let stopDataCleanupJob: (() => void) | null = null;
 let stopWalCheckpointJob: (() => void) | null = null;
@@ -806,10 +809,18 @@ export default async function startServer(options?: {
 	// accepts a getter so it can read the live (post-hot-reload) instance.
 	let currentStrategy: LoadBalancingStrategy | null = null;
 
+	// The management login. Built BEFORE the API router so both it and the
+	// proxy's AuthService share one instance — the router hands it to the auth
+	// endpoints and to the SSE revocation guard, while the front-door gate
+	// reaches it through `authService`. Two instances would work but would make
+	// "is a password configured" two independent reads of the same row.
+	const sessionAuth = new SessionAuthService(dbOps);
+
 	const apiRouter = new APIRouter({
 		db,
 		config,
 		dbOps,
+		sessionAuth,
 		runtime: {
 			port,
 			tlsEnabled,
@@ -820,8 +831,40 @@ export default async function startServer(options?: {
 		getEventLoopLag: () => getEventLoopStats(),
 	});
 
-	// Initialize AuthService for proxy authentication
-	const authService = new AuthService(dbOps);
+	// The read-only widget API. Its own router, mounted as a sibling of the wire
+	// mounts rather than under `/api/*`, so the management session gate cannot
+	// reach it and no exemption list has to keep a credential-less device
+	// working.
+	const publicRouter = new PublicRouter({ dbOps, config });
+
+	// Initialize AuthService for proxy authentication. It also answers the
+	// front door's `session` requirement for `/api/*`, so it is handed the same
+	// SessionAuthService the API router uses.
+	const authService = new AuthService(dbOps, undefined, sessionAuth);
+
+	// Expired management sessions: swept once at startup and hourly after that.
+	// Neither ceiling depends on this running — validation enforces both on
+	// every read and deletes what it rejects — so this is housekeeping that
+	// keeps the table from accumulating rows nobody will ever look up again.
+	void sessionAuth.sweepExpiredSessions().catch((err) => {
+		log.debug(`Startup management-session sweep failed: ${err}`);
+	});
+	const unregisterSessionSweep = registerCleanup({
+		id: "management-session-sweep",
+		callback: async () => {
+			try {
+				const removed = await sessionAuth.sweepExpiredSessions();
+				if (removed > 0) {
+					log.debug(`Swept ${removed} expired management session(s)`);
+				}
+			} catch (err) {
+				log.error(`Management session sweep error: ${err}`);
+			}
+		},
+		minutes: 60,
+		description: "Management session sweep",
+	});
+	stopManagementSessionSweepJob = unregisterSessionSweep;
 
 	// Run startup maintenance once (cleanup only) - fire and forget
 	runStartupMaintenance(config, dbOps).catch((err) => {
@@ -1237,6 +1280,7 @@ export default async function startServer(options?: {
 	// from a test instead of living inside a Bun.serve closure.
 	const routerDeps: RequestRouterDeps = {
 		handleApiRequest: (url, req) => apiRouter.handleRequest(url, req),
+		handlePublicRequest: (req, url) => publicRouter.handle(req, url),
 		authenticate: (req, path, method, requirement) =>
 			authService.authenticateRequest(req, path, method, requirement),
 		dispatchProxy: (req, url, apiKeyId, apiKeyName) =>
@@ -1759,6 +1803,10 @@ async function handleGracefulShutdown(signal: string) {
 		if (stopOAuthCleanupJob) {
 			stopOAuthCleanupJob();
 			stopOAuthCleanupJob = null;
+		}
+		if (stopManagementSessionSweepJob) {
+			stopManagementSessionSweepJob();
+			stopManagementSessionSweepJob = null;
 		}
 		if (stopRateLimitCleanupJob) {
 			stopRateLimitCleanupJob();

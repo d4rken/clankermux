@@ -553,6 +553,44 @@ export function ensureSchema(db: Database): void {
 			ON codex_reset_credit_events(account_id, created_at DESC)`,
 	);
 
+	// Dashboard/management session auth.
+	//
+	// `auth_password` holds AT MOST ONE row — the CHECK on the primary key is
+	// what enforces that, so "the password" cannot silently become a set of
+	// passwords. `verifier` is a scrypt output over an operator-chosen secret;
+	// `params` carries the versioned cost parameters that produced it, so the
+	// cost can be raised later without invalidating verifiers written under the
+	// old one. Absence of the row is the FAIL-OPEN state: no password
+	// configured, management API ungated.
+	db.run(`
+		CREATE TABLE IF NOT EXISTS auth_password (
+			id INTEGER PRIMARY KEY CHECK (id = 1),
+			verifier TEXT NOT NULL,
+			params TEXT NOT NULL,
+			updated_at INTEGER NOT NULL
+		)
+	`);
+
+	// One row per live session cookie. `token_hash` is an unsalted SHA-256 of
+	// the cookie value and is the PRIMARY KEY, so validating a session is ONE
+	// indexed lookup and never a key-derivation — scrypt-per-request is exactly
+	// what caused the ~300ms API-key stalls. Unsalted is safe here for the same
+	// reason as api_keys.hashed_key: the token is 32 random bytes we minted, not
+	// a secret a human chose.
+	db.run(`
+		CREATE TABLE IF NOT EXISTS auth_sessions (
+			token_hash TEXT PRIMARY KEY,
+			created_at INTEGER NOT NULL,
+			expires_at INTEGER NOT NULL,
+			last_seen_at INTEGER NOT NULL
+		)
+	`);
+
+	// Drives the startup + hourly expiry sweep.
+	db.run(
+		`CREATE INDEX IF NOT EXISTS idx_auth_sessions_expires ON auth_sessions(expires_at)`,
+	);
+
 	// Performance indexes (covering/partial indexes for hot query paths)
 	addPerformanceIndexes(db);
 }

@@ -130,6 +130,47 @@ export interface ReauthNeededResponse {
 	};
 }
 
+/**
+ * Listeners notified when the server answers 401 to ANY management call.
+ *
+ * Module-scoped rather than per-component: a signed-out session fails every
+ * in-flight request at once, and the app needs to learn it once, not once per
+ * failing panel.
+ */
+const unauthorizedListeners = new Set<() => void>();
+
+/**
+ * Subscribe to "this browser is not signed in". Returns an unsubscribe.
+ *
+ * The auth gate uses this to switch to the login screen the moment a session
+ * expires or is revoked, instead of leaving the operator looking at a page of
+ * unrelated error states.
+ */
+export function onUnauthorized(listener: () => void): () => void {
+	unauthorizedListeners.add(listener);
+	return () => {
+		unauthorizedListeners.delete(listener);
+	};
+}
+
+function notifyUnauthorized(): void {
+	for (const listener of unauthorizedListeners) {
+		try {
+			listener();
+		} catch (error) {
+			console.error("Unauthorized listener failed:", error);
+		}
+	}
+}
+
+/** `GET /api/auth/status`. */
+export interface AuthStatus {
+	/** A management password is set — the API is gated. */
+	configured: boolean;
+	/** This browser holds a live session. */
+	authenticated: boolean;
+}
+
 class API extends HttpClient {
 	private logger = {
 		info: (message: string, ...args: unknown[]) => {
@@ -154,7 +195,35 @@ class API extends HttpClient {
 			},
 			timeout: API_TIMEOUT,
 			retries: 1,
+			onUnauthorized: notifyUnauthorized,
 		});
+	}
+
+	/**
+	 * Is the management API gated, and does this browser hold a session?
+	 *
+	 * Public by policy, so it answers even when nothing else will — which is
+	 * what makes it usable as the gate's own probe.
+	 */
+	async getAuthStatus(): Promise<AuthStatus> {
+		return this.get<AuthStatus>("/api/auth/status");
+	}
+
+	/**
+	 * Exchange the management password for a session cookie.
+	 *
+	 * The cookie is `HttpOnly`, so nothing here ever holds the token; the
+	 * browser attaches it to later requests, including both `EventSource`
+	 * lanes, without any header work.
+	 */
+	async login(password: string): Promise<void> {
+		await this.post<{ authenticated: boolean }>("/api/auth/login", {
+			password,
+		});
+	}
+
+	async logout(): Promise<void> {
+		await this.post<{ authenticated: boolean }>("/api/auth/logout", {});
 	}
 
 	async getStats(opts?: {

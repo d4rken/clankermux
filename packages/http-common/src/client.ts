@@ -13,6 +13,18 @@ export interface ClientOptions {
 	timeout?: number;
 	retries?: number;
 	retryDelay?: number;
+	/**
+	 * Called whenever the server answers 401, BEFORE the error is thrown.
+	 *
+	 * A dashboard cannot recover from this at the call site: the session either
+	 * expired or was revoked, and every other in-flight and future request will
+	 * fail the same way. Each caller catching its own 401 would produce a page
+	 * of unrelated error toasts instead of the one thing that helps, which is
+	 * showing the login screen. This hook is how the app learns, once, that it
+	 * is signed out. It must not throw — a listener failure is swallowed so it
+	 * cannot turn an auth failure into an unrelated one.
+	 */
+	onUnauthorized?: (url: string) => void;
 }
 
 /**
@@ -28,6 +40,7 @@ export class HttpClient {
 			timeout: options.timeout || 30000,
 			retries: options.retries || 0,
 			retryDelay: options.retryDelay || 1000,
+			onUnauthorized: options.onUnauthorized ?? (() => {}),
 		};
 	}
 
@@ -70,6 +83,16 @@ export class HttpClient {
 				timeoutId = undefined;
 
 				if (!response.ok) {
+					if (response.status === 401) {
+						// Announced BEFORE the throw, so the app switches to the login
+						// screen even for a caller that swallows the error. A throwing
+						// listener must not become the error this request reports.
+						try {
+							this.options.onUnauthorized(fullUrl);
+						} catch {
+							// Best-effort notification only.
+						}
+					}
 					const error = await parseHttpError(response);
 					throw error;
 				}

@@ -53,6 +53,11 @@ import {
 	createApiKeysListHandler,
 	createApiKeysStatsHandler,
 } from "./handlers/api-keys";
+import {
+	createAuthLoginHandler,
+	createAuthLogoutHandler,
+	createAuthStatusHandler,
+} from "./handlers/auth";
 import { createCacheEffectivenessHandler } from "./handlers/cache-effectiveness";
 import { createCacheKeepaliveHandler } from "./handlers/cache-keepalive";
 import { createCacheKeepaliveHistoryHandler } from "./handlers/cache-keepalive-history";
@@ -126,6 +131,8 @@ import {
 } from "./handlers/token-health";
 import { createUsageHistoryHandler } from "./handlers/usage-history";
 import { createVersionCheckHandler } from "./handlers/version";
+import { SessionAuthService } from "./services/session-auth-service";
+import { createSessionStreamGuard } from "./services/session-stream-registry";
 import type { APIContext } from "./types";
 import { errorResponse } from "./utils/http-error";
 
@@ -158,6 +165,13 @@ export class APIRouter {
 			getStrategy,
 			getEventLoopLag,
 		} = this.context;
+
+		// The management login. Built from `dbOps` when the caller did not inject
+		// one, so the auth endpoints and the stream guard always have a service
+		// rather than degrading to "no session exists".
+		const sessionAuth =
+			this.context.sessionAuth ?? new SessionAuthService(dbOps);
+		const sessionStreamGuard = createSessionStreamGuard(sessionAuth);
 
 		// Create handlers
 		const healthHandler = createHealthHandler(
@@ -198,7 +212,10 @@ export class APIRouter {
 		);
 		const requestsDetailHandler = createRequestsDetailHandler(dbOps);
 		const configHandlers = createConfigHandlers(config, this.context.runtime);
-		const logsStreamHandler = createLogsStreamHandler();
+		const logsStreamHandler = createLogsStreamHandler(
+			undefined,
+			sessionStreamGuard,
+		);
 		const logsHistoryHandler = createLogsHistoryHandler();
 		const analyticsHandler = createAnalyticsHandler(this.context);
 		const analyticsFilterOptionsHandler = createAnalyticsFilterOptionsHandler(
@@ -228,7 +245,10 @@ export class APIRouter {
 			dbOps,
 			config,
 		);
-		const requestsStreamHandler = createRequestsStreamHandler();
+		const requestsStreamHandler = createRequestsStreamHandler(
+			undefined,
+			sessionStreamGuard,
+		);
 		const cleanupHandler = createCleanupHandler(dbOps, config);
 		const systemInfoHandler = createSystemInfoHandler();
 		const systemStatusHandler = createSystemStatusHandler(
@@ -251,7 +271,7 @@ export class APIRouter {
 		const apiKeysStatsHandler = createApiKeysStatsHandler(dbOps);
 
 		// Register routes
-		this.handlers.set("GET:/health", (_req, url) => healthHandler(url));
+		this.handlers.set("GET:/health", () => healthHandler());
 		this.handlers.set("GET:/api/stats", (_req, url) => statsHandler(url));
 		this.handlers.set("POST:/api/stats/reset", () => statsResetHandler());
 		this.handlers.set("GET:/api/storage", (_req, _url) => storageHandler());
@@ -418,6 +438,15 @@ export class APIRouter {
 		this.handlers.set("POST:/api/payments/seed", (req) =>
 			paymentsSeedHandler(req),
 		);
+		// Management login. These three are the only /api/* routes the session
+		// gate deliberately does not cover — see management-auth-policy.ts.
+		const authLoginHandler = createAuthLoginHandler(sessionAuth);
+		const authLogoutHandler = createAuthLogoutHandler(sessionAuth);
+		const authStatusHandler = createAuthStatusHandler(sessionAuth);
+		this.handlers.set("POST:/api/auth/login", (req) => authLoginHandler(req));
+		this.handlers.set("POST:/api/auth/logout", (req) => authLogoutHandler(req));
+		this.handlers.set("GET:/api/auth/status", (req) => authStatusHandler(req));
+
 		this.handlers.set("GET:/api/system/info", () => systemInfoHandler());
 		this.handlers.set("GET:/api/system/status", () => systemStatusHandler());
 		this.handlers.set("GET:/api/version/check", () => versionCheckHandler());
@@ -500,12 +529,21 @@ export class APIRouter {
 		const method = req.method;
 		const key = `${method}:${path}`;
 
-		// Auth is intentionally NOT called here. The router only dispatches
-		// /api/* paths, which are all public under the post-#216 policy.
-		// Upstream traffic never arrives here at all: it comes in on the wire
-		// mounts, which authenticate exactly once before dispatch, and the root
-		// spellings (/v1/*, /messages/*) are refused by the front door. Authing
-		// here would double-increment usage_count on every proxied request.
+		// Auth is intentionally NOT called here, and that is now load-bearing in
+		// BOTH directions.
+		//
+		// API keys: upstream traffic never arrives here at all. It comes in on
+		// the wire mounts, which authenticate exactly once before dispatch, and
+		// the root spellings (/v1/*, /messages/*) are refused by the front door.
+		// Authing here would double-increment usage_count on every proxied
+		// request.
+		//
+		// Sessions: the management gate runs in `routeRootRequest` BEFORE this
+		// method is ever called, because this method returns its response to the
+		// caller directly — a check placed here would be the second one, not the
+		// first, and a `handleApiRequest` invoked from anywhere else would bypass
+		// it entirely. See management-auth-policy.ts for the classification both
+		// sides share.
 
 		// Check for exact match
 		const handler = this.handlers.get(key);
