@@ -168,6 +168,19 @@ export class CodexModelCatalogCache {
 		return this.startRefresh(key, pin);
 	}
 
+	/**
+	 * When the POOL-WIDE catalog was last fetched, or null when none is held.
+	 *
+	 * Provenance for the operator's editing view, which reads the catalog at the
+	 * unpinned scope (`get(null)`) because curation applies to the pool rather
+	 * than to one key's pin. Deliberately not parameterised by API key: this is
+	 * a display detail, and resolving a pin here would make a UI read do a
+	 * database lookup it has no reason to do.
+	 */
+	getFetchedAt(): number | null {
+		return this.slots.get("")?.fetchedAt ?? null;
+	}
+
 	private inBackoff(key: string): boolean {
 		const until = this.retryAfter.get(key);
 		if (until === undefined) return false;

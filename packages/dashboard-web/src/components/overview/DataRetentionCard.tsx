@@ -1,4 +1,5 @@
 import { formatBytes } from "@clankermux/ui-common";
+import { AlertCircle } from "lucide-react";
 import { useEffect, useState } from "react";
 import {
 	useCleanupNow,
@@ -6,6 +7,11 @@ import {
 	useSetRetention,
 	useStorageUsage,
 } from "../../hooks/queries";
+import {
+	SettingFigure,
+	SettingNumberControl,
+	SettingRow,
+} from "../settings/SettingRow";
 import { Button } from "../ui/button";
 import {
 	Card,
@@ -14,7 +20,6 @@ import {
 	CardHeader,
 	CardTitle,
 } from "../ui/card";
-import { Input } from "../ui/input";
 import { Switch } from "../ui/switch";
 
 export function DataRetentionCard() {
@@ -88,10 +93,10 @@ export function DataRetentionCard() {
 	// Per-data-type storage usage, keyed for inline lookup next to each control.
 	// A control may govern more than one table (the usage-snapshot retention
 	// prunes both the account-wide and the per-family series on one cutoff), so
-	// the hint takes a key LIST and reports the total: a key nothing renders is a
+	// this takes a key LIST and reports the total: a key nothing renders is a
 	// figure the user never sees.
 	const usageByKey = new Map((usage?.types ?? []).map((t) => [t.key, t]));
-	const usageHint = (
+	const usageFigure = (
 		...keys: Array<
 			| "payloads"
 			| "requests"
@@ -101,23 +106,18 @@ export function DataRetentionCard() {
 			| "memory_snapshots"
 		>
 	) => {
-		if (!usage?.available) return null;
+		if (!usage?.available) return undefined;
 		const present = keys
 			.map((k) => usageByKey.get(k))
 			.filter((t): t is NonNullable<typeof t> => t != null);
-		if (present.length === 0) return null;
+		if (present.length === 0) return undefined;
 		const approxBytes = present.reduce((sum, t) => sum + t.approxBytes, 0);
 		const rowCount = present.reduce((sum, t) => sum + t.rowCount, 0);
-		// The measured result gets the figure treatment (bold, tabular, larger)
-		// so it reads as a value at a glance instead of blending into the prose
-		// description underneath it.
 		return (
-			<div className="mt-1.5 flex items-baseline gap-item">
-				<span className="figure-lg">~{formatBytes(approxBytes)}</span>
-				<span className="text-xs text-muted-foreground tabular-nums">
-					{rowCount.toLocaleString()} rows
-				</span>
-			</div>
+			<SettingFigure
+				figure={`~${formatBytes(approxBytes)}`}
+				note={`${rowCount.toLocaleString()} rows`}
+			/>
 		);
 	};
 
@@ -126,264 +126,163 @@ export function DataRetentionCard() {
 			<CardHeader>
 				<CardTitle>Payload Retention</CardTitle>
 				<CardDescription>
-					Automatically delete request/response payloads older than this window.
-					Analytics remain intact.
+					How long each kind of stored data is kept. Analytics remain intact
+					when payloads are pruned.
 				</CardDescription>
 			</CardHeader>
-			<CardContent className="space-y-row">
-				<div>
-					<div className="flex items-center gap-item">
-						<div className="flex items-center gap-item">
-							<span className="text-sm font-medium w-28">Payloads</span>
-							<Input
-								type="number"
+			<CardContent className="space-y-section">
+				{/* Two columns from `lg` up. The card is full-width on the settings
+				    page, so a single column left half the row empty and pushed the
+				    footer far below the fold. */}
+				<div className="grid grid-cols-1 gap-x-section gap-y-row lg:grid-cols-2">
+					<SettingRow
+						label="Payloads"
+						control={
+							<SettingNumberControl
+								value={payloadHours}
+								unit="hours"
 								min={1}
 								max={8760}
-								value={payloadHours}
-								onChange={(e) =>
-									setPayloadHours(parseInt(e.target.value || "0", 10))
-								}
-								className="w-24"
+								disabled={disabled}
+								canSave={validPayload}
+								onChange={(raw) => setPayloadHours(parseInt(raw || "0", 10))}
+								onSave={() => setRetention.mutate({ payloadHours })}
 							/>
-							<span className="text-sm text-muted-foreground">hours</span>
-						</div>
-						<Button
-							size="sm"
-							disabled={disabled || !validPayload}
-							onClick={() => setRetention.mutate({ payloadHours })}
-						>
-							Save
-						</Button>
-					</div>
-					{usageHint("payloads")}
-					<p className="text-xs text-muted-foreground mt-1">
-						Payloads are by far the largest table — this is the main lever on
-						database size.
-					</p>
-				</div>
+						}
+						value={usageFigure("payloads")}
+						summary="Request and response bodies. By far the largest table."
+						detail="This is the main lever on database size — every other retention setting below moves a rounding error by comparison."
+					/>
 
-				<div className="pt-2">
-					<div className="flex items-center gap-item">
-						<div className="flex items-center gap-item">
-							<span className="text-sm font-medium w-28">Payload size cap</span>
-							<Input
-								type="number"
+					<SettingRow
+						label="Payload size cap"
+						control={
+							<SettingNumberControl
+								value={payloadMaxGb}
+								unit={payloadMaxGb === 0 ? "GB (off)" : "GB"}
 								min={0}
 								max={1024}
 								step={0.5}
-								value={payloadMaxGb}
-								onChange={(e) =>
-									setPayloadMaxGb(parseFloat(e.target.value || "0"))
+								disabled={disabled}
+								canSave={validPayloadMax}
+								onChange={(raw) => setPayloadMaxGb(parseFloat(raw || "0"))}
+								onSave={() =>
+									setRetention.mutate({
+										payloadMaxMb: Math.round(payloadMaxGb * 1024),
+									})
 								}
-								className="w-24"
 							/>
-							<span className="text-sm text-muted-foreground">
-								GB{payloadMaxGb === 0 ? " (off)" : ""}
-							</span>
-						</div>
-						<Button
-							size="sm"
-							disabled={disabled || !validPayloadMax}
-							onClick={() =>
-								setRetention.mutate({
-									payloadMaxMb: Math.round(payloadMaxGb * 1024),
-								})
-							}
-						>
-							Save
-						</Button>
-					</div>
-					<p className="text-xs text-muted-foreground mt-1">
-						Second limit on top of the window above: once stored payloads exceed
-						this, the oldest are deleted until they fit. 0 disables it. Counts
-						payload content bytes, <strong>not the database file size</strong> —
-						the file stays larger and only shrinks as the vacuum returns freed
-						pages to disk.
-					</p>
-				</div>
-
-				<div className="pt-2">
-					<div className="flex items-center gap-item">
-						<div className="flex items-center gap-item">
-							<span className="text-sm font-medium w-28">Requests</span>
-							<Input
-								type="number"
-								min={1}
-								max={3650}
-								value={requestDays}
-								onChange={(e) =>
-									setRequestDays(parseInt(e.target.value || "0", 10))
-								}
-								className="w-24"
-							/>
-							<span className="text-sm text-muted-foreground">days</span>
-						</div>
-						<Button
-							size="sm"
-							disabled={disabled || !validRequests}
-							onClick={() => setRetention.mutate({ requestDays })}
-						>
-							Save
-						</Button>
-					</div>
-					{usageHint("requests")}
-				</div>
-
-				<div className="pt-2">
-					<div className="flex items-center gap-item">
-						<div className="flex items-center gap-item">
-							<span className="text-sm font-medium w-28">Usage snapshots</span>
-							<Input
-								type="number"
-								min={1}
-								max={3650}
-								value={usageSnapshotDays}
-								onChange={(e) =>
-									setUsageSnapshotDays(parseInt(e.target.value || "0", 10))
-								}
-								className="w-24"
-							/>
-							<span className="text-sm text-muted-foreground">days</span>
-						</div>
-						<Button
-							size="sm"
-							disabled={disabled || !validUsageSnapshots}
-							onClick={() => setRetention.mutate({ usageSnapshotDays })}
-						>
-							Save
-						</Button>
-					</div>
-					{usageHint(
-						"usage_snapshots",
-						"usage_scoped_snapshots",
-						"unified_claim_observations",
-					)}
-					<p className="text-xs text-muted-foreground mt-1">
-						How long per-account limit-usage history is kept for the Limits
-						graph. Covers both the account-wide windows and the per-model-family
-						weekly windows recorded alongside them. The size above also includes
-						the per-request limit readings, which are kept 90 days regardless of
-						this setting.
-					</p>
-				</div>
-
-				<div className="pt-2">
-					<div className="flex items-center gap-item">
-						<div className="flex items-center gap-item">
-							<span className="text-sm font-medium w-28">Memory history</span>
-							<Input
-								type="number"
-								min={1}
-								max={3650}
-								value={memorySnapshotDays}
-								onChange={(e) =>
-									setMemorySnapshotDays(parseInt(e.target.value || "0", 10))
-								}
-								className="w-24"
-							/>
-							<span className="text-sm text-muted-foreground">days</span>
-						</div>
-						<Button
-							size="sm"
-							disabled={disabled || !validMemorySnapshots}
-							onClick={() => setRetention.mutate({ memorySnapshotDays })}
-						>
-							Save
-						</Button>
-					</div>
-					{usageHint("memory_snapshots")}
-					<p className="text-xs text-muted-foreground mt-1">
-						How long process memory history (RSS + heap) is kept for the System
-						Health Memory Usage graph.
-					</p>
-				</div>
-
-				<div className="pt-2">
-					<div className="flex items-center gap-item">
-						<div className="flex items-center gap-item">
-							<span className="text-sm font-medium w-28">
-								Cache keep-alive snapshots
-							</span>
-							<Input
-								type="number"
-								min={1}
-								max={3650}
-								value={cacheKeepaliveSnapshotDays}
-								onChange={(e) =>
-									setCacheKeepaliveSnapshotDays(
-										parseInt(e.target.value || "0", 10),
-									)
-								}
-								className="w-24"
-							/>
-							<span className="text-sm text-muted-foreground">days</span>
-						</div>
-						<Button
-							size="sm"
-							disabled={disabled || !validCacheKeepaliveSnapshots}
-							onClick={() =>
-								setRetention.mutate({ cacheKeepaliveSnapshotDays })
-							}
-						>
-							Save
-						</Button>
-					</div>
-					<p className="text-xs text-muted-foreground mt-1">
-						How long cache keep-alive history is kept for the Analytics Cache
-						Keep-Alive graph.
-					</p>
-				</div>
-
-				{usage?.available && (
-					<p className="text-xs text-muted-foreground pt-1">
-						Sizes are approximate (stored content, excluding index/page
-						overhead) and won't sum to the file size. Database file is{" "}
-						<span className="font-medium tabular-nums text-foreground">
-							{formatBytes(usage.dbBytes)}
-							{usage.walBytes > 0
-								? ` (+${formatBytes(usage.walBytes)} WAL)`
-								: ""}
-						</span>{" "}
-						on disk · measured {new Date(usage.measuredAt).toLocaleTimeString()}
-						.
-					</p>
-				)}
-				{/* No data at all = the measurement is pending, or a request timed
-				    out and a retry/refetch is coming — the server keeps scanning
-				    either way, so "measuring" stays true. Distinct from a resolved
-				    `available: false` (a failed scan), which renders nothing rather
-				    than claim progress that isn't happening. */}
-				{!usage && (
-					<p className="text-xs text-muted-foreground pt-1">
-						Measuring storage usage… the first measurement after a restart scans
-						the whole database and can take a couple of minutes.
-					</p>
-				)}
-
-				<div className="flex items-center justify-between pt-2 pb-1">
-					<div>
-						<p className="text-sm font-medium">Store message payloads</p>
-						<p className="text-xs text-muted-foreground">
-							Stores full request/response bodies (conversation text, images) in
-							the database. Disable to reduce database size and lower memory
-							pressure — token counts, costs, and analytics are always saved
-							regardless.
-						</p>
-						<p className="text-xs text-warning-strong mt-0.5">
-							Warning: storing payloads can significantly grow the database size
-							over time.
-						</p>
-					</div>
-					<Switch
-						checked={data?.storePayloads ?? true}
-						disabled={isLoading || setRetention.isPending}
-						onCheckedChange={(checked) =>
-							setRetention.mutate({ storePayloads: checked })
 						}
+						summary="A second limit on top of the window: oldest payloads go first. 0 disables it."
+						detail="Counts payload content bytes, not the database file size. The file stays larger than this number and only shrinks as the vacuum returns freed pages to disk."
+					/>
+
+					<SettingRow
+						label="Requests"
+						control={
+							<SettingNumberControl
+								value={requestDays}
+								unit="days"
+								min={1}
+								max={3650}
+								disabled={disabled}
+								canSave={validRequests}
+								onChange={(raw) => setRequestDays(parseInt(raw || "0", 10))}
+								onSave={() => setRetention.mutate({ requestDays })}
+							/>
+						}
+						value={usageFigure("requests")}
+						summary="Per-request metadata: tokens, cost, timing, account used."
+						detail="This is what every analytics chart and the cost accounting read from. Pruning it removes history from those views permanently."
+					/>
+
+					<SettingRow
+						label="Usage snapshots"
+						control={
+							<SettingNumberControl
+								value={usageSnapshotDays}
+								unit="days"
+								min={1}
+								max={3650}
+								disabled={disabled}
+								canSave={validUsageSnapshots}
+								onChange={(raw) =>
+									setUsageSnapshotDays(parseInt(raw || "0", 10))
+								}
+								onSave={() => setRetention.mutate({ usageSnapshotDays })}
+							/>
+						}
+						value={usageFigure(
+							"usage_snapshots",
+							"usage_scoped_snapshots",
+							"unified_claim_observations",
+						)}
+						summary="Per-account limit-usage history behind the Limits graph."
+						detail="Covers both the account-wide windows and the per-model-family weekly windows recorded alongside them. The size shown also includes the per-request limit readings, which are kept 90 days regardless of this setting."
+					/>
+
+					<SettingRow
+						label="Memory history"
+						control={
+							<SettingNumberControl
+								value={memorySnapshotDays}
+								unit="days"
+								min={1}
+								max={3650}
+								disabled={disabled}
+								canSave={validMemorySnapshots}
+								onChange={(raw) =>
+									setMemorySnapshotDays(parseInt(raw || "0", 10))
+								}
+								onSave={() => setRetention.mutate({ memorySnapshotDays })}
+							/>
+						}
+						value={usageFigure("memory_snapshots")}
+						summary="Process memory history (RSS + heap) for the System Health graph."
+					/>
+
+					<SettingRow
+						label="Cache keep-alive"
+						control={
+							<SettingNumberControl
+								value={cacheKeepaliveSnapshotDays}
+								unit="days"
+								min={1}
+								max={3650}
+								disabled={disabled}
+								canSave={validCacheKeepaliveSnapshots}
+								onChange={(raw) =>
+									setCacheKeepaliveSnapshotDays(parseInt(raw || "0", 10))
+								}
+								onSave={() =>
+									setRetention.mutate({ cacheKeepaliveSnapshotDays })
+								}
+							/>
+						}
+						summary="Keep-alive history for the Analytics Cache Keep-Alive graph."
 					/>
 				</div>
 
-				<div className="pt-1 flex items-center gap-item">
+				<StorageSummary usage={usage} />
+
+				<div className="border-t pt-row">
+					<SettingRow
+						label="Store payloads"
+						control={
+							<Switch
+								checked={data?.storePayloads ?? true}
+								disabled={isLoading || setRetention.isPending}
+								onCheckedChange={(checked) =>
+									setRetention.mutate({ storePayloads: checked })
+								}
+							/>
+						}
+						summary="Save full request/response bodies (conversation text, images)."
+						detail="Turning this off reduces database size and memory pressure; token counts, costs and analytics are recorded either way. Left on, payloads can grow the database substantially over time — the two limits above are what bound it."
+					/>
+				</div>
+
+				<div className="flex flex-wrap items-center gap-item border-t pt-row">
 					<Button
 						variant="secondary"
 						size="sm"
@@ -392,40 +291,92 @@ export function DataRetentionCard() {
 					>
 						{cleanupNow.isPending ? "Cleaning up…" : "Clean up now"}
 					</Button>
+					{cleanupNow.isError && (
+						<p className="flex items-center gap-tight text-xs text-destructive-strong">
+							<AlertCircle className="h-3.5 w-3.5 shrink-0" />
+							Timed out — on a large database this can take several minutes.
+							Check server logs.
+						</p>
+					)}
+					{cleanupNow.data && (
+						<p className="text-xs text-muted-foreground">
+							Removed{" "}
+							<span className="font-medium tabular-nums text-foreground">
+								{cleanupNow.data.removedPayloads.toLocaleString()}
+							</span>{" "}
+							payloads (
+							{cleanupNow.data.payloadCutoffIso ? (
+								<>
+									older than{" "}
+									{new Date(cleanupNow.data.payloadCutoffIso).toLocaleString()}
+								</>
+							) : (
+								<>all — storage disabled</>
+							)}
+							) and{" "}
+							<span className="font-medium tabular-nums text-foreground">
+								{cleanupNow.data.removedRequests.toLocaleString()}
+							</span>{" "}
+							requests (older than{" "}
+							{new Date(cleanupNow.data.requestCutoffIso).toLocaleString()}).
+							The sizes above refresh automatically.
+						</p>
+					)}
 				</div>
-
-				{cleanupNow.isError && (
-					<p className="text-xs text-destructive-strong">
-						Operation timed out — for large databases this may take several
-						minutes. Check server logs.
-					</p>
-				)}
-
-				{cleanupNow.data && (
-					<p className="text-xs text-muted-foreground">
-						Removed{" "}
-						<span className="font-medium tabular-nums text-foreground">
-							{cleanupNow.data.removedPayloads}
-						</span>{" "}
-						payloads (
-						{cleanupNow.data.payloadCutoffIso ? (
-							<>
-								older than{" "}
-								{new Date(cleanupNow.data.payloadCutoffIso).toLocaleString()}
-							</>
-						) : (
-							<>all — storage disabled</>
-						)}
-						) and{" "}
-						<span className="font-medium tabular-nums text-foreground">
-							{cleanupNow.data.removedRequests}
-						</span>{" "}
-						requests (older than{" "}
-						{new Date(cleanupNow.data.requestCutoffIso).toLocaleString()}). The
-						sizes above refresh automatically.
-					</p>
-				)}
 			</CardContent>
 		</Card>
+	);
+}
+
+/**
+ * Whole-file totals and the state of the measurement behind every figure above.
+ *
+ * Three distinct states, and they must stay distinct: a scan still running, a
+ * scan that failed, and a completed one. The failed case used to render nothing
+ * at all, which left the sizes silently absent with no reason given — visually
+ * identical to a feature that had broken.
+ */
+function StorageSummary({
+	usage,
+}: {
+	usage: ReturnType<typeof useStorageUsage>["data"];
+}) {
+	if (!usage) {
+		// No data = the first scan is in flight, or a request hit the 60s client
+		// timeout and the poll in `useStorageUsage` is still going. The server
+		// keeps scanning across both, so "measuring" is honest here.
+		return (
+			<p className="text-xs text-muted-foreground">
+				Measuring storage usage… the first measurement after a restart scans the
+				whole database and can take a couple of minutes.
+			</p>
+		);
+	}
+	if (!usage.available) {
+		return (
+			<p className="flex items-center gap-tight text-xs text-warning-strong">
+				<AlertCircle className="h-3.5 w-3.5 shrink-0" />
+				Storage measurement unavailable — the scan could not complete. Check
+				server logs.
+			</p>
+		);
+	}
+	return (
+		<div className="flex flex-wrap items-baseline gap-x-group gap-y-tight">
+			<div className="flex items-baseline gap-item">
+				<span className="text-xs text-muted-foreground">Database file</span>
+				<span className="figure-lg">{formatBytes(usage.dbBytes)}</span>
+				{usage.walBytes > 0 && (
+					<span className="text-xs tabular-nums text-muted-foreground">
+						+{formatBytes(usage.walBytes)} WAL
+					</span>
+				)}
+			</div>
+			<p className="text-xs text-muted-foreground">
+				Sizes are approximate (stored content, excluding index/page overhead)
+				and won't sum to the file size · measured{" "}
+				{new Date(usage.measuredAt).toLocaleTimeString()}
+			</p>
+		</div>
 	);
 }

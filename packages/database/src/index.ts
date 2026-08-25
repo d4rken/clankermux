@@ -55,6 +55,12 @@ export {
 } from "./repositories/codex-reset-credit-event.repository";
 export { MemorySnapshotRepository } from "./repositories/memory-snapshot.repository";
 export {
+	type ModelOverrideDialect,
+	ModelOverrideRepository,
+	type ModelOverrideRow,
+	type ModelOverrideUpsert,
+} from "./repositories/model-override.repository";
+export {
 	QuotaDriftResultRepository,
 	type QuotaDriftResultRow,
 } from "./repositories/quota-drift-result.repository";

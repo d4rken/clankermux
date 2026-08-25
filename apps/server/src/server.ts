@@ -41,6 +41,7 @@ import {
 import { LeastUsedStrategy, SessionStrategy } from "@clankermux/load-balancer";
 import { Logger } from "@clankermux/logger";
 import {
+	CODEX_MODELS,
 	handleModelsRequest,
 	handleResponsesRequest,
 } from "@clankermux/openai-responses-adapter";
@@ -54,6 +55,7 @@ import {
 	usageCache,
 } from "@clankermux/providers";
 import {
+	AnthropicModelCatalogCache,
 	AutoRefreshScheduler,
 	bridgeStats,
 	CacheKeepaliveScheduler,
@@ -110,6 +112,7 @@ import {
 } from "./capacity-restored";
 import { runCodexIdentityBackfill } from "./codex-identity-backfill";
 import { waitForDrainIdle } from "./drain-idle";
+import { ModelCatalogService } from "./model-catalog-service";
 import { handleModelsRoute } from "./models-route";
 import { QuotaDriftScheduler } from "./quota-drift-scheduler";
 import { type RequestRouterDeps, routeRequest } from "./request-router";
@@ -825,11 +828,60 @@ export default async function startServer(options?: {
 	// "is a password configured" two independent reads of the same row.
 	const sessionAuth = new SessionAuthService(dbOps);
 
+	// The model catalogues, built HERE rather than beside the rest of the proxy
+	// wiring further down. Two surfaces read them — the wire route and the
+	// management API the router below registers — and both must see the same
+	// instance, or the dashboard would curate one catalogue while `/v1/models`
+	// served another. The router is constructed first, so the catalogues have to
+	// exist first.
+	//
+	// `proxyContext` does not exist yet; token acquisition reaches it through a
+	// holder assigned once it does. Nothing calls these before then: the caches
+	// are driven by requests, and no request is served until `serve()` runs at
+	// the end of this function.
+	let proxyContextRef: ProxyContext | null = null;
+	const catalogAccessToken = (account: Account): Promise<string> => {
+		if (!proxyContextRef) {
+			return Promise.reject(
+				new Error("Model catalogue read before the proxy context was built"),
+			);
+		}
+		return getValidAccessToken(account, proxyContextRef);
+	};
+
+	const anthropicModelCatalog = new AnthropicModelCatalogCache({
+		listAccounts: () => dbOps.getAllAccounts(),
+		getAccessToken: catalogAccessToken,
+	});
+
+	// Codex reads its model catalog from `GET /v1/models`, and the catalog is
+	// per-subscription — so it comes from one of OUR Codex accounts, not from the
+	// client, which authenticates with a ClankerMux API key and holds no
+	// upstream-valid token. Best-effort throughout: `get` returning null puts the
+	// route back on the static list it served before.
+	const codexModelCatalog = new CodexModelCatalogCache({
+		listAccounts: () => dbOps.getAllAccounts(),
+		getApiKeyPin: (apiKeyId) => dbOps.getApiKeyPin(apiKeyId),
+		getAccessToken: catalogAccessToken,
+		fetchCatalog: fetchCodexModelCatalog,
+	});
+
+	const modelCatalogService = new ModelCatalogService({
+		anthropicCatalog: anthropicModelCatalog,
+		codexCatalog: codexModelCatalog,
+		staticModelIds: CODEX_MODELS,
+		listOverrides: (dialect) => dbOps.listModelOverrides(dialect),
+		upsertOverride: (input) => dbOps.upsertModelOverride(input),
+		removeOverride: (dialect, modelId) =>
+			dbOps.removeModelOverride(dialect, modelId),
+	});
+
 	const apiRouter = new APIRouter({
 		db,
 		config,
 		dbOps,
 		sessionAuth,
+		modelCatalog: modelCatalogService,
 		runtime: {
 			port,
 			tlsEnabled,
@@ -1188,6 +1240,9 @@ export default async function startServer(options?: {
 		asyncWriter,
 		requestRecorder,
 	};
+	// The model-catalogue caches were built before the API router (they are
+	// shared with it) and reach token acquisition through this holder.
+	proxyContextRef = proxyContext;
 
 	// The single authority for autonomous (scheduled-prime) and manual
 	// (manual-refresh) Codex spend. Constructed ONCE over this proxyContext and
@@ -1348,18 +1403,6 @@ export default async function startServer(options?: {
 		// hot-reload of the flag takes effect on the next request automatically.
 	});
 
-	// Codex reads its model catalog from `GET /v1/models`, and the catalog is
-	// per-subscription — so it comes from one of OUR Codex accounts, not from the
-	// client, which authenticates with a ClankerMux API key and holds no
-	// upstream-valid token. Best-effort throughout: `getCatalog` returning null
-	// puts the route back on the static list it served before.
-	const codexModelCatalog = new CodexModelCatalogCache({
-		listAccounts: () => proxyContext.dbOps.getAllAccounts(),
-		getApiKeyPin: (apiKeyId) => proxyContext.dbOps.getApiKeyPin(apiKeyId),
-		getAccessToken: (account) => getValidAccessToken(account, proxyContext),
-		fetchCatalog: fetchCodexModelCatalog,
-	});
-
 	// Everything the front door needs, bound once. `fetch` is a thin wrapper
 	// around routeRequest so the routing itself — which namespace a request
 	// belongs to, whether it needs a key, which handler owns it — is reachable
@@ -1380,14 +1423,19 @@ export default async function startServer(options?: {
 				apiKeyId,
 				apiKeyName,
 			),
-		handleModels: (url, apiKeyId) =>
+		handleModels: (url, apiKeyId, dialect) =>
 			handleModelsRoute(
 				url,
 				{
-					getCatalog: (keyId) => codexModelCatalog.get(keyId),
+					getCatalog: (keyId) => modelCatalogService.getCodexCatalog(keyId),
 					staticModels: handleModelsRequest,
+					staticModelIds: modelCatalogService.staticModelIds,
+					getAnthropicCatalog: () => modelCatalogService.getAnthropicCatalog(),
+					listOverrides: (forDialect) =>
+						modelCatalogService.listOverrides(forDialect),
 				},
 				apiKeyId ?? null,
+				dialect,
 			),
 		withDashboard,
 		dashboardManifest,

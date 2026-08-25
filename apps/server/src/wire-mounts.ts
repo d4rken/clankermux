@@ -105,11 +105,14 @@ export function matchWireMount(pathname: string): WireMatch {
 	return { kind: "unmounted" };
 }
 
+/** The model-listing route, served locally under BOTH dialects. */
+export const MODELS_PATH = "/v1/models";
+
 /** The three routes the OpenAI mount can actually serve, and with what verb. */
 const OPENAI_ROUTES: ReadonlyMap<string, string> = new Map([
 	["/v1/responses", "POST"],
 	["/v1/responses/compact", "POST"],
-	["/v1/models", "GET"],
+	[MODELS_PATH, "GET"],
 ]);
 
 /** Routes that belong to the OpenAI mount and must not be forwarded upstream
@@ -129,9 +132,18 @@ const OPENAI_ONLY_PATHS: readonly string[] = [
  * tomorrow reaches Anthropic instead of collecting a 404 from us, and the
  * request only has to be a path we do not claim for something else. Two things
  * are claimed: `/v1/responses(/compact)`, which is OpenAI's Responses API and
- * has no Anthropic meaning, and `GET /v1/models`, which we answer locally from
- * a static OpenAI-format catalogue for Codex's startup probe. Other verbs on
- * `/v1/models` are forwarded like anything else.
+ * has no Anthropic meaning, and `GET /v1/models`, which we answer locally with
+ * the operator-curated Anthropic catalogue. Other verbs on `/v1/models` are
+ * forwarded like anything else.
+ *
+ * `GET /v1/models` is admitted under `anthropic` only in its EXACT canonical
+ * spelling, and that asymmetry with the rest of the branch is deliberate. The
+ * router dispatches this path locally on an `===` match, so an alias spelling
+ * (`/v1/models/`, `//v1/%6dodels`, anything else canonicalizing to it) would
+ * not reach the local handler — it would be blind-forwarded to Anthropic on a
+ * pooled OAuth bearer, which is the one thing this mount must never do with a
+ * path we claim. Refusing the alias is visible and costs a caller nothing but a
+ * corrected URL.
  *
  * `openai` is a STRICT ALLOWLIST, because blind forwarding is not safe here.
  * Only those three paths get OpenAI handling; anything else would enter a
@@ -171,11 +183,11 @@ export function isDialectAllowed(
 	for (const claimed of OPENAI_ONLY_PATHS) {
 		if (logicalPath === claimed || canonical === claimed) return false;
 	}
-	if (
-		verb === "GET" &&
-		(logicalPath === "/v1/models" || canonical === "/v1/models")
-	) {
-		return false;
+	if (verb === "GET" && canonical === MODELS_PATH) {
+		// Admitted only when the caller spelled it exactly. Anything else that
+		// merely canonicalizes to it is refused rather than forwarded: see the
+		// note above on why an alias must not reach the proxy.
+		return logicalPath === MODELS_PATH;
 	}
 	return true;
 }

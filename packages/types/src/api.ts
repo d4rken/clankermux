@@ -199,3 +199,64 @@ export interface StorageUsageResponse {
 	walBytes: number;
 	types: StorageUsageType[];
 }
+
+// Model-catalogue curation: the dashboard's "Models" page and the
+// `GET /v1/models` reply it shapes.
+
+/**
+ * A wire dialect, which is also the unit a catalogue is curated in. The two
+ * mounts serve different clients different shapes, so an entry hidden for
+ * Codex is untouched for Claude Code.
+ */
+export type ModelDialect = "anthropic" | "openai";
+
+/**
+ * Where the uncurated list came from. Shown verbatim to the operator, because
+ * "the models Anthropic lists" and "the models this build knows about" are
+ * different answers and only one of them is live.
+ */
+export type ModelBaselineSource =
+	/** Anthropic's live `/v1/models`. */
+	| "upstream"
+	/** The registry compiled into this build; upstream could not be read. */
+	| "bundled"
+	/** The bundled Codex model list. */
+	| "static"
+	/** The per-subscription Codex catalogue, read from one of our accounts. */
+	| "codex-catalog";
+
+/** One row of the operator's editing view: baseline plus what was done to it. */
+export interface ModelCatalogRow {
+	id: string;
+	/** The name as served, after any override. */
+	displayName: string;
+	/** Whether the entry exists upstream or only because it was added here. */
+	source: "upstream" | "custom";
+	hidden: boolean;
+	/** The stored override, or null when the baseline's own name is served. */
+	overrideDisplayName: string | null;
+}
+
+/** Response from `GET /api/models/catalog?dialect=…`. */
+export interface ModelCatalogResponse {
+	baseline: {
+		source: ModelBaselineSource;
+		/** Epoch ms of the fetch backing the baseline, or null when it is static. */
+		fetchedAt: number | null;
+	};
+	rows: ModelCatalogRow[];
+}
+
+/**
+ * Body of `POST /api/models/overrides`. FULL REPLACEMENT: every field is
+ * required, because the editing view always holds the complete state of the row
+ * it renders and a partial merge would make two concurrent edits silently
+ * combine.
+ */
+export interface ModelOverrideSetRequest {
+	dialect: ModelDialect;
+	modelId: string;
+	hidden: boolean;
+	custom: boolean;
+	displayName: string | null;
+}
