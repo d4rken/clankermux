@@ -37,6 +37,15 @@ const INTERNAL_HEADERS = [
 	"x-clankermux-synthetic-response",
 	"x-clankermux-synthetic-status",
 	NATIVE_RESPONSES_REQUEST_HEADER,
+	// The RESPONSE marker is stripped here too, then re-set below on (and only
+	// on) a genuine native passthrough. Without this an upstream — a custom
+	// endpoint, or anything else answering for a Codex account — could send
+	// `x-clankermux-responses-native: 1` itself and have it survive into the
+	// proxy's own classification, where it now decides whether a stream needed a
+	// Responses terminal to count as a success. Forging it would mark ordinary
+	// Anthropic-shaped traffic as failed. Sanitize first, assert provenance
+	// second.
+	NATIVE_RESPONSES_RESPONSE_HEADER,
 ];
 
 function sanitizeResponseHeaders(headers: Headers): Headers {

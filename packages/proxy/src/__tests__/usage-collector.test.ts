@@ -1212,7 +1212,9 @@ describe("usage-collector", () => {
 			// which reclassifies a following read error as a SUCCESS — so a
 			// failed response setting it would launder failures into successes.
 			expect(state.providerReportedOutput).toBe(true);
-			expect(state.sawResponsesTerminal).toBe(true);
+			expect(state.responsesTerminalKind).toBe(
+				terminal === "response.failed" ? "failed" : "incomplete",
+			);
 			expect(state.sawMessageStop).toBe(false);
 		});
 
@@ -1232,7 +1234,7 @@ describe("usage-collector", () => {
 				1100,
 			);
 			expect(state.sawMessageStop).toBe(true);
-			expect(state.sawResponsesTerminal).toBe(true);
+			expect(state.responsesTerminalKind).toBe("completed");
 		});
 
 		it.each([
@@ -1465,6 +1467,112 @@ describe("usage-collector", () => {
 			// max(100000, tiny estimate) = 100000; still flagged approximate because
 			// the ending wasn't clean.
 			expect(summary.usage.outputTokens).toBe(100000);
+			expect(summary.outputApproximate).toBe(true);
+		});
+
+		it("a Responses terminal's counts survive a read error (usage trust vs clean ending)", async () => {
+			// A native stream that reported exact counts in `response.failed` and
+			// then hit a read error. A Responses terminal is terminal in the
+			// protocol — nothing billable follows it — so the backend's own numbers
+			// are final even though the ending was not clean. Keying `endedCleanly`
+			// on the transport verdict instead made finalize take
+			// max(exact, bytes/4) over every raw SSE frame, inflating counts the
+			// backend had already reported precisely.
+			const state = createUsageState();
+			feedChunk(
+				state,
+				sse("response.created", {
+					type: "response.created",
+					response: { id: "r", model: "gpt-5.5-codex" },
+				}),
+				1000,
+			);
+			feedChunk(
+				state,
+				sse("response.output_text.delta", {
+					type: "response.output_text.delta",
+					delta: "x".repeat(4000),
+				}),
+				1100,
+			);
+			feedChunk(
+				state,
+				sse("response.failed", {
+					type: "response.failed",
+					response: {
+						id: "r",
+						model: "gpt-5.5-codex",
+						usage: { input_tokens: 10, output_tokens: 9 },
+					},
+				}),
+				1200,
+			);
+			expect(state.providerReportedOutput).toBe(true);
+			expect(state.sawMessageStop).toBe(false);
+			expect(state.responsesTerminalKind).toBe("failed");
+
+			const summary = await finalizeUsage(
+				state,
+				{
+					responseTimeMs: 1000,
+					providerName: "codex",
+					isStream: true,
+					endedCleanly: true,
+				},
+				{ estimateCostUSD: fakeCost().fn },
+			);
+			// Exact, not max(9, ceil(bytes/4)) which would be in the hundreds.
+			expect(summary.usage.outputTokens).toBe(9);
+			expect(summary.outputApproximate).toBeUndefined();
+		});
+
+		it("an Anthropic stream cut after the last message_delta still takes the bytes/4 floor", async () => {
+			// The R5 anti-undercount case, pinned because the usage-trust key in
+			// response-handler must NOT be `providerReportedOutput` alone: every
+			// Anthropic `message_delta` sets that flag, and a stream cut afterwards
+			// really can have emitted more text. Only a Responses terminal licenses
+			// skipping the floor, and Anthropic SSE never emits one.
+			const state = createUsageState();
+			feedChunk(
+				state,
+				sse("message_start", {
+					type: "message_start",
+					message: {
+						model: "claude-opus-4-8",
+						usage: { input_tokens: 10, output_tokens: 0 },
+					},
+				}),
+				1000,
+			);
+			feedChunk(
+				state,
+				sse("message_delta", {
+					type: "message_delta",
+					usage: { output_tokens: 3 },
+				}),
+				1100,
+			);
+			feedChunk(
+				state,
+				sse("content_block_delta", {
+					type: "content_block_delta",
+					delta: { type: "text_delta", text: "y".repeat(4000) },
+				}),
+				1200,
+			);
+			expect(state.responsesTerminalKind).toBeNull();
+
+			const summary = await finalizeUsage(
+				state,
+				{
+					responseTimeMs: 1000,
+					providerName: "anthropic",
+					isStream: true,
+					endedCleanly: false,
+				},
+				{ estimateCostUSD: fakeCost().fn },
+			);
+			expect(summary.usage.outputTokens).toBeGreaterThan(3);
 			expect(summary.outputApproximate).toBe(true);
 		});
 
