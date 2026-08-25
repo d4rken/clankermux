@@ -5,10 +5,19 @@
  * never drift between producer and consumers.
  *
  *  - `header`            — explicit `x-project` request header (tier 1)
+ *  - `path_override`     — an operator-configured path-to-project mapping
+ *  - `repo_root`         — the repository root named by the client's own
+ *                          instruction files, validated against the working
+ *                          directory
  *  - `wd_primary`        — "Primary working directory:" system-prompt label
  *  - `wd_plain`          — plain "Working directory:" system-prompt label
  *  - `codex_cwd`         — Codex `<cwd>…</cwd>` tag in the first user message
- *  - `session_inherited` — inherited from the session cache (tier 4)
+ *
+ * The three path-derived labels above (`wd_primary`, `wd_plain`, `codex_cwd`)
+ * say which SIGNAL supplied the working directory; the configured project
+ * roots then decided which segment of it was the project.
+ *
+ *  - `session_inherited` — inherited from the session cache
  *  - `session_ambiguous` — the session seeded conflicting projects, so nothing
  *                          was inherited (project stays null)
  *  - `none`              — eligible request, no tier produced a project
@@ -18,6 +27,8 @@
  */
 export type ProjectAttributionSource =
 	| "header"
+	| "path_override"
+	| "repo_root"
 	| "wd_primary"
 	| "wd_plain"
 	| "codex_cwd"

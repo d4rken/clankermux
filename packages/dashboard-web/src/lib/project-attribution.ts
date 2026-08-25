@@ -11,6 +11,8 @@ import type { ProjectAttributionSource } from "@clankermux/types";
 
 const SOURCE_LABELS: Record<ProjectAttributionSource, string> = {
 	header: "x-project header",
+	path_override: "configured path override",
+	repo_root: "repository root",
 	wd_primary: "primary working directory",
 	wd_plain: "working directory",
 	codex_cwd: "Codex working directory",

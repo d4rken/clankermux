@@ -7,6 +7,10 @@ function makeConfig() {
 	let cacheWarmingRiskFactor = 0.4;
 	let cacheKeepaliveSnapshotDays = 30;
 	let payloadMaxMb = 0;
+	let projectRules: {
+		roots: string[];
+		overrides: { prefix: string; name: string }[];
+	} = { roots: ["/home/*"], overrides: [] };
 	return {
 		getAllSettings: () => ({
 			lb_strategy: "session",
@@ -54,6 +58,10 @@ function makeConfig() {
 		getCacheWarmingRiskFactor: () => cacheWarmingRiskFactor,
 		setCacheWarmingRiskFactor: mock((v: number) => {
 			cacheWarmingRiskFactor = Math.min(Math.max(v, 0), 1);
+		}),
+		getProjectRules: () => projectRules,
+		setProjectRules: mock((v: typeof projectRules) => {
+			projectRules = v;
 		}),
 	} as unknown as import("@clankermux/config").Config;
 }
@@ -603,5 +611,84 @@ describe("createConfigHandlers", () => {
 		expect(
 			config.setCacheKeepaliveSnapshotRetentionDays,
 		).not.toHaveBeenCalled();
+	});
+
+	describe("project rules", () => {
+		function handlersFor(config: import("@clankermux/config").Config) {
+			return createConfigHandlers(config, { port: 8080, tlsEnabled: false });
+		}
+
+		function post(body: unknown): Request {
+			return new Request("http://localhost/api/config/project-rules", {
+				method: "POST",
+				headers: { "Content-Type": "application/json" },
+				body: JSON.stringify(body),
+			});
+		}
+
+		it("returns the stored rules plus the defaults", async () => {
+			const response = handlersFor(makeConfig()).getProjectRules();
+			const body = (await response.json()) as Record<string, unknown>;
+			expect(body.roots).toEqual(["/home/*"]);
+			expect(body.overrides).toEqual([]);
+			// The UI offers "restore defaults" from this rather than hardcoding a
+			// list that would drift from the server's.
+			expect(Array.isArray(body.defaultRoots)).toBe(true);
+			expect(body.defaultRoots).toContain("/home/*");
+			expect(Array.isArray(body.unmatched)).toBe(true);
+		});
+
+		it("stores a valid payload and answers 204", async () => {
+			const config = makeConfig();
+			const response = await handlersFor(config).setProjectRules(
+				post({
+					roots: ["/workspace"],
+					overrides: [{ prefix: "/home/u/.claude", name: ".claude" }],
+				}),
+			);
+			expect(response.status).toBe(204);
+			expect(config.setProjectRules).toHaveBeenCalledWith({
+				roots: ["/workspace"],
+				overrides: [{ prefix: "/home/u/.claude", name: ".claude" }],
+			});
+		});
+
+		it("rejects a bad payload with 400 and writes nothing", async () => {
+			// Hand-rolled BadRequest, not a throwing validator, so assert on the
+			// status here rather than with rejects.toThrow().
+			const config = makeConfig();
+			const response = await handlersFor(config).setProjectRules(
+				post({ roots: ["relative/path"], overrides: [] }),
+			);
+			expect(response.status).toBe(400);
+			expect(config.setProjectRules).not.toHaveBeenCalled();
+		});
+
+		it("writes NOTHING when a later entry is invalid", async () => {
+			// The all-or-nothing property this handler exists to have: a
+			// half-applied rule set silently changes which upstream account the
+			// affected projects pin to.
+			const config = makeConfig();
+			const response = await handlersFor(config).setProjectRules(
+				post({
+					roots: ["/workspace", "/srv", "nope"],
+					overrides: [{ prefix: "/home/u", name: "u" }],
+				}),
+			);
+			expect(response.status).toBe(400);
+			expect(config.setProjectRules).not.toHaveBeenCalled();
+		});
+
+		it("accepts empty lists", async () => {
+			const config = makeConfig();
+			const response = await handlersFor(config).setProjectRules(
+				post({ roots: [], overrides: [] }),
+			);
+			expect(response.status).toBe(204);
+			expect(config.setProjectRules).toHaveBeenCalledWith({
+				roots: [],
+				overrides: [],
+			});
+		});
 	});
 });

@@ -1,5 +1,18 @@
-import type { ProjectAttributionSource } from "@clankermux/types";
-import { exceedsProjectNameLimit, sanitizeProjectName } from "./project-name";
+import type { ProjectAttributionSource, ProjectRules } from "@clankermux/types";
+import {
+	exceedsProjectNameLimit,
+	PROJECT_NAME_MAX_LEN,
+	sanitizeProjectName,
+} from "./project-name";
+import {
+	isUsableWorkingDir,
+	resolveConfiguredProject,
+} from "./project-path-match";
+import {
+	ANCHOR_SCAN_MAX_CHARS,
+	extractRepoRoot,
+	repoRootToCandidate,
+} from "./repo-root-anchor";
 import type { RequestJsonBody } from "./request-body-context";
 import type { SessionProjectCache } from "./session-project-cache";
 
@@ -7,10 +20,19 @@ import type { SessionProjectCache } from "./session-project-cache";
  * Tiered project-name extraction for routing affinity:
  *
  *   1. `x-project` header (explicit client opt-in, highest priority)
- *   2. Anchored working-directory labels in the system prompt
- *      ("Primary working directory:" wins over plain "Working directory:")
- *   3. Codex-style `<cwd>…</cwd>` tag in the FIRST user message only
- *   4. Session inheritance: requests with no anchored signal (Claude Code
+ *   2. An operator-configured path override (see `ProjectRules`) matching the
+ *      working directory the request claims. Never second-guessed: the
+ *      configured name is used verbatim, dot-leading rejection included.
+ *   3. The repository root named by the client's own instruction files
+ *      (see repo-root-anchor.ts), validated as an ancestor of that working
+ *      directory. Outranks the folder walk because it READ the root rather
+ *      than deducing which path segment was likely to be one.
+ *   4. The operator-configured project roots applied to the working directory,
+ *      which comes from an anchored label in the system prompt ("Primary
+ *      working directory:" wins over plain "Working directory:") or from a
+ *      Codex-style `<cwd>…</cwd>` tag in the FIRST user message only. The
+ *      recorded source says which of those supplied the path.
+ *   5. Session inheritance: requests with no anchored signal (Claude Code
  *      sidechains, title generation, count_tokens) inherit the project last
  *      anchored by the same Claude Code session (`metadata.user_id` →
  *      `session_id`, scoped per API key). `resolveProject` only READS the
@@ -102,22 +124,6 @@ const CWD_SCAN_MAX_CHARS = 4096;
 const CONTROL_CHAR_RE = /[\x00-\x1F\x7F]/;
 const WHITESPACE_RE = /\s/;
 
-// Windows paths: `C:\Users\Alice\myproj` and `\\server\share\myproj`. Without
-// the separator swap the whole string is a single segment, so the entire path —
-// user name included — became the project.
-const WINDOWS_DRIVE_PREFIX_RE = /^[A-Za-z]:/;
-const UNC_HOST_PREFIX_RE = /^\/\/[^/]+/;
-
-// Common "container" directories directly under /home/<user> or
-// /Users/<user> that hold projects rather than being projects themselves.
-const HOME_CONTAINER_DIRS = new Set([
-	"Desktop",
-	"projects",
-	"repos",
-	"src",
-	"git_repos",
-]);
-
 export function normalizeProjectCandidate(
 	raw: string | undefined | null,
 ): string | null {
@@ -131,36 +137,48 @@ export function normalizeProjectCandidate(
 	return sanitized;
 }
 
-export function mapWorkingDirToProject(wd: string): string | null {
-	// Rule (d): normalize Windows separators and drop a drive/UNC-host prefix so
-	// the segment walk below sees the same shape it does on POSIX.
-	const normalized = wd
-		.replace(/\\/g, "/")
-		.replace(WINDOWS_DRIVE_PREFIX_RE, "")
-		.replace(UNC_HOST_PREFIX_RE, "");
-	const segments = normalized
-		.split("/")
-		.filter((segment) => segment.length > 0);
-	if (segments.length === 0) return null;
+/**
+ * Normalize a name the OPERATOR configured, rather than one we inferred.
+ *
+ * Same cleanup and same length cap as {@link normalizeProjectCandidate}, minus
+ * the dot-leading rejection. That rejection exists to stop a session that
+ * happens to sit in an infrastructure directory from being labelled with it;
+ * it has no business overruling an operator who wrote the mapping by hand.
+ */
+export function normalizeConfiguredName(raw: string): string | null {
+	const trimmed = raw.trim();
+	if (!trimmed) return null;
+	// Length and control characters only. Emphatically NOT sanitizeProjectName:
+	// that strips a trailing run starting at "Platform", "Shell", "Model" and
+	// friends, which exists to clean up a name SCRAPED out of a Claude Code
+	// environment block. Applied to a name the operator typed it silently
+	// mangles legitimate ones — `Acme Platform` becomes `Acme`, and `model`
+	// becomes null — which is the opposite of the guarantee this tier makes.
+	if (CONTROL_CHAR_RE.test(trimmed)) return null;
+	if (trimmed.length > PROJECT_NAME_MAX_LEN) return null;
+	return trimmed;
+}
 
-	let candidate: string | null;
-	if (segments[0] === "home" || segments[0] === "Users") {
-		// Drop the /home (or /Users) prefix and the user segment, then skip
-		// consecutive container dirs; the next segment is the project root.
-		let index = 2;
-		while (
-			index < segments.length &&
-			HOME_CONTAINER_DIRS.has(segments[index])
-		) {
-			index++;
-		}
-		candidate = index < segments.length ? segments[index] : null;
-	} else {
-		// Non-home paths (/workspace, /srv/data/myproj): use the basename.
-		candidate = segments[segments.length - 1];
+/**
+ * Map a working directory to a project using the operator's configured roots.
+ *
+ * Returns null for a path no root matches. That is the whole point: the
+ * previous implementation fell back to the BASENAME for any path outside
+ * `/home` or `/Users`, which turned every subdirectory of a repository into
+ * its own project and fed that name straight into the load balancer's affinity
+ * partition key. An unknown layout is now reported as unknown so the operator
+ * can name it, instead of being guessed at.
+ */
+export function mapWorkingDirToProject(
+	wd: string,
+	rules: ProjectRules,
+): string | null {
+	const resolved = resolveConfiguredProject(wd, rules);
+	if (!resolved) return null;
+	if (resolved.kind === "override") {
+		return normalizeConfiguredName(resolved.name);
 	}
-
-	return normalizeProjectCandidate(candidate);
+	return normalizeProjectCandidate(resolved.segment);
 }
 
 function extractSystemPrompt(body: RequestJsonBody | null): string | null {
@@ -202,11 +220,15 @@ function stripSurroundingQuotes(value: string): {
 }
 
 /**
- * Turn a raw working-directory capture into a project name, applying rules
+ * Turn a raw working-directory capture into a trustworthy PATH, applying rules
  * (a) and (c) of the guard documented above. Returns `null` for anything that
  * carries prompt text rather than a path.
+ *
+ * Stops at the path rather than continuing to a project name, because two
+ * later tiers need the path itself: the override list matches against it, and
+ * the repository-root anchor is only trusted when it is an ancestor of it.
  */
-function projectFromCapture(raw: string | undefined): string | null {
+function pathFromCapture(raw: string | undefined): string | null {
 	if (raw === undefined) return null;
 
 	// (a) Trim first, then reject on what is LEFT — boundary newlines are
@@ -219,11 +241,18 @@ function projectFromCapture(raw: string | undefined): string | null {
 	// (c) Only a quoted capture may contain whitespace.
 	if (!quoted && WHITESPACE_RE.test(value)) return null;
 
-	return mapWorkingDirToProject(value);
+	// (e) It has to be a path: absolute, and with no unresolved `.`/`..`. This
+	// is what keeps a prompt fragment out of the rules engine entirely — a bare
+	// `token=sk-…` or a relative `home/u/repo` would otherwise be matched
+	// against the roots AND, when nothing matched, recorded as an "unmatched
+	// path" and shown in the dashboard.
+	if (!isUsableWorkingDir(value)) return null;
+
+	return value;
 }
 
-function projectFromLabelMatch(match: RegExpMatchArray | null): string | null {
-	return projectFromCapture(match?.[1]);
+function pathFromLabelMatch(match: RegExpMatchArray | null): string | null {
+	return pathFromCapture(match?.[1]);
 }
 
 function collectFirstUserMessageTexts(body: RequestJsonBody): string[] {
@@ -254,48 +283,189 @@ function collectFirstUserMessageTexts(body: RequestJsonBody): string[] {
 	return [];
 }
 
-/** Sources a body-only extraction can report (tiers 2–3, or nothing). */
+/** Sources a body-only extraction can report (tiers 2–5, or nothing). */
 export type BodyProjectSource = Extract<
 	ProjectAttributionSource,
-	"wd_primary" | "wd_plain" | "codex_cwd" | "none"
+	| "path_override"
+	| "repo_root"
+	| "wd_primary"
+	| "wd_plain"
+	| "codex_cwd"
+	| "none"
 >;
 
-/** Sources a full request extraction can report (tiers 1–3, or nothing). */
+/** Sources a full request extraction can report (tiers 1–5, or nothing). */
 export type RequestProjectSource = BodyProjectSource | "header";
 
 const NO_BODY_PROJECT = { project: null, source: "none" } as const;
 
-export function extractProjectFromBody(body: RequestJsonBody | null): {
+/** Which signal produced a candidate working directory. */
+type WorkingDirSource = Extract<
+	ProjectAttributionSource,
+	"wd_primary" | "wd_plain" | "codex_cwd"
+>;
+
+interface WorkingDirCandidate {
+	path: string;
+	source: WorkingDirSource;
+}
+
+/**
+ * Every working directory the body claims, most trustworthy first.
+ *
+ * A LIST rather than a single value because the tiers below can decline a
+ * path — an unconfigured layout, a name that fails normalization — and the
+ * next signal deserves its turn. The previous implementation got this for free
+ * by falling through from the "Primary working directory" label to the plain
+ * one when the first produced no name; keeping the candidates ordered
+ * preserves that without special-casing it.
+ */
+function collectWorkingDirCandidates(
+	body: RequestJsonBody,
+): WorkingDirCandidate[] {
+	const candidates: WorkingDirCandidate[] = [];
+
+	const systemPrompt = extractSystemPrompt(body);
+	if (systemPrompt) {
+		const primary = pathFromLabelMatch(
+			systemPrompt.match(PRIMARY_WORKING_DIR_RE),
+		);
+		if (primary) candidates.push({ path: primary, source: "wd_primary" });
+
+		const plain = pathFromLabelMatch(systemPrompt.match(WORKING_DIR_RE));
+		if (plain) candidates.push({ path: plain, source: "wd_plain" });
+	}
+
+	// Codex `<cwd>` tag — first user message only, never the rest of the
+	// conversation, and only the head of each text chunk.
+	for (const text of collectFirstUserMessageTexts(body)) {
+		const match = text.slice(0, CWD_SCAN_MAX_CHARS).match(CODEX_CWD_RE);
+		const path = pathFromCapture(match?.[1]);
+		if (path) {
+			candidates.push({ path, source: "codex_cwd" });
+			break;
+		}
+	}
+
+	return candidates;
+}
+
+/**
+ * The text the repository-root anchor scans: the whole system prompt (bounded
+ * by the client) plus a capped head of the first user message, which is where
+ * Claude Code puts the instruction-file contents.
+ */
+function collectAnchorText(body: RequestJsonBody): string {
+	const parts: string[] = [];
+	const systemPrompt = extractSystemPrompt(body);
+	if (systemPrompt) parts.push(systemPrompt);
+
+	// Per-chunk AND total budget. The per-chunk cap alone bounds nothing: the
+	// first user message can carry an unbounded number of text blocks, and this
+	// runs on every eligible request. Truncating is safe for the same reason the
+	// per-chunk cap is (see repo-root-anchor: every instruction path in a
+	// repository reduces to the same root).
+	let budget = ANCHOR_SCAN_MAX_CHARS;
+	for (const text of collectFirstUserMessageTexts(body)) {
+		if (budget <= 0) break;
+		const slice = text.slice(0, Math.min(budget, ANCHOR_SCAN_MAX_CHARS));
+		parts.push(slice);
+		budget -= slice.length;
+	}
+	return parts.join("\n");
+}
+
+/**
+ * Tiers 2–5, in priority order, for each candidate working directory.
+ *
+ *   2  path override   what the operator stated; never second-guessed
+ *   3  repo-root anchor what the client's own instruction files revealed
+ *   4  configured roots what the layout implies
+ *
+ * The order is "explicit beats observed beats inferred". The anchor outranks
+ * the roots walk because it read the repository root out of the request rather
+ * than deducing which path segment was likely to be one; where they disagree
+ * — a monorepo under a container directory nobody configured — the anchor is
+ * the one that saw the answer.
+ */
+export function extractProjectFromBody(
+	body: RequestJsonBody | null,
+	rules: ProjectRules,
+): {
 	project: string | null;
 	source: BodyProjectSource;
+	/**
+	 * The best working directory that produced no project, for the operator's
+	 * "these paths matched no rule" list. Null when the body claimed no usable
+	 * working directory at all, which is not an attribution gap but a request
+	 * that never carried the signal.
+	 */
+	unmatchedPath?: string | null;
 } {
 	if (!body) return NO_BODY_PROJECT;
 
-	// Tier 2: anchored working-directory labels in the system prompt.
-	const systemPrompt = extractSystemPrompt(body);
-	if (systemPrompt) {
-		const primary = projectFromLabelMatch(
-			systemPrompt.match(PRIMARY_WORKING_DIR_RE),
+	const candidates = collectWorkingDirCandidates(body);
+	if (candidates.length === 0) return NO_BODY_PROJECT;
+
+	const anchorText = collectAnchorText(body);
+	const resolved = candidates.map((candidate) => ({
+		candidate,
+		configured: resolveConfiguredProject(candidate.path, rules),
+	}));
+
+	// TIER-first, not candidate-first. Running every tier for the first
+	// candidate before looking at the second would make the tier order local to
+	// a candidate rather than global: an explicit override naming the plain
+	// "Working directory" would lose to a mere roots match on the "Primary
+	// working directory", which is the opposite of what the documented order
+	// promises.
+
+	// Tier 2: explicit override.
+	for (const { configured } of resolved) {
+		if (configured?.kind !== "override") continue;
+		const name = normalizeConfiguredName(configured.name);
+		if (name) return { project: name, source: "path_override" };
+	}
+
+	// Tier 3: repository root named by the client's instruction files, bounded
+	// BELOW by the directory the roots walk already chose. It may only refine
+	// that answer downwards — see rule 3 in repo-root-anchor. With no root match
+	// there is no floor, so the anchor does not fire: an unbounded anchor is
+	// steerable by anything that can write into the prompt.
+	for (const { candidate, configured } of resolved) {
+		if (configured?.kind !== "root") continue;
+		const root = extractRepoRoot(
+			anchorText,
+			candidate.path,
+			configured.projectDir,
 		);
-		if (primary) return { project: primary, source: "wd_primary" };
-
-		const plain = projectFromLabelMatch(systemPrompt.match(WORKING_DIR_RE));
-		if (plain) return { project: plain, source: "wd_plain" };
+		if (!root) continue;
+		const project = normalizeProjectCandidate(repoRootToCandidate(root));
+		if (project) return { project, source: "repo_root" };
 	}
 
-	// Tier 3: codex <cwd> tag — first user message only, never the rest of
-	// the conversation, and only the head of each text chunk.
-	for (const text of collectFirstUserMessageTexts(body)) {
-		const match = text.slice(0, CWD_SCAN_MAX_CHARS).match(CODEX_CWD_RE);
-		const project = projectFromCapture(match?.[1]);
-		if (project) return { project, source: "codex_cwd" };
+	// Tier 4: the configured roots. Labelled by which signal supplied the path,
+	// so the stored attribution still says where the path came from.
+	for (const { candidate, configured } of resolved) {
+		if (configured?.kind !== "root") continue;
+		const project = normalizeProjectCandidate(configured.segment);
+		if (project) return { project, source: candidate.source };
 	}
 
-	return NO_BODY_PROJECT;
+	return { ...NO_BODY_PROJECT, unmatchedPath: candidates[0].path };
 }
 
 // Paths eligible for project attribution (anchored tiers AND session
-// inheritance). count_tokens shares the session's body shape and metadata.
+// inheritance).
+//
+// count_tokens is listed because it is a per-session call that SHOULD carry
+// the session's identity, not because it currently does. Claude Code 2.1.241
+// sends `{model, messages, tools}` and nothing else on this path: no `system`,
+// no `metadata`, and no session id in any header. Every anchored tier
+// therefore finds nothing, `extractSessionId` has nothing to parse, and
+// inheritance cannot fire — so in practice every count_tokens request is
+// unattributed. Leave it eligible so a client that does send `metadata` is
+// attributed, but do not expect this path to resolve.
 const PROJECT_ELIGIBLE_PATHS = new Set([
 	"/v1/messages",
 	"/v1/messages/count_tokens",
@@ -309,7 +479,12 @@ export function extractProjectFromRequest(
 	path: string,
 	headers: Headers,
 	body: RequestJsonBody | null,
-): { project: string | null; source: RequestProjectSource } {
+	rules: ProjectRules,
+): {
+	project: string | null;
+	source: RequestProjectSource;
+	unmatchedPath?: string | null;
+} {
 	if (method !== "POST" || !PROJECT_ELIGIBLE_PATHS.has(path)) {
 		return NO_BODY_PROJECT;
 	}
@@ -318,7 +493,7 @@ export function extractProjectFromRequest(
 	const headerProject = normalizeProjectCandidate(headers.get("x-project"));
 	if (headerProject) return { project: headerProject, source: "header" };
 
-	return extractProjectFromBody(body);
+	return extractProjectFromBody(body, rules);
 }
 
 /**
@@ -354,11 +529,18 @@ export function extractSessionId(body: RequestJsonBody | null): string | null {
 /** The tiers that come from the request itself rather than session history. */
 export type AnchoredProjectSource = Extract<
 	ProjectAttributionSource,
-	"header" | "wd_primary" | "wd_plain" | "codex_cwd"
+	| "header"
+	| "path_override"
+	| "repo_root"
+	| "wd_primary"
+	| "wd_plain"
+	| "codex_cwd"
 >;
 
 const ANCHORED_SOURCES: ReadonlySet<string> = new Set<AnchoredProjectSource>([
 	"header",
+	"path_override",
+	"repo_root",
 	"wd_primary",
 	"wd_plain",
 	"codex_cwd",
@@ -391,6 +573,13 @@ export type ResolvedProject =
 			source: "none" | "session_ambiguous";
 			project: null;
 			sessionKey: string | null;
+			/**
+			 * A working directory that matched no rule, for the operator's
+			 * "unattributed paths" list. Only set on `none`, and only when the
+			 * request actually carried a path — a request with no working
+			 * directory at all is not a configuration gap.
+			 */
+			unmatchedPath?: string | null;
 	  }
 	| {
 			source: Exclude<ProjectAttributionSource, "none" | "session_ambiguous">;
@@ -415,6 +604,7 @@ export function resolveProject(
 	body: RequestJsonBody | null,
 	apiKeyId: string | null,
 	cache: SessionProjectCache,
+	rules: ProjectRules,
 ): ResolvedProject {
 	if (method !== "POST" || !PROJECT_ELIGIBLE_PATHS.has(path)) {
 		return { project: null, source: null, sessionKey: null };
@@ -423,9 +613,31 @@ export function resolveProject(
 	const sessionId = extractSessionId(body);
 	const sessionKey = sessionId ? `${apiKeyId ?? "anon"}:${sessionId}` : null;
 
-	const anchored = extractProjectFromRequest(method, path, headers, body);
+	const anchored = extractProjectFromRequest(
+		method,
+		path,
+		headers,
+		body,
+		rules,
+	);
 	if (anchored.project !== null && anchored.source !== "none") {
 		return { project: anchored.project, source: anchored.source, sessionKey };
+	}
+
+	// An explicit working directory that matched no rule BLOCKS inheritance.
+	// The request said where it is; we just do not know that place. Inheriting
+	// here would answer a question about directory B with the project of
+	// directory A — a definite wrong project, and precisely the outcome
+	// removing the basename fallback was meant to avoid. It also has to be
+	// reported, or the one signal telling the operator to add a root is
+	// swallowed by a cache hit.
+	if (anchored.unmatchedPath) {
+		return {
+			project: null,
+			source: "none",
+			sessionKey,
+			unmatchedPath: anchored.unmatchedPath,
+		};
 	}
 
 	if (sessionKey) {
@@ -442,5 +654,16 @@ export function resolveProject(
 		}
 	}
 
-	return { project: null, source: "none", sessionKey };
+	// The key is present only when there is something to report. A request that
+	// carried no working directory at all is not a configuration gap, and
+	// stamping `unmatchedPath: null` on it would make every signal-less
+	// count_tokens call look like one.
+	return anchored.unmatchedPath
+		? {
+				project: null,
+				source: "none",
+				sessionKey,
+				unmatchedPath: anchored.unmatchedPath,
+			}
+		: { project: null, source: "none", sessionKey };
 }
