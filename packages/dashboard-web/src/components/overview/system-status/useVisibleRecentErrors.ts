@@ -1,5 +1,5 @@
 import type { RecentErrorGroup } from "@clankermux/types";
-import { useMemo } from "react";
+import { useCallback, useMemo } from "react";
 import { useDismissedErrors } from "./useDismissedErrors";
 
 /**
@@ -17,13 +17,22 @@ export function useVisibleRecentErrors(
 ): {
 	visible: RecentErrorGroup[];
 	dismiss: (group: RecentErrorGroup) => void;
+	dismissAll: () => void;
 } {
-	const { dismiss, isDismissed } = useDismissedErrors();
+	const { dismiss, dismissMany, isDismissed } = useDismissedErrors();
 
 	const visible = useMemo(
 		() => (groups ?? []).filter((group) => !isDismissed(group)),
 		[groups, isDismissed],
 	);
 
-	return { visible, dismiss };
+	// Dismisses what is currently visible, not what is currently rendered:
+	// the Overview list caps itself at a few rows, and a "Clear all" that left
+	// the overflow behind would repopulate the list the moment it re-rendered.
+	const dismissAll = useCallback(
+		() => dismissMany(visible),
+		[dismissMany, visible],
+	);
+
+	return { visible, dismiss, dismissAll };
 }
