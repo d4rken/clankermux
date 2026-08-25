@@ -1,4 +1,5 @@
 import { useSetUsageThrottling, useUsageThrottling } from "../../hooks/queries";
+import { SettingRow } from "../settings/SettingRow";
 import {
 	Card,
 	CardContent,
@@ -14,29 +15,22 @@ export function UsageThrottlingCard() {
 
 	const fiveHourEnabled = data?.fiveHourEnabled ?? false;
 	const weeklyEnabled = data?.weeklyEnabled ?? false;
+	const busy = isLoading || setUsageThrottling.isPending;
 
 	return (
 		<Card className="card-hover">
 			<CardHeader>
 				<CardTitle>Usage Throttling</CardTitle>
 				<CardDescription>
-					Control short-window and weekly pacing separately. When a selected
-					window is ahead of its pacing line, the proxy returns an error
-					instructing the client to retry in 60 seconds instead of sending
-					another upstream request.
+					Pace spending against each usage window separately.
 				</CardDescription>
 			</CardHeader>
-			<CardContent>
-				<div className="space-y-group">
-					<div className="flex items-center justify-between gap-row">
-						<div className="space-y-tight">
-							<div className="text-sm font-medium">5-hour window</div>
-							<div className="text-sm text-muted-foreground">
-								Throttle requests when 5-hour usage is ahead of its pacing line.
-							</div>
-						</div>
+			<CardContent className="space-y-row">
+				<SettingRow
+					label="5-hour window"
+					control={
 						<Switch
-							disabled={isLoading || setUsageThrottling.isPending}
+							disabled={busy}
 							checked={fiveHourEnabled}
 							onCheckedChange={(checked) =>
 								setUsageThrottling.mutate({
@@ -45,17 +39,15 @@ export function UsageThrottlingCard() {
 								})
 							}
 						/>
-					</div>
-					<div className="flex items-center justify-between gap-row">
-						<div className="space-y-tight">
-							<div className="text-sm font-medium">Weekly window</div>
-							<div className="text-sm text-muted-foreground">
-								Throttle requests when weekly usage is ahead of its pacing line.
-								Disable this if you expect usage to recover overnight.
-							</div>
-						</div>
+					}
+					summary="Throttle requests when 5-hour usage is ahead of its pacing line."
+					detail="While a window is ahead of pace the proxy answers the client with a retry-in-60-seconds error instead of sending another upstream request, so the remaining quota is spread across the rest of the window rather than spent early."
+				/>
+				<SettingRow
+					label="Weekly window"
+					control={
 						<Switch
-							disabled={isLoading || setUsageThrottling.isPending}
+							disabled={busy}
 							checked={weeklyEnabled}
 							onCheckedChange={(checked) =>
 								setUsageThrottling.mutate({
@@ -64,8 +56,10 @@ export function UsageThrottlingCard() {
 								})
 							}
 						/>
-					</div>
-				</div>
+					}
+					summary="Throttle requests when weekly usage is ahead of its pacing line."
+					detail="Disable this if you expect usage to recover overnight — the weekly pacing line assumes an even burn across the whole week, which penalises a heavy day that a quiet night would have offset anyway."
+				/>
 			</CardContent>
 		</Card>
 	);

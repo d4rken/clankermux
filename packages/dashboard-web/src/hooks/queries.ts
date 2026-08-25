@@ -104,17 +104,60 @@ export const useStorageInfo = (refetchInterval?: number) => {
 	});
 };
 
+/** How often to re-ask for the measurement while none has landed yet. */
+export const STORAGE_USAGE_POLL_MS = 15_000;
+
+/**
+ * Poll until a measurement has actually landed, then stop.
+ *
+ * Keyed on `status`, NOT on the presence of `data`. TanStack keeps the previous
+ * value after a failed refetch, so a cold rescan that times out — exactly what
+ * "Clean up now" provokes, since it invalidates the server's cached figure —
+ * leaves stale numbers in place with `status: "error"`. Keyed on data alone the
+ * poll would stop there and strand the card on sizes that no longer describe
+ * the database.
+ *
+ * Stopping on success is equally load-bearing in the other direction: this
+ * endpoint runs full-table scans, so a completed measurement must never
+ * re-trigger one on a timer.
+ */
+export function storageUsageRefetchInterval(
+	status: "pending" | "error" | "success",
+): number | false {
+	return status === "success" ? false : STORAGE_USAGE_POLL_MS;
+}
+
 /**
  * Per-data-type storage usage for the retention settings card. The server
  * caches the (scan-backed) measurement for a few minutes, so we mirror that
- * with a 5-minute staleTime and don't poll — it refetches on mount and is
- * invalidated explicitly after "Clean up now".
+ * with a 5-minute staleTime once a value has landed.
+ *
+ * Getting the FIRST value is the hard part, and this query needs its own
+ * cadence rather than the app-wide defaults from App.tsx. After a restart the
+ * scan runs cold over the whole database (minutes on a multi-GB file), well
+ * past the 60s client timeout in `api.getStorageUsage`, so early attempts time
+ * out while the server keeps scanning behind them. Under the inherited
+ * defaults a failing read can chain up to three 60s timeouts before the 30s
+ * interval gets a turn — ticks that land mid-fetch coalesce onto the fetch
+ * already running — which stretches the gap between attempts to minutes while
+ * the card sits on "Measuring storage usage…".
+ *
+ * So: one attempt per cycle, retried on a tight interval. The server dedups
+ * concurrent callers onto one in-flight scan and caches the result, so a poll
+ * already in flight when the scan lands returns it immediately, and one that
+ * is not starts at most 15s later.
  */
 export const useStorageUsage = () => {
 	return useQuery({
 		queryKey: queryKeys.storageUsage(),
 		queryFn: () => api.getStorageUsage(),
 		staleTime: 5 * 60_000,
+		// One attempt per cycle; the poll below is the retry mechanism.
+		retry: false,
+		refetchInterval: (query) => storageUsageRefetchInterval(query.state.status),
+		// Deliberately not polling a hidden tab: this endpoint runs full-table
+		// scans, and nothing is waiting to read them while the tab is away.
+		refetchIntervalInBackground: false,
 	});
 };
 
