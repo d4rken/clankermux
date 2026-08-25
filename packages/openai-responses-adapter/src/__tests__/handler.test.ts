@@ -503,6 +503,63 @@ describe("handleResponsesRequest", () => {
 			}
 		});
 
+		test("non-streaming client + ChatGPT-shaped empty-output terminal → assembled output", async () => {
+			// What the real backend sends: the message lives in the
+			// response.output_item.done event and the terminal envelope's `output` is
+			// an empty array.
+			const item = {
+				type: "message",
+				id: "msg_backend_1",
+				role: "assistant",
+				status: "completed",
+				content: [{ type: "output_text", text: "Hello" }],
+			};
+			const emptyTerminal = { ...TERMINAL_RESPONSE, output: [] };
+			const sse = [
+				"event: response.output_item.done",
+				`data: ${JSON.stringify({
+					type: "response.output_item.done",
+					item,
+					output_index: 0,
+				})}`,
+				"",
+				"event: response.completed",
+				`data: ${JSON.stringify({
+					type: "response.completed",
+					response: emptyTerminal,
+				})}`,
+				"",
+				"",
+			].join("\n");
+
+			const mockHandleProxy: HandleProxyFn = async () =>
+				new Response(sse, {
+					status: 200,
+					headers: {
+						"Content-Type": "text/event-stream",
+						[NATIVE_RESPONSES_RESPONSE_HEADER]: "1",
+						"x-clankermux-account-id": "acc-1",
+					},
+				});
+
+			const resp = await handleResponsesRequest(
+				streamingRequest(false),
+				new URL("http://localhost/v1/responses"),
+				mockHandleProxy,
+				{},
+			);
+
+			expect(resp.status).toBe(200);
+			expect(resp.headers.get("content-type")).toBe("application/json");
+			expect(resp.headers.get(NATIVE_RESPONSES_RESPONSE_HEADER)).toBeNull();
+			for (const [name] of resp.headers.entries()) {
+				expect(name.startsWith("x-clankermux-")).toBe(false);
+			}
+
+			// The client gets the content, not the backend's empty array.
+			expect(await resp.json()).toEqual({ ...emptyTerminal, output: [item] });
+		});
+
 		test("non-streaming client + no terminal event → 502 in the OpenAI error shape", async () => {
 			const truncated = [
 				"event: response.created",

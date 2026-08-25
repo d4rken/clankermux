@@ -1,8 +1,10 @@
 import { describe, expect, test } from "bun:test";
 import {
 	extractNativeTerminalResponse,
+	MAX_NATIVE_NONSTREAM_ITEMS_BYTES,
 	MAX_NATIVE_NONSTREAM_SSE_BYTES,
 } from "../native-nonstream";
+import { REAL_CODEX_NONSTREAM_SSE } from "./real-codex-sse.fixture";
 
 const encoder = new TextEncoder();
 
@@ -571,6 +573,344 @@ describe("extractNativeTerminalResponse", () => {
 
 		expect(result).toEqual({ ok: false, reason: "oversized" });
 		expect(state.cancelled).toBe(1);
+	});
+
+	describe("empty-output terminal assembly (ChatGPT backend shape)", () => {
+		/** An assistant message item as `response.output_item.done` carries it. */
+		function messageItem(id: string, text: string) {
+			return {
+				id,
+				type: "message",
+				status: "completed",
+				role: "assistant",
+				content: [{ type: "output_text", text }],
+			};
+		}
+
+		/** A `response.output_item.done` frame; `outputIndex` is left out when undefined. */
+		function itemDone(item: unknown, outputIndex?: unknown): string {
+			const payload: Record<string, unknown> = {
+				type: "response.output_item.done",
+				item,
+			};
+			if (outputIndex !== undefined) payload.output_index = outputIndex;
+			return sseEvent("response.output_item.done", payload);
+		}
+
+		function terminalEvent(
+			type: "response.completed" | "response.incomplete" | "response.failed",
+			response: unknown,
+		): string {
+			return sseEvent(type, { type, response });
+		}
+
+		const EMPTY_OUTPUT_TERMINAL = { ...COMPLETED_RESPONSE, output: [] };
+
+		test("real captured backend SSE: terminal `output: []` is filled from the done item", async () => {
+			// Parse the fixture instead of restating it: the expectations then track
+			// the capture rather than a hand-written idea of it.
+			const events = REAL_CODEX_NONSTREAM_SSE.split("\n\n")
+				.map((block) =>
+					block.split("\n").find((line) => line.startsWith("data: ")),
+				)
+				.filter((line): line is string => line !== undefined)
+				.map(
+					(line) =>
+						JSON.parse(line.slice("data: ".length)) as Record<string, unknown>,
+				);
+			const terminal = events.find((e) => e.type === "response.completed");
+			const done = events.find((e) => e.type === "response.output_item.done") as
+				| { item: unknown }
+				| undefined;
+			const terminalResponse = terminal?.response as Record<string, unknown>;
+
+			// The divergence this whole module exists for, asserted on real bytes.
+			expect(terminalResponse.output).toEqual([]);
+			expect(done?.item).toBeDefined();
+
+			const result = await extractNativeTerminalResponse(
+				streamOf([REAL_CODEX_NONSTREAM_SSE]),
+				{},
+			);
+
+			expect(result.ok).toBe(true);
+			if (!result.ok) return;
+			// Deep-equal, not byte-equal: the envelope is reserialized.
+			expect(JSON.parse(result.responseJson)).toEqual({
+				...terminalResponse,
+				output: [done?.item],
+			});
+		});
+
+		test("terminal already carrying output → verbatim, retained items ignored", async () => {
+			const result = await extractNativeTerminalResponse(
+				streamOf([
+					itemDone(messageItem("msg_ignored", "ignored"), 0),
+					terminalEvent("response.completed", COMPLETED_RESPONSE),
+				]),
+				{},
+			);
+
+			expect(result.ok).toBe(true);
+			if (!result.ok) return;
+			expect(JSON.parse(result.responseJson)).toEqual(COMPLETED_RESPONSE);
+		});
+
+		test("out-of-order output_index → assembled ascending", async () => {
+			const items = [
+				messageItem("msg_a", "a"),
+				messageItem("msg_b", "b"),
+				messageItem("msg_c", "c"),
+			];
+			const result = await extractNativeTerminalResponse(
+				streamOf([
+					itemDone(items[2], 2),
+					itemDone(items[0], 0),
+					itemDone(items[1], 1),
+					terminalEvent("response.completed", EMPTY_OUTPUT_TERMINAL),
+				]),
+				{},
+			);
+
+			expect(result.ok).toBe(true);
+			if (!result.ok) return;
+			expect(JSON.parse(result.responseJson).output).toEqual(items);
+		});
+
+		test("response.incomplete with empty output → assembled all the same", async () => {
+			const item = messageItem("msg_partial", "half a th");
+			const response = {
+				...EMPTY_OUTPUT_TERMINAL,
+				status: "incomplete",
+				incomplete_details: { reason: "max_output_tokens" },
+			};
+			const result = await extractNativeTerminalResponse(
+				streamOf([
+					itemDone(item, 0),
+					terminalEvent("response.incomplete", response),
+				]),
+				{},
+			);
+
+			expect(result.ok).toBe(true);
+			if (!result.ok) return;
+			const parsed = JSON.parse(result.responseJson);
+			expect(parsed.status).toBe("incomplete");
+			expect(parsed).toEqual({ ...response, output: [item] });
+		});
+
+		test("empty output and no retained items → ok with an empty output array", async () => {
+			const result = await extractNativeTerminalResponse(
+				streamOf([terminalEvent("response.completed", EMPTY_OUTPUT_TERMINAL)]),
+				{},
+			);
+
+			expect(result.ok).toBe(true);
+			if (!result.ok) return;
+			expect(JSON.parse(result.responseJson)).toEqual(EMPTY_OUTPUT_TERMINAL);
+		});
+
+		test("retained items cumulatively past the items cap → oversized", async () => {
+			// Every single frame is comfortably under the frame cap; only their SUM
+			// crosses the separate items budget.
+			const chunkText = "x".repeat(9 * 1024 * 1024);
+			const chunks = [0, 1, 2, 3].map((i) =>
+				itemDone(messageItem(`msg_${i}`, chunkText), i),
+			);
+			for (const chunk of chunks) {
+				expect(chunk.length).toBeLessThan(MAX_NATIVE_NONSTREAM_SSE_BYTES);
+			}
+			expect(4 * chunkText.length).toBeGreaterThan(
+				MAX_NATIVE_NONSTREAM_ITEMS_BYTES,
+			);
+
+			const result = await extractNativeTerminalResponse(
+				streamOf([
+					...chunks,
+					terminalEvent("response.completed", EMPTY_OUTPUT_TERMINAL),
+				]),
+				{},
+			);
+
+			expect(result).toEqual({ ok: false, reason: "oversized" });
+		});
+
+		test("a big item plus a big non-empty terminal, each under its own cap → success", async () => {
+			// Regression on cap SEPARATION: charging retained items against the frame
+			// retention budget would reject this stream, whose every document fits.
+			const half = "y".repeat(17 * 1024 * 1024);
+			const response = {
+				...COMPLETED_RESPONSE,
+				output: [messageItem("msg_terminal", half)],
+			};
+			const itemFrame = itemDone(messageItem("msg_retained", half), 0);
+			const terminalFrame = terminalEvent("response.completed", response);
+			expect(itemFrame.length).toBeLessThan(MAX_NATIVE_NONSTREAM_SSE_BYTES);
+			expect(terminalFrame.length).toBeLessThan(MAX_NATIVE_NONSTREAM_SSE_BYTES);
+			expect(itemFrame.length + terminalFrame.length).toBeGreaterThan(
+				MAX_NATIVE_NONSTREAM_SSE_BYTES,
+			);
+
+			const result = await extractNativeTerminalResponse(
+				streamOf([itemFrame, terminalFrame]),
+				{},
+			);
+
+			expect(result.ok).toBe(true);
+			if (!result.ok) return;
+			expect(JSON.parse(result.responseJson)).toEqual(response);
+		});
+
+		test("unindexed items are appended after indexed ones, never overwriting them", async () => {
+			const indexed = messageItem("msg_indexed", "indexed");
+			const missing = messageItem("msg_missing", "missing");
+			const stringIndex = messageItem("msg_string", "string");
+			const negative = messageItem("msg_negative", "negative");
+			const fractional = messageItem("msg_fractional", "fractional");
+
+			const result = await extractNativeTerminalResponse(
+				streamOf([
+					itemDone(missing),
+					itemDone(indexed, 0),
+					itemDone(stringIndex, "1"),
+					itemDone(negative, -1),
+					itemDone(fractional, 1.5),
+					terminalEvent("response.completed", EMPTY_OUTPUT_TERMINAL),
+				]),
+				{},
+			);
+
+			expect(result.ok).toBe(true);
+			if (!result.ok) return;
+			// Indexed first, then the unindexed ones in arrival order.
+			expect(JSON.parse(result.responseJson).output).toEqual([
+				indexed,
+				missing,
+				stringIndex,
+				negative,
+				fractional,
+			]);
+		});
+
+		test("duplicate output_index → last wins, and its bytes replace rather than add", async () => {
+			// Both items alone exceed half the items cap: without subtracting the
+			// superseded entry the second one would be reported as oversized.
+			const filler = "z".repeat(17 * 1024 * 1024);
+			const first = messageItem("msg_first", filler);
+			const second = messageItem("msg_second", filler);
+			expect(2 * filler.length).toBeGreaterThan(
+				MAX_NATIVE_NONSTREAM_ITEMS_BYTES,
+			);
+
+			const result = await extractNativeTerminalResponse(
+				streamOf([
+					itemDone(first, 0),
+					itemDone(second, 0),
+					terminalEvent("response.completed", EMPTY_OUTPUT_TERMINAL),
+				]),
+				{},
+			);
+
+			expect(result.ok).toBe(true);
+			if (!result.ok) return;
+			const output = JSON.parse(result.responseJson).output;
+			expect(output).toHaveLength(1);
+			expect(output[0].id).toBe("msg_second");
+		});
+
+		test("OR semantics: an `event:` name alone marks a done item", async () => {
+			const item = messageItem("msg_named", "named");
+			const result = await extractNativeTerminalResponse(
+				streamOf([
+					sseEvent("response.output_item.done", {
+						// Conflicting data.type: the event name is authoritative on its own.
+						type: "response.output_item.added",
+						item,
+						output_index: 0,
+					}),
+					terminalEvent("response.completed", EMPTY_OUTPUT_TERMINAL),
+				]),
+				{},
+			);
+
+			expect(result.ok).toBe(true);
+			if (!result.ok) return;
+			expect(JSON.parse(result.responseJson).output).toEqual([item]);
+		});
+
+		test("OR semantics: a data.type alone marks a done item", async () => {
+			const item = messageItem("msg_typed", "typed");
+			const result = await extractNativeTerminalResponse(
+				streamOf([
+					sseEvent(null, {
+						type: "response.output_item.done",
+						item,
+						output_index: 0,
+					}),
+					terminalEvent("response.completed", EMPTY_OUTPUT_TERMINAL),
+				]),
+				{},
+			);
+
+			expect(result.ok).toBe(true);
+			if (!result.ok) return;
+			expect(JSON.parse(result.responseJson).output).toEqual([item]);
+		});
+
+		describe("corrupt done items", () => {
+			const corruptFrames: Array<[string, string]> = [
+				[
+					"invalid JSON under a done event name",
+					"event: response.output_item.done\ndata: {not json\n\n",
+				],
+				[
+					"missing item",
+					sseEvent("response.output_item.done", {
+						type: "response.output_item.done",
+						output_index: 0,
+					}),
+				],
+				[
+					"non-record item",
+					sseEvent("response.output_item.done", {
+						type: "response.output_item.done",
+						item: "a message, honest",
+						output_index: 0,
+					}),
+				],
+			];
+
+			for (const [label, frame] of corruptFrames) {
+				test(`${label} + empty-output terminal → malformed-terminal, never a silent empty output`, async () => {
+					const result = await extractNativeTerminalResponse(
+						streamOf([
+							frame,
+							terminalEvent("response.completed", EMPTY_OUTPUT_TERMINAL),
+						]),
+						{},
+					);
+
+					expect(result).toEqual({
+						ok: false,
+						reason: "malformed-terminal",
+					});
+				});
+
+				test(`${label} + terminal carrying real output → verbatim success`, async () => {
+					const result = await extractNativeTerminalResponse(
+						streamOf([
+							frame,
+							terminalEvent("response.completed", COMPLETED_RESPONSE),
+						]),
+						{},
+					);
+
+					expect(result.ok).toBe(true);
+					if (!result.ok) return;
+					expect(JSON.parse(result.responseJson)).toEqual(COMPLETED_RESPONSE);
+				});
+			}
+		});
 	});
 
 	test("a hanging cancel() never stalls the 200 path", async () => {
