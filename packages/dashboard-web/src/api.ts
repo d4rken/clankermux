@@ -15,6 +15,9 @@ import type {
 	ComboWithSlots,
 	LogEvent,
 	MemoryHistoryResponse,
+	ModelCatalogResponse,
+	ModelDialect,
+	ModelOverrideSetRequest,
 	PaymentKind,
 	PaymentsSummary,
 	QuotaDriftResponse,
@@ -1722,6 +1725,76 @@ class API extends HttpClient {
 			if (error instanceof HttpError) {
 				throw new Error(error.message);
 			}
+			throw error;
+		}
+	}
+
+	// The model catalogue the proxy serves on `GET /v1/models`, per wire dialect,
+	// and the operator's curation of it.
+	async getModelCatalog(dialect: ModelDialect): Promise<ModelCatalogResponse> {
+		const startTime = Date.now();
+		const url = `/api/models/catalog?dialect=${encodeURIComponent(dialect)}`;
+
+		this.logger.debug(`→ GET ${url}`);
+
+		try {
+			const response = await this.get<ModelCatalogResponse>(url);
+			const duration = Date.now() - startTime;
+			this.logger.debug(`← GET ${url} - 200 (${duration}ms)`);
+			return response;
+		} catch (error) {
+			const duration = Date.now() - startTime;
+			this.logger.error(`✗ GET ${url} - ERROR (${duration}ms)`, {
+				error: error instanceof Error ? error.message : String(error),
+				stack: error instanceof Error ? error.stack : undefined,
+			});
+			throw error;
+		}
+	}
+
+	/**
+	 * Write one curation row. The body is the COMPLETE state of the row, never a
+	 * patch — see the server handler for why a merge would lose edits.
+	 */
+	async setModelOverride(payload: ModelOverrideSetRequest): Promise<void> {
+		const startTime = Date.now();
+		const url = "/api/models/overrides";
+
+		this.logger.debug(`→ POST ${url}`, { payload });
+
+		try {
+			await this.post(url, payload);
+			const duration = Date.now() - startTime;
+			this.logger.debug(`← POST ${url} - 204 (${duration}ms)`);
+		} catch (error) {
+			const duration = Date.now() - startTime;
+			this.logger.error(`✗ POST ${url} - ERROR (${duration}ms)`, {
+				error: error instanceof Error ? error.message : String(error),
+			});
+			throw error;
+		}
+	}
+
+	async deleteModelOverride(
+		dialect: ModelDialect,
+		modelId: string,
+	): Promise<void> {
+		const startTime = Date.now();
+		const url =
+			`/api/models/overrides?dialect=${encodeURIComponent(dialect)}` +
+			`&modelId=${encodeURIComponent(modelId)}`;
+
+		this.logger.debug(`→ DELETE ${url}`);
+
+		try {
+			await this.delete(url);
+			const duration = Date.now() - startTime;
+			this.logger.debug(`← DELETE ${url} - 204 (${duration}ms)`);
+		} catch (error) {
+			const duration = Date.now() - startTime;
+			this.logger.error(`✗ DELETE ${url} - ERROR (${duration}ms)`, {
+				error: error instanceof Error ? error.message : String(error),
+			});
 			throw error;
 		}
 	}

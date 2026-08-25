@@ -2,6 +2,7 @@ import { parseHttpError } from "@clankermux/errors";
 import {
 	Activity,
 	BarChart3,
+	Boxes,
 	FileText,
 	Gauge,
 	GitBranch,
@@ -52,6 +53,7 @@ const NAV_ITEMS: NavItem[] = [
 	{ label: "Accounts", icon: Users, path: "/accounts" },
 	{ label: "Routing Chains", icon: Zap, path: "/combos" },
 	{ label: "API Keys", icon: Key, path: "/api-keys" },
+	{ label: "Models", icon: Boxes, path: "/models" },
 	{ label: "Logs", icon: FileText, path: "/logs" },
 	{ label: "System", icon: HeartPulse, path: "/system" },
 	{ label: "Settings", icon: Settings, path: "/settings" },

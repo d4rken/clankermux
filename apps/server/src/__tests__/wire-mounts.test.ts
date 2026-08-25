@@ -177,12 +177,11 @@ describe("isDialectAllowed: anthropic forwards blindly, minus the OpenAI routes"
 		expect(isDialectAllowed("anthropic", "GET", "/v1/responses")).toBe(false);
 	});
 
-	// `GET /v1/models` is answered locally, in OpenAI's list format, for Codex's
-	// startup probe. Serving that under the Anthropic mount would hand a Claude
-	// client a catalogue in the wrong shape for a request that should have gone
-	// upstream.
-	it("refuses GET /v1/models but forwards other verbs on it", () => {
-		expect(isDialectAllowed("anthropic", "GET", "/v1/models")).toBe(false);
+	// `GET /v1/models` is answered locally under BOTH mounts, each in its own
+	// dialect's shape: Claude Code's gateway model discovery reads the Anthropic
+	// one. Other verbs on the path are ordinary forwarded traffic.
+	it("admits GET /v1/models and forwards other verbs on it", () => {
+		expect(isDialectAllowed("anthropic", "GET", "/v1/models")).toBe(true);
 		expect(isDialectAllowed("anthropic", "POST", "/v1/models")).toBe(true);
 	});
 });
@@ -205,9 +204,31 @@ describe("isDialectAllowed normalizes before comparing", () => {
 		});
 	}
 
+	// The exact spelling is served locally; every alias of it is refused rather
+	// than forwarded. The router dispatches the local handler on an `===` match,
+	// so an admitted alias would be blind-forwarded to Anthropic carrying a
+	// pooled OAuth bearer — the outcome the claim on this path exists to prevent.
 	it("refuses normalized spellings of GET /v1/models under anthropic", () => {
-		expect(isDialectAllowed("anthropic", "GET", "/v1/models/")).toBe(false);
-		expect(isDialectAllowed("anthropic", "GET", "//v1/%6dodels")).toBe(false);
+		for (const alias of [
+			"/v1/models/",
+			"//v1/%6dodels",
+			"/v1/./models",
+			"/v1/foo/../models",
+			"/v1\\models",
+			"/v1/models/.",
+		]) {
+			expect(isDialectAllowed("anthropic", "GET", alias)).toBe(false);
+		}
+		expect(isDialectAllowed("anthropic", "GET", "/v1/models")).toBe(true);
+	});
+
+	// Same-stem neighbours are not aliases of the claimed path and stay ordinary
+	// forwarded traffic.
+	it("still forwards same-stem neighbours of /v1/models", () => {
+		expect(isDialectAllowed("anthropic", "GET", "/v1/modelsx")).toBe(true);
+		expect(
+			isDialectAllowed("anthropic", "GET", "/v1/models/claude-opus-5"),
+		).toBe(true);
 	});
 
 	// The allowlist side refuses those same spellings instead of admitting them.

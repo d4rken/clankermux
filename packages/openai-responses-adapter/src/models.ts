@@ -20,7 +20,9 @@
 // works as long as the upstream accepts it. Keep it to the CURRENTLY-SERVED
 // Codex models (per the codex-cli models cache, 2026-06-09); retired slugs
 // (gpt-5-codex, gpt-5.3-codex) were dropped.
-const CODEX_MODELS = [
+// Exported so the server can compose the operator's model-catalogue overrides
+// onto it. The LIST is the shared thing; the reply SHAPE below stays owned here.
+export const CODEX_MODELS = [
 	"gpt-5.6-sol",
 	"gpt-5.6-terra",
 	"gpt-5.6-luna",
@@ -40,11 +42,18 @@ const MODEL_CREATED = 1_700_000_000;
  * Serves OpenAI-format clients, and backs the Codex catalog path when the pool
  * has no Codex account to read a real catalog from. Either way the route
  * answers 200 rather than 400ing through the proxy pipeline.
+ *
+ * `ids` defaults to the bundled list and is passed explicitly when the operator
+ * has curated the catalogue (hidden entries removed, custom ones added). Note
+ * that this shape carries NO display name, so a rename cannot materialise here
+ * — it applies to the dashboard and to the shapes that do have the field.
  */
-export function handleModelsRequest(): Response {
+export function handleModelsRequest(
+	ids: readonly string[] = CODEX_MODELS,
+): Response {
 	const body = {
 		object: "list",
-		data: CODEX_MODELS.map((id) => ({
+		data: ids.map((id) => ({
 			id,
 			object: "model",
 			created: MODEL_CREATED,

@@ -5,9 +5,32 @@ import type {
 	EventLoopLagStats,
 	IntegrityStatus,
 	LoadBalancingStrategy,
+	ModelCatalogResponse,
+	ModelDialect,
 	ProviderOverloadStatus,
 } from "@clankermux/types";
 import type { SessionAuthService } from "./services/session-auth-service";
+
+/**
+ * The model catalogue, as the management API sees it.
+ *
+ * Structural rather than a class import: the implementation lives in
+ * `apps/server` (it owns the upstream caches) and this package must not depend
+ * on the app that uses it. What matters here is that the SAME instance backs
+ * the wire route, so the page cannot show a catalogue the route would not
+ * serve.
+ */
+export interface ModelCatalogReader {
+	getCatalogView(dialect: ModelDialect): Promise<ModelCatalogResponse>;
+	setOverride(input: {
+		dialect: ModelDialect;
+		modelId: string;
+		hidden: boolean;
+		custom: boolean;
+		displayName: string | null;
+	}): Promise<void>;
+	removeOverride(dialect: ModelDialect, modelId: string): Promise<boolean>;
+}
 
 /**
  * Request-scoped context handed to every HTTP handler in this package.
@@ -29,6 +52,13 @@ export interface APIContext {
 	 * production always passes one.
 	 */
 	sessionAuth?: SessionAuthService;
+	/**
+	 * The model catalogue behind the dashboard's Models page. Optional so a
+	 * caller that only wants the read handlers can build a router without it;
+	 * absent, the catalogue endpoints answer an empty static baseline rather
+	 * than failing, and no edit can be made through them.
+	 */
+	modelCatalog?: ModelCatalogReader;
 	auth?: {
 		isAuthenticated: boolean;
 		apiKey?: ApiKey;
@@ -70,6 +100,11 @@ export type {
 	FullAnalyticsResponse,
 	HealthResponse,
 	IntegrityStatus,
+	ModelBaselineSource,
+	ModelCatalogResponse,
+	ModelCatalogRow,
+	ModelDialect,
+	ModelOverrideSetRequest,
 	ModelPerformance,
 	PoolStatus,
 	RequestResponse,

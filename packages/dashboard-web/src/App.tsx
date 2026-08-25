@@ -7,6 +7,7 @@ import { AuthGate } from "./components/AuthGate";
 import { CombosTab } from "./components/combos/CombosTab";
 import { DebugPanel } from "./components/DebugPanel";
 import { LogsTab } from "./components/LogsTab";
+import { ModelsTab } from "./components/ModelsTab";
 import { Navigation } from "./components/navigation";
 import { OverviewTab } from "./components/OverviewTab";
 import { RequestEventProvider } from "./components/RequestEventProvider";
@@ -97,6 +98,11 @@ export function App() {
 				path: "/api-keys",
 				element: <ApiKeysTab />,
 				title: "API Keys",
+			},
+			{
+				path: "/models",
+				element: <ModelsTab />,
+				title: "Models",
 			},
 			{
 				path: "/logs",

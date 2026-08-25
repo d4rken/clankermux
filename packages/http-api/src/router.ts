@@ -85,6 +85,7 @@ import { createLogsStreamHandler } from "./handlers/logs";
 import { createLogsHistoryHandler } from "./handlers/logs-history";
 import { createCleanupHandler } from "./handlers/maintenance";
 import { createMemoryHistoryHandler } from "./handlers/memory-history";
+import { createModelOverrideHandlers } from "./handlers/model-overrides";
 import {
 	createAnthropicReauthCallbackHandler,
 	createAnthropicReauthInitHandler,
@@ -134,7 +135,7 @@ import { createVersionCheckHandler } from "./handlers/version";
 import { SessionAuthService } from "./services/session-auth-service";
 import { createSessionStreamGuard } from "./services/session-stream-registry";
 import type { APIContext } from "./types";
-import { errorResponse } from "./utils/http-error";
+import { errorResponse, InternalServerError } from "./utils/http-error";
 
 /**
  * API Router that handles all API endpoints
@@ -213,6 +214,30 @@ export class APIRouter {
 		);
 		const requestsDetailHandler = createRequestsDetailHandler(dbOps);
 		const configHandlers = createConfigHandlers(config, this.context.runtime);
+
+		// The Models page. Without an injected catalogue the endpoints still exist
+		// and answer coherently — an empty static baseline and a refusal to write —
+		// rather than 404ing, so a router built without one (tests, embedders)
+		// degrades visibly instead of looking like a missing route.
+		const modelCatalog = this.context.modelCatalog;
+		const modelOverrideHandlers = createModelOverrideHandlers({
+			getCatalog: async (dialect) =>
+				modelCatalog
+					? modelCatalog.getCatalogView(dialect)
+					: { baseline: { source: "static", fetchedAt: null }, rows: [] },
+			setOverride: async (input) => {
+				if (!modelCatalog) {
+					throw InternalServerError("No model catalogue is configured");
+				}
+				await modelCatalog.setOverride(input);
+			},
+			removeOverride: async (dialect, modelId) => {
+				if (!modelCatalog) {
+					throw InternalServerError("No model catalogue is configured");
+				}
+				return modelCatalog.removeOverride(dialect, modelId);
+			},
+		});
 		const logsStreamHandler = createLogsStreamHandler(
 			undefined,
 			sessionStreamGuard,
@@ -411,6 +436,15 @@ export class APIRouter {
 		);
 		this.handlers.set("POST:/api/config/retention", (req) =>
 			configHandlers.setRetention(req),
+		);
+		this.handlers.set("GET:/api/models/catalog", (_req, url) =>
+			modelOverrideHandlers.getCatalog(url),
+		);
+		this.handlers.set("POST:/api/models/overrides", (req) =>
+			modelOverrideHandlers.setOverride(req),
+		);
+		this.handlers.set("DELETE:/api/models/overrides", (_req, url) =>
+			modelOverrideHandlers.removeOverride(url),
 		);
 		this.handlers.set("GET:/api/config/cache-warming", () =>
 			configHandlers.getCacheWarming(),

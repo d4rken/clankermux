@@ -356,6 +356,20 @@ export const POST_FLOOR_TABLE_BASELINES: Readonly<
 		columns: ["token_hash", "created_at", "expires_at", "last_seen_at"],
 		source: "create-table-at-intro",
 	},
+	model_overrides: {
+		shipped: "2026-08-25",
+		commit: "unreleased",
+		columns: [
+			"dialect",
+			"model_id",
+			"hidden",
+			"custom",
+			"display_name",
+			"created_at",
+			"updated_at",
+		],
+		source: "create-table-at-intro",
+	},
 	codex_reset_credit_events: {
 		shipped: "2026-07-20",
 		commit: "372eab98",

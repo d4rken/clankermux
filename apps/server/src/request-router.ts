@@ -44,6 +44,7 @@ import {
 import { terminalForRequestError } from "./request-error-terminal";
 import {
 	isDialectAllowed,
+	MODELS_PATH,
 	matchWireMount,
 	otherMount,
 	WIRE_MOUNTS,
@@ -84,8 +85,16 @@ export interface RequestRouterDeps {
 		apiKeyName?: string | null,
 	): Promise<Response>;
 	/**
-	 * `GET /v1/models`. Takes the URL because the reply's SHAPE depends on it:
-	 * a `client_version` parameter marks a Codex models-manager fetch, which
+	 * `GET /v1/models`, served under both mounts.
+	 *
+	 * Takes the DIALECT because the reply's shape is the mount's, not a
+	 * negotiation: `/wire/anthropic` answers Anthropic's own
+	 * `{"data":[{"type":"model",…}]}` listing, which is what Claude Code's
+	 * gateway model discovery parses, and `/wire/openai` answers the OpenAI
+	 * family of shapes.
+	 *
+	 * Takes the URL because within the OpenAI dialect the shape still depends on
+	 * it: a `client_version` parameter marks a Codex models-manager fetch, which
 	 * wants the per-account `{"models": […]}` catalog, and its absence marks an
 	 * ordinary OpenAI-format client, which wants `{"object":"list","data":[…]}`.
 	 *
@@ -93,7 +102,11 @@ export interface RequestRouterDeps {
 	 * entitlement is per-subscription, so a pinned key must be shown a catalog
 	 * from inside its own pin, exactly as its requests are routed inside it.
 	 */
-	handleModels(url: URL, apiKeyId?: string | null): Promise<Response>;
+	handleModels(
+		url: URL,
+		apiKeyId: string | null | undefined,
+		dialect: WireDialect,
+	): Promise<Response>;
 	withDashboard: boolean;
 	dashboardManifest: Record<string, string> | null;
 	serveDashboardFile(
@@ -250,7 +263,13 @@ async function routeMountedRequest(
 	}
 
 	try {
-		return await serveAgentRequest(req, canonicalUrl, authResult, deps);
+		return await serveAgentRequest(
+			req,
+			canonicalUrl,
+			authResult,
+			dialect,
+			deps,
+		);
 	} catch (dispatchError) {
 		return terminalForRequestError(
 			req,
@@ -451,6 +470,7 @@ async function serveAgentRequest(
 	req: Request,
 	url: URL,
 	authResult: AuthenticationResult,
+	dialect: WireDialect,
 	deps: RequestRouterDeps,
 ): Promise<Response> {
 	// Codex CLI first tries WebSocket transport for /v1/responses.
@@ -479,13 +499,13 @@ async function serveAgentRequest(
 		);
 	}
 
-	// Codex CLI probes GET /v1/models on startup to populate its model picker
-	// and validate the configured model. ClankerMux has no models route, so
-	// without this it falls through to the proxy and 400s ("Provider cannot
-	// handle path: /v1/models") on every Codex startup. The reply shape depends
-	// on the query string; see RequestRouterDeps.handleModels.
-	if (req.method === "GET" && url.pathname === "/v1/models") {
-		return await deps.handleModels(url, authResult.apiKeyId);
+	// `GET /v1/models`, answered locally under both mounts: Codex CLI probes it
+	// on startup to populate its model picker, and Claude Code reads it for
+	// gateway model discovery. Matched with `===`, which is why the mount gate
+	// admits this path only in its exact canonical spelling — an alias would
+	// miss here and fall through to the proxy on a pooled bearer.
+	if (req.method === "GET" && url.pathname === MODELS_PATH) {
+		return await deps.handleModels(url, authResult.apiKeyId, dialect);
 	}
 
 	return await deps.dispatchProxy(

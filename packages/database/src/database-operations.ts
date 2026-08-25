@@ -72,6 +72,12 @@ import { CodexWindowObservationRepository } from "./repositories/codex-window-ob
 import { ComboRepository } from "./repositories/combo.repository";
 import { InternalDispatchSpendRepository } from "./repositories/internal-dispatch-spend.repository";
 import { MemorySnapshotRepository } from "./repositories/memory-snapshot.repository";
+import {
+	type ModelOverrideDialect,
+	ModelOverrideRepository,
+	type ModelOverrideRow,
+	type ModelOverrideUpsert,
+} from "./repositories/model-override.repository";
 import { OAuthRepository } from "./repositories/oauth.repository";
 import { OpenAiBucketObservationRepository } from "./repositories/openai-bucket-observation.repository";
 import {
@@ -493,6 +499,7 @@ export class DatabaseOperations implements StrategyStore, Disposable {
 	private accountPayments: AccountPaymentRepository;
 	private codexResetCreditEvents: CodexResetCreditEventRepository;
 	private quotaDriftResults: QuotaDriftResultRepository;
+	private modelOverrides: ModelOverrideRepository;
 
 	constructor(
 		dbPath?: string,
@@ -616,6 +623,10 @@ export class DatabaseOperations implements StrategyStore, Disposable {
 		this.codexResetCreditEvents = retrying(
 			new CodexResetCreditEventRepository(this.adapter),
 			"codexResetCreditEvents",
+		);
+		this.modelOverrides = retrying(
+			new ModelOverrideRepository(this.adapter),
+			"modelOverrides",
 		);
 	}
 
@@ -2795,5 +2806,25 @@ OAuth tokens will need to be re-authenticated.
 		limit: number,
 	): Promise<CodexResetCreditEventRow[]> {
 		return this.codexResetCreditEvents.findRecentForAccount(accountId, limit);
+	}
+
+	// Model-catalogue curation. Every read is per dialect: `/wire/anthropic` and
+	// `/wire/openai` are separate catalogues and their overrides never mix.
+
+	async listModelOverrides(
+		dialect: ModelOverrideDialect,
+	): Promise<ModelOverrideRow[]> {
+		return this.modelOverrides.listByDialect(dialect);
+	}
+
+	async upsertModelOverride(input: ModelOverrideUpsert): Promise<void> {
+		await this.modelOverrides.upsert(input);
+	}
+
+	async removeModelOverride(
+		dialect: ModelOverrideDialect,
+		modelId: string,
+	): Promise<boolean> {
+		return this.modelOverrides.remove(dialect, modelId);
 	}
 }
