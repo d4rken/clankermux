@@ -77,6 +77,8 @@ interface MountOptions {
 	readFails?: boolean;
 	/** Reject the write instead of accepting it. */
 	writeFails?: boolean;
+	/** Never settle a write, leaving it in flight for the whole test. */
+	writesHang?: boolean;
 }
 
 async function mount(options: MountOptions = {}): Promise<Recorded> {
@@ -92,6 +94,7 @@ async function mount(options: MountOptions = {}): Promise<Recorded> {
 	const setSpy = spyOn(api, "setModelOverride").mockImplementation(
 		async (payload: ModelOverrideSetRequest) => {
 			recorded.sets.push(payload);
+			if (options.writesHang) await new Promise<void>(() => {});
 			if (options.writeFails) throw new Error("nope");
 		},
 	);
@@ -371,6 +374,33 @@ describe("ModelsTab: hiding and adding", () => {
 		expect(nameFieldEl.value).toBe("");
 	});
 
+	// The add is a write like any other, and a write can fail. Clearing the fields
+	// at submit would throw away an id the server just rejected as too long, at
+	// the one moment the operator needs it back.
+	it("keeps both drafts when the add fails", async () => {
+		const recorded = await mount({ writeFails: true });
+
+		const idField = host?.querySelector<HTMLInputElement>(
+			"#add-model-id-anthropic",
+		);
+		const nameFieldEl = host?.querySelector<HTMLInputElement>(
+			"#add-model-name-anthropic",
+		);
+		if (!idField || !nameFieldEl) throw new Error("No add-model form");
+
+		await type(idField, "claude-experimental");
+		await type(nameFieldEl, "Experimental");
+		const addButton = Array.from(
+			host?.querySelectorAll<HTMLElement>("button") ?? [],
+		).find((element) => element.textContent?.includes("Add custom model"));
+		if (!addButton) throw new Error("No add button");
+		await click(addButton);
+
+		expect(recorded.sets).toHaveLength(1);
+		expect(idField.value).toBe("claude-experimental");
+		expect(nameFieldEl.value).toBe("Experimental");
+	});
+
 	// Claude Code's picker filters the listing down to ids naming the Claude
 	// family, so an id it would drop is worth flagging before the operator waits
 	// for it to appear.
@@ -389,6 +419,30 @@ describe("ModelsTab: hiding and adding", () => {
 		expect(text()).not.toContain(
 			"Claude Code only keeps ids naming the Claude",
 		);
+	});
+
+	// Overlapping writes are one gesture apart: start a rename, then touch another
+	// row while the first is still in flight. Tracking a single pending row would
+	// re-enable the first one here, and the two full-replacement writes would then
+	// race with the loser's change silently discarded.
+	it("keeps a busy row inert while a second row is edited", async () => {
+		const recorded = await mount({ writesHang: true });
+
+		const first = nameField("claude-opus-5");
+		await type(first, "House Opus");
+		await blur(first);
+		expect(nameField("claude-opus-5").disabled).toBe(true);
+
+		const second = nameField("claude-house");
+		await type(second, "Renamed");
+		await blur(second);
+
+		expect(recorded.sets).toHaveLength(2);
+		expect(nameField("claude-opus-5").disabled).toBe(true);
+		expect(
+			button("Show claude-opus-5 on /wire/anthropic").hasAttribute("disabled"),
+		).toBe(true);
+		expect(nameField("claude-house").disabled).toBe(true);
 	});
 
 	it("deletes a custom entry", async () => {

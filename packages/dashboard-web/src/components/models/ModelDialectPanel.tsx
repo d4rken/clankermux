@@ -65,29 +65,58 @@ export function ModelDialectPanel({ dialect }: { dialect: ModelDialect }) {
 	const { data, isLoading, isError, error } = useModelCatalog(dialect);
 	const setOverride = useSetModelOverride();
 	const deleteOverride = useDeleteModelOverride();
-	// Which row a write is in flight for, so only that row goes inert rather than
-	// the whole list freezing on an unrelated edit.
-	const [pendingId, setPendingId] = useState<string | null>(null);
+	// Which rows have a write in flight, so only those go inert rather than the
+	// whole list freezing on an unrelated edit. A SET, not a single id: writes
+	// from different rows overlap, and tracking one id would re-enable the first
+	// row the moment a second edit started, inviting a pair of full-replacement
+	// writes whose loser is silently discarded.
+	const [pendingIds, setPendingIds] = useState<ReadonlySet<string>>(new Set());
 
-	const write = (row: {
+	// A new Set every time: React compares state by identity, and mutating the
+	// existing one would leave the rows rendering the previous busy state.
+	const markPending = (modelId: string, pending: boolean) => {
+		setPendingIds((current) => {
+			const next = new Set(current);
+			if (pending) next.add(modelId);
+			else next.delete(modelId);
+			return next;
+		});
+	};
+
+	/** One full-replacement write, with that row inert until it settles. */
+	const write = async (row: {
 		modelId: string;
 		hidden: boolean;
 		custom: boolean;
 		displayName: string | null;
-	}) => {
-		setPendingId(row.modelId);
-		setOverride.mutate(
-			{ dialect, ...row },
-			{ onSettled: () => setPendingId(null) },
-		);
+	}): Promise<void> => {
+		markPending(row.modelId, true);
+		try {
+			await setOverride.mutateAsync({ dialect, ...row });
+		} finally {
+			markPending(row.modelId, false);
+		}
 	};
 
-	const remove = (modelId: string) => {
-		setPendingId(modelId);
-		deleteOverride.mutate(
-			{ dialect, modelId },
-			{ onSettled: () => setPendingId(null) },
-		);
+	const remove = async (modelId: string): Promise<void> => {
+		markPending(modelId, true);
+		try {
+			await deleteOverride.mutateAsync({ dialect, modelId });
+		} finally {
+			markPending(modelId, false);
+		}
+	};
+
+	/**
+	 * Start a write from a row gesture and stop caring about its outcome.
+	 *
+	 * The rejection is dropped on purpose: the mutation's error state is already
+	 * the error surface, and the row keeps whatever the operator typed. The add
+	 * form is the one caller that awaits a write instead, because it has a draft
+	 * to clear on success and keep on failure.
+	 */
+	const detach = (work: Promise<void>) => {
+		void work.catch(() => {});
 	};
 
 	return (
@@ -129,27 +158,31 @@ export function ModelDialectPanel({ dialect }: { dialect: ModelDialect }) {
 										key={row.id}
 										dialect={dialect}
 										row={row}
-										busy={pendingId === row.id}
+										busy={pendingIds.has(row.id)}
 										onRename={(displayName) =>
-											write({
-												modelId: row.id,
-												hidden: row.hidden,
-												custom: row.source === "custom",
-												displayName,
-											})
+											detach(
+												write({
+													modelId: row.id,
+													hidden: row.hidden,
+													custom: row.source === "custom",
+													displayName,
+												}),
+											)
 										}
 										onSetHidden={(hidden) =>
-											write({
-												modelId: row.id,
-												hidden,
-												custom: row.source === "custom",
-												// The write replaces the whole row, so the stored name
-												// has to be sent back or hiding an entry would also
-												// discard its rename.
-												displayName: row.overrideDisplayName,
-											})
+											detach(
+												write({
+													modelId: row.id,
+													hidden,
+													custom: row.source === "custom",
+													// The write replaces the whole row, so the stored
+													// name has to be sent back or hiding an entry would
+													// also discard its rename.
+													displayName: row.overrideDisplayName,
+												}),
+											)
 										}
-										onDelete={() => remove(row.id)}
+										onDelete={() => detach(remove(row.id))}
 									/>
 								))}
 							</div>

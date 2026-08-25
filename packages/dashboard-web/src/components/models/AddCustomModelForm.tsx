@@ -8,7 +8,11 @@ import { Label } from "../ui/label";
 interface AddCustomModelFormProps {
 	dialect: ModelDialect;
 	busy: boolean;
-	onAdd(modelId: string, displayName: string | null): void;
+	/**
+	 * Resolves once the entry is stored and REJECTS when the write failed, which
+	 * is what tells the form whether the draft may be cleared.
+	 */
+	onAdd(modelId: string, displayName: string | null): Promise<void>;
 }
 
 /**
@@ -39,9 +43,24 @@ export function AddCustomModelForm({
 		trimmedId !== "" &&
 		!isLikelyDiscoverableByClaudeCode(trimmedId);
 
-	const submit = () => {
+	/**
+	 * Clear the fields only once the entry actually exists.
+	 *
+	 * A failed add keeps both drafts: an id rejected as too long, or a write that
+	 * hit a transient error, is exactly when the operator needs what they typed
+	 * back. The failure itself shows in the mutation's error state, as it does for
+	 * every other edit on this page.
+	 */
+	const submit = async () => {
 		if (trimmedId === "" || busy) return;
-		onAdd(trimmedId, displayName.trim() === "" ? null : displayName.trim());
+		try {
+			await onAdd(
+				trimmedId,
+				displayName.trim() === "" ? null : displayName.trim(),
+			);
+		} catch {
+			return;
+		}
 		setModelId("");
 		setDisplayName("");
 	};
@@ -63,7 +82,7 @@ export function AddCustomModelForm({
 						onKeyDown={(event) => {
 							if (event.key === "Enter") {
 								event.preventDefault();
-								submit();
+								void submit();
 							}
 						}}
 					/>
@@ -81,7 +100,7 @@ export function AddCustomModelForm({
 						onKeyDown={(event) => {
 							if (event.key === "Enter") {
 								event.preventDefault();
-								submit();
+								void submit();
 							}
 						}}
 					/>
@@ -89,7 +108,9 @@ export function AddCustomModelForm({
 				<Button
 					className="gap-item"
 					disabled={busy || trimmedId === ""}
-					onClick={submit}
+					onClick={() => {
+						void submit();
+					}}
 				>
 					<Plus className="h-4 w-4" />
 					Add custom model
