@@ -70,6 +70,7 @@ import {
 	getValidAccessToken,
 	handleProxy,
 	markCapacityRestoredProbePending,
+	type PolledCodexAccount,
 	type ProxyContext,
 	RequestRecorder,
 	registerAffinityClearer,
@@ -1307,8 +1308,14 @@ export default async function startServer(options?: {
 	// younger than one active interval. See CodexUsagePoller for the cadence
 	// policy; the active interval is shared with the Anthropic usage poller.
 	codexUsagePoller = new CodexUsagePoller({
-		listCodexAccounts: async () =>
-			(await dbOps.getAllAccounts()).filter((a) => a.provider === "codex"),
+		// A narrow projection rather than getAllAccounts(): this runs on every 30s
+		// heartbeat, and the poller only needs these five columns.
+		listCodexAccounts: () =>
+			dbOps
+				.getAdapter()
+				.query<PolledCodexAccount>(
+					"SELECT id, name, access_token, refresh_token, last_used FROM accounts WHERE provider = 'codex'",
+				),
 		readUsage: (accountId) => codexSpendCoordinator.readUsageStatus(accountId),
 		peekObservedAtMs: (accountId) =>
 			usageCache.peekWithAge(accountId)?.observedAtMs ?? null,

@@ -35,6 +35,13 @@ interface Harness {
 	now(): number;
 	setObservedAt(accountId: string, observedAtMs: number | null): void;
 	setReadResult(result: { success: boolean; message: string }): void;
+	/**
+	 * By default a successful readUsage stamps a TIMED reading at the current
+	 * clock, modeling applyCodexUsageStatus. Disable to model a GET that
+	 * "succeeds" without producing a timed entry (superseded by an UNTIMED
+	 * reconstruction).
+	 */
+	setReadProducesTimedReading(value: boolean): void;
 }
 
 function makeAccount(
@@ -55,10 +62,14 @@ function makeHarness(accounts: PolledCodexAccount[]): Harness {
 	const readCalls: string[] = [];
 	const observedAt = new Map<string, number | null>();
 	let readResult = { success: true, message: "ok" };
+	let readProducesTimedReading = true;
 	const deps: CodexUsagePollerDeps = {
 		listCodexAccounts: async () => accounts,
 		readUsage: async (accountId) => {
 			readCalls.push(accountId);
+			if (readResult.success && readProducesTimedReading) {
+				observedAt.set(accountId, nowMs);
+			}
 			return readResult;
 		},
 		peekObservedAtMs: (accountId) => observedAt.get(accountId) ?? null,
@@ -79,6 +90,9 @@ function makeHarness(accounts: PolledCodexAccount[]): Harness {
 		},
 		setReadResult: (result) => {
 			readResult = result;
+		},
+		setReadProducesTimedReading: (value) => {
+			readProducesTimedReading = value;
 		},
 	};
 }
@@ -189,9 +203,10 @@ describe("CodexUsagePoller", () => {
 		const removed = h.accounts.pop();
 		if (!removed) throw new Error("test setup");
 		await h.poller.tick();
-		// Re-add well before the old schedule would have been due: pruned state
-		// means it is treated as new and read immediately.
-		h.setNow(T0 + 60_000);
+		// Re-add well before the old IDLE schedule (9min) would have been due:
+		// pruned state means it is treated as new and read on the next beat (the
+		// clock sits past the freshness window so the read is not skipped).
+		h.setNow(T0 + ACTIVE_MS + 30_000);
 		h.accounts.push(removed);
 		await h.poller.tick();
 		expect(h.readCalls).toHaveLength(2);
@@ -232,6 +247,137 @@ describe("CodexUsagePoller", () => {
 		await h.poller.tick();
 		expect(h.readCalls).toHaveLength(3);
 		expect(h.readCalls[2]).toBe("acct-2");
+	});
+
+	it("clamps the freshness-skip threshold when the configured interval exceeds the delay cap", async () => {
+		// With a configured active interval ABOVE the demand-aware delay clamp
+		// (TTL - lead = 9min), the next poll is due at the CLAMP, and the reading
+		// taken by the previous poll must count as stale there — otherwise every
+		// poll skips and the real cadence doubles.
+		const bigActive = USAGE_CACHE_TTL_MS + 5 * 60_000; // 15min, clamp = 9min
+		let nowMs = T0;
+		const readCalls: string[] = [];
+		const accounts = [makeAccount({ last_used: T0 - 1_000 })];
+		const poller = new CodexUsagePoller({
+			listCodexAccounts: async () => accounts,
+			readUsage: async (id) => {
+				readCalls.push(id);
+				return { success: true, message: "ok" };
+			},
+			// The previous poll's reading, aging naturally with the clock.
+			peekObservedAtMs: () => (readCalls.length === 0 ? null : T0),
+			activeIntervalMs: () => bigActive,
+			now: () => nowMs,
+			jitterFraction: () => 0,
+		});
+		await poller.tick();
+		expect(readCalls).toHaveLength(1);
+		// Next due time is the clamp (9min), where the T0 reading is 9min old:
+		// older than the clamped freshness threshold → a real read, not a skip.
+		nowMs = T0 + (USAGE_CACHE_TTL_MS - IDLE_REFRESH_LEAD_MS);
+		accounts[0].last_used = nowMs - 1_000;
+		await poller.tick();
+		expect(readCalls).toHaveLength(2);
+	});
+
+	it("clears a failure streak when traffic supplies a fresh timed reading", async () => {
+		h.accounts[0].last_used = T0 - 1_000;
+		h.setReadResult({ success: false, message: "boom" });
+		await h.poller.tick(); // failure #1 → due at ACTIVE * 2
+		expect(h.readCalls).toHaveLength(1);
+		// Real traffic produces a fresh TIMED reading before the backoff elapses.
+		h.setNow(T0 + ACTIVE_MS * 2);
+		h.accounts[0].last_used = h.now() - 1_000;
+		h.setObservedAt("acct-1", h.now() - 5_000);
+		await h.poller.tick(); // freshness skip resets the streak
+		expect(h.readCalls).toHaveLength(1);
+		// The next schedule is the healthy ACTIVE cadence, not ACTIVE * 4.
+		h.setNow(T0 + ACTIVE_MS * 3);
+		h.accounts[0].last_used = h.now() - 1_000;
+		h.setReadResult({ success: true, message: "ok" });
+		await h.poller.tick();
+		expect(h.readCalls).toHaveLength(2);
+	});
+
+	it("retries at the active cadence when a successful read leaves the cache untimed", async () => {
+		// Models the coordinator's "superseded by a newer observation" success:
+		// the GET succeeded but an UNTIMED reconstruction won the cache write, so
+		// peekObservedAtMs stays null. The poller must not sleep the idle ~9min on
+		// that outcome.
+		h.setReadProducesTimedReading(false);
+		await h.poller.tick();
+		expect(h.readCalls).toHaveLength(1);
+		h.setNow(T0 + ACTIVE_MS);
+		await h.poller.tick();
+		expect(h.readCalls).toHaveLength(2);
+		// Once a read produces a TIMED entry, the idle cadence resumes.
+		h.setReadProducesTimedReading(true);
+		h.setNow(T0 + ACTIVE_MS * 2);
+		await h.poller.tick();
+		expect(h.readCalls).toHaveLength(3);
+		h.setNow(T0 + ACTIVE_MS * 2 + IDLE_MS - 1);
+		await h.poller.tick();
+		expect(h.readCalls).toHaveLength(3);
+	});
+
+	it("isolates a throwing read to its own account and backs it off", async () => {
+		let nowMs = T0;
+		const readCalls: string[] = [];
+		const accounts = [
+			makeAccount({ id: "acct-throws", name: "Codex-Throws" }),
+			makeAccount({ id: "acct-2", name: "Codex-2" }),
+		];
+		const poller = new CodexUsagePoller({
+			listCodexAccounts: async () => accounts,
+			readUsage: async (id) => {
+				readCalls.push(id);
+				if (id === "acct-throws") throw new Error("db exploded");
+				return { success: true, message: "ok" };
+			},
+			peekObservedAtMs: () => null,
+			activeIntervalMs: () => ACTIVE_MS,
+			now: () => nowMs,
+			jitterFraction: () => 0,
+		});
+		await poller.tick();
+		// The throw did not starve acct-2.
+		expect(readCalls).toEqual(["acct-throws", "acct-2"]);
+		// The thrower is in backoff (ACTIVE * 2), not due on the next beat.
+		nowMs = T0 + ACTIVE_MS * 2 - 1;
+		await poller.tick();
+		expect(readCalls.filter((id) => id === "acct-throws")).toHaveLength(1);
+		nowMs = T0 + ACTIVE_MS * 2;
+		await poller.tick();
+		expect(readCalls.filter((id) => id === "acct-throws")).toHaveLength(2);
+	});
+
+	it("stops initiating reads mid-batch once stop() is called", async () => {
+		let nowMs = T0;
+		const readCalls: string[] = [];
+		const accounts = [
+			makeAccount(),
+			makeAccount({ id: "acct-2", name: "Codex-2" }),
+		];
+		let poller: CodexUsagePoller;
+		const deps: CodexUsagePollerDeps = {
+			listCodexAccounts: async () => accounts,
+			readUsage: async (id) => {
+				readCalls.push(id);
+				// stop() arrives while the FIRST account's read is in flight.
+				poller.stop();
+				return { success: true, message: "ok" };
+			},
+			peekObservedAtMs: () => null,
+			activeIntervalMs: () => ACTIVE_MS,
+			now: () => nowMs,
+			jitterFraction: () => 0,
+		};
+		poller = new CodexUsagePoller(deps);
+		await poller.tick();
+		expect(readCalls).toEqual(["acct-1"]);
+		nowMs = T0 + IDLE_MS * 2;
+		await poller.tick();
+		expect(readCalls).toEqual(["acct-1"]);
 	});
 
 	it("ignores overlapping ticks while one is still running", async () => {

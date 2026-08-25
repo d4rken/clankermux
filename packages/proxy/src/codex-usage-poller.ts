@@ -3,6 +3,8 @@ import { Logger } from "@clankermux/logger";
 import {
 	computeDemandAwareInterval,
 	computePollDelay,
+	IDLE_REFRESH_LEAD_MS,
+	USAGE_CACHE_TTL_MS,
 } from "@clankermux/providers";
 
 const log = new Logger("CodexUsagePoller");
@@ -98,6 +100,12 @@ export class CodexUsagePoller {
 	private readonly state = new Map<string, AccountPollState>();
 	private unregisterHeartbeat: (() => void) | null = null;
 	private tickInFlight = false;
+	/**
+	 * Set by stop(). A tick that is mid-batch when stop() runs checks this before
+	 * every account and before writing any schedule, so shutdown never keeps
+	 * initiating new network reads for the rest of the batch.
+	 */
+	private stopped = false;
 
 	constructor(deps: CodexUsagePollerDeps) {
 		this.deps = deps;
@@ -109,6 +117,7 @@ export class CodexUsagePoller {
 			return;
 		}
 		log.info("Starting Codex usage poller");
+		this.stopped = false;
 		this.unregisterHeartbeat = registerHeartbeat({
 			id: "codex-usage-poller",
 			callback: () => void this.tick(),
@@ -119,6 +128,7 @@ export class CodexUsagePoller {
 	}
 
 	stop(): void {
+		this.stopped = true;
 		if (this.unregisterHeartbeat) {
 			this.unregisterHeartbeat();
 			this.unregisterHeartbeat = null;
@@ -166,6 +176,7 @@ export class CodexUsagePoller {
 		}
 
 		for (const account of accounts) {
+			if (this.stopped) return;
 			// No credentials at all: a read would fail before reaching the network.
 			// Keep no schedule; the account is re-checked on every heartbeat and
 			// picked up the moment tokens appear (e.g. after an OAuth flow).
@@ -173,8 +184,43 @@ export class CodexUsagePoller {
 				this.state.delete(account.id);
 				continue;
 			}
-			await this.evaluateAccount(account);
+			// Per-account isolation: readUsage normally reports failure as an
+			// outcome, but its DB lookups can still reject — one throwing account
+			// must not abort the batch and starve the accounts behind it.
+			try {
+				await this.evaluateAccount(account);
+			} catch (error) {
+				this.recordThrownRead(account, error);
+			}
 		}
+	}
+
+	/**
+	 * A read that THREW (rather than returning a failure outcome) counts toward
+	 * the same failure streak, so a persistently-throwing account backs off
+	 * exponentially instead of retrying on every heartbeat.
+	 */
+	private recordThrownRead(account: PolledCodexAccount, error: unknown): void {
+		const state = this.state.get(account.id);
+		if (!state || this.stopped) return;
+		state.failures += 1;
+		state.lastReadFailed = true;
+		log.warn(
+			`Codex usage poll threw for account ${account.name} (${state.failures} consecutive): ${
+				error instanceof Error ? error.message : String(error)
+			}`,
+		);
+		const { delayMs, isIdle } = computePollDelay({
+			demandAware: true,
+			activeIntervalMs: this.deps.activeIntervalMs(),
+			lastActivityMs: account.last_used,
+			failures: state.failures,
+			retryAfterMs: null,
+			now: this.now(),
+			jitterFraction: this.jitterFraction(),
+		});
+		state.dueAt = this.now() + delayMs;
+		state.isIdle = isIdle;
 	}
 
 	private async evaluateAccount(account: PolledCodexAccount): Promise<void> {
@@ -209,12 +255,31 @@ export class CodexUsagePoller {
 		// would be redundant. An UNTIMED entry (peekObservedAtMs → null, the
 		// post-restart payload rebuild) never satisfies this and is replaced by a
 		// real read immediately.
+		//
+		// The freshness threshold is the CLAMPED healthy cadence, not the raw
+		// configured interval: computePollDelay caps every demand-aware delay at
+		// USAGE_CACHE_TTL_MS - IDLE_REFRESH_LEAD_MS, so with a configured interval
+		// above that cap (allowed up to 1h) a reading taken at the previous poll
+		// would still be "fresh" by the raw interval at the next due time — every
+		// poll would skip, doubling the real cadence and breaking the ≤15min
+		// observation-gap contract the poller exists to uphold.
+		const freshnessMs = Math.min(
+			activeIntervalMs,
+			USAGE_CACHE_TTL_MS - IDLE_REFRESH_LEAD_MS,
+		);
 		const observedAtMs = this.deps.peekObservedAtMs(account.id);
 		const trafficFresh =
-			observedAtMs !== null && now - observedAtMs < activeIntervalMs;
+			observedAtMs !== null && now - observedAtMs < freshnessMs;
 
-		if (!trafficFresh) {
+		if (trafficFresh) {
+			// A fresh TIMED reading is positive evidence acquisition works, however
+			// it arrived — clear any failure streak so a recovered account does not
+			// serve out a stale multi-minute backoff before its next real read.
+			state.failures = 0;
+			state.lastReadFailed = false;
+		} else {
 			const outcome = await this.deps.readUsage(account.id);
+			if (this.stopped) return;
 			if (outcome.success) {
 				if (state.lastReadFailed) {
 					log.info(
@@ -237,13 +302,22 @@ export class CodexUsagePoller {
 			}
 		}
 
+		// A "successful" read can still leave the cache UNTIMED: the coordinator
+		// reports success when its GET was superseded by a newer cache write, and
+		// that newer write can be an UNTIMED payload reconstruction (the accounts
+		// endpoint racing this poller just after a restart). Sleeping the full
+		// idle interval on that outcome would leave the sampler blind for another
+		// cycle — retry at the active cadence until a TIMED reading exists.
+		const timedAfterRead = this.deps.peekObservedAtMs(account.id) !== null;
+
 		// Schedule the next evaluation from the CURRENT clock (the read above may
-		// have taken a while). Failure backoff wins inside computePollDelay; a
-		// freshness skip keeps the stored failure streak without growing it.
+		// have taken a while). Failure backoff wins inside computePollDelay.
 		const { delayMs, isIdle } = computePollDelay({
 			demandAware: true,
 			activeIntervalMs,
-			lastActivityMs: account.last_used,
+			// An untimed cache forces the ACTIVE branch (recent-activity signal) so
+			// the retry lands one active interval out rather than ~9min out.
+			lastActivityMs: timedAfterRead ? account.last_used : this.now(),
 			failures: state.failures,
 			retryAfterMs: null,
 			now: this.now(),
