@@ -212,6 +212,34 @@ export function ensureSchema(db: Database): void {
 		)
 	`);
 
+	// Operator curation of the per-dialect `GET /v1/models` catalogue.
+	//
+	// One row per (wire dialect, model id), and the row says what the operator
+	// changed about that model — never what the model IS. The baseline stays
+	// upstream's: the live Anthropic catalogue, the Codex catalogue, or the
+	// bundled static list. This table only hides, renames, or adds entries on top
+	// of it, so a model we have never heard of still appears the moment upstream
+	// ships it.
+	//
+	// hidden=1 removes a baseline entry from the reply; custom=1 adds an entry the
+	// baseline does not have; display_name overrides the shown name and is valid
+	// on either kind (renaming a baseline entry is the common case). The two flags
+	// are mutually exclusive by CHECK: hiding an entry that exists only because
+	// the operator added it is a delete, not a state.
+	db.run(`
+		CREATE TABLE IF NOT EXISTS model_overrides (
+			dialect TEXT NOT NULL CHECK (dialect IN ('anthropic','openai')),
+			model_id TEXT NOT NULL,
+			hidden INTEGER NOT NULL CHECK (hidden IN (0,1)),
+			custom INTEGER NOT NULL CHECK (custom IN (0,1)),
+			display_name TEXT,
+			created_at INTEGER NOT NULL,
+			updated_at INTEGER NOT NULL,
+			PRIMARY KEY (dialect, model_id),
+			CHECK (NOT (hidden = 1 AND custom = 1))
+		)
+	`);
+
 	// Create request_payloads table for storing full request/response data.
 	// `bytes` is the stored payload's UTF-8 length, recorded at write time so the
 	// byte-budget cleanup pass can sum sizes from an index instead of scanning
