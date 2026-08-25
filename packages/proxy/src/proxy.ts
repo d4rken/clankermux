@@ -5,10 +5,15 @@ import {
 	isPinActive,
 	requestEvents,
 	ServiceUnavailableError,
+	ValidationError,
 } from "@clankermux/core";
 import { sanitizeRequestHeaders } from "@clankermux/http-common";
 import { Logger, LogLevel } from "@clankermux/logger";
-import { getFreshCapacity, usageCache } from "@clankermux/providers";
+import {
+	getFreshCapacity,
+	getProvider,
+	usageCache,
+} from "@clankermux/providers";
 import type { Account, ComboSlotInfo } from "@clankermux/types";
 import {
 	createAdmissionGates,
@@ -38,6 +43,7 @@ import {
 	resolveFamilyWeeklyExclusion,
 	selectAccountsForRequest,
 	setForcedAccount,
+	validateProviderPath,
 } from "./handlers";
 // Direct leaf import (not via the `handlers` barrel) — see the module comment.
 import { createClientAbortResponse } from "./handlers/client-abort-response";
@@ -51,7 +57,7 @@ import {
 	getProviderOverloadUntil,
 	isOfficialAnthropicProvider,
 } from "./provider-overload-cooldown";
-import { createRecoveryHolds } from "./recovery-holds";
+import { createRecoveryHolds, isAccountWideFailure } from "./recovery-holds";
 import { type IngressContext, ingestProxyRequest } from "./request-ingress";
 import type { RecordMeta, RequestRecorder } from "./request-recorder";
 import { hashRoutingAffinityKey } from "./routing-telemetry";
@@ -565,6 +571,7 @@ async function handleIngestedProxy(
 
 	const createProviderOverloadedResponse = async (
 		overloaded: ProviderOverloadedAccount[],
+		opts?: { failoverAttempts?: number },
 	): Promise<Response> => {
 		const now = Date.now();
 		const nextAvailableAt = Math.min(...overloaded.map(({ until }) => until));
@@ -606,7 +613,21 @@ async function handleIngestedProxy(
 				},
 			},
 		);
-		await recordSyntheticErrorResponse(response, "provider_overloaded");
+		// Same collision guard as the give-up terminal (`recordGiveUpTerminal`):
+		// an earlier attempt can have called `begin()` and then failed during
+		// forwarding setup, and `recordSynthetic` bypasses the live-record map,
+		// so writing here would overwrite that row or emit a second summary.
+		// Newly load-bearing: this terminal is now reachable by requests that
+		// already attempted upstream, which is exactly when a live record exists.
+		if (!ctx.requestRecorder.hasRecord(requestMeta.id)) {
+			// Carry the REAL attempt count. A request gated mid-loop reaches this
+			// terminal having already made upstream attempts, and recording 0
+			// would understate what happened in exactly the way the
+			// all-accounts-failed terminal was fixed not to.
+			await recordSyntheticErrorResponse(response, "provider_overloaded", {
+				failoverAttempts: opts?.failoverAttempts,
+			});
+		}
 		return response;
 	};
 
@@ -687,6 +708,31 @@ async function handleIngestedProxy(
 		);
 	};
 
+	/**
+	 * Whether this account's provider can serve the requested path at all.
+	 *
+	 * Mirrors the `validateProviderPath` check inside `proxyWithAccount`, which
+	 * runs AFTER the attempt loop's gates — so the candidate list legitimately
+	 * contains accounts that will fail over on routing grounds alone (only
+	 * CodexProvider restricts paths). Used by the late overload gate to decide
+	 * whether a skipped candidate is real evidence that an overload blocked this
+	 * request, or merely an account that was never going to serve it.
+	 *
+	 * Fails OPEN on an unknown provider: `getProvider` returning undefined means
+	 * we cannot say, and treating that as "cannot serve" would silently narrow
+	 * the fix back to nothing.
+	 */
+	const canAccountServePath = (account: Account): boolean => {
+		const provider = getProvider(account.provider) ?? ctx.provider;
+		try {
+			validateProviderPath(provider, url.pathname);
+			return true;
+		} catch (error) {
+			if (error instanceof ValidationError) return false;
+			throw error;
+		}
+	};
+
 	// Real upstream attempts made for this request, counted at the probe-gate
 	// callback — the last point before `proxyWithAccount` runs. Candidates that
 	// were never attempted (probe-gate suppressed, overload-skipped, burst
@@ -753,6 +799,7 @@ async function handleIngestedProxy(
 			holds,
 			recordSyntheticErrorResponse,
 			createProviderOverloadedResponse,
+			getUpstreamAttempts: () => upstreamAttempts,
 			logFinalOrderOnce,
 			attemptThroughProbeGate: countedAttemptThroughProbeGate,
 		});
@@ -932,8 +979,15 @@ async function handleIngestedProxy(
 								onOutcome: (o) => {
 									firstOutcome = o;
 									// The normal loop below skips the held account (attempted-id
-									// guard), so its suppression must be recorded here.
+									// guard), so its suppression must be recorded here — and so
+									// must an ordinary failure, for the same reason. Without
+									// it a hold entered later can re-select and be served by
+									// this very account, leaving the gated sibling it was
+									// waiting for untried.
 									holds.noteOverloadSuppression(heldAccount, o);
+									if (isAccountWideFailure(o)) {
+										holds.noteOrdinaryFailure(heldAccount.id);
+									}
 								},
 							},
 						);
@@ -1105,6 +1159,16 @@ async function handleIngestedProxy(
 				}
 			}
 
+			// Keyed on the combo override or the request's LOGICAL model, not the
+			// account's mapped model. Deliberately unchanged: switching it to the
+			// canonical per-account model changes WHICH candidate is skipped
+			// during an overload — an account mapping sonnet→opus is gated on the
+			// sonnet bucket today and would stop being — and that is a routing
+			// decision, separate from the skip-recording below.
+			//
+			// The hold no longer disagrees about which bucket that was: the skip
+			// records this model as `gatedModel`, and holdability, slot keying and
+			// the terminal's refresh all follow it rather than re-deriving one.
 			const overloadedUntil = getProviderOverloadUntil(
 				list[i].provider,
 				Date.now(),
@@ -1114,6 +1178,38 @@ async function handleIngestedProxy(
 				log.debug(
 					`Skipping ${label} ${list[i].name}; provider ${list[i].provider} is overloaded until ${new Date(overloadedUntil).toISOString()}`,
 				);
+				// Record it, or this request is worse off than one that arrived a
+				// moment later. The gate fires when the breaker trips AFTER
+				// selection, while this request is already walking its list; the
+				// skip used to be silent, so `overloadSuppressedAttempts` stayed
+				// empty, the post-loop hold never fired, and the request fell
+				// through to ALL_ACCOUNTS_FAILED. Meanwhile a request that found
+				// zero available candidates UP FRONT took the zero-accounts path,
+				// held, and was served. Observed in production 2026-08-24 18:43:08:
+				// one 503 alongside two 200s, one second apart, same breaker.
+				//
+				// ONLY when this account could actually have served the request.
+				// Per-account path validation happens inside `proxyWithAccount`,
+				// AFTER this gate, so the candidate list still contains accounts
+				// that would fail over on routing grounds alone — a Codex account
+				// asked for /v1/chat/completions, say. Recording one of those as
+				// overload-blocked would make the request wait out a cooldown that
+				// could never help it, turning an honest fast 503 into a
+				// multi-minute hold and then a 529. A candidate that cannot serve
+				// the path is not evidence of anything about the breaker.
+				if (canAccountServePath(list[i])) {
+					// Carries the model the gate DECIDED on, so the hold and the
+					// terminal key on the same bucket. Re-deriving it per account
+					// picks a different one under per-account model mapping: the
+					// gate skips on sonnet, the hold finds opus closed and retries
+					// at once, and the terminal refreshes a deadline that was never
+					// the reason for the skip.
+					holds.noteOverloadGateSkip(
+						list[i],
+						overloadedUntil,
+						modelOverride ?? effectiveRequestModel ?? null,
+					);
+				}
 				continue;
 			}
 
@@ -1164,7 +1260,20 @@ async function handleIngestedProxy(
 						// running to completion. This loop serves both the main pass and
 						// the combo-fallback pass.
 						signal: req.signal,
-						onOutcome: (o) => holds.noteOverloadSuppression(list[i], o),
+						onOutcome: (o) => {
+							holds.noteOverloadSuppression(list[i], o);
+							// An ORDINARY failure — no overload verdict to wait on.
+							// Recorded so a hold entered later in THIS request does not
+							// re-attempt, and get served by, the account that just
+							// failed, leaving the gated one it was waiting for untried.
+							//
+							// Uses the hold's OWN predicate rather than restating it: a
+							// 529 must not count here, or the hold would refuse to retry
+							// the account whose recovery it is waiting for.
+							if (isAccountWideFailure(o)) {
+								holds.noteOrdinaryFailure(list[i].id);
+							}
+						},
 					},
 				);
 			});
@@ -1287,15 +1396,17 @@ async function handleIngestedProxy(
 			cacheBodyStore.discardStaged(requestMeta.id);
 			return await createProviderOverloadedResponse(
 				holds.refreshOverloadUntils(providerFallbackOverloadedAccounts),
+				{ failoverAttempts: upstreamAttempts },
 			);
 		}
 	}
 
-	// Suppressed-only correctness: at least one candidate was refused by the
-	// half-open overload-probe admission (a probe is in flight, or an open
-	// bucket won a race against the gate) and nothing else served the request.
-	// Surface the provider-overloaded 529 with a short Retry-After — the probe
-	// resolves within seconds — instead of the misleading ALL_ACCOUNTS_FAILED.
+	// Overload-blocked correctness: at least one candidate never reached upstream
+	// because of an overload — refused by half-open probe admission (a probe is
+	// in flight, or an open bucket won a race against the gate), or dropped by
+	// the loop's late gate when the breaker tripped mid-walk. Either way the
+	// request was blocked by an overload and must be told so, rather than
+	// getting the misleading ALL_ACCOUNTS_FAILED.
 	if (holds.overloadSuppressedAttempts.length > 0) {
 		// Hold (bounded, capped) behind the in-flight probe instead of bouncing
 		// the short-Retry-After 529; overflow and budget expiry fall back to it.
@@ -1306,6 +1417,7 @@ async function handleIngestedProxy(
 		cacheBodyStore.discardStaged(requestMeta.id);
 		return await createProviderOverloadedResponse(
 			holds.refreshOverloadUntils(holds.overloadSuppressedAttempts),
+			{ failoverAttempts: upstreamAttempts },
 		);
 	}
 

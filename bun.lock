@@ -6,6 +6,7 @@
       "name": "ccflare",
       "devDependencies": {
         "@biomejs/biome": "2.4.10",
+        "@clankermux/test-support": "workspace:*",
         "@types/bun": "1.3.14",
         "bun-types": "1.3.14",
         "typescript": "6.0.2",
@@ -27,6 +28,9 @@
         "@clankermux/proxy": "workspace:*",
         "@clankermux/security": "workspace:*",
         "@clankermux/types": "workspace:*",
+      },
+      "devDependencies": {
+        "@clankermux/test-support": "workspace:*",
       },
     },
     "packages/config": {
@@ -100,6 +104,9 @@
         "@clankermux/core": "workspace:*",
         "@clankermux/logger": "workspace:*",
       },
+      "devDependencies": {
+        "@clankermux/test-support": "workspace:*",
+      },
     },
     "packages/errors": {
       "name": "@clankermux/errors",
@@ -125,6 +132,9 @@
         "@clankermux/providers": "workspace:*",
         "@clankermux/proxy": "workspace:*",
         "@clankermux/types": "workspace:*",
+      },
+      "devDependencies": {
+        "@clankermux/test-support": "workspace:*",
       },
     },
     "packages/http-common": {
@@ -200,12 +210,23 @@
         "@clankermux/providers": "workspace:*",
         "@clankermux/types": "workspace:*",
       },
+      "devDependencies": {
+        "@clankermux/test-support": "workspace:*",
+      },
     },
     "packages/security": {
       "name": "@clankermux/security",
       "version": "0.1.0",
       "dependencies": {
         "@clankermux/logger": "workspace:*",
+      },
+    },
+    "packages/test-support": {
+      "name": "@clankermux/test-support",
+      "version": "1.0.0",
+      "devDependencies": {
+        "@types/bun": "1.3.14",
+        "typescript": "6.0.2",
       },
     },
     "packages/types": {
@@ -284,6 +305,8 @@
     "@clankermux/security": ["@clankermux/security@workspace:packages/security"],
 
     "@clankermux/server": ["@clankermux/server@workspace:apps/server"],
+
+    "@clankermux/test-support": ["@clankermux/test-support@workspace:packages/test-support"],
 
     "@clankermux/types": ["@clankermux/types@workspace:packages/types"],
 

@@ -9,14 +9,11 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
-import { randomBytes } from "node:crypto";
-import { rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 // Force @clankermux/core to initialise before @clankermux/types resolves its
 // circular dependency. Same pattern as account-payment.repository.test.ts.
 import "@clankermux/core";
 import { DatabaseOperations } from "@clankermux/database";
+import { tempDbTracker } from "@clankermux/test-support";
 import type { AccountPaymentRow } from "@clankermux/types";
 import {
 	type AccountRenewalConfig,
@@ -28,28 +25,22 @@ import {
 const TODAY = new Date(2026, 5, 9, 12).getTime();
 const TODAY_STR = "2026-06-09";
 
-function tempDbPath(): string {
-	return join(
-		tmpdir(),
-		`test-payment-recorder-${randomBytes(6).toString("hex")}.db`,
-	);
-}
+const tmpDb = tempDbTracker("test-payment-recorder");
 
 describe("SubscriptionPaymentRecorder", () => {
 	let dbOps: DatabaseOperations;
-	let dbPath: string;
 	let nowMs: number;
 
 	beforeEach(() => {
-		dbPath = tempDbPath();
-		dbOps = new DatabaseOperations(dbPath);
+		dbOps = new DatabaseOperations(tmpDb.next());
 		nowMs = TODAY;
 	});
 
-	afterEach(() => {
-		dbOps.dispose?.();
-		for (const suffix of ["", "-wal", "-shm"]) {
-			rmSync(`${dbPath}${suffix}`, { force: true });
+	afterEach(async () => {
+		try {
+			await dbOps?.dispose();
+		} finally {
+			tmpDb.cleanup();
 		}
 	});
 

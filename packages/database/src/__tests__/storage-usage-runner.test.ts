@@ -13,33 +13,14 @@
 
 import { Database } from "bun:sqlite";
 import { afterEach, describe, expect, it } from "bun:test";
-import { randomBytes } from "node:crypto";
-import { unlinkSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { tempDbTracker } from "@clankermux/test-support";
 import { runStorageUsageScanInWorker } from "../storage-usage-runner";
 
-const created: string[] = [];
-
-function tempDbPath(): string {
-	const p = join(
-		tmpdir(),
-		`test-storage-usage-worker-${randomBytes(6).toString("hex")}.db`,
-	);
-	created.push(p);
-	return p;
-}
+const tmpDb = tempDbTracker("test-storage-usage-worker");
 
 afterEach(() => {
-	for (const p of created.splice(0)) {
-		for (const suffix of ["", "-wal", "-shm"]) {
-			try {
-				unlinkSync(p + suffix);
-			} catch {
-				// already gone
-			}
-		}
-	}
+	tmpDb.cleanup();
 });
 
 function seedDb(path: string): void {
@@ -56,7 +37,7 @@ function seedDb(path: string): void {
 
 describe("runStorageUsageScanInWorker", () => {
 	it("measures row counts and logical bytes matching direct SQL", async () => {
-		const path = tempDbPath();
+		const path = tmpDb.next();
 		seedDb(path);
 
 		const result = await runStorageUsageScanInWorker(path, {
@@ -78,7 +59,7 @@ describe("runStorageUsageScanInWorker", () => {
 	});
 
 	it("returns zeros for a missing table instead of failing the scan", async () => {
-		const path = tempDbPath();
+		const path = tmpDb.next();
 		seedDb(path);
 
 		const result = await runStorageUsageScanInWorker(path, {
@@ -105,7 +86,7 @@ describe("runStorageUsageScanInWorker", () => {
 		// the one class of error that must surface as available:false rather
 		// than as silent zeros.
 		const result = await runStorageUsageScanInWorker(
-			join(tmpdir(), `no-such-dir-${randomBytes(6).toString("hex")}`, "x.db"),
+			join(dirname(tmpDb.next()), "no-such-dir", "x.db"),
 			{ tables: [{ key: "things", table: "things" }] },
 		);
 
@@ -117,7 +98,7 @@ describe("runStorageUsageScanInWorker", () => {
 		// journal-mode probe is the first query and throws NOTADB. Surfacing
 		// that as unavailable beats the old in-process behaviour of confident
 		// zeros over an unreadable file.
-		const path = tempDbPath();
+		const path = tmpDb.next();
 		await Bun.write(path, "not a sqlite file at all");
 
 		const result = await runStorageUsageScanInWorker(path, {
@@ -132,7 +113,7 @@ describe("runStorageUsageScanInWorker", () => {
 		// shared lock that blocks every writer commit — the same event-loop
 		// damage the worker exists to prevent, relocated into SQLite's busy
 		// handler. The worker must refuse, and the caller reports unavailable.
-		const path = tempDbPath();
+		const path = tmpDb.next();
 		const setup = new Database(path);
 		setup.exec("CREATE TABLE things (id TEXT PRIMARY KEY)");
 		setup.close();
@@ -151,7 +132,7 @@ describe("runStorageUsageScanInWorker", () => {
 		// the default rollback-journal mode instead of via seedDb — there a
 		// BEGIN EXCLUSIVE locks readers out, keeping the worker's busy_timeout
 		// spinning past the runner's cap.
-		const path = tempDbPath();
+		const path = tmpDb.next();
 		const setup = new Database(path);
 		setup.exec("CREATE TABLE things (id TEXT PRIMARY KEY)");
 		setup.close();

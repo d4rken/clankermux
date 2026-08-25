@@ -47,6 +47,8 @@ import {
 } from "../provider-overload-cooldown";
 import {
 	createRecoveryHolds,
+	isAccountWideFailure,
+	isOrdinaryAttemptFailure,
 	type RecoveryHolds,
 	type RecoveryHoldsDeps,
 } from "../recovery-holds";
@@ -677,5 +679,112 @@ describe("createRecoveryHolds", () => {
 
 			expect(holds.burstHeldId).toBe(account.id);
 		});
+	});
+});
+
+describe("isOrdinaryAttemptFailure", () => {
+	// The two exclusions carry the whole meaning. A hold exists to wait out an
+	// overload; classifying a 529 as an ordinary failure makes it refuse to
+	// retry the very account whose recovery it is waiting for, and a suppressed
+	// attempt has a probe in flight rather than a failure.
+	it("excludes the two outcomes a hold is waiting on", () => {
+		expect(
+			isOrdinaryAttemptFailure({ kind: "overload_529", cooldownUntil: 1 }),
+		).toBe(false);
+		expect(
+			isOrdinaryAttemptFailure({ kind: "overload_suppressed", until: null }),
+		).toBe(false);
+	});
+
+	it("treats every other outcome as ordinary", () => {
+		for (const outcome of [
+			{ kind: "auth" as const },
+			{ kind: "network_error" as const },
+			{ kind: "model_not_found" as const },
+			{ kind: "other" as const },
+			{ kind: "hard_429" as const },
+			{
+				kind: "retryable_429" as const,
+				confidence: "fresh_headroom" as const,
+			},
+		]) {
+			expect(isOrdinaryAttemptFailure(outcome)).toBe(true);
+		}
+	});
+});
+
+describe("gatedModel on a recorded skip", () => {
+	// The mapping case that motivated carrying it. The late gate keys on the
+	// request's logical model; the hold and the terminal used to re-derive the
+	// account's MAPPED model. With sonnet→opus mapping and only the sonnet
+	// bucket open, that meant the gate skipped on sonnet while the hold found
+	// opus closed and retried at once, and the terminal refreshed a deadline
+	// that was never the reason for the skip.
+	afterEach(() => {
+		clearProviderOverloadCooldown();
+	});
+
+	it("refreshes the bucket the gate used, not the account's mapped model", () => {
+		const account = makeAccount({
+			id: uniqueId("mapped"),
+			model_mappings: JSON.stringify({
+				"claude-sonnet-4-5": "claude-opus-4-5",
+			}),
+		});
+		const { holds } = makeHolds([account], alwaysThrottled);
+
+		// Only the LOGICAL model's bucket is open; the mapped one is closed.
+		const until = applyProviderOverloadCooldown(
+			"anthropic",
+			Date.now() + 60_000,
+			"claude-sonnet-4-5",
+		);
+
+		const refreshed = holds.refreshOverloadUntils([
+			{ account, until, gatedModel: "claude-sonnet-4-5" },
+		]);
+		// Follows the recorded bucket: a real deadline, not the short
+		// probe-suppressed fallback a closed bucket would produce.
+		expect(refreshed[0].until).toBe(until);
+
+		// Without the recorded model it re-derives the mapped one, whose bucket
+		// is closed, and falls back to the short horizon — the bug this pins.
+		const rederived = holds.refreshOverloadUntils([{ account, until }]);
+		expect(rederived[0].until).toBeLessThan(until);
+	});
+});
+
+describe("isAccountWideFailure", () => {
+	// Narrower than isOrdinaryAttemptFailure on purpose. The exclusion set is
+	// keyed by ACCOUNT ID, so a failure whose real cause is one model or one
+	// family must not exclude the account for the rest of the request.
+	it("excludes failures whose cause is narrower than the account", () => {
+		// A fact about the model the attempt sent; a combo fallback can go on to
+		// wait for a different model's breaker on the same account.
+		expect(isAccountWideFailure({ kind: "model_not_found" })).toBe(false);
+		// The catch-all, through which family-weekly exhaustion is reported —
+		// deliberately without an account-wide cooldown at its fail() site.
+		expect(isAccountWideFailure({ kind: "other" })).toBe(false);
+	});
+
+	it("still excludes what the hold is waiting on", () => {
+		expect(
+			isAccountWideFailure({ kind: "overload_529", cooldownUntil: 1 }),
+		).toBe(false);
+		expect(
+			isAccountWideFailure({ kind: "overload_suppressed", until: null }),
+		).toBe(false);
+	});
+
+	it("accepts failures that really are account-wide", () => {
+		expect(isAccountWideFailure({ kind: "auth" })).toBe(true);
+		expect(isAccountWideFailure({ kind: "network_error" })).toBe(true);
+		expect(isAccountWideFailure({ kind: "hard_429" })).toBe(true);
+		expect(
+			isAccountWideFailure({
+				kind: "retryable_429",
+				confidence: "fresh_headroom",
+			}),
+		).toBe(true);
 	});
 });

@@ -16,5 +16,8 @@
 		"@clankermux/logger": "workspace:*",
 		"@clankermux/providers": "workspace:*",
 		"@clankermux/types": "workspace:*"
+	},
+	"devDependencies": {
+		"@clankermux/test-support": "workspace:*"
 	}
 }

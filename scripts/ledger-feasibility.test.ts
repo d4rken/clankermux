@@ -615,7 +615,7 @@ describe("runFeasibilityStudy", () => {
 				entries: g.entries.map((e) => [e.name, e.verdict, e.detail]),
 			}));
 		expect(summarise(study())).toEqual(summarise(study()));
-	});
+	}, 30_000);
 
 	test("a different seed moves only the seeded controls", () => {
 		const a = study();

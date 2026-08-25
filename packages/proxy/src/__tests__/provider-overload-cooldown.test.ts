@@ -105,6 +105,9 @@ function makeContext(accounts: Account[]): ProxyContext {
 			attachUsageSummary: mock(() => undefined),
 			markUsageUnavailable: mock(() => undefined),
 			recordSynthetic: mock(() => undefined),
+			// Read by the synthetic terminals' collision guard, which keeps them
+			// from overwriting a live record an earlier attempt already began.
+			hasRecord: mock(() => false),
 			sweep: mock(() => undefined),
 			dispose: mock(() => undefined),
 		} as never,

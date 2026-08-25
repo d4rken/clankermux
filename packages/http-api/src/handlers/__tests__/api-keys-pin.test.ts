@@ -6,12 +6,12 @@ import {
 	expect,
 	it,
 } from "bun:test";
-import { existsSync, unlinkSync } from "node:fs";
 import type { DatabaseOperations } from "@clankermux/database";
 import { DatabaseFactory } from "@clankermux/database";
+import { tempDbTracker } from "@clankermux/test-support";
 import { createApiKeyPinHandler } from "../api-keys";
 
-const TEST_DB_PATH = "/tmp/test-api-keys-pin.db";
+const tmpDb = tempDbTracker("test-api-keys-pin");
 
 /** Insert a minimal active API key row and return its generated id. */
 async function insertApiKey(
@@ -66,18 +66,17 @@ describe("createApiKeyPinHandler", () => {
 	let handler: (req: Request, keyIdOrName: string) => Promise<Response>;
 
 	beforeAll(() => {
-		if (existsSync(TEST_DB_PATH)) unlinkSync(TEST_DB_PATH);
-		DatabaseFactory.initialize(TEST_DB_PATH);
+		DatabaseFactory.initialize(tmpDb.next());
 		dbOps = DatabaseFactory.getInstance();
 		handler = createApiKeyPinHandler(dbOps);
 	});
 
 	afterAll(() => {
-		DatabaseFactory.reset();
+		// reset() closes the singleton connection before the files go away.
 		try {
-			if (existsSync(TEST_DB_PATH)) unlinkSync(TEST_DB_PATH);
-		} catch {
-			// ignore
+			DatabaseFactory.reset();
+		} finally {
+			tmpDb.cleanup();
 		}
 	});
 
