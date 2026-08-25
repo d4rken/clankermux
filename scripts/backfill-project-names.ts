@@ -45,6 +45,7 @@
  */
 
 import { Database } from "bun:sqlite";
+import { Config } from "../packages/config/src/index";
 import { resolveDbPath } from "../packages/database/src/paths";
 import {
 	decryptPayload,
@@ -112,6 +113,7 @@ interface PassARow {
 	method: string | null;
 	path: string | null;
 	project: string | null;
+	source: string | null;
 }
 
 interface PayloadEnvelope {
@@ -265,6 +267,12 @@ async function runPassA(
 	const derivedIds = new Set<string>();
 	const derivedByPostBValue = new Map<string | null, number>();
 
+	// Re-derivation must use the SAME rules the live proxy uses, or the backfill
+	// would rewrite history under a different definition of "project" than the
+	// rows it is sitting next to. `Config` reads the same file the server does
+	// and needs no DI container, which is what makes it usable from a script.
+	const projectRules = new Config().getProjectRules();
+
 	// High-water mark: only process payload rows that existed when we started,
 	// so concurrent live inserts can't make keyset pagination chase a moving
 	// target. NULL timestamps map to a sentinel that sorts as oldest.
@@ -282,7 +290,8 @@ async function runPassA(
 	const pageStmt = db.query<PassARow, [number, string, number, string, number]>(
 		`SELECT p.id AS id, p.json AS json,
 		        COALESCE(p.timestamp, ${NULL_TS_SENTINEL}) AS ts_key,
-		        r.method AS method, r.path AS path, r.project AS project
+		        r.method AS method, r.path AS path, r.project AS project,
+		        r.project_attribution_source AS source
 		 FROM request_payloads p
 		 JOIN requests r ON r.id = p.id
 		 WHERE (COALESCE(p.timestamp, ${NULL_TS_SENTINEL}) > ?1
@@ -292,9 +301,15 @@ async function runPassA(
 		 ORDER BY ts_key ASC, p.id ASC
 		 LIMIT ?5`,
 	);
+	// The source is rewritten with the project. Writing only the project would
+	// leave the stored tier label describing an extraction that no longer
+	// produced this value, which is worse than no label: the dashboard renders
+	// it as fact.
 	const updateStmt = options.dryRun
 		? null
-		: db.query("UPDATE requests SET project = ? WHERE id = ?");
+		: db.query(
+				"UPDATE requests SET project = ?, project_attribution_source = ? WHERE id = ?",
+			);
 
 	// Cursor starts strictly below every possible (ts_key, id).
 	let cursorTs = Number.MIN_SAFE_INTEGER;
@@ -310,7 +325,11 @@ async function runPassA(
 		);
 		if (rows.length === 0) break;
 
-		const pending: Array<{ id: string; newProject: string | null }> = [];
+		const pending: Array<{
+			id: string;
+			newProject: string | null;
+			newSource: string | null;
+		}> = [];
 
 		for (const row of rows) {
 			counters.examined++;
@@ -380,16 +399,37 @@ async function runPassA(
 			}
 
 			let newProject: string | null;
+			let newSource: string | null;
 			try {
 				const headers = new Headers(envelope.request.headers ?? {});
-				newProject = extractProjectFromRequest(
+				// Destructured, NOT assigned whole: this returns
+				// `{project, source}`, and taking the object would have written
+				// the string "[object Object]" into every re-derived row. The
+				// script is outside tsconfig's `include`, so nothing caught it —
+				// it is listed there now.
+				const extracted = extractProjectFromRequest(
 					row.method ?? "",
 					row.path ?? "",
 					headers,
 					parsedBody,
+					projectRules,
 				);
+				newProject = extracted.project;
+				newSource = extracted.source;
 			} catch {
 				counters.failOther++;
+				continue;
+			}
+
+			// Never null out a project that was INHERITED from the session cache.
+			// Re-derivation runs the anchored tiers only; session inheritance is
+			// in-memory state that no longer exists, so a sidechain or title
+			// request legitimately attributed at the time re-derives to nothing.
+			// Overwriting it would delete correct data, which is the one thing a
+			// repair pass must not do.
+			if (newProject === null && row.source === "session_inherited") {
+				counters.unchanged++;
+				derivedIds.add(row.id);
 				continue;
 			}
 
@@ -412,7 +452,7 @@ async function runPassA(
 
 			if (newProject !== currentProject) {
 				counters.changed++;
-				pending.push({ id: row.id, newProject });
+				pending.push({ id: row.id, newProject, newSource });
 				if (samples.length < SAMPLE_LIMIT) {
 					samples.push({
 						label: `id=${row.id}`,
@@ -428,7 +468,7 @@ async function runPassA(
 		if (!options.dryRun && pending.length > 0) {
 			const applyBatch = db.transaction(() => {
 				for (const update of pending) {
-					updateStmt?.run(update.newProject, update.id);
+					updateStmt?.run(update.newProject, update.newSource, update.id);
 				}
 			});
 			applyBatch();

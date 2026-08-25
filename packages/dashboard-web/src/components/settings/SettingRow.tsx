@@ -190,3 +190,124 @@ export function SettingNumberControl({
 		</div>
 	);
 }
+
+/** One editable column of a {@link SettingListControl} row. */
+export interface SettingListField {
+	/** Key into the row object. */
+	key: string;
+	placeholder: string;
+	/** Relative width. Two fields at 2 and 1 give a wide path and a short name. */
+	grow?: number;
+}
+
+/**
+ * A repeated-row list editor: add, remove, edit in place, save the whole list.
+ *
+ * Whole-list save rather than per-item endpoints, unlike the combo slot builder
+ * this otherwise resembles. That one can address rows individually because the
+ * server assigns each an id; these rows live in a JSON config file and have no
+ * identity beyond their position, so the only coherent unit of change is the
+ * list.
+ *
+ * Rows are keyed by INDEX on purpose. The values are what the operator is
+ * editing, so keying by value would remount the focused input on every
+ * keystroke and by construction cannot be unique while a duplicate is being
+ * typed.
+ *
+ * There is deliberately NO Save button here. A control that owned one would
+ * imply it could be saved by itself, and a caller whose lists are written as a
+ * single payload would then show two buttons that do the same thing. Saving is
+ * the caller's, at whatever granularity its endpoint actually has.
+ */
+export function SettingListControl({
+	name,
+	fields,
+	rows,
+	addLabel,
+	emptyLabel,
+	disabled,
+	onChange,
+	onReset,
+	resetLabel,
+}: {
+	/**
+	 * What this list holds, singular ("root", "override"). Used to label every
+	 * input — these are bare text boxes in a repeated row, so without a label
+	 * neither a screen reader nor a test can say which one it is looking at.
+	 */
+	name: string;
+	fields: SettingListField[];
+	rows: Record<string, string>[];
+	addLabel: string;
+	emptyLabel: string;
+	disabled?: boolean;
+	onChange: (rows: Record<string, string>[]) => void;
+	/** Optional per-list "restore defaults" action. Edits the draft, not the server. */
+	onReset?: () => void;
+	resetLabel?: string;
+}) {
+	const updateCell = (index: number, key: string, value: string) => {
+		onChange(
+			rows.map((row, i) => (i === index ? { ...row, [key]: value } : row)),
+		);
+	};
+
+	return (
+		<div className="flex flex-col gap-tight">
+			{rows.length === 0 && (
+				<p className="text-sm text-muted-foreground">{emptyLabel}</p>
+			)}
+			{rows.map((row, index) => (
+				// biome-ignore lint/suspicious/noArrayIndexKey: the row's own values are the edit target
+				<div key={index} className="flex items-center gap-item">
+					{fields.map((field) => (
+						<Input
+							key={field.key}
+							value={row[field.key] ?? ""}
+							placeholder={field.placeholder}
+							disabled={disabled}
+							aria-label={`${name} ${index + 1} ${field.key}`}
+							onChange={(e) => updateCell(index, field.key, e.target.value)}
+							className="min-w-0"
+							style={{ flexGrow: field.grow ?? 1, flexBasis: 0 }}
+						/>
+					))}
+					<Button
+						size="sm"
+						variant="ghost"
+						disabled={disabled}
+						aria-label={`Remove ${name} ${index + 1}`}
+						onClick={() => onChange(rows.filter((_, i) => i !== index))}
+					>
+						Remove
+					</Button>
+				</div>
+			))}
+			<div className="flex items-center gap-item">
+				<Button
+					size="sm"
+					variant="outline"
+					disabled={disabled}
+					onClick={() =>
+						onChange([
+							...rows,
+							Object.fromEntries(fields.map((f) => [f.key, ""])),
+						])
+					}
+				>
+					{addLabel}
+				</Button>
+				{onReset && (
+					<Button
+						size="sm"
+						variant="ghost"
+						disabled={disabled}
+						onClick={onReset}
+					>
+						{resetLabel ?? "Restore defaults"}
+					</Button>
+				)}
+			</div>
+		</div>
+	);
+}

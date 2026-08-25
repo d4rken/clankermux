@@ -814,16 +814,39 @@ describe("native Responses passthrough — non-streaming client (integration)", 
 			expect(meta).toBeDefined();
 			expect(meta.isStream).toBe(true);
 
-			// 3. Reading the stream to EOF inside the adapter is a clean completion,
-			// not the client disconnect a cancel() would have recorded.
+			// 3. Reading the stream to EOF inside the adapter is a clean TRANSPORT
+			// completion, not the client disconnect a cancel() would have recorded
+			// — that is what this assertion has always been about, so no outcome
+			// here may ever be "disconnect" or "timeout".
+			//
+			// The success/error value is a separate question, and it follows the
+			// RESPONSE rather than the transport: a backend that returned 200
+			// headers and then declared `response.failed` did not succeed, and
+			// recording it as a success left the dashboard showing green during
+			// exactly the incident an operator would be looking at.
+			// `response.incomplete` is treated the same way — it stopped short of
+			// what was asked for. Only `response.completed` is a success.
 			const outcomes = recorder.finishTransport.mock.calls.map((call) => ({
 				outcome: call[1],
 				reason: call[2],
 			}));
 			expect(outcomes.length).toBeGreaterThan(0);
+			// Only `response.failed` is an error. `response.incomplete` is a normal
+			// outcome the client is fully informed about — the translated path
+			// renders the same upstream condition as Anthropic
+			// `stop_reason: "max_tokens"` and records a success, so treating it as
+			// an error here would make one condition a success or a failure purely
+			// by which internal path served it.
+			const expectedOutcome = type === "response.failed" ? "error" : "success";
+			const expectedReason =
+				type === "response.failed"
+					? "native_responses_stream_failed"
+					: undefined;
 			for (const o of outcomes) {
-				expect(o.outcome).toBe("success");
-				expect(o.reason).toBeUndefined();
+				expect(o.outcome).not.toBe("disconnect");
+				expect(o.outcome).not.toBe("timeout");
+				expect(o.outcome).toBe(expectedOutcome);
+				expect(o.reason).toBe(expectedReason);
 			}
 
 			// 4. Usage comes from the terminal event verbatim — no bytes/4 floor,

@@ -1,3 +1,4 @@
+import type { ProjectPathOverride } from "./project-rules";
 import type {
 	ContextComposition,
 	ProjectAttributionSource,
@@ -138,6 +139,29 @@ export interface RetentionSetRequest {
 	memorySnapshotDays?: number;
 	cacheKeepaliveSnapshotDays?: number;
 	storePayloads?: boolean;
+}
+
+// Project-attribution rules. Shared rather than re-declared client-side: a
+// server-side rename must not typecheck while the client silently disagrees.
+export interface ProjectRulesGetResponse {
+	roots: string[];
+	overrides: ProjectPathOverride[];
+	/**
+	 * The built-in roots, so the UI can offer "restore defaults" without
+	 * hardcoding a list that would drift from the server's.
+	 */
+	defaultRoots: string[];
+	/**
+	 * Working directories seen since startup that matched no rule, most recent
+	 * first. In-memory and bounded, so an empty list means "nothing recently",
+	 * never "nothing ever".
+	 */
+	unmatched: { path: string; count: number; lastSeenAt: number }[];
+}
+
+export interface ProjectRulesSetRequest {
+	roots: string[];
+	overrides: ProjectPathOverride[];
 }
 
 export interface CleanupResponse {

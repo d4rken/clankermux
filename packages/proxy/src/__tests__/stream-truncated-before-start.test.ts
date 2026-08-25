@@ -13,7 +13,10 @@
  * `message_start` can never reach.
  */
 import { describe, expect, it } from "bun:test";
-import type { Account } from "@clankermux/types";
+import {
+	type Account,
+	NATIVE_RESPONSES_RESPONSE_HEADER,
+} from "@clankermux/types";
 import {
 	applyProviderOverloadCooldown,
 	clearProviderOverloadCooldown,
@@ -23,8 +26,10 @@ import {
 import type { TransportOutcome } from "../request-recorder";
 import { forwardToClient } from "../response-handler";
 import {
+	classifyNativeResponsesEnd,
 	createUsageState,
 	expectsMessageStart,
+	expectsResponsesTerminal,
 	feedChunk,
 	flushPendingSseLine,
 } from "../usage-collector";
@@ -130,6 +135,12 @@ const MESSAGE_START =
 const MESSAGE_DELTA =
 	'event: message_delta\ndata: {"type":"message_delta","usage":{"output_tokens":7}}\n\n';
 const MESSAGE_STOP = 'event: message_stop\ndata: {"type":"message_stop"}\n\n';
+const RESPONSE_CREATED =
+	'event: response.created\ndata: {"type":"response.created","response":{"model":"gpt-5.5"}}\n\n';
+const RESPONSE_COMPLETED =
+	'event: response.completed\ndata: {"type":"response.completed","response":{"usage":{"input_tokens":3,"output_tokens":4}}}\n\n';
+const RESPONSE_FAILED =
+	'event: response.failed\ndata: {"type":"response.failed","response":{"usage":{"input_tokens":3,"output_tokens":1}}}\n\n';
 
 async function runStream(
 	chunks: string[],
@@ -139,6 +150,8 @@ async function runStream(
 		status?: number;
 		contentType?: string;
 		providerName?: string;
+		/** Sets x-clankermux-responses-native, as the Codex provider does. */
+		nativeMarker?: boolean;
 	} = {},
 ): Promise<FinishCall[]> {
 	const finishCalls: FinishCall[] = [];
@@ -154,6 +167,9 @@ async function runStream(
 				status: options.status ?? 200,
 				headers: {
 					"content-type": options.contentType ?? "text/event-stream",
+					...(options.nativeMarker
+						? { [NATIVE_RESPONSES_RESPONSE_HEADER]: "1" }
+						: {}),
 				},
 			}),
 			timestamp: Date.now(),
@@ -225,6 +241,75 @@ describe("expectsMessageStart (the gate)", () => {
 	});
 });
 
+describe("expectsResponsesTerminal (the native gate)", () => {
+	it("matches only a native-MARKED 200", () => {
+		expect(
+			expectsResponsesTerminal({ status: 200, nativeResponsesMarker: "1" }),
+		).toBe(true);
+		expect(
+			expectsResponsesTerminal({ status: 502, nativeResponsesMarker: "1" }),
+		).toBe(false);
+		expect(
+			expectsResponsesTerminal({ status: 200, nativeResponsesMarker: null }),
+		).toBe(false);
+		expect(expectsResponsesTerminal({ status: 200 })).toBe(false);
+	});
+
+	it("is the exact complement of expectsMessageStart on a native stream", () => {
+		// The native exemption in one gate is what creates the need for the other;
+		// if both ever return false for the same response, that stream has no
+		// in-band check at all — which is the bug this pair exists to prevent.
+		const opts = {
+			method: "POST",
+			path: "/v1/messages",
+			status: 200,
+			contentType: "text/event-stream",
+			nativeResponsesMarker: "1",
+		};
+		expect(expectsMessageStart(opts)).toBe(false);
+		expect(expectsResponsesTerminal(opts)).toBe(true);
+	});
+});
+
+describe("classifyNativeResponsesEnd", () => {
+	it("returns null for a clean completion", () => {
+		expect(
+			classifyNativeResponsesEnd({
+				sawMessageStop: true,
+				responsesTerminalKind: "completed",
+			}),
+		).toBeNull();
+	});
+
+	it("names a failed terminal and a missing terminal differently", () => {
+		expect(
+			classifyNativeResponsesEnd({
+				sawMessageStop: false,
+				responsesTerminalKind: "failed",
+			}),
+		).toBe("native_responses_stream_failed");
+		expect(
+			classifyNativeResponsesEnd({
+				sawMessageStop: false,
+				responsesTerminalKind: null,
+			}),
+		).toBe("native_responses_no_terminal");
+	});
+
+	it("treats an incomplete terminal as a NON-error", () => {
+		// The backend stopped short and said so. The translated path renders the
+		// same condition as Anthropic `stop_reason: "max_tokens"` and records a
+		// success; counting it here would fill the error rate with non-incidents
+		// and split one upstream condition across two verdicts by internal path.
+		expect(
+			classifyNativeResponsesEnd({
+				sawMessageStop: false,
+				responsesTerminalKind: "incomplete",
+			}),
+		).toBeNull();
+	});
+});
+
 describe("UsageState.sawMessageStart", () => {
 	it("is set by a message_start event and stays false without one", () => {
 		const withStart = createUsageState();
@@ -291,11 +376,146 @@ describe("forwardToClient — premature SSE termination", () => {
 		expect(calls[0].reason).toBeUndefined();
 	});
 
+	it("records a NATIVE stream ending in response.failed as an error", async () => {
+		// The backend accepted the request and returned 200 headers, then failed
+		// mid-generation. Nothing else in this classifier can see that: the SSE
+		// sniffer matches only Anthropic's rate_limit_error / overloaded_error, and
+		// expectsMessageStart exempts native streams by construction. Before this
+		// the outcome came from the HTTP status alone — a recorded success.
+		const calls = await runStream([RESPONSE_CREATED, RESPONSE_FAILED], {
+			providerName: "codex",
+			nativeMarker: true,
+		});
+		expect(calls[0].outcome).toBe("error");
+		expect(calls[0].reason).toBe("native_responses_stream_failed");
+	});
+
+	it("records a NATIVE stream with no terminal at all as an error", async () => {
+		const calls = await runStream([RESPONSE_CREATED], {
+			providerName: "codex",
+			nativeMarker: true,
+		});
+		expect(calls[0].outcome).toBe("error");
+		// Distinct reason from the failed case on purpose: no terminal points at
+		// transport or parsing on our side, not at the backend reporting failure.
+		expect(calls[0].reason).toBe("native_responses_no_terminal");
+	});
+
+	it("still records a healthy NATIVE stream as a success", async () => {
+		const calls = await runStream([RESPONSE_CREATED, RESPONSE_COMPLETED], {
+			providerName: "codex",
+			nativeMarker: true,
+		});
+		expect(calls[0].outcome).toBe("success");
+		expect(calls[0].reason).toBeUndefined();
+	});
+
+	it("does not apply the terminal gate to a native-MARKED non-200", async () => {
+		// A non-200 already classifies from its status; asserting a Responses
+		// completion contract on an error envelope would be wrong.
+		const calls = await runStream([RESPONSE_CREATED], {
+			providerName: "codex",
+			nativeMarker: true,
+			status: 502,
+		});
+		expect(calls[0].outcome).toBe("error");
+		expect(calls[0].reason).toBeUndefined();
+	});
+
 	it("leaves other SSE paths alone", async () => {
 		const calls = await runStream(['data: {"choices":[]}\n\n'], {
 			path: "/v1/chat/completions",
 		});
 		expect(calls[0].outcome).toBe("success");
+	});
+
+	it("does NOT close the breaker for a failed NATIVE stream", async () => {
+		// The OPPOSITE of the truncation case below, and deliberately so: a
+		// `response.failed` can itself carry `server_is_overloaded` or
+		// `slow_down`, so treating it as proof the family recovered is exactly
+		// backwards. "abandoned" releases the lease WITHOUT closing the breaker,
+		// leaving the next request free to probe.
+		//
+		// This must trip the breaker and hold a real probe lease — asserting on an
+		// untouched bucket would pass no matter what the code did.
+		clearProviderOverloadCooldown();
+		try {
+			applyProviderOverloadCooldown("codex", Date.now() + 5, MODEL);
+			await new Promise((r) => setTimeout(r, 15));
+			expect(inspectProviderOverload("codex", MODEL).state).toBe("half-open");
+			const admission = tryAcquireProviderOverloadProbe("codex", MODEL);
+			if (!admission.admitted || !admission.token) {
+				throw new Error("expected an admitted probe with a token");
+			}
+
+			const finishCalls: FinishCall[] = [];
+			const response = await forwardToClient(
+				{
+					requestId: "req-native-failed-probe",
+					method: "POST",
+					path: "/v1/messages",
+					account: makeAccount({ provider: "codex" }),
+					requestHeaders: new Headers({ "content-type": "application/json" }),
+					requestBody: enc.encode("{}").buffer as ArrayBuffer,
+					response: new Response(
+						sseStream([RESPONSE_CREATED, RESPONSE_FAILED]),
+						{
+							status: 200,
+							headers: {
+								"content-type": "text/event-stream",
+								[NATIVE_RESPONSES_RESPONSE_HEADER]: "1",
+							},
+						},
+					),
+					timestamp: Date.now(),
+					retryAttempt: 0,
+					failoverAttempts: 0,
+					upstreamModel: MODEL,
+					overloadProbeToken: admission.token,
+				},
+				makeCtx(finishCalls, "codex"),
+			);
+			await response.text();
+
+			expect(finishCalls[0].outcome).toBe("error");
+			expect(finishCalls[0].reason).toBe("native_responses_stream_failed");
+			// Still half-open — the lease was released, the breaker was NOT closed.
+			expect(inspectProviderOverload("codex", MODEL).state).toBe("half-open");
+		} finally {
+			clearProviderOverloadCooldown();
+		}
+	});
+
+	it("recognises a terminal named only by its event line", async () => {
+		// The backend has been seen sending `event: response.failed` while the
+		// payload carries `"type":"error"`. EITHER field is authoritative on its
+		// own — a nullish-coalesce over the two would let the non-terminal payload
+		// type mask the terminal event name, losing both the usage and the verdict.
+		const calls = await runStream(
+			[
+				RESPONSE_CREATED,
+				'event: response.failed\ndata: {"type":"error","error":{"message":"boom"},"response":{"usage":{"input_tokens":2,"output_tokens":1}}}\n\n',
+			],
+			{ providerName: "codex", nativeMarker: true },
+		);
+		expect(calls[0].outcome).toBe("error");
+		expect(calls[0].reason).toBe("native_responses_stream_failed");
+	});
+
+	it("recognises a terminal whose payload carries no usage, model or message", async () => {
+		// The usage prefilter skips data lines without `usage` / `message` /
+		// `model`, which a terminal can legitimately lack. Skipping one used to
+		// cost only a token count; now it would report a finished stream as having
+		// no terminal at all.
+		const calls = await runStream(
+			[
+				RESPONSE_CREATED,
+				'event: response.failed\ndata: {"type":"response.failed","error":{"code":"server_is_overloaded"}}\n\n',
+			],
+			{ providerName: "codex", nativeMarker: true },
+		);
+		expect(calls[0].outcome).toBe("error");
+		expect(calls[0].reason).toBe("native_responses_stream_failed");
 	});
 
 	it("keeps the in-band SSE error frame as the more specific diagnosis", async () => {

@@ -2,6 +2,7 @@ import React from "react";
 import { CacheWarmingCard } from "./overview/CacheWarmingCard";
 import { DataRetentionCard } from "./overview/DataRetentionCard";
 import { UsageThrottlingCard } from "./overview/UsageThrottlingCard";
+import { ProjectAttributionCard } from "./settings/ProjectAttributionCard";
 
 export const SettingsTab = React.memo(() => {
 	return (
@@ -16,6 +17,9 @@ export const SettingsTab = React.memo(() => {
 				<UsageThrottlingCard />
 			</div>
 			<DataRetentionCard />
+			{/* Full width for the same reason as retention: two list editors and a
+			    third read-only list do not fit a half-width column. */}
+			<ProjectAttributionCard />
 		</div>
 	);
 });

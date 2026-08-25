@@ -75,6 +75,7 @@ export {
 	createUsageThrottledResponse,
 	formatTokenHealthReport,
 	getAccountsNeedingReauth,
+	getCoalescibleRecentRefresh,
 	getForcedAccount,
 	getPendingRotation,
 	getUsageThrottleStatus,
@@ -86,6 +87,7 @@ export {
 	type PendingRotation,
 	type PendingRotationWriter,
 	recordPendingRotation,
+	recordRecentRefresh,
 	refreshCodexResetCreditsForAccount,
 	refreshCodexUsageForAccount,
 	registerAffinityClearer,
@@ -180,8 +182,14 @@ export {
 	type ResponseHandlerOptions,
 } from "./response-handler";
 export { sessionCacheStore } from "./session-cache-store";
+export { sessionProjectCache } from "./session-project-cache";
 export { sessionPromotionTracker } from "./session-promotion";
 export type { ProxyRequest, ProxyResponse } from "./types";
+export {
+	type UnmatchedPath,
+	UnmatchedPathTracker,
+	unmatchedPathTracker,
+} from "./unmatched-paths";
 export {
 	clearUsageRevisionAnchors,
 	getUsageRevisionAnchor,

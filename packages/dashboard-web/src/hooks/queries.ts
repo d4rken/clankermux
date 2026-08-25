@@ -4,6 +4,7 @@ import type {
 	ApiKeyResponse,
 	ModelDialect,
 	ModelOverrideSetRequest,
+	ProjectRulesSetRequest,
 	RetentionSetRequest,
 } from "@clankermux/types";
 import {
@@ -851,6 +852,37 @@ export const useSetUsageThrottling = () => {
 		onSuccess: () => {
 			queryClient.invalidateQueries({ queryKey: ["usage-throttling"] });
 			invalidateCapacityQueries(queryClient);
+		},
+	});
+};
+
+/**
+ * Path-to-project rules plus the recently-unmatched working directories.
+ *
+ * The unmatched list is live server state that changes with traffic rather
+ * than with edits, so it is polled rather than left to invalidate-on-write —
+ * an operator watching the card for "which layout is missing" should see a new
+ * path appear without reloading.
+ */
+export const useProjectRules = () => {
+	return useQuery({
+		queryKey: ["project-rules"],
+		queryFn: () => api.getProjectRules(),
+		refetchInterval: 30000,
+		refetchIntervalInBackground: false,
+	});
+};
+
+export const useSetProjectRules = () => {
+	const queryClient = useQueryClient();
+	return useMutation({
+		mutationFn: (rules: ProjectRulesSetRequest) => api.setProjectRules(rules),
+		onSuccess: () => {
+			queryClient.invalidateQueries({ queryKey: ["project-rules"] });
+			// Attribution changes what the project filter and the analytics
+			// breakdown will report for NEW requests, so the lists the dashboard
+			// already holds are stale the moment the rules change.
+			queryClient.invalidateQueries({ queryKey: queryKeys.requestProjects() });
 		},
 	});
 };

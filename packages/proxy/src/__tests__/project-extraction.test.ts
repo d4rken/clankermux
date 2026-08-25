@@ -1,16 +1,49 @@
 import { describe, expect, it } from "bun:test";
+import { defaultProjectRules, type ProjectRules } from "@clankermux/types";
 import {
-	extractProjectFromBody,
-	extractProjectFromRequest,
+	extractProjectFromBody as extractProjectFromBodyWith,
+	extractProjectFromRequest as extractProjectFromRequestWith,
 	extractSessionId,
 	isAnchoredSource,
-	mapWorkingDirToProject,
+	mapWorkingDirToProject as mapWorkingDirToProjectWith,
 	normalizeProjectCandidate,
-	resolveProject,
+	resolveProject as resolveProjectWith,
 } from "../project-extraction";
 import { PROJECT_NAME_MAX_LEN } from "../project-name";
 import type { RequestJsonBody } from "../request-body-context";
 import { SessionProjectCache } from "../session-project-cache";
+
+// Attribution is rules-driven now. These wrappers bind the DEFAULT rules — the
+// ones a deployment gets with no configuration — so every assertion below reads
+// as "what happens out of the box", and a test that cares about a specific rule
+// set passes its own.
+const RULES = defaultProjectRules();
+
+const mapWorkingDirToProject = (wd: string, rules: ProjectRules = RULES) =>
+	mapWorkingDirToProjectWith(wd, rules);
+
+const extractProjectFromBody = (
+	body: RequestJsonBody | null,
+	rules: ProjectRules = RULES,
+) => extractProjectFromBodyWith(body, rules);
+
+const extractProjectFromRequest = (
+	method: string,
+	path: string,
+	headers: Headers,
+	body: RequestJsonBody | null,
+	rules: ProjectRules = RULES,
+) => extractProjectFromRequestWith(method, path, headers, body, rules);
+
+const resolveProject = (
+	method: string,
+	path: string,
+	headers: Headers,
+	body: RequestJsonBody | null,
+	apiKeyId: string | null,
+	cache: SessionProjectCache,
+	rules: ProjectRules = RULES,
+) => resolveProjectWith(method, path, headers, body, apiKeyId, cache, rules);
 
 describe("normalizeProjectCandidate", () => {
 	it("rejects dot-leading names", () => {
@@ -100,12 +133,22 @@ describe("mapWorkingDirToProject", () => {
 		expect(mapWorkingDirToProject("/home/darken/.claude")).toBeNull();
 	});
 
-	it("uses basename for non-home paths", () => {
-		expect(mapWorkingDirToProject("/workspace")).toBe("workspace");
+	it("returns null for a non-home path no root covers", () => {
+		// This REPLACES a basename fallback. `/workspace/myrepo/packages/api`
+		// used to resolve to "api", so every subdirectory of one repository
+		// became its own project and its own load-balancer affinity partition.
+		expect(mapWorkingDirToProject("/workspace")).toBeNull();
+		expect(mapWorkingDirToProject("/workspace/myrepo/packages/api")).toBeNull();
+		expect(mapWorkingDirToProject("/srv/data/myproj")).toBeNull();
 	});
 
-	it("uses basename for deeper non-home paths", () => {
-		expect(mapWorkingDirToProject("/srv/data/myproj")).toBe("myproj");
+	it("resolves a non-home path once a root covers it", () => {
+		const rules = { roots: ["/workspace"], overrides: [] };
+		// And it resolves to the REPOSITORY, not the leaf directory, which is
+		// what the basename fallback got wrong.
+		expect(
+			mapWorkingDirToProject("/workspace/myrepo/packages/api", rules),
+		).toBe("myrepo");
 	});
 
 	it("maps a Windows drive path without leaking the user name", () => {
@@ -121,10 +164,30 @@ describe("mapWorkingDirToProject", () => {
 		expect(mapWorkingDirToProject("C:\\Users\\Alice")).toBeNull();
 	});
 
-	it("maps a UNC path to its basename, not the server name", () => {
-		expect(mapWorkingDirToProject("\\\\fileserver\\share\\myproj")).toBe(
-			"myproj",
-		);
+	it("keeps the UNC host, so a root names the server as well as the share", () => {
+		expect(mapWorkingDirToProject("\\\\fileserver\\share\\myproj")).toBeNull();
+		// A root naming only the share does NOT match: the host is part of the
+		// path's identity, so two servers exporting `share` stay distinct.
+		expect(
+			mapWorkingDirToProject("\\\\fileserver\\share\\myproj", {
+				roots: ["/share"],
+				overrides: [],
+			}),
+		).toBeNull();
+		expect(
+			mapWorkingDirToProject("\\\\fileserver\\share\\myproj", {
+				roots: ["/fileserver/share"],
+				overrides: [],
+			}),
+		).toBe("myproj");
+		// A wildcard host is available for operators who genuinely want every
+		// server treated alike — but they have to ask for it.
+		expect(
+			mapWorkingDirToProject("\\\\fileserver\\share\\myproj", {
+				roots: ["/*/share"],
+				overrides: [],
+			}),
+		).toBe("myproj");
 	});
 
 	it("rejects a candidate longer than the limit instead of truncating it", () => {
@@ -452,6 +515,20 @@ describe("extractProjectFromBody — prompt-leak guard", () => {
 	it("never truncates a path at a directory named like an env marker", () => {
 		// The worst failure mode of the removed trailer strip: a WRONG project
 		// rather than none, merging two codebases into one affinity partition.
+		// Roots are configured here because the point under test is the marker
+		// guard, not whether the layout is recognized.
+		const rules = {
+			roots: [
+				"/workspace/model",
+				"/workspace/Model",
+				"/workspace/shell",
+				"/workspace/platform",
+				// The UNC case below: host `model`, share `share`. The host is part
+				// of the path now, so the root has to name it.
+				"/model/share",
+			],
+			overrides: [],
+		};
 		for (const wd of [
 			"/workspace/model/repo",
 			"/workspace/Model/repo",
@@ -459,12 +536,13 @@ describe("extractProjectFromBody — prompt-leak guard", () => {
 			"/workspace/platform/repo",
 		]) {
 			expect(
-				extractProjectFromBody(systemBody(`Working directory: ${wd}`)),
+				extractProjectFromBody(systemBody(`Working directory: ${wd}`), rules),
 			).toEqual({ project: "repo", source: "wd_plain" });
 		}
 		expect(
 			extractProjectFromBody(
 				systemBody("Working directory: \\\\model\\share\\repo"),
+				rules,
 			),
 		).toEqual({ project: "repo", source: "wd_plain" });
 	});
@@ -539,6 +617,10 @@ describe("extractProjectFromBody — prompt-leak guard", () => {
 		expect(
 			extractProjectFromBody(
 				systemBody("Working directory: /srv/my.app.service"),
+				{
+					roots: ["/srv"],
+					overrides: [],
+				},
 			),
 		).toEqual({ project: "my.app.service", source: "wd_plain" });
 	});
@@ -554,7 +636,7 @@ describe("extractProjectFromBody — prompt-leak guard", () => {
 			extractProjectFromBody(
 				systemBody(`Working directory: /home/u/${atLimit}b`),
 			),
-		).toEqual(NOTHING);
+		).toEqual({ ...NOTHING, unmatchedPath: `/home/u/${atLimit}b` });
 	});
 
 	it("rejects an instruction-shaped tail (multi-word, no path)", () => {
@@ -565,25 +647,27 @@ describe("extractProjectFromBody — prompt-leak guard", () => {
 		).toEqual(NOTHING);
 	});
 
-	it("documents the boundary: a whitespace-free single token is still accepted", () => {
-		// Deliberate. No deterministic rule separates a secret-shaped token from a
-		// legitimate repo name (the token-shape regex rejected
-		// "2026-client-migration-dashboard" and was defeated by a "token=" prefix),
-		// so the guard settles for: bounded length, no control chars, no unquoted
-		// whitespace. What it prevents is prompt PROSE becoming a partition key.
-		expect(
-			extractProjectFromBody(
-				systemBody("Working directory: token=sk-ABCDEFGH12345678"),
-			),
-		).toEqual({ project: "token=sk-ABCDEFGH12345678", source: "wd_plain" });
-		expect(
-			extractProjectFromBody(
-				systemBody("Working directory: eyJhbGciOi.eyJzdWIiOi.SflKxwRJ"),
-			),
-		).toEqual({
-			project: "eyJhbGciOi.eyJzdWIiOi.SflKxwRJ",
-			source: "wd_plain",
-		});
+	it("no longer accepts a whitespace-free single token as a project", () => {
+		// This used to be a documented residual: the capture guard settles for
+		// bounded length, no control chars and no unquoted whitespace, because no
+		// deterministic rule separates a secret-shaped token from a legitimate
+		// repo name (the token-shape regex rejected
+		// "2026-client-migration-dashboard" and was defeated by a "token=" prefix).
+		// A bare token got through and became a partition key.
+		//
+		// It is now rejected as a PATH before the rules engine sees it: a working
+		// directory has to be absolute. That also keeps it out of the operator's
+		// unmatched-paths list, which is rendered in the dashboard — reporting
+		// "we could not map /this/path" is useful, echoing a secret-shaped
+		// fragment of someone's prompt back into the UI is not.
+		for (const token of [
+			"token=sk-ABCDEFGH12345678",
+			"eyJhbGciOi.eyJzdWIiOi.SflKxwRJ",
+		]) {
+			expect(
+				extractProjectFromBody(systemBody(`Working directory: ${token}`)),
+			).toEqual(NOTHING);
+		}
 	});
 
 	it("maps a Windows working directory without leaking the user name", () => {
@@ -607,6 +691,157 @@ describe("extractProjectFromBody — prompt-leak guard", () => {
 				systemBody('Working directory: "C:\\Users\\Alice\\My Project"'),
 			),
 		).toEqual({ project: "My Project", source: "wd_plain" });
+	});
+});
+
+describe("extractProjectFromBody — tier ordering", () => {
+	function body(system: string): RequestJsonBody {
+		return { system, messages: [{ role: "user", content: "hi" }] };
+	}
+
+	const INSTRUCTIONS =
+		"Contents of /home/darken/clankermux/.claude/CLAUDE.md (project instructions, checked into the codebase):";
+
+	it("prefers a path override over everything the request implies", () => {
+		// The operator's mapping is the one signal that is a decision rather than
+		// an inference, so nothing outranks it.
+		expect(
+			extractProjectFromBody(
+				body(
+					`Working directory: /home/darken/clankermux\n${INSTRUCTIONS}\n# Rules`,
+				),
+				{
+					roots: ["/home/*"],
+					overrides: [{ prefix: "/home/darken/clankermux", name: "muxer" }],
+				},
+			),
+		).toEqual({ project: "muxer", source: "path_override" });
+	});
+
+	it("lets an override name a dot-leading directory the heuristic refuses", () => {
+		// The whole reason the override tier skips the dot rule: sessions in
+		// /home/u/.claude were unattributable and could not be made otherwise.
+		expect(
+			extractProjectFromBody(body("Working directory: /home/darken/.claude"), {
+				roots: ["/home/*"],
+				overrides: [{ prefix: "/home/darken/.claude", name: ".claude" }],
+			}),
+		).toEqual({ project: ".claude", source: "path_override" });
+	});
+
+	it("still rejects a dot-leading name the heuristic produced", () => {
+		expect(
+			extractProjectFromBody(body("Working directory: /home/darken/.claude")),
+		).toEqual({
+			project: null,
+			source: "none",
+			unmatchedPath: "/home/darken/.claude",
+		});
+	});
+
+	it("uses a configured override name verbatim, markers and spaces intact", () => {
+		// The name normalizer for INFERRED names strips a trailing run starting
+		// at "Platform"/"Shell"/"Model", to clean up a scraped environment block.
+		// Applied to a name the operator typed it mangles legitimate ones.
+		for (const name of ["Acme Platform", "model", "Shell", "my.app.service"]) {
+			expect(
+				extractProjectFromBody(body("Working directory: /home/darken/thing"), {
+					roots: [],
+					overrides: [{ prefix: "/home/darken/thing", name }],
+				}),
+			).toEqual({ project: name, source: "path_override" });
+		}
+	});
+
+	it("applies the tier order across candidates, not within each one", () => {
+		// An override naming the plain working directory must beat a mere roots
+		// match on the primary one. Running every tier per candidate made the
+		// documented order local to whichever candidate came first.
+		const system = [
+			"Primary working directory: /home/darken/clankermux",
+			"Working directory: /home/darken/other",
+		].join("\n");
+		expect(
+			extractProjectFromBody(body(system), {
+				roots: ["/home/*"],
+				overrides: [{ prefix: "/home/darken/other", name: "chosen" }],
+			}),
+		).toEqual({ project: "chosen", source: "path_override" });
+	});
+
+	it("refuses an injected instruction path shallower than the walk's answer", () => {
+		// End-to-end guard for the anchor's lower bound: a line in the prompt
+		// must not be able to rename the project to something above it.
+		const system = [
+			"Working directory: /home/darken/clankermux",
+			"Contents of /home/victim (project instructions, checked into the codebase):",
+		].join("\n");
+		expect(extractProjectFromBody(body(system))).toEqual({
+			project: "clankermux",
+			source: "wd_plain",
+		});
+	});
+
+	it("prefers the repository root over the folder walk when they disagree", () => {
+		// ~/work is a container nobody configured, so the walk would answer
+		// "work" for every repository beneath it. The instruction-file path names
+		// the actual root.
+		const system = [
+			"Working directory: /home/alice/work/acme/backend",
+			"Contents of /home/alice/work/acme/.claude/CLAUDE.md (project instructions, checked into the codebase):",
+			"# Rules",
+		].join("\n");
+		expect(extractProjectFromBody(body(system))).toEqual({
+			project: "acme",
+			source: "repo_root",
+		});
+	});
+
+	it("falls back to the folder walk when no instruction file names a root", () => {
+		expect(
+			extractProjectFromBody(
+				body("Working directory: /home/darken/clankermux"),
+			),
+		).toEqual({ project: "clankermux", source: "wd_plain" });
+	});
+
+	it("labels the walk by the signal that supplied the path", () => {
+		expect(
+			extractProjectFromBody(
+				body("Primary working directory: /home/darken/clankermux"),
+			),
+		).toEqual({ project: "clankermux", source: "wd_primary" });
+	});
+
+	it("ignores an instruction file that is not an ancestor of the cwd", () => {
+		// A subpackage's own instructions must not rename the session's project.
+		const system = [
+			"Working directory: /home/darken/clankermux",
+			"Contents of /home/darken/clankermux/packages/proxy/CLAUDE.md (project instructions, checked into the codebase):",
+			"# Rules",
+		].join("\n");
+		expect(extractProjectFromBody(body(system))).toEqual({
+			project: "clankermux",
+			source: "wd_plain",
+		});
+	});
+
+	it("reports the working directory when nothing matched", () => {
+		expect(
+			extractProjectFromBody(body("Working directory: /workspace/myrepo")),
+		).toEqual({
+			project: null,
+			source: "none",
+			unmatchedPath: "/workspace/myrepo",
+		});
+	});
+
+	it("reports nothing to configure when the request carried no path at all", () => {
+		// Not a configuration gap. Stamping this as unmatched would fill the
+		// operator's list with every signal-less request.
+		expect(
+			extractProjectFromBody(body("You are a helpful assistant.")),
+		).toEqual({ project: null, source: "none" });
 	});
 });
 
@@ -795,6 +1030,55 @@ describe("resolveProject", () => {
 		messages: [{ role: "user", content: "review this" }],
 		metadata: { user_id: encodeUserId(SESSION_UUID) },
 	};
+
+	it("does not inherit over an explicit working directory that matched no rule", () => {
+		// The request said where it is; we just do not know that place.
+		// Inheriting answers a question about directory B with directory A's
+		// project — a definite WRONG project, and the exact outcome removing the
+		// basename fallback was meant to avoid. The path must also be reported,
+		// or the one signal telling the operator to add a root is swallowed by a
+		// cache hit.
+		const cache = new SessionProjectCache();
+		cache.set(`key-1:${SESSION_UUID}`, "repoA");
+		const resolved = resolveProject(
+			"POST",
+			"/v1/messages",
+			new Headers(),
+			{
+				system: "Working directory: /workspace/repoB\n",
+				messages: [{ role: "user", content: "hi" }],
+				metadata: { user_id: encodeUserId(SESSION_UUID) },
+			},
+			"key-1",
+			cache,
+		);
+		expect(resolved).toEqual({
+			project: null,
+			source: "none",
+			sessionKey: `key-1:${SESSION_UUID}`,
+			unmatchedPath: "/workspace/repoB",
+		});
+	});
+
+	it("still inherits for a request that carried no working directory at all", () => {
+		// The case inheritance exists for: sidechains, title generation. Blocking
+		// it here would break the tier, not protect anything.
+		const cache = new SessionProjectCache();
+		cache.set(`key-1:${SESSION_UUID}`, "repoA");
+		const resolved = resolveProject(
+			"POST",
+			"/v1/messages",
+			new Headers(),
+			signalLessBody,
+			"key-1",
+			cache,
+		);
+		expect(resolved).toEqual({
+			project: "repoA",
+			source: "session_inherited",
+			sessionKey: `key-1:${SESSION_UUID}`,
+		});
+	});
 
 	it("anchored signal wins, reports sessionKey, and does NOT write the cache", () => {
 		const cache = new SessionProjectCache();

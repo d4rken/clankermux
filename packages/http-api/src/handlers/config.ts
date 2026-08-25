@@ -20,12 +20,16 @@ import {
 	KEEPALIVE_REFRESH_1H_MS,
 	MAX_BRIDGE_HOURS,
 	riskFactorToBridgeHours,
+	unmatchedPathTracker,
 } from "@clankermux/proxy";
+import { DEFAULT_PROJECT_ROOTS } from "@clankermux/types";
 import type {
 	ConfigResponse,
+	ProjectRulesGetResponse,
 	RetentionGetResponse,
 	RetentionSetRequest,
 } from "../types";
+import { validateProjectRulesPayload } from "./project-rules-validation";
 
 /** The bridge horizon (hours/risk factor) only describes the promoted 1h-TTL slots.
  * The conversion + clamps live in @clankermux/proxy (bridge-policy) — the single
@@ -328,6 +332,34 @@ export function createConfigHandlers(
 			}
 			config.setUsageThrottlingFiveHourEnabled(body.fiveHourEnabled);
 			config.setUsageThrottlingWeeklyEnabled(body.weeklyEnabled);
+			return new Response(null, { status: 204 });
+		},
+
+		getProjectRules: (): Response => {
+			const rules = config.getProjectRules();
+			return jsonResponse({
+				roots: rules.roots,
+				overrides: rules.overrides,
+				defaultRoots: [...DEFAULT_PROJECT_ROOTS],
+				unmatched: unmatchedPathTracker.list(),
+			} satisfies ProjectRulesGetResponse);
+		},
+
+		setProjectRules: async (req: Request): Promise<Response> => {
+			const body = await req.json();
+
+			// Validate BOTH lists before writing either. The retention handler's
+			// per-field chain applies earlier fields before a later one throws,
+			// which for a rule set would leave attribution running on half the
+			// operator's intent.
+			const validated = validateProjectRulesPayload(body);
+			if ("error" in validated)
+				return errorResponse(BadRequest(validated.error));
+
+			config.setProjectRules(validated.rules);
+			// A path that matched nothing under the old rules may match under the
+			// new ones, so the complaint list is stale the moment they change.
+			unmatchedPathTracker.clear();
 			return new Response(null, { status: 204 });
 		},
 	};
