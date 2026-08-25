@@ -29,8 +29,9 @@ import type { SlimUsageSummary } from "./request-recorder";
  *         `response.completed` / `.incomplete` / `.failed` supplies the
  *         authoritative usage (input/output + cached-token details), and
  *         `response.completed` alone additionally sets `sawMessageStop`,
- *         since only it asserts a clean ending. All other `response.*` events
- *         are no-ops.
+ *         since only it asserts a clean ending — `.incomplete` / `.failed` are
+ *         recorded (kind + usage) without claiming one. All other `response.*`
+ *         events are no-ops.
  *     `content_block_delta`/`text_delta`/`response.output_text.delta` are
  *     NEVER parsed for tokens.
  *
@@ -108,23 +109,28 @@ export interface UsageState {
 	 * stream probe as recovered, and passes `endedCleanly`. So it must stay
 	 * keyed to a SUCCESSFUL terminal. `response.incomplete` and
 	 * `response.failed` deliberately do NOT set it — they carry trustworthy
-	 * usage (see {@link sawResponsesTerminal}) but they are not clean endings,
+	 * usage (see {@link responsesTerminalKind}) but they are not clean endings,
 	 * and conflating the two would silently turn failed responses into
 	 * successes.
 	 */
 	sawMessageStop: boolean;
 	/**
-	 * True once ANY Responses terminal (`response.completed` / `.incomplete` /
-	 * `.failed`) was seen, clean or not.
+	 * Which Responses terminal was seen FIRST, or null if none has arrived.
 	 *
 	 * Separate from `sawMessageStop` because the two questions are different:
 	 * this one is "are the provider's numbers final?", that one is "did the
-	 * stream end cleanly?". It also makes the FIRST terminal authoritative — a
-	 * stray terminal frame arriving after one already landed is ignored rather
-	 * than allowed to overwrite exact counts, mirroring the Codex transformer's
-	 * own stray-terminal guard.
+	 * stream end cleanly?". Being non-null also makes the FIRST terminal
+	 * authoritative — a stray terminal frame arriving after one already landed
+	 * is ignored rather than allowed to overwrite exact counts, mirroring the
+	 * Codex transformer's own stray-terminal guard.
+	 *
+	 * The KIND is retained, not just the fact, so the recorded failure reason can
+	 * name what actually happened: `incomplete` (stopped short — an output
+	 * ceiling, a content filter, or a reason that does not exist yet) is not
+	 * `failed` (the backend reporting its own error), and labelling one as the
+	 * other misleads exactly the operator this reason exists for.
 	 */
-	sawResponsesTerminal: boolean;
+	responsesTerminalKind: ResponsesTerminalKind | null;
 	/**
 	 * True once a `message_start` event was seen. Every Anthropic-shape streaming
 	 * `/v1/messages` 200 opens with one — including the translated Codex /
@@ -176,7 +182,7 @@ export function createUsageState(): UsageState {
 		lineBuffer: "",
 		currentEvent: undefined,
 		sawMessageStop: false,
-		sawResponsesTerminal: false,
+		responsesTerminalKind: null,
 		sawMessageStart: false,
 		skippingOverlongLine: false,
 	};
@@ -335,15 +341,16 @@ function applySseData(
 	// sequence for the same reason (see its stray-terminal handling), and
 	// without this a `completed usage=135` followed by `failed usage=1` would
 	// bill the request for one output token.
-	const isResponseTerminal =
-		parsed.type === "response.completed" ||
-		parsed.type === "response.incomplete" ||
-		parsed.type === "response.failed" ||
-		eventType === "response.completed" ||
-		eventType === "response.incomplete" ||
-		eventType === "response.failed";
-	if (isResponseTerminal && !state.sawResponsesTerminal) {
-		state.sawResponsesTerminal = true;
+	// EITHER field is authoritative on its own, never `parsed.type ?? eventType`:
+	// backends have been seen naming an event `response.failed` while its payload
+	// carries `"type":"error"`, and a nullish-coalesce would let the non-terminal
+	// payload type mask the terminal event name. The adapter's own extractor
+	// documents this same OR rule and this same observed shape — the two must not
+	// drift apart.
+	const terminalKind =
+		responsesTerminalKindOf(parsed.type) ?? responsesTerminalKindOf(eventType);
+	if (terminalKind && state.responsesTerminalKind === null) {
+		state.responsesTerminalKind = terminalKind;
 		const usage = parsed.response?.usage;
 		if (usage) {
 			const inputTokenDetails = usage.input_tokens_details;
@@ -389,10 +396,7 @@ function applySseData(
 		// for `.incomplete` / `.failed` would quietly reclassify failed responses
 		// as successful ones. Their usage is still trusted above; only the
 		// clean-ending claim is withheld.
-		const isCleanTerminal =
-			parsed.type === "response.completed" ||
-			eventType === "response.completed";
-		if (isCleanTerminal) {
+		if (terminalKind === "completed") {
 			state.sawMessageStop = true;
 		}
 	}
@@ -414,7 +418,19 @@ function processLine(state: UsageState, rawLine: string): void {
 	if (!parsed.data) return;
 	if (!parsed.data.startsWith("{")) return;
 	// Guard per data line so a non-usage event (e.g. ping) isn't parsed.
-	if (!dataMayCarryUsage(parsed.data)) return;
+	//
+	// A terminal event must bypass it. The guard looks for `usage` / `message` /
+	// `model` substrings, and a terminal can legitimately carry none of them —
+	// `{"type":"response.failed","error":{…}}` has no usage to report. Skipping
+	// such a line used to cost only a usage count; now that the terminal also
+	// decides the recorded outcome, skipping it would classify a stream that
+	// declared itself finished as having no terminal at all.
+	if (
+		!dataMayCarryUsage(parsed.data) &&
+		responsesTerminalKindOf(state.currentEvent) === null
+	) {
+		return;
+	}
 	try {
 		const obj = JSON.parse(parsed.data) as SseParsed;
 		applySseData(obj, state.currentEvent ?? "", state);
@@ -523,6 +539,57 @@ export function flushPendingSseLine(state: UsageState): void {
 export const STREAM_TRUNCATED_MID_CONTENT = "stream_truncated_mid_content";
 
 /**
+ * Recorder outcome reason for a native Codex passthrough stream that reached
+ * EOF having emitted `response.failed` — the backend accepted the request and
+ * returned 200 headers, then reported its own failure. That can happen before a
+ * single token is generated (validation) as easily as part-way through.
+ *
+ * Needed because the native path has no other in-band refinement: the SSE
+ * rate-limit sniffer matches only Anthropic's `rate_limit_error` /
+ * `overloaded_error`, and `expectsMessageStart` deliberately exempts native
+ * streams (they speak `response.*` and never emit `message_start`). Without
+ * these two reasons the outcome came from the HTTP status alone, so a failed
+ * response was recorded as a success.
+ */
+export const NATIVE_RESPONSES_STREAM_FAILED = "native_responses_stream_failed";
+
+/**
+ * Recorder outcome reason for a native Codex passthrough stream that reached
+ * EOF without ANY terminal event. The counterpart to
+ * {@link STREAM_TRUNCATED_MID_CONTENT} for the Responses vocabulary: the
+ * transport ended cleanly, but the response never declared itself finished.
+ */
+export const NATIVE_RESPONSES_NO_TERMINAL = "native_responses_no_terminal";
+
+/** The three Responses terminal event kinds, without their `response.` prefix. */
+export type ResponsesTerminalKind = "completed" | "incomplete" | "failed";
+
+/** Recorder reasons a native stream can end on, other than successfully. */
+export type NativeResponsesEndReason =
+	| typeof NATIVE_RESPONSES_STREAM_FAILED
+	| typeof NATIVE_RESPONSES_NO_TERMINAL;
+
+/**
+ * Map an SSE event name to its terminal kind, or null when it is not a
+ * terminal. Accepts the name from either the `data:` payload's `type` or the
+ * `event:` line, since a backend can supply only one of the two.
+ */
+function responsesTerminalKindOf(
+	name: string | undefined,
+): ResponsesTerminalKind | null {
+	switch (name) {
+		case "response.completed":
+			return "completed";
+		case "response.incomplete":
+			return "incomplete";
+		case "response.failed":
+			return "failed";
+		default:
+			return null;
+	}
+}
+
+/**
  * Does this response shape REQUIRE a `message_start` to be considered complete?
  *
  * Narrow and explicit on purpose — `POST /v1/messages`, status 200,
@@ -561,6 +628,73 @@ export function expectsMessageStart(opts: {
 		opts.status === 200 &&
 		(opts.contentType ?? "").toLowerCase().includes("text/event-stream")
 	);
+}
+
+/**
+ * The Responses-vocabulary counterpart to {@link expectsMessageStart}: does
+ * this response REQUIRE a clean `response.completed` to count as a success?
+ *
+ * Kept beside that gate so the two cannot drift apart. NOT its exact
+ * complement: a native-marked NON-200 makes both false, which is intended —
+ * such a response already classifies from its status. `expectsMessageStart` returns false for a
+ * native stream because it speaks `response.*` and never emits `message_start`;
+ * that exemption left the native path with NO in-band check at all, so a
+ * backend that returned 200 headers and then failed mid-generation was recorded
+ * from its status alone — as a success. This closes that hole for the native
+ * path only.
+ *
+ * Keyed on the response marker for the same reason: the adapter rewrites
+ * `/v1/responses` to `/v1/messages` before the proxy sees it, so the marker is
+ * the only reliable discriminator here.
+ *
+ * Evaluate the RESULT only at natural EOF. A stream cut mid-flight has its own
+ * classification in `onError`, where an absent terminal means "truncated", not
+ * "the response declared failure".
+ */
+export function expectsResponsesTerminal(opts: {
+	status: number;
+	/** Value of {@link NATIVE_RESPONSES_RESPONSE_HEADER} on the response. */
+	nativeResponsesMarker?: string | null;
+}): boolean {
+	return opts.nativeResponsesMarker === "1" && opts.status === 200;
+}
+
+/**
+ * Classify how a native Responses stream ended, once EOF is reached.
+ *
+ * Returns the recorder reason, or `null` when the stream ended cleanly (a
+ * `response.completed` was seen) — which is also what a non-native stream
+ * always gets, since the caller gates on {@link expectsResponsesTerminal}.
+ *
+ * The two failure reasons are kept distinct because they mean different things
+ * operationally: `response.failed` is the backend reporting its own failure and
+ * is worth alerting on, while no terminal at all means the stream reached EOF
+ * without ever declaring itself finished — a transport cut, a frame we failed to
+ * parse, or a backend that simply stopped talking.
+ *
+ * `response.incomplete` is deliberately NOT a failure reason; see the switch.
+ */
+export function classifyNativeResponsesEnd(
+	state: Pick<UsageState, "sawMessageStop" | "responsesTerminalKind">,
+): NativeResponsesEndReason | null {
+	if (state.sawMessageStop) return null;
+	switch (state.responsesTerminalKind) {
+		case "failed":
+			return NATIVE_RESPONSES_STREAM_FAILED;
+		case "incomplete":
+			// NOT an error. The backend stopped short of what was asked for and said
+			// so, which is a normal outcome the client is fully informed about: the
+			// translated path renders the same upstream condition as Anthropic
+			// `stop_reason: "max_tokens"` (or `"refusal"` for a content filter) and
+			// records a success, and the native client gets the richer
+			// `incomplete_details` envelope verbatim. Counting it here would make one
+			// upstream condition a success or an error purely by which internal path
+			// served it, and would fill the error rate with non-incidents.
+			return null;
+		// "completed" cannot reach here — it is what sets sawMessageStop.
+		default:
+			return NATIVE_RESPONSES_NO_TERMINAL;
+	}
 }
 
 /**

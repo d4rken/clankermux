@@ -1212,7 +1212,9 @@ describe("usage-collector", () => {
 			// which reclassifies a following read error as a SUCCESS — so a
 			// failed response setting it would launder failures into successes.
 			expect(state.providerReportedOutput).toBe(true);
-			expect(state.sawResponsesTerminal).toBe(true);
+			expect(state.responsesTerminalKind).toBe(
+				terminal === "response.failed" ? "failed" : "incomplete",
+			);
 			expect(state.sawMessageStop).toBe(false);
 		});
 
@@ -1232,7 +1234,7 @@ describe("usage-collector", () => {
 				1100,
 			);
 			expect(state.sawMessageStop).toBe(true);
-			expect(state.sawResponsesTerminal).toBe(true);
+			expect(state.responsesTerminalKind).toBe("completed");
 		});
 
 		it.each([

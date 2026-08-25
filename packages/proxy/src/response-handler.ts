@@ -55,13 +55,16 @@ import {
 	getStreamForwardTotalTimeoutMs,
 } from "./stream-timeouts";
 import {
+	classifyNativeResponsesEnd,
 	createUsageState,
 	detectMissingMessageStop,
 	expectsMessageStart,
+	expectsResponsesTerminal,
 	feedChunk,
 	feedNonStreamBody,
 	finalizeUsage,
 	flushPendingSseLine,
+	NATIVE_RESPONSES_STREAM_FAILED,
 	STREAM_TRUNCATED_MID_CONTENT,
 	type UsageState,
 } from "./usage-collector";
@@ -847,6 +850,14 @@ async function forwardToClientInner(
 				NATIVE_RESPONSES_RESPONSE_HEADER,
 			),
 		});
+		// The Responses-vocabulary counterpart, for the path `mustSeeMessageStart`
+		// exempts. Precomputed here for the same reason it is.
+		const mustSeeResponsesTerminal = expectsResponsesTerminal({
+			status: response.status,
+			nativeResponsesMarker: response.headers.get(
+				NATIVE_RESPONSES_RESPONSE_HEADER,
+			),
+		});
 
 		// Single mutable owner of the probe lease for the whole stream. Every
 		// settle site below reads and then CLEARS it, so the lease is reported
@@ -1037,18 +1048,39 @@ async function forwardToClientInner(
 				// stream still means the provider returned 200 headers and streamed
 				// bytes, which IS evidence the family is not overloaded. Marking it
 				// "abandoned" would keep a healthy bucket half-open for no reason.
-				const cleanEof = success && rateLimitSniffer?.firedReason == null;
+				// Flush BEFORE classifying. A provider may close right after the last
+				// `data:` byte with no trailing newline, so a final `message_start` or
+				// terminal event can still be sitting in the line buffer here —
+				// classifying first would call a complete stream truncated.
+				// finalizeUsage's own flush then no-ops. Hoisted above the probe
+				// settle because the native verdict below reads the flushed state.
+				if (usageState) flushPendingSseLine(usageState);
+				// Native passthrough: the backend returned 200 headers and streamed,
+				// but the stream itself can still declare failure. Nothing else here
+				// can see that — the sniffer matches only Anthropic error types, and
+				// `mustSeeMessageStart` is false by construction on this path — so
+				// without this the outcome came from the HTTP status alone and a
+				// `response.failed` was recorded as a success.
+				const nativeEndReason =
+					usageState && mustSeeResponsesTerminal
+						? classifyNativeResponsesEnd(usageState)
+						: null;
+				// A `response.failed` does NOT count as recovery evidence: the
+				// failure can itself be `server_is_overloaded` / `slow_down`, so
+				// treating it as proof the family is healthy is exactly backwards.
+				// "abandoned" releases the lease without closing the breaker, leaving
+				// the next request free to probe. A truncated (non-native) stream
+				// still recovers — see the note above; that case carries no such
+				// self-reported failure.
+				const cleanEof =
+					success &&
+					rateLimitSniffer?.firedReason == null &&
+					nativeEndReason !== NATIVE_RESPONSES_STREAM_FAILED;
 				settleStreamProbe(
 					cleanEof ? "recovered" : "abandoned",
 					cleanEof ? "clean_eof" : "stream_not_success",
 				);
 				if (usageState) {
-					// Flush BEFORE classifying. A provider may close right after the
-					// last `data:` byte with no trailing newline, so a final
-					// `message_start` can still be sitting in the line buffer here —
-					// classifying first would call a complete stream truncated.
-					// finalizeUsage's own flush then no-ops.
-					flushPendingSseLine(usageState);
 					// A qualifying stream that never produced `message_start` died
 					// before any content. Bun reported a clean `done:true`, so the
 					// header-only `success` above says 200/OK — but the row would carry
@@ -1062,15 +1094,23 @@ async function forwardToClientInner(
 					const responseTimeMs = Math.max(0, Date.now() - timestamp);
 					ctx.requestRecorder.finishTransport(
 						requestId,
-						rateLimitSniffer.firedReason || truncatedBeforeStart
+						rateLimitSniffer.firedReason ||
+							truncatedBeforeStart ||
+							nativeEndReason
 							? "error"
 							: success
 								? "success"
 								: "error",
 						// An in-band SSE error frame is the more specific diagnosis and
-						// keeps precedence — that path already records correctly.
+						// keeps precedence — that path already records correctly, and it
+						// CAN fire on a native stream (a native `event: error` carrying
+						// `rate_limit_error` matches the sniffer), so this ordering is
+						// load-bearing, not cosmetic. `truncatedBeforeStart` is the one
+						// that cannot fire natively.
 						rateLimitSniffer.firedReason ??
-							(truncatedBeforeStart ? STREAM_TRUNCATED_MID_CONTENT : undefined),
+							(truncatedBeforeStart
+								? STREAM_TRUNCATED_MID_CONTENT
+								: (nativeEndReason ?? undefined)),
 					);
 					trackFinalize(
 						usageState,
