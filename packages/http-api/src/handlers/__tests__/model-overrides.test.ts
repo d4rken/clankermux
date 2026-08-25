@@ -182,6 +182,22 @@ describe("POST /api/models/overrides", () => {
 		expect(recorded.set).toEqual([]);
 	});
 
+	// The body is the WHOLE row. A body that never mentions the name would, if
+	// accepted, clear a stored rename as a side effect of hiding or un-hiding —
+	// the exact loss the full-replacement contract exists to prevent. Saying "no
+	// name" takes an explicit null.
+	test("rejects a body that omits displayName", async () => {
+		const { handlers, recorded } = harness();
+		const { dialect, modelId, hidden, custom } = VALID;
+
+		const resp = await handlers.setOverride(
+			postBody({ dialect, modelId, hidden, custom }),
+		);
+
+		expect(resp.status).toBe(400);
+		expect(recorded.set).toEqual([]);
+	});
+
 	// The storage layer refuses this pairing too; catching it here makes the
 	// refusal a 400 with a reason rather than a constraint violation.
 	test("rejects a row that is both hidden and custom", async () => {

@@ -100,11 +100,10 @@ export function createModelOverrideHandlers(deps: ModelOverrideHandlerDeps) {
 					BadRequest("A model cannot be both hidden and custom"),
 				);
 			}
-			if (
-				input.displayName !== null &&
-				input.displayName !== undefined &&
-				typeof input.displayName !== "string"
-			) {
+			// Omission is rejected, not treated as "no name": the body is the whole
+			// row, so accepting a body that never mentions the name would let an
+			// unrelated edit clear a stored rename without anyone asking for it.
+			if (input.displayName !== null && typeof input.displayName !== "string") {
 				return errorResponse(
 					BadRequest("Invalid 'displayName': must be a string or null"),
 				);
@@ -140,11 +139,10 @@ export function createModelOverrideHandlers(deps: ModelOverrideHandlerDeps) {
 					custom: input.custom,
 					// A blank name is not a name. Normalising it to null here means the
 					// row can then be recognised as a no-op and deleted rather than
-					// stored as "renamed to nothing".
-					displayName:
-						displayName === undefined || displayName === ""
-							? null
-							: displayName,
+					// stored as "renamed to nothing". An explicit null arrives as
+					// undefined, because validateString maps it there; both mean the
+					// same thing to the row.
+					displayName: displayName ? displayName : null,
 				});
 				return new Response(null, { status: 204 });
 			} catch (error) {

@@ -54,6 +54,8 @@ const ONE_MODEL = body([
 
 interface HarnessOptions {
 	accounts?: Account[];
+	/** Replaces the plain listing when a test needs it to cost time or throw. */
+	listAccounts?: () => Promise<readonly Account[]>;
 	getAccessToken?: (acct: Account) => Promise<string>;
 	/** One entry per attempt; the last is reused once exhausted. */
 	responses?: Array<
@@ -68,12 +70,17 @@ function harness(options: HarnessOptions = {}) {
 	const accounts = options.accounts ?? [account()];
 	const responses = options.responses ?? [{ status: 200, body: ONE_MODEL }];
 	const fetchCalls: Array<{ url: string; headers: Headers }> = [];
+	const tokenCalls: string[] = [];
 	let clock = 1_000;
 
 	const cache = new AnthropicModelCatalogCache({
-		listAccounts: async () => accounts,
-		getAccessToken:
-			options.getAccessToken ?? (async (acct: Account) => `token-${acct.id}`),
+		listAccounts: options.listAccounts ?? (async () => accounts),
+		getAccessToken: async (acct: Account) => {
+			tokenCalls.push(acct.id);
+			return options.getAccessToken
+				? await options.getAccessToken(acct)
+				: `token-${acct.id}`;
+		},
 		fetchImpl: (async (input: string, init?: RequestInit) => {
 			fetchCalls.push({
 				url: String(input),
@@ -95,6 +102,7 @@ function harness(options: HarnessOptions = {}) {
 	return {
 		cache,
 		fetchCalls,
+		tokenCalls,
 		advance: (ms: number) => {
 			clock += ms;
 		},
@@ -346,6 +354,28 @@ describe("AnthropicModelCatalogCache", () => {
 		});
 
 		expect((await cache.get()).source).toBe("bundled");
+	});
+
+	// The budget starts when the lookup does, not when the account list arrives.
+	// A database read that outlives it has already lost the outer race, so every
+	// step after it — a token refresh, a bearer-authenticated call to Anthropic —
+	// would be spent producing an answer nobody is waiting for.
+	test("drops the attempt when listing accounts outlives the budget", async () => {
+		let advance: (ms: number) => void = () => {};
+		const h = harness({
+			lookupBudgetMs: 5_000,
+			listAccounts: async () => {
+				advance(6_000);
+				return [account()];
+			},
+		});
+		advance = h.advance;
+
+		const snapshot = await h.cache.get();
+
+		expect(snapshot.source).toBe("bundled");
+		expect(h.tokenCalls).toEqual([]);
+		expect(h.fetchCalls).toHaveLength(0);
 	});
 
 	// The per-attempt loop needs its own ceiling: N accounts each returning at

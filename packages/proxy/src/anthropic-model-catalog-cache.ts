@@ -270,6 +270,17 @@ export class AnthropicModelCatalogCache {
 	private async fetchFromAnyAccount(): Promise<
 		readonly AnthropicCatalogModel[] | null
 	> {
+		// Two bounds, because they stop different things. This one keeps a loop of
+		// attempts that each RETURN from consuming the budget several times over;
+		// the race in withDeadline is the backstop for a single attempt that never
+		// returns at all, which no amount of checking between attempts can catch.
+		//
+		// Taken BEFORE the account listing rather than after it: the listing is a
+		// database read that can outlive the budget on its own, and everything past
+		// it is a bearer-authenticated call whose result the race has already
+		// thrown away.
+		const deadline = this.deps.now() + this.deps.lookupBudgetMs;
+
 		let accounts: readonly Account[];
 		try {
 			accounts = await this.deps.listAccounts();
@@ -281,18 +292,19 @@ export class AnthropicModelCatalogCache {
 			return null;
 		}
 
+		if (this.deps.now() >= deadline) {
+			log.warn(
+				"Account listing outlived the Anthropic model-catalogue budget; dropping the attempt",
+			);
+			return null;
+		}
+
 		const candidates = accounts
 			.filter((account) => account.provider === "anthropic" && !account.paused)
 			// Sorted, not database order: the answer must not depend on row order or
 			// on who happened to answer first.
 			.sort((a, b) => a.id.localeCompare(b.id));
 		if (candidates.length === 0) return null;
-
-		// Two bounds, because they stop different things. This one keeps a loop of
-		// attempts that each RETURN from consuming the budget several times over;
-		// the race in withDeadline is the backstop for a single attempt that never
-		// returns at all, which no amount of checking between attempts can catch.
-		const deadline = this.deps.now() + this.deps.lookupBudgetMs;
 
 		for (const account of candidates) {
 			if (this.deps.now() >= deadline) {
