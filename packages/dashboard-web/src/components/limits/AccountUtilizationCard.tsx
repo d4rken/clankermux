@@ -1,6 +1,16 @@
-import { extractFiveHour, extractSevenDay } from "@clankermux/core";
 import type { AccountResponse } from "@clankermux/types";
 import { AlertCircle } from "lucide-react";
+import { useState } from "react";
+import {
+	ACCOUNT_UTILIZATION_SORT_LABELS,
+	ACCOUNT_UTILIZATION_SORT_MODES,
+	ACCOUNT_UTILIZATION_SORT_STORAGE_KEY,
+	type AccountUtilizationSortMode,
+	accountToUsageCardSource,
+	DEFAULT_ACCOUNT_UTILIZATION_SORT_MODE,
+	parseAccountUtilizationSortMode,
+	sortAccountsByUtilization,
+} from "../../lib/account-utilization-sort";
 import { computeWindowResetExtremes } from "../../lib/usage-windows";
 import { providerShowsWeeklyUsage } from "../../utils/provider-utils";
 import { AccountStatusChips } from "../accounts/AccountStatusChips";
@@ -14,6 +24,14 @@ import {
 	CardHeader,
 	CardTitle,
 } from "../ui/card";
+import { Label } from "../ui/label";
+import {
+	Select,
+	SelectContent,
+	SelectItem,
+	SelectTrigger,
+	SelectValue,
+} from "../ui/select";
 import { Skeleton } from "../ui/skeleton";
 
 interface AccountUtilizationCardProps {
@@ -34,19 +52,19 @@ interface AccountUtilizationCardProps {
 	unavailableReason?: string;
 }
 
-/** Highest of the account's 5h/7d utilization, for sort ordering (no data → -1). */
-function maxUtilization(account: AccountResponse): number {
-	if (!account.usageData) return -1;
-	const five = extractFiveHour(account.usageData)?.pct ?? null;
-	const seven = extractSevenDay(account.usageData)?.pct ?? null;
-	if (five == null && seven == null) return -1;
-	return Math.max(five ?? 0, seven ?? 0);
-}
-
-/** Windowed-quota accounts (or rate-limited ones) that RateLimitProgress can render. */
+/**
+ * Windowed-quota accounts (or rate-limited ones) that RateLimitProgress can render.
+ *
+ * `staleUsage` counts: an account whose live usage read failed still carries a
+ * persisted snapshot, which `classifyUsageCard` classifies as `stale` and
+ * RateLimitProgress renders as a "last known as of HH:MM" row. Leaving it out
+ * of this predicate made the filter and the renderer disagree, and the filter
+ * was the one that was wrong.
+ */
 function hasWindowedUsage(account: AccountResponse): boolean {
 	return (
 		account.usageData != null ||
+		account.staleUsage != null ||
 		account.usageRateLimitedUntil != null ||
 		account.rateLimitReset != null
 	);
@@ -63,39 +81,99 @@ export function AccountUtilizationCard({
 	loading = false,
 	unavailableReason,
 }: AccountUtilizationCardProps) {
+	// Row order, persisted so the choice survives reloads. localStorage can throw
+	// (e.g. Safari private mode) — degrade to the in-memory default.
+	const [sortMode, setSortMode] = useState<AccountUtilizationSortMode>(() => {
+		if (typeof window === "undefined")
+			return DEFAULT_ACCOUNT_UTILIZATION_SORT_MODE;
+		try {
+			return parseAccountUtilizationSortMode(
+				window.localStorage.getItem(ACCOUNT_UTILIZATION_SORT_STORAGE_KEY),
+			);
+		} catch {
+			return DEFAULT_ACCOUNT_UTILIZATION_SORT_MODE;
+		}
+	});
+
+	const handleSortModeChange = (value: string) => {
+		const mode = parseAccountUtilizationSortMode(value);
+		setSortMode(mode);
+		try {
+			window.localStorage.setItem(ACCOUNT_UTILIZATION_SORT_STORAGE_KEY, mode);
+		} catch {
+			// ignore — degrade to in-memory
+		}
+	};
+
 	const pending = loading && unavailableReason == null;
-	const rows = accounts
-		.filter(hasWindowedUsage)
-		.sort((a, b) => maxUtilization(b) - maxUtilization(a));
+	const rows = sortAccountsByUtilization(
+		accounts.filter(hasWindowedUsage),
+		sortMode,
+		now,
+	);
 
 	// Built from `rows`, not `accounts`: an account filtered out of this card has
 	// no countdown here to emphasize, and letting it define either endpoint
 	// would leave a visible category incorrectly marked.
 	const resetExtremes = computeWindowResetExtremes(
-		rows.map((account) => ({
-			resetIso: account.rateLimitReset,
-			usageUtilization: account.usageUtilization,
-			usageWindow: account.usageWindow,
-			usageData: account.usageData,
-			staleUsage: account.staleUsage,
-			usageRateLimitedUntil: account.usageRateLimitedUntil,
-			provider: account.provider,
-			showWeekly: providerShowsWeeklyUsage(account.provider),
-		})),
+		rows.map(accountToUsageCardSource),
 		now,
 	);
+
+	// A sort control over an error message, a skeleton, the empty state or a
+	// single row is a dead affordance.
+	const showSortControl =
+		unavailableReason == null && !pending && rows.length > 1;
 
 	return (
 		<Card id="account-utilization" className="scroll-mt-section">
 			<CardHeader>
-				<CardTitle>Account Utilization</CardTitle>
-				<CardDescription>
-					Current 5-hour and 7-day quota per account, with reset countdowns and
-					a burn-rate projection. The tick marks the expected pace; a bar turns
-					amber when it is projected to run out before its reset, and red once
-					that projection is well clear of the reset. Green reset times come
-					back first; red reset times come back last.
-				</CardDescription>
+				{/* A CONTAINER query, not a viewport one: this card is full-width on
+				    the Limits page today but sits in a grid elsewhere, and viewport
+				    width says nothing about the room this header actually has. Keyed
+				    on `sm:` the same mistake in SettingRow switched a two-track layout
+				    on at 640px while the row still had ~340px, overflowing its
+				    control. */}
+				<div className="@container">
+					<div className="flex flex-col gap-item @md:flex-row @md:items-start @md:justify-between">
+						<div className="min-w-0">
+							<CardTitle>Account Utilization</CardTitle>
+							<CardDescription>
+								Current 5-hour and 7-day quota per account, with reset
+								countdowns and a burn-rate projection. The tick marks the
+								expected pace; a bar turns amber when it is projected to run out
+								before its reset, and red once that projection is well clear of
+								the reset. Green reset times come back first; red reset times
+								come back last.
+							</CardDescription>
+						</div>
+						{showSortControl && (
+							<div className="flex items-center gap-item @md:shrink-0">
+								<Label
+									htmlFor="account-utilization-sort"
+									className="text-xs text-muted-foreground whitespace-nowrap"
+								>
+									Sort by
+								</Label>
+								<Select value={sortMode} onValueChange={handleSortModeChange}>
+									<SelectTrigger
+										id="account-utilization-sort"
+										className="h-9 w-full @md:w-[190px]"
+									>
+										<SelectValue />
+									</SelectTrigger>
+									<SelectContent>
+										{ACCOUNT_UTILIZATION_SORT_MODES.map((mode) => (
+											<SelectItem key={mode} value={mode}>
+												{ACCOUNT_UTILIZATION_SORT_LABELS[mode]}
+											</SelectItem>
+										))}
+									</SelectContent>
+								</Select>
+							</div>
+						)}
+					</div>
+				</div>
 			</CardHeader>
 			<CardContent>
 				{unavailableReason != null ? (
