@@ -4,15 +4,16 @@ import type { RequestResponse } from "@clankermux/types";
 // copy of its number.
 import { MAX_LANES } from "../../components/overview/LiveActivityLanes";
 import {
-	ageOpacity,
 	applyHistoryRows,
 	applyStreamEvent,
 	buildLanes,
 	type LiveStore,
 	LOST_AFTER_MS,
 	laneKeyOf,
+	MARK_OPACITY,
 	markRadius,
 	pruneLiveStore,
+	rankModels,
 	sweepLostEvents,
 } from "../live-activity";
 
@@ -906,14 +907,69 @@ describe("markRadius", () => {
 	});
 });
 
-describe("ageOpacity", () => {
-	it("fades from full to a floor across the window", () => {
-		expect(ageOpacity(T0, T0, WINDOW)).toBeCloseTo(1, 5);
-		expect(ageOpacity(T0 - WINDOW, T0, WINDOW)).toBeCloseTo(0.35, 5);
+describe("rankModels", () => {
+	const laneOf = (models: string[]) => ({
+		events: models.map((model, i) => ({
+			id: `r${i}`,
+			ts: T0,
+			project: "clankermux",
+			model,
+			tokens: 1,
+			status: "ok" as const,
+			durationMs: 1,
+			tokensPerSecond: null,
+			account: null,
+		})),
 	});
 
-	it("clamps rather than going transparent or over-bright", () => {
-		expect(ageOpacity(T0 - WINDOW * 3, T0, WINDOW)).toBeCloseTo(0.35, 5);
-		expect(ageOpacity(T0 + 5_000, T0, WINDOW)).toBeCloseTo(1, 5);
+	it("keeps the busiest models and counts the rest", () => {
+		const ranking = rankModels(
+			[laneOf(["a", "a", "a", "b", "b", "c", "d", "e", "f", "g"])],
+			3,
+		);
+		expect(ranking.colored).toEqual(["a", "b", "c"]);
+		expect(ranking.otherModels).toBe(4);
+	});
+
+	it("breaks ties on the name so the cut cannot flip between renders", () => {
+		// Equal-count models would otherwise trade the last slot on every
+		// re-render, flickering one mark between its hue and the neutral.
+		const first = rankModels([laneOf(["z", "y", "x"])], 2);
+		const second = rankModels([laneOf(["x", "y", "z"])], 2);
+		expect(first.colored).toEqual(second.colored);
+		expect(first.colored).toEqual(["x", "y"]);
+	});
+
+	it("ranks nothing when there is nothing on the plot", () => {
+		expect(rankModels([{ events: [] }], 5)).toMatchObject({
+			colored: [],
+			otherModels: 0,
+		});
+	});
+
+	it("counts a model across every lane it appears in", () => {
+		// Lanes are projects; one model spread thinly over several projects can
+		// still be the busiest thing on the card.
+		const ranking = rankModels(
+			[laneOf(["spread", "loud"]), laneOf(["spread"]), laneOf(["spread"])],
+			1,
+		);
+		expect(ranking.colored).toEqual(["spread"]);
+	});
+});
+
+describe("MARK_OPACITY", () => {
+	it("is fully opaque, so a mark's colour is the palette colour", () => {
+		// Marks used to fade with age, to 0.35 at the left edge. That is
+		// incompatible with hue carrying model identity: compositing 28 palette
+		// hues toward the card ground collapses them into each other, and no
+		// floor short of 1.0 keeps every pair above the palette's own 15 dE
+		// threshold (measured worst pair at floor 0.90 is dE 9.9 on the dark
+		// ground). A partial fade cannot work either, because the ramp passes
+		// through every intermediate opacity on the way down.
+		//
+		// Age is not lost: this is a time axis, so horizontal position already
+		// states it exactly.
+		expect(MARK_OPACITY).toBe(1);
 	});
 });

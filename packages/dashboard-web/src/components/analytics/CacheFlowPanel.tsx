@@ -26,9 +26,9 @@ const STATUS_LABELS: Record<CacheStatus, string> = {
 // Palette KEYS rather than values: the three series are resolved against the
 // ground currently being painted (see useSeriesPalette), because the dark hue
 // set is chosen to sit on near-black and washes out on a white card.
-const STATUS_HUES: Record<CacheStatus, "green" | "peach" | "grey"> = {
+const STATUS_HUES: Record<CacheStatus, "green" | "tan" | "grey"> = {
 	read: "green",
-	write: "peach",
+	write: "tan",
 	uncached: "grey",
 };
 

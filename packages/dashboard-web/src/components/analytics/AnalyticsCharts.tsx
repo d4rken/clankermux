@@ -287,12 +287,12 @@ export function MainMetricsChart({
 											>
 												<stop
 													offset="0%"
-													stopColor={series.hue.peach}
+													stopColor={series.hue.tan}
 													stopOpacity={0.9}
 												/>
 												<stop
 													offset="100%"
-													stopColor={series.hue.peach}
+													stopColor={series.hue.tan}
 													stopOpacity={0.1}
 												/>
 											</linearGradient>
@@ -337,7 +337,7 @@ export function MainMetricsChart({
 											type="monotone"
 											dataKey="apiCost"
 											name="Token Cost"
-											stroke={series.hue.peach}
+											stroke={series.hue.tan}
 											strokeWidth={strokeW}
 											fillOpacity={1}
 											fill="url(#colorApiCost)"

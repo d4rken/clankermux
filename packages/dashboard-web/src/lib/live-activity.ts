@@ -1,4 +1,4 @@
-import type { RequestStreamEvt } from "@clankermux/core";
+import { getModelShortName, type RequestStreamEvt } from "@clankermux/core";
 import type { RequestResponse } from "@clankermux/types";
 import { NO_PROJECT_LABEL } from "./project-donut";
 
@@ -613,18 +613,97 @@ export function markRadius(tokens: number | null): number {
 	return MIN_RADIUS + (MAX_RADIUS - MIN_RADIUS) * scaled;
 }
 
-/** Opacity floor for the oldest mark still on screen. */
-const MIN_OPACITY = 0.35;
+/**
+ * Marks are drawn fully opaque. There is no age ramp, and adding one back would
+ * break the card's colour encoding.
+ *
+ * Age used to fade a mark toward the card ground, down to 0.35 at the window's
+ * left edge. That was sound while hue meant STATUS: four values, all far apart,
+ * so washing one out could not turn it into another. Hue now identifies the
+ * MODEL across 28 palette entries, and compositing those toward the ground
+ * collapses them into each other — measured over every pair at every point on
+ * the ramp, against the real card grounds:
+ *
+ *   floor 0.35 -> min dE  4.1 (dark, purple vs fuchsia)   0.6 (light)
+ *   floor 0.70 -> min dE  6.5                             5.6
+ *   floor 0.90 -> min dE  9.9 (dark, teal vs mint)       13.0
+ *   no fade   -> min dE 15.1                             18.5
+ *
+ * Only "no fade" clears the palette's own 15 dE floor. There is no partial
+ * setting that works, because the ramp passes through every intermediate
+ * opacity on its way down.
+ *
+ * Nothing is lost by dropping it: this is a time axis, so a mark's age is
+ * already given by its horizontal position, exactly and unambiguously. The fade
+ * was a second, redundant encoding of the one variable the plot's geometry
+ * already carries. It also actively hurt in one case — an in-flight request
+ * pending for the whole window faded to 35%, making the mark most likely to be
+ * wedged the faintest thing on the card.
+ */
+export const MARK_OPACITY = 1;
 
 /**
- * Fade a mark with its age across the window — a single-hue lightness ramp, so
- * age never competes with the status hues for meaning.
+ * How many models get their own colour on the card before the rest collapse
+ * into one "Other" bucket.
+ *
+ * Five covers 99.0% of a day's requests here, 98.9% of a week and 98.2% of a
+ * month — the top five run 6.8% and up while the sixth-busiest real model is
+ * 0.01%, so the cap sits in a very wide gap rather than cutting through a
+ * cluster. The card's window is minutes, and seven distinct models appear in a
+ * whole day; a legend longer than this is legend for traffic that is not there.
+ *
+ * Analytics deliberately does NOT cap. Its ranges reach back far enough that
+ * the tail is real — Opus 4.8 is 19% of lifetime traffic and Opus 4.7 another
+ * 9%, both effectively retired now — and greying them would merge a quarter of
+ * all history into one band in exactly the charts that exist to separate it.
  */
-export function ageOpacity(ts: number, now: number, windowMs: number): number {
-	if (windowMs <= 0) return 1;
-	const age = (now - ts) / windowMs;
-	const clamped = Math.min(Math.max(age, 0), 1);
-	return 1 - (1 - MIN_OPACITY) * clamped;
+export const MAX_COLORED_MODELS = 5;
+
+export interface ModelRanking {
+	/** Short names that keep their own hue, busiest first. */
+	colored: string[];
+	/** Short name -> a full model id for it, for palette lookup. */
+	idFor: Map<string, string>;
+	/** How many distinct models fell outside the cap. */
+	otherModels: number;
+}
+
+/**
+ * Rank the models on the plot by request count and decide which keep a hue.
+ *
+ * Rank decides only WHETHER a model is coloured, never WHICH colour it gets —
+ * that stays keyed to the model id. If rank picked the hue, every mark on the
+ * card would change colour whenever two models swapped places as the window
+ * rolled, which is the instability the id-keyed palette exists to prevent.
+ *
+ * Ties break on the short name so the cut is deterministic: two models on equal
+ * counts would otherwise trade the last slot on every re-render.
+ */
+export function rankModels(
+	lanes: Array<{ events: LiveEvent[] }>,
+	limit: number = MAX_COLORED_MODELS,
+): ModelRanking {
+	const counts = new Map<string, number>();
+	const idFor = new Map<string, string>();
+	for (const lane of lanes) {
+		for (const event of lane.events) {
+			if (!event.model) continue;
+			const shortName = getModelShortName(event.model);
+			counts.set(shortName, (counts.get(shortName) ?? 0) + 1);
+			if (!idFor.has(shortName)) idFor.set(shortName, event.model);
+		}
+	}
+
+	const ordered = [...counts.entries()].sort(
+		([nameA, countA], [nameB, countB]) =>
+			countB - countA || nameA.localeCompare(nameB),
+	);
+
+	return {
+		colored: ordered.slice(0, limit).map(([name]) => name),
+		idFor,
+		otherModels: Math.max(ordered.length - limit, 0),
+	};
 }
 
 // ---------------------------------------------------------------------------

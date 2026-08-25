@@ -20,10 +20,16 @@ export interface SeriesPalette {
 	 * assignable to them.
 	 */
 	hue: Record<HueName, string>;
-	/** Index-addressed fallback sequence for series with no named assignment. */
+	/** Fallback sequence for series with no named assignment. */
 	sequence: readonly string[];
-	/** Colour for a model id, resolved for the current ground. */
-	forModel: (model: string, index: number) => string;
+	/**
+	 * Colour for a model id, resolved for the current ground.
+	 *
+	 * Takes no index: an unassigned model's colour is derived from its ID, not
+	 * from where it happens to sit in the series list, so it does not change
+	 * when a neighbouring series appears or drops out of the range.
+	 */
+	forModel: (model: string) => string;
 }
 
 /**
@@ -31,7 +37,7 @@ export interface SeriesPalette {
  *
  * Chart series cannot use the CSS token layer the rest of the UI uses: recharts
  * wants concrete values for `stroke`/`fill`, and the qualitative palette is a
- * curated 17-hue set rather than a handful of semantic roles. What it can do is
+ * 28-hue qualitative set rather than a handful of semantic roles. What it can do is
  * pick the right SET — the dark palette's hues are chosen to sit above L* 45 on
  * a near-black ground and several of them fall under 1.5:1 on a white card, so
  * a light palette needs its own values for the same keys.
@@ -48,8 +54,7 @@ export function useSeriesPalette(): SeriesPalette {
 			mode,
 			hue: mode === "light" ? MODEL_PALETTE_LIGHT : MODEL_PALETTE,
 			sequence: mode === "light" ? CHART_COLORS_LIGHT : CHART_COLORS,
-			forModel: (model: string, index: number) =>
-				getModelColor(model, index, mode),
+			forModel: (model: string) => getModelColor(model, mode),
 		}),
 		[mode],
 	);
