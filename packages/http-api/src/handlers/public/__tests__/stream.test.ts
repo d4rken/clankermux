@@ -17,7 +17,7 @@
  * Plus the property this whole surface exists for: the internal event
  * discriminator never reaches the wire.
  */
-import { afterEach, describe, expect, it } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import {
 	type RequestEvt,
 	requestEvents,
@@ -72,6 +72,19 @@ function dataOf(frame: string): Record<string, unknown> | null {
 		return null;
 	}
 }
+
+/**
+ * The active-request registry is a module global shared by every suite in the
+ * process, and a suite elsewhere that drives real proxy code emits a `start`
+ * without a matching `summary` — leaving a live entry that this handler then
+ * faithfully replays into every stream opened here. Resetting only afterwards
+ * cleans up after this file but not before it, so the snapshot assertions
+ * below describe whatever the previous file happened to leave behind. Reset on
+ * BOTH sides.
+ */
+beforeEach(() => {
+	resetRequestEventRegistry();
+});
 
 afterEach(() => {
 	// Closing the streams detaches their listeners; the module's own registry
