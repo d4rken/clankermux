@@ -105,13 +105,17 @@ export interface UsageState {
 	 *
 	 * Not diagnostic, despite what an older comment here claimed: paired with
 	 * `providerReportedOutput` this is `terminalSeen` in response-handler, which
-	 * reclassifies a subsequent generic read error as a success, settles the
-	 * stream probe as recovered, and passes `endedCleanly`. So it must stay
-	 * keyed to a SUCCESSFUL terminal. `response.incomplete` and
-	 * `response.failed` deliberately do NOT set it — they carry trustworthy
-	 * usage (see {@link responsesTerminalKind}) but they are not clean endings,
-	 * and conflating the two would silently turn failed responses into
-	 * successes.
+	 * reclassifies a subsequent generic read error as a success and settles the
+	 * stream probe as recovered. So it must stay keyed to a SUCCESSFUL terminal.
+	 * `response.incomplete` and `response.failed` deliberately do NOT set it —
+	 * conflating the two would silently turn failed responses into successes.
+	 *
+	 * It does NOT decide usage trust. That is the other key,
+	 * {@link responsesTerminalKind}: a Responses terminal is terminal in the
+	 * protocol, so `.incomplete` / `.failed` report the backend's own final
+	 * counts just as authoritatively as `.completed`. response-handler's
+	 * `onError` keys `endedCleanly` on that one and this one on the transport
+	 * verdict; `onEnd` already passes `endedCleanly: true` unconditionally.
 	 */
 	sawMessageStop: boolean;
 	/**

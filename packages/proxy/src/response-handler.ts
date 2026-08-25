@@ -1168,6 +1168,34 @@ async function forwardToClientInner(
 				//
 				// An in-band SSE error frame wins over both: a fired sniffer keeps
 				// the error classification and the untrusted counts.
+				// The two consequences above are keyed SEPARATELY, because they ask
+				// different questions — the paragraph above has always claimed they
+				// were decoupled, but a single `terminalSeen` used to gate both.
+				//
+				// USAGE trust: did a terminal carrying the provider's own final
+				// counts arrive? A Responses terminal is terminal in the protocol —
+				// no content follows it — so `response.failed` / `.incomplete` report
+				// the backend's billing record for the request just as authoritatively
+				// as `response.completed` does. Withholding that trust made finalize
+				// take max(exactCount, bytes/4) over every raw SSE frame, inflating
+				// counts the backend had already reported precisely.
+				//
+				// The Responses-terminal arm is what makes this safe for Anthropic.
+				// `providerReportedOutput` alone would NOT do: on the Anthropic path
+				// every `message_delta` sets it, and a stream cut after the last delta
+				// really can have emitted more text — that is the R5 anti-undercount
+				// case the max() exists for. `responsesTerminalKind` is non-null only
+				// on native passthrough, so for Anthropic and every translated
+				// provider this expression stays bit-identical to the old one.
+				const usageTerminalSeen =
+					usageState?.providerReportedOutput === true &&
+					(usageState.sawMessageStop === true ||
+						usageState.responsesTerminalKind !== null) &&
+					rateLimitSniffer.firedReason == null;
+				// TRANSPORT reclassification and the probe verdict: only a CLEAN
+				// terminal means the complete response reached the client stream
+				// before the cut. A failed response did not become successful because
+				// the connection also dropped.
 				const terminalSeen =
 					usageState?.sawMessageStop === true &&
 					usageState.providerReportedOutput === true &&
@@ -1218,7 +1246,9 @@ async function forwardToClientInner(
 							providerName: ctx.provider.name,
 							accountProvider,
 							isStream: true,
-							endedCleanly: terminalSeen,
+							// The USAGE key, not the transport one: this decides only
+							// whether finalize trusts the provider's counts.
+							endedCleanly: usageTerminalSeen,
 						},
 						ctx,
 					);
