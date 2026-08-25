@@ -249,27 +249,54 @@ export class CodexUsagePoller {
 			}
 		}
 
-		if (now < state.dueAt) return;
+		// Freshness threshold for "a poll now would be redundant". Two bounds keep
+		// it strictly below every delay the healthy scheduler can produce, so a
+		// due poll can never classify ITS OWN previous reading as fresh (which
+		// would skip the poll, double the real cadence, and break the ≤15min
+		// observation-gap contract the poller exists to uphold):
+		//  - min(active, TTL - lead): computePollDelay clamps every demand-aware
+		//    delay to that cap, while the configured interval may be up to 1h;
+		//  - × 0.8: the worst-case downward jitter (active is symmetric ±20%,
+		//    idle folds to negative-only −10%), so even the earliest jittered poll
+		//    still sees the previous reading as stale.
+		const freshnessMs =
+			0.8 *
+			Math.min(activeIntervalMs, USAGE_CACHE_TTL_MS - IDLE_REFRESH_LEAD_MS);
+		const isTrafficFresh = () => {
+			const observedAtMs = this.deps.peekObservedAtMs(account.id);
+			return observedAtMs !== null && now - observedAtMs < freshnessMs;
+		};
+
+		if (now < state.dueAt) {
+			// A fresh TIMED reading arriving while a failure BACKOFF is pending is
+			// positive evidence acquisition recovered (traffic or a manual refresh
+			// repopulated the cache). Convert the backoff into the healthy cadence
+			// now instead of serving out up to 30 minutes of it — without this, the
+			// first poll after recovery could sit a full backoff away from that
+			// lone reading and break the observation run anyway.
+			if (state.failures > 0 && isTrafficFresh()) {
+				state.failures = 0;
+				state.lastReadFailed = false;
+				const { delayMs, isIdle } = computePollDelay({
+					demandAware: true,
+					activeIntervalMs,
+					lastActivityMs: account.last_used,
+					failures: 0,
+					retryAfterMs: null,
+					now,
+					jitterFraction: this.jitterFraction(),
+				});
+				state.dueAt = now + delayMs;
+				state.isIdle = isIdle;
+			}
+			return;
+		}
 
 		// Real traffic keeps the cache fresh with TIMED readings; a poll on top
 		// would be redundant. An UNTIMED entry (peekObservedAtMs → null, the
 		// post-restart payload rebuild) never satisfies this and is replaced by a
 		// real read immediately.
-		//
-		// The freshness threshold is the CLAMPED healthy cadence, not the raw
-		// configured interval: computePollDelay caps every demand-aware delay at
-		// USAGE_CACHE_TTL_MS - IDLE_REFRESH_LEAD_MS, so with a configured interval
-		// above that cap (allowed up to 1h) a reading taken at the previous poll
-		// would still be "fresh" by the raw interval at the next due time — every
-		// poll would skip, doubling the real cadence and breaking the ≤15min
-		// observation-gap contract the poller exists to uphold.
-		const freshnessMs = Math.min(
-			activeIntervalMs,
-			USAGE_CACHE_TTL_MS - IDLE_REFRESH_LEAD_MS,
-		);
-		const observedAtMs = this.deps.peekObservedAtMs(account.id);
-		const trafficFresh =
-			observedAtMs !== null && now - observedAtMs < freshnessMs;
+		const trafficFresh = isTrafficFresh();
 
 		if (trafficFresh) {
 			// A fresh TIMED reading is positive evidence acquisition works, however

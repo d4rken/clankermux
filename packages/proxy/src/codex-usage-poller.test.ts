@@ -320,6 +320,59 @@ describe("CodexUsagePoller", () => {
 		expect(h.readCalls).toHaveLength(3);
 	});
 
+	it("keeps the freshness threshold under the earliest jittered poll delay", async () => {
+		// activeIntervalMs = 500s sits in the band where a naive min(active, cap)
+		// threshold exceeds the negatively-jittered idle delay (540s * 0.9 = 486s):
+		// the due poll would see its own previous reading (age 486s < 500s) as
+		// fresh, skip, and only read again ~972s later — past the 15min
+		// observation-gap contract. The 0.8 factor keeps the threshold (400s)
+		// under every reachable delay.
+		const activeMs = 500_000;
+		let nowMs = T0;
+		const readCalls: string[] = [];
+		const observedAt = new Map<string, number>();
+		const poller = new CodexUsagePoller({
+			listCodexAccounts: async () => [makeAccount()],
+			readUsage: async (id) => {
+				readCalls.push(id);
+				observedAt.set(id, nowMs);
+				return { success: true, message: "ok" };
+			},
+			peekObservedAtMs: (id) => observedAt.get(id) ?? null,
+			activeIntervalMs: () => activeMs,
+			now: () => nowMs,
+			// The caller-supplied symmetric jitter that folds to the idle band's
+			// most-negative value (-10%): idle delay = 540s * 0.9 = 486s.
+			jitterFraction: () => 0.2,
+		});
+		await poller.tick();
+		expect(readCalls).toHaveLength(1);
+		nowMs = T0 + 486_000; // the jittered idle due time
+		await poller.tick();
+		// Reading age 486s ≥ threshold 400s → a real read, not a skip.
+		expect(readCalls).toHaveLength(2);
+	});
+
+	it("converts a pending backoff into the healthy cadence when a fresh reading appears", async () => {
+		h.setReadResult({ success: false, message: "boom" });
+		await h.poller.tick(); // failure #1 → backoff, due T0 + ACTIVE * 2
+		expect(h.readCalls).toHaveLength(1);
+		// Mid-backoff (NOT yet due), traffic repopulates the cache with a timed
+		// reading: the backoff is converted to the healthy cadence from now.
+		h.setNow(T0 + 60_000);
+		h.accounts[0].last_used = h.now() - 1_000;
+		h.setObservedAt("acct-1", h.now());
+		h.setReadResult({ success: true, message: "ok" });
+		await h.poller.tick();
+		expect(h.readCalls).toHaveLength(1); // no read — evidence alone reschedules
+		// Healthy ACTIVE cadence from the conversion point: due T0+60s+90s, which
+		// is EARLIER than the original backoff due time (T0+180s).
+		h.setNow(T0 + 150_000);
+		h.accounts[0].last_used = h.now() - 1_000;
+		await h.poller.tick();
+		expect(h.readCalls).toHaveLength(2);
+	});
+
 	it("isolates a throwing read to its own account and backs it off", async () => {
 		let nowMs = T0;
 		const readCalls: string[] = [];
