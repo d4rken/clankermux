@@ -60,6 +60,7 @@ import {
 	CodexModelCatalogCache,
 	type CodexResetCreditApplyScheduler,
 	CodexSpendCoordinator,
+	CodexUsagePoller,
 	createCodexResetCreditApplyScheduler,
 	dispatchProxyRequest,
 	drainPendingUsageFinalizers,
@@ -263,6 +264,7 @@ let stopDataCleanupJob: (() => void) | null = null;
 let stopWalCheckpointJob: (() => void) | null = null;
 let stopIntegritySchedulerJob: (() => void) | null = null;
 let autoRefreshScheduler: AutoRefreshScheduler | null = null;
+let codexUsagePoller: CodexUsagePoller | null = null;
 let cacheKeepaliveScheduler: CacheKeepaliveScheduler | null = null;
 let usageSnapshotSampler: UsageSnapshotSampler | null = null;
 let cacheKeepaliveSnapshotSampler: CacheKeepaliveSnapshotSampler | null = null;
@@ -1297,6 +1299,23 @@ export default async function startServer(options?: {
 	);
 	autoRefreshScheduler.start();
 
+	// Demand-aware Codex usage poller: keeps the usage cache warm with TIMED
+	// readings via the zero-cost `GET /wham/usage` read, so the snapshot sampler
+	// records continuous history for idle codex accounts (the quota-drift fit
+	// needs observation runs, and real traffic alone only covers active bursts).
+	// Skips the network read whenever live traffic already produced a reading
+	// younger than one active interval. See CodexUsagePoller for the cadence
+	// policy; the active interval is shared with the Anthropic usage poller.
+	codexUsagePoller = new CodexUsagePoller({
+		listCodexAccounts: async () =>
+			(await dbOps.getAllAccounts()).filter((a) => a.provider === "codex"),
+		readUsage: (accountId) => codexSpendCoordinator.readUsageStatus(accountId),
+		peekObservedAtMs: (accountId) =>
+			usageCache.peekWithAge(accountId)?.observedAtMs ?? null,
+		activeIntervalMs: () => config.getUsagePollIntervalMs(),
+	});
+	codexUsagePoller.start();
+
 	// Initialize cache keepalive scheduler
 	cacheKeepaliveScheduler = new CacheKeepaliveScheduler(proxyContext, config);
 	cacheKeepaliveScheduler.start();
@@ -1887,6 +1906,10 @@ async function handleGracefulShutdown(signal: string) {
 		if (autoRefreshScheduler) {
 			autoRefreshScheduler.stop();
 			autoRefreshScheduler = null;
+		}
+		if (codexUsagePoller) {
+			codexUsagePoller.stop();
+			codexUsagePoller = null;
 		}
 		if (cacheKeepaliveScheduler) {
 			cacheKeepaliveScheduler.stop();
