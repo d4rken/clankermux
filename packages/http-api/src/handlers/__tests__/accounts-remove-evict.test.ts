@@ -4,9 +4,12 @@ import {
 	usageCache,
 } from "@clankermux/providers";
 import {
+	clearAccountRefreshCache,
 	clearCapacityRestoredProbePending,
+	getCoalescibleRecentRefresh,
 	hasCapacityRestoredProbePending,
 	markCapacityRestoredProbePending,
+	recordRecentRefresh,
 	sessionCacheStore,
 } from "@clankermux/proxy";
 import { createAccountRemoveHandler } from "../accounts";
@@ -233,5 +236,197 @@ describe("createAccountRemoveHandler — session-cache eviction", () => {
 			clearCapacityRestoredProbePending(ACCOUNT_ID);
 			clearCapacityRestoredProbePending(OTHER_ID);
 		}
+	});
+});
+
+describe("createAccountRemoveHandler — usage-poll teardown", () => {
+	const wait = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+	/**
+	 * Deadline-based wait for a condition, so the "polling is live" precondition
+	 * never depends on a fixed sleep outrunning a loaded event loop. Failure
+	 * backoff is `activeIntervalMs * 2 ** failures` and unjittered, so with a
+	 * 20ms base the ticks are due at ~0/40/120/280ms — a fixed sleep would leave
+	 * only tens of milliseconds of slack when the whole suite runs in parallel.
+	 */
+	async function waitUntil(
+		predicate: () => boolean,
+		timeoutMs = 5000,
+	): Promise<void> {
+		const deadline = Date.now() + timeoutMs;
+		while (!predicate()) {
+			if (Date.now() > deadline) {
+				throw new Error(`waitUntil timed out after ${timeoutMs}ms`);
+			}
+			await wait(5);
+		}
+	}
+
+	/**
+	 * Removal used to call `usageCache.delete(accountId)`, which drops only the
+	 * cached usage entry. `tokenProviders`, `pollTimeouts` and `pollGenerations`
+	 * survived it, and `scheduleNextPoll` re-arms for as long as `tokenProviders`
+	 * still holds the id — poll failures lengthen the backoff but never
+	 * unschedule. So a deleted account kept a live poll loop calling its token
+	 * provider until the process restarted.
+	 *
+	 * The token provider throws, so the loop never reaches the network: no fetch
+	 * mocking needed, and the invocation count is the whole signal. With no
+	 * onTokenRefreshFailure halt hook a throw is treated as transient, which is
+	 * exactly the "retries forever" case.
+	 */
+	it("stops the poll loop for the removed account, not just its cache entry", async () => {
+		const POLL_ID = "acc-poll-teardown";
+		let calls = 0;
+		const tokenProvider = async () => {
+			calls++;
+			throw new Error("network timeout"); // transient: never halts the loop
+		};
+
+		try {
+			usageCache.startPolling(POLL_ID, tokenProvider, "anthropic", 20, null);
+			// Wait for a RESCHEDULED tick, not just the immediate first fetch:
+			// that proves the loop re-arms, which is the behavior removal has to
+			// stop. Asserted before removal so the post-removal assertion can't
+			// pass for the wrong reason.
+			await waitUntil(() => calls > 1);
+
+			const { dbOps } = makeDbOps([{ id: POLL_ID, name: "poll-teardown" }]);
+			expect(
+				(await makeHandler(dbOps)(deleteRequest("poll-teardown"), POLL_ID))
+					.status,
+			).toBe(200);
+
+			const callsAtRemoval = calls;
+			await wait(250);
+			expect(calls).toBe(callsAtRemoval);
+		} finally {
+			usageCache.stopPolling(POLL_ID);
+		}
+	});
+
+	it("still evicts the usage cache for an account that never had a poller", async () => {
+		// Most of what stopPolling() clears sits behind its
+		// `tokenProviders.has(accountId)` guard, so for an account with no poll
+		// loop it is a no-op — the cache eviction included. Only anthropic, zai
+		// and kilo accounts get a poller, and only with credentials, so every
+		// other provider lands here, as does an account removed before its poller
+		// started. The handler's explicit delete() is what covers them.
+		const NO_POLLER_ID = "acc-no-poller";
+		usageCache.set(NO_POLLER_ID, { five_hour: { utilization: 42 } } as never);
+		expect(usageCache.peek(NO_POLLER_ID)).not.toBeNull();
+
+		try {
+			const { dbOps } = makeDbOps([{ id: NO_POLLER_ID, name: "no-poller" }]);
+			expect(
+				(await makeHandler(dbOps)(deleteRequest("no-poller"), NO_POLLER_ID))
+					.status,
+			).toBe(200);
+
+			expect(usageCache.peek(NO_POLLER_ID)).toBeNull();
+		} finally {
+			usageCache.delete(NO_POLLER_ID);
+		}
+	});
+
+	it("leaves a surviving account's poll loop running", async () => {
+		const GONE_ID = "acc-poll-gone";
+		const KEPT_ID = "acc-poll-kept";
+		let goneCalls = 0;
+		let keptCalls = 0;
+		const throwing = (bump: () => void) => async () => {
+			bump();
+			throw new Error("network timeout");
+		};
+
+		try {
+			usageCache.startPolling(
+				GONE_ID,
+				throwing(() => {
+					goneCalls++;
+				}),
+				"anthropic",
+				20,
+				null,
+			);
+			usageCache.startPolling(
+				KEPT_ID,
+				throwing(() => {
+					keptCalls++;
+				}),
+				"anthropic",
+				20,
+				null,
+			);
+			await waitUntil(() => goneCalls > 1 && keptCalls > 1);
+
+			const { dbOps } = makeDbOps([
+				{ id: GONE_ID, name: "poll-gone" },
+				{ id: KEPT_ID, name: "poll-kept" },
+			]);
+			expect(
+				(await makeHandler(dbOps)(deleteRequest("poll-gone"), GONE_ID)).status,
+			).toBe(200);
+
+			const goneAtRemoval = goneCalls;
+			const keptAtRemoval = keptCalls;
+			// The survivor's next tick is the clock: once it has fired, a still-live
+			// loop on the removed account (same cadence, same base interval) would
+			// have fired too. That reads the removed loop's silence off observed
+			// progress rather than off a fixed sleep.
+			await waitUntil(() => keptCalls > keptAtRemoval);
+
+			expect(goneCalls).toBe(goneAtRemoval);
+		} finally {
+			usageCache.stopPolling(GONE_ID);
+			usageCache.stopPolling(KEPT_ID);
+		}
+	});
+});
+
+describe("createAccountRemoveHandler — token-manager refresh state", () => {
+	/**
+	 * Removal never called `clearAccountRefreshCache`, so the removed account's
+	 * coalesce-cached token, refresh-failure record and backoff counter sat in
+	 * token-manager until the TTL sweep or the entry-count cap evicted them. The
+	 * coalesce cache is the slice of that state with a public reader, so it
+	 * stands in for the whole clear.
+	 */
+	const HEADROOM_MS = 60 * 60 * 1000;
+
+	// recentRefreshes is a module-level singleton shared with every other suite
+	// in this process, so both ids are cleared even on a failing assertion.
+	afterEach(() => {
+		clearAccountRefreshCache(ACCOUNT_ID);
+		clearAccountRefreshCache(OTHER_ID);
+	});
+
+	it("drops the removed account's coalesce-cached refresh, keeping other accounts'", () => {
+		recordRecentRefresh(ACCOUNT_ID, "tok-removed", Date.now() + HEADROOM_MS);
+		recordRecentRefresh(OTHER_ID, "tok-kept", Date.now() + HEADROOM_MS);
+		// Both read back to start with. Passing `null` as the caller's current
+		// token means "I hold nothing", so a cached token is always worth serving.
+		expect(getCoalescibleRecentRefresh(ACCOUNT_ID, null)).not.toBeNull();
+		expect(getCoalescibleRecentRefresh(OTHER_ID, null)).not.toBeNull();
+
+		clearAccountRefreshCache(ACCOUNT_ID);
+
+		expect(getCoalescibleRecentRefresh(ACCOUNT_ID, null)).toBeNull();
+		expect(getCoalescibleRecentRefresh(OTHER_ID, null)?.accessToken).toBe(
+			"tok-kept",
+		);
+	});
+
+	it("is reached by the removal handler", async () => {
+		recordRecentRefresh(ACCOUNT_ID, "tok-removed", Date.now() + HEADROOM_MS);
+		expect(getCoalescibleRecentRefresh(ACCOUNT_ID, null)).not.toBeNull();
+
+		const { dbOps } = makeDbOps();
+		expect(
+			(await makeHandler(dbOps)(deleteRequest(ACCOUNT_NAME), ACCOUNT_ID))
+				.status,
+		).toBe(200);
+
+		expect(getCoalescibleRecentRefresh(ACCOUNT_ID, null)).toBeNull();
 	});
 });
