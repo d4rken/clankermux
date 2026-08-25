@@ -82,6 +82,7 @@ import {
 	registerPollingRestarter,
 	registerRefreshClearer,
 	rollbackCapacityRestoredProbePending,
+	sessionProjectCache,
 	setRequestRecorder,
 	startGlobalTokenHealthChecks,
 	startIntegrityScheduler,
@@ -1401,6 +1402,18 @@ export default async function startServer(options?: {
 		// store_payloads needs no worker push anymore: the RequestRecorder reads
 		// config.getStorePayloads() live on every begin()/capture/persist, so a
 		// hot-reload of the flag takes effect on the next request automatically.
+
+		// Project rules are read live per request, so the new rules apply on
+		// their own — but the session project cache still holds names derived
+		// under the OLD ones. Left alone, the first request of every live
+		// session would seed a different project for the same session, which
+		// the cache treats as a conflict and answers by withholding attribution
+		// for the next six hours. Dropping the cache costs one request of
+		// re-anchoring instead.
+		if (key === "project_roots" || key === "project_overrides") {
+			log.info("Project attribution rules changed; clearing session cache");
+			sessionProjectCache.clear();
+		}
 	});
 
 	// Everything the front door needs, bound once. `fetch` is a thin wrapper

@@ -107,6 +107,8 @@ export type {
 	ModelOverrideSetRequest,
 	ModelPerformance,
 	PoolStatus,
+	ProjectRulesGetResponse,
+	ProjectRulesSetRequest,
 	RequestResponse,
 	RetentionGetResponse,
 	RetentionSetRequest,

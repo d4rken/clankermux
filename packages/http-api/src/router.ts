@@ -458,6 +458,12 @@ export class APIRouter {
 		this.handlers.set("POST:/api/config/usage-throttling", (req) =>
 			configHandlers.setUsageThrottling(req),
 		);
+		this.handlers.set("GET:/api/config/project-rules", () =>
+			configHandlers.getProjectRules(),
+		);
+		this.handlers.set("POST:/api/config/project-rules", (req) =>
+			configHandlers.setProjectRules(req),
+		);
 		this.handlers.set("POST:/api/maintenance/cleanup", () => cleanupHandler());
 
 		// Payments ledger routes (summary reads dispatch through the read-only

@@ -12,6 +12,7 @@
 	"dependencies": {
 		"@clankermux/core": "workspace:*",
 		"@clankermux/logger": "workspace:*",
-		"@clankermux/security": "workspace:*"
+		"@clankermux/security": "workspace:*",
+		"@clankermux/types": "workspace:*"
 	}
 }

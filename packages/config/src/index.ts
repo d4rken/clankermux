@@ -13,6 +13,11 @@ import {
 } from "@clankermux/core";
 import { Logger } from "@clankermux/logger";
 import { validatePathOrThrow } from "@clankermux/security";
+import {
+	defaultProjectRules,
+	type ProjectPathOverride,
+	type ProjectRules,
+} from "@clankermux/types";
 import { resolveConfigPath } from "./paths";
 
 const log = new Logger("Config");
@@ -78,7 +83,17 @@ export interface ConfigData {
 	db_retry_delay_ms?: number;
 	db_retry_backoff?: number;
 	db_retry_max_delay_ms?: number;
-	[key: string]: string | number | boolean | undefined;
+	// Project attribution. The only structured keys in the file; see
+	// getProjectRules/setProjectRules for why they bypass get/set.
+	project_roots?: string[];
+	project_overrides?: ProjectPathOverride[];
+	[key: string]:
+		| string
+		| number
+		| boolean
+		| string[]
+		| ProjectPathOverride[]
+		| undefined;
 }
 
 /**
@@ -232,7 +247,12 @@ export class Config extends EventEmitter {
 		defaultValue?: string | number | boolean,
 	): string | number | boolean | undefined {
 		if (key in this.data) {
-			return this.data[key];
+			const value = this.data[key];
+			// The structured keys are not reachable through the scalar accessor;
+			// they have typed getters instead. Returning `undefined` here (rather
+			// than widening the signature) keeps every other caller honest.
+			if (Array.isArray(value)) return undefined;
+			return value;
 		}
 
 		if (defaultValue !== undefined) {
@@ -249,6 +269,23 @@ export class Config extends EventEmitter {
 		this.saveConfig();
 
 		// Emit change event
+		this.emit("change", { key, oldValue, newValue: value });
+	}
+
+	/**
+	 * Persist a list-valued key.
+	 *
+	 * Separate from `set` so that method's signature stays scalar-only. Same
+	 * save-and-emit contract, so listeners on "change" see structured keys the
+	 * same way they see every other one.
+	 */
+	private setStructured(
+		key: string,
+		value: string[] | ProjectPathOverride[],
+	): void {
+		const oldValue = this.data[key];
+		this.data[key] = value;
+		this.saveConfig();
 		this.emit("change", { key, oldValue, newValue: value });
 	}
 
@@ -529,10 +566,65 @@ export class Config extends EventEmitter {
 		this.set("usage_throttling_weekly_enabled", value);
 	}
 
+	/**
+	 * Path-to-project rules (see `ProjectRules`).
+	 *
+	 * Absent or malformed keys fall back to the DEFAULTS rather than to an
+	 * empty rule set: an empty `roots` list attributes nothing at all, so a
+	 * hand-edited config file with a typo would silently switch project
+	 * attribution off across the whole deployment. A present-but-empty list is
+	 * honoured, because that is a choice an operator can make in the UI.
+	 */
+	getProjectRules(): ProjectRules {
+		const defaults = defaultProjectRules();
+		const roots = this.data.project_roots;
+		const overrides = this.data.project_overrides;
+		// Element types are checked, not just the container. These values reach
+		// string operations on the request hot path, so a hand-edited
+		// `{"project_roots":[42]}` would otherwise throw on EVERY request rather
+		// than falling back as this method's contract promises. Elements are
+		// filtered individually so one bad entry costs that entry, not the file.
+		const validRoots = Array.isArray(roots)
+			? roots.filter((r): r is string => typeof r === "string")
+			: null;
+		const validOverrides = Array.isArray(overrides)
+			? overrides.filter(
+					(o): o is ProjectPathOverride =>
+						typeof o === "object" &&
+						o !== null &&
+						typeof (o as ProjectPathOverride).prefix === "string" &&
+						typeof (o as ProjectPathOverride).name === "string",
+				)
+			: null;
+		return {
+			roots: validRoots ?? defaults.roots,
+			overrides: validOverrides ?? defaults.overrides,
+		};
+	}
+
+	/**
+	 * Replace both rule lists.
+	 *
+	 * Written through `setStructured` rather than `set` so the public
+	 * `get`/`set` pair stays scalar-only — every other caller of `set` passes a
+	 * primitive, and widening its signature would let any key be handed an
+	 * object by accident.
+	 */
+	setProjectRules(rules: ProjectRules): void {
+		this.setStructured("project_roots", [...rules.roots]);
+		this.setStructured("project_overrides", [...rules.overrides]);
+	}
+
 	getAllSettings(): Record<string, string | number | boolean | undefined> {
+		// The structured project-attribution keys are deliberately excluded:
+		// this returns a flat scalar map, and they have their own endpoint like
+		// every other setting group. Spreading `this.data` would smuggle them in.
+		const { project_roots, project_overrides, ...scalars } = this.data;
+		void project_roots;
+		void project_overrides;
 		// Include current strategy (which might come from env)
 		return {
-			...this.data,
+			...(scalars as Record<string, string | number | boolean | undefined>),
 			lb_strategy: this.getStrategy(),
 			payload_retention_hours: this.getPayloadRetentionHours(),
 			payload_max_mb: this.getPayloadMaxMb(),

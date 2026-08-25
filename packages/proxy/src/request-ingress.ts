@@ -6,6 +6,7 @@ import {
 } from "@clankermux/core";
 import { Logger } from "@clankermux/logger";
 import {
+	defaultProjectRules,
 	getNativeResponsesRequestContext,
 	type ProjectAttributionSource,
 	type RequestMeta,
@@ -30,6 +31,7 @@ import { parseReasoningEffort } from "./reasoning-effort";
 import { extractRequestAffinity } from "./request-affinity";
 import { sessionProjectCache } from "./session-project-cache";
 import { sessionPromotionTracker } from "./session-promotion";
+import { unmatchedPathTracker } from "./unmatched-paths";
 
 // Same channel name as handleProxy's own logger: this module was carved out of
 // it, and the log lines below must keep their historical prefix.
@@ -165,7 +167,19 @@ export async function ingestProxyRequest(
 		parsedBody,
 		apiKeyId ?? null,
 		sessionProjectCache,
+		// Optional call with an honest fallback, the same shape as
+		// `ctx.config.getStorePayloads?.() ?? true` in response-handler. A Config
+		// that predates this method (or a test stub that does not mock it) gets
+		// the built-in defaults, which is exactly what an unconfigured deployment
+		// gets — not an empty rule set, which would attribute nothing at all.
+		ctx.config.getProjectRules?.() ?? defaultProjectRules(),
 	);
+	// A working directory that matched no rule is the operator's cue to add a
+	// project root; without this the new "return nothing rather than guess"
+	// behaviour would be correct but invisible.
+	if (resolved.source === "none" && resolved.unmatchedPath) {
+		unmatchedPathTracker.record(resolved.unmatchedPath);
+	}
 	const project = resolved.project;
 	// Which tier produced it (null = the request was never eligible). Carried
 	// beside `project` so the persisted row records HOW it was attributed.
