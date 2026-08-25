@@ -12,6 +12,7 @@ import {
 } from "../../hooks/queries";
 import { Card, CardContent, CardHeader, CardTitle } from "../ui/card";
 import { AddCustomModelForm } from "./AddCustomModelForm";
+import { ClientSetupNote } from "./ClientSetupNote";
 import { ModelRow } from "./ModelRow";
 
 /**
@@ -128,6 +129,10 @@ export function ModelDialectPanel({ dialect }: { dialect: ModelDialect }) {
 				<p className="text-sm text-muted-foreground">
 					{DIALECT_BLURBS[dialect]}
 				</p>
+				{/* Sits with the blurb rather than under the rows: it answers "will a
+				    client actually see my edit", which is a question the operator has
+				    BEFORE making one, not after scrolling past the list. */}
+				<ClientSetupNote dialect={dialect} />
 			</CardHeader>
 			<CardContent className="space-y-group">
 				{isLoading && (
