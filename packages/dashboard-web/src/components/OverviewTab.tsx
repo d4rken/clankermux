@@ -106,8 +106,11 @@ export const OverviewTab = React.memo(() => {
 
 	// Resolved once here so the strip's count and the list below it can never
 	// disagree about what's been dismissed.
-	const { visible: visibleErrors, dismiss: dismissError } =
-		useVisibleRecentErrors(stats?.recentErrors);
+	const {
+		visible: visibleErrors,
+		dismiss: dismissError,
+		dismissAll: dismissAllErrors,
+	} = useVisibleRecentErrors(stats?.recentErrors);
 
 	const [now, setNow] = useState(() => Date.now());
 	// Recomputed against `now` so the age keeps ticking with the 30s refresh
@@ -355,6 +358,7 @@ export const OverviewTab = React.memo(() => {
 				errors={visibleErrors}
 				accounts={accounts}
 				onDismiss={dismissError}
+				onDismissAll={dismissAllErrors}
 				unavailable={statsUnavailable}
 				staleNote={statsStaleNote}
 			/>

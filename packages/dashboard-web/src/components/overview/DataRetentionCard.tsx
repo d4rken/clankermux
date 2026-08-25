@@ -108,10 +108,16 @@ export function DataRetentionCard() {
 		if (present.length === 0) return null;
 		const approxBytes = present.reduce((sum, t) => sum + t.approxBytes, 0);
 		const rowCount = present.reduce((sum, t) => sum + t.rowCount, 0);
+		// The measured result gets the figure treatment (bold, tabular, larger)
+		// so it reads as a value at a glance instead of blending into the prose
+		// description underneath it.
 		return (
-			<p className="text-xs text-muted-foreground tabular-nums mt-1">
-				~{formatBytes(approxBytes)} · {rowCount.toLocaleString()} rows
-			</p>
+			<div className="mt-1.5 flex items-baseline gap-item">
+				<span className="figure-lg">~{formatBytes(approxBytes)}</span>
+				<span className="text-xs text-muted-foreground tabular-nums">
+					{rowCount.toLocaleString()} rows
+				</span>
+			</div>
 		);
 	};
 
@@ -332,8 +338,12 @@ export function DataRetentionCard() {
 					<p className="text-xs text-muted-foreground pt-1">
 						Sizes are approximate (stored content, excluding index/page
 						overhead) and won't sum to the file size. Database file is{" "}
-						{formatBytes(usage.dbBytes)}
-						{usage.walBytes > 0 ? ` (+${formatBytes(usage.walBytes)} WAL)` : ""}{" "}
+						<span className="font-medium tabular-nums text-foreground">
+							{formatBytes(usage.dbBytes)}
+							{usage.walBytes > 0
+								? ` (+${formatBytes(usage.walBytes)} WAL)`
+								: ""}
+						</span>{" "}
 						on disk · measured {new Date(usage.measuredAt).toLocaleTimeString()}
 						.
 					</p>
@@ -393,7 +403,11 @@ export function DataRetentionCard() {
 
 				{cleanupNow.data && (
 					<p className="text-xs text-muted-foreground">
-						Removed {cleanupNow.data.removedPayloads} payloads (
+						Removed{" "}
+						<span className="font-medium tabular-nums text-foreground">
+							{cleanupNow.data.removedPayloads}
+						</span>{" "}
+						payloads (
 						{cleanupNow.data.payloadCutoffIso ? (
 							<>
 								older than{" "}
@@ -402,7 +416,11 @@ export function DataRetentionCard() {
 						) : (
 							<>all — storage disabled</>
 						)}
-						) and {cleanupNow.data.removedRequests} requests (older than{" "}
+						) and{" "}
+						<span className="font-medium tabular-nums text-foreground">
+							{cleanupNow.data.removedRequests}
+						</span>{" "}
+						requests (older than{" "}
 						{new Date(cleanupNow.data.requestCutoffIso).toLocaleString()}). The
 						sizes above refresh automatically.
 					</p>

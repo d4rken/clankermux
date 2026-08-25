@@ -39,6 +39,7 @@ function render(
 				errors={errors}
 				accounts={[]}
 				onDismiss={() => {}}
+				onDismissAll={() => {}}
 				staleNote={extra.staleNote}
 				unavailable={extra.unavailable}
 			/>
@@ -57,6 +58,38 @@ describe("CompactRecentErrors", () => {
 		expect(html).toContain('href="/system"');
 		expect(html).toContain("View all");
 		expect(html).toContain("Last hour");
+	});
+
+	it("offers a clear-all control alongside the link", () => {
+		const html = render([makeError()]);
+
+		expect(html).toContain("Clear all");
+	});
+
+	/**
+	 * The control clears the whole hour, not the three rows on screen, so the
+	 * label has to count the groups the card is hiding as well.
+	 */
+	it("counts the overflow groups in the clear-all label", () => {
+		const errors = Array.from({ length: 5 }, (_, i) =>
+			makeError({ accountId: `a${i}`, latestRequestId: `req-${i}` }),
+		);
+
+		expect(render(errors)).toContain(
+			'aria-label="Dismiss all 5 recent error groups"',
+		);
+	});
+
+	it("singularizes the clear-all label", () => {
+		expect(render([makeError()])).toContain(
+			'aria-label="Dismiss all 1 recent error group"',
+		);
+	});
+
+	it("omits the clear-all control when there is nothing to clear", () => {
+		expect(render([], { staleNote: "Last updated 12m ago" })).not.toContain(
+			"Clear all",
+		);
 	});
 
 	it("caps the list at three rows", () => {

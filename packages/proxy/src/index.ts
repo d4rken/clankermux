@@ -41,6 +41,11 @@ export {
 	CodexSpendCoordinator,
 	type CodexSpendResult,
 } from "./codex-spend-coordinator";
+export {
+	CodexUsagePoller,
+	type CodexUsagePollerDeps,
+	type PolledCodexAccount,
+} from "./codex-usage-poller";
 export { computeContextAndToolStats } from "./context-composition";
 export { dispatchProxyRequest } from "./dispatch";
 export {

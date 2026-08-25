@@ -1,6 +1,7 @@
 import { NO_ACCOUNT_ID, type RecentErrorGroup } from "@clankermux/types";
 import { useState } from "react";
 import { useAccounts, useStats } from "../../../hooks/queries";
+import { Button } from "../../ui/button";
 import {
 	Card,
 	CardContent,
@@ -39,13 +40,19 @@ export function RecentErrorsCard() {
 	const { windowKey, setWindowKey, windowHours } = useErrorWindow();
 	const { data, isLoading, error } = useStats(undefined, windowHours);
 	const { data: accounts } = useAccounts();
-	const { dismiss, isDismissed } = useDismissedErrors();
+	const { dismiss, dismissMany, isDismissed } = useDismissedErrors();
 	const [selectedError, setSelectedError] = useState<RecentErrorGroup | null>(
 		null,
 	);
 
 	const recentErrors = data?.recentErrors;
 	const visibleErrors = recentErrors?.filter((err) => !isDismissed(err)) ?? [];
+	// Gated on the same conditions as the list itself. React Query keeps the
+	// previous payload after a failed poll, so keying only on the length would
+	// leave a Clear all button next to "Could not load recent errors", acting on
+	// groups the card is no longer willing to show.
+	const canDismissAll =
+		!error && !(isLoading && !data) && visibleErrors.length > 0;
 
 	const hasOtherAvailableAccounts = (errorAccountId: string | null) =>
 		otherAccountsAvailable(accounts, errorAccountId);
@@ -60,21 +67,34 @@ export function RecentErrorsCard() {
 							Failed requests grouped by error and account.
 						</CardDescription>
 					</div>
-					<Select
-						value={windowKey}
-						onValueChange={(v) => setWindowKey(v as ErrorWindowKey)}
-					>
-						<SelectTrigger className="w-[140px] h-8 text-xs">
-							<SelectValue />
-						</SelectTrigger>
-						<SelectContent>
-							{WINDOW_OPTIONS.map((option) => (
-								<SelectItem key={option.value} value={option.value}>
-									{option.label}
-								</SelectItem>
-							))}
-						</SelectContent>
-					</Select>
+					<div className="flex items-center gap-item shrink-0">
+						{canDismissAll ? (
+							<Button
+								variant="ghost"
+								size="sm"
+								className="h-8 px-2 text-xs text-muted-foreground hover:text-foreground"
+								aria-label={`Dismiss all ${visibleErrors.length} error ${visibleErrors.length === 1 ? "group" : "groups"} in ${WINDOW_PHRASES[windowKey]}`}
+								onClick={() => dismissMany(visibleErrors)}
+							>
+								Clear all
+							</Button>
+						) : null}
+						<Select
+							value={windowKey}
+							onValueChange={(v) => setWindowKey(v as ErrorWindowKey)}
+						>
+							<SelectTrigger className="w-[140px] h-8 text-xs">
+								<SelectValue />
+							</SelectTrigger>
+							<SelectContent>
+								{WINDOW_OPTIONS.map((option) => (
+									<SelectItem key={option.value} value={option.value}>
+										{option.label}
+									</SelectItem>
+								))}
+							</SelectContent>
+						</Select>
+					</div>
 				</div>
 			</CardHeader>
 			<CardContent>
@@ -93,7 +113,10 @@ export function RecentErrorsCard() {
 				) : isLoading && !data ? (
 					<p className="text-sm text-muted-foreground">Loading…</p>
 				) : visibleErrors.length === 0 ? (
-					<p className="text-sm text-muted-foreground">
+					// Announced: Clear all unmounts the focused button, so without a live
+					// region a screen-reader user gets no confirmation that anything
+					// happened. Also covers the window selector changing the answer.
+					<p role="status" className="text-sm text-muted-foreground">
 						{/* "None occurred" and "all dismissed" are different situations —
 						    saying "no errors" for the second one hides the fact that the
 						    window still contains some. The server caps the response at 50

@@ -495,7 +495,6 @@ describe("handleProxy prologue wiring", () => {
 		function nativeContext(effort: string | null) {
 			return {
 				nativeBody: JSON.stringify({ model: MODEL, input: [] }),
-				clientStream: false,
 				reasoningEffort: effort,
 			};
 		}
