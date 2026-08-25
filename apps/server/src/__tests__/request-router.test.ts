@@ -27,11 +27,16 @@ interface Calls {
 	dispatch: { pathname: string; search: string; apiKeyId?: string | null }[];
 	responses: { pathname: string; search: string }[];
 	models: number;
-	/** What `handleModels` was handed: the URL, and the authenticated key id. */
+	/**
+	 * What `handleModels` was handed: the URL, the authenticated key id, and the
+	 * mount's dialect — the reply's SHAPE is the dialect's, so the hop has to
+	 * carry it.
+	 */
 	modelUrls: {
 		pathname: string;
 		search: string;
 		apiKeyId?: string | null;
+		dialect?: string;
 	}[];
 	dashboard: { assetPath: string }[];
 	auth: { path: string; method: string; requirement?: AuthRequirement }[];
@@ -128,12 +133,13 @@ function makeDeps(options: Options = {}): {
 				status: 200,
 			});
 		},
-		async handleModels(url, apiKeyId) {
+		async handleModels(url, apiKeyId, dialect) {
 			calls.models++;
 			calls.modelUrls.push({
 				pathname: url.pathname,
 				search: url.search,
 				apiKeyId,
+				dialect,
 			});
 			return new Response(JSON.stringify({ handler: "models" }), {
 				status: 200,
@@ -271,7 +277,86 @@ describe("mounted agent traffic", () => {
 				pathname: "/v1/models",
 				search: "?client_version=0.149.0",
 				apiKeyId: "key-1",
+				dialect: "openai",
 			},
+		]);
+	});
+
+	// The reply's shape is the mount's: Claude Code's gateway model discovery
+	// reads Anthropic's own listing shape, which only the anthropic branch of the
+	// handler produces. Losing the dialect here would answer a Claude client with
+	// an OpenAI-shaped body it silently ignores.
+	it("serves GET /v1/models under the anthropic mount, tagged with its dialect", async () => {
+		const { deps, calls } = makeDeps();
+
+		const res = await routeRequest(
+			makeRequest("/wire/anthropic/v1/models", { headers: withKey }),
+			deps,
+		);
+
+		expect(await res.json()).toEqual({ handler: "models" });
+		expect(calls.modelUrls).toEqual([
+			{
+				pathname: "/v1/models",
+				search: "",
+				apiKeyId: "key-1",
+				dialect: "anthropic",
+			},
+		]);
+		expect(calls.dispatch).toEqual([]);
+	});
+
+	// The alias spellings are the dangerous half of that claim. The local
+	// dispatch matches `/v1/models` with `===`, so an admitted alias would carry
+	// a pooled OAuth bearer straight to Anthropic; the mount gate refuses them
+	// instead, and none of them may reach dispatchProxy.
+	//
+	// Only spellings that SURVIVE URL parsing are listed. A dot-segment form like
+	// `/v1/foo/../models` never reaches the gate as an alias — the URL parser has
+	// already collapsed it to the canonical path — so it is served locally, which
+	// is the correct outcome for it.
+	it("refuses alias spellings of GET /v1/models rather than forwarding them", async () => {
+		for (const alias of [
+			"/v1/models/",
+			"//v1/%6dodels",
+			"/v1/%6dodels",
+			"/v1/models/.",
+		]) {
+			const { deps, calls } = makeDeps();
+			const res = await routeRequest(
+				makeRequest(`/wire/anthropic${alias}`, { headers: withKey }),
+				deps,
+			);
+
+			expect(res.status).toBe(404);
+			expect(calls.dispatch).toEqual([]);
+			expect(calls.models).toBe(0);
+		}
+	});
+
+	// A verb we do not answer locally is ordinary forwarded traffic, and a
+	// sub-path of the models route is not the models route at all.
+	it("forwards other verbs and sub-paths of /v1/models under anthropic", async () => {
+		const { deps, calls } = makeDeps();
+
+		await routeRequest(
+			makeRequest("/wire/anthropic/v1/models", {
+				method: "POST",
+				headers: withKey,
+			}),
+			deps,
+		);
+		await routeRequest(
+			makeRequest("/wire/anthropic/v1/models/claude-opus-5", {
+				headers: withKey,
+			}),
+			deps,
+		);
+
+		expect(calls.models).toBe(0);
+		expect(calls.dispatch.map((c) => c.pathname)).toEqual([
+			"/v1/models",
+			"/v1/models/claude-opus-5",
 		]);
 	});
 
@@ -287,6 +372,7 @@ describe("mounted agent traffic", () => {
 
 		expect(calls.modelUrls).toHaveLength(1);
 		expect(calls.modelUrls[0].apiKeyId).toBe("key-1");
+		expect(calls.modelUrls[0].dialect).toBe("openai");
 	});
 
 	it("rejects a WebSocket upgrade on the mounted Responses path", async () => {
