@@ -613,19 +613,34 @@ export function markRadius(tokens: number | null): number {
 	return MIN_RADIUS + (MAX_RADIUS - MIN_RADIUS) * scaled;
 }
 
-/** Opacity floor for the oldest mark still on screen. */
-const MIN_OPACITY = 0.35;
-
 /**
- * Fade a mark with its age across the window — a single-hue lightness ramp, so
- * age never competes with the status hues for meaning.
+ * Marks are drawn fully opaque. There is no age ramp, and adding one back would
+ * break the card's colour encoding.
+ *
+ * Age used to fade a mark toward the card ground, down to 0.35 at the window's
+ * left edge. That was sound while hue meant STATUS: four values, all far apart,
+ * so washing one out could not turn it into another. Hue now identifies the
+ * MODEL across 28 palette entries, and compositing those toward the ground
+ * collapses them into each other — measured over every pair at every point on
+ * the ramp, against the real card grounds:
+ *
+ *   floor 0.35 -> min dE  4.1 (dark, purple vs fuchsia)   0.6 (light)
+ *   floor 0.70 -> min dE  6.5                             5.6
+ *   floor 0.90 -> min dE  9.9 (dark, teal vs mint)       13.0
+ *   no fade   -> min dE 15.1                             18.5
+ *
+ * Only "no fade" clears the palette's own 15 dE floor. There is no partial
+ * setting that works, because the ramp passes through every intermediate
+ * opacity on its way down.
+ *
+ * Nothing is lost by dropping it: this is a time axis, so a mark's age is
+ * already given by its horizontal position, exactly and unambiguously. The fade
+ * was a second, redundant encoding of the one variable the plot's geometry
+ * already carries. It also actively hurt in one case — an in-flight request
+ * pending for the whole window faded to 35%, making the mark most likely to be
+ * wedged the faintest thing on the card.
  */
-export function ageOpacity(ts: number, now: number, windowMs: number): number {
-	if (windowMs <= 0) return 1;
-	const age = (now - ts) / windowMs;
-	const clamped = Math.min(Math.max(age, 0), 1);
-	return 1 - (1 - MIN_OPACITY) * clamped;
-}
+export const MARK_OPACITY = 1;
 
 // ---------------------------------------------------------------------------
 // Plot geometry

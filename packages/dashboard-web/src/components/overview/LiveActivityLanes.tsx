@@ -1,14 +1,19 @@
+import { getModelShortName } from "@clankermux/core";
 import { formatNumber, formatTokens } from "@clankermux/ui-common";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { COLORS } from "../../constants";
 import {
-	ageOpacity,
+	type SeriesPalette,
+	useSeriesPalette,
+} from "../../hooks/useSeriesPalette";
+import {
 	buildLanes,
 	hitTest,
 	LANE_HEIGHT,
 	type Lane,
 	type LiveEvent,
 	type LiveStatus,
+	MARK_OPACITY,
 	markCenterX,
 	markRadius,
 	NOW_INSET,
@@ -52,23 +57,41 @@ export const MAX_LANES = 8;
 const DEFAULT_PLOT_WIDTH = 720;
 
 /**
- * Status → mark colour.
+ * Status → mark colour, for the statuses that keep one.
  *
- * Validated with the dataviz palette checker against both chart surfaces
- * (`--card`: #ffffff light, hsl(220 13% 12%) dark): worst adjacent CVD
- * separation ΔE 13.9 deutan / 16.6 tritan, 19.8 at normal vision. The obvious
- * alternative — the brand orange for OK — is a hard fail at ΔE 7.2 against
- * amber, well under the 15 floor. Every status also has its own SHAPE, so none
- * of this is colour-alone.
+ * Failure holds its hue; healthy traffic gives its hue up to the MODEL. That
+ * split is the whole point of colouring the card: 99.7% of requests here
+ * complete with a 200, so a status-keyed palette spent the entire colour
+ * channel on a distinction that almost never varies, and the card was a field
+ * of identical blue dots.
+ *
+ * The three healthy statuses are absent from this map deliberately: a missing
+ * entry means "ask the model palette". That includes `pending`, which is
+ * coloured from the REQUESTED model — known from ingress onwards, so in-flight
+ * work shows what it is waiting on rather than sitting anonymous. A mark can
+ * therefore change hue once if the upstream reports a different model than was
+ * asked for (an alias resolving to a dated id, say); that is rare, and showing
+ * nothing until the response lands would be worse on a card whose job is to
+ * show what is in flight. A model-less event falls back to neutral.
+ *
+ * Amber and red stay exclusive to failure. `model-colors.test.ts` enforces
+ * that no model hue comes within 15 dE of either (7.9 under simulated
+ * dichromacy), so a red mark on this card is always an error and never an
+ * Opus. Every status also has its own SHAPE, so none of this is colour-alone.
  */
-const STATUS_COLOR: Record<LiveStatus, string> = {
-	pending: COLORS.blue,
-	streaming: COLORS.blue,
-	ok: COLORS.blue,
+const STATUS_COLOR: Partial<Record<LiveStatus, string>> = {
 	rate_limited: COLORS.warning,
 	error: COLORS.error,
 	lost: "var(--muted-foreground)",
 };
+
+/** Mark colour for one event: failure keeps its status hue, work gets its model's. */
+function markColor(event: LiveEvent, palette: SeriesPalette): string {
+	const status = STATUS_COLOR[event.status];
+	if (status) return status;
+	if (!event.model) return "var(--muted-foreground)";
+	return palette.forModel(event.model);
+}
 
 const STATUS_LABEL: Record<LiveStatus, string> = {
 	pending: "waiting for upstream",
@@ -89,6 +112,14 @@ export interface LiveActivityLanesViewProps {
 	outages: readonly Outage[];
 	coverageFrom: number | null;
 	primed: boolean;
+	/**
+	 * Model hues for the ground being painted. A PROP rather than a
+	 * `useSeriesPalette()` call inside the view, so this stays a pure function
+	 * of its inputs: the hook subscribes to `<html>`'s class with a
+	 * MutationObserver, which is exactly the kind of live wiring the
+	 * view/container split keeps out of here.
+	 */
+	palette: SeriesPalette;
 	/** Currently highlighted event, if any. */
 	selected?: LiveEvent | null;
 	/**
@@ -145,6 +176,7 @@ export function LiveActivityLanesView({
 	outages,
 	coverageFrom,
 	primed,
+	palette,
 	selected = null,
 	plot,
 	windowControl,
@@ -170,8 +202,8 @@ export function LiveActivityLanesView({
 						<CardTitle>Live Activity</CardTitle>
 						<CardDescription>
 							Every request in the last {Math.round(windowMs / 60_000)} minutes,
-							by project. Mark size follows token count. Click a mark to open
-							its request.
+							by project. Colour shows the model, shape shows the outcome, size
+							follows token count. Click a mark to open its request.
 						</CardDescription>
 					</div>
 					<div className="flex flex-wrap items-center gap-x-row gap-y-item text-sm">
@@ -210,193 +242,202 @@ export function LiveActivityLanesView({
 							: "Waiting for the request stream…"}
 					</p>
 				) : (
-					<div className="flex gap-row">
-						{/* Lane labels — real text, not SVG, so they wrap, truncate and
+					<>
+						<div className="flex gap-row">
+							{/* Lane labels — real text, not SVG, so they wrap, truncate and
 						    are selectable like any other list. NOT aria-hidden: each
 						    label that maps to a single filter is a link, and focusable
 						    content inside an aria-hidden subtree is an accessibility
 						    violation. */}
-						<ul className="w-32 shrink-0 space-y-0 pt-0">
-							{lanes.map((lane) => {
-								const href = laneRequestsHref(lane.scope);
-								return (
-									<li
-										key={lane.key}
-										className="flex items-center truncate text-sm text-muted-foreground"
-										style={{ height: LANE_HEIGHT }}
-										title={lane.label}
-									>
-										{/* The overflow lane aggregates several projects, so no
+							<ul className="w-32 shrink-0 space-y-0 pt-0">
+								{lanes.map((lane) => {
+									const href = laneRequestsHref(lane.scope);
+									return (
+										<li
+											key={lane.key}
+											className="flex items-center truncate text-sm text-muted-foreground"
+											style={{ height: LANE_HEIGHT }}
+											title={lane.label}
+										>
+											{/* The overflow lane aggregates several projects, so no
 										    single project filter expresses it — it stays text
 										    rather than linking to a subset of what it shows. */}
-										{href === null ? (
-											lane.label
-										) : (
-											<a
-												href={href}
-												target="_blank"
-												rel="noopener noreferrer"
-												aria-label={`Show ${lane.label} requests`}
-												className="truncate hover:text-foreground hover:underline focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
-											>
-												{lane.label}
-											</a>
-										)}
-									</li>
-								);
-							})}
-						</ul>
+											{href === null ? (
+												lane.label
+											) : (
+												<a
+													href={href}
+													target="_blank"
+													rel="noopener noreferrer"
+													aria-label={`Show ${lane.label} requests`}
+													className="truncate hover:text-foreground hover:underline focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+												>
+													{lane.label}
+												</a>
+											)}
+										</li>
+									);
+								})}
+							</ul>
 
-						{/* Wrapper, so a blur can tell "focus left the plot area" from
+							{/* Wrapper, so a blur can tell "focus left the plot area" from
 						    "focus moved to the selected-request link below the plot".
 						    Focus BOOKKEEPING for the controls inside it, not an
 						    interactive element of its own — it is never focusable and
 						    has nothing to activate. */}
-						{/* biome-ignore lint/a11y/noStaticElementInteractions: onBlur here tracks focus leaving the group, it does not make the div actionable */}
-						<div
-							className="min-w-0 flex-1"
-							ref={plot?.areaRef}
-							onBlur={plot?.onBlur}
-						>
-							<svg
-								ref={plot?.ref}
-								width="100%"
-								height={height}
-								viewBox={`0 0 ${plotWidth} ${height}`}
-								role="img"
-								aria-label={describeLanes(lanes, windowMs)}
-								className={`overflow-visible focus:outline-none focus-visible:ring-1 focus-visible:ring-ring${
-									plot?.onClick ? " cursor-pointer" : ""
-								}`}
-								// The 28px lane row is the hit target: the pointer only
-								// has to be CLOSEST to a mark, never on it. A 5px dot is
-								// a pinpoint nobody lands on reliably, and at this
-								// density per-mark hit areas would overlap anyway. The
-								// CLICK path additionally caps the horizontal distance
-								// (see resolveMarkHref) so empty space does not open a
-								// request minutes away from the pointer.
-								tabIndex={plot ? 0 : undefined}
-								onPointerMove={plot?.onPointerMove}
-								onPointerLeave={plot?.onPointerLeave}
-								onKeyDown={plot?.onKeyDown}
-								onClick={plot?.onClick}
-								onFocus={plot?.onFocus}
+							{/* biome-ignore lint/a11y/noStaticElementInteractions: onBlur here tracks focus leaving the group, it does not make the div actionable */}
+							<div
+								className="min-w-0 flex-1"
+								ref={plot?.areaRef}
+								onBlur={plot?.onBlur}
 							>
-								<title>{describeLanes(lanes, windowMs)}</title>
-								<defs>
-									<clipPath id="live-activity-plot">
-										<rect x={0} y={0} width={plotWidth} height={height} />
-									</clipPath>
-									<pattern
-										id="live-activity-unknown"
-										width={6}
-										height={6}
-										patternUnits="userSpaceOnUse"
-										patternTransform="rotate(45)"
-									>
-										<line
-											x1={0}
-											y1={0}
-											x2={0}
-											y2={6}
-											stroke="var(--muted-foreground)"
-											strokeWidth={1}
-											opacity={0.25}
-										/>
-									</pattern>
-								</defs>
+								<svg
+									ref={plot?.ref}
+									width="100%"
+									height={height}
+									viewBox={`0 0 ${plotWidth} ${height}`}
+									role="img"
+									aria-label={describeLanes(lanes, windowMs)}
+									className={`overflow-visible focus:outline-none focus-visible:ring-1 focus-visible:ring-ring${
+										plot?.onClick ? " cursor-pointer" : ""
+									}`}
+									// The 28px lane row is the hit target: the pointer only
+									// has to be CLOSEST to a mark, never on it. A 5px dot is
+									// a pinpoint nobody lands on reliably, and at this
+									// density per-mark hit areas would overlap anyway. The
+									// CLICK path additionally caps the horizontal distance
+									// (see resolveMarkHref) so empty space does not open a
+									// request minutes away from the pointer.
+									tabIndex={plot ? 0 : undefined}
+									onPointerMove={plot?.onPointerMove}
+									onPointerLeave={plot?.onPointerLeave}
+									onKeyDown={plot?.onKeyDown}
+									onClick={plot?.onClick}
+									onFocus={plot?.onFocus}
+								>
+									<title>{describeLanes(lanes, windowMs)}</title>
+									<defs>
+										<clipPath id="live-activity-plot">
+											<rect x={0} y={0} width={plotWidth} height={height} />
+										</clipPath>
+										<pattern
+											id="live-activity-unknown"
+											width={6}
+											height={6}
+											patternUnits="userSpaceOnUse"
+											patternTransform="rotate(45)"
+										>
+											<line
+												x1={0}
+												y1={0}
+												x2={0}
+												y2={6}
+												stroke="var(--muted-foreground)"
+												strokeWidth={1}
+												opacity={0.25}
+											/>
+										</pattern>
+									</defs>
 
-								<g clipPath="url(#live-activity-plot)">
-									{/* Minute gridlines. NOT part of the scrolling group: they
+									<g clipPath="url(#live-activity-plot)">
+										{/* Minute gridlines. NOT part of the scrolling group: they
 									    mark offsets FROM now (-1m, -2m, …), so they belong to
 									    the axis and must stay put while time passes. Solid
 									    hairlines — dashing would read as a threshold. */}
-									{minuteTicks(windowMs).map((offset) => (
-										<line
-											key={offset}
-											x1={xOf(now - offset)}
-											y1={0}
-											x2={xOf(now - offset)}
-											y2={lanes.length * LANE_HEIGHT}
-											stroke="var(--border)"
-											strokeWidth={1}
-										/>
-									))}
+										{minuteTicks(windowMs).map((offset) => (
+											<line
+												key={offset}
+												x1={xOf(now - offset)}
+												y1={0}
+												x2={xOf(now - offset)}
+												y2={lanes.length * LANE_HEIGHT}
+												stroke="var(--border)"
+												strokeWidth={1}
+											/>
+										))}
 
-									{/* Everything anchored to an ABSOLUTE moment, and only
+										{/* Everything anchored to an ABSOLUTE moment, and only
 									    that: the marks and the regions we cannot speak for.
 									    This is the group the animation frame translates, so it
 									    must not contain the axis, the labels or the card
 									    chrome — translating those would slide the whole card
 									    sideways and move the marks WITH their own axis, which
 									    is no movement at all. */}
-									<g ref={plot?.scrollRef}>
-										{/* Rendered UNDER the marks so a hatch can never hide a
+										<g ref={plot?.scrollRef}>
+											{/* Rendered UNDER the marks so a hatch can never hide a
 										    real request. */}
-										{unknownRegions({
-											now,
-											windowMs,
-											coverageFrom,
-											outages,
-										}).map((region) => (
-											<rect
-												key={region.key}
-												x={Math.max(xOf(region.from), 0)}
-												y={0}
-												width={Math.max(
-													xOf(region.to) - Math.max(xOf(region.from), 0),
-													0,
-												)}
-												height={lanes.length * LANE_HEIGHT}
-												fill="url(#live-activity-unknown)"
-											>
-												<title>{region.label}</title>
-											</rect>
-										))}
+											{unknownRegions({
+												now,
+												windowMs,
+												coverageFrom,
+												outages,
+											}).map((region) => (
+												<rect
+													key={region.key}
+													x={Math.max(xOf(region.from), 0)}
+													y={0}
+													width={Math.max(
+														xOf(region.to) - Math.max(xOf(region.from), 0),
+														0,
+													)}
+													height={lanes.length * LANE_HEIGHT}
+													fill="url(#live-activity-unknown)"
+												>
+													<title>{region.label}</title>
+												</rect>
+											))}
 
-										{lanes.map((lane, laneIndex) => (
-											<g key={lane.key}>
-												{lane.events.map((event) => (
-													<Mark
-														key={event.id}
-														event={event}
-														cx={markCenterX(event.ts, now, windowMs, plotWidth)}
-														cy={laneIndex * LANE_HEIGHT + LANE_HEIGHT / 2}
-														opacity={ageOpacity(event.ts, now, windowMs)}
-														selected={selected?.id === event.id}
-													/>
-												))}
-											</g>
-										))}
+											{lanes.map((lane, laneIndex) => (
+												<g key={lane.key}>
+													{lane.events.map((event) => (
+														<Mark
+															key={event.id}
+															event={event}
+															palette={palette}
+															cx={markCenterX(
+																event.ts,
+																now,
+																windowMs,
+																plotWidth,
+															)}
+															cy={laneIndex * LANE_HEIGHT + LANE_HEIGHT / 2}
+															opacity={MARK_OPACITY}
+															selected={selected?.id === event.id}
+														/>
+													))}
+												</g>
+											))}
+										</g>
 									</g>
-								</g>
 
-								{/* "Now" rule, drawn last so it sits above the marks. */}
-								<line
-									x1={usable}
-									y1={0}
-									x2={usable}
-									y2={lanes.length * LANE_HEIGHT}
-									stroke="var(--foreground)"
-									strokeWidth={1}
-									opacity={0.4}
-								/>
+									{/* "Now" rule, drawn last so it sits above the marks. */}
+									<line
+										x1={usable}
+										y1={0}
+										x2={usable}
+										y2={lanes.length * LANE_HEIGHT}
+										stroke="var(--foreground)"
+										strokeWidth={1}
+										opacity={0.4}
+									/>
 
-								{minuteTicks(windowMs).map((offset) => (
-									<text
-										key={offset}
-										x={xOf(now - offset)}
-										y={lanes.length * LANE_HEIGHT + 14}
-										textAnchor="middle"
-										className="fill-muted-foreground"
-										style={{ fontSize: 10 }}
-									>
-										{offset === 0 ? "now" : `-${Math.round(offset / 60_000)}m`}
-									</text>
-								))}
-							</svg>
+									{minuteTicks(windowMs).map((offset) => (
+										<text
+											key={offset}
+											x={xOf(now - offset)}
+											y={lanes.length * LANE_HEIGHT + 14}
+											textAnchor="middle"
+											className="fill-muted-foreground"
+											style={{ fontSize: 10 }}
+										>
+											{offset === 0
+												? "now"
+												: `-${Math.round(offset / 60_000)}m`}
+										</text>
+									))}
+								</svg>
 
-							{/* Native link semantics for the selected mark. The plot is
+								{/* Native link semantics for the selected mark. The plot is
 							    role="img": Enter on an image role is not announced as
 							    actionable, and with no initial selection it would do
 							    nothing until an arrow key was guessed. A real anchor is
@@ -406,50 +447,121 @@ export function LiveActivityLanesView({
 							    set by pointer movement as well as by focus, so growing the
 							    column by a line of text on hover would shove everything
 							    below the card down and back on every pass over a mark. */}
-							<div className="mt-1 h-4">
-								{selected && (
-									<a
-										href={requestDetailsHref(selected.id)}
-										target="_blank"
-										rel="noopener noreferrer"
-										className="inline-block text-xs text-muted-foreground underline hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
-									>
-										Open selected request
-									</a>
-								)}
+								<div className="mt-1 h-4">
+									{selected && (
+										<a
+											href={requestDetailsHref(selected.id)}
+											target="_blank"
+											rel="noopener noreferrer"
+											className="inline-block text-xs text-muted-foreground underline hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+										>
+											Open selected request
+										</a>
+									)}
+								</div>
 							</div>
-						</div>
 
-						{/* Direct labels: every number the marks encode is also written
+							{/* Direct labels: every number the marks encode is also written
 						    out, so nothing is reachable only by hovering. */}
-						<ul className="w-40 shrink-0 space-y-0 text-right text-xs">
-							{lanes.map((lane) => (
-								<li
-									key={lane.key}
-									className="flex items-center justify-end gap-item tabular-nums"
-									style={{ height: LANE_HEIGHT }}
-								>
-									<span className="font-medium">{lane.requests} req</span>
-									<span className="text-muted-foreground">
-										{formatTokens(lane.tokens)}
-									</span>
-									{lane.rateLimited > 0 && (
-										<span style={{ color: COLORS.warning }}>
-											{lane.rateLimited} 429
+							<ul className="w-40 shrink-0 space-y-0 text-right text-xs">
+								{lanes.map((lane) => (
+									<li
+										key={lane.key}
+										className="flex items-center justify-end gap-item tabular-nums"
+										style={{ height: LANE_HEIGHT }}
+									>
+										<span className="font-medium">{lane.requests} req</span>
+										<span className="text-muted-foreground">
+											{formatTokens(lane.tokens)}
 										</span>
-									)}
-									{lane.errors > 0 && (
-										<span style={{ color: COLORS.error }}>
-											{lane.errors} err
-										</span>
-									)}
-								</li>
-							))}
-						</ul>
-					</div>
+										{lane.rateLimited > 0 && (
+											<span style={{ color: COLORS.warning }}>
+												{lane.rateLimited} 429
+											</span>
+										)}
+										{lane.errors > 0 && (
+											<span style={{ color: COLORS.error }}>
+												{lane.errors} err
+											</span>
+										)}
+									</li>
+								))}
+							</ul>
+						</div>
+						<ModelLegend lanes={lanes} palette={palette} />
+					</>
 				)}
 			</CardContent>
 		</Card>
+	);
+}
+
+/**
+ * Swatch-and-name key for the models currently on the plot.
+ *
+ * Only the models actually present are listed. A fixed key for every model the
+ * registry knows would be mostly dead entries, and the point of the legend is
+ * to decode what is on screen right now.
+ *
+ * Ordered by NAME, not by volume. Volume ordering reshuffles the row as the
+ * window rolls and one model overtakes another, which turns a reference strip
+ * into motion in the corner of the eye. Alphabetical is arbitrary but it holds
+ * still, and holding still is the property that matters for something you scan
+ * rather than read.
+ */
+function ModelLegend({
+	lanes,
+	palette,
+}: {
+	lanes: Lane[];
+	palette: SeriesPalette;
+}) {
+	const models = useMemo(() => {
+		const names = new Map<string, string>();
+		for (const lane of lanes) {
+			for (const event of lane.events) {
+				if (!event.model) continue;
+				names.set(getModelShortName(event.model), event.model);
+			}
+		}
+		return [...names.entries()].sort(([a], [b]) => a.localeCompare(b));
+	}, [lanes]);
+
+	if (models.length === 0) return null;
+
+	return (
+		<ul className="mt-2 flex flex-wrap items-center gap-x-row gap-y-item border-t pt-2 text-xs text-muted-foreground">
+			{models.map(([shortName, modelId]) => (
+				<li key={shortName} className="flex items-center gap-item">
+					<span
+						className="inline-block h-2 w-2 shrink-0 rounded-full"
+						style={{ backgroundColor: palette.forModel(modelId) }}
+						aria-hidden="true"
+					/>
+					{shortName}
+				</li>
+			))}
+			{/* Named alongside the models because they are the other thing a
+			    mark's appearance can mean. Without them a red X reads as one more
+			    model whose swatch is missing from the row. */}
+			<li className="flex items-center gap-item">
+				<span
+					className="inline-block h-2 w-2 shrink-0"
+					style={{
+						backgroundColor: COLORS.warning,
+						clipPath: "polygon(50% 0%, 100% 100%, 0% 100%)",
+					}}
+					aria-hidden="true"
+				/>
+				429
+			</li>
+			<li className="flex items-center gap-item">
+				<span aria-hidden="true" style={{ color: COLORS.error }}>
+					✕
+				</span>
+				failed
+			</li>
+		</ul>
 	);
 }
 
@@ -499,21 +611,23 @@ function WindowSelector({
 	);
 }
 
-/** One request. Shape carries the status alongside colour. */
+/** One request. Shape carries the status; colour carries the model. */
 function Mark({
 	event,
+	palette,
 	cx,
 	cy,
 	opacity,
 	selected,
 }: {
 	event: LiveEvent;
+	palette: SeriesPalette;
 	cx: number;
 	cy: number;
 	opacity: number;
 	selected: boolean;
 }) {
-	const color = STATUS_COLOR[event.status];
+	const color = markColor(event, palette);
 	const r = markRadius(event.tokens);
 	// A 2px surface ring rather than a border, so overlapping marks stay
 	// separable without adding a second ink colour.
@@ -521,7 +635,16 @@ function Mark({
 	// punching a hole in whatever sits behind them, so it cannot follow --card
 	// into transparency.
 	const ring = { stroke: "var(--surface-raised)", strokeWidth: 2 };
-	const label = `${event.project ?? "no project"} · ${STATUS_LABEL[event.status]}`;
+	// The model is named here as well as coloured. Hue identifies it only once
+	// you have read the legend, and there are more models than anyone keeps in
+	// their head — the tooltip is what makes a mark self-describing.
+	const label = [
+		event.project ?? "no project",
+		event.model ? getModelShortName(event.model) : null,
+		STATUS_LABEL[event.status],
+	]
+		.filter(Boolean)
+		.join(" · ");
 
 	const halo = selected ? (
 		<circle
@@ -832,6 +955,11 @@ export function ScrollingLanes({
 }) {
 	const scrollRef = useRef<SVGGElement>(null);
 	const svgRef = useRef<SVGSVGElement>(null);
+	// Resolved here rather than in the outer container because this is the
+	// component that renders the view, and the DOM tests mount THIS one
+	// directly — threading the palette down from `LiveActivityLanes` would
+	// leave those mounts without one.
+	const palette = useSeriesPalette();
 	const pxPerMs = Math.max(plotWidth - NOW_INSET, 1) / windowMs;
 	const [cursor, setCursor] = useState<{
 		laneIndex: number;
@@ -1053,6 +1181,7 @@ export function ScrollingLanes({
 					outages={outages}
 					coverageFrom={coverageFrom}
 					primed={primed}
+					palette={palette}
 					selected={selected}
 					windowControl={{ value: windowMs, onChange: setWindowMs }}
 					plot={{

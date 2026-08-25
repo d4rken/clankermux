@@ -4,13 +4,13 @@ import type { RequestResponse } from "@clankermux/types";
 // copy of its number.
 import { MAX_LANES } from "../../components/overview/LiveActivityLanes";
 import {
-	ageOpacity,
 	applyHistoryRows,
 	applyStreamEvent,
 	buildLanes,
 	type LiveStore,
 	LOST_AFTER_MS,
 	laneKeyOf,
+	MARK_OPACITY,
 	markRadius,
 	pruneLiveStore,
 	sweepLostEvents,
@@ -906,14 +906,18 @@ describe("markRadius", () => {
 	});
 });
 
-describe("ageOpacity", () => {
-	it("fades from full to a floor across the window", () => {
-		expect(ageOpacity(T0, T0, WINDOW)).toBeCloseTo(1, 5);
-		expect(ageOpacity(T0 - WINDOW, T0, WINDOW)).toBeCloseTo(0.35, 5);
-	});
-
-	it("clamps rather than going transparent or over-bright", () => {
-		expect(ageOpacity(T0 - WINDOW * 3, T0, WINDOW)).toBeCloseTo(0.35, 5);
-		expect(ageOpacity(T0 + 5_000, T0, WINDOW)).toBeCloseTo(1, 5);
+describe("MARK_OPACITY", () => {
+	it("is fully opaque, so a mark's colour is the palette colour", () => {
+		// Marks used to fade with age, to 0.35 at the left edge. That is
+		// incompatible with hue carrying model identity: compositing 28 palette
+		// hues toward the card ground collapses them into each other, and no
+		// floor short of 1.0 keeps every pair above the palette's own 15 dE
+		// threshold (measured worst pair at floor 0.90 is dE 9.9 on the dark
+		// ground). A partial fade cannot work either, because the ramp passes
+		// through every intermediate opacity on the way down.
+		//
+		// Age is not lost: this is a time axis, so horizontal position already
+		// states it exactly.
+		expect(MARK_OPACITY).toBe(1);
 	});
 });
