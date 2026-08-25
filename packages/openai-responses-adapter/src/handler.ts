@@ -5,6 +5,10 @@ import {
 	parseUpstreamError,
 	setNativeResponsesRequestContext,
 } from "@clankermux/types";
+import {
+	extractNativeTerminalResponse,
+	type NativeTerminalFailureReason,
+} from "./native-nonstream";
 import { translateRequestToAnthropic } from "./request-translator";
 import { translateAnthropicResponseToResponses } from "./response-translator";
 import { translateAnthropicStreamToResponses } from "./stream-translator";
@@ -67,6 +71,49 @@ async function readBoundedText(resp: Response): Promise<string> {
 	return new TextDecoder().decode(buffer.subarray(0, filled));
 }
 
+/**
+ * Client-facing text for each way the terminal-envelope extraction can fail.
+ * Bounded, reason-specific, and derived from nothing the upstream sent — a
+ * failed extraction means the upstream bytes are untrustworthy, so none of them
+ * are relayed.
+ */
+const NATIVE_EXTRACTION_MESSAGES: Record<NativeTerminalFailureReason, string> =
+	{
+		"no-terminal": "Upstream response ended without a terminal Responses event",
+		"malformed-terminal": "Upstream sent a malformed terminal Responses event",
+		oversized: "Upstream response exceeded the non-streaming size limit",
+		"read-error": "Failed to read the upstream response stream",
+	};
+
+/**
+ * 502 for a native non-streaming attempt whose terminal envelope never
+ * materialized. There is deliberately NO fallback to the Anthropic translation
+ * path: the body in hand is Codex SSE, so translating it would produce
+ * nonsense, and a client that gets an error can retry.
+ *
+ * A client that walked away is logged at debug, not warn — aborts are routine
+ * on this endpoint (Codex CLI cancels freely) and would otherwise storm the
+ * warn log with a condition no operator can act on.
+ */
+function nativeExtractionError(
+	reason: NativeTerminalFailureReason,
+	req: Request,
+): Response {
+	const message = NATIVE_EXTRACTION_MESSAGES[reason];
+	const line = `Native Responses non-stream extraction failed (${reason})`;
+	if (req.signal.aborted) {
+		log.debug(`${line} — client aborted`);
+	} else {
+		log.warn(line);
+	}
+	return new Response(
+		JSON.stringify({
+			error: { message, type: "api_error", code: "api_error" },
+		}),
+		{ status: 502, headers: { "Content-Type": "application/json" } },
+	);
+}
+
 export async function handleResponsesRequest(
 	req: Request,
 	url: URL,
@@ -121,6 +168,22 @@ export async function handleResponsesRequest(
 				error: {
 					type: "invalid_request_error",
 					message: "input: Field required",
+				},
+			}),
+			{ status: 400, headers: { "Content-Type": "application/json" } },
+		);
+	}
+	// `stream` selects between two entirely different response legs (raw SSE
+	// passthrough vs. terminal-envelope extraction), so a non-boolean must be
+	// rejected rather than coerced: `"stream": "false"` is a truthy string and
+	// would have silently streamed at a client that asked for one JSON document.
+	if ("stream" in body && typeof body.stream !== "boolean") {
+		return new Response(
+			JSON.stringify({
+				type: "error",
+				error: {
+					type: "invalid_request_error",
+					message: "stream: Input should be a valid boolean",
 				},
 			}),
 			{ status: 400, headers: { "Content-Type": "application/json" } },
@@ -186,11 +249,12 @@ export async function handleResponsesRequest(
 	});
 	// Native Responses passthrough (Stage A): carry the original (normalized)
 	// Responses body alongside the translated request. When the proxy selects a
-	// codex account for a streaming client, it forwards this body verbatim
-	// instead of double-translating — handleProxy re-keys it onto RequestMeta.
+	// codex account it forwards this body verbatim instead of double-translating
+	// — handleProxy re-keys it onto RequestMeta. The client's own stream intent
+	// is not part of that decision (see step 8): the upstream leg is SSE either
+	// way, so it stays a property of `body` here in the adapter.
 	setNativeResponsesRequestContext(syntheticReq, {
 		nativeBody: JSON.stringify(body),
-		clientStream: body.stream === true,
 		// Captured from the ORIGINAL body before translation; the real effort
 		// vocabulary is wider than the narrow type in types.ts, so treat it as an
 		// arbitrary string.
@@ -295,13 +359,23 @@ export async function handleResponsesRequest(
 	// with the internal marker header (only ever set on status 200 — non-200s
 	// were error-translated above). The body is already genuine Responses SSE
 	// (response.created / response.output_text.delta / response.completed, with
-	// the backend's own response id), so it goes to the client AS-IS — no
-	// translation, no responseId substitution — minus the internal marker. The
-	// marker implies the client requested streaming (Stage A only goes native
-	// when clientStream === true), so this branch sits naturally before the
-	// `body.stream` check below.
+	// the backend's own response id).
+	//
+	// The marker says nothing about what the CLIENT asked for: the upstream
+	// transport is SSE either way (the provider forces `stream: true`), so this
+	// branch owns both legs. A streaming client gets the bytes AS-IS — no
+	// translation, no responseId substitution — minus the internal marker. A
+	// non-streaming client gets the terminal event's `response` envelope
+	// extracted from that same SSE, which is the same document the backend would
+	// have returned had it been asked for JSON.
 	if (anthropicResp.headers.get(NATIVE_RESPONSES_RESPONSE_HEADER) === "1") {
-		if (body.stream) {
+		if (anthropicResp.body === null) {
+			// A marked 200 with no body at all: there is no terminal event to find
+			// and nothing to pass through. Fail loudly rather than hand the client
+			// an empty success.
+			return nativeExtractionError("no-terminal", req);
+		}
+		if (body.stream === true) {
 			const passthroughHeaders = new Headers(anthropicResp.headers);
 			passthroughHeaders.delete(NATIVE_RESPONSES_RESPONSE_HEADER);
 			return new Response(anthropicResp.body, {
@@ -310,11 +384,20 @@ export async function handleResponsesRequest(
 				headers: passthroughHeaders,
 			});
 		}
-		// Should be impossible — Stage A guards on clientStream === true. Warn
-		// for observability and fall through to the normal translation path.
-		log.warn(
-			"Native Responses marker present but the client did not request streaming — falling back to translation",
-		);
+
+		const extracted = await extractNativeTerminalResponse(anthropicResp.body, {
+			signal: req.signal,
+		});
+		if (!extracted.ok) {
+			return nativeExtractionError(extracted.reason, req);
+		}
+		// Fresh headers, exactly like the JSON translation path below: that is what
+		// strips the internal marker, every other x-clankermux-* header, and the
+		// upstream's now-wrong SSE content-type / content-length.
+		return new Response(extracted.responseJson, {
+			status: 200,
+			headers: { "Content-Type": "application/json" },
+		});
 	}
 
 	// 9. Stream path

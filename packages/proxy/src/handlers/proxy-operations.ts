@@ -1168,14 +1168,16 @@ export async function proxyWithAccount(
 
 		// ── Native Responses passthrough (Stage A, request leg) ────────────────
 		// When the client request was an OpenAI-Responses call (the adapter
-		// attached a NativeResponsesContext), this attempt targets a codex account
-		// AND the client asked for streaming, forward the ORIGINAL Responses body
-		// instead of the double-translated Anthropic body. The decision is strictly
+		// attached a NativeResponsesContext) and this attempt targets a codex
+		// account, forward the ORIGINAL Responses body instead of the
+		// double-translated Anthropic body. What the CLIENT asked for does not
+		// enter into it: the upstream transport is SSE either way (the provider
+		// forces `stream: true`), and the adapter reduces that SSE to a single
+		// JSON document for a non-streaming client. The decision is strictly
 		// per-attempt: the translated effectiveBodyBuffer stays untouched, so a
 		// failover to a non-codex account re-enters here and picks it up.
 		const nativeCtx = getNativeResponsesMetaContext(requestMeta);
-		const useNative =
-			nativeCtx?.clientStream === true && account.provider === "codex";
+		const useNative = nativeCtx !== undefined && account.provider === "codex";
 		let nativeBodyText: string | null = null;
 		if (nativeCtx && useNative) {
 			nativeBodyText = prepareNativeBody(nativeCtx.nativeBody, modelOverride);

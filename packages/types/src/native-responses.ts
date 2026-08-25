@@ -3,15 +3,19 @@ import type { RequestMeta } from "./api";
 /**
  * Original (decompressed, normalized) OpenAI-Responses request carried
  * alongside the translated Anthropic request. Stage A of the native Responses
- * passthrough: when the selected account is a codex account and the client
- * asked for streaming, the proxy forwards this body verbatim (lightly patched)
- * instead of the double-translated Anthropic body.
+ * passthrough: when the selected account is a codex account, the proxy forwards
+ * this body verbatim (lightly patched) instead of the double-translated
+ * Anthropic body.
+ *
+ * Client stream intent is deliberately NOT carried here. The upstream transport
+ * is SSE for every native attempt, so the intent changes nothing on the request
+ * leg; the adapter branches on the client body's own `stream` field when it
+ * decides whether to relay the SSE or reduce it to one JSON document, and the
+ * stored request payload keeps the answer for anyone reading a row later.
  */
 export interface NativeResponsesContext {
 	/** JSON.stringify of the normalized ResponsesRequest the client sent. */
 	nativeBody: string;
-	/** Whether the CLIENT asked for a streamed response (body.stream === true). */
-	clientStream: boolean;
 	/**
 	 * Raw `reasoning.effort` string from the ORIGINAL OpenAI Responses body
 	 * (captured before translation, since the translated Anthropic body loses
