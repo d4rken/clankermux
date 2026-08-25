@@ -166,6 +166,31 @@ describe("extractRepoRoot", () => {
 		expect(second).toBe("/home/u/repo");
 	});
 
+	it("reaches a marker at the offset Claude Code actually puts it", () => {
+		// The regression this pins down. Claude Code emits the instruction-file
+		// block AFTER its context preamble: measured across 600 live payloads the
+		// marker sat at offset ~20,100 in first user messages up to ~66,000
+		// characters. A 16,384 budget fired on 0 of the 505 payloads that carried
+		// one, and every test still passed, because fixtures put the marker in the
+		// first few hundred characters. Fixtures must therefore span the real
+		// offset, or this tier can go dead again without a single failure.
+		const REAL_WORLD_MARKER_OFFSET = 20_114;
+		const REAL_WORLD_FIRST_MESSAGE = 65_883;
+		expect(ANCHOR_SCAN_MAX_CHARS).toBeGreaterThan(REAL_WORLD_FIRST_MESSAGE);
+
+		const text =
+			"x".repeat(REAL_WORLD_MARKER_OFFSET) +
+			projectInstructions("/home/u/repo/.claude/CLAUDE.md") +
+			"y".repeat(REAL_WORLD_FIRST_MESSAGE - REAL_WORLD_MARKER_OFFSET);
+		expect(
+			extractRepoRoot(
+				text.slice(0, ANCHOR_SCAN_MAX_CHARS),
+				"/home/u/repo",
+				"/home/u/repo",
+			),
+		).toBe("/home/u/repo");
+	});
+
 	it("still finds the root when the scan budget truncates later markers", () => {
 		// Rule 1 is what makes truncation safe: whichever instruction file the
 		// budget happens to include reduces to the same root.
