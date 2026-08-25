@@ -227,10 +227,13 @@ export function LiveActivityLanesView({
 	return (
 		<Card>
 			<CardHeader className="p-4 pb-2">
-				{/* Wraps rather than overflowing: the status/rate readouts plus a
-				    four-option selector are wider than a phone-width card interior,
-				    and a non-wrapping row would clip them or push the page sideways. */}
-				<div className="flex flex-wrap items-baseline justify-between gap-x-group gap-y-item">
+				{/* The selector is anchored to the card's top-right corner rather than
+				    trailing the readouts: `active` and `req/min` change width every
+				    tick, and a control at the end of that row would shift under the
+				    pointer between clicks. Pinning it to a corner nothing else shares
+				    keeps it still. `items-start` so it stays on the title's line
+				    however far the description wraps. */}
+				<div className="flex items-start justify-between gap-x-group">
 					<div className="min-w-0">
 						<CardTitle>Live Activity</CardTitle>
 						<CardDescription>
@@ -239,32 +242,35 @@ export function LiveActivityLanesView({
 							follows token count. Click a mark to open its request.
 						</CardDescription>
 					</div>
-					<div className="flex flex-wrap items-center gap-x-row gap-y-item text-sm">
-						<span className="flex items-center gap-item">
-							<span
-								className="inline-block h-2 w-2 rounded-full"
-								style={{
-									backgroundColor: connected
-										? COLORS.success
-										: "var(--muted-foreground)",
-								}}
-								aria-hidden="true"
-							/>
-							<span className="text-muted-foreground">
-								{connected ? "live" : "reconnecting"}
-							</span>
+					{windowControl && (
+						<WindowSelector
+							value={windowControl.value}
+							onChange={windowControl.onChange}
+						/>
+					)}
+				</div>
+				{/* Wraps rather than overflowing: on a phone-width card the three
+				    readouts are wider than the interior, and a non-wrapping row
+				    would clip them or push the page sideways. */}
+				<div className="mt-item flex flex-wrap items-center gap-x-row gap-y-item text-sm">
+					<span className="flex items-center gap-item">
+						<span
+							className="inline-block h-2 w-2 rounded-full"
+							style={{
+								backgroundColor: connected
+									? COLORS.success
+									: "var(--muted-foreground)",
+							}}
+							aria-hidden="true"
+						/>
+						<span className="text-muted-foreground">
+							{connected ? "live" : "reconnecting"}
 						</span>
-						<span className="font-medium">{activeCount} active</span>
-						<span className="text-muted-foreground tabular-nums">
-							{formatNumber(Math.round(perMinute))} req/min
-						</span>
-						{windowControl && (
-							<WindowSelector
-								value={windowControl.value}
-								onChange={windowControl.onChange}
-							/>
-						)}
-					</div>
+					</span>
+					<span className="font-medium">{activeCount} active</span>
+					<span className="text-muted-foreground tabular-nums">
+						{formatNumber(Math.round(perMinute))} req/min
+					</span>
 				</div>
 			</CardHeader>
 			<CardContent className="p-4 pt-2">
@@ -632,9 +638,10 @@ function WindowSelector({
 	return (
 		<fieldset
 			// A fieldset rather than role="group": same semantics, native
-			// element. `min-w-0` undoes the UA's min-inline-size, which would
-			// otherwise stop it shrinking inside the flex header.
-			className="flex min-w-0 items-center gap-tight rounded-md border p-0.5"
+			// element. `min-w-0` undoes the UA's min-inline-size; `shrink-0`
+			// then keeps the four options at full width in the header's flex
+			// row, so the description column absorbs any narrowing instead.
+			className="flex min-w-0 shrink-0 items-center gap-tight rounded-md border p-0.5"
 			aria-label="Live activity time range"
 		>
 			{LIVE_WINDOW_OPTIONS.map((option) => {
