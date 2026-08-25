@@ -34,20 +34,60 @@ const TERMINAL_EVENT_NAMES: ReadonlySet<string> = new Set([
 ]);
 
 /**
- * Cap on the bytes RETAINED while scanning: the incomplete trailing line plus
- * the `data:` payload of the event currently being assembled. Processed
- * non-terminal events are discarded the moment they are dispatched, so the
- * whole SSE is never held — peak per-request memory is this cap, transiently
- * ~3x it while one terminal event is parsed and re-serialized. That is
- * affordable because the expected concurrency of NON-streaming native clients
- * is low (the only known client, Codex CLI, always streams); a client that
- * streams never reaches this module at all.
+ * The ChatGPT/Codex backend diverges from the public OpenAI Responses shape in
+ * exactly one way that matters here: its terminal envelope carries
+ * `"output": []`. The assistant message, reasoning items and tool calls exist
+ * only in the `response.output_item.done` events that precede it (verified live
+ * on 2026-08-25; the captured stream is the fixture behind
+ * __tests__/real-codex-sse.fixture.ts). Handing that envelope to a
+ * non-streaming client verbatim gives it a 200 with no content at all.
+ *
+ * So the scanner retains finalized items as it goes and, ONLY when the terminal
+ * envelope's `output` is an empty array, substitutes the assembled list. A
+ * public-OpenAI-shaped terminal already carries its full output and keeps
+ * passing through verbatim — including its retained items being ignored, since
+ * the backend's own array is authoritative whenever it exists.
+ *
+ * Only `.done` items are used, never the `output_text.delta` fragments: an item
+ * the backend never finalized is represented exactly as far as the backend got,
+ * rather than being reconstructed from deltas into something the backend never
+ * said. Recognition uses the same OR rule as terminals — the `event:` field or
+ * the parsed `data.type`.
+ */
+const OUTPUT_ITEM_DONE_EVENT = "response.output_item.done";
+
+/**
+ * Cap on the bytes RETAINED while scanning ONE frame: the incomplete trailing
+ * line plus the `data:` payload of the event currently being assembled. Events
+ * other than finalized output items are discarded the moment they are
+ * dispatched, so the whole SSE is never held. That is affordable because the
+ * expected concurrency of NON-streaming native clients is low (the only known
+ * client, Codex CLI, always streams); a client that streams never reaches this
+ * module at all.
  *
  * (The proxy's own 256 KiB `MAX_NON_STREAM_BODY_BYTES` is an analytics capture
  * bound and never applies here — from the proxy's point of view this response
  * is still a stream.)
  */
 export const MAX_NATIVE_NONSTREAM_SSE_BYTES = 32 * 1024 * 1024;
+
+/**
+ * Separate cap on the bytes held by RETAINED finalized output items, which live
+ * across frames rather than being dropped at dispatch.
+ *
+ * It is deliberately its own budget rather than a share of the frame cap above.
+ * Charging items against the frame cap would let one large finalized item make
+ * a later, individually-legal terminal frame oversized — rejecting a stream in
+ * which every single document fits, and changing shipped behavior for the
+ * non-empty-output terminals that never needed items in the first place.
+ *
+ * Both numbers bound LOGICAL payload bytes, not JS heap: the parsed objects,
+ * the decoder's intermediate strings and the re-serialization of the terminal
+ * envelope all cost extra on top, transiently several times the payload size.
+ * Peak logical payload for one request is therefore the frame cap plus this
+ * one, and the heap figure is a multiple of that.
+ */
+export const MAX_NATIVE_NONSTREAM_ITEMS_BYTES = 32 * 1024 * 1024;
 
 /**
  * Bound on the bytes consumed by the post-terminal drain. Draining to natural
@@ -70,10 +110,15 @@ export type NativeTerminalResult =
 type ScanOutcome =
 	| { kind: "none" }
 	| { kind: "terminal"; responseJson: string }
-	| { kind: "malformed" };
+	| { kind: "malformed" }
+	| { kind: "oversized" };
 
 const NONE: ScanOutcome = { kind: "none" };
 const MALFORMED: ScanOutcome = { kind: "malformed" };
+const OVERSIZED: ScanOutcome = { kind: "oversized" };
+
+/** A finalized output item plus the payload bytes it is charged for. */
+type RetainedItem = { item: Record<string, unknown>; bytes: number };
 
 /** What `reader.read()` resolves to, spelled without a lib-dependent alias. */
 type ReaderResult = Awaited<
@@ -102,9 +147,10 @@ function cancelQuietly(reader: ReadableStreamDefaultReader<Uint8Array>): void {
 
 /**
  * Incremental SSE scanner: fed decoded text, it dispatches complete events and
- * reports the first terminal one. Non-terminal events are dropped as soon as
- * they are dispatched, so nothing accumulates except the current line and the
- * current event's `data:` payload.
+ * reports the first terminal one. Events are dropped as soon as they are
+ * dispatched — except finalized output items, which are retained because a
+ * ChatGPT-backend terminal envelope cannot be answered without them (see
+ * OUTPUT_ITEM_DONE_EVENT above).
  */
 class NativeSseScanner {
 	/** Trailing bytes that are not yet a complete line. */
@@ -115,6 +161,29 @@ class NativeSseScanner {
 	private dataBytes = 0;
 	private eventName: string | null = null;
 	private eventNameBytes = 0;
+
+	/**
+	 * Finalized items that carried a usable `output_index`, keyed by it. A Map
+	 * rather than a sparse array: the backend's indices are its own, and nothing
+	 * here should depend on them being dense or starting at zero.
+	 */
+	private indexedItems = new Map<number, RetainedItem>();
+	/**
+	 * Finalized items whose `output_index` was absent or unusable, in arrival
+	 * order. They get their OWN list instead of a synthesized key: "largest index
+	 * so far + 1" would collide with a later real index and silently overwrite
+	 * output the backend did send.
+	 */
+	private unindexedItems: RetainedItem[] = [];
+	private itemsBytes = 0;
+	/**
+	 * Set when a recognized done event could not be retained (unparseable data, a
+	 * missing or non-record `item`, an unserializable one). Consulted ONLY where
+	 * it changes an answer: a terminal that needs reconstruction. Reporting a
+	 * 502 there is the honest outcome, because the alternative is a 200 whose
+	 * `output` silently omits whatever that event was carrying.
+	 */
+	private itemsCorrupt = false;
 
 	/**
 	 * Bytes currently held: incomplete line + assembled event payload + the
@@ -210,6 +279,7 @@ class NativeSseScanner {
 		if (data === "" && name === null) return NONE;
 
 		const namedTerminal = name !== null && TERMINAL_EVENT_NAMES.has(name);
+		const namedDoneItem = name === OUTPUT_ITEM_DONE_EVENT;
 
 		let parsed: unknown;
 		try {
@@ -218,19 +288,101 @@ class NativeSseScanner {
 			// An unparseable payload is only an error when the event announced
 			// itself as the terminal one. Anything else is noise the scanner has no
 			// stake in — sentinel frames, partial vendor extensions, `[DONE]`.
-			return namedTerminal ? MALFORMED : NONE;
+			if (namedTerminal) return MALFORMED;
+			// A done event that cannot be read is different from noise: it was
+			// carrying output this scanner may have to reconstruct from.
+			if (namedDoneItem) this.itemsCorrupt = true;
+			return NONE;
 		}
 
 		const type = isRecord(parsed) ? parsed.type : undefined;
 		const typedTerminal =
 			typeof type === "string" && TERMINAL_EVENT_NAMES.has(type);
-		if (!namedTerminal && !typedTerminal) return NONE;
+		// Terminal recognition is checked first: an event claiming both names is
+		// pathological, and answering the client is what this module is for.
+		if (namedTerminal || typedTerminal) return this.finishTerminal(parsed);
+		if (namedDoneItem || type === OUTPUT_ITEM_DONE_EVENT) {
+			return this.retainItem(parsed);
+		}
+		return NONE;
+	}
 
+	/** Retain one `response.output_item.done` payload's `item`. */
+	private retainItem(parsed: unknown): ScanOutcome {
+		const item = isRecord(parsed) ? parsed.item : undefined;
+		if (!isRecord(item)) {
+			this.itemsCorrupt = true;
+			return NONE;
+		}
+
+		let bytes: number;
+		try {
+			bytes = utf8Length(JSON.stringify(item));
+		} catch {
+			// Only reachable for values JSON.parse cannot produce (a getter, a
+			// BigInt); fail the same way as a missing item rather than trust it.
+			this.itemsCorrupt = true;
+			return NONE;
+		}
+
+		// `null` means "no usable index": absent, non-numeric, negative,
+		// fractional, or past the safe-integer range.
+		const rawIndex = isRecord(parsed) ? parsed.output_index : undefined;
+		const index =
+			typeof rawIndex === "number" &&
+			Number.isSafeInteger(rawIndex) &&
+			rawIndex >= 0
+				? rawIndex
+				: null;
+
+		// A re-emitted index supersedes what it replaces, so the entry it evicts
+		// stops being charged — otherwise a backend that re-sends one item could
+		// exhaust the budget with bytes nothing is holding.
+		const superseded =
+			index === null ? undefined : this.indexedItems.get(index);
+		const nextBytes = this.itemsBytes + bytes - (superseded?.bytes ?? 0);
+		if (nextBytes > MAX_NATIVE_NONSTREAM_ITEMS_BYTES) return OVERSIZED;
+
+		this.itemsBytes = nextBytes;
+		if (index === null) this.unindexedItems.push({ item, bytes });
+		else this.indexedItems.set(index, { item, bytes });
+		return NONE;
+	}
+
+	/**
+	 * Produce the client's JSON body from a terminal envelope, repairing an empty
+	 * `output` from the retained items.
+	 */
+	private finishTerminal(parsed: unknown): ScanOutcome {
 		const response = isRecord(parsed) ? parsed.response : undefined;
 		if (!isRecord(response)) return MALFORMED;
-		// Verbatim: no status rewriting, no id substitution. The backend's own
-		// envelope is what the client would have received had it streamed.
-		return { kind: "terminal", responseJson: JSON.stringify(response) };
+
+		if (Array.isArray(response.output) && response.output.length === 0) {
+			// Only here does a dropped item change the answer.
+			if (this.itemsCorrupt) return MALFORMED;
+			const items = this.assembleItems();
+			if (items.length > 0) response.output = items;
+		}
+
+		// Otherwise verbatim: no status rewriting, no id substitution. The
+		// backend's own envelope is what the client would have received had it
+		// streamed.
+		try {
+			return { kind: "terminal", responseJson: JSON.stringify(response) };
+		} catch {
+			return MALFORMED;
+		}
+	}
+
+	/** Indexed items in ascending index order, then unindexed ones as they came. */
+	private assembleItems(): Array<Record<string, unknown>> {
+		const indexed = [...this.indexedItems.entries()]
+			.sort(([a], [b]) => a - b)
+			.map(([, retained]) => retained.item);
+		return [
+			...indexed,
+			...this.unindexedItems.map((retained) => retained.item),
+		];
 	}
 }
 
@@ -249,6 +401,22 @@ class NativeSseScanner {
 export async function extractNativeTerminalResponse(
 	body: ReadableStream<Uint8Array>,
 	opts: { signal?: AbortSignal } = {},
+): Promise<NativeTerminalResult> {
+	// Structurally non-rejecting: the caller (handler.ts) awaits this on the
+	// request's hot path and does not catch, so a rejection here would surface as
+	// an unhandled failure instead of the 502 this module is supposed to produce.
+	// Every known path already returns a result; this is the guarantee, not a
+	// replacement for them.
+	try {
+		return await scanNativeTerminalResponse(body, opts);
+	} catch {
+		return { ok: false, reason: "read-error" };
+	}
+}
+
+async function scanNativeTerminalResponse(
+	body: ReadableStream<Uint8Array>,
+	opts: { signal?: AbortSignal },
 ): Promise<NativeTerminalResult> {
 	const signal = opts.signal;
 	const reader = body.getReader();
@@ -275,11 +443,13 @@ export async function extractNativeTerminalResponse(
 			if (outcome.kind === "terminal") {
 				return { ok: true, responseJson: outcome.responseJson };
 			}
-			return {
-				ok: false,
-				reason:
-					outcome.kind === "malformed" ? "malformed-terminal" : "no-terminal",
-			};
+			if (outcome.kind === "malformed") {
+				return { ok: false, reason: "malformed-terminal" };
+			}
+			if (outcome.kind === "oversized") {
+				return { ok: false, reason: "oversized" };
+			}
+			return { ok: false, reason: "no-terminal" };
 		}
 
 		const value = chunk.value;
@@ -315,6 +485,13 @@ export async function extractNativeTerminalResponse(
 		if (outcome.kind === "malformed") {
 			await drainToEnd(reader, signal);
 			return { ok: false, reason: "malformed-terminal" };
+		}
+		if (outcome.kind === "oversized") {
+			// The retained-items budget is exhausted: this stream cannot produce a
+			// complete answer no matter how much more of it is read. Cancel rather
+			// than drain, exactly as the frame cap does.
+			cancelQuietly(reader);
+			return { ok: false, reason: "oversized" };
 		}
 
 		if (scanner.retainedBytes > MAX_NATIVE_NONSTREAM_SSE_BYTES) {
