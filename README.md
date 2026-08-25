@@ -138,6 +138,36 @@ codex
 `dummy-key` is sufficient when ClankerMux runs open. Codex reads the variable named
 by `env_key` and sends it as a bearer token, so the secret stays out of `config.toml`.
 
+## Curate the model list
+
+Each mount answers `GET /v1/models` in the shape its clients parse, and the
+dashboard's **Models** page decides what that list contains. The upstream
+catalogue is the baseline — Anthropic's live listing for `/wire/anthropic`, the
+Codex catalogue plus the bundled list for `/wire/openai` — and the page layers
+three edits on top of it: hide an entry, rename it, or add one the upstream list
+does not have. Curation is per mount: hiding a model for Codex leaves Claude
+Code's list untouched.
+
+Claude Code reads the list only when gateway model discovery is on:
+
+```bash
+export ANTHROPIC_BASE_URL=http://localhost:8080/wire/anthropic
+export CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1
+claude
+```
+
+Its picker keeps ids naming the Claude family, so a custom entry called something
+else is stored and served but never shown there. OpenAI-format clients read
+`http://localhost:8080/wire/openai/v1/models` and need no flag.
+
+Renames land wherever the wire shape has a name field: Anthropic's listing and
+the Codex catalogue. The plain OpenAI list shape carries no display name, so for
+those clients a rename shows in the dashboard only — hides and additions still
+apply.
+
+Hiding a model removes it from the list; it does not block it. A client that asks
+for a hidden model by name is still proxied normally.
+
 ## License
 
 MIT — see [LICENSE](LICENSE).
