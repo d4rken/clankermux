@@ -2,6 +2,8 @@ import { HttpError } from "@clankermux/http-common";
 import type {
 	AnalyticsSection,
 	ApiKeyResponse,
+	ModelDialect,
+	ModelOverrideSetRequest,
 	RetentionSetRequest,
 } from "@clankermux/types";
 import {
@@ -658,6 +660,47 @@ export const useResetStats = () => {
 };
 
 // Note: Clear logs functionality appears to be removed from the API
+
+/**
+ * The model catalogue for one dialect, and the edits to it.
+ *
+ * Keyed by dialect: the two mounts are separate catalogues, and a shared key
+ * would show the Anthropic list while the OpenAI tab was selected during the
+ * first fetch after a switch. Every mutation invalidates only its own dialect,
+ * because a write to one cannot change the other.
+ */
+export const useModelCatalog = (dialect: ModelDialect) => {
+	return useQuery({
+		queryKey: ["model-catalog", dialect],
+		queryFn: () => api.getModelCatalog(dialect),
+	});
+};
+
+export const useSetModelOverride = () => {
+	const queryClient = useQueryClient();
+	return useMutation({
+		mutationFn: (payload: ModelOverrideSetRequest) =>
+			api.setModelOverride(payload),
+		onSuccess: (_result, payload) => {
+			queryClient.invalidateQueries({
+				queryKey: ["model-catalog", payload.dialect],
+			});
+		},
+	});
+};
+
+export const useDeleteModelOverride = () => {
+	const queryClient = useQueryClient();
+	return useMutation({
+		mutationFn: (payload: { dialect: ModelDialect; modelId: string }) =>
+			api.deleteModelOverride(payload.dialect, payload.modelId),
+		onSuccess: (_result, payload) => {
+			queryClient.invalidateQueries({
+				queryKey: ["model-catalog", payload.dialect],
+			});
+		},
+	});
+};
 
 // Retention settings
 export const useRetention = () => {
