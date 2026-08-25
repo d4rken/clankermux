@@ -171,6 +171,65 @@ describe("LiveActivityLanesView colour encoding", () => {
 		expect(plotOf(render())).toContain("claude-opus-5");
 	});
 
+	it("colours only the busiest few models and greys the rest", () => {
+		// Five covers 99% of a day's requests here, and the card's window is
+		// minutes. A legend naming every model that has ever appeared is legend
+		// for traffic that is not on screen.
+		const events = [
+			// Five busy models, two requests each.
+			...[
+				"claude-opus-5",
+				"claude-sonnet-5",
+				"claude-fable-5",
+				"gpt-5.6-sol",
+				"claude-haiku-4.5",
+			].flatMap((model, i) => [
+				event({ id: `busy-${i}-a`, model }),
+				event({ id: `busy-${i}-b`, model }),
+			]),
+			// One straggler, which must fall outside the cap.
+			event({ id: "rare", model: "claude-opus-4.8" }),
+		];
+		const markup = render({
+			lanes: buildLanes(events, T0, WINDOW, 6).lanes,
+		});
+
+		const legend = legendOf(markup);
+		expect(legend).toContain("claude-opus-5");
+		// Named in the legend only if coloured — the straggler is not.
+		expect(legend).not.toContain("claude-opus-4.8");
+		expect(legend).toContain("1 more");
+		// Its mark draws in the neutral, not in its own palette hue.
+		expect(plotOf(markup)).not.toContain(MODEL_PALETTE.yellow);
+		expect(plotOf(markup)).toContain(MODEL_PALETTE.grey);
+	});
+
+	it("still names a greyed model on its own mark", () => {
+		// Losing the hue must not lose the identity: the tooltip is the only
+		// place left that says which model a grey mark belongs to.
+		const markup = render({
+			lanes: buildLanes(
+				[
+					...[
+						"claude-opus-5",
+						"claude-sonnet-5",
+						"claude-fable-5",
+						"gpt-5.6-sol",
+						"claude-haiku-4.5",
+					].flatMap((model, i) => [
+						event({ id: `busy-${i}-a`, model }),
+						event({ id: `busy-${i}-b`, model }),
+					]),
+					event({ id: "rare", model: "claude-opus-4.8" }),
+				],
+				T0,
+				WINDOW,
+				6,
+			).lanes,
+		});
+		expect(plotOf(markup)).toContain("claude-opus-4.8");
+	});
+
 	it("gives a Codex model its own legend swatch, not a Claude model's", () => {
 		// gpt-5.6-sol is ~15% of live requests. It used to reach the index-based
 		// fallback, whose entries are hues registered Claude models already wear,

@@ -14,9 +14,11 @@ import {
 	type LiveEvent,
 	type LiveStatus,
 	MARK_OPACITY,
+	type ModelRanking,
 	markCenterX,
 	markRadius,
 	NOW_INSET,
+	rankModels,
 } from "../../lib/live-activity";
 import type { Outage } from "../../lib/live-activity-store";
 import { LIVE_WINDOW_OPTIONS } from "../../lib/live-activity-window";
@@ -85,12 +87,38 @@ const STATUS_COLOR: Partial<Record<LiveStatus, string>> = {
 	lost: "var(--muted-foreground)",
 };
 
-/** Mark colour for one event: failure keeps its status hue, work gets its model's. */
-function markColor(event: LiveEvent, palette: SeriesPalette): string {
+/**
+ * Colour for the models outside the top few, and for events with no model at
+ * all.
+ *
+ * `MODEL_PALETTE.grey` rather than `--muted-foreground`, which already means
+ * "outcome unknown" on this card: the two sit dE 30.2 apart on the dark ground
+ * and 19.3 on the light one, so a de-emphasised model still reads as a
+ * different thing from a `lost` request.
+ */
+function otherColor(palette: SeriesPalette): string {
+	return palette.hue.grey;
+}
+
+/**
+ * Mark colour for one event: failure keeps its status hue, and work gets its
+ * model's hue if that model is one of the few the legend names.
+ *
+ * `colored` is a set of SHORT names, matching how the ranking and the legend
+ * key models — so a dated id and its alias are one model here as they are
+ * everywhere else.
+ */
+function markColor(
+	event: LiveEvent,
+	palette: SeriesPalette,
+	colored: ReadonlySet<string>,
+): string {
 	const status = STATUS_COLOR[event.status];
 	if (status) return status;
-	if (!event.model) return "var(--muted-foreground)";
-	return palette.forModel(event.model);
+	if (!event.model) return otherColor(palette);
+	return colored.has(getModelShortName(event.model))
+		? palette.forModel(event.model)
+		: otherColor(palette);
 }
 
 const STATUS_LABEL: Record<LiveStatus, string> = {
@@ -190,6 +218,11 @@ export function LiveActivityLanesView({
 	const perMinute = requestCount / (windowMs / 60_000);
 
 	const height = lanes.length * LANE_HEIGHT + AXIS_HEIGHT;
+
+	// One ranking, shared by the marks and the legend, so the key can never
+	// disagree with what is drawn.
+	const ranking = rankModels(lanes);
+	const colored = new Set(ranking.colored);
 
 	return (
 		<Card>
@@ -394,6 +427,7 @@ export function LiveActivityLanesView({
 															key={event.id}
 															event={event}
 															palette={palette}
+															colored={colored}
 															cx={markCenterX(
 																event.ts,
 																now,
@@ -488,7 +522,7 @@ export function LiveActivityLanesView({
 								))}
 							</ul>
 						</div>
-						<ModelLegend lanes={lanes} palette={palette} />
+						<ModelLegend ranking={ranking} palette={palette} />
 					</>
 				)}
 			</CardContent>
@@ -510,37 +544,51 @@ export function LiveActivityLanesView({
  * rather than read.
  */
 function ModelLegend({
-	lanes,
+	ranking,
 	palette,
 }: {
-	lanes: Lane[];
+	ranking: ModelRanking;
 	palette: SeriesPalette;
 }) {
-	const models = useMemo(() => {
-		const names = new Map<string, string>();
-		for (const lane of lanes) {
-			for (const event of lane.events) {
-				if (!event.model) continue;
-				names.set(getModelShortName(event.model), event.model);
-			}
-		}
-		return [...names.entries()].sort(([a], [b]) => a.localeCompare(b));
-	}, [lanes]);
+	// Ranked busiest-first for the CUT, then listed alphabetically. Volume
+	// decides which models are named; showing them in volume order would make
+	// the row reorder itself as the window rolls and two models trade places,
+	// which is motion in the corner of the eye for no information.
+	const models = useMemo(
+		() => [...ranking.colored].sort((a, b) => a.localeCompare(b)),
+		[ranking.colored],
+	);
 
-	if (models.length === 0) return null;
+	if (models.length === 0 && ranking.otherModels === 0) return null;
 
 	return (
 		<ul className="mt-2 flex flex-wrap items-center gap-x-row gap-y-item border-t pt-2 text-xs text-muted-foreground">
-			{models.map(([shortName, modelId]) => (
+			{models.map((shortName) => (
 				<li key={shortName} className="flex items-center gap-item">
 					<span
 						className="inline-block h-2 w-2 shrink-0 rounded-full"
-						style={{ backgroundColor: palette.forModel(modelId) }}
+						style={{
+							backgroundColor: palette.forModel(
+								ranking.idFor.get(shortName) ?? shortName,
+							),
+						}}
 						aria-hidden="true"
 					/>
 					{shortName}
 				</li>
 			))}
+			{ranking.otherModels > 0 && (
+				// Counted, not just labelled "Other": the number is the only thing
+				// telling you whether the grey marks are one stray model or a dozen.
+				<li className="flex items-center gap-item">
+					<span
+						className="inline-block h-2 w-2 shrink-0 rounded-full"
+						style={{ backgroundColor: otherColor(palette) }}
+						aria-hidden="true"
+					/>
+					{ranking.otherModels} more
+				</li>
+			)}
 			{/* Named alongside the models because they are the other thing a
 			    mark's appearance can mean. Without them a red X reads as one more
 			    model whose swatch is missing from the row. */}
@@ -615,6 +663,7 @@ function WindowSelector({
 function Mark({
 	event,
 	palette,
+	colored,
 	cx,
 	cy,
 	opacity,
@@ -622,12 +671,13 @@ function Mark({
 }: {
 	event: LiveEvent;
 	palette: SeriesPalette;
+	colored: ReadonlySet<string>;
 	cx: number;
 	cy: number;
 	opacity: number;
 	selected: boolean;
 }) {
-	const color = markColor(event, palette);
+	const color = markColor(event, palette, colored);
 	const r = markRadius(event.tokens);
 	// A 2px surface ring rather than a border, so overlapping marks stay
 	// separable without adding a second ink colour.

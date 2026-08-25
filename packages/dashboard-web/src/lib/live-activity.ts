@@ -1,4 +1,4 @@
-import type { RequestStreamEvt } from "@clankermux/core";
+import { getModelShortName, type RequestStreamEvt } from "@clankermux/core";
 import type { RequestResponse } from "@clankermux/types";
 import { NO_PROJECT_LABEL } from "./project-donut";
 
@@ -641,6 +641,70 @@ export function markRadius(tokens: number | null): number {
  * wedged the faintest thing on the card.
  */
 export const MARK_OPACITY = 1;
+
+/**
+ * How many models get their own colour on the card before the rest collapse
+ * into one "Other" bucket.
+ *
+ * Five covers 99.0% of a day's requests here, 98.9% of a week and 98.2% of a
+ * month — the top five run 6.8% and up while the sixth-busiest real model is
+ * 0.01%, so the cap sits in a very wide gap rather than cutting through a
+ * cluster. The card's window is minutes, and seven distinct models appear in a
+ * whole day; a legend longer than this is legend for traffic that is not there.
+ *
+ * Analytics deliberately does NOT cap. Its ranges reach back far enough that
+ * the tail is real — Opus 4.8 is 19% of lifetime traffic and Opus 4.7 another
+ * 9%, both effectively retired now — and greying them would merge a quarter of
+ * all history into one band in exactly the charts that exist to separate it.
+ */
+export const MAX_COLORED_MODELS = 5;
+
+export interface ModelRanking {
+	/** Short names that keep their own hue, busiest first. */
+	colored: string[];
+	/** Short name -> a full model id for it, for palette lookup. */
+	idFor: Map<string, string>;
+	/** How many distinct models fell outside the cap. */
+	otherModels: number;
+}
+
+/**
+ * Rank the models on the plot by request count and decide which keep a hue.
+ *
+ * Rank decides only WHETHER a model is coloured, never WHICH colour it gets —
+ * that stays keyed to the model id. If rank picked the hue, every mark on the
+ * card would change colour whenever two models swapped places as the window
+ * rolled, which is the instability the id-keyed palette exists to prevent.
+ *
+ * Ties break on the short name so the cut is deterministic: two models on equal
+ * counts would otherwise trade the last slot on every re-render.
+ */
+export function rankModels(
+	lanes: Array<{ events: LiveEvent[] }>,
+	limit: number = MAX_COLORED_MODELS,
+): ModelRanking {
+	const counts = new Map<string, number>();
+	const idFor = new Map<string, string>();
+	for (const lane of lanes) {
+		for (const event of lane.events) {
+			if (!event.model) continue;
+			const shortName = getModelShortName(event.model);
+			counts.set(shortName, (counts.get(shortName) ?? 0) + 1);
+			if (!idFor.has(shortName)) idFor.set(shortName, event.model);
+		}
+	}
+
+	const ordered = [...counts.entries()].sort(
+		([nameA, countA], [nameB, countB]) =>
+			countB - countA || nameA.localeCompare(nameB),
+	);
+
+	return {
+		colored: ordered.slice(0, limit).map(([name]) => name),
+		idFor,
+		otherModels: Math.max(ordered.length - limit, 0),
+	};
+}
 
 // ---------------------------------------------------------------------------
 // Plot geometry

@@ -13,6 +13,7 @@ import {
 	MARK_OPACITY,
 	markRadius,
 	pruneLiveStore,
+	rankModels,
 	sweepLostEvents,
 } from "../live-activity";
 
@@ -903,6 +904,57 @@ describe("markRadius", () => {
 	it("gives an unknown token count a neutral size", () => {
 		expect(markRadius(null)).toBeGreaterThanOrEqual(2.5);
 		expect(markRadius(null)).toBeLessThanOrEqual(7);
+	});
+});
+
+describe("rankModels", () => {
+	const laneOf = (models: string[]) => ({
+		events: models.map((model, i) => ({
+			id: `r${i}`,
+			ts: T0,
+			project: "clankermux",
+			model,
+			tokens: 1,
+			status: "ok" as const,
+			durationMs: 1,
+			tokensPerSecond: null,
+			account: null,
+		})),
+	});
+
+	it("keeps the busiest models and counts the rest", () => {
+		const ranking = rankModels(
+			[laneOf(["a", "a", "a", "b", "b", "c", "d", "e", "f", "g"])],
+			3,
+		);
+		expect(ranking.colored).toEqual(["a", "b", "c"]);
+		expect(ranking.otherModels).toBe(4);
+	});
+
+	it("breaks ties on the name so the cut cannot flip between renders", () => {
+		// Equal-count models would otherwise trade the last slot on every
+		// re-render, flickering one mark between its hue and the neutral.
+		const first = rankModels([laneOf(["z", "y", "x"])], 2);
+		const second = rankModels([laneOf(["x", "y", "z"])], 2);
+		expect(first.colored).toEqual(second.colored);
+		expect(first.colored).toEqual(["x", "y"]);
+	});
+
+	it("ranks nothing when there is nothing on the plot", () => {
+		expect(rankModels([{ events: [] }], 5)).toMatchObject({
+			colored: [],
+			otherModels: 0,
+		});
+	});
+
+	it("counts a model across every lane it appears in", () => {
+		// Lanes are projects; one model spread thinly over several projects can
+		// still be the busiest thing on the card.
+		const ranking = rankModels(
+			[laneOf(["spread", "loud"]), laneOf(["spread"]), laneOf(["spread"])],
+			1,
+		);
+		expect(ranking.colored).toEqual(["spread"]);
 	});
 });
 
