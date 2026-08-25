@@ -9,6 +9,17 @@ export {
 	listProviders,
 	registerProvider,
 } from "@clankermux/providers";
+export {
+	ANTHROPIC_BUNDLED_MODEL_CREATED_AT,
+	ANTHROPIC_MODEL_CATALOG_LOOKUP_BUDGET_MS,
+	ANTHROPIC_MODEL_CATALOG_RETRY_AFTER_MS,
+	ANTHROPIC_MODEL_CATALOG_TTL_MS,
+	ANTHROPIC_MODEL_CATALOG_URL,
+	type AnthropicCatalogModel,
+	AnthropicModelCatalogCache,
+	type AnthropicModelCatalogCacheDeps,
+	type AnthropicModelCatalogSnapshot,
+} from "./anthropic-model-catalog-cache";
 export { AutoRefreshScheduler } from "./auto-refresh-scheduler";
 export {
 	BRIDGE_HOURS_PER_RISK_UNIT,
