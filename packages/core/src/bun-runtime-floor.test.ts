@@ -255,9 +255,12 @@ describe("assertBunRuntimeFloor", () => {
 });
 
 describe("the floor is declared consistently across the repo", () => {
-	// Five places state the runtime floor: this constant, `engines.bun`,
-	// `.bun-version` (what CI installs), and two spots in the README. Nothing
-	// enforces agreement at runtime, so it is enforced here.
+	// Six places state the runtime floor: this constant, `engines.bun`,
+	// `.bun-version` (what CI installs), two spots in the README, and the root
+	// `devDependencies.bun` pin. That pin exists so package.json scripts do not
+	// resolve the Bun binary that `bun-plugin-tailwind`'s peer dependency drops
+	// into `node_modules/.bin`. Nothing enforces agreement at runtime, so it is
+	// enforced here.
 
 	async function readRepoFile(relative: string): Promise<string> {
 		return await Bun.file(new URL(relative, REPO_ROOT).pathname).text();
@@ -277,6 +280,19 @@ describe("the floor is declared consistently across the repo", () => {
 			engines?: { bun?: string };
 		};
 		expect(pkg.engines?.bun).toBe(`>=${MIN_BUN_VERSION}`);
+	});
+
+	test("package.json pins the bun devDependency to the floor exactly", async () => {
+		// Equality, for the same reason `.bun-version` uses it: a pin allowed to
+		// drift above the floor would leave the declared minimum untested, and a
+		// pin allowed to drift below re-creates the shadowed-runtime bug this
+		// devDependency was added to fix — package.json scripts resolving the
+		// Bun that `bun-plugin-tailwind`'s peer dependency drops into
+		// `node_modules/.bin` instead of the one `.bun-version` declares.
+		const pkg = JSON.parse(await readRepoFile("package.json")) as {
+			devDependencies?: { bun?: string };
+		};
+		expect(pkg.devDependencies?.bun).toBe(MIN_BUN_VERSION);
 	});
 
 	test(".bun-version is the floor exactly, so CI tests the declared minimum", async () => {
