@@ -133,9 +133,13 @@ export function AccountUtilizationCard({
 				    width says nothing about the room this header actually has. Keyed
 				    on `sm:` the same mistake in SettingRow switched a two-track layout
 				    on at 640px while the row still had ~340px, overflowing its
-				    control. */}
+				    control. The threshold here is `@xl` (576px): at a 448px container
+				    (`@md`) the "Sort by" label plus the 190px trigger forms a roughly
+				    237px cluster, leaving the five-sentence description about 203px.
+				    That wraps without overlap or truncation, but stays cramped until
+				    roughly 576px, so the header stays stacked until then. */}
 				<div className="@container">
-					<div className="flex flex-col gap-item @md:flex-row @md:items-start @md:justify-between">
+					<div className="flex flex-col gap-item @xl:flex-row @xl:items-start @xl:justify-between">
 						<div className="min-w-0">
 							<CardTitle>Account Utilization</CardTitle>
 							<CardDescription>
@@ -148,7 +152,7 @@ export function AccountUtilizationCard({
 							</CardDescription>
 						</div>
 						{showSortControl && (
-							<div className="flex items-center gap-item @md:shrink-0">
+							<div className="flex items-center gap-item @xl:shrink-0">
 								<Label
 									htmlFor="account-utilization-sort"
 									className="text-xs text-muted-foreground whitespace-nowrap"
@@ -158,7 +162,7 @@ export function AccountUtilizationCard({
 								<Select value={sortMode} onValueChange={handleSortModeChange}>
 									<SelectTrigger
 										id="account-utilization-sort"
-										className="h-9 w-full @md:w-[190px]"
+										className="h-9 w-full @xl:w-[190px]"
 									>
 										<SelectValue />
 									</SelectTrigger>
