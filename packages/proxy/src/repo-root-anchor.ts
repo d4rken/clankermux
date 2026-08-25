@@ -73,12 +73,26 @@ const PROJECT_INSTRUCTIONS_RE =
 /**
  * How much of the first user message to scan.
  *
- * Safe to truncate because of rule 1: every instruction path in a repository
- * reduces to the same root, so a scan that sees only some of them still lands
- * on the right answer. The system prompt is bounded by the client and scanned
- * whole; only the message body, which carries the file CONTENTS, needs a cap.
+ * MEASURED, not guessed. Claude Code puts the instruction-file block after the
+ * rest of its context preamble: across 600 live `/v1/messages` payloads the
+ * marker sat at a p50 offset of 20,100 characters (p99 20,114, max 20,114) in
+ * first user messages running up to 65,883 characters.
+ *
+ * An earlier value of 16,384 fired on 0 of the 505 payloads that carried a
+ * marker at all. The tier was completely dead in production while every test
+ * passed, because the tests place the marker near the start of a short
+ * fixture. That is the failure mode to keep in mind here: nothing errors, the
+ * attribution just quietly falls through to the tier below.
+ *
+ * 256 KiB is roughly four times the largest first message observed, so it is
+ * headroom rather than a fit, and it still bounds the work. The scan is also
+ * gated on a plain substring check, so the regex only runs on a message that
+ * actually contains the marker.
  */
-export const ANCHOR_SCAN_MAX_CHARS = 16_384;
+export const ANCHOR_SCAN_MAX_CHARS = 262_144;
+
+/** Cheap pre-check so the regex never runs on a message without the marker. */
+const ANCHOR_MARKER = "(project instructions";
 
 /**
  * Reduce one instruction-file path to the repository root that contains it.
@@ -108,6 +122,7 @@ export function extractRepoRoot(
 	projectDir: string,
 ): string | null {
 	if (!workingDir || !projectDir) return null;
+	if (!text.includes(ANCHOR_MARKER)) return null;
 
 	let best: string | null = null;
 	let bestDepth = Number.POSITIVE_INFINITY;
