@@ -274,7 +274,22 @@ export class CodexUsagePoller {
 			// now instead of serving out up to 30 minutes of it — without this, the
 			// first poll after recovery could sit a full backoff away from that
 			// lone reading and break the observation run anyway.
-			if (state.failures > 0 && isTrafficFresh()) {
+			//
+			// The evidence window gets a heartbeat-based floor: this check only runs
+			// on ~30s beats, and with a configured interval small enough that
+			// freshnessMs < the beat spacing (allowed down to 10s), a reading landing
+			// between beats would always be "stale" by the next beat and the
+			// conversion could never fire. A reading observed within the last two
+			// beats is still recovery evidence — the wider window is used ONLY here,
+			// never for the skip-a-read decision below.
+			const evidenceWindowMs = Math.max(
+				freshnessMs,
+				2 * HEARTBEAT_SECONDS * 1000,
+			);
+			const observedAtMs = this.deps.peekObservedAtMs(account.id);
+			const recoveryEvidence =
+				observedAtMs !== null && now - observedAtMs < evidenceWindowMs;
+			if (state.failures > 0 && recoveryEvidence) {
 				state.failures = 0;
 				state.lastReadFailed = false;
 				const { delayMs, isIdle } = computePollDelay({

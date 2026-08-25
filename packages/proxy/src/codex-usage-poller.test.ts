@@ -373,6 +373,51 @@ describe("CodexUsagePoller", () => {
 		expect(h.readCalls).toHaveLength(2);
 	});
 
+	it("still converts a backoff when the interval is smaller than the heartbeat", async () => {
+		// At the config floor (10s), freshness is 8s — shorter than the 30s beat
+		// spacing — so without the heartbeat floor on the evidence window a
+		// reading landing between beats would always look stale by the next beat
+		// and the conversion could never fire.
+		const activeMs = 10_000;
+		let nowMs = T0;
+		const readCalls: string[] = [];
+		let observedAt: number | null = null;
+		let readResult = { success: false, message: "boom" };
+		const accounts = [makeAccount({ last_used: T0 - 1_000 })];
+		const poller = new CodexUsagePoller({
+			listCodexAccounts: async () => accounts,
+			readUsage: async (id) => {
+				readCalls.push(id);
+				return readResult;
+			},
+			peekObservedAtMs: () => observedAt,
+			activeIntervalMs: () => activeMs,
+			now: () => nowMs,
+			jitterFraction: () => 0,
+		});
+		await poller.tick(); // failure #1 → backoff, due T0 + 20s
+		expect(readCalls).toHaveLength(1);
+		// A traffic reading lands 5s in; the next evaluation at T0+15s sees it
+		// 10s old — past the 8s freshness window, but within the heartbeat-floored
+		// evidence window — and converts the backoff (healthy due: T0 + 25s).
+		nowMs = T0 + 15_000;
+		observedAt = T0 + 5_000;
+		accounts[0].last_used = nowMs - 1_000;
+		readResult = { success: true, message: "ok" };
+		await poller.tick();
+		expect(readCalls).toHaveLength(1);
+		// Without the conversion the ORIGINAL backoff due time (T0+20s) would
+		// trigger a read here; the healthy reschedule moved it to T0+25s.
+		nowMs = T0 + 20_000;
+		accounts[0].last_used = nowMs - 1_000;
+		await poller.tick();
+		expect(readCalls).toHaveLength(1);
+		nowMs = T0 + 25_000;
+		accounts[0].last_used = nowMs - 1_000;
+		await poller.tick();
+		expect(readCalls).toHaveLength(2);
+	});
+
 	it("isolates a throwing read to its own account and backs it off", async () => {
 		let nowMs = T0;
 		const readCalls: string[] = [];
