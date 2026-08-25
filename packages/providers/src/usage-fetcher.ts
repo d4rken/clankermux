@@ -1545,6 +1545,16 @@ class UsageCache {
 			clearTimeout(timeout);
 			this.pollTimeouts.delete(accountId);
 		}
+		// Provider metadata is dropped UNCONDITIONALLY, outside the
+		// `tokenProviders.has` guard below: startPolling writes these two only
+		// when the caller passes a value, so an account can hold them without
+		// ever having had a live poller. Neither can keep a stopped poller alive
+		// (refreshNow bails on the missing token provider first), but leaving
+		// them means every account ever polled keeps an entry for the life of
+		// the process, and a later startPolling for the same id that omits the
+		// arguments would inherit the stale value.
+		this.providerTypes.delete(accountId);
+		this.customEndpoints.delete(accountId);
 		if (this.tokenProviders.has(accountId)) {
 			this.tokenProviders.delete(accountId);
 			this.failureCounts.delete(accountId);

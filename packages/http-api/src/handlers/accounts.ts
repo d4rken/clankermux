@@ -1496,8 +1496,26 @@ export function createAccountRemoveHandler(dbOps: DatabaseOperations) {
 
 			// In-memory cleanup, keyed by the SAME id that was deleted — so a name
 			// collision can never evict a surviving account's state.
-			// Clear usage cache for removed account to prevent memory leaks
+			// BOTH, and in this order. stopPolling() tears down the poll loop:
+			// delete() drops only the cached usage entry, leaving tokenProviders
+			// and pollTimeouts populated, and scheduleNextPoll re-arms for as long
+			// as tokenProviders holds the id — poll failures lengthen the backoff
+			// but never unschedule, so a delete()-only removal left the loop
+			// hitting the provider with the deleted account's token until the
+			// process restarted. delete() then still runs because most of what
+			// stopPolling() clears (the cache entry included) sits behind its
+			// `tokenProviders.has(accountId)` guard, and an account that never had
+			// a poller does not satisfy it. Only anthropic, zai and kilo accounts
+			// get one, and only when they have credentials — every other provider,
+			// and any account removed before its poller started, reaches removal
+			// with a populated cache and no token provider.
+			usageCache.stopPolling(accountId);
 			usageCache.delete(accountId);
+			// Token-manager refresh bookkeeping (in-flight refresh, failure and
+			// backoff counters) is otherwise only released by the 5-minute TTL
+			// sweep or the entry-count cap. Same clearer the reauth and
+			// usage-refresh paths already call.
+			clearAccountRefreshCache(accountId);
 			codexRateLimitResetCreditsCache.delete(accountId);
 			clearUsageRevisionAnchors(accountId);
 			// Evict any warm session-cache slots owned by the removed account so
