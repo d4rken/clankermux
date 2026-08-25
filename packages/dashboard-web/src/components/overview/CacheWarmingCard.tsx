@@ -5,7 +5,11 @@ import {
 	hoursToRiskFactor,
 	keepalivesForHours,
 } from "../../lib/bridge-horizon";
-import { Button } from "../ui/button";
+import {
+	SettingFigure,
+	SettingNumberControl,
+	SettingRow,
+} from "../settings/SettingRow";
 import {
 	Card,
 	CardContent,
@@ -13,7 +17,6 @@ import {
 	CardHeader,
 	CardTitle,
 } from "../ui/card";
-import { Input } from "../ui/input";
 import {
 	Select,
 	SelectContent,
@@ -37,12 +40,27 @@ const MODE_OPTIONS: { value: CacheWarmingMode; label: string }[] = [
 	{ value: "dynamic", label: "Dynamic" },
 ];
 
-const MODE_HELP: Record<CacheWarmingMode, string> = {
-	off: "Disabled — no prompt caches are kept warm.",
-	static:
-		"Every eligible session (≥ min context) is kept warm at the 1-hour cache TTL. Predictable, but pays the 1h-write premium on all of them.",
-	dynamic:
-		"Adaptive: only idle-prone, established sessions are promoted to the 1h TTL; continuously-active sessions are demoted back to the cheap 5-minute TTL (de-stick). Smartest, lowest waste.",
+/**
+ * Mode help, split into the line that is always on screen and the reasoning
+ * behind the expander. The summary says what the mode DOES; the detail says
+ * what it costs, which is the part you only need while choosing.
+ */
+const MODE_HELP: Record<
+	CacheWarmingMode,
+	{ summary: string; detail?: string }
+> = {
+	off: { summary: "Disabled — no prompt caches are kept warm." },
+	static: {
+		summary: "Every eligible session is kept warm at the 1-hour cache TTL.",
+		detail:
+			"Predictable, but it pays the 1-hour cache-write premium on all of them, including sessions that were never going to be resumed.",
+	},
+	dynamic: {
+		summary:
+			"Only idle-prone, established sessions are promoted to the 1-hour TTL.",
+		detail:
+			"Adaptive: continuously-active sessions are demoted back to the cheap 5-minute TTL (de-stick), so the 1-hour premium is paid only where an idle gap makes it worth holding. Smartest, lowest waste.",
+	},
 };
 
 export function CacheWarmingCard() {
@@ -85,21 +103,21 @@ export function CacheWarmingCard() {
 		keepalivesForHours(hours, refreshMinutes),
 	);
 
+	const modeHelp = MODE_HELP[mode];
+
 	return (
 		<Card className="card-hover">
 			<CardHeader>
 				<CardTitle>Cache Keep-Alive</CardTitle>
 				<CardDescription>
 					Keeps large, idle Anthropic prompt caches warm so returning to a
-					forgotten session stays cheap. Only applies to providers with a
-					cache-write premium (Anthropic) — OpenAI/Codex cache automatically and
-					don't benefit.
+					forgotten session stays cheap.
 				</CardDescription>
 			</CardHeader>
-			<CardContent className="space-y-group">
-				<div>
-					<div className="flex items-center gap-row">
-						<span className="text-sm font-medium w-12">Mode</span>
+			<CardContent className="space-y-row">
+				<SettingRow
+					label="Mode"
+					control={
 						<Select
 							value={mode}
 							disabled={busy}
@@ -118,87 +136,62 @@ export function CacheWarmingCard() {
 								))}
 							</SelectContent>
 						</Select>
-					</div>
-					<p className="text-xs text-muted-foreground mt-1">
-						{MODE_HELP[mode]}
-					</p>
-				</div>
+					}
+					summary={modeHelp.summary}
+					detail={
+						modeHelp.detail ??
+						"Only applies to providers with a cache-write premium (Anthropic). OpenAI and Codex cache automatically and gain nothing from keep-alive."
+					}
+				/>
 
-				<div>
-					<div className="flex items-center gap-item">
-						<span className="text-sm font-medium">
-							Minimum context size (tokens)
-						</span>
-					</div>
-					<div className="flex items-center gap-item mt-1">
-						<Input
-							type="number"
+				<SettingRow
+					label="Minimum context"
+					control={
+						<SettingNumberControl
+							value={minTokens}
+							unit="tokens"
 							min={0}
 							step={1000}
-							value={minTokens}
 							disabled={busy || offMode}
-							onChange={(e) =>
-								setMinTokens(parseInt(e.target.value || "0", 10))
-							}
-							className="w-32"
+							canSave={validMinTokens && dirty}
+							onChange={(raw) => setMinTokens(parseInt(raw || "0", 10))}
+							onSave={() => setCacheWarming.mutate({ minTokens })}
+							inputClassName="w-28"
 						/>
-						<Button
-							size="sm"
-							disabled={busy || offMode || !validMinTokens || !dirty}
-							onClick={() => setCacheWarming.mutate({ minTokens })}
-						>
-							Save
-						</Button>
-					</div>
-					<p className="text-xs text-muted-foreground mt-1">
-						Only sessions whose cached context is at least this many tokens are
-						kept warm (default 100,000 ≈ 100k).
-					</p>
-				</div>
+					}
+					summary="Only sessions with at least this much cached context are kept warm."
+					detail="Below this size a cache is cheap enough to rebuild on demand, so holding it warm costs more than it saves. Default is 100,000 tokens (≈100k)."
+				/>
 
-				<div>
-					<div className="flex items-center gap-item">
-						<span className="text-sm font-medium">Bridge horizon (hours)</span>
-					</div>
-					<div className="flex items-center gap-item mt-1">
-						<Input
-							type="number"
+				<SettingRow
+					label="Bridge horizon"
+					control={
+						<SettingNumberControl
+							value={hours}
+							unit="hours"
 							min={0}
 							max={maxBridgeHours}
 							step={0.5}
-							value={hours}
 							disabled={busy || offMode}
-							onChange={(e) =>
+							canSave={validHours && hoursDirty}
+							onChange={(raw) =>
 								setHours(
-									clampBridgeHours(
-										parseFloat(e.target.value || "0"),
-										maxBridgeHours,
-									),
+									clampBridgeHours(parseFloat(raw || "0"), maxBridgeHours),
 								)
 							}
-							className="w-32"
+							onSave={() => setCacheWarming.mutate({ bridgeHours: hours })}
+							inputClassName="w-28"
 						/>
-						<Button
-							size="sm"
-							disabled={busy || offMode || !validHours || !hoursDirty}
-							onClick={() => setCacheWarming.mutate({ bridgeHours: hours })}
-						>
-							Save
-						</Button>
-					</div>
-					<p className="text-xs text-muted-foreground mt-1">
-						How long an <strong>idle, promoted (1-hour)</strong> session is kept
-						warm before the spend budget gives up — ≈{previewKeepalives}{" "}
-						keepalive
-						{previewKeepalives === 1 ? "" : "s"} at the {refreshMinutes}-min
-						cadence (risk factor {previewRiskFactor.toFixed(2)}). Longer
-						recovers older idle sessions (e.g. overnight) cheaply on return,
-						since a refresh costs ~20× less than rebuilding the cache — but you
-						pay that hold cost on sessions you never come back to. Max ~
-						{maxBridgeHours.toFixed(1)}h: beyond the break-even point it's
-						cheaper to let the cache rebuild.
-					</p>
-				</div>
+					}
+					value={
+						<SettingFigure
+							figure={`≈${previewKeepalives}`}
+							note={`keepalive${previewKeepalives === 1 ? "" : "s"} at the ${refreshMinutes}-min cadence · risk ${previewRiskFactor.toFixed(2)}`}
+						/>
+					}
+					summary="How long an idle, promoted (1-hour) session is kept warm."
+					detail={`Longer recovers older idle sessions (an overnight gap, say) cheaply on return, since a refresh costs ~20× less than rebuilding the cache — but you pay that hold cost on every session you never come back to. Max ~${maxBridgeHours.toFixed(1)}h: beyond the break-even point it is cheaper to let the cache rebuild.`}
+				/>
 			</CardContent>
 		</Card>
 	);
