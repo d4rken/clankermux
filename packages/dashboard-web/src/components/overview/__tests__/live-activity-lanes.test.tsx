@@ -1,12 +1,30 @@
 import { describe, expect, it } from "bun:test";
 import { renderToStaticMarkup } from "react-dom/server";
+import { COLORS, MODEL_PALETTE } from "../../../constants";
+import type { SeriesPalette } from "../../../hooks/useSeriesPalette";
 import type { Lane, LiveEvent, LiveStatus } from "../../../lib/live-activity";
 import { buildLanes, hitTest } from "../../../lib/live-activity";
+import { getModelColor } from "../../../lib/model-colors";
 import { LiveActivityLanesView, unknownRegions } from "../LiveActivityLanes";
 
 const WINDOW = 180_000;
 const T0 = 1_700_000_000_000;
 const PLOT_WIDTH = 720;
+
+/**
+ * The dark-ground palette, built by hand rather than through the hook.
+ *
+ * `useSeriesPalette` reads the class off `<html>` and subscribes to it, which
+ * needs a DOM; these are `renderToStaticMarkup` tests. Passing the palette as a
+ * prop is what makes that possible, so constructing one here is the point of
+ * the prop, not a workaround for it.
+ */
+const PALETTE: SeriesPalette = {
+	mode: "dark",
+	hue: MODEL_PALETTE,
+	sequence: [],
+	forModel: (model: string) => getModelColor(model, "dark"),
+};
 
 function event(over: Partial<LiveEvent> = {}): LiveEvent {
 	return {
@@ -38,10 +56,202 @@ function render(
 			outages={[]}
 			coverageFrom={T0 - WINDOW}
 			primed={true}
+			palette={PALETTE}
 			{...props}
 		/>,
 	);
 }
+
+/**
+ * The plot only. Model names and hues appear in three places — the marks, their
+ * tooltips, and the legend — so a whole-markup `toContain` cannot tell "this
+ * mark is red" from "red is listed in the key below".
+ */
+function plotOf(markup: string): string {
+	const start = markup.indexOf("<svg");
+	const end = markup.indexOf("</svg>");
+	return markup.slice(start, end);
+}
+
+/** The legend strip only, for assertions about what the key lists and in what order. */
+function legendOf(markup: string): string {
+	return markup.slice(markup.indexOf("</svg>"));
+}
+
+describe("LiveActivityLanesView colour encoding", () => {
+	it("gives each model its own mark colour", () => {
+		// The defect this replaced: every healthy request drew in one blue,
+		// because colour keyed off status and 99.7% of requests succeed. Two
+		// models in the same lane have to come out as two different fills.
+		const markup = render({
+			lanes: buildLanes(
+				[
+					event({ id: "a", model: "claude-opus-5" }),
+					event({ id: "b", model: "claude-sonnet-5" }),
+				],
+				T0,
+				WINDOW,
+				6,
+			).lanes,
+		});
+		expect(markup).toContain(MODEL_PALETTE.azure); // claude-opus-5
+		expect(markup).toContain(MODEL_PALETTE.emerald); // claude-sonnet-5
+	});
+
+	it("keeps amber and red for failures, whatever model produced them", () => {
+		// Colour-coding models is only safe while the status hues stay
+		// unambiguous. A 429 and an error must not pick up their model's hue, or
+		// the two encodings become indistinguishable on the same plot.
+		const markup = render({
+			lanes: buildLanes(
+				[
+					event({ id: "a", model: "claude-opus-5", status: "rate_limited" }),
+					event({ id: "b", model: "claude-sonnet-5", status: "error" }),
+				],
+				T0,
+				WINDOW,
+				6,
+			).lanes,
+		});
+		const plot = plotOf(markup);
+		expect(plot).toContain(COLORS.warning);
+		expect(plot).toContain(COLORS.error);
+		// Scoped to the plot: the legend still lists both models, correctly — a
+		// model whose every request failed is still a model that ran.
+		expect(plot).not.toContain(MODEL_PALETTE.azure);
+		expect(plot).not.toContain(MODEL_PALETTE.emerald);
+	});
+
+	it("colours an in-flight request by the model it is waiting on", () => {
+		// `pending` arrives before any usage resolves, but the REQUESTED model is
+		// known from ingress. Leaving it neutral would blank the colour of
+		// exactly the requests this card exists to show.
+		const markup = render({
+			lanes: buildLanes(
+				[event({ id: "a", model: "claude-fable-5", status: "pending" })],
+				T0,
+				WINDOW,
+				6,
+			).lanes,
+		});
+		expect(markup).toContain(MODEL_PALETTE.teal);
+	});
+
+	it("lists the models on the plot in a legend, in a stable order", () => {
+		// Ordered by name rather than by volume: a volume-ordered legend
+		// reshuffles itself as the window rolls and one model overtakes another.
+		// Sonnet deliberately outnumbers Fable 2:1. Alphabetical puts Fable first,
+		// volume-descending puts Sonnet first — so this fixture can tell the two
+		// orderings apart. With Fable in the majority both rules agree and the
+		// test would pass against the behaviour it is meant to rule out.
+		const markup = render({
+			lanes: buildLanes(
+				[
+					event({ id: "a", model: "claude-sonnet-5" }),
+					event({ id: "b", model: "claude-sonnet-5" }),
+					event({ id: "c", model: "claude-fable-5" }),
+				],
+				T0,
+				WINDOW,
+				6,
+			).lanes,
+		});
+		// Scoped to the legend, since the marks' own tooltips name models in plot
+		// order.
+		const legend = legendOf(markup);
+		expect(legend.indexOf("claude-fable-5")).toBeLessThan(
+			legend.indexOf("claude-sonnet-5"),
+		);
+	});
+
+	it("names the model on the mark itself, not only in the legend", () => {
+		// Hue is only decodable against the legend, and there are more models
+		// than anyone memorises. The tooltip has to stand alone — asserted
+		// against the plot, or the legend entry would satisfy it on its own.
+		expect(plotOf(render())).toContain("claude-opus-5");
+	});
+
+	it("colours only the busiest few models and greys the rest", () => {
+		// Five covers 99% of a day's requests here, and the card's window is
+		// minutes. A legend naming every model that has ever appeared is legend
+		// for traffic that is not on screen.
+		const events = [
+			// Five busy models, two requests each.
+			...[
+				"claude-opus-5",
+				"claude-sonnet-5",
+				"claude-fable-5",
+				"gpt-5.6-sol",
+				"claude-haiku-4.5",
+			].flatMap((model, i) => [
+				event({ id: `busy-${i}-a`, model }),
+				event({ id: `busy-${i}-b`, model }),
+			]),
+			// One straggler, which must fall outside the cap.
+			event({ id: "rare", model: "claude-opus-4.8" }),
+		];
+		const markup = render({
+			lanes: buildLanes(events, T0, WINDOW, 6).lanes,
+		});
+
+		const legend = legendOf(markup);
+		expect(legend).toContain("claude-opus-5");
+		// Named in the legend only if coloured — the straggler is not.
+		expect(legend).not.toContain("claude-opus-4.8");
+		expect(legend).toContain("1 more");
+		// Its mark draws in the neutral, not in its own palette hue.
+		expect(plotOf(markup)).not.toContain(MODEL_PALETTE.yellow);
+		expect(plotOf(markup)).toContain(MODEL_PALETTE.grey);
+	});
+
+	it("still names a greyed model on its own mark", () => {
+		// Losing the hue must not lose the identity: the tooltip is the only
+		// place left that says which model a grey mark belongs to.
+		const markup = render({
+			lanes: buildLanes(
+				[
+					...[
+						"claude-opus-5",
+						"claude-sonnet-5",
+						"claude-fable-5",
+						"gpt-5.6-sol",
+						"claude-haiku-4.5",
+					].flatMap((model, i) => [
+						event({ id: `busy-${i}-a`, model }),
+						event({ id: `busy-${i}-b`, model }),
+					]),
+					event({ id: "rare", model: "claude-opus-4.8" }),
+				],
+				T0,
+				WINDOW,
+				6,
+			).lanes,
+		});
+		expect(plotOf(markup)).toContain("claude-opus-4.8");
+	});
+
+	it("gives a Codex model its own legend swatch, not a Claude model's", () => {
+		// gpt-5.6-sol is ~15% of live requests. It used to reach the index-based
+		// fallback, whose entries are hues registered Claude models already wear,
+		// so the legend could show two rows with the same swatch.
+		const markup = render({
+			lanes: buildLanes(
+				[
+					event({ id: "a", model: "gpt-5.6-sol" }),
+					event({ id: "b", model: "claude-opus-5" }),
+				],
+				T0,
+				WINDOW,
+				6,
+			).lanes,
+		});
+		const legend = legendOf(markup);
+		expect(legend).toContain("gpt-5.6-sol");
+		expect(getModelColor("gpt-5.6-sol", "dark")).not.toBe(
+			getModelColor("claude-opus-5", "dark"),
+		);
+	});
+});
 
 describe("LiveActivityLanesView", () => {
 	it("distinguishes an empty window from a stream that has not primed", () => {

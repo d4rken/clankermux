@@ -148,7 +148,7 @@ function WindowSeries({
 		};
 	}, [window]);
 
-	const colorFor = (key: string, index: number) => palette.forModel(key, index);
+	const colorFor = (key: string) => palette.forModel(key);
 
 	// Why the chart is empty where it is empty. Covers every model in the
 	// window, including the ones with no line at all — a model that was never
@@ -225,26 +225,26 @@ function WindowSeries({
 							}}
 						/>
 						<Legend />
-						{models.map((key, index) => (
+						{models.map((key, _index) => (
 							<Area
 								key={`${key}__band`}
 								dataKey={`${key}__band`}
 								name={`${key}__band`}
 								stroke="none"
-								fill={colorFor(key, index)}
+								fill={colorFor(key)}
 								fillOpacity={0.15}
 								isAnimationActive={false}
 								connectNulls={false}
 								legendType="none"
 							/>
 						))}
-						{models.map((key, index) => (
+						{models.map((key, _index) => (
 							<Line
 								key={key}
 								type="linear"
 								dataKey={key}
 								name={key}
-								stroke={colorFor(key, index)}
+								stroke={colorFor(key)}
 								strokeWidth={2}
 								dot={false}
 								isAnimationActive={false}

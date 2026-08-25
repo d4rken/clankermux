@@ -21,32 +21,73 @@ export const COLORS = {
  * a data-series palette needs many mutually distinguishable hues and nothing
  * else.
  *
- * Every entry is taken verbatim from an established colorblind-safe
- * qualitative set (Okabe-Ito, and Paul Tol's bright/light/muted/vibrant
- * schemes). The 17 hues were picked to maximise the smallest pairwise CIE76
- * distance while keeping every pair at least ~9 dE apart under simulated
- * protanopia and deuteranopia, and every entry above L* 45 so it stays legible
- * on the dashboard's near-black chart background (hsl(220 13% 8%)).
- * model-colors.test.ts enforces the separation.
+ * Every hue clears the same two bars, enforced by model-colors.test.ts:
+ * 15 dE from every other entry at normal vision and 7.9 dE under simulated
+ * protanopia and deuteranopia; and, on the dark ground, L* 45 or above so it
+ * reads on the near-black chart background (hsl(220 13% 8%)).
+ *
+ * A second exclusion applies on top of the pairwise one: no entry may be
+ * confusable with `COLORS.warning` or `COLORS.error`. Those two hues MEAN
+ * "rate limited" and "failed" on surfaces that draw model-coloured marks
+ * alongside status-coloured ones — Live Activity is one — so a model wearing
+ * one of them reads as a status on sight, whatever its shape says.
+ *
+ * For the error red that exclusion is a HUE-FAMILY rule, not a distance: a
+ * colour within 30° of the error hue and saturated enough to read as that hue
+ * (chroma 25+) is out even when it clears 15 dE, because clearing on distance
+ * usually means it is merely darker. `red` (#CC3311) passed every numeric
+ * check at 11° from the error hue while being the assigned colour of Claude
+ * Opus 5, which is over half of all traffic — the card would have been a field
+ * of red marks captioned "red means failed". That cost five original entries:
+ * `red`, `peach`, `rose`, `pink` and `magenta`, plus `orange` (dE 7.2 from
+ * warning, 1.2 under dichromacy), `olive` and `pear` (yellow-greens that the
+ * red-green axis collapses onto red exactly as it does the error hue).
+ *
+ * The warning amber keeps only the numeric checks. Rate limits are drawn as
+ * TRIANGLES and are ~2 requests a day against ~15,000 successes; reserving
+ * that arc too would have cost the whole warm half of the palette to guard a
+ * collision that is both shape-distinguished and vanishingly rare.
+ *
+ * Ten entries are the surviving originals, verbatim from Okabe-Ito and Paul
+ * Tol's schemes. `gold` is Tol high-contrast yellow. The remaining seventeen
+ * come from a Lab sweep, not a published set: those sets cluster tightly
+ * enough that they are exhausted well before 28 mutually separable hues, and
+ * 28 is what 24 models plus a fallback pool needs.
+ * `bun packages/ui-constants/scripts/extend-model-palette.ts` is that search.
  */
 export const MODEL_PALETTE = {
+	// Survivors from the original curated set.
 	blue: "#0077BB", // Tol vibrant blue
-	orange: "#E69F00", // Okabe-Ito orange
+	teal: "#009988", // Tol vibrant teal
 	green: "#228833", // Tol bright green
-	magenta: "#EE3377", // Tol vibrant magenta
 	skyBlue: "#99DDFF", // Tol light cyan
 	yellow: "#EEDD88", // Tol light yellow
-	red: "#CC3311", // Tol vibrant red
 	mint: "#44BB99", // Tol light mint
 	purple: "#AA4499", // Tol muted purple
-	pear: "#BBCC33", // Tol light pear
-	peach: "#EE8866", // Tol light orange
 	lightBlue: "#77AADD", // Tol light blue
-	olive: "#999933", // Tol muted olive
 	mauve: "#CC79A7", // Okabe-Ito reddish purple
 	grey: "#DDDDDD", // Tol pale grey
-	rose: "#EE6677", // Tol bright red
-	pink: "#FFAABB", // Tol light pink
+	// Added by the search. `gold` is Tol high-contrast yellow verbatim; the rest
+	// come from the Lab sweep, because the published qualitative sets are
+	// clustered enough that they run out well before 28 mutually separable hues.
+	gold: "#DDAA33", // Tol high-contrast yellow
+	periwinkle: "#8582FD",
+	indigo: "#8846E5",
+	moss: "#6A7055",
+	fern: "#7C880C",
+	tan: "#C9966D",
+	sage: "#C0E8B6",
+	orchid: "#C20FB7",
+	violet: "#9F19FF",
+	lilac: "#C8ACD3",
+	leaf: "#92C55B",
+	cornflower: "#98A5FF",
+	magenta: "#C63D7B",
+	fuchsia: "#EB6BD4",
+	emerald: "#7FD38F",
+	amethyst: "#D53DF2",
+	azure: "#175FF9",
+	plum: "#A176B7",
 } as const;
 
 /**
@@ -60,29 +101,49 @@ export const MODEL_PALETTE = {
  * least 3:1 on white — while keeping the same keys, so a model's identity is
  * the key and only the rendered value depends on the colour mode.
  *
- * Hues are drawn from Paul Tol's muted, dark and high-contrast schemes plus
- * darkened Okabe-Ito entries. Separation is enforced by model-colors.test.ts
- * across BOTH palettes; `scripts/check-light-palette.ts` is the design-time aid
- * used to pick them.
+ * The surviving original entries are Paul Tol's muted, dark and high-contrast
+ * schemes plus darkened Okabe-Ito entries. Most ADDED entries are their dark
+ * counterpart walked down its own Lab hue ray until it clears the 3:1 floor, so
+ * the two palettes hold the same colour at different lightness rather than two
+ * unrelated colours under one key — searching the grounds independently and
+ * zipping the results is what yields a key that is green in dark mode and
+ * violet in light mode. Two are exceptions, both fine: `indigo` takes Tol muted
+ * indigo directly (L* 22, below the ray walk's search band) and `periwinkle`
+ * happens to satisfy both grounds unchanged.
+ *
+ * Cross-ground coherence is enforced by model-colors.test.ts alongside the
+ * separation checks; `scripts/check-light-palette.ts` and
+ * `scripts/extend-model-palette.ts` are the design-time aids used to pick them.
  */
 export const MODEL_PALETTE_LIGHT: Record<keyof typeof MODEL_PALETTE, string> = {
 	blue: "#0F96C7", // L* 58 · 3.4:1
-	orange: "#A86538", // L* 49 · 4.6:1
+	teal: "#046A5E", // L* 40 · 6.5:1
 	green: "#496812", // L* 40 · 6.4:1
-	magenta: "#DF0CA0", // L* 50 · 4.5:1
 	skyBlue: "#077788", // L* 46 · 5.2:1
 	yellow: "#8C9457", // L* 59 · 3.2:1
-	red: "#7E2626", // L* 29 · 9.6:1
 	mint: "#73967E", // L* 59 · 3.3:1
 	purple: "#7B3BC4", // L* 40 · 6.4:1
-	pear: "#A88A38", // L* 59 · 3.3:1
-	peach: "#F33416", // L* 54 · 4.0:1
 	lightBlue: "#1A4961", // L* 29 · 9.7:1
-	olive: "#645F40", // L* 40 · 6.5:1
 	mauve: "#7B218C", // L* 32 · 8.6:1
 	grey: "#4C4343", // L* 29 · 9.6:1
-	rose: "#B62020", // L* 40 · 6.5:1
-	pink: "#A96560", // L* 50 · 4.5:1
+	gold: "#B88904", // L* 60 · 3.2:1
+	periwinkle: "#8582FD", // L* 60 · 3.2:1
+	indigo: "#332288", // L* 22 · 12.2:1 — Tol muted indigo
+	moss: "#5E6449", // L* 41 · 6.2:1
+	fern: "#758200", // L* 52 · 4.2:1
+	tan: "#5B3410", // L* 26 · 10.8:1
+	sage: "#30542A", // L* 32 · 8.7:1
+	orchid: "#EE4CE0", // L* 61 · 3.1:1
+	violet: "#9F19FF", // L* 46 · 5.2:1
+	lilac: "#A68BB1", // L* 61 · 3.0:1
+	leaf: "#689B33", // L* 59 · 3.3:1
+	cornflower: "#5064B6", // L* 45 · 5.5:1
+	magenta: "#B3296B", // L* 42 · 6.1:1
+	fuchsia: "#C647B1", // L* 51 · 4.3:1
+	emerald: "#106D31", // L* 40 · 6.5:1
+	amethyst: "#C92EE6", // L* 52 · 4.2:1
+	azure: "#025CF5", // L* 45 · 5.5:1
+	plum: "#68417E", // L* 34 · 7.9:1
 } as const;
 
 /**
@@ -97,7 +158,7 @@ export const MODEL_PALETTE_LIGHT: Record<keyof typeof MODEL_PALETTE, string> = {
  */
 export const CHART_COLORS = [
 	MODEL_PALETTE.blue,
-	MODEL_PALETTE.orange,
+	MODEL_PALETTE.teal,
 	MODEL_PALETTE.green,
 	MODEL_PALETTE.magenta,
 	MODEL_PALETTE.mint,
@@ -106,7 +167,7 @@ export const CHART_COLORS = [
 /** Light-ground counterpart to CHART_COLORS, same ordering. */
 export const CHART_COLORS_LIGHT = [
 	MODEL_PALETTE_LIGHT.blue,
-	MODEL_PALETTE_LIGHT.orange,
+	MODEL_PALETTE_LIGHT.teal,
 	MODEL_PALETTE_LIGHT.green,
 	MODEL_PALETTE_LIGHT.magenta,
 	MODEL_PALETTE_LIGHT.mint,

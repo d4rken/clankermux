@@ -53,7 +53,7 @@ const SEGMENT_HUES = {
 	system: "blue",
 	tools: "purple",
 	messages: "green",
-	binary: "peach",
+	binary: "tan",
 } as const;
 
 const SEGMENT_LABELS: Record<string, string> = {

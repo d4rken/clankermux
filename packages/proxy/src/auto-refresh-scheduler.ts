@@ -174,10 +174,11 @@ export class AutoRefreshScheduler {
 	//
 	// It cannot defer a legitimate prime: a real 5h window cannot roll twice
 	// inside the cooldown, so when the next reset genuinely arrives the last prime
-	// is hours old. It throttles rather than silences deliberately — a Codex
-	// account is not covered by the UsageFetcher poller (server.ts starts polling
-	// for `provider === "anthropic"` only), so the slow prime stays its
-	// usage-freshness heartbeat.
+	// is hours old. It throttles rather than silences deliberately. (Usage
+	// FRESHNESS is no longer this prime's job — the CodexUsagePoller keeps the
+	// cache warm with free `GET /wham/usage` reads — but the prime remains the
+	// only operation that can START a new 5h window, and the throttled cadence
+	// still keeps the evicting-cache invariants below intact between primes.)
 	//
 	// MUST stay under USAGE_CACHE_TTL_MS, which is why it is derived from it
 	// rather than written as a literal. The codex observation reads its baseline

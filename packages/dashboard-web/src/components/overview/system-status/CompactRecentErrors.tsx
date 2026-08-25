@@ -3,6 +3,7 @@ import { NO_ACCOUNT_ID } from "@clankermux/types";
 import { AlertCircle, Clock } from "lucide-react";
 import { useState } from "react";
 import { Link } from "react-router";
+import { Button } from "../../ui/button";
 import { Card } from "../../ui/card";
 import { ErrorDetailsModal } from "./ErrorDetailsModal";
 import {
@@ -22,6 +23,11 @@ interface CompactRecentErrorsProps {
 	errors: RecentErrorGroup[];
 	accounts: AccountForFailoverCheck[] | undefined;
 	onDismiss: (group: RecentErrorGroup) => void;
+	/**
+	 * Dismisses every group in `errors`, including the ones past `MAX_ROWS` that
+	 * this card never rendered.
+	 */
+	onDismissAll: () => void;
 	/**
 	 * The read that supplies these groups failed with nothing cached. Without
 	 * this the component renders NOTHING for a failed read — visually identical
@@ -49,6 +55,7 @@ export function CompactRecentErrors({
 	errors,
 	accounts,
 	onDismiss,
+	onDismissAll,
 	unavailable = false,
 	staleNote,
 }: CompactRecentErrorsProps) {
@@ -111,12 +118,23 @@ export function CompactRecentErrors({
 						<p className="text-xs text-muted-foreground">Last hour</p>
 					)}
 				</div>
-				<Link
-					to="/system"
-					className="text-xs text-muted-foreground underline-offset-4 hover:text-foreground hover:underline"
-				>
-					View all →
-				</Link>
+				<div className="flex items-center gap-item shrink-0">
+					<Button
+						variant="ghost"
+						size="sm"
+						className="h-7 px-2 text-xs text-muted-foreground hover:text-foreground"
+						aria-label={`Dismiss all ${errors.length} recent error ${errors.length === 1 ? "group" : "groups"}`}
+						onClick={onDismissAll}
+					>
+						Clear all
+					</Button>
+					<Link
+						to="/system"
+						className="text-xs text-muted-foreground underline-offset-4 hover:text-foreground hover:underline"
+					>
+						View all →
+					</Link>
+				</div>
 			</div>
 
 			<div className="space-y-item">

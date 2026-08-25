@@ -135,7 +135,7 @@ export function MultiModelChart({
 				margin={{ top: 5, right: 30, left: 20, bottom: 5 }}
 			>
 				<defs>
-					{models.map((model, index) => (
+					{models.map((model, _index) => (
 						<linearGradient
 							key={model}
 							id={`gradient-${model}`}
@@ -146,12 +146,12 @@ export function MultiModelChart({
 						>
 							<stop
 								offset="0%"
-								stopColor={series.forModel(model, index)}
+								stopColor={series.forModel(model)}
 								stopOpacity={0.9}
 							/>
 							<stop
 								offset="100%"
-								stopColor={series.forModel(model, index)}
+								stopColor={series.forModel(model)}
 								stopOpacity={0.3}
 							/>
 						</linearGradient>
@@ -191,13 +191,13 @@ export function MultiModelChart({
 					height={36}
 					wrapperStyle={{ paddingTop: "10px" }}
 				/>
-				{models.map((model, index) => (
+				{models.map((model, _index) => (
 					<Line
 						key={model}
 						type="monotone"
 						dataKey={model}
 						name={model}
-						stroke={series.forModel(model, index)}
+						stroke={series.forModel(model)}
 						strokeWidth={2}
 						dot={false}
 						activeDot={{ r: 6 }}
