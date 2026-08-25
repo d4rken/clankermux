@@ -70,9 +70,9 @@
 
 /**
  * Minimum Bun release this proxy supports. Kept in step with `engines.bun`,
- * `.bun-version` and the README by the consistency tests in
- * `bun-runtime-floor.test.ts` — change it here and those tests name every other
- * place that has to move.
+ * `.bun-version`, the root `devDependencies.bun` pin and the README by the
+ * consistency tests in `bun-runtime-floor.test.ts` — change it here and those
+ * tests name every other place that has to move.
  */
 export const MIN_BUN_VERSION = "1.4.0";
 
