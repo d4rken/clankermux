@@ -673,4 +673,33 @@ describe("summarizeKeyRunways", () => {
 			effectiveRunwayOutcome(summary.worst?.outcome ?? UNKNOWN, NOW).kind,
 		).toBe("out-now");
 	});
+
+	it("ties beyond-horizon rows toward the most fragile paceMargin", () => {
+		// The headline row is the only one whose paceMargin any surface renders,
+		// so among tied beyond-horizon keys the knife-edge one must win over a
+		// robust one — in either input order — and the smaller flip multiplier
+		// over the larger.
+		const fragile = rowWith("fragile", {
+			...BEYOND,
+			paceMargin: { multiplier: 1.02, exhaustsAtMs: NOW + 2 * DAY },
+		});
+		const lessFragile = rowWith("less-fragile", {
+			...BEYOND,
+			paceMargin: { multiplier: 1.4, exhaustsAtMs: NOW + 10 * DAY },
+		});
+		const robust = rowWith("robust", BEYOND);
+
+		expect(worstKeyRunway([robust, fragile], NOW)?.keyId).toBe("fragile");
+		expect(worstKeyRunway([fragile, robust], NOW)?.keyId).toBe("fragile");
+		expect(worstKeyRunway([lessFragile, fragile], NOW)?.keyId).toBe("fragile");
+		// A finite runway still outranks any beyond-horizon, margin or not.
+		const finite = rowWith("finite", {
+			kind: "runway",
+			exhaustsAtMs: NOW + DAY,
+			durationMs: DAY,
+			causes: [],
+			unprojectableAccountIds: [],
+		});
+		expect(worstKeyRunway([fragile, finite], NOW)?.keyId).toBe("finite");
+	});
 });

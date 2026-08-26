@@ -324,7 +324,10 @@ describe("runwayQualifier", () => {
 });
 
 describe("runwayPaceMargin", () => {
-	it("rounds the multiplier to a whole percent and keeps the instant", () => {
+	it("CEILS the multiplier to a whole percent and keeps the instant", () => {
+		// 1.117 must render as +12%, never +11%: the served multiplier is the
+		// grid point at which the scan actually flipped, and rounding down would
+		// state a pace at which the pool still scans infinite.
 		expect(
 			runwayPaceMargin(
 				{
@@ -336,9 +339,22 @@ describe("runwayPaceMargin", () => {
 				NOW,
 			),
 		).toEqual({ pacePct: 12, exhaustsAtMs: NOW + 60 * HOUR });
+		// A tiny margin ceils UP to +1% rather than down to a "+0%" that would
+		// contradict the beyond-horizon headline.
+		expect(
+			runwayPaceMargin(
+				{
+					kind: "beyond-horizon",
+					horizonMs: 14 * DAY,
+					unprojectableAccountIds: [],
+					paceMargin: { multiplier: 1.004, exhaustsAtMs: NOW + 60 * HOUR },
+				},
+				NOW,
+			),
+		).toEqual({ pacePct: 1, exhaustsAtMs: NOW + 60 * HOUR });
 	});
 
-	it("is null without a margin, on other kinds, and at a zero rounded pace", () => {
+	it("is null without a margin, on other kinds, and at a non-positive pace", () => {
 		expect(
 			runwayPaceMargin(
 				{
@@ -350,15 +366,13 @@ describe("runwayPaceMargin", () => {
 			),
 		).toBeNull();
 		expect(runwayPaceMargin(runwayOutcome(HOUR), NOW)).toBeNull();
-		// A multiplier that rounds to +0% would read as "at your current pace",
-		// which contradicts the beyond-horizon headline — suppressed.
 		expect(
 			runwayPaceMargin(
 				{
 					kind: "beyond-horizon",
 					horizonMs: 14 * DAY,
 					unprojectableAccountIds: [],
-					paceMargin: { multiplier: 1.004, exhaustsAtMs: NOW + 60 * HOUR },
+					paceMargin: { multiplier: 1, exhaustsAtMs: NOW + 60 * HOUR },
 				},
 				NOW,
 			),

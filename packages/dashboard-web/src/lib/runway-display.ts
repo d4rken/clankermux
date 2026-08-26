@@ -159,10 +159,13 @@ export function assumedCreditCount(outcome: RunwayOutcome): number {
  * measured one, plus the run-out instant the scan projects at that pace.
  *
  * Null when the outcome is not `beyond-horizon`, when the verdict was robust
- * (no `paceMargin` served), when the probed instant has already passed at
- * render time (a stale poll must not count down negative time), and when the
- * multiplier rounds to +0% — that would read as "at your current pace", which
- * contradicts the headline it qualifies.
+ * (no `paceMargin` served), and when the probed instant has already passed at
+ * render time (a stale poll must not count down negative time).
+ *
+ * The percent is CEILED, not rounded: the served multiplier is a grid point
+ * at which the scan verifiably flipped, and rounding 1.1016 down to "+10%"
+ * would state a pace at which the pool still scans infinite. Ceiling keeps
+ * the displayed claim one the scan stands behind.
  */
 export function runwayPaceMargin(
 	outcome: RunwayOutcome,
@@ -172,9 +175,15 @@ export function runwayPaceMargin(
 	const margin = outcome.paceMargin;
 	if (!margin) return null;
 	if (margin.exhaustsAtMs <= now) return null;
-	const pacePct = Math.round((margin.multiplier - 1) * 100);
-	if (pacePct <= 0) return null;
-	return { pacePct, exhaustsAtMs: margin.exhaustsAtMs };
+	if (margin.multiplier <= 1) return null;
+	// Micro-round before the ceil: the server's grid multipliers are exact
+	// hundredths whose float representation can land a hair ABOVE the true
+	// value ((1.12 - 1) * 100 === 12.000000000000004), and ceiling that raw
+	// product would overstate the grid point by a full percent.
+	return {
+		pacePct: Math.ceil(Math.round((margin.multiplier - 1) * 100 * 1e6) / 1e6),
+		exhaustsAtMs: margin.exhaustsAtMs,
+	};
 }
 
 /**

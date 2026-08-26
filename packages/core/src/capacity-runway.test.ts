@@ -1525,6 +1525,54 @@ describe("computeCapacityRunway pace-margin probe", () => {
 		expect(margin.exhaustsAtMs).toBeLessThan(NOW + RUNWAY_HORIZON_MS);
 	});
 
+	it("finds a flip that credit timing hides from the probe cap", () => {
+		// One banked weekly-limit credit expiring at NOW+245h, weekly fill time
+		// 180h in a 168h cycle (flip at 180/168 ≈ 1.0714). At a small pace-up the
+		// projected exhaustion (NOW + 84h + 180h/1.08 ≈ NOW+250.7h) lands AFTER
+		// the credit's expiry, nothing revives the window, and the scan is
+		// finite. At the probe cap the exhaustion moves BEFORE the expiry, the
+		// credit revives the window, and the scan is beyond-horizon AGAIN —
+		// "finite at pace m" is not monotone in m. A bisection seeded at the cap
+		// would call this pool robust; the grid walk must find the low flip.
+		const result = computeCapacityRunway(
+			[
+				{
+					accountId: "a",
+					unmetered: false,
+					windows: [
+						window({
+							windowKind: "seven_day",
+							utilizationPct: 50,
+							resetsAtMs: NOW + 84 * HOUR,
+							windowStartMs: NOW - 84 * HOUR,
+							prediction: prediction({
+								resetsAtMs: NOW + 84 * HOUR,
+								slopePerHour: 100 / 180,
+								etaExhaustMs: NOW + 500 * HOUR,
+							}),
+						}),
+					],
+					codexResetCredits: {
+						onWeeklyLimitEnabled: true,
+						onExpiryEnabled: false,
+						credits: [{ expiresAtMs: NOW + 245 * HOUR }],
+					},
+				},
+			],
+			NOW,
+		);
+
+		expect(result.kind).toBe("beyond-horizon");
+		if (result.kind !== "beyond-horizon") return;
+		const margin = result.paceMargin;
+		expect(margin).toBeDefined();
+		if (!margin) return;
+		// First grid point past 1.0714.
+		expect(margin.multiplier).toBeCloseTo(1.08, 5);
+		expect(margin.exhaustsAtMs).toBeGreaterThan(NOW + 249 * HOUR);
+		expect(margin.exhaustsAtMs).toBeLessThan(NOW + 252 * HOUR);
+	});
+
 	it("never annotates a finite outcome, and the probe respects the horizon", () => {
 		// Dead every cycle already: finite runway, no paceMargin field exists on
 		// that variant at the type level — assert the shape stays exact.

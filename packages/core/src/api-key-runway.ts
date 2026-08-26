@@ -381,6 +381,25 @@ export function worstRunwayEntry<T extends { outcome: RunwayOutcome }>(
 				worstOutcome = candidateOutcome;
 			}
 		}
+		// Among tied beyond-horizon rows the knife-edge one is worse: the
+		// headline row is the only one whose paceMargin any surface renders, so
+		// letting input order win here would let a robust key's ∞ hide another
+		// key's +2% flip. A missing margin means the probe found the verdict
+		// robust to its cap, which ranks best.
+		if (
+			candidateRank === worstRank &&
+			candidateOutcome.kind === "beyond-horizon" &&
+			worstOutcome.kind === "beyond-horizon"
+		) {
+			const candidateMultiplier =
+				candidateOutcome.paceMargin?.multiplier ?? Number.POSITIVE_INFINITY;
+			const worstMultiplier =
+				worstOutcome.paceMargin?.multiplier ?? Number.POSITIVE_INFINITY;
+			if (candidateMultiplier < worstMultiplier) {
+				worst = candidate;
+				worstOutcome = candidateOutcome;
+			}
+		}
 	}
 	return worst;
 }

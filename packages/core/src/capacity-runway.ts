@@ -724,29 +724,37 @@ function isDeadAt(intervals: DeadInterval[], t: number): boolean {
  * A window-exhaustion estimate under a hypothetical uniform burn-pace
  * multiplier, for the {@link probePaceMargin} counterfactual only.
  *
- * The scaled ETA is re-anchored at `now` — `now + (eta − now) / pace` — rather
- * than at the estimate's own anchor (newest sample, observation instant, or
- * `now`, depending on the branch that produced it), because the anchor is not
- * carried in {@link WindowExhaustion}. The probe feeds routing-fresh readings,
- * so the anchor is at most minutes behind `now` and the approximation error is
- * bounded by `(pace − 1) · age` — seconds to a few minutes against a probe
- * whose answer is disclosed at whole-percent precision. An `already-exhausted`
- * estimate is untouched: being spent now does not depend on pace.
+ * The scaled ETA is re-anchored at the instant the burn is measured from: the
+ * reading's observation for an observation-anchored estimate
+ * (`lifetime-primary`), `now` otherwise. `now` is exact for the low lifetime
+ * path and an approximation for a regression's newest-sample anchor — which is
+ * fine, because regressions only exist for routing-fresh readings (minutes
+ * old at most). The observation anchor is NOT an approximation the same way:
+ * the scan legitimately serves persisted Codex readings that are hours or
+ * days old after a restart, and anchoring those at `now` would move the
+ * scaled ETA by a third of the reading's age at the probe cap. An
+ * `already-exhausted` estimate is untouched: being spent now does not depend
+ * on pace.
  */
 function scaleEstimatePace(
 	estimate: WindowExhaustion,
 	pace: number,
 	now: number,
+	observedAtMs: number | null | undefined,
 ): WindowExhaustion {
 	if (pace === 1) return estimate;
 	const slope = estimate.slopePctPerHour;
 	let exhaustsAtMs = estimate.exhaustsAtMs;
-	if (
-		estimate.source !== "already-exhausted" &&
-		exhaustsAtMs != null &&
-		exhaustsAtMs > now
-	) {
-		exhaustsAtMs = now + (exhaustsAtMs - now) / pace;
+	if (estimate.source !== "already-exhausted" && exhaustsAtMs != null) {
+		const anchorMs =
+			estimate.source === "lifetime-primary" &&
+			observedAtMs != null &&
+			Number.isFinite(observedAtMs)
+				? observedAtMs
+				: now;
+		if (exhaustsAtMs > anchorMs) {
+			exhaustsAtMs = anchorMs + (exhaustsAtMs - anchorMs) / pace;
+		}
 	}
 	return {
 		...estimate,
@@ -883,6 +891,7 @@ function buildPool(
 				),
 				pace,
 				now,
+				window.observedAtMs,
 			);
 			if (estimate.source === "none") continue;
 			// Evidence is tracked separately from intervals on purpose: a readable
@@ -990,13 +999,13 @@ function firstAllOut(
  */
 export const PACE_MARGIN_PROBE_MAX = 1.5;
 
-/** Bisection stops when the flip multiplier is bracketed this tightly. */
+/** Grid step at which the probe walks candidate multipliers. */
 const PACE_MARGIN_PRECISION = 0.01;
 
 /**
- * How fragile a `beyond-horizon` verdict is: the smallest uniform burn-pace
- * multiplier (up to {@link PACE_MARGIN_PROBE_MAX}) at which the same pool
- * scans FINITE, or null when none exists.
+ * How fragile a `beyond-horizon` verdict is: the smallest probed uniform
+ * burn-pace multiplier (up to {@link PACE_MARGIN_PROBE_MAX}) at which the same
+ * pool scans FINITE, or null when none does.
  *
  * Exists because the all-out test is binary in a way small evidence changes
  * can flip: a window projected to fill even slightly slower than its own
@@ -1007,36 +1016,34 @@ const PACE_MARGIN_PRECISION = 0.01;
  * smoothed (a sub-sustainable pace genuinely never exhausts), so the honest
  * fix is disclosure: quantify how close the verdict is to flipping back.
  *
- * The dead-time set grows monotonically with pace — every scaled ETA moves
- * earlier, every cycle's dead tail widens, and a credit revival re-exhausts
- * sooner — so "scans finite at pace m" is monotone in m and bisection is
- * valid. Cost: at most ~7 pool rebuilds over a handful of accounts, only on
- * the beyond-horizon path.
+ * A GRID WALK from the bottom, deliberately not a bisection: "finite at pace
+ * m" is NOT monotone in m once reset credits are modeled. Dead-time itself
+ * only grows with pace, but a faster pace moves a dead span's start earlier,
+ * which can put it back inside a banked credit's expiry — the credit then
+ * revives the window and the scan turns beyond-horizon AGAIN at the higher
+ * pace. A bisection seeded by a probe at the cap would read such a pool as
+ * robust and miss a real low flip. Walking every grid step finds the smallest
+ * flipping multiplier by construction, at a bounded cost of 50 pool rebuilds
+ * over a handful of accounts, only on the beyond-horizon path.
+ *
+ * The finite scan a probe step finds may itself consume modeled credits; they
+ * are not itemized separately because the entire figure is already a
+ * disclosed counterfactual, not a measurement.
  */
 function probePaceMargin(
 	accounts: RunwayAccountInput[],
 	now: number,
 	horizonEndMs: number,
 ): { multiplier: number; exhaustsAtMs: number } | null {
-	const hitAt = (pace: number): AllOutHit | null => {
+	const steps = Math.round((PACE_MARGIN_PROBE_MAX - 1) / PACE_MARGIN_PRECISION);
+	for (let step = 1; step <= steps; step++) {
+		// Recomputed from the integer step so accumulation error cannot drift
+		// the grid.
+		const pace = 1 + step * PACE_MARGIN_PRECISION;
 		const { pooled } = buildPool(accounts, now, horizonEndMs, pace);
 		if (pooled.length === 0) return null;
-		return firstAllOut(pooled, now, horizonEndMs);
-	};
-
-	if (hitAt(PACE_MARGIN_PROBE_MAX) === null) return null;
-
-	let lo = 1;
-	let hi = PACE_MARGIN_PROBE_MAX;
-	while (hi - lo > PACE_MARGIN_PRECISION) {
-		const mid = (lo + hi) / 2;
-		if (hitAt(mid) !== null) hi = mid;
-		else lo = mid;
+		const hit = firstAllOut(pooled, now, horizonEndMs);
+		if (hit !== null) return { multiplier: pace, exhaustsAtMs: hit.t };
 	}
-
-	const hit = hitAt(hi);
-	// Unreachable by monotonicity (hi always held a finite scan), but never
-	// report a margin the final scan did not reproduce.
-	if (hit === null) return null;
-	return { multiplier: hi, exhaustsAtMs: hit.t };
+	return null;
 }
