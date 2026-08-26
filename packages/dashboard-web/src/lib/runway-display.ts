@@ -158,9 +158,14 @@ export function assumedCreditCount(outcome: RunwayOutcome): number {
  * exposes it in display terms: the flip pace as a whole percent above the
  * measured one, plus the run-out instant the scan projects at that pace.
  *
- * Null when the outcome is not `beyond-horizon`, when the verdict was robust
- * (no `paceMargin` served), and when the probed instant has already passed at
- * render time (a stale poll must not count down negative time).
+ * Null when the outcome is not `beyond-horizon` and when no `paceMargin` was
+ * served (no probed grid multiplier flipped the scan).
+ *
+ * `remainingLabel` is the human form of the counterfactual instant: a
+ * duration while it is still ahead of the render clock, and "now" once it is
+ * not — a scaled ETA can legitimately land AT the serve instant (a stale
+ * observation-anchored reading), and a stale poll must not count down
+ * negative time.
  *
  * The percent is CEILED, not rounded: the served multiplier is a grid point
  * at which the scan verifiably flipped, and rounding 1.1016 down to "+10%"
@@ -170,11 +175,10 @@ export function assumedCreditCount(outcome: RunwayOutcome): number {
 export function runwayPaceMargin(
 	outcome: RunwayOutcome,
 	now: number,
-): { pacePct: number; exhaustsAtMs: number } | null {
+): { pacePct: number; remainingLabel: string } | null {
 	if (outcome.kind !== "beyond-horizon") return null;
 	const margin = outcome.paceMargin;
 	if (!margin) return null;
-	if (margin.exhaustsAtMs <= now) return null;
 	if (margin.multiplier <= 1) return null;
 	// Micro-round before the ceil: the server's grid multipliers are exact
 	// hundredths whose float representation can land a hair ABOVE the true
@@ -182,7 +186,10 @@ export function runwayPaceMargin(
 	// product would overstate the grid point by a full percent.
 	return {
 		pacePct: Math.ceil(Math.round((margin.multiplier - 1) * 100 * 1e6) / 1e6),
-		exhaustsAtMs: margin.exhaustsAtMs,
+		remainingLabel:
+			margin.exhaustsAtMs > now
+				? `in ${formatDurationDhm(margin.exhaustsAtMs - now)}`
+				: "now",
 	};
 }
 
@@ -201,9 +208,7 @@ export function runwayQualifier(
 		parts.push(`no run-out within ${formatDurationDhm(effective.horizonMs)}`);
 		const margin = runwayPaceMargin(effective, now);
 		if (margin) {
-			parts.push(
-				`out in ${formatDurationDhm(margin.exhaustsAtMs - now)} at +${margin.pacePct}% pace`,
-			);
+			parts.push(`out ${margin.remainingLabel} at +${margin.pacePct}% pace`);
 		}
 	}
 	const unknown = unprojectableCount(effective);

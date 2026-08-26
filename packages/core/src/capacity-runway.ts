@@ -1029,12 +1029,22 @@ const PACE_MARGIN_PRECISION = 0.01;
  * The finite scan a probe step finds may itself consume modeled credits; they
  * are not itemized separately because the entire figure is already a
  * disclosed counterfactual, not a measurement.
+ *
+ * A GRID claim, not a continuous one: a modeled credit whose expiry sits just
+ * past a dead span's start can in principle carve a finite island narrower
+ * than one grid step, which this walk passes over. Deliberate — such an
+ * island flips back to beyond-horizon a fraction of a percent higher, so it
+ * carries no usable fragility signal, and no finite grid could rule the shape
+ * out anyway. The wire type documents the same grid semantics.
  */
 function probePaceMargin(
 	accounts: RunwayAccountInput[],
 	now: number,
 	horizonEndMs: number,
 ): { multiplier: number; exhaustsAtMs: number } | null {
+	// An unmetered account is never out of quota at ANY pace, so the pool can
+	// never be all-out and every probe step would rebuild it for nothing.
+	if (accounts.some((account) => account.unmetered)) return null;
 	const steps = Math.round((PACE_MARGIN_PROBE_MAX - 1) / PACE_MARGIN_PRECISION);
 	for (let step = 1; step <= steps; step++) {
 		// Recomputed from the integer step so accumulation error cannot drift

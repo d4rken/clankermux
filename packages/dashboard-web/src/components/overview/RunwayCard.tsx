@@ -207,7 +207,7 @@ export function RunwayCard({
 		subRows.push({
 			label: "Margin",
 			value: `+${paceMargin.pacePct}% pace`,
-			tooltip: `The ∞ is narrow: if the pool burned ${paceMargin.pacePct}% faster than measured, quota would run out in ${formatDurationDhm(paceMargin.exhaustsAtMs - now)}. Idle stretches (overnight, weekends) can swing the measured pace by more than this.`,
+			tooltip: `The ∞ is narrow: if the pool burned ${paceMargin.pacePct}% faster than measured, quota would run out ${paceMargin.remainingLabel}. Idle stretches (overnight, weekends) can swing the measured pace by more than this.`,
 		});
 	}
 
