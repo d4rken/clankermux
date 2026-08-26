@@ -47,6 +47,29 @@ export type RunwayOutcome =
 			horizonMs: number;
 			unprojectableAccountIds: string[];
 			assumedResetCredits?: RunwayAssumedCredits[];
+			/**
+			 * How fragile this "no run-out" is. The all-out test is binary — a
+			 * window projected to fill even slightly slower than its own length
+			 * never goes dead in any projected cycle — so a small pace change can
+			 * flip the outcome between a finite runway and beyond-horizon (a night
+			 * of idle time has done exactly that). When some probed uniform
+			 * burn-rate multiplier (whole-percent grid steps up to the probe cap)
+			 * makes the scan finite, this carries the smallest such probed
+			 * multiplier and the run-out instant the scan reports at it.
+			 *
+			 * Absent when NO PROBED multiplier flips the scan — a grid claim, not
+			 * a continuous one: modeled reset-credit timing can in principle carve
+			 * a finite island narrower than a grid step, which the probe would
+			 * walk past. Such an island flips back to beyond-horizon a fraction of
+			 * a percent higher, so it carries no usable fragility signal either
+			 * way.
+			 */
+			paceMargin?: {
+				/** Smallest probed burn-pace multiplier (>1) that turns the scan finite. */
+				multiplier: number;
+				/** The all-out instant the scan projects AT that multiplier. */
+				exhaustsAtMs: number;
+			};
 	  }
 	| {
 			kind: "runway";

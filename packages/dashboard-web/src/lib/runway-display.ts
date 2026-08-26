@@ -150,8 +150,53 @@ export function assumedCreditCount(outcome: RunwayOutcome): number {
 }
 
 /**
+ * The knife-edge disclosure behind a `beyond-horizon` headline, or null.
+ *
+ * The scan's all-out test is binary, so an overnight stretch of idle time can
+ * flip the headline between a finite runway and the ∞ glyph on evidence that
+ * barely moved. When the server probed that fragility (`paceMargin`), this
+ * exposes it in display terms: the flip pace as a whole percent above the
+ * measured one, plus the run-out instant the scan projects at that pace.
+ *
+ * Null when the outcome is not `beyond-horizon` and when no `paceMargin` was
+ * served (no probed grid multiplier flipped the scan).
+ *
+ * `remainingLabel` is the human form of the counterfactual instant: a
+ * duration while it is still ahead of the render clock, and "now" once it is
+ * not — a scaled ETA can legitimately land AT the serve instant (a stale
+ * observation-anchored reading), and a stale poll must not count down
+ * negative time.
+ *
+ * The percent is CEILED, not rounded: the served multiplier is a grid point
+ * at which the scan verifiably flipped, and rounding 1.1016 down to "+10%"
+ * would state a pace at which the pool still scans infinite. Ceiling keeps
+ * the displayed claim one the scan stands behind.
+ */
+export function runwayPaceMargin(
+	outcome: RunwayOutcome,
+	now: number,
+): { pacePct: number; remainingLabel: string } | null {
+	if (outcome.kind !== "beyond-horizon") return null;
+	const margin = outcome.paceMargin;
+	if (!margin) return null;
+	if (margin.multiplier <= 1) return null;
+	// Micro-round before the ceil: the server's grid multipliers are exact
+	// hundredths whose float representation can land a hair ABOVE the true
+	// value ((1.12 - 1) * 100 === 12.000000000000004), and ceiling that raw
+	// product would overstate the grid point by a full percent.
+	return {
+		pacePct: Math.ceil(Math.round((margin.multiplier - 1) * 100 * 1e6) / 1e6),
+		remainingLabel:
+			margin.exhaustsAtMs > now
+				? `in ${formatDurationDhm(margin.exhaustsAtMs - now)}`
+				: "now",
+	};
+}
+
+/**
  * The note that qualifies the headline: what the `beyond-horizon` glyph
- * actually checked, or how many accounts the figure could not see.
+ * actually checked, how fragile that verdict is, or how many accounts the
+ * figure could not see.
  */
 export function runwayQualifier(
 	outcome: RunwayOutcome,
@@ -161,6 +206,10 @@ export function runwayQualifier(
 	const parts: string[] = [];
 	if (effective.kind === "beyond-horizon") {
 		parts.push(`no run-out within ${formatDurationDhm(effective.horizonMs)}`);
+		const margin = runwayPaceMargin(effective, now);
+		if (margin) {
+			parts.push(`out ${margin.remainingLabel} at +${margin.pacePct}% pace`);
+		}
 	}
 	const unknown = unprojectableCount(effective);
 	if (unknown > 0) {

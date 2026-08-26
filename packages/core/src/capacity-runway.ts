@@ -552,8 +552,11 @@ function weeklyTimeToFull(
 	window: RunwayWindowInput,
 	estimate: WindowExhaustion,
 	now: number,
+	pace = 1,
 ): number | null {
 	if (estimate.slopePctPerHour != null && estimate.slopePctPerHour > 0) {
+		// `estimate` arrives already pace-scaled (see `scaleEstimatePace`), so the
+		// slope path needs no further scaling.
 		return (100 / estimate.slopePctPerHour) * HOUR_MS;
 	}
 	if (estimate.source !== "already-exhausted") return null;
@@ -578,10 +581,14 @@ function weeklyTimeToFull(
 		observedAtMs !== null &&
 		observedAtMs > anchor.anchorMs
 	) {
-		return ((observedAtMs - anchor.anchorMs) * 100) / (100 - anchor.anchorPct);
+		// Observed elapsed time is historical fact; under a hypothetical pace
+		// multiplier the refill completes proportionally sooner.
+		return (
+			((observedAtMs - anchor.anchorMs) * 100) / (100 - anchor.anchorPct) / pace
+		);
 	}
 	if (window.windowStartMs != null && filledByMs > window.windowStartMs) {
-		return filledByMs - window.windowStartMs;
+		return (filledByMs - window.windowStartMs) / pace;
 	}
 	return null;
 }
@@ -714,6 +721,62 @@ function isDeadAt(intervals: DeadInterval[], t: number): boolean {
 }
 
 /**
+ * A window-exhaustion estimate under a hypothetical uniform burn-pace
+ * multiplier, for the {@link probePaceMargin} counterfactual only.
+ *
+ * The scaled ETA is re-anchored at the instant the burn is measured from: the
+ * reading's observation for an observation-anchored estimate
+ * (`lifetime-primary`), `now` otherwise. `now` is exact for the low lifetime
+ * path and an approximation for a regression's newest-sample anchor — which is
+ * fine, because regressions only exist for routing-fresh readings (minutes
+ * old at most). The observation anchor is NOT an approximation the same way:
+ * the scan legitimately serves persisted Codex readings that are hours or
+ * days old after a restart, and anchoring those at `now` would move the
+ * scaled ETA by a third of the reading's age at the probe cap. An
+ * `already-exhausted` estimate is untouched: being spent now does not depend
+ * on pace.
+ */
+function scaleEstimatePace(
+	estimate: WindowExhaustion,
+	pace: number,
+	now: number,
+	observedAtMs: number | null | undefined,
+): WindowExhaustion {
+	if (pace === 1) return estimate;
+	const slope = estimate.slopePctPerHour;
+	let exhaustsAtMs = estimate.exhaustsAtMs;
+	if (estimate.source !== "already-exhausted" && exhaustsAtMs != null) {
+		const anchorMs =
+			estimate.source === "lifetime-primary" &&
+			observedAtMs != null &&
+			Number.isFinite(observedAtMs)
+				? observedAtMs
+				: now;
+		if (exhaustsAtMs > anchorMs) {
+			exhaustsAtMs = anchorMs + (exhaustsAtMs - anchorMs) / pace;
+		}
+	}
+	return {
+		...estimate,
+		slopePctPerHour: slope != null && slope > 0 ? slope * pace : slope,
+		exhaustsAtMs,
+	};
+}
+
+/** Everything the pool scan derives from the account inputs, per pace. */
+interface PoolBuild {
+	pooled: PooledAccount[];
+	unprojectableAccountIds: string[];
+	assumedCredits: RunwayAssumedCredits[];
+}
+
+/** The first instant every pooled account is dead at once, or null. */
+interface AllOutHit {
+	t: number;
+	causes: RunwayCause[];
+}
+
+/**
  * How long the pool can keep going at the current pace before EVERY account in
  * it is simultaneously out of account-wide quota.
  *
@@ -721,6 +784,9 @@ function isDeadAt(intervals: DeadInterval[], t: number): boolean {
  * `unprojectableAccountIds`. Excluding an account can only SHORTEN the computed
  * runway, so a `runway` result carrying unprojectable accounts is a documented
  * lower bound — never a fabricated zero.
+ *
+ * A `beyond-horizon` outcome additionally carries `paceMargin` when the
+ * verdict is knife-edge — see {@link probePaceMargin}.
  */
 export function computeCapacityRunway(
 	accounts: RunwayAccountInput[],
@@ -730,6 +796,61 @@ export function computeCapacityRunway(
 	if (accounts.length === 0) return { kind: "no-accounts" };
 
 	const horizonEndMs = now + horizonMs;
+	const { pooled, unprojectableAccountIds, assumedCredits } = buildPool(
+		accounts,
+		now,
+		horizonEndMs,
+		1,
+	);
+
+	if (pooled.length === 0) return { kind: "unknown" };
+
+	const hit = firstAllOut(pooled, now, horizonEndMs);
+	if (hit !== null) {
+		if (hit.t === now) {
+			return {
+				kind: "out-now",
+				causes: hit.causes,
+				unprojectableAccountIds,
+				...(assumedCredits.length > 0
+					? { assumedResetCredits: assumedCredits }
+					: {}),
+			};
+		}
+		return {
+			kind: "runway",
+			exhaustsAtMs: hit.t,
+			durationMs: hit.t - now,
+			causes: hit.causes,
+			unprojectableAccountIds,
+			...(assumedCredits.length > 0
+				? { assumedResetCredits: assumedCredits }
+				: {}),
+		};
+	}
+
+	const paceMargin = probePaceMargin(accounts, now, horizonEndMs);
+	return {
+		kind: "beyond-horizon",
+		horizonMs,
+		unprojectableAccountIds,
+		...(assumedCredits.length > 0
+			? { assumedResetCredits: assumedCredits }
+			: {}),
+		...(paceMargin !== null ? { paceMargin } : {}),
+	};
+}
+
+/**
+ * Dead intervals and pool membership for every account, under a burn-pace
+ * multiplier (`pace: 1` is the real scan; the probe passes hypotheticals).
+ */
+function buildPool(
+	accounts: RunwayAccountInput[],
+	now: number,
+	horizonEndMs: number,
+	pace: number,
+): PoolBuild {
 	const pooled: PooledAccount[] = [];
 	const unprojectableAccountIds: string[] = [];
 	const assumedCredits: RunwayAssumedCredits[] = [];
@@ -755,17 +876,22 @@ export function computeCapacityRunway(
 		const bank = account.codexResetCredits ?? null;
 		let readable = false;
 		for (const window of account.windows) {
-			const estimate = estimateWindowExhaustion(
-				{
-					utilizationPct: window.utilizationPct,
-					resetsAtMs: window.resetsAtMs,
-					windowStartMs: window.windowStartMs,
-					prediction: window.prediction,
-					lifetimeConfidence: window.lifetimeConfidence,
-					observedAtMs: window.observedAtMs,
-					anchor: window.anchor,
-				},
+			const estimate = scaleEstimatePace(
+				estimateWindowExhaustion(
+					{
+						utilizationPct: window.utilizationPct,
+						resetsAtMs: window.resetsAtMs,
+						windowStartMs: window.windowStartMs,
+						prediction: window.prediction,
+						lifetimeConfidence: window.lifetimeConfidence,
+						observedAtMs: window.observedAtMs,
+						anchor: window.anchor,
+					},
+					now,
+				),
+				pace,
 				now,
+				window.observedAtMs,
 			);
 			if (estimate.source === "none") continue;
 			// Evidence is tracked separately from intervals on purpose: a readable
@@ -780,7 +906,7 @@ export function computeCapacityRunway(
 			);
 			if (bank !== null && window.windowKind === "seven_day") {
 				weeklyIntervals.push(...intervals);
-				weeklyTimeToFullMs = weeklyTimeToFull(window, estimate, now);
+				weeklyTimeToFullMs = weeklyTimeToFull(window, estimate, now, pace);
 			} else {
 				windowIntervals.push(...intervals);
 			}
@@ -818,12 +944,24 @@ export function computeCapacityRunway(
 		});
 	}
 
-	if (pooled.length === 0) return { kind: "unknown" };
+	return { pooled, unprojectableAccountIds, assumedCredits };
+}
 
-	// The first all-dead instant is either `now` or a moment at which some
-	// account transitions from alive to dead — which is exactly the start of one
-	// of its unioned dead intervals. Testing those candidates is therefore
-	// complete, not a sampling approximation.
+/**
+ * The first instant at which every pooled account is dead at once, with the
+ * window intervals covering it, or null when no such instant exists inside the
+ * horizon.
+ *
+ * The first all-dead instant is either `now` or a moment at which some
+ * account transitions from alive to dead — which is exactly the start of one
+ * of its unioned dead intervals. Testing those candidates is therefore
+ * complete, not a sampling approximation.
+ */
+function firstAllOut(
+	pooled: PooledAccount[],
+	now: number,
+	horizonEndMs: number,
+): AllOutHit | null {
 	const candidates = new Set<number>([now]);
 	for (const account of pooled) {
 		for (const interval of account.union) {
@@ -847,35 +985,75 @@ export function computeCapacityRunway(
 				}
 			}
 		}
-
-		if (t === now) {
-			return {
-				kind: "out-now",
-				causes,
-				unprojectableAccountIds,
-				...(assumedCredits.length > 0
-					? { assumedResetCredits: assumedCredits }
-					: {}),
-			};
-		}
-		return {
-			kind: "runway",
-			exhaustsAtMs: t,
-			durationMs: t - now,
-			causes,
-			unprojectableAccountIds,
-			...(assumedCredits.length > 0
-				? { assumedResetCredits: assumedCredits }
-				: {}),
-		};
+		return { t, causes };
 	}
 
-	return {
-		kind: "beyond-horizon",
-		horizonMs,
-		unprojectableAccountIds,
-		...(assumedCredits.length > 0
-			? { assumedResetCredits: assumedCredits }
-			: {}),
-	};
+	return null;
+}
+
+/**
+ * Largest uniform burn-pace multiplier the probe checks. A `beyond-horizon`
+ * that survives every account burning half again as fast is not knife-edge,
+ * and there is nothing useful to disclose about it. Inline named constant —
+ * NO env var / feature gate.
+ */
+export const PACE_MARGIN_PROBE_MAX = 1.5;
+
+/** Grid step at which the probe walks candidate multipliers. */
+const PACE_MARGIN_PRECISION = 0.01;
+
+/**
+ * How fragile a `beyond-horizon` verdict is: the smallest probed uniform
+ * burn-pace multiplier (up to {@link PACE_MARGIN_PROBE_MAX}) at which the same
+ * pool scans FINITE, or null when none does.
+ *
+ * Exists because the all-out test is binary in a way small evidence changes
+ * can flip: a window projected to fill even slightly slower than its own
+ * length contributes NO dead time to any projected cycle (see
+ * `windowDeadIntervals`), so one account's slope easing across `100%/duration`
+ * — a night of idle diluting a lifetime average is enough — teleports the pool
+ * outcome between a finite runway and `beyond-horizon`. The model cannot be
+ * smoothed (a sub-sustainable pace genuinely never exhausts), so the honest
+ * fix is disclosure: quantify how close the verdict is to flipping back.
+ *
+ * A GRID WALK from the bottom, deliberately not a bisection: "finite at pace
+ * m" is NOT monotone in m once reset credits are modeled. Dead-time itself
+ * only grows with pace, but a faster pace moves a dead span's start earlier,
+ * which can put it back inside a banked credit's expiry — the credit then
+ * revives the window and the scan turns beyond-horizon AGAIN at the higher
+ * pace. A bisection seeded by a probe at the cap would read such a pool as
+ * robust and miss a real low flip. Walking every grid step finds the smallest
+ * flipping multiplier by construction, at a bounded cost of 50 pool rebuilds
+ * over a handful of accounts, only on the beyond-horizon path.
+ *
+ * The finite scan a probe step finds may itself consume modeled credits; they
+ * are not itemized separately because the entire figure is already a
+ * disclosed counterfactual, not a measurement.
+ *
+ * A GRID claim, not a continuous one: a modeled credit whose expiry sits just
+ * past a dead span's start can in principle carve a finite island narrower
+ * than one grid step, which this walk passes over. Deliberate — such an
+ * island flips back to beyond-horizon a fraction of a percent higher, so it
+ * carries no usable fragility signal, and no finite grid could rule the shape
+ * out anyway. The wire type documents the same grid semantics.
+ */
+function probePaceMargin(
+	accounts: RunwayAccountInput[],
+	now: number,
+	horizonEndMs: number,
+): { multiplier: number; exhaustsAtMs: number } | null {
+	// An unmetered account is never out of quota at ANY pace, so the pool can
+	// never be all-out and every probe step would rebuild it for nothing.
+	if (accounts.some((account) => account.unmetered)) return null;
+	const steps = Math.round((PACE_MARGIN_PROBE_MAX - 1) / PACE_MARGIN_PRECISION);
+	for (let step = 1; step <= steps; step++) {
+		// Recomputed from the integer step so accumulation error cannot drift
+		// the grid.
+		const pace = 1 + step * PACE_MARGIN_PRECISION;
+		const { pooled } = buildPool(accounts, now, horizonEndMs, pace);
+		if (pooled.length === 0) return null;
+		const hit = firstAllOut(pooled, now, horizonEndMs);
+		if (hit !== null) return { multiplier: pace, exhaustsAtMs: hit.t };
+	}
+	return null;
 }

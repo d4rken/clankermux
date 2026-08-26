@@ -52,6 +52,7 @@ import {
 	makeDowSeasonalEstimator,
 	makeEndpointSlopeEstimator,
 	makeOlsEstimator,
+	makeFallbackEstimator,
 	makeTrailingBurnEstimator,
 	naivePersistenceEstimator,
 	scoreForSelection,
@@ -197,6 +198,16 @@ export const ESTIMATOR_REGISTRY: readonly EstimatorRegistryEntry[] = [
 		windows: SEVEN_DAY_ONLY,
 		needsDeepHistory: true,
 		make: () => makeDowSeasonalEstimator(),
+	},
+	{
+		name: "trailing-7d-else-lifetime",
+		windows: SEVEN_DAY_ONLY,
+		needsDeepHistory: true,
+		make: () =>
+			makeFallbackEstimator(
+				makeTrailingBurnEstimator(7 * 24 * HOUR_MS),
+				lifetimeAverageEstimator,
+			),
 	},
 ];
 

@@ -6,6 +6,7 @@ import {
 	BEYOND_HORIZON_GLYPH,
 	describeRunwayCause,
 	formatRunwayValue,
+	runwayPaceMargin,
 	runwayQualifier,
 	runwayUnavailableReason,
 	runwayWindowLabel,
@@ -291,6 +292,123 @@ describe("runwayQualifier", () => {
 				NOW,
 			),
 		).toBeNull();
+	});
+
+	it("discloses a knife-edge beyond-horizon with its flip pace", () => {
+		expect(
+			runwayQualifier(
+				{
+					kind: "beyond-horizon",
+					horizonMs: 14 * DAY,
+					unprojectableAccountIds: [],
+					paceMargin: { multiplier: 1.12, exhaustsAtMs: NOW + 60 * HOUR },
+				},
+				NOW,
+			),
+		).toBe("no run-out within 14d · out in 2d 12h at +12% pace");
+	});
+
+	it("renders a not-ahead pace-margin instant as 'now', never negative time", () => {
+		expect(
+			runwayQualifier(
+				{
+					kind: "beyond-horizon",
+					horizonMs: 14 * DAY,
+					unprojectableAccountIds: [],
+					paceMargin: { multiplier: 1.12, exhaustsAtMs: NOW - HOUR },
+				},
+				NOW,
+			),
+		).toBe("no run-out within 14d · out now at +12% pace");
+	});
+});
+
+describe("runwayPaceMargin", () => {
+	it("CEILS the multiplier to a whole percent and formats the instant", () => {
+		// 1.117 must render as +12%, never +11%: the served multiplier is a pace
+		// at which the scan actually flipped (the current server only emits 1%
+		// grid points, but the display must not depend on that), and rounding
+		// down would state a pace at which the pool still scans infinite.
+		expect(
+			runwayPaceMargin(
+				{
+					kind: "beyond-horizon",
+					horizonMs: 14 * DAY,
+					unprojectableAccountIds: [],
+					paceMargin: { multiplier: 1.117, exhaustsAtMs: NOW + 60 * HOUR },
+				},
+				NOW,
+			),
+		).toEqual({ pacePct: 12, remainingLabel: "in 2d 12h" });
+		// A tiny margin ceils UP to +1% rather than down to a "+0%" that would
+		// contradict the beyond-horizon headline.
+		expect(
+			runwayPaceMargin(
+				{
+					kind: "beyond-horizon",
+					horizonMs: 14 * DAY,
+					unprojectableAccountIds: [],
+					paceMargin: { multiplier: 1.004, exhaustsAtMs: NOW + 60 * HOUR },
+				},
+				NOW,
+			),
+		).toEqual({ pacePct: 1, remainingLabel: "in 2d 12h" });
+		// A scaled ETA can legitimately land AT the serve instant (stale
+		// observation-anchored reading); the label degrades to "now" rather than
+		// the margin being suppressed — the tiebreak may have picked this row
+		// FOR its margin.
+		expect(
+			runwayPaceMargin(
+				{
+					kind: "beyond-horizon",
+					horizonMs: 14 * DAY,
+					unprojectableAccountIds: [],
+					paceMargin: { multiplier: 1.01, exhaustsAtMs: NOW },
+				},
+				NOW,
+			),
+		).toEqual({ pacePct: 1, remainingLabel: "now" });
+	});
+
+	it("is null without a margin, on other kinds, and at a non-positive pace", () => {
+		expect(
+			runwayPaceMargin(
+				{
+					kind: "beyond-horizon",
+					horizonMs: 14 * DAY,
+					unprojectableAccountIds: [],
+				},
+				NOW,
+			),
+		).toBeNull();
+		expect(runwayPaceMargin(runwayOutcome(HOUR), NOW)).toBeNull();
+		expect(
+			runwayPaceMargin(
+				{
+					kind: "beyond-horizon",
+					horizonMs: 14 * DAY,
+					unprojectableAccountIds: [],
+					paceMargin: { multiplier: 1, exhaustsAtMs: NOW + 60 * HOUR },
+				},
+				NOW,
+			),
+		).toBeNull();
+	});
+
+	it("stays present on a pool with a knife-edge margin AND unknown accounts", () => {
+		expect(
+			runwayQualifier(
+				{
+					kind: "beyond-horizon",
+					horizonMs: 14 * DAY,
+					unprojectableAccountIds: ["a"],
+					paceMargin: { multiplier: 1.05, exhaustsAtMs: NOW + 12 * HOUR },
+				},
+				NOW,
+			),
+		).toBe(
+			"no run-out within 14d · out in 12h at +5% pace · 1 account unknown",
+		);
 	});
 });
 
