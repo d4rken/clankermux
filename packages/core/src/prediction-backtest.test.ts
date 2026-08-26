@@ -14,6 +14,7 @@ import {
 	macroAverageByAccount,
 	makeDowSeasonalEstimator,
 	makeEndpointSlopeEstimator,
+	makeFallbackEstimator,
 	makeOlsEstimator,
 	makeTrailingBurnEstimator,
 	naivePersistenceEstimator,
@@ -1194,6 +1195,53 @@ describe("makeTrailingBurnEstimator", () => {
 			"insufficient_data",
 		);
 		expect(trailing3d(thin, T0, SEVEN_DAY_SPEC).usable).toBe(true);
+	});
+});
+
+describe("makeFallbackEstimator", () => {
+	const composite = makeFallbackEstimator(
+		makeTrailingBurnEstimator(7 * DAY_MS),
+		lifetimeAverageEstimator,
+	);
+
+	test("primary usable -> the primary's answer, byte for byte", () => {
+		const reset = T0 + 2 * DAY_MS;
+		const points = uniformBurn(T0, 4, 5, reset);
+		const primary = makeTrailingBurnEstimator(7 * DAY_MS)(
+			points,
+			T0,
+			SEVEN_DAY_SPEC,
+		);
+		expect(primary.usable).toBe(true);
+		expect(composite(points, T0, SEVEN_DAY_SPEC)).toEqual(primary);
+	});
+
+	test("a confident negative from the primary is an answer, not a fallthrough", () => {
+		const reset = T0 + 2 * DAY_MS;
+		// Net refund over the horizon: trailing burn answers "will not exhaust";
+		// the lifetime average over the same points would project an ETA.
+		const points = uniformBurn(T0, 4, -5, reset, 40);
+		const out = composite(points, T0, SEVEN_DAY_SPEC);
+		expect(out.usable).toBe(true);
+		expect(out.predictsExhaust).toBe(false);
+		expect(out.predictedEtaMs).toBeNull();
+	});
+
+	test("primary abstains -> the fallback's answer", () => {
+		const reset = T0 + 2 * DAY_MS;
+		// 3 days of history: short of trailing-7d's 3.5-day coverage floor.
+		const points = uniformBurn(T0, 3, 5, reset);
+		const fallback = lifetimeAverageEstimator(points, T0, SEVEN_DAY_SPEC);
+		expect(fallback.usable).toBe(true);
+		expect(composite(points, T0, SEVEN_DAY_SPEC)).toEqual(fallback);
+	});
+
+	test("both abstain -> the fallback's abstention reason", () => {
+		// No reset: neither estimator can place a window.
+		const points = uniformBurn(T0, 4, 5, null);
+		const out = composite(points, T0, SEVEN_DAY_SPEC);
+		expect(out.usable).toBe(false);
+		expect(out.unusableReason).toBe("no_reset");
 	});
 });
 

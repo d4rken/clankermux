@@ -1174,6 +1174,32 @@ export function makeTrailingBurnEstimator(horizonMs: number): Estimator {
 	});
 }
 
+/**
+ * `primary` where it can answer, `fallback` where it abstains.
+ *
+ * Exists because coverage is what decided the seven-day selection: trailing-7d
+ * beat the lifetime average on the held-out range on every gate criterion but
+ * lost the tuning range at 79.9% usable coverage — it abstains until it has
+ * half its horizon of observed deltas, and on the deployment cohort an
+ * abstention scores as a missed exhaustion. Substituting the incumbent on
+ * exactly those instants scores the pair a deployment would actually run.
+ *
+ * A usable CONFIDENT NEGATIVE from the primary is an answer and is passed
+ * through — only `usable: false` falls through. Both inputs already carry
+ * `withProductionGuards`, so no third wrapper here: the guards would decide
+ * identically before either inner ran.
+ */
+export function makeFallbackEstimator(
+	primary: Estimator,
+	fallback: Estimator,
+): Estimator {
+	return (points, T, window) => {
+		const first = primary(points, T, window);
+		if (first.usable) return first;
+		return fallback(points, T, window);
+	};
+}
+
 /** Minimum observed time per UTC day-of-week before its burn is a profile. */
 const DOW_MIN_EXPOSURE_MS = DAY_MS;
 const DOW_COUNT = 7;

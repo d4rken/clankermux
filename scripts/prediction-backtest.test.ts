@@ -725,6 +725,7 @@ describe("estimator registry", () => {
 			"trailing-3d",
 			"trailing-7d",
 			"dow-seasonal",
+			"trailing-7d-else-lifetime",
 		]);
 	});
 
