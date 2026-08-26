@@ -1428,3 +1428,124 @@ describe("computeCapacityRunway with a reset-credit bank", () => {
 		expect(withBank).toEqual(without);
 	});
 });
+
+describe("computeCapacityRunway pace-margin probe", () => {
+	// A weekly window burning at ~90% of sustainable pace: timeToFull 186.7h in
+	// a 168h cycle, with the current cycle's ETA far past its reset so only the
+	// projected later cycles can go dead. The overnight-flip case: no cycle is
+	// ever dead at the measured pace, but a ~+12% pace makes every cycle
+	// exhaust.
+	const marginalWeekly = () =>
+		window({
+			windowKind: "seven_day",
+			utilizationPct: 50,
+			resetsAtMs: NOW + 84 * HOUR,
+			windowStartMs: NOW - 84 * HOUR,
+			prediction: prediction({
+				resetsAtMs: NOW + 84 * HOUR,
+				slopePerHour: 100 / 186.7,
+				etaExhaustMs: NOW + 200 * HOUR,
+			}),
+		});
+
+	it("annotates a knife-edge beyond-horizon with the flip multiplier", () => {
+		const result = computeCapacityRunway(
+			[account("a", [marginalWeekly()])],
+			NOW,
+		);
+
+		expect(result.kind).toBe("beyond-horizon");
+		if (result.kind !== "beyond-horizon") return;
+		const margin = result.paceMargin;
+		expect(margin).toBeDefined();
+		if (!margin) return;
+		// The flip is at timeToFull/duration = 186.7/168 ≈ 1.111; the probe
+		// reports the smallest flipping multiplier to its stated precision.
+		expect(margin.multiplier).toBeGreaterThan(1.111);
+		expect(margin.multiplier).toBeLessThanOrEqual(1.13);
+		// At the flip the first dead instant is the first later cycle's projected
+		// exhaustion: resetsAt + timeToFull/multiplier ≈ NOW + 250h.
+		expect(margin.exhaustsAtMs).toBeGreaterThan(NOW + 245 * HOUR);
+		expect(margin.exhaustsAtMs).toBeLessThan(NOW + 255 * HOUR);
+	});
+
+	it("stays silent when the beyond-horizon is robust to the probe cap", () => {
+		// timeToFull 300h: even at the 1.5x probe cap the scaled 200h cannot be
+		// spent inside a 168h cycle, and the current ETA stays past its reset.
+		const result = computeCapacityRunway(
+			[
+				account("a", [
+					window({
+						windowKind: "seven_day",
+						utilizationPct: 30,
+						resetsAtMs: NOW + 84 * HOUR,
+						windowStartMs: NOW - 84 * HOUR,
+						prediction: prediction({
+							resetsAtMs: NOW + 84 * HOUR,
+							slopePerHour: 100 / 300,
+							etaExhaustMs: NOW + 500 * HOUR,
+						}),
+					}),
+				]),
+			],
+			NOW,
+		);
+
+		// Exact equality: a robust beyond-horizon carries NO paceMargin key.
+		expect(result).toEqual({
+			kind: "beyond-horizon",
+			horizonMs: RUNWAY_HORIZON_MS,
+			unprojectableAccountIds: [],
+		});
+	});
+
+	it("probes the POOL, not each account alone", () => {
+		// Account a is dead for half of every 5h cycle already; alone it never
+		// makes the pool all-dead because b is never dead at measured pace. The
+		// probe must find the multiplier at which b's weekly cycles start dying
+		// and OVERLAP a's dead spans.
+		const result = computeCapacityRunway(
+			[
+				account("a", [cyclicWindow("five_hour", NOW + HOUR, 5, 2.5)]),
+				account("b", [marginalWeekly()]),
+			],
+			NOW,
+		);
+
+		expect(result.kind).toBe("beyond-horizon");
+		if (result.kind !== "beyond-horizon") return;
+		const margin = result.paceMargin;
+		expect(margin).toBeDefined();
+		if (!margin) return;
+		// b's cycles start dying just above 1.111; a's dead spans recur every 5h,
+		// so an overlap exists almost immediately after.
+		expect(margin.multiplier).toBeGreaterThan(1.111);
+		expect(margin.multiplier).toBeLessThanOrEqual(1.15);
+		expect(margin.exhaustsAtMs).toBeGreaterThan(NOW);
+		expect(margin.exhaustsAtMs).toBeLessThan(NOW + RUNWAY_HORIZON_MS);
+	});
+
+	it("never annotates a finite outcome, and the probe respects the horizon", () => {
+		// Dead every cycle already: finite runway, no paceMargin field exists on
+		// that variant at the type level — assert the shape stays exact.
+		const finite = computeCapacityRunway(
+			[account("a", [cyclicWindow("seven_day", NOW + 84 * HOUR, 168, 100)])],
+			NOW,
+		);
+		expect(finite.kind).toBe("runway");
+
+		// With a 4-day horizon the marginal account's first scaled dead instant
+		// (~NOW+250h) lies OUTSIDE the horizon, so the probe must not claim a
+		// flip it cannot see.
+		const shortHorizon = computeCapacityRunway(
+			[account("a", [marginalWeekly()])],
+			NOW,
+			4 * DAY,
+		);
+		expect(shortHorizon).toEqual({
+			kind: "beyond-horizon",
+			horizonMs: 4 * DAY,
+			unprojectableAccountIds: [],
+		});
+	});
+});

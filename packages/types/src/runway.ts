@@ -47,6 +47,22 @@ export type RunwayOutcome =
 			horizonMs: number;
 			unprojectableAccountIds: string[];
 			assumedResetCredits?: RunwayAssumedCredits[];
+			/**
+			 * How fragile this "no run-out" is. The all-out test is binary — a
+			 * window projected to fill even slightly slower than its own length
+			 * never goes dead in any projected cycle — so a small pace change can
+			 * flip the outcome between a finite runway and beyond-horizon (a night
+			 * of idle time has done exactly that). When a uniform burn-rate
+			 * multiplier no larger than the probe cap would make the scan finite,
+			 * this carries the smallest such multiplier and the runway instant the
+			 * scan reports at it. Absent when the outcome is robust to the cap.
+			 */
+			paceMargin?: {
+				/** Smallest uniform burn-pace multiplier (>1) that turns the scan finite. */
+				multiplier: number;
+				/** The all-out instant the scan projects AT that multiplier. */
+				exhaustsAtMs: number;
+			};
 	  }
 	| {
 			kind: "runway";

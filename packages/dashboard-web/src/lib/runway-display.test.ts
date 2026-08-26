@@ -6,6 +6,7 @@ import {
 	BEYOND_HORIZON_GLYPH,
 	describeRunwayCause,
 	formatRunwayValue,
+	runwayPaceMargin,
 	runwayQualifier,
 	runwayUnavailableReason,
 	runwayWindowLabel,
@@ -287,6 +288,77 @@ describe("runwayQualifier", () => {
 					kind: "out-now",
 					causes: [],
 					unprojectableAccountIds: [],
+				},
+				NOW,
+			),
+		).toBeNull();
+	});
+
+	it("discloses a knife-edge beyond-horizon with its flip pace", () => {
+		expect(
+			runwayQualifier(
+				{
+					kind: "beyond-horizon",
+					horizonMs: 14 * DAY,
+					unprojectableAccountIds: [],
+					paceMargin: { multiplier: 1.12, exhaustsAtMs: NOW + 60 * HOUR },
+				},
+				NOW,
+			),
+		).toBe("no run-out within 14d · out in 2d 12h at +12% pace");
+	});
+
+	it("drops a stale pace-margin instant instead of counting negative time", () => {
+		expect(
+			runwayQualifier(
+				{
+					kind: "beyond-horizon",
+					horizonMs: 14 * DAY,
+					unprojectableAccountIds: [],
+					paceMargin: { multiplier: 1.12, exhaustsAtMs: NOW - HOUR },
+				},
+				NOW,
+			),
+		).toBe("no run-out within 14d");
+	});
+});
+
+describe("runwayPaceMargin", () => {
+	it("rounds the multiplier to a whole percent and keeps the instant", () => {
+		expect(
+			runwayPaceMargin(
+				{
+					kind: "beyond-horizon",
+					horizonMs: 14 * DAY,
+					unprojectableAccountIds: [],
+					paceMargin: { multiplier: 1.117, exhaustsAtMs: NOW + 60 * HOUR },
+				},
+				NOW,
+			),
+		).toEqual({ pacePct: 12, exhaustsAtMs: NOW + 60 * HOUR });
+	});
+
+	it("is null without a margin, on other kinds, and at a zero rounded pace", () => {
+		expect(
+			runwayPaceMargin(
+				{
+					kind: "beyond-horizon",
+					horizonMs: 14 * DAY,
+					unprojectableAccountIds: [],
+				},
+				NOW,
+			),
+		).toBeNull();
+		expect(runwayPaceMargin(runwayOutcome(HOUR), NOW)).toBeNull();
+		// A multiplier that rounds to +0% would read as "at your current pace",
+		// which contradicts the beyond-horizon headline — suppressed.
+		expect(
+			runwayPaceMargin(
+				{
+					kind: "beyond-horizon",
+					horizonMs: 14 * DAY,
+					unprojectableAccountIds: [],
+					paceMargin: { multiplier: 1.004, exhaustsAtMs: NOW + 60 * HOUR },
 				},
 				NOW,
 			),

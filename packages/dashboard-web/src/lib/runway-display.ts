@@ -150,8 +150,37 @@ export function assumedCreditCount(outcome: RunwayOutcome): number {
 }
 
 /**
+ * The knife-edge disclosure behind a `beyond-horizon` headline, or null.
+ *
+ * The scan's all-out test is binary, so an overnight stretch of idle time can
+ * flip the headline between a finite runway and the ∞ glyph on evidence that
+ * barely moved. When the server probed that fragility (`paceMargin`), this
+ * exposes it in display terms: the flip pace as a whole percent above the
+ * measured one, plus the run-out instant the scan projects at that pace.
+ *
+ * Null when the outcome is not `beyond-horizon`, when the verdict was robust
+ * (no `paceMargin` served), when the probed instant has already passed at
+ * render time (a stale poll must not count down negative time), and when the
+ * multiplier rounds to +0% — that would read as "at your current pace", which
+ * contradicts the headline it qualifies.
+ */
+export function runwayPaceMargin(
+	outcome: RunwayOutcome,
+	now: number,
+): { pacePct: number; exhaustsAtMs: number } | null {
+	if (outcome.kind !== "beyond-horizon") return null;
+	const margin = outcome.paceMargin;
+	if (!margin) return null;
+	if (margin.exhaustsAtMs <= now) return null;
+	const pacePct = Math.round((margin.multiplier - 1) * 100);
+	if (pacePct <= 0) return null;
+	return { pacePct, exhaustsAtMs: margin.exhaustsAtMs };
+}
+
+/**
  * The note that qualifies the headline: what the `beyond-horizon` glyph
- * actually checked, or how many accounts the figure could not see.
+ * actually checked, how fragile that verdict is, or how many accounts the
+ * figure could not see.
  */
 export function runwayQualifier(
 	outcome: RunwayOutcome,
@@ -161,6 +190,12 @@ export function runwayQualifier(
 	const parts: string[] = [];
 	if (effective.kind === "beyond-horizon") {
 		parts.push(`no run-out within ${formatDurationDhm(effective.horizonMs)}`);
+		const margin = runwayPaceMargin(effective, now);
+		if (margin) {
+			parts.push(
+				`out in ${formatDurationDhm(margin.exhaustsAtMs - now)} at +${margin.pacePct}% pace`,
+			);
+		}
 	}
 	const unknown = unprojectableCount(effective);
 	if (unknown > 0) {

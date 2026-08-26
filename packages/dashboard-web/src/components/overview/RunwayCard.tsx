@@ -7,6 +7,7 @@ import {
 	assumedCreditCount,
 	describeRunwayCause,
 	formatRunwayValue,
+	runwayPaceMargin,
 	runwayUnavailableReason,
 	unprojectableCount,
 } from "../../lib/runway-display";
@@ -193,6 +194,20 @@ export function RunwayCard({
 			label: "Unobserved",
 			value: parts.join(" · "),
 			tooltip: tooltipParts.join(" "),
+		});
+	}
+
+	// The ∞ headline is binary in a way the evidence is not: one account's pace
+	// easing below sustainable — a night of idle time is enough — flips the
+	// whole figure from a dated runway to ∞. When the server's probe found the
+	// verdict is within reach of a modest pace increase, that fragility belongs
+	// on screen beside the glyph it undermines.
+	const paceMargin = worst ? runwayPaceMargin(worst.outcome, now) : null;
+	if (paceMargin) {
+		subRows.push({
+			label: "Margin",
+			value: `+${paceMargin.pacePct}% pace`,
+			tooltip: `The ∞ is narrow: if the pool burned ${paceMargin.pacePct}% faster than measured, quota would run out in ${formatDurationDhm(paceMargin.exhaustsAtMs - now)}. Idle stretches (overnight, weekends) can swing the measured pace by more than this.`,
 		});
 	}
 
