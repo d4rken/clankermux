@@ -335,6 +335,16 @@ export function convertOpenAIResponseToAnthropic(
 	// Build content array with text and tool calls
 	const content: AnthropicContentBlock[] = [];
 
+	// Reasoning-capable openai-compatible providers (DashScope, DeepSeek)
+	// return reasoning_content on the message; thinking leads per Anthropic
+	// block ordering, matching the streaming path in stream.ts.
+	if (choice.message?.reasoning_content) {
+		content.push({
+			type: "thinking",
+			thinking: choice.message.reasoning_content,
+		});
+	}
+
 	// Add text content if present
 	if (choice.message?.content) {
 		content.push({
