@@ -307,11 +307,15 @@ export function clearPendingRotationIfCurrent(
 }
 
 /**
- * Drop whatever is pending for an account, unconditionally. For reauth
- * COMPLETION only: fresh credentials have just been written, so any pending
- * rotation describes a generation the provider has already replaced. Never call
- * it from generic cache-clearing paths (force-reset-rate-limit, manual usage
- * refresh) — those would discard the only live copy of a rotated token.
+ * Drop whatever is pending for an account, unconditionally. Two sanctioned
+ * callers: reauth COMPLETION (fresh credentials have just been written, so any
+ * pending rotation describes a generation the provider has already replaced)
+ * and ACCOUNT REMOVAL (the row is gone, so the rotation has nowhere to land —
+ * the retry sweep would discover that itself within ~35s via the CAS matching
+ * zero rows, but it would log a misleading "superseded" warning on the way).
+ * Never call it from generic cache-clearing paths (force-reset-rate-limit,
+ * manual usage refresh) — those would discard the only live copy of a rotated
+ * token.
  */
 export function clearPendingRotation(accountId: string): void {
 	if (!pending.delete(accountId)) return;

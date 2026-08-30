@@ -59,6 +59,14 @@ export {
 } from "./codex-usage-poller";
 export { computeContextAndToolStats } from "./context-composition";
 export { dispatchProxyRequest } from "./dispatch";
+// clearFamilyWeeklyExhaustedForAccount is called by the account-removal
+// handler in http-api; the record/get pair rides along so its integration test
+// can seed and observe the memo through the package boundary.
+export {
+	clearFamilyWeeklyExhaustedForAccount,
+	getFamilyWeeklyExhaustedUntil,
+	recordFamilyWeeklyExhausted,
+} from "./family-weekly-memo";
 export {
 	type CapacityProbeReservation,
 	type CodexResetCreditConsumeDispatchOutcome,

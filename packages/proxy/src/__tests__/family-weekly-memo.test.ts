@@ -11,6 +11,7 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import {
 	clearFamilyWeeklyExhausted,
+	clearFamilyWeeklyExhaustedForAccount,
 	getFamilyWeeklyExhaustedUntil,
 	isFamilyWeeklyMemoExhausted,
 	recordFamilyWeeklyExhausted,
@@ -164,6 +165,39 @@ describe("family-weekly memo", () => {
 		);
 		expect(getFamilyWeeklyExhaustedUntil("acc-49", "fable", NOW)).toBe(
 			NOW + 50_000,
+		);
+	});
+});
+
+describe("clearFamilyWeeklyExhaustedForAccount", () => {
+	beforeEach(resetFamilyWeeklyMemoForTests);
+	afterEach(resetFamilyWeeklyMemoForTests);
+
+	// Account removal is the only caller: a deleted id is never read again, so
+	// without this its entries would sit in the map (and against the entry cap,
+	// which DROPS new records when full) until an unrelated record after their
+	// reset time sweeps them.
+	it("clears every family for the account and nothing for other accounts", () => {
+		recordFamilyWeeklyExhausted(ACCOUNT, "fable", NOW + HOUR, NOW);
+		recordFamilyWeeklyExhausted(ACCOUNT, "opus", NOW + 2 * HOUR, NOW);
+		recordFamilyWeeklyExhausted(OTHER_ACCOUNT, "fable", NOW + HOUR, NOW);
+
+		clearFamilyWeeklyExhaustedForAccount(ACCOUNT);
+
+		expect(getFamilyWeeklyExhaustedUntil(ACCOUNT, "fable", NOW)).toBeNull();
+		expect(getFamilyWeeklyExhaustedUntil(ACCOUNT, "opus", NOW)).toBeNull();
+		expect(getFamilyWeeklyExhaustedUntil(OTHER_ACCOUNT, "fable", NOW)).toBe(
+			NOW + HOUR,
+		);
+	});
+
+	it("is a no-op for an account with nothing recorded", () => {
+		recordFamilyWeeklyExhausted(OTHER_ACCOUNT, "fable", NOW + HOUR, NOW);
+
+		clearFamilyWeeklyExhaustedForAccount(ACCOUNT);
+
+		expect(getFamilyWeeklyExhaustedUntil(OTHER_ACCOUNT, "fable", NOW)).toBe(
+			NOW + HOUR,
 		);
 	});
 });

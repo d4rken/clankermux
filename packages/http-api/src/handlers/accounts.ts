@@ -49,6 +49,8 @@ import {
 	clearAccountAffinity,
 	clearAccountRefreshCache,
 	clearCapacityRestoredProbePending,
+	clearFamilyWeeklyExhaustedForAccount,
+	clearPendingRotation,
 	clearProviderOverloadCooldown,
 	clearUsageRevisionAnchors,
 	consumeCodexResetCreditForAccount,
@@ -1527,6 +1529,15 @@ export function createAccountRemoveHandler(dbOps: DatabaseOperations) {
 			// or a superseding lease), so removal is the only way a deleted id
 			// stops occupying them.
 			clearCapacityRestoredProbePending(accountId);
+			// Family-weekly exhaustion memo entries for a deleted id are never read
+			// again (readers iterate live accounts) and the only sweep runs on the
+			// next RECORD after their reset — up to a week away — while they occupy
+			// a cap that drops new records rather than evicting.
+			clearFamilyWeeklyExhaustedForAccount(accountId);
+			// A pending token rotation has nowhere to land once the row is gone;
+			// dropping it here saves the retry sweep a doomed flush and the
+			// misleading "superseded" warning that flush would log.
+			clearPendingRotation(accountId);
 
 			return jsonResponse({
 				success: true,
