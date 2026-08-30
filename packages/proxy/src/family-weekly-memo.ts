@@ -160,6 +160,24 @@ export function isFamilyWeeklyMemoExhausted(
 	return getFamilyWeeklyExhaustedUntil(account.id, family, now) !== null;
 }
 
+/**
+ * Forget every family entry for one account, because the account was removed.
+ *
+ * Without this, a removed account's entries survive until some OTHER account
+ * records an exhaustion after their reset time (`pruneExpired` only runs from
+ * `recordFamilyWeeklyExhausted`, and the lazy per-key expiry in
+ * `getFamilyWeeklyExhaustedUntil` needs a reader that iterates live accounts,
+ * so a deleted id is never asked about again). Up to a week of dead entries is
+ * mostly harmless — except that `MAX_MEMO_ENTRIES` DROPS new records at the
+ * cap rather than evicting, so dead entries can block live findings.
+ */
+export function clearFamilyWeeklyExhaustedForAccount(accountId: string): void {
+	const prefix = `${accountId}:`;
+	for (const key of memo.keys()) {
+		if (key.startsWith(prefix)) memo.delete(key);
+	}
+}
+
 /** Test seam: every peer module in this package exports one. */
 export function resetFamilyWeeklyMemoForTests(): void {
 	memo.clear();

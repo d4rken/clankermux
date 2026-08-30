@@ -5,10 +5,16 @@ import {
 } from "@clankermux/providers";
 import {
 	clearAccountRefreshCache,
+	clearAllPendingRotationsForTests,
 	clearCapacityRestoredProbePending,
+	clearFamilyWeeklyExhaustedForAccount,
 	getCoalescibleRecentRefresh,
+	getFamilyWeeklyExhaustedUntil,
+	getPendingRotation,
 	hasCapacityRestoredProbePending,
 	markCapacityRestoredProbePending,
+	recordFamilyWeeklyExhausted,
+	recordPendingRotation,
 	recordRecentRefresh,
 	sessionCacheStore,
 } from "@clankermux/proxy";
@@ -381,6 +387,77 @@ describe("createAccountRemoveHandler — usage-poll teardown", () => {
 			usageCache.stopPolling(GONE_ID);
 			usageCache.stopPolling(KEPT_ID);
 		}
+	});
+});
+
+describe("createAccountRemoveHandler — family-weekly memo eviction", () => {
+	/**
+	 * The memo's readers iterate live accounts, so a deleted id is never asked
+	 * about again and its lazy per-key expiry never fires; the only sweep runs
+	 * on the next RECORD after the entry's reset time — up to a week away —
+	 * while the entry counts against a cap that DROPS new records when full.
+	 * Removal is the only prompt eviction.
+	 */
+	const NOW = Date.now();
+	const HOUR = 3_600_000;
+
+	afterEach(() => {
+		clearFamilyWeeklyExhaustedForAccount(ACCOUNT_ID);
+		clearFamilyWeeklyExhaustedForAccount(OTHER_ID);
+	});
+
+	it("drops the removed account's memo entries, keeping other accounts'", async () => {
+		recordFamilyWeeklyExhausted(ACCOUNT_ID, "fable", NOW + HOUR, NOW);
+		recordFamilyWeeklyExhausted(ACCOUNT_ID, "opus", NOW + HOUR, NOW);
+		recordFamilyWeeklyExhausted(OTHER_ID, "fable", NOW + HOUR, NOW);
+
+		const { dbOps } = makeDbOps();
+		expect(
+			(await makeHandler(dbOps)(deleteRequest(ACCOUNT_NAME), ACCOUNT_ID))
+				.status,
+		).toBe(200);
+
+		expect(getFamilyWeeklyExhaustedUntil(ACCOUNT_ID, "fable", NOW)).toBeNull();
+		expect(getFamilyWeeklyExhaustedUntil(ACCOUNT_ID, "opus", NOW)).toBeNull();
+		expect(getFamilyWeeklyExhaustedUntil(OTHER_ID, "fable", NOW)).toBe(
+			NOW + HOUR,
+		);
+	});
+});
+
+describe("createAccountRemoveHandler — pending-rotation eviction", () => {
+	/**
+	 * A pending rotation for a deleted row has nowhere to land. The retry sweep
+	 * would discover that within ~35s (its CAS matches zero rows) but logs a
+	 * misleading "superseded" warning on the way; removal drops the entry
+	 * directly.
+	 */
+	const neverWriter = {
+		updateAccountTokens: async () => false,
+	};
+
+	afterEach(clearAllPendingRotationsForTests);
+
+	it("drops the removed account's pending rotation, keeping other accounts'", async () => {
+		const rotation = {
+			accessToken: "at-new",
+			expiresAt: Date.now() + 3_600_000,
+			refreshToken: "rt-new",
+			identity: null,
+			attemptedRefreshToken: "rt-old",
+		};
+		recordPendingRotation(ACCOUNT_ID, rotation, neverWriter);
+		recordPendingRotation(OTHER_ID, { ...rotation }, neverWriter);
+		expect(getPendingRotation(ACCOUNT_ID)).toBeDefined();
+
+		const { dbOps } = makeDbOps();
+		expect(
+			(await makeHandler(dbOps)(deleteRequest(ACCOUNT_NAME), ACCOUNT_ID))
+				.status,
+		).toBe(200);
+
+		expect(getPendingRotation(ACCOUNT_ID)).toBeUndefined();
+		expect(getPendingRotation(OTHER_ID)).toBeDefined();
 	});
 });
 
