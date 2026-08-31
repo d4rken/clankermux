@@ -6,18 +6,20 @@
 @custom-variant dark (&:is(.dark *));
 
 /* ══════════════════════════════════════════════════════════════════════════
-   PAPER TERMINAL — the dashboard's theme.
+   SUBSTRATE — the dashboard's theme.
 
-   Light and clinical: cool paper ground, ink type, one deep instrument teal,
-   hairline rules doing the work drop shadows used to. Density comes from
-   typography and a strict spacing scale rather than from boxes, because every
-   page here is figures first.
+   Dark first. A near-black ground (#0A0B0D) with panels lifted out of it in
+   two steps — card #121417, raised #171A1E — one signal blue for emphasis,
+   and hairline rules doing the separating. Density still comes from typography
+   and a strict spacing scale rather than from boxes, because every page here
+   is figures first. Light mode is derived from the same roles rather than
+   designed separately, so both modes are one palette read two ways.
 
    This file briefly carried seven selectable directions behind a
    `data-palette` attribute so they could be compared in the running app. That
-   axis is gone: Paper won, and a theme you cannot switch away from is a theme
-   whose values can actually be reasoned about. What survives from that work is
-   the ROLE discipline below, which is what made the comparison possible.
+   axis is gone, and a theme you cannot switch away from is a theme whose
+   values can actually be reasoned about. What survives from that work is the
+   ROLE discipline below, which is what made the comparison possible.
 
    ── Colour roles ────────────────────────────────────────────────────────────
 
@@ -32,6 +34,15 @@
                       or occludes it — a dialog over its scrim, the debug
                       panel, an SVG node label sitting on its own connector
                       lines — uses this rather than --card.
+   --sidebar          The nav rail's own ground. One step BELOW --card on the
+                      dark side, so the rail recedes and the panels sit on top
+                      of it; flush white on the light side. It carries plain
+                      --foreground, so there is deliberately no
+                      --sidebar-foreground.
+   --chart-*          Qualitative accents for chart series that have no
+                      semantic meaning. NOT the per-model palette (that is
+                      MODEL_PALETTE in @clankermux/ui-constants, 28 hues
+                      keyed by model), and not a second brand ramp.
 
    Semantic colour comes in TWO variants and they are not interchangeable:
 
@@ -55,40 +66,61 @@
    ══════════════════════════════════════════════════════════════════════════ */
 
 :root {
-	--background: #eef1f2;
-	--foreground: #0f1a20;
+	--background: #f4f5f7;
+	--foreground: #0e1116;
 	--card: #ffffff;
-	--card-foreground: #0f1a20;
+	--card-foreground: #0e1116;
 	--popover: #ffffff;
-	--popover-foreground: #0f1a20;
+	--popover-foreground: #0e1116;
 	--surface-raised: #ffffff;
-	--primary: #0f6d74;
+	--primary: #164ec9;
 	--primary-foreground: #ffffff;
-	--secondary: #e4eaec;
-	--secondary-foreground: #0f1a20;
-	--muted: #e4eaec;
-	--muted-foreground: #5c6d74;
-	--accent: #dde7e8;
-	--accent-foreground: #0f1a20;
-	--destructive: #a82b22;
+	--secondary: #e8eaee;
+	--secondary-foreground: #0e1116;
+	--muted: #e8eaee;
+	--muted-foreground: #5b636d;
+	--accent: #e2e6ec;
+	--accent-foreground: #0e1116;
+	--destructive: #b42318;
 	--destructive-foreground: #ffffff;
-	--destructive-strong: #a82b22;
-	--warning: oklch(60% 0.13 75);
-	--warning-foreground: oklch(98% 0.01 75);
-	--warning-strong: #8a5d00;
-	--success: oklch(52% 0.12 155);
-	--success-foreground: oklch(98% 0.01 155);
-	--success-strong: #14663f;
+	--destructive-strong: #b42318;
+	--warning: #b54708;
+	--warning-foreground: #ffffff;
+	--warning-strong: #8a5300;
+	--success: #067647;
+	--success-foreground: #ffffff;
+	--success-strong: #067647;
 	--info: #0f5b87;
 	--info-foreground: #ffffff;
-	--border: #d9e0e2;
-	--input: #d9e0e2;
-	--ring: #0f6d74;
+	--border: #d7dbe1;
+	--input: #d7dbe1;
+	--ring: #164ec9;
+	--sidebar: #ffffff;
+	--sidebar-border: #e2e6ec;
 
-	/* Geometry. 3px reads as "machined" without becoming a pill; anything
-	   larger starts to look like a consumer app rather than an instrument. */
-	--radius: 3px;
-	--card-shadow: none;
+	/* Qualitative chart accents. Every one clears 3:1 against its own --card
+	   and sits at least 15 dE from the others in its mode, because
+	   MemoryUsageChart draws primary/purple/blue/cyan in one plot and
+	   ModelPerformanceTable draws seven of them as adjacent column bars. */
+	--chart-blue: #0284c7;
+	--chart-purple: #7c3aed;
+	--chart-pink: #be185d;
+	--chart-indigo: #4338ca;
+	--chart-cyan: #0e7490;
+
+	/* Geometry. 8px: enough that a card reads as a panel rather than a cut
+	   rectangle, and — with the derived scale below — enough room for controls
+	   to sit a step tighter than the cards containing them. */
+	--radius: 8px;
+	--card-shadow:
+		0 1px 2px rgba(14, 17, 22, 0.05), inset 0 1px 0 rgba(255, 255, 255, 0.9);
+
+	/* Floating and occluding surfaces only — menus, dialogs, popovers, chart
+	   tooltips. Separate from --card-shadow because the job is different: this
+	   one has to say "above the page", not "is a panel". */
+	--overlay-shadow:
+		0 8px 24px -6px rgba(14, 17, 22, 0.14),
+		0 2px 6px -2px rgba(14, 17, 22, 0.08);
 
 	/* Type. One sans and its own mono, rather than three families.
 	   Geist and Geist Mono are drawn as a single system, so a label in the sans
@@ -126,36 +158,57 @@
 }
 
 .dark {
-	--background: #10171a;
-	--foreground: #e8eff1;
-	--card: #172125;
-	--card-foreground: #e8eff1;
-	--popover: #172125;
-	--popover-foreground: #e8eff1;
-	--surface-raised: #172125;
-	--primary: #4fb8be;
-	--primary-foreground: #04191b;
-	--secondary: #1d282c;
-	--secondary-foreground: #e8eff1;
-	--muted: #1d282c;
-	--muted-foreground: #7c939b;
-	--accent: #223035;
-	--accent-foreground: #e8eff1;
-	--destructive: #e0685e;
-	--destructive-foreground: #ffffff;
-	--destructive-strong: #ec8a80;
-	--warning: oklch(82% 0.14 80);
-	--warning-foreground: oklch(20% 0.03 80);
-	--warning-strong: #e3bd6a;
-	--success: oklch(76% 0.13 158);
-	--success-foreground: oklch(18% 0.03 158);
-	--success-strong: #62c79a;
+	--background: #0a0b0d;
+	--foreground: #e9ecee;
+	--card: #121417;
+	--card-foreground: #e9ecee;
+	--popover: #171a1e;
+	--popover-foreground: #e9ecee;
+	--surface-raised: #171a1e;
+	--primary: #4c8dff;
+	--primary-foreground: #04101f;
+	--secondary: #1b1f24;
+	--secondary-foreground: #e9ecee;
+	--muted: #1b1f24;
+	--muted-foreground: #8b939b;
+	--accent: #1e242a;
+	--accent-foreground: #e9ecee;
+	--destructive: #ff7a6e;
+	--destructive-foreground: #2a0b07;
+	--destructive-strong: #ff9a90;
+	--warning: #f2b544;
+	--warning-foreground: #2a1d05;
+	--warning-strong: #f5c46a;
+	--success: #3dd68c;
+	--success-foreground: #04220f;
+	--success-strong: #5fe0a2;
 	--info: #7fc4e0;
-	--info-foreground: #04191b;
-	--border: #26343a;
-	--input: #26343a;
-	--ring: #4fb8be;
-	--card-shadow: none;
+	--info-foreground: #041720;
+	--border: #22262b;
+	--input: #22262b;
+	--ring: #4c8dff;
+	--sidebar: #0e1013;
+	--sidebar-border: #22262b;
+
+	/* Indigo is #6366F1 rather than the more obvious #7C83F5: that one measures
+	   11.0 dE from --chart-purple and 12.3 from --primary, both under the 15 dE
+	   floor, and all three are drawn in the same charts. */
+	--chart-blue: #38bdf8;
+	--chart-purple: #a78bfa;
+	--chart-pink: #f472b6;
+	--chart-indigo: #6366f1;
+	--chart-cyan: #2dd4bf;
+
+	/* No drop shadow: on a near-black ground the ambient occlusion a light-mode
+	   card shadow simulates has nothing to darken. The lift is the surface step
+	   itself plus a hairline top highlight. */
+	--card-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.045);
+
+	/* Same reason, inverted: a drop shadow alone carries almost no signal here,
+	   so the overlay shadow is paired with a hairline ring that does the
+	   separating. */
+	--overlay-shadow:
+		0 12px 32px -8px rgba(0, 0, 0, 0.72), 0 0 0 1px rgba(255, 255, 255, 0.05);
 }
 
 @theme inline {
@@ -192,16 +245,28 @@
 	--color-border: var(--border);
 	--color-input: var(--input);
 	--color-ring: var(--ring);
+	--color-sidebar: var(--sidebar);
+	--color-sidebar-border: var(--sidebar-border);
+	--color-chart-blue: var(--chart-blue);
+	--color-chart-purple: var(--chart-purple);
+	--color-chart-pink: var(--chart-pink);
+	--color-chart-indigo: var(--chart-indigo);
+	--color-chart-cyan: var(--chart-cyan);
 
-	/* Clamped at 0: --radius is 3px, and a bare calc(3px - 4px) is a negative
-	   border-radius, which invalidates the declaration rather than squaring the
-	   corner. */
-	--radius-sm: max(0px, calc(var(--radius) - 2px));
-	--radius-md: var(--radius);
+	/* Four steps that actually differ, so a control can sit tighter than the
+	   card holding it: 3px / 5px / 8px / 12px.
+
+	   The scale is derived by subtraction, so the deepest cut — the 5px that
+	   makes --radius-sm — is the one clamped at 0: nothing stops a later
+	   --radius from being smaller than 5px, and a bare calc() that lands
+	   negative invalidates the declaration rather than squaring the corner. */
+	--radius-sm: max(0px, calc(var(--radius) - 5px));
+	--radius-md: calc(var(--radius) - 3px);
 	--radius-lg: var(--radius);
-	--radius-xl: calc(var(--radius) + 3px);
+	--radius-xl: calc(var(--radius) + 4px);
 
 	--shadow-card: var(--card-shadow);
+	--shadow-overlay: var(--overlay-shadow);
 
 	--font-sans: var(--app-font-sans);
 	--font-mono: var(--app-font-mono);
@@ -336,15 +401,20 @@
 		font-variant-numeric: tabular-nums;
 	}
 
-	/* Headline numbers. The SANS with tabular figures, not the mono.
-	   Tabular-nums already gives every digit the same advance, so columns of
-	   these still line up — but punctuation keeps its natural width. In a mono
-	   the comma and the point each take a full character cell, which at 24px
-	   turns "$1,075.00" into visibly disconnected clumps. Mono stays for
-	   `.figure`, where the values sit in dense columns and cell alignment is
-	   the whole point. */
+	/* Headline numbers. The MONO with tabular figures.
+
+	   This reverses an earlier decision. These used to be set in the sans on
+	   the grounds that tabular-nums already equalises digit advances while
+	   letting punctuation keep its natural width. That cost is real and is
+	   accepted here: in a mono the comma and the decimal point each take a full
+	   character cell, so at 24px "$1,075.00" reads as slightly disconnected
+	   clumps. Substrate takes it because the alternative is worse on this
+	   screen — a headline figure in the sans is the same family, weight class
+	   and rhythm as the prose beside it, so the one number a tile exists to
+	   report stops announcing itself as a measurement. Mono makes "is a value"
+	   a property of the type rather than of the size. */
 	.figure-xl {
-		font-family: var(--app-font-sans);
+		font-family: var(--app-font-mono);
 		font-variant-numeric: tabular-nums;
 		font-size: 1.5rem;
 		/* An exact 1.75rem rather than a ratio: the loading skeleton that stands
@@ -352,18 +422,20 @@
 		   tile change height the moment real data arrives. */
 		line-height: 1.75rem;
 		font-weight: 500;
-		letter-spacing: -0.02em;
+		/* Zero, not the sans's negative tracking: a mono is drawn on a fixed
+		   advance and tightening it collapses the cells into each other. */
+		letter-spacing: 0;
 	}
 
 	/* Secondary figures: panel totals and inline measurements. Same reasoning
 	   as .figure-xl. */
 	.figure-lg {
-		font-family: var(--app-font-sans);
+		font-family: var(--app-font-mono);
 		font-variant-numeric: tabular-nums;
 		font-size: 1.125rem;
 		line-height: 1.5rem; /* = h-6, same skeleton reasoning as figure-xl */
 		font-weight: 500;
-		letter-spacing: -0.01em;
+		letter-spacing: 0;
 	}
 
 	/* Card hover is a border shift, not a lift: geometry that moves under the

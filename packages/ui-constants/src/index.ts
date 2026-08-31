@@ -1,3 +1,24 @@
+/**
+ * The two status hues that are NOT theme tokens, and must not become them.
+ *
+ * Live Activity draws amber "rate limited" and red "failed" marks in the same
+ * plot as model-coloured request marks. `model-colors.test.ts` measures all 28
+ * model hues — in both colour modes, at normal vision and under simulated
+ * protanopia and deuteranopia — against exactly these two values, and
+ * `scripts/extend-model-palette.ts` searches for new hues against them too. Of
+ * 36 candidate warning/error pairs, only this one and #F7B500/#EF4444 keep
+ * every model hue clear; the theme's own --warning (#F2B544 on the dark ground)
+ * fails on `gold` at 6.4 dE and on `tan` at 2.5 dE under dichromacy.
+ *
+ * So these stay literals, deliberately outside the mode-following tokens:
+ * routing them through --warning/--destructive would silently invalidate the
+ * separation guarantee the palette is built on.
+ */
+export const PINNED_MARK_COLORS = {
+	warning: "#F59E0B",
+	error: "#EF4444",
+} as const;
+
 // Color palette used across UI components
 export const COLORS = {
 	primary: "#f38020",
