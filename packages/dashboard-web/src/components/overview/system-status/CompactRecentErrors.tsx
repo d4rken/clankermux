@@ -65,7 +65,7 @@ export function CompactRecentErrors({
 
 	if (unavailable) {
 		return (
-			<Card className="flex items-center gap-item px-4 py-3 text-sm text-muted-foreground">
+			<Card className="flex items-center gap-item px-group py-row text-sm text-muted-foreground">
 				<AlertCircle className="h-4 w-4 shrink-0 text-warning-strong" />
 				Recent errors unavailable — the stats endpoint could not be read.
 			</Card>
@@ -80,9 +80,9 @@ export function CompactRecentErrors({
 
 	if (errors.length === 0) {
 		return (
-			<Card className="flex items-start gap-item px-4 py-3 text-sm">
+			<Card className="flex items-start gap-item px-group py-row text-sm">
 				<Clock
-					className="mt-0.5 h-4 w-4 shrink-0 text-warning-strong"
+					className="mt-tight h-4 w-4 shrink-0 text-warning-strong"
 					aria-hidden="true"
 				/>
 				<div>
@@ -122,6 +122,9 @@ export function CompactRecentErrors({
 					<Button
 						variant="ghost"
 						size="sm"
+						// Numeric padding: it has to CANCEL the `sm` variant's own
+						// `px-3`, and tailwind-merge only does that against a padding
+						// utility it recognises — `px-item` would leave `px-3` live.
 						className="h-7 px-2 text-xs text-muted-foreground hover:text-foreground"
 						aria-label={`Dismiss all ${errors.length} recent error ${errors.length === 1 ? "group" : "groups"}`}
 						onClick={onDismissAll}

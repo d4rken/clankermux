@@ -270,19 +270,19 @@ export function PoolDetailSection({
 	return (
 		<div className="space-y-row">
 			<div>
-				<div className="font-medium mb-1">Calculation</div>
+				<div className="font-medium mb-tight">Calculation</div>
 				<div className="text-muted-foreground">
 					Headline counts unavailable eligible accounts as 100% used.
 				</div>
 				{activeAverage != null && (
-					<div className="mt-1">
+					<div className="mt-tight">
 						Reporting accounts average: {activeAverage.toFixed(0)}%
 					</div>
 				)}
 			</div>
 			{hasContributing && (
 				<div>
-					<div className="font-medium mb-1">
+					<div className="font-medium mb-tight">
 						Reporting ({contributing.length})
 					</div>
 					<ul className="space-y-tight">
@@ -302,10 +302,10 @@ export function PoolDetailSection({
 			)}
 			{familyWeekly.length > 0 && (
 				<div>
-					<div className="font-medium mb-1">
+					<div className="font-medium mb-tight">
 						Model limits ({familyWeekly.length})
 					</div>
-					<div className="text-muted-foreground mb-1">
+					<div className="text-muted-foreground mb-tight">
 						Per-model weekly quota — can throttle one model while the
 						account-wide average remains low.
 					</div>
@@ -357,7 +357,7 @@ export function PoolDetailSection({
 										</div>
 									)}
 									{f.accounts.length > 1 && (
-										<ul className="ml-2 space-y-tight">
+										<ul className="ml-item space-y-tight">
 											{f.accounts.map((a) => (
 												<li
 													key={a.name}
@@ -387,8 +387,8 @@ export function PoolDetailSection({
 			)}
 			{hasAtRisk && (
 				<div>
-					<div className="font-medium mb-1">At risk ({atRisk.length})</div>
-					<div className="text-muted-foreground mb-1">
+					<div className="font-medium mb-tight">At risk ({atRisk.length})</div>
+					<div className="text-muted-foreground mb-tight">
 						Projected to exhaust before their window resets.
 					</div>
 					<ul className="space-y-tight">
@@ -410,7 +410,7 @@ export function PoolDetailSection({
 			)}
 			{hasExhausted && (
 				<div>
-					<div className="font-medium mb-1">
+					<div className="font-medium mb-tight">
 						Unavailable ({exhausted.length})
 					</div>
 					<div className="space-y-item">
@@ -419,7 +419,7 @@ export function PoolDetailSection({
 								<div className="text-muted-foreground">
 									{REASON_LABELS[reason]} · counted as 100%
 								</div>
-								<ul className="ml-2 space-y-tight">
+								<ul className="ml-item space-y-tight">
 									{items.map((e) => (
 										<li key={e.name} className="truncate" title={e.name}>
 											{e.name}
@@ -433,14 +433,16 @@ export function PoolDetailSection({
 			)}
 			{hasExcluded && (
 				<div>
-					<div className="font-medium mb-1">Unknown ({excluded.length})</div>
+					<div className="font-medium mb-tight">
+						Unknown ({excluded.length})
+					</div>
 					<div className="space-y-item">
 						{excludedGroups.map(({ reason, items }) => (
 							<div key={reason}>
 								<div className="text-muted-foreground">
 									{REASON_LABELS[reason]} · not counted
 								</div>
-								<ul className="ml-2 space-y-tight">
+								<ul className="ml-item space-y-tight">
 									{items.map((e) => (
 										<li key={e.name} className="truncate" title={e.name}>
 											{e.name}
@@ -454,10 +456,10 @@ export function PoolDetailSection({
 			)}
 			{hasFallback && (
 				<div>
-					<div className="font-medium mb-1">
+					<div className="font-medium mb-tight">
 						Outside this window ({fallback.length})
 					</div>
-					<div className="text-muted-foreground mb-1">
+					<div className="text-muted-foreground mb-tight">
 						Providers without this rolling window, including pay-as-you-go
 						accounts, are not included in the average.
 					</div>
@@ -477,7 +479,7 @@ export function PoolDetailSection({
 			)}
 			{earliestResetMs != null && (
 				<div>
-					<div className="font-medium mb-1">Next checkpoint</div>
+					<div className="font-medium mb-tight">Next checkpoint</div>
 					<div>
 						{checkpointLabel(earliestResetMs, earliestResetAccountName, window)}
 					</div>
@@ -555,7 +557,7 @@ export function PoolMetricCard({
 			    Passing the padding explicitly is what lets tailwind-merge cancel
 			    that `pt-0`. */}
 			<CardContent className="p-4">
-				<div className="flex items-center justify-between gap-item mb-1.5">
+				<div className="flex items-center justify-between gap-item mb-tight">
 					<div className="flex items-center gap-item min-w-0">
 						<Icon className="h-4 w-4 shrink-0 text-muted-foreground/40" />
 						<p className="text-sm text-muted-foreground truncate">{title}</p>
@@ -613,7 +615,7 @@ export function PoolMetricCard({
 					)}
 				</div>
 				{inlineDetails && showChip && (
-					<div className="mt-3 pt-3 border-t border-border/50 text-xs">
+					<div className="mt-row pt-row border-t border-border/50 text-xs">
 						<PoolDetailSection result={result} window={window} />
 					</div>
 				)}

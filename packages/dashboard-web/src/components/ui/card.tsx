@@ -17,6 +17,11 @@ import { cn } from "../../lib/utils";
  * card WITHOUT a header, which is every metric tile, rendered with zero top
  * padding and its content jammed against the border.
  *
+ * The same exemption holds wherever a call site's padding has to CANCEL a
+ * primitive's own — `p-2` on a `PopoverContent` (`p-4`), `px-2` on a `sm`
+ * Button (`px-3`). Those stay numeric too, and say so where they sit. Padding
+ * that competes with nothing is spelled on the scale like everything else.
+ *
  * There is deliberately no hover lift anywhere: geometry that moves under the
  * cursor is noise on a page whose job is reporting throttling state.
  */

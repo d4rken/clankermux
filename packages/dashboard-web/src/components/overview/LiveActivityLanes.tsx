@@ -234,7 +234,7 @@ export function LiveActivityLanesView({
 
 	return (
 		<Card>
-			<CardHeader className="p-4 pb-2">
+			<CardHeader className="p-4 pb-item">
 				{/* The selector is anchored to the card's top-right corner rather than
 				    trailing the readouts: `active` and `req/min` change width every
 				    tick, and a control at the end of that row would shift under the
@@ -281,9 +281,9 @@ export function LiveActivityLanesView({
 					</span>
 				</div>
 			</CardHeader>
-			<CardContent className="p-4 pt-2">
+			<CardContent className="p-4 pt-item">
 				{lanes.length === 0 ? (
-					<p className="py-6 text-center text-sm text-muted-foreground">
+					<p className="py-section text-center text-sm text-muted-foreground">
 						{primed
 							? "No requests in the last few minutes."
 							: "Waiting for the request stream…"}
@@ -495,7 +495,7 @@ export function LiveActivityLanesView({
 							    set by pointer movement as well as by focus, so growing the
 							    column by a line of text on hover would shove everything
 							    below the card down and back on every pass over a mark. */}
-								<div className="mt-1 h-4">
+								<div className="mt-tight h-4">
 									{selected && (
 										<a
 											href={requestDetailsHref(selected.id)}
@@ -576,7 +576,7 @@ function ModelLegend({
 	if (models.length === 0 && ranking.otherModels === 0) return null;
 
 	return (
-		<ul className="mt-2 flex flex-wrap items-center gap-x-row gap-y-item border-t pt-2 text-xs text-muted-foreground">
+		<ul className="mt-item flex flex-wrap items-center gap-x-row gap-y-item border-t pt-item text-xs text-muted-foreground">
 			{models.map((shortName) => (
 				<li key={shortName} className="flex items-center gap-item">
 					<span
@@ -649,7 +649,7 @@ function WindowSelector({
 			// element. `min-w-0` undoes the UA's min-inline-size; `shrink-0`
 			// then keeps the four options at full width in the header's flex
 			// row, so the description column absorbs any narrowing instead.
-			className="flex min-w-0 shrink-0 items-center gap-tight rounded-md border p-0.5"
+			className="flex min-w-0 shrink-0 items-center gap-tight rounded-md border p-tight"
 			aria-label="Live activity time range"
 		>
 			{LIVE_WINDOW_OPTIONS.map((option) => {
@@ -660,7 +660,7 @@ function WindowSelector({
 						type="button"
 						onClick={() => onChange(option.ms)}
 						aria-pressed={active}
-						className={`rounded px-1.5 py-0.5 text-xs tabular-nums transition-colors ${
+						className={`rounded px-item py-tight text-xs tabular-nums transition-colors ${
 							active
 								? "bg-primary text-primary-foreground"
 								: "text-muted-foreground hover:bg-muted"
@@ -1284,7 +1284,7 @@ function MarkTooltip({ event }: { event: LiveEvent }) {
 		<div
 			role="status"
 			aria-live="polite"
-			className="pointer-events-none absolute right-4 top-4 z-10 rounded-md border bg-popover/95 px-3 py-2 text-xs shadow-overlay backdrop-blur"
+			className="pointer-events-none absolute right-4 top-4 z-10 rounded-md border bg-popover/95 px-row py-item text-xs shadow-overlay backdrop-blur"
 		>
 			<div className="flex items-baseline gap-item">
 				<span className="text-sm font-semibold tabular-nums">
@@ -1292,7 +1292,7 @@ function MarkTooltip({ event }: { event: LiveEvent }) {
 				</span>
 				<span className="text-muted-foreground">tokens</span>
 			</div>
-			<dl className="mt-1 space-y-tight text-muted-foreground">
+			<dl className="mt-tight space-y-tight text-muted-foreground">
 				<Row label="Status" value={STATUS_LABEL[event.status]} />
 				{event.durationMs !== null && (
 					<Row
@@ -1305,7 +1305,7 @@ function MarkTooltip({ event }: { event: LiveEvent }) {
 				<Row label="Project" value={event.project ?? "(no project)"} />
 				<Row label="At" value={new Date(event.ts).toLocaleTimeString()} />
 			</dl>
-			<p className="mt-1 text-muted-foreground">Click to open details</p>
+			<p className="mt-tight text-muted-foreground">Click to open details</p>
 		</div>
 	);
 }

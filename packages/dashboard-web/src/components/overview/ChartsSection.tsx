@@ -140,7 +140,7 @@ export function ChartsSection({
 								paddingAngle={5}
 							/>
 						)}
-						<div className="mt-3 space-y-item">
+						<div className="mt-row space-y-item">
 							{modelData.map((model, index) => (
 								<div
 									key={model.name}
@@ -184,7 +184,7 @@ export function ChartsSection({
 								paddingAngle={5}
 							/>
 						)}
-						<div className="mt-3 space-y-item">
+						<div className="mt-row space-y-item">
 							{accountUsageDonutData.map((account, index) => {
 								const models = accountModelBreakdown.get(account.name) ?? [];
 								return (
@@ -205,6 +205,11 @@ export function ChartsSection({
 											<span className="font-medium">{account.value}</span>
 										</div>
 										{models.length > 1 && (
+											// `pl-5` is an ALIGNMENT, not a rhythm step, so it stays
+											// off the scale: 20px is the account row's swatch (12px)
+											// plus its `gap-item` (8px), which is what puts these
+											// per-model lines under the account NAME rather than
+											// under its dot.
 											<div className="pl-5 space-y-tight">
 												{models.map((m) => (
 													<div
@@ -249,7 +254,7 @@ export function ChartsSection({
 								]}
 							/>
 						)}
-						<div className="mt-3 space-y-item">
+						<div className="mt-row space-y-item">
 							{projectDonutData.map((project, index) => (
 								<div
 									key={project.name}

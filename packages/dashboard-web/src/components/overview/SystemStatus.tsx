@@ -108,12 +108,12 @@ export function SystemStatus() {
 
 				<div className="grid grid-cols-2 gap-group">
 					{/* Uptime */}
-					<div className="rounded-lg border p-3">
+					<div className="rounded-lg border p-row">
 						<div className="flex items-center gap-item text-sm text-muted-foreground">
 							<Clock className="h-4 w-4" />
 							Uptime
 						</div>
-						<p className="mt-1 text-lg font-semibold tabular-nums">
+						<p className="mt-tight text-lg font-semibold tabular-nums">
 							{formatUptime(uptime_s)}
 						</p>
 					</div>
@@ -122,7 +122,7 @@ export function SystemStatus() {
 					    blocked main thread freezes all HTTP serving, so this is the
 					    primary stall signal. Memory lives in the Memory Usage chart
 					    further down this page. */}
-					<div className="rounded-lg border p-3">
+					<div className="rounded-lg border p-row">
 						<div className="flex items-center justify-between text-sm text-muted-foreground">
 							<span className="flex items-center gap-item">
 								<Activity className="h-4 w-4" />
@@ -141,7 +141,7 @@ export function SystemStatus() {
 								aria-hidden
 							/>
 						</div>
-						<p className="mt-1 text-lg font-semibold tabular-nums">
+						<p className="mt-tight text-lg font-semibold tabular-nums">
 							{formatLagMs(eventLoop?.lastLagMs)}
 						</p>
 						<p className="text-xs text-muted-foreground tabular-nums">

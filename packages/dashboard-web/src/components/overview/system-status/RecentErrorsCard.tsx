@@ -72,6 +72,10 @@ export function RecentErrorsCard() {
 							<Button
 								variant="ghost"
 								size="sm"
+								// Numeric padding: it has to CANCEL the `sm` variant's own
+								// `px-3`, and tailwind-merge only does that against a
+								// padding utility it recognises — `px-item` would leave
+								// `px-3` live and change nothing.
 								className="h-8 px-2 text-xs text-muted-foreground hover:text-foreground"
 								aria-label={`Dismiss all ${visibleErrors.length} error ${visibleErrors.length === 1 ? "group" : "groups"} in ${WINDOW_PHRASES[windowKey]}`}
 								onClick={() => dismissMany(visibleErrors)}
