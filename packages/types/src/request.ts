@@ -44,6 +44,24 @@ export type ProjectAttributionSource =
  * columns; NULL = "composition not recorded" (old rows, parse failures,
  * non-messages endpoints), while 0 is a valid recorded value.
  */
+/**
+ * Cache-measurement capture: prompt-cache prefix identity for one request,
+ * computed at ingest by packages/proxy/src/cache-prefix-hash.ts (the layout,
+ * chain design, and join semantics are documented there). Persisted as JSON in
+ * the nullable requests.cache_prefix_hashes column; consumed only by offline
+ * analysis.
+ */
+export interface CachePrefixCapture {
+	/** Shape version; bumped on any change to the hash layout. */
+	v: 2;
+	/** Breakpoint-chain digests (16-hex each), walk order, capped at 8. */
+	bp: string[];
+	/** Total number of messages walked. */
+	n: number;
+	/** Message-chain digests at the last ≤16 message ends, oldest first. */
+	tail: string[];
+}
+
 export interface ContextComposition {
 	/** System prompt: string length or summed text-block lengths. */
 	systemChars: number;

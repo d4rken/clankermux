@@ -1,5 +1,6 @@
 import type { ProjectPathOverride } from "./project-rules";
 import type {
+	CachePrefixCapture,
 	ContextComposition,
 	ProjectAttributionSource,
 	ToolCallStat,
@@ -67,7 +68,7 @@ export interface RequestMeta {
 	 * (other endpoints, no ephemeral cache_control breakpoints, unparseable
 	 * body). Threaded to the recorder like `contextComposition`.
 	 */
-	cachePrefixHashes?: string[] | null;
+	cachePrefixHashes?: CachePrefixCapture | null;
 	headers?: Headers;
 	/** True only for in-process scheduler/probe requests, never from client headers */
 	internal?: boolean;

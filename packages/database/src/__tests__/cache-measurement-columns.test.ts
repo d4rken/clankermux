@@ -78,13 +78,18 @@ describe("requests cache-measurement columns", () => {
 		await repo.save(
 			requestData({
 				sessionKey: "key1:abc-session",
-				cachePrefixHashes: ["aaaaaaaaaaaaaaaa", "bbbbbbbbbbbbbbbb"],
+				cachePrefixHashes: {
+					v: 2,
+					bp: ["aaaaaaaaaaaaaaaa", "bbbbbbbbbbbbbbbb"],
+					n: 3,
+					tail: ["cccccccccccccccc"],
+				},
 			}),
 		);
 		const row = readRow(db);
 		expect(row?.session_key).toBe("key1:abc-session");
 		expect(row?.cache_prefix_hashes).toBe(
-			'["aaaaaaaaaaaaaaaa","bbbbbbbbbbbbbbbb"]',
+			'{"v":2,"bp":["aaaaaaaaaaaaaaaa","bbbbbbbbbbbbbbbb"],"n":3,"tail":["cccccccccccccccc"]}',
 		);
 	});
 
@@ -99,44 +104,78 @@ describe("requests cache-measurement columns", () => {
 		await repo.save(
 			requestData({
 				sessionKey: "anon:s1",
-				cachePrefixHashes: ["cccccccccccccccc"],
+				cachePrefixHashes: {
+					v: 2,
+					bp: ["cccccccccccccccc"],
+					n: 1,
+					tail: ["dddddddddddddddd"],
+				},
 			}),
 		);
 		await repo.save(requestData());
 		const row = readRow(db);
 		expect(row?.session_key).toBe("anon:s1");
-		expect(row?.cache_prefix_hashes).toBe('["cccccccccccccccc"]');
+		expect(row?.cache_prefix_hashes).toBe(
+			'{"v":2,"bp":["cccccccccccccccc"],"n":1,"tail":["dddddddddddddddd"]}',
+		);
 	});
 
 	it("supports the offline-analysis JSON1 expressions on a stored row", async () => {
+		// The position-aligned join the analysis runs: the digest of the whole
+		// message prefix is tail[#-1]; the digest at 0-based message index i is
+		// tail[i - (n - len(tail))] when the window still covers it.
 		await repo.save(
 			requestData({
 				sessionKey: "anon:s1",
-				cachePrefixHashes: [
-					"aaaaaaaaaaaaaaaa",
-					"bbbbbbbbbbbbbbbb",
-					"cccccccccccccccc",
-				],
+				cachePrefixHashes: {
+					v: 2,
+					bp: ["aaaaaaaaaaaaaaaa"],
+					n: 20,
+					tail: ["bbbbbbbbbbbbbbbb", "cccccccccccccccc"],
+				},
 			}),
 		);
 		const derived = db
 			.query(
-				`SELECT json_array_length(cache_prefix_hashes) AS n,
-				        json_extract(cache_prefix_hashes, '$[#-1]') AS last_hash
+				`SELECT json_extract(cache_prefix_hashes, '$.v') AS v,
+				        json_extract(cache_prefix_hashes, '$.n') AS n,
+				        json_array_length(cache_prefix_hashes, '$.tail') AS tail_len,
+				        json_extract(cache_prefix_hashes, '$.tail[#-1]') AS last_tail
 				 FROM requests WHERE id = 'req-1'`,
 			)
-			.get() as { n: number; last_hash: string };
-		expect(derived.n).toBe(3);
-		expect(derived.last_hash).toBe("cccccccccccccccc");
+			.get() as { v: number; n: number; tail_len: number; last_tail: string };
+		expect(derived.v).toBe(2);
+		expect(derived.n).toBe(20);
+		expect(derived.tail_len).toBe(2);
+		expect(derived.last_tail).toBe("cccccccccccccccc");
 
-		const contained = db
+		// Aligned lookup at message index 18 (n=20, window of 2 covers 18..19).
+		const aligned = db
 			.query(
-				`SELECT EXISTS (
-				   SELECT 1 FROM requests, json_each(requests.cache_prefix_hashes)
-				   WHERE requests.id = 'req-1' AND json_each.value = ?
-				 ) AS hit`,
+				`SELECT json_extract(cache_prefix_hashes,
+				          '$.tail[' || (18 - (json_extract(cache_prefix_hashes,'$.n')
+				            - json_array_length(cache_prefix_hashes,'$.tail'))) || ']') AS h
+				 FROM requests WHERE id = 'req-1'`,
 			)
-			.get("bbbbbbbbbbbbbbbb") as { hit: number };
-		expect(contained.hit).toBe(1);
+			.get() as { h: string };
+		expect(aligned.h).toBe("bbbbbbbbbbbbbbbb");
+
+		// Out-of-window lookup (index 17 with a 2-deep tail covering 18..19):
+		// the guarded form returns NULL — the pair is UNMEASURABLE, not
+		// diverged. The unguarded '$.tail[-1]' path would be a JSON1 error, so
+		// the analysis SQL must always carry this CASE guard.
+		const outOfWindow = db
+			.query(
+				`SELECT CASE
+				   WHEN 17 >= json_extract(cache_prefix_hashes,'$.n')
+				          - json_array_length(cache_prefix_hashes,'$.tail')
+				   THEN json_extract(cache_prefix_hashes,
+				          '$.tail[' || (17 - (json_extract(cache_prefix_hashes,'$.n')
+				            - json_array_length(cache_prefix_hashes,'$.tail'))) || ']')
+				   ELSE NULL END AS h
+				 FROM requests WHERE id = 'req-1'`,
+			)
+			.get() as { h: string | null };
+		expect(outOfWindow.h).toBeNull();
 	});
 });

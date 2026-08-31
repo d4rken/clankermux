@@ -677,8 +677,10 @@ describe("handleProxy prologue wiring", () => {
 			expect(res.status).toBe(200);
 			expect(recorded).toHaveLength(1);
 			expect(recorded[0].sessionKey).toBe(`anon:${SESSION_ID}`);
-			expect(recorded[0].cachePrefixHashes).toHaveLength(1);
-			expect(recorded[0].cachePrefixHashes?.[0]).toMatch(/^[0-9a-f]{16}$/);
+			expect(recorded[0].cachePrefixHashes?.v).toBe(2);
+			expect(recorded[0].cachePrefixHashes?.bp).toHaveLength(1);
+			expect(recorded[0].cachePrefixHashes?.bp[0]).toMatch(/^[0-9a-f]{16}$/);
+			expect(recorded[0].cachePrefixHashes?.n).toBe(1);
 		});
 
 		it("records null hashes for a non-/v1/messages path", async () => {
