@@ -1,6 +1,6 @@
 import { useQueryClient } from "@tanstack/react-query";
 import { AlertCircle, Crosshair, Plus } from "lucide-react";
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { type Account, api } from "../api";
 import {
 	useAccounts,
@@ -91,6 +91,12 @@ export function AccountsTab() {
 		accountName: "",
 		confirmInput: "",
 	});
+	const [isDeleting, setIsDeleting] = useState(false);
+	// Which account the delete dialog is currently about. A ref rather than only
+	// state because handleConfirmDelete has to read it AFTER an await: the dialog
+	// can be reopened for a different account while a removal is in flight, and
+	// the first request's completion must not close or error against the second.
+	const deleteTargetRef = useRef("");
 	const [renameDialog, setRenameDialog] = useState<{
 		isOpen: boolean;
 		account: Account | null;
@@ -355,6 +361,7 @@ export function AccountsTab() {
 	};
 
 	const handleRemoveAccount = (account: Account) => {
+		deleteTargetRef.current = account.id;
 		setConfirmDelete({
 			show: true,
 			accountId: account.id,
@@ -371,22 +378,27 @@ export function AccountsTab() {
 			return;
 		}
 
+		// Captured at call time: everything after the await must belong to THIS
+		// account, or a removal that was dismissed and followed by a second one
+		// closes the second dialog and reports the first account's error against it.
+		const { accountId, confirmInput } = confirmDelete;
+		setIsDeleting(true);
 		try {
 			// Keyed by id; the typed name travels as the confirm string.
-			await api.removeAccount(
-				confirmDelete.accountId,
-				confirmDelete.confirmInput,
-			);
+			await api.removeAccount(accountId, confirmInput);
 			await loadAccounts();
-			setConfirmDelete({
-				show: false,
-				accountId: "",
-				accountName: "",
-				confirmInput: "",
-			});
+			if (deleteTargetRef.current !== accountId) return;
+			// Only `show` is cleared. Radix keeps closed content mounted for the exit
+			// animation, so wiping the name and the typed confirmation here would
+			// animate out an empty dialog. The payload is overwritten by the next
+			// deletion instead.
+			setConfirmDelete((prev) => ({ ...prev, show: false }));
 			setActionError(null);
 		} catch (err) {
+			if (deleteTargetRef.current !== accountId) return;
 			setActionError(formatError(err));
+		} finally {
+			setIsDeleting(false);
 		}
 	};
 
@@ -759,28 +771,25 @@ export function AccountsTab() {
 				</CardContent>
 			</Card>
 
-			{confirmDelete.show && (
-				<DeleteConfirmationDialog
-					accountName={confirmDelete.accountName}
-					confirmInput={confirmDelete.confirmInput}
-					onConfirmInputChange={(value) =>
-						setConfirmDelete({
-							...confirmDelete,
-							confirmInput: value,
-						})
-					}
-					onConfirm={handleConfirmDelete}
-					onCancel={() => {
-						setConfirmDelete({
-							show: false,
-							accountId: "",
-							accountName: "",
-							confirmInput: "",
-						});
-						setActionError(null);
-					}}
-				/>
-			)}
+			{/* Rendered unconditionally so Radix owns mount/unmount and the exit
+			    animation runs. */}
+			<DeleteConfirmationDialog
+				isOpen={confirmDelete.show}
+				accountName={confirmDelete.accountName}
+				confirmInput={confirmDelete.confirmInput}
+				isDeleting={isDeleting}
+				onConfirmInputChange={(value) =>
+					setConfirmDelete({
+						...confirmDelete,
+						confirmInput: value,
+					})
+				}
+				onConfirm={handleConfirmDelete}
+				onClose={() => {
+					setConfirmDelete((prev) => ({ ...prev, show: false }));
+					setActionError(null);
+				}}
+			/>
 
 			{renameDialog.isOpen && renameDialog.account && (
 				<RenameAccountDialog
