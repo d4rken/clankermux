@@ -130,7 +130,17 @@ export function ensureSchema(db: Database): void {
 			-- async writer drains), so it lags the moment the usage was actually
 			-- true by the response duration plus queue depth. NULL = no usable
 			-- usage ever arrived (waived, or a summary carrying no model).
-			usage_finalized_at INTEGER
+			usage_finalized_at INTEGER,
+			-- Cache-measurement capture (passive; consumed only by offline SQL).
+			-- session_key: "<apiKeyId|anon>:<Claude Code session uuid>" from the
+			-- body's metadata.user_id. cache_prefix_hashes: JSON array of <=8
+			-- 16-hex chained prompt-cache prefix digests, one per ephemeral
+			-- cache_control breakpoint (see packages/proxy/src/cache-prefix-hash.ts).
+			-- NULL = not computed / pre-column row. If keepalive replays ever run
+			-- again they replay a staged body and would carry the SAME key and
+			-- hashes — exclude synthetic traffic when analyzing.
+			session_key TEXT,
+			cache_prefix_hashes TEXT
 		)
 	`);
 
@@ -1299,6 +1309,21 @@ export const ADDITIVE_COLUMNS: ReadonlyArray<{
 		table: "unified_claim_observations",
 		column: "surpassed_threshold",
 		ddl: "ALTER TABLE unified_claim_observations ADD COLUMN surpassed_threshold REAL",
+	},
+	// Cache-measurement capture (see the requests CREATE TABLE comment):
+	// Claude Code session identity + per-breakpoint prompt-cache prefix
+	// digests, recorded so the keepalive-retry question can be answered
+	// offline. NULL on pre-column rows and on requests without a session id /
+	// without cache breakpoints.
+	{
+		table: "requests",
+		column: "session_key",
+		ddl: "ALTER TABLE requests ADD COLUMN session_key TEXT",
+	},
+	{
+		table: "requests",
+		column: "cache_prefix_hashes",
+		ddl: "ALTER TABLE requests ADD COLUMN cache_prefix_hashes TEXT",
 	},
 ];
 

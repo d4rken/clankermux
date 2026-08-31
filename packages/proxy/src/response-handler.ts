@@ -516,6 +516,10 @@ export interface ResponseHandlerOptions {
 	toolCallStats?: ToolCallStat[] | null;
 	/** Per-request reasoning effort (see RequestMeta.reasoningEffort). */
 	reasoningEffort?: string | null;
+	/** Cache-measurement session identity (see RequestMeta.sessionKey). */
+	sessionKey?: string | null;
+	/** Cache-measurement prefix digests (see RequestMeta.cachePrefixHashes). */
+	cachePrefixHashes?: string[] | null;
 	response: Response;
 	timestamp: number;
 	retryAttempt: number;
@@ -624,6 +628,8 @@ async function forwardToClientInner(
 		contextComposition,
 		toolCallStats,
 		reasoningEffort,
+		sessionKey,
+		cachePrefixHashes,
 		response: responseRaw,
 		timestamp,
 		retryAttempt, // Always 0 in new flow, but kept for message compatibility
@@ -770,6 +776,8 @@ async function forwardToClientInner(
 			contextComposition: contextComposition ?? null,
 			toolCallStats: toolCallStats ?? null,
 			reasoningEffort: reasoningEffort ?? null,
+			sessionKey: sessionKey ?? null,
+			cachePrefixHashes: cachePrefixHashes ?? null,
 			routing: routingRecord,
 			timestamp,
 			requestBody:

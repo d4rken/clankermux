@@ -640,4 +640,60 @@ describe("handleProxy prologue wiring", () => {
 			]);
 		});
 	});
+
+	describe("cache-measurement capture", () => {
+		const SESSION_ID = "11111111-2222-3333-4444-555555555555";
+		const CAPTURE_BODY = {
+			model: MODEL,
+			system: [
+				{ type: "text", text: "You are a test assistant." },
+				{
+					type: "text",
+					text: "cached tail",
+					cache_control: { type: "ephemeral" },
+				},
+			],
+			messages: [{ role: "user", content: "hello" }],
+			max_tokens: 16,
+			metadata: {
+				user_id: JSON.stringify({
+					device_id: "device-1",
+					account_uuid: "",
+					session_id: SESSION_ID,
+				}),
+			},
+		};
+
+		it("threads sessionKey and cachePrefixHashes to the recorded row", async () => {
+			globalThis.fetch = upstreamOnlyFetch();
+			const { ctx, recorded } = makeHarness([makeAccount()]);
+
+			const res = await callHandleProxy(
+				jsonRequest("/v1/messages", CAPTURE_BODY),
+				new URL("https://proxy.local/v1/messages"),
+				ctx,
+			);
+
+			expect(res.status).toBe(200);
+			expect(recorded).toHaveLength(1);
+			expect(recorded[0].sessionKey).toBe(`anon:${SESSION_ID}`);
+			expect(recorded[0].cachePrefixHashes).toHaveLength(1);
+			expect(recorded[0].cachePrefixHashes?.[0]).toMatch(/^[0-9a-f]{16}$/);
+		});
+
+		it("records null hashes for a non-/v1/messages path", async () => {
+			globalThis.fetch = upstreamOnlyFetch();
+			const { ctx, recorded } = makeHarness([makeAccount()]);
+
+			const res = await callHandleProxy(
+				jsonRequest("/v1/complete", CAPTURE_BODY),
+				new URL("https://proxy.local/v1/complete"),
+				ctx,
+			);
+
+			expect(res.status).toBe(200);
+			expect(recorded).toHaveLength(1);
+			expect(recorded[0].cachePrefixHashes).toBeNull();
+		});
+	});
 });

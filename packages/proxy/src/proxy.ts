@@ -543,6 +543,8 @@ async function handleIngestedProxy(
 			project: project ?? null,
 			projectAttributionSource,
 			reasoningEffort: requestMeta.reasoningEffort ?? null,
+			sessionKey: requestMeta.sessionKey ?? null,
+			cachePrefixHashes: requestMeta.cachePrefixHashes ?? null,
 			routing: requestMeta.routing
 				? {
 						strategy: requestMeta.routing.strategy,

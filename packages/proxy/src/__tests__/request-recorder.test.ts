@@ -35,6 +35,8 @@ interface SaveRequestCall {
 	reasoningEffort: string | null | undefined;
 	requestedModel: string | null | undefined;
 	projectAttributionSource: string | null | undefined;
+	sessionKey: string | null | undefined;
+	cachePrefixHashes: string[] | null | undefined;
 }
 
 type EnqueuedKind = "request" | "routing" | "tool_calls" | "payload";
@@ -86,6 +88,8 @@ class FakeDbOps {
 		requestedModel?: string | null;
 		projectAttributionSource: string | null;
 		usageFinalizedAt?: number | null;
+		sessionKey?: string | null;
+		cachePrefixHashes?: string[] | null;
 	}): Promise<void> {
 		this.order.push("request");
 		if (this.failSaveRequest) throw new Error("saveRequest failed");
@@ -109,6 +113,8 @@ class FakeDbOps {
 			requestedModel: data.requestedModel,
 			projectAttributionSource: data.projectAttributionSource,
 			usageFinalizedAt: data.usageFinalizedAt,
+			sessionKey: data.sessionKey,
+			cachePrefixHashes: data.cachePrefixHashes,
 		});
 	}
 
@@ -1448,6 +1454,39 @@ describe("RequestRecorder — projectAttributionSource threading", () => {
 			meta: Record<string, unknown>;
 		};
 		expect(env.meta.projectAttributionSource).toBeUndefined();
+	});
+});
+
+describe("RequestRecorder — cache-measurement threading", () => {
+	it("persists sessionKey and cachePrefixHashes from the meta", async () => {
+		const h = makeHarness();
+		h.recorder.begin(
+			makeMeta({
+				sessionKey: "anon:11111111-2222-3333-4444-555555555555",
+				cachePrefixHashes: ["aaaaaaaaaaaaaaaa", "bbbbbbbbbbbbbbbb"],
+			}),
+		);
+		h.recorder.attachUsageSummary("req-1", makeSummary());
+		h.recorder.finishTransport("req-1", "success");
+		await h.flush();
+
+		const call = h.dbOps.saveRequestCalls[0];
+		expect(call.sessionKey).toBe("anon:11111111-2222-3333-4444-555555555555");
+		expect(call.cachePrefixHashes).toEqual([
+			"aaaaaaaaaaaaaaaa",
+			"bbbbbbbbbbbbbbbb",
+		]);
+	});
+
+	it("writes null when the meta omits both fields", async () => {
+		const h = makeHarness();
+		h.recorder.begin(makeMeta());
+		h.recorder.attachUsageSummary("req-1", makeSummary());
+		h.recorder.finishTransport("req-1", "success");
+		await h.flush();
+
+		expect(h.dbOps.saveRequestCalls[0].sessionKey).toBeNull();
+		expect(h.dbOps.saveRequestCalls[0].cachePrefixHashes).toBeNull();
 	});
 });
 
