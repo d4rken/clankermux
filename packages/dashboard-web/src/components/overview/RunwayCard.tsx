@@ -244,6 +244,13 @@ export function RunwayCard({
 					: null) ?? "—"
 			}
 			caption={caption}
+			// The strip is why THIS tile is the one that outgrows MetricCard's
+			// reserved height: it exists only once the read resolves, as do the
+			// evidence sub-rows below (unobserved, margin, assumed credits), and
+			// which of those exist is itself part of what resolved. The floor keeps
+			// the three tiles beside it still; this one grows into the row they
+			// share, which is the deliberate trade — the alternative is reserving
+			// the tallest possible runway tile on every Overview load.
 			afterValue={
 				<RunwayHorizonStrip
 					exhaustsAtMs={exhaustsAtMs}

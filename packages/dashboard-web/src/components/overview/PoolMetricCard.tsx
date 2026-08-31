@@ -555,8 +555,23 @@ export function PoolMetricCard({
 			{/* p-4, not the bare default: CardContent ships `pt-0` so a header and a
 			    body do not double their facing edges, and this card has no header.
 			    Passing the padding explicitly is what lets tailwind-merge cancel
-			    that `pt-0`. */}
-			<CardContent className="p-4">
+			    that `pt-0`.
+
+			    The floor is the common RESOLVED tile, summed from its own line
+			    boxes so the ordinary pending→resolved transition moves nothing:
+			    1.25rem title row + 0.25rem (mb-tight) + 1.75rem headline
+			    (.figure-xl's pinned line box, which the h-7 skeleton matches)
+			    + 0.25rem + 1rem "capacity used" + 0.25rem + 1rem next-checkpoint
+			    line + 2rem padding = 7.75rem. The checkpoint line is in the sum
+			    because it is what the pending state is missing; it is still only
+			    drawn once resolved.
+
+			    A FLOOR, not a fixed height, and the residual is larger here than
+			    on MetricCard: the stale note, the at-risk line and the
+			    family-weekly line are each conditional on data that a RESOLVED
+			    read may or may not contain, so a resolved tile can legitimately
+			    stand three lines taller than this. */}
+			<CardContent className="p-4 min-h-[7.75rem]">
 				<div className="flex items-center justify-between gap-item mb-tight">
 					<div className="flex items-center gap-item min-w-0">
 						<Icon className="h-4 w-4 shrink-0 text-muted-foreground/40" />

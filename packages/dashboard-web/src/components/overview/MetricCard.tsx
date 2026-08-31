@@ -97,8 +97,22 @@ export function MetricCard({
 			{/* p-4, not the bare default: CardContent ships `pt-0` so a header and a
 			    body do not double their facing edges, and this card has no header.
 			    Passing the padding explicitly is what lets tailwind-merge cancel
-			    that `pt-0`. */}
-			<CardContent className="p-4">
+			    that `pt-0`.
+
+			    The floor is the common RESOLVED tile, summed from its own line
+			    boxes so the ordinary pending→resolved transition moves nothing:
+			    1.25rem title row + 0.25rem (mb-tight) + 1.75rem figure
+			    (.figure-xl's pinned line box, which the h-7 skeleton matches)
+			    + 0.75rem mt-row + 0.75rem pt-row + 1px rule + two 1rem sub-rows
+			    with 0.25rem between + 2rem padding = 9.0625rem.
+
+			    A FLOOR, not a fixed height. A tile that renders every optional
+			    line — a stale note, a third or fourth sub-row, RunwayCard's
+			    horizon strip — grows past it, and in the four-up grid the row then
+			    stretches to the tallest tile. Height cannot be made independent of
+			    resolution state here, because WHICH optional lines exist is itself
+			    part of what resolves. */}
+			<CardContent className="p-4 min-h-[9.0625rem]">
 				<div className="flex items-center justify-between gap-item mb-tight">
 					<div className="flex items-center gap-item min-w-0">
 						<Icon className="h-4 w-4 shrink-0 text-muted-foreground/40" />
