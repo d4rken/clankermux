@@ -286,13 +286,23 @@ export function LiveActivityLanesView({
 			    survives and the body loses its top padding. `max-sm:px-0` hands the
 			    32px of side padding to the plot at phone width, which means EVERY
 			    direct child of this container has to carry its own inset below `sm`
-			    or its contents sit against the card border. Both of them do: the
-			    lane-label gutter takes `pl-item` out of its own 96px, and the model
-			    legend takes `px-item` on its contents while its `border-t` stays
-			    full-width. Anything added here needs the same. */}
+			    or its contents sit against the card border. The children, across
+			    both branches of the ternary:
+
+			      - the empty-state paragraph takes `px-item`, so a line that wraps
+			        under browser font scaling cannot run into the border;
+			      - the plot row needs no inset of its own, because its children
+			        already handle it: the lane-label gutter takes `pl-item` out of
+			        its own 96px, the plot wrapper is full-bleed by design, and the
+			        readout gutter does not render below `sm` at all;
+			      - the model legend takes `px-item` on its contents while its
+			        `border-t` stays full-width.
+
+			    Anything added here needs the same, and this list has to grow with
+			    it. */}
 			<CardContent className="p-4 pt-item max-sm:px-0">
 				{lanes.length === 0 ? (
-					<p className="py-section text-center text-sm text-muted-foreground">
+					<p className="py-section text-center text-sm text-muted-foreground max-sm:px-item">
 						{primed
 							? "No requests in the last few minutes."
 							: "Waiting for the request stream…"}
