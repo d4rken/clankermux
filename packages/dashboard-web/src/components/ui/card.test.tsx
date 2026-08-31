@@ -70,11 +70,9 @@ describe("Card header spacing contract", () => {
 describe("Headerless card padding", () => {
 	it("drops pt-0 when a headerless body passes p-4", () => {
 		// Every metric tile is a Card with no header, so its CardContent has to
-		// restore the top padding the `pt-0` default removes. That only works
-		// while the override is spelled numerically: tailwind-merge cancels
-		// `pt-0` against a padding utility it RECOGNISES, and a custom scale key
-		// (`p-group`) is not one — the class would survive and the tile would
-		// render its figure jammed against the top border.
+		// restore the top padding the `pt-0` default removes. Passing a padding
+		// explicitly is what makes tailwind-merge drop `pt-0`; with no override
+		// at all the tile would render its figure jammed against the top border.
 		const html = renderToStaticMarkup(
 			<Card>
 				<CardContent className="p-4">12,345</CardContent>
