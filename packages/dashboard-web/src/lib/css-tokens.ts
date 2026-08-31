@@ -19,12 +19,10 @@ export type Tokens = Record<string, string>;
 
 export type ColorScheme = "light" | "dark";
 
-export const CSS_PATH = join(import.meta.dir, "../../styles/globals.css");
+const CSS_PATH = join(import.meta.dir, "../../styles/globals.css");
 
 /** The `:root` and `.dark` token blocks, in source order. */
-export function parseBlocks(
-	css: string,
-): Array<{ selector: string; tokens: Tokens }> {
+function parseBlocks(css: string): Array<{ selector: string; tokens: Tokens }> {
 	// Comments can contain braces and colons; strip them before matching.
 	const stripped = css.replace(/\/\*[\s\S]*?\*\//g, "");
 	const blocks: Array<{ selector: string; tokens: Tokens }> = [];
@@ -52,7 +50,7 @@ export function parseBlocks(
  * radius, fonts and spacing are inherited from `:root` — so applying `:root`
  * first and layering `.dark` over it reproduces the cascade exactly.
  */
-export function resolve(
+function resolve(
 	blocks: ReturnType<typeof parseBlocks>,
 	mode: ColorScheme,
 ): Tokens {
