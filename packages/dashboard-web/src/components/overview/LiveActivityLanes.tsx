@@ -284,9 +284,12 @@ export function LiveActivityLanesView({
 			{/* `p-4` stays spelled numerically: it is the tailwind-merge exemption
 			    documented in `card.tsx`, without which `CardContent`'s own `pt-0`
 			    survives and the body loses its top padding. `max-sm:px-0` hands the
-			    32px of side padding to the plot at phone width; the lane-label gutter
-			    takes a small inset of its own there so its text is not against the
-			    card edge. */}
+			    32px of side padding to the plot at phone width, which means EVERY
+			    direct child of this container has to carry its own inset below `sm`
+			    or its contents sit against the card border. Both of them do: the
+			    lane-label gutter takes `pl-item` out of its own 96px, and the model
+			    legend takes `px-item` on its contents while its `border-t` stays
+			    full-width. Anything added here needs the same. */}
 			<CardContent className="p-4 pt-item max-sm:px-0">
 				{lanes.length === 0 ? (
 					<p className="py-section text-center text-sm text-muted-foreground">
@@ -628,7 +631,7 @@ function ModelLegend({
 		// selected-request row and the readout gutter that now sit there too.
 		<ul
 			data-testid="live-legend"
-			className="mt-item flex flex-wrap items-center gap-x-row gap-y-item border-t pt-item text-xs text-muted-foreground"
+			className="mt-item flex flex-wrap items-center gap-x-row gap-y-item border-t pt-item text-xs text-muted-foreground max-sm:px-item"
 		>
 			{models.map((shortName) => (
 				<li key={shortName} className="flex items-center gap-item">
