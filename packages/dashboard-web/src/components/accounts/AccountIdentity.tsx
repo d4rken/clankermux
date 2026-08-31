@@ -68,7 +68,7 @@ export function AccountIdentityLine({
 			{parts.join(" · ")}
 			{externalId && (
 				// The leading margin only makes sense when something precedes the id.
-				<span className={cn(parts.length > 0 && "ml-1", "opacity-60")}>
+				<span className={cn(parts.length > 0 && "ml-tight", "opacity-60")}>
 					#{externalIdDisplay === "full" ? externalId : externalId.slice(0, 8)}
 				</span>
 			)}

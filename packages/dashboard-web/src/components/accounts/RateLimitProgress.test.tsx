@@ -1157,7 +1157,7 @@ describe("RateLimitProgress", () => {
 			expect(html).toContain("sm:grid-cols-2");
 			expect(html).not.toContain("xl:grid-flow-col");
 			// Default card padding stays roomy.
-			expect(html).toContain("rounded-lg border p-3");
+			expect(html).toContain("rounded-lg border p-row");
 		});
 
 		it("flows every window card into one row and tightens padding when compact", () => {
@@ -1174,8 +1174,8 @@ describe("RateLimitProgress", () => {
 			expect(html).toContain("xl:grid-flow-col");
 			expect(html).toContain("xl:auto-cols-fr");
 			expect(html).toContain("xl:grid-cols-none");
-			expect(html).toContain("rounded-lg border p-2");
-			expect(html).not.toContain("rounded-lg border p-3");
+			expect(html).toContain("rounded-lg border p-item");
+			expect(html).not.toContain("rounded-lg border p-row");
 		});
 
 		it("leads the caption with the countdown so truncation eats the date", () => {
@@ -1287,7 +1287,7 @@ describe("RateLimitProgress", () => {
 			expect(html).toContain("5-hour");
 			expect(html).toContain("Weekly");
 			expect(html).toContain("Fable");
-			expect((html.match(/rounded-lg border p-2/g) ?? []).length).toBe(3);
+			expect((html.match(/rounded-lg border p-item/g) ?? []).length).toBe(3);
 		});
 	});
 });

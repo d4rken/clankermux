@@ -187,7 +187,7 @@ function WindowPanel({
 	].filter((note): note is string => note != null);
 
 	return (
-		<section className="flex min-w-0 flex-col p-4" aria-label={title}>
+		<section className="flex min-w-0 flex-col p-group" aria-label={title}>
 			<div className="flex items-center justify-between gap-row">
 				<div className="flex min-w-0 items-center gap-item">
 					<Icon className="h-4 w-4 shrink-0 text-muted-foreground" />
@@ -298,6 +298,9 @@ function WindowPanel({
 				<div className="mt-group space-y-item">
 					{result.atRisk.length > 0 && (
 						<div className="flex items-start gap-item rounded-md border border-warning/30 bg-warning/10 px-row py-item text-xs text-warning-strong">
+							{/* `mt-0.5` stays numeric: an optical nudge to sit the icon on
+							    the text baseline, at 0.125rem — no step on the rhythm
+							    scale, and not a rhythm decision either. */}
 							<AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
 							<span>
 								{result.atRisk.length}{" "}
@@ -315,6 +318,9 @@ function WindowPanel({
 									: "border-warning/30 bg-warning/10 text-warning-strong",
 							)}
 						>
+							{/* `mt-0.5` stays numeric: an optical nudge to sit the icon on
+							    the text baseline, at 0.125rem — no step on the rhythm
+							    scale, and not a rhythm decision either. */}
 							<AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
 							<span>{familyAlert.label}</span>
 						</div>
@@ -420,7 +426,10 @@ function RunwayPanel({
 		worst && stated ? describeRunwayCause(worst.outcome, accounts, now) : null;
 
 	return (
-		<section className="flex min-w-0 flex-col p-4" aria-label="Quota runway">
+		<section
+			className="flex min-w-0 flex-col p-group"
+			aria-label="Quota runway"
+		>
 			<div className="flex items-center justify-between gap-row">
 				<div className="flex min-w-0 items-center gap-item">
 					<Hourglass className="h-4 w-4 shrink-0 text-muted-foreground" />

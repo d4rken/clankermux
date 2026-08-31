@@ -103,7 +103,7 @@ export function AnthropicReauthDialog({
 					</DialogDescription>
 				</DialogHeader>
 
-				<div className="py-4">
+				<div className="py-group">
 					{step === "idle" && (
 						<p className="text-sm text-muted-foreground">
 							Click the button below to start the Anthropic OAuth flow. A

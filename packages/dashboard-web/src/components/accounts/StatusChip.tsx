@@ -25,6 +25,10 @@ export const StatusChip = forwardRef<
 		<span
 			ref={ref}
 			className={cn(
+				// `px-2 py-0.5` stays numeric: 0.125rem is the pill padding the
+				// Substrate mockup specifies and it maps to no step on the rhythm
+				// scale, so there is nothing to convert it TO. Spelling only the
+				// horizontal half on the scale would mix two scales in one string.
 				"inline-flex items-center gap-tight rounded-md px-2 py-0.5 text-xs font-medium whitespace-nowrap",
 				className,
 			)}

@@ -109,7 +109,7 @@ export function AccountRenewalDialog({
 						when it is imminent.
 					</DialogDescription>
 				</DialogHeader>
-				<div className="grid gap-group py-4">
+				<div className="grid gap-group py-group">
 					<div className="grid grid-cols-4 items-center gap-group">
 						<Label htmlFor="renewal-anchor" className="text-right">
 							Date
@@ -156,7 +156,7 @@ export function AccountRenewalDialog({
 								disabled={priceDisabled}
 							/>
 							{priceDisabled && (
-								<p className="mt-1 text-xs text-muted-foreground">
+								<p className="mt-tight text-xs text-muted-foreground">
 									One-time dates aren't auto-recorded — use Record Payment.
 								</p>
 							)}

@@ -653,7 +653,12 @@ export function AccountsTab() {
 	if (loading) {
 		return (
 			<Card>
-				<CardContent className="pt-6">
+				{/* `p-group`, not `pt-group`: this card has no CardHeader, so
+				    CardContent's own `pt-0` would jam the text against the border.
+				    Cancelling it with the full shorthand also makes the padding
+				    symmetric, where the previous `pt-6` gave 1.5rem top against
+				    1rem sides. */}
+				<CardContent className="p-group">
 					<p className="text-muted-foreground">Loading accounts...</p>
 				</CardContent>
 			</Card>
@@ -671,7 +676,7 @@ export function AccountsTab() {
 		<div className="space-y-section">
 			{displayError && (
 				<Card className="border-destructive">
-					<CardContent className="pt-6">
+					<CardContent className="p-group">
 						<div className="flex items-center gap-item">
 							<AlertCircle className="h-4 w-4 text-destructive-strong" />
 							<p className="text-destructive-strong">{displayError}</p>
@@ -682,7 +687,7 @@ export function AccountsTab() {
 
 			{forcedAccountId && (
 				<Card className="border-destructive bg-destructive/10">
-					<CardContent className="pt-6">
+					<CardContent className="p-group">
 						<div className="flex items-start gap-item">
 							<Crosshair className="h-5 w-5 shrink-0 text-destructive-strong" />
 							<p className="text-sm text-destructive-strong">
@@ -706,7 +711,7 @@ export function AccountsTab() {
 						</div>
 						{!adding && (
 							<Button onClick={() => setAdding(true)} size="sm">
-								<Plus className="mr-2 h-4 w-4" />
+								<Plus className="mr-item h-4 w-4" />
 								Add Account
 							</Button>
 						)}

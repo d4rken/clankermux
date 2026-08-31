@@ -93,12 +93,12 @@ const LIVE_USAGE_FRESH_MS = 10 * 60 * 1000;
 // filled-vs-outline distinction reads clearly in BOTH light and dark themes,
 // whereas a mere opacity difference on `bg-muted` is near-invisible in light
 // mode (muted is ~96% lightness, so it barely differs from a white surface).
-const WINDOW_CARD_CLASS = "rounded-lg border p-3";
+const WINDOW_CARD_CLASS = "rounded-lg border p-row";
 // Compact variant: same card, two fewer pixels of padding on every side. Used
 // by the Accounts list, where a dozen accounts stack vertically and the padding
 // is paid once per window card per account. The Limits tab keeps the roomy
 // default — it shows one account's quota at a time and has the space.
-const COMPACT_WINDOW_CARD_CLASS = "rounded-lg border p-2";
+const COMPACT_WINDOW_CARD_CLASS = "rounded-lg border p-item";
 const PRIMARY_WINDOW_TINT = "border-border/60 bg-muted/50";
 const SECONDARY_WINDOW_TINT = "border-border/50 bg-transparent";
 
@@ -849,9 +849,9 @@ export function RateLimitProgress({
 									</PopoverTrigger>
 									<PopoverContent
 										align="start"
-										className="w-auto max-w-xs p-3 text-xs"
+										className="w-auto max-w-xs p-row text-xs"
 									>
-										<p className="mb-1 font-medium">{windowLabel} usage</p>
+										<p className="mb-tight font-medium">{windowLabel} usage</p>
 										<p className={projectionTextClass}>{projection.message}</p>
 									</PopoverContent>
 								</Popover>

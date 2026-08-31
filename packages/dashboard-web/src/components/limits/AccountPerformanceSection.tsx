@@ -152,7 +152,7 @@ export function AccountPerformanceSection({
 				    standalone tiles). The averages below Plan Value are fixed 7d/30d
 				    windows and stay put when the range above changes; the amortized
 				    rows under Cost are likewise range-independent run rates. */}
-				<div className="mb-4 grid grid-cols-2 md:grid-cols-3 gap-group border-b pb-4">
+				<div className="mb-group grid grid-cols-2 md:grid-cols-3 gap-group border-b pb-group">
 					{/* Every figure in this card is a range AGGREGATE — hundreds to
 					    tens of thousands of dollars — so they all take the money
 					    formatter: two decimals, grouped. `formatCost`'s four decimals
@@ -166,7 +166,7 @@ export function AccountPerformanceSection({
 								? formatUsd(costSummary.planCostUsd)
 								: "—"}
 						</p>
-						<div className="mt-2 space-y-tight text-xs">
+						<div className="mt-item space-y-tight text-xs">
 							{planAvgRows.map((row) => (
 								<div
 									key={row.label}
@@ -192,7 +192,7 @@ export function AccountPerformanceSection({
 								? formatUsd(paymentsSummary.range.totalUsd)
 								: "—"}
 						</p>
-						<div className="mt-2 space-y-tight text-xs">
+						<div className="mt-item space-y-tight text-xs">
 							{costAmortizedRows.map((row) => (
 								<div
 									key={row.label}
@@ -213,7 +213,7 @@ export function AccountPerformanceSection({
 						<p className="figure-xl">
 							{formatValueRatio(paymentsSummary?.range.valueRatio)}
 						</p>
-						<p className="mt-2 text-xs text-muted-foreground">
+						<p className="mt-item text-xs text-muted-foreground">
 							plan value ÷ amortized spend
 						</p>
 					</div>
@@ -243,33 +243,53 @@ export function AccountPerformanceSection({
 					/>
 				)}
 				{!analyticsResolved && !unavailable && (
-					<div className="mt-4 space-y-item">
+					<div className="mt-group space-y-item">
 						{[0, 1, 2].map((index) => (
 							<Skeleton key={index} className="h-8 w-full" />
 						))}
 					</div>
 				)}
 				{analyticsResolved && (
-					<div className="mt-4 border rounded-md overflow-hidden">
+					<div className="mt-group border rounded-md overflow-hidden">
+						{/* Column heads are `.label-caps` micro-labels: size, weight,
+						    tracking, uppercase and --muted-foreground in one class. NOT
+						    the <th scope="row"> in <tfoot> — that is a data-row summary
+						    label sitting beside its own font-medium totals, and
+						    shrinking and muting it would make it mimic a column head. */}
 						<table
 							aria-label="Account cost breakdown"
 							className="w-full text-sm"
 						>
 							<thead className="bg-muted/50">
 								<tr>
-									<th scope="col" className="text-left px-3 py-2">
+									<th
+										scope="col"
+										className="label-caps text-left px-row py-item"
+									>
 										Account
 									</th>
-									<th scope="col" className="text-right px-3 py-2">
+									<th
+										scope="col"
+										className="label-caps text-right px-row py-item"
+									>
 										Plan Value
 									</th>
-									<th scope="col" className="text-right px-3 py-2">
+									<th
+										scope="col"
+										className="label-caps text-right px-row py-item"
+									>
 										API Value
 									</th>
-									<th scope="col" className="text-right px-3 py-2">
+									<th
+										scope="col"
+										className="label-caps text-right px-row py-item"
+									>
 										Total
 									</th>
-									<th scope="col" className="text-right px-3 py-2">
+									<th
+										scope="col"
+										className="label-caps text-right px-row py-item"
+									>
 										Sub / mo
 									</th>
 								</tr>
@@ -280,19 +300,19 @@ export function AccountPerformanceSection({
 										const subMonthly = subMonthlyByName.get(row.name);
 										return (
 											<tr key={row.name} className="border-t">
-												<td className="px-3 py-2 text-muted-foreground">
+												<td className="px-row py-item text-muted-foreground">
 													{row.name}
 												</td>
-												<td className="px-3 py-2 text-right">
+												<td className="px-row py-item text-right">
 													{formatUsd(row.planCostUsd)}
 												</td>
-												<td className="px-3 py-2 text-right">
+												<td className="px-row py-item text-right">
 													{formatUsd(row.apiCostUsd)}
 												</td>
-												<td className="px-3 py-2 text-right font-medium">
+												<td className="px-row py-item text-right font-medium">
 													{formatUsd(row.totalCostUsd)}
 												</td>
-												<td className="px-3 py-2 text-right">
+												<td className="px-row py-item text-right">
 													{subMonthly != null ? formatUsd(subMonthly) : "—"}
 												</td>
 											</tr>
@@ -300,7 +320,10 @@ export function AccountPerformanceSection({
 									})
 								) : (
 									<tr className="border-t">
-										<td className="px-3 py-3 text-muted-foreground" colSpan={5}>
+										<td
+											className="px-row py-row text-muted-foreground"
+											colSpan={5}
+										>
 											No cost data
 										</td>
 									</tr>
@@ -308,19 +331,22 @@ export function AccountPerformanceSection({
 							</tbody>
 							<tfoot className="bg-muted/30 border-t">
 								<tr>
-									<th scope="row" className="px-3 py-2 font-medium text-left">
+									<th
+										scope="row"
+										className="px-row py-item font-medium text-left"
+									>
 										Total
 									</th>
-									<td className="px-3 py-2 text-right font-medium">
+									<td className="px-row py-item text-right font-medium">
 										{formatUsd(accountCostTotals.planCostUsd)}
 									</td>
-									<td className="px-3 py-2 text-right font-medium">
+									<td className="px-row py-item text-right font-medium">
 										{formatUsd(accountCostTotals.apiCostUsd)}
 									</td>
-									<td className="px-3 py-2 text-right font-medium">
+									<td className="px-row py-item text-right font-medium">
 										{formatUsd(accountCostTotals.totalCostUsd)}
 									</td>
-									<td className="px-3 py-2 text-right font-medium">
+									<td className="px-row py-item text-right font-medium">
 										{paymentsSummary
 											? formatUsd(paymentsSummary.amortizedMonthlyUsd)
 											: "—"}

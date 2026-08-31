@@ -818,8 +818,13 @@ export function AccountAddForm({
 	};
 
 	return (
-		<div className="space-y-group mb-6 p-4 border rounded-lg">
-			<h4 className="font-medium">
+		<div className="space-y-group mb-section p-group border rounded-lg">
+			{/* A panel heading playing the CardTitle role, so it needs
+			    `.display-face` to pick up the theme's display face and its
+			    --display-tracking. It stays an <h4> rather than becoming a
+			    CardTitle: that would move it to <h3> and change the heading
+			    outline of the page. */}
+			<h4 className="display-face font-medium">
 				{authStep === "form" ? "Add New Account" : "Enter Authorization Code"}
 			</h4>
 			{authStep === "form" && (
@@ -902,7 +907,7 @@ export function AccountAddForm({
 								<Alert title="Waiting for authorization...">
 									<p>Enter this code in the browser tab:</p>
 									<div className="flex items-center gap-item">
-										<code className="text-lg font-mono font-bold tracking-widest bg-info/15 text-foreground px-3 py-1 rounded">
+										<code className="text-lg font-mono font-bold tracking-widest bg-info/15 text-foreground px-row py-tight rounded">
 											{codexUserCode}
 										</code>
 										<a
@@ -953,7 +958,7 @@ export function AccountAddForm({
 								<Alert title="Waiting for authorization...">
 									<p>Enter this code in the browser tab:</p>
 									<div className="flex items-center gap-item">
-										<code className="text-lg font-mono font-bold tracking-widest bg-info/15 text-foreground px-3 py-1 rounded">
+										<code className="text-lg font-mono font-bold tracking-widest bg-info/15 text-foreground px-row py-tight rounded">
 											{qwenUserCode}
 										</code>
 										<a
@@ -1015,7 +1020,7 @@ export function AccountAddForm({
 									Map Anthropic model names to z.ai-specific models. Leave empty
 									to use Claude models directly.
 								</p>
-								<div className="space-y-item pl-4">
+								<div className="space-y-item pl-group">
 									<div>
 										<Label htmlFor="opusModel" className="text-sm">
 											Opus Model
@@ -1030,7 +1035,7 @@ export function AccountAddForm({
 												})
 											}
 											placeholder="e.g. glm-4.5-flash"
-											className="mt-1"
+											className="mt-tight"
 										/>
 									</div>
 									<div>
@@ -1047,7 +1052,7 @@ export function AccountAddForm({
 												})
 											}
 											placeholder="e.g. glm-4.5-flash"
-											className="mt-1"
+											className="mt-tight"
 										/>
 									</div>
 									<div>
@@ -1064,7 +1069,7 @@ export function AccountAddForm({
 												})
 											}
 											placeholder="e.g. glm-4.5-air"
-											className="mt-1"
+											className="mt-tight"
 										/>
 									</div>
 								</div>
@@ -1124,11 +1129,11 @@ export function AccountAddForm({
 							</div>
 							<div className="space-y-item">
 								<Label>Model Mappings (Optional)</Label>
-								<p className="text-xs text-muted-foreground mb-2">
+								<p className="text-xs text-muted-foreground mb-item">
 									Map Anthropic model names to provider-specific models. Leave
 									empty to use defaults.
 								</p>
-								<div className="space-y-item pl-4">
+								<div className="space-y-item pl-group">
 									<div>
 										<Label htmlFor="opusModel" className="text-sm">
 											Opus Model
@@ -1143,7 +1148,7 @@ export function AccountAddForm({
 												})
 											}
 											placeholder="claude-3-opus-20240229 (default)"
-											className="mt-1"
+											className="mt-tight"
 										/>
 									</div>
 									<div>
@@ -1160,7 +1165,7 @@ export function AccountAddForm({
 												})
 											}
 											placeholder="claude-3-sonnet-20240229 (default)"
-											className="mt-1"
+											className="mt-tight"
 										/>
 									</div>
 									<div>
@@ -1177,7 +1182,7 @@ export function AccountAddForm({
 												})
 											}
 											placeholder="claude-3-haiku-20240307 (default)"
-											className="mt-1"
+											className="mt-tight"
 										/>
 									</div>
 								</div>
@@ -1220,11 +1225,11 @@ export function AccountAddForm({
 							</div>
 							<div className="space-y-item">
 								<Label>Model Mappings (Optional)</Label>
-								<p className="text-xs text-muted-foreground mb-2">
+								<p className="text-xs text-muted-foreground mb-item">
 									Map Anthropic model names to provider-specific models. Leave
 									empty to use defaults.
 								</p>
-								<div className="space-y-item pl-4">
+								<div className="space-y-item pl-group">
 									<div>
 										<Label htmlFor="opusModel" className="text-sm">
 											Opus Model
@@ -1239,7 +1244,7 @@ export function AccountAddForm({
 												})
 											}
 											placeholder="openai/gpt-5 (default)"
-											className="mt-1"
+											className="mt-tight"
 										/>
 									</div>
 									<div>
@@ -1256,7 +1261,7 @@ export function AccountAddForm({
 												})
 											}
 											placeholder="openai/gpt-5 (default)"
-											className="mt-1"
+											className="mt-tight"
 										/>
 									</div>
 									<div>
@@ -1273,7 +1278,7 @@ export function AccountAddForm({
 												})
 											}
 											placeholder="openai/gpt-5-mini (default)"
-											className="mt-1"
+											className="mt-tight"
 										/>
 									</div>
 								</div>
@@ -1305,11 +1310,11 @@ export function AccountAddForm({
 							</div>
 							<div className="space-y-item">
 								<Label>Model Mappings (Optional)</Label>
-								<p className="text-xs text-muted-foreground mb-2">
+								<p className="text-xs text-muted-foreground mb-item">
 									Map Anthropic model names to Ollama model names (e.g.
 									qwen3-coder, llama3.3).
 								</p>
-								<div className="space-y-item pl-4">
+								<div className="space-y-item pl-group">
 									<div>
 										<Label htmlFor="opusModel" className="text-sm">
 											Opus Model
@@ -1324,7 +1329,7 @@ export function AccountAddForm({
 												})
 											}
 											placeholder="qwen3-coder (example)"
-											className="mt-1"
+											className="mt-tight"
 										/>
 									</div>
 									<div>
@@ -1341,7 +1346,7 @@ export function AccountAddForm({
 												})
 											}
 											placeholder="qwen3-coder (example)"
-											className="mt-1"
+											className="mt-tight"
 										/>
 									</div>
 									<div>
@@ -1358,7 +1363,7 @@ export function AccountAddForm({
 												})
 											}
 											placeholder="llama3.3 (example)"
-											className="mt-1"
+											className="mt-tight"
 										/>
 									</div>
 								</div>
@@ -1384,11 +1389,11 @@ export function AccountAddForm({
 							</div>
 							<div className="space-y-item">
 								<Label>Model Mappings (Optional)</Label>
-								<p className="text-xs text-muted-foreground mb-2">
+								<p className="text-xs text-muted-foreground mb-item">
 									Map Anthropic model names to Ollama model names (e.g.
 									qwen3-coder, llama3.3).
 								</p>
-								<div className="space-y-item pl-4">
+								<div className="space-y-item pl-group">
 									<div>
 										<Label htmlFor="opusModel" className="text-sm">
 											Opus Model
@@ -1403,7 +1408,7 @@ export function AccountAddForm({
 												})
 											}
 											placeholder="qwen3-coder (example)"
-											className="mt-1"
+											className="mt-tight"
 										/>
 									</div>
 									<div>
@@ -1420,7 +1425,7 @@ export function AccountAddForm({
 												})
 											}
 											placeholder="qwen3-coder (example)"
-											className="mt-1"
+											className="mt-tight"
 										/>
 									</div>
 									<div>
@@ -1437,7 +1442,7 @@ export function AccountAddForm({
 												})
 											}
 											placeholder="llama3.3 (example)"
-											className="mt-1"
+											className="mt-tight"
 										/>
 									</div>
 								</div>

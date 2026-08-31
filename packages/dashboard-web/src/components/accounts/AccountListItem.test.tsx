@@ -130,7 +130,7 @@ describe("AccountListItem — session stats", () => {
 	it("pads the card and separates its four groups by the row step", () => {
 		const html = render(makeAccount({}));
 
-		expect(html).toContain("p-4 border rounded-lg");
+		expect(html).toContain("p-group border rounded-lg");
 		expect(html).toContain("space-y-row border-border");
 	});
 
@@ -212,6 +212,6 @@ describe("AccountListItem — compact quota cards", () => {
 		);
 
 		expect(html).toContain("xl:grid-flow-col");
-		expect(html).toContain("rounded-lg border p-2");
+		expect(html).toContain("rounded-lg border p-item");
 	});
 });

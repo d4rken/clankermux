@@ -111,13 +111,13 @@ export function AccountModelMappingsDialog({
 						models with commas to cycle through them on rate limits.
 					</DialogDescription>
 				</DialogHeader>
-				<div className="space-y-group py-2 overflow-y-auto flex-1">
+				<div className="space-y-group py-item overflow-y-auto flex-1">
 					<div>
-						<h4 className="text-sm font-medium mb-2">Model Mappings</h4>
-						<p className="text-xs text-muted-foreground mb-3">
+						<h4 className="text-sm font-medium mb-item">Model Mappings</h4>
+						<p className="text-xs text-muted-foreground mb-row">
 							Map Anthropic model names to provider-specific models. Use commas
 							for multiple models (e.g.{" "}
-							<code className="text-xs bg-muted px-1 rounded">
+							<code className="text-xs bg-muted px-tight rounded">
 								model-a, model-b
 							</code>
 							) to cycle on rate limits.
@@ -174,7 +174,7 @@ export function AccountModelMappingsDialog({
 						</div>
 					</div>
 				</div>
-				<DialogFooter className="mt-2 shrink-0">
+				<DialogFooter className="mt-item shrink-0">
 					<Button
 						type="button"
 						variant="outline"

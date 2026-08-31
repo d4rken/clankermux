@@ -8,6 +8,10 @@ import { ProviderMarkIcon } from "./provider-marks";
  * status themselves, which is exactly what they must not do. This is the same
  * neutral fill unlisted providers already fell back to.
  */
+// `px-2 py-0.5` stays numeric: 0.125rem is the pill padding the Substrate
+// mockup specifies and it maps to no step on the rhythm scale, so there is
+// nothing to convert it TO. Spelling only the horizontal half on the scale
+// would mix two scales inside one declaration.
 const CHIP_CLASSES =
 	"inline-flex items-center gap-item rounded-full border border-border/60 bg-secondary px-2 py-0.5 text-xs font-medium text-secondary-foreground";
 
