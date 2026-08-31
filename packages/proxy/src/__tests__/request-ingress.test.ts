@@ -211,6 +211,47 @@ describe("ingestProxyRequest", () => {
 			expect(result.context.requestMeta.requestedModel).toBe(MODEL);
 		});
 
+		it("captures sessionKey and cachePrefixHashes on the request meta", async () => {
+			const body = contextBody("11111111-2222-3333-4444-555555555555");
+			(body.system as Record<string, unknown>[])[0].cache_control = {
+				type: "ephemeral",
+			};
+			const result = await ingestProxyRequest(
+				jsonRequest("/v1/messages", body),
+				urlFor("/v1/messages"),
+				makeCtx(),
+				null,
+				false,
+			);
+
+			if (result.kind !== "context") throw new Error("expected a context");
+			expect(result.context.requestMeta.sessionKey).toBe(
+				"anon:11111111-2222-3333-4444-555555555555",
+			);
+			const hashes = result.context.requestMeta.cachePrefixHashes;
+			expect(hashes).toHaveLength(1);
+			expect(hashes?.[0]).toMatch(/^[0-9a-f]{16}$/);
+		});
+
+		it("records null hashes for a breakpoint-less body but keeps the session key", async () => {
+			const result = await ingestProxyRequest(
+				jsonRequest(
+					"/v1/messages",
+					contextBody("11111111-2222-3333-4444-555555555555"),
+				),
+				urlFor("/v1/messages"),
+				makeCtx(),
+				null,
+				false,
+			);
+
+			if (result.kind !== "context") throw new Error("expected a context");
+			expect(result.context.requestMeta.sessionKey).toBe(
+				"anon:11111111-2222-3333-4444-555555555555",
+			);
+			expect(result.context.requestMeta.cachePrefixHashes).toBeNull();
+		});
+
 		it("derives the request metadata from the api key, headers, and internal flag", async () => {
 			const apiKeyId = uniqueId("key");
 			const sessionId = uniqueId("session");

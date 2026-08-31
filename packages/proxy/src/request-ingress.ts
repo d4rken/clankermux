@@ -12,6 +12,7 @@ import {
 	type RequestMeta,
 	setNativeResponsesMetaContext,
 } from "@clankermux/types";
+import { computeCachePrefixHashes } from "./cache-prefix-hash";
 import { injectCacheTtl1h } from "./cache-ttl-injector";
 import { computeContextAndToolStats } from "./context-composition";
 import {
@@ -192,6 +193,14 @@ export async function ingestProxyRequest(
 		req.method === "POST" && url.pathname === "/v1/messages"
 			? computeContextAndToolStats(parsedBody)
 			: { composition: null, toolStats: null };
+	// Cache-measurement capture: per-breakpoint prompt-cache prefix digests,
+	// same gate and parsed body as the composition walk. Invariant to the
+	// injectCacheTtl1h mutation below (cache_control is stripped from the
+	// hashed content), so computing it here is order-independent.
+	const cachePrefixHashes =
+		req.method === "POST" && url.pathname === "/v1/messages"
+			? computeCachePrefixHashes(parsedBody)
+			: null;
 	const affinity = extractRequestAffinity(req.headers);
 
 	// Coarse request-size estimate for the cache-warming session-promotion path
@@ -326,6 +335,10 @@ export async function ingestProxyRequest(
 	requestMeta.requestedModel = effectiveRequestModel ?? null;
 	requestMeta.contextComposition = contextComposition;
 	requestMeta.toolCallStats = toolCallStats;
+	// Cache-measurement capture: session identity (already derived by
+	// resolveProject) + the prefix digests, persisted with the request row.
+	requestMeta.sessionKey = resolved.sessionKey;
+	requestMeta.cachePrefixHashes = cachePrefixHashes;
 	// Per-request reasoning effort, derived once for all failover attempts. The
 	// Codex path's translated Anthropic body loses reasoning.effort, so fall
 	// back to the value captured from the ORIGINAL Responses body (Stage A).

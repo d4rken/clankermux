@@ -825,6 +825,8 @@ export async function proxyUnauthenticated(
 				contextComposition: requestMeta.contextComposition,
 				toolCallStats: requestMeta.toolCallStats,
 				reasoningEffort: requestMeta.reasoningEffort,
+				sessionKey: requestMeta.sessionKey,
+				cachePrefixHashes: requestMeta.cachePrefixHashes,
 				response,
 				timestamp: requestMeta.timestamp,
 				retryAttempt: 0,
@@ -1595,6 +1597,8 @@ export async function proxyWithAccount(
 							requestMeta.projectAttributionSource ?? null,
 						comboName: requestMeta.comboName ?? null,
 						reasoningEffort: requestMeta.reasoningEffort ?? null,
+						sessionKey: requestMeta.sessionKey ?? null,
+						cachePrefixHashes: requestMeta.cachePrefixHashes ?? null,
 					}),
 				);
 				log.warn(
@@ -1750,6 +1754,8 @@ export async function proxyWithAccount(
 								requestMeta.projectAttributionSource ?? null,
 							comboName: requestMeta.comboName ?? null,
 							reasoningEffort: requestMeta.reasoningEffort ?? null,
+							sessionKey: requestMeta.sessionKey ?? null,
+							cachePrefixHashes: requestMeta.cachePrefixHashes ?? null,
 						}),
 					);
 					log.warn(
@@ -1871,6 +1877,8 @@ export async function proxyWithAccount(
 								requestMeta.projectAttributionSource ?? null,
 							comboName: requestMeta.comboName ?? null,
 							reasoningEffort: requestMeta.reasoningEffort ?? null,
+							sessionKey: requestMeta.sessionKey ?? null,
+							cachePrefixHashes: requestMeta.cachePrefixHashes ?? null,
 						}),
 					);
 					log.warn(
@@ -2008,6 +2016,8 @@ export async function proxyWithAccount(
 								requestMeta.projectAttributionSource ?? null,
 							comboName: requestMeta.comboName ?? null,
 							reasoningEffort: requestMeta.reasoningEffort ?? null,
+							sessionKey: requestMeta.sessionKey ?? null,
+							cachePrefixHashes: requestMeta.cachePrefixHashes ?? null,
 						}),
 					);
 					log.warn(
@@ -2128,6 +2138,8 @@ export async function proxyWithAccount(
 									requestMeta.projectAttributionSource ?? null,
 								comboName: requestMeta.comboName ?? null,
 								reasoningEffort: requestMeta.reasoningEffort ?? null,
+								sessionKey: requestMeta.sessionKey ?? null,
+								cachePrefixHashes: requestMeta.cachePrefixHashes ?? null,
 							}),
 						);
 						return await fail({ kind: "hard_429", cooldownUntil }, rawResponse);
@@ -2398,6 +2410,8 @@ export async function proxyWithAccount(
 									requestMeta.projectAttributionSource ?? null,
 								comboName: requestMeta.comboName ?? null,
 								reasoningEffort: requestMeta.reasoningEffort ?? null,
+								sessionKey: requestMeta.sessionKey ?? null,
+								cachePrefixHashes: requestMeta.cachePrefixHashes ?? null,
 							}),
 						);
 					}
@@ -2570,6 +2584,8 @@ export async function proxyWithAccount(
 						contextComposition: requestMeta.contextComposition,
 						toolCallStats: requestMeta.toolCallStats,
 						reasoningEffort: requestMeta.reasoningEffort,
+						sessionKey: requestMeta.sessionKey,
+						cachePrefixHashes: requestMeta.cachePrefixHashes,
 						response,
 						timestamp: requestMeta.timestamp,
 						retryAttempt: 0,
@@ -2647,6 +2663,8 @@ export async function proxyWithAccount(
 						contextComposition: requestMeta.contextComposition,
 						toolCallStats: requestMeta.toolCallStats,
 						reasoningEffort: requestMeta.reasoningEffort,
+						sessionKey: requestMeta.sessionKey,
+						cachePrefixHashes: requestMeta.cachePrefixHashes,
 						response,
 						timestamp: requestMeta.timestamp,
 						retryAttempt: 0,
@@ -2759,6 +2777,8 @@ export async function proxyWithAccount(
 				contextComposition: requestMeta.contextComposition,
 				toolCallStats: requestMeta.toolCallStats,
 				reasoningEffort: requestMeta.reasoningEffort,
+				sessionKey: requestMeta.sessionKey,
+				cachePrefixHashes: requestMeta.cachePrefixHashes,
 				response,
 				timestamp: requestMeta.timestamp,
 				retryAttempt: 0,
@@ -2915,6 +2935,8 @@ export async function proxyForcedAccount(
 				contextComposition: requestMeta.contextComposition,
 				toolCallStats: requestMeta.toolCallStats,
 				reasoningEffort: requestMeta.reasoningEffort,
+				sessionKey: requestMeta.sessionKey,
+				cachePrefixHashes: requestMeta.cachePrefixHashes,
 				response: errorResponse,
 				timestamp: requestMeta.timestamp,
 				retryAttempt: 0,
@@ -3109,6 +3131,8 @@ export async function proxyForcedAccount(
 				contextComposition: requestMeta.contextComposition,
 				toolCallStats: requestMeta.toolCallStats,
 				reasoningEffort: requestMeta.reasoningEffort,
+				sessionKey: requestMeta.sessionKey,
+				cachePrefixHashes: requestMeta.cachePrefixHashes,
 				response,
 				timestamp: requestMeta.timestamp,
 				retryAttempt: 0,

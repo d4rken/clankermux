@@ -108,6 +108,16 @@ export interface RecordMeta {
 	toolCallStats?: ToolCallStat[] | null;
 	/** Per-request reasoning effort (see RequestMeta.reasoningEffort). */
 	reasoningEffort: string | null;
+	/**
+	 * Cache-measurement session identity (see RequestMeta.sessionKey).
+	 * Optional: synthetic/audit rows may omit it and stay NULL.
+	 */
+	sessionKey?: string | null;
+	/**
+	 * Cache-measurement prefix digests (see RequestMeta.cachePrefixHashes).
+	 * Optional: synthetic/audit rows may omit it and stay NULL.
+	 */
+	cachePrefixHashes?: string[] | null;
 	routing: RecordRouting | null;
 	timestamp: number;
 	/** Pre-capped request body copy, or null when not captured / over budget. */
@@ -225,6 +235,10 @@ interface SaveRequestData {
 	 * earliest stamp survives. Null/absent = no usable usage ever arrived.
 	 */
 	usageFinalizedAt?: number | null;
+	/** Cache-measurement session identity — mirrors `RequestData.sessionKey`. */
+	sessionKey?: string | null;
+	/** Cache-measurement prefix digests — mirrors `RequestData.cachePrefixHashes`. */
+	cachePrefixHashes?: string[] | null;
 }
 
 /** Fails to compile unless `T` is exactly `true`. */
@@ -916,6 +930,8 @@ export class RequestRecorder {
 					contextComposition: meta.contextComposition ?? null,
 					requestedModel: meta.requestedModel ?? null,
 					usageFinalizedAt: record.usageFinalizedAt,
+					sessionKey: meta.sessionKey ?? null,
+					cachePrefixHashes: meta.cachePrefixHashes ?? null,
 				});
 				requestRowSaved = true;
 			} catch (error) {

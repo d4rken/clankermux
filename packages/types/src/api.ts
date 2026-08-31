@@ -53,6 +53,21 @@ export interface RequestMeta {
 	 * bodies, null when absent. Derived once in handleProxy.
 	 */
 	reasoningEffort?: string | null;
+	/**
+	 * Cache-measurement capture: `<apiKeyId|anon>:<Claude Code session uuid>`
+	 * from the body's metadata.user_id (same value resolveProject derives for
+	 * session-based project inheritance). Null/absent when the body carried no
+	 * session id. Threaded to the recorder like `project`.
+	 */
+	sessionKey?: string | null;
+	/**
+	 * Cache-measurement capture: per-breakpoint prompt-cache prefix digests
+	 * computed once in handleProxy from the parsed POST /v1/messages body (see
+	 * packages/proxy/src/cache-prefix-hash.ts). Null/absent when not computed
+	 * (other endpoints, no ephemeral cache_control breakpoints, unparseable
+	 * body). Threaded to the recorder like `contextComposition`.
+	 */
+	cachePrefixHashes?: string[] | null;
 	headers?: Headers;
 	/** True only for in-process scheduler/probe requests, never from client headers */
 	internal?: boolean;

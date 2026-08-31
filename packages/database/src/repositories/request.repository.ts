@@ -89,6 +89,15 @@ export interface RequestData {
 	 * so the EARLIEST stamp survives a late patch.
 	 */
 	usageFinalizedAt?: number | null;
+	/**
+	 * Cache-measurement capture, both ingress-derived facts (absent on the
+	 * usage-patch re-upsert, so both COALESCE stored-value-preserving):
+	 * `sessionKey` is `<apiKeyId|anon>:<Claude Code session uuid>`;
+	 * `cachePrefixHashes` is the per-breakpoint prefix digest array, stored as
+	 * its JSON text.
+	 */
+	sessionKey?: string | null;
+	cachePrefixHashes?: string[] | null;
 }
 
 /** Fails to compile unless `T` is exactly `true`. */
@@ -138,9 +147,10 @@ export class RequestRepository extends BaseRepository<RequestData> {
 					context_system_chars, context_tools_chars, context_tool_count,
 					context_messages_chars, context_message_count, context_tool_result_chars,
 					context_largest_tool_chars, context_largest_tool_name,
-					context_binary_chars, usage_finalized_at
+					context_binary_chars, usage_finalized_at,
+					session_key, cache_prefix_hashes
 				)
-				VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+				VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 				ON CONFLICT (id) DO UPDATE SET
 				timestamp = EXCLUDED.timestamp,
 				method = EXCLUDED.method,
@@ -182,7 +192,9 @@ export class RequestRepository extends BaseRepository<RequestData> {
 				-- Stored value FIRST: the earliest moment a usable usage vector
 				-- existed is the fact this column records, so a re-upsert (or a
 				-- later patch) must never move it forward.
-				usage_finalized_at = COALESCE(requests.usage_finalized_at, EXCLUDED.usage_finalized_at)
+				usage_finalized_at = COALESCE(requests.usage_finalized_at, EXCLUDED.usage_finalized_at),
+				session_key = COALESCE(EXCLUDED.session_key, requests.session_key),
+				cache_prefix_hashes = COALESCE(EXCLUDED.cache_prefix_hashes, requests.cache_prefix_hashes)
 		`,
 			[
 				data.id,
@@ -228,6 +240,8 @@ export class RequestRepository extends BaseRepository<RequestData> {
 				// figure: images + documents.
 				comp ? comp.imagePayloadChars + comp.documentPayloadChars : null,
 				data.usageFinalizedAt ?? null,
+				data.sessionKey ?? null,
+				data.cachePrefixHashes ? JSON.stringify(data.cachePrefixHashes) : null,
 			],
 		);
 	}
