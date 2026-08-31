@@ -1,5 +1,5 @@
 import type { SystemStatusResponse } from "@clankermux/types";
-import { COLORS } from "../../../constants";
+import { CHART_TOKENS } from "../../../constants";
 
 export type SystemTone = "ok" | "degraded" | "unhealthy";
 
@@ -16,15 +16,21 @@ export function formatUptime(seconds: number): string {
 	return `${s}s`;
 }
 
-/** Hex color for a status, drawn from the shared palette. */
+/**
+ * Colour for a status, as a CSS custom property.
+ *
+ * Every consumer hands the result to an inline `style`, so the browser
+ * resolves it and the dot follows the colour mode with nothing threaded
+ * through React.
+ */
 export function statusColor(status: SystemStatusResponse["status"]): string {
 	switch (status) {
 		case "ok":
-			return COLORS.success;
+			return CHART_TOKENS.success;
 		case "degraded":
-			return COLORS.warning;
+			return CHART_TOKENS.warning;
 		default:
-			return COLORS.error;
+			return CHART_TOKENS.error;
 	}
 }
 

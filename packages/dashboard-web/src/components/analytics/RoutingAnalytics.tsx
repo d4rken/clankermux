@@ -14,7 +14,7 @@ import {
 	XAxis,
 	YAxis,
 } from "recharts";
-import { COLORS, type TimeRange } from "../../constants";
+import { CHART_TOKENS, type TimeRange } from "../../constants";
 import { useSeriesPalette } from "../../hooks/useSeriesPalette";
 import { shortLabel } from "../../lib/chart-utils";
 import {
@@ -33,9 +33,9 @@ import {
 import { labelDecision } from "./routing-labels";
 
 const OUTCOME_COLORS: Record<RoutingFlowPoint["outcome"], string> = {
-	success: COLORS.success,
-	rate_limited: COLORS.warning,
-	error: COLORS.error,
+	success: CHART_TOKENS.success,
+	rate_limited: CHART_TOKENS.warning,
+	error: CHART_TOKENS.error,
 };
 
 const DECISION_EXPLANATIONS: Record<string, string> = {
@@ -175,7 +175,7 @@ function RoutingFlowGraph({ flow }: { flow: RoutingFlowPoint[] }) {
 					const y3 = outcomeY.get(row.outcome) ?? graph.height / 2;
 					const strokeWidth =
 						2 + Math.sqrt(row.requests / graph.maxRequests) * 14;
-					const color = OUTCOME_COLORS[row.outcome] ?? COLORS.primary;
+					const color = OUTCOME_COLORS[row.outcome] ?? CHART_TOKENS.primary;
 					const key = `${row.strategy}-${row.decision}-${row.accountId}-${row.outcome}`;
 
 					return (
@@ -397,7 +397,10 @@ export function RoutingAnalyticsPanel({
 								data={timeline.data}
 								margin={{ top: 8, right: 16, left: 0, bottom: 0 }}
 							>
-								<CartesianGrid strokeDasharray="3 3" className="stroke-muted" />
+								<CartesianGrid
+									strokeDasharray="3 3"
+									className="stroke-border"
+								/>
 								<XAxis dataKey="time" fontSize={12} tickLine={false} />
 								<YAxis fontSize={12} tickLine={false} allowDecimals={false} />
 								<Tooltip

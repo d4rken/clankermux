@@ -41,14 +41,14 @@ export function isChartEmpty(data: ChartDataPoint[] | undefined): boolean {
 }
 
 /**
- * Get tooltip styles from prop
+ * Inline style for a chart tooltip.
+ *
+ * There is ONE tooltip appearance and it is defined in tokens, so a caller
+ * passes an object only to override part of it. This used to take a variant
+ * name; the variants are gone.
  */
-export function getTooltipStyles(
-	tooltipStyle: keyof typeof CHART_TOOLTIP_STYLE | object,
-): object {
-	return typeof tooltipStyle === "string"
-		? CHART_TOOLTIP_STYLE[tooltipStyle]
-		: tooltipStyle;
+export function getTooltipStyles(tooltipStyle?: object): object {
+	return tooltipStyle ?? CHART_TOOLTIP_STYLE;
 }
 
 /**
@@ -79,7 +79,7 @@ export interface CommonChartProps extends CommonAxisProps {
 	legendHeight?: number;
 	tooltipFormatter?: (value: number, name: string) => [string, string];
 	tooltipLabelFormatter?: TooltipLabelFormatter;
-	tooltipStyle?: keyof typeof CHART_TOOLTIP_STYLE | object;
+	tooltipStyle?: object;
 	animationDuration?: number;
 	onChartClick?: ChartClickHandler;
 }

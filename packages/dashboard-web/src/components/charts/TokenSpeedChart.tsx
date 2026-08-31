@@ -1,5 +1,5 @@
 import { formatTokensPerSecond } from "@clankermux/ui-common";
-import { COLORS, type TimeRange } from "../../constants";
+import { CHART_TOKENS, type TimeRange } from "../../constants";
 import { formatCompactNumber } from "../../lib/chart-utils";
 import { makeTimeTooltipLabelFormatter } from "../../lib/time-format";
 import { BaseAreaChart } from "./BaseAreaChart";
@@ -30,8 +30,8 @@ export function TokenSpeedChart({
 
 	const gradient = (
 		<linearGradient id="colorSpeed" x1="0" y1="0" x2="0" y2="1">
-			<stop offset="0%" stopColor={COLORS.purple} stopOpacity={0.9} />
-			<stop offset="100%" stopColor={COLORS.purple} stopOpacity={0.1} />
+			<stop offset="0%" stopColor={CHART_TOKENS.purple} stopOpacity={0.9} />
+			<stop offset="100%" stopColor={CHART_TOKENS.purple} stopOpacity={0.1} />
 		</linearGradient>
 	);
 
@@ -41,7 +41,7 @@ export function TokenSpeedChart({
 			dataKey="avgTokensPerSecond"
 			loading={loading}
 			height={height}
-			color={COLORS.purple}
+			color={CHART_TOKENS.purple}
 			gradientId="colorSpeed"
 			customGradient={gradient}
 			strokeWidth={2}

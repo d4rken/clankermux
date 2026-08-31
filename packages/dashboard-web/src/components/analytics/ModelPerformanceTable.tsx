@@ -1,7 +1,7 @@
 import { getModelShortName } from "@clankermux/core";
 import { formatTokensPerSecond } from "@clankermux/ui-common";
 import { useMemo, useState } from "react";
-import { COLORS } from "../../constants";
+import { CHART_TOKENS } from "../../constants";
 import { type SortDir, SortHeaderButton } from "./sort-header";
 
 /** One model's row in the performance table. */
@@ -47,43 +47,43 @@ const METRIC_COLUMNS: MetricColumn[] = [
 	{
 		key: "medianTps",
 		label: "Median tok/s",
-		color: COLORS.purple,
+		color: CHART_TOKENS.purple,
 		format: (v) => formatTokensPerSecond(v),
 	},
 	{
 		key: "p95Tps",
 		label: "P95 tok/s",
-		color: COLORS.indigo,
+		color: CHART_TOKENS.indigo,
 		format: (v) => formatTokensPerSecond(v),
 	},
 	{
 		key: "avgResponseTimeMs",
 		label: "Avg resp",
-		color: COLORS.blue,
+		color: CHART_TOKENS.blue,
 		format: (v) => `${Math.round(v)} ms`,
 	},
 	{
 		key: "p95ResponseTimeMs",
 		label: "P95 resp",
-		color: COLORS.cyan,
+		color: CHART_TOKENS.cyan,
 		format: (v) => `${Math.round(v)} ms`,
 	},
 	{
 		key: "errorRate",
 		label: "Error %",
-		color: COLORS.error,
+		color: CHART_TOKENS.error,
 		format: (v) => `${v.toFixed(1)}%`,
 	},
 	{
 		key: "costPer1kTokens",
 		label: "Cost / 1K",
-		color: COLORS.warning,
+		color: CHART_TOKENS.warning,
 		format: (v) => `$${v.toFixed(4)}`,
 	},
 	{
 		key: "efficiency",
 		label: "Efficiency",
-		color: COLORS.success,
+		color: CHART_TOKENS.success,
 		format: (v) => `${Math.round(v).toLocaleString()} tok/s/$`,
 	},
 ];

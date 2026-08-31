@@ -11,7 +11,7 @@ import {
 	XAxis,
 	YAxis,
 } from "recharts";
-import { CHART_PROPS, COLORS, type TimeRange } from "../../constants";
+import { CHART_PROPS, CHART_TOKENS, type TimeRange } from "../../constants";
 import {
 	useCacheKeepalive,
 	useCacheKeepaliveHistory,
@@ -196,7 +196,7 @@ export function CacheKeepalivePanel({ range }: { range: TimeRange }) {
 								type="monotone"
 								dataKey="spentUsd"
 								name="Spent"
-								stroke={COLORS.warning}
+								stroke={CHART_TOKENS.warning}
 								strokeWidth={2}
 								dot={false}
 								isAnimationActive={false}
@@ -206,7 +206,7 @@ export function CacheKeepalivePanel({ range }: { range: TimeRange }) {
 								type="monotone"
 								dataKey="savedUsd"
 								name="Saved"
-								stroke={COLORS.success}
+								stroke={CHART_TOKENS.success}
 								strokeWidth={2}
 								dot={false}
 								isAnimationActive={false}
@@ -216,7 +216,7 @@ export function CacheKeepalivePanel({ range }: { range: TimeRange }) {
 								type="monotone"
 								dataKey="hitRatePct"
 								name="Hit rate"
-								stroke={COLORS.blue}
+								stroke={CHART_TOKENS.blue}
 								strokeWidth={1}
 								dot={false}
 								isAnimationActive={false}

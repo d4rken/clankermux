@@ -2,7 +2,7 @@ import type { PaymentsSummary } from "@clankermux/types";
 import { formatUsd } from "@clankermux/ui-common";
 import { AlertCircle } from "lucide-react";
 import { useMemo } from "react";
-import { COLORS } from "../../constants";
+import { CHART_TOKENS } from "../../constants";
 import { BaseBarChart } from "../charts";
 import type { ChartDataPoint } from "../charts/types";
 import {
@@ -231,7 +231,7 @@ export function AccountPerformanceSection({
 							{
 								dataKey: "successRate",
 								yAxisId: "right",
-								fill: COLORS.success,
+								fill: CHART_TOKENS.success,
 								name: "Success %",
 							},
 						]}

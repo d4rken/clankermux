@@ -207,7 +207,7 @@ function WindowSeries({
 							tickFormatter={(v: number) => `${v.toFixed(0)}M`}
 						/>
 						<Tooltip
-							contentStyle={getTooltipStyles("default")}
+							contentStyle={getTooltipStyles()}
 							labelFormatter={(v) => new Date(Number(v)).toLocaleString()}
 							formatter={(value: unknown, name: unknown) => {
 								const label = String(name ?? "");

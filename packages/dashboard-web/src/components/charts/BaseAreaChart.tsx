@@ -9,7 +9,7 @@ import {
 	XAxis,
 	YAxis,
 } from "recharts";
-import { CHART_PROPS, COLORS } from "../../constants";
+import { CHART_PROPS, CHART_TOKENS } from "../../constants";
 import { ChartContainer } from "./ChartContainer";
 import {
 	type CommonChartProps,
@@ -33,7 +33,7 @@ export function BaseAreaChart({
 	xAxisKey = "time",
 	loading = false,
 	height = "medium",
-	color = COLORS.primary,
+	color = CHART_TOKENS.primary,
 	gradientId = "colorGradient",
 	customGradient,
 	strokeWidth = 2,
@@ -46,7 +46,7 @@ export function BaseAreaChart({
 	yAxisTickFormatter,
 	tooltipFormatter,
 	tooltipLabelFormatter,
-	tooltipStyle = "default",
+	tooltipStyle,
 	animationDuration = 1000,
 	showLegend = false,
 	legendHeight = 36,

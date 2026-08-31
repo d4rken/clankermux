@@ -1,7 +1,7 @@
 import { getModelShortName } from "@clankermux/core";
 import { formatNumber, formatTokens } from "@clankermux/ui-common";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { COLORS } from "../../constants";
+import { CHART_TOKENS, PINNED_MARK_COLORS } from "../../constants";
 import {
 	type SeriesPalette,
 	useSeriesPalette,
@@ -80,10 +80,18 @@ const DEFAULT_PLOT_WIDTH = 720;
  * that no model hue comes within 15 dE of either (7.9 under simulated
  * dichromacy), so a red mark on this card is always an error and never an
  * Opus. Every status also has its own SHAPE, so none of this is colour-alone.
+ *
+ * Those two are LITERALS, and the one place in the charting layer that does not
+ * take a `var(--token)`. They are drawn in the same plot as model-coloured
+ * marks, and the separation above is measured against exactly these two hexes.
+ * `var(--warning)` would draw the theme's amber, which sits 6.4 dE from `gold`
+ * and 2.5 dE from `tan` under simulated dichromacy — a rate-limit triangle
+ * indistinguishable from a model. `lost` has no such constraint: it means
+ * "outcome unknown", carries no hue of its own, and takes the token.
  */
-const STATUS_COLOR: Partial<Record<LiveStatus, string>> = {
-	rate_limited: COLORS.warning,
-	error: COLORS.error,
+export const STATUS_COLOR: Partial<Record<LiveStatus, string>> = {
+	rate_limited: PINNED_MARK_COLORS.warning,
+	error: PINNED_MARK_COLORS.error,
 	lost: "var(--muted-foreground)",
 };
 
@@ -258,7 +266,7 @@ export function LiveActivityLanesView({
 							className="inline-block h-2 w-2 rounded-full"
 							style={{
 								backgroundColor: connected
-									? COLORS.success
+									? CHART_TOKENS.success
 									: "var(--muted-foreground)",
 							}}
 							aria-hidden="true"
@@ -515,12 +523,12 @@ export function LiveActivityLanesView({
 											{formatTokens(lane.tokens)}
 										</span>
 										{lane.rateLimited > 0 && (
-											<span style={{ color: COLORS.warning }}>
+											<span style={{ color: PINNED_MARK_COLORS.warning }}>
 												{lane.rateLimited} 429
 											</span>
 										)}
 										{lane.errors > 0 && (
-											<span style={{ color: COLORS.error }}>
+											<span style={{ color: PINNED_MARK_COLORS.error }}>
 												{lane.errors} err
 											</span>
 										)}
@@ -602,7 +610,7 @@ function ModelLegend({
 				<span
 					className="inline-block h-2 w-2 shrink-0"
 					style={{
-						backgroundColor: COLORS.warning,
+						backgroundColor: PINNED_MARK_COLORS.warning,
 						clipPath: "polygon(50% 0%, 100% 100%, 0% 100%)",
 					}}
 					aria-hidden="true"
@@ -610,7 +618,7 @@ function ModelLegend({
 				429
 			</li>
 			<li className="flex items-center gap-item">
-				<span aria-hidden="true" style={{ color: COLORS.error }}>
+				<span aria-hidden="true" style={{ color: PINNED_MARK_COLORS.error }}>
 					✕
 				</span>
 				failed

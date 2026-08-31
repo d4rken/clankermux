@@ -2,7 +2,7 @@ import type {
 	ActiveSessionsAnalytics,
 	ActiveSessionsTimePoint,
 } from "@clankermux/types";
-import { COLORS } from "../constants";
+import { CHART_TOKENS } from "../constants";
 
 /**
  * Pure transforms for the Active Sessions panel (Analytics tab). Kept out of the
@@ -31,25 +31,28 @@ export const SCOPE_ORDER: readonly ActiveSessionScope[] = [
 /**
  * Per-scope color keyed by chart dataKey, so each scope keeps its identity color
  * even when a sibling scope is absent (index-based coloring would shift). Sourced
- * from the shared COLORS palette in @clankermux/ui-constants.
+ * from the shared CHART_TOKENS accents in @clankermux/ui-constants, so these are
+ * CSS custom properties and the series follow the colour mode on their own.
  */
 export const SESSION_SCOPE_COLORS: Record<string, string> = {
-	"scope:claude_session": COLORS.primary,
-	"scope:codex_thread": COLORS.blue,
-	"scope:project": COLORS.purple,
+	"scope:claude_session": CHART_TOKENS.primary,
+	"scope:codex_thread": CHART_TOKENS.blue,
+	"scope:project": CHART_TOKENS.purple,
 };
 
 /**
  * Synthetic "Total" line: the per-bucket sum across all client scopes. Kept out
  * of SCOPE_ORDER/SESSION_SCOPE_COLORS because it is an aggregate, not a client.
- * Rendered dashed in a neutral slate so it reads as an aggregate and stays
- * legible on both light and dark chart backgrounds. NOTE: this per-bucket total
- * is legitimately summable per bucket, but it is NOT `totalDistinctSessions`
- * (the range badge), which COUNT-DISTINCTs a session once across the whole range
- * while this counts it in every bucket it was active in.
+ * Rendered dashed in the neutral the rest of the app already uses for secondary
+ * text, so it reads as an aggregate rather than as one more scope, and it now
+ * tracks the colour mode instead of being one fixed slate for both grounds.
+ * NOTE: this per-bucket total is legitimately summable per bucket, but it is
+ * NOT `totalDistinctSessions` (the range badge), which COUNT-DISTINCTs a
+ * session once across the whole range while this counts it in every bucket it
+ * was active in.
  */
 export const SESSION_TOTAL_KEY = "scope:total";
-export const SESSION_TOTAL_COLOR = "#94a3b8";
+export const SESSION_TOTAL_COLOR = "var(--muted-foreground)";
 
 /** One chart row: a bucket timestamp plus per-scope session counts keyed by scopeKey. */
 export interface ActiveSessionsTrendRow {

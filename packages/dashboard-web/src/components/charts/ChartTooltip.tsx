@@ -19,7 +19,8 @@ interface ChartTooltipProps {
 	formatters?: Record<string, (value: TooltipFormatterValue) => string>;
 	/** Recharts-style label formatter; receives the label and payload rows. */
 	labelFormatter?: TooltipLabelFormatter;
-	style?: keyof typeof CHART_TOOLTIP_STYLE | object;
+	/** Overrides on top of the one token-defined tooltip surface. */
+	style?: object;
 }
 
 export function ChartTooltip({
@@ -28,14 +29,11 @@ export function ChartTooltip({
 	label,
 	formatters = {},
 	labelFormatter,
-	style = "default",
+	style = CHART_TOOLTIP_STYLE,
 }: ChartTooltipProps) {
 	if (!active || !payload?.length) {
 		return null;
 	}
-
-	const tooltipStyle =
-		typeof style === "string" ? CHART_TOOLTIP_STYLE[style] : style;
 
 	const formattedLabel = labelFormatter
 		? labelFormatter(
@@ -45,7 +43,7 @@ export function ChartTooltip({
 		: label;
 
 	return (
-		<div className="p-3 rounded-md shadow-overlay" style={tooltipStyle}>
+		<div className="p-3 rounded-md shadow-overlay" style={style}>
 			{formattedLabel && <p className="font-medium mb-2">{formattedLabel}</p>}
 			<div className="space-y-tight">
 				{payload.map((entry, index) => {

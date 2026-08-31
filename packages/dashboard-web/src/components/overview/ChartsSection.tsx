@@ -138,7 +138,6 @@ export function ChartsSection({
 								innerRadius={48}
 								outerRadius={72}
 								paddingAngle={5}
-								tooltipStyle="success"
 							/>
 						)}
 						<div className="mt-3 space-y-item">
@@ -183,7 +182,6 @@ export function ChartsSection({
 								innerRadius={48}
 								outerRadius={72}
 								paddingAngle={5}
-								tooltipStyle="success"
 							/>
 						)}
 						<div className="mt-3 space-y-item">
@@ -245,7 +243,6 @@ export function ChartsSection({
 								innerRadius={48}
 								outerRadius={72}
 								paddingAngle={5}
-								tooltipStyle="success"
 								tooltipFormatter={(value) => [
 									formatTokens(Number(value)),
 									"Tokens",

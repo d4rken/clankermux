@@ -6,7 +6,7 @@
  * enforces, so a hue that passes here passes in CI:
  *
  *  1. Report which existing MODEL_PALETTE / MODEL_PALETTE_LIGHT entries sit too
- *     close to the semantic status colours (COLORS.warning, COLORS.error). Those
+ *     close to the semantic status colours (PINNED_MARK_COLORS). Those
  *     hues cannot identify a model on a surface where amber and red already mean
  *     "rate limited" and "failed" — Live Activity is such a surface.
  *  2. Search for replacement hues so every model can be assigned one that clears
@@ -32,7 +32,11 @@
  * Run: bun packages/ui-constants/scripts/extend-model-palette.ts 16 --emit
  */
 
-import { COLORS, MODEL_PALETTE, MODEL_PALETTE_LIGHT } from "../src/index";
+import {
+	MODEL_PALETTE,
+	MODEL_PALETTE_LIGHT,
+	PINNED_MARK_COLORS,
+} from "../src/index";
 
 type RGB = [number, number, number];
 type Lab = [number, number, number];
@@ -164,7 +168,7 @@ const MIN_DELTA_E = 15;
 const MIN_CVD_DELTA_E = 7.9;
 
 /** The status colours a model hue must never be mistaken for. */
-const SEMANTIC = { warning: COLORS.warning, error: COLORS.error };
+const SEMANTIC = PINNED_MARK_COLORS;
 
 /**
  * Hues from the same published qualitative sets the palette already draws on

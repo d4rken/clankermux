@@ -1,6 +1,6 @@
 import { describe, expect, it } from "bun:test";
 import { renderToStaticMarkup } from "react-dom/server";
-import { COLORS, MODEL_PALETTE } from "../../../constants";
+import { MODEL_PALETTE, PINNED_MARK_COLORS } from "../../../constants";
 import type { SeriesPalette } from "../../../hooks/useSeriesPalette";
 import type { Lane, LiveEvent, LiveStatus } from "../../../lib/live-activity";
 import { buildLanes, hitTest } from "../../../lib/live-activity";
@@ -114,8 +114,8 @@ describe("LiveActivityLanesView colour encoding", () => {
 			).lanes,
 		});
 		const plot = plotOf(markup);
-		expect(plot).toContain(COLORS.warning);
-		expect(plot).toContain(COLORS.error);
+		expect(plot).toContain(PINNED_MARK_COLORS.warning);
+		expect(plot).toContain(PINNED_MARK_COLORS.error);
 		// Scoped to the plot: the legend still lists both models, correctly — a
 		// model whose every request failed is still a model that ran.
 		expect(plot).not.toContain(MODEL_PALETTE.azure);

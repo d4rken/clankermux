@@ -12,7 +12,7 @@ import {
 	XAxis,
 	YAxis,
 } from "recharts";
-import { CHART_PROPS, COLORS, type TimeRange } from "../../constants";
+import { CHART_PROPS, CHART_TOKENS, type TimeRange } from "../../constants";
 import { formatLagMs } from "../../lib/event-loop";
 import { formatAxisTime, formatTooltipTime } from "../../lib/time-format";
 import { ChartContainer } from "../charts/ChartContainer";
@@ -120,12 +120,12 @@ export function MemoryUsageChart({
 								<linearGradient id={GRADIENT_ID} x1="0" y1="0" x2="0" y2="1">
 									<stop
 										offset="5%"
-										stopColor={COLORS.primary}
+										stopColor={CHART_TOKENS.primary}
 										stopOpacity={0.7}
 									/>
 									<stop
 										offset="95%"
-										stopColor={COLORS.primary}
+										stopColor={CHART_TOKENS.primary}
 										stopOpacity={0.05}
 									/>
 								</linearGradient>
@@ -188,7 +188,7 @@ export function MemoryUsageChart({
 								type="monotone"
 								dataKey="rssMb"
 								name="RSS"
-								stroke={COLORS.primary}
+								stroke={CHART_TOKENS.primary}
 								strokeWidth={2}
 								fillOpacity={1}
 								fill={`url(#${GRADIENT_ID})`}
@@ -199,7 +199,7 @@ export function MemoryUsageChart({
 								type="monotone"
 								dataKey="heapTotalMb"
 								name="Heap (committed)"
-								stroke={COLORS.purple}
+								stroke={CHART_TOKENS.purple}
 								strokeWidth={2}
 								dot={false}
 								connectNulls
@@ -210,7 +210,7 @@ export function MemoryUsageChart({
 								type="monotone"
 								dataKey="heapMb"
 								name="Heap (used)"
-								stroke={COLORS.blue}
+								stroke={CHART_TOKENS.blue}
 								strokeWidth={2}
 								dot={false}
 								isAnimationActive={false}
@@ -223,7 +223,7 @@ export function MemoryUsageChart({
 								type="monotone"
 								dataKey="lagMs"
 								name="Event loop lag (peak)"
-								stroke={COLORS.cyan}
+								stroke={CHART_TOKENS.cyan}
 								strokeWidth={1}
 								dot={false}
 								connectNulls={false}

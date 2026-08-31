@@ -9,7 +9,7 @@ import {
 	XAxis,
 	YAxis,
 } from "recharts";
-import { CHART_PROPS, COLORS } from "../../constants";
+import { CHART_PROPS, CHART_TOKENS } from "../../constants";
 import { ChartContainer } from "./ChartContainer";
 import {
 	type CommonChartProps,
@@ -78,7 +78,7 @@ export function BaseLineChart({
 	yAxisTickFormatter,
 	tooltipFormatter,
 	tooltipLabelFormatter,
-	tooltipStyle = "default",
+	tooltipStyle,
 	animationDuration = 1000,
 	showLegend = false,
 	legendHeight = 36,
@@ -136,7 +136,7 @@ export function BaseLineChart({
 							key={lineConfig.dataKey}
 							type={lineConfig.type ?? lineType}
 							dataKey={lineConfig.dataKey}
-							stroke={lineConfig.stroke || COLORS.primary}
+							stroke={lineConfig.stroke || CHART_TOKENS.primary}
 							strokeWidth={lineConfig.strokeWidth || 2}
 							strokeDasharray={lineConfig.strokeDasharray}
 							connectNulls={lineConfig.connectNulls ?? false}
@@ -150,7 +150,7 @@ export function BaseLineChart({
 						<ReferenceLine
 							key={`ref-line-${refLine.y}`}
 							y={refLine.y}
-							stroke={refLine.stroke || COLORS.primary}
+							stroke={refLine.stroke || CHART_TOKENS.primary}
 							strokeDasharray={
 								refLine.strokeDasharray || CHART_PROPS.strokeDasharray
 							}
