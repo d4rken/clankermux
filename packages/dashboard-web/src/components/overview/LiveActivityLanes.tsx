@@ -1276,7 +1276,7 @@ function MarkTooltip({ event }: { event: LiveEvent }) {
 		<div
 			role="status"
 			aria-live="polite"
-			className="pointer-events-none absolute right-4 top-4 z-10 rounded-md border bg-popover/95 px-3 py-2 text-xs shadow-md backdrop-blur"
+			className="pointer-events-none absolute right-4 top-4 z-10 rounded-md border bg-popover/95 px-3 py-2 text-xs shadow-overlay backdrop-blur"
 		>
 			<div className="flex items-baseline gap-item">
 				<span className="text-sm font-semibold tabular-nums">

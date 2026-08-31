@@ -45,7 +45,7 @@ export function ChartTooltip({
 		: label;
 
 	return (
-		<div className="p-3 rounded-md shadow-lg" style={tooltipStyle}>
+		<div className="p-3 rounded-md shadow-overlay" style={tooltipStyle}>
 			{formattedLabel && <p className="font-medium mb-2">{formattedLabel}</p>}
 			<div className="space-y-tight">
 				{payload.map((entry, index) => {

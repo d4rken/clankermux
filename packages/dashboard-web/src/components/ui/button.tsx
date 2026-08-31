@@ -5,7 +5,10 @@ import * as React from "react";
 import { cn } from "../../lib/utils";
 
 const buttonVariants = cva(
-	"inline-flex items-center justify-center gap-item whitespace-nowrap rounded-md text-sm font-medium transition-all duration-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:pointer-events-none disabled:opacity-50 [&_svg]:pointer-events-none [&_svg]:size-4 [&_svg]:shrink-0",
+	// `ring-offset-background` is load-bearing, not decoration: Tailwind's
+	// default --tw-ring-offset-color is #fff, so `ring-offset-2` alone draws a
+	// white halo around every focused control on a near-black ground.
+	"inline-flex items-center justify-center gap-item whitespace-nowrap rounded-md text-sm font-medium transition-all duration-200 ring-offset-background focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:pointer-events-none disabled:opacity-50 [&_svg]:pointer-events-none [&_svg]:size-4 [&_svg]:shrink-0",
 	{
 		variants: {
 			variant: {
@@ -13,8 +16,11 @@ const buttonVariants = cva(
 					"bg-primary text-primary-foreground shadow-card hover:bg-primary/90",
 				destructive:
 					"bg-destructive text-destructive-foreground shadow-card hover:bg-destructive/90",
+				// A hairline border, not 2px: on a dark ground the rule is the
+				// separator, and doubling it reads as a heavy box drawn around the
+				// label rather than as an edge.
 				outline:
-					"border-2 border-border bg-background shadow-card hover:bg-accent hover:text-accent-foreground hover:border-primary/50",
+					"border border-border bg-background shadow-card hover:bg-accent hover:text-accent-foreground hover:border-primary/50",
 				secondary:
 					"bg-secondary text-secondary-foreground shadow-card hover:bg-secondary/80",
 				ghost: "hover:bg-accent hover:text-accent-foreground",
