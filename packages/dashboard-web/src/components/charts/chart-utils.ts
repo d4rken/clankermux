@@ -43,12 +43,14 @@ export function isChartEmpty(data: ChartDataPoint[] | undefined): boolean {
 /**
  * Inline style for a chart tooltip.
  *
- * There is ONE tooltip appearance and it is defined in tokens, so a caller
- * passes an object only to override part of it. This used to take a variant
- * name; the variants are gone.
+ * There is ONE tooltip appearance and it is defined in tokens, so a caller's
+ * object is merged ON TOP of it rather than replacing it: passing
+ * `{ maxWidth: 240 }` keeps the token background, border and shadow. Replacing
+ * would drop the token surface and let recharts fall back to its own white
+ * inline default. This used to take a variant name; the variants are gone.
  */
 export function getTooltipStyles(tooltipStyle?: object): object {
-	return tooltipStyle ?? CHART_TOOLTIP_STYLE;
+	return { ...CHART_TOOLTIP_STYLE, ...tooltipStyle };
 }
 
 /**
