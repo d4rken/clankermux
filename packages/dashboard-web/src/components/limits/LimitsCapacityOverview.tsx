@@ -33,6 +33,7 @@ import {
 	CardHeader,
 	CardTitle,
 } from "../ui/card";
+import { InsetPanel } from "../ui/inset-panel";
 import { Popover, PopoverContent, PopoverTrigger } from "../ui/popover";
 import { Progress } from "../ui/progress";
 import { Skeleton } from "../ui/skeleton";
@@ -242,7 +243,7 @@ function WindowPanel({
 				)}
 			</div>
 
-			<dl className="mt-group grid grid-cols-2 divide-x rounded-md border bg-muted/20">
+			<InsetPanel as="dl" className="mt-group grid grid-cols-2 divide-x p-0">
 				<div className="min-w-0 p-row">
 					<dt className="label-caps">Reporting</dt>
 					<dd className="mt-tight min-w-0">
@@ -291,7 +292,7 @@ function WindowPanel({
 						</span>
 					</dd>
 				</div>
-			</dl>
+			</InsetPanel>
 
 			{resolved && (result.atRisk.length > 0 || familyAlert.label != null) && (
 				<div className="mt-group space-y-item">
@@ -448,7 +449,7 @@ function RunwayPanel({
 				</p>
 			</div>
 
-			<dl className="mt-group grid grid-cols-2 divide-x rounded-md border bg-muted/20">
+			<InsetPanel as="dl" className="mt-group grid grid-cols-2 divide-x p-0">
 				<div className="min-w-0 p-row">
 					<dt className="label-caps">Eligible accounts</dt>
 					<dd className="mt-tight min-w-0">
@@ -483,7 +484,7 @@ function RunwayPanel({
 						</span>
 					</dd>
 				</div>
-			</dl>
+			</InsetPanel>
 
 			{activeRunways.length > 0 && dataResolved && (
 				<div className="mt-auto pt-group">

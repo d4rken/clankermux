@@ -38,6 +38,7 @@ import {
 	DropdownMenuSeparator,
 	DropdownMenuTrigger,
 } from "../ui/dropdown-menu";
+import { InsetPanel } from "../ui/inset-panel";
 import { Popover, PopoverContent, PopoverTrigger } from "../ui/popover";
 import { Textarea } from "../ui/textarea";
 import { AccountIdentityLine } from "./AccountIdentity";
@@ -596,7 +597,7 @@ export function AccountListItem({
 			    bars below. */}
 			<div className="space-y-item">
 				<AccountStatusChips account={account} status={status} />
-				<div className="rounded-md border border-border/60 bg-muted/30 px-3 py-2">
+				<InsetPanel data-testid="account-info-row">
 					<div className="flex flex-wrap items-center gap-row">
 						<dl className="flex min-w-0 flex-1 flex-wrap items-center gap-x-section gap-y-item text-xs">
 							<div className="flex items-baseline gap-tight">
@@ -677,7 +678,7 @@ export function AccountListItem({
 							</Button>
 						)}
 					</div>
-				</div>
+				</InsetPanel>
 			</div>
 			{(account.rateLimitReset ||
 				account.usageData ||

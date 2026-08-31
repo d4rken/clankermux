@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { api } from "../../api";
 import { runGuarded } from "../../lib/submit-guard";
+import { Alert } from "../ui/alert";
 import { Button } from "../ui/button";
 import { Input } from "../ui/input";
 import { Label } from "../ui/label";
@@ -890,24 +891,16 @@ export function AccountAddForm({
 					{newAccount.mode === "codex" && (
 						<div className="space-y-row">
 							{codexStep === "idle" && (
-								<div className="bg-info/10 border border-info/25 p-3 rounded-lg">
-									<p className="text-sm text-foreground font-medium mb-1">
-										Device Code Authentication
-									</p>
-									<p className="text-xs text-muted-foreground">
+								<Alert title="Device Code Authentication">
+									<p>
 										Click the button below to start Codex authentication. A
 										browser tab will open for you to authorize.
 									</p>
-								</div>
+								</Alert>
 							)}
 							{codexStep === "pending" && (
-								<div className="bg-info/10 border border-info/25 p-3 rounded-lg space-y-item">
-									<p className="text-sm text-foreground font-medium">
-										Waiting for authorization...
-									</p>
-									<p className="text-xs text-muted-foreground">
-										Enter this code in the browser tab:
-									</p>
+								<Alert title="Waiting for authorization...">
+									<p>Enter this code in the browser tab:</p>
 									<div className="flex items-center gap-item">
 										<code className="text-lg font-mono font-bold tracking-widest bg-info/15 text-foreground px-3 py-1 rounded">
 											{codexUserCode}
@@ -921,21 +914,17 @@ export function AccountAddForm({
 											Open browser
 										</a>
 									</div>
-								</div>
+								</Alert>
 							)}
 							{codexStep === "complete" && (
-								<div className="bg-success/10 border border-success/25 p-3 rounded-lg">
-									<p className="text-sm text-foreground font-medium">
-										Authorization successful! Account added.
-									</p>
-								</div>
+								<Alert
+									tone="success"
+									title="Authorization successful! Account added."
+								/>
 							)}
 							{codexStep === "error" && (
-								<div className="bg-destructive/10 border border-destructive/25 p-3 rounded-lg space-y-item">
-									<p className="text-sm text-foreground font-medium">
-										Authentication failed
-									</p>
-									<p className="text-xs text-muted-foreground">{codexError}</p>
+								<Alert tone="destructive" title="Authentication failed">
+									<p>{codexError}</p>
 									<Button
 										variant="outline"
 										size="sm"
@@ -946,31 +935,23 @@ export function AccountAddForm({
 									>
 										Try again
 									</Button>
-								</div>
+								</Alert>
 							)}
 						</div>
 					)}
 					{newAccount.mode === "qwen" && (
 						<div className="space-y-row">
 							{qwenStep === "idle" && (
-								<div className="bg-info/10 border border-info/25 p-3 rounded-lg">
-									<p className="text-sm text-foreground font-medium mb-1">
-										Device Code Authentication
-									</p>
-									<p className="text-xs text-muted-foreground">
+								<Alert title="Device Code Authentication">
+									<p>
 										Click the button below to start Qwen authentication. A
 										browser tab will open for you to authorize.
 									</p>
-								</div>
+								</Alert>
 							)}
 							{qwenStep === "pending" && (
-								<div className="bg-info/10 border border-info/25 p-3 rounded-lg space-y-item">
-									<p className="text-sm text-foreground font-medium">
-										Waiting for authorization...
-									</p>
-									<p className="text-xs text-muted-foreground">
-										Enter this code in the browser tab:
-									</p>
+								<Alert title="Waiting for authorization...">
+									<p>Enter this code in the browser tab:</p>
 									<div className="flex items-center gap-item">
 										<code className="text-lg font-mono font-bold tracking-widest bg-info/15 text-foreground px-3 py-1 rounded">
 											{qwenUserCode}
@@ -984,21 +965,17 @@ export function AccountAddForm({
 											Open browser
 										</a>
 									</div>
-								</div>
+								</Alert>
 							)}
 							{qwenStep === "complete" && (
-								<div className="bg-success/10 border border-success/25 p-3 rounded-lg">
-									<p className="text-sm text-foreground font-medium">
-										Authorization successful! Account added.
-									</p>
-								</div>
+								<Alert
+									tone="success"
+									title="Authorization successful! Account added."
+								/>
 							)}
 							{qwenStep === "error" && (
-								<div className="bg-destructive/10 border border-destructive/25 p-3 rounded-lg space-y-item">
-									<p className="text-sm text-foreground font-medium">
-										Authentication failed
-									</p>
-									<p className="text-xs text-muted-foreground">{qwenError}</p>
+								<Alert tone="destructive" title="Authentication failed">
+									<p>{qwenError}</p>
 									<Button
 										variant="outline"
 										size="sm"
@@ -1009,7 +986,7 @@ export function AccountAddForm({
 									>
 										Try again
 									</Button>
-								</div>
+								</Alert>
 							)}
 						</div>
 					)}
