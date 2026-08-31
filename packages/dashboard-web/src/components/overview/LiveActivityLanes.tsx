@@ -295,8 +295,15 @@ export function LiveActivityLanesView({
 						    are selectable like any other list. NOT aria-hidden: each
 						    label that maps to a single filter is a link, and focusable
 						    content inside an aria-hidden subtree is an accessibility
-						    violation. */}
-							<ul className="w-32 shrink-0 space-y-0 pt-0">
+						    violation.
+
+						    Narrower below `sm`, where the plot is what the card is for
+						    and the labels truncate anyway. With the readout gutter
+						    dropped there too, a 320px viewport leaves 320 − 32 (card
+						    padding) − 96 (this gutter) − 12 (gap) = 180px of plot, so
+						    the card cannot push the document sideways however narrow
+						    the screen gets. */}
+							<ul className="w-24 shrink-0 space-y-0 pt-0 sm:w-32">
 								{lanes.map((lane) => {
 									const href = laneRequestsHref(lane.scope);
 									return (
@@ -510,8 +517,14 @@ export function LiveActivityLanesView({
 							</div>
 
 							{/* Direct labels: every number the marks encode is also written
-						    out, so nothing is reachable only by hovering. */}
-							<ul className="w-40 shrink-0 space-y-0 text-right text-xs">
+						    out, so nothing is reachable only by hovering.
+
+						    Dropped below `sm`: at phone width these four figures per
+						    lane are wider than the plot they annotate, and keeping them
+						    would leave the marks with no room to sit apart. The counts
+						    stay reachable there through the hover card, which carries
+						    the same numbers per mark. */}
+							<ul className="hidden w-40 shrink-0 space-y-0 text-right text-xs sm:block">
 								{lanes.map((lane) => (
 									<li
 										key={lane.key}

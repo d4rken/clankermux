@@ -133,8 +133,11 @@ export function StorageIntegritySection() {
 		</div>
 	) : (
 		<div className="space-y-group">
+			{/* Stacks below `sm`, like the status card's own panel: the skipped and
+			    corrupt descriptions are full sentences, and holding the badge on
+			    the same line squeezed them to a couple of words per line. */}
 			<div
-				className={`flex items-center justify-between p-4 rounded-lg ${tonePanel}`}
+				className={`flex flex-col items-start gap-row p-4 rounded-lg sm:flex-row sm:items-center sm:justify-between ${tonePanel}`}
 			>
 				<div className="flex items-center gap-row">
 					{icon}
@@ -146,7 +149,9 @@ export function StorageIntegritySection() {
 				{badgeNode}
 			</div>
 
-			<dl className="grid grid-cols-2 gap-row text-sm">
+			{/* One column below `sm`: "Last quick check" and its relative time do
+			    not both fit in half a phone-width card. */}
+			<dl className="grid grid-cols-1 gap-row text-sm sm:grid-cols-2">
 				<div>
 					<dt className="text-muted-foreground">Last quick check</dt>
 					<dd>
@@ -189,7 +194,10 @@ export function StorageIntegritySection() {
 				</div>
 			</dl>
 
-			<div className="flex gap-item">
+			{/* Wraps rather than overflowing: the two buttons together are wider
+			    than a phone-width card's interior, so on a narrow screen the second
+			    one drops to its own line instead of pushing past the border. */}
+			<div className="flex flex-wrap gap-item">
 				<Button
 					variant="outline"
 					size="sm"

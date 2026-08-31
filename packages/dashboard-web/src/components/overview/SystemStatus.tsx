@@ -33,7 +33,7 @@ export function SystemStatus() {
 		statusBody = <div className="text-sm text-muted-foreground">Loading…</div>;
 	} else if (error || !data) {
 		statusBody = (
-			<div className="flex items-center justify-between p-4 rounded-lg bg-muted/50">
+			<div className="flex flex-col items-start gap-row p-4 rounded-lg bg-muted/50 sm:flex-row sm:items-center sm:justify-between">
 				<div className="flex items-center gap-row">
 					<AlertTriangle className="h-5 w-5 text-muted-foreground" />
 					<div>
@@ -93,8 +93,12 @@ export function SystemStatus() {
 
 		statusBody = (
 			<>
+				{/* Stacks below `sm`: the label, its description and the badge do not
+				    fit on one line in a phone-width card, and a non-wrapping row
+				    squeezed the description to a couple of words per line while the
+				    badge kept its full width. */}
 				<div
-					className={`flex items-center justify-between p-4 rounded-lg ${tonePanel}`}
+					className={`flex flex-col items-start gap-row p-4 rounded-lg sm:flex-row sm:items-center sm:justify-between ${tonePanel}`}
 				>
 					<div className="flex items-center gap-row">
 						{icon}
@@ -106,7 +110,10 @@ export function SystemStatus() {
 					{badge}
 				</div>
 
-				<div className="grid grid-cols-2 gap-group">
+				{/* One column below `sm`. Two 12px-padded panels side by side in a
+				    phone-width card left each figure about 110px, which is narrower
+				    than the "max (1m): 1,234 ms" line they have to carry. */}
+				<div className="grid grid-cols-1 gap-group sm:grid-cols-2">
 					{/* Uptime */}
 					<div className="rounded-lg border p-row">
 						<div className="flex items-center gap-item text-sm text-muted-foreground">
