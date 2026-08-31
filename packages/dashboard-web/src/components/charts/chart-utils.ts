@@ -41,14 +41,16 @@ export function isChartEmpty(data: ChartDataPoint[] | undefined): boolean {
 }
 
 /**
- * Get tooltip styles from prop
+ * Inline style for a chart tooltip.
+ *
+ * There is ONE tooltip appearance and it is defined in tokens, so a caller's
+ * object is merged ON TOP of it rather than replacing it: passing
+ * `{ maxWidth: 240 }` keeps the token background, border and shadow. Replacing
+ * would drop the token surface and let recharts fall back to its own white
+ * inline default. This used to take a variant name; the variants are gone.
  */
-export function getTooltipStyles(
-	tooltipStyle: keyof typeof CHART_TOOLTIP_STYLE | object,
-): object {
-	return typeof tooltipStyle === "string"
-		? CHART_TOOLTIP_STYLE[tooltipStyle]
-		: tooltipStyle;
+export function getTooltipStyles(tooltipStyle?: object): object {
+	return { ...CHART_TOOLTIP_STYLE, ...tooltipStyle };
 }
 
 /**
@@ -79,7 +81,7 @@ export interface CommonChartProps extends CommonAxisProps {
 	legendHeight?: number;
 	tooltipFormatter?: (value: number, name: string) => [string, string];
 	tooltipLabelFormatter?: TooltipLabelFormatter;
-	tooltipStyle?: keyof typeof CHART_TOOLTIP_STYLE | object;
+	tooltipStyle?: object;
 	animationDuration?: number;
 	onChartClick?: ChartClickHandler;
 }

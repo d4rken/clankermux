@@ -1,4 +1,4 @@
-import { COLORS, type TimeRange } from "../../constants";
+import { CHART_TOKENS, type TimeRange } from "../../constants";
 import { makeTimeTooltipLabelFormatter } from "../../lib/time-format";
 import { BaseAreaChart } from "./BaseAreaChart";
 import { longRangeAxisProps } from "./chart-utils";
@@ -26,7 +26,7 @@ export function ResponseTimeChart({
 			dataKey="responseTime"
 			loading={loading}
 			height={height}
-			color={COLORS.primary}
+			color={CHART_TOKENS.primary}
 			strokeWidth={2}
 			{...longRangeAxisProps(timeRange)}
 			tooltipFormatter={(value) => [`${value}ms`, "Response Time"]}

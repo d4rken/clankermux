@@ -11,7 +11,7 @@ import {
 	XAxis,
 	YAxis,
 } from "recharts";
-import { CHART_PROPS, COLORS } from "../../constants";
+import { CHART_PROPS, CHART_TOKENS } from "../../constants";
 import { SESSION_TOTAL_COLOR } from "../../lib/active-sessions";
 import { formatCompactNumber } from "../../lib/chart-utils";
 import { ChartContainer } from "./ChartContainer";
@@ -97,8 +97,16 @@ export function RequestVolumeSuccessChart({
 				<ComposedChart data={data} margin={{ top: 8, right: 8, left: 0 }}>
 					<defs>
 						<linearGradient id={GRADIENT_ID} x1="0" y1="0" x2="0" y2="1">
-							<stop offset="5%" stopColor={COLORS.primary} stopOpacity={0.8} />
-							<stop offset="95%" stopColor={COLORS.primary} stopOpacity={0.1} />
+							<stop
+								offset="5%"
+								stopColor={CHART_TOKENS.primary}
+								stopOpacity={0.8}
+							/>
+							<stop
+								offset="95%"
+								stopColor={CHART_TOKENS.primary}
+								stopOpacity={0.1}
+							/>
 						</linearGradient>
 					</defs>
 					<CartesianGrid
@@ -170,7 +178,7 @@ export function RequestVolumeSuccessChart({
 						type="monotone"
 						dataKey="requests"
 						name="Requests"
-						stroke={COLORS.primary}
+						stroke={CHART_TOKENS.primary}
 						strokeWidth={2}
 						fillOpacity={1}
 						fill={`url(#${GRADIENT_ID})`}
@@ -180,7 +188,7 @@ export function RequestVolumeSuccessChart({
 						type="monotone"
 						dataKey="successRate"
 						name="Success Rate"
-						stroke={COLORS.success}
+						stroke={CHART_TOKENS.success}
 						strokeWidth={2}
 						dot={false}
 					/>

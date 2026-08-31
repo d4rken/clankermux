@@ -1,5 +1,7 @@
 import React from "react";
 
+import { Button } from "./ui/button";
+
 interface ErrorBoundaryState {
 	hasError: boolean;
 	error: Error | null;
@@ -109,13 +111,13 @@ function DefaultErrorFallback({ error, reset }: DefaultErrorFallbackProps) {
 					{error?.message ||
 						"An unexpected error occurred while loading this component."}
 				</p>
-				<button
-					type="button"
-					onClick={reset}
-					className="px-4 py-2 bg-destructive text-destructive-foreground rounded-md hover:bg-destructive/90 focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2"
-				>
+				{/* The shared Button rather than a bespoke one: this markup was a
+				    hand-rolled copy of the destructive variant, down to a
+				    `ring-offset-2` with no offset colour — a white halo on the dark
+				    ground, the same defect the primitives were just fixed for. */}
+				<Button type="button" variant="destructive" onClick={reset}>
 					Try again
-				</button>
+				</Button>
 			</div>
 		</div>
 	);

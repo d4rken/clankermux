@@ -8,7 +8,7 @@ import {
 	XAxis,
 	YAxis,
 } from "recharts";
-import { CHART_PROPS, COLORS } from "../../constants";
+import { CHART_PROPS, CHART_TOKENS } from "../../constants";
 import { ChartContainer } from "./ChartContainer";
 import {
 	type CommonChartProps,
@@ -55,7 +55,7 @@ export function BaseBarChart({
 	secondaryYAxis = false,
 	tooltipFormatter,
 	tooltipLabelFormatter,
-	tooltipStyle = "default",
+	tooltipStyle,
 	animationDuration = 1000,
 	showLegend = false,
 	legendHeight = 36,
@@ -146,7 +146,7 @@ export function BaseBarChart({
 						<Bar
 							key={barConfig.dataKey}
 							dataKey={barConfig.dataKey}
-							fill={barConfig.fill || COLORS.primary}
+							fill={barConfig.fill || CHART_TOKENS.primary}
 							name={barConfig.name || barConfig.dataKey}
 							yAxisId={barConfig.yAxisId}
 							radius={barConfig.radius}

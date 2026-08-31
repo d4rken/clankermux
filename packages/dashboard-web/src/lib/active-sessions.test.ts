@@ -234,8 +234,11 @@ describe("SCOPE_ORDER / SESSION_SCOPE_COLORS", () => {
 	});
 
 	it("exposes a color for every scope key", () => {
+		// CSS custom properties, not literals: the scope colours are chart accent
+		// tokens, so the series follow the colour mode without the panel
+		// re-rendering.
 		for (const { key } of SCOPE_ORDER) {
-			expect(SESSION_SCOPE_COLORS[key]).toMatch(/^#[0-9a-f]{6}$/i);
+			expect(SESSION_SCOPE_COLORS[key]).toMatch(/^var\(--[a-z-]+\)$/);
 		}
 	});
 });

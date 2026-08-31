@@ -1,6 +1,12 @@
 import { describe, expect, it } from "bun:test";
 import { CLAUDE_MODEL_IDS } from "@clankermux/core";
-import { COLORS, MODEL_PALETTE, MODEL_PALETTE_LIGHT } from "../constants";
+import { STATUS_COLOR } from "../components/overview/LiveActivityLanes";
+import {
+	MODEL_PALETTE,
+	MODEL_PALETTE_LIGHT,
+	PINNED_MARK_COLORS,
+} from "../constants";
+import { readThemeTokens } from "./css-tokens";
 import {
 	type ColorMode,
 	getModelColor,
@@ -85,7 +91,7 @@ function deltaE76(a: string, b: string): number {
  * The pairwise checks above run at normal vision, where amber and a yellow-green
  * are obviously different colors. Under protanopia and deuteranopia the
  * red-green axis collapses and both land on top of the error red — which is how
- * `olive` sat 0.6 dE from `COLORS.error` while looking nothing like it.
+ * `olive` sat 0.6 dE from the pinned error red while looking nothing like it.
  */
 function simulate(hex: string, kind: "prot" | "deut"): string {
 	const h = hex.replace("#", "");
@@ -308,7 +314,7 @@ describe("getModelColor", () => {
 		// fill colour resolves long before the outline does.
 		const MIN_DELTA_E = 15;
 		const MIN_CVD_DELTA_E = 7.9;
-		const SEMANTIC = { warning: COLORS.warning, error: COLORS.error };
+		const SEMANTIC = PINNED_MARK_COLORS;
 
 		// The error red additionally reserves its whole HUE FAMILY. Distance
 		// alone is not enough for it: the retired `red` (#CC3311) cleared 15 dE
@@ -347,6 +353,39 @@ describe("getModelColor", () => {
 		expect(conflicts).toEqual([]);
 	});
 
+	it("draws the status marks from the constant the clearance test measures", () => {
+		// The check above is only worth anything if Live Activity draws the exact
+		// hexes it measured. Routing STATUS_COLOR through `var(--warning)` would
+		// leave every assertion above passing while the card drew the theme's
+		// amber, which is 6.4 dE from `gold` and 2.5 dE from `tan` under
+		// simulated dichromacy. One constant, asserted from both ends.
+		expect(STATUS_COLOR.rate_limited).toBe(PINNED_MARK_COLORS.warning);
+		expect(STATUS_COLOR.error).toBe(PINNED_MARK_COLORS.error);
+	});
+
+	it("keeps the theme's primary clear of every model color", () => {
+		// --primary is drawn as a chart series in its own right (memory, request
+		// volume, session scopes) on the same axes as model-coloured lines, so it
+		// competes for identity exactly as the model hues do — but nothing gated
+		// it until now. The pre-review light primary #155EEF measured 4.8 dE from
+		// `azure` #025CF5, which is Claude Opus 5's light colour, and would have
+		// shipped silently; #164EC9 sits 16.8 dE away.
+		const MIN_DELTA_E = 15;
+		const conflicts: string[] = [];
+		for (const mode of MODES) {
+			const primary = readThemeTokens(mode)["--primary"];
+			for (const [name, hex] of Object.entries(paletteFor(mode))) {
+				const distance = deltaE76(primary, hex);
+				if (distance < MIN_DELTA_E) {
+					conflicts.push(
+						`[${mode}] --primary ${primary} vs ${name} ${hex}: dE ${distance.toFixed(1)}`,
+					);
+				}
+			}
+		}
+		expect(conflicts).toEqual([]);
+	});
+
 	it("keeps Opus 4.5 through 5 off Opus 4's color", () => {
 		const opus4 = getModelColor(CLAUDE_MODEL_IDS.OPUS_4);
 		for (const modelId of [
@@ -361,7 +400,7 @@ describe("getModelColor", () => {
 	});
 
 	it("keeps Opus 5, Sonnet 5 and Mythos 5 mutually distinct", () => {
-		// The reported defect: all three used to resolve to COLORS.primary and
+		// The reported defect: all three used to resolve to the same brand hue and
 		// rendered as one indistinguishable line.
 		const colors = [
 			getModelColor(CLAUDE_MODEL_IDS.OPUS_5),

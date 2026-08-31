@@ -1,17 +1,18 @@
 import { describe, expect, it } from "bun:test";
-import { readFileSync } from "node:fs";
-import { join } from "node:path";
+import { PINNED_MARK_COLORS } from "../constants";
+import { readThemeTokens, type Tokens } from "./css-tokens";
 
 /**
  * Contrast guard for the theme tokens.
  *
- * Paper Terminal defines two complete token sets, one per colour mode.
+ * Substrate defines two complete token sets, one per colour mode.
  * Nothing else checks them: the components only name roles
  * (`text-warning-strong`, `bg-card`), so an amber too light for 12px text
  * produces no error anywhere — it just ships an unreadable status chip.
  *
- * This parses styles/globals.css directly rather than going through a rendered
- * page, because the failure lives in the token values, not in any component.
+ * This reads styles/globals.css directly (via css-tokens.ts) rather than going
+ * through a rendered page, because the failure lives in the token values, not
+ * in any component.
  *
  * The role split it enforces is the one that caused the original defect:
  *
@@ -23,51 +24,6 @@ import { join } from "node:path";
  * Using `-foreground` on a tint is what broke: on `bg-destructive/15` over a
  * white card, `--destructive-foreground` is white.
  */
-
-const CSS_PATH = join(import.meta.dir, "../../styles/globals.css");
-
-type Tokens = Record<string, string>;
-
-/** The `:root` and `.dark` token blocks, in source order. */
-function parseBlocks(css: string): Array<{ selector: string; tokens: Tokens }> {
-	// Comments can contain braces and colons; strip them before matching.
-	const stripped = css.replace(/\/\*[\s\S]*?\*\//g, "");
-	const blocks: Array<{ selector: string; tokens: Tokens }> = [];
-	const blockRe = /^(:root|\.dark)\s*\{([\s\S]*?)^\}/gm;
-	let match = blockRe.exec(stripped);
-	while (match !== null) {
-		const tokens: Tokens = {};
-		const declRe = /(--[a-z-]+)\s*:\s*([^;]+);/g;
-		let decl = declRe.exec(match[2]);
-		while (decl !== null) {
-			tokens[decl[1]] = decl[2].replace(/\s+/g, " ").trim();
-			decl = declRe.exec(match[2]);
-		}
-		blocks.push({ selector: match[1], tokens });
-		match = blockRe.exec(stripped);
-	}
-	return blocks;
-}
-
-/**
- * Resolve the token set a browser would compute for one colour mode.
- *
- * `:root` and `.dark` have equal specificity (0,1,0), so source order decides
- * and `.dark` wins by coming second. Dark deliberately redefines only colour —
- * radius, fonts and spacing are inherited from `:root` — so applying `:root`
- * first and layering `.dark` over it reproduces the cascade exactly.
- */
-function resolve(
-	blocks: ReturnType<typeof parseBlocks>,
-	mode: "light" | "dark",
-): Tokens {
-	const out: Tokens = {};
-	for (const { selector, tokens } of blocks) {
-		if (selector === ".dark" && mode !== "dark") continue;
-		Object.assign(out, tokens);
-	}
-	return out;
-}
 
 // ── colour maths ─────────────────────────────────────────────────────────────
 
@@ -169,24 +125,30 @@ function contrast(a: string, b: string): number {
 
 const MODES = ["light", "dark"] as const;
 
-const blocks = parseBlocks(readFileSync(CSS_PATH, "utf8"));
-
 /** WCAG AA for normal text. Everything read as prose has to clear this. */
 const TEXT_MIN = 4.5;
 
 /**
- * Solid semantic fills. Paper's own fills clear 4.5, but the floor stays at 3
- * because a fill is a badge background carrying a short word, not running
+ * Solid semantic fills. Substrate's own fills clear 4.5, but the floor stays at
+ * 3 because a fill is a badge background carrying a short word, not running
  * prose — and the pairing that matters most (`-foreground` on its own fill) is
  * checked here rather than assumed.
  */
 const FILL_MIN = 3;
 
+/**
+ * Surfaces that only have to be TELLABLE APART, not readable: a hairline rule
+ * against the panel it bounds, a control fill against the card behind it. The
+ * theme separates panels with borders rather than boxes, so a border that
+ * vanishes into the card takes the whole card boundary with it.
+ */
+const SEPARATION_MIN = 1.15;
+
 describe("theme token contrast", () => {
 	it("parses a complete token set for both colour modes", () => {
 		for (const mode of MODES) {
 			{
-				const tokens = resolve(blocks, mode);
+				const tokens = readThemeTokens(mode);
 				for (const required of [
 					"--background",
 					"--foreground",
@@ -207,6 +169,11 @@ describe("theme token contrast", () => {
 					"--info",
 					"--surface-raised",
 					"--border",
+					// The nav rail's ground and its rule. There is deliberately no
+					// --sidebar-foreground: the rail carries plain --foreground, which
+					// is why the contrast pair checked below is --foreground/--sidebar.
+					"--sidebar",
+					"--sidebar-border",
 				]) {
 					expect(`${mode} ${required}`).toBe(
 						`${mode} ${tokens[required] ? required : "MISSING"}`,
@@ -220,7 +187,7 @@ describe("theme token contrast", () => {
 		const failures: string[] = [];
 		for (const mode of MODES) {
 			{
-				const t = resolve(blocks, mode);
+				const t = readThemeTokens(mode);
 				const pairs: Array<[string, string, string]> = [
 					["foreground on background", t["--foreground"], t["--background"]],
 					[
@@ -251,6 +218,27 @@ describe("theme token contrast", () => {
 						t["--muted-foreground"],
 						t["--background"],
 					],
+					// Hover/focus surfaces and menus swap the ground out from under
+					// text that is otherwise only ever checked against --card.
+					[
+						"accent-foreground on accent",
+						t["--accent-foreground"],
+						t["--accent"],
+					],
+					[
+						"secondary-foreground on secondary",
+						t["--secondary-foreground"],
+						t["--secondary"],
+					],
+					[
+						"popover-foreground on popover",
+						t["--popover-foreground"],
+						t["--popover"],
+					],
+					// The nav rail has its own ground and deliberately no foreground
+					// token of its own, so this is the pair that decides whether nav
+					// labels read.
+					["foreground on sidebar", t["--foreground"], t["--sidebar"]],
 				];
 				for (const [label, fg, bg] of pairs) {
 					const ratio = contrast(fg, bg);
@@ -272,7 +260,7 @@ describe("theme token contrast", () => {
 		const failures: string[] = [];
 		for (const mode of MODES) {
 			{
-				const t = resolve(blocks, mode);
+				const t = readThemeTokens(mode);
 				for (const role of ["success", "warning", "destructive", "info"]) {
 					const token = role === "info" ? "--info" : `--${role}-strong`;
 					const ratio = contrast(t[token], surfaceOf(t, "--card"));
@@ -287,23 +275,34 @@ describe("theme token contrast", () => {
 		expect(failures).toEqual([]);
 	});
 
-	it("keeps solid fills legible against their own foreground", () => {
+	it("keeps solid fills legible and the focus ring perceivable", () => {
 		const failures: string[] = [];
 		for (const mode of MODES) {
 			{
-				const t = resolve(blocks, mode);
+				const t = readThemeTokens(mode);
 				const pairs: Array<[string, string, string]> = [
-					["primary", t["--primary-foreground"], t["--primary"]],
-					["success", t["--success-foreground"], t["--success"]],
-					["warning", t["--warning-foreground"], t["--warning"]],
-					["destructive", t["--destructive-foreground"], t["--destructive"]],
+					["primary fill", t["--primary-foreground"], t["--primary"]],
+					["success fill", t["--success-foreground"], t["--success"]],
+					["warning fill", t["--warning-foreground"], t["--warning"]],
+					[
+						"destructive fill",
+						t["--destructive-foreground"],
+						t["--destructive"],
+					],
+					// --info has no -strong partner; its fill pairing is the only
+					// thing standing between an info badge and white-on-pale-blue.
+					["info fill", t["--info-foreground"], t["--info"]],
+					// Not a fill: the focus ring is a non-text UI component (WCAG
+					// 1.4.11), and the same 3:1 applies to it against the ground it
+					// is drawn on. A ring nobody can see is a keyboard user with no
+					// idea where focus is.
+					["ring on background", t["--ring"], t["--background"]],
 				];
 				for (const [label, fg, bg] of pairs) {
 					const ratio = contrast(fg, bg);
-					const key = `${mode} ${label}`;
 					if (ratio < FILL_MIN) {
 						failures.push(
-							`${key} fill: ${ratio.toFixed(2)}:1 (min ${FILL_MIN})`,
+							`${mode} ${label}: ${ratio.toFixed(2)}:1 (min ${FILL_MIN})`,
 						);
 					}
 				}
@@ -313,16 +312,79 @@ describe("theme token contrast", () => {
 	});
 
 	it("keeps borders perceivable against their surface", () => {
-		// Not a WCAG text rule — the three new directions lean on hairline borders
-		// instead of shadows, so a border that vanishes into the card takes the
-		// whole card boundary with it.
+		// Not a WCAG text rule — the theme leans on hairline borders instead of
+		// shadows, so a border that vanishes into the card takes the whole card
+		// boundary with it.
 		const failures: string[] = [];
 		for (const mode of MODES) {
 			{
-				const t = resolve(blocks, mode);
-				const ratio = contrast(t["--border"], surfaceOf(t, "--card"));
-				if (ratio < 1.15) {
-					failures.push(`${mode} --border on --card: ${ratio.toFixed(2)}:1`);
+				const t = readThemeTokens(mode);
+				const pairs: Array<[string, string, string]> = [
+					["--border on --card", t["--border"], surfaceOf(t, "--card")],
+					// --input is the fill of an unfocused control, drawn on a card;
+					// on a dark ground a field that does not separate from the panel
+					// reads as an empty gap rather than something you can type in.
+					["--input on --card", t["--input"], surfaceOf(t, "--card")],
+					[
+						"--sidebar-border on --sidebar",
+						t["--sidebar-border"],
+						t["--sidebar"],
+					],
+				];
+				for (const [label, a, b] of pairs) {
+					const ratio = contrast(a, b);
+					if (ratio < SEPARATION_MIN) {
+						failures.push(
+							`${mode} ${label}: ${ratio.toFixed(2)}:1 (min ${SEPARATION_MIN})`,
+						);
+					}
+				}
+			}
+		}
+		expect(failures).toEqual([]);
+	});
+
+	it("keeps every chart accent perceivable on its own card", () => {
+		// Chart marks are 2px strokes and small fills read against --card, which
+		// makes them non-text UI components under WCAG 1.4.11: 3:1 or they are
+		// decoration. The qualitative accents are tokens and follow the mode; the
+		// two status marks are pinned literals and do not.
+		const failures: string[] = [];
+		for (const mode of MODES) {
+			{
+				const t = readThemeTokens(mode);
+				const accents: Array<[string, string]> = [
+					["--chart-blue", t["--chart-blue"]],
+					["--chart-purple", t["--chart-purple"]],
+					["--chart-pink", t["--chart-pink"]],
+					["--chart-indigo", t["--chart-indigo"]],
+					["--chart-cyan", t["--chart-cyan"]],
+					// Semantic roles are drawn as chart series too (success/error
+					// rates, throttling), so they are held to the same floor.
+					["--primary", t["--primary"]],
+					["--success", t["--success"]],
+					["--warning", t["--warning"]],
+					["--destructive", t["--destructive"]],
+					["pinned error mark", PINNED_MARK_COLORS.error],
+					["pinned warning mark", PINNED_MARK_COLORS.warning],
+				];
+				for (const [label, value] of accents) {
+					// NAMED EXEMPTION: the pinned warning amber measures 2.15:1 on the
+					// light card and cannot move. It is one of exactly two
+					// warning/error pairs (of 36 candidates) that keeps all 28 model
+					// hues clear of the status hues under simulated protanopia and
+					// deuteranopia — see model-colors.test.ts — and every darker amber
+					// that reaches 3:1 collides with a model hue (#D97706 lands 1.9
+					// CVD dE from `gold`, #B45309 0.8 from `fern`). Rate limits are
+					// also drawn as TRIANGLES, so the mark is not colour-alone. This
+					// is the value and the ratio that ship today.
+					if (mode === "light" && label === "pinned warning mark") continue;
+					const ratio = contrast(value, surfaceOf(t, "--card"));
+					if (ratio < FILL_MIN) {
+						failures.push(
+							`${mode} ${label} on --card: ${ratio.toFixed(2)}:1 (min ${FILL_MIN})`,
+						);
+					}
 				}
 			}
 		}

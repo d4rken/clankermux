@@ -203,10 +203,12 @@ export function Navigation() {
 				/>
 			)}
 
-			{/* Sidebar */}
+			{/* Sidebar. Its own ground rather than --card: the rail sits one step
+			    BELOW the panels on the dark side so it recedes and they read as
+			    lying on top of it. */}
 			<aside
 				className={cn(
-					"fixed left-0 top-0 z-40 h-screen w-48 bg-card border-r transition-transform duration-300 lg:translate-x-0",
+					"fixed left-0 top-0 z-40 h-screen w-48 bg-sidebar border-r border-sidebar-border transition-transform duration-300 lg:translate-x-0",
 					isMobileMenuOpen
 						? "translate-x-0"
 						: "-translate-x-full lg:translate-x-0",

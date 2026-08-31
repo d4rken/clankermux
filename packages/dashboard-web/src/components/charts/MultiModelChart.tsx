@@ -179,7 +179,7 @@ export function MultiModelChart({
 					}}
 				/>
 				<Tooltip
-					contentStyle={getTooltipStyles("dark")}
+					contentStyle={getTooltipStyles()}
 					formatter={
 						((value: number) =>
 							formatValue(value, metric)) as TooltipFormatterProp

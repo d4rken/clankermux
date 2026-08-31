@@ -198,7 +198,7 @@ function CompositionSplit({
 					<XAxis type="number" hide domain={[0, totalChars]} />
 					<YAxis type="category" dataKey="name" hide />
 					<Tooltip
-						contentStyle={getTooltipStyles("default")}
+						contentStyle={getTooltipStyles()}
 						formatter={tooltipFormatter}
 					/>
 					{segments.map((segment) => (

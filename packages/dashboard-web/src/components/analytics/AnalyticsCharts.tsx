@@ -14,7 +14,7 @@ import {
 import {
 	CHART_HEIGHTS,
 	CHART_PROPS,
-	COLORS,
+	CHART_TOKENS,
 	type TimeRange,
 } from "../../constants";
 import { useSeriesPalette } from "../../hooks/useSeriesPalette";
@@ -361,7 +361,7 @@ export function MainMetricsChart({
 									dataKey={selectedMetric}
 									loading={loading}
 									height="large"
-									color={COLORS.primary}
+									color={CHART_TOKENS.primary}
 									strokeWidth={2}
 									{...longRangeAxisProps(timeRange)}
 									tooltipLabelFormatter={makeTimeTooltipLabelFormatter(
@@ -399,12 +399,12 @@ export function PerformanceIndicatorsChart({
 					lines={[
 						{
 							dataKey: "errorRate",
-							stroke: COLORS.error,
+							stroke: CHART_TOKENS.error,
 							name: "Error Rate %",
 						},
 						{
 							dataKey: "cacheHitRate",
-							stroke: COLORS.success,
+							stroke: CHART_TOKENS.success,
 							name: "Cache Hit %",
 						},
 					]}
@@ -413,8 +413,8 @@ export function PerformanceIndicatorsChart({
 					showLegend={true}
 					tooltipLabelFormatter={makeTimeTooltipLabelFormatter(timeRange)}
 					referenceLines={[
-						{ y: 90, stroke: COLORS.success },
-						{ y: 5, stroke: COLORS.error },
+						{ y: 90, stroke: CHART_TOKENS.success },
+						{ y: 5, stroke: CHART_TOKENS.error },
 					]}
 				/>
 			</CardContent>
@@ -465,12 +465,12 @@ export function TokenUsageBreakdown({
 										width: `${item.percentage}%`,
 										backgroundColor:
 											index === 0
-												? COLORS.blue
+												? CHART_TOKENS.blue
 												: index === 1
-													? COLORS.success
+													? CHART_TOKENS.success
 													: index === 2
-														? COLORS.warning
-														: COLORS.purple,
+														? CHART_TOKENS.warning
+														: CHART_TOKENS.purple,
 									}}
 								/>
 							</div>
@@ -521,18 +521,26 @@ export function CumulativeGrowthChart({
 						    with TokenUsageChart's gradient and swap fills. */}
 						<defs>
 							<linearGradient id="cumulativeTokens" x1="0" y1="0" x2="0" y2="1">
-								<stop offset="0%" stopColor={COLORS.blue} stopOpacity={0.9} />
-								<stop offset="100%" stopColor={COLORS.blue} stopOpacity={0.1} />
-							</linearGradient>
-							<linearGradient id="cumulativeCost" x1="0" y1="0" x2="0" y2="1">
 								<stop
 									offset="0%"
-									stopColor={COLORS.warning}
+									stopColor={CHART_TOKENS.blue}
 									stopOpacity={0.9}
 								/>
 								<stop
 									offset="100%"
-									stopColor={COLORS.warning}
+									stopColor={CHART_TOKENS.blue}
+									stopOpacity={0.1}
+								/>
+							</linearGradient>
+							<linearGradient id="cumulativeCost" x1="0" y1="0" x2="0" y2="1">
+								<stop
+									offset="0%"
+									stopColor={CHART_TOKENS.warning}
+									stopOpacity={0.9}
+								/>
+								<stop
+									offset="100%"
+									stopColor={CHART_TOKENS.warning}
 									stopOpacity={0.1}
 								/>
 							</linearGradient>
@@ -552,19 +560,19 @@ export function CumulativeGrowthChart({
 						<YAxis
 							yAxisId="tokens"
 							className="text-xs"
-							stroke={COLORS.blue}
+							stroke={CHART_TOKENS.blue}
 							tickFormatter={formatCompactNumber}
 						/>
 						<YAxis
 							yAxisId="cost"
 							orientation="right"
 							className="text-xs"
-							stroke={COLORS.warning}
+							stroke={CHART_TOKENS.warning}
 							tickFormatter={formatCompactCurrency}
 						/>
 						<Tooltip
 							labelClassName="font-bold"
-							contentStyle={getTooltipStyles("default")}
+							contentStyle={getTooltipStyles()}
 							labelFormatter={makeTimeTooltipLabelFormatter(timeRange)}
 							formatter={
 								((value: number | string, name: string) => {
@@ -586,7 +594,7 @@ export function CumulativeGrowthChart({
 							yAxisId="tokens"
 							type="monotone"
 							dataKey="tokens"
-							stroke={COLORS.blue}
+							stroke={CHART_TOKENS.blue}
 							strokeWidth={3}
 							fillOpacity={1}
 							fill="url(#cumulativeTokens)"
@@ -597,7 +605,7 @@ export function CumulativeGrowthChart({
 							yAxisId="cost"
 							type="monotone"
 							dataKey="cost"
-							stroke={COLORS.warning}
+							stroke={CHART_TOKENS.warning}
 							strokeWidth={3}
 							fillOpacity={1}
 							fill="url(#cumulativeCost)"

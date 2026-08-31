@@ -1,5 +1,5 @@
 import { formatNumber } from "@clankermux/ui-common";
-import { COLORS, type TimeRange } from "../../constants";
+import { CHART_TOKENS, type TimeRange } from "../../constants";
 import { formatCompactNumber } from "../../lib/chart-utils";
 import { makeTimeTooltipLabelFormatter } from "../../lib/time-format";
 import { BaseAreaChart } from "./BaseAreaChart";
@@ -28,7 +28,7 @@ export function RequestVolumeChart({
 			dataKey="requests"
 			loading={loading}
 			height={height}
-			color={COLORS.primary}
+			color={CHART_TOKENS.primary}
 			gradientId="colorRequests"
 			strokeWidth={2}
 			{...longRangeAxisProps(timeRange)}

@@ -7,7 +7,7 @@ import {
 	ResponsiveContainer,
 	Tooltip,
 } from "recharts";
-import type { CHART_HEIGHTS, CHART_TOOLTIP_STYLE } from "../../constants";
+import type { CHART_HEIGHTS } from "../../constants";
 import { useSeriesPalette } from "../../hooks/useSeriesPalette";
 import { ChartContainer } from "./ChartContainer";
 import { getChartHeight, getTooltipStyles } from "./chart-utils";
@@ -29,7 +29,7 @@ interface BasePieChartProps {
 	/** Overrides the palette. Omit to follow the active theme's chart ground. */
 	colors?: string[];
 	tooltipFormatter?: TooltipFormatterFunction;
-	tooltipStyle?: keyof typeof CHART_TOOLTIP_STYLE | object;
+	tooltipStyle?: object;
 	animationDuration?: number;
 	showLegend?: boolean;
 	legendLayout?: "horizontal" | "vertical";
@@ -55,7 +55,7 @@ export function BasePieChart({
 	cy = "50%",
 	colors,
 	tooltipFormatter,
-	tooltipStyle = "default",
+	tooltipStyle,
 	animationDuration = 1000,
 	showLegend = false,
 	legendLayout = "horizontal",

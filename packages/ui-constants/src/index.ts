@@ -1,25 +1,65 @@
-// Color palette used across UI components
-export const COLORS = {
-	primary: "#f38020",
-	success: "#10b981",
-	warning: "#f59e0b",
-	error: "#ef4444",
-	blue: "#3b82f6",
-	purple: "#8b5cf6",
-	pink: "#ec4899",
-	indigo: "#6366f1",
-	cyan: "#06b6d4",
+/**
+ * The two status hues that are NOT theme tokens, and must not become them.
+ *
+ * Live Activity draws amber "rate limited" and red "failed" marks in the same
+ * plot as model-coloured request marks. `model-colors.test.ts` measures all 28
+ * model hues — in both colour modes, at normal vision and under simulated
+ * protanopia and deuteranopia — against exactly these two values, and
+ * `scripts/extend-model-palette.ts` searches for new hues against them too. Of
+ * 36 candidate warning/error pairs, only this one and #F7B500/#EF4444 keep
+ * every model hue clear; the theme's own --warning (#F2B544 on the dark ground)
+ * fails on `gold` at 6.4 dE and on `tan` at 2.5 dE under dichromacy.
+ *
+ * So these stay literals, deliberately outside the mode-following tokens:
+ * routing them through --warning/--destructive would silently invalidate the
+ * separation guarantee the palette is built on.
+ */
+export const PINNED_MARK_COLORS = {
+	warning: "#F59E0B",
+	error: "#EF4444",
+} as const;
+
+/**
+ * Chart accents, as CSS custom properties rather than literals.
+ *
+ * Anything rendered into the DOM or SVG can name a token directly —
+ * `stroke="var(--primary)"` is valid SVG, and recharts writes its props
+ * straight onto the element — so chart colour follows the colour mode with no
+ * JavaScript, no hook and no re-render. The literals these replaced were a
+ * single fixed set for both modes, which is how a chart ended up drawing
+ * Cloudflare orange on a theme that has no orange in it.
+ *
+ * The semantic four resolve to the theme's own roles. The five qualitative
+ * hues resolve to --chart-*, which is a per-mode set verified >=3:1 on its own
+ * card and >=15 dE apart within a mode: MemoryUsageChart draws
+ * primary/purple/blue/cyan in one plot, and ModelPerformanceTable draws seven
+ * of these as adjacent column bars.
+ *
+ * NOT for per-model series — those come from MODEL_PALETTE below, which needs
+ * computed literals for compositing and legend swatches.
+ */
+export const CHART_TOKENS = {
+	primary: "var(--primary)",
+	success: "var(--success)",
+	warning: "var(--warning)",
+	error: "var(--destructive)",
+	blue: "var(--chart-blue)",
+	purple: "var(--chart-purple)",
+	pink: "var(--chart-pink)",
+	indigo: "var(--chart-indigo)",
+	cyan: "var(--chart-cyan)",
 } as const;
 
 /**
  * Qualitative palette for per-model data series.
  *
- * Deliberately separate from `COLORS`: those are SEMANTIC names (success,
+ * Deliberately separate from `CHART_TOKENS`: those are ROLES (success,
  * warning, error, ...) that other components rely on, and there are only nine
  * of them — far too few to give every model a unique hue, which is why models
  * used to collide. Charts plot every model in the time range side by side, so
  * a data-series palette needs many mutually distinguishable hues and nothing
- * else.
+ * else. These are also literals rather than tokens, because a model's colour
+ * has to be composited and drawn into legend swatches, not just handed to SVG.
  *
  * Every hue clears the same two bars, enforced by model-colors.test.ts:
  * 15 dE from every other entry at normal vision and 7.9 dE under simulated
@@ -27,7 +67,7 @@ export const COLORS = {
  * reads on the near-black chart background (hsl(220 13% 8%)).
  *
  * A second exclusion applies on top of the pairwise one: no entry may be
- * confusable with `COLORS.warning` or `COLORS.error`. Those two hues MEAN
+ * confusable with `PINNED_MARK_COLORS.warning` or `.error`. Those two hues MEAN
  * "rate limited" and "failed" on surfaces that draw model-coloured marks
  * alongside status-coloured ones — Live Activity is one — so a model wearing
  * one of them reads as a status on sight, whatever its shape says.
@@ -149,8 +189,8 @@ export const MODEL_PALETTE_LIGHT: Record<keyof typeof MODEL_PALETTE, string> = {
 /**
  * Fallback sequence for series that have no explicit model assignment.
  *
- * Drawn from MODEL_PALETTE rather than the semantic COLORS object: the old
- * sequence was orange/blue/purple/pink/green straight out of COLORS, which put
+ * Drawn from MODEL_PALETTE rather than the semantic accent set: the old
+ * sequence was orange/blue/purple/pink/green straight out of it, which put
  * the brand hue and a non-colourblind-safe set on charts that sit next to
  * MODEL_COLORS series using the curated palette. Two palettes disagreeing on
  * the same axes is what made unknown models look like a different kind of
@@ -193,31 +233,34 @@ export const CHART_HEIGHTS = {
 	large: 400,
 } as const;
 
-// Common chart tooltip styles
+/**
+ * The chart tooltip's surface. One definition, entirely in tokens.
+ *
+ * There used to be three, and two of them were defects. `dark` hard-coded
+ * rgba(0,0,0,0.8) with a white-alpha hairline and the codebase's only literal
+ * 8px radius, so it neither followed the colour mode nor matched any other
+ * floating surface. `success` filled with the success hue and put plain white
+ * on top of it, the same sub-3:1 pairing badge.tsx documents at its own
+ * success variant. A tooltip that needs a success tint uses `var(--success)`
+ * with `var(--success-foreground)`.
+ *
+ * A tooltip is a floating surface, so it takes --surface-raised and the
+ * overlay shadow rather than --card: it occludes the plot it is describing.
+ */
 export const CHART_TOOLTIP_STYLE = {
-	default: {
-		backgroundColor: "var(--background)",
-		border: "1px solid var(--border)",
-		borderRadius: "var(--radius)",
-	},
-	success: {
-		backgroundColor: COLORS.success,
-		border: `1px solid ${COLORS.success}`,
-		borderRadius: "var(--radius)",
-		color: "#fff",
-	},
-	dark: {
-		backgroundColor: "rgba(0,0,0,0.8)",
-		border: "1px solid rgba(255,255,255,0.2)",
-		borderRadius: "8px",
-		backdropFilter: "blur(8px)",
-	},
+	backgroundColor: "var(--surface-raised)",
+	color: "var(--foreground)",
+	border: "1px solid var(--border)",
+	borderRadius: "var(--radius)",
+	boxShadow: "var(--overlay-shadow)",
 } as const;
 
-// Chart common properties
+// Chart common properties. The grid is `stroke-border`, not `stroke-muted`:
+// --muted is a fill hue and sits ~1.2:1 against the card on the dark ground,
+// which is an invisible grid.
 export const CHART_PROPS = {
 	strokeDasharray: "3 3",
-	gridClassName: "stroke-muted",
+	gridClassName: "stroke-border",
 } as const;
 
 // API and data refresh intervals (in milliseconds)
