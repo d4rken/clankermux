@@ -212,8 +212,8 @@ export function MetricCard({
 													{row.value}
 												</span>
 											</PopoverTrigger>
-											{/* Numeric padding: cancels the primitive's `p-4`,
-											    which a scale key cannot (see above). */}
+											{/* Passing a padding explicitly is what lets tailwind-merge
+											    cancel the primitive's own `p-4`. */}
 											<PopoverContent className="w-auto p-2 text-xs">
 												<p>{row.tooltip}</p>
 											</PopoverContent>
