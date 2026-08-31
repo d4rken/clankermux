@@ -234,7 +234,7 @@ export function LiveActivityLanesView({
 
 	return (
 		<Card>
-			<CardHeader className="p-4 pb-2">
+			<CardHeader className="p-4 pb-item">
 				{/* The selector is anchored to the card's top-right corner rather than
 				    trailing the readouts: `active` and `req/min` change width every
 				    tick, and a control at the end of that row would shift under the
@@ -281,9 +281,28 @@ export function LiveActivityLanesView({
 					</span>
 				</div>
 			</CardHeader>
-			<CardContent className="p-4 pt-2">
+			{/* `p-4` stays spelled numerically: it is the tailwind-merge exemption
+			    documented in `card.tsx`, without which `CardContent`'s own `pt-0`
+			    survives and the body loses its top padding. `max-sm:px-0` hands the
+			    32px of side padding to the plot at phone width, which means EVERY
+			    direct child of this container has to carry its own inset below `sm`
+			    or its contents sit against the card border. The children, across
+			    both branches of the ternary:
+
+			      - the empty-state paragraph takes `px-item`, so a line that wraps
+			        under browser font scaling cannot run into the border;
+			      - the plot row needs no inset of its own, because its children
+			        already handle it: the lane-label gutter takes `pl-item` out of
+			        its own 96px, the plot wrapper is full-bleed by design, and the
+			        readout gutter does not render below `sm` at all;
+			      - the model legend takes `px-item` on its contents while its
+			        `border-t` stays full-width.
+
+			    Anything added here needs the same, and this list has to grow with
+			    it. */}
+			<CardContent className="p-4 pt-item max-sm:px-0">
 				{lanes.length === 0 ? (
-					<p className="py-6 text-center text-sm text-muted-foreground">
+					<p className="py-section text-center text-sm text-muted-foreground max-sm:px-item">
 						{primed
 							? "No requests in the last few minutes."
 							: "Waiting for the request stream…"}
@@ -295,8 +314,33 @@ export function LiveActivityLanesView({
 						    are selectable like any other list. NOT aria-hidden: each
 						    label that maps to a single filter is a link, and focusable
 						    content inside an aria-hidden subtree is an accessibility
-						    violation. */}
-							<ul className="w-32 shrink-0 space-y-0 pt-0">
+						    violation.
+
+						    Narrower below `sm`, where the plot is what the card is for
+						    and the labels truncate anyway, and inset by `pl-item` there
+						    because the card drops its own side padding at that width. The
+						    inset comes out of this gutter's 96px, not out of the plot.
+
+						    Everything the card sits inside has to be counted, including the
+						    page wrapper: `App.tsx` lays out all route content in a
+						    `p-4 md:p-6 lg:p-8` container, which is 16px a side at phone
+						    width. With the readout gutter dropped below `sm` too, a 320px
+						    viewport leaves
+
+						        320 − 32 (page wrapper `p-4`) − 2 (card border)
+						            − 0 (card padding, dropped below `sm`)
+						            − 96 (this gutter) − 12 (gap)  =  178px of plot,
+
+						    so the card cannot push the document sideways however narrow the
+						    screen gets.
+
+						    `data-testid` so a test can name this list rather than
+						    reaching for "the first <ul>", which the legend below would
+						    silently inherit the day this one moves. */}
+							<ul
+								data-testid="live-lane-labels"
+								className="w-24 shrink-0 space-y-0 pt-0 max-sm:pl-item sm:w-32"
+							>
 								{lanes.map((lane) => {
 									const href = laneRequestsHref(lane.scope);
 									return (
@@ -495,7 +539,7 @@ export function LiveActivityLanesView({
 							    set by pointer movement as well as by focus, so growing the
 							    column by a line of text on hover would shove everything
 							    below the card down and back on every pass over a mark. */}
-								<div className="mt-1 h-4">
+								<div className="mt-tight h-4">
 									{selected && (
 										<a
 											href={requestDetailsHref(selected.id)}
@@ -510,8 +554,24 @@ export function LiveActivityLanesView({
 							</div>
 
 							{/* Direct labels: every number the marks encode is also written
-						    out, so nothing is reachable only by hovering. */}
-							<ul className="w-40 shrink-0 space-y-0 text-right text-xs">
+						    out, so nothing is reachable only by hovering.
+
+						    Dropped below `sm`: at phone width these four figures per
+						    lane are wider than the plot they annotate, and keeping them
+						    would leave the marks with no room to sit apart.
+
+						    Nothing replaces them there. Per-lane totals are a desktop-only
+						    affordance: below `sm` the request, token, 429 and error counts
+						    per lane are simply not shown anywhere in the UI. The hover card
+						    is NOT a substitute — it reports one event (its tokens, status,
+						    duration, model, account, project, timestamp), never a lane
+						    aggregate.
+
+						    They cannot move into the left label gutter either: that gutter
+						    is height-locked to LANE_HEIGHT so its rows stay aligned with the
+						    lanes drawn inside the single SVG, and a second line of text does
+						    not fit without changing that constant. */}
+							<ul className="hidden w-40 shrink-0 space-y-0 text-right text-xs sm:block">
 								{lanes.map((lane) => (
 									<li
 										key={lane.key}
@@ -576,7 +636,13 @@ function ModelLegend({
 	if (models.length === 0 && ranking.otherModels === 0) return null;
 
 	return (
-		<ul className="mt-2 flex flex-wrap items-center gap-x-row gap-y-item border-t pt-2 text-xs text-muted-foreground">
+		// `data-testid` so the legend can be selected on its own: it used to be
+		// found by slicing the markup after `</svg>`, which quietly included the
+		// selected-request row and the readout gutter that now sit there too.
+		<ul
+			data-testid="live-legend"
+			className="mt-item flex flex-wrap items-center gap-x-row gap-y-item border-t pt-item text-xs text-muted-foreground max-sm:px-item"
+		>
 			{models.map((shortName) => (
 				<li key={shortName} className="flex items-center gap-item">
 					<span
@@ -649,7 +715,7 @@ function WindowSelector({
 			// element. `min-w-0` undoes the UA's min-inline-size; `shrink-0`
 			// then keeps the four options at full width in the header's flex
 			// row, so the description column absorbs any narrowing instead.
-			className="flex min-w-0 shrink-0 items-center gap-tight rounded-md border p-0.5"
+			className="flex min-w-0 shrink-0 items-center gap-tight rounded-md border p-tight"
 			aria-label="Live activity time range"
 		>
 			{LIVE_WINDOW_OPTIONS.map((option) => {
@@ -660,7 +726,7 @@ function WindowSelector({
 						type="button"
 						onClick={() => onChange(option.ms)}
 						aria-pressed={active}
-						className={`rounded px-1.5 py-0.5 text-xs tabular-nums transition-colors ${
+						className={`rounded px-item py-tight text-xs tabular-nums transition-colors ${
 							active
 								? "bg-primary text-primary-foreground"
 								: "text-muted-foreground hover:bg-muted"
@@ -1284,7 +1350,7 @@ function MarkTooltip({ event }: { event: LiveEvent }) {
 		<div
 			role="status"
 			aria-live="polite"
-			className="pointer-events-none absolute right-4 top-4 z-10 rounded-md border bg-popover/95 px-3 py-2 text-xs shadow-overlay backdrop-blur"
+			className="pointer-events-none absolute right-4 top-4 z-10 rounded-md border bg-popover/95 px-row py-item text-xs shadow-overlay backdrop-blur"
 		>
 			<div className="flex items-baseline gap-item">
 				<span className="text-sm font-semibold tabular-nums">
@@ -1292,7 +1358,7 @@ function MarkTooltip({ event }: { event: LiveEvent }) {
 				</span>
 				<span className="text-muted-foreground">tokens</span>
 			</div>
-			<dl className="mt-1 space-y-tight text-muted-foreground">
+			<dl className="mt-tight space-y-tight text-muted-foreground">
 				<Row label="Status" value={STATUS_LABEL[event.status]} />
 				{event.durationMs !== null && (
 					<Row
@@ -1305,7 +1371,7 @@ function MarkTooltip({ event }: { event: LiveEvent }) {
 				<Row label="Project" value={event.project ?? "(no project)"} />
 				<Row label="At" value={new Date(event.ts).toLocaleTimeString()} />
 			</dl>
-			<p className="mt-1 text-muted-foreground">Click to open details</p>
+			<p className="mt-tight text-muted-foreground">Click to open details</p>
 		</div>
 	);
 }

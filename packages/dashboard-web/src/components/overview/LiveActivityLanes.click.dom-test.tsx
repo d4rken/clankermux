@@ -2,7 +2,12 @@ import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { act, createRef } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import type { Lane, LiveEvent } from "../../lib/live-activity";
-import { buildLanes } from "../../lib/live-activity";
+import {
+	buildLanes,
+	LANE_HEIGHT,
+	markCenterX,
+	NOW_INSET,
+} from "../../lib/live-activity";
 import { ScrollingLanes } from "./LiveActivityLanes";
 
 /**
@@ -27,8 +32,6 @@ const WINDOW = 180_000;
 const T0 = 1_700_000_000_000;
 const PLOT_WIDTH = 720;
 const PLOT_HEIGHT = 76;
-const LANE_HEIGHT = 28;
-const NOW_INSET = 8;
 
 function event(over: Partial<LiveEvent> = {}): LiveEvent {
 	return {
@@ -55,10 +58,16 @@ const lanes: Lane[] = buildLanes(
 	6,
 ).lanes;
 
-/** Plot x of a mark's centre, matching the renderer's placement. */
+/**
+ * Plot x of a mark's centre.
+ *
+ * The renderer's own `markCenterX`, not a copy of its arithmetic: aiming a
+ * click with a second implementation only proves the two agree, and they were
+ * free to drift apart. `LANE_HEIGHT` and `NOW_INSET` come from the same module
+ * for the same reason.
+ */
 function xOfTs(ts: number): number {
-	const usable = PLOT_WIDTH - NOW_INSET;
-	return usable - ((T0 - ts) * usable) / WINDOW;
+	return markCenterX(ts, T0, WINDOW, PLOT_WIDTH);
 }
 
 let root: Root | null = null;
@@ -87,8 +96,16 @@ function stubPlotRect(svg: SVGSVGElement) {
 		}) as DOMRect;
 }
 
+/**
+ * The plot, by the `role="img"` it already carries.
+ *
+ * Not `querySelector("svg")`: that takes the FIRST svg in the card, so a single
+ * lucide icon added anywhere above the plot would silently point every case in
+ * this file at a 16px glyph — and they would go on passing or failing for
+ * reasons that have nothing to do with the plot.
+ */
 function plot(): SVGSVGElement {
-	const svg = host?.querySelector("svg");
+	const svg = host?.querySelector('svg[role="img"]');
 	if (!svg) throw new Error("plot not rendered");
 	return svg as SVGSVGElement;
 }

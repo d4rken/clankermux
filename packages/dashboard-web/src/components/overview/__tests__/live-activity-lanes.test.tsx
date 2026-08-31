@@ -66,16 +66,40 @@ function render(
  * The plot only. Model names and hues appear in three places — the marks, their
  * tooltips, and the legend — so a whole-markup `toContain` cannot tell "this
  * mark is red" from "red is listed in the key below".
+ *
+ * Keyed on `role="img"`, which the plot element already carries and nothing
+ * else in the card does. Slicing from the first `<svg` instead would silently
+ * follow any icon added to the header, since every lucide glyph is an svg too.
  */
 function plotOf(markup: string): string {
-	const start = markup.indexOf("<svg");
-	const end = markup.indexOf("</svg>");
-	return markup.slice(start, end);
+	const marker = markup.indexOf('role="img"');
+	if (marker === -1) throw new Error("plot not rendered");
+	return markup.slice(
+		markup.lastIndexOf("<svg", marker),
+		markup.indexOf("</svg>", marker),
+	);
 }
 
-/** The legend strip only, for assertions about what the key lists and in what order. */
+/** The markup of the `<ul>` carrying `testid`, that element only. */
+function listOf(markup: string, testid: string): string {
+	const marker = markup.indexOf(`data-testid="${testid}"`);
+	if (marker === -1) throw new Error(`${testid} not rendered`);
+	return markup.slice(
+		markup.lastIndexOf("<ul", marker),
+		markup.indexOf("</ul>", marker) + "</ul>".length,
+	);
+}
+
+/**
+ * The legend strip only, for assertions about what the key lists and in what
+ * order.
+ *
+ * Selected by its own hook rather than as "everything after `</svg>`": the
+ * selected-request row and the per-lane readout gutter already sit between the
+ * plot and the legend, so that slice had stopped meaning what it says.
+ */
 function legendOf(markup: string): string {
-	return markup.slice(markup.indexOf("</svg>"));
+	return listOf(markup, "live-legend");
 }
 
 describe("LiveActivityLanesView colour encoding", () => {
@@ -370,7 +394,9 @@ describe("LiveActivityLanesView", () => {
 		// Focusable content inside an aria-hidden subtree is an accessibility
 		// violation, not a cosmetic one.
 		const html = render();
-		const labelList = html.slice(html.indexOf("<ul"), html.indexOf("</ul>"));
+		// The lane gutter by name. "The first <ul>" happened to be this list and
+		// would keep passing while pointing at the legend the day one moves.
+		const labelList = listOf(html, "live-lane-labels");
 
 		expect(labelList).toContain('href="/requests?project=clankermux"');
 		expect(labelList).not.toContain("aria-hidden");

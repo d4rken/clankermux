@@ -1,6 +1,7 @@
 import { formatTokens } from "@clankermux/ui-common";
 import { AlertCircle } from "lucide-react";
 import { useMemo } from "react";
+import { CHART_HEIGHTS } from "../../constants";
 import { useSeriesPalette } from "../../hooks/useSeriesPalette";
 import { formatCompactNumber } from "../../lib/chart-utils";
 import type { OverviewTimeSeriesRow } from "../../lib/overview-timeseries";
@@ -39,11 +40,24 @@ interface ChartsSectionProps {
 	unavailable?: boolean;
 }
 
-/** Stands in for a chart whose data could not be read. */
-function ChartUnavailable({ height }: { height: string }) {
+/**
+ * Stands in for a chart whose data could not be read.
+ *
+ * Takes the same `CHART_HEIGHTS` key as the chart it replaces, not a height
+ * class of its own. The two used to be spelled independently — `h-64` (256px)
+ * standing in for a `medium` chart drawn at 300px, `h-40` (160px) for a
+ * `compact` one at 180px — so every panel jumped by 20 to 44px at the moment
+ * data arrived, which is the one moment the reader is looking at it.
+ *
+ * This renders INSTEAD of `ChartContainer`, not inside it, so it has to reserve
+ * that height itself. Reserving the full height is the point: a failed read
+ * holds the space its chart would occupy rather than collapsing the page.
+ */
+function ChartUnavailable({ height }: { height: keyof typeof CHART_HEIGHTS }) {
 	return (
 		<div
-			className={`flex items-center justify-center gap-item text-xs text-warning-strong ${height}`}
+			className="flex items-center justify-center gap-item text-xs text-warning-strong"
+			style={{ height: CHART_HEIGHTS[height] }}
 		>
 			<AlertCircle className="h-3.5 w-3.5 shrink-0" />
 			Chart data unavailable
@@ -105,7 +119,7 @@ export function ChartsSection({
 				</CardHeader>
 				<CardContent>
 					{unavailable ? (
-						<ChartUnavailable height="h-64" />
+						<ChartUnavailable height="medium" />
 					) : (
 						<RequestVolumeSuccessChart
 							data={timeSeriesData}
@@ -129,7 +143,7 @@ export function ChartsSection({
 					</CardHeader>
 					<CardContent className="p-4 pt-0">
 						{unavailable ? (
-							<ChartUnavailable height="h-40" />
+							<ChartUnavailable height="compact" />
 						) : (
 							<BasePieChart
 								data={modelData}
@@ -140,7 +154,7 @@ export function ChartsSection({
 								paddingAngle={5}
 							/>
 						)}
-						<div className="mt-3 space-y-item">
+						<div className="mt-row space-y-item">
 							{modelData.map((model, index) => (
 								<div
 									key={model.name}
@@ -173,7 +187,7 @@ export function ChartsSection({
 					</CardHeader>
 					<CardContent className="p-4 pt-0">
 						{unavailable ? (
-							<ChartUnavailable height="h-40" />
+							<ChartUnavailable height="compact" />
 						) : (
 							<BasePieChart
 								data={accountUsageDonutData}
@@ -184,7 +198,7 @@ export function ChartsSection({
 								paddingAngle={5}
 							/>
 						)}
-						<div className="mt-3 space-y-item">
+						<div className="mt-row space-y-item">
 							{accountUsageDonutData.map((account, index) => {
 								const models = accountModelBreakdown.get(account.name) ?? [];
 								return (
@@ -205,6 +219,11 @@ export function ChartsSection({
 											<span className="font-medium">{account.value}</span>
 										</div>
 										{models.length > 1 && (
+											// `pl-5` is an ALIGNMENT, not a rhythm step, so it stays
+											// off the scale: 20px is the account row's swatch (12px)
+											// plus its `gap-item` (8px), which is what puts these
+											// per-model lines under the account NAME rather than
+											// under its dot.
 											<div className="pl-5 space-y-tight">
 												{models.map((m) => (
 													<div
@@ -234,7 +253,7 @@ export function ChartsSection({
 					</CardHeader>
 					<CardContent className="p-4 pt-0">
 						{unavailable ? (
-							<ChartUnavailable height="h-40" />
+							<ChartUnavailable height="compact" />
 						) : (
 							<BasePieChart
 								data={projectDonutData}
@@ -249,7 +268,7 @@ export function ChartsSection({
 								]}
 							/>
 						)}
-						<div className="mt-3 space-y-item">
+						<div className="mt-row space-y-item">
 							{projectDonutData.map((project, index) => (
 								<div
 									key={project.name}

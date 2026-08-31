@@ -46,7 +46,7 @@ function DetailRow({ label, children }: DetailRowProps) {
 	return (
 		<div>
 			<p className="label-caps">{label}</p>
-			<div className="text-sm mt-0.5">{children}</div>
+			<div className="text-sm mt-tight">{children}</div>
 		</div>
 	);
 }
@@ -91,7 +91,7 @@ export function ErrorDetailsModal({
 
 						<div className="grid grid-cols-1 sm:grid-cols-2 gap-group">
 							<DetailRow label="Error code">
-								<code className="font-mono text-xs bg-muted px-1.5 py-0.5 rounded">
+								<code className="font-mono text-xs bg-muted px-item py-tight rounded">
 									{error.errorCode}
 								</code>
 							</DetailRow>
@@ -147,8 +147,8 @@ export function ErrorDetailsModal({
 
 						<Separator />
 
-						<div className="rounded-lg bg-muted/50 p-3 text-sm">
-							<p className="label-caps mb-1">Suggestion</p>
+						<div className="rounded-lg bg-muted/50 p-row text-sm">
+							<p className="label-caps mb-tight">Suggestion</p>
 							{meta.suggestion}
 						</div>
 

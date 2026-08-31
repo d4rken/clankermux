@@ -133,8 +133,11 @@ export function StorageIntegritySection() {
 		</div>
 	) : (
 		<div className="space-y-group">
+			{/* Stacks below `sm`, like the status card's own panel: the skipped and
+			    corrupt descriptions are full sentences, and holding the badge on
+			    the same line squeezed them to a couple of words per line. */}
 			<div
-				className={`flex items-center justify-between p-4 rounded-lg ${tonePanel}`}
+				className={`flex flex-col items-start gap-row p-4 rounded-lg sm:flex-row sm:items-center sm:justify-between ${tonePanel}`}
 			>
 				<div className="flex items-center gap-row">
 					{icon}
@@ -146,7 +149,9 @@ export function StorageIntegritySection() {
 				{badgeNode}
 			</div>
 
-			<dl className="grid grid-cols-2 gap-row text-sm">
+			{/* One column below `sm`: "Last quick check" and its relative time do
+			    not both fit in half a phone-width card. */}
+			<dl className="grid grid-cols-1 gap-row text-sm sm:grid-cols-2">
 				<div>
 					<dt className="text-muted-foreground">Last quick check</dt>
 					<dd>
@@ -189,14 +194,17 @@ export function StorageIntegritySection() {
 				</div>
 			</dl>
 
-			<div className="flex gap-item">
+			{/* Wraps rather than overflowing: the two buttons together are wider
+			    than a phone-width card's interior, so on a narrow screen the second
+			    one drops to its own line instead of pushing past the border. */}
+			<div className="flex flex-wrap gap-item">
 				<Button
 					variant="outline"
 					size="sm"
 					disabled={isRunning}
 					onClick={() => onClick("quick")}
 				>
-					<RefreshCw className="h-4 w-4 mr-2" />
+					<RefreshCw className="h-4 w-4 mr-item" />
 					Run quick check
 				</Button>
 				<Button
@@ -205,7 +213,7 @@ export function StorageIntegritySection() {
 					disabled={isRunning}
 					onClick={() => onClick("full")}
 				>
-					<RefreshCw className="h-4 w-4 mr-2" />
+					<RefreshCw className="h-4 w-4 mr-item" />
 					Run full check
 				</Button>
 			</div>
@@ -242,8 +250,8 @@ export function StorageIntegrityBanner() {
 
 	if (isError && data === undefined) {
 		return (
-			<div className="flex items-start gap-row p-3 rounded-lg bg-warning/10 border border-warning/30">
-				<AlertCircle className="h-5 w-5 text-warning-strong mt-0.5 shrink-0" />
+			<div className="flex items-start gap-row p-row rounded-lg bg-warning/10 border border-warning/30">
+				<AlertCircle className="h-5 w-5 text-warning-strong mt-tight shrink-0" />
 				<div className="text-sm">
 					<p className="font-medium">Database integrity status unavailable</p>
 					<p className="text-muted-foreground">
@@ -265,9 +273,9 @@ export function StorageIntegrityBanner() {
 		return (
 			<div
 				role="alert"
-				className="flex items-start gap-row p-3 rounded-lg bg-destructive/15 border border-destructive/30"
+				className="flex items-start gap-row p-row rounded-lg bg-destructive/15 border border-destructive/30"
 			>
-				<XCircle className="h-5 w-5 text-destructive-strong mt-0.5 shrink-0" />
+				<XCircle className="h-5 w-5 text-destructive-strong mt-tight shrink-0" />
 				<div className="text-sm">
 					<p className="font-medium text-destructive-strong">
 						Database integrity check failed
@@ -279,7 +287,7 @@ export function StorageIntegrityBanner() {
 					{/* A failed refresh never downgrades a corruption report: the note
 					    is APPENDED, so the destructive banner stays as-is. */}
 					{staleNote ? (
-						<p className="text-muted-foreground mt-1">{staleNote}</p>
+						<p className="text-muted-foreground mt-tight">{staleNote}</p>
 					) : null}
 				</div>
 			</div>
@@ -288,8 +296,8 @@ export function StorageIntegrityBanner() {
 
 	if (staleNote) {
 		return (
-			<div className="flex items-start gap-row p-3 rounded-lg bg-warning/10 border border-warning/30">
-				<AlertCircle className="h-5 w-5 text-warning-strong mt-0.5 shrink-0" />
+			<div className="flex items-start gap-row p-row rounded-lg bg-warning/10 border border-warning/30">
+				<AlertCircle className="h-5 w-5 text-warning-strong mt-tight shrink-0" />
 				<div className="text-sm">
 					<p className="font-medium">Database integrity status stale</p>
 					<p className="text-muted-foreground">{staleNote}</p>

@@ -74,7 +74,7 @@ export function QuotaDriftPanel({
 						</Badge>
 					) : null}
 				</CardTitle>
-				<CardDescription className="text-xs max-w-prose">
+				<CardDescription className="text-xs">
 					Millions of equivalent tokens the full window would buy at each
 					rolling fit's rate. Shaded bands are 90% intervals; the line breaks
 					wherever the model could not be separated from the traffic beside it.

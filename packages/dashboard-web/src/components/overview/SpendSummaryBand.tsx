@@ -20,7 +20,7 @@ export function SpendSummaryBand() {
 					<div className="grid grid-cols-2 md:grid-cols-4 gap-group">
 						{["month", "day", "week", "amortized-month"].map((key) => (
 							<div key={key}>
-								<Skeleton className="h-4 w-24 mb-2" />
+								<Skeleton className="h-4 w-24 mb-item" />
 								<Skeleton className="h-8 w-28" />
 							</div>
 						))}
@@ -57,7 +57,7 @@ export function SpendSummaryBand() {
 					<div>
 						<p className="text-sm text-muted-foreground">Spend this month</p>
 						<p className="figure-xl">{formatUsd(currentMonth.totalUsd)}</p>
-						<p className="mt-1 text-xs text-muted-foreground">
+						<p className="mt-tight text-xs text-muted-foreground">
 							{breakdownParts.join(" · ")}
 						</p>
 					</div>
@@ -69,7 +69,7 @@ export function SpendSummaryBand() {
 					))}
 				</div>
 				{showConfigHint && (
-					<p className="mt-3 text-xs text-muted-foreground">
+					<p className="mt-row text-xs text-muted-foreground">
 						Set a renewal price on an account to track subscription spend.
 					</p>
 				)}

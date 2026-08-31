@@ -97,9 +97,23 @@ export function MetricCard({
 			{/* p-4, not the bare default: CardContent ships `pt-0` so a header and a
 			    body do not double their facing edges, and this card has no header.
 			    Passing the padding explicitly is what lets tailwind-merge cancel
-			    that `pt-0`. */}
-			<CardContent className="p-4">
-				<div className="flex items-center justify-between gap-item mb-1.5">
+			    that `pt-0`.
+
+			    The floor is the common RESOLVED tile, summed from its own line
+			    boxes so the ordinary pending→resolved transition moves nothing:
+			    1.25rem title row + 0.25rem (mb-tight) + 1.75rem figure
+			    (.figure-xl's pinned line box, which the h-7 skeleton matches)
+			    + 0.75rem mt-row + 0.75rem pt-row + 1px rule + two 1rem sub-rows
+			    with 0.25rem between + 2rem padding = 9.0625rem.
+
+			    A FLOOR, not a fixed height. A tile that renders every optional
+			    line — a stale note, a third or fourth sub-row, RunwayCard's
+			    horizon strip — grows past it, and in the four-up grid the row then
+			    stretches to the tallest tile. Height cannot be made independent of
+			    resolution state here, because WHICH optional lines exist is itself
+			    part of what resolves. */}
+			<CardContent className="p-4 min-h-[9.0625rem]">
+				<div className="flex items-center justify-between gap-item mb-tight">
 					<div className="flex items-center gap-item min-w-0">
 						<Icon className="h-4 w-4 shrink-0 text-muted-foreground/40" />
 						{/* The TITLE is the protected element: it is a short fixed
@@ -124,6 +138,11 @@ export function MetricCard({
 									<Info className="h-3 w-3 text-muted-foreground" />
 								</div>
 							</PopoverTrigger>
+							{/* Numeric for the same reason `p-4` is below: this tightens a
+							    one-line popover from the primitive's own `p-4`, and
+							    tailwind-merge cancels that only against a padding utility
+							    it recognises — `p-item` would leave both live and the
+							    larger padding would win. */}
 							<PopoverContent className="w-auto p-2 text-xs">
 								<p>Compared to {trendPeriod}</p>
 							</PopoverContent>
@@ -135,7 +154,7 @@ export function MetricCard({
 				{unavailableReason ? (
 					<>
 						<p className="figure-xl text-muted-foreground/60">—</p>
-						<p className="mt-1 flex items-center gap-item text-xs text-warning-strong">
+						<p className="mt-tight flex items-center gap-item text-xs text-warning-strong">
 							<AlertCircle className="h-3.5 w-3.5 shrink-0" />
 							{unavailableReason}
 						</p>
@@ -152,20 +171,20 @@ export function MetricCard({
 					</>
 				)}
 				{pending && subRows && subRows.length > 0 && (
-					<div className="mt-3 pt-3 border-t border-border/50 space-y-tight">
+					<div className="mt-row pt-row border-t border-border/50 space-y-tight">
 						{subRows.map((row) => (
 							<Skeleton key={row.label} className="h-3 w-full" />
 						))}
 					</div>
 				)}
 				{!unavailableReason && !pending && staleNote && (
-					<p className="mt-1 flex items-center gap-item text-xs text-muted-foreground">
+					<p className="mt-tight flex items-center gap-item text-xs text-muted-foreground">
 						<Clock className="h-3.5 w-3.5 shrink-0" />
 						{staleNote}
 					</p>
 				)}
 				{!unavailableReason && !pending && subRows && subRows.length > 0 && (
-					<div className="mt-3 pt-3 border-t border-border/50 space-y-tight">
+					<div className="mt-row pt-row border-t border-border/50 space-y-tight">
 						{subRows.map((row) => {
 							if (row.inlineExplainer) {
 								return (
@@ -176,7 +195,7 @@ export function MetricCard({
 												{row.value}
 											</span>
 										</div>
-										<p className="mt-0.5 text-muted-foreground/70">
+										<p className="mt-tight text-muted-foreground/70">
 											{row.inlineExplainer}
 										</p>
 									</div>
@@ -195,6 +214,8 @@ export function MetricCard({
 													{row.value}
 												</span>
 											</PopoverTrigger>
+											{/* Numeric padding: cancels the primitive's `p-4`,
+											    which a scale key cannot (see above). */}
 											<PopoverContent className="w-auto p-2 text-xs">
 												<p>{row.tooltip}</p>
 											</PopoverContent>

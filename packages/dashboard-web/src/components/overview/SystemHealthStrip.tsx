@@ -93,7 +93,7 @@ export function SystemHealthStripView({
 			to="/system"
 			className="block focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring rounded-lg"
 		>
-			<Card className={`px-4 py-3 ${tone}`}>
+			<Card className={`px-group py-row ${tone}`}>
 				<div className="flex flex-wrap items-center gap-x-group gap-y-item text-sm">
 					<span className="flex items-center gap-item whitespace-nowrap font-medium">
 						<span
@@ -187,7 +187,7 @@ export function SystemHealthStripView({
 				    next recovers at 3:47:12 PM") and would reflow the strip into a
 				    multi-line block if they sat inline. */}
 				{description && (headline?.tone ?? "unhealthy") !== "ok" ? (
-					<p className="mt-1.5 text-xs text-muted-foreground">{description}</p>
+					<p className="mt-item text-xs text-muted-foreground">{description}</p>
 				) : null}
 			</Card>
 		</Link>

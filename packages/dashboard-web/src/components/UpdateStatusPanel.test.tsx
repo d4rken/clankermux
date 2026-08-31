@@ -32,16 +32,37 @@ function asMarkup(command: string): string {
 function render(
 	status: UpdateCheckStatus,
 	overrides: Partial<UpdateInfo> = {},
+	error: string | null = null,
 ) {
 	return renderToStaticMarkup(
 		<UpdateStatusPanel
 			status={status}
 			info={info(overrides)}
-			error={null}
+			error={error}
 			onCheck={() => {}}
 		/>,
 	);
 }
+
+/** The opening tag of the paragraph that renders `text`. */
+function paragraphTag(markup: string, text: string): string {
+	const at = markup.indexOf(`>${text}<`);
+	if (at === -1) throw new Error(`nothing renders "${text}"`);
+	return markup.slice(markup.lastIndexOf("<p", at), at + 1);
+}
+
+/**
+ * Longer than the panel's column can show, which is the whole point.
+ *
+ * The real case was a 334-character HTML error document: `parseHttpError`
+ * assigns a non-JSON response body to the message whole, and it reached the
+ * sidebar untruncated. Plain text here so the assertions are about the length
+ * rather than about React's attribute escaping.
+ */
+const LONG_ERROR =
+	"The upstream returned an unexpected response and the deployment check could not complete. " +
+	"This message is deliberately long enough to wrap well past two lines in the sidebar column, " +
+	"which is 136 pixels wide and cannot show anything like this much text.";
 
 /**
  * Repo freshness ("is there a newer commit on main?") and process freshness
@@ -132,6 +153,29 @@ describe("UpdateStatusPanel", () => {
 		const html = render("unknown", { currentSha: null, remoteError: null });
 
 		expect(html).toContain("not a git checkout");
+	});
+
+	it("clamps a long GitHub failure and keeps all of it on hover", () => {
+		// Nothing bounds this string at the source, and the panel sits in a 136px
+		// sidebar column, so the render site clamps it. `title` has to carry the
+		// message the panel DISPLAYS — prefix included — or the part the clamp
+		// hides is unrecoverable.
+		const html = render("unknown", { remoteError: LONG_ERROR });
+		const displayed = `Could not reach GitHub: ${LONG_ERROR}`;
+
+		const tag = paragraphTag(html, displayed);
+		expect(tag).toContain("line-clamp-2");
+		expect(tag).toContain(`title="${displayed}"`);
+	});
+
+	it("clamps a long check failure and keeps all of it on hover", () => {
+		// The other unbounded string: a transport-level failure of the check
+		// itself, which arrives as the raw response body just as often.
+		const html = render("error", {}, LONG_ERROR);
+
+		const tag = paragraphTag(html, LONG_ERROR);
+		expect(tag).toContain("line-clamp-2");
+		expect(tag).toContain(`title="${LONG_ERROR}"`);
 	});
 
 	it("renders the restart chip even while a re-check is in flight", () => {

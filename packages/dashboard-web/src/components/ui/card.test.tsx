@@ -1,6 +1,12 @@
 import { describe, expect, it } from "bun:test";
 import { renderToStaticMarkup } from "react-dom/server";
-import { Card, CardDescription, CardHeader, CardTitle } from "./card";
+import {
+	Card,
+	CardContent,
+	CardDescription,
+	CardHeader,
+	CardTitle,
+} from "./card";
 
 /**
  * The title→description gap is a CSS adjacency rule in `@layer base`, keyed on
@@ -58,5 +64,39 @@ describe("Card header spacing contract", () => {
 		// A `space-y-*` here would outrank the base-layer rule for the direct-child
 		// headers only, reintroducing two different gaps for the same pair.
 		expect(html).not.toContain("space-y-");
+	});
+});
+
+describe("Headerless card padding", () => {
+	it("drops pt-0 when a headerless body passes p-4", () => {
+		// Every metric tile is a Card with no header, so its CardContent has to
+		// restore the top padding the `pt-0` default removes. That only works
+		// while the override is spelled numerically: tailwind-merge cancels
+		// `pt-0` against a padding utility it RECOGNISES, and a custom scale key
+		// (`p-group`) is not one — the class would survive and the tile would
+		// render its figure jammed against the top border.
+		const html = renderToStaticMarkup(
+			<Card>
+				<CardContent className="p-4">12,345</CardContent>
+			</Card>,
+		);
+
+		expect(html).toContain("p-4");
+		expect(html).not.toContain("pt-0");
+	});
+
+	it("keeps pt-0 for a headed card that overrides nothing", () => {
+		// The other side of the same rule: a card WITH a header wants the
+		// default, so the two facing edges do not double up.
+		const html = renderToStaticMarkup(
+			<Card>
+				<CardHeader>
+					<CardTitle>Usage Over Time</CardTitle>
+				</CardHeader>
+				<CardContent>12,345</CardContent>
+			</Card>,
+		);
+
+		expect(html).toContain("pt-0");
 	});
 });

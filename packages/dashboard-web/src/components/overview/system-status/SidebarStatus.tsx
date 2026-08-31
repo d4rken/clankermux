@@ -26,7 +26,7 @@ export function SidebarStatus() {
 	const textClass = data && !error ? statusTextClass(data.status) : "";
 
 	return (
-		<div className="rounded-lg bg-muted/50 p-3">
+		<div className="rounded-lg bg-muted/50 p-row">
 			<div className="flex items-center gap-item text-sm">
 				<span
 					className="inline-block h-2.5 w-2.5 rounded-full bg-muted-foreground"
@@ -39,11 +39,11 @@ export function SidebarStatus() {
 				</span>
 			</div>
 			{data && !error ? (
-				<p className="mt-1 text-xs text-muted-foreground tabular-nums">
+				<p className="mt-tight text-xs text-muted-foreground tabular-nums">
 					up {formatUptime(data.uptime_s)} · {data.memory.rss_mb} MB
 				</p>
 			) : (
-				<p className="mt-1 text-xs text-muted-foreground">
+				<p className="mt-tight text-xs text-muted-foreground">
 					{error ? "status unavailable" : "loading…"}
 				</p>
 			)}

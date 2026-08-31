@@ -69,7 +69,7 @@ export function QuotaChangeVerdicts({
 					<Scale className="h-5 w-5" />
 					Implied Window Cost
 				</CardTitle>
-				<CardDescription className="text-xs max-w-prose">
+				<CardDescription className="text-xs">
 					How much of a usage window this proxy's own traffic implies a model
 					consumes, fitted from the provider's reported percentages against the
 					requests recorded here. It covers all retained history, not the window

@@ -60,7 +60,7 @@ export function RunwayHorizonStrip({
 			: `Run-out projected ${formatDurationDhm(Math.max(0, remainingMs ?? 0))} into a ${horizonLabel} horizon`;
 
 	return (
-		<div className="mt-2">
+		<div className="mt-item">
 			<div
 				className="relative h-1.5 w-full overflow-hidden rounded-full bg-muted/50"
 				role="img"
@@ -81,7 +81,7 @@ export function RunwayHorizonStrip({
 					</>
 				)}
 			</div>
-			<div className="mt-1 flex items-baseline justify-between gap-item text-[10px] leading-tight text-muted-foreground/70">
+			<div className="mt-tight flex items-baseline justify-between gap-item text-[10px] leading-tight text-muted-foreground/70">
 				<span className="truncate" title={markerLabel ?? description}>
 					{fraction == null ? "no run-out" : (markerLabel ?? "run-out")}
 				</span>
