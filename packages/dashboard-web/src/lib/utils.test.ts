@@ -22,4 +22,12 @@ describe("cn — custom spacing scale conflict resolution", () => {
 	it("lets a named side padding override a numeric one", () => {
 		expect(cn("p-4 pt-0 pt-section")).toBe("p-4 pt-section");
 	});
+
+	// The composition that actually ships: `CardContent` carries `p-4 pt-0` and a
+	// call site passes `p-group`. The two-argument form is the point — it takes a
+	// different path through clsx than one pre-joined string, and it is how every
+	// primitive merges its base classes with an incoming `className`.
+	it("lets a call site's named padding replace a primitive's numeric pair", () => {
+		expect(cn("p-4 pt-0", "p-group")).toBe("p-group");
+	});
 });
