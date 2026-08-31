@@ -2,6 +2,7 @@ import { describe, expect, it } from "bun:test";
 import type { SystemStatusResponse } from "@clankermux/types";
 import { renderToStaticMarkup } from "react-dom/server";
 import { MemoryRouter } from "react-router";
+import { TONE } from "../../test-utils/tone";
 import { SystemHealthStripView } from "./SystemHealthStrip";
 
 function makeStatus(
@@ -46,6 +47,24 @@ function render(
 	);
 }
 
+/**
+ * Rendered text with the markup stripped, so an assertion about what the strip
+ * SAYS cannot be decided by a class name that happens to contain the word.
+ */
+function textOf(markup: string): string {
+	return markup
+		.replace(/<[^>]*>/g, " ")
+		.replace(/\s+/g, " ")
+		.trim();
+}
+
+/** The strip's own link tag — the element whose accessible name is at stake. */
+function linkTag(markup: string): string {
+	const start = markup.indexOf("<a ");
+	if (start === -1) throw new Error("strip link not rendered");
+	return markup.slice(start, markup.indexOf(">", start) + 1);
+}
+
 describe("SystemHealthStripView", () => {
 	it("links to the System Health page", () => {
 		expect(render()).toContain('href="/system"');
@@ -81,7 +100,7 @@ describe("SystemHealthStripView", () => {
 			}),
 		});
 
-		expect(html).toContain("bg-warning/10");
+		expect(html).toContain(TONE.warningSurface);
 		expect(html).toContain("Degraded");
 		expect(html).toContain("All accounts rate-limited");
 	});
@@ -98,7 +117,7 @@ describe("SystemHealthStripView", () => {
 			}),
 		});
 
-		expect(html).toContain("bg-destructive/10");
+		expect(html).toContain(TONE.destructiveSurface);
 		expect(html).toContain("Async DB writer is failing");
 		expect(html).toContain("DB corrupt");
 	});
@@ -119,7 +138,7 @@ describe("SystemHealthStripView", () => {
 		});
 
 		expect(html).toContain("Database corruption detected");
-		expect(html).toContain("bg-destructive/10");
+		expect(html).toContain(TONE.destructiveSurface);
 		expect(html).toContain("DB corrupt");
 		expect(html).not.toContain("All Systems Operational");
 	});
@@ -138,7 +157,7 @@ describe("SystemHealthStripView", () => {
 
 		expect(html).toContain("All Systems Operational");
 		expect(html).toContain("DB check skipped");
-		expect(html).not.toContain("bg-destructive/10");
+		expect(html).not.toContain(TONE.destructiveSurface);
 	});
 
 	it("does not repeat the integrity suffix when already unhealthy", () => {
@@ -158,23 +177,29 @@ describe("SystemHealthStripView", () => {
 
 	it("keeps the strip's own text in the link's accessible name", () => {
 		// An aria-label would replace the content-derived name, not extend it.
+		// Asserted on the LINK's own tag: a document-wide check also fails on an
+		// aria-label that belongs to some icon inside the strip, where it is
+		// harmless and where nothing about this rule applies.
 		const html = render();
 
-		expect(html).not.toContain("aria-label=");
-		expect(html).toContain("Open the System Health page");
+		expect(linkTag(html)).not.toContain("aria-label");
+		expect(textOf(html)).toContain("Open the System Health page");
 	});
 
 	it("degrades to a labelled unavailable state without status data", () => {
 		const html = render({ status: null, isLoading: false });
+		const text = textOf(html);
 
-		expect(html).toContain("Status unavailable");
-		expect(html).toContain("Could not reach the proxy status endpoint.");
+		expect(text).toContain("Status unavailable");
+		expect(text).toContain("Could not reach the proxy status endpoint.");
 		// Metric slots need live data — none of them should render placeholders.
-		expect(html).not.toContain("RSS");
-		// `>up ` rather than a bare `up `: the uptime text is rendered directly
-		// after the clock icon's </svg>, and a bare "up " also matches inside
-		// class attributes (`gap-x-group ` ends with it).
-		expect(html).not.toContain(">up ");
+		// Asserted on the rendered TEXT, so a class name that happens to contain
+		// one of these words can neither pass nor fail it. (The previous form had
+		// to be written `>up ` because `gap-x-group ` also ends in "up ".)
+		expect(text).not.toContain("RSS");
+		expect(text).not.toMatch(/\bup \d/);
+		expect(text).not.toContain("loop ");
+		expect(text).not.toContain("DB ");
 	});
 
 	it("shows a loading label instead of an error before the first fetch", () => {

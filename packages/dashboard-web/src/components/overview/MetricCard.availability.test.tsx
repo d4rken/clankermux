@@ -12,6 +12,14 @@ import { Users } from "lucide-react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { MetricCard } from "./MetricCard";
 
+/** The opening tag of the element whose own text is `text`. */
+function tagFor(markup: string, text: string): string {
+	const at = markup.indexOf(`>${text}<`);
+	if (at === -1) throw new Error(`nothing renders "${text}"`);
+	const start = markup.lastIndexOf("<", at);
+	return markup.slice(start, at + 1);
+}
+
 describe("MetricCard availability states", () => {
 	it("renders the value normally when the read succeeded", () => {
 		const html = renderToStaticMarkup(
@@ -53,7 +61,10 @@ describe("MetricCard availability states", () => {
 	it("keeps the title visible next to a long caption", () => {
 		// Regression: the title carried `truncate` while the caption carried
 		// `shrink-0`, so a long caption won the single-line row and the title
-		// rendered as an empty ellipsis.
+		// rendered as an empty ellipsis. The title is a short fixed string and
+		// the caption is caller-generated and unbounded, so the CAPTION has to be
+		// the element that yields. Asserted through the two tags rather than by
+		// pinning the exact markup around the title text.
 		const caption = "11 keys · no run-out within 14d · 3 accounts unknown";
 		const html = renderToStaticMarkup(
 			<MetricCard
@@ -63,9 +74,13 @@ describe("MetricCard availability states", () => {
 				caption={caption}
 			/>,
 		);
-		expect(html).toContain(">Quota Runway</p>");
+		expect(html).toContain("Quota Runway");
 		expect(html).toContain(caption);
-		// The caption is the element that yields, and keeps its full text on hover.
+
+		expect(tagFor(html, "Quota Runway")).toContain("shrink-0");
+		expect(tagFor(html, "Quota Runway")).not.toContain("truncate");
+		expect(tagFor(html, caption)).toContain("truncate");
+		// The caption keeps its full text on hover.
 		expect(html).toContain(`title="${caption}"`);
 	});
 

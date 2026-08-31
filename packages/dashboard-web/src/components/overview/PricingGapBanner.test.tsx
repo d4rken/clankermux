@@ -2,6 +2,7 @@ import { describe, expect, it } from "bun:test";
 import type { PricingGap } from "@clankermux/types";
 import { isValidElement, type ReactNode } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
+import { TONE } from "../../test-utils/tone";
 import { PricingGapBannerView } from "./PricingGapBanner";
 
 function gap(overrides: Partial<PricingGap> = {}): PricingGap {
@@ -87,8 +88,8 @@ describe("PricingGapBannerView", () => {
 		// className the markup asks for — NOT that it resolves to any CSS. What
 		// makes it resolve is `warning` being a registered theme color in
 		// globals.css's `@theme inline` block.
-		expect(html).toContain("bg-warning/15");
-		expect(html).not.toContain("bg-destructive");
+		expect(html).toContain(TONE.warningBanner);
+		expect(html).not.toContain(TONE.anyDestructiveSurface);
 	});
 
 	it("words the remediation for both failure shapes", () => {

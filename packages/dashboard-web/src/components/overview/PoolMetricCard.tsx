@@ -347,9 +347,14 @@ export function PoolDetailSection({
 									 * shared estimator (no per-family regression exists), and the
 									 * tile's rule is that a low-confidence projection does not
 									 * drive alarm colour.
+									 *
+									 * `data-tone` states that as a contract a test can hold
+									 * without pinning the class that implements it: the rule is
+									 * "this line is neutral", and asserting only that the line
+									 * renders would pass again the day a tint comes back.
 									 */}
 									{f.soonestExhaustsAtMs !== null && (
-										<div className="text-muted-foreground">
+										<div data-tone="neutral" className="text-muted-foreground">
 											{f.accounts.length > 1
 												? `${f.atRiskCount} of ${f.accounts.length} projected to run out · first `
 												: "projected to run out "}

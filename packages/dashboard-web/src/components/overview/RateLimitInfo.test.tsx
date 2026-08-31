@@ -1,6 +1,7 @@
 import { describe, expect, it } from "bun:test";
 import type { AccountResponse } from "@clankermux/types";
 import { renderToStaticMarkup } from "react-dom/server";
+import { TONE } from "../../test-utils/tone";
 import { RateLimitInfo } from "./RateLimitInfo";
 
 const NOW = 1_750_000_000_000;
@@ -71,7 +72,7 @@ describe("RateLimitInfo", () => {
 				rateLimitCauseResetMs: NOW + 10 * MIN,
 			}),
 		]);
-		expect(hard).toContain("bg-destructive/10");
+		expect(hard).toContain(TONE.destructiveSurface);
 
 		const soft = render([
 			makeAccount({
@@ -81,7 +82,7 @@ describe("RateLimitInfo", () => {
 				rateLimitCauseResetMs: NOW + 10 * MIN,
 			}),
 		]);
-		expect(soft).toContain("bg-warning/10");
+		expect(soft).toContain(TONE.warningSurface);
 	});
 
 	it("still lists an `unknown` cause, coloured amber rather than red", () => {
@@ -95,8 +96,8 @@ describe("RateLimitInfo", () => {
 			}),
 		]);
 		expect(html).toContain("mystery");
-		expect(html).toContain("bg-warning/10");
-		expect(html).not.toContain("bg-destructive/10");
+		expect(html).toContain(TONE.warningSurface);
+		expect(html).not.toContain(TONE.destructiveSurface);
 	});
 
 	it("names the spent window class for a usage_exhausted account", () => {

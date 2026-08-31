@@ -48,6 +48,27 @@ function render(queryClient: QueryClient): string {
 }
 
 /**
+ * The markup of ONE metric tile, from its title to the start of the next card.
+ *
+ * Every zero assertion below has to be scoped this way. The page legitimately
+ * renders zeros of its own — "0 active" in the Live Activity readout is a real
+ * measurement of the request stream — so a document-wide "contains no zero"
+ * check is either wrong or, as the checks this replaced were, pinned to a class
+ * pair (`text-2xl font-bold`) that no longer exists and therefore passes
+ * whatever the tiles render.
+ */
+function tile(markup: string, title: string): string {
+	const at = markup.indexOf(`>${title}<`);
+	if (at === -1) throw new Error(`no tile titled "${title}"`);
+	const rest = markup.slice(at);
+	const next = rest.indexOf("bg-card");
+	return next === -1 ? rest : rest.slice(0, next);
+}
+
+/** The four tiles of the metrics grid, each of which speaks for its own read. */
+const TILES = ["Total Requests", "5h Pool", "7d Pool", "Quota Runway"];
+
+/**
  * Marks a query as terminally failed with nothing cached — the "unavailable"
  * case. `setQueryData` cannot express this (it only seeds data), so the cache
  * entry is built and put straight into an error state.
@@ -141,8 +162,11 @@ describe("OverviewTab progressive render", () => {
 	it("does not present an unresolved read as a measured zero", () => {
 		const html = render(client());
 
-		// The old `?? 0` / `|| 0` fallbacks rendered a bold "0" in each tile.
-		expect(html).not.toContain('class="text-2xl font-bold">0<');
+		// The old `?? 0` / `|| 0` fallbacks rendered a "0" in each tile. Checked
+		// per tile, because the page elsewhere reports real zeros.
+		for (const title of TILES) {
+			expect(tile(html, title)).not.toContain(">0<");
+		}
 		// ...and the pool tiles must not show a 0% pool for accounts never read.
 		expect(html).not.toContain("0%");
 	});
@@ -155,7 +179,9 @@ describe("OverviewTab progressive render", () => {
 
 		expect(html).toContain("Request data unavailable");
 		expect(html).toContain("Chart data unavailable");
-		expect(html).not.toContain('class="text-2xl font-bold">0<');
+		// The tile that read analytics is the one that must not fall back to a
+		// zero; the others are speaking for reads that did not fail.
+		expect(tile(html, "Total Requests")).not.toContain(">0<");
 		// Live Activity is unaffected by an analytics failure.
 		expect(html).toContain("Live Activity");
 	});
@@ -199,7 +225,7 @@ describe("OverviewTab progressive render", () => {
 		// The em-dash unavailable state, never a fabricated figure or a zero.
 		expect(html).toContain("—");
 		expect(html).not.toContain("∞");
-		expect(html).not.toContain('class="text-2xl font-bold">0<');
+		expect(tile(html, "Quota Runway")).not.toContain(">0<");
 	});
 
 	it("renders no error badge on the health strip while stats is pending", () => {

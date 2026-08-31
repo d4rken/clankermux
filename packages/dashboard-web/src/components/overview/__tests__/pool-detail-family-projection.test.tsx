@@ -42,6 +42,17 @@ function rowFor(html: string, name: string): string {
 	return match[0];
 }
 
+/**
+ * The opening tag of the element that renders the projection line — the one
+ * whose tone the test below is about.
+ */
+function projectionTag(html: string): string {
+	const at = html.indexOf("projected to run out");
+	if (at === -1) throw new Error("no projection line rendered");
+	const start = html.lastIndexOf("<div", at);
+	return html.slice(start, html.indexOf(">", start) + 1);
+}
+
 /** Absolute instants are rendered by the card's own locale formatter. */
 function instantLabel(ms: number): string {
 	return new Date(ms).toLocaleString(undefined, {
@@ -149,11 +160,14 @@ describe("PoolDetailSection family at-risk projection", () => {
 			}),
 		]);
 		// The estimate is always the low-confidence lifetime average, so it must
-		// never carry the warning or destructive tone the percentages use. Asserted
-		// on the element that OPENS the projection line, not on a slice of the
-		// document, so a tint elsewhere on the card cannot fail (or pass) this.
-		expect(html).toMatch(
-			/<div class="text-muted-foreground">projected to run out/,
-		);
+		// never carry the warning or destructive tone the percentages use. The
+		// line declares its tone as `data-tone`, so this holds the rule itself
+		// rather than the class that currently implements it — and it is asserted
+		// on the tag that OPENS the projection line, so neither a tint elsewhere
+		// on the card nor a token rename can decide the outcome.
+		const tag = projectionTag(html);
+		expect(tag).toContain('data-tone="neutral"');
+		expect(tag).not.toContain("warning");
+		expect(tag).not.toContain("destructive");
 	});
 });

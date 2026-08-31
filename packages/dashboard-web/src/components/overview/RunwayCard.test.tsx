@@ -3,6 +3,7 @@ import type { KeyRunway } from "@clankermux/core";
 import { UNAUTHENTICATED_POOL_KEY_NAME } from "@clankermux/core";
 import type { RunwayAccountSummary } from "@clankermux/types";
 import { renderToStaticMarkup } from "react-dom/server";
+import { TONE } from "../../test-utils/tone";
 import { RunwayCard } from "./RunwayCard";
 
 const HOUR = 60 * 60 * 1000;
@@ -324,14 +325,14 @@ describe("RunwayCard", () => {
 			// A RESOLVED dash, not the unavailable slot: the read succeeded and
 			// simply has nothing to project from. The warning styling belongs to a
 			// backing-read failure alone.
-			expect(html).not.toContain("text-warning-strong");
+			expect(html).not.toContain(TONE.warningText);
 		});
 
 		it("marks a genuinely failed read with the warning styling", () => {
 			// The other side of the same line — this read produced nothing at all.
 			const html = render({ unavailableReason: "Runway data unavailable" });
 
-			expect(html).toContain("text-warning-strong");
+			expect(html).toContain(TONE.warningText);
 			expect(html).toContain("Runway data unavailable");
 		});
 

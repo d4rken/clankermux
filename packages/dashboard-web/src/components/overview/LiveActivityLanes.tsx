@@ -302,8 +302,15 @@ export function LiveActivityLanesView({
 						    dropped there too, a 320px viewport leaves 320 − 32 (card
 						    padding) − 96 (this gutter) − 12 (gap) = 180px of plot, so
 						    the card cannot push the document sideways however narrow
-						    the screen gets. */}
-							<ul className="w-24 shrink-0 space-y-0 pt-0 sm:w-32">
+						    the screen gets.
+
+						    `data-testid` so a test can name this list rather than
+						    reaching for "the first <ul>", which the legend below would
+						    silently inherit the day this one moves. */}
+							<ul
+								data-testid="live-lane-labels"
+								className="w-24 shrink-0 space-y-0 pt-0 sm:w-32"
+							>
 								{lanes.map((lane) => {
 									const href = laneRequestsHref(lane.scope);
 									return (
@@ -589,7 +596,13 @@ function ModelLegend({
 	if (models.length === 0 && ranking.otherModels === 0) return null;
 
 	return (
-		<ul className="mt-item flex flex-wrap items-center gap-x-row gap-y-item border-t pt-item text-xs text-muted-foreground">
+		// `data-testid` so the legend can be selected on its own: it used to be
+		// found by slicing the markup after `</svg>`, which quietly included the
+		// selected-request row and the readout gutter that now sit there too.
+		<ul
+			data-testid="live-legend"
+			className="mt-item flex flex-wrap items-center gap-x-row gap-y-item border-t pt-item text-xs text-muted-foreground"
+		>
 			{models.map((shortName) => (
 				<li key={shortName} className="flex items-center gap-item">
 					<span
