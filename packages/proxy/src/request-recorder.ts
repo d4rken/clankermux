@@ -5,6 +5,7 @@ import {
 	parseCodexCreditsHeaders,
 } from "@clankermux/providers";
 import {
+	type CachePrefixCapture,
 	type ContextComposition,
 	NO_ACCOUNT_ID,
 	type ProjectAttributionSource,
@@ -117,7 +118,7 @@ export interface RecordMeta {
 	 * Cache-measurement prefix digests (see RequestMeta.cachePrefixHashes).
 	 * Optional: synthetic/audit rows may omit it and stay NULL.
 	 */
-	cachePrefixHashes?: string[] | null;
+	cachePrefixHashes?: CachePrefixCapture | null;
 	routing: RecordRouting | null;
 	timestamp: number;
 	/** Pre-capped request body copy, or null when not captured / over budget. */
@@ -238,7 +239,7 @@ interface SaveRequestData {
 	/** Cache-measurement session identity — mirrors `RequestData.sessionKey`. */
 	sessionKey?: string | null;
 	/** Cache-measurement prefix digests — mirrors `RequestData.cachePrefixHashes`. */
-	cachePrefixHashes?: string[] | null;
+	cachePrefixHashes?: CachePrefixCapture | null;
 }
 
 /** Fails to compile unless `T` is exactly `true`. */

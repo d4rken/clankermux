@@ -133,12 +133,15 @@ export function ensureSchema(db: Database): void {
 			usage_finalized_at INTEGER,
 			-- Cache-measurement capture (passive; consumed only by offline SQL).
 			-- session_key: "<apiKeyId|anon>:<Claude Code session uuid>" from the
-			-- body's metadata.user_id. cache_prefix_hashes: JSON array of <=8
-			-- 16-hex chained prompt-cache prefix digests, one per ephemeral
-			-- cache_control breakpoint (see packages/proxy/src/cache-prefix-hash.ts).
-			-- NULL = not computed / pre-column row. If keepalive replays ever run
-			-- again they replay a staged body and would carry the SAME key and
-			-- hashes — exclude synthetic traffic when analyzing.
+			-- body's metadata.user_id. cache_prefix_hashes: JSON object
+			-- {"v":2,"bp":[...],"n":N,"tail":[...]} — breakpoint-chain digests
+			-- plus a message-end digest tail for the position-aligned prefix
+			-- join (layout in packages/proxy/src/cache-prefix-hash.ts). A few
+			-- rows written 2026-08-31 carry the v1 bare-array shape; filter on
+			-- json_type(...)='object'. NULL = not computed / pre-column row. If
+			-- keepalive replays ever run again they replay a staged body and
+			-- would carry the SAME key and hashes — exclude synthetic traffic
+			-- when analyzing.
 			session_key TEXT,
 			cache_prefix_hashes TEXT
 		)

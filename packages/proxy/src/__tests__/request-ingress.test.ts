@@ -228,9 +228,12 @@ describe("ingestProxyRequest", () => {
 			expect(result.context.requestMeta.sessionKey).toBe(
 				"anon:11111111-2222-3333-4444-555555555555",
 			);
-			const hashes = result.context.requestMeta.cachePrefixHashes;
-			expect(hashes).toHaveLength(1);
-			expect(hashes?.[0]).toMatch(/^[0-9a-f]{16}$/);
+			const capture = result.context.requestMeta.cachePrefixHashes;
+			expect(capture?.v).toBe(2);
+			expect(capture?.bp).toHaveLength(1);
+			expect(capture?.bp[0]).toMatch(/^[0-9a-f]{16}$/);
+			expect(capture?.n).toBe(1);
+			expect(capture?.tail).toHaveLength(1);
 		});
 
 		it("records null hashes for a breakpoint-less body but keeps the session key", async () => {

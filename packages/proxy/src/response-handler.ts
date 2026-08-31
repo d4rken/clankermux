@@ -13,6 +13,7 @@ import {
 import { Logger } from "@clankermux/logger";
 import {
 	type Account,
+	type CachePrefixCapture,
 	type ContextComposition,
 	type InternalDispatchSpendRow,
 	type InternalDispatchSpendSource,
@@ -519,7 +520,7 @@ export interface ResponseHandlerOptions {
 	/** Cache-measurement session identity (see RequestMeta.sessionKey). */
 	sessionKey?: string | null;
 	/** Cache-measurement prefix digests (see RequestMeta.cachePrefixHashes). */
-	cachePrefixHashes?: string[] | null;
+	cachePrefixHashes?: CachePrefixCapture | null;
 	response: Response;
 	timestamp: number;
 	retryAttempt: number;

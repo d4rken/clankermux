@@ -1,5 +1,6 @@
 import { Logger } from "@clankermux/logger";
 import type {
+	CachePrefixCapture,
 	ContextComposition,
 	ProjectAttributionSource,
 	ToolCallStat,
@@ -97,7 +98,7 @@ export interface RequestData {
 	 * its JSON text.
 	 */
 	sessionKey?: string | null;
-	cachePrefixHashes?: string[] | null;
+	cachePrefixHashes?: CachePrefixCapture | null;
 }
 
 /** Fails to compile unless `T` is exactly `true`. */
