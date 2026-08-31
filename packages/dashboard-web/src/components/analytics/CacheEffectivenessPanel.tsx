@@ -56,7 +56,7 @@ export function CacheEffectivenessPanel({ range }: { range: TimeRange }) {
 					<Gauge className="h-5 w-5" />
 					Effectiveness
 				</CardTitle>
-				<CardDescription className="text-xs max-w-prose">
+				<CardDescription className="text-xs">
 					Measures whether keeping caches warm actually reduced quota pressure
 					over the window. Headline figures are the honest (conservative,
 					5-minute counterfactual) numbers — what the bridge saved versus Claude

@@ -72,6 +72,22 @@ const CardTitle = React.forwardRef<
 ));
 CardTitle.displayName = "CardTitle";
 
+/**
+ * Description line under a card title.
+ *
+ * `max-w-prose` (65ch) is on the paragraph itself, and it is the app's reading
+ * measure rather than a local nicety: a full-width card on a 1600px screen was
+ * setting these at 192 characters per line, which is roughly three times the
+ * width at which the eye reliably finds the start of the next one. Every
+ * description in the app is one sentence of explanation, so capping the
+ * measure costs nothing and there is no case for a card whose prose runs the
+ * full width of a panel.
+ *
+ * On the element, never on a wrapper: the title→description gap is a CSS
+ * adjacency rule keyed on the two `data-slot` attributes (see globals.css and
+ * card.test.tsx), and an element slipped between them would silently drop that
+ * gap on every header in the app.
+ */
 const CardDescription = React.forwardRef<
 	HTMLParagraphElement,
 	React.HTMLAttributes<HTMLParagraphElement>
@@ -79,7 +95,7 @@ const CardDescription = React.forwardRef<
 	<p
 		ref={ref}
 		data-slot="subtitle"
-		className={cn("text-sm text-muted-foreground", className)}
+		className={cn("max-w-prose text-sm text-muted-foreground", className)}
 		{...props}
 	/>
 ));

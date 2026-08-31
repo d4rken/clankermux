@@ -49,7 +49,7 @@ export function ModelWindowCostPanel({
 						</Badge>
 					) : null}
 				</CardTitle>
-				<CardDescription className="text-xs max-w-prose">
+				<CardDescription className="text-xs">
 					Percentage of the window consumed per 1M price-equivalent tokens
 					(input, output and cache weighted by the provider's own list-price
 					ratios), with a 90% interval. "Implied capacity" is what the whole

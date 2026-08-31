@@ -74,6 +74,12 @@ export function UpdateStatusPanel({
 	const restartPending = info?.restartPending === true;
 	const showUpdateDetail = status === "available";
 	const showCurrentDetail = status === "current" && !restartPending;
+	// Composed once, so the clamped paragraph and the `title` that recovers what
+	// the clamp hid carry the SAME string — a tooltip holding only the bare
+	// `remoteError` would drop the sentence that says what failed.
+	const unknownMessage = info?.remoteError
+		? `Could not reach GitHub: ${info.remoteError}`
+		: "Could not determine the deployed commit (not a git checkout?).";
 
 	return (
 		<div
@@ -205,16 +211,28 @@ export function UpdateStatusPanel({
 				</div>
 			)}
 
+			{/* Both failure lines are clamped to two lines with the full text on
+			    hover. Neither string is bounded at the source: a failed check
+			    reports whatever the response carried, and a non-JSON body reaches
+			    here whole — an HTML error document rendered as sixteen wrapped
+			    lines inside this 136px sidebar column, pushing the nav below it off
+			    screen. The truncation is a RENDER decision and stays here: the
+			    message itself is parsed in `@clankermux/errors`, which the proxy
+			    shares and which has no business knowing about a sidebar. */}
 			{status === "unknown" && (
-				<p className="mt-1 text-xs text-muted-foreground text-left break-words">
-					{info?.remoteError
-						? `Could not reach GitHub: ${info.remoteError}`
-						: "Could not determine the deployed commit (not a git checkout?)."}
+				<p
+					className="mt-1 text-xs text-muted-foreground text-left break-words line-clamp-2"
+					title={unknownMessage}
+				>
+					{unknownMessage}
 				</p>
 			)}
 
 			{status === "error" && error && (
-				<p className="mt-1 text-xs text-destructive-strong text-left break-words">
+				<p
+					className="mt-1 text-xs text-destructive-strong text-left break-words line-clamp-2"
+					title={error}
+				>
 					{error}
 				</p>
 			)}
