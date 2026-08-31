@@ -23,10 +23,11 @@ describe("cn — custom spacing scale conflict resolution", () => {
 		expect(cn("p-4 pt-0 pt-section")).toBe("p-4 pt-section");
 	});
 
-	// The composition that actually ships: `CardContent` carries `p-4 pt-0` and a
-	// call site passes `p-group`. The two-argument form is the point — it takes a
-	// different path through clsx than one pre-joined string, and it is how every
-	// primitive merges its base classes with an incoming `className`.
+	// This mirrors the composition that actually ships: `CardContent` calls
+	// `cn("p-4 pt-0", className)` and all three `AccountsTab` cards pass
+	// `className="p-group"`. It is written in the two-argument form because that is
+	// how the call site composes, not because the two forms behave differently: a
+	// pre-joined string reaches tailwind-merge as the same input.
 	it("lets a call site's named padding replace a primitive's numeric pair", () => {
 		expect(cn("p-4 pt-0", "p-group")).toBe("p-group");
 	});
