@@ -1,5 +1,9 @@
 import { describe, expect, it } from "bun:test";
-import type { ContextComposition, RequestResponse } from "@clankermux/types";
+import type {
+	CachePrefixCapture,
+	ContextComposition,
+	RequestResponse,
+} from "@clankermux/types";
 // Import the recorder (and the re-exported NO_ACCOUNT_ID) FIRST: the recorder
 // pulls @clankermux/core before @clankermux/types, which is the load order that
 // avoids the latent types↔core module-eval cycle. A standalone value-import of
@@ -36,7 +40,7 @@ interface SaveRequestCall {
 	requestedModel: string | null | undefined;
 	projectAttributionSource: string | null | undefined;
 	sessionKey: string | null | undefined;
-	cachePrefixHashes: string[] | null | undefined;
+	cachePrefixHashes: CachePrefixCapture | null | undefined;
 }
 
 type EnqueuedKind = "request" | "routing" | "tool_calls" | "payload";
@@ -89,7 +93,7 @@ class FakeDbOps {
 		projectAttributionSource: string | null;
 		usageFinalizedAt?: number | null;
 		sessionKey?: string | null;
-		cachePrefixHashes?: string[] | null;
+		cachePrefixHashes?: CachePrefixCapture | null;
 	}): Promise<void> {
 		this.order.push("request");
 		if (this.failSaveRequest) throw new Error("saveRequest failed");
@@ -1463,7 +1467,12 @@ describe("RequestRecorder — cache-measurement threading", () => {
 		h.recorder.begin(
 			makeMeta({
 				sessionKey: "anon:11111111-2222-3333-4444-555555555555",
-				cachePrefixHashes: ["aaaaaaaaaaaaaaaa", "bbbbbbbbbbbbbbbb"],
+				cachePrefixHashes: {
+					v: 2,
+					bp: ["aaaaaaaaaaaaaaaa"],
+					n: 2,
+					tail: ["bbbbbbbbbbbbbbbb", "cccccccccccccccc"],
+				},
 			}),
 		);
 		h.recorder.attachUsageSummary("req-1", makeSummary());
@@ -1472,10 +1481,12 @@ describe("RequestRecorder — cache-measurement threading", () => {
 
 		const call = h.dbOps.saveRequestCalls[0];
 		expect(call.sessionKey).toBe("anon:11111111-2222-3333-4444-555555555555");
-		expect(call.cachePrefixHashes).toEqual([
-			"aaaaaaaaaaaaaaaa",
-			"bbbbbbbbbbbbbbbb",
-		]);
+		expect(call.cachePrefixHashes).toEqual({
+			v: 2,
+			bp: ["aaaaaaaaaaaaaaaa"],
+			n: 2,
+			tail: ["bbbbbbbbbbbbbbbb", "cccccccccccccccc"],
+		});
 	});
 
 	it("writes null when the meta omits both fields", async () => {
