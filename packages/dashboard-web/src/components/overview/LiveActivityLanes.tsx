@@ -281,7 +281,13 @@ export function LiveActivityLanesView({
 					</span>
 				</div>
 			</CardHeader>
-			<CardContent className="p-4 pt-item">
+			{/* `p-4` stays spelled numerically: it is the tailwind-merge exemption
+			    documented in `card.tsx`, without which `CardContent`'s own `pt-0`
+			    survives and the body loses its top padding. `max-sm:px-0` hands the
+			    32px of side padding to the plot at phone width; the lane-label gutter
+			    takes a small inset of its own there so its text is not against the
+			    card edge. */}
+			<CardContent className="p-4 pt-item max-sm:px-0">
 				{lanes.length === 0 ? (
 					<p className="py-section text-center text-sm text-muted-foreground">
 						{primed
@@ -298,18 +304,29 @@ export function LiveActivityLanesView({
 						    violation.
 
 						    Narrower below `sm`, where the plot is what the card is for
-						    and the labels truncate anyway. With the readout gutter
-						    dropped there too, a 320px viewport leaves 320 − 32 (card
-						    padding) − 96 (this gutter) − 12 (gap) = 180px of plot, so
-						    the card cannot push the document sideways however narrow
-						    the screen gets.
+						    and the labels truncate anyway, and inset by `pl-item` there
+						    because the card drops its own side padding at that width. The
+						    inset comes out of this gutter's 96px, not out of the plot.
+
+						    Everything the card sits inside has to be counted, including the
+						    page wrapper: `App.tsx` lays out all route content in a
+						    `p-4 md:p-6 lg:p-8` container, which is 16px a side at phone
+						    width. With the readout gutter dropped below `sm` too, a 320px
+						    viewport leaves
+
+						        320 − 32 (page wrapper `p-4`) − 2 (card border)
+						            − 0 (card padding, dropped below `sm`)
+						            − 96 (this gutter) − 12 (gap)  =  178px of plot,
+
+						    so the card cannot push the document sideways however narrow the
+						    screen gets.
 
 						    `data-testid` so a test can name this list rather than
 						    reaching for "the first <ul>", which the legend below would
 						    silently inherit the day this one moves. */}
 							<ul
 								data-testid="live-lane-labels"
-								className="w-24 shrink-0 space-y-0 pt-0 sm:w-32"
+								className="w-24 shrink-0 space-y-0 pt-0 max-sm:pl-item sm:w-32"
 							>
 								{lanes.map((lane) => {
 									const href = laneRequestsHref(lane.scope);
@@ -528,9 +545,19 @@ export function LiveActivityLanesView({
 
 						    Dropped below `sm`: at phone width these four figures per
 						    lane are wider than the plot they annotate, and keeping them
-						    would leave the marks with no room to sit apart. The counts
-						    stay reachable there through the hover card, which carries
-						    the same numbers per mark. */}
+						    would leave the marks with no room to sit apart.
+
+						    Nothing replaces them there. Per-lane totals are a desktop-only
+						    affordance: below `sm` the request, token, 429 and error counts
+						    per lane are simply not shown anywhere in the UI. The hover card
+						    is NOT a substitute — it reports one event (its tokens, status,
+						    duration, model, account, project, timestamp), never a lane
+						    aggregate.
+
+						    They cannot move into the left label gutter either: that gutter
+						    is height-locked to LANE_HEIGHT so its rows stay aligned with the
+						    lanes drawn inside the single SVG, and a second line of text does
+						    not fit without changing that constant. */}
 							<ul className="hidden w-40 shrink-0 space-y-0 text-right text-xs sm:block">
 								{lanes.map((lane) => (
 									<li
