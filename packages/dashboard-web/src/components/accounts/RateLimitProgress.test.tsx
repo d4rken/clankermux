@@ -458,10 +458,28 @@ describe("RateLimitProgress", () => {
 	// The bar's fill carries the same tone as the projection line, so the run-out
 	// signal is readable without hovering. The pace tick is NOT the carrier — its
 	// position means clock time and nothing else — so every case below also
-	// asserts the tick's white treatment survives.
+	// asserts the tick's own treatment survives.
 	describe("progress bar fill tone", () => {
 		const HOUR = 60 * 60 * 1000;
-		const PACE_TICK_COLOR = "rgba(255,255,255,0.95)";
+		/**
+		 * The tick is drawn from tokens: `bg-foreground` for the line and a halo
+		 * from `--background` so it reads against both the filled and unfilled
+		 * parts of the track in either mode. It used to be a hard white line with
+		 * a black glow, which is a dark-mode assumption that renders white-on-light
+		 * in light mode. Assert the tokens are present AND the literal is gone, so
+		 * these guard the fix rather than the defect.
+		 */
+		const PACE_TICK_CLASSES = [
+			"bg-foreground",
+			"shadow-[1px_0_2px_var(--background),-1px_0_2px_var(--background)]",
+		];
+		const PACE_TICK_LITERAL = "rgba(255,255,255,0.95)";
+
+		function expectTokenisedPaceTick(html: string) {
+			for (const cls of PACE_TICK_CLASSES) expect(html).toContain(cls);
+			expect(html).not.toContain(PACE_TICK_LITERAL);
+			expect(html).not.toContain("rgba(0,0,0,0.5)");
+		}
 
 		/** A five-hour window whose reset is `msFromNow` away. */
 		function fiveHourProps(utilization: number, msFromNow: number) {
@@ -507,7 +525,7 @@ describe("RateLimitProgress", () => {
 
 			expect(html).not.toContain("bg-destructive");
 			expect(html).not.toContain("bg-warning");
-			expect(html).toContain(PACE_TICK_COLOR);
+			expectTokenisedPaceTick(html);
 		});
 
 		it("paints a wide-margin regression projection red", () => {
@@ -523,7 +541,7 @@ describe("RateLimitProgress", () => {
 			expect(html).toContain("bg-destructive");
 			// The fill and the projection line read from one tone, so they agree.
 			expect(html).toContain("text-destructive-strong");
-			expect(html).toContain(PACE_TICK_COLOR);
+			expectTokenisedPaceTick(html);
 		});
 
 		it("paints a thin-margin regression projection amber, not red", () => {
@@ -542,7 +560,7 @@ describe("RateLimitProgress", () => {
 			expect(html).toContain("text-warning-strong");
 			expect(html).not.toContain("bg-destructive");
 			expect(html).not.toContain("text-destructive-strong");
-			expect(html).toContain(PACE_TICK_COLOR);
+			expectTokenisedPaceTick(html);
 		});
 
 		it("caps the legacy single-snapshot projection at amber", () => {

@@ -807,16 +807,20 @@ export function RateLimitProgress({
 								)}
 							/>
 							{expectedPct !== null && (
+								// The tick and its halo are tokens, not literals. They used to
+								// be a hard white line with a black glow, which is a dark-mode
+								// assumption: in light mode that is a white line on a light
+								// track. The halo is drawn from `--background` so the tick
+								// stays legible against both the filled and the unfilled part
+								// of the bar in either mode. `left` is computed and the rest
+								// is pure positioning, so those stay inline.
 								<div
-									className="absolute w-0.5 pointer-events-none"
+									className="absolute w-0.5 pointer-events-none bg-foreground shadow-[1px_0_2px_var(--background),-1px_0_2px_var(--background)]"
 									style={{
 										left: `${expectedPct}%`,
 										top: "-3px",
 										height: "14px",
 										zIndex: 10,
-										backgroundColor: "rgba(255,255,255,0.95)",
-										boxShadow:
-											"1px 0 2px rgba(0,0,0,0.5), -1px 0 2px rgba(0,0,0,0.5)",
 									}}
 								/>
 							)}
