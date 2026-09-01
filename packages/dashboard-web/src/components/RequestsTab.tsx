@@ -145,9 +145,8 @@ function FilterChip({
 /**
  * Stable keys for the request-list loading skeleton.
  *
- * Six, not "about eight": the count is fixed so the loading list and the
- * loaded list occupy the same box, and so QA can measure one against the other
- * with the stub returning exactly six rows.
+ * Six, not "about eight": the count is fixed so QA can compare loading and
+ * loaded-list geometry using a controlled six-row stub.
  *
  * `h-[6.25rem]` (100px) matches the browser-measured height of a normal
  * request row in the six-row QA fixture. A row that renders `request.error`
@@ -160,8 +159,9 @@ function FilterChip({
  * future error-row distribution, the skeleton uses the modal 100px row.
  * Re-measure these values in a browser when the row markup changes.
  *
- * The value this replaced counted only two of the three content rows and came
- * out at 72px, which is why the route still jumped 216px when the list loaded.
+ * The original `h-[4.5rem]` value counted only two of the three content rows.
+ * In the mixed four-normal/two-error fixture, its 472px skeleton loaded into a
+ * 688px list, producing the measured 216px jump.
  */
 const REQUEST_SKELETON_ROWS = [
 	"row-1",
