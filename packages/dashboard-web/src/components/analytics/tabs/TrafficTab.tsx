@@ -10,6 +10,7 @@ import {
 	MainMetricsChart,
 	MissingSectionsNotice,
 	PerformanceIndicatorsChart,
+	SectionHeading,
 	TokenUsageBreakdown,
 } from "..";
 import type { TrafficTabProps } from "./types";
@@ -160,21 +161,25 @@ export function TrafficTab(props: TrafficTabProps) {
 			<AnalyticsControls
 				timeRange={range}
 				setTimeRange={onRangeChange}
-				filters={filters}
-				setFilters={setFilters}
-				availableAccounts={availableAccounts}
-				availableModels={availableModels}
-				availableApiKeys={availableApiKeys}
-				availableProjects={availableProjects}
-				hasNoAccountBucket={hasNoAccountBucket}
-				hasNoProjectBucket={hasNoProjectBucket}
-				activeFilterCount={activeFilterCount}
-				filterOpen={filterOpen}
-				setFilterOpen={setFilterOpen}
-				loading={loading}
-				onRefresh={() => {
-					void refetch();
-					if (modelBreakdown) void refetchPerModel();
+				filterProps={{
+					filters,
+					setFilters,
+					availableAccounts,
+					availableModels,
+					availableApiKeys,
+					availableProjects,
+					hasNoAccountBucket,
+					hasNoProjectBucket,
+					activeFilterCount,
+					filterOpen,
+					setFilterOpen,
+				}}
+				refresh={{
+					loading,
+					onRefresh: () => {
+						void refetch();
+						if (modelBreakdown) void refetchPerModel();
+					},
 				}}
 			/>
 
@@ -205,6 +210,7 @@ export function TrafficTab(props: TrafficTabProps) {
 				<TokenUsageBreakdown
 					tokenBreakdown={tokenBreakdown}
 					timeRange={range}
+					loading={loading}
 				/>
 			</div>
 
@@ -218,14 +224,11 @@ export function TrafficTab(props: TrafficTabProps) {
 			{/* Cumulative Trends - always shown at the bottom */}
 			{analytics && data.length > 0 && (
 				<section className="space-y-section">
-					<div className="border-t pt-6">
-						<h2 data-slot="title" className="text-lg font-semibold">
-							Cumulative Trends
-						</h2>
-						<p data-slot="subtitle" className="text-sm text-muted-foreground">
-							Running totals across the selected time range
-						</p>
-					</div>
+					<SectionHeading
+						className="border-t pt-section"
+						title="Cumulative Trends"
+						description="Running totals across the selected time range"
+					/>
 					<CumulativeGrowthChart data={cumulativeData} timeRange={range} />
 				</section>
 			)}

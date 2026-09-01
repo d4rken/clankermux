@@ -1,6 +1,7 @@
 import { registerUIRefresh } from "@clankermux/core";
 import type { AnalyticsSection } from "@clankermux/types";
 import React, { useEffect, useMemo, useState } from "react";
+import type { TimeRange } from "../../constants";
 import {
 	useAccounts,
 	useAnalytics,
@@ -30,9 +31,10 @@ export const LIMITS_SECTIONS: readonly AnalyticsSection[] = [
 export const LimitsTab = React.memo(() => {
 	// Each time-ranged card owns its own range now (the live pool tiles and
 	// utilization card below are range-independent and get no selector).
-	const [fiveHourUsageRange, setFiveHourUsageRange] = useState("24h");
-	const [sevenDayUsageRange, setSevenDayUsageRange] = useState("7d");
-	const [perfRange, setPerfRange] = useState("7d");
+	const [fiveHourUsageRange, setFiveHourUsageRange] =
+		useState<TimeRange>("24h");
+	const [sevenDayUsageRange, setSevenDayUsageRange] = useState<TimeRange>("7d");
+	const [perfRange, setPerfRange] = useState<TimeRange>("7d");
 
 	const accountsQuery = useAccounts();
 	const { data: accounts, isLoading: accountsLoading } = accountsQuery;

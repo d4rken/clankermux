@@ -11,6 +11,7 @@ import type { CHART_HEIGHTS } from "../../constants";
 import { useSeriesPalette } from "../../hooks/useSeriesPalette";
 import { ChartContainer } from "./ChartContainer";
 import { getChartHeight, getTooltipStyles } from "./chart-utils";
+import { legendLabelFormatter } from "./legend-format";
 import type { ChartClickHandler, TooltipFormatterFunction } from "./types";
 
 type TooltipFormatterProp = ComponentProps<typeof Tooltip>["formatter"];
@@ -113,6 +114,7 @@ export function BasePieChart({
 					/>
 					{showLegend && (
 						<Legend
+							formatter={legendLabelFormatter}
 							layout={legendLayout}
 							align={legendAlign}
 							verticalAlign={legendVerticalAlign}

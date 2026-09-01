@@ -5,6 +5,7 @@ import {
 	ModelWindowCostPanel,
 	QuotaChangeVerdicts,
 	QuotaDriftPanel,
+	SectionHeading,
 } from "..";
 
 /**
@@ -38,21 +39,18 @@ export function QuotaTab() {
 			) : (
 				cohorts.map((cohort) => (
 					<section key={cohort.key} className="space-y-section">
-						<div>
-							<h2 data-slot="title" className="text-lg font-semibold">
-								{cohortLabel(cohort)}
-							</h2>
-							<p
-								data-slot="subtitle"
-								className="text-sm text-muted-foreground max-w-prose"
-							>
-								{cohort.accountIds.length} account
-								{cohort.accountIds.length === 1 ? "" : "s"} fitted together.
-								{cohort.tierProvenance === "assumed"
-									? " Tier inferred from today's account values rather than recorded per sample."
-									: null}
-							</p>
-						</div>
+						<SectionHeading
+							title={cohortLabel(cohort)}
+							description={
+								<>
+									{cohort.accountIds.length} account
+									{cohort.accountIds.length === 1 ? "" : "s"} fitted together.
+									{cohort.tierProvenance === "assumed"
+										? " Tier inferred from today's account values rather than recorded per sample."
+										: null}
+								</>
+							}
+						/>
 						<ModelWindowCostPanel cohort={cohort} />
 						<QuotaDriftPanel cohort={cohort} />
 					</section>

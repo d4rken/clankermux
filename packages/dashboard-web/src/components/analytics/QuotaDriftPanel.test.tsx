@@ -32,7 +32,7 @@ describe("QuotaDriftPanel", () => {
 		const html = renderToStaticMarkup(<QuotaDriftPanel loading />);
 
 		expect(html).toContain("Implied Capacity Over Time");
-		expect(html).toContain("animate-spin");
+		expect(html).toContain("animate-pulse");
 	});
 
 	it("says so when the cohort has no fitted windows", () => {

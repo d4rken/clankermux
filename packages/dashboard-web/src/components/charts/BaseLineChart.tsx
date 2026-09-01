@@ -17,6 +17,7 @@ import {
 	getTooltipStyles,
 	isChartEmpty,
 } from "./chart-utils";
+import { legendLabelFormatter } from "./legend-format";
 
 // Recharts' string curve types. `CurveType` is not re-exported from the
 // "recharts" package root (only `Curve`/`CurveProps` are), so we mirror the
@@ -111,6 +112,7 @@ export function BaseLineChart({
 						className={CHART_PROPS.gridClassName}
 					/>
 					<XAxis
+						{...CHART_PROPS.axis}
 						dataKey={xAxisKey}
 						className="text-xs"
 						angle={xAxisAngle}
@@ -119,18 +121,22 @@ export function BaseLineChart({
 						tickFormatter={xAxisTickFormatter}
 					/>
 					<YAxis
+						{...CHART_PROPS.axis}
 						className="text-xs"
 						domain={yAxisDomain}
 						tickFormatter={yAxisTickFormatter}
 					/>
 					<Tooltip
+						cursor={CHART_PROPS.cursorLine}
 						contentStyle={tooltipStyles}
 						// biome-ignore lint/suspicious/noExplicitAny: recharts v3.8 widened Formatter to include undefined
 						formatter={tooltipFormatter as any}
 						// biome-ignore lint/suspicious/noExplicitAny: recharts v3.8 widened labelFormatter label to ReactNode
 						labelFormatter={tooltipLabelFormatter as any}
 					/>
-					{showLegend && <Legend height={legendHeight} />}
+					{showLegend && (
+						<Legend height={legendHeight} formatter={legendLabelFormatter} />
+					)}
 					{lineConfigs.map((lineConfig, _index) => (
 						<Line
 							key={lineConfig.dataKey}

@@ -28,13 +28,6 @@ export function TokenSpeedChart({
 		avgTokensPerSecond: point.avgTokensPerSecond || 0,
 	}));
 
-	const gradient = (
-		<linearGradient id="colorSpeed" x1="0" y1="0" x2="0" y2="1">
-			<stop offset="0%" stopColor={CHART_TOKENS.purple} stopOpacity={0.9} />
-			<stop offset="100%" stopColor={CHART_TOKENS.purple} stopOpacity={0.1} />
-		</linearGradient>
-	);
-
 	return (
 		<BaseAreaChart
 			data={filteredData}
@@ -43,7 +36,6 @@ export function TokenSpeedChart({
 			height={height}
 			color={CHART_TOKENS.purple}
 			gradientId="colorSpeed"
-			customGradient={gradient}
 			strokeWidth={2}
 			{...longRangeAxisProps(timeRange)}
 			yAxisTickFormatter={formatCompactNumber}

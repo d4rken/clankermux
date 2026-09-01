@@ -19,7 +19,6 @@ import {
 import { CHART_HEIGHTS, CHART_PROPS } from "../../constants";
 import { useSeriesPalette } from "../../hooks/useSeriesPalette";
 import {
-	cohortLabel,
 	flatWindowNotice,
 	lastObservedValueNotice,
 	notReportedNotice,
@@ -29,7 +28,7 @@ import {
 import { formatAxisTime } from "../../lib/time-format";
 import { ChartContainer } from "../charts/ChartContainer";
 import { getTooltipStyles } from "../charts/chart-utils";
-import { Badge } from "../ui/badge";
+import { legendLabelFormatter } from "../charts/legend-format";
 import {
 	Card,
 	CardContent,
@@ -68,11 +67,6 @@ export function QuotaDriftPanel({
 				<CardTitle className="flex items-center gap-item">
 					<Activity className="h-5 w-5" />
 					Implied Capacity Over Time
-					{cohort ? (
-						<Badge variant="outline" className="ml-auto font-normal">
-							{cohortLabel(cohort)}
-						</Badge>
-					) : null}
 				</CardTitle>
 				<CardDescription className="text-xs">
 					Millions of equivalent tokens the full window would buy at each
@@ -195,18 +189,21 @@ function WindowSeries({
 							className={CHART_PROPS.gridClassName}
 						/>
 						<XAxis
+							{...CHART_PROPS.axis}
 							dataKey="ts"
 							type="number"
 							domain={["dataMin", "dataMax"]}
 							scale="time"
-							tick={{ fontSize: 11 }}
+							tick={{ ...CHART_PROPS.axis.tick, fontSize: 11 }}
 							tickFormatter={(v: number) => formatAxisTime(v, "all")}
 						/>
 						<YAxis
-							tick={{ fontSize: 11 }}
+							{...CHART_PROPS.axis}
+							tick={{ ...CHART_PROPS.axis.tick, fontSize: 11 }}
 							tickFormatter={(v: number) => `${v.toFixed(0)}M`}
 						/>
 						<Tooltip
+							cursor={CHART_PROPS.cursorLine}
 							contentStyle={getTooltipStyles()}
 							labelFormatter={(v) => new Date(Number(v)).toLocaleString()}
 							formatter={(value: unknown, name: unknown) => {
@@ -224,7 +221,7 @@ function WindowSeries({
 								];
 							}}
 						/>
-						<Legend />
+						<Legend formatter={legendLabelFormatter} />
 						{models.map((key, _index) => (
 							<Area
 								key={`${key}__band`}
@@ -286,11 +283,11 @@ function WindowSeries({
 			) : null}
 			{gaps.length > 0 ? (
 				<details className="group max-w-prose">
-					<summary className="flex cursor-pointer list-none items-center gap-1 text-xs font-medium text-muted-foreground hover:text-foreground focus:outline-none focus-visible:ring-2 focus-visible:ring-ring [&::-webkit-details-marker]:hidden">
+					<summary className="flex cursor-pointer list-none items-center gap-tight text-xs font-medium text-muted-foreground hover:text-foreground focus:outline-none focus-visible:ring-2 focus-visible:ring-ring [&::-webkit-details-marker]:hidden">
 						What this analysis could not measure, and why
 						<ChevronDown className="h-3.5 w-3.5 transition-transform group-open:rotate-180" />
 					</summary>
-					<ul className="mt-1 text-xs text-muted-foreground space-y-0.5">
+					<ul className="mt-tight text-xs text-muted-foreground space-y-0.5">
 						{gaps.map((model) => (
 							<li key={model.key}>
 								<span className="font-medium">{model.key}</span>
@@ -300,7 +297,7 @@ function WindowSeries({
 								{model.lines.length === 1 ? (
 									` — ${model.lines[0].text}`
 								) : (
-									<ul className="pl-4 space-y-0.5">
+									<ul className="pl-group space-y-0.5">
 										{model.lines.map((line) => (
 											<li key={line.id}>{line.text}</li>
 										))}

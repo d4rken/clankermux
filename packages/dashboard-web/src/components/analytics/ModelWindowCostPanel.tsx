@@ -1,7 +1,6 @@
 import type { QuotaDriftCohort, QuotaDriftModel } from "@clankermux/types";
 import { Coins, Loader2 } from "lucide-react";
 import {
-	cohortLabel,
 	formatCapacity,
 	formatCoefficient,
 	formatInterval,
@@ -9,7 +8,6 @@ import {
 	supportText,
 	unidentifiedReasonText,
 } from "../../lib/quota-drift-display";
-import { Badge } from "../ui/badge";
 import {
 	Card,
 	CardContent,
@@ -17,6 +15,15 @@ import {
 	CardHeader,
 	CardTitle,
 } from "../ui/card";
+import {
+	Table,
+	TableBody,
+	TableCell,
+	TableFrame,
+	TableHead,
+	TableHeader,
+	TableRow,
+} from "../ui/table";
 
 /**
  * "How many tokens is a model worth?" — the direct answer, per window.
@@ -43,11 +50,6 @@ export function ModelWindowCostPanel({
 				<CardTitle className="flex items-center gap-item">
 					<Coins className="h-5 w-5" />
 					Window Cost per Model
-					{cohort ? (
-						<Badge variant="outline" className="ml-auto font-normal">
-							{cohortLabel(cohort)}
-						</Badge>
-					) : null}
 				</CardTitle>
 				<CardDescription className="text-xs">
 					Percentage of the window consumed per 1M price-equivalent tokens
@@ -90,30 +92,30 @@ export function ModelWindowCostPanel({
 									No models carried enough traffic in this window.
 								</p>
 							) : (
-								<div className="overflow-x-auto">
-									<table className="w-full text-sm">
-										<thead>
-											<tr className="text-xs text-muted-foreground text-left">
-												<th className="font-normal pb-1">Model</th>
+								// Bare: one table is emitted per fitted window inside this
+								// map, so a frame would stack N borders down the card.
+								<TableFrame variant="bare">
+									<Table density="compact">
+										<TableHeader className="bg-transparent">
+											<TableRow className="border-t-0">
+												<TableHead>Model</TableHead>
 												{/* The unit is in the HEADER, not only in the prose
 												    above: a reader scanning the table takes "/ 1M" as
 												    raw tokens, and the whole column is in
 												    list-price-weighted equivalents. */}
-												<th className="font-normal pb-1">
-													% of window / 1M eq-tokens
-												</th>
-												<th className="font-normal pb-1">90% interval</th>
-												<th className="font-normal pb-1">Implied capacity</th>
-												<th className="font-normal pb-1">Share of traffic</th>
-											</tr>
-										</thead>
-										<tbody>
+												<TableHead>% of window / 1M eq-tokens</TableHead>
+												<TableHead>90% interval</TableHead>
+												<TableHead>Implied capacity</TableHead>
+												<TableHead>Share of traffic</TableHead>
+											</TableRow>
+										</TableHeader>
+										<TableBody>
 											{window.models.map((model) => (
 												<ModelRow key={model.key} model={model} />
 											))}
-										</tbody>
-									</table>
-								</div>
+										</TableBody>
+									</Table>
+								</TableFrame>
 							)}
 						</div>
 					))
@@ -129,26 +131,26 @@ function ModelRow({ model }: { model: QuotaDriftModel }) {
 
 	if (reason !== null) {
 		return (
-			<tr className="border-t">
-				<td className="py-1.5 font-medium">{model.key}</td>
+			<TableRow>
+				<TableCell className="font-medium">{model.key}</TableCell>
 				{/* One span across the three numeric columns: there is no number to
 				    put in any of them, and three repeated placeholders would read as
 				    three separate missing values. */}
-				<td className="py-1.5 text-muted-foreground" colSpan={3}>
+				<TableCell className="text-muted-foreground" colSpan={3}>
 					{reason}
-				</td>
-				<td className="py-1.5 text-muted-foreground">
+				</TableCell>
+				<TableCell className="figure text-muted-foreground">
 					{share == null ? "—" : `${(share * 100).toFixed(1)}%`}
-				</td>
-			</tr>
+				</TableCell>
+			</TableRow>
 		);
 	}
 
 	const support = supportText(model);
 
 	return (
-		<tr className="border-t">
-			<td className="py-1.5 font-medium">
+		<TableRow>
+			<TableCell className="font-medium">
 				{model.key}
 				{/* How many independent clusters actually carried this model. The
 				    interval cannot express it: the bootstrap resamples whole runs, so
@@ -159,17 +161,17 @@ function ModelRow({ model }: { model: QuotaDriftModel }) {
 						{support}
 					</span>
 				) : null}
-			</td>
-			<td className="py-1.5 font-medium">
+			</TableCell>
+			<TableCell className="figure font-medium">
 				{formatCoefficient(model.latest?.pointEstimate ?? null)}
-			</td>
-			<td className="py-1.5 text-muted-foreground">
+			</TableCell>
+			<TableCell className="figure text-muted-foreground">
 				{formatInterval(
 					model.latest?.ciLow ?? null,
 					model.latest?.ciHigh ?? null,
 				)}
-			</td>
-			<td className="py-1.5">
+			</TableCell>
+			<TableCell className="figure">
 				{/* "eq-tokens", never bare "tokens": the capacity is 100/coefficient
 				    in the same price-equivalent unit the coefficient is denominated
 				    in, and calling it tokens invites a reader to compare it against a
@@ -178,10 +180,10 @@ function ModelRow({ model }: { model: QuotaDriftModel }) {
 				    eq-tokens rather than Mtok-eq — the latter would state the million
 				    twice. */}
 				{formatCapacity(model.latest?.impliedCapacityMtok ?? null)} eq-tokens
-			</td>
-			<td className="py-1.5 text-muted-foreground">
+			</TableCell>
+			<TableCell className="figure text-muted-foreground">
 				{share == null ? "—" : `${(share * 100).toFixed(1)}%`}
-			</td>
-		</tr>
+			</TableCell>
+		</TableRow>
 	);
 }

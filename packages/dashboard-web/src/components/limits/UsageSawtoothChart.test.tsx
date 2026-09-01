@@ -72,8 +72,9 @@ describe("UsageSawtoothChart availability", () => {
 		const html = renderChart({ loading: true }, { loading: true });
 
 		expect(html).not.toContain(EMPTY_CLAIM);
-		// Both panels show the chart container's spinner instead.
-		expect(html.match(/animate-spin/g)).toHaveLength(2);
+		// Both panels show the chart container's loading skeleton instead. The
+		// COUNT is the assertion: one pulsing block per pending window.
+		expect(html.match(/animate-pulse/g)).toHaveLength(2);
 	});
 
 	it("still claims history is being collected once the read resolves empty", () => {
@@ -104,6 +105,8 @@ describe("UsageSawtoothChart availability", () => {
 		);
 
 		expect(html.match(new RegExp(EMPTY_CLAIM, "g"))).toHaveLength(1);
-		expect(html.match(/animate-spin/g)).toHaveLength(1);
+		// One skeleton, not two: the resolved window must not borrow the
+		// pending one's loading state.
+		expect(html.match(/animate-pulse/g)).toHaveLength(1);
 	});
 });

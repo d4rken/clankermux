@@ -2,11 +2,12 @@ import * as React from "react";
 
 import { cn } from "../../lib/utils";
 
-type AlertTone = "info" | "success" | "destructive";
+type AlertTone = "info" | "success" | "warning" | "destructive";
 
 const TONE: Record<AlertTone, string> = {
 	info: "bg-info/10 border-info/25",
 	success: "bg-success/10 border-success/25",
+	warning: "bg-warning/10 border-warning/25",
 	destructive: "bg-destructive/10 border-destructive/25",
 };
 
@@ -17,6 +18,7 @@ const TONE: Record<AlertTone, string> = {
 const ICON_TONE: Record<AlertTone, string> = {
 	info: "text-foreground",
 	success: "text-success-strong",
+	warning: "text-warning-strong",
 	destructive: "text-destructive-strong",
 };
 

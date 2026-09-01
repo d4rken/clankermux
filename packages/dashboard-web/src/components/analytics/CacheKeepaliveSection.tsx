@@ -1,6 +1,7 @@
 import type { TimeRange } from "../../constants";
 import { CacheEffectivenessPanel } from "./CacheEffectivenessPanel";
 import { CacheKeepalivePanel } from "./CacheKeepalivePanel";
+import { SectionHeading } from "./SectionHeading";
 
 /**
  * Groups the two cache-keepalive analytics panels under a single, shared
@@ -20,20 +21,11 @@ import { CacheKeepalivePanel } from "./CacheKeepalivePanel";
  */
 export function CacheKeepaliveSection({ range }: { range: TimeRange }) {
 	return (
-		<section className="space-y-section border-t pt-6">
-			<div>
-				<h2 data-slot="title" className="text-lg font-semibold">
-					Cache Keep-Alive
-				</h2>
-				<p
-					data-slot="subtitle"
-					className="text-sm text-muted-foreground max-w-prose"
-				>
-					Live cache status, historical activity, and effectiveness. The
-					selected window applies to history and effectiveness; live counters
-					are cumulative since the last restart.
-				</p>
-			</div>
+		<section className="space-y-section border-t pt-section">
+			<SectionHeading
+				title="Cache Keep-Alive"
+				description="Live cache status, historical activity, and effectiveness. The selected window applies to history and effectiveness; live counters are cumulative since the last restart."
+			/>
 			<CacheKeepalivePanel range={range} />
 			<CacheEffectivenessPanel range={range} />
 		</section>

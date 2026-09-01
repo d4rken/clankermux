@@ -24,6 +24,7 @@ import {
 	CardHeader,
 	CardTitle,
 } from "../ui/card";
+import { PanelEmptyState } from "./PanelEmptyState";
 
 function EmptyState({ loading }: { loading: boolean }) {
 	return (
@@ -38,11 +39,11 @@ function EmptyState({ loading }: { loading: boolean }) {
 				</CardDescription>
 			</CardHeader>
 			<CardContent>
-				<div className="flex min-h-40 items-center justify-center rounded-md border border-dashed px-6 text-center text-sm text-muted-foreground">
+				<PanelEmptyState>
 					{loading
 						? "Loading active sessions..."
 						: "No session activity recorded in this range yet. Sessions are attributed for new requests only."}
-				</div>
+				</PanelEmptyState>
 			</CardContent>
 		</Card>
 	);

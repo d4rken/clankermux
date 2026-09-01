@@ -16,6 +16,7 @@ import {
 	getTooltipStyles,
 	isChartEmpty,
 } from "./chart-utils";
+import { legendLabelFormatter } from "./legend-format";
 
 interface BarConfig {
 	dataKey: string;
@@ -93,11 +94,13 @@ export function BaseBarChart({
 					{layout === "vertical" ? (
 						<>
 							<XAxis
+								{...CHART_PROPS.axis}
 								type={xAxisType as "number"}
 								className="text-xs"
 								tickFormatter={xAxisTickFormatter}
 							/>
 							<YAxis
+								{...CHART_PROPS.axis}
 								dataKey={xAxisKey}
 								type={yAxisType as "category"}
 								className="text-xs"
@@ -108,6 +111,7 @@ export function BaseBarChart({
 					) : (
 						<>
 							<XAxis
+								{...CHART_PROPS.axis}
 								dataKey={xAxisKey}
 								type={xAxisType as "category"}
 								className="text-xs"
@@ -117,6 +121,7 @@ export function BaseBarChart({
 								tickFormatter={xAxisTickFormatter}
 							/>
 							<YAxis
+								{...CHART_PROPS.axis}
 								yAxisId={secondaryYAxis ? "left" : undefined}
 								type={yAxisType as "number"}
 								className="text-xs"
@@ -126,6 +131,7 @@ export function BaseBarChart({
 							/>
 							{secondaryYAxis && (
 								<YAxis
+									{...CHART_PROPS.axis}
 									yAxisId="right"
 									orientation="right"
 									className="text-xs"
@@ -135,13 +141,16 @@ export function BaseBarChart({
 						</>
 					)}
 					<Tooltip
+						cursor={CHART_PROPS.cursorBand}
 						contentStyle={tooltipStyles}
 						// biome-ignore lint/suspicious/noExplicitAny: recharts v3.8 widened Formatter to include undefined
 						formatter={tooltipFormatter as any}
 						// biome-ignore lint/suspicious/noExplicitAny: recharts v3.8 widened labelFormatter label to ReactNode
 						labelFormatter={tooltipLabelFormatter as any}
 					/>
-					{showLegend && <Legend height={legendHeight} />}
+					{showLegend && (
+						<Legend height={legendHeight} formatter={legendLabelFormatter} />
+					)}
 					{barConfigs.map((barConfig) => (
 						<Bar
 							key={barConfig.dataKey}

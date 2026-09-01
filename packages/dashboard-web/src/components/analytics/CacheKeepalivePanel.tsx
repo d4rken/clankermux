@@ -20,7 +20,9 @@ import { formatAxisTime, formatTooltipTime } from "../../lib/time-format";
 import { ChartContainer } from "../charts/ChartContainer";
 import { ChartTooltip } from "../charts/ChartTooltip";
 import { getChartHeight } from "../charts/chart-utils";
+import { legendLabelFormatter } from "../charts/legend-format";
 import { Card, CardContent, CardHeader, CardTitle } from "../ui/card";
+import { StatTile } from "./StatTile";
 
 const MODE_LABELS: Record<string, string> = {
 	off: "Off",
@@ -38,32 +40,6 @@ interface KeepaliveRow {
 	savedUsd: number;
 	/** Hit rate as a 0..100 percentage (history hitRate is 0..1). */
 	hitRatePct: number;
-}
-
-/**
- * Small headline tile for the live cache-keepalive stats. Uses the compact
- * stat-card idiom shared by the analytics panels.
- */
-function StatTile({
-	label,
-	value,
-	sub,
-	valueClassName,
-}: {
-	label: string;
-	value: string;
-	sub?: string;
-	valueClassName?: string;
-}) {
-	return (
-		<div className="rounded-lg border bg-card p-3">
-			<p className="text-xs text-muted-foreground">{label}</p>
-			<p className={`text-xl font-bold ${valueClassName ?? ""}`}>{value}</p>
-			{sub ? (
-				<p className="text-xs text-muted-foreground mt-0.5">{sub}</p>
-			) : null}
-		</div>
-	);
 }
 
 /**
@@ -153,12 +129,14 @@ export function CacheKeepalivePanel({ range }: { range: TimeRange }) {
 								className={CHART_PROPS.gridClassName}
 							/>
 							<XAxis
+								{...CHART_PROPS.axis}
 								dataKey="ts"
 								className="text-xs"
 								height={30}
 								tickFormatter={(value) => formatAxisTime(Number(value), range)}
 							/>
 							<YAxis
+								{...CHART_PROPS.axis}
 								yAxisId="usd"
 								className="text-xs"
 								width={64}
@@ -166,6 +144,7 @@ export function CacheKeepalivePanel({ range }: { range: TimeRange }) {
 							/>
 							{/* Right axis for the hit-rate line, pinned to 0–100%. */}
 							<YAxis
+								{...CHART_PROPS.axis}
 								yAxisId="rate"
 								orientation="right"
 								className="text-xs"
@@ -174,6 +153,7 @@ export function CacheKeepalivePanel({ range }: { range: TimeRange }) {
 								tickFormatter={(value) => `${Math.round(Number(value))}%`}
 							/>
 							<Tooltip
+								cursor={CHART_PROPS.cursorLine}
 								content={
 									<ChartTooltip
 										formatters={{
@@ -190,7 +170,12 @@ export function CacheKeepalivePanel({ range }: { range: TimeRange }) {
 									/>
 								}
 							/>
-							<Legend verticalAlign="top" height={36} iconType="rect" />
+							<Legend
+								formatter={legendLabelFormatter}
+								verticalAlign="top"
+								height={36}
+								iconType="rect"
+							/>
 							<Line
 								yAxisId="usd"
 								type="monotone"

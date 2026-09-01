@@ -37,6 +37,7 @@ import {
 	TokenUsageChart,
 } from "../charts";
 import { getTooltipStyles, longRangeAxisProps } from "../charts/chart-utils";
+import { legendLabelFormatter } from "../charts/legend-format";
 import { Badge } from "../ui/badge";
 import {
 	Card,
@@ -53,6 +54,7 @@ import {
 	SelectTrigger,
 	SelectValue,
 } from "../ui/select";
+import { Skeleton } from "../ui/skeleton";
 import { Switch } from "../ui/switch";
 
 type TooltipFormatterProp = ComponentProps<typeof Tooltip>["formatter"];
@@ -173,7 +175,7 @@ export function MainMetricsChart({
 	return (
 		<Card>
 			<CardHeader>
-				<div className="flex items-center justify-between">
+				<div className="flex flex-wrap items-start justify-between gap-row">
 					<div>
 						<CardTitle>Traffic Analytics</CardTitle>
 						<CardDescription>
@@ -302,6 +304,7 @@ export function MainMetricsChart({
 											className={CHART_PROPS.gridClassName}
 										/>
 										<XAxis
+											{...CHART_PROPS.axis}
 											dataKey="time"
 											className="text-xs"
 											angle={isLongRange ? -45 : 0}
@@ -309,10 +312,12 @@ export function MainMetricsChart({
 											height={isLongRange ? 60 : 30}
 										/>
 										<YAxis
+											{...CHART_PROPS.axis}
 											className="text-xs"
 											tickFormatter={formatCompactCurrency}
 										/>
 										<Tooltip
+											cursor={CHART_PROPS.cursorLine}
 											formatter={
 												((value: number, name: string) => [
 													formatCost(Number(value)),
@@ -321,7 +326,7 @@ export function MainMetricsChart({
 											}
 											labelFormatter={makeTimeTooltipLabelFormatter(timeRange)}
 										/>
-										<Legend height={36} />
+										<Legend height={36} formatter={legendLabelFormatter} />
 										<Area
 											type="monotone"
 											dataKey="planCost"
@@ -428,14 +433,20 @@ interface TokenBreakdownItem {
 	percentage: number;
 }
 
+// The four rows are a fixed schema (input, cache read, cache creation, output),
+// so the loading state can stand in for exactly what will arrive.
+const TOKEN_BREAKDOWN_ROWS = 4;
+
 interface TokenUsageBreakdownProps {
 	tokenBreakdown: TokenBreakdownItem[];
 	timeRange: TimeRange;
+	loading: boolean;
 }
 
 export function TokenUsageBreakdown({
 	tokenBreakdown,
 	timeRange,
+	loading,
 }: TokenUsageBreakdownProps) {
 	return (
 		<Card>
@@ -446,48 +457,75 @@ export function TokenUsageBreakdown({
 				</CardDescription>
 			</CardHeader>
 			<CardContent>
-				<div className="space-y-group">
-					{tokenBreakdown.map((item, index) => (
-						<div key={item.type}>
-							<div className="flex items-center justify-between mb-2">
-								<span className="text-sm font-medium">{item.type}</span>
-								<div className="flex items-center gap-item">
-									<span className="text-sm text-muted-foreground">
-										{formatTokens(item.value)} tokens
-									</span>
-									<Badge variant="outline">{item.percentage}%</Badge>
+				{/* This sits beside PerformanceIndicatorsChart, which takes `loading`
+				    and forwards it. Without the same treatment here, a refetch left
+				    one half of the row showing zero-percentage bars while the other
+				    showed its loading state. */}
+				{loading ? (
+					<div className="space-y-group">
+						{Array.from(
+							{ length: TOKEN_BREAKDOWN_ROWS },
+							(_, i) => `token-row-${i}`,
+						).map((key) => (
+							<div key={key}>
+								<div className="mb-item flex items-center justify-between">
+									<Skeleton className="h-4 w-28" />
+									<Skeleton className="h-4 w-24" />
 								</div>
+								<Skeleton className="h-2 w-full rounded-full" />
 							</div>
-							<div className="w-full bg-muted rounded-full h-2">
-								<div
-									className="h-2 rounded-full transition-all"
-									style={{
-										width: `${item.percentage}%`,
-										backgroundColor:
-											index === 0
-												? CHART_TOKENS.blue
-												: index === 1
-													? CHART_TOKENS.success
-													: index === 2
-														? CHART_TOKENS.warning
-														: CHART_TOKENS.purple,
-									}}
-								/>
+						))}
+						<div className="pt-group border-t">
+							<div className="flex items-center justify-between">
+								<span className="text-sm font-medium">Total Tokens</span>
+								<Skeleton className="h-6 w-32" />
 							</div>
-						</div>
-					))}
-					<div className="pt-4 border-t">
-						<div className="flex items-center justify-between">
-							<span className="text-sm font-medium">Total Tokens</span>
-							<span className="text-lg font-bold">
-								{formatTokens(
-									tokenBreakdown.reduce((acc, item) => acc + item.value, 0),
-								)}{" "}
-								tokens
-							</span>
 						</div>
 					</div>
-				</div>
+				) : (
+					<div className="space-y-group">
+						{tokenBreakdown.map((item, index) => (
+							<div key={item.type}>
+								<div className="flex items-center justify-between mb-item">
+									<span className="text-sm font-medium">{item.type}</span>
+									<div className="flex items-center gap-item">
+										<span className="text-sm text-muted-foreground">
+											{formatTokens(item.value)} tokens
+										</span>
+										<Badge variant="outline">{item.percentage}%</Badge>
+									</div>
+								</div>
+								<div className="w-full bg-muted rounded-full h-2">
+									<div
+										className="h-2 rounded-full transition-all"
+										style={{
+											width: `${item.percentage}%`,
+											backgroundColor:
+												index === 0
+													? CHART_TOKENS.blue
+													: index === 1
+														? CHART_TOKENS.success
+														: index === 2
+															? CHART_TOKENS.warning
+															: CHART_TOKENS.purple,
+										}}
+									/>
+								</div>
+							</div>
+						))}
+						<div className="pt-group border-t">
+							<div className="flex items-center justify-between">
+								<span className="text-sm font-medium">Total Tokens</span>
+								<span className="text-lg font-bold">
+									{formatTokens(
+										tokenBreakdown.reduce((acc, item) => acc + item.value, 0),
+									)}{" "}
+									tokens
+								</span>
+							</div>
+						</div>
+					</div>
+				)}
 			</CardContent>
 		</Card>
 	);
@@ -503,7 +541,7 @@ export function CumulativeGrowthChart({
 	timeRange,
 }: CumulativeGrowthChartProps) {
 	return (
-		<Card className="bg-gradient-to-br from-background to-muted/10 border-muted">
+		<Card>
 			<CardHeader>
 				<CardTitle>Cumulative Growth Analysis</CardTitle>
 				<CardDescription>
@@ -556,7 +594,7 @@ export function CumulativeGrowthChart({
 							strokeDasharray={CHART_PROPS.strokeDasharray}
 							className={CHART_PROPS.gridClassName}
 						/>
-						<XAxis dataKey="time" className="text-xs" />
+						<XAxis {...CHART_PROPS.axis} dataKey="time" className="text-xs" />
 						<YAxis
 							yAxisId="tokens"
 							className="text-xs"
@@ -571,6 +609,7 @@ export function CumulativeGrowthChart({
 							tickFormatter={formatCompactCurrency}
 						/>
 						<Tooltip
+							cursor={CHART_PROPS.cursorLine}
 							labelClassName="font-bold"
 							contentStyle={getTooltipStyles()}
 							labelFormatter={makeTimeTooltipLabelFormatter(timeRange)}
@@ -583,6 +622,7 @@ export function CumulativeGrowthChart({
 							}
 						/>
 						<Legend
+							formatter={legendLabelFormatter}
 							verticalAlign="top"
 							height={36}
 							iconType="rect"

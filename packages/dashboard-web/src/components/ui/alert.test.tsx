@@ -10,6 +10,9 @@ describe("Alert tones", () => {
 		expect(renderToStaticMarkup(<Alert tone="success" title="t" />)).toContain(
 			"bg-success/10 border-success/25",
 		);
+		expect(renderToStaticMarkup(<Alert tone="warning" title="t" />)).toContain(
+			"bg-warning/10 border-warning/25",
+		);
 		expect(
 			renderToStaticMarkup(<Alert tone="destructive" title="t" />),
 		).toContain("bg-destructive/10 border-destructive/25");
@@ -24,6 +27,10 @@ describe("Alert tones", () => {
 			<Alert tone="success" title="t" icon={<svg role="presentation" />} />,
 		);
 		expect(success).toContain("text-success-strong");
+		const warning = renderToStaticMarkup(
+			<Alert tone="warning" title="t" icon={<svg role="presentation" />} />,
+		);
+		expect(warning).toContain("text-warning-strong");
 		const destructive = renderToStaticMarkup(
 			<Alert tone="destructive" title="t" icon={<svg role="presentation" />} />,
 		);
@@ -40,7 +47,7 @@ describe("Alert tones", () => {
 	 * the title keeps maximum legibility in every tone — destructive included.
 	 */
 	it("keeps the title text-foreground in every tone", () => {
-		for (const tone of ["info", "success", "destructive"] as const) {
+		for (const tone of ["info", "success", "warning", "destructive"] as const) {
 			const html = renderToStaticMarkup(
 				<Alert tone={tone} title="Warning">
 					body

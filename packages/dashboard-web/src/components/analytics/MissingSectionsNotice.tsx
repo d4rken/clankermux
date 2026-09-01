@@ -1,7 +1,7 @@
 import type { AnalyticsResponse, AnalyticsSection } from "@clankermux/types";
 import { AlertCircle } from "lucide-react";
 import { hasSection } from "../../lib/analytics-sections";
-import { Card } from "../ui/card";
+import { Alert } from "../ui/alert";
 
 interface MissingSectionsNoticeProps {
 	analytics: AnalyticsResponse | undefined;
@@ -33,19 +33,16 @@ export function MissingSectionsNotice({
 	if (missing.length === 0) return null;
 
 	return (
-		<Card
+		<Alert
 			role="alert"
-			className="flex items-start gap-row px-4 py-3 text-sm bg-warning/10 border-warning/30"
+			tone="warning"
+			title="Some panels are unavailable"
+			icon={<AlertCircle className="h-4 w-4" />}
 		>
-			<AlertCircle className="h-4 w-4 mt-0.5 shrink-0 text-warning-strong" />
-			<div>
-				<p className="font-medium">Some panels are unavailable</p>
-				<p className="text-muted-foreground">
-					The server did not return: {missing.join(", ")}. Panels backed by
-					those are blank because the data is missing, not because the range is
-					empty.
-				</p>
-			</div>
-		</Card>
+			<p>
+				The server did not return: {missing.join(", ")}. Panels backed by those
+				are blank because the data is missing, not because the range is empty.
+			</p>
+		</Alert>
 	);
 }

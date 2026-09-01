@@ -19,6 +19,7 @@ import {
 	CardHeader,
 	CardTitle,
 } from "../ui/card";
+import { InsetPanel } from "../ui/inset-panel";
 
 /**
  * Headline callouts for the Quota tab, plus the standing statement of what
@@ -137,12 +138,12 @@ export function QuotaChangeVerdicts({
 				)}
 
 				{/* ── What this measurement is not ─────────────────────────────── */}
-				<div className="rounded-lg border border-dashed p-3 space-y-item">
+				<InsetPanel className="rounded-lg border-dashed space-y-item">
 					<p className="flex items-center gap-item text-xs font-medium">
 						<AlertTriangle className="h-3.5 w-3.5" />
 						What these numbers are not
 					</p>
-					<ul className="text-xs text-muted-foreground space-y-0.5 list-disc pl-4 max-w-prose">
+					<ul className="text-xs text-muted-foreground space-y-0.5 list-disc pl-group max-w-prose">
 						<li>
 							This is <span className="font-medium">implied cost</span> inferred
 							from the provider's reported percentages, not the provider's
@@ -184,7 +185,7 @@ export function QuotaChangeVerdicts({
 							</li>
 						) : null}
 					</ul>
-				</div>
+				</InsetPanel>
 			</CardContent>
 		</Card>
 	);

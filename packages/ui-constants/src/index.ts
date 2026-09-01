@@ -261,6 +261,48 @@ export const CHART_TOOLTIP_STYLE = {
 export const CHART_PROPS = {
 	strokeDasharray: "3 3",
 	gridClassName: "stroke-border",
+
+	/**
+	 * Axis presentation, spread onto every `<XAxis>`/`<YAxis>` in the app.
+	 *
+	 * Recharts drives the axis line, the tick marks and the tick LABELS from a
+	 * single `stroke` prop defaulting to `#666` (tick text renders with
+	 * `fill: stroke`). On the dark card that is 3.2:1 — below the 4.5:1 that
+	 * text needs, making these the least legible words in the app and the only
+	 * ones that ignore the theme.
+	 *
+	 * Two roles, not one. Setting the root `stroke` to --muted-foreground fixes
+	 * the labels but drags the baselines and tick marks to 6:1 as well, far
+	 * louder than the `stroke-border` grid they sit beside — trading a
+	 * legibility defect for a prominence one. Recharts takes independent
+	 * `tick`, `tickLine` and `axisLine` objects, so the text takes the readable
+	 * value and the geometry matches the grid.
+	 */
+	axis: {
+		tick: { fill: "var(--muted-foreground)" },
+		tickLine: { stroke: "var(--border)" },
+		axisLine: { stroke: "var(--border)" },
+	},
+
+	/**
+	 * The tooltip cursor for BarChart, where recharts draws a `Rectangle`.
+	 *
+	 * `getCursorRectangle` returns `{ stroke: 'none', fill: '#ccc' }` and is
+	 * spread over the base props, so the default is an OPAQUE light-grey band —
+	 * glaring on a near-black card and blind to the colour mode. A translucent
+	 * muted fill reads as a highlight on either ground.
+	 *
+	 * Only a chart whose `chartName` is literally 'BarChart' gets the rectangle;
+	 * a ComposedChart containing bars still gets `cursorLine`.
+	 */
+	cursorBand: { fill: "var(--muted-foreground)", fillOpacity: 0.12 },
+
+	/**
+	 * The tooltip cursor everywhere else (line, area and composed charts), where
+	 * recharts draws a `Curve` from a base of `{ stroke: '#ccc' }` — a hairline
+	 * at roughly 12:1 on the dark card, far louder than the grid beside it.
+	 */
+	cursorLine: { stroke: "var(--muted-foreground)", strokeWidth: 1 },
 } as const;
 
 // API and data refresh intervals (in milliseconds)

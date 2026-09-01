@@ -18,6 +18,7 @@ import { formatAxisTime, formatTooltipTime } from "../../lib/time-format";
 import { ChartContainer } from "../charts/ChartContainer";
 import { ChartTooltip } from "../charts/ChartTooltip";
 import { getChartHeight } from "../charts/chart-utils";
+import { legendLabelFormatter } from "../charts/legend-format";
 import {
 	Card,
 	CardContent,
@@ -31,8 +32,8 @@ interface MemoryUsageChartProps {
 	memoryHistory: MemoryHistoryResponse | undefined;
 	loading: boolean;
 	/** Selected time range (controlled); also re-keys the parent's memory-history query. */
-	range: string;
-	onRangeChange: (range: string) => void;
+	range: TimeRange;
+	onRangeChange: (range: TimeRange) => void;
 }
 
 const GRADIENT_ID = "memoryUsageRssGradient";
@@ -84,7 +85,6 @@ export function MemoryUsageChart({
 
 	// Need at least two points to draw a meaningful trend.
 	const isEmpty = rows.length < 2;
-	const tr = range as TimeRange;
 
 	return (
 		<Card>
@@ -135,12 +135,14 @@ export function MemoryUsageChart({
 								className={CHART_PROPS.gridClassName}
 							/>
 							<XAxis
+								{...CHART_PROPS.axis}
 								dataKey="ts"
 								className="text-xs"
 								height={30}
-								tickFormatter={(value) => formatAxisTime(Number(value), tr)}
+								tickFormatter={(value) => formatAxisTime(Number(value), range)}
 							/>
 							<YAxis
+								{...CHART_PROPS.axis}
 								yAxisId="memory"
 								className="text-xs"
 								width={56}
@@ -149,6 +151,7 @@ export function MemoryUsageChart({
 							{/* Right axis for the event-loop lag overlay (ms); auto domain
 							    since lag spans <1 ms to multi-second stalls. */}
 							<YAxis
+								{...CHART_PROPS.axis}
 								yAxisId="lag"
 								orientation="right"
 								className="text-xs"
@@ -158,6 +161,7 @@ export function MemoryUsageChart({
 								}
 							/>
 							<Tooltip
+								cursor={CHART_PROPS.cursorLine}
 								content={
 									<ChartTooltip
 										formatters={{
@@ -176,13 +180,18 @@ export function MemoryUsageChart({
 											// tick omits the date on short ranges.
 											const ts = payload?.[0]?.payload?.ts;
 											return typeof ts === "number"
-												? formatTooltipTime(ts, tr)
+												? formatTooltipTime(ts, range)
 												: label;
 										}}
 									/>
 								}
 							/>
-							<Legend verticalAlign="top" height={36} iconType="rect" />
+							<Legend
+								formatter={legendLabelFormatter}
+								verticalAlign="top"
+								height={36}
+								iconType="rect"
+							/>
 							<Area
 								yAxisId="memory"
 								type="monotone"

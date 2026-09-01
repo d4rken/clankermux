@@ -1,100 +1,61 @@
-import type { AnalyticsFilterOption } from "@clankermux/types";
-import { CalendarDays, RefreshCw } from "lucide-react";
+import { RefreshCw } from "lucide-react";
 import type { TimeRange } from "../../constants";
+import { TimeRangeSelector } from "../overview/TimeRangeSelector";
 import { Button } from "../ui/button";
-import {
-	Select,
-	SelectContent,
-	SelectItem,
-	SelectTrigger,
-	SelectValue,
-} from "../ui/select";
-import { AnalyticsFilters, type FilterState } from "./AnalyticsFilters";
+import { AnalyticsFilters } from "./AnalyticsFilters";
+import type { SharedFilterProps } from "./tabs/types";
 
+/**
+ * The control row every analytics tab puts above its content.
+ *
+ * It used to hand-roll its own range `Select` while `CachingTab` rendered
+ * `TimeRangeSelector` in a right-aligned row of its own, so the picker moved
+ * across the page and changed appearance between tabs while offering the very
+ * same six ranges. There is one picker now, and it lives here.
+ *
+ * `filterProps` and `refresh` are optional objects rather than flags plus a
+ * flat prop list: a tab either has filters or it does not, and omitting the
+ * object is the only way to say so — there is no way to ask for the Filters
+ * button and then not supply its options.
+ */
 interface AnalyticsControlsProps {
 	timeRange: TimeRange;
 	setTimeRange: (range: TimeRange) => void;
-	filters: FilterState;
-	setFilters: (filters: FilterState) => void;
-	availableAccounts: AnalyticsFilterOption[];
-	availableModels: string[];
-	availableApiKeys: AnalyticsFilterOption[];
-	availableProjects: string[];
-	hasNoAccountBucket: boolean;
-	hasNoProjectBucket: boolean;
-	activeFilterCount: number;
-	filterOpen: boolean;
-	setFilterOpen: (open: boolean) => void;
-	loading: boolean;
-	onRefresh: () => void;
+	/** Omitted ⇒ no Filters button. */
+	filterProps?: SharedFilterProps;
+	/** Omitted ⇒ no Refresh button. */
+	refresh?: { loading: boolean; onRefresh: () => void };
 }
 
 export function AnalyticsControls({
 	timeRange,
 	setTimeRange,
-	filters,
-	setFilters,
-	availableAccounts,
-	availableModels,
-	availableApiKeys,
-	availableProjects,
-	hasNoAccountBucket,
-	hasNoProjectBucket,
-	activeFilterCount,
-	filterOpen,
-	setFilterOpen,
-	loading,
-	onRefresh,
+	filterProps,
+	refresh,
 }: AnalyticsControlsProps) {
 	return (
 		<div className="flex flex-col sm:flex-row gap-group justify-between">
 			<div className="flex flex-wrap gap-item">
-				<Select
-					value={timeRange}
-					onValueChange={(v) => setTimeRange(v as TimeRange)}
-				>
-					<SelectTrigger className="w-32">
-						<CalendarDays className="h-4 w-4 mr-2" />
-						<SelectValue />
-					</SelectTrigger>
-					<SelectContent>
-						<SelectItem value="1h">Last Hour</SelectItem>
-						<SelectItem value="6h">Last 6 Hours</SelectItem>
-						<SelectItem value="24h">Last 24 Hours</SelectItem>
-						<SelectItem value="7d">Last 7 Days</SelectItem>
-						<SelectItem value="30d">Last 30 Days</SelectItem>
-						<SelectItem value="all">All Time</SelectItem>
-					</SelectContent>
-				</Select>
+				<TimeRangeSelector value={timeRange} onChange={setTimeRange} />
 
-				<AnalyticsFilters
-					filters={filters}
-					setFilters={setFilters}
-					availableAccounts={availableAccounts}
-					availableModels={availableModels}
-					availableApiKeys={availableApiKeys}
-					availableProjects={availableProjects}
-					hasNoAccountBucket={hasNoAccountBucket}
-					hasNoProjectBucket={hasNoProjectBucket}
-					activeFilterCount={activeFilterCount}
-					filterOpen={filterOpen}
-					setFilterOpen={setFilterOpen}
-				/>
+				{filterProps && <AnalyticsFilters {...filterProps} />}
 			</div>
 
-			<div className="flex gap-item">
-				<Button
-					variant="outline"
-					size="sm"
-					onClick={onRefresh}
-					disabled={loading}
-				>
-					<RefreshCw
-						className={`h-4 w-4 mr-2 ${loading ? "animate-spin" : ""}`}
-					/>
-					Refresh
-				</Button>
-			</div>
+			{refresh && (
+				<div className="flex gap-item">
+					<Button
+						variant="outline"
+						size="sm"
+						onClick={refresh.onRefresh}
+						disabled={refresh.loading}
+					>
+						<RefreshCw
+							className={`h-4 w-4 mr-item ${refresh.loading ? "animate-spin" : ""}`}
+						/>
+						Refresh
+					</Button>
+				</div>
+			)}
 		</div>
 	);
 }

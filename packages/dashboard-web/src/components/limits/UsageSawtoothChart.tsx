@@ -2,6 +2,7 @@ import type { AccountResponse, UsageHistoryResponse } from "@clankermux/types";
 import { format } from "date-fns";
 import { AlertCircle } from "lucide-react";
 import { useMemo } from "react";
+import type { TimeRange } from "../../constants";
 import { useSeriesPalette } from "../../hooks/useSeriesPalette";
 import type { PoolWindow } from "../../lib/pool-usage";
 import { pickTimePattern } from "../../lib/usage-chart-format";
@@ -28,8 +29,8 @@ export interface UsageWindowChartState {
 	 */
 	unavailableReason?: string;
 	/** Selected time range; also re-keys this window's usage-history query. */
-	range: string;
-	onRangeChange: (range: string) => void;
+	range: TimeRange;
+	onRangeChange: (range: TimeRange) => void;
 }
 
 interface UsageSawtoothChartProps {
@@ -241,8 +242,8 @@ function WindowChartPanel({
 	chart: WindowChart;
 	loading: boolean;
 	unavailableReason?: string;
-	range: string;
-	onRangeChange: (range: string) => void;
+	range: TimeRange;
+	onRangeChange: (range: TimeRange) => void;
 	selectorLabel: string;
 }) {
 	const pending = loading && unavailableReason == null;

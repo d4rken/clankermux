@@ -9,32 +9,17 @@ import {
 	CardHeader,
 	CardTitle,
 } from "../ui/card";
-
-/**
- * Small headline tile. Mirrors the compact stat-card idiom used by
- * CacheKeepalivePanel's StatTile.
- */
-function StatTile({
-	label,
-	value,
-	sub,
-	valueClassName,
-}: {
-	label: string;
-	value: string;
-	sub?: string;
-	valueClassName?: string;
-}) {
-	return (
-		<div className="rounded-lg border bg-card p-3">
-			<p className="text-xs text-muted-foreground">{label}</p>
-			<p className={`text-xl font-bold ${valueClassName ?? ""}`}>{value}</p>
-			{sub ? (
-				<p className="text-xs text-muted-foreground mt-0.5">{sub}</p>
-			) : null}
-		</div>
-	);
-}
+import {
+	Table,
+	TableBody,
+	TableCell,
+	TableFooter,
+	TableFrame,
+	TableHead,
+	TableHeader,
+	TableRow,
+} from "../ui/table";
+import { StatTile } from "./StatTile";
 
 /**
  * Analytics-tab cache-keepalive "Effectiveness" panel. A per-range summary that
@@ -121,72 +106,66 @@ export function CacheEffectivenessPanel({ range }: { range: TimeRange }) {
 				</p>
 
 				{/* Workload-normalized quota pressure (de-confounds volume). */}
-				<div className="rounded-lg border bg-card p-3">
-					<p className="text-xs text-muted-foreground">
-						7-day quota peak per 1M tokens
-					</p>
-					<p className="text-xl font-bold">
-						{isLoading
+				<StatTile
+					label="7-day quota peak per 1M tokens"
+					value={
+						isLoading
 							? "—"
-							: `${(data?.sevenDayPeakPer1MTokens ?? 0).toFixed(2)}%`}
-					</p>
-					<p className="text-xs text-muted-foreground mt-0.5 max-w-prose">
-						Pool 7-day peak utilization % per 1M prompt tokens of real work —
-						de-confounds workload, so you can compare quota pressure across
-						weeks of different volume.
-					</p>
-				</div>
+							: `${(data?.sevenDayPeakPer1MTokens ?? 0).toFixed(2)}%`
+					}
+					sub="Pool 7-day peak utilization % per 1M prompt tokens of real work — de-confounds workload, so you can compare quota pressure across weeks of different volume."
+				/>
 
 				{/* Per-account quota peaks over the window. */}
-				<div className="overflow-x-auto">
-					<table className="w-full text-sm">
-						<thead>
-							<tr className="border-b text-left text-xs text-muted-foreground">
-								<th className="py-2 pr-4 font-medium">Account</th>
-								<th className="py-2 pr-4 font-medium text-right">Peak 5h</th>
-								<th className="py-2 font-medium text-right">Peak 7d</th>
-							</tr>
-						</thead>
-						<tbody>
+				<TableFrame>
+					<Table>
+						<TableHeader>
+							<TableRow>
+								<TableHead>Account</TableHead>
+								<TableHead className="text-right">Peak 5h</TableHead>
+								<TableHead className="text-right">Peak 7d</TableHead>
+							</TableRow>
+						</TableHeader>
+						<TableBody>
 							{accounts.length === 0 ? (
-								<tr>
-									<td className="py-2 text-muted-foreground" colSpan={3}>
+								<TableRow>
+									<TableCell className="text-muted-foreground" colSpan={3}>
 										{isLoading
 											? "Loading…"
 											: "No quota samples in this window."}
-									</td>
-								</tr>
+									</TableCell>
+								</TableRow>
 							) : (
 								accounts.map((a) => (
-									<tr key={a.accountId} className="border-b last:border-0">
-										<td className="py-2 pr-4">{a.name}</td>
-										<td className="py-2 pr-4 text-right tabular-nums">
+									<TableRow key={a.accountId}>
+										<TableCell>{a.name}</TableCell>
+										<TableCell className="figure text-right">
 											{a.peakFiveHourPct.toFixed(1)}%
-										</td>
-										<td className="py-2 text-right tabular-nums">
+										</TableCell>
+										<TableCell className="figure text-right">
 											{a.peakSevenDayPct.toFixed(1)}%
-										</td>
-									</tr>
+										</TableCell>
+									</TableRow>
 								))
 							)}
-						</tbody>
-						<tfoot>
-							<tr className="border-t font-medium">
-								<td className="py-2 pr-4">Pool peak</td>
-								<td className="py-2 pr-4 text-right tabular-nums">
+						</TableBody>
+						<TableFooter>
+							<TableRow>
+								<TableHead scope="row">Pool peak</TableHead>
+								<TableCell className="figure text-right font-medium">
 									{isLoading
 										? "—"
 										: `${(data?.poolPeakFiveHourPct ?? 0).toFixed(1)}%`}
-								</td>
-								<td className="py-2 text-right tabular-nums">
+								</TableCell>
+								<TableCell className="figure text-right font-medium">
 									{isLoading
 										? "—"
 										: `${(data?.poolPeakSevenDayPct ?? 0).toFixed(1)}%`}
-								</td>
-							</tr>
-						</tfoot>
-					</table>
-				</div>
+								</TableCell>
+							</TableRow>
+						</TableFooter>
+					</Table>
+				</TableFrame>
 			</CardContent>
 		</Card>
 	);

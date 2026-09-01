@@ -14,7 +14,7 @@ import {
 	XAxis,
 	YAxis,
 } from "recharts";
-import { CHART_TOKENS, type TimeRange } from "../../constants";
+import { CHART_PROPS, CHART_TOKENS, type TimeRange } from "../../constants";
 import { useSeriesPalette } from "../../hooks/useSeriesPalette";
 import { shortLabel } from "../../lib/chart-utils";
 import {
@@ -30,6 +30,7 @@ import {
 	CardHeader,
 	CardTitle,
 } from "../ui/card";
+import { PanelEmptyState } from "./PanelEmptyState";
 import { labelDecision } from "./routing-labels";
 
 const OUTCOME_COLORS: Record<RoutingFlowPoint["outcome"], string> = {
@@ -67,11 +68,11 @@ function EmptyRoutingState({ loading }: { loading: boolean }) {
 				</CardDescription>
 			</CardHeader>
 			<CardContent>
-				<div className="flex min-h-40 items-center justify-center rounded-md border border-dashed text-sm text-muted-foreground">
+				<PanelEmptyState>
 					{loading
 						? "Loading routing analytics..."
 						: "No routing telemetry in this range"}
-				</div>
+				</PanelEmptyState>
 			</CardContent>
 		</Card>
 	);
@@ -398,12 +399,25 @@ export function RoutingAnalyticsPanel({
 								margin={{ top: 8, right: 16, left: 0, bottom: 0 }}
 							>
 								<CartesianGrid
-									strokeDasharray="3 3"
-									className="stroke-border"
+									strokeDasharray={CHART_PROPS.strokeDasharray}
+									className={CHART_PROPS.gridClassName}
 								/>
-								<XAxis dataKey="time" fontSize={12} tickLine={false} />
-								<YAxis fontSize={12} tickLine={false} allowDecimals={false} />
+								{/* `tickLine={false}` stays after the spread: this chart draws
+								    no tick marks at all, which the shared object cannot say. */}
+								<XAxis
+									{...CHART_PROPS.axis}
+									dataKey="time"
+									fontSize={12}
+									tickLine={false}
+								/>
+								<YAxis
+									{...CHART_PROPS.axis}
+									fontSize={12}
+									tickLine={false}
+									allowDecimals={false}
+								/>
 								<Tooltip
+									cursor={CHART_PROPS.cursorLine}
 									content={
 										<ChartTooltip
 											formatters={{

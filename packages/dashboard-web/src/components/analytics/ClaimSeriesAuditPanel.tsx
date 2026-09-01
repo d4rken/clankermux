@@ -1,4 +1,13 @@
 import type { QuotaClaimAudit, QuotaClaimLabelCount } from "@clankermux/types";
+import {
+	Table,
+	TableBody,
+	TableCell,
+	TableFrame,
+	TableHead,
+	TableHeader,
+	TableRow,
+} from "../ui/table";
 
 /**
  * The standing audit of the request-aligned claim series.
@@ -24,11 +33,11 @@ export function ClaimSeriesAuditPanel({
 	if (!audit) return null;
 
 	return (
-		<details className="rounded-lg border p-3">
+		<details className="rounded-lg border p-row">
 			<summary className="text-sm font-medium cursor-pointer">
 				Claim-series audit
 			</summary>
-			<p className="text-xs text-muted-foreground max-w-prose mt-2">
+			<p className="text-xs text-muted-foreground max-w-prose mt-item">
 				What is actually in the per-request rate-limit readings this proxy has
 				captured, from {formatDay(audit.fromMs)} to {formatDay(audit.toMs)}.
 				Counts only — nothing here is a statement about the provider. The
@@ -36,87 +45,90 @@ export function ClaimSeriesAuditPanel({
 				about responses that were not.
 			</p>
 			{audit.claims.length === 0 ? (
-				<p className="text-xs text-muted-foreground mt-2">
+				<p className="text-xs text-muted-foreground mt-item">
 					No claim readings captured in this span.
 				</p>
 			) : (
-				<div className="overflow-x-auto mt-2">
-					<table className="w-full text-xs">
-						<thead>
-							<tr className="text-muted-foreground text-left">
-								<th className="font-normal pb-1">Claim</th>
-								<th className="font-normal pb-1">Rows</th>
-								<th className="font-normal pb-1">Series</th>
-								<th className="font-normal pb-1">Rows/day</th>
-								<th className="font-normal pb-1">No reading</th>
-								<th className="font-normal pb-1">Distinct values</th>
-								<th className="font-normal pb-1">On 0.01 grid</th>
-								<th className="font-normal pb-1">On 0.001 grid</th>
-								<th className="font-normal pb-1">Transitions</th>
-								<th className="font-normal pb-1">Min rise</th>
-								<th className="font-normal pb-1">Median rise</th>
-								<th className="font-normal pb-1">Same-window drops</th>
-								<th className="font-normal pb-1">Gift drops</th>
-								<th className="font-normal pb-1">Composition</th>
-							</tr>
-						</thead>
-						<tbody>
+				// Bare: this table's only border is the `<details>` around it, and a
+				// frame here would double it. Compact for the 14 columns — at the
+				// comfortable padding they would add roughly 336px of width.
+				<TableFrame variant="bare" className="mt-item">
+					<Table className="text-xs" density="compact">
+						<TableHeader className="bg-transparent">
+							<TableRow className="border-t-0">
+								<TableHead>Claim</TableHead>
+								<TableHead>Rows</TableHead>
+								<TableHead>Series</TableHead>
+								<TableHead>Rows/day</TableHead>
+								<TableHead>No reading</TableHead>
+								<TableHead>Distinct values</TableHead>
+								<TableHead>On 0.01 grid</TableHead>
+								<TableHead>On 0.001 grid</TableHead>
+								<TableHead>Transitions</TableHead>
+								<TableHead>Min rise</TableHead>
+								<TableHead>Median rise</TableHead>
+								<TableHead>Same-window drops</TableHead>
+								<TableHead>Gift drops</TableHead>
+								<TableHead>Composition</TableHead>
+							</TableRow>
+						</TableHeader>
+						<TableBody>
 							{audit.claims.map((claim) => (
-								<tr key={claim.claim} className="border-t align-top">
-									<td className="py-1 font-medium">{claim.claim}</td>
-									<td className="py-1 tabular-nums">
+								<TableRow key={claim.claim} className="align-top">
+									<TableCell className="font-medium">{claim.claim}</TableCell>
+									<TableCell className="figure">
 										{claim.rows.toLocaleString()}
-									</td>
-									<td className="py-1 tabular-nums">
+									</TableCell>
+									<TableCell className="figure">
 										{claim.nSeries} · {claim.nAccounts} acct
-									</td>
-									<td className="py-1 tabular-nums">
+									</TableCell>
+									<TableCell className="figure">
 										{formatNumber(claim.rowsPerDay, 1)}
-									</td>
-									<td className="py-1 tabular-nums">
+									</TableCell>
+									<TableCell className="figure">
 										{formatShare(claim.nullUtilizationShare)}
-									</td>
-									<td className="py-1 tabular-nums">
+									</TableCell>
+									<TableCell className="figure">
 										{/* A capped tracker reports a FLOOR, and says so. */}
 										{claim.distinctValuesExact ? "" : "≥"}
 										{claim.distinctValues}
-									</td>
-									<td className="py-1 tabular-nums">
+									</TableCell>
+									<TableCell className="figure">
 										{formatShare(claim.gridShare01)}
-									</td>
-									<td className="py-1 tabular-nums">
+									</TableCell>
+									<TableCell className="figure">
 										{formatShare(claim.gridShare001)}
-									</td>
-									<td className="py-1 tabular-nums">
+									</TableCell>
+									<TableCell className="figure">
 										{claim.transitions.toLocaleString()} (
 										{claim.positiveIncrements.toLocaleString()} up)
-									</td>
-									<td className="py-1 tabular-nums">
+									</TableCell>
+									<TableCell className="figure">
 										{formatNumber(claim.minPositiveIncrement, 4)}
-									</td>
-									<td className="py-1 tabular-nums">
+									</TableCell>
+									<TableCell className="figure">
 										{formatNumber(claim.medianPositiveIncrement, 4)}
-									</td>
-									<td className="py-1 tabular-nums">
+									</TableCell>
+									<TableCell className="figure">
 										{claim.stableResetNegatives.toLocaleString()} /{" "}
 										{claim.stableResetTransitions.toLocaleString()}
-									</td>
-									<td className="py-1 tabular-nums">
+									</TableCell>
+									<TableCell className="figure">
 										{claim.giftDrops.toLocaleString()} (
 										{claim.giftDropsOrderingSuspect.toLocaleString()} ordering,{" "}
 										{claim.giftDropsUnexplained.toLocaleString()} unexplained)
-									</td>
-									<td className="py-1">
+									</TableCell>
+									<TableCell>
 										{formatLabels(claim.composition.bySource)}
 										<span className="block text-muted-foreground">
 											{formatLabels(claim.composition.byHttpStatus)}
 										</span>
-									</td>
-								</tr>
+									</TableCell>
+								</TableRow>
 							))}
-						</tbody>
-					</table>
-				</div>
+						</TableBody>
+					</Table>
+				</TableFrame>
 			)}
 		</details>
 	);

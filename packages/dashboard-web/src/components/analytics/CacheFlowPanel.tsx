@@ -12,6 +12,7 @@ import {
 	CardHeader,
 	CardTitle,
 } from "../ui/card";
+import { PanelEmptyState } from "./PanelEmptyState";
 
 type CacheStatus = "read" | "write" | "uncached";
 
@@ -57,11 +58,11 @@ function EmptyCacheFlowState({ loading }: { loading: boolean }) {
 				</CardDescription>
 			</CardHeader>
 			<CardContent>
-				<div className="flex min-h-40 items-center justify-center rounded-md border border-dashed text-sm text-muted-foreground">
+				<PanelEmptyState>
 					{loading
 						? "Loading cache analytics..."
 						: "No cache activity in this range"}
-				</div>
+				</PanelEmptyState>
 			</CardContent>
 		</Card>
 	);

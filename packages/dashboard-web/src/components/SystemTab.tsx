@@ -1,4 +1,5 @@
 import { useState } from "react";
+import type { TimeRange } from "../constants";
 import { useMemoryHistory } from "../hooks/queries";
 import { MemoryUsageChart } from "./overview/MemoryUsageChart";
 import { StorageIntegritySection } from "./overview/StorageIntegrity";
@@ -30,7 +31,7 @@ import {
  */
 export function SystemTab() {
 	// 7d by default so the leak-trend view is the landing state.
-	const [memoryRange, setMemoryRange] = useState("7d");
+	const [memoryRange, setMemoryRange] = useState<TimeRange>("7d");
 	const { data: memoryHistory, isLoading: memoryLoading } =
 		useMemoryHistory(memoryRange);
 

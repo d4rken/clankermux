@@ -17,6 +17,7 @@ import { formatCompactNumber } from "../../lib/chart-utils";
 import { ChartContainer } from "./ChartContainer";
 import { ChartTooltip } from "./ChartTooltip";
 import { getChartHeight } from "./chart-utils";
+import { legendLabelFormatter } from "./legend-format";
 
 interface RequestVolumeSuccessChartProps {
 	data: Array<{
@@ -114,17 +115,20 @@ export function RequestVolumeSuccessChart({
 						className={CHART_PROPS.gridClassName}
 					/>
 					<XAxis
+						{...CHART_PROPS.axis}
 						dataKey="ts"
 						className="text-xs"
 						height={30}
 						tickFormatter={(value) => formatAxisLabel(Number(value), timeRange)}
 					/>
 					<YAxis
+						{...CHART_PROPS.axis}
 						yAxisId="requests"
 						className="text-xs"
 						tickFormatter={formatCompactNumber}
 					/>
 					<YAxis
+						{...CHART_PROPS.axis}
 						yAxisId="successRate"
 						orientation="right"
 						className="text-xs"
@@ -141,6 +145,7 @@ export function RequestVolumeSuccessChart({
 					 */}
 					{hasSessions && (
 						<YAxis
+							{...CHART_PROPS.axis}
 							yAxisId="sessions"
 							hide
 							width={0}
@@ -149,6 +154,7 @@ export function RequestVolumeSuccessChart({
 						/>
 					)}
 					<Tooltip
+						cursor={CHART_PROPS.cursorLine}
 						content={
 							<ChartTooltip
 								formatters={{
@@ -172,7 +178,11 @@ export function RequestVolumeSuccessChart({
 					 * No fixed height: with a third series the legend wraps on a narrow
 					 * card, and a hard 36px reservation would let it overlap the plot.
 					 */}
-					<Legend verticalAlign="top" iconType="rect" />
+					<Legend
+						formatter={legendLabelFormatter}
+						verticalAlign="top"
+						iconType="rect"
+					/>
 					<Area
 						yAxisId="requests"
 						type="monotone"

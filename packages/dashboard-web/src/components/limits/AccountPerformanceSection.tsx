@@ -2,7 +2,7 @@ import type { PaymentsSummary } from "@clankermux/types";
 import { formatUsd } from "@clankermux/ui-common";
 import { AlertCircle } from "lucide-react";
 import { useMemo } from "react";
-import { CHART_TOKENS } from "../../constants";
+import { CHART_TOKENS, type TimeRange } from "../../constants";
 import { BaseBarChart } from "../charts";
 import type { ChartDataPoint } from "../charts/types";
 import {
@@ -20,6 +20,16 @@ import {
 	CardTitle,
 } from "../ui/card";
 import { Skeleton } from "../ui/skeleton";
+import {
+	Table,
+	TableBody,
+	TableCell,
+	TableFooter,
+	TableFrame,
+	TableHead,
+	TableHeader,
+	TableRow,
+} from "../ui/table";
 import {
 	amortizedMonthlyByAccountName,
 	formatValueRatio,
@@ -58,8 +68,8 @@ interface AccountPerformanceSectionProps {
 	 */
 	unavailable?: boolean;
 	/** Selected time range (controlled); re-keys the parent's analytics query. */
-	range: string;
-	onRangeChange: (range: string) => void;
+	range: TimeRange;
+	onRangeChange: (range: TimeRange) => void;
 	costSummary: AccountPerformanceCostSummary;
 	/** Payments-ledger summary for the same range; undefined while loading. */
 	paymentsSummary?: PaymentsSummary;
@@ -250,111 +260,78 @@ export function AccountPerformanceSection({
 					</div>
 				)}
 				{analyticsResolved && (
-					<div className="mt-group border rounded-md overflow-hidden">
-						{/* Column heads are `.label-caps` micro-labels: size, weight,
-						    tracking, uppercase and --muted-foreground in one class. NOT
-						    the <th scope="row"> in <tfoot> — that is a data-row summary
-						    label sitting beside its own font-medium totals, and
-						    shrinking and muting it would make it mimic a column head. */}
-						<table
-							aria-label="Account cost breakdown"
-							className="w-full text-sm"
-						>
-							<thead className="bg-muted/50">
-								<tr>
-									<th
-										scope="col"
-										className="label-caps text-left px-row py-item"
-									>
-										Account
-									</th>
-									<th
-										scope="col"
-										className="label-caps text-right px-row py-item"
-									>
-										Plan Value
-									</th>
-									<th
-										scope="col"
-										className="label-caps text-right px-row py-item"
-									>
-										API Value
-									</th>
-									<th
-										scope="col"
-										className="label-caps text-right px-row py-item"
-									>
-										Total
-									</th>
-									<th
-										scope="col"
-										className="label-caps text-right px-row py-item"
-									>
-										Sub / mo
-									</th>
-								</tr>
-							</thead>
-							<tbody>
+					<TableFrame className="mt-group">
+						{/* The `scope="row"` in the footer is what keeps the totals label
+						    out of `.label-caps`: TableHead derives its type treatment
+						    from scope precisely so this row-summary label, sitting beside
+						    its own font-medium totals, cannot be shrunk and muted into
+						    something that mimics a column head. */}
+						<Table aria-label="Account cost breakdown">
+							<TableHeader>
+								<TableRow>
+									<TableHead>Account</TableHead>
+									<TableHead className="text-right">Plan Value</TableHead>
+									<TableHead className="text-right">API Value</TableHead>
+									<TableHead className="text-right">Total</TableHead>
+									<TableHead className="text-right">Sub / mo</TableHead>
+								</TableRow>
+							</TableHeader>
+							<TableBody>
 								{hasAnyAccountCostData(sortedAccountCostRows) ? (
 									sortedAccountCostRows.map((row) => {
 										const subMonthly = subMonthlyByName.get(row.name);
 										return (
-											<tr key={row.name} className="border-t">
-												<td className="px-row py-item text-muted-foreground">
+											<TableRow key={row.name}>
+												<TableCell className="text-muted-foreground">
 													{row.name}
-												</td>
-												<td className="px-row py-item text-right">
+												</TableCell>
+												<TableCell className="figure text-right">
 													{formatUsd(row.planCostUsd)}
-												</td>
-												<td className="px-row py-item text-right">
+												</TableCell>
+												<TableCell className="figure text-right">
 													{formatUsd(row.apiCostUsd)}
-												</td>
-												<td className="px-row py-item text-right font-medium">
+												</TableCell>
+												<TableCell className="figure text-right font-medium">
 													{formatUsd(row.totalCostUsd)}
-												</td>
-												<td className="px-row py-item text-right">
+												</TableCell>
+												<TableCell className="figure text-right">
 													{subMonthly != null ? formatUsd(subMonthly) : "—"}
-												</td>
-											</tr>
+												</TableCell>
+											</TableRow>
 										);
 									})
 								) : (
-									<tr className="border-t">
-										<td
-											className="px-row py-row text-muted-foreground"
+									<TableRow>
+										<TableCell
+											className="py-row text-muted-foreground"
 											colSpan={5}
 										>
 											No cost data
-										</td>
-									</tr>
+										</TableCell>
+									</TableRow>
 								)}
-							</tbody>
-							<tfoot className="bg-muted/30 border-t">
-								<tr>
-									<th
-										scope="row"
-										className="px-row py-item font-medium text-left"
-									>
-										Total
-									</th>
-									<td className="px-row py-item text-right font-medium">
+							</TableBody>
+							<TableFooter>
+								<TableRow>
+									<TableHead scope="row">Total</TableHead>
+									<TableCell className="figure text-right font-medium">
 										{formatUsd(accountCostTotals.planCostUsd)}
-									</td>
-									<td className="px-row py-item text-right font-medium">
+									</TableCell>
+									<TableCell className="figure text-right font-medium">
 										{formatUsd(accountCostTotals.apiCostUsd)}
-									</td>
-									<td className="px-row py-item text-right font-medium">
+									</TableCell>
+									<TableCell className="figure text-right font-medium">
 										{formatUsd(accountCostTotals.totalCostUsd)}
-									</td>
-									<td className="px-row py-item text-right font-medium">
+									</TableCell>
+									<TableCell className="figure text-right font-medium">
 										{paymentsSummary
 											? formatUsd(paymentsSummary.amortizedMonthlyUsd)
 											: "—"}
-									</td>
-								</tr>
-							</tfoot>
-						</table>
-					</div>
+									</TableCell>
+								</TableRow>
+							</TableFooter>
+						</Table>
+					</TableFrame>
 				)}
 			</CardContent>
 		</Card>

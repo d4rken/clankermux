@@ -15,7 +15,7 @@ import {
 	XAxis,
 	YAxis,
 } from "recharts";
-import type { TimeRange } from "../../constants";
+import { CHART_PROPS, type TimeRange } from "../../constants";
 import { useSeriesPalette } from "../../hooks/useSeriesPalette";
 import {
 	formatCompactNumber,
@@ -25,6 +25,7 @@ import {
 	formatAxisTime,
 	makeTimeTooltipLabelFormatter,
 } from "../../lib/time-format";
+import { cn } from "../../lib/utils";
 import { BaseLineChart } from "../charts";
 import { getTooltipStyles } from "../charts/chart-utils";
 import type { ChartDataPoint } from "../charts/types";
@@ -36,6 +37,17 @@ import {
 	CardHeader,
 	CardTitle,
 } from "../ui/card";
+import { InsetPanel } from "../ui/inset-panel";
+import {
+	Table,
+	TableBody,
+	TableCell,
+	TableFrame,
+	TableHead,
+	TableHeader,
+	TableRow,
+} from "../ui/table";
+import { PanelEmptyState } from "./PanelEmptyState";
 
 type ContextComposition = NonNullable<AnalyticsResponse["contextComposition"]>;
 
@@ -93,13 +105,13 @@ function EmptyState({
 				</CardDescription>
 			</CardHeader>
 			<CardContent>
-				<div className="flex min-h-40 items-center justify-center rounded-md border border-dashed px-6 text-center text-sm text-muted-foreground">
+				<PanelEmptyState>
 					{loading
 						? "Loading context composition..."
 						: noCoverage
 							? "Context composition is recorded for new requests; run scripts/backfill-context-composition.ts to analyze history."
 							: "No context composition data in this range"}
-				</div>
+				</PanelEmptyState>
 			</CardContent>
 		</Card>
 	);
@@ -195,9 +207,15 @@ function CompositionSplit({
 					layout="vertical"
 					margin={{ top: 4, right: 4, bottom: 4, left: 4 }}
 				>
-					<XAxis type="number" hide domain={[0, totalChars]} />
-					<YAxis type="category" dataKey="name" hide />
+					<XAxis
+						{...CHART_PROPS.axis}
+						type="number"
+						hide
+						domain={[0, totalChars]}
+					/>
+					<YAxis {...CHART_PROPS.axis} type="category" dataKey="name" hide />
 					<Tooltip
+						cursor={CHART_PROPS.cursorBand}
 						contentStyle={getTooltipStyles()}
 						formatter={tooltipFormatter}
 					/>
@@ -284,8 +302,10 @@ function GrowthChart({
 
 	return (
 		<div>
-			<h4 className="mb-2 text-sm font-medium">Context growth over time</h4>
-			<p className="mb-2 text-xs text-muted-foreground">
+			<h4 data-slot="title" className="text-sm font-medium">
+				Context growth over time
+			</h4>
+			<p data-slot="subtitle" className="mb-item text-xs text-muted-foreground">
 				Average context tokens per request, per project (top{" "}
 				{series.length === 1 ? "project" : `${series.length} projects`} by
 				requests)
@@ -321,64 +341,59 @@ function TopContributorsTable({
 
 	return (
 		<div>
-			<h4 className="mb-2 text-sm font-medium">Top context contributors</h4>
-			<p className="mb-2 text-xs text-muted-foreground">
+			<h4 data-slot="title" className="text-sm font-medium">
+				Top context contributors
+			</h4>
+			<p data-slot="subtitle" className="mb-item text-xs text-muted-foreground">
 				Largest single tool results re-sent in a request — the actionable list
 				for trimming context
 			</p>
-			<div className="overflow-hidden rounded-md border">
-				<table aria-label="Top context contributors" className="w-full text-sm">
-					<thead className="bg-muted/50">
-						<tr>
-							<th scope="col" className="px-3 py-2 text-left">
-								Tool
-							</th>
-							<th scope="col" className="px-3 py-2 text-right">
-								Size
-							</th>
-							<th scope="col" className="px-3 py-2 text-left">
-								Project
-							</th>
-							<th scope="col" className="px-3 py-2 text-left">
-								Model
-							</th>
-							<th scope="col" className="px-3 py-2 text-left">
-								When
-							</th>
-						</tr>
-					</thead>
-					<tbody>
+			<TableFrame>
+				<Table aria-label="Top context contributors">
+					<TableHeader>
+						<TableRow>
+							<TableHead>Tool</TableHead>
+							<TableHead className="text-right">Size</TableHead>
+							<TableHead>Project</TableHead>
+							<TableHead>Model</TableHead>
+							<TableHead>When</TableHead>
+						</TableRow>
+					</TableHeader>
+					<TableBody>
 						{contributors.map((row) => (
-							<tr key={row.requestId} className="border-t">
-								<td className="px-3 py-2 font-medium">{row.toolName ?? "—"}</td>
-								<td className="px-3 py-2 text-right">
+							<TableRow key={row.requestId}>
+								<TableCell className="font-medium">
+									{row.toolName ?? "—"}
+								</TableCell>
+								<TableCell className="figure text-right">
 									{formatNumber(row.chars)} chars
-									<span className="ml-1 text-xs text-muted-foreground">
+									<span className="ml-tight text-xs text-muted-foreground">
 										~
 										{formatTokens(
 											Math.round(row.chars / CHARS_PER_TOKEN_ESTIMATE),
 										)}{" "}
 										tok (est.)
 									</span>
-								</td>
-								<td
-									className={`px-3 py-2 text-muted-foreground ${
-										row.project == null ? "italic" : ""
-									}`}
+								</TableCell>
+								<TableCell
+									className={cn(
+										"text-muted-foreground",
+										row.project == null && "italic",
+									)}
 								>
 									{projectLabel(row.project)}
-								</td>
-								<td className="px-3 py-2 text-muted-foreground">
+								</TableCell>
+								<TableCell className="text-muted-foreground">
 									{row.model ?? "—"}
-								</td>
-								<td className="px-3 py-2 text-muted-foreground">
+								</TableCell>
+								<TableCell className="figure text-muted-foreground">
 									{format(new Date(row.ts), "MMM d, HH:mm")}
-								</td>
-							</tr>
+								</TableCell>
+							</TableRow>
 						))}
-					</tbody>
-				</table>
-			</div>
+					</TableBody>
+				</Table>
+			</TableFrame>
 		</div>
 	);
 }
@@ -435,11 +450,11 @@ export function ContextCompositionPanel({
 			</CardHeader>
 			<CardContent className="space-y-section">
 				{coverage.withComposition < coverage.totalRequests && (
-					<p className="rounded-md bg-muted/50 px-3 py-2 text-xs text-muted-foreground">
+					<InsetPanel as="p" className="text-xs text-muted-foreground">
 						Composition recorded for {formatNumber(coverage.withComposition)} of{" "}
 						{formatNumber(coverage.totalRequests)} requests in range (captured
 						at request time)
-					</p>
+					</InsetPanel>
 				)}
 				<CompositionSplit totals={totals} avgPerRequest={avgPerRequest} />
 				<GrowthChart growthCurve={growthCurve} timeRange={timeRange} />

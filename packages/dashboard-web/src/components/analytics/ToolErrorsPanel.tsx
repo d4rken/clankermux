@@ -23,6 +23,16 @@ import {
 	CardHeader,
 	CardTitle,
 } from "../ui/card";
+import {
+	Table,
+	TableBody,
+	TableCell,
+	TableFrame,
+	TableHead,
+	TableHeader,
+	TableRow,
+} from "../ui/table";
+import { PanelEmptyState } from "./PanelEmptyState";
 import { type SortDir, SortHeaderButton } from "./sort-header";
 
 type ToolCallErrors = NonNullable<AnalyticsResponse["toolCallErrors"]>;
@@ -49,11 +59,11 @@ function EmptyState({ loading }: { loading: boolean }) {
 				</CardDescription>
 			</CardHeader>
 			<CardContent>
-				<div className="flex min-h-40 items-center justify-center rounded-md border border-dashed px-6 text-center text-sm text-muted-foreground">
+				<PanelEmptyState>
 					{loading
 						? "Loading tool errors..."
 						: "No tool calls recorded in this range yet. Data is collected for new requests only."}
-				</div>
+				</PanelEmptyState>
 			</CardContent>
 		</Card>
 	);
@@ -105,28 +115,23 @@ function ToolErrorTable({ rows }: { rows: ToolErrorRow[] }) {
 	);
 
 	return (
-		<div className="overflow-x-auto">
-			<table
-				aria-label="Tool error rates"
-				className="w-full text-sm border-collapse"
-			>
-				<thead>
-					<tr className="border-b">
-						<th className="text-left font-medium py-2 pr-4">
-							{headerButton("toolName", "Tool")}
-						</th>
-						<th className="text-right font-medium py-2 px-3">
+		<TableFrame>
+			<Table aria-label="Tool error rates">
+				<TableHeader>
+					<TableRow>
+						<TableHead>{headerButton("toolName", "Tool")}</TableHead>
+						<TableHead className="text-right">
 							{headerButton("totalCalls", "Calls")}
-						</th>
-						<th className="text-right font-medium py-2 px-3">
+						</TableHead>
+						<TableHead className="text-right">
 							{headerButton("totalErrors", "Errors")}
-						</th>
-						<th className="text-right font-medium py-2 px-3">
+						</TableHead>
+						<TableHead className="text-right">
 							{headerButton("errorRatePct", "Error rate")}
-						</th>
-					</tr>
-				</thead>
-				<tbody>
+						</TableHead>
+					</TableRow>
+				</TableHeader>
+				<TableBody>
 					{sortedRows.map((row) => {
 						const lowSample = row.totalCalls < LOW_SAMPLE_THRESHOLD;
 						// A genuine 0% gets no bar — the 2% floor only keeps
@@ -136,11 +141,8 @@ function ToolErrorTable({ rows }: { rows: ToolErrorRow[] }) {
 								? Math.max(2, (row.errorRatePct / maxErrorRate) * 100)
 								: 0;
 						return (
-							<tr
-								key={row.toolName}
-								className="border-b last:border-0 hover:bg-muted/40"
-							>
-								<td className="py-2 pr-4 align-top">
+							<TableRow key={row.toolName} className="hover:bg-muted/40">
+								<TableCell className="align-top">
 									<div className="font-medium">{row.toolName}</div>
 									{lowSample && (
 										<div
@@ -150,18 +152,20 @@ function ToolErrorTable({ rows }: { rows: ToolErrorRow[] }) {
 											low sample
 										</div>
 									)}
-								</td>
-								<td className="py-2 px-3 text-right tabular-nums align-top">
+								</TableCell>
+								<TableCell className="figure text-right align-top">
 									{formatNumber(row.totalCalls)}
-								</td>
-								<td className="py-2 px-3 text-right tabular-nums align-top">
+								</TableCell>
+								<TableCell className="figure text-right align-top">
 									{formatNumber(row.totalErrors)}
-								</td>
-								<td className="py-2 px-3 align-top">
-									<div className="text-right tabular-nums">
+								</TableCell>
+								<TableCell className="align-top">
+									<div className="figure text-right">
 										{row.errorRatePct.toFixed(1)}%
 									</div>
-									<div className="mt-1 h-1 w-full bg-muted rounded-full overflow-hidden">
+									<div className="mt-tight h-1 w-full bg-muted rounded-full overflow-hidden">
+										{/* Width is computed per row against the cross-row max, so
+										    it cannot be a class. */}
 										<div
 											className="h-full rounded-full transition-all"
 											style={{
@@ -170,13 +174,13 @@ function ToolErrorTable({ rows }: { rows: ToolErrorRow[] }) {
 											}}
 										/>
 									</div>
-								</td>
-							</tr>
+								</TableCell>
+							</TableRow>
 						);
 					})}
-				</tbody>
-			</table>
-		</div>
+				</TableBody>
+			</Table>
+		</TableFrame>
 	);
 }
 
@@ -203,8 +207,10 @@ function ErrorRateTrendChart({
 
 	return (
 		<div>
-			<h4 className="mb-2 text-sm font-medium">Error rate over time</h4>
-			<p className="mb-2 text-xs text-muted-foreground">
+			<h4 data-slot="title" className="text-sm font-medium">
+				Error rate over time
+			</h4>
+			<p data-slot="subtitle" className="mb-item text-xs text-muted-foreground">
 				Per-bucket error rate for the top{" "}
 				{series.length === 1 ? "tool" : `${series.length} tools`} by errors
 			</p>
@@ -235,8 +241,10 @@ function TopMessagesSection({ groups }: { groups: ToolMessageGroup[] }) {
 
 	return (
 		<div>
-			<h4 className="mb-2 text-sm font-medium">Top error messages</h4>
-			<p className="mb-2 text-xs text-muted-foreground">
+			<h4 data-slot="title" className="text-sm font-medium">
+				Top error messages
+			</h4>
+			<p data-slot="subtitle" className="mb-item text-xs text-muted-foreground">
 				Most frequent error texts per tool — the actionable list for tuning
 				prompts and tool usage
 			</p>
@@ -247,7 +255,7 @@ function TopMessagesSection({ groups }: { groups: ToolMessageGroup[] }) {
 						className="rounded-md border"
 						open={groups.length === 1}
 					>
-						<summary className="flex cursor-pointer items-center justify-between gap-item px-3 py-2 text-sm hover:bg-muted/40">
+						<summary className="flex cursor-pointer items-center justify-between gap-item px-row py-item text-sm hover:bg-muted/40">
 							<span className="font-medium">{group.toolName}</span>
 							<Badge variant="outline">
 								{formatNumber(group.totalOccurrences)}{" "}
@@ -258,7 +266,7 @@ function TopMessagesSection({ groups }: { groups: ToolMessageGroup[] }) {
 							{group.messages.map((message) => (
 								<li
 									key={message.errorText}
-									className="flex items-start justify-between gap-row border-b px-3 py-2 last:border-0"
+									className="flex items-start justify-between gap-row border-b px-row py-item last:border-0"
 								>
 									<code
 										className="min-w-0 flex-1 truncate font-mono text-xs text-muted-foreground"
