@@ -48,6 +48,16 @@ interface AlertProps
 	size?: AlertSize;
 	title: React.ReactNode;
 	icon?: React.ReactNode;
+	/**
+	 * A control that belongs beside the title rather than in the body — the
+	 * "Show more"/"Show less" toggles on the three conversation blocks.
+	 *
+	 * Passing one switches the header to a `justify-between` row. Omitting one
+	 * MUST leave the header byte-identical to what every existing call site
+	 * renders today, which is why this is a branch and not an unconditional
+	 * wrapper (alert.test.tsx pins both shapes with full-string equality).
+	 */
+	action?: React.ReactNode;
 }
 
 /**
@@ -69,24 +79,45 @@ interface AlertProps
  */
 const Alert = React.forwardRef<HTMLDivElement, AlertProps>(
 	(
-		{ tone = "info", size = "sm", title, icon, className, children, ...props },
+		{
+			tone = "info",
+			size = "sm",
+			title,
+			icon,
+			action,
+			className,
+			children,
+			...props
+		},
 		ref,
 	) => {
 		const sizing = SIZE[size];
+		const iconNode = icon ? (
+			<span className={cn("flex shrink-0", ICON_TONE[tone])}>{icon}</span>
+		) : null;
+		const titleNode = (
+			<p className={cn(sizing.title, "font-medium text-foreground")}>{title}</p>
+		);
 		return (
 			<div
 				ref={ref}
 				className={cn("rounded-lg border", sizing.root, TONE[tone], className)}
 				{...props}
 			>
-				<div className="flex items-center gap-item">
-					{icon ? (
-						<span className={cn("flex shrink-0", ICON_TONE[tone])}>{icon}</span>
-					) : null}
-					<p className={cn(sizing.title, "font-medium text-foreground")}>
-						{title}
-					</p>
-				</div>
+				{action == null ? (
+					<div className="flex items-center gap-item">
+						{iconNode}
+						{titleNode}
+					</div>
+				) : (
+					<div className="flex items-center justify-between gap-item">
+						<div className="flex min-w-0 flex-1 items-center gap-item">
+							{iconNode}
+							{titleNode}
+						</div>
+						<span className="shrink-0">{action}</span>
+					</div>
+				)}
 				{children ? (
 					<div className={cn(sizing.body, "space-y-item")}>{children}</div>
 				) : null}

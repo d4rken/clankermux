@@ -110,3 +110,82 @@ describe("Alert body", () => {
 		expect(html).not.toContain("space-y-item");
 	});
 });
+
+describe("Alert header shape", () => {
+	/**
+	 * Every other assertion in this file checks classes and content, never DOM
+	 * SHAPE — so none of them would notice the header gaining a wrapper element.
+	 * The `action` slot is a conditional branch precisely so the no-action case
+	 * keeps emitting the flat header it emits today, and only full-string
+	 * equality can hold that.
+	 */
+	it("emits byte-identical markup for the no-action case", () => {
+		expect(
+			renderToStaticMarkup(
+				<Alert
+					tone="warning"
+					size="sm"
+					title="Heads up"
+					icon={<svg role="presentation" />}
+				>
+					<p>Body</p>
+				</Alert>,
+			),
+		).toBe(
+			'<div class="rounded-lg border p-row bg-warning/10 border-warning/25"><div class="flex items-center gap-item"><span class="flex shrink-0 text-warning-strong"><svg role="presentation"></svg></span><p class="text-sm font-medium text-foreground">Heads up</p></div><div class="mt-item text-xs text-muted-foreground space-y-item"><p>Body</p></div></div>',
+		);
+	});
+
+	it("emits byte-identical markup with neither icon nor body", () => {
+		expect(
+			renderToStaticMarkup(
+				<Alert tone="destructive" size="md" title="Broken" />,
+			),
+		).toBe(
+			'<div class="rounded-lg border p-group bg-destructive/10 border-destructive/25"><div class="flex items-center gap-item"><p class="text-base font-medium text-foreground">Broken</p></div></div>',
+		);
+	});
+
+	/**
+	 * With an action the header becomes a `justify-between` row: icon and title
+	 * in a shrinkable group on the left, the control pinned right. The control
+	 * stays IN the header row — a conversation block's "Show more" toggle sitting
+	 * below the title instead of beside it is the regression this holds.
+	 */
+	it("pins an action beside the title in a justify-between header", () => {
+		const html = renderToStaticMarkup(
+			<Alert
+				tone="success"
+				title="Tool result"
+				action={<button type="button">Show more</button>}
+			>
+				<p>Body</p>
+			</Alert>,
+		);
+
+		expect(html).toContain(
+			'<div class="flex items-center justify-between gap-item">',
+		);
+		expect(html).toContain(
+			'<div class="flex min-w-0 flex-1 items-center gap-item">',
+		);
+		expect(html).toMatch(
+			/<p class="text-sm font-medium text-foreground">Tool result<\/p><\/div><span class="shrink-0"><button type="button">Show more<\/button><\/span><\/div>/,
+		);
+	});
+
+	it("keeps the icon inside the action header's left group", () => {
+		const html = renderToStaticMarkup(
+			<Alert
+				tone="warning"
+				title="Thinking"
+				icon={<svg role="presentation" />}
+				action={<button type="button">Show less</button>}
+			/>,
+		);
+
+		expect(html).toMatch(
+			/<div class="flex min-w-0 flex-1 items-center gap-item"><span class="flex shrink-0 text-warning-strong">/,
+		);
+	});
+});
