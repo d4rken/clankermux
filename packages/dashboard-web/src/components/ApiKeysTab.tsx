@@ -16,7 +16,10 @@ import { type Account, api } from "../api";
 import { fetchApiKeys, useAccounts } from "../hooks/queries";
 import { describePinTarget } from "../lib/api-key-pin-label";
 import { invalidateCapacityQueries, queryKeys } from "../lib/query-keys";
+import { cn } from "../lib/utils";
 import { CopyButton } from "./CopyButton";
+import { Alert } from "./ui/alert";
+import { Badge } from "./ui/badge";
 import { Button } from "./ui/button";
 import {
 	Card,
@@ -36,6 +39,8 @@ import {
 } from "./ui/dialog";
 import { Input } from "./ui/input";
 import { Label } from "./ui/label";
+import { PanelEmptyState } from "./ui/panel-empty-state";
+import { SectionHeading } from "./ui/section-heading";
 import {
 	Select,
 	SelectContent,
@@ -43,6 +48,7 @@ import {
 	SelectTrigger,
 	SelectValue,
 } from "./ui/select";
+import { Skeleton } from "./ui/skeleton";
 
 interface ApiKey {
 	id: string;
@@ -149,6 +155,48 @@ export function sortApiKeys<
 		);
 	});
 }
+
+/**
+ * One of the three key-count tiles at the top of the page.
+ *
+ * Local and deliberately not `overview/MetricCard`: that one requires an `icon`
+ * and carries trend, sub-row and popover machinery none of these three use, so
+ * adopting it would mean inventing three icons to satisfy a required prop.
+ */
+function StatCard({
+	label,
+	value,
+	valueClassName,
+}: {
+	label: string;
+	value: number;
+	valueClassName?: string;
+}) {
+	return (
+		<Card>
+			<CardHeader className="pb-item">
+				<CardTitle className="text-base font-medium">{label}</CardTitle>
+			</CardHeader>
+			<CardContent>
+				<div className={cn("figure-xl", valueClassName)}>{value}</div>
+			</CardContent>
+		</Card>
+	);
+}
+
+/**
+ * Stable keys for the API-key list skeleton.
+ *
+ * Exactly three, so the loading list and the loaded list occupy the same box
+ * and QA can measure one selector across both with a three-key stub.
+ *
+ * `h-[7.625rem]` is a real key row: 1px of border top and bottom (2), `p-group`
+ * top and bottom (32), and a left column of a 24px name line, a `text-sm`
+ * "key ends with" line at `mt-tight` (24) and two `text-xs` lines at `mt-tight`
+ * (20 each) = 88. The six `size="sm"` action buttons opposite are 32px, so the
+ * left column sets the height. 2 + 32 + 88 = 122px.
+ */
+const API_KEY_SKELETON_ROWS = ["key-1", "key-2", "key-3"] as const;
 
 type PinMode = "unpinned" | "account" | "provider";
 
@@ -454,11 +502,13 @@ export function ApiKeysTab() {
 	if (keysError || statsError) {
 		return (
 			<Card>
-				<CardContent className="p-6">
-					<div className="flex items-center gap-item text-destructive-strong">
-						<AlertTriangle className="h-5 w-5" />
-						<span>Failed to load API keys. Please try again.</span>
-					</div>
+				<CardContent className="p-group">
+					<Alert
+						size="md"
+						tone="destructive"
+						icon={<AlertTriangle className="h-5 w-5" />}
+						title="Failed to load API keys. Please try again."
+					/>
 				</CardContent>
 			</Card>
 		);
@@ -468,51 +518,35 @@ export function ApiKeysTab() {
 		<div className="space-y-section">
 			{/* Statistics Cards */}
 			<div className="grid grid-cols-1 md:grid-cols-3 gap-group">
-				<Card>
-					<CardHeader className="pb-2">
-						<CardTitle className="text-base font-medium">Total Keys</CardTitle>
-					</CardHeader>
-					<CardContent>
-						<div className="figure-xl">{stats?.total || 0}</div>
-					</CardContent>
-				</Card>
-				<Card>
-					<CardHeader className="pb-2">
-						<CardTitle className="text-base font-medium">Active Keys</CardTitle>
-					</CardHeader>
-					<CardContent>
-						<div className="figure-xl text-success-strong">
-							{stats?.active || 0}
-						</div>
-					</CardContent>
-				</Card>
-				<Card>
-					<CardHeader className="pb-2">
-						<CardTitle className="text-base font-medium">
-							Inactive Keys
-						</CardTitle>
-					</CardHeader>
-					<CardContent>
-						<div className="figure-xl text-muted-foreground">
-							{stats?.inactive || 0}
-						</div>
-					</CardContent>
-				</Card>
+				<StatCard label="Total Keys" value={stats?.total || 0} />
+				<StatCard
+					label="Active Keys"
+					value={stats?.active || 0}
+					valueClassName="text-success-strong"
+				/>
+				<StatCard
+					label="Inactive Keys"
+					value={stats?.inactive || 0}
+					valueClassName="text-muted-foreground"
+				/>
 			</div>
 
 			{/* Header with Create Button */}
 			<div className="flex items-center justify-between">
-				<div>
-					<h2 className="text-xl font-semibold">API Keys</h2>
-					<p className="text-muted-foreground">
-						Manage API keys for authentication. When at least one key is active,
-						all API requests must include a valid API key.
-					</p>
-				</div>
-				<Dialog open={isCreateDialogOpen} onOpenChange={setIsCreateDialogOpen}>
+				<SectionHeading
+					title="API Keys"
+					description="Manage API keys for authentication. When at least one key is active, all API requests must include a valid API key."
+				/>
+				<Dialog
+					open={isCreateDialogOpen}
+					onOpenChange={(open) => {
+						generateKeyMutation.reset();
+						setIsCreateDialogOpen(open);
+					}}
+				>
 					<DialogTrigger asChild>
 						<Button>
-							<Plus className="h-4 w-4 mr-2" />
+							<Plus className="h-4 w-4" />
 							Generate API Key
 						</Button>
 					</DialogTrigger>
@@ -524,7 +558,7 @@ export function ApiKeysTab() {
 								only once, so save it securely.
 							</DialogDescription>
 						</DialogHeader>
-						<div className="space-y-group py-4">
+						<div className="space-y-group py-group">
 							<div className="space-y-item">
 								<Label htmlFor="name">Key Name</Label>
 								<Input
@@ -534,6 +568,17 @@ export function ApiKeysTab() {
 									onChange={(e) => setNewKeyName(e.target.value)}
 								/>
 							</div>
+							{generateKeyMutation.isError && (
+								<Alert
+									size="sm"
+									tone="destructive"
+									icon={<AlertTriangle className="h-4 w-4 shrink-0" />}
+									title={
+										generateKeyMutation.error?.message ??
+										"Failed to generate API key."
+									}
+								/>
+							)}
 						</div>
 						<DialogFooter>
 							<Button
@@ -561,7 +606,11 @@ export function ApiKeysTab() {
 					<div className="flex items-start justify-between gap-group">
 						<div>
 							<CardTitle>Your API Keys</CardTitle>
-							<CardDescription className="mt-1.5">
+							{/* No `mt-1.5`: the [data-slot="title"] + [data-slot="subtitle"]
+						    base rule already supplies 0.5rem, and this utility outranked
+						    it — so this one card header rendered 0.375rem where every
+						    other renders 0.5rem. */}
+							<CardDescription>
 								{apiKeys.length === 0
 									? "No API keys have been created yet."
 									: `You have ${apiKeys.length} API key${apiKeys.length === 1 ? "" : "s"}.`}
@@ -593,44 +642,53 @@ export function ApiKeysTab() {
 				</CardHeader>
 				<CardContent>
 					{isLoadingKeys ? (
-						<div className="text-center py-8">Loading API keys...</div>
-					) : apiKeys.length === 0 ? (
-						<div className="text-center py-8 text-muted-foreground">
-							<Shield className="h-12 w-12 mx-auto mb-4 opacity-50" />
-							<p>No API keys configured</p>
-							<p className="text-sm">
-								API authentication will be disabled until you create your first
-								key.
-							</p>
+						<div
+							data-slot="api-key-list"
+							aria-busy="true"
+							className="space-y-group"
+						>
+							<span className="sr-only" role="status">
+								Loading API keys
+							</span>
+							{API_KEY_SKELETON_ROWS.map((rowKey) => (
+								<Skeleton
+									key={rowKey}
+									className="h-[7.625rem] w-full rounded-lg"
+								/>
+							))}
 						</div>
+					) : apiKeys.length === 0 ? (
+						<PanelEmptyState icon={<Shield className="h-12 w-12" />}>
+							<span>
+								No API keys configured. API authentication will be disabled
+								until you create your first key.
+							</span>
+						</PanelEmptyState>
 					) : (
-						<div className="space-y-group">
+						<div data-slot="api-key-list" className="space-y-group">
 							{sortedApiKeys.map((key) => (
 								<div
 									key={key.id}
-									className="flex flex-col gap-row p-4 border rounded-lg"
+									className="flex flex-col gap-row p-group border rounded-lg"
 								>
 									<div className="flex items-center justify-between">
 										<div className="flex-1">
 											<div className="flex items-center gap-item">
 												<h3 className="font-medium">{key.name}</h3>
-												<div
-													className={`px-2 py-1 rounded text-xs font-medium ${
-														key.isActive
-															? "bg-success/15 text-success-strong"
-															: "bg-muted text-muted-foreground"
-													}`}
-												>
+												{/* The shared Badge, not a one-off `bg-success/15` tint: the
+												    active pill is a solid fill like every other status
+												    badge in the app. */}
+												<Badge variant={key.isActive ? "success" : "secondary"}>
 													{key.isActive ? "Active" : "Disabled"}
-												</div>
+												</Badge>
 											</div>
-											<div className="text-sm text-muted-foreground mt-1">
+											<div className="text-sm text-muted-foreground mt-tight">
 												Key ends with:{" "}
-												<code className="bg-muted px-1 rounded">
+												<code className="bg-muted px-tight rounded">
 													{key.prefixLast8}
 												</code>
 											</div>
-											<div className="text-xs text-muted-foreground mt-1 flex items-center gap-tight">
+											<div className="text-xs text-muted-foreground mt-tight flex items-center gap-tight">
 												<Route className="h-3 w-3" />
 												<span>
 													{describePinTarget(
@@ -642,7 +700,7 @@ export function ApiKeysTab() {
 													)}
 												</span>
 											</div>
-											<div className="text-xs text-muted-foreground mt-1">
+											<div className="text-xs text-muted-foreground mt-tight">
 												Created{" "}
 												{formatDistanceToNow(new Date(key.createdAt), {
 													addSuffix: true,
@@ -772,11 +830,11 @@ export function ApiKeysTab() {
 								: "Your API key has been generated. Save it securely now - it won't be shown again."}
 						</DialogDescription>
 					</DialogHeader>
-					<div className="space-y-group py-4">
+					<div className="space-y-group py-group">
 						<div className="space-y-item">
 							<Label>API Key</Label>
 							<div className="flex items-center gap-item">
-								<code className="flex-1 p-3 bg-muted rounded text-sm font-mono break-all">
+								<code className="flex-1 p-row bg-muted rounded text-sm font-mono break-all">
 									{generatedKey?.apiKey}
 								</code>
 								<CopyButton
@@ -787,16 +845,15 @@ export function ApiKeysTab() {
 								/>
 							</div>
 						</div>
-						<div className="p-4 bg-warning/10 border border-warning/25 rounded-lg">
-							<div className="flex items-center gap-item text-foreground">
-								<AlertTriangle className="h-5 w-5" />
-								<span className="font-medium">Important:</span>
-							</div>
-							<p className="text-sm text-muted-foreground mt-1">
-								Save this API key in a secure location. You won't be able to see
-								it again after closing this dialog.
-							</p>
-						</div>
+						<Alert
+							size="md"
+							tone="warning"
+							icon={<AlertTriangle className="h-5 w-5" />}
+							title="Important:"
+						>
+							Save this API key in a secure location. You won't be able to see
+							it again after closing this dialog.
+						</Alert>
 					</div>
 					<DialogFooter>
 						<Button onClick={handleSavedKey} variant="outline">
@@ -826,22 +883,25 @@ export function ApiKeysTab() {
 							history will be preserved.
 						</DialogDescription>
 					</DialogHeader>
-					<div className="py-4 space-y-row">
+					<div className="py-group space-y-row">
 						<p className="text-sm text-muted-foreground">
 							Use this when the original key has been lost. Any application or
 							script still using the old secret will start failing with 401
 							until you update it.
 						</p>
 						{regenerateKeyMutation.isError && (
-							<div className="p-3 bg-destructive/10 border border-destructive/30 rounded-lg">
-								<div className="flex items-start gap-item text-destructive-strong">
-									<AlertTriangle className="h-4 w-4 mt-0.5 shrink-0" />
-									<span className="text-sm">
-										{regenerateKeyMutation.error?.message ??
-											"Failed to regenerate API key."}
-									</span>
-								</div>
-							</div>
+							<Alert
+								size="sm"
+								tone="destructive"
+								// No `mt-0.5` on the icon: that hairline nudge only made sense
+								// against the old `items-start` shell. Alert's header row is
+								// `items-center`, where it would push the icon BELOW centre.
+								icon={<AlertTriangle className="h-4 w-4 shrink-0" />}
+								title={
+									regenerateKeyMutation.error?.message ??
+									"Failed to regenerate API key."
+								}
+							/>
 						)}
 					</div>
 					<DialogFooter>
@@ -889,7 +949,7 @@ export function ApiKeysTab() {
 								Enter a new name for the API key "{selectedKey?.name}".
 							</DialogDescription>
 						</DialogHeader>
-						<div className="grid gap-group py-4">
+						<div className="grid gap-group py-group">
 							<div className="grid gap-item">
 								<Label htmlFor="rename-key-name">New Name</Label>
 								<Input
@@ -908,15 +968,15 @@ export function ApiKeysTab() {
 								)}
 							</div>
 							{renameKeyMutation.isError && (
-								<div className="p-3 bg-destructive/10 border border-destructive/30 rounded-lg">
-									<div className="flex items-start gap-item text-destructive-strong">
-										<AlertTriangle className="h-4 w-4 mt-0.5 shrink-0" />
-										<span className="text-sm">
-											{renameKeyMutation.error?.message ??
-												"Failed to rename API key."}
-										</span>
-									</div>
-								</div>
+								<Alert
+									size="sm"
+									tone="destructive"
+									icon={<AlertTriangle className="h-4 w-4 shrink-0" />}
+									title={
+										renameKeyMutation.error?.message ??
+										"Failed to rename API key."
+									}
+								/>
 							)}
 						</div>
 						<DialogFooter>
@@ -949,7 +1009,7 @@ export function ApiKeysTab() {
 							This action cannot be undone.
 						</DialogDescription>
 					</DialogHeader>
-					<div className="py-4">
+					<div className="py-group">
 						<p className="text-sm text-muted-foreground">
 							Deleting this API key will immediately invalidate it, and any
 							applications using it will no longer be able to authenticate.
@@ -1044,7 +1104,7 @@ function PinEditor({
 		(mode === "provider" && providers.length === 0);
 
 	return (
-		<div className="border-t pt-3 space-y-row">
+		<div className="border-t pt-row space-y-row">
 			<div className="space-y-item">
 				<Label className="text-xs">Routing mode</Label>
 				<Select value={mode} onValueChange={(v) => setMode(v as PinMode)}>
@@ -1075,7 +1135,7 @@ function PinEditor({
 								{accounts.map((account) => (
 									<SelectItem key={account.id} value={account.id}>
 										{account.name}
-										<span className="ml-2 text-xs text-muted-foreground">
+										<span className="ml-item text-xs text-muted-foreground">
 											{account.provider}
 										</span>
 									</SelectItem>
@@ -1115,12 +1175,12 @@ function PinEditor({
 			)}
 
 			{error && (
-				<div className="p-3 bg-destructive/10 border border-destructive/30 rounded-lg">
-					<div className="flex items-start gap-item text-destructive-strong">
-						<AlertTriangle className="h-4 w-4 mt-0.5 shrink-0" />
-						<span className="text-sm">{error}</span>
-					</div>
-				</div>
+				<Alert
+					size="sm"
+					tone="destructive"
+					icon={<AlertTriangle className="h-4 w-4 shrink-0" />}
+					title={error}
+				/>
 			)}
 
 			<div className="flex items-center gap-item">

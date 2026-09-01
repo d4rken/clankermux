@@ -19,6 +19,7 @@ import {
 	CardHeader,
 	CardTitle,
 } from "../ui/card";
+import { PanelEmptyState } from "../ui/panel-empty-state";
 import {
 	Table,
 	TableBody,
@@ -28,7 +29,6 @@ import {
 	TableHeader,
 	TableRow,
 } from "../ui/table";
-import { PanelEmptyState } from "./PanelEmptyState";
 
 type ProjectBreakdownRow = NonNullable<
 	AnalyticsResponse["projectBreakdown"]

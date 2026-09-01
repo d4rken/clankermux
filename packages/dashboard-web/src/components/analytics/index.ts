@@ -1,3 +1,4 @@
+export { SectionHeading } from "../ui/section-heading";
 export { ActiveSessionsPanel } from "./ActiveSessionsPanel";
 export {
 	CumulativeGrowthChart,
@@ -18,6 +19,5 @@ export { ProjectAnalytics } from "./ProjectAnalytics";
 export { QuotaChangeVerdicts } from "./QuotaChangeVerdicts";
 export { QuotaDriftPanel } from "./QuotaDriftPanel";
 export { RoutingAnalyticsPanel } from "./RoutingAnalytics";
-export { SectionHeading } from "./SectionHeading";
 export { TokenSpeedAnalytics } from "./TokenSpeedAnalytics";
 export { ToolErrorsPanel } from "./ToolErrorsPanel";

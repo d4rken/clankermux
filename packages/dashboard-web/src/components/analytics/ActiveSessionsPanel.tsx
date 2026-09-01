@@ -24,7 +24,7 @@ import {
 	CardHeader,
 	CardTitle,
 } from "../ui/card";
-import { PanelEmptyState } from "./PanelEmptyState";
+import { PanelEmptyState } from "../ui/panel-empty-state";
 
 function EmptyState({ loading }: { loading: boolean }) {
 	return (

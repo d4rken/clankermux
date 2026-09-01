@@ -189,7 +189,7 @@ export function ProjectAttributionCard() {
 						</span>
 					)}
 					{setProjectRules.isError && (
-						<span className="text-sm text-destructive">
+						<span className="text-sm text-destructive-strong">
 							Save failed. Your changes are still here.
 						</span>
 					)}

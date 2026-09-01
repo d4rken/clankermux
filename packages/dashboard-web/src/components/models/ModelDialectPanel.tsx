@@ -10,7 +10,14 @@ import {
 	useModelCatalog,
 	useSetModelOverride,
 } from "../../hooks/queries";
-import { Card, CardContent, CardHeader, CardTitle } from "../ui/card";
+import {
+	Card,
+	CardContent,
+	CardDescription,
+	CardHeader,
+	CardTitle,
+} from "../ui/card";
+import { Skeleton } from "../ui/skeleton";
 import { AddCustomModelForm } from "./AddCustomModelForm";
 import { ClientSetupNote } from "./ClientSetupNote";
 import { ModelRow } from "./ModelRow";
@@ -123,12 +130,18 @@ export function ModelDialectPanel({ dialect }: { dialect: ModelDialect }) {
 	return (
 		<Card>
 			<CardHeader>
-				<CardTitle className="font-mono text-base">
+				{/* `tracking-normal` because CardTitle applies `.display-face`, whose
+				    -0.02em is wrong for a mono: a mono is drawn on a fixed advance and
+				    tightening it collapses the cells into each other. This is the
+				    app's only mono display-face line. */}
+				<CardTitle className="font-mono text-base tracking-normal">
 					{DIALECT_TITLES[dialect]}
 				</CardTitle>
-				<p className="text-sm text-muted-foreground">
-					{DIALECT_BLURBS[dialect]}
-				</p>
+				{/* A CardDescription, not a raw <p>: CardHeader has no gap of its own,
+				    and the title-to-description spacing is a base rule keyed on the
+				    `data-slot` pair. A raw <p> carries no slot, so this blurb rendered
+				    flush against the title and unbounded by the reading measure. */}
+				<CardDescription>{DIALECT_BLURBS[dialect]}</CardDescription>
 				{/* Sits with the blurb rather than under the rows: it answers "will a
 				    client actually see my edit", which is a question the operator has
 				    BEFORE making one, not after scrolling past the list. */}
@@ -136,11 +149,21 @@ export function ModelDialectPanel({ dialect }: { dialect: ModelDialect }) {
 			</CardHeader>
 			<CardContent className="space-y-group">
 				{isLoading && (
-					<p className="text-sm text-muted-foreground">Loading models…</p>
+					// A bare Skeleton has no role and no accessible text, so the message
+					// the replaced line announced moves to a visually hidden status line.
+					<div aria-busy="true" className="space-y-item">
+						<span className="sr-only" role="status">
+							Loading models
+						</span>
+						<Skeleton className="h-5 w-48" />
+						<Skeleton className="h-24 w-full rounded-md" />
+					</div>
 				)}
 
 				{isError && (
-					<p className="text-sm text-destructive">
+					// `-strong`, not the bare fill hue: `--destructive` is a fill value
+					// and fails as a foreground colour.
+					<p className="text-sm text-destructive-strong">
 						Could not load the model catalogue
 						{error instanceof Error ? `: ${error.message}` : ""}
 					</p>

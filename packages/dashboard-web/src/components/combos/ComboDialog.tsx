@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { useCreateCombo, useGetCombo } from "../../hooks/queries";
+import { Alert } from "../ui/alert";
 import { Button } from "../ui/button";
 import {
 	Dialog,
@@ -10,7 +11,9 @@ import {
 	DialogTitle,
 } from "../ui/dialog";
 import { Input } from "../ui/input";
+import { InsetPanel } from "../ui/inset-panel";
 import { Label } from "../ui/label";
+import { Skeleton } from "../ui/skeleton";
 import { Switch } from "../ui/switch";
 import { ComboSlotBuilder } from "./ComboSlotBuilder";
 
@@ -55,6 +58,7 @@ export function ComboDialog({ isOpen, onClose, comboId }: ComboDialogProps) {
 		setName("");
 		setDescription("");
 		setEnabled(true);
+		createCombo.reset();
 		onClose();
 	};
 
@@ -75,16 +79,26 @@ export function ComboDialog({ isOpen, onClose, comboId }: ComboDialogProps) {
 				</DialogHeader>
 
 				{isEditMode ? (
-					<div className="min-h-0 flex-1 space-y-group overflow-y-auto py-2">
+					<div className="min-h-0 flex-1 space-y-group overflow-y-auto py-item">
 						{comboQuery.isLoading && (
-							<p className="text-sm text-muted-foreground">
-								Loading routing chain...
-							</p>
+							<div aria-busy="true" className="space-y-item">
+								<span className="sr-only" role="status">
+									Loading routing chain
+								</span>
+								{/* Stands in for the slot-builder Card at its minimum, which
+								    is what a chain with no slots renders: 1px of border top
+								    and bottom (2), a `p-4 pb-item` header whose tallest child
+								    is the size="sm" Add Slot button (16 + 32 + 8 = 56), and a
+								    `p-4 pt-0` body around the `py-item` empty-slots line
+								    (8 + 20 + 8 + 16 = 52). 2 + 56 + 52 = 110px. A chain WITH
+								    slots is taller, so this is a floor, not a match. */}
+								<Skeleton className="h-[6.875rem] w-full rounded-lg" />
+							</div>
 						)}
 						{combo && <ComboSlotBuilder combo={combo} />}
 					</div>
 				) : (
-					<div className="space-y-group py-2">
+					<div className="space-y-group py-item">
 						<div className="space-y-item">
 							<Label htmlFor="combo-name">Name</Label>
 							<Input
@@ -106,7 +120,9 @@ export function ComboDialog({ isOpen, onClose, comboId }: ComboDialogProps) {
 							/>
 						</div>
 
-						<div className="flex items-center justify-between rounded-md border px-3 py-2">
+						{/* Exact class match for what this rendered by hand, plus the
+						    `bg-muted/30` surface step it was always meant to have. */}
+						<InsetPanel className="flex items-center justify-between">
 							<Label htmlFor="combo-enabled" className="cursor-pointer">
 								Enabled
 							</Label>
@@ -115,7 +131,7 @@ export function ComboDialog({ isOpen, onClose, comboId }: ComboDialogProps) {
 								checked={enabled}
 								onCheckedChange={setEnabled}
 							/>
-						</div>
+						</InsetPanel>
 
 						<p className="text-xs text-muted-foreground">
 							Slots can be configured after creation.
@@ -124,9 +140,11 @@ export function ComboDialog({ isOpen, onClose, comboId }: ComboDialogProps) {
 				)}
 
 				{createCombo.isError && (
-					<p className="text-sm text-destructive-strong">
-						Failed to create routing chain. Please try again.
-					</p>
+					<Alert
+						tone="destructive"
+						size="sm"
+						title="Failed to create routing chain. Please try again."
+					/>
 				)}
 
 				<DialogFooter>

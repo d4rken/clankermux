@@ -2,7 +2,13 @@ import type { Combo } from "@clankermux/types";
 import { Edit, Trash2 } from "lucide-react";
 import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
-import { Card, CardContent, CardHeader, CardTitle } from "../ui/card";
+import {
+	Card,
+	CardContent,
+	CardDescription,
+	CardHeader,
+	CardTitle,
+} from "../ui/card";
 import { Switch } from "../ui/switch";
 
 interface ComboCardProps {
@@ -24,31 +30,29 @@ export function ComboCard({
 }: ComboCardProps) {
 	return (
 		<Card>
-			<CardHeader className="pb-3">
+			<CardHeader className="pb-row">
 				<div className="flex items-start justify-between gap-item">
 					<div className="min-w-0 flex-1">
 						<CardTitle className="text-base leading-snug">
 							{combo.name}
 						</CardTitle>
 						{combo.description && (
-							<p className="mt-1 text-sm text-muted-foreground line-clamp-2">
+							<CardDescription className="line-clamp-2">
 								{combo.description}
-							</p>
+							</CardDescription>
 						)}
 					</div>
 					<Switch checked={combo.enabled} onCheckedChange={onToggleEnabled} />
 				</div>
 			</CardHeader>
-			<CardContent className="pt-0">
+			<CardContent>
 				<div className="flex items-center justify-between">
 					<div className="flex items-center gap-item">
 						<span className="text-sm text-muted-foreground">
 							{slotCount} {slotCount === 1 ? "slot" : "slots"}
 						</span>
 						{assignedFamily && (
-							<Badge variant="secondary" className="text-xs">
-								{assignedFamily}
-							</Badge>
+							<Badge variant="secondary">{assignedFamily}</Badge>
 						)}
 					</div>
 					<div className="flex items-center gap-tight">

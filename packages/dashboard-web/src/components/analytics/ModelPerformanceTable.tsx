@@ -3,6 +3,7 @@ import { formatTokensPerSecond } from "@clankermux/ui-common";
 import { Loader2 } from "lucide-react";
 import { useMemo, useState } from "react";
 import { CHART_TOKENS } from "../../constants";
+import { PanelEmptyState } from "../ui/panel-empty-state";
 import {
 	Table,
 	TableBody,
@@ -12,7 +13,6 @@ import {
 	TableHeader,
 	TableRow,
 } from "../ui/table";
-import { PanelEmptyState } from "./PanelEmptyState";
 import { type SortDir, SortHeaderButton } from "./sort-header";
 
 /** One model's row in the performance table. */

@@ -21,7 +21,7 @@ import {
 	User,
 	X,
 } from "lucide-react";
-import { useCallback, useMemo, useState } from "react";
+import { type ReactNode, useCallback, useMemo, useState } from "react";
 import { useSearchParams } from "react-router";
 import { api, type RequestPayload, type RequestSummary } from "../api";
 import { API_LIMITS } from "../constants";
@@ -57,6 +57,7 @@ import { cn } from "../lib/utils";
 import { isZaiPeakHour } from "../utils/provider-utils";
 import { CopyButton } from "./CopyButton";
 import { RequestDetailsModal } from "./RequestDetailsModal";
+import { Alert } from "./ui/alert";
 import { Badge, badgeVariants } from "./ui/badge";
 import { Button } from "./ui/button";
 import {
@@ -72,6 +73,7 @@ import {
 	DropdownMenuTrigger,
 } from "./ui/dropdown-menu";
 import { Input } from "./ui/input";
+import { InsetPanel } from "./ui/inset-panel";
 import { Label } from "./ui/label";
 import {
 	Select,
@@ -80,6 +82,7 @@ import {
 	SelectTrigger,
 	SelectValue,
 } from "./ui/select";
+import { Skeleton } from "./ui/skeleton";
 
 /**
  * Styling for the cost chip in the requests list, keyed off the request's
@@ -106,6 +109,68 @@ export function costBadgeProps(billingType: string | null | undefined): {
 		title: billingType === "plan" ? "Covered by plan" : undefined,
 	};
 }
+
+/**
+ * One dismissible chip in the active-filters bar.
+ *
+ * Six byte-identical copies of this markup sat inline, which also meant six
+ * copies of the off-scale `p-0.5` on the clear button — a deliberate hairline
+ * hit-area pad that would read as sloppiness repeated six times and as an
+ * intentional exception once.
+ */
+function FilterChip({
+	icon,
+	label,
+	onClear,
+}: {
+	icon: ReactNode;
+	label: ReactNode;
+	onClear: () => void;
+}) {
+	return (
+		<Badge variant="outline" className="gap-item pr-1">
+			{icon}
+			{label}
+			<button
+				type="button"
+				onClick={onClear}
+				className="ml-tight p-0.5 hover:bg-destructive/20 rounded"
+			>
+				<X className="h-3 w-3" />
+			</button>
+		</Badge>
+	);
+}
+
+/**
+ * Stable keys for the request-list loading skeleton.
+ *
+ * Six, not "about eight": the count is fixed so QA can compare loading and
+ * loaded-list geometry using a controlled six-row stub.
+ *
+ * `h-[6.25rem]` (100px) matches the browser-measured height of a normal
+ * request row in the six-row QA fixture. A row that renders `request.error`
+ * adds a 24px error line, so the loaded list height is
+ * `6 × 100px + 5 × 8px + 24px × errorRowCount`.
+ *
+ * The fixture contains four normal rows and two error rows, giving
+ * `600 + 40 + 48 = 688px`; its 108px average is therefore a fixture-weighted
+ * mean, not a universal row height. Because the loading state cannot know the
+ * future error-row distribution, the skeleton uses the modal 100px row.
+ * Re-measure these values in a browser when the row markup changes.
+ *
+ * The original `h-[4.5rem]` value counted only two of the three content rows.
+ * In the mixed four-normal/two-error fixture, its 472px skeleton loaded into a
+ * 688px list, producing the measured 216px jump.
+ */
+const REQUEST_SKELETON_ROWS = [
+	"row-1",
+	"row-2",
+	"row-3",
+	"row-4",
+	"row-5",
+	"row-6",
+] as const;
 
 /**
  * Option values for the name-valued filter dropdowns.
@@ -475,7 +540,7 @@ export function RequestsTab() {
 							size="sm"
 							className="relative"
 						>
-							<Filter className="h-4 w-4 mr-2" />
+							<Filter className="h-4 w-4" />
 							Filters
 							{filtersActive && !showFilters && (
 								<span className="absolute -top-1 -right-1 h-2 w-2 bg-primary rounded-full animate-pulse" />
@@ -489,20 +554,18 @@ export function RequestsTab() {
 			</CardHeader>
 			<CardContent>
 				{error && (
-					<div className="mb-4 p-3 rounded-lg border border-destructive/50 bg-destructive/5">
-						<p className="text-destructive-strong text-sm">
-							Error: {error instanceof Error ? error.message : String(error)}
-						</p>
-						<Button
-							onClick={() => reload()}
-							variant="outline"
-							size="sm"
-							className="mt-2"
-						>
-							<RefreshCw className="mr-2 h-4 w-4" />
+					<Alert
+						tone="destructive"
+						className="mb-group"
+						title={`Error: ${error instanceof Error ? error.message : String(error)}`}
+					>
+						{/* No `mt-2`: as Alert children this sits in the body wrapper,
+						    which already supplies the offset. */}
+						<Button onClick={() => reload()} variant="outline" size="sm">
+							<RefreshCw className="h-4 w-4" />
 							Retry
 						</Button>
-					</div>
+					</Alert>
 				)}
 
 				{/* A linked-to request that could not be looked up. Retryable by
@@ -510,30 +573,33 @@ export function RequestsTab() {
 				    retry an HttpError — the server answered, so this state stays
 				    until someone asks again. */}
 				{byIdError != null && (
-					<div className="mb-4 p-3 rounded-lg border border-destructive/50 bg-destructive/5">
-						<p className="text-destructive-strong text-sm">
-							Could not load the linked request:{" "}
-							{byIdError instanceof Error
-								? byIdError.message
-								: String(byIdError)}
-						</p>
+					<Alert
+						tone="destructive"
+						className="mb-group"
+						title={`Could not load the linked request: ${
+							byIdError instanceof Error ? byIdError.message : String(byIdError)
+						}`}
+					>
 						<Button
 							onClick={() => byIdQuery.refetch()}
 							variant="outline"
 							size="sm"
-							className="mt-2"
 						>
-							<RefreshCw className="mr-2 h-4 w-4" />
+							<RefreshCw className="h-4 w-4" />
 							Retry
 						</Button>
-					</div>
+					</Alert>
 				)}
 
 				{/* Not an error: a request has no recorded row until it completes,
 				    and Live Activity links in-flight marks on purpose. The live tail
-				    is still running, so it opens by itself once the row lands. */}
+				    is still running, so it opens by itself once the row lands.
+
+				    Deliberately NOT an <Alert>: this is neutral information, and
+				    Alert has no neutral tone — `info` would tint it blue and read as
+				    a warning about something that is working as designed. */}
 				{byIdMissing && (
-					<div className="mb-4 p-3 rounded-lg border bg-muted/50">
+					<div className="mb-group p-row rounded-lg border bg-muted/50">
 						<p className="text-sm text-muted-foreground">
 							That request has not been recorded yet — it may still be in
 							flight. Its details will open here as soon as it completes.
@@ -543,97 +609,63 @@ export function RequestsTab() {
 
 				{/* Active Filters Display */}
 				{filtersActive && (
-					<div className="mb-4 p-3 bg-muted/50 rounded-lg">
+					<InsetPanel className="mb-group">
 						<div className="flex flex-wrap items-center gap-item">
 							{statusCategory !== "all" && statusCodeFilters.size === 0 && (
-								<Badge variant="outline" className="gap-item pr-1">
-									<Hash className="h-3 w-3" />
-									{statusCategoryLabel(statusCategory)}
-									<button
-										type="button"
-										onClick={() => setStatusCategory("all")}
-										className="ml-1 p-0.5 hover:bg-destructive/20 rounded"
-									>
-										<X className="h-3 w-3" />
-									</button>
-								</Badge>
+								<FilterChip
+									icon={<Hash className="h-3 w-3" />}
+									label={statusCategoryLabel(statusCategory)}
+									onClear={() => setStatusCategory("all")}
+								/>
 							)}
 							{statusCodeFilters.size > 0 && (
-								<Badge variant="outline" className="gap-item pr-1">
-									<Hash className="h-3 w-3" />
-									{Array.from(statusCodeFilters).join(", ")}
-									<button
-										type="button"
-										onClick={() => setStatusCodeFilters(new Set())}
-										className="ml-1 p-0.5 hover:bg-destructive/20 rounded"
-									>
-										<X className="h-3 w-3" />
-									</button>
-								</Badge>
+								<FilterChip
+									icon={<Hash className="h-3 w-3" />}
+									label={Array.from(statusCodeFilters).join(", ")}
+									onClear={() => setStatusCodeFilters(new Set())}
+								/>
 							)}
 							{accountFilter !== null && (
-								<Badge variant="outline" className="gap-item pr-1">
-									<User className="h-3 w-3" />
-									{accountFilter}
-									<button
-										type="button"
-										onClick={() => setAccountFilter(null)}
-										className="ml-1 p-0.5 hover:bg-destructive/20 rounded"
-									>
-										<X className="h-3 w-3" />
-									</button>
-								</Badge>
+								<FilterChip
+									icon={<User className="h-3 w-3" />}
+									label={accountFilter}
+									onClear={() => setAccountFilter(null)}
+								/>
 							)}
 							{(noApiKeyFilter || apiKeyFilter !== null) && (
-								<Badge variant="outline" className="gap-item pr-1">
-									<Hash className="h-3 w-3" />
-									{noApiKeyFilter ? "No API Key" : apiKeyFilter}
-									<button
-										type="button"
-										onClick={() => {
-											setApiKeyFilter(null);
-											setNoApiKeyFilter(false);
-										}}
-										className="ml-1 p-0.5 hover:bg-destructive/20 rounded"
-									>
-										<X className="h-3 w-3" />
-									</button>
-								</Badge>
+								<FilterChip
+									icon={<Hash className="h-3 w-3" />}
+									label={noApiKeyFilter ? "No API Key" : apiKeyFilter}
+									onClear={() => {
+										setApiKeyFilter(null);
+										setNoApiKeyFilter(false);
+									}}
+								/>
 							)}
 							{(noProjectFilter || projectFilter !== null) && (
-								<Badge variant="outline" className="gap-item pr-1">
-									<Folder className="h-3 w-3" />
-									{noProjectFilter ? "No Project" : projectFilter}
-									<button
-										type="button"
-										onClick={() =>
-											setProjectSelection({ name: null, none: false })
-										}
-										className="ml-1 p-0.5 hover:bg-destructive/20 rounded"
-									>
-										<X className="h-3 w-3" />
-									</button>
-								</Badge>
+								<FilterChip
+									icon={<Folder className="h-3 w-3" />}
+									label={noProjectFilter ? "No Project" : projectFilter}
+									onClear={() =>
+										setProjectSelection({ name: null, none: false })
+									}
+								/>
 							)}
 							{(dateFrom || dateTo) && (
-								<Badge variant="outline" className="gap-item pr-1">
-									<Calendar className="h-3 w-3" />
-									{dateFrom && dateTo
-										? "Custom range"
-										: dateFrom
-											? `From ${new Date(dateFrom).toLocaleDateString()}`
-											: `Until ${new Date(dateTo).toLocaleDateString()}`}
-									<button
-										type="button"
-										onClick={() => {
-											setDateFrom("");
-											setDateTo("");
-										}}
-										className="ml-1 p-0.5 hover:bg-destructive/20 rounded"
-									>
-										<X className="h-3 w-3" />
-									</button>
-								</Badge>
+								<FilterChip
+									icon={<Calendar className="h-3 w-3" />}
+									label={
+										dateFrom && dateTo
+											? "Custom range"
+											: dateFrom
+												? `From ${new Date(dateFrom).toLocaleDateString()}`
+												: `Until ${new Date(dateTo).toLocaleDateString()}`
+									}
+									onClear={() => {
+										setDateFrom("");
+										setDateTo("");
+									}}
+								/>
 							)}
 							<div className="ml-auto flex items-center gap-item">
 								<span className="text-xs text-muted-foreground">
@@ -651,15 +683,19 @@ export function RequestsTab() {
 								</Button>
 							</div>
 						</div>
-					</div>
+					</InsetPanel>
 				)}
 
-				{/* Filters Panel */}
+				{/* Filters Panel. InsetPanel supplies the surface step this panel
+				    used to lack — it carried `bg-card` INSIDE the tab's own Card, so
+				    it read as a bare border with no surface behind it. Its own
+				    `px-row py-item` is sized for definition rows, hence the `p-0`
+				    override and the explicit padding on the two inner blocks. */}
 				{showFilters && (
-					<div className="mb-6 border rounded-lg bg-card">
-						<div className="p-4 border-b">
+					<InsetPanel className="mb-section p-0">
+						<div className="p-group border-b">
 							<div className="flex items-center justify-between">
-								<h3 className="font-medium">Filters</h3>
+								<h3 className="display-face font-medium">Filters</h3>
 								<Button
 									variant="ghost"
 									size="sm"
@@ -671,14 +707,14 @@ export function RequestsTab() {
 							</div>
 						</div>
 
-						<div className="p-4 space-y-group">
+						<div className="p-group space-y-group">
 							{/* Time Range Section */}
 							<div>
-								<h4 className="text-sm font-medium mb-3 flex items-center gap-item">
+								<h4 className="display-face text-sm font-medium mb-row flex items-center gap-item">
 									<Clock className="h-4 w-4" />
 									Time Range
 								</h4>
-								<div className="flex flex-wrap gap-item mb-3">
+								<div className="flex flex-wrap gap-item mb-row">
 									<Button
 										variant={dateFrom || dateTo ? "outline" : "secondary"}
 										size="sm"
@@ -742,7 +778,7 @@ export function RequestsTab() {
 							<div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-group">
 								{/* Status Category */}
 								<div>
-									<Label className="text-xs flex items-center gap-tight mb-2">
+									<Label className="text-xs flex items-center gap-tight mb-item">
 										<Hash className="h-3 w-3" />
 										Status
 									</Label>
@@ -752,7 +788,7 @@ export function RequestsTab() {
 												key={cat}
 												type="button"
 												onClick={() => setStatusCategory(cat)}
-												className={`flex-1 text-xs px-2 border-r last:border-r-0 transition-colors ${
+												className={`flex-1 text-xs px-item border-r last:border-r-0 transition-colors ${
 													statusCategory === cat
 														? "bg-primary text-primary-foreground"
 														: "hover:bg-accent"
@@ -770,7 +806,7 @@ export function RequestsTab() {
 
 								{/* Status Code Filter */}
 								<div>
-									<Label className="text-xs flex items-center gap-tight mb-2">
+									<Label className="text-xs flex items-center gap-tight mb-item">
 										<Hash className="h-3 w-3" />
 										Status Codes
 									</Label>
@@ -787,15 +823,15 @@ export function RequestsTab() {
 											</Button>
 										</DropdownMenuTrigger>
 										<DropdownMenuContent className="w-56 max-h-64 overflow-y-auto">
-											<div className="p-2">
-												<div className="text-xs font-medium text-muted-foreground mb-2">
+											<div className="p-item">
+												<div className="label-caps mb-item">
 													Select status codes
 												</div>
 												{statusCodeOptions.map((code) => (
 													<button
 														key={code}
 														type="button"
-														className="flex items-center gap-item p-2 hover:bg-accent rounded cursor-pointer w-full text-left"
+														className="flex items-center gap-item p-item hover:bg-accent rounded cursor-pointer w-full text-left"
 														onClick={() => toggleStatusCode(code.toString())}
 													>
 														<div
@@ -831,7 +867,7 @@ export function RequestsTab() {
 													</button>
 												))}
 											</div>
-											<div className="border-t p-2 text-xs text-muted-foreground">
+											<div className="border-t p-item text-xs text-muted-foreground">
 												Specific codes override the Status category.
 											</div>
 										</DropdownMenuContent>
@@ -840,7 +876,7 @@ export function RequestsTab() {
 
 								{/* Account Filter */}
 								<div>
-									<Label className="text-xs flex items-center gap-tight mb-2">
+									<Label className="text-xs flex items-center gap-tight mb-item">
 										<User className="h-3 w-3" />
 										Account
 									</Label>
@@ -880,7 +916,7 @@ export function RequestsTab() {
 
 								{/* API Key Filter */}
 								<div>
-									<Label className="text-xs flex items-center gap-tight mb-2">
+									<Label className="text-xs flex items-center gap-tight mb-item">
 										<Key className="h-3 w-3" />
 										API Key
 									</Label>
@@ -915,7 +951,7 @@ export function RequestsTab() {
 
 								{/* Project Filter */}
 								<div>
-									<Label className="text-xs flex items-center gap-tight mb-2">
+									<Label className="text-xs flex items-center gap-tight mb-item">
 										<Folder className="h-3 w-3" />
 										Project
 									</Label>
@@ -950,11 +986,25 @@ export function RequestsTab() {
 								</div>
 							</div>
 						</div>
-					</div>
+					</InsetPanel>
 				)}
 
 				{loading && loadedCount === 0 ? (
-					<p className="text-muted-foreground">Loading requests...</p>
+					// A bare Skeleton has no role and no accessible text, so the
+					// sr-only line carries the announcement the removed text line
+					// used to carry. `role="status"` stays OFF the decorative blocks.
+					<div
+						data-slot="request-list"
+						aria-busy="true"
+						className="space-y-item"
+					>
+						<span className="sr-only" role="status">
+							Loading requests
+						</span>
+						{REQUEST_SKELETON_ROWS.map((key) => (
+							<Skeleton key={key} className="h-[6.25rem] w-full rounded-lg" />
+						))}
+					</div>
 				) : !data || requests.length === 0 ? (
 					<p className="text-muted-foreground">
 						{filtersActive
@@ -962,7 +1012,7 @@ export function RequestsTab() {
 							: "No requests found"}
 					</p>
 				) : (
-					<div className="space-y-item">
+					<div data-slot="request-list" className="space-y-item">
 						{requests.map((request) => {
 							const isError = request.error || !request.meta.success;
 							const statusCode = request.response?.status;
@@ -1045,7 +1095,7 @@ export function RequestsTab() {
 								>
 									{/* Row 1 "where": single line, never wraps — time, status,
 									    method, unusual endpoint, account, retries, timing, id */}
-									<div className="flex items-center gap-item px-3 py-1.5">
+									<div className="flex items-center gap-item px-row py-1.5">
 										<button
 											type="button"
 											className="flex items-center gap-item min-w-0 flex-1 text-left cursor-pointer"
@@ -1184,7 +1234,7 @@ export function RequestsTab() {
 										comboName: summary?.comboName,
 										source: attributionSource,
 									}) && (
-										<div className="flex flex-wrap items-center gap-item px-3 pb-1.5 text-xs">
+										<div className="flex flex-wrap items-center gap-item px-row pb-1.5 text-xs">
 											{apiKeyName && (
 												<button
 													type="button"
@@ -1198,7 +1248,7 @@ export function RequestsTab() {
 													}}
 													title={`Filter by API key ${apiKeyName}`}
 												>
-													<Key className="h-3 w-3 mr-1" />
+													<Key className="h-3 w-3 mr-tight" />
 													{apiKeyName}
 												</button>
 											)}
@@ -1214,14 +1264,14 @@ export function RequestsTab() {
 													}}
 													title={`Filter by project ${project}`}
 												>
-													<Folder className="h-3 w-3 mr-1" />
+													<Folder className="h-3 w-3 mr-tight" />
 													{project}
 												</button>
 											)}
 											{attributionChip && (
 												<Badge
 													variant="outline"
-													className="text-xs border-warning text-warning-strong"
+													className="border-warning text-warning-strong"
 													title={attributionChip.title}
 												>
 													{attributionChip.label}
@@ -1230,7 +1280,7 @@ export function RequestsTab() {
 											{summary?.comboName && (
 												<Badge
 													variant="outline"
-													className="text-xs border-info/60 text-info"
+													className="border-info/60 text-info"
 												>
 													Combo: {summary.comboName}
 												</Badge>
@@ -1247,11 +1297,10 @@ export function RequestsTab() {
 										(summary?.costUsd != null && summary.costUsd > 0) ||
 										request.meta.rateLimited ||
 										isZaiPeak) && (
-										<div className="flex flex-wrap items-center gap-item px-3 pb-2 text-xs">
+										<div className="flex flex-wrap items-center gap-item px-row pb-item text-xs">
 											{(modelPresentation || summary?.reasoningEffort) && (
 												<Badge
 													variant="secondary"
-													className="text-xs"
 													title={
 														modelPresentation?.requestedOnly
 															? "Requested model; the provider did not report a served model"
@@ -1271,7 +1320,7 @@ export function RequestsTab() {
 												</Badge>
 											)}
 											{summary?.totalTokens != null && (
-												<Badge variant="outline" className="text-xs">
+												<Badge variant="outline">
 													{formatTokens(summary.totalTokens)} tokens
 													{freshTokens != null &&
 													freshTokens !== summary.totalTokens
@@ -1282,10 +1331,9 @@ export function RequestsTab() {
 											{(summary?.attachmentChars ?? 0) > 0 && (
 												<Badge
 													variant="outline"
-													className="text-xs"
 													title="Attached images/documents (decoded size)"
 												>
-													<Paperclip className="h-3 w-3 mr-1" />
+													<Paperclip className="h-3 w-3 mr-tight" />
 													{formatBytes(
 														Math.round((summary?.attachmentChars ?? 0) * 0.75),
 													)}
@@ -1293,7 +1341,7 @@ export function RequestsTab() {
 											)}
 											{summary?.tokensPerSecond != null &&
 												summary.tokensPerSecond > 0 && (
-													<Badge variant="secondary" className="text-xs">
+													<Badge variant="secondary">
 														{formatTokensPerSecond(
 															summary.tokensPerSecond,
 															summary.tokensPerSecondApproximate,
@@ -1309,14 +1357,12 @@ export function RequestsTab() {
 												</Badge>
 											)}
 											{request.meta.rateLimited && (
-												<Badge variant="warning" className="text-xs">
-													Rate Limited
-												</Badge>
+												<Badge variant="warning">Rate Limited</Badge>
 											)}
 											{isZaiPeak && (
 												<Badge
 													variant="outline"
-													className="text-xs border-warning text-warning-strong"
+													className="border-warning text-warning-strong"
 												>
 													Peak
 												</Badge>
@@ -1325,7 +1371,7 @@ export function RequestsTab() {
 									)}
 
 									{request.error && (
-										<div className="text-xs text-destructive-strong px-3 pb-2 break-words">
+										<div className="text-xs text-destructive-strong px-row pb-item break-words">
 											Error: {request.error}
 										</div>
 									)}
@@ -1337,7 +1383,7 @@ export function RequestsTab() {
 
 				{/* Load more / end-of-results — filtered explorer only */}
 				{filtersActive && (hasMore || isFetchingMore) && (
-					<div className="mt-4 flex justify-center">
+					<div className="mt-group flex justify-center">
 						<Button
 							variant="outline"
 							size="sm"
@@ -1346,7 +1392,7 @@ export function RequestsTab() {
 						>
 							{isFetchingMore ? (
 								<>
-									<RefreshCw className="h-4 w-4 mr-2 animate-spin" />
+									<RefreshCw className="h-4 w-4 animate-spin" />
 									Loading...
 								</>
 							) : (
@@ -1356,7 +1402,7 @@ export function RequestsTab() {
 					</div>
 				)}
 				{filtersActive && !hasMore && loadedCount > 0 && (
-					<p className="mt-4 text-center text-xs text-muted-foreground">
+					<p className="mt-group text-center text-xs text-muted-foreground">
 						End of results
 					</p>
 				)}

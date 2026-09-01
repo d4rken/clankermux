@@ -22,10 +22,12 @@ import {
 	useRemoveComboSlot,
 	useReorderComboSlots,
 } from "../../hooks/queries";
+import { Alert } from "../ui/alert";
 import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "../ui/card";
 import { Input } from "../ui/input";
+import { InsetPanel } from "../ui/inset-panel";
 import { Label } from "../ui/label";
 import {
 	Select,
@@ -69,10 +71,16 @@ function SortableSlotRow({
 	};
 
 	return (
-		<div
+		// `setNodeRef` and the transform `style` MUST stay on the same element:
+		// dnd-kit measures the node it was given and positions it with that
+		// transform, so a wrapper between them breaks drag positioning silently.
+		// InsetPanel forwards its ref and spreads props, so it satisfies that; a
+		// plain wrapper <div> would not. The row carried `bg-card` inside a Card,
+		// which is no surface step at all.
+		<InsetPanel
 			ref={setNodeRef}
 			style={style}
-			className="flex items-center gap-item rounded-md border bg-card px-3 py-2"
+			className="flex items-center gap-item"
 		>
 			<span className="w-4 shrink-0 text-center text-xs font-medium text-muted-foreground">
 				{index}
@@ -87,7 +95,7 @@ function SortableSlotRow({
 			</button>
 
 			<div className="flex min-w-0 flex-1 items-center gap-item">
-				<Badge variant="secondary" className="shrink-0 text-xs">
+				<Badge variant="secondary" className="shrink-0">
 					{provider}
 				</Badge>
 				<span className="truncate text-sm font-medium">{accountName}</span>
@@ -106,7 +114,7 @@ function SortableSlotRow({
 			>
 				<Trash2 className="h-4 w-4" />
 			</Button>
-		</div>
+		</InsetPanel>
 	);
 }
 
@@ -178,15 +186,22 @@ export function ComboSlotBuilder({ combo }: ComboSlotBuilderProps) {
 
 	return (
 		<Card>
-			<CardHeader className="pb-2">
+			<CardHeader className="pb-item">
 				<div className="flex items-center justify-between">
 					<CardTitle className="text-sm">Slots</CardTitle>
 					<Button
 						variant="outline"
 						size="sm"
-						onClick={() => setShowAddForm((v) => !v)}
+						disabled={addSlot.isPending}
+						onClick={() => {
+							addSlot.reset();
+							setShowAddForm((v) => !v);
+						}}
 					>
-						<Plus className="mr-1 h-3 w-3" />
+						{/* No margin: Button's base gap-item already separates the icon
+						    from the label. `h-3 w-3` is inert here — the base's
+						    [&_svg]:size-4 outranks it. */}
+						<Plus className="h-3 w-3" />
 						Add Slot
 					</Button>
 				</div>
@@ -195,14 +210,14 @@ export function ComboSlotBuilder({ combo }: ComboSlotBuilderProps) {
 				{assignedFamily && (
 					<div className="flex items-center gap-item text-xs text-muted-foreground">
 						<span>Assigned to:</span>
-						<Badge variant="default" className="text-xs">
+						<Badge variant="default">
 							{assignedFamily.family.charAt(0).toUpperCase() +
 								assignedFamily.family.slice(1)}
 						</Badge>
 					</div>
 				)}
 				{showAddForm && (
-					<div className="space-y-row rounded-md border border-dashed p-3">
+					<div className="space-y-row rounded-md border border-dashed p-row">
 						<div className="space-y-item">
 							<Label>Account</Label>
 							<Select value={newAccountId} onValueChange={setNewAccountId}>
@@ -219,9 +234,7 @@ export function ComboSlotBuilder({ combo }: ComboSlotBuilderProps) {
 									{accounts.map((account) => (
 										<SelectItem key={account.id} value={account.id}>
 											<span className="flex items-center gap-item">
-												<Badge variant="secondary" className="text-xs">
-													{account.provider}
-												</Badge>
+												<Badge variant="secondary">{account.provider}</Badge>
 												{account.name}
 											</span>
 										</SelectItem>
@@ -237,6 +250,13 @@ export function ComboSlotBuilder({ combo }: ComboSlotBuilderProps) {
 								placeholder="claude-3-opus"
 							/>
 						</div>
+						{addSlot.isError && (
+							<Alert
+								size="sm"
+								tone="destructive"
+								title={addSlot.error?.message ?? "Failed to add slot."}
+							/>
+						)}
 						<div className="flex justify-end gap-item">
 							<Button
 								variant="outline"
@@ -263,7 +283,7 @@ export function ComboSlotBuilder({ combo }: ComboSlotBuilderProps) {
 				)}
 
 				{combo.slots.length === 0 && !showAddForm && (
-					<p className="py-2 text-center text-sm text-muted-foreground">
+					<p className="py-item text-center text-sm text-muted-foreground">
 						No slots yet. Add a slot to define the fallback chain.
 					</p>
 				)}

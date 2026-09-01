@@ -59,6 +59,12 @@ export function SettingRow({
 				{/* 9.5rem label + ~236px control cluster ≈ 400px, so the two-track
 				    layout needs @md (448px) to fit with room to spare. Below that
 				    the label sits above its control instead. */}
+				{/* `@md:pt-1.5` (0.375rem) is deliberately off the five-name scale.
+				    It is an optical baseline nudge, not rhythm: in the two-track
+				    layout the label sits beside a control whose text starts lower
+				    inside its own box, and this aligns the two baselines. Rounding
+				    it to `pt-item` (0.5rem) overshoots and visibly drops the label
+				    below its control. */}
 				<span className="text-sm font-medium leading-tight @md:pt-1.5">
 					{label}
 				</span>

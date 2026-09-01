@@ -6,7 +6,7 @@ import {
 	formatTokens,
 } from "@clankermux/ui-common";
 import { Eye, Paperclip } from "lucide-react";
-import { useEffect, useState } from "react";
+import { type ReactNode, useEffect, useState } from "react";
 import { api, type RequestPayload, type RequestSummary } from "../api";
 import { decodeBase64Utf8 } from "../lib/base64";
 import {
@@ -17,6 +17,7 @@ import { getRequestModelPresentation } from "../lib/request-model";
 import { ConversationView } from "./ConversationView";
 import { CopyButton } from "./CopyButton";
 import { TokenUsageDisplay } from "./TokenUsageDisplay";
+import { Alert } from "./ui/alert";
 import { Badge } from "./ui/badge";
 import {
 	Dialog,
@@ -26,6 +27,7 @@ import {
 	DialogTitle,
 } from "./ui/dialog";
 import { Label } from "./ui/label";
+import { Skeleton } from "./ui/skeleton";
 import { Switch } from "./ui/switch";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "./ui/tabs";
 
@@ -53,6 +55,64 @@ export function shouldHydrateRequestPayload(
 		hydratedId !== request.id &&
 		(!request.request || request.meta?.bodiesOmitted === true) &&
 		failedId !== request.id
+	);
+}
+
+/**
+ * One "heading + copy button + preformatted payload" block.
+ *
+ * Five byte-identical copies of this sat inline across the request, response
+ * and metadata tabs, which meant five copies each of the heading offset, the
+ * `<pre>` padding and the bare `<h3>`.
+ */
+function PayloadSection({
+	title,
+	getValue,
+	children,
+}: {
+	title: string;
+	getValue: () => string;
+	children: ReactNode;
+}) {
+	return (
+		<div>
+			<div className="flex items-center justify-between mb-item">
+				<h3 className="display-face font-semibold">{title}</h3>
+				<CopyButton variant="ghost" size="sm" getValue={getValue}>
+					Copy
+				</CopyButton>
+			</div>
+			<pre className="bg-muted p-group rounded-lg overflow-x-auto text-sm font-mono">
+				{children}
+			</pre>
+		</div>
+	);
+}
+
+/**
+ * Stands in for a {@link PayloadSection} while the stored payload is being
+ * fetched.
+ *
+ * The header block is `h-8` because that is exactly what the real header row
+ * measures — the `size="sm"` CopyButton beside the heading is the tallest thing
+ * in it. The body block cannot be measured the same way: a payload `<pre>` is
+ * content-sized and unbounded, so `h-40` is a nominal stand-in rather than a
+ * match, chosen to fill the tab without implying a specific payload length.
+ *
+ * A bare Skeleton carries no role and no accessible text, so the message the
+ * replaced text line announced moves to a visually hidden status line and the
+ * wrapper carries `aria-busy`. `role="status"` deliberately stays off the
+ * decorative blocks.
+ */
+function PayloadSkeleton({ label }: { label: string }) {
+	return (
+		<div aria-busy="true" className="space-y-item">
+			<span className="sr-only" role="status">
+				{label}
+			</span>
+			<Skeleton className="h-8 w-40" />
+			<Skeleton className="h-40 w-full rounded-lg" />
+		</div>
 	);
 }
 
@@ -204,7 +264,7 @@ export function RequestDetailsModal({
 									variant="outline"
 									title="Attached images/documents (decoded size)"
 								>
-									<Paperclip className="h-3 w-3 mr-1" />
+									<Paperclip className="h-3 w-3 mr-tight" />
 									{formatBytes(
 										Math.round((summary?.attachmentChars ?? 0) * 0.75),
 									)}
@@ -236,28 +296,31 @@ export function RequestDetailsModal({
 				</DialogHeader>
 
 				{executionError && (
-					<div className="rounded-md border border-destructive/40 bg-destructive/5 px-3 py-2 text-sm text-destructive-strong">
-						Error: {executionError}
-					</div>
+					<Alert tone="destructive" title={`Error: ${executionError}`} />
 				)}
 				{effective.meta?.synthetic && (
-					<div className="rounded-md border border-warning/40 bg-warning/5 px-3 py-2 text-sm text-muted-foreground">
-						Rejected locally before upstream dispatch
-						{effective.meta.providerName
-							? ` by the ${effective.meta.providerName} provider gate`
-							: ""}
-						{effective.meta.failureSource
-							? ` (${effective.meta.failureSource})`
-							: ""}
-						.
-					</div>
+					<Alert
+						tone="warning"
+						title={`Rejected locally before upstream dispatch${
+							effective.meta.providerName
+								? ` by the ${effective.meta.providerName} provider gate`
+								: ""
+						}${
+							effective.meta.failureSource
+								? ` (${effective.meta.failureSource})`
+								: ""
+						}.`}
+					/>
 				)}
 				{payloadUnavailable && (
-					<div className="rounded-md border border-warning/40 bg-warning/5 px-3 py-2 text-sm text-muted-foreground">
-						{currentLoadError
-							? `Could not load the stored payload: ${currentLoadError}`
-							: "No payload was recorded for this request. Older local rejections and requests recorded while payload storage was disabled only have summary metadata."}
-					</div>
+					<Alert
+						tone="warning"
+						title={
+							currentLoadError
+								? `Could not load the stored payload: ${currentLoadError}`
+								: "No payload was recorded for this request. Older local rejections and requests recorded while payload storage was disabled only have summary metadata."
+						}
+					/>
 				)}
 
 				<Tabs defaultValue="conversation" className="flex-1 overflow-hidden">
@@ -269,7 +332,7 @@ export function RequestDetailsModal({
 						<TabsTrigger value="tokens">Token Usage</TabsTrigger>
 					</TabsList>
 
-					<TabsContent value="conversation" className="mt-4 flex-1 min-h-0">
+					<TabsContent value="conversation" className="mt-group flex-1 min-h-0">
 						<ConversationView
 							requestBody={decodeBase64Utf8(effective.request?.body ?? null)}
 							responseBody={decodeBase64Utf8(effective.response?.body || null)}
@@ -278,101 +341,72 @@ export function RequestDetailsModal({
 
 					<TabsContent
 						value="request"
-						className="mt-4 space-y-group overflow-y-auto max-h-[60vh]"
+						className="mt-group space-y-group overflow-y-auto max-h-[60vh]"
 					>
 						{effective.request ? (
 							<>
-								<div>
-									<div className="flex items-center justify-between mb-2">
-										<h3 className="font-semibold">Headers</h3>
-										<CopyButton
-											variant="ghost"
-											size="sm"
-											getValue={() => formatHeaders(effective.request.headers)}
-										>
-											Copy
-										</CopyButton>
-									</div>
-									<pre className="bg-muted p-4 rounded-lg overflow-x-auto text-sm font-mono">
-										{formatHeaders(effective.request.headers)}
-									</pre>
-								</div>
+								<PayloadSection
+									title="Headers"
+									getValue={() => formatHeaders(effective.request.headers)}
+								>
+									{formatHeaders(effective.request.headers)}
+								</PayloadSection>
 
 								{effective.request.body && (
-									<div>
-										<div className="flex items-center justify-between mb-2">
-											<h3 className="font-semibold">Body</h3>
-											<CopyButton
-												variant="ghost"
-												size="sm"
-												getValue={() => formatBody(effective.request.body)}
-											>
-												Copy
-											</CopyButton>
-										</div>
-										<pre className="bg-muted p-4 rounded-lg overflow-x-auto text-sm font-mono">
-											{formatBody(effective.request.body)}
-										</pre>
-									</div>
+									<PayloadSection
+										title="Body"
+										getValue={() => formatBody(effective.request.body)}
+									>
+										{formatBody(effective.request.body)}
+									</PayloadSection>
 								)}
 							</>
+						) : needsHydration ? (
+							<PayloadSkeleton label="Loading payload" />
 						) : (
 							<div className="text-center text-muted-foreground py-8">
-								{needsHydration
-									? "Loading payload…"
-									: "No request data available"}
+								No request data available
 							</div>
 						)}
 					</TabsContent>
 
 					<TabsContent
 						value="response"
-						className="mt-4 space-y-group overflow-y-auto max-h-[60vh]"
+						className="mt-group space-y-group overflow-y-auto max-h-[60vh]"
 					>
+						{/* Three-way, not two: a rendered response, else a payload still
+						    being fetched, else the permanent no-response state. The
+						    error branch below never switches on `needsHydration`, so
+						    folding the loading state into it would have produced a
+						    loading message that can never appear. */}
 						{effective.response ? (
 							<>
-								<div>
-									<div className="flex items-center justify-between mb-2">
-										<h3 className="font-semibold">Headers</h3>
-										<CopyButton
-											variant="ghost"
-											size="sm"
-											getValue={() =>
-												effective.response
-													? formatHeaders(effective.response.headers)
-													: ""
-											}
-										>
-											Copy
-										</CopyButton>
-									</div>
-									<pre className="bg-muted p-4 rounded-lg overflow-x-auto text-sm font-mono">
-										{formatHeaders(effective.response.headers)}
-									</pre>
-								</div>
+								<PayloadSection
+									title="Headers"
+									getValue={() =>
+										effective.response
+											? formatHeaders(effective.response.headers)
+											: ""
+									}
+								>
+									{formatHeaders(effective.response.headers)}
+								</PayloadSection>
 
 								{effective.response.body && (
-									<div>
-										<div className="flex items-center justify-between mb-2">
-											<h3 className="font-semibold">Body</h3>
-											<CopyButton
-												variant="ghost"
-												size="sm"
-												getValue={() =>
-													effective.response
-														? formatBody(effective.response.body)
-														: ""
-												}
-											>
-												Copy
-											</CopyButton>
-										</div>
-										<pre className="bg-muted p-4 rounded-lg overflow-x-auto text-sm font-mono">
-											{formatBody(effective.response.body)}
-										</pre>
-									</div>
+									<PayloadSection
+										title="Body"
+										getValue={() =>
+											effective.response
+												? formatBody(effective.response.body)
+												: ""
+										}
+									>
+										{formatBody(effective.response.body)}
+									</PayloadSection>
 								)}
 							</>
+						) : needsHydration ? (
+							<PayloadSkeleton label="Loading payload" />
 						) : (
 							<div className="text-center text-muted-foreground py-8">
 								{executionError ? (
@@ -380,7 +414,7 @@ export function RequestDetailsModal({
 										<p className="text-destructive-strong font-medium">
 											Error: {executionError}
 										</p>
-										<p className="mt-2">No response data available</p>
+										<p className="mt-item">No response data available</p>
 									</>
 								) : (
 									<p>No response data available</p>
@@ -391,34 +425,25 @@ export function RequestDetailsModal({
 
 					<TabsContent
 						value="metadata"
-						className="mt-4 overflow-y-auto max-h-[60vh]"
+						className="mt-group overflow-y-auto max-h-[60vh]"
 					>
-						<div>
-							<div className="flex items-center justify-between mb-2">
-								<h3 className="font-semibold">Request Metadata</h3>
-								<CopyButton
-									variant="ghost"
-									size="sm"
-									getValue={() =>
-										beautifyMode
-											? JSON.stringify(effective.meta, null, 2)
-											: JSON.stringify(effective.meta)
-									}
-								>
-									Copy
-								</CopyButton>
-							</div>
-							<pre className="bg-muted p-4 rounded-lg overflow-x-auto text-sm font-mono">
-								{beautifyMode
+						<PayloadSection
+							title="Request Metadata"
+							getValue={() =>
+								beautifyMode
 									? JSON.stringify(effective.meta, null, 2)
-									: JSON.stringify(effective.meta)}
-							</pre>
-						</div>
+									: JSON.stringify(effective.meta)
+							}
+						>
+							{beautifyMode
+								? JSON.stringify(effective.meta, null, 2)
+								: JSON.stringify(effective.meta)}
+						</PayloadSection>
 					</TabsContent>
 
 					<TabsContent
 						value="tokens"
-						className="mt-4 overflow-y-auto max-h-[60vh]"
+						className="mt-group overflow-y-auto max-h-[60vh]"
 					>
 						<TokenUsageDisplay summary={summary} />
 					</TabsContent>

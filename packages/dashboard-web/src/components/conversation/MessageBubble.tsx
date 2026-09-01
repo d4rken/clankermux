@@ -2,6 +2,7 @@ import type { Role } from "@clankermux/types";
 import React from "react";
 import { useCollapsible } from "../../hooks/useCollapsible";
 import { Button } from "../ui/button";
+import { ROLE_BACKGROUNDS } from "./role-styles";
 
 interface MessageBubbleProps {
 	role: Role;
@@ -10,25 +11,19 @@ interface MessageBubbleProps {
 
 const MAX_CHARS_COLLAPSE = 300;
 
-const ROLE_BG_COLORS: Record<Role, string> = {
-	user: "bg-primary text-primary-foreground",
-	assistant: "bg-muted",
-	system: "bg-warning/15 text-foreground",
-};
-
 function MessageBubbleComponent({ role, content }: MessageBubbleProps) {
 	const { display, isLong, isExpanded, toggle } = useCollapsible(
 		content,
 		MAX_CHARS_COLLAPSE,
 	);
-	const bgColor = ROLE_BG_COLORS[role];
+	const bgColor = ROLE_BACKGROUNDS[role];
 
 	return (
 		<div>
-			<div className={`rounded-lg px-4 py-2 ${bgColor}`}>
+			<div className={`rounded-lg px-group py-item ${bgColor}`}>
 				<div
 					className={`whitespace-pre text-sm overflow-x-auto text-left ${
-						isExpanded && isLong ? "max-h-96 overflow-y-auto pr-2" : ""
+						isExpanded && isLong ? "max-h-96 overflow-y-auto pr-item" : ""
 					}`}
 				>
 					{display}
@@ -38,7 +33,7 @@ function MessageBubbleComponent({ role, content }: MessageBubbleProps) {
 				<Button
 					variant="ghost"
 					size="sm"
-					className="mt-1 h-6 px-2 text-xs"
+					className="mt-tight h-6 px-item text-xs"
 					onClick={toggle}
 				>
 					{isExpanded ? "Show less" : "Show more"}

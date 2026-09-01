@@ -1,6 +1,6 @@
 import { describe, expect, it } from "bun:test";
 import { renderToStaticMarkup } from "react-dom/server";
-import { SectionHeading } from "./SectionHeading";
+import { SectionHeading } from "./section-heading";
 
 /**
  * Same contract Card's header holds, one level up: the gap between a section
