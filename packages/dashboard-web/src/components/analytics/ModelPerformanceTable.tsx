@@ -154,8 +154,13 @@ export function ModelPerformanceTable({
 		// The Loader2 line the neighbouring quota panels already use. What stood
 		// here was a hand-rolled `border-4 border-primary border-t-transparent`
 		// CSS ring — the only one in the app.
+		//
+		// Those two panels are prose-bodied and need no reservation; this one
+		// renders a table, so the line carries `PanelEmptyState`'s own `min-h-40`
+		// and centring. Without it the panel collapses to a single line while
+		// loading and jumps ~190px the moment rows arrive.
 		return (
-			<p className="flex items-center gap-item text-sm text-muted-foreground">
+			<p className="flex min-h-40 items-center justify-center gap-item text-sm text-muted-foreground">
 				<Loader2 className="h-4 w-4 animate-spin" />
 				Loading model performance…
 			</p>
