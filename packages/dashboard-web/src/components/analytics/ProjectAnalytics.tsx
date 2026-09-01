@@ -11,6 +11,7 @@ import {
 	attributionCoverage,
 	describeProjectAttribution,
 } from "../../lib/project-attribution";
+import { cn } from "../../lib/utils";
 import {
 	Card,
 	CardContent,
@@ -18,6 +19,15 @@ import {
 	CardHeader,
 	CardTitle,
 } from "../ui/card";
+import {
+	Table,
+	TableBody,
+	TableCell,
+	TableFrame,
+	TableHead,
+	TableHeader,
+	TableRow,
+} from "../ui/table";
 
 type ProjectBreakdownRow = NonNullable<
 	AnalyticsResponse["projectBreakdown"]
@@ -100,68 +110,53 @@ export function ProjectAnalytics({
 				<CardDescription>Requests, tokens, and cost by project</CardDescription>
 			</CardHeader>
 			<CardContent>
-				<div className="border rounded-md overflow-hidden">
-					<table aria-label="Project breakdown" className="w-full text-sm">
-						<thead className="bg-muted/50">
-							<tr>
-								<th scope="col" className="text-left px-3 py-2">
-									Project
-								</th>
-								<th scope="col" className="text-right px-3 py-2">
-									Requests
-								</th>
-								<th scope="col" className="text-right px-3 py-2">
-									Tokens
-								</th>
-								<th scope="col" className="text-right px-3 py-2">
-									Plan Value
-								</th>
-								<th scope="col" className="text-right px-3 py-2">
-									Token Cost
-								</th>
-								<th scope="col" className="text-right px-3 py-2">
-									Success
-								</th>
-								<th scope="col" className="text-right px-3 py-2">
-									Attribution
-								</th>
-							</tr>
-						</thead>
-						<tbody>
+				<TableFrame>
+					<Table aria-label="Project breakdown">
+						<TableHeader>
+							<TableRow>
+								<TableHead>Project</TableHead>
+								<TableHead className="text-right">Requests</TableHead>
+								<TableHead className="text-right">Tokens</TableHead>
+								<TableHead className="text-right">Plan Value</TableHead>
+								<TableHead className="text-right">Token Cost</TableHead>
+								<TableHead className="text-right">Success</TableHead>
+								<TableHead className="text-right">Attribution</TableHead>
+							</TableRow>
+						</TableHeader>
+						<TableBody>
 							{projectBreakdown.map((row) => (
-								<tr key={projectKey(row.project)} className="border-t">
-									<td
-										className={`px-3 py-2 ${
-											row.project == null
-												? "text-muted-foreground italic"
-												: "text-muted-foreground"
-										}`}
+								<TableRow key={projectKey(row.project)}>
+									<TableCell
+										className={cn(
+											"text-muted-foreground",
+											row.project == null && "italic",
+										)}
 									>
 										{projectLabel(row.project)}
-									</td>
-									<td className="px-3 py-2 text-right">
+									</TableCell>
+									<TableCell className="figure text-right">
 										{formatNumber(row.requests)}
-									</td>
-									<td className="px-3 py-2 text-right">
+									</TableCell>
+									<TableCell className="figure text-right">
 										{formatTokens(row.totalTokens)}
-									</td>
-									<td className="px-3 py-2 text-right">
+									</TableCell>
+									<TableCell className="figure text-right">
 										{formatCost(row.planCostUsd)}
-									</td>
-									<td className="px-3 py-2 text-right">
+									</TableCell>
+									<TableCell className="figure text-right">
 										{formatCost(row.apiCostUsd)}
-									</td>
-									<td className="px-3 py-2 text-right">
+									</TableCell>
+									<TableCell className="figure text-right">
 										{formatPercentage(row.successRate, 0)}
-									</td>
-									<td className="px-3 py-2 text-right text-muted-foreground">
+									</TableCell>
+									<TableCell className="text-right text-muted-foreground">
 										{describeProjectAttribution(row)}
-									</td>
-								</tr>
+									</TableCell>
+								</TableRow>
 							))}
-						</tbody>
-					</table>
-				</div>
+						</TableBody>
+					</Table>
+				</TableFrame>
 				<p className="mt-2 text-xs text-muted-foreground">
 					{/* Rows exist by this point (the empty range returns early), so a
 					    null percent means the server sent no coverage aggregate —

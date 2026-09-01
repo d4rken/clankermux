@@ -25,6 +25,7 @@ import {
 	formatAxisTime,
 	makeTimeTooltipLabelFormatter,
 } from "../../lib/time-format";
+import { cn } from "../../lib/utils";
 import { BaseLineChart } from "../charts";
 import { getTooltipStyles } from "../charts/chart-utils";
 import type { ChartDataPoint } from "../charts/types";
@@ -36,6 +37,15 @@ import {
 	CardHeader,
 	CardTitle,
 } from "../ui/card";
+import {
+	Table,
+	TableBody,
+	TableCell,
+	TableFrame,
+	TableHead,
+	TableHeader,
+	TableRow,
+} from "../ui/table";
 
 type ContextComposition = NonNullable<AnalyticsResponse["contextComposition"]>;
 
@@ -326,32 +336,24 @@ function TopContributorsTable({
 				Largest single tool results re-sent in a request — the actionable list
 				for trimming context
 			</p>
-			<div className="overflow-hidden rounded-md border">
-				<table aria-label="Top context contributors" className="w-full text-sm">
-					<thead className="bg-muted/50">
-						<tr>
-							<th scope="col" className="px-3 py-2 text-left">
-								Tool
-							</th>
-							<th scope="col" className="px-3 py-2 text-right">
-								Size
-							</th>
-							<th scope="col" className="px-3 py-2 text-left">
-								Project
-							</th>
-							<th scope="col" className="px-3 py-2 text-left">
-								Model
-							</th>
-							<th scope="col" className="px-3 py-2 text-left">
-								When
-							</th>
-						</tr>
-					</thead>
-					<tbody>
+			<TableFrame>
+				<Table aria-label="Top context contributors">
+					<TableHeader>
+						<TableRow>
+							<TableHead>Tool</TableHead>
+							<TableHead className="text-right">Size</TableHead>
+							<TableHead>Project</TableHead>
+							<TableHead>Model</TableHead>
+							<TableHead>When</TableHead>
+						</TableRow>
+					</TableHeader>
+					<TableBody>
 						{contributors.map((row) => (
-							<tr key={row.requestId} className="border-t">
-								<td className="px-3 py-2 font-medium">{row.toolName ?? "—"}</td>
-								<td className="px-3 py-2 text-right">
+							<TableRow key={row.requestId}>
+								<TableCell className="font-medium">
+									{row.toolName ?? "—"}
+								</TableCell>
+								<TableCell className="figure text-right">
 									{formatNumber(row.chars)} chars
 									<span className="ml-1 text-xs text-muted-foreground">
 										~
@@ -360,25 +362,26 @@ function TopContributorsTable({
 										)}{" "}
 										tok (est.)
 									</span>
-								</td>
-								<td
-									className={`px-3 py-2 text-muted-foreground ${
-										row.project == null ? "italic" : ""
-									}`}
+								</TableCell>
+								<TableCell
+									className={cn(
+										"text-muted-foreground",
+										row.project == null && "italic",
+									)}
 								>
 									{projectLabel(row.project)}
-								</td>
-								<td className="px-3 py-2 text-muted-foreground">
+								</TableCell>
+								<TableCell className="text-muted-foreground">
 									{row.model ?? "—"}
-								</td>
-								<td className="px-3 py-2 text-muted-foreground">
+								</TableCell>
+								<TableCell className="figure text-muted-foreground">
 									{format(new Date(row.ts), "MMM d, HH:mm")}
-								</td>
-							</tr>
+								</TableCell>
+							</TableRow>
 						))}
-					</tbody>
-				</table>
-			</div>
+					</TableBody>
+				</Table>
+			</TableFrame>
 		</div>
 	);
 }
