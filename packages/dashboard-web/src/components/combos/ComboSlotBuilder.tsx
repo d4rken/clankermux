@@ -192,6 +192,7 @@ export function ComboSlotBuilder({ combo }: ComboSlotBuilderProps) {
 					<Button
 						variant="outline"
 						size="sm"
+						disabled={addSlot.isPending}
 						onClick={() => {
 							addSlot.reset();
 							setShowAddForm((v) => !v);
