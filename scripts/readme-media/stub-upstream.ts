@@ -196,10 +196,37 @@ function main(): void {
 			}
 			if (url.pathname === "/backend-api/codex/rate-limit-reset-credits") {
 				// Earned reset credits are a separate read the accounts endpoint
-				// kicks off for every Codex account. The mock account has none, which
-				// is the ordinary case and keeps the card free of a credits chip.
+				// kicks off for every Codex account. Two banked credits rather than
+				// zero: the chip renders either way, and "0 usage resets" is a chip
+				// that costs a line and says nothing.
 				if (!account) return json({ error: { type: "authentication_error" } }, 401);
-				return json({ rateLimitResetCredits: { availableCount: 0, credits: [] } });
+				const granted = Math.floor((now - 2 * DAY_MS) / 1000);
+				const expires = Math.floor((now + 11 * DAY_MS) / 1000);
+				return json({
+					rateLimitResetCredits: {
+						availableCount: 2,
+						credits: [
+							{
+								id: "credit-1",
+								resetType: "primary",
+								status: "available",
+								grantedAt: granted,
+								expiresAt: expires,
+								title: "Usage reset",
+								description: null,
+							},
+							{
+								id: "credit-2",
+								resetType: "primary",
+								status: "available",
+								grantedAt: granted,
+								expiresAt: expires,
+								title: "Usage reset",
+								description: null,
+							},
+						],
+					},
+				});
 			}
 
 			if (url.pathname.startsWith("/repos/") && headSha) {
