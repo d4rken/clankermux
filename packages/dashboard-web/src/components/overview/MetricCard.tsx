@@ -138,11 +138,9 @@ export function MetricCard({
 									<Info className="h-3 w-3 text-muted-foreground" />
 								</div>
 							</PopoverTrigger>
-							{/* Numeric for the same reason `p-4` is below: this tightens a
-							    one-line popover from the primitive's own `p-4`, and
-							    tailwind-merge cancels that only against a padding utility
-							    it recognises — `p-item` would leave both live and the
-							    larger padding would win. */}
+							{/* This tightens a one-line popover from the primitive's own
+							    `p-4`. Passing a padding explicitly is what lets
+							    tailwind-merge cancel the larger value. */}
 							<PopoverContent className="w-auto p-2 text-xs">
 								<p>Compared to {trendPeriod}</p>
 							</PopoverContent>
@@ -214,8 +212,8 @@ export function MetricCard({
 													{row.value}
 												</span>
 											</PopoverTrigger>
-											{/* Numeric padding: cancels the primitive's `p-4`,
-											    which a scale key cannot (see above). */}
+											{/* Passing a padding explicitly is what lets tailwind-merge
+											    cancel the primitive's own `p-4`. */}
 											<PopoverContent className="w-auto p-2 text-xs">
 												<p>{row.tooltip}</p>
 											</PopoverContent>

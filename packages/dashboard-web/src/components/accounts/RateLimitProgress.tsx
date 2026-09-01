@@ -93,12 +93,12 @@ const LIVE_USAGE_FRESH_MS = 10 * 60 * 1000;
 // filled-vs-outline distinction reads clearly in BOTH light and dark themes,
 // whereas a mere opacity difference on `bg-muted` is near-invisible in light
 // mode (muted is ~96% lightness, so it barely differs from a white surface).
-const WINDOW_CARD_CLASS = "rounded-lg border p-3";
+const WINDOW_CARD_CLASS = "rounded-lg border p-row";
 // Compact variant: same card, two fewer pixels of padding on every side. Used
 // by the Accounts list, where a dozen accounts stack vertically and the padding
 // is paid once per window card per account. The Limits tab keeps the roomy
 // default — it shows one account's quota at a time and has the space.
-const COMPACT_WINDOW_CARD_CLASS = "rounded-lg border p-2";
+const COMPACT_WINDOW_CARD_CLASS = "rounded-lg border p-item";
 const PRIMARY_WINDOW_TINT = "border-border/60 bg-muted/50";
 const SECONDARY_WINDOW_TINT = "border-border/50 bg-transparent";
 
@@ -807,16 +807,20 @@ export function RateLimitProgress({
 								)}
 							/>
 							{expectedPct !== null && (
+								// The tick and its halo are tokens, not literals. They used to
+								// be a hard white line with a black glow, which is a dark-mode
+								// assumption: in light mode that is a white line on a light
+								// track. The halo is drawn from `--background` so the tick
+								// stays legible against both the filled and the unfilled part
+								// of the bar in either mode. `left` is computed and the rest
+								// is pure positioning, so those stay inline.
 								<div
-									className="absolute w-0.5 pointer-events-none"
+									className="absolute w-0.5 pointer-events-none bg-foreground shadow-[1px_0_2px_var(--background),-1px_0_2px_var(--background)]"
 									style={{
 										left: `${expectedPct}%`,
 										top: "-3px",
 										height: "14px",
 										zIndex: 10,
-										backgroundColor: "rgba(255,255,255,0.95)",
-										boxShadow:
-											"1px 0 2px rgba(0,0,0,0.5), -1px 0 2px rgba(0,0,0,0.5)",
 									}}
 								/>
 							)}
@@ -845,9 +849,9 @@ export function RateLimitProgress({
 									</PopoverTrigger>
 									<PopoverContent
 										align="start"
-										className="w-auto max-w-xs p-3 text-xs"
+										className="w-auto max-w-xs p-row text-xs"
 									>
-										<p className="mb-1 font-medium">{windowLabel} usage</p>
+										<p className="mb-tight font-medium">{windowLabel} usage</p>
 										<p className={projectionTextClass}>{projection.message}</p>
 									</PopoverContent>
 								</Popover>

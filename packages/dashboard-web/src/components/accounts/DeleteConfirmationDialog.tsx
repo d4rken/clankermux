@@ -1,82 +1,107 @@
 import { AlertCircle } from "lucide-react";
+import { Alert } from "../ui/alert";
 import { Button } from "../ui/button";
 import {
-	Card,
-	CardContent,
-	CardDescription,
-	CardHeader,
-	CardTitle,
-} from "../ui/card";
+	Dialog,
+	DialogContent,
+	DialogDescription,
+	DialogFooter,
+	DialogHeader,
+	DialogTitle,
+} from "../ui/dialog";
 import { Input } from "../ui/input";
 import { Label } from "../ui/label";
 
 interface DeleteConfirmationDialogProps {
+	isOpen: boolean;
 	accountName: string;
 	confirmInput: string;
+	/** True while the removal request is in flight. Closes every dismissal path. */
+	isDeleting?: boolean;
 	onConfirmInputChange: (value: string) => void;
 	onConfirm: () => void;
-	onCancel: () => void;
+	onClose: () => void;
 }
 
 export function DeleteConfirmationDialog({
+	isOpen,
 	accountName,
 	confirmInput,
+	isDeleting = false,
 	onConfirmInputChange,
 	onConfirm,
-	onCancel,
+	onClose,
 }: DeleteConfirmationDialogProps) {
 	return (
-		<div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
-			{/* bg-surface-raised rather than the default card surface: a
-			    direction that separates panels with rules sets --card to
-			    transparent, which would drop this dialog's text straight onto the
-			    dimmed page behind it. */}
-			<Card className="w-full max-w-md bg-surface-raised">
-				<CardHeader>
-					<CardTitle>Confirm Account Removal</CardTitle>
-					<CardDescription>This action cannot be undone.</CardDescription>
-				</CardHeader>
-				<CardContent className="space-y-group">
-					<div className="p-4 bg-destructive/10 border border-destructive/20 rounded-lg">
-						<div className="flex items-center gap-item text-destructive-strong">
-							<AlertCircle className="h-5 w-5" />
-							<p className="font-medium">Warning</p>
-						</div>
-						<p className="text-sm mt-2">
-							You are about to permanently remove the account '{accountName}'.
-							This will delete all associated data and cannot be recovered.
-						</p>
-					</div>
-					<div className="space-y-item">
-						<Label htmlFor="confirm-input">
-							Type{" "}
-							<span className="font-mono font-semibold">{accountName}</span> to
-							confirm:
-						</Label>
-						<Input
-							id="confirm-input"
-							value={confirmInput}
-							onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
-								onConfirmInputChange((e.target as HTMLInputElement).value)
-							}
-							placeholder="Enter account name"
-							autoComplete="off"
-						/>
-					</div>
-					<div className="flex gap-item">
-						<Button
-							variant="destructive"
-							onClick={onConfirm}
-							disabled={confirmInput !== accountName}
-						>
-							Delete Account
-						</Button>
-						<Button variant="outline" onClick={onCancel}>
-							Cancel
-						</Button>
-					</div>
-				</CardContent>
-			</Card>
-		</div>
+		<Dialog
+			open={isOpen}
+			onOpenChange={(open) => {
+				if (!open) onClose();
+			}}
+		>
+			<DialogContent
+				closeDisabled={isDeleting}
+				// Escape and an outside click only became dismissal paths when this
+				// moved onto the Dialog primitive, and mid-request they are a race:
+				// the removal continues regardless, so a dialog reopened for another
+				// account would inherit the first request's completion. Both are held
+				// shut while a deletion is in flight, alongside the two buttons and
+				// the corner close.
+				onEscapeKeyDown={(event) => {
+					if (isDeleting) event.preventDefault();
+				}}
+				onPointerDownOutside={(event) => {
+					if (isDeleting) event.preventDefault();
+				}}
+			>
+				<DialogHeader>
+					<DialogTitle>Confirm Account Removal</DialogTitle>
+					<DialogDescription>This action cannot be undone.</DialogDescription>
+				</DialogHeader>
+				<Alert
+					tone="destructive"
+					size="md"
+					icon={<AlertCircle className="h-5 w-5" />}
+					title="Warning"
+				>
+					<p>
+						You are about to permanently remove the account '{accountName}'.
+						This will delete all associated data and cannot be recovered.
+					</p>
+				</Alert>
+				<div className="space-y-item">
+					<Label htmlFor="confirm-input">
+						Type <span className="font-mono font-semibold">{accountName}</span>{" "}
+						to confirm:
+					</Label>
+					<Input
+						id="confirm-input"
+						value={confirmInput}
+						onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
+							onConfirmInputChange((e.target as HTMLInputElement).value)
+						}
+						placeholder="Enter account name"
+						autoComplete="off"
+					/>
+				</div>
+				{/* Cancel first, Delete second — DialogFooter is
+				    `flex-col-reverse sm:flex-row sm:justify-end`, so this is the DOM
+				    order every other dialog in the app uses to put Cancel left and
+				    the primary action right. This one used to invert it and place
+				    the destructive button where muscle memory expects Cancel. */}
+				<DialogFooter>
+					<Button variant="outline" onClick={onClose} disabled={isDeleting}>
+						Cancel
+					</Button>
+					<Button
+						variant="destructive"
+						onClick={onConfirm}
+						disabled={isDeleting || confirmInput !== accountName}
+					>
+						Delete Account
+					</Button>
+				</DialogFooter>
+			</DialogContent>
+		</Dialog>
 	);
 }

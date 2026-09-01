@@ -248,7 +248,7 @@ function WindowChartPanel({
 	const pending = loading && unavailableReason == null;
 	return (
 		<div>
-			<div className="mb-2 flex items-center justify-between gap-group">
+			<div className="mb-item flex items-center justify-between gap-group">
 				<p className="text-xs font-medium text-muted-foreground">{label}</p>
 				<TimeRangeSelector
 					value={range}

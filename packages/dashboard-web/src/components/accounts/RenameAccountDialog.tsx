@@ -69,7 +69,7 @@ export function RenameAccountDialog({
 							Enter a new name for account "{currentName}"
 						</DialogDescription>
 					</DialogHeader>
-					<div className="grid gap-group py-4">
+					<div className="grid gap-group py-group">
 						<div className="grid gap-item">
 							<Label htmlFor="new-name">New Name</Label>
 							<Input

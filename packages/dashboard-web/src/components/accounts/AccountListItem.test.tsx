@@ -81,12 +81,19 @@ const SESSION_STATS = {
 	apiCostUsd: 0,
 };
 
-/** The inset panel carrying request, client, session, cost and re-auth figures. */
+/**
+ * The inset panel carrying request, client, session, cost and re-auth figures.
+ *
+ * Anchored on the panel's `data-testid`, never on its class string: this helper
+ * used to match the full `class="…"` verbatim, so it threw "info row not found"
+ * the moment the panel moved onto the shared InsetPanel primitive. What these
+ * tests are about is the row's CONTENT, so its styling must be free to change.
+ */
 function infoRow(html: string): string {
-	const marker =
-		'<div class="rounded-md border border-border/60 bg-muted/30 px-3 py-2">';
-	const start = html.indexOf(marker);
-	if (start === -1) throw new Error("info row not found");
+	const testid = html.indexOf('data-testid="account-info-row"');
+	if (testid === -1) throw new Error("info row not found");
+	const start = html.lastIndexOf("<div", testid);
+	if (start === -1) throw new Error("info row has no element start");
 	// Walk to the matching close so a nested <span> cannot end the slice early.
 	let depth = 0;
 	let i = start;
@@ -123,7 +130,7 @@ describe("AccountListItem — session stats", () => {
 	it("pads the card and separates its four groups by the row step", () => {
 		const html = render(makeAccount({}));
 
-		expect(html).toContain("p-4 border rounded-lg");
+		expect(html).toContain("p-group border rounded-lg");
 		expect(html).toContain("space-y-row border-border");
 	});
 
@@ -205,6 +212,6 @@ describe("AccountListItem — compact quota cards", () => {
 		);
 
 		expect(html).toContain("xl:grid-flow-col");
-		expect(html).toContain("rounded-lg border p-2");
+		expect(html).toContain("rounded-lg border p-item");
 	});
 });

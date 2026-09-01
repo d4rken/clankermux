@@ -33,6 +33,7 @@ import {
 	CardHeader,
 	CardTitle,
 } from "../ui/card";
+import { InsetPanel } from "../ui/inset-panel";
 import { Popover, PopoverContent, PopoverTrigger } from "../ui/popover";
 import { Progress } from "../ui/progress";
 import { Skeleton } from "../ui/skeleton";
@@ -186,7 +187,7 @@ function WindowPanel({
 	].filter((note): note is string => note != null);
 
 	return (
-		<section className="flex min-w-0 flex-col p-4" aria-label={title}>
+		<section className="flex min-w-0 flex-col p-group" aria-label={title}>
 			<div className="flex items-center justify-between gap-row">
 				<div className="flex min-w-0 items-center gap-item">
 					<Icon className="h-4 w-4 shrink-0 text-muted-foreground" />
@@ -242,7 +243,7 @@ function WindowPanel({
 				)}
 			</div>
 
-			<dl className="mt-group grid grid-cols-2 divide-x rounded-md border bg-muted/20">
+			<InsetPanel as="dl" className="mt-group grid grid-cols-2 divide-x p-0">
 				<div className="min-w-0 p-row">
 					<dt className="label-caps">Reporting</dt>
 					<dd className="mt-tight min-w-0">
@@ -291,12 +292,15 @@ function WindowPanel({
 						</span>
 					</dd>
 				</div>
-			</dl>
+			</InsetPanel>
 
 			{resolved && (result.atRisk.length > 0 || familyAlert.label != null) && (
 				<div className="mt-group space-y-item">
 					{result.atRisk.length > 0 && (
 						<div className="flex items-start gap-item rounded-md border border-warning/30 bg-warning/10 px-row py-item text-xs text-warning-strong">
+							{/* `mt-0.5` stays numeric: an optical nudge to sit the icon on
+							    the text baseline, at 0.125rem — no step on the rhythm
+							    scale, and not a rhythm decision either. */}
 							<AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
 							<span>
 								{result.atRisk.length}{" "}
@@ -314,6 +318,9 @@ function WindowPanel({
 									: "border-warning/30 bg-warning/10 text-warning-strong",
 							)}
 						>
+							{/* `mt-0.5` stays numeric: an optical nudge to sit the icon on
+							    the text baseline, at 0.125rem — no step on the rhythm
+							    scale, and not a rhythm decision either. */}
 							<AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
 							<span>{familyAlert.label}</span>
 						</div>
@@ -419,7 +426,10 @@ function RunwayPanel({
 		worst && stated ? describeRunwayCause(worst.outcome, accounts, now) : null;
 
 	return (
-		<section className="flex min-w-0 flex-col p-4" aria-label="Quota runway">
+		<section
+			className="flex min-w-0 flex-col p-group"
+			aria-label="Quota runway"
+		>
 			<div className="flex items-center justify-between gap-row">
 				<div className="flex min-w-0 items-center gap-item">
 					<Hourglass className="h-4 w-4 shrink-0 text-muted-foreground" />
@@ -448,7 +458,7 @@ function RunwayPanel({
 				</p>
 			</div>
 
-			<dl className="mt-group grid grid-cols-2 divide-x rounded-md border bg-muted/20">
+			<InsetPanel as="dl" className="mt-group grid grid-cols-2 divide-x p-0">
 				<div className="min-w-0 p-row">
 					<dt className="label-caps">Eligible accounts</dt>
 					<dd className="mt-tight min-w-0">
@@ -483,7 +493,7 @@ function RunwayPanel({
 						</span>
 					</dd>
 				</div>
-			</dl>
+			</InsetPanel>
 
 			{activeRunways.length > 0 && dataResolved && (
 				<div className="mt-auto pt-group">

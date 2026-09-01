@@ -161,6 +161,9 @@ export function ResetCreditEventsPanel({
 						<span className="text-muted-foreground whitespace-nowrap">
 							{formatEventTime(event.createdAt)}
 						</span>
+						{/* `px-1.5` stays numeric: 0.375rem maps to no step on the
+						    rhythm scale, and this micro-pill sits tighter than the
+						    0.5rem `item` step would allow. */}
 						<span
 							className={`px-1.5 py-0 rounded-md label-caps ${
 								event.trigger === "auto"
@@ -460,7 +463,7 @@ function CodexUsageResetChip({
 					{label}
 				</StatusChip>
 			</PopoverTrigger>
-			<PopoverContent align="start" className="w-80 p-3 space-y-row">
+			<PopoverContent align="start" className="w-80 p-row space-y-row">
 				<ResetCreditApplyPanel
 					accountName={account.name}
 					availableCount={summary.availableCount}
@@ -472,7 +475,7 @@ function CodexUsageResetChip({
 					onDismiss={handleCancel}
 				/>
 				<div>
-					<p className="text-xs font-medium mb-2">Usage-reset history</p>
+					<p className="text-xs font-medium mb-item">Usage-reset history</p>
 					<ResetCreditEventsPanel state={eventsState} />
 				</div>
 			</PopoverContent>

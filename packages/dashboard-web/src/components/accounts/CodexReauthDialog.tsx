@@ -117,7 +117,7 @@ export function CodexReauthDialog({
 					</DialogDescription>
 				</DialogHeader>
 
-				<div className="py-4">
+				<div className="py-group">
 					{step === "idle" && (
 						<p className="text-sm text-muted-foreground">
 							Click the button below to start the Codex device flow. A browser
@@ -135,7 +135,9 @@ export function CodexReauthDialog({
 									<span className="text-sm text-muted-foreground">
 										User code:
 									</span>
-									<code className="text-sm font-mono bg-muted px-2 py-0.5 rounded">
+									{/* `py-0.5` stays numeric: 0.125rem maps to no step on the
+									    rhythm scale. */}
+									<code className="text-sm font-mono bg-muted px-item py-0.5 rounded">
 										{userCode}
 									</code>
 								</div>

@@ -1,5 +1,6 @@
 import type { Account } from "../../api";
 import { cn } from "../../lib/utils";
+import { InsetPanel } from "../ui/inset-panel";
 
 /**
  * Combined plan label: Title-cased plan tier with the rate-limit multiplier
@@ -67,7 +68,7 @@ export function AccountIdentityLine({
 			{parts.join(" · ")}
 			{externalId && (
 				// The leading margin only makes sense when something precedes the id.
-				<span className={cn(parts.length > 0 && "ml-1", "opacity-60")}>
+				<span className={cn(parts.length > 0 && "ml-tight", "opacity-60")}>
 					#{externalIdDisplay === "full" ? externalId : externalId.slice(0, 8)}
 				</span>
 			)}
@@ -87,13 +88,13 @@ export function AccountIdentityPanel({ account }: { account: Account | null }) {
 	if (!account) return null;
 
 	return (
-		<div className="min-w-0 rounded-md border bg-muted/50 px-3 py-2">
+		<InsetPanel className="min-w-0">
 			<p className="text-sm font-medium break-words">{account.name}</p>
 			<AccountIdentityLine
 				account={account}
 				className="break-words"
 				externalIdDisplay="full"
 			/>
-		</div>
+		</InsetPanel>
 	);
 }

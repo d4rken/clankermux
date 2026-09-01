@@ -8,12 +8,11 @@ export function LoadingSkeleton() {
 				{[...Array(4)].map((_, i) => (
 					// biome-ignore lint/suspicious/noArrayIndexKey: Skeleton cards are temporary placeholders
 					<Card key={i}>
-						{/* Numeric, like every padding that has to CANCEL a primitive's
-						    own: `CardContent` ships `pt-0` for headed cards, and
-						    tailwind-merge only drops it against a padding utility it
-						    recognises — a scale key such as `p-section` would leave
-						    `pt-0` live and jam these bars against the top border. See
-						    the Card primitive for the full reasoning. */}
+						{/* `CardContent` ships `pt-0` for headed cards, and these have
+						    no header. Passing the padding explicitly is what lets
+						    tailwind-merge drop that `pt-0`, without which the bars sit
+						    jammed against the top border. See the Card primitive for
+						    the full reasoning. */}
 						<CardContent className="p-6">
 							<Skeleton className="h-4 w-24 mb-item" />
 							<Skeleton className="h-8 w-32 mb-item" />

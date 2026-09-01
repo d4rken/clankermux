@@ -281,9 +281,9 @@ export function LiveActivityLanesView({
 					</span>
 				</div>
 			</CardHeader>
-			{/* `p-4` stays spelled numerically: it is the tailwind-merge exemption
-			    documented in `card.tsx`, without which `CardContent`'s own `pt-0`
-			    survives and the body loses its top padding. `max-sm:px-0` hands the
+			{/* `CardContent` supplies the padding and ships `pt-0` so a header and
+			    a body do not double up their facing edges. This card overrides only
+			    the top, with `pt-item`. `max-sm:px-0` hands the
 			    32px of side padding to the plot at phone width, which means EVERY
 			    direct child of this container has to carry its own inset below `sm`
 			    or its contents sit against the card border. The children, across
@@ -300,7 +300,7 @@ export function LiveActivityLanesView({
 
 			    Anything added here needs the same, and this list has to grow with
 			    it. */}
-			<CardContent className="p-4 pt-item max-sm:px-0">
+			<CardContent className="pt-item max-sm:px-0">
 				{lanes.length === 0 ? (
 					<p className="py-section text-center text-sm text-muted-foreground max-sm:px-item">
 						{primed

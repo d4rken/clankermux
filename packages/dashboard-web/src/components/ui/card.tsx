@@ -8,19 +8,13 @@ import { cn } from "../../lib/utils";
  * Interior padding is 1rem — the same value the spacing scale calls `group`,
  * so what separates panels and what lines them agree.
  *
- * It is spelled `p-4` rather than `p-group` deliberately. `CardContent` carries
- * `pt-0` so a header and a body do not double up their facing edges, and
- * tailwind-merge can only cancel that against a padding utility it recognises.
- * It does not recognise a custom scale key — `twMerge("p-group pt-0", "p-group")`
- * returns all three classes with `pt-0` still live — and it recognised the
- * previous custom `.surface-pad` class even less. The result was that every
- * card WITHOUT a header, which is every metric tile, rendered with zero top
- * padding and its content jammed against the border.
- *
- * The same exemption holds wherever a call site's padding has to CANCEL a
- * primitive's own — `p-2` on a `PopoverContent` (`p-4`), `px-2` on a `sm`
- * Button (`px-3`). Those stay numeric too, and say so where they sit. Padding
- * that competes with nothing is spelled on the scale like everything else.
+ * `CardContent` carries `pt-0` so a header and a body do not double up their
+ * facing edges. A call site that needs to CANCEL that — a card with no header,
+ * which is every metric tile — may spell its override on the named scale:
+ * `cn()` is configured with the five `--spacing-*` names (see lib/utils.ts), so
+ * tailwind-merge resolves `p-group` against `pt-0` like any built-in padding.
+ * Before that configuration existed it did not, and the cancel silently did
+ * nothing; do not reintroduce a numeric literal as a workaround for that.
  *
  * There is deliberately no hover lift anywhere: geometry that moves under the
  * cursor is noise on a page whose job is reporting throttling state.

@@ -47,10 +47,12 @@ export function ChartTooltip({
 
 	return (
 		<div
-			className="p-3 rounded-md shadow-overlay"
+			className="p-row rounded-md shadow-overlay"
 			style={{ ...CHART_TOOLTIP_STYLE, ...style }}
 		>
-			{formattedLabel && <p className="font-medium mb-2">{formattedLabel}</p>}
+			{formattedLabel && (
+				<p className="font-medium mb-item">{formattedLabel}</p>
+			)}
 			<div className="space-y-tight">
 				{payload.map((entry, index) => {
 					const formatter = formatters[entry.dataKey] || formatters.default;

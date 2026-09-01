@@ -38,6 +38,7 @@ import {
 	DropdownMenuSeparator,
 	DropdownMenuTrigger,
 } from "../ui/dropdown-menu";
+import { InsetPanel } from "../ui/inset-panel";
 import { Popover, PopoverContent, PopoverTrigger } from "../ui/popover";
 import { Textarea } from "../ui/textarea";
 import { AccountIdentityLine } from "./AccountIdentity";
@@ -88,12 +89,12 @@ function SessionDetailsPopover({
 					{children}
 				</button>
 			</PopoverTrigger>
-			<PopoverContent align="start" className="w-72 p-3 text-xs">
+			<PopoverContent align="start" className="w-72 p-row text-xs">
 				<p className="font-medium">Active session</p>
-				<p className="mt-1 text-muted-foreground">
+				<p className="mt-tight text-muted-foreground">
 					Usage since the current session window started.
 				</p>
-				<dl className="mt-3 grid grid-cols-2 gap-row">
+				<dl className="mt-row grid grid-cols-2 gap-row">
 					<div>
 						<dt className="text-muted-foreground">Requests</dt>
 						<dd className="font-medium tabular-nums">
@@ -224,7 +225,7 @@ export function AccountListItem({
 	// group — exactly as much air as the boundary between two, so six of these
 	// cards read as one wall of text.
 	return (
-		<div className="p-4 border rounded-lg transition-colors space-y-row border-border hover:border-muted-foreground/50">
+		<div className="p-group border rounded-lg transition-colors space-y-row border-border hover:border-muted-foreground/50">
 			<div className="flex items-center justify-between">
 				<div className="flex flex-col gap-tight min-w-0">
 					<div className="flex items-center gap-item min-w-0">
@@ -407,16 +408,16 @@ export function AccountListItem({
 									}}
 									title="Add a note for this account"
 								>
-									<StickyNote className="mr-2 h-4 w-4" />
+									<StickyNote className="mr-item h-4 w-4" />
 									Add note
 								</DropdownMenuItem>
 							)}
 							<DropdownMenuItem onClick={() => onRename(account)}>
-								<Edit2 className="mr-2 h-4 w-4" />
+								<Edit2 className="mr-item h-4 w-4" />
 								Rename
 							</DropdownMenuItem>
 							<DropdownMenuItem onClick={() => onPriorityChange(account)}>
-								<Zap className="mr-2 h-4 w-4" />
+								<Zap className="mr-item h-4 w-4" />
 								Change Priority
 							</DropdownMenuItem>
 							<DropdownMenuItem
@@ -428,7 +429,7 @@ export function AccountListItem({
 								}
 							>
 								<CalendarClock
-									className={`mr-2 h-4 w-4 ${account.renewalAnchor ? "text-primary" : ""}`}
+									className={`mr-item h-4 w-4 ${account.renewalAnchor ? "text-primary" : ""}`}
 								/>
 								Set Renewal Date
 								{account.renewalAnchor && (
@@ -441,7 +442,7 @@ export function AccountListItem({
 								onClick={() => onRecordPayment(account)}
 								title="Record a manual payment (subscription renewal or usage-credit purchase) in the ledger"
 							>
-								<Receipt className="mr-2 h-4 w-4" />
+								<Receipt className="mr-item h-4 w-4" />
 								Record Payment…
 							</DropdownMenuItem>
 							{onResetStickiness && (
@@ -449,7 +450,7 @@ export function AccountListItem({
 									onClick={() => onResetStickiness(account)}
 									title="Clear this account's session affinity pins and active-session anchor so its sessions re-pick on their next request"
 								>
-									<Unlink className="mr-2 h-4 w-4" />
+									<Unlink className="mr-item h-4 w-4" />
 									Reset session stickiness
 								</DropdownMenuItem>
 							)}
@@ -466,7 +467,7 @@ export function AccountListItem({
 									}
 								>
 									<Globe
-										className={`mr-2 h-4 w-4 ${account.customEndpoint ? "text-primary" : ""}`}
+										className={`mr-item h-4 w-4 ${account.customEndpoint ? "text-primary" : ""}`}
 									/>
 									Custom Endpoint
 									{account.customEndpoint && (
@@ -486,7 +487,7 @@ export function AccountListItem({
 									}
 								>
 									<Hash
-										className={`mr-2 h-4 w-4 ${account.modelMappings ? "text-primary" : ""}`}
+										className={`mr-item h-4 w-4 ${account.modelMappings ? "text-primary" : ""}`}
 									/>
 									Model Mappings
 									{account.modelMappings && (
@@ -502,7 +503,7 @@ export function AccountListItem({
 									onClick={() => onReauth(account)}
 									title="Re-authenticate this Qwen account (preserves all metadata)"
 								>
-									<KeyRound className="mr-2 h-4 w-4" />
+									<KeyRound className="mr-item h-4 w-4" />
 									Re-authenticate
 								</DropdownMenuItem>
 							)}
@@ -513,7 +514,7 @@ export function AccountListItem({
 										onClick={() => onAnthropicReauth(account)}
 										title="Re-authenticate this Anthropic account (preserves all metadata)"
 									>
-										<KeyRound className="mr-2 h-4 w-4" />
+										<KeyRound className="mr-item h-4 w-4" />
 										Re-authenticate
 									</DropdownMenuItem>
 								)}
@@ -522,7 +523,7 @@ export function AccountListItem({
 									onClick={() => onCodexReauth(account)}
 									title="Re-authenticate this Codex account (preserves all metadata)"
 								>
-									<KeyRound className="mr-2 h-4 w-4" />
+									<KeyRound className="mr-item h-4 w-4" />
 									Re-authenticate
 								</DropdownMenuItem>
 							)}
@@ -596,7 +597,7 @@ export function AccountListItem({
 			    bars below. */}
 			<div className="space-y-item">
 				<AccountStatusChips account={account} status={status} />
-				<div className="rounded-md border border-border/60 bg-muted/30 px-3 py-2">
+				<InsetPanel data-testid="account-info-row">
 					<div className="flex flex-wrap items-center gap-row">
 						<dl className="flex min-w-0 flex-1 flex-wrap items-center gap-x-section gap-y-item text-xs">
 							<div className="flex items-baseline gap-tight">
@@ -677,7 +678,7 @@ export function AccountListItem({
 							</Button>
 						)}
 					</div>
-				</div>
+				</InsetPanel>
 			</div>
 			{(account.rateLimitReset ||
 				account.usageData ||

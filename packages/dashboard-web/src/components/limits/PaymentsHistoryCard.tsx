@@ -81,7 +81,7 @@ export function PaymentsHistoryCard({
 				) : pending ? (
 					<div className="divide-y">
 						{[0, 1, 2].map((index) => (
-							<div key={index} className="py-2">
+							<div key={index} className="py-item">
 								<Skeleton className="h-5 w-full" />
 							</div>
 						))}
@@ -97,7 +97,7 @@ export function PaymentsHistoryCard({
 						{payments.map((payment) => (
 							<div
 								key={payment.id}
-								className="flex items-center gap-row py-2 text-sm"
+								className="flex items-center gap-row py-item text-sm"
 								title={payment.notes ?? undefined}
 							>
 								<span className="text-muted-foreground tabular-nums shrink-0">

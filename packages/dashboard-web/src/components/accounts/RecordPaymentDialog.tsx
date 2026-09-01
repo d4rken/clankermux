@@ -89,7 +89,7 @@ export function RecordPaymentDialog({
 						this for credit purchases or missed renewals.
 					</DialogDescription>
 				</DialogHeader>
-				<div className="grid gap-group py-4">
+				<div className="grid gap-group py-group">
 					<div className="grid grid-cols-4 items-center gap-group">
 						<Label htmlFor="payment-kind" className="text-right">
 							Kind
