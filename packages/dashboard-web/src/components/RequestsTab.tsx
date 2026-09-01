@@ -149,10 +149,23 @@ function FilterChip({
  * loaded list occupy the same box, and so QA can measure one against the other
  * with the stub returning exactly six rows.
  *
- * `h-[4.5rem]` is the real row height, not an estimate: a 1px border top and
- * bottom (2), plus row 1 at `py-1.5` around a `h-7` icon button (28 + 12 = 40),
- * plus the outcome row at `pb-2` around a badge whose `py-0.5` + border sit on
- * a `text-xs` 1rem line box (22 + 8 = 30). 2 + 40 + 30 = 72px = 4.5rem.
+ * `h-[6.75rem]` (108px) is measured, not derived: with six rows loaded the list
+ * box is 688px, which over six rows minus the five 8px `space-y-item` gaps is
+ * (688 - 40) / 6 = 108px per row.
+ *
+ * The class-level parts of a card account for about 100px of that, over all
+ * THREE content rows it renders: a 1px border top and bottom (2), row 1
+ * "where" at `py-1.5` around a `h-7` icon button (28 + 12 = 40), row 2
+ * "attribution" at `pb-1.5` around a badge whose `py-0.5` + border sit on a
+ * `text-xs` 1rem line box (22 + 6 = 28), and row 3 "outcome" at `pb-item`
+ * around that same 22px badge (22 + 8 = 30). The remaining ~8px is not
+ * explained by that breakdown; a card that also renders the error line is
+ * taller still (+24), so the constant tracks the measured height of a real
+ * list rather than a per-part sum. Re-measure it in a browser when the card
+ * markup changes instead of recomputing it from classes.
+ *
+ * The value this replaced counted only two of the three content rows and came
+ * out at 72px, which is why the route still jumped 216px when the list loaded.
  */
 const REQUEST_SKELETON_ROWS = [
 	"row-1",
@@ -993,7 +1006,7 @@ export function RequestsTab() {
 							Loading requests
 						</span>
 						{REQUEST_SKELETON_ROWS.map((key) => (
-							<Skeleton key={key} className="h-[4.5rem] w-full rounded-lg" />
+							<Skeleton key={key} className="h-[6.75rem] w-full rounded-lg" />
 						))}
 					</div>
 				) : !data || requests.length === 0 ? (
