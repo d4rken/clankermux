@@ -86,6 +86,22 @@ describe("ModelsTab", () => {
 		expect(render(queryClient)).toContain("Loading models");
 	});
 
+	/**
+	 * The loading state is a skeleton rather than a text line, and a bare
+	 * Skeleton has no role and no accessible text — so the assertion above only
+	 * still holds because the announcement moved to a visually hidden status
+	 * line. This pins the other half of that: the region declares itself busy.
+	 */
+	it("marks the loading region busy for assistive technology", () => {
+		const queryClient = client();
+		seedPending(queryClient);
+
+		const html = render(queryClient);
+
+		expect(html).toContain('aria-busy="true"');
+		expect(html).toContain('<span class="sr-only" role="status">');
+	});
+
 	// "Missing because Anthropic no longer lists it" and "missing because this
 	// build predates it" are different problems with different fixes.
 	it("distinguishes a live catalogue from the bundled fallback", () => {
