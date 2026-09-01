@@ -279,11 +279,11 @@ function WindowSeries({
 			) : null}
 			{gaps.length > 0 ? (
 				<details className="group max-w-prose">
-					<summary className="flex cursor-pointer list-none items-center gap-1 text-xs font-medium text-muted-foreground hover:text-foreground focus:outline-none focus-visible:ring-2 focus-visible:ring-ring [&::-webkit-details-marker]:hidden">
+					<summary className="flex cursor-pointer list-none items-center gap-tight text-xs font-medium text-muted-foreground hover:text-foreground focus:outline-none focus-visible:ring-2 focus-visible:ring-ring [&::-webkit-details-marker]:hidden">
 						What this analysis could not measure, and why
 						<ChevronDown className="h-3.5 w-3.5 transition-transform group-open:rotate-180" />
 					</summary>
-					<ul className="mt-1 text-xs text-muted-foreground space-y-0.5">
+					<ul className="mt-tight text-xs text-muted-foreground space-y-0.5">
 						{gaps.map((model) => (
 							<li key={model.key}>
 								<span className="font-medium">{model.key}</span>
@@ -293,7 +293,7 @@ function WindowSeries({
 								{model.lines.length === 1 ? (
 									` — ${model.lines[0].text}`
 								) : (
-									<ul className="pl-4 space-y-0.5">
+									<ul className="pl-group space-y-0.5">
 										{model.lines.map((line) => (
 											<li key={line.id}>{line.text}</li>
 										))}

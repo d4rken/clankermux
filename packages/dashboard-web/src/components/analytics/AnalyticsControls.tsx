@@ -54,7 +54,7 @@ export function AnalyticsControls({
 					onValueChange={(v) => setTimeRange(v as TimeRange)}
 				>
 					<SelectTrigger className="w-32">
-						<CalendarDays className="h-4 w-4 mr-2" />
+						<CalendarDays className="h-4 w-4 mr-item" />
 						<SelectValue />
 					</SelectTrigger>
 					<SelectContent>
@@ -90,7 +90,7 @@ export function AnalyticsControls({
 					disabled={loading}
 				>
 					<RefreshCw
-						className={`h-4 w-4 mr-2 ${loading ? "animate-spin" : ""}`}
+						className={`h-4 w-4 mr-item ${loading ? "animate-spin" : ""}`}
 					/>
 					Refresh
 				</Button>

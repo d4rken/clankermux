@@ -21,7 +21,7 @@ import { SectionHeading } from "./SectionHeading";
  */
 export function CacheKeepaliveSection({ range }: { range: TimeRange }) {
 	return (
-		<section className="space-y-section border-t pt-6">
+		<section className="space-y-section border-t pt-section">
 			<SectionHeading
 				title="Cache Keep-Alive"
 				description="Live cache status, historical activity, and effectiveness. The selected window applies to history and effectiveness; live counters are cumulative since the last restart."

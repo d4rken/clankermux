@@ -361,7 +361,7 @@ function TopContributorsTable({
 								</TableCell>
 								<TableCell className="figure text-right">
 									{formatNumber(row.chars)} chars
-									<span className="ml-1 text-xs text-muted-foreground">
+									<span className="ml-tight text-xs text-muted-foreground">
 										~
 										{formatTokens(
 											Math.round(row.chars / CHARS_PER_TOKEN_ESTIMATE),

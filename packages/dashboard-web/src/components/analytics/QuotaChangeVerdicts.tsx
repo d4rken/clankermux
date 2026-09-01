@@ -143,7 +143,7 @@ export function QuotaChangeVerdicts({
 						<AlertTriangle className="h-3.5 w-3.5" />
 						What these numbers are not
 					</p>
-					<ul className="text-xs text-muted-foreground space-y-0.5 list-disc pl-4 max-w-prose">
+					<ul className="text-xs text-muted-foreground space-y-0.5 list-disc pl-group max-w-prose">
 						<li>
 							This is <span className="font-medium">implied cost</span> inferred
 							from the provider's reported percentages, not the provider's

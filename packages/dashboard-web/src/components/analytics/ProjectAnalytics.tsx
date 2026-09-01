@@ -158,7 +158,7 @@ export function ProjectAnalytics({
 						</TableBody>
 					</Table>
 				</TableFrame>
-				<p className="mt-2 text-xs text-muted-foreground">
+				<p className="mt-item text-xs text-muted-foreground">
 					{/* Rows exist by this point (the empty range returns early), so a
 					    null percent means the server sent no coverage aggregate —
 					    say so instead of implying an empty range or a real 0%. */}

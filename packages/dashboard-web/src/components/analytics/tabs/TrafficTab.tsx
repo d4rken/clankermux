@@ -221,7 +221,7 @@ export function TrafficTab(props: TrafficTabProps) {
 			{analytics && data.length > 0 && (
 				<section className="space-y-section">
 					<SectionHeading
-						className="border-t pt-6"
+						className="border-t pt-section"
 						title="Cumulative Trends"
 						description="Running totals across the selected time range"
 					/>

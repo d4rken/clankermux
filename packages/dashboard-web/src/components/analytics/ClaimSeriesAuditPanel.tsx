@@ -37,7 +37,7 @@ export function ClaimSeriesAuditPanel({
 			<summary className="text-sm font-medium cursor-pointer">
 				Claim-series audit
 			</summary>
-			<p className="text-xs text-muted-foreground max-w-prose mt-2">
+			<p className="text-xs text-muted-foreground max-w-prose mt-item">
 				What is actually in the per-request rate-limit readings this proxy has
 				captured, from {formatDay(audit.fromMs)} to {formatDay(audit.toMs)}.
 				Counts only — nothing here is a statement about the provider. The
@@ -45,14 +45,14 @@ export function ClaimSeriesAuditPanel({
 				about responses that were not.
 			</p>
 			{audit.claims.length === 0 ? (
-				<p className="text-xs text-muted-foreground mt-2">
+				<p className="text-xs text-muted-foreground mt-item">
 					No claim readings captured in this span.
 				</p>
 			) : (
 				// Bare: this table's only border is the `<details>` around it, and a
 				// frame here would double it. Compact for the 14 columns — at the
 				// comfortable padding they would add roughly 336px of width.
-				<TableFrame variant="bare" className="mt-2">
+				<TableFrame variant="bare" className="mt-item">
 					<Table className="text-xs" density="compact">
 						<TableHeader className="bg-transparent">
 							<TableRow className="border-t-0">

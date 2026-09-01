@@ -83,10 +83,10 @@ export function AnalyticsFilters({
 		<Popover open={filterOpen} onOpenChange={setFilterOpen}>
 			<PopoverTrigger asChild>
 				<Button variant="outline" size="sm">
-					<Filter className="h-4 w-4 mr-2" />
+					<Filter className="h-4 w-4 mr-item" />
 					Filters
 					{activeFilterCount > 0 && (
-						<Badge variant="secondary" className="ml-2 h-5 px-1">
+						<Badge variant="secondary" className="ml-item h-5 px-tight">
 							{activeFilterCount}
 						</Badge>
 					)}
@@ -144,9 +144,9 @@ export function AnalyticsFilters({
 								{filters.accounts.length + (filters.noAccount ? 1 : 0)}{" "}
 								selected)
 							</Label>
-							<div className="border rounded-md p-2 max-h-32 overflow-y-auto space-y-tight">
+							<div className="border rounded-md p-item max-h-32 overflow-y-auto space-y-tight">
 								{(hasNoAccountBucket || filters.noAccount) && (
-									<label className="flex items-center space-x-item cursor-pointer hover:bg-muted/50 p-1 rounded">
+									<label className="flex items-center space-x-item cursor-pointer hover:bg-muted/50 p-tight rounded">
 										<input
 											type="checkbox"
 											className="rounded border-input"
@@ -161,7 +161,7 @@ export function AnalyticsFilters({
 								{availableAccounts.map((account) => (
 									<label
 										key={account.value}
-										className="flex items-center space-x-item cursor-pointer hover:bg-muted/50 p-1 rounded"
+										className="flex items-center space-x-item cursor-pointer hover:bg-muted/50 p-tight rounded"
 									>
 										<input
 											type="checkbox"
@@ -194,11 +194,11 @@ export function AnalyticsFilters({
 					{availableModels.length > 0 && (
 						<div className="space-y-item">
 							<Label>Models ({filters.models.length} selected)</Label>
-							<div className="border rounded-md p-2 max-h-32 overflow-y-auto space-y-tight">
+							<div className="border rounded-md p-item max-h-32 overflow-y-auto space-y-tight">
 								{availableModels.map((model) => (
 									<label
 										key={model}
-										className="flex items-center space-x-item cursor-pointer hover:bg-muted/50 p-1 rounded"
+										className="flex items-center space-x-item cursor-pointer hover:bg-muted/50 p-tight rounded"
 									>
 										<input
 											type="checkbox"
@@ -229,11 +229,11 @@ export function AnalyticsFilters({
 					{availableApiKeys.length > 0 && (
 						<div className="space-y-item">
 							<Label>API Keys ({filters.apiKeys.length} selected)</Label>
-							<div className="border rounded-md p-2 max-h-32 overflow-y-auto space-y-tight">
+							<div className="border rounded-md p-item max-h-32 overflow-y-auto space-y-tight">
 								{availableApiKeys.map((apiKey) => (
 									<label
 										key={apiKey.value}
-										className="flex items-center space-x-item cursor-pointer hover:bg-muted/50 p-1 rounded"
+										className="flex items-center space-x-item cursor-pointer hover:bg-muted/50 p-tight rounded"
 									>
 										<input
 											type="checkbox"
@@ -274,9 +274,9 @@ export function AnalyticsFilters({
 								{filters.projects.length + (filters.noProject ? 1 : 0)}{" "}
 								selected)
 							</Label>
-							<div className="border rounded-md p-2 max-h-32 overflow-y-auto space-y-tight">
+							<div className="border rounded-md p-item max-h-32 overflow-y-auto space-y-tight">
 								{(hasNoProjectBucket || filters.noProject) && (
-									<label className="flex items-center space-x-item cursor-pointer hover:bg-muted/50 p-1 rounded">
+									<label className="flex items-center space-x-item cursor-pointer hover:bg-muted/50 p-tight rounded">
 										<input
 											type="checkbox"
 											className="rounded border-input"
@@ -291,7 +291,7 @@ export function AnalyticsFilters({
 								{availableProjects.map((project) => (
 									<label
 										key={project}
-										className="flex items-center space-x-item cursor-pointer hover:bg-muted/50 p-1 rounded"
+										className="flex items-center space-x-item cursor-pointer hover:bg-muted/50 p-tight rounded"
 									>
 										<input
 											type="checkbox"

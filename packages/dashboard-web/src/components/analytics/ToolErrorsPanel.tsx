@@ -163,7 +163,7 @@ function ToolErrorTable({ rows }: { rows: ToolErrorRow[] }) {
 									<div className="figure text-right">
 										{row.errorRatePct.toFixed(1)}%
 									</div>
-									<div className="mt-1 h-1 w-full bg-muted rounded-full overflow-hidden">
+									<div className="mt-tight h-1 w-full bg-muted rounded-full overflow-hidden">
 										{/* Width is computed per row against the cross-row max, so
 										    it cannot be a class. */}
 										<div
@@ -255,7 +255,7 @@ function TopMessagesSection({ groups }: { groups: ToolMessageGroup[] }) {
 						className="rounded-md border"
 						open={groups.length === 1}
 					>
-						<summary className="flex cursor-pointer items-center justify-between gap-item px-3 py-2 text-sm hover:bg-muted/40">
+						<summary className="flex cursor-pointer items-center justify-between gap-item px-row py-item text-sm hover:bg-muted/40">
 							<span className="font-medium">{group.toolName}</span>
 							<Badge variant="outline">
 								{formatNumber(group.totalOccurrences)}{" "}
@@ -266,7 +266,7 @@ function TopMessagesSection({ groups }: { groups: ToolMessageGroup[] }) {
 							{group.messages.map((message) => (
 								<li
 									key={message.errorText}
-									className="flex items-start justify-between gap-row border-b px-3 py-2 last:border-0"
+									className="flex items-start justify-between gap-row border-b px-row py-item last:border-0"
 								>
 									<code
 										className="min-w-0 flex-1 truncate font-mono text-xs text-muted-foreground"

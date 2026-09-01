@@ -482,7 +482,7 @@ export function TokenUsageBreakdown({
 					<div className="space-y-group">
 						{tokenBreakdown.map((item, index) => (
 							<div key={item.type}>
-								<div className="flex items-center justify-between mb-2">
+								<div className="flex items-center justify-between mb-item">
 									<span className="text-sm font-medium">{item.type}</span>
 									<div className="flex items-center gap-item">
 										<span className="text-sm text-muted-foreground">
@@ -509,7 +509,7 @@ export function TokenUsageBreakdown({
 								</div>
 							</div>
 						))}
-						<div className="pt-4 border-t">
+						<div className="pt-group border-t">
 							<div className="flex items-center justify-between">
 								<span className="text-sm font-medium">Total Tokens</span>
 								<span className="text-lg font-bold">

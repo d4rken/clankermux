@@ -229,7 +229,7 @@ export function ModelPerformanceTable({
 											<div className="figure text-right">
 												{value != null ? col.format(value) : "—"}
 											</div>
-											<div className="mt-1 h-1 w-full bg-muted rounded-full overflow-hidden">
+											<div className="mt-tight h-1 w-full bg-muted rounded-full overflow-hidden">
 												{/* Width is computed per row against this column's
 												    cross-row max, so it cannot be a class. */}
 												<div
