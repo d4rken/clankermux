@@ -503,7 +503,7 @@ export function CumulativeGrowthChart({
 	timeRange,
 }: CumulativeGrowthChartProps) {
 	return (
-		<Card className="bg-gradient-to-br from-background to-muted/10 border-muted">
+		<Card>
 			<CardHeader>
 				<CardTitle>Cumulative Growth Analysis</CardTitle>
 				<CardDescription>
