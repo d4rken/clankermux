@@ -23,6 +23,7 @@
 		"build:dashboard": "bun run --cwd packages/dashboard-web build",
 		"build:dashboard:guarded": "bun run scripts/guarded-build.ts dashboard",
 		"build:readme-media": "bun run scripts/build-readme-media.ts",
+		"build:readme-screenshots": "bun run build:dashboard && scripts/capture-readme-screenshots.sh",
 		"format": "bunx biome format --write .",
 		"lint": "bunx --bun biome check --write --unsafe .",
 		"restart": "./scripts/restart.sh"
