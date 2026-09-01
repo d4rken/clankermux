@@ -340,6 +340,44 @@
 		overflow: visible;
 	}
 
+	/* Chart tooltips come in two kinds. Four charts render the app's own tooltip
+	   component, which carries the typography treatment in its own markup: a
+	   mono timestamp at 0.75rem above rows whose measured values are set as
+	   figures while the series names stay in the reading face. The other nine
+	   charts hand Recharts its stock tooltip, whose markup this app never
+	   writes, so the only place that treatment can be applied to them is here.
+	   Every rule below is scoped under the wrapper class Recharts puts on that
+	   stock tooltip, so none of them can reach the component's own markup.
+
+	   The gap under the header is carried as bottom padding rather than a
+	   bottom margin: Recharts sets a zero margin on that element itself, and an
+	   element style can only be outranked by reversing the cascade, which this
+	   repo does not allow. The box has no background or border of its own, so
+	   the space below the text is the same either way, and it is the same
+	   --space-item step the app's own tooltip uses. */
+	.recharts-default-tooltip .recharts-tooltip-label {
+		font-family: var(--app-font-mono);
+		font-size: 0.75rem;
+		color: var(--muted-foreground);
+		padding-bottom: var(--space-item);
+	}
+
+	.recharts-default-tooltip .recharts-tooltip-item-list,
+	.recharts-default-tooltip .recharts-tooltip-item {
+		font-size: 0.875rem;
+	}
+
+	/* A series name is reading text, not a measurement: it keeps the sans while
+	   the value beside it becomes a figure. */
+	.recharts-default-tooltip .recharts-tooltip-item-name {
+		font-family: var(--app-font-sans);
+	}
+
+	.recharts-default-tooltip .recharts-tooltip-item-value {
+		font-family: var(--app-font-mono);
+		font-variant-numeric: tabular-nums;
+	}
+
 	.glass {
 		@apply bg-background/80 backdrop-blur-md;
 	}
