@@ -3,7 +3,8 @@
   <img> renders in the browser's secure static mode and GitHub proxies README
   images through a sanitiser, so the theme has to be chosen outside the file.
   <picture> is the mechanism GitHub documents for that. The same applies to the
-  screenshots below, which is why each one is a light/dark pair.
+  screenshots below, which is why each one is a light/dark pair. Their links can
+  only name one file, so they point at the dark variant deliberately.
 
   The mark comes from `bun run build:readme-media`. The screenshots come from
   `bun run build:readme-screenshots`, which boots a real ClankerMux against a
@@ -25,11 +26,11 @@ in the dashboard, and it routes and falls back across them.
 ## An opinionated fork
 
 ClankerMux began as a fork of [tombii/better-ccflare](https://github.com/tombii/better-ccflare)
-(itself a fork of [snipeship/ccflare](https://github.com/snipeship/ccflare)).
-After 30+ upstream PRs I decided to have my own bespoke solution.
-Fast iteration and tailored to my use-case, mostly Anthropic and OpenAI accounts.
-It's since diverged substantially and is developed independently, but stays
-MIT-licensed and keeps the original authors' copyright intact.
+(itself a fork of [snipeship/ccflare](https://github.com/snipeship/ccflare)). After 30+
+upstream PRs I wanted something bespoke: fast iteration, tailored to my use case of
+mostly Anthropic and OpenAI accounts. It has since diverged substantially and is
+developed independently, but stays MIT-licensed and keeps the original authors'
+copyright intact.
 
 Features:
 
@@ -57,15 +58,12 @@ Features:
 
 ## Screenshots
 
-Captured from a real instance carrying invented accounts and projects, not
-anyone's live deployment.
-
 <table>
 <tr>
-<td width="25%"><a href="docs/media/overview-light.png"><picture><source media="(prefers-color-scheme: dark)" srcset="docs/media/overview-dark.png"><img src="docs/media/overview-light.png" width="100%" alt="Overview: a Live Activity strip plotting the last five minutes of requests by project, coloured by model, above tiles for total requests, 5-hour and 7-day pool capacity, quota runway, and monthly spend amortized per day, week and month." /></picture></a></td>
-<td width="25%"><a href="docs/media/accounts-light.png"><picture><source media="(prefers-color-scheme: dark)" srcset="docs/media/accounts-dark.png"><img src="docs/media/accounts-light.png" width="100%" alt="Accounts: five account cards across Anthropic, OpenAI, OpenRouter and a local Ollama model, each with its provider, priority, renewal date, request count, and bars for the 5-hour, weekly and per-model-family quota windows." /></picture></a></td>
-<td width="25%"><a href="docs/media/limits-light.png"><picture><source media="(prefers-color-scheme: dark)" srcset="docs/media/limits-dark.png"><img src="docs/media/limits-light.png" width="100%" alt="Usage: pooled 5-hour and 7-day quota with next checkpoints and exhaustion warnings, a quota runway estimate, and per-account utilization bars carrying burn-rate projections against each window's reset." /></picture></a></td>
-<td width="25%"><a href="docs/media/analytics-light.png"><picture><source media="(prefers-color-scheme: dark)" srcset="docs/media/analytics-dark.png"><img src="docs/media/analytics-light.png" width="100%" alt="Analytics: a request-volume chart over the last hour, with panels for error and cache-hit trends and a token usage breakdown split across input, cache read, cache creation and output tokens." /></picture></a></td>
+<td width="25%"><a href="docs/media/overview-dark.png"><picture><source media="(prefers-color-scheme: dark)" srcset="docs/media/overview-dark.png"><img src="docs/media/overview-light.png" width="100%" alt="Overview: a Live Activity strip plotting the last five minutes of requests by project, coloured by model, above tiles for total requests, 5-hour and 7-day pool capacity, quota runway, and monthly spend amortized per day, week and month." /></picture></a></td>
+<td width="25%"><a href="docs/media/accounts-dark.png"><picture><source media="(prefers-color-scheme: dark)" srcset="docs/media/accounts-dark.png"><img src="docs/media/accounts-light.png" width="100%" alt="Accounts: five account cards across Anthropic, OpenAI, OpenRouter and a local Ollama model, each with its provider, priority, renewal date, request count, and bars for the 5-hour, weekly and per-model-family quota windows." /></picture></a></td>
+<td width="25%"><a href="docs/media/limits-dark.png"><picture><source media="(prefers-color-scheme: dark)" srcset="docs/media/limits-dark.png"><img src="docs/media/limits-light.png" width="100%" alt="Usage: pooled 5-hour and 7-day quota with next checkpoints and exhaustion warnings, a quota runway estimate, and per-account utilization bars carrying burn-rate projections against each window's reset." /></picture></a></td>
+<td width="25%"><a href="docs/media/analytics-dark.png"><picture><source media="(prefers-color-scheme: dark)" srcset="docs/media/analytics-dark.png"><img src="docs/media/analytics-light.png" width="100%" alt="Analytics: a request-volume chart over the last hour, with panels for error and cache-hit trends and a token usage breakdown split across input, cache read, cache creation and output tokens." /></picture></a></td>
 </tr>
 </table>
 
@@ -75,11 +73,11 @@ anyone's live deployment.
 
 ## Build from source
 
-Requires [Bun](https://bun.sh) 1.4.0 or newer. On older runtimes a client
-aborting a streaming response segfaults the process
-([oven-sh/bun#32111](https://github.com/oven-sh/bun/issues/32111)), which is
-routine traffic for a proxy, so ClankerMux refuses to start on them. The exact
-version CI builds and tests against is pinned in `.bun-version`.
+Requires [Bun](https://bun.sh) 1.4.0 or newer — on older runtimes a client aborting a
+streaming response segfaults the process
+([oven-sh/bun#32111](https://github.com/oven-sh/bun/issues/32111)), which is routine
+traffic for a proxy, so ClankerMux refuses to start. CI pins the exact version in
+`.bun-version`.
 
 ```bash
 git clone https://github.com/d4rken/clankermux
@@ -89,14 +87,10 @@ bun run build       # builds the dashboard (required before first run)
 bun start           # serves the proxy + dashboard on http://localhost:8080
 ```
 
-Add your provider accounts in the dashboard, then point your coding client at the proxy.
-
-Agent traffic is served only under the wire mounts: `/wire/anthropic` for clients that
-speak the Anthropic Messages API and `/wire/openai` for clients that speak the OpenAI
-Responses API. The mount names the wire format the client speaks, not the account pool
-the request is served from. The old root endpoints (`/v1/*` and `/messages/*` directly
-on the port) have been removed and now answer 404, so a client still configured with a
-bare base URL has to be repointed at the mount for its format.
+Add your accounts in the dashboard, then point your client at a wire mount:
+`/wire/anthropic` for the Anthropic Messages API, `/wire/openai` for the OpenAI
+Responses API. The mount names the format the client speaks, not the account pool it is
+served from. Bare `/v1/*` and `/messages/*` were removed and answer 404.
 
 ## Use it with Claude Code
 
@@ -148,15 +142,13 @@ by `env_key` and sends it as a bearer token, so the secret stays out of `config.
 
 ## Curate the model list
 
-Each mount answers `GET /v1/models` in the shape its clients parse, and the
-dashboard's **Models** page decides what that list contains. The upstream
-catalogue is the baseline — Anthropic's live listing for `/wire/anthropic`, the
-Codex catalogue plus the bundled list for `/wire/openai` — and the page layers
-three edits on top of it: hide an entry, rename it, or add one the upstream list
-does not have. Curation is per mount: hiding a model for Codex leaves Claude
-Code's list untouched.
+Each mount answers `GET /v1/models` in the shape its clients parse, and the dashboard's
+**Models** page decides what that list contains: over the upstream catalogue it layers
+hides, renames and additions, per mount. Hiding a model for Codex leaves Claude Code's
+list untouched.
 
-Claude Code reads the list only when gateway model discovery is on:
+OpenAI-format clients read `/wire/openai/v1/models` with no flag. Claude Code reads the
+list only with gateway model discovery on:
 
 ```bash
 export ANTHROPIC_BASE_URL=http://localhost:8080/wire/anthropic
@@ -164,17 +156,11 @@ export CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1
 claude
 ```
 
-Its picker keeps ids naming the Claude family, so a custom entry called something
-else is stored and served but never shown there. OpenAI-format clients read
-`http://localhost:8080/wire/openai/v1/models` and need no flag.
-
-Renames land wherever the wire shape has a name field: Anthropic's listing and
-the Codex catalogue. The plain OpenAI list shape carries no display name, so for
-those clients a rename shows in the dashboard only — hides and additions still
-apply.
-
-Hiding a model removes it from the list; it does not block it. A client that asks
-for a hidden model by name is still proxied normally.
+Three limits worth knowing: Claude Code's picker only shows ids naming the Claude
+family, so a custom entry called anything else is served but never listed there; a
+rename needs a wire shape with a name field, so for plain OpenAI clients it shows in the
+dashboard only; and hiding removes a model from the list without blocking it — a client
+that asks for it by name is still proxied.
 
 ## License
 
