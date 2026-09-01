@@ -38,6 +38,7 @@ import {
 	CardTitle,
 } from "../ui/card";
 import { InsetPanel } from "../ui/inset-panel";
+import { PanelEmptyState } from "../ui/panel-empty-state";
 import {
 	Table,
 	TableBody,
@@ -47,7 +48,6 @@ import {
 	TableHeader,
 	TableRow,
 } from "../ui/table";
-import { PanelEmptyState } from "../ui/panel-empty-state";
 
 type ContextComposition = NonNullable<AnalyticsResponse["contextComposition"]>;
 
