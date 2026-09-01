@@ -5,7 +5,7 @@ import {
 	parseAssistantMessage,
 	parseRequestMessages,
 } from "@clankermux/ui-common";
-import React, { useCallback, useEffect, useMemo, useState } from "react";
+import React, { useCallback, useMemo } from "react";
 import { Message } from "./conversation";
 
 interface ConversationViewProps {
@@ -17,8 +17,6 @@ function ConversationViewComponent({
 	requestBody,
 	responseBody,
 }: ConversationViewProps) {
-	const [messages, setMessages] = useState<MessageData[]>([]);
-
 	// Create stable cleanLineNumbers function
 	const cleanLineNumbersCallback = useCallback(cleanLineNumbers, []);
 
@@ -34,38 +32,44 @@ function ConversationViewComponent({
 		[responseBody],
 	);
 
-	// Combine messages
-	useEffect(() => {
+	// Derived synchronously, and deliberately NOT via `useState` + `useEffect`.
+	// With state populated from an effect, EVERY conversation — valid ones
+	// included — rendered `messages.length === 0` on its first paint, so opening
+	// any request flashed the empty state before the real one arrived.
+	const messages = useMemo(() => {
 		const allMessages: MessageData[] = [...requestMessages];
 		if (assistantMessage) {
 			allMessages.push(assistantMessage);
 		}
-		setMessages(allMessages);
+		return allMessages;
 	}, [requestMessages, assistantMessage]);
 
-	if (messages.length === 0) {
-		return (
-			<div className="flex items-center justify-center h-32">
-				<p className="text-muted-foreground">No conversation data available</p>
-			</div>
-		);
-	}
-
+	// One fixed-height container around both branches, so the panel does not
+	// change size between the empty and loaded states. The height constant is
+	// hand-tuned against the modal header above it — do not adjust it here.
 	return (
 		<div className="h-[calc(65vh-10rem)] w-full overflow-hidden">
-			<div className="h-full w-full overflow-y-auto overflow-x-hidden px-4 py-3 space-y-row">
-				{messages.map((message, index) => (
-					<Message
-						key={genMessageKey(message, index)}
-						role={message.role}
-						content={message.content}
-						contentBlocks={message.contentBlocks}
-						tools={message.tools}
-						toolResults={message.toolResults}
-						cleanLineNumbers={cleanLineNumbersCallback}
-					/>
-				))}
-			</div>
+			{messages.length === 0 ? (
+				<div className="flex h-full w-full items-center justify-center">
+					<p className="text-muted-foreground">
+						No conversation data available
+					</p>
+				</div>
+			) : (
+				<div className="h-full w-full overflow-y-auto overflow-x-hidden px-group py-row space-y-row">
+					{messages.map((message, index) => (
+						<Message
+							key={genMessageKey(message, index)}
+							role={message.role}
+							content={message.content}
+							contentBlocks={message.contentBlocks}
+							tools={message.tools}
+							toolResults={message.toolResults}
+							cleanLineNumbers={cleanLineNumbersCallback}
+						/>
+					))}
+				</div>
+			)}
 		</div>
 	);
 }

@@ -10,6 +10,7 @@ import { Bot, FileText, Terminal, User } from "lucide-react";
 import React from "react";
 import { Badge } from "../ui/badge";
 import { MessageBubble } from "./MessageBubble";
+import { ROLE_BACKGROUNDS } from "./role-styles";
 import { ThinkingBlock } from "./ThinkingBlock";
 import { ToolResultBlock } from "./ToolResultBlock";
 import { ToolUsageBlock } from "./ToolUsageBlock";
@@ -23,10 +24,11 @@ interface MessageProps {
 	cleanLineNumbers: (content: string) => string;
 }
 
-const ROLE_STYLES: Record<Role, { bg: string; Icon: LucideIcon }> = {
-	user: { bg: "bg-primary text-primary-foreground", Icon: User },
-	assistant: { bg: "bg-muted", Icon: Bot },
-	system: { bg: "bg-warning/15 text-foreground", Icon: Bot },
+/** The avatar glyph. Only `Message` draws one, so it stays local. */
+const ROLE_ICONS: Record<Role, LucideIcon> = {
+	user: User,
+	assistant: Bot,
+	system: Bot,
 };
 
 function MessageComponent({
@@ -50,15 +52,14 @@ function MessageComponent({
 	const hasTools = tools?.length || 0;
 	const hasToolResults = toolResults?.length || 0;
 
-	const roleStyle = ROLE_STYLES[role];
-	const Icon = roleStyle.Icon;
+	const Icon = ROLE_ICONS[role];
 
 	return (
 		<div
 			className={`flex gap-row w-full ${isRightAligned ? "flex-row-reverse" : "flex-row"}`}
 		>
 			<div
-				className={`flex-shrink-0 w-8 h-8 rounded-full flex items-center justify-center ${roleStyle.bg}`}
+				className={`flex-shrink-0 w-8 h-8 rounded-full flex items-center justify-center ${ROLE_BACKGROUNDS[role]}`}
 			>
 				<Icon className="w-4 h-4" />
 			</div>
@@ -69,24 +70,20 @@ function MessageComponent({
 				<div
 					className={`inline-block max-w-[85%] ${isRightAligned ? "ml-auto" : "mr-auto"}`}
 				>
-					<div className="flex items-center gap-item mb-1">
+					<div className="flex items-center gap-item mb-tight">
 						<span className="text-xs font-medium text-muted-foreground">
 							{role.charAt(0).toUpperCase() + role.slice(1)}
 						</span>
-						{hasThinking && (
-							<Badge variant="secondary" className="text-xs">
-								Thinking
-							</Badge>
-						)}
+						{hasThinking && <Badge variant="secondary">Thinking</Badge>}
 						{hasTools > 0 && (
-							<Badge variant="outline" className="text-xs">
-								<Terminal className="w-3 h-3 mr-1" />
+							<Badge variant="outline">
+								<Terminal className="w-3 h-3 mr-tight" />
 								{hasTools} tool{hasTools > 1 ? "s" : ""} used
 							</Badge>
 						)}
 						{hasToolResults > 0 && (
-							<Badge variant="secondary" className="text-xs">
-								<FileText className="w-3 h-3 mr-1" />
+							<Badge variant="secondary">
+								<FileText className="w-3 h-3 mr-tight" />
 								{hasToolResults} result{hasToolResults > 1 ? "s" : ""}
 							</Badge>
 						)}
@@ -94,7 +91,7 @@ function MessageComponent({
 
 					{/* Thinking block */}
 					{hasThinking && thinkingBlock && (
-						<div className="mb-2">
+						<div className="mb-item">
 							<ThinkingBlock content={cleanLineNumbers(thinkingText)} />
 						</div>
 					)}
@@ -106,7 +103,7 @@ function MessageComponent({
 
 					{/* Tool usage */}
 					{hasTools > 0 && (
-						<div className="mt-2 space-y-item">
+						<div className="mt-item space-y-item">
 							{tools?.map((tool, index) => (
 								<ToolUsageBlock
 									key={
@@ -122,7 +119,7 @@ function MessageComponent({
 
 					{/* Tool results */}
 					{hasToolResults > 0 && (
-						<div className="mt-2 space-y-item">
+						<div className="mt-item space-y-item">
 							{toolResults?.map((result, index) => (
 								<ToolResultBlock
 									key={`result-${result.tool_use_id || index}`}

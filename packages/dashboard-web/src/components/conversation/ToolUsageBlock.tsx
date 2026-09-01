@@ -1,6 +1,7 @@
 import { Terminal } from "lucide-react";
 import React, { useMemo } from "react";
 import { useCollapsible } from "../../hooks/useCollapsible";
+import { Alert } from "../ui/alert";
 import { Button } from "../ui/button";
 
 interface ToolUsageBlockProps {
@@ -23,35 +24,39 @@ function ToolUsageBlockComponent({ toolName, input }: ToolUsageBlockProps) {
 	const hasInput = input && Object.keys(input).length > 0;
 
 	return (
-		<div className="p-3 bg-info/10 border border-info/25 rounded-lg">
-			<div className="flex items-center justify-between mb-1">
-				<div className="flex items-center gap-item">
-					<Terminal className="w-3 h-3 text-info" />
-					<span className="text-xs font-medium text-info">
-						Tool: {toolName}
-					</span>
-				</div>
-				{hasInput && isLong && (
+		<Alert
+			tone="info"
+			title={`Tool: ${toolName}`}
+			// The icon keeps its own hue here, unlike the warning and success
+			// blocks: Alert maps `info` icons to `text-foreground` because no info
+			// call site had an icon when it was written, and `--info-strong` is
+			// deliberately not invented without a consumer.
+			icon={<Terminal className="w-3 h-3 text-info" />}
+			action={
+				hasInput && isLong ? (
 					<Button
 						variant="ghost"
 						size="sm"
-						className="h-6 px-2 text-xs"
+						className="h-6 px-2"
 						onClick={toggle}
 					>
 						{isExpanded ? "Show less" : "Show more"}
 					</Button>
-				)}
-			</div>
-			{hasInput && (
+				) : undefined
+			}
+		>
+			{hasInput ? (
+				// `text-foreground` for the same reason as the tool-result block:
+				// this is the tool's actual input, not a note about it.
 				<pre
-					className={`text-xs bg-muted p-2 rounded mt-1 overflow-x-auto whitespace-pre text-left ${
-						isExpanded && isLong ? "max-h-96 overflow-y-auto pr-2" : ""
+					className={`bg-muted p-item rounded overflow-x-auto whitespace-pre text-left text-foreground ${
+						isExpanded && isLong ? "max-h-96 overflow-y-auto pr-item" : ""
 					}`}
 				>
 					{display}
 				</pre>
-			)}
-		</div>
+			) : null}
+		</Alert>
 	);
 }
 

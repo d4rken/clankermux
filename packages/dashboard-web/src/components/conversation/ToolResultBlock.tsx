@@ -1,6 +1,7 @@
 import { FileText } from "lucide-react";
 import React from "react";
 import { useCollapsible } from "../../hooks/useCollapsible";
+import { Alert } from "../ui/alert";
 import { Button } from "../ui/button";
 
 interface ToolResultBlockProps {
@@ -16,35 +17,37 @@ function ToolResultBlockComponent({ content }: ToolResultBlockProps) {
 	);
 
 	return (
-		<div className="p-3 bg-success/10 border border-success/25 rounded-lg">
-			<div className="flex items-center justify-between mb-1">
-				<div className="flex items-center gap-item">
-					<FileText className="w-3 h-3 text-success-strong" />
-					<span className="text-xs font-medium text-success-strong">
-						Tool Result
-					</span>
-				</div>
-				{isLong && (
+		<Alert
+			tone="success"
+			title="Tool Result"
+			icon={<FileText className="w-3 h-3" />}
+			action={
+				isLong ? (
 					<Button
 						variant="ghost"
 						size="sm"
-						className="h-6 px-2 text-xs"
+						className="h-6 px-2"
 						onClick={toggle}
 					>
 						{isExpanded ? "Show less" : "Show more"}
 					</Button>
-				)}
-			</div>
-			<div className="text-xs bg-muted p-2 rounded mt-1 overflow-hidden">
+				) : undefined
+			}
+		>
+			{/* `text-foreground` is not redundant: Alert's body wrapper sets the
+			    muted body type, and this block is tool OUTPUT rather than a note
+			    about it — dimming it would be a legibility regression, not a
+			    restyle. The old `mt-1` is gone; the wrapper supplies that offset. */}
+			<div className="bg-muted p-item rounded overflow-hidden text-foreground">
 				<pre
 					className={`overflow-x-auto whitespace-pre text-left ${
-						isExpanded && isLong ? "max-h-96 overflow-y-auto pr-2" : ""
+						isExpanded && isLong ? "max-h-96 overflow-y-auto pr-item" : ""
 					}`}
 				>
 					{display}
 				</pre>
 			</div>
-		</div>
+		</Alert>
 	);
 }
 
