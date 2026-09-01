@@ -33,7 +33,7 @@ export function ClaimSeriesAuditPanel({
 	if (!audit) return null;
 
 	return (
-		<details className="rounded-lg border p-3">
+		<details className="rounded-lg border p-row">
 			<summary className="text-sm font-medium cursor-pointer">
 				Claim-series audit
 			</summary>

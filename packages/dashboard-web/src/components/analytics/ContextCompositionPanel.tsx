@@ -37,6 +37,7 @@ import {
 	CardHeader,
 	CardTitle,
 } from "../ui/card";
+import { InsetPanel } from "../ui/inset-panel";
 import {
 	Table,
 	TableBody,
@@ -443,11 +444,11 @@ export function ContextCompositionPanel({
 			</CardHeader>
 			<CardContent className="space-y-section">
 				{coverage.withComposition < coverage.totalRequests && (
-					<p className="rounded-md bg-muted/50 px-3 py-2 text-xs text-muted-foreground">
+					<InsetPanel as="p" className="text-xs text-muted-foreground">
 						Composition recorded for {formatNumber(coverage.withComposition)} of{" "}
 						{formatNumber(coverage.totalRequests)} requests in range (captured
 						at request time)
-					</p>
+					</InsetPanel>
 				)}
 				<CompositionSplit totals={totals} avgPerRequest={avgPerRequest} />
 				<GrowthChart growthCurve={growthCurve} timeRange={timeRange} />
