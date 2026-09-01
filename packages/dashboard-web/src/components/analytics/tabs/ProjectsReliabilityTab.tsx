@@ -49,19 +49,20 @@ export function ProjectsReliabilityTab(props: ProjectsReliabilityTabProps) {
 			<AnalyticsControls
 				timeRange={range}
 				setTimeRange={onRangeChange}
-				filters={filters}
-				setFilters={setFilters}
-				availableAccounts={availableAccounts}
-				availableModels={availableModels}
-				availableApiKeys={availableApiKeys}
-				availableProjects={availableProjects}
-				hasNoAccountBucket={hasNoAccountBucket}
-				hasNoProjectBucket={hasNoProjectBucket}
-				activeFilterCount={activeFilterCount}
-				filterOpen={filterOpen}
-				setFilterOpen={setFilterOpen}
-				loading={loading}
-				onRefresh={refetch}
+				filterProps={{
+					filters,
+					setFilters,
+					availableAccounts,
+					availableModels,
+					availableApiKeys,
+					availableProjects,
+					hasNoAccountBucket,
+					hasNoProjectBucket,
+					activeFilterCount,
+					filterOpen,
+					setFilterOpen,
+				}}
+				refresh={{ loading, onRefresh: refetch }}
 			/>
 
 			<MissingSectionsNotice

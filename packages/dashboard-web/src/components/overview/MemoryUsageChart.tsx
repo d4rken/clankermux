@@ -31,8 +31,8 @@ interface MemoryUsageChartProps {
 	memoryHistory: MemoryHistoryResponse | undefined;
 	loading: boolean;
 	/** Selected time range (controlled); also re-keys the parent's memory-history query. */
-	range: string;
-	onRangeChange: (range: string) => void;
+	range: TimeRange;
+	onRangeChange: (range: TimeRange) => void;
 }
 
 const GRADIENT_ID = "memoryUsageRssGradient";
@@ -84,7 +84,6 @@ export function MemoryUsageChart({
 
 	// Need at least two points to draw a meaningful trend.
 	const isEmpty = rows.length < 2;
-	const tr = range as TimeRange;
 
 	return (
 		<Card>
@@ -138,7 +137,7 @@ export function MemoryUsageChart({
 								dataKey="ts"
 								className="text-xs"
 								height={30}
-								tickFormatter={(value) => formatAxisTime(Number(value), tr)}
+								tickFormatter={(value) => formatAxisTime(Number(value), range)}
 							/>
 							<YAxis
 								yAxisId="memory"
@@ -176,7 +175,7 @@ export function MemoryUsageChart({
 											// tick omits the date on short ranges.
 											const ts = payload?.[0]?.payload?.ts;
 											return typeof ts === "number"
-												? formatTooltipTime(ts, tr)
+												? formatTooltipTime(ts, range)
 												: label;
 										}}
 									/>

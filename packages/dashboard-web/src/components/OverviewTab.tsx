@@ -3,7 +3,7 @@ import type { AnalyticsSection } from "@clankermux/types";
 import { formatNumber, formatPercentage } from "@clankermux/ui-common";
 import { Activity, BarChart3, Gauge } from "lucide-react";
 import React, { useCallback, useEffect, useMemo, useState } from "react";
-import { REFRESH_INTERVALS } from "../constants";
+import { REFRESH_INTERVALS, type TimeRange } from "../constants";
 import {
 	useAccounts,
 	useAnalytics,
@@ -58,7 +58,7 @@ export const OverviewTab = React.memo(() => {
 		OVERVIEW_ERROR_WINDOW_HOURS,
 	);
 	const { data: stats, isLoading: statsLoading } = statsQuery;
-	const [timeRange, setTimeRange] = useState("6h");
+	const [timeRange, setTimeRange] = useState<TimeRange>("6h");
 	const analyticsQuery = useAnalytics(
 		timeRange,
 		{ accounts: [], models: [], status: "all" },

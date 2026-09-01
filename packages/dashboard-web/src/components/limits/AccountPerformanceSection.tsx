@@ -2,7 +2,7 @@ import type { PaymentsSummary } from "@clankermux/types";
 import { formatUsd } from "@clankermux/ui-common";
 import { AlertCircle } from "lucide-react";
 import { useMemo } from "react";
-import { CHART_TOKENS } from "../../constants";
+import { CHART_TOKENS, type TimeRange } from "../../constants";
 import { BaseBarChart } from "../charts";
 import type { ChartDataPoint } from "../charts/types";
 import {
@@ -68,8 +68,8 @@ interface AccountPerformanceSectionProps {
 	 */
 	unavailable?: boolean;
 	/** Selected time range (controlled); re-keys the parent's analytics query. */
-	range: string;
-	onRangeChange: (range: string) => void;
+	range: TimeRange;
+	onRangeChange: (range: TimeRange) => void;
 	costSummary: AccountPerformanceCostSummary;
 	/** Payments-ledger summary for the same range; undefined while loading. */
 	paymentsSummary?: PaymentsSummary;

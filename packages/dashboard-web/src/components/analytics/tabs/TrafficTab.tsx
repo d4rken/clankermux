@@ -161,21 +161,25 @@ export function TrafficTab(props: TrafficTabProps) {
 			<AnalyticsControls
 				timeRange={range}
 				setTimeRange={onRangeChange}
-				filters={filters}
-				setFilters={setFilters}
-				availableAccounts={availableAccounts}
-				availableModels={availableModels}
-				availableApiKeys={availableApiKeys}
-				availableProjects={availableProjects}
-				hasNoAccountBucket={hasNoAccountBucket}
-				hasNoProjectBucket={hasNoProjectBucket}
-				activeFilterCount={activeFilterCount}
-				filterOpen={filterOpen}
-				setFilterOpen={setFilterOpen}
-				loading={loading}
-				onRefresh={() => {
-					void refetch();
-					if (modelBreakdown) void refetchPerModel();
+				filterProps={{
+					filters,
+					setFilters,
+					availableAccounts,
+					availableModels,
+					availableApiKeys,
+					availableProjects,
+					hasNoAccountBucket,
+					hasNoProjectBucket,
+					activeFilterCount,
+					filterOpen,
+					setFilterOpen,
+				}}
+				refresh={{
+					loading,
+					onRefresh: () => {
+						void refetch();
+						if (modelBreakdown) void refetchPerModel();
+					},
 				}}
 			/>
 

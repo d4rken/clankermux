@@ -1,8 +1,7 @@
 import type { AnalyticsSection } from "@clankermux/types";
-import type { TimeRange } from "../../../constants";
 import { useAnalyticsData } from "../../../hooks/useAnalyticsData";
-import { TimeRangeSelector } from "../../overview/TimeRangeSelector";
 import {
+	AnalyticsControls,
 	CacheFlowPanel,
 	CacheKeepaliveSection,
 	MissingSectionsNotice,
@@ -28,15 +27,7 @@ export function CachingTab({ range, onRangeChange }: CachingTabProps) {
 
 	return (
 		<div className="space-y-section">
-			<div className="flex flex-col gap-row sm:flex-row sm:items-center sm:justify-end">
-				<div className="flex items-center gap-item shrink-0">
-					<span className="text-xs text-muted-foreground">Window</span>
-					<TimeRangeSelector
-						value={range}
-						onChange={(v) => onRangeChange(v as TimeRange)}
-					/>
-				</div>
-			</div>
+			<AnalyticsControls timeRange={range} setTimeRange={onRangeChange} />
 
 			<MissingSectionsNotice
 				analytics={analytics}
