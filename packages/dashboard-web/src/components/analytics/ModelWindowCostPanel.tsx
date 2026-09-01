@@ -1,7 +1,6 @@
 import type { QuotaDriftCohort, QuotaDriftModel } from "@clankermux/types";
 import { Coins, Loader2 } from "lucide-react";
 import {
-	cohortLabel,
 	formatCapacity,
 	formatCoefficient,
 	formatInterval,
@@ -9,7 +8,6 @@ import {
 	supportText,
 	unidentifiedReasonText,
 } from "../../lib/quota-drift-display";
-import { Badge } from "../ui/badge";
 import {
 	Card,
 	CardContent,
@@ -52,11 +50,6 @@ export function ModelWindowCostPanel({
 				<CardTitle className="flex items-center gap-item">
 					<Coins className="h-5 w-5" />
 					Window Cost per Model
-					{cohort ? (
-						<Badge variant="outline" className="ml-auto font-normal">
-							{cohortLabel(cohort)}
-						</Badge>
-					) : null}
 				</CardTitle>
 				<CardDescription className="text-xs">
 					Percentage of the window consumed per 1M price-equivalent tokens

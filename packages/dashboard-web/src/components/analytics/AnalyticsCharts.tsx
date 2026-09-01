@@ -53,6 +53,7 @@ import {
 	SelectTrigger,
 	SelectValue,
 } from "../ui/select";
+import { Skeleton } from "../ui/skeleton";
 import { Switch } from "../ui/switch";
 
 type TooltipFormatterProp = ComponentProps<typeof Tooltip>["formatter"];
@@ -173,7 +174,7 @@ export function MainMetricsChart({
 	return (
 		<Card>
 			<CardHeader>
-				<div className="flex items-center justify-between">
+				<div className="flex flex-wrap items-start justify-between gap-row">
 					<div>
 						<CardTitle>Traffic Analytics</CardTitle>
 						<CardDescription>
@@ -428,14 +429,20 @@ interface TokenBreakdownItem {
 	percentage: number;
 }
 
+// The four rows are a fixed schema (input, cache read, cache creation, output),
+// so the loading state can stand in for exactly what will arrive.
+const TOKEN_BREAKDOWN_ROWS = 4;
+
 interface TokenUsageBreakdownProps {
 	tokenBreakdown: TokenBreakdownItem[];
 	timeRange: TimeRange;
+	loading: boolean;
 }
 
 export function TokenUsageBreakdown({
 	tokenBreakdown,
 	timeRange,
+	loading,
 }: TokenUsageBreakdownProps) {
 	return (
 		<Card>
@@ -446,48 +453,75 @@ export function TokenUsageBreakdown({
 				</CardDescription>
 			</CardHeader>
 			<CardContent>
-				<div className="space-y-group">
-					{tokenBreakdown.map((item, index) => (
-						<div key={item.type}>
-							<div className="flex items-center justify-between mb-2">
-								<span className="text-sm font-medium">{item.type}</span>
-								<div className="flex items-center gap-item">
-									<span className="text-sm text-muted-foreground">
-										{formatTokens(item.value)} tokens
-									</span>
-									<Badge variant="outline">{item.percentage}%</Badge>
+				{/* This sits beside PerformanceIndicatorsChart, which takes `loading`
+				    and forwards it. Without the same treatment here, a refetch left
+				    one half of the row showing zero-percentage bars while the other
+				    showed its loading state. */}
+				{loading ? (
+					<div className="space-y-group">
+						{Array.from(
+							{ length: TOKEN_BREAKDOWN_ROWS },
+							(_, i) => `token-row-${i}`,
+						).map((key) => (
+							<div key={key}>
+								<div className="mb-item flex items-center justify-between">
+									<Skeleton className="h-4 w-28" />
+									<Skeleton className="h-4 w-24" />
 								</div>
+								<Skeleton className="h-2 w-full rounded-full" />
 							</div>
-							<div className="w-full bg-muted rounded-full h-2">
-								<div
-									className="h-2 rounded-full transition-all"
-									style={{
-										width: `${item.percentage}%`,
-										backgroundColor:
-											index === 0
-												? CHART_TOKENS.blue
-												: index === 1
-													? CHART_TOKENS.success
-													: index === 2
-														? CHART_TOKENS.warning
-														: CHART_TOKENS.purple,
-									}}
-								/>
+						))}
+						<div className="pt-group border-t">
+							<div className="flex items-center justify-between">
+								<span className="text-sm font-medium">Total Tokens</span>
+								<Skeleton className="h-6 w-32" />
 							</div>
-						</div>
-					))}
-					<div className="pt-4 border-t">
-						<div className="flex items-center justify-between">
-							<span className="text-sm font-medium">Total Tokens</span>
-							<span className="text-lg font-bold">
-								{formatTokens(
-									tokenBreakdown.reduce((acc, item) => acc + item.value, 0),
-								)}{" "}
-								tokens
-							</span>
 						</div>
 					</div>
-				</div>
+				) : (
+					<div className="space-y-group">
+						{tokenBreakdown.map((item, index) => (
+							<div key={item.type}>
+								<div className="flex items-center justify-between mb-2">
+									<span className="text-sm font-medium">{item.type}</span>
+									<div className="flex items-center gap-item">
+										<span className="text-sm text-muted-foreground">
+											{formatTokens(item.value)} tokens
+										</span>
+										<Badge variant="outline">{item.percentage}%</Badge>
+									</div>
+								</div>
+								<div className="w-full bg-muted rounded-full h-2">
+									<div
+										className="h-2 rounded-full transition-all"
+										style={{
+											width: `${item.percentage}%`,
+											backgroundColor:
+												index === 0
+													? CHART_TOKENS.blue
+													: index === 1
+														? CHART_TOKENS.success
+														: index === 2
+															? CHART_TOKENS.warning
+															: CHART_TOKENS.purple,
+										}}
+									/>
+								</div>
+							</div>
+						))}
+						<div className="pt-4 border-t">
+							<div className="flex items-center justify-between">
+								<span className="text-sm font-medium">Total Tokens</span>
+								<span className="text-lg font-bold">
+									{formatTokens(
+										tokenBreakdown.reduce((acc, item) => acc + item.value, 0),
+									)}{" "}
+									tokens
+								</span>
+							</div>
+						</div>
+					</div>
+				)}
 			</CardContent>
 		</Card>
 	);

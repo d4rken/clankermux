@@ -206,6 +206,7 @@ export function TrafficTab(props: TrafficTabProps) {
 				<TokenUsageBreakdown
 					tokenBreakdown={tokenBreakdown}
 					timeRange={range}
+					loading={loading}
 				/>
 			</div>
 

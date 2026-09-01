@@ -19,7 +19,6 @@ import {
 import { CHART_HEIGHTS, CHART_PROPS } from "../../constants";
 import { useSeriesPalette } from "../../hooks/useSeriesPalette";
 import {
-	cohortLabel,
 	flatWindowNotice,
 	lastObservedValueNotice,
 	notReportedNotice,
@@ -29,7 +28,6 @@ import {
 import { formatAxisTime } from "../../lib/time-format";
 import { ChartContainer } from "../charts/ChartContainer";
 import { getTooltipStyles } from "../charts/chart-utils";
-import { Badge } from "../ui/badge";
 import {
 	Card,
 	CardContent,
@@ -68,11 +66,6 @@ export function QuotaDriftPanel({
 				<CardTitle className="flex items-center gap-item">
 					<Activity className="h-5 w-5" />
 					Implied Capacity Over Time
-					{cohort ? (
-						<Badge variant="outline" className="ml-auto font-normal">
-							{cohortLabel(cohort)}
-						</Badge>
-					) : null}
 				</CardTitle>
 				<CardDescription className="text-xs">
 					Millions of equivalent tokens the full window would buy at each
