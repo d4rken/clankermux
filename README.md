@@ -2,8 +2,13 @@
   The mark is two files rather than one with a media query: an SVG behind an
   <img> renders in the browser's secure static mode and GitHub proxies README
   images through a sanitiser, so the theme has to be chosen outside the file.
-  <picture> is the mechanism GitHub documents for that. Both files, and every
-  screenshot below, come from `bun run build:readme-media`.
+  <picture> is the mechanism GitHub documents for that. The same applies to the
+  screenshots below, which is why each one is a light/dark pair.
+
+  The mark comes from `bun run build:readme-media`. The screenshots come from
+  `bun run build:readme-screenshots`, which boots a real ClankerMux against a
+  synthetic database in a network namespace and photographs it — see
+  scripts/readme-media/.
 -->
 # ClankerMux <picture><source media="(prefers-color-scheme: dark)" srcset="docs/media/logo-dark.svg"><img src="docs/media/logo-light.svg" alt="" height="30" align="center" /></picture>
 
@@ -52,12 +57,15 @@ Features:
 
 ## Screenshots
 
+Captured from a real instance carrying invented accounts and projects, not
+anyone's live deployment.
+
 <table>
 <tr>
-<td width="25%"><a href="docs/media/overview-light.svg"><picture><source media="(prefers-color-scheme: dark)" srcset="docs/media/overview-dark.svg"><img src="docs/media/overview-light.svg" width="100%" alt="Overview: a health strip reading All Systems Operational, tiles for 24-hour requests, success rate, tokens and plan value, and a per-account throughput chart." /></picture></a></td>
-<td width="25%"><a href="docs/media/accounts-light.svg"><picture><source media="(prefers-color-scheme: dark)" srcset="docs/media/accounts-dark.svg"><img src="docs/media/accounts-light.svg" width="100%" alt="Accounts: three account cards, each with its provider, status chips, request counts and a row of quota windows showing 5-hour, weekly and per-family utilization." /></picture></a></td>
-<td width="25%"><a href="docs/media/usage-light.svg"><picture><source media="(prefers-color-scheme: dark)" srcset="docs/media/usage-dark.svg"><img src="docs/media/usage-light.svg" width="100%" alt="Usage: a sawtooth chart of per-account utilization against the limit line, with dashed burn-rate projections, above headline figures for plan value, cost and value ratio." /></picture></a></td>
-<td width="25%"><a href="docs/media/requests-light.svg"><picture><source media="(prefers-color-scheme: dark)" srcset="docs/media/requests-dark.svg"><img src="docs/media/requests-light.svg" width="100%" alt="Request history: five request rows, each showing time, status, the account it was routed through, latency, and chips for the calling agent, project, model, token counts, throughput and cost." /></picture></a></td>
+<td width="25%"><a href="docs/media/overview-light.png"><picture><source media="(prefers-color-scheme: dark)" srcset="docs/media/overview-dark.png"><img src="docs/media/overview-light.png" width="100%" alt="Overview: a Live Activity strip plotting the last five minutes of requests by project, coloured by model, above tiles for total requests, 5-hour and 7-day pool capacity, quota runway, and monthly spend amortized per day, week and month." /></picture></a></td>
+<td width="25%"><a href="docs/media/accounts-light.png"><picture><source media="(prefers-color-scheme: dark)" srcset="docs/media/accounts-dark.png"><img src="docs/media/accounts-light.png" width="100%" alt="Accounts: five account cards across Anthropic, OpenAI, OpenRouter and a local Ollama model, each with its provider, priority, renewal date, request count, and bars for the 5-hour, weekly and per-model-family quota windows." /></picture></a></td>
+<td width="25%"><a href="docs/media/limits-light.png"><picture><source media="(prefers-color-scheme: dark)" srcset="docs/media/limits-dark.png"><img src="docs/media/limits-light.png" width="100%" alt="Usage: pooled 5-hour and 7-day quota with next checkpoints and exhaustion warnings, a quota runway estimate, and per-account utilization bars carrying burn-rate projections against each window's reset." /></picture></a></td>
+<td width="25%"><a href="docs/media/analytics-light.png"><picture><source media="(prefers-color-scheme: dark)" srcset="docs/media/analytics-dark.png"><img src="docs/media/analytics-light.png" width="100%" alt="Analytics: a request-volume chart over the last hour, with panels for error and cache-hit trends and a token usage breakdown split across input, cache read, cache creation and output tokens." /></picture></a></td>
 </tr>
 </table>
 

@@ -8,30 +8,23 @@ import {
 	BRAND_MARK_SELECTED_PATH,
 	BRAND_MARK_STROKES,
 } from "../packages/dashboard-web/src/brand-mark-geometry";
-import { CANVAS_WIDTH, renderAll, textWidth } from "./build-readme-media";
+import { renderAll } from "./build-readme-media";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const files = renderAll();
 
 /**
- * These SVGs are the README's illustrations, and nothing in this repo can
- * render one to look at. That makes silent breakage the realistic failure:
- * lengthen a mock account name or a chip label and the text runs off the canvas
- * or out of its own pill, and the only place it shows is a published page. The
- * checks below stand in for the eye that cannot see the output.
+ * These two SVGs are the README's brand mark, and nothing in this repo can
+ * render one to look at. That makes silent breakage the realistic failure: a
+ * geometry change that puts the mark outside its own 24-unit box, or a stray
+ * bit of CSS that GitHub's proxy strips, shows up only on a published page.
+ * The checks below stand in for the eye that cannot see the output.
  */
-
-interface Span {
-	text: string;
-	left: number;
-	right: number;
-	baseline: number;
-}
 
 /**
  * Every number read out of the markup goes through here. A missing or malformed
  * attribute yields NaN, and NaN fails every `>` and `<` comparison silently —
- * so an `x="NaN"` would sail through an overflow check that looks strict.
+ * so an `x="NaN"` would sail through a bounds check that looks strict.
  */
 function num(attrs: string, name: string): number {
 	const raw = attrs.match(new RegExp(`${name}="([^"]*)"`))?.[1];
@@ -42,52 +35,109 @@ function num(attrs: string, name: string): number {
 	return value;
 }
 
-function textSpans(svg: string): Span[] {
-	const spans: Span[] = [];
-	for (const m of svg.matchAll(/<text ([^>]*)>([^<]*)<\/text>/g)) {
-		const [, attrs, body] = m;
-		const attr = (name: string) =>
-			attrs.match(new RegExp(`${name}="([^"]*)"`))?.[1];
-		const x = num(attrs, "x");
-		const size = num(attrs, "font-size");
-		const mono = (attr("font-family") ?? "").includes("Geist Mono");
-		const anchor = attr("text-anchor") ?? "start";
-		const w = textWidth(body, size, mono);
-		const left = anchor === "end" ? x - w : anchor === "middle" ? x - w / 2 : x;
-		spans.push({
-			text: body,
-			left,
-			right: left + w,
-			baseline: num(attrs, "y"),
-		});
+/**
+ * Every point a path visits, including bezier control points, in absolute
+ * coordinates.
+ *
+ * A flat sweep of the numbers in a `d` attribute cannot do this: the mark uses
+ * `h`, whose operand is a RELATIVE x offset and not a coordinate at all, so
+ * reading the numbers as x/y pairs would bound the wrong values. Any command
+ * this does not implement throws rather than being skipped — an unrecognised
+ * command must fail the test, not quietly shrink what it checks.
+ */
+function pathPoints(d: string): Array<[number, number]> {
+	const points: Array<[number, number]> = [];
+	let x = 0;
+	let y = 0;
+	const tokens = d.match(/[A-Za-z]|-?\d+(?:\.\d+)?/g) ?? [];
+	let i = 0;
+	const next = () => {
+		const value = Number(tokens[i++]);
+		if (!Number.isFinite(value)) {
+			throw new Error(`path operand "${tokens[i - 1]}" is not a finite number`);
+		}
+		return value;
+	};
+	while (i < tokens.length) {
+		const command = tokens[i++];
+		switch (command) {
+			case "M":
+			case "L":
+				x = next();
+				y = next();
+				points.push([x, y]);
+				break;
+			case "l":
+				x += next();
+				y += next();
+				points.push([x, y]);
+				break;
+			case "H":
+				x = next();
+				points.push([x, y]);
+				break;
+			case "h":
+				x += next();
+				points.push([x, y]);
+				break;
+			case "V":
+				y = next();
+				points.push([x, y]);
+				break;
+			case "v":
+				y += next();
+				points.push([x, y]);
+				break;
+			case "C": {
+				const [x1, y1, x2, y2, ex, ey] = [
+					next(),
+					next(),
+					next(),
+					next(),
+					next(),
+					next(),
+				];
+				points.push([x1, y1], [x2, y2], [ex, ey]);
+				x = ex;
+				y = ey;
+				break;
+			}
+			case "c": {
+				// Control points AND the endpoint are relative to the current point;
+				// only the endpoint advances it.
+				const [dx1, dy1, dx2, dy2, dx, dy] = [
+					next(),
+					next(),
+					next(),
+					next(),
+					next(),
+					next(),
+				];
+				points.push([x + dx1, y + dy1], [x + dx2, y + dy2], [x + dx, y + dy]);
+				x += dx;
+				y += dy;
+				break;
+			}
+			default:
+				throw new Error(`unhandled path command "${command}" in "${d}"`);
+		}
 	}
-	return spans;
+	return points;
 }
 
-
-function viewBoxHeight(svg: string): number {
-	const m = svg.match(/viewBox="0 0 \d+ (\d+)"/);
+function viewBox(svg: string): { width: number; height: number } {
+	const m = svg.match(/viewBox="0 0 (\d+) (\d+)"/);
 	if (!m) throw new Error("no viewBox");
-	return Number(m[1]);
+	return { width: Number(m[1]), height: Number(m[2]) };
 }
 
 describe("README media", () => {
-	it("emits a light and a dark file for the logo and every view", () => {
+	it("emits a light and a dark logo, and nothing else", () => {
+		// The four dashboard mockups this script used to draw are now real
+		// captures from `scripts/capture-readme-screenshots.sh`; if one reappears
+		// here, two pipelines are writing the same figures.
 		const names = files.map((f) => f.name).sort();
-		expect(names).toEqual(
-			[
-				"accounts-dark.svg",
-				"accounts-light.svg",
-				"logo-dark.svg",
-				"logo-light.svg",
-				"overview-dark.svg",
-				"overview-light.svg",
-				"requests-dark.svg",
-				"requests-light.svg",
-				"usage-dark.svg",
-				"usage-light.svg",
-			].sort(),
-		);
+		expect(names).toEqual(["logo-dark.svg", "logo-light.svg"]);
 	});
 
 	it("matches what is committed in docs/media", () => {
@@ -145,62 +195,13 @@ describe("README media", () => {
 				expect(f.svg).not.toContain("@font-face");
 				// The namespace URI is declared, never fetched; nothing else may be a
 				// URL at all.
-				expect([...f.svg.matchAll(/https?:\/\/[^"\s]*/g)].map((m) => m[0]))
-					.toEqual(["http://www.w3.org/2000/svg"]);
-			});
-
-			it("never draws a pill narrower than the label on it", () => {
-				// A global canvas bound cannot see this: a chip whose background is
-				// too small for its own text sits well inside the page and still
-				// clips. Lengthening a mock label is exactly what causes it.
-				const boxes = f.pills;
-				// Only two views draw chips; the logo and the two chart views draw
-				// none, and asserting a minimum there would just be a false alarm.
-				// Where chips ARE expected, the count is checked so that a pairing
-				// that silently stops finding them cannot pass as clean.
-				if (/^(accounts|requests)-/.test(f.name)) {
-					expect(boxes.length).toBeGreaterThan(0);
-				} else if (f.name.startsWith("logo-")) {
-					expect(boxes).toHaveLength(0);
-				}
-				for (const b of boxes) {
-					expect({ label: b.label, clipped: b.textLeft < b.boxLeft }).toEqual({
-						label: b.label,
-						clipped: false,
-					});
-					expect({ label: b.label, clipped: b.textRight > b.boxRight }).toEqual(
-						{ label: b.label, clipped: false },
-					);
-				}
-			});
-
-			it("keeps every glyph inside its card, not merely inside the canvas", () => {
-				const height = viewBoxHeight(f.svg);
-				// The page gutter (24) plus a card's own padding (16). Text reaching
-				// past this has escaped the panel it belongs to, which is the failure
-				// that actually happens here — a lengthened chip label or account
-				// name pushing a row wider than the card that draws it.
-				const cardInterior = CANVAS_WIDTH - 24 - 16;
-				for (const s of textSpans(f.svg)) {
-					expect({
-						text: s.text,
-						overflowsRight: s.right > cardInterior,
-					}).toEqual({ text: s.text, overflowsRight: false });
-					expect({ text: s.text, overflowsLeft: s.left < 0 }).toEqual({
-						text: s.text,
-						overflowsLeft: false,
-					});
-					expect({
-						text: s.text,
-						belowCanvas: s.baseline > height - 4,
-					}).toEqual({ text: s.text, belowCanvas: false });
-				}
+				expect([...f.svg.matchAll(/https?:\/\/[^"\s]*/g)].map((m) => m[0])).toEqual([
+					"http://www.w3.org/2000/svg",
+				]);
 			});
 
 			it("keeps every shape inside the canvas", () => {
-				const height = viewBoxHeight(f.svg);
-				const vb = f.svg.match(/viewBox="0 0 (\d+) \d+"/);
-				const width = Number(vb?.[1]);
+				const { width, height } = viewBox(f.svg);
 				const inX = (v: number) => {
 					expect(v).toBeGreaterThanOrEqual(-0.5);
 					expect(v).toBeLessThanOrEqual(width + 0.5);
@@ -210,112 +211,124 @@ describe("README media", () => {
 					expect(v).toBeLessThanOrEqual(height + 0.5);
 				};
 
-				let shapes = 0;
+				let rects = 0;
 				for (const m of f.svg.matchAll(/<rect ([^>]*)\/>/g)) {
-					shapes++;
+					rects++;
 					inX(num(m[1], "x"));
 					inX(num(m[1], "x") + num(m[1], "width"));
 					inY(num(m[1], "y"));
 					inY(num(m[1], "y") + num(m[1], "height"));
 				}
-				for (const m of f.svg.matchAll(/<line ([^>]*)\/>/g)) {
-					shapes++;
-					inX(num(m[1], "x1"));
-					inX(num(m[1], "x2"));
-					inY(num(m[1], "y1"));
-					inY(num(m[1], "y2"));
-				}
-				for (const m of f.svg.matchAll(/<circle ([^>]*)\/>/g)) {
-					shapes++;
-					inX(num(m[1], "cx"));
-					inY(num(m[1], "cy"));
-				}
-				// Paths carry the brand mark, whose coordinates are absolute inside a
-				// 24-unit box; the logo files contain nothing else, so without this
-				// the shape check made no assertion about them whatsoever.
+
+				// The mark is two paths plus the core rect and nothing else, so the
+				// path arm is the one that carries this check — counted separately
+				// because a rect-only tally would let a broken path regex pass as a
+				// file full of shapes.
+				let paths = 0;
 				for (const m of f.svg.matchAll(/<path d="([^"]*)"/g)) {
-					shapes++;
-					const coords = m[1].match(/-?\d+(?:\.\d+)?/g) ?? [];
-					expect(coords.length).toBeGreaterThan(0);
-					for (const c of coords) {
-						expect(Number.isFinite(Number(c))).toBe(true);
-						expect(Math.abs(Number(c))).toBeLessThanOrEqual(24);
+					paths++;
+					const points = pathPoints(m[1]);
+					expect(points.length).toBeGreaterThan(0);
+					for (const [x, y] of points) {
+						inX(x);
+						inY(y);
 					}
 				}
-				for (const m of f.svg.matchAll(/points="([^"]*)"/g)) {
-					shapes++;
-					for (const pt of m[1].split(" ")) {
-						const [px, py] = pt.split(",").map(Number);
-						expect(Number.isFinite(px)).toBe(true);
-						expect(Number.isFinite(py)).toBe(true);
-						inX(px);
-						inY(py);
-					}
-				}
+
 				// Guards the guard: a regex that stops matching would otherwise turn
 				// this whole test into a pass.
-				expect(shapes).toBeGreaterThan(0);
+				expect({ rects: rects > 0, paths: paths > 0 }).toEqual({
+					rects: true,
+					paths: true,
+				});
 			});
 		});
 	}
 
 	it("uses each palette's own ink, so the pair is not two copies", () => {
-		const dark = files.find((f) => f.name === "accounts-dark.svg")?.svg ?? "";
-		const light = files.find((f) => f.name === "accounts-light.svg")?.svg ?? "";
-		expect(dark).toContain("#e8eff1");
-		expect(dark).not.toContain("#0f1a20");
-		expect(light).toContain("#0f1a20");
-		expect(light).not.toContain("#e8eff1");
+		const dark = files.find((f) => f.name === "logo-dark.svg")?.svg ?? "";
+		const light = files.find((f) => f.name === "logo-light.svg")?.svg ?? "";
+		expect(dark).toContain("#4fb8be");
+		expect(dark).not.toContain("#0f6d74");
+		expect(light).toContain("#0f6d74");
+		expect(light).not.toContain("#4fb8be");
 	});
 
 	it("is referenced by the README through a closed <picture>, not a bare <img>", () => {
-		// A bare <img> would pin one theme's screenshot onto both GitHub themes.
-		// Matching the whole element rather than the two paths separately is what
-		// makes this a structural check: the substrings alone would also be
-		// satisfied by two unrelated images, or by an unclosed tag.
+		// A bare <img> would pin one theme's mark onto both GitHub themes: the
+		// light logo is near-invisible on a dark page. Matching the whole element
+		// rather than the two paths separately is what makes this a structural
+		// check — the substrings alone would also be satisfied by two unrelated
+		// images, or by an unclosed tag.
 		const readme = readFileSync(join(ROOT, "README.md"), "utf8");
 		const blocks = [
 			...readme.matchAll(
-				/<picture><source media="\(prefers-color-scheme: dark\)" srcset="(docs\/media\/[^"]+)"><img src="(docs\/media\/[^"]+)"[^>]*><\/picture>/g,
+				/<picture><source media="\(prefers-color-scheme: dark\)" srcset="docs\/media\/logo-dark\.svg"><img src="docs\/media\/logo-light\.svg"([^>]*)><\/picture>/g,
 			),
 		];
-		const darkFiles = files
-			.filter((f) => f.name.endsWith("-dark.svg"))
-			.map((f) => f.name);
-		expect(blocks).toHaveLength(darkFiles.length);
+		expect(blocks).toHaveLength(1);
+		expect(existsSync(join(ROOT, "docs", "media", "logo-dark.svg"))).toBe(true);
+		expect(existsSync(join(ROOT, "docs", "media", "logo-light.svg"))).toBe(true);
 
-		for (const [, dark, light] of blocks) {
-			// The pair inside one <picture> must be the two halves of the SAME image.
-			expect(dark.replace("-dark.svg", "")).toBe(
-				light.replace("-light.svg", ""),
-			);
-			expect(existsSync(join(ROOT, dark))).toBe(true);
-			expect(existsSync(join(ROOT, light))).toBe(true);
-		}
-		expect(blocks.map((b) => b[1]).sort()).toEqual(
-			darkFiles.map((n) => `docs/media/${n}`).sort(),
-		);
-
-		// Nothing may reference the media outside a <picture> — except the
-		// click-through link each screenshot's <picture> is wrapped in, whose
-		// href necessarily sits outside the element it wraps.
-		const stripped = readme
-			.replace(
-				/<a href="docs\/media\/[^"]+"><picture>.*?<\/picture><\/a>/g,
-				"",
-			)
-			.replace(/<picture>.*?<\/picture>/g, "");
-		expect(stripped).not.toContain("docs/media/");
+		// That <picture> accounts for both mentions of the mark: one srcset, one
+		// src. A third would be a reference outside it.
+		expect(readme.match(/docs\/media\/logo-/g) ?? []).toHaveLength(2);
 	});
 
-	it("gives every screenshot alt text describing what is in it", () => {
+	it("references every captured screenshot as a light/dark pair with alt text", () => {
+		// The captures come from `scripts/capture-readme-screenshots.sh`, which
+		// nothing here can run — so this is the only check that the README and
+		// docs/media agree at all. Without it a renamed route, a half-finished
+		// capture run, or a dropped dark variant reaches a published page as a
+		// broken image.
 		const readme = readFileSync(join(ROOT, "README.md"), "utf8");
-		for (const m of readme.matchAll(/<img src="docs\/media\/([^"]+)"[^>]*>/g)) {
-			const alt = m[0].match(/alt="([^"]*)"/)?.[1];
-			// The logo's alt is deliberately empty: it sits beside the project name
-			// in the heading, so announcing it would repeat the word "ClankerMux".
-			if (m[1].startsWith("logo-")) expect(alt).toBe("");
-			else expect((alt ?? "").length).toBeGreaterThan(40);
+		const names = ["overview", "accounts", "limits", "analytics"];
+
+		for (const name of names) {
+			for (const theme of ["light", "dark"]) {
+				const file = join(ROOT, "docs", "media", `${name}-${theme}.png`);
+				expect(`${name}-${theme}.png: ${existsSync(file)}`).toBe(
+					`${name}-${theme}.png: true`,
+				);
+			}
+
+			const block = readme.match(
+				new RegExp(
+					`<picture><source media="\\(prefers-color-scheme: dark\\)" srcset="docs/media/${name}-dark\\.png"><img src="docs/media/${name}-light\\.png"([^>]*)></picture>`,
+				),
+			);
+			expect(`${name}: referenced`).toBe(
+				block ? `${name}: referenced` : `${name}: MISSING or malformed`,
+			);
+			// Non-empty alt, unlike the logo: these figures carry information a
+			// screen-reader user cannot otherwise get.
+			const alt = block?.[1].match(/\salt="([^"]*)"/)?.[1] ?? "";
+			expect(`${name} alt length`).toBe(
+				alt.length > 40 ? `${name} alt length` : `${name} alt too short: "${alt}"`,
+			);
+		}
+
+		// No stray references to figures that no longer exist.
+		const referenced = [
+			...readme.matchAll(/docs\/media\/([a-z-]+)\.png/g),
+		].map((m) => m[1]);
+		const expected = names.flatMap((n) => [`${n}-light`, `${n}-dark`]);
+		expect([...new Set(referenced)].sort()).toEqual(expected.sort());
+	});
+
+	it("gives the logo an alt attribute", () => {
+		// Deliberately empty: it sits beside the project name in the heading, so
+		// announcing it would just repeat the word "ClankerMux". Empty is a
+		// decision a screen reader honours; a missing attribute makes it read the
+		// filename instead, which is why presence is asserted separately.
+		const readme = readFileSync(join(ROOT, "README.md"), "utf8");
+		const tags = [
+			...readme.matchAll(/<img src="docs\/media\/logo-[^"]+"[^>]*>/g),
+		].map((m) => m[0]);
+		expect(tags).toHaveLength(1);
+		for (const tag of tags) {
+			expect(tag).toMatch(/\salt="/);
+			expect(tag.match(/alt="([^"]*)"/)?.[1]).toBe("");
 		}
 	});
 });
