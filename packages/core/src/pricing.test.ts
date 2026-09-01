@@ -368,6 +368,47 @@ describe("bundled Mythos-class pricing (offline fallback)", () => {
 	});
 });
 
+describe("bundled Fable/Mythos 5.1 pricing (offline fallback)", () => {
+	// The 5.1 generation keeps $10/M input, $50/M output, $12.50/M cache write
+	// but drops cache reads to $0.25/M — 0.025x, unique to Fable/Mythos 5.1.
+	const ioTokens: TokenBreakdown = {
+		inputTokens: 1_000_000,
+		outputTokens: 1_000_000,
+	};
+	const cacheTokens: TokenBreakdown = {
+		cacheReadInputTokens: 1_000_000,
+		cacheCreationInputTokens: 1_000_000,
+	};
+
+	it("prices claude-fable-5-1 input/output from bundled data", async () => {
+		expect(await estimateCostUSD("claude-fable-5-1", ioTokens)).toBeCloseTo(
+			60,
+			6,
+		);
+	});
+
+	it("prices claude-fable-5-1 cache tokens from bundled data", async () => {
+		expect(await estimateCostUSD("claude-fable-5-1", cacheTokens)).toBeCloseTo(
+			12.75,
+			6,
+		);
+	});
+
+	it("prices claude-mythos-5-1 input/output from bundled data", async () => {
+		expect(await estimateCostUSD("claude-mythos-5-1", ioTokens)).toBeCloseTo(
+			60,
+			6,
+		);
+	});
+
+	it("prices claude-mythos-5-1 cache tokens from bundled data", async () => {
+		expect(await estimateCostUSD("claude-mythos-5-1", cacheTokens)).toBeCloseTo(
+			12.75,
+			6,
+		);
+	});
+});
+
 describe("getModelCacheRates", () => {
 	it("returns Opus 5 rates from bundled data", () => {
 		expect(getModelCacheRates("claude-opus-5")).toEqual({

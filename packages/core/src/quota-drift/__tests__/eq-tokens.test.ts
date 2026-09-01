@@ -134,6 +134,27 @@ describe("EQ_WEIGHTS invariants against the bundled price table", () => {
 		expect(override.cacheCreate).toBe(OPENAI_EQ_WEIGHTS.cacheCreate);
 	});
 
+	it("prices Fable/Mythos 5.1's cheaper cache reads on their own weights", () => {
+		// The 5.1 generation reads cache at $0.25/M against $10/M input — 0.025x
+		// where every other Anthropic model reads at 0.1x. Claude Code traffic is
+		// cache-read-dominated, so the shared weight would overstate exposure
+		// fourfold on the dominant token class.
+		for (const id of ["claude-fable-5-1", "claude-mythos-5-1"]) {
+			const entry = entriesFor("anthropic").find(([entryId]) => entryId === id);
+			expect(entry).toBeDefined();
+			const [, cost] = entry as [string, ModelCost];
+			expect((cost.cache_read as number) / cost.input).toBeCloseTo(0.025, 9);
+
+			const override = MODEL_EQ_WEIGHT_OVERRIDES[id];
+			expect(override).toBeDefined();
+			expect(override.cacheRead).toBeCloseTo(0.025, 9);
+			// Only the diverging class differs; the rest stay on the provider ratios.
+			expect(override.input).toBe(ANTHROPIC_EQ_WEIGHTS.input);
+			expect(override.output).toBe(ANTHROPIC_EQ_WEIGHTS.output);
+			expect(override.cacheCreate).toBe(ANTHROPIC_EQ_WEIGHTS.cacheCreate);
+		}
+	});
+
 	it("tolerates a Codex entry that omits cache_write", () => {
 		// Not a hypothetical: Codex reports no cache-creation tokens, so several
 		// entries carry no rate for it.

@@ -77,10 +77,6 @@ describe("Claude Fable 5 registration", () => {
 		expect(CLAUDE_MODEL_IDS.FABLE_5).toBe("claude-fable-5");
 	});
 
-	it("is the latest fable model", () => {
-		expect(LATEST_FABLE_MODEL).toBe("claude-fable-5");
-	});
-
 	it("has a human-readable display name", () => {
 		expect(getModelDisplayName("claude-fable-5")).toBe("Claude Fable 5");
 	});
@@ -105,5 +101,46 @@ describe("Claude Mythos 5 registration", () => {
 
 	it("is recognized as a valid model id", () => {
 		expect(isValidModelId("claude-mythos-5")).toBe(true);
+	});
+});
+
+describe("Claude Fable 5.1 registration", () => {
+	it("exposes the claude-fable-5-1 model id", () => {
+		expect(CLAUDE_MODEL_IDS.FABLE_5_1).toBe("claude-fable-5-1");
+	});
+
+	it("is the latest fable model", () => {
+		expect(LATEST_FABLE_MODEL).toBe("claude-fable-5-1");
+	});
+
+	it("has a human-readable display name", () => {
+		expect(getModelDisplayName("claude-fable-5-1")).toBe("Claude Fable 5.1");
+	});
+
+	it("has a short name for UI color mapping", () => {
+		// Dot-decimal for an x.y version — matches the Opus 4.8 precedent.
+		expect(getModelShortName("claude-fable-5-1")).toBe("claude-fable-5.1");
+	});
+
+	it("is recognized as a valid model id", () => {
+		expect(isValidModelId("claude-fable-5-1")).toBe(true);
+	});
+});
+
+describe("Claude Mythos 5.1 registration", () => {
+	it("exposes the claude-mythos-5-1 model id", () => {
+		expect(CLAUDE_MODEL_IDS.MYTHOS_5_1).toBe("claude-mythos-5-1");
+	});
+
+	it("has a human-readable display name", () => {
+		expect(getModelDisplayName("claude-mythos-5-1")).toBe("Claude Mythos 5.1");
+	});
+
+	it("has a short name for UI color mapping", () => {
+		expect(getModelShortName("claude-mythos-5-1")).toBe("claude-mythos-5.1");
+	});
+
+	it("is recognized as a valid model id", () => {
+		expect(isValidModelId("claude-mythos-5-1")).toBe(true);
 	});
 });

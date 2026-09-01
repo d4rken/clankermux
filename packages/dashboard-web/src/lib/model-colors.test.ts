@@ -410,6 +410,18 @@ describe("getModelColor", () => {
 		expect(new Set(colors).size).toBe(3);
 	});
 
+	it("keeps Fable 5.1 and Mythos 5.1 off their 5.0 predecessors' colors", () => {
+		// The substring fallback would hand `claude-fable-5-1` Fable 5's teal if
+		// the explicit entry went missing — two live models as one line, since
+		// both generations appear in the same time ranges around the switchover.
+		expect(getModelColor(CLAUDE_MODEL_IDS.FABLE_5_1)).not.toBe(
+			getModelColor(CLAUDE_MODEL_IDS.FABLE_5),
+		);
+		expect(getModelColor(CLAUDE_MODEL_IDS.MYTHOS_5_1)).not.toBe(
+			getModelColor(CLAUDE_MODEL_IDS.MYTHOS_5),
+		);
+	});
+
 	it("keeps Sonnet 4.5 off the legacy claude-3.5-sonnet color", () => {
 		expect(getModelColor(CLAUDE_MODEL_IDS.SONNET_4_5)).not.toBe(
 			getModelColor("claude-3.5-sonnet"),
