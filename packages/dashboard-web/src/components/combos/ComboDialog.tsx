@@ -58,6 +58,7 @@ export function ComboDialog({ isOpen, onClose, comboId }: ComboDialogProps) {
 		setName("");
 		setDescription("");
 		setEnabled(true);
+		createCombo.reset();
 		onClose();
 	};
 

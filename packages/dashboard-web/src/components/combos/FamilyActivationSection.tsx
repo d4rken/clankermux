@@ -94,6 +94,7 @@ export function FamilyActivationSection() {
 					<>
 						{assignFamily.isError && (
 							<Alert
+								className="mb-row"
 								size="sm"
 								tone="destructive"
 								title={

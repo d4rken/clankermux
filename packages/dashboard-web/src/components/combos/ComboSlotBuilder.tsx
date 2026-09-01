@@ -192,7 +192,10 @@ export function ComboSlotBuilder({ combo }: ComboSlotBuilderProps) {
 					<Button
 						variant="outline"
 						size="sm"
-						onClick={() => setShowAddForm((v) => !v)}
+						onClick={() => {
+							addSlot.reset();
+							setShowAddForm((v) => !v);
+						}}
 					>
 						{/* No margin: Button's base gap-item already separates the icon
 						    from the label. `h-3 w-3` is inert here — the base's

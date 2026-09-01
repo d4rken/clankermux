@@ -537,7 +537,13 @@ export function ApiKeysTab() {
 					title="API Keys"
 					description="Manage API keys for authentication. When at least one key is active, all API requests must include a valid API key."
 				/>
-				<Dialog open={isCreateDialogOpen} onOpenChange={setIsCreateDialogOpen}>
+				<Dialog
+					open={isCreateDialogOpen}
+					onOpenChange={(open) => {
+						generateKeyMutation.reset();
+						setIsCreateDialogOpen(open);
+					}}
+				>
 					<DialogTrigger asChild>
 						<Button>
 							<Plus className="h-4 w-4" />
