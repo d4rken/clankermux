@@ -24,6 +24,7 @@ import {
 import { makeTimeTooltipLabelFormatter } from "../../lib/time-format";
 import { ChartContainer } from "./ChartContainer";
 import { getTooltipStyles } from "./chart-utils";
+import { legendLabelFormatter } from "./legend-format";
 
 type TooltipFormatterProp = ComponentProps<typeof Tooltip>["formatter"];
 
@@ -134,51 +135,32 @@ export function MultiModelChart({
 				data={data}
 				margin={{ top: 5, right: 30, left: 20, bottom: 5 }}
 			>
-				<defs>
-					{models.map((model, _index) => (
-						<linearGradient
-							key={model}
-							id={`gradient-${model}`}
-							x1="0"
-							y1="0"
-							x2="0"
-							y2="1"
-						>
-							<stop
-								offset="0%"
-								stopColor={series.forModel(model)}
-								stopOpacity={0.9}
-							/>
-							<stop
-								offset="100%"
-								stopColor={series.forModel(model)}
-								stopOpacity={0.3}
-							/>
-						</linearGradient>
-					))}
-				</defs>
 				<CartesianGrid
 					strokeDasharray={CHART_PROPS.strokeDasharray}
 					className={CHART_PROPS.gridClassName}
 				/>
 				<XAxis
+					{...CHART_PROPS.axis}
 					dataKey="time"
-					fontSize={12}
+					className="text-xs"
 					angle={data.length > 10 ? -45 : 0}
 					textAnchor={data.length > 10 ? "end" : "middle"}
 					height={data.length > 10 ? 60 : 30}
 				/>
 				<YAxis
-					fontSize={12}
+					{...CHART_PROPS.axis}
+					className="text-xs"
 					tickFormatter={(value) => formatAxisValue(value, metric)}
 					label={{
 						value: getMetricLabel(metric),
 						angle: -90,
 						position: "insideLeft",
-						style: { textAnchor: "middle", fontSize: 12 },
+						className: "text-xs",
+						style: { textAnchor: "middle" },
 					}}
 				/>
 				<Tooltip
+					cursor={CHART_PROPS.cursorLine}
 					contentStyle={getTooltipStyles()}
 					formatter={
 						((value: number) =>
@@ -187,9 +169,10 @@ export function MultiModelChart({
 					labelFormatter={makeTimeTooltipLabelFormatter(timeRange)}
 				/>
 				<Legend
+					formatter={legendLabelFormatter}
 					verticalAlign="top"
 					height={36}
-					wrapperStyle={{ paddingTop: "10px" }}
+					wrapperStyle={{ paddingTop: "var(--space-item)" }}
 				/>
 				{models.map((model, _index) => (
 					<Line

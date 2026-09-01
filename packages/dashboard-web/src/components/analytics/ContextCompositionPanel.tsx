@@ -15,7 +15,7 @@ import {
 	XAxis,
 	YAxis,
 } from "recharts";
-import type { TimeRange } from "../../constants";
+import { CHART_PROPS, type TimeRange } from "../../constants";
 import { useSeriesPalette } from "../../hooks/useSeriesPalette";
 import {
 	formatCompactNumber,
@@ -207,9 +207,15 @@ function CompositionSplit({
 					layout="vertical"
 					margin={{ top: 4, right: 4, bottom: 4, left: 4 }}
 				>
-					<XAxis type="number" hide domain={[0, totalChars]} />
-					<YAxis type="category" dataKey="name" hide />
+					<XAxis
+						{...CHART_PROPS.axis}
+						type="number"
+						hide
+						domain={[0, totalChars]}
+					/>
+					<YAxis {...CHART_PROPS.axis} type="category" dataKey="name" hide />
 					<Tooltip
+						cursor={CHART_PROPS.cursorBand}
 						contentStyle={getTooltipStyles()}
 						formatter={tooltipFormatter}
 					/>

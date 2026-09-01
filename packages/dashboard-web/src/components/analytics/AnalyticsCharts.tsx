@@ -37,6 +37,7 @@ import {
 	TokenUsageChart,
 } from "../charts";
 import { getTooltipStyles, longRangeAxisProps } from "../charts/chart-utils";
+import { legendLabelFormatter } from "../charts/legend-format";
 import { Badge } from "../ui/badge";
 import {
 	Card,
@@ -303,6 +304,7 @@ export function MainMetricsChart({
 											className={CHART_PROPS.gridClassName}
 										/>
 										<XAxis
+											{...CHART_PROPS.axis}
 											dataKey="time"
 											className="text-xs"
 											angle={isLongRange ? -45 : 0}
@@ -310,10 +312,12 @@ export function MainMetricsChart({
 											height={isLongRange ? 60 : 30}
 										/>
 										<YAxis
+											{...CHART_PROPS.axis}
 											className="text-xs"
 											tickFormatter={formatCompactCurrency}
 										/>
 										<Tooltip
+											cursor={CHART_PROPS.cursorLine}
 											formatter={
 												((value: number, name: string) => [
 													formatCost(Number(value)),
@@ -322,7 +326,7 @@ export function MainMetricsChart({
 											}
 											labelFormatter={makeTimeTooltipLabelFormatter(timeRange)}
 										/>
-										<Legend height={36} />
+										<Legend height={36} formatter={legendLabelFormatter} />
 										<Area
 											type="monotone"
 											dataKey="planCost"
@@ -590,7 +594,7 @@ export function CumulativeGrowthChart({
 							strokeDasharray={CHART_PROPS.strokeDasharray}
 							className={CHART_PROPS.gridClassName}
 						/>
-						<XAxis dataKey="time" className="text-xs" />
+						<XAxis {...CHART_PROPS.axis} dataKey="time" className="text-xs" />
 						<YAxis
 							yAxisId="tokens"
 							className="text-xs"
@@ -605,6 +609,7 @@ export function CumulativeGrowthChart({
 							tickFormatter={formatCompactCurrency}
 						/>
 						<Tooltip
+							cursor={CHART_PROPS.cursorLine}
 							labelClassName="font-bold"
 							contentStyle={getTooltipStyles()}
 							labelFormatter={makeTimeTooltipLabelFormatter(timeRange)}
@@ -617,6 +622,7 @@ export function CumulativeGrowthChart({
 							}
 						/>
 						<Legend
+							formatter={legendLabelFormatter}
 							verticalAlign="top"
 							height={36}
 							iconType="rect"

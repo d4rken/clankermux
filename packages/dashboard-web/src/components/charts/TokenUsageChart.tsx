@@ -22,13 +22,6 @@ export function TokenUsageChart({
 	height = 400,
 	timeRange = "24h",
 }: TokenUsageChartProps) {
-	const gradient = (
-		<linearGradient id="colorTokens" x1="0" y1="0" x2="0" y2="1">
-			<stop offset="0%" stopColor={CHART_TOKENS.primary} stopOpacity={0.9} />
-			<stop offset="100%" stopColor={CHART_TOKENS.primary} stopOpacity={0.1} />
-		</linearGradient>
-	);
-
 	return (
 		<BaseAreaChart
 			data={data}
@@ -37,7 +30,6 @@ export function TokenUsageChart({
 			height={height}
 			color={CHART_TOKENS.primary}
 			gradientId="colorTokens"
-			customGradient={gradient}
 			strokeWidth={2}
 			{...longRangeAxisProps(timeRange)}
 			yAxisTickFormatter={formatCompactNumber}

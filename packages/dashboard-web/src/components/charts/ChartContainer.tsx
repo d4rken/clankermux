@@ -1,6 +1,7 @@
-import { RefreshCw } from "lucide-react";
 import type { ReactNode } from "react";
 import { CHART_HEIGHTS } from "../../constants";
+import { cn } from "../../lib/utils";
+import { Skeleton } from "../ui/skeleton";
 
 interface ChartContainerProps {
 	children: ReactNode;
@@ -8,6 +9,12 @@ interface ChartContainerProps {
 	height?: keyof typeof CHART_HEIGHTS | number;
 	className?: string;
 	error?: Error | null;
+	/**
+	 * A string takes the one house empty-state treatment below. The `ReactNode`
+	 * form stays for the structured cases (a sentence plus a link, say) — five
+	 * spellings across three measures, two sizes and two alignments existed
+	 * before the string form did.
+	 */
 	emptyState?: ReactNode;
 	isEmpty?: boolean;
 }
@@ -16,7 +23,7 @@ export function ChartContainer({
 	children,
 	loading = false,
 	height = "medium",
-	className = "",
+	className,
 	error = null,
 	emptyState,
 	isEmpty = false,
@@ -27,7 +34,7 @@ export function ChartContainer({
 	if (error) {
 		return (
 			<div
-				className={`flex items-center justify-center ${className}`}
+				className={cn("flex items-center justify-center", className)}
 				style={{ height: chartHeight }}
 			>
 				<div className="text-center space-y-item">
@@ -41,12 +48,13 @@ export function ChartContainer({
 	}
 
 	if (loading) {
+		// A Skeleton sized to the plot, not a spinning RefreshCw. This was the
+		// third pending vocabulary in the app; the other 10+ surfaces already
+		// stand in for their content with a pulsing block of its shape, which
+		// also reserves the plot's box instead of centring an icon in it.
 		return (
-			<div
-				className={`flex items-center justify-center ${className}`}
-				style={{ height: chartHeight }}
-			>
-				<RefreshCw className="h-8 w-8 animate-spin text-muted-foreground" />
+			<div className={className}>
+				<Skeleton className="w-full" style={{ height: chartHeight }} />
 			</div>
 		);
 	}
@@ -54,10 +62,16 @@ export function ChartContainer({
 	if (isEmpty && emptyState) {
 		return (
 			<div
-				className={`flex items-center justify-center ${className}`}
+				className={cn("flex items-center justify-center", className)}
 				style={{ height: chartHeight }}
 			>
-				{emptyState}
+				{typeof emptyState === "string" ? (
+					<p className="max-w-prose text-center text-sm text-muted-foreground">
+						{emptyState}
+					</p>
+				) : (
+					emptyState
+				)}
 			</div>
 		);
 	}

@@ -18,6 +18,7 @@ import { formatAxisTime, formatTooltipTime } from "../../lib/time-format";
 import { ChartContainer } from "../charts/ChartContainer";
 import { ChartTooltip } from "../charts/ChartTooltip";
 import { getChartHeight } from "../charts/chart-utils";
+import { legendLabelFormatter } from "../charts/legend-format";
 import {
 	Card,
 	CardContent,
@@ -134,12 +135,14 @@ export function MemoryUsageChart({
 								className={CHART_PROPS.gridClassName}
 							/>
 							<XAxis
+								{...CHART_PROPS.axis}
 								dataKey="ts"
 								className="text-xs"
 								height={30}
 								tickFormatter={(value) => formatAxisTime(Number(value), range)}
 							/>
 							<YAxis
+								{...CHART_PROPS.axis}
 								yAxisId="memory"
 								className="text-xs"
 								width={56}
@@ -148,6 +151,7 @@ export function MemoryUsageChart({
 							{/* Right axis for the event-loop lag overlay (ms); auto domain
 							    since lag spans <1 ms to multi-second stalls. */}
 							<YAxis
+								{...CHART_PROPS.axis}
 								yAxisId="lag"
 								orientation="right"
 								className="text-xs"
@@ -157,6 +161,7 @@ export function MemoryUsageChart({
 								}
 							/>
 							<Tooltip
+								cursor={CHART_PROPS.cursorLine}
 								content={
 									<ChartTooltip
 										formatters={{
@@ -181,7 +186,12 @@ export function MemoryUsageChart({
 									/>
 								}
 							/>
-							<Legend verticalAlign="top" height={36} iconType="rect" />
+							<Legend
+								formatter={legendLabelFormatter}
+								verticalAlign="top"
+								height={36}
+								iconType="rect"
+							/>
 							<Area
 								yAxisId="memory"
 								type="monotone"

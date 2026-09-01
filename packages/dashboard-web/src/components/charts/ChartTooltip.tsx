@@ -46,12 +46,11 @@ export function ChartTooltip({
 		: label;
 
 	return (
-		<div
-			className="p-row rounded-md shadow-overlay"
-			style={{ ...CHART_TOOLTIP_STYLE, ...style }}
-		>
+		<div className="p-row" style={{ ...CHART_TOOLTIP_STYLE, ...style }}>
 			{formattedLabel && (
-				<p className="font-medium mb-item">{formattedLabel}</p>
+				<p className="text-xs figure text-muted-foreground mb-item">
+					{formattedLabel}
+				</p>
 			)}
 			<div className="space-y-tight">
 				{payload.map((entry, index) => {
@@ -70,7 +69,7 @@ export function ChartTooltip({
 								className="w-3 h-3 rounded-full"
 								style={{ backgroundColor: entry.color }}
 							/>
-							<span className="text-sm">
+							<span className="text-sm figure">
 								{entry.name}: <strong>{value}</strong>
 							</span>
 						</div>

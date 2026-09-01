@@ -28,6 +28,7 @@ import {
 import { formatAxisTime } from "../../lib/time-format";
 import { ChartContainer } from "../charts/ChartContainer";
 import { getTooltipStyles } from "../charts/chart-utils";
+import { legendLabelFormatter } from "../charts/legend-format";
 import {
 	Card,
 	CardContent,
@@ -188,18 +189,21 @@ function WindowSeries({
 							className={CHART_PROPS.gridClassName}
 						/>
 						<XAxis
+							{...CHART_PROPS.axis}
 							dataKey="ts"
 							type="number"
 							domain={["dataMin", "dataMax"]}
 							scale="time"
-							tick={{ fontSize: 11 }}
+							tick={{ ...CHART_PROPS.axis.tick, fontSize: 11 }}
 							tickFormatter={(v: number) => formatAxisTime(v, "all")}
 						/>
 						<YAxis
-							tick={{ fontSize: 11 }}
+							{...CHART_PROPS.axis}
+							tick={{ ...CHART_PROPS.axis.tick, fontSize: 11 }}
 							tickFormatter={(v: number) => `${v.toFixed(0)}M`}
 						/>
 						<Tooltip
+							cursor={CHART_PROPS.cursorLine}
 							contentStyle={getTooltipStyles()}
 							labelFormatter={(v) => new Date(Number(v)).toLocaleString()}
 							formatter={(value: unknown, name: unknown) => {
@@ -217,7 +221,7 @@ function WindowSeries({
 								];
 							}}
 						/>
-						<Legend />
+						<Legend formatter={legendLabelFormatter} />
 						{models.map((key, _index) => (
 							<Area
 								key={`${key}__band`}
