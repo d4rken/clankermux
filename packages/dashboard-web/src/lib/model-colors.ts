@@ -45,6 +45,8 @@ export const MODEL_COLOR_KEYS: Record<string, keyof typeof MODEL_PALETTE> = {
 	"claude-haiku-4.5": "lightBlue",
 	"claude-fable-5": "teal",
 	"claude-mythos-5": "mauve",
+	"claude-fable-5.1": "violet",
+	"claude-mythos-5.1": "fuchsia",
 	// Codex slugs, from MODEL_CONTEXT_WINDOWS. These need explicit entries for
 	// the same reason the Claude ids do, and more urgently: the substring
 	// fallback below would collapse `gpt-5.4-mini` onto `gpt-5.4`, and
@@ -66,13 +68,14 @@ export const MODEL_COLOR_KEYS: Record<string, keyof typeof MODEL_PALETTE> = {
  * an unrecognised model could render in Opus 4's blue — and on Live Activity,
  * whose legend lists a swatch per model, that surfaces as two rows with
  * identical colours and no way to tell which mark is which.
+ *
+ * Down to two buckets: `violet` and `fuchsia` were promoted to Fable/Mythos
+ * 5.1 when the palette's 28 mutually-separable hues ran out. Registered models
+ * win that trade — every model that actually appears in traffic gets an
+ * explicit entry, and two colliding UNKNOWN ids is a rarer, cheaper defect
+ * than two registered models sharing a hue.
  */
-const FALLBACK_HUES: Array<keyof typeof MODEL_PALETTE> = [
-	"violet",
-	"leaf",
-	"fuchsia",
-	"amethyst",
-];
+const FALLBACK_HUES: Array<keyof typeof MODEL_PALETTE> = ["leaf", "amethyst"];
 
 /** Resolve a palette key to its value for the given ground. */
 export function paletteColor(
@@ -84,9 +87,9 @@ export function paletteColor(
 
 /**
  * FNV-1a over the model id. Any stable hash would do; this one is short, has no
- * dependency, and spreads short ASCII ids well enough for a four-bucket pick.
+ * dependency, and spreads short ASCII ids well enough for a two-bucket pick.
  *
- * Four buckets does mean two unregistered models can collide. That is the
+ * Two buckets does mean two unregistered models can collide. That is the
  * accepted floor, not an oversight: the alternative is more reserved hues that
  * no real model uses, taken out of the budget every REGISTERED model competes
  * for. Every model that actually appears in traffic gets an explicit entry

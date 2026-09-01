@@ -169,7 +169,7 @@ const BUNDLED_PRICING: ApiResponse = {
 					cache_write: 6.25,
 				},
 			},
-			// Mythos-class models: $10/M input, $50/M output,
+			// Mythos-class 5.0 generation: $10/M input, $50/M output,
 			// $1.00/M cache read (0.1x), $12.50/M cache write (1.25x).
 			[CLAUDE_MODEL_IDS.FABLE_5]: {
 				id: CLAUDE_MODEL_IDS.FABLE_5,
@@ -188,6 +188,30 @@ const BUNDLED_PRICING: ApiResponse = {
 					input: 10,
 					output: 50,
 					cache_read: 1.0,
+					cache_write: 12.5,
+				},
+			},
+			// The 5.1 generation keeps the Mythos-class $10/$50 but drops cache
+			// reads to $0.25/M — a 0.025x multiplier unique to Fable/Mythos 5.1;
+			// every other Anthropic model reads at 0.1x. Source: the pricing docs'
+			// model table, 2026-09-01.
+			[CLAUDE_MODEL_IDS.FABLE_5_1]: {
+				id: CLAUDE_MODEL_IDS.FABLE_5_1,
+				name: MODEL_DISPLAY_NAMES[CLAUDE_MODEL_IDS.FABLE_5_1],
+				cost: {
+					input: 10,
+					output: 50,
+					cache_read: 0.25,
+					cache_write: 12.5,
+				},
+			},
+			[CLAUDE_MODEL_IDS.MYTHOS_5_1]: {
+				id: CLAUDE_MODEL_IDS.MYTHOS_5_1,
+				name: MODEL_DISPLAY_NAMES[CLAUDE_MODEL_IDS.MYTHOS_5_1],
+				cost: {
+					input: 10,
+					output: 50,
+					cache_read: 0.25,
 					cache_write: 12.5,
 				},
 			},

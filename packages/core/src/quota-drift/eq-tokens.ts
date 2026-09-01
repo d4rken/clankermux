@@ -26,7 +26,9 @@ export interface EqTokenWeights {
 /**
  * Anthropic list-price ratios, normalized to input = 1. Verified against the
  * haiku-4.5 entry (input 1 / output 5 / cache_read 0.1 / cache_write 1.25);
- * every Anthropic entry in the bundled table shares them.
+ * every Anthropic entry in the bundled table shares them except Fable/Mythos
+ * 5.1, whose 0.025x cache read is corrected by
+ * {@link MODEL_EQ_WEIGHT_OVERRIDES}.
  */
 export const ANTHROPIC_EQ_WEIGHTS: EqTokenWeights = {
 	input: 1,
@@ -69,6 +71,11 @@ export const OPENAI_EQ_WEIGHTS: EqTokenWeights = {
  * this a trap that arms itself the first time the model is routed rather than a
  * live defect.
  *
+ * Fable/Mythos 5.1 price cache reads at $0.25/M against a $10/M input — a
+ * 0.025x multiplier where every other Anthropic model reads at 0.1x. Claude
+ * Code traffic is cache-read-dominated, so the shared weight would overstate
+ * their exposure fourfold on the class that carries most of their tokens.
+ *
  * `eq-tokens.test.ts` derives its expectations from this map, so an entry that
  * stops matching the bundled price table fails, and so does a NEW divergence
  * with no entry.
@@ -77,6 +84,8 @@ export const MODEL_EQ_WEIGHT_OVERRIDES: Readonly<
 	Record<string, EqTokenWeights>
 > = {
 	"gpt-5.3-codex-spark": { ...OPENAI_EQ_WEIGHTS, output: 8 },
+	"claude-fable-5-1": { ...ANTHROPIC_EQ_WEIGHTS, cacheRead: 0.025 },
+	"claude-mythos-5-1": { ...ANTHROPIC_EQ_WEIGHTS, cacheRead: 0.025 },
 };
 
 /** Provider axis the weights are selected on. */
