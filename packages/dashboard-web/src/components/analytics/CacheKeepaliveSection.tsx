@@ -1,7 +1,7 @@
 import type { TimeRange } from "../../constants";
 import { CacheEffectivenessPanel } from "./CacheEffectivenessPanel";
 import { CacheKeepalivePanel } from "./CacheKeepalivePanel";
-import { SectionHeading } from "./SectionHeading";
+import { SectionHeading } from "../ui/section-heading";
 
 /**
  * Groups the two cache-keepalive analytics panels under a single, shared
