@@ -19,32 +19,7 @@ import {
 	TableHeader,
 	TableRow,
 } from "../ui/table";
-
-/**
- * Small headline tile. Mirrors the compact stat-card idiom used by
- * CacheKeepalivePanel's StatTile.
- */
-function StatTile({
-	label,
-	value,
-	sub,
-	valueClassName,
-}: {
-	label: string;
-	value: string;
-	sub?: string;
-	valueClassName?: string;
-}) {
-	return (
-		<div className="rounded-lg border bg-card p-3">
-			<p className="text-xs text-muted-foreground">{label}</p>
-			<p className={`text-xl font-bold ${valueClassName ?? ""}`}>{value}</p>
-			{sub ? (
-				<p className="text-xs text-muted-foreground mt-0.5">{sub}</p>
-			) : null}
-		</div>
-	);
-}
+import { StatTile } from "./StatTile";
 
 /**
  * Analytics-tab cache-keepalive "Effectiveness" panel. A per-range summary that
@@ -131,21 +106,15 @@ export function CacheEffectivenessPanel({ range }: { range: TimeRange }) {
 				</p>
 
 				{/* Workload-normalized quota pressure (de-confounds volume). */}
-				<div className="rounded-lg border bg-card p-3">
-					<p className="text-xs text-muted-foreground">
-						7-day quota peak per 1M tokens
-					</p>
-					<p className="text-xl font-bold">
-						{isLoading
+				<StatTile
+					label="7-day quota peak per 1M tokens"
+					value={
+						isLoading
 							? "—"
-							: `${(data?.sevenDayPeakPer1MTokens ?? 0).toFixed(2)}%`}
-					</p>
-					<p className="text-xs text-muted-foreground mt-0.5 max-w-prose">
-						Pool 7-day peak utilization % per 1M prompt tokens of real work —
-						de-confounds workload, so you can compare quota pressure across
-						weeks of different volume.
-					</p>
-				</div>
+							: `${(data?.sevenDayPeakPer1MTokens ?? 0).toFixed(2)}%`
+					}
+					sub="Pool 7-day peak utilization % per 1M prompt tokens of real work — de-confounds workload, so you can compare quota pressure across weeks of different volume."
+				/>
 
 				{/* Per-account quota peaks over the window. */}
 				<TableFrame>

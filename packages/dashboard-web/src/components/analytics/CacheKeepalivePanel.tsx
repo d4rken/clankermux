@@ -21,6 +21,7 @@ import { ChartContainer } from "../charts/ChartContainer";
 import { ChartTooltip } from "../charts/ChartTooltip";
 import { getChartHeight } from "../charts/chart-utils";
 import { Card, CardContent, CardHeader, CardTitle } from "../ui/card";
+import { StatTile } from "./StatTile";
 
 const MODE_LABELS: Record<string, string> = {
 	off: "Off",
@@ -38,32 +39,6 @@ interface KeepaliveRow {
 	savedUsd: number;
 	/** Hit rate as a 0..100 percentage (history hitRate is 0..1). */
 	hitRatePct: number;
-}
-
-/**
- * Small headline tile for the live cache-keepalive stats. Uses the compact
- * stat-card idiom shared by the analytics panels.
- */
-function StatTile({
-	label,
-	value,
-	sub,
-	valueClassName,
-}: {
-	label: string;
-	value: string;
-	sub?: string;
-	valueClassName?: string;
-}) {
-	return (
-		<div className="rounded-lg border bg-card p-3">
-			<p className="text-xs text-muted-foreground">{label}</p>
-			<p className={`text-xl font-bold ${valueClassName ?? ""}`}>{value}</p>
-			{sub ? (
-				<p className="text-xs text-muted-foreground mt-0.5">{sub}</p>
-			) : null}
-		</div>
-	);
 }
 
 /**
