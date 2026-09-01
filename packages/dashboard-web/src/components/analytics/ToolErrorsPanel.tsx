@@ -23,6 +23,15 @@ import {
 	CardHeader,
 	CardTitle,
 } from "../ui/card";
+import {
+	Table,
+	TableBody,
+	TableCell,
+	TableFrame,
+	TableHead,
+	TableHeader,
+	TableRow,
+} from "../ui/table";
 import { type SortDir, SortHeaderButton } from "./sort-header";
 
 type ToolCallErrors = NonNullable<AnalyticsResponse["toolCallErrors"]>;
@@ -105,28 +114,23 @@ function ToolErrorTable({ rows }: { rows: ToolErrorRow[] }) {
 	);
 
 	return (
-		<div className="overflow-x-auto">
-			<table
-				aria-label="Tool error rates"
-				className="w-full text-sm border-collapse"
-			>
-				<thead>
-					<tr className="border-b">
-						<th className="text-left font-medium py-2 pr-4">
-							{headerButton("toolName", "Tool")}
-						</th>
-						<th className="text-right font-medium py-2 px-3">
+		<TableFrame>
+			<Table aria-label="Tool error rates">
+				<TableHeader>
+					<TableRow>
+						<TableHead>{headerButton("toolName", "Tool")}</TableHead>
+						<TableHead className="text-right">
 							{headerButton("totalCalls", "Calls")}
-						</th>
-						<th className="text-right font-medium py-2 px-3">
+						</TableHead>
+						<TableHead className="text-right">
 							{headerButton("totalErrors", "Errors")}
-						</th>
-						<th className="text-right font-medium py-2 px-3">
+						</TableHead>
+						<TableHead className="text-right">
 							{headerButton("errorRatePct", "Error rate")}
-						</th>
-					</tr>
-				</thead>
-				<tbody>
+						</TableHead>
+					</TableRow>
+				</TableHeader>
+				<TableBody>
 					{sortedRows.map((row) => {
 						const lowSample = row.totalCalls < LOW_SAMPLE_THRESHOLD;
 						// A genuine 0% gets no bar — the 2% floor only keeps
@@ -136,11 +140,8 @@ function ToolErrorTable({ rows }: { rows: ToolErrorRow[] }) {
 								? Math.max(2, (row.errorRatePct / maxErrorRate) * 100)
 								: 0;
 						return (
-							<tr
-								key={row.toolName}
-								className="border-b last:border-0 hover:bg-muted/40"
-							>
-								<td className="py-2 pr-4 align-top">
+							<TableRow key={row.toolName} className="hover:bg-muted/40">
+								<TableCell className="align-top">
 									<div className="font-medium">{row.toolName}</div>
 									{lowSample && (
 										<div
@@ -150,18 +151,20 @@ function ToolErrorTable({ rows }: { rows: ToolErrorRow[] }) {
 											low sample
 										</div>
 									)}
-								</td>
-								<td className="py-2 px-3 text-right tabular-nums align-top">
+								</TableCell>
+								<TableCell className="figure text-right align-top">
 									{formatNumber(row.totalCalls)}
-								</td>
-								<td className="py-2 px-3 text-right tabular-nums align-top">
+								</TableCell>
+								<TableCell className="figure text-right align-top">
 									{formatNumber(row.totalErrors)}
-								</td>
-								<td className="py-2 px-3 align-top">
-									<div className="text-right tabular-nums">
+								</TableCell>
+								<TableCell className="align-top">
+									<div className="figure text-right">
 										{row.errorRatePct.toFixed(1)}%
 									</div>
 									<div className="mt-1 h-1 w-full bg-muted rounded-full overflow-hidden">
+										{/* Width is computed per row against the cross-row max, so
+										    it cannot be a class. */}
 										<div
 											className="h-full rounded-full transition-all"
 											style={{
@@ -170,13 +173,13 @@ function ToolErrorTable({ rows }: { rows: ToolErrorRow[] }) {
 											}}
 										/>
 									</div>
-								</td>
-							</tr>
+								</TableCell>
+							</TableRow>
 						);
 					})}
-				</tbody>
-			</table>
-		</div>
+				</TableBody>
+			</Table>
+		</TableFrame>
 	);
 }
 

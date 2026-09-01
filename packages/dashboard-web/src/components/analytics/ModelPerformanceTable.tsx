@@ -2,6 +2,15 @@ import { getModelShortName } from "@clankermux/core";
 import { formatTokensPerSecond } from "@clankermux/ui-common";
 import { useMemo, useState } from "react";
 import { CHART_TOKENS } from "../../constants";
+import {
+	Table,
+	TableBody,
+	TableCell,
+	TableFrame,
+	TableHead,
+	TableHeader,
+	TableRow,
+} from "../ui/table";
 import { type SortDir, SortHeaderButton } from "./sort-header";
 
 /** One model's row in the performance table. */
@@ -156,39 +165,36 @@ export function ModelPerformanceTable({
 	}
 
 	return (
-		<div className="overflow-x-auto">
-			<table className="w-full text-sm border-collapse">
-				<thead>
-					<tr className="border-b">
-						<th className="text-left font-medium py-2 pr-4">
+		<TableFrame>
+			<Table>
+				<TableHeader>
+					<TableRow>
+						<TableHead>
 							<SortHeaderButton
 								label="Model"
 								active={sortKey === "model"}
 								dir={sortDir}
 								onClick={() => handleSort("model")}
 							/>
-						</th>
+						</TableHead>
 						{METRIC_COLUMNS.map((col) => (
-							<th key={col.key} className="text-right font-medium py-2 px-3">
+							<TableHead key={col.key} className="text-right">
 								<SortHeaderButton
 									label={col.label}
 									active={sortKey === col.key}
 									dir={sortDir}
 									onClick={() => handleSort(col.key)}
 								/>
-							</th>
+							</TableHead>
 						))}
-					</tr>
-				</thead>
-				<tbody>
+					</TableRow>
+				</TableHeader>
+				<TableBody>
 					{sortedRows.map((row) => {
 						const lowSample = row.speedSampleCount < LOW_SAMPLE_THRESHOLD;
 						return (
-							<tr
-								key={row.model}
-								className="border-b last:border-0 hover:bg-muted/40"
-							>
-								<td className="py-2 pr-4 align-top">
+							<TableRow key={row.model} className="hover:bg-muted/40">
+								<TableCell className="align-top">
 									<div className="font-medium">
 										{getModelShortName(row.model)}
 									</div>
@@ -204,7 +210,7 @@ export function ModelPerformanceTable({
 											</span>
 										)}
 									</div>
-								</td>
+								</TableCell>
 								{METRIC_COLUMNS.map((col) => {
 									const value = row[col.key];
 									const max = maxByColumn[col.key];
@@ -215,11 +221,13 @@ export function ModelPerformanceTable({
 											? Math.max(2, (value / max) * 100)
 											: 0;
 									return (
-										<td key={col.key} className="py-2 px-3 align-top">
-											<div className="text-right tabular-nums">
+										<TableCell key={col.key} className="align-top">
+											<div className="figure text-right">
 												{value != null ? col.format(value) : "—"}
 											</div>
 											<div className="mt-1 h-1 w-full bg-muted rounded-full overflow-hidden">
+												{/* Width is computed per row against this column's
+												    cross-row max, so it cannot be a class. */}
 												<div
 													className="h-full rounded-full transition-all"
 													style={{
@@ -228,14 +236,14 @@ export function ModelPerformanceTable({
 													}}
 												/>
 											</div>
-										</td>
+										</TableCell>
 									);
 								})}
-							</tr>
+							</TableRow>
 						);
 					})}
-				</tbody>
-			</table>
-		</div>
+				</TableBody>
+			</Table>
+		</TableFrame>
 	);
 }
