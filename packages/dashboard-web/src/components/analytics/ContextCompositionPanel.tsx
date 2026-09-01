@@ -294,8 +294,10 @@ function GrowthChart({
 
 	return (
 		<div>
-			<h4 className="mb-2 text-sm font-medium">Context growth over time</h4>
-			<p className="mb-2 text-xs text-muted-foreground">
+			<h4 data-slot="title" className="text-sm font-medium">
+				Context growth over time
+			</h4>
+			<p data-slot="subtitle" className="mb-item text-xs text-muted-foreground">
 				Average context tokens per request, per project (top{" "}
 				{series.length === 1 ? "project" : `${series.length} projects`} by
 				requests)
@@ -331,8 +333,10 @@ function TopContributorsTable({
 
 	return (
 		<div>
-			<h4 className="mb-2 text-sm font-medium">Top context contributors</h4>
-			<p className="mb-2 text-xs text-muted-foreground">
+			<h4 data-slot="title" className="text-sm font-medium">
+				Top context contributors
+			</h4>
+			<p data-slot="subtitle" className="mb-item text-xs text-muted-foreground">
 				Largest single tool results re-sent in a request — the actionable list
 				for trimming context
 			</p>

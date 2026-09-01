@@ -206,8 +206,10 @@ function ErrorRateTrendChart({
 
 	return (
 		<div>
-			<h4 className="mb-2 text-sm font-medium">Error rate over time</h4>
-			<p className="mb-2 text-xs text-muted-foreground">
+			<h4 data-slot="title" className="text-sm font-medium">
+				Error rate over time
+			</h4>
+			<p data-slot="subtitle" className="mb-item text-xs text-muted-foreground">
 				Per-bucket error rate for the top{" "}
 				{series.length === 1 ? "tool" : `${series.length} tools`} by errors
 			</p>
@@ -238,8 +240,10 @@ function TopMessagesSection({ groups }: { groups: ToolMessageGroup[] }) {
 
 	return (
 		<div>
-			<h4 className="mb-2 text-sm font-medium">Top error messages</h4>
-			<p className="mb-2 text-xs text-muted-foreground">
+			<h4 data-slot="title" className="text-sm font-medium">
+				Top error messages
+			</h4>
+			<p data-slot="subtitle" className="mb-item text-xs text-muted-foreground">
 				Most frequent error texts per tool — the actionable list for tuning
 				prompts and tool usage
 			</p>

@@ -10,6 +10,7 @@ import {
 	MainMetricsChart,
 	MissingSectionsNotice,
 	PerformanceIndicatorsChart,
+	SectionHeading,
 	TokenUsageBreakdown,
 } from "..";
 import type { TrafficTabProps } from "./types";
@@ -218,14 +219,11 @@ export function TrafficTab(props: TrafficTabProps) {
 			{/* Cumulative Trends - always shown at the bottom */}
 			{analytics && data.length > 0 && (
 				<section className="space-y-section">
-					<div className="border-t pt-6">
-						<h2 data-slot="title" className="text-lg font-semibold">
-							Cumulative Trends
-						</h2>
-						<p data-slot="subtitle" className="text-sm text-muted-foreground">
-							Running totals across the selected time range
-						</p>
-					</div>
+					<SectionHeading
+						className="border-t pt-6"
+						title="Cumulative Trends"
+						description="Running totals across the selected time range"
+					/>
 					<CumulativeGrowthChart data={cumulativeData} timeRange={range} />
 				</section>
 			)}
