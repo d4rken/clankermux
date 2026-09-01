@@ -1,43 +1,32 @@
 import { Skeleton } from "./ui/skeleton";
 
+/**
+ * Suspense fallback for the lazily-loaded Analytics route.
+ *
+ * It stands in for what the route actually paints: a five-tab strip, the
+ * control row under it, and one tab's content. It used to draw a header row, a
+ * 4-up metric grid and four chart blocks — and there is no 4-up metric grid
+ * anywhere in Analytics, so the layout visibly rearranged itself the moment the
+ * chunk arrived.
+ *
+ * One chart block, not several: which tab loads is not known here, and every
+ * tab opens with a single full-width panel.
+ */
 export function AnalyticsLoadingSkeleton() {
 	return (
 		<div className="space-y-section">
-			{/* Header */}
-			<div className="flex justify-between items-center">
-				<Skeleton className="h-8 w-32" />
-				<Skeleton className="h-10 w-40" />
-			</div>
+			{/* Tab strip */}
+			<Skeleton className="h-10 w-full" />
 
-			{/* Controls */}
+			{/* Controls: range picker, Filters, Refresh */}
 			<div className="flex gap-group">
 				<Skeleton className="h-10 w-48" />
 				<Skeleton className="h-10 w-32" />
 				<Skeleton className="h-10 w-24" />
 			</div>
 
-			{/* Metrics Grid */}
-			<div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-group">
-				{Array.from({ length: 4 }, (_, i) => `metric-${i}`).map((key) => (
-					<div key={key} className="p-4 border rounded-lg">
-						<Skeleton className="h-6 w-24 mb-2" />
-						<Skeleton className="h-8 w-16 mb-1" />
-						<Skeleton className="h-4 w-20" />
-					</div>
-				))}
-			</div>
-
-			{/* Charts */}
-			<div className="grid grid-cols-1 lg:grid-cols-2 gap-section">
-				<Skeleton className="h-64 w-full" />
-				<Skeleton className="h-64 w-full" />
-			</div>
-
-			{/* Additional Charts */}
-			<div className="space-y-section">
-				<Skeleton className="h-64 w-full" />
-				<Skeleton className="h-64 w-full" />
-			</div>
+			{/* First panel */}
+			<Skeleton className="h-64 w-full" />
 		</div>
 	);
 }
