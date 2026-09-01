@@ -1,5 +1,6 @@
 import type { ComboFamily } from "@clankermux/types";
 import { useAssignFamily, useCombos, useFamilies } from "../../hooks/queries";
+import { Alert } from "../ui/alert";
 import { Badge } from "../ui/badge";
 import {
 	Card,
@@ -16,6 +17,7 @@ import {
 	SelectTrigger,
 	SelectValue,
 } from "../ui/select";
+import { Skeleton } from "../ui/skeleton";
 import { Switch } from "../ui/switch";
 
 const FAMILIES: ComboFamily[] = ["opus", "sonnet", "haiku", "fable"];
@@ -57,40 +59,13 @@ export function FamilyActivationSection() {
 		});
 	};
 
-	if (familiesQuery.isLoading || combosQuery.isLoading) {
-		return (
-			<Card>
-				<CardHeader>
-					<CardTitle>Family Activation</CardTitle>
-					<CardDescription>
-						Assign routing chains to model families
-					</CardDescription>
-				</CardHeader>
-				<CardContent>
-					<p className="text-sm text-muted-foreground">Loading...</p>
-				</CardContent>
-			</Card>
-		);
-	}
+	const isLoading = familiesQuery.isLoading || combosQuery.isLoading;
+	const isError = familiesQuery.isError || combosQuery.isError;
 
-	if (familiesQuery.isError || combosQuery.isError) {
-		return (
-			<Card>
-				<CardHeader>
-					<CardTitle>Family Activation</CardTitle>
-					<CardDescription>
-						Assign routing chains to model families
-					</CardDescription>
-				</CardHeader>
-				<CardContent>
-					<p className="text-sm text-destructive-strong">
-						Failed to load family data.
-					</p>
-				</CardContent>
-			</Card>
-		);
-	}
-
+	// One shell, three bodies. The loading, error and loaded states each carried
+	// a byte-identical Card/CardHeader/CardTitle/CardDescription of their own, so
+	// the section's heading was written out three times and could drift in two of
+	// them without anyone noticing.
 	return (
 		<Card>
 			<CardHeader>
@@ -100,49 +75,71 @@ export function FamilyActivationSection() {
 				</CardDescription>
 			</CardHeader>
 			<CardContent>
-				<div className="space-y-row">
-					{FAMILIES.map((family) => {
-						const assignment = getFamilyAssignment(family);
-						const isEnabled = assignment?.enabled ?? false;
-						const activeComboId = assignment?.combo_id ?? null;
+				{isLoading ? (
+					<div aria-busy="true" className="space-y-row">
+						<span className="sr-only" role="status">
+							Loading family activation
+						</span>
+						{FAMILIES.map((family) => (
+							<Skeleton key={family} className="h-9 w-full" />
+						))}
+					</div>
+				) : isError ? (
+					<Alert
+						tone="destructive"
+						size="sm"
+						title="Failed to load family data."
+					/>
+				) : (
+					<div className="space-y-row">
+						{FAMILIES.map((family) => {
+							const assignment = getFamilyAssignment(family);
+							const isEnabled = assignment?.enabled ?? false;
+							const activeComboId = assignment?.combo_id ?? null;
 
-						return (
-							<div
-								key={family}
-								className="grid grid-cols-[5rem_auto_1fr_auto] items-center gap-row"
-							>
-								<Label className="font-medium">{FAMILY_LABELS[family]}</Label>
-								<Switch
-									checked={isEnabled}
-									onCheckedChange={(checked) => handleToggle(family, checked)}
-									disabled={assignFamily.isPending}
-								/>
-								<Select
-									value={activeComboId ?? "none"}
-									onValueChange={(value) => handleComboSelect(family, value)}
-									disabled={!isEnabled || assignFamily.isPending}
+							return (
+								<div
+									key={family}
+									className="grid grid-cols-[5rem_auto_1fr_auto] items-center gap-row"
 								>
-									<SelectTrigger className={!isEnabled ? "opacity-40" : ""}>
-										<SelectValue placeholder="Select routing chain..." />
-									</SelectTrigger>
-									<SelectContent>
-										<SelectItem value="none">None</SelectItem>
-										{enabledCombos.map((combo) => (
-											<SelectItem key={combo.id} value={combo.id}>
-												{combo.name}
-											</SelectItem>
-										))}
-									</SelectContent>
-								</Select>
-								<div className="w-14 text-right">
-									{isEnabled && activeComboId && (
-										<Badge variant="default">Active</Badge>
-									)}
+									<Label className="font-medium">{FAMILY_LABELS[family]}</Label>
+									<Switch
+										checked={isEnabled}
+										onCheckedChange={(checked) => handleToggle(family, checked)}
+										disabled={assignFamily.isPending}
+									/>
+									<Select
+										value={activeComboId ?? "none"}
+										onValueChange={(value) => handleComboSelect(family, value)}
+										disabled={!isEnabled || assignFamily.isPending}
+									>
+										{/* No `opacity-40` here: the trigger is already `disabled`
+										    on exactly this condition and SelectTrigger carries
+										    `disabled:opacity-50`, so two opacity utilities were
+										    racing on one element — and 0.4 on muted text is below
+										    the AA contrast floor. */}
+										<SelectTrigger>
+											<SelectValue placeholder="Select routing chain..." />
+										</SelectTrigger>
+										<SelectContent>
+											<SelectItem value="none">None</SelectItem>
+											{enabledCombos.map((combo) => (
+												<SelectItem key={combo.id} value={combo.id}>
+													{combo.name}
+												</SelectItem>
+											))}
+										</SelectContent>
+									</Select>
+									<div className="w-14 text-right">
+										{isEnabled && activeComboId && (
+											<Badge variant="default">Active</Badge>
+										)}
+									</div>
 								</div>
-							</div>
-						);
-					})}
-				</div>
+							);
+						})}
+					</div>
+				)}
 			</CardContent>
 		</Card>
 	);
