@@ -69,8 +69,9 @@ export function ChartTooltip({
 								className="w-3 h-3 rounded-full"
 								style={{ backgroundColor: entry.color }}
 							/>
-							<span className="text-sm figure">
-								{entry.name}: <strong>{value}</strong>
+							<span className="text-sm">
+								{entry.name}:{" "}
+								<strong className="figure font-medium">{value}</strong>
 							</span>
 						</div>
 					);
