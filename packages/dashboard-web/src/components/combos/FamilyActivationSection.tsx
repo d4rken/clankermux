@@ -91,54 +91,72 @@ export function FamilyActivationSection() {
 						title="Failed to load family data."
 					/>
 				) : (
-					<div className="space-y-row">
-						{FAMILIES.map((family) => {
-							const assignment = getFamilyAssignment(family);
-							const isEnabled = assignment?.enabled ?? false;
-							const activeComboId = assignment?.combo_id ?? null;
+					<>
+						{assignFamily.isError && (
+							<Alert
+								size="sm"
+								tone="destructive"
+								title={
+									assignFamily.error?.message ??
+									"Failed to update family activation."
+								}
+							/>
+						)}
+						<div className="space-y-row">
+							{FAMILIES.map((family) => {
+								const assignment = getFamilyAssignment(family);
+								const isEnabled = assignment?.enabled ?? false;
+								const activeComboId = assignment?.combo_id ?? null;
 
-							return (
-								<div
-									key={family}
-									className="grid grid-cols-[5rem_auto_1fr_auto] items-center gap-row"
-								>
-									<Label className="font-medium">{FAMILY_LABELS[family]}</Label>
-									<Switch
-										checked={isEnabled}
-										onCheckedChange={(checked) => handleToggle(family, checked)}
-										disabled={assignFamily.isPending}
-									/>
-									<Select
-										value={activeComboId ?? "none"}
-										onValueChange={(value) => handleComboSelect(family, value)}
-										disabled={!isEnabled || assignFamily.isPending}
+								return (
+									<div
+										key={family}
+										className="grid grid-cols-[5rem_auto_1fr_auto] items-center gap-row"
 									>
-										{/* No `opacity-40` here: the trigger is already `disabled`
-										    on exactly this condition and SelectTrigger carries
-										    `disabled:opacity-50`, so two opacity utilities were
-										    racing on one element — and 0.4 on muted text is below
-										    the AA contrast floor. */}
-										<SelectTrigger>
-											<SelectValue placeholder="Select routing chain..." />
-										</SelectTrigger>
-										<SelectContent>
-											<SelectItem value="none">None</SelectItem>
-											{enabledCombos.map((combo) => (
-												<SelectItem key={combo.id} value={combo.id}>
-													{combo.name}
-												</SelectItem>
-											))}
-										</SelectContent>
-									</Select>
-									<div className="w-14 text-right">
-										{isEnabled && activeComboId && (
-											<Badge variant="default">Active</Badge>
-										)}
+										<Label className="font-medium">
+											{FAMILY_LABELS[family]}
+										</Label>
+										<Switch
+											checked={isEnabled}
+											onCheckedChange={(checked) =>
+												handleToggle(family, checked)
+											}
+											disabled={assignFamily.isPending}
+										/>
+										<Select
+											value={activeComboId ?? "none"}
+											onValueChange={(value) =>
+												handleComboSelect(family, value)
+											}
+											disabled={!isEnabled || assignFamily.isPending}
+										>
+											{/* No `opacity-40` here: the trigger is already `disabled`
+											    on exactly this condition and SelectTrigger carries
+											    `disabled:opacity-50`, so two opacity utilities were
+											    racing on one element — and 0.4 on muted text is below
+											    the AA contrast floor. */}
+											<SelectTrigger>
+												<SelectValue placeholder="Select routing chain..." />
+											</SelectTrigger>
+											<SelectContent>
+												<SelectItem value="none">None</SelectItem>
+												{enabledCombos.map((combo) => (
+													<SelectItem key={combo.id} value={combo.id}>
+														{combo.name}
+													</SelectItem>
+												))}
+											</SelectContent>
+										</Select>
+										<div className="w-14 text-right">
+											{isEnabled && activeComboId && (
+												<Badge variant="default">Active</Badge>
+											)}
+										</div>
 									</div>
-								</div>
-							);
-						})}
-					</div>
+								);
+							})}
+						</div>
+					</>
 				)}
 			</CardContent>
 		</Card>

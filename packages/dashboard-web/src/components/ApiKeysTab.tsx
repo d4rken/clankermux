@@ -562,6 +562,17 @@ export function ApiKeysTab() {
 									onChange={(e) => setNewKeyName(e.target.value)}
 								/>
 							</div>
+							{generateKeyMutation.isError && (
+								<Alert
+									size="sm"
+									tone="destructive"
+									icon={<AlertTriangle className="h-4 w-4 shrink-0" />}
+									title={
+										generateKeyMutation.error?.message ??
+										"Failed to generate API key."
+									}
+								/>
+							)}
 						</div>
 						<DialogFooter>
 							<Button

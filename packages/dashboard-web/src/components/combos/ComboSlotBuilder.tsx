@@ -22,6 +22,7 @@ import {
 	useRemoveComboSlot,
 	useReorderComboSlots,
 } from "../../hooks/queries";
+import { Alert } from "../ui/alert";
 import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "../ui/card";
@@ -245,6 +246,13 @@ export function ComboSlotBuilder({ combo }: ComboSlotBuilderProps) {
 								placeholder="claude-3-opus"
 							/>
 						</div>
+						{addSlot.isError && (
+							<Alert
+								size="sm"
+								tone="destructive"
+								title={addSlot.error?.message ?? "Failed to add slot."}
+							/>
+						)}
 						<div className="flex justify-end gap-item">
 							<Button
 								variant="outline"
