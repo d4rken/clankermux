@@ -12,7 +12,7 @@ import {
 	TableHeader,
 	TableRow,
 } from "../ui/table";
-import { PanelEmptyState } from "./PanelEmptyState";
+import { PanelEmptyState } from "../ui/panel-empty-state";
 import { type SortDir, SortHeaderButton } from "./sort-header";
 
 /** One model's row in the performance table. */

@@ -30,7 +30,7 @@ import {
 	CardHeader,
 	CardTitle,
 } from "../ui/card";
-import { PanelEmptyState } from "./PanelEmptyState";
+import { PanelEmptyState } from "../ui/panel-empty-state";
 import { labelDecision } from "./routing-labels";
 
 const OUTCOME_COLORS: Record<RoutingFlowPoint["outcome"], string> = {

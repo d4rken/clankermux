@@ -47,7 +47,7 @@ import {
 	TableHeader,
 	TableRow,
 } from "../ui/table";
-import { PanelEmptyState } from "./PanelEmptyState";
+import { PanelEmptyState } from "../ui/panel-empty-state";
 
 type ContextComposition = NonNullable<AnalyticsResponse["contextComposition"]>;
 

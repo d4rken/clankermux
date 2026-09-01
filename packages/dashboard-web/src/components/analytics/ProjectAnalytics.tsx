@@ -28,7 +28,7 @@ import {
 	TableHeader,
 	TableRow,
 } from "../ui/table";
-import { PanelEmptyState } from "./PanelEmptyState";
+import { PanelEmptyState } from "../ui/panel-empty-state";
 
 type ProjectBreakdownRow = NonNullable<
 	AnalyticsResponse["projectBreakdown"]
