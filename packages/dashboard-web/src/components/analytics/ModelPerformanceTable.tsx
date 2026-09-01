@@ -1,5 +1,6 @@
 import { getModelShortName } from "@clankermux/core";
 import { formatTokensPerSecond } from "@clankermux/ui-common";
+import { Loader2 } from "lucide-react";
 import { useMemo, useState } from "react";
 import { CHART_TOKENS } from "../../constants";
 import {
@@ -11,6 +12,7 @@ import {
 	TableHeader,
 	TableRow,
 } from "../ui/table";
+import { PanelEmptyState } from "./PanelEmptyState";
 import { type SortDir, SortHeaderButton } from "./sort-header";
 
 /** One model's row in the performance table. */
@@ -149,18 +151,20 @@ export function ModelPerformanceTable({
 	};
 
 	if (loading) {
+		// The Loader2 line the neighbouring quota panels already use. What stood
+		// here was a hand-rolled `border-4 border-primary border-t-transparent`
+		// CSS ring — the only one in the app.
 		return (
-			<div className="flex items-center justify-center h-48">
-				<div className="h-8 w-8 animate-spin rounded-full border-4 border-primary border-t-transparent" />
-			</div>
+			<p className="flex items-center gap-item text-sm text-muted-foreground">
+				<Loader2 className="h-4 w-4 animate-spin" />
+				Loading model performance…
+			</p>
 		);
 	}
 
 	if (rows.length === 0) {
 		return (
-			<div className="flex items-center justify-center h-48 text-muted-foreground">
-				No model performance data available
-			</div>
+			<PanelEmptyState>No model performance data available</PanelEmptyState>
 		);
 	}
 

@@ -32,6 +32,7 @@ import {
 	TableHeader,
 	TableRow,
 } from "../ui/table";
+import { PanelEmptyState } from "./PanelEmptyState";
 import { type SortDir, SortHeaderButton } from "./sort-header";
 
 type ToolCallErrors = NonNullable<AnalyticsResponse["toolCallErrors"]>;
@@ -58,11 +59,11 @@ function EmptyState({ loading }: { loading: boolean }) {
 				</CardDescription>
 			</CardHeader>
 			<CardContent>
-				<div className="flex min-h-40 items-center justify-center rounded-md border border-dashed px-6 text-center text-sm text-muted-foreground">
+				<PanelEmptyState>
 					{loading
 						? "Loading tool errors..."
 						: "No tool calls recorded in this range yet. Data is collected for new requests only."}
-				</div>
+				</PanelEmptyState>
 			</CardContent>
 		</Card>
 	);

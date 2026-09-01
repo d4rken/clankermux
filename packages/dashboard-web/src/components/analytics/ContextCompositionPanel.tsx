@@ -46,6 +46,7 @@ import {
 	TableHeader,
 	TableRow,
 } from "../ui/table";
+import { PanelEmptyState } from "./PanelEmptyState";
 
 type ContextComposition = NonNullable<AnalyticsResponse["contextComposition"]>;
 
@@ -103,13 +104,13 @@ function EmptyState({
 				</CardDescription>
 			</CardHeader>
 			<CardContent>
-				<div className="flex min-h-40 items-center justify-center rounded-md border border-dashed px-6 text-center text-sm text-muted-foreground">
+				<PanelEmptyState>
 					{loading
 						? "Loading context composition..."
 						: noCoverage
 							? "Context composition is recorded for new requests; run scripts/backfill-context-composition.ts to analyze history."
 							: "No context composition data in this range"}
-				</div>
+				</PanelEmptyState>
 			</CardContent>
 		</Card>
 	);

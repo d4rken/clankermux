@@ -30,6 +30,7 @@ import {
 	CardHeader,
 	CardTitle,
 } from "../ui/card";
+import { PanelEmptyState } from "./PanelEmptyState";
 import { labelDecision } from "./routing-labels";
 
 const OUTCOME_COLORS: Record<RoutingFlowPoint["outcome"], string> = {
@@ -67,11 +68,11 @@ function EmptyRoutingState({ loading }: { loading: boolean }) {
 				</CardDescription>
 			</CardHeader>
 			<CardContent>
-				<div className="flex min-h-40 items-center justify-center rounded-md border border-dashed text-sm text-muted-foreground">
+				<PanelEmptyState>
 					{loading
 						? "Loading routing analytics..."
 						: "No routing telemetry in this range"}
-				</div>
+				</PanelEmptyState>
 			</CardContent>
 		</Card>
 	);

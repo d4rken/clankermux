@@ -28,6 +28,7 @@ import {
 	TableHeader,
 	TableRow,
 } from "../ui/table";
+import { PanelEmptyState } from "./PanelEmptyState";
 
 type ProjectBreakdownRow = NonNullable<
 	AnalyticsResponse["projectBreakdown"]
@@ -90,11 +91,11 @@ export function ProjectAnalytics({
 					</CardDescription>
 				</CardHeader>
 				<CardContent>
-					<div className="flex min-h-40 items-center justify-center rounded-md border border-dashed text-sm text-muted-foreground">
+					<PanelEmptyState>
 						{loading
 							? "Loading project analytics..."
 							: "No requests in this range"}
-					</div>
+					</PanelEmptyState>
 				</CardContent>
 			</Card>
 		);
