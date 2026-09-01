@@ -16,6 +16,22 @@ import {
 	CardHeader,
 	CardTitle,
 } from "./ui/card";
+import { Skeleton } from "./ui/skeleton";
+
+/**
+ * Stable keys for the log-stream loading skeleton.
+ *
+ * `h-5` is the real line height: a log row is a flex of `text-sm` spans inside
+ * the `text-sm` scroller, so each renders a 1.25rem line box.
+ */
+const LOG_SKELETON_LINES = [
+	"line-1",
+	"line-2",
+	"line-3",
+	"line-4",
+	"line-5",
+	"line-6",
+] as const;
 
 export function LogsTab() {
 	const [logs, setLogs] = useState<LogEntry[]>([]);
@@ -187,21 +203,24 @@ export function LogsTab() {
 						</CardDescription>
 					</div>
 					<div className="flex gap-item">
+						{/* No `mr-2` on these icons: Button's base already carries
+						    `gap-item`, so the margin rendered a 1rem gap where the rest of
+						    the app renders 0.5rem. */}
 						<Button onClick={togglePause} variant="outline" size="sm">
 							{paused ? (
 								<>
-									<Play className="mr-2 h-4 w-4" />
+									<Play className="h-4 w-4" />
 									Resume
 								</>
 							) : (
 								<>
-									<Pause className="mr-2 h-4 w-4" />
+									<Pause className="h-4 w-4" />
 									Pause
 								</>
 							)}
 						</Button>
 						<Button onClick={clearLogs} variant="outline" size="sm">
-							<Trash2 className="mr-2 h-4 w-4" />
+							<Trash2 className="h-4 w-4" />
 							Clear
 						</Button>
 					</div>
@@ -210,7 +229,18 @@ export function LogsTab() {
 			<CardContent className="flex flex-1 flex-col min-h-0">
 				<div className="space-y-tight flex-1 min-h-0 overflow-y-auto font-mono text-sm">
 					{loading ? (
-						<p className="text-muted-foreground">Loading logs...</p>
+						// A bare Skeleton has no role and no accessible text, so the
+						// announcement the replaced text line carried moves to a visually
+						// hidden status line. `role="status"` stays OFF the decorative
+						// blocks themselves.
+						<div aria-busy="true" className="space-y-tight">
+							<span className="sr-only" role="status">
+								Loading logs
+							</span>
+							{LOG_SKELETON_LINES.map((key) => (
+								<Skeleton key={key} className="h-5 w-full" />
+							))}
+						</div>
 					) : error ? (
 						<p className="text-destructive-strong">
 							Error: {error instanceof Error ? error.message : String(error)}
@@ -238,7 +268,7 @@ export function LogsTab() {
 					)}
 					<div ref={logsEndRef} />
 				</div>
-				<div className="mt-4 flex shrink-0 items-center gap-item">
+				<div className="mt-group flex shrink-0 items-center gap-item">
 					<input
 						type="checkbox"
 						id="autoscroll"
