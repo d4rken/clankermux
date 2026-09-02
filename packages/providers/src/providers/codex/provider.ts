@@ -1720,10 +1720,22 @@ export class CodexProvider extends BaseProvider {
 				`[codex:model-debug] request_id=${requestId} transformSseResponseToJson used fallback model=gpt-5.4 (startMessage.model missing)`,
 			);
 		}
-		const stopReason = content.some((block) => block.type === "tool_use")
-			? "tool_use"
-			: "end_turn";
-		const jsonPayload = {
+		const streamDelta = (messageDeltaPayload as Record<string, unknown> | null)
+			?.delta as Record<string, unknown> | undefined;
+		// The assembled content blocks can only ever say tool_use or end_turn, so
+		// re-deriving the stop reason from them would report a content-filtered or
+		// truncated turn to a non-streaming client as a successful end_turn. The
+		// synthesized message_delta is the only place those reasons are named, so
+		// it wins; the content-derived value is the fallback for a stream that
+		// carried no stop_reason at all.
+		const stopReason =
+			typeof streamDelta?.stop_reason === "string"
+				? streamDelta.stop_reason
+				: content.some((block) => block.type === "tool_use")
+					? "tool_use"
+					: "end_turn";
+		const stopDetails = streamDelta?.stop_details;
+		const jsonPayload: Record<string, unknown> = {
 			id:
 				typeof startMessage.id === "string"
 					? startMessage.id
@@ -1736,6 +1748,11 @@ export class CodexProvider extends BaseProvider {
 			stop_sequence: null,
 			usage,
 		};
+		// Only a refusal carries stop_details; every other stop reason leaves the
+		// key off entirely so non-refusal payloads are byte-identical to before.
+		if (stopDetails !== undefined) {
+			jsonPayload.stop_details = stopDetails;
+		}
 		const headers = sanitizeResponseHeaders(response.headers);
 		headers.set("content-type", "application/json");
 		return new Response(JSON.stringify(jsonPayload), {

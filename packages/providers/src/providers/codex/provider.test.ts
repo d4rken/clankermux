@@ -2923,6 +2923,100 @@ describe("CodexProvider response.incomplete stop reasons", () => {
 		expect(body).not.toContain('"stop_reason":"end_turn"');
 		expect(body).toContain('"stop_reason":"max_tokens"');
 	});
+
+	it("carries the refusal stop_reason and stop_details into the non-streaming JSON body", async () => {
+		// The SSE->JSON conversion re-derives stop_reason from the assembled
+		// content blocks, which can only ever say tool_use or end_turn. A
+		// content-filtered turn must not reach a non-streaming client as a
+		// successful end_turn, so the synthesized message_delta wins.
+		const provider = new CodexProvider();
+		const upstreamBody = sseBody([
+			...eventLine("response.created", {
+				response: { id: "resp_incomplete", model: "gpt-5.5" },
+			}),
+			...eventLine("response.output_item.added", {
+				item: { type: "message" },
+				output_index: 0,
+			}),
+			...eventLine("response.content_part.added", {
+				part: { type: "output_text" },
+			}),
+			...eventLine("response.output_text.delta", { delta: "partial" }),
+			...eventLine("response.incomplete", {
+				response: {
+					model: "gpt-5.5",
+					status: "incomplete",
+					incomplete_details: { reason: "content_filter" },
+					usage: { input_tokens: 3, output_tokens: 1 },
+				},
+			}),
+		]);
+
+		const response = new Response(upstreamBody, {
+			status: 200,
+			headers: {
+				"content-type": "text/event-stream",
+				"x-clankermux-request-stream": "false",
+			},
+		});
+
+		const transformed = await provider.processResponse(response, null);
+		expect(transformed.headers.get("content-type")).toContain(
+			"application/json",
+		);
+		const payload = JSON.parse(await transformed.text()) as Record<
+			string,
+			unknown
+		>;
+		expect(payload.stop_reason).toBe("refusal");
+		expect(payload.stop_details).toEqual({
+			type: "refusal",
+			category: "content_filter",
+			explanation: null,
+			fallback_credit_token: null,
+			fallback_has_prefill_claim: null,
+			recommended_model: null,
+		});
+	});
+
+	it("leaves an ordinary non-streaming completion at end_turn with no stop_details key", async () => {
+		const provider = new CodexProvider();
+		const upstreamBody = sseBody([
+			...eventLine("response.created", {
+				response: { id: "resp_ok", model: "gpt-5.5" },
+			}),
+			...eventLine("response.output_item.added", {
+				item: { type: "message" },
+				output_index: 0,
+			}),
+			...eventLine("response.content_part.added", {
+				part: { type: "output_text" },
+			}),
+			...eventLine("response.output_text.delta", { delta: "Hi" }),
+			...eventLine("response.completed", {
+				response: {
+					model: "gpt-5.5",
+					usage: { input_tokens: 3, output_tokens: 1 },
+				},
+			}),
+		]);
+
+		const response = new Response(upstreamBody, {
+			status: 200,
+			headers: {
+				"content-type": "text/event-stream",
+				"x-clankermux-request-stream": "false",
+			},
+		});
+
+		const transformed = await provider.processResponse(response, null);
+		const payload = JSON.parse(await transformed.text()) as Record<
+			string,
+			unknown
+		>;
+		expect(payload.stop_reason).toBe("end_turn");
+		expect(payload).not.toHaveProperty("stop_details");
+	});
 });
 
 describe("parseCodexUsageHeaders", () => {
