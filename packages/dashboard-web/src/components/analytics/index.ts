@@ -18,6 +18,7 @@ export { ModelWindowCostPanel } from "./ModelWindowCostPanel";
 export { ProjectAnalytics } from "./ProjectAnalytics";
 export { QuotaChangeVerdicts } from "./QuotaChangeVerdicts";
 export { QuotaDriftPanel } from "./QuotaDriftPanel";
+export { RefusalFallbackPanel } from "./RefusalFallbackPanel";
 export { RoutingAnalyticsPanel } from "./RoutingAnalytics";
 export { TokenSpeedAnalytics } from "./TokenSpeedAnalytics";
 export { ToolErrorsPanel } from "./ToolErrorsPanel";
