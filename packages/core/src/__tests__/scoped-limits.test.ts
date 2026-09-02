@@ -2,6 +2,7 @@ import { describe, expect, it } from "bun:test";
 import {
 	FAMILY_WEEKLY_EXHAUSTED_THRESHOLD_PERCENT,
 	getExhaustedFamilies,
+	getScopedFamilyLimits,
 	isFamilyWeeklyExhaustedWithHeadroom,
 } from "@clankermux/core";
 import type {
@@ -219,6 +220,64 @@ describe("getExhaustedFamilies", () => {
 
 	it("uses 100 as the default threshold constant", () => {
 		expect(FAMILY_WEEKLY_EXHAUSTED_THRESHOLD_PERCENT).toBe(100);
+	});
+});
+
+describe("getScopedFamilyLimits", () => {
+	it("returns entries for the requested family whatever their utilization", () => {
+		const limits = getScopedFamilyLimits(
+			usage([scopedEntry({ percent: 42 })]),
+			"fable",
+			NOW,
+		);
+		expect(limits).toHaveLength(1);
+		expect(limits[0].percent).toBe(42);
+		expect(limits[0].family).toBe("fable");
+		expect(limits[0].resetsAtMs).toBe(Date.parse(FUTURE_ISO));
+	});
+
+	it("returns every entry that collapses to the same family", () => {
+		// Anthropic can report several scope surfaces for one family; a single
+		// entry would silently drop the others.
+		const limits = getScopedFamilyLimits(
+			usage([
+				scopedEntry({ percent: 10, displayName: "Fable" }),
+				scopedEntry({ percent: 60, displayName: "Mythos 5" }),
+			]),
+			"fable",
+			NOW,
+		);
+		expect(limits.map((l) => l.percent).sort((a, b) => a - b)).toEqual([
+			10, 60,
+		]);
+	});
+
+	it("filters out other families", () => {
+		expect(
+			getScopedFamilyLimits(usage([scopedEntry({ percent: 90 })]), "opus", NOW),
+		).toEqual([]);
+	});
+
+	it("drops entries whose reset has already passed", () => {
+		expect(
+			getScopedFamilyLimits(
+				usage([scopedEntry({ percent: 90, resets_at: PAST_ISO })]),
+				"fable",
+				NOW,
+			),
+		).toEqual([]);
+	});
+
+	it("returns [] for absent or non-Anthropic usage data", () => {
+		expect(getScopedFamilyLimits(null, "fable", NOW)).toEqual([]);
+		expect(getScopedFamilyLimits(undefined, "fable", NOW)).toEqual([]);
+		expect(
+			getScopedFamilyLimits(
+				{ tokens_limit: { percentage: 90 } } as unknown as AnthropicUsageData,
+				"fable",
+				NOW,
+			),
+		).toEqual([]);
 	});
 });
 

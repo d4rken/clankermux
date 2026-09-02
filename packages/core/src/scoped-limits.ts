@@ -54,6 +54,29 @@ export function getExhaustedFamilies(
 }
 
 /**
+ * Every per-family weekly window recorded for `family`, whatever its
+ * utilization. The exhaustion readers above filter to at/above the threshold;
+ * this one hands the caller the raw entries so a PACING decision (throttling
+ * before the family wall, not at it) can be made from them.
+ *
+ * The API can report several entries that collapse to one family (different
+ * scope model display names, e.g. an Opus 4 and an Opus 4.5 surface), so this
+ * returns a list rather than a single entry. Empty for absent, non-Anthropic,
+ * or unrecognised usage data.
+ *
+ * Pure: no clock access (callers pass `now`).
+ */
+export function getScopedFamilyLimits(
+	usageData: AnthropicUsageData | null | undefined,
+	family: ModelFamily,
+	now: number,
+): ScopedFamilyLimit[] {
+	return normalizeAnthropicUsage(usageData, now).weeklyScoped.filter(
+		(limit) => limit.family === family,
+	);
+}
+
+/**
  * True iff the given `family`'s weekly quota is exhausted for this account AND
  * the account still has unified (5h/7d) headroom to serve other families.
  *

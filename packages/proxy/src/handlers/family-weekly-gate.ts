@@ -1,8 +1,11 @@
 import {
+	computeThrottleResumeAt,
+	FAMILY_WEEKLY_EXHAUSTED_THRESHOLD_PERCENT,
 	getAccountWideClaimHeadroom,
 	getExhaustedFamilies,
 	getModelFamily,
 	getScopedClaimRejection,
+	getScopedFamilyLimits,
 	hasAccountWideUnifiedRejection as hasAccountWideUnifiedRejectionHeaders,
 	isFamilyWeeklyExhaustedWithHeadroom,
 	type ModelFamily,
@@ -74,6 +77,78 @@ export function resolveFamilyWeeklyExclusion(
 		(e) => e.family === family,
 	);
 	return { account, family, resetAt: match?.resetsAtMs ?? now };
+}
+
+/**
+ * An Anthropic account held back from a request because the request's model
+ * family is burning its per-family weekly quota faster than an even pace,
+ * while the family is not yet spent.
+ */
+export interface FamilyWeeklyPacedAccount {
+	account: Account;
+	/** The requested model family that is running ahead of pace. */
+	family: ModelFamily;
+	/** Epoch ms at which an even burn catches up with the reported usage. */
+	resumeAt: number;
+}
+
+/**
+ * Pure per-account decision for family-aware weekly PACING — the companion to
+ * {@link resolveFamilyWeeklyExclusion}, which only fires once a family is
+ * spent. Account-wide 5h/7d pacing lives in the usage-throttling gate; this is
+ * what makes the per-family weekly windows pace too, and it is deliberately
+ * scoped to the REQUESTED family so an overpaced Fable can never delay Opus
+ * traffic on the same account.
+ *
+ * Returns the paced account (with the instant an even burn catches up) or null.
+ * Null in every one of these cases:
+ *  - the model resolves to no family;
+ *  - capacity is null, non-finite or has no unified headroom — the same
+ *    fail-open guard the exclusion uses, so an account-wide problem stays with
+ *    the account-wide paths instead of being reported as family pacing;
+ *  - no scoped entry for the family is BELOW the exhaustion threshold. At or
+ *    above it the family is spent and the exclusion gate owns the decision;
+ *    this helper stays silent even when called directly.
+ *  - no qualifying entry is ahead of pace.
+ *
+ * When several entries collapse to the family (multiple scope surfaces), the
+ * LATEST catch-up instant across them wins: the account is not paced-clear
+ * until every one of its windows is.
+ */
+export function resolveFamilyWeeklyPacing(
+	account: Account,
+	modelForGate: string | null,
+	usageData: AnyUsageData | null,
+	capacity: CapacitySignal | null,
+	now: number,
+): FamilyWeeklyPacedAccount | null {
+	const family = modelForGate ? getModelFamily(modelForGate) : null;
+	if (!family) return null;
+	if (
+		capacity === null ||
+		!Number.isFinite(capacity.minHeadroom) ||
+		capacity.minHeadroom <= 0
+	) {
+		return null;
+	}
+	// `getScopedFamilyLimits` normalizes any shape and yields [] for
+	// non-Anthropic data, so this cast is safe.
+	const data = (usageData ?? undefined) as AnthropicUsageData | undefined;
+
+	let resumeAt: number | null = null;
+	for (const entry of getScopedFamilyLimits(data, family, now)) {
+		if (entry.percent >= FAMILY_WEEKLY_EXHAUSTED_THRESHOLD_PERCENT) continue;
+		const entryResumeAt = computeThrottleResumeAt(
+			entry.resetsAtMs,
+			"seven_day_scoped",
+			entry.percent,
+			now,
+		);
+		if (entryResumeAt === null) continue;
+		if (resumeAt === null || entryResumeAt > resumeAt) resumeAt = entryResumeAt;
+	}
+	if (resumeAt === null) return null;
+	return { account, family, resumeAt };
 }
 
 /**

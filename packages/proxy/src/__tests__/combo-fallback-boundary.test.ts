@@ -105,7 +105,10 @@ const codexSmallAccount = () =>
 		model_mappings: JSON.stringify({ sonnet: "gpt-5.3-codex-spark" }),
 	});
 
-type ConfigOverrides = { usageThrottlingFiveHour?: boolean };
+type ConfigOverrides = {
+	usageThrottlingFiveHour?: boolean;
+	usageThrottlingWeekly?: boolean;
+};
 
 function makeContext(
 	accounts: Account[],
@@ -150,7 +153,8 @@ function makeContext(
 		config: {
 			getUsageThrottlingFiveHourEnabled: () =>
 				config.usageThrottlingFiveHour === true,
-			getUsageThrottlingWeeklyEnabled: () => false,
+			getUsageThrottlingWeeklyEnabled: () =>
+				config.usageThrottlingWeekly === true,
 			getCacheWarmingEnabled: () => false,
 			getCacheWarmingMinTokens: () => 100_000,
 			getStorePayloads: () => false,
@@ -356,6 +360,55 @@ describe("handleProxy combo fallback", () => {
 		expect(stagedDuringFlight[0]).toBe(1);
 		// … and dropped by the terminal.
 		expect(cacheBodyStore.getStagingSize()).toBe(0);
+	}, 15_000);
+
+	it("returns the 529 usage-throttled terminal when family-weekly pacing empties the fallback pool", async () => {
+		// The family-weekly gate runs AFTER the usage-throttle gate on this chain,
+		// so an account it paces never lands in `throttledFallbackAccounts`. Before
+		// the paced list was consulted here the pool fell through to the generic
+		// "All accounts failed" terminal, which tells the client the wrong thing:
+		// nothing failed, one account is simply ahead of its weekly pace.
+		const accounts = [slotA(), slotB(), fallbackAccount()];
+		const now = Date.now();
+		const weeklyReset = new Date(now + 5 * 24 * 60 * 60 * 1000).toISOString();
+		usageCache.set(FALLBACK, {
+			// Both ACCOUNT-WIDE windows are comfortably behind pace, so only the
+			// per-family weekly window can be what holds this account back.
+			five_hour: {
+				utilization: 10,
+				resets_at: new Date(now + 4 * 60 * 60 * 1000).toISOString(),
+			},
+			seven_day: { utilization: 10, resets_at: weeklyReset },
+			limits: [
+				{
+					kind: "weekly_scoped",
+					group: "weekly",
+					// 80% two days into a 7-day window: an even burn is at ~28.6%.
+					percent: 80,
+					resets_at: weeklyReset,
+					scope: { model: { id: "sonnet", display_name: "Sonnet" } },
+					is_active: true,
+				},
+			],
+		} as never);
+
+		const log: FetchLog = { all: [], upstream: [] };
+		globalThis.fetch = recordingFetch(log, () => rateLimited429());
+
+		const res = await callHandleProxy(
+			cacheableRequest(),
+			new URL("https://proxy.local/v1/messages"),
+			makeContext(accounts, { usageThrottlingWeekly: true }),
+		);
+
+		expect(res.status).toBe(529);
+		const body = (await res.json()) as {
+			error: { type: string; message: string };
+		};
+		expect(body.error.type).toBe("overloaded_error");
+		expect(body.error.message).toContain("fallback-1");
+		// Both combo slots were attempted; the paced fallback never was.
+		expect(log.upstream).toEqual(["key-slot-a", "key-slot-b"]);
 	}, 15_000);
 
 	it("never fetches a fallback candidate that the second-pass context-window gate excludes", async () => {

@@ -263,6 +263,120 @@ describe("getUsageThrottleUntil", () => {
 	});
 });
 
+describe("per-family weekly windows are NOT account-wide throttle evidence", () => {
+	const DAY_MS = 24 * 60 * 60 * 1000;
+
+	it("emits no window for a limits[] scoped entry that is ahead of pace", () => {
+		// Throttling a whole account because ONE family is ahead of its weekly
+		// pace delays every other family on it. That decision belongs to the
+		// family-weekly gate, which knows the requested family.
+		const now = Date.UTC(2026, 3, 28, 12, 0, 0);
+		const weeklyReset = new Date(now + 5 * DAY_MS).toISOString();
+		const status = getUsageThrottleStatus(
+			{
+				limits: [
+					{
+						kind: "session",
+						group: "session",
+						percent: 5,
+						resets_at: new Date(now + 4 * 60 * 60 * 1000).toISOString(),
+						scope: null,
+						is_active: true,
+					},
+					{
+						kind: "weekly_all",
+						group: "weekly",
+						percent: 10,
+						resets_at: weeklyReset,
+						scope: null,
+						is_active: true,
+					},
+					{
+						// 90% two days into a 7-day window: far ahead of the ~28.6%
+						// an even burn would be at.
+						kind: "weekly_scoped",
+						group: "weekly",
+						percent: 90,
+						resets_at: weeklyReset,
+						scope: { model: { id: "opus", display_name: "Opus" } },
+						is_active: true,
+					},
+				],
+			} as never,
+			{ fiveHourEnabled: true, weeklyEnabled: true },
+			now,
+			"anthropic",
+		);
+
+		expect(status.throttledWindows).toEqual([]);
+		expect(status.throttleUntil).toBeNull();
+	});
+
+	it("still throttles the ACCOUNT-WIDE weekly window in the same payload", () => {
+		const now = Date.UTC(2026, 3, 28, 12, 0, 0);
+		const weeklyReset = new Date(now + 5 * DAY_MS).toISOString();
+		const status = getUsageThrottleStatus(
+			{
+				limits: [
+					{
+						kind: "weekly_all",
+						group: "weekly",
+						percent: 90,
+						resets_at: weeklyReset,
+						scope: null,
+						is_active: true,
+					},
+					{
+						kind: "weekly_scoped",
+						group: "weekly",
+						percent: 90,
+						resets_at: weeklyReset,
+						scope: { model: { id: "opus", display_name: "Opus" } },
+						is_active: true,
+					},
+				],
+			} as never,
+			{ fiveHourEnabled: true, weeklyEnabled: true },
+			now,
+			"anthropic",
+		);
+
+		expect(status.throttledWindows).toEqual(["seven_day"]);
+	});
+
+	it("ignores the legacy flat seven_day_opus/seven_day_sonnet keys", () => {
+		// Null upstream since the scoped windows moved into limits[]; a stale
+		// payload that still carries them must not resurrect account-wide pacing.
+		const now = Date.UTC(2026, 3, 28, 12, 0, 0);
+		const status = getUsageThrottleStatus(
+			{
+				five_hour: {
+					utilization: 5,
+					resets_at: new Date(now + 4 * 60 * 60 * 1000).toISOString(),
+				},
+				seven_day: {
+					utilization: 10,
+					resets_at: new Date(now + 5 * DAY_MS).toISOString(),
+				},
+				seven_day_opus: {
+					utilization: 90,
+					resets_at: new Date(now + 5 * DAY_MS).toISOString(),
+				},
+				seven_day_sonnet: {
+					utilization: 95,
+					resets_at: new Date(now + 5 * DAY_MS).toISOString(),
+				},
+			} as never,
+			{ fiveHourEnabled: true, weeklyEnabled: true },
+			now,
+			"anthropic",
+		);
+
+		expect(status.throttledWindows).toEqual([]);
+		expect(status.throttleUntil).toBeNull();
+	});
+});
+
 describe("getUsageThrottleUntil — MiniMax", () => {
 	const HOUR_MS = 60 * 60 * 1000;
 

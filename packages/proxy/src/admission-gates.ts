@@ -16,10 +16,12 @@ import {
 	type ContextWindowExcludedBackend,
 	FAMILY_WEEKLY_MAX_USAGE_AGE_MS,
 	type FamilyWeeklyExcludedAccount,
+	type FamilyWeeklyPacedAccount,
 	getUsageThrottleUntil,
 	isAbsorbablePeer,
 	type ProxyContext,
 	resolveFamilyWeeklyExclusion,
+	resolveFamilyWeeklyPacing,
 	resolveLivenessReserveThreshold,
 	resolvePoolLivenessDemotion,
 } from "./handlers";
@@ -147,6 +149,15 @@ export interface AdmissionGates {
 	readonly contextExcludedAccounts: readonly ContextWindowExcludedBackend[];
 	/** Same accumulate-and-dedup contract for the family-weekly gate. */
 	readonly familyWeeklyExcludedAccounts: readonly FamilyWeeklyExcludedAccount[];
+	/**
+	 * Accounts the family-weekly gate held back for PACING (the family is ahead
+	 * of an even burn but not yet spent), same accumulate-and-dedup contract.
+	 *
+	 * Deliberately a separate list from `familyWeeklyExcludedAccounts`: pacing is
+	 * throttle evidence (a 529 "come back shortly"), never grounds for the
+	 * family-exhausted 429 and its multi-day Retry-After.
+	 */
+	readonly familyWeeklyPacedAccounts: readonly FamilyWeeklyPacedAccount[];
 	/**
 	 * Why each demoted account was demoted, as of the LATEST
 	 * `applySoftDemotionReorder` call (each call rebuilds it from scratch).
@@ -415,7 +426,17 @@ export function createAdmissionGates(deps: AdmissionGateDeps): AdmissionGates {
 	// account stays fully eligible for Opus/Sonnet instead of being sidelined
 	// account-wide. Non-Anthropic accounts always pass. Combo-slot model
 	// overrides are honored, mirroring the context-window gate.
+	//
+	// The same gate also PACES the family's weekly window before it is spent:
+	// the account-wide throttle gate only knows the 5h/7d windows, so a family
+	// burning its weekly quota far ahead of an even pace used to run unchecked
+	// until it hit the wall. Pacing is family-scoped for the same reason the
+	// exclusion is, so an overpaced Fable never delays Opus traffic on the same
+	// account, and it is kept in a SEPARATE list: a paced account is throttle
+	// evidence (a 529 "come back shortly"), never grounds for the family
+	// exhausted 429 and its multi-day Retry-After.
 	const familyWeeklyExcludedAccounts: FamilyWeeklyExcludedAccount[] = [];
+	const familyWeeklyPacedAccounts: FamilyWeeklyPacedAccount[] = [];
 	const applyFamilyWeeklyGate = (
 		candidates: Account[],
 		comboInfo?: {
@@ -423,6 +444,11 @@ export function createAdmissionGates(deps: AdmissionGateDeps): AdmissionGates {
 		} | null,
 	): Account[] => {
 		const now = Date.now();
+		// Pacing follows the same switches as the account-wide usage throttle: the
+		// weekly toggle owns weekly windows, and a synthetic probe must never be
+		// delayed by one.
+		const pacingEnabled =
+			!isSyntheticProbeRequest && config.getUsageThrottlingWeeklyEnabled();
 		const passed: Account[] = [];
 		for (const account of candidates) {
 			if (account.provider !== "anthropic") {
@@ -436,17 +462,19 @@ export function createAdmissionGates(deps: AdmissionGateDeps): AdmissionGates {
 					modelForGate = slot.modelOverride;
 				}
 			}
+			const capacity = getFreshCapacity(
+				usageCache,
+				account.id,
+				account.provider,
+				now,
+				FAMILY_WEEKLY_MAX_USAGE_AGE_MS,
+			);
+			const usageData = usageCache.get(account.id);
 			const exclusion = resolveFamilyWeeklyExclusion(
 				account,
 				modelForGate,
-				usageCache.get(account.id),
-				getFreshCapacity(
-					usageCache,
-					account.id,
-					account.provider,
-					now,
-					FAMILY_WEEKLY_MAX_USAGE_AGE_MS,
-				),
+				usageData,
+				capacity,
 				now,
 			);
 			if (exclusion) {
@@ -461,6 +489,32 @@ export function createAdmissionGates(deps: AdmissionGateDeps): AdmissionGates {
 					`Family-weekly gate: excluding "${account.name}" for family=${exclusion.family} ` +
 						`(weekly quota exhausted, unified headroom present; ` +
 						`reset ${new Date(exclusion.resetAt).toISOString()})`,
+				);
+				continue;
+			}
+			// Exclusion first, pacing second: a spent family is the exclusion
+			// gate's call, and `resolveFamilyWeeklyPacing` ignores entries at or
+			// above the threshold anyway.
+			const paced = pacingEnabled
+				? resolveFamilyWeeklyPacing(
+						account,
+						modelForGate,
+						usageData,
+						capacity,
+						now,
+					)
+				: null;
+			if (paced) {
+				if (
+					!familyWeeklyPacedAccounts.some(
+						(entry) => entry.account.id === account.id,
+					)
+				) {
+					familyWeeklyPacedAccounts.push(paced);
+				}
+				log.debug(
+					`Family-weekly gate: pacing "${account.name}" for family=${paced.family} ` +
+						`(weekly burn ahead of pace; resume ${new Date(paced.resumeAt).toISOString()})`,
 				);
 				continue;
 			}
@@ -711,6 +765,7 @@ export function createAdmissionGates(deps: AdmissionGateDeps): AdmissionGates {
 		applyFamilyMemoDemotion,
 		contextExcludedAccounts,
 		familyWeeklyExcludedAccounts,
+		familyWeeklyPacedAccounts,
 		get softDemotionReasons() {
 			return softDemotionReasons;
 		},

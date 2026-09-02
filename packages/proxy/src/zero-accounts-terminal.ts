@@ -469,9 +469,13 @@ export async function resolveZeroAccountsOutcome(
 	// surfaced below. We only reach the CW hold / last-resort path when the
 	// large-context accounts are unavailable for non-throttle reasons (paused,
 	// rate-limited) — which is the incident this path was built for.
+	// Family-weekly PACING is throttle evidence too, so it takes the same
+	// precedence: an account held back by pacing is over its quota pace, not
+	// unavailable for a reason a context-window hold could resolve.
 	if (
 		gates.contextExcludedAccounts.length > 0 &&
-		throttledAccounts.length === 0
+		throttledAccounts.length === 0 &&
+		gates.familyWeeklyPacedAccounts.length === 0
 	) {
 		// Pre-compute the last-resort relaxation candidates (Codex accounts that
 		// fit the FULL/unmargined window) so we can both (a) pick the hold budget
@@ -620,7 +624,8 @@ export async function resolveZeroAccountsOutcome(
 	if (
 		gates.familyWeeklyExcludedAccounts.length > 0 &&
 		gates.contextExcludedAccounts.length === 0 &&
-		throttledAccounts.length === 0
+		throttledAccounts.length === 0 &&
+		gates.familyWeeklyPacedAccounts.length === 0
 	) {
 		const family = gates.familyWeeklyExcludedAccounts[0].family;
 
@@ -724,8 +729,17 @@ export async function resolveZeroAccountsOutcome(
 		return familyResponse;
 	}
 
-	if (throttledAccounts.length > 0) {
-		return createUsageThrottledResponse(throttledAccounts);
+	// A paced account is throttled, just on a per-family weekly window rather
+	// than an account-wide one: the answer is the same retryable 529, never the
+	// family-exhausted 429 above (whose Retry-After is the multi-day window).
+	if (
+		throttledAccounts.length > 0 ||
+		gates.familyWeeklyPacedAccounts.length > 0
+	) {
+		return createUsageThrottledResponse([
+			...throttledAccounts,
+			...gates.familyWeeklyPacedAccounts.map((paced) => paced.account),
+		]);
 	}
 
 	if (

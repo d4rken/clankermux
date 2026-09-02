@@ -108,17 +108,15 @@ function collectWindows(
 	}
 
 	if ("five_hour" in data && "seven_day" in data) {
+		// ACCOUNT-WIDE windows only. The flat `seven_day_opus`/`seven_day_sonnet`
+		// keys have been null since Anthropic moved the scoped windows into
+		// `limits[]`, and per-family weekly pacing is now the family-weekly gate's
+		// job (`resolveFamilyWeeklyPacing`), which is scoped to the REQUESTED
+		// family. Emitting them here would delay every family on the account for
+		// one family's overpace.
 		const anthropicLike = data as {
 			five_hour?: { utilization?: number | null; resets_at?: string | null };
 			seven_day?: { utilization?: number | null; resets_at?: string | null };
-			seven_day_opus?: {
-				utilization?: number | null;
-				resets_at?: string | null;
-			};
-			seven_day_sonnet?: {
-				utilization?: number | null;
-				resets_at?: string | null;
-			};
 		};
 
 		pushWindow(
@@ -133,20 +131,6 @@ function collectWindows(
 			anthropicLike.seven_day?.utilization,
 			anthropicLike.seven_day?.resets_at
 				? new Date(anthropicLike.seven_day.resets_at).getTime()
-				: null,
-		);
-		pushWindow(
-			"seven_day_opus",
-			anthropicLike.seven_day_opus?.utilization,
-			anthropicLike.seven_day_opus?.resets_at
-				? new Date(anthropicLike.seven_day_opus.resets_at).getTime()
-				: null,
-		);
-		pushWindow(
-			"seven_day_sonnet",
-			anthropicLike.seven_day_sonnet?.utilization,
-			anthropicLike.seven_day_sonnet?.resets_at
-				? new Date(anthropicLike.seven_day_sonnet.resets_at).getTime()
 				: null,
 		);
 		return windows;
@@ -187,9 +171,12 @@ function collectWindows(
 	// Anthropic `limits[]`-only (upstream is dropping the flat five_hour/seven_day
 	// keys). Reached only when the flat-Anthropic branch above did NOT match (no
 	// flat five_hour && seven_day pair), so it covers pure `limits[]` payloads and
-	// partial-flat ones. Source session→five_hour, weeklyAll→seven_day, and the
-	// per-family scoped weekly windows (opus/sonnet) from the normalizer so these
-	// accounts still get proactive throttling.
+	// partial-flat ones. Source session→five_hour and weeklyAll→seven_day so these
+	// accounts still get proactive account-wide throttling. The per-family scoped
+	// weekly windows are NOT emitted here: pacing them account-wide would delay
+	// every family for one family's overpace, so that decision belongs to the
+	// family-weekly gate (`resolveFamilyWeeklyPacing`), which knows the requested
+	// family.
 	if (isAnthropicUsageShape(data as unknown as AnthropicUsageData)) {
 		const normalized = normalizeAnthropicUsage(
 			data as unknown as AnthropicUsageData,
@@ -209,14 +196,6 @@ function collectWindows(
 				normalized.weeklyAll.resetMs,
 			);
 		}
-		for (const scoped of normalized.weeklyScoped) {
-			if (scoped.family === "opus") {
-				pushWindow("seven_day_opus", scoped.percent, scoped.resetsAtMs);
-			} else if (scoped.family === "sonnet") {
-				pushWindow("seven_day_sonnet", scoped.percent, scoped.resetsAtMs);
-			}
-			// fable/haiku have no dedicated throttle window type — skipped.
-		}
 		return windows;
 	}
 
@@ -233,8 +212,6 @@ function isWindowThrottlingEnabled(
 		case "tokens_limit":
 			return settings.fiveHourEnabled;
 		case "seven_day":
-		case "seven_day_opus":
-		case "seven_day_sonnet":
 		case "weekly":
 		case "monthly":
 			return settings.weeklyEnabled;

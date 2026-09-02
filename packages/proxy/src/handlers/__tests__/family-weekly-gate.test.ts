@@ -11,6 +11,7 @@ import {
 	hasAccountWideUnifiedRejection,
 	resolveFamilyWeeklyExclusion,
 	resolveFamilyWeeklyExclusionFromHeaders,
+	resolveFamilyWeeklyPacing,
 	resolveTransientlyCooledFamilySibling,
 } from "../family-weekly-gate";
 
@@ -81,6 +82,137 @@ const capacity = (minHeadroom: number): CapacitySignal => ({
 	weeklyHeadroom: 100,
 	sessionResetMs: null,
 	extraUsageUtilization: null,
+});
+
+describe("resolveFamilyWeeklyPacing", () => {
+	const DAY_MS = 24 * 60 * 60 * 1000;
+	// Two days into a 7-day window: an even burn would be at 2/7 = ~28.6%.
+	const RESET_MS = NOW + 5 * DAY_MS;
+	const WINDOW_START_MS = RESET_MS - 7 * DAY_MS;
+
+	/** A scoped weekly entry with an explicit reset, on the real mixed shape. */
+	function scoped(
+		displayName: string,
+		percent: number,
+		resetsAtMs = RESET_MS,
+	): AnthropicLimitEntry {
+		return {
+			kind: "weekly_scoped",
+			group: "weekly",
+			percent,
+			resets_at: new Date(resetsAtMs).toISOString(),
+			scope: { model: { id: "id", display_name: displayName } },
+			is_active: true,
+		};
+	}
+
+	it("paces a family burning ahead of an even weekly pace", () => {
+		const result = resolveFamilyWeeklyPacing(
+			makeAccount(),
+			"claude-fable-5",
+			usage([scoped("Fable", 80)]),
+			capacity(17),
+			NOW,
+		);
+		expect(result).not.toBeNull();
+		expect(result?.family).toBe("fable");
+		expect(result?.account.id).toBe("acc-1");
+		// An even burn reaches 80% at 80% of the window.
+		expect(result?.resumeAt).toBe(WINDOW_START_MS + 0.8 * 7 * DAY_MS);
+	});
+
+	it("does not pace a DIFFERENT family on the same account", () => {
+		// The whole point of family-scoped pacing: an overpaced Fable must not
+		// delay Opus traffic on the account that carries both.
+		const result = resolveFamilyWeeklyPacing(
+			makeAccount(),
+			"claude-opus-4-8",
+			usage([scoped("Fable", 80)]),
+			capacity(17),
+			NOW,
+		);
+		expect(result).toBeNull();
+	});
+
+	it("does not pace a family that is behind the line", () => {
+		const result = resolveFamilyWeeklyPacing(
+			makeAccount(),
+			"claude-fable-5",
+			usage([scoped("Fable", 20)]),
+			capacity(17),
+			NOW,
+		);
+		expect(result).toBeNull();
+	});
+
+	it("returns null at the exhaustion threshold (the exclusion gate's call)", () => {
+		const result = resolveFamilyWeeklyPacing(
+			makeAccount(),
+			"claude-fable-5",
+			usage([scoped("Fable", 100)]),
+			capacity(17),
+			NOW,
+		);
+		expect(result).toBeNull();
+	});
+
+	it("takes the LATEST catch-up instant across entries that collapse to one family", () => {
+		// Anthropic can report several scope surfaces for the same family; the
+		// account is not paced-clear until every one of its windows is.
+		const result = resolveFamilyWeeklyPacing(
+			makeAccount(),
+			"claude-fable-5",
+			usage([scoped("Fable", 20), scoped("Mythos 5", 80)]),
+			capacity(17),
+			NOW,
+		);
+		expect(result?.resumeAt).toBe(WINDOW_START_MS + 0.8 * 7 * DAY_MS);
+	});
+
+	it("fails open when capacity is null (stale usage)", () => {
+		const result = resolveFamilyWeeklyPacing(
+			makeAccount(),
+			"claude-fable-5",
+			usage([scoped("Fable", 80)]),
+			null,
+			NOW,
+		);
+		expect(result).toBeNull();
+	});
+
+	it("fails open when there is no unified headroom left", () => {
+		// An account-wide problem stays with the account-wide paths.
+		expect(
+			resolveFamilyWeeklyPacing(
+				makeAccount(),
+				"claude-fable-5",
+				usage([scoped("Fable", 80)]),
+				capacity(0),
+				NOW,
+			),
+		).toBeNull();
+		expect(
+			resolveFamilyWeeklyPacing(
+				makeAccount(),
+				"claude-fable-5",
+				usage([scoped("Fable", 80)]),
+				capacity(Number.NaN),
+				NOW,
+			),
+		).toBeNull();
+	});
+
+	it("returns null for a model with no resolvable family", () => {
+		expect(
+			resolveFamilyWeeklyPacing(
+				makeAccount(),
+				"gpt-5.6",
+				usage([scoped("Fable", 80)]),
+				capacity(17),
+				NOW,
+			),
+		).toBeNull();
+	});
 });
 
 describe("resolveFamilyWeeklyExclusion", () => {

@@ -110,6 +110,11 @@ interface HarnessOptions {
 		family: string;
 		resetAt: number;
 	}>;
+	familyWeeklyPacedAccounts?: Array<{
+		account: Account;
+		family: string;
+		resumeAt: number;
+	}>;
 	holds?: Partial<RecoveryHolds>;
 	requestId?: string;
 	/** Combo snapshot frozen at gate construction. */
@@ -127,6 +132,7 @@ function makeHarness(opts: HarnessOptions = {}): Harness {
 		gateTokenEstimate = 100,
 		contextExcludedAccounts = [],
 		familyWeeklyExcludedAccounts = [],
+		familyWeeklyPacedAccounts = [],
 		holds = {},
 		requestId = uniqueId("req"),
 		initialComboInfo = null,
@@ -162,6 +168,7 @@ function makeHarness(opts: HarnessOptions = {}): Harness {
 	const gates = {
 		contextExcludedAccounts,
 		familyWeeklyExcludedAccounts,
+		familyWeeklyPacedAccounts,
 		softDemotionReasons: new Map<string, string>(),
 	} as unknown as AdmissionGates;
 
@@ -451,6 +458,92 @@ describe("resolveZeroAccountsOutcome contracts", () => {
 			await resolveZeroAccountsOutcome(harness.deps);
 
 			expect(holdLabels).toEqual([]);
+		});
+	});
+
+	// Family-weekly pacing is throttle evidence: the account is over its per-family
+	// weekly PACE, not exhausted and not unavailable. Every terminal that gives
+	// throttling precedence has to see it, or the request gets an answer that
+	// tells the client the wrong thing to do.
+	describe("family-weekly pacing is throttle evidence", () => {
+		function paced(account: Account) {
+			return [{ account, family: "fable", resumeAt: Date.now() + 60_000 }];
+		}
+
+		it("answers with the 529 usage-throttled terminal, not the family 429", async () => {
+			const account = makeAccount({ id: uniqueId("paced"), name: "Paced" });
+			const harness = makeHarness({
+				accounts: [account],
+				familyWeeklyPacedAccounts: paced(account),
+			});
+
+			const res = await resolveZeroAccountsOutcome(harness.deps);
+
+			expect(res.status).toBe(529);
+			const body = (await res.json()) as { error: { message: string } };
+			expect(body.error.message).toContain("Paced");
+		});
+
+		it("outranks the family-exhausted 429 when both lists are populated", async () => {
+			// The exhausted account's Retry-After is its multi-day weekly window;
+			// answering with that when a paced sibling recovers in a minute tells
+			// the client to stay away for days.
+			const pacedAccount = makeAccount({
+				id: uniqueId("paced"),
+				name: "Paced",
+			});
+			const exhausted = makeAccount({
+				id: uniqueId("exhausted"),
+				name: "Exhausted",
+			});
+			const harness = makeHarness({
+				accounts: [pacedAccount, exhausted],
+				familyWeeklyPacedAccounts: paced(pacedAccount),
+				familyWeeklyExcludedAccounts: [
+					{
+						account: exhausted,
+						family: "fable",
+						resetAt: Date.now() + 5 * 86_400_000,
+					},
+				],
+			});
+
+			const res = await resolveZeroAccountsOutcome(harness.deps);
+
+			expect(res.status).toBe(529);
+		});
+
+		it("takes precedence over the context-window hold", async () => {
+			// A CW hold waits for a large-context account to come back; a paced
+			// account is not coming back any sooner for being waited on, and the
+			// honest answer is the retryable throttle.
+			const pacedAccount = makeAccount({
+				id: uniqueId("paced"),
+				name: "Paced",
+			});
+			const codex = makeAccount({
+				id: uniqueId("codex"),
+				name: "Codex",
+				provider: "codex",
+			});
+			let cwHoldEntered = false;
+			const harness = makeHarness({
+				accounts: [pacedAccount, codex],
+				familyWeeklyPacedAccounts: paced(pacedAccount),
+				contextExcludedAccounts: [{ account: codex, model: MODEL }],
+				gateTokenEstimate: 2_000_000,
+				holds: {
+					holdForNonCodexRecovery: async () => {
+						cwHoldEntered = true;
+						return null;
+					},
+				},
+			});
+
+			const res = await resolveZeroAccountsOutcome(harness.deps);
+
+			expect(cwHoldEntered).toBe(false);
+			expect(res.status).toBe(529);
 		});
 	});
 

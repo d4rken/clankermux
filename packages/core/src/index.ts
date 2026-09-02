@@ -184,6 +184,7 @@ export * from "./request-events";
 export {
 	FAMILY_WEEKLY_EXHAUSTED_THRESHOLD_PERCENT,
 	getExhaustedFamilies,
+	getScopedFamilyLimits,
 	isFamilyWeeklyExhaustedWithHeadroom,
 	type ScopedFamilyLimit,
 } from "./scoped-limits";

@@ -6,8 +6,6 @@
 export type SupportedWindow =
 	| "five_hour"
 	| "seven_day"
-	| "seven_day_opus"
-	| "seven_day_sonnet"
 	| "weekly"
 	| "daily"
 	| "monthly"
@@ -16,6 +14,11 @@ export type SupportedWindow =
 /**
  * Fixed window durations in milliseconds.
  * Note: monthly windows have variable duration (28-31 days) and are handled separately.
+ *
+ * Keyed by string, and deliberately WIDER than `SupportedWindow`: the dashboard
+ * resolves window starts for display-only window kinds
+ * (`seven_day_opus`/`seven_day_sonnet`/`seven_day_scoped`) that the proactive
+ * throttle no longer emits.
  */
 export const FIXED_WINDOW_DURATION_MS: Record<string, number> = {
 	five_hour: 5 * 60 * 60 * 1000,
