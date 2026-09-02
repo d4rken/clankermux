@@ -2367,6 +2367,14 @@ export class CodexProvider extends BaseProvider {
 					delta: {
 						stop_reason: "end_turn" | "tool_use" | "max_tokens" | "refusal";
 						stop_sequence: null;
+						stop_details?: {
+							type: "refusal";
+							category: string;
+							explanation: null;
+							fallback_credit_token: null;
+							fallback_has_prefill_claim: null;
+							recommended_model: null;
+						};
 					};
 					usage: {
 						input_tokens: number;
@@ -2388,6 +2396,23 @@ export class CodexProvider extends BaseProvider {
 						cache_creation_input_tokens: state.cacheCreationInputTokens,
 					},
 				};
+				// A refusal carries the Anthropic `stop_details` envelope so the
+				// refusal is CATEGORIZED rather than landing as a bare "unknown":
+				// OpenAI's only refusal reason is its content filter, so that is
+				// what the category names. Schema-conformant, and deliberately
+				// credit-less — Codex issues no fallback credit, so a client reading
+				// this finds no token and behaves exactly as before. Non-refusal
+				// reasons emit no stop_details at all.
+				if (stopReason === "refusal") {
+					messageDelta.delta.stop_details = {
+						type: "refusal",
+						category: "content_filter",
+						explanation: null,
+						fallback_credit_token: null,
+						fallback_has_prefill_claim: null,
+						recommended_model: null,
+					};
+				}
 				if (state.contextWindow) {
 					messageDelta.context_window = state.contextWindow;
 				}

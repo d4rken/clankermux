@@ -2806,6 +2806,29 @@ describe("CodexProvider response.incomplete stop reasons", () => {
 		expect(body).toContain('"stop_reason":"refusal"');
 		expect(body).toContain("event: message_delta");
 		expect(body).toContain("event: message_stop");
+
+		// The refusal carries a schema-conformant stop_details envelope so the
+		// proxy records WHY it was refused instead of a bare "unknown". It names
+		// no credit token — Codex issues none — so a client reading it finds
+		// nothing to redeem and behaves exactly as it did before.
+		const delta = JSON.parse(
+			body
+				.split("\n")
+				.find((line) => line.includes('"stop_reason":"refusal"'))
+				?.replace(/^data: /, "") ?? "{}",
+		) as {
+			delta: {
+				stop_details?: Record<string, unknown>;
+			};
+		};
+		expect(delta.delta.stop_details).toEqual({
+			type: "refusal",
+			category: "content_filter",
+			explanation: null,
+			fallback_credit_token: null,
+			fallback_has_prefill_claim: null,
+			recommended_model: null,
+		});
 	});
 
 	it("maps response.incomplete with a non-content_filter reason to max_tokens", async () => {
@@ -2833,6 +2856,8 @@ describe("CodexProvider response.incomplete stop reasons", () => {
 		const body = await transformed.text();
 
 		expect(body).toContain('"stop_reason":"max_tokens"');
+		// Only a refusal carries stop_details.
+		expect(body).not.toContain("stop_details");
 	});
 
 	it("treats a response.completed event carrying status incomplete the same as response.incomplete", async () => {
