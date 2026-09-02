@@ -363,4 +363,45 @@ describe("UsageSnapshotRepository", () => {
 			expect(r.sevenDayReset).toBe(88_000);
 		});
 	});
+
+	describe("getLatestSnapshotsBefore — carry-forward seed", () => {
+		it("returns the single latest row per account strictly before the cutoff", async () => {
+			await repo.insertSnapshots([
+				row({ accountId: "acct-a", sampledAt: 1_000, fiveHourPct: 1 }),
+				row({ accountId: "acct-a", sampledAt: 2_000, fiveHourPct: 2 }),
+				row({ accountId: "acct-b", sampledAt: 1_800, fiveHourPct: 3 }),
+				// At/after the cutoff — the range read owns these.
+				row({ accountId: "acct-a", sampledAt: 5_000, fiveHourPct: 9 }),
+			]);
+
+			const read = await repo.getLatestSnapshotsBefore(5_000);
+
+			expect(
+				read
+					.map((r) => [r.accountId, r.ts, r.fiveHourPct])
+					.sort((a, b) => String(a[0]).localeCompare(String(b[0]))),
+			).toEqual([
+				["acct-a", 2_000, 2],
+				["acct-b", 1_800, 3],
+			]);
+		});
+
+		it("carries the row's own sample time, not a bucket start", async () => {
+			await repo.insertSnapshots([
+				row({ accountId: "acct-a", sampledAt: 1_234, sevenDayReset: 77_000 }),
+			]);
+
+			const read = await repo.getLatestSnapshotsBefore(5_000);
+
+			expect(read).toHaveLength(1);
+			expect(read[0].ts).toBe(1_234);
+			expect(read[0].sevenDayReset).toBe(77_000);
+			expect(read[0].provider).toBe("anthropic");
+		});
+
+		it("returns [] when nothing precedes the cutoff", async () => {
+			await repo.insertSnapshots([row({ sampledAt: 5_000 })]);
+			expect(await repo.getLatestSnapshotsBefore(5_000)).toEqual([]);
+		});
+	});
 });
