@@ -22,6 +22,7 @@ const SCOPED_BINDING_ORDER = `sampled_at DESC, (pct IS NULL), pct DESC, (reset_a
 function mapRankedScopedRow(row: {
 	account_id: string;
 	ts: number;
+	sampled_at: number;
 	family: string;
 	display_name: string;
 	pct: number | null;
@@ -30,6 +31,7 @@ function mapRankedScopedRow(row: {
 	return {
 		accountId: row.account_id,
 		ts: Number(row.ts),
+		sampledAt: Number(row.sampled_at),
 		family: row.family,
 		displayName: row.display_name,
 		pct: row.pct == null ? null : Number(row.pct),
@@ -129,6 +131,10 @@ export class UsageScopedSnapshotRepository extends BaseRepository<ScopedUsageSna
 	 * No family predicate: the caller shapes EVERY recorded family in one pass,
 	 * so the existing `sampled_at` index covers the scan and no new index is
 	 * needed.
+	 *
+	 * `sampledAt` carries the winning row's real sample time beside the bucket
+	 * start, so a caller comparing recency across accounts in one bucket (the
+	 * family display name) is not left ranking identical bucket timestamps.
 	 */
 	async getBucketedSnapshots(opts: {
 		sinceMs: number;
@@ -138,6 +144,7 @@ export class UsageScopedSnapshotRepository extends BaseRepository<ScopedUsageSna
 		const rows = await this.query<{
 			account_id: string;
 			ts: number;
+			sampled_at: number;
 			family: string;
 			display_name: string;
 			pct: number | null;
@@ -157,7 +164,7 @@ export class UsageScopedSnapshotRepository extends BaseRepository<ScopedUsageSna
 				) AS rn
 				FROM bucketed
 			)
-			SELECT account_id, ts, family, display_name, pct, reset_at
+			SELECT account_id, ts, sampled_at, family, display_name, pct, reset_at
 			FROM ranked WHERE rn = 1 ORDER BY ts, family, account_id;
 		`,
 			[bucketMs, bucketMs, sinceMs],
@@ -182,6 +189,7 @@ export class UsageScopedSnapshotRepository extends BaseRepository<ScopedUsageSna
 		const rows = await this.query<{
 			account_id: string;
 			ts: number;
+			sampled_at: number;
 			family: string;
 			display_name: string;
 			pct: number | null;
@@ -196,7 +204,7 @@ export class UsageScopedSnapshotRepository extends BaseRepository<ScopedUsageSna
 				FROM usage_scoped_snapshots
 				WHERE sampled_at < ?
 			)
-			SELECT account_id, sampled_at AS ts, family, display_name, pct, reset_at
+			SELECT account_id, sampled_at AS ts, sampled_at, family, display_name, pct, reset_at
 			FROM ranked WHERE rn = 1 ORDER BY family, account_id;
 		`,
 			[beforeMs],

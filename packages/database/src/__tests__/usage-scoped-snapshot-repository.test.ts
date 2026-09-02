@@ -382,11 +382,50 @@ describe("UsageScopedSnapshotRepository", () => {
 					["acct-b", "opus", 1_800, 4],
 				].sort(),
 			);
+			// The predecessor read reports the raw sample time on both fields.
+			expect(read.map((r) => r.sampledAt).sort()).toEqual([
+				1_500, 1_800, 2_000,
+			]);
 		});
 
 		it("returns [] when nothing precedes the cutoff", async () => {
 			await repo.insertSnapshots([row({ sampledAt: 5_000 })]);
 			expect(await repo.getLatestSnapshotsBefore(5_000)).toEqual([]);
 		});
+	});
+});
+
+describe("UsageScopedSnapshotRepository — bucketed read exposes sampledAt", () => {
+	let db: Database;
+	let repo: UsageScopedSnapshotRepository;
+
+	beforeEach(() => {
+		db = makeDb();
+		insertAccount(db, "acct-a");
+		repo = new UsageScopedSnapshotRepository(new BunSqlAdapter(db));
+	});
+
+	afterEach(() => {
+		db.close();
+	});
+
+	it("carries the winning row's raw sampled_at beside the bucket ts", async () => {
+		const HOUR = 60 * 60 * 1000;
+		const MINUTE = 60 * 1000;
+		const bucket = 12 * HOUR;
+		await repo.insertSnapshots([
+			row({ sampledAt: bucket + 5 * MINUTE, displayName: "Claude Opus 4.8" }),
+			row({ sampledAt: bucket + 55 * MINUTE, displayName: "Claude Opus 5" }),
+		]);
+
+		const read = await repo.getBucketedSnapshots({
+			sinceMs: 0,
+			bucketMs: HOUR,
+		});
+
+		expect(read).toHaveLength(1);
+		expect(read[0]?.ts).toBe(bucket);
+		expect(read[0]?.displayName).toBe("Claude Opus 5");
+		expect(read[0]?.sampledAt).toBe(bucket + 55 * MINUTE);
 	});
 });

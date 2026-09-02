@@ -9,7 +9,8 @@ import {
 	type UsageScopedHistorySources,
 } from "../usage-scoped-history-direct";
 
-const HOUR = 60 * 60 * 1000;
+const MINUTE = 60 * 1000;
+const HOUR = 60 * MINUTE;
 const DAY = 24 * HOUR;
 /** An hour-aligned "now" so the hourly bucket grid lands on round numbers. */
 const NOW_ALIGNED = Math.floor(1_700_000_000_000 / HOUR) * HOUR;
@@ -21,14 +22,18 @@ function makeAccount(id: string, name: string, provider: string): Account {
 function snapshot(
 	partial: Partial<RankedScopedSnapshot>,
 ): RankedScopedSnapshot {
+	const ts = partial.ts ?? NOW_ALIGNED;
 	return {
 		accountId: "acct-a",
-		ts: NOW_ALIGNED,
 		family: "fable",
 		displayName: "Fable",
 		pct: 10,
 		resetAt: null,
 		...partial,
+		ts,
+		// The raw sample time defaults to the bucket start, so a fixture that
+		// only cares about buckets reads the same as before the field existed.
+		sampledAt: partial.sampledAt ?? ts,
 	};
 }
 
@@ -351,5 +356,43 @@ describe("usage-scoped-history handler — expired predecessor-only family", () 
 			ts: sinceMs,
 			pct: 30,
 		});
+	});
+});
+
+describe("usage-scoped-history handler — displayName by sample recency", () => {
+	it("labels a family from the most recently SAMPLED row when two accounts share a bucket", async () => {
+		// Same 12:00 bucket for both accounts. Rows arrive in the repository's
+		// `ts, family, account_id` order, so the stale-generation account (id
+		// "zzz-stale", sampled 12:05) is iterated AFTER the fresh one (id
+		// "aaa-fresh", sampled 12:55). The label must follow the later sample.
+		const sources = createSources({
+			snapshots: [
+				snapshot({
+					accountId: "aaa-fresh",
+					ts: NOW_ALIGNED,
+					sampledAt: NOW_ALIGNED + 55 * MINUTE,
+					family: "opus",
+					displayName: "Claude Opus 5",
+					pct: 20,
+				}),
+				snapshot({
+					accountId: "zzz-stale",
+					ts: NOW_ALIGNED,
+					sampledAt: NOW_ALIGNED + 5 * MINUTE,
+					family: "opus",
+					displayName: "Claude Opus 4.8",
+					pct: 50,
+				}),
+			],
+			accounts: [
+				makeAccount("aaa-fresh", "Fresh", "anthropic"),
+				makeAccount("zzz-stale", "Stale", "anthropic"),
+			],
+		});
+
+		const { body } = await callHandler(sources, "24h");
+
+		expect(body.families[0]?.family).toBe("opus");
+		expect(body.families[0]?.displayName).toBe("Claude Opus 5");
 	});
 });

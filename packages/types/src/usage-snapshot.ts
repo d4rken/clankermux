@@ -163,6 +163,13 @@ export interface RankedScopedSnapshot {
 	accountId: string;
 	/** Bucket start, ms since epoch (or the sample time on the predecessor read). */
 	ts: number;
+	/**
+	 * The winning row's REAL sample time, ms since epoch — the instant the
+	 * reading was taken, not the bucket it fell in. Two accounts in one bucket
+	 * share a `ts`, so anything that has to pick the most recent reading (the
+	 * family's display name across model generations) must compare this.
+	 */
+	sampledAt: number;
 	family: string;
 	displayName: string;
 	pct: number | null;

@@ -114,7 +114,7 @@ export function createUsageScopedHistoryHandlerFromSources(
 				if (!bucket) {
 					bucket = {
 						displayName: "",
-						latestRowTs: Number.NEGATIVE_INFINITY,
+						latestSampledAt: Number.NEGATIVE_INFINITY,
 						earliestRowTs: null,
 						hasPredecessor: false,
 						accountOrder: [],
@@ -198,7 +198,7 @@ export function createUsageScopedHistoryHandlerFromSources(
 /** Per-family accumulation while the flat row list is grouped. */
 interface FamilyBucket {
 	displayName: string;
-	latestRowTs: number;
+	latestSampledAt: number;
 	earliestRowTs: number | null;
 	hasPredecessor: boolean;
 	accountOrder: string[];
@@ -211,13 +211,18 @@ interface FamilyBucket {
  * "Claude Opus 5" both resolve to `opus`), so the label shown is the provider's
  * own scope name from the MOST RECENT row seen — the generation currently in
  * force, not whichever one happened to be read first.
+ *
+ * Recency is the row's real `sampledAt`, never its bucket start: two accounts
+ * reporting different generations inside one bucket share a `ts`, so a bucket
+ * comparison would resolve them by iteration (account-id) order and could
+ * label the family with the older generation.
  */
 function noteDisplayName(
 	bucket: FamilyBucket,
 	row: RankedScopedSnapshot,
 ): void {
-	if (row.ts < bucket.latestRowTs) return;
-	bucket.latestRowTs = row.ts;
+	if (row.sampledAt < bucket.latestSampledAt) return;
+	bucket.latestSampledAt = row.sampledAt;
 	bucket.displayName = row.displayName;
 }
 
