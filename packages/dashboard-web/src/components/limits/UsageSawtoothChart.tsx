@@ -351,8 +351,8 @@ export function UsageSawtoothChart({
 					Per-account utilization with the pool average. Solid lines are
 					recorded history; a paused or maxed-out account holds its last value
 					until its window rolls over, so it never silently drops out of the
-					pool average. Dashed lines project the current burn rate forward to
-					each window's reset.
+					pool average. Dashed lines project the current burn rate forward
+					through each window's reset (dropping to 0%) and a little beyond.
 				</CardDescription>
 			</CardHeader>
 			<CardContent className="space-y-section">
