@@ -29,6 +29,10 @@ import {
 } from "./identity-bound-paths";
 import { isAnchoredSource, resolveProject } from "./project-extraction";
 import { parseReasoningEffort } from "./reasoning-effort";
+import {
+	hashCreditToken,
+	refusalFallbackRegistry,
+} from "./refusal-fallback-registry";
 import { extractRequestAffinity } from "./request-affinity";
 import { sessionProjectCache } from "./session-project-cache";
 import { sessionPromotionTracker } from "./session-promotion";
@@ -161,6 +165,15 @@ export async function ingestProxyRequest(
 	// and reuse parsed body for /v1/messages validation (consolidate parses)
 	const parsedBody = requestBodyContext.getParsedJson();
 	const requestModel = requestBodyContext.getModel();
+	// Fallback-credit redemption: Claude Code re-sends a refused turn to the
+	// fallback model with the opaque credit token the refusal issued at the top
+	// level of the body. The body is re-encoded from `parsedBody` downstream, so
+	// reading it here forwards it unchanged.
+	const rawCreditToken = parsedBody?.fallback_credit_token;
+	const creditToken =
+		typeof rawCreditToken === "string" && rawCreditToken.length > 0
+			? rawCreditToken
+			: null;
 	const resolved = resolveProject(
 		req.method,
 		url.pathname,
@@ -333,6 +346,16 @@ export async function ingestProxyRequest(
 	requestMeta.project = project;
 	requestMeta.projectAttributionSource = projectAttributionSource;
 	requestMeta.requestedModel = effectiveRequestModel ?? null;
+	requestMeta.fallbackCreditClaimed = creditToken !== null;
+	// Resolved once, here: the registry entry is consumed on redemption, so this
+	// must not run per failover attempt. `null` when the refusal that issued the
+	// credit was not observed by this process (restart, or another proxy).
+	requestMeta.fallbackFromModel = creditToken
+		? (refusalFallbackRegistry.takeOrigin(
+				hashCreditToken(creditToken),
+				Date.now(),
+			)?.model ?? null)
+		: null;
 	requestMeta.contextComposition = contextComposition;
 	requestMeta.toolCallStats = toolCallStats;
 	// Cache-measurement capture: session identity (already derived by

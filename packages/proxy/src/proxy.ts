@@ -529,6 +529,9 @@ async function handleIngestedProxy(
 			isStream: false,
 			providerName: ctx.provider.name,
 			requestedModel: effectiveRequestModel ?? null,
+			// A locally-rejected retry is still the redemption of a refusal.
+			fallbackCreditClaimed: requestMeta.fallbackCreditClaimed ?? null,
+			fallbackFromModel: requestMeta.fallbackFromModel ?? null,
 			synthetic: true,
 			failureSource:
 				error === "provider_overloaded"
