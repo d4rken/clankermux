@@ -32,6 +32,7 @@ import type {
 	StorageUsageResponse,
 	SystemStatusResponse,
 	UsageHistoryResponse,
+	UsageScopedHistoryResponse,
 } from "@clankermux/types";
 import { API_LIMITS, API_TIMEOUT } from "./constants";
 import { canonicalSections } from "./lib/analytics-sections";
@@ -1025,6 +1026,29 @@ class API extends HttpClient {
 		this.logger.debug(`→ GET ${url}`);
 		try {
 			const response = await this.get<UsageHistoryResponse>(url);
+			const duration = Date.now() - startTime;
+			this.logger.debug(`← GET ${url} - 200 (${duration}ms)`);
+			return response;
+		} catch (error) {
+			const duration = Date.now() - startTime;
+			this.logger.error(`✗ GET ${url} - ERROR (${duration}ms)`, {
+				error: error instanceof Error ? error.message : String(error),
+			});
+			throw error;
+		}
+	}
+
+	// Per-model-family weekly windows for the Limits-tab family panels. One
+	// response carries every recorded family, so the panel list itself comes
+	// from this read rather than having to name a family up front.
+	async getUsageScopedHistory(
+		range: string,
+	): Promise<UsageScopedHistoryResponse> {
+		const startTime = Date.now();
+		const url = `/api/analytics/usage-scoped-history?range=${encodeURIComponent(range)}`;
+		this.logger.debug(`→ GET ${url}`);
+		try {
+			const response = await this.get<UsageScopedHistoryResponse>(url);
 			const duration = Date.now() - startTime;
 			this.logger.debug(`← GET ${url} - 200 (${duration}ms)`);
 			return response;
