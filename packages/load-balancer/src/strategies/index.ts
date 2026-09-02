@@ -391,7 +391,7 @@ export class SessionStrategy implements LoadBalancingStrategy {
 	 *                   when the original account recovers and its prompt cache
 	 *                   is still warm.
 	 *  - `reassign`  — affined account is durably gone (real 5h/7d exhaustion,
-	 *                   manual pause, session expired, removed). Delete the
+	 *                   any pause, session expired, removed). Delete the
 	 *                   affinity entry and pick a fresh account.
 	 *  - `miss`      — no affinity entry exists for this key yet.
 	 */
@@ -445,24 +445,27 @@ export class SessionStrategy implements LoadBalancingStrategy {
 	 * serving elsewhere while holding the slot (hold).
 	 *
 	 * Affinity-breaking ("durable") conditions:
-	 *  - Manual or failure-threshold pause (operator intervention required).
+	 *  - ANY pause, whatever the reason. Operator pauses (manual,
+	 *    failure_threshold) and re-auth pauses (oauth_invalid_grant,
+	 *    subscription_expired) need a human; the self-healing ones (overage,
+	 *    peak_hours, rate_limit_window) clear on a usage-window reset, which is
+	 *    hours away. Either way the pause outlives
+	 *    AFFINITY_REASSIGN_MIN_COOLDOWN_MS, the threshold above which the
+	 *    rate-limit branch below already treats the prompt cache as cold, so
+	 *    there is nothing left to hold the slot for.
 	 *  - Long rate-limit cooldown (>= AFFINITY_REASSIGN_MIN_COOLDOWN_MS) for a
 	 *    non-server-wide reason — indicates real 5h/7d usage-window exhaustion.
 	 *
 	 * Affinity-preserving ("transient") conditions:
 	 *  - 529 overload / probe cooldown — server-wide; switching doesn't help.
 	 *  - Short rate-limit cooldown — per-minute throttle; resolves in seconds.
-	 *  - Billing overage / peak-hours pause — auto-resumes on window reset.
 	 */
 	private isAffinityBreakingUnavailability(
 		account: Account,
 		now: number,
 	): boolean {
-		// Sticky pauses: operator must manually resume.
-		if (account.paused) {
-			const reason = account.pause_reason;
-			return reason === "manual" || reason === "failure_threshold";
-		}
+		// A pause is never brief enough to be worth holding a pin through.
+		if (account.paused) return true;
 
 		const until = account.rate_limited_until;
 		if (!until || until <= now) return false;
