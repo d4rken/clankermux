@@ -1,16 +1,19 @@
+import type { ModelFamily } from "@clankermux/core";
 import {
 	computeWindowStartMs,
 	estimateWindowExhaustion,
 	extractFiveHour,
 	extractSevenDay,
+	isAnthropicStyleShape,
+	normalizeAnthropicUsage,
 } from "@clankermux/core";
-import type { AccountResponse } from "@clankermux/types";
+import type { AccountResponse, AnthropicUsageData } from "@clankermux/types";
 import {
 	usageObservedAtMs,
 	weeklyLifetimeConfidence,
 	windowBurnAnchor,
 } from "./lifetime-confidence";
-import type { PoolWindow } from "./pool-usage";
+import { type PoolWindow, pickBindingScopedLimit } from "./pool-usage";
 
 /**
  * Forward usage projection for the Limits-tab sawtooth charts.
@@ -45,6 +48,48 @@ export const FORECAST_POST_RESET_TAIL_MS = {
 
 /** The window kinds a forecast line can be drawn for. */
 type ForecastWindowKind = keyof typeof FORECAST_POST_RESET_TAIL_MS;
+
+/**
+ * Which window a forecast is asked for: one of the account-wide windows, or
+ * one model family's scoped weekly window (the "Fable weekly window" panel).
+ */
+export type ForecastWindow =
+	| PoolWindow
+	| { kind: "family"; family: ModelFamily };
+
+function forecastWindowKind(window: ForecastWindow): ForecastWindowKind {
+	return typeof window === "string" ? window : "seven_day_scoped";
+}
+
+/**
+ * The utilization and reset to project, for whichever window was asked for.
+ *
+ * A family window reads the account's scoped weekly limits and takes the
+ * BINDING one (see pickBindingScopedLimit): an account reporting two limits
+ * that fold onto one family gets one line, describing the window that actually
+ * constrains it. Only Anthropic-style payloads carry scoped windows at all.
+ */
+function extractWindow(
+	account: AccountResponse,
+	window: ForecastWindow,
+	now: number,
+): { pct: number | null; resetMs: number | null } | null {
+	if (!account.usageData) return null;
+	if (typeof window === "string") {
+		return window === "five_hour"
+			? extractFiveHour(account.usageData)
+			: extractSevenDay(account.usageData);
+	}
+	if (!isAnthropicStyleShape(account.usageData)) return null;
+	const binding = pickBindingScopedLimit(
+		normalizeAnthropicUsage(
+			account.usageData as AnthropicUsageData,
+			now,
+		).weeklyScoped.filter((limit) => limit.family === window.family),
+	);
+	if (binding === null) return null;
+	return { pct: binding.percent, resetMs: binding.resetsAtMs };
+}
 
 /** A single projected point on a forecast line. `pct` is clamped to 0–100. */
 export interface ForecastPoint {
@@ -97,15 +142,13 @@ function clampPct(value: number): number {
  */
 function deriveLiveState(
 	account: AccountResponse,
-	window: PoolWindow,
+	window: ForecastWindow,
 	now: number,
 ): LiveWindowState | null {
 	if (!account.usageData) return null;
 
-	const extracted =
-		window === "five_hour"
-			? extractFiveHour(account.usageData)
-			: extractSevenDay(account.usageData);
+	const windowKind = forecastWindowKind(window);
+	const extracted = extractWindow(account, window, now);
 	if (!extracted || extracted.pct == null || extracted.resetMs == null) {
 		return null;
 	}
@@ -127,7 +170,7 @@ function deriveLiveState(
 	if (account.paused === true || inCooldown || pct >= 100) {
 		return {
 			accountId: account.id,
-			windowKind: window,
+			windowKind,
 			pct: clampPct(pct),
 			startMs: now,
 			resetMs,
@@ -139,7 +182,7 @@ function deriveLiveState(
 	}
 
 	// Actively burning: 0 < pct < 100.
-	const burnStartMs = computeWindowStartMs(resetMs, window);
+	const burnStartMs = computeWindowStartMs(resetMs, windowKind);
 	if (burnStartMs == null) return null;
 	const elapsed = now - burnStartMs;
 	if (elapsed <= 0) return null;
@@ -157,10 +200,16 @@ function deriveLiveState(
 	// `pct`, and it reaches exactly 100 at the recomputed exhaustion time. This
 	// anchor is chart rendering, deliberately different from the progress-bar
 	// message's anchor, and so stays here rather than moving into the estimator.
+	// A family window gets NO regression: the server only fits the ACCOUNT-WIDE
+	// series, so its %/hour is in units of a different numerator. Feeding it in
+	// would emit a confident-looking projection built on a mismatched
+	// denominator — the same reason computeFamilyWeeklyUsage passes null.
 	const pred =
-		window === "five_hour"
-			? account.prediction?.fiveHour
-			: account.prediction?.sevenDay;
+		typeof window !== "string"
+			? null
+			: window === "five_hour"
+				? account.prediction?.fiveHour
+				: account.prediction?.sevenDay;
 	const estimate = estimateWindowExhaustion(
 		{
 			utilizationPct: pct,
@@ -172,9 +221,14 @@ function deriveLiveState(
 			// too: a full-confidence lifetime slope is `pct` over the elapsed time
 			// AT THE OBSERVATION, so the forecast line stops shallowing out
 			// between refetches as `now` walks forward.
-			lifetimeConfidence: weeklyLifetimeConfidence(window),
+			// Asked of the shared policy, never assumed: today a scoped window is
+			// "low" (unmeasured, and carrying no regression to have been compared
+			// against), and the anchor registry holds account-wide windows only, so
+			// both return the empty answer for a family. Going through the policy
+			// means a future change reaches this line without another edit here.
+			lifetimeConfidence: weeklyLifetimeConfidence(windowKind),
 			observedAtMs: usageObservedAtMs(account.usageAsOfIso),
-			anchor: windowBurnAnchor(account.burnAnchors, window),
+			anchor: windowBurnAnchor(account.burnAnchors, windowKind),
 		},
 		now,
 	);
@@ -221,7 +275,7 @@ function deriveLiveState(
 
 	return {
 		accountId: account.id,
-		windowKind: window,
+		windowKind,
 		pct,
 		startMs,
 		resetMs,
@@ -332,7 +386,7 @@ function toSortedPoints(byTs: Map<number, number>): ForecastPoint[] {
  */
 export function computeWindowForecast(
 	accounts: AccountResponse[],
-	window: PoolWindow,
+	window: ForecastWindow,
 	now: number,
 	cadenceMs: number,
 	horizonMs: number,

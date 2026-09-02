@@ -509,6 +509,141 @@ describe("computeWindowForecast — burn anchor + shared ETA", () => {
 	});
 });
 
+describe("computeWindowForecast — per-family scoped weekly window", () => {
+	const FABLE = { kind: "family", family: "fable" } as const;
+
+	function scopedEntry(displayName: string, percent: number, resetMs: number) {
+		return {
+			kind: "weekly_scoped",
+			group: "weekly",
+			percent,
+			resets_at: new Date(resetMs).toISOString(),
+			scope: {
+				model: {
+					id: displayName.toLowerCase().replace(/\s+/g, "-"),
+					display_name: displayName,
+				},
+			},
+			is_active: true,
+		};
+	}
+
+	function scopedAccount(
+		id: string,
+		entries: ReturnType<typeof scopedEntry>[],
+		partial: Partial<AccountResponse> = {},
+	): AccountResponse {
+		return mkAccount({
+			id,
+			usageData: { limits: entries } as unknown as FullUsageData,
+			...partial,
+		});
+	}
+
+	it("projects the family window from its binding limit, with the weekly tail", () => {
+		// 30% observed 3 days into a 7-day window (resets 4 days out) => the
+		// lifetime rate is 10%/day, so the line lands on 70% at the reset.
+		const resetMs = NOW + 4 * DAY;
+		const [series] = computeWindowForecast(
+			[scopedAccount("a", [scopedEntry("Fable", 30, resetMs)])],
+			FABLE,
+			NOW,
+			HOUR,
+			FAR_HORIZON,
+		);
+
+		expect(series.accountId).toBe("a");
+		expect(series.bridgePct).toBe(30);
+		expect(series.isSafe).toBe(true);
+		expect(pctAt(series, resetMs)).toBeCloseTo(70, 5);
+		expect(pctAt(series, resetMs + 1)).toBe(0);
+		expect(lastPoint(series).ts).toBe(resetMs + SEVEN_DAY_TAIL);
+	});
+
+	it("takes the binding limit when two scope labels fold onto one family", () => {
+		// Mythos-class labels resolve to `fable` too. The account gets ONE line,
+		// for the window that actually constrains it.
+		const bindingReset = NOW + 4 * DAY;
+		const [series] = computeWindowForecast(
+			[
+				scopedAccount("a", [
+					scopedEntry("Fable", 30, NOW + 2 * DAY),
+					scopedEntry("Mythos", 60, bindingReset),
+				]),
+			],
+			FABLE,
+			NOW,
+			HOUR,
+			FAR_HORIZON,
+		);
+
+		expect(series.bridgePct).toBe(60);
+		expect(pctAt(series, bindingReset + 1)).toBe(0);
+	});
+
+	it("ignores the account-wide regression for a family window", () => {
+		// The server only fits the account-wide series, so its slope is in %/hour
+		// of the wrong quantity. The line must follow the family's own lifetime
+		// rate (10%/day = ~0.417%/h => ~30.4 an hour out), not the 5%/h prediction.
+		const resetMs = NOW + 4 * DAY;
+		const [series] = computeWindowForecast(
+			[
+				scopedAccount("a", [scopedEntry("Fable", 30, resetMs)], {
+					prediction: {
+						sevenDay: {
+							state: "rising",
+							slopePerHour: 5,
+							etaExhaustMs: null,
+							predictedAtReset: null,
+							resetsAtMs: resetMs,
+							willExhaustBeforeReset: false,
+							lowConfidence: false,
+						},
+					},
+				}),
+			],
+			FABLE,
+			NOW,
+			HOUR,
+			FAR_HORIZON,
+		);
+
+		expect(pctAt(series, NOW + HOUR)).toBeCloseTo(30 + 10 / 24, 5);
+	});
+
+	it("yields nothing for an account with no window in that family", () => {
+		expect(
+			computeWindowForecast(
+				[scopedAccount("a", [scopedEntry("Claude Opus 5", 40, NOW + 4 * DAY)])],
+				FABLE,
+				NOW,
+				HOUR,
+				FAR_HORIZON,
+			),
+		).toEqual([]);
+	});
+
+	it("yields nothing for a non-Anthropic payload", () => {
+		expect(
+			computeWindowForecast(
+				[
+					mkAccount({
+						id: "codex",
+						provider: "codex",
+						usageData: {
+							primary: { used_percent: 40 },
+						} as unknown as FullUsageData,
+					}),
+				],
+				FABLE,
+				NOW,
+				HOUR,
+				FAR_HORIZON,
+			),
+		).toEqual([]);
+	});
+});
+
 describe("computeWindowForecast — pool line across staggered resets", () => {
 	// Two members whose resets are further apart than the tail: the pool line
 	// ends where the FIRST member's own line ends, so every pool point is a mean

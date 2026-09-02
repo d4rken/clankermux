@@ -1,4 +1,4 @@
-import type { ModelFamily } from "@clankermux/core";
+import type { ModelFamily, ScopedFamilyLimit } from "@clankermux/core";
 import {
 	computeWindowStartMs,
 	estimateWindowExhaustion,
@@ -289,6 +289,100 @@ function projectFamilyExhaustion(
 	return estimate.exhaustsAtMs;
 }
 
+/**
+ * The scoped limit that BINDS out of several the same account reports for one
+ * family: highest percent, and on a tie the one that clears first.
+ *
+ * One account can report two scoped windows that collapse onto one family —
+ * getModelFamily() maps Mythos-class display names onto "fable" — and every
+ * surface that shows "this account's Fable number" has to name the same one.
+ * Shared by the family aggregate here and the family forecast line
+ * (usage-forecast.ts), and mirrored by the recorded history's SQL tie-break,
+ * so the solid line, the dashed line and the popover cannot disagree.
+ */
+export function pickBindingScopedLimit(
+	limits: ScopedFamilyLimit[],
+): ScopedFamilyLimit | null {
+	let binding: ScopedFamilyLimit | null = null;
+	for (const limit of limits) {
+		if (
+			binding === null ||
+			limit.percent > binding.percent ||
+			(limit.percent === binding.percent &&
+				limit.resetsAtMs < binding.resetsAtMs)
+		) {
+			binding = limit;
+		}
+	}
+	return binding;
+}
+
+/** A model family the pool is currently reporting a scoped weekly window for. */
+export interface LiveScopedFamily {
+	family: ModelFamily;
+	/** Anthropic's own scope label for the family, e.g. "Fable". */
+	displayName: string;
+}
+
+/**
+ * Every family ANY account currently reports a scoped weekly window for.
+ *
+ * Deliberately unfiltered, unlike {@link computeFamilyWeeklyUsage}: this
+ * decides whether a family's CHART exists, and a paused or spent account's
+ * recorded history is exactly what someone opens that chart to look at. The
+ * exclusion rules belong to the aggregate number, not to the axis.
+ */
+export function listLiveScopedFamilies(
+	accounts: AccountResponse[],
+	now: number,
+): LiveScopedFamily[] {
+	const byFamily = new Map<ModelFamily, string>();
+	for (const account of accounts) {
+		if (!account.usageData) continue;
+		if (!isAnthropicStyleShape(account.usageData)) continue;
+		const scoped = normalizeAnthropicUsage(
+			account.usageData as AnthropicUsageData,
+			now,
+		).weeklyScoped;
+		for (const limit of scoped) {
+			if (!byFamily.has(limit.family)) {
+				byFamily.set(limit.family, limit.displayName);
+			}
+		}
+	}
+	return [...byFamily].map(([family, displayName]) => ({
+		family,
+		displayName,
+	}));
+}
+
+/**
+ * Union of the families seen live and the families with recorded history,
+ * sorted by family.
+ *
+ * Both sources are needed. Live-only discovery makes a panel disappear at
+ * every rollover — `normalizeWeeklyScoped` drops a limit the moment its reset
+ * passes, so between the reset and the next successful poll no account reports
+ * the family at all — and it takes the panel away entirely whenever the
+ * accounts read fails. History-only discovery cannot show a family whose first
+ * snapshot has not been written yet. The live label wins where both have one:
+ * it names the model generation currently in force.
+ */
+export function mergeScopedFamilies(
+	live: LiveScopedFamily[],
+	recorded: Array<{ family: string; displayName: string }>,
+): LiveScopedFamily[] {
+	const merged = new Map<string, string>();
+	for (const entry of recorded) merged.set(entry.family, entry.displayName);
+	for (const entry of live) merged.set(entry.family, entry.displayName);
+	return [...merged]
+		.map(([family, displayName]) => ({
+			family: family as ModelFamily,
+			displayName,
+		}))
+		.sort((a, b) => a.family.localeCompare(b.family));
+}
+
 export function computeFamilyWeeklyUsage(
 	accounts: AccountResponse[],
 	now: number,
@@ -319,31 +413,23 @@ export function computeFamilyWeeklyUsage(
 		// come out of the same `usageData` payload.
 		const observedAtMs = usageObservedAtMs(account.usageAsOfIso);
 
+		// Grouped first so the binding window is chosen by one shared rule rather
+		// than folded in incrementally — see pickBindingScopedLimit.
+		const byFamily = new Map<ModelFamily, ScopedFamilyLimit[]>();
 		for (const limit of scoped) {
-			let bucket = buckets.get(limit.family);
+			const group = byFamily.get(limit.family);
+			if (group) group.push(limit);
+			else byFamily.set(limit.family, [limit]);
+		}
+
+		for (const [family, limits] of byFamily) {
+			const binding = pickBindingScopedLimit(limits);
+			if (binding === null) continue;
+			let bucket = buckets.get(family);
 			if (bucket === undefined) {
-				bucket = { label: limit.displayName, accounts: new Map() };
-				buckets.set(limit.family, bucket);
+				bucket = { label: limits[0].displayName, accounts: new Map() };
+				buckets.set(family, bucket);
 			}
-			const previous = bucket.accounts.get(account.id);
-			// Keep the binding window for this account: highest percent, and on a
-			// tie the one that clears first.
-			const supersedes =
-				previous === undefined ||
-				limit.percent > previous.pct ||
-				(limit.percent === previous.pct && limit.resetsAtMs < previous.resetMs);
-			const binding =
-				supersedes || previous === undefined
-					? {
-							name: account.name,
-							pct: limit.percent,
-							resetMs: limit.resetsAtMs,
-						}
-					: {
-							name: previous.name,
-							pct: previous.pct,
-							resetMs: previous.resetMs,
-						};
 			// The PROJECTION is folded across every window in this family, not taken
 			// from the binding one. Percent alone does not decide risk when the resets
 			// differ: 90% clearing in 12h is not projected to exhaust, while 80%
@@ -351,17 +437,23 @@ export function computeFamilyWeeklyUsage(
 			// `fable`. Keeping only the binding window's projection would report that
 			// account as not at risk. The account runs out of the family when its
 			// FIRST constituent window does, so take the earliest.
-			bucket.accounts.set(account.id, {
-				...binding,
-				exhaustsAtMs: soonerOf(
-					previous?.exhaustsAtMs ?? null,
+			let exhaustsAtMs: number | null = null;
+			for (const limit of limits) {
+				exhaustsAtMs = soonerOf(
+					exhaustsAtMs,
 					projectFamilyExhaustion(
 						limit.percent,
 						limit.resetsAtMs,
 						observedAtMs,
 						now,
 					),
-				),
+				);
+			}
+			bucket.accounts.set(account.id, {
+				name: account.name,
+				pct: binding.percent,
+				resetMs: binding.resetsAtMs,
+				exhaustsAtMs,
 			});
 		}
 	}
