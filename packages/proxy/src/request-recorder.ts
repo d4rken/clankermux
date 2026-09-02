@@ -151,6 +151,17 @@ export interface SlimUsageSummary {
 	tokensPerSecondApproximate?: boolean;
 	responseTimeMs?: number;
 	cacheCreationInputTokens?: number;
+	/**
+	 * The provider's terminal `stop_reason`, raw. Top level rather than inside
+	 * `usage` because it describes how the response ENDED, not what it cost.
+	 * Absent when the response reported none.
+	 */
+	stopReason?: string;
+	/**
+	 * Present if and only if `stopReason` is `"refusal"`: the provider's safety
+	 * category, or `"unknown"` when it named none.
+	 */
+	refusalCategory?: string;
 }
 
 /** Optional response bytes captured for a locally produced terminal response. */
