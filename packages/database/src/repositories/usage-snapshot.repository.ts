@@ -186,6 +186,63 @@ export class UsageSnapshotRepository extends BaseRepository<UsageSnapshotRow> {
 	}
 
 	/**
+	 * Read the single most recent snapshot per account with
+	 * `sampled_at < beforeMs` — the row that was in force when a chart range
+	 * BEGINS. Without it an account whose last sample fell just before the range
+	 * start is absent from the whole range, even though its value (and the
+	 * window it belongs to) still held there.
+	 *
+	 * `ts` carries the row's real `sampled_at`, not a bucket start: the caller
+	 * needs the true sample time to expire the carried value at the right
+	 * moment, and this row is by definition outside the bucket grid.
+	 *
+	 * `lookbackMs` bounds the scan to `[beforeMs - lookbackMs, beforeMs)` and is
+	 * lossless when it is at least one nominal window: a reading sampled longer
+	 * than that before the cutoff has expired by then (at its own reset, or at
+	 * `sampled_at + nominal` when it carries none), so it cannot be in force at
+	 * the range start and there is no point ranking it. Unbounded, this ranks
+	 * every row in retention — 0.5s on a 180k-row table, per open panel, per
+	 * minute — and gets slower as history grows.
+	 */
+	async getLatestSnapshotsBefore(
+		beforeMs: number,
+		lookbackMs: number,
+	): Promise<RankedSnapshot[]> {
+		const rows = await this.query<{
+			account_id: string;
+			provider: string | null;
+			sampled_at: number;
+			five_hour_pct: number | null;
+			seven_day_pct: number | null;
+			five_hour_reset: number | null;
+			seven_day_reset: number | null;
+		}>(
+			`
+			WITH ranked AS (
+				SELECT *, ROW_NUMBER() OVER (PARTITION BY account_id ORDER BY sampled_at DESC) AS rn
+				FROM usage_snapshots
+				WHERE sampled_at < ? AND sampled_at >= ?
+			)
+			SELECT account_id, provider, sampled_at, five_hour_pct, seven_day_pct, five_hour_reset, seven_day_reset
+			FROM ranked WHERE rn = 1 ORDER BY account_id;
+		`,
+			[beforeMs, beforeMs - lookbackMs],
+		);
+
+		return rows.map((row) => ({
+			accountId: row.account_id,
+			provider: row.provider ?? null,
+			ts: Number(row.sampled_at),
+			fiveHourPct: row.five_hour_pct == null ? null : Number(row.five_hour_pct),
+			sevenDayPct: row.seven_day_pct == null ? null : Number(row.seven_day_pct),
+			fiveHourReset:
+				row.five_hour_reset == null ? null : Number(row.five_hour_reset),
+			sevenDayReset:
+				row.seven_day_reset == null ? null : Number(row.seven_day_reset),
+		}));
+	}
+
+	/**
 	 * Read RAW (un-bucketed) snapshot rows for the given accounts with
 	 * `sampled_at >= sinceMs`, ordered `account_id, sampled_at`. Unlike
 	 * `getSnapshots`, this returns every stored sample at its real sample time

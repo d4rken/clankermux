@@ -1,10 +1,30 @@
 import { describe, expect, it } from "bun:test";
 import type { AccountResponse, FullUsageData } from "@clankermux/types";
-import { computeWindowForecast } from "../usage-forecast";
+import {
+	computeWindowForecast,
+	FORECAST_POST_RESET_TAIL_MS,
+	type ForecastSeries,
+} from "../usage-forecast";
 
 const NOW = 1_700_000_000_000;
 const HOUR = 60 * 60 * 1000;
-const FAR_HORIZON = NOW + 30 * 24 * HOUR; // effectively uncapped
+const DAY = 24 * HOUR;
+const FAR_HORIZON = NOW + 30 * DAY; // effectively uncapped
+const FIVE_HOUR_TAIL = FORECAST_POST_RESET_TAIL_MS.five_hour;
+const SEVEN_DAY_TAIL = FORECAST_POST_RESET_TAIL_MS.seven_day;
+
+/** Projected pct at an exact ts on a series; throws when nothing is plotted. */
+function pctAt(series: ForecastSeries, ts: number): number {
+	const point = series.points.find((p) => p.ts === ts);
+	if (!point) throw new Error(`no forecast point at ts=${ts}`);
+	return point.pct;
+}
+
+function lastPoint(series: ForecastSeries): { ts: number; pct: number } {
+	const point = series.points[series.points.length - 1];
+	if (!point) throw new Error("series has no points");
+	return point;
+}
 
 function mkAccount(partial: Partial<AccountResponse>): AccountResponse {
 	return {
@@ -44,6 +64,33 @@ function mkAccount(partial: Partial<AccountResponse>): AccountResponse {
 		sessionStats: null,
 		...partial,
 	};
+}
+
+/** Anthropic-shaped usage data with a 7-day window. */
+function sevenDayUsage(pct: number, resetMs: number): FullUsageData {
+	return {
+		five_hour: { utilization: null, resets_at: null },
+		seven_day: {
+			utilization: pct,
+			resets_at: new Date(resetMs).toISOString(),
+		},
+	} as unknown as FullUsageData;
+}
+
+/**
+ * A held (paused / cooling down / maxed) line: flat at `pct` up to and
+ * including the reset, then flat at 0 for the post-reset tail.
+ */
+function expectHeldShape(
+	series: ForecastSeries,
+	resetMs: number,
+	pct: number,
+): void {
+	for (const point of series.points) {
+		expect(point.pct).toBe(point.ts <= resetMs ? pct : 0);
+	}
+	expect(pctAt(series, resetMs)).toBe(pct);
+	expect(pctAt(series, resetMs + 1)).toBe(0);
 }
 
 /** Anthropic-shaped usage data with a 5-hour window. */
@@ -103,7 +150,7 @@ describe("computeWindowForecast — guards", () => {
 });
 
 describe("computeWindowForecast — projection", () => {
-	it("marks an over-pacing account at-risk and ends its line at 100%", () => {
+	it("marks an over-pacing account at-risk and carries its line past the reset", () => {
 		// 95% used 4.5h into a 5h window (resets in 0.5h) → exhausts before reset.
 		const resetMs = NOW + 0.5 * HOUR;
 		const acct = mkAccount({
@@ -125,13 +172,20 @@ describe("computeWindowForecast — projection", () => {
 		expect(series.exhaustsAtMs as number).toBeGreaterThan(NOW);
 		expect(series.exhaustsAtMs as number).toBeLessThan(resetMs);
 		expect(series.bridgePct).toBe(95);
-		// Line stops at exactly 100% at the exhaustion point.
-		const last = series.points[series.points.length - 1];
-		expect(last.pct).toBeCloseTo(100, 5);
-		expect(last.ts).toBeCloseTo(series.exhaustsAtMs as number, 5);
+		// Reaches 100% at the projected exhaustion and now HOLDS there instead of
+		// stopping, all the way to the reset.
+		const eta = series.exhaustsAtMs as number;
+		expect(pctAt(series, resetMs)).toBeCloseTo(100, 5);
+		// The window rolls: a one-slot step down to 0%...
+		expect(pctAt(series, resetMs + 1)).toBe(0);
+		// ...then the same burn rate restarts from 0 for the post-reset tail.
+		const slopePerMs = 5 / (eta - NOW);
+		const last = lastPoint(series);
+		expect(last.ts).toBe(resetMs + FIVE_HOUR_TAIL);
+		expect(last.pct).toBeCloseTo(slopePerMs * FIVE_HOUR_TAIL, 5);
 	});
 
-	it("marks an under-pacing account safe and ends at the projected reset value", () => {
+	it("marks an under-pacing account safe and restarts it after the reset", () => {
 		// 10% used 1h into a 5h window (resets in 4h) → projects to 50% at reset.
 		const resetMs = NOW + 4 * HOUR;
 		const acct = mkAccount({ id: "b", usageData: fiveHourUsage(10, resetMs) });
@@ -146,12 +200,16 @@ describe("computeWindowForecast — projection", () => {
 
 		expect(series.isSafe).toBe(true);
 		expect(series.exhaustsAtMs).toBeNull();
-		const last = series.points[series.points.length - 1];
-		expect(last.ts).toBe(resetMs);
-		expect(last.pct).toBeCloseTo(50, 5);
+		// The projected landing value at the reset, then the drop.
+		expect(pctAt(series, resetMs)).toBeCloseTo(50, 5);
+		expect(pctAt(series, resetMs + 1)).toBe(0);
+		// Two hours of the same 10%/h burn into the fresh window.
+		const last = lastPoint(series);
+		expect(last.ts).toBe(resetMs + FIVE_HOUR_TAIL);
+		expect(last.pct).toBeCloseTo(20, 5);
 	});
 
-	it("caps the forecast at the horizon for short ranges", () => {
+	it("caps the forecast at the horizon when the reset is beyond it", () => {
 		const resetMs = NOW + 4 * HOUR;
 		const horizon = NOW + 1 * HOUR; // tighter than the reset
 		const acct = mkAccount({ id: "c", usageData: fiveHourUsage(10, resetMs) });
@@ -164,9 +222,66 @@ describe("computeWindowForecast — projection", () => {
 			horizon,
 		);
 
-		const last = series.points[series.points.length - 1];
+		const last = lastPoint(series);
 		expect(last.ts).toBe(horizon);
 		expect(last.pct).toBeLessThan(100);
+	});
+
+	it("caps the post-reset tail at the selected range span", () => {
+		// Reset inside the horizon, but the range spans less than the 2h tail:
+		// the drop is still drawn, the tail only runs to the range span.
+		const resetMs = NOW + 1 * HOUR;
+		const horizon = NOW + 1.5 * HOUR;
+		const acct = mkAccount({ id: "c", usageData: fiveHourUsage(40, resetMs) });
+
+		const [series] = computeWindowForecast(
+			[acct],
+			"five_hour",
+			NOW,
+			HOUR / 4,
+			horizon,
+		);
+
+		expect(pctAt(series, resetMs + 1)).toBe(0);
+		expect(lastPoint(series).ts).toBe(resetMs + (horizon - NOW));
+	});
+
+	it("draws the full tail once the horizon clears reset + tail", () => {
+		const resetMs = NOW + 1 * HOUR;
+		const horizon = NOW + 4 * HOUR; // >= resetMs + 2h tail
+		const acct = mkAccount({ id: "c", usageData: fiveHourUsage(40, resetMs) });
+
+		const [series] = computeWindowForecast(
+			[acct],
+			"five_hour",
+			NOW,
+			HOUR / 4,
+			horizon,
+		);
+
+		expect(lastPoint(series).ts).toBe(resetMs + FIVE_HOUR_TAIL);
+	});
+
+	it("draws the weekly tail past a reset late in the 7-day range", () => {
+		// The reset sits 6.5 days out with a 7-day horizon: the tail runs past
+		// the horizon rather than clipping the roll-over off the right edge.
+		const resetMs = NOW + 6.5 * DAY;
+		const horizon = NOW + 7 * DAY;
+		const acct = mkAccount({
+			id: "w",
+			usageData: sevenDayUsage(30, resetMs),
+		});
+
+		const [series] = computeWindowForecast(
+			[acct],
+			"seven_day",
+			NOW,
+			HOUR,
+			horizon,
+		);
+
+		expect(pctAt(series, resetMs + 1)).toBe(0);
+		expect(lastPoint(series).ts).toBe(resetMs + SEVEN_DAY_TAIL);
 	});
 
 	it("emits a pool aggregate averaging the contributing accounts", () => {
@@ -213,9 +328,9 @@ describe("computeWindowForecast — held (unavailable) accounts", () => {
 		expect(series.isSafe).toBe(false); // already maxed
 		expect(series.exhaustsAtMs).toBeNull();
 		expect(series.bridgePct).toBe(100);
-		expect(series.points.every((p) => p.pct === 100)).toBe(true);
-		// Flat line ends at the window reset.
-		expect(series.points[series.points.length - 1]?.ts).toBe(resetMs);
+		// Flat at 100% up to and including the reset, then the fresh window.
+		expectHeldShape(series, resetMs, 100);
+		expect(lastPoint(series).ts).toBe(resetMs + FIVE_HOUR_TAIL);
 	});
 
 	it("holds a paused account flat at its current utilization", () => {
@@ -238,8 +353,8 @@ describe("computeWindowForecast — held (unavailable) accounts", () => {
 		expect(series.isSafe).toBe(true); // paused below 100 won't exhaust
 		expect(series.exhaustsAtMs).toBeNull();
 		expect(series.bridgePct).toBe(50);
-		expect(series.points.every((p) => p.pct === 50)).toBe(true);
-		expect(series.points[series.points.length - 1]?.ts).toBe(resetMs);
+		expectHeldShape(series, resetMs, 50);
+		expect(lastPoint(series).ts).toBe(resetMs + FIVE_HOUR_TAIL);
 	});
 
 	it("holds an account in an active rate-limit cooldown flat", () => {
@@ -260,7 +375,8 @@ describe("computeWindowForecast — held (unavailable) accounts", () => {
 
 		expect(series.accountId).toBe("r");
 		expect(series.exhaustsAtMs).toBeNull();
-		expect(series.points.every((p) => p.pct === 50)).toBe(true);
+		expectHeldShape(series, resetMs, 50);
+		expect(lastPoint(series).ts).toBe(resetMs + FIVE_HOUR_TAIL);
 	});
 
 	it("keeps a maxed/paused account in the projected pool average (no drop)", () => {
@@ -294,18 +410,6 @@ describe("computeWindowForecast — held (unavailable) accounts", () => {
 });
 
 describe("computeWindowForecast — burn anchor + shared ETA", () => {
-	const DAY = 24 * HOUR;
-
-	function sevenDayUsage(pct: number, resetMs: number): FullUsageData {
-		return {
-			five_hour: { utilization: null, resets_at: null },
-			seven_day: {
-				utilization: pct,
-				resets_at: new Date(resetMs).toISOString(),
-			},
-		} as unknown as FullUsageData;
-	}
-
 	it("re-anchors the weekly line at a served burn anchor", () => {
 		// Gift 12h ago, 40% burned since; reset 1.5d out. Un-anchored the line is
 		// safe (40% over 5.5d clears the reset); anchored it lands 100% at +18h.
@@ -346,9 +450,12 @@ describe("computeWindowForecast — burn anchor + shared ETA", () => {
 		expect(anchored.isSafe).toBe(false);
 		expect(anchored.exhaustsAtMs).toBe(NOW + 18 * HOUR);
 		expect(anchored.bridgePct).toBe(40);
-		const last = anchored.points[anchored.points.length - 1];
-		expect(last.pct).toBeCloseTo(100, 5);
-		expect(last.ts).toBeCloseTo(NOW + 18 * HOUR, 5);
+		// 100% at the anchored ETA, held there to the reset, then the roll-over
+		// and the 2-DAY weekly tail.
+		expect(pctAt(anchored, NOW + 18 * HOUR)).toBeCloseTo(100, 5);
+		expect(pctAt(anchored, resetMs)).toBeCloseTo(100, 5);
+		expect(pctAt(anchored, resetMs + 1)).toBe(0);
+		expect(lastPoint(anchored).ts).toBe(resetMs + SEVEN_DAY_TAIL);
 	});
 
 	it("lands 100% at the estimator's observation-anchored ETA, not a now-derived one", () => {
@@ -399,5 +506,220 @@ describe("computeWindowForecast — burn anchor + shared ETA", () => {
 
 		expect(series.isSafe).toBe(false);
 		expect(series.exhaustsAtMs).toBe(NOW);
+	});
+});
+
+describe("computeWindowForecast — per-family scoped weekly window", () => {
+	const FABLE = { kind: "family", family: "fable" } as const;
+
+	function scopedEntry(displayName: string, percent: number, resetMs: number) {
+		return {
+			kind: "weekly_scoped",
+			group: "weekly",
+			percent,
+			resets_at: new Date(resetMs).toISOString(),
+			scope: {
+				model: {
+					id: displayName.toLowerCase().replace(/\s+/g, "-"),
+					display_name: displayName,
+				},
+			},
+			is_active: true,
+		};
+	}
+
+	function scopedAccount(
+		id: string,
+		entries: ReturnType<typeof scopedEntry>[],
+		partial: Partial<AccountResponse> = {},
+	): AccountResponse {
+		return mkAccount({
+			id,
+			usageData: { limits: entries } as unknown as FullUsageData,
+			...partial,
+		});
+	}
+
+	it("projects the family window from its binding limit, with the weekly tail", () => {
+		// 30% observed 3 days into a 7-day window (resets 4 days out) => the
+		// lifetime rate is 10%/day, so the line lands on 70% at the reset.
+		const resetMs = NOW + 4 * DAY;
+		const [series] = computeWindowForecast(
+			[scopedAccount("a", [scopedEntry("Fable", 30, resetMs)])],
+			FABLE,
+			NOW,
+			HOUR,
+			FAR_HORIZON,
+		);
+
+		expect(series.accountId).toBe("a");
+		expect(series.bridgePct).toBe(30);
+		expect(series.isSafe).toBe(true);
+		expect(pctAt(series, resetMs)).toBeCloseTo(70, 5);
+		expect(pctAt(series, resetMs + 1)).toBe(0);
+		expect(lastPoint(series).ts).toBe(resetMs + SEVEN_DAY_TAIL);
+	});
+
+	it("takes the binding limit when two scope labels fold onto one family", () => {
+		// Mythos-class labels resolve to `fable` too. The account gets ONE line,
+		// for the window that actually constrains it.
+		const bindingReset = NOW + 4 * DAY;
+		const [series] = computeWindowForecast(
+			[
+				scopedAccount("a", [
+					scopedEntry("Fable", 30, NOW + 2 * DAY),
+					scopedEntry("Mythos", 60, bindingReset),
+				]),
+			],
+			FABLE,
+			NOW,
+			HOUR,
+			FAR_HORIZON,
+		);
+
+		expect(series.bridgePct).toBe(60);
+		expect(pctAt(series, bindingReset + 1)).toBe(0);
+	});
+
+	it("ignores the account-wide regression for a family window", () => {
+		// The server only fits the account-wide series, so its slope is in %/hour
+		// of the wrong quantity. The line must follow the family's own lifetime
+		// rate (10%/day = ~0.417%/h => ~30.4 an hour out), not the 5%/h prediction.
+		const resetMs = NOW + 4 * DAY;
+		const [series] = computeWindowForecast(
+			[
+				scopedAccount("a", [scopedEntry("Fable", 30, resetMs)], {
+					prediction: {
+						sevenDay: {
+							state: "rising",
+							slopePerHour: 5,
+							etaExhaustMs: null,
+							predictedAtReset: null,
+							resetsAtMs: resetMs,
+							willExhaustBeforeReset: false,
+							lowConfidence: false,
+						},
+					},
+				}),
+			],
+			FABLE,
+			NOW,
+			HOUR,
+			FAR_HORIZON,
+		);
+
+		expect(pctAt(series, NOW + HOUR)).toBeCloseTo(30 + 10 / 24, 5);
+	});
+
+	it("yields nothing for an account with no window in that family", () => {
+		expect(
+			computeWindowForecast(
+				[scopedAccount("a", [scopedEntry("Claude Opus 5", 40, NOW + 4 * DAY)])],
+				FABLE,
+				NOW,
+				HOUR,
+				FAR_HORIZON,
+			),
+		).toEqual([]);
+	});
+
+	it("yields nothing for a non-Anthropic payload", () => {
+		expect(
+			computeWindowForecast(
+				[
+					mkAccount({
+						id: "codex",
+						provider: "codex",
+						usageData: {
+							primary: { used_percent: 40 },
+						} as unknown as FullUsageData,
+					}),
+				],
+				FABLE,
+				NOW,
+				HOUR,
+				FAR_HORIZON,
+			),
+		).toEqual([]);
+	});
+});
+
+describe("computeWindowForecast — pool line across staggered resets", () => {
+	// Two members whose resets are further apart than the tail: the pool line
+	// ends where the FIRST member's own line ends, so every pool point is a mean
+	// over members that are all still drawn.
+	const earlyReset = NOW + 1 * HOUR;
+	const lateReset = NOW + 4 * HOUR;
+
+	function poolOf(): ForecastSeries {
+		const early = mkAccount({
+			id: "early",
+			usageData: fiveHourUsage(40, earlyReset),
+		});
+		const late = mkAccount({
+			id: "late",
+			usageData: fiveHourUsage(20, lateReset),
+		});
+		const series = computeWindowForecast(
+			[early, late],
+			"five_hour",
+			NOW,
+			HOUR,
+			FAR_HORIZON,
+		);
+		const pool = series.find((s) => s.accountId === null);
+		if (!pool) throw new Error("no pool series");
+		return pool;
+	}
+
+	it("ends the pool line at the earliest member's end", () => {
+		expect(lastPoint(poolOf()).ts).toBe(earlyReset + FIVE_HOUR_TAIL);
+	});
+
+	it("steps the pool down at a member reset inside the pool line", () => {
+		const pool = poolOf();
+		// At the reset the early member is still at its landing value (50%), the
+		// late member is at 20 + 20%/h over 1h = 40, so the mean is 45.
+		expect(pctAt(pool, earlyReset)).toBeCloseTo(45, 5);
+		// One slot later the early member has rolled to 0, so the mean is ~20.
+		expect(pctAt(pool, earlyReset + 1)).toBeCloseTo(20, 3);
+	});
+
+	it("omits a member reset that falls beyond the pool line", () => {
+		const pool = poolOf();
+		expect(pool.points.some((p) => p.ts === lateReset)).toBe(false);
+		expect(pool.points.some((p) => p.ts === lateReset + 1)).toBe(false);
+	});
+});
+
+describe("computeWindowForecast — point ordering", () => {
+	it("emits strictly ascending, duplicate-free timestamps in every series", () => {
+		// A cadence tick landing exactly on a reset is the collision case: the
+		// reset pair owns that instant, and must not double it up.
+		const resetMs = NOW + 2 * HOUR;
+		const burning = mkAccount({
+			id: "burning",
+			usageData: fiveHourUsage(60, resetMs),
+		});
+		const held = mkAccount({
+			id: "held",
+			paused: true,
+			usageData: fiveHourUsage(100, NOW + 3 * HOUR),
+		});
+
+		const series = computeWindowForecast(
+			[burning, held],
+			"five_hour",
+			NOW,
+			HOUR,
+			FAR_HORIZON,
+		);
+
+		expect(series).toHaveLength(3);
+		for (const s of series) {
+			const timestamps = s.points.map((p) => p.ts);
+			expect(timestamps).toEqual([...timestamps].sort((a, b) => a - b));
+			expect(new Set(timestamps).size).toBe(timestamps.length);
+		}
 	});
 });

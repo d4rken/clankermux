@@ -1,16 +1,19 @@
+import type { ModelFamily } from "@clankermux/core";
 import {
 	computeWindowStartMs,
 	estimateWindowExhaustion,
 	extractFiveHour,
 	extractSevenDay,
+	isAnthropicStyleShape,
+	normalizeAnthropicUsage,
 } from "@clankermux/core";
-import type { AccountResponse } from "@clankermux/types";
+import type { AccountResponse, AnthropicUsageData } from "@clankermux/types";
 import {
 	usageObservedAtMs,
 	weeklyLifetimeConfidence,
 	windowBurnAnchor,
 } from "./lifetime-confidence";
-import type { PoolWindow } from "./pool-usage";
+import { type PoolWindow, pickBindingScopedLimit } from "./pool-usage";
 
 /**
  * Forward usage projection for the Limits-tab sawtooth charts.
@@ -22,11 +25,71 @@ import type { PoolWindow } from "./pool-usage";
  * otherwise the lifetime-average burn rate (current utilization `pct` observed
  * `elapsed` ms into the window, assumed to continue). Either way the projection
  * is anchored at "now" (so the dashed forecast line meets the solid history
- * line) and runs forward until it stops — at 100% for an account projected to
- * exhaust before reset, or at the window reset / chart horizon otherwise.
+ * line) and runs forward THROUGH the window's reset: it climbs (holding at 100%
+ * once an at-risk account is projected to run out), steps down to 0% at the
+ * reset the way a recorded roll-over does, and keeps going at the same rate for
+ * {@link FORECAST_POST_RESET_TAIL_MS} into the fresh window. Only a reset past
+ * the chart horizon clips the line at the horizon instead.
  * Paused / cooldown / exhausted accounts are held flat regardless of any
  * prediction. Pure + recharts-free so it can be unit-tested directly.
  */
+
+/**
+ * How far past a window's reset the dashed projection keeps going, per window
+ * kind. The point of the tail is that the roll-over itself is visible: a line
+ * that stopped AT the reset never showed the drop, only a truncated climb.
+ * Product defaults, named here so they are tuned in one place — no env gate.
+ */
+export const FORECAST_POST_RESET_TAIL_MS = {
+	five_hour: 2 * 60 * 60 * 1000, // 2 hours
+	seven_day: 2 * 24 * 60 * 60 * 1000, // 2 days
+	seven_day_scoped: 2 * 24 * 60 * 60 * 1000, // 2 days
+} as const;
+
+/** The window kinds a forecast line can be drawn for. */
+type ForecastWindowKind = keyof typeof FORECAST_POST_RESET_TAIL_MS;
+
+/**
+ * Which window a forecast is asked for: one of the account-wide windows, or
+ * one model family's scoped weekly window (the "Fable weekly window" panel).
+ */
+export type ForecastWindow =
+	| PoolWindow
+	| { kind: "family"; family: ModelFamily };
+
+function forecastWindowKind(window: ForecastWindow): ForecastWindowKind {
+	return typeof window === "string" ? window : "seven_day_scoped";
+}
+
+/**
+ * The utilization and reset to project, for whichever window was asked for.
+ *
+ * A family window reads the account's scoped weekly limits and takes the
+ * BINDING one (see pickBindingScopedLimit): an account reporting two limits
+ * that fold onto one family gets one line, describing the window that actually
+ * constrains it. Only Anthropic-style payloads carry scoped windows at all.
+ */
+function extractWindow(
+	account: AccountResponse,
+	window: ForecastWindow,
+	now: number,
+): { pct: number | null; resetMs: number | null } | null {
+	if (!account.usageData) return null;
+	if (typeof window === "string") {
+		return window === "five_hour"
+			? extractFiveHour(account.usageData)
+			: extractSevenDay(account.usageData);
+	}
+	if (!isAnthropicStyleShape(account.usageData)) return null;
+	const binding = pickBindingScopedLimit(
+		normalizeAnthropicUsage(
+			account.usageData as AnthropicUsageData,
+			now,
+		).weeklyScoped.filter((limit) => limit.family === window.family),
+	);
+	if (binding === null) return null;
+	return { pct: binding.percent, resetMs: binding.resetsAtMs };
+}
 
 /** A single projected point on a forecast line. `pct` is clamped to 0–100. */
 export interface ForecastPoint {
@@ -52,6 +115,7 @@ export interface ForecastSeries {
 /** Per-account live burn state used to drive the projection. */
 interface LiveWindowState {
 	accountId: string;
+	windowKind: ForecastWindowKind; // selects the post-reset tail length
 	pct: number; // current utilization (clamped 0–100)
 	startMs: number; // window start (= now - elapsed); `now` for held states
 	resetMs: number; // window reset, strictly in the future
@@ -78,15 +142,13 @@ function clampPct(value: number): number {
  */
 function deriveLiveState(
 	account: AccountResponse,
-	window: PoolWindow,
+	window: ForecastWindow,
 	now: number,
 ): LiveWindowState | null {
 	if (!account.usageData) return null;
 
-	const extracted =
-		window === "five_hour"
-			? extractFiveHour(account.usageData)
-			: extractSevenDay(account.usageData);
+	const windowKind = forecastWindowKind(window);
+	const extracted = extractWindow(account, window, now);
 	if (!extracted || extracted.pct == null || extracted.resetMs == null) {
 		return null;
 	}
@@ -108,6 +170,7 @@ function deriveLiveState(
 	if (account.paused === true || inCooldown || pct >= 100) {
 		return {
 			accountId: account.id,
+			windowKind,
 			pct: clampPct(pct),
 			startMs: now,
 			resetMs,
@@ -119,7 +182,7 @@ function deriveLiveState(
 	}
 
 	// Actively burning: 0 < pct < 100.
-	const burnStartMs = computeWindowStartMs(resetMs, window);
+	const burnStartMs = computeWindowStartMs(resetMs, windowKind);
 	if (burnStartMs == null) return null;
 	const elapsed = now - burnStartMs;
 	if (elapsed <= 0) return null;
@@ -137,10 +200,16 @@ function deriveLiveState(
 	// `pct`, and it reaches exactly 100 at the recomputed exhaustion time. This
 	// anchor is chart rendering, deliberately different from the progress-bar
 	// message's anchor, and so stays here rather than moving into the estimator.
+	// A family window gets NO regression: the server only fits the ACCOUNT-WIDE
+	// series, so its %/hour is in units of a different numerator. Feeding it in
+	// would emit a confident-looking projection built on a mismatched
+	// denominator — the same reason computeFamilyWeeklyUsage passes null.
 	const pred =
-		window === "five_hour"
-			? account.prediction?.fiveHour
-			: account.prediction?.sevenDay;
+		typeof window !== "string"
+			? null
+			: window === "five_hour"
+				? account.prediction?.fiveHour
+				: account.prediction?.sevenDay;
 	const estimate = estimateWindowExhaustion(
 		{
 			utilizationPct: pct,
@@ -152,9 +221,14 @@ function deriveLiveState(
 			// too: a full-confidence lifetime slope is `pct` over the elapsed time
 			// AT THE OBSERVATION, so the forecast line stops shallowing out
 			// between refetches as `now` walks forward.
-			lifetimeConfidence: weeklyLifetimeConfidence(window),
+			// Asked of the shared policy, never assumed: today a scoped window is
+			// "low" (unmeasured, and carrying no regression to have been compared
+			// against), and the anchor registry holds account-wide windows only, so
+			// both return the empty answer for a family. Going through the policy
+			// means a future change reaches this line without another edit here.
+			lifetimeConfidence: weeklyLifetimeConfidence(windowKind),
 			observedAtMs: usageObservedAtMs(account.usageAsOfIso),
-			anchor: windowBurnAnchor(account.burnAnchors, window),
+			anchor: windowBurnAnchor(account.burnAnchors, windowKind),
 		},
 		now,
 	);
@@ -201,6 +275,7 @@ function deriveLiveState(
 
 	return {
 		accountId: account.id,
+		windowKind,
 		pct,
 		startMs,
 		resetMs,
@@ -215,39 +290,87 @@ function deriveLiveState(
 function projectAt(state: LiveWindowState, ts: number): number {
 	// Held accounts — and usable-but-stable accounts (slope 0) — are flat at their
 	// current value; burning accounts follow pct(ts) = slope * (ts - startMs),
-	// which equals `pct` at `now`.
-	if (state.held || state.slopePerMs === 0) return clampPct(state.pct);
-	return clampPct(state.slopePerMs * (ts - state.startMs));
+	// which equals `pct` at `now` and clamps at 100 from the projected exhaustion
+	// instant onward (that flat-at-100 leg IS the prediction: out of quota until
+	// the window rolls).
+	if (ts <= state.resetMs) {
+		if (state.held || state.slopePerMs === 0) return clampPct(state.pct);
+		return clampPct(state.slopePerMs * (ts - state.startMs));
+	}
+	// Past the reset the window has rolled: everything restarts from 0. A held
+	// account stays at 0 (paused/cooling down accounts are not burning, and
+	// their pre-reset value was spent quota that no longer exists); a burning
+	// account resumes the SAME rate from the reset instant.
+	if (state.held || state.slopePerMs === 0) return 0;
+	return clampPct(state.slopePerMs * (ts - state.resetMs));
 }
 
-/** Where a single account's forecast line stops, capped at the chart horizon. */
-function stateEndMs(state: LiveWindowState, horizonMs: number): number {
-	// Held states and safe burning states run to the window reset; only an
-	// at-risk burning account stops early at its projected exhaustion. The
-	// `exhaustsAtMs == null` check covers held states (isSafe false, no
-	// exhaustion time) and also narrows the type without a cast.
-	const natural =
-		state.isSafe || state.exhaustsAtMs == null
-			? state.resetMs
-			: state.exhaustsAtMs;
-	return Math.min(natural, horizonMs);
+/**
+ * Where a single account's forecast line stops.
+ *
+ * If the reset falls inside the chart horizon the line always gets its drop and
+ * its post-reset tail, even when that runs past the horizon — otherwise a
+ * weekly reset more than two days before the end of the 7-day range would have
+ * its roll-over clipped off the right edge, which is the one thing the tail
+ * exists to show. The tail itself never exceeds the selected range's span, so a
+ * 1-hour view cannot sprout a 2-hour tail. A reset BEYOND the horizon is not
+ * reached at all, so the line simply ends at the horizon.
+ *
+ * `exhaustsAtMs` no longer truncates the line: an at-risk account's flat-at-100
+ * leg is drawn up to the reset (see projectAt).
+ */
+function stateEndMs(
+	state: LiveWindowState,
+	now: number,
+	horizonMs: number,
+): number {
+	if (state.resetMs > horizonMs) return horizonMs;
+	const tailMs = Math.min(
+		FORECAST_POST_RESET_TAIL_MS[state.windowKind],
+		horizonMs - now,
+	);
+	return state.resetMs + tailMs;
 }
 
-/** Cadence samples up to (and including) the exact stop point. */
+/**
+ * Cadence samples up to (and including) the exact stop point, plus the
+ * roll-over pair at the reset.
+ *
+ * Keyed by ts so a cadence tick landing exactly on the reset (or on the
+ * endpoint) cannot emit a duplicate x-value: the chart's axis is CATEGORICAL —
+ * one equal-width slot per row — so a duplicated timestamp is a duplicated
+ * slot. The reset pair is written last and therefore wins any collision.
+ */
 function buildPoints(
 	state: LiveWindowState,
 	now: number,
 	endMs: number,
 	cadenceMs: number,
 ): ForecastPoint[] {
-	const points: ForecastPoint[] = [];
+	const byTs = new Map<number, number>();
 	for (let ts = now + cadenceMs; ts < endMs; ts += cadenceMs) {
-		points.push({ ts, pct: projectAt(state, ts) });
+		byTs.set(ts, projectAt(state, ts));
 	}
-	// Always include the exact endpoint for a crisp end: 100% at projected
-	// exhaustion, or the projected value at reset / horizon.
-	points.push({ ts: endMs, pct: projectAt(state, endMs) });
-	return points;
+	// Always include the exact endpoint for a crisp end.
+	byTs.set(endMs, projectAt(state, endMs));
+	if (state.resetMs < endMs) addResetPair(byTs, state);
+	return toSortedPoints(byTs);
+}
+
+/**
+ * The roll-over: the value the line lands on at the reset, then 0% one
+ * millisecond later. On the categorical axis that renders as a one-slot step
+ * down — the same shape a recorded reset has between two history buckets.
+ */
+function addResetPair(byTs: Map<number, number>, state: LiveWindowState): void {
+	byTs.set(state.resetMs, projectAt(state, state.resetMs));
+	byTs.set(state.resetMs + 1, 0);
+}
+
+function toSortedPoints(byTs: Map<number, number>): ForecastPoint[] {
+	return [...byTs.entries()]
+		.sort(([a], [b]) => a - b)
+		.map(([ts, pct]) => ({ ts, pct }));
 }
 
 /**
@@ -255,13 +378,15 @@ function buildPoints(
  *
  * @param cadenceMs  spacing between projected samples (use the history bucket size)
  * @param horizonMs  absolute timestamp cap (e.g. now + selected-range span) so a
- *                   7-day projection can't dwarf a short history range
+ *                   7-day projection can't dwarf a short history range. A line
+ *                   whose reset falls inside it still gets its post-reset tail
+ *                   (see stateEndMs), so the drawn span can exceed it slightly.
  * @returns one entry per projectable account plus a trailing pool aggregate;
  *          empty when nothing is projectable
  */
 export function computeWindowForecast(
 	accounts: AccountResponse[],
-	window: PoolWindow,
+	window: ForecastWindow,
 	now: number,
 	cadenceMs: number,
 	horizonMs: number,
@@ -280,25 +405,42 @@ export function computeWindowForecast(
 		isSafe: state.isSafe,
 		exhaustsAtMs: state.exhaustsAtMs,
 		bridgePct: state.pct,
-		points: buildPoints(state, now, stateEndMs(state, horizonMs), cadenceMs),
+		points: buildPoints(
+			state,
+			now,
+			stateEndMs(state, now, horizonMs),
+			cadenceMs,
+		),
 	}));
 
-	// Pool aggregate: mean across all contributing accounts, drawn only up to
-	// the first window event (earliest reset/exhaustion) so every account is
-	// present for the whole pool line — no confusing step-downs.
-	const poolEndMs = Math.min(...states.map((s) => stateEndMs(s, horizonMs)));
-	const poolPoints: ForecastPoint[] = [];
+	// Pool aggregate: mean across all contributing accounts, drawn up to the
+	// point where the FIRST member's own line ends. Every pool point is then a
+	// mean over members that are all still drawn — nobody silently drops out of
+	// the denominator mid-line. Member resets inside that span DO step the pool
+	// line down, which is a real prediction (the member rolls over and its
+	// contribution restarts at 0), not a member disappearing. A member whose
+	// reset lies past the pool end contributes its pre-reset projection only,
+	// and its own roll-over never appears in the pool line.
+	const poolEndMs = Math.min(
+		...states.map((s) => stateEndMs(s, now, horizonMs)),
+	);
+	const poolByTs = new Map<number, number>();
 	for (let ts = now + cadenceMs; ts < poolEndMs; ts += cadenceMs) {
-		poolPoints.push({ ts, pct: meanProjection(states, ts) });
+		poolByTs.set(ts, meanProjection(states, ts));
 	}
-	poolPoints.push({ ts: poolEndMs, pct: meanProjection(states, poolEndMs) });
+	poolByTs.set(poolEndMs, meanProjection(states, poolEndMs));
+	for (const state of states) {
+		if (state.resetMs >= poolEndMs) continue;
+		poolByTs.set(state.resetMs, meanProjection(states, state.resetMs));
+		poolByTs.set(state.resetMs + 1, meanProjection(states, state.resetMs + 1));
+	}
 
 	series.push({
 		accountId: null,
 		isSafe: states.every((s) => s.isSafe),
 		exhaustsAtMs: null,
 		bridgePct: states.reduce((sum, s) => sum + s.pct, 0) / states.length,
-		points: poolPoints,
+		points: toSortedPoints(poolByTs),
 	});
 
 	return series;

@@ -33,6 +33,10 @@ export const queryKeys = {
 		] as const,
 	usageHistory: (range?: string) =>
 		[...queryKeys.all, "usage-history", { range }] as const,
+	// Per-model-family weekly history. Keyed by range only: one response covers
+	// every family, so two family panels on the same range share a cache entry.
+	usageScopedHistory: (range?: string) =>
+		[...queryKeys.all, "usage-scoped-history", { range }] as const,
 	memoryHistory: (range?: string) =>
 		[...queryKeys.all, "memory-history", { range }] as const,
 	// Unkeyed: the payload is precomputed over the whole retained history, so

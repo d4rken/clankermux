@@ -1,9 +1,13 @@
 import { describe, expect, it } from "bun:test";
+import type { ScopedFamilyLimit } from "@clankermux/core";
 import type { AccountResponse } from "@clankermux/types";
 import {
 	computeFamilyWeeklyUsage,
 	computePoolUsage,
 	FAMILY_WEEKLY_ELEVATED_THRESHOLD_PCT,
+	listLiveScopedFamilies,
+	mergeScopedFamilies,
+	pickBindingScopedLimit,
 } from "../pool-usage";
 
 const NOW = 1_700_000_000_000;
@@ -1375,6 +1379,126 @@ describe("computeFamilyWeeklyUsage", () => {
 					NOW,
 				),
 			).toEqual([]);
+		});
+	});
+
+	describe("pickBindingScopedLimit", () => {
+		const DAY = 86_400_000;
+
+		function limit(
+			percent: number,
+			resetsAtMs: number,
+			displayName = "Fable",
+		): ScopedFamilyLimit {
+			return {
+				family: "fable",
+				percent,
+				resetsAtMs,
+				isActive: true,
+				displayName,
+			};
+		}
+
+		it("returns null for no limits", () => {
+			expect(pickBindingScopedLimit([])).toBeNull();
+		});
+
+		it("takes the highest percent", () => {
+			const binding = pickBindingScopedLimit([
+				limit(40, NOW + DAY),
+				limit(70, NOW + 3 * DAY, "Mythos"),
+			]);
+			expect(binding?.percent).toBe(70);
+		});
+
+		it("breaks a percent tie on the earlier reset", () => {
+			const binding = pickBindingScopedLimit([
+				limit(55, NOW + 3 * DAY),
+				limit(55, NOW + DAY, "Mythos"),
+			]);
+			expect(binding?.displayName).toBe("Mythos");
+		});
+	});
+
+	describe("listLiveScopedFamilies", () => {
+		it("lists every family reported, deduplicated, with its label", () => {
+			const families = listLiveScopedFamilies(
+				[
+					mkScopedAccount("a", [
+						scopedEntry("Fable", 20),
+						scopedEntry("Claude Opus 5", 30),
+					]),
+					mkScopedAccount("b", [scopedEntry("Fable", 60)]),
+				],
+				NOW,
+			);
+
+			expect(families).toEqual([
+				{ family: "fable", displayName: "Fable" },
+				{ family: "opus", displayName: "Claude Opus 5" },
+			]);
+		});
+
+		it("keeps a paused account's family — the chart is not the aggregate", () => {
+			// computeFamilyWeeklyUsage excludes unavailable accounts from the
+			// NUMBER; the panel still has to exist so its recorded history can be
+			// read.
+			const families = listLiveScopedFamilies(
+				[mkScopedAccount("p", [scopedEntry("Fable", 90)], { paused: true })],
+				NOW,
+			);
+
+			expect(families.map((f) => f.family)).toEqual(["fable"]);
+		});
+
+		it("ignores accounts with no usage data or no scoped windows", () => {
+			expect(
+				listLiveScopedFamilies(
+					[
+						mkAccount({ name: "empty", provider: "anthropic" }),
+						mkAccount({
+							name: "flat",
+							provider: "anthropic",
+							usageData: {
+								five_hour: { utilization: 10, resets_at: null },
+								seven_day: { utilization: 20, resets_at: null },
+							} as never,
+						}),
+					],
+					NOW,
+				),
+			).toEqual([]);
+		});
+	});
+
+	describe("mergeScopedFamilies", () => {
+		it("unions live and recorded families, sorted by family", () => {
+			expect(
+				mergeScopedFamilies(
+					[{ family: "opus", displayName: "Claude Opus 5" }],
+					[{ family: "fable", displayName: "Fable" }],
+				),
+			).toEqual([
+				{ family: "fable", displayName: "Fable" },
+				{ family: "opus", displayName: "Claude Opus 5" },
+			]);
+		});
+
+		it("prefers the live label for a family both sources know", () => {
+			expect(
+				mergeScopedFamilies(
+					[{ family: "opus", displayName: "Claude Opus 5" }],
+					[{ family: "opus", displayName: "Claude Opus 4.8" }],
+				),
+			).toEqual([{ family: "opus", displayName: "Claude Opus 5" }]);
+		});
+
+		it("keeps a recorded family that reports nothing live right now", () => {
+			// Between a window's reset and the next poll no account reports it.
+			// Dropping it here would make the panel blink out at every rollover.
+			expect(
+				mergeScopedFamilies([], [{ family: "fable", displayName: "Fable" }]),
+			).toEqual([{ family: "fable", displayName: "Fable" }]);
 		});
 	});
 });

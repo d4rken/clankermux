@@ -1,8 +1,43 @@
 import type {
+	RankedScopedSnapshot,
 	ScopedUsageSnapshotRow,
 	ScopedUsageSnapshotSample,
 } from "@clankermux/types";
 import { BaseRepository } from "./base.repository";
+
+/**
+ * Tie-break order within one (account, family) partition.
+ *
+ * Latest sample first. Within a single tick a family can carry two rows (two
+ * display names folding onto one family), and the one that BINDS is the
+ * highest percent, then the earliest reset — the same rule the live view uses
+ * to pick an account's binding scoped limit, so the recorded line and the
+ * dashed forecast describe the same window. Display name last so the pick is
+ * deterministic even for two structurally identical rows; the `pct IS NULL` /
+ * `reset_at IS NULL` guards keep a reported value ahead of an absent one
+ * (SQLite sorts NULL first on a plain DESC).
+ */
+const SCOPED_BINDING_ORDER = `sampled_at DESC, (pct IS NULL), pct DESC, (reset_at IS NULL), reset_at ASC, display_name ASC`;
+
+function mapRankedScopedRow(row: {
+	account_id: string;
+	ts: number;
+	sampled_at: number;
+	family: string;
+	display_name: string;
+	pct: number | null;
+	reset_at: number | null;
+}): RankedScopedSnapshot {
+	return {
+		accountId: row.account_id,
+		ts: Number(row.ts),
+		sampledAt: Number(row.sampled_at),
+		family: row.family,
+		displayName: row.display_name,
+		pct: row.pct == null ? null : Number(row.pct),
+		resetAt: row.reset_at == null ? null : Number(row.reset_at),
+	};
+}
 
 /**
  * Repository for the `usage_scoped_snapshots` time-series — an append-only
@@ -85,6 +120,106 @@ export class UsageScopedSnapshotRepository extends BaseRepository<ScopedUsageSna
 			pct: row.pct == null ? null : Number(row.pct),
 			resetAt: row.reset_at == null ? null : Number(row.reset_at),
 		}));
+	}
+
+	/**
+	 * Read the winning value per (account, family, time bucket) since
+	 * `sinceMs` — the scoped analogue of
+	 * `UsageSnapshotRepository.getSnapshots`, with the family axis added to the
+	 * partition. Buckets are `bucketMs`-wide windows aligned to the epoch.
+	 *
+	 * No family predicate: the caller shapes EVERY recorded family in one pass,
+	 * so the existing `sampled_at` index covers the scan and no new index is
+	 * needed.
+	 *
+	 * `sampledAt` carries the winning row's real sample time beside the bucket
+	 * start, so a caller comparing recency across accounts in one bucket (the
+	 * family display name) is not left ranking identical bucket timestamps.
+	 */
+	async getBucketedSnapshots(opts: {
+		sinceMs: number;
+		bucketMs: number;
+	}): Promise<RankedScopedSnapshot[]> {
+		const { sinceMs, bucketMs } = opts;
+		const rows = await this.query<{
+			account_id: string;
+			ts: number;
+			sampled_at: number;
+			family: string;
+			display_name: string;
+			pct: number | null;
+			reset_at: number | null;
+		}>(
+			`
+			WITH bucketed AS (
+				SELECT account_id, family, display_name, pct, reset_at, sampled_at,
+				       (sampled_at / ?) * ? AS ts
+				FROM usage_scoped_snapshots
+				WHERE sampled_at >= ?
+			),
+			ranked AS (
+				SELECT *, ROW_NUMBER() OVER (
+					PARTITION BY account_id, family, ts
+					ORDER BY ${SCOPED_BINDING_ORDER}
+				) AS rn
+				FROM bucketed
+			)
+			SELECT account_id, ts, sampled_at, family, display_name, pct, reset_at
+			FROM ranked WHERE rn = 1 ORDER BY ts, family, account_id;
+		`,
+			[bucketMs, bucketMs, sinceMs],
+		);
+
+		return rows.map(mapRankedScopedRow);
+	}
+
+	/**
+	 * Read the single most recent row per (account, family) with
+	 * `sampled_at < beforeMs` — the value that was in force when a chart range
+	 * BEGINS, so an account last sampled just before the range start is not
+	 * missing from the whole range.
+	 *
+	 * `ts` carries the row's real `sampled_at`, not a bucket start: this row
+	 * lies outside the grid by construction, and the caller expires the carried
+	 * value from its true sample time.
+	 *
+	 * `lookbackMs` bounds the scan to `[beforeMs - lookbackMs, beforeMs)` and is
+	 * lossless when it is at least one nominal window: a reading sampled longer
+	 * than that before the cutoff has expired by then (at its own reset, or at
+	 * `sampled_at + nominal` when it carries none), so it cannot be in force at
+	 * the range start and there is no point ranking it. Unbounded, this ranks
+	 * every row in retention — 0.5s on a 180k-row table, per open panel, per
+	 * minute — and gets slower as history grows.
+	 */
+	async getLatestSnapshotsBefore(
+		beforeMs: number,
+		lookbackMs: number,
+	): Promise<RankedScopedSnapshot[]> {
+		const rows = await this.query<{
+			account_id: string;
+			ts: number;
+			sampled_at: number;
+			family: string;
+			display_name: string;
+			pct: number | null;
+			reset_at: number | null;
+		}>(
+			`
+			WITH ranked AS (
+				SELECT *, ROW_NUMBER() OVER (
+					PARTITION BY account_id, family
+					ORDER BY ${SCOPED_BINDING_ORDER}
+				) AS rn
+				FROM usage_scoped_snapshots
+				WHERE sampled_at < ? AND sampled_at >= ?
+			)
+			SELECT account_id, sampled_at AS ts, sampled_at, family, display_name, pct, reset_at
+			FROM ranked WHERE rn = 1 ORDER BY family, account_id;
+		`,
+			[beforeMs, beforeMs - lookbackMs],
+		);
+
+		return rows.map(mapRankedScopedRow);
 	}
 
 	/**

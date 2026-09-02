@@ -430,6 +430,27 @@ export const useUsageHistory = (range: string) => {
 };
 
 /**
+ * Per-model-family weekly history for the Limits-tab family panels, on the
+ * same cadence as useUsageHistory.
+ *
+ * Exported as options rather than only as a hook because the Limits tab drives
+ * one query per discovered family through `useQueries`, and a per-panel read
+ * that drifted from the hook's key or cadence would fork the cache.
+ */
+export const usageScopedHistoryQueryOptions = (range: string) => ({
+	queryKey: queryKeys.usageScopedHistory(range),
+	queryFn: () => api.getUsageScopedHistory(range),
+	staleTime: 45000,
+	refetchInterval: 60000,
+	refetchIntervalInBackground: false,
+	retry: shouldRetryDashboardQuery,
+});
+
+export const useUsageScopedHistory = (range: string) => {
+	return useQuery(usageScopedHistoryQueryOptions(range));
+};
+
+/**
  * Precomputed quota-drift analysis for the Analytics "Quota" tab.
  *
  * The server recomputes it every 30 minutes, so polling faster would only

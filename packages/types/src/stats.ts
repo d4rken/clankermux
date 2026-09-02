@@ -666,6 +666,59 @@ export interface UsageHistoryResponse {
 	pool: UsageHistoryPoolPoint[];
 }
 
+// Scoped usage-history (per-model-family weekly windows) types.
+//
+// The same shape as the account-wide series above, one level deeper: the
+// response carries EVERY family present in `usage_scoped_snapshots` over the
+// requested range, each with its own per-account series and pool aggregate.
+// Built from RankedScopedSnapshot rows (see usage-snapshot.ts).
+
+/** One bucketed sample of an account's per-family weekly utilization. */
+export interface UsageScopedHistoryPoint {
+	ts: number; // bucket start (ms)
+	pct: number | null;
+}
+
+/** One account's series within one family. */
+export interface UsageScopedHistorySeries {
+	accountId: string;
+	name: string;
+	provider: string;
+	points: UsageScopedHistoryPoint[];
+}
+
+/**
+ * Pool-wide aggregate for one family at a single bucket. Avg/max ignore nulls
+ * and are null when no account reported a value; `sampledCount` counts the
+ * accounts contributing any non-null value, carried-forward ones included —
+ * exactly as {@link UsageHistoryPoolPoint} does for the account-wide windows.
+ */
+export interface UsageScopedHistoryPoolPoint {
+	ts: number;
+	avg: number | null;
+	max: number | null;
+	sampledCount: number;
+}
+
+/**
+ * One model family's recorded weekly-window history. `displayName` is the
+ * provider's own scope label from the most recent row seen for the family
+ * (e.g. "Fable") — the family key alone is lossy across generations.
+ */
+export interface UsageScopedHistoryFamily {
+	family: string;
+	displayName: string;
+	series: UsageScopedHistorySeries[];
+	pool: UsageScopedHistoryPoolPoint[];
+}
+
+/** Every family with recorded scoped history in the range, sorted by family. */
+export interface UsageScopedHistoryResponse {
+	range: string;
+	bucketMs: number;
+	families: UsageScopedHistoryFamily[];
+}
+
 // Pool status for health check
 export interface PoolStatus {
 	configured: number; // Total accounts in database

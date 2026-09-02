@@ -308,9 +308,11 @@ describe("computeWindowForecast — flat-hold overrides prediction", () => {
 		);
 
 		expect(series.bridgePct).toBeCloseTo(40, 6);
-		// Every projected point stays flat at 40 — the regression never revives it.
+		// Every projected point up to the reset stays flat at 40 — the regression
+		// never revives it. Past the reset the window has rolled, so the held line
+		// restarts at 0 rather than resuming a burn it was never doing.
 		for (const point of series.points) {
-			expect(point.pct).toBeCloseTo(40, 6);
+			expect(point.pct).toBeCloseTo(point.ts <= RESET_5H ? 40 : 0, 6);
 		}
 	});
 
@@ -330,7 +332,7 @@ describe("computeWindowForecast — flat-hold overrides prediction", () => {
 			"cooldown",
 		);
 		for (const point of series.points) {
-			expect(point.pct).toBeCloseTo(50, 6);
+			expect(point.pct).toBeCloseTo(point.ts <= RESET_5H ? 50 : 0, 6);
 		}
 	});
 });

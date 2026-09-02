@@ -120,6 +120,7 @@ describe("dashboard worker per-kind timeouts", () => {
 		for (const kind of [
 			"stats",
 			"usage-history",
+			"usage-scoped-history",
 			"memory-history",
 			"cache-keepalive-history",
 			"cache-effectiveness",

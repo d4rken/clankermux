@@ -1,13 +1,35 @@
 import { describe, expect, it } from "bun:test";
-import type { UsageHistoryResponse } from "@clankermux/types";
+import type {
+	UsageHistoryResponse,
+	UsageScopedHistoryResponse,
+} from "@clankermux/types";
 import { renderToStaticMarkup } from "react-dom/server";
 import {
+	type FamilyWindowChartState,
 	UsageSawtoothChart,
 	type UsageWindowChartState,
 } from "./UsageSawtoothChart";
 
 function emptyHistory(range: string): UsageHistoryResponse {
 	return { range, bucketMs: 60_000, series: [], pool: [] };
+}
+
+function emptyScopedHistory(range: string): UsageScopedHistoryResponse {
+	return { range, bucketMs: 60_000, families: [] };
+}
+
+function fableFamily(
+	partial: Partial<FamilyWindowChartState> = {},
+): FamilyWindowChartState {
+	return {
+		family: "fable",
+		displayName: "Fable",
+		usageHistory: emptyScopedHistory("7d"),
+		loading: false,
+		range: "7d",
+		onRangeChange: () => {},
+		...partial,
+	};
 }
 
 describe("UsageSawtoothChart range selectors", () => {
@@ -35,6 +57,22 @@ describe("UsageSawtoothChart range selectors", () => {
 		expect(html).toContain('aria-label="5-hour graph time range"');
 		expect(html).toContain('aria-label="7-day graph time range"');
 	});
+
+	it("gives each per-family panel its own labelled selector", () => {
+		const html = renderChart({}, {}, [fableFamily()]);
+
+		expect(html.match(/role="combobox"/g)).toHaveLength(3);
+		expect(html).toContain("Fable weekly window");
+		expect(html).toContain('aria-label="Fable weekly graph time range"');
+	});
+
+	it("renders only the two account-wide panels when no family is reported", () => {
+		for (const families of [undefined, []]) {
+			const html = renderChart({}, {}, families);
+			expect(html.match(/role="combobox"/g)).toHaveLength(2);
+			expect(html).not.toContain("weekly window");
+		}
+	});
 });
 
 const EMPTY_CLAIM = "Collecting data";
@@ -42,6 +80,7 @@ const EMPTY_CLAIM = "Collecting data";
 function renderChart(
 	fiveHour: Partial<UsageWindowChartState>,
 	sevenDay: Partial<UsageWindowChartState>,
+	families?: FamilyWindowChartState[],
 ): string {
 	return renderToStaticMarkup(
 		<UsageSawtoothChart
@@ -61,6 +100,7 @@ function renderChart(
 				onRangeChange: () => {},
 				...sevenDay,
 			}}
+			families={families}
 		/>,
 	);
 }
@@ -94,6 +134,27 @@ describe("UsageSawtoothChart availability", () => {
 
 		expect(html).not.toContain(EMPTY_CLAIM);
 		expect(html.match(/Usage history unavailable/g)).toHaveLength(2);
+	});
+
+	it("keeps each family panel on its own state", () => {
+		const html = renderChart(
+			{ usageHistory: emptyHistory("24h") },
+			{ usageHistory: emptyHistory("7d") },
+			[
+				fableFamily({ loading: true, usageHistory: undefined }),
+				fableFamily({
+					family: "opus",
+					displayName: "Claude Opus 5",
+					unavailableReason: "Usage history unavailable",
+				}),
+			],
+		);
+
+		// The two account-wide panels resolved empty; the Fable panel is in
+		// flight; the Opus panel failed. Each says its own thing.
+		expect(html.match(new RegExp(EMPTY_CLAIM, "g"))).toHaveLength(2);
+		expect(html.match(/animate-pulse/g)).toHaveLength(1);
+		expect(html.match(/Usage history unavailable/g)).toHaveLength(1);
 	});
 
 	it("keeps each window on its own state", () => {

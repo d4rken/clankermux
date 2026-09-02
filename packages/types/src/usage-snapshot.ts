@@ -142,3 +142,36 @@ export interface ScopedUsageSnapshotSample {
 	pct: number | null;
 	resetAt: number | null;
 }
+
+/**
+ * Bucketed read shape for the scoped series — one row per
+ * (account, family, time bucket), carrying the winning sample within that
+ * bucket. The scoped analogue of {@link RankedSnapshot}, with the family axis
+ * added.
+ *
+ * `ts` is the floored bucket start (sampledAt / bucketMs * bucketMs) for the
+ * bucketed read; the predecessor read (the single latest row strictly before a
+ * cutoff) has no meaningful bucket and returns the row's real `sampled_at`
+ * there instead.
+ *
+ * One tick can report two display names that fold onto the same family, so the
+ * read picks ONE per (account, family, bucket): latest sample, then highest
+ * pct, then earliest reset — the same "binding limit" rule the live view
+ * applies — so the recorded line and the live forecast agree.
+ */
+export interface RankedScopedSnapshot {
+	accountId: string;
+	/** Bucket start, ms since epoch (or the sample time on the predecessor read). */
+	ts: number;
+	/**
+	 * The winning row's REAL sample time, ms since epoch — the instant the
+	 * reading was taken, not the bucket it fell in. Two accounts in one bucket
+	 * share a `ts`, so anything that has to pick the most recent reading (the
+	 * family's display name across model generations) must compare this.
+	 */
+	sampledAt: number;
+	family: string;
+	displayName: string;
+	pct: number | null;
+	resetAt: number | null;
+}

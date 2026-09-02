@@ -1,10 +1,12 @@
 /**
- * Worker round-trip tests for the usage-history and memory-history endpoints
- * (kinds "usage-history" / "memory-history" on the shared read-only dashboard
- * worker). Mirrors stats-worker-isolation.test.ts: real temp DB, the thin
- * main-thread wrappers, and assertions that the wire shape matches what the
- * old main-thread handlers produced. The shaping logic itself is covered by
- * the direct-handler unit tests (usage-history.test.ts / memory-history.test.ts).
+ * Worker round-trip tests for the usage-history, scoped usage-history and
+ * memory-history endpoints (kinds "usage-history" / "usage-scoped-history" /
+ * "memory-history" on the shared read-only dashboard worker). Mirrors
+ * stats-worker-isolation.test.ts: real temp DB, the thin main-thread wrappers,
+ * and assertions that the wire shape matches what the old main-thread handlers
+ * produced. The shaping logic itself is covered by the direct-handler unit
+ * tests (usage-history.test.ts / usage-scoped-history.test.ts /
+ * memory-history.test.ts).
  */
 import {
 	afterAll,
@@ -21,6 +23,7 @@ import { DatabaseOperations } from "@clankermux/database";
 import type {
 	MemoryHistoryResponse,
 	UsageHistoryResponse,
+	UsageScopedHistoryResponse,
 } from "@clankermux/types";
 import {
 	clearAnalyticsCachesForTests,
@@ -29,6 +32,7 @@ import {
 } from "../analytics-runner";
 import { createMemoryHistoryHandler } from "../memory-history";
 import { createUsageHistoryHandler } from "../usage-history";
+import { createUsageScopedHistoryHandler } from "../usage-scoped-history";
 import { makeContext } from "./dashboard-test-helpers";
 
 const HOUR = 60 * 60 * 1000;
@@ -102,6 +106,52 @@ describe("history worker isolation", () => {
 				sevenDayMax: 7,
 				sampledCount: 1,
 			},
+		]);
+	});
+
+	it("serves /api/analytics/usage-scoped-history through the SQLite worker", async () => {
+		// The worker's kind dispatch falls back to the analytics handler, so a
+		// missed branch still compiles and answers 200 with the wrong body shape.
+		const now = Date.now();
+		const expectedTs = Math.floor(now / HOUR) * HOUR;
+		await insertAccount("acct-1", "Alpha");
+		await dbOps.insertScopedUsageSnapshots([
+			{
+				accountId: "acct-1",
+				sampledAt: now,
+				family: "fable",
+				displayName: "Fable",
+				pct: 63,
+				resetAt: now + 100 * HOUR,
+			},
+			{
+				accountId: "acct-1",
+				sampledAt: now,
+				family: "opus",
+				displayName: "Claude Opus 5",
+				pct: 12,
+				resetAt: now + 100 * HOUR,
+			},
+		]);
+
+		const handler = createUsageScopedHistoryHandler(makeContext(dbOps));
+		const response = await handler(new URLSearchParams({ range: "24h" }));
+		const data = (await response.json()) as UsageScopedHistoryResponse;
+
+		expect(response.status).toBe(200);
+		expect(response.headers.get("x-clankermux-analytics-mode")).toBe("worker");
+		expect(data.range).toBe("24h");
+		expect(data.bucketMs).toBe(HOUR);
+		expect(data.families.map((f) => f.family)).toEqual(["fable", "opus"]);
+		const fable = data.families[0];
+		expect(fable?.displayName).toBe("Fable");
+		expect(fable?.series).toHaveLength(1);
+		expect(fable?.series[0]?.accountId).toBe("acct-1");
+		expect(fable?.series[0]?.name).toBe("Alpha");
+		expect(fable?.series[0]?.provider).toBe("anthropic");
+		expect(fable?.series[0]?.points).toEqual([{ ts: expectedTs, pct: 63 }]);
+		expect(fable?.pool).toEqual([
+			{ ts: expectedTs, avg: 63, max: 63, sampledCount: 1 },
 		]);
 	});
 
