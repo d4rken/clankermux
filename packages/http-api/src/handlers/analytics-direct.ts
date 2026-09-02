@@ -14,6 +14,7 @@ import type {
 	APIContext,
 	CacheFlowPoint,
 	FullAnalyticsResponse,
+	RefusalFallbackAnalytics,
 	SpeedTimePoint,
 } from "../types";
 import { allSections, parseSectionsParam } from "./analytics-sections";
@@ -120,6 +121,7 @@ const FULL_RESPONSE_FIELDS: Record<keyof FullAnalyticsResponse, true> = {
 	contextComposition: true,
 	toolCallErrors: true,
 	activeSessions: true,
+	refusalFallbacks: true,
 };
 
 /**
@@ -1069,6 +1071,122 @@ export function createAnalyticsHandler(context: APIContext) {
 							medianTps: Number(row.median_tps),
 						}));
 
+			// Safety refusals and the fallback-credit retries that redeem them.
+			//
+			// Four statements rather than a UNION: they have three different shapes
+			// (bucketed counts, a provider/category grouping that needs the accounts
+			// join, and a model-pair grouping) and one scalar, and the partial index
+			// idx_requests_refusal_fallback covers the first three exactly. The
+			// eligibility count is deliberately NOT filtered to refusals — it is the
+			// denominator for the share.
+			const refusalFallbackData = await runPhase(
+				"refusal_fallbacks",
+				want("refusalFallbacks"),
+				async () => {
+					const [timeSeries, byCategory, byModelPair, eligible] =
+						await Promise.all([
+							db.query<{
+								ts: number;
+								refusals: number;
+								fallback_retries: number;
+							}>(
+								`SELECT
+					(timestamp / ?) * ? AS ts,
+					SUM(refusal_category IS NOT NULL) AS refusals,
+					SUM(fallback_credit_claimed = 1) AS fallback_retries
+				FROM requests r
+				WHERE ${whereClause}
+					AND (refusal_category IS NOT NULL OR fallback_credit_claimed = 1)
+				GROUP BY ts
+				ORDER BY ts`,
+								[bucket.bucketMs, bucket.bucketMs, ...queryParams],
+							),
+							db.query<{
+								provider: string | null;
+								category: string;
+								count: number;
+							}>(
+								// Same accounts join the account-performance branch uses:
+								// the refusal vocabulary is the PROVIDER's, so the category
+								// is only readable next to the provider that named it.
+								`SELECT a.provider AS provider, r.refusal_category AS category, COUNT(*) AS count
+				FROM requests r
+				LEFT JOIN accounts a ON a.id = r.account_used
+				WHERE ${whereClause} AND r.refusal_category IS NOT NULL
+				GROUP BY a.provider, r.refusal_category
+				ORDER BY count DESC`,
+								queryParams,
+							),
+							db.query<{
+								from_model: string | null;
+								to_model: string | null;
+								count: number;
+							}>(
+								`SELECT fallback_from_model AS from_model, requested_model AS to_model, COUNT(*) AS count
+				FROM requests r
+				WHERE ${whereClause} AND fallback_credit_claimed = 1
+				GROUP BY fallback_from_model, requested_model
+				ORDER BY count DESC`,
+								queryParams,
+							),
+							db.get<{ n: number }>(
+								// The denominator: completed /v1/messages rows that
+								// RECORDED a stop reason. Rows written before this feature
+								// carry none and are excluded, so a range spanning the
+								// deploy reports the share over the traffic it can actually
+								// see rather than diluting it with history.
+								`SELECT COUNT(*) AS n
+				FROM requests r
+				WHERE ${whereClause}
+					AND path = '/v1/messages'
+					AND status_code = 200
+					AND stop_reason IS NOT NULL`,
+								queryParams,
+							),
+						]);
+					return { timeSeries, byCategory, byModelPair, eligible };
+				},
+			);
+
+			const refusalFallbacks: RefusalFallbackAnalytics | undefined =
+				!refusalFallbackData
+					? undefined
+					: (() => {
+							const timeSeries = refusalFallbackData.timeSeries.map((row) => ({
+								ts: Number(row.ts),
+								refusals: Number(row.refusals) || 0,
+								fallbackRetries: Number(row.fallback_retries) || 0,
+							}));
+							return {
+								totals: {
+									// Summed over the buckets rather than queried again: the
+									// series already partitions exactly the rows that count,
+									// so a separate aggregate could only ever disagree.
+									refusals: timeSeries.reduce(
+										(sum, point) => sum + point.refusals,
+										0,
+									),
+									fallbackRetries: timeSeries.reduce(
+										(sum, point) => sum + point.fallbackRetries,
+										0,
+									),
+									eligibleRequests:
+										Number(refusalFallbackData.eligible?.n) || 0,
+								},
+								timeSeries,
+								byCategory: refusalFallbackData.byCategory.map((row) => ({
+									provider: row.provider ?? null,
+									category: row.category,
+									count: Number(row.count) || 0,
+								})),
+								byModelPair: refusalFallbackData.byModelPair.map((row) => ({
+									fromModel: row.from_model ?? null,
+									toModel: row.to_model ?? null,
+									count: Number(row.count) || 0,
+								})),
+							};
+						})();
+
 			// Distinct-active-sessions series, bucketed by requests.timestamp and
 			// split by affinity scope.
 			//
@@ -1975,6 +2093,7 @@ export function createAnalyticsHandler(context: APIContext) {
 				contextComposition,
 				toolCallErrors,
 				activeSessions,
+				refusalFallbacks,
 			};
 
 			logAnalyticsTimings(phaseTimings, analyticsStartedAt);

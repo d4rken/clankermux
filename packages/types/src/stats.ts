@@ -353,6 +353,7 @@ export const ANALYTICS_SECTIONS = [
 	"modelDistribution",
 	"modelPerformance",
 	"projectBreakdown",
+	"refusalFallbacks",
 	"routing",
 	"speedTimeSeries",
 	"speedTotals",
@@ -567,6 +568,58 @@ export interface AnalyticsResponse {
 	// because an older server may not populate it — consumers should treat
 	// absence as undefined.
 	activeSessions?: ActiveSessionsAnalytics;
+	// Safety refusals and the fallback-credit retries that follow them. Optional
+	// because an older server may not populate it — consumers should treat
+	// absence as undefined ("not computed"), which is distinct from a computed
+	// section with zero totals.
+	refusalFallbacks?: RefusalFallbackAnalytics;
+}
+
+/** One time bucket of the refusal / fallback-retry series. */
+export interface RefusalFallbackPoint {
+	ts: number;
+	refusals: number;
+	fallbackRetries: number;
+}
+
+/**
+ * Refusals grouped by the ACCOUNT's provider and the refusal category. The
+ * category vocabulary is the provider's own, so the provider is what makes it
+ * readable: `content_filter` from an OpenAI account and `cyber` from an
+ * Anthropic one are not two values of one scale. `provider: null` covers rows
+ * whose account has since been deleted.
+ */
+export interface RefusalFallbackCategory {
+	provider: string | null;
+	category: string;
+	count: number;
+}
+
+/**
+ * Fallback retries grouped by the model that refused and the model the retry
+ * went to. `fromModel: null` = the credit token was never seen on a refusal
+ * this proxy observed (a restart, or another proxy served it).
+ */
+export interface RefusalFallbackModelPair {
+	fromModel: string | null;
+	toModel: string | null;
+	count: number;
+}
+
+export interface RefusalFallbackAnalytics {
+	/**
+	 * `eligibleRequests` = completed /v1/messages rows WITH a recorded
+	 * stop_reason. Rows written before this feature carry none and are excluded,
+	 * so the share is not diluted by history.
+	 */
+	totals: {
+		refusals: number;
+		fallbackRetries: number;
+		eligibleRequests: number;
+	};
+	timeSeries: RefusalFallbackPoint[];
+	byCategory: RefusalFallbackCategory[];
+	byModelPair: RefusalFallbackModelPair[];
 }
 
 /**

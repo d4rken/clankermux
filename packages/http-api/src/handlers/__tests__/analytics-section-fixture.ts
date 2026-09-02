@@ -75,6 +75,14 @@ type RequestRow = {
 	contextMessageCount: number | null;
 	contextLargestToolName: string | null;
 	contextLargestToolChars: number | null;
+	/** Ingress model. Only set where a fallback retry needs a `toModel`. */
+	requestedModel: string | null;
+	/** Provider terminal stop reason; null = the row predates the column. */
+	stopReason: string | null;
+	/** Non-null only alongside stopReason 'refusal'. */
+	refusalCategory: string | null;
+	fallbackCreditClaimed: boolean;
+	fallbackFromModel: string | null;
 };
 
 function row(overrides: Partial<RequestRow> & { id: string }): RequestRow {
@@ -104,6 +112,11 @@ function row(overrides: Partial<RequestRow> & { id: string }): RequestRow {
 		contextMessageCount: 12,
 		contextLargestToolName: "Read",
 		contextLargestToolChars: 4000,
+		requestedModel: null,
+		stopReason: null,
+		refusalCategory: null,
+		fallbackCreditClaimed: false,
+		fallbackFromModel: null,
 		...overrides,
 	};
 }
@@ -116,13 +129,24 @@ function row(overrides: Partial<RequestRow> & { id: string }): RequestRow {
  */
 const REQUESTS: RequestRow[] = [
 	// ── Recent, account A, project alpha, live key ─────────────────────────
-	row({ id: "r-01", timestamp: FIXED_NOW - 1 * HOUR }),
+	// A safety refusal from an anthropic-provider account.
+	row({
+		id: "r-01",
+		timestamp: FIXED_NOW - 1 * HOUR,
+		stopReason: "refusal",
+		refusalCategory: "cyber",
+	}),
+	// The fallback-credit retry that redeems r-01's refusal.
 	row({
 		id: "r-02",
 		timestamp: FIXED_NOW - 2 * HOUR,
 		outputTokensPerSecond: 55,
 		responseTimeMs: 900,
 		costUsd: 0.07,
+		stopReason: "end_turn",
+		requestedModel: "claude-opus-4-8",
+		fallbackCreditClaimed: true,
+		fallbackFromModel: "claude-fable-5-1",
 	}),
 	row({
 		id: "r-03",
@@ -153,6 +177,10 @@ const REQUESTS: RequestRow[] = [
 		contextMessageCount: 5,
 		contextLargestToolName: "Bash",
 		contextLargestToolChars: 900,
+		// Account B is an openai-provider account: its refusals carry the Codex
+		// vocabulary, which is why the category is grouped BY provider.
+		stopReason: "refusal",
+		refusalCategory: "content_filter",
 	}),
 	row({
 		id: "r-05",
@@ -184,6 +212,7 @@ const REQUESTS: RequestRow[] = [
 		costUsd: 0.01,
 		outputTokensPerSecond: 120,
 		responseTimeMs: 450,
+		stopReason: "end_turn",
 		contextSystemChars: null,
 		contextToolsChars: null,
 		contextMessagesChars: null,
@@ -207,7 +236,10 @@ const REQUESTS: RequestRow[] = [
 		costUsd: 0.004,
 		outputTokensPerSecond: 110,
 		responseTimeMs: 500,
+		stopReason: "end_turn",
 	}),
+	// Deliberately left with NO stop_reason: a legacy row written before the
+	// column existed. It must NOT count toward the refusal-share denominator.
 	row({
 		id: "r-08",
 		timestamp: FIXED_NOW - 10 * HOUR,
@@ -224,11 +256,15 @@ const REQUESTS: RequestRow[] = [
 		responseTimeMs: 300,
 	}),
 	// ── Older rows: inside 7d, inside 30d, and beyond 30d ──────────────────
+	// A refusal OUTSIDE the 24h window (and with no category recorded), so the
+	// range filter is exercised on the refusal queries too.
 	row({
 		id: "r-09",
 		timestamp: FIXED_NOW - 3 * DAY,
 		outputTokensPerSecond: 35,
 		costUsd: 0.09,
+		stopReason: "refusal",
+		refusalCategory: "unknown",
 	}),
 	row({
 		id: "r-10",
@@ -426,8 +462,9 @@ export function seedAnalyticsFixture(db: Database): void {
 			project_attribution_source, context_system_chars, context_tools_chars,
 			context_messages_chars, context_tool_result_chars,
 			context_message_count, context_largest_tool_name,
-			context_largest_tool_chars
-		) VALUES (?, ?, 'POST', '/v1/messages', ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			context_largest_tool_chars, requested_model, stop_reason,
+			refusal_category, fallback_credit_claimed, fallback_from_model
+		) VALUES (?, ?, 'POST', '/v1/messages', ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 	);
 	for (const r of REQUESTS) {
 		insertRequest.run(
@@ -458,6 +495,11 @@ export function seedAnalyticsFixture(db: Database): void {
 			r.contextMessageCount,
 			r.contextLargestToolName,
 			r.contextLargestToolChars,
+			r.requestedModel,
+			r.stopReason,
+			r.refusalCategory,
+			r.fallbackCreditClaimed ? 1 : null,
+			r.fallbackFromModel,
 		);
 	}
 
