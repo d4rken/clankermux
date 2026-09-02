@@ -312,6 +312,31 @@ describe("SessionStrategy — pause_reason auto-unpause logic", () => {
 	});
 
 	// -------------------------------------------------------------------------
+	// An active cooldown blocks the unpause regardless of pause_reason: the
+	// usage window may have reset while our own rate_limited_until still runs.
+	// -------------------------------------------------------------------------
+
+	describe("active rate_limited_until cooldown", () => {
+		it("does not unpause an overage account whose cooldown is still running", () => {
+			const account = makeAccount({
+				id: "cooling",
+				name: "cooling",
+				paused: true,
+				pause_reason: "overage",
+				auto_fallback_enabled: true,
+				rate_limit_reset: expiredReset,
+				rate_limited_until: now + 60_000,
+				priority: 0,
+			});
+
+			strategy.select([account], meta);
+
+			expect(mockStore.hasResumeCall("cooling")).toBe(false);
+			expect(account.paused).toBe(true);
+		});
+	});
+
+	// -------------------------------------------------------------------------
 	// Mixed scenario: multiple paused accounts, each with different pause_reason.
 	// The first eligible auto-fallback candidate (by priority) is the overage account
 	// (priority=2). The failure and manual accounts are lower priority (0, 1) but

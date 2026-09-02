@@ -1,19 +1,26 @@
 import { isAccountAvailable } from "@clankermux/core";
 import { type Account, PROVIDER_NAMES } from "@clankermux/types";
+import { isSelfHealingPauseReason } from "./pause-reasons";
 
 const RATE_LIMIT_RESET_BUFFER_MS = 1000;
 
 /**
- * Mirrors the auto-unpause condition that select() applies before testing
- * availability. Returns true when select() WOULD unpause this account on
- * its next call, without performing the unpause itself.
+ * The structural half of the auto-unpause condition: the account is paused with
+ * auto-fallback on, its provider reports a resettable usage window, that window
+ * has elapsed, and no cooldown of our own is still running. Says nothing about
+ * WHY the account is paused — see {@link wouldAutoUnpause} for that.
  *
- * Kept in sync with SessionStrategy.select() and
- * LeastUsedStrategy.autoUnpauseElapsedAccounts() — divergence here causes
- * peek() to flag the wrong account as Primary while real traffic goes
- * elsewhere.
+ * Both strategies filter their auto-fallback candidates through this so the
+ * two cannot drift: SessionStrategy.checkForAutoFallbackAccounts() used to
+ * carry its own copy of the provider/window/cooldown test, and
+ * LeastUsedStrategy resumed accounts whose cooldown had not expired at all.
+ *
+ * The cooldown boundary matches core `isAccountAvailable`, which requires
+ * `rate_limited_until < now`: an account whose cooldown ends exactly at `now`
+ * is still rate-limited, so unpausing it would only hand the pool an account
+ * that the very next availability check rejects.
  */
-export function wouldAutoUnpause(
+export function isAutoUnpauseCandidate(
 	account: Account,
 	now: number = Date.now(),
 ): boolean {
@@ -31,11 +38,30 @@ export function wouldAutoUnpause(
 		account.rate_limit_reset < now - RATE_LIMIT_RESET_BUFFER_MS;
 	if (!windowReset) return false;
 
-	const pauseReason = account.pause_reason ?? null;
+	if (account.rate_limited_until && account.rate_limited_until >= now) {
+		return false;
+	}
+
+	return true;
+}
+
+/**
+ * Mirrors the auto-unpause condition that select() applies before testing
+ * availability. Returns true when select() WOULD unpause this account on
+ * its next call, without performing the unpause itself.
+ *
+ * Kept in sync with SessionStrategy.select() and
+ * LeastUsedStrategy.autoUnpauseElapsedAccounts() — divergence here causes
+ * peek() to flag the wrong account as Primary while real traffic goes
+ * elsewhere.
+ */
+export function wouldAutoUnpause(
+	account: Account,
+	now: number = Date.now(),
+): boolean {
 	return (
-		pauseReason === null ||
-		pauseReason === "overage" ||
-		pauseReason === "rate_limit_window"
+		isAutoUnpauseCandidate(account, now) &&
+		isSelfHealingPauseReason(account.pause_reason)
 	);
 }
 

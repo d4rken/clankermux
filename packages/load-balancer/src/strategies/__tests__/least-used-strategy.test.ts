@@ -206,6 +206,53 @@ describe("LeastUsedStrategy", () => {
 			expect(store.resumeCalls).not.toContain("no-flag");
 		});
 
+		it("does NOT resume while rate_limited_until is still in the future", () => {
+			const now = Date.now();
+			const account = makeAccount({
+				id: "cooling",
+				paused: true,
+				pause_reason: "overage",
+				auto_fallback_enabled: true,
+				rate_limit_reset: now - 60_000,
+				rate_limited_until: now + 60_000,
+			});
+			strategy.select([account], meta);
+			expect(account.paused).toBe(true);
+			expect(store.resumeCalls).not.toContain("cooling");
+		});
+
+		it("resumes once rate_limited_until has elapsed", () => {
+			const now = Date.now();
+			const account = makeAccount({
+				id: "cooled",
+				paused: true,
+				pause_reason: "overage",
+				auto_fallback_enabled: true,
+				rate_limit_reset: now - 60_000,
+				rate_limited_until: now - 1_000,
+			});
+			strategy.select([account], meta);
+			expect(account.paused).toBe(false);
+			expect(store.resumeCalls).toContain("cooled");
+		});
+
+		it("does NOT resume when rate_limited_until is exactly now", () => {
+			// isAccountAvailable requires rate_limited_until < now, so a cooldown
+			// that ends at `now` is still a cooldown.
+			const now = Date.now();
+			const account = makeAccount({
+				id: "boundary",
+				paused: true,
+				pause_reason: "overage",
+				auto_fallback_enabled: true,
+				rate_limit_reset: now - 60_000,
+				rate_limited_until: now,
+			});
+			strategy.select([account], meta);
+			expect(account.paused).toBe(true);
+			expect(store.resumeCalls).not.toContain("boundary");
+		});
+
 		it("does NOT resume when rate_limit_reset is still in the future", () => {
 			const future = Date.now() + 60_000;
 			const account = makeAccount({
