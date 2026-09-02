@@ -1601,6 +1601,10 @@ export async function proxyWithAccount(
 						reasoningEffort: requestMeta.reasoningEffort ?? null,
 						sessionKey: requestMeta.sessionKey ?? null,
 						cachePrefixHashes: requestMeta.cachePrefixHashes ?? null,
+						// The ingress model needs its own column: the usage envelope carries the
+						// provider-reported model, while analytics that group by ingress model
+						// (the fallback model-pair table) read requested_model.
+						requestedModel: requestMeta.requestedModel ?? null,
 						// A retry that ends in a local rejection keeps its fallback mark: the
 						// row is still the redemption of a refusal, whatever happened next.
 						fallbackCreditClaimed:
@@ -1763,6 +1767,10 @@ export async function proxyWithAccount(
 							reasoningEffort: requestMeta.reasoningEffort ?? null,
 							sessionKey: requestMeta.sessionKey ?? null,
 							cachePrefixHashes: requestMeta.cachePrefixHashes ?? null,
+							// The ingress model needs its own column: the usage envelope carries the
+							// provider-reported model, while analytics that group by ingress model
+							// (the fallback model-pair table) read requested_model.
+							requestedModel: requestMeta.requestedModel ?? null,
 							// A retry that ends in a local rejection keeps its fallback mark: the
 							// row is still the redemption of a refusal, whatever happened next.
 							fallbackCreditClaimed:
@@ -1891,6 +1899,10 @@ export async function proxyWithAccount(
 							reasoningEffort: requestMeta.reasoningEffort ?? null,
 							sessionKey: requestMeta.sessionKey ?? null,
 							cachePrefixHashes: requestMeta.cachePrefixHashes ?? null,
+							// The ingress model needs its own column: the usage envelope carries the
+							// provider-reported model, while analytics that group by ingress model
+							// (the fallback model-pair table) read requested_model.
+							requestedModel: requestMeta.requestedModel ?? null,
 							// A retry that ends in a local rejection keeps its fallback mark: the
 							// row is still the redemption of a refusal, whatever happened next.
 							fallbackCreditClaimed:
@@ -2035,6 +2047,10 @@ export async function proxyWithAccount(
 							reasoningEffort: requestMeta.reasoningEffort ?? null,
 							sessionKey: requestMeta.sessionKey ?? null,
 							cachePrefixHashes: requestMeta.cachePrefixHashes ?? null,
+							// The ingress model needs its own column: the usage envelope carries the
+							// provider-reported model, while analytics that group by ingress model
+							// (the fallback model-pair table) read requested_model.
+							requestedModel: requestMeta.requestedModel ?? null,
 							// A retry that ends in a local rejection keeps its fallback mark: the
 							// row is still the redemption of a refusal, whatever happened next.
 							fallbackCreditClaimed:
@@ -2162,6 +2178,10 @@ export async function proxyWithAccount(
 								reasoningEffort: requestMeta.reasoningEffort ?? null,
 								sessionKey: requestMeta.sessionKey ?? null,
 								cachePrefixHashes: requestMeta.cachePrefixHashes ?? null,
+								// The ingress model needs its own column: the usage envelope carries the
+								// provider-reported model, while analytics that group by ingress model
+								// (the fallback model-pair table) read requested_model.
+								requestedModel: requestMeta.requestedModel ?? null,
 								// A retry that ends in a local rejection keeps its fallback mark: the
 								// row is still the redemption of a refusal, whatever happened next.
 								fallbackCreditClaimed:
@@ -2439,6 +2459,10 @@ export async function proxyWithAccount(
 								reasoningEffort: requestMeta.reasoningEffort ?? null,
 								sessionKey: requestMeta.sessionKey ?? null,
 								cachePrefixHashes: requestMeta.cachePrefixHashes ?? null,
+								// The ingress model needs its own column: the usage envelope carries the
+								// provider-reported model, while analytics that group by ingress model
+								// (the fallback model-pair table) read requested_model.
+								requestedModel: requestMeta.requestedModel ?? null,
 								// A retry that ends in a local rejection keeps its fallback mark: the
 								// row is still the redemption of a refusal, whatever happened next.
 								fallbackCreditClaimed:
