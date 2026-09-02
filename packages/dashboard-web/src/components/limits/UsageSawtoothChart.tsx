@@ -1,4 +1,9 @@
-import type { AccountResponse, UsageHistoryResponse } from "@clankermux/types";
+import type { ModelFamily } from "@clankermux/core";
+import type {
+	AccountResponse,
+	UsageHistoryResponse,
+	UsageScopedHistoryResponse,
+} from "@clankermux/types";
 import { format } from "date-fns";
 import { AlertCircle } from "lucide-react";
 import { useMemo } from "react";
@@ -6,7 +11,10 @@ import type { TimeRange } from "../../constants";
 import { useSeriesPalette } from "../../hooks/useSeriesPalette";
 import type { PoolWindow } from "../../lib/pool-usage";
 import { pickTimePattern } from "../../lib/usage-chart-format";
-import { computeWindowForecast } from "../../lib/usage-forecast";
+import {
+	computeWindowForecast,
+	type ForecastWindow,
+} from "../../lib/usage-forecast";
 import { BaseLineChart } from "../charts";
 import type { LineConfig } from "../charts/BaseLineChart";
 import type { ChartDataPoint } from "../charts/types";
@@ -33,6 +41,23 @@ export interface UsageWindowChartState {
 	onRangeChange: (range: TimeRange) => void;
 }
 
+/**
+ * One per-model-family weekly panel (e.g. "Fable weekly window"). Same
+ * availability contract as {@link UsageWindowChartState}, plus the family this
+ * panel is about. `usageHistory` is the WHOLE scoped-history response — one
+ * response carries every family — and this panel picks its own entry out of it.
+ */
+export interface FamilyWindowChartState {
+	family: ModelFamily;
+	/** Anthropic's own label for the family, e.g. "Fable". */
+	displayName: string;
+	usageHistory: UsageScopedHistoryResponse | undefined;
+	loading: boolean;
+	unavailableReason?: string;
+	range: TimeRange;
+	onRangeChange: (range: TimeRange) => void;
+}
+
 interface UsageSawtoothChartProps {
 	/** Live accounts (from /api/accounts) — drive the forward burn-rate forecast. */
 	accounts: AccountResponse[];
@@ -40,6 +65,82 @@ interface UsageSawtoothChartProps {
 	now: number;
 	fiveHour: UsageWindowChartState;
 	sevenDay: UsageWindowChartState;
+	/**
+	 * One extra panel per model family the provider scopes a weekly window for.
+	 * Data-driven, not a hard-coded "Fable" panel: whichever families the pool
+	 * reports (or has recorded history for) get a graph.
+	 */
+	families?: FamilyWindowChartState[];
+}
+
+/**
+ * One window's history, normalised out of whichever endpoint produced it, so
+ * the row builder below does not have to know that the account-wide response
+ * keys its values by window while the scoped one keys them by family.
+ */
+interface WindowHistory {
+	range: string | undefined;
+	bucketMs: number;
+	series: Array<{
+		accountId: string;
+		name: string;
+		points: Array<{ ts: number; pct: number | null }>;
+	}>;
+	pool: Array<{ ts: number; avg: number | null }>;
+}
+
+function windowHistoryFromUsage(
+	usageHistory: UsageHistoryResponse | undefined,
+	window: PoolWindow,
+): WindowHistory | undefined {
+	if (!usageHistory) return undefined;
+	const five = window === "five_hour";
+	return {
+		range: usageHistory.range,
+		bucketMs: usageHistory.bucketMs,
+		series: usageHistory.series.map((s) => ({
+			accountId: s.accountId,
+			name: s.name,
+			points: s.points.map((p) => ({
+				ts: p.ts,
+				pct: five ? p.fiveHourPct : p.sevenDayPct,
+			})),
+		})),
+		pool: usageHistory.pool.map((p) => ({
+			ts: p.ts,
+			avg: five ? p.fiveHourAvg : p.sevenDayAvg,
+		})),
+	};
+}
+
+function windowHistoryFromScopedFamily(
+	response: UsageScopedHistoryResponse | undefined,
+	family: ModelFamily,
+): WindowHistory | undefined {
+	if (!response) return undefined;
+	const entry = response.families.find((f) => f.family === family);
+	// The read resolved but has nothing recorded for this family yet (a window
+	// the pool started reporting since the last snapshot). Still return the
+	// response's range and bucket size: the forecast that IS drawable has to use
+	// the selected range's horizon and cadence, not the 24h fallback.
+	if (!entry) {
+		return {
+			range: response.range,
+			bucketMs: response.bucketMs,
+			series: [],
+			pool: [],
+		};
+	}
+	return {
+		range: response.range,
+		bucketMs: response.bucketMs,
+		series: entry.series.map((s) => ({
+			accountId: s.accountId,
+			name: s.name,
+			points: s.points.map((p) => ({ ts: p.ts, pct: p.pct })),
+		})),
+		pool: entry.pool.map((p) => ({ ts: p.ts, avg: p.avg })),
+	};
 }
 
 /**
@@ -90,9 +191,9 @@ function rangeToMs(range: string | undefined): number {
 
 /** Build merged historical + forecast rows and line configs for one window. */
 function buildWindowChart(
-	usageHistory: UsageHistoryResponse | undefined,
+	history: WindowHistory | undefined,
 	accounts: AccountResponse[],
-	window: PoolWindow,
+	window: ForecastWindow,
 	now: number,
 	// Passed in rather than read from a module constant: the qualitative hues
 	// differ between the light and dark chart grounds, and this builder has to
@@ -100,10 +201,10 @@ function buildWindowChart(
 	sequence: readonly string[],
 	poolStroke: string,
 ): WindowChart {
-	const pool = usageHistory?.pool ?? [];
-	const series = usageHistory?.series ?? [];
-	const bucketMs = usageHistory?.bucketMs ?? 0;
-	const rangeMs = rangeToMs(usageHistory?.range);
+	const pool = history?.pool ?? [];
+	const series = history?.series ?? [];
+	const bucketMs = history?.bucketMs ?? 0;
+	const rangeMs = rangeToMs(history?.range);
 
 	// Label format disambiguates the day once the span exceeds 24h (see helper).
 	const timePattern = pickTimePattern(bucketMs, rangeMs);
@@ -120,12 +221,11 @@ function buildWindowChart(
 
 	// Historical pool average + per-account utilization.
 	for (const p of pool) {
-		rowFor(p.ts).pool = window === "five_hour" ? p.fiveHourAvg : p.sevenDayAvg;
+		rowFor(p.ts).pool = p.avg;
 	}
 	for (const s of series) {
 		for (const point of s.points) {
-			rowFor(point.ts)[s.accountId] =
-				window === "five_hour" ? point.fiveHourPct : point.sevenDayPct;
+			rowFor(point.ts)[s.accountId] = point.pct;
 		}
 	}
 
@@ -231,7 +331,12 @@ function buildWindowChart(
  */
 function WindowChartPanel({
 	label,
-	chart,
+	history,
+	accounts,
+	window,
+	now,
+	sequence,
+	poolStroke,
 	loading,
 	unavailableReason,
 	range,
@@ -239,13 +344,25 @@ function WindowChartPanel({
 	selectorLabel,
 }: {
 	label: string;
-	chart: WindowChart;
+	history: WindowHistory | undefined;
+	accounts: AccountResponse[];
+	window: ForecastWindow;
+	now: number;
+	sequence: readonly string[];
+	poolStroke: string;
 	loading: boolean;
 	unavailableReason?: string;
 	range: TimeRange;
 	onRangeChange: (range: TimeRange) => void;
 	selectorLabel: string;
 }) {
+	// Built per panel rather than in the parent: the family panels are rendered
+	// from a list, and a hook cannot be called in a loop outside a component.
+	const chart = useMemo(
+		() =>
+			buildWindowChart(history, accounts, window, now, sequence, poolStroke),
+		[history, accounts, window, now, sequence, poolStroke],
+	);
 	const pending = loading && unavailableReason == null;
 	return (
 		<div>
@@ -313,35 +430,12 @@ export function UsageSawtoothChart({
 	now,
 	fiveHour: fiveHourState,
 	sevenDay: sevenDayState,
+	families = [],
 }: UsageSawtoothChartProps) {
 	const palette = useSeriesPalette();
 	// The pool average is the emphasis line, so it takes the palette's own
 	// primary rather than a qualitative hue.
 	const poolStroke = "var(--primary)";
-	const fiveHour = useMemo(
-		() =>
-			buildWindowChart(
-				fiveHourState.usageHistory,
-				accounts,
-				"five_hour",
-				now,
-				palette.sequence,
-				poolStroke,
-			),
-		[fiveHourState.usageHistory, accounts, now, palette.sequence],
-	);
-	const sevenDay = useMemo(
-		() =>
-			buildWindowChart(
-				sevenDayState.usageHistory,
-				accounts,
-				"seven_day",
-				now,
-				palette.sequence,
-				poolStroke,
-			),
-		[sevenDayState.usageHistory, accounts, now, palette.sequence],
-	);
 
 	return (
 		<Card>
@@ -358,7 +452,15 @@ export function UsageSawtoothChart({
 			<CardContent className="space-y-section">
 				<WindowChartPanel
 					label="5-hour window"
-					chart={fiveHour}
+					history={windowHistoryFromUsage(
+						fiveHourState.usageHistory,
+						"five_hour",
+					)}
+					accounts={accounts}
+					window="five_hour"
+					now={now}
+					sequence={palette.sequence}
+					poolStroke={poolStroke}
 					loading={fiveHourState.loading}
 					unavailableReason={fiveHourState.unavailableReason}
 					range={fiveHourState.range}
@@ -367,13 +469,41 @@ export function UsageSawtoothChart({
 				/>
 				<WindowChartPanel
 					label="7-day window"
-					chart={sevenDay}
+					history={windowHistoryFromUsage(
+						sevenDayState.usageHistory,
+						"seven_day",
+					)}
+					accounts={accounts}
+					window="seven_day"
+					now={now}
+					sequence={palette.sequence}
+					poolStroke={poolStroke}
 					loading={sevenDayState.loading}
 					unavailableReason={sevenDayState.unavailableReason}
 					range={sevenDayState.range}
 					onRangeChange={sevenDayState.onRangeChange}
 					selectorLabel="7-day graph time range"
 				/>
+				{families.map((family) => (
+					<WindowChartPanel
+						key={family.family}
+						label={`${family.displayName} weekly window`}
+						history={windowHistoryFromScopedFamily(
+							family.usageHistory,
+							family.family,
+						)}
+						accounts={accounts}
+						window={{ kind: "family", family: family.family }}
+						now={now}
+						sequence={palette.sequence}
+						poolStroke={poolStroke}
+						loading={family.loading}
+						unavailableReason={family.unavailableReason}
+						range={family.range}
+						onRangeChange={family.onRangeChange}
+						selectorLabel={`${family.displayName} weekly graph time range`}
+					/>
+				))}
 			</CardContent>
 		</Card>
 	);
