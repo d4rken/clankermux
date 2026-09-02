@@ -299,3 +299,57 @@ describe("usage-scoped-history handler", () => {
 		});
 	});
 });
+
+describe("usage-scoped-history handler — expired predecessor-only family", () => {
+	const sinceMs = NOW_ALIGNED - 7 * DAY;
+
+	it("emits no family when its only evidence is a predecessor that reset before the range began", async () => {
+		const sources = createSources({
+			snapshots: [],
+			predecessors: [
+				snapshot({
+					accountId: "main",
+					family: "fable",
+					displayName: "Fable",
+					ts: sinceMs - 2 * HOUR,
+					pct: 30,
+					resetAt: sinceMs - HOUR,
+				}),
+			],
+			accounts: [makeAccount("main", "Main-me", "anthropic")],
+			nowMs: NOW_ALIGNED,
+		});
+
+		const { body } = await callHandler(sources, "7d");
+
+		expect(body.families.map((f) => f.family)).toEqual([]);
+		expect(body.families).toEqual([]);
+	});
+
+	it("control: a predecessor still in force at the range start seeds the first bucket", async () => {
+		const sources = createSources({
+			snapshots: [],
+			predecessors: [
+				snapshot({
+					accountId: "main",
+					family: "fable",
+					displayName: "Fable",
+					ts: sinceMs - 2 * HOUR,
+					pct: 30,
+					resetAt: sinceMs + DAY,
+				}),
+			],
+			accounts: [makeAccount("main", "Main-me", "anthropic")],
+			nowMs: NOW_ALIGNED,
+		});
+
+		const { body } = await callHandler(sources, "7d");
+
+		expect(body.families).toHaveLength(1);
+		expect(body.families[0]?.series).toHaveLength(1);
+		expect(body.families[0]?.series[0]?.points[0]).toEqual({
+			ts: sinceMs,
+			pct: 30,
+		});
+	});
+});

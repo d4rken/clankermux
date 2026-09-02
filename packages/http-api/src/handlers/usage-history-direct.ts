@@ -187,6 +187,7 @@ export function createUsageHistoryHandlerFromSources(
 						reset: r.fiveHourReset,
 					})),
 					FIXED_WINDOW_DURATION_MS.five_hour,
+					sinceMs,
 				);
 				const seven = walkCarry(
 					grid,
@@ -199,6 +200,7 @@ export function createUsageHistoryHandlerFromSources(
 						reset: r.sevenDayReset,
 					})),
 					FIXED_WINDOW_DURATION_MS.seven_day,
+					sinceMs,
 				);
 
 				const points: UsageHistoryPoint[] = [];

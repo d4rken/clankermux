@@ -121,6 +121,12 @@ export function buildBucketGrid(opts: {
  * the pool *look* healthier the moment it got worse. `predecessor` extends the
  * same rule backwards over the range's left edge.
  *
+ * A predecessor is evidence only while it is still in force AT THE RANGE
+ * START: expiry has to be judged against `rangeStartMs`, not against the first
+ * bucket, because that bucket is the FLOORED range start and so begins earlier
+ * (a 24h range asked for at 11:37 opens a bucket at 11:00). A window that
+ * rolled at 11:36 held nothing when the range began and must not be drawn.
+ *
  * @returns bucket start -> held pct, for the buckets that hold a value.
  */
 export function walkCarry(
@@ -128,6 +134,7 @@ export function walkCarry(
 	samples: Map<number, CarrySample>,
 	predecessor: CarryPredecessor | null,
 	nominalMs: number,
+	rangeStartMs: number,
 ): Map<number, number> {
 	let carry: CarriedValue | null = predecessor
 		? advanceCarry(
@@ -138,6 +145,7 @@ export function walkCarry(
 				nominalMs,
 			)
 		: null;
+	if (carry !== null && carry.expiresAt <= rangeStartMs) carry = null;
 	const held = new Map<number, number>();
 	for (const ts of grid) {
 		const sample = samples.get(ts);

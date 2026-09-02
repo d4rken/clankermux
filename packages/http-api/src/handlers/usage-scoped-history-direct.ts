@@ -79,6 +79,10 @@ export function createUsageScopedHistoryHandler(context: APIContext) {
  * scoped limit the moment its reset passes, and family discovery based on live
  * evidence alone would make the panel vanish until the next poll.
  *
+ * Families with no rows in range and no predecessor still in force at the
+ * range start are absent: a family nobody reports any more would otherwise
+ * keep an empty panel on the dashboard forever.
+ *
  * Carry-forward and the bucket grid are the account-wide handler's, unchanged
  * (see usage-history-shared.ts). Nominal window length is the scoped weekly
  * one, used only when a row carries no reset of its own.
@@ -127,8 +131,15 @@ export function createUsageScopedHistoryHandlerFromSources(
 				bucket.accountOrder.push(accountId);
 			};
 			// Predecessors first: their evidence is the oldest, and an account that
-			// went silent before the range began still belongs in the chart.
+			// went silent before the range began still belongs in the chart — but
+			// only while its window was still in force AT the range start. A row
+			// whose window had already rolled is not evidence for this range, and
+			// must not conjure a family (nor a bucketFor entry) out of nothing.
 			for (const row of predecessors) {
+				if (row.pct == null) continue;
+				const expiresAt =
+					row.resetAt ?? row.ts + FIXED_WINDOW_DURATION_MS.seven_day_scoped;
+				if (expiresAt <= sinceMs) continue;
 				const bucket = bucketFor(row.family);
 				register(bucket, row.accountId);
 				bucket.predecessorByAccount.set(row.accountId, row);
@@ -157,10 +168,14 @@ export function createUsageScopedHistoryHandlerFromSources(
 						? sinceMs
 						: bucket.earliestRowTs,
 				});
+				const shaped = shapeFamily(bucket, grid, accountById, sinceMs);
+				// No account holds a value anywhere on the grid: the family has no
+				// evidence in this range, so it gets no (empty) panel.
+				if (shaped.series.length === 0) continue;
 				result.push({
 					family,
 					displayName: bucket.displayName || family,
-					...shapeFamily(bucket, grid, accountById),
+					...shaped,
 				});
 			}
 			result.sort((a, b) => a.family.localeCompare(b.family));
@@ -210,6 +225,7 @@ function shapeFamily(
 	bucket: FamilyBucket,
 	grid: number[],
 	accountById: Map<string, Pick<Account, "id" | "name" | "provider">>,
+	sinceMs: number,
 ): { series: UsageScopedHistorySeries[]; pool: UsageScopedHistoryPoolPoint[] } {
 	const poolByTs = new Map<number, { values: number[] }>();
 	for (const ts of grid) poolByTs.set(ts, { values: [] });
@@ -233,6 +249,7 @@ function shapeFamily(
 					}
 				: null,
 			FIXED_WINDOW_DURATION_MS.seven_day_scoped,
+			sinceMs,
 		);
 
 		const points: UsageScopedHistoryPoint[] = [];

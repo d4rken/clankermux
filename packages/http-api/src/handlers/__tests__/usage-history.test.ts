@@ -594,3 +594,35 @@ describe("usage-history handler", () => {
 		});
 	});
 });
+
+describe("usage-history handler — predecessor expiry vs range start", () => {
+	it("emits no value for the first bucket when the pre-range reading reset before the range began", async () => {
+		const MINUTE = 60 * 1000;
+		const DAY = 24 * HOUR;
+		// now = hh:37, so the 24h range starts at (yesterday) hh:37 while the grid's
+		// first bucket starts at hh:00.
+		const nowMs = NOW_ALIGNED + 37 * MINUTE;
+		const sinceMs = nowMs - DAY;
+		const firstBucket = NOW_ALIGNED - DAY;
+		const sources = createSources({
+			snapshots: [],
+			predecessors: [
+				snapshot({
+					accountId: "a",
+					ts: sinceMs - 10 * MINUTE,
+					fiveHourPct: 40,
+					// Rolled one minute BEFORE the range start.
+					fiveHourReset: sinceMs - MINUTE,
+				}),
+			],
+			accounts: [makeAccount("a", "Alpha", "anthropic")],
+			nowMs,
+		});
+
+		const { body } = await callHandler(sources, "24h");
+
+		expect(body.pool[0]?.ts).toBe(firstBucket);
+		expect(body.pool[0]?.fiveHourAvg).toBeNull();
+		expect(body.series).toEqual([]);
+	});
+});
