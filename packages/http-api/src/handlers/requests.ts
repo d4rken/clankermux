@@ -76,6 +76,10 @@ export function createRequestsSummaryHandler(db: BunSqlAdapter) {
 			combo_name: string | null;
 			reasoning_effort: string | null;
 			context_binary_chars: number | null;
+			stop_reason: string | null;
+			refusal_category: string | null;
+			fallback_credit_claimed: number | null;
+			fallback_from_model: string | null;
 		}>(
 			`
 			SELECT r.*, a.name as account_name,
@@ -137,6 +141,14 @@ export function createRequestsSummaryHandler(db: BunSqlAdapter) {
 			// as undefined — a request without attachments needs no field.
 			attachmentChars: request.context_binary_chars || undefined,
 			rateLimited: request.status_code === 429,
+			// Refusal / fallback-credit marks. NULL (pre-column row, or a request
+			// that carried neither) reads back as undefined, so a legacy row shows
+			// no badge rather than an "unknown" one.
+			stopReason: request.stop_reason || undefined,
+			refusalCategory: request.refusal_category || undefined,
+			fallbackCreditClaimed:
+				request.fallback_credit_claimed === 1 ? true : undefined,
+			fallbackFromModel: request.fallback_from_model || undefined,
 		}));
 
 		return jsonResponse(response);
