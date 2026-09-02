@@ -486,6 +486,23 @@ export function createRecoveryHolds(deps: RecoveryHoldsDeps): RecoveryHolds {
 		return slot?.modelOverride ?? null;
 	};
 
+	// The model whose overload bucket THIS account's attempt would trip: the
+	// current combo slot override (falling back to the request's logical model),
+	// run through the account's own model mapping and the shared canonical
+	// attribution. Every overload read in this module goes through it so the
+	// deadline a hold waits on, the breaker the burst hold defers to and the
+	// attempt gate below can never key on different families. Reading the
+	// logical model alone made a mapped account (sonnet -> opus) consult the
+	// wrong bucket: a hold would skip a wait its attempt then needed, and the
+	// burst hold would run straight into an open breaker.
+	const overloadAttributionModelFor = (account: Account): string | null => {
+		const logical =
+			currentComboOverrideForAccount(account) ?? effectiveRequestModel;
+		return logical
+			? resolveOverloadAttributionModel(mapModelName(logical, account), logical)
+			: null;
+	};
+
 	// Result of one re-attempt round over re-selected hold candidates.
 	// `sawOverloadSuppression` / `sawRetrip` are derived from the per-attempt
 	// outcome sink (the same mechanism the failover loops use for
@@ -577,16 +594,9 @@ export function createRecoveryHolds(deps: RecoveryHoldsDeps): RecoveryHolds {
 			// round for the whole hold budget. Using the request's logical model
 			// alone would be wrong the other way: it would sideline an account whose
 			// mapped model belongs to a different, healthy family.
-			const attemptLogicalModel =
-				currentComboOverrideForAccount(candidate) ?? effectiveRequestModel;
 			const overload = inspectProviderOverload(
 				candidate.provider,
-				attemptLogicalModel
-					? resolveOverloadAttributionModel(
-							mapModelName(attemptLogicalModel, candidate),
-							attemptLogicalModel,
-						)
-					: null,
+				overloadAttributionModelFor(candidate),
 			);
 			if (overload.state === "open" || overload.probeActive) {
 				// Same bookkeeping as a recovery-probe suppression: NOTHING was
@@ -1088,14 +1098,15 @@ export function createRecoveryHolds(deps: RecoveryHoldsDeps): RecoveryHolds {
 						a.rate_limited_until && a.rate_limited_until > nowMs
 							? a.rate_limited_until
 							: 0;
-					// Family-scoped read: only wait out buckets relevant to THIS
-					// request's model — an unrelated family's breaker must not
-					// extend (or create) the wait.
+					// Family-scoped read: only wait out buckets relevant to the model
+					// THIS account's attempt would send — an unrelated family's
+					// breaker must not extend (or create) the wait, and a mapped
+					// family's open breaker must not be missed.
 					const ov =
 						getProviderOverloadUntil(
 							a.provider,
 							nowMs,
-							effectiveRequestModel ?? null,
+							overloadAttributionModelFor(a),
 						) ?? 0;
 					return { account: a, availableAt: Math.max(rl, ov) };
 				})
@@ -1268,7 +1279,7 @@ export function createRecoveryHolds(deps: RecoveryHoldsDeps): RecoveryHolds {
 		const heldOverloadedUntil = getProviderOverloadUntil(
 			heldAccount.provider,
 			Date.now(),
-			effectiveRequestModel ?? null,
+			overloadAttributionModelFor(heldAccount),
 		);
 		if (heldOverloadedUntil !== null) {
 			log.warn(
@@ -1284,7 +1295,7 @@ export function createRecoveryHolds(deps: RecoveryHoldsDeps): RecoveryHolds {
 			reprobe,
 			// Family-scoped overload precedence inside the hold's reprobe loop
 			// (defense in depth for a breaker that opens mid-hold).
-			model: effectiveRequestModel ?? null,
+			model: overloadAttributionModelFor(heldAccount),
 			// Deterministic-timing overrides (maxHoldMs/now/jitterMs). Undefined in
 			// production — the hold falls back to its fixed source-level defaults.
 			...(burstHoldTimingOverride ?? {}),

@@ -713,6 +713,64 @@ describe("isOrdinaryAttemptFailure", () => {
 	});
 });
 
+describe("non-Codex hold waits on the MAPPED model's overload bucket", () => {
+	const OPUS = "claude-opus-4-1";
+
+	beforeEach(() => {
+		resetSingletons();
+	});
+	afterEach(() => {
+		resetSingletons();
+	});
+
+	/**
+	 * The account maps this request's Sonnet model to Opus, so the bucket its
+	 * attempt would trip is the Opus one. Nothing is rate-limited: the overload
+	 * deadline is the ONLY thing that can produce a wait.
+	 */
+	function mappedAccount(): Account {
+		const account = makeAccount({
+			id: uniqueId("mapped-hold"),
+			name: uniqueId("mapped-hold"),
+			model_mappings: JSON.stringify({ [MODEL]: OPUS }),
+		});
+		usageCache.delete(account.id);
+		return account;
+	}
+
+	it("waits for the mapped family's deadline", async () => {
+		const account = mappedAccount();
+		const clock = fakeHoldClock();
+		applyProviderOverloadCooldown("anthropic", clock.now() + 3_000, OPUS);
+		const { holds } = makeHolds([account], alwaysThrottled, {}, clock);
+
+		const { lines } = await captureInfoLines(() =>
+			holds.holdForNonCodexRecovery(30_000, "Test hold"),
+		);
+
+		// Reading the request's LOGICAL model would find a clear bucket, see
+		// nothing to wait for and break out of the loop on the first pass.
+		const waitLine = lines.find((l) => l.includes("waiting"));
+		expect(waitLine).toBeDefined();
+		expect(waitLine).toContain(account.name);
+	});
+
+	it("does not wait for the logical family's deadline when the account maps away from it", async () => {
+		const account = mappedAccount();
+		const clock = fakeHoldClock();
+		// The Sonnet bucket is open, but this account sends Opus.
+		applyProviderOverloadCooldown("anthropic", clock.now() + 3_000, MODEL);
+		const { holds, gated } = makeHolds([account], alwaysThrottled, {}, clock);
+
+		const { lines } = await captureInfoLines(() =>
+			holds.holdForNonCodexRecovery(30_000, "Test hold"),
+		);
+
+		expect(lines.find((l) => l.includes("waiting"))).toBeUndefined();
+		expect(gated).toEqual([]);
+	});
+});
+
 describe("gatedModel on a recorded skip", () => {
 	// The mapping case that motivated carrying it. The late gate keys on the
 	// request's logical model; the hold and the terminal used to re-derive the

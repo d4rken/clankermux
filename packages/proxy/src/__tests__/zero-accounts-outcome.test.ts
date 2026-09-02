@@ -18,17 +18,20 @@
 
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { NETWORK } from "@clankermux/core";
-import type { Account, RequestMeta } from "@clankermux/types";
+import type { Account, ComboSlotInfo, RequestMeta } from "@clankermux/types";
 import type { AdmissionGates } from "../admission-gates";
 import { cacheBodyStore } from "../cache-body-store";
-import { setForcedAccount } from "../handlers";
+import { setComboSlotInfo, setForcedAccount } from "../handlers";
 import {
 	clearAnthropicBurstThrottle,
 	resetHoldSlots,
 } from "../handlers/burst-cooldown";
 import { resetRateLimitProbeGatesForTests } from "../handlers/rate-limit-cooldown";
 import { resetOverloadHoldSlots } from "../overload-hold";
-import { clearProviderOverloadCooldown } from "../provider-overload-cooldown";
+import {
+	applyProviderOverloadCooldown,
+	clearProviderOverloadCooldown,
+} from "../provider-overload-cooldown";
 import type { RecoveryHolds } from "../recovery-holds";
 import { sessionProjectCache } from "../session-project-cache";
 import { sessionPromotionTracker } from "../session-promotion";
@@ -109,6 +112,11 @@ interface HarnessOptions {
 	}>;
 	holds?: Partial<RecoveryHolds>;
 	requestId?: string;
+	/** Combo snapshot frozen at gate construction. */
+	initialComboInfo?: ComboSlotInfo | null;
+	/** Combo name on the request meta, plus the CURRENT (post-wake) slot info. */
+	comboName?: string | null;
+	currentComboInfo?: ComboSlotInfo | null;
 }
 
 function makeHarness(opts: HarnessOptions = {}): Harness {
@@ -121,6 +129,9 @@ function makeHarness(opts: HarnessOptions = {}): Harness {
 		familyWeeklyExcludedAccounts = [],
 		holds = {},
 		requestId = uniqueId("req"),
+		initialComboInfo = null,
+		comboName = null,
+		currentComboInfo = null,
 	} = opts;
 
 	const controller = new AbortController();
@@ -141,7 +152,9 @@ function makeHarness(opts: HarnessOptions = {}): Harness {
 		internal: false,
 		pin,
 		pinFailure,
+		...(comboName ? { comboName } : {}),
 	} as unknown as RequestMeta;
+	if (currentComboInfo) setComboSlotInfo(requestMeta, currentComboInfo);
 
 	const recorded: string[] = [];
 	let bumps = 0;
@@ -187,7 +200,7 @@ function makeHarness(opts: HarnessOptions = {}): Harness {
 		finalCreateBodyStream: () => undefined,
 		effectiveRequestModel: MODEL,
 		gateTokenEstimate,
-		initialComboInfo: null,
+		initialComboInfo,
 		selectedAccounts: [],
 		throttledAccounts: [],
 		providerAvailableAccounts: [],
@@ -316,6 +329,129 @@ describe("resolveZeroAccountsOutcome contracts", () => {
 		expect(res.status).toBe(503);
 		expect(harness.requestMeta.pinFailure).toEqual(original);
 		expect(harness.recorded).toEqual(["pinned_account_unavailable"]);
+	});
+
+	// Every overload deadline in this terminal must read the bucket the account's
+	// own attempt would trip. Reading the request's logical model instead means a
+	// mapped account (opus -> sonnet here) is measured against the wrong family:
+	// a hold is skipped when it was needed, or entered when there was nothing to
+	// wait for.
+	describe("overload deadlines follow the account's mapped model", () => {
+		const SONNET = "claude-sonnet-4-5";
+		const HAIKU = "claude-haiku-4-5";
+
+		function pinHarness(mapTo: string, openBucketModel: string) {
+			const accId = uniqueId("acc");
+			const pinned = makeAccount({
+				id: accId,
+				name: accId,
+				model_mappings: JSON.stringify({ [MODEL]: mapTo }),
+			});
+			const holdLabels: string[] = [];
+			const harness = makeHarness({
+				accounts: [pinned],
+				pin: { accountId: accId, providers: null },
+				pinFailure: {
+					code: "pinned_account_unavailable",
+					message: "unavailable",
+				},
+				holds: {
+					holdForNonCodexRecovery: async (_budgetMs, label) => {
+						holdLabels.push(label);
+						return null;
+					},
+				},
+			});
+			applyProviderOverloadCooldown(
+				"anthropic",
+				Date.now() + 5_000,
+				openBucketModel,
+			);
+			return { harness, holdLabels };
+		}
+
+		it("pin hold fires when the MAPPED family's breaker is open", async () => {
+			const { harness, holdLabels } = pinHarness(SONNET, SONNET);
+
+			await resolveZeroAccountsOutcome(harness.deps);
+
+			expect(holdLabels).toHaveLength(1);
+		});
+
+		it("pin hold does NOT fire when only the logical family's breaker is open", async () => {
+			const { harness, holdLabels } = pinHarness(SONNET, MODEL);
+
+			await resolveZeroAccountsOutcome(harness.deps);
+
+			expect(holdLabels).toEqual([]);
+		});
+
+		/**
+		 * Cooled-sibling detection runs AFTER holdForNonCodexRecovery, whose wake
+		 * re-runs selection and rewrites the combo slot info. Reading the frozen
+		 * `initialComboInfo` would measure the sibling against the model the
+		 * request STARTED with rather than the one it would now send.
+		 */
+		function siblingHarness(openBucketModel: string) {
+			const siblingId = uniqueId("sibling");
+			const sibling = makeAccount({ id: siblingId, name: siblingId });
+			const exhausted = makeAccount({
+				id: uniqueId("exhausted"),
+				name: "exhausted",
+			});
+			const holdLabels: string[] = [];
+			const harness = makeHarness({
+				accounts: [sibling],
+				familyWeeklyExcludedAccounts: [
+					{
+						account: exhausted,
+						family: "opus",
+						resetAt: Date.now() + 86_400_000,
+					},
+				],
+				comboName: "combo-a",
+				// Frozen at gate construction: the slot pointed at Haiku.
+				initialComboInfo: {
+					comboName: "combo-a",
+					slots: [{ accountId: siblingId, modelOverride: HAIKU }],
+				},
+				// What a hold wake's re-selection wrote: the slot now sends Sonnet.
+				currentComboInfo: {
+					comboName: "combo-a",
+					slots: [{ accountId: siblingId, modelOverride: SONNET }],
+				},
+				holds: {
+					holdForNonCodexRecovery: async (_budgetMs, label) => {
+						holdLabels.push(label);
+						return null;
+					},
+				},
+			});
+			applyProviderOverloadCooldown(
+				"anthropic",
+				Date.now() + 5_000,
+				openBucketModel,
+			);
+			return { harness, sibling, holdLabels };
+		}
+
+		it("detects a cooled sibling via the CURRENT combo override", async () => {
+			const { harness, sibling, holdLabels } = siblingHarness(SONNET);
+
+			const res = await resolveZeroAccountsOutcome(harness.deps);
+
+			expect(holdLabels).toEqual(["Family-weekly hold"]);
+			const body = (await res.json()) as { error: { message: string } };
+			expect(body.error.message).toContain(sibling.name);
+		});
+
+		it("ignores the frozen combo snapshot's family", async () => {
+			const { harness, holdLabels } = siblingHarness(HAIKU);
+
+			await resolveZeroAccountsOutcome(harness.deps);
+
+			expect(holdLabels).toEqual([]);
+		});
 	});
 
 	it("arms exactly one re-arm interval per hold and clears it on exit (pin hold)", async () => {
