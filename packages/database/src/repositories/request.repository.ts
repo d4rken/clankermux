@@ -99,6 +99,22 @@ export interface RequestData {
 	 */
 	sessionKey?: string | null;
 	cachePrefixHashes?: CachePrefixCapture | null;
+	/**
+	 * The provider's terminal `stop_reason`, raw, for every provider and every
+	 * reason. Absent/null = the response carried none (errors, aborted streams,
+	 * native Responses passthrough) and the column stays NULL.
+	 */
+	stopReason?: string | null;
+	/**
+	 * Set if and only if `stopReason` is `"refusal"`: the provider's
+	 * `stop_details.category`, or the literal `"unknown"` when it named none.
+	 * The marker every safety-refusal predicate keys on.
+	 */
+	refusalCategory?: string | null;
+	/** True when the request body carried a non-empty `fallback_credit_token`. */
+	fallbackCreditClaimed?: boolean;
+	/** The model whose refusal this retry redeems; null when unresolved. */
+	fallbackFromModel?: string | null;
 }
 
 /** Fails to compile unless `T` is exactly `true`. */
@@ -149,9 +165,11 @@ export class RequestRepository extends BaseRepository<RequestData> {
 					context_messages_chars, context_message_count, context_tool_result_chars,
 					context_largest_tool_chars, context_largest_tool_name,
 					context_binary_chars, usage_finalized_at,
-					session_key, cache_prefix_hashes
+					session_key, cache_prefix_hashes,
+					stop_reason, refusal_category, fallback_credit_claimed,
+					fallback_from_model
 				)
-				VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+				VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 				ON CONFLICT (id) DO UPDATE SET
 				timestamp = EXCLUDED.timestamp,
 				method = EXCLUDED.method,
@@ -195,7 +213,15 @@ export class RequestRepository extends BaseRepository<RequestData> {
 				-- later patch) must never move it forward.
 				usage_finalized_at = COALESCE(requests.usage_finalized_at, EXCLUDED.usage_finalized_at),
 				session_key = COALESCE(EXCLUDED.session_key, requests.session_key),
-				cache_prefix_hashes = COALESCE(EXCLUDED.cache_prefix_hashes, requests.cache_prefix_hashes)
+				cache_prefix_hashes = COALESCE(EXCLUDED.cache_prefix_hashes, requests.cache_prefix_hashes),
+				-- All four are facts that, once known, never become unknown again:
+				-- the usage-patch re-upsert carries no ingress facts and the ingress
+				-- upsert carries no response facts, so each side must preserve what
+				-- the other already wrote.
+				stop_reason = COALESCE(EXCLUDED.stop_reason, requests.stop_reason),
+				refusal_category = COALESCE(EXCLUDED.refusal_category, requests.refusal_category),
+				fallback_credit_claimed = COALESCE(EXCLUDED.fallback_credit_claimed, requests.fallback_credit_claimed),
+				fallback_from_model = COALESCE(EXCLUDED.fallback_from_model, requests.fallback_from_model)
 		`,
 			[
 				data.id,
@@ -243,6 +269,13 @@ export class RequestRepository extends BaseRepository<RequestData> {
 				data.usageFinalizedAt ?? null,
 				data.sessionKey ?? null,
 				data.cachePrefixHashes ? JSON.stringify(data.cachePrefixHashes) : null,
+				data.stopReason ?? null,
+				data.refusalCategory ?? null,
+				// NULL, not 0, for "no credit": the column is a marker, and a 0
+				// would make the partial index and every `= 1` predicate carry rows
+				// that mean nothing.
+				data.fallbackCreditClaimed ? 1 : null,
+				data.fallbackFromModel ?? null,
 			],
 		);
 	}
@@ -330,11 +363,15 @@ export class RequestRepository extends BaseRepository<RequestData> {
 		requestId: string,
 		usage: RequestData["usage"],
 		usageFinalizedAt?: number | null,
+		response?: { stopReason?: string | null; refusalCategory?: string | null },
 	): Promise<void> {
-		if (!usage) return;
-
-		await this.run(
-			`
+		// The usage columns and the response-shape columns are independent
+		// patches: a summary can carry a stop reason while the token vector was
+		// waived, so a missing `usage` skips the usage half rather than the whole
+		// statement.
+		if (usage) {
+			await this.run(
+				`
 			UPDATE requests
 			SET
 				usage_finalized_at = COALESCE(usage_finalized_at, ?),
@@ -351,22 +388,43 @@ export class RequestRepository extends BaseRepository<RequestData> {
 				output_tokens_per_second_approx = COALESCE(?, output_tokens_per_second_approx)
 			WHERE id = ?
 		`,
-			[
-				usageFinalizedAt ?? null,
-				usage.model || null,
-				usage.promptTokens || null,
-				usage.completionTokens || null,
-				usage.totalTokens || null,
-				usage.costUsd || null,
-				usage.inputTokens || null,
-				usage.cacheReadInputTokens || null,
-				usage.cacheCreationInputTokens || null,
-				usage.outputTokens || null,
-				usage.tokensPerSecond || null,
-				usage.tokensPerSecondApproximate && usage.tokensPerSecond ? 1 : null,
-				requestId,
-			],
-		);
+				[
+					usageFinalizedAt ?? null,
+					usage.model || null,
+					usage.promptTokens || null,
+					usage.completionTokens || null,
+					usage.totalTokens || null,
+					usage.costUsd || null,
+					usage.inputTokens || null,
+					usage.cacheReadInputTokens || null,
+					usage.cacheCreationInputTokens || null,
+					usage.outputTokens || null,
+					usage.tokensPerSecond || null,
+					usage.tokensPerSecondApproximate && usage.tokensPerSecond ? 1 : null,
+					requestId,
+				],
+			);
+		}
+
+		if (
+			response &&
+			(response.stopReason != null || response.refusalCategory != null)
+		) {
+			await this.run(
+				`
+			UPDATE requests
+			SET
+				stop_reason = COALESCE(?, stop_reason),
+				refusal_category = COALESCE(?, refusal_category)
+			WHERE id = ?
+		`,
+				[
+					response.stopReason ?? null,
+					response.refusalCategory ?? null,
+					requestId,
+				],
+			);
+		}
 	}
 
 	// Payload management
