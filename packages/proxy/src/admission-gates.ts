@@ -328,6 +328,7 @@ export function createAdmissionGates(deps: AdmissionGateDeps): AdmissionGates {
 				usageCache.get(account.id),
 				settings,
 				now,
+				account.provider,
 			);
 			if (throttleUntil && throttleUntil > now) {
 				throttled.push(account);

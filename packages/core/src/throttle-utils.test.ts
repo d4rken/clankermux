@@ -106,6 +106,39 @@ describe("computeThrottleResumeAt", () => {
 		);
 	});
 
+	it("an explicit durationMs equal to the fixed one matches the lookup result", () => {
+		const now = startMs + HOUR_MS;
+		expect(
+			computeThrottleResumeAt(resetMs, "five_hour", 40, now, 5 * HOUR_MS),
+		).toBe(computeThrottleResumeAt(resetMs, "five_hour", 40, now));
+	});
+
+	it("an explicit durationMs overrides the window-name lookup", () => {
+		// A 2h window ending at resetMs starts at resetMs - 2h; at 1h before the
+		// reset that is 50% elapsed, so 70% used resumes at 70% of the window.
+		const now = resetMs - HOUR_MS;
+		expect(
+			computeThrottleResumeAt(resetMs, "five_hour", 70, now, 2 * HOUR_MS),
+		).toBe(resetMs - 2 * HOUR_MS + 1.4 * HOUR_MS);
+	});
+
+	it("an explicit durationMs works for a window name with no known duration", () => {
+		const now = resetMs - HOUR_MS;
+		expect(
+			computeThrottleResumeAt(resetMs, "time_limit", 70, now, 2 * HOUR_MS),
+		).toBe(resetMs - 2 * HOUR_MS + 1.4 * HOUR_MS);
+	});
+
+	it("falls back to the window-name lookup for a non-positive durationMs", () => {
+		const now = startMs + HOUR_MS;
+		expect(computeThrottleResumeAt(resetMs, "five_hour", 40, now, 0)).toBe(
+			startMs + 2 * HOUR_MS,
+		);
+		expect(
+			computeThrottleResumeAt(resetMs, "five_hour", 40, now, Number.NaN),
+		).toBe(startMs + 2 * HOUR_MS);
+	});
+
 	it("uses the preceding month's length for monthly windows", () => {
 		const DAY_MS = 24 * HOUR_MS;
 		const monthlyReset = Date.UTC(2026, 7, 1, 0, 0, 0, 0); // July has 31 days

@@ -5,7 +5,11 @@ import {
 	type SupportedWindow,
 } from "@clankermux/core";
 import type { AnyUsageData } from "@clankermux/providers";
-import type { Account, AnthropicUsageData } from "@clankermux/types";
+import {
+	type Account,
+	type AnthropicUsageData,
+	PROVIDER_NAMES,
+} from "@clankermux/types";
 
 const RETRY_AFTER_SECONDS = 60;
 
@@ -13,6 +17,12 @@ interface UsageWindowSnapshot {
 	utilization: number;
 	resetAtMs: number;
 	window: SupportedWindow;
+	/**
+	 * Data-derived window length, for providers that report one per reading
+	 * instead of running windows of a fixed, known duration. Absent for every
+	 * provider whose window length is implied by `window`.
+	 */
+	durationMs?: number;
 }
 
 export interface UsageThrottleSettings {
@@ -28,6 +38,7 @@ export interface UsageThrottleStatus {
 function collectWindows(
 	data: AnyUsageData | null,
 	now: number,
+	provider: string,
 ): UsageWindowSnapshot[] {
 	if (!data || typeof data !== "object") return [];
 
@@ -37,6 +48,7 @@ function collectWindows(
 		window: SupportedWindow,
 		utilization: number | null | undefined,
 		resetAtMs: number | null | undefined,
+		durationMs?: number,
 	) => {
 		if (
 			typeof utilization !== "number" ||
@@ -51,8 +63,49 @@ function collectWindows(
 			utilization,
 			resetAtMs,
 			window,
+			...(durationMs === undefined ? {} : { durationMs }),
 		});
 	};
+
+	// MiniMax must be matched on the PROVIDER, before the generic branch below.
+	// Its payload carries top-level `five_hour`/`seven_day` keys too, so the
+	// Anthropic-like branch matches it structurally and then reads `resets_at`,
+	// which MiniMax never has — every window was silently dropped and the
+	// account was never throttled.
+	if (provider === PROVIDER_NAMES.MINIMAX) {
+		const minimax = data as {
+			five_hour?: {
+				utilization?: number | null;
+				resetAt?: number | null;
+				intervalMs?: number | null;
+			} | null;
+			seven_day?: {
+				utilization?: number | null;
+				resetAt?: number | null;
+				intervalMs?: number | null;
+			} | null;
+		};
+		for (const [window, snapshot] of [
+			["five_hour", minimax.five_hour],
+			["seven_day", minimax.seven_day],
+		] as const) {
+			if (!snapshot) continue;
+			// MiniMax windows have no fixed length: the duration is derived per
+			// reading from the API's own start/end times. Without it there is no
+			// pace line to compare against, and substituting the nominal 5h/7d
+			// would invent evidence — so skip the window and fail open.
+			const intervalMs = snapshot.intervalMs;
+			if (
+				typeof intervalMs !== "number" ||
+				!Number.isFinite(intervalMs) ||
+				intervalMs <= 0
+			) {
+				continue;
+			}
+			pushWindow(window, snapshot.utilization, snapshot.resetAt, intervalMs);
+		}
+		return windows;
+	}
 
 	if ("five_hour" in data && "seven_day" in data) {
 		const anthropicLike = data as {
@@ -188,12 +241,20 @@ function isWindowThrottlingEnabled(
 	}
 }
 
+/**
+ * `provider` is REQUIRED: window shapes are not self-describing (MiniMax and
+ * Anthropic both carry top-level `five_hour`/`seven_day` keys with different
+ * field names inside), so structural detection alone silently reads the wrong
+ * provider's payload. Making it required means the type checker, not a
+ * production incident, catches a caller that forgets it.
+ */
 export function getUsageThrottleStatus(
 	data: AnyUsageData | null,
 	settings: UsageThrottleSettings,
 	now = Date.now(),
+	provider: string,
 ): UsageThrottleStatus {
-	const windows = collectWindows(data, now);
+	const windows = collectWindows(data, now, provider);
 	let throttleUntil: number | null = null;
 	const throttledWindows: SupportedWindow[] = [];
 
@@ -204,6 +265,7 @@ export function getUsageThrottleStatus(
 			window.window,
 			window.utilization,
 			now,
+			window.durationMs,
 		);
 		if (resumeAt === null) continue;
 		throttledWindows.push(window.window);
@@ -219,8 +281,9 @@ export function getUsageThrottleUntil(
 	data: AnyUsageData | null,
 	settings: UsageThrottleSettings,
 	now = Date.now(),
+	provider: string,
 ): number | null {
-	return getUsageThrottleStatus(data, settings, now).throttleUntil;
+	return getUsageThrottleStatus(data, settings, now, provider).throttleUntil;
 }
 
 export function createUsageThrottledResponse(accounts: Account[]): Response {

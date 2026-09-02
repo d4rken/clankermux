@@ -53,6 +53,7 @@ describe("getUsageThrottleUntil", () => {
 			},
 			{ fiveHourEnabled: true, weeklyEnabled: true },
 			now,
+			"anthropic",
 		);
 
 		expect(throttleUntil).not.toBeNull();
@@ -70,6 +71,7 @@ describe("getUsageThrottleUntil", () => {
 			},
 			{ fiveHourEnabled: true, weeklyEnabled: true },
 			now,
+			"anthropic",
 		);
 
 		expect(throttleUntil).toBeNull();
@@ -97,6 +99,7 @@ describe("getUsageThrottleUntil", () => {
 			},
 			{ fiveHourEnabled: true, weeklyEnabled: true },
 			now,
+			"anthropic",
 		);
 
 		expect(throttleUntil).toBeNull();
@@ -121,6 +124,7 @@ describe("getUsageThrottleUntil", () => {
 			},
 			{ fiveHourEnabled: true, weeklyEnabled: true },
 			now,
+			"anthropic",
 		);
 
 		expect(throttleStatus.throttledWindows.sort()).toEqual([
@@ -145,6 +149,7 @@ describe("getUsageThrottleUntil", () => {
 			},
 			{ fiveHourEnabled: false, weeklyEnabled: true },
 			now,
+			"anthropic",
 		);
 
 		expect(throttleStatus.throttledWindows).toEqual(["seven_day"]);
@@ -178,6 +183,7 @@ describe("getUsageThrottleUntil", () => {
 			} as never,
 			{ fiveHourEnabled: true, weeklyEnabled: true },
 			now,
+			"anthropic",
 		);
 
 		expect(throttleUntil).not.toBeNull();
@@ -209,6 +215,7 @@ describe("getUsageThrottleUntil", () => {
 			} as never,
 			{ fiveHourEnabled: false, weeklyEnabled: true },
 			now,
+			"anthropic",
 		);
 
 		expect(status.throttledWindows).toEqual(["seven_day"]);
@@ -232,6 +239,7 @@ describe("getUsageThrottleUntil", () => {
 			} as never,
 			{ fiveHourEnabled: true, weeklyEnabled: true },
 			now,
+			"anthropic",
 		);
 
 		expect(throttleUntil).toBeNull();
@@ -248,9 +256,158 @@ describe("getUsageThrottleUntil", () => {
 			},
 			{ fiveHourEnabled: true, weeklyEnabled: true },
 			now,
+			"anthropic",
 		);
 
 		expect(throttleUntil).toBe(new Date(resetAt).getTime());
+	});
+});
+
+describe("getUsageThrottleUntil — MiniMax", () => {
+	const HOUR_MS = 60 * 60 * 1000;
+
+	function minimaxData(
+		fiveHour: {
+			utilization: number;
+			resetAt: number | null;
+			intervalMs: number | null;
+		} | null,
+		sevenDay: {
+			utilization: number;
+			resetAt: number | null;
+			intervalMs: number | null;
+		} | null = null,
+	) {
+		const wrap = (
+			w: {
+				utilization: number;
+				resetAt: number | null;
+				intervalMs: number | null;
+			} | null,
+		) =>
+			w
+				? {
+						utilization: w.utilization,
+						remainingPercent: 100 - w.utilization,
+						resetAt: w.resetAt,
+						intervalMs: w.intervalMs,
+					}
+				: null;
+		return {
+			five_hour: wrap(fiveHour),
+			seven_day: wrap(sevenDay),
+		} as never;
+	}
+
+	it("throttles a five_hour window that is ahead of pace", () => {
+		const now = Date.UTC(2026, 3, 28, 12, 0, 0);
+		// 5h window, 1h left → 80% elapsed, 90% used → ahead of pace.
+		const status = getUsageThrottleStatus(
+			minimaxData({
+				utilization: 90,
+				resetAt: now + HOUR_MS,
+				intervalMs: 5 * HOUR_MS,
+			}),
+			{ fiveHourEnabled: true, weeklyEnabled: true },
+			now,
+			"minimax",
+		);
+
+		expect(status.throttledWindows).toEqual(["five_hour"]);
+		// startMs = reset - 5h = now - 4h; resume = start + 90% * 5h = now + 0.5h.
+		expect(status.throttleUntil).toBe(now + 0.5 * HOUR_MS);
+	});
+
+	it("follows the data-derived interval rather than a fixed 5h duration", () => {
+		const now = Date.UTC(2026, 3, 28, 12, 0, 0);
+		// Same reading, but the API reports a 2h window: startMs = now - 1h,
+		// resume = start + 90% * 2h = now + 0.8h.
+		const status = getUsageThrottleStatus(
+			minimaxData({
+				utilization: 90,
+				resetAt: now + HOUR_MS,
+				intervalMs: 2 * HOUR_MS,
+			}),
+			{ fiveHourEnabled: true, weeklyEnabled: true },
+			now,
+			"minimax",
+		);
+
+		expect(status.throttledWindows).toEqual(["five_hour"]);
+		expect(status.throttleUntil).toBe(now + 0.8 * HOUR_MS);
+	});
+
+	it("does not throttle a window that is behind pace", () => {
+		const now = Date.UTC(2026, 3, 28, 12, 0, 0);
+		const throttleUntil = getUsageThrottleUntil(
+			minimaxData({
+				utilization: 10,
+				resetAt: now + HOUR_MS,
+				intervalMs: 5 * HOUR_MS,
+			}),
+			{ fiveHourEnabled: true, weeklyEnabled: true },
+			now,
+			"minimax",
+		);
+
+		expect(throttleUntil).toBeNull();
+	});
+
+	it("throttles the seven_day window and tolerates a null five_hour", () => {
+		const now = Date.UTC(2026, 3, 28, 12, 0, 0);
+		const DAY_MS = 24 * HOUR_MS;
+		const status = getUsageThrottleStatus(
+			minimaxData(null, {
+				utilization: 90,
+				resetAt: now + 2 * DAY_MS,
+				intervalMs: 7 * DAY_MS,
+			}),
+			{ fiveHourEnabled: true, weeklyEnabled: true },
+			now,
+			"minimax",
+		);
+
+		expect(status.throttledWindows).toEqual(["seven_day"]);
+		expect(status.throttleUntil).toBe(now + 1.3 * DAY_MS);
+	});
+
+	it("emits no window when intervalMs is missing or unusable (fail open)", () => {
+		const now = Date.UTC(2026, 3, 28, 12, 0, 0);
+		for (const intervalMs of [null, 0, -HOUR_MS, Number.NaN]) {
+			const status = getUsageThrottleStatus(
+				minimaxData({
+					utilization: 90,
+					resetAt: now + HOUR_MS,
+					intervalMs,
+				}),
+				{ fiveHourEnabled: true, weeklyEnabled: true },
+				now,
+				"minimax",
+			);
+			expect(status.throttledWindows).toEqual([]);
+			expect(status.throttleUntil).toBeNull();
+		}
+	});
+
+	it("does not read a MiniMax payload as an Anthropic one", () => {
+		const now = Date.UTC(2026, 3, 28, 12, 0, 0);
+		// The MiniMax shape has top-level five_hour/seven_day keys, so the generic
+		// Anthropic branch matches it structurally and reads `resets_at`, which
+		// MiniMax never carries. Passing "anthropic" here proves the provider
+		// argument (not the shape) is what selects the MiniMax reader.
+		const status = getUsageThrottleStatus(
+			minimaxData({
+				utilization: 90,
+				resetAt: now + HOUR_MS,
+				intervalMs: 5 * HOUR_MS,
+			}),
+			{ fiveHourEnabled: true, weeklyEnabled: true },
+			now,
+			"anthropic",
+		);
+
+		expect(status.throttledWindows).toEqual([]);
+		expect(status.throttleUntil).toBeNull();
 	});
 });
 

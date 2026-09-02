@@ -185,6 +185,7 @@ export function evaluateDefaultCandidates(
 				usageCache.peek(account.id),
 				settings,
 				now,
+				account.provider,
 			);
 			if (tu && tu > now) {
 				exclusions.push({
