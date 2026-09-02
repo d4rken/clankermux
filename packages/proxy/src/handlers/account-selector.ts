@@ -465,6 +465,16 @@ export async function selectAccountsForRequest(
 				message:
 					"Codex CLI traffic may not be routed to a Claude/Anthropic account, and no eligible account is available.",
 			};
+			// Nothing is served on this branch, so the routing telemetry the
+			// strategy left behind describes accounts the floor just rejected.
+			// Clear the account-naming fields (the recorder persists meta.routing)
+			// and keep `decision` so the reason for the pick is still visible.
+			if (meta.routing) {
+				meta.routing.selectedAccountId = null;
+				meta.routing.candidatesCount = 0;
+				meta.routing.heldAccountId = null;
+				meta.routing.primaryAttemptAccountId = null;
+			}
 			return [];
 		}
 		// Keep routing telemetry consistent with the filtered head/count. The
