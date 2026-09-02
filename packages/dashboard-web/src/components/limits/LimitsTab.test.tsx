@@ -1,8 +1,10 @@
 import { describe, expect, it } from "bun:test";
 import type {
+	AccountResponse,
 	AnalyticsResponse,
 	RunwayResponse,
 	UsageHistoryResponse,
+	UsageScopedHistoryResponse,
 } from "@clankermux/types";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { renderToStaticMarkup } from "react-dom/server";
@@ -263,5 +265,144 @@ describe("LimitsTab per-section gating", () => {
 		expect(html).toContain("Runway unknown");
 		expect(html).not.toContain("∞");
 		expect(html).not.toContain(">0<");
+	});
+});
+
+describe("LimitsTab per-family weekly panels", () => {
+	const FABLE_PANEL = "Fable weekly window";
+
+	function scopedAccount(): AccountResponse {
+		return {
+			id: "acc-1",
+			name: "Primary",
+			provider: "anthropic",
+			usageData: {
+				limits: [
+					{
+						kind: "weekly_scoped",
+						group: "weekly",
+						percent: 42,
+						resets_at: new Date(Date.now() + 3 * DAY).toISOString(),
+						scope: { model: { id: "fable", display_name: "Fable" } },
+						is_active: true,
+					},
+				],
+			},
+		} as unknown as AccountResponse;
+	}
+
+	function scopedHistory(): UsageScopedHistoryResponse {
+		return {
+			range: "7d",
+			bucketMs: HOUR,
+			families: [
+				{
+					family: "fable",
+					displayName: "Fable",
+					series: [],
+					pool: [],
+				},
+			],
+		};
+	}
+
+	/** Everything the tab needs to render without any section claiming failure. */
+	function seedBaseline(queryClient: QueryClient): void {
+		queryClient.setQueryData(analyticsKey, {} as AnalyticsResponse);
+		queryClient.setQueryData(queryKeys.runway(), runwayResponse());
+		queryClient.setQueryData(queryKeys.usageHistory("24h"), {
+			range: "24h",
+			bucketMs: HOUR,
+			series: [],
+			pool: [],
+		} as UsageHistoryResponse);
+		queryClient.setQueryData(queryKeys.usageHistory("7d"), {
+			range: "7d",
+			bucketMs: HOUR,
+			series: [],
+			pool: [],
+		} as UsageHistoryResponse);
+	}
+
+	it("renders a panel for a family the accounts report live", () => {
+		const queryClient = client();
+		seedBaseline(queryClient);
+		queryClient.setQueryData(queryKeys.accounts(), [scopedAccount()]);
+		queryClient.setQueryData(
+			queryKeys.usageScopedHistory("7d"),
+			scopedHistory(),
+		);
+
+		const html = render(queryClient);
+
+		expect(html).toContain(FABLE_PANEL);
+		expect(
+			queryClient.getQueryCache().find({
+				queryKey: queryKeys.usageScopedHistory("7d"),
+				exact: true,
+			}),
+		).toBeDefined();
+	});
+
+	it("renders a recorded family even when no account reports it right now", () => {
+		// Between a window's reset and the next poll the live payload carries no
+		// scoped limit at all. The panel must not blink out.
+		const queryClient = client();
+		seedBaseline(queryClient);
+		queryClient.setQueryData(queryKeys.accounts(), []);
+		queryClient.setQueryData(
+			queryKeys.usageScopedHistory("7d"),
+			scopedHistory(),
+		);
+
+		const html = render(queryClient);
+
+		expect(html).toContain(FABLE_PANEL);
+	});
+
+	it("renders only the two account-wide panels when there is no scoped window", () => {
+		const queryClient = client();
+		seedBaseline(queryClient);
+		queryClient.setQueryData(queryKeys.accounts(), []);
+		queryClient.setQueryData(queryKeys.usageScopedHistory("7d"), {
+			range: "7d",
+			bucketMs: HOUR,
+			families: [],
+		} as UsageScopedHistoryResponse);
+
+		const html = render(queryClient);
+
+		expect(html).not.toContain("weekly window");
+		expect(html.match(/Collecting data/g)).toHaveLength(2);
+	});
+
+	it("does not claim a family has no history while its read is unresolved", () => {
+		// "Collecting data" asserts that no history EXISTS, which an unresolved
+		// read cannot support — the same rule the two account-wide panels follow.
+		const queryClient = client();
+		seedBaseline(queryClient);
+		queryClient.setQueryData(queryKeys.accounts(), [scopedAccount()]);
+
+		const html = render(queryClient);
+
+		expect(html).toContain(FABLE_PANEL);
+		// Only the two seeded-empty account-wide panels make that claim.
+		expect(html.match(/Collecting data/g)).toHaveLength(2);
+		expect(html).not.toContain("Usage history unavailable");
+	});
+
+	it("says the family history is unavailable when its read fails outright", () => {
+		const queryClient = client(false);
+		seedBaseline(queryClient);
+		queryClient.setQueryData(queryKeys.accounts(), [scopedAccount()]);
+		seedError(queryClient, queryKeys.usageScopedHistory("7d"));
+
+		const html = render(queryClient);
+
+		// The family is still discovered from the live accounts, and its panel
+		// reports the failed read instead of claiming there is nothing recorded.
+		expect(html).toContain(FABLE_PANEL);
+		expect(html.match(/Usage history unavailable/g)).toHaveLength(1);
+		expect(html.match(/Collecting data/g)).toHaveLength(2);
 	});
 });

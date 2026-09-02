@@ -1,16 +1,24 @@
+import type { ModelFamily } from "@clankermux/core";
 import { registerUIRefresh } from "@clankermux/core";
 import type { AnalyticsSection } from "@clankermux/types";
+import { useQueries } from "@tanstack/react-query";
 import React, { useEffect, useMemo, useState } from "react";
 import type { TimeRange } from "../../constants";
 import {
+	usageScopedHistoryQueryOptions,
 	useAccounts,
 	useAnalytics,
 	usePaymentsSummary,
 	useRunway,
 	useUsageHistory,
+	useUsageScopedHistory,
 } from "../../hooks/queries";
 import { dataAvailability } from "../../lib/data-availability";
-import { computePoolUsage } from "../../lib/pool-usage";
+import {
+	computePoolUsage,
+	listLiveScopedFamilies,
+	mergeScopedFamilies,
+} from "../../lib/pool-usage";
 import { AccountPerformanceSection } from "./AccountPerformanceSection";
 import { AccountUtilizationCard } from "./AccountUtilizationCard";
 import { LimitsCapacityOverview } from "./LimitsCapacityOverview";
@@ -28,6 +36,12 @@ export const LIMITS_SECTIONS: readonly AnalyticsSection[] = [
 	"accountPerformance",
 ];
 
+/**
+ * Range every family panel starts on, and the range of the always-on discovery
+ * read. Weekly windows, so a weekly span.
+ */
+const DEFAULT_FAMILY_RANGE: TimeRange = "7d";
+
 export const LimitsTab = React.memo(() => {
 	// Each time-ranged card owns its own range now (the live pool tiles and
 	// utilization card below are range-independent and get no selector).
@@ -35,6 +49,11 @@ export const LimitsTab = React.memo(() => {
 		useState<TimeRange>("24h");
 	const [sevenDayUsageRange, setSevenDayUsageRange] = useState<TimeRange>("7d");
 	const [perfRange, setPerfRange] = useState<TimeRange>("7d");
+	// One range per family panel, defaulting to 7d. Sparse: a family the user
+	// has not touched shares the discovery query's cache entry.
+	const [familyRanges, setFamilyRanges] = useState<
+		Partial<Record<ModelFamily, TimeRange>>
+	>({});
 
 	const accountsQuery = useAccounts();
 	const { data: accounts, isLoading: accountsLoading } = accountsQuery;
@@ -57,6 +76,12 @@ export const LimitsTab = React.memo(() => {
 	const sevenDayUsageQuery = useUsageHistory(sevenDayUsageRange);
 	const { data: sevenDayUsageHistory, isLoading: sevenDayUsageHistoryLoading } =
 		sevenDayUsageQuery;
+	// Per-model-family weekly history. This one read is always on: it discovers
+	// which families HAVE recorded history, which is half of the panel list (the
+	// other half is what the accounts currently report). It also serves every
+	// family panel still on the default range, since one response carries them
+	// all and react-query dedupes the identical key.
+	const scopedDefaultQuery = useUsageScopedHistory(DEFAULT_FAMILY_RANGE);
 	// Payments-ledger spend summary follows the Account Performance card's range.
 	const paymentsQuery = usePaymentsSummary(perfRange);
 	const { data: paymentsSummary, isLoading: paymentsLoading } = paymentsQuery;
@@ -79,6 +104,28 @@ export const LimitsTab = React.memo(() => {
 		() => computePoolUsage(accounts ?? [], "seven_day", now),
 		[accounts, now],
 	);
+	// Which per-family panels exist: the union of what the pool reports right now
+	// and what has been recorded. Live-only would blink the panel out at every
+	// window rollover (a scoped limit disappears from the payload the moment its
+	// reset passes) and whenever the accounts read fails; history-only could not
+	// show a family whose first snapshot has not been written yet.
+	const scopedFamilies = useMemo(
+		() =>
+			mergeScopedFamilies(
+				listLiveScopedFamilies(accounts ?? [], now),
+				scopedDefaultQuery.data?.families ?? [],
+			),
+		[accounts, now, scopedDefaultQuery.data],
+	);
+	// One query per panel, through the SHARED options so the key and the polling
+	// cadence cannot drift from the discovery read above.
+	const scopedResults = useQueries({
+		queries: scopedFamilies.map((family) =>
+			usageScopedHistoryQueryOptions(
+				familyRanges[family.family] ?? DEFAULT_FAMILY_RANGE,
+			),
+		),
+	});
 	// There is deliberately no page-wide loading gate. Each section states the
 	// availability of the ONE query it is computed from, so a slow or failed read
 	// can only blank the section that depends on it. `/api/analytics` is the
@@ -105,6 +152,28 @@ export const LimitsTab = React.memo(() => {
 	const sevenDayUsageUnavailable =
 		dataAvailability(sevenDayUsageQuery, sevenDayUsageHistoryLoading).state ===
 		"unavailable";
+	// Same rule the two account-wide panels use, per family: `isError && !data`
+	// would let a query that has simply never run fall through to the panel's
+	// "Collecting data" claim, which asserts that no history EXISTS.
+	const familyPanels = scopedFamilies.map((family, index) => {
+		const result = scopedResults[index];
+		const unavailable =
+			result === undefined ||
+			dataAvailability(result, result.isLoading).state === "unavailable";
+		return {
+			family: family.family,
+			displayName: family.displayName,
+			usageHistory: result?.data,
+			loading: result?.isLoading === true && !result.data,
+			unavailableReason: unavailable ? "Usage history unavailable" : undefined,
+			range: familyRanges[family.family] ?? DEFAULT_FAMILY_RANGE,
+			onRangeChange: (range: TimeRange) =>
+				setFamilyRanges((previous) => ({
+					...previous,
+					[family.family]: range,
+				})),
+		};
+	});
 	const paymentsUnavailable =
 		dataAvailability(paymentsQuery, paymentsLoading).state === "unavailable";
 	const paymentsPending = paymentsLoading && !paymentsSummary;
@@ -179,6 +248,7 @@ export const LimitsTab = React.memo(() => {
 					range: sevenDayUsageRange,
 					onRangeChange: setSevenDayUsageRange,
 				}}
+				families={familyPanels}
 			/>
 
 			{/* Account performance + folded-in Plan Value / Cost / Value Ratio summary;
