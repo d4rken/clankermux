@@ -13,6 +13,10 @@ import {
 } from "@clankermux/core";
 import type { ProxyContext } from "../handlers";
 import { setForcedAccount } from "../handlers";
+import {
+	hashCreditToken,
+	refusalFallbackRegistry,
+} from "../refusal-fallback-registry";
 import { ingestProxyRequest } from "../request-ingress";
 import { sessionProjectCache } from "../session-project-cache";
 import { sessionPromotionTracker } from "../session-promotion";
@@ -77,6 +81,7 @@ function urlFor(path: string): URL {
 
 function resetSingletons(): void {
 	setForcedAccount(null);
+	refusalFallbackRegistry.reset();
 	sessionPromotionTracker.setMode("off");
 	sessionPromotionTracker.clear();
 	sessionProjectCache.clear();
@@ -209,6 +214,100 @@ describe("ingestProxyRequest", () => {
 				"wd_primary",
 			);
 			expect(result.context.requestMeta.requestedModel).toBe(MODEL);
+		});
+
+		it("marks a request carrying a fallback credit token and forwards it verbatim", async () => {
+			const body = {
+				...contextBody(),
+				fallback_credit_token: "fbc_opaque_token",
+			};
+			const result = await ingestProxyRequest(
+				jsonRequest("/v1/messages", body),
+				urlFor("/v1/messages"),
+				makeCtx(),
+				null,
+				false,
+			);
+
+			if (result.kind !== "context") throw new Error("expected a context");
+			expect(result.context.requestMeta.fallbackCreditClaimed).toBe(true);
+			// The proxy re-encodes the body from the parsed JSON, so the token the
+			// provider has to see must survive that round trip untouched.
+			const forwarded = JSON.parse(
+				new TextDecoder().decode(result.context.finalBodyBuffer as ArrayBuffer),
+			) as { fallback_credit_token?: string };
+			expect(forwarded.fallback_credit_token).toBe("fbc_opaque_token");
+		});
+
+		for (const [label, token] of [
+			["absent", undefined],
+			["empty", ""],
+			["a non-string", 42],
+		] as const) {
+			it(`leaves the mark false when the credit token is ${label}`, async () => {
+				const body: Record<string, unknown> = { ...contextBody() };
+				if (token !== undefined) body.fallback_credit_token = token;
+				const result = await ingestProxyRequest(
+					jsonRequest("/v1/messages", body),
+					urlFor("/v1/messages"),
+					makeCtx(),
+					null,
+					false,
+				);
+
+				if (result.kind !== "context") throw new Error("expected a context");
+				expect(result.context.requestMeta.fallbackCreditClaimed).toBe(false);
+				expect(result.context.requestMeta.fallbackFromModel).toBeNull();
+			});
+		}
+
+		it("resolves the refused model from the registry and consumes the entry", async () => {
+			refusalFallbackRegistry.noteRefusal(hashCreditToken("fbc_seen"), {
+				model: "claude-fable-5-1",
+				category: "cyber",
+				at: Date.now(),
+			});
+
+			const ingest = () =>
+				ingestProxyRequest(
+					jsonRequest("/v1/messages", {
+						...contextBody(),
+						fallback_credit_token: "fbc_seen",
+					}),
+					urlFor("/v1/messages"),
+					makeCtx(),
+					null,
+					false,
+				);
+
+			const first = await ingest();
+			if (first.kind !== "context") throw new Error("expected a context");
+			expect(first.context.requestMeta.fallbackFromModel).toBe(
+				"claude-fable-5-1",
+			);
+
+			// The credit is redeemed once: a replay resolves no origin.
+			const second = await ingest();
+			if (second.kind !== "context") throw new Error("expected a context");
+			expect(second.context.requestMeta.fallbackCreditClaimed).toBe(true);
+			expect(second.context.requestMeta.fallbackFromModel).toBeNull();
+		});
+
+		it("records a null origin for a credit token this process never saw refused", async () => {
+			const result = await ingestProxyRequest(
+				jsonRequest("/v1/messages", {
+					...contextBody(),
+					fallback_credit_token: "fbc_unknown",
+				}),
+				urlFor("/v1/messages"),
+				makeCtx(),
+				null,
+				false,
+			);
+
+			if (result.kind !== "context") throw new Error("expected a context");
+			expect(result.context.requestMeta.fallbackCreditClaimed).toBe(true);
+			expect(result.context.requestMeta.fallbackFromModel).toBeNull();
 		});
 
 		it("captures sessionKey and cachePrefixHashes on the request meta", async () => {

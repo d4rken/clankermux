@@ -3,6 +3,10 @@ import {
 	estimateCostUSD as realEstimateCostUSD,
 } from "@clankermux/core";
 import { normalizeCodexInputUsage } from "@clankermux/providers";
+import {
+	hashCreditToken,
+	refusalFallbackRegistry,
+} from "./refusal-fallback-registry";
 import type { SlimUsageSummary } from "./request-recorder";
 
 /**
@@ -152,6 +156,20 @@ export interface UsageState {
 	 * never emits a newline (small leak / DoS guard).
 	 */
 	skippingOverlongLine: boolean;
+	/**
+	 * The provider's terminal `stop_reason`, raw and unfiltered — `end_turn`,
+	 * `tool_use`, `max_tokens`, `refusal`, or anything a provider invents next.
+	 * `undefined` until one is seen; the LAST accepted one wins.
+	 */
+	stopReason: string | undefined;
+	/**
+	 * Set if and only if {@link stopReason} is `"refusal"`: the provider's
+	 * `stop_details.category`, or the literal `"unknown"` when the refusal named
+	 * none (including when `stop_details` itself is null, which real refusals
+	 * do carry). Cleared whenever a non-refusal reason is accepted, so the two
+	 * fields can never disagree.
+	 */
+	refusalCategory: string | undefined;
 }
 
 /**
@@ -189,6 +207,8 @@ export function createUsageState(): UsageState {
 		responsesTerminalKind: null,
 		sawMessageStart: false,
 		skippingOverlongLine: false,
+		stopReason: undefined,
+		refusalCategory: undefined,
 	};
 }
 
@@ -218,6 +238,19 @@ function parseSSELine(line: string): { event?: string; data?: string } {
 		return { data };
 	}
 	return {};
+}
+
+/**
+ * The refusal envelope Anthropic attaches to a `stop_reason: "refusal"`.
+ *
+ * Only the two fields this module acts on are declared; the rest of the
+ * documented shape (`explanation`, `fallback_has_prefill_claim`,
+ * `recommended_model`) is deliberately ignored. `stop_details` can be null on a
+ * genuine refusal, which is why every read of it is optional-chained.
+ */
+interface SseStopDetails {
+	category?: string | null;
+	fallback_credit_token?: string | null;
 }
 
 interface SseParsed {
@@ -257,6 +290,63 @@ interface SseParsed {
 			};
 		};
 	};
+	/**
+	 * Terminal stop reason at the TOP level — the shape a non-streaming
+	 * Anthropic body uses. Streaming puts the same pair inside
+	 * `message_delta.delta`.
+	 */
+	stop_reason?: string;
+	stop_details?: SseStopDetails | null;
+	/** `message_delta`'s payload: the streaming home of stop_reason/stop_details. */
+	delta?: {
+		stop_reason?: string;
+		stop_details?: SseStopDetails | null;
+	};
+}
+
+/**
+ * Record the provider's terminal stop reason, and the refusal facts that ride
+ * with it.
+ *
+ * Both fields move together so they can never disagree: a later non-refusal
+ * reason clears the category rather than leaving a stale one behind. A missing
+ * or non-string reason is ignored outright — an event that carries no reason
+ * must not erase one already seen.
+ *
+ * When the accepted reason is a refusal carrying a fallback credit token, the
+ * token's HASH is registered against the serving model so the retry that
+ * redeems it (a separate request, arriving moments later) can name the model it
+ * was refused by. The token itself is never stored or logged.
+ */
+function applyStopReason(
+	state: UsageState,
+	stopReason: unknown,
+	stopDetails: unknown,
+	now: number,
+): void {
+	if (typeof stopReason !== "string" || stopReason.length === 0) return;
+	const details = (stopDetails ?? undefined) as SseStopDetails | undefined;
+
+	state.stopReason = stopReason;
+	if (stopReason !== "refusal") {
+		state.refusalCategory = undefined;
+		return;
+	}
+	// A refusal with no category (or no stop_details at all) is still a refusal;
+	// 'unknown' keeps the column's "non-NULL iff refusal" contract intact.
+	state.refusalCategory =
+		typeof details?.category === "string" && details.category
+			? details.category
+			: "unknown";
+
+	const token = details?.fallback_credit_token;
+	if (typeof token === "string" && token.length > 0) {
+		refusalFallbackRegistry.noteRefusal(hashCreditToken(token), {
+			model: state.model ?? null,
+			category: state.refusalCategory,
+			at: now,
+		});
+	}
 }
 
 /**
@@ -274,6 +364,7 @@ function applySseData(
 	parsed: SseParsed,
 	eventType: string,
 	state: UsageState,
+	now: number,
 ): void {
 	const isMessageStart =
 		parsed.type === "message_start" || eventType === "message_start";
@@ -298,17 +389,27 @@ function applySseData(
 
 	const isMessageDelta =
 		parsed.type === "message_delta" || eventType === "message_delta";
-	if (isMessageDelta && parsed.usage) {
-		const u = parsed.usage;
-		if (u.output_tokens !== undefined) {
-			state.providerFinalOutputTokens = u.output_tokens;
-			state.providerReportedOutput = true;
+	if (isMessageDelta) {
+		if (parsed.usage) {
+			const u = parsed.usage;
+			if (u.output_tokens !== undefined) {
+				state.providerFinalOutputTokens = u.output_tokens;
+				state.providerReportedOutput = true;
+			}
+			if (u.input_tokens !== undefined) state.inputTokens = u.input_tokens;
+			if (u.cache_read_input_tokens !== undefined)
+				state.cacheReadInputTokens = u.cache_read_input_tokens;
+			if (u.cache_creation_input_tokens !== undefined)
+				state.cacheCreationInputTokens = u.cache_creation_input_tokens;
 		}
-		if (u.input_tokens !== undefined) state.inputTokens = u.input_tokens;
-		if (u.cache_read_input_tokens !== undefined)
-			state.cacheReadInputTokens = u.cache_read_input_tokens;
-		if (u.cache_creation_input_tokens !== undefined)
-			state.cacheCreationInputTokens = u.cache_creation_input_tokens;
+		// Independent of usage: a refusal's message_delta carries the terminal
+		// reason whether or not it also reports tokens.
+		applyStopReason(
+			state,
+			parsed.delta?.stop_reason,
+			parsed.delta?.stop_details,
+			now,
+		);
 	}
 
 	if (parsed.type === "message_stop" || eventType === "message_stop") {
@@ -411,7 +512,7 @@ function applySseData(
  * `event:` lines; for `data:` lines, parse JSON only when the substring guard
  * passes. Shared by feedChunk (per complete line) and the finalize flush.
  */
-function processLine(state: UsageState, rawLine: string): void {
+function processLine(state: UsageState, rawLine: string, now: number): void {
 	const line = rawLine.trim();
 	if (!line) return;
 	const parsed = parseSSELine(line);
@@ -437,7 +538,7 @@ function processLine(state: UsageState, rawLine: string): void {
 	}
 	try {
 		const obj = JSON.parse(parsed.data) as SseParsed;
-		applySseData(obj, state.currentEvent ?? "", state);
+		applySseData(obj, state.currentEvent ?? "", state, now);
 	} catch {
 		// Silent — non-JSON or still-partial data line.
 	}
@@ -480,7 +581,7 @@ export function feedChunk(
 	while (newlineIdx !== -1) {
 		const rawLine = state.lineBuffer.slice(0, newlineIdx);
 		state.lineBuffer = state.lineBuffer.slice(newlineIdx + 1);
-		processLine(state, rawLine);
+		processLine(state, rawLine, now);
 		newlineIdx = state.lineBuffer.indexOf("\n");
 	}
 
@@ -503,7 +604,7 @@ export function feedChunk(
  * may close the connection right after the last `data:` byte with no trailing
  * newline; without this flush that final `message_delta` would be lost.
  */
-function flushLineBuffer(state: UsageState): void {
+function flushLineBuffer(state: UsageState, now: number = Date.now()): void {
 	// Drain the streaming decoder (no-op if no bytes are pending).
 	const tail = state.decoder.decode();
 	if (tail) state.lineBuffer += tail;
@@ -516,7 +617,7 @@ function flushLineBuffer(state: UsageState): void {
 	if (state.lineBuffer.length === 0) return;
 	const rawLine = state.lineBuffer;
 	state.lineBuffer = "";
-	processLine(state, rawLine);
+	processLine(state, rawLine, now);
 }
 
 /**
@@ -717,9 +818,13 @@ export function feedNonStreamBody(state: UsageState, bodyText: string): void {
 			state.cacheCreationInputTokens = usage.cache_creation_input_tokens ?? 0;
 			state.providerFinalOutputTokens = usage.output_tokens ?? 0;
 			state.providerReportedOutput = true;
+			// Model first, then the stop reason: a refusal registers its credit
+			// token against the SERVING model, which the line above just set.
+			applyStopReason(state, json.stop_reason, json.stop_details, Date.now());
 			return;
 		}
 		if (json.model) state.model = json.model;
+		applyStopReason(state, json.stop_reason, json.stop_details, Date.now());
 	} catch {
 		// Non-JSON body — fall through to the byte fallback.
 	}
@@ -886,6 +991,11 @@ export async function finalizeUsage(
 	};
 	if (outputApproximate) summary.outputApproximate = true;
 	if (speed?.approximate) summary.tokensPerSecondApproximate = true;
+	// Top-level, not inside `usage`: these describe how the response ENDED, not
+	// what it cost, and they persist to their own columns.
+	if (state.stopReason !== undefined) summary.stopReason = state.stopReason;
+	if (state.refusalCategory !== undefined)
+		summary.refusalCategory = state.refusalCategory;
 	return summary;
 }
 

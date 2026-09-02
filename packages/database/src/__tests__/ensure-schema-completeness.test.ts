@@ -115,6 +115,10 @@ describe("ensureSchema completeness", () => {
 		expect(cols.has("api_key_name")).toBe(true);
 		expect(cols.has("combo_name")).toBe(true);
 		expect(cols.has("requested_model")).toBe(true);
+		expect(cols.has("stop_reason")).toBe(true);
+		expect(cols.has("refusal_category")).toBe(true);
+		expect(cols.has("fallback_credit_claimed")).toBe(true);
+		expect(cols.has("fallback_from_model")).toBe(true);
 		expect(cols.has("agent_used")).toBe(false);
 	});
 

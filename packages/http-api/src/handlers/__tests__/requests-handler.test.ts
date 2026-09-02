@@ -84,6 +84,65 @@ describe("createRequestsSummaryHandler", () => {
 		expect(body[0].requestedModel).toBe("claude-haiku-4-5-20251001");
 	});
 
+	it("maps the refusal and fallback-credit columns onto the response", async () => {
+		const { db } = mockDb([
+			{
+				id: "refused",
+				timestamp: 1_700_000_000_000,
+				method: "POST",
+				path: "/v1/messages",
+				account_used: "acc1",
+				account_name: "Primary",
+				status_code: 200,
+				success: 1,
+				error_message: null,
+				stop_reason: "refusal",
+				// 'unknown' is a real recorded category (the provider named none)
+				// and must survive to the wire rather than collapsing to absent.
+				refusal_category: "unknown",
+				fallback_credit_claimed: 1,
+				fallback_from_model: "claude-fable-5-1",
+			},
+		]);
+		const res = await createRequestsSummaryHandler(db)();
+		const body = (await res.json()) as Array<{
+			stopReason?: string;
+			refusalCategory?: string;
+			fallbackCreditClaimed?: boolean;
+			fallbackFromModel?: string;
+		}>;
+		expect(body[0].stopReason).toBe("refusal");
+		expect(body[0].refusalCategory).toBe("unknown");
+		expect(body[0].fallbackCreditClaimed).toBe(true);
+		expect(body[0].fallbackFromModel).toBe("claude-fable-5-1");
+	});
+
+	it("omits the refusal and fallback fields for a legacy row with all NULLs", async () => {
+		const { db } = mockDb([
+			{
+				id: "legacy",
+				timestamp: 1_700_000_000_000,
+				method: "POST",
+				path: "/v1/messages",
+				account_used: "acc1",
+				account_name: "Primary",
+				status_code: 200,
+				success: 1,
+				error_message: null,
+				stop_reason: null,
+				refusal_category: null,
+				fallback_credit_claimed: null,
+				fallback_from_model: null,
+			},
+		]);
+		const res = await createRequestsSummaryHandler(db)();
+		const body = (await res.json()) as Array<Record<string, unknown>>;
+		expect(body[0]).not.toHaveProperty("stopReason");
+		expect(body[0]).not.toHaveProperty("refusalCategory");
+		expect(body[0]).not.toHaveProperty("fallbackCreditClaimed");
+		expect(body[0]).not.toHaveProperty("fallbackFromModel");
+	});
+
 	it("maps context_binary_chars into attachmentChars", async () => {
 		const { db } = mockDb([
 			{

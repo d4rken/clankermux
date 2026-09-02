@@ -77,6 +77,14 @@ export interface RecordMeta {
 	providerName: string;
 	/** Model named by the request, independent of any provider-reported model. */
 	requestedModel?: string | null;
+	/**
+	 * True when the request body carried a fallback credit token (see
+	 * `RequestMeta.fallbackCreditClaimed`). Optional: synthetic/audit rows may
+	 * omit it and stay NULL-covered.
+	 */
+	fallbackCreditClaimed?: boolean | null;
+	/** The model whose refusal this retry redeems (see RequestMeta). */
+	fallbackFromModel?: string | null;
 	/** True when the proxy produced the terminal response without an upstream call. */
 	synthetic?: boolean;
 	/** Machine-readable origin for a locally produced terminal response. */
@@ -151,6 +159,17 @@ export interface SlimUsageSummary {
 	tokensPerSecondApproximate?: boolean;
 	responseTimeMs?: number;
 	cacheCreationInputTokens?: number;
+	/**
+	 * The provider's terminal `stop_reason`, raw. Top level rather than inside
+	 * `usage` because it describes how the response ENDED, not what it cost.
+	 * Absent when the response reported none.
+	 */
+	stopReason?: string;
+	/**
+	 * Present if and only if `stopReason` is `"refusal"`: the provider's safety
+	 * category, or `"unknown"` when it named none.
+	 */
+	refusalCategory?: string;
 }
 
 /** Optional response bytes captured for a locally produced terminal response. */
@@ -240,6 +259,14 @@ interface SaveRequestData {
 	sessionKey?: string | null;
 	/** Cache-measurement prefix digests — mirrors `RequestData.cachePrefixHashes`. */
 	cachePrefixHashes?: CachePrefixCapture | null;
+	/** Provider terminal stop reason — mirrors `RequestData.stopReason`. */
+	stopReason?: string | null;
+	/** Refusal category — mirrors `RequestData.refusalCategory`. */
+	refusalCategory?: string | null;
+	/** Fallback-credit mark — mirrors `RequestData.fallbackCreditClaimed`. */
+	fallbackCreditClaimed?: boolean;
+	/** Refused-model origin — mirrors `RequestData.fallbackFromModel`. */
+	fallbackFromModel?: string | null;
 }
 
 /** Fails to compile unless `T` is exactly `true`. */
@@ -271,6 +298,7 @@ interface DbOpsLike {
 		requestId: string,
 		usage: unknown,
 		usageFinalizedAt?: number | null,
+		response?: { stopReason?: string; refusalCategory?: string },
 	): Promise<void>;
 	pauseAccount(accountId: string, reason: string): Promise<void>;
 	updateAccountUsage(accountId: string): Promise<void>;
@@ -933,6 +961,12 @@ export class RequestRecorder {
 					usageFinalizedAt: record.usageFinalizedAt,
 					sessionKey: meta.sessionKey ?? null,
 					cachePrefixHashes: meta.cachePrefixHashes ?? null,
+					// Response-side facts come off the finalized usage summary; the
+					// two credit marks are ingress facts carried on the meta.
+					stopReason: record.usage?.stopReason,
+					refusalCategory: record.usage?.refusalCategory,
+					fallbackCreditClaimed: meta.fallbackCreditClaimed ?? undefined,
+					fallbackFromModel: meta.fallbackFromModel ?? undefined,
 				});
 				requestRowSaved = true;
 			} catch (error) {
@@ -1031,6 +1065,12 @@ export class RequestRecorder {
 					record.meta.requestId,
 					usage,
 					usageFinalizedAt,
+					// The row was persisted before the response ended, so its
+					// stop-reason columns are still NULL; the late patch fills them.
+					{
+						stopReason: summary.stopReason,
+						refusalCategory: summary.refusalCategory,
+					},
 				);
 			} catch (error) {
 				log.error(`Failed to patch usage for ${record.meta.requestId}:`, error);
@@ -1187,6 +1227,13 @@ export class RequestRecorder {
 			comboName: meta.comboName ?? undefined,
 			reasoningEffort: meta.reasoningEffort ?? undefined,
 			attachmentChars,
+			// Live Activity summaries carry the same marks the persisted row does,
+			// so a refusal is badged the moment it lands rather than on the next
+			// history refetch.
+			stopReason: summary?.stopReason,
+			refusalCategory: summary?.refusalCategory,
+			fallbackCreditClaimed: meta.fallbackCreditClaimed ?? undefined,
+			fallbackFromModel: meta.fallbackFromModel ?? undefined,
 		};
 	}
 

@@ -508,6 +508,10 @@ export interface ResponseHandlerOptions {
 	internal?: boolean;
 	/** Ingress model, supplied by the already-parsed request path when available. */
 	requestedModel?: string | null;
+	/** True when the request carried a fallback credit token (see RequestMeta). */
+	fallbackCreditClaimed?: boolean | null;
+	/** The model whose refusal this retry redeems (see RequestMeta). */
+	fallbackFromModel?: string | null;
 	project?: string | null;
 	/** Which tier produced `project` (see RequestMeta.projectAttributionSource). */
 	projectAttributionSource?: ProjectAttributionSource | null;
@@ -764,6 +768,8 @@ async function forwardToClientInner(
 			isStream,
 			providerName: ctx.provider.name,
 			requestedModel,
+			fallbackCreditClaimed: options.fallbackCreditClaimed ?? null,
+			fallbackFromModel: options.fallbackFromModel ?? null,
 			accountBillingType: account?.billing_type ?? null,
 			accountAutoPauseOnOverageEnabled: account?.auto_pause_on_overage_enabled
 				? 1

@@ -36,6 +36,20 @@ export interface RequestMeta {
 	/** Model resolved at ingress before an upstream response is available. */
 	requestedModel?: string | null;
 	/**
+	 * True when the request body carried a non-empty top-level
+	 * `fallback_credit_token` — Claude Code re-sending a turn a provider refused
+	 * to a fallback model, redeeming the credit the refusal issued. Derived once
+	 * at ingress and threaded to the recorder like `requestedModel`.
+	 */
+	fallbackCreditClaimed?: boolean;
+	/**
+	 * The model whose refusal this retry redeems, resolved by correlating the
+	 * credit token against the refusals seen within the credit lifetime. `null`
+	 * when the request claimed no credit, or when the token was never seen on a
+	 * refusal this process observed (a restart, or another proxy served it).
+	 */
+	fallbackFromModel?: string | null;
+	/**
 	 * Ingest-time context composition computed once in handleProxy from the
 	 * parsed POST /v1/messages body; null/absent when not computed (other
 	 * endpoints, unparseable body). Threaded to the recorder like `project`.

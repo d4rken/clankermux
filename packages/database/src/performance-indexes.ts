@@ -27,6 +27,18 @@ export function addPerformanceIndexes(db: Database): void {
 	`);
 	log.info("Added index: idx_requests_model_timestamp");
 
+	// 2b. Partial index on requests(timestamp) for the refusal/fallback section.
+	// The analytics phase filters on exactly this predicate — refusal rows OR
+	// fallback-credit retries — on every 60s dashboard poll against a
+	// multi-month requests table, and both are rare enough that a partial index
+	// stays tiny while turning that scan into a range read.
+	db.run(`
+		CREATE INDEX IF NOT EXISTS idx_requests_refusal_fallback
+		ON requests(timestamp)
+		WHERE refusal_category IS NOT NULL OR fallback_credit_claimed = 1
+	`);
+	log.info("Added index: idx_requests_refusal_fallback");
+
 	// 3. Index on requests(success, timestamp) for success rate calculations
 	// Used in analytics for calculating success rates over time
 	db.run(`

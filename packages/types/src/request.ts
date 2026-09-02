@@ -162,6 +162,29 @@ export interface RequestRow {
 	 * or the row predates the column.
 	 */
 	usage_finalized_at: number | null;
+	/**
+	 * The provider's terminal `stop_reason`, raw, for every provider and every
+	 * reason ('end_turn', 'tool_use', 'max_tokens', 'refusal', ...). NULL when
+	 * the response carried none (errors, aborted streams, native Responses
+	 * passthrough) or the row predates the column.
+	 */
+	stop_reason: string | null;
+	/**
+	 * Non-NULL if and only if `stop_reason` is 'refusal': the provider's
+	 * `stop_details.category`, or the literal 'unknown' when it named none.
+	 */
+	refusal_category: string | null;
+	/**
+	 * 1 when the request body carried a non-empty top-level
+	 * `fallback_credit_token` — Claude Code re-sending a refused turn to a
+	 * fallback model. NULL otherwise.
+	 */
+	fallback_credit_claimed: number | null;
+	/**
+	 * The model that produced the refusal this retry redeems. NULL when the
+	 * credit token was not seen on a refusal within its lifetime.
+	 */
+	fallback_from_model: string | null;
 }
 
 // Domain model
@@ -201,6 +224,17 @@ export interface Request {
 	 * when none ever did, or when the row predates the column.
 	 */
 	usageFinalizedAt?: number;
+	/** The provider's terminal stop_reason, raw. Absent when none was reported. */
+	stopReason?: string;
+	/**
+	 * Present if and only if `stopReason` is `"refusal"`: the provider's safety
+	 * category, or `"unknown"` when it named none.
+	 */
+	refusalCategory?: string;
+	/** True when the request carried a fallback credit token. */
+	fallbackCreditClaimed?: boolean;
+	/** The model whose refusal this retry redeems, when it could be resolved. */
+	fallbackFromModel?: string;
 }
 
 // API response type
@@ -253,6 +287,18 @@ export interface RequestResponse {
 	// Derived from statusCode === 429 server-side so the list view can render
 	// the "Rate Limited" badge without lazy-loading the full payload.
 	rateLimited?: boolean;
+	/** The provider's terminal stop_reason, raw. Absent when none was reported. */
+	stopReason?: string;
+	/**
+	 * Present if and only if `stopReason` is `"refusal"`: the provider's safety
+	 * category, or `"unknown"` when it named none. This is what the "refused"
+	 * badge keys on.
+	 */
+	refusalCategory?: string;
+	/** True when the request carried a fallback credit token. */
+	fallbackCreditClaimed?: boolean;
+	/** The model whose refusal this retry redeems, when it could be resolved. */
+	fallbackFromModel?: string;
 }
 
 // Detailed request with payload
@@ -363,6 +409,10 @@ export function toRequest(row: RequestRow): Request {
 			row.usage_finalized_at != null
 				? Number(row.usage_finalized_at)
 				: undefined,
+		stopReason: row.stop_reason || undefined,
+		refusalCategory: row.refusal_category || undefined,
+		fallbackCreditClaimed: row.fallback_credit_claimed === 1 ? true : undefined,
+		fallbackFromModel: row.fallback_from_model || undefined,
 	};
 }
 
@@ -398,6 +448,10 @@ export function toRequestResponse(request: Request): RequestResponse {
 		comboName: request.comboName,
 		reasoningEffort: request.reasoningEffort,
 		rateLimited: request.statusCode === 429,
+		stopReason: request.stopReason,
+		refusalCategory: request.refusalCategory,
+		fallbackCreditClaimed: request.fallbackCreditClaimed,
+		fallbackFromModel: request.fallbackFromModel,
 	};
 }
 

@@ -5,16 +5,18 @@ import {
 	ContextCompositionPanel,
 	MissingSectionsNotice,
 	ModelAnalytics,
+	RefusalFallbackPanel,
 	TokenSpeedAnalytics,
 } from "..";
 import type { ModelsTabProps } from "./types";
 
 // `totals` is still requested because `contextComposition` is computed against
 // it server-side; no tile on this tab reads the totals directly any more.
-const MODELS_SECTIONS: readonly AnalyticsSection[] = [
+export const MODELS_SECTIONS: readonly AnalyticsSection[] = [
 	"totals",
 	"costByModel",
 	"modelPerformance",
+	"refusalFallbacks",
 	"speedTimeSeries",
 	"contextComposition",
 ];
@@ -84,6 +86,13 @@ export function ModelsTab(props: ModelsTabProps) {
 				modelPerformance={analytics?.modelPerformance || []}
 				costByModel={costByModel}
 				loading={loading}
+			/>
+
+			{/* Safety refusals and the fallback retries that follow them */}
+			<RefusalFallbackPanel
+				data={analytics?.refusalFallbacks}
+				loading={loading}
+				timeRange={range}
 			/>
 
 			{/* Token Speed Analytics */}

@@ -143,7 +143,28 @@ export function ensureSchema(db: Database): void {
 			-- would carry the SAME key and hashes — exclude synthetic traffic
 			-- when analyzing.
 			session_key TEXT,
-			cache_prefix_hashes TEXT
+			cache_prefix_hashes TEXT,
+			-- Safety-refusal / fallback-credit capture.
+			-- stop_reason: the provider's terminal stop_reason, stored raw for
+			-- every provider and every reason ('end_turn', 'tool_use',
+			-- 'max_tokens', 'refusal', ...). NULL when the response carried none
+			-- (errors, aborted streams, native Responses passthrough, pre-column
+			-- rows), which is why it also serves as the eligibility denominator
+			-- for the refusal share.
+			stop_reason TEXT,
+			-- refusal_category: non-NULL if and only if stop_reason = 'refusal' —
+			-- the provider's stop_details.category when it sent one, else the
+			-- literal 'unknown'. This column is the "safety refusal" marker every
+			-- consumer (analytics, badges) keys on.
+			refusal_category TEXT,
+			-- 1 when the request body carried a non-empty top-level
+			-- fallback_credit_token (Claude Code re-sending a refused turn to a
+			-- fallback model), else NULL.
+			fallback_credit_claimed INTEGER,
+			-- The model that produced the refusal this retry redeems, resolved by
+			-- correlating the credit token against the refusals seen within the
+			-- credit lifetime. NULL when the token was never seen on a refusal.
+			fallback_from_model TEXT
 		)
 	`);
 
@@ -1327,6 +1348,39 @@ export const ADDITIVE_COLUMNS: ReadonlyArray<{
 		table: "requests",
 		column: "cache_prefix_hashes",
 		ddl: "ALTER TABLE requests ADD COLUMN cache_prefix_hashes TEXT",
+	},
+	// Safety-refusal / fallback-credit capture (see the requests CREATE TABLE
+	// comment for the full column contract).
+	//
+	// stop_reason: the provider's raw terminal stop_reason for EVERY reason, not
+	// just refusals — NULL means "the response carried none", which is what makes
+	// it the honest denominator for the refusal share (pre-column rows carry NULL
+	// and are excluded rather than diluting it).
+	{
+		table: "requests",
+		column: "stop_reason",
+		ddl: "ALTER TABLE requests ADD COLUMN stop_reason TEXT",
+	},
+	// refusal_category: non-NULL iff stop_reason = 'refusal' ('unknown' when the
+	// provider named no category). The marker every refusal predicate keys on.
+	{
+		table: "requests",
+		column: "refusal_category",
+		ddl: "ALTER TABLE requests ADD COLUMN refusal_category TEXT",
+	},
+	// 1 when the request body carried a non-empty top-level
+	// fallback_credit_token, else NULL.
+	{
+		table: "requests",
+		column: "fallback_credit_claimed",
+		ddl: "ALTER TABLE requests ADD COLUMN fallback_credit_claimed INTEGER",
+	},
+	// The model whose refusal this retry redeems; NULL when the credit token was
+	// not seen on a refusal within its lifetime.
+	{
+		table: "requests",
+		column: "fallback_from_model",
+		ddl: "ALTER TABLE requests ADD COLUMN fallback_from_model TEXT",
 	},
 ];
 

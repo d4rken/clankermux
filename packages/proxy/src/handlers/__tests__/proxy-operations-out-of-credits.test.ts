@@ -73,6 +73,9 @@ function makeRequestMeta(): RequestMeta {
 		headers: new Headers(),
 		project: "clankermux",
 		projectAttributionSource: "wd_primary",
+		// Ingress resolves the model named by the client and hangs it on the meta;
+		// the audit rows below have to carry it into the requested_model column.
+		requestedModel: REQUEST_MODEL,
 	} as RequestMeta;
 }
 
@@ -237,6 +240,12 @@ describe("proxyWithAccount — out_of_credits 429 (issue #261)", () => {
 		const row = saveRequestCalls[0];
 		expect(row.errorMessage).toBe("out_of_credits");
 		expect(row.usage).toEqual({ model: REQUEST_MODEL });
+
+		// The requested_model column is its own field: the usage envelope feeds
+		// the provider-reported model, and analytics that group by ingress model
+		// (the fallback model-pair table) read requested_model. Leaving it NULL
+		// reports the destination of every fallback as unknown.
+		expect(row.requestedModel).toBe(REQUEST_MODEL);
 
 		// (4) Project attribution travels with the directly-written audit row —
 		// otherwise these rows would look like un-attributable legacy rows.

@@ -13,7 +13,10 @@ import {
 	projectAttributionLabel,
 	resolveProjectAttributionSource,
 } from "../lib/project-attribution";
-import { getRequestModelPresentation } from "../lib/request-model";
+import {
+	getRefusalFallbackBadge,
+	getRequestModelPresentation,
+} from "../lib/request-model";
 import { ConversationView } from "./ConversationView";
 import { CopyButton } from "./CopyButton";
 import { TokenUsageDisplay } from "./TokenUsageDisplay";
@@ -203,6 +206,7 @@ export function RequestDetailsModal({
 	const currentLoadError =
 		loadError?.id === request.id ? loadError.message : null;
 	const modelPresentation = getRequestModelPresentation(summary);
+	const refusalBadge = getRefusalFallbackBadge(summary);
 	const requestSucceeded = summary?.success ?? effective.meta?.success;
 	// Live summaries carry the source; hydrated historical rows only have the
 	// stored envelope's meta block. Falling back keeps both views in agreement.
@@ -252,6 +256,11 @@ export function RequestDetailsModal({
 								>
 									{modelPresentation.value}
 									{modelPresentation.requestedOnly ? " · requested" : ""}
+								</Badge>
+							)}
+							{refusalBadge && (
+								<Badge variant="outline" title={refusalBadge.title}>
+									{refusalBadge.label}
 								</Badge>
 							)}
 							{summary?.totalTokens && (

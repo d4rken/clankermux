@@ -1,5 +1,9 @@
-import { describe, expect, it } from "bun:test";
+import { beforeEach, describe, expect, it } from "bun:test";
 import type { PricingEstimateContext } from "@clankermux/core";
+import {
+	hashCreditToken,
+	refusalFallbackRegistry,
+} from "../refusal-fallback-registry";
 import {
 	createUsageState,
 	feedChunk,
@@ -1702,6 +1706,249 @@ describe("usage-collector", () => {
 				{ estimateCostUSD: cost.fn },
 			);
 			expect(summary.usage.outputTokens).toBe(88);
+		});
+	});
+
+	describe("stop reason + refusal capture", () => {
+		beforeEach(() => refusalFallbackRegistry.reset());
+
+		it("captures an ordinary end_turn with no refusal category", async () => {
+			const state = createUsageState();
+			feedChunk(
+				state,
+				sse("message_delta", {
+					type: "message_delta",
+					delta: { stop_reason: "end_turn", stop_sequence: null },
+					usage: { output_tokens: 12 },
+				}),
+				1000,
+			);
+			expect(state.stopReason).toBe("end_turn");
+			expect(state.refusalCategory).toBeUndefined();
+
+			const summary = await finalizeUsage(
+				state,
+				{ responseTimeMs: 100, providerName: "anthropic", isStream: true },
+				{ estimateCostUSD: fakeCost().fn },
+			);
+			expect(summary.stopReason).toBe("end_turn");
+			expect(summary.refusalCategory).toBeUndefined();
+		});
+
+		it("captures a streaming refusal that also reports usage", async () => {
+			const state = createUsageState();
+			feedChunk(
+				state,
+				sse("message_delta", {
+					type: "message_delta",
+					delta: {
+						stop_reason: "refusal",
+						stop_details: {
+							type: "refusal",
+							category: "cyber",
+							explanation: null,
+							fallback_credit_token: null,
+							fallback_has_prefill_claim: null,
+							recommended_model: null,
+						},
+					},
+					usage: { output_tokens: 7 },
+				}),
+				1000,
+			);
+			expect(state.stopReason).toBe("refusal");
+			expect(state.refusalCategory).toBe("cyber");
+			// The usage half of the branch still runs.
+			expect(state.providerReportedOutput).toBe(true);
+			expect(state.providerFinalOutputTokens).toBe(7);
+		});
+
+		it("captures a streaming refusal that reports no usage at all", () => {
+			const state = createUsageState();
+			feedChunk(
+				state,
+				sse("message_delta", {
+					type: "message_delta",
+					delta: {
+						stop_reason: "refusal",
+						stop_details: { type: "refusal", category: "weapons" },
+					},
+				}),
+				1000,
+			);
+			expect(state.stopReason).toBe("refusal");
+			expect(state.refusalCategory).toBe("weapons");
+			expect(state.providerReportedOutput).toBe(false);
+		});
+
+		it("records 'unknown' when stop_details is null", () => {
+			const state = createUsageState();
+			feedChunk(
+				state,
+				sse("message_delta", {
+					type: "message_delta",
+					delta: { stop_reason: "refusal", stop_details: null },
+					usage: { output_tokens: 1 },
+				}),
+				1000,
+			);
+			expect(state.refusalCategory).toBe("unknown");
+		});
+
+		it("records 'unknown' when the category itself is null", () => {
+			const state = createUsageState();
+			feedChunk(
+				state,
+				sse("message_delta", {
+					type: "message_delta",
+					delta: {
+						stop_reason: "refusal",
+						stop_details: { type: "refusal", category: null },
+					},
+				}),
+				1000,
+			);
+			expect(state.refusalCategory).toBe("unknown");
+		});
+
+		it("lets a later end_turn supersede a refusal and clear its category", () => {
+			const state = createUsageState();
+			feedChunk(
+				state,
+				sse("message_delta", {
+					type: "message_delta",
+					delta: {
+						stop_reason: "refusal",
+						stop_details: { type: "refusal", category: "cyber" },
+					},
+				}),
+				1000,
+			);
+			feedChunk(
+				state,
+				sse("message_delta", {
+					type: "message_delta",
+					delta: { stop_reason: "end_turn" },
+					usage: { output_tokens: 5 },
+				}),
+				1100,
+			);
+			expect(state.stopReason).toBe("end_turn");
+			expect(state.refusalCategory).toBeUndefined();
+		});
+
+		it("ignores a message_delta that carries no stop reason", () => {
+			const state = createUsageState();
+			feedChunk(
+				state,
+				sse("message_delta", {
+					type: "message_delta",
+					delta: {
+						stop_reason: "refusal",
+						stop_details: { type: "refusal", category: "cyber" },
+					},
+				}),
+				1000,
+			);
+			feedChunk(
+				state,
+				sse("message_delta", {
+					type: "message_delta",
+					usage: { output_tokens: 9 },
+				}),
+				1100,
+			);
+			// A reason-less delta must not erase the one already seen.
+			expect(state.stopReason).toBe("refusal");
+			expect(state.refusalCategory).toBe("cyber");
+		});
+
+		it("captures a non-stream refusal alongside its usage object", () => {
+			const state = createUsageState();
+			feedNonStreamBody(
+				state,
+				JSON.stringify({
+					model: "claude-fable-5-1",
+					stop_reason: "refusal",
+					stop_details: { type: "refusal", category: "cyber" },
+					usage: { input_tokens: 10, output_tokens: 2 },
+				}),
+			);
+			expect(state.stopReason).toBe("refusal");
+			expect(state.refusalCategory).toBe("cyber");
+			expect(state.providerReportedOutput).toBe(true);
+		});
+
+		it("captures a non-stream refusal from a body with no usage object", () => {
+			const state = createUsageState();
+			feedNonStreamBody(
+				state,
+				JSON.stringify({
+					model: "claude-fable-5-1",
+					stop_reason: "refusal",
+					stop_details: null,
+				}),
+			);
+			expect(state.stopReason).toBe("refusal");
+			expect(state.refusalCategory).toBe("unknown");
+			expect(state.providerReportedOutput).toBe(false);
+		});
+
+		it("registers a refusal's credit token under its hash, against the served model", () => {
+			const state = createUsageState();
+			feedChunk(
+				state,
+				sse("message_start", {
+					type: "message_start",
+					message: { model: "claude-fable-5-1", usage: { input_tokens: 3 } },
+				}),
+				1000,
+			);
+			feedChunk(
+				state,
+				sse("message_delta", {
+					type: "message_delta",
+					delta: {
+						stop_reason: "refusal",
+						stop_details: {
+							type: "refusal",
+							category: "cyber",
+							fallback_credit_token: "fbc_token_value",
+						},
+					},
+					usage: { output_tokens: 4 },
+				}),
+				1100,
+			);
+
+			const origin = refusalFallbackRegistry.takeOrigin(
+				hashCreditToken("fbc_token_value"),
+				1200,
+			);
+			expect(origin).not.toBeNull();
+			expect(origin?.model).toBe("claude-fable-5-1");
+			expect(origin?.category).toBe("cyber");
+			expect(origin?.at).toBe(1100);
+		});
+
+		it("registers nothing for a refusal without a credit token", () => {
+			const state = createUsageState();
+			feedChunk(
+				state,
+				sse("message_delta", {
+					type: "message_delta",
+					delta: {
+						stop_reason: "refusal",
+						stop_details: {
+							type: "refusal",
+							category: "cyber",
+							fallback_credit_token: null,
+						},
+					},
+				}),
+				1000,
+			);
+			expect(refusalFallbackRegistry.size()).toBe(0);
 		});
 	});
 });

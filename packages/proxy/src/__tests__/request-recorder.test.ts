@@ -41,6 +41,10 @@ interface SaveRequestCall {
 	projectAttributionSource: string | null | undefined;
 	sessionKey: string | null | undefined;
 	cachePrefixHashes: CachePrefixCapture | null | undefined;
+	stopReason: string | null | undefined;
+	refusalCategory: string | null | undefined;
+	fallbackCreditClaimed: boolean | undefined;
+	fallbackFromModel: string | null | undefined;
 }
 
 type EnqueuedKind = "request" | "routing" | "tool_calls" | "payload";
@@ -54,6 +58,7 @@ class FakeDbOps {
 		id: string;
 		usage: unknown;
 		usageFinalizedAt?: number | null;
+		response?: { stopReason?: string; refusalCategory?: string };
 	}> = [];
 	pauseCalls: Array<{ accountId: string; reason: string }> = [];
 	updateAccountUsageCalls: string[] = [];
@@ -94,6 +99,10 @@ class FakeDbOps {
 		usageFinalizedAt?: number | null;
 		sessionKey?: string | null;
 		cachePrefixHashes?: CachePrefixCapture | null;
+		stopReason?: string | null;
+		refusalCategory?: string | null;
+		fallbackCreditClaimed?: boolean;
+		fallbackFromModel?: string | null;
 	}): Promise<void> {
 		this.order.push("request");
 		if (this.failSaveRequest) throw new Error("saveRequest failed");
@@ -119,6 +128,10 @@ class FakeDbOps {
 			usageFinalizedAt: data.usageFinalizedAt,
 			sessionKey: data.sessionKey,
 			cachePrefixHashes: data.cachePrefixHashes,
+			stopReason: data.stopReason,
+			refusalCategory: data.refusalCategory,
+			fallbackCreditClaimed: data.fallbackCreditClaimed,
+			fallbackFromModel: data.fallbackFromModel,
 		});
 	}
 
@@ -153,8 +166,14 @@ class FakeDbOps {
 		requestId: string,
 		usage: unknown,
 		usageFinalizedAt?: number | null,
+		response?: { stopReason?: string; refusalCategory?: string },
 	): Promise<void> {
-		this.updateUsageCalls.push({ id: requestId, usage, usageFinalizedAt });
+		this.updateUsageCalls.push({
+			id: requestId,
+			usage,
+			usageFinalizedAt,
+			response,
+		});
 	}
 
 	async pauseAccount(accountId: string, reason: string): Promise<void> {
@@ -2115,5 +2134,86 @@ describe("RequestRecorder — usage_finalized_at", () => {
 
 		expect(h.dbOps.updateUsageCalls).toHaveLength(1);
 		expect(h.dbOps.updateUsageCalls[0].usageFinalizedAt).toBe(lateAt);
+	});
+});
+
+describe("RequestRecorder — refusal and fallback-credit marks", () => {
+	it("writes all four columns on the pre-persistence path", async () => {
+		const h = makeHarness();
+		h.recorder.begin(
+			makeMeta({
+				fallbackCreditClaimed: true,
+				fallbackFromModel: "claude-fable-5-1",
+			}),
+		);
+		h.recorder.attachUsageSummary(
+			"req-1",
+			makeSummary({ stopReason: "refusal", refusalCategory: "cyber" }),
+		);
+		h.recorder.finishTransport("req-1", "success");
+		await h.flush();
+
+		const call = h.dbOps.saveRequestCalls[0];
+		expect(call.stopReason).toBe("refusal");
+		expect(call.refusalCategory).toBe("cyber");
+		expect(call.fallbackCreditClaimed).toBe(true);
+		expect(call.fallbackFromModel).toBe("claude-fable-5-1");
+	});
+
+	it("leaves the response columns unset when the provider reported no stop reason", async () => {
+		const h = makeHarness();
+		h.recorder.begin(makeMeta());
+		h.recorder.attachUsageSummary("req-1", makeSummary());
+		h.recorder.finishTransport("req-1", "success");
+		await h.flush();
+
+		const call = h.dbOps.saveRequestCalls[0];
+		expect(call.stopReason).toBeUndefined();
+		expect(call.refusalCategory).toBeUndefined();
+	});
+
+	it("carries the stop reason on a LATE patch of an already-persisted row", async () => {
+		const h = makeHarness();
+		h.recorder.begin(makeMeta({ fallbackCreditClaimed: true }));
+		h.recorder.finishTransport("req-1", "success");
+		// Grace elapses with no usage → the row persists with NULL stop columns.
+		h.timers.advance(150);
+		await h.flush();
+		expect(h.dbOps.saveRequestCalls[0].stopReason).toBeUndefined();
+		expect(h.dbOps.saveRequestCalls[0].fallbackCreditClaimed).toBe(true);
+
+		h.recorder.attachUsageSummary(
+			"req-1",
+			makeSummary({ stopReason: "refusal", refusalCategory: "unknown" }),
+		);
+		await h.flush();
+
+		expect(h.dbOps.updateUsageCalls).toHaveLength(1);
+		expect(h.dbOps.updateUsageCalls[0].response).toEqual({
+			stopReason: "refusal",
+			refusalCategory: "unknown",
+		});
+	});
+
+	it("carries all four marks on the live summary event", async () => {
+		const h = makeHarness();
+		h.recorder.begin(
+			makeMeta({
+				fallbackCreditClaimed: true,
+				fallbackFromModel: "claude-fable-5-1",
+			}),
+		);
+		h.recorder.attachUsageSummary(
+			"req-1",
+			makeSummary({ stopReason: "refusal", refusalCategory: "cyber" }),
+		);
+		h.recorder.finishTransport("req-1", "success");
+		await h.flush();
+
+		const event = h.emitted.at(-1);
+		expect(event?.stopReason).toBe("refusal");
+		expect(event?.refusalCategory).toBe("cyber");
+		expect(event?.fallbackCreditClaimed).toBe(true);
+		expect(event?.fallbackFromModel).toBe("claude-fable-5-1");
 	});
 });

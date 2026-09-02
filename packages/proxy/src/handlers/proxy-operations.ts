@@ -820,6 +820,8 @@ export async function proxyUnauthenticated(
 				requestHeaders: req.headers,
 				requestBody: requestBodyBuffer,
 				requestedModel: requestMeta.requestedModel,
+				fallbackCreditClaimed: requestMeta.fallbackCreditClaimed,
+				fallbackFromModel: requestMeta.fallbackFromModel,
 				project: requestMeta.project,
 				projectAttributionSource: requestMeta.projectAttributionSource,
 				contextComposition: requestMeta.contextComposition,
@@ -1599,6 +1601,15 @@ export async function proxyWithAccount(
 						reasoningEffort: requestMeta.reasoningEffort ?? null,
 						sessionKey: requestMeta.sessionKey ?? null,
 						cachePrefixHashes: requestMeta.cachePrefixHashes ?? null,
+						// The ingress model needs its own column: the usage envelope carries the
+						// provider-reported model, while analytics that group by ingress model
+						// (the fallback model-pair table) read requested_model.
+						requestedModel: requestMeta.requestedModel ?? null,
+						// A retry that ends in a local rejection keeps its fallback mark: the
+						// row is still the redemption of a refusal, whatever happened next.
+						fallbackCreditClaimed:
+							requestMeta.fallbackCreditClaimed ?? undefined,
+						fallbackFromModel: requestMeta.fallbackFromModel ?? undefined,
 					}),
 				);
 				log.warn(
@@ -1756,6 +1767,15 @@ export async function proxyWithAccount(
 							reasoningEffort: requestMeta.reasoningEffort ?? null,
 							sessionKey: requestMeta.sessionKey ?? null,
 							cachePrefixHashes: requestMeta.cachePrefixHashes ?? null,
+							// The ingress model needs its own column: the usage envelope carries the
+							// provider-reported model, while analytics that group by ingress model
+							// (the fallback model-pair table) read requested_model.
+							requestedModel: requestMeta.requestedModel ?? null,
+							// A retry that ends in a local rejection keeps its fallback mark: the
+							// row is still the redemption of a refusal, whatever happened next.
+							fallbackCreditClaimed:
+								requestMeta.fallbackCreditClaimed ?? undefined,
+							fallbackFromModel: requestMeta.fallbackFromModel ?? undefined,
 						}),
 					);
 					log.warn(
@@ -1879,6 +1899,15 @@ export async function proxyWithAccount(
 							reasoningEffort: requestMeta.reasoningEffort ?? null,
 							sessionKey: requestMeta.sessionKey ?? null,
 							cachePrefixHashes: requestMeta.cachePrefixHashes ?? null,
+							// The ingress model needs its own column: the usage envelope carries the
+							// provider-reported model, while analytics that group by ingress model
+							// (the fallback model-pair table) read requested_model.
+							requestedModel: requestMeta.requestedModel ?? null,
+							// A retry that ends in a local rejection keeps its fallback mark: the
+							// row is still the redemption of a refusal, whatever happened next.
+							fallbackCreditClaimed:
+								requestMeta.fallbackCreditClaimed ?? undefined,
+							fallbackFromModel: requestMeta.fallbackFromModel ?? undefined,
 						}),
 					);
 					log.warn(
@@ -2018,6 +2047,15 @@ export async function proxyWithAccount(
 							reasoningEffort: requestMeta.reasoningEffort ?? null,
 							sessionKey: requestMeta.sessionKey ?? null,
 							cachePrefixHashes: requestMeta.cachePrefixHashes ?? null,
+							// The ingress model needs its own column: the usage envelope carries the
+							// provider-reported model, while analytics that group by ingress model
+							// (the fallback model-pair table) read requested_model.
+							requestedModel: requestMeta.requestedModel ?? null,
+							// A retry that ends in a local rejection keeps its fallback mark: the
+							// row is still the redemption of a refusal, whatever happened next.
+							fallbackCreditClaimed:
+								requestMeta.fallbackCreditClaimed ?? undefined,
+							fallbackFromModel: requestMeta.fallbackFromModel ?? undefined,
 						}),
 					);
 					log.warn(
@@ -2140,6 +2178,15 @@ export async function proxyWithAccount(
 								reasoningEffort: requestMeta.reasoningEffort ?? null,
 								sessionKey: requestMeta.sessionKey ?? null,
 								cachePrefixHashes: requestMeta.cachePrefixHashes ?? null,
+								// The ingress model needs its own column: the usage envelope carries the
+								// provider-reported model, while analytics that group by ingress model
+								// (the fallback model-pair table) read requested_model.
+								requestedModel: requestMeta.requestedModel ?? null,
+								// A retry that ends in a local rejection keeps its fallback mark: the
+								// row is still the redemption of a refusal, whatever happened next.
+								fallbackCreditClaimed:
+									requestMeta.fallbackCreditClaimed ?? undefined,
+								fallbackFromModel: requestMeta.fallbackFromModel ?? undefined,
 							}),
 						);
 						return await fail({ kind: "hard_429", cooldownUntil }, rawResponse);
@@ -2412,6 +2459,15 @@ export async function proxyWithAccount(
 								reasoningEffort: requestMeta.reasoningEffort ?? null,
 								sessionKey: requestMeta.sessionKey ?? null,
 								cachePrefixHashes: requestMeta.cachePrefixHashes ?? null,
+								// The ingress model needs its own column: the usage envelope carries the
+								// provider-reported model, while analytics that group by ingress model
+								// (the fallback model-pair table) read requested_model.
+								requestedModel: requestMeta.requestedModel ?? null,
+								// A retry that ends in a local rejection keeps its fallback mark: the
+								// row is still the redemption of a refusal, whatever happened next.
+								fallbackCreditClaimed:
+									requestMeta.fallbackCreditClaimed ?? undefined,
+								fallbackFromModel: requestMeta.fallbackFromModel ?? undefined,
 							}),
 						);
 					}
@@ -2579,6 +2635,8 @@ export async function proxyWithAccount(
 						requestHeaders: req.headers,
 						requestBody: effectiveBodyBuffer,
 						requestedModel: requestMeta.requestedModel,
+						fallbackCreditClaimed: requestMeta.fallbackCreditClaimed,
+						fallbackFromModel: requestMeta.fallbackFromModel,
 						project: requestMeta.project,
 						projectAttributionSource: requestMeta.projectAttributionSource,
 						contextComposition: requestMeta.contextComposition,
@@ -2658,6 +2716,8 @@ export async function proxyWithAccount(
 						requestHeaders: req.headers,
 						requestBody: effectiveBodyBuffer,
 						requestedModel: requestMeta.requestedModel,
+						fallbackCreditClaimed: requestMeta.fallbackCreditClaimed,
+						fallbackFromModel: requestMeta.fallbackFromModel,
 						project: requestMeta.project,
 						projectAttributionSource: requestMeta.projectAttributionSource,
 						contextComposition: requestMeta.contextComposition,
@@ -2772,6 +2832,8 @@ export async function proxyWithAccount(
 				requestHeaders: req.headers,
 				requestBody: effectiveBodyBuffer,
 				requestedModel: requestMeta.requestedModel,
+				fallbackCreditClaimed: requestMeta.fallbackCreditClaimed,
+				fallbackFromModel: requestMeta.fallbackFromModel,
 				project: requestMeta.project,
 				projectAttributionSource: requestMeta.projectAttributionSource,
 				contextComposition: requestMeta.contextComposition,
@@ -2930,6 +2992,8 @@ export async function proxyForcedAccount(
 				requestHeaders: req.headers,
 				requestBody: effectiveBodyBuffer,
 				requestedModel: requestMeta.requestedModel,
+				fallbackCreditClaimed: requestMeta.fallbackCreditClaimed,
+				fallbackFromModel: requestMeta.fallbackFromModel,
 				project: requestMeta.project,
 				projectAttributionSource: requestMeta.projectAttributionSource,
 				contextComposition: requestMeta.contextComposition,
@@ -3126,6 +3190,8 @@ export async function proxyForcedAccount(
 				requestHeaders: req.headers,
 				requestBody: effectiveBodyBuffer,
 				requestedModel: requestMeta.requestedModel,
+				fallbackCreditClaimed: requestMeta.fallbackCreditClaimed,
+				fallbackFromModel: requestMeta.fallbackFromModel,
 				project: requestMeta.project,
 				projectAttributionSource: requestMeta.projectAttributionSource,
 				contextComposition: requestMeta.contextComposition,

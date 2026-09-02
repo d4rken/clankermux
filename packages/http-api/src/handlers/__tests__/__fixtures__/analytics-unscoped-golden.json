@@ -2,7 +2,27 @@
 	"meta": {
 		"range": "all",
 		"bucket": "1d",
-		"cumulative": false
+		"cumulative": false,
+		"sections": [
+			"accountModelUsage",
+			"accountPerformance",
+			"activeSessions",
+			"activeSessionsByAccount",
+			"apiKeyPerformance",
+			"cacheFlow",
+			"contextComposition",
+			"costByModel",
+			"modelDistribution",
+			"modelPerformance",
+			"projectBreakdown",
+			"refusalFallbacks",
+			"routing",
+			"speedTimeSeries",
+			"speedTotals",
+			"timeSeries",
+			"toolCallErrors",
+			"totals"
+		]
 	},
 	"totals": {
 		"requests": 12,
@@ -21,6 +41,12 @@
 		"avgWeeklyPlanCostUsd": 0.18666666666666668,
 		"avgDailyApiCostUsd": 0.064,
 		"avgWeeklyApiCostUsd": 0.448
+	},
+	"tokenBreakdown": {
+		"inputTokens": 3600,
+		"cacheReadInputTokens": 6000,
+		"cacheCreationInputTokens": 1200,
+		"outputTokens": 1200
 	},
 	"timeSeries": [
 		{
@@ -89,12 +115,6 @@
 			"avgTokensPerSecond": 72.85714285714286
 		}
 	],
-	"tokenBreakdown": {
-		"inputTokens": 3600,
-		"cacheReadInputTokens": 6000,
-		"cacheCreationInputTokens": 1200,
-		"outputTokens": 1200
-	},
 	"modelDistribution": [
 		{
 			"model": "claude-opus-4-8",
@@ -897,6 +917,49 @@
 				"accountId": "no_account",
 				"accountName": "no_account",
 				"sessions": 1
+			}
+		]
+	},
+	"refusalFallbacks": {
+		"totals": {
+			"refusals": 3,
+			"fallbackRetries": 1,
+			"eligibleRequests": 6
+		},
+		"timeSeries": [
+			{
+				"ts": 1773273600000,
+				"refusals": 1,
+				"fallbackRetries": 0
+			},
+			{
+				"ts": 1773532800000,
+				"refusals": 2,
+				"fallbackRetries": 1
+			}
+		],
+		"byCategory": [
+			{
+				"provider": "anthropic",
+				"category": "cyber",
+				"count": 1
+			},
+			{
+				"provider": "anthropic",
+				"category": "unknown",
+				"count": 1
+			},
+			{
+				"provider": "openai",
+				"category": "content_filter",
+				"count": 1
+			}
+		],
+		"byModelPair": [
+			{
+				"fromModel": "claude-fable-5-1",
+				"toModel": "claude-opus-4-8",
+				"count": 1
 			}
 		]
 	}

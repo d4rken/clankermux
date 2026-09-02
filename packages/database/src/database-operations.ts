@@ -1443,8 +1443,14 @@ OAuth tokens will need to be re-authenticated.
 		requestId: string,
 		usage: RequestData["usage"],
 		usageFinalizedAt?: number | null,
+		response?: { stopReason?: string | null; refusalCategory?: string | null },
 	): Promise<void> {
-		await this.requests.updateUsage(requestId, usage, usageFinalizedAt);
+		await this.requests.updateUsage(
+			requestId,
+			usage,
+			usageFinalizedAt,
+			response,
+		);
 	}
 
 	/**
