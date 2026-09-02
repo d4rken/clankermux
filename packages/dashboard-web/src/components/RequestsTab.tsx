@@ -51,7 +51,10 @@ import {
 	type RequestFilterState,
 	type StatusCategory,
 } from "../lib/request-filters";
-import { getRequestModelPresentation } from "../lib/request-model";
+import {
+	getRefusalFallbackBadge,
+	getRequestModelPresentation,
+} from "../lib/request-model";
 import { isRowActivationClick } from "../lib/row-activation";
 import { cn } from "../lib/utils";
 import { isZaiPeakHour } from "../utils/provider-utils";
@@ -1018,6 +1021,7 @@ export function RequestsTab() {
 							const statusCode = request.response?.status;
 							const summary = data?.summaries.get(request.id);
 							const modelPresentation = getRequestModelPresentation(summary);
+							const refusalBadge = getRefusalFallbackBadge(summary);
 							const method = request.meta.method || summary?.method;
 							const path = request.meta.path || summary?.path;
 							const accountLabel =
@@ -1296,6 +1300,9 @@ export function RequestsTab() {
 										(summary?.tokensPerSecond ?? 0) > 0 ||
 										(summary?.costUsd != null && summary.costUsd > 0) ||
 										request.meta.rateLimited ||
+										// A refusal can arrive with no usage at all, so the row
+										// would otherwise have nothing to hang the badge on.
+										refusalBadge ||
 										isZaiPeak) && (
 										<div className="flex flex-wrap items-center gap-item px-row pb-item text-xs">
 											{(modelPresentation || summary?.reasoningEffort) && (
@@ -1317,6 +1324,11 @@ export function RequestsTab() {
 													]
 														.filter(Boolean)
 														.join(" · ")}
+												</Badge>
+											)}
+											{refusalBadge && (
+												<Badge variant="outline" title={refusalBadge.title}>
+													{refusalBadge.label}
 												</Badge>
 											)}
 											{summary?.totalTokens != null && (
