@@ -195,8 +195,19 @@ export class UsageSnapshotRepository extends BaseRepository<UsageSnapshotRow> {
 	 * `ts` carries the row's real `sampled_at`, not a bucket start: the caller
 	 * needs the true sample time to expire the carried value at the right
 	 * moment, and this row is by definition outside the bucket grid.
+	 *
+	 * `lookbackMs` bounds the scan to `[beforeMs - lookbackMs, beforeMs)` and is
+	 * lossless when it is at least one nominal window: a reading sampled longer
+	 * than that before the cutoff has expired by then (at its own reset, or at
+	 * `sampled_at + nominal` when it carries none), so it cannot be in force at
+	 * the range start and there is no point ranking it. Unbounded, this ranks
+	 * every row in retention — 0.5s on a 180k-row table, per open panel, per
+	 * minute — and gets slower as history grows.
 	 */
-	async getLatestSnapshotsBefore(beforeMs: number): Promise<RankedSnapshot[]> {
+	async getLatestSnapshotsBefore(
+		beforeMs: number,
+		lookbackMs: number,
+	): Promise<RankedSnapshot[]> {
 		const rows = await this.query<{
 			account_id: string;
 			provider: string | null;
@@ -210,12 +221,12 @@ export class UsageSnapshotRepository extends BaseRepository<UsageSnapshotRow> {
 			WITH ranked AS (
 				SELECT *, ROW_NUMBER() OVER (PARTITION BY account_id ORDER BY sampled_at DESC) AS rn
 				FROM usage_snapshots
-				WHERE sampled_at < ?
+				WHERE sampled_at < ? AND sampled_at >= ?
 			)
 			SELECT account_id, provider, sampled_at, five_hour_pct, seven_day_pct, five_hour_reset, seven_day_reset
 			FROM ranked WHERE rn = 1 ORDER BY account_id;
 		`,
-			[beforeMs],
+			[beforeMs, beforeMs - lookbackMs],
 		);
 
 		return rows.map((row) => ({

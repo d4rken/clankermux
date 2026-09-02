@@ -44,9 +44,13 @@ export interface UsageHistorySources {
 	}): Promise<RankedSnapshot[]>;
 	/**
 	 * The last reading per account before the range starts, so the left edge of
-	 * the chart is not blind. See UsageSnapshotRepository.getLatestSnapshotsBefore.
+	 * the chart is not blind. `lookbackMs` bounds how far back that search
+	 * goes — see UsageSnapshotRepository.getLatestSnapshotsBefore.
 	 */
-	getLatestSnapshotsBefore(beforeMs: number): Promise<RankedSnapshot[]>;
+	getLatestSnapshotsBefore(
+		beforeMs: number,
+		lookbackMs: number,
+	): Promise<RankedSnapshot[]>;
 	getAllAccounts(): Promise<Array<Pick<Account, "id" | "name">>>;
 	/** Clock seam. Defaults to `Date.now`; tests pin it to a fixed instant. */
 	now?(): number;
@@ -69,8 +73,8 @@ export function createUsageHistoryHandler(context: APIContext) {
 	const accounts = new AccountRepository(adapter);
 	return createUsageHistoryHandlerFromSources({
 		getUsageSnapshots: (opts) => usageSnapshots.getSnapshots(opts),
-		getLatestSnapshotsBefore: (beforeMs) =>
-			usageSnapshots.getLatestSnapshotsBefore(beforeMs),
+		getLatestSnapshotsBefore: (beforeMs, lookbackMs) =>
+			usageSnapshots.getLatestSnapshotsBefore(beforeMs, lookbackMs),
 		getAllAccounts: () => accounts.findAll(),
 	});
 }
@@ -105,8 +109,14 @@ export function createUsageHistoryHandlerFromSources(
 			const [rows, predecessors, accounts] = await Promise.all([
 				sources.getUsageSnapshots({ sinceMs, bucketMs }),
 				// Nothing can precede an unbounded range, so don't pay for the scan.
+				// One seven-day window back is the whole search space: the longest
+				// window this series carries, so an older reading has expired before
+				// the range start whichever window it belongs to.
 				sinceMs > 0
-					? sources.getLatestSnapshotsBefore(sinceMs)
+					? sources.getLatestSnapshotsBefore(
+							sinceMs,
+							FIXED_WINDOW_DURATION_MS.seven_day,
+						)
 					: Promise.resolve([]),
 				sources.getAllAccounts(),
 			]);

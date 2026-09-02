@@ -374,7 +374,7 @@ describe("UsageSnapshotRepository", () => {
 				row({ accountId: "acct-a", sampledAt: 5_000, fiveHourPct: 9 }),
 			]);
 
-			const read = await repo.getLatestSnapshotsBefore(5_000);
+			const read = await repo.getLatestSnapshotsBefore(5_000, 5_000);
 
 			expect(
 				read
@@ -391,7 +391,7 @@ describe("UsageSnapshotRepository", () => {
 				row({ accountId: "acct-a", sampledAt: 1_234, sevenDayReset: 77_000 }),
 			]);
 
-			const read = await repo.getLatestSnapshotsBefore(5_000);
+			const read = await repo.getLatestSnapshotsBefore(5_000, 5_000);
 
 			expect(read).toHaveLength(1);
 			expect(read[0].ts).toBe(1_234);
@@ -401,7 +401,26 @@ describe("UsageSnapshotRepository", () => {
 
 		it("returns [] when nothing precedes the cutoff", async () => {
 			await repo.insertSnapshots([row({ sampledAt: 5_000 })]);
-			expect(await repo.getLatestSnapshotsBefore(5_000)).toEqual([]);
+			expect(await repo.getLatestSnapshotsBefore(5_000, 5_000)).toEqual([]);
+		});
+
+		it("scans only the lookback window before the cutoff", async () => {
+			insertAccount(db, "acct-c");
+			await repo.insertSnapshots([
+				// Older than beforeMs - lookbackMs (3_000): expired by the cutoff
+				// whichever window it belongs to, so it must not be ranked.
+				row({ accountId: "acct-a", sampledAt: 2_999, fiveHourPct: 1 }),
+				// Exactly at the lookback edge, and inside it: both still count.
+				row({ accountId: "acct-b", sampledAt: 3_000, fiveHourPct: 2 }),
+				row({ accountId: "acct-c", sampledAt: 4_500, fiveHourPct: 3 }),
+			]);
+
+			const read = await repo.getLatestSnapshotsBefore(5_000, 2_000);
+
+			expect(read.map((r) => [r.accountId, r.ts, r.fiveHourPct])).toEqual([
+				["acct-b", 3_000, 2],
+				["acct-c", 4_500, 3],
+			]);
 		});
 	});
 });

@@ -1,4 +1,5 @@
 import { describe, expect, it } from "bun:test";
+import { FIXED_WINDOW_DURATION_MS } from "@clankermux/core";
 import type {
 	Account,
 	RankedScopedSnapshot,
@@ -49,6 +50,11 @@ function createSources(opts: {
 	predecessors?: RankedScopedSnapshot[];
 	nowMs?: number;
 	captureOpts?: (o: { sinceMs: number; bucketMs: number }) => void;
+	/** Captures the (cutoff, lookback) the handler asks the predecessor read for. */
+	capturePredecessorArgs?: (a: {
+		beforeMs: number;
+		lookbackMs: number;
+	}) => void;
 }): UsageScopedHistorySources {
 	const samples = [...opts.snapshots, ...(opts.predecessors ?? [])];
 	const pinnedNow =
@@ -59,7 +65,10 @@ function createSources(opts: {
 			opts.captureOpts?.(o);
 			return opts.snapshots;
 		},
-		getLatestScopedSnapshotsBefore: async () => opts.predecessors ?? [],
+		getLatestScopedSnapshotsBefore: async (beforeMs, lookbackMs) => {
+			opts.capturePredecessorArgs?.({ beforeMs, lookbackMs });
+			return opts.predecessors ?? [];
+		},
 		getAllAccounts: async () => opts.accounts,
 		...(pinnedNow === undefined ? {} : { now: () => pinnedNow }),
 	};
@@ -302,6 +311,43 @@ describe("usage-scoped-history handler", () => {
 			expect(opus?.pool.map((p) => p.ts)).toEqual([NOW_ALIGNED]);
 			expect(opus?.pool[0]?.avg).toBe(10);
 		});
+	});
+});
+
+describe("usage-scoped-history handler — predecessor lookback bound", () => {
+	it("asks for at most one scoped weekly window before the range start", async () => {
+		let captured: { beforeMs: number; lookbackMs: number } | null = null;
+		const sources = createSources({
+			snapshots: [],
+			accounts: [],
+			nowMs: NOW_ALIGNED,
+			capturePredecessorArgs: (a) => {
+				captured = a;
+			},
+		});
+
+		await callHandler(sources, "24h");
+
+		expect(captured).toEqual({
+			beforeMs: NOW_ALIGNED - DAY,
+			lookbackMs: FIXED_WINDOW_DURATION_MS.seven_day_scoped,
+		});
+	});
+
+	it("does not run the predecessor read at all for range=all", async () => {
+		let calls = 0;
+		const sources = createSources({
+			snapshots: [],
+			accounts: [],
+			nowMs: NOW_ALIGNED,
+			capturePredecessorArgs: () => {
+				calls += 1;
+			},
+		});
+
+		await callHandler(sources, "all");
+
+		expect(calls).toBe(0);
 	});
 });
 

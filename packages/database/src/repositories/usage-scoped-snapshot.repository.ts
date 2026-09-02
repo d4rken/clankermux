@@ -182,9 +182,18 @@ export class UsageScopedSnapshotRepository extends BaseRepository<ScopedUsageSna
 	 * `ts` carries the row's real `sampled_at`, not a bucket start: this row
 	 * lies outside the grid by construction, and the caller expires the carried
 	 * value from its true sample time.
+	 *
+	 * `lookbackMs` bounds the scan to `[beforeMs - lookbackMs, beforeMs)` and is
+	 * lossless when it is at least one nominal window: a reading sampled longer
+	 * than that before the cutoff has expired by then (at its own reset, or at
+	 * `sampled_at + nominal` when it carries none), so it cannot be in force at
+	 * the range start and there is no point ranking it. Unbounded, this ranks
+	 * every row in retention — 0.5s on a 180k-row table, per open panel, per
+	 * minute — and gets slower as history grows.
 	 */
 	async getLatestSnapshotsBefore(
 		beforeMs: number,
+		lookbackMs: number,
 	): Promise<RankedScopedSnapshot[]> {
 		const rows = await this.query<{
 			account_id: string;
@@ -202,12 +211,12 @@ export class UsageScopedSnapshotRepository extends BaseRepository<ScopedUsageSna
 					ORDER BY ${SCOPED_BINDING_ORDER}
 				) AS rn
 				FROM usage_scoped_snapshots
-				WHERE sampled_at < ?
+				WHERE sampled_at < ? AND sampled_at >= ?
 			)
 			SELECT account_id, sampled_at AS ts, sampled_at, family, display_name, pct, reset_at
 			FROM ranked WHERE rn = 1 ORDER BY family, account_id;
 		`,
-			[beforeMs],
+			[beforeMs, beforeMs - lookbackMs],
 		);
 
 		return rows.map(mapRankedScopedRow);

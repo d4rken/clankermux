@@ -40,8 +40,14 @@ export interface UsageScopedHistorySources {
 		sinceMs: number;
 		bucketMs: number;
 	}): Promise<RankedScopedSnapshot[]>;
+	/**
+	 * The last reading per (account, family) before the range starts.
+	 * `lookbackMs` bounds how far back that search goes — see
+	 * UsageScopedSnapshotRepository.getLatestSnapshotsBefore.
+	 */
 	getLatestScopedSnapshotsBefore(
 		beforeMs: number,
+		lookbackMs: number,
 	): Promise<RankedScopedSnapshot[]>;
 	getAllAccounts(): Promise<Array<Pick<Account, "id" | "name" | "provider">>>;
 	/** Clock seam. Defaults to `Date.now`; tests pin it to a fixed instant. */
@@ -62,8 +68,8 @@ export function createUsageScopedHistoryHandler(context: APIContext) {
 	const accounts = new AccountRepository(adapter);
 	return createUsageScopedHistoryHandlerFromSources({
 		getScopedSnapshots: (opts) => scopedSnapshots.getBucketedSnapshots(opts),
-		getLatestScopedSnapshotsBefore: (beforeMs) =>
-			scopedSnapshots.getLatestSnapshotsBefore(beforeMs),
+		getLatestScopedSnapshotsBefore: (beforeMs, lookbackMs) =>
+			scopedSnapshots.getLatestSnapshotsBefore(beforeMs, lookbackMs),
 		getAllAccounts: () => accounts.findAll(),
 	});
 }
@@ -100,8 +106,13 @@ export function createUsageScopedHistoryHandlerFromSources(
 			const [rows, predecessors, accounts] = await Promise.all([
 				sources.getScopedSnapshots({ sinceMs, bucketMs }),
 				// Nothing can precede an unbounded range, so don't pay for the scan.
+				// One scoped weekly window back covers every reading that could
+				// still be in force at the range start; older ones have expired.
 				sinceMs > 0
-					? sources.getLatestScopedSnapshotsBefore(sinceMs)
+					? sources.getLatestScopedSnapshotsBefore(
+							sinceMs,
+							FIXED_WINDOW_DURATION_MS.seven_day_scoped,
+						)
 					: Promise.resolve([]),
 				sources.getAllAccounts(),
 			]);

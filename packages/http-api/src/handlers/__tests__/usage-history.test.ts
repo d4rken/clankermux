@@ -1,4 +1,5 @@
 import { describe, expect, it } from "bun:test";
+import { FIXED_WINDOW_DURATION_MS } from "@clankermux/core";
 import type {
 	Account,
 	RankedSnapshot,
@@ -49,6 +50,11 @@ function createSources(opts: {
 	 */
 	nowMs?: number;
 	captureOpts?: (o: { sinceMs: number; bucketMs: number }) => void;
+	/** Captures the (cutoff, lookback) the handler asks the predecessor read for. */
+	capturePredecessorArgs?: (a: {
+		beforeMs: number;
+		lookbackMs: number;
+	}) => void;
 }): UsageHistorySources {
 	const pinnedNow = opts.nowMs ?? newestSampleMs(opts);
 	return {
@@ -56,7 +62,10 @@ function createSources(opts: {
 			opts.captureOpts?.(o);
 			return opts.snapshots;
 		},
-		getLatestSnapshotsBefore: async () => opts.predecessors ?? [],
+		getLatestSnapshotsBefore: async (beforeMs, lookbackMs) => {
+			opts.capturePredecessorArgs?.({ beforeMs, lookbackMs });
+			return opts.predecessors ?? [];
+		},
 		getAllAccounts: async () => opts.accounts,
 		...(pinnedNow === undefined ? {} : { now: () => pinnedNow }),
 	};
@@ -592,6 +601,43 @@ describe("usage-history handler", () => {
 				NOW_ALIGNED,
 			]);
 		});
+	});
+});
+
+describe("usage-history handler — predecessor lookback bound", () => {
+	it("asks for at most one seven-day window before the range start", async () => {
+		let captured: { beforeMs: number; lookbackMs: number } | null = null;
+		const sources = createSources({
+			snapshots: [],
+			accounts: [],
+			nowMs: NOW_ALIGNED,
+			capturePredecessorArgs: (a) => {
+				captured = a;
+			},
+		});
+
+		await callHandler(sources, "24h");
+
+		expect(captured).toEqual({
+			beforeMs: NOW_ALIGNED - 24 * HOUR,
+			lookbackMs: FIXED_WINDOW_DURATION_MS.seven_day,
+		});
+	});
+
+	it("does not run the predecessor read at all for range=all", async () => {
+		let calls = 0;
+		const sources = createSources({
+			snapshots: [],
+			accounts: [],
+			nowMs: NOW_ALIGNED,
+			capturePredecessorArgs: () => {
+				calls += 1;
+			},
+		});
+
+		await callHandler(sources, "all");
+
+		expect(calls).toBe(0);
 	});
 });
 
