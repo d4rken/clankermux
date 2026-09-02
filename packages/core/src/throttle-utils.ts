@@ -6,8 +6,6 @@
 export type SupportedWindow =
 	| "five_hour"
 	| "seven_day"
-	| "seven_day_opus"
-	| "seven_day_sonnet"
 	| "weekly"
 	| "daily"
 	| "monthly"
@@ -16,6 +14,11 @@ export type SupportedWindow =
 /**
  * Fixed window durations in milliseconds.
  * Note: monthly windows have variable duration (28-31 days) and are handled separately.
+ *
+ * Keyed by string, and deliberately WIDER than `SupportedWindow`: the dashboard
+ * resolves window starts for display-only window kinds
+ * (`seven_day_opus`/`seven_day_sonnet`/`seven_day_scoped`) that the proactive
+ * throttle no longer emits.
  */
 export const FIXED_WINDOW_DURATION_MS: Record<string, number> = {
 	five_hour: 5 * 60 * 60 * 1000,
@@ -37,13 +40,27 @@ export const FIXED_WINDOW_DURATION_MS: Record<string, number> = {
  *
  * @param resetMs - Reset timestamp in milliseconds
  * @param window - Window type (e.g., "five_hour", "seven_day", "monthly")
+ * @param durationMs - Data-derived window length, for providers that report one
+ *   per reading (MiniMax) instead of running fixed windows. Takes precedence
+ *   over both the monthly calendar arithmetic and the name lookup; ignored when
+ *   it is not a finite positive number, which keeps every existing caller
+ *   byte-identical.
  * @returns Window start timestamp in milliseconds, or null if invalid
  */
 export function computeWindowStartMs(
 	resetMs: number,
 	window: SupportedWindow | string,
+	durationMs?: number,
 ): number | null {
 	if (!Number.isFinite(resetMs)) return null;
+
+	if (
+		typeof durationMs === "number" &&
+		Number.isFinite(durationMs) &&
+		durationMs > 0
+	) {
+		return resetMs - durationMs;
+	}
 
 	if (window === "monthly") {
 		const resetDate = new Date(resetMs);
@@ -70,8 +87,8 @@ export function computeWindowStartMs(
 		return resetMs - actualMonthDurationMs;
 	}
 
-	const durationMs = FIXED_WINDOW_DURATION_MS[window];
-	return durationMs ? resetMs - durationMs : null;
+	const fixedDurationMs = FIXED_WINDOW_DURATION_MS[window];
+	return fixedDurationMs ? resetMs - fixedDurationMs : null;
 }
 
 /**
@@ -86,9 +103,10 @@ export function computeExpectedPct(
 	resetMs: number,
 	window: SupportedWindow | string,
 	now: number,
+	windowDurationMs?: number,
 ): number | null {
 	if (!Number.isFinite(resetMs)) return null;
-	const startMs = computeWindowStartMs(resetMs, window);
+	const startMs = computeWindowStartMs(resetMs, window, windowDurationMs);
 	if (startMs === null) return null;
 	const durationMs = resetMs - startMs;
 	if (durationMs <= 0) return null;
@@ -104,19 +122,28 @@ export function computeExpectedPct(
  * behind pace, or the window/reset unusable. Both the server's throttle
  * decision and the dashboard's "delayed until" line derive from this one
  * function so the UI can never disagree with the behaviour it explains.
+ *
+ * `windowDurationMs` is the data-derived window length for providers that
+ * report one per reading; see {@link computeWindowStartMs}.
  */
 export function computeThrottleResumeAt(
 	resetMs: number,
 	window: SupportedWindow | string,
 	utilizationPct: number,
 	now: number,
+	windowDurationMs?: number,
 ): number | null {
 	if (!Number.isFinite(resetMs) || resetMs <= now) return null;
-	const startMs = computeWindowStartMs(resetMs, window);
+	const startMs = computeWindowStartMs(resetMs, window, windowDurationMs);
 	if (startMs === null || startMs >= resetMs) return null;
 	if (now - startMs <= 0) return null;
 
-	const expectedPct = computeExpectedPct(resetMs, window, now);
+	const expectedPct = computeExpectedPct(
+		resetMs,
+		window,
+		now,
+		windowDurationMs,
+	);
 	if (expectedPct === null || utilizationPct <= expectedPct) return null;
 
 	const durationMs = resetMs - startMs;

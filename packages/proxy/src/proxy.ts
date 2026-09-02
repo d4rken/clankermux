@@ -1377,12 +1377,24 @@ async function handleIngestedProxy(
 				label: "fallback account",
 			});
 			if (fallbackResponse) return fallbackResponse;
-		} else if (throttledFallbackAccounts.length > 0) {
+		} else if (
+			throttledFallbackAccounts.length > 0 ||
+			gates.familyWeeklyPacedAccounts.length > 0
+		) {
 			// Combo slots staged a body but all failed, and the fallback found only
 			// throttled accounts — this terminal return emits no worker summary, so
 			// drop the staged body now (mirrors the all-accounts-failed cleanup).
+			//
+			// `applyFamilyWeeklyGate` runs AFTER `applyUsageThrottling` on this
+			// chain, so an account it paced never reaches `throttledFallbackAccounts`
+			// and the pool would otherwise fall through to the "All accounts failed"
+			// terminal. Pacing is throttle evidence, so it answers here with the
+			// same retryable 529.
 			cacheBodyStore.discardStaged(requestMeta.id);
-			return createUsageThrottledResponse(throttledFallbackAccounts);
+			return createUsageThrottledResponse([
+				...throttledFallbackAccounts,
+				...gates.familyWeeklyPacedAccounts.map((paced) => paced.account),
+			]);
 		} else if (
 			selectedFallbackAccounts.length > 0 &&
 			providerFallbackAccounts.length === 0 &&

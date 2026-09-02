@@ -1014,6 +1014,9 @@ export function createAccountsListHandler(
 						fullUsageData as AnyUsageData,
 						usageThrottleSettings,
 						now,
+						// The account row projection types provider as nullable; an
+						// unknown provider takes no provider-specific branch.
+						account.provider ?? "",
 					);
 					usageThrottledUntil = usageThrottleStatus.throttleUntil;
 					usageThrottledWindows = usageThrottleStatus.throttledWindows;

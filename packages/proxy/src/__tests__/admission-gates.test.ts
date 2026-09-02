@@ -140,6 +140,32 @@ function seedThrottled(accountId: string) {
 	} as never);
 }
 
+/**
+ * An account whose FABLE weekly window is far ahead of an even pace (80% used
+ * two days into a 7-day window) while every account-wide window is fine, which
+ * is what family-aware weekly pacing exists to catch.
+ */
+function seedFamilyOverpace(accountId: string) {
+	const resetsAt = new Date(Date.now() + 5 * DAY).toISOString();
+	usageCache.set(accountId, {
+		five_hour: {
+			utilization: 10,
+			resets_at: new Date(Date.now() + 4 * HOUR).toISOString(),
+		},
+		seven_day: { utilization: 10, resets_at: resetsAt },
+		limits: [
+			{
+				kind: "weekly_scoped",
+				group: "weekly",
+				percent: 80,
+				resets_at: resetsAt,
+				scope: { model: { id: "fable", display_name: "Fable" } },
+				is_active: true,
+			},
+		],
+	} as never);
+}
+
 const SEEDED_IDS = ["acc-1", "acc-a", "acc-b", "acc-c", "acc-d", "codex-1"];
 
 describe("createAdmissionGates", () => {
@@ -354,6 +380,77 @@ describe("createAdmissionGates", () => {
 			// … while modelForAccount keeps the CONSTRUCTION-time snapshot. Existing
 			// behavior, pinned deliberately rather than "fixed".
 			expect(gates.modelForAccount(account)).toBe("claude-opus-4-5");
+		});
+	});
+
+	describe("family-weekly PACING", () => {
+		it("drops a paced account and records it under familyWeeklyPacedAccounts", () => {
+			const account = makeAccount();
+			seedFamilyOverpace(account.id);
+			const gates = makeGates({
+				effectiveRequestModel: "claude-fable-5",
+				config: makeConfig({ fiveHour: false, weekly: true }),
+			});
+
+			expect(gates.applyFamilyWeeklyGate([account])).toEqual([]);
+			expect(gates.familyWeeklyPacedAccounts).toHaveLength(1);
+			expect(gates.familyWeeklyPacedAccounts[0].account.id).toBe(account.id);
+			expect(gates.familyWeeklyPacedAccounts[0].family).toBe("fable");
+			// Pacing is throttle evidence, NOT exhaustion: putting it in the
+			// exclusion list would fire the family-exhausted 429 with its
+			// multi-day Retry-After.
+			expect(gates.familyWeeklyExcludedAccounts).toEqual([]);
+		});
+
+		it("keeps the account when weekly throttling is disabled", () => {
+			const account = makeAccount();
+			seedFamilyOverpace(account.id);
+			const gates = makeGates({
+				effectiveRequestModel: "claude-fable-5",
+				config: makeConfig({ fiveHour: true, weekly: false }),
+			});
+
+			expect(gates.applyFamilyWeeklyGate([account])).toEqual([account]);
+			expect(gates.familyWeeklyPacedAccounts).toEqual([]);
+		});
+
+		it("never paces a synthetic probe request", () => {
+			const account = makeAccount();
+			seedFamilyOverpace(account.id);
+			const gates = makeGates({
+				effectiveRequestModel: "claude-fable-5",
+				isSyntheticProbeRequest: true,
+				config: makeConfig({ fiveHour: true, weekly: true }),
+			});
+
+			expect(gates.applyFamilyWeeklyGate([account])).toEqual([account]);
+			expect(gates.familyWeeklyPacedAccounts).toEqual([]);
+		});
+
+		it("does not pace a request for a DIFFERENT family on the same account", () => {
+			const account = makeAccount();
+			seedFamilyOverpace(account.id);
+			const gates = makeGates({
+				effectiveRequestModel: "claude-opus-4-8",
+				config: makeConfig({ fiveHour: false, weekly: true }),
+			});
+
+			expect(gates.applyFamilyWeeklyGate([account])).toEqual([account]);
+			expect(gates.familyWeeklyPacedAccounts).toEqual([]);
+		});
+
+		it("dedups a paced account across gate passes", () => {
+			const account = makeAccount();
+			seedFamilyOverpace(account.id);
+			const gates = makeGates({
+				effectiveRequestModel: "claude-fable-5",
+				config: makeConfig({ fiveHour: false, weekly: true }),
+			});
+
+			gates.applyFamilyWeeklyGate([account]);
+			gates.applyFamilyWeeklyGate([account]);
+
+			expect(gates.familyWeeklyPacedAccounts).toHaveLength(1);
 		});
 	});
 

@@ -5,7 +5,11 @@ import {
 	type SupportedWindow,
 } from "@clankermux/core";
 import type { AnyUsageData } from "@clankermux/providers";
-import type { Account, AnthropicUsageData } from "@clankermux/types";
+import {
+	type Account,
+	type AnthropicUsageData,
+	PROVIDER_NAMES,
+} from "@clankermux/types";
 
 const RETRY_AFTER_SECONDS = 60;
 
@@ -13,6 +17,12 @@ interface UsageWindowSnapshot {
 	utilization: number;
 	resetAtMs: number;
 	window: SupportedWindow;
+	/**
+	 * Data-derived window length, for providers that report one per reading
+	 * instead of running windows of a fixed, known duration. Absent for every
+	 * provider whose window length is implied by `window`.
+	 */
+	durationMs?: number;
 }
 
 export interface UsageThrottleSettings {
@@ -28,6 +38,7 @@ export interface UsageThrottleStatus {
 function collectWindows(
 	data: AnyUsageData | null,
 	now: number,
+	provider: string,
 ): UsageWindowSnapshot[] {
 	if (!data || typeof data !== "object") return [];
 
@@ -37,6 +48,7 @@ function collectWindows(
 		window: SupportedWindow,
 		utilization: number | null | undefined,
 		resetAtMs: number | null | undefined,
+		durationMs?: number,
 	) => {
 		if (
 			typeof utilization !== "number" ||
@@ -51,21 +63,60 @@ function collectWindows(
 			utilization,
 			resetAtMs,
 			window,
+			...(durationMs === undefined ? {} : { durationMs }),
 		});
 	};
 
+	// MiniMax must be matched on the PROVIDER, before the generic branch below.
+	// Its payload carries top-level `five_hour`/`seven_day` keys too, so the
+	// Anthropic-like branch matches it structurally and then reads `resets_at`,
+	// which MiniMax never has — every window was silently dropped and the
+	// account was never throttled.
+	if (provider === PROVIDER_NAMES.MINIMAX) {
+		const minimax = data as {
+			five_hour?: {
+				utilization?: number | null;
+				resetAt?: number | null;
+				intervalMs?: number | null;
+			} | null;
+			seven_day?: {
+				utilization?: number | null;
+				resetAt?: number | null;
+				intervalMs?: number | null;
+			} | null;
+		};
+		for (const [window, snapshot] of [
+			["five_hour", minimax.five_hour],
+			["seven_day", minimax.seven_day],
+		] as const) {
+			if (!snapshot) continue;
+			// MiniMax windows have no fixed length: the duration is derived per
+			// reading from the API's own start/end times. Without it there is no
+			// pace line to compare against, and substituting the nominal 5h/7d
+			// would invent evidence — so skip the window and fail open.
+			const intervalMs = snapshot.intervalMs;
+			if (
+				typeof intervalMs !== "number" ||
+				!Number.isFinite(intervalMs) ||
+				intervalMs <= 0
+			) {
+				continue;
+			}
+			pushWindow(window, snapshot.utilization, snapshot.resetAt, intervalMs);
+		}
+		return windows;
+	}
+
 	if ("five_hour" in data && "seven_day" in data) {
+		// ACCOUNT-WIDE windows only. The flat `seven_day_opus`/`seven_day_sonnet`
+		// keys have been null since Anthropic moved the scoped windows into
+		// `limits[]`, and per-family weekly pacing is now the family-weekly gate's
+		// job (`resolveFamilyWeeklyPacing`), which is scoped to the REQUESTED
+		// family. Emitting them here would delay every family on the account for
+		// one family's overpace.
 		const anthropicLike = data as {
 			five_hour?: { utilization?: number | null; resets_at?: string | null };
 			seven_day?: { utilization?: number | null; resets_at?: string | null };
-			seven_day_opus?: {
-				utilization?: number | null;
-				resets_at?: string | null;
-			};
-			seven_day_sonnet?: {
-				utilization?: number | null;
-				resets_at?: string | null;
-			};
 		};
 
 		pushWindow(
@@ -80,20 +131,6 @@ function collectWindows(
 			anthropicLike.seven_day?.utilization,
 			anthropicLike.seven_day?.resets_at
 				? new Date(anthropicLike.seven_day.resets_at).getTime()
-				: null,
-		);
-		pushWindow(
-			"seven_day_opus",
-			anthropicLike.seven_day_opus?.utilization,
-			anthropicLike.seven_day_opus?.resets_at
-				? new Date(anthropicLike.seven_day_opus.resets_at).getTime()
-				: null,
-		);
-		pushWindow(
-			"seven_day_sonnet",
-			anthropicLike.seven_day_sonnet?.utilization,
-			anthropicLike.seven_day_sonnet?.resets_at
-				? new Date(anthropicLike.seven_day_sonnet.resets_at).getTime()
 				: null,
 		);
 		return windows;
@@ -134,9 +171,12 @@ function collectWindows(
 	// Anthropic `limits[]`-only (upstream is dropping the flat five_hour/seven_day
 	// keys). Reached only when the flat-Anthropic branch above did NOT match (no
 	// flat five_hour && seven_day pair), so it covers pure `limits[]` payloads and
-	// partial-flat ones. Source session→five_hour, weeklyAll→seven_day, and the
-	// per-family scoped weekly windows (opus/sonnet) from the normalizer so these
-	// accounts still get proactive throttling.
+	// partial-flat ones. Source session→five_hour and weeklyAll→seven_day so these
+	// accounts still get proactive account-wide throttling. The per-family scoped
+	// weekly windows are NOT emitted here: pacing them account-wide would delay
+	// every family for one family's overpace, so that decision belongs to the
+	// family-weekly gate (`resolveFamilyWeeklyPacing`), which knows the requested
+	// family.
 	if (isAnthropicUsageShape(data as unknown as AnthropicUsageData)) {
 		const normalized = normalizeAnthropicUsage(
 			data as unknown as AnthropicUsageData,
@@ -156,14 +196,6 @@ function collectWindows(
 				normalized.weeklyAll.resetMs,
 			);
 		}
-		for (const scoped of normalized.weeklyScoped) {
-			if (scoped.family === "opus") {
-				pushWindow("seven_day_opus", scoped.percent, scoped.resetsAtMs);
-			} else if (scoped.family === "sonnet") {
-				pushWindow("seven_day_sonnet", scoped.percent, scoped.resetsAtMs);
-			}
-			// fable/haiku have no dedicated throttle window type — skipped.
-		}
 		return windows;
 	}
 
@@ -180,20 +212,26 @@ function isWindowThrottlingEnabled(
 		case "tokens_limit":
 			return settings.fiveHourEnabled;
 		case "seven_day":
-		case "seven_day_opus":
-		case "seven_day_sonnet":
 		case "weekly":
 		case "monthly":
 			return settings.weeklyEnabled;
 	}
 }
 
+/**
+ * `provider` is REQUIRED: window shapes are not self-describing (MiniMax and
+ * Anthropic both carry top-level `five_hour`/`seven_day` keys with different
+ * field names inside), so structural detection alone silently reads the wrong
+ * provider's payload. Making it required means the type checker, not a
+ * production incident, catches a caller that forgets it.
+ */
 export function getUsageThrottleStatus(
 	data: AnyUsageData | null,
 	settings: UsageThrottleSettings,
 	now = Date.now(),
+	provider: string,
 ): UsageThrottleStatus {
-	const windows = collectWindows(data, now);
+	const windows = collectWindows(data, now, provider);
 	let throttleUntil: number | null = null;
 	const throttledWindows: SupportedWindow[] = [];
 
@@ -204,6 +242,7 @@ export function getUsageThrottleStatus(
 			window.window,
 			window.utilization,
 			now,
+			window.durationMs,
 		);
 		if (resumeAt === null) continue;
 		throttledWindows.push(window.window);
@@ -219,8 +258,9 @@ export function getUsageThrottleUntil(
 	data: AnyUsageData | null,
 	settings: UsageThrottleSettings,
 	now = Date.now(),
+	provider: string,
 ): number | null {
-	return getUsageThrottleStatus(data, settings, now).throttleUntil;
+	return getUsageThrottleStatus(data, settings, now, provider).throttleUntil;
 }
 
 export function createUsageThrottledResponse(accounts: Account[]): Response {

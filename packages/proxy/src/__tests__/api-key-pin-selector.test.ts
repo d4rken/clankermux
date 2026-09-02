@@ -68,6 +68,11 @@ function makeContext(accounts: Account[]): ProxyContext {
 					affinityKey: null,
 					previousAccountId: null,
 					failoverReason: null,
+					// Carried through from any pre-seeded routing meta so a test can
+					// stage the fields the session strategy / admission gates own.
+					heldAccountId: meta.routing?.heldAccountId ?? null,
+					primaryAttemptAccountId:
+						meta.routing?.primaryAttemptAccountId ?? null,
 				};
 				return ordered;
 			},
@@ -379,11 +384,31 @@ describe("Codex-CLI floor: excludeOfficialAnthropic", () => {
 		const console_ = makeAccount({ id: "cc", provider: "claude-console-api" });
 		const ctx = makeContext([oauth, console_]);
 		const meta = makeMeta({ excludeOfficialAnthropic: true });
+		// Stage the routing telemetry the strategy/gates would have produced for
+		// the pre-filter pool, so the fail-closed branch has stale values to clear.
+		meta.routing = {
+			strategy: "session",
+			decision: "primary",
+			selectedAccountId: "oauth",
+			candidatesCount: 2,
+			affinityScope: null,
+			affinityKey: null,
+			previousAccountId: null,
+			failoverReason: null,
+			heldAccountId: "cc",
+			primaryAttemptAccountId: "oauth",
+		};
 
 		const result = await select(meta, ctx);
 
 		expect(result).toEqual([]);
 		expect(meta.pinFailure?.code).toBe("anthropic_excluded_no_account");
+		// Nothing was served: the persisted routing projection must not name an
+		// account that the floor just filtered out.
+		expect(meta.routing?.selectedAccountId).toBeNull();
+		expect(meta.routing?.candidatesCount).toBe(0);
+		expect(meta.routing?.heldAccountId).toBeNull();
+		expect(meta.routing?.primaryAttemptAccountId).toBeNull();
 	});
 
 	it("no Claude accounts in pool → returns the selection unchanged", async () => {

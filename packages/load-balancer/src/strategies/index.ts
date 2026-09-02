@@ -11,7 +11,8 @@ import {
 	PROVIDER_NAMES,
 	requiresSessionDurationTracking,
 } from "@clankermux/types";
-import { isPeekAvailable } from "./peek-availability";
+import { isSelfHealingPauseReason } from "./pause-reasons";
+import { isAutoUnpauseCandidate, isPeekAvailable } from "./peek-availability";
 
 export { LeastUsedStrategy } from "./least-used";
 
@@ -390,7 +391,7 @@ export class SessionStrategy implements LoadBalancingStrategy {
 	 *                   when the original account recovers and its prompt cache
 	 *                   is still warm.
 	 *  - `reassign`  — affined account is durably gone (real 5h/7d exhaustion,
-	 *                   manual pause, session expired, removed). Delete the
+	 *                   any pause, session expired, removed). Delete the
 	 *                   affinity entry and pick a fresh account.
 	 *  - `miss`      — no affinity entry exists for this key yet.
 	 */
@@ -444,24 +445,27 @@ export class SessionStrategy implements LoadBalancingStrategy {
 	 * serving elsewhere while holding the slot (hold).
 	 *
 	 * Affinity-breaking ("durable") conditions:
-	 *  - Manual or failure-threshold pause (operator intervention required).
+	 *  - ANY pause, whatever the reason. Operator pauses (manual,
+	 *    failure_threshold) and re-auth pauses (oauth_invalid_grant,
+	 *    subscription_expired) need a human; the self-healing ones (overage,
+	 *    peak_hours, rate_limit_window) clear on a usage-window reset, which is
+	 *    hours away. Either way the pause outlives
+	 *    AFFINITY_REASSIGN_MIN_COOLDOWN_MS, the threshold above which the
+	 *    rate-limit branch below already treats the prompt cache as cold, so
+	 *    there is nothing left to hold the slot for.
 	 *  - Long rate-limit cooldown (>= AFFINITY_REASSIGN_MIN_COOLDOWN_MS) for a
 	 *    non-server-wide reason — indicates real 5h/7d usage-window exhaustion.
 	 *
 	 * Affinity-preserving ("transient") conditions:
 	 *  - 529 overload / probe cooldown — server-wide; switching doesn't help.
 	 *  - Short rate-limit cooldown — per-minute throttle; resolves in seconds.
-	 *  - Billing overage / peak-hours pause — auto-resumes on window reset.
 	 */
 	private isAffinityBreakingUnavailability(
 		account: Account,
 		now: number,
 	): boolean {
-		// Sticky pauses: operator must manually resume.
-		if (account.paused) {
-			const reason = account.pause_reason;
-			return reason === "manual" || reason === "failure_threshold";
-		}
+		// A pause is never brief enough to be worth holding a pin through.
+		if (account.paused) return true;
 
 		const until = account.rate_limited_until;
 		if (!until || until <= now) return false;
@@ -745,10 +749,7 @@ export class SessionStrategy implements LoadBalancingStrategy {
 			// overage, or `rate_limit_window` (reserved/future pause reason) — never auto-unpause
 			// manual or failure_threshold pauses.
 			if (candidate.paused && this.store?.resumeAccount) {
-				const canAutoUnpause =
-					!candidate.pause_reason ||
-					candidate.pause_reason === "overage" ||
-					candidate.pause_reason === "rate_limit_window";
+				const canAutoUnpause = isSelfHealingPauseReason(candidate.pause_reason);
 				if (canAutoUnpause) {
 					this.log.info(
 						`Unpausing account ${candidate.name} due to auto-fallback reactivation`,
@@ -1054,31 +1055,15 @@ export class SessionStrategy implements LoadBalancingStrategy {
 		accounts: Account[],
 		now: number,
 	): Account[] {
-		// Find accounts with auto-fallback enabled that:
-		// 1. Have an API reset time that has passed (usage window has reset)
-		// 2. Are not currently paused
-		// 3. Are not currently in a rate limited state (rate_limited_until is in the past or null)
-		const resetAccounts = accounts.filter((account) => {
-			if (!account.auto_fallback_enabled) return false;
-			// Note: We check paused status AFTER filtering for auto-fallback enabled accounts
-			// This allows paused accounts with auto-fallback to be considered for reactivation
-
-			// Check if the API usage window has reset for auto-fallback
-			const supportsWindowReset =
-				account.provider === PROVIDER_NAMES.ANTHROPIC ||
-				account.provider === PROVIDER_NAMES.CODEX ||
-				account.provider === PROVIDER_NAMES.ZAI;
-			const providerWindowReset =
-				supportsWindowReset &&
-				account.rate_limit_reset &&
-				account.rate_limit_reset < now - 1000; // 1 second buffer for clock skew protection
-
-			// Check if the account is not currently rate limited by our system
-			const notRateLimited =
-				!account.rate_limited_until || account.rate_limited_until <= now;
-
-			return providerWindowReset && notRateLimited;
-		});
+		// isAutoUnpauseCandidate is the shared structural test (auto-fallback on,
+		// paused, provider with a resettable usage window, window elapsed, no live
+		// cooldown of our own). This method used to re-implement it with its own
+		// `rate_limited_until <= now` boundary, which is exactly how the two
+		// strategies drifted. Requiring `paused` is behaviour-neutral here: the
+		// consuming loop only acts on paused candidates.
+		const resetAccounts = accounts.filter((account) =>
+			isAutoUnpauseCandidate(account, now),
+		);
 
 		if (resetAccounts.length === 0) return [];
 

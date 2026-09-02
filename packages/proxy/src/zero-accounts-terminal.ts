@@ -22,7 +22,11 @@
  * request state it mutates belongs to its caller.
  */
 
-import { codexAccountFitsRequestUnmargined, NETWORK } from "@clankermux/core";
+import {
+	codexAccountFitsRequestUnmargined,
+	mapModelName,
+	NETWORK,
+} from "@clankermux/core";
 import { Logger } from "@clankermux/logger";
 import { getFreshCapacity, usageCache } from "@clankermux/providers";
 import type { Account, ComboSlotInfo, RequestMeta } from "@clankermux/types";
@@ -43,6 +47,7 @@ import {
 	createPoolExhaustedResponse,
 	createUsageThrottledResponse,
 	ERROR_MESSAGES,
+	getComboSlotInfo,
 	isAnthropicBurstThrottleActive,
 	isOAuthAnthropicAccount,
 	type ProxyContext,
@@ -54,7 +59,10 @@ import {
 } from "./handlers";
 // Direct leaf import (not via the `handlers` barrel) — see the module comment.
 import { createClientAbortResponse } from "./handlers/client-abort-response";
-import { getProviderOverloadUntil } from "./provider-overload-cooldown";
+import {
+	getProviderOverloadUntil,
+	resolveOverloadAttributionModel,
+} from "./provider-overload-cooldown";
 import {
 	CW_HOLD_MAX_MS,
 	CW_HOLD_MAX_MS_NO_CODEX_FALLBACK,
@@ -167,6 +175,26 @@ export async function resolveZeroAccountsOutcome(
 		attemptThroughProbeGate,
 	} = deps;
 
+	// The model whose overload bucket an attempt on THIS account would trip, and
+	// therefore the bucket every overload deadline here must read. Mirrors
+	// recovery-holds.ts: the request's logical model alone would consult the
+	// wrong family for an account that maps it (e.g. sonnet -> opus), so a hold
+	// would look eligible against a clear bucket while the attempt runs into an
+	// open one.
+	//
+	// The combo override comes from the CURRENT combo info, not the frozen
+	// `initialComboInfo`: the cooled-sibling detection below runs AFTER
+	// holdForNonCodexRecovery, whose wake re-runs selection and can replace or
+	// clear the combo state.
+	const overloadAttributionModelFor = (account: Account): string | null => {
+		const combo = requestMeta.comboName ? getComboSlotInfo(requestMeta) : null;
+		const slot = combo?.slots.find((s) => s.accountId === account.id);
+		const logical = slot?.modelOverride ?? effectiveRequestModel;
+		return logical
+			? resolveOverloadAttributionModel(mapModelName(logical, account), logical)
+			: null;
+	};
+
 	// Pin-transient hold: the pin strict-failed selection ONLY because every
 	// pin-ALLOWED account is on a short transient cooldown (a per-account 429 or
 	// a provider-wide 529 overload) that will clear within the hold budget — NOT
@@ -207,7 +235,7 @@ export async function resolveZeroAccountsOutcome(
 					getProviderOverloadUntil(
 						a.provider,
 						nowMs,
-						effectiveRequestModel ?? null,
+						overloadAttributionModelFor(a),
 					) ?? 0;
 				const availableAt = Math.max(rl, ov);
 				// Only hold when the transient cooldown clears within budget; a
@@ -441,9 +469,13 @@ export async function resolveZeroAccountsOutcome(
 	// surfaced below. We only reach the CW hold / last-resort path when the
 	// large-context accounts are unavailable for non-throttle reasons (paused,
 	// rate-limited) — which is the incident this path was built for.
+	// Family-weekly PACING is throttle evidence too, so it takes the same
+	// precedence: an account held back by pacing is over its quota pace, not
+	// unavailable for a reason a context-window hold could resolve.
 	if (
 		gates.contextExcludedAccounts.length > 0 &&
-		throttledAccounts.length === 0
+		throttledAccounts.length === 0 &&
+		gates.familyWeeklyPacedAccounts.length === 0
 	) {
 		// Pre-compute the last-resort relaxation candidates (Codex accounts that
 		// fit the FULL/unmargined window) so we can both (a) pick the hold budget
@@ -592,7 +624,8 @@ export async function resolveZeroAccountsOutcome(
 	if (
 		gates.familyWeeklyExcludedAccounts.length > 0 &&
 		gates.contextExcludedAccounts.length === 0 &&
-		throttledAccounts.length === 0
+		throttledAccounts.length === 0 &&
+		gates.familyWeeklyPacedAccounts.length === 0
 	) {
 		const family = gates.familyWeeklyExcludedAccounts[0].family;
 
@@ -626,7 +659,7 @@ export async function resolveZeroAccountsOutcome(
 							getProviderOverloadUntil(
 								a.provider,
 								nowGate,
-								effectiveRequestModel ?? null,
+								overloadAttributionModelFor(a),
 							),
 							nowGate,
 						),
@@ -696,8 +729,17 @@ export async function resolveZeroAccountsOutcome(
 		return familyResponse;
 	}
 
-	if (throttledAccounts.length > 0) {
-		return createUsageThrottledResponse(throttledAccounts);
+	// A paced account is throttled, just on a per-family weekly window rather
+	// than an account-wide one: the answer is the same retryable 529, never the
+	// family-exhausted 429 above (whose Retry-After is the multi-day window).
+	if (
+		throttledAccounts.length > 0 ||
+		gates.familyWeeklyPacedAccounts.length > 0
+	) {
+		return createUsageThrottledResponse([
+			...throttledAccounts,
+			...gates.familyWeeklyPacedAccounts.map((paced) => paced.account),
+		]);
 	}
 
 	if (

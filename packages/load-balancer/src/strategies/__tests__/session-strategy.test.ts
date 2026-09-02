@@ -1426,6 +1426,69 @@ describe("SessionStrategy", () => {
 			expect(strategy.select([affined, healthy], projectMeta)[0]).toBe(affined);
 		});
 
+		// Any pause breaks affinity. Every pause outlasts the 15-minute cooldown
+		// threshold the rate-limit path already reassigns on, so the warmed prompt
+		// cache on the pinned account is gone by the time it could come back; a
+		// hold would just leave the project on a dead pin while the served sibling
+		// drifts with FEFO metrics until pruneAffinity ages the entry out.
+		for (const pauseReason of [
+			"oauth_invalid_grant",
+			"subscription_expired",
+			"peak_hours",
+			"overage",
+			"something_new",
+		]) {
+			it(`reassigns project affinity when the pinned account is paused (${pauseReason})`, () => {
+				const now = Date.now();
+				const projectMeta: RequestMeta = {
+					...meta,
+					project: `paused-${pauseReason}-project`,
+				};
+
+				const affined = makeAccount({
+					id: "affined-paused",
+					name: "affined-paused",
+					created_at: now,
+					expires_at: now + 3600_000,
+					session_start: now - 60_000,
+					session_request_count: 4,
+				});
+				const healthy = makeAccount({
+					id: "healthy-after-pause",
+					name: "healthy-after-pause",
+					created_at: now,
+					expires_at: now + 3600_000,
+				});
+
+				expect(strategy.select([affined, healthy], projectMeta)[0]).toBe(
+					affined,
+				);
+
+				// The pin goes paused (no auto-fallback window, so the auto-unpause
+				// side-effect cannot clear it before affinity resolves).
+				affined.paused = true;
+				affined.pause_reason = pauseReason;
+
+				const result = strategy.select([affined, healthy], projectMeta);
+
+				expect(result[0]).toBe(healthy);
+				expect(projectMeta.routing?.decision).toBe("affinity_reassigned");
+				expect(projectMeta.routing?.previousAccountId).toBe(affined.id);
+
+				// The affinity map now points at the sibling: a further request is a
+				// plain hit on it, and unpausing the old account does not snap back.
+				const followUp = strategy.select([affined, healthy], projectMeta);
+				expect(followUp[0]).toBe(healthy);
+				expect(projectMeta.routing?.decision).toBe("affinity_hit");
+
+				affined.paused = false;
+				affined.pause_reason = null;
+				expect(strategy.select([affined, healthy], projectMeta)[0]).toBe(
+					healthy,
+				);
+			});
+		}
+
 		it("keeps affinity for non-session-tracking providers until TTL expiry", () => {
 			const projectMeta: RequestMeta = {
 				...meta,
