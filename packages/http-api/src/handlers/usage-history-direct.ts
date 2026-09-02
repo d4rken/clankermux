@@ -19,61 +19,17 @@ import type {
 } from "@clankermux/types";
 import type { APIContext } from "../types";
 import { getRangeConfig } from "./range-config";
+import {
+	avgOrNull,
+	buildBucketGrid,
+	type CarryPredecessor,
+	type CarrySample,
+	maxOrNull,
+	normalizeRange,
+	walkCarry,
+} from "./usage-history-shared";
 
 const log = new Logger("UsageHistoryHandler");
-
-/**
- * A window value held across gap buckets. `expiresAt` is the window's reset
- * (or the nominal-length fallback): the value is assumed to still hold until
- * then, and is dropped once a bucket reaches it.
- */
-interface CarriedValue {
-	pct: number;
-	expiresAt: number;
-}
-
-/**
- * Advance one window's carry-forward state by one bucket. A fresh sample
- * refreshes the held value (until its own reset, or the nominal window length
- * when the row carries no reset); otherwise the last value is held until a
- * bucket reaches that reset, then dropped.
- */
-function advanceCarry(
-	carry: CarriedValue | null,
-	pct: number | null | undefined,
-	reset: number | null | undefined,
-	ts: number,
-	nominalMs: number,
-): CarriedValue | null {
-	if (pct != null) {
-		return { pct, expiresAt: reset ?? ts + nominalMs };
-	}
-	if (carry && ts >= carry.expiresAt) return null;
-	return carry;
-}
-
-const ALLOWED_RANGES = ["1h", "6h", "24h", "7d", "30d", "all"] as const;
-type Range = (typeof ALLOWED_RANGES)[number];
-const DEFAULT_RANGE: Range = "7d";
-
-function normalizeRange(raw: string | null): Range {
-	if (raw && (ALLOWED_RANGES as readonly string[]).includes(raw)) {
-		return raw as Range;
-	}
-	return DEFAULT_RANGE;
-}
-
-/** Mean of the non-null numbers, or null when there are none. */
-function avgOrNull(values: number[]): number | null {
-	if (values.length === 0) return null;
-	return values.reduce((sum, v) => sum + v, 0) / values.length;
-}
-
-/** Max of the non-null numbers, or null when there are none. */
-function maxOrNull(values: number[]): number | null {
-	if (values.length === 0) return null;
-	return Math.max(...values);
-}
 
 /**
  * Data sources the usage-history shaping logic reads from. In production these
@@ -86,7 +42,14 @@ export interface UsageHistorySources {
 		sinceMs: number;
 		bucketMs: number;
 	}): Promise<RankedSnapshot[]>;
+	/**
+	 * The last reading per account before the range starts, so the left edge of
+	 * the chart is not blind. See UsageSnapshotRepository.getLatestSnapshotsBefore.
+	 */
+	getLatestSnapshotsBefore(beforeMs: number): Promise<RankedSnapshot[]>;
 	getAllAccounts(): Promise<Array<Pick<Account, "id" | "name">>>;
+	/** Clock seam. Defaults to `Date.now`; tests pin it to a fixed instant. */
+	now?(): number;
 }
 
 /**
@@ -106,13 +69,15 @@ export function createUsageHistoryHandler(context: APIContext) {
 	const accounts = new AccountRepository(adapter);
 	return createUsageHistoryHandlerFromSources({
 		getUsageSnapshots: (opts) => usageSnapshots.getSnapshots(opts),
+		getLatestSnapshotsBefore: (beforeMs) =>
+			usageSnapshots.getLatestSnapshotsBefore(beforeMs),
 		getAllAccounts: () => accounts.findAll(),
 	});
 }
 
 /**
  * Shape the usage_snapshots time-series into per-account series + a pool
- * aggregate.
+ * aggregate over a regular bucket grid.
  *
  * Carry-forward: a maxed-out account that stops reporting (paused, exhausted)
  * must not silently fall out of the pool average — dropping the highest
@@ -121,6 +86,10 @@ export function createUsageHistoryHandler(context: APIContext) {
  * window reset (per window), keeping its contribution in both its own series
  * and the pool denominator. After the real reset it expires, so a genuine
  * window roll (a true drop to ~0%) still shows.
+ *
+ * The grid comes from buildBucketGrid rather than from the timestamps present
+ * in the rows, and the walk is seeded with the reading in force at the range
+ * start — see that helper for the two gaps this closes at the edges.
  */
 export function createUsageHistoryHandlerFromSources(
 	sources: UsageHistorySources,
@@ -130,46 +99,68 @@ export function createUsageHistoryHandlerFromSources(
 			const range = normalizeRange(params.get("range"));
 			// "all" scans from sinceMs 0 — full snapshot retention.
 			const { bucketMs, windowMs } = getRangeConfig(range);
-			const sinceMs = windowMs === null ? 0 : Date.now() - windowMs;
+			const nowMs = sources.now?.() ?? Date.now();
+			const sinceMs = windowMs === null ? 0 : nowMs - windowMs;
 
-			const [rows, accounts] = await Promise.all([
+			const [rows, predecessors, accounts] = await Promise.all([
 				sources.getUsageSnapshots({ sinceMs, bucketMs }),
+				// Nothing can precede an unbounded range, so don't pay for the scan.
+				sinceMs > 0
+					? sources.getLatestSnapshotsBefore(sinceMs)
+					: Promise.resolve([]),
 				sources.getAllAccounts(),
 			]);
 
 			const nameById = new Map(accounts.map((a) => [a.id, a.name]));
 
-			// The chart's x-axis buckets: every distinct ts present in the data,
-			// ascending. A bucket exists because at least one account reported in
-			// it, so a silent (paused/maxed) account is carried into the buckets
-			// its still-reporting peers keep creating.
-			const allTs = Array.from(new Set(rows.map((r) => r.ts))).sort(
-				(a, b) => a - b,
-			);
+			// A predecessor means evidence was already in force at the range start,
+			// so the grid starts there. Otherwise it starts at the first recorded
+			// bucket. Scanned rather than spread (`Math.min(...rows)`) because
+			// range=all returns the full retention — hundreds of thousands of rows.
+			let earliestRowTs: number | null = null;
+			for (const row of rows) {
+				if (earliestRowTs === null || row.ts < earliestRowTs) {
+					earliestRowTs = row.ts;
+				}
+			}
+			const firstEvidenceMs = predecessors.length > 0 ? sinceMs : earliestRowTs;
+			const grid = buildBucketGrid({
+				sinceMs,
+				bucketMs,
+				nowMs,
+				firstEvidenceMs,
+			});
 
-			// Index rows by account → (ts → row), preserving first-appearance order
-			// and each account's provider.
+			// Index rows by account → (ts → row), and each account's provider.
+			// Predecessor-only accounts are registered FIRST: their evidence is the
+			// oldest, and an account that went silent before the range began still
+			// belongs in the chart.
 			const rowsByAccount = new Map<string, Map<number, RankedSnapshot>>();
+			const predecessorByAccount = new Map<string, RankedSnapshot>();
 			const providerById = new Map<string, string>();
 			const accountOrder: string[] = [];
+			const register = (row: RankedSnapshot): void => {
+				if (rowsByAccount.has(row.accountId)) return;
+				rowsByAccount.set(row.accountId, new Map());
+				providerById.set(row.accountId, row.provider ?? "unknown");
+				accountOrder.push(row.accountId);
+			};
+			for (const row of predecessors) {
+				register(row);
+				predecessorByAccount.set(row.accountId, row);
+			}
 			for (const row of rows) {
-				let tsMap = rowsByAccount.get(row.accountId);
-				if (!tsMap) {
-					tsMap = new Map();
-					rowsByAccount.set(row.accountId, tsMap);
-					providerById.set(row.accountId, row.provider ?? "unknown");
-					accountOrder.push(row.accountId);
-				}
-				tsMap.set(row.ts, row);
+				register(row);
+				rowsByAccount.get(row.accountId)?.set(row.ts, row);
 			}
 
-			// Pool buckets, seeded for every ts so an all-null bucket still yields a
-			// (null-avg, count 0) point rather than vanishing.
+			// Pool buckets, seeded for every GRID bucket so an all-null bucket still
+			// yields a (null-avg, count 0) point rather than vanishing.
 			const poolByTs = new Map<
 				number,
 				{ fiveHour: number[]; sevenDay: number[]; contributors: Set<string> }
 			>();
-			for (const ts of allTs) {
+			for (const ts of grid) {
 				poolByTs.set(ts, {
 					fiveHour: [],
 					sevenDay: [],
@@ -184,28 +175,36 @@ export function createUsageHistoryHandlerFromSources(
 			for (const accountId of accountOrder) {
 				const tsMap = rowsByAccount.get(accountId);
 				if (!tsMap) continue;
-				const points: UsageHistoryPoint[] = [];
-				let five: CarriedValue | null = null;
-				let seven: CarriedValue | null = null;
-				for (const ts of allTs) {
-					const row = tsMap.get(ts);
-					five = advanceCarry(
-						five,
-						row?.fiveHourPct,
-						row?.fiveHourReset,
-						ts,
-						FIXED_WINDOW_DURATION_MS.five_hour,
-					);
-					seven = advanceCarry(
-						seven,
-						row?.sevenDayPct,
-						row?.sevenDayReset,
-						ts,
-						FIXED_WINDOW_DURATION_MS.seven_day,
-					);
+				const predecessor = predecessorByAccount.get(accountId) ?? null;
+				const five = walkCarry(
+					grid,
+					windowSamples(tsMap, (r) => ({
+						pct: r.fiveHourPct,
+						reset: r.fiveHourReset,
+					})),
+					windowPredecessor(predecessor, (r) => ({
+						pct: r.fiveHourPct,
+						reset: r.fiveHourReset,
+					})),
+					FIXED_WINDOW_DURATION_MS.five_hour,
+				);
+				const seven = walkCarry(
+					grid,
+					windowSamples(tsMap, (r) => ({
+						pct: r.sevenDayPct,
+						reset: r.sevenDayReset,
+					})),
+					windowPredecessor(predecessor, (r) => ({
+						pct: r.sevenDayPct,
+						reset: r.sevenDayReset,
+					})),
+					FIXED_WINDOW_DURATION_MS.seven_day,
+				);
 
-					const fivePct = five?.pct ?? null;
-					const sevenPct = seven?.pct ?? null;
+				const points: UsageHistoryPoint[] = [];
+				for (const ts of grid) {
+					const fivePct = five.get(ts) ?? null;
+					const sevenPct = seven.get(ts) ?? null;
 					if (fivePct == null && sevenPct == null) continue;
 
 					points.push({ ts, fiveHourPct: fivePct, sevenDayPct: sevenPct });
@@ -226,8 +225,8 @@ export function createUsageHistoryHandlerFromSources(
 				}
 			}
 
-			// allTs is already ascending, so the pool is sorted by construction.
-			const pool: UsageHistoryPoolPoint[] = allTs.map((ts) => {
+			// The grid is ascending, so the pool is sorted by construction.
+			const pool: UsageHistoryPoolPoint[] = grid.map((ts) => {
 				const b = poolByTs.get(ts) ?? {
 					fiveHour: [],
 					sevenDay: [],
@@ -257,4 +256,23 @@ export function createUsageHistoryHandlerFromSources(
 			);
 		}
 	};
+}
+
+/** Project one window out of an account's bucketed rows for {@link walkCarry}. */
+function windowSamples(
+	tsMap: Map<number, RankedSnapshot>,
+	pick: (row: RankedSnapshot) => CarrySample,
+): Map<number, CarrySample> {
+	const samples = new Map<number, CarrySample>();
+	for (const [ts, row] of tsMap) samples.set(ts, pick(row));
+	return samples;
+}
+
+/** The same projection for the pre-range reading, keeping its sample time. */
+function windowPredecessor(
+	row: RankedSnapshot | null,
+	pick: (row: RankedSnapshot) => CarrySample,
+): CarryPredecessor | null {
+	if (!row) return null;
+	return { ...pick(row), sampledAt: row.ts };
 }

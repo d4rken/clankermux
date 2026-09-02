@@ -131,6 +131,7 @@ import {
 	createTokenHealthHandler,
 } from "./handlers/token-health";
 import { createUsageHistoryHandler } from "./handlers/usage-history";
+import { createUsageScopedHistoryHandler } from "./handlers/usage-scoped-history";
 import { createVersionCheckHandler } from "./handlers/version";
 import { SessionAuthService } from "./services/session-auth-service";
 import { createSessionStreamGuard } from "./services/session-stream-registry";
@@ -248,6 +249,9 @@ export class APIRouter {
 			this.context,
 		);
 		const usageHistoryHandler = createUsageHistoryHandler(this.context);
+		const usageScopedHistoryHandler = createUsageScopedHistoryHandler(
+			this.context,
+		);
 		const quotaDriftHandler = createQuotaDriftHandler(this.context);
 		const memoryHistoryHandler = createMemoryHistoryHandler(this.context);
 		const cacheKeepaliveHandler = createCacheKeepaliveHandler(this.context);
@@ -501,6 +505,15 @@ export class APIRouter {
 		this.handlers.set("GET:/api/analytics/usage-history", (_req, url) => {
 			return usageHistoryHandler(url.searchParams);
 		});
+		// Per-model-family weekly windows. Takes only `range`: ONE response
+		// carries every recorded family, so the dashboard discovers the panel
+		// list from it rather than having to name a family up front.
+		this.handlers.set(
+			"GET:/api/analytics/usage-scoped-history",
+			(_req, url) => {
+				return usageScopedHistoryHandler(url.searchParams);
+			},
+		);
 		// Precomputed quota-drift analysis. Takes no params: the pass fits the
 		// whole retained history, and a range filter would silently change which
 		// evidence a verdict rests on.

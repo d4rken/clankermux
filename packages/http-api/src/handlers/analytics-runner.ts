@@ -24,6 +24,7 @@ import { createPaymentsSummaryDataHandler as createDirectPaymentsSummaryDataHand
 import { createQuotaDriftHandler as createDirectQuotaDriftHandler } from "./quota-drift-direct";
 import { createStatsHandler as createDirectStatsHandler } from "./stats-direct";
 import { createUsageHistoryHandler as createDirectUsageHistoryHandler } from "./usage-history-direct";
+import { createUsageScopedHistoryHandler as createDirectUsageScopedHistoryHandler } from "./usage-scoped-history-direct";
 
 const log = new Logger("AnalyticsRunner");
 
@@ -51,6 +52,7 @@ const WORKER_SOFT_TIMEOUT_MS_BY_KIND: Record<DashboardWorkerKind, number> = {
 	analytics: ANALYTICS_WORKER_TIMEOUT_MS,
 	stats: DEFAULT_WORKER_TIMEOUT_MS,
 	"usage-history": DEFAULT_WORKER_TIMEOUT_MS,
+	"usage-scoped-history": DEFAULT_WORKER_TIMEOUT_MS,
 	"memory-history": DEFAULT_WORKER_TIMEOUT_MS,
 	"cache-keepalive-history": DEFAULT_WORKER_TIMEOUT_MS,
 	"cache-effectiveness": DEFAULT_WORKER_TIMEOUT_MS,
@@ -165,6 +167,7 @@ const LANE_BY_KIND: Record<DashboardWorkerKind, WorkerLane> = {
 	analytics: "heavy",
 	stats: "light",
 	"usage-history": "light",
+	"usage-scoped-history": "light",
 	"memory-history": "light",
 	"cache-keepalive-history": "light",
 	"cache-effectiveness": "light",
@@ -220,6 +223,11 @@ const KIND_LABELS: Record<
 		timeoutMessage: "Usage history request timed out",
 		failureMessage: "Failed to fetch usage history data",
 		tooManyMessage: "Too many usage history requests",
+	},
+	"usage-scoped-history": {
+		timeoutMessage: "Scoped usage history request timed out",
+		failureMessage: "Failed to fetch scoped usage history data",
+		tooManyMessage: "Too many scoped usage history requests",
 	},
 	"memory-history": {
 		timeoutMessage: "Memory history request timed out",
@@ -295,6 +303,18 @@ export function createIsolatedUsageHistoryHandler(context: APIContext) {
 		context,
 		"usage-history",
 		createDirectUsageHistoryHandler(context),
+	);
+}
+
+/**
+ * Worker-routed read of the PER-MODEL-FAMILY weekly windows. One response
+ * covers every recorded family — see usage-scoped-history-direct.ts.
+ */
+export function createIsolatedUsageScopedHistoryHandler(context: APIContext) {
+	return createIsolatedDashboardHandler(
+		context,
+		"usage-scoped-history",
+		createDirectUsageScopedHistoryHandler(context),
 	);
 }
 

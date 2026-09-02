@@ -10,9 +10,24 @@ import {
 } from "../usage-history-direct";
 
 const HOUR = 60 * 60 * 1000;
+/** An hour-aligned "now" so the hourly bucket grid lands on round numbers. */
+const NOW_ALIGNED = Math.floor(1_700_000_000_000 / HOUR) * HOUR;
 
 function makeAccount(id: string, name: string, provider: string): Account {
 	return { id, name, provider } as Account;
+}
+
+function snapshot(partial: Partial<RankedSnapshot>): RankedSnapshot {
+	return {
+		accountId: "a",
+		provider: "anthropic",
+		ts: NOW_ALIGNED,
+		fiveHourPct: null,
+		sevenDayPct: null,
+		fiveHourReset: null,
+		sevenDayReset: null,
+		...partial,
+	};
 }
 
 /**
@@ -24,15 +39,35 @@ function makeAccount(id: string, name: string, provider: string): Account {
 function createSources(opts: {
 	snapshots: RankedSnapshot[];
 	accounts: Account[];
+	/** Rows in force BEFORE the range start (the carry-forward seed). */
+	predecessors?: RankedSnapshot[];
+	/**
+	 * Pins the handler's clock. The bucket grid runs to the CURRENT bucket, so a
+	 * fixture with fixed timestamps has to pin "now" beside them. Defaults to the
+	 * fixture's newest sample, i.e. "the range ends where the data ends"; pass it
+	 * explicitly to put buckets after the last sample.
+	 */
+	nowMs?: number;
 	captureOpts?: (o: { sinceMs: number; bucketMs: number }) => void;
 }): UsageHistorySources {
+	const pinnedNow = opts.nowMs ?? newestSampleMs(opts);
 	return {
 		getUsageSnapshots: async (o: { sinceMs: number; bucketMs: number }) => {
 			opts.captureOpts?.(o);
 			return opts.snapshots;
 		},
+		getLatestSnapshotsBefore: async () => opts.predecessors ?? [],
 		getAllAccounts: async () => opts.accounts,
+		...(pinnedNow === undefined ? {} : { now: () => pinnedNow }),
 	};
+}
+
+/** The fixture's newest sample time, or undefined when it has no samples. */
+function newestSampleMs(
+	opts: Pick<Parameters<typeof createSources>[0], "snapshots" | "predecessors">,
+): number | undefined {
+	const all = [...opts.snapshots, ...(opts.predecessors ?? [])];
+	return all.length === 0 ? undefined : Math.max(...all.map((r) => r.ts));
 }
 
 async function callHandler(
@@ -144,7 +179,7 @@ describe("usage-history handler", () => {
 
 	describe("series grouping", () => {
 		it("groups rows by account, resolves names, sorts points by ts", async () => {
-			const t1 = 1_700_000_000_000;
+			const t1 = NOW_ALIGNED - HOUR;
 			const t2 = t1 + HOUR;
 			// Intentionally out-of-order ts to confirm the handler sorts points.
 			const snapshots: RankedSnapshot[] = [
@@ -198,7 +233,7 @@ describe("usage-history handler", () => {
 		});
 
 		it("falls back to the accountId when the account is missing", async () => {
-			const t1 = 1_700_000_000_000;
+			const t1 = NOW_ALIGNED;
 			const snapshots: RankedSnapshot[] = [
 				{
 					accountId: "ghost",
@@ -220,7 +255,7 @@ describe("usage-history handler", () => {
 
 	describe("pool aggregation", () => {
 		it("averages and maxes non-null values, counts contributors, sorts by ts", async () => {
-			const t1 = 1_700_000_000_000;
+			const t1 = NOW_ALIGNED - HOUR;
 			const t2 = t1 + HOUR;
 			const snapshots: RankedSnapshot[] = [
 				// t1: a=20/10, b=80/null → avg5h=50 max5h=80; avg7d=10 max7d=10; count=2
@@ -293,7 +328,7 @@ describe("usage-history handler", () => {
 			// The reported bug: Main-me hits 100% and stops reporting; a still-active
 			// peer keeps the buckets alive. Main-me must keep counting at 100% until
 			// its 5h window resets — the pool must NOT drop the instant it maxes out.
-			const t1 = 1_700_000_000_000;
+			const t1 = NOW_ALIGNED - 2 * HOUR;
 			const t2 = t1 + HOUR;
 			const t3 = t1 + 2 * HOUR;
 			const fiveHourReset = t1 + 3 * HOUR; // Main-me's window resets after t3
@@ -366,7 +401,7 @@ describe("usage-history handler", () => {
 			// Main-me maxes at t1 with a reset between t2 and t3. It carries through
 			// t2 (still before reset) but drops out at t3 (reset has passed), and the
 			// pool then reflects only the still-reporting peer.
-			const t1 = 1_700_000_000_000;
+			const t1 = NOW_ALIGNED - 2 * HOUR;
 			const t2 = t1 + HOUR;
 			const t3 = t1 + 2 * HOUR;
 			const fiveHourReset = t1 + 90 * 60 * 1000; // between t2 and t3
@@ -431,7 +466,7 @@ describe("usage-history handler", () => {
 		});
 
 		it("yields null avg/max when every account is null at a ts", async () => {
-			const t1 = 1_700_000_000_000;
+			const t1 = NOW_ALIGNED;
 			const snapshots: RankedSnapshot[] = [
 				{
 					accountId: "a",
@@ -467,6 +502,95 @@ describe("usage-history handler", () => {
 			expect(p?.sevenDayAvg).toBeNull();
 			expect(p?.sevenDayMax).toBeNull();
 			expect(p?.sampledCount).toBe(0);
+		});
+	});
+
+	describe("bucket grid", () => {
+		const DAY = 24 * HOUR;
+		const rangeStart = NOW_ALIGNED - DAY;
+
+		it("seeds the range start from the reading in force before it", async () => {
+			// Main-me maxed out and went silent 10 minutes BEFORE the range began.
+			// Built from the returned rows alone the range has no evidence of it at
+			// all, so the chart would open with the account simply missing until
+			// its window rolled — the exact drop the carry-forward exists to stop.
+			const sources = createSources({
+				snapshots: [],
+				predecessors: [
+					snapshot({
+						accountId: "main",
+						ts: rangeStart - 10 * 60 * 1000,
+						fiveHourPct: 100,
+						fiveHourReset: rangeStart + 2 * HOUR,
+					}),
+				],
+				accounts: [makeAccount("main", "Main-me", "anthropic")],
+				nowMs: NOW_ALIGNED,
+			});
+
+			const { body } = await callHandler(sources, "24h");
+
+			const main = body.series.find((s) => s.accountId === "main");
+			expect(main?.name).toBe("Main-me");
+			// Held from the first bucket of the range until its own reset passes.
+			expect(main?.points.map((p) => p.ts)).toEqual([
+				rangeStart,
+				rangeStart + HOUR,
+			]);
+			expect(main?.points.map((p) => p.fiveHourPct)).toEqual([100, 100]);
+			expect(body.pool[0]?.fiveHourAvg).toBe(100);
+			expect(body.pool[2]?.fiveHourAvg).toBeNull();
+			expect(body.pool[2]?.sampledCount).toBe(0);
+		});
+
+		it("expires a hold on a bucket after the last sample of the whole pool", async () => {
+			// Every account stops reporting. Without a regular grid there are no
+			// later buckets for the hold to expire on, so the line runs to the
+			// right edge frozen at 100%.
+			const sources = createSources({
+				snapshots: [
+					snapshot({
+						accountId: "main",
+						ts: rangeStart,
+						fiveHourPct: 100,
+						fiveHourReset: rangeStart + 3 * HOUR,
+					}),
+				],
+				accounts: [makeAccount("main", "Main-me", "anthropic")],
+				nowMs: NOW_ALIGNED,
+			});
+
+			const { body } = await callHandler(sources, "24h");
+
+			const main = body.series.find((s) => s.accountId === "main");
+			expect(main?.points.map((p) => p.ts)).toEqual([
+				rangeStart,
+				rangeStart + HOUR,
+				rangeStart + 2 * HOUR,
+			]);
+			// The grid keeps going to the current bucket, and the hold expires.
+			expect(body.pool).toHaveLength(25);
+			expect(body.pool[3]?.fiveHourAvg).toBeNull();
+			expect(body.pool[body.pool.length - 1]?.ts).toBe(NOW_ALIGNED);
+		});
+
+		it("does not open buckets before the first evidence in the range", async () => {
+			const firstTs = NOW_ALIGNED - 2 * HOUR;
+			const sources = createSources({
+				snapshots: [
+					snapshot({ accountId: "main", ts: firstTs, fiveHourPct: 20 }),
+				],
+				accounts: [makeAccount("main", "Main-me", "anthropic")],
+				nowMs: NOW_ALIGNED,
+			});
+
+			const { body } = await callHandler(sources, "24h");
+
+			expect(body.pool.map((p) => p.ts)).toEqual([
+				firstTs,
+				firstTs + HOUR,
+				NOW_ALIGNED,
+			]);
 		});
 	});
 });

@@ -10,6 +10,7 @@ import { createPaymentsSummaryDataHandler } from "./payments-summary-direct";
 import { createQuotaDriftHandler } from "./quota-drift-direct";
 import { createStatsHandler } from "./stats-direct";
 import { createUsageHistoryHandler } from "./usage-history-direct";
+import { createUsageScopedHistoryHandler } from "./usage-scoped-history-direct";
 
 /**
  * Read-only dashboard worker: executes the synchronous bun:sqlite dashboard
@@ -21,6 +22,7 @@ export type DashboardWorkerKind =
 	| "analytics"
 	| "stats"
 	| "usage-history"
+	| "usage-scoped-history"
 	| "memory-history"
 	| "cache-keepalive-history"
 	| "cache-effectiveness"
@@ -74,19 +76,21 @@ self.onmessage = async (event: MessageEvent<AnalyticsWorkerRequest>) => {
 				? createStatsHandler(context)
 				: kind === "usage-history"
 					? createUsageHistoryHandler(context)
-					: kind === "memory-history"
-						? createMemoryHistoryHandler(context)
-						: kind === "cache-keepalive-history"
-							? createCacheKeepaliveHistoryHandler(context)
-							: kind === "cache-effectiveness"
-								? createCacheEffectivenessHandler(context)
-								: kind === "payments-summary"
-									? createPaymentsSummaryDataHandler(context)
-									: kind === "filter-options"
-										? createAnalyticsFilterOptionsHandler(context)
-										: kind === "quota-drift"
-											? createQuotaDriftHandler(context)
-											: createAnalyticsHandler(context);
+					: kind === "usage-scoped-history"
+						? createUsageScopedHistoryHandler(context)
+						: kind === "memory-history"
+							? createMemoryHistoryHandler(context)
+							: kind === "cache-keepalive-history"
+								? createCacheKeepaliveHistoryHandler(context)
+								: kind === "cache-effectiveness"
+									? createCacheEffectivenessHandler(context)
+									: kind === "payments-summary"
+										? createPaymentsSummaryDataHandler(context)
+										: kind === "filter-options"
+											? createAnalyticsFilterOptionsHandler(context)
+											: kind === "quota-drift"
+												? createQuotaDriftHandler(context)
+												: createAnalyticsHandler(context);
 		const response = await handler(new URLSearchParams(params));
 		const body = await response.text();
 		db.close();
