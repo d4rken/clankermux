@@ -26,6 +26,8 @@ function poolResult(): PoolUsageResult {
 		earliestResetAccountName: null,
 		atRisk: [],
 		familyWeekly: [],
+		classes: [],
+		bindingClass: null,
 	};
 }
 
@@ -68,9 +70,7 @@ describe("LimitsCapacityOverview calculation help", () => {
 		expect(document.body.textContent).toContain(
 			"How the overview is calculated",
 		);
-		expect(document.body.textContent).toContain(
-			"unavailable count as 100% used",
-		);
+		expect(document.body.textContent).toContain("never as 0%");
 		expect(document.body.textContent).toContain(
 			"never control request routing",
 		);

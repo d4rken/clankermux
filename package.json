@@ -26,6 +26,7 @@
 		"build:readme-screenshots": "bun run build:dashboard && scripts/capture-readme-screenshots.sh",
 		"format": "bunx biome format --write .",
 		"lint": "bunx --bun biome check --write --unsafe .",
+		"preview:dashboard": "bun scripts/dashboard-preview.ts",
 		"restart": "./scripts/restart.sh"
 	},
 	"engines": {
