@@ -1,8 +1,6 @@
 import { RUNWAY_HORIZON_MS } from "@clankermux/core";
 import type { AnalyticsSection } from "@clankermux/types";
-import { formatNumber, formatPercentage } from "@clankermux/ui-common";
-import { Activity } from "lucide-react";
-import React, { useCallback, useMemo, useState } from "react";
+import React, { useMemo, useState } from "react";
 import { REFRESH_INTERVALS, type TimeRange } from "../constants";
 import {
 	useAccounts,
@@ -17,7 +15,6 @@ import type { ServableClassPool } from "../lib/pool-usage";
 import { MissingSectionsNotice } from "./analytics/MissingSectionsNotice";
 import { ChartsSection } from "./overview/ChartsSection";
 import { LiveActivityLanes } from "./overview/LiveActivityLanes";
-import { MetricCard } from "./overview/MetricCard";
 import { PricingGapBanner } from "./overview/PricingGapBanner";
 import { RateLimitInfo } from "./overview/RateLimitInfo";
 import { RunwayCard } from "./overview/RunwayCard";
@@ -146,10 +143,6 @@ export const OverviewTab = React.memo(() => {
 		statsAvailability.state === "stale"
 			? `Last updated ${staleAgeLabel(statsAvailability.lastUpdatedAt, now)}`
 			: undefined;
-	const analyticsStaleNote =
-		analyticsAvailability.state === "stale"
-			? `Last updated ${staleAgeLabel(analyticsAvailability.lastUpdatedAt, now)}`
-			: undefined;
 	const accountsStaleNote =
 		accountsAvailability.state === "stale"
 			? `Last updated ${staleAgeLabel(accountsAvailability.lastUpdatedAt, now)}`
@@ -159,68 +152,11 @@ export const OverviewTab = React.memo(() => {
 			? `Last updated ${staleAgeLabel(runwayAvailability.lastUpdatedAt, now)}`
 			: undefined;
 
-	// Memoize percentage change calculation (must be at top level)
-	const pctChange = useCallback(
-		(current: number, previous: number): number | null => {
-			if (previous === 0) return null; // avoid division by zero
-			return ((current - previous) / previous) * 100;
-		},
-		[],
-	);
-
-	// Memoize trend period description
-	const getTrendPeriod = useCallback((range: string): string => {
-		switch (range) {
-			case "1h":
-				return "previous minute";
-			case "6h":
-				return "previous 5 minutes";
-			case "24h":
-				return "previous hour";
-			case "7d":
-				return "previous hour";
-			case "30d":
-			case "all":
-				return "previous day";
-			default:
-				return "previous period";
-		}
-	}, []);
-
 	// Transform time series data
 	const timeSeriesData = useMemo(
 		() => buildOverviewTimeSeries(analytics),
 		[analytics],
 	);
-
-	// Memoize percentage changes calculation
-	const trends = useMemo(() => {
-		if (timeSeriesData.length < 2) {
-			return {
-				deltaRequests: null,
-				trendRequests: "flat" as "up" | "down" | "flat",
-			};
-		}
-
-		const lastBucket = timeSeriesData[timeSeriesData.length - 1];
-		const prevBucket = timeSeriesData[timeSeriesData.length - 2];
-
-		// Calculate deltas
-		const deltaRequests = pctChange(lastBucket.requests, prevBucket.requests);
-
-		// Helper to determine trend
-		const getTrend = (delta: number | null): "up" | "down" | "flat" => {
-			if (delta === null) return "flat";
-			return delta >= 0 ? "up" : "down";
-		};
-
-		return {
-			deltaRequests,
-			trendRequests: getTrend(deltaRequests),
-		};
-	}, [timeSeriesData, pctChange]);
-
-	const trendPeriod = getTrendPeriod(timeRange);
 
 	// Use analytics data for model distribution
 	const modelData =
@@ -263,10 +199,11 @@ export const OverviewTab = React.memo(() => {
 			    whole row while governing one tile of four; it moved down to sit with
 			    the ranged content instead.
 
-			    Column count follows the class list: one card per class plus the
-			    runway, capped at four so a fifth provider wraps rather than
-			    shrinking every card below legibility. */}
-			<div className="grid grid-cols-1 gap-group md:grid-cols-2 lg:grid-cols-4">
+			    Three columns, not four: with Total Requests moved out this row holds
+			    one card per servable class plus the runway, and a four-column grid
+			    left the last slot visibly empty. A fifth provider wraps to a second
+			    row rather than shrinking every card below legibility. */}
+			<div className="grid grid-cols-1 gap-group md:grid-cols-2 lg:grid-cols-3">
 				{/* One card per servable class, because the accounts in different
 				    classes cannot cover for each other — see lib/pool-classes. The
 				    5-hour window is a ROW inside each card rather than a card of its
@@ -323,7 +260,12 @@ export const OverviewTab = React.memo(() => {
 			<SpendSummaryBand />
 
 			{/* Everything from here down IS scoped by the selector, and nothing
-			    above it is. */}
+			    above it is.
+
+			    There is deliberately no Total Requests tile: the request-volume chart
+			    directly below plots the same count per bucket, and its right axis
+			    already carries success rate and cache hit — the three figures the
+			    tile used to state as flat aggregates. */}
 			<div className="flex justify-end">
 				<TimeRangeSelector value={timeRange} onChange={setTimeRange} />
 			</div>
@@ -332,36 +274,6 @@ export const OverviewTab = React.memo(() => {
 				analytics={analytics}
 				requested={OVERVIEW_SECTIONS}
 			/>
-
-			<div className="grid grid-cols-1 gap-group md:grid-cols-2 lg:grid-cols-4">
-				<MetricCard
-					title="Total Requests"
-					value={formatNumber(analytics?.totals?.requests || 0)}
-					change={
-						trends.deltaRequests !== null ? trends.deltaRequests : undefined
-					}
-					trend={trends.trendRequests}
-					trendPeriod={trendPeriod}
-					loading={analyticsPending}
-					// Without these the tile would render the `|| 0` fallback, which is
-					// indistinguishable from a range that genuinely saw no requests.
-					unavailableReason={
-						analyticsUnavailable ? "Request data unavailable" : undefined
-					}
-					staleNote={analyticsStaleNote}
-					icon={Activity}
-					subRows={[
-						{
-							label: "Success rate",
-							value: formatPercentage(analytics?.totals?.successRate || 0, 0),
-						},
-						{
-							label: "Cache hit",
-							value: formatPercentage(analytics?.totals?.cacheHitRate || 0, 0),
-						},
-					]}
-				/>
-			</div>
 
 			<ChartsSection
 				timeSeriesData={timeSeriesData}

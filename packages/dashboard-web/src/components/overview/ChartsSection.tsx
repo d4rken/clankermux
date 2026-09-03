@@ -110,11 +110,12 @@ export function ChartsSection({
 			{/* Charts Row 1 — request volume + success rate, combined full width */}
 			<Card>
 				<CardHeader>
-					<CardTitle>Request Volume &amp; Success Rate</CardTitle>
+					<CardTitle>Request Volume, Success &amp; Cache Hit</CardTitle>
 					<CardDescription>
-						Requests per bucket (left axis), success percentage (right axis),
-						and distinct active sessions (own scale — compare shape, not height)
-						over time. Sessions are attributed for new requests only.
+						Requests per bucket (left axis), success and cache-hit percentages
+						(right axis), and distinct active sessions (own scale — compare
+						shape, not height) over time. Sessions are attributed for new
+						requests only.
 					</CardDescription>
 				</CardHeader>
 				<CardContent>

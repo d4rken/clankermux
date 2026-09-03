@@ -139,6 +139,9 @@ describe("buildOverviewTimeSeries", () => {
 			ts: 42,
 			requests: 9,
 			successRate: 87.5,
+			// Carried through so the chart can plot it as a series. It was always
+			// on the analytics response; only the Overview transform dropped it.
+			cacheHitRate: 0,
 			responseTime: 124,
 			cost: "1.24",
 			planCost: 0.5,

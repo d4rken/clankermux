@@ -24,6 +24,8 @@ interface RequestVolumeSuccessChartProps {
 		ts: number;
 		requests: number;
 		successRate: number;
+		/** Cache-read tokens as a percentage of input tokens in the bucket. */
+		cacheHitRate: number;
 		/**
 		 * Distinct active sessions in the bucket. The key is absent (not
 		 * `undefined`) on every row when the server didn't report session
@@ -160,6 +162,7 @@ export function RequestVolumeSuccessChart({
 								formatters={{
 									requests: (value) => formatNumber(Number(value)),
 									successRate: (value) => `${Number(value).toFixed(1)}%`,
+									cacheHitRate: (value) => `${Number(value).toFixed(1)}%`,
 									activeSessions: (value) => formatNumber(Number(value)),
 								}}
 								labelFormatter={(label, payload) => {
@@ -200,6 +203,20 @@ export function RequestVolumeSuccessChart({
 						name="Success Rate"
 						stroke={CHART_TOKENS.success}
 						strokeWidth={2}
+						dot={false}
+					/>
+					{/* Shares the percentage axis with success rate — both are 0-100%
+					    of a per-bucket denominator, so a second axis would invite
+					    comparing two differently-scaled lines by height. Dashed so the
+					    two are separable without relying on colour alone. */}
+					<Line
+						yAxisId="successRate"
+						type="monotone"
+						dataKey="cacheHitRate"
+						name="Cache Hit"
+						stroke={CHART_TOKENS.cyan}
+						strokeWidth={2}
+						strokeDasharray="4 3"
 						dot={false}
 					/>
 					{hasSessions && (
