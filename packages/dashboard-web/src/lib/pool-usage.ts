@@ -219,6 +219,77 @@ export function willRunOutCount(result: PoolUsageResult): {
 	};
 }
 
+/**
+ * The verdict for ONE servable class, tinting the figure that class shows.
+ *
+ * Keyed on the least-used account, because that is the number on the card. A
+ * verdict computed from the whole pool's average would tint a figure it does not
+ * describe — and on a per-class card it would paint every class the same colour
+ * regardless of which one is actually in trouble.
+ */
+export function poolClassOutlook(pool: ServableClassPool): Outlook {
+	if (pool.leastUsed == null) {
+		return { label: "No reading", tone: "neutral" };
+	}
+	const pct = pool.leastUsed.pct;
+	if (pct >= 100) return { label: "Exhausted", tone: "destructive" };
+	if (pct >= 80) return { label: "High usage", tone: "destructive" };
+	if (pct >= 60) return { label: "Watch", tone: "warning" };
+	// An account nobody has a reading for is not evidence of health, and it is
+	// omitted from every figure above. Same rule as the pool-wide outlook.
+	if (pool.eligibleTotal > pool.capacityCount) {
+		return { label: "Watch", tone: "warning" };
+	}
+	return { label: "Low usage", tone: "success" };
+}
+
+/**
+ * Narrow a whole-pool result to one servable class.
+ *
+ * The per-class cards render the shared breakdown and the family badge, both of
+ * which take a `PoolUsageResult`. Handing them the pool-wide one made every card
+ * show every account — a Codex card claiming a Claude model family was
+ * exhausted, and a one-account card whose popover listed six.
+ *
+ * Membership is by account NAME for the exclusion lists, which carry no id. Names
+ * are user-set and need not be unique, so a duplicate name can pull a row into a
+ * neighbouring class's breakdown. That is a cosmetic mislabel in a disclosure
+ * panel, and strictly better than the alternative of showing everything
+ * everywhere; the lists would need an id to do better.
+ */
+export function scopeResultToClass(
+	result: PoolUsageResult,
+	pool: ServableClassPool,
+): PoolUsageResult {
+	const ids = new Set(pool.accounts.map((a) => a.accountId));
+	const names = new Set(pool.accounts.map((a) => a.name));
+	const contributing = result.contributing.filter((c) => ids.has(c.accountId));
+	const exhausted = result.exhausted.filter((e) => names.has(e.name));
+	const excluded = result.excluded.filter((e) => names.has(e.name));
+	const familyWeekly = result.familyWeekly
+		.map((family) => ({
+			...family,
+			accounts: family.accounts.filter((a) => names.has(a.name)),
+		}))
+		// A family none of this class's accounts reports is not this class's
+		// concern. Dropping it is what stops a GPT card announcing a Fable limit.
+		.filter((family) => family.accounts.length > 0);
+
+	return {
+		...result,
+		contributing,
+		exhausted,
+		excluded,
+		fallback: [],
+		atRisk: result.atRisk.filter((a) => ids.has(a.accountId)),
+		familyWeekly,
+		earliestResetMs: pool.earliestResetMs,
+		earliestResetAccountName: pool.earliestResetAccountName,
+		classes: [pool],
+		bindingClass: pool,
+	};
+}
+
 /** One account's contribution to a per-family weekly bucket. */
 export interface FamilyWeeklyAccountUsage {
 	name: string;

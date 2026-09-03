@@ -256,46 +256,17 @@ export const OverviewTab = React.memo(() => {
 			    the same content. */}
 			<LiveActivityLanes />
 
-			{/* Scopes everything below it, and now sits directly above it. */}
-			<div className="flex justify-end">
-				<TimeRangeSelector value={timeRange} onChange={setTimeRange} />
-			</div>
+			{/* LIVE-STATE row: current quota per servable class, plus the runway.
+			    Deliberately ABOVE the range selector and unaffected by it — these
+			    describe the pool right now, not a time window. Total Requests used to
+			    sit here and IS range-scoped, so the selector appeared to govern the
+			    whole row while governing one tile of four; it moved down to sit with
+			    the ranged content instead.
 
-			<MissingSectionsNotice
-				analytics={analytics}
-				requested={OVERVIEW_SECTIONS}
-			/>
-
-			{/* Metrics Grid. Four tiles: two columns from md, four once there is room,
-			    so the runway tile never lands alone on a half-empty row. */}
-			<div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-group">
-				<MetricCard
-					title="Total Requests"
-					value={formatNumber(analytics?.totals?.requests || 0)}
-					change={
-						trends.deltaRequests !== null ? trends.deltaRequests : undefined
-					}
-					trend={trends.trendRequests}
-					trendPeriod={trendPeriod}
-					loading={analyticsPending}
-					// Without these the tile would render the `|| 0` fallback, which is
-					// indistinguishable from a range that genuinely saw no requests.
-					unavailableReason={
-						analyticsUnavailable ? "Request data unavailable" : undefined
-					}
-					staleNote={analyticsStaleNote}
-					icon={Activity}
-					subRows={[
-						{
-							label: "Success rate",
-							value: formatPercentage(analytics?.totals?.successRate || 0, 0),
-						},
-						{
-							label: "Cache hit",
-							value: formatPercentage(analytics?.totals?.cacheHitRate || 0, 0),
-						},
-					]}
-				/>
+			    Column count follows the class list: one card per class plus the
+			    runway, capped at four so a fifth provider wraps rather than
+			    shrinking every card below legibility. */}
+			<div className="grid grid-cols-1 gap-group md:grid-cols-2 lg:grid-cols-4">
 				{/* One card per servable class, because the accounts in different
 				    classes cannot cover for each other — see lib/pool-classes. The
 				    5-hour window is a ROW inside each card rather than a card of its
@@ -350,6 +321,47 @@ export const OverviewTab = React.memo(() => {
 
 			{/* Calendar-month ledger spend + amortized subscription run rates. */}
 			<SpendSummaryBand />
+
+			{/* Everything from here down IS scoped by the selector, and nothing
+			    above it is. */}
+			<div className="flex justify-end">
+				<TimeRangeSelector value={timeRange} onChange={setTimeRange} />
+			</div>
+
+			<MissingSectionsNotice
+				analytics={analytics}
+				requested={OVERVIEW_SECTIONS}
+			/>
+
+			<div className="grid grid-cols-1 gap-group md:grid-cols-2 lg:grid-cols-4">
+				<MetricCard
+					title="Total Requests"
+					value={formatNumber(analytics?.totals?.requests || 0)}
+					change={
+						trends.deltaRequests !== null ? trends.deltaRequests : undefined
+					}
+					trend={trends.trendRequests}
+					trendPeriod={trendPeriod}
+					loading={analyticsPending}
+					// Without these the tile would render the `|| 0` fallback, which is
+					// indistinguishable from a range that genuinely saw no requests.
+					unavailableReason={
+						analyticsUnavailable ? "Request data unavailable" : undefined
+					}
+					staleNote={analyticsStaleNote}
+					icon={Activity}
+					subRows={[
+						{
+							label: "Success rate",
+							value: formatPercentage(analytics?.totals?.successRate || 0, 0),
+						},
+						{
+							label: "Cache hit",
+							value: formatPercentage(analytics?.totals?.cacheHitRate || 0, 0),
+						},
+					]}
+				/>
+			</div>
 
 			<ChartsSection
 				timeSeriesData={timeSeriesData}

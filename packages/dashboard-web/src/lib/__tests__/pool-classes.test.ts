@@ -1,7 +1,7 @@
 import { describe, expect, it } from "bun:test";
 import type { AccountResponse } from "@clankermux/types";
 import { compareServableClasses, servableClassFor } from "../pool-classes";
-import { computePoolUsage } from "../pool-usage";
+import { computePoolUsage, scopeResultToClass } from "../pool-usage";
 
 const NOW = Date.UTC(2026, 8, 3, 12, 0, 0);
 const HOUR = 60 * 60_000;
@@ -189,5 +189,75 @@ describe("computePoolUsage servable classes", () => {
 		// And it is still counted as capacity: it can serve once it recovers.
 		expect(result.classes[0].capacityCount).toBe(2);
 		expect(result.classes[0].singlePointOfFailure).toBe(false);
+	});
+});
+
+describe("scopeResultToClass", () => {
+	it("drops a model family none of the class's accounts reports", () => {
+		// The defect this exists for, seen live: every per-class card was handed
+		// the pool-wide result, so the GPT card announced "Fable weekly exhausted"
+		// — a Claude model family — about a single Codex account.
+		const result = computePoolUsage(
+			[
+				withUsage("claude-a", "anthropic", 30),
+				withUsage("codex-1", "codex", 50),
+			],
+			"seven_day",
+			NOW,
+		);
+		const withFable: typeof result = {
+			...result,
+			familyWeekly: [
+				{
+					family: "fable",
+					label: "Fable",
+					worstPct: 100,
+					worstAccountName: "claude-a",
+					earliestResetMs: NOW + 48 * HOUR,
+					elevated: true,
+					exhaustedCount: 1,
+					elevatedCount: 1,
+					atRiskCount: 0,
+					soonestExhaustsAtMs: null,
+					accounts: [
+						{
+							name: "claude-a",
+							pct: 100,
+							resetMs: NOW + 48 * HOUR,
+							exhaustsAtMs: null,
+						},
+					],
+				},
+			],
+		};
+
+		const codexClass = result.classes.find((c) => c.classId === "codex");
+		const anthropicClass = result.classes.find(
+			(c) => c.classId === "anthropic",
+		);
+		if (!codexClass || !anthropicClass) throw new Error("missing class");
+
+		expect(scopeResultToClass(withFable, codexClass).familyWeekly).toEqual([]);
+		expect(
+			scopeResultToClass(withFable, anthropicClass).familyWeekly,
+		).toHaveLength(1);
+	});
+
+	it("narrows the breakdown to the class's own accounts", () => {
+		// A one-account card's popover listed all six accounts.
+		const result = computePoolUsage(
+			[
+				withUsage("claude-a", "anthropic", 30),
+				withUsage("claude-b", "anthropic", 40),
+				withUsage("codex-1", "codex", 50),
+			],
+			"seven_day",
+			NOW,
+		);
+		const codexClass = result.classes.find((c) => c.classId === "codex");
+		if (!codexClass) throw new Error("missing class");
+
+		const scoped = scopeResultToClass(result, codexClass);
+		expect(scoped.contributing.map((c) => c.name)).toEqual(["codex-1"]);
 	});
 });

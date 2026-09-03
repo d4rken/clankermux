@@ -1,8 +1,9 @@
 import { AlertCircle, AlertTriangle, Clock, Info } from "lucide-react";
 import {
 	type PoolUsageResult,
-	poolOutlook,
+	poolClassOutlook,
 	type ServableClassPool,
+	scopeResultToClass,
 } from "../../lib/pool-usage";
 import { cn } from "../../lib/utils";
 import { Card, CardContent } from "../ui/card";
@@ -59,18 +60,24 @@ export function PoolQuotaCard({
 	const pending = loading && !unavailableReason;
 	const resolved = !pending && !unavailableReason;
 	const leastUsed = weekly.leastUsed;
-	// A class with no reporting account has no headroom to state. The explicit
-	// dash is required: rendering 100% left for a pool nobody has read would be
-	// the most dangerous possible failure of this card.
-	const headroom = leastUsed == null ? null : Math.max(0, 100 - leastUsed.pct);
-	const tone = TONE_FIGURE_CLASS[poolOutlook(weeklyResult).tone];
-	const family = familyWeeklyBadge(weeklyResult.familyWeekly);
+	// Utilization, not headroom. Every other quota surface in the app — the
+	// account bars right below this figure, the Usage page, the runway chip —
+	// states percent USED, and a headline stating percent LEFT put two readings
+	// of the same fact next to each other ("75% left" above a bar labelled 25%).
+	// One frame, and it is the one the rest of the app already speaks.
+	const usedPct = leastUsed?.pct ?? null;
+	const tone = TONE_FIGURE_CLASS[poolClassOutlook(weekly).tone];
+	// Scoped to THIS class. Handed the pool-wide result, every card rendered
+	// every account: a Codex card announced that a Claude model family was
+	// exhausted, and a one-account card's popover listed six.
+	const scoped = scopeResultToClass(weeklyResult, weekly);
+	const family = familyWeeklyBadge(scoped.familyWeekly);
 
 	const fiveHourLeast = fiveHour?.leastUsed ?? null;
 	const paceText =
 		fiveHourLeast == null
 			? null
-			: `5h pace: ${Math.round(fiveHourLeast.pct)}% used on ${fiveHourLeast.name}`;
+			: `5h pace: ${Math.round(fiveHourLeast.pct)}% used · ${fiveHourLeast.name}`;
 
 	const checkpoint =
 		weekly.earliestResetMs == null
@@ -102,7 +109,7 @@ export function PoolQuotaCard({
 								</button>
 							</PopoverTrigger>
 							<PopoverContent className="w-72 space-y-row text-xs">
-								<PoolDetailSection result={weeklyResult} window="seven_day" />
+								<PoolDetailSection result={scoped} window="seven_day" />
 							</PopoverContent>
 						</Popover>
 					)}
@@ -118,7 +125,7 @@ export function PoolQuotaCard({
 					</>
 				) : pending ? (
 					<Skeleton className="h-7 w-24" />
-				) : headroom == null ? (
+				) : usedPct == null ? (
 					<>
 						<p className="figure-xl text-muted-foreground/60">—</p>
 						<p className="text-xs text-muted-foreground">
@@ -127,11 +134,9 @@ export function PoolQuotaCard({
 					</>
 				) : (
 					<>
-						<p className={cn("figure-xl", tone)}>
-							{Math.round(headroom)}% left
-						</p>
+						<p className={cn("figure-xl", tone)}>{Math.round(usedPct)}% used</p>
 						<p className="truncate text-xs text-muted-foreground">
-							on {leastUsed?.name}
+							lowest · {leastUsed?.name}
 						</p>
 					</>
 				)}
