@@ -1,8 +1,7 @@
 import type { ModelFamily } from "@clankermux/core";
-import { registerUIRefresh } from "@clankermux/core";
 import type { AnalyticsSection } from "@clankermux/types";
 import { useQueries } from "@tanstack/react-query";
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useMemo, useState } from "react";
 import type { TimeRange } from "../../constants";
 import {
 	usageScopedHistoryQueryOptions,
@@ -13,9 +12,9 @@ import {
 	useUsageHistory,
 	useUsageScopedHistory,
 } from "../../hooks/queries";
+import { usePoolUsage } from "../../hooks/usePoolUsage";
 import { dataAvailability } from "../../lib/data-availability";
 import {
-	computePoolUsage,
 	listLiveScopedFamilies,
 	mergeScopedFamilies,
 } from "../../lib/pool-usage";
@@ -86,24 +85,10 @@ export const LimitsTab = React.memo(() => {
 	const paymentsQuery = usePaymentsSummary(perfRange);
 	const { data: paymentsSummary, isLoading: paymentsLoading } = paymentsQuery;
 
-	const [now, setNow] = useState(() => Date.now());
-	useEffect(() => {
-		return registerUIRefresh({
-			id: "limits-tab-update",
-			callback: () => setNow(Date.now()),
-			seconds: 30,
-			description: "Limits tab pool/countdown refresh",
-		});
-	}, []);
-
-	const fiveHourPool = useMemo(
-		() => computePoolUsage(accounts ?? [], "five_hour", now),
-		[accounts, now],
-	);
-	const weeklyPool = useMemo(
-		() => computePoolUsage(accounts ?? [], "seven_day", now),
-		[accounts, now],
-	);
+	// One computation and one clock, shared with the Overview. Both pages used to
+	// run their own `computePoolUsage` against their own 30s interval, so the
+	// same two numbers could differ between tabs by up to a refresh period.
+	const { now, fiveHour: fiveHourPool, sevenDay: weeklyPool } = usePoolUsage();
 	// Which per-family panels exist: the union of what the pool reports right now
 	// and what has been recorded. Live-only would blink the panel out at every
 	// window rollover (a scoped limit disappears from the payload the moment its

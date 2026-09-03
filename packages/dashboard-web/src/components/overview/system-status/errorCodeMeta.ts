@@ -101,6 +101,68 @@ const KNOWN_ERROR_META: Record<
 	},
 };
 
+/**
+ * Give-up terminals written by `handleProxy` when no account produced a
+ * response. These are NOT `RateLimitReason` values — they are request-level
+ * verdicts, one per request, whereas a `RateLimitReason` describes a single
+ * attempt — so they need their own table rather than a widened one.
+ *
+ * They are here because the terminal label is the only durable record of WHY a
+ * request was refused, and the two that look alike are the ones worth telling
+ * apart: `all_accounts_failed` means the pool had nothing left, while
+ * `model_not_served` means the pool was fine and the model was not.
+ */
+const KNOWN_TERMINAL_META: Record<string, ErrorMeta> = {
+	model_not_served: {
+		title: "Model rejected by every account attempted",
+		description:
+			"Each account the proxy reached rejected this model as outside its plan entitlement, and none of them was short of quota. Accounts that were unavailable at the time (paused, cooling down) were not attempted, so this does not prove the model is unserveable everywhere — only that nothing reachable would serve it.",
+		suggestion:
+			"Stop sending this model, or add an account on a plan that serves it. Retrying will not help while the same accounts are reachable.",
+		severity: "error",
+	},
+	all_accounts_failed: {
+		title: "No account could serve the request",
+		description:
+			"Every candidate account was attempted and none produced a response. Causes vary — rate limits, auth failures, upstream errors — and each attempt is recorded separately in Request History.",
+		suggestion:
+			"Check the individual attempt rows for this request to see what each account returned.",
+		severity: "error",
+	},
+	pool_exhausted: {
+		title: "Pool exhausted",
+		description:
+			"No account had quota left to serve the request at the moment it arrived.",
+		suggestion:
+			"Wait for the earliest window reset, or add capacity to the pool.",
+		severity: "error",
+	},
+	oauth_tokens_expired: {
+		title: "OAuth re-authentication likely needed",
+		description:
+			"The request failed with one or more OAuth accounts whose refresh token is past its maximum age. That age check is a heuristic, not a refresh attempt, so it names the likely cause rather than a confirmed one.",
+		suggestion:
+			"Re-authenticate the named accounts from the Accounts tab. An expired refresh token does not resolve on its own.",
+		severity: "error",
+	},
+	pinned_target_unavailable: {
+		title: "Pinned account unavailable",
+		description:
+			"The request was pinned to a specific account or class, and that target could not serve it. Pinning deliberately forbids failover, so no other account was tried.",
+		suggestion:
+			"Wait for the pinned account to recover, or remove the pin if any account will do.",
+		severity: "error",
+	},
+	provider_overloaded: {
+		title: "Provider overloaded",
+		description:
+			"The upstream provider is returning overload errors across the pool, and the shared cooldown was still open when this request arrived.",
+		suggestion:
+			"No action needed — the breaker half-opens and probes for recovery automatically.",
+		severity: "warning",
+	},
+};
+
 function getModelFallbackMeta(context?: ErrorContext): ErrorMeta {
 	const provider = context?.provider ?? null;
 	const otherAccountsAvailable = context?.otherAccountsAvailable;
@@ -138,6 +200,8 @@ export function getErrorMeta(code: string, context?: ErrorContext): ErrorMeta {
 	if (code in KNOWN_ERROR_META) {
 		return KNOWN_ERROR_META[code as keyof typeof KNOWN_ERROR_META];
 	}
+	const terminal = KNOWN_TERMINAL_META[code];
+	if (terminal) return terminal;
 	return {
 		title: code || "Unknown error",
 		description: "No additional context is available for this error code.",

@@ -702,6 +702,151 @@ export class RequestRepository extends BaseRepository<RequestData> {
 		}));
 	}
 
+	/**
+	 * Failed requests in range, grouped by raw message + status + time bucket.
+	 *
+	 * Classification into a {@link StopCause} happens in TypeScript, not here:
+	 * `error_message` mixes proxy terminals with free-form upstream text, and
+	 * encoding that vocabulary as SQL CASE arms would put the rule in a second
+	 * place that the public widget read could disagree with.
+	 *
+	 * Served by `idx_requests_success_timestamp` — `(success, timestamp DESC)`,
+	 * created in performance-indexes.ts — as a covering index, verified against
+	 * the live planner. No dedicated index is needed or wanted here.
+	 *
+	 * Grouping deliberately omits the model: adding it multiplies the row count
+	 * by the model cardinality on top of the bucket cardinality. The per-cause
+	 * top model comes from {@link getStopModelBreakdown}, which has no bucket
+	 * dimension and stays small.
+	 */
+	async getStopsByBucket(opts: { sinceMs: number; bucketMs: number }): Promise<
+		Array<{
+			errorMessage: string | null;
+			statusCode: number | null;
+			bucketMs: number;
+			count: number;
+			firstSeenMs: number;
+			lastSeenMs: number;
+		}>
+	> {
+		const rows = await this.query<{
+			error_message: string | null;
+			status_code: number | null;
+			bucket: number;
+			c: number;
+			first_ms: number;
+			last_ms: number;
+		}>(
+			`
+			SELECT
+				error_message,
+				status_code,
+				(timestamp / ?) * ? AS bucket,
+				COUNT(*) AS c,
+				MIN(timestamp) AS first_ms,
+				MAX(timestamp) AS last_ms
+			FROM requests
+			WHERE success = 0 AND timestamp >= ?
+			GROUP BY error_message, status_code, bucket
+		`,
+			[opts.bucketMs, opts.bucketMs, opts.sinceMs],
+		);
+		return rows.map((row) => ({
+			errorMessage: row.error_message,
+			statusCode: row.status_code,
+			bucketMs: row.bucket,
+			count: row.c,
+			firstSeenMs: row.first_ms,
+			lastSeenMs: row.last_ms,
+		}));
+	}
+
+	/**
+	 * Failed requests in range by raw message + status + requested model.
+	 *
+	 * Feeds the per-cause "top requested model" line, which is what makes a
+	 * historical row readable after the fact: a cause whose blocks are almost
+	 * all one model is usually not the story its label tells, and rows written
+	 * before the proxy learned to tell those apart keep their old label forever.
+	 *
+	 * `requested_model` is the INGRESS model (what the client asked for), which
+	 * is the one worth naming; `model` is the fallback for rows recorded before
+	 * that column existed.
+	 */
+	async getStopModelBreakdown(opts: { sinceMs: number }): Promise<
+		Array<{
+			errorMessage: string | null;
+			statusCode: number | null;
+			model: string | null;
+			count: number;
+		}>
+	> {
+		const rows = await this.query<{
+			error_message: string | null;
+			status_code: number | null;
+			m: string | null;
+			c: number;
+		}>(
+			`
+			SELECT
+				error_message,
+				status_code,
+				COALESCE(requested_model, model) AS m,
+				COUNT(*) AS c
+			FROM requests
+			WHERE success = 0 AND timestamp >= ?
+			GROUP BY error_message, status_code, m
+		`,
+			[opts.sinceMs],
+		);
+		return rows.map((row) => ({
+			errorMessage: row.error_message,
+			statusCode: row.status_code,
+			model: row.m,
+			count: row.c,
+		}));
+	}
+
+	/** Total requests in range — the denominator a blocked count needs to be a rate. */
+	async countRequestsSince(sinceMs: number): Promise<number> {
+		const row = await this.get<{ c: number }>(
+			`SELECT COUNT(*) AS c FROM requests WHERE timestamp >= ?`,
+			[sinceMs],
+		);
+		return row?.c ?? 0;
+	}
+
+	/**
+	 * How many accounts were eligible to serve each request, as a histogram.
+	 *
+	 * This is the redundancy signal no forecast can see. A pool that never drops
+	 * below two eligible accounts has margin that no projection can take away;
+	 * one that spends most of its time at one candidate is a single failure away
+	 * from a stop however much quota it reports.
+	 *
+	 * Rows with a NULL `candidates_count` are excluded rather than folded into
+	 * zero — "not recorded" and "nothing was eligible" are opposite readings,
+	 * and zero is the one that means an outage.
+	 */
+	async getCandidateCountDistribution(
+		sinceMs: number,
+	): Promise<Array<{ candidatesCount: number; requests: number }>> {
+		const rows = await this.query<{ candidates_count: number; c: number }>(
+			`
+			SELECT candidates_count, COUNT(*) AS c
+			FROM request_routing
+			WHERE created_at >= ? AND candidates_count IS NOT NULL
+			GROUP BY candidates_count
+			ORDER BY candidates_count ASC
+		`,
+			[sinceMs],
+		);
+		return rows.map((row) => ({
+			candidatesCount: row.candidates_count,
+			requests: row.c,
+		}));
+	}
+
 	// Retention DELETEs (requests / payloads by age, orphaned payloads) now run
 	// off the main thread in the incremental-vacuum worker's "cleanup" kind —
 	// see runCleanup() in incremental-vacuum-worker.ts, driven by

@@ -65,8 +65,16 @@ function tile(markup: string, title: string): string {
 	return next === -1 ? rest : rest.slice(0, next);
 }
 
-/** The four tiles of the metrics grid, each of which speaks for its own read. */
-const TILES = ["Total Requests", "5h Pool", "7d Pool", "Quota Runway"];
+/**
+ * The tiles of the metrics grid, each of which speaks for its own read.
+ *
+ * "Quota" rather than the old "5h Pool"/"7d Pool" pair: the quota cards are now
+ * one per servable class and that list is DERIVED from the accounts, so while
+ * the accounts read is pending or failed there is no class list to render. A
+ * single placeholder card stands in for the set, which is exactly the state
+ * these tests exercise.
+ */
+const TILES = ["Quota", "Quota Runway"];
 
 /**
  * Marks a query as terminally failed with nothing cached — the "unavailable"
@@ -153,9 +161,7 @@ describe("OverviewTab progressive render", () => {
 		expect(html).toContain("Live Activity");
 		expect(html).toContain("Every request in the last");
 		// Tiles are present but placeholdered, not gone and not zeroed.
-		expect(html).toContain("Total Requests");
-		expect(html).toContain("7d Pool");
-		expect(html).toContain("5h Pool");
+		expect(html).toContain("Quota");
 		expect(html).toContain("animate-pulse");
 	});
 
@@ -177,13 +183,16 @@ describe("OverviewTab progressive render", () => {
 
 		const html = render(queryClient);
 
-		expect(html).toContain("Request data unavailable");
+		// The Total Requests tile used to carry this claim. It is gone — the
+		// request-volume chart plots the same count per bucket, with success rate
+		// and cache hit on its right axis — so the chart is now the only surface
+		// speaking for the analytics read, and it must still say the read failed
+		// rather than draw an empty plot that looks like a quiet period.
 		expect(html).toContain("Chart data unavailable");
-		// The tile that read analytics is the one that must not fall back to a
-		// zero; the others are speaking for reads that did not fail.
-		expect(tile(html, "Total Requests")).not.toContain(">0<");
-		// Live Activity is unaffected by an analytics failure.
+		// Live Activity and the quota cards are unaffected by an analytics
+		// failure: they speak for reads that did not fail.
 		expect(html).toContain("Live Activity");
+		expect(html).toContain("Quota");
 	});
 
 	it("says 'unavailable' rather than empty capacity when accounts fails outright", () => {

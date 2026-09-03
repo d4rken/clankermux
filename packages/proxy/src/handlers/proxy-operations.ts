@@ -200,6 +200,19 @@ export type ProxyAttemptOutcome =
 	| { kind: "overload_529"; cooldownUntil?: number }
 	| { kind: "overload_suppressed"; until: number | null }
 	| { kind: "model_not_found" }
+	/**
+	 * The account is not ENTITLED to the model: it exists, but this account's
+	 * plan does not serve it (the Codex/ChatGPT plan-scoped rejection).
+	 *
+	 * Split out from `model_not_found` because only this one is unambiguous
+	 * evidence about the model. `model_not_found` is also emitted after an
+	 * account's model-fallback list is exhausted, where the kind is decided by
+	 * the LAST response's status alone — a primary that 429s and a fallback that
+	 * 404s produces `model_not_found` for what was really a capacity failure.
+	 * Anything that reasons about "the model, not the load" must key on this
+	 * kind, not on that one.
+	 */
+	| { kind: "model_not_entitled" }
 	| { kind: "network_error" }
 	| { kind: "other" };
 
@@ -2205,7 +2218,7 @@ export async function proxyWithAccount(
 						// Default "native" dispose: this short-circuit runs before any
 						// usage-extraction clone exists, so rawResponse is still a plain
 						// fetch body that must be drained, not a tee branch.
-						return await fail({ kind: "model_not_found" }, rawResponse);
+						return await fail({ kind: "model_not_entitled" }, rawResponse);
 					}
 					// Model-not-found (404/400) is forwarded to the client so it can
 					// surface the real error. Strip content-encoding/content-length

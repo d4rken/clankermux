@@ -13,7 +13,14 @@ import {
 import type { ComponentType } from "react";
 import { describePinTarget } from "../../lib/api-key-pin-label";
 import { formatDurationDhm } from "../../lib/format-prediction";
-import type { PoolUsageResult, PoolWindow } from "../../lib/pool-usage";
+import {
+	eligibleAccountTotal,
+	type Outlook,
+	type PoolUsageResult,
+	type PoolWindow,
+	poolOutlook,
+	willRunOutCount,
+} from "../../lib/pool-usage";
 import {
 	describeRunwayCause,
 	formatRunwayValue,
@@ -22,10 +29,12 @@ import {
 } from "../../lib/runway-display";
 import { cn } from "../../lib/utils";
 import { StatusChip } from "../accounts/StatusChip";
+import { TONE_CLASSES } from "../quota/outlook-tone";
 import {
 	familyWeeklyBadge,
 	PoolDetailSection,
-} from "../overview/PoolMetricCard";
+	windowTimeLabel,
+} from "../quota/PoolDetailSection";
 import {
 	Card,
 	CardContent,
@@ -37,85 +46,6 @@ import { InsetPanel } from "../ui/inset-panel";
 import { Popover, PopoverContent, PopoverTrigger } from "../ui/popover";
 import { Progress } from "../ui/progress";
 import { Skeleton } from "../ui/skeleton";
-
-type OutlookTone = "neutral" | "success" | "warning" | "destructive";
-
-interface Outlook {
-	label: string;
-	tone: OutlookTone;
-}
-
-const TONE_CLASSES: Record<
-	OutlookTone,
-	{ chip: string; figure: string; progress: string }
-> = {
-	neutral: {
-		chip: "bg-secondary text-secondary-foreground",
-		figure: "text-muted-foreground",
-		progress: "bg-muted-foreground/40",
-	},
-	success: {
-		chip: "bg-success/15 text-success-strong",
-		figure: "text-success-strong",
-		progress: "bg-success",
-	},
-	warning: {
-		chip: "bg-warning/15 text-warning-strong",
-		figure: "text-warning-strong",
-		progress: "bg-warning",
-	},
-	destructive: {
-		chip: "bg-destructive/15 text-destructive-strong",
-		figure: "text-destructive-strong",
-		progress: "bg-destructive",
-	},
-};
-
-function quotaOutlook(result: PoolUsageResult): Outlook {
-	if (result.average == null) {
-		return { label: "Account-wide unknown", tone: "neutral" };
-	}
-
-	const allUnavailable =
-		result.contributing.length === 0 && result.exhausted.length > 0;
-
-	if (result.average >= 100 || allUnavailable) {
-		return { label: "Constrained", tone: "destructive" };
-	}
-	if (result.average >= 80) {
-		return { label: "High usage", tone: "destructive" };
-	}
-	if (
-		result.average >= 60 ||
-		result.atRisk.length > 0 ||
-		result.exhausted.length > 0 ||
-		result.excluded.length > 0
-	) {
-		return { label: "Watch", tone: "warning" };
-	}
-
-	const everyReportingAccountCanBeProjected =
-		result.contributing.length > 0 &&
-		result.contributing.every((account) => account.resetMs != null);
-	return everyReportingAccountCanBeProjected
-		? { label: "On pace", tone: "success" }
-		: { label: "Low usage", tone: "success" };
-}
-
-function formatCheckpointStamp(resetMs: number, window: PoolWindow): string {
-	const reset = new Date(resetMs);
-	return window === "seven_day"
-		? reset.toLocaleString(undefined, {
-				month: "short",
-				day: "numeric",
-				hour: "2-digit",
-				minute: "2-digit",
-			})
-		: reset.toLocaleTimeString(undefined, {
-				hour: "2-digit",
-				minute: "2-digit",
-			});
-}
 
 function countLabel(count: number, state: string): string {
 	return `${count} ${state}`;
@@ -156,13 +86,10 @@ function WindowPanel({
 	const pending = loading && unavailableReason == null;
 	const resolved = !pending && unavailableReason == null;
 	const outlook: Outlook = resolved
-		? quotaOutlook(result)
+		? poolOutlook(result)
 		: { label: pending ? "Loading" : "Unavailable", tone: "neutral" };
 	const toneClasses = TONE_CLASSES[outlook.tone];
-	const eligibleTotal =
-		result.contributing.length +
-		result.exhausted.length +
-		result.excluded.length;
+	const eligibleTotal = eligibleAccountTotal(result);
 	const clampedAverage =
 		result.average == null ? 0 : Math.max(0, Math.min(100, result.average));
 	const checkpointRemaining =
@@ -170,6 +97,12 @@ function WindowPanel({
 			? null
 			: Math.max(0, result.earliestResetMs - now);
 	const familyAlert = familyWeeklyBadge(result.familyWeekly);
+	// Shared with the Overview badge. This panel used to count `atRisk` alone
+	// while the tile counted `atRisk + exhausted` — the same window, the same
+	// instant, two answers to "how many will run out". An account already at
+	// 100% has run out, so excluding it made the count shrink at the moment the
+	// pool got worse.
+	const { willRunOut, capacity } = willRunOutCount(result);
 	const hasBreakdown =
 		resolved &&
 		(result.contributing.length > 0 ||
@@ -285,7 +218,7 @@ function WindowPanel({
 									? "No checkpoint reported"
 									: [
 											result.earliestResetAccountName,
-											formatCheckpointStamp(result.earliestResetMs, window),
+											windowTimeLabel(result.earliestResetMs, window),
 										]
 											.filter(Boolean)
 											.join(" · ")}
@@ -294,18 +227,18 @@ function WindowPanel({
 				</div>
 			</InsetPanel>
 
-			{resolved && (result.atRisk.length > 0 || familyAlert.label != null) && (
+			{resolved && (willRunOut > 0 || familyAlert.label != null) && (
 				<div className="mt-group space-y-item">
-					{result.atRisk.length > 0 && (
+					{willRunOut > 0 && (
 						<div className="flex items-start gap-item rounded-md border border-warning/30 bg-warning/10 px-row py-item text-xs text-warning-strong">
 							{/* `mt-0.5` stays numeric: an optical nudge to sit the icon on
 							    the text baseline, at 0.125rem — no step on the rhythm
 							    scale, and not a rhythm decision either. */}
 							<AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
 							<span>
-								{result.atRisk.length}{" "}
-								{result.atRisk.length === 1 ? "account" : "accounts"} may
-								exhaust before reset
+								{willRunOut} of {capacity}{" "}
+								{capacity === 1 ? "account" : "accounts"} projected to run out
+								before reset
 							</span>
 						</div>
 					)}

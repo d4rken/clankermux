@@ -11,6 +11,14 @@ export interface OverviewTimeSeriesRow {
 	ts: number;
 	requests: number;
 	successRate: number;
+	/**
+	 * Cache-read tokens as a percentage of all input tokens in this bucket.
+	 *
+	 * Already computed per bucket by the analytics query and already on the
+	 * response — it simply was not carried through here, so the Overview could
+	 * only show it as one aggregate figure on a tile.
+	 */
+	cacheHitRate: number;
 	responseTime: number;
 	/** Pre-formatted 2-dp string — the chart renders it verbatim. */
 	cost: string;
@@ -58,6 +66,7 @@ export function buildOverviewTimeSeries(
 		ts: point.ts,
 		requests: point.requests,
 		successRate: point.successRate,
+		cacheHitRate: point.cacheHitRate,
 		responseTime: Math.round(point.avgResponseTime),
 		cost: point.costUsd.toFixed(2),
 		planCost: point.planCostUsd ?? 0,

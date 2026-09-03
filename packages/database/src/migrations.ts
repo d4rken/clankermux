@@ -183,6 +183,15 @@ export function ensureSchema(db: Database): void {
 		`CREATE INDEX IF NOT EXISTS idx_requests_timestamp_account ON requests(timestamp DESC, account_used)`,
 	);
 
+	// NOTE: do NOT add a partial index over failed rows here for the
+	// stops-history read. `idx_requests_success_timestamp` — created in
+	// performance-indexes.ts, not in this file — is `(success, timestamp DESC)`
+	// and already serves `WHERE success = 0 AND timestamp >= ?` as a covering
+	// index. One was added here and measured against the live planner, which
+	// ignored it in favour of the existing composite; it was pure write
+	// amplification on every failed-request insert. Check
+	// performance-indexes.ts before concluding an index is missing.
+
 	// Create request_routing table for load-balancer decision telemetry.
 	db.run(`
 		CREATE TABLE IF NOT EXISTS request_routing (
