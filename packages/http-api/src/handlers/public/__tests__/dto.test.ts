@@ -10,10 +10,11 @@
  * unauthenticated surface — that no field arrives here that was not named.
  */
 import { describe, expect, it } from "bun:test";
-import type {
-	RateLimitCause,
-	RequestResponse,
-	StopsHistoryResponse,
+import {
+	type RateLimitCause,
+	type RequestResponse,
+	STOP_CAUSES,
+	type StopsHistoryResponse,
 } from "@clankermux/types";
 import type { PublicRunwaySnapshot } from "../../../services/public-runway";
 import type {
@@ -1310,7 +1311,24 @@ describe("stop cause is a closed set with an escape hatch", () => {
 		// `other`, which the firmware renders with a warning, rather than as a
 		// string its closed-set check rejects outright.
 		expect(toPublicStopCause("some_future_terminal")).toBe("other");
+		expect(toPublicStopCause("future_cause")).toBe("other");
 		expect(toPublicStopCause("")).toBe("other");
+	});
+
+	it("publishes exactly today's internal causes and no more", () => {
+		// THIS ASSERTION IS MEANT TO FAIL the day a cause is added to
+		// `STOP_CAUSES`. The mapper no longer derives its set from that list, so
+		// a new internal cause reaches this wire as `other` until someone decides
+		// otherwise — and this is where that decision gets made, in the same
+		// commit that invents the cause, rather than by an unauthenticated
+		// surface silently growing a value its readers reject.
+		//
+		// `STOP_CAUSES` is imported HERE and nowhere in the DTO module: this is a
+		// comparison between two independently written lists, which is the whole
+		// point of it.
+		for (const cause of STOP_CAUSES) {
+			expect(toPublicStopCause(cause)).toBe(cause);
+		}
 	});
 });
 

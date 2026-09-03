@@ -50,11 +50,10 @@
  * our schedule.
  */
 
-import {
-	type RequestResponse,
-	STOP_CAUSES,
-	type StopsHistoryResponse,
-	type UsagePrediction,
+import type {
+	RequestResponse,
+	StopsHistoryResponse,
+	UsagePrediction,
 } from "@clankermux/types";
 import type { PublicRunwaySnapshot } from "../../services/public-runway";
 import type {
@@ -966,10 +965,42 @@ export type PublicStopCauseDto =
 	| "upstream_error"
 	| "other";
 
-const KNOWN_STOP_CAUSES: ReadonlySet<string> = new Set(STOP_CAUSES);
-
+/**
+ * Total over today's `StopCause` values; anything later becomes `other`.
+ *
+ * Written out rather than derived from the internal `STOP_CAUSES` list, which
+ * is what it did before: derived, the published set silently GREW with the
+ * internal one, and a cause added to the proxy shipped onto an unauthenticated
+ * wire the same commit it was invented — past closed-set readers that cannot be
+ * redeployed on our schedule. Spelled out, adding a cause is a decision this
+ * file records, and until it is made the new cause arrives as `other`, which
+ * every consumer already renders.
+ */
 export function toPublicStopCause(cause: string): PublicStopCauseDto {
-	return KNOWN_STOP_CAUSES.has(cause) ? (cause as PublicStopCauseDto) : "other";
+	switch (cause) {
+		case "pool_quota_exhausted":
+			return "pool_quota_exhausted";
+		case "family_weekly_exhausted":
+			return "family_weekly_exhausted";
+		case "model_not_served":
+			return "model_not_served";
+		case "oauth_tokens_expired":
+			return "oauth_tokens_expired";
+		case "pinned_target_unavailable":
+			return "pinned_target_unavailable";
+		case "provider_overloaded":
+			return "provider_overloaded";
+		case "usage_throttled":
+			return "usage_throttled";
+		case "context_window_exceeded":
+			return "context_window_exceeded";
+		case "upstream_error":
+			return "upstream_error";
+		case "other":
+			return "other";
+		default:
+			return "other";
+	}
 }
 
 /** One cause and how often it stopped a request in the window. */
