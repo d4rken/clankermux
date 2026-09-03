@@ -4,10 +4,12 @@ import { jsonResponse } from "@clankermux/http-common";
 import type { LoadBalancingStrategy } from "@clankermux/types";
 import { createPublicRunwayReader } from "../../services/public-runway";
 import { createPublicSnapshotReader } from "../../services/public-snapshot";
+import { createPublicStopsReader } from "../../services/public-stops";
 import { createPublicAccountsHandler } from "./accounts";
 import { NO_STORE_HEADERS } from "./cache-headers";
 import { createPublicRunwayHandler } from "./runway";
 import { createPublicStatusHandler } from "./status";
+import { createPublicStopsHandler } from "./stops";
 import { createPublicStreamHandler } from "./stream";
 
 /**
@@ -52,6 +54,12 @@ export class PublicRouter {
 		const runwayHandler = createPublicRunwayHandler(
 			createPublicRunwayReader(dbOps),
 		);
+		// Its own reader too, and for the same reason: a scan of the request table
+		// is not something a `status` poll should pay for. Memoized inside the
+		// reader, so the isolation costs nothing per caller.
+		const stopsHandler = createPublicStopsHandler(
+			createPublicStopsReader(dbOps),
+		);
 		const streamHandler = createPublicStreamHandler();
 
 		this.handlers = new Map<
@@ -61,6 +69,7 @@ export class PublicRouter {
 			["/public/v1/status", () => statusHandler()],
 			["/public/v1/accounts", () => accountsHandler()],
 			["/public/v1/runway", () => runwayHandler()],
+			["/public/v1/stops", () => stopsHandler()],
 			["/public/v1/stream", (req) => streamHandler(req)],
 		]);
 	}

@@ -222,6 +222,70 @@ describe("GET /public/v1/runway", () => {
 		]);
 	});
 
+	it("publishes the band belonging to the key whose outcome it publishes", async () => {
+		// The band is a PER-KEY field precisely because the headline picks the
+		// worst stateable key: taking it from anywhere else would bracket a scan
+		// this outcome does not describe. Two keys with different pins, so the
+		// published outcome and the published band can only agree by coming from
+		// the same row.
+		usageCache.set(
+			"acc-1",
+			usage(5, BASE + 4 * HOUR_MS, 60, BASE + 3 * DAY_MS),
+		);
+		usageCache.set("acc-2", HEALTHY());
+		const snapshot = await read(
+			makeDbOps({
+				accounts: [
+					makeAccount({ id: "acc-1" }),
+					makeAccount({ id: "acc-2", name: "Account 2" }),
+				],
+				keys: [
+					makeKey({ id: "k1", pinnedAccountId: "acc-1" }),
+					makeKey({ id: "k2", pinnedAccountId: "acc-2" }),
+				],
+			}),
+		);
+		// `acc-1`'s weekly is 60% used with three days left, so its key is the
+		// worse of the two and the one the headline names.
+		expect(snapshot.worstStatedOutcome?.kind).toBe("runway");
+		expect(snapshot.worstStatedOutcome?.causes).toEqual([
+			{ accountId: "acc-1", windowKind: "seven_day" },
+		]);
+		const band = snapshot.worstStatedOutcome?.band;
+		expect(band).not.toBeNull();
+		// Half a percent either way on a whole-percent reading.
+		expect(band?.halfWidthPct).toBe(0.5);
+		// The point estimate the same outcome reports sits inside its own band.
+		const point = snapshot.worstStatedOutcome?.exhaustsAtMs ?? 0;
+		expect(band?.earliestExhaustsAtMs ?? 0).toBeLessThanOrEqual(point);
+		expect(
+			band?.latestExhaustsAtMs ?? Number.POSITIVE_INFINITY,
+		).toBeGreaterThanOrEqual(point);
+
+		// …and it maps onto the two wire instants, which is the only form a
+		// consumer ever sees. The projection is fractional milliseconds; an
+		// instant is not, so the wire value is the truncation of it.
+		const dto = toPublicRunwayDto(snapshot);
+		expect(Date.parse(dto.worstStatedOutcome?.earliestExhaustsAt ?? "")).toBe(
+			Math.trunc(band?.earliestExhaustsAtMs ?? 0),
+		);
+		expect(Date.parse(dto.worstStatedOutcome?.latestExhaustsAt ?? "")).toBe(
+			Math.trunc(band?.latestExhaustsAtMs ?? 0),
+		);
+	});
+
+	it("states no band when nothing anywhere could be stated", async () => {
+		const snapshot = await read(
+			makeDbOps({
+				accounts: [makeAccount({ id: "acc-1" })],
+				keys: [makeKey({})],
+			}),
+		);
+		expect(snapshot.worstStatedOutcome).toBeNull();
+		const dto = toPublicRunwayDto(snapshot);
+		expect(dto.worstStatedOutcome).toBeNull();
+	});
+
 	it("carries aggregate key COUNTS and no key identity whatsoever", async () => {
 		usageCache.set("acc-1", HEALTHY());
 		const snapshot = await read(

@@ -15,6 +15,7 @@ export {
 	PUBLIC_ACCOUNTS_SCHEMA,
 	PUBLIC_RUNWAY_SCHEMA,
 	PUBLIC_STATUS_SCHEMA,
+	PUBLIC_STOPS_SCHEMA,
 	PUBLIC_STREAM_SCHEMA,
 	type PublicAccountDto,
 	type PublicAccountsDto,
@@ -40,6 +41,9 @@ export {
 	type PublicScopedLimitDto,
 	type PublicSnapshotEventDto,
 	type PublicStatusDto,
+	type PublicStopCauseDto,
+	type PublicStopCauseRowDto,
+	type PublicStopsDto,
 	type PublicStreamEventDto,
 	type PublicStreamEventType,
 	type PublicWindowAggregateDto,
@@ -59,10 +63,13 @@ export {
 	toPublicRunwayKind,
 	toPublicStatusDto,
 	toPublicStatusLevel,
+	toPublicStopCause,
+	toPublicStopsDto,
 	toPublicWindowKind,
 	truncateUtf8,
 } from "./handlers/public/dto";
 export { PublicRouter, type PublicRouterDeps } from "./handlers/public/router";
+export { createPublicStopsHandler } from "./handlers/public/stops";
 export { toPublicStreamEvent } from "./handlers/public/stream";
 export {
 	__setQuotaDriftWorkerFactoryForTests,
@@ -111,6 +118,14 @@ export {
 	type PublicWindowSnapshot,
 	resolveCredentialState,
 } from "./services/public-snapshot";
+export {
+	createPublicStopsReader,
+	createPublicStopsReaderFromSources,
+	PUBLIC_STOPS_RANGE,
+	type PublicStopsOptions,
+	type PublicStopsReader,
+	type PublicStopsSnapshot,
+} from "./services/public-stops";
 export {
 	SESSION_ABSOLUTE_MAX_MS,
 	SESSION_COOKIE_NAME,
