@@ -63,6 +63,37 @@ describe("reasoning effort support", () => {
 			"low",
 			"medium",
 		]);
+		// GPT-6 drops `minimal` and adds `max`; the generation prefix covers
+		// later tiers and dated variants without a table edit.
+		expect(getSupportedReasoningEfforts("gpt-6-astra")).toEqual([
+			"low",
+			"medium",
+			"high",
+			"xhigh",
+			"max",
+		]);
+		expect(getSupportedReasoningEfforts("gpt-6-astra-2026-09-03")).toEqual([
+			"low",
+			"medium",
+			"high",
+			"xhigh",
+			"max",
+		]);
+	});
+
+	it("keeps max on GPT-6 and downgrades minimal to its floor", () => {
+		expect(
+			validateReasoningEffort("max", {
+				sourceModel: "claude-fable-5-1",
+				targetModel: "gpt-6-astra",
+			}),
+		).toBe("max");
+		expect(
+			validateReasoningEffort("minimal", {
+				sourceModel: "gpt-6-astra",
+				targetModel: "gpt-6-astra",
+			}),
+		).toBe("low");
 	});
 
 	it("accepts valid reasoning effort for supported Claude and Codex models", () => {

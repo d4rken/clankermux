@@ -328,6 +328,9 @@ describe("MODEL_CONTEXT_WINDOWS", () => {
 		expect(MODEL_CONTEXT_WINDOWS["gpt-5.4"]).toBe(272_000);
 		expect(MODEL_CONTEXT_WINDOWS["gpt-5.4-mini"]).toBe(272_000);
 		expect(MODEL_CONTEXT_WINDOWS["gpt-5.3-codex-spark"]).toBe(128_000);
+		// GPT-6 Astra shares the 272K billing threshold; its 1.05M ceiling is
+		// deliberately not the gate window (see MODEL_CONTEXT_WINDOWS).
+		expect(MODEL_CONTEXT_WINDOWS["gpt-6-astra"]).toBe(272_000);
 	});
 
 	test("omits retired and experimental/compaction models", () => {
@@ -352,6 +355,7 @@ describe("resolveModelContextWindow", () => {
 		// base model's window rather than being treated as unknown.
 		expect(resolveModelContextWindow("gpt-5.6-sol-2026-05-13")).toBe(272_000);
 		expect(resolveModelContextWindow("gpt-5.5-2026-01-01")).toBe(272_000);
+		expect(resolveModelContextWindow("gpt-6-astra-2026-09-03")).toBe(272_000);
 	});
 
 	test("does not accept arbitrary (non-date) suffixes", () => {
@@ -536,7 +540,7 @@ describe("codexAccountFitsRequest", () => {
 	});
 
 	test("gates a default-config account on the fable family window", () => {
-		// fable → gpt-5.6-sol default (272K, threshold 263840).
+		// fable → gpt-6-astra default (272K, threshold 263840).
 		const account = makeCodexAccount({ model_mappings: null });
 		expect(codexAccountFitsRequest(account, "claude-fable-5", 263_840)).toBe(
 			true,
@@ -856,10 +860,10 @@ describe("resolveCodexTargetModel", () => {
 			"gpt-5.6-luna",
 		);
 		expect(resolveCodexTargetModel("claude-fable-5", account)).toBe(
-			"gpt-5.6-sol",
+			"gpt-6-astra",
 		);
 		expect(resolveCodexTargetModel("claude-mythos-5", account)).toBe(
-			"gpt-5.6-sol",
+			"gpt-6-astra",
 		);
 	});
 
@@ -875,7 +879,7 @@ describe("resolveCodexTargetModel", () => {
 			opus: "gpt-5.6-sol",
 			sonnet: "gpt-5.6-terra",
 			haiku: "gpt-5.6-luna",
-			fable: "gpt-5.6-sol",
+			fable: "gpt-6-astra",
 		});
 	});
 

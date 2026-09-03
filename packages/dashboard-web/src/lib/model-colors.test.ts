@@ -38,6 +38,7 @@ const LEGACY_MODEL_IDS = [
 // the Claude models and appear in the same Live Activity legend, so they
 // compete for colors and belong in every separation check below.
 const CODEX_MODEL_IDS = [
+	"gpt-6-astra",
 	"gpt-5.6-sol",
 	"gpt-5.6-terra",
 	"gpt-5.6-luna",

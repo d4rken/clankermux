@@ -1982,9 +1982,14 @@ describe("CodexProvider.transformRequestBody", () => {
 		expect(body.model).toBe("gpt-5.6-terra");
 	});
 
-	it("maps fable and mythos models to the top Codex tier", async () => {
+	it("maps fable and mythos models to the top Codex tier (GPT-6 Astra)", async () => {
 		const provider = new CodexProvider();
-		for (const model of ["claude-fable-5", "claude-mythos-5"]) {
+		for (const model of [
+			"claude-fable-5",
+			"claude-mythos-5",
+			"claude-fable-5-1",
+			"claude-mythos-5-1",
+		]) {
 			const request = new Request("https://example.com/v1/messages", {
 				method: "POST",
 				headers: { "content-type": "application/json" },
@@ -2001,7 +2006,7 @@ describe("CodexProvider.transformRequestBody", () => {
 			);
 			const body = await transformed.json();
 
-			expect(body.model).toBe("gpt-5.6-sol");
+			expect(body.model).toBe("gpt-6-astra");
 		}
 	});
 
@@ -2724,6 +2729,42 @@ describe("CodexProvider ChatGPT-backend parameter sanitation", () => {
 		// fails here purely because routing picked a translated account.
 		const body = await translatedTransform({ reasoning: { effort: "none" } });
 		expect(body.reasoning).toEqual({ effort: "none" });
+	});
+
+	it("raises none to low when the translated target is GPT-6", async () => {
+		// gpt-6-astra's catalog levels start at `low`; `none` is a 5.x-only value.
+		const body = await translatedTransform(
+			{ model: "claude-fable-5-1", reasoning: { effort: "none" } },
+			codexAccount({ model_mappings: null }),
+		);
+		expect(body.model).toBe("gpt-6-astra");
+		expect(body.reasoning).toEqual({ effort: "low" });
+	});
+
+	it("keeps max and ultra on a GPT-6 target, clamps ultra to xhigh on 5.x", async () => {
+		// `ultra` is outside resolveReasoningEffort's vocabulary (it would throw),
+		// so like `none` it short-circuits the resolver and lands in the
+		// generation-aware clamp: preserved for GPT-6, lowered for 5.x.
+		const astraMax = await translatedTransform(
+			{ model: "claude-fable-5-1", reasoning: { effort: "max" } },
+			codexAccount({ model_mappings: null }),
+		);
+		expect(astraMax.model).toBe("gpt-6-astra");
+		expect(astraMax.reasoning).toEqual({ effort: "max" });
+
+		const astraUltra = await translatedTransform(
+			{ model: "claude-fable-5-1", reasoning: { effort: "ultra" } },
+			codexAccount({ model_mappings: null }),
+		);
+		expect(astraUltra.model).toBe("gpt-6-astra");
+		expect(astraUltra.reasoning).toEqual({ effort: "ultra" });
+
+		const solUltra = await translatedTransform(
+			{ model: "claude-opus-4-7", reasoning: { effort: "ultra" } },
+			codexAccount({ model_mappings: null }),
+		);
+		expect(solUltra.model).toBe("gpt-5.6-sol");
+		expect(solUltra.reasoning).toEqual({ effort: "xhigh" });
 	});
 
 	it("does not clamp the translated path for a custom-endpoint account", async () => {

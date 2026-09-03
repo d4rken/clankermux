@@ -1,6 +1,8 @@
 import { describe, expect, it } from "bun:test";
 import {
+	CHATGPT_BACKEND_GPT6_REASONING_EFFORTS,
 	CHATGPT_BACKEND_REASONING_EFFORTS,
+	chatGptBackendReasoningEffortsFor,
 	clampChatGptBackendReasoningEffort,
 	sanitizeChatGptBackendBody,
 } from "../backend-params";
@@ -19,14 +21,106 @@ describe("clampChatGptBackendReasoningEffort", () => {
 		expect(clampChatGptBackendReasoningEffort("minimal")).toBe("none");
 	});
 
-	it("clamps an above-ceiling value down to xhigh", () => {
+	it("clamps an above-ceiling value down to xhigh on the 5.x generation", () => {
 		expect(clampChatGptBackendReasoningEffort("max")).toBe("xhigh");
+		expect(clampChatGptBackendReasoningEffort("max", "gpt-5.6-sol")).toBe(
+			"xhigh",
+		);
+		expect(clampChatGptBackendReasoningEffort("ultra", "gpt-5.5")).toBe(
+			"xhigh",
+		);
 	});
 
 	it("leaves an unrecognised value untouched without throwing", () => {
 		expect(clampChatGptBackendReasoningEffort("ludicrous")).toBe("ludicrous");
 		expect(clampChatGptBackendReasoningEffort("")).toBe("");
 		expect(clampChatGptBackendReasoningEffort("LOW")).toBe("LOW");
+	});
+
+	describe("GPT-6 generation", () => {
+		it("selects the GPT-6 effort set by generation prefix, dated variants included", () => {
+			expect(chatGptBackendReasoningEffortsFor("gpt-6-astra")).toBe(
+				CHATGPT_BACKEND_GPT6_REASONING_EFFORTS,
+			);
+			expect(chatGptBackendReasoningEffortsFor("gpt-6-astra-2026-09-03")).toBe(
+				CHATGPT_BACKEND_GPT6_REASONING_EFFORTS,
+			);
+			expect(chatGptBackendReasoningEffortsFor("GPT-6-Astra")).toBe(
+				CHATGPT_BACKEND_GPT6_REASONING_EFFORTS,
+			);
+			expect(chatGptBackendReasoningEffortsFor("gpt-5.6-sol")).toBe(
+				CHATGPT_BACKEND_REASONING_EFFORTS,
+			);
+			expect(chatGptBackendReasoningEffortsFor(undefined)).toBe(
+				CHATGPT_BACKEND_REASONING_EFFORTS,
+			);
+		});
+
+		it("preserves every GPT-6 value, max and ultra included", () => {
+			for (const effort of CHATGPT_BACKEND_GPT6_REASONING_EFFORTS) {
+				expect(clampChatGptBackendReasoningEffort(effort, "gpt-6-astra")).toBe(
+					effort,
+				);
+			}
+		});
+
+		it("clamps below-floor values UP to low instead of sending none/minimal", () => {
+			expect(clampChatGptBackendReasoningEffort("none", "gpt-6-astra")).toBe(
+				"low",
+			);
+			expect(clampChatGptBackendReasoningEffort("minimal", "gpt-6-astra")).toBe(
+				"low",
+			);
+		});
+
+		it("still passes an unrecognised value through", () => {
+			expect(
+				clampChatGptBackendReasoningEffort("ludicrous", "gpt-6-astra"),
+			).toBe("ludicrous");
+		});
+	});
+});
+
+describe("sanitizeChatGptBackendBody reasoning.effort by model", () => {
+	it("keeps max on a GPT-6 body and clamps it on a 5.x body", () => {
+		const astra: Record<string, unknown> = {
+			model: "gpt-6-astra",
+			reasoning: { effort: "max" },
+		};
+		expect(sanitizeChatGptBackendBody(astra).clampedEffort).toBeUndefined();
+		expect((astra.reasoning as { effort: string }).effort).toBe("max");
+
+		const sol: Record<string, unknown> = {
+			model: "gpt-5.6-sol",
+			reasoning: { effort: "max" },
+		};
+		expect(sanitizeChatGptBackendBody(sol).clampedEffort).toEqual({
+			from: "max",
+			to: "xhigh",
+		});
+		expect((sol.reasoning as { effort: string }).effort).toBe("xhigh");
+	});
+
+	it("raises a GPT-6 body's none effort to low", () => {
+		const body: Record<string, unknown> = {
+			model: "gpt-6-astra",
+			reasoning: { effort: "none" },
+		};
+		expect(sanitizeChatGptBackendBody(body).clampedEffort).toEqual({
+			from: "none",
+			to: "low",
+		});
+	});
+
+	it("falls back to the 5.x set when the body carries no string model", () => {
+		const body: Record<string, unknown> = {
+			model: 42,
+			reasoning: { effort: "max" },
+		};
+		expect(sanitizeChatGptBackendBody(body).clampedEffort).toEqual({
+			from: "max",
+			to: "xhigh",
+		});
 	});
 });
 

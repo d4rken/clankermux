@@ -18,11 +18,13 @@
 // straight through to the selected account's backend (see request-translator.ts
 // — no gpt-* → Claude-family remap), so a model absent from this list still
 // works as long as the upstream accepts it. Keep it to the CURRENTLY-SERVED
-// Codex models (per the codex-cli models cache, 2026-06-09); retired slugs
-// (gpt-5-codex, gpt-5.3-codex) were dropped.
+// Codex models (per the codex-cli models cache, 2026-06-09, plus gpt-6-astra
+// from codex-cli 0.153.1 on 2026-09-03); retired slugs (gpt-5-codex,
+// gpt-5.3-codex) were dropped.
 // Exported so the server can compose the operator's model-catalogue overrides
 // onto it. The LIST is the shared thing; the reply SHAPE below stays owned here.
 export const CODEX_MODELS = [
+	"gpt-6-astra",
 	"gpt-5.6-sol",
 	"gpt-5.6-terra",
 	"gpt-5.6-luna",
