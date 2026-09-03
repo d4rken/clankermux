@@ -141,7 +141,12 @@ export class SessionStrategy implements LoadBalancingStrategy {
 		// Codex response. (Neither provider's 429 cooldown writes this column —
 		// applySuccessRateLimitClear documents that `rate_limit_reset` is left to
 		// the status-meta path — so an ordinary retry deadline cannot land here and
-		// masquerade as a rolled window.) Other session-tracked providers (zai) have
+		// masquerade as a rolled window.) One more writer is deliberate about
+		// reading as a rolled window: the capacity-restored stamp in
+		// apps/server/src/capacity-restored.ts writes a just-past instant onto a
+		// PAUSED account whose recorded reset matched no window the provider
+		// reported, so auto-unpause can see it. The one-shot `session_start`
+		// comparison below means that costs a single session reset, once. Other session-tracked providers (zai) have
 		// no such feed and keep the fixed-duration clock alone rather than reacting
 		// to a value nothing refreshes.
 		//

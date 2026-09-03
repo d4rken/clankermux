@@ -213,11 +213,13 @@ export {
 	type UnifiedClaimReading,
 } from "./unified-claim-headers";
 export {
+	collectObservedWindows,
 	getRepresentativeUtilization as getNormalizedRepresentativeUtilization,
 	isAnthropicUsageShape,
 	type NormalizedAnthropicUsage,
 	type NormalizedUsageWindow,
 	normalizeAnthropicUsage,
+	type ObservedWindow,
 } from "./usage-normalizer";
 export {
 	computeUsagePrediction,

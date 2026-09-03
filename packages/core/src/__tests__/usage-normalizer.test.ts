@@ -4,6 +4,7 @@ import type {
 	AnthropicUsageData,
 } from "@clankermux/types";
 import {
+	collectObservedWindows,
 	getRepresentativeUtilization,
 	isAnthropicUsageShape,
 	normalizeAnthropicUsage,
@@ -249,5 +250,78 @@ describe("isAnthropicUsageShape", () => {
 				tokens_limit: { percentage: 0, resetAt: null },
 			} as unknown as AnthropicUsageData),
 		).toBe(false);
+	});
+});
+
+describe("collectObservedWindows", () => {
+	const PAST_MS = Date.parse(PAST_ISO);
+	const OTHER_ISO = new Date(NOW + 3 * 24 * 60 * 60 * 1000).toISOString();
+	const OTHER_MS = Date.parse(OTHER_ISO);
+	const sorted = (data: AnthropicUsageData) =>
+		collectObservedWindows(data).sort(
+			(a, b) =>
+				a.resetMs - b.resetMs || (a.utilization ?? -1) - (b.utilization ?? -1),
+		);
+
+	it("collects every flat window and every limits[] entry with its utilization", () => {
+		const data: AnthropicUsageData = {
+			five_hour: { utilization: 10, resets_at: FUTURE_ISO },
+			seven_day: { utilization: 40, resets_at: OTHER_ISO },
+			seven_day_oauth_apps: { utilization: 0, resets_at: FUTURE_ISO },
+			limits: [
+				entry({ kind: "session", percent: 10, resets_at: FUTURE_ISO }),
+				entry({ kind: "weekly_all", percent: 40, resets_at: OTHER_ISO }),
+				entry({
+					kind: "weekly_scoped",
+					percent: 100,
+					resets_at: new Date(OTHER_MS + 1).toISOString(),
+					scope: { model: { id: "fable", display_name: "Fable" } },
+				}),
+			],
+		};
+		expect(sorted(data)).toEqual([
+			{ resetMs: FUTURE_MS, utilization: 0 },
+			{ resetMs: FUTURE_MS, utilization: 10 },
+			{ resetMs: FUTURE_MS, utilization: 10 },
+			{ resetMs: OTHER_MS, utilization: 40 },
+			{ resetMs: OTHER_MS, utilization: 40 },
+			{ resetMs: OTHER_MS + 1, utilization: 100 },
+		]);
+	});
+
+	it("keeps entries the routing normalizer drops: unknown families and elapsed resets", () => {
+		// A recorded reset owned by one of these is NOT stale — the provider
+		// still describes that window — so dropping them would create false
+		// staleness positives.
+		const data: AnthropicUsageData = {
+			five_hour: { utilization: 0, resets_at: PAST_ISO },
+			limits: [
+				entry({
+					kind: "weekly_scoped",
+					percent: 100,
+					resets_at: OTHER_ISO,
+					scope: { model: { id: "x", display_name: "Unknown Model Z" } },
+				}),
+				entry({ kind: "something_new", percent: null, resets_at: FUTURE_ISO }),
+			],
+		};
+		expect(normalizeAnthropicUsage(data, NOW).weeklyScoped).toEqual([]);
+		expect(sorted(data)).toEqual([
+			{ resetMs: PAST_MS, utilization: 0 },
+			{ resetMs: FUTURE_MS, utilization: null },
+			{ resetMs: OTHER_MS, utilization: 100 },
+		]);
+	});
+
+	it("skips windows without a parseable reset; empty for no payload", () => {
+		const data: AnthropicUsageData = {
+			five_hour: { utilization: 0, resets_at: null },
+			seven_day: { utilization: 100, resets_at: "not a date" },
+			limits: [entry({ resets_at: null })],
+		};
+		expect(collectObservedWindows(data)).toEqual([]);
+		expect(collectObservedWindows(null)).toEqual([]);
+		expect(collectObservedWindows(undefined)).toEqual([]);
+		expect(collectObservedWindows({})).toEqual([]);
 	});
 });

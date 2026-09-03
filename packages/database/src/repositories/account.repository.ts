@@ -484,8 +484,8 @@ export class AccountRepository extends BaseRepository<Account> {
 
 	/**
 	 * Compare-and-clear the rate-limit lock for the usage-poller's
-	 * capacity-restored path. Clears the SAME columns as `clearRateLimitState`,
-	 * but ONLY when the account's cooldown is STILL the exact one the caller
+	 * capacity-restored path. Clears the lock columns `clearRateLimitState`
+	 * clears, EXCEPT `rate_limit_reset` (see below), and ONLY when the account's cooldown is STILL the exact one the caller
 	 * observed — `rate_limited_until`, `rate_limited_at` AND `rate_limited_reason`
 	 * all unchanged — and only when that cooldown is strictly OLDER than the
 	 * evidence that justifies clearing it.
@@ -514,6 +514,17 @@ export class AccountRepository extends BaseRepository<Account> {
 	 * Together this makes the poller's read-check-clear ATOMIC at the DB layer: any
 	 * concurrent cooldown write between the caller's read and this write leaves the
 	 * new state intact. Returns true iff a row actually changed.
+	 *
+	 * `rate_limit_reset` is left UNTOUCHED. Releasing a cooldown and recording
+	 * when the binding usage window resets are separate facts; this method used
+	 * to null the column as well, which is a trap: `isAutoUnpauseCandidate`
+	 * (`packages/load-balancer/src/strategies/peek-availability.ts`) requires
+	 * `rate_limit_reset != null AND < now`, so a NULL there means an account
+	 * paused for a self-healing reason can NEVER auto-unpause, and nothing
+	 * rewrites the column for a paused account because it receives no requests.
+	 * The value that was there is the binding window's reset from the last
+	 * response headers, which stays true after the lock goes. When it is STALE,
+	 * {@link stampObservedRateLimitReset} corrects it on its own evidence.
 	 */
 	async clearRateLimitOnCapacityRestore(
 		accountId: string,
@@ -528,7 +539,6 @@ export class AccountRepository extends BaseRepository<Account> {
 				rate_limited_until = NULL,
 				rate_limited_reason = NULL,
 				rate_limited_at = NULL,
-				rate_limit_reset = NULL,
 				rate_limit_status = NULL,
 				rate_limit_remaining = NULL
 			WHERE id = ?
@@ -543,6 +553,55 @@ export class AccountRepository extends BaseRepository<Account> {
 				expectedRateLimitedReason,
 				evidenceFetchStartedAt,
 			],
+		);
+		return changes > 0;
+	}
+
+	/**
+	 * Compare-and-stamp `rate_limit_reset` to the instant the usage poller
+	 * observed that the recorded reset no longer corresponds to any window the
+	 * provider reports. Runs whether or not a lock was just cleared;
+	 * {@link clearRateLimitOnCapacityRestore} deliberately leaves this column
+	 * alone.
+	 *
+	 * Exists because a stale FUTURE `rate_limit_reset` is self-sustaining on a
+	 * paused account. `isAutoUnpauseCandidate` needs the column to be in the past
+	 * before it will auto-unpause; the column is only rewritten by a real response
+	 * (which needs the account to be selectable) or by the auto-refresh scheduler
+	 * (whose own `bindingWindowResetElapsed` gate is shut for exactly this value).
+	 * So an out-of-band weekly reset — a seat reassignment or a gift reset that
+	 * moves the boundary earlier than the deadline we recorded — leaves the
+	 * account paused with nothing able to correct the record.
+	 *
+	 * The caller decides that the recorded reset IS stale (it matches no window
+	 * the provider reports; see `apps/server/src/capacity-restored.ts`) and that
+	 * the pause reason is one auto-unpause may clear. Those are JS-side reads.
+	 * The WHERE re-asserts what it can inside one statement:
+	 *  - `rate_limit_reset = ?` (the value the caller read) is the CAS: any write
+	 *    landing between the caller's read and this one simply misses the WHERE.
+	 *  - `rate_limit_reset > ?` restricts the write to a value that is still in
+	 *    the FUTURE relative to the observation, which is what makes it both
+	 *    correct (never moves an already-elapsed reset) and idempotent (after the
+	 *    stamp the column equals `observedAt`, so a repeat poll no longer matches).
+	 *  - `paused = 1` pins the precondition that makes the write meaningful: an
+	 *    account resumed between the read and this write gets real traffic, and
+	 *    its next response rewrites the column from headers; a stamp landing on
+	 *    top of that would replace fresh evidence with an inferred value.
+	 *
+	 * Returns true iff a row actually changed.
+	 */
+	async stampObservedRateLimitReset(
+		accountId: string,
+		expectedReset: number,
+		observedAt: number,
+	): Promise<boolean> {
+		const changes = await this.runWithChanges(
+			`UPDATE accounts SET rate_limit_reset = ?
+			 WHERE id = ?
+			 	AND rate_limit_reset = ?
+			 	AND rate_limit_reset > ?
+			 	AND COALESCE(paused, 0) = 1`,
+			[observedAt, accountId, expectedReset, observedAt],
 		);
 		return changes > 0;
 	}

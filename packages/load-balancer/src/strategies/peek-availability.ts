@@ -5,6 +5,21 @@ import { isSelfHealingPauseReason } from "./pause-reasons";
 const RATE_LIMIT_RESET_BUFFER_MS = 1000;
 
 /**
+ * Providers whose `rate_limit_reset` is maintained from real usage evidence,
+ * and so the only ones auto-unpause may trust an elapsed reset from. The single
+ * definition: the capacity-restored path in `apps/server` consults it before
+ * correcting a paused account's reset, so it never promises an unpause the gate
+ * here would refuse.
+ */
+export function supportsWindowResetUnpause(provider: string): boolean {
+	return (
+		provider === PROVIDER_NAMES.ANTHROPIC ||
+		provider === PROVIDER_NAMES.CODEX ||
+		provider === PROVIDER_NAMES.ZAI
+	);
+}
+
+/**
  * The structural half of the auto-unpause condition: the account is paused with
  * auto-fallback on, its provider reports a resettable usage window, that window
  * has elapsed, and no cooldown of our own is still running. Says nothing about
@@ -26,12 +41,7 @@ export function isAutoUnpauseCandidate(
 ): boolean {
 	if (!account.paused) return false;
 	if (!account.auto_fallback_enabled) return false;
-
-	const supportsWindowReset =
-		account.provider === PROVIDER_NAMES.ANTHROPIC ||
-		account.provider === PROVIDER_NAMES.CODEX ||
-		account.provider === PROVIDER_NAMES.ZAI;
-	if (!supportsWindowReset) return false;
+	if (!supportsWindowResetUnpause(account.provider)) return false;
 
 	const windowReset =
 		account.rate_limit_reset != null &&

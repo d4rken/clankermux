@@ -1243,6 +1243,21 @@ OAuth tokens will need to be re-authenticated.
 		);
 	}
 
+	/**
+	 * See {@link AccountRepository.stampObservedRateLimitReset}.
+	 */
+	async stampObservedRateLimitReset(
+		accountId: string,
+		expectedReset: number,
+		observedAt: number,
+	): Promise<boolean> {
+		return this.accounts.stampObservedRateLimitReset(
+			accountId,
+			expectedReset,
+			observedAt,
+		);
+	}
+
 	async pauseAccount(accountId: string, reason = "manual"): Promise<void> {
 		await this.accounts.pause(accountId, reason);
 	}

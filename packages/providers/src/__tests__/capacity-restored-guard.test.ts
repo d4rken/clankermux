@@ -92,12 +92,73 @@ describe("usageCache capacity-restored reporting (level-triggered)", () => {
 		expect(calls[0].accountId).toBe(ACCOUNT);
 		expect(calls[0].utilization).toBe(42);
 		expect(calls[0].extraUsageUtilization).toBeNull();
+		expect(calls[0].observedWindows.map((w) => w.utilization)).toEqual([
+			10, 42,
+		]);
+		expect(calls[0].observedWindows.every((w) => w.resetMs > Date.now())).toBe(
+			true,
+		);
 
 		// Steady-state healthy polls keep reporting — this is what heals a refused
 		// or missed clear.
 		await usageCache.refreshNow(ACCOUNT);
 		await usageCache.refreshNow(ACCOUNT);
 		expect(calls).toHaveLength(3);
+	});
+
+	it("carries EVERY reported window reset, scoped and elapsed included", async () => {
+		// The listener tells a stale recorded reset from a correct one by whether
+		// it matches ANY window the provider reports — a spent per-family weekly
+		// (not part of the account-wide representative) must be in the list, or
+		// its correct future reset would read as stale and get stamped away.
+		const fiveHour = new Date(Date.now() + 60 * 60 * 1000).toISOString();
+		const weekly = new Date(Date.now() + 3 * 24 * 60 * 60 * 1000).toISOString();
+		const fable = new Date(Date.now() + 5 * 24 * 60 * 60 * 1000).toISOString();
+		const elapsed = new Date(Date.now() - 60 * 60 * 1000).toISOString();
+		fetchSpy = spyOn(globalThis, "fetch").mockImplementation(async () =>
+			usageResponse({
+				five_hour: { utilization: 10, resets_at: fiveHour },
+				seven_day: { utilization: 78, resets_at: weekly },
+				limits: [
+					{
+						kind: "weekly_scoped",
+						group: "weekly",
+						percent: 100,
+						resets_at: fable,
+						scope: { model: { id: "fable", display_name: "Fable" } },
+						is_active: true,
+					},
+					{
+						kind: "weekly_scoped",
+						group: "weekly",
+						percent: 0,
+						resets_at: elapsed,
+						scope: { model: { id: "opus", display_name: "Opus" } },
+						is_active: false,
+					},
+				],
+			}),
+		);
+		const calls: CapacityRestoredEvidence[] = [];
+		startPolling((e) => calls.push(e));
+		await settle();
+
+		expect(calls).toHaveLength(1);
+		// Account-wide is 78% — a spent scoped weekly does not stop the report…
+		expect(calls[0].utilization).toBe(78);
+		// …but the window IS reported, spent, so the listener can see it still
+		// owns its reset. The elapsed one is reported too (idle, drained).
+		const byReset = new Map(
+			calls[0].observedWindows.map((w) => [w.resetMs, w.utilization]),
+		);
+		expect(byReset).toEqual(
+			new Map([
+				[Date.parse(fiveHour), 10],
+				[Date.parse(weekly), 78],
+				[Date.parse(fable), 100],
+				[Date.parse(elapsed), 0],
+			]),
+		);
 	});
 
 	it("reports fetchStartedAt from BEFORE the request, not after it", async () => {

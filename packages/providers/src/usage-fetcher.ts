@@ -1,4 +1,9 @@
-import { CLAUDE_CLI_VERSION, normalizeAnthropicUsage } from "@clankermux/core";
+import {
+	CLAUDE_CLI_VERSION,
+	collectObservedWindows,
+	normalizeAnthropicUsage,
+	type ObservedWindow,
+} from "@clankermux/core";
 import { Logger } from "@clankermux/logger";
 import {
 	type AnthropicLimitEntry,
@@ -657,6 +662,17 @@ export interface CapacityRestoredEvidence {
 	 * reading that may predate it.
 	 */
 	fetchStartedAt: number;
+	/**
+	 * Every window the payload reported with a reset (epoch ms + utilization),
+	 * account-wide AND per-family scoped, elapsed or not — see
+	 * `collectObservedWindows`. The listener uses it to tell a STALE recorded
+	 * `rate_limit_reset` (owned by no window that is still spent: an
+	 * out-of-band reset moved the boundary, or a gift reset drained the window
+	 * in place) from a CORRECT future one (a spent per-family weekly the
+	 * account-wide representative does not see). Reported, never interpreted
+	 * here.
+	 */
+	observedWindows: ObservedWindow[];
 }
 
 /**
@@ -1877,6 +1893,9 @@ class UsageCache {
 								extraUsageUtilization:
 									(result.data as UsageData).extra_usage?.utilization ?? null,
 								fetchStartedAt,
+								observedWindows: collectObservedWindows(
+									result.data as AnthropicUsageData,
+								),
 							});
 					}
 					const window = getRepresentativeWindow(result.data as UsageData);
