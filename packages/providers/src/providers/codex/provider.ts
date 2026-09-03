@@ -98,9 +98,10 @@ const PROMPT_CACHE_KEY_DIGEST_LEN = 45;
 // newer models behind a minimum client version: too-old here → 400 "The '<model>'
 // model requires a newer version of Codex." We override the real client's header
 // with this value, so it must track a version new enough for the models we route
-// (e.g. gpt-5.6-sol needs >= 0.144). Bump this when a new Codex model 400s on the
-// version gate.
-export const CODEX_VERSION = "0.144.0";
+// (gpt-5.6-sol needs >= 0.144; gpt-6-astra carries `minimal_client_version:
+// 0.153.0` in the Codex catalog and shipped in codex-cli 0.153.1). Bump this
+// when a new Codex model 400s on the version gate.
+export const CODEX_VERSION = "0.153.1";
 export const CODEX_USER_AGENT = `codex-cli/${CODEX_VERSION} (Windows 10.0.26100; x64)`;
 
 /**
@@ -1470,18 +1471,22 @@ export class CodexProvider extends BaseProvider {
 		// `none` succeeds through the native passthrough (which preserves it) and
 		// fails through this translator, decided only by which account routing
 		// picked. So when this account really reaches that backend, short-circuit
-		// exactly `none` — and nothing else. Every other value, `minimal`
-		// included, stays on the resolver-then-clamp path, because the resolver is
-		// what raises an effort UP to the target model's documented minimum
-		// (`minimal` → `low` for a profile that floors at `low`, e.g.
+		// exactly the backend-only values — `none`, and since GPT-6 `ultra` (the
+		// top of gpt-6-astra's catalog levels, above `max`) — and nothing else.
+		// Both land in the generation-aware clamp below, which raises `none` to
+		// `low` on GPT-6 and lowers `ultra` to `xhigh` on 5.x. Every other value,
+		// `minimal` included, stays on the resolver-then-clamp path, because the
+		// resolver is what raises an effort UP to the target model's documented
+		// minimum (`minimal` → `low` for a profile that floors at `low`, e.g.
 		// gpt-5.4-mini). Short-circuiting on "the clamp would say none" would
 		// bypass that floor and send `none` where `low` was due.
 		const reasoningResolution: {
 			effort: string | undefined;
 			downgrades: ReadonlyArray<{ model: string; from: string; to: string }>;
 		} =
-			targetsChatGptBackend && requestedEffort === "none"
-				? { effort: "none", downgrades: [] }
+			targetsChatGptBackend &&
+			(requestedEffort === "none" || requestedEffort === "ultra")
+				? { effort: requestedEffort, downgrades: [] }
 				: resolveReasoningEffort(requestedEffort, {
 						sourceModel: body.model,
 						targetModel: model,
@@ -1501,7 +1506,7 @@ export class CodexProvider extends BaseProvider {
 		// the native passthrough), but only when we really target that backend.
 		const resolvedEffort = reasoningResolution.effort ?? "medium";
 		const backendEffort = targetsChatGptBackend
-			? clampChatGptBackendReasoningEffort(resolvedEffort)
+			? clampChatGptBackendReasoningEffort(resolvedEffort, model)
 			: resolvedEffort;
 
 		// Codex always requires streaming upstream; non-streaming clients are handled

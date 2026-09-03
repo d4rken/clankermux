@@ -58,6 +58,9 @@ export const MODEL_COLOR_KEYS: Record<string, keyof typeof MODEL_PALETTE> = {
 	"gpt-5.4": "tan",
 	"gpt-5.4-mini": "sage",
 	"gpt-5.3-codex-spark": "plum",
+	// Promoted out of FALLBACK_HUES when GPT-6 Astra became routable
+	// (2026-09-03): a registered model outranks an unknown-model bucket.
+	"gpt-6-astra": "leaf",
 };
 
 /**
@@ -69,13 +72,14 @@ export const MODEL_COLOR_KEYS: Record<string, keyof typeof MODEL_PALETTE> = {
  * whose legend lists a swatch per model, that surfaces as two rows with
  * identical colours and no way to tell which mark is which.
  *
- * Down to two buckets: `violet` and `fuchsia` were promoted to Fable/Mythos
- * 5.1 when the palette's 28 mutually-separable hues ran out. Registered models
- * win that trade — every model that actually appears in traffic gets an
- * explicit entry, and two colliding UNKNOWN ids is a rarer, cheaper defect
- * than two registered models sharing a hue.
+ * Down to one bucket: `violet` and `fuchsia` were promoted to Fable/Mythos
+ * 5.1 when the palette's 28 mutually-separable hues ran out, and `leaf` went
+ * to GPT-6 Astra. Registered models win that trade — every model that actually
+ * appears in traffic gets an explicit entry, and two colliding UNKNOWN ids is
+ * a rarer, cheaper defect than two registered models sharing a hue. The next
+ * registered model needs a new separable hue in both palettes, not this one.
  */
-const FALLBACK_HUES: Array<keyof typeof MODEL_PALETTE> = ["leaf", "amethyst"];
+const FALLBACK_HUES: Array<keyof typeof MODEL_PALETTE> = ["amethyst"];
 
 /** Resolve a palette key to its value for the given ground. */
 export function paletteColor(
@@ -87,13 +91,13 @@ export function paletteColor(
 
 /**
  * FNV-1a over the model id. Any stable hash would do; this one is short, has no
- * dependency, and spreads short ASCII ids well enough for a two-bucket pick.
+ * dependency, and spreads short ASCII ids well enough for a small bucket pick.
  *
- * Two buckets does mean two unregistered models can collide. That is the
- * accepted floor, not an oversight: the alternative is more reserved hues that
- * no real model uses, taken out of the budget every REGISTERED model competes
- * for. Every model that actually appears in traffic gets an explicit entry
- * above, so this path is for genuinely unknown ids.
+ * With a single fallback hue every unregistered model shares one colour. That
+ * is the accepted floor, not an oversight: the alternative is more reserved
+ * hues that no real model uses, taken out of the budget every REGISTERED model
+ * competes for. Every model that actually appears in traffic gets an explicit
+ * entry above, so this path is for genuinely unknown ids.
  */
 function hashModelId(model: string): number {
 	let hash = 0x811c9dc5;

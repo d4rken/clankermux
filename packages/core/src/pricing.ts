@@ -313,6 +313,20 @@ BUNDLED_PRICING.minimax = {
  */
 BUNDLED_PRICING.openai = {
 	models: {
+		// GPT-6 Astra: models.dev did not list it yet when this was added
+		// (2026-09-04), so these are the Standard-tier rates from OpenAI's own
+		// pricing page (input $10, cached $1, cache write $12.50, output $50),
+		// not a models.dev mirror. Remote still wins per field once it appears.
+		"gpt-6-astra": {
+			id: "gpt-6-astra",
+			name: "GPT-6 Astra",
+			cost: {
+				input: 10,
+				output: 50,
+				cache_read: 1,
+				cache_write: 12.5,
+			},
+		},
 		"gpt-5.6-sol": {
 			id: "gpt-5.6-sol",
 			name: "GPT-5.6 Sol",

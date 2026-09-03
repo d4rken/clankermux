@@ -510,6 +510,13 @@ export const MODEL_CONTEXT_WINDOWS: Record<string, number> = {
 	"gpt-5.6-sol": 272_000,
 	"gpt-5.6-terra": 272_000,
 	"gpt-5.6-luna": 272_000,
+	// GPT-6 Astra (released 2026-09-03). The Codex catalog entry that shipped in
+	// codex-cli 0.153.1 (openai/codex#42605) reports `context_window: 272000`
+	// and `max_context_window: 872000`, the same split as the 5.6 tiers, and
+	// the API pricing page keeps the same >272K-input surcharge (2x input, 1.5x
+	// output for the whole request). The documented 1.05M API window is the raw
+	// ceiling, ignored here for the same reason as 5.6's 872K.
+	"gpt-6-astra": 272_000,
 };
 
 /**
@@ -882,8 +889,10 @@ export const DEFAULT_CODEX_MODEL_BY_FAMILY: Record<
 	opus: "gpt-5.6-sol",
 	sonnet: "gpt-5.6-terra",
 	haiku: "gpt-5.6-luna",
-	// Fable/Mythos are above Opus — route to the top Codex tier (same as opus).
-	fable: "gpt-5.6-sol",
+	// Fable/Mythos are above Opus — route to the top Codex tier. Since
+	// 2026-09-03 that is GPT-6 Astra; opus deliberately stays on gpt-5.6-sol,
+	// which lists at roughly half of Astra's per-token price.
+	fable: "gpt-6-astra",
 };
 
 /**

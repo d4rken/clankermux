@@ -25,7 +25,10 @@
  * `gpt-5` profile — exactly the value the backend rejects.
  */
 
-/** Reasoning efforts the ChatGPT/Codex backend accepts, ascending. */
+/**
+ * Reasoning efforts the ChatGPT/Codex backend accepts for the GPT-5.x models,
+ * ascending. Verified live against gpt-5.6-sol: `minimal` and `max` 400.
+ */
 export const CHATGPT_BACKEND_REASONING_EFFORTS = [
 	"none",
 	"low",
@@ -38,10 +41,28 @@ export type ChatGptBackendReasoningEffort =
 	(typeof CHATGPT_BACKEND_REASONING_EFFORTS)[number];
 
 /**
+ * Reasoning efforts for the GPT-6 generation, ascending. Taken from the
+ * `supported_reasoning_levels` of the gpt-6-astra entry in the Codex catalog
+ * (codex-cli 0.153.1, openai/codex#42605): low, medium, high, xhigh, max,
+ * ultra. Neither `none` nor `minimal` is listed, so those clamp UP to `low`
+ * rather than being sent as-is. `max` is a real value here — the 5.x clamp
+ * to `xhigh` would silently cap the model the client explicitly paid for.
+ */
+export const CHATGPT_BACKEND_GPT6_REASONING_EFFORTS = [
+	"low",
+	"medium",
+	"high",
+	"xhigh",
+	"max",
+	"ultra",
+] as const;
+
+/**
  * Every reasoning effort we know of, ascending by how much reasoning it buys —
- * including the two the backend rejects (`minimal`, `max`), which is precisely
- * what lets them be clamped to a neighbour instead of being sent as-is.
- * `none` sorts below `minimal`: no reasoning at all is less than the least.
+ * including the ones some generation rejects (`minimal`, `max`, `ultra`),
+ * which is precisely what lets them be clamped to a neighbour instead of being
+ * sent as-is. `none` sorts below `minimal`: no reasoning at all is less than
+ * the least.
  */
 const KNOWN_EFFORTS_ASCENDING = [
 	"none",
@@ -51,37 +72,62 @@ const KNOWN_EFFORTS_ASCENDING = [
 	"high",
 	"xhigh",
 	"max",
+	"ultra",
 ] as const;
 
-const ACCEPTED = new Set<string>(CHATGPT_BACKEND_REASONING_EFFORTS);
+const ACCEPTED_GPT5 = new Set<string>(CHATGPT_BACKEND_REASONING_EFFORTS);
+const ACCEPTED_GPT6 = new Set<string>(CHATGPT_BACKEND_GPT6_REASONING_EFFORTS);
+
+/**
+ * The effort set the backend accepts for `model`, in ascending order. Keyed on
+ * the generation prefix so a dated variant (`gpt-6-astra-2026-09-03`) or a
+ * later GPT-6 tier resolves without a table edit; an unknown or absent model
+ * gets the 5.x set, which is what every Codex-served slug before GPT-6 used.
+ */
+export function chatGptBackendReasoningEffortsFor(
+	model: string | undefined,
+): readonly string[] {
+	return isGpt6Model(model)
+		? CHATGPT_BACKEND_GPT6_REASONING_EFFORTS
+		: CHATGPT_BACKEND_REASONING_EFFORTS;
+}
+
+function isGpt6Model(model: string | undefined): boolean {
+	return typeof model === "string" && model.toLowerCase().startsWith("gpt-6");
+}
 
 /**
  * Coerce a `reasoning.effort` value into something the ChatGPT/Codex backend
- * accepts:
- *  - an accepted value is returned unchanged (`none` is PRESERVED — it is the
- *    cheapest accepted value, not an absence),
+ * accepts for the target `model`:
+ *  - an accepted value is returned unchanged (`none` is PRESERVED on 5.x — it
+ *    is the cheapest accepted value there, not an absence),
  *  - a known-but-rejected value clamps to the nearest accepted value at or
- *    below it (`minimal` → `none`, `max` → `xhigh`),
+ *    below it (5.x: `minimal` → `none`, `max` → `xhigh`; GPT-6 keeps `max`),
+ *  - a known value below the model's floor clamps UP to that floor (GPT-6:
+ *    `none`/`minimal` → `low`),
  *  - anything we do not recognise is returned untouched, so a value the backend
  *    learns to accept before we do is not silently rewritten.
  *
  * Never throws: callers sit on request paths whose contract is "never fail the
  * request over a parameter we merely wanted to fix up".
  */
-export function clampChatGptBackendReasoningEffort(effort: string): string {
-	if (ACCEPTED.has(effort)) return effort;
+export function clampChatGptBackendReasoningEffort(
+	effort: string,
+	model?: string,
+): string {
+	const accepted = isGpt6Model(model) ? ACCEPTED_GPT6 : ACCEPTED_GPT5;
+	if (accepted.has(effort)) return effort;
 	const rank = KNOWN_EFFORTS_ASCENDING.indexOf(
 		effort as (typeof KNOWN_EFFORTS_ASCENDING)[number],
 	);
 	if (rank < 0) return effort;
 	for (let i = rank - 1; i >= 0; i--) {
 		const candidate = KNOWN_EFFORTS_ASCENDING[i];
-		if (ACCEPTED.has(candidate)) return candidate;
+		if (accepted.has(candidate)) return candidate;
 	}
-	// Below every accepted value (unreachable today: `none` is both accepted and
-	// the floor) — clamp UP to the cheapest accepted value rather than sending
-	// something the backend rejects.
-	return CHATGPT_BACKEND_REASONING_EFFORTS[0];
+	// Below every accepted value — clamp UP to the cheapest accepted value
+	// rather than sending something the backend rejects.
+	return chatGptBackendReasoningEffortsFor(model)[0];
 }
 
 /**
@@ -219,7 +265,10 @@ export function sanitizeChatGptBackendBody(
 		const record = reasoning as Record<string, unknown>;
 		const effort = record.effort;
 		if (typeof effort === "string") {
-			const clamped = clampChatGptBackendReasoningEffort(effort);
+			// The body's own `model` picks the generation: on this path the client
+			// names the exact backend slug and the proxy forwards it unchanged.
+			const model = typeof body.model === "string" ? body.model : undefined;
+			const clamped = clampChatGptBackendReasoningEffort(effort, model);
 			if (clamped !== effort) {
 				record.effort = clamped;
 				return { droppedParams, clampedEffort: { from: effort, to: clamped } };

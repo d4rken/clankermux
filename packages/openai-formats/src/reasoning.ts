@@ -40,6 +40,12 @@ const TARGET_REASONING_EFFORTS: Record<string, readonly ReasoningEffort[]> = {
 	"gpt-5.5": ["minimal", "low", "medium", "high", "xhigh"],
 	"gpt-5.3-codex": ["minimal", "low", "medium", "high", "xhigh"],
 	"gpt-5.4-mini": ["low", "medium"],
+	// GPT-6 (2026-09-03): the API documents low..max and drops `minimal`; the
+	// Codex catalog entry additionally lists `ultra`, which is outside this
+	// module's effort vocabulary and is left to pass through untouched on the
+	// native path rather than widened into a value Claude models cannot take.
+	"gpt-6": ["low", "medium", "high", "xhigh", "max"],
+	"gpt-6-astra": ["low", "medium", "high", "xhigh", "max"],
 };
 
 function normalizeTargetModelName(model: string): string {
@@ -57,6 +63,10 @@ export function getSupportedReasoningEfforts(
 
 	if (normalized in TARGET_REASONING_EFFORTS) {
 		return TARGET_REASONING_EFFORTS[normalized];
+	}
+
+	if (normalized.startsWith("gpt-6")) {
+		return TARGET_REASONING_EFFORTS["gpt-6"];
 	}
 
 	if (normalized.startsWith("gpt-5")) {
