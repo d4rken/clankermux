@@ -11,7 +11,7 @@ import {
 import { usePoolUsage } from "../hooks/usePoolUsage";
 import { dataAvailability, staleAgeLabel } from "../lib/data-availability";
 import { buildOverviewTimeSeries } from "../lib/overview-timeseries";
-import type { ServableClassPool } from "../lib/pool-usage";
+import { listFamilyRows, type ServableClassPool } from "../lib/pool-usage";
 import { MissingSectionsNotice } from "./analytics/MissingSectionsNotice";
 import { ChartsSection } from "./overview/ChartsSection";
 import { LiveActivityLanes } from "./overview/LiveActivityLanes";
@@ -24,6 +24,7 @@ import { SystemHealthStrip } from "./overview/SystemHealthStrip";
 import { CompactRecentErrors } from "./overview/system-status/CompactRecentErrors";
 import { useVisibleRecentErrors } from "./overview/system-status/useVisibleRecentErrors";
 import { TimeRangeSelector } from "./overview/TimeRangeSelector";
+import { FamilyWeeklyCard } from "./quota/FamilyWeeklyCard";
 import { PoolQuotaCard } from "./quota/PoolQuotaCard";
 
 /** Error window for the Overview's compact list, in hours. */
@@ -147,6 +148,11 @@ export const OverviewTab = React.memo(() => {
 		accountsAvailability.state === "stale"
 			? `Last updated ${staleAgeLabel(accountsAvailability.lastUpdatedAt, now)}`
 			: undefined;
+	// Live discovery only, over the same accounts the quota cards read.
+	const familyRows = useMemo(
+		() => listFamilyRows(accounts ?? [], now),
+		[accounts, now],
+	);
 	const runwayStaleNote =
 		runwayAvailability.state === "stale"
 			? `Last updated ${staleAgeLabel(runwayAvailability.lastUpdatedAt, now)}`
@@ -257,6 +263,21 @@ export const OverviewTab = React.memo(() => {
 					staleNote={runwayStaleNote}
 				/>
 			</div>
+
+			{/* Per-model weekly caps, full width beneath the class cards. A family
+			    limit is independent of the account-wide weekly window above it — a
+			    model can be spent while every card here still reads healthy — so it
+			    sits with the live quota state rather than under the range selector.
+			    No new query: same accounts read the cards use. */}
+			<FamilyWeeklyCard
+				rows={familyRows}
+				now={now}
+				loading={accountsPending}
+				unavailableReason={
+					accountsUnavailable ? "Account data unavailable" : undefined
+				}
+				staleNote={accountsStaleNote}
+			/>
 
 			{/* Calendar-month ledger spend + amortized subscription run rates. */}
 			<SpendSummaryBand />

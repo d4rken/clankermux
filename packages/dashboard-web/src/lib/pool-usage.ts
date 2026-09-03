@@ -628,6 +628,94 @@ export function listLiveScopedFamilies(
 	}));
 }
 
+/** One model family's weekly cap, with the accounts that could not report it. */
+export interface FamilyRow {
+	family: ModelFamily;
+	/** Anthropic's own scope label, e.g. "Fable". */
+	displayName: string;
+	/**
+	 * The aggregate over accounts that can actually serve this family, or null
+	 * when every account reporting the family is unavailable.
+	 */
+	usage: FamilyWeeklyUsage | null;
+	/** Accounts contributing to `usage`. */
+	reportingCount: number;
+	/**
+	 * Accounts that report this family's scoped window but are paused, cooling
+	 * down, token-expired, hidden by a usage-429, or out of their account-wide
+	 * quota.
+	 *
+	 * Stated rather than dropped: {@link computeFamilyWeeklyUsage} excludes them
+	 * for good reason (an account that cannot serve anything must not inflate a
+	 * family's worst percentage), but silently excluding them makes a family
+	 * reported by ONE paused account vanish from the card entirely — the reader
+	 * cannot tell "no such limit" from "nobody who has it can be reached".
+	 */
+	unavailableReporters: number;
+}
+
+/**
+ * Every model family currently reporting a weekly cap, with its aggregate.
+ *
+ * LIVE discovery only, unlike the Usage page's charts: this card describes the
+ * pool right now, and a family that no live account reports has no current cap
+ * to state. The recorded-history union belongs to the charts, whose whole
+ * purpose is showing a series that outlives the reading.
+ *
+ * Codex's synthetic per-model weekly windows do NOT appear here. They carry
+ * display names that resolve to no Claude family, so `normalizeAnthropicUsage`
+ * drops them, and this card is family-resolved by construction. They stay on the
+ * Accounts tab and in Account Utilization, which read them through
+ * `lib/secondary-limits.ts` instead.
+ */
+export function listFamilyRows(
+	accounts: AccountResponse[],
+	now: number,
+): FamilyRow[] {
+	const usageByFamily = new Map(
+		computeFamilyWeeklyUsage(accounts, now).map((u) => [u.family, u]),
+	);
+
+	// Which families each UNAVAILABLE account reports, so the card can say a
+	// family exists but nobody who has it can serve it.
+	const unavailableByFamily = new Map<ModelFamily, number>();
+	for (const account of accounts) {
+		if (!account.usageData) continue;
+		if (!isAnthropicStyleShape(account.usageData)) continue;
+		const unavailable =
+			classifyExclusion(account, now) !== null ||
+			classifyQuotaExhaustion(account, "seven_day") !== null;
+		if (!unavailable) continue;
+		const scoped = normalizeAnthropicUsage(
+			account.usageData as AnthropicUsageData,
+			now,
+		).weeklyScoped;
+		// One account reporting two windows that fold onto one family counts once.
+		for (const family of new Set(scoped.map((limit) => limit.family))) {
+			unavailableByFamily.set(
+				family,
+				(unavailableByFamily.get(family) ?? 0) + 1,
+			);
+		}
+	}
+
+	const rows: FamilyRow[] = [];
+	for (const live of listLiveScopedFamilies(accounts, now)) {
+		const usage = usageByFamily.get(live.family) ?? null;
+		rows.push({
+			family: live.family,
+			displayName: live.displayName,
+			usage,
+			reportingCount: usage?.accounts.length ?? 0,
+			unavailableReporters: unavailableByFamily.get(live.family) ?? 0,
+		});
+	}
+	// Worst first, and families nobody can report last: an unstated cap is not
+	// evidence of a problem, so it must not head the list.
+	rows.sort((a, b) => (b.usage?.worstPct ?? -1) - (a.usage?.worstPct ?? -1));
+	return rows;
+}
+
 /**
  * Union of the families seen live and the families with recorded history,
  * sorted by family.

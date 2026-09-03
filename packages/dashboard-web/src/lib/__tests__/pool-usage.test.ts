@@ -5,6 +5,7 @@ import {
 	computeFamilyWeeklyUsage,
 	computePoolUsage,
 	FAMILY_WEEKLY_ELEVATED_THRESHOLD_PCT,
+	listFamilyRows,
 	listLiveScopedFamilies,
 	mergeScopedFamilies,
 	pickBindingScopedLimit,
@@ -1746,5 +1747,138 @@ describe("servable class earliest reset", () => {
 		const pool = classReset([NOW - 60_000, NOW - 10_000]);
 		expect(pool.earliestResetMs).toBeNull();
 		expect(pool.earliestResetAccountName).toBeNull();
+	});
+});
+
+describe("listFamilyRows", () => {
+	const FUTURE_RESET = NOW + 3 * 86_400_000;
+
+	function scopedEntry(
+		displayName: string,
+		percent: number,
+		resetMs: number = FUTURE_RESET,
+	) {
+		return {
+			kind: "weekly_scoped",
+			group: "weekly",
+			percent,
+			resets_at: new Date(resetMs).toISOString(),
+			scope: {
+				model: {
+					id: displayName.toLowerCase().replace(/\s+/g, "-"),
+					display_name: displayName,
+				},
+			},
+			is_active: true,
+		};
+	}
+
+	function mkScopedAccount(
+		name: string,
+		entries: ReturnType<typeof scopedEntry>[],
+		partial: Partial<AccountResponse> = {},
+	): AccountResponse {
+		return mkAccount({
+			name,
+			provider: "anthropic",
+			usageData: { limits: entries } as never,
+			...partial,
+		});
+	}
+
+	it("returns [] when no account reports a scoped weekly window", () => {
+		expect(
+			listFamilyRows(
+				[
+					mkAccount({
+						name: "flat",
+						provider: "anthropic",
+						usageData: {
+							seven_day: { utilization: 20, resets_at: null },
+						} as never,
+					}),
+				],
+				NOW,
+			),
+		).toEqual([]);
+	});
+
+	it("joins the live family to its aggregate, with account ids on the rows", () => {
+		const rows = listFamilyRows(
+			[mkScopedAccount("acct-a", [scopedEntry("Fable", 45)])],
+			NOW,
+		);
+
+		expect(rows).toHaveLength(1);
+		expect(rows[0].family).toBe("fable");
+		expect(rows[0].displayName).toBe("Fable");
+		expect(rows[0].reportingCount).toBe(1);
+		expect(rows[0].unavailableReporters).toBe(0);
+		expect(rows[0].usage?.worstPct).toBe(45);
+		expect(rows[0].usage?.accounts[0].accountId).toBe("acct-a");
+	});
+
+	it("keeps a family only unavailable accounts report, with no aggregate", () => {
+		// The family is real — a live account reports the window — but nobody
+		// who has it can serve. Dropping the row would read as "no such limit".
+		const rows = listFamilyRows(
+			[mkScopedAccount("paused", [scopedEntry("Fable", 45)], { paused: true })],
+			NOW,
+		);
+
+		expect(rows).toHaveLength(1);
+		expect(rows[0].usage).toBeNull();
+		expect(rows[0].reportingCount).toBe(0);
+		expect(rows[0].unavailableReporters).toBe(1);
+	});
+
+	it("counts both sides of a mixed family", () => {
+		const rows = listFamilyRows(
+			[
+				mkScopedAccount("live", [scopedEntry("Fable", 45)]),
+				mkScopedAccount("paused", [scopedEntry("Fable", 90)], {
+					paused: true,
+				}),
+			],
+			NOW,
+		);
+
+		expect(rows).toHaveLength(1);
+		expect(rows[0].reportingCount).toBe(1);
+		expect(rows[0].unavailableReporters).toBe(1);
+		// The paused account's 90% must not drive the figure: it cannot serve
+		// this family, or any other.
+		expect(rows[0].usage?.worstPct).toBe(45);
+	});
+
+	it("counts an account reporting two windows of one family once", () => {
+		// getModelFamily() folds Mythos-class display names onto "fable", so a
+		// plain count would put the same account in the denominator twice.
+		const rows = listFamilyRows(
+			[
+				mkScopedAccount(
+					"paused",
+					[scopedEntry("Fable", 45), scopedEntry("Mythos", 60)],
+					{ paused: true },
+				),
+			],
+			NOW,
+		);
+
+		expect(rows).toHaveLength(1);
+		expect(rows[0].unavailableReporters).toBe(1);
+	});
+
+	it("orders the worst family first and unreadable ones last", () => {
+		const rows = listFamilyRows(
+			[
+				mkScopedAccount("a", [scopedEntry("Fable", 20)]),
+				mkScopedAccount("b", [scopedEntry("Opus", 80)]),
+				mkScopedAccount("c", [scopedEntry("Haiku", 50)], { paused: true }),
+			],
+			NOW,
+		);
+
+		expect(rows.map((r) => r.displayName)).toEqual(["Opus", "Fable", "Haiku"]);
 	});
 });

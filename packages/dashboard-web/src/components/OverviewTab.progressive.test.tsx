@@ -237,6 +237,57 @@ describe("OverviewTab progressive render", () => {
 		expect(tile(html, "Quota Runway")).not.toContain(">0<");
 	});
 
+	it("renders the model-limits card for a family with a live scoped window", () => {
+		const queryClient = client(false);
+		queryClient.setQueryData(queryKeys.accounts(), [
+			{
+				id: "acc-1",
+				name: "Primary",
+				provider: "anthropic",
+				paused: false,
+				rateLimitedUntil: null,
+				tokenExpiresAt: null,
+				hasRefreshToken: false,
+				usageRateLimitedUntil: null,
+				// The rate-limit strip on this page reads these, so a fixture
+				// carrying only the quota fields crashes the whole render.
+				rateLimitStatus: "OK",
+				rateLimitReset: null,
+				rateLimitRemaining: null,
+				requestCount: 0,
+				totalRequests: 0,
+				usageData: {
+					limits: [
+						{
+							kind: "weekly_scoped",
+							group: "weekly",
+							percent: 45,
+							resets_at: new Date(Date.now() + 3 * 86_400_000).toISOString(),
+							scope: { model: { id: "fable", display_name: "Fable" } },
+							is_active: true,
+						},
+					],
+				},
+			},
+		]);
+
+		const html = render(queryClient);
+
+		expect(html).toContain("Model limits");
+		expect(html).toContain("Fable");
+	});
+
+	it("leaves the model-limits card out when no family reports a cap", () => {
+		// A permanent empty frame on every pool without a scoped window would be
+		// worse than no card, and most pools have none.
+		const queryClient = client(false);
+		queryClient.setQueryData(queryKeys.accounts(), []);
+
+		const html = render(queryClient);
+
+		expect(html).not.toContain("Model limits");
+	});
+
 	it("renders no error badge on the health strip while stats is pending", () => {
 		// `null` there means "the count is UNKNOWN because the read failed"; using
 		// it for an ordinary in-flight load would put that badge on every visit.
