@@ -22,6 +22,7 @@ function makeDb(): { db: Database; repo: AccountRepository } {
 			rate_limit_reset INTEGER,
 			rate_limit_status TEXT,
 			rate_limit_remaining INTEGER,
+			paused INTEGER DEFAULT 0,
 			consecutive_rate_limits INTEGER DEFAULT 0,
 			identity_external_id TEXT,
 			identity_email TEXT,
@@ -280,5 +281,167 @@ describe("AccountRepository — clearRateLimitOnCapacityRestore (atomic compare-
 			FETCH_STARTED_AT,
 		);
 		expect(changed).toBe(false);
+	});
+});
+
+function readReset(db: Database, id: string): number | null {
+	return (
+		db
+			.query<{ rate_limit_reset: number | null }, [string]>(
+				"SELECT rate_limit_reset FROM accounts WHERE id = ?",
+			)
+			.get(id)?.rate_limit_reset ?? null
+	);
+}
+
+describe("AccountRepository — rate_limit_reset on capacity restore", () => {
+	let db: Database;
+	let repo: AccountRepository;
+	const AT = Date.now();
+	const FETCH_STARTED_AT = AT + 1_000;
+	const FUTURE_RESET = FETCH_STARTED_AT + 5 * 60 * 60 * 1000;
+
+	beforeEach(() => {
+		({ db, repo } = makeDb());
+	});
+	afterEach(() => {
+		db.close();
+	});
+
+	/** Insert an account carrying a rate_limit_reset, paused unless told otherwise. */
+	function seedReset(id: string, reset: number | null, paused = 1): void {
+		db.run(
+			`INSERT INTO accounts (id, name, created_at, rate_limit_reset, paused) VALUES (?, ?, ?, ?, ?)`,
+			[id, id, Date.now(), reset, paused],
+		);
+	}
+
+	it("clearRateLimitOnCapacityRestore leaves rate_limit_reset untouched", async () => {
+		db.run(
+			`INSERT INTO accounts (id, name, created_at, rate_limited_until, rate_limited_at, rate_limited_reason, rate_limit_reset)
+			 VALUES (?, ?, ?, ?, ?, ?, ?)`,
+			[
+				"a",
+				"a",
+				Date.now(),
+				FUTURE_RESET,
+				AT,
+				"weekly_exhausted_429",
+				FUTURE_RESET,
+			],
+		);
+
+		expect(
+			await repo.clearRateLimitOnCapacityRestore(
+				"a",
+				FUTURE_RESET,
+				AT,
+				"weekly_exhausted_429",
+				FETCH_STARTED_AT,
+			),
+		).toBe(true);
+		expect(readUntil(db, "a")).toBe(null);
+		// It used to write NULL here, which permanently disqualifies the account
+		// from auto-unpause (isAutoUnpauseCandidate requires a non-null reset in
+		// the past). Releasing a lock says nothing about when the window resets.
+		expect(readReset(db, "a")).toBe(FUTURE_RESET);
+	});
+
+	it("stampObservedRateLimitReset rewrites a future reset to the observation", async () => {
+		seedReset("a", FUTURE_RESET);
+		expect(
+			await repo.stampObservedRateLimitReset(
+				"a",
+				FUTURE_RESET,
+				FETCH_STARTED_AT,
+			),
+		).toBe(true);
+		expect(readReset(db, "a")).toBe(FETCH_STARTED_AT);
+	});
+
+	it("is idempotent across level-triggered re-reports (later observedAt, same value)", async () => {
+		seedReset("a", FUTURE_RESET);
+		await repo.stampObservedRateLimitReset("a", FUTURE_RESET, FETCH_STARTED_AT);
+		// The next poll reads the stamped value back and reports 90s later. The
+		// stamped value is no longer > observedAt, so the WHERE misses.
+		expect(
+			await repo.stampObservedRateLimitReset(
+				"a",
+				FETCH_STARTED_AT,
+				FETCH_STARTED_AT + 90_000,
+			),
+		).toBe(false);
+		expect(readReset(db, "a")).toBe(FETCH_STARTED_AT);
+	});
+
+	it("refuses when a concurrent write replaced the observed reset (CAS miss)", async () => {
+		seedReset("a", FUTURE_RESET);
+		const concurrent = FUTURE_RESET + 60_000;
+		db.run("UPDATE accounts SET rate_limit_reset = ? WHERE id = ?", [
+			concurrent,
+			"a",
+		]);
+		expect(
+			await repo.stampObservedRateLimitReset(
+				"a",
+				FUTURE_RESET,
+				FETCH_STARTED_AT,
+			),
+		).toBe(false);
+		expect(readReset(db, "a")).toBe(concurrent);
+	});
+
+	it("refuses when the account was resumed between the read and the write", async () => {
+		// A resumed account gets real traffic; its next response rewrites the
+		// column from headers, and a stamp landing on top would replace that.
+		seedReset("a", FUTURE_RESET, 0);
+		expect(
+			await repo.stampObservedRateLimitReset(
+				"a",
+				FUTURE_RESET,
+				FETCH_STARTED_AT,
+			),
+		).toBe(false);
+		expect(readReset(db, "a")).toBe(FUTURE_RESET);
+	});
+
+	it("never moves a reset at or before the observation, and never fills a NULL", async () => {
+		seedReset("past", FETCH_STARTED_AT - 1);
+		seedReset("equal", FETCH_STARTED_AT);
+		seedReset("none", null);
+
+		expect(
+			await repo.stampObservedRateLimitReset(
+				"past",
+				FETCH_STARTED_AT - 1,
+				FETCH_STARTED_AT,
+			),
+		).toBe(false);
+		expect(
+			await repo.stampObservedRateLimitReset(
+				"equal",
+				FETCH_STARTED_AT,
+				FETCH_STARTED_AT,
+			),
+		).toBe(false);
+		// A NULL reset can never equal expectedReset, so the CAS simply misses.
+		expect(
+			await repo.stampObservedRateLimitReset(
+				"none",
+				FUTURE_RESET,
+				FETCH_STARTED_AT,
+			),
+		).toBe(false);
+
+		expect(readReset(db, "past")).toBe(FETCH_STARTED_AT - 1);
+		expect(readReset(db, "equal")).toBe(FETCH_STARTED_AT);
+		expect(readReset(db, "none")).toBe(null);
+	});
+
+	it("touches only the addressed account", async () => {
+		seedReset("a", FUTURE_RESET);
+		seedReset("b", FUTURE_RESET);
+		await repo.stampObservedRateLimitReset("a", FUTURE_RESET, FETCH_STARTED_AT);
+		expect(readReset(db, "b")).toBe(FUTURE_RESET);
 	});
 });

@@ -1,5 +1,6 @@
 import { describe, expect, it } from "bun:test";
 import type { Account, DatabaseOperations } from "@clankermux/database";
+import { isAutoUnpauseCandidate } from "@clankermux/load-balancer";
 import type { CapacityRestoredEvidence } from "@clankermux/providers";
 import {
 	clearCapacityRestoredProbePending,
@@ -12,6 +13,8 @@ import {
 	type CapacityRestoredLogger,
 	type CapacityRestoredProbeMarker,
 	clearRateLimitOnCapacityRestored,
+	isStaleRecordedReset,
+	RESET_MATCH_TOLERANCE_MS,
 } from "./capacity-restored";
 
 const NOW = 1_750_000_000_000;
@@ -20,6 +23,15 @@ const FUTURE = NOW + 60 * 60 * 1000;
 const AT = NOW - 5_000;
 /** …and the poll that produced the evidence started 1s ago, i.e. AFTER it. */
 const FETCH_STARTED_AT = NOW - 1_000;
+/**
+ * A SPENT window the provider reported in this poll whose reset does NOT
+ * correspond to FUTURE, so a recorded reset of FUTURE reads as stale by
+ * default (nothing spent owns it).
+ */
+const REPORTED_WINDOW = {
+	resetMs: FUTURE + 2 * 60 * 60 * 1000,
+	utilization: 100,
+};
 
 function evidence(
 	overrides: Partial<CapacityRestoredEvidence> = {},
@@ -29,6 +41,7 @@ function evidence(
 		utilization: 40,
 		extraUsageUtilization: null,
 		fetchStartedAt: FETCH_STARTED_AT,
+		observedWindows: [REPORTED_WINDOW],
 		...overrides,
 	};
 }
@@ -52,11 +65,21 @@ interface ClearCall {
 	fetchStartedAt: number;
 }
 
+interface StampCall {
+	accountId: string;
+	expectedReset: number;
+	observedAt: number;
+}
+
 interface Harness {
 	dbOps: Pick<
 		DatabaseOperations,
-		"getAccount" | "clearRateLimitOnCapacityRestore"
+		| "getAccount"
+		| "clearRateLimitOnCapacityRestore"
+		| "stampObservedRateLimitReset"
 	>;
+	/** Args of every stampObservedRateLimitReset call, in order. */
+	stampCalls: StampCall[];
 	logger: CapacityRestoredLogger;
 	clearCalls: ClearCall[];
 	debugMsgs: string[];
@@ -78,8 +101,10 @@ interface Harness {
 function makeHarness(
 	account: Account | null | (() => Account | null),
 	clear: boolean | (() => boolean) = true,
+	stamp: boolean | (() => boolean) = true,
 ): Harness {
 	const clearCalls: ClearCall[] = [];
+	const stampCalls: StampCall[] = [];
 	const debugMsgs: string[] = [];
 	const infoMsgs: string[] = [];
 	const warnMsgs: string[] = [];
@@ -89,8 +114,10 @@ function makeHarness(
 	let generation = 0;
 	const getAccount = typeof account === "function" ? account : () => account;
 	const clearResult = typeof clear === "function" ? clear : () => clear;
+	const stampResult = typeof stamp === "function" ? stamp : () => stamp;
 	return {
 		clearCalls,
+		stampCalls,
 		debugMsgs,
 		infoMsgs,
 		warnMsgs,
@@ -132,9 +159,19 @@ function makeHarness(
 				});
 				return clearResult();
 			},
+			stampObservedRateLimitReset: async (
+				accountId: string,
+				expectedReset: number,
+				observedAt: number,
+			) => {
+				stampCalls.push({ accountId, expectedReset, observedAt });
+				return stampResult();
+			},
 		} as Pick<
 			DatabaseOperations,
-			"getAccount" | "clearRateLimitOnCapacityRestore"
+			| "getAccount"
+			| "clearRateLimitOnCapacityRestore"
+			| "stampObservedRateLimitReset"
 		>,
 	};
 }
@@ -753,5 +790,372 @@ describe("clearRateLimitOnCapacityRestored — lock-contradiction alarm", () => 
 			expect(h.warnMsgs).toEqual([]);
 			expect(skipToken(h.debugMsgs)).toEqual(["ineligible_reason"]);
 		}
+	});
+});
+
+describe("isStaleRecordedReset", () => {
+	const R = 1_800_000_000_000;
+	const spent = (resetMs: number) => ({ resetMs, utilization: 100 });
+
+	it("is fresh only while a SPENT window matches within the tolerance", () => {
+		expect(isStaleRecordedReset(R, [spent(R)])).toBe(false);
+		expect(isStaleRecordedReset(R, [spent(R - RESET_MATCH_TOLERANCE_MS)])).toBe(
+			false,
+		);
+		expect(isStaleRecordedReset(R, [spent(R + RESET_MATCH_TOLERANCE_MS)])).toBe(
+			false,
+		);
+		expect(
+			isStaleRecordedReset(R, [spent(R + RESET_MATCH_TOLERANCE_MS + 1)]),
+		).toBe(true);
+		expect(
+			isStaleRecordedReset(R, [spent(R - RESET_MATCH_TOLERANCE_MS - 1)]),
+		).toBe(true);
+		// One owning match among many non-matches is still a match.
+		expect(
+			isStaleRecordedReset(R, [
+				spent(R + 999_999),
+				spent(R - 474),
+				spent(R + 999_999),
+			]),
+		).toBe(false);
+	});
+
+	it("a matching window that DRAINED no longer owns the deadline (gift reset)", () => {
+		// The documented gift signature: percentage drops, resets_at stays put.
+		expect(isStaleRecordedReset(R, [{ resetMs: R, utilization: 0 }])).toBe(
+			true,
+		);
+		expect(isStaleRecordedReset(R, [{ resetMs: R, utilization: 99.9 }])).toBe(
+			true,
+		);
+		// …but a spent window with the same reset still holds, even beside a
+		// drained one (two windows can share a boundary).
+		expect(
+			isStaleRecordedReset(R, [
+				{ resetMs: R, utilization: 0 },
+				{ resetMs: R + 200, utilization: 100 },
+			]),
+		).toBe(false);
+	});
+
+	it("unknown utilization on a matching window counts as spent (hold)", () => {
+		expect(isStaleRecordedReset(R, [{ resetMs: R, utilization: null }])).toBe(
+			false,
+		);
+	});
+
+	it("an empty list is stale: no spent window can own a deadline it does not report", () => {
+		expect(isStaleRecordedReset(R, [])).toBe(true);
+	});
+
+	it("tolerates the measured header-vs-payload rounding (≤474ms live, 1s cap)", () => {
+		// Header resets are whole seconds; payload resets carry ms. Values seen on
+		// 2026-09-03 across every live account.
+		const header = 1788678000000;
+		for (const drift of [238, -474, -74, 452, 265, 0]) {
+			expect(isStaleRecordedReset(header, [spent(header - drift)])).toBe(false);
+		}
+	});
+});
+
+describe("clearRateLimitOnCapacityRestored — stranded paused account", () => {
+	/** No active lock, so the handler takes the stamp path rather than the clear path. */
+	function stranded(overrides: Partial<Account> = {}): Account {
+		return makeAccount({
+			rate_limited_until: null,
+			rate_limited_at: null,
+			rate_limited_reason: null,
+			paused: true,
+			pause_reason: "overage",
+			auto_fallback_enabled: true,
+			provider: "anthropic",
+			rate_limit_reset: FUTURE,
+			...overrides,
+		} as Partial<Account>);
+	}
+
+	it("stamps the observation instant over a stale future reset", async () => {
+		const h = makeHarness(stranded());
+		await clearRateLimitOnCapacityRestored(
+			h.dbOps,
+			h.logger,
+			evidence(),
+			h.marker,
+			NOW,
+		);
+
+		expect(h.stampCalls).toEqual([
+			{
+				accountId: "acc-1",
+				expectedReset: FUTURE,
+				observedAt: FETCH_STARTED_AT,
+			},
+		]);
+		// The lock path must not run: there is no cooldown to compare-and-clear,
+		// and no probe generation should be reserved for a stamp.
+		expect(h.clearCalls).toEqual([]);
+		expect(h.markerCalls).toEqual([]);
+		expect(h.infoMsgs).toHaveLength(1);
+		expect(h.infoMsgs[0]).toContain("capacity_restored_stamp_reset");
+		expect(h.infoMsgs[0]).toContain("pause_reason=overage");
+	});
+
+	it("the value the handler writes satisfies the auto-unpause gate after its skew buffer, not before", async () => {
+		// Composition with the gate this whole change exists to open: drive the
+		// handler, take the value it actually chose to write, and feed THAT into
+		// isAutoUnpauseCandidate. Before the stamp the account is the deadlock.
+		expect(isAutoUnpauseCandidate(stranded(), NOW)).toBe(false);
+
+		const h = makeHarness(stranded());
+		await clearRateLimitOnCapacityRestored(
+			h.dbOps,
+			h.logger,
+			evidence(),
+			h.marker,
+			NOW,
+		);
+		expect(h.stampCalls).toHaveLength(1);
+		const written = h.stampCalls[0].observedAt;
+		const afterStamp = stranded({
+			rate_limit_reset: written,
+		} as Partial<Account>);
+		expect(isAutoUnpauseCandidate(afterStamp, written + 999)).toBe(false);
+		expect(isAutoUnpauseCandidate(afterStamp, written + 1_001)).toBe(true);
+	});
+
+	it("leaves a CORRECT future reset alone: it matches a reported window", async () => {
+		// Claude-1, 2026-09-03: fable weekly 100% (reset days out), account-wide
+		// 78%. The recorded reset is the scoped claim's and is right. Account-wide
+		// headroom fires the evidence every poll; the stamp must not follow.
+		const scopedReset = FUTURE;
+		const h = makeHarness(stranded());
+		await clearRateLimitOnCapacityRestored(
+			h.dbOps,
+			h.logger,
+			evidence({
+				utilization: 78,
+				observedWindows: [
+					{ resetMs: NOW + 5 * 60 * 60 * 1000, utilization: 13 },
+					{ resetMs: NOW + 3 * 24 * 60 * 60 * 1000, utilization: 78 },
+					{ resetMs: scopedReset + 238, utilization: 100 },
+				],
+			}),
+			h.marker,
+			NOW,
+		);
+		expect(h.stampCalls).toEqual([]);
+		// The normal state for such an account on every poll: silent, like the
+		// healthy no-lock return.
+		expect(h.infoMsgs).toEqual([]);
+		expect(h.debugMsgs).toEqual([]);
+	});
+
+	it("stamps on a gift reset: the matching window drained in place", async () => {
+		// Same reset as recorded, but the window is at 0% now. Holding until the
+		// old deadline would idle a usable account for days.
+		const h = makeHarness(stranded());
+		await clearRateLimitOnCapacityRestored(
+			h.dbOps,
+			h.logger,
+			evidence({
+				utilization: 0,
+				observedWindows: [{ resetMs: FUTURE + 300, utilization: 0 }],
+			}),
+			h.marker,
+			NOW,
+		);
+		expect(h.stampCalls).toHaveLength(1);
+	});
+
+	it("stamps on a payload that reports no resets at all (every window idle)", async () => {
+		// A paused account gets no traffic, so after an out-of-band reset every
+		// window it owns is idle, and idle windows can report resets_at: null.
+		// Failing closed here would recreate the deadlock.
+		const h = makeHarness(stranded());
+		await clearRateLimitOnCapacityRestored(
+			h.dbOps,
+			h.logger,
+			evidence({ utilization: 0, observedWindows: [] }),
+			h.marker,
+			NOW,
+		);
+		expect(h.stampCalls).toHaveLength(1);
+	});
+
+	it("stamps for the other self-healing reason and for an absent one", async () => {
+		for (const pause_reason of ["rate_limit_window", null, ""]) {
+			const h = makeHarness(stranded({ pause_reason } as Partial<Account>));
+			await clearRateLimitOnCapacityRestored(
+				h.dbOps,
+				h.logger,
+				evidence(),
+				h.marker,
+				NOW,
+			);
+			expect(h.stampCalls).toHaveLength(1);
+		}
+	});
+
+	it("refuses a durable pause reason", async () => {
+		for (const pause_reason of [
+			"manual",
+			"failure_threshold",
+			"oauth_invalid_grant",
+			"subscription_expired",
+		]) {
+			const h = makeHarness(stranded({ pause_reason } as Partial<Account>));
+			await clearRateLimitOnCapacityRestored(
+				h.dbOps,
+				h.logger,
+				evidence(),
+				h.marker,
+				NOW,
+			);
+			expect(h.stampCalls).toEqual([]);
+		}
+	});
+
+	it("refuses when nothing would ever auto-unpause the account anyway", async () => {
+		// The gate also requires auto-fallback and a window-reset provider; a
+		// stamp there would only log a promise that cannot be kept.
+		for (const overrides of [
+			{ auto_fallback_enabled: false },
+			{ provider: "openai" },
+			{ provider: "kilo" },
+		]) {
+			const h = makeHarness(stranded(overrides as Partial<Account>));
+			await clearRateLimitOnCapacityRestored(
+				h.dbOps,
+				h.logger,
+				evidence(),
+				h.marker,
+				NOW,
+			);
+			expect(h.stampCalls).toEqual([]);
+		}
+	});
+
+	it("leaves an UNPAUSED account alone — it still gets traffic to fix itself", async () => {
+		const h = makeHarness(stranded({ paused: false } as Partial<Account>));
+		await clearRateLimitOnCapacityRestored(
+			h.dbOps,
+			h.logger,
+			evidence(),
+			h.marker,
+			NOW,
+		);
+		expect(h.stampCalls).toEqual([]);
+	});
+
+	it("never moves a reset that is already at or before the observation", async () => {
+		for (const rate_limit_reset of [
+			FETCH_STARTED_AT - 1,
+			FETCH_STARTED_AT,
+			null,
+		]) {
+			const h = makeHarness(
+				stranded({ rate_limit_reset } as unknown as Partial<Account>),
+			);
+			await clearRateLimitOnCapacityRestored(
+				h.dbOps,
+				h.logger,
+				evidence(),
+				h.marker,
+				NOW,
+			);
+			expect(h.stampCalls).toEqual([]);
+		}
+	});
+
+	it("the boundary is the poll's start, not the handler's now", async () => {
+		// A reset that fell between the poll starting and the handler running is
+		// still in the future RELATIVE TO THE OBSERVATION, so it is stamped; a
+		// `now`-based comparison would wrongly skip it.
+		const h = makeHarness(
+			stranded({ rate_limit_reset: NOW - 500 } as Partial<Account>),
+		);
+		await clearRateLimitOnCapacityRestored(
+			h.dbOps,
+			h.logger,
+			evidence(),
+			h.marker,
+			NOW,
+		);
+		expect(h.stampCalls).toEqual([
+			{
+				accountId: "acc-1",
+				expectedReset: NOW - 500,
+				observedAt: FETCH_STARTED_AT,
+			},
+		]);
+	});
+
+	it("logs a debug token, not an info line, when the CAS misses", async () => {
+		const h = makeHarness(stranded(), true, false);
+		await clearRateLimitOnCapacityRestored(
+			h.dbOps,
+			h.logger,
+			evidence(),
+			h.marker,
+			NOW,
+		);
+		expect(h.stampCalls).toHaveLength(1);
+		expect(h.infoMsgs).toEqual([]);
+		expect(skipToken(h.debugMsgs)).toContain("stale_reset_cas_mismatch");
+	});
+
+	it("after clearing a lock on a paused account, also corrects a stale reset", async () => {
+		// Lock path + paused: the clear leaves rate_limit_reset alone, so the
+		// account is still stranded once the lock is gone. Clear first, then stamp.
+		const h = makeHarness(
+			makeAccount({
+				paused: true,
+				pause_reason: "overage",
+				auto_fallback_enabled: true,
+				provider: "anthropic",
+				rate_limit_reset: FUTURE,
+			} as Partial<Account>),
+		);
+		await clearRateLimitOnCapacityRestored(
+			h.dbOps,
+			h.logger,
+			evidence(),
+			h.marker,
+			NOW,
+		);
+		expect(h.clearCalls).toHaveLength(1);
+		expect(h.stampCalls).toEqual([
+			{
+				accountId: "acc-1",
+				expectedReset: FUTURE,
+				observedAt: FETCH_STARTED_AT,
+			},
+		]);
+		expect(
+			h.infoMsgs.map((m) => m.match(/capacity_restored_\w+/)?.[0]),
+		).toEqual(["capacity_restored_clear", "capacity_restored_stamp_reset"]);
+	});
+
+	it("does not stamp when the lock clear itself was refused", async () => {
+		const h = makeHarness(
+			makeAccount({
+				paused: true,
+				pause_reason: "overage",
+				auto_fallback_enabled: true,
+				provider: "anthropic",
+				rate_limit_reset: FUTURE,
+			} as Partial<Account>),
+			false,
+		);
+		await clearRateLimitOnCapacityRestored(
+			h.dbOps,
+			h.logger,
+			evidence(),
+			h.marker,
+			NOW,
+		);
+		expect(h.clearCalls).toHaveLength(1);
+		expect(h.stampCalls).toEqual([]);
 	});
 });

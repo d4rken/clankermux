@@ -183,3 +183,58 @@ export function isAnthropicUsageShape(
 	const limits = (data as AnthropicUsageData).limits;
 	return Array.isArray(limits) && limits.length > 0;
 }
+
+/** One window the usage payload reports, as the staleness test sees it. */
+export interface ObservedWindow {
+	/** The window's `resets_at` in epoch ms. */
+	resetMs: number;
+	/** Its utilization percent, or null when the payload did not say. */
+	utilization: number | null;
+}
+
+/**
+ * Every window with a parseable reset the payload reports, in no particular
+ * order: the flat windows (`five_hour`, `seven_day`, `seven_day_oauth_apps`,
+ * `seven_day_opus`, `seven_day_sonnet`) plus EVERY `limits[]` entry regardless
+ * of `kind`, family resolution or whether the reset has already elapsed.
+ *
+ * Deliberately broader than {@link normalizeAnthropicUsage}, which excludes
+ * unknown families and rolled-over scoped windows because routing must not act
+ * on them. This collector answers a different question: "is the reset we have
+ * RECORDED for this account still owned by a window the provider reports as
+ * spent?" Dropping entries here would turn a correct recorded reset into a
+ * false positive for staleness.
+ *
+ * Windows without a `resets_at` are not windows for this purpose: a reset
+ * that is null cannot own a recorded deadline. The flat `extra_usage` field is
+ * not collected: it is a monthly billing bucket, not a rate-limit window, and
+ * carries no `resets_at` in any payload shape seen. A `limits[]` entry of ANY
+ * kind is collected, so an overage-kind entry with a `resets_at` would count.
+ */
+export function collectObservedWindows(
+	data: AnthropicUsageData | null | undefined,
+): ObservedWindow[] {
+	if (!data || typeof data !== "object") return [];
+	const out: ObservedWindow[] = [];
+	const add = (
+		window:
+			| { utilization?: number | null; resets_at?: string | null }
+			| null
+			| undefined,
+		utilization: number | null | undefined,
+	) => {
+		const resetMs = parseResetMs(window?.resets_at);
+		if (resetMs === null) return;
+		out.push({
+			resetMs,
+			utilization: isFiniteNumber(utilization) ? utilization : null,
+		});
+	};
+	add(data.five_hour, data.five_hour?.utilization);
+	add(data.seven_day, data.seven_day?.utilization);
+	add(data.seven_day_oauth_apps, data.seven_day_oauth_apps?.utilization);
+	add(data.seven_day_opus, data.seven_day_opus?.utilization);
+	add(data.seven_day_sonnet, data.seven_day_sonnet?.utilization);
+	for (const entry of data.limits ?? []) add(entry, entry?.percent);
+	return out;
+}
