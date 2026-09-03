@@ -886,15 +886,18 @@ function outcomeInstant(outcome: RunwayOutcome, now: number): number | null {
  * perturbed copies of the inputs and reports the two answers, so the band can
  * never disagree with the point estimate it brackets.
  *
- * Null — no band stated — in three cases, each because the two probes would not
+ * Null — no band stated — in four cases, each because the two probes would not
  * bound anything:
  *
  *  - The baseline consumed modeled reset credits. Burn under credits is
  *    documented non-monotonic (see {@link probePaceMargin}): a faster burn can
  *    move a dead span back inside a credit's expiry and REVIVE the window, so
  *    the perturbed answers do not straddle the baseline.
+ *  - The baseline is `out-now`. The pool is out at this instant, and an instant
+ *    that has already arrived is not a projection with an error bar on it.
  *  - No weekly window was perturbed. Every weekly reading was already
- *    fractional, so quantisation is not what is limiting the precision here.
+ *    fractional or already exhausted, so quantisation is not what is limiting
+ *    the precision here.
  *  - Both probes state no run-out. There is nothing to bracket.
  *
  * FIVE-HOUR WINDOWS ARE NEVER PERTURBED, and the band says nothing about them.
@@ -923,17 +926,28 @@ export function computeCapacityRunwayBand(
 		return null;
 	}
 
+	// A pool that is ALREADY out states no future instant, so there is nothing
+	// for two probes to bracket. Without this, a window reading exactly 100 is
+	// perturbed down to 99.5 — a reading the estimator no longer treats as
+	// exhausted — and the low probe hands back a run-out minutes from now, so an
+	// "Out now" headline would ship a band that puts the run-out in the future.
+	if (baseline.kind === "out-now") return null;
+
 	let perturbed = false;
 	const shift = (delta: number): RunwayAccountInput[] =>
 		accounts.map((account) => ({
 			...account,
 			windows: account.windows.map((window) => {
-				// The WEEKLY window only, and only a WHOLE-percent reading of it. A
-				// fractional reading came from somewhere that already knows better,
-				// and nudging it would invent an uncertainty it does not have.
+				// The WEEKLY window only, and only a WHOLE-percent reading of it that
+				// is not already exhausted. A fractional reading came from somewhere
+				// that already knows better, and nudging it would invent an
+				// uncertainty it does not have; a reading at 100 is a STATE the
+				// provider reports — the window is spent — not a measurement rounded
+				// to the nearest percent, so pushing it to 99.5 would un-exhaust it.
 				if (
 					window.windowKind !== "seven_day" ||
-					!Number.isInteger(window.utilizationPct)
+					!Number.isInteger(window.utilizationPct) ||
+					window.utilizationPct >= 100
 				) {
 					return window;
 				}

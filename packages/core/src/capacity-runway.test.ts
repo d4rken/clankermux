@@ -1609,8 +1609,9 @@ describe("computeCapacityRunwayBand", () => {
 	function weeklyAt(
 		pct: number,
 		alsoCarrying: RunwayWindowInput[] = [],
+		accountId = "a",
 	): RunwayAccountInput {
-		return account("a", [
+		return account(accountId, [
 			window({
 				windowKind: "seven_day",
 				utilizationPct: pct,
@@ -1725,23 +1726,30 @@ describe("computeCapacityRunwayBand", () => {
 		expect(computeCapacityRunwayBand([weeklyAt(20)], NOW, baseline)).toBeNull();
 	});
 
-	it("anchors the earliest end at now when one probe reads out-now", () => {
-		// 100% used: the low probe drops to 99.5 and projects a run-out, the high
-		// probe clamps back to 100 and is out already.
-		const accounts = [
-			account("a", [
-				window({
-					windowKind: "seven_day",
-					utilizationPct: 100,
-					resetsAtMs: NOW + 6 * DAY,
-					windowStartMs: NOW - DAY,
-					prediction: null,
-				}),
-			]),
-		];
-		const baseline = computeCapacityRunway(accounts, NOW);
-		const band = computeCapacityRunwayBand(accounts, NOW, baseline);
-		expect(band?.earliestExhaustsAtMs).toBe(NOW);
+	it("states no band when the pool is already out", () => {
+		// A reading of exactly 100 is a state the provider reports, not a figure
+		// rounded to the nearest percent, so it is not perturbed: dropping it to
+		// 99.5 would un-exhaust a spent window and hand the low probe a run-out
+		// half an hour from now, under a headline that says the pool is out. An
+		// instant that has already arrived is not a projection with an error bar.
+		const { baseline, band } = bandFor([weeklyAt(100)]);
+
+		expect(baseline.kind).toBe("out-now");
+		expect(band).toBeNull();
+	});
+
+	it("takes no perturbation from a pool member that is already spent", () => {
+		// One account out of quota, one at 40% and still burning. The pool runs
+		// out when the second one does, and the band around that instant is the
+		// one the 40% reading's precision leaves open — the spent account states
+		// no uncertainty to add to it.
+		const stillBurning = weeklyAt(40, [], "burning");
+		const withSpentPeer = bandFor([weeklyAt(100, [], "spent"), stillBurning]);
+		const alone = bandFor([stillBurning]);
+
+		expect(withSpentPeer.baseline.kind).toBe("runway");
+		expect(alone.band).not.toBeNull();
+		expect(withSpentPeer.band).toEqual(alone.band);
 	});
 
 	it("skips the pace-margin walk when the caller opts out", () => {
