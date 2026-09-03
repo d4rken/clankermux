@@ -1,5 +1,6 @@
 import type {
 	RunwayAssumedCredits,
+	RunwayBand,
 	RunwayCause,
 	RunwayOutcome,
 	UsageBurnAnchor,
@@ -17,7 +18,7 @@ import { TIME_CONSTANTS } from "./constants";
  * types package depend on core. Re-exported here so this module stays the one
  * import site for everything runway-shaped on the server and the dashboard.
  */
-export type { RunwayAssumedCredits, RunwayCause, RunwayOutcome };
+export type { RunwayAssumedCredits, RunwayBand, RunwayCause, RunwayOutcome };
 
 /**
  * Quota-exhaustion estimation, and the pool-level "runway" built on top of it.
@@ -792,6 +793,18 @@ export function computeCapacityRunway(
 	accounts: RunwayAccountInput[],
 	now: number,
 	horizonMs: number = RUNWAY_HORIZON_MS,
+	options?: {
+		/**
+		 * Whether a `beyond-horizon` result should carry its fragility probe.
+		 * Default true, so every existing caller is unchanged.
+		 *
+		 * The probe costs up to 50 pool rebuilds, which is fine once per served
+		 * response and is not fine inside a caller that runs the whole scan twice
+		 * — {@link computeCapacityRunwayBand} does, and it discards
+		 * `paceMargin` anyway.
+		 */
+		probePaceMargin?: boolean;
+	},
 ): RunwayOutcome {
 	if (accounts.length === 0) return { kind: "no-accounts" };
 
@@ -829,7 +842,10 @@ export function computeCapacityRunway(
 		};
 	}
 
-	const paceMargin = probePaceMargin(accounts, now, horizonEndMs);
+	const paceMargin =
+		options?.probePaceMargin === false
+			? null
+			: probePaceMargin(accounts, now, horizonEndMs);
 	return {
 		kind: "beyond-horizon",
 		horizonMs,
@@ -838,6 +854,117 @@ export function computeCapacityRunway(
 			? { assumedResetCredits: assumedCredits }
 			: {}),
 		...(paceMargin !== null ? { paceMargin } : {}),
+	};
+}
+
+/**
+ * How far a whole-percent reading is perturbed in each direction, in percentage
+ * points. A provider reporting "20%" means [19.5, 20.5), so half a percent is
+ * the full extent of the quantisation error — not a chosen tolerance.
+ */
+const RUNWAY_BAND_HALF_WIDTH_PCT = 0.5;
+
+/** The run-out instant an outcome states, or null when it states none. */
+function outcomeInstant(outcome: RunwayOutcome, now: number): number | null {
+	if (outcome.kind === "runway") return outcome.exhaustsAtMs;
+	if (outcome.kind === "out-now") return now;
+	return null;
+}
+
+/**
+ * The interval the run-out actually lies in, given that the readings behind it
+ * are whole percents.
+ *
+ * The scan divides by a utilization to get a pace, so its error is proportional
+ * to the runway: half a percent of reading error on a window at 20% one day in
+ * is about six hours of run-out, while the same half percent deep into a window
+ * is minutes. Reporting one instant states a precision the input never had, and
+ * the figure visibly swinging by a day between polls is the same fact seen from
+ * the outside.
+ *
+ * Nothing about the estimator is touched. This runs the SAME scan twice against
+ * perturbed copies of the inputs and reports the two answers, so the band can
+ * never disagree with the point estimate it brackets.
+ *
+ * Null — no band stated — in three cases, each because the two probes would not
+ * bound anything:
+ *
+ *  - The baseline consumed modeled reset credits. Burn under credits is
+ *    documented non-monotonic (see {@link probePaceMargin}): a faster burn can
+ *    move a dead span back inside a credit's expiry and REVIVE the window, so
+ *    the perturbed answers do not straddle the baseline.
+ *  - No window was perturbed. Every reading was already fractional, so
+ *    quantisation is not what is limiting the precision here.
+ *  - Both probes state no run-out. There is nothing to bracket.
+ *
+ * A regression-backed window is perturbed like any other and simply does not
+ * move: `estimateWindowExhaustion`'s regression branch projects from the server
+ * slope and never reads the percentage. The two ends then come back equal,
+ * which the display renders as no band. That is disclosure of what the model
+ * does, not a claim that the figure is exact.
+ */
+export function computeCapacityRunwayBand(
+	accounts: RunwayAccountInput[],
+	now: number,
+	baseline: RunwayOutcome,
+	horizonMs: number = RUNWAY_HORIZON_MS,
+): RunwayBand | null {
+	if (
+		"assumedResetCredits" in baseline &&
+		(baseline.assumedResetCredits?.length ?? 0) > 0
+	) {
+		return null;
+	}
+
+	let perturbed = false;
+	const shift = (delta: number): RunwayAccountInput[] =>
+		accounts.map((account) => ({
+			...account,
+			windows: account.windows.map((window) => {
+				// Only a WHOLE-percent reading carries quantisation error. A
+				// fractional one came from somewhere that already knows better, and
+				// nudging it would invent an uncertainty it does not have.
+				if (!Number.isInteger(window.utilizationPct)) return window;
+				perturbed = true;
+				return {
+					...window,
+					utilizationPct: Math.min(
+						100,
+						Math.max(0, window.utilizationPct + delta),
+					),
+				};
+			}),
+		}));
+
+	const lowInputs = shift(-RUNWAY_BAND_HALF_WIDTH_PCT);
+	const highInputs = shift(RUNWAY_BAND_HALF_WIDTH_PCT);
+	if (!perturbed) return null;
+
+	// `probePaceMargin: false` on both: the walk costs up to 50 pool rebuilds
+	// per call and nothing here reads its result.
+	const low = computeCapacityRunway(lowInputs, now, horizonMs, {
+		probePaceMargin: false,
+	});
+	const high = computeCapacityRunway(highInputs, now, horizonMs, {
+		probePaceMargin: false,
+	});
+
+	// Which probe lands earlier is NOT assumed. Less utilization usually means a
+	// longer runway, but a pool's all-out instant is the intersection of several
+	// accounts' dead spans, and shifting them all can move that intersection
+	// either way.
+	const instants = [outcomeInstant(low, now), outcomeInstant(high, now)].filter(
+		(t): t is number => t !== null,
+	);
+	if (instants.length === 0) return null;
+
+	return {
+		// A probe that found no run-out inside the horizon leaves its side OPEN:
+		// null is "at least this", not "equal to the other end".
+		earliestExhaustsAtMs:
+			instants.length === 2 ? Math.min(...instants) : instants[0],
+		latestExhaustsAtMs: instants.length === 2 ? Math.max(...instants) : null,
+		halfWidthPct: RUNWAY_BAND_HALF_WIDTH_PCT,
 	};
 }
 

@@ -3,6 +3,7 @@ import type {
 	AccountUsagePrediction,
 	ApiKeyResponse,
 	FullUsageData,
+	RunwayBand,
 	RunwayKeyEntry,
 	RunwayOutcome,
 	UsageBurnAnchor,
@@ -10,6 +11,7 @@ import type {
 import { isAccountAllowedByPin, type RoutingPin } from "./api-key-pin";
 import {
 	computeCapacityRunway,
+	computeCapacityRunwayBand,
 	type LifetimeConfidence,
 	type RunwayAccountInput,
 	type RunwayResetCreditBank,
@@ -224,15 +226,24 @@ function runwayFor(
 	pin: RoutingPin,
 	accounts: RunwayAccountSource[],
 	now: number,
-): { eligibleAccountIds: string[]; outcome: RunwayOutcome } {
+): {
+	eligibleAccountIds: string[];
+	outcome: RunwayOutcome;
+	band: RunwayBand | null;
+} {
 	const eligible = accounts.filter((account) =>
 		isAccountAllowedByPin(pin, account),
 	);
+	const inputs = eligible.map(toRunwayAccountInput);
+	const outcome = computeCapacityRunway(inputs, now);
 	return {
 		// The IDS, not a count: a consumer that wants the count takes `.length`,
 		// but nothing can recover which accounts a key reaches from a number.
 		eligibleAccountIds: eligible.map((account) => account.id),
-		outcome: computeCapacityRunway(eligible.map(toRunwayAccountInput), now),
+		outcome,
+		// Computed from the SAME inputs as the outcome above, so the band can
+		// never bracket a scan the row does not report.
+		band: computeCapacityRunwayBand(inputs, now, outcome),
 	};
 }
 

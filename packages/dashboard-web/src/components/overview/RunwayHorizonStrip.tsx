@@ -16,6 +16,18 @@ interface RunwayHorizonStripProps {
 	 * to. Null renders the horizon's own description instead.
 	 */
 	markerLabel?: string | null;
+	/**
+	 * The quantisation band around `exhaustsAtMs`, drawn as a translucent range
+	 * behind the marker. Absent or null on either side draws nothing: an open end
+	 * has no position to draw.
+	 *
+	 * The marker is a single line at a single instant, which reads as precision
+	 * the whole-percent readings behind it never had. The shading is the same
+	 * disclosure the card's "Band" row makes, in the place a reader is already
+	 * looking.
+	 */
+	bandEarliestMs?: number | null;
+	bandLatestMs?: number | null;
 }
 
 /**
@@ -37,6 +49,8 @@ export function RunwayHorizonStrip({
 	horizonMs,
 	now,
 	markerLabel,
+	bandEarliestMs,
+	bandLatestMs,
 }: RunwayHorizonStripProps) {
 	// A horizon that is absent or nonsensical cannot be drawn to scale, and a
 	// strip drawn to a made-up scale is worse than no strip.
@@ -53,6 +67,16 @@ export function RunwayHorizonStrip({
 			? null
 			: Math.min(1, Math.max(0, remainingMs / horizonMs));
 
+	// Same clamp as the marker, for the same reason.
+	const bandFraction = (at: number | null | undefined): number | null =>
+		at == null ? null : Math.min(1, Math.max(0, (at - now) / horizonMs));
+	const bandStart = bandFraction(bandEarliestMs);
+	const bandEnd = bandFraction(bandLatestMs);
+	const bandSpan =
+		bandStart != null && bandEnd != null && bandEnd > bandStart
+			? { left: bandStart * 100, width: (bandEnd - bandStart) * 100 }
+			: null;
+
 	const horizonLabel = formatDurationDhm(horizonMs);
 	const description =
 		fraction == null
@@ -66,6 +90,12 @@ export function RunwayHorizonStrip({
 				role="img"
 				aria-label={description}
 			>
+				{bandSpan != null && (
+					<div
+						className="absolute inset-y-0 bg-warning/20"
+						style={{ left: `${bandSpan.left}%`, width: `${bandSpan.width}%` }}
+					/>
+				)}
 				{fraction != null && (
 					<>
 						<div

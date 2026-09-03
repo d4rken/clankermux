@@ -703,3 +703,43 @@ describe("summarizeKeyRunways", () => {
 		expect(worstKeyRunway([fragile, finite], NOW)?.keyId).toBe("finite");
 	});
 });
+
+describe("runway band on each key row", () => {
+	it("carries a band for the key it was computed from", () => {
+		// Two keys over different account sets, so a shared band would be
+		// visibly wrong: the pinned key sees only the spent account.
+		const accounts = [
+			mkAccount({
+				id: "acc-1",
+				name: "acc-1",
+				usageData: usage(10, NOW + 4 * HOUR, 40, NOW + 6 * DAY),
+			}),
+			healthy("acc-2"),
+		];
+		const keys = [
+			mkKey({ id: "k1", name: "Pinned", pinnedAccountId: "acc-1" }),
+			mkKey({ id: "k2", name: "Open" }),
+		];
+
+		const runways = computeApiKeyRunways(keys, accounts, NOW);
+
+		for (const runway of runways) {
+			expect(runway).toHaveProperty("band");
+		}
+		const pinned = byId(runways, "k1");
+		expect(pinned.outcome.kind).toBe("runway");
+		expect(pinned.band).not.toBeNull();
+		expect(pinned.band?.halfWidthPct).toBe(0.5);
+	});
+
+	it("states no band for a key with no accounts to scan", () => {
+		const runways = computeApiKeyRunways(
+			[mkKey({ id: "k1", pinnedAccountId: "missing" })],
+			[healthy("acc-1")],
+			NOW,
+		);
+
+		expect(byId(runways, "k1").outcome.kind).toBe("no-accounts");
+		expect(byId(runways, "k1").band).toBeNull();
+	});
+});

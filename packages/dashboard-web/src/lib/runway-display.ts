@@ -1,4 +1,4 @@
-import type { RunwayCause, RunwayOutcome } from "@clankermux/core";
+import type { RunwayBand, RunwayCause, RunwayOutcome } from "@clankermux/core";
 import { effectiveRunwayOutcome } from "@clankermux/core";
 import { formatDurationDhm } from "./format-prediction";
 
@@ -216,4 +216,38 @@ export function runwayQualifier(
 		parts.push(`${unknown} account${unknown === 1 ? "" : "s"} unknown`);
 	}
 	return parts.length > 0 ? parts.join(" · ") : null;
+}
+
+/**
+ * The quantisation band as a duration range, or null when there is nothing to
+ * state.
+ *
+ * Three forms, because an open end is a different claim from a closed one:
+ * "8d 2h – 10d 5h" when both probes found a run-out, "≥ 8d 2h" when the later
+ * probe found none inside the horizon, and "≤ 10d 5h" when the earlier one
+ * did not.
+ *
+ * Null when both ends are open (nothing to bracket), when no band was stated,
+ * and — the case worth knowing about — when the two ends are EQUAL. Equal ends
+ * mean the perturbation moved nothing, which happens whenever the projection is
+ * regression-backed: that branch reads the server's slope and never touches the
+ * percentage. Rendering "8d 2h – 8d 2h" would dress that up as a measured
+ * zero-width interval; saying nothing is the honest form.
+ */
+export function formatRunwayBand(
+	band: RunwayBand | null | undefined,
+	now: number,
+): string | null {
+	if (band == null) return null;
+	const { earliestExhaustsAtMs: earliest, latestExhaustsAtMs: latest } = band;
+	if (earliest == null && latest == null) return null;
+	if (earliest != null && latest != null) {
+		if (earliest === latest) return null;
+		return `${formatDurationDhm(Math.max(0, earliest - now))} – ${formatDurationDhm(Math.max(0, latest - now))}`;
+	}
+	if (latest == null && earliest != null) {
+		return `≥ ${formatDurationDhm(Math.max(0, earliest - now))}`;
+	}
+	// `latest` is non-null here; the earlier probe found no run-out.
+	return `≤ ${formatDurationDhm(Math.max(0, (latest as number) - now))}`;
 }

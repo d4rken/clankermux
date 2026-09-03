@@ -464,3 +464,55 @@ describe("RunwayCard", () => {
 		});
 	});
 });
+
+describe("RunwayCard quantisation band", () => {
+	const finite = (band: KeyRunway["band"]) =>
+		row({
+			outcome: {
+				kind: "runway",
+				exhaustsAtMs: NOW + 9 * DAY,
+				durationMs: 9 * DAY,
+				causes: [{ accountId: "acc-1", windowKind: "seven_day" }],
+				unprojectableAccountIds: [],
+			},
+			band,
+		});
+
+	it("states the interval the run-out really lies in", () => {
+		const html = render({
+			runways: [
+				finite({
+					earliestExhaustsAtMs: NOW + 8 * DAY + 2 * HOUR,
+					latestExhaustsAtMs: NOW + 10 * DAY + 5 * HOUR,
+					halfWidthPct: 0.5,
+				}),
+			],
+		});
+
+		expect(html).toContain("Band");
+		expect(html).toContain("8d 2h – 10d 5h");
+		// The strip shades the same interval behind its marker: a single line at
+		// a single instant reads as precision the whole-percent input never had.
+		expect(html).toContain("bg-warning/20");
+	});
+
+	it("omits the row entirely when no band is stated", () => {
+		expect(render({ runways: [finite(null)] })).not.toContain(">Band<");
+		expect(render({ runways: [finite(undefined)] })).not.toContain(">Band<");
+	});
+
+	it("omits the row when the perturbation moved nothing", () => {
+		// Equal ends: a regression-backed projection never reads the percentage.
+		const html = render({
+			runways: [
+				finite({
+					earliestExhaustsAtMs: NOW + 9 * DAY,
+					latestExhaustsAtMs: NOW + 9 * DAY,
+					halfWidthPct: 0.5,
+				}),
+			],
+		});
+
+		expect(html).not.toContain(">Band<");
+	});
+});

@@ -38,11 +38,13 @@ export {
 export {
 	ANCHOR_FULL_CONFIDENCE_MIN_SPAN_MS,
 	computeCapacityRunway,
+	computeCapacityRunwayBand,
 	estimateWindowExhaustion,
 	type LifetimeConfidence,
 	RUNWAY_HORIZON_MS,
 	type RunwayAccountInput,
 	type RunwayAssumedCredits,
+	type RunwayBand,
 	type RunwayCause,
 	type RunwayOutcome,
 	type RunwayResetCreditBank,

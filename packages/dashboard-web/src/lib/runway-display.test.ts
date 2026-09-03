@@ -5,6 +5,7 @@ import {
 	assumedCreditCount,
 	BEYOND_HORIZON_GLYPH,
 	describeRunwayCause,
+	formatRunwayBand,
 	formatRunwayValue,
 	runwayPaceMargin,
 	runwayQualifier,
@@ -438,5 +439,79 @@ describe("assumedCreditCount", () => {
 		).toBe(0);
 		expect(assumedCreditCount({ kind: "unknown" })).toBe(0);
 		expect(assumedCreditCount({ kind: "no-accounts" })).toBe(0);
+	});
+});
+
+describe("formatRunwayBand", () => {
+	it("states a closed interval as a duration range", () => {
+		expect(
+			formatRunwayBand(
+				{
+					earliestExhaustsAtMs: NOW + 8 * DAY + 2 * HOUR,
+					latestExhaustsAtMs: NOW + 10 * DAY + 5 * HOUR,
+					halfWidthPct: 0.5,
+				},
+				NOW,
+			),
+		).toBe("8d 2h – 10d 5h");
+	});
+
+	it("states an open upper end as a lower bound", () => {
+		// The later probe found no run-out inside the horizon, so the interval is
+		// genuinely unbounded above — not equal to the other end.
+		expect(
+			formatRunwayBand(
+				{
+					earliestExhaustsAtMs: NOW + 8 * DAY + 2 * HOUR,
+					latestExhaustsAtMs: null,
+					halfWidthPct: 0.5,
+				},
+				NOW,
+			),
+		).toBe("≥ 8d 2h");
+	});
+
+	it("states an open lower end as an upper bound", () => {
+		expect(
+			formatRunwayBand(
+				{
+					earliestExhaustsAtMs: null,
+					latestExhaustsAtMs: NOW + 10 * DAY + 5 * HOUR,
+					halfWidthPct: 0.5,
+				},
+				NOW,
+			),
+		).toBe("≤ 10d 5h");
+	});
+
+	it("says nothing when the two ends are equal", () => {
+		// Equal ends mean the perturbation moved nothing — a regression-backed
+		// projection never reads the percentage. Rendering "8d 2h – 8d 2h" would
+		// dress that up as a measured zero-width interval.
+		expect(
+			formatRunwayBand(
+				{
+					earliestExhaustsAtMs: NOW + 8 * DAY,
+					latestExhaustsAtMs: NOW + 8 * DAY,
+					halfWidthPct: 0.5,
+				},
+				NOW,
+			),
+		).toBeNull();
+	});
+
+	it("says nothing when both ends are open, absent or null", () => {
+		expect(
+			formatRunwayBand(
+				{
+					earliestExhaustsAtMs: null,
+					latestExhaustsAtMs: null,
+					halfWidthPct: 0.5,
+				},
+				NOW,
+			),
+		).toBeNull();
+		expect(formatRunwayBand(null, NOW)).toBeNull();
+		expect(formatRunwayBand(undefined, NOW)).toBeNull();
 	});
 });

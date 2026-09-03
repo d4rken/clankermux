@@ -5,6 +5,7 @@ import { describePinTarget } from "../../lib/api-key-pin-label";
 import type { Outlook, PoolUsageResult } from "../../lib/pool-usage";
 import {
 	describeRunwayCause,
+	formatRunwayBand,
 	formatRunwayValue,
 	runwayQualifier,
 	runwayUnavailableReason,
@@ -103,6 +104,11 @@ function RunwayPanel({
 		worst && stated ? runwayQualifier(worst.outcome, now) : null;
 	const cause =
 		worst && stated ? describeRunwayCause(worst.outcome, accounts, now) : null;
+	// Text only here; the Overview card carries the shaded strip. The headline is
+	// a single duration built on whole-percent readings, so the interval it
+	// really lies in belongs on the line under it — see formatRunwayBand.
+	const bandLabel =
+		worst && stated ? formatRunwayBand(worst.band ?? null, now) : null;
 
 	return (
 		<section
@@ -128,6 +134,7 @@ function RunwayPanel({
 							? "Reading keys and accounts"
 							: [
 									qualifier ?? "At the current pace",
+									bandLabel,
 									headline.unobservedKeyCount > 0
 										? `${headline.unobservedKeyCount} key${headline.unobservedKeyCount === 1 ? "" : "s"} with no quota evidence`
 										: null,
