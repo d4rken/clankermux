@@ -50,6 +50,13 @@ export interface PoolUsageProjection
 }
 
 export interface PoolUsageExclusion {
+	/**
+	 * Stable join key. Present so a consumer can match an exclusion to an
+	 * account without going through `name`, which is user-set and need not be
+	 * unique — two identically-named accounts in different servable classes
+	 * otherwise put a row in the wrong class's breakdown.
+	 */
+	accountId: string;
 	name: string;
 	reason: ExcludedReason;
 	resetMs: number | null;
@@ -208,14 +215,26 @@ export function eligibleAccountTotal(result: PoolUsageResult): number {
  * same instant, two different numerators for "will run out". Exhausted accounts
  * belong in it — an account already at 100% has run out, and excluding it makes
  * the count shrink at the moment the pool got worse.
+ *
+ * Only quota exhaustion OF THIS WINDOW counts, which is why the window has to be
+ * passed. `exhausted` is a mixed list: it also holds paused accounts, accounts
+ * in a cooldown, accounts whose token expired and accounts a usage-429 hid. Not
+ * one of those is "projected to run out before reset" — a paused account is a
+ * choice someone made, and the badge claimed it as a forecast.
  */
-export function willRunOutCount(result: PoolUsageResult): {
+export function willRunOutCount(
+	result: PoolUsageResult,
+	window: PoolWindow,
+): {
 	willRunOut: number;
 	capacity: number;
 } {
+	const spentOnThisWindow = result.exhausted.filter(
+		(e) => e.reason === `${window}_exhausted`,
+	).length;
 	return {
-		willRunOut: result.atRisk.length + result.exhausted.length,
-		capacity: result.contributing.length + result.exhausted.length,
+		willRunOut: result.atRisk.length + spentOnThisWindow,
+		capacity: result.contributing.length + spentOnThisWindow,
 	};
 }
 
@@ -240,7 +259,16 @@ export function poolClassOutlook(pool: ServableClassPool): Outlook {
 	if (pool.eligibleTotal > pool.capacityCount) {
 		return { label: "Watch", tone: "warning" };
 	}
-	return { label: "Low usage", tone: "success" };
+	// "On pace" claims a projection exists, so it may only be said when every
+	// reporting account actually has a reset to project against. Without one
+	// there is nothing to be on pace FOR, and the honest word is the weaker
+	// "Low usage" — same distinction the pool-wide outlook draws.
+	const everyReportingAccountCanBeProjected = pool.accounts.every(
+		(account) => account.state !== "reporting" || account.resetMs != null,
+	);
+	return everyReportingAccountCanBeProjected
+		? { label: "On pace", tone: "success" }
+		: { label: "Low usage", tone: "success" };
 }
 
 /**
@@ -251,25 +279,23 @@ export function poolClassOutlook(pool: ServableClassPool): Outlook {
  * show every account — a Codex card claiming a Claude model family was
  * exhausted, and a one-account card whose popover listed six.
  *
- * Membership is by account NAME for the exclusion lists, which carry no id. Names
- * are user-set and need not be unique, so a duplicate name can pull a row into a
- * neighbouring class's breakdown. That is a cosmetic mislabel in a disclosure
- * panel, and strictly better than the alternative of showing everything
- * everywhere; the lists would need an id to do better.
+ * Membership is by account id throughout — the exclusion lists and the family
+ * rows both carry `accountId` for exactly this reason. Matching on name would
+ * misfile a row whenever two accounts in different classes share a name, and
+ * names are user-set.
  */
 export function scopeResultToClass(
 	result: PoolUsageResult,
 	pool: ServableClassPool,
 ): PoolUsageResult {
 	const ids = new Set(pool.accounts.map((a) => a.accountId));
-	const names = new Set(pool.accounts.map((a) => a.name));
 	const contributing = result.contributing.filter((c) => ids.has(c.accountId));
-	const exhausted = result.exhausted.filter((e) => names.has(e.name));
-	const excluded = result.excluded.filter((e) => names.has(e.name));
+	const exhausted = result.exhausted.filter((e) => ids.has(e.accountId));
+	const excluded = result.excluded.filter((e) => ids.has(e.accountId));
 	const familyWeekly = result.familyWeekly
 		.map((family) => ({
 			...family,
-			accounts: family.accounts.filter((a) => names.has(a.name)),
+			accounts: family.accounts.filter((a) => ids.has(a.accountId)),
 		}))
 		// A family none of this class's accounts reports is not this class's
 		// concern. Dropping it is what stops a GPT card announcing a Fable limit.
@@ -292,6 +318,8 @@ export function scopeResultToClass(
 
 /** One account's contribution to a per-family weekly bucket. */
 export interface FamilyWeeklyAccountUsage {
+	/** Stable join key, for the same reason the exclusion rows carry one. */
+	accountId: string;
 	name: string;
 	pct: number;
 	resetMs: number;
@@ -414,22 +442,38 @@ function classifyExclusion(
 	return null;
 }
 
+/**
+ * Whether an account is spent, and on which window.
+ *
+ * WHICH accounts this excludes does not depend on `window` — an account spent on
+ * either window cannot serve a request right now, and that is the semantics
+ * every surface wants. The window decides only which reason is REPORTED when the
+ * account is spent on both: the window being computed is tested first, so an
+ * account out of both reads "weekly spent" on the weekly surfaces and
+ * "waiting on 5h" on the 5-hour ones. Reporting the 5-hour reason on a weekly
+ * panel told the reader to wait for a lift that would not restore weekly
+ * capacity.
+ */
 function classifyQuotaExhaustion(
 	account: AccountResponse,
+	window: PoolWindow,
 ): { reason: ExcludedReason; resetMs: number | null } | null {
 	if (!account.usageData) return null;
 
 	const fiveHour = extractFiveHour(account.usageData);
-	if (fiveHour?.pct != null && fiveHour.pct >= 100) {
-		return { reason: "five_hour_exhausted", resetMs: fiveHour.resetMs };
-	}
-
 	const sevenDay = extractSevenDay(account.usageData);
-	if (sevenDay?.pct != null && sevenDay.pct >= 100) {
-		return { reason: "seven_day_exhausted", resetMs: sevenDay.resetMs };
-	}
+	const spentFiveHour =
+		fiveHour?.pct != null && fiveHour.pct >= 100
+			? ({ reason: "five_hour_exhausted", resetMs: fiveHour.resetMs } as const)
+			: null;
+	const spentSevenDay =
+		sevenDay?.pct != null && sevenDay.pct >= 100
+			? ({ reason: "seven_day_exhausted", resetMs: sevenDay.resetMs } as const)
+			: null;
 
-	return null;
+	return window === "seven_day"
+		? (spentSevenDay ?? spentFiveHour)
+		: (spentFiveHour ?? spentSevenDay);
 }
 
 /**
@@ -630,7 +674,9 @@ export function computeFamilyWeeklyUsage(
 	for (const account of accounts) {
 		if (classifyExclusion(account, now) !== null) continue;
 		if (!account.usageData) continue;
-		if (classifyQuotaExhaustion(account) !== null) continue;
+		// The weekly window: this aggregate is about weekly family caps, and the
+		// reason is unused here — only whether the account is spent at all.
+		if (classifyQuotaExhaustion(account, "seven_day") !== null) continue;
 		if (!isAnthropicStyleShape(account.usageData)) continue;
 
 		const scoped = normalizeAnthropicUsage(
@@ -678,6 +724,7 @@ export function computeFamilyWeeklyUsage(
 				);
 			}
 			bucket.accounts.set(account.id, {
+				accountId: account.id,
 				name: account.name,
 				pct: binding.percent,
 				resetMs: binding.resetsAtMs,
@@ -764,9 +811,11 @@ export function computePoolUsage(
 		}
 
 		const exclusion =
-			classifyExclusion(account, now) ?? classifyQuotaExhaustion(account);
+			classifyExclusion(account, now) ??
+			classifyQuotaExhaustion(account, window);
 		if (exclusion) {
 			exhausted.push({
+				accountId: account.id,
 				name: account.name,
 				reason: exclusion.reason,
 				resetMs: exclusion.resetMs,
@@ -785,6 +834,7 @@ export function computePoolUsage(
 
 		if (!account.usageData) {
 			excluded.push({
+				accountId: account.id,
 				name: account.name,
 				reason: "no_usage_data",
 				resetMs: null,
@@ -813,6 +863,7 @@ export function computePoolUsage(
 
 		if (extracted.pct === null) {
 			excluded.push({
+				accountId: account.id,
 				name: account.name,
 				reason: "no_usage_data",
 				resetMs: extracted.resetMs,
@@ -930,7 +981,7 @@ export function computePoolUsage(
 	const familyWeekly =
 		window === "seven_day" ? computeFamilyWeeklyUsage(accounts, now) : [];
 
-	const classes = groupIntoServableClasses(accountBars);
+	const classes = groupIntoServableClasses(accountBars, now);
 
 	return {
 		average,
@@ -950,7 +1001,10 @@ export function computePoolUsage(
 }
 
 /** Group the per-account verdicts into pools that can cover for each other. */
-function groupIntoServableClasses(bars: PoolAccountBar[]): ServableClassPool[] {
+function groupIntoServableClasses(
+	bars: PoolAccountBar[],
+	now: number,
+): ServableClassPool[] {
 	const byClass = new Map<string, { label: string; bars: PoolAccountBar[] }>();
 	for (const bar of bars) {
 		const servable = servableClassFor(bar.provider);
@@ -1007,9 +1061,14 @@ function groupIntoServableClasses(bars: PoolAccountBar[]): ServableClassPool[] {
 				unknownCount++;
 			}
 			// Soonest still-future reset in this class, over accounts that have one.
+			// A reset in the PAST is a stale reading, not an imminent recovery: the
+			// old `> 0` test admitted it, and the class then advertised a lift that
+			// had already come and gone as the next one. The pool-wide
+			// `earliestResetMs` has always used `> now`; this makes the per-class
+			// figure agree with it.
 			if (
 				bar.resetMs != null &&
-				bar.resetMs > 0 &&
+				bar.resetMs > now &&
 				(earliestResetMs === null || bar.resetMs < earliestResetMs)
 			) {
 				earliestResetMs = bar.resetMs;

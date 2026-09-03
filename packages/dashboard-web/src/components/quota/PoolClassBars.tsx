@@ -68,7 +68,25 @@ export function PoolClassBars({
 						>
 							{bar.name}
 						</span>
-						<span className="relative h-1.5 min-w-0 flex-1 overflow-hidden rounded-full bg-muted">
+						{/* Explicit progressbar semantics. The panel this replaced used a
+					    real <Progress>, and dropping to bare spans left the figures
+					    available only as text beside a decorative bar — a screen reader
+					    got no sense of magnitude, and an unknown reading was
+					    indistinguishable from zero. `aria-valuenow` is omitted entirely
+					    when there is no reading, which is how ARIA spells
+					    "indeterminate". */}
+						<span
+							role="progressbar"
+							aria-valuemin={0}
+							aria-valuemax={100}
+							aria-valuenow={bar.pct ?? undefined}
+							aria-valuetext={
+								bar.pct == null
+									? `${bar.name}: no reading`
+									: `${bar.name}: ${Math.round(bar.pct)}% used`
+							}
+							className="relative h-1.5 min-w-0 flex-1 overflow-hidden rounded-full bg-muted"
+						>
 							<span
 								className={cn(
 									"absolute inset-y-0 left-0",

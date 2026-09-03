@@ -102,7 +102,7 @@ function WindowPanel({
 	// instant, two answers to "how many will run out". An account already at
 	// 100% has run out, so excluding it made the count shrink at the moment the
 	// pool got worse.
-	const { willRunOut, capacity } = willRunOutCount(result);
+	const { willRunOut, capacity } = willRunOutCount(result, window);
 	const hasBreakdown =
 		resolved &&
 		(result.contributing.length > 0 ||

@@ -8,6 +8,8 @@ import {
 	listLiveScopedFamilies,
 	mergeScopedFamilies,
 	pickBindingScopedLimit,
+	poolClassOutlook,
+	willRunOutCount,
 } from "../pool-usage";
 
 const NOW = 1_700_000_000_000;
@@ -187,7 +189,12 @@ describe("computePoolUsage", () => {
 		const seven = computePoolUsage(accounts, "seven_day", NOW);
 		expect(seven.contributing).toEqual([]);
 		expect(seven.excluded).toEqual([
-			{ name: "anthro", reason: "no_usage_data", resetMs: null },
+			{
+				accountId: "anthro",
+				name: "anthro",
+				reason: "no_usage_data",
+				resetMs: null,
+			},
 		]);
 	});
 
@@ -207,7 +214,7 @@ describe("computePoolUsage", () => {
 		const result = computePoolUsage(accounts, "five_hour", NOW);
 		expect(result.contributing).toEqual([]);
 		expect(result.exhausted).toEqual([
-			{ name: "p", reason: "paused", resetMs: null },
+			{ accountId: "p", name: "p", reason: "paused", resetMs: null },
 		]);
 		expect(result.excluded).toEqual([]);
 		expect(result.average).toBe(100);
@@ -239,7 +246,12 @@ describe("computePoolUsage", () => {
 		expect(result.activeAverage).toBe(20);
 		expect(result.contributing).toHaveLength(1);
 		expect(result.exhausted).toEqual([
-			{ name: "rl", reason: "rate_limited", resetMs: NOW + 60_000 },
+			{
+				accountId: "rl",
+				name: "rl",
+				reason: "rate_limited",
+				resetMs: NOW + 60_000,
+			},
 		]);
 		expect(result.excluded).toEqual([]);
 	});
@@ -260,7 +272,7 @@ describe("computePoolUsage", () => {
 
 		const result = computePoolUsage(accounts, "five_hour", NOW);
 		expect(result.exhausted).toEqual([
-			{ name: "te", reason: "token_expired", resetMs: null },
+			{ accountId: "te", name: "te", reason: "token_expired", resetMs: null },
 		]);
 		expect(result.excluded).toEqual([]);
 		expect(result.average).toBe(100);
@@ -278,7 +290,12 @@ describe("computePoolUsage", () => {
 
 		const result = computePoolUsage(accounts, "five_hour", NOW);
 		expect(result.exhausted).toEqual([
-			{ name: "url", reason: "usage_rate_limited", resetMs: NOW + 60_000 },
+			{
+				accountId: "url",
+				name: "url",
+				reason: "usage_rate_limited",
+				resetMs: NOW + 60_000,
+			},
 		]);
 		expect(result.excluded).toEqual([]);
 		expect(result.average).toBe(100);
@@ -295,7 +312,7 @@ describe("computePoolUsage", () => {
 
 		const result = computePoolUsage(accounts, "five_hour", NOW);
 		expect(result.excluded).toEqual([
-			{ name: "nud", reason: "no_usage_data", resetMs: null },
+			{ accountId: "nud", name: "nud", reason: "no_usage_data", resetMs: null },
 		]);
 	});
 
@@ -789,6 +806,7 @@ describe("computePoolUsage", () => {
 		const result = computePoolUsage(accounts, "five_hour", NOW);
 		expect(result.exhausted).toEqual([
 			{
+				accountId: "limits-exhausted",
 				name: "limits-exhausted",
 				reason: "seven_day_exhausted",
 				resetMs: NOW + 5_000_000,
@@ -846,16 +864,23 @@ describe("computePoolUsage", () => {
 		]);
 		expect(fiveHour.exhausted).toEqual([
 			{
+				accountId: "weekly-exhausted",
 				name: "weekly-exhausted",
 				reason: "seven_day_exhausted",
 				resetMs: NOW + 5_000_000,
 			},
 			{
+				accountId: "five-hour-exhausted",
 				name: "five-hour-exhausted",
 				reason: "five_hour_exhausted",
 				resetMs: NOW + 1_000_000,
 			},
-			{ name: "both-exhausted", reason: "seven_day_exhausted", resetMs: null },
+			{
+				accountId: "both-exhausted",
+				name: "both-exhausted",
+				reason: "seven_day_exhausted",
+				resetMs: null,
+			},
 		]);
 		expect(fiveHour.earliestResetMs).toBe(NOW + 1_000_000);
 		expect(fiveHour.earliestResetAccountName).toBe("five-hour-exhausted");
@@ -868,16 +893,23 @@ describe("computePoolUsage", () => {
 		]);
 		expect(sevenDay.exhausted).toEqual([
 			{
+				accountId: "weekly-exhausted",
 				name: "weekly-exhausted",
 				reason: "seven_day_exhausted",
 				resetMs: NOW + 5_000_000,
 			},
 			{
+				accountId: "five-hour-exhausted",
 				name: "five-hour-exhausted",
 				reason: "five_hour_exhausted",
 				resetMs: NOW + 1_000_000,
 			},
-			{ name: "both-exhausted", reason: "seven_day_exhausted", resetMs: null },
+			{
+				accountId: "both-exhausted",
+				name: "both-exhausted",
+				reason: "seven_day_exhausted",
+				resetMs: null,
+			},
 		]);
 		expect(sevenDay.earliestResetMs).toBe(NOW + 1_000_000);
 		expect(sevenDay.earliestResetAccountName).toBe("five-hour-exhausted");
@@ -948,6 +980,7 @@ describe("computeFamilyWeeklyUsage", () => {
 		expect(result[0].elevated).toBe(false);
 		expect(result[0].accounts).toHaveLength(1);
 		expect(result[0].accounts[0]).toEqual({
+			accountId: "acct-a",
 			name: "acct-a",
 			pct: 45,
 			resetMs: FUTURE_RESET,
@@ -1500,5 +1533,218 @@ describe("computeFamilyWeeklyUsage", () => {
 				mergeScopedFamilies([], [{ family: "fable", displayName: "Fable" }]),
 			).toEqual([{ family: "fable", displayName: "Fable" }]);
 		});
+	});
+});
+
+describe("classifyQuotaExhaustion reasons are window-aware", () => {
+	// An account out of BOTH windows used to read "five_hour_exhausted"
+	// everywhere, because the 5h test ran first unconditionally. On a weekly
+	// panel that told the reader to wait for a lift in an hour that would
+	// restore no weekly capacity at all.
+	const bothSpent = mkAccount({
+		name: "both",
+		provider: "anthropic",
+		usageData: {
+			five_hour: {
+				utilization: 100,
+				resets_at: new Date(NOW + 1_000_000).toISOString(),
+			},
+			seven_day: {
+				utilization: 100,
+				resets_at: new Date(NOW + 5_000_000).toISOString(),
+			},
+		} as never,
+	});
+
+	it("names the weekly window in the weekly result", () => {
+		const sevenDay = computePoolUsage([bothSpent], "seven_day", NOW);
+		expect(sevenDay.exhausted).toEqual([
+			{
+				accountId: "both",
+				name: "both",
+				reason: "seven_day_exhausted",
+				resetMs: NOW + 5_000_000,
+			},
+		]);
+	});
+
+	it("names the 5-hour window in the 5-hour result", () => {
+		const fiveHour = computePoolUsage([bothSpent], "five_hour", NOW);
+		expect(fiveHour.exhausted).toEqual([
+			{
+				accountId: "both",
+				name: "both",
+				reason: "five_hour_exhausted",
+				resetMs: NOW + 1_000_000,
+			},
+		]);
+	});
+
+	it("excludes the same account either way", () => {
+		// The reason label moves; the set of accounts that can serve right now
+		// does not. That is the invariant the window-awareness must not break.
+		expect(
+			computePoolUsage([bothSpent], "seven_day", NOW).contributing,
+		).toEqual([]);
+		expect(
+			computePoolUsage([bothSpent], "five_hour", NOW).contributing,
+		).toEqual([]);
+	});
+});
+
+describe("poolClassOutlook", () => {
+	function classOf(accounts: AccountResponse[]) {
+		const pool = computePoolUsage(accounts, "seven_day", NOW).classes[0];
+		if (!pool) throw new Error("no class");
+		return pool;
+	}
+
+	it("says On pace when every reporting account has a reset to project against", () => {
+		const outlook = poolClassOutlook(
+			classOf([
+				mkAccount({
+					name: "a",
+					provider: "anthropic",
+					usageData: {
+						seven_day: {
+							utilization: 20,
+							resets_at: new Date(NOW + 5_000_000).toISOString(),
+						},
+					} as never,
+				}),
+			]),
+		);
+		expect(outlook).toEqual({ label: "On pace", tone: "success" });
+	});
+
+	it("weakens to Low usage when a reporting account has no reset", () => {
+		// Nothing to be on pace FOR: without a reset there is no window to run
+		// out of, so the stronger word would claim a projection that does not
+		// exist.
+		const outlook = poolClassOutlook(
+			classOf([
+				mkAccount({
+					name: "a",
+					provider: "anthropic",
+					usageData: {
+						seven_day: { utilization: 20, resets_at: null },
+					} as never,
+				}),
+			]),
+		);
+		expect(outlook).toEqual({ label: "Low usage", tone: "success" });
+	});
+});
+
+describe("willRunOutCount", () => {
+	// One of each unavailability the exhausted list mixes together, plus an
+	// account that really is projected to run out. Only quota exhaustion of the
+	// window in question may reach the numerator.
+	const ACCOUNTS: AccountResponse[] = [
+		mkAccount({ name: "paused", provider: "anthropic", paused: true }),
+		mkAccount({
+			name: "token-expired",
+			provider: "anthropic",
+			hasRefreshToken: true,
+			tokenExpiresAt: new Date(NOW - 60_000).toISOString(),
+		}),
+		mkAccount({
+			name: "five-hour-spent",
+			provider: "anthropic",
+			usageData: {
+				five_hour: {
+					utilization: 100,
+					resets_at: new Date(NOW + 1_000_000).toISOString(),
+				},
+				seven_day: {
+					utilization: 40,
+					resets_at: new Date(NOW + 5_000_000).toISOString(),
+				},
+			} as never,
+		}),
+		mkAccount({
+			name: "weekly-spent",
+			provider: "anthropic",
+			usageData: {
+				five_hour: {
+					utilization: 10,
+					resets_at: new Date(NOW + 1_000_000).toISOString(),
+				},
+				seven_day: {
+					utilization: 100,
+					resets_at: new Date(NOW + 5_000_000).toISOString(),
+				},
+			} as never,
+		}),
+		// Burning fast enough on both windows to be projected out before either
+		// resets: 90% used a short way into each window.
+		mkAccount({
+			name: "at-risk",
+			provider: "anthropic",
+			usageData: {
+				five_hour: {
+					utilization: 90,
+					resets_at: new Date(NOW + 4 * 3_600_000).toISOString(),
+				},
+				seven_day: {
+					utilization: 90,
+					resets_at: new Date(NOW + 6 * 86_400_000).toISOString(),
+				},
+			} as never,
+		}),
+	];
+
+	it("counts only weekly exhaustion and at-risk on the weekly window", () => {
+		const sevenDay = computePoolUsage(ACCOUNTS, "seven_day", NOW);
+		expect(sevenDay.atRisk.map((a) => a.name)).toEqual(["at-risk"]);
+		// weekly-spent + at-risk. Paused, token-expired and the 5h-spent account
+		// are all in `exhausted` and none of them is a weekly forecast.
+		expect(willRunOutCount(sevenDay, "seven_day")).toEqual({
+			willRunOut: 2,
+			capacity: 2,
+		});
+	});
+
+	it("counts only 5-hour exhaustion and at-risk on the 5-hour window", () => {
+		const fiveHour = computePoolUsage(ACCOUNTS, "five_hour", NOW);
+		expect(fiveHour.atRisk.map((a) => a.name)).toEqual(["at-risk"]);
+		expect(willRunOutCount(fiveHour, "five_hour")).toEqual({
+			willRunOut: 2,
+			capacity: 2,
+		});
+	});
+});
+
+describe("servable class earliest reset", () => {
+	function classReset(fiveHourResets: Array<number | null>) {
+		const accounts = fiveHourResets.map((resetMs, i) =>
+			mkAccount({
+				name: `acc-${i}`,
+				provider: "anthropic",
+				usageData: {
+					five_hour: {
+						utilization: 20,
+						resets_at: resetMs == null ? null : new Date(resetMs).toISOString(),
+					},
+				} as never,
+			}),
+		);
+		const pool = computePoolUsage(accounts, "five_hour", NOW).classes[0];
+		if (!pool) throw new Error("no class");
+		return pool;
+	}
+
+	it("offers the soonest FUTURE reset, never a past one", () => {
+		// A reset already behind us is a stale reading, not an imminent
+		// recovery; offering it advertised a lift that had come and gone.
+		const pool = classReset([NOW - 60_000, NOW + 90_000]);
+		expect(pool.earliestResetMs).toBe(NOW + 90_000);
+		expect(pool.earliestResetAccountName).toBe("acc-1");
+	});
+
+	it("reports no reset when every reading is in the past", () => {
+		const pool = classReset([NOW - 60_000, NOW - 10_000]);
+		expect(pool.earliestResetMs).toBeNull();
+		expect(pool.earliestResetAccountName).toBeNull();
 	});
 });

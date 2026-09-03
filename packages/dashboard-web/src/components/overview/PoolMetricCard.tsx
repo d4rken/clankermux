@@ -64,7 +64,7 @@ export function PoolMetricCard({
 	// panel cannot answer the same question differently — they used to, with
 	// two at-risk numerators and two colour rules for one number.
 	const eligibleTotal = eligibleAccountTotal(result);
-	const { willRunOut, capacity } = willRunOutCount(result);
+	const { willRunOut, capacity } = willRunOutCount(result, window);
 	const { label: willRunOutText, colorClass: willRunOutColor } = atRiskBadge(
 		willRunOut,
 		capacity,

@@ -221,6 +221,7 @@ describe("scopeResultToClass", () => {
 					soonestExhaustsAtMs: null,
 					accounts: [
 						{
+							accountId: "id-claude-a",
 							name: "claude-a",
 							pct: 100,
 							resetMs: NOW + 48 * HOUR,
@@ -241,6 +242,37 @@ describe("scopeResultToClass", () => {
 		expect(
 			scopeResultToClass(withFable, anthropicClass).familyWeekly,
 		).toHaveLength(1);
+	});
+
+	it("files an exclusion by account id, not by the name it shares", () => {
+		// Names are user-set and need not be unique. Matched on name, a paused
+		// Codex account called "shared" put its row in the Claude card's
+		// breakdown as well, so a one-account card listed an account of a class
+		// it cannot route to.
+		const result = computePoolUsage(
+			[
+				account({ id: "id-anthropic-shared", name: "shared", paused: true }),
+				account({
+					id: "id-codex-shared",
+					name: "shared",
+					provider: "codex",
+					paused: true,
+				}),
+			],
+			"seven_day",
+			NOW,
+		);
+		const anthropicClass = result.classes.find(
+			(c) => c.classId === "anthropic",
+		);
+		if (!anthropicClass) throw new Error("missing class");
+
+		expect(result.exhausted).toHaveLength(2);
+		expect(
+			scopeResultToClass(result, anthropicClass).exhausted.map(
+				(e) => e.accountId,
+			),
+		).toEqual(["id-anthropic-shared"]);
 	});
 
 	it("narrows the breakdown to the class's own accounts", () => {

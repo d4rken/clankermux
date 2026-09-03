@@ -4,6 +4,7 @@ import {
 	poolClassOutlook,
 	type ServableClassPool,
 	scopeResultToClass,
+	willRunOutCount,
 } from "../../lib/pool-usage";
 import { cn } from "../../lib/utils";
 import { Card, CardContent } from "../ui/card";
@@ -72,6 +73,9 @@ export function PoolQuotaCard({
 	// exhausted, and a one-account card's popover listed six.
 	const scoped = scopeResultToClass(weeklyResult, weekly);
 	const family = familyWeeklyBadge(scoped.familyWeekly);
+	// Scoped to the class as well: the pool-wide count would state, on a
+	// one-account card, how many accounts across every class will run out.
+	const { willRunOut, capacity } = willRunOutCount(scoped, "seven_day");
 
 	const fiveHourLeast = fiveHour?.leastUsed ?? null;
 	const paceText =
@@ -149,6 +153,20 @@ export function PoolQuotaCard({
 				)}
 
 				<div className="mt-item space-y-tight">
+					{resolved && willRunOut > 0 && (
+						<p className="flex items-center gap-item text-xs text-warning-strong">
+							<AlertTriangle className="h-3.5 w-3.5 shrink-0" />
+							{willRunOut} of {capacity}{" "}
+							{capacity === 1 ? "account" : "accounts"} projected to run out
+							before reset
+						</p>
+					)}
+					{resolved && weekly.reportingCount < weekly.eligibleTotal && (
+						<p className="truncate text-xs text-muted-foreground">
+							{weekly.reportingCount} of {weekly.eligibleTotal} accounts
+							reporting
+						</p>
+					)}
 					{resolved && weekly.singlePointOfFailure && (
 						<p className="flex items-center gap-item text-xs text-warning-strong">
 							<AlertTriangle className="h-3.5 w-3.5 shrink-0" />
