@@ -29,6 +29,7 @@ import type {
 	RetentionSetRequest,
 	RunwayResponse,
 	StatsWithErrors,
+	StopsHistoryResponse,
 	StorageUsageResponse,
 	SystemStatusResponse,
 	UsageHistoryResponse,
@@ -1049,6 +1050,27 @@ class API extends HttpClient {
 		this.logger.debug(`→ GET ${url}`);
 		try {
 			const response = await this.get<UsageScopedHistoryResponse>(url);
+			const duration = Date.now() - startTime;
+			this.logger.debug(`← GET ${url} - 200 (${duration}ms)`);
+			return response;
+		} catch (error) {
+			const duration = Date.now() - startTime;
+			this.logger.error(`✗ GET ${url} - ERROR (${duration}ms)`, {
+				error: error instanceof Error ? error.message : String(error),
+			});
+			throw error;
+		}
+	}
+
+	// How often requests were actually blocked in the range, by cause, plus how
+	// many accounts were eligible per request. Range-scoped like the other
+	// history reads.
+	async getStopsHistory(range: string): Promise<StopsHistoryResponse> {
+		const startTime = Date.now();
+		const url = `/api/analytics/stops-history?range=${encodeURIComponent(range)}`;
+		this.logger.debug(`→ GET ${url}`);
+		try {
+			const response = await this.get<StopsHistoryResponse>(url);
 			const duration = Date.now() - startTime;
 			this.logger.debug(`← GET ${url} - 200 (${duration}ms)`);
 			return response;

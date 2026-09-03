@@ -24,6 +24,15 @@ interface BarConfig {
 	name?: string;
 	yAxisId?: string;
 	radius?: [number, number, number, number];
+	/**
+	 * Bars sharing a `stackId` are stacked instead of drawn side by side.
+	 *
+	 * Needed where the series are PARTS OF ONE TOTAL — stops per cause in a
+	 * bucket, say. Side by side, the reader has to add the bars up by eye to see
+	 * how bad the bucket was, and a bucket with many small causes looks calmer
+	 * than one with a single large one of the same total.
+	 */
+	stackId?: string;
 }
 
 interface BaseBarChartProps extends CommonChartProps {
@@ -158,6 +167,7 @@ export function BaseBarChart({
 							fill={barConfig.fill || CHART_TOKENS.primary}
 							name={barConfig.name || barConfig.dataKey}
 							yAxisId={barConfig.yAxisId}
+							stackId={barConfig.stackId}
 							radius={barConfig.radius}
 							animationDuration={animationDuration}
 						/>

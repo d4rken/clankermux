@@ -7,6 +7,7 @@ import {
 	useAnalytics,
 	useRunway,
 	useStats,
+	useStopsHistory,
 } from "../hooks/queries";
 import { usePoolUsage } from "../hooks/usePoolUsage";
 import { dataAvailability, staleAgeLabel } from "../lib/data-availability";
@@ -19,6 +20,7 @@ import { PricingGapBanner } from "./overview/PricingGapBanner";
 import { RateLimitInfo } from "./overview/RateLimitInfo";
 import { RunwayCard } from "./overview/RunwayCard";
 import { SpendSummaryBand } from "./overview/SpendSummaryBand";
+import { StopsHistoryCard } from "./overview/StopsHistoryCard";
 import { StorageIntegrityBanner } from "./overview/StorageIntegrity";
 import { SystemHealthStrip } from "./overview/SystemHealthStrip";
 import { CompactRecentErrors } from "./overview/system-status/CompactRecentErrors";
@@ -96,6 +98,10 @@ export const OverviewTab = React.memo(() => {
 	// instead of being blocked whenever /api/accounts fails.
 	const runwayQuery = useRunway();
 	const { data: runway, isLoading: runwayLoading } = runwayQuery;
+	// Range-scoped, so it belongs BELOW the selector with the other ranged
+	// content — everything above the selector describes the pool right now.
+	const stopsQuery = useStopsHistory(timeRange);
+	const { data: stops, isLoading: stopsLoading } = stopsQuery;
 
 	// This page renders PROGRESSIVELY: there is no whole-page gate, because one
 	// slow section (activeSessions dominates /api/analytics) used to hide the
@@ -125,6 +131,9 @@ export const OverviewTab = React.memo(() => {
 	const runwayAvailability = dataAvailability(runwayQuery, runwayLoading);
 	const runwayUnavailable = runwayAvailability.state === "unavailable";
 	const runwayPending = runwayLoading && !runway;
+	const stopsAvailability = dataAvailability(stopsQuery, stopsLoading);
+	const stopsUnavailable = stopsAvailability.state === "unavailable";
+	const stopsPending = stopsLoading && !stops;
 
 	// Resolved once here so the strip's count and the list below it can never
 	// disagree about what's been dismissed.
@@ -156,6 +165,10 @@ export const OverviewTab = React.memo(() => {
 	const runwayStaleNote =
 		runwayAvailability.state === "stale"
 			? `Last updated ${staleAgeLabel(runwayAvailability.lastUpdatedAt, now)}`
+			: undefined;
+	const stopsStaleNote =
+		stopsAvailability.state === "stale"
+			? `Last updated ${staleAgeLabel(stopsAvailability.lastUpdatedAt, now)}`
 			: undefined;
 
 	// Transform time series data
@@ -292,6 +305,20 @@ export const OverviewTab = React.memo(() => {
 			<div className="flex justify-end">
 				<TimeRangeSelector value={timeRange} onChange={setTimeRange} />
 			</div>
+
+			{/* What ACTUALLY blocked a request in this range. Every other quota
+			    surface on this page is a projection; this is the record, and the
+			    only thing that can say whether those projections described a real
+			    risk. Range-scoped, hence its place directly under the selector. */}
+			<StopsHistoryCard
+				data={stops}
+				now={now}
+				loading={stopsPending}
+				unavailableReason={
+					stopsUnavailable ? "Stops data unavailable" : undefined
+				}
+				staleNote={stopsStaleNote}
+			/>
 
 			<MissingSectionsNotice
 				analytics={analytics}
