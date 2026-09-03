@@ -176,6 +176,32 @@ export class OAuthError extends ProviderError {
 }
 
 /**
+ * Every account that was actually attempted rejected the request because it
+ * could not serve the requested MODEL.
+ *
+ * Distinct from {@link ServiceUnavailableError} because the two answer opposite
+ * questions. A 503 says the pool had no capacity and the caller should come
+ * back later; this says the pool had capacity and the model was the problem, so
+ * coming back later changes nothing. Collapsing them is what let 306 production
+ * requests for a retired model be filed as quota exhaustion while the account
+ * behind them sat at 11% of its weekly limit.
+ *
+ * The wording of `message` is deliberately "no configured account can serve"
+ * rather than "the model does not exist": the Codex/ChatGPT rejection this is
+ * usually built from is plan-scoped, so adding an account on a different plan
+ * can change the answer.
+ */
+export class ModelNotServedError extends AppError {
+	constructor(
+		message: string,
+		public readonly model: string | null,
+		public readonly provider?: string,
+	) {
+		super(message, "MODEL_NOT_SERVED", 400, { model, provider });
+	}
+}
+
+/**
  * Service unavailable errors
  */
 export class ServiceUnavailableError extends AppError {

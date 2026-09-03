@@ -20,12 +20,9 @@ import {
 	describe,
 	expect,
 	it,
-	mock,
 } from "bun:test";
 import { logBus } from "@clankermux/logger";
 import { usageCache } from "@clankermux/providers";
-import type { Account } from "@clankermux/types";
-import type { ProxyContext } from "../handlers";
 import { resetRateLimitProbeGatesForTests } from "../handlers/rate-limit-cooldown";
 import {
 	resetOverloadHoldSlots,
@@ -35,151 +32,16 @@ import {
 	applyProviderOverloadCooldown,
 	clearProviderOverloadCooldown,
 } from "../provider-overload-cooldown";
-
-let idCounter = 0;
-function uniqueId(prefix: string): string {
-	idCounter++;
-	return `${prefix}-${idCounter}`;
-}
+import {
+	callHandleProxy,
+	LONG_AGO,
+	makeAccount,
+	makeContext,
+	syntheticCall,
+	upstreamOnlyFetch,
+} from "./fixtures/proxy-terminal-harness";
 
 const MODEL = "claude-haiku-4-5";
-/** Older than the refresh-token max age, so the token reads as expired. */
-const LONG_AGO = Date.now() - 400 * 24 * 60 * 60 * 1000;
-
-async function callHandleProxy(req: Request, url: URL, ctx: ProxyContext) {
-	const { handleProxy } = await import("../proxy");
-	return handleProxy(req, url, ctx);
-}
-
-function makeAccount(overrides: Partial<Account> = {}): Account {
-	return {
-		id: uniqueId("acc"),
-		name: "Main-me",
-		provider: "anthropic",
-		api_key: "test-key",
-		refresh_token: null,
-		access_token: null,
-		expires_at: null,
-		request_count: 0,
-		total_requests: 0,
-		last_used: null,
-		created_at: Date.now(),
-		rate_limited_until: null,
-		rate_limited_reason: null,
-		rate_limited_at: null,
-		consecutive_rate_limits: 0,
-		session_start: null,
-		session_request_count: 0,
-		paused: false,
-		rate_limit_reset: null,
-		rate_limit_status: null,
-		rate_limit_remaining: null,
-		priority: 0,
-		auto_fallback_enabled: false,
-		auto_refresh_enabled: false,
-		auto_pause_on_overage_enabled: false,
-		peak_hours_pause_enabled: false,
-		codex_auto_apply_reset_credits_enabled: false,
-		custom_endpoint: null,
-		model_mappings: null,
-		cross_region_mode: null,
-		model_fallbacks: null,
-		billing_type: null,
-		pause_reason: null,
-		refresh_token_issued_at: null,
-		...overrides,
-	} as Account;
-}
-
-type RecorderMock = {
-	begin: ReturnType<typeof mock>;
-	hasRecord: ReturnType<typeof mock>;
-	recordSynthetic: ReturnType<typeof mock>;
-	captureResponseChunk: ReturnType<typeof mock>;
-	finishTransport: ReturnType<typeof mock>;
-	attachUsageSummary: ReturnType<typeof mock>;
-	markUsageUnavailable: ReturnType<typeof mock>;
-	sweep: ReturnType<typeof mock>;
-	dispose: ReturnType<typeof mock>;
-};
-
-function makeContext(
-	accounts: Account[],
-	recorderOverrides: Partial<Record<"hasRecord", () => boolean>> = {},
-): ProxyContext & { recorder: RecorderMock } {
-	const recorder: RecorderMock = {
-		begin: mock(() => {}),
-		hasRecord: mock(recorderOverrides.hasRecord ?? (() => false)),
-		recordSynthetic: mock(() => {}),
-		captureResponseChunk: mock(() => {}),
-		finishTransport: mock(() => {}),
-		attachUsageSummary: mock(() => {}),
-		markUsageUnavailable: mock(() => {}),
-		sweep: mock(() => {}),
-		dispose: mock(() => {}),
-	};
-	const ctx = {
-		strategy: {
-			select: (accs: Account[]) => {
-				const now = Date.now();
-				return accs.filter(
-					(acc) =>
-						!acc.paused &&
-						(!acc.rate_limited_until || acc.rate_limited_until <= now),
-				);
-			},
-		} as never,
-		dbOps: {
-			getAllAccounts: mock(async () => accounts),
-			getAccount: mock(
-				async (id: string) => accounts.find((a) => a.id === id) ?? null,
-			),
-			getActiveComboForFamily: mock(async () => null),
-			getApiKeyPin: mock(async () => null),
-			markAccountRateLimited: mock(async () => 1),
-			markAccountRateLimitedDeadlineOnly: mock(async () => {}),
-			saveRequest: mock(async () => {}),
-			updateAccountUsage: mock(async () => {}),
-			updateAccountRateLimitMeta: mock(async () => {}),
-			resetConsecutiveRateLimits: mock(async () => {}),
-			getAdapter: mock(() => ({
-				run: mock(async () => {}),
-				get: mock(async () => null),
-			})),
-		} as never,
-		runtime: { port: 8080, clientId: "test" } as never,
-		config: {
-			getUsageThrottlingFiveHourEnabled: () => false,
-			getUsageThrottlingWeeklyEnabled: () => false,
-			getCacheWarmingEnabled: () => false,
-			getCacheWarmingMinTokens: () => 100_000,
-			getStorePayloads: () => false,
-		} as never,
-		provider: {
-			name: "anthropic",
-			canHandle: () => true,
-			buildUrl: () => "https://api.anthropic.com/v1/messages",
-			prepareHeaders: () => new Headers(),
-			transformRequestBody: null,
-			processResponse: async (r: Response) => r,
-			parseRateLimit: () => ({
-				isRateLimited: false,
-				resetTime: undefined,
-				statusHeader: undefined,
-				remaining: undefined,
-			}),
-			isStreamingResponse: () => false,
-		} as never,
-		refreshInFlight: new Map(),
-		asyncWriter: {
-			enqueue: mock(async (job: () => void | Promise<void>) => {
-				await job();
-			}),
-		} as never,
-		requestRecorder: recorder as never,
-	} as unknown as ProxyContext;
-	return Object.assign(ctx, { recorder });
-}
 
 function makeRequest(path = "/v1/messages"): Request {
 	return new Request(`https://proxy.local${path}`, {
@@ -216,32 +78,6 @@ function unauthorized() {
 		}),
 		{ status: 401, headers: { "content-type": "application/json" } },
 	);
-}
-
-/** Keep unrelated background fetches (pricing catalog) off the handler. */
-function upstreamOnlyFetch(
-	handler: (input: Request | string | URL) => Response | Promise<Response>,
-): typeof globalThis.fetch {
-	return mock(async (input: Request | string | URL) => {
-		const url = input instanceof Request ? input.url : String(input);
-		if (!url.includes("api.anthropic.com") && !url.includes("chatgpt.com")) {
-			return new Response("unavailable", { status: 500 });
-		}
-		return handler(input);
-	}) as never;
-}
-
-/** The RecordMeta of the single synthetic row written, plus its label. */
-function syntheticCall(recorder: RecorderMock): {
-	meta: { responseStatus: number; failoverAttempts: number };
-	label: string;
-} {
-	expect(recorder.recordSynthetic).toHaveBeenCalledTimes(1);
-	const call = recorder.recordSynthetic.mock.calls[0] as unknown[];
-	return {
-		meta: call[0] as { responseStatus: number; failoverAttempts: number },
-		label: call[2] as string,
-	};
 }
 
 describe("all-accounts-failed terminal", () => {
