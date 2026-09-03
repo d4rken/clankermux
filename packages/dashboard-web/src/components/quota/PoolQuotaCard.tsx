@@ -1,5 +1,10 @@
 import { AlertCircle, AlertTriangle, Clock, Info } from "lucide-react";
 import {
+	burnRatioTone,
+	computeBurnRatio,
+	formatBurnRatio,
+} from "../../lib/burn-ratio";
+import {
 	type PoolUsageResult,
 	poolClassOutlook,
 	type ServableClassPool,
@@ -25,6 +30,12 @@ interface PoolQuotaCardProps {
 	fiveHour: ServableClassPool | null;
 	/** Whole-window results, for the shared breakdown and the family badge. */
 	weeklyResult: PoolUsageResult;
+	/**
+	 * The tab's ticking clock. The pace row divides utilization by where an even
+	 * burn would sit AT THIS INSTANT, so it has to advance between polls rather
+	 * than freeze at whenever the component happened to first render.
+	 */
+	now: number;
 	loading?: boolean;
 	unavailableReason?: string;
 	staleNote?: string;
@@ -54,6 +65,7 @@ export function PoolQuotaCard({
 	weekly,
 	fiveHour,
 	weeklyResult,
+	now,
 	loading = false,
 	unavailableReason,
 	staleNote,
@@ -82,6 +94,15 @@ export function PoolQuotaCard({
 		fiveHourLeast == null
 			? null
 			: `5h pace: ${Math.round(fiveHourLeast.pct)}% used · ${fiveHourLeast.name}`;
+	// A percentage is a POSITION; this is the RATE. 48% used one day into the
+	// week and 48% used six days in are opposite situations, and the reader was
+	// left to do that division against a reset printed on another line.
+	const burn = computeBurnRatio(
+		fiveHourLeast?.pct ?? 0,
+		fiveHourLeast?.resetMs ?? null,
+		"five_hour",
+		now,
+	);
 
 	const checkpoint =
 		weekly.earliestResetMs == null
@@ -177,6 +198,16 @@ export function PoolQuotaCard({
 					)}
 					{resolved && paceText && (
 						<p className="truncate text-xs text-muted-foreground">{paceText}</p>
+					)}
+					{resolved && burn && (
+						<p
+							className={cn(
+								"truncate text-xs",
+								TONE_FIGURE_CLASS[burnRatioTone(burn)],
+							)}
+						>
+							pace {formatBurnRatio(burn)}
+						</p>
 					)}
 					{resolved && checkpoint && (
 						<p className="truncate text-xs text-muted-foreground">

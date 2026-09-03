@@ -206,6 +206,32 @@ describe("LimitsCapacityOverview", () => {
 		expect(html).toContain("2 of 2 reporting");
 	});
 
+	it("states each class's burn against its sustainable pace", () => {
+		// gamma is 55% used with three days left of a seven-day window, so an even
+		// burn would sit at 4/7 = 57.1% and this reads just under sustainable.
+		const html = renderOverview();
+
+		// Two occurrences: the headline sub-line for the binding class and that
+		// class's own row. The tinted span breaks the run of text, so the prefix
+		// is asserted separately.
+		expect(countOccurrences(html, "1.0× sustainable pace")).toBeGreaterThan(0);
+		expect(html).toContain("GPT · lowest gamma");
+	});
+
+	it("says nothing about pace for a class with no reset to measure against", () => {
+		const html = renderOverview(
+			pools([
+				account({
+					id: "acc-1",
+					name: "alpha",
+					usageData: usage(20, 20, { sevenDayResetMs: null }),
+				}),
+			]),
+		);
+
+		expect(html).not.toContain("sustainable pace");
+	});
+
 	it("says a reset is not reported rather than inventing one", () => {
 		const html = renderOverview(
 			pools([

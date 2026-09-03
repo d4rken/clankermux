@@ -1,4 +1,9 @@
 import { AlertCircle, BarChart3 } from "lucide-react";
+import {
+	burnRatioTone,
+	computeBurnRatio,
+	formatBurnRatio,
+} from "../../lib/burn-ratio";
 import { formatDurationDhm } from "../../lib/format-prediction";
 import {
 	type Outlook,
@@ -10,9 +15,32 @@ import {
 } from "../../lib/pool-usage";
 import { cn } from "../../lib/utils";
 import { StatusChip } from "../accounts/StatusChip";
-import { TONE_CLASSES } from "../quota/outlook-tone";
+import { TONE_CLASSES, TONE_FIGURE_CLASS } from "../quota/outlook-tone";
 import { familyWeeklyBadge } from "../quota/PoolDetailSection";
 import { Skeleton } from "../ui/skeleton";
+
+/**
+ * The pace line for a class's least-used account, or null when the account has
+ * no future reset to measure the window against.
+ *
+ * Keyed on the SAME account the class's percentage names. A pace computed over
+ * some other account would sit beside a figure it does not describe.
+ */
+function classBurn(pool: ServableClassPool, now: number) {
+	const leastUsed = pool.leastUsed;
+	if (leastUsed == null) return null;
+	const burn = computeBurnRatio(
+		leastUsed.pct,
+		leastUsed.resetMs,
+		"seven_day",
+		now,
+	);
+	if (burn == null) return null;
+	return {
+		text: formatBurnRatio(burn),
+		tone: TONE_FIGURE_CLASS[burnRatioTone(burn)],
+	};
+}
 
 interface WeeklyBudgetPanelProps {
 	sevenDay: PoolUsageResult;
@@ -119,6 +147,7 @@ export function WeeklyBudgetPanel({
 			? { label: "No reading", tone: "neutral" }
 			: poolClassOutlook(binding);
 	const toneClasses = TONE_CLASSES[outlook.tone];
+	const bindingBurn = binding == null ? null : classBurn(binding, now);
 
 	return (
 		<section
@@ -176,6 +205,12 @@ export function WeeklyBudgetPanel({
 						</div>
 						<p className="mt-tight truncate text-xs text-muted-foreground">
 							{binding.label} · lowest {binding.leastUsed?.name}
+							{bindingBurn && (
+								<>
+									{" · "}
+									<span className={bindingBurn.tone}>{bindingBurn.text}</span>
+								</>
+							)}
 						</p>
 					</>
 				)}
@@ -188,6 +223,7 @@ export function WeeklyBudgetPanel({
 				>
 					{sevenDay.classes.map((pool) => {
 						const badges = classBadges(sevenDay, pool);
+						const burn = classBurn(pool, now);
 						return (
 							<li key={pool.classId} className="min-w-0 text-xs">
 								<p className="truncate">
@@ -217,6 +253,12 @@ export function WeeklyBudgetPanel({
 								</p>
 								<p className="truncate text-xs text-muted-foreground">
 									{coverageLine(pool, now)}
+									{burn && (
+										<>
+											{" · "}
+											<span className={burn.tone}>{burn.text}</span>
+										</>
+									)}
 								</p>
 								{badges.map((badge) => (
 									<p

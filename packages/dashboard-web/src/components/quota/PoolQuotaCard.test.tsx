@@ -29,12 +29,41 @@ function weeklyAt(pct: number, resetMs: number) {
 	};
 }
 
+function bothAt(
+	fiveHourPct: number,
+	fiveHourResetMs: number | null,
+	weeklyPct: number,
+	weeklyResetMs: number,
+) {
+	return {
+		five_hour: {
+			utilization: fiveHourPct,
+			resets_at:
+				fiveHourResetMs == null
+					? null
+					: new Date(fiveHourResetMs).toISOString(),
+		},
+		seven_day: {
+			utilization: weeklyPct,
+			resets_at: new Date(weeklyResetMs).toISOString(),
+		},
+	};
+}
+
 function render(accounts: AccountResponse[]) {
 	const result = computePoolUsage(accounts, "seven_day", NOW);
+	const fiveHourResult = computePoolUsage(accounts, "five_hour", NOW);
 	const weekly = result.classes[0];
 	if (!weekly) throw new Error("no class");
 	return renderToStaticMarkup(
-		<PoolQuotaCard weekly={weekly} fiveHour={null} weeklyResult={result} />,
+		<PoolQuotaCard
+			weekly={weekly}
+			fiveHour={
+				fiveHourResult.classes.find((c) => c.classId === weekly.classId) ?? null
+			}
+			weeklyResult={result}
+			now={NOW}
+		/>,
 	);
 }
 
@@ -80,5 +109,30 @@ describe("PoolQuotaCard at-risk row", () => {
 			account({ id: "acc-2", name: "beta" }),
 		]);
 		expect(html).toContain("1 of 2 accounts reporting");
+	});
+});
+
+describe("PoolQuotaCard 5-hour pace", () => {
+	it("states the burn against the sustainable pace", () => {
+		// Halfway through a five-hour window at 75%: an even burn would be at
+		// 50%, so this is 1.5x sustainable.
+		const html = render([
+			account({
+				usageData: bothAt(75, NOW + 2.5 * HOUR, 20, NOW + 6 * DAY) as never,
+			}),
+		]);
+
+		expect(html).toContain("pace 1.5× sustainable pace");
+	});
+
+	it("says nothing about pace without a reset to measure against", () => {
+		// The window's start is derived from its reset, so no reset means no
+		// window to be on pace through.
+		const html = render([
+			account({ usageData: bothAt(75, null, 20, NOW + 6 * DAY) as never }),
+		]);
+
+		expect(html).toContain("5h pace: 75% used");
+		expect(html).not.toContain("sustainable pace");
 	});
 });

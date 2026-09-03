@@ -220,6 +220,7 @@ export const OverviewTab = React.memo(() => {
 						weekly={PLACEHOLDER_CLASS_POOL}
 						fiveHour={null}
 						weeklyResult={weeklyPool}
+						now={now}
 						loading={accountsPending}
 						unavailableReason={
 							accountsUnavailable ? "Account data unavailable" : undefined
@@ -236,6 +237,7 @@ export const OverviewTab = React.memo(() => {
 								) ?? null
 							}
 							weeklyResult={weeklyPool}
+							now={now}
 							staleNote={accountsStaleNote}
 						/>
 					))
