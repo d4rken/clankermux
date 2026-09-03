@@ -13,12 +13,12 @@ import { cn } from "../../lib/utils";
  * helpers that go with it.
  *
  * This lives in `quota/` rather than `overview/` because BOTH pages render it:
- * the Overview inside its tile's popover, the Usage page inside a `<details>`
- * disclosure. While it sat in `overview/PoolMetricCard.tsx`, the Usage page
- * reached across into an `overview/` component to get it — an import that made
- * the sharing invisible and invited the two pages to drift apart around it,
- * which is exactly what happened to the outlook and at-risk rules that used to
- * live beside it.
+ * the Overview inside its card's popover, the Usage page inside a `<details>`
+ * disclosure. While it sat inside the Overview's own tile component, the Usage
+ * page reached across into an `overview/` module to get it — an import that
+ * made the sharing invisible and invited the two pages to drift apart around
+ * it, which is exactly what happened to the outlook and at-risk rules that used
+ * to live beside it.
  *
  * Everything here is presentation over an already-computed `PoolUsageResult`.
  * The rules about what those numbers MEAN — the outlook verdict, the eligible
@@ -220,7 +220,6 @@ export function PoolDetailSection({
 	window: PoolWindow;
 }) {
 	const {
-		activeAverage,
 		contributing,
 		exhausted,
 		excluded,
@@ -246,17 +245,6 @@ export function PoolDetailSection({
 
 	return (
 		<div className="space-y-row">
-			<div>
-				<div className="font-medium mb-tight">Calculation</div>
-				<div className="text-muted-foreground">
-					Headline counts unavailable eligible accounts as 100% used.
-				</div>
-				{activeAverage != null && (
-					<div className="mt-tight">
-						Reporting accounts average: {activeAverage.toFixed(0)}%
-					</div>
-				)}
-			</div>
 			{hasContributing && (
 				<div>
 					<div className="font-medium mb-tight">

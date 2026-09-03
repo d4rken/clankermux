@@ -60,8 +60,8 @@ function mkAccount(partial: Partial<AccountResponse>): AccountResponse {
 describe("computePoolUsage", () => {
 	it("returns empty for empty accounts", () => {
 		const result = computePoolUsage([], "five_hour", NOW);
-		expect(result.average).toBeNull();
-		expect(result.worst).toBeNull();
+		expect(result.classes).toEqual([]);
+		expect(result.bindingClass).toBeNull();
 		expect(result.contributing).toEqual([]);
 		expect(result.excluded).toEqual([]);
 		expect(result.fallback).toEqual([]);
@@ -69,7 +69,92 @@ describe("computePoolUsage", () => {
 		expect(result.earliestResetAccountName).toBeNull();
 	});
 
-	it("averages Anthropic + Codex for 5h pool", () => {
+	it("keeps the flat lists a VIEW over the class list, never a second opinion", () => {
+		// The invariant that replaced the pool average: one account, one verdict.
+		// While the flat lists were pushed to inside the classification loop they
+		// were a second recording of the same decision, and nothing stopped a
+		// later edit from updating one and not the other.
+		const accounts: AccountResponse[] = [
+			mkAccount({
+				name: "reporting",
+				provider: "anthropic",
+				usageData: {
+					five_hour: {
+						utilization: 30,
+						resets_at: new Date(NOW + 1_000_000).toISOString(),
+					},
+					seven_day: { utilization: 10, resets_at: null },
+				} as never,
+			}),
+			mkAccount({
+				name: "spent",
+				provider: "anthropic",
+				usageData: {
+					five_hour: {
+						utilization: 100,
+						resets_at: new Date(NOW + 2_000_000).toISOString(),
+					},
+					seven_day: { utilization: 10, resets_at: null },
+				} as never,
+			}),
+			mkAccount({ name: "paused", provider: "anthropic", paused: true }),
+			mkAccount({ name: "blind", provider: "anthropic", usageData: null }),
+			// A different servable class, so the projection has to span classes.
+			mkAccount({
+				name: "codex",
+				provider: "codex",
+				usageData: {
+					five_hour: { utilization: 55, resets_at: null },
+					seven_day: { utilization: 5, resets_at: null },
+				} as never,
+			}),
+		];
+
+		const result = computePoolUsage(accounts, "five_hour", NOW);
+		const bars = result.classes.flatMap((c) => c.accounts);
+
+		expect(result.contributing.map((c) => c.accountId).sort()).toEqual(
+			bars
+				.filter((b) => b.state === "reporting")
+				.map((b) => b.accountId)
+				.sort(),
+		);
+		expect(result.exhausted.map((e) => e.accountId).sort()).toEqual(
+			bars
+				.filter((b) => b.state === "exhausted")
+				.map((b) => b.accountId)
+				.sort(),
+		);
+		expect(result.excluded.map((e) => e.accountId).sort()).toEqual(
+			bars
+				.filter((b) => b.state === "unknown")
+				.map((b) => b.accountId)
+				.sort(),
+		);
+		// Every eligible account lands in exactly one of the three, and nowhere
+		// twice.
+		const flat = [
+			...result.contributing,
+			...result.exhausted,
+			...result.excluded,
+		].map((e) => e.accountId);
+		expect(flat.length).toBe(bars.length);
+		expect(new Set(flat).size).toBe(bars.length);
+
+		// The VALUES agree too, not just the membership.
+		for (const c of result.contributing) {
+			const bar = bars.find((b) => b.accountId === c.accountId);
+			expect(bar?.pct).toBe(c.pct);
+			expect(bar?.resetMs).toBe(c.resetMs);
+		}
+		for (const e of [...result.exhausted, ...result.excluded]) {
+			const bar = bars.find((b) => b.accountId === e.accountId);
+			expect(bar?.reason).toBe(e.reason);
+			expect(bar?.resetMs).toBe(e.resetMs);
+		}
+	});
+
+	it("reads Anthropic and Codex as SEPARATE servable classes", () => {
 		const accounts: AccountResponse[] = [
 			mkAccount({
 				name: "anthro-a",
@@ -89,16 +174,28 @@ describe("computePoolUsage", () => {
 			}),
 		];
 
+		// A Claude request cannot be served by a Codex account, so the two never
+		// pool: 40 and 60 are one class each, and the mean of them (50) describes
+		// no decision anyone makes.
 		const five = computePoolUsage(accounts, "five_hour", NOW);
-		expect(five.average).toBe(50);
-		expect(five.worst).toEqual({ name: "codex-b", pct: 60 });
 		expect(five.contributing).toHaveLength(2);
 		expect(five.excluded).toEqual([]);
 		expect(five.fallback).toEqual([]);
+		expect(
+			five.classes.map((c) => [c.leastUsed?.name, c.leastUsed?.pct]),
+		).toEqual([
+			["anthro-a", 40],
+			["codex-b", 60],
+		]);
+		expect(five.classes.map((c) => c.worst?.pct)).toEqual([40, 60]);
 
 		const seven = computePoolUsage(accounts, "seven_day", NOW);
-		expect(seven.average).toBe(25);
-		expect(seven.worst).toEqual({ name: "codex-b", pct: 30 });
+		expect(
+			seven.classes.map((c) => [c.leastUsed?.name, c.leastUsed?.pct]),
+		).toEqual([
+			["anthro-a", 20],
+			["codex-b", 30],
+		]);
 	});
 
 	it("Alibaba contributes to both pools via percentUsed", () => {
@@ -218,7 +315,9 @@ describe("computePoolUsage", () => {
 			{ accountId: "p", name: "p", reason: "paused", resetMs: null },
 		]);
 		expect(result.excluded).toEqual([]);
-		expect(result.average).toBe(100);
+		// Counted as capacity that cannot serve, never as a reporting account.
+		expect(result.classes[0].capacityCount).toBe(1);
+		expect(result.classes[0].reportingCount).toBe(0);
 	});
 
 	it("rate_limited account (rateLimitedUntil > now) counts as exhausted capacity", () => {
@@ -243,8 +342,15 @@ describe("computePoolUsage", () => {
 		];
 
 		const result = computePoolUsage(accounts, "five_hour", NOW);
-		expect(result.average).toBe(60);
-		expect(result.activeAverage).toBe(20);
+		// One account still reporting, at 20%, out of two with capacity.
+		expect(result.classes[0].leastUsed).toEqual({
+			accountId: "active",
+			name: "active",
+			pct: 20,
+			resetMs: null,
+		});
+		expect(result.classes[0].reportingCount).toBe(1);
+		expect(result.classes[0].capacityCount).toBe(2);
 		expect(result.contributing).toHaveLength(1);
 		expect(result.exhausted).toEqual([
 			{
@@ -276,7 +382,7 @@ describe("computePoolUsage", () => {
 			{ accountId: "te", name: "te", reason: "token_expired", resetMs: null },
 		]);
 		expect(result.excluded).toEqual([]);
-		expect(result.average).toBe(100);
+		expect(result.classes[0].leastUsed).toBeNull();
 	});
 
 	it("usage_rate_limited when usageRateLimitedUntil > now AND no usageData", () => {
@@ -299,7 +405,7 @@ describe("computePoolUsage", () => {
 			},
 		]);
 		expect(result.excluded).toEqual([]);
-		expect(result.average).toBe(100);
+		expect(result.classes[0].leastUsed).toBeNull();
 	});
 
 	it("no_usage_data when eligible provider has usageData === null and is not rate-limited", () => {
@@ -376,7 +482,7 @@ describe("computePoolUsage", () => {
 		expect(result.earliestResetAccountName).toBe("b");
 	});
 
-	it("single contributing → returns worst (UI handles suppression)", () => {
+	it("single contributing → it is both the least-used and the worst", () => {
 		const accounts: AccountResponse[] = [
 			mkAccount({
 				name: "solo",
@@ -390,7 +496,10 @@ describe("computePoolUsage", () => {
 
 		const result = computePoolUsage(accounts, "five_hour", NOW);
 		expect(result.contributing).toHaveLength(1);
-		expect(result.worst).toEqual({ name: "solo", pct: 42 });
+		expect(result.classes[0].leastUsed?.name).toBe("solo");
+		expect(result.classes[0].leastUsed?.pct).toBe(42);
+		expect(result.classes[0].worst?.pct).toBe(42);
+		expect(result.classes[0].singlePointOfFailure).toBe(true);
 	});
 
 	it("Anthropic with seven_day_opus/seven_day_sonnet populated: only seven_day counts", () => {
@@ -411,10 +520,10 @@ describe("computePoolUsage", () => {
 		const result = computePoolUsage(accounts, "seven_day", NOW);
 		expect(result.contributing).toHaveLength(1);
 		expect(result.contributing[0].pct).toBe(50);
-		expect(result.average).toBe(50);
+		expect(result.classes[0].leastUsed?.pct).toBe(50);
 	});
 
-	it("three contributing accounts 30/60/87 → average 59, worst points at 87% account", () => {
+	it("three contributing accounts 30/60/87 → least-used 30, worst 87", () => {
 		const accounts: AccountResponse[] = [
 			mkAccount({
 				name: "low",
@@ -443,8 +552,13 @@ describe("computePoolUsage", () => {
 		];
 
 		const result = computePoolUsage(accounts, "five_hour", NOW);
-		expect(result.average).toBe(59);
-		expect(result.worst).toEqual({ name: "high", pct: 87 });
+		// The class is headlined by the account with the most room, because that
+		// is the one routing can still use. The mean (59) sits between three
+		// accounts and describes none of them.
+		expect(result.classes[0].leastUsed?.name).toBe("low");
+		expect(result.classes[0].leastUsed?.pct).toBe(30);
+		expect(result.classes[0].worst?.name).toBe("high");
+		expect(result.classes[0].worst?.pct).toBe(87);
 	});
 
 	describe("atRisk projection", () => {
@@ -858,8 +972,6 @@ describe("computePoolUsage", () => {
 		];
 
 		const fiveHour = computePoolUsage(accounts, "five_hour", NOW);
-		expect(fiveHour.average).toBe(82);
-		expect(fiveHour.activeAverage).toBe(28);
 		expect(fiveHour.contributing).toEqual([
 			{ accountId: "codex", name: "codex", pct: 28, resetMs: null },
 		]);
@@ -887,8 +999,6 @@ describe("computePoolUsage", () => {
 		expect(fiveHour.earliestResetAccountName).toBe("five-hour-exhausted");
 
 		const sevenDay = computePoolUsage(accounts, "seven_day", NOW);
-		expect(sevenDay.average).toBe(83.75);
-		expect(sevenDay.activeAverage).toBe(35);
 		expect(sevenDay.contributing).toEqual([
 			{ accountId: "codex", name: "codex", pct: 35, resetMs: null },
 		]);
@@ -1084,7 +1194,7 @@ describe("computeFamilyWeeklyUsage", () => {
 
 		const seven = computePoolUsage(accounts, "seven_day", NOW);
 		// Account-wide weekly stays healthy at 20% (family limit does not fold in).
-		expect(seven.average).toBe(20);
+		expect(seven.classes[0].leastUsed?.pct).toBe(20);
 		expect(seven.familyWeekly).toHaveLength(1);
 		expect(seven.familyWeekly[0].family).toBe("fable");
 		expect(seven.familyWeekly[0].worstPct).toBe(100);

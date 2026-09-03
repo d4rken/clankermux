@@ -11,9 +11,6 @@ const DAY = 86_400_000;
 
 function emptyPool(familyWeekly: FamilyWeeklyUsage[]): PoolUsageResult {
 	return {
-		average: 40,
-		activeAverage: 40,
-		worst: null,
 		contributing: [],
 		exhausted: [],
 		excluded: [],

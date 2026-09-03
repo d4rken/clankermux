@@ -13,9 +13,6 @@ let host: HTMLElement | null = null;
 
 function poolResult(): PoolUsageResult {
 	return {
-		average: 25,
-		activeAverage: 25,
-		worst: { name: "alpha", pct: 25 },
 		contributing: [
 			{ accountId: "acc-1", name: "alpha", pct: 25, resetMs: null },
 		],

@@ -141,59 +141,6 @@ export interface Outlook {
 }
 
 /**
- * The single verdict on a pool's health, shared by every surface that renders
- * one.
- *
- * There used to be two. The Overview tinted its headline with a bare 60/80
- * split on the average, while the Usage page ran a richer rule that also
- * escalated on at-risk, exhausted or unreported accounts. A pool at 20% with
- * one `no_usage_data` account was therefore GREEN on Overview and AMBER on
- * Usage — the same pool, the same instant, two colours, and no way for a reader
- * to tell which one was lying. This is the Usage rule, which is a strict
- * superset, and both pages now call it.
- *
- * The escalation on `excluded` is deliberate and easy to mistake for a bug: an
- * account nobody has usage data for is not evidence of health, and the average
- * silently omits it. Amber is the honest colour for a number computed over
- * fewer accounts than the pool contains.
- */
-export function poolOutlook(result: PoolUsageResult): Outlook {
-	if (result.average == null) {
-		return { label: "Account-wide unknown", tone: "neutral" };
-	}
-
-	// Every eligible account is spent or unavailable. The average alone cannot
-	// say this: with nothing contributing, it is composed entirely of the 100%
-	// charged to unavailable accounts, which reads the same as a busy pool.
-	const allUnavailable =
-		result.contributing.length === 0 && result.exhausted.length > 0;
-
-	if (result.average >= 100 || allUnavailable) {
-		return { label: "Constrained", tone: "destructive" };
-	}
-	if (result.average >= 80) {
-		return { label: "High usage", tone: "destructive" };
-	}
-	if (
-		result.average >= 60 ||
-		result.atRisk.length > 0 ||
-		result.exhausted.length > 0 ||
-		result.excluded.length > 0
-	) {
-		return { label: "Watch", tone: "warning" };
-	}
-
-	// "On pace" claims a projection exists, so it may only be said when every
-	// reporting account actually has a reset to project against.
-	const everyReportingAccountCanBeProjected =
-		result.contributing.length > 0 &&
-		result.contributing.every((account) => account.resetMs != null);
-	return everyReportingAccountCanBeProjected
-		? { label: "On pace", tone: "success" }
-		: { label: "Low usage", tone: "success" };
-}
-
-/**
  * How many accounts could contribute to this window at all: those reporting,
  * those charged as spent, and those with no reading. Both pages computed this
  * sum inline with identical arithmetic.
@@ -391,10 +338,24 @@ export interface FamilyWeeklyUsage {
 	accounts: FamilyWeeklyAccountUsage[];
 }
 
+/**
+ * One window's read of the pool.
+ *
+ * There is deliberately NO pool-wide average here, and the omission is the
+ * point. A Claude request cannot be served by a Codex account, so a figure
+ * averaged across both describes no decision anyone makes — and even inside one
+ * servable class, routing picks ONE account, so a mean of a spent account and a
+ * fresh one describes neither. {@link classes} is the answer to both: per
+ * class, and headlined by the account with the most room. What the average used
+ * to be read for lives on {@link ServableClassPool.leastUsed} and
+ * {@link ServableClassPool.worst}.
+ *
+ * `contributing` / `exhausted` / `excluded` are the flat VIEWS over the same
+ * verdicts `classes` groups — see {@link projectAccountBars}. They are a
+ * projection of `classes.flatMap(c => c.accounts)`, not a parallel computation,
+ * so the two cannot disagree about an account.
+ */
 export interface PoolUsageResult {
-	average: number | null;
-	activeAverage: number | null;
-	worst: { name: string; pct: number } | null;
 	contributing: PoolUsageContribution[];
 	exhausted: PoolUsageExclusion[];
 	excluded: PoolUsageExclusion[];
@@ -867,9 +828,6 @@ export function computePoolUsage(
 	window: PoolWindow,
 	now: number,
 ): PoolUsageResult {
-	const contributing: PoolUsageContribution[] = [];
-	const exhausted: PoolUsageExclusion[] = [];
-	const excluded: PoolUsageExclusion[] = [];
 	const fallback: PoolUsageFallback[] = [];
 	// Captured while iterating the accounts so the at-risk projection below can
 	// reach each contribution's server-side prediction. Keyed by account id —
@@ -884,10 +842,11 @@ export function computePoolUsage(
 	const anchors = new Map<string, UsageBurnAnchor | null>();
 
 	// Every eligible account with the verdict this pass reached about it, in one
-	// place. Built alongside the lists above rather than derived from them: the
-	// exclusion lists carry a name but no provider and no account id, so the
-	// servable-class grouping cannot be reconstructed afterwards without
-	// re-running the classification — two copies of a rule that must not drift.
+	// place, and the ONLY place a verdict is recorded. The flat
+	// contributing/exhausted/excluded lists are projected off this afterwards
+	// rather than pushed to alongside it: while both were built in the loop, one
+	// account's state was written twice, and nothing stopped a later edit from
+	// updating one and not the other.
 	const accountBars: PoolAccountBar[] = [];
 
 	const eligible = eligibleProvidersFor(window);
@@ -902,12 +861,6 @@ export function computePoolUsage(
 			classifyExclusion(account, now) ??
 			classifyQuotaExhaustion(account, window);
 		if (exclusion) {
-			exhausted.push({
-				accountId: account.id,
-				name: account.name,
-				reason: exclusion.reason,
-				resetMs: exclusion.resetMs,
-			});
 			accountBars.push({
 				accountId: account.id,
 				name: account.name,
@@ -921,12 +874,6 @@ export function computePoolUsage(
 		}
 
 		if (!account.usageData) {
-			excluded.push({
-				accountId: account.id,
-				name: account.name,
-				reason: "no_usage_data",
-				resetMs: null,
-			});
 			accountBars.push({
 				accountId: account.id,
 				name: account.name,
@@ -950,12 +897,6 @@ export function computePoolUsage(
 		}
 
 		if (extracted.pct === null) {
-			excluded.push({
-				accountId: account.id,
-				name: account.name,
-				reason: "no_usage_data",
-				resetMs: extracted.resetMs,
-			});
 			accountBars.push({
 				accountId: account.id,
 				name: account.name,
@@ -968,12 +909,6 @@ export function computePoolUsage(
 			continue;
 		}
 
-		contributing.push({
-			accountId: account.id,
-			name: account.name,
-			pct: extracted.pct,
-			resetMs: extracted.resetMs,
-		});
 		accountBars.push({
 			accountId: account.id,
 			name: account.name,
@@ -993,29 +928,7 @@ export function computePoolUsage(
 		anchors.set(account.id, windowBurnAnchor(account.burnAnchors, window));
 	}
 
-	const activeAverage =
-		contributing.length === 0
-			? null
-			: contributing.reduce((sum, c) => sum + c.pct, 0) / contributing.length;
-	const capacityCount = contributing.length + exhausted.length;
-	const average =
-		capacityCount === 0
-			? null
-			: (contributing.reduce((sum, c) => sum + c.pct, 0) +
-					exhausted.length * 100) /
-				capacityCount;
-
-	let worst: { name: string; pct: number } | null = null;
-	for (const c of contributing) {
-		if (worst === null || c.pct > worst.pct) {
-			worst = { name: c.name, pct: c.pct };
-		}
-	}
-	for (const e of exhausted) {
-		if (worst === null || 100 > worst.pct) {
-			worst = { name: e.name, pct: 100 };
-		}
-	}
+	const { contributing, exhausted, excluded } = projectAccountBars(accountBars);
 
 	const resetCandidates = [...contributing, ...exhausted].filter(
 		(
@@ -1072,9 +985,6 @@ export function computePoolUsage(
 	const classes = groupIntoServableClasses(accountBars, now);
 
 	return {
-		average,
-		activeAverage,
-		worst,
 		contributing,
 		exhausted,
 		excluded,
@@ -1086,6 +996,50 @@ export function computePoolUsage(
 		classes,
 		bindingClass: pickBindingClass(classes),
 	};
+}
+
+/**
+ * The flat lists, as VIEWS over the per-account verdicts.
+ *
+ * One account, one verdict, projected three ways. While the lists were pushed
+ * to inside the classification loop they were a second recording of the same
+ * decision, and a bar could say "exhausted" while the flat list said
+ * "contributing" if either push site was edited alone. Derived here, that
+ * disagreement is unrepresentable.
+ *
+ * A `reporting` bar always carries a percentage — that is what makes it
+ * reporting — but the type does not know it, so the narrowing is written out
+ * rather than cast. A bar that somehow lacked one would be counted as unknown,
+ * which is the honest reading of a missing number and never a 0%.
+ */
+function projectAccountBars(bars: PoolAccountBar[]): {
+	contributing: PoolUsageContribution[];
+	exhausted: PoolUsageExclusion[];
+	excluded: PoolUsageExclusion[];
+} {
+	const contributing: PoolUsageContribution[] = [];
+	const exhausted: PoolUsageExclusion[] = [];
+	const excluded: PoolUsageExclusion[] = [];
+	for (const bar of bars) {
+		if (bar.state === "reporting" && bar.pct !== null) {
+			contributing.push({
+				accountId: bar.accountId,
+				name: bar.name,
+				pct: bar.pct,
+				resetMs: bar.resetMs,
+			});
+			continue;
+		}
+		const exclusion: PoolUsageExclusion = {
+			accountId: bar.accountId,
+			name: bar.name,
+			reason: bar.reason ?? "no_usage_data",
+			resetMs: bar.resetMs,
+		};
+		if (bar.state === "exhausted") exhausted.push(exclusion);
+		else excluded.push(exclusion);
+	}
+	return { contributing, exhausted, excluded };
 }
 
 /** Group the per-account verdicts into pools that can cover for each other. */
