@@ -66,6 +66,99 @@ export interface PoolUsageFallback {
  */
 export const FAMILY_WEEKLY_ELEVATED_THRESHOLD_PCT = 80;
 
+export type OutlookTone = "neutral" | "success" | "warning" | "destructive";
+
+export interface Outlook {
+	label: string;
+	tone: OutlookTone;
+}
+
+/**
+ * The single verdict on a pool's health, shared by every surface that renders
+ * one.
+ *
+ * There used to be two. The Overview tinted its headline with a bare 60/80
+ * split on the average, while the Usage page ran a richer rule that also
+ * escalated on at-risk, exhausted or unreported accounts. A pool at 20% with
+ * one `no_usage_data` account was therefore GREEN on Overview and AMBER on
+ * Usage — the same pool, the same instant, two colours, and no way for a reader
+ * to tell which one was lying. This is the Usage rule, which is a strict
+ * superset, and both pages now call it.
+ *
+ * The escalation on `excluded` is deliberate and easy to mistake for a bug: an
+ * account nobody has usage data for is not evidence of health, and the average
+ * silently omits it. Amber is the honest colour for a number computed over
+ * fewer accounts than the pool contains.
+ */
+export function poolOutlook(result: PoolUsageResult): Outlook {
+	if (result.average == null) {
+		return { label: "Account-wide unknown", tone: "neutral" };
+	}
+
+	// Every eligible account is spent or unavailable. The average alone cannot
+	// say this: with nothing contributing, it is composed entirely of the 100%
+	// charged to unavailable accounts, which reads the same as a busy pool.
+	const allUnavailable =
+		result.contributing.length === 0 && result.exhausted.length > 0;
+
+	if (result.average >= 100 || allUnavailable) {
+		return { label: "Constrained", tone: "destructive" };
+	}
+	if (result.average >= 80) {
+		return { label: "High usage", tone: "destructive" };
+	}
+	if (
+		result.average >= 60 ||
+		result.atRisk.length > 0 ||
+		result.exhausted.length > 0 ||
+		result.excluded.length > 0
+	) {
+		return { label: "Watch", tone: "warning" };
+	}
+
+	// "On pace" claims a projection exists, so it may only be said when every
+	// reporting account actually has a reset to project against.
+	const everyReportingAccountCanBeProjected =
+		result.contributing.length > 0 &&
+		result.contributing.every((account) => account.resetMs != null);
+	return everyReportingAccountCanBeProjected
+		? { label: "On pace", tone: "success" }
+		: { label: "Low usage", tone: "success" };
+}
+
+/**
+ * How many accounts could contribute to this window at all: those reporting,
+ * those charged as spent, and those with no reading. Both pages computed this
+ * sum inline with identical arithmetic.
+ */
+export function eligibleAccountTotal(result: PoolUsageResult): number {
+	return (
+		result.contributing.length +
+		result.exhausted.length +
+		result.excluded.length
+	);
+}
+
+/**
+ * How many accounts are projected to run out before this window resets, over
+ * how many could.
+ *
+ * The two pages disagreed here too: the Overview badge counted
+ * `atRisk + exhausted`, the Usage alert counted `atRisk` alone. Same window,
+ * same instant, two different numerators for "will run out". Exhausted accounts
+ * belong in it — an account already at 100% has run out, and excluding it makes
+ * the count shrink at the moment the pool got worse.
+ */
+export function willRunOutCount(result: PoolUsageResult): {
+	willRunOut: number;
+	capacity: number;
+} {
+	return {
+		willRunOut: result.atRisk.length + result.exhausted.length,
+		capacity: result.contributing.length + result.exhausted.length,
+	};
+}
+
 /** One account's contribution to a per-family weekly bucket. */
 export interface FamilyWeeklyAccountUsage {
 	name: string;

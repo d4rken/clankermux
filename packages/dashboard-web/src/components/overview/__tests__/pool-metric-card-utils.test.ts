@@ -3,7 +3,10 @@ import {
 	FAMILY_WEEKLY_ELEVATED_THRESHOLD_PCT,
 	type FamilyWeeklyUsage,
 } from "../../../lib/pool-usage";
-import { familyScopeSummary, familyWeeklyBadge } from "../PoolMetricCard";
+import {
+	familyScopeSummary,
+	familyWeeklyBadge,
+} from "../../quota/PoolDetailSection";
 
 function makeFamily(
 	overrides: Partial<FamilyWeeklyUsage> & { worstPct: number },
