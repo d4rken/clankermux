@@ -1606,7 +1606,10 @@ describe("computeCapacityRunwayBand", () => {
 	 * `elapsed * (100 / pct)` from the window start — which is exactly the
 	 * formula the width assertion below re-derives at each perturbation.
 	 */
-	function weeklyAt(pct: number): RunwayAccountInput {
+	function weeklyAt(
+		pct: number,
+		alsoCarrying: RunwayWindowInput[] = [],
+	): RunwayAccountInput {
 		return account("a", [
 			window({
 				windowKind: "seven_day",
@@ -1615,6 +1618,7 @@ describe("computeCapacityRunwayBand", () => {
 				windowStartMs: NOW - DAY,
 				prediction: null,
 			}),
+			...alsoCarrying,
 		]);
 	}
 
@@ -1648,6 +1652,47 @@ describe("computeCapacityRunwayBand", () => {
 		// whole percent; nudging it would invent an uncertainty it does not have.
 		const { band } = bandFor([weeklyAt(20.25)]);
 		expect(band).toBeNull();
+	});
+
+	it("states no band for an account with only a five-hour window", () => {
+		// A whole-percent 5-hour reading is NOT perturbed, so there is nothing to
+		// bracket even though the scan does project a run-out from it. The 5-hour
+		// fallback is `now`-anchored and drifts between polls, so the interval a
+		// probe on it traces is not the quantisation interval a band claims.
+		const fiveHourOnly = [
+			account("a", [
+				window({
+					windowKind: "five_hour",
+					utilizationPct: 90,
+					resetsAtMs: NOW + HOUR,
+					windowStartMs: NOW - 4 * HOUR,
+					prediction: null,
+				}),
+			]),
+		];
+		const { baseline, band } = bandFor(fiveHourOnly);
+
+		expect(baseline.kind).toBe("runway");
+		expect(band).toBeNull();
+	});
+
+	it("perturbs the weekly window and leaves the five-hour one alone", () => {
+		// Same weekly reading, once on its own and once beside a whole-percent
+		// 5-hour window that contributes no dead span of its own. The band has to
+		// be the same one: it reports what the WEEKLY reading's precision leaves
+		// open, and the 5-hour window's presence is not part of that claim.
+		const idleFiveHour = window({
+			windowKind: "five_hour",
+			utilizationPct: 10,
+			resetsAtMs: NOW + 4 * HOUR,
+			windowStartMs: NOW - HOUR,
+			prediction: null,
+		});
+		const weeklyOnly = bandFor([weeklyAt(20)]);
+		const withFiveHour = bandFor([weeklyAt(20, [idleFiveHour])]);
+
+		expect(withFiveHour.band).not.toBeNull();
+		expect(withFiveHour.band).toEqual(weeklyOnly.band);
 	});
 
 	it("returns equal ends for a regression-backed window", () => {

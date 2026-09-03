@@ -893,12 +893,19 @@ function outcomeInstant(outcome: RunwayOutcome, now: number): number | null {
  *    documented non-monotonic (see {@link probePaceMargin}): a faster burn can
  *    move a dead span back inside a credit's expiry and REVIVE the window, so
  *    the perturbed answers do not straddle the baseline.
- *  - No window was perturbed. Every reading was already fractional, so
- *    quantisation is not what is limiting the precision here.
+ *  - No weekly window was perturbed. Every weekly reading was already
+ *    fractional, so quantisation is not what is limiting the precision here.
  *  - Both probes state no run-out. There is nothing to bracket.
  *
- * A regression-backed window is perturbed like any other and simply does not
- * move: `estimateWindowExhaustion`'s regression branch projects from the server
+ * FIVE-HOUR WINDOWS ARE NEVER PERTURBED, and the band says nothing about them.
+ * The 5-hour fallback is `now`-anchored and drifts between polls, so the
+ * interval a probe on it would trace is not the quantisation interval this
+ * function claims to be reporting — it would widen the band by an amount that
+ * has nothing to do with the reading's precision, on the window whose reading
+ * moves fastest.
+ *
+ * A regression-backed weekly window is perturbed like any other and simply does
+ * not move: `estimateWindowExhaustion`'s regression branch projects from the server
  * slope and never reads the percentage. The two ends then come back equal,
  * which the display renders as no band. That is disclosure of what the model
  * does, not a claim that the figure is exact.
@@ -921,10 +928,15 @@ export function computeCapacityRunwayBand(
 		accounts.map((account) => ({
 			...account,
 			windows: account.windows.map((window) => {
-				// Only a WHOLE-percent reading carries quantisation error. A
-				// fractional one came from somewhere that already knows better, and
-				// nudging it would invent an uncertainty it does not have.
-				if (!Number.isInteger(window.utilizationPct)) return window;
+				// The WEEKLY window only, and only a WHOLE-percent reading of it. A
+				// fractional reading came from somewhere that already knows better,
+				// and nudging it would invent an uncertainty it does not have.
+				if (
+					window.windowKind !== "seven_day" ||
+					!Number.isInteger(window.utilizationPct)
+				) {
+					return window;
+				}
 				perturbed = true;
 				return {
 					...window,
