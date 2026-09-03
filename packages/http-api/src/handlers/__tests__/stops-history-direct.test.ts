@@ -241,6 +241,43 @@ describe("stops-history handler", () => {
 		).toBe(false);
 	});
 
+	it("still returns the WHOLE response through the handler path", async () => {
+		// The shaping moved into `computeStopsHistory` so the public widget reader
+		// can ask for less. The dashboard route asks for nothing and must keep
+		// getting everything — the model breakdown is queried and the series is
+		// built, exactly as before.
+		const sources = makeSources({
+			total: 100,
+			buckets: [
+				{
+					errorMessage: "all_accounts_failed",
+					statusCode: 503,
+					bucketMs: NOW - HOUR,
+					count: 4,
+					firstSeenMs: NOW - HOUR + 10,
+					lastSeenMs: NOW - HOUR + 90,
+				},
+			],
+			models: [
+				{
+					errorMessage: "all_accounts_failed",
+					statusCode: 503,
+					model: "gpt-5.2-codex",
+					count: 4,
+				},
+			],
+		});
+		const body = await run(sources, "6h");
+
+		expect(sources.calls).toContain("getStopModelBreakdown");
+		const cause = body.causes[0];
+		expect(cause?.topRequestedModel).toBe("gpt-5.2-codex");
+		expect(cause?.topRequestedModelCount).toBe(4);
+		expect(cause?.sampleErrorMessage).toBe("all_accounts_failed");
+		expect(cause?.series.length).toBeGreaterThan(0);
+		expect(body.range).toBe("6h");
+	});
+
 	it("orders causes by count, biggest first", async () => {
 		const body = await run(
 			makeSources({

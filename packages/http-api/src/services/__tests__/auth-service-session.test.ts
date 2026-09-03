@@ -192,6 +192,8 @@ describe("paths the session policy must not touch", () => {
 		"/health",
 		"/public/v1/status",
 		"/public/v1/accounts",
+		"/public/v1/runway",
+		"/public/v1/stops",
 		"/public/v1/stream",
 		"/",
 		"/assets/app.js",

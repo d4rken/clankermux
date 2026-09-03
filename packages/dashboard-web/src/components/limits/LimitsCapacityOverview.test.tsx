@@ -1,16 +1,14 @@
 import { describe, expect, it } from "bun:test";
 import type { KeyRunway } from "@clankermux/core";
 import { UNAUTHENTICATED_POOL_KEY_NAME } from "@clankermux/core";
-import { Gauge } from "lucide-react";
+import type { AccountResponse } from "@clankermux/types";
 import { renderToStaticMarkup } from "react-dom/server";
 import {
-	type FamilyWeeklyUsage,
+	computePoolUsage,
 	type PoolUsageResult,
-	poolOutlook,
-	willRunOutCount,
+	poolClassOutlook,
 } from "../../lib/pool-usage";
-import { PoolMetricCard } from "../overview/PoolMetricCard";
-import { TONE_FIGURE_CLASS } from "../quota/outlook-tone";
+import { PoolQuotaCard } from "../quota/PoolQuotaCard";
 import { LimitsCapacityOverview } from "./LimitsCapacityOverview";
 
 const NOW = Date.UTC(2026, 7, 22, 12, 0, 0);
@@ -38,57 +36,108 @@ function keyRunway(overrides: Partial<KeyRunway> = {}): KeyRunway {
 	};
 }
 
-function poolResult(overrides: Partial<PoolUsageResult> = {}): PoolUsageResult {
+function account(over: Partial<AccountResponse> = {}): AccountResponse {
 	return {
-		average: 34,
-		activeAverage: 34,
-		worst: { name: "alpha", pct: 48 },
-		contributing: [
-			{
-				accountId: "acc-1",
-				name: "alpha",
-				pct: 48,
-				resetMs: NOW + 90 * 60_000,
-			},
-			{
-				accountId: "acc-2",
-				name: "beta",
-				pct: 20,
-				resetMs: NOW + 3 * 60 * 60_000,
-			},
-		],
-		exhausted: [],
-		excluded: [],
-		fallback: [],
-		earliestResetMs: NOW + 90 * 60_000,
-		earliestResetAccountName: "alpha",
-		atRisk: [],
-		familyWeekly: [],
-		...overrides,
+		id: "acc-1",
+		name: "alpha",
+		provider: "anthropic",
+		paused: false,
+		rateLimitedUntil: null,
+		tokenExpiresAt: null,
+		hasRefreshToken: false,
+		usageRateLimitedUntil: null,
+		usageData: null,
+		...over,
+	} as unknown as AccountResponse;
+}
+
+/**
+ * An Anthropic-style usage payload. Both window resets default to a FUTURE
+ * instant: a past reset is a stale reading the panels deliberately refuse to
+ * offer, so leaving one in by accident would silently disarm half these
+ * assertions.
+ */
+function usage(
+	fiveHourPct: number | null,
+	sevenDayPct: number | null,
+	over: {
+		fiveHourResetMs?: number | null;
+		sevenDayResetMs?: number | null;
+	} = {},
+) {
+	const fiveHourResetMs =
+		over.fiveHourResetMs === undefined ? NOW + 2 * HOUR : over.fiveHourResetMs;
+	const sevenDayResetMs =
+		over.sevenDayResetMs === undefined
+			? NOW + 90 * 60_000
+			: over.sevenDayResetMs;
+	return {
+		five_hour: {
+			utilization: fiveHourPct,
+			resets_at:
+				fiveHourResetMs == null
+					? null
+					: new Date(fiveHourResetMs).toISOString(),
+		},
+		seven_day: {
+			utilization: sevenDayPct,
+			resets_at:
+				sevenDayResetMs == null
+					? null
+					: new Date(sevenDayResetMs).toISOString(),
+		},
+	} as never;
+}
+
+/**
+ * Two servable classes, so "tightest class" means something: the GPT account is
+ * the most spent of the two least-used accounts and therefore binds.
+ */
+const DEFAULT_ACCOUNTS: AccountResponse[] = [
+	account({ id: "acc-1", name: "alpha", usageData: usage(48, 48) }),
+	account({
+		id: "acc-2",
+		name: "beta",
+		usageData: usage(20, 20, { sevenDayResetMs: NOW + 5 * HOUR }),
+	}),
+	account({
+		id: "acc-3",
+		name: "gamma",
+		provider: "codex",
+		usageData: usage(30, 55, { sevenDayResetMs: NOW + 3 * DAY }),
+	}),
+];
+
+function pools(accounts: AccountResponse[] = DEFAULT_ACCOUNTS, now = NOW) {
+	return {
+		fiveHour: computePoolUsage(accounts, "five_hour", now),
+		sevenDay: computePoolUsage(accounts, "seven_day", now),
 	};
 }
 
 function renderOverview(
-	fiveHour = poolResult(),
-	sevenDay = poolResult({
-		average: 51,
-		activeAverage: 51,
-		worst: { name: "beta", pct: 62 },
-	}),
+	windows: {
+		fiveHour: PoolUsageResult;
+		sevenDay: PoolUsageResult;
+	} = pools(),
 	runwayProps: {
 		runways?: KeyRunway[];
 		runwaysLoading?: boolean;
 		runwaysUnavailableReason?: string;
+		windowsLoading?: boolean;
+		windowsUnavailableReason?: string;
 		now?: number;
 	} = {},
 ) {
 	return renderToStaticMarkup(
 		<LimitsCapacityOverview
-			fiveHour={fiveHour}
-			sevenDay={sevenDay}
+			fiveHour={windows.fiveHour}
+			sevenDay={windows.sevenDay}
 			now={runwayProps.now ?? NOW}
 			runways={runwayProps.runways ?? [keyRunway()]}
 			accounts={RUNWAY_ACCOUNTS}
+			windowsLoading={runwayProps.windowsLoading}
+			windowsUnavailableReason={runwayProps.windowsUnavailableReason}
 			runwaysLoading={runwayProps.runwaysLoading ?? false}
 			runwaysUnavailableReason={runwayProps.runwaysUnavailableReason}
 		/>,
@@ -100,6 +149,15 @@ function countOccurrences(haystack: string, needle: string): number {
 	return haystack.split(needle).length - 1;
 }
 
+/**
+ * The runway panel's own markup, sliced out of the card.
+ *
+ * Scoped rather than whole-card because several of these assert on the ABSENCE
+ * of a glyph that the sibling panels legitimately render — the 5-hour pacing
+ * headline is a count, and a resolved zero there is the reassuring answer.
+ * Asserted against the whole card, those checks would fail on a neighbour's
+ * correct output instead of on the runway panel's own.
+ */
 function renderRunway(
 	runwayProps: {
 		runways?: KeyRunway[];
@@ -108,215 +166,219 @@ function renderRunway(
 		now?: number;
 	} = {},
 ) {
-	return renderOverview(poolResult(), poolResult(), runwayProps);
+	const html = renderOverview(pools(), runwayProps);
+	const start = html.indexOf('aria-label="Quota runway"');
+	if (start === -1) throw new Error("runway panel not rendered");
+	return html.slice(start);
 }
 
 describe("LimitsCapacityOverview", () => {
-	it("turns the two windows into comparable visual summaries", () => {
+	it("headlines the tightest class and the account with the most room in it", () => {
 		const html = renderOverview();
 
 		expect(html).toContain("Quota overview");
-		expect(html).toContain("5-hour window");
-		expect(html).toContain("7-day window");
-		expect(html).toContain("34%");
-		expect(html).toContain("51%");
-		expect(html).toContain("Average quota used");
-		expect(html).toContain('role="progressbar"');
-		expect(html).toContain('aria-valuenow="34"');
-		expect(html).toContain("2 of 2 accounts");
-		expect(html).toContain("in 1h 30m");
-		expect(html).toContain("Next checkpoint");
-		expect(html).toContain("On pace");
+		expect(html).toContain("Weekly budget");
+		expect(html).toContain("5-hour pacing");
+		// GPT's least-used account sits at 55%, Claude's at 20%, so GPT binds.
+		expect(html).toContain("55% used");
+		expect(html).toContain("Tightest class");
+		expect(html).toContain("GPT · lowest gamma");
 	});
 
-	it("keeps the routing boundary and aggregation explanation close by", () => {
+	it("drops the pooled average and the checkpoint cell entirely", () => {
+		// Both stated a quantity nobody routes on: an average across accounts
+		// that cannot cover for each other, and the next reset of whichever
+		// account happened to be soonest regardless of class.
+		const html = renderOverview();
+
+		expect(html).not.toContain("Average quota used");
+		expect(html).not.toContain("Next checkpoint");
+	});
+
+	it("gives every class a row with its own reading and reset", () => {
+		const html = renderOverview();
+
+		expect(html).toContain('aria-label="Weekly budget by class"');
+		expect(html).toContain("20% used");
+		expect(html).toContain("lowest beta");
+		expect(html).toContain("resets in 1h 30m · alpha");
+		expect(html).toContain("resets in 3d · gamma");
+		expect(html).toContain("2 of 2 reporting");
+	});
+
+	it("states each class's burn against its sustainable pace", () => {
+		// gamma is 55% used with three days left of a seven-day window, so an even
+		// burn would sit at 4/7 = 57.1% and this reads just under sustainable.
+		const html = renderOverview();
+
+		// Two occurrences: the headline sub-line for the binding class and that
+		// class's own row. The tinted span breaks the run of text, so the prefix
+		// is asserted separately.
+		expect(countOccurrences(html, "1.0× sustainable pace")).toBeGreaterThan(0);
+		expect(html).toContain("GPT · lowest gamma");
+	});
+
+	it("says nothing about pace for a class with no reset to measure against", () => {
+		const html = renderOverview(
+			pools([
+				account({
+					id: "acc-1",
+					name: "alpha",
+					usageData: usage(20, 20, { sevenDayResetMs: null }),
+				}),
+			]),
+		);
+
+		expect(html).not.toContain("sustainable pace");
+	});
+
+	it("says a reset is not reported rather than inventing one", () => {
+		const html = renderOverview(
+			pools([
+				account({
+					id: "acc-1",
+					name: "alpha",
+					usageData: usage(20, 20, { sevenDayResetMs: null }),
+				}),
+			]),
+		);
+
+		expect(html).toContain("reset not reported");
+	});
+
+	it("reads a 5h-spent account as waiting on both panels", () => {
+		const html = renderOverview(
+			pools([
+				account({ id: "acc-1", name: "alpha", usageData: usage(100, 40) }),
+				account({ id: "acc-2", name: "beta", usageData: usage(20, 20) }),
+			]),
+		);
+
+		// Weekly row: the account is not reporting weekly, and the reason it is
+		// missing is the 5-hour limit rather than a spent weekly quota.
+		expect(html).toContain("1 waiting on 5h");
+		// Pacing row plus its headline lift time.
+		expect(html).toContain("1 waiting");
+		expect(html).toContain("next lift in 2h · alpha");
+	});
+
+	it("reads an account spent on both windows as weekly spent, not waiting", () => {
+		// The 5-hour lift restores nothing here, so promising one would be a
+		// promise of capacity that does not arrive until the weekly reset.
+		const html = renderOverview(
+			pools([
+				account({ id: "acc-1", name: "alpha", usageData: usage(100, 100) }),
+				account({ id: "acc-2", name: "beta", usageData: usage(20, 20) }),
+			]),
+		);
+
+		expect(html).toContain("1 weekly spent");
+		expect(html).not.toContain("1 waiting on 5h");
+		expect(html).toContain("Nothing waiting to lift");
+	});
+
+	it("counts an unread account as unknown and never as zero percent", () => {
+		// 25%, not 20%: "20% used" contains the literal "0%" and would let the
+		// assertion below pass for the wrong reason.
+		const html = renderOverview(
+			pools([
+				account({ id: "acc-1", name: "alpha", usageData: usage(25, 25) }),
+				account({ id: "acc-2", name: "beta" }),
+			]),
+		);
+
+		expect(html).toContain("1 unknown");
+		expect(html).not.toContain("0%");
+	});
+
+	it("states nothing while the accounts read is in flight", () => {
+		const html = renderOverview(pools(), { windowsLoading: true });
+
+		expect(countOccurrences(html, "Reading accounts")).toBe(2);
+		expect(html).toContain("Loading");
+		expect(html).not.toContain("55% used");
+		expect(html).not.toContain('aria-label="Weekly budget by class"');
+	});
+
+	it("reports a failed accounts read as unavailable, not as loading", () => {
+		const html = renderOverview(pools(), {
+			windowsLoading: true,
+			windowsUnavailableReason: "Account data unavailable",
+		});
+
+		expect(countOccurrences(html, "Account data unavailable")).toBe(2);
+		expect(html).not.toContain("Reading accounts");
+		expect(html).not.toContain("55% used");
+	});
+
+	it("says there are no rolling-quota accounts rather than showing zero", () => {
+		const html = renderOverview(pools([]));
+
+		expect(countOccurrences(html, "No rolling-quota accounts")).toBe(2);
+		expect(html).not.toContain("0%");
+	});
+
+	it("keeps the routing boundary and the calculation note close by", () => {
 		const html = renderOverview();
 
 		expect(html).toContain("polled quota state, not routing availability");
 		expect(html).toContain('aria-label="About quota calculations"');
-		expect(html).toContain("Full breakdown");
 		expect(html).toContain('href="#account-utilization"');
 	});
 
-	it("surfaces only exceptional account and model-family states inline", () => {
-		const family: FamilyWeeklyUsage = {
-			family: "fable",
-			label: "Fable",
-			worstPct: 92,
-			worstAccountName: "weekly-hot",
-			earliestResetMs: NOW + 2 * 24 * 60 * 60_000,
-			elevated: true,
-			exhaustedCount: 0,
-			elevatedCount: 1,
-			atRiskCount: 0,
-			soonestExhaustsAtMs: null,
-			accounts: [
-				{
-					name: "weekly-hot",
-					pct: 92,
-					resetMs: NOW + 2 * 24 * 60 * 60_000,
-					exhaustsAtMs: null,
-				},
-			],
-		};
-		const sevenDay = poolResult({
-			average: 74,
-			activeAverage: 74,
-			atRisk: [
-				{
-					accountId: "acc-2",
-					name: "weekly-hot",
-					pct: 74,
-					resetMs: NOW + 24 * 60 * 60_000,
-					exhaustsAtMs: NOW + 4 * 60 * 60_000,
-					timeToExhaustMs: 4 * 60 * 60_000,
-					remainingMs: 24 * 60 * 60_000,
-				},
-			],
-			familyWeekly: [family],
-		});
-
-		const html = renderOverview(poolResult(), sevenDay);
-
-		// Derived, not hardcoded: the count is "at risk over accounts that could
-		// run out", so it moves whenever the fixture's account list does.
-		const { willRunOut, capacity } = willRunOutCount(sevenDay);
-		expect(html).toContain(
-			`${willRunOut} of ${capacity} accounts projected to run out before reset`,
+	it("describes non-window providers without assuming their billing model", () => {
+		const html = renderOverview(
+			pools([
+				account({ id: "acc-1", name: "alpha", usageData: usage(20, 20) }),
+				account({ id: "acc-9", name: "zai-1", provider: "zai" }),
+			]),
 		);
-		expect(html).toContain("Fable weekly at 92%");
-		expect(html).toContain("Watch");
+
+		// The line is a union over BOTH windows, so it cannot name one of them —
+		// and it says nothing about how the account is billed.
+		expect(html).toContain("Not on a rolling quota: zai-1 (zai)");
 	});
 
-	it("agrees with the Overview tile about outlook and at-risk count", () => {
-		// The regression this file exists to make non-recurring. The two pages ran
-		// SEPARATE rules for the same two questions: the Overview tinted its
-		// headline on a bare 60/80 split while this panel also escalated on
-		// unreported accounts, and the two counted "will run out" over different
-		// numerators. A pool at 20% with one unknown account was green here and
-		// amber there.
-		//
-		// Asserted against each other rather than against literals on purpose:
-		// pinning both to fixed strings would let them drift apart again the next
-		// time one side's copy changes, which is exactly how they diverged.
-		const result = poolResult({
-			average: 20,
-			activeAverage: 20,
-			excluded: [{ name: "waiting", reason: "no_usage_data", resetMs: null }],
-		});
+	it("lists two identically-named accounts rather than one", () => {
+		// Names are user-set and need not be unique. Deduping the union by name
+		// dropped the second account with a given name from the only place the
+		// page accounts for it at all.
+		const html = renderOverview(
+			pools([
+				account({ id: "acc-1", name: "alpha", usageData: usage(20, 20) }),
+				account({ id: "acc-8", name: "spare", provider: "zai" }),
+				account({ id: "acc-9", name: "spare", provider: "claude-console-api" }),
+			]),
+		);
 
-		expect(poolOutlook(result).tone).toBe("warning");
-		const { willRunOut, capacity } = willRunOutCount(result);
+		expect(html).toContain("spare (zai)");
+		expect(html).toContain("spare (claude-console-api)");
+	});
 
-		const panelHtml = renderOverview(result);
-		const tileHtml = renderToStaticMarkup(
-			<PoolMetricCard
-				title="5h Pool"
-				icon={Gauge}
-				result={result}
-				window="five_hour"
+	it("agrees with the Overview card about the same class's figure and verdict", () => {
+		// The regression this exists to make non-recurring: the two pages ran
+		// separate rules for the same question and painted the same pool two
+		// colours. Asserted against each other rather than against literals,
+		// because pinning both to fixed strings is exactly how they drifted.
+		const { fiveHour, sevenDay } = pools();
+		const binding = sevenDay.bindingClass;
+		if (!binding) throw new Error("no binding class");
+
+		const panelHtml = renderOverview({ fiveHour, sevenDay });
+		const cardHtml = renderToStaticMarkup(
+			<PoolQuotaCard
+				weekly={binding}
+				fiveHour={
+					fiveHour.classes.find((c) => c.classId === binding.classId) ?? null
+				}
+				weeklyResult={sevenDay}
 			/>,
 		);
 
-		// Same verdict word, same tone class, on both surfaces.
-		expect(panelHtml).toContain(poolOutlook(result).label);
-		expect(tileHtml).toContain(TONE_FIGURE_CLASS[poolOutlook(result).tone]);
-		// And the same at-risk numerator, whatever it happens to be.
-		if (willRunOut > 0) {
-			expect(panelHtml).toContain(`${willRunOut} of ${capacity}`);
-			expect(tileHtml).toContain(`${willRunOut} of ${capacity}`);
-		}
-	});
-
-	it("distinguishes unavailable and unknown accounts from reported usage", () => {
-		const fiveHour = poolResult({
-			average: 56,
-			activeAverage: 34,
-			exhausted: [{ name: "paused", reason: "paused", resetMs: null }],
-			excluded: [{ name: "waiting", reason: "no_usage_data", resetMs: null }],
-		});
-
-		const html = renderOverview(fiveHour);
-
-		expect(html).toContain("2 of 4 accounts");
-		expect(html).toContain("1 unavailable");
-		expect(html).toContain("1 unknown");
-		expect(html).not.toContain("2 of 4 active");
-	});
-
-	it("does not call a partial account-wide reading on pace", () => {
-		const partial = poolResult({
-			average: 20,
-			activeAverage: 20,
-			excluded: [{ name: "waiting", reason: "no_usage_data", resetMs: null }],
-		});
-
-		const html = renderOverview(partial, partial);
-
-		expect(html).toContain("Watch");
-		expect(html).not.toContain("On pace");
-	});
-
-	it("keeps scoped-family alerts separate from the account-wide outlook", () => {
-		const exhaustedFamily: FamilyWeeklyUsage = {
-			family: "fable",
-			label: "Fable",
-			worstPct: 100,
-			worstAccountName: "weekly-hot",
-			earliestResetMs: NOW + 2 * 24 * 60 * 60_000,
-			elevated: true,
-			exhaustedCount: 1,
-			elevatedCount: 1,
-			atRiskCount: 0,
-			soonestExhaustsAtMs: null,
-			accounts: [
-				{
-					name: "weekly-hot",
-					pct: 100,
-					resetMs: NOW + 2 * 24 * 60 * 60_000,
-					exhaustsAtMs: null,
-				},
-			],
-		};
-		const sevenDay = poolResult({ familyWeekly: [exhaustedFamily] });
-
-		const html = renderOverview(poolResult(), sevenDay);
-
-		expect(html).toContain("On pace");
-		expect(html).not.toContain("Limit reached");
-		expect(html).toContain("Fable weekly exhausted on 1 of 1 account");
-	});
-
-	it("never presents missing evidence as zero usage", () => {
-		const empty = poolResult({
-			average: null,
-			activeAverage: null,
-			worst: null,
-			contributing: [],
-			exhausted: [],
-			excluded: [],
-			earliestResetMs: null,
-			earliestResetAccountName: null,
-		});
-
-		const html = renderOverview(empty, empty);
-
-		expect(html).toContain("Account-wide unknown");
-		expect(html).toContain("No reported account-wide average");
-		expect(html).not.toContain("0%");
-	});
-
-	it("describes non-window providers without assuming their billing model", () => {
-		const withFallback = poolResult({
-			fallback: [{ name: "zai", provider: "zai" }],
-		});
-
-		const html = renderOverview(withFallback);
-
-		expect(html).toContain("Providers without this rolling window");
-		expect(html).not.toContain(
-			"Pay-as-you-go accounts, not included in this rolling-quota average",
-		);
+		const headline = `${Math.round(binding.leastUsed?.pct ?? 0)}% used`;
+		expect(panelHtml).toContain(headline);
+		expect(cardHtml).toContain(headline);
+		expect(panelHtml).toContain(poolClassOutlook(binding).label);
 	});
 });
 
@@ -519,14 +581,12 @@ describe("LimitsCapacityOverview runway panel", () => {
 		// No figure, no eligible-account count, no pin label, no breakdown.
 		expect(html).not.toContain("∞");
 		expect(html).not.toContain("no run-out within 14d");
-		// ">2 accounts<" is the runway panel's own cell; the window panels render
-		// "2 of 2 accounts".
+		// ">2 accounts<" is the runway panel's own cell.
 		expect(html).not.toContain(">2 accounts<");
 		expect(html).not.toContain("Unpinned");
 		expect(html).not.toContain("prod");
 		expect(html).toContain("Not reported");
-		// Only the two window panels disclose a breakdown.
-		expect(countOccurrences(html, "Full breakdown")).toBe(2);
+		expect(countOccurrences(html, "Full breakdown")).toBe(0);
 		expect(html).not.toContain(">0<");
 	});
 
@@ -560,7 +620,7 @@ describe("LimitsCapacityOverview runway panel", () => {
 		expect(html).toContain("codex-only");
 		expect(html).toContain("Pinned → codex");
 		expect(html).toContain("4h");
-		expect(countOccurrences(html, "Full breakdown")).toBe(3);
+		expect(countOccurrences(html, "Full breakdown")).toBe(1);
 		expect(html).not.toContain(">0<");
 	});
 });

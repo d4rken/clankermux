@@ -35,10 +35,22 @@ function barTone(bar: PoolAccountBar): string {
 export function PoolClassBars({
 	accounts,
 	leastUsedAccountId,
+	formatPct = (pct) => `${Math.round(pct)}%`,
 }: {
 	accounts: PoolAccountBar[];
 	/** Emphasised as the one the headline names. */
 	leastUsedAccountId?: string | null;
+	/**
+	 * How a reading is SPOKEN, in the row title, the accessible value text and
+	 * the trailing figure. Defaults to rounding.
+	 *
+	 * It exists so a card can print its bars in the same frame as its own
+	 * headline: rounding here beneath a headline that floors showed 79.6% as
+	 * "80%" on the bar and "79% used" above it, two readings of one number. The
+	 * RAW value still drives the bar width and `aria-valuenow` — the quantity is
+	 * unchanged, only its wording.
+	 */
+	formatPct?: (pct: number) => string;
 }) {
 	if (accounts.length === 0) return null;
 
@@ -55,7 +67,7 @@ export function PoolClassBars({
 						title={
 							bar.pct == null
 								? `${bar.name} — ${REASON_SHORT[bar.reason ?? ""] ?? "no reading"}`
-								: `${bar.name} — ${Math.round(bar.pct)}% used`
+								: `${bar.name} — ${formatPct(bar.pct)} used`
 						}
 					>
 						<span
@@ -68,7 +80,25 @@ export function PoolClassBars({
 						>
 							{bar.name}
 						</span>
-						<span className="relative h-1.5 min-w-0 flex-1 overflow-hidden rounded-full bg-muted">
+						{/* Explicit progressbar semantics. The panel this replaced used a
+					    real <Progress>, and dropping to bare spans left the figures
+					    available only as text beside a decorative bar — a screen reader
+					    got no sense of magnitude, and an unknown reading was
+					    indistinguishable from zero. `aria-valuenow` is omitted entirely
+					    when there is no reading, which is how ARIA spells
+					    "indeterminate". */}
+						<span
+							role="progressbar"
+							aria-valuemin={0}
+							aria-valuemax={100}
+							aria-valuenow={bar.pct ?? undefined}
+							aria-valuetext={
+								bar.pct == null
+									? `${bar.name}: no reading`
+									: `${bar.name}: ${formatPct(bar.pct)} used`
+							}
+							className="relative h-1.5 min-w-0 flex-1 overflow-hidden rounded-full bg-muted"
+						>
 							<span
 								className={cn(
 									"absolute inset-y-0 left-0",
@@ -88,7 +118,7 @@ export function PoolClassBars({
 						>
 							{bar.pct == null
 								? (REASON_SHORT[bar.reason ?? ""] ?? "—")
-								: `${Math.round(bar.pct)}%`}
+								: formatPct(bar.pct)}
 						</span>
 					</li>
 				);

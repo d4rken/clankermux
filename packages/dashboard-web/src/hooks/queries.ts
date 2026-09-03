@@ -451,6 +451,25 @@ export const useUsageScopedHistory = (range: string) => {
 };
 
 /**
+ * How often requests were actually blocked in the range, by cause.
+ *
+ * Same cadence as the other range-scoped history reads: a stop is an event
+ * already in the past, so a faster poll only re-fetches the same rows.
+ */
+export const stopsHistoryQueryOptions = (range: string) => ({
+	queryKey: queryKeys.stopsHistory(range),
+	queryFn: () => api.getStopsHistory(range),
+	staleTime: 45000,
+	refetchInterval: 60000,
+	refetchIntervalInBackground: false,
+	retry: shouldRetryDashboardQuery,
+});
+
+export const useStopsHistory = (range: string) => {
+	return useQuery(stopsHistoryQueryOptions(range));
+};
+
+/**
  * Precomputed quota-drift analysis for the Analytics "Quota" tab.
  *
  * The server recomputes it every 30 minutes, so polling faster would only

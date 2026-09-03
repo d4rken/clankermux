@@ -7,11 +7,12 @@ import {
 	useAnalytics,
 	useRunway,
 	useStats,
+	useStopsHistory,
 } from "../hooks/queries";
 import { usePoolUsage } from "../hooks/usePoolUsage";
 import { dataAvailability, staleAgeLabel } from "../lib/data-availability";
 import { buildOverviewTimeSeries } from "../lib/overview-timeseries";
-import type { ServableClassPool } from "../lib/pool-usage";
+import { listFamilyRows, type ServableClassPool } from "../lib/pool-usage";
 import { MissingSectionsNotice } from "./analytics/MissingSectionsNotice";
 import { ChartsSection } from "./overview/ChartsSection";
 import { LiveActivityLanes } from "./overview/LiveActivityLanes";
@@ -19,11 +20,13 @@ import { PricingGapBanner } from "./overview/PricingGapBanner";
 import { RateLimitInfo } from "./overview/RateLimitInfo";
 import { RunwayCard } from "./overview/RunwayCard";
 import { SpendSummaryBand } from "./overview/SpendSummaryBand";
+import { StopsHistoryCard } from "./overview/StopsHistoryCard";
 import { StorageIntegrityBanner } from "./overview/StorageIntegrity";
 import { SystemHealthStrip } from "./overview/SystemHealthStrip";
 import { CompactRecentErrors } from "./overview/system-status/CompactRecentErrors";
 import { useVisibleRecentErrors } from "./overview/system-status/useVisibleRecentErrors";
 import { TimeRangeSelector } from "./overview/TimeRangeSelector";
+import { FamilyWeeklyCard } from "./quota/FamilyWeeklyCard";
 import { PoolQuotaCard } from "./quota/PoolQuotaCard";
 
 /** Error window for the Overview's compact list, in hours. */
@@ -95,6 +98,10 @@ export const OverviewTab = React.memo(() => {
 	// instead of being blocked whenever /api/accounts fails.
 	const runwayQuery = useRunway();
 	const { data: runway, isLoading: runwayLoading } = runwayQuery;
+	// Range-scoped, so it belongs BELOW the selector with the other ranged
+	// content — everything above the selector describes the pool right now.
+	const stopsQuery = useStopsHistory(timeRange);
+	const { data: stops, isLoading: stopsLoading } = stopsQuery;
 
 	// This page renders PROGRESSIVELY: there is no whole-page gate, because one
 	// slow section (activeSessions dominates /api/analytics) used to hide the
@@ -124,6 +131,9 @@ export const OverviewTab = React.memo(() => {
 	const runwayAvailability = dataAvailability(runwayQuery, runwayLoading);
 	const runwayUnavailable = runwayAvailability.state === "unavailable";
 	const runwayPending = runwayLoading && !runway;
+	const stopsAvailability = dataAvailability(stopsQuery, stopsLoading);
+	const stopsUnavailable = stopsAvailability.state === "unavailable";
+	const stopsPending = stopsLoading && !stops;
 
 	// Resolved once here so the strip's count and the list below it can never
 	// disagree about what's been dismissed.
@@ -147,9 +157,18 @@ export const OverviewTab = React.memo(() => {
 		accountsAvailability.state === "stale"
 			? `Last updated ${staleAgeLabel(accountsAvailability.lastUpdatedAt, now)}`
 			: undefined;
+	// Live discovery only, over the same accounts the quota cards read.
+	const familyRows = useMemo(
+		() => listFamilyRows(accounts ?? [], now),
+		[accounts, now],
+	);
 	const runwayStaleNote =
 		runwayAvailability.state === "stale"
 			? `Last updated ${staleAgeLabel(runwayAvailability.lastUpdatedAt, now)}`
+			: undefined;
+	const stopsStaleNote =
+		stopsAvailability.state === "stale"
+			? `Last updated ${staleAgeLabel(stopsAvailability.lastUpdatedAt, now)}`
 			: undefined;
 
 	// Transform time series data
@@ -220,6 +239,7 @@ export const OverviewTab = React.memo(() => {
 						weekly={PLACEHOLDER_CLASS_POOL}
 						fiveHour={null}
 						weeklyResult={weeklyPool}
+						now={now}
 						loading={accountsPending}
 						unavailableReason={
 							accountsUnavailable ? "Account data unavailable" : undefined
@@ -236,6 +256,7 @@ export const OverviewTab = React.memo(() => {
 								) ?? null
 							}
 							weeklyResult={weeklyPool}
+							now={now}
 							staleNote={accountsStaleNote}
 						/>
 					))
@@ -256,6 +277,21 @@ export const OverviewTab = React.memo(() => {
 				/>
 			</div>
 
+			{/* Per-model weekly caps, full width beneath the class cards. A family
+			    limit is independent of the account-wide weekly window above it — a
+			    model can be spent while every card here still reads healthy — so it
+			    sits with the live quota state rather than under the range selector.
+			    No new query: same accounts read the cards use. */}
+			<FamilyWeeklyCard
+				rows={familyRows}
+				now={now}
+				loading={accountsPending}
+				unavailableReason={
+					accountsUnavailable ? "Account data unavailable" : undefined
+				}
+				staleNote={accountsStaleNote}
+			/>
+
 			{/* Calendar-month ledger spend + amortized subscription run rates. */}
 			<SpendSummaryBand />
 
@@ -269,6 +305,20 @@ export const OverviewTab = React.memo(() => {
 			<div className="flex justify-end">
 				<TimeRangeSelector value={timeRange} onChange={setTimeRange} />
 			</div>
+
+			{/* What ACTUALLY blocked a request in this range. Every other quota
+			    surface on this page is a projection; this is the record, and the
+			    only thing that can say whether those projections described a real
+			    risk. Range-scoped, hence its place directly under the selector. */}
+			<StopsHistoryCard
+				data={stops}
+				now={now}
+				loading={stopsPending}
+				unavailableReason={
+					stopsUnavailable ? "Stops data unavailable" : undefined
+				}
+				staleNote={stopsStaleNote}
+			/>
 
 			<MissingSectionsNotice
 				analytics={analytics}

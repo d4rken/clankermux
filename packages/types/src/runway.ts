@@ -80,6 +80,26 @@ export type RunwayOutcome =
 			assumedResetCredits?: RunwayAssumedCredits[];
 	  };
 
+/**
+ * How much of the run-out instant is quantisation noise.
+ *
+ * Providers report utilization as a WHOLE PERCENT, so a reading of "20%" is
+ * really anywhere in [19.5, 20.5) — and the lifetime-average projection divides
+ * by that number, so the error it carries is proportional to the runway itself.
+ * At 20% one day in, half a percent of reading error is about six hours of
+ * run-out; deep into a window it is minutes. A single instant states a precision
+ * the input never had.
+ *
+ * An end is `null` when the scan at that perturbation found no run-out inside
+ * the horizon — the band is open on that side, not zero-width.
+ */
+export interface RunwayBand {
+	earliestExhaustsAtMs: number | null;
+	latestExhaustsAtMs: number | null;
+	/** How far each probe moved a whole-percent reading, in percentage points. */
+	halfWidthPct: number;
+}
+
 /** The account-wide quota windows the runway scan models. */
 export type RunwayWindowKind = "five_hour" | "seven_day";
 
@@ -104,6 +124,17 @@ export interface RunwayKeyEntry {
 	 */
 	eligibleAccountIds: string[];
 	outcome: RunwayOutcome;
+	/**
+	 * The quantisation band around THIS key's run-out, or `null`/absent when no
+	 * band is stated (see {@link RunwayBand}).
+	 *
+	 * Per key rather than per response: the dashboard headline picks the worst
+	 * STATEABLE key client-side, so a response-level band could bracket a
+	 * different key than the one the headline names. `RunwayOutcome` is
+	 * deliberately not widened — the band is a claim ABOUT the outcome, not part
+	 * of it, and every existing consumer of the union keeps working untouched.
+	 */
+	band?: RunwayBand | null;
 }
 
 export interface RunwayWindowSummary {

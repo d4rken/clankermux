@@ -6,6 +6,7 @@ import { formatDurationDhm } from "../../lib/format-prediction";
 import {
 	assumedCreditCount,
 	describeRunwayCause,
+	formatRunwayBand,
 	formatRunwayValue,
 	runwayPaceMargin,
 	runwayUnavailableReason,
@@ -211,6 +212,22 @@ export function RunwayCard({
 		});
 	}
 
+	// The marker sits at ONE instant, but the readings behind it are whole
+	// percents: a provider reporting 20% means [19.5, 20.5), and the projection
+	// divides by that number, so the error scales with the runway itself. Stating
+	// the interval is what makes the figure swinging by a day between polls
+	// legible rather than alarming.
+	const band = worst?.band ?? null;
+	const bandLabel = formatRunwayBand(band, now);
+	if (bandLabel) {
+		subRows.push({
+			label: "Band",
+			value: bandLabel,
+			tooltip:
+				"The provider reports whole percents; the run-out is re-estimated at ±half a percent.",
+		});
+	}
+
 	// A runway extended by modeled reset-credit redemptions is an ASSUMPTION,
 	// not a measurement: the auto-applier still has to redeem those credits when
 	// the exhaustions actually happen. Undisclosed, the figure would read as
@@ -257,6 +274,8 @@ export function RunwayCard({
 					horizonMs={horizonMs}
 					now={now}
 					markerLabel={markerLabel}
+					bandEarliestMs={bandLabel ? band?.earliestExhaustsAtMs : null}
+					bandLatestMs={bandLabel ? band?.latestExhaustsAtMs : null}
 				/>
 			}
 			subRows={subRows}

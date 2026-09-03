@@ -1,9 +1,15 @@
 import { AlertCircle, AlertTriangle, Clock, Info } from "lucide-react";
 import {
+	burnRatioTone,
+	computeBurnRatio,
+	formatBurnRatio,
+} from "../../lib/burn-ratio";
+import {
 	type PoolUsageResult,
 	poolClassOutlook,
 	type ServableClassPool,
 	scopeResultToClass,
+	willRunOutCount,
 } from "../../lib/pool-usage";
 import { cn } from "../../lib/utils";
 import { Card, CardContent } from "../ui/card";
@@ -24,6 +30,12 @@ interface PoolQuotaCardProps {
 	fiveHour: ServableClassPool | null;
 	/** Whole-window results, for the shared breakdown and the family badge. */
 	weeklyResult: PoolUsageResult;
+	/**
+	 * The tab's ticking clock. The pace row divides utilization by where an even
+	 * burn would sit AT THIS INSTANT, so it has to advance between polls rather
+	 * than freeze at whenever the component happened to first render.
+	 */
+	now: number;
 	loading?: boolean;
 	unavailableReason?: string;
 	staleNote?: string;
@@ -53,6 +65,7 @@ export function PoolQuotaCard({
 	weekly,
 	fiveHour,
 	weeklyResult,
+	now,
 	loading = false,
 	unavailableReason,
 	staleNote,
@@ -72,12 +85,30 @@ export function PoolQuotaCard({
 	// exhausted, and a one-account card's popover listed six.
 	const scoped = scopeResultToClass(weeklyResult, weekly);
 	const family = familyWeeklyBadge(scoped.familyWeekly);
+	// Scoped to the class as well: the pool-wide count would state, on a
+	// one-account card, how many accounts across every class will run out.
+	const { willRunOut, capacity } = willRunOutCount(scoped, "seven_day");
 
 	const fiveHourLeast = fiveHour?.leastUsed ?? null;
 	const paceText =
 		fiveHourLeast == null
 			? null
 			: `5h pace: ${Math.round(fiveHourLeast.pct)}% used · ${fiveHourLeast.name}`;
+	// A percentage is a POSITION; this is the RATE behind the one the headline
+	// states. 48% used one day into the week and 48% used six days in are
+	// opposite situations, and the reader was left to do that division against a
+	// reset printed on another line.
+	//
+	// Divided by the WEEKLY window, matching the figure above it and the Usage
+	// page's own pace row. Against the 5-hour window it was a rate for a
+	// different quantity than the percentage it sat under, and the two surfaces
+	// printed different multiples of "sustainable" for the same pool.
+	const burn = computeBurnRatio(
+		leastUsed?.pct ?? 0,
+		leastUsed?.resetMs ?? null,
+		"seven_day",
+		now,
+	);
 
 	const checkpoint =
 		weekly.earliestResetMs == null
@@ -141,6 +172,20 @@ export function PoolQuotaCard({
 					</>
 				)}
 
+				{/* Directly beneath the headline caption, ahead of the bars: this is
+				    the rate behind the figure immediately above it, and further down
+				    the card it read as a property of the account list instead. */}
+				{resolved && burn && (
+					<p
+						className={cn(
+							"truncate text-xs",
+							TONE_FIGURE_CLASS[burnRatioTone(burn)],
+						)}
+					>
+						pace {formatBurnRatio(burn)}
+					</p>
+				)}
+
 				{resolved && (
 					<PoolClassBars
 						accounts={weekly.accounts}
@@ -149,6 +194,20 @@ export function PoolQuotaCard({
 				)}
 
 				<div className="mt-item space-y-tight">
+					{resolved && willRunOut > 0 && (
+						<p className="flex items-center gap-item text-xs text-warning-strong">
+							<AlertTriangle className="h-3.5 w-3.5 shrink-0" />
+							{willRunOut} of {capacity}{" "}
+							{capacity === 1 ? "account" : "accounts"} projected to run out
+							before reset
+						</p>
+					)}
+					{resolved && weekly.reportingCount < weekly.eligibleTotal && (
+						<p className="truncate text-xs text-muted-foreground">
+							{weekly.reportingCount} of {weekly.eligibleTotal} accounts
+							reporting
+						</p>
+					)}
 					{resolved && weekly.singlePointOfFailure && (
 						<p className="flex items-center gap-item text-xs text-warning-strong">
 							<AlertTriangle className="h-3.5 w-3.5 shrink-0" />

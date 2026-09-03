@@ -1,6 +1,6 @@
 import { effectiveRunwayOutcome, summarizeKeyRunways } from "@clankermux/core";
 import type { DatabaseOperations } from "@clankermux/database";
-import type { RunwayCause } from "@clankermux/types";
+import type { RunwayBand, RunwayCause } from "@clankermux/types";
 import { computeRunwayScan } from "./runway-scan";
 
 /**
@@ -72,6 +72,16 @@ export interface PublicWorstOutcome {
 	exhaustsAtMs: number | null;
 	/** The account + window that runs out at that instant. */
 	causes: RunwayCause[];
+	/**
+	 * How much of {@link exhaustsAtMs} is quantisation noise, or null when no
+	 * band is stated (see `RunwayBand`).
+	 *
+	 * Belongs to THE SAME KEY this outcome came from. The band is a per-key
+	 * field precisely because the headline picks the worst stateable key, so
+	 * taking it from anywhere else would bracket a scan this outcome does not
+	 * describe.
+	 */
+	band: RunwayBand | null;
 }
 
 export interface PublicRunwaySnapshot {
@@ -119,6 +129,9 @@ export function createPublicRunwayReader(dbOps: DatabaseOperations) {
 							outcome.kind === "runway" || outcome.kind === "out-now"
 								? outcome.causes
 								: [],
+						// From the key whose outcome is published, not from the scan at
+						// large: `headline.worst` is that key, and `band` is its own.
+						band: headline.worst?.band ?? null,
 					}
 				: null,
 		};

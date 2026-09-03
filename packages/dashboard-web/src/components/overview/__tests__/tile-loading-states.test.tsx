@@ -7,12 +7,13 @@
  * "unavailable", never a fallback zero), and real-but-stale numbers.
  */
 import { describe, expect, it } from "bun:test";
-import { Activity, Gauge } from "lucide-react";
+import type { AccountResponse } from "@clankermux/types";
+import { Activity } from "lucide-react";
 import { renderToStaticMarkup } from "react-dom/server";
-import type { PoolUsageResult } from "../../../lib/pool-usage";
+import { computePoolUsage } from "../../../lib/pool-usage";
+import { PoolQuotaCard } from "../../quota/PoolQuotaCard";
 import { ChartsSection } from "../ChartsSection";
 import { MetricCard } from "../MetricCard";
-import { PoolMetricCard } from "../PoolMetricCard";
 
 const SUB_ROWS = [
 	{ label: "Success rate", value: "97%" },
@@ -80,82 +81,85 @@ describe("MetricCard loading", () => {
 	});
 });
 
-/** A pool with real numbers, so hiding them is observable. */
-function poolResult(): PoolUsageResult {
-	return {
-		average: 61,
-		activeAverage: 61,
-		worst: { name: "alpha", pct: 61 },
-		contributing: [
-			{ name: "alpha", pct: 61 },
-		] as PoolUsageResult["contributing"],
-		exhausted: [],
-		excluded: [],
-		fallback: [],
-		earliestResetMs: 1_700_000_000_000,
-		earliestResetAccountName: "alpha",
-		atRisk: [],
-		familyWeekly: [],
-	};
+const NOW = Date.UTC(2026, 8, 3, 12, 0, 0);
+const DAY = 24 * 60 * 60_000;
+
+/** One account with a real weekly reading, so hiding it is observable. */
+function accounts(): AccountResponse[] {
+	return [
+		{
+			id: "acc-1",
+			name: "alpha",
+			provider: "anthropic",
+			paused: false,
+			rateLimitedUntil: null,
+			tokenExpiresAt: null,
+			hasRefreshToken: false,
+			usageRateLimitedUntil: null,
+			usageData: {
+				seven_day: {
+					utilization: 61,
+					resets_at: new Date(NOW + 3 * DAY).toISOString(),
+				},
+			},
+		} as unknown as AccountResponse,
+	];
 }
 
-function poolCard(props: Partial<Parameters<typeof PoolMetricCard>[0]> = {}) {
+function poolCard(props: Partial<Parameters<typeof PoolQuotaCard>[0]> = {}) {
+	const weeklyResult = computePoolUsage(accounts(), "seven_day", NOW);
+	const weekly = weeklyResult.classes[0];
+	if (!weekly) throw new Error("no servable class");
 	return renderToStaticMarkup(
-		<PoolMetricCard
-			title="5h Pool"
-			icon={Gauge}
-			result={poolResult()}
-			window="five_hour"
+		<PoolQuotaCard
+			weekly={weekly}
+			fiveHour={null}
+			weeklyResult={weeklyResult}
+			now={NOW}
 			{...props}
 		/>,
 	);
 }
 
-describe("PoolMetricCard loading and unavailable", () => {
-	it("renders the headline, chip and checkpoint line once resolved", () => {
+describe("PoolQuotaCard loading and unavailable", () => {
+	it("renders the headline, chip and reset line once resolved", () => {
 		const html = poolCard();
 
-		expect(html).toContain("61%");
+		expect(html).toContain("61% used");
 		expect(html).toContain("1/1 active");
-		expect(html).toContain("next checkpoint at");
+		expect(html).toContain("resets");
 	});
 
-	it("hides the headline, chip, checkpoint line and inline details while pending", () => {
+	it("hides the headline, chip and reset line while pending", () => {
 		// `computePoolUsage([], …)` returns an all-empty result that is
 		// indistinguishable from "no accounts contribute", so a pending read must
 		// not render a pool at all.
-		const html = poolCard({ loading: true, inlineDetails: true });
+		const html = poolCard({ loading: true });
 
-		expect(html).not.toContain("61%");
+		expect(html).not.toContain("61% used");
 		expect(html).not.toContain("active)");
-		expect(html).not.toContain("next checkpoint at");
-		expect(html).not.toContain("Pool usage");
+		expect(html).not.toContain("resets");
 		expect(html).toContain("animate-pulse");
 	});
 
 	it("says so explicitly when the accounts read failed", () => {
-		const html = poolCard({
-			unavailableReason: "Account data unavailable",
-			inlineDetails: true,
-		});
+		const html = poolCard({ unavailableReason: "Account data unavailable" });
 
 		expect(html).toContain("Account data unavailable");
-		expect(html).not.toContain("61%");
+		expect(html).not.toContain("61% used");
 		expect(html).not.toContain("active)");
-		expect(html).not.toContain("next checkpoint at");
-		expect(html).not.toContain("Pool usage");
 		expect(html).not.toContain("animate-pulse");
 	});
 
 	it("ages the numbers when the latest accounts refresh failed", () => {
-		// The quota percentages, next-checkpoint line and badges are all still
-		// the last real reading, so they stay — but presenting them as current
-		// alongside tiles that DO carry an age note is the claim to avoid.
+		// The quota percentages, reset line and badges are all still the last
+		// real reading, so they stay — but presenting them as current alongside
+		// tiles that DO carry an age note is the claim to avoid.
 		const html = poolCard({ staleNote: "Last updated 3m ago" });
 
 		expect(html).toContain("Last updated 3m ago");
-		expect(html).toContain("61%");
-		expect(html).toContain("next checkpoint at");
+		expect(html).toContain("61% used");
+		expect(html).toContain("resets");
 	});
 
 	it("does not age a tile that has no numbers yet", () => {

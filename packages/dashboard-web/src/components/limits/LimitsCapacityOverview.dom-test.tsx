@@ -13,9 +13,6 @@ let host: HTMLElement | null = null;
 
 function poolResult(): PoolUsageResult {
 	return {
-		average: 25,
-		activeAverage: 25,
-		worst: { name: "alpha", pct: 25 },
 		contributing: [
 			{ accountId: "acc-1", name: "alpha", pct: 25, resetMs: null },
 		],
@@ -26,6 +23,8 @@ function poolResult(): PoolUsageResult {
 		earliestResetAccountName: null,
 		atRisk: [],
 		familyWeekly: [],
+		classes: [],
+		bindingClass: null,
 	};
 }
 
@@ -68,9 +67,7 @@ describe("LimitsCapacityOverview calculation help", () => {
 		expect(document.body.textContent).toContain(
 			"How the overview is calculated",
 		);
-		expect(document.body.textContent).toContain(
-			"unavailable count as 100% used",
-		);
+		expect(document.body.textContent).toContain("never as 0%");
 		expect(document.body.textContent).toContain(
 			"never control request routing",
 		);

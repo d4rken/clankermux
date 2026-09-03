@@ -672,6 +672,34 @@ describe("pooled aggregates disclose what they are", () => {
 		expect(snapshot.usage.fiveHour.meanUtilizationPct).toBeNull();
 		expect(snapshot.usage.sevenDay.meanUtilizationPct).toBeNull();
 		expect(snapshot.usage.worstAccountUtilizationPct).toBeNull();
+		// The least-used pair is null for the same reason and by the same rule: a
+		// window nobody reported is not a window at 0% used.
+		expect(snapshot.usage.fiveHour.leastUsedUtilizationPct).toBeNull();
+		expect(snapshot.usage.fiveHour.leastUsedAccountId).toBeNull();
+	});
+
+	it("names the account with the MOST room left, beside the mean", async () => {
+		// Routing picks ONE account, so what decides whether the next request
+		// goes through is whether ANY account still has room. A mean of a spent
+		// account and a fresh one describes neither of them.
+		insertAccount({ id: "a", name: "a" });
+		insertAccount({ id: "b", name: "b" });
+		insertAccount({ id: "c", name: "c" });
+		usageCache.set("a", anthropicUsage(90, 90));
+		usageCache.set("b", anthropicUsage(12, 40));
+		// No reading: cannot be the least-used, because it is not a reading of 0.
+		usageCache.set("c", anthropicUsage(null, null));
+		const snapshot = await read();
+		expect(snapshot.usage.fiveHour.leastUsedUtilizationPct).toBe(12);
+		expect(snapshot.usage.fiveHour.leastUsedAccountId).toBe("b");
+		expect(snapshot.usage.fiveHour.meanUtilizationPct).toBe(51);
+		// The id is the join key against `accounts[].id`, so it must actually
+		// resolve there.
+		expect(
+			snapshot.accounts.some(
+				(a) => a.id === snapshot.usage.fiveHour.leastUsedAccountId,
+			),
+		).toBe(true);
 	});
 
 	it("takes the EARLIEST reset, never a mean of reset instants", async () => {

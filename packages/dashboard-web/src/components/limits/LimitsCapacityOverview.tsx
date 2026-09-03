@@ -1,28 +1,11 @@
 import type { KeyRunway } from "@clankermux/core";
 import { effectiveRunwayOutcome, summarizeKeyRunways } from "@clankermux/core";
-import { formatPercentage } from "@clankermux/ui-common";
-import {
-	AlertCircle,
-	AlertTriangle,
-	BarChart3,
-	ChevronDown,
-	Gauge,
-	Hourglass,
-	Info,
-} from "lucide-react";
-import type { ComponentType } from "react";
+import { ChevronDown, Hourglass, Info } from "lucide-react";
 import { describePinTarget } from "../../lib/api-key-pin-label";
-import { formatDurationDhm } from "../../lib/format-prediction";
-import {
-	eligibleAccountTotal,
-	type Outlook,
-	type PoolUsageResult,
-	type PoolWindow,
-	poolOutlook,
-	willRunOutCount,
-} from "../../lib/pool-usage";
+import type { Outlook, PoolUsageResult } from "../../lib/pool-usage";
 import {
 	describeRunwayCause,
+	formatRunwayBand,
 	formatRunwayValue,
 	runwayQualifier,
 	runwayUnavailableReason,
@@ -30,11 +13,6 @@ import {
 import { cn } from "../../lib/utils";
 import { StatusChip } from "../accounts/StatusChip";
 import { TONE_CLASSES } from "../quota/outlook-tone";
-import {
-	familyWeeklyBadge,
-	PoolDetailSection,
-	windowTimeLabel,
-} from "../quota/PoolDetailSection";
 import {
 	Card,
 	CardContent,
@@ -44,239 +22,8 @@ import {
 } from "../ui/card";
 import { InsetPanel } from "../ui/inset-panel";
 import { Popover, PopoverContent, PopoverTrigger } from "../ui/popover";
-import { Progress } from "../ui/progress";
-import { Skeleton } from "../ui/skeleton";
-
-function countLabel(count: number, state: string): string {
-	return `${count} ${state}`;
-}
-
-interface WindowPanelProps {
-	title: string;
-	icon: ComponentType<{ className?: string }>;
-	result: PoolUsageResult;
-	window: PoolWindow;
-	now: number;
-	/**
-	 * Set while the first `/api/accounts` fetch is in flight and nothing is
-	 * cached.
-	 *
-	 * Required rather than inferable from `result`: `computePoolUsage([], …)`
-	 * returns an all-empty result that reads as "no accounts contribute to this
-	 * window" — a measurement claim an unread account list never made.
-	 */
-	loading: boolean;
-	/**
-	 * Set when that read FAILED with nothing cached. Precedence is
-	 * `unavailableReason` -> `loading` -> resolved, so a failed read is never
-	 * dressed up as a pending one.
-	 */
-	unavailableReason?: string;
-}
-
-function WindowPanel({
-	title,
-	icon: Icon,
-	result,
-	window,
-	now,
-	loading,
-	unavailableReason,
-}: WindowPanelProps) {
-	const pending = loading && unavailableReason == null;
-	const resolved = !pending && unavailableReason == null;
-	const outlook: Outlook = resolved
-		? poolOutlook(result)
-		: { label: pending ? "Loading" : "Unavailable", tone: "neutral" };
-	const toneClasses = TONE_CLASSES[outlook.tone];
-	const eligibleTotal = eligibleAccountTotal(result);
-	const clampedAverage =
-		result.average == null ? 0 : Math.max(0, Math.min(100, result.average));
-	const checkpointRemaining =
-		result.earliestResetMs == null
-			? null
-			: Math.max(0, result.earliestResetMs - now);
-	const familyAlert = familyWeeklyBadge(result.familyWeekly);
-	// Shared with the Overview badge. This panel used to count `atRisk` alone
-	// while the tile counted `atRisk + exhausted` — the same window, the same
-	// instant, two answers to "how many will run out". An account already at
-	// 100% has run out, so excluding it made the count shrink at the moment the
-	// pool got worse.
-	const { willRunOut, capacity } = willRunOutCount(result);
-	const hasBreakdown =
-		resolved &&
-		(result.contributing.length > 0 ||
-			result.exhausted.length > 0 ||
-			result.excluded.length > 0 ||
-			result.fallback.length > 0 ||
-			result.familyWeekly.length > 0);
-	const reportingNotes = [
-		result.exhausted.length > 0
-			? countLabel(result.exhausted.length, "unavailable")
-			: null,
-		result.excluded.length > 0
-			? countLabel(result.excluded.length, "unknown")
-			: null,
-	].filter((note): note is string => note != null);
-
-	return (
-		<section className="flex min-w-0 flex-col p-group" aria-label={title}>
-			<div className="flex items-center justify-between gap-row">
-				<div className="flex min-w-0 items-center gap-item">
-					<Icon className="h-4 w-4 shrink-0 text-muted-foreground" />
-					<h4 className="truncate text-sm font-medium">{title}</h4>
-				</div>
-				<StatusChip className={toneClasses.chip}>{outlook.label}</StatusChip>
-			</div>
-
-			<div className="mt-group">
-				{unavailableReason != null ? (
-					<>
-						<p className="figure-xl text-muted-foreground">—</p>
-						<p className="mt-tight flex items-center gap-item text-xs text-warning-strong">
-							<AlertCircle className="h-3.5 w-3.5 shrink-0" />
-							{unavailableReason}
-						</p>
-					</>
-				) : pending ? (
-					<>
-						{/* Same line box as the resolved headline (.figure-xl is a fixed
-						    1.75rem = h-7), so the panel keeps its height when the
-						    accounts land. */}
-						<Skeleton className="h-7 w-20" />
-						<p className="mt-tight text-xs text-muted-foreground">
-							Reading accounts
-						</p>
-					</>
-				) : result.average == null ? (
-					<>
-						<p className={cn("figure-xl", toneClasses.figure)}>—</p>
-						<p className="mt-tight text-xs text-muted-foreground">
-							No reported account-wide average
-						</p>
-					</>
-				) : (
-					<>
-						<div className="flex items-baseline justify-between gap-row">
-							<p className={cn("figure-xl", toneClasses.figure)}>
-								{formatPercentage(result.average, 0)}
-							</p>
-							<p className="text-xs text-muted-foreground">
-								Average quota used
-							</p>
-						</div>
-						<Progress
-							value={clampedAverage}
-							className="mt-item h-2.5"
-							indicatorClassName={toneClasses.progress}
-							aria-label={`${title} average quota used`}
-							aria-valuetext={`${formatPercentage(result.average, 0)} average quota used`}
-						/>
-					</>
-				)}
-			</div>
-
-			<InsetPanel as="dl" className="mt-group grid grid-cols-2 divide-x p-0">
-				<div className="min-w-0 p-row">
-					<dt className="label-caps">Reporting</dt>
-					<dd className="mt-tight min-w-0">
-						<span className="block truncate text-sm font-medium">
-							{resolved
-								? `${result.contributing.length} of ${eligibleTotal} accounts`
-								: "—"}
-						</span>
-						<span className="mt-tight block truncate text-xs text-muted-foreground">
-							{!resolved
-								? "Not reported"
-								: reportingNotes.length > 0
-									? reportingNotes.join(" · ")
-									: eligibleTotal > 0
-										? "All reporting"
-										: "No eligible accounts"}
-						</span>
-					</dd>
-				</div>
-				<div className="min-w-0 p-row">
-					<dt className="label-caps">Next checkpoint</dt>
-					<dd
-						className="mt-tight min-w-0"
-						title={
-							resolved
-								? (result.earliestResetAccountName ?? undefined)
-								: undefined
-						}
-					>
-						<span className="block truncate text-sm font-medium">
-							{!resolved || checkpointRemaining == null
-								? "—"
-								: `in ${formatDurationDhm(checkpointRemaining)}`}
-						</span>
-						<span className="mt-tight block truncate text-xs text-muted-foreground">
-							{!resolved
-								? "Not reported"
-								: result.earliestResetMs == null
-									? "No checkpoint reported"
-									: [
-											result.earliestResetAccountName,
-											windowTimeLabel(result.earliestResetMs, window),
-										]
-											.filter(Boolean)
-											.join(" · ")}
-						</span>
-					</dd>
-				</div>
-			</InsetPanel>
-
-			{resolved && (willRunOut > 0 || familyAlert.label != null) && (
-				<div className="mt-group space-y-item">
-					{willRunOut > 0 && (
-						<div className="flex items-start gap-item rounded-md border border-warning/30 bg-warning/10 px-row py-item text-xs text-warning-strong">
-							{/* `mt-0.5` stays numeric: an optical nudge to sit the icon on
-							    the text baseline, at 0.125rem — no step on the rhythm
-							    scale, and not a rhythm decision either. */}
-							<AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
-							<span>
-								{willRunOut} of {capacity}{" "}
-								{capacity === 1 ? "account" : "accounts"} projected to run out
-								before reset
-							</span>
-						</div>
-					)}
-					{familyAlert.label != null && (
-						<div
-							className={cn(
-								"flex items-start gap-item rounded-md border px-row py-item text-xs",
-								familyAlert.colorClass === "text-destructive-strong"
-									? "border-destructive/30 bg-destructive/10 text-destructive-strong"
-									: "border-warning/30 bg-warning/10 text-warning-strong",
-							)}
-						>
-							{/* `mt-0.5` stays numeric: an optical nudge to sit the icon on
-							    the text baseline, at 0.125rem — no step on the rhythm
-							    scale, and not a rhythm decision either. */}
-							<AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
-							<span>{familyAlert.label}</span>
-						</div>
-					)}
-				</div>
-			)}
-
-			{hasBreakdown && (
-				<div className="mt-auto pt-group">
-					<details className="group border-t border-border/60 pt-item">
-						<summary className="flex cursor-pointer list-none items-center justify-between gap-item rounded-sm py-tight text-xs font-medium text-muted-foreground hover:text-foreground focus:outline-none focus-visible:ring-2 focus-visible:ring-ring [&::-webkit-details-marker]:hidden">
-							Full breakdown
-							<ChevronDown className="h-3.5 w-3.5 transition-transform group-open:rotate-180" />
-						</summary>
-						<div className="mt-item border-t border-border/50 pt-row text-xs">
-							<PoolDetailSection result={result} window={window} />
-						</div>
-					</details>
-				</div>
-			)}
-		</section>
-	);
-}
+import { FiveHourPacingPanel } from "./FiveHourPacingPanel";
+import { WeeklyBudgetPanel } from "./WeeklyBudgetPanel";
 
 interface RunwayPanelProps {
 	runways: KeyRunway[];
@@ -357,6 +104,11 @@ function RunwayPanel({
 		worst && stated ? runwayQualifier(worst.outcome, now) : null;
 	const cause =
 		worst && stated ? describeRunwayCause(worst.outcome, accounts, now) : null;
+	// Text only here; the Overview card carries the shaded strip. The headline is
+	// a single duration built on whole-percent readings, so the interval it
+	// really lies in belongs on the line under it — see formatRunwayBand.
+	const bandLabel =
+		worst && stated ? formatRunwayBand(worst.band ?? null, now) : null;
 
 	return (
 		<section
@@ -382,6 +134,7 @@ function RunwayPanel({
 							? "Reading keys and accounts"
 							: [
 									qualifier ?? "At the current pace",
+									bandLabel,
 									headline.unobservedKeyCount > 0
 										? `${headline.unobservedKeyCount} key${headline.unobservedKeyCount === 1 ? "" : "s"} with no quota evidence`
 										: null,
@@ -543,6 +296,22 @@ export function LimitsCapacityOverview({
 	runwaysLoading,
 	runwaysUnavailableReason,
 }: LimitsCapacityOverviewProps) {
+	// Union of both windows' fallbacks. An account outside the 5-hour window is
+	// not necessarily outside the weekly one — Codex reports a weekly window and
+	// no 5-hour one — so listing either window's fallbacks alone would silently
+	// drop accounts the panels above do not account for. Deduped by ACCOUNT ID,
+	// since the same account appears in both lists when it has neither window —
+	// and never by name, which is user-set and need not be unique: keying on it
+	// dropped every account after the first that shared one.
+	const fallbackNames = [
+		...new Map(
+			[...fiveHour.fallback, ...sevenDay.fallback].map((f) => [
+				f.accountId,
+				`${f.name} (${f.provider})`,
+			]),
+		).values(),
+	];
+
 	return (
 		<Card>
 			<CardHeader>
@@ -550,8 +319,8 @@ export function LimitsCapacityOverview({
 					<div className="min-w-0">
 						<CardTitle>Quota overview</CardTitle>
 						<CardDescription>
-							Latest reported usage across rolling quota accounts. This is
-							polled quota state, not routing availability.
+							Latest reported quota per servable class. This is polled quota
+							state, not routing availability.
 						</CardDescription>
 					</div>
 					<Popover>
@@ -567,16 +336,20 @@ export function LimitsCapacityOverview({
 						<PopoverContent align="end" className="space-y-item text-xs">
 							<p className="font-medium">How the overview is calculated</p>
 							<p className="text-muted-foreground">
-								Each percentage is an equal-weight average. Reporting accounts
-								use their latest window percentage; eligible accounts currently
-								unavailable count as 100% used. Accounts without usage evidence
-								are marked unknown and omitted from the average.
+								Weekly budget: for each servable class (accounts that can cover
+								for each other) the account with the most weekly room is the
+								real constraint; the headline names the tightest class.
 							</p>
 							<p className="text-muted-foreground">
-								Pay-as-you-go accounts and providers without this rolling window
-								are not part of its figure. The next checkpoint may be a quota
-								reset, cooldown expiry, or usage-poll retry deadline. Dashboard
-								projections never control request routing.
+								5-hour pacing: how many accounts are currently held by the
+								5-hour rate limit and when the earliest one lifts; 'running hot'
+								means an account is projected to hit its 5-hour limit before it
+								resets. Accounts without a reading are counted as unknown, never
+								as 0%.
+							</p>
+							<p className="text-muted-foreground">
+								Accounts not on a rolling quota are listed beneath the panels.
+								Dashboard projections never control request routing.
 							</p>
 						</PopoverContent>
 					</Popover>
@@ -586,20 +359,15 @@ export function LimitsCapacityOverview({
 				{/* Three panels: stacked and full-width on narrow viewports, side by
 				    side once there is room for them. */}
 				<div className="grid overflow-hidden rounded-md border divide-y lg:grid-cols-3 lg:divide-x lg:divide-y-0">
-					<WindowPanel
-						title="5-hour window"
-						icon={Gauge}
-						result={fiveHour}
-						window="five_hour"
+					<WeeklyBudgetPanel
+						sevenDay={sevenDay}
 						now={now}
 						loading={windowsLoading}
 						unavailableReason={windowsUnavailableReason}
 					/>
-					<WindowPanel
-						title="7-day window"
-						icon={BarChart3}
-						result={sevenDay}
-						window="seven_day"
+					<FiveHourPacingPanel
+						fiveHour={fiveHour}
+						sevenDay={sevenDay}
 						now={now}
 						loading={windowsLoading}
 						unavailableReason={windowsUnavailableReason}
@@ -612,6 +380,11 @@ export function LimitsCapacityOverview({
 						unavailableReason={runwaysUnavailableReason}
 					/>
 				</div>
+				{fallbackNames.length > 0 && (
+					<p className="mt-row text-xs text-muted-foreground">
+						Not on a rolling quota: {fallbackNames.join(", ")}
+					</p>
+				)}
 				<div className="mt-row flex justify-end">
 					<a
 						href="#account-utilization"

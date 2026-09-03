@@ -238,6 +238,18 @@ export interface PublicWindowAggregate {
 	 * over.
 	 */
 	earliestResetsAtMs: number | null;
+	/**
+	 * The LOWEST utilization among the contributing accounts, and whose it is.
+	 *
+	 * The mean beside it cannot answer the question a widget is actually asking.
+	 * Routing picks ONE account, so what decides whether the next request goes
+	 * through is whether ANY account still has room — and a mean of a spent
+	 * account and a fresh one describes neither. Both null when nothing
+	 * contributed.
+	 */
+	leastUsedUtilizationPct: number | null;
+	/** A join key against `accounts[].id`, so never truncated downstream. */
+	leastUsedAccountId: string | null;
 }
 
 /** Cross-account usage aggregate, per window class. */
@@ -448,16 +460,25 @@ function servablePrediction(
  * the mean actually describes.
  */
 function aggregateWindow(
-	readings: Array<{ utilizationPct: number | null; resetsAtMs: number | null }>,
+	readings: WindowReading[],
 	inScopeCount: number,
 ): PublicWindowAggregate {
 	const contributing = readings.filter(
-		(r): r is { utilizationPct: number; resetsAtMs: number | null } =>
+		(r): r is WindowReading & { utilizationPct: number } =>
 			r.utilizationPct !== null,
 	);
 	const resets = contributing
 		.map((r) => r.resetsAtMs)
 		.filter((r): r is number => r !== null);
+	let leastUsed: (WindowReading & { utilizationPct: number }) | null = null;
+	for (const reading of contributing) {
+		if (
+			leastUsed === null ||
+			reading.utilizationPct < leastUsed.utilizationPct
+		) {
+			leastUsed = reading;
+		}
+	}
 	return {
 		meanUtilizationPct:
 			contributing.length === 0
@@ -470,7 +491,16 @@ function aggregateWindow(
 		contributingAccountCount: contributing.length,
 		unknownAccountCount: inScopeCount - contributing.length,
 		earliestResetsAtMs: resets.length === 0 ? null : Math.min(...resets),
+		leastUsedUtilizationPct: leastUsed?.utilizationPct ?? null,
+		leastUsedAccountId: leastUsed?.accountId ?? null,
 	};
+}
+
+/** One account's reading of one window, carrying the id that identifies it. */
+interface WindowReading {
+	accountId: string;
+	utilizationPct: number | null;
+	resetsAtMs: number | null;
 }
 
 function maxOfPresent(values: Array<number | null>): number | null {
@@ -893,9 +923,10 @@ export function createPublicSnapshotReader(
 		const readingOf = (
 			account: PublicAccountSnapshot,
 			match: (window: PublicWindowSnapshot) => boolean,
-		): { utilizationPct: number | null; resetsAtMs: number | null } => {
+		): WindowReading => {
 			const window = account.windows.find(match);
 			return {
+				accountId: account.id,
 				utilizationPct: window?.utilizationPct ?? null,
 				resetsAtMs: window?.resetsAtMs ?? null,
 			};

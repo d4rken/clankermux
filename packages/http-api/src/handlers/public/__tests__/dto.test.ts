@@ -10,7 +10,12 @@
  * unauthenticated surface — that no field arrives here that was not named.
  */
 import { describe, expect, it } from "bun:test";
-import type { RateLimitCause, RequestResponse } from "@clankermux/types";
+import {
+	type RateLimitCause,
+	type RequestResponse,
+	STOP_CAUSES,
+	type StopsHistoryResponse,
+} from "@clankermux/types";
 import type { PublicRunwaySnapshot } from "../../../services/public-runway";
 import type {
 	PublicAccountSnapshot,
@@ -33,6 +38,8 @@ import {
 	toPublicRunwayKind,
 	toPublicStatusDto,
 	toPublicStatusLevel,
+	toPublicStopCause,
+	toPublicStopsDto,
 	toPublicWindowKind,
 	truncateUtf8,
 } from "../dto";
@@ -99,12 +106,16 @@ function snapshot(over: Partial<PublicSnapshot> = {}): PublicSnapshot {
 				contributingAccountCount: 1,
 				unknownAccountCount: 2,
 				earliestResetsAtMs: 1_700_000_000_000,
+				leastUsedUtilizationPct: 42,
+				leastUsedAccountId: "acct-1",
 			},
 			sevenDay: {
 				meanUtilizationPct: null,
 				contributingAccountCount: 0,
 				unknownAccountCount: 3,
 				earliestResetsAtMs: null,
+				leastUsedUtilizationPct: null,
+				leastUsedAccountId: null,
 			},
 			worstAccountUtilizationPct: 42,
 		},
@@ -140,6 +151,54 @@ function runway(
 			kind: "runway",
 			exhaustsAtMs: 1_700_040_000_000,
 			causes: [{ accountId: "acct-1", windowKind: "five_hour" }],
+			band: {
+				earliestExhaustsAtMs: 1_700_030_000_000,
+				latestExhaustsAtMs: 1_700_050_000_000,
+				halfWidthPct: 0.5,
+			},
+		},
+		...over,
+	};
+}
+
+function stops(over: Partial<StopsHistoryResponse> = {}): StopsHistoryResponse {
+	return {
+		range: "7d",
+		bucketMs: 3_600_000,
+		windowStartsAt: NOW - 7 * 24 * 3_600_000,
+		windowEndsAt: NOW,
+		totalRequests: 4_000,
+		blockedRequests: 12,
+		causes: [
+			{
+				cause: "pool_quota_exhausted",
+				count: 9,
+				firstSeenMs: NOW - 3 * 3_600_000,
+				lastSeenMs: NOW - 3_600_000,
+				// Present on the internal shape, deliberately not on the wire.
+				topRequestedModel: "gpt-5.2-codex",
+				topRequestedModelCount: 9,
+				sampleErrorMessage: "all_accounts_failed",
+				series: [{ ts: NOW - 3 * 3_600_000, count: 9 }],
+			},
+			{
+				cause: "model_not_served",
+				count: 3,
+				firstSeenMs: NOW - 2 * 3_600_000,
+				lastSeenMs: NOW - 2 * 3_600_000,
+				topRequestedModel: null,
+				topRequestedModelCount: 0,
+				sampleErrorMessage: null,
+				series: [],
+			},
+		],
+		candidates: {
+			observedRequests: 3_800,
+			zeroCandidateRequests: 12,
+			distribution: [
+				{ candidatesCount: 0, requests: 12 },
+				{ candidatesCount: 2, requests: 3_788 },
+			],
 		},
 		...over,
 	};
@@ -177,12 +236,16 @@ describe("golden: GET /public/v1/status", () => {
 					contributingAccountCount: 1,
 					unknownAccountCount: 2,
 					earliestResetsAt: "2023-11-14T22:13:20.000Z",
+					leastUsedUtilizationPct: 42,
+					leastUsedAccountId: "acct-1",
 				},
 				sevenDay: {
 					meanUtilizationPct: null,
 					contributingAccountCount: 0,
 					unknownAccountCount: 3,
 					earliestResetsAt: null,
+					leastUsedUtilizationPct: null,
+					leastUsedAccountId: null,
 				},
 				worstAccountUtilizationPct: 42,
 			},
@@ -199,6 +262,23 @@ describe("golden: GET /public/v1/status", () => {
 				},
 			],
 		});
+	});
+
+	it("names the least-used account beside the mean, and whose reading it is", () => {
+		// The mean cannot answer a widget's question: routing picks ONE account,
+		// so what matters is whether ANY account still has room. The id travels
+		// with the percentage or the figure names nobody.
+		const dto = toPublicStatusDto(snapshot(), { uptimeS: 1, version: "v" });
+		expect(dto.usage.fiveHour.leastUsedUtilizationPct).toBe(42);
+		expect(dto.usage.fiveHour.leastUsedAccountId).toBe("acct-1");
+	});
+
+	it("states both least-used fields as null when nothing contributed", () => {
+		// Never 0: a window nobody reported is not a window at 0% used.
+		const dto = toPublicStatusDto(snapshot(), { uptimeS: 1, version: "v" });
+		expect(dto.usage.sevenDay.contributingAccountCount).toBe(0);
+		expect(dto.usage.sevenDay.leastUsedUtilizationPct).toBeNull();
+		expect(dto.usage.sevenDay.leastUsedAccountId).toBeNull();
 	});
 
 	it("states the routing context beside the candidate it belongs to", () => {
@@ -424,6 +504,8 @@ describe("golden: GET /public/v1/runway", () => {
 				kind: "runway",
 				exhaustsAt: "2023-11-15T09:20:00.000Z",
 				causes: [{ accountId: "acct-1", windowKind: "five_hour" }],
+				earliestExhaustsAt: "2023-11-15T06:33:20.000Z",
+				latestExhaustsAt: "2023-11-15T12:06:40.000Z",
 			},
 		});
 	});
@@ -472,11 +554,77 @@ describe("golden: GET /public/v1/runway", () => {
 		]) {
 			const dto = toPublicRunwayDto(
 				runway({
-					worstStatedOutcome: { kind, exhaustsAtMs: null, causes: [] },
+					worstStatedOutcome: {
+						kind,
+						exhaustsAtMs: null,
+						causes: [],
+						band: null,
+					},
 				}),
 			);
 			expect(dto.worstStatedOutcome?.exhaustsAt).toBeNull();
 		}
+	});
+
+	it("brackets the instant with the band the same key reported", () => {
+		const dto = toPublicRunwayDto(runway());
+		expect(dto.worstStatedOutcome?.earliestExhaustsAt).toBe(
+			"2023-11-15T06:33:20.000Z",
+		);
+		expect(dto.worstStatedOutcome?.latestExhaustsAt).toBe(
+			"2023-11-15T12:06:40.000Z",
+		);
+		// The point estimate sits inside its own band, which is the only reason
+		// publishing both is honest rather than confusing.
+		const point = Date.parse(dto.worstStatedOutcome?.exhaustsAt ?? "");
+		expect(
+			Date.parse(dto.worstStatedOutcome?.earliestExhaustsAt ?? ""),
+		).toBeLessThanOrEqual(point);
+		expect(
+			Date.parse(dto.worstStatedOutcome?.latestExhaustsAt ?? ""),
+		).toBeGreaterThanOrEqual(point);
+	});
+
+	it("states both band ends as null when no band was stated", () => {
+		// Modelled reset credits make the burn non-monotonic, so two probes bound
+		// nothing and the scan declines to claim a band. That must read as absent,
+		// never as a zero-width band around the point estimate.
+		const dto = toPublicRunwayDto(
+			runway({
+				worstStatedOutcome: {
+					kind: "runway",
+					exhaustsAtMs: 1_700_040_000_000,
+					causes: [],
+					band: null,
+				},
+			}),
+		);
+		expect(dto.worstStatedOutcome?.exhaustsAt).not.toBeNull();
+		expect(dto.worstStatedOutcome?.earliestExhaustsAt).toBeNull();
+		expect(dto.worstStatedOutcome?.latestExhaustsAt).toBeNull();
+	});
+
+	it("leaves an OPEN band end null rather than collapsing it onto the other", () => {
+		// A probe that found no run-out inside the horizon has not found a late
+		// bound — folding the other end in would invent one.
+		const dto = toPublicRunwayDto(
+			runway({
+				worstStatedOutcome: {
+					kind: "runway",
+					exhaustsAtMs: 1_700_040_000_000,
+					causes: [],
+					band: {
+						earliestExhaustsAtMs: 1_700_030_000_000,
+						latestExhaustsAtMs: null,
+						halfWidthPct: 0.5,
+					},
+				},
+			}),
+		);
+		expect(dto.worstStatedOutcome?.earliestExhaustsAt).toBe(
+			"2023-11-15T06:33:20.000Z",
+		);
+		expect(dto.worstStatedOutcome?.latestExhaustsAt).toBeNull();
 	});
 
 	it("reports a null outcome when nothing anywhere could be stated", () => {
@@ -484,6 +632,88 @@ describe("golden: GET /public/v1/runway", () => {
 		expect(dto.worstStatedOutcome).toBeNull();
 		// …but the coverage counts still say how much of the pool was blind.
 		expect(dto.coverage.unobservedKeyCount).toBe(1);
+	});
+});
+
+describe("golden: GET /public/v1/stops", () => {
+	it("matches the pinned shape exactly", () => {
+		expect(toPublicStopsDto(stops(), NOW)).toEqual({
+			schema: "clankermux.public.stops.v1",
+			generatedAt: NOW_ISO,
+			range: "7d",
+			windowStartsAt: "2023-11-07T21:56:40.000Z",
+			windowEndsAt: NOW_ISO,
+			totalRequests: 4_000,
+			blockedRequests: 12,
+			causes: [
+				{
+					cause: "pool_quota_exhausted",
+					count: 9,
+					firstSeenAt: "2023-11-14T18:56:40.000Z",
+					lastSeenAt: "2023-11-14T20:56:40.000Z",
+				},
+				{
+					cause: "model_not_served",
+					count: 3,
+					firstSeenAt: "2023-11-14T19:56:40.000Z",
+					lastSeenAt: "2023-11-14T19:56:40.000Z",
+				},
+			],
+			candidates: {
+				observedRequests: 3_800,
+				zeroCandidateRequests: 12,
+				distribution: [
+					{ candidatesCount: 0, requests: 12 },
+					{ candidatesCount: 2, requests: 3_788 },
+				],
+			},
+		});
+	});
+
+	it("drops the series, the raw message and the model it was asked for", () => {
+		// Each for its own reason: a per-cause series is a second array level
+		// inside a record array, a raw `error_message` is unreviewed third-party
+		// text on an unauthenticated wire, and which model a caller asked for is
+		// traffic detail rather than a pool fact.
+		const wire = JSON.stringify(toPublicStopsDto(stops(), NOW));
+		for (const forbidden of [
+			"series",
+			"sampleErrorMessage",
+			"all_accounts_failed",
+			"topRequestedModel",
+			"gpt-5.2-codex",
+		]) {
+			expect(wire).not.toContain(forbidden);
+		}
+	});
+
+	it("states the range it counted rather than leaving it to be assumed", () => {
+		const dto = toPublicStopsDto(stops(), NOW);
+		expect(dto.range).toBe("7d");
+		expect(Date.parse(dto.windowEndsAt) - Date.parse(dto.windowStartsAt)).toBe(
+			7 * 24 * 3_600_000,
+		);
+	});
+
+	it("reports zero blocked with no cause rows rather than omitting the block", () => {
+		const dto = toPublicStopsDto(
+			stops({
+				blockedRequests: 0,
+				causes: [],
+				candidates: {
+					observedRequests: 0,
+					zeroCandidateRequests: 0,
+					distribution: [],
+				},
+			}),
+			NOW,
+		);
+		expect(dto.blockedRequests).toBe(0);
+		expect(dto.causes).toEqual([]);
+		// The denominator survives: 4000 requests and none blocked is a
+		// measurement, and it is the one worth seeing.
+		expect(dto.totalRequests).toBe(4_000);
+		expect(dto.candidates.observedRequests).toBe(0);
 	});
 });
 
@@ -522,6 +752,8 @@ describe("instants vs durations", () => {
 						contributingAccountCount: 1,
 						unknownAccountCount: 0,
 						earliestResetsAtMs: 1_700_200_000_000,
+						leastUsedUtilizationPct: 12,
+						leastUsedAccountId: "acct-1",
 					},
 				],
 			},
@@ -553,6 +785,7 @@ describe("instants vs durations", () => {
 		);
 		assertInstantsAreIso(toPublicAccountsDto(populated));
 		assertInstantsAreIso(toPublicRunwayDto(runway()));
+		assertInstantsAreIso(toPublicStopsDto(stops(), NOW));
 	});
 
 	it("emits no duration as a string", () => {
@@ -621,6 +854,34 @@ describe("identifiers are never truncated", () => {
 		expect(dto.accountId).toBe(longId);
 	});
 
+	it("passes a long least-used account id through whole", () => {
+		const dto = toPublicStatusDto(
+			snapshot({
+				usage: {
+					fiveHour: {
+						meanUtilizationPct: 42,
+						contributingAccountCount: 1,
+						unknownAccountCount: 0,
+						earliestResetsAtMs: null,
+						leastUsedUtilizationPct: 42,
+						leastUsedAccountId: longId,
+					},
+					sevenDay: {
+						meanUtilizationPct: null,
+						contributingAccountCount: 0,
+						unknownAccountCount: 1,
+						earliestResetsAtMs: null,
+						leastUsedUtilizationPct: null,
+						leastUsedAccountId: null,
+					},
+					worstAccountUtilizationPct: 42,
+				},
+			}),
+			{ uptimeS: 1, version: "v" },
+		);
+		expect(dto.usage.fiveHour.leastUsedAccountId).toBe(longId);
+	});
+
 	it("passes a long runway cause account id through whole", () => {
 		const dto = toPublicRunwayDto(
 			runway({
@@ -628,6 +889,7 @@ describe("identifiers are never truncated", () => {
 					kind: "out-now",
 					exhaustsAtMs: null,
 					causes: [{ accountId: longId, windowKind: "seven_day" }],
+					band: null,
 				},
 			}),
 		);
@@ -693,6 +955,10 @@ describe("structural limits", () => {
 			arrayNesting(toPublicStatusDto(snapshot(), { uptimeS: 1, version: "v" })),
 		).toBeLessThanOrEqual(2);
 		expect(arrayNesting(toPublicRunwayDto(runway()))).toBeLessThanOrEqual(2);
+		// stops[] spends its budget on causes[] and distribution[] as SIBLINGS,
+		// which is one level each — the series that would have nested inside a
+		// cause is exactly what this surface drops.
+		expect(arrayNesting(toPublicStopsDto(stops(), NOW))).toBeLessThanOrEqual(2);
 	});
 
 	it("keeps object depth far below the reader's 16-deep ceiling", () => {
@@ -701,6 +967,7 @@ describe("structural limits", () => {
 			depthOf(toPublicStatusDto(snapshot(), { uptimeS: 1, version: "v" })),
 		).toBeLessThan(8);
 		expect(depthOf(toPublicRunwayDto(runway()))).toBeLessThan(8);
+		expect(depthOf(toPublicStopsDto(stops(), NOW))).toBeLessThan(8);
 	});
 });
 
@@ -1016,6 +1283,52 @@ describe("runway kind is a closed set with an escape hatch", () => {
 		// The internal spelling is kebab-case; the snake_case wire spelling is NOT
 		// an accepted input, so a round-trip mistake shows up rather than passing.
 		expect(toPublicRunwayKind("beyond_horizon")).toBe("other");
+	});
+});
+
+describe("stop cause is a closed set with an escape hatch", () => {
+	for (const cause of [
+		"pool_quota_exhausted",
+		"family_weekly_exhausted",
+		"model_not_served",
+		"oauth_tokens_expired",
+		"pinned_target_unavailable",
+		"provider_overloaded",
+		"usage_throttled",
+		"context_window_exceeded",
+		"upstream_error",
+		"other",
+	]) {
+		it(`passes ${cause} through unchanged`, () => {
+			expect(toPublicStopCause(cause)).toBe(
+				cause as ReturnType<typeof toPublicStopCause>,
+			);
+		});
+	}
+
+	it("maps a cause the vocabulary has never seen to other", () => {
+		// A terminal added to the proxy without a classification must arrive as
+		// `other`, which the firmware renders with a warning, rather than as a
+		// string its closed-set check rejects outright.
+		expect(toPublicStopCause("some_future_terminal")).toBe("other");
+		expect(toPublicStopCause("future_cause")).toBe("other");
+		expect(toPublicStopCause("")).toBe("other");
+	});
+
+	it("publishes exactly today's internal causes and no more", () => {
+		// THIS ASSERTION IS MEANT TO FAIL the day a cause is added to
+		// `STOP_CAUSES`. The mapper no longer derives its set from that list, so
+		// a new internal cause reaches this wire as `other` until someone decides
+		// otherwise — and this is where that decision gets made, in the same
+		// commit that invents the cause, rather than by an unauthenticated
+		// surface silently growing a value its readers reject.
+		//
+		// `STOP_CAUSES` is imported HERE and nowhere in the DTO module: this is a
+		// comparison between two independently written lists, which is the whole
+		// point of it.
+		for (const cause of STOP_CAUSES) {
+			expect(toPublicStopCause(cause)).toBe(cause);
+		}
 	});
 });
 

@@ -2,6 +2,7 @@ import { describe, expect, it } from "bun:test";
 import type { UsagePrediction } from "@clankermux/types";
 import {
 	computeCapacityRunway,
+	computeCapacityRunwayBand,
 	estimateWindowExhaustion,
 	RUNWAY_HORIZON_MS,
 	type RunwayAccountInput,
@@ -1595,5 +1596,204 @@ describe("computeCapacityRunway pace-margin probe", () => {
 			horizonMs: 4 * DAY,
 			unprojectableAccountIds: [],
 		});
+	});
+});
+
+describe("computeCapacityRunwayBand", () => {
+	/**
+	 * One weekly window, `pct` used, one day in. With no prediction the
+	 * estimator takes its lifetime-average branch, so the projected run-out is
+	 * `elapsed * (100 / pct)` from the window start — which is exactly the
+	 * formula the width assertion below re-derives at each perturbation.
+	 */
+	function weeklyAt(
+		pct: number,
+		alsoCarrying: RunwayWindowInput[] = [],
+		accountId = "a",
+	): RunwayAccountInput {
+		return account(accountId, [
+			window({
+				windowKind: "seven_day",
+				utilizationPct: pct,
+				resetsAtMs: NOW + 6 * DAY,
+				windowStartMs: NOW - DAY,
+				prediction: null,
+			}),
+			...alsoCarrying,
+		]);
+	}
+
+	function bandFor(accounts: RunwayAccountInput[]) {
+		const baseline = computeCapacityRunway(accounts, NOW);
+		return {
+			baseline,
+			band: computeCapacityRunwayBand(accounts, NOW, baseline),
+		};
+	}
+
+	it("brackets the run-out by exactly the quantisation the reading carries", () => {
+		const { baseline, band } = bandFor([weeklyAt(20)]);
+		expect(baseline.kind).toBe("runway");
+		expect(band).not.toBeNull();
+		expect(band?.halfWidthPct).toBe(0.5);
+
+		// The lifetime formula: run-out lands `elapsed * 100 / pct` after the
+		// window start, so half a percent of reading error is worth
+		// `elapsed * 100 * (1/19.5 - 1/20.5)` of run-out — about six hours here.
+		const elapsedMs = DAY;
+		const expectedWidthMs = elapsedMs * 100 * (1 / (20 - 0.5) - 1 / (20 + 0.5));
+		const actualWidthMs =
+			(band?.latestExhaustsAtMs ?? 0) - (band?.earliestExhaustsAtMs ?? 0);
+		expect(actualWidthMs).toBeGreaterThan(expectedWidthMs * 0.9);
+		expect(actualWidthMs).toBeLessThan(expectedWidthMs * 1.1);
+	});
+
+	it("states no band when every reading is already fractional", () => {
+		// A fractional percentage came from somewhere that knows better than a
+		// whole percent; nudging it would invent an uncertainty it does not have.
+		const { band } = bandFor([weeklyAt(20.25)]);
+		expect(band).toBeNull();
+	});
+
+	it("states no band for an account with only a five-hour window", () => {
+		// A whole-percent 5-hour reading is NOT perturbed, so there is nothing to
+		// bracket even though the scan does project a run-out from it. The 5-hour
+		// fallback is `now`-anchored and drifts between polls, so the interval a
+		// probe on it traces is not the quantisation interval a band claims.
+		const fiveHourOnly = [
+			account("a", [
+				window({
+					windowKind: "five_hour",
+					utilizationPct: 90,
+					resetsAtMs: NOW + HOUR,
+					windowStartMs: NOW - 4 * HOUR,
+					prediction: null,
+				}),
+			]),
+		];
+		const { baseline, band } = bandFor(fiveHourOnly);
+
+		expect(baseline.kind).toBe("runway");
+		expect(band).toBeNull();
+	});
+
+	it("perturbs the weekly window and leaves the five-hour one alone", () => {
+		// Same weekly reading, once on its own and once beside a whole-percent
+		// 5-hour window that contributes no dead span of its own. The band has to
+		// be the same one: it reports what the WEEKLY reading's precision leaves
+		// open, and the 5-hour window's presence is not part of that claim.
+		const idleFiveHour = window({
+			windowKind: "five_hour",
+			utilizationPct: 10,
+			resetsAtMs: NOW + 4 * HOUR,
+			windowStartMs: NOW - HOUR,
+			prediction: null,
+		});
+		const weeklyOnly = bandFor([weeklyAt(20)]);
+		const withFiveHour = bandFor([weeklyAt(20, [idleFiveHour])]);
+
+		expect(withFiveHour.band).not.toBeNull();
+		expect(withFiveHour.band).toEqual(weeklyOnly.band);
+	});
+
+	it("returns equal ends for a regression-backed window", () => {
+		// The regression branch projects from the server's slope and never reads
+		// the percentage, so perturbing the reading moves nothing. Disclosed as
+		// equal ends — which the display renders as no band — rather than faked.
+		const accounts = [
+			account("a", [
+				cyclicWindow("seven_day", NOW + 2 * HOUR, 5, 1),
+				cyclicWindow("five_hour", NOW + 2 * HOUR, 5, 1),
+			]),
+		];
+		const { band } = bandFor(accounts);
+		expect(band).not.toBeNull();
+		expect(band?.earliestExhaustsAtMs).toBe(band?.latestExhaustsAtMs ?? -1);
+	});
+
+	it("states no band when the baseline assumed reset credits", () => {
+		// Burn under modeled credits is non-monotonic: a faster burn can move a
+		// dead span back inside a credit's expiry and revive the window, so two
+		// probes do not straddle the baseline.
+		const baseline = {
+			kind: "runway" as const,
+			exhaustsAtMs: NOW + DAY,
+			durationMs: DAY,
+			causes: [],
+			unprojectableAccountIds: [],
+			assumedResetCredits: [{ accountId: "a", count: 1 }],
+		};
+		expect(computeCapacityRunwayBand([weeklyAt(20)], NOW, baseline)).toBeNull();
+	});
+
+	it("states no band when the pool is already out", () => {
+		// A reading of exactly 100 is a state the provider reports, not a figure
+		// rounded to the nearest percent, so it is not perturbed: dropping it to
+		// 99.5 would un-exhaust a spent window and hand the low probe a run-out
+		// half an hour from now, under a headline that says the pool is out. An
+		// instant that has already arrived is not a projection with an error bar.
+		const { baseline, band } = bandFor([weeklyAt(100)]);
+
+		expect(baseline.kind).toBe("out-now");
+		expect(band).toBeNull();
+	});
+
+	it("takes no perturbation from a pool member that is already spent", () => {
+		// One account out of quota, one at 40% and still burning. The pool runs
+		// out when the second one does, and the band around that instant is the
+		// one the 40% reading's precision leaves open — the spent account states
+		// no uncertainty to add to it.
+		const stillBurning = weeklyAt(40, [], "burning");
+		const withSpentPeer = bandFor([weeklyAt(100, [], "spent"), stillBurning]);
+		const alone = bandFor([stillBurning]);
+
+		expect(withSpentPeer.baseline.kind).toBe("runway");
+		expect(alone.band).not.toBeNull();
+		expect(withSpentPeer.band).toEqual(alone.band);
+	});
+
+	it("skips the pace-margin walk when the caller opts out", () => {
+		// The walk costs up to 50 pool rebuilds, and the band runs the whole scan
+		// twice per call. Same knife-edge fixture the probe's own suite uses, so
+		// the default DOES find a margin and the opt-out is observably skipping
+		// work rather than finding nothing.
+		const accounts = [
+			account("a", [
+				window({
+					windowKind: "seven_day",
+					utilizationPct: 50,
+					resetsAtMs: NOW + 84 * HOUR,
+					windowStartMs: NOW - 84 * HOUR,
+					prediction: prediction({
+						resetsAtMs: NOW + 84 * HOUR,
+						slopePerHour: 100 / 186.7,
+						etaExhaustMs: NOW + 200 * HOUR,
+					}),
+				}),
+			]),
+		];
+		const withProbe = computeCapacityRunway(accounts, NOW);
+		const withoutProbe = computeCapacityRunway(accounts, NOW, undefined, {
+			probePaceMargin: false,
+		});
+
+		expect(withProbe.kind).toBe("beyond-horizon");
+		expect(
+			withProbe.kind === "beyond-horizon" ? withProbe.paceMargin : undefined,
+		).toBeDefined();
+		expect(withoutProbe).toEqual({
+			kind: "beyond-horizon",
+			horizonMs: RUNWAY_HORIZON_MS,
+			unprojectableAccountIds: [],
+		});
+	});
+
+	it("leaves the default probe behaviour untouched", () => {
+		const accounts = [weeklyAt(20)];
+		expect(computeCapacityRunway(accounts, NOW)).toEqual(
+			computeCapacityRunway(accounts, NOW, RUNWAY_HORIZON_MS, {
+				probePaceMargin: true,
+			}),
+		);
 	});
 });

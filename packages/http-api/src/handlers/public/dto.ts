@@ -50,7 +50,11 @@
  * our schedule.
  */
 
-import type { RequestResponse, UsagePrediction } from "@clankermux/types";
+import type {
+	RequestResponse,
+	StopsHistoryResponse,
+	UsagePrediction,
+} from "@clankermux/types";
 import type { PublicRunwaySnapshot } from "../../services/public-runway";
 import type {
 	PublicAccountSnapshot,
@@ -70,6 +74,7 @@ export const PUBLIC_STATUS_SCHEMA = "clankermux.public.status.v1";
 export const PUBLIC_ACCOUNTS_SCHEMA = "clankermux.public.accounts.v1";
 export const PUBLIC_RUNWAY_SCHEMA = "clankermux.public.runway.v1";
 export const PUBLIC_STREAM_SCHEMA = "clankermux.public.stream.v1";
+export const PUBLIC_STOPS_SCHEMA = "clankermux.public.stops.v1";
 
 /** Byte ceiling on every DISPLAY string this surface emits. */
 export const MAX_STRING_BYTES = 96;
@@ -670,6 +675,23 @@ export interface PublicWindowAggregateDto {
 	 * happens.
 	 */
 	earliestResetsAt: string | null;
+	/**
+	 * The LOWEST utilization among the contributors — the account with the most
+	 * room left.
+	 *
+	 * Published beside the mean because it is the one that answers a widget's
+	 * actual question. Routing picks ONE account, so what decides whether the
+	 * next request goes through is whether ANY account still has room; a mean of
+	 * a spent account and a fresh one describes neither of them. Null when
+	 * nothing contributed.
+	 */
+	leastUsedUtilizationPct: number | null;
+	/**
+	 * Whose that reading is: a join key against `accounts[].id`, so NEVER
+	 * truncated. Without it the percentage names no account and cannot be acted
+	 * on.
+	 */
+	leastUsedAccountId: string | null;
 }
 
 /** One provider-scoped limit, pooled. */
@@ -756,6 +778,8 @@ function toPublicWindowAggregateDto(
 		contributingAccountCount: aggregate.contributingAccountCount,
 		unknownAccountCount: aggregate.unknownAccountCount,
 		earliestResetsAt: instant(aggregate.earliestResetsAtMs),
+		leastUsedUtilizationPct: aggregate.leastUsedUtilizationPct,
+		leastUsedAccountId: optionalIdentifier(aggregate.leastUsedAccountId),
 	};
 }
 
@@ -838,6 +862,23 @@ export interface PublicWorstOutcomeDto {
 	/** INSTANT the pool is projected to be out; null on every other kind. */
 	exhaustsAt: string | null;
 	causes: PublicRunwayCauseDto[];
+	/**
+	 * The quantisation band around {@link exhaustsAt}: the earliest and latest
+	 * run-out the same scan reports when each whole-percent reading is nudged by
+	 * half a percent either way.
+	 *
+	 * Providers report utilization as a whole percent, and the projection divides
+	 * by that number, so the error is proportional to the runway itself — at 20%
+	 * one day into a weekly window, half a percent is about six hours. A single
+	 * instant states a precision the input never had.
+	 *
+	 * Either end is null when the scan at that perturbation found no run-out
+	 * inside the horizon: the band is OPEN on that side, not zero-width. Both are
+	 * null when no band is stated at all (modelled reset credits make the burn
+	 * non-monotonic, or every reading was already fractional).
+	 */
+	earliestExhaustsAt: string | null;
+	latestExhaustsAt: string | null;
 }
 
 /**
@@ -888,8 +929,175 @@ export function toPublicRunwayDto(
 						accountId: identifier(cause.accountId),
 						windowKind: toPublicWindowKind(cause.windowKind),
 					})),
+					earliestExhaustsAt: instant(
+						snapshot.worstStatedOutcome.band?.earliestExhaustsAtMs,
+					),
+					latestExhaustsAt: instant(
+						snapshot.worstStatedOutcome.band?.latestExhaustsAtMs,
+					),
 				}
 			: null,
+	};
+}
+
+// ---------------------------------------------------------------------------
+// GET /public/v1/stops
+// ---------------------------------------------------------------------------
+
+/**
+ * Why a request was refused, as a CLOSED set.
+ *
+ * Mirrors the internal `StopCause` value for value — it is already snake_case
+ * and already carries `other`, so no renaming happens here. The mapper is still
+ * explicit rather than a cast: a cause added to the proxy later must arrive on
+ * this wire as `other`, which the firmware knows how to render, instead of as a
+ * string its closed-set check would reject.
+ */
+export type PublicStopCauseDto =
+	| "pool_quota_exhausted"
+	| "family_weekly_exhausted"
+	| "model_not_served"
+	| "oauth_tokens_expired"
+	| "pinned_target_unavailable"
+	| "provider_overloaded"
+	| "usage_throttled"
+	| "context_window_exceeded"
+	| "upstream_error"
+	| "other";
+
+/**
+ * Total over today's `StopCause` values; anything later becomes `other`.
+ *
+ * Written out rather than derived from the internal `STOP_CAUSES` list, which
+ * is what it did before: derived, the published set silently GREW with the
+ * internal one, and a cause added to the proxy shipped onto an unauthenticated
+ * wire the same commit it was invented — past closed-set readers that cannot be
+ * redeployed on our schedule. Spelled out, adding a cause is a decision this
+ * file records, and until it is made the new cause arrives as `other`, which
+ * every consumer already renders.
+ */
+export function toPublicStopCause(cause: string): PublicStopCauseDto {
+	switch (cause) {
+		case "pool_quota_exhausted":
+			return "pool_quota_exhausted";
+		case "family_weekly_exhausted":
+			return "family_weekly_exhausted";
+		case "model_not_served":
+			return "model_not_served";
+		case "oauth_tokens_expired":
+			return "oauth_tokens_expired";
+		case "pinned_target_unavailable":
+			return "pinned_target_unavailable";
+		case "provider_overloaded":
+			return "provider_overloaded";
+		case "usage_throttled":
+			return "usage_throttled";
+		case "context_window_exceeded":
+			return "context_window_exceeded";
+		case "upstream_error":
+			return "upstream_error";
+		case "other":
+			return "other";
+		default:
+			return "other";
+	}
+}
+
+/** One cause and how often it stopped a request in the window. */
+export interface PublicStopCauseRowDto {
+	cause: PublicStopCauseDto;
+	count: number;
+	/** INSTANT of the first block under this cause inside the window. */
+	firstSeenAt: string | null;
+	/** INSTANT of the most recent one. */
+	lastSeenAt: string | null;
+}
+
+/**
+ * `GET /public/v1/stops` — how often the pool actually refused a request, and
+ * why.
+ *
+ * The counterpart to `/public/v1/runway`: that one is a PROJECTION, this one is
+ * what already happened. A panel showing plenty of runway while requests are
+ * being refused is showing the two halves of the same question, which is why
+ * this is worth publishing at all.
+ *
+ * FIXED AT SEVEN DAYS, with no query parameter, and the omission is
+ * deliberate. The dashboard's `/api/analytics/stops-history` takes a caller's
+ * range because a session picked it; this surface is unauthenticated, so a
+ * range parameter is an unauthenticated caller choosing how much of the request
+ * table the server scans. Seven days is one figure, memoized, the same for
+ * everyone.
+ *
+ * Deliberately absent, and none of it may be added back:
+ *
+ *  - `series`. A per-bucket time series is a second array level inside the
+ *    cause records, past what the device's streaming scanner can descend into.
+ *  - `sampleErrorMessage`. A raw upstream `error_message` is unreviewed text
+ *    from a third party on an unauthenticated wire; it exists as provenance for
+ *    a human reading the dashboard, and the cause label is the machine-readable
+ *    fact.
+ *  - `topRequestedModel`. Which model a caller asked for is traffic detail, not
+ *    a pool fact, and this surface is the pool's.
+ */
+export interface PublicStopsDto {
+	schema: string;
+	/** INSTANT this payload describes. */
+	generatedAt: string;
+	/** Fixed. Stated on the wire so a client never assumes a window length. */
+	range: "7d";
+	/** INSTANT the counted window opens. */
+	windowStartsAt: string;
+	/** INSTANT it closes — the read's own clock, not the client's. */
+	windowEndsAt: string;
+	/** The denominator. A blocked count without it is not a rate. */
+	totalRequests: number;
+	blockedRequests: number;
+	causes: PublicStopCauseRowDto[];
+	/**
+	 * How much redundancy the pool actually had, per request: how many accounts
+	 * were eligible to serve each one. The leading indicator no projection can
+	 * see — a pool that never drops below two candidates has margin, and one
+	 * sitting at one candidate is a single failure from a stop however much
+	 * quota it reports.
+	 *
+	 * `observedRequests` is the denominator for THIS block alone and is normally
+	 * smaller than `totalRequests`: eligibility is only recorded for requests
+	 * that reached routing.
+	 */
+	candidates: {
+		observedRequests: number;
+		zeroCandidateRequests: number;
+		distribution: Array<{ candidatesCount: number; requests: number }>;
+	};
+}
+
+export function toPublicStopsDto(
+	summary: StopsHistoryResponse,
+	generatedAtMs: number,
+): PublicStopsDto {
+	return {
+		schema: PUBLIC_STOPS_SCHEMA,
+		generatedAt: new Date(generatedAtMs).toISOString(),
+		range: "7d",
+		windowStartsAt: new Date(summary.windowStartsAt).toISOString(),
+		windowEndsAt: new Date(summary.windowEndsAt).toISOString(),
+		totalRequests: summary.totalRequests,
+		blockedRequests: summary.blockedRequests,
+		causes: summary.causes.map((row) => ({
+			cause: toPublicStopCause(row.cause),
+			count: row.count,
+			firstSeenAt: instant(row.firstSeenMs),
+			lastSeenAt: instant(row.lastSeenMs),
+		})),
+		candidates: {
+			observedRequests: summary.candidates.observedRequests,
+			zeroCandidateRequests: summary.candidates.zeroCandidateRequests,
+			distribution: summary.candidates.distribution.map((bucket) => ({
+				candidatesCount: bucket.candidatesCount,
+				requests: bucket.requests,
+			})),
+		},
 	};
 }
 
