@@ -73,7 +73,13 @@ function family(overrides: Partial<FamilyWeeklyUsage>): FamilyWeeklyUsage {
 		atRiskCount: 0,
 		soonestExhaustsAtMs: null,
 		accounts: [
-			{ name: "alpha", pct: 80, resetMs: NOW + 3 * DAY, exhaustsAtMs: null },
+			{
+				accountId: "id-alpha",
+				name: "alpha",
+				pct: 80,
+				resetMs: NOW + 3 * DAY,
+				exhaustsAtMs: null,
+			},
 		],
 		...overrides,
 	};
@@ -93,7 +99,13 @@ describe("PoolDetailSection family at-risk projection", () => {
 				atRiskCount: 1,
 				soonestExhaustsAtMs: exhaustsAtMs,
 				accounts: [
-					{ name: "alpha", pct: 80, resetMs: NOW + 3 * DAY, exhaustsAtMs },
+					{
+						accountId: "id-alpha",
+						name: "alpha",
+						pct: 80,
+						resetMs: NOW + 3 * DAY,
+						exhaustsAtMs,
+					},
 				],
 			}),
 		]);
@@ -115,18 +127,21 @@ describe("PoolDetailSection family at-risk projection", () => {
 				elevatedCount: 2,
 				accounts: [
 					{
+						accountId: "id-sooner",
 						name: "sooner",
 						pct: 90,
 						resetMs: NOW + 3 * DAY,
 						exhaustsAtMs: soonest,
 					},
 					{
+						accountId: "id-later",
 						name: "later",
 						pct: 80,
 						resetMs: NOW + 3 * DAY,
 						exhaustsAtMs: later,
 					},
 					{
+						accountId: "id-fine",
 						name: "fine",
 						pct: 20,
 						resetMs: NOW + 3 * DAY,
@@ -152,7 +167,13 @@ describe("PoolDetailSection family at-risk projection", () => {
 				atRiskCount: 1,
 				soonestExhaustsAtMs: exhaustsAtMs,
 				accounts: [
-					{ name: "alpha", pct: 80, resetMs: NOW + 3 * DAY, exhaustsAtMs },
+					{
+						accountId: "id-alpha",
+						name: "alpha",
+						pct: 80,
+						resetMs: NOW + 3 * DAY,
+						exhaustsAtMs,
+					},
 				],
 			}),
 		]);

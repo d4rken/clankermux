@@ -253,7 +253,7 @@ export function PoolDetailSection({
 					<ul className="space-y-tight">
 						{sortedContributing.map((c) => (
 							<li
-								key={c.name}
+								key={c.accountId}
 								className="flex items-center justify-between gap-item"
 							>
 								<span className="truncate" title={c.name}>
@@ -272,7 +272,7 @@ export function PoolDetailSection({
 					</div>
 					<div className="text-muted-foreground mb-tight">
 						Per-model weekly quota — can throttle one model while the
-						account-wide average remains low.
+						account-wide weekly still has room.
 					</div>
 					<ul className="space-y-tight">
 						{familyWeekly.map((f) => {
@@ -330,7 +330,7 @@ export function PoolDetailSection({
 										<ul className="ml-item space-y-tight">
 											{f.accounts.map((a) => (
 												<li
-													key={a.name}
+													key={a.accountId}
 													className="flex items-center justify-between gap-item"
 												>
 													<span className="truncate" title={a.name}>
@@ -364,7 +364,7 @@ export function PoolDetailSection({
 					<ul className="space-y-tight">
 						{sortedAtRisk.map((a) => (
 							<li
-								key={a.name}
+								key={a.accountId}
 								className="flex items-center justify-between gap-item"
 							>
 								<span className="truncate" title={a.name}>
@@ -391,7 +391,7 @@ export function PoolDetailSection({
 								</div>
 								<ul className="ml-item space-y-tight">
 									{items.map((e) => (
-										<li key={e.name} className="truncate" title={e.name}>
+										<li key={e.accountId} className="truncate" title={e.name}>
 											{e.name}
 										</li>
 									))}
@@ -414,7 +414,7 @@ export function PoolDetailSection({
 								</div>
 								<ul className="ml-item space-y-tight">
 									{items.map((e) => (
-										<li key={e.name} className="truncate" title={e.name}>
+										<li key={e.accountId} className="truncate" title={e.name}>
 											{e.name}
 										</li>
 									))}
@@ -430,13 +430,13 @@ export function PoolDetailSection({
 						Outside this window ({fallback.length})
 					</div>
 					<div className="text-muted-foreground mb-tight">
-						Providers without this rolling window, including pay-as-you-go
-						accounts, are not included in the average.
+						Accounts outside this rolling window; they do not take part in this
+						class's figures.
 					</div>
 					<ul className="space-y-tight">
 						{fallback.map((f) => (
 							<li
-								key={f.name}
+								key={f.accountId}
 								className="truncate"
 								title={`${f.name} (${f.provider})`}
 							>
