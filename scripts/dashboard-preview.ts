@@ -9,10 +9,12 @@
  * reads to the server that is already running.
  *
  * READ-ONLY BY CONSTRUCTION. The upstream is a production instance with real
- * accounts, so the guard is a denylist that answers 405 rather than a promise
- * that the reviewer will not click anything: GET and HEAD pass, the two auth
- * endpoints pass because signing in is what makes the reads work, `/api/debug/*`
- * is refused outright, and everything else under the API prefixes is refused.
+ * accounts, so the guard answers 405 rather than trusting that the reviewer
+ * will not click anything: GET and HEAD pass ANYWHERE, the two auth endpoints
+ * pass because signing in is what makes the reads work, `/api/debug/*` is
+ * refused outright, and every other method is refused on every path — the
+ * static and SPA-fallback routes included, which otherwise answered a POST with
+ * `index.html` and a 200.
  *
  * LOOPBACK ONLY. It forwards an authenticated management session; binding it to
  * a routable interface would publish that session to the network.
@@ -22,6 +24,11 @@
 
 const DEFAULT_PORT = 8095;
 const DEFAULT_UPSTREAM = "http://127.0.0.1:8090";
+/**
+ * How long the upstream gets to produce RESPONSE HEADERS. Not a budget for the
+ * body: `/api/requests/stream` is an event stream that stays open for as long
+ * as the page does, and an abort covering the body cut it mid-chunk.
+ */
 const UPSTREAM_TIMEOUT_MS = 15_000;
 
 /** Prefixes whose requests belong to the upstream server, not to the bundle. */
@@ -95,6 +102,16 @@ function forwardableHeaders(request: Request): Headers {
 async function forward(request: Request, upstream: string): Promise<Response> {
 	const url = new URL(request.url);
 	const target = `${upstream}${url.pathname}${url.search}`;
+	// The timeout covers the wait for headers ONLY, and is cleared the moment
+	// they arrive. `AbortSignal.timeout` stayed armed over the returned body, so
+	// every forwarded event stream died 15 seconds in — the browser reported it
+	// as ERR_INCOMPLETE_CHUNKED_ENCODING, which reads like a server bug and was
+	// this proxy all along.
+	const controller = new AbortController();
+	const headersTimer = setTimeout(
+		() => controller.abort(),
+		UPSTREAM_TIMEOUT_MS,
+	);
 	try {
 		const upstreamResponse = await fetch(target, {
 			method: request.method,
@@ -104,8 +121,9 @@ async function forward(request: Request, upstream: string): Promise<Response> {
 					? undefined
 					: await request.arrayBuffer(),
 			redirect: "manual",
-			signal: AbortSignal.timeout(UPSTREAM_TIMEOUT_MS),
+			signal: controller.signal,
 		});
+		clearTimeout(headersTimer);
 		// Returned as-is, `set-cookie` included: the session cookie the login
 		// endpoint issues is what every subsequent read depends on.
 		return new Response(upstreamResponse.body, {
@@ -114,6 +132,7 @@ async function forward(request: Request, upstream: string): Promise<Response> {
 			headers: upstreamResponse.headers,
 		});
 	} catch (error) {
+		clearTimeout(headersTimer);
 		return Response.json(
 			{
 				error: "upstream unreachable",
@@ -134,6 +153,10 @@ const server = Bun.serve({
 	// session.
 	hostname: "127.0.0.1",
 	port,
+	// Bun's maximum. A forwarded event stream is idle by design — it emits
+	// nothing between requests — and the 10-second default closed it from this
+	// side while the upstream was still holding it open.
+	idleTimeout: 255,
 	async fetch(request) {
 		const url = new URL(request.url);
 
@@ -148,6 +171,13 @@ const server = Bun.serve({
 			) {
 				return forward(request, upstream);
 			}
+			return refused();
+		}
+
+		// Everything past this point serves the bundle, and only reads of it are
+		// offered. Refused here rather than inside the forwarding branch, which is
+		// where the check used to sit and where it could not see these paths.
+		if (request.method !== "GET" && request.method !== "HEAD") {
 			return refused();
 		}
 
