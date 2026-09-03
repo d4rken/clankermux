@@ -183,21 +183,14 @@ export function ensureSchema(db: Database): void {
 		`CREATE INDEX IF NOT EXISTS idx_requests_timestamp_account ON requests(timestamp DESC, account_used)`,
 	);
 
-	// PARTIAL index over failed rows only, for the stops-history read.
-	//
-	// `success` is not indexed, so scanning "failures in the last N days" over
-	// idx_requests_timestamp means a range scan plus a row lookup for every row
-	// in range — on a live database that is hundreds of thousands of rows to
-	// find a few hundred. Failures are ~0.1% of traffic, so a partial index is
-	// three orders of magnitude smaller than the range it replaces and costs
-	// almost nothing to maintain.
-	//
-	// Introducing this on an existing large database triggers one ANALYZE pass
-	// at the first optimize tick after the upgrade restart. That is expected and
-	// happens once.
-	db.run(
-		`CREATE INDEX IF NOT EXISTS idx_requests_failed_timestamp ON requests(timestamp DESC) WHERE success = 0`,
-	);
+	// NOTE: do NOT add a partial index over failed rows here for the
+	// stops-history read. `idx_requests_success_timestamp` — created in
+	// performance-indexes.ts, not in this file — is `(success, timestamp DESC)`
+	// and already serves `WHERE success = 0 AND timestamp >= ?` as a covering
+	// index. One was added here and measured against the live planner, which
+	// ignored it in favour of the existing composite; it was pure write
+	// amplification on every failed-request insert. Check
+	// performance-indexes.ts before concluding an index is missing.
 
 	// Create request_routing table for load-balancer decision telemetry.
 	db.run(`

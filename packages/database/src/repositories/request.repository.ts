@@ -710,10 +710,9 @@ export class RequestRepository extends BaseRepository<RequestData> {
 	 * encoding that vocabulary as SQL CASE arms would put the rule in a second
 	 * place that the public widget read could disagree with.
 	 *
-	 * `success = 0` is spelled with the literal rather than `FALSE` so it matches
-	 * the `idx_requests_failed_timestamp` partial-index predicate character for
-	 * character — a mismatch there silently costs the index and turns this into
-	 * a full range scan of every request in the window.
+	 * Served by `idx_requests_success_timestamp` — `(success, timestamp DESC)`,
+	 * created in performance-indexes.ts — as a covering index, verified against
+	 * the live planner. No dedicated index is needed or wanted here.
 	 *
 	 * Grouping deliberately omits the model: adding it multiplies the row count
 	 * by the model cardinality on top of the bucket cardinality. The per-cause
