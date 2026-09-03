@@ -242,7 +242,34 @@ describe("computePoolUsage", () => {
 
 		const seven = computePoolUsage(accounts, "seven_day", NOW);
 		expect(seven.contributing).toEqual([]);
-		expect(seven.fallback).toEqual([{ name: "zai-1", provider: "zai" }]);
+		expect(seven.fallback).toEqual([
+			{ accountId: "zai-1", name: "zai-1", provider: "zai" },
+		]);
+	});
+
+	it("keeps two identically-named fallback accounts apart", () => {
+		// Names are user-set. The row carries the account id so a consumer
+		// deduping the two windows' fallback lists cannot collapse two accounts
+		// into one.
+		const accounts: AccountResponse[] = [
+			mkAccount({
+				id: "acc-8",
+				name: "spare",
+				provider: "claude-console-api",
+				hasRefreshToken: false,
+				usageData: null,
+			}),
+			mkAccount({
+				id: "acc-9",
+				name: "spare",
+				provider: "zai",
+				hasRefreshToken: false,
+				usageData: null,
+			}),
+		];
+
+		const seven = computePoolUsage(accounts, "seven_day", NOW);
+		expect(seven.fallback.map((f) => f.accountId)).toEqual(["acc-8", "acc-9"]);
 	});
 
 	it("claude-console-api goes to fallback for both pools", () => {
@@ -257,14 +284,22 @@ describe("computePoolUsage", () => {
 
 		const five = computePoolUsage(accounts, "five_hour", NOW);
 		expect(five.fallback).toEqual([
-			{ name: "console", provider: "claude-console-api" },
+			{
+				accountId: "console",
+				name: "console",
+				provider: "claude-console-api",
+			},
 		]);
 		expect(five.excluded).toEqual([]);
 		expect(five.contributing).toEqual([]);
 
 		const seven = computePoolUsage(accounts, "seven_day", NOW);
 		expect(seven.fallback).toEqual([
-			{ name: "console", provider: "claude-console-api" },
+			{
+				accountId: "console",
+				name: "console",
+				provider: "claude-console-api",
+			},
 		]);
 	});
 

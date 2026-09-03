@@ -94,13 +94,19 @@ export function PoolQuotaCard({
 		fiveHourLeast == null
 			? null
 			: `5h pace: ${Math.round(fiveHourLeast.pct)}% used · ${fiveHourLeast.name}`;
-	// A percentage is a POSITION; this is the RATE. 48% used one day into the
-	// week and 48% used six days in are opposite situations, and the reader was
-	// left to do that division against a reset printed on another line.
+	// A percentage is a POSITION; this is the RATE behind the one the headline
+	// states. 48% used one day into the week and 48% used six days in are
+	// opposite situations, and the reader was left to do that division against a
+	// reset printed on another line.
+	//
+	// Divided by the WEEKLY window, matching the figure above it and the Usage
+	// page's own pace row. Against the 5-hour window it was a rate for a
+	// different quantity than the percentage it sat under, and the two surfaces
+	// printed different multiples of "sustainable" for the same pool.
 	const burn = computeBurnRatio(
-		fiveHourLeast?.pct ?? 0,
-		fiveHourLeast?.resetMs ?? null,
-		"five_hour",
+		leastUsed?.pct ?? 0,
+		leastUsed?.resetMs ?? null,
+		"seven_day",
 		now,
 	);
 
@@ -166,6 +172,20 @@ export function PoolQuotaCard({
 					</>
 				)}
 
+				{/* Directly beneath the headline caption, ahead of the bars: this is
+				    the rate behind the figure immediately above it, and further down
+				    the card it read as a property of the account list instead. */}
+				{resolved && burn && (
+					<p
+						className={cn(
+							"truncate text-xs",
+							TONE_FIGURE_CLASS[burnRatioTone(burn)],
+						)}
+					>
+						pace {formatBurnRatio(burn)}
+					</p>
+				)}
+
 				{resolved && (
 					<PoolClassBars
 						accounts={weekly.accounts}
@@ -198,16 +218,6 @@ export function PoolQuotaCard({
 					)}
 					{resolved && paceText && (
 						<p className="truncate text-xs text-muted-foreground">{paceText}</p>
-					)}
-					{resolved && burn && (
-						<p
-							className={cn(
-								"truncate text-xs",
-								TONE_FIGURE_CLASS[burnRatioTone(burn)],
-							)}
-						>
-							pace {formatBurnRatio(burn)}
-						</p>
 					)}
 					{resolved && checkpoint && (
 						<p className="truncate text-xs text-muted-foreground">

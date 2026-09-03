@@ -63,6 +63,12 @@ export interface PoolUsageExclusion {
 }
 
 export interface PoolUsageFallback {
+	/**
+	 * Stable join key, for the same reason the exclusion rows carry one: a
+	 * consumer deduping these across both windows has to key on the account, not
+	 * on `name`, which is user-set and need not be unique.
+	 */
+	accountId: string;
 	name: string;
 	provider: string;
 }
@@ -853,7 +859,11 @@ export function computePoolUsage(
 
 	for (const account of accounts) {
 		if (!eligible.has(account.provider)) {
-			fallback.push({ name: account.name, provider: account.provider });
+			fallback.push({
+				accountId: account.id,
+				name: account.name,
+				provider: account.provider,
+			});
 			continue;
 		}
 
@@ -892,7 +902,11 @@ export function computePoolUsage(
 				: extractSevenDay(account.usageData);
 
 		if (extracted === null) {
-			fallback.push({ name: account.name, provider: account.provider });
+			fallback.push({
+				accountId: account.id,
+				name: account.name,
+				provider: account.provider,
+			});
 			continue;
 		}
 

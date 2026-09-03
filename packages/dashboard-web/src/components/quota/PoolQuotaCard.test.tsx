@@ -33,7 +33,7 @@ function bothAt(
 	fiveHourPct: number,
 	fiveHourResetMs: number | null,
 	weeklyPct: number,
-	weeklyResetMs: number,
+	weeklyResetMs: number | null,
 ) {
 	return {
 		five_hour: {
@@ -45,7 +45,8 @@ function bothAt(
 		},
 		seven_day: {
 			utilization: weeklyPct,
-			resets_at: new Date(weeklyResetMs).toISOString(),
+			resets_at:
+				weeklyResetMs == null ? null : new Date(weeklyResetMs).toISOString(),
 		},
 	};
 }
@@ -112,24 +113,29 @@ describe("PoolQuotaCard at-risk row", () => {
 	});
 });
 
-describe("PoolQuotaCard 5-hour pace", () => {
-	it("states the burn against the sustainable pace", () => {
-		// Halfway through a five-hour window at 75%: an even burn would be at
-		// 50%, so this is 1.5x sustainable.
+describe("PoolQuotaCard pace", () => {
+	it("measures the pace against the WEEKLY window the headline states", () => {
+		// Halfway through the weekly window at 75%: an even burn would be at 50%,
+		// so this is 1.5x sustainable. The 5-hour window is deliberately at a
+		// different multiple (20% halfway through is 0.4x), so a row computed off
+		// it would state a visibly different figure than the headline it sits
+		// under.
 		const html = render([
 			account({
-				usageData: bothAt(75, NOW + 2.5 * HOUR, 20, NOW + 6 * DAY) as never,
+				usageData: bothAt(20, NOW + 2.5 * HOUR, 75, NOW + 3.5 * DAY) as never,
 			}),
 		]);
 
 		expect(html).toContain("pace 1.5× sustainable pace");
+		expect(html).toContain("5h pace: 20% used");
 	});
 
-	it("says nothing about pace without a reset to measure against", () => {
-		// The window's start is derived from its reset, so no reset means no
-		// window to be on pace through.
+	it("says nothing about pace without a weekly reset to measure against", () => {
+		// The window's start is derived from its reset, so no weekly reset means
+		// no weekly window to be on pace through — and a live 5-hour reset is not
+		// a substitute, because it paces a different budget.
 		const html = render([
-			account({ usageData: bothAt(75, null, 20, NOW + 6 * DAY) as never }),
+			account({ usageData: bothAt(75, NOW + 2.5 * HOUR, 20, null) as never }),
 		]);
 
 		expect(html).toContain("5h pace: 75% used");

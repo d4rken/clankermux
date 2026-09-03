@@ -83,7 +83,11 @@ describe("StopsHistoryCard", () => {
 		// raw distribution buries that under a list of account counts.
 		const html = render();
 
-		expect(html).toContain("none: 4 · one: 24.5% · two or more: 75.0%");
+		// Count AND share for all three, so no bucket is stated in a different
+		// unit than the ones beside it.
+		expect(html).toContain(
+			"none: 4 (0.5%) · one: 196 (24.5%) · two or more: 600 (75.0%)",
+		);
 		expect(html).toContain("eligibility observed for 800 of 1000 requests");
 	});
 

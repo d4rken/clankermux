@@ -80,10 +80,14 @@ function candidatesLine(data: StopsHistoryResponse): string {
 		else two += row.requests;
 	}
 	const pct = (n: number) => `${((n / observedRequests) * 100).toFixed(1)}%`;
+	// Count AND share for every bucket, in one frame. A count for `none` beside
+	// percentages for the other two read as "4% had no candidate", and left the
+	// figure that matters most — how many requests actually had nowhere to go —
+	// recoverable only by arithmetic.
 	return [
-		`none: ${none}`,
-		`one: ${pct(one)}`,
-		`two or more: ${pct(two)}`,
+		`none: ${none} (${pct(none)})`,
+		`one: ${one} (${pct(one)})`,
+		`two or more: ${two} (${pct(two)})`,
 		`eligibility observed for ${observedRequests} of ${data.totalRequests} requests`,
 	].join(" · ");
 }

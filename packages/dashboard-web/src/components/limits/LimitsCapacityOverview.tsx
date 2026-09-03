@@ -299,12 +299,14 @@ export function LimitsCapacityOverview({
 	// Union of both windows' fallbacks. An account outside the 5-hour window is
 	// not necessarily outside the weekly one — Codex reports a weekly window and
 	// no 5-hour one — so listing either window's fallbacks alone would silently
-	// drop accounts the panels above do not account for. Deduped by name, since
-	// the same account appears in both lists when it has neither window.
+	// drop accounts the panels above do not account for. Deduped by ACCOUNT ID,
+	// since the same account appears in both lists when it has neither window —
+	// and never by name, which is user-set and need not be unique: keying on it
+	// dropped every account after the first that shared one.
 	const fallbackNames = [
 		...new Map(
 			[...fiveHour.fallback, ...sevenDay.fallback].map((f) => [
-				f.name,
+				f.accountId,
 				`${f.name} (${f.provider})`,
 			]),
 		).values(),
@@ -346,9 +348,8 @@ export function LimitsCapacityOverview({
 								as 0%.
 							</p>
 							<p className="text-muted-foreground">
-								Pay-as-you-go accounts and providers without a rolling window
-								are listed beneath the panels. Dashboard projections never
-								control request routing.
+								Accounts not on a rolling quota are listed beneath the panels.
+								Dashboard projections never control request routing.
 							</p>
 						</PopoverContent>
 					</Popover>
@@ -381,7 +382,7 @@ export function LimitsCapacityOverview({
 				</div>
 				{fallbackNames.length > 0 && (
 					<p className="mt-row text-xs text-muted-foreground">
-						Providers without this rolling window: {fallbackNames.join(", ")}
+						Not on a rolling quota: {fallbackNames.join(", ")}
 					</p>
 				)}
 				<div className="mt-row flex justify-end">

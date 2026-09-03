@@ -58,7 +58,7 @@ function rowsFor(accounts: AccountResponse[]) {
 }
 
 describe("FamilyWeeklyCard", () => {
-	it("states the worst account's reading, its bars and its reset", () => {
+	it("states the least-used account's reading, its bars and its reset", () => {
 		const html = render(
 			rowsFor([
 				scopedAccount("acct-a", [scopedEntry("Fable", 45)]),
@@ -68,14 +68,22 @@ describe("FamilyWeeklyCard", () => {
 
 		expect(html).toContain("Model limits");
 		expect(html).toContain("Fable");
-		expect(html).toContain("45% used");
+		// Routing picks ONE account, so the account with room is what decides
+		// whether the next Fable request goes through — not the worst one.
+		expect(html).toContain("20% used");
+		expect(html).toContain("lowest · acct-b");
 		expect(html).toContain("acct-a");
 		expect(html).toContain("2 of 2 reporting");
-		// The reset named is the SOONEST one, so it belongs to acct-b even though
-		// the percentage above names acct-a.
+		// The reset named is the SOONEST one, which here happens to be the same
+		// account the headline names; the two are computed separately.
 		expect(html).toContain("resets in 1d · acct-b");
 		expect(html).toContain('aria-valuenow="45"');
 		expect(html).toContain('aria-valuenow="20"');
+		// Ascending, so the headline account is the first bar — as on the
+		// servable-class cards.
+		expect(html.indexOf('aria-valuenow="20"')).toBeLessThan(
+			html.indexOf('aria-valuenow="45"'),
+		);
 	});
 
 	it("says a family is spent rather than merely elevated", () => {
@@ -100,6 +108,18 @@ describe("FamilyWeeklyCard", () => {
 		);
 
 		expect(html).toContain("On pace");
+	});
+
+	it("quantises the headline the way the chip thresholds do", () => {
+		// 79.6%: the chip's threshold is a hard 80, so a rounded headline printed
+		// "80% used" directly above a chip saying "On pace".
+		const html = render(
+			rowsFor([scopedAccount("a", [scopedEntry("Fable", 79.6)])]),
+		);
+
+		expect(html).toContain("79% used");
+		expect(html).toContain("On pace");
+		expect(html).not.toContain("80% used");
 	});
 
 	it("says who cannot report rather than hiding the family", () => {

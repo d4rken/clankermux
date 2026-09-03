@@ -26,20 +26,24 @@ export const STOP_CAUSE_LABELS: Record<StopCause, string> = {
 /**
  * A distinct hue per cause, so a stacked bar can be read against the legend.
  *
- * The nine `CHART_TOKENS` roles, assigned in `STOP_CAUSES` order, plus muted
- * grey for `other`. `other` is deliberately outside the palette: it is the
- * bucket for terminals nobody has classified yet, not a cause of its own, and
- * giving it a hue of equal weight would make an unclassified spike look like a
- * named failure mode.
+ * The nine `CHART_TOKENS` roles plus muted grey for `other`. Assignment follows
+ * `STOP_CAUSES` order except where a role carries meaning of its own: the
+ * success hue is not handed to whichever cause the list order happens to put
+ * there. `other` is deliberately outside the palette: it is the bucket for
+ * terminals nobody has classified yet, not a cause of its own, and giving it a
+ * hue of equal weight would make an unclassified spike look like a named
+ * failure mode.
  */
 export const STOP_CAUSE_COLORS: Record<StopCause, string> = {
 	pool_quota_exhausted: CHART_TOKENS.primary,
-	family_weekly_exhausted: CHART_TOKENS.success,
+	family_weekly_exhausted: CHART_TOKENS.pink,
 	model_not_served: CHART_TOKENS.warning,
 	oauth_tokens_expired: CHART_TOKENS.error,
 	pinned_target_unavailable: CHART_TOKENS.blue,
 	provider_overloaded: CHART_TOKENS.purple,
-	usage_throttled: CHART_TOKENS.pink,
+	// The one cause allowed the success hue: it is the proxy's own deliberate
+	// pacing, not a failure of anything.
+	usage_throttled: CHART_TOKENS.success,
 	context_window_exceeded: CHART_TOKENS.indigo,
 	upstream_error: CHART_TOKENS.cyan,
 	other: "var(--muted-foreground)",

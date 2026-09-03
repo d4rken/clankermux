@@ -3,6 +3,8 @@ import { formatDurationDhm } from "../../lib/format-prediction";
 import {
 	FAMILY_WEEKLY_ELEVATED_THRESHOLD_PCT,
 	type FamilyRow,
+	type FamilyWeeklyAccountUsage,
+	type FamilyWeeklyUsage,
 	type Outlook,
 	type PoolAccountBar,
 } from "../../lib/pool-usage";
@@ -47,7 +49,21 @@ function familyOutlook(row: FamilyRow): Outlook {
 }
 
 /**
- * The family's accounts as distribution bars.
+ * The account with the most room left in this family.
+ *
+ * `usage.accounts` is non-empty whenever `usage` exists — a family bucket is
+ * only created by an account reporting a window for it — which is the same
+ * assumption `worstPct` already rests on.
+ */
+function leastUsedAccount(usage: FamilyWeeklyUsage): FamilyWeeklyAccountUsage {
+	return usage.accounts.reduce((least, entry) =>
+		entry.pct < least.pct ? entry : least,
+	);
+}
+
+/**
+ * The family's accounts as distribution bars, ordered from most headroom to
+ * least, so the account the headline names is the first row.
  *
  * `provider: "anthropic"` because only Anthropic-style payloads carry scoped
  * family windows at all — the bars use it for nothing but the servable-class
@@ -56,16 +72,27 @@ function familyOutlook(row: FamilyRow): Outlook {
  * could not report, so what remains is a reading by construction.
  */
 function familyBars(row: FamilyRow): PoolAccountBar[] {
-	return (row.usage?.accounts ?? []).map((entry) => ({
-		accountId: entry.accountId,
-		name: entry.name,
-		provider: "anthropic",
-		pct: entry.pct,
-		state: "reporting" as const,
-		reason: null,
-		resetMs: entry.resetMs,
-	}));
+	return (row.usage?.accounts ?? [])
+		.map((entry) => ({
+			accountId: entry.accountId,
+			name: entry.name,
+			provider: "anthropic",
+			pct: entry.pct,
+			state: "reporting" as const,
+			reason: null,
+			resetMs: entry.resetMs,
+		}))
+		.sort((a, b) => a.pct - b.pct);
 }
+
+/**
+ * The card's own wording for a reading: FLOORED, never rounded.
+ *
+ * The chip already floors (`At 80%`) and switches at a hard 80, so a rounded
+ * headline printed "80% used" directly above an "On pace" chip for the same
+ * 79.6. One quantisation for every figure on the card.
+ */
+const floorPct = (pct: number): string => `${Math.floor(pct)}%`;
 
 /**
  * Per-model weekly caps, one block per family.
@@ -76,6 +103,14 @@ function familyBars(row: FamilyRow): PoolAccountBar[] {
  * ("Fable weekly at 92% on 1 of 3 accounts"), which states the worst account and
  * hides the distribution — the thing that decides whether a sibling can still
  * take the request.
+ *
+ * THE HEADLINE IS THE LEAST-USED ACCOUNT, as on the servable-class cards.
+ * Routing picks ONE account, so what decides whether the next request for this
+ * family goes through is whether ANY account still has room for it; headlining
+ * the worst one announced a problem the pool could already route around, and
+ * put the two Overview quota surfaces in different frames for the same
+ * question. The chip is the other end deliberately: `Exhausted on 1 of 3` /
+ * `At 92%` count who is spent, which is what the headline no longer says.
  *
  * Codex's synthetic per-model weekly windows are not here; see
  * {@link listFamilyRows} for why, and the Accounts tab for where they are.
@@ -118,6 +153,7 @@ export function FamilyWeeklyCard({
 					<div className="space-y-group">
 						{rows.map((row) => {
 							const usage = row.usage;
+							const least = usage == null ? null : leastUsedAccount(usage);
 							const outlook = familyOutlook(row);
 							const total = row.reportingCount + row.unavailableReporters;
 							// Only a FUTURE reset is offered. `earliestResetMs` is the
@@ -143,7 +179,7 @@ export function FamilyWeeklyCard({
 										</StatusChip>
 									</div>
 
-									{usage == null ? (
+									{usage == null || least == null ? (
 										// The family exists — a live account reports the window —
 										// but every account that has it is unavailable. Saying
 										// nothing would read as "no such limit".
@@ -160,12 +196,16 @@ export function FamilyWeeklyCard({
 													TONE_FIGURE_CLASS[outlook.tone],
 												)}
 											>
-												{Math.round(usage.worstPct)}% used
+												{floorPct(least.pct)} used
 											</p>
 											<p className="truncate text-xs text-muted-foreground">
-												{usage.worstAccountName}
+												lowest · {least.name}
 											</p>
-											<PoolClassBars accounts={familyBars(row)} />
+											<PoolClassBars
+												accounts={familyBars(row)}
+												leastUsedAccountId={least.accountId}
+												formatPct={floorPct}
+											/>
 											<div className="mt-item space-y-tight text-xs text-muted-foreground">
 												<p className="truncate">
 													{row.reportingCount} of {total} reporting
