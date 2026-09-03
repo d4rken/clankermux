@@ -1,7 +1,7 @@
 import { RUNWAY_HORIZON_MS } from "@clankermux/core";
 import type { AnalyticsSection } from "@clankermux/types";
 import { formatNumber, formatPercentage } from "@clankermux/ui-common";
-import { Activity, BarChart3, Gauge } from "lucide-react";
+import { Activity } from "lucide-react";
 import React, { useCallback, useMemo, useState } from "react";
 import { REFRESH_INTERVALS, type TimeRange } from "../constants";
 import {
@@ -13,11 +13,11 @@ import {
 import { usePoolUsage } from "../hooks/usePoolUsage";
 import { dataAvailability, staleAgeLabel } from "../lib/data-availability";
 import { buildOverviewTimeSeries } from "../lib/overview-timeseries";
+import type { ServableClassPool } from "../lib/pool-usage";
 import { MissingSectionsNotice } from "./analytics/MissingSectionsNotice";
 import { ChartsSection } from "./overview/ChartsSection";
 import { LiveActivityLanes } from "./overview/LiveActivityLanes";
 import { MetricCard } from "./overview/MetricCard";
-import { PoolMetricCard } from "./overview/PoolMetricCard";
 import { PricingGapBanner } from "./overview/PricingGapBanner";
 import { RateLimitInfo } from "./overview/RateLimitInfo";
 import { RunwayCard } from "./overview/RunwayCard";
@@ -27,9 +27,33 @@ import { SystemHealthStrip } from "./overview/SystemHealthStrip";
 import { CompactRecentErrors } from "./overview/system-status/CompactRecentErrors";
 import { useVisibleRecentErrors } from "./overview/system-status/useVisibleRecentErrors";
 import { TimeRangeSelector } from "./overview/TimeRangeSelector";
+import { PoolQuotaCard } from "./quota/PoolQuotaCard";
 
 /** Error window for the Overview's compact list, in hours. */
 export const OVERVIEW_ERROR_WINDOW_HOURS = 1;
+
+/**
+ * Stands in for the class list while `/api/accounts` is pending or failed.
+ *
+ * The class list is DERIVED from the accounts, so before they arrive there is
+ * nothing to iterate — mapping over the empty array would render no card at all
+ * and silently drop the quota section from the page. Every count is zero and
+ * every figure null, so the card takes its own pending or unavailable branch and
+ * never states a measurement.
+ */
+const PLACEHOLDER_CLASS_POOL: ServableClassPool = {
+	classId: "pending",
+	label: "Quota",
+	accounts: [],
+	leastUsed: null,
+	worst: null,
+	reportingCount: 0,
+	capacityCount: 0,
+	eligibleTotal: 0,
+	singlePointOfFailure: false,
+	earliestResetMs: null,
+	earliestResetAccountName: null,
+} as const;
 
 /**
  * The Overview's metric tiles and charts. `activeSessions` is not optional
@@ -272,31 +296,42 @@ export const OverviewTab = React.memo(() => {
 						},
 					]}
 				/>
-				{/* `computePoolUsage([], …)` yields an all-empty result that reads as
-				    "no accounts contribute to this pool" — a claim neither an
-				    in-flight nor a failed /api/accounts read is entitled to make. */}
-				<PoolMetricCard
-					title="5h Pool"
-					icon={Gauge}
-					result={fiveHourPool}
-					window="five_hour"
-					loading={accountsPending}
-					unavailableReason={
-						accountsUnavailable ? "Account data unavailable" : undefined
-					}
-					staleNote={accountsStaleNote}
-				/>
-				<PoolMetricCard
-					title="7d Pool"
-					icon={BarChart3}
-					result={weeklyPool}
-					window="seven_day"
-					loading={accountsPending}
-					unavailableReason={
-						accountsUnavailable ? "Account data unavailable" : undefined
-					}
-					staleNote={accountsStaleNote}
-				/>
+				{/* One card per servable class, because the accounts in different
+				    classes cannot cover for each other — see lib/pool-classes. The
+				    5-hour window is a ROW inside each card rather than a card of its
+				    own: the weekly window is the budget, the 5-hour one is the rate
+				    governor that paces you through it.
+
+				    `computePoolUsage([], …)` yields an all-empty result that reads as
+				    "no accounts contribute to this pool" — a claim neither an in-flight
+				    nor a failed /api/accounts read is entitled to make, hence the
+				    explicit pending/unavailable props. While either holds there are no
+				    classes to iterate, so one placeholder card stands in for the set. */}
+				{accountsPending || accountsUnavailable ? (
+					<PoolQuotaCard
+						weekly={PLACEHOLDER_CLASS_POOL}
+						fiveHour={null}
+						weeklyResult={weeklyPool}
+						loading={accountsPending}
+						unavailableReason={
+							accountsUnavailable ? "Account data unavailable" : undefined
+						}
+					/>
+				) : (
+					weeklyPool.classes.map((weeklyClass) => (
+						<PoolQuotaCard
+							key={weeklyClass.classId}
+							weekly={weeklyClass}
+							fiveHour={
+								fiveHourPool.classes.find(
+									(c) => c.classId === weeklyClass.classId,
+								) ?? null
+							}
+							weeklyResult={weeklyPool}
+							staleNote={accountsStaleNote}
+						/>
+					))
+				)}
 				{/* Gated on the runway read ALONE. The response carries the account
 				    names it needs, so a failing /api/accounts — which blanks the two
 				    pool tiles beside it — must not blank this one too. */}
