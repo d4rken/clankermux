@@ -21,6 +21,7 @@ export * from "./quota-drift";
 export * from "./request";
 export * from "./runway";
 export * from "./stats";
+export * from "./stops-history";
 export * from "./strategy";
 export * from "./system";
 export * from "./unified-claim-observation";

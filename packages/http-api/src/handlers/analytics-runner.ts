@@ -23,6 +23,7 @@ import { createMemoryHistoryHandler as createDirectMemoryHistoryHandler } from "
 import { createPaymentsSummaryDataHandler as createDirectPaymentsSummaryDataHandler } from "./payments-summary-direct";
 import { createQuotaDriftHandler as createDirectQuotaDriftHandler } from "./quota-drift-direct";
 import { createStatsHandler as createDirectStatsHandler } from "./stats-direct";
+import { createStopsHistoryHandler as createDirectStopsHistoryHandler } from "./stops-history-direct";
 import { createUsageHistoryHandler as createDirectUsageHistoryHandler } from "./usage-history-direct";
 import { createUsageScopedHistoryHandler as createDirectUsageScopedHistoryHandler } from "./usage-scoped-history-direct";
 
@@ -53,6 +54,7 @@ const WORKER_SOFT_TIMEOUT_MS_BY_KIND: Record<DashboardWorkerKind, number> = {
 	stats: DEFAULT_WORKER_TIMEOUT_MS,
 	"usage-history": DEFAULT_WORKER_TIMEOUT_MS,
 	"usage-scoped-history": DEFAULT_WORKER_TIMEOUT_MS,
+	"stops-history": DEFAULT_WORKER_TIMEOUT_MS,
 	"memory-history": DEFAULT_WORKER_TIMEOUT_MS,
 	"cache-keepalive-history": DEFAULT_WORKER_TIMEOUT_MS,
 	"cache-effectiveness": DEFAULT_WORKER_TIMEOUT_MS,
@@ -168,6 +170,7 @@ const LANE_BY_KIND: Record<DashboardWorkerKind, WorkerLane> = {
 	stats: "light",
 	"usage-history": "light",
 	"usage-scoped-history": "light",
+	"stops-history": "light",
 	"memory-history": "light",
 	"cache-keepalive-history": "light",
 	"cache-effectiveness": "light",
@@ -228,6 +231,11 @@ const KIND_LABELS: Record<
 		timeoutMessage: "Scoped usage history request timed out",
 		failureMessage: "Failed to fetch scoped usage history data",
 		tooManyMessage: "Too many scoped usage history requests",
+	},
+	"stops-history": {
+		timeoutMessage: "Stops history request timed out",
+		failureMessage: "Failed to fetch stops history data",
+		tooManyMessage: "Too many stops history requests",
 	},
 	"memory-history": {
 		timeoutMessage: "Memory history request timed out",
@@ -315,6 +323,18 @@ export function createIsolatedUsageScopedHistoryHandler(context: APIContext) {
 		context,
 		"usage-scoped-history",
 		createDirectUsageScopedHistoryHandler(context),
+	);
+}
+
+/**
+ * Worker-routed read of the retrospective stops surface — how often requests
+ * were actually refused in a range, and why. See stops-history-direct.ts.
+ */
+export function createIsolatedStopsHistoryHandler(context: APIContext) {
+	return createIsolatedDashboardHandler(
+		context,
+		"stops-history",
+		createDirectStopsHistoryHandler(context),
 	);
 }
 
