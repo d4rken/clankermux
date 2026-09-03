@@ -1,8 +1,8 @@
-import { RUNWAY_HORIZON_MS, registerUIRefresh } from "@clankermux/core";
+import { RUNWAY_HORIZON_MS } from "@clankermux/core";
 import type { AnalyticsSection } from "@clankermux/types";
 import { formatNumber, formatPercentage } from "@clankermux/ui-common";
 import { Activity, BarChart3, Gauge } from "lucide-react";
-import React, { useCallback, useEffect, useMemo, useState } from "react";
+import React, { useCallback, useMemo, useState } from "react";
 import { REFRESH_INTERVALS, type TimeRange } from "../constants";
 import {
 	useAccounts,
@@ -10,9 +10,9 @@ import {
 	useRunway,
 	useStats,
 } from "../hooks/queries";
+import { usePoolUsage } from "../hooks/usePoolUsage";
 import { dataAvailability, staleAgeLabel } from "../lib/data-availability";
 import { buildOverviewTimeSeries } from "../lib/overview-timeseries";
-import { computePoolUsage } from "../lib/pool-usage";
 import { MissingSectionsNotice } from "./analytics/MissingSectionsNotice";
 import { ChartsSection } from "./overview/ChartsSection";
 import { LiveActivityLanes } from "./overview/LiveActivityLanes";
@@ -112,7 +112,10 @@ export const OverviewTab = React.memo(() => {
 		dismissAll: dismissAllErrors,
 	} = useVisibleRecentErrors(stats?.recentErrors);
 
-	const [now, setNow] = useState(() => Date.now());
+	// One computation and one clock, shared with the Usage page — see
+	// usePoolUsage. `now` also drives the stale-age captions below, so every
+	// duration on this page advances on the same tick.
+	const { now, fiveHour: fiveHourPool, sevenDay: weeklyPool } = usePoolUsage();
 	// Recomputed against `now` so the age keeps ticking with the 30s refresh
 	// below rather than freezing at the moment the read first failed.
 	const statsStaleNote =
@@ -132,23 +135,6 @@ export const OverviewTab = React.memo(() => {
 			? `Last updated ${staleAgeLabel(runwayAvailability.lastUpdatedAt, now)}`
 			: undefined;
 
-	useEffect(() => {
-		return registerUIRefresh({
-			id: "pool-metric-card-update",
-			callback: () => setNow(Date.now()),
-			seconds: 30,
-			description: "Combined-quota tile refresh",
-		});
-	}, []);
-
-	const fiveHourPool = useMemo(
-		() => computePoolUsage(accounts ?? [], "five_hour", now),
-		[accounts, now],
-	);
-	const weeklyPool = useMemo(
-		() => computePoolUsage(accounts ?? [], "seven_day", now),
-		[accounts, now],
-	);
 	// Memoize percentage change calculation (must be at top level)
 	const pctChange = useCallback(
 		(current: number, previous: number): number | null => {
