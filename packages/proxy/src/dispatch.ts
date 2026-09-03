@@ -1,4 +1,4 @@
-import { HTTP_STATUS } from "@clankermux/core";
+import { HTTP_STATUS, ModelNotServedError } from "@clankermux/core";
 import { Logger } from "@clankermux/logger";
 import { handleProxy, type ProxyContext } from "./proxy";
 
@@ -38,8 +38,16 @@ export async function dispatchProxyRequest(
 		log.error("Proxy request failed:", proxyError);
 
 		const isServiceUnavailable = statusCode === HTTP_STATUS.SERVICE_UNAVAILABLE;
+		// The one non-503 terminal whose message is deliberately client-facing.
+		// The generic branch below replaces every other message with "Proxy
+		// request failed" so an internal string can never leak, and that default
+		// is right — but it would also swallow the model name, which is the
+		// entire content of this terminal. Gated on the class rather than on the
+		// status so a future 400 from anywhere else does not inherit the
+		// passthrough by accident.
+		const isModelNotServed = proxyError instanceof ModelNotServedError;
 		const message =
-			isServiceUnavailable && proxyError instanceof Error
+			(isServiceUnavailable || isModelNotServed) && proxyError instanceof Error
 				? proxyError.message
 				: isServiceUnavailable
 					? "Service temporarily unavailable. Please try again later."
@@ -51,7 +59,12 @@ export async function dispatchProxyRequest(
 				error: {
 					type: isServiceUnavailable
 						? "service_unavailable_error"
-						: "proxy_error",
+						: isModelNotServed
+							? // Anthropic's vocabulary for a 400 about the request
+								// itself, so a client's existing error handling reads it
+								// as a request problem rather than a transport one.
+								"invalid_request_error"
+							: "proxy_error",
 					message,
 				},
 			}),

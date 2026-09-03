@@ -69,6 +69,7 @@ export {
 export {
 	isInvalidGrantMessage,
 	logError,
+	ModelNotServedError,
 	OAuthError,
 	OAuthRefreshTokenError,
 	PAUSE_REASON_NEEDS_REAUTH,

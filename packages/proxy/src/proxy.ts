@@ -3,6 +3,7 @@ import {
 	getModelFamily,
 	isDebugEnabled,
 	isPinActive,
+	ModelNotServedError,
 	requestEvents,
 	ServiceUnavailableError,
 	ValidationError,
@@ -746,6 +747,22 @@ async function handleIngestedProxy(
 	// neither `recordSyntheticErrorResponse`'s hardcoded 0 nor the candidate-list
 	// length the thrown message quotes.
 	let upstreamAttempts = 0;
+	/**
+	 * How many of those attempts failed over because the account's plan is not
+	 * entitled to the requested model, rather than because it had no capacity.
+	 *
+	 * Keyed on `model_not_entitled`, NOT on `model_not_found`. The latter is
+	 * also emitted after an account's model-fallback list is exhausted, where
+	 * the outcome kind is chosen from the LAST response's status alone: a
+	 * primary that 429s followed by a fallback that 404s reports
+	 * `model_not_found` for what was really a capacity failure. Counting that
+	 * here would relabel a genuine outage as a configuration problem — the exact
+	 * inversion of what this terminal exists to fix.
+	 */
+	let modelUnentitledAttempts = 0;
+	const noteAttemptOutcome = (outcome: ProxyAttemptOutcome): void => {
+		if (outcome.kind === "model_not_entitled") modelUnentitledAttempts++;
+	};
 	const countedAttemptThroughProbeGate = (
 		account: Account,
 		attempt: () => Promise<Response | null>,
@@ -983,6 +1000,7 @@ async function handleIngestedProxy(
 								signal: req.signal,
 								onOutcome: (o) => {
 									firstOutcome = o;
+									noteAttemptOutcome(o);
 									// The normal loop below skips the held account (attempted-id
 									// guard), so its suppression must be recorded here — and so
 									// must an ordinary failure, for the same reason. Without
@@ -1266,6 +1284,7 @@ async function handleIngestedProxy(
 						// the combo-fallback pass.
 						signal: req.signal,
 						onOutcome: (o) => {
+							noteAttemptOutcome(o);
 							holds.noteOverloadSuppression(list[i], o);
 							// An ORDINARY failure — no overload verdict to wait on.
 							// Recorded so a hold entered later in THIS request does not
@@ -1497,19 +1516,77 @@ async function handleIngestedProxy(
 	const recordGiveUpTerminal = async (
 		label: string,
 		message: string,
+		// Defaults are the 503 shape every terminal here used before there was a
+		// second one. Passed explicitly rather than derived from the label so the
+		// recorded row and the bytes `dispatchProxyRequest` builds from the thrown
+		// error stay one edit apart.
+		{ status = 503, errorType = "service_unavailable_error" } = {},
 	): Promise<void> => {
 		if (ctx.requestRecorder.hasRecord(requestMeta.id)) return;
 		const terminalResponse = new Response(
 			JSON.stringify({
 				type: "error",
-				error: { type: "service_unavailable_error", message },
+				error: { type: errorType, message },
 			}),
-			{ status: 503, headers: { "Content-Type": "application/json" } },
+			{ status, headers: { "Content-Type": "application/json" } },
 		);
 		await recordSyntheticErrorResponse(terminalResponse, label, {
 			failoverAttempts: upstreamAttempts,
 		});
 	};
+
+	// Every account we actually reached rejected the MODEL, not the load. That is
+	// a different diagnosis from an exhausted pool and must not be filed under
+	// one: `all_accounts_failed` is what every "did I run out of quota" question
+	// counts, and a model no plan serves would inflate that answer forever while
+	// the accounts behind it sat idle.
+	//
+	// Three conditions, each closing a way this label could lie:
+	//
+	// 1. At least one upstream attempt. With none there is no evidence about the
+	//    model at all, and a verdict from an empty sample is exactly the
+	//    overreach this terminal exists to undo.
+	// 2. EVERY attempt was an entitlement rejection. One 429 in the mix means
+	//    the pool had a capacity problem too, and the broad label is then the
+	//    honest one.
+	// 3. No candidate was dropped by an admission gate. The gates remove
+	//    accounts for provider overload, usage throttling, family-weekly pacing
+	//    and context-window fit — all reasons an account that might have served
+	//    this model was never asked. Comparing the post-gate list against the
+	//    pre-gate one stays correct when a gate is added later, which
+	//    enumerating today's gates would not.
+	//
+	// What it still cannot see: an account the strategy had already dropped as
+	// unavailable (paused, cooling down) before candidate selection. Because a
+	// plan-scoped rejection is account-scoped, such an account might have served
+	// this model. So the message claims only what was OBSERVED — what the
+	// attempted accounts said — and never that no account anywhere could serve
+	// it.
+	//
+	// Ordered BEFORE the OAuth-expiry branch, and the order is load-bearing.
+	// `needsReauth` is an age HEURISTIC (`isRefreshTokenLikelyExpired`): an
+	// account whose refresh token looks stale can still hold a valid access
+	// token, reach upstream, and come back with a plan-scoped model rejection.
+	// The observed cause must outrank the inferred one there. This cannot
+	// swallow a genuine OAuth failure, because a token that actually fails to
+	// resolve produces a non-model outcome and so can never satisfy the
+	// unanimity condition below.
+	if (
+		upstreamAttempts > 0 &&
+		modelUnentitledAttempts === upstreamAttempts &&
+		accounts.length >= selectedAccounts.length
+	) {
+		const model = effectiveRequestModel ?? requestMeta.requestedModel ?? null;
+		const modelLabel = model ?? "the requested model";
+		const unserveableMessage =
+			`Every account attempted (${upstreamAttempts}) rejected model '${modelLabel}' as outside its plan entitlement. ` +
+			`Retrying will not help until an account whose plan serves this model is available.`;
+		await recordGiveUpTerminal("model_not_served", unserveableMessage, {
+			status: 400,
+			errorType: "invalid_request_error",
+		});
+		throw new ModelNotServedError(unserveableMessage, model, ctx.provider.name);
+	}
 
 	if (needsReauth.length > 0) {
 		const accountNames = needsReauth.map((acc) => acc.name).join(", ");

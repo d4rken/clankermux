@@ -116,6 +116,7 @@ import {
 import { createRequestsStreamHandler } from "./handlers/requests-stream";
 import { createRunwayHandler } from "./handlers/runway";
 import { createStatsHandler, createStatsResetHandler } from "./handlers/stats";
+import { createStopsHistoryHandler } from "./handlers/stops-history";
 import {
 	createIntegrityCheckHandler,
 	createStorageHandler,
@@ -252,6 +253,7 @@ export class APIRouter {
 		const usageScopedHistoryHandler = createUsageScopedHistoryHandler(
 			this.context,
 		);
+		const stopsHistoryHandler = createStopsHistoryHandler(this.context);
 		const quotaDriftHandler = createQuotaDriftHandler(this.context);
 		const memoryHistoryHandler = createMemoryHistoryHandler(this.context);
 		const cacheKeepaliveHandler = createCacheKeepaliveHandler(this.context);
@@ -514,6 +516,12 @@ export class APIRouter {
 				return usageScopedHistoryHandler(url.searchParams);
 			},
 		);
+		// How often requests were actually refused, and why. Takes only `range`.
+		// The retrospective counterpart to every forecast on the page: unlike a
+		// projection, this one can be checked against what happened.
+		this.handlers.set("GET:/api/analytics/stops-history", (_req, url) => {
+			return stopsHistoryHandler(url.searchParams);
+		});
 		// Precomputed quota-drift analysis. Takes no params: the pass fits the
 		// whole retained history, and a range filter would silently change which
 		// evidence a verdict rests on.

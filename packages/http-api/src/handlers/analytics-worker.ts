@@ -9,6 +9,7 @@ import { createMemoryHistoryHandler } from "./memory-history-direct";
 import { createPaymentsSummaryDataHandler } from "./payments-summary-direct";
 import { createQuotaDriftHandler } from "./quota-drift-direct";
 import { createStatsHandler } from "./stats-direct";
+import { createStopsHistoryHandler } from "./stops-history-direct";
 import { createUsageHistoryHandler } from "./usage-history-direct";
 import { createUsageScopedHistoryHandler } from "./usage-scoped-history-direct";
 
@@ -23,6 +24,7 @@ export type DashboardWorkerKind =
 	| "stats"
 	| "usage-history"
 	| "usage-scoped-history"
+	| "stops-history"
 	| "memory-history"
 	| "cache-keepalive-history"
 	| "cache-effectiveness"
@@ -71,26 +73,28 @@ self.onmessage = async (event: MessageEvent<AnalyticsWorkerRequest>) => {
 			},
 		} as APIContext;
 
-		const handler =
-			kind === "stats"
-				? createStatsHandler(context)
-				: kind === "usage-history"
-					? createUsageHistoryHandler(context)
-					: kind === "usage-scoped-history"
-						? createUsageScopedHistoryHandler(context)
-						: kind === "memory-history"
-							? createMemoryHistoryHandler(context)
-							: kind === "cache-keepalive-history"
-								? createCacheKeepaliveHistoryHandler(context)
-								: kind === "cache-effectiveness"
-									? createCacheEffectivenessHandler(context)
-									: kind === "payments-summary"
-										? createPaymentsSummaryDataHandler(context)
-										: kind === "filter-options"
-											? createAnalyticsFilterOptionsHandler(context)
-											: kind === "quota-drift"
-												? createQuotaDriftHandler(context)
-												: createAnalyticsHandler(context);
+		// Table rather than a ternary chain: this was eleven nested arms, where
+		// adding a kind meant re-indenting every one below it and the compiler
+		// could not tell you that a kind had been missed. `satisfies Record<...>`
+		// makes an unhandled kind a type error at the point it is added.
+		const HANDLER_BY_KIND = {
+			stats: createStatsHandler,
+			"usage-history": createUsageHistoryHandler,
+			"usage-scoped-history": createUsageScopedHistoryHandler,
+			"stops-history": createStopsHistoryHandler,
+			"memory-history": createMemoryHistoryHandler,
+			"cache-keepalive-history": createCacheKeepaliveHistoryHandler,
+			"cache-effectiveness": createCacheEffectivenessHandler,
+			"payments-summary": createPaymentsSummaryDataHandler,
+			"filter-options": createAnalyticsFilterOptionsHandler,
+			"quota-drift": createQuotaDriftHandler,
+			analytics: createAnalyticsHandler,
+		} satisfies Record<
+			DashboardWorkerKind,
+			(context: APIContext) => (params: URLSearchParams) => Promise<Response>
+		>;
+
+		const handler = HANDLER_BY_KIND[kind](context);
 		const response = await handler(new URLSearchParams(params));
 		const body = await response.text();
 		db.close();

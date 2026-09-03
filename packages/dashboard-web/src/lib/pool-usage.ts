@@ -20,6 +20,7 @@ import {
 	weeklyLifetimeConfidence,
 	windowBurnAnchor,
 } from "./lifetime-confidence";
+import { compareServableClasses, servableClassFor } from "./pool-classes";
 
 export type PoolWindow = "five_hour" | "seven_day";
 
@@ -59,12 +60,164 @@ export interface PoolUsageFallback {
 	provider: string;
 }
 
+/** One account's row in a class's distribution strip. */
+export interface PoolAccountBar {
+	accountId: string;
+	name: string;
+	provider: string;
+	/**
+	 * Utilization, or null when there is no reading.
+	 *
+	 * Null is NOT zero and must never be drawn as an empty bar: "nobody has
+	 * polled this account" and "this account is untouched" are opposite facts,
+	 * and the second one is the reassuring one.
+	 */
+	pct: number | null;
+	state: "reporting" | "exhausted" | "unknown";
+	reason: ExcludedReason | null;
+	resetMs: number | null;
+}
+
+/**
+ * One pool of accounts that can actually cover for each other.
+ *
+ * See lib/pool-classes: a Claude request cannot be served by a Codex account, so
+ * a figure averaged across both describes no decision anyone makes.
+ */
+export interface ServableClassPool {
+	classId: string;
+	label: string;
+	/** Ascending by utilization, unknowns last. */
+	accounts: PoolAccountBar[];
+	/**
+	 * The account with the most headroom, and the real constraint on this class.
+	 *
+	 * Routing picks ONE account, so what matters is whether any account still has
+	 * room — not the mean, which mixes a spent account with a fresh one and
+	 * describes neither. Measured over 45 days of production data this is also
+	 * far the steadier statistic: it climbed 0% to 25% monotonically across a
+	 * week while the runway it sits beside swung by a day between polls.
+	 */
+	leastUsed: PoolUsageContribution | null;
+	/** The most-spent account, for the distribution's other end. */
+	worst: PoolUsageContribution | null;
+	reportingCount: number;
+	/** Reporting + exhausted: accounts that could serve if they had room. */
+	capacityCount: number;
+	/** Capacity + unknown: every account eligible for this window. */
+	eligibleTotal: number;
+	/**
+	 * One account or fewer can serve this class, so a single failure stops it.
+	 *
+	 * This is the condition behind every hard stop in the production sample that
+	 * motivated the redesign, and no pooled average can express it: the pool read
+	 * comfortable throughout because five healthy accounts of another class were
+	 * averaged in.
+	 */
+	singlePointOfFailure: boolean;
+	earliestResetMs: number | null;
+	earliestResetAccountName: string | null;
+}
+
 /**
  * Percent at/above which a per-model-family weekly window is surfaced as
  * "elevated" in the pool view (worth a callout even when account-wide capacity
  * is healthy). Inline named constant — NO env var / feature gate.
  */
 export const FAMILY_WEEKLY_ELEVATED_THRESHOLD_PCT = 80;
+
+export type OutlookTone = "neutral" | "success" | "warning" | "destructive";
+
+export interface Outlook {
+	label: string;
+	tone: OutlookTone;
+}
+
+/**
+ * The single verdict on a pool's health, shared by every surface that renders
+ * one.
+ *
+ * There used to be two. The Overview tinted its headline with a bare 60/80
+ * split on the average, while the Usage page ran a richer rule that also
+ * escalated on at-risk, exhausted or unreported accounts. A pool at 20% with
+ * one `no_usage_data` account was therefore GREEN on Overview and AMBER on
+ * Usage — the same pool, the same instant, two colours, and no way for a reader
+ * to tell which one was lying. This is the Usage rule, which is a strict
+ * superset, and both pages now call it.
+ *
+ * The escalation on `excluded` is deliberate and easy to mistake for a bug: an
+ * account nobody has usage data for is not evidence of health, and the average
+ * silently omits it. Amber is the honest colour for a number computed over
+ * fewer accounts than the pool contains.
+ */
+export function poolOutlook(result: PoolUsageResult): Outlook {
+	if (result.average == null) {
+		return { label: "Account-wide unknown", tone: "neutral" };
+	}
+
+	// Every eligible account is spent or unavailable. The average alone cannot
+	// say this: with nothing contributing, it is composed entirely of the 100%
+	// charged to unavailable accounts, which reads the same as a busy pool.
+	const allUnavailable =
+		result.contributing.length === 0 && result.exhausted.length > 0;
+
+	if (result.average >= 100 || allUnavailable) {
+		return { label: "Constrained", tone: "destructive" };
+	}
+	if (result.average >= 80) {
+		return { label: "High usage", tone: "destructive" };
+	}
+	if (
+		result.average >= 60 ||
+		result.atRisk.length > 0 ||
+		result.exhausted.length > 0 ||
+		result.excluded.length > 0
+	) {
+		return { label: "Watch", tone: "warning" };
+	}
+
+	// "On pace" claims a projection exists, so it may only be said when every
+	// reporting account actually has a reset to project against.
+	const everyReportingAccountCanBeProjected =
+		result.contributing.length > 0 &&
+		result.contributing.every((account) => account.resetMs != null);
+	return everyReportingAccountCanBeProjected
+		? { label: "On pace", tone: "success" }
+		: { label: "Low usage", tone: "success" };
+}
+
+/**
+ * How many accounts could contribute to this window at all: those reporting,
+ * those charged as spent, and those with no reading. Both pages computed this
+ * sum inline with identical arithmetic.
+ */
+export function eligibleAccountTotal(result: PoolUsageResult): number {
+	return (
+		result.contributing.length +
+		result.exhausted.length +
+		result.excluded.length
+	);
+}
+
+/**
+ * How many accounts are projected to run out before this window resets, over
+ * how many could.
+ *
+ * The two pages disagreed here too: the Overview badge counted
+ * `atRisk + exhausted`, the Usage alert counted `atRisk` alone. Same window,
+ * same instant, two different numerators for "will run out". Exhausted accounts
+ * belong in it — an account already at 100% has run out, and excluding it makes
+ * the count shrink at the moment the pool got worse.
+ */
+export function willRunOutCount(result: PoolUsageResult): {
+	willRunOut: number;
+	capacity: number;
+} {
+	return {
+		willRunOut: result.atRisk.length + result.exhausted.length,
+		capacity: result.contributing.length + result.exhausted.length,
+	};
+}
 
 /** One account's contribution to a per-family weekly bucket. */
 export interface FamilyWeeklyAccountUsage {
@@ -151,6 +304,10 @@ export interface PoolUsageResult {
 	earliestResetAccountName: string | null;
 	atRisk: PoolUsageProjection[];
 	familyWeekly: FamilyWeeklyUsage[];
+	/** One pool per group of accounts that can cover for each other. */
+	classes: ServableClassPool[];
+	/** The tightest class — the one that will stop you first. */
+	bindingClass: ServableClassPool | null;
 }
 
 function eligibleProvidersFor(window: PoolWindow): ReadonlySet<string> {
@@ -520,6 +677,13 @@ export function computePoolUsage(
 	// for this window, which re-anchors the lifetime slope's origin.
 	const anchors = new Map<string, UsageBurnAnchor | null>();
 
+	// Every eligible account with the verdict this pass reached about it, in one
+	// place. Built alongside the lists above rather than derived from them: the
+	// exclusion lists carry a name but no provider and no account id, so the
+	// servable-class grouping cannot be reconstructed afterwards without
+	// re-running the classification — two copies of a rule that must not drift.
+	const accountBars: PoolAccountBar[] = [];
+
 	const eligible = eligibleProvidersFor(window);
 
 	for (const account of accounts) {
@@ -536,12 +700,30 @@ export function computePoolUsage(
 				reason: exclusion.reason,
 				resetMs: exclusion.resetMs,
 			});
+			accountBars.push({
+				accountId: account.id,
+				name: account.name,
+				provider: account.provider,
+				pct: null,
+				state: "exhausted",
+				reason: exclusion.reason,
+				resetMs: exclusion.resetMs,
+			});
 			continue;
 		}
 
 		if (!account.usageData) {
 			excluded.push({
 				name: account.name,
+				reason: "no_usage_data",
+				resetMs: null,
+			});
+			accountBars.push({
+				accountId: account.id,
+				name: account.name,
+				provider: account.provider,
+				pct: null,
+				state: "unknown",
 				reason: "no_usage_data",
 				resetMs: null,
 			});
@@ -564,6 +746,15 @@ export function computePoolUsage(
 				reason: "no_usage_data",
 				resetMs: extracted.resetMs,
 			});
+			accountBars.push({
+				accountId: account.id,
+				name: account.name,
+				provider: account.provider,
+				pct: null,
+				state: "unknown",
+				reason: "no_usage_data",
+				resetMs: extracted.resetMs,
+			});
 			continue;
 		}
 
@@ -571,6 +762,15 @@ export function computePoolUsage(
 			accountId: account.id,
 			name: account.name,
 			pct: extracted.pct,
+			resetMs: extracted.resetMs,
+		});
+		accountBars.push({
+			accountId: account.id,
+			name: account.name,
+			provider: account.provider,
+			pct: extracted.pct,
+			state: "reporting",
+			reason: null,
 			resetMs: extracted.resetMs,
 		});
 		predictions.set(
@@ -659,6 +859,8 @@ export function computePoolUsage(
 	const familyWeekly =
 		window === "seven_day" ? computeFamilyWeeklyUsage(accounts, now) : [];
 
+	const classes = groupIntoServableClasses(accountBars);
+
 	return {
 		average,
 		activeAverage,
@@ -671,5 +873,125 @@ export function computePoolUsage(
 		earliestResetAccountName,
 		atRisk,
 		familyWeekly,
+		classes,
+		bindingClass: pickBindingClass(classes),
 	};
+}
+
+/** Group the per-account verdicts into pools that can cover for each other. */
+function groupIntoServableClasses(bars: PoolAccountBar[]): ServableClassPool[] {
+	const byClass = new Map<string, { label: string; bars: PoolAccountBar[] }>();
+	for (const bar of bars) {
+		const servable = servableClassFor(bar.provider);
+		const bucket = byClass.get(servable.classId);
+		if (bucket) bucket.bars.push(bar);
+		else byClass.set(servable.classId, { label: servable.label, bars: [bar] });
+	}
+
+	const pools: ServableClassPool[] = [];
+	for (const [classId, { label, bars: classBars }] of byClass) {
+		// Ascending by utilization with unknowns last: the strip reads left to
+		// right from most headroom to least, and an account with no reading
+		// belongs at the end rather than sorted as if it were at 0%.
+		const sorted = [...classBars].sort((a, b) => {
+			if (a.pct == null && b.pct == null) return a.name.localeCompare(b.name);
+			if (a.pct == null) return 1;
+			if (b.pct == null) return -1;
+			return a.pct - b.pct;
+		});
+
+		let leastUsed: PoolUsageContribution | null = null;
+		let classWorst: PoolUsageContribution | null = null;
+		let reportingCount = 0;
+		let exhaustedCount = 0;
+		let unknownCount = 0;
+		let earliestResetMs: number | null = null;
+		let earliestResetAccountName: string | null = null;
+
+		for (const bar of sorted) {
+			if (bar.state === "reporting" && bar.pct != null) {
+				reportingCount++;
+				const entry: PoolUsageContribution = {
+					accountId: bar.accountId,
+					name: bar.name,
+					pct: bar.pct,
+					resetMs: bar.resetMs,
+				};
+				if (leastUsed === null || bar.pct < leastUsed.pct) leastUsed = entry;
+				if (classWorst === null || bar.pct > classWorst.pct) classWorst = entry;
+			} else if (bar.state === "exhausted") {
+				exhaustedCount++;
+				// A spent account is the worst possible reading, and must be able to
+				// take that slot: leaving it out would let the strip's high end be a
+				// reporting account at 80% while a sibling sits dead at 100%.
+				if (classWorst === null || classWorst.pct < 100) {
+					classWorst = {
+						accountId: bar.accountId,
+						name: bar.name,
+						pct: 100,
+						resetMs: bar.resetMs,
+					};
+				}
+			} else {
+				unknownCount++;
+			}
+			// Soonest still-future reset in this class, over accounts that have one.
+			if (
+				bar.resetMs != null &&
+				bar.resetMs > 0 &&
+				(earliestResetMs === null || bar.resetMs < earliestResetMs)
+			) {
+				earliestResetMs = bar.resetMs;
+				earliestResetAccountName = bar.name;
+			}
+		}
+
+		const capacityCount = reportingCount + exhaustedCount;
+		pools.push({
+			classId,
+			label,
+			accounts: sorted,
+			leastUsed,
+			worst: classWorst,
+			reportingCount,
+			capacityCount,
+			eligibleTotal: capacityCount + unknownCount,
+			singlePointOfFailure:
+				capacityCount <= 1 && capacityCount + unknownCount > 0,
+			earliestResetMs,
+			earliestResetAccountName,
+		});
+	}
+
+	pools.sort((a, b) => compareServableClasses(a.classId, b.classId));
+	return pools;
+}
+
+/**
+ * The class that constrains the pool: the one whose MOST-IDLE account is the
+ * most spent.
+ *
+ * Within a class, any account with headroom can serve the request, so the
+ * class's least-used account is its real limit. Across classes the constraint is
+ * the tightest class, because the classes cannot cover for each other — a global
+ * minimum would be the most optimistic number available and would hide a Claude
+ * pool at 90% behind an idle account of some other class.
+ *
+ * Null when no class has a reporting account. Callers must render their explicit
+ * unavailable state for that, never "100% left".
+ */
+function pickBindingClass(
+	classes: ServableClassPool[],
+): ServableClassPool | null {
+	let binding: ServableClassPool | null = null;
+	for (const pool of classes) {
+		if (pool.leastUsed == null) continue;
+		if (
+			binding?.leastUsed == null ||
+			pool.leastUsed.pct > binding.leastUsed.pct
+		) {
+			binding = pool;
+		}
+	}
+	return binding;
 }

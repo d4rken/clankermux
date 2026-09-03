@@ -1,8 +1,16 @@
 import { describe, expect, it } from "bun:test";
 import type { KeyRunway } from "@clankermux/core";
 import { UNAUTHENTICATED_POOL_KEY_NAME } from "@clankermux/core";
+import { Gauge } from "lucide-react";
 import { renderToStaticMarkup } from "react-dom/server";
-import type { FamilyWeeklyUsage, PoolUsageResult } from "../../lib/pool-usage";
+import {
+	type FamilyWeeklyUsage,
+	type PoolUsageResult,
+	poolOutlook,
+	willRunOutCount,
+} from "../../lib/pool-usage";
+import { PoolMetricCard } from "../overview/PoolMetricCard";
+import { TONE_FIGURE_CLASS } from "../quota/outlook-tone";
 import { LimitsCapacityOverview } from "./LimitsCapacityOverview";
 
 const NOW = Date.UTC(2026, 7, 22, 12, 0, 0);
@@ -170,9 +178,54 @@ describe("LimitsCapacityOverview", () => {
 
 		const html = renderOverview(poolResult(), sevenDay);
 
-		expect(html).toContain("1 account may exhaust before reset");
+		// Derived, not hardcoded: the count is "at risk over accounts that could
+		// run out", so it moves whenever the fixture's account list does.
+		const { willRunOut, capacity } = willRunOutCount(sevenDay);
+		expect(html).toContain(
+			`${willRunOut} of ${capacity} accounts projected to run out before reset`,
+		);
 		expect(html).toContain("Fable weekly at 92%");
 		expect(html).toContain("Watch");
+	});
+
+	it("agrees with the Overview tile about outlook and at-risk count", () => {
+		// The regression this file exists to make non-recurring. The two pages ran
+		// SEPARATE rules for the same two questions: the Overview tinted its
+		// headline on a bare 60/80 split while this panel also escalated on
+		// unreported accounts, and the two counted "will run out" over different
+		// numerators. A pool at 20% with one unknown account was green here and
+		// amber there.
+		//
+		// Asserted against each other rather than against literals on purpose:
+		// pinning both to fixed strings would let them drift apart again the next
+		// time one side's copy changes, which is exactly how they diverged.
+		const result = poolResult({
+			average: 20,
+			activeAverage: 20,
+			excluded: [{ name: "waiting", reason: "no_usage_data", resetMs: null }],
+		});
+
+		expect(poolOutlook(result).tone).toBe("warning");
+		const { willRunOut, capacity } = willRunOutCount(result);
+
+		const panelHtml = renderOverview(result);
+		const tileHtml = renderToStaticMarkup(
+			<PoolMetricCard
+				title="5h Pool"
+				icon={Gauge}
+				result={result}
+				window="five_hour"
+			/>,
+		);
+
+		// Same verdict word, same tone class, on both surfaces.
+		expect(panelHtml).toContain(poolOutlook(result).label);
+		expect(tileHtml).toContain(TONE_FIGURE_CLASS[poolOutlook(result).tone]);
+		// And the same at-risk numerator, whatever it happens to be.
+		if (willRunOut > 0) {
+			expect(panelHtml).toContain(`${willRunOut} of ${capacity}`);
+			expect(tileHtml).toContain(`${willRunOut} of ${capacity}`);
+		}
 	});
 
 	it("distinguishes unavailable and unknown accounts from reported usage", () => {

@@ -65,8 +65,16 @@ function tile(markup: string, title: string): string {
 	return next === -1 ? rest : rest.slice(0, next);
 }
 
-/** The four tiles of the metrics grid, each of which speaks for its own read. */
-const TILES = ["Total Requests", "5h Pool", "7d Pool", "Quota Runway"];
+/**
+ * The tiles of the metrics grid, each of which speaks for its own read.
+ *
+ * "Quota" rather than the old "5h Pool"/"7d Pool" pair: the quota cards are now
+ * one per servable class and that list is DERIVED from the accounts, so while
+ * the accounts read is pending or failed there is no class list to render. A
+ * single placeholder card stands in for the set, which is exactly the state
+ * these tests exercise.
+ */
+const TILES = ["Total Requests", "Quota", "Quota Runway"];
 
 /**
  * Marks a query as terminally failed with nothing cached — the "unavailable"
@@ -154,8 +162,7 @@ describe("OverviewTab progressive render", () => {
 		expect(html).toContain("Every request in the last");
 		// Tiles are present but placeholdered, not gone and not zeroed.
 		expect(html).toContain("Total Requests");
-		expect(html).toContain("7d Pool");
-		expect(html).toContain("5h Pool");
+		expect(html).toContain("Quota");
 		expect(html).toContain("animate-pulse");
 	});
 

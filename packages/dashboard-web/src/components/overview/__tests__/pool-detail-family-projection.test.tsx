@@ -4,7 +4,7 @@ import type {
 	FamilyWeeklyUsage,
 	PoolUsageResult,
 } from "../../../lib/pool-usage";
-import { PoolDetailSection } from "../PoolMetricCard";
+import { PoolDetailSection } from "../../quota/PoolDetailSection";
 
 const NOW = 1_700_000_000_000;
 const DAY = 86_400_000;
