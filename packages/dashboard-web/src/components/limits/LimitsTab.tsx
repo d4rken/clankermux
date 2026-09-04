@@ -8,6 +8,7 @@ import {
 	usageScopedHistoryQueryOptions,
 	useAccounts,
 	useAnalytics,
+	usePacing,
 	usePaymentsSummary,
 	useRunway,
 	useUsageHistory,
@@ -57,6 +58,11 @@ export const LimitsTab = React.memo(() => {
 	// rows down, so LimitsCapacityOverview stays a pure view component.
 	const runwayQuery = useRunway();
 	const { data: runway, isLoading: runwayLoading } = runwayQuery;
+	// Pacing is computed server-side too, from the same account array the list
+	// endpoint serves, so the panels and the desk widget cannot disagree about
+	// whether a pace is sustainable.
+	const pacingQuery = usePacing();
+	const { data: pacing, isLoading: pacingLoading } = pacingQuery;
 	const analyticsQuery = useAnalytics(
 		perfRange,
 		{ accounts: [], models: [], status: "all" },
@@ -188,12 +194,13 @@ export const LimitsTab = React.memo(() => {
 			{/* The two rolling windows share one visual hierarchy so their usage,
 			    reporting coverage and recovery timing can be compared at a glance. */}
 			<LimitsCapacityOverview
+				pacing={pacing}
 				fiveHour={fiveHourPool}
 				sevenDay={weeklyPool}
 				now={now}
 				runways={runway?.keys ?? []}
 				accounts={runway?.accounts ?? []}
-				windowsLoading={accountsPending}
+				windowsLoading={accountsPending || (pacingLoading && !pacing)}
 				windowsUnavailableReason={accountsUnavailableReason}
 				runwaysLoading={runwayLoading && !runway}
 				runwaysUnavailableReason={runwaysUnavailableReason}

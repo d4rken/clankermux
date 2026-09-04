@@ -1,11 +1,9 @@
 import type { Config } from "@clankermux/config";
+import type { PacingSnapshot } from "@clankermux/core";
 import type { DatabaseOperations } from "@clankermux/database";
 import { jsonResponse } from "@clankermux/http-common";
 import type { LoadBalancingStrategy } from "@clankermux/types";
-import {
-	computePacingScan,
-	type PacingSnapshot,
-} from "../services/pacing-scan";
+import { computePacingScan } from "../services/pacing-scan";
 
 /**
  * `GET /api/pacing` — how fast the pool is spending its weekly budget, and what

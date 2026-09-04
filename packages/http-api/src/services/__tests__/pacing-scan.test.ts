@@ -1,6 +1,6 @@
 import { describe, expect, it } from "bun:test";
+import { computePacingFromAccounts } from "@clankermux/core";
 import type { AccountResponse } from "@clankermux/types";
-import { computePacingFromAccounts } from "../pacing-scan";
 
 /**
  * The pacing scan, over fixture accounts.

@@ -233,6 +233,25 @@ export const useRunway = () => {
 };
 
 /**
+ * Server-computed pacing: per-class weekly burn and the 5-hour rollup.
+ *
+ * Same cadence as the runway rather than the faster account poll. Both are
+ * derived scans rather than raw state, and a burn ratio moves on the scale of a
+ * weekly window — refetching it every few seconds would spend an account build
+ * to redraw an identical figure.
+ */
+export const usePacing = () => {
+	return useQuery({
+		queryKey: queryKeys.pacing(),
+		queryFn: () => api.getPacing(),
+		staleTime: 20000,
+		refetchInterval: 60000,
+		refetchIntervalInBackground: false,
+		gcTime: 5 * 60 * 1000,
+	});
+};
+
+/**
  * Global force-account override state (in-memory on the server, clears on
  * restart). Kept on a short poll + invalidated after set/clear and on every
  * account reload so the per-account toggle and global banner can't drift across

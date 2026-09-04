@@ -50,13 +50,13 @@
  * our schedule.
  */
 
+import type { PacingSnapshot } from "@clankermux/core";
 import { classIsUnread } from "@clankermux/core";
 import type {
 	RequestResponse,
 	StopsHistoryResponse,
 	UsagePrediction,
 } from "@clankermux/types";
-import type { PacingSnapshot } from "../../services/pacing-scan";
 import type { PublicRunwaySnapshot } from "../../services/public-runway";
 import type {
 	PublicAccountSnapshot,

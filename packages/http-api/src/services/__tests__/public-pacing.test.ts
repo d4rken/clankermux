@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import type { PacingSnapshot } from "../pacing-scan";
+import type { PacingSnapshot } from "@clankermux/core";
 import { createPublicPacingReaderFromScan } from "../public-pacing";
 
 /**

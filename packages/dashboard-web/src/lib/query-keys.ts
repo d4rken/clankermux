@@ -10,6 +10,10 @@ export const queryKeys = {
 	// and the API-key set (with their routing pins), so it is invalidated
 	// wherever either changes — see invalidateCapacityQueries below.
 	runway: () => [...queryKeys.all, "runway"] as const,
+	// Server-computed pacing scan. Built from the SAME account array `accounts()`
+	// serves, so it goes stale on exactly the same events and is invalidated
+	// beside it.
+	pacing: () => [...queryKeys.all, "pacing"] as const,
 	forcedAccount: () => [...queryKeys.all, "forced-account"] as const,
 	stats: (errorsSinceHours?: number) =>
 		errorsSinceHours !== undefined
@@ -104,4 +108,5 @@ export function invalidateCapacityQueries(queryClient: QueryClient): void {
 	queryClient.invalidateQueries({ queryKey: queryKeys.accounts() });
 	queryClient.invalidateQueries({ queryKey: queryKeys.apiKeys() });
 	queryClient.invalidateQueries({ queryKey: queryKeys.runway() });
+	queryClient.invalidateQueries({ queryKey: queryKeys.pacing() });
 }

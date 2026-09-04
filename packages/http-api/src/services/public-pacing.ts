@@ -1,7 +1,8 @@
 import type { Config } from "@clankermux/config";
+import type { PacingSnapshot } from "@clankermux/core";
 import type { DatabaseOperations } from "@clankermux/database";
 import type { LoadBalancingStrategy } from "@clankermux/types";
-import { computePacingScan, type PacingSnapshot } from "./pacing-scan";
+import { computePacingScan } from "./pacing-scan";
 
 /**
  * The de-identified pacing scan for `GET /public/v1/pacing`.

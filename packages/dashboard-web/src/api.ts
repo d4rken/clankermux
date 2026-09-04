@@ -1,3 +1,4 @@
+import type { PacingSnapshot } from "@clankermux/core";
 import { HttpClient, HttpError } from "@clankermux/http-common";
 import type {
 	AccountResponse,
@@ -288,6 +289,18 @@ class API extends HttpClient {
 	 */
 	async getRunway(): Promise<RunwayResponse> {
 		return this.get<RunwayResponse>("/api/runway");
+	}
+
+	/**
+	 * Server-computed pacing scan: per-class weekly burn and the 5-hour rollup.
+	 *
+	 * Read rather than derived in the browser so the page and the desk widget
+	 * cannot disagree about whether a pace is sustainable — the thresholds and
+	 * the early-window guard behind these figures are policy, not arithmetic a
+	 * client should re-implement.
+	 */
+	async getPacing(): Promise<PacingSnapshot> {
+		return this.get<PacingSnapshot>("/api/pacing");
 	}
 
 	async initAddAccount(data: {

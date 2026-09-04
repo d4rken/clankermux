@@ -185,6 +185,11 @@ export {
 	MODEL_SHORT_NAMES,
 } from "./models";
 export {
+	type ClassBudget,
+	computePacingFromAccounts,
+	type PacingSnapshot,
+} from "./pacing-scan";
+export {
 	compareServableClasses,
 	type ServableClass,
 	servableClassFor,

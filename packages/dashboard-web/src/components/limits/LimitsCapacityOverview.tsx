@@ -1,4 +1,9 @@
-import type { KeyRunway, Outlook, PoolUsageResult } from "@clankermux/core";
+import type {
+	KeyRunway,
+	Outlook,
+	PacingSnapshot,
+	PoolUsageResult,
+} from "@clankermux/core";
 import { effectiveRunwayOutcome, summarizeKeyRunways } from "@clankermux/core";
 import { ChevronDown, Hourglass, Info } from "lucide-react";
 import { describePinTarget } from "../../lib/api-key-pin-label";
@@ -261,6 +266,17 @@ function runwayOutlook(
 }
 
 interface LimitsCapacityOverviewProps {
+	/**
+	 * The SERVED pacing scan, driving both quota panels. Undefined while its read
+	 * is in flight or has failed — the panels render their own pending and
+	 * unavailable states rather than a fabricated zero.
+	 */
+	pacing: PacingSnapshot | undefined;
+	/**
+	 * The locally-computed pools. Still needed for the per-model-family badge
+	 * (not a pace, not on the pacing wire) and for the fallback-account list
+	 * below.
+	 */
 	fiveHour: PoolUsageResult;
 	sevenDay: PoolUsageResult;
 	now: number;
@@ -285,6 +301,7 @@ interface LimitsCapacityOverviewProps {
  * disclosures and in the full Account Utilization card immediately below.
  */
 export function LimitsCapacityOverview({
+	pacing,
 	fiveHour,
 	sevenDay,
 	now,
@@ -359,14 +376,14 @@ export function LimitsCapacityOverview({
 				    side once there is room for them. */}
 				<div className="grid overflow-hidden rounded-md border divide-y lg:grid-cols-3 lg:divide-x lg:divide-y-0">
 					<WeeklyBudgetPanel
+						pacing={pacing}
 						sevenDay={sevenDay}
 						now={now}
 						loading={windowsLoading}
 						unavailableReason={windowsUnavailableReason}
 					/>
 					<FiveHourPacingPanel
-						fiveHour={fiveHour}
-						sevenDay={sevenDay}
+						pacing={pacing?.fiveHour}
 						now={now}
 						loading={windowsLoading}
 						unavailableReason={windowsUnavailableReason}
