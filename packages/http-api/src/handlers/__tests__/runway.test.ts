@@ -6,6 +6,7 @@ import type {
 	Account,
 	ApiKey,
 	RunwayResponse,
+	ScopedUsageSnapshotSample,
 	UsageSnapshotSample,
 } from "@clankermux/types";
 import { clearCodexPayloadScanMemo } from "../../services/resolve-codex-usage";
@@ -112,7 +113,9 @@ function makeDbOps(options: {
 	accounts?: Account[];
 	keys?: ApiKey[];
 	snapshots?: UsageSnapshotSample[];
+	scopedSnapshots?: ScopedUsageSnapshotSample[];
 	snapshotsThrow?: boolean;
+	scopedSnapshotsThrow?: boolean;
 	codexColumns?: CodexColumnRow[];
 	payloads?: Array<{ json: string; timestamp: number }>;
 	adapterQueries?: string[];
@@ -132,6 +135,18 @@ function makeDbOps(options: {
 		getRecentUsageSnapshotsForAccounts: async (accountIds: string[]) => {
 			if (options.snapshotsThrow) throw new Error("snapshot read failed");
 			return (options.snapshots ?? []).filter((s) =>
+				accountIds.includes(s.accountId),
+			);
+		},
+		// Must be implemented even when a test supplies none. Leaving it off the
+		// stub does not mean "no scoped rows" — it throws, so every test would
+		// silently exercise the loader's read-failure path and none would cover
+		// scoped restoration at all.
+		getRecentScopedUsageSnapshotsForAccounts: async (accountIds: string[]) => {
+			if (options.scopedSnapshotsThrow) {
+				throw new Error("scoped snapshot read failed");
+			}
+			return (options.scopedSnapshots ?? []).filter((s) =>
 				accountIds.includes(s.accountId),
 			);
 		},
@@ -742,6 +757,14 @@ describe("GET /api/runway persisted snapshot fallback", () => {
 		nowSpy.mockRestore();
 	});
 
+	/**
+	 * How far a row's reading was observed BEFORE the tick that recorded it.
+	 * Non-zero on purpose: the sampler stamps `sampled_at` from its own clock
+	 * while copying a cache entry observed earlier, so a fixture where the two
+	 * coincide cannot tell a reader that confuses them from one that does not.
+	 */
+	const OBSERVED_LAG_MS = 30_000;
+
 	/** One persisted sample, `ageMs` before BASE. */
 	function snapshot(
 		accountId: string,
@@ -752,6 +775,10 @@ describe("GET /api/runway persisted snapshot fallback", () => {
 			accountId,
 			provider: "anthropic",
 			sampledAt: BASE - ageMs,
+			// The sampler will not write a row without one — a reading that cannot
+			// say when it was observed is an honest gap and the account is skipped —
+			// so a fixture without it is a shape production never produces.
+			observedAt: BASE - ageMs - OBSERVED_LAG_MS,
 			fiveHourPct: 100,
 			fiveHourReset: BASE + 2 * HOUR_MS,
 			sevenDayPct: 20,
@@ -774,7 +801,11 @@ describe("GET /api/runway persisted snapshot fallback", () => {
 		// inside the routing bar a cache entry would be held to.
 		expect(body.keys[0].outcome.kind).toBe("out-now");
 		expect(body.accounts[0].windows[0].utilizationPct).toBe(100);
-		expect(body.accounts[0].usageAsOfMs).toBe(BASE - 2 * MINUTE_MS);
+		// The row's OBSERVATION time, not the tick that copied it. Reporting the
+		// tick would overstate the reading's recency by the sampler's own lag.
+		expect(body.accounts[0].usageAsOfMs).toBe(
+			BASE - 2 * MINUTE_MS - OBSERVED_LAG_MS,
+		);
 	});
 
 	it("never emits a prediction for a snapshot-restored account", async () => {
@@ -799,6 +830,99 @@ describe("GET /api/runway persisted snapshot fallback", () => {
 			null,
 			null,
 		]);
+	});
+
+	it("does not let a snapshot with no observation time skip the routing bar", async () => {
+		// Ranking and admissibility are different questions, and a row with no
+		// `observed_at` can still be barred on its own age. Answering both from
+		// `observedAtMs` sent an untimed candidate straight to the "sorts last but
+		// wins if nothing else does" slot WITHOUT the age test, so a 20-minute-old
+		// pre-migration row projected from a reading the 10-minute routing bar
+		// exists to reject. It is still reported as evidence, with no time.
+		const body = await runway(
+			makeDbOps({
+				accounts: [makeAccount({ id: "cold-1", name: "Cold" })],
+				keys: [makeKey({ id: "k1" })],
+				snapshots: [snapshot("cold-1", 20 * MINUTE_MS, { observedAt: null })],
+			}),
+		);
+
+		expect(body.keys[0].outcome.kind).toBe("unknown");
+		expect(body.accounts[0].usageAsOfMs).toBeNull();
+	});
+
+	it("drops a future observed_at rather than reporting it as the reading's age", async () => {
+		// The rejected stamp must not survive on the candidate that still wins for
+		// want of any other. The winner's `observedAtMs` becomes `usageAsOfMs` and
+		// anchors the weekly window's full-confidence estimate, so carrying a future
+		// instant through would anchor a projection ahead of now — worse than the
+		// mis-ordering the rejection was for.
+		const body = await runway(
+			makeDbOps({
+				accounts: [makeAccount({ id: "cold-1", name: "Cold" })],
+				keys: [makeKey({ id: "k1" })],
+				snapshots: [
+					snapshot("cold-1", 2 * MINUTE_MS, { observedAt: BASE + HOUR_MS }),
+				],
+			}),
+		);
+
+		expect(body.accounts[0].usageAsOfMs).toBeNull();
+		expect(body.accounts[0].windows[0].utilizationPct).toBe(100);
+	});
+
+	it("does not let a future observed_at outrank a live reading", async () => {
+		// The age bar and the rank now read different fields, so the rank needs its
+		// own validation: a row whose `sampled_at` is a sound age can still carry a
+		// future `observed_at` after a clock rollback, and the sampler only rejects
+		// a cache entry for being too OLD. Unchecked, that stamp sorts above every
+		// honest reading. A stamp that cannot be believed makes the row untimed,
+		// which still serves as a fallback but never wins against a live entry.
+		nowSpy.mockReturnValue(BASE - 5 * MINUTE_MS);
+		usageCache.set("warm-1", HEALTHY());
+		nowSpy.mockReturnValue(BASE);
+
+		const body = await runway(
+			makeDbOps({
+				accounts: [makeAccount({ id: "warm-1", name: "Warm" })],
+				keys: [makeKey({ id: "k1" })],
+				snapshots: [
+					snapshot("warm-1", MINUTE_MS, { observedAt: BASE + 5 * MINUTE_MS }),
+				],
+			}),
+		);
+
+		expect(body.accounts[0].windows[0].utilizationPct).toBe(10);
+		expect(body.accounts[0].usageAsOfMs).toBe(BASE - 5 * MINUTE_MS);
+	});
+
+	it("keeps the live reading when the snapshot's TICK is later than it", async () => {
+		// The production shape, and the one the sibling test below cannot show: the
+		// sampler ticks after the poll it copies, so a row's `sampled_at` is always
+		// ahead of the reading behind it. Ranked on that, the copy displaced its own
+		// source for the whole gap to the next poll, and the account then reported
+		// only what the row carries. Ranked on `observed_at` the copy is what it has
+		// always claimed to be, a fallback for a read that produced nothing.
+		nowSpy.mockReturnValue(BASE - 5 * MINUTE_MS);
+		usageCache.set("warm-1", HEALTHY());
+		nowSpy.mockReturnValue(BASE);
+
+		const body = await runway(
+			makeDbOps({
+				accounts: [makeAccount({ id: "warm-1", name: "Warm" })],
+				keys: [makeKey({ id: "k1" })],
+				snapshots: [
+					snapshot("warm-1", MINUTE_MS, {
+						// Copied from a reading a minute older than the live entry, which
+						// is what the sampler's freshness bound permits.
+						observedAt: BASE - 6 * MINUTE_MS,
+					}),
+				],
+			}),
+		);
+
+		expect(body.accounts[0].windows[0].utilizationPct).toBe(10);
+		expect(body.accounts[0].usageAsOfMs).toBe(BASE - 5 * MINUTE_MS);
 	});
 
 	it("keeps a live cache reading over a newer-looking snapshot", async () => {
@@ -831,7 +955,9 @@ describe("GET /api/runway persisted snapshot fallback", () => {
 		// display horizon and outside the routing one, so the reading is reported
 		// with its age while the scan calls the account unprojectable.
 		expect(body.accounts[0].windows[0].utilizationPct).toBe(100);
-		expect(body.accounts[0].usageAsOfMs).toBe(BASE - 20 * MINUTE_MS);
+		expect(body.accounts[0].usageAsOfMs).toBe(
+			BASE - 20 * MINUTE_MS - OBSERVED_LAG_MS,
+		);
 		expect(body.keys[0].outcome.kind).toBe("unknown");
 	});
 
@@ -911,6 +1037,7 @@ describe("GET /api/runway persisted snapshot fallback", () => {
 						accountId: "codex-1",
 						provider: "codex",
 						sampledAt: BASE - 2 * MINUTE_MS,
+						observedAt: BASE - 2 * MINUTE_MS - OBSERVED_LAG_MS,
 						fiveHourPct: null,
 						fiveHourReset: null,
 						sevenDayPct: 10,
@@ -926,7 +1053,9 @@ describe("GET /api/runway persisted snapshot fallback", () => {
 		// sat unread.
 		const weekly = body.accounts[0].windows.find((w) => w.kind === "seven_day");
 		expect(weekly?.utilizationPct).toBe(10);
-		expect(body.accounts[0].usageAsOfMs).toBe(BASE - 2 * MINUTE_MS);
+		expect(body.accounts[0].usageAsOfMs).toBe(
+			BASE - 2 * MINUTE_MS - OBSERVED_LAG_MS,
+		);
 	});
 
 	it("still reports a stale Codex column when nothing fresher exists", async () => {
