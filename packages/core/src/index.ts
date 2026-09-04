@@ -12,7 +12,11 @@ export {
 	type RunwayAccountSource,
 	type RunwayHeadline,
 	type RunwayWindowObservations,
+	scopedFamilyReadings,
+	scopedWeeklyWindowKind,
 	summarizeKeyRunways,
+	toRunwayAccountInput,
+	toScopedFamilyRunwayInput,
 	UNAUTHENTICATED_POOL_KEY_NAME,
 	worstKeyRunway,
 } from "./api-key-runway";
@@ -323,3 +327,11 @@ export {
 	type WeeklyWindow,
 	weeklyExhaustion,
 } from "./weekly-exhaustion";
+export {
+	computeWorkloadHeadroom,
+	type HeadroomAbsence,
+	type HeadroomBasis,
+	type ProjectionBasis,
+	type WorkloadDimensionKind,
+	type WorkloadHeadroomRow,
+} from "./workload-headroom";

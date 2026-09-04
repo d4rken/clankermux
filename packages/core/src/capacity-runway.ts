@@ -815,6 +815,23 @@ export function computeCapacityRunway(
 		 * anyway.
 		 */
 		probePaceMargin?: boolean;
+		/**
+		 * Which window kinds the PROBE varies. Omitted (the default) paces every
+		 * window, which is the uniform "the whole workload moves together"
+		 * counterfactual the pool-level figure states.
+		 *
+		 * A narrower set expresses a SCOPED counterfactual — one model family's
+		 * load changing while the rest of the account's load does not. That is a
+		 * bound rather than a measurement, because the share of account-wide burn
+		 * belonging to the scoped workload is not derivable from recorded data
+		 * (`docs/ledger-burn-feasibility.md`); see `workload-headroom.ts`, which is
+		 * the only caller that passes it and carries the argument for which end of
+		 * the share range each side must assume.
+		 *
+		 * The BASELINE scan is unaffected either way: it runs at pace 1, where no
+		 * window is scaled and the set cannot change the outcome.
+		 */
+		pacedWindowKinds?: ReadonlySet<string> | null;
 	},
 ): RunwayOutcome {
 	if (accounts.length === 0) return { kind: "no-accounts" };
@@ -844,7 +861,12 @@ export function computeCapacityRunway(
 		const paceDeficit =
 			options?.probePaceMargin === false
 				? null
-				: probePaceDeficit(accounts, now, horizonEndMs);
+				: probePaceDeficit(
+						accounts,
+						now,
+						horizonEndMs,
+						options?.pacedWindowKinds,
+					);
 		return {
 			kind: "runway",
 			exhaustsAtMs: hit.t,
@@ -861,7 +883,7 @@ export function computeCapacityRunway(
 	const paceMargin =
 		options?.probePaceMargin === false
 			? null
-			: probePaceMargin(accounts, now, horizonEndMs);
+			: probePaceMargin(accounts, now, horizonEndMs, options?.pacedWindowKinds);
 	return {
 		kind: "beyond-horizon",
 		horizonMs,
@@ -1069,6 +1091,7 @@ function buildPool(
 	now: number,
 	horizonEndMs: number,
 	pace: number,
+	pacedWindowKinds?: ReadonlySet<string> | null,
 ): PoolBuild {
 	const pooled: PooledAccount[] = [];
 	const unprojectableAccountIds: string[] = [];
@@ -1095,6 +1118,15 @@ function buildPool(
 		const bank = account.codexResetCredits ?? null;
 		let readable = false;
 		for (const window of account.windows) {
+			// A window outside the paced set is held at its measured burn. That is
+			// what makes a SCOPED counterfactual expressible: varying one model
+			// family's load moves that family's window and leaves the account-wide
+			// ones where they are. With no set given every window is paced, which is
+			// the uniform scan every existing caller asks for.
+			const windowPace =
+				pacedWindowKinds == null || pacedWindowKinds.has(window.windowKind)
+					? pace
+					: 1;
 			const estimate = scaleEstimatePace(
 				estimateWindowExhaustion(
 					{
@@ -1108,7 +1140,7 @@ function buildPool(
 					},
 					now,
 				),
-				pace,
+				windowPace,
 				now,
 				window.observedAtMs,
 			);
@@ -1125,7 +1157,12 @@ function buildPool(
 			);
 			if (bank !== null && window.windowKind === "seven_day") {
 				weeklyIntervals.push(...intervals);
-				weeklyTimeToFullMs = weeklyTimeToFull(window, estimate, now, pace);
+				weeklyTimeToFullMs = weeklyTimeToFull(
+					window,
+					estimate,
+					now,
+					windowPace,
+				);
 			} else {
 				windowIntervals.push(...intervals);
 			}
@@ -1260,6 +1297,7 @@ function probePaceMargin(
 	accounts: RunwayAccountInput[],
 	now: number,
 	horizonEndMs: number,
+	pacedWindowKinds?: ReadonlySet<string> | null,
 ): { multiplier: number; exhaustsAtMs: number } | null {
 	// An unmetered account is never out of quota at ANY pace, so the pool can
 	// never be all-out and every probe step would rebuild it for nothing.
@@ -1269,7 +1307,13 @@ function probePaceMargin(
 		// Recomputed from the integer step so accumulation error cannot drift
 		// the grid.
 		const pace = 1 + step * PACE_MARGIN_PRECISION;
-		const { pooled } = buildPool(accounts, now, horizonEndMs, pace);
+		const { pooled } = buildPool(
+			accounts,
+			now,
+			horizonEndMs,
+			pace,
+			pacedWindowKinds,
+		);
 		if (pooled.length === 0) return null;
 		const hit = firstAllOut(pooled, now, horizonEndMs);
 		if (hit !== null) return { multiplier: pace, exhaustsAtMs: hit.t };
@@ -1330,6 +1374,7 @@ function probePaceDeficit(
 	accounts: RunwayAccountInput[],
 	now: number,
 	horizonEndMs: number,
+	pacedWindowKinds?: ReadonlySet<string> | null,
 ): { multiplier: number } | null {
 	// Same short-circuit as the margin probe, for the opposite reason: with an
 	// unmetered account in the pool the scan can never be all-out, so it would
@@ -1344,7 +1389,13 @@ function probePaceDeficit(
 	for (let step = steps; step >= 1; step--) {
 		// From the integer step, so accumulated float error cannot drift the grid.
 		const pace = 1 - step * PACE_MARGIN_PRECISION;
-		const { pooled } = buildPool(accounts, now, horizonEndMs, pace);
+		const { pooled } = buildPool(
+			accounts,
+			now,
+			horizonEndMs,
+			pace,
+			pacedWindowKinds,
+		);
 		if (pooled.length === 0) return null;
 		if (firstAllOut(pooled, now, horizonEndMs) !== null) break;
 		safest = pace;

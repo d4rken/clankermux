@@ -6,6 +6,7 @@ import { createPublicPacingReader } from "../../services/public-pacing";
 import { createPublicRunwayReader } from "../../services/public-runway";
 import { createPublicSnapshotReader } from "../../services/public-snapshot";
 import { createPublicStopsReader } from "../../services/public-stops";
+import { createPublicWorkloadHeadroomReader } from "../../services/public-workload-headroom";
 import { createPublicAccountsHandler } from "./accounts";
 import { NO_STORE_HEADERS } from "./cache-headers";
 import { createPublicPacingHandler } from "./pacing";
@@ -13,6 +14,7 @@ import { createPublicRunwayHandler } from "./runway";
 import { createPublicStatusHandler } from "./status";
 import { createPublicStopsHandler } from "./stops";
 import { createPublicStreamHandler } from "./stream";
+import { createPublicWorkloadHeadroomHandler } from "./workload-headroom";
 
 /**
  * The read-only widget API.
@@ -71,6 +73,13 @@ export class PublicRouter {
 		const pacingHandler = createPublicPacingHandler(
 			createPublicPacingReader(dbOps, config, getStrategy),
 		);
+		// Shares the runway SCAN (not its reader): the workload rows are that same
+		// resolution viewed per class and per family, so a second scan here could
+		// disagree with the runway resource about the pool at one instant. Its own
+		// memo, because each row runs a pace probe on top.
+		const workloadHeadroomHandler = createPublicWorkloadHeadroomHandler(
+			createPublicWorkloadHeadroomReader(dbOps),
+		);
 		const streamHandler = createPublicStreamHandler();
 
 		this.handlers = new Map<
@@ -82,6 +91,7 @@ export class PublicRouter {
 			["/public/v1/runway", () => runwayHandler()],
 			["/public/v1/stops", () => stopsHandler()],
 			["/public/v1/pacing", () => pacingHandler()],
+			["/public/v1/workload-headroom", () => workloadHeadroomHandler()],
 			["/public/v1/stream", (req) => streamHandler(req)],
 		]);
 	}
