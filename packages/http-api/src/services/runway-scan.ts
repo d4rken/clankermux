@@ -342,6 +342,22 @@ interface UsageCandidate {
 	windows: RunwayWindowObservations;
 	observedAtMs: number | null;
 	/**
+	 * What the AGE BAR is measured from, when that is not `observedAtMs`.
+	 *
+	 * Ranking and admissibility are different questions and a snapshot answers
+	 * them from different clocks. Its rank must be the observation time, or the
+	 * copy outranks its own source; but its admissibility has always been its
+	 * row's `sampled_at`, an upper bound on the reading's recency that makes the
+	 * bar permissive by the sampler's own lag. Collapsing the two lets a row that
+	 * cannot state an observation time skip the bar entirely and project from a
+	 * reading far past it.
+	 *
+	 * Null means the bar is measured from `observedAtMs`; when both are null the
+	 * candidate is unbarred, which is the pre-existing and deliberate treatment of
+	 * the Codex payload reconstruction.
+	 */
+	ageBasisMs?: number | null;
+	/**
 	 * Where it came from. Only the scan's fallback tier cares, and it cares for
 	 * one reason: `codex-persisted` is the single source this endpoint has
 	 * decided may project from OUTSIDE the routing bar (see the CODEX paragraph
@@ -375,13 +391,35 @@ function freshestCandidate(
 	let best: UsageCandidate | null = null;
 	let untimed: UsageCandidate | null = null;
 	for (const candidate of candidates) {
-		if (candidate.observedAtMs == null) {
-			untimed ??= candidate;
+		// ADMISSIBILITY first, and from its own clock — a candidate that cannot be
+		// ranked can still be barred. Running the bar only on `observedAtMs` let an
+		// untimed candidate reach the `untimed` slot unchecked and then be returned,
+		// so a snapshot with no recorded observation time projected from a reading
+		// well past the bar that a timed one would have been rejected for.
+		const ageBasisMs = candidate.ageBasisMs ?? candidate.observedAtMs;
+		if (ageBasisMs != null) {
+			const ageMs = now - ageBasisMs;
+			if (!Number.isFinite(ageMs) || ageMs < 0 || ageMs > maxAgeMs) continue;
+		}
+		// The RANK timestamp is validated separately, because it is no longer
+		// necessarily the one the bar just checked. A snapshot whose row age is
+		// sound can still carry a future or non-finite `observed_at` after a clock
+		// rollback — the sampler only rejects a cache entry for being too OLD — and
+		// left unchecked that stamp would sort it above every honest reading. A
+		// stamp that cannot be believed makes the reading untimed, which is usable
+		// as a fallback but can never outrank.
+		const rankMs = candidate.observedAtMs;
+		if (rankMs == null || !Number.isFinite(rankMs) || rankMs > now) {
+			// The stamp is DROPPED, not merely ignored for ordering. The winner's
+			// `observedAtMs` travels on as the reading's "as of" instant and anchors
+			// the weekly window's full-confidence estimate, so passing the candidate
+			// through unchanged would let a rejected timestamp anchor a projection in
+			// the future — the one place it does more harm than mis-ordering.
+			untimed ??=
+				rankMs == null ? candidate : { ...candidate, observedAtMs: null };
 			continue;
 		}
-		const ageMs = now - candidate.observedAtMs;
-		if (!Number.isFinite(ageMs) || ageMs < 0 || ageMs > maxAgeMs) continue;
-		if (best == null || candidate.observedAtMs > (best.observedAtMs ?? 0)) {
+		if (best == null || rankMs > (best.observedAtMs ?? 0)) {
 			best = candidate;
 		}
 	}
@@ -595,7 +633,19 @@ export async function computeRunwayScan(
 			if (snapshot) {
 				candidates.push({
 					windows: snapshot,
-					observedAtMs: snapshot.sampledAtMs,
+					// The row's OBSERVATION time, never its `sampledAtMs` write time.
+					// A snapshot is a COPY of a cache reading, and the sampler stamps
+					// every row in a tick with that tick's instant — later than the
+					// reading it copied. Ranked on the write time a snapshot therefore
+					// beats its own source for the whole gap between the tick and that
+					// account's next poll, substituting a lossy copy for the live entry
+					// sitting right beside it. Null when the row cannot state one, which
+					// sorts it last rather than first.
+					observedAtMs: snapshot.observedAtMs,
+					// The bar stays on the row's own age, which is what it has always
+					// been measured from and what `snapshotWithin` above already used.
+					// Only the RANK moves to the observation time.
+					ageBasisMs: snapshot.sampledAtMs,
 					source: "snapshot",
 				});
 			}
@@ -652,13 +702,7 @@ export async function computeRunwayScan(
 					// written; a live reading's cannot have.
 					windows:
 						winner.source === "snapshot"
-							? projectableWindows(
-									{
-										...winner.windows,
-										sampledAtMs: winner.observedAtMs ?? now,
-									},
-									now,
-								)
+							? projectableWindows(winner.windows, now)
 							: winner.windows,
 					observedAtMs: winner.observedAtMs,
 				},

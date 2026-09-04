@@ -1752,9 +1752,12 @@ Available endpoints:
 	usageSnapshotSampler = new UsageSnapshotSampler({
 		getAccounts: () => dbOps.getAllAccounts(),
 		insertSnapshots: (rows) => dbOps.insertUsageSnapshots(rows),
-		// Per-model-family weekly windows, recorded from the same tick. Capture
-		// only for now: nothing reads this series yet, but it cannot be
-		// reconstructed after the fact.
+		// Per-model-family weekly windows, recorded from the same tick and from
+		// the same normalized reading, so a scoped row and the account-wide row
+		// sharing a `sampled_at` describe one observation. `runway-scan.ts` pairs
+		// them on exactly that, which is what lets a snapshot-restored account
+		// still state its family windows instead of looking like an account that
+		// reports none.
 		insertScopedSnapshots: (rows) => dbOps.insertScopedUsageSnapshots(rows),
 		// Persisted history for the weekly burn-slope fit that sizes the
 		// pool-liveness reserve's release horizon.
