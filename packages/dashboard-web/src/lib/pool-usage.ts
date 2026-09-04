@@ -174,6 +174,13 @@ export function eligibleAccountTotal(result: PoolUsageResult): number {
  * in a cooldown, accounts whose token expired and accounts a usage-429 hid. Not
  * one of those is "projected to run out before reset" — a paused account is a
  * choice someone made, and the badge claimed it as a forecast.
+ *
+ * `spent` is reported ALONGSIDE the total rather than folded silently into it,
+ * because callers render the count in a sentence and the two halves need
+ * different verbs. An account at 100% is not "projected" to reach it; it is
+ * there. With `spent > 0` a caller that says only "projected" describes
+ * measured, already-lost capacity as a forecast — which also understates it,
+ * since a forecast invites the reader to think it might not happen.
  */
 export function willRunOutCount(
 	result: PoolUsageResult,
@@ -181,6 +188,8 @@ export function willRunOutCount(
 ): {
 	willRunOut: number;
 	capacity: number;
+	/** Of `willRunOut`, how many are ALREADY at 100% rather than projected. */
+	spent: number;
 } {
 	const spentOnThisWindow = result.exhausted.filter(
 		(e) => e.reason === `${window}_exhausted`,
@@ -188,6 +197,7 @@ export function willRunOutCount(
 	return {
 		willRunOut: result.atRisk.length + spentOnThisWindow,
 		capacity: result.contributing.length + spentOnThisWindow,
+		spent: spentOnThisWindow,
 	};
 }
 

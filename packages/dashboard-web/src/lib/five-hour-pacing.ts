@@ -146,6 +146,26 @@ export function computeFiveHourPacing(
 }
 
 /**
+ * True when this class yields NO 5-hour reading: nobody reporting, nobody held
+ * by the limit, and at least one account nothing could be read from.
+ *
+ * `unavailable` is deliberately NOT part of this test. An excluded account —
+ * paused, cooling down, token-expired — is classified before usage is even
+ * extracted and is stored with `pct: null` (see `classifyExclusion` in
+ * pool-usage.ts), so knowing WHY it cannot serve tells us nothing whatsoever
+ * about the class's 5-hour situation. Requiring `unavailable === 0` let a class
+ * of one unread account plus one paused account pass as read, and a sibling
+ * class with room then carried the whole panel to green.
+ *
+ * Codex accounts are the standing case rather than an edge one: they report no
+ * 5-hour window at all, so any pool holding one has a permanently unread class
+ * sitting beside fully-read ones.
+ */
+export function classIsUnread(pacing: ClassPacing): boolean {
+	return pacing.room === 0 && pacing.waiting === 0 && pacing.unknown > 0;
+}
+
+/**
  * The verdict on the pool's pacing.
  *
  * Ordered by what it costs the reader to be wrong. A class with nothing left to
@@ -155,6 +175,15 @@ export function computeFiveHourPacing(
  * comes before the reassuring "Clear" deliberately — no class with room and
  * nothing waiting means there is nothing to be clear ABOUT, and green would
  * dress an absent measurement as a healthy one.
+ *
+ * "Partial" applies that same rule PER CLASS, which is the granularity it was
+ * missing. One class with room was enough to paint the chip green while a
+ * sibling had no 5-hour reading whatsoever, so the reassurance covered accounts
+ * that nothing had measured — and with a Codex account in the pool that is the
+ * permanent state, not a transient one. It ranks below the pacing states and
+ * above "Clear", and stays NEUTRAL: an unread class is not evidence of trouble,
+ * only the absence of evidence of health. Which class it is comes from the
+ * rows beneath, which render "no 5h reading" off the same predicate.
  */
 function pacingOutlook(classes: ClassPacing[]): Outlook {
 	if (classes.some((c) => c.noPath)) {
@@ -165,6 +194,9 @@ function pacingOutlook(classes: ClassPacing[]): Outlook {
 	}
 	if (!classes.some((c) => c.room > 0)) {
 		return { label: "No reading", tone: "neutral" };
+	}
+	if (classes.some(classIsUnread)) {
+		return { label: "Partial", tone: "neutral" };
 	}
 	return { label: "Clear", tone: "success" };
 }

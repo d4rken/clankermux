@@ -87,7 +87,7 @@ export function PoolQuotaCard({
 	const family = familyWeeklyBadge(scoped.familyWeekly);
 	// Scoped to the class as well: the pool-wide count would state, on a
 	// one-account card, how many accounts across every class will run out.
-	const { willRunOut, capacity } = willRunOutCount(scoped, "seven_day");
+	const { willRunOut, capacity, spent } = willRunOutCount(scoped, "seven_day");
 
 	const fiveHourLeast = fiveHour?.leastUsed ?? null;
 	const paceText =
@@ -194,12 +194,26 @@ export function PoolQuotaCard({
 				)}
 
 				<div className="mt-item space-y-tight">
+					{/* "hit 100% before their OWN reset", never "run out". This counts
+					    accounts individually against individually-staggered windows; the
+					    Quota Runway card sitting beside it on the Overview reports the
+					    POOL, which survives every one of these because each account's
+					    window refills at its own reset while the others still have room.
+					    Worded as "run out", the two cards read as a flat contradiction
+					    ("5 of 5 projected to run out" next to "no run-out") with nothing
+					    on screen to say they answer different questions.
+
+					    "spent or projected" once any of them is ALREADY at 100%: the
+					    count mixes measured exhaustion with forecast, and calling all of
+					    it a projection invites the reader to discount capacity that is
+					    already gone. */}
 					{resolved && willRunOut > 0 && (
 						<p className="flex items-center gap-item text-xs text-warning-strong">
 							<AlertTriangle className="h-3.5 w-3.5 shrink-0" />
 							{willRunOut} of {capacity}{" "}
-							{capacity === 1 ? "account" : "accounts"} projected to run out
-							before reset
+							{capacity === 1 ? "account" : "accounts"}{" "}
+							{spent > 0 ? "spent or projected" : "projected"} to hit 100%
+							before {willRunOut === 1 ? "its" : "their"} own reset
 						</p>
 					)}
 					{resolved && weekly.reportingCount < weekly.eligibleTotal && (

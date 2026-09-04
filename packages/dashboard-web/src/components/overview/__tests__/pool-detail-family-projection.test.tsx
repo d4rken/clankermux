@@ -44,7 +44,7 @@ function rowFor(html: string, name: string): string {
  * whose tone the test below is about.
  */
 function projectionTag(html: string): string {
-	const at = html.indexOf("projected to run out");
+	const at = html.indexOf("projected to hit the cap");
 	if (at === -1) throw new Error("no projection line rendered");
 	const start = html.lastIndexOf("<div", at);
 	return html.slice(start, html.indexOf(">", start) + 1);
@@ -86,10 +86,10 @@ function family(overrides: Partial<FamilyWeeklyUsage>): FamilyWeeklyUsage {
 }
 
 describe("PoolDetailSection family at-risk projection", () => {
-	it("says nothing when no account is projected to run out", () => {
+	it("says nothing when no account is projected to hit the cap", () => {
 		const html = render([family({})]);
 		expect(html).toContain("Fable");
-		expect(html).not.toContain("projected to run out");
+		expect(html).not.toContain("projected to hit the cap");
 	});
 
 	it("names the projected instant for a single-account family", () => {
@@ -109,7 +109,7 @@ describe("PoolDetailSection family at-risk projection", () => {
 				],
 			}),
 		]);
-		expect(html).toContain("projected to run out");
+		expect(html).toContain("projected to hit the cap");
 		expect(html).toContain(instantLabel(exhaustsAtMs));
 		// A single-account family must not claim a pool-wide fraction.
 		expect(html).not.toContain("of 1 projected");
@@ -150,7 +150,7 @@ describe("PoolDetailSection family at-risk projection", () => {
 				],
 			}),
 		]);
-		expect(html).toContain("2 of 3 projected to run out");
+		expect(html).toContain("2 of 3 projected to hit the cap");
 		// Each row must carry ITS OWN instant, and the unprojected row none at all —
 		// asserting the three strings appear somewhere would pass even if the
 		// timestamps were rendered beside the wrong accounts.

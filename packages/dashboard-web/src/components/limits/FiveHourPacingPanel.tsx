@@ -1,6 +1,7 @@
 import { AlertCircle, Gauge } from "lucide-react";
 import {
 	type ClassPacing,
+	classIsUnread,
 	computeFiveHourPacing,
 } from "../../lib/five-hour-pacing";
 import { formatDurationDhm } from "../../lib/format-prediction";
@@ -24,12 +25,16 @@ function rowSegments(pacing: ClassPacing): string {
 	// A class with no reading at all would otherwise render as "0 with room",
 	// which states a measured absence of capacity rather than an absent
 	// measurement.
-	if (
-		pacing.room === 0 &&
-		pacing.waiting === 0 &&
-		pacing.unavailable === 0 &&
-		pacing.unknown > 0
-	) {
+	//
+	// STRICTER than the shared `classIsUnread` the chip uses, by the added
+	// `unavailable` clause, because the two answer different questions. The chip
+	// asks "may I call this class read?" — a paused account supplies no 5-hour
+	// reading, so it may not. This row asks "is there anything to enumerate?",
+	// and a paused account IS something to enumerate: replacing "1 unavailable"
+	// with "no 5h reading" would drop a fact the reader wants. Expressed as a
+	// strengthening of the shared predicate rather than a second copy of it, so
+	// the two can only ever differ by this one documented clause.
+	if (classIsUnread(pacing) && pacing.unavailable === 0) {
 		return "no 5h reading";
 	}
 	const segments = [`${pacing.room} with room`];

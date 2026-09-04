@@ -317,12 +317,18 @@ export function PoolDetailSection({
 									 * without pinning the class that implements it: the rule is
 									 * "this line is neutral", and asserting only that the line
 									 * renders would pass again the day a tint comes back.
+									 *
+									 * "hit the cap", matching FamilyWeeklyCard, never "run out":
+									 * this is a PER-FAMILY cap, and an account that reaches it
+									 * still has account-wide weekly quota left for every other
+									 * family. "Run out" claims the account is finished, which is
+									 * the exact confusion this section exists to prevent.
 									 */}
 									{f.soonestExhaustsAtMs !== null && (
 										<div data-tone="neutral" className="text-muted-foreground">
 											{f.accounts.length > 1
-												? `${f.atRiskCount} of ${f.accounts.length} projected to run out · first `
-												: "projected to run out "}
+												? `${f.atRiskCount} of ${f.accounts.length} projected to hit the cap · first `
+												: "projected to hit the cap "}
 											{windowTimeLabel(f.soonestExhaustsAtMs, "seven_day")}
 										</div>
 									)}
