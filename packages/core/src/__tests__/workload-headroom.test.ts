@@ -2,6 +2,7 @@ import { describe, expect, it } from "bun:test";
 import {
 	computeCapacityRunway,
 	computeWorkloadHeadroom,
+	normalizeAnthropicUsage,
 	type RunwayAccountSource,
 	runwayPaceHeadroom,
 	scopedWeeklyWindowKind,
@@ -193,14 +194,46 @@ describe("computeWorkloadHeadroom — family rows", () => {
 		expect(uniform?.pct).toBeGreaterThan(0);
 	});
 
-	it("discloses that a family projection rests on the structural estimate", () => {
+	it("discloses that a BINDING scoped window rests on the structural estimate", () => {
+		// Fable at 90% fills 13h from now, well before its reset, so it is what
+		// this row's outcome rests on. Scoped windows carry no prediction and no
+		// burn anchor, so that estimate is a now-anchored lifetime average which
+		// drifts later while a reading is stale — optimistic drift, disclosed.
+		const binding: RunwayAccountSource = {
+			id: "c1",
+			name: "c1",
+			provider: "anthropic",
+			usageData: anthropicUsage({
+				fiveHourPct: 1,
+				fiveHourResetMs: NOW + HOUR,
+				weeklyPct: 80,
+				weeklyResetMs: NOW + 2 * DAY,
+				scoped: { pct: 90 },
+			}),
+			usageObservedAtMs: NOW,
+		};
+		const row = computeWorkloadHeadroom([binding], NOW).find(
+			(candidate) => candidate.dimensionKind === "family",
+		);
+		expect(row?.projectionBasis).toBe("structural");
+		if (row?.outcome.kind !== "runway") throw new Error("unreachable");
+		expect(row.outcome.exhaustsAtMs).toBeCloseTo(NOW + 13.33 * HOUR, -6);
+	});
+
+	it("does not downgrade a family row for a scoped window that binds nothing", () => {
+		// Fable at 70% never fills before its reset, so the outcome rests entirely
+		// on the well-evidenced account-wide weekly window. Marking the row weak
+		// because a scoped window merely EXISTS would make the field useless: it
+		// would read `structural` on every family row forever, saying nothing
+		// about the projection actually served.
 		const row = computeWorkloadHeadroom(
 			[accountWideConstrained("c1")],
 			NOW,
 		).find((candidate) => candidate.dimensionKind === "family");
-		// Scoped windows carry no prediction and no burn anchor, so their ETA is a
-		// now-anchored lifetime average that drifts later on a stale reading.
-		expect(row?.projectionBasis).toBe("structural");
+		expect(row?.projectionBasis).toBe("measured");
+		// The row is still a BOUND — that is what `basis` says, and it is a
+		// different claim from how well-evidenced the projection is.
+		expect(row?.basis).toBe("conservative-bound");
 	});
 
 	it("drops an account that reports no scoped window for the family", () => {
@@ -246,6 +279,129 @@ describe("computeWorkloadHeadroom — family rows", () => {
 		// share range dominates. The bound is simply unavailable.
 		expect(row?.headroom).toBeNull();
 		expect(row?.headroomAbsence).toBe("bound-broken-by-credits");
+	});
+});
+
+describe("computeWorkloadHeadroom — sources shaped like the server's scan", () => {
+	/**
+	 * The server's runway scan resolves every account through its freshness
+	 * tiers and hands on `usageData: null` with the readings in
+	 * `windowObservations`. Every other test here uses a raw payload, so none of
+	 * them exercises the shape production actually passes.
+	 */
+	function scanShaped(id: string): RunwayAccountSource {
+		const payload = anthropicUsage({
+			fiveHourPct: 1,
+			fiveHourResetMs: NOW + HOUR,
+			weeklyPct: 80,
+			weeklyResetMs: NOW + 2 * DAY,
+			scoped: { pct: 70 },
+		});
+		return {
+			id,
+			name: id,
+			provider: "anthropic",
+			usageData: null,
+			windowObservations: {
+				fiveHour: { pct: 1, resetMs: NOW + HOUR },
+				sevenDay: { pct: 80, resetMs: NOW + 2 * DAY },
+				weeklyScoped: normalizeAnthropicUsage(payload, NOW).weeklyScoped,
+			},
+			usageObservedAtMs: NOW,
+		};
+	}
+
+	it("still discovers families when the readings are pre-extracted", () => {
+		// The regression that a green suite hid: family discovery read only
+		// `usageData`, so the whole dimension came out empty in production while
+		// every payload-shaped test passed.
+		const rows = computeWorkloadHeadroom([scanShaped("c1")], NOW);
+		expect(rows.map((row) => row.dimensionId)).toContain("fable");
+	});
+});
+
+describe("computeWorkloadHeadroom — honest counts", () => {
+	it("counts an account blocked by its 5-hour window as spent", () => {
+		const account: RunwayAccountSource = {
+			id: "c1",
+			name: "c1",
+			provider: "anthropic",
+			usageData: anthropicUsage({
+				// Spent right now on the 5-hour window while the week has room. Either
+				// account-wide window blocks routing, so a count that tested only the
+				// weekly one reported zero beside an `out-now` outcome.
+				fiveHourPct: 100,
+				fiveHourResetMs: NOW + HOUR,
+				weeklyPct: 20,
+				weeklyResetMs: NOW + 5 * DAY,
+				scoped: null,
+			}),
+			usageObservedAtMs: NOW,
+		};
+
+		const row = computeWorkloadHeadroom([account], NOW).find(
+			(candidate) => candidate.dimensionId === "anthropic",
+		);
+		expect(row?.outcome.kind).toBe("out-now");
+		expect(row?.spentAccountIds).toEqual(["c1"]);
+	});
+
+	it("separates accounts considered from accounts projected from", () => {
+		const readable = accountWideConstrained("c1");
+		const unreadable: RunwayAccountSource = {
+			id: "c2",
+			name: "c2",
+			provider: "anthropic",
+			usageData: null,
+			usageObservedAtMs: null,
+		};
+
+		const row = computeWorkloadHeadroom([readable, unreadable], NOW).find(
+			(candidate) => candidate.dimensionId === "anthropic",
+		);
+		expect(row?.eligibleAccountIds).toEqual(["c1", "c2"]);
+		// Counting c2 as depth behind the projection would claim two accounts of
+		// cover for a runway computed from one.
+		expect(row?.unreadableAccountIds).toEqual(["c2"]);
+	});
+
+	it("reports a live family it cannot project rather than dropping it", () => {
+		const mismatched: RunwayAccountSource = {
+			id: "c1",
+			name: "c1",
+			provider: "anthropic",
+			usageData: anthropicUsage({
+				fiveHourPct: 1,
+				fiveHourResetMs: NOW + HOUR,
+				weeklyPct: 80,
+				weeklyResetMs: NOW + 2 * DAY,
+				scoped: { pct: 70, resetMs: NOW + 5 * DAY },
+			}),
+			usageObservedAtMs: NOW,
+		};
+
+		const row = computeWorkloadHeadroom([mismatched], NOW).find(
+			(candidate) => candidate.dimensionKind === "family",
+		);
+		// Silently omitting the row would read as "no such limit", which is the
+		// opposite of "this limit exists and we cannot see it".
+		expect(row?.outcome.kind).toBe("unknown");
+		expect(row?.unreadableAccountIds).toEqual(["c1"]);
+		expect(row?.headroomAbsence).toBe("not-projected");
+	});
+
+	it("does not claim measured evidence for an unanchored weekly window", () => {
+		const unanchored: RunwayAccountSource = {
+			...accountWideConstrained("c1"),
+			// No honest observation time, so the weekly window degrades to the
+			// amber-capped now-anchored estimate. A hardcoded "measured" claimed
+			// evidence the scan did not have.
+			usageObservedAtMs: null,
+		};
+		const row = computeWorkloadHeadroom([unanchored], NOW).find(
+			(candidate) => candidate.dimensionId === "anthropic",
+		);
+		expect(row?.projectionBasis).toBe("structural");
 	});
 });
 

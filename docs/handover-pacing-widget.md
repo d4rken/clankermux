@@ -196,11 +196,19 @@ One flat record array, nothing nested inside it:
       "headroomAbsence": null,
       "projectionBasis": "measured",
       "eligibleAccounts": 5,
+      "unreadableAccounts": 0,
       "spentAccounts": 0
     }
   ]
 }
 ```
+
+`unreadableAccounts` is not decoration. Accounts the scan could not project from
+are excluded, and excluding one can only bring the all-out instant *earlier* —
+so whenever this is above zero, `exhaustsAt` is a lower bound and
+`eligibleAccounts` overstates the depth actually behind the projection. Render
+the pair, or at least don't claim five accounts of cover for a number computed
+from three.
 
 `headroomPct` and `headroomDirection` mean exactly what they mean in section 3,
 including the rule that the sign lives in the enum. What is new is
@@ -242,10 +250,18 @@ relieve those windows too. Do not render it as "hopeless".
 
 ### `projectionBasis`
 
-`measured` on class rows, `structural` on family rows. Scoped family windows
-carry no prediction and no burn anchor, so their ETA is a now-anchored lifetime
-average that drifts *later* while a reading is stale — optimistic drift. Treat a
-`structural` row as the softer of the two readings.
+A different claim from `headroomBasis`: this one is about `outcomeKind` and
+`exhaustsAt`, not about the headroom. `structural` means some window the outcome
+rests on has no full-confidence estimate behind it — usually a scoped family
+window, which carries no prediction and no burn anchor and so drifts *later*
+while a reading is stale (optimistic drift), but a class row earns it too when
+its weekly window has no honest observation time. Treat a `structural` row's
+instant as the softer reading.
+
+It is scoped to the windows that actually drive the outcome, so a family row can
+legitimately read `measured` when its scoped window is nowhere near binding.
+`headroomBasis` still says `conservative_bound` there — the two fields answer
+different questions and will not always agree.
 
 ---
 

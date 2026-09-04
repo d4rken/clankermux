@@ -176,22 +176,45 @@ export function scopedWeeklyWindowKind(family: ModelFamily): string {
  * window's validated `"full"` policy and must be disclosed by anything serving
  * the result.
  */
+/**
+ * Every per-model-family scoped weekly reading this account states, from the
+ * SAME resolution the account-wide windows come from.
+ *
+ * Exported because family DISCOVERY and family WINDOW BUILDING must not read
+ * different sources. They did once: discovery went through a helper that only
+ * looked at `usageData`, while the server's runway scan deliberately resolves
+ * every account into `windowObservations` and leaves `usageData` null. The
+ * result was a feature that passed every test and returned no family rows at
+ * all in production.
+ */
+export function scopedFamilyReadings(
+	account: RunwayAccountSource,
+	now: number,
+): ScopedFamilyLimit[] | null {
+	// A live payload wins; the pre-extracted readings are the FALLBACK for a
+	// caller that resolved the account without one — the same precedence
+	// `toRunwayAccountInput` applies to the account-wide windows, so all three
+	// windows come from one resolution.
+	//
+	// Null is "no scoped evidence" and an empty array is "this account reports
+	// none". Both suppress a scoped window; they are kept distinct because only
+	// the first can be fixed by a fresher reading.
+	if (account.usageData) {
+		return normalizeAnthropicUsage(
+			account.usageData as Parameters<typeof normalizeAnthropicUsage>[0],
+			now,
+		).weeklyScoped;
+	}
+	return account.windowObservations?.weeklyScoped ?? null;
+}
+
 function scopedWeeklyWindowFor(
 	account: RunwayAccountSource,
 	family: ModelFamily,
 	now: number,
 	accountWideResetMs: number | null,
 ): RunwayWindowInput | null {
-	// A live payload wins; the pre-extracted readings are the FALLBACK for a
-	// caller that resolved the account without one — the same precedence
-	// `toRunwayAccountInput` applies to the account-wide windows, so all three
-	// windows come from one resolution.
-	const available = account.usageData
-		? normalizeAnthropicUsage(
-				account.usageData as Parameters<typeof normalizeAnthropicUsage>[0],
-				now,
-			).weeklyScoped
-		: (account.windowObservations?.weeklyScoped ?? null);
+	const available = scopedFamilyReadings(account, now);
 	if (!available) return null;
 	const scoped = available.filter((limit) => limit.family === family);
 	if (scoped.length === 0) return null;

@@ -1606,15 +1606,33 @@ export interface PublicWorkloadHeadroomRowDto {
 	/** Why no headroom is stated. Never a stand-in for zero. */
 	headroomAbsence: PublicHeadroomAbsenceDto | null;
 	/**
-	 * How well-evidenced the projection is. `structural` marks a row resting on a
-	 * scoped window, which carries no prediction and no burn anchor, so its ETA
-	 * is a now-anchored lifetime average that drifts LATER while a reading is
-	 * stale — optimistic drift, and the reason this field exists.
+	 * How well-evidenced `outcomeKind` / `exhaustsAt` are — a DIFFERENT claim
+	 * from `headroomBasis`, which is about the headroom.
+	 *
+	 * `structural` means some window the outcome rests on has no full-confidence
+	 * estimate behind it: usually a scoped family window, which carries no
+	 * prediction and no burn anchor and so drifts LATER while a reading is stale
+	 * (optimistic drift), but a class row earns it too when its weekly window has
+	 * no honest observation time.
 	 */
 	projectionBasis: PublicProjectionBasisDto;
-	/** Accounts the scan pooled for this workload. */
+	/**
+	 * Accounts considered for this workload.
+	 *
+	 * Not the same as the number PROJECTED from: subtract `unreadableAccounts`
+	 * for that. Rendering only this one lets a bar claim five accounts of depth
+	 * behind a projection built on three.
+	 */
 	eligibleAccounts: number;
-	/** Of those, the ones whose binding window is already at or past 100%. */
+	/**
+	 * Of those, the ones with no readable window for this workload.
+	 *
+	 * Their exclusion can only shorten a runway, so `exhaustsAt` is a lower bound
+	 * whenever this is above zero — never a fabricated number, but not the whole
+	 * picture either.
+	 */
+	unreadableAccounts: number;
+	/** Of the eligible ones, those already at or past 100% on any pooled window. */
 	spentAccounts: number;
 }
 
@@ -1719,6 +1737,7 @@ export function toPublicWorkloadHeadroomDto(snapshot: {
 			headroomAbsence: toPublicHeadroomAbsence(row.headroomAbsence),
 			projectionBasis: toPublicProjectionBasis(row.projectionBasis),
 			eligibleAccounts: row.eligibleAccountIds.length,
+			unreadableAccounts: row.unreadableAccountIds.length,
 			spentAccounts: row.spentAccountIds.length,
 		})),
 	};

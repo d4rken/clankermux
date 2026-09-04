@@ -12,6 +12,7 @@ export {
 	type RunwayAccountSource,
 	type RunwayHeadline,
 	type RunwayWindowObservations,
+	scopedFamilyReadings,
 	scopedWeeklyWindowKind,
 	summarizeKeyRunways,
 	toRunwayAccountInput,

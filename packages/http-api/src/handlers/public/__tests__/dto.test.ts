@@ -190,6 +190,7 @@ function workloadHeadroom(): {
 				headroomAbsence: null,
 				projectionBasis: "measured",
 				eligibleAccountIds: ["acct-1", "acct-2"],
+				unreadableAccountIds: [],
 				spentAccountIds: [],
 			},
 			{
@@ -207,6 +208,7 @@ function workloadHeadroom(): {
 				headroomAbsence: "beyond-probe-range",
 				projectionBasis: "structural",
 				eligibleAccountIds: ["acct-1", "acct-2"],
+				unreadableAccountIds: ["acct-3"],
 				spentAccountIds: ["acct-1"],
 			},
 		],
@@ -936,6 +938,7 @@ describe("golden: GET /public/v1/workload-headroom", () => {
 					headroomAbsence: null,
 					projectionBasis: "measured",
 					eligibleAccounts: 2,
+					unreadableAccounts: 0,
 					spentAccounts: 0,
 				},
 				{
@@ -953,6 +956,10 @@ describe("golden: GET /public/v1/workload-headroom", () => {
 					headroomAbsence: "beyond_probe_range",
 					projectionBasis: "structural",
 					eligibleAccounts: 2,
+					// Above zero, so `exhaustsAt` on this row is a LOWER bound: an
+					// account the scan could not project from was excluded, and
+					// excluding one can only bring the all-out instant earlier.
+					unreadableAccounts: 1,
 					spentAccounts: 1,
 				},
 			],

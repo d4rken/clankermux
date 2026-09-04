@@ -1083,6 +1083,44 @@ export function computeCapacityRunwayBand(
 }
 
 /**
+ * Whether one window contributes dead time to the scan, and how well-evidenced
+ * the estimate behind it is.
+ *
+ * Exported for callers that report the EVIDENCE QUALITY of an outcome. The
+ * `contributes` half is what stops that report being over-pessimistic: a window
+ * projected never to fill produces no dead interval, so a low-confidence
+ * estimate of it cannot have moved the outcome and must not downgrade a row.
+ * Answered by running the real interval builder rather than by re-deriving its
+ * conditions, so the two cannot drift.
+ */
+export function windowEvidence(
+	window: RunwayWindowInput,
+	now: number,
+	horizonMs: number = RUNWAY_HORIZON_MS,
+): { contributes: boolean; lowConfidence: boolean } {
+	const estimate = estimateWindowExhaustion(
+		{
+			utilizationPct: window.utilizationPct,
+			resetsAtMs: window.resetsAtMs,
+			windowStartMs: window.windowStartMs,
+			prediction: window.prediction,
+			lifetimeConfidence: window.lifetimeConfidence,
+			observedAtMs: window.observedAtMs,
+			anchor: window.anchor,
+		},
+		now,
+	);
+	if (estimate.source === "none") {
+		return { contributes: false, lowConfidence: false };
+	}
+	const intervals = windowDeadIntervals(window, estimate, now, now + horizonMs);
+	return {
+		contributes: intervals.length > 0,
+		lowConfidence: estimate.lowConfidence,
+	};
+}
+
+/**
  * Dead intervals and pool membership for every account, under a burn-pace
  * multiplier (`pace: 1` is the real scan; the probe passes hypotheticals).
  */

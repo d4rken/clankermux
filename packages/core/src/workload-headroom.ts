@@ -3,6 +3,7 @@
 
 import {
 	type RunwayAccountSource,
+	scopedFamilyReadings,
 	scopedWeeklyWindowKind,
 	toRunwayAccountInput,
 	toScopedFamilyRunwayInput,
@@ -13,10 +14,10 @@ import {
 	type RunwayAccountInput,
 	type RunwayOutcome,
 	runwayPaceHeadroom,
+	windowEvidence,
 } from "./capacity-runway";
 import type { ModelFamily } from "./model-mappings";
 import { compareServableClasses, servableClassFor } from "./pool-classes";
-import { listLiveScopedFamilies } from "./pool-usage";
 
 /**
  * "Can I add another agent of THIS kind of work?", answered per workload rather
@@ -80,15 +81,21 @@ export type HeadroomAbsence =
 	| "bound-broken-by-credits";
 
 /**
- * How well-evidenced the projection under a row is.
+ * How well-evidenced the row's STATED OUTCOME is — a different claim from
+ * {@link HeadroomBasis}, which says whether the headroom is exact or a bound.
  *
- * `measured` is the account-wide windows' policy: a lifetime estimator selected
- * on held-out backtests, anchored to the reading's observation time, with burn
- * anchors to absorb mid-window gift resets. `structural` is what a scoped family
- * window gets, because none of those exist per family — no prediction, no
- * anchor, and a now-anchored ETA that therefore drifts LATER between scans when
- * the reading is stale. Optimistic drift is the expensive direction, so a row
- * carrying it has to say so.
+ * `measured` means every window the outcome rests on carries a full-confidence
+ * estimate: the account-wide policy of a lifetime estimator selected on
+ * held-out backtests, anchored to the reading's observation time, with burn
+ * anchors to absorb mid-window gift resets. `structural` means at least one of
+ * them does not — typically a scoped family window, which has no prediction and
+ * no anchor and so drifts LATER between scans while a reading is stale, but a
+ * class row earns it too when its weekly window has no honest observation time.
+ * Optimistic drift is the expensive direction, so a row carrying it says so.
+ *
+ * Scoped to the windows that actually CONTRIBUTE dead time. A window projected
+ * never to fill cannot have moved the outcome, and counting it would mark
+ * almost every row weak on evidence the answer does not depend on.
  */
 export type ProjectionBasis = "measured" | "structural";
 
@@ -99,37 +106,106 @@ export interface WorkloadHeadroomRow {
 	/** What the workload is called on screen — the models, not the vendor. */
 	label: string;
 	/**
-	 * The scan at the MEASURED pace. Exact on every row, family rows included:
-	 * at pace 1 no window is scaled, so the unknown burn share cannot reach it.
-	 * Only the headroom below is ever a bound.
+	 * The scan at the MEASURED pace.
+	 *
+	 * Free of the burn-share unknown on every row, family rows included: at pace
+	 * 1 no window is scaled, so the share cannot reach it. That is why the
+	 * headroom is a bound on a family row and this is not.
+	 *
+	 * It is still a LOWER BOUND whenever {@link unreadableAccountIds} is
+	 * non-empty, for a different reason: an account the scan could not project
+	 * from is excluded, and excluding one can only bring the all-out instant
+	 * earlier. Read the two fields together.
 	 */
 	outcome: RunwayOutcome;
 	headroom: { pct: number; direction: "margin" | "deficit" } | null;
 	basis: HeadroomBasis;
 	headroomAbsence: HeadroomAbsence | null;
 	projectionBasis: ProjectionBasis;
-	/** Accounts the scan actually pooled, in input order. */
+	/**
+	 * Accounts considered for this workload, in input order.
+	 *
+	 * NOT the same as the accounts the scan projected from: an account with no
+	 * readable window is counted here and excluded from the pool, and shows up in
+	 * {@link unreadableAccountIds}. Publishing only the first number would let a
+	 * row claim five accounts of depth behind a projection built on three.
+	 */
 	eligibleAccountIds: string[];
-	/** Of those, the ones whose binding window is already at or past 100%. */
+	/**
+	 * Of those, the ones the scan could not project from — no readable window at
+	 * all, or (on a family row) no usable scoped reading for this family.
+	 *
+	 * Their exclusion can only SHORTEN the runway, so an outcome carrying them is
+	 * a lower bound rather than a fabricated number. It is also the reason a
+	 * family row's baseline outcome is conservative rather than exact: the burn
+	 * share cannot reach a pace-1 scan, but a missing account can.
+	 */
+	unreadableAccountIds: string[];
+	/** Of the eligible ones, those already at or past 100% on any pooled window. */
 	spentAccountIds: string[];
 }
 
 /** Utilization at or above which a window counts as already spent. */
 const SPENT_THRESHOLD_PCT = 100;
 
-function spentAccountIds(
-	inputs: readonly RunwayAccountInput[],
-	windowKind: string,
-): string[] {
+/**
+ * Accounts that cannot serve this workload right now, over ANY of the windows
+ * the row's scan pooled.
+ *
+ * The union, not one named window: either account-wide window blocks routing,
+ * and a family's scoped window blocks it for that family. Testing only the
+ * weekly one let an account sitting at 100% of its 5-hour quota be counted as
+ * having room — the row's own outcome would read `out-now` beside a spent count
+ * of zero.
+ */
+function spentAccountIds(inputs: readonly RunwayAccountInput[]): string[] {
 	return inputs
 		.filter((input) =>
 			input.windows.some(
-				(window) =>
-					window.windowKind === windowKind &&
-					window.utilizationPct >= SPENT_THRESHOLD_PCT,
+				(window) => window.utilizationPct >= SPENT_THRESHOLD_PCT,
 			),
 		)
 		.map((input) => input.accountId);
+}
+
+/**
+ * How well-evidenced a row's projection is, DERIVED from the estimates rather
+ * than assumed from the row's kind.
+ *
+ * A class row is not automatically `measured`: a weekly window with no honest
+ * observation time falls back to the amber-capped now-anchored estimate, and a
+ * 5-hour window with no usable regression lands on the same low-confidence
+ * path. Hardcoding `measured` there claimed evidence the scan did not have. A
+ * family row still comes out `structural` on its own merits, because a scoped
+ * window has neither a prediction nor an anchor to reach full confidence with.
+ *
+ * The extra estimator pass is cheap next to the probe it sits beside: one
+ * estimate per window, against up to 50 pool rebuilds.
+ */
+function projectionBasisFor(
+	inputs: readonly RunwayAccountInput[],
+	now: number,
+	horizonMs: number,
+): ProjectionBasis {
+	for (const input of inputs) {
+		for (const window of input.windows) {
+			const evidence = windowEvidence(window, now, horizonMs);
+			// A window that contributes no dead time did not move this outcome, so
+			// the confidence of its estimate is not this row's problem. Counting it
+			// would mark almost every row weak on the strength of a 5-hour window
+			// projected never to fill.
+			if (!evidence.contributes) continue;
+			if (evidence.lowConfidence) return "structural";
+		}
+	}
+	return "measured";
+}
+
+/** The accounts a scan could not project from, on the kinds that report them. */
+function unprojectableOf(outcome: RunwayOutcome): string[] {
+	return "unprojectableAccountIds" in outcome
+		? outcome.unprojectableAccountIds
+		: [];
 }
 
 function absenceFor(outcome: RunwayOutcome): HeadroomAbsence {
@@ -267,37 +343,64 @@ export function computeWorkloadHeadroom(
 			headroom,
 			basis: "exact",
 			headroomAbsence: headroom === null ? absenceFor(outcome) : null,
-			projectionBasis: "measured",
+			projectionBasis: projectionBasisFor(inputs, now, horizonMs),
 			eligibleAccountIds: inputs.map((input) => input.accountId),
-			spentAccountIds: spentAccountIds(inputs, "seven_day"),
+			unreadableAccountIds: unprojectableOf(outcome),
+			spentAccountIds: spentAccountIds(inputs),
 		});
 	}
 
-	for (const live of listLiveScopedFamilies(accounts, now)) {
-		const inputs: RunwayAccountInput[] = [];
-		for (const account of accounts) {
-			const input = toScopedFamilyRunwayInput(account, live.family, now);
-			if (input) inputs.push(input);
+	// Family DISCOVERY reads exactly the source family WINDOW BUILDING reads.
+	// They were split once — discovery looked only at `usageData`, which the
+	// server's scan deliberately leaves null — and the whole family dimension
+	// came out empty in production while every test passed.
+	const familyLabels = new Map<ModelFamily, string>();
+	for (const account of accounts) {
+		for (const limit of scopedFamilyReadings(account, now) ?? []) {
+			if (!familyLabels.has(limit.family)) {
+				familyLabels.set(limit.family, limit.displayName);
+			}
 		}
-		// No account states this family's window, so there is nothing to say about
-		// it — not a row claiming unknown capacity.
-		if (inputs.length === 0) continue;
+	}
 
-		const bound = familyHeadroomBound(inputs, live.family, now, horizonMs);
+	for (const [family, displayName] of familyLabels) {
+		const inputs: RunwayAccountInput[] = [];
+		const unreadable: string[] = [];
+		for (const account of accounts) {
+			const input = toScopedFamilyRunwayInput(account, family, now);
+			if (input) inputs.push(input);
+			// Only an account that could otherwise have served this family counts as
+			// unreadable. A Codex account has no Claude family window to be missing.
+			else if (scopedFamilyReadings(account, now) !== null) {
+				unreadable.push(account.id);
+			}
+		}
+
+		// The family is live — some account reported it — but nothing about it can
+		// be projected. That is `unknown`, and it is reported. Skipping the row
+		// instead would make a family whose readings were all rejected silently
+		// vanish, which reads as "no such limit".
+		const bound =
+			inputs.length === 0
+				? {
+						outcome: { kind: "unknown" } as RunwayOutcome,
+						headroom: null,
+						absence: "not-projected" as HeadroomAbsence,
+					}
+				: familyHeadroomBound(inputs, family, now, horizonMs);
+
 		rows.push({
 			dimensionKind: "family",
-			dimensionId: live.family,
-			label: live.displayName,
+			dimensionId: family,
+			label: displayName,
 			outcome: bound.outcome,
 			headroom: bound.headroom,
 			basis: "conservative-bound",
 			headroomAbsence: bound.absence,
-			projectionBasis: "structural",
+			projectionBasis: projectionBasisFor(inputs, now, horizonMs),
 			eligibleAccountIds: inputs.map((input) => input.accountId),
-			spentAccountIds: spentAccountIds(
-				inputs,
-				scopedWeeklyWindowKind(live.family),
-			),
+			unreadableAccountIds: [...unreadable, ...unprojectableOf(bound.outcome)],
+			spentAccountIds: spentAccountIds(inputs),
 		});
 	}
 
