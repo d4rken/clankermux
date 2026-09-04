@@ -76,7 +76,9 @@ describe("PoolQuotaCard at-risk row", () => {
 		const html = render([
 			account({ usageData: weeklyAt(90, NOW + 6 * DAY) as never }),
 		]);
-		expect(html).toContain("1 of 1 account projected to run out before reset");
+		expect(html).toContain(
+			"1 of 1 account projected to hit 100% before its own reset",
+		);
 	});
 
 	it("says 'accounts' when the class holds more than one", () => {
@@ -88,7 +90,9 @@ describe("PoolQuotaCard at-risk row", () => {
 				usageData: weeklyAt(88, NOW + 6 * DAY) as never,
 			}),
 		]);
-		expect(html).toContain("2 of 2 accounts projected to run out before reset");
+		expect(html).toContain(
+			"2 of 2 accounts projected to hit 100% before their own reset",
+		);
 	});
 
 	it("leaves a paused account out of the forecast", () => {
@@ -101,7 +105,7 @@ describe("PoolQuotaCard at-risk row", () => {
 			account({ usageData: weeklyAt(10, NOW + 6 * DAY) as never }),
 			account({ id: "acc-2", name: "beta", paused: true }),
 		]);
-		expect(html).not.toContain("projected to run out before reset");
+		expect(html).not.toContain("projected to hit 100% before");
 	});
 
 	it("states the reporting coverage when an account has no reading", () => {

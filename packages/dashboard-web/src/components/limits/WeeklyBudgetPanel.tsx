@@ -71,10 +71,26 @@ function classBadges(
 		});
 	}
 	const scoped = scopeResultToClass(sevenDay, pool);
-	const { willRunOut, capacity } = willRunOutCount(scoped, "seven_day");
+	const { willRunOut, capacity, spent } = willRunOutCount(scoped, "seven_day");
 	if (willRunOut > 0) {
 		badges.push({
-			label: `${willRunOut} of ${capacity} projected to run out before reset`,
+			// "hit 100% before their OWN reset", never "run out": this counts
+			// accounts individually, against individually-staggered windows, and
+			// the runway panel one column over reports the POOL — which survives
+			// every one of these, because each account's window refills at its own
+			// reset while the others still have room. Worded as "run out" the two
+			// read as a flat contradiction, and the reader has no way to tell that
+			// they are answering different questions.
+			//
+			// "spent or projected" once any of them is ALREADY at 100%: the count
+			// mixes measured exhaustion with forecast, and calling the whole of it a
+			// projection invites the reader to discount capacity that is already
+			// gone.
+			label: `${willRunOut} of ${capacity} ${
+				capacity === 1 ? "account" : "accounts"
+			} ${spent > 0 ? "spent or projected" : "projected"} to hit 100% before ${
+				willRunOut === 1 ? "its" : "their"
+			} own reset`,
 			colorClass: "text-warning-strong",
 		});
 	}
@@ -247,18 +263,27 @@ export function WeeklyBudgetPanel({
 												</span>
 												{" · lowest "}
 												{pool.leastUsed.name}
+												{/* The pace belongs on THIS line and nowhere else: it
+												    is computed over the least-used account named
+												    immediately to its left. Below, it sat at the end of
+												    the coverage line, whose own trailing name is the
+												    class's EARLIEST-resetting account — a different
+												    account whenever the two differ, which read as
+												    "Claude-1 · 1.2× sustainable pace" while the 1.2×
+												    described Claude-4. Same placement the Overview's
+												    PoolQuotaCard already uses. */}
+												{burn && (
+													<>
+														{" · "}
+														<span className={burn.tone}>{burn.text}</span>
+													</>
+												)}
 											</>
 										)}
 									</span>
 								</p>
 								<p className="truncate text-xs text-muted-foreground">
 									{coverageLine(pool, now)}
-									{burn && (
-										<>
-											{" · "}
-											<span className={burn.tone}>{burn.text}</span>
-										</>
-									)}
 								</p>
 								{badges.map((badge) => (
 									<p

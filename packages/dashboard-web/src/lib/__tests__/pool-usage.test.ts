@@ -1848,6 +1848,11 @@ describe("willRunOutCount", () => {
 		expect(willRunOutCount(sevenDay, "seven_day")).toEqual({
 			willRunOut: 2,
 			capacity: 2,
+			// Of those two, ONE is already at 100% and one is only forecast to get
+			// there. Callers word the halves differently — "spent or projected"
+			// versus "projected" — so the split is part of the contract, not an
+			// incidental extra field.
+			spent: 1,
 		});
 	});
 
@@ -1857,6 +1862,7 @@ describe("willRunOutCount", () => {
 		expect(willRunOutCount(fiveHour, "five_hour")).toEqual({
 			willRunOut: 2,
 			capacity: 2,
+			spent: 1,
 		});
 	});
 });

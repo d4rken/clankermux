@@ -150,6 +150,23 @@ function countOccurrences(haystack: string, needle: string): number {
 }
 
 /**
+ * The innermost `<p>` element containing `needle`.
+ *
+ * For assertions about which figures share a LINE. Several readings on this
+ * card are computed over different accounts, so a whole-document `toContain`
+ * cannot tell "beta's pace beside beta's name" from "beta's pace beside
+ * alpha's" — both render the same set of strings.
+ */
+function paragraphContaining(html: string, needle: string): string {
+	const at = html.indexOf(needle);
+	if (at === -1) throw new Error(`not rendered: ${needle}`);
+	const start = html.lastIndexOf("<p", at);
+	const end = html.indexOf("</p>", at);
+	if (start === -1 || end === -1) throw new Error(`no <p> around: ${needle}`);
+	return html.slice(start, end);
+}
+
+/**
  * The runway panel's own markup, sliced out of the card.
  *
  * Scoped rather than whole-card because several of these assert on the ABSENCE
@@ -216,6 +233,27 @@ describe("LimitsCapacityOverview", () => {
 		// is asserted separately.
 		expect(countOccurrences(html, "1.0× sustainable pace")).toBeGreaterThan(0);
 		expect(html).toContain("GPT · lowest gamma");
+	});
+
+	it("puts the pace on the line naming the account it was computed over", () => {
+		// The regression this pins, using the one fixture where the two accounts
+		// differ: the anthropic class's LEAST-USED account is beta (the pace is
+		// beta's), while its EARLIEST-RESETTING account is alpha (the coverage line
+		// ends "· alpha"). With the pace appended to the coverage line, the render
+		// read "resets in 1h 30m · alpha · 0.2× sustainable pace" — one run of text
+		// in which the ratio appears to belong to alpha, which it does not.
+		//
+		// Asserted per-PARAGRAPH rather than by searching the whole card, because
+		// both strings are present either way; only their grouping changed, and a
+		// whole-document `toContain` passes on the broken layout too.
+		const html = renderOverview();
+
+		expect(paragraphContaining(html, "lowest beta")).toContain(
+			"sustainable pace",
+		);
+		expect(paragraphContaining(html, "resets in 1h 30m · alpha")).not.toContain(
+			"sustainable pace",
+		);
 	});
 
 	it("says nothing about pace for a class with no reset to measure against", () => {

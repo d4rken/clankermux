@@ -128,9 +128,94 @@ describe("computeFiveHourPacing", () => {
 		expect(codex?.unknown).toBe(1);
 		expect(codex?.room).toBe(0);
 		expect(codex?.waiting).toBe(0);
-		// The class with a real reading is clean, and an absent measurement is not
-		// evidence against it.
+		// NOT "Clear", which is what this asserted while the unread-class rule was
+		// only applied pool-wide. The clean class is still clean and the row for it
+		// still says so; what may not happen is the SUMMARY chip claiming the pool
+		// is clear on the strength of it, because the codex class beside it has no
+		// 5-hour reading whatsoever. Neutral, not a warning: an absent measurement
+		// is not evidence of trouble, only the absence of evidence of health — and
+		// with a Codex account in the pool this is the permanent state.
+		expect(pacing.outlook).toEqual({ label: "Partial", tone: "neutral" });
+	});
+
+	it("keeps Clear when every class has a reading", () => {
+		// The counterpart to the case above, pinning that "Partial" is caused by an
+		// UNREAD class and not merely by having more than one class.
+		const pacing = pacingFor([
+			account({ id: "a", name: "alpha", usageData: usage(20, 20) }),
+			account({
+				id: "c",
+				name: "gamma",
+				provider: "codex",
+				usageData: usage(10, 40),
+			}),
+		]);
+
+		// The codex class must actually BE here: `every` over a list that lost it
+		// is vacuously true, so without this the test would keep passing if the
+		// second class stopped being built at all.
+		expect(pacing.classes.map((c) => c.classId).sort()).toEqual([
+			"anthropic",
+			"codex",
+		]);
+		expect(pacing.classes.every((c) => c.unknown === 0)).toBe(true);
 		expect(pacing.outlook).toEqual({ label: "Clear", tone: "success" });
+	});
+
+	it("does not call a class read because its other account is paused", () => {
+		// A paused account is classified BEFORE usage extraction and stored with
+		// `pct: null`, so it contributes no 5-hour reading — knowing why it cannot
+		// serve says nothing about the class's pacing. While `classIsUnread` also
+		// required `unavailable === 0`, this class passed as read and the anthropic
+		// class's room carried the whole panel to green.
+		const pacing = pacingFor([
+			account({ id: "a", name: "alpha", usageData: usage(20, 20) }),
+			account({
+				id: "c",
+				name: "gamma",
+				provider: "codex",
+				usageData: usage(null, 40),
+			}),
+			account({
+				id: "d",
+				name: "delta",
+				provider: "codex",
+				paused: true,
+			}),
+		]);
+
+		const codex = pacing.classes.find((c) => c.classId === "codex");
+		expect(codex?.unknown).toBe(1);
+		expect(codex?.unavailable).toBe(1);
+		expect(codex?.room).toBe(0);
+		expect(pacing.outlook).toEqual({ label: "Partial", tone: "neutral" });
+	});
+
+	it("ranks an actively-paced class above an unread one", () => {
+		// Pins the PRECEDENCE, which the cases above cannot: each of them has only
+		// one candidate branch. Here both apply at once — the anthropic class is
+		// holding an account on the 5-hour limit while the codex class has no
+		// reading — and the warning must win, because a known limiting condition
+		// outranks missing coverage. Without this, moving the "Partial" branch
+		// above "Pacing" would leave every other test passing.
+		const pacing = pacingFor([
+			account({
+				id: "a",
+				name: "alpha",
+				usageData: usage(100, 20, { fiveHourResetMs: NOW + HOUR }),
+			}),
+			account({ id: "b", name: "beta", usageData: usage(20, 20) }),
+			account({
+				id: "c",
+				name: "gamma",
+				provider: "codex",
+				usageData: usage(null, 40),
+			}),
+		]);
+
+		expect(pacing.waiting).toBe(1);
+		expect(pacing.classes.find((c) => c.classId === "codex")?.unknown).toBe(1);
+		expect(pacing.outlook).toEqual({ label: "Pacing", tone: "warning" });
 	});
 
 	it("says Clear when nothing is waiting or running hot", () => {
