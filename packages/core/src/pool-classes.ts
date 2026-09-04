@@ -1,4 +1,4 @@
-import { providerDisplayName } from "../utils/provider-utils";
+import { providerDisplayName } from "./provider-display";
 
 /**
  * Which accounts can serve which requests, as a grouping of providers.

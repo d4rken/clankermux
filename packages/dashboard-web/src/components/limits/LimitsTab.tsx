@@ -1,4 +1,5 @@
 import type { ModelFamily } from "@clankermux/core";
+import { listLiveScopedFamilies, mergeScopedFamilies } from "@clankermux/core";
 import type { AnalyticsSection } from "@clankermux/types";
 import { useQueries } from "@tanstack/react-query";
 import React, { useMemo, useState } from "react";
@@ -7,6 +8,7 @@ import {
 	usageScopedHistoryQueryOptions,
 	useAccounts,
 	useAnalytics,
+	usePacing,
 	usePaymentsSummary,
 	useRunway,
 	useUsageHistory,
@@ -14,10 +16,6 @@ import {
 } from "../../hooks/queries";
 import { usePoolUsage } from "../../hooks/usePoolUsage";
 import { dataAvailability } from "../../lib/data-availability";
-import {
-	listLiveScopedFamilies,
-	mergeScopedFamilies,
-} from "../../lib/pool-usage";
 import { AccountPerformanceSection } from "./AccountPerformanceSection";
 import { AccountUtilizationCard } from "./AccountUtilizationCard";
 import { LimitsCapacityOverview } from "./LimitsCapacityOverview";
@@ -60,6 +58,11 @@ export const LimitsTab = React.memo(() => {
 	// rows down, so LimitsCapacityOverview stays a pure view component.
 	const runwayQuery = useRunway();
 	const { data: runway, isLoading: runwayLoading } = runwayQuery;
+	// Pacing is computed server-side too, from the same account array the list
+	// endpoint serves, so the panels and the desk widget cannot disagree about
+	// whether a pace is sustainable.
+	const pacingQuery = usePacing();
+	const { data: pacing, isLoading: pacingLoading } = pacingQuery;
 	const analyticsQuery = useAnalytics(
 		perfRange,
 		{ accounts: [], models: [], status: "all" },
@@ -125,6 +128,18 @@ export const LimitsTab = React.memo(() => {
 	const accountsUnavailableReason = accountsUnavailable
 		? "Account data unavailable"
 		: undefined;
+	// The quota panels read PACING, so a failed pacing read has to reach them as
+	// an unavailable reason of its own. Folding it into `loading` alone was not
+	// enough: after a first-load failure `isLoading` goes false with `data` still
+	// undefined, so both panels fell through to "No rolling-quota accounts" —
+	// asserting a measured empty pool on the strength of a request that failed.
+	// The accounts reason still wins, since without accounts there is nothing to
+	// pace either way.
+	const pacingUnavailable =
+		dataAvailability(pacingQuery, pacingLoading).state === "unavailable";
+	const quotaUnavailableReason =
+		accountsUnavailableReason ??
+		(pacingUnavailable ? "Pacing data unavailable" : undefined);
 	const analyticsUnavailable =
 		dataAvailability(analyticsQuery, analyticsLoading).state === "unavailable";
 	const analyticsPending = analyticsLoading && !analytics;
@@ -191,13 +206,14 @@ export const LimitsTab = React.memo(() => {
 			{/* The two rolling windows share one visual hierarchy so their usage,
 			    reporting coverage and recovery timing can be compared at a glance. */}
 			<LimitsCapacityOverview
+				pacing={pacing}
 				fiveHour={fiveHourPool}
 				sevenDay={weeklyPool}
 				now={now}
 				runways={runway?.keys ?? []}
 				accounts={runway?.accounts ?? []}
-				windowsLoading={accountsPending}
-				windowsUnavailableReason={accountsUnavailableReason}
+				windowsLoading={accountsPending || (pacingLoading && !pacing)}
+				windowsUnavailableReason={quotaUnavailableReason}
 				runwaysLoading={runwayLoading && !runway}
 				runwaysUnavailableReason={runwaysUnavailableReason}
 			/>

@@ -1,9 +1,6 @@
 import { describe, expect, it } from "bun:test";
+import type { FamilyWeeklyUsage, PoolUsageResult } from "@clankermux/core";
 import { renderToStaticMarkup } from "react-dom/server";
-import type {
-	FamilyWeeklyUsage,
-	PoolUsageResult,
-} from "../../../lib/pool-usage";
 import { PoolDetailSection } from "../../quota/PoolDetailSection";
 
 const NOW = 1_700_000_000_000;

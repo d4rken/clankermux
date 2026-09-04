@@ -6,14 +6,13 @@ import {
 	extractSevenDay,
 	isAnthropicStyleShape,
 	normalizeAnthropicUsage,
-} from "@clankermux/core";
-import type { AccountResponse, AnthropicUsageData } from "@clankermux/types";
-import {
+	type PoolWindow,
+	pickBindingScopedLimit,
 	usageObservedAtMs,
 	weeklyLifetimeConfidence,
 	windowBurnAnchor,
-} from "./lifetime-confidence";
-import { type PoolWindow, pickBindingScopedLimit } from "./pool-usage";
+} from "@clankermux/core";
+import type { AccountResponse, AnthropicUsageData } from "@clankermux/types";
 
 /**
  * Forward usage projection for the Limits-tab sawtooth charts.

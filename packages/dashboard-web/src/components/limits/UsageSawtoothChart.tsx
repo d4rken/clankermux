@@ -1,4 +1,4 @@
-import type { ModelFamily } from "@clankermux/core";
+import type { ModelFamily, PoolWindow } from "@clankermux/core";
 import type {
 	AccountResponse,
 	UsageHistoryResponse,
@@ -9,7 +9,6 @@ import { AlertCircle } from "lucide-react";
 import { useMemo } from "react";
 import type { TimeRange } from "../../constants";
 import { useSeriesPalette } from "../../hooks/useSeriesPalette";
-import type { PoolWindow } from "../../lib/pool-usage";
 import { pickTimePattern } from "../../lib/usage-chart-format";
 import {
 	computeWindowForecast,

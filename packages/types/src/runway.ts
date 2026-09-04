@@ -78,6 +78,42 @@ export type RunwayOutcome =
 			causes: RunwayCause[];
 			unprojectableAccountIds: string[];
 			assumedResetCredits?: RunwayAssumedCredits[];
+			/**
+			 * How much SLOWER the pool would have to burn to stop running out
+			 * inside the horizon — the mirror of `paceMargin` on the branch where
+			 * the pool is already projected to run out.
+			 *
+			 * The two exist for one reason between them: a reader deciding whether
+			 * to add or shed load needs a signed answer, and `paceMargin` alone
+			 * goes absent at exactly the moment the answer stops being "you have
+			 * room". Since an outcome is either finite or beyond-horizon and never
+			 * both, at most one of the two is ever present, and a scan runs at most
+			 * one probe.
+			 *
+			 * Carries the largest probed multiplier (<1) such that it AND EVERY
+			 * PROBED MULTIPLIER BELOW IT clears the horizon — a threshold a reader
+			 * can act on, so "cut by at least this much" is a true statement.
+			 *
+			 * The whole contiguous tail, not the first multiplier that happens to
+			 * clear, because safety is NOT monotone in pace: a modelled reset credit
+			 * revives a window only when the dead span starts before the credit
+			 * expires, and slowing the burn pushes that span later, so a pool can be
+			 * safe at 0.71 and unsafe again at 0.60. Publishing the first hit would
+			 * hand a reader a sampled point they would then act on as a threshold —
+			 * told to cut 29%, they cut 35% and land back in trouble.
+			 *
+			 * Absent when even the floor still runs out. That is NOT "no deficit":
+			 * it means the pool cannot be paced out of trouble within the probe's
+			 * range, which is worse than any number here, and a renderer must not
+			 * display it as zero.
+			 */
+			paceDeficit?: {
+				/**
+				 * Largest burn-pace multiplier (<1) from which every probed slower
+				 * pace also clears the horizon.
+				 */
+				multiplier: number;
+			};
 	  };
 
 /**

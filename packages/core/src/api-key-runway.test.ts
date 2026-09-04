@@ -366,6 +366,48 @@ describe("worstKeyRunway", () => {
 		);
 	});
 
+	it("breaks a runway tie on the deeper required cut, not on input order", () => {
+		// The headline row is the ONLY one whose pace figure any surface renders,
+		// so with two keys running out at the same instant, input order deciding
+		// which is published means one asking for a 10% cut can hide another
+		// asking for 50% — same instant, opposite advice. Asserted in both
+		// orderings, because order is exactly what must not matter.
+		const shallow: KeyRunway = {
+			...runwayRow(6 * HOUR, "shallow"),
+			outcome: {
+				...runwayRow(6 * HOUR, "shallow").outcome,
+				paceDeficit: { multiplier: 0.9 },
+			} as KeyRunway["outcome"],
+		};
+		const deep: KeyRunway = {
+			...runwayRow(6 * HOUR, "deep"),
+			outcome: {
+				...runwayRow(6 * HOUR, "deep").outcome,
+				paceDeficit: { multiplier: 0.5 },
+			} as KeyRunway["outcome"],
+		};
+
+		expect(worstKeyRunway([shallow, deep], NOW)?.keyId).toBe("deep");
+		expect(worstKeyRunway([deep, shallow], NOW)?.keyId).toBe("deep");
+	});
+
+	it("ranks a tied runway with NO stateable deficit worst of all", () => {
+		// An absent deficit means no pace in range reliably saves that key, which
+		// is worse than any cut a sibling could be asked for — so it must not sort
+		// as though it were the mildest.
+		const cuttable: KeyRunway = {
+			...runwayRow(6 * HOUR, "cuttable"),
+			outcome: {
+				...runwayRow(6 * HOUR, "cuttable").outcome,
+				paceDeficit: { multiplier: 0.6 },
+			} as KeyRunway["outcome"],
+		};
+		const hopeless = runwayRow(6 * HOUR, "hopeless");
+
+		expect(worstKeyRunway([cuttable, hopeless], NOW)?.keyId).toBe("hopeless");
+		expect(worstKeyRunway([hopeless, cuttable], NOW)?.keyId).toBe("hopeless");
+	});
+
 	it("prefers the shortest runway among finite ones", () => {
 		const worst = worstKeyRunway(
 			[

@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import {
 	FAMILY_WEEKLY_ELEVATED_THRESHOLD_PCT,
 	type FamilyWeeklyUsage,
-} from "../../../lib/pool-usage";
+} from "@clankermux/core";
 import {
 	familyScopeSummary,
 	familyWeeklyBadge,

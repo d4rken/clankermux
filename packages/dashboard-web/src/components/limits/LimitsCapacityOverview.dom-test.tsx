@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it } from "bun:test";
+import type { PoolUsageResult } from "@clankermux/core";
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
-import type { PoolUsageResult } from "../../lib/pool-usage";
 import { LimitsCapacityOverview } from "./LimitsCapacityOverview";
 
 (

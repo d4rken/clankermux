@@ -1,26 +1,41 @@
-import type { ModelFamily, ScopedFamilyLimit } from "@clankermux/core";
-import {
-	computeWindowStartMs,
-	estimateWindowExhaustion,
-	extractFiveHour,
-	extractSevenDay,
-	FIVE_HOUR_ELIGIBLE_PROVIDERS,
-	isAnthropicStyleShape,
-	normalizeAnthropicUsage,
-	SEVEN_DAY_ELIGIBLE_PROVIDERS,
-} from "@clankermux/core";
+// RELATIVE imports, never the "@clankermux/core" barrel. This module now lives
+// inside core, and a module importing its own package entry is a cycle: the
+// barrel would have to finish evaluating to satisfy an import that the barrel
+// itself is in the middle of pulling in. Every non-test module in this package
+// imports its siblings by path for that reason.
+
+// `AccountResponse` is named outright here, which is the first time core does
+// so. `api-key-runway.ts` deliberately avoids it, shaping `RunwayAccountSource`
+// so the response type structurally satisfies it instead. That convention is
+// right for a module that merely needs a few fields; this one is ABOUT the
+// account response — it reads usage payloads, predictions, pause state and
+// rate-limit columns — and a parallel structural mirror of it would be exactly
+// the duplicated definition this move exists to remove. Direction is legal:
+// core already depends on types, and types must never depend on core.
 import type {
 	AccountResponse,
 	AnthropicUsageData,
 	UsageBurnAnchor,
 	UsagePrediction,
 } from "@clankermux/types";
+import { estimateWindowExhaustion } from "./capacity-runway";
 import {
 	usageObservedAtMs,
 	weeklyLifetimeConfidence,
 	windowBurnAnchor,
 } from "./lifetime-confidence";
+import type { ModelFamily } from "./model-mappings";
 import { compareServableClasses, servableClassFor } from "./pool-classes";
+import type { ScopedFamilyLimit } from "./scoped-limits";
+import { computeWindowStartMs } from "./throttle-utils";
+import { normalizeAnthropicUsage } from "./usage-normalizer";
+import {
+	extractFiveHour,
+	extractSevenDay,
+	FIVE_HOUR_ELIGIBLE_PROVIDERS,
+	isAnthropicStyleShape,
+	SEVEN_DAY_ELIGIBLE_PROVIDERS,
+} from "./usage-window-extract";
 
 export type PoolWindow = "five_hour" | "seven_day";
 
@@ -130,6 +145,15 @@ export interface ServableClassPool {
 	singlePointOfFailure: boolean;
 	earliestResetMs: number | null;
 	earliestResetAccountName: string | null;
+	/**
+	 * The same account as {@link earliestResetAccountName}, by id.
+	 *
+	 * Carried alongside the name because a published surface needs a JOIN KEY:
+	 * `/public/v1/pacing` may not re-serve account names (they live once, on the
+	 * accounts resource), so a consumer resolves this id against that list. The
+	 * name stays for the dashboard, which renders it directly.
+	 */
+	earliestResetAccountId: string | null;
 }
 
 /**
@@ -144,19 +168,6 @@ export type OutlookTone = "neutral" | "success" | "warning" | "destructive";
 export interface Outlook {
 	label: string;
 	tone: OutlookTone;
-}
-
-/**
- * How many accounts could contribute to this window at all: those reporting,
- * those charged as spent, and those with no reading. Both pages computed this
- * sum inline with identical arithmetic.
- */
-export function eligibleAccountTotal(result: PoolUsageResult): number {
-	return (
-		result.contributing.length +
-		result.exhausted.length +
-		result.excluded.length
-	);
 }
 
 /**
@@ -1098,6 +1109,7 @@ function groupIntoServableClasses(
 		let unknownCount = 0;
 		let earliestResetMs: number | null = null;
 		let earliestResetAccountName: string | null = null;
+		let earliestResetAccountId: string | null = null;
 
 		for (const bar of sorted) {
 			if (bar.state === "reporting" && bar.pct != null) {
@@ -1139,6 +1151,7 @@ function groupIntoServableClasses(
 			) {
 				earliestResetMs = bar.resetMs;
 				earliestResetAccountName = bar.name;
+				earliestResetAccountId = bar.accountId;
 			}
 		}
 
@@ -1156,6 +1169,7 @@ function groupIntoServableClasses(
 				capacityCount <= 1 && capacityCount + unknownCount > 0,
 			earliestResetMs,
 			earliestResetAccountName,
+			earliestResetAccountId,
 		});
 	}
 

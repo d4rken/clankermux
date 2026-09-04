@@ -375,14 +375,30 @@ export function presentRateLimitStatus(
 }
 
 /**
- * Create an accounts list handler
+ * Build the account list `GET /api/accounts` serves.
+ *
+ * Extracted from the handler so a SECOND surface can consume the same array:
+ * the pacing scan derives per-class burn ratios and the 5-hour rollup from it,
+ * and those figures sit beside the account bars on the same page. Recomputing
+ * the input a second way is how a page comes to disagree with itself about the
+ * same pool — the resolvers below are subtle in exactly the places that would
+ * bite (when a reading may carry a prediction, how `usageAsOfIso` is stamped,
+ * which tier a Codex reading resolves from), so the whole assembly is shared
+ * rather than the parts.
+ *
+ * The pacing scan reads only about a dozen of these fields and pays for all of
+ * them, session stats and duplicate detection included. Deliberate: identical
+ * input is the point, and a narrowed second read would reintroduce the drift
+ * this exists to prevent. The public widget reader absorbs its share behind a
+ * TTL memo; the dashboard pays it twice per refresh while the Usage page is
+ * open, which is the cost of the two surfaces never disagreeing.
  */
-export function createAccountsListHandler(
+export async function listAccountResponses(
 	dbOps: DatabaseOperations,
 	config: Config,
 	getStrategy?: () => LoadBalancingStrategy | null,
-) {
-	return async (): Promise<Response> => {
+): Promise<AccountResponse[]> {
+	{
 		const db = dbOps.getAdapter();
 		const now = Date.now();
 		const sessionDuration = 5 * 60 * 60 * 1000; // 5 hours
@@ -1225,8 +1241,23 @@ export function createAccountsListHandler(
 			account.duplicateAccountIds = dupIds;
 		}
 
-		return jsonResponse(response);
-	};
+		return response;
+	}
+}
+
+/**
+ * Create an accounts list handler.
+ *
+ * A thin wrapper over {@link listAccountResponses}: the array is the reusable
+ * thing, the JSON envelope is not.
+ */
+export function createAccountsListHandler(
+	dbOps: DatabaseOperations,
+	config: Config,
+	getStrategy?: () => LoadBalancingStrategy | null,
+) {
+	return async (): Promise<Response> =>
+		jsonResponse(await listAccountResponses(dbOps, config, getStrategy));
 }
 
 /**

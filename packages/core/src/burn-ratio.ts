@@ -1,5 +1,5 @@
-import { computeExpectedPct } from "@clankermux/core";
 import type { OutlookTone } from "./pool-usage";
+import { computeExpectedPct } from "./throttle-utils";
 
 /**
  * A percentage is a POSITION, not a rate.

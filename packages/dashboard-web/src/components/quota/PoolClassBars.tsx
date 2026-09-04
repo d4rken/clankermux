@@ -1,4 +1,4 @@
-import type { PoolAccountBar } from "../../lib/pool-usage";
+import type { PoolAccountBar } from "@clankermux/core";
 import { cn } from "../../lib/utils";
 
 const REASON_SHORT: Record<string, string> = {

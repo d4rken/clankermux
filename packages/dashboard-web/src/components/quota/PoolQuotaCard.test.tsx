@@ -1,7 +1,7 @@
 import { describe, expect, it } from "bun:test";
+import { computePoolUsage } from "@clankermux/core";
 import type { AccountResponse } from "@clankermux/types";
 import { renderToStaticMarkup } from "react-dom/server";
-import { computePoolUsage } from "../../lib/pool-usage";
 import { PoolQuotaCard } from "./PoolQuotaCard";
 
 const NOW = Date.UTC(2026, 8, 3, 12, 0, 0);

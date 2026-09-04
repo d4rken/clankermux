@@ -1,20 +1,23 @@
-import { AlertCircle, Gauge } from "lucide-react";
+import type { Outlook } from "@clankermux/core";
 import {
 	type ClassPacing,
 	classIsUnread,
-	computeFiveHourPacing,
-} from "../../lib/five-hour-pacing";
+	type FiveHourPacing,
+} from "@clankermux/core";
+import { AlertCircle, Gauge } from "lucide-react";
 import { formatDurationDhm } from "../../lib/format-prediction";
-import type { Outlook, PoolUsageResult } from "../../lib/pool-usage";
 import { cn } from "../../lib/utils";
 import { StatusChip } from "../accounts/StatusChip";
 import { TONE_CLASSES } from "../quota/outlook-tone";
 import { Skeleton } from "../ui/skeleton";
 
 interface FiveHourPacingPanelProps {
-	fiveHour: PoolUsageResult;
-	/** The weekly result, so an account spent on BOTH windows is not sold as merely waiting. */
-	sevenDay: PoolUsageResult;
+	/**
+	 * The SERVED rollup. Computed on the server from both windows, so an account
+	 * spent on the weekly window too is not sold here as merely waiting for a
+	 * lift that gives it nothing.
+	 */
+	pacing: FiveHourPacing | undefined;
 	now: number;
 	loading: boolean;
 	unavailableReason?: string;
@@ -60,28 +63,29 @@ function rowSegments(pacing: ClassPacing): string {
  * answer, and a dash would hide it behind the same glyph an unread pool shows.
  */
 export function FiveHourPacingPanel({
-	fiveHour,
-	sevenDay,
+	pacing,
 	now,
 	loading,
 	unavailableReason,
 }: FiveHourPacingPanelProps) {
 	const pending = loading && unavailableReason == null;
-	const resolved = !pending && unavailableReason == null;
-	const pacing = computeFiveHourPacing(fiveHour, sevenDay, now);
-	const outlook: Outlook = resolved
-		? pacing.outlook
-		: { label: pending ? "Loading" : "Unavailable", tone: "neutral" };
+	const resolved = !pending && unavailableReason == null && pacing != null;
+	const outlook: Outlook =
+		resolved && pacing != null
+			? pacing.outlook
+			: { label: pending ? "Loading" : "Unavailable", tone: "neutral" };
 	const toneClasses = TONE_CLASSES[outlook.tone];
 
 	const subLine =
-		pacing.nextLiftMs != null
-			? `next lift in ${formatDurationDhm(pacing.nextLiftMs - now)}${
-					pacing.nextLiftAccountName ? ` · ${pacing.nextLiftAccountName}` : ""
-				}`
-			: pacing.waiting === 0
-				? "Nothing waiting to lift"
-				: "Lift time not reported";
+		pacing == null
+			? "Reading accounts"
+			: pacing.nextLiftMs != null
+				? `next lift in ${formatDurationDhm(pacing.nextLiftMs - now)}${
+						pacing.nextLiftAccountName ? ` · ${pacing.nextLiftAccountName}` : ""
+					}`
+				: pacing.waiting === 0
+					? "Nothing waiting to lift"
+					: "Lift time not reported";
 
 	return (
 		<section
@@ -114,7 +118,7 @@ export function FiveHourPacingPanel({
 							Reading accounts
 						</p>
 					</>
-				) : fiveHour.classes.length === 0 ? (
+				) : (pacing?.classes.length ?? 0) === 0 ? (
 					<>
 						<p className="figure-xl text-muted-foreground">—</p>
 						<p className="mt-tight text-xs text-muted-foreground">
@@ -125,10 +129,10 @@ export function FiveHourPacingPanel({
 					<>
 						<div className="flex items-baseline justify-between gap-row">
 							<p className={cn("figure-xl", toneClasses.figure)}>
-								{pacing.waiting}
+								{pacing?.waiting ?? 0}
 							</p>
 							<p className="text-xs text-muted-foreground">
-								{pacing.waiting === 1
+								{pacing?.waiting === 1
 									? "account waiting on 5h"
 									: "accounts waiting on 5h"}
 							</p>
@@ -140,7 +144,7 @@ export function FiveHourPacingPanel({
 				)}
 			</div>
 
-			{resolved && pacing.classes.length > 0 && (
+			{resolved && pacing != null && pacing.classes.length > 0 && (
 				<ul
 					className="mt-group space-y-item"
 					aria-label="5-hour pacing by class"

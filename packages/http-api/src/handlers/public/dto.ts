@@ -50,6 +50,8 @@
  * our schedule.
  */
 
+import type { PacingSnapshot } from "@clankermux/core";
+import { classIsUnread } from "@clankermux/core";
 import type {
 	RequestResponse,
 	StopsHistoryResponse,
@@ -75,6 +77,7 @@ export const PUBLIC_ACCOUNTS_SCHEMA = "clankermux.public.accounts.v1";
 export const PUBLIC_RUNWAY_SCHEMA = "clankermux.public.runway.v1";
 export const PUBLIC_STREAM_SCHEMA = "clankermux.public.stream.v1";
 export const PUBLIC_STOPS_SCHEMA = "clankermux.public.stops.v1";
+export const PUBLIC_PACING_SCHEMA = "clankermux.public.pacing.v1";
 
 /** Byte ceiling on every DISPLAY string this surface emits. */
 export const MAX_STRING_BYTES = 96;
@@ -879,6 +882,51 @@ export interface PublicWorstOutcomeDto {
 	 */
 	earliestExhaustsAt: string | null;
 	latestExhaustsAt: string | null;
+	/**
+	 * Signed pace headroom: how much more load the pool can take, or how much it
+	 * has to shed, as a whole percentage of the currently measured pace.
+	 *
+	 * THE figure a "more agents or fewer agents" reading is built from, and the
+	 * only one on this surface that is pool-level rather than per-account. The
+	 * per-class burn ratios on `/public/v1/pacing` answer a different question
+	 * and routinely disagree with this one: several accounts can each be over
+	 * pace on their own window while the pool, with staggered resets and
+	 * failover, still has room.
+	 *
+	 * Positive with `direction: "margin"`, negative-sense with `"deficit"`. The
+	 * sign is carried in `headroomDirection` rather than in the number so a
+	 * client that ignores the enum cannot silently read a required cut as spare
+	 * capacity.
+	 *
+	 * BOTH null is not "zero headroom" — it is "no figure", and which end of the
+	 * scale that means depends on `kind`. On a `beyond_horizon` it is the good
+	 * end (no probed increase up to the cap flips the verdict, so headroom is at
+	 * least the cap); on a `runway` it is the bad end (no probed slowdown down to
+	 * the floor clears the horizon). A renderer must read `kind` alongside it and
+	 * must never draw either case as a zero.
+	 */
+	headroomPct: number | null;
+	headroomDirection: PublicHeadroomDirection | null;
+}
+
+/**
+ * Which way the pool's pace headroom points, as a CLOSED set.
+ *
+ * Two members and an escape hatch rather than a signed number alone, because
+ * the two mean opposite things and a client dropping the sign would invert the
+ * advice completely.
+ */
+export type PublicHeadroomDirection = "margin" | "deficit" | "other";
+
+const KNOWN_HEADROOM_DIRECTIONS = new Set(["margin", "deficit"]);
+
+/** Total over today's headroom directions; anything later becomes `other`. */
+export function toPublicHeadroomDirection(
+	direction: string,
+): PublicHeadroomDirection {
+	return KNOWN_HEADROOM_DIRECTIONS.has(direction)
+		? (direction as PublicHeadroomDirection)
+		: "other";
 }
 
 /**
@@ -935,6 +983,13 @@ export function toPublicRunwayDto(
 					latestExhaustsAt: instant(
 						snapshot.worstStatedOutcome.band?.latestExhaustsAtMs,
 					),
+					headroomPct: snapshot.worstStatedOutcome.headroom?.pct ?? null,
+					headroomDirection:
+						snapshot.worstStatedOutcome.headroom == null
+							? null
+							: toPublicHeadroomDirection(
+									snapshot.worstStatedOutcome.headroom.direction,
+								),
 				}
 			: null,
 	};
@@ -1270,6 +1325,231 @@ export function toPublicRequestDoneDto(
 		totalTokens: payload.totalTokens ?? null,
 		costUsd: payload.costUsd ?? null,
 		errorMessage: text(payload.errorMessage),
+	};
+}
+
+// ---------------------------------------------------------------------------
+// GET /public/v1/pacing
+// ---------------------------------------------------------------------------
+
+/**
+ * How a figure should be read, as a CLOSED set.
+ *
+ * Mirrors the internal `OutlookTone` value for value. Published rather than
+ * left to the client because the thresholds behind it (60% "watch", 80% "high",
+ * 1.05x and 1.5x on the burn ratio) are policy, and a widget re-deriving them
+ * would drift from the dashboard the first time one moved.
+ */
+export type PublicToneDto =
+	| "neutral"
+	| "success"
+	| "warning"
+	| "destructive"
+	| "other";
+
+const KNOWN_TONES = new Set(["neutral", "success", "warning", "destructive"]);
+
+/** Total over today's `OutlookTone`; anything later becomes `other`. */
+export function toPublicTone(tone: string): PublicToneDto {
+	return KNOWN_TONES.has(tone) ? (tone as PublicToneDto) : "other";
+}
+
+/**
+ * One servable class's weekly budget and 5-hour governor state.
+ *
+ * Account references are IDs only. Names live once, on `/public/v1/accounts`,
+ * and a consumer joins on these — re-serving them here would be the same fact
+ * in two places, free to drift.
+ */
+export interface PublicPacingClassDto {
+	/** Join key for the class itself; stable across polls. */
+	classId: string;
+	/** Display label, e.g. "Claude". Truncated like any display string. */
+	label: string | null;
+
+	// --- Weekly budget ---
+	/**
+	 * The LEAST-USED account's weekly utilization, which is this class's real
+	 * headroom: routing picks one account, so what matters is whether any account
+	 * still has room, not the mean of a spent one and a fresh one.
+	 */
+	utilizationPct: number | null;
+	/** The account the two figures above and below describe. */
+	leastUsedAccountId: string | null;
+	/**
+	 * Actual burn over the burn an even spend of the window would have reached.
+	 * 1.0 is exactly on pace. Null when no honest comparison exists — no reset to
+	 * measure against, or a window too young to divide by.
+	 *
+	 * NOT the answer to "should I run more work": it describes one account, and a
+	 * pool with staggered resets and failover routinely shows several accounts
+	 * over pace while the pool as a whole has room. The pool-level signed figure
+	 * is on `/public/v1/runway`.
+	 */
+	burnRatio: number | null;
+	burnTone: PublicToneDto | null;
+	outlookTone: PublicToneDto;
+	/** Accounts reporting a weekly reading, out of those that could. */
+	reportingCount: number;
+	eligibleTotal: number;
+	/** How many reach 100% before their own reset, and how many already have. */
+	willRunOut: number;
+	alreadySpent: number;
+	/** Earliest weekly reset in the class, and whose. */
+	resetsAt: string | null;
+	resetsAtAccountId: string | null;
+	/** One account or fewer can serve this class; a single failure stops it. */
+	singlePointOfFailure: boolean;
+
+	// --- 5-hour governor ---
+	/** Accounts that can serve right now. */
+	fiveHourRoom: number;
+	/** Reporting accounts projected to hit the 5-hour limit before it resets. */
+	fiveHourRunningHot: number;
+	/**
+	 * Held by the 5-hour limit ALONE — capacity a lift restores. An account also
+	 * out of its weekly quota is excluded: the lift gives it nothing, and
+	 * counting it here would promise a recovery that never arrives.
+	 */
+	fiveHourWaiting: number;
+	/** Paused, cooling down, token-expired, usage-429 or weekly-spent. */
+	fiveHourUnavailable: number;
+	/** No 5-hour reading at all. Never counted as zero. */
+	fiveHourUnknown: number;
+	/**
+	 * True when nothing is known about this class's 5-hour state. Codex accounts
+	 * report no 5-hour window at all, so this is a standing condition for a pool
+	 * holding one, not a transient error.
+	 */
+	fiveHourUnread: boolean;
+	/** Earliest future lift among this class's waiting accounts. */
+	nextLiftAt: string | null;
+	nextLiftAccountId: string | null;
+}
+
+/**
+ * `GET /public/v1/pacing` — how fast the pool is spending, per servable class.
+ *
+ * Deliberately absent, and none of it may be added back:
+ *
+ *  - Account NAMES. They are display text belonging to the accounts resource;
+ *    every reference here is a join key.
+ *  - The pool's signed pace headroom. It is computed by the runway scan and
+ *    published on `/public/v1/runway`; a copy here would be one measurement in
+ *    two places.
+ *  - Per-account bars. That is the accounts resource's job, and nesting them
+ *    under `classes[]` would put a second array inside a record array, which the
+ *    device's scanner cannot descend into.
+ */
+export interface PublicPacingDto {
+	schema: string;
+	/** INSTANT this payload describes. */
+	generatedAt: string;
+	/** The tightest class's id, or null when none reports. */
+	bindingClassId: string | null;
+	/**
+	 * The pool-wide 5-hour verdict. `paced` is the one state where waiting is the
+	 * only option: some class has nothing that can serve it and the cause is the
+	 * 5-hour limit.
+	 */
+	fiveHourOutlookTone: PublicToneDto;
+	classes: PublicPacingClassDto[];
+}
+
+export function toPublicPacingDto(snapshot: PacingSnapshot): PublicPacingDto {
+	const pacingByClass = new Map(
+		snapshot.fiveHour.classes.map((pacing) => [pacing.classId, pacing]),
+	);
+	const budgetByClass = new Map(
+		snapshot.classes.map((budget) => [budget.classId, budget]),
+	);
+
+	// The UNION of both window's classes, not just the weekly ones. Provider
+	// eligibility differs per window — z.ai reports a 5-hour quota and no weekly
+	// one — so a weekly-only walk drops such a class entirely. That produced the
+	// worst possible payload: a pool-wide `destructive` verdict caused by a
+	// z.ai class that is being held by its 5-hour limit, beside an empty
+	// `classes` array with nothing to explain it or say when it lifts.
+	//
+	// Weekly-only order first, then any 5-hour-only class, so the common case
+	// keeps the ordering the pool already sorted.
+	const classIds = [
+		...snapshot.classes.map((budget) => budget.classId),
+		...snapshot.fiveHour.classes
+			.map((pacing) => pacing.classId)
+			.filter((classId) => !budgetByClass.has(classId)),
+	];
+
+	return {
+		schema: PUBLIC_PACING_SCHEMA,
+		generatedAt: new Date(snapshot.generatedAtMs).toISOString(),
+		bindingClassId: optionalIdentifier(snapshot.bindingClassId),
+		fiveHourOutlookTone: toPublicTone(snapshot.fiveHour.outlook.tone),
+		classes: classIds.map((classId) => {
+			const pacing = pacingByClass.get(classId);
+			const budget = budgetByClass.get(classId);
+			// A class with no weekly budget reports zero accounts ELIGIBLE for the
+			// weekly window, which is a measured fact about provider eligibility
+			// rather than a fabricated empty: no z.ai account has a weekly quota to
+			// report. `utilizationPct` and the burn stay null, as they must.
+			if (budget == null) {
+				return {
+					classId: identifier(classId),
+					label: text(pacing?.label ?? null),
+					utilizationPct: null,
+					leastUsedAccountId: null,
+					burnRatio: null,
+					burnTone: null,
+					outlookTone: toPublicTone("neutral"),
+					reportingCount: 0,
+					eligibleTotal: 0,
+					willRunOut: 0,
+					alreadySpent: 0,
+					resetsAt: null,
+					resetsAtAccountId: null,
+					singlePointOfFailure: false,
+					fiveHourRoom: pacing?.room ?? 0,
+					fiveHourRunningHot: pacing?.runningHot ?? 0,
+					fiveHourWaiting: pacing?.waiting ?? 0,
+					fiveHourUnavailable: pacing?.unavailable ?? 0,
+					fiveHourUnknown: pacing?.unknown ?? 0,
+					fiveHourUnread: pacing == null ? true : classIsUnread(pacing),
+					nextLiftAt: instant(pacing?.nextLiftMs),
+					nextLiftAccountId: optionalIdentifier(pacing?.nextLiftAccountId),
+				};
+			}
+			return {
+				classId: identifier(budget.classId),
+				label: text(budget.label),
+				utilizationPct: budget.utilizationPct,
+				leastUsedAccountId: optionalIdentifier(budget.leastUsedAccountId),
+				// Rounded to two decimals: the input is a whole-percent utilization
+				// over a continuously advancing clock, so further digits are noise
+				// that would make the figure look like it moved between polls.
+				burnRatio:
+					budget.burn == null
+						? null
+						: Math.round(budget.burn.ratio * 100) / 100,
+				burnTone:
+					budget.burnTone == null ? null : toPublicTone(budget.burnTone),
+				outlookTone: toPublicTone(budget.outlookTone),
+				reportingCount: budget.reportingCount,
+				eligibleTotal: budget.eligibleTotal,
+				willRunOut: budget.willRunOut,
+				alreadySpent: budget.alreadySpent,
+				resetsAt: instant(budget.earliestResetMs),
+				resetsAtAccountId: optionalIdentifier(budget.earliestResetAccountId),
+				singlePointOfFailure: budget.singlePointOfFailure,
+				fiveHourRoom: pacing?.room ?? 0,
+				fiveHourRunningHot: pacing?.runningHot ?? 0,
+				fiveHourWaiting: pacing?.waiting ?? 0,
+				fiveHourUnavailable: pacing?.unavailable ?? 0,
+				fiveHourUnknown: pacing?.unknown ?? 0,
+				fiveHourUnread: pacing == null ? true : classIsUnread(pacing),
+				nextLiftAt: instant(pacing?.nextLiftMs),
+				nextLiftAccountId: optionalIdentifier(pacing?.nextLiftAccountId),
+			};
+		}),
 	};
 }
 

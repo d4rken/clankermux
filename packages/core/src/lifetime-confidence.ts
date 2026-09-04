@@ -1,5 +1,5 @@
-import type { LifetimeConfidence } from "@clankermux/core";
 import type { AccountBurnAnchors, UsageBurnAnchor } from "@clankermux/types";
+import type { LifetimeConfidence } from "./capacity-runway";
 
 /**
  * Which windows the dashboard trusts the lifetime average on.

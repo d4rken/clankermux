@@ -1,5 +1,3 @@
-import { AlertCircle, Clock } from "lucide-react";
-import { formatDurationDhm } from "../../lib/format-prediction";
 import {
 	FAMILY_WEEKLY_ELEVATED_THRESHOLD_PCT,
 	type FamilyRow,
@@ -7,7 +5,9 @@ import {
 	type FamilyWeeklyUsage,
 	type Outlook,
 	type PoolAccountBar,
-} from "../../lib/pool-usage";
+} from "@clankermux/core";
+import { AlertCircle, Clock } from "lucide-react";
+import { formatDurationDhm } from "../../lib/format-prediction";
 import { cn } from "../../lib/utils";
 import { StatusChip } from "../accounts/StatusChip";
 import {

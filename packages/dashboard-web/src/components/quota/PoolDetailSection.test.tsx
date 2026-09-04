@@ -1,6 +1,6 @@
 import { describe, expect, it } from "bun:test";
+import type { PoolUsageResult } from "@clankermux/core";
 import { renderToStaticMarkup } from "react-dom/server";
-import type { PoolUsageResult } from "../../lib/pool-usage";
 import { PoolDetailSection } from "./PoolDetailSection";
 
 const NOW = 1_700_000_000_000;

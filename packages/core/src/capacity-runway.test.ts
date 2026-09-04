@@ -8,6 +8,7 @@ import {
 	type RunwayAccountInput,
 	type RunwayResetCreditBank,
 	type RunwayWindowInput,
+	runwayPaceHeadroom,
 } from "./capacity-runway";
 
 const NOW = Date.UTC(2026, 7, 22, 12, 0, 0);
@@ -780,14 +781,24 @@ describe("computeCapacityRunway", () => {
 		// Given one, the window runs out where the READING says it does — 80% over
 		// the 114 hours to the observation leaves 28.5 more — and stays there while
 		// `now` walks on, so the runway does not drift between polls.
+		// `probePaceMargin: false` on both: this test is about WHERE the runway
+		// lands and that it does not drift, and the exact-shape assertion below
+		// would otherwise have to pin the pace-deficit multiplier the probe
+		// happens to find — a number with no bearing on lifetime-confidence
+		// threading, which would break this test if the probe's floor or grid ever
+		// changed. The probe has its own describe block.
 		const observedAtMs = NOW - 6 * HOUR;
 		const anchoredAtNow = computeCapacityRunway(
 			[account("a", windows("full", observedAtMs))],
 			NOW,
+			RUNWAY_HORIZON_MS,
+			{ probePaceMargin: false },
 		);
 		const anchoredLater = computeCapacityRunway(
 			[account("a", windows("full", observedAtMs))],
 			NOW + 30_000,
+			RUNWAY_HORIZON_MS,
+			{ probePaceMargin: false },
 		);
 
 		expect(anchoredAtNow).toEqual({
@@ -1596,6 +1607,225 @@ describe("computeCapacityRunway pace-margin probe", () => {
 			horizonMs: 4 * DAY,
 			unprojectableAccountIds: [],
 		});
+	});
+});
+
+describe("computeCapacityRunway pace-deficit probe", () => {
+	/**
+	 * The mirror of `marginalWeekly`: a weekly window filling in 150h inside a
+	 * 168h cycle, so every projected later cycle goes dead and the scan is
+	 * FINITE at the measured pace. The current cycle's ETA sits past its own
+	 * reset, so only the later cycles contribute.
+	 *
+	 * Slowing by a multiplier m stretches the fill to 150/m, and the cycles stop
+	 * dying once that reaches the 168h cycle length — at m = 150/168 ≈ 0.8929.
+	 * The probe must report 0.89, the first grid step at or below that: the
+	 * LEAST slowdown that clears the horizon.
+	 */
+	const overspentWeekly = () =>
+		window({
+			windowKind: "seven_day",
+			utilizationPct: 50,
+			resetsAtMs: NOW + 84 * HOUR,
+			windowStartMs: NOW - 84 * HOUR,
+			prediction: prediction({
+				resetsAtMs: NOW + 84 * HOUR,
+				slopePerHour: 100 / 150,
+				etaExhaustMs: NOW + 200 * HOUR,
+			}),
+		});
+
+	it("reports the least slowdown that clears the horizon", () => {
+		const result = computeCapacityRunway(
+			[account("a", [overspentWeekly()])],
+			NOW,
+		);
+
+		expect(result.kind).toBe("runway");
+		if (result.kind !== "runway") return;
+		const deficit = result.paceDeficit;
+		expect(deficit).toBeDefined();
+		if (!deficit) return;
+		// Largest qualifying grid point, not merely SOME qualifying one: 0.90
+		// still leaves the cycles dying (150/0.90 = 166.7h < 168h), so anything
+		// above 0.89 is wrong, and anything below it overstates the cut needed.
+		expect(deficit.multiplier).toBeCloseTo(0.89, 5);
+	});
+
+	it("signs the headroom as a deficit, rounding the cut up", () => {
+		// Rounding direction is the point: 1 - 0.89 = 0.10999999999999999, and a
+		// figure rounded DOWN to 10% would advise a cut the 0.90 grid step was
+		// just shown to fail at.
+		const result = computeCapacityRunway(
+			[account("a", [overspentWeekly()])],
+			NOW,
+		);
+		expect(runwayPaceHeadroom(result)).toEqual({
+			pct: 11,
+			direction: "deficit",
+		});
+	});
+
+	it("stays silent when no slowdown in range can clear the horizon", () => {
+		// Fill time 80h in a 168h cycle: burning so far above sustainable that even
+		// at the 0.5 probe FLOOR the stretched 160h still fits inside the cycle, so
+		// every cycle keeps going dead and no probed multiplier clears the horizon.
+		//
+		// The absent key is the claim, and it is the BAD end of the scale — "no
+		// pace in range saves this pool", strictly worse than any number the probe
+		// could have returned. A renderer showing it as a zero-percent deficit
+		// would invert the message completely.
+		const result = computeCapacityRunway(
+			[account("a", [cyclicWindow("seven_day", NOW + 84 * HOUR, 168, 80)])],
+			NOW,
+		);
+
+		expect(result.kind).toBe("runway");
+		if (result.kind !== "runway") return;
+		expect(result.paceDeficit).toBeUndefined();
+		expect(runwayPaceHeadroom(result)).toBeNull();
+	});
+
+	it("clears a pool that is only modestly over, at the grid step that works", () => {
+		// The contrast case for the one above, and the reason the floor is not just
+		// a safety rail: fill time 100h in the same 168h cycle needs 100/168, so
+		// 0.59 is the largest grid step that stretches the fill past the cycle.
+		// Slower pools get a number; hopeless ones get nothing.
+		const result = computeCapacityRunway(
+			[account("a", [cyclicWindow("seven_day", NOW + 84 * HOUR, 168, 100)])],
+			NOW,
+		);
+
+		expect(result.kind).toBe("runway");
+		if (result.kind !== "runway") return;
+		expect(result.paceDeficit?.multiplier).toBeCloseTo(0.59, 5);
+	});
+
+	it("annotates neither an out-now nor an unreadable pool", () => {
+		// An instant that has already arrived is not a projection with a pace
+		// assumption to vary, so `out-now` carries no probe of either sign.
+		const outNow = computeCapacityRunway(
+			[account("a", [cyclicWindow("five_hour", NOW + HOUR, 5, 100)])],
+			NOW,
+		);
+		if (outNow.kind === "out-now") {
+			expect(runwayPaceHeadroom(outNow)).toBeNull();
+		}
+		expect(runwayPaceHeadroom({ kind: "unknown" })).toBeNull();
+		expect(runwayPaceHeadroom({ kind: "no-accounts" })).toBeNull();
+	});
+
+	it("is suppressed by the same flag that suppresses the margin probe", () => {
+		// The band runs the whole scan twice and discards both figures; paying 50
+		// pool rebuilds per perturbation for a field nobody reads is what the flag
+		// exists to prevent.
+		const result = computeCapacityRunway(
+			[account("a", [overspentWeekly()])],
+			NOW,
+			RUNWAY_HORIZON_MS,
+			{ probePaceMargin: false },
+		);
+
+		expect(result.kind).toBe("runway");
+		if (result.kind !== "runway") return;
+		expect(result.paceDeficit).toBeUndefined();
+	});
+
+	/**
+	 * Simulating a uniform pace multiplier `m` is exactly a fill time of `F / m`
+	 * at pace 1: `scaleEstimatePace` divides the slope and timeToFull is
+	 * 100/slope. So a scan at `fillHours: F / m` reads out what the probe sees at
+	 * grid step `m`, which is how the island below was measured rather than
+	 * reasoned about.
+	 */
+	function creditedWeekly(fillHours: number, creditExpiryHours: number) {
+		return {
+			accountId: "a",
+			unmetered: false,
+			windows: [
+				window({
+					windowKind: "seven_day",
+					utilizationPct: 50,
+					resetsAtMs: NOW + 84 * HOUR,
+					windowStartMs: NOW - 84 * HOUR,
+					prediction: prediction({
+						resetsAtMs: NOW + 84 * HOUR,
+						slopePerHour: 100 / fillHours,
+						etaExhaustMs: NOW + 500 * HOUR,
+					}),
+				}),
+			],
+			codexResetCredits: {
+				onWeeklyLimitEnabled: true,
+				onExpiryEnabled: false,
+				credits: [{ expiresAtMs: NOW + creditExpiryHours * HOUR }],
+			},
+		} satisfies RunwayAccountInput;
+	}
+
+	it("states no deficit when the safe paces are an island, not a tail", () => {
+		// Safety is NOT monotone in pace, and this is the measured proof. Fill 80h
+		// in a 168h cycle puts TWO dead spans inside the horizon; one credit
+		// expiring at NOW+180h covers the first, the second is uncovered, so the
+		// pool is finite at the measured pace. Slowing pushes the second span past
+		// the horizon and the scan clears — but slowing FURTHER pushes the first
+		// span past the credit's expiry, the revival is lost, and it goes finite
+		// again. Scanned across the grid, the paces that clear are exactly
+		// [0.84, 0.95]: an island, with the floor unsafe on the far side of it.
+		//
+		// Reporting the first pace that clears walking down — 0.95, "cut 5%" —
+		// would be actively dangerous: a reader who cut 20% would land at 0.80,
+		// outside the island and back in trouble. Nobody can act on a sampled
+		// point. Absent is the only honest answer here, and it means "no pace in
+		// range reliably saves this pool", which is worse than any number.
+		const result = computeCapacityRunway([creditedWeekly(80, 180)], NOW);
+
+		expect(result.kind).toBe("runway");
+		if (result.kind !== "runway") return;
+		expect(result.paceDeficit).toBeUndefined();
+		expect(runwayPaceHeadroom(result)).toBeNull();
+	});
+
+	it("still states a deficit when the safe paces reach the floor", () => {
+		// The contrast, and the reason the rule above is a tail test rather than a
+		// blanket refusal whenever credits are modelled. Same credit, but a fill
+		// time slow enough that every pace below the first clearing one also
+		// clears — so the tail runs to the floor and the figure is publishable.
+		const result = computeCapacityRunway([creditedWeekly(150, 180)], NOW);
+
+		if (result.kind !== "runway") return;
+		const deficit = result.paceDeficit;
+		if (!deficit) return;
+		expect(deficit.multiplier).toBeLessThan(1);
+		expect(runwayPaceHeadroom(result)?.direction).toBe("deficit");
+	});
+
+	it("never annotates a beyond-horizon with a deficit", () => {
+		// The two probes are exclusive by construction; this pins that the finite
+		// branch is the only one that can carry a deficit, so a reader can key on
+		// `kind` to know which sign an absent field means. Fill time 186.7h in a
+		// 168h cycle — the same under-pace shape the margin probe's fixture uses,
+		// restated here rather than shared so the two blocks stay independent.
+		const result = computeCapacityRunway(
+			[
+				account("a", [
+					window({
+						windowKind: "seven_day",
+						utilizationPct: 50,
+						resetsAtMs: NOW + 84 * HOUR,
+						windowStartMs: NOW - 84 * HOUR,
+						prediction: prediction({
+							resetsAtMs: NOW + 84 * HOUR,
+							slopePerHour: 100 / 186.7,
+							etaExhaustMs: NOW + 200 * HOUR,
+						}),
+					}),
+				]),
+			],
+			NOW,
+		);
+		expect(result.kind).toBe("beyond-horizon");
+		expect(runwayPaceHeadroom(result)?.direction).toBe("margin");
 	});
 });
 

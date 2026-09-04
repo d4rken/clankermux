@@ -6,7 +6,7 @@ import { NO_PROJECT_LABEL } from "./project-donut";
  * Pure model behind the Overview's Live Activity lanes.
  *
  * Kept out of the component (mirroring `lib/active-sessions.ts` and
- * `lib/pool-usage.ts`) because most of the difficulty here is reconciliation,
+ * `packages/core/src/pool-usage.ts`) because most of the difficulty here is reconciliation,
  * not rendering: the same request arrives from three sources — the live SSE
  * stream, the connect-time in-flight snapshot, and the database backfill — and
  * those sources disagree about field shapes and can deliver out of order.

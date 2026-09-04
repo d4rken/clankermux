@@ -33,6 +33,15 @@ export interface ClassPacing {
 	nextLiftMs: number | null;
 	nextLiftAccountName: string | null;
 	/**
+	 * The same account as {@link nextLiftAccountName}, by id.
+	 *
+	 * Carried alongside the name because a published surface needs a JOIN KEY:
+	 * `/public/v1/pacing` may not re-serve account names (they live once, on the
+	 * accounts resource), so a consumer resolves this id against that list. The
+	 * name stays for the dashboard, which renders it directly.
+	 */
+	nextLiftAccountId: string | null;
+	/**
 	 * Nothing in this class can serve a request, and the reason is the 5-hour
 	 * limit. The one case where a reader has no option but to wait, so it is
 	 * called out separately from a class that merely lost an account.
@@ -81,6 +90,7 @@ export function computeFiveHourPacing(
 		let unknown = 0;
 		let nextLiftMs: number | null = null;
 		let nextLiftAccountName: string | null = null;
+		let nextLiftAccountId: string | null = null;
 
 		for (const bar of pool.accounts) {
 			if (bar.state === "reporting") {
@@ -107,6 +117,7 @@ export function computeFiveHourPacing(
 			) {
 				nextLiftMs = bar.resetMs;
 				nextLiftAccountName = bar.name;
+				nextLiftAccountId = bar.accountId;
 			}
 		}
 
@@ -120,6 +131,7 @@ export function computeFiveHourPacing(
 			unknown,
 			nextLiftMs,
 			nextLiftAccountName,
+			nextLiftAccountId,
 			noPath: room === 0 && waiting > 0,
 		};
 	});

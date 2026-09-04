@@ -1,4 +1,4 @@
-import type { OutlookTone } from "../../lib/pool-usage";
+import type { OutlookTone } from "@clankermux/core";
 
 /**
  * How an outlook tone is painted, in one place for every quota surface.

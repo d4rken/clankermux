@@ -1,13 +1,15 @@
 import { describe, expect, it } from "bun:test";
 import type { KeyRunway } from "@clankermux/core";
-import { UNAUTHENTICATED_POOL_KEY_NAME } from "@clankermux/core";
-import type { AccountResponse } from "@clankermux/types";
-import { renderToStaticMarkup } from "react-dom/server";
 import {
+	computePacingFromAccounts,
 	computePoolUsage,
+	type PacingSnapshot,
 	type PoolUsageResult,
 	poolClassOutlook,
-} from "../../lib/pool-usage";
+	UNAUTHENTICATED_POOL_KEY_NAME,
+} from "@clankermux/core";
+import type { AccountResponse } from "@clankermux/types";
+import { renderToStaticMarkup } from "react-dom/server";
 import { PoolQuotaCard } from "../quota/PoolQuotaCard";
 import { LimitsCapacityOverview } from "./LimitsCapacityOverview";
 
@@ -108,10 +110,19 @@ const DEFAULT_ACCOUNTS: AccountResponse[] = [
 	}),
 ];
 
+/**
+ * The three reads the card takes, from ONE set of fixture accounts.
+ *
+ * `pacing` is built with the same `computePacingFromAccounts` the server runs,
+ * never hand-written: these tests assert what the panels RENDER, and a
+ * hand-built snapshot would let them keep passing while the real scan produced
+ * something else entirely.
+ */
 function pools(accounts: AccountResponse[] = DEFAULT_ACCOUNTS, now = NOW) {
 	return {
 		fiveHour: computePoolUsage(accounts, "five_hour", now),
 		sevenDay: computePoolUsage(accounts, "seven_day", now),
+		pacing: computePacingFromAccounts(accounts, now),
 	};
 }
 
@@ -119,6 +130,7 @@ function renderOverview(
 	windows: {
 		fiveHour: PoolUsageResult;
 		sevenDay: PoolUsageResult;
+		pacing: PacingSnapshot;
 	} = pools(),
 	runwayProps: {
 		runways?: KeyRunway[];
@@ -131,6 +143,7 @@ function renderOverview(
 ) {
 	return renderToStaticMarkup(
 		<LimitsCapacityOverview
+			pacing={windows.pacing}
 			fiveHour={windows.fiveHour}
 			sevenDay={windows.sevenDay}
 			now={runwayProps.now ?? NOW}
@@ -398,11 +411,18 @@ describe("LimitsCapacityOverview", () => {
 		// separate rules for the same question and painted the same pool two
 		// colours. Asserted against each other rather than against literals,
 		// because pinning both to fixed strings is exactly how they drifted.
-		const { fiveHour, sevenDay } = pools();
+		//
+		// It now checks something stronger than when it was written. This panel
+		// renders the SERVER's pacing scan while the Overview card still computes
+		// from the pool in the browser, so the two sides are no longer the same
+		// arithmetic run twice — they are the two implementations that the pacing
+		// endpoint exists to keep in agreement.
+		const windows = pools();
+		const { fiveHour, sevenDay } = windows;
 		const binding = sevenDay.bindingClass;
 		if (!binding) throw new Error("no binding class");
 
-		const panelHtml = renderOverview({ fiveHour, sevenDay });
+		const panelHtml = renderOverview(windows);
 		const cardHtml = renderToStaticMarkup(
 			<PoolQuotaCard
 				weekly={binding}

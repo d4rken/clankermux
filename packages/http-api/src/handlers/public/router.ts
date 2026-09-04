@@ -2,11 +2,13 @@ import type { Config } from "@clankermux/config";
 import type { DatabaseOperations } from "@clankermux/database";
 import { jsonResponse } from "@clankermux/http-common";
 import type { LoadBalancingStrategy } from "@clankermux/types";
+import { createPublicPacingReader } from "../../services/public-pacing";
 import { createPublicRunwayReader } from "../../services/public-runway";
 import { createPublicSnapshotReader } from "../../services/public-snapshot";
 import { createPublicStopsReader } from "../../services/public-stops";
 import { createPublicAccountsHandler } from "./accounts";
 import { NO_STORE_HEADERS } from "./cache-headers";
+import { createPublicPacingHandler } from "./pacing";
 import { createPublicRunwayHandler } from "./runway";
 import { createPublicStatusHandler } from "./status";
 import { createPublicStopsHandler } from "./stops";
@@ -60,6 +62,15 @@ export class PublicRouter {
 		const stopsHandler = createPublicStopsHandler(
 			createPublicStopsReader(dbOps),
 		);
+		// Its own reader again, and for the sharpest version of the same reason.
+		// The pacing scan builds the FULL account list — session stats, snapshots,
+		// prediction regressions, duplicate detection — because computing pacing
+		// from anything narrower would let it drift from the account bars it sits
+		// beside. The memo is what stops an anonymous poll loop deciding how often
+		// that is paid for.
+		const pacingHandler = createPublicPacingHandler(
+			createPublicPacingReader(dbOps, config, getStrategy),
+		);
 		const streamHandler = createPublicStreamHandler();
 
 		this.handlers = new Map<
@@ -70,6 +81,7 @@ export class PublicRouter {
 			["/public/v1/accounts", () => accountsHandler()],
 			["/public/v1/runway", () => runwayHandler()],
 			["/public/v1/stops", () => stopsHandler()],
+			["/public/v1/pacing", () => pacingHandler()],
 			["/public/v1/stream", (req) => streamHandler(req)],
 		]);
 	}
