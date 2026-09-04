@@ -98,6 +98,7 @@ import {
 	createQwenDeviceFlowStatusHandler,
 	createQwenReauthHandler,
 } from "./handlers/oauth";
+import { createPacingHandler } from "./handlers/pacing";
 import {
 	createPaymentCreateHandler,
 	createPaymentDeleteHandler,
@@ -195,6 +196,7 @@ export class APIRouter {
 			getStrategy,
 		);
 		const runwayHandler = createRunwayHandler(dbOps);
+		const pacingHandler = createPacingHandler(dbOps, config, getStrategy);
 		const accountAddHandler = createAccountAddHandler(dbOps, config);
 		const zaiAccountAddHandler = createZaiAccountAddHandler(dbOps);
 		const minimaxAccountAddHandler = createMinimaxAccountAddHandler(dbOps);
@@ -312,6 +314,7 @@ export class APIRouter {
 		);
 		this.handlers.set("GET:/api/accounts", () => accountsHandler());
 		this.handlers.set("GET:/api/runway", () => runwayHandler());
+		this.handlers.set("GET:/api/pacing", () => pacingHandler());
 		this.handlers.set("POST:/api/accounts", (req) => accountAddHandler(req));
 		this.handlers.set("POST:/api/accounts/zai", (req) =>
 			zaiAccountAddHandler(req),

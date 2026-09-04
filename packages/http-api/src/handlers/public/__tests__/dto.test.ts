@@ -16,6 +16,7 @@ import {
 	STOP_CAUSES,
 	type StopsHistoryResponse,
 } from "@clankermux/types";
+import type { PacingSnapshot } from "../../../services/pacing-scan";
 import type { PublicRunwaySnapshot } from "../../../services/public-runway";
 import type {
 	PublicAccountSnapshot,
@@ -31,6 +32,7 @@ import {
 	toPublicCredentialState,
 	toPublicMeasurementState,
 	toPublicOverloadState,
+	toPublicPacingDto,
 	toPublicPredictionState,
 	toPublicRequestDoneDto,
 	toPublicRequestPhase,
@@ -156,6 +158,60 @@ function runway(
 				latestExhaustsAtMs: 1_700_050_000_000,
 				halfWidthPct: 0.5,
 			},
+			headroom: { pct: 11, direction: "deficit" },
+		},
+		...over,
+	};
+}
+
+function pacing(over: Partial<PacingSnapshot> = {}): PacingSnapshot {
+	return {
+		generatedAtMs: NOW,
+		bindingClassId: "codex",
+		classes: [
+			{
+				classId: "anthropic",
+				label: "Claude",
+				utilizationPct: 47,
+				leastUsedAccountId: "acct-1",
+				leastUsedAccountName: "Claude-4",
+				burn: { ratio: 1.1636, expectedPct: 40.4 },
+				burnTone: "warning",
+				outlookLabel: "Low usage",
+				outlookTone: "success",
+				reportingCount: 5,
+				eligibleTotal: 5,
+				willRunOut: 5,
+				willRunOutCapacity: 5,
+				alreadySpent: 0,
+				earliestResetMs: NOW + 2 * 3_600_000,
+				earliestResetAccountId: "acct-2",
+				earliestResetAccountName: "Claude-1",
+				singlePointOfFailure: false,
+			},
+		],
+		fiveHour: {
+			waiting: 0,
+			runningHot: 0,
+			room: 5,
+			nextLiftMs: null,
+			nextLiftAccountName: null,
+			outlook: { label: "Partial", tone: "neutral" },
+			classes: [
+				{
+					classId: "anthropic",
+					label: "Claude",
+					room: 5,
+					runningHot: 0,
+					waiting: 0,
+					unavailable: 0,
+					unknown: 0,
+					nextLiftMs: NOW + 3_600_000,
+					nextLiftAccountName: "Claude-1",
+					nextLiftAccountId: "acct-2",
+					noPath: false,
+				},
+			],
 		},
 		...over,
 	};
@@ -506,6 +562,11 @@ describe("golden: GET /public/v1/runway", () => {
 				causes: [{ accountId: "acct-1", windowKind: "five_hour" }],
 				earliestExhaustsAt: "2023-11-15T06:33:20.000Z",
 				latestExhaustsAt: "2023-11-15T12:06:40.000Z",
+				// The signed pace headroom. The sign lives in the DIRECTION, not in
+				// the number, so a client that drops the enum cannot read a required
+				// cut as spare capacity.
+				headroomPct: 11,
+				headroomDirection: "deficit",
 			},
 		});
 	});
@@ -632,6 +693,127 @@ describe("golden: GET /public/v1/runway", () => {
 		expect(dto.worstStatedOutcome).toBeNull();
 		// …but the coverage counts still say how much of the pool was blind.
 		expect(dto.coverage.unobservedKeyCount).toBe(1);
+	});
+});
+
+describe("golden: GET /public/v1/pacing", () => {
+	it("matches the pinned shape exactly", () => {
+		expect(toPublicPacingDto(pacing())).toEqual({
+			schema: "clankermux.public.pacing.v1",
+			generatedAt: NOW_ISO,
+			bindingClassId: "codex",
+			fiveHourOutlookTone: "neutral",
+			classes: [
+				{
+					classId: "anthropic",
+					label: "Claude",
+					utilizationPct: 47,
+					leastUsedAccountId: "acct-1",
+					// Two decimals, not the raw 1.1636: the input is a whole-percent
+					// utilization over a continuously advancing clock, so further digits
+					// are noise that would make the figure look like it moved.
+					burnRatio: 1.16,
+					burnTone: "warning",
+					outlookTone: "success",
+					reportingCount: 5,
+					eligibleTotal: 5,
+					willRunOut: 5,
+					alreadySpent: 0,
+					resetsAt: "2023-11-14T23:56:40.000Z",
+					resetsAtAccountId: "acct-2",
+					singlePointOfFailure: false,
+					fiveHourRoom: 5,
+					fiveHourRunningHot: 0,
+					fiveHourWaiting: 0,
+					fiveHourUnavailable: 0,
+					fiveHourUnknown: 0,
+					fiveHourUnread: false,
+					nextLiftAt: "2023-11-14T22:56:40.000Z",
+					nextLiftAccountId: "acct-2",
+				},
+			],
+		});
+	});
+
+	it("publishes account IDs and never account names", () => {
+		// Names live once, on the accounts resource. Re-serving them here would be
+		// the same fact in two places, free to drift — and the internal snapshot
+		// carries them, so only the named-field mapping keeps them off the wire.
+		const wire = JSON.stringify(toPublicPacingDto(pacing()));
+
+		expect(wire).toContain("acct-1");
+		expect(wire).toContain("acct-2");
+		expect(wire).not.toContain("Claude-4");
+		expect(wire).not.toContain("Claude-1");
+	});
+
+	it("omits the internal outlook label and the burn's expected percentage", () => {
+		// `outlookLabel` and `expectedPct` are display scaffolding for the
+		// dashboard. The TONE is published because the thresholds behind it are
+		// policy a widget must not re-derive; the English is not.
+		const wire = JSON.stringify(toPublicPacingDto(pacing()));
+
+		expect(wire).not.toContain("Low usage");
+		expect(wire).not.toContain("expectedPct");
+		expect(wire).not.toContain("willRunOutCapacity");
+	});
+
+	it("reports an unread class rather than calling it zero-with-room", () => {
+		// A Codex class reports no 5-hour window at all. Zero accounts with room is
+		// a MEASURED absence of capacity; this is an absent measurement, and a
+		// widget drawing the first when it means the second says the pool is in
+		// trouble when nothing has been read.
+		const dto = toPublicPacingDto(
+			pacing({
+				fiveHour: {
+					waiting: 0,
+					runningHot: 0,
+					room: 0,
+					nextLiftMs: null,
+					nextLiftAccountName: null,
+					outlook: { label: "Partial", tone: "neutral" },
+					classes: [
+						{
+							classId: "anthropic",
+							label: "Claude",
+							room: 0,
+							runningHot: 0,
+							waiting: 0,
+							unavailable: 0,
+							unknown: 1,
+							nextLiftMs: null,
+							nextLiftAccountName: null,
+							nextLiftAccountId: null,
+							noPath: false,
+						},
+					],
+				},
+			}),
+		);
+
+		expect(dto.classes[0]?.fiveHourUnread).toBe(true);
+		expect(dto.classes[0]?.fiveHourUnknown).toBe(1);
+		expect(dto.classes[0]?.nextLiftAt).toBeNull();
+	});
+
+	it("states a null burn ratio rather than substituting a 1.0", () => {
+		// Withheld early in a window, where the expected percentage is too small to
+		// divide by. 1.0 would read as "exactly on pace", the most reassuring
+		// possible answer from the least reliable possible input.
+		const dto = toPublicPacingDto(
+			pacing({
+				classes: [
+					{
+						...pacing().classes[0],
+						burn: null,
+						burnTone: null,
+					} as PacingSnapshot["classes"][number],
+				],
+			}),
+		);
+
+		expect(dto.classes[0]?.burnRatio).toBeNull();
+		expect(dto.classes[0]?.burnTone).toBeNull();
 	});
 });
 
@@ -786,6 +968,7 @@ describe("instants vs durations", () => {
 		assertInstantsAreIso(toPublicAccountsDto(populated));
 		assertInstantsAreIso(toPublicRunwayDto(runway()));
 		assertInstantsAreIso(toPublicStopsDto(stops(), NOW));
+		assertInstantsAreIso(toPublicPacingDto(pacing()));
 	});
 
 	it("emits no duration as a string", () => {
@@ -959,6 +1142,10 @@ describe("structural limits", () => {
 		// which is one level each — the series that would have nested inside a
 		// cause is exactly what this surface drops.
 		expect(arrayNesting(toPublicStopsDto(stops(), NOW))).toBeLessThanOrEqual(2);
+		// pacing[] spends its whole budget on classes[] and nests NOTHING inside
+		// it: the per-account bars a reader might expect there are the accounts
+		// resource's job, and putting them here would be the third level.
+		expect(arrayNesting(toPublicPacingDto(pacing()))).toBeLessThanOrEqual(2);
 	});
 
 	it("keeps object depth far below the reader's 16-deep ceiling", () => {
@@ -968,6 +1155,7 @@ describe("structural limits", () => {
 		).toBeLessThan(8);
 		expect(depthOf(toPublicRunwayDto(runway()))).toBeLessThan(8);
 		expect(depthOf(toPublicStopsDto(stops(), NOW))).toBeLessThan(8);
+		expect(depthOf(toPublicPacingDto(pacing()))).toBeLessThan(8);
 	});
 });
 

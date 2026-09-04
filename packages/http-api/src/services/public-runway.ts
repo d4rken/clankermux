@@ -1,4 +1,8 @@
-import { effectiveRunwayOutcome, summarizeKeyRunways } from "@clankermux/core";
+import {
+	effectiveRunwayOutcome,
+	runwayPaceHeadroom,
+	summarizeKeyRunways,
+} from "@clankermux/core";
 import type { DatabaseOperations } from "@clankermux/database";
 import type { RunwayBand, RunwayCause } from "@clankermux/types";
 import { computeRunwayScan } from "./runway-scan";
@@ -82,6 +86,13 @@ export interface PublicWorstOutcome {
 	 * describe.
 	 */
 	band: RunwayBand | null;
+	/**
+	 * The signed pace headroom for this same outcome, or null when the probe
+	 * stated none. Derived by `runwayPaceHeadroom` rather than read off the
+	 * outcome, so the magnitude cannot be rounded differently here than on the
+	 * management surface or in the dashboard.
+	 */
+	headroom: { pct: number; direction: "margin" | "deficit" } | null;
 }
 
 export interface PublicRunwaySnapshot {
@@ -132,6 +143,10 @@ export function createPublicRunwayReader(dbOps: DatabaseOperations) {
 						// From the key whose outcome is published, not from the scan at
 						// large: `headline.worst` is that key, and `band` is its own.
 						band: headline.worst?.band ?? null,
+						// Read off the EFFECTIVE outcome, the same one `kind` above comes
+						// from. Taking it from the raw recorded outcome could publish a
+						// margin beside a kind that has since become `out-now`.
+						headroom: runwayPaceHeadroom(outcome),
 					}
 				: null,
 		};

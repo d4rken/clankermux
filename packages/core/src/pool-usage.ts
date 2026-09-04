@@ -145,6 +145,15 @@ export interface ServableClassPool {
 	singlePointOfFailure: boolean;
 	earliestResetMs: number | null;
 	earliestResetAccountName: string | null;
+	/**
+	 * The same account as {@link earliestResetAccountName}, by id.
+	 *
+	 * Carried alongside the name because a published surface needs a JOIN KEY:
+	 * `/public/v1/pacing` may not re-serve account names (they live once, on the
+	 * accounts resource), so a consumer resolves this id against that list. The
+	 * name stays for the dashboard, which renders it directly.
+	 */
+	earliestResetAccountId: string | null;
 }
 
 /**
@@ -1100,6 +1109,7 @@ function groupIntoServableClasses(
 		let unknownCount = 0;
 		let earliestResetMs: number | null = null;
 		let earliestResetAccountName: string | null = null;
+		let earliestResetAccountId: string | null = null;
 
 		for (const bar of sorted) {
 			if (bar.state === "reporting" && bar.pct != null) {
@@ -1141,6 +1151,7 @@ function groupIntoServableClasses(
 			) {
 				earliestResetMs = bar.resetMs;
 				earliestResetAccountName = bar.name;
+				earliestResetAccountId = bar.accountId;
 			}
 		}
 
@@ -1158,6 +1169,7 @@ function groupIntoServableClasses(
 				capacityCount <= 1 && capacityCount + unknownCount > 0,
 			earliestResetMs,
 			earliestResetAccountName,
+			earliestResetAccountId,
 		});
 	}
 
