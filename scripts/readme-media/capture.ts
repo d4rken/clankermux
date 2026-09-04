@@ -33,9 +33,8 @@ import { join } from "node:path";
  * Routes to capture, and the file stem each one is written under.
  *
  * `height` overrides the run's default viewport height for that one route. The
- * account list is the case it exists for: the API returns accounts ordered by
- * `priority DESC`, so the highest-priority account is LAST, and at the default
- * height the most detailed card is the one cut off by the fold.
+ * account list is the case it exists for: its detailed cards need extra height
+ * to keep the representative set visible below the fold.
  */
 export const CAPTURES = [
 	{ route: "/", name: "overview" },
