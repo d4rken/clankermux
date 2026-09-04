@@ -517,7 +517,7 @@ export async function listAccountResponses(
 						ELSE '-'
 					END as session_info
 				FROM accounts
-				ORDER BY priority DESC, request_count DESC
+				ORDER BY name ASC, priority DESC
 			`,
 			[now, now, now, sessionDuration],
 		);
