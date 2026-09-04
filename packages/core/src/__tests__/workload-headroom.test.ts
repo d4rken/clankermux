@@ -405,6 +405,167 @@ describe("computeWorkloadHeadroom — honest counts", () => {
 	});
 });
 
+describe("computeWorkloadHeadroom — counts that must not mislead", () => {
+	it("does not count a non-Anthropic account as failing to report a family", () => {
+		// Production puts `weeklyScoped: []` on every non-Anthropic scan winner, so
+		// a non-null check counted every Codex account as an account that failed to
+		// state a Claude family window. A Codex account has no Fable limit to be
+		// missing; it is not eligible for the row at all.
+		const rows = computeWorkloadHeadroom(
+			[
+				accountWideConstrained("claude-1"),
+				{
+					id: "codex-1",
+					name: "codex-1",
+					provider: "codex",
+					usageData: null,
+					windowObservations: {
+						fiveHour: { pct: 10, resetMs: NOW + HOUR },
+						sevenDay: { pct: 30, resetMs: NOW + 5 * DAY },
+						weeklyScoped: [],
+					},
+					usageObservedAtMs: NOW,
+				},
+			],
+			NOW,
+		);
+
+		const family = rows.find((row) => row.dimensionKind === "family");
+		expect(family?.eligibleAccountIds).toEqual(["claude-1"]);
+		expect(family?.unreadableAccountIds).toEqual([]);
+	});
+
+	it("keeps unreadable a SUBSET of eligible on a family row", () => {
+		const mismatched: RunwayAccountSource = {
+			id: "c1",
+			name: "c1",
+			provider: "anthropic",
+			usageData: anthropicUsage({
+				fiveHourPct: 1,
+				fiveHourResetMs: NOW + HOUR,
+				weeklyPct: 80,
+				weeklyResetMs: NOW + 2 * DAY,
+				scoped: { pct: 70, resetMs: NOW + 5 * DAY },
+			}),
+			usageObservedAtMs: NOW,
+		};
+
+		const row = computeWorkloadHeadroom([mismatched], NOW).find(
+			(candidate) => candidate.dimensionKind === "family",
+		);
+		// The wire tells clients to subtract one count from the other. Building
+		// eligible from the successful inputs alone made that go negative.
+		expect(row?.eligibleAccountIds).toEqual(["c1"]);
+		expect(row?.unreadableAccountIds).toEqual(["c1"]);
+		expect(row?.projectionBasis).toBeNull();
+	});
+
+	it("reports a wholly blind class as wholly unreadable", () => {
+		const blind: RunwayAccountSource = {
+			id: "c1",
+			name: "c1",
+			provider: "anthropic",
+			usageData: null,
+			usageObservedAtMs: null,
+		};
+		const row = computeWorkloadHeadroom([blind], NOW).find(
+			(candidate) => candidate.dimensionId === "anthropic",
+		);
+		// `unknown` carries no id list of its own, so reading only the outcome
+		// reported zero unreadable accounts — the most reassuring possible answer
+		// to the least informative scan.
+		expect(row?.outcome.kind).toBe("unknown");
+		expect(row?.unreadableAccountIds).toEqual(["c1"]);
+		expect(row?.projectionBasis).toBeNull();
+	});
+
+	it("does not call an account spent when the scan revived it with a credit", () => {
+		const credited: RunwayAccountSource = {
+			id: "credited",
+			name: "credited",
+			provider: "codex",
+			usageData: anthropicUsage({
+				fiveHourPct: 0,
+				fiveHourResetMs: NOW + HOUR,
+				weeklyPct: 100,
+				weeklyResetMs: NOW + 2 * DAY,
+				scoped: null,
+			}),
+			usageObservedAtMs: NOW,
+			codexResetCredits: {
+				credits: [{ expiresAtMs: NOW + 5 * DAY }],
+				onWeeklyLimitEnabled: true,
+				onExpiryEnabled: false,
+			},
+		};
+
+		const row = computeWorkloadHeadroom([credited], NOW).find(
+			(candidate) => candidate.dimensionId === "codex",
+		);
+		// Reporting it spent while the same scan models it revived puts a
+		// contradiction inside one row.
+		expect(row?.outcome.kind).not.toBe("out-now");
+		expect(row?.spentAccountIds).toEqual([]);
+	});
+});
+
+describe("computeWorkloadHeadroom — projection basis follows the claim", () => {
+	it("marks a beyond-horizon structural when only a weak estimate holds it up", () => {
+		// Both weekly windows reset in a day, so their structural start is six days
+		// back and both burn slowly enough never to fill before that reset. Fable
+		// therefore emits no dead interval — and that absence IS the claim holding
+		// the row at beyond-horizon. Scoping evidence to windows that emit
+		// intervals called this `measured`, which is exactly where a stale scoped
+		// reading's optimistic drift would bite.
+		const roomy: RunwayAccountSource = {
+			id: "c1",
+			name: "c1",
+			provider: "anthropic",
+			usageData: anthropicUsage({
+				fiveHourPct: 1,
+				fiveHourResetMs: NOW + HOUR,
+				weeklyPct: 5,
+				weeklyResetMs: NOW + DAY,
+				scoped: { pct: 40 },
+			}),
+			usageObservedAtMs: NOW,
+		};
+		const row = computeWorkloadHeadroom([roomy], NOW).find(
+			(candidate) => candidate.dimensionKind === "family",
+		);
+		expect(row?.outcome.kind).toBe("beyond-horizon");
+		expect(row?.projectionBasis).toBe("structural");
+	});
+
+	it("ignores a weak window that is not among the causes of a stated instant", () => {
+		// Weekly is spent now and is the sole cause. The 5-hour window is on a
+		// low-confidence estimate but has nothing to do with the reported instant,
+		// and marking the row weak because of it described the wrong measurement.
+		const spentWeekly: RunwayAccountSource = {
+			id: "c1",
+			name: "c1",
+			provider: "anthropic",
+			usageData: anthropicUsage({
+				fiveHourPct: 40,
+				fiveHourResetMs: NOW + HOUR,
+				weeklyPct: 100,
+				weeklyResetMs: NOW + 2 * DAY,
+				scoped: null,
+			}),
+			usageObservedAtMs: NOW,
+		};
+		const row = computeWorkloadHeadroom([spentWeekly], NOW).find(
+			(candidate) => candidate.dimensionId === "anthropic",
+		);
+		expect(row?.outcome.kind).toBe("out-now");
+		if (row?.outcome.kind !== "out-now") throw new Error("unreachable");
+		expect(row.outcome.causes.map((cause) => cause.windowKind)).toEqual([
+			"seven_day",
+		]);
+		expect(row.projectionBasis).toBe("measured");
+	});
+});
+
 describe("toScopedFamilyRunwayInput", () => {
 	it("never names the scoped window with the credit-bearing weekly kind", () => {
 		const input = toScopedFamilyRunwayInput(

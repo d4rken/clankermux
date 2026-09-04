@@ -258,10 +258,15 @@ while a reading is stale (optimistic drift), but a class row earns it too when
 its weekly window has no honest observation time. Treat a `structural` row's
 instant as the softer reading.
 
-It is scoped to the windows that actually drive the outcome, so a family row can
-legitimately read `measured` when its scoped window is nowhere near binding.
-`headroomBasis` still says `conservative_bound` there — the two fields answer
-different questions and will not always agree.
+Which windows count depends on what the row claims. A stated instant
+(`runway`, `out_now`) rests on the windows the outcome names as its causes; a
+`beyond_horizon` rests on every window that could have run out and did not, so a
+weak estimate anywhere downgrades it. It is `null` on `unknown` and
+`no_accounts`, which assert nothing — do not render that as `measured`.
+
+So a family row can legitimately read `measured` when its scoped window is
+nowhere near binding. `headroomBasis` still says `conservative_bound` there: the
+two fields answer different questions and will not always agree.
 
 ---
 

@@ -977,6 +977,27 @@ describe("golden: GET /public/v1/workload-headroom", () => {
 		expect(dto.headroomPct).toBeUndefined();
 	});
 
+	it("keeps an uncharacterisable projection null rather than reassuring", () => {
+		const scan = workloadHeadroom();
+		const dto = toPublicWorkloadHeadroomDto({
+			...scan,
+			rows: [
+				{
+					...scan.rows[0],
+					outcome: { kind: "unknown" },
+					headroom: null,
+					headroomAbsence: "not-projected",
+					// An outcome that asserts nothing has no projection whose evidence
+					// could be characterised. Mapping this to "measured" would be the
+					// most reassuring possible answer to the least informative scan.
+					projectionBasis: null,
+				},
+			],
+		});
+		expect(dto.rows[0].projectionBasis).toBeNull();
+		expect(dto.rows[0].outcomeKind).toBe("unknown");
+	});
+
 	it("never re-serves an account name or id list", () => {
 		const json = JSON.stringify(
 			toPublicWorkloadHeadroomDto(workloadHeadroom()),

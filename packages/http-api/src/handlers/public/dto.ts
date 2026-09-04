@@ -1614,8 +1614,13 @@ export interface PublicWorkloadHeadroomRowDto {
 	 * prediction and no burn anchor and so drifts LATER while a reading is stale
 	 * (optimistic drift), but a class row earns it too when its weekly window has
 	 * no honest observation time.
+	 *
+	 * Which windows "the outcome rests on" depends on what the row claims. A
+	 * stated instant rests on the windows that CAUSE it; a `beyond_horizon` rests
+	 * on every window that could have run out and did not. Null on `unknown` and
+	 * `no_accounts`, which assert nothing.
 	 */
-	projectionBasis: PublicProjectionBasisDto;
+	projectionBasis: PublicProjectionBasisDto | null;
 	/**
 	 * Accounts considered for this workload.
 	 *
@@ -1683,7 +1688,13 @@ function toPublicHeadroomAbsence(
 	}
 }
 
-function toPublicProjectionBasis(basis: string): PublicProjectionBasisDto {
+function toPublicProjectionBasis(
+	basis: string | null,
+): PublicProjectionBasisDto | null {
+	// Null stays null: an outcome that asserts nothing has no projection whose
+	// evidence could be characterised, and mapping it to `measured` would be the
+	// most reassuring possible answer to the least informative scan.
+	if (basis == null) return null;
 	switch (basis) {
 		case "measured":
 			return "measured";

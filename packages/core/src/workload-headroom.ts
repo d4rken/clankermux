@@ -10,11 +10,12 @@ import {
 } from "./api-key-runway";
 import {
 	computeCapacityRunway,
+	estimateWindowExhaustion,
 	RUNWAY_HORIZON_MS,
 	type RunwayAccountInput,
 	type RunwayOutcome,
+	type RunwayWindowInput,
 	runwayPaceHeadroom,
-	windowEvidence,
 } from "./capacity-runway";
 import type { ModelFamily } from "./model-mappings";
 import { compareServableClasses, servableClassFor } from "./pool-classes";
@@ -121,7 +122,13 @@ export interface WorkloadHeadroomRow {
 	headroom: { pct: number; direction: "margin" | "deficit" } | null;
 	basis: HeadroomBasis;
 	headroomAbsence: HeadroomAbsence | null;
-	projectionBasis: ProjectionBasis;
+	/**
+	 * Null on `unknown` and `no-accounts`: those assert nothing, so there is no
+	 * projection whose evidence could be characterised. Never substitute
+	 * `measured` there — it is the most reassuring answer to the least
+	 * informative scan.
+	 */
+	projectionBasis: ProjectionBasis | null;
 	/**
 	 * Accounts considered for this workload, in input order.
 	 *
@@ -158,51 +165,106 @@ const SPENT_THRESHOLD_PCT = 100;
  * having room — the row's own outcome would read `out-now` beside a spent count
  * of zero.
  */
-function spentAccountIds(inputs: readonly RunwayAccountInput[]): string[] {
+function spentAccountIds(
+	inputs: readonly RunwayAccountInput[],
+	outcome: RunwayOutcome,
+): string[] {
+	// An account whose modelled reset credit the scan CONSUMED is not a hard stop
+	// under that same scan. Credits are applied to dead spans in ascending start
+	// order, and a window reading 100% has a span starting now, so it is the
+	// first candidate — if any credit was consumed for the account, that span is
+	// the one it revived. Counting it anyway put a spent account beside a
+	// `beyond-horizon` outcome built on reviving it.
+	const credits =
+		"assumedResetCredits" in outcome ? (outcome.assumedResetCredits ?? []) : [];
+	const revived = new Set(credits.map((credit) => credit.accountId));
 	return inputs
-		.filter((input) =>
-			input.windows.some(
-				(window) => window.utilizationPct >= SPENT_THRESHOLD_PCT,
-			),
+		.filter(
+			(input) =>
+				!revived.has(input.accountId) &&
+				input.windows.some(
+					(window) => window.utilizationPct >= SPENT_THRESHOLD_PCT,
+				),
 		)
 		.map((input) => input.accountId);
 }
 
 /**
- * How well-evidenced a row's projection is, DERIVED from the estimates rather
- * than assumed from the row's kind.
+ * How well-evidenced the row's outcome is, scoped to the windows the outcome's
+ * own CLAIM rests on.
  *
- * A class row is not automatically `measured`: a weekly window with no honest
- * observation time falls back to the amber-capped now-anchored estimate, and a
- * 5-hour window with no usable regression lands on the same low-confidence
- * path. Hardcoding `measured` there claimed evidence the scan did not have. A
- * family row still comes out `structural` on its own merits, because a scoped
- * window has neither a prediction nor an anchor to reach full confidence with.
+ * The scoping is the whole difficulty, and two earlier rules got it wrong. Any
+ * window with an estimate marked nearly every row weak on evidence the answer
+ * did not depend on. Any window emitting a dead interval was wrong in BOTH
+ * directions: it called a `beyond-horizon` measured when the only thing holding
+ * it up was a structural estimate saying a scoped window would not fill (emitting
+ * no interval is exactly what that claim looks like), and it called an `out-now`
+ * structural because of a weak window that had nothing to do with the cause.
  *
- * The extra estimator pass is cheap next to the probe it sits beside: one
- * estimate per window, against up to 50 pool rebuilds.
+ * What a row claims decides what evidence it rests on:
+ *
+ *  - `runway` / `out-now` assert a specific instant, and the outcome NAMES the
+ *    windows that produce it. Only those matter.
+ *  - `beyond-horizon` asserts that nothing runs out. Every window that could
+ *    have run out is load-bearing for a negative claim, so all of them count.
+ *  - `unknown` / `no-accounts` assert nothing, so there is no projection to
+ *    characterise and the answer is null rather than a reassuring "measured".
  */
 function projectionBasisFor(
 	inputs: readonly RunwayAccountInput[],
+	outcome: RunwayOutcome,
 	now: number,
-	horizonMs: number,
-): ProjectionBasis {
+): ProjectionBasis | null {
+	if (outcome.kind === "unknown" || outcome.kind === "no-accounts") return null;
+
+	const isLowConfidence = (window: RunwayWindowInput): boolean => {
+		const estimate = estimateWindowExhaustion(
+			{
+				utilizationPct: window.utilizationPct,
+				resetsAtMs: window.resetsAtMs,
+				windowStartMs: window.windowStartMs,
+				prediction: window.prediction,
+				lifetimeConfidence: window.lifetimeConfidence,
+				observedAtMs: window.observedAtMs,
+				anchor: window.anchor,
+			},
+			now,
+		);
+		return estimate.source !== "none" && estimate.lowConfidence;
+	};
+
+	if (outcome.kind === "beyond-horizon") {
+		return inputs.some((input) => input.windows.some(isLowConfidence))
+			? "structural"
+			: "measured";
+	}
+
+	const causeWindows = new Set(
+		outcome.causes.map(
+			(cause) => `${cause.accountId}\u0000${cause.windowKind}`,
+		),
+	);
 	for (const input of inputs) {
 		for (const window of input.windows) {
-			const evidence = windowEvidence(window, now, horizonMs);
-			// A window that contributes no dead time did not move this outcome, so
-			// the confidence of its estimate is not this row's problem. Counting it
-			// would mark almost every row weak on the strength of a 5-hour window
-			// projected never to fill.
-			if (!evidence.contributes) continue;
-			if (evidence.lowConfidence) return "structural";
+			if (!causeWindows.has(`${input.accountId}\u0000${window.windowKind}`)) {
+				continue;
+			}
+			if (isLowConfidence(window)) return "structural";
 		}
 	}
 	return "measured";
 }
 
-/** The accounts a scan could not project from, on the kinds that report them. */
-function unprojectableOf(outcome: RunwayOutcome): string[] {
+/**
+ * The accounts a scan could not project from.
+ *
+ * `unknown` is the case that needs the `pooled` argument: it is returned when
+ * NOTHING was projectable, and it carries no id list of its own, so reading only
+ * the outcome reported a fully blind class as having zero unreadable accounts —
+ * the most reassuring possible answer to the least informative scan.
+ */
+function unreadableOf(outcome: RunwayOutcome, pooled: string[]): string[] {
+	if (outcome.kind === "unknown") return pooled;
 	return "unprojectableAccountIds" in outcome
 		? outcome.unprojectableAccountIds
 		: [];
@@ -343,10 +405,13 @@ export function computeWorkloadHeadroom(
 			headroom,
 			basis: "exact",
 			headroomAbsence: headroom === null ? absenceFor(outcome) : null,
-			projectionBasis: projectionBasisFor(inputs, now, horizonMs),
+			projectionBasis: projectionBasisFor(inputs, outcome, now),
 			eligibleAccountIds: inputs.map((input) => input.accountId),
-			unreadableAccountIds: unprojectableOf(outcome),
-			spentAccountIds: spentAccountIds(inputs),
+			unreadableAccountIds: unreadableOf(
+				outcome,
+				inputs.map((input) => input.accountId),
+			),
+			spentAccountIds: spentAccountIds(inputs, outcome),
 		});
 	}
 
@@ -365,15 +430,23 @@ export function computeWorkloadHeadroom(
 
 	for (const [family, displayName] of familyLabels) {
 		const inputs: RunwayAccountInput[] = [];
-		const unreadable: string[] = [];
+		// Every account that REPORTS this family, projectable or not. This is the
+		// row's `eligibleAccountIds`, and the unreadable list has to be a subset of
+		// it: the wire tells a client to subtract one from the other, and building
+		// eligible from the successful inputs alone made that go negative.
+		const considered: string[] = [];
+		const rejected: string[] = [];
 		for (const account of accounts) {
+			// Reporting the family is the eligibility test, not merely having some
+			// scoped evidence. Production puts `weeklyScoped: []` on every
+			// non-Anthropic account, so a non-null check counted every Codex account
+			// as an account that failed to state a Claude family window.
+			const readings = scopedFamilyReadings(account, now);
+			if (!readings?.some((limit) => limit.family === family)) continue;
+			considered.push(account.id);
 			const input = toScopedFamilyRunwayInput(account, family, now);
 			if (input) inputs.push(input);
-			// Only an account that could otherwise have served this family counts as
-			// unreadable. A Codex account has no Claude family window to be missing.
-			else if (scopedFamilyReadings(account, now) !== null) {
-				unreadable.push(account.id);
-			}
+			else rejected.push(account.id);
 		}
 
 		// The family is live — some account reported it — but nothing about it can
@@ -397,10 +470,16 @@ export function computeWorkloadHeadroom(
 			headroom: bound.headroom,
 			basis: "conservative-bound",
 			headroomAbsence: bound.absence,
-			projectionBasis: projectionBasisFor(inputs, now, horizonMs),
-			eligibleAccountIds: inputs.map((input) => input.accountId),
-			unreadableAccountIds: [...unreadable, ...unprojectableOf(bound.outcome)],
-			spentAccountIds: spentAccountIds(inputs),
+			projectionBasis: projectionBasisFor(inputs, bound.outcome, now),
+			eligibleAccountIds: considered,
+			unreadableAccountIds: [
+				...rejected,
+				...unreadableOf(
+					bound.outcome,
+					inputs.map((input) => input.accountId),
+				),
+			],
+			spentAccountIds: spentAccountIds(inputs, bound.outcome),
 		});
 	}
 
