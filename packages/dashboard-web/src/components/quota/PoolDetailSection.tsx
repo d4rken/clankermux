@@ -5,7 +5,7 @@ import {
 	type FamilyWeeklyUsage,
 	type PoolUsageResult,
 	type PoolWindow,
-} from "../../lib/pool-usage";
+} from "@clankermux/core";
 import { cn } from "../../lib/utils";
 
 /**
@@ -22,7 +22,7 @@ import { cn } from "../../lib/utils";
  *
  * Everything here is presentation over an already-computed `PoolUsageResult`.
  * The rules about what those numbers MEAN — the outlook verdict, the eligible
- * total, the at-risk numerator — belong to `lib/pool-usage.ts`, so that no
+ * total, the at-risk numerator — belong to `core/pool-usage.ts`, so that no
  * caller can render a different verdict by reimplementing one locally.
  */
 const REASON_LABELS: Record<ExcludedReason, string> = {

@@ -1,4 +1,8 @@
-import { RUNWAY_HORIZON_MS } from "@clankermux/core";
+import {
+	listFamilyRows,
+	RUNWAY_HORIZON_MS,
+	type ServableClassPool,
+} from "@clankermux/core";
 import type { AnalyticsSection } from "@clankermux/types";
 import React, { useMemo, useState } from "react";
 import { REFRESH_INTERVALS, type TimeRange } from "../constants";
@@ -12,7 +16,6 @@ import {
 import { usePoolUsage } from "../hooks/usePoolUsage";
 import { dataAvailability, staleAgeLabel } from "../lib/data-availability";
 import { buildOverviewTimeSeries } from "../lib/overview-timeseries";
-import { listFamilyRows, type ServableClassPool } from "../lib/pool-usage";
 import { MissingSectionsNotice } from "./analytics/MissingSectionsNotice";
 import { ChartsSection } from "./overview/ChartsSection";
 import { LiveActivityLanes } from "./overview/LiveActivityLanes";
@@ -224,7 +227,7 @@ export const OverviewTab = React.memo(() => {
 			    row rather than shrinking every card below legibility. */}
 			<div className="grid grid-cols-1 gap-group md:grid-cols-2 lg:grid-cols-3">
 				{/* One card per servable class, because the accounts in different
-				    classes cannot cover for each other — see lib/pool-classes. The
+				    classes cannot cover for each other — see core/pool-classes. The
 				    5-hour window is a ROW inside each card rather than a card of its
 				    own: the weekly window is the budget, the 5-hour one is the rate
 				    governor that paces you through it.

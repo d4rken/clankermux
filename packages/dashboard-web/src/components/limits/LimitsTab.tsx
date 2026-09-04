@@ -1,4 +1,5 @@
 import type { ModelFamily } from "@clankermux/core";
+import { listLiveScopedFamilies, mergeScopedFamilies } from "@clankermux/core";
 import type { AnalyticsSection } from "@clankermux/types";
 import { useQueries } from "@tanstack/react-query";
 import React, { useMemo, useState } from "react";
@@ -14,10 +15,6 @@ import {
 } from "../../hooks/queries";
 import { usePoolUsage } from "../../hooks/usePoolUsage";
 import { dataAvailability } from "../../lib/data-availability";
-import {
-	listLiveScopedFamilies,
-	mergeScopedFamilies,
-} from "../../lib/pool-usage";
 import { AccountPerformanceSection } from "./AccountPerformanceSection";
 import { AccountUtilizationCard } from "./AccountUtilizationCard";
 import { LimitsCapacityOverview } from "./LimitsCapacityOverview";

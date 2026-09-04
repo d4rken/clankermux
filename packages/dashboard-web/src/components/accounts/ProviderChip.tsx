@@ -1,4 +1,4 @@
-import { providerDisplayName } from "../../utils/provider-utils";
+import { providerDisplayName } from "@clankermux/core";
 import { ProviderMarkIcon } from "./provider-marks";
 
 /**

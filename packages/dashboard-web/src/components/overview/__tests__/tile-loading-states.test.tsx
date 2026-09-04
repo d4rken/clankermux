@@ -7,10 +7,10 @@
  * "unavailable", never a fallback zero), and real-but-stale numbers.
  */
 import { describe, expect, it } from "bun:test";
+import { computePoolUsage } from "@clankermux/core";
 import type { AccountResponse } from "@clankermux/types";
 import { Activity } from "lucide-react";
 import { renderToStaticMarkup } from "react-dom/server";
-import { computePoolUsage } from "../../../lib/pool-usage";
 import { PoolQuotaCard } from "../../quota/PoolQuotaCard";
 import { ChartsSection } from "../ChartsSection";
 import { MetricCard } from "../MetricCard";

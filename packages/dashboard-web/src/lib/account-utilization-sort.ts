@@ -1,9 +1,10 @@
-import { extractFiveHour, extractSevenDay } from "@clankermux/core";
-import type { FullUsageData, StaleUsageInfo } from "@clankermux/types";
 import {
+	extractFiveHour,
+	extractSevenDay,
 	providerDisplayName,
-	providerShowsWeeklyUsage,
-} from "../utils/provider-utils";
+} from "@clankermux/core";
+import type { FullUsageData, StaleUsageInfo } from "@clankermux/types";
+import { providerShowsWeeklyUsage } from "../utils/provider-utils";
 import { classifyUsageCard, type UsageCardSource } from "./usage-windows";
 
 /**

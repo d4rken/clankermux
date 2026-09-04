@@ -1,3 +1,4 @@
+import { providerDisplayName } from "@clankermux/core";
 import type {
 	QuotaDriftCohort,
 	QuotaDriftModel,
@@ -6,7 +7,6 @@ import type {
 	QuotaDriftWindowResult,
 } from "@clankermux/types";
 import { format } from "date-fns";
-import { providerDisplayName } from "../utils/provider-utils";
 
 /**
  * Display helpers for the Analytics "Quota" tab.

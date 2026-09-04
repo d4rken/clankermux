@@ -4,6 +4,9 @@ import {
 	computeWindowStartMs,
 	estimateWindowExhaustion,
 	registerUIRefresh,
+	usageObservedAtMs,
+	weeklyLifetimeConfidence,
+	windowBurnAnchor,
 } from "@clankermux/core";
 import type {
 	AccountBurnAnchors,
@@ -23,11 +26,6 @@ import {
 	type ProjectionTone,
 	RESETS_BEFORE_EXHAUSTION_MESSAGE,
 } from "../../lib/format-prediction";
-import {
-	usageObservedAtMs,
-	weeklyLifetimeConfidence,
-	windowBurnAnchor,
-} from "../../lib/lifetime-confidence";
 import {
 	classifyUsageCard,
 	usageWindowCategoryKey,

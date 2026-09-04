@@ -1,7 +1,7 @@
 import { describe, expect, it } from "bun:test";
+import { type FamilyRow, listFamilyRows } from "@clankermux/core";
 import type { AccountResponse } from "@clankermux/types";
 import { renderToStaticMarkup } from "react-dom/server";
-import { type FamilyRow, listFamilyRows } from "../../lib/pool-usage";
 import { FamilyWeeklyCard } from "./FamilyWeeklyCard";
 
 const NOW = Date.UTC(2026, 8, 3, 12, 0, 0);

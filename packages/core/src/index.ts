@@ -36,6 +36,12 @@ export {
 	UNSUPPORTED_RUNTIME_EXIT_CODE,
 } from "./bun-runtime-floor";
 export {
+	type BurnRatio,
+	burnRatioTone,
+	computeBurnRatio,
+	formatBurnRatio,
+} from "./burn-ratio";
+export {
 	ANCHOR_FULL_CONFIDENCE_MIN_SPAN_MS,
 	computeCapacityRunway,
 	computeCapacityRunwayBand,
@@ -67,7 +73,6 @@ export {
 	REFRESH_TOKEN_REAUTH_WARNING_MS,
 	TIME_CONSTANTS,
 } from "./constants";
-
 export {
 	isInvalidGrantMessage,
 	logError,
@@ -81,6 +86,12 @@ export {
 	TokenRefreshError,
 	ValidationError,
 } from "./errors";
+export {
+	type ClassPacing,
+	classIsUnread,
+	computeFiveHourPacing,
+	type FiveHourPacing,
+} from "./five-hour-pacing";
 
 export * from "./lifecycle";
 
@@ -114,6 +125,11 @@ export {
 	registerHeartbeat,
 	registerUIRefresh,
 } from "./interval-manager";
+export {
+	usageObservedAtMs,
+	weeklyLifetimeConfidence,
+	windowBurnAnchor,
+} from "./lifetime-confidence";
 export {
 	type BodyMeasurement,
 	type ContentBlockMeasurement,
@@ -167,6 +183,38 @@ export {
 	MODEL_SHORT_NAMES,
 } from "./models";
 export {
+	compareServableClasses,
+	type ServableClass,
+	servableClassFor,
+} from "./pool-classes";
+export {
+	computeFamilyWeeklyUsage,
+	computePoolUsage,
+	type ExcludedReason,
+	FAMILY_WEEKLY_ELEVATED_THRESHOLD_PCT,
+	type FamilyRow,
+	type FamilyWeeklyAccountUsage,
+	type FamilyWeeklyUsage,
+	type LiveScopedFamily,
+	listFamilyRows,
+	listLiveScopedFamilies,
+	mergeScopedFamilies,
+	type Outlook,
+	type OutlookTone,
+	type PoolAccountBar,
+	type PoolUsageContribution,
+	type PoolUsageExclusion,
+	type PoolUsageFallback,
+	type PoolUsageProjection,
+	type PoolUsageResult,
+	type PoolWindow,
+	pickBindingScopedLimit,
+	poolClassOutlook,
+	type ServableClassPool,
+	scopeResultToClass,
+	willRunOutCount,
+} from "./pool-usage";
+export {
 	// Test-only handle (reset cached pricing + the pricing-miss registry). NOT a
 	// runtime API: there is deliberately no public way to clear recorded gaps.
 	__pricingTestHooks,
@@ -179,6 +227,7 @@ export {
 	setPricingLogger,
 	type TokenBreakdown,
 } from "./pricing";
+export { providerDisplayName } from "./provider-display";
 // The quota-drift estimator. `@clankermux/core` exposes only its root entry, so
 // an unexported module here is unreachable from http-api.
 export * from "./quota-drift";

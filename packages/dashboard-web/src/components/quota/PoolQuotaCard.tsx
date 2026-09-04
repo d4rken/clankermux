@@ -1,16 +1,14 @@
-import { AlertCircle, AlertTriangle, Clock, Info } from "lucide-react";
 import {
 	burnRatioTone,
 	computeBurnRatio,
 	formatBurnRatio,
-} from "../../lib/burn-ratio";
-import {
 	type PoolUsageResult,
 	poolClassOutlook,
 	type ServableClassPool,
 	scopeResultToClass,
 	willRunOutCount,
-} from "../../lib/pool-usage";
+} from "@clankermux/core";
+import { AlertCircle, AlertTriangle, Clock, Info } from "lucide-react";
 import { cn } from "../../lib/utils";
 import { Card, CardContent } from "../ui/card";
 import { Popover, PopoverContent, PopoverTrigger } from "../ui/popover";

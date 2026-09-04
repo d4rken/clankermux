@@ -1,18 +1,16 @@
-import { AlertCircle, BarChart3 } from "lucide-react";
 import {
 	burnRatioTone,
 	computeBurnRatio,
 	formatBurnRatio,
-} from "../../lib/burn-ratio";
-import { formatDurationDhm } from "../../lib/format-prediction";
-import {
 	type Outlook,
 	type PoolUsageResult,
 	poolClassOutlook,
 	type ServableClassPool,
 	scopeResultToClass,
 	willRunOutCount,
-} from "../../lib/pool-usage";
+} from "@clankermux/core";
+import { AlertCircle, BarChart3 } from "lucide-react";
+import { formatDurationDhm } from "../../lib/format-prediction";
 import { cn } from "../../lib/utils";
 import { StatusChip } from "../accounts/StatusChip";
 import { TONE_CLASSES, TONE_FIGURE_CLASS } from "../quota/outlook-tone";

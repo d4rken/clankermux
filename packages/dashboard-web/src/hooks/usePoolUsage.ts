@@ -1,6 +1,6 @@
+import { computePoolUsage, type PoolUsageResult } from "@clankermux/core";
 import { useEffect, useMemo, useState } from "react";
 import { subscribePoolClock } from "../lib/pool-clock";
-import { computePoolUsage, type PoolUsageResult } from "../lib/pool-usage";
 import { useAccounts } from "./queries";
 
 export interface PoolUsageSnapshot {

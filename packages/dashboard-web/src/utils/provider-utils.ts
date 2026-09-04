@@ -9,41 +9,11 @@ import {
 } from "@clankermux/types";
 
 /**
- * Human-readable display labels for provider keys. The keys here are the
- * internal provider identifiers (see `PROVIDER_NAMES`) and must stay in sync
- * with them; the values are purely for display and can be reworded freely.
- * Unknown/unlisted providers fall back to a Title-Cased version of the key.
+ * `providerDisplayName` moved to `@clankermux/core` (`provider-display.ts`).
+ * Servable-class labels are derived from it and are now published on the wire,
+ * so the map has to be readable from the server. Import it from core directly;
+ * this module deliberately does not re-export it, so there is one path to it.
  */
-const PROVIDER_DISPLAY_NAMES: Record<string, string> = {
-	anthropic: "Anthropic",
-	"claude-console-api": "Claude API",
-	"anthropic-compatible": "Anthropic-Compatible",
-	codex: "OpenAI",
-	"openai-compatible": "OpenAI-Compatible",
-	zai: "z.ai",
-	minimax: "MiniMax",
-	kilo: "Kilo",
-	openrouter: "OpenRouter",
-	"alibaba-coding-plan": "Alibaba",
-	qwen: "Qwen",
-	ollama: "Ollama",
-	"ollama-cloud": "Ollama Cloud",
-};
-
-/**
- * Turn a provider key into a human-readable label (e.g. "codex" -> "OpenAI").
- * Falls back to Title Case over `-`/`_`/space-separated segments so unknown
- * providers still render sensibly.
- */
-export function providerDisplayName(provider: string): string {
-	const known = PROVIDER_DISPLAY_NAMES[provider];
-	if (known) return known;
-	return provider
-		.split(/[-_\s]+/)
-		.filter(Boolean)
-		.map((part) => part.charAt(0).toUpperCase() + part.slice(1))
-		.join(" ");
-}
 
 /**
  * Check if a provider supports auto-fallback and auto-refresh features

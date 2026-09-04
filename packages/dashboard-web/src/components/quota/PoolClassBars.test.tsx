@@ -1,6 +1,6 @@
 import { describe, expect, it } from "bun:test";
+import type { PoolAccountBar } from "@clankermux/core";
 import { renderToStaticMarkup } from "react-dom/server";
-import type { PoolAccountBar } from "../../lib/pool-usage";
 import { PoolClassBars } from "./PoolClassBars";
 
 function bar(over: Partial<PoolAccountBar> = {}): PoolAccountBar {

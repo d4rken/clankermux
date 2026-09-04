@@ -1,8 +1,7 @@
-import type { KeyRunway } from "@clankermux/core";
+import type { KeyRunway, Outlook, PoolUsageResult } from "@clankermux/core";
 import { effectiveRunwayOutcome, summarizeKeyRunways } from "@clankermux/core";
 import { ChevronDown, Hourglass, Info } from "lucide-react";
 import { describePinTarget } from "../../lib/api-key-pin-label";
-import type { Outlook, PoolUsageResult } from "../../lib/pool-usage";
 import {
 	describeRunwayCause,
 	formatRunwayBand,

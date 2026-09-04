@@ -1,11 +1,11 @@
-import { AlertCircle, Gauge } from "lucide-react";
+import type { Outlook, PoolUsageResult } from "@clankermux/core";
 import {
 	type ClassPacing,
 	classIsUnread,
 	computeFiveHourPacing,
-} from "../../lib/five-hour-pacing";
+} from "@clankermux/core";
+import { AlertCircle, Gauge } from "lucide-react";
 import { formatDurationDhm } from "../../lib/format-prediction";
-import type { Outlook, PoolUsageResult } from "../../lib/pool-usage";
 import { cn } from "../../lib/utils";
 import { StatusChip } from "../accounts/StatusChip";
 import { TONE_CLASSES } from "../quota/outlook-tone";
