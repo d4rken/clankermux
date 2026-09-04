@@ -78,6 +78,32 @@ export type RunwayOutcome =
 			causes: RunwayCause[];
 			unprojectableAccountIds: string[];
 			assumedResetCredits?: RunwayAssumedCredits[];
+			/**
+			 * How much SLOWER the pool would have to burn to stop running out
+			 * inside the horizon — the mirror of `paceMargin` on the branch where
+			 * the pool is already projected to run out.
+			 *
+			 * The two exist for one reason between them: a reader deciding whether
+			 * to add or shed load needs a signed answer, and `paceMargin` alone
+			 * goes absent at exactly the moment the answer stops being "you have
+			 * room". Since an outcome is either finite or beyond-horizon and never
+			 * both, at most one of the two is ever present, and a scan runs at most
+			 * one probe.
+			 *
+			 * Carries the LARGEST probed multiplier (<1) at which the scan finds no
+			 * run-out — largest, because that is the least slowing-down that works,
+			 * and a reader told to cut more than necessary will cut more than
+			 * necessary.
+			 *
+			 * Absent when no probed multiplier down to the floor clears the
+			 * horizon. That is NOT "no deficit": it means the pool cannot be paced
+			 * out of trouble within the probe's range, which is a worse answer than
+			 * any number here, and a renderer must not display it as zero.
+			 */
+			paceDeficit?: {
+				/** Largest probed burn-pace multiplier (<1) with no run-out in horizon. */
+				multiplier: number;
+			};
 	  };
 
 /**

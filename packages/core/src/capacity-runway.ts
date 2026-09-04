@@ -786,8 +786,16 @@ interface AllOutHit {
  * runway, so a `runway` result carrying unprojectable accounts is a documented
  * lower bound — never a fabricated zero.
  *
- * A `beyond-horizon` outcome additionally carries `paceMargin` when the
- * verdict is knife-edge — see {@link probePaceMargin}.
+ * Outcomes additionally carry a PACE PROBE, the two halves of one signed
+ * "how much load can this pool take" figure: `beyond-horizon` carries
+ * `paceMargin` when the verdict is knife-edge (see {@link probePaceMargin}),
+ * and `runway` carries `paceDeficit`, the least slowdown that clears the
+ * horizon (see {@link probePaceDeficit}). An outcome is one or the other and
+ * never both, so a scan runs at most one probe.
+ *
+ * `out-now` carries neither, on the same grounds `computeCapacityRunwayBand`
+ * refuses it: the pool is out at this instant, and an instant that has already
+ * arrived is not a projection with a pace assumption to vary.
  */
 export function computeCapacityRunway(
 	accounts: RunwayAccountInput[],
@@ -795,13 +803,16 @@ export function computeCapacityRunway(
 	horizonMs: number = RUNWAY_HORIZON_MS,
 	options?: {
 		/**
-		 * Whether a `beyond-horizon` result should carry its fragility probe.
-		 * Default true, so every existing caller is unchanged.
+		 * Whether the result should carry its pace probe — `paceMargin` on a
+		 * `beyond-horizon`, `paceDeficit` on a `runway`. One flag for both: they
+		 * are the two halves of one signed figure, they cost the same, and a
+		 * caller that cannot afford one cannot afford the other. Default true, so
+		 * every existing caller is unchanged.
 		 *
-		 * The probe costs up to 50 pool rebuilds, which is fine once per served
+		 * A probe costs up to 50 pool rebuilds, which is fine once per served
 		 * response and is not fine inside a caller that runs the whole scan twice
-		 * — {@link computeCapacityRunwayBand} does, and it discards
-		 * `paceMargin` anyway.
+		 * — {@link computeCapacityRunwayBand} does, and it discards both figures
+		 * anyway.
 		 */
 		probePaceMargin?: boolean;
 	},
@@ -830,6 +841,10 @@ export function computeCapacityRunway(
 					: {}),
 			};
 		}
+		const paceDeficit =
+			options?.probePaceMargin === false
+				? null
+				: probePaceDeficit(accounts, now, horizonEndMs);
 		return {
 			kind: "runway",
 			exhaustsAtMs: hit.t,
@@ -839,6 +854,7 @@ export function computeCapacityRunway(
 			...(assumedCredits.length > 0
 				? { assumedResetCredits: assumedCredits }
 				: {}),
+			...(paceDeficit !== null ? { paceDeficit } : {}),
 		};
 	}
 
@@ -868,6 +884,56 @@ const RUNWAY_BAND_HALF_WIDTH_PCT = 0.5;
 function outcomeInstant(outcome: RunwayOutcome, now: number): number | null {
 	if (outcome.kind === "runway") return outcome.exhaustsAtMs;
 	if (outcome.kind === "out-now") return now;
+	return null;
+}
+
+/**
+ * The pool's signed pace headroom: how much more load it can take, or how much
+ * it has to shed, as a whole percentage of the CURRENTLY MEASURED pace.
+ *
+ * The single figure a "more agents or fewer agents" reading is built from, and
+ * the reason both probes exist. `margin` means the scan finds no run-out and
+ * would need the pace to rise by `pct` before it did; `deficit` means it finds
+ * one and the pace has to fall by `pct` to clear the horizon. Callers render
+ * the sign; this decides the magnitude, so the dashboard, the management API
+ * and the widget wire cannot round it differently.
+ *
+ * Null in three DIFFERENT situations that a renderer must not collapse into a
+ * zero or a blank:
+ *  - `no-accounts` / `unknown` — nothing was measured.
+ *  - `out-now` — the pool is out at this instant; there is no pace assumption
+ *    left to vary.
+ *  - Either probe came back empty. On the margin side that is the GOOD end: no
+ *    probed increase up to the cap flips the verdict, so the headroom is at
+ *    least the cap. On the deficit side it is the BAD end: no probed slowdown
+ *    down to the floor clears the horizon. Same absent field, opposite meanings,
+ *    which is why `outcome.kind` has to be read alongside it.
+ *
+ * Rounded AWAY FROM ZERO in both directions, so the figure always understates
+ * the pool's comfort: a margin is the increase the pool is known to survive, a
+ * deficit is a cut the probe proved sufficient. Rounding a deficit down would
+ * advise a cut that the grid step above it demonstrably failed at.
+ */
+export function runwayPaceHeadroom(
+	outcome: RunwayOutcome,
+): { pct: number; direction: "margin" | "deficit" } | null {
+	// Micro-round before the ceil in both branches: the grid multipliers are
+	// exact hundredths whose float representation can land a hair off the true
+	// value ((1.12 - 1) * 100 === 12.000000000000004), and ceiling that raw
+	// product would overstate the grid point by a full percent.
+	const wholePct = (value: number): number =>
+		Math.ceil(Math.round(value * 100 * 1e6) / 1e6);
+
+	if (outcome.kind === "beyond-horizon") {
+		const margin = outcome.paceMargin;
+		if (!margin || margin.multiplier <= 1) return null;
+		return { pct: wholePct(margin.multiplier - 1), direction: "margin" };
+	}
+	if (outcome.kind === "runway") {
+		const deficit = outcome.paceDeficit;
+		if (!deficit || deficit.multiplier >= 1) return null;
+		return { pct: wholePct(1 - deficit.multiplier), direction: "deficit" };
+	}
 	return null;
 }
 
@@ -1207,6 +1273,78 @@ function probePaceMargin(
 		if (pooled.length === 0) return null;
 		const hit = firstAllOut(pooled, now, horizonEndMs);
 		if (hit !== null) return { multiplier: pace, exhaustsAtMs: hit.t };
+	}
+	return null;
+}
+
+/**
+ * Smallest floor the deficit probe walks down to. Below half the measured pace
+ * the advice has stopped being "ease off" and become "stop", which no
+ * percentage renders usefully. Inline named constant — NO env var / feature
+ * gate.
+ */
+export const PACE_DEFICIT_PROBE_MIN = 0.5;
+
+/**
+ * How much slower the pool would have to burn to stop running out inside the
+ * horizon: the LARGEST probed multiplier (down to {@link
+ * PACE_DEFICIT_PROBE_MIN}) at which the same pool scans beyond-horizon, or null
+ * when none does.
+ *
+ * The mirror of {@link probePaceMargin}, and it exists for the same reason read
+ * from the other side. That probe quantifies how close a "no run-out" is to
+ * flipping finite; this one quantifies how far a finite runway is from flipping
+ * back. Together they are one signed figure — how much load the pool can take,
+ * positive or negative — and a reader deciding whether to add or shed work
+ * needs the negative half most, because that is the half that arrives when
+ * something has to change.
+ *
+ * Walks DOWNWARD from just under 1, and takes the FIRST hit, which is therefore
+ * the largest qualifying multiplier: the least slowing-down that clears the
+ * horizon. Reporting a smaller one would tell a reader to cut more load than
+ * the model says is needed.
+ *
+ * A GRID WALK from the top, deliberately not a bisection. {@link
+ * probePaceMargin} documents a concrete pool where "finite at pace m" is not
+ * monotone in m once reset credits are modeled, and nothing establishes that
+ * the relation is better behaved below 1 than above it. The walk costs 50 pool
+ * rebuilds either way — the budget a probe already has — so bisecting would
+ * trade an unproven monotonicity assumption for no saving worth having.
+ *
+ * Note the credit mechanism that drives the upward case does NOT mirror
+ * cleanly: lowering the pace pushes a dead span's start monotonically LATER, so
+ * a banked credit that already fails to reach that span keeps failing at every
+ * slower pace. The walk is not justified by a demonstrated downward flip, but
+ * by there being no reason to assume one cannot exist.
+ *
+ * Cost is 50 pool rebuilds, and the budget is unchanged rather than doubled:
+ * an outcome is finite or beyond-horizon and never both, so exactly one of the
+ * two probes runs per scan.
+ *
+ * Null carries a MEANING and must not be rendered as zero — see the field doc
+ * on `paceDeficit`. It says no pace in range clears the horizon, which is
+ * strictly worse than any figure the probe could have returned.
+ */
+function probePaceDeficit(
+	accounts: RunwayAccountInput[],
+	now: number,
+	horizonEndMs: number,
+): { multiplier: number } | null {
+	// Same short-circuit as the margin probe, for the opposite reason: with an
+	// unmetered account in the pool the scan can never be all-out, so it would
+	// not have reached this branch at all.
+	if (accounts.some((account) => account.unmetered)) return null;
+	const steps = Math.round(
+		(1 - PACE_DEFICIT_PROBE_MIN) / PACE_MARGIN_PRECISION,
+	);
+	for (let step = 1; step <= steps; step++) {
+		// From the integer step, so accumulated float error cannot drift the grid.
+		const pace = 1 - step * PACE_MARGIN_PRECISION;
+		const { pooled } = buildPool(accounts, now, horizonEndMs, pace);
+		if (pooled.length === 0) return null;
+		if (firstAllOut(pooled, now, horizonEndMs) === null) {
+			return { multiplier: pace };
+		}
 	}
 	return null;
 }
