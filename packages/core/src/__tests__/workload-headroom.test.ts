@@ -566,6 +566,114 @@ describe("computeWorkloadHeadroom — projection basis follows the claim", () =>
 	});
 });
 
+describe("computeWorkloadHeadroom — three states of scoped evidence", () => {
+	it("keeps a snapshot-restored sibling eligible but unreadable", () => {
+		// A snapshot restore carries the account-wide windows and no scoped ones,
+		// so this account states NO scoped evidence rather than stating it has no
+		// Fable limit. A sibling in its own class does report Fable, so it may well
+		// be able to serve it. Treating that like "reports none" dropped its
+		// capacity from the family runway while claiming nothing was missing.
+		const restored: RunwayAccountSource = {
+			id: "restored",
+			name: "restored",
+			provider: "anthropic",
+			usageData: null,
+			windowObservations: {
+				fiveHour: { pct: 5, resetMs: NOW + HOUR },
+				sevenDay: { pct: 10, resetMs: NOW + 5 * DAY },
+			},
+			usageObservedAtMs: NOW,
+		};
+
+		const row = computeWorkloadHeadroom(
+			[accountWideConstrained("reporter"), restored],
+			NOW,
+		).find((candidate) => candidate.dimensionKind === "family");
+
+		expect(row?.eligibleAccountIds).toEqual(["reporter", "restored"]);
+		expect(row?.unreadableAccountIds).toEqual(["restored"]);
+	});
+
+	it("still excludes an account that reports scoped limits without this family", () => {
+		const otherFamilyOnly: RunwayAccountSource = {
+			id: "codex-1",
+			name: "codex-1",
+			provider: "codex",
+			usageData: null,
+			windowObservations: {
+				fiveHour: { pct: 5, resetMs: NOW + HOUR },
+				sevenDay: { pct: 10, resetMs: NOW + 5 * DAY },
+				// Reports scoped limits, just none for Fable — a different state from
+				// stating no scoped evidence at all.
+				weeklyScoped: [],
+			},
+			usageObservedAtMs: NOW,
+		};
+
+		const row = computeWorkloadHeadroom(
+			[accountWideConstrained("reporter"), otherFamilyOnly],
+			NOW,
+		).find((candidate) => candidate.dimensionKind === "family");
+
+		expect(row?.eligibleAccountIds).toEqual(["reporter"]);
+		expect(row?.unreadableAccountIds).toEqual([]);
+	});
+
+	it("does not let a future weekly credit hide a spent 5-hour window", () => {
+		const account: RunwayAccountSource = {
+			id: "c1",
+			name: "c1",
+			provider: "codex",
+			usageData: anthropicUsage({
+				// Out right now on the 5-hour window. The weekly is not spent, so the
+				// credit below can only be consumed for a future weekly exhaustion —
+				// it has nothing to do with the window blocking this account today.
+				fiveHourPct: 100,
+				fiveHourResetMs: NOW + HOUR,
+				weeklyPct: 90,
+				weeklyResetMs: NOW + 2 * DAY,
+				scoped: null,
+			}),
+			usageObservedAtMs: NOW,
+			codexResetCredits: {
+				credits: [{ expiresAtMs: NOW + 10 * DAY }],
+				onWeeklyLimitEnabled: true,
+				onExpiryEnabled: false,
+			},
+		};
+
+		const row = computeWorkloadHeadroom([account], NOW).find(
+			(candidate) => candidate.dimensionId === "codex",
+		);
+		// Excusing the whole account produced "out now, zero accounts spent".
+		expect(row?.outcome.kind).toBe("out-now");
+		expect(row?.spentAccountIds).toEqual(["c1"]);
+	});
+
+	it("will not call a beyond-horizon measured while ignoring a blank window", () => {
+		// One readable window and one with no reset, so no estimate at all.
+		// `buildPool` drops an account only when EVERY window is unreadable, so
+		// this one stays pooled and "nothing runs out" rests on ignoring the blank.
+		const partiallyBlind: RunwayAccountSource = {
+			id: "c1",
+			name: "c1",
+			provider: "anthropic",
+			usageData: {
+				five_hour: { utilization: 0, resets_at: iso(NOW + HOUR) },
+				seven_day: { utilization: 40, resets_at: null },
+				limits: [],
+			} as unknown as AnthropicUsageData,
+			usageObservedAtMs: NOW,
+		};
+
+		const row = computeWorkloadHeadroom([partiallyBlind], NOW).find(
+			(candidate) => candidate.dimensionId === "anthropic",
+		);
+		expect(row?.outcome.kind).toBe("beyond-horizon");
+		expect(row?.projectionBasis).toBe("structural");
+	});
+});
+
 describe("toScopedFamilyRunwayInput", () => {
 	it("never names the scoped window with the credit-bearing weekly kind", () => {
 		const input = toScopedFamilyRunwayInput(

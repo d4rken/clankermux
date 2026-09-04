@@ -170,21 +170,27 @@ function spentAccountIds(
 	outcome: RunwayOutcome,
 ): string[] {
 	// An account whose modelled reset credit the scan CONSUMED is not a hard stop
-	// under that same scan. Credits are applied to dead spans in ascending start
-	// order, and a window reading 100% has a span starting now, so it is the
-	// first candidate — if any credit was consumed for the account, that span is
-	// the one it revived. Counting it anyway put a spent account beside a
-	// `beyond-horizon` outcome built on reviving it.
+	// on the window that credit revives. Credits apply to dead spans in ascending
+	// start order, and a weekly window reading 100% has a span starting now, so
+	// it is the first candidate — a consumed credit is one that revived it.
+	//
+	// Scoped to the WEEKLY window, because that is the only kind
+	// `applyResetCreditsToWeeklyIntervals` touches. Excusing the whole account
+	// let a credit consumed for a future weekly exhaustion hide a 5-hour window
+	// that is spent right now: the row read `out-now` beside zero spent accounts.
 	const credits =
 		"assumedResetCredits" in outcome ? (outcome.assumedResetCredits ?? []) : [];
-	const revived = new Set(credits.map((credit) => credit.accountId));
+	const weeklyRevived = new Set(credits.map((credit) => credit.accountId));
 	return inputs
-		.filter(
-			(input) =>
-				!revived.has(input.accountId) &&
-				input.windows.some(
-					(window) => window.utilizationPct >= SPENT_THRESHOLD_PCT,
-				),
+		.filter((input) =>
+			input.windows.some(
+				(window) =>
+					window.utilizationPct >= SPENT_THRESHOLD_PCT &&
+					!(
+						window.windowKind === "seven_day" &&
+						weeklyRevived.has(input.accountId)
+					),
+			),
 		)
 		.map((input) => input.accountId);
 }
@@ -230,10 +236,16 @@ function projectionBasisFor(
 			},
 			now,
 		);
-		return estimate.source !== "none" && estimate.lowConfidence;
+		return estimate.source === "none" || estimate.lowConfidence;
 	};
 
 	if (outcome.kind === "beyond-horizon") {
+		// A window with NO estimate counts here too, which is why `isLowConfidence`
+		// treats `none` as weak. `buildPool` drops an account only when EVERY
+		// window is unreadable, so a pooled account can carry one readable window
+		// and one blank — and then "nothing runs out" rests on ignoring the blank
+		// one. On a stated instant it is different: an unreadable window is not
+		// among the causes and did not produce the answer.
 		return inputs.some((input) => input.windows.some(isLowConfidence))
 			? "structural"
 			: "measured";
@@ -428,23 +440,51 @@ export function computeWorkloadHeadroom(
 		}
 	}
 
+	// The servable classes that report each family, so an account with NO scoped
+	// evidence can be told apart from one that reports none. Both look like an
+	// absent Fable entry; only the first might still be able to serve Fable.
+	const reportingClasses = new Map<ModelFamily, Set<string>>();
+	for (const account of accounts) {
+		for (const limit of scopedFamilyReadings(account, now) ?? []) {
+			const classId = servableClassFor(account.provider).classId;
+			const existing = reportingClasses.get(limit.family);
+			if (existing) existing.add(classId);
+			else reportingClasses.set(limit.family, new Set([classId]));
+		}
+	}
+
 	for (const [family, displayName] of familyLabels) {
 		const inputs: RunwayAccountInput[] = [];
-		// Every account that REPORTS this family, projectable or not. This is the
-		// row's `eligibleAccountIds`, and the unreadable list has to be a subset of
-		// it: the wire tells a client to subtract one from the other, and building
-		// eligible from the successful inputs alone made that go negative.
+		// Every account that could serve this family, projectable or not. The
+		// unreadable list has to be a subset of this: the wire tells a client to
+		// subtract one from the other, and building eligible from the successful
+		// inputs alone made that go negative.
 		const considered: string[] = [];
 		const rejected: string[] = [];
+		const classes = reportingClasses.get(family) ?? new Set<string>();
 		for (const account of accounts) {
-			// Reporting the family is the eligibility test, not merely having some
-			// scoped evidence. Production puts `weeklyScoped: []` on every
-			// non-Anthropic account, so a non-null check counted every Codex account
-			// as an account that failed to state a Claude family window.
 			const readings = scopedFamilyReadings(account, now);
-			if (!readings?.some((limit) => limit.family === family)) continue;
+			// THREE states, and collapsing any two of them loses an account or
+			// invents one:
+			//  - reports this family: eligible, and projectable if the window holds up.
+			//  - reports scoped limits but NOT this one (`[]` or a different family):
+			//    not eligible. Production gives every non-Anthropic account `[]`, so
+			//    a Codex account has no Fable window to be missing.
+			//  - states no scoped evidence at all (`null`) while a sibling in its own
+			//    servable class does report the family: it may well be able to serve
+			//    it — a snapshot-restored Anthropic account carries account-wide
+			//    windows only — so it is eligible AND unreadable. Skipping it dropped
+			//    its capacity from the runway while reporting nothing was missing.
+			const reportsFamily =
+				readings?.some((limit) => limit.family === family) ?? false;
+			const unknownButCapable =
+				readings === null &&
+				classes.has(servableClassFor(account.provider).classId);
+			if (!reportsFamily && !unknownButCapable) continue;
 			considered.push(account.id);
-			const input = toScopedFamilyRunwayInput(account, family, now);
+			const input = reportsFamily
+				? toScopedFamilyRunwayInput(account, family, now)
+				: null;
 			if (input) inputs.push(input);
 			else rejected.push(account.id);
 		}
