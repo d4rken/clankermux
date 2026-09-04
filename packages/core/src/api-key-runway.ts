@@ -17,7 +17,10 @@ import {
 	type RunwayResetCreditBank,
 	type RunwayWindowInput,
 } from "./capacity-runway";
+import type { ModelFamily } from "./model-mappings";
+import type { ScopedFamilyLimit } from "./scoped-limits";
 import { computeWindowStartMs } from "./throttle-utils";
+import { normalizeAnthropicUsage } from "./usage-normalizer";
 import {
 	type ExtractedValue,
 	extractFiveHour,
@@ -115,6 +118,17 @@ export interface RunwayAccountSource {
 export interface RunwayWindowObservations {
 	fiveHour: ExtractedValue | null;
 	sevenDay: ExtractedValue | null;
+	/**
+	 * Per-model-family scoped weekly readings from the SAME resolution as the
+	 * account-wide windows above, or absent when the resolution carried none.
+	 *
+	 * Optional because the persisted `usage_snapshots` history stores the two
+	 * account-wide windows' scalars and nothing else, so a reading restored from
+	 * it genuinely has no scoped evidence. Absent is not empty: a family scan
+	 * DROPS an account with no scoped reading rather than pooling it on its
+	 * account-wide windows alone, which is the conservative direction.
+	 */
+	weeklyScoped?: ScopedFamilyLimit[] | null;
 }
 
 /**
@@ -123,6 +137,94 @@ export interface RunwayWindowObservations {
  * the wire row cannot drift apart.
  */
 export type KeyRunway = RunwayKeyEntry;
+
+/**
+ * Length of a per-model-family scoped weekly window.
+ *
+ * The providers that report one report it alongside the account-wide weekly
+ * window and with the SAME reset instant, so the account-wide cycle length is
+ * the scoped window's cycle length. Asserted rather than assumed:
+ * {@link scopedWeeklyWindowFor} only emits a window when the two resets agree,
+ * because a structural start derived from the wrong cycle length would put a
+ * fabricated denominator under every figure built on it.
+ */
+const SCOPED_WEEKLY_DURATION_MS = 7 * 24 * 60 * 60 * 1000;
+
+/**
+ * How close two reset instants may sit and still count as the same reset.
+ * Providers report the scoped and account-wide resets from one clock but
+ * serialise them separately, so they differ by a millisecond or two.
+ */
+const SCOPED_RESET_MATCH_TOLERANCE_MS = 60_000;
+
+/** The window kind naming one model family's scoped weekly quota. */
+export function scopedWeeklyWindowKind(family: ModelFamily): string {
+	return `weekly_scoped:${family}`;
+}
+
+/**
+ * The scoped weekly window for one model family, or null when the account
+ * states none this scan can stand behind.
+ *
+ * Deliberately NOT the exact kind `"seven_day"`: `buildPool` routes that kind
+ * into the reset-credit path, and a scoped window carrying an account-wide
+ * window's credit bank would have credits applied twice.
+ *
+ * No prediction and no burn anchor are attached, because none is recorded per
+ * family — the estimator therefore falls through to the structural lifetime
+ * average at LOW confidence, which is weaker than the account-wide weekly
+ * window's validated `"full"` policy and must be disclosed by anything serving
+ * the result.
+ */
+function scopedWeeklyWindowFor(
+	account: RunwayAccountSource,
+	family: ModelFamily,
+	now: number,
+	accountWideResetMs: number | null,
+): RunwayWindowInput | null {
+	// A live payload wins; the pre-extracted readings are the FALLBACK for a
+	// caller that resolved the account without one — the same precedence
+	// `toRunwayAccountInput` applies to the account-wide windows, so all three
+	// windows come from one resolution.
+	const available = account.usageData
+		? normalizeAnthropicUsage(
+				account.usageData as Parameters<typeof normalizeAnthropicUsage>[0],
+				now,
+			).weeklyScoped
+		: (account.windowObservations?.weeklyScoped ?? null);
+	if (!available) return null;
+	const scoped = available.filter((limit) => limit.family === family);
+	if (scoped.length === 0) return null;
+	// Several scope display names can fold onto one family (an Opus 4 and an
+	// Opus 4.5 surface). The BUSIEST is the binding one: the family is blocked
+	// when any of its surfaces is spent.
+	const limit = scoped.reduce((worst, candidate) =>
+		candidate.percent > worst.percent ? candidate : worst,
+	);
+	if (
+		accountWideResetMs == null ||
+		Math.abs(limit.resetsAtMs - accountWideResetMs) >
+			SCOPED_RESET_MATCH_TOLERANCE_MS
+	) {
+		// Without a matching account-wide reset the cycle length is a guess, and a
+		// guessed denominator would silently scale every derived figure.
+		return null;
+	}
+	return {
+		windowKind: scopedWeeklyWindowKind(family),
+		utilizationPct: limit.percent,
+		resetsAtMs: limit.resetsAtMs,
+		windowStartMs: computeWindowStartMs(
+			limit.resetsAtMs,
+			"seven_day",
+			SCOPED_WEEKLY_DURATION_MS,
+		),
+		prediction: undefined,
+		lifetimeConfidence: undefined,
+		observedAtMs: account.usageObservedAtMs ?? null,
+		anchor: null,
+	};
+}
 
 function windowInput(
 	windowKind: "five_hour" | "seven_day",
@@ -220,6 +322,42 @@ export function toRunwayAccountInput(
 		windows,
 		codexResetCredits: account.codexResetCredits ?? null,
 	};
+}
+
+/**
+ * Map one account onto the runway model AS SEEN BY one model family: its
+ * account-wide windows plus that family's scoped weekly window.
+ *
+ * Null when the account states no usable scoped window for the family, so the
+ * caller can drop it from the family pool rather than pool it on its
+ * account-wide windows alone. That distinction is load-bearing: an account
+ * pooled without its scoped window looks available for a family whose quota it
+ * may have already spent, which is the one direction a capacity figure must
+ * never err in. Dropping it can only SHORTEN the family's runway, matching how
+ * {@link computeCapacityRunway} already treats an account it cannot project.
+ *
+ * Reached through {@link toRunwayAccountInput} rather than around it, so the
+ * account-wide eligibility, window-start and confidence policies stay in one
+ * place.
+ */
+export function toScopedFamilyRunwayInput(
+	account: RunwayAccountSource,
+	family: ModelFamily,
+	now: number,
+): RunwayAccountInput | null {
+	const base = toRunwayAccountInput(account);
+	if (base.unmetered) return null;
+	const accountWideResetMs =
+		base.windows.find((window) => window.windowKind === "seven_day")
+			?.resetsAtMs ?? null;
+	const scoped = scopedWeeklyWindowFor(
+		account,
+		family,
+		now,
+		accountWideResetMs,
+	);
+	if (scoped === null) return null;
+	return { ...base, windows: [...base.windows, scoped] };
 }
 
 function runwayFor(

@@ -15,6 +15,7 @@
 import type {
 	AccountResponse,
 	AnthropicUsageData,
+	FullUsageData,
 	UsageBurnAnchor,
 	UsagePrediction,
 } from "@clankermux/types";
@@ -593,7 +594,7 @@ export interface LiveScopedFamily {
  * exclusion rules belong to the aggregate number, not to the axis.
  */
 export function listLiveScopedFamilies(
-	accounts: AccountResponse[],
+	accounts: readonly { usageData: FullUsageData | null }[],
 	now: number,
 ): LiveScopedFamily[] {
 	const byFamily = new Map<ModelFamily, string>();

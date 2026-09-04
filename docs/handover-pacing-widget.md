@@ -21,11 +21,12 @@ forbids publishing one measurement in two places. So:
 | Question | Endpoint | Field |
 |---|---|---|
 | Add load or shed it? (the headline) | `/public/v1/runway` | `worstStatedOutcome.headroomPct` + `.headroomDirection` |
+| Add load *of a particular kind*? | `/public/v1/workload-headroom` | `rows[]` |
 | Which class, and how is it spending? | `/public/v1/pacing` | `classes[]` |
 
 If you only change one thing, change the runway panel to render
 `headroomPct`/`headroomDirection` instead of `exhaustsAt`. You do not need the
-pacing endpoint at all for a working v1.
+other two endpoints at all for a working v1.
 
 ---
 
@@ -161,6 +162,93 @@ Things that will bite:
 
 ---
 
+## 4b. Per-workload headroom (`/public/v1/workload-headroom`)
+
+The headline in section 3 answers "can the pool's current aggregate workload
+grow". It cannot answer "can I add another **GPT** agent" or "another
+**Fable-heavy** agent", for two reasons it is worth knowing about:
+
+- It pools every account together, so a Claude account's headroom silently
+  covers for a Codex one that nothing can cover for.
+- It reads only account-wide quota windows. A per-model-family limit that is
+  already spent is invisible to it. When this resource was built, Fable was at
+  100% on two of five Claude accounts while the headline read `+32% margin`.
+  The headline was not wrong (those accounts really were alive for Sonnet work)
+  but for Fable work it reported room that did not exist.
+
+One flat record array, nothing nested inside it:
+
+```jsonc
+{
+  "schema": "clankermux.public.workload-headroom.v1",
+  "generatedAt": "2026-09-04T…",
+  "horizonMs": 1209600000,
+  "rows": [
+    {
+      "dimensionKind": "class",       // "class" | "family" | "other"
+      "dimensionId": "anthropic",
+      "label": "Claude",
+      "outcomeKind": "beyond_horizon",
+      "exhaustsAt": null,
+      "headroomPct": 31,
+      "headroomDirection": "margin",
+      "headroomBasis": "exact",       // <-- READ THIS
+      "headroomAbsence": null,
+      "projectionBasis": "measured",
+      "eligibleAccounts": 5,
+      "spentAccounts": 0
+    }
+  ]
+}
+```
+
+`headroomPct` and `headroomDirection` mean exactly what they mean in section 3,
+including the rule that the sign lives in the enum. What is new is
+`headroomBasis`.
+
+### `headroomBasis: "exact"` vs `"conservative_bound"`
+
+A **class** row (`Claude`, `GPT`) is `exact`. Its accounts can genuinely cover
+for each other and every window is varied together, so the figure is a threshold
+in the same sense the headline is.
+
+A **family** row (`Fable`) is a `conservative_bound`, and the difference is not
+pedantry. Isolating one family's load needs that family's share of the
+account-wide burn, and that share is not derivable from what the proxy records —
+`docs/ledger-burn-feasibility.md` measured the token-to-percent relation as
+indistinguishable from a future-token placebo, and the resolution requirement it
+failed on is still unmet. So each side of the scale is computed at the
+pessimistic end of that unknown share: the "can I run more" side assumes the
+family is all of the account's burn, the "must I cut" side assumes it is none of
+it. Both err toward advising restraint.
+
+Render a bound as a bound. It is a safe number to act on in the cautious
+direction and a wrong number to quote as *the* answer.
+
+### `headroomAbsence` — why there is no figure
+
+Closed enum, and it tells you something `outcomeKind` alone cannot:
+
+| Value | Means |
+|---|---|
+| `beyond_probe_range` | The probe walked its whole range without the verdict flipping. Read `outcomeKind` for which end: robust past the cap on `beyond_horizon`, unsalvageable on `runway`. |
+| `not_projected` | `out_now`, `unknown` or `no_accounts` — no projection to vary. |
+| `bound_broken_by_credits` | Family row only. Modelled reset credits make faster burn able to *revive* a window, so no single scan bounds the answer. Not a failure; there is genuinely nothing honest to state. |
+
+A null deficit on a family row means **"no cut of up to 50% can be certified
+without burn attribution"**. It does *not* mean cutting that family won't help —
+if the family's real share of account-wide burn is above zero, cutting it does
+relieve those windows too. Do not render it as "hopeless".
+
+### `projectionBasis`
+
+`measured` on class rows, `structural` on family rows. Scoped family windows
+carry no prediction and no burn anchor, so their ETA is a now-anchored lifetime
+average that drifts *later* while a reading is stale — optimistic drift. Treat a
+`structural` row as the softer of the two readings.
+
+---
+
 ## 5. Suggested bar
 
 A centred bar with zero in the middle:
@@ -187,9 +275,11 @@ readout.
 
 ## 6. Polling
 
-- `/public/v1/pacing` is memoised server-side with a **60 s TTL** and
-  single-flight. Polling faster than 60 s returns the identical payload (same
-  `generatedAt`) and gains nothing.
+- `/public/v1/pacing` and `/public/v1/workload-headroom` are memoised
+  server-side with a **60 s TTL** and single-flight. Polling faster than 60 s
+  returns the identical payload (same `generatedAt`) and gains nothing.
+  `workload-headroom` is the most expensive route on the surface — a full
+  runway scan, then a pace probe per row — so respect its TTL in particular.
 - `/public/v1/runway` is not memoised but is an expensive scan. 60 s is a
   sensible floor for both.
 - Both send `Cache-Control: no-store`.
@@ -220,6 +310,9 @@ reimplement it. Four separate ways to get it subtly wrong.
 - Pace probes: `packages/core/src/capacity-runway.ts` — `probePaceMargin`,
   `probePaceDeficit`, `runwayPaceHeadroom`
 - Pacing scan: `packages/core/src/pacing-scan.ts`
-- Public readers: `packages/http-api/src/services/public-{runway,pacing}.ts`
+- Per-workload rows and the bound argument in full:
+  `packages/core/src/workload-headroom.ts` — see `familyHeadroomBound`
+- Public readers:
+  `packages/http-api/src/services/public-{runway,pacing,workload-headroom}.ts`
 - Wire guards (extend these if you request a field): 
   `packages/http-api/src/handlers/public/__tests__/dto.test.ts`

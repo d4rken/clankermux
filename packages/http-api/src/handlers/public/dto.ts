@@ -50,7 +50,7 @@
  * our schedule.
  */
 
-import type { PacingSnapshot } from "@clankermux/core";
+import type { PacingSnapshot, WorkloadHeadroomRow } from "@clankermux/core";
 import { classIsUnread } from "@clankermux/core";
 import type {
 	RequestResponse,
@@ -78,6 +78,8 @@ export const PUBLIC_RUNWAY_SCHEMA = "clankermux.public.runway.v1";
 export const PUBLIC_STREAM_SCHEMA = "clankermux.public.stream.v1";
 export const PUBLIC_STOPS_SCHEMA = "clankermux.public.stops.v1";
 export const PUBLIC_PACING_SCHEMA = "clankermux.public.pacing.v1";
+export const PUBLIC_WORKLOAD_HEADROOM_SCHEMA =
+	"clankermux.public.workload-headroom.v1";
 
 /** Byte ceiling on every DISPLAY string this surface emits. */
 export const MAX_STRING_BYTES = 96;
@@ -1561,3 +1563,163 @@ export const streamHelpers = {
 	text,
 	toPublicRequestPhase,
 };
+
+/**
+ * One workload's headroom row.
+ *
+ * FLAT, deliberately: no array nested inside this record at all, so the whole
+ * resource is one record array and a streaming scanner never descends past the
+ * depth the wire guard enforces. Account references would be join keys against
+ * `/public/v1/accounts`; this resource publishes COUNTS instead, because the
+ * question it answers ("can I add another agent of this kind") is about how
+ * many accounts stand behind a workload, not which ones.
+ */
+export interface PublicWorkloadHeadroomRowDto {
+	/** `"class"` (Claude, GPT) or `"family"` (a scoped model family). */
+	dimensionKind: PublicWorkloadDimensionDto;
+	/** Servable class id or model family id. Join key, never truncated. */
+	dimensionId: string;
+	label: string | null;
+	/** `RunwayOutcome["kind"]`, mapped exactly as the runway resource maps it. */
+	outcomeKind: PublicRunwayKind;
+	/** Projected all-out instant for this workload, or null on every other kind. */
+	exhaustsAt: string | null;
+	/**
+	 * Magnitude only — ALWAYS POSITIVE. The sign lives in `headroomDirection`,
+	 * and a client that renders this number without reading that field shows a
+	 * required 40% cut as 40% of spare capacity.
+	 */
+	headroomPct: number | null;
+	headroomDirection: PublicHeadroomDirection | null;
+	/**
+	 * Whether `headroomPct` is the threshold or a BOUND on it.
+	 *
+	 * `exact` on a class row: the accounts in a class can cover for each other,
+	 * every window is varied together, and the figure means what the pool-level
+	 * one on `/public/v1/runway` means. `conservative_bound` on a family row:
+	 * isolating one family's load needs that family's share of account-wide
+	 * burn, which is not derivable from what this proxy records, so each side of
+	 * the scale is computed at the pessimistic end of that unknown. A bound errs
+	 * toward advising restraint and must not be presented as an exact answer.
+	 */
+	headroomBasis: PublicHeadroomBasisDto;
+	/** Why no headroom is stated. Never a stand-in for zero. */
+	headroomAbsence: PublicHeadroomAbsenceDto | null;
+	/**
+	 * How well-evidenced the projection is. `structural` marks a row resting on a
+	 * scoped window, which carries no prediction and no burn anchor, so its ETA
+	 * is a now-anchored lifetime average that drifts LATER while a reading is
+	 * stale — optimistic drift, and the reason this field exists.
+	 */
+	projectionBasis: PublicProjectionBasisDto;
+	/** Accounts the scan pooled for this workload. */
+	eligibleAccounts: number;
+	/** Of those, the ones whose binding window is already at or past 100%. */
+	spentAccounts: number;
+}
+
+export type PublicWorkloadDimensionDto = "class" | "family" | "other";
+export type PublicHeadroomBasisDto = "exact" | "conservative_bound" | "other";
+export type PublicHeadroomAbsenceDto =
+	| "beyond_probe_range"
+	| "not_projected"
+	| "bound_broken_by_credits"
+	| "other";
+export type PublicProjectionBasisDto = "measured" | "structural" | "other";
+
+function toPublicWorkloadDimension(kind: string): PublicWorkloadDimensionDto {
+	switch (kind) {
+		case "class":
+			return "class";
+		case "family":
+			return "family";
+		default:
+			return "other";
+	}
+}
+
+function toPublicHeadroomBasis(basis: string): PublicHeadroomBasisDto {
+	switch (basis) {
+		case "exact":
+			return "exact";
+		case "conservative-bound":
+			return "conservative_bound";
+		default:
+			return "other";
+	}
+}
+
+function toPublicHeadroomAbsence(
+	absence: string | null,
+): PublicHeadroomAbsenceDto | null {
+	if (absence == null) return null;
+	switch (absence) {
+		case "beyond-probe-range":
+			return "beyond_probe_range";
+		case "not-projected":
+			return "not_projected";
+		case "bound-broken-by-credits":
+			return "bound_broken_by_credits";
+		default:
+			return "other";
+	}
+}
+
+function toPublicProjectionBasis(basis: string): PublicProjectionBasisDto {
+	switch (basis) {
+		case "measured":
+			return "measured";
+		case "structural":
+			return "structural";
+		default:
+			return "other";
+	}
+}
+
+export interface PublicWorkloadHeadroomDto {
+	schema: typeof PUBLIC_WORKLOAD_HEADROOM_SCHEMA;
+	generatedAt: string;
+	horizonMs: number;
+	rows: PublicWorkloadHeadroomRowDto[];
+}
+
+/**
+ * Project the workload scan onto the wire.
+ *
+ * The POOL-LEVEL headroom is deliberately absent here: it is published on
+ * `/public/v1/runway`, where the scan that computes it lives, and restating it
+ * would put one measurement in two places for the two to drift apart. The rows
+ * here are per class and per family — different measurements of a different
+ * thing, not a second copy of that one.
+ */
+export function toPublicWorkloadHeadroomDto(snapshot: {
+	generatedAtMs: number;
+	horizonMs: number;
+	rows: readonly WorkloadHeadroomRow[];
+}): PublicWorkloadHeadroomDto {
+	return {
+		schema: PUBLIC_WORKLOAD_HEADROOM_SCHEMA,
+		generatedAt: new Date(snapshot.generatedAtMs).toISOString(),
+		horizonMs: snapshot.horizonMs,
+		rows: snapshot.rows.map((row) => ({
+			dimensionKind: toPublicWorkloadDimension(row.dimensionKind),
+			dimensionId: identifier(row.dimensionId),
+			label: text(row.label),
+			outcomeKind: toPublicRunwayKind(row.outcome.kind),
+			exhaustsAt:
+				row.outcome.kind === "runway"
+					? instant(row.outcome.exhaustsAtMs)
+					: null,
+			headroomPct: row.headroom?.pct ?? null,
+			headroomDirection:
+				row.headroom === null
+					? null
+					: toPublicHeadroomDirection(row.headroom.direction),
+			headroomBasis: toPublicHeadroomBasis(row.basis),
+			headroomAbsence: toPublicHeadroomAbsence(row.headroomAbsence),
+			projectionBasis: toPublicProjectionBasis(row.projectionBasis),
+			eligibleAccounts: row.eligibleAccountIds.length,
+			spentAccounts: row.spentAccountIds.length,
+		})),
+	};
+}

@@ -10,6 +10,7 @@
  * unauthenticated surface — that no field arrives here that was not named.
  */
 import { describe, expect, it } from "bun:test";
+import type { WorkloadHeadroomRow } from "@clankermux/core";
 import {
 	type RateLimitCause,
 	type RequestResponse,
@@ -43,6 +44,7 @@ import {
 	toPublicStopCause,
 	toPublicStopsDto,
 	toPublicWindowKind,
+	toPublicWorkloadHeadroomDto,
 	truncateUtf8,
 } from "../dto";
 import { arrayNesting, assertInstantsAreIso, depthOf } from "./wire-contract";
@@ -161,6 +163,53 @@ function runway(
 			headroom: { pct: 11, direction: "deficit" },
 		},
 		...over,
+	};
+}
+
+/**
+ * A workload-headroom scan carrying one row of each kind, with the family row
+ * in the state the whole resource exists to express: a bound that states no
+ * figure, on a projection weaker than the class row's.
+ */
+function workloadHeadroom(): {
+	generatedAtMs: number;
+	horizonMs: number;
+	rows: WorkloadHeadroomRow[];
+} {
+	return {
+		generatedAtMs: NOW,
+		horizonMs: 1_209_600_000,
+		rows: [
+			{
+				dimensionKind: "class",
+				dimensionId: "anthropic",
+				label: "Claude",
+				outcome: { kind: "beyond-horizon", horizonMs: 1_209_600_000 },
+				headroom: { pct: 31, direction: "margin" },
+				basis: "exact",
+				headroomAbsence: null,
+				projectionBasis: "measured",
+				eligibleAccountIds: ["acct-1", "acct-2"],
+				spentAccountIds: [],
+			},
+			{
+				dimensionKind: "family",
+				dimensionId: "fable",
+				label: "Fable",
+				outcome: {
+					kind: "runway",
+					exhaustsAtMs: NOW + 3_600_000,
+					durationMs: 3_600_000,
+					causes: [{ accountId: "acct-1", windowKind: "weekly_scoped:fable" }],
+				},
+				headroom: null,
+				basis: "conservative-bound",
+				headroomAbsence: "beyond-probe-range",
+				projectionBasis: "structural",
+				eligibleAccountIds: ["acct-1", "acct-2"],
+				spentAccountIds: ["acct-1"],
+			},
+		],
 	};
 }
 
@@ -868,6 +917,70 @@ describe("golden: GET /public/v1/pacing", () => {
 	});
 });
 
+describe("golden: GET /public/v1/workload-headroom", () => {
+	it("matches the pinned shape exactly", () => {
+		expect(toPublicWorkloadHeadroomDto(workloadHeadroom())).toEqual({
+			schema: "clankermux.public.workload-headroom.v1",
+			generatedAt: NOW_ISO,
+			horizonMs: 1_209_600_000,
+			rows: [
+				{
+					dimensionKind: "class",
+					dimensionId: "anthropic",
+					label: "Claude",
+					outcomeKind: "beyond_horizon",
+					exhaustsAt: null,
+					headroomPct: 31,
+					headroomDirection: "margin",
+					headroomBasis: "exact",
+					headroomAbsence: null,
+					projectionBasis: "measured",
+					eligibleAccounts: 2,
+					spentAccounts: 0,
+				},
+				{
+					dimensionKind: "family",
+					dimensionId: "fable",
+					label: "Fable",
+					outcomeKind: "runway",
+					exhaustsAt: "2023-11-14T22:56:40.000Z",
+					// Null on BOTH fields, never a zero: the pool is running out and no
+					// certifiable cut was found, which is the opposite end of the scale
+					// from a null on a `beyond_horizon` row.
+					headroomPct: null,
+					headroomDirection: null,
+					headroomBasis: "conservative_bound",
+					headroomAbsence: "beyond_probe_range",
+					projectionBasis: "structural",
+					eligibleAccounts: 2,
+					spentAccounts: 1,
+				},
+			],
+		});
+	});
+
+	it("publishes no pool-level headroom, which lives on the runway resource", () => {
+		const dto = toPublicWorkloadHeadroomDto(workloadHeadroom()) as Record<
+			string,
+			unknown
+		>;
+		// One canonical home per fact. `/public/v1/runway` computes and serves the
+		// pool figure; a copy here would be free to drift from it.
+		expect(dto.worstStatedOutcome).toBeUndefined();
+		expect(dto.headroomPct).toBeUndefined();
+	});
+
+	it("never re-serves an account name or id list", () => {
+		const json = JSON.stringify(
+			toPublicWorkloadHeadroomDto(workloadHeadroom()),
+		);
+		// Names live on /public/v1/accounts. The rows carry counts, so not even the
+		// join keys appear — there is nothing here to truncate wrongly.
+		expect(json).not.toContain("acct-1");
+		expect(json).not.toContain("Claude-4");
+	});
+});
+
 describe("golden: GET /public/v1/stops", () => {
 	it("matches the pinned shape exactly", () => {
 		expect(toPublicStopsDto(stops(), NOW)).toEqual({
@@ -1020,6 +1133,7 @@ describe("instants vs durations", () => {
 		assertInstantsAreIso(toPublicRunwayDto(runway()));
 		assertInstantsAreIso(toPublicStopsDto(stops(), NOW));
 		assertInstantsAreIso(toPublicPacingDto(pacing()));
+		assertInstantsAreIso(toPublicWorkloadHeadroomDto(workloadHeadroom()));
 	});
 
 	it("emits no duration as a string", () => {
@@ -1197,6 +1311,12 @@ describe("structural limits", () => {
 		// it: the per-account bars a reader might expect there are the accounts
 		// resource's job, and putting them here would be the third level.
 		expect(arrayNesting(toPublicPacingDto(pacing()))).toBeLessThanOrEqual(2);
+		// workload-headroom[] spends its budget on rows[] and nests NOTHING: the
+		// rows publish account COUNTS rather than id lists precisely so no second
+		// level is needed here.
+		expect(
+			arrayNesting(toPublicWorkloadHeadroomDto(workloadHeadroom())),
+		).toBeLessThanOrEqual(2);
 	});
 
 	it("keeps object depth far below the reader's 16-deep ceiling", () => {
@@ -1207,6 +1327,9 @@ describe("structural limits", () => {
 		expect(depthOf(toPublicRunwayDto(runway()))).toBeLessThan(8);
 		expect(depthOf(toPublicStopsDto(stops(), NOW))).toBeLessThan(8);
 		expect(depthOf(toPublicPacingDto(pacing()))).toBeLessThan(8);
+		expect(
+			depthOf(toPublicWorkloadHeadroomDto(workloadHeadroom())),
+		).toBeLessThan(8);
 	});
 });
 

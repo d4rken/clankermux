@@ -5,6 +5,7 @@ import {
 	extractSevenDay,
 	FIVE_HOUR_ELIGIBLE_PROVIDERS,
 	type KeyRunway,
+	normalizeAnthropicUsage,
 	RUNWAY_HORIZON_MS,
 	type RunwayAccountSource,
 	type RunwayResetCreditBank,
@@ -246,11 +247,22 @@ function windowSummary(
  */
 function observationsFrom(
 	usageData: FullUsageData | null,
+	now: number,
 ): RunwayWindowObservations | null {
 	if (usageData == null) return null;
 	return {
 		fiveHour: extractFiveHour(usageData),
 		sevenDay: extractSevenDay(usageData),
+		// From the same payload as the two windows above, so a per-family scan
+		// cannot pair a scoped reading with an account-wide one resolved at a
+		// different instant. Non-Anthropic payloads normalize to an empty list,
+		// which is "this provider reports none" and not "we could not read it" —
+		// the distinction that matters is payload versus no payload, and a caller
+		// with no payload gets `undefined` from the snapshot path instead.
+		weeklyScoped: normalizeAnthropicUsage(
+			usageData as Parameters<typeof normalizeAnthropicUsage>[0],
+			now,
+		).weeklyScoped,
 	};
 }
 
@@ -386,6 +398,17 @@ export interface RunwayScan {
 	keys: KeyRunway[];
 	/** Every account, whether or not any key can reach it. */
 	accounts: RunwayAccountSummary[];
+	/**
+	 * The resolved model inputs the key rows were computed from.
+	 *
+	 * Exposed so a SECOND view of the same scan — per servable class, per model
+	 * family — reuses this resolution instead of running its own. Each account's
+	 * usage here has already been through the freshness tiers, the Codex payload
+	 * recovery, the prediction regression and the credit-bank assembly; a
+	 * consumer that rebuilt any of that would be a second scan wearing the first
+	 * one's timestamp, free to disagree with it about the same instant.
+	 */
+	sources: RunwayAccountSource[];
 }
 
 /**
@@ -539,6 +562,7 @@ export async function computeRunwayScan(
 				resolvedCodex
 					? resolvedCodex.data
 					: ((entry?.data ?? null) as FullUsageData | null),
+				now,
 			);
 			// Bounded here rather than trusting the query's `sinceMs`: this
 			// reader states its own admissibility, and a row older than the
@@ -701,5 +725,6 @@ export async function computeRunwayScan(
 		horizonMs: RUNWAY_HORIZON_MS,
 		keys: runways,
 		accounts: accountSummaries,
+		sources,
 	};
 }
