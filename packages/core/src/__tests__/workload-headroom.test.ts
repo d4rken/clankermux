@@ -650,6 +650,37 @@ describe("computeWorkloadHeadroom — three states of scoped evidence", () => {
 		expect(row?.spentAccountIds).toEqual(["c1"]);
 	});
 
+	it("does not excuse a spent weekly window on an expiry-only credit", () => {
+		const account: RunwayAccountSource = {
+			id: "c1",
+			name: "c1",
+			provider: "codex",
+			usageData: anthropicUsage({
+				fiveHourPct: 0,
+				fiveHourResetMs: NOW + HOUR,
+				weeklyPct: 100,
+				weeklyResetMs: NOW + 2 * DAY,
+				scoped: null,
+			}),
+			usageObservedAtMs: NOW,
+			codexResetCredits: {
+				// Expiry-only. That trigger TRUNCATES the dead span at the expiry
+				// instant rather than reviving it at the start, so the window really
+				// is spent for the next six hours — but the credit still counts as
+				// consumed, which is what made the excuse fire wrongly.
+				credits: [{ expiresAtMs: NOW + 6 * HOUR }],
+				onWeeklyLimitEnabled: false,
+				onExpiryEnabled: true,
+			},
+		};
+
+		const row = computeWorkloadHeadroom([account], NOW).find(
+			(candidate) => candidate.dimensionId === "codex",
+		);
+		expect(row?.outcome.kind).toBe("out-now");
+		expect(row?.spentAccountIds).toEqual(["c1"]);
+	});
+
 	it("will not call a beyond-horizon measured while ignoring a blank window", () => {
 		// One readable window and one with no reset, so no estimate at all.
 		// `buildPool` drops an account only when EVERY window is unreadable, so

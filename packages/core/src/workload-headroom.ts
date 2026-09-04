@@ -180,16 +180,21 @@ function spentAccountIds(
 	// that is spent right now: the row read `out-now` beside zero spent accounts.
 	const credits =
 		"assumedResetCredits" in outcome ? (outcome.assumedResetCredits ?? []) : [];
-	const weeklyRevived = new Set(credits.map((credit) => credit.accountId));
+	const consumedFor = new Set(credits.map((credit) => credit.accountId));
+	// ONLY the weekly-limit trigger revives at the span's start. The expiry
+	// trigger truncates a dead span AT the expiry instant instead, so a window
+	// spent now stays spent until then — and a credit consumed that way still
+	// shows up in `assumedResetCredits`. Excusing on the consumption alone made
+	// an expiry-only bank report `out-now` with zero accounts spent.
+	const revivedNow = (input: RunwayAccountInput): boolean =>
+		consumedFor.has(input.accountId) &&
+		input.codexResetCredits?.onWeeklyLimitEnabled === true;
 	return inputs
 		.filter((input) =>
 			input.windows.some(
 				(window) =>
 					window.utilizationPct >= SPENT_THRESHOLD_PCT &&
-					!(
-						window.windowKind === "seven_day" &&
-						weeklyRevived.has(input.accountId)
-					),
+					!(window.windowKind === "seven_day" && revivedNow(input)),
 			),
 		)
 		.map((input) => input.accountId);
