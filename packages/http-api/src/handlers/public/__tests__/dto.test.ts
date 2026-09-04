@@ -796,6 +796,57 @@ describe("golden: GET /public/v1/pacing", () => {
 		expect(dto.classes[0]?.nextLiftAt).toBeNull();
 	});
 
+	it("publishes a class that reports a 5-hour window but no weekly one", () => {
+		// Provider eligibility differs per window: z.ai reports a 5-hour quota and
+		// no weekly one, so its class exists in the 5-hour rollup and NOT in the
+		// weekly budget list. Walking only the weekly classes dropped it, which
+		// produced the worst possible payload — a pool-wide destructive verdict
+		// caused by a class being held on its 5-hour limit, beside an empty
+		// `classes` array with nothing to explain it or say when it lifts.
+		const dto = toPublicPacingDto(
+			pacing({
+				fiveHour: {
+					waiting: 1,
+					runningHot: 0,
+					room: 0,
+					nextLiftMs: NOW + 40 * 60_000,
+					nextLiftAccountName: "zed",
+					outlook: { label: "Paced", tone: "destructive" },
+					classes: [
+						{
+							classId: "zai",
+							label: "z.ai",
+							room: 0,
+							runningHot: 0,
+							waiting: 1,
+							unavailable: 0,
+							unknown: 0,
+							nextLiftMs: NOW + 40 * 60_000,
+							nextLiftAccountName: "zed",
+							nextLiftAccountId: "acct-9",
+							noPath: true,
+						},
+					],
+				},
+			}),
+		);
+
+		const zai = dto.classes.find((c) => c.classId === "zai");
+		expect(zai).toBeDefined();
+		expect(zai?.fiveHourWaiting).toBe(1);
+		expect(zai?.nextLiftAccountId).toBe("acct-9");
+		expect(zai?.nextLiftAt).toBe("2023-11-14T22:36:40.000Z");
+		// Zero accounts ELIGIBLE for the weekly window is a measured fact about
+		// provider eligibility, not a fabricated empty — no z.ai account has a
+		// weekly quota to report. The percentage and the burn stay null, which is
+		// what "no reading" has to look like.
+		expect(zai?.eligibleTotal).toBe(0);
+		expect(zai?.utilizationPct).toBeNull();
+		expect(zai?.burnRatio).toBeNull();
+		// And the name still never crosses the boundary.
+		expect(JSON.stringify(dto)).not.toContain("zed");
+	});
+
 	it("states a null burn ratio rather than substituting a 1.0", () => {
 		// Withheld early in a window, where the expected percentage is too small to
 		// divide by. 1.0 would read as "exactly on pace", the most reassuring

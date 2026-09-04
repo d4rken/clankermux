@@ -128,6 +128,18 @@ export const LimitsTab = React.memo(() => {
 	const accountsUnavailableReason = accountsUnavailable
 		? "Account data unavailable"
 		: undefined;
+	// The quota panels read PACING, so a failed pacing read has to reach them as
+	// an unavailable reason of its own. Folding it into `loading` alone was not
+	// enough: after a first-load failure `isLoading` goes false with `data` still
+	// undefined, so both panels fell through to "No rolling-quota accounts" —
+	// asserting a measured empty pool on the strength of a request that failed.
+	// The accounts reason still wins, since without accounts there is nothing to
+	// pace either way.
+	const pacingUnavailable =
+		dataAvailability(pacingQuery, pacingLoading).state === "unavailable";
+	const quotaUnavailableReason =
+		accountsUnavailableReason ??
+		(pacingUnavailable ? "Pacing data unavailable" : undefined);
 	const analyticsUnavailable =
 		dataAvailability(analyticsQuery, analyticsLoading).state === "unavailable";
 	const analyticsPending = analyticsLoading && !analytics;
@@ -201,7 +213,7 @@ export const LimitsTab = React.memo(() => {
 				runways={runway?.keys ?? []}
 				accounts={runway?.accounts ?? []}
 				windowsLoading={accountsPending || (pacingLoading && !pacing)}
-				windowsUnavailableReason={accountsUnavailableReason}
+				windowsUnavailableReason={quotaUnavailableReason}
 				runwaysLoading={runwayLoading && !runway}
 				runwaysUnavailableReason={runwaysUnavailableReason}
 			/>

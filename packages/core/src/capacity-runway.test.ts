@@ -1731,6 +1731,75 @@ describe("computeCapacityRunway pace-deficit probe", () => {
 		expect(result.paceDeficit).toBeUndefined();
 	});
 
+	/**
+	 * Simulating a uniform pace multiplier `m` is exactly a fill time of `F / m`
+	 * at pace 1: `scaleEstimatePace` divides the slope and timeToFull is
+	 * 100/slope. So a scan at `fillHours: F / m` reads out what the probe sees at
+	 * grid step `m`, which is how the island below was measured rather than
+	 * reasoned about.
+	 */
+	function creditedWeekly(fillHours: number, creditExpiryHours: number) {
+		return {
+			accountId: "a",
+			unmetered: false,
+			windows: [
+				window({
+					windowKind: "seven_day",
+					utilizationPct: 50,
+					resetsAtMs: NOW + 84 * HOUR,
+					windowStartMs: NOW - 84 * HOUR,
+					prediction: prediction({
+						resetsAtMs: NOW + 84 * HOUR,
+						slopePerHour: 100 / fillHours,
+						etaExhaustMs: NOW + 500 * HOUR,
+					}),
+				}),
+			],
+			codexResetCredits: {
+				onWeeklyLimitEnabled: true,
+				onExpiryEnabled: false,
+				credits: [{ expiresAtMs: NOW + creditExpiryHours * HOUR }],
+			},
+		} satisfies RunwayAccountInput;
+	}
+
+	it("states no deficit when the safe paces are an island, not a tail", () => {
+		// Safety is NOT monotone in pace, and this is the measured proof. Fill 80h
+		// in a 168h cycle puts TWO dead spans inside the horizon; one credit
+		// expiring at NOW+180h covers the first, the second is uncovered, so the
+		// pool is finite at the measured pace. Slowing pushes the second span past
+		// the horizon and the scan clears — but slowing FURTHER pushes the first
+		// span past the credit's expiry, the revival is lost, and it goes finite
+		// again. Scanned across the grid, the paces that clear are exactly
+		// [0.84, 0.95]: an island, with the floor unsafe on the far side of it.
+		//
+		// Reporting the first pace that clears walking down — 0.95, "cut 5%" —
+		// would be actively dangerous: a reader who cut 20% would land at 0.80,
+		// outside the island and back in trouble. Nobody can act on a sampled
+		// point. Absent is the only honest answer here, and it means "no pace in
+		// range reliably saves this pool", which is worse than any number.
+		const result = computeCapacityRunway([creditedWeekly(80, 180)], NOW);
+
+		expect(result.kind).toBe("runway");
+		if (result.kind !== "runway") return;
+		expect(result.paceDeficit).toBeUndefined();
+		expect(runwayPaceHeadroom(result)).toBeNull();
+	});
+
+	it("still states a deficit when the safe paces reach the floor", () => {
+		// The contrast, and the reason the rule above is a tail test rather than a
+		// blanket refusal whenever credits are modelled. Same credit, but a fill
+		// time slow enough that every pace below the first clearing one also
+		// clears — so the tail runs to the floor and the figure is publishable.
+		const result = computeCapacityRunway([creditedWeekly(150, 180)], NOW);
+
+		if (result.kind !== "runway") return;
+		const deficit = result.paceDeficit;
+		if (!deficit) return;
+		expect(deficit.multiplier).toBeLessThan(1);
+		expect(runwayPaceHeadroom(result)?.direction).toBe("deficit");
+	});
+
 	it("never annotates a beyond-horizon with a deficit", () => {
 		// The two probes are exclusive by construction; this pins that the finite
 		// branch is the only one that can carry a deficit, so a reader can key on

@@ -390,6 +390,22 @@ export function worstRunwayEntry<T extends { outcome: RunwayOutcome }>(
 			if (candidateRemaining < worstRemaining) {
 				worst = candidate;
 				worstOutcome = candidateOutcome;
+			} else if (candidateRemaining === worstRemaining) {
+				// Exactly as tied beyond-horizon rows break on `paceMargin`, and for
+				// the same reason: the headline row is the only one whose pace figure
+				// any surface renders, so input order deciding it would let a key
+				// needing a 10% cut hide another needing 50% — same instant, opposite
+				// advice. The LOWER multiplier is the deeper cut and therefore the
+				// worse row. A missing deficit means no pace in range saves that key,
+				// which is worse still, so it sorts below every stated multiplier.
+				const candidateMultiplier =
+					candidateOutcome.paceDeficit?.multiplier ?? Number.NEGATIVE_INFINITY;
+				const worstMultiplier =
+					worstOutcome.paceDeficit?.multiplier ?? Number.NEGATIVE_INFINITY;
+				if (candidateMultiplier < worstMultiplier) {
+					worst = candidate;
+					worstOutcome = candidateOutcome;
+				}
 			}
 		}
 		// Among tied beyond-horizon rows the knife-edge one is worse: the

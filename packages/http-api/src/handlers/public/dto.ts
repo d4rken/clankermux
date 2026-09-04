@@ -1460,14 +1460,64 @@ export function toPublicPacingDto(snapshot: PacingSnapshot): PublicPacingDto {
 	const pacingByClass = new Map(
 		snapshot.fiveHour.classes.map((pacing) => [pacing.classId, pacing]),
 	);
+	const budgetByClass = new Map(
+		snapshot.classes.map((budget) => [budget.classId, budget]),
+	);
+
+	// The UNION of both window's classes, not just the weekly ones. Provider
+	// eligibility differs per window — z.ai reports a 5-hour quota and no weekly
+	// one — so a weekly-only walk drops such a class entirely. That produced the
+	// worst possible payload: a pool-wide `destructive` verdict caused by a
+	// z.ai class that is being held by its 5-hour limit, beside an empty
+	// `classes` array with nothing to explain it or say when it lifts.
+	//
+	// Weekly-only order first, then any 5-hour-only class, so the common case
+	// keeps the ordering the pool already sorted.
+	const classIds = [
+		...snapshot.classes.map((budget) => budget.classId),
+		...snapshot.fiveHour.classes
+			.map((pacing) => pacing.classId)
+			.filter((classId) => !budgetByClass.has(classId)),
+	];
 
 	return {
 		schema: PUBLIC_PACING_SCHEMA,
 		generatedAt: new Date(snapshot.generatedAtMs).toISOString(),
 		bindingClassId: optionalIdentifier(snapshot.bindingClassId),
 		fiveHourOutlookTone: toPublicTone(snapshot.fiveHour.outlook.tone),
-		classes: snapshot.classes.map((budget) => {
-			const pacing = pacingByClass.get(budget.classId);
+		classes: classIds.map((classId) => {
+			const pacing = pacingByClass.get(classId);
+			const budget = budgetByClass.get(classId);
+			// A class with no weekly budget reports zero accounts ELIGIBLE for the
+			// weekly window, which is a measured fact about provider eligibility
+			// rather than a fabricated empty: no z.ai account has a weekly quota to
+			// report. `utilizationPct` and the burn stay null, as they must.
+			if (budget == null) {
+				return {
+					classId: identifier(classId),
+					label: text(pacing?.label ?? null),
+					utilizationPct: null,
+					leastUsedAccountId: null,
+					burnRatio: null,
+					burnTone: null,
+					outlookTone: toPublicTone("neutral"),
+					reportingCount: 0,
+					eligibleTotal: 0,
+					willRunOut: 0,
+					alreadySpent: 0,
+					resetsAt: null,
+					resetsAtAccountId: null,
+					singlePointOfFailure: false,
+					fiveHourRoom: pacing?.room ?? 0,
+					fiveHourRunningHot: pacing?.runningHot ?? 0,
+					fiveHourWaiting: pacing?.waiting ?? 0,
+					fiveHourUnavailable: pacing?.unavailable ?? 0,
+					fiveHourUnknown: pacing?.unknown ?? 0,
+					fiveHourUnread: pacing == null ? true : classIsUnread(pacing),
+					nextLiftAt: instant(pacing?.nextLiftMs),
+					nextLiftAccountId: optionalIdentifier(pacing?.nextLiftAccountId),
+				};
+			}
 			return {
 				classId: identifier(budget.classId),
 				label: text(budget.label),

@@ -1286,44 +1286,45 @@ function probePaceMargin(
 export const PACE_DEFICIT_PROBE_MIN = 0.5;
 
 /**
- * How much slower the pool would have to burn to stop running out inside the
- * horizon: the LARGEST probed multiplier (down to {@link
- * PACE_DEFICIT_PROBE_MIN}) at which the same pool scans beyond-horizon, or null
- * when none does.
+ * The least slowdown a reader can act on: the largest probed multiplier such
+ * that it AND EVERY PROBED MULTIPLIER BELOW IT scans beyond-horizon, or null
+ * when the floor itself still runs out.
  *
  * The mirror of {@link probePaceMargin}, and it exists for the same reason read
  * from the other side. That probe quantifies how close a "no run-out" is to
- * flipping finite; this one quantifies how far a finite runway is from flipping
- * back. Together they are one signed figure — how much load the pool can take,
- * positive or negative — and a reader deciding whether to add or shed work
- * needs the negative half most, because that is the half that arrives when
- * something has to change.
+ * flipping finite; this one says how much load has to come off a finite runway.
+ * Together they are one signed figure — how much this pool can take, positive
+ * or negative — and a reader deciding whether to add or shed work needs the
+ * negative half most, because that is the half that arrives when something has
+ * to change.
  *
- * Walks DOWNWARD from just under 1, and takes the FIRST hit, which is therefore
- * the largest qualifying multiplier: the least slowing-down that clears the
- * horizon. Reporting a smaller one would tell a reader to cut more load than
- * the model says is needed.
+ * WHY THE WHOLE TAIL AND NOT THE FIRST HIT. Returning the first clearing
+ * multiplier walking down would be the largest qualifying one, and it would be
+ * WRONG to publish, because "finite at pace m" is genuinely not monotone in m
+ * once reset credits are modeled — a fact this comment previously denied. The
+ * mechanism is the same one {@link probePaceMargin} documents, read downward: a
+ * credit revives a window when the dead span starts before the credit expires,
+ * and slowing the burn pushes that span LATER, so a slower pace can move the
+ * span past the expiry, lose the revival, and go finite again. A pool can
+ * therefore be safe at 0.71 and unsafe at 0.60.
  *
- * A GRID WALK from the top, deliberately not a bisection. {@link
- * probePaceMargin} documents a concrete pool where "finite at pace m" is not
- * monotone in m once reset credits are modeled, and nothing establishes that
- * the relation is better behaved below 1 than above it. The walk costs 50 pool
- * rebuilds either way — the budget a probe already has — so bisecting would
- * trade an unproven monotonicity assumption for no saving worth having.
+ * That makes the first hit a SAMPLED SAFE POINT rather than a threshold, and
+ * nobody can act on a sampled point: told to cut 29%, a reader cuts 35% and
+ * lands back in trouble. So the walk continues to the floor and reports only
+ * the contiguous safe tail, which supports the sentence a widget actually
+ * renders — "cut by at least this much".
  *
- * Note the credit mechanism that drives the upward case does NOT mirror
- * cleanly: lowering the pace pushes a dead span's start monotonically LATER, so
- * a banked credit that already fails to reach that span keeps failing at every
- * slower pace. The walk is not justified by a demonstrated downward flip, but
- * by there being no reason to assume one cannot exist.
+ * A GRID WALK, deliberately not a bisection, for that same non-monotonicity: a
+ * bisection cannot find the boundary of a region it assumes is contiguous.
  *
- * Cost is 50 pool rebuilds, and the budget is unchanged rather than doubled:
- * an outcome is finite or beyond-horizon and never both, so exactly one of the
- * two probes runs per scan.
+ * Cost is the same 50 pool rebuilds the margin probe has, and the budget is
+ * unchanged rather than doubled: an outcome is finite or beyond-horizon and
+ * never both, so exactly one of the two probes runs per scan. Walking the full
+ * grid rather than stopping early costs nothing against that ceiling.
  *
  * Null carries a MEANING and must not be rendered as zero — see the field doc
- * on `paceDeficit`. It says no pace in range clears the horizon, which is
- * strictly worse than any figure the probe could have returned.
+ * on `paceDeficit`. It says no pace in range clears the horizon and stays
+ * clear, which is strictly worse than any figure the probe could return.
  */
 function probePaceDeficit(
 	accounts: RunwayAccountInput[],
@@ -1337,14 +1338,16 @@ function probePaceDeficit(
 	const steps = Math.round(
 		(1 - PACE_DEFICIT_PROBE_MIN) / PACE_MARGIN_PRECISION,
 	);
-	for (let step = 1; step <= steps; step++) {
+	// Ascending from the floor, so the loop can stop at the first pace that runs
+	// out and everything it already accepted is known to be below that point.
+	let safest: number | null = null;
+	for (let step = steps; step >= 1; step--) {
 		// From the integer step, so accumulated float error cannot drift the grid.
 		const pace = 1 - step * PACE_MARGIN_PRECISION;
 		const { pooled } = buildPool(accounts, now, horizonEndMs, pace);
 		if (pooled.length === 0) return null;
-		if (firstAllOut(pooled, now, horizonEndMs) === null) {
-			return { multiplier: pace };
-		}
+		if (firstAllOut(pooled, now, horizonEndMs) !== null) break;
+		safest = pace;
 	}
-	return null;
+	return safest === null ? null : { multiplier: safest };
 }
