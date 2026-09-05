@@ -10,6 +10,7 @@ import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import type { AnyUsageData, UsageData } from "@clankermux/providers";
 import {
 	clearUsageRevisionAnchors,
+	clearWeeklyBurnSlopes,
 	getUsageRevisionAnchor,
 	getWeeklyBurnSlope,
 } from "@clankermux/proxy";
@@ -465,12 +466,16 @@ function makeSampler(opts: {
 	accounts: Account[];
 	cache: SamplerCache;
 	storedSnapshots?: () => UsageSnapshotSample[];
+	/** Re-read per call, for tests that change the roster between ticks. */
+	getAccounts?: () => Account[];
+	/** Awaited inside the history read, so a test can hold a tick open. */
+	beforeHistory?: () => Promise<void>;
 }): SamplerHarness {
 	const inserted: UsageSnapshotRow[] = [];
 	const insertedScoped: ScopedUsageSnapshotRow[] = [];
 	const queries: Array<{ accountIds: string[]; sinceMs: number }> = [];
 	const sampler = new UsageSnapshotSampler({
-		getAccounts: async () => opts.accounts,
+		getAccounts: async () => opts.getAccounts?.() ?? opts.accounts,
 		insertSnapshots: async (rows) => {
 			inserted.push(...rows);
 		},
@@ -479,6 +484,7 @@ function makeSampler(opts: {
 		},
 		getRecentSnapshots: async (accountIds, sinceMs) => {
 			queries.push({ accountIds, sinceMs });
+			await opts.beforeHistory?.();
 			return (opts.storedSnapshots?.() ?? []).filter(
 				(s) => s.sampledAt >= sinceMs,
 			);
@@ -859,6 +865,100 @@ describe("UsageSnapshotSampler weekly burn-slope feed", () => {
 		expect(q[0]?.accountIds).toEqual([id]);
 		expect(q[0]?.sinceMs).toBeGreaterThanOrEqual(now - 24 * HOUR_MS);
 		expect(q[0]?.sinceMs).toBeLessThanOrEqual(after - 24 * HOUR_MS);
+	});
+
+	it("prunes both per-account maps against the live roster each tick", async () => {
+		// Nothing else evicts either map: the sampler is a server-owned instance
+		// the HTTP delete handler cannot reach, and no account-removed hook
+		// exists. Left alone, a long-lived process accumulates one entry per
+		// removed account in both.
+		const now = Date.now();
+		const removed = slopeAccountId();
+		const kept = slopeAccountId();
+		const resetMs = now + 3 * 24 * HOUR_MS;
+		const series = (id: string) =>
+			risingSeries({
+				accountId: id,
+				base: now,
+				endsAgoMs: 0,
+				count: 5,
+				stepMs: 5 * MINUTE,
+				startPct: 40,
+				pctPerStep: 1,
+				resetMs,
+			});
+		let accounts = [acct(removed, "anthropic"), acct(kept, "anthropic")];
+		const h = makeSampler({
+			accounts: [],
+			cache: makeCache({}),
+			// Scoped to the roster, as the real account-keyed history query is.
+			storedSnapshots: () => accounts.flatMap((a) => series(a.id)),
+			getAccounts: () => accounts,
+		});
+
+		await h.sampler.refreshBurnSlopes();
+		expect(getWeeklyBurnSlope(removed, Date.now())).not.toBeNull();
+		expect(getWeeklyBurnSlope(kept, Date.now())).not.toBeNull();
+
+		accounts = [acct(kept, "anthropic")];
+		await h.sampler.refreshBurnSlopes();
+
+		expect(getWeeklyBurnSlope(removed, Date.now())).toBeNull();
+		expect(getWeeklyBurnSlope(kept, Date.now())).not.toBeNull();
+
+		// And the dedupe entry went with it: re-adding the account with the SAME
+		// newest sample refits rather than being skipped as unchanged history.
+		accounts = [acct(removed, "anthropic"), acct(kept, "anthropic")];
+		await h.sampler.refreshBurnSlopes();
+		expect(getWeeklyBurnSlope(removed, Date.now())).not.toBeNull();
+	});
+
+	it("reconciles a slope re-recorded by a tick that raced the delete", async () => {
+		// The handler's own clear is not enough: a tick already awaiting its
+		// history read when the DELETE lands re-records the slope AFTER the clear.
+		const now = Date.now();
+		const removed = slopeAccountId();
+		const resetMs = now + 3 * 24 * HOUR_MS;
+		let releaseHistory: (() => void) | null = null;
+		const historyHeld = new Promise<void>((resolve) => {
+			releaseHistory = resolve;
+		});
+		let accounts = [acct(removed, "anthropic")];
+		let holdNext = true;
+		const h = makeSampler({
+			accounts: [],
+			cache: makeCache({}),
+			storedSnapshots: () =>
+				risingSeries({
+					accountId: removed,
+					base: now,
+					endsAgoMs: 0,
+					count: 5,
+					stepMs: 5 * MINUTE,
+					startPct: 40,
+					pctPerStep: 1,
+					resetMs,
+				}),
+			getAccounts: () => accounts,
+			beforeHistory: async () => {
+				if (!holdNext) return;
+				holdNext = false;
+				await historyHeld;
+			},
+		});
+
+		const inFlight = h.sampler.refreshBurnSlopes();
+		// The DELETE lands mid-tick: the handler clears the store, then the held
+		// history read resolves and the fit writes the entry straight back.
+		accounts = [];
+		clearWeeklyBurnSlopes(removed);
+		(releaseHistory as unknown as () => void)();
+		await inFlight;
+		expect(getWeeklyBurnSlope(removed, Date.now())).not.toBeNull();
+
+		// The next tick reconciles from the roster and the entry is gone.
+		await h.sampler.refreshBurnSlopes();
+		expect(getWeeklyBurnSlope(removed, Date.now())).toBeNull();
 	});
 
 	it("goes evidence-stale when no new snapshot has landed for >15 minutes", async () => {

@@ -53,6 +53,7 @@ import {
 	clearPendingRotation,
 	clearProviderOverloadCooldown,
 	clearUsageRevisionAnchors,
+	clearWeeklyBurnSlopes,
 	consumeCodexResetCreditForAccount,
 	getForcedAccount,
 	getProviderOverloadKey,
@@ -1554,6 +1555,10 @@ export function createAccountRemoveHandler(dbOps: DatabaseOperations) {
 			clearAccountRefreshCache(accountId);
 			codexRateLimitResetCreditsCache.delete(accountId);
 			clearUsageRevisionAnchors(accountId);
+			// The fitted weekly burn slope, for the same reason: nothing else ever
+			// evicts an entry, so a deleted id would occupy one for the process's
+			// lifetime.
+			clearWeeklyBurnSlopes(accountId);
 			// Evict any warm session-cache slots owned by the removed account so
 			// the keepalive scheduler never tries to replay against a deleted id.
 			sessionCacheStore.evictAccount(accountId);

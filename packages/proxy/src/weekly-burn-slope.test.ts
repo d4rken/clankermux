@@ -1,7 +1,9 @@
 import { describe, expect, it } from "bun:test";
 import type { CapacitySignal } from "@clankermux/types";
 import {
+	clearWeeklyBurnSlopes,
 	getWeeklyBurnSlope,
+	pruneWeeklyBurnSlopes,
 	recordWeeklyBurnSlope,
 	resolveEffectiveWeeklySlope,
 	WEEKLY_SLOPE_MAX_AGE_MS,
@@ -43,6 +45,60 @@ describe("recordWeeklyBurnSlope / getWeeklyBurnSlope", () => {
 			slopePctPerHour: 1.13,
 			windowResetMs: WEEKLY_RESET,
 		});
+	});
+
+	it("drops one account's entry on request", () => {
+		const kept = uniqueId("kept");
+		const dropped = uniqueId("dropped");
+		const record = {
+			slopePctPerHour: 1.13,
+			lowConfidence: false,
+			observedAt: NOW - 60_000,
+			windowResetMs: WEEKLY_RESET,
+		};
+		recordWeeklyBurnSlope(kept, record);
+		recordWeeklyBurnSlope(dropped, record);
+
+		clearWeeklyBurnSlopes(dropped);
+
+		expect(getWeeklyBurnSlope(dropped, NOW)).toBeNull();
+		expect(getWeeklyBurnSlope(kept, NOW)).not.toBeNull();
+	});
+
+	it("drops every entry when no account is named", () => {
+		const a = uniqueId("all-a");
+		const b = uniqueId("all-b");
+		const record = {
+			slopePctPerHour: 1.13,
+			lowConfidence: false,
+			observedAt: NOW - 60_000,
+			windowResetMs: WEEKLY_RESET,
+		};
+		recordWeeklyBurnSlope(a, record);
+		recordWeeklyBurnSlope(b, record);
+
+		clearWeeklyBurnSlopes();
+
+		expect(getWeeklyBurnSlope(a, NOW)).toBeNull();
+		expect(getWeeklyBurnSlope(b, NOW)).toBeNull();
+	});
+
+	it("prunes everything the live roster no longer names", () => {
+		const live = uniqueId("live");
+		const gone = uniqueId("gone");
+		const record = {
+			slopePctPerHour: 1.13,
+			lowConfidence: false,
+			observedAt: NOW - 60_000,
+			windowResetMs: WEEKLY_RESET,
+		};
+		recordWeeklyBurnSlope(live, record);
+		recordWeeklyBurnSlope(gone, record);
+
+		pruneWeeklyBurnSlopes(new Set([live]));
+
+		expect(getWeeklyBurnSlope(live, NOW)).not.toBeNull();
+		expect(getWeeklyBurnSlope(gone, NOW)).toBeNull();
 	});
 
 	it("returns null for an account that was never recorded", () => {
