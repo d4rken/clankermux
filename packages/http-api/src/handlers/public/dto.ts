@@ -1575,6 +1575,15 @@ export const streamHelpers = {
  * many accounts stand behind a workload, not which ones.
  */
 export interface PublicWorkloadHeadroomRowDto {
+	/** Primary planning interval. Existing top-level fields retain the long horizon. */
+	nextReset: {
+		resetsAt: string | null;
+		outcomeKind: PublicRunwayKind;
+		exhaustsAt: string | null;
+		headroomPct: number | null;
+		headroomDirection: PublicHeadroomDirection | null;
+		projectionBasis: PublicProjectionBasisDto | null;
+	} | null;
 	/** `"class"` (Claude, GPT) or `"family"` (a scoped model family). */
 	dimensionKind: PublicWorkloadDimensionDto;
 	/** Servable class id or model family id. Join key, never truncated. */
@@ -1731,6 +1740,23 @@ export function toPublicWorkloadHeadroomDto(snapshot: {
 		generatedAt: new Date(snapshot.generatedAtMs).toISOString(),
 		horizonMs: snapshot.horizonMs,
 		rows: snapshot.rows.map((row) => ({
+			nextReset: row.nextReset
+				? {
+						resetsAt: instant(row.nextReset.resetsAtMs),
+						outcomeKind: toPublicRunwayKind(row.nextReset.outcome.kind),
+						exhaustsAt:
+							row.nextReset.outcome.kind === "runway"
+								? instant(row.nextReset.outcome.exhaustsAtMs)
+								: null,
+						headroomPct: row.nextReset.headroom?.pct ?? null,
+						headroomDirection: row.nextReset.headroom
+							? toPublicHeadroomDirection(row.nextReset.headroom.direction)
+							: null,
+						projectionBasis: toPublicProjectionBasis(
+							row.nextReset.projectionBasis,
+						),
+					}
+				: null,
 			dimensionKind: toPublicWorkloadDimension(row.dimensionKind),
 			dimensionId: identifier(row.dimensionId),
 			label: text(row.label),

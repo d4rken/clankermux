@@ -1462,7 +1462,26 @@ export class CodexProvider extends BaseProvider {
 			}));
 		}
 
-		const requestedEffort = body.reasoning?.effort;
+		// Explicit Responses effort takes precedence on mixed-format requests.
+		const thinking = body.thinking as
+			| { type?: string; budget_tokens?: number }
+			| undefined;
+		const outputConfig = body.output_config as { effort?: string } | undefined;
+		const requestedEffort =
+			body.reasoning?.effort ??
+			(thinking?.type === "disabled"
+				? "none"
+				: (outputConfig?.effort ??
+					(thinking?.type === "enabled" &&
+					typeof thinking.budget_tokens === "number" &&
+					Number.isFinite(thinking.budget_tokens)
+						? // Approximate numeric budgets by effort; target support is clamped below.
+							thinking.budget_tokens <= 4096
+							? "low"
+							: thinking.budget_tokens <= 16384
+								? "medium"
+								: "high"
+						: undefined)));
 		const targetsChatGptBackend = targetsChatGptCodexBackend(account);
 		// `none` is a value the ChatGPT/Codex backend ACCEPTS, but the resolver has
 		// no notion of it: it THROWS a ValidationError for anything outside
@@ -1487,10 +1506,13 @@ export class CodexProvider extends BaseProvider {
 			targetsChatGptBackend &&
 			(requestedEffort === "none" || requestedEffort === "ultra")
 				? { effort: requestedEffort, downgrades: [] }
-				: resolveReasoningEffort(requestedEffort, {
-						sourceModel: body.model,
-						targetModel: model,
-					});
+				: resolveReasoningEffort(
+						requestedEffort === "none" ? "minimal" : requestedEffort,
+						{
+							sourceModel: body.model,
+							targetModel: model,
+						},
+					);
 		if (reasoningResolution.downgrades.length > 0) {
 			for (const downgrade of reasoningResolution.downgrades) {
 				log.warn(

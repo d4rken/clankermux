@@ -12,8 +12,7 @@ import type { SlimUsageSummary } from "./request-recorder";
 /**
  * usage-collector — main-thread, per-request usage/cost computer.
  *
- * Computes per-request usage/cost inline (no worker thread) and needs neither
- * tiktoken nor parsing of high-frequency content deltas:
+ * Computes per-request usage/cost inline (no worker thread) without a tokenizer:
  *
  *   - Streaming: `feedChunk` is called for every response chunk. It always
  *     stamps timestamps + accumulates a byte count, then decodes the chunk with
@@ -22,7 +21,7 @@ import type { SlimUsageSummary } from "./request-recorder";
  *     `lineBuffer`. Only COMPLETE lines (terminated by `\n`) are processed; the
  *     trailing partial line is retained for the next chunk so an `event:`/`data:`
  *     line split across chunk boundaries is never lost. Parsing of a `data:`
- *     payload runs only when it could carry usage (the substring guard). The
+ *     payload runs when it could carry usage or generated content. The
  *     `event:`/`data:` pairing is tracked via `currentEvent` carried across
  *     chunks. Two disjoint SSE vocabularies are dispatched by event name:
  *       - Anthropic (`message_*`): `message_start` supplies input/cache/model;
@@ -34,14 +33,13 @@ import type { SlimUsageSummary } from "./request-recorder";
  *         authoritative usage (input/output + cached-token details), and
  *         `response.completed` alone additionally sets `sawMessageStop`,
  *         since only it asserts a clean ending — `.incomplete` / `.failed` are
- *         recorded (kind + usage) without claiming one. All other `response.*`
- *         events are no-ops.
- *     `content_block_delta`/`text_delta`/`response.output_text.delta` are
- *     NEVER parsed for tokens.
+ *         recorded (kind + usage) without claiming one. Content deltas also feed the fallback estimate.
+ *     `content_block_delta` and Responses content deltas supply a visible-content
+ *     estimate when authoritative usage is missing; framing is never counted.
  *
  *   - Non-stream: `feedNonStreamBody` parses the (capped) JSON body once. A
- *     `usage` object is authoritative; otherwise the body length seeds the
- *     bytes/4 fallback.
+ *     `usage` object is authoritative; otherwise generated content seeds the
+ *     content-chars/4 fallback.
  *
  *   - `finalizeUsage` first flushes any complete-but-unterminated buffered line,
  *     then resolves the final output-token count via the precedence rule below,
@@ -55,12 +53,12 @@ import type { SlimUsageSummary } from "./request-recorder";
  * non-stream `usage` object — never by `message_start` (whose `output_tokens`
  * is a placeholder 0/1). If the provider reported a count AND the stream ended
  * cleanly, we trust it (even if 0).
- * Otherwise we approximate from streamed bytes (ceil(bytes/4)) and flag it.
+ * Otherwise we approximate from visible generated content (ceil(content-chars/4)) and flag it.
  *
  * R5 (non-clean endings): on a disconnect/timeout/error the provider may have
  * reported only a stale partial `output_tokens` before the stream was cut. When
  * `endedCleanly` is false and the provider DID report, finalize takes
- * `max(providerCount, ceil(bytes/4))` and flags `outputApproximate`, so a
+ * `max(providerCount, ceil(content-chars/4))` and flags `outputApproximate`, so a
  * truncated stream that kept emitting text after the last `message_delta` isn't
  * undercounted.
  */
@@ -83,8 +81,10 @@ export interface UsageState {
 	 * (whose `output_tokens` is a placeholder 0/1).
 	 */
 	providerReportedOutput: boolean;
-	/** Total response bytes seen (drives the bytes/4 output fallback). */
+	/** Total response bytes seen (transport diagnostics). */
 	streamedBytes: number;
+	/** Visible generated content only; excludes SSE framing and heartbeats. */
+	generatedChars: number;
 	firstChunkTs: number | undefined;
 	lastChunkTs: number | undefined;
 	/**
@@ -198,6 +198,7 @@ export function createUsageState(): UsageState {
 		providerFinalOutputTokens: undefined,
 		providerReportedOutput: false,
 		streamedBytes: 0,
+		generatedChars: 0,
 		firstChunkTs: undefined,
 		lastChunkTs: undefined,
 		decoder: new TextDecoder(),
@@ -435,7 +436,7 @@ function applySseData(
 	// native Codex stream that stopped early (`response.incomplete`, whether
 	// from an output ceiling, a content filter, or a reason that does not exist
 	// yet) or died mid-generation (`response.failed`) left
-	// `providerReportedOutput` false: finalize then fell back to the bytes/4
+	// `providerReportedOutput` false: finalize then fell back to the content-chars/4
 	// estimate, and the request row persisted with invented token counts and a
 	// cost derived from them, despite the backend having reported exact numbers
 	// in the event being ignored.
@@ -507,6 +508,92 @@ function applySseData(
 	}
 }
 
+/** Count content deltas without retaining the generated text. Hidden reasoning
+ * cannot be reconstructed; missing provider usage always remains approximate. */
+function countGeneratedContent(
+	obj: Record<string, unknown>,
+	event: string,
+): number {
+	const kind = typeof obj.type === "string" ? obj.type : event;
+	const delta = obj.delta;
+	if (kind === "content_block_delta" && delta && typeof delta === "object") {
+		const d = delta as Record<string, unknown>;
+		const value =
+			d.type === "text_delta"
+				? d.text
+				: d.type === "thinking_delta"
+					? d.thinking
+					: d.type === "input_json_delta"
+						? d.partial_json
+						: null;
+		return typeof value === "string" ? value.length : 0;
+	}
+	if (
+		[
+			"response.output_text.delta",
+			"response.function_call_arguments.delta",
+			"response.reasoning_text.delta",
+			"response.reasoning_summary_text.delta",
+			"response.refusal.delta",
+		].includes(kind)
+	) {
+		return typeof delta === "string" ? delta.length : 0;
+	}
+	if (
+		kind === "content_block_start" &&
+		obj.content_block &&
+		typeof obj.content_block === "object"
+	) {
+		return countContentBlock(obj.content_block as Record<string, unknown>);
+	}
+	return 0;
+}
+
+function countContentBlock(block: Record<string, unknown>): number {
+	if (block.type === "text" || block.type === "output_text")
+		return typeof block.text === "string" ? block.text.length : 0;
+	if (block.type === "thinking")
+		return typeof block.thinking === "string" ? block.thinking.length : 0;
+	if (
+		block.type === "tool_use" &&
+		block.input &&
+		typeof block.input === "object" &&
+		Object.keys(block.input).length
+	)
+		return JSON.stringify(block.input).length;
+	return 0;
+}
+
+/** Native Responses output is an array of messages, reasoning, and tool calls. */
+function countResponseOutput(output: unknown): number {
+	if (!Array.isArray(output)) return 0;
+	return output.reduce((total: number, item: unknown) => {
+		if (!item || typeof item !== "object") return total;
+		const block = item as Record<string, unknown>;
+		if (block.type === "function_call")
+			return (
+				total +
+				(typeof block.arguments === "string" ? block.arguments.length : 0)
+			);
+		const content = block.type === "reasoning" ? block.summary : block.content;
+		if (!Array.isArray(content)) return total;
+		return (
+			total +
+			content.reduce((n: number, part: unknown) => {
+				if (!part || typeof part !== "object") return n;
+				const value = part as Record<string, unknown>;
+				if (value.type === "summary_text")
+					return n + (typeof value.text === "string" ? value.text.length : 0);
+				if (value.type === "refusal")
+					return (
+						n + (typeof value.refusal === "string" ? value.refusal.length : 0)
+					);
+				return n + countContentBlock(value);
+			}, 0)
+		);
+	}, 0);
+}
+
 /**
  * Process one COMPLETE (newline-stripped) SSE line: update `currentEvent` for
  * `event:` lines; for `data:` lines, parse JSON only when the substring guard
@@ -532,12 +619,18 @@ function processLine(state: UsageState, rawLine: string, now: number): void {
 	// declared itself finished as having no terminal at all.
 	if (
 		!dataMayCarryUsage(parsed.data) &&
+		!parsed.data.includes("delta") &&
+		!parsed.data.includes("content_block") &&
 		responsesTerminalKindOf(state.currentEvent) === null
 	) {
 		return;
 	}
 	try {
 		const obj = JSON.parse(parsed.data) as SseParsed;
+		state.generatedChars += countGeneratedContent(
+			obj as unknown as Record<string, unknown>,
+			state.currentEvent ?? "",
+		);
 		applySseData(obj, state.currentEvent ?? "", state, now);
 	} catch {
 		// Silent — non-JSON or still-partial data line.
@@ -804,12 +897,27 @@ export function classifyNativeResponsesEnd(
 
 /**
  * Feed a non-stream (capped) response body. A `usage` object is authoritative
- * (sets providerReportedOutput); otherwise the body length seeds the bytes/4
+ * (sets providerReportedOutput); otherwise generated content seeds the content-chars/4
  * output fallback.
  */
 export function feedNonStreamBody(state: UsageState, bodyText: string): void {
 	try {
 		const json = JSON.parse(bodyText) as SseParsed;
+		const content = (json as unknown as { content?: unknown }).content;
+		if (typeof content === "string") state.generatedChars = content.length;
+		else if (Array.isArray(content))
+			state.generatedChars = content.reduce(
+				(n: number, block: unknown) =>
+					n +
+					(block && typeof block === "object"
+						? countContentBlock(block as Record<string, unknown>)
+						: 0),
+				0,
+			);
+		else
+			state.generatedChars = countResponseOutput(
+				(json as unknown as { output?: unknown }).output,
+			);
 		const usage = json.usage;
 		if (usage) {
 			if (json.model) state.model = json.model;
@@ -826,9 +934,9 @@ export function feedNonStreamBody(state: UsageState, bodyText: string): void {
 		if (json.model) state.model = json.model;
 		applyStopReason(state, json.stop_reason, json.stop_details, Date.now());
 	} catch {
-		// Non-JSON body — fall through to the byte fallback.
+		// Unknown body shape: no generated content can be identified.
 	}
-	// No usage object → seed the bytes/4 fallback from the body length.
+	// Transport size is diagnostic only; never bill the envelope as output.
 	state.streamedBytes = bodyText.length;
 }
 
@@ -874,7 +982,7 @@ export interface FinalizeOpts {
 	 * successful/complete transport ('success', or a `message_stop` was seen),
 	 * `false` for a disconnect/timeout/error. When the provider reported an
 	 * output count but the stream did NOT end cleanly, finalize takes
-	 * `max(providerCount, ceil(bytes/4))` and flags the result approximate so a
+	 * `max(providerCount, ceil(content-chars/4))` and flags the result approximate so a
 	 * truncated stream that kept emitting text after the last `message_delta`
 	 * isn't undercounted. Defaults to `true` (back-compat: trust the provider).
 	 */
@@ -901,7 +1009,7 @@ export type FinalizedUsage = SlimUsageSummary & { outputApproximate?: boolean };
 /**
  * Resolve final usage. Returns a `SlimUsageSummary` (without `requestId` — the
  * caller attaches it via `attachUsageSummary(requestId, summary)`), plus an
- * `outputApproximate` flag set when the output count came from the bytes/4
+ * `outputApproximate` flag set when the output count came from the content-chars/4
  * fallback rather than the provider.
  */
 export async function finalizeUsage(
@@ -926,8 +1034,8 @@ export async function finalizeUsage(
 	// PRECEDENCE + R5: trust the provider's count when it reported one AND the
 	// stream ended cleanly (even a 0 is authoritative then). On a non-clean end
 	// the reported count may be stale/partial, so take the larger of it and the
-	// bytes/4 estimate. With no provider count at all, always estimate.
-	const byteEstimate = Math.ceil(state.streamedBytes / 4);
+	// content-chars/4 estimate. With no provider count at all, always estimate.
+	const contentEstimate = Math.ceil(state.generatedChars / 4);
 	let outputApproximate = false;
 	let finalOutput: number;
 	if (state.providerReportedOutput) {
@@ -935,11 +1043,11 @@ export async function finalizeUsage(
 		if (endedCleanly) {
 			finalOutput = reported;
 		} else {
-			finalOutput = Math.max(reported, byteEstimate);
+			finalOutput = Math.max(reported, contentEstimate);
 			outputApproximate = true;
 		}
 	} else {
-		finalOutput = byteEstimate;
+		finalOutput = contentEstimate;
 		outputApproximate = true;
 	}
 

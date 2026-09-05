@@ -133,4 +133,6 @@ export interface LoadBalancingStrategy {
 	 * of pins removed. Strategies without affinity (e.g. LeastUsed) omit this.
 	 */
 	clearAffinityForAccount?(accountId: string): number;
+	/** Rebind a conversation after a durable request-specific exclusion. */
+	reassignAffinity?(meta: RequestMeta, account: Account): void;
 }

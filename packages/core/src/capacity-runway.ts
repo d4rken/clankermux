@@ -133,8 +133,8 @@ export interface WindowExhaustion {
 	/** Projected 100% instant, or null when not projected to exhaust. */
 	exhaustsAtMs: number | null;
 	/**
-	 * True on the lifetime-average path unless the caller declared
-	 * `lifetimeConfidence: "full"` for that window. Callers cap severity on THIS,
+	 * True on the lifetime-average path and whenever the window or burn anchor
+	 * has less than one hour of evidence. Callers cap severity on THIS,
 	 * not on which function ran, so the "the fallback projection never renders
 	 * red" rule survives the consolidation.
 	 */
@@ -148,9 +148,9 @@ export interface WindowExhaustion {
 }
 
 /**
- * Post-anchor evidence span below which a re-anchored FULL-confidence estimate
- * stays amber-capped. Minutes after a gift reset the anchored slope is built on
- * a couple of samples; the arithmetic is corrected immediately, but a red
+ * Evidence span after a window start or burn anchor below which a full-confidence
+ * estimate stays amber-capped. Minutes after a gift reset the slope is built
+ * on a couple of samples; the arithmetic is corrected immediately, but a red
  * rendered on that little evidence would be noise. One hour ≈ 30 sampler ticks.
  * Inline named constant — NO env var / feature gate.
  */
@@ -219,29 +219,10 @@ export function estimateWindowExhaustion(
 	if (resetsAtMs <= now) return NO_EVIDENCE;
 	if (windowStartMs >= resetsAtMs) return NO_EVIDENCE;
 
-	if (isUsablePrediction(prediction, resetsAtMs)) {
-		const slope = Math.max(0, prediction.slopePerHour);
-		return {
-			source: "regression",
-			slopePctPerHour: slope,
-			exhaustsAtMs: slope > 0 ? prediction.etaExhaustMs : null,
-			lowConfidence: false,
-		};
-	}
-
-	if (pct <= 0) {
-		return {
-			source: "no-usage",
-			slopePctPerHour: null,
-			exhaustsAtMs: null,
-			lowConfidence: false,
-		};
-	}
-
 	// A valid burn anchor replaces the structural origin on BOTH lifetime paths
 	// below: elapsed time and consumed percentage are measured from the last
-	// mid-window revision instead of from `windowStartMs` / 0%. Resolved once,
-	// here, so the two paths cannot disagree about whether it applies.
+	// mid-window revision instead of from `windowStartMs` / 0%. Resolve once
+	// so regression confidence and lifetime estimates agree.
 	//
 	// Beyond the window-identity guards, the anchor applies only to a reading
 	// KNOWN to have been observed at/after it: a stale reading from BEFORE the
@@ -257,6 +238,27 @@ export function estimateWindowExhaustion(
 		observedAtMs >= windowAnchor.anchorMs
 			? windowAnchor
 			: null;
+
+	if (isUsablePrediction(prediction, resetsAtMs)) {
+		const slope = Math.max(0, prediction.slopePerHour);
+		return {
+			source: "regression",
+			slopePctPerHour: slope,
+			exhaustsAtMs: slope > 0 ? prediction.etaExhaustMs : null,
+			lowConfidence:
+				(observedAtMs ?? now) - (activeAnchor?.anchorMs ?? windowStartMs) <
+				ANCHOR_FULL_CONFIDENCE_MIN_SPAN_MS,
+		};
+	}
+
+	if (pct <= 0) {
+		return {
+			source: "no-usage",
+			slopePctPerHour: null,
+			exhaustsAtMs: null,
+			lowConfidence: false,
+		};
+	}
 
 	// Full confidence is earned by the pair (policy AND observation time), never
 	// by the policy alone: without an instant to anchor to, the only estimate
@@ -302,7 +304,7 @@ export function estimateWindowExhaustion(
 			source: "lifetime-primary",
 			slopePctPerHour: (pct / observedElapsed) * HOUR_MS,
 			exhaustsAtMs: observedAtMs + ((100 - pct) / pct) * observedElapsed,
-			lowConfidence: false,
+			lowConfidence: observedElapsed < ANCHOR_FULL_CONFIDENCE_MIN_SPAN_MS,
 		};
 	}
 

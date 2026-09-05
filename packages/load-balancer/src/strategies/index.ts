@@ -341,6 +341,19 @@ export class SessionStrategy implements LoadBalancingStrategy {
 		return cleared;
 	}
 
+	reassignAffinity(meta: RequestMeta, account: Account): void {
+		if (meta.routing?.strategy !== "session" || !this.getAffinityKey(meta))
+			return;
+		const previousAccountId =
+			meta.routing.heldAccountId ?? meta.routing.selectedAccountId;
+		this.resetSessionIfExpired(account);
+		this.rememberAffinity(meta, account, Date.now());
+		meta.routing.decision = "affinity_reassigned";
+		meta.routing.previousAccountId = previousAccountId;
+		meta.routing.selectedAccountId = account.id;
+		meta.routing.heldAccountId = account.id;
+	}
+
 	private pruneAffinity(now: number): void {
 		const staleBefore = now - this.sessionDurationMs;
 		// The map is maintained in least-recently-used order: recordAffinity()

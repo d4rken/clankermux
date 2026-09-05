@@ -2027,3 +2027,57 @@ describe("computeCapacityRunwayBand", () => {
 		);
 	});
 });
+
+describe("confidence after window starts and banked resets", () => {
+	for (const regression of [false, true]) {
+		it(`requires one hour of evidence for ${regression ? "regression" : "lifetime"} estimates`, () => {
+			for (const elapsed of [10 * 60_000, HOUR]) {
+				const resetsAtMs = NOW - elapsed + 7 * DAY;
+				const result = estimateWindowExhaustion(
+					{
+						utilizationPct: 2,
+						resetsAtMs,
+						windowStartMs: NOW - elapsed,
+						lifetimeConfidence: "full",
+						observedAtMs: NOW,
+						prediction: regression
+							? prediction({ resetsAtMs, etaExhaustMs: NOW + HOUR })
+							: null,
+					},
+					NOW,
+				);
+				expect(result.lowConfidence).toBe(elapsed < HOUR);
+			}
+		});
+	}
+	it("uses only an applicable burn anchor for regression confidence", () => {
+		const resetsAtMs = NOW + 2 * DAY;
+		const input = {
+			utilizationPct: 2,
+			resetsAtMs,
+			windowStartMs: NOW - 5 * DAY,
+			observedAtMs: NOW,
+			prediction: prediction({ resetsAtMs, etaExhaustMs: NOW + HOUR }),
+		};
+		const anchor = {
+			anchorMs: NOW - 10 * 60_000,
+			anchorPct: 0,
+			windowResetMs: resetsAtMs,
+		};
+		expect(
+			estimateWindowExhaustion({ ...input, anchor }, NOW).lowConfidence,
+		).toBe(true);
+		expect(
+			estimateWindowExhaustion(
+				{ ...input, anchor: { ...anchor, windowResetMs: resetsAtMs - DAY } },
+				NOW,
+			).lowConfidence,
+		).toBe(false);
+		expect(
+			estimateWindowExhaustion(
+				{ ...input, anchor: { ...anchor, anchorMs: NOW + HOUR } },
+				NOW,
+			).lowConfidence,
+		).toBe(false);
+	});
+});

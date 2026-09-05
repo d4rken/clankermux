@@ -140,7 +140,7 @@ describe("usage-collector", () => {
 		});
 	});
 
-	describe("precedence: provider-reported vs byte fallback", () => {
+	describe("precedence: provider-reported vs content fallback", () => {
 		it("message_start output_tokens:0 then message_delta N → final = N (not 0)", async () => {
 			const state = createUsageState();
 			feedChunk(
@@ -177,7 +177,7 @@ describe("usage-collector", () => {
 			expect(summary.outputApproximate).toBeUndefined();
 		});
 
-		it("provider never reports output → fallback ceil(bytes/4), outputApproximate=true", async () => {
+		it("provider never reports output → fallback from generated content, outputApproximate=true", async () => {
 			const state = createUsageState();
 			feedChunk(
 				state,
@@ -198,7 +198,7 @@ describe("usage-collector", () => {
 			feedChunk(state, a, 1100);
 			expect(state.providerReportedOutput).toBe(false);
 
-			const expectedBytes = state.streamedBytes;
+			const expectedChars = state.generatedChars;
 			const cost = fakeCost();
 			const summary = await finalizeUsage(
 				state,
@@ -206,7 +206,7 @@ describe("usage-collector", () => {
 				{ estimateCostUSD: cost.fn },
 			);
 			expect(summary.outputApproximate).toBe(true);
-			expect(summary.usage.outputTokens).toBe(Math.ceil(expectedBytes / 4));
+			expect(summary.usage.outputTokens).toBe(Math.ceil(expectedChars / 4));
 		});
 	});
 
@@ -544,7 +544,7 @@ describe("usage-collector", () => {
 			expect(summary.outputApproximate).toBeUndefined();
 		});
 
-		it("falls back to bytes/4 when the body has no usage object", async () => {
+		it("does not count an unrecognized JSON envelope as generated output", async () => {
 			const state = createUsageState();
 			const body = JSON.stringify({ model: "claude-opus-4-8", foo: "bar" });
 			feedNonStreamBody(state, body);
@@ -558,7 +558,7 @@ describe("usage-collector", () => {
 				{ estimateCostUSD: cost.fn },
 			);
 			expect(summary.outputApproximate).toBe(true);
-			expect(summary.usage.outputTokens).toBe(Math.ceil(body.length / 4));
+			expect(summary.usage.outputTokens).toBe(0);
 		});
 	});
 
@@ -949,7 +949,7 @@ describe("usage-collector", () => {
 			});
 		}
 
-		it("computes totals from response.completed usage — NOT the bytes/4 estimate", async () => {
+		it("computes totals from response.completed usage — NOT the content-chars/4 estimate", async () => {
 			const state = createUsageState();
 			feedChunk(state, codexCreated(), 1000);
 			feedChunk(state, codexTextDelta("Hello"), 1100);
@@ -992,7 +992,7 @@ describe("usage-collector", () => {
 			expect(summary.usage.cacheCreationInputTokens).toBe(64);
 			// inputTokens (93) + cacheRead (1024) reconstructs the 1117 total.
 			expect(summary.usage.totalTokens).toBe(93 + 1024 + 64 + 215);
-			// The provider reported — the bytes/4 fallback must NOT have been used.
+			// The provider reported — the content-chars/4 fallback must NOT have been used.
 			expect(summary.outputApproximate).toBeUndefined();
 			expect(summary.usage.outputTokens).not.toBe(
 				Math.ceil(state.streamedBytes / 4),
@@ -1153,7 +1153,7 @@ describe("usage-collector", () => {
 		it.each([
 			"response.incomplete",
 			"response.failed",
-		])("%s reports its usage instead of falling back to bytes/4", async (terminal) => {
+		])("%s reports its usage instead of falling back to content-chars/4", async (terminal) => {
 			const state = createUsageState();
 			feedChunk(state, codexCreated(), 1000);
 			feedChunk(state, codexTextDelta("x".repeat(400)), 1100);
@@ -1267,7 +1267,7 @@ describe("usage-collector", () => {
 			expect(state.sawMessageStop).toBe(first === "response.completed");
 		});
 
-		it("usage-less Codex stream falls back to bytes/4 as today", async () => {
+		it("usage-less Codex stream estimates only generated content", async () => {
 			const state = createUsageState();
 			feedChunk(state, codexCreated(), 1000);
 			feedChunk(state, codexTextDelta("x".repeat(400)), 1100);
@@ -1275,7 +1275,7 @@ describe("usage-collector", () => {
 			feedChunk(state, codexCompleted(), 1200);
 			expect(state.providerReportedOutput).toBe(false);
 
-			const expectedBytes = state.streamedBytes;
+			const expectedChars = state.generatedChars;
 			const cost = fakeCost();
 			const summary = await finalizeUsage(
 				state,
@@ -1283,7 +1283,7 @@ describe("usage-collector", () => {
 				{ estimateCostUSD: cost.fn },
 			);
 			expect(summary.outputApproximate).toBe(true);
-			expect(summary.usage.outputTokens).toBe(Math.ceil(expectedBytes / 4));
+			expect(summary.usage.outputTokens).toBe(Math.ceil(expectedChars / 4));
 		});
 
 		it("Anthropic stream regression: behavior is unchanged with the Codex vocabulary present", async () => {
@@ -1362,7 +1362,7 @@ describe("usage-collector", () => {
 				}),
 				1100,
 			);
-			// Stream a lot of bytes so ceil(bytes/4) would dwarf the provider count
+			// Stream enough generated text so ceil(content-chars/4) would dwarf the provider count
 			// IF we wrongly took the max on a clean end.
 			feedChunk(
 				state,
@@ -1387,7 +1387,7 @@ describe("usage-collector", () => {
 			expect(summary.outputApproximate).toBeUndefined();
 		});
 
-		it("truncated end uses max(provider, ceil(bytes/4)) and flags approximate", async () => {
+		it("truncated end uses max(provider, ceil(content-chars/4)) and flags approximate", async () => {
 			const state = createUsageState();
 			feedChunk(
 				state,
@@ -1410,7 +1410,7 @@ describe("usage-collector", () => {
 				1100,
 			);
 			// ...then lots more text streamed before the connection dropped (no final
-			// message_delta). ceil(bytes/4) should exceed the stale provider count.
+			// message_delta). ceil(content-chars/4) should exceed the stale provider count.
 			feedChunk(
 				state,
 				sse("content_block_delta", {
@@ -1419,7 +1419,7 @@ describe("usage-collector", () => {
 				}),
 				1200,
 			);
-			const expectedEstimate = Math.ceil(state.streamedBytes / 4);
+			const expectedEstimate = 1000; // 4000 generated characters; framing is excluded.
 			const cost = fakeCost();
 			const summary = await finalizeUsage(
 				state,
@@ -1480,7 +1480,7 @@ describe("usage-collector", () => {
 			// protocol — nothing billable follows it — so the backend's own numbers
 			// are final even though the ending was not clean. Keying `endedCleanly`
 			// on the transport verdict instead made finalize take
-			// max(exact, bytes/4) over every raw SSE frame, inflating counts the
+			// max(exact, content-chars/4) over every raw SSE frame, inflating counts the
 			// backend had already reported precisely.
 			const state = createUsageState();
 			feedChunk(
@@ -1525,12 +1525,12 @@ describe("usage-collector", () => {
 				},
 				{ estimateCostUSD: fakeCost().fn },
 			);
-			// Exact, not max(9, ceil(bytes/4)) which would be in the hundreds.
+			// Exact, not max(9, ceil(content-chars/4)) which would be in the hundreds.
 			expect(summary.usage.outputTokens).toBe(9);
 			expect(summary.outputApproximate).toBeUndefined();
 		});
 
-		it("an Anthropic stream cut after the last message_delta still takes the bytes/4 floor", async () => {
+		it("an Anthropic stream cut after the last message_delta still takes the content-chars/4 floor", async () => {
 			// The R5 anti-undercount case, pinned because the usage-trust key in
 			// response-handler must NOT be `providerReportedOutput` alone: every
 			// Anthropic `message_delta` sets that flag, and a stream cut afterwards
@@ -1586,7 +1586,7 @@ describe("usage-collector", () => {
 			// of the HTTP success/error outcome, which is recorded separately on the
 			// row. The bytes streamed dwarf the provider count; if onEnd wrongly
 			// reported endedCleanly=false (the old `success || sawMessageStop`
-			// behaviour on a non-2xx EOF), we'd take max(provider, bytes/4) instead.
+			// behaviour on a non-2xx EOF), we'd take max(provider, content-chars/4) instead.
 			const state = createUsageState();
 			feedChunk(
 				state,
@@ -1632,7 +1632,7 @@ describe("usage-collector", () => {
 			expect(summary.outputApproximate).toBeUndefined();
 		});
 
-		it("disconnect/onError mid-stream (endedCleanly=false) still uses the max(provider, bytes/4) fallback", async () => {
+		it("disconnect/onError mid-stream (endedCleanly=false) still uses the max(provider, content-chars/4) fallback", async () => {
 			// The truncation path: onError passes endedCleanly=false so a cut stream
 			// that kept emitting text after the last message_delta isn't undercounted.
 			const state = createUsageState();
@@ -1663,7 +1663,7 @@ describe("usage-collector", () => {
 				}),
 				1200,
 			);
-			const expectedEstimate = Math.ceil(state.streamedBytes / 4);
+			const expectedEstimate = 1000; // 4000 generated characters; framing is excluded.
 			expect(expectedEstimate).toBeGreaterThan(12);
 			const cost = fakeCost();
 			const summary = await finalizeUsage(
@@ -1951,4 +1951,91 @@ describe("usage-collector", () => {
 			expect(refusalFallbackRegistry.size()).toBe(0);
 		});
 	});
+});
+
+describe("content-only token estimates", () => {
+	it("does not turn heartbeat framing into output tokens", async () => {
+		const state = createUsageState();
+		feedChunk(
+			state,
+			new TextEncoder().encode(
+				'event: ping\ndata: {"type":"ping"}\n\n'.repeat(100),
+			),
+			1,
+		);
+		const summary = await finalizeUsage(state, {
+			providerName: "codex",
+			isStream: true,
+			endedCleanly: false,
+			responseTimeMs: 1000,
+		});
+		expect(summary.usage.outputTokens).toBe(0);
+		expect(summary.outputApproximate).toBe(true);
+	});
+	it("counts text, visible thinking and tool arguments across split UTF-8 chunks", async () => {
+		const state = createUsageState();
+		const events = [
+			{
+				type: "content_block_delta",
+				delta: { type: "text_delta", text: "é".repeat(8) },
+			},
+			{
+				type: "content_block_delta",
+				delta: { type: "thinking_delta", thinking: "x".repeat(8) },
+			},
+			{ type: "response.function_call_arguments.delta", delta: "x".repeat(8) },
+			{
+				type: "content_block_delta",
+				delta: { type: "signature_delta", signature: "x".repeat(1000) },
+			},
+		];
+		const bytes = new TextEncoder().encode(
+			events
+				.map((e) => `event: ${e.type}\ndata: ${JSON.stringify(e)}\n\n`)
+				.join(""),
+		);
+		for (const b of bytes) feedChunk(state, new Uint8Array([b]), 1);
+		const summary = await finalizeUsage(state, {
+			providerName: "codex",
+			isStream: true,
+			endedCleanly: false,
+			responseTimeMs: 1000,
+		});
+		expect(summary.usage.outputTokens).toBe(6);
+		expect(summary.outputApproximate).toBe(true);
+	});
+});
+
+it("estimates native Responses output without counting its JSON envelope", async () => {
+	const state = createUsageState();
+	feedNonStreamBody(
+		state,
+		JSON.stringify({
+			id: "metadata".repeat(100),
+			output: [
+				{
+					type: "message",
+					content: [{ type: "output_text", text: "Hello!!!" }],
+				},
+				{ type: "function_call", arguments: '{"x":12}' },
+				{
+					type: "reasoning",
+					summary: [{ type: "summary_text", text: "Plan" }],
+					encrypted_content: "signature".repeat(100),
+				},
+			],
+		}),
+	);
+	expect(state.generatedChars).toBe(20);
+	const result = await finalizeUsage(
+		state,
+		{
+			providerName: "codex",
+			isStream: false,
+			responseTimeMs: 1000,
+		},
+		{ estimateCostUSD: fakeCost().fn },
+	);
+	expect(result.usage.outputTokens).toBe(5);
+	expect(result.outputApproximate).toBe(true);
 });

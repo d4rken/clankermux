@@ -1,11 +1,18 @@
 # Handover: showing PACE instead of RUNWAY on the usage widget
 
+> **2026-09-05 update:** Use the new
+> [external widget integration guide](external-widgets-pacing-guide.md) for
+> implementation. It supersedes this historical guide's headline selection and
+> null-headroom rendering rules. The new next-reset fields are not deployed yet;
+> clients must also support responses that omit them.
+
 For whoever is changing the desk widget. It currently renders the quota runway
 ("when does the pool run dry"). The goal is to render **pace** instead: at a
 glance, should I run more agents right now or fewer.
 
-Everything below is live on the ClankerMux proxy as of 2026-09-04. No auth, no
-credential: `/public/v1/*` is a read-only unauthenticated mount.
+The original examples describe the ClankerMux proxy as of 2026-09-04; subsequent
+updates are documented separately. No auth, no credential: `/public/v1/*` is a
+read-only unauthenticated mount.
 
 ---
 
@@ -351,3 +358,21 @@ reimplement it. Four separate ways to get it subtly wrong.
   `packages/http-api/src/services/public-{runway,pacing,workload-headroom}.ts`
 - Wire guards (extend these if you request a field): 
   `packages/http-api/src/handlers/public/__tests__/dto.test.ts`
+
+## Next-reset planning and immature evidence
+
+Workload rows now include `nextReset` (or null when no weekly deadline is known).
+Its `resetsAt` is the earliest known weekly recovery among the active accounts
+supporting the workload. Its outcome and headroom cover only the interval up to
+that deadline; the existing row fields still describe the 14-day sustainability
+projection. Use `nextReset` as the primary day-to-day pacing view and label the
+14-day projection separately. Clearing the next reset does not guarantee later
+weeks are sustainable, especially with staggered accounts or banked resets.
+
+Read `projectionBasis` before choosing warning severity. `structural` includes
+immature evidence: an ordinary reset, a banked reset, or a regression with less
+than one hour of post-reset observations. In the next-reset view, headroom is
+withheld for these readings. Render “early estimate” rather than interpreting
+null headroom as “cut hard”. Unknown or unreadable quota remains unknown; it
+must not be rendered as confirmed room. These are forecasts at sustained burn,
+not a claim that the account is already nearly empty.

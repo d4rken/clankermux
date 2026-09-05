@@ -895,6 +895,7 @@ export function createRecoveryHolds(deps: RecoveryHoldsDeps): RecoveryHolds {
 					),
 					wakeComboInfo,
 				);
+				gates.reconcileAffinity(candidates);
 				if (requestMeta.routing) {
 					// The wake re-selection replaces the candidate list, so the post-gate
 					// first attempt moves with it (see the initial pipeline).
@@ -1181,6 +1182,7 @@ export function createRecoveryHolds(deps: RecoveryHoldsDeps): RecoveryHolds {
 				),
 				requestMeta.comboName ? getComboSlotInfo(requestMeta) : null,
 			);
+			gates.reconcileAffinity(candidates);
 
 			// A probe-verdict poll re-attempts ONLY the candidates that were
 			// suppressed — the whole reason this pass exists. A sibling that

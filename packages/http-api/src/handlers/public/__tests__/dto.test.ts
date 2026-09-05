@@ -928,6 +928,7 @@ describe("golden: GET /public/v1/workload-headroom", () => {
 			rows: [
 				{
 					dimensionKind: "class",
+					nextReset: null,
 					dimensionId: "anthropic",
 					label: "Claude",
 					outcomeKind: "beyond_horizon",
@@ -943,6 +944,7 @@ describe("golden: GET /public/v1/workload-headroom", () => {
 				},
 				{
 					dimensionKind: "family",
+					nextReset: null,
 					dimensionId: "fable",
 					label: "Fable",
 					outcomeKind: "runway",
@@ -964,6 +966,27 @@ describe("golden: GET /public/v1/workload-headroom", () => {
 				},
 			],
 		});
+	});
+
+	it("serializes next-reset guidance with ISO dates and no account identities", () => {
+		const source = workloadHeadroom();
+		source.rows[0].nextReset = {
+			resetsAtMs: NOW + 3_600_000,
+			outcome: source.rows[0].outcome,
+			headroom: { pct: 12, direction: "margin" },
+			projectionBasis: "measured",
+		};
+		const dto = toPublicWorkloadHeadroomDto(source);
+		expect(dto.rows[0].nextReset).toEqual({
+			resetsAt: new Date(NOW + 3_600_000).toISOString(),
+			outcomeKind: "beyond_horizon",
+			exhaustsAt: null,
+			headroomPct: 12,
+			headroomDirection: "margin",
+			projectionBasis: "measured",
+		});
+		expect(depthOf(dto)).toBeLessThan(8);
+		expect(arrayNesting(dto)).toBeLessThanOrEqual(2);
 	});
 
 	it("publishes no pool-level headroom, which lives on the runway resource", () => {

@@ -54,108 +54,102 @@ export function createStreamAnalyticsPassthrough(
 		bumpIdleTimeout,
 	} = options;
 	const reader = upstream.getReader();
-	const startTime = Date.now();
-	let finalized = false; // guard so onEnd/onError fire at most once total
-
-	// Re-arm the connection's idle timer for the lifetime of the stream so long
-	// quiet gaps between chunks don't trip the base idleTimeout. Started here (not
-	// in pull) so a silent gap before the first chunk is also covered. Cleared in
-	// finalize(), invoked on every end path below.
+	let finalized = false;
+	let totalTimer: ReturnType<typeof setTimeout> | undefined;
+	let readTimer: ReturnType<typeof setTimeout> | undefined;
 	const rearmInterval = bumpIdleTimeout
 		? setInterval(bumpIdleTimeout, IDLE_REARM_INTERVAL_MS)
-		: null;
+		: undefined;
 
-	// Single place that runs the at-most-once analytics finalizer AND stops the
-	// idle re-arm. Idempotent via the `finalized` guard.
-	const finalize = (kind: "end" | "error", err?: Error): void => {
-		if (rearmInterval !== null) {
-			clearInterval(rearmInterval);
-		}
-		if (finalized) return;
+	const finalize = (err?: Error): boolean => {
+		if (finalized) return false;
 		finalized = true;
-		if (kind === "end") {
-			onEnd?.();
-		} else {
-			onError?.(err as Error);
+		clearTimeout(totalTimer);
+		clearTimeout(readTimer);
+		clearInterval(rearmInterval);
+		// Cleanup and the terminal verdict must not depend on upstream cancel
+		// settling. Cancellation resolves pending reads with done:true.
+		try {
+			if (err) onError?.(err);
+			else onEnd?.();
+		} catch {
+			/* analytics only */
 		}
+		return true;
+	};
+	const release = () => {
+		try {
+			reader.releaseLock();
+		} catch {
+			/* pending read */
+		}
+	};
+	const cancelUpstream = (reason?: unknown) => {
+		void reader
+			.cancel(reason)
+			.catch(() => {})
+			.finally(release);
+	};
+	const fail = (
+		controller: ReadableStreamDefaultController<Uint8Array>,
+		err: Error,
+	) => {
+		if (!finalize(err)) return;
+		controller.error(err);
+		cancelUpstream(err);
 	};
 
 	return new ReadableStream<Uint8Array>({
-		async pull(controller) {
-			// Overall stream timeout
-			if (Date.now() - startTime > totalTimeoutMs) {
-				const err = new Error(
-					`Stream timeout: exceeded ${totalTimeoutMs}ms total duration`,
-				);
-				try {
-					await reader.cancel();
-				} catch {
-					// reader may already be released/cancelled
-				}
-				finalize("error", err);
-				controller.error(err);
-				return;
-			}
-
-			let timeoutId: ReturnType<typeof setTimeout> | null = null;
-			const timeoutPromise = new Promise<never>((_, reject) => {
-				timeoutId = setTimeout(
-					() =>
-						reject(
-							new Error(
-								`Stream timeout: no data received for ${chunkTimeoutMs}ms`,
-							),
+		start(controller) {
+			// Independent of pull/backpressure: a silent or unread stream still
+			// has the same absolute lifetime cap.
+			totalTimer = setTimeout(
+				() =>
+					fail(
+						controller,
+						new Error(
+							`Stream timeout: exceeded ${totalTimeoutMs}ms total duration`,
 						),
-					chunkTimeoutMs,
-				);
-			});
-
+					),
+				totalTimeoutMs,
+			);
+		},
+		async pull(controller) {
+			if (finalized) return;
+			readTimer = setTimeout(
+				() =>
+					fail(
+						controller,
+						new Error(
+							`Stream timeout: no data received for ${chunkTimeoutMs}ms`,
+						),
+					),
+				chunkTimeoutMs,
+			);
 			try {
-				const { value, done } = await Promise.race([
-					reader.read(),
-					timeoutPromise,
-				]);
-				if (timeoutId) {
-					clearTimeout(timeoutId);
-					timeoutId = null;
-				}
-
+				const { value, done } = await reader.read();
+				clearTimeout(readTimer);
+				if (finalized) return;
 				if (done) {
-					finalize("end");
+					finalize();
+					release();
 					controller.close();
 					return;
 				}
 				if (value) {
-					controller.enqueue(value); // deliver to client first (latency)
+					controller.enqueue(value);
 					try {
 						onChunk?.(value);
 					} catch {
-						// analytics must never break the client stream
+						/* analytics only */
 					}
 				}
 			} catch (err) {
-				if (timeoutId) {
-					clearTimeout(timeoutId);
-					timeoutId = null;
-				}
-				try {
-					await reader.cancel();
-				} catch {
-					// reader may already be released/cancelled
-				}
-				finalize("error", err as Error);
-				controller.error(err);
+				fail(controller, err instanceof Error ? err : new Error(String(err)));
 			}
 		},
-		async cancel(reason) {
-			// Client disconnected. Cancel upstream and finalize analytics so the
-			// worker doesn't leak per-request state waiting for an end that never comes.
-			try {
-				await reader.cancel(reason);
-			} catch {
-				// reader may already be released/cancelled
-			}
-			finalize("error", new Error("client disconnected"));
+		cancel(reason) {
+			if (finalize(new Error("client disconnected"))) cancelUpstream(reason);
 		},
 	});
 }

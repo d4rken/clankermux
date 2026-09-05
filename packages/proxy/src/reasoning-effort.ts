@@ -14,6 +14,12 @@ export function parseReasoningEffort(body: unknown): string | null {
 	}
 	const record = body as Record<string, unknown>;
 
+	const explicit = (record.reasoning as { effort?: unknown } | undefined)
+		?.effort;
+	if (typeof explicit === "string" && explicit.length > 0) return explicit;
+	const adaptiveEffort = (
+		record.output_config as { effort?: unknown } | undefined
+	)?.effort;
 	const thinking = record.thinking;
 	if (typeof thinking === "object" && thinking !== null) {
 		const t = thinking as Record<string, unknown>;
@@ -24,16 +30,11 @@ export function parseReasoningEffort(body: unknown): string | null {
 			}
 			return "thinking";
 		}
+		if (t.type === "adaptive" && typeof adaptiveEffort === "string")
+			return adaptiveEffort;
 		return null;
 	}
 
-	const reasoning = record.reasoning;
-	if (typeof reasoning === "object" && reasoning !== null) {
-		const effort = (reasoning as Record<string, unknown>).effort;
-		if (typeof effort === "string" && effort.length > 0) {
-			return effort;
-		}
-	}
-
+	if (typeof adaptiveEffort === "string") return adaptiveEffort;
 	return null;
 }

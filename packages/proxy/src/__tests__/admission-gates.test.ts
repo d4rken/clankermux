@@ -10,6 +10,7 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { SessionStrategy } from "@clankermux/load-balancer";
 import { usageCache } from "@clankermux/providers";
 import type { Account, ComboSlotInfo, RequestMeta } from "@clankermux/types";
 import { createAdmissionGates } from "../admission-gates";
@@ -145,7 +146,7 @@ function seedThrottled(accountId: string) {
  * two days into a 7-day window) while every account-wide window is fine, which
  * is what family-aware weekly pacing exists to catch.
  */
-function seedFamilyOverpace(accountId: string) {
+function seedFamilyOverpace(accountId: string, percent = 80) {
 	const resetsAt = new Date(Date.now() + 5 * DAY).toISOString();
 	usageCache.set(accountId, {
 		five_hour: {
@@ -157,7 +158,7 @@ function seedFamilyOverpace(accountId: string) {
 			{
 				kind: "weekly_scoped",
 				group: "weekly",
-				percent: 80,
+				percent,
 				resets_at: resetsAt,
 				scope: { model: { id: "fable", display_name: "Fable" } },
 				is_active: true,
@@ -607,5 +608,111 @@ describe("createAdmissionGates", () => {
 				gates.applyFamilyMemoDemotion(softReordered).map((a) => a.id),
 			).toEqual(["acc-b", "acc-a"]);
 		});
+	});
+});
+
+describe("affinity after durable request exclusions", () => {
+	it("keeps the compatible account sticky after rejecting a smaller context window", () => {
+		const accounts = ["small", "large-a", "large-b"].map((id, i) =>
+			makeAccount({
+				id,
+				name: id,
+				provider: "codex",
+				priority: i ? 1 : 0,
+				model_mappings: JSON.stringify({
+					sonnet: i ? "gpt-6-astra" : "gpt-5.3-codex-spark",
+				}),
+			}),
+		);
+		let preferred = "large-a";
+		const strategy = new SessionStrategy();
+		strategy.initialize({
+			resetAccountSession() {},
+			getAccountUtilization: (id) => (id === preferred ? 10 : 30),
+		});
+		for (const pref of ["large-a", "large-b"]) {
+			preferred = pref;
+			const meta = makeRequestMeta({
+				affinityKey: "conversation",
+				affinityScope: "session",
+			});
+			const selected = strategy.select(accounts, meta);
+			const gates = createAdmissionGates({
+				requestMeta: meta,
+				initialComboInfo: null,
+				effectiveRequestModel: MODEL,
+				gateTokenEstimate: 150_000,
+				isSyntheticProbeRequest: false,
+				config: makeConfig({ fiveHour: false, weekly: false }),
+				strategy,
+			});
+			const candidates = gates.applyContextWindowGate(selected);
+			gates.reconcileAffinity(candidates);
+			expect(candidates[0].id).toBe("large-a");
+			expect(meta.routing?.heldAccountId).toBe("large-a");
+		}
+	});
+	it("rebinds affinity when the requested family is weekly-exhausted", () => {
+		const accounts = [
+			makeAccount({ id: "family-affinity-spent", priority: 0 }),
+			makeAccount({ id: "family-affinity-ready", priority: 1 }),
+		];
+		seedFamilyOverpace(accounts[0].id, 100);
+		try {
+			const strategy = new SessionStrategy();
+			const meta = makeRequestMeta({
+				affinityKey: "family-conversation",
+				affinityScope: "session",
+			});
+			const selected = strategy.select(accounts, meta);
+			expect(selected[0].id).toBe(accounts[0].id);
+			const gates = createAdmissionGates({
+				requestMeta: meta,
+				initialComboInfo: null,
+				effectiveRequestModel: "claude-fable-5",
+				gateTokenEstimate: 1,
+				isSyntheticProbeRequest: false,
+				config: makeConfig({ fiveHour: false, weekly: false }),
+				strategy,
+			});
+			const candidates = gates.applyFamilyWeeklyGate(selected);
+			expect(candidates.map((account) => account.id)).toEqual([accounts[1].id]);
+			gates.reconcileAffinity(candidates);
+			const next = makeRequestMeta({
+				affinityKey: "family-conversation",
+				affinityScope: "session",
+			});
+			expect(strategy.select(accounts, next)[0].id).toBe(accounts[1].id);
+		} finally {
+			usageCache.delete(accounts[0].id);
+		}
+	});
+
+	it("temporary exclusions do not overwrite the original affinity", () => {
+		const accounts = [
+			makeAccount({ id: "a", priority: 0 }),
+			makeAccount({ id: "b", priority: 1 }),
+		];
+		const strategy = new SessionStrategy();
+		const meta = makeRequestMeta({
+			affinityKey: "conversation",
+			affinityScope: "session",
+		});
+		strategy.select(accounts, meta);
+		const gates = createAdmissionGates({
+			requestMeta: meta,
+			initialComboInfo: null,
+			effectiveRequestModel: MODEL,
+			gateTokenEstimate: 1,
+			isSyntheticProbeRequest: false,
+			config: makeConfig({ fiveHour: false, weekly: false }),
+			strategy,
+		});
+		gates.reconcileAffinity([accounts[1]]);
+		const next = makeRequestMeta({
+			affinityKey: "conversation",
+			affinityScope: "session",
+		});
+		expect(strategy.select(accounts, next)[0].id).toBe("a");
 	});
 });

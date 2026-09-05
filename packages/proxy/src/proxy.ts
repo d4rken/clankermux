@@ -476,6 +476,7 @@ async function handleIngestedProxy(
 		effectiveRequestModel: effectiveRequestModel ?? null,
 		gateTokenEstimate,
 		isSyntheticProbeRequest,
+		strategy: ctx.strategy,
 		config: ctx.config,
 	});
 
@@ -659,6 +660,7 @@ async function handleIngestedProxy(
 		),
 		initialComboInfo,
 	);
+	gates.reconcileAffinity(accounts);
 	if (requestMeta.routing) {
 		requestMeta.routing.selectedAccountId =
 			accounts[0]?.id ?? requestMeta.routing.selectedAccountId ?? null;
@@ -1376,6 +1378,7 @@ async function handleIngestedProxy(
 				gates.applyFamilyWeeklyGate(filteredFallbackAccounts),
 			),
 		);
+		gates.reconcileAffinity(fallbackAccounts);
 		if (requestMeta.routing) {
 			requestMeta.routing.selectedAccountId =
 				fallbackAccounts[0]?.id ??

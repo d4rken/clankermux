@@ -321,3 +321,67 @@ describe("createStreamAnalyticsPassthrough", () => {
 		expect(endCount).toBe(0);
 	});
 });
+
+describe("stream terminal races", () => {
+	it("cancel during a pending read cannot report normal completion", async () => {
+		const events: string[] = [];
+		const upstream = new ReadableStream<Uint8Array>({
+			pull() {},
+			cancel() {
+				events.push("cancel");
+			},
+		});
+		const reader = createStreamAnalyticsPassthrough(upstream, {
+			totalTimeoutMs: 1000,
+			chunkTimeoutMs: 1000,
+			onEnd: () => events.push("end"),
+			onError: () => events.push("error"),
+		}).getReader();
+		const pending = reader.read();
+		await Promise.resolve();
+		await reader.cancel();
+		await pending;
+		expect(events).toEqual(["error", "cancel"]);
+	});
+	it("total deadline interrupts a stalled read even if upstream cancellation hangs", async () => {
+		let release!: () => void;
+		const cancelled = mock(
+			() =>
+				new Promise<void>((r) => {
+					release = r;
+				}),
+		);
+		const upstream = new ReadableStream<Uint8Array>({
+			pull() {},
+			cancel: cancelled,
+		});
+		const errors: string[] = [];
+		const reader = createStreamAnalyticsPassthrough(upstream, {
+			totalTimeoutMs: 20,
+			chunkTimeoutMs: 1000,
+			onError: (e) => errors.push(e.message),
+		}).getReader();
+		await expect(reader.read()).rejects.toThrow("total duration");
+		expect(errors).toHaveLength(1);
+		expect(cancelled).toHaveBeenCalledTimes(1);
+		release();
+	});
+	it("total deadline also expires a stream blocked by client backpressure", async () => {
+		let cancelCount = 0;
+		const upstream = new ReadableStream<Uint8Array>({
+			pull(c) {
+				c.enqueue(new Uint8Array([1]));
+			},
+			cancel() {
+				cancelCount++;
+			},
+		});
+		const stream = createStreamAnalyticsPassthrough(upstream, {
+			totalTimeoutMs: 20,
+			chunkTimeoutMs: 1000,
+		});
+		await new Promise((r) => setTimeout(r, 40));
+		await expect(stream.getReader().read()).rejects.toThrow("total duration");
+		expect(cancelCount).toBe(1);
+	});
+});

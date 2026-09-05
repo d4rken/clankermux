@@ -100,7 +100,16 @@ export type HeadroomAbsence =
  */
 export type ProjectionBasis = "measured" | "structural";
 
+export interface NextResetGuidance {
+	resetsAtMs: number;
+	outcome: RunwayOutcome;
+	headroom: { pct: number; direction: "margin" | "deficit" } | null;
+	projectionBasis: ProjectionBasis | null;
+}
+
 export interface WorkloadHeadroomRow {
+	/** Primary planning interval: until the earliest known weekly recovery. */
+	nextReset?: NextResetGuidance | null;
 	dimensionKind: WorkloadDimensionKind;
 	/** Servable class id, or model family id. Stable join key. */
 	dimensionId: string;
@@ -375,11 +384,50 @@ function familyHeadroomBound(
 	};
 }
 
+function nextResetGuidance(
+	inputs: RunwayAccountInput[],
+	now: number,
+	family?: ModelFamily,
+): NextResetGuidance | null {
+	const resets = inputs
+		.flatMap((account) => account.windows)
+		.filter(
+			(window) =>
+				window.windowKind === "seven_day" ||
+				window.windowKind.startsWith("weekly_scoped:"),
+		)
+		.map((window) => window.resetsAtMs)
+		.filter(
+			(at): at is number => at !== null && Number.isFinite(at) && at > now,
+		);
+	if (!resets.length) return null;
+	const resetsAtMs = Math.min(...resets);
+	const horizonMs = resetsAtMs - now;
+	const result = family
+		? familyHeadroomBound(inputs, family, now, horizonMs)
+		: null;
+	const outcome =
+		result?.outcome ?? computeCapacityRunway(inputs, now, horizonMs);
+	const projectionBasis = projectionBasisFor(inputs, outcome, now);
+	return {
+		resetsAtMs,
+		outcome,
+		// Do not turn weak evidence into a precise slowdown recommendation.
+		headroom:
+			projectionBasis === "measured"
+				? result
+					? result.headroom
+					: runwayPaceHeadroom(outcome)
+				: null,
+		projectionBasis,
+	};
+}
+
 /**
  * Per-workload headroom rows: one per servable class, one per live scoped model
  * family.
  *
- * Cost is close to one extra pool-level scan in total, not one per row: a probe
+ * Each planning horizon adds roughly one pool-level scan across class rows: a probe
  * is bounded at 50 pool rebuilds and a rebuild is linear in accounts, so
  * summing over a partition of the accounts costs about what a single scan over
  * all of them costs. Family rows add one more pass over the accounts that
@@ -417,6 +465,7 @@ export function computeWorkloadHeadroom(
 		const headroom = runwayPaceHeadroom(outcome);
 		rows.push({
 			dimensionKind: "class",
+			nextReset: nextResetGuidance(inputs, now),
 			dimensionId: classId,
 			label: bucket.label,
 			outcome,
@@ -510,6 +559,7 @@ export function computeWorkloadHeadroom(
 
 		rows.push({
 			dimensionKind: "family",
+			nextReset: nextResetGuidance(inputs, now, family),
 			dimensionId: family,
 			label: displayName,
 			outcome: bound.outcome,

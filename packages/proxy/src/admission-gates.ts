@@ -90,10 +90,13 @@ export interface AdmissionGateDeps {
 	isSyntheticProbeRequest: boolean;
 	/** `ctx.config` — the usage-throttle getters are read LIVE on every call. */
 	config: ProxyContext["config"];
+	strategy?: ProxyContext["strategy"];
 }
 
 /** The per-request admission gates, plus the state they accumulate. */
 export interface AdmissionGates {
+	/** Rebind only when a durable exclusion invalidates the remembered account. */
+	reconcileAffinity: (candidates: Account[]) => void;
 	modelForAccount: (account: Account) => string | null;
 	applyProviderOverloadGate: (accounts: Account[]) => {
 		available: Account[];
@@ -753,7 +756,27 @@ export function createAdmissionGates(deps: AdmissionGateDeps): AdmissionGates {
 		return [...kept, ...demoted];
 	};
 
+	const reconcileAffinity = (candidates: Account[]) => {
+		if (isSyntheticProbeRequest || requestMeta.routing?.strategy !== "session")
+			return;
+		const original =
+			requestMeta.routing.heldAccountId ??
+			requestMeta.routing.selectedAccountId;
+		if (
+			!original ||
+			!candidates[0] ||
+			candidates.some((a) => a.id === original)
+		)
+			return;
+		const durable = [
+			...contextExcludedAccounts,
+			...familyWeeklyExcludedAccounts,
+		].some((entry) => entry.account.id === original);
+		if (durable) deps.strategy?.reassignAffinity?.(requestMeta, candidates[0]);
+	};
+
 	return {
+		reconcileAffinity,
 		modelForAccount,
 		applyProviderOverloadGate,
 		shouldForwardProviderOverloadIfNoCrossProviderFallback,

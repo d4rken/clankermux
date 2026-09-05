@@ -87,12 +87,21 @@ describe("parseReasoningEffort", () => {
 		});
 	});
 
-	it("prefers anthropic thinking when both shapes are present", () => {
+	it("records adaptive thinking effort", () => {
+		expect(
+			parseReasoningEffort({
+				thinking: { type: "adaptive" },
+				output_config: { effort: "low" },
+			}),
+		).toBe("low");
+	});
+
+	it("prefers explicit Responses effort when both shapes are present", () => {
 		expect(
 			parseReasoningEffort({
 				thinking: { type: "enabled", budget_tokens: 1024 },
 				reasoning: { effort: "high" },
 			}),
-		).toBe("thinking:1024");
+		).toBe("high");
 	});
 });

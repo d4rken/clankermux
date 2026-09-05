@@ -3890,3 +3890,36 @@ describe("CodexProvider refreshToken auth-error classification", () => {
 		expect(result.expiresAt).toBeGreaterThanOrEqual(before + 3600 * 1000);
 	});
 });
+
+describe("Anthropic reasoning controls on translated Codex requests", () => {
+	for (const [controls, expected] of [
+		[{ thinking: { type: "disabled" } }, "none"],
+		[
+			{ thinking: { type: "adaptive" }, output_config: { effort: "low" } },
+			"low",
+		],
+		[
+			{ thinking: { type: "adaptive" }, output_config: { effort: "high" } },
+			"high",
+		],
+		[{ thinking: { type: "enabled", budget_tokens: 1024 } }, "low"],
+		[{ thinking: { type: "enabled", budget_tokens: 32000 } }, "high"],
+		[{ thinking: { type: "disabled" }, reasoning: { effort: "high" } }, "high"],
+	] as const) {
+		it(`maps ${JSON.stringify(controls)} to ${expected}`, async () => {
+			const provider = new CodexProvider();
+			const req = new Request("https://example.com/v1/messages", {
+				method: "POST",
+				headers: { "content-type": "application/json" },
+				body: JSON.stringify({
+					model: "claude-sonnet-4-5",
+					max_tokens: 128,
+					messages: [{ role: "user", content: "Hello" }],
+					...controls,
+				}),
+			});
+			const body = await (await provider.transformRequestBody(req)).json();
+			expect(body.reasoning.effort).toBe(expected);
+		});
+	}
+});

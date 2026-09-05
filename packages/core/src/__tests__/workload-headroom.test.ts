@@ -745,3 +745,89 @@ describe("toScopedFamilyRunwayInput", () => {
 		expect(toScopedFamilyRunwayInput(account, "fable", NOW)).toBeNull();
 	});
 });
+
+describe("next weekly reset planning", () => {
+	it("ignores an earlier reset on a paused account", () => {
+		const active = accountWideConstrained("active");
+		const paused = {
+			...accountWideConstrained("paused"),
+			paused: true,
+			usageData: anthropicUsage({
+				fiveHourPct: 100,
+				fiveHourResetMs: NOW + HOUR,
+				weeklyPct: 100,
+				weeklyResetMs: NOW + DAY,
+			}),
+		};
+		const rows = computeWorkloadHeadroom([active, paused], NOW);
+		expect(rows.length).toBeGreaterThan(0);
+		for (const row of rows)
+			expect(row.nextReset?.resetsAtMs).toBe(NOW + 2 * DAY);
+	});
+	it("includes the requested family reset when it arrives before the account-wide reset", () => {
+		const source = {
+			...accountWideConstrained("scoped"),
+			usageData: anthropicUsage({
+				fiveHourPct: 0,
+				fiveHourResetMs: NOW + HOUR,
+				weeklyPct: 20,
+				weeklyResetMs: NOW + 2 * DAY,
+				scoped: { pct: 20, resetMs: NOW + 2 * DAY - 1000 },
+			}),
+		};
+		const rows = computeWorkloadHeadroom([source], NOW);
+		expect(
+			rows.find((row) => row.dimensionKind === "family")?.nextReset?.resetsAtMs,
+		).toBe(NOW + 2 * DAY - 1000);
+	});
+	it("distinguishes current-week runway from longer-term sustainability", () => {
+		const resetsAtMs = NOW + DAY;
+		const source = {
+			...accountWideConstrained("recent-burn"),
+			usageData: anthropicUsage({
+				fiveHourPct: 0,
+				fiveHourResetMs: NOW + HOUR,
+				weeklyPct: 70,
+				weeklyResetMs: resetsAtMs,
+			}),
+			prediction: {
+				sevenDay: {
+					state: "rising" as const,
+					slopePerHour: 1,
+					etaExhaustMs: NOW + 30 * HOUR,
+					predictedAtReset: 94,
+					resetsAtMs,
+					willExhaustBeforeReset: false,
+					lowConfidence: false,
+				},
+			},
+		};
+		const row = computeWorkloadHeadroom([source], NOW)[0];
+		expect(row.nextReset?.outcome.kind).toBe("beyond-horizon");
+		expect(row.nextReset?.projectionBasis).toBe("measured");
+		expect(row.nextReset?.headroom?.direction).toBe("margin");
+		expect(row.outcome.kind).toBe("runway");
+		expect(row.headroom?.direction).toBe("deficit");
+	});
+	it("withholds a precise cut from an immature weekly estimate", () => {
+		const source = {
+			...accountWideConstrained("young"),
+			usageData: anthropicUsage({
+				fiveHourPct: 0,
+				fiveHourResetMs: NOW + HOUR,
+				weeklyPct: 2,
+				weeklyResetMs: NOW + 7 * DAY - 10 * 60_000,
+			}),
+		};
+		const row = computeWorkloadHeadroom([source], NOW)[0];
+		expect(row.nextReset?.projectionBasis).toBe("structural");
+		expect(row.nextReset?.headroom).toBeNull();
+	});
+	it("does not invent a reset date for an unreadable account", () => {
+		const row = computeWorkloadHeadroom(
+			[{ id: "unknown", name: "unknown", provider: "codex", usageData: null }],
+			NOW,
+		)[0];
+		expect(row.nextReset).toBeNull();
+	});
+});
