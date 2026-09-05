@@ -1691,6 +1691,31 @@ describe("computeFamilyWeeklyUsage", () => {
 			expect(result[0].soonestExhaustsAtMs).toBeNull();
 		});
 
+		it("withholds the run-out instant when one folded window is still learning", () => {
+			// Fable at 80% over 4d projects a 1d run-out; Mythos at 0% has no
+			// measured burn. The fold takes the EARLIEST instant, and the unmeasured
+			// window could have been the earliest, so the account is learning, not
+			// at risk: it must not sit in BOTH atRiskCount and learningCount, and
+			// the row must not carry the confident window's instant.
+			const result = computeFamilyWeeklyUsage(
+				[
+					mkScopedAccount("mixed-learning", [
+						scopedEntry("Fable", 80, RESET_3D),
+						scopedEntry("Mythos 5", 0, RESET_3D),
+					]),
+				],
+				NOW,
+			);
+			expect(result).toHaveLength(1);
+			expect(result[0].family).toBe("fable");
+			expect(result[0].accounts).toHaveLength(1);
+			expect(result[0].accounts[0].pct).toBe(80);
+			expect(result[0].learningCount).toBe(1);
+			expect(result[0].atRiskCount).toBe(0);
+			expect(result[0].accounts[0].exhaustsAtMs).toBeNull();
+			expect(result[0].soonestExhaustsAtMs).toBeNull();
+		});
+
 		it("keeps a folded family unprojected when no constituent window runs out", () => {
 			const result = computeFamilyWeeklyUsage(
 				[

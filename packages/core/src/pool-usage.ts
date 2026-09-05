@@ -1034,7 +1034,7 @@ export function computeFamilyWeeklyUsage(
 				name: account.name,
 				pct: binding.percent,
 				resetMs: binding.resetsAtMs,
-				exhaustsAtMs,
+				exhaustsAtMs: learning ? null : exhaustsAtMs,
 			});
 		}
 	}
