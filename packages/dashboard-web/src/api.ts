@@ -21,6 +21,7 @@ import type {
 	ModelOverrideSetRequest,
 	PaymentKind,
 	PaymentsSummary,
+	PoolSizingResponse,
 	ProjectRulesGetResponse,
 	ProjectRulesSetRequest,
 	QuotaDriftResponse,
@@ -1088,6 +1089,27 @@ class API extends HttpClient {
 		this.logger.debug(`→ GET ${url}`);
 		try {
 			const response = await this.get<UsageScopedHistoryResponse>(url);
+			const duration = Date.now() - startTime;
+			this.logger.debug(`← GET ${url} - 200 (${duration}ms)`);
+			return response;
+		} catch (error) {
+			const duration = Date.now() - startTime;
+			this.logger.error(`✗ GET ${url} - ERROR (${duration}ms)`, {
+				error: error instanceof Error ? error.message : String(error),
+			});
+			throw error;
+		}
+	}
+
+	// Account-weeks consumed per completed weekly cycle. Takes no parameters:
+	// the lookback is fixed and the unit is a completed cycle, so there is no
+	// range axis to pass.
+	async getPoolSizing(): Promise<PoolSizingResponse> {
+		const startTime = Date.now();
+		const url = "/api/analytics/pool-sizing";
+		this.logger.debug(`→ GET ${url}`);
+		try {
+			const response = await this.get<PoolSizingResponse>(url);
 			const duration = Date.now() - startTime;
 			this.logger.debug(`← GET ${url} - 200 (${duration}ms)`);
 			return response;

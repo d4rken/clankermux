@@ -15,6 +15,7 @@ export { ContextCompositionPanel } from "./ContextCompositionPanel";
 export { MissingSectionsNotice } from "./MissingSectionsNotice";
 export { ModelAnalytics } from "./ModelAnalytics";
 export { ModelWindowCostPanel } from "./ModelWindowCostPanel";
+export { PoolSizingPanel } from "./PoolSizingPanel";
 export { ProjectAnalytics } from "./ProjectAnalytics";
 export { QuotaChangeVerdicts } from "./QuotaChangeVerdicts";
 export { QuotaDriftPanel } from "./QuotaDriftPanel";

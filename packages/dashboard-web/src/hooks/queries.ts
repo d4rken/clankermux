@@ -518,6 +518,28 @@ export const useQuotaDrift = () => {
 };
 
 /**
+ * Account-weeks consumed per completed weekly cycle, for the Quota tab's
+ * "Pool sizing" panel.
+ *
+ * The unit is a COMPLETED weekly cycle, so the answer cannot move more than
+ * once a week; the server caches the read for five minutes and the client
+ * matches it. Exported as options as well as a hook so a test can seed the
+ * exact key the panel reads.
+ */
+export const poolSizingQueryOptions = () => ({
+	queryKey: queryKeys.poolSizing(),
+	queryFn: () => api.getPoolSizing(),
+	staleTime: 5 * 60_000,
+	refetchInterval: 5 * 60_000,
+	refetchIntervalInBackground: false,
+	retry: shouldRetryDashboardQuery,
+});
+
+export const usePoolSizing = () => {
+	return useQuery(poolSizingQueryOptions());
+};
+
+/**
  * Process memory footprint (RSS + JS heap) time-series, feeding the System
  * Health page's "Memory Usage" chart and the Overview health strip's RSS
  * sparkline. Keyed by range, so the two share a cache entry only when the
