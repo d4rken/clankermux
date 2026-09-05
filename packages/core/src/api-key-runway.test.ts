@@ -355,6 +355,24 @@ describe("effectiveRunwayOutcome", () => {
 		expect(effective.unprojectableAccountIds).toEqual([]);
 	});
 
+	it("carries learningAccountIds onto the lapsed out-now", () => {
+		// The accounts the scan withheld are still withheld after the ETA passes,
+		// so the lapsed row keeps disclosing that its figure is a lower bound.
+		const lapsed = effectiveRunwayOutcome(
+			{
+				...runwayRow(4 * HOUR, "a").outcome,
+				learningAccountIds: ["acc-2"],
+				unprojectableAccountIds: ["acc-2"],
+			} as KeyRunway["outcome"],
+			NOW + 5 * HOUR,
+		);
+
+		expect(lapsed.kind).toBe("out-now");
+		if (lapsed.kind !== "out-now") throw new Error("unreachable");
+		expect(lapsed.learningAccountIds).toEqual(["acc-2"]);
+		expect(lapsed.unprojectableAccountIds).toEqual(["acc-2"]);
+	});
+
 	it("leaves an outcome that has not expired exactly as served", () => {
 		const outcome = runwayRow(4 * HOUR, "a").outcome;
 
@@ -703,6 +721,47 @@ describe("summarizeKeyRunways", () => {
 		expect(summary.worst).toBeNull();
 		expect(summary.statedKeyCount).toBe(0);
 		expect(summary.unobservedKeyCount).toBe(2);
+	});
+
+	it("unions the learning accounts across active keys", () => {
+		// Two keys sharing an eligible account must not double-count it, and the
+		// union has to survive `stateable` dropping every `unknown` row — that is
+		// the only case where the headline itself has nothing else to say.
+		const summary = summarizeKeyRunways(
+			[
+				rowWith("a", { kind: "unknown", learningAccountIds: ["acc-1"] }),
+				rowWith("b", {
+					kind: "unknown",
+					learningAccountIds: ["acc-1", "acc-2"],
+				}),
+			],
+			NOW,
+		);
+
+		expect(summary.worst).toBeNull();
+		expect(summary.learningAccountIds).toEqual(["acc-1", "acc-2"]);
+	});
+
+	it("includes a learning-only key beside a stateable one", () => {
+		const summary = summarizeKeyRunways(
+			[
+				rowWith("known", BEYOND),
+				rowWith("cold", { kind: "unknown", learningAccountIds: ["acc-9"] }),
+			],
+			NOW,
+		);
+
+		expect(summary.worst?.keyId).toBe("known");
+		expect(summary.learningAccountIds).toEqual(["acc-9"]);
+	});
+
+	it("states an empty union when nothing is learning", () => {
+		const summary = summarizeKeyRunways(
+			[rowWith("known", BEYOND), rowWith("cold", UNKNOWN)],
+			NOW,
+		);
+
+		expect(summary.learningAccountIds).toEqual([]);
 	});
 
 	it("keeps no-accounts in the headline", () => {

@@ -134,7 +134,7 @@ describe("computeWorkloadHeadroom — class rows", () => {
 					name: "codex-1",
 					provider: "codex",
 					usageData: anthropicUsage({
-						fiveHourPct: 0,
+						fiveHourPct: 1,
 						fiveHourResetMs: NOW + HOUR,
 						weeklyPct: 1,
 						weeklyResetMs: NOW + 6 * DAY,
@@ -500,7 +500,7 @@ describe("computeWorkloadHeadroom — counts that must not mislead", () => {
 			name: "credited",
 			provider: "codex",
 			usageData: anthropicUsage({
-				fiveHourPct: 0,
+				fiveHourPct: 1,
 				fiveHourResetMs: NOW + HOUR,
 				weeklyPct: 100,
 				weeklyResetMs: NOW + 2 * DAY,
@@ -854,7 +854,7 @@ describe("computeWorkloadHeadroom — four states of scoped evidence", () => {
 			name: "c1",
 			provider: "codex",
 			usageData: anthropicUsage({
-				fiveHourPct: 0,
+				fiveHourPct: 1,
 				fiveHourResetMs: NOW + HOUR,
 				weeklyPct: 100,
 				weeklyResetMs: NOW + 2 * DAY,
@@ -888,7 +888,7 @@ describe("computeWorkloadHeadroom — four states of scoped evidence", () => {
 			name: "c1",
 			provider: "anthropic",
 			usageData: {
-				five_hour: { utilization: 0, resets_at: iso(NOW + HOUR) },
+				five_hour: { utilization: 1, resets_at: iso(NOW + HOUR) },
 				seven_day: { utilization: 40, resets_at: null },
 				limits: [],
 			} as unknown as AnthropicUsageData,
@@ -974,12 +974,24 @@ describe("next weekly reset planning", () => {
 		const source = {
 			...accountWideConstrained("recent-burn"),
 			usageData: anthropicUsage({
-				fiveHourPct: 0,
+				fiveHourPct: 1,
 				fiveHourResetMs: NOW + HOUR,
 				weeklyPct: 70,
 				weeklyResetMs: resetsAtMs,
 			}),
 			prediction: {
+				// A confident five-hour regression too, so the only weak evidence
+				// left is the thing this test is about: neither window is learning,
+				// and the row rests on measured burn.
+				fiveHour: {
+					state: "rising" as const,
+					slopePerHour: 0.25,
+					etaExhaustMs: NOW + 396 * HOUR,
+					predictedAtReset: 2,
+					resetsAtMs: NOW + HOUR,
+					willExhaustBeforeReset: false,
+					lowConfidence: false,
+				},
 				sevenDay: {
 					state: "rising" as const,
 					slopePerHour: 1,
@@ -999,17 +1011,22 @@ describe("next weekly reset planning", () => {
 		expect(row.headroom?.direction).toBe("deficit");
 	});
 	it("withholds a precise cut from an immature weekly estimate", () => {
+		// Ten minutes of evidence is not a burn rate. The account is withheld from
+		// the scan entirely rather than projected weakly, so there is no basis to
+		// characterise and no cut to state — with the account named, so the row
+		// says "not yet" rather than "no evidence".
 		const source = {
 			...accountWideConstrained("young"),
 			usageData: anthropicUsage({
-				fiveHourPct: 0,
+				fiveHourPct: 1,
 				fiveHourResetMs: NOW + HOUR,
 				weeklyPct: 2,
 				weeklyResetMs: NOW + 7 * DAY - 10 * 60_000,
 			}),
 		};
 		const row = computeWorkloadHeadroom([source], NOW)[0];
-		expect(row.nextReset?.projectionBasis).toBe("structural");
+		expect(row.nextReset?.outcome.kind).toBe("unknown");
+		expect(row.nextReset?.projectionBasis).toBeNull();
 		expect(row.nextReset?.headroom).toBeNull();
 	});
 	it("does not invent a reset date for an unreadable account", () => {

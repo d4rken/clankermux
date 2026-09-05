@@ -62,6 +62,14 @@ export type WindowExhaustionSource =
 	| "already-exhausted"
 	/** Window is readable, but nothing has been used yet. */
 	| "no-usage"
+	/**
+	 * Readable at 0% AND the structural start coincides with the observation:
+	 * the window has not started. Providers slide `resets_at = now + duration`
+	 * on every poll until the first request pins the window, so the reset is a
+	 * moving placeholder and NOT a deadline. Distinct from `no-usage`, which is
+	 * a started window nobody has spent anything in yet.
+	 */
+	| "unstarted"
 	/** No usable evidence at all. */
 	| "none";
 
@@ -145,6 +153,22 @@ export interface WindowExhaustion {
 	 * switching tone on `lowConfidence` and copy on `source`.
 	 */
 	anchored?: boolean;
+	/**
+	 * How much elapsed time the burn behind this estimate is measured over: from
+	 * the burn anchor when one applies, otherwise from the structural window
+	 * start, up to the instant the reading is placed at (`observedAtMs` on the
+	 * observation-anchored paths, `now` otherwise).
+	 *
+	 * Present on the three PROJECTING sources only — `regression`,
+	 * `lifetime-primary`, `lifetime-average`. `already-exhausted`, `no-usage`,
+	 * `unstarted` and `none` measure no burn, so they state no span.
+	 *
+	 * The single input to {@link isLearningEstimate}. Deliberately separate from
+	 * `lowConfidence`, which the low lifetime path raises unconditionally and
+	 * which therefore cannot distinguish "little evidence" from "cheap
+	 * estimator".
+	 */
+	evidenceSpanMs?: number;
 }
 
 /**
@@ -155,6 +179,20 @@ export interface WindowExhaustion {
  * Inline named constant — NO env var / feature gate.
  */
 export const ANCHOR_FULL_CONFIDENCE_MIN_SPAN_MS = 60 * 60_000;
+
+/**
+ * How far a window's structural start may sit from the reading's observation
+ * and still count as "the window has not started".
+ *
+ * A reading can lag the poll that stamped `resets_at` by one sampling interval
+ * (120 s for Codex, 90 s for Anthropic) plus clock skew, so the two instants
+ * are never bit-identical in production. Five minutes is more than twice the
+ * slowest cadence and matches the reset-match tolerance the weekly burn-slope
+ * store already uses. A genuinely started window younger than this reads
+ * `unstarted` for one poll and self-corrects on the next.
+ * Inline named constant — NO env var / feature gate.
+ */
+export const UNSTARTED_WINDOW_TOLERANCE_MS = 5 * 60_000;
 
 const NO_EVIDENCE: WindowExhaustion = {
 	source: "none",
@@ -241,17 +279,31 @@ export function estimateWindowExhaustion(
 
 	if (isUsablePrediction(prediction, resetsAtMs)) {
 		const slope = Math.max(0, prediction.slopePerHour);
+		const span =
+			(observedAtMs ?? now) - (activeAnchor?.anchorMs ?? windowStartMs);
 		return {
 			source: "regression",
 			slopePctPerHour: slope,
 			exhaustsAtMs: slope > 0 ? prediction.etaExhaustMs : null,
-			lowConfidence:
-				(observedAtMs ?? now) - (activeAnchor?.anchorMs ?? windowStartMs) <
-				ANCHOR_FULL_CONFIDENCE_MIN_SPAN_MS,
+			lowConfidence: span < ANCHOR_FULL_CONFIDENCE_MIN_SPAN_MS,
+			evidenceSpanMs: span,
 		};
 	}
 
 	if (pct <= 0) {
+		// A window whose structural start IS the observation has not started: the
+		// provider re-stamps `resets_at = now + duration` on every poll until the
+		// first request pins it. Safe to test after the regression branch — every
+		// poll of a sliding window is an `isResetBoundary`, so no usable
+		// prediction can exist for one.
+		if (isUnstartedWindow({ utilizationPct: pct, windowStartMs, observedAtMs })) {
+			return {
+				source: "unstarted",
+				slopePctPerHour: null,
+				exhaustsAtMs: null,
+				lowConfidence: false,
+			};
+		}
 		return {
 			source: "no-usage",
 			slopePctPerHour: null,
@@ -286,6 +338,7 @@ export function estimateWindowExhaustion(
 					exhaustsAtMs: null,
 					lowConfidence: anchoredElapsed < ANCHOR_FULL_CONFIDENCE_MIN_SPAN_MS,
 					anchored: true,
+					evidenceSpanMs: anchoredElapsed,
 				};
 			}
 			return {
@@ -297,6 +350,7 @@ export function estimateWindowExhaustion(
 				// after a gift the slope stands on a couple of samples.
 				lowConfidence: anchoredElapsed < ANCHOR_FULL_CONFIDENCE_MIN_SPAN_MS,
 				anchored: true,
+				evidenceSpanMs: anchoredElapsed,
 			};
 		}
 		const observedElapsed = observedAtMs - windowStartMs;
@@ -305,6 +359,7 @@ export function estimateWindowExhaustion(
 			slopePctPerHour: (pct / observedElapsed) * HOUR_MS,
 			exhaustsAtMs: observedAtMs + ((100 - pct) / pct) * observedElapsed,
 			lowConfidence: observedElapsed < ANCHOR_FULL_CONFIDENCE_MIN_SPAN_MS,
+			evidenceSpanMs: observedElapsed,
 		};
 	}
 
@@ -318,6 +373,7 @@ export function estimateWindowExhaustion(
 				exhaustsAtMs: null,
 				lowConfidence: true,
 				anchored: true,
+				evidenceSpanMs: anchoredElapsed,
 			};
 		}
 		return {
@@ -329,6 +385,7 @@ export function estimateWindowExhaustion(
 			exhaustsAtMs: now + ((100 - pct) / burned) * anchoredElapsed,
 			lowConfidence: true,
 			anchored: true,
+			evidenceSpanMs: anchoredElapsed,
 		};
 	}
 
@@ -340,7 +397,72 @@ export function estimateWindowExhaustion(
 		slopePctPerHour: (pct / elapsed) * HOUR_MS,
 		exhaustsAtMs: now + ((100 - pct) / pct) * elapsed,
 		lowConfidence: true,
+		evidenceSpanMs: elapsed,
 	};
+}
+
+/**
+ * Whether a window is one the provider has not started yet.
+ *
+ * True only for a zero reading whose structural start coincides with the
+ * instant the reading was observed, within
+ * {@link UNSTARTED_WINDOW_TOLERANCE_MS}. That coincidence is the signature of a
+ * sliding placeholder: with nothing spent, the provider reports
+ * `resets_at = now + duration` on every poll, so the derived start tracks the
+ * observation instead of standing still. A reading with no observation time
+ * cannot be placed against the start at all and is never called unstarted.
+ *
+ * The consequence a caller must respect: `resetsAtMs` on such a window is NOT a
+ * deadline, so it must never be offered as an earliest reset or a "next reset".
+ */
+export function isUnstartedWindow(input: {
+	utilizationPct: number;
+	windowStartMs: number | null | undefined;
+	observedAtMs?: number | null;
+}): boolean {
+	const { utilizationPct, windowStartMs, observedAtMs } = input;
+	if (!Number.isFinite(utilizationPct) || utilizationPct > 0) return false;
+	if (windowStartMs == null || !Number.isFinite(windowStartMs)) return false;
+	if (observedAtMs == null || !Number.isFinite(observedAtMs)) return false;
+	return (
+		Math.abs(windowStartMs - observedAtMs) <= UNSTARTED_WINDOW_TOLERANCE_MS
+	);
+}
+
+/**
+ * Whether this estimate is still LEARNING the window's burn: readable, but not
+ * yet carrying enough evidence to state a run-out.
+ *
+ * Three ways to be learning, one rule:
+ *  - the reading is at or below 0%, whatever the estimator said. Zero usage is
+ *    no evidence of burn, and it stays no evidence once three zero readings
+ *    have produced a flat regression that would otherwise read as "confidently
+ *    never runs out";
+ *  - `no-usage` / `unstarted`, the two zero-reading sources;
+ *  - a projecting source whose {@link WindowExhaustion.evidenceSpanMs} is under
+ *    {@link ANCHOR_FULL_CONFIDENCE_MIN_SPAN_MS}. Strict `<`, so exactly one
+ *    hour is confident.
+ *
+ * `already-exhausted` is a fact and `none` is already unreadable, so neither is
+ * ever learning. Deliberately NOT keyed on `lowConfidence`: the low lifetime
+ * path raises that flag unconditionally, so keying on it would leave every
+ * 5-hour window learning forever.
+ *
+ * A learning window is withheld from projection rather than treated as "no
+ * burn" — the difference between "we do not know yet" and "infinite runway".
+ */
+export function isLearningEstimate(
+	estimate: WindowExhaustion,
+	utilizationPct: number,
+): boolean {
+	if (Number.isFinite(utilizationPct) && utilizationPct <= 0) return true;
+	if (estimate.source === "no-usage" || estimate.source === "unstarted") {
+		return true;
+	}
+	return (
+		estimate.evidenceSpanMs != null &&
+		estimate.evidenceSpanMs < ANCHOR_FULL_CONFIDENCE_MIN_SPAN_MS
+	);
 }
 
 /**
@@ -769,6 +891,8 @@ function scaleEstimatePace(
 interface PoolBuild {
 	pooled: PooledAccount[];
 	unprojectableAccountIds: string[];
+	/** Subset of `unprojectableAccountIds` withheld for lack of evidence. */
+	learningAccountIds: string[];
 	assumedCredits: RunwayAssumedCredits[];
 }
 
@@ -783,9 +907,14 @@ interface AllOutHit {
  * it is simultaneously out of account-wide quota.
  *
  * Accounts with no readable window are excluded from the pool and reported in
- * `unprojectableAccountIds`. Excluding an account can only SHORTEN the computed
- * runway, so a `runway` result carrying unprojectable accounts is a documented
- * lower bound — never a fabricated zero.
+ * `unprojectableAccountIds`. So are accounts with a readable but still LEARNING
+ * window (see {@link isLearningEstimate}), which are additionally named in
+ * `learningAccountIds` — a subset of the unprojectable list — because their
+ * exclusion is temporary and a reader can be told what it is waiting for.
+ * Excluding an account can only SHORTEN the computed runway, so a `runway`
+ * result carrying unprojectable accounts is a documented lower bound — never a
+ * fabricated zero. When EVERY eligible account is learning the outcome is
+ * `unknown` carrying the same list: insufficient evidence, not infinity.
  *
  * Outcomes additionally carry a PACE PROBE, the two halves of one signed
  * "how much load can this pool take" figure: `beyond-horizon` carries
@@ -838,14 +967,18 @@ export function computeCapacityRunway(
 	if (accounts.length === 0) return { kind: "no-accounts" };
 
 	const horizonEndMs = now + horizonMs;
-	const { pooled, unprojectableAccountIds, assumedCredits } = buildPool(
-		accounts,
-		now,
-		horizonEndMs,
-		1,
-	);
+	const { pooled, unprojectableAccountIds, learningAccountIds, assumedCredits } =
+		buildPool(accounts, now, horizonEndMs, 1);
 
-	if (pooled.length === 0) return { kind: "unknown" };
+	// Every eligible account still learning is "we do not know yet", not
+	// "forever": the same `unknown` every other insufficient-evidence pool
+	// reports, now carrying who it is waiting on.
+	if (pooled.length === 0) {
+		return {
+			kind: "unknown",
+			...(learningAccountIds.length > 0 ? { learningAccountIds } : {}),
+		};
+	}
 
 	const hit = firstAllOut(pooled, now, horizonEndMs);
 	if (hit !== null) {
@@ -854,6 +987,7 @@ export function computeCapacityRunway(
 				kind: "out-now",
 				causes: hit.causes,
 				unprojectableAccountIds,
+				...(learningAccountIds.length > 0 ? { learningAccountIds } : {}),
 				...(assumedCredits.length > 0
 					? { assumedResetCredits: assumedCredits }
 					: {}),
@@ -874,6 +1008,7 @@ export function computeCapacityRunway(
 			durationMs: hit.t - now,
 			causes: hit.causes,
 			unprojectableAccountIds,
+			...(learningAccountIds.length > 0 ? { learningAccountIds } : {}),
 			...(assumedCredits.length > 0
 				? { assumedResetCredits: assumedCredits }
 				: {}),
@@ -889,6 +1024,7 @@ export function computeCapacityRunway(
 		kind: "beyond-horizon",
 		horizonMs,
 		unprojectableAccountIds,
+		...(learningAccountIds.length > 0 ? { learningAccountIds } : {}),
 		...(assumedCredits.length > 0
 			? { assumedResetCredits: assumedCredits }
 			: {}),
@@ -1022,9 +1158,24 @@ export function computeCapacityRunwayBand(
 	// "Out now" headline would ship a band that puts the run-out in the future.
 	if (baseline.kind === "out-now") return null;
 
+	// Accounts the BASELINE withheld for lack of evidence stay out of both
+	// probes. The ±0.5 pp perturbation would turn a mature 0% learner into a
+	// projectable 0.5% account, which can push a probe past the horizon and
+	// place the band's own start before or after a baseline the learner never
+	// took part in.
+	const learningAccountIds = new Set(
+		"learningAccountIds" in baseline ? (baseline.learningAccountIds ?? []) : [],
+	);
+	const probeAccounts =
+		learningAccountIds.size === 0
+			? accounts
+			: accounts.filter(
+					(account) => !learningAccountIds.has(account.accountId),
+				);
+
 	let perturbed = false;
 	const shift = (delta: number): RunwayAccountInput[] =>
-		accounts.map((account) => ({
+		probeAccounts.map((account) => ({
 			...account,
 			windows: account.windows.map((window) => {
 				// The WEEKLY window only, and only a WHOLE-percent reading of it that
@@ -1096,6 +1247,7 @@ function buildPool(
 ): PoolBuild {
 	const pooled: PooledAccount[] = [];
 	const unprojectableAccountIds: string[] = [];
+	const learningAccountIds: string[] = [];
 	const assumedCredits: RunwayAssumedCredits[] = [];
 
 	for (const account of accounts) {
@@ -1118,6 +1270,7 @@ function buildPool(
 		let weeklyTimeToFullMs: number | null = null;
 		const bank = account.codexResetCredits ?? null;
 		let readable = false;
+		let learning = false;
 		for (const window of account.windows) {
 			// A window outside the paced set is held at its measured burn. That is
 			// what makes a SCOPED counterfactual expressible: varying one model
@@ -1150,6 +1303,15 @@ function buildPool(
 			// window that emits NO dead interval is positively known to stay
 			// available, which is the opposite of unknown.
 			readable = true;
+			// Unknown burn, NOT zero burn. Emitting no dead interval here would
+			// claim the window stays available, which is the optimistic direction.
+			// ONE learning window makes the WHOLE account unprojectable: pooling it
+			// on its confident windows alone applies half its constraints and can
+			// only lengthen the pool runway.
+			if (isLearningEstimate(estimate, window.utilizationPct)) {
+				learning = true;
+				continue;
+			}
 			const intervals = windowDeadIntervals(
 				window,
 				estimate,
@@ -1171,6 +1333,14 @@ function buildPool(
 
 		if (!readable) {
 			unprojectableAccountIds.push(account.accountId);
+			continue;
+		}
+
+		// The intervals collected from this account's CONFIDENT windows are
+		// discarded along with it — a partial constraint set is not a bound.
+		if (learning) {
+			unprojectableAccountIds.push(account.accountId);
+			learningAccountIds.push(account.accountId);
 			continue;
 		}
 
@@ -1201,7 +1371,7 @@ function buildPool(
 		});
 	}
 
-	return { pooled, unprojectableAccountIds, assumedCredits };
+	return { pooled, unprojectableAccountIds, learningAccountIds, assumedCredits };
 }
 
 /**
@@ -1293,6 +1463,12 @@ const PACE_MARGIN_PRECISION = 0.01;
  * island flips back to beyond-horizon a fraction of a percent higher, so it
  * carries no usable fragility signal, and no finite grid could rule the shape
  * out anyway. The wire type documents the same grid semantics.
+ *
+ * Runs on the same learning-excluded pool the baseline scan used: the learning
+ * predicate is pace-independent, so no probed multiplier can re-admit an
+ * account the baseline withheld. `pooled.length === 0` can therefore mean every
+ * eligible account is learning, which is the same "nothing to probe" the walk
+ * already returns null for.
  */
 function probePaceMargin(
 	accounts: RunwayAccountInput[],
@@ -1370,6 +1546,9 @@ export const PACE_DEFICIT_PROBE_MIN = 0.5;
  * Null carries a MEANING and must not be rendered as zero — see the field doc
  * on `paceDeficit`. It says no pace in range clears the horizon and stays
  * clear, which is strictly worse than any figure the probe could return.
+ *
+ * Runs on the same learning-excluded pool as the baseline scan, for the reason
+ * {@link probePaceMargin} states.
  */
 function probePaceDeficit(
 	accounts: RunwayAccountInput[],

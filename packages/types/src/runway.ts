@@ -34,11 +34,28 @@ export interface RunwayAssumedCredits {
 
 export type RunwayOutcome =
 	| { kind: "no-accounts" }
-	| { kind: "unknown" }
+	| {
+			kind: "unknown";
+			/**
+			 * See the doc on `out-now`. On `unknown` a non-empty list says the WHOLE
+			 * pool was in that state: insufficient evidence, not infinity.
+			 */
+			learningAccountIds?: string[];
+	  }
 	| {
 			kind: "out-now";
 			causes: RunwayCause[];
 			unprojectableAccountIds: string[];
+			/**
+			 * Present (non-empty) only when some eligible account had a readable
+			 * window and at least one of its readable windows was still learning:
+			 * inside the one-hour evidence span, at 0% (`no-usage` or a flat
+			 * regression), or `unstarted`. Excluded from the survival set exactly
+			 * like an unreadable account, and therefore ALSO listed in
+			 * `unprojectableAccountIds` (a subset of it). On `unknown` it says the
+			 * whole pool was in that state: insufficient evidence, not infinity.
+			 */
+			learningAccountIds?: string[];
 			/** Present (non-empty) only when a credit assumption shaped the scan. */
 			assumedResetCredits?: RunwayAssumedCredits[];
 	  }
@@ -46,6 +63,8 @@ export type RunwayOutcome =
 			kind: "beyond-horizon";
 			horizonMs: number;
 			unprojectableAccountIds: string[];
+			/** See the doc on `out-now`. */
+			learningAccountIds?: string[];
 			assumedResetCredits?: RunwayAssumedCredits[];
 			/**
 			 * How fragile this "no run-out" is. The all-out test is binary — a
@@ -77,6 +96,8 @@ export type RunwayOutcome =
 			durationMs: number;
 			causes: RunwayCause[];
 			unprojectableAccountIds: string[];
+			/** See the doc on `out-now`. */
+			learningAccountIds?: string[];
 			assumedResetCredits?: RunwayAssumedCredits[];
 			/**
 			 * How much SLOWER the pool would have to burn to stop running out
@@ -187,6 +208,14 @@ export interface RunwayWindowSummary {
 	 * placeholder 0 that must never be served as a measured slope).
 	 */
 	prediction: UsagePrediction | null;
+	/**
+	 * True when the window has not started: it reads 0% and its structural start
+	 * coincides with the observation, because the provider slides
+	 * `resets_at = now + duration` on every poll until the first request pins it.
+	 * `resetsAtMs` is then a sliding placeholder and NEVER a deadline. Omitted
+	 * otherwise.
+	 */
+	unstarted?: boolean;
 }
 
 export interface RunwayAccountSummary {
