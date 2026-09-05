@@ -85,11 +85,19 @@ function RunwayPanel({
 	// of which has quota evidence. Reporting the first when it is the second
 	// contradicts the per-key breakdown standing right underneath, which lists
 	// the keys this line just claimed do not exist.
+	// And a third situation inside the second: active keys whose accounts ARE
+	// readable but are still learning their burn. "No quota evidence" would send
+	// a reader looking for a dead poller; the count says to wait instead. Read
+	// from the summary's union rather than an outcome, because this is exactly
+	// the case where no key was stateable enough to have one.
+	const learningAccounts = headline.learningAccountIds.length;
 	const outcomeReason = dataResolved
 		? worst === null
 			? headline.activeKeyCount === 0
 				? "No active API keys or accounts"
-				: "No quota evidence for any account"
+				: learningAccounts > 0
+					? `${learningAccounts} account${learningAccounts === 1 ? "" : "s"} not yet projectable`
+					: "No quota evidence for any account"
 			: runwayUnavailableReason(worst.outcome)
 		: null;
 	const blockingReason = unavailableReason ?? outcomeReason;

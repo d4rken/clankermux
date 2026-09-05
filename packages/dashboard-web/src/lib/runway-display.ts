@@ -32,8 +32,14 @@ export function runwayUnavailableReason(outcome: RunwayOutcome): string | null {
 	switch (outcome.kind) {
 		case "no-accounts":
 			return "No accounts this key can route to";
-		case "unknown":
-			return "No quota evidence for any account";
+		case "unknown": {
+			// "Not yet" and "never polled" are different absences and must not
+			// share a caption: the first resolves on its own within the hour.
+			const learning = outcome.learningAccountIds?.length ?? 0;
+			return learning > 0
+				? `${learning} account${learning === 1 ? "" : "s"} not yet projectable`
+				: "No quota evidence for any account";
+		}
 		default:
 			return null;
 	}
@@ -117,13 +123,43 @@ export function describeRunwayCause(
 	return causes.length > 1 ? `${label} +${causes.length - 1} more` : label;
 }
 
-/** How many eligible accounts had no readable quota window. */
+/**
+ * How many eligible accounts had NO READABLE WINDOW AT ALL.
+ *
+ * Accounts withheld only because their burn is not measured yet are listed in
+ * `unprojectableAccountIds` too, and they are subtracted here: they belong to
+ * {@link learningCount}, which reads as "wait" rather than "nobody polled it".
+ * The name is kept because every caller already renders it as "unknown".
+ */
 export function unprojectableCount(outcome: RunwayOutcome): number {
 	switch (outcome.kind) {
 		case "out-now":
 		case "beyond-horizon":
 		case "runway":
-			return outcome.unprojectableAccountIds.length;
+			return Math.max(
+				0,
+				outcome.unprojectableAccountIds.length -
+					(outcome.learningAccountIds?.length ?? 0),
+			);
+		default:
+			return 0;
+	}
+}
+
+/**
+ * How many eligible accounts the scan withheld for lack of evidence — early in
+ * a window, at 0%, or on a window the provider has not started.
+ *
+ * Counted on `unknown` too, where it is the whole pool and the only thing the
+ * outcome can say.
+ */
+export function learningCount(outcome: RunwayOutcome): number {
+	switch (outcome.kind) {
+		case "unknown":
+		case "out-now":
+		case "beyond-horizon":
+		case "runway":
+			return outcome.learningAccountIds?.length ?? 0;
 		default:
 			return 0;
 	}
@@ -214,6 +250,10 @@ export function runwayQualifier(
 	const unknown = unprojectableCount(effective);
 	if (unknown > 0) {
 		parts.push(`${unknown} account${unknown === 1 ? "" : "s"} unknown`);
+	}
+	const learning = learningCount(effective);
+	if (learning > 0) {
+		parts.push(`${learning} learning`);
 	}
 	return parts.length > 0 ? parts.join(" · ") : null;
 }

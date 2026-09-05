@@ -3,6 +3,7 @@ import type { KeyRunway } from "@clankermux/core";
 import type { RunwayAccountSummary } from "@clankermux/types";
 import {
 	msUntilNextReset,
+	nextResetEvidence,
 	reachableAccounts,
 	tightestWindow,
 } from "./runway-evidence";
@@ -17,6 +18,7 @@ function account(
 		kind: "five_hour" | "seven_day";
 		utilizationPct: number | null;
 		resetsAtMs: number | null;
+		unstarted?: boolean;
 	}>,
 ): RunwayAccountSummary {
 	return {
@@ -144,5 +146,49 @@ describe("msUntilNextReset", () => {
 		];
 
 		expect(msUntilNextReset(accounts, NOW)).toBeNull();
+	});
+
+	it("skips an unstarted window and says so when it was the only one", () => {
+		// The provider re-stamps that reset as `now + 7d` on every poll while
+		// nothing has been spent, so it would take the soonest slot forever and
+		// name a deadline that keeps moving.
+		const onlyUnstarted = [
+			account("fresh", [
+				{
+					kind: "seven_day",
+					utilizationPct: 0,
+					resetsAtMs: NOW + 7 * DAY,
+					unstarted: true,
+				},
+			]),
+		];
+		expect(nextResetEvidence(onlyUnstarted, NOW)).toEqual({
+			msUntilReset: null,
+			onlyUnstarted: true,
+		});
+
+		const alongside = [
+			...onlyUnstarted,
+			account("running", [
+				{ kind: "seven_day", utilizationPct: 20, resetsAtMs: NOW + 2 * DAY },
+			]),
+		];
+		expect(nextResetEvidence(alongside, NOW)).toEqual({
+			msUntilReset: 2 * DAY,
+			onlyUnstarted: false,
+		});
+	});
+
+	it("keeps 'nothing reported a reset' distinct from 'not started'", () => {
+		const accounts = [
+			account("none", [
+				{ kind: "five_hour", utilizationPct: 10, resetsAtMs: null },
+			]),
+		];
+
+		expect(nextResetEvidence(accounts, NOW)).toEqual({
+			msUntilReset: null,
+			onlyUnstarted: false,
+		});
 	});
 });

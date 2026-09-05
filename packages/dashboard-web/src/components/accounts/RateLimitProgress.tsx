@@ -228,6 +228,15 @@ function computeProjectedMessage(
 	);
 
 	if (estimate.source === "none") return null;
+	if (estimate.source === "unstarted") {
+		// Nothing spent AND the window's structural start tracks the reading: the
+		// provider re-stamps `resets_at = now + duration` on every poll until the
+		// first request pins it, so the date beside this is not a deadline.
+		return {
+			message: "Not started — the window begins on first use",
+			tone: "neutral",
+		};
+	}
 	if (estimate.source === "no-usage") {
 		return { message: "No usage recorded yet in this window", tone: "neutral" };
 	}

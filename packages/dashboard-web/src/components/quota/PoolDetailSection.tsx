@@ -332,6 +332,14 @@ export function PoolDetailSection({
 											{windowTimeLabel(f.soonestExhaustsAtMs, "seven_day")}
 										</div>
 									)}
+									{/* Accounts excluded from that count for want of measured
+									    burn. Rendered even when nothing is projected, which is the
+									    case that would otherwise say nothing at all. */}
+									{f.learningCount > 0 && (
+										<div data-tone="neutral" className="text-muted-foreground">
+											{f.learningCount} not yet projectable
+										</div>
+									)}
 									{f.accounts.length > 1 && (
 										<ul className="ml-item space-y-tight">
 											{f.accounts.map((a) => (

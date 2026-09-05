@@ -68,6 +68,46 @@ function render(accounts: AccountResponse[]) {
 	);
 }
 
+describe("PoolQuotaCard unstarted and learning disclosure", () => {
+	it("says the week has not started instead of falling silent", () => {
+		// The provider reports `now + 7d` and re-stamps it every poll, so that
+		// instant is excluded from the class's earliest reset upstream. Without
+		// this the checkpoint line simply disappears.
+		const html = render([
+			account({
+				usageAsOfIso: new Date(NOW).toISOString(),
+				usageData: weeklyAt(0, NOW + 7 * DAY) as never,
+			}),
+		]);
+
+		expect(html).toContain("not started; resets 7d after first use");
+		// And the withheld projection is disclosed rather than reading as
+		// "nothing is projected to run out".
+		expect(html).toContain("1 not yet projectable");
+	});
+
+	it("keeps a started account's reset while naming the unstarted one", () => {
+		const html = render([
+			account({
+				id: "acc-1",
+				name: "alpha",
+				usageAsOfIso: new Date(NOW).toISOString(),
+				usageData: weeklyAt(30, NOW + 2 * DAY) as never,
+			}),
+			account({
+				id: "acc-2",
+				name: "beta",
+				usageAsOfIso: new Date(NOW).toISOString(),
+				usageData: weeklyAt(0, NOW + 7 * DAY) as never,
+			}),
+		]);
+
+		expect(html).toContain("1 not started");
+		expect(html).toContain("resets");
+		expect(html).toContain("1 not yet projectable");
+	});
+});
+
 describe("PoolQuotaCard at-risk row", () => {
 	it("says 'account' when the class holds one", () => {
 		// 90% used a day into a 7-day window: the projection lands well before

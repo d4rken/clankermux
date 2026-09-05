@@ -98,25 +98,49 @@ export function tightestWindow(
 }
 
 /**
- * The soonest window reset still ahead of `now`, in ms from `now`.
+ * The soonest window reset still ahead of `now`, in ms from `now`, and whether
+ * an UNSTARTED window is the reason there is none.
  *
  * Resets in the past are skipped rather than clamped to zero: a reset instant
  * that has already passed means the reading predates the rollover, so the
  * window has already reset and the stored instant says nothing about the next
  * one.
+ *
+ * An unstarted window is skipped for a different reason, and the two absences
+ * must not read alike. Its reset is the provider's placeholder, re-stamped as
+ * `now + duration` on every poll while nothing has been spent, so it would win
+ * "soonest" forever and name a deadline that keeps moving. `onlyUnstarted` says
+ * every candidate was one of those, so a caller can render "not started"
+ * instead of the dash it uses for "nothing reported a reset at all".
  */
-export function msUntilNextReset(
+export function nextResetEvidence(
 	accounts: RunwayAccountSummary[],
 	now: number,
-): number | null {
+): { msUntilReset: number | null; onlyUnstarted: boolean } {
 	let soonest: number | null = null;
+	let unstartedSeen = false;
 	for (const account of accounts) {
 		for (const window of account.windows) {
 			const resetsAtMs = window.resetsAtMs;
 			if (resetsAtMs == null || !Number.isFinite(resetsAtMs)) continue;
 			if (resetsAtMs <= now) continue;
+			if (window.unstarted === true) {
+				unstartedSeen = true;
+				continue;
+			}
 			if (soonest == null || resetsAtMs < soonest) soonest = resetsAtMs;
 		}
 	}
-	return soonest == null ? null : soonest - now;
+	return {
+		msUntilReset: soonest == null ? null : soonest - now,
+		onlyUnstarted: soonest == null && unstartedSeen,
+	};
+}
+
+/** {@link nextResetEvidence} without the unstarted distinction. */
+export function msUntilNextReset(
+	accounts: RunwayAccountSummary[],
+	now: number,
+): number | null {
+	return nextResetEvidence(accounts, now).msUntilReset;
 }

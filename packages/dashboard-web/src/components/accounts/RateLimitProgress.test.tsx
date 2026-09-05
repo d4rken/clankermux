@@ -35,6 +35,55 @@ describe("RateLimitProgress", () => {
 		expect(html).toContain("5-hour");
 	});
 
+	it("says a window the provider has not started yet is not a deadline", () => {
+		// Nothing spent AND the structural start tracks the reading: the provider
+		// re-stamps `resets_at = now + 5h` on every poll until the first request
+		// pins it, so the countdown beside this is a placeholder.
+		const now = Date.now();
+		const html = renderToStaticMarkup(
+			<RateLimitProgress
+				resetIso={new Date(now + 5 * 60 * 60 * 1000).toISOString()}
+				usageUtilization={0}
+				usageWindow="five_hour"
+				usageData={{
+					five_hour: {
+						utilization: 0,
+						resets_at: new Date(now + 5 * 60 * 60 * 1000).toISOString(),
+					},
+				}}
+				usageAsOfIso={new Date(now).toISOString()}
+				provider="anthropic"
+				inlineProjection
+			/>,
+		);
+
+		expect(html).toContain("Not started — the window begins on first use");
+		expect(html).not.toContain("No usage recorded yet in this window");
+	});
+
+	it("still says no usage recorded for a started window sitting at zero", () => {
+		const now = Date.now();
+		const html = renderToStaticMarkup(
+			<RateLimitProgress
+				resetIso={new Date(now + 60 * 60 * 1000).toISOString()}
+				usageUtilization={0}
+				usageWindow="five_hour"
+				usageData={{
+					five_hour: {
+						utilization: 0,
+						resets_at: new Date(now + 60 * 60 * 1000).toISOString(),
+					},
+				}}
+				usageAsOfIso={new Date(now).toISOString()}
+				provider="anthropic"
+				inlineProjection
+			/>,
+		);
+
+		expect(html).toContain("No usage recorded yet in this window");
+		expect(html).not.toContain("Not started — the window begins on first use");
+	});
+
 	describe("weekly window with no reset timestamp", () => {
 		const futureFiveHour = () => ({
 			utilization: 10,
