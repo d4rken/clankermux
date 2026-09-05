@@ -1,6 +1,10 @@
 import { describe, expect, it } from "bun:test";
 import {
 	clampBridgeHours,
+	FALLBACK_BRIDGE_HOURS,
+	FALLBACK_HOURS_PER_RISK_UNIT,
+	FALLBACK_MAX_BRIDGE_HOURS,
+	FALLBACK_REFRESH_MINUTES,
 	hoursToRiskFactor,
 	keepalivesForHours,
 } from "./bridge-horizon";
@@ -9,6 +13,23 @@ import {
 const HOURS_PER_RISK_UNIT = 9.5833; // ((1.25-0.1)/0.1) × (50/60)
 const MAX_BRIDGE_HOURS = 9.5833;
 const REFRESH_MINUTES = 50;
+
+describe("pre-load fallbacks", () => {
+	// The server (bridge-policy) owns these numbers; the fallbacks only have to
+	// agree with it until the first cache-warming query resolves.
+	it("match the server's derivation for the 1h-promoted bridge", () => {
+		expect(FALLBACK_HOURS_PER_RISK_UNIT).toBeCloseTo(HOURS_PER_RISK_UNIT, 3);
+		expect(FALLBACK_MAX_BRIDGE_HOURS).toBeCloseTo(MAX_BRIDGE_HOURS, 3);
+		expect(FALLBACK_REFRESH_MINUTES).toBe(REFRESH_MINUTES);
+	});
+
+	it("default horizon is the server's default risk factor (0.4) in hours", () => {
+		expect(FALLBACK_BRIDGE_HOURS).toBeCloseTo(0.4 * HOURS_PER_RISK_UNIT, 3);
+		expect(
+			hoursToRiskFactor(FALLBACK_BRIDGE_HOURS, FALLBACK_HOURS_PER_RISK_UNIT),
+		).toBeCloseTo(0.4, 6);
+	});
+});
 
 describe("clampBridgeHours", () => {
 	it("clamps into [0, maxBridgeHours]", () => {

@@ -549,6 +549,109 @@ describe("decideResetCreditAction — weekly-limit trigger", () => {
 			}),
 		).toEqual({ action: "skip", reason: "no-credit-available" });
 	});
+
+	// A restored weekly window only helps an account the auto-resume guard will
+	// un-pause afterwards. Every other pause keeps the account out of routing,
+	// so a credit spent on it buys nothing.
+	for (const pauseReason of [
+		"manual",
+		null,
+		"failure_threshold",
+		"subscription_expired",
+		"some-future-reason",
+	]) {
+		it(`skips a pause that a weekly reset cannot lift (reason ${pauseReason})`, () => {
+			expect(
+				decide({
+					account: { ...weeklyOnly, paused: true, pause_reason: pauseReason },
+					credits: [farCredit()],
+					weeklyUsedPercent: 100,
+				}),
+			).toEqual({ action: "skip", reason: "paused" });
+		});
+	}
+
+	for (const pauseReason of ["overage", null]) {
+		it(`fires on an auto-resumable overage pause (reason ${pauseReason})`, () => {
+			const credit = farCredit();
+			expect(
+				decide({
+					account: {
+						...weeklyOnly,
+						paused: true,
+						pause_reason: pauseReason,
+						auto_pause_on_overage_enabled: true,
+					},
+					credits: [credit],
+					weeklyUsedPercent: 100,
+				}),
+			).toEqual({
+				action: "consume",
+				creditId: "c-far",
+				expiresAt: credit.expiresAt as number,
+				cause: "weekly-limit",
+			});
+		});
+	}
+
+	// The toggle alone is not enough: the reason has to be one auto-resume
+	// clears, or the account stays paused after the reset regardless.
+	for (const pauseReason of [
+		"manual",
+		"failure_threshold",
+		"subscription_expired",
+	]) {
+		it(`skips a ${pauseReason} pause even with auto-resume on`, () => {
+			expect(
+				decide({
+					account: {
+						...weeklyOnly,
+						paused: true,
+						pause_reason: pauseReason,
+						auto_pause_on_overage_enabled: true,
+					},
+					credits: [farCredit()],
+					weeklyUsedPercent: 100,
+				}),
+			).toEqual({ action: "skip", reason: "paused" });
+		});
+	}
+
+	it("skips an overage pause once auto-resume has been switched off", () => {
+		expect(
+			decide({
+				account: {
+					...weeklyOnly,
+					paused: true,
+					pause_reason: "overage",
+					auto_pause_on_overage_enabled: false,
+				},
+				credits: [farCredit()],
+				weeklyUsedPercent: 100,
+			}),
+		).toEqual({ action: "skip", reason: "paused" });
+	});
+
+	it("the pause gate stays out of the expiry trigger", () => {
+		const credit = makeCredit();
+		expect(
+			decide({
+				account: {
+					codex_auto_apply_reset_credits_enabled: true,
+					codex_auto_apply_reset_on_weekly_limit_enabled: true,
+					paused: true,
+					pause_reason: "failure_threshold",
+				},
+				credits: [credit],
+				weeklyUsedPercent: 100,
+			}),
+		).toEqual({
+			action: "consume",
+			creditId: credit.id,
+			expiresAt: credit.expiresAt as number,
+			cause: "expiry",
+		});
+	});
 });
 
 // ---------------------------------------------------------------------------
@@ -717,7 +820,12 @@ describe("CodexResetCreditApplyScheduler.tick", () => {
 		expect(h.dispatchCalls).toHaveLength(0);
 	});
 
-	for (const pauseReason of ["manual", null]) {
+	for (const pauseReason of [
+		"manual",
+		null,
+		"failure_threshold",
+		"subscription_expired",
+	]) {
 		it(`conserves weekly resets on a paused account with reason ${pauseReason}`, async () => {
 			const h = makeHarness({
 				getAccount: async () =>
@@ -732,6 +840,55 @@ describe("CodexResetCreditApplyScheduler.tick", () => {
 			expect(h.dispatchCalls).toHaveLength(0);
 		});
 	}
+
+	it("restores weekly quota for an overage pause that auto-resume will lift", async () => {
+		const h = makeHarness({
+			getAccount: async () =>
+				makeCodexAccount({
+					...weeklyOnly,
+					paused: true,
+					pause_reason: "overage",
+					auto_pause_on_overage_enabled: true,
+				}),
+			weeklyUsedPercent: 100,
+		});
+		await h.scheduler.tick();
+		expect(h.dispatchCalls).toHaveLength(1);
+	});
+
+	it("does not retry a pending weekly attempt on an account paused by the failure threshold", async () => {
+		const h = makeHarness({
+			getAccount: async () =>
+				makeCodexAccount({
+					...weeklyOnly,
+					paused: true,
+					pause_reason: "failure_threshold",
+				}),
+			getPendingAttempt: async () => pendingAttempt(),
+			weeklyUsedPercent: 100,
+		});
+		await h.scheduler.tick();
+		expect(h.dispatchCalls).toHaveLength(0);
+	});
+
+	it("retries a pending weekly attempt on an auto-resumable overage pause", async () => {
+		const h = makeHarness({
+			getAccount: async () =>
+				makeCodexAccount({
+					...weeklyOnly,
+					paused: true,
+					pause_reason: "overage",
+					auto_pause_on_overage_enabled: true,
+				}),
+			getPendingAttempt: async () => pendingAttempt(),
+			weeklyUsedPercent: 100,
+		});
+		await h.scheduler.tick();
+		expect(h.dispatchCalls).toHaveLength(1);
+		expect(h.dispatchCalls[0].request.idempotencyKey).toBe(
+			"codex-reset-auto:acct-1:credit-1:1",
+		);
+	});
 
 	it("honors a manual pause applied between discovery and confirmation", async () => {
 		let reads = 0;

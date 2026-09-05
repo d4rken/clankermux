@@ -38,3 +38,21 @@ export function keepalivesForHours(
 	if (!Number.isFinite(hours) || !(refreshMinutes > 0) || hours <= 0) return 0;
 	return (hours * 60) / refreshMinutes;
 }
+
+/**
+ * Pre-load fallbacks for the server-owned constants above, used only until the
+ * first cache-warming query resolves so the horizon control opens with the
+ * right range instead of a stale one. They restate bridge-policy's derivation
+ * for the 1h-promoted bridge:
+ *   hoursPerRiskUnit = (FIVE_MINUTE_WRITE_MULT − CACHE_READ_MULT) / CACHE_READ_MULT
+ *                    × KEEPALIVE_REFRESH_1H / 1h
+ *                    = (1.25 − 0.1) / 0.1 × 50min / 60min
+ * The server value always replaces these once loaded; a change to the server
+ * economics must be mirrored here (bridge-horizon.test.ts pins the numbers).
+ */
+export const FALLBACK_HOURS_PER_RISK_UNIT = ((1.25 - 0.1) / 0.1) * (50 / 60);
+/** MAX_RISK_FACTOR is 1.0, so the break-even ceiling equals one risk unit. */
+export const FALLBACK_MAX_BRIDGE_HOURS = FALLBACK_HOURS_PER_RISK_UNIT;
+export const FALLBACK_REFRESH_MINUTES = 50;
+/** The server's default RISK_FACTOR (0.4) expressed as a horizon. */
+export const FALLBACK_BRIDGE_HOURS = 0.4 * FALLBACK_HOURS_PER_RISK_UNIT;

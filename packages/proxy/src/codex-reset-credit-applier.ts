@@ -16,9 +16,10 @@
  *      the redeem endpoint every tick. When both
  *      triggers apply to the same credit the audit cause is "expiry" (the
  *      more urgent reason — the credit was about to be lost anyway).
- *    Expiry protection includes paused accounts. Weekly redemption excludes
- *    manual pauses (including legacy pauses with no reason). Needs-reauth
- *    accounts are excluded from both triggers.
+ *    Expiry protection includes paused accounts. Weekly redemption skips any
+ *    pause the restored window cannot lift — everything except an overage
+ *    pause that auto-resume will clear (see {@link weeklyResetCanLiftPause}).
+ *    Needs-reauth accounts are excluded from both triggers.
  *  - Two-phase tick per candidate: DISCOVERY runs on the cheap TTL-gated cache
  *    read; only when discovery says "consume" does CONFIRMATION force a fresh
  *    metadata read and re-run every gate (last-moment toggle flip, credit
@@ -105,13 +106,39 @@ export type ResetCreditApplyDecision =
 				| "no-credit-near-expiry"
 				| "weekly-not-exhausted"
 				| "other-account-available"
-				| "manually-paused"
+				| "paused"
 				| "cooldown"
 				| "no-credit-available"
 				| "already-resolved";
 	  };
 
 type ResetCreditSkip = Extract<ResetCreditApplyDecision, { action: "skip" }>;
+
+/**
+ * Whether a restored weekly window can lift this account's pause.
+ *
+ * Mirrors the auto-resume guard in auto-refresh-scheduler
+ * (`auto_pause_on_overage_enabled` AND `pause_reason` IN (NULL, 'overage')).
+ * That guard is the only thing that un-pauses an account without an operator,
+ * so it is also the only pause a weekly reset credit buys anything for: the
+ * account is on paid credits because its week is spent, the reset ends that,
+ * and the next prime resumes it. Every other pause — manual, failure
+ * threshold, subscription expiry, a reason this code has never seen — keeps
+ * the account out of routing after the reset, and the credit is better kept
+ * for the expiry trigger or a later exhaustion. Unpaused accounts pass.
+ */
+export function weeklyResetCanLiftPause(
+	account: Pick<
+		Account,
+		"paused" | "pause_reason" | "auto_pause_on_overage_enabled"
+	>,
+): boolean {
+	if (!account.paused) return true;
+	return (
+		Boolean(account.auto_pause_on_overage_enabled) &&
+		(account.pause_reason == null || account.pause_reason === "overage")
+	);
+}
 
 /**
  * Pure decision function — no I/O, injectable clock. Shared gates run first:
@@ -123,8 +150,8 @@ type ResetCreditSkip = Extract<ResetCreditApplyDecision, { action: "skip" }>;
  *  - EXPIRY: `available` credits whose expiry is in the future but within
  *    {@link RESET_CREDIT_AUTO_APPLY_LEAD_MS}, soonest-first.
  *  - WEEKLY-LIMIT: fires only when the cached 7-day used percent is a known
- *    number >= 100 (null/unknown FAILS CLOSED), the account is not manually
- *    paused, and no cooldown-anchoring auto
+ *    number >= 100 (null/unknown FAILS CLOSED), any pause is one the reset
+ *    can lift ({@link weeklyResetCanLiftPause}), and no cooldown-anchoring auto
  *    resolution happened within {@link RESET_CREDIT_WEEKLY_LIMIT_COOLDOWN_MS}.
  *    Any
  *    unexpired `available` credit qualifies, soonest-expiring first with
@@ -144,6 +171,7 @@ export function decideResetCreditAction(inputs: {
 		| "codex_auto_apply_reset_on_weekly_limit_enabled"
 		| "pause_reason"
 		| "paused"
+		| "auto_pause_on_overage_enabled"
 		| "refresh_token"
 		| "access_token"
 	>;
@@ -228,11 +256,8 @@ export function decideResetCreditAction(inputs: {
 	// WEEKLY-LIMIT trigger — exhausted 7-day window, cooldown-gated.
 	let weeklySkip: ResetCreditSkip | null = null;
 	if (weeklyEnabled) {
-		if (
-			account.paused &&
-			(account.pause_reason === "manual" || account.pause_reason === null)
-		) {
-			weeklySkip = { action: "skip", reason: "manually-paused" };
+		if (!weeklyResetCanLiftPause(account)) {
+			weeklySkip = { action: "skip", reason: "paused" };
 		} else if (weeklyUsedPercent === null || weeklyUsedPercent < 100) {
 			// Includes the fail-closed null/unknown case.
 			weeklySkip = { action: "skip", reason: "weekly-not-exhausted" };
@@ -451,11 +476,7 @@ export class CodexResetCreditApplyScheduler {
 			const mayReplay =
 				pending.cause === "weekly-limit"
 					? account.codex_auto_apply_reset_on_weekly_limit_enabled &&
-						!(
-							account.paused &&
-							(account.pause_reason === "manual" ||
-								account.pause_reason === null)
-						)
+						weeklyResetCanLiftPause(account)
 					: account.codex_auto_apply_reset_credits_enabled;
 			// Replay the SAME key even when usage recovered or the metadata now
 			// says redeemed/missing/expired. This retrieves the uncertain outcome
@@ -475,8 +496,9 @@ export class CodexResetCreditApplyScheduler {
 				);
 				return;
 			}
-			// A manual pause/toggle flip stops a weekly retry, but must not
-			// disable the independent protection for credits about to expire.
+			// A pause the reset can't lift, or a toggle flip, stops a weekly retry
+			// but must not disable the independent protection for credits about
+			// to expire.
 		}
 
 		// Phase 1 — DISCOVERY on the cheap TTL-gated cache read.
