@@ -29,6 +29,7 @@ function input(
 	return {
 		readings: [],
 		presentFamilies: new Set<ModelFamily>(),
+		idleFamilies: new Set<ModelFamily>(),
 		family: "fable",
 		accountWideWeeklyResetMs: NOW + 3 * DAY,
 		classId: "anthropic",
@@ -94,10 +95,58 @@ describe("classifyScopedFamilyEvidence", () => {
 		).toBe("not-eligible");
 	});
 
+	it("calls the idle form unopened while the account-wide week is still running", () => {
+		// Anthropic's OTHER shape for an unused window: the entry is present at 0%
+		// with no reset instead of absent. Same fact as an omitted entry, so it
+		// must reach the same state.
+		expect(
+			classifyScopedFamilyEvidence(
+				input({
+					readings: [],
+					presentFamilies: new Set<ModelFamily>(["fable"]),
+					idleFamilies: new Set<ModelFamily>(["fable"]),
+				}),
+			),
+		).toBe("unopened");
+	});
+
+	it("calls the idle form unreadable once the account-wide week has rolled over", () => {
+		// After the rollover the entry says nothing about the week now running,
+		// and it EXISTS, so the account stays in the row as unreadable rather than
+		// being dropped.
+		expect(
+			classifyScopedFamilyEvidence(
+				input({
+					readings: [],
+					presentFamilies: new Set<ModelFamily>(["fable"]),
+					idleFamilies: new Set<ModelFamily>(["fable"]),
+					accountWideWeeklyResetMs: NOW - DAY,
+				}),
+			),
+		).toBe("unreadable");
+	});
+
+	it("calls the idle form unreadable when the account-wide reset is unknown", () => {
+		expect(
+			classifyScopedFamilyEvidence(
+				input({
+					readings: [],
+					presentFamilies: new Set<ModelFamily>(["fable"]),
+					idleFamilies: new Set<ModelFamily>(["fable"]),
+					accountWideWeeklyResetMs: null,
+				}),
+			),
+		).toBe("unreadable");
+	});
+
 	it("keeps an account with no scoped evidence unreadable when its class reports", () => {
 		expect(
 			classifyScopedFamilyEvidence(
-				input({ readings: null, presentFamilies: null }),
+				input({
+					readings: null,
+					presentFamilies: null,
+					idleFamilies: null,
+				}),
 			),
 		).toBe("unreadable");
 	});
@@ -108,6 +157,7 @@ describe("classifyScopedFamilyEvidence", () => {
 				input({
 					readings: null,
 					presentFamilies: null,
+					idleFamilies: null,
 					classId: "codex",
 					reportingClasses: new Set(["anthropic"]),
 				}),

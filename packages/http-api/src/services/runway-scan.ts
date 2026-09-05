@@ -270,6 +270,12 @@ function observationsFrom(
 		// used it this week) from "the payload named one and it could not be
 		// read" — the snapshot path leaves it absent, which is neither.
 		weeklyScopedPresent: normalized.weeklyScopedPresent,
+		// Also from that same call: the families whose entry is the idle form
+		// (0%, no reset). Anthropic states an unused window either by omitting it
+		// or by listing it this way, and the family scan has to reach the same
+		// conclusion from both — otherwise an account that has simply not touched
+		// the family reads as one whose entry could not be parsed.
+		weeklyScopedIdle: normalized.weeklyScopedIdle,
 	};
 }
 

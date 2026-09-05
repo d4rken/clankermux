@@ -140,6 +140,17 @@ export interface RunwayWindowObservations {
 	 * assert that an account has used nothing this week.
 	 */
 	weeklyScopedPresent?: ModelFamily[];
+	/**
+	 * Families whose entry in that payload is the IDLE form (0%, no reset) —
+	 * Anthropic's other way of stating a window with no usage this week; absent
+	 * when the resolution carried no payload (snapshot restore), which is why it
+	 * is optional and why absent must stay distinct from empty.
+	 *
+	 * Empty means the payload was read and named no idle entry. Absent means
+	 * there was no payload to name one. Collapsing the two would let a snapshot
+	 * restore assert that an account has used nothing this week.
+	 */
+	weeklyScopedIdle?: ModelFamily[];
 }
 
 /**
@@ -243,6 +254,32 @@ export function scopedFamilyPresence(
 	}
 	const present = account.windowObservations?.weeklyScopedPresent;
 	return present ? new Set(present) : null;
+}
+
+/**
+ * Every family this account's resolution named an IDLE scoped entry for (0%, no
+ * reset), or null when the resolution carried no payload.
+ *
+ * Same precedence as {@link scopedFamilyPresence}, deliberately: idleness,
+ * presence and readings have to describe one resolution, or a caller could see
+ * a family idle from a live payload while reading it as absent from an older
+ * snapshot. Null is the snapshot case and is NOT an empty set — see
+ * {@link RunwayWindowObservations.weeklyScopedIdle}.
+ */
+export function scopedFamilyIdle(
+	account: RunwayAccountSource,
+	now: number,
+): ReadonlySet<ModelFamily> | null {
+	if (account.usageData) {
+		return new Set(
+			normalizeAnthropicUsage(
+				account.usageData as Parameters<typeof normalizeAnthropicUsage>[0],
+				now,
+			).weeklyScopedIdle,
+		);
+	}
+	const idle = account.windowObservations?.weeklyScopedIdle;
+	return idle ? new Set(idle) : null;
 }
 
 /**

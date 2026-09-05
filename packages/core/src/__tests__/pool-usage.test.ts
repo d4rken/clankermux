@@ -2071,6 +2071,32 @@ describe("listFamilyRows", () => {
 			expect(rows[0].unavailableReporters).toBe(0);
 		});
 
+		it("counts a servable sibling carrying the idle 0%-no-reset entry", () => {
+			// The live Claude-4 shape: the Fable window is present at 0% with no
+			// reset instead of omitted. Same fact as an absent entry — the account
+			// has not touched Fable this week — so it belongs in the same count.
+			const idleEntry = {
+				kind: "weekly_scoped",
+				group: "weekly",
+				percent: 0,
+				resets_at: null,
+				scope: { model: { id: null, display_name: "Fable" }, surface: null },
+				is_active: false,
+			} as unknown as ReturnType<typeof scopedEntry>;
+
+			const rows = listFamilyRows(
+				[
+					mkWindowedAccount("reporter", [scopedEntry("Fable", 45)]),
+					mkWindowedAccount("idle", [idleEntry]),
+				],
+				NOW,
+			);
+
+			expect(rows).toHaveLength(1);
+			expect(rows[0].reportingCount).toBe(1);
+			expect(rows[0].unopenedCount).toBe(1);
+		});
+
 		it("counts a sibling that reports only another family", () => {
 			const rows = listFamilyRows(
 				[

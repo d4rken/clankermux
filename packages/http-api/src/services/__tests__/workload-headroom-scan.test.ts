@@ -293,6 +293,66 @@ describe("computeWorkloadHeadroomScan from persisted rows only", () => {
 		expect(family?.unreadableAccountIds).toEqual([]);
 	});
 
+	it("calls a live payload carrying the idle Fable entry unopened", async () => {
+		// Anthropic's other shape for "not used this week": the Fable entry is
+		// PRESENT at 0% with no reset rather than absent. Filing it as unreadable
+		// hid a fully serving account behind a parse-failure label.
+		usageCache.set("cold-1", {
+			five_hour: {
+				utilization: 10,
+				resets_at: new Date(BASE + 2 * HOUR_MS).toISOString(),
+			},
+			seven_day: {
+				utilization: 30,
+				resets_at: new Date(BASE + 3 * DAY_MS).toISOString(),
+			},
+			limits: [
+				{
+					kind: "weekly_scoped",
+					group: "weekly",
+					percent: 40,
+					resets_at: new Date(BASE + 3 * DAY_MS).toISOString(),
+					scope: { model: { id: "claude-fable-5", display_name: "Fable" } },
+					is_active: true,
+				},
+			],
+		} as never);
+		usageCache.set("cold-2", {
+			five_hour: {
+				utilization: 0,
+				resets_at: new Date(BASE + 2 * HOUR_MS).toISOString(),
+			},
+			seven_day: {
+				utilization: 0,
+				resets_at: new Date(BASE + 3 * DAY_MS).toISOString(),
+			},
+			limits: [
+				{
+					kind: "weekly_scoped",
+					group: "weekly",
+					percent: 0,
+					resets_at: null,
+					scope: { model: { id: null, display_name: "Fable" } },
+					is_active: false,
+				},
+			],
+		} as never);
+
+		const scan = await computeWorkloadHeadroomScan(
+			makeDbOps({
+				accounts: [
+					makeAccount({ id: "cold-1" }),
+					makeAccount({ id: "cold-2", name: "Cold 2" }),
+				],
+			}),
+		);
+
+		const family = scan.rows.find((r) => r.dimensionKind === "family");
+		expect(family?.eligibleAccountIds.sort()).toEqual(["cold-1", "cold-2"]);
+		expect(family?.unopenedAccountIds).toEqual(["cold-2"]);
+		expect(family?.unreadableAccountIds).toEqual([]);
+	});
+
 	it("classifies a snapshot tick that recorded another family's row", async () => {
 		// The snapshot path classifies from payload evidence too, as long as the
 		// evidence came from ONE tick: this tick wrote an account-wide row AND an

@@ -26,8 +26,9 @@ export interface UsageDisplay {
 	label?: string;
 	/**
 	 * `"unopened"`: a labelled scoped-weekly row for a family this account has
-	 * not used this window. Anthropic omits the family's entry until its first
-	 * use, so there is no reading to show.
+	 * not used this window — its payload carries no window for the family, or an
+	 * idle one (0%, no reset). Anthropic states an untouched family's entry
+	 * either way until its first use, so there is no reading to show.
 	 *
 	 * `utilization` and `resetTime` are null BY CONTRACT on such a row and must
 	 * never be rendered as a bar, a percentage or a countdown — a 0% bar claims a
@@ -280,8 +281,9 @@ export function classifyUsageCard(
 		}
 
 		// Families the pool reports that THIS account's payload names no window
-		// for: Anthropic omits the entry until the family's first use in the week,
-		// so their absence is a fact about the account rather than a gap.
+		// for, or names only an idle one (0%, no reset): Anthropic states an
+		// untouched family either way until its first use in the week, so this is
+		// a fact about the account rather than a gap.
 		//
 		// Availability (paused, cooling down) is deliberately NOT a condition: the
 		// row states what this account's own reading says, and a paused account
@@ -297,10 +299,13 @@ export function classifyUsageCard(
 			// including ones `getScopedWeeklyLimits` kept and the normalizer dropped
 			// (an unparseable `resets_at`). Those classify as unreadable, so the
 			// ordinary percent card and this row can never render together for one
-			// family.
+			// family. `weeklyScopedIdle` is the narrower set whose entry states no
+			// usage this week (0%, no reset); `getScopedWeeklyLimits` drops those
+			// for want of a reset, so the unopened row is the only one they emit.
 			const evidence = classifyScopedFamilyEvidence({
 				readings: normalized.weeklyScoped,
 				presentFamilies: new Set(normalized.weeklyScopedPresent),
+				idleFamilies: new Set(normalized.weeklyScopedIdle),
 				family: family.family,
 				accountWideWeeklyResetMs: normalized.weeklyAll?.resetMs ?? null,
 				classId,

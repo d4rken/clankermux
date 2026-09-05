@@ -234,8 +234,8 @@ from three.
 
 `unopenedAccounts` splits out one specific reason from that total: the account
 was read cleanly, its weekly window is still running, and its payload carries no
-window for this family at all — Anthropic omits the entry until the family's
-first use in the week. Those accounts are counted inside `unreadableAccounts`,
+window for this family, or an idle one (0%, no reset) — Anthropic states an
+untouched family either way until its first use in the week. Those accounts are counted inside `unreadableAccounts`,
 not beside it, so `eligibleAccounts − unreadableAccounts` keeps meaning "the
 accounts the projection was built from" whatever your widget knows about this
 field. The remainder, `unreadableAccounts − unopenedAccounts`, is the other

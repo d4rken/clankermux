@@ -456,6 +456,31 @@ describe("classifyUsageCard — families this account has not used", () => {
 		).toHaveLength(0);
 	});
 
+	it("emits one for the idle 0%-no-reset entry and no percent row beside it", () => {
+		// The live Claude-4 shape: Anthropic states the untouched Fable window as
+		// an entry at 0% with no reset rather than omitting it. The card must read
+		// that as "not used this week", not as a window it failed to parse.
+		const card = classifyUsageCard(
+			anthropicAccount({
+				scoped: [{ ...scopedEntry("Fable", inHours(72), 0), resets_at: null }],
+				poolScopedFamilies: FABLE,
+			}),
+			NOW,
+		);
+		if (card.kind !== "windows")
+			throw new Error(`expected windows: ${card.kind}`);
+
+		expect(card.usages.filter((u) => u.window === "seven_day_scoped")).toEqual([
+			{
+				utilization: null,
+				window: "seven_day_scoped",
+				resetTime: null,
+				label: "Fable",
+				state: "unopened",
+			},
+		]);
+	});
+
 	it("does not emit one once the account-wide week has rolled over", () => {
 		const card = classifyUsageCard(
 			anthropicAccount({

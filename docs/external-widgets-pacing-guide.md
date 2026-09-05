@@ -154,8 +154,8 @@ nonzero, alongside `eligibleAccounts`. An exhaustion time derived while some
 accounts are unreadable is a lower bound on runway, not a complete account-pool
 forecast. `unopenedAccounts` is a subset of `unreadableAccounts`, not an extra
 term: it counts accounts on a family row that were read cleanly and carry no
-window for the family because they have not used it this week, so subtracting it
-a second time would double-count them. `spentAccounts` is existing row-level
+window for the family, or an idle one (0%, no reset), because they have not used
+it this week, so subtracting it a second time would double-count them. `spentAccounts` is existing row-level
 context; it is not a new next-reset-specific count.
 
 ## Paused accounts and banked resets

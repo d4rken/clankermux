@@ -377,3 +377,48 @@ describe("normalizeAnthropicUsage — weeklyScopedPresent", () => {
 		}
 	});
 });
+
+describe("normalizeAnthropicUsage — weeklyScopedIdle", () => {
+	it("lists the idle form (0%, no reset) as idle and present, never a reading", () => {
+		// The live Claude-4 shape observed 2026-09-05: the account used nothing
+		// this week, and Anthropic emitted the Fable window at 0% with no reset
+		// instead of omitting it.
+		const n = normalizeAnthropicUsage(
+			{
+				five_hour: { utilization: 0, resets_at: FUTURE_ISO },
+				seven_day: { utilization: 0, resets_at: FUTURE_ISO },
+				limits: [scoped("Fable", { percent: 0, resets_at: null })],
+			},
+			NOW,
+		);
+		expect(n.weeklyScoped).toEqual([]);
+		expect(n.weeklyScopedIdle).toEqual(["fable"]);
+		expect(n.weeklyScopedPresent).toEqual(["fable"]);
+	});
+
+	it("treats 0% with a valid future reset as an ordinary reading, not idle", () => {
+		const n = normalizeAnthropicUsage(
+			{ limits: [scoped("Fable", { percent: 0, resets_at: FUTURE_ISO })] },
+			NOW,
+		);
+		expect(n.weeklyScoped.map((s) => s.family)).toEqual(["fable"]);
+		expect(n.weeklyScopedIdle).toEqual([]);
+		expect(n.weeklyScopedPresent).toEqual(["fable"]);
+	});
+
+	it("treats a non-zero percent with no reset as present-only, not idle", () => {
+		const n = normalizeAnthropicUsage(
+			{ limits: [scoped("Fable", { percent: 5, resets_at: null })] },
+			NOW,
+		);
+		expect(n.weeklyScoped).toEqual([]);
+		expect(n.weeklyScopedIdle).toEqual([]);
+		expect(n.weeklyScopedPresent).toEqual(["fable"]);
+	});
+
+	it("is empty for a null / non-object payload", () => {
+		for (const d of [null, undefined, {} as AnthropicUsageData]) {
+			expect(normalizeAnthropicUsage(d, NOW).weeklyScopedIdle).toEqual([]);
+		}
+	});
+});

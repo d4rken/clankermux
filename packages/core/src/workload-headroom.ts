@@ -4,6 +4,7 @@
 import {
 	accountWideWeeklyResetMs,
 	type RunwayAccountSource,
+	scopedFamilyIdle,
 	scopedFamilyPresence,
 	scopedFamilyReadings,
 	scopedWeeklyWindowKind,
@@ -174,7 +175,7 @@ export interface WorkloadHeadroomRow {
 	 * Family rows only (`[]` on class rows): eligible accounts excluded because
 	 * they have not used this family in the current weekly window — a live
 	 * reading, a future account-wide weekly reset, and no window for the family,
-	 * while a same-class account reports it.
+	 * or an idle one (0%, no reset), while a same-class account reports it.
 	 *
 	 * DISJOINT from {@link unreadableAccountIds}; both are subsets of
 	 * {@link eligibleAccountIds}. Excluded from the projection exactly like an
@@ -183,7 +184,8 @@ export interface WorkloadHeadroomRow {
 	 * week of capacity that no reading supports.
 	 *
 	 * Distinct because it is EVIDENCE OF ABSENCE (a payload was read and named
-	 * no window for the family) rather than absence of evidence. A reader can act
+	 * no window for the family, or an idle one — 0%, no reset) rather than
+	 * absence of evidence. A reader can act
 	 * on it — the account is very likely able to serve the family — and cannot
 	 * act on "we could not read it".
 	 */
@@ -563,9 +565,10 @@ export function computeWorkloadHeadroom(
 			//    snapshot-restored Anthropic account carries account-wide windows
 			//    only — so it is eligible AND unreadable. Skipping it dropped its
 			//    capacity from the runway while reporting nothing was missing.
-			//  - read cleanly and names NO window for the family while a class
-			//    sibling reports it, with its own week still running: it has not
-			//    used the family this window. Eligible, excluded from the
+			//  - read cleanly and names NO window for the family, or an idle one
+			//    (0%, no reset), while a class sibling reports it, with its own week
+			//    still running: it has not used the family this window. Both forms
+			//    say the same thing. Eligible, excluded from the
 			//    projection, and counted separately — the previous rule skipped it
 			//    outright, so two live accounts were invisible on the Fable row
 			//    while it claimed to describe the whole class.
@@ -577,6 +580,7 @@ export function computeWorkloadHeadroom(
 			const evidence = classifyScopedFamilyEvidence({
 				readings,
 				presentFamilies: scopedFamilyPresence(account, now),
+				idleFamilies: scopedFamilyIdle(account, now),
 				family,
 				accountWideWeeklyResetMs: accountWideWeeklyResetMs(account),
 				classId: servableClassFor(account.provider).classId,

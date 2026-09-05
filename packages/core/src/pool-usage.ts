@@ -713,10 +713,12 @@ export interface FamilyRow {
 	unavailableReporters: number;
 	/**
 	 * Accounts that could serve right now, carry a live Anthropic-style payload
-	 * with a future account-wide weekly reset, and report NO window for this
-	 * family, while an unpaused same-class account reports it.
+	 * with a future account-wide weekly reset, and report no window for this
+	 * family, or an idle one (0%, no reset), while an unpaused same-class account
+	 * reports it.
 	 *
-	 * Anthropic omits a family's window until its first use in the week, so this
+	 * Anthropic states a family's window as untouched until its first use in the
+	 * week — either by omitting it or by listing it at 0% with no reset — so this
 	 * is the pool's untouched capacity for the family. It is NEVER a percentage:
 	 * the account states no reading, and a 0% bar would claim a measurement
 	 * nobody made.
@@ -808,6 +810,7 @@ export function listFamilyRows(
 			const evidence = classifyScopedFamilyEvidence({
 				readings: normalized.weeklyScoped,
 				presentFamilies: new Set(normalized.weeklyScopedPresent),
+				idleFamilies: new Set(normalized.weeklyScopedIdle),
 				family: family.family,
 				accountWideWeeklyResetMs: normalized.weeklyAll?.resetMs ?? null,
 				classId,

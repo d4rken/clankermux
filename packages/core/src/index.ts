@@ -13,6 +13,7 @@ export {
 	type RunwayAccountSource,
 	type RunwayHeadline,
 	type RunwayWindowObservations,
+	scopedFamilyIdle,
 	scopedFamilyPresence,
 	scopedFamilyReadings,
 	scopedWeeklyWindowKind,

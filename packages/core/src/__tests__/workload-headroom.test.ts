@@ -655,6 +655,7 @@ describe("computeWorkloadHeadroom — four states of scoped evidence", () => {
 				sevenDay: { pct: 10, resetMs: NOW + 5 * DAY },
 				weeklyScoped: [],
 				weeklyScopedPresent: [],
+				weeklyScopedIdle: [],
 			},
 			usageObservedAtMs: NOW,
 		};
@@ -739,6 +740,7 @@ describe("computeWorkloadHeadroom — four states of scoped evidence", () => {
 				sevenDay: { pct: 10, resetMs: NOW - HOUR },
 				weeklyScoped: [],
 				weeklyScopedPresent: [],
+				weeklyScopedIdle: [],
 			},
 			usageObservedAtMs: NOW,
 		};

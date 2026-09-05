@@ -12,6 +12,13 @@ import type { ScopedFamilyLimit } from "./scoped-limits";
  * account whose payload names no window for a family its own servable class is
  * currently reporting has therefore not used the family this week.
  *
+ * ABSENT and IDLE (0%, no reset) are the two observed forms of an unused
+ * window: the same provider also lists the entry at `percent: 0` with no
+ * `resets_at` (observed live 2026-09-05), because a window that has not opened
+ * has no reset instant yet. Both forms mean the family was not touched, and
+ * only the idle one carries an entry — so it must be read as unopened rather
+ * than as a window whose reset failed to parse.
+ *
  * The state asserts NO percentage. It is evidence of absence — a payload was
  * read and named nothing — and must never be rendered as a 0% reading, a
  * forecast, or an invented reset. `"unreadable"` is the opposite claim (absence
@@ -32,6 +39,16 @@ export interface ScopedFamilyEvidenceInput {
 	 * restore).
 	 */
 	presentFamilies: ReadonlySet<ModelFamily> | null;
+	/**
+	 * Families whose entry in that resolution's payload is the IDLE form — 0%
+	 * with no reset, the shape Anthropic emits for a window with no usage this
+	 * week; null when the resolution carried no payload (snapshot restore).
+	 *
+	 * A subset of {@link presentFamilies}: the entry exists, it just states no
+	 * measurement. Absent is not empty, for the same reason presence draws that
+	 * distinction.
+	 */
+	idleFamilies: ReadonlySet<ModelFamily> | null;
 	family: ModelFamily;
 	/** Account-wide weekly reset from the SAME resolution, or null when unknown. */
 	accountWideWeeklyResetMs: number | null;
@@ -46,10 +63,14 @@ export interface ScopedFamilyEvidenceInput {
  * Classify one account's evidence for one family, from one resolution.
  *
  * Shared by the server's workload-headroom scan and the dashboard so both
- * surfaces label the same accounts unopened. Pass readings, presence and the
- * account-wide reset from a SINGLE resolution: mixing a live payload's scoped
- * list with a snapshot's account-wide reset would decide a week's worth of
- * absence from two different instants.
+ * surfaces label the same accounts unopened. Pass readings, presence, idleness
+ * and the account-wide reset from a SINGLE resolution: mixing a live payload's
+ * scoped list with a snapshot's account-wide reset would decide a week's worth
+ * of absence from two different instants.
+ *
+ * `"unopened"` covers BOTH observed forms of an unused window — the entry
+ * absent, and the entry present as the idle form (0%, no reset) — because they
+ * state the same fact about the account.
  */
 export function classifyScopedFamilyEvidence(
 	input: ScopedFamilyEvidenceInput,
@@ -57,6 +78,7 @@ export function classifyScopedFamilyEvidence(
 	const {
 		readings,
 		presentFamilies,
+		idleFamilies,
 		family,
 		accountWideWeeklyResetMs,
 		classId,
@@ -76,10 +98,26 @@ export function classifyScopedFamilyEvidence(
 	// well still be able to serve. Unchanged behaviour.
 	if (readings === null) return "unreadable";
 
+	// The IDLE form of an unused window: the entry is there at 0% with no reset,
+	// which is the provider stating that this family's window has not opened —
+	// the same fact as an omitted entry, so it must reach the same state. Gated
+	// on the account-wide week still running, exactly like the absent form:
+	// after a rollover the entry says nothing about the week now in force.
+	if (
+		idleFamilies?.has(family) &&
+		accountWideWeeklyResetMs !== null &&
+		accountWideWeeklyResetMs > now
+	) {
+		return "unopened";
+	}
+
 	// The payload NAMES the family but the entry is unusable (null percent,
-	// unparseable reset, or a scoped reset already past while the account-wide
-	// one is not). Evidence exists and cannot be read; it is never "unopened",
-	// which would state the family untouched on the strength of a parse failure.
+	// unparseable reset, a non-zero percent with no reset, a scoped reset already
+	// past while the account-wide one is not, or an idle entry whose account-wide
+	// week has rolled over or is unknown). Evidence exists and cannot be read; it
+	// is never "unopened", which would state the family untouched on the strength
+	// of a parse failure. The account stays in the row rather than being dropped:
+	// the entry exists, so this resolution has something to say about it.
 	if (presentFamilies?.has(family)) return "unreadable";
 
 	// Read, named no window for the family, and the week that window would

@@ -49,6 +49,25 @@ export interface NormalizedAnthropicUsage {
 	 * much stronger claim "this family was never touched".
 	 */
 	weeklyScopedPresent: ModelFamily[];
+	/**
+	 * Families whose `weekly_scoped` entry is the IDLE form: `percent === 0` with
+	 * `resets_at` absent. De-duplicated, in first-seen order.
+	 *
+	 * This is how Anthropic states a window with no usage this week when it does
+	 * not omit the entry outright (observed live 2026-09-05; see
+	 * `packages/types/src/account.ts:190-194`, which documents the same
+	 * `{utilization: 0, resets_at: null}` idle form for the 5-hour window). A
+	 * window that has not opened has no reset instant yet, so the entry carries
+	 * none.
+	 *
+	 * A subset of {@link weeklyScopedPresent} and NEVER of {@link weeklyScoped}:
+	 * the entry has no usable reset, so it is not a reading. Two neighbouring
+	 * shapes are deliberately NOT idle — an entry at `percent: 0` with a valid
+	 * FUTURE reset is an ordinary reading (the window opened and nothing has been
+	 * spent yet), and `percent > 0` with `resets_at: null` is present-only, since
+	 * something was spent and only the reset is missing.
+	 */
+	weeklyScopedIdle: ModelFamily[];
 }
 
 /** Parse an ISO reset timestamp to epoch ms, or null when absent/unparseable. */
@@ -126,15 +145,21 @@ function normalizeWeeklyAll(
  * through for logging but never gates inclusion.
  *
  * `present` is the weaker claim from the same pass: the family was NAMED by an
- * entry, usable or not. The two are computed in one loop so they cannot drift
- * over which entries exist.
+ * entry, usable or not. `idle` is the narrower claim that the entry is the form
+ * Anthropic emits for a window with no usage this week (0%, no reset). All
+ * three are computed in one loop so they cannot drift over which entries exist.
  */
 function normalizeWeeklyScoped(
 	data: AnthropicUsageData,
 	nowMs: number,
-): { readings: ScopedFamilyLimit[]; present: ModelFamily[] } {
+): {
+	readings: ScopedFamilyLimit[];
+	present: ModelFamily[];
+	idle: ModelFamily[];
+} {
 	const readings: ScopedFamilyLimit[] = [];
 	const present: ModelFamily[] = [];
+	const idle: ModelFamily[] = [];
 	for (const entry of data.limits ?? []) {
 		if (entry.kind !== "weekly_scoped") continue;
 		// Family resolution comes FIRST: an entry naming no known family says
@@ -145,6 +170,17 @@ function normalizeWeeklyScoped(
 		const family = getModelFamily(displayName);
 		if (family === null) continue;
 		if (!present.includes(family)) present.push(family);
+		// The idle form: nothing spent AND no reset instant, which is what an
+		// unopened window looks like when the provider lists it instead of
+		// omitting it. Tested before usability, because the entry is by
+		// definition not a reading — it has no reset to parse.
+		if (
+			entry.percent === 0 &&
+			(entry.resets_at === null || entry.resets_at === undefined) &&
+			!idle.includes(family)
+		) {
+			idle.push(family);
+		}
 		if (!isFiniteNumber(entry.percent)) continue;
 		const resetsAtMs = parseResetMs(entry.resets_at);
 		if (resetsAtMs === null || resetsAtMs <= nowMs) continue;
@@ -156,7 +192,7 @@ function normalizeWeeklyScoped(
 			displayName,
 		});
 	}
-	return { readings, present };
+	return { readings, present, idle };
 }
 
 /**
@@ -175,6 +211,7 @@ export function normalizeAnthropicUsage(
 			weeklyAll: null,
 			weeklyScoped: [],
 			weeklyScopedPresent: [],
+			weeklyScopedIdle: [],
 		};
 	}
 	const scoped = normalizeWeeklyScoped(data, nowMs);
@@ -183,6 +220,7 @@ export function normalizeAnthropicUsage(
 		weeklyAll: normalizeWeeklyAll(data),
 		weeklyScoped: scoped.readings,
 		weeklyScopedPresent: scoped.present,
+		weeklyScopedIdle: scoped.idle,
 	};
 }
 

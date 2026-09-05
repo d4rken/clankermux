@@ -1652,8 +1652,8 @@ export interface PublicWorkloadHeadroomRowDto {
 	/**
 	 * Of `unreadableAccounts`, the accounts excluded because they have not used
 	 * this family in the current weekly window: a live reading with a future
-	 * weekly reset and no window for the family, while a same-class account
-	 * reports it.
+	 * weekly reset and no window for the family, or an idle one (0%, no reset),
+	 * while a same-class account reports it.
 	 *
 	 * Nested, not disjoint: `eligibleAccounts − unreadableAccounts` is still the
 	 * projected count, and `unreadableAccounts − unopenedAccounts` is the rest of
