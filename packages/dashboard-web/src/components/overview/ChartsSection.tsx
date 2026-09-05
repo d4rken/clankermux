@@ -216,6 +216,7 @@ export function ChartsSection({
 						) : (
 							<BasePieChart
 								data={apiKeyUsageDonutData}
+								cellKey="id"
 								loading={loading}
 								height="compact"
 								innerRadius={48}
