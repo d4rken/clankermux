@@ -252,6 +252,7 @@ function makeCtx() {
 	const accounts = new Map<string, Account>();
 	const getAccountCalls: string[] = [];
 	const forceResetCalls: string[] = [];
+	const resumeOverageCalls: string[] = [];
 	const resolveLedgerCalls: Array<{
 		id: string;
 		status: string;
@@ -279,6 +280,22 @@ function makeCtx() {
 			}),
 			forceResetAccountRateLimit: mock(async (id: string) => {
 				forceResetCalls.push(id);
+				return true;
+			}),
+			// Compare-and-resume double: lifts the pause only when the stored row
+			// is the proxy's own overage pause, mirroring the SQL predicate.
+			resumeAccountIfOveragePaused: mock(async (id: string) => {
+				resumeOverageCalls.push(id);
+				const a = accounts.get(id);
+				if (
+					!a?.paused ||
+					!a.auto_pause_on_overage_enabled ||
+					(a.pause_reason != null && a.pause_reason !== "overage")
+				) {
+					return false;
+				}
+				a.paused = false;
+				a.pause_reason = null;
 				return true;
 			}),
 			resolveCodexResetCreditAttempt: mock(
@@ -309,6 +326,7 @@ function makeCtx() {
 		ctx,
 		getAccountCalls,
 		forceResetCalls,
+		resumeOverageCalls,
 		resolveLedgerCalls,
 		manualLedgerEvents,
 		spendRows,
@@ -540,6 +558,261 @@ describe("CodexSpendCoordinator.consumeResetCredit", () => {
 			availableResetCount: 2,
 			localRateLimitStateCleared: true,
 		});
+	});
+
+	// The proxy's own overage pause exists only because the week is spent. The
+	// reset un-spends it, and neither automatic resumer fires afterwards (both
+	// key on a reset deadline the redemption clears and the next free read
+	// re-stamps a week out), so the redemption lifts the pause itself.
+	it("a reset lifts the proxy's overage pause", async () => {
+		const { coordinator, setAccount, resumeOverageCalls } = makeCoordinator();
+		const id = seedId("consume-overage-pause");
+		const account = makeCodexAccount({
+			id,
+			name: "codex-overage",
+			paused: true,
+			pause_reason: "overage",
+			auto_pause_on_overage_enabled: true,
+		});
+		setAccount(account);
+
+		const outcome = await coordinator.consumeResetCredit(id, {
+			idempotencyKey: "redeem-overage",
+			creditId: "credit-1",
+		});
+
+		expect(outcome.status).toBe("completed");
+		expect(resumeOverageCalls).toEqual([id]);
+		expect(account.paused).toBe(false);
+		expect(account.pause_reason).toBeNull();
+	});
+
+	it("a reset does NOT lift a manual pause", async () => {
+		const { coordinator, setAccount } = makeCoordinator();
+		const id = seedId("consume-manual-pause");
+		const account = makeCodexAccount({
+			id,
+			name: "codex-manual",
+			paused: true,
+			pause_reason: "manual",
+			auto_pause_on_overage_enabled: true,
+		});
+		setAccount(account);
+
+		const outcome = await coordinator.consumeResetCredit(id, {
+			idempotencyKey: "redeem-manual",
+			creditId: "credit-1",
+		});
+
+		expect(outcome.status).toBe("completed");
+		expect(account.paused).toBe(true);
+		expect(account.pause_reason).toBe("manual");
+	});
+
+	// alreadyRedeemed = the windows were restored by an EARLIER attempt whose
+	// response was lost. A pending replay can surface it long after, once the
+	// account has spent the restored week again — resuming would route a
+	// re-exhausted account onto paid credits. Only a live `reset` resumes.
+	it("alreadyRedeemed does NOT lift the overage pause", async () => {
+		const { coordinator, setAccount, resumeOverageCalls, forceResetCalls } =
+			makeCoordinator();
+		const id = seedId("consume-already-redeemed-pause");
+		const account = makeCodexAccount({
+			id,
+			name: "codex-already-redeemed",
+			paused: true,
+			pause_reason: "overage",
+			auto_pause_on_overage_enabled: true,
+		});
+		setAccount(account);
+		consumeImpl = async () => ({ outcome: "alreadyRedeemed", windowsReset: 0 });
+
+		const outcome = await coordinator.consumeResetCredit(id, {
+			idempotencyKey: "redeem-already",
+			creditId: "credit-1",
+		});
+
+		expect(outcome.status).toBe("completed");
+		// The stale-state cleanup still runs (the windows DID change at some point)…
+		expect(forceResetCalls).toEqual([id]);
+		// …but the pause is not lifted on that evidence.
+		expect(resumeOverageCalls).toEqual([]);
+		expect(account.paused).toBe(true);
+	});
+
+	// The fence is raised the instant the outcome is known, BEFORE the ledger
+	// await: a read issued while the ledger write is still pending is genuinely
+	// post-reset and must apply, not be discarded as pre-reset.
+	it("a read issued during the post-outcome ledger write applies", async () => {
+		const { coordinator, setAccount, ctx } = makeCoordinator();
+		const id = seedId("consume-ledger-await");
+		setAccount(makeCodexAccount({ id, name: "codex-ledger-await" }));
+
+		// Park the auto-row ledger resolve so the consume sits in its await.
+		let releaseLedger!: () => void;
+		const ledgerGate = new Promise<void>((res) => {
+			releaseLedger = res;
+		});
+		(
+			ctx.dbOps as { resolveCodexResetCreditAttempt: () => Promise<void> }
+		).resolveCodexResetCreditAttempt = async () => {
+			await ledgerGate;
+		};
+
+		const consumeP = coordinator.consumeResetCredit(id, {
+			idempotencyKey: "redeem-ledger-await",
+			creditId: "credit-1",
+			autoApply: { ledgerRowId: "row-1" },
+		});
+		await flush();
+		// The fence is already up while the consume is parked…
+		expect(usageCache.get(id)).toBeNull();
+
+		// …and a read issued now carries post-reset state: it applies.
+		const fresh = await coordinator.readUsageStatus(id);
+		expect(fresh.success).toBe(true);
+		expect(fresh.message).not.toContain("superseded");
+		expect(applyStatusCalls).toHaveLength(1);
+
+		releaseLedger();
+		const outcome = await consumeP;
+		expect(outcome.status).toBe("completed");
+	});
+
+	it("a consume that restored nothing (noCredit) never touches the pause", async () => {
+		const { coordinator, setAccount, resumeOverageCalls } = makeCoordinator();
+		const id = seedId("consume-nocredit-pause");
+		const account = makeCodexAccount({
+			id,
+			name: "codex-nocredit-paused",
+			paused: true,
+			pause_reason: "overage",
+			auto_pause_on_overage_enabled: true,
+		});
+		setAccount(account);
+		consumeImpl = async () => ({ outcome: "noCredit", windowsReset: 0 });
+
+		await coordinator.consumeResetCredit(id, {
+			idempotencyKey: "redeem-nocredit-paused",
+		});
+
+		expect(resumeOverageCalls).toEqual([]);
+		expect(account.paused).toBe(true);
+	});
+
+	// A free usage GET that was ISSUED before the reset but RETURNS after it
+	// carries the pre-reset snapshot (weekly 100%). Applying it would re-store
+	// the exhausted reading the reset just cleared — and that stale 100% is what
+	// the weekly-limit trigger and the pool-availability check consume, so it
+	// could authorize a second redemption. The reset must supersede it.
+	it("a usage read in flight during a reset does NOT re-apply its pre-reset snapshot", async () => {
+		const { coordinator, setAccount } = makeCoordinator();
+		const id = seedId("consume-inflight-read");
+		setAccount(makeCodexAccount({ id, name: "codex-inflight" }));
+
+		let releaseRead!: (s: CodexUsageStatus) => void;
+		usageStatusImpl = () =>
+			new Promise<CodexUsageStatus>((res) => {
+				releaseRead = res;
+			});
+
+		// 1. The read is issued first and parks on the network.
+		const readP = coordinator.readUsageStatus(id);
+		await flush();
+
+		// 2. The reset completes while the read is still in flight.
+		const outcome = await coordinator.consumeResetCredit(id, {
+			idempotencyKey: "redeem-inflight",
+			creditId: "credit-1",
+		});
+		expect(outcome.status).toBe("completed");
+
+		// 3. The stale read returns: it must be skipped, not applied.
+		releaseRead(makeUsageStatus());
+		const read = await readP;
+		expect(read.success).toBe(true);
+		expect(read.message).toContain("superseded by a newer observation");
+		expect(applyStatusCalls).toHaveLength(0);
+		expect(usageCache.get(id)).toBeNull();
+
+		// 4. A read issued AFTER the reset reflects post-reset state and applies.
+		usageStatusImpl = null;
+		const later = await coordinator.readUsageStatus(id);
+		expect(later.success).toBe(true);
+		expect(applyStatusCalls).toHaveLength(1);
+	});
+
+	// Same race, later interleaving: the read has ALREADY passed its sequence
+	// claim and is parked on the credential re-read (an await) when the reset
+	// completes. The re-validation after that await must catch it.
+	it("a read parked on its final account re-read when the reset completes does NOT apply", async () => {
+		const { coordinator, setAccount, ctx } = makeCoordinator();
+		const id = seedId("consume-inflight-reread");
+		setAccount(makeCodexAccount({ id, name: "codex-inflight-reread" }));
+
+		// Park ONLY the read's second getAccount (the credential re-read): the
+		// first call (before the GET) and the consume's own call pass through.
+		let releaseReread!: () => void;
+		const rereadGate = new Promise<void>((res) => {
+			releaseReread = res;
+		});
+		const realGetAccount = ctx.dbOps.getAccount.bind(ctx.dbOps);
+		let readCalls = 0;
+		let parked = false;
+		(ctx.dbOps as { getAccount: typeof realGetAccount }).getAccount = async (
+			accountId: string,
+		) => {
+			if (accountId === id && !parked && ++readCalls === 2) {
+				parked = true;
+				await rereadGate;
+			}
+			return realGetAccount(accountId);
+		};
+
+		const readP = coordinator.readUsageStatus(id);
+		// Let the GET resolve and the read advance to (and park on) the re-read.
+		await flush();
+		await flush();
+		expect(parked).toBe(true);
+
+		const outcome = await coordinator.consumeResetCredit(id, {
+			idempotencyKey: "redeem-inflight-reread",
+			creditId: "credit-1",
+		});
+		expect(outcome.status).toBe("completed");
+
+		releaseReread();
+		const read = await readP;
+		expect(read.success).toBe(true);
+		expect(read.message).toContain("superseded by a newer observation");
+		expect(applyStatusCalls).toHaveLength(0);
+		expect(usageCache.get(id)).toBeNull();
+	});
+
+	it("a consume that changed nothing upstream (noCredit) leaves an in-flight read valid", async () => {
+		const { coordinator, setAccount } = makeCoordinator();
+		const id = seedId("consume-inflight-nocredit");
+		setAccount(makeCodexAccount({ id, name: "codex-inflight-none" }));
+		consumeImpl = async () => ({ outcome: "noCredit", windowsReset: 0 });
+
+		let releaseRead!: (s: CodexUsageStatus) => void;
+		usageStatusImpl = () =>
+			new Promise<CodexUsageStatus>((res) => {
+				releaseRead = res;
+			});
+		const readP = coordinator.readUsageStatus(id);
+		await flush();
+
+		const outcome = await coordinator.consumeResetCredit(id, {
+			idempotencyKey: "redeem-inflight-none",
+		});
+		expect(outcome.status).toBe("completed");
+
+		// Nothing was reset, so the snapshot the read carries is still current.
+		releaseRead(makeUsageStatus());
+		const read = await readP;
+		expect(read.success).toBe(true);
+		expect(applyStatusCalls).toHaveLength(1);
 	});
 
 	it("treats noCredit as a completed business outcome without clearing local limits", async () => {

@@ -632,6 +632,31 @@ describe("decideResetCreditAction — weekly-limit trigger", () => {
 		).toEqual({ action: "skip", reason: "paused" });
 	});
 
+	// The redemption itself lifts the overage pause (coordinator side), so the
+	// gate must not depend on the auto-refresh / auto-fallback resumers.
+	it("fires on an overage pause with both automatic resumers off", () => {
+		const credit = farCredit();
+		expect(
+			decide({
+				account: {
+					...weeklyOnly,
+					paused: true,
+					pause_reason: "overage",
+					auto_pause_on_overage_enabled: true,
+					auto_refresh_enabled: false,
+					auto_fallback_enabled: false,
+				},
+				credits: [credit],
+				weeklyUsedPercent: 100,
+			}),
+		).toEqual({
+			action: "consume",
+			creditId: "c-far",
+			expiresAt: credit.expiresAt as number,
+			cause: "weekly-limit",
+		});
+	});
+
 	it("the pause gate stays out of the expiry trigger", () => {
 		const credit = makeCredit();
 		expect(
