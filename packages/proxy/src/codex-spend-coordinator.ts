@@ -171,6 +171,9 @@ export class CodexSpendCoordinator {
 	 * read ({@link runUsageStatusRead}) or a native-ping spend
 	 * ({@link runSharedSpend}) — reserves the next value the instant its network
 	 * call is issued ({@link reserveApplicationSeq}). Values only ever increase.
+	 * A reset-credit redemption that changed the upstream windows
+	 * ({@link consumeResetCredit}) reserves AND claims a value the instant its
+	 * outcome is known, so every observation issued before it is superseded.
 	 */
 	private readonly applicationSeqCounter = new Map<string, number>();
 	/**
@@ -449,6 +452,29 @@ export class CodexSpendCoordinator {
 			);
 		}
 
+		const windowsRestored =
+			result.outcome === "reset" || result.outcome === "alreadyRedeemed";
+		if (windowsRestored) {
+			// The upstream windows just changed. Every coordinator observation
+			// ISSUED before this instant (a free-GET read or a native-ping spend
+			// still on the wire) carries the PRE-reset snapshot — weekly 100% — and
+			// must not apply when it returns: the cache delete below drives the
+			// cache write-time guard to -Infinity, which never reads as "advanced",
+			// so the sequence guard is the only thing that can stop it.
+			// Reserve-and-claim the next sequence so those older reads fail
+			// `claimApplication` and are skipped, while reads issued after this
+			// point apply normally. Without this a stale exhausted reading could
+			// resurface and authorize a second redemption (the weekly-limit trigger
+			// reads it, and the pool-availability check treats this account as
+			// still exhausted). Both happen SYNCHRONOUSLY, the instant the outcome
+			// is known and before any await: a read issued during the ledger write
+			// below is genuinely post-reset and must keep its higher sequence, and
+			// a read that applies between the claim and the delete would only be
+			// wiped again.
+			this.claimApplication(accountId, this.reserveApplicationSeq(accountId));
+			usageCache.delete(accountId);
+		}
+
 		// A business outcome (reset/nothingToReset/noCredit/alreadyRedeemed) is
 		// definitive: resolve the auto row / book the manual event now, before the
 		// best-effort cleanup below.
@@ -462,7 +488,7 @@ export class CodexSpendCoordinator {
 		);
 
 		let localRateLimitStateCleared = false;
-		if (result.outcome === "reset" || result.outcome === "alreadyRedeemed") {
+		if (windowsRestored) {
 			try {
 				localRateLimitStateCleared =
 					await this.ctx.dbOps.forceResetAccountRateLimit(accountId);
@@ -472,7 +498,34 @@ export class CodexSpendCoordinator {
 					error,
 				);
 			}
-			usageCache.delete(accountId);
+		}
+		if (result.outcome === "reset") {
+			// The proxy pauses a Codex account with reason 'overage' the moment a
+			// response bills paid credits past the spent weekly window. The restored
+			// window removes that pause's only reason, and the two automatic resumers
+			// (the auto-refresh prime, the load balancer's elapsed-deadline check)
+			// both key on a reset deadline the redemption just cleared and the next
+			// free read re-stamps a week out — so neither lifts it in time. Lift it
+			// here, from the redemption itself. The SQL predicate re-checks the row,
+			// so a manual pause applied meanwhile (any other reason) is kept.
+			//
+			// `reset` ONLY, not `alreadyRedeemed`: that outcome says the windows
+			// were restored by an EARLIER attempt whose response was lost, and the
+			// account may have spent the restored week since. A pending replay can
+			// surface it long after the fact — resuming on it would route a
+			// re-exhausted account onto paid credits until the recorder re-pauses it.
+			try {
+				if (await this.ctx.dbOps.resumeAccountIfOveragePaused(accountId)) {
+					log.info(
+						`Resumed '${account.name}' from its overage pause: a reset credit restored its usage windows`,
+					);
+				}
+			} catch (error) {
+				log.error(
+					`Reset was consumed for '${account.name}', but its overage pause could not be lifted:`,
+					error,
+				);
+			}
 		}
 
 		let resetMetadataRefreshed = false;
@@ -902,6 +955,17 @@ export class CodexSpendCoordinator {
 			return {
 				success: true,
 				message: `Usage read for '${account.name}' superseded by a credential change; kept the fresher state.`,
+			};
+		}
+		// The account re-read above yielded the event loop AFTER this read claimed
+		// its sequence. A reset-credit redemption that completed in that gap
+		// claimed a higher one (see consumeResetCredit) — this snapshot predates
+		// the restored windows and would re-store the exhausted reading the reset
+		// just cleared. Re-validate the claim before the synchronous apply.
+		if (this.lastAppliedSeq.get(accountId) !== applicationSeq) {
+			return {
+				success: true,
+				message: `Usage read for '${account.name}' superseded by a newer observation; kept the fresher state.`,
 			};
 		}
 

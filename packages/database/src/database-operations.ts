@@ -1288,6 +1288,15 @@ OAuth tokens will need to be re-authenticated.
 	}
 
 	/**
+	 * Lift the proxy's own overage pause (auto-pause-on-overage on, reason NULL
+	 * or 'overage') and no other pause. Compare-and-resume in SQL; returns true
+	 * when this call resumed it. See {@link AccountRepository.resumeIfOveragePaused}.
+	 */
+	async resumeAccountIfOveragePaused(accountId: string): Promise<boolean> {
+		return this.accounts.resumeIfOveragePaused(accountId);
+	}
+
+	/**
 	 * Resume an account only if it is paused specifically for needing re-auth
 	 * (`oauth_invalid_grant`). Called after a successful reauth so the account
 	 * returns to rotation automatically, without lifting a manual/overage/

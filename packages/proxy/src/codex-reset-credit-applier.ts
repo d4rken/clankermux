@@ -117,15 +117,17 @@ type ResetCreditSkip = Extract<ResetCreditApplyDecision, { action: "skip" }>;
 /**
  * Whether a restored weekly window can lift this account's pause.
  *
- * Mirrors the auto-resume guard in auto-refresh-scheduler
- * (`auto_pause_on_overage_enabled` AND `pause_reason` IN (NULL, 'overage')).
- * That guard is the only thing that un-pauses an account without an operator,
- * so it is also the only pause a weekly reset credit buys anything for: the
- * account is on paid credits because its week is spent, the reset ends that,
- * and the next prime resumes it. Every other pause — manual, failure
- * threshold, subscription expiry, a reason this code has never seen — keeps
- * the account out of routing after the reset, and the credit is better kept
- * for the expiry trigger or a later exhaustion. Unpaused accounts pass.
+ * Only the proxy's OWN overage pause qualifies: `auto_pause_on_overage_enabled`
+ * AND `pause_reason` IN (NULL, 'overage') — the rule the auto-refresh
+ * scheduler's post-prime resume applies. The account was paused because a
+ * response billed paid credits past its spent week; the reset un-spends the
+ * week, and the redemption itself lifts that pause
+ * (`CodexSpendCoordinator.consumeResetCredit` →
+ * `resumeAccountIfOveragePaused`), so the credit buys routing within the
+ * minute. Every other pause — manual, failure threshold, subscription expiry,
+ * a reason this code has never seen — keeps the account out of routing after
+ * the reset, and the credit is better kept for the expiry trigger or a later
+ * exhaustion. Unpaused accounts pass.
  */
 export function weeklyResetCanLiftPause(
 	account: Pick<

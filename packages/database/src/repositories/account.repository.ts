@@ -667,6 +667,28 @@ export class AccountRepository extends BaseRepository<Account> {
 		return changes > 0;
 	}
 
+	/**
+	 * Lift the proxy's OWN overage pause, and nothing else: paused with
+	 * `auto_pause_on_overage_enabled` and `pause_reason` IN (NULL, 'overage') —
+	 * the exact rule the auto-refresh scheduler's post-prime resume applies. The
+	 * predicate lives in the WHERE so the DB row is re-checked at write time: a
+	 * manual pause applied after the caller last read the account carries
+	 * `pause_reason = 'manual'` and simply misses the UPDATE. Returns true when
+	 * this call resumed the account.
+	 */
+	async resumeIfOveragePaused(accountId: string): Promise<boolean> {
+		const changes = await this.runWithChanges(
+			`UPDATE accounts
+			 SET paused = 0, pause_reason = NULL
+			 WHERE id = ?
+			   AND paused = 1
+			   AND COALESCE(auto_pause_on_overage_enabled, 0) = 1
+			   AND (pause_reason IS NULL OR pause_reason = 'overage')`,
+			[accountId],
+		);
+		return changes > 0;
+	}
+
 	async resetSession(accountId: string, timestamp: number): Promise<void> {
 		await this.run(
 			`UPDATE accounts SET session_start = ?, session_request_count = 0 WHERE id = ?`,
