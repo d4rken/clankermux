@@ -86,6 +86,7 @@ the values are not a production account snapshot:
       "projectionBasis": "measured",
       "eligibleAccounts": 1,
       "unreadableAccounts": 0,
+      "unopenedAccounts": 0,
       "spentAccounts": 0
     }
   ]
@@ -151,8 +152,11 @@ classification rather than a widget-side one-hour timer.
 `measured` does not guarantee complete coverage. Show `unreadableAccounts` when
 nonzero, alongside `eligibleAccounts`. An exhaustion time derived while some
 accounts are unreadable is a lower bound on runway, not a complete account-pool
-forecast. `spentAccounts` is existing row-level context; it is not a new
-next-reset-specific count.
+forecast. `unopenedAccounts` is a subset of `unreadableAccounts`, not an extra
+term: it counts accounts on a family row that were read cleanly and carry no
+window for the family because they have not used it this week, so subtracting it
+a second time would double-count them. `spentAccounts` is existing row-level
+context; it is not a new next-reset-specific count.
 
 ## Paused accounts and banked resets
 

@@ -240,4 +240,112 @@ describe("computeWorkloadHeadroomScan from persisted rows only", () => {
 		expect(family?.eligibleAccountIds.sort()).toEqual(["cold-1", "cold-2"]);
 		expect(family?.unreadableAccountIds).toEqual([]);
 	});
+
+	it("calls a live payload that names no window for the family unopened", async () => {
+		// The state that was invisible: a complete live reading whose payload
+		// simply carries no Fable entry, because the account has not used Fable
+		// since the week began. It was skipped entirely, so the row described
+		// three accounts while five could serve.
+		usageCache.set("cold-1", {
+			five_hour: {
+				utilization: 10,
+				resets_at: new Date(BASE + 2 * HOUR_MS).toISOString(),
+			},
+			seven_day: {
+				utilization: 30,
+				resets_at: new Date(BASE + 3 * DAY_MS).toISOString(),
+			},
+			limits: [
+				{
+					kind: "weekly_scoped",
+					group: "weekly",
+					percent: 40,
+					resets_at: new Date(BASE + 3 * DAY_MS).toISOString(),
+					scope: { model: { id: "claude-fable-5", display_name: "Fable" } },
+					is_active: true,
+				},
+			],
+		} as never);
+		usageCache.set("cold-2", {
+			five_hour: {
+				utilization: 5,
+				resets_at: new Date(BASE + 2 * HOUR_MS).toISOString(),
+			},
+			seven_day: {
+				utilization: 12,
+				resets_at: new Date(BASE + 3 * DAY_MS).toISOString(),
+			},
+			limits: [],
+		} as never);
+
+		const scan = await computeWorkloadHeadroomScan(
+			makeDbOps({
+				accounts: [
+					makeAccount({ id: "cold-1" }),
+					makeAccount({ id: "cold-2", name: "Cold 2" }),
+				],
+			}),
+		);
+
+		const family = scan.rows.find((r) => r.dimensionKind === "family");
+		expect(family?.eligibleAccountIds.sort()).toEqual(["cold-1", "cold-2"]);
+		expect(family?.unopenedAccountIds).toEqual(["cold-2"]);
+		expect(family?.unreadableAccountIds).toEqual([]);
+	});
+
+	it("classifies a snapshot tick that recorded another family's row", async () => {
+		// The snapshot path classifies from payload evidence too, as long as the
+		// evidence came from ONE tick: this tick wrote an account-wide row AND an
+		// Opus scoped row, so the absence of a Fable row is a fact about the
+		// reading rather than a gap in it.
+		const scan = await computeWorkloadHeadroomScan(
+			makeDbOps({
+				accounts: [
+					makeAccount({ id: "cold-1" }),
+					makeAccount({ id: "cold-2", name: "Cold 2" }),
+				],
+				snapshots: [accountWide("cold-1"), accountWide("cold-2")],
+				scopedSnapshots: [
+					scopedRow("cold-1"),
+					scopedRow("cold-2", {
+						family: "opus",
+						displayName: "Claude Opus 5",
+					}),
+				],
+			}),
+		);
+
+		const family = scan.rows.find((r) => r.dimensionId === "fable");
+		expect(family?.eligibleAccountIds.sort()).toEqual(["cold-1", "cold-2"]);
+		expect(family?.unopenedAccountIds).toEqual(["cold-2"]);
+		expect(family?.unreadableAccountIds).toEqual([]);
+	});
+
+	it("will not take the family evidence from a different tick", async () => {
+		// Same rows, but the Opus row belongs to an earlier tick than the
+		// account-wide reading that won. That tick cannot say what the winning
+		// reading contained, so the account is unreadable — not untouched.
+		const scan = await computeWorkloadHeadroomScan(
+			makeDbOps({
+				accounts: [
+					makeAccount({ id: "cold-1" }),
+					makeAccount({ id: "cold-2", name: "Cold 2" }),
+				],
+				snapshots: [accountWide("cold-1"), accountWide("cold-2")],
+				scopedSnapshots: [
+					scopedRow("cold-1"),
+					scopedRow("cold-2", {
+						sampledAt: BASE - 3 * MINUTE_MS,
+						family: "opus",
+						displayName: "Claude Opus 5",
+					}),
+				],
+			}),
+		);
+
+		const family = scan.rows.find((r) => r.dimensionId === "fable");
+		expect(family?.eligibleAccountIds.sort()).toEqual(["cold-1", "cold-2"]);
+		expect(family?.unreadableAccountIds).toEqual(["cold-2"]);
+		expect(family?.unopenedAccountIds).toEqual([]);
+	});
 });
