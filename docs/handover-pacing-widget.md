@@ -218,6 +218,7 @@ One flat record array, nothing nested inside it:
       "projectionBasis": "measured",
       "eligibleAccounts": 5,
       "unreadableAccounts": 0,
+      "unopenedAccounts": 0,
       "spentAccounts": 0
     }
   ]
@@ -230,6 +231,18 @@ so whenever this is above zero, `exhaustsAt` is a lower bound and
 `eligibleAccounts` overstates the depth actually behind the projection. Render
 the pair, or at least don't claim five accounts of cover for a number computed
 from three.
+
+`unopenedAccounts` splits out one specific reason from that total: the account
+was read cleanly, its weekly window is still running, and its payload carries no
+window for this family, or an idle one (0%, no reset) — Anthropic states an
+untouched family either way until its first use in the week. Those accounts are counted inside `unreadableAccounts`,
+not beside it, so `eligibleAccounts − unreadableAccounts` keeps meaning "the
+accounts the projection was built from" whatever your widget knows about this
+field. The remainder, `unreadableAccounts − unopenedAccounts`, is the other
+excluded accounts: no reading at all, or a reading nothing could be projected
+from. Class rows always carry 0. A widget can render this directly ("2 accounts
+have not used Fable this week"); it must not render it as a 0% reading, because
+the account states no percentage for the family.
 
 `headroomPct` and `headroomDirection` mean exactly what they mean in section 3,
 including the rule that the sign lives in the enum. What is new is

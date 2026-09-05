@@ -1,6 +1,10 @@
+import {
+	listLiveScopedFamiliesByClass,
+	servableClassFor,
+} from "@clankermux/core";
 import type { AccountResponse } from "@clankermux/types";
 import { AlertCircle } from "lucide-react";
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import {
 	ACCOUNT_UTILIZATION_SORT_LABELS,
 	ACCOUNT_UTILIZATION_SORT_MODES,
@@ -120,6 +124,20 @@ export function AccountUtilizationCard({
 		now,
 	);
 
+	// Which model families each servable class currently reports, from UNPAUSED
+	// accounts only — the same set the server's family scan builds its class gate
+	// from, so both surfaces call the same accounts untouched. Built from every
+	// account rather than from `rows`: an account filtered out of this card can
+	// still be the one proving the family exists for the class.
+	const familiesByClass = useMemo(
+		() =>
+			listLiveScopedFamiliesByClass(
+				accounts.filter((account) => account.paused !== true),
+				now,
+			),
+		[accounts, now],
+	);
+
 	// A sort control over an error message, a skeleton, the empty state or a
 	// single row is a dead affordance.
 	const showSortControl =
@@ -237,6 +255,11 @@ export function AccountUtilizationCard({
 									showWeekly={providerShowsWeeklyUsage(account.provider)}
 									earliestResets={resetExtremes.earliest}
 									latestResets={resetExtremes.latest}
+									poolScopedFamilies={
+										familiesByClass.get(
+											servableClassFor(account.provider).classId,
+										) ?? []
+									}
 									inlineProjection
 								/>
 							</div>

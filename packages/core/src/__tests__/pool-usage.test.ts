@@ -7,6 +7,7 @@ import {
 	FAMILY_WEEKLY_ELEVATED_THRESHOLD_PCT,
 	listFamilyRows,
 	listLiveScopedFamilies,
+	listLiveScopedFamiliesByClass,
 	mergeScopedFamilies,
 	pickBindingScopedLimit,
 	poolClassOutlook,
@@ -2031,5 +2032,233 @@ describe("listFamilyRows", () => {
 		);
 
 		expect(rows.map((r) => r.displayName)).toEqual(["Opus", "Fable", "Haiku"]);
+	});
+
+	describe("unopened accounts", () => {
+		/** An account with account-wide windows and the given scoped entries. */
+		function mkWindowedAccount(
+			name: string,
+			entries: ReturnType<typeof scopedEntry>[],
+			partial: Partial<AccountResponse> = {},
+		): AccountResponse {
+			return mkAccount({
+				name,
+				provider: "anthropic",
+				usageData: {
+					five_hour: { utilization: 10, resets_at: null },
+					seven_day: {
+						utilization: 20,
+						resets_at: new Date(FUTURE_RESET).toISOString(),
+					},
+					limits: entries,
+				} as never,
+				...partial,
+			});
+		}
+
+		it("counts a servable sibling that reports no window for the family", () => {
+			const rows = listFamilyRows(
+				[
+					mkWindowedAccount("reporter", [scopedEntry("Fable", 45)]),
+					mkWindowedAccount("untouched", []),
+				],
+				NOW,
+			);
+
+			expect(rows).toHaveLength(1);
+			expect(rows[0].reportingCount).toBe(1);
+			expect(rows[0].unopenedCount).toBe(1);
+			expect(rows[0].unavailableReporters).toBe(0);
+		});
+
+		it("counts a servable sibling carrying the idle 0%-no-reset entry", () => {
+			// The live Claude-4 shape: the Fable window is present at 0% with no
+			// reset instead of omitted. Same fact as an absent entry — the account
+			// has not touched Fable this week — so it belongs in the same count.
+			const idleEntry = {
+				kind: "weekly_scoped",
+				group: "weekly",
+				percent: 0,
+				resets_at: null,
+				scope: { model: { id: null, display_name: "Fable" }, surface: null },
+				is_active: false,
+			} as unknown as ReturnType<typeof scopedEntry>;
+
+			const rows = listFamilyRows(
+				[
+					mkWindowedAccount("reporter", [scopedEntry("Fable", 45)]),
+					mkWindowedAccount("idle", [idleEntry]),
+				],
+				NOW,
+			);
+
+			expect(rows).toHaveLength(1);
+			expect(rows[0].reportingCount).toBe(1);
+			expect(rows[0].unopenedCount).toBe(1);
+		});
+
+		it("counts a sibling that reports only another family", () => {
+			const rows = listFamilyRows(
+				[
+					mkWindowedAccount("reporter", [scopedEntry("Fable", 45)]),
+					mkWindowedAccount("opus-only", [scopedEntry("Opus", 30)]),
+				],
+				NOW,
+			);
+
+			const fable = rows.find((r) => r.family === "fable");
+			expect(fable?.unopenedCount).toBe(1);
+			// And symmetrically for the other row.
+			expect(rows.find((r) => r.family === "opus")?.unopenedCount).toBe(1);
+		});
+
+		it("does not count a sibling that cannot serve right now", () => {
+			for (const blocked of [
+				{ paused: true },
+				{ rateLimitedUntil: NOW + 60_000 },
+			]) {
+				const rows = listFamilyRows(
+					[
+						mkWindowedAccount("reporter", [scopedEntry("Fable", 45)]),
+						mkWindowedAccount("untouched", [], blocked),
+					],
+					NOW,
+				);
+				expect(rows[0].unopenedCount).toBe(0);
+			}
+		});
+
+		it("does not count a sibling whose account-wide week has rolled over", () => {
+			const rows = listFamilyRows(
+				[
+					mkWindowedAccount("reporter", [scopedEntry("Fable", 45)]),
+					mkWindowedAccount("rolled-over", [], {
+						usageData: {
+							five_hour: { utilization: 10, resets_at: null },
+							seven_day: {
+								utilization: 20,
+								resets_at: new Date(NOW - 60_000).toISOString(),
+							},
+							limits: [],
+						} as never,
+					}),
+				],
+				NOW,
+			);
+
+			expect(rows[0].unopenedCount).toBe(0);
+		});
+
+		it("does not count an account outside the reporting class", () => {
+			const rows = listFamilyRows(
+				[
+					mkWindowedAccount("reporter", [scopedEntry("Fable", 45)]),
+					mkWindowedAccount("codex", [], { provider: "codex" }),
+				],
+				NOW,
+			);
+
+			expect(rows[0].unopenedCount).toBe(0);
+		});
+
+		it("does not count a sibling whose Fable entry is present but unusable", () => {
+			// `percent: null` drops the entry from the usable readings while the
+			// payload still names Fable. That is unreadable, never untouched.
+			const rows = listFamilyRows(
+				[
+					mkWindowedAccount("reporter", [scopedEntry("Fable", 45)]),
+					mkWindowedAccount("malformed", [
+						{ ...scopedEntry("Fable", 0), percent: null },
+					] as never),
+				],
+				NOW,
+			);
+
+			expect(rows[0].unopenedCount).toBe(0);
+		});
+
+		it("counts nobody when the family's only reporter is paused", () => {
+			// The reporting-class gate is built from UNPAUSED accounts, matching
+			// the server. Without that, a family nobody live reports would label
+			// every sibling untouched.
+			const rows = listFamilyRows(
+				[
+					mkWindowedAccount("reporter", [scopedEntry("Fable", 45)], {
+						paused: true,
+					}),
+					mkWindowedAccount("untouched", []),
+				],
+				NOW,
+			);
+
+			expect(rows).toHaveLength(1);
+			expect(rows[0].unavailableReporters).toBe(1);
+			expect(rows[0].unopenedCount).toBe(0);
+		});
+	});
+});
+
+describe("listLiveScopedFamiliesByClass", () => {
+	function scopedEntry(displayName: string, percent: number) {
+		return {
+			kind: "weekly_scoped",
+			group: "weekly",
+			percent,
+			resets_at: new Date(NOW + 3 * 86_400_000).toISOString(),
+			scope: {
+				model: {
+					id: displayName.toLowerCase().replace(/\s+/g, "-"),
+					display_name: displayName,
+				},
+			},
+			is_active: true,
+		};
+	}
+
+	it("keys each family by the servable class that reports it", () => {
+		const byClass = listLiveScopedFamiliesByClass(
+			[
+				mkAccount({
+					name: "a",
+					provider: "anthropic",
+					usageData: { limits: [scopedEntry("Fable", 20)] } as never,
+				}),
+				mkAccount({
+					name: "b",
+					provider: "bedrock",
+					usageData: { limits: [scopedEntry("Claude Opus 5", 30)] } as never,
+				}),
+			],
+			NOW,
+		);
+
+		// anthropic and bedrock share one servable class, so both land together.
+		expect([...byClass.keys()]).toEqual(["anthropic"]);
+		expect(byClass.get("anthropic")).toEqual([
+			{ family: "fable", displayName: "Fable" },
+			{ family: "opus", displayName: "Claude Opus 5" },
+		]);
+	});
+
+	it("leaves the flat family list it feeds unchanged", () => {
+		const accounts = [
+			mkAccount({
+				name: "a",
+				provider: "anthropic",
+				usageData: {
+					limits: [scopedEntry("Fable", 20), scopedEntry("Claude Opus 5", 30)],
+				} as never,
+			}),
+			mkAccount({
+				name: "b",
+				provider: "anthropic",
+				usageData: { limits: [scopedEntry("Fable", 60)] } as never,
+			}),
+		];
+
+		expect(listLiveScopedFamilies(accounts, NOW)).toEqual([
+			{ family: "fable", displayName: "Fable" },
+			{ family: "opus", displayName: "Claude Opus 5" },
+		]);
 	});
 });

@@ -13,6 +13,9 @@ const NOW = Date.parse("2026-08-21T12:00:00.000Z");
 const inHours = (hours: number) =>
 	new Date(NOW + hours * 60 * 60 * 1000).toISOString();
 
+/** What a list-level caller supplies: the families this account's class reports. */
+const FABLE = [{ family: "fable", displayName: "Fable" }] as const;
+
 function scopedEntry(displayName: string, resetsAt: string, percent = 42) {
 	return {
 		kind: "weekly_scoped",
@@ -356,5 +359,147 @@ describe("computeWindowResetExtremes", () => {
 
 		expect(extremes.earliest.has("scoped:fable")).toBe(false);
 		expect(extremes.latest.has("scoped:fable")).toBe(false);
+	});
+
+	it("never lets an unopened row define a reset endpoint", () => {
+		// The row carries no reset BY CONTRACT, so there is nothing to compare —
+		// and inventing one would put a countdown on a window that has not
+		// started.
+		const extremes = computeWindowResetExtremes(
+			[
+				anthropicAccount({ poolScopedFamilies: FABLE }),
+				anthropicAccount({ poolScopedFamilies: FABLE }),
+			],
+			NOW,
+		);
+
+		expect(extremes.earliest.has("scoped:fable")).toBe(false);
+		expect(extremes.latest.has("scoped:fable")).toBe(false);
+	});
+});
+
+describe("classifyUsageCard — families this account has not used", () => {
+	it("emits a labelled row with no utilization and no reset", () => {
+		const card = classifyUsageCard(
+			anthropicAccount({ poolScopedFamilies: FABLE }),
+			NOW,
+		);
+		if (card.kind !== "windows")
+			throw new Error(`expected windows: ${card.kind}`);
+
+		const unopened = card.usages.filter((u) => u.state === "unopened");
+		expect(unopened).toEqual([
+			{
+				utilization: null,
+				window: "seven_day_scoped",
+				resetTime: null,
+				label: "Fable",
+				state: "unopened",
+			},
+		]);
+	});
+
+	it("does not emit one for a family the payload already reports", () => {
+		const card = classifyUsageCard(
+			anthropicAccount({
+				scoped: [scopedEntry("Fable", inHours(72))],
+				poolScopedFamilies: FABLE,
+			}),
+			NOW,
+		);
+		if (card.kind !== "windows")
+			throw new Error(`expected windows: ${card.kind}`);
+
+		expect(card.usages.some((u) => u.state === "unopened")).toBe(false);
+		// The ordinary percent card is what renders instead.
+		expect(
+			card.usages.filter((u) => u.window === "seven_day_scoped"),
+		).toHaveLength(1);
+	});
+
+	it("does not emit one beside a percent card built from an unparseable reset", () => {
+		// `getScopedWeeklyLimits` keeps an entry with any non-null `resets_at`
+		// while the normalizer drops it, so the family is PRESENT but unreadable.
+		// Emitting the unopened row too would put "42%" and "not used this week"
+		// on the same family in one card.
+		const card = classifyUsageCard(
+			anthropicAccount({
+				scoped: [scopedEntry("Fable", "not-a-date")],
+				poolScopedFamilies: FABLE,
+			}),
+			NOW,
+		);
+		if (card.kind !== "windows")
+			throw new Error(`expected windows: ${card.kind}`);
+
+		expect(card.usages.some((u) => u.state === "unopened")).toBe(false);
+		expect(
+			card.usages.filter((u) => u.window === "seven_day_scoped"),
+		).toHaveLength(1);
+	});
+
+	it("emits nothing at all for a family whose only entry has no reset", () => {
+		// Dropped by both readers, so the family renders no row of any kind —
+		// never an unopened one, which would claim the entry was not there.
+		const card = classifyUsageCard(
+			anthropicAccount({
+				scoped: [{ ...scopedEntry("Fable", inHours(72)), resets_at: null }],
+				poolScopedFamilies: FABLE,
+			}),
+			NOW,
+		);
+		if (card.kind !== "windows")
+			throw new Error(`expected windows: ${card.kind}`);
+
+		expect(
+			card.usages.filter((u) => u.window === "seven_day_scoped"),
+		).toHaveLength(0);
+	});
+
+	it("emits one for the idle 0%-no-reset entry and no percent row beside it", () => {
+		// The live Claude-4 shape: Anthropic states the untouched Fable window as
+		// an entry at 0% with no reset rather than omitting it. The card must read
+		// that as "not used this week", not as a window it failed to parse.
+		const card = classifyUsageCard(
+			anthropicAccount({
+				scoped: [{ ...scopedEntry("Fable", inHours(72), 0), resets_at: null }],
+				poolScopedFamilies: FABLE,
+			}),
+			NOW,
+		);
+		if (card.kind !== "windows")
+			throw new Error(`expected windows: ${card.kind}`);
+
+		expect(card.usages.filter((u) => u.window === "seven_day_scoped")).toEqual([
+			{
+				utilization: null,
+				window: "seven_day_scoped",
+				resetTime: null,
+				label: "Fable",
+				state: "unopened",
+			},
+		]);
+	});
+
+	it("does not emit one once the account-wide week has rolled over", () => {
+		const card = classifyUsageCard(
+			anthropicAccount({
+				sevenDayResetsAt: inHours(-1),
+				poolScopedFamilies: FABLE,
+			}),
+			NOW,
+		);
+		if (card.kind !== "windows")
+			throw new Error(`expected windows: ${card.kind}`);
+
+		expect(card.usages.some((u) => u.state === "unopened")).toBe(false);
+	});
+
+	it("emits nothing when the caller supplies no pool families", () => {
+		const card = classifyUsageCard(anthropicAccount(), NOW);
+		if (card.kind !== "windows")
+			throw new Error(`expected windows: ${card.kind}`);
+
+		expect(card.usages.some((u) => u.state === "unopened")).toBe(false);
 	});
 });

@@ -245,7 +245,7 @@ describe("computeWorkloadHeadroom — family rows", () => {
 		expect(row?.basis).toBe("conservative-bound");
 	});
 
-	it("drops an account that reports no scoped window for the family", () => {
+	it("lists an account that reports no scoped window as unopened, not pooled", () => {
 		const withScope = accountWideConstrained("c1");
 		const withoutScope: RunwayAccountSource = {
 			id: "c2",
@@ -264,9 +264,13 @@ describe("computeWorkloadHeadroom — family rows", () => {
 		const row = computeWorkloadHeadroom([withScope, withoutScope], NOW).find(
 			(candidate) => candidate.dimensionKind === "family",
 		);
-		// c2 has plenty of account-wide room, so pooling it would make the family
-		// look beyond-horizon on capacity it may not have for Fable at all.
-		expect(row?.eligibleAccountIds).toEqual(["c1"]);
+		// c2 has plenty of account-wide room, but it has not used Fable this week —
+		// it is eligible and disclosed as unopened, and NOT pooled, because pooling
+		// it would make the family look beyond-horizon on capacity it may not have
+		// for Fable at all.
+		expect(row?.eligibleAccountIds).toEqual(["c1", "c2"]);
+		expect(row?.unopenedAccountIds).toEqual(["c2"]);
+		expect(row?.unreadableAccountIds).toEqual([]);
 		expect(row?.outcome.kind).toBe("runway");
 	});
 
@@ -442,6 +446,8 @@ describe("computeWorkloadHeadroom — counts that must not mislead", () => {
 		const family = rows.find((row) => row.dimensionKind === "family");
 		expect(family?.eligibleAccountIds).toEqual(["claude-1"]);
 		expect(family?.unreadableAccountIds).toEqual([]);
+		// Nor is it an account that has not USED the family: it could never use it.
+		expect(family?.unopenedAccountIds).toEqual([]);
 	});
 
 	it("keeps unreadable a SUBSET of eligible on a family row", () => {
@@ -575,7 +581,7 @@ describe("computeWorkloadHeadroom — projection basis follows the claim", () =>
 	});
 });
 
-describe("computeWorkloadHeadroom — three states of scoped evidence", () => {
+describe("computeWorkloadHeadroom — four states of scoped evidence", () => {
 	it("keeps a snapshot-restored sibling eligible but unreadable", () => {
 		// A snapshot restore carries the account-wide windows and no scoped ones,
 		// so this account states NO scoped evidence rather than stating it has no
@@ -601,6 +607,9 @@ describe("computeWorkloadHeadroom — three states of scoped evidence", () => {
 
 		expect(row?.eligibleAccountIds).toEqual(["reporter", "restored"]);
 		expect(row?.unreadableAccountIds).toEqual(["restored"]);
+		// Absence of evidence, not evidence of absence: nothing here says the
+		// account has not used Fable, only that this resolution cannot say.
+		expect(row?.unopenedAccountIds).toEqual([]);
 	});
 
 	it("still excludes an account that reports scoped limits without this family", () => {
@@ -626,6 +635,186 @@ describe("computeWorkloadHeadroom — three states of scoped evidence", () => {
 
 		expect(row?.eligibleAccountIds).toEqual(["reporter"]);
 		expect(row?.unreadableAccountIds).toEqual([]);
+		// A Codex account has no Fable window to be missing, so it is not
+		// "unopened" either — it is not eligible for the row at all.
+		expect(row?.unopenedAccountIds).toEqual([]);
+	});
+
+	it("calls an Anthropic sibling that reports no Fable window unopened", () => {
+		// The reading is live and complete: the payload was read, it names no
+		// window for this family, and the week that window would belong to has
+		// not rolled over. Before this state existed the account was skipped
+		// entirely — invisible in every count on the row.
+		const unopened: RunwayAccountSource = {
+			id: "unopened",
+			name: "unopened",
+			provider: "anthropic",
+			usageData: null,
+			windowObservations: {
+				fiveHour: { pct: 5, resetMs: NOW + 5 * HOUR },
+				sevenDay: { pct: 10, resetMs: NOW + 5 * DAY },
+				weeklyScoped: [],
+				weeklyScopedPresent: [],
+				weeklyScopedIdle: [],
+			},
+			usageObservedAtMs: NOW,
+		};
+
+		const row = computeWorkloadHeadroom(
+			[accountWideConstrained("reporter"), unopened],
+			NOW,
+		).find((candidate) => candidate.dimensionKind === "family");
+
+		expect(row?.eligibleAccountIds).toEqual(["reporter", "unopened"]);
+		expect(row?.unreadableAccountIds).toEqual([]);
+		expect(row?.unopenedAccountIds).toEqual(["unopened"]);
+	});
+
+	it("classifies the same state from a live payload", () => {
+		const unopened: RunwayAccountSource = {
+			id: "unopened",
+			name: "unopened",
+			provider: "anthropic",
+			usageData: anthropicUsage({
+				fiveHourPct: 5,
+				fiveHourResetMs: NOW + 5 * HOUR,
+				weeklyPct: 10,
+				weeklyResetMs: NOW + 5 * DAY,
+				scoped: null,
+			}),
+			usageObservedAtMs: NOW,
+		};
+
+		const row = computeWorkloadHeadroom(
+			[accountWideConstrained("reporter"), unopened],
+			NOW,
+		).find((candidate) => candidate.dimensionKind === "family");
+
+		expect(row?.eligibleAccountIds).toEqual(["reporter", "unopened"]);
+		expect(row?.unreadableAccountIds).toEqual([]);
+		expect(row?.unopenedAccountIds).toEqual(["unopened"]);
+	});
+
+	it("calls a payload that names the family with an unusable entry unreadable", () => {
+		// `percent: null` drops the entry from the usable readings while the
+		// payload still names Fable. Reading the usable list alone would label
+		// this account untouched, which is the one thing the payload disproves.
+		const malformed: RunwayAccountSource = {
+			id: "malformed",
+			name: "malformed",
+			provider: "anthropic",
+			usageData: {
+				five_hour: { utilization: 5, resets_at: iso(NOW + 5 * HOUR) },
+				seven_day: { utilization: 10, resets_at: iso(NOW + 5 * DAY) },
+				limits: [
+					{
+						...scopedEntry(0, NOW + 5 * DAY),
+						percent: null,
+					},
+				],
+			} as unknown as AnthropicUsageData,
+			usageObservedAtMs: NOW,
+		};
+
+		const row = computeWorkloadHeadroom(
+			[accountWideConstrained("reporter"), malformed],
+			NOW,
+		).find((candidate) => candidate.dimensionKind === "family");
+
+		expect(row?.eligibleAccountIds).toEqual(["reporter", "malformed"]);
+		expect(row?.unreadableAccountIds).toEqual(["malformed"]);
+		expect(row?.unopenedAccountIds).toEqual([]);
+	});
+
+	it("excludes the boundary tick whose account-wide week has already rolled over", () => {
+		// Between a weekly reset and the next poll every scoped entry is stale and
+		// gone. That is not evidence the family was never used; it stays excluded
+		// exactly as it was before this state existed.
+		const rolledOver: RunwayAccountSource = {
+			id: "rolled-over",
+			name: "rolled-over",
+			provider: "anthropic",
+			usageData: null,
+			windowObservations: {
+				fiveHour: { pct: 5, resetMs: NOW + 5 * HOUR },
+				sevenDay: { pct: 10, resetMs: NOW - HOUR },
+				weeklyScoped: [],
+				weeklyScopedPresent: [],
+				weeklyScopedIdle: [],
+			},
+			usageObservedAtMs: NOW,
+		};
+
+		const row = computeWorkloadHeadroom(
+			[accountWideConstrained("reporter"), rolledOver],
+			NOW,
+		).find((candidate) => candidate.dimensionKind === "family");
+
+		expect(row?.eligibleAccountIds).toEqual(["reporter"]);
+		expect(row?.unopenedAccountIds).toEqual([]);
+	});
+
+	it("excludes an unopened account from the projection and from spent", () => {
+		const unopened: RunwayAccountSource = {
+			id: "unopened",
+			name: "unopened",
+			provider: "anthropic",
+			usageData: anthropicUsage({
+				fiveHourPct: 5,
+				fiveHourResetMs: NOW + 5 * HOUR,
+				weeklyPct: 10,
+				weeklyResetMs: NOW + 5 * DAY,
+				scoped: null,
+			}),
+			usageObservedAtMs: NOW,
+		};
+		const reporter = accountWideConstrained("reporter");
+
+		const withUnopened = computeWorkloadHeadroom(
+			[reporter, unopened],
+			NOW,
+		).find((candidate) => candidate.dimensionKind === "family");
+		const reporterOnly = computeWorkloadHeadroom([reporter], NOW).find(
+			(candidate) => candidate.dimensionKind === "family",
+		);
+
+		expect(withUnopened?.unopenedAccountIds).toEqual(["unopened"]);
+		// The row stays an observed LOWER bound: an account with no window for the
+		// family contributes no capacity, so folding it in would invent depth.
+		expect(withUnopened?.outcome).toEqual(reporterOnly?.outcome);
+		expect(withUnopened?.spentAccountIds).toEqual([]);
+	});
+
+	it("keeps class rows free of a state that only family rows can have", () => {
+		const row = computeWorkloadHeadroom(
+			[accountWideConstrained("reporter")],
+			NOW,
+		).find((candidate) => candidate.dimensionKind === "class");
+		expect(row?.unopenedAccountIds).toEqual([]);
+	});
+
+	it("keeps a reset-mismatch rejection unreadable rather than unopened", () => {
+		const mismatched: RunwayAccountSource = {
+			id: "mismatched",
+			name: "mismatched",
+			provider: "anthropic",
+			usageData: anthropicUsage({
+				fiveHourPct: 1,
+				fiveHourResetMs: NOW + HOUR,
+				weeklyPct: 80,
+				weeklyResetMs: NOW + 2 * DAY,
+				scoped: { pct: 70, resetMs: NOW + 5 * DAY },
+			}),
+			usageObservedAtMs: NOW,
+		};
+
+		const row = computeWorkloadHeadroom([mismatched], NOW).find(
+			(candidate) => candidate.dimensionKind === "family",
+		);
+		// It DOES report Fable — the reading just cannot carry a projection. The
+		// unreadable remainder on the wire is not only "no reading at all".
+		expect(row?.unreadableAccountIds).toEqual(["mismatched"]);
+		expect(row?.unopenedAccountIds).toEqual([]);
 	});
 
 	it("does not let a future weekly credit hide a spent 5-hour window", () => {

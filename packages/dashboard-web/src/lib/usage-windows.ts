@@ -1,5 +1,15 @@
-import { getModelFamily } from "@clankermux/core";
-import type { FullUsageData, StaleUsageInfo } from "@clankermux/types";
+import {
+	classifyScopedFamilyEvidence,
+	getModelFamily,
+	type LiveScopedFamily,
+	normalizeAnthropicUsage,
+	servableClassFor,
+} from "@clankermux/core";
+import type {
+	AnthropicUsageData,
+	FullUsageData,
+	StaleUsageInfo,
+} from "@clankermux/types";
 import {
 	providerShowsCreditsBalance,
 	providerShowsWeeklyUsage,
@@ -14,6 +24,18 @@ export interface UsageDisplay {
 	window: string | null;
 	resetTime: string | null;
 	label?: string;
+	/**
+	 * `"unopened"`: a labelled scoped-weekly row for a family this account has
+	 * not used this window — its payload carries no window for the family, or an
+	 * idle one (0%, no reset). Anthropic states an untouched family's entry
+	 * either way until its first use, so there is no reading to show.
+	 *
+	 * `utilization` and `resetTime` are null BY CONTRACT on such a row and must
+	 * never be rendered as a bar, a percentage or a countdown — a 0% bar claims a
+	 * measurement nobody made, and the generic "Usage data unavailable" copy
+	 * blames the proxy for a fact about the account.
+	 */
+	state?: "unopened";
 }
 
 /**
@@ -30,6 +52,16 @@ export interface UsageCardSource {
 	usageRateLimitedUntil?: number | null;
 	provider: string;
 	showWeekly?: boolean;
+	/**
+	 * Families some UNPAUSED account in THIS account's servable class reports
+	 * live, from `listLiveScopedFamiliesByClass` over the unpaused accounts.
+	 *
+	 * Supplied by list-level callers and omitted when the card renders alone: a
+	 * single card cannot know whether a family it does not report even exists in
+	 * the pool, and without that it could only guess at the difference between
+	 * "not used yet" and "no such limit for this provider".
+	 */
+	poolScopedFamilies?: readonly LiveScopedFamily[];
 }
 
 /**
@@ -66,6 +98,7 @@ export function classifyUsageCard(
 		usageRateLimitedUntil,
 		provider,
 		showWeekly = false,
+		poolScopedFamilies,
 	} = source;
 
 	// Allow a null resetIso for providers that show usage data (e.g. PayG mode)
@@ -244,6 +277,50 @@ export function classifyUsageCard(
 				window: "seven_day_scoped",
 				resetTime: limit.resetsAt,
 				label: limit.label,
+			});
+		}
+
+		// Families the pool reports that THIS account's payload names no window
+		// for, or names only an idle one (0%, no reset): Anthropic states an
+		// untouched family either way until its first use in the week, so this is
+		// a fact about the account rather than a gap.
+		//
+		// Availability (paused, cooling down) is deliberately NOT a condition: the
+		// row states what this account's own reading says, and a paused account
+		// already renders all its other windows. The family-card COUNT uses the
+		// serving rule instead, because it answers a different question.
+		const normalized = normalizeAnthropicUsage(
+			usageData as AnthropicUsageData,
+			now,
+		);
+		const classId = servableClassFor(provider).classId;
+		for (const family of poolScopedFamilies ?? []) {
+			// `weeklyScopedPresent` covers every entry that resolves to a family,
+			// including ones `getScopedWeeklyLimits` kept and the normalizer dropped
+			// (an unparseable `resets_at`). Those classify as unreadable, so the
+			// ordinary percent card and this row can never render together for one
+			// family. `weeklyScopedIdle` is the narrower set whose entry states no
+			// usage this week (0%, no reset); `getScopedWeeklyLimits` drops those
+			// for want of a reset, so the unopened row is the only one they emit.
+			const evidence = classifyScopedFamilyEvidence({
+				readings: normalized.weeklyScoped,
+				presentFamilies: new Set(normalized.weeklyScopedPresent),
+				idleFamilies: new Set(normalized.weeklyScopedIdle),
+				family: family.family,
+				accountWideWeeklyResetMs: normalized.weeklyAll?.resetMs ?? null,
+				classId,
+				// The caller supplies only the families this account's own class
+				// reports, so reaching this loop is itself the class evidence.
+				reportingClasses: new Set([classId]),
+				now,
+			});
+			if (evidence !== "unopened") continue;
+			usages.push({
+				utilization: null,
+				window: "seven_day_scoped",
+				resetTime: null,
+				label: family.displayName,
+				state: "unopened",
 			});
 		}
 	} else if (

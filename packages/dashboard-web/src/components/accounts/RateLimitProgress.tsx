@@ -3,6 +3,7 @@ import {
 	computeThrottleResumeAt,
 	computeWindowStartMs,
 	estimateWindowExhaustion,
+	type LiveScopedFamily,
 	registerUIRefresh,
 	usageObservedAtMs,
 	weeklyLifetimeConfidence,
@@ -60,6 +61,11 @@ interface RateLimitProgressProps {
 	// renders alone, where there is nothing to compare.
 	earliestResets?: ReadonlyMap<string, number>;
 	latestResets?: ReadonlyMap<string, number>;
+	// Families some unpaused account in this account's servable class reports.
+	// Any of them this account's payload names no window for renders as an
+	// "unopened" row instead of vanishing. Omitted when the card renders alone —
+	// a single card cannot know what the rest of the class reports.
+	poolScopedFamilies?: readonly LiveScopedFamily[];
 }
 
 // Maps a render-loop window name to its server-computed prediction. Only the
@@ -429,6 +435,7 @@ export function RateLimitProgress({
 	compact = false,
 	earliestResets,
 	latestResets,
+	poolScopedFamilies,
 }: RateLimitProgressProps) {
 	const [now, setNow] = useState(Date.now());
 
@@ -474,6 +481,7 @@ export function RateLimitProgress({
 			usageRateLimitedUntil,
 			provider,
 			showWeekly,
+			poolScopedFamilies,
 		},
 		now,
 	);
@@ -600,6 +608,40 @@ export function RateLimitProgress({
 			{usages.map((usage, _index) => {
 				const percentage = usage.utilization;
 				const isAvailable = percentage !== null;
+
+				// A model family this account has not used this week. It carries no
+				// reading BY CONTRACT, so this card has no bar, no pace tick, no
+				// projection, no reset and no throttle chip — every one of those
+				// would state something the account did not report. It comes before
+				// the branches below because each of them assumes a window with a
+				// value.
+				if (usage.state === "unopened") {
+					const unopenedLabel = usageWindowLabel(usage);
+					return (
+						<div
+							key={`${usage.window}-${usage.label}`}
+							className={cn(cardClass, SECONDARY_WINDOW_TINT, cardSpacing)}
+						>
+							<div className="flex items-center justify-between gap-item text-xs">
+								<span
+									className={cn(
+										"text-muted-foreground",
+										compact ? "min-w-0 shrink truncate" : "shrink-0",
+									)}
+									title={compact ? unopenedLabel : undefined}
+								>
+									{unopenedLabel}
+								</span>
+								<span className="shrink-0 font-medium text-muted-foreground">
+									Not used this week
+								</span>
+							</div>
+							<p className="text-xs text-muted-foreground">
+								No reading until first use
+							</p>
+						</div>
+					);
+				}
 
 				// Special rendering for PayG mode - just show message without progress bar
 				if (

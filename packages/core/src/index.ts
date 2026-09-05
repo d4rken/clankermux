@@ -6,12 +6,15 @@ export {
 	type RoutingPin,
 } from "./api-key-pin";
 export {
+	accountWideWeeklyResetMs,
 	computeApiKeyRunways,
 	effectiveRunwayOutcome,
 	type KeyRunway,
 	type RunwayAccountSource,
 	type RunwayHeadline,
 	type RunwayWindowObservations,
+	scopedFamilyIdle,
+	scopedFamilyPresence,
 	scopedFamilyReadings,
 	scopedWeeklyWindowKind,
 	summarizeKeyRunways,
@@ -209,6 +212,7 @@ export {
 	type LiveScopedFamily,
 	listFamilyRows,
 	listLiveScopedFamilies,
+	listLiveScopedFamiliesByClass,
 	mergeScopedFamilies,
 	type Outlook,
 	type OutlookTone,
@@ -244,6 +248,11 @@ export { providerDisplayName } from "./provider-display";
 export * from "./quota-drift";
 export * from "./rate-limit-status";
 export * from "./request-events";
+export {
+	classifyScopedFamilyEvidence,
+	type ScopedFamilyEvidence,
+	type ScopedFamilyEvidenceInput,
+} from "./scoped-family-evidence";
 export {
 	FAMILY_WEEKLY_EXHAUSTED_THRESHOLD_PERCENT,
 	getExhaustedFamilies,

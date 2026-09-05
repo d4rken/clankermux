@@ -47,6 +47,29 @@ function scopedAccount(
 	} as unknown as AccountResponse;
 }
 
+/**
+ * Like {@link scopedAccount} but with the account-wide windows the "has not used
+ * this family" classification needs: the week the missing entry would belong to
+ * has to still be running for its absence to mean anything.
+ */
+function windowedAccount(
+	name: string,
+	entries: ReturnType<typeof scopedEntry>[],
+	over: Partial<AccountResponse> = {},
+): AccountResponse {
+	return scopedAccount(name, entries, {
+		usageData: {
+			five_hour: { utilization: 10, resets_at: null },
+			seven_day: {
+				utilization: 20,
+				resets_at: new Date(NOW + 3 * DAY).toISOString(),
+			},
+			limits: entries,
+		},
+		...over,
+	} as unknown as Partial<AccountResponse>);
+}
+
 function render(rows: FamilyRow[], props: Record<string, unknown> = {}) {
 	return renderToStaticMarkup(
 		<FamilyWeeklyCard rows={rows} now={NOW} {...props} />,
@@ -145,6 +168,50 @@ describe("FamilyWeeklyCard", () => {
 		);
 
 		expect(html).toContain("1 of 2 reporting · 1 unavailable");
+	});
+
+	it("counts accounts that have not used the family this week", () => {
+		// The sibling can serve Fable and simply has not touched it, so it is
+		// neither a reporter nor unavailable. Leaving it out of the denominator
+		// made "1 of 1 reporting" describe a two-account pool.
+		const html = render(
+			rowsFor([
+				windowedAccount("reporter", [scopedEntry("Fable", 45)]),
+				windowedAccount("untouched", []),
+			]),
+		);
+
+		expect(html).toContain("1 of 2 reporting · 1 not used this week");
+		expect(html).not.toContain("unavailable");
+	});
+
+	it("mentions unopened accounts when nobody who reports can serve", () => {
+		// The only reporter is out of its account-wide weekly quota, so there is
+		// no aggregate to state — but a sibling that has never opened Fable is
+		// still there, and the reader has to be told before concluding the family
+		// is unreachable.
+		const html = render(
+			rowsFor([
+				windowedAccount("spent-reporter", [scopedEntry("Fable", 45)], {
+					usageData: {
+						five_hour: { utilization: 10, resets_at: null },
+						seven_day: {
+							utilization: 100,
+							resets_at: new Date(NOW + 3 * DAY).toISOString(),
+						},
+						limits: [scopedEntry("Fable", 45)],
+					},
+				} as unknown as Partial<AccountResponse>),
+				windowedAccount("untouched", []),
+			]),
+		);
+
+		expect(html).toContain("No reading");
+		expect(html).toContain(
+			"Reported only by 1 account that cannot serve right now",
+		);
+		expect(html).toContain("1 has not used Fable this week");
+		expect(html).not.toContain("% used");
 	});
 
 	it("renders nothing at all when no family reports a cap", () => {

@@ -1639,13 +1639,29 @@ export interface PublicWorkloadHeadroomRowDto {
 	 */
 	eligibleAccounts: number;
 	/**
-	 * Of those, the ones with no readable window for this workload.
+	 * Of those, the ones with no usable window for this workload — no reading at
+	 * all, a reading the scan could not project from, or (see
+	 * {@link unopenedAccounts}) a reading that shows the family untouched this
+	 * window.
 	 *
 	 * Their exclusion can only shorten a runway, so `exhaustsAt` is a lower bound
 	 * whenever this is above zero — never a fabricated number, but not the whole
 	 * picture either.
 	 */
 	unreadableAccounts: number;
+	/**
+	 * Of `unreadableAccounts`, the accounts excluded because they have not used
+	 * this family in the current weekly window: a live reading with a future
+	 * weekly reset and no window for the family, or an idle one (0%, no reset),
+	 * while a same-class account reports it.
+	 *
+	 * Nested, not disjoint: `eligibleAccounts − unreadableAccounts` is still the
+	 * projected count, and `unreadableAccounts − unopenedAccounts` is the rest of
+	 * the excluded accounts — those with no scoped reading at all, or a reading
+	 * that could not support a projection (a malformed entry, a scoped reset that
+	 * disagrees with the account-wide one). Class rows carry 0.
+	 */
+	unopenedAccounts: number;
 	/** Of the eligible ones, those already at or past 100% on any pooled window. */
 	spentAccounts: number;
 }
@@ -1774,7 +1790,13 @@ export function toPublicWorkloadHeadroomDto(snapshot: {
 			headroomAbsence: toPublicHeadroomAbsence(row.headroomAbsence),
 			projectionBasis: toPublicProjectionBasis(row.projectionBasis),
 			eligibleAccounts: row.eligibleAccountIds.length,
-			unreadableAccounts: row.unreadableAccountIds.length,
+			// Unopened accounts are counted HERE as well as in their own field.
+			// The two id lists are disjoint internally; nesting them on the wire is
+			// what keeps the documented `eligible − unreadable` arithmetic pointing
+			// at the projected count for a client that predates the new field.
+			unreadableAccounts:
+				row.unreadableAccountIds.length + row.unopenedAccountIds.length,
+			unopenedAccounts: row.unopenedAccountIds.length,
 			spentAccounts: row.spentAccountIds.length,
 		})),
 	};

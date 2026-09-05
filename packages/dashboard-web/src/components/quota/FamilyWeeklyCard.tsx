@@ -112,6 +112,11 @@ const floorPct = (pct: number): string => `${Math.floor(pct)}%`;
  * question. The chip is the other end deliberately: `Exhausted on 1 of 3` /
  * `At 92%` count who is spent, which is what the headline no longer says.
  *
+ * The reporting line also counts accounts that could serve the family and have
+ * not used it this week ("1 of 3 reporting · 2 not used this week"). Anthropic
+ * omits a family's window until its first use, so those accounts report no
+ * percentage at all — they are stated as a count and never as a 0% reading.
+ *
  * Codex's synthetic per-model weekly windows are not here; see
  * {@link listFamilyRows} for why, and the Accounts tab for where they are.
  */
@@ -155,7 +160,14 @@ export function FamilyWeeklyCard({
 							const usage = row.usage;
 							const least = usage == null ? null : leastUsedAccount(usage);
 							const outlook = familyOutlook(row);
-							const total = row.reportingCount + row.unavailableReporters;
+							// Accounts that could serve the family but have never opened it
+							// belong in the denominator: without them "1 of 1 reporting"
+							// described a single account while four more could take the
+							// work.
+							const total =
+								row.reportingCount +
+								row.unavailableReporters +
+								row.unopenedCount;
 							// Only a FUTURE reset is offered. `earliestResetMs` is the
 							// soonest across the family's accounts, so the name beside it
 							// has to be that account's — not `worstAccountName`, which is
@@ -183,11 +195,26 @@ export function FamilyWeeklyCard({
 										// The family exists — a live account reports the window —
 										// but every account that has it is unavailable. Saying
 										// nothing would read as "no such limit".
-										<p className="mt-tight text-xs text-muted-foreground">
-											Reported only by {row.unavailableReporters}{" "}
-											{row.unavailableReporters === 1 ? "account" : "accounts"}{" "}
-											that cannot serve right now
-										</p>
+										<>
+											<p className="mt-tight text-xs text-muted-foreground">
+												Reported only by {row.unavailableReporters}{" "}
+												{row.unavailableReporters === 1
+													? "account"
+													: "accounts"}{" "}
+												that cannot serve right now
+											</p>
+											{row.unopenedCount > 0 && (
+												// Untouched capacity is still capacity. Without this
+												// the card reads as "nobody can serve this family"
+												// while accounts that can are sitting idle — they
+												// simply have no window to report yet.
+												<p className="mt-tight text-xs text-muted-foreground">
+													{row.unopenedCount}{" "}
+													{row.unopenedCount === 1 ? "has" : "have"} not used{" "}
+													{row.displayName} this week
+												</p>
+											)}
+										</>
 									) : (
 										<>
 											<p
@@ -209,6 +236,9 @@ export function FamilyWeeklyCard({
 											<div className="mt-item space-y-tight text-xs text-muted-foreground">
 												<p className="truncate">
 													{row.reportingCount} of {total} reporting
+													{row.unopenedCount > 0
+														? ` · ${row.unopenedCount} not used this week`
+														: ""}
 													{row.unavailableReporters > 0
 														? ` · ${row.unavailableReporters} unavailable`
 														: ""}

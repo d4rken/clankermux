@@ -191,6 +191,7 @@ function workloadHeadroom(): {
 				projectionBasis: "measured",
 				eligibleAccountIds: ["acct-1", "acct-2"],
 				unreadableAccountIds: [],
+				unopenedAccountIds: [],
 				spentAccountIds: [],
 			},
 			{
@@ -209,6 +210,7 @@ function workloadHeadroom(): {
 				projectionBasis: "structural",
 				eligibleAccountIds: ["acct-1", "acct-2"],
 				unreadableAccountIds: ["acct-3"],
+				unopenedAccountIds: [],
 				spentAccountIds: ["acct-1"],
 			},
 		],
@@ -940,6 +942,7 @@ describe("golden: GET /public/v1/workload-headroom", () => {
 					projectionBasis: "measured",
 					eligibleAccounts: 2,
 					unreadableAccounts: 0,
+					unopenedAccounts: 0,
 					spentAccounts: 0,
 				},
 				{
@@ -962,10 +965,33 @@ describe("golden: GET /public/v1/workload-headroom", () => {
 					// account the scan could not project from was excluded, and
 					// excluding one can only bring the all-out instant earlier.
 					unreadableAccounts: 1,
+					unopenedAccounts: 0,
 					spentAccounts: 1,
 				},
 			],
 		});
+	});
+
+	it("nests unopened accounts inside the unreadable count", () => {
+		const scan = workloadHeadroom();
+		const dto = toPublicWorkloadHeadroomDto({
+			...scan,
+			rows: [
+				{
+					...scan.rows[1],
+					eligibleAccountIds: ["a", "b", "c"],
+					unreadableAccountIds: ["a"],
+					unopenedAccountIds: ["b"],
+				},
+			],
+		});
+		// `eligibleAccounts − unreadableAccounts` has to keep meaning "the
+		// accounts the projection was built from" for a widget that has never
+		// heard of the new state, so unopened accounts are counted in BOTH — and
+		// the remainder, `unreadable − unopened`, is the rest of the exclusions.
+		expect(dto.rows[0].eligibleAccounts).toBe(3);
+		expect(dto.rows[0].unreadableAccounts).toBe(2);
+		expect(dto.rows[0].unopenedAccounts).toBe(1);
 	});
 
 	it("serializes next-reset guidance with ISO dates and no account identities", () => {
