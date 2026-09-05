@@ -1,4 +1,4 @@
-import { RequestRepository } from "@clankermux/database";
+import { type RequestFilters, RequestRepository } from "@clankermux/database";
 import {
 	errorResponse,
 	InternalServerError,
@@ -13,6 +13,7 @@ import {
 	type StopsHistoryResponse,
 } from "@clankermux/types";
 import type { APIContext } from "../types";
+import { parseAnalyticsRequestFilters } from "./analytics-request-filters";
 import { getRangeConfig } from "./range-config";
 import {
 	buildBucketGrid,
@@ -30,7 +31,11 @@ const SAMPLE_MESSAGE_MAX_CHARS = 160;
  * handlers: repositories in production, plain mocks in the unit tests.
  */
 export interface StopsHistorySources {
-	getStopsByBucket(opts: { sinceMs: number; bucketMs: number }): Promise<
+	getStopsByBucket(opts: {
+		sinceMs: number;
+		bucketMs: number;
+		filters?: RequestFilters;
+	}): Promise<
 		Array<{
 			errorMessage: string | null;
 			statusCode: number | null;
@@ -40,7 +45,10 @@ export interface StopsHistorySources {
 			lastSeenMs: number;
 		}>
 	>;
-	getStopModelBreakdown(opts: { sinceMs: number }): Promise<
+	getStopModelBreakdown(opts: {
+		sinceMs: number;
+		filters?: RequestFilters;
+	}): Promise<
 		Array<{
 			errorMessage: string | null;
 			statusCode: number | null;
@@ -48,10 +56,14 @@ export interface StopsHistorySources {
 			count: number;
 		}>
 	>;
-	countRequestsSince(sinceMs: number): Promise<number>;
-	getCandidateCountDistribution(
-		sinceMs: number,
-	): Promise<Array<{ candidatesCount: number; requests: number }>>;
+	countRequestsSince(opts: {
+		sinceMs: number;
+		filters?: RequestFilters;
+	}): Promise<number>;
+	getCandidateCountDistribution(opts: {
+		sinceMs: number;
+		filters?: RequestFilters;
+	}): Promise<Array<{ candidatesCount: number; requests: number }>>;
 	/** Clock seam. Defaults to `Date.now`; tests pin it to a fixed instant. */
 	now?(): number;
 }
@@ -61,9 +73,9 @@ export function createStopsHistoryHandler(context: APIContext) {
 	return createStopsHistoryHandlerFromSources({
 		getStopsByBucket: (opts) => requests.getStopsByBucket(opts),
 		getStopModelBreakdown: (opts) => requests.getStopModelBreakdown(opts),
-		countRequestsSince: (sinceMs) => requests.countRequestsSince(sinceMs),
-		getCandidateCountDistribution: (sinceMs) =>
-			requests.getCandidateCountDistribution(sinceMs),
+		countRequestsSince: (opts) => requests.countRequestsSince(opts),
+		getCandidateCountDistribution: (opts) =>
+			requests.getCandidateCountDistribution(opts),
 	});
 }
 
@@ -75,6 +87,10 @@ export function createStopsHistoryHandler(context: APIContext) {
  * response — model breakdown and series included — and owns the range parsing
  * and the error mapping. The public widget reader calls the same computation
  * with a fixed range and both extras off.
+ *
+ * The filter panel is parsed here with the SAME parser `/api/analytics` uses,
+ * so the card and the request-volume panels beside it on the Analytics tab
+ * describe one selection rather than two.
  */
 export function createStopsHistoryHandlerFromSources(
 	sources: StopsHistorySources,
@@ -82,7 +98,10 @@ export function createStopsHistoryHandlerFromSources(
 	return async (params: URLSearchParams): Promise<Response> => {
 		try {
 			const range = normalizeRange(params.get("range"));
-			return jsonResponse(await computeStopsHistory(sources, range));
+			const filters = parseAnalyticsRequestFilters(params);
+			return jsonResponse(
+				await computeStopsHistory(sources, range, { filters }),
+			);
 		} catch (error) {
 			log.error("Stops history error:", error);
 			return errorResponse(
@@ -108,6 +127,13 @@ export interface StopsHistoryOptions {
 	includeModelBreakdown?: boolean;
 	/** Build the per-bucket `series` on every cause row. */
 	includeSeries?: boolean;
+	/**
+	 * Narrow every read to one analytics filter selection. Forwarded to all four
+	 * sources so the blocked count, its denominator and the candidate
+	 * distribution describe the same rows. Absent for the public widget reader,
+	 * which publishes a pool-level record with no caller-chosen scope.
+	 */
+	filters?: RequestFilters;
 }
 
 /**
@@ -135,17 +161,18 @@ export async function computeStopsHistory(
 ): Promise<StopsHistoryResponse> {
 	const includeModelBreakdown = options.includeModelBreakdown ?? true;
 	const includeSeries = options.includeSeries ?? true;
+	const filters = options.filters;
 	const { bucketMs, windowMs } = getRangeConfig(range);
 	const nowMs = sources.now?.() ?? Date.now();
 	const sinceMs = windowMs === null ? 0 : nowMs - windowMs;
 
 	const [buckets, models, totalRequests, candidateRows] = await Promise.all([
-		sources.getStopsByBucket({ sinceMs, bucketMs }),
+		sources.getStopsByBucket({ sinceMs, bucketMs, filters }),
 		includeModelBreakdown
-			? sources.getStopModelBreakdown({ sinceMs })
+			? sources.getStopModelBreakdown({ sinceMs, filters })
 			: Promise.resolve([]),
-		sources.countRequestsSince(sinceMs),
-		sources.getCandidateCountDistribution(sinceMs),
+		sources.countRequestsSince({ sinceMs, filters }),
+		sources.getCandidateCountDistribution({ sinceMs, filters }),
 	]);
 
 	// Cause accumulation. Classification runs once per (message, status)

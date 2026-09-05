@@ -41,10 +41,11 @@ export const queryKeys = {
 	// every family, so two family panels on the same range share a cache entry.
 	usageScopedHistory: (range?: string) =>
 		[...queryKeys.all, "usage-scoped-history", { range }] as const,
-	// Blocked-request history by cause. Keyed by range only: one response covers
-	// every cause, so the chart and the table share a cache entry.
-	stopsHistory: (range?: string) =>
-		[...queryKeys.all, "stops-history", { range }] as const,
+	// Blocked-request history by cause, keyed by range and filters. One response
+	// covers every cause, so the chart and the table share a cache entry; a
+	// different filter selection is a different measurement and must not.
+	stopsHistory: (range?: string, filters?: unknown) =>
+		[...queryKeys.all, "stops-history", { range, filters }] as const,
 	memoryHistory: (range?: string) =>
 		[...queryKeys.all, "memory-history", { range }] as const,
 	// Unkeyed: the payload is precomputed over the whole retained history, so

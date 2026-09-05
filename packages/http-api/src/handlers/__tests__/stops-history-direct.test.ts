@@ -11,6 +11,10 @@
  */
 
 import { describe, expect, it } from "bun:test";
+import {
+	EMPTY_REQUEST_FILTERS,
+	type RequestFilters,
+} from "@clankermux/database";
 import type { StopsHistoryResponse } from "@clankermux/types";
 import {
 	createStopsHistoryHandlerFromSources,
@@ -29,25 +33,35 @@ function makeSources(over: {
 	models?: Models;
 	total?: number;
 	candidates?: Array<{ candidatesCount: number; requests: number }>;
-}): StopsHistorySources & { calls: string[] } {
+}): StopsHistorySources & {
+	calls: string[];
+	/** The filter selection each source was handed, in call order. */
+	filterArgs: Array<RequestFilters | undefined>;
+} {
 	const calls: string[] = [];
+	const filterArgs: Array<RequestFilters | undefined> = [];
 	return {
 		calls,
+		filterArgs,
 		now: () => NOW,
-		getStopsByBucket: async () => {
+		getStopsByBucket: async (opts) => {
 			calls.push("getStopsByBucket");
+			filterArgs.push(opts.filters);
 			return over.buckets ?? [];
 		},
-		getStopModelBreakdown: async () => {
+		getStopModelBreakdown: async (opts) => {
 			calls.push("getStopModelBreakdown");
+			filterArgs.push(opts.filters);
 			return over.models ?? [];
 		},
-		countRequestsSince: async () => {
+		countRequestsSince: async (opts) => {
 			calls.push("countRequestsSince");
+			filterArgs.push(opts.filters);
 			return over.total ?? 0;
 		},
-		getCandidateCountDistribution: async () => {
+		getCandidateCountDistribution: async (opts) => {
 			calls.push("getCandidateCountDistribution");
+			filterArgs.push(opts.filters);
 			return over.candidates ?? [];
 		},
 	};
@@ -56,9 +70,10 @@ function makeSources(over: {
 async function run(
 	sources: StopsHistorySources,
 	range = "24h",
+	extraParams = "",
 ): Promise<StopsHistoryResponse> {
 	const response = await createStopsHistoryHandlerFromSources(sources)(
-		new URLSearchParams({ range }),
+		new URLSearchParams(`range=${range}${extraParams}`),
 	);
 	expect(response.status).toBe(200);
 	return (await response.json()) as StopsHistoryResponse;
@@ -276,6 +291,45 @@ describe("stops-history handler", () => {
 		expect(cause?.sampleErrorMessage).toBe("all_accounts_failed");
 		expect(cause?.series.length).toBeGreaterThan(0);
 		expect(body.range).toBe("6h");
+	});
+
+	it("hands the parsed filter selection to ALL FOUR sources", async () => {
+		// The card sits on a tab with a filter panel, so "N of M requests
+		// blocked" is a claim about a selection. Numerator, denominator and the
+		// candidate distribution have to narrow together — a filtered blocked
+		// count over an unfiltered total is a rate that is simply wrong.
+		const sources = makeSources({ total: 100 });
+		await run(
+			sources,
+			"24h",
+			"&apiKeys=k1,k2&accountsNone=true&status=error&models=m1&projects=p1&projectsNone=true&accounts=a1",
+		);
+
+		expect(sources.filterArgs).toHaveLength(4);
+		for (const filters of sources.filterArgs) {
+			expect(filters).toEqual({
+				accounts: ["a1"],
+				accountsNone: true,
+				models: ["m1"],
+				apiKeys: ["k1", "k2"],
+				projects: ["p1"],
+				projectsNone: true,
+				status: "error",
+			});
+		}
+	});
+
+	it("hands a CLEARED selection to all four when no filter params are sent", async () => {
+		// Not `undefined`: the handler always parses, so the sources see an
+		// explicit "nothing selected" and the repository takes its unfiltered
+		// path from the emptiness rather than from the absence.
+		const sources = makeSources({ total: 100 });
+		await run(sources);
+
+		expect(sources.filterArgs).toHaveLength(4);
+		for (const filters of sources.filterArgs) {
+			expect(filters).toEqual(EMPTY_REQUEST_FILTERS);
+		}
 	});
 
 	it("orders causes by count, biggest first", async () => {

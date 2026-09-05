@@ -20,5 +20,6 @@ export { QuotaChangeVerdicts } from "./QuotaChangeVerdicts";
 export { QuotaDriftPanel } from "./QuotaDriftPanel";
 export { RefusalFallbackPanel } from "./RefusalFallbackPanel";
 export { RoutingAnalyticsPanel } from "./RoutingAnalytics";
+export { StopsHistoryCard } from "./StopsHistoryCard";
 export { TokenSpeedAnalytics } from "./TokenSpeedAnalytics";
 export { ToolErrorsPanel } from "./ToolErrorsPanel";

@@ -519,9 +519,11 @@ export class APIRouter {
 				return usageScopedHistoryHandler(url.searchParams);
 			},
 		);
-		// How often requests were actually refused, and why. Takes only `range`.
-		// The retrospective counterpart to every forecast on the page: unlike a
-		// projection, this one can be checked against what happened.
+		// How often requests were actually refused, and why. Takes `range` plus
+		// the analytics filter panel (accounts / models / API keys / projects /
+		// status), so the card answers for the same selection as the panels
+		// beside it. The retrospective counterpart to every forecast on the page:
+		// unlike a projection, this one can be checked against what happened.
 		this.handlers.set("GET:/api/analytics/stops-history", (_req, url) => {
 			return stopsHistoryHandler(url.searchParams);
 		});

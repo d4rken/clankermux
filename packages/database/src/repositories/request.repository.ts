@@ -7,6 +7,11 @@ import type {
 } from "@clankermux/types";
 import { decryptPayload, encryptPayload } from "../payload-encryption";
 import { BaseRepository } from "./base.repository";
+import {
+	buildRequestFilterConditions,
+	hasRequestFilters,
+	type RequestFilters,
+} from "./request-filters";
 
 const log = new Logger("RequestRepository");
 
@@ -712,14 +717,22 @@ export class RequestRepository extends BaseRepository<RequestData> {
 	 *
 	 * Served by `idx_requests_success_timestamp` — `(success, timestamp DESC)`,
 	 * created in performance-indexes.ts — as a covering index, verified against
-	 * the live planner. No dedicated index is needed or wanted here.
+	 * the live planner. That still holds for the UNFILTERED read, which is the
+	 * one the Overview-era caller made and the one the public widget makes.
+	 * A filtered read adds predicates on columns the index does not carry, so it
+	 * costs a row lookup per candidate; those reads come from an analytics tab
+	 * with a filter panel open and are expected to be rarer.
 	 *
 	 * Grouping deliberately omits the model: adding it multiplies the row count
 	 * by the model cardinality on top of the bucket cardinality. The per-cause
 	 * top model comes from {@link getStopModelBreakdown}, which has no bucket
 	 * dimension and stays small.
 	 */
-	async getStopsByBucket(opts: { sinceMs: number; bucketMs: number }): Promise<
+	async getStopsByBucket(opts: {
+		sinceMs: number;
+		bucketMs: number;
+		filters?: RequestFilters;
+	}): Promise<
 		Array<{
 			errorMessage: string | null;
 			statusCode: number | null;
@@ -729,6 +742,7 @@ export class RequestRepository extends BaseRepository<RequestData> {
 			lastSeenMs: number;
 		}>
 	> {
+		const filter = buildRequestFilterConditions(opts.filters, "r");
 		const rows = await this.query<{
 			error_message: string | null;
 			status_code: number | null;
@@ -739,17 +753,19 @@ export class RequestRepository extends BaseRepository<RequestData> {
 		}>(
 			`
 			SELECT
-				error_message,
-				status_code,
-				(timestamp / ?) * ? AS bucket,
+				r.error_message AS error_message,
+				r.status_code AS status_code,
+				(r.timestamp / ?) * ? AS bucket,
 				COUNT(*) AS c,
-				MIN(timestamp) AS first_ms,
-				MAX(timestamp) AS last_ms
-			FROM requests
-			WHERE success = 0 AND timestamp >= ?
-			GROUP BY error_message, status_code, bucket
+				MIN(r.timestamp) AS first_ms,
+				MAX(r.timestamp) AS last_ms
+			FROM requests r
+			WHERE r.success = 0 AND r.timestamp >= ?${filter.conditions
+				.map((condition) => ` AND ${condition}`)
+				.join("")}
+			GROUP BY r.error_message, r.status_code, bucket
 		`,
-			[opts.bucketMs, opts.bucketMs, opts.sinceMs],
+			[opts.bucketMs, opts.bucketMs, opts.sinceMs, ...filter.binds],
 		);
 		return rows.map((row) => ({
 			errorMessage: row.error_message,
@@ -773,7 +789,10 @@ export class RequestRepository extends BaseRepository<RequestData> {
 	 * is the one worth naming; `model` is the fallback for rows recorded before
 	 * that column existed.
 	 */
-	async getStopModelBreakdown(opts: { sinceMs: number }): Promise<
+	async getStopModelBreakdown(opts: {
+		sinceMs: number;
+		filters?: RequestFilters;
+	}): Promise<
 		Array<{
 			errorMessage: string | null;
 			statusCode: number | null;
@@ -781,6 +800,7 @@ export class RequestRepository extends BaseRepository<RequestData> {
 			count: number;
 		}>
 	> {
+		const filter = buildRequestFilterConditions(opts.filters, "r");
 		const rows = await this.query<{
 			error_message: string | null;
 			status_code: number | null;
@@ -789,15 +809,17 @@ export class RequestRepository extends BaseRepository<RequestData> {
 		}>(
 			`
 			SELECT
-				error_message,
-				status_code,
-				COALESCE(requested_model, model) AS m,
+				r.error_message AS error_message,
+				r.status_code AS status_code,
+				COALESCE(r.requested_model, r.model) AS m,
 				COUNT(*) AS c
-			FROM requests
-			WHERE success = 0 AND timestamp >= ?
-			GROUP BY error_message, status_code, m
+			FROM requests r
+			WHERE r.success = 0 AND r.timestamp >= ?${filter.conditions
+				.map((condition) => ` AND ${condition}`)
+				.join("")}
+			GROUP BY r.error_message, r.status_code, m
 		`,
-			[opts.sinceMs],
+			[opts.sinceMs, ...filter.binds],
 		);
 		return rows.map((row) => ({
 			errorMessage: row.error_message,
@@ -807,11 +829,21 @@ export class RequestRepository extends BaseRepository<RequestData> {
 		}));
 	}
 
-	/** Total requests in range — the denominator a blocked count needs to be a rate. */
-	async countRequestsSince(sinceMs: number): Promise<number> {
+	/**
+	 * Total requests in range — the denominator a blocked count needs to be a
+	 * rate. Under filters it counts the SAME selection the numerator does, so
+	 * the two figures stay comparable.
+	 */
+	async countRequestsSince(opts: {
+		sinceMs: number;
+		filters?: RequestFilters;
+	}): Promise<number> {
+		const filter = buildRequestFilterConditions(opts.filters, "r");
 		const row = await this.get<{ c: number }>(
-			`SELECT COUNT(*) AS c FROM requests WHERE timestamp >= ?`,
-			[sinceMs],
+			`SELECT COUNT(*) AS c FROM requests r WHERE r.timestamp >= ?${filter.conditions
+				.map((condition) => ` AND ${condition}`)
+				.join("")}`,
+			[opts.sinceMs, ...filter.binds],
 		);
 		return row?.c ?? 0;
 	}
@@ -827,19 +859,39 @@ export class RequestRepository extends BaseRepository<RequestData> {
 	 * Rows with a NULL `candidates_count` are excluded rather than folded into
 	 * zero — "not recorded" and "nothing was eligible" are opposite readings,
 	 * and zero is the one that means an outage.
+	 *
+	 * The unfiltered read stays on `request_routing` alone. A filtered one has
+	 * to join `requests`, because every filter dimension lives on that row and
+	 * nowhere here; the join also drops routing rows whose request has since
+	 * been retained away, which is the correct reading of "requests matching
+	 * this selection".
 	 */
-	async getCandidateCountDistribution(
-		sinceMs: number,
-	): Promise<Array<{ candidatesCount: number; requests: number }>> {
-		const rows = await this.query<{ candidates_count: number; c: number }>(
-			`
+	async getCandidateCountDistribution(opts: {
+		sinceMs: number;
+		filters?: RequestFilters;
+	}): Promise<Array<{ candidatesCount: number; requests: number }>> {
+		const filter = buildRequestFilterConditions(opts.filters, "r");
+		const sql = hasRequestFilters(opts.filters)
+			? `
+			SELECT rr.candidates_count AS candidates_count, COUNT(*) AS c
+			FROM request_routing rr
+			JOIN requests r ON r.id = rr.request_id
+			WHERE rr.created_at >= ? AND rr.candidates_count IS NOT NULL${filter.conditions
+				.map((condition) => ` AND ${condition}`)
+				.join("")}
+			GROUP BY rr.candidates_count
+			ORDER BY rr.candidates_count ASC
+		`
+			: `
 			SELECT candidates_count, COUNT(*) AS c
 			FROM request_routing
 			WHERE created_at >= ? AND candidates_count IS NOT NULL
 			GROUP BY candidates_count
 			ORDER BY candidates_count ASC
-		`,
-			[sinceMs],
+		`;
+		const rows = await this.query<{ candidates_count: number; c: number }>(
+			sql,
+			[opts.sinceMs, ...filter.binds],
 		);
 		return rows.map((row) => ({
 			candidatesCount: row.candidates_count,

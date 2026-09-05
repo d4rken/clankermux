@@ -1,4 +1,5 @@
 import { MAX_PLAUSIBLE_TOKENS_PER_SECOND } from "@clankermux/core";
+import { buildRequestFilterConditions } from "@clankermux/database";
 import {
 	BadRequest,
 	errorResponse,
@@ -17,6 +18,7 @@ import type {
 	RefusalFallbackAnalytics,
 	SpeedTimePoint,
 } from "../types";
+import { parseAnalyticsRequestFilters } from "./analytics-request-filters";
 import { allSections, parseSectionsParam } from "./analytics-sections";
 import { getRangeConfig } from "./range-config";
 
@@ -443,31 +445,16 @@ export function createAnalyticsHandler(context: APIContext) {
 		const mode = params.get("mode") ?? "normal";
 		const isCumulative = mode === "cumulative";
 
-		// Extract filters.
-		//
-		// `accounts` and `apiKeys` carry stable IDs, not display names. Names are
-		// not identity: they change under a rename and disappear under a hard
-		// delete, and matching on them left the SQL-NULL-account rows unfilterable
-		// while the dropdown still offered a "(no account)" option. IDs are what
-		// the row actually stores. `models` and `projects` ARE their own identity,
-		// so they are unchanged.
-		const accountsFilter =
-			params.get("accounts")?.split(",").filter(Boolean) || [];
-		const accountsNone = params.get("accountsNone") === "true";
-		const modelsFilter = params.get("models")?.split(",").filter(Boolean) || [];
-		const apiKeysFilter =
-			params.get("apiKeys")?.split(",").filter(Boolean) || [];
-		// Named projects plus a dedicated flag for the NULL bucket — no in-band
-		// sentinel, so a project literally named "no-project" stays filterable
-		// as a normal name.
-		const projectsFilter =
-			params.get("projects")?.split(",").filter(Boolean) || [];
-		const projectsNone = params.get("projectsNone") === "true";
-		const statusFilter = params.get("status") || "all";
+		// Extract filters. Parsed and compiled by the shared modules the
+		// stops-history read uses, so a panel selection narrows both surfaces the
+		// same way — the predicates and their bind order are pinned by
+		// database/repositories/request-filters.
+		const filters = parseAnalyticsRequestFilters(params);
 
 		// Build filter conditions. The timestamp bound is structurally omitted
 		// for the all-time range (startMs === null) instead of widening to
-		// `timestamp > 0`.
+		// `timestamp > 0`, and it comes FIRST so the filter binds keep the order
+		// the shared builder emits them in.
 		const conditions: string[] = [];
 		const queryParams: (string | number)[] = [];
 		if (startMs !== null) {
@@ -484,59 +471,9 @@ export function createAnalyticsHandler(context: APIContext) {
 		 */
 		const pinRequestsFirst = startMs !== null;
 
-		// Named accounts plus a dedicated flag for the NULL bucket, mirroring the
-		// project filter below. The NO_ACCOUNT_ID sentinel is never STORED on a
-		// request row (account_used is either an id or SQL NULL), so the old
-		// `r.account_used = 'no_account'` disjunct matched nothing and the
-		// no-account requests could not be filtered at all.
-		if (accountsFilter.length > 0 || accountsNone) {
-			const parts: string[] = [];
-			if (accountsFilter.length > 0) {
-				const placeholders = accountsFilter.map(() => "?").join(",");
-				parts.push(`r.account_used IN (${placeholders})`);
-				queryParams.push(...accountsFilter);
-			}
-			if (accountsNone) {
-				parts.push("r.account_used IS NULL");
-			}
-			conditions.push(`(${parts.join(" OR ")})`);
-		}
-
-		if (modelsFilter.length > 0) {
-			const placeholders = modelsFilter.map(() => "?").join(",");
-			conditions.push(`r.model IN (${placeholders})`);
-			queryParams.push(...modelsFilter);
-		}
-
-		if (apiKeysFilter.length > 0) {
-			// Match on api_key_id, which is stamped on the row and survives both a
-			// rename and a hard delete — exactly what the previous
-			// COALESCE(current name, snapshot name) predicate was approximating,
-			// but exactly rather than approximately, and without a correlated
-			// subquery per row.
-			const placeholders = apiKeysFilter.map(() => "?").join(",");
-			conditions.push(`r.api_key_id IN (${placeholders})`);
-			queryParams.push(...apiKeysFilter);
-		}
-
-		if (projectsFilter.length > 0 || projectsNone) {
-			const parts: string[] = [];
-			if (projectsFilter.length > 0) {
-				const placeholders = projectsFilter.map(() => "?").join(",");
-				parts.push(`r.project IN (${placeholders})`);
-				queryParams.push(...projectsFilter);
-			}
-			if (projectsNone) {
-				parts.push("r.project IS NULL");
-			}
-			conditions.push(`(${parts.join(" OR ")})`);
-		}
-
-		if (statusFilter === "success") {
-			conditions.push("r.success = TRUE");
-		} else if (statusFilter === "error") {
-			conditions.push("r.success = FALSE");
-		}
+		const filterSql = buildRequestFilterConditions(filters, "r");
+		conditions.push(...filterSql.conditions);
+		queryParams.push(...filterSql.binds);
 
 		// range=all with no filters leaves no conditions; keep the WHERE slot
 		// valid with a constant-true predicate.

@@ -65,6 +65,13 @@ export {
 	type QuotaDriftResultRow,
 } from "./repositories/quota-drift-result.repository";
 export { RequestRepository } from "./repositories/request.repository";
+export {
+	buildRequestFilterConditions,
+	EMPTY_REQUEST_FILTERS,
+	hasRequestFilters,
+	type RequestFilterStatus,
+	type RequestFilters,
+} from "./repositories/request-filters";
 export { StatsRepository } from "./repositories/stats.repository";
 export { UsageScopedSnapshotRepository } from "./repositories/usage-scoped-snapshot.repository";
 export { UsageSnapshotRepository } from "./repositories/usage-snapshot.repository";

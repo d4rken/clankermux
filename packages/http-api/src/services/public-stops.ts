@@ -23,6 +23,11 @@ import {
  *  - COMPUTES ONLY WHAT IT PUBLISHES. The model breakdown is a second full scan
  *    of the range and the bucket grid builds a per-cause series; neither is on
  *    this wire, so neither is asked for.
+ *  - NO FILTER SCOPE. The dashboard route narrows to the analytics filter panel
+ *    a signed-in session had open. This surface publishes the POOL-LEVEL
+ *    record, so it passes no filters at all: the accounts, keys and projects a
+ *    selection names are exactly the identities this route exists not to
+ *    disclose, and honoring them would also make the memo below per-caller.
  *  - MEMOIZED, SINGLE-FLIGHT. One read per {@link PublicStopsOptions.ttlMs},
  *    and concurrent callers await the same in-flight promise rather than each
  *    starting a scan. Without it a poll loop on the LAN sets the query rate.
@@ -64,9 +69,9 @@ export function createPublicStopsReader(
 	const sources: StopsHistorySources = {
 		getStopsByBucket: (opts) => requests.getStopsByBucket(opts),
 		getStopModelBreakdown: (opts) => requests.getStopModelBreakdown(opts),
-		countRequestsSince: (sinceMs) => requests.countRequestsSince(sinceMs),
-		getCandidateCountDistribution: (sinceMs) =>
-			requests.getCandidateCountDistribution(sinceMs),
+		countRequestsSince: (opts) => requests.countRequestsSince(opts),
+		getCandidateCountDistribution: (opts) =>
+			requests.getCandidateCountDistribution(opts),
 		now,
 	};
 
