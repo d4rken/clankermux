@@ -325,3 +325,55 @@ describe("collectObservedWindows", () => {
 		expect(collectObservedWindows({})).toEqual([]);
 	});
 });
+
+describe("normalizeAnthropicUsage — weeklyScopedPresent", () => {
+	it("lists a family whose entry is unusable while weeklyScoped omits it", () => {
+		// Presence is evidence that the provider KNOWS the family for this
+		// account. Every entry below is dropped from the usable readings, and a
+		// consumer testing the usable list alone would read each of them as "this
+		// account has never used the family" — the opposite claim.
+		for (const broken of [
+			scoped("Fable", { percent: null }),
+			scoped("Fable", { percent: Number.NaN }),
+			scoped("Fable", { resets_at: "not-a-real-date" }),
+			scoped("Fable", { resets_at: PAST_ISO }),
+			scoped("Fable", { resets_at: null }),
+		]) {
+			const n = normalizeAnthropicUsage({ limits: [broken] }, NOW);
+			expect(n.weeklyScoped).toEqual([]);
+			expect(n.weeklyScopedPresent).toEqual(["fable"]);
+		}
+	});
+
+	it("omits an entry whose display name resolves to no family from both lists", () => {
+		const n = normalizeAnthropicUsage({ limits: [scoped("Nonsense")] }, NOW);
+		expect(n.weeklyScoped).toEqual([]);
+		expect(n.weeklyScopedPresent).toEqual([]);
+	});
+
+	it("lists a usable entry in both, de-duplicated and in first-seen order", () => {
+		const n = normalizeAnthropicUsage(
+			{
+				limits: [
+					scoped("Opus", { percent: 10 }),
+					scoped("Fable", { percent: 20 }),
+					// Mythos folds onto the fable family: one presence entry, not two.
+					scoped("Mythos", { percent: 30 }),
+				],
+			},
+			NOW,
+		);
+		expect(n.weeklyScoped.map((s) => s.family)).toEqual([
+			"opus",
+			"fable",
+			"fable",
+		]);
+		expect(n.weeklyScopedPresent).toEqual(["opus", "fable"]);
+	});
+
+	it("is empty for a null / non-object payload", () => {
+		for (const d of [null, undefined, {} as AnthropicUsageData]) {
+			expect(normalizeAnthropicUsage(d, NOW).weeklyScopedPresent).toEqual([]);
+		}
+	});
+});

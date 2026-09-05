@@ -1,5 +1,5 @@
 import type { AnthropicUsageData } from "@clankermux/types";
-import { getModelFamily } from "./model-mappings";
+import { getModelFamily, type ModelFamily } from "./model-mappings";
 import type { ScopedFamilyLimit } from "./scoped-limits";
 
 /**
@@ -36,6 +36,19 @@ export interface NormalizedAnthropicUsage {
 	weeklyAll: NormalizedUsageWindow | null;
 	/** Every present per-family scoped weekly window (finite future reset). */
 	weeklyScoped: ScopedFamilyLimit[];
+	/**
+	 * Every family named by ANY `weekly_scoped` entry whose scope display name
+	 * resolves, whether or not the entry survived into {@link weeklyScoped}.
+	 * De-duplicated, in first-seen order.
+	 *
+	 * Presence is evidence that the provider knows the family for this account;
+	 * `weeklyScoped` is the subset usable as a reading. A consumer deciding
+	 * whether an account has NOT used a family must test presence, not the usable
+	 * list, or a malformed entry (non-finite `percent`, unparseable or elapsed
+	 * `resets_at`) reads as no entry — and "we could not read it" becomes the
+	 * much stronger claim "this family was never touched".
+	 */
+	weeklyScopedPresent: ModelFamily[];
 }
 
 /** Parse an ISO reset timestamp to epoch ms, or null when absent/unparseable. */
@@ -104,27 +117,38 @@ function normalizeWeeklyAll(
 
 /**
  * Collect every present per-model-family scoped weekly window from `limits[]`.
- * A `weekly_scoped` entry qualifies when its `percent` is a finite number, its
- * scope model display name resolves to a known family, and its `resets_at`
- * parses to a finite FUTURE timestamp (a rolled-over window is stale, excluded).
+ * A `weekly_scoped` entry qualifies as a READING when its `percent` is a finite
+ * number, its scope model display name resolves to a known family, and its
+ * `resets_at` parses to a finite FUTURE timestamp (a rolled-over window is
+ * stale, excluded).
  *
  * NOT thresholded on percent — callers decide exhaustion. `is_active` is carried
  * through for logging but never gates inclusion.
+ *
+ * `present` is the weaker claim from the same pass: the family was NAMED by an
+ * entry, usable or not. The two are computed in one loop so they cannot drift
+ * over which entries exist.
  */
 function normalizeWeeklyScoped(
 	data: AnthropicUsageData,
 	nowMs: number,
-): ScopedFamilyLimit[] {
-	const results: ScopedFamilyLimit[] = [];
+): { readings: ScopedFamilyLimit[]; present: ModelFamily[] } {
+	const readings: ScopedFamilyLimit[] = [];
+	const present: ModelFamily[] = [];
 	for (const entry of data.limits ?? []) {
 		if (entry.kind !== "weekly_scoped") continue;
-		if (!isFiniteNumber(entry.percent)) continue;
-		const resetsAtMs = parseResetMs(entry.resets_at);
-		if (resetsAtMs === null || resetsAtMs <= nowMs) continue;
+		// Family resolution comes FIRST: an entry naming no known family says
+		// nothing about any family, so it belongs to neither list. Everything
+		// after this point is about whether the entry is usable, not whether it
+		// exists.
 		const displayName = entry.scope?.model?.display_name ?? "";
 		const family = getModelFamily(displayName);
 		if (family === null) continue;
-		results.push({
+		if (!present.includes(family)) present.push(family);
+		if (!isFiniteNumber(entry.percent)) continue;
+		const resetsAtMs = parseResetMs(entry.resets_at);
+		if (resetsAtMs === null || resetsAtMs <= nowMs) continue;
+		readings.push({
 			family,
 			percent: entry.percent,
 			resetsAtMs,
@@ -132,7 +156,7 @@ function normalizeWeeklyScoped(
 			displayName,
 		});
 	}
-	return results;
+	return { readings, present };
 }
 
 /**
@@ -146,12 +170,19 @@ export function normalizeAnthropicUsage(
 	nowMs: number,
 ): NormalizedAnthropicUsage {
 	if (!data || typeof data !== "object") {
-		return { session: null, weeklyAll: null, weeklyScoped: [] };
+		return {
+			session: null,
+			weeklyAll: null,
+			weeklyScoped: [],
+			weeklyScopedPresent: [],
+		};
 	}
+	const scoped = normalizeWeeklyScoped(data, nowMs);
 	return {
 		session: normalizeSession(data),
 		weeklyAll: normalizeWeeklyAll(data),
-		weeklyScoped: normalizeWeeklyScoped(data, nowMs),
+		weeklyScoped: scoped.readings,
+		weeklyScopedPresent: scoped.present,
 	};
 }
 

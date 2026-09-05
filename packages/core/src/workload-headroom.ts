@@ -2,7 +2,9 @@
 // top of `pool-usage.ts`. A module importing its own package entry is a cycle.
 
 import {
+	accountWideWeeklyResetMs,
 	type RunwayAccountSource,
+	scopedFamilyPresence,
 	scopedFamilyReadings,
 	scopedWeeklyWindowKind,
 	toRunwayAccountInput,
@@ -19,6 +21,7 @@ import {
 } from "./capacity-runway";
 import type { ModelFamily } from "./model-mappings";
 import { compareServableClasses, servableClassFor } from "./pool-classes";
+import { classifyScopedFamilyEvidence } from "./scoped-family-evidence";
 
 /**
  * "Can I add another agent of THIS kind of work?", answered per workload rather
@@ -122,10 +125,10 @@ export interface WorkloadHeadroomRow {
 	 * 1 no window is scaled, so the share cannot reach it. That is why the
 	 * headroom is a bound on a family row and this is not.
 	 *
-	 * It is still a LOWER BOUND whenever {@link unreadableAccountIds} is
-	 * non-empty, for a different reason: an account the scan could not project
-	 * from is excluded, and excluding one can only bring the all-out instant
-	 * earlier. Read the two fields together.
+	 * It is still a LOWER BOUND whenever {@link unreadableAccountIds} or
+	 * {@link unopenedAccountIds} is non-empty, for a different reason: an account
+	 * the scan could not project from is excluded, and excluding one can only
+	 * bring the all-out instant earlier. Read the fields together.
 	 */
 	outcome: RunwayOutcome;
 	headroom: { pct: number; direction: "margin" | "deficit" } | null;
@@ -145,11 +148,21 @@ export interface WorkloadHeadroomRow {
 	 * readable window is counted here and excluded from the pool, and shows up in
 	 * {@link unreadableAccountIds}. Publishing only the first number would let a
 	 * row claim five accounts of depth behind a projection built on three.
+	 *
+	 * The projected count is `eligible − unreadable − unopened` HERE, where the
+	 * two exclusion lists are disjoint. The public DTO nests unopened inside its
+	 * `unreadableAccounts` count instead, so the documented external arithmetic
+	 * (`eligibleAccounts − unreadableAccounts`) keeps meaning the same thing for
+	 * a widget that has never heard of the new state.
 	 */
 	eligibleAccountIds: string[];
 	/**
 	 * Of those, the ones the scan could not project from — no readable window at
 	 * all, or (on a family row) no usable scoped reading for this family.
+	 *
+	 * ABSENCE OF EVIDENCE. The account may or may not have a window here; this
+	 * resolution cannot say. {@link unopenedAccountIds} is the other case, where
+	 * a payload WAS read and named no window, and the two lists are disjoint.
 	 *
 	 * Their exclusion can only SHORTEN the runway, so an outcome carrying them is
 	 * a lower bound rather than a fabricated number. It is also the reason a
@@ -157,6 +170,24 @@ export interface WorkloadHeadroomRow {
 	 * share cannot reach a pace-1 scan, but a missing account can.
 	 */
 	unreadableAccountIds: string[];
+	/**
+	 * Family rows only (`[]` on class rows): eligible accounts excluded because
+	 * they have not used this family in the current weekly window — a live
+	 * reading, a future account-wide weekly reset, and no window for the family,
+	 * while a same-class account reports it.
+	 *
+	 * DISJOINT from {@link unreadableAccountIds}; both are subsets of
+	 * {@link eligibleAccountIds}. Excluded from the projection exactly like an
+	 * unreadable account, so the row stays an observed lower bound: the account
+	 * states no percentage for this family, and inventing 0% would claim a full
+	 * week of capacity that no reading supports.
+	 *
+	 * Distinct because it is EVIDENCE OF ABSENCE (a payload was read and named
+	 * no window for the family) rather than absence of evidence. A reader can act
+	 * on it — the account is very likely able to serve the family — and cannot
+	 * act on "we could not read it".
+	 */
+	unopenedAccountIds: string[];
 	/** Of the eligible ones, those already at or past 100% on any pooled window. */
 	spentAccountIds: string[];
 }
@@ -478,6 +509,10 @@ export function computeWorkloadHeadroom(
 				outcome,
 				inputs.map((input) => input.accountId),
 			),
+			// A class row pools the account-wide windows, which every metered
+			// account reports. "Has not used this family yet" is a claim only a
+			// family row can make.
+			unopenedAccountIds: [],
 			spentAccountIds: spentAccountIds(inputs, outcome),
 		});
 	}
@@ -516,30 +551,48 @@ export function computeWorkloadHeadroom(
 		// inputs alone made that go negative.
 		const considered: string[] = [];
 		const rejected: string[] = [];
+		const unopened: string[] = [];
 		const classes = reportingClasses.get(family) ?? new Set<string>();
 		for (const account of activeAccounts) {
-			const readings = scopedFamilyReadings(account, now);
-			// THREE states, and collapsing any two of them loses an account or
+			// FOUR states, and collapsing any two of them loses an account or
 			// invents one:
 			//  - reports this family: eligible, and projectable if the window holds up.
-			//  - reports scoped limits but NOT this one (`[]` or a different family):
-			//    not eligible. Production gives every non-Anthropic account `[]`, so
-			//    a Codex account has no Fable window to be missing.
 			//  - states no scoped evidence at all (`null`) while a sibling in its own
-			//    servable class does report the family: it may well be able to serve
-			//    it — a snapshot-restored Anthropic account carries account-wide
-			//    windows only — so it is eligible AND unreadable. Skipping it dropped
-			//    its capacity from the runway while reporting nothing was missing.
-			const reportsFamily =
-				readings?.some((limit) => limit.family === family) ?? false;
-			const unknownButCapable =
-				readings === null &&
-				classes.has(servableClassFor(account.provider).classId);
-			if (!reportsFamily && !unknownButCapable) continue;
+			//    servable class does report the family, or names the family with an
+			//    entry too broken to read: it may well be able to serve it — a
+			//    snapshot-restored Anthropic account carries account-wide windows
+			//    only — so it is eligible AND unreadable. Skipping it dropped its
+			//    capacity from the runway while reporting nothing was missing.
+			//  - read cleanly and names NO window for the family while a class
+			//    sibling reports it, with its own week still running: it has not
+			//    used the family this window. Eligible, excluded from the
+			//    projection, and counted separately — the previous rule skipped it
+			//    outright, so two live accounts were invisible on the Fable row
+			//    while it claimed to describe the whole class.
+			//  - anything else (a class that does not report the family at all, or a
+			//    week that has already rolled over): not eligible. Production gives
+			//    every non-Anthropic account `[]`, so a Codex account has no Fable
+			//    window to be missing.
+			const readings = scopedFamilyReadings(account, now);
+			const evidence = classifyScopedFamilyEvidence({
+				readings,
+				presentFamilies: scopedFamilyPresence(account, now),
+				family,
+				accountWideWeeklyResetMs: accountWideWeeklyResetMs(account),
+				classId: servableClassFor(account.provider).classId,
+				reportingClasses: classes,
+				now,
+			});
+			if (evidence === "not-eligible") continue;
 			considered.push(account.id);
-			const input = reportsFamily
-				? toScopedFamilyRunwayInput(account, family, now)
-				: null;
+			if (evidence === "unopened") {
+				unopened.push(account.id);
+				continue;
+			}
+			const input =
+				evidence === "reports"
+					? toScopedFamilyRunwayInput(account, family, now)
+					: null;
 			if (input) inputs.push(input);
 			else rejected.push(account.id);
 		}
@@ -575,6 +628,7 @@ export function computeWorkloadHeadroom(
 					inputs.map((input) => input.accountId),
 				),
 			],
+			unopenedAccountIds: unopened,
 			spentAccountIds: spentAccountIds(inputs, bound.outcome),
 		});
 	}

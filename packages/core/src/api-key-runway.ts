@@ -129,6 +129,17 @@ export interface RunwayWindowObservations {
 	 * account-wide windows alone, which is the conservative direction.
 	 */
 	weeklyScoped?: ScopedFamilyLimit[] | null;
+	/**
+	 * Families with ANY `weekly_scoped` entry in the payload this resolution came
+	 * from, usable or not; absent when the resolution carried no payload
+	 * (snapshot restore), which is why it is optional and why absent must stay
+	 * distinct from empty.
+	 *
+	 * Empty means the payload was read and named no family. Absent means there
+	 * was no payload to name one. Collapsing the two would let a snapshot restore
+	 * assert that an account has used nothing this week.
+	 */
+	weeklyScopedPresent?: ModelFamily[];
 }
 
 /**
@@ -206,6 +217,51 @@ export function scopedFamilyReadings(
 		).weeklyScoped;
 	}
 	return account.windowObservations?.weeklyScoped ?? null;
+}
+
+/**
+ * Every family this account's resolution NAMED a scoped weekly entry for,
+ * usable or not, or null when the resolution carried no payload.
+ *
+ * Same precedence as {@link scopedFamilyReadings}, deliberately: presence and
+ * readings have to describe one resolution, or a caller could see a family
+ * "present" from a live payload while reading it as absent from an older
+ * snapshot. Null is the snapshot case and is NOT an empty set — see
+ * {@link RunwayWindowObservations.weeklyScopedPresent}.
+ */
+export function scopedFamilyPresence(
+	account: RunwayAccountSource,
+	now: number,
+): ReadonlySet<ModelFamily> | null {
+	if (account.usageData) {
+		return new Set(
+			normalizeAnthropicUsage(
+				account.usageData as Parameters<typeof normalizeAnthropicUsage>[0],
+				now,
+			).weeklyScopedPresent,
+		);
+	}
+	const present = account.windowObservations?.weeklyScopedPresent;
+	return present ? new Set(present) : null;
+}
+
+/**
+ * The account-wide weekly reset from the SAME resolution the scoped readings
+ * come from, or null when unknown.
+ *
+ * Same precedence as {@link toRunwayAccountInput} applies to its windows. The
+ * reset is evidence for the scoped-family classifier — it is what says whether
+ * the week an absent family window would belong to has rolled over — so taking
+ * it from a different resolution than the readings would decide that question
+ * against the wrong week.
+ */
+export function accountWideWeeklyResetMs(
+	account: RunwayAccountSource,
+): number | null {
+	if (account.usageData) {
+		return extractSevenDay(account.usageData)?.resetMs ?? null;
+	}
+	return account.windowObservations?.sevenDay?.resetMs ?? null;
 }
 
 function scopedWeeklyWindowFor(

@@ -26,6 +26,7 @@ import {
 } from "./lifetime-confidence";
 import type { ModelFamily } from "./model-mappings";
 import { compareServableClasses, servableClassFor } from "./pool-classes";
+import { classifyScopedFamilyEvidence } from "./scoped-family-evidence";
 import type { ScopedFamilyLimit } from "./scoped-limits";
 import { computeWindowStartMs } from "./throttle-utils";
 import { normalizeAnthropicUsage } from "./usage-normalizer";
@@ -465,6 +466,26 @@ function classifyQuotaExhaustion(
 }
 
 /**
+ * Whether an account could serve a request RIGHT NOW: not paused, cooling down,
+ * token-expired or hidden by a usage-429, and not out of either account-wide
+ * window.
+ *
+ * One named predicate rather than the condition spelled out at each call site.
+ * {@link listFamilyRows} tests it twice — once to say who cannot report a
+ * family and once to count who has not used one — and two copies of it would be
+ * free to drift into a card whose two numbers describe two different pools.
+ *
+ * `classifyQuotaExhaustion` rejects on EITHER window regardless of the argument;
+ * `"seven_day"` only decides which reason it would report, which this discards.
+ */
+function canServeNow(account: AccountResponse, now: number): boolean {
+	return (
+		classifyExclusion(account, now) === null &&
+		classifyQuotaExhaustion(account, "seven_day") === null
+	);
+}
+
+/**
  * Aggregate per-model-family weekly usage across the pool. A family's weekly
  * quota is independent of the account-wide 5h/7d windows, so a family can be
  * spent while the pool headline reads healthy — that is the case this exists to
@@ -585,6 +606,59 @@ export interface LiveScopedFamily {
 }
 
 /**
+ * Every family the given accounts currently report a scoped weekly window for,
+ * grouped by the servable class that reports it.
+ *
+ * The single discovery loop: {@link listLiveScopedFamilies} is derived from
+ * this, so the flat list and the per-class one cannot disagree about which
+ * account reports what. The class grouping is what lets a caller ask "does
+ * anything in THIS account's class report Fable" — the question that separates
+ * an account which has not used a family from one that could never serve it.
+ *
+ * Deliberately unfiltered on availability, unlike {@link computeFamilyWeeklyUsage}:
+ * this decides whether a family's CHART exists, and a paused or spent account's
+ * recorded history is exactly what someone opens that chart to look at. Callers
+ * that need "reported by an account that can serve" filter the accounts they
+ * pass in.
+ */
+export function listLiveScopedFamiliesByClass(
+	accounts: AccountResponse[],
+	now: number,
+): ReadonlyMap<string, LiveScopedFamily[]> {
+	const byClass = new Map<string, Map<ModelFamily, string>>();
+	for (const account of accounts) {
+		if (!account.usageData) continue;
+		if (!isAnthropicStyleShape(account.usageData)) continue;
+		const scoped = normalizeAnthropicUsage(
+			account.usageData as AnthropicUsageData,
+			now,
+		).weeklyScoped;
+		if (scoped.length === 0) continue;
+		const classId = servableClassFor(account.provider).classId;
+		let families = byClass.get(classId);
+		if (!families) {
+			families = new Map<ModelFamily, string>();
+			byClass.set(classId, families);
+		}
+		for (const limit of scoped) {
+			// First display name wins: it names the model generation in force for
+			// the account that reported it first.
+			if (!families.has(limit.family)) {
+				families.set(limit.family, limit.displayName);
+			}
+		}
+	}
+	const result = new Map<string, LiveScopedFamily[]>();
+	for (const [classId, families] of byClass) {
+		result.set(
+			classId,
+			[...families].map(([family, displayName]) => ({ family, displayName })),
+		);
+	}
+	return result;
+}
+
+/**
  * Every family ANY account currently reports a scoped weekly window for.
  *
  * Deliberately unfiltered, unlike {@link computeFamilyWeeklyUsage}: this
@@ -597,16 +671,13 @@ export function listLiveScopedFamilies(
 	now: number,
 ): LiveScopedFamily[] {
 	const byFamily = new Map<ModelFamily, string>();
-	for (const account of accounts) {
-		if (!account.usageData) continue;
-		if (!isAnthropicStyleShape(account.usageData)) continue;
-		const scoped = normalizeAnthropicUsage(
-			account.usageData as AnthropicUsageData,
-			now,
-		).weeklyScoped;
-		for (const limit of scoped) {
-			if (!byFamily.has(limit.family)) {
-				byFamily.set(limit.family, limit.displayName);
+	for (const families of listLiveScopedFamiliesByClass(
+		accounts,
+		now,
+	).values()) {
+		for (const live of families) {
+			if (!byFamily.has(live.family)) {
+				byFamily.set(live.family, live.displayName);
 			}
 		}
 	}
@@ -640,6 +711,22 @@ export interface FamilyRow {
 	 * cannot tell "no such limit" from "nobody who has it can be reached".
 	 */
 	unavailableReporters: number;
+	/**
+	 * Accounts that could serve right now, carry a live Anthropic-style payload
+	 * with a future account-wide weekly reset, and report NO window for this
+	 * family, while an unpaused same-class account reports it.
+	 *
+	 * Anthropic omits a family's window until its first use in the week, so this
+	 * is the pool's untouched capacity for the family. It is NEVER a percentage:
+	 * the account states no reading, and a 0% bar would claim a measurement
+	 * nobody made.
+	 *
+	 * Counted in neither {@link reportingCount} nor {@link unavailableReporters}
+	 * — an unopened account contributes nothing to the aggregate and is not
+	 * unavailable. An entry that is present but unusable is unreadable, not
+	 * unopened, and lands in none of the three.
+	 */
+	unopenedCount: number;
 }
 
 /**
@@ -670,10 +757,7 @@ export function listFamilyRows(
 	for (const account of accounts) {
 		if (!account.usageData) continue;
 		if (!isAnthropicStyleShape(account.usageData)) continue;
-		const unavailable =
-			classifyExclusion(account, now) !== null ||
-			classifyQuotaExhaustion(account, "seven_day") !== null;
-		if (!unavailable) continue;
+		if (canServeNow(account, now)) continue;
 		const scoped = normalizeAnthropicUsage(
 			account.usageData as AnthropicUsageData,
 			now,
@@ -687,15 +771,67 @@ export function listFamilyRows(
 		}
 	}
 
+	// Row DISCOVERY stays unfiltered (a family only a paused account reports
+	// still gets a row), but the class gate for "unopened" is built from UNPAUSED
+	// reporters only — matching the server's scan, which drops paused accounts
+	// before it discovers families. Without that match the two surfaces would
+	// label different accounts unopened for the same family, and a family whose
+	// only reporter is paused would brand every sibling as merely untouched.
+	const reportingClasses = new Map<ModelFamily, Set<string>>();
+	for (const [classId, families] of listLiveScopedFamiliesByClass(
+		accounts.filter((account) => account.paused !== true),
+		now,
+	)) {
+		for (const live of families) {
+			const existing = reportingClasses.get(live.family);
+			if (existing) existing.add(classId);
+			else reportingClasses.set(live.family, new Set([classId]));
+		}
+	}
+
+	const live = listLiveScopedFamilies(accounts, now);
+	const unopenedByFamily = new Map<ModelFamily, number>();
+	for (const account of accounts) {
+		if (!account.usageData) continue;
+		if (!isAnthropicStyleShape(account.usageData)) continue;
+		// The count answers "how many accounts could serve this family right now
+		// but have not touched it", so an account that cannot serve anything is
+		// not one of them. The account-card row uses a DIFFERENT rule on purpose:
+		// there the row is a fact about one account's own reading.
+		if (!canServeNow(account, now)) continue;
+		const normalized = normalizeAnthropicUsage(
+			account.usageData as AnthropicUsageData,
+			now,
+		);
+		const classId = servableClassFor(account.provider).classId;
+		for (const family of live) {
+			const evidence = classifyScopedFamilyEvidence({
+				readings: normalized.weeklyScoped,
+				presentFamilies: new Set(normalized.weeklyScopedPresent),
+				family: family.family,
+				accountWideWeeklyResetMs: normalized.weeklyAll?.resetMs ?? null,
+				classId,
+				reportingClasses: reportingClasses.get(family.family) ?? new Set(),
+				now,
+			});
+			if (evidence !== "unopened") continue;
+			unopenedByFamily.set(
+				family.family,
+				(unopenedByFamily.get(family.family) ?? 0) + 1,
+			);
+		}
+	}
+
 	const rows: FamilyRow[] = [];
-	for (const live of listLiveScopedFamilies(accounts, now)) {
-		const usage = usageByFamily.get(live.family) ?? null;
+	for (const family of live) {
+		const usage = usageByFamily.get(family.family) ?? null;
 		rows.push({
-			family: live.family,
-			displayName: live.displayName,
+			family: family.family,
+			displayName: family.displayName,
 			usage,
 			reportingCount: usage?.accounts.length ?? 0,
-			unavailableReporters: unavailableByFamily.get(live.family) ?? 0,
+			unavailableReporters: unavailableByFamily.get(family.family) ?? 0,
+			unopenedCount: unopenedByFamily.get(family.family) ?? 0,
 		});
 	}
 	// Worst first, and families nobody can report last: an unstated cap is not
