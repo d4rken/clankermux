@@ -9,11 +9,15 @@
  * mock.module (bun registers those globally and they leak into later files in
  * the suite; see codex-spend-coordinator.test.ts for the established style).
  */
-import { describe, expect, it } from "bun:test";
+import { afterEach, describe, expect, it } from "bun:test";
 import { PAUSE_REASON_NEEDS_REAUTH } from "@clankermux/core";
-import type {
-	CodexRateLimitResetCredit,
-	CodexRateLimitResetCreditsCacheEntry,
+import type { CodexResetCreditEventRow } from "@clankermux/database";
+import {
+	type CodexRateLimitResetCredit,
+	type CodexRateLimitResetCreditsCacheEntry,
+	USAGE_CACHE_TTL_MS,
+	type UsageData,
+	usageCache,
 } from "@clankermux/providers";
 import type {
 	Account,
@@ -35,6 +39,12 @@ import type { CodexResetCreditConsumeDispatchOutcome } from "../handlers/token-m
 
 /** Fixed fake "now" (ms). All expiry math in the tests is relative to this. */
 const NOW = 1_800_000_000_000;
+
+/** Weekly-only account: weekly toggle ON, expiry toggle OFF. */
+const weeklyOnly: Partial<Account> = {
+	codex_auto_apply_reset_credits_enabled: false,
+	codex_auto_apply_reset_on_weekly_limit_enabled: true,
+};
 
 /** Unix-seconds expiry that is `msFromNow` in the future of NOW. */
 function expirySec(msFromNow: number): number {
@@ -93,6 +103,28 @@ function makeCredit(
 		expiresAt: expirySec(5 * 60_000), // 5 min out — inside the 10-min lead
 		title: null,
 		description: null,
+		...overrides,
+	};
+}
+
+function pendingAttempt(
+	overrides: Partial<CodexResetCreditEventRow> = {},
+): CodexResetCreditEventRow {
+	return {
+		id: "acct-1:credit-1:1",
+		account_id: "acct-1",
+		account_name: "codex-account",
+		credit_id: "credit-1",
+		trigger: "auto",
+		cause: "weekly-limit",
+		attempt_seq: 1,
+		idempotency_key: "codex-reset-auto:acct-1:credit-1:1",
+		status: "pending",
+		windows_reset: null,
+		error_message: null,
+		credit_expires_at: null,
+		created_at: NOW - 60_000,
+		resolved_at: null,
 		...overrides,
 	};
 }
@@ -317,11 +349,6 @@ describe("decideResetCreditAction — boundaries and ordering", () => {
 // ---------------------------------------------------------------------------
 
 describe("decideResetCreditAction — weekly-limit trigger", () => {
-	/** Weekly-only account: weekly toggle ON, expiry toggle OFF. */
-	const weeklyOnly: Partial<Account> = {
-		codex_auto_apply_reset_credits_enabled: false,
-		codex_auto_apply_reset_on_weekly_limit_enabled: true,
-	};
 	/** A credit far outside the expiry lead window — expiry trigger ignores it. */
 	const farCredit = () =>
 		makeCredit({ id: "c-far", expiresAt: expirySec(3 * 3600_000) });
@@ -529,6 +556,8 @@ describe("decideResetCreditAction — weekly-limit trigger", () => {
 // ---------------------------------------------------------------------------
 
 interface HarnessOptions {
+	getPendingAttempt?: () => Promise<CodexResetCreditEventRow | null>;
+	refreshResult?: (force: boolean) => boolean;
 	/** Accounts returned by listCandidateAccounts. */
 	candidates?: Array<{ id: string; name: string }>;
 	/** Per-call getAccount implementation (defaults to a stable codex account). */
@@ -544,6 +573,7 @@ interface HarnessOptions {
 	weeklyUsedPercent?: number | null;
 	/** Cooldown anchor timestamp (ms) served to the weekly cooldown gate. */
 	autoApplyCooldownAnchorAt?: number | null;
+	hasOtherAvailableCodexAccount?: (accountId: string) => Promise<boolean>;
 	claim?: {
 		id: string;
 		idempotencyKey: string;
@@ -571,6 +601,7 @@ function makeHarness(opts: HarnessOptions = {}) {
 		listCandidateAccounts: async () =>
 			opts.candidates ?? [{ id: "acct-1", name: "codex-account" }],
 		getAccount: opts.getAccount ?? (async (id) => makeCodexAccount({ id })),
+		getPendingAttempt: opts.getPendingAttempt ?? (async () => null),
 		getCachedCredits: (): CodexRateLimitResetCreditsCacheEntry | null => {
 			const credits = creditsFn(forceRefreshes());
 			return {
@@ -583,10 +614,13 @@ function makeHarness(opts: HarnessOptions = {}) {
 		},
 		refreshCredits: async (accountId, force) => {
 			refreshCalls.push({ accountId, force });
+			return opts.refreshResult?.(force) ?? true;
 		},
 		getTerminallyResolvedCreditIds: async () =>
 			opts.resolvedIds ?? new Set<string>(),
 		getWeeklyUsedPercent: () => opts.weeklyUsedPercent ?? null,
+		hasOtherAvailableCodexAccount:
+			opts.hasOtherAvailableCodexAccount ?? (async () => false),
 		getAutoApplyCooldownAnchorAt: async () =>
 			opts.autoApplyCooldownAnchorAt ?? null,
 		claimAutoAttempt: async (input) => {
@@ -621,6 +655,201 @@ function makeHarness(opts: HarnessOptions = {}) {
 }
 
 describe("CodexResetCreditApplyScheduler.tick", () => {
+	it("recovers the original credit and key after a lost response and scheduler restart", async () => {
+		let pending: CodexResetCreditEventRow | null = null;
+		const sent: CodexRateLimitResetCreditConsumeRequest[] = [];
+		const opts: HarnessOptions = {
+			getAccount: async () => makeCodexAccount(weeklyOnly),
+			getPendingAttempt: async () => pending,
+			weeklyUsedPercent: 100,
+			credits: () =>
+				pending
+					? [makeCredit({ id: "credit-2", expiresAt: null })]
+					: [makeCredit({ expiresAt: null })],
+			dispatchImpl: async (_id, request) => {
+				sent.push(request);
+				pending = pendingAttempt();
+				return {
+					status: "failed",
+					message: "Upstream applied reset but response was lost",
+				};
+			},
+		};
+		await makeHarness(opts).scheduler.tick();
+		const restarted = makeHarness(opts);
+		await restarted.scheduler.tick();
+		expect(sent.map((r) => r.creditId)).toEqual(["credit-1", "credit-1"]);
+		expect(sent[1]?.idempotencyKey).toBe(sent[0]?.idempotencyKey);
+		expect(restarted.claimCalls).toHaveLength(0);
+	});
+
+	it("reconciles a pending attempt even after usage recovered and the credit expired", async () => {
+		const pending = pendingAttempt({ credit_expires_at: expirySec(-60_000) });
+		const h = makeHarness({
+			getAccount: async () => makeCodexAccount(weeklyOnly),
+			getPendingAttempt: async () => pending,
+			credits: () => [],
+			weeklyUsedPercent: 0,
+			hasOtherAvailableCodexAccount: async () => true,
+		});
+		await h.scheduler.tick();
+		expect(h.dispatchCalls[0]?.request.idempotencyKey).toBe(
+			pending.idempotency_key,
+		);
+		expect(h.claimCalls).toHaveLength(0);
+	});
+
+	it("leaves an uncertain attempt pending when confirmation fails", async () => {
+		const h = makeHarness({
+			getPendingAttempt: async () => pendingAttempt(),
+			refreshResult: () => false,
+		});
+		await h.scheduler.tick();
+		expect(h.dispatchCalls).toHaveLength(0);
+		expect(h.claimCalls).toHaveLength(0);
+	});
+
+	it("does not redeem using cached metadata after a failed forced refresh", async () => {
+		const h = makeHarness({ refreshResult: (force) => !force });
+		await h.scheduler.tick();
+		expect(h.refreshCalls.map((r) => r.force)).toEqual([false, true]);
+		expect(h.claimCalls).toHaveLength(0);
+		expect(h.dispatchCalls).toHaveLength(0);
+	});
+
+	for (const pauseReason of ["manual", null]) {
+		it(`conserves weekly resets on a paused account with reason ${pauseReason}`, async () => {
+			const h = makeHarness({
+				getAccount: async () =>
+					makeCodexAccount({
+						...weeklyOnly,
+						paused: true,
+						pause_reason: pauseReason,
+					}),
+				weeklyUsedPercent: 100,
+			});
+			await h.scheduler.tick();
+			expect(h.dispatchCalls).toHaveLength(0);
+		});
+	}
+
+	it("honors a manual pause applied between discovery and confirmation", async () => {
+		let reads = 0;
+		const h = makeHarness({
+			getAccount: async () =>
+				makeCodexAccount({
+					...weeklyOnly,
+					paused: ++reads > 1,
+					pause_reason: "manual",
+				}),
+			weeklyUsedPercent: 100,
+		});
+		await h.scheduler.tick();
+		expect(h.claimCalls).toHaveLength(0);
+	});
+
+	it("does not retry a non-expiring weekly attempt on a manually paused account", async () => {
+		const h = makeHarness({
+			getAccount: async () =>
+				makeCodexAccount({
+					...weeklyOnly,
+					paused: true,
+					pause_reason: "manual",
+				}),
+			getPendingAttempt: async () => pendingAttempt(),
+			weeklyUsedPercent: 100,
+		});
+		await h.scheduler.tick();
+		expect(h.dispatchCalls).toHaveLength(0);
+	});
+
+	it("keeps expiry protection active when a manual pause defers an older weekly attempt", async () => {
+		const h = makeHarness({
+			getAccount: async () =>
+				makeCodexAccount({
+					paused: true,
+					pause_reason: "manual",
+					codex_auto_apply_reset_on_weekly_limit_enabled: true,
+				}),
+			getPendingAttempt: async () =>
+				pendingAttempt({ credit_id: "old-non-expiring" }),
+		});
+		await h.scheduler.tick();
+		expect(h.dispatchCalls[0]?.request.creditId).toBe("credit-1");
+		expect(h.claimCalls[0]?.cause).toBe("expiry");
+	});
+
+	it("does not retry a weekly attempt after its toggle was disabled", async () => {
+		const h = makeHarness({
+			getPendingAttempt: async () => pendingAttempt(),
+			credits: () => [makeCredit({ expiresAt: null })],
+		});
+		await h.scheduler.tick();
+		expect(h.dispatchCalls).toHaveLength(0);
+	});
+
+	it("conserves a weekly reset until the other account becomes unavailable", async () => {
+		let otherAvailable = true;
+		const h = makeHarness({
+			getAccount: async () => makeCodexAccount(weeklyOnly),
+			weeklyUsedPercent: 100,
+			credits: () => [makeCredit({ expiresAt: null })],
+			hasOtherAvailableCodexAccount: async () => otherAvailable,
+		});
+		await h.scheduler.tick();
+		expect(h.claimCalls).toHaveLength(0);
+		expect(h.dispatchCalls).toHaveLength(0);
+		expect(h.refreshCalls).toHaveLength(1);
+
+		otherAvailable = false;
+		await h.scheduler.tick();
+		expect(h.dispatchCalls).toHaveLength(1);
+	});
+
+	it("aborts weekly redemption if another account recovers before confirmation", async () => {
+		let poolReads = 0;
+		const h = makeHarness({
+			getAccount: async () => makeCodexAccount(weeklyOnly),
+			weeklyUsedPercent: 100,
+			hasOtherAvailableCodexAccount: async () => ++poolReads > 1,
+		});
+		await h.scheduler.tick();
+		expect(poolReads).toBe(2);
+		expect(h.claimCalls).toHaveLength(0);
+		expect(h.dispatchCalls).toHaveLength(0);
+	});
+
+	it("keeps expiry redemption independent of pool availability and pool read failures", async () => {
+		const h = makeHarness({
+			getAccount: async () =>
+				makeCodexAccount({
+					paused: true,
+					pause_reason: "manual",
+					codex_auto_apply_reset_on_weekly_limit_enabled: true,
+				}),
+			weeklyUsedPercent: 100,
+			hasOtherAvailableCodexAccount: async () => {
+				throw new Error("Expiry must not read pool availability");
+			},
+		});
+		await h.scheduler.tick();
+		expect(h.dispatchCalls).toHaveLength(1);
+		expect(h.claimCalls[0]?.cause).toBe("expiry");
+	});
+
+	it("conserves weekly resets when the pool availability read fails", async () => {
+		const h = makeHarness({
+			getAccount: async () => makeCodexAccount(weeklyOnly),
+			weeklyUsedPercent: 100,
+			hasOtherAvailableCodexAccount: async () => {
+				throw new Error("Pool read unavailable");
+			},
+		});
+		await h.scheduler.tick();
+		expect(h.claimCalls).toHaveLength(0);
+		expect(h.dispatchCalls).toHaveLength(0);
+	});
+
 	it("dispatches with the exact claim idempotencyKey, creditId, and autoApply row id", async () => {
 		const { scheduler, refreshCalls, claimCalls, dispatchCalls } = makeHarness({
 			claim: {
@@ -866,11 +1095,13 @@ function makeLedgerHarness(opts: {
 			summary: { availableCount: credits.length, credits },
 			fetchedAt: nowMs,
 		}),
-		refreshCredits: async () => {},
+		refreshCredits: async () => true,
+		getPendingAttempt: async () => null,
 		// This fake ledger only ever holds pending/nothingToReset rows, and
 		// neither status is terminal for automation.
 		getTerminallyResolvedCreditIds: async () => new Set<string>(),
 		getWeeklyUsedPercent: () => opts.weeklyUsedPercent ?? null,
+		hasOtherAvailableCodexAccount: async () => false,
 		// Widened anchor semantics: nothingToReset resolutions anchor too.
 		getAutoApplyCooldownAnchorAt: async () => {
 			const anchors = rows.flatMap((r) =>
@@ -1046,6 +1277,8 @@ describe("createCodexResetCreditApplyScheduler default listCandidateAccounts", (
 		const scheduler = createCodexResetCreditApplyScheduler({
 			dbOps: {
 				getAllAccounts: async () => accounts,
+				getActiveApiKeys: async () => [],
+				getPendingCodexResetCreditAttempt: async () => null,
 				// Return null so each candidate stops right after discovery — the
 				// point of this test is WHO gets evaluated, not what happens next.
 				getAccount: async (id) => {
@@ -1056,11 +1289,338 @@ describe("createCodexResetCreditApplyScheduler default listCandidateAccounts", (
 				claimCodexResetCreditAutoAttempt: async () => null,
 				getCodexResetCreditAutoApplyCooldownAnchorAt: async () => null,
 			},
-			coordinator: { refreshResetCredits: async () => undefined },
+			coordinator: {
+				refreshResetCredits: async () => ({ success: true }),
+				readUsageStatus: async () => ({ success: false }),
+			},
 		});
 
 		await scheduler.tick();
 
 		expect(evaluatedIds.sort()).toEqual(["both", "expiry-only", "weekly-only"]);
+	});
+});
+
+describe("weekly reset conservation with the production pool check", () => {
+	const targetId = "reset-pool-target";
+	const otherId = "reset-pool-other";
+	const usage = (weekly = 20, session = 10): UsageData => ({
+		five_hour: {
+			utilization: session,
+			resets_at: new Date(NOW + 3600_000).toISOString(),
+		},
+		seven_day: {
+			utilization: weekly,
+			resets_at: new Date(NOW + 86_400_000).toISOString(),
+		},
+	});
+
+	afterEach(() => {
+		usageCache.delete(targetId);
+		usageCache.delete(otherId);
+	});
+
+	function poolHarness(
+		accounts: Account[],
+		options: {
+			pins?: Array<string | null>;
+			now?: () => number;
+			readUsage?: (id: string) => Promise<{ success: boolean }>;
+			refreshCredits?: () => Promise<{ success: boolean }>;
+			cooldownAnchor?: (id: string) => Promise<number | null>;
+		} = {},
+	) {
+		const consumed: string[] = [];
+		const usageReads: string[] = [];
+		const scheduler = createCodexResetCreditApplyScheduler({
+			dbOps: {
+				getAllAccounts: async () => accounts,
+				getActiveApiKeys: async () =>
+					(options.pins ?? []).map((pinnedAccountId, index) => ({
+						id: `key-${index}`,
+						name: `key-${index}`,
+						hashedKey: "test",
+						prefixLast8: "test",
+						createdAt: NOW,
+						lastUsed: NOW,
+						usageCount: 1,
+						isActive: true,
+						pinnedAccountId,
+						pinnedProviders: null,
+					})),
+				getPendingCodexResetCreditAttempt: async () => null,
+				getAccount: async (id) => accounts.find((a) => a.id === id) ?? null,
+				getTerminallyResolvedCodexResetCreditIds: async () => new Set(),
+				getCodexResetCreditAutoApplyCooldownAnchorAt:
+					options.cooldownAnchor ?? (async () => null),
+				claimCodexResetCreditAutoAttempt: async ({ accountId }) => ({
+					id: accountId,
+					idempotencyKey: accountId,
+					attemptSeq: 1,
+					reused: false,
+				}),
+			},
+			coordinator: {
+				refreshResetCredits:
+					options.refreshCredits ?? (async () => ({ success: true })),
+				readUsageStatus: async (id) => {
+					usageReads.push(id);
+					if (options.readUsage) return options.readUsage(id);
+					usageCache.set(id, usage());
+					return { success: true };
+				},
+			},
+			overrides: {
+				now: options.now ?? (() => NOW),
+				getCachedCredits: () => ({
+					summary: {
+						availableCount: 1,
+						credits: [makeCredit({ expiresAt: null })],
+					},
+					fetchedAt: NOW,
+				}),
+				dispatchConsume: async (accountId) => {
+					consumed.push(accountId);
+					// Match the coordinator's successful reset cleanup: the next
+					// candidate must see the restored account, even before polling.
+					const account = accounts.find((a) => a.id === accountId);
+					if (account) account.rate_limited_until = null;
+					usageCache.delete(accountId);
+					return {
+						status: "completed",
+						accountName: accountId,
+						result: { outcome: "reset", windowsReset: 2 },
+						resetMetadataRefreshed: true,
+						availableResetCount: 0,
+						localRateLimitStateCleared: true,
+					};
+				},
+			},
+		});
+		return { scheduler, consumed, usageReads };
+	}
+
+	function twoAccounts(): Account[] {
+		usageCache.set(targetId, usage(100));
+		return [
+			makeCodexAccount({ id: targetId, ...weeklyOnly }),
+			makeCodexAccount({
+				id: otherId,
+				codex_auto_apply_reset_credits_enabled: false,
+			}),
+		];
+	}
+
+	it("does not count an account the target's pinned API key cannot use", async () => {
+		const accounts = twoAccounts();
+		usageCache.set(otherId, usage());
+		const h = poolHarness(accounts, { pins: [targetId, null] });
+		await h.scheduler.tick();
+		expect(h.consumed).toEqual([targetId]);
+	});
+
+	it("a key pinned elsewhere does not disable conservation for the target", async () => {
+		const accounts = twoAccounts();
+		usageCache.set(otherId, usage());
+		const h = poolHarness(accounts, { pins: [otherId, null] });
+		await h.scheduler.tick();
+		expect(h.consumed).toEqual([]);
+	});
+
+	it("forces a free usage read before trusting an alternative with unknown usage", async () => {
+		const h = poolHarness(twoAccounts());
+		await h.scheduler.tick();
+		expect(h.usageReads).toEqual([otherId]);
+		expect(h.consumed).toEqual([]);
+	});
+
+	it("redeems when refreshing stale usage confirms the alternative is exhausted", async () => {
+		const h = poolHarness(twoAccounts(), {
+			readUsage: async (id) => {
+				usageCache.set(id, usage(100));
+				return { success: true };
+			},
+		});
+		await h.scheduler.tick();
+		expect(h.usageReads).toEqual([otherId]);
+		expect(h.consumed).toEqual([targetId]);
+	});
+
+	for (const failure of [
+		"failure-result",
+		"throw",
+		"success-without-data",
+	] as const) {
+		it(`unknown usage does not block indefinitely after ${failure}`, async () => {
+			const h = poolHarness(twoAccounts(), {
+				readUsage: async () => {
+					if (failure === "throw") throw new Error("Usage unavailable");
+					return { success: failure === "success-without-data" };
+				},
+			});
+			await h.scheduler.tick();
+			expect(h.usageReads).toEqual([otherId]); // Confirmation does not hammer it again.
+			expect(h.consumed).toEqual([targetId]);
+		});
+	}
+
+	it("rechecks eligibility when the usage read pauses the alternative for reauth", async () => {
+		const accounts = twoAccounts();
+		const h = poolHarness(accounts, {
+			readUsage: async (id) => {
+				accounts[1].paused = true;
+				accounts[1].pause_reason = PAUSE_REASON_NEEDS_REAUTH;
+				usageCache.set(id, usage());
+				return { success: true };
+			},
+		});
+		await h.scheduler.tick();
+		expect(h.consumed).toEqual([targetId]);
+	});
+
+	it("gives a just-restored account one tick for usage to catch up, then retries unknown usage", async () => {
+		let now = NOW;
+		const h = poolHarness(twoAccounts(), {
+			now: () => now,
+			readUsage: async () => ({ success: false }),
+			cooldownAnchor: async (id) => (id === otherId ? NOW : null),
+		});
+		await h.scheduler.tick();
+		expect(h.consumed).toEqual([]);
+		now += 60_000;
+		await h.scheduler.tick();
+		expect(h.usageReads).toEqual([otherId, otherId]);
+		expect(h.consumed).toEqual([targetId]);
+	});
+
+	it("preserves the coordinator's failed confirmation result despite cached credits", async () => {
+		const h = poolHarness(twoAccounts().slice(0, 1), {
+			refreshCredits: async () => ({ success: false }),
+		});
+		await h.scheduler.tick();
+		expect(h.consumed).toEqual([]);
+	});
+
+	const cases: Array<{
+		label: string;
+		other?: Partial<Account>;
+		usage?: UsageData;
+		ageMs?: number;
+		consume: boolean;
+	}> = [
+		{
+			label: "another account has quota with reset automation disabled",
+			usage: usage(),
+			consume: false,
+		},
+		{ label: "another account has unknown usage", consume: false },
+		{
+			label: "another account has stale exhausted usage",
+			usage: usage(100),
+			ageMs: USAGE_CACHE_TTL_MS + 1,
+			consume: false,
+		},
+		{
+			label: "the other account's exhausted window has elapsed",
+			usage: {
+				...usage(100),
+				seven_day: {
+					utilization: 100,
+					resets_at: new Date(NOW - 1).toISOString(),
+				},
+			},
+			consume: false,
+		},
+		{
+			label: "the other account is paused",
+			other: { paused: true, pause_reason: "manual" },
+			usage: usage(),
+			consume: true,
+		},
+		{
+			label: "the other account is rate limited",
+			other: { rate_limited_until: NOW + 60_000 },
+			usage: usage(),
+			consume: true,
+		},
+		{
+			label: "the other account needs reauthentication",
+			other: { pause_reason: PAUSE_REASON_NEEDS_REAUTH },
+			usage: usage(),
+			consume: true,
+		},
+		{
+			label: "the other account has no credentials",
+			other: { refresh_token: null, access_token: null },
+			usage: usage(),
+			consume: true,
+		},
+		{
+			label: "the other account has only an expired access token",
+			other: { refresh_token: null, expires_at: NOW - 1 },
+			usage: usage(),
+			consume: true,
+		},
+		{
+			label: "the other account can refresh its expired access token",
+			other: { expires_at: NOW - 1 },
+			usage: usage(),
+			consume: false,
+		},
+		{
+			label: "only a different provider has quota",
+			other: { provider: "anthropic" },
+			usage: usage(),
+			consume: true,
+		},
+		{
+			label: "the other account's weekly quota is exhausted",
+			usage: usage(100),
+			consume: true,
+		},
+		{
+			label: "the other account's five-hour quota is exhausted",
+			usage: usage(20, 100),
+			consume: true,
+		},
+	];
+	for (const c of cases) {
+		it(`${c.consume ? "redeems" : "conserves"} when ${c.label}`, async () => {
+			const target = makeCodexAccount({ id: targetId, ...weeklyOnly });
+			const other = makeCodexAccount({
+				id: otherId,
+				codex_auto_apply_reset_credits_enabled: false,
+				...c.other,
+			});
+			usageCache.set(targetId, usage(100));
+			if (c.usage)
+				usageCache.setWithAgeForTests(otherId, c.usage, c.ageMs ?? 0);
+			const h = poolHarness([target, other]);
+			await h.scheduler.tick();
+			expect(h.consumed).toEqual(c.consume ? [targetId] : []);
+		});
+	}
+
+	it("redeems in a single-account pool", async () => {
+		usageCache.set(targetId, usage(100));
+		const h = poolHarness([makeCodexAccount({ id: targetId, ...weeklyOnly })]);
+		await h.scheduler.tick();
+		expect(h.consumed).toEqual([targetId]);
+	});
+
+	it("restores one exhausted account and conserves the other account's reset", async () => {
+		const accounts = [targetId, otherId].map((id) => {
+			usageCache.set(id, usage(100));
+			return makeCodexAccount({
+				id,
+				...weeklyOnly,
+				rate_limited_until: NOW + 60_000,
+			});
+		});
+		const h = poolHarness(accounts);
+		await h.scheduler.tick();
+		expect(h.consumed).toEqual([targetId]);
+		await h.scheduler.tick();
+		expect(h.consumed).toEqual([targetId]);
 	});
 });

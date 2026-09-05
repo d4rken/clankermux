@@ -153,8 +153,11 @@ export function computePacingFromAccounts(
 	accounts: AccountResponse[],
 	now: number,
 ): PacingSnapshot {
-	const sevenDay = computePoolUsage(accounts, "seven_day", now);
-	const fiveHour = computePoolUsage(accounts, "five_hour", now);
+	// Paused inventory stays visible on the accounts resource, but contributes
+	// no budget, governor counts or fallback capacity to the active workload.
+	const activeAccounts = accounts.filter((account) => !account.paused);
+	const sevenDay = computePoolUsage(activeAccounts, "seven_day", now);
+	const fiveHour = computePoolUsage(activeAccounts, "five_hour", now);
 
 	return {
 		generatedAtMs: now,

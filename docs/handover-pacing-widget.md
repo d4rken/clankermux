@@ -96,6 +96,20 @@ stated. **Which end of the scale that is depends on `kind`:**
 You must read `kind` alongside. Rendering either null as a zero-width bar or a
 "0%" says the pool is exactly on the edge, which is wrong in both directions.
 
+These labels describe sustainability over `horizonMs` (currently 14 days),
+assuming the measured burn rate continues. They do not describe how full the
+account is right now. For example, 10% used in the first hour of a weekly window
+projects a full window every 10 hours. Two modeled banked resets extend the
+remaining runway from 9 hours to 29 hours, but even halving that pace does not
+clear 14 days. That can legitimately produce "cut hard" beside a mostly empty
+usage bar. Show the horizon and sustained-rate assumption in the explanation;
+a short burst after a reset is weak evidence of someone's longer-term workload.
+
+Paused accounts are excluded from runway, per-workload headroom and pacing
+counts. Their readings remain visible on the accounts resource. Banked resets
+extend the model only when the corresponding automation is enabled and credit
+metadata is available; they are finite extra capacity, not a recurring budget.
+
 ---
 
 ## 4. Per-class context (optional, `/public/v1/pacing`)

@@ -9,15 +9,16 @@
  *      shortly before it expires; and
  *      WEEKLY-LIMIT (`codex_auto_apply_reset_on_weekly_limit_enabled`) —
  *      redeem a credit when the cached 7-day usage window is exhausted
- *      (>= 100%), rate-limited by a 1h cooldown anchored on the last auto
+ *      (>= 100%) and no other usable Codex account has quota available,
+ *      rate-limited by a 1h cooldown anchored on the last auto
  *      resolution (reset/alreadyRedeemed/nothingToReset) so stale usage data
  *      can't drain credits back-to-back and a stuck 100% reading can't hammer
  *      the redeem endpoint every tick. When both
  *      triggers apply to the same credit the audit cause is "expiry" (the
  *      more urgent reason — the credit was about to be lost anyway).
- *    PAUSED accounts are deliberately NOT skipped — a paused account's credit
- *    still expires; only a needs-reauth pause (dead refresh token)
- *    disqualifies, because no consume could succeed anyway.
+ *    Expiry protection includes paused accounts. Weekly redemption excludes
+ *    manual pauses (including legacy pauses with no reason). Needs-reauth
+ *    accounts are excluded from both triggers.
  *  - Two-phase tick per candidate: DISCOVERY runs on the cheap TTL-gated cache
  *    read; only when discovery says "consume" does CONFIRMATION force a fresh
  *    metadata read and re-run every gate (last-moment toggle flip, credit
@@ -33,9 +34,14 @@
  *    plain doubles + a fake clock — no mock.module.
  */
 
-import { intervalManager, PAUSE_REASON_NEEDS_REAUTH } from "@clankermux/core";
+import {
+	intervalManager,
+	isAccountAvailable,
+	PAUSE_REASON_NEEDS_REAUTH,
+} from "@clankermux/core";
 import type {
 	CodexResetCreditAutoClaim,
+	CodexResetCreditEventRow,
 	DatabaseOperations,
 } from "@clankermux/database";
 import { Logger } from "@clankermux/logger";
@@ -43,6 +49,7 @@ import {
 	type CodexRateLimitResetCredit,
 	type CodexRateLimitResetCreditsCacheEntry,
 	codexRateLimitResetCreditsCache,
+	getAccountCapacitySignal,
 	type UsageData,
 	usageCache,
 } from "@clankermux/providers";
@@ -97,6 +104,8 @@ export type ResetCreditApplyDecision =
 				| "no-tokens"
 				| "no-credit-near-expiry"
 				| "weekly-not-exhausted"
+				| "other-account-available"
+				| "manually-paused"
 				| "cooldown"
 				| "no-credit-available"
 				| "already-resolved";
@@ -107,15 +116,15 @@ type ResetCreditSkip = Extract<ResetCreditApplyDecision, { action: "skip" }>;
 /**
  * Pure decision function — no I/O, injectable clock. Shared gates run first:
  * at least one opt-in toggle → codex provider → not needs-reauth (a dead
- * refresh token means no consume can succeed; any OTHER pause state is
- * deliberately not an input) → holds a refresh token. Then each enabled
+ * refresh token means no consume can succeed) → holds a refresh token. Then each enabled
  * trigger is evaluated, EXPIRY first so a credit that satisfies both is
  * audited under the more urgent cause:
  *
  *  - EXPIRY: `available` credits whose expiry is in the future but within
  *    {@link RESET_CREDIT_AUTO_APPLY_LEAD_MS}, soonest-first.
  *  - WEEKLY-LIMIT: fires only when the cached 7-day used percent is a known
- *    number >= 100 (null/unknown FAILS CLOSED) and no cooldown-anchoring auto
+ *    number >= 100 (null/unknown FAILS CLOSED), the account is not manually
+ *    paused, and no cooldown-anchoring auto
  *    resolution happened within {@link RESET_CREDIT_WEEKLY_LIMIT_COOLDOWN_MS}.
  *    Any
  *    unexpired `available` credit qualifies, soonest-expiring first with
@@ -134,6 +143,7 @@ export function decideResetCreditAction(inputs: {
 		| "codex_auto_apply_reset_credits_enabled"
 		| "codex_auto_apply_reset_on_weekly_limit_enabled"
 		| "pause_reason"
+		| "paused"
 		| "refresh_token"
 		| "access_token"
 	>;
@@ -218,7 +228,12 @@ export function decideResetCreditAction(inputs: {
 	// WEEKLY-LIMIT trigger — exhausted 7-day window, cooldown-gated.
 	let weeklySkip: ResetCreditSkip | null = null;
 	if (weeklyEnabled) {
-		if (weeklyUsedPercent === null || weeklyUsedPercent < 100) {
+		if (
+			account.paused &&
+			(account.pause_reason === "manual" || account.pause_reason === null)
+		) {
+			weeklySkip = { action: "skip", reason: "manually-paused" };
+		} else if (weeklyUsedPercent === null || weeklyUsedPercent < 100) {
 			// Includes the fail-closed null/unknown case.
 			weeklySkip = { action: "skip", reason: "weekly-not-exhausted" };
 		} else if (
@@ -268,7 +283,11 @@ export interface CodexResetCreditApplyDeps {
 		accountId: string,
 	): CodexRateLimitResetCreditsCacheEntry | null;
 	/** Refresh the metadata cache; non-forced is a cheap no-op while fresh. */
-	refreshCredits(accountId: string, force: boolean): Promise<void>;
+	refreshCredits(accountId: string, force: boolean): Promise<boolean>;
+	/** Recovery must look at the ledger, even if the credit vanished from metadata. */
+	getPendingAttempt(
+		accountId: string,
+	): Promise<CodexResetCreditEventRow | null>;
 	/** Credit ids whose automation the ledger has terminally resolved. */
 	getTerminallyResolvedCreditIds(accountId: string): Promise<Set<string>>;
 	/**
@@ -279,6 +298,8 @@ export interface CodexResetCreditApplyDeps {
 	getWeeklyUsedPercent(
 		accountId: string,
 	): Promise<number | null> | number | null;
+	/** Re-read the pool before weekly redemption; expiry never consults this gate. */
+	hasOtherAvailableCodexAccount(accountId: string): Promise<boolean>;
 	/**
 	 * MAX resolved_at (ms) of cooldown-anchoring auto resolutions
 	 * (reset/alreadyRedeemed/nothingToReset) — the weekly-limit trigger's 1h
@@ -387,7 +408,7 @@ export class CodexResetCreditApplyScheduler {
 				this.deps.getWeeklyUsedPercent(accountId),
 				this.deps.getAutoApplyCooldownAnchorAt(accountId),
 			]);
-		return decideResetCreditAction({
+		const decision = decideResetCreditAction({
 			account,
 			credits: cached?.summary.credits ?? null,
 			terminallyResolvedCreditIds,
@@ -395,6 +416,17 @@ export class CodexResetCreditApplyScheduler {
 			autoApplyCooldownAnchorAt: cooldownAnchorAt,
 			now: (this.deps.now ?? Date.now)(),
 		});
+		// Check in BOTH discovery and confirmation, and separately for each
+		// candidate. A preceding reset can restore another account during this
+		// tick. Keep expiry independent, including when reading the pool fails.
+		if (
+			decision.action === "consume" &&
+			decision.cause === "weekly-limit" &&
+			(await this.deps.hasOtherAvailableCodexAccount(accountId))
+		) {
+			return { action: "skip", reason: "other-account-available" };
+		}
+		return decision;
 	}
 
 	private async processAccount(candidate: {
@@ -402,6 +434,50 @@ export class CodexResetCreditApplyScheduler {
 		name: string;
 	}): Promise<void> {
 		const { id, name } = candidate;
+		const pending = await this.deps.getPendingAttempt(id);
+		if (pending) {
+			// A lost response may already have spent this credit. Reconcile it
+			// before selecting a different credit for weekly exhaustion.
+			if (!(await this.deps.refreshCredits(id, true))) return;
+			const account = await this.deps.getAccount(id);
+			if (
+				!account ||
+				account.provider !== "codex" ||
+				!account.refresh_token ||
+				account.pause_reason === PAUSE_REASON_NEEDS_REAUTH ||
+				!pending.credit_id
+			)
+				return;
+			const mayReplay =
+				pending.cause === "weekly-limit"
+					? account.codex_auto_apply_reset_on_weekly_limit_enabled &&
+						!(
+							account.paused &&
+							(account.pause_reason === "manual" ||
+								account.pause_reason === null)
+						)
+					: account.codex_auto_apply_reset_credits_enabled;
+			// Replay the SAME key even when usage recovered or the metadata now
+			// says redeemed/missing/expired. This retrieves the uncertain outcome
+			// instead of treating a stale 100% reading as permission for credit B.
+			if (mayReplay) {
+				await this.dispatchAttempt(
+					id,
+					name,
+					pending.credit_id,
+					pending.cause ?? "expiry",
+					{
+						id: pending.id,
+						idempotencyKey: pending.idempotency_key,
+						attemptSeq: pending.attempt_seq ?? 1,
+						reused: true,
+					},
+				);
+				return;
+			}
+			// A manual pause/toggle flip stops a weekly retry, but must not
+			// disable the independent protection for credits about to expire.
+		}
 
 		// Phase 1 — DISCOVERY on the cheap TTL-gated cache read.
 		await this.deps.refreshCredits(id, false);
@@ -424,7 +500,12 @@ export class CodexResetCreditApplyScheduler {
 
 		// Phase 2 — CONFIRMATION on a forced fresh read. The toggle may have been
 		// flipped off and the credit may have been redeemed/expired meanwhile.
-		await this.deps.refreshCredits(id, true);
+		if (!(await this.deps.refreshCredits(id, true))) {
+			log.debug(
+				`Reset-credit applier: confirmation refresh failed for '${name}'`,
+			);
+			return;
+		}
 		const confirmed = await this.evaluate(id);
 		if (!confirmed || confirmed.action !== "consume") {
 			log.debug(
@@ -434,6 +515,7 @@ export class CodexResetCreditApplyScheduler {
 			);
 			return;
 		}
+		if (pending && confirmed.cause === "weekly-limit") return;
 
 		const claim = await this.deps.claimAutoAttempt({
 			accountId: id,
@@ -447,24 +529,40 @@ export class CodexResetCreditApplyScheduler {
 			now: (this.deps.now ?? Date.now)(),
 		});
 		if (!claim) {
-			// The ledger says automation is terminal for this credit.
+			// Terminal credit, or another unresolved account attempt won the race.
 			log.debug(
-				`Reset-credit applier: claim refused for '${name}' credit ${confirmed.creditId} (terminal)`,
+				`Reset-credit applier: claim refused for '${name}' credit ${confirmed.creditId} (terminal or unresolved account attempt)`,
 			);
 			return;
 		}
 
+		await this.dispatchAttempt(
+			id,
+			name,
+			confirmed.creditId,
+			confirmed.cause,
+			claim,
+		);
+	}
+
+	private async dispatchAttempt(
+		id: string,
+		name: string,
+		creditId: string,
+		cause: ResetCreditApplyCause,
+		claim: CodexResetCreditAutoClaim,
+	): Promise<void> {
 		let outcome: CodexResetCreditConsumeDispatchOutcome;
 		try {
 			outcome = await this.deps.dispatchConsume(id, {
 				idempotencyKey: claim.idempotencyKey,
-				creditId: confirmed.creditId,
+				creditId,
 				autoApply: { ledgerRowId: claim.id },
 			});
 		} catch (err) {
 			// Row stays pending → the next tick retries with the SAME key.
 			log.warn(
-				`Reset-credit applier: dispatch threw for '${name}' credit ${confirmed.creditId} (attempt ${claim.attemptSeq}); will retry with the same key: ${err instanceof Error ? err.message : String(err)}`,
+				`Reset-credit applier: dispatch threw for '${name}' credit ${creditId} (attempt ${claim.attemptSeq}); will retry with the same key: ${err instanceof Error ? err.message : String(err)}`,
 			);
 			return;
 		}
@@ -472,13 +570,13 @@ export class CodexResetCreditApplyScheduler {
 		if (outcome.status === "failed") {
 			// Row stays pending → same-key retry on a later tick.
 			log.warn(
-				`Reset-credit applier: consume failed for '${name}' credit ${confirmed.creditId} (attempt ${claim.attemptSeq}); will retry with the same key: ${outcome.message}`,
+				`Reset-credit applier: consume failed for '${name}' credit ${creditId} (attempt ${claim.attemptSeq}); will retry with the same key: ${outcome.message}`,
 			);
 			return;
 		}
 
 		log.info(
-			`Reset-credit applier: auto-applied for '${name}' credit ${confirmed.creditId} (cause: ${confirmed.cause}, attempt ${claim.attemptSeq}, ${claim.reused ? "reused pending claim" : "fresh claim"}, outcome: ${outcome.result.outcome}, windowsReset: ${outcome.result.windowsReset})`,
+			`Reset-credit applier: auto-applied for '${name}' credit ${creditId} (cause: ${cause}, attempt ${claim.attemptSeq}, ${claim.reused ? "reused pending claim" : "fresh claim"}, outcome: ${outcome.result.outcome}, windowsReset: ${outcome.result.windowsReset})`,
 		);
 	}
 }
@@ -495,16 +593,35 @@ export function createCodexResetCreditApplyScheduler(wiring: {
 		DatabaseOperations,
 		| "getAllAccounts"
 		| "getAccount"
+		| "getActiveApiKeys"
+		| "getPendingCodexResetCreditAttempt"
 		| "getTerminallyResolvedCodexResetCreditIds"
 		| "claimCodexResetCreditAutoAttempt"
 		| "getCodexResetCreditAutoApplyCooldownAnchorAt"
 	>;
 	coordinator: {
-		refreshResetCredits(accountId: string, force?: boolean): Promise<unknown>;
+		refreshResetCredits(
+			accountId: string,
+			force?: boolean,
+		): Promise<{ success: boolean }>;
+		readUsageStatus(accountId: string): Promise<{ success: boolean }>;
 	};
 	overrides?: Partial<CodexResetCreditApplyDeps>;
 }): CodexResetCreditApplyScheduler {
 	const { dbOps, coordinator, overrides } = wiring;
+	// Bound retries of unknown alternatives across discovery/confirmation and
+	// candidates. Failed free reads must not hold up reset redemption forever.
+	const usageRefreshAttempts = new Map<string, number>();
+	const nowMs = overrides?.now ?? Date.now;
+	const usable = (account: Account, now: number) =>
+		account.provider === "codex" &&
+		isAccountAvailable(account, now) &&
+		account.pause_reason !== PAUSE_REASON_NEEDS_REAUTH &&
+		Boolean(
+			account.refresh_token ||
+				(account.access_token &&
+					(!account.expires_at || account.expires_at > now)),
+		);
 	return new CodexResetCreditApplyScheduler({
 		listCandidateAccounts: async () =>
 			(await dbOps.getAllAccounts())
@@ -516,10 +633,12 @@ export function createCodexResetCreditApplyScheduler(wiring: {
 				)
 				.map((account) => ({ id: account.id, name: account.name })),
 		getAccount: (accountId) => dbOps.getAccount(accountId),
+		getPendingAttempt: (accountId) =>
+			dbOps.getPendingCodexResetCreditAttempt(accountId),
 		getCachedCredits: (accountId) =>
 			codexRateLimitResetCreditsCache.get(accountId),
 		refreshCredits: async (accountId, force) => {
-			await coordinator.refreshResetCredits(accountId, force);
+			return (await coordinator.refreshResetCredits(accountId, force)).success;
 		},
 		getTerminallyResolvedCreditIds: (accountId) =>
 			dbOps.getTerminallyResolvedCodexResetCreditIds(accountId),
@@ -531,6 +650,67 @@ export function createCodexResetCreditApplyScheduler(wiring: {
 			const usage = usageCache.get(accountId) as UsageData | null;
 			const pct = usage?.seven_day?.utilization;
 			return typeof pct === "number" && Number.isFinite(pct) ? pct : null;
+		},
+		hasOtherAvailableCodexAccount: async (accountId) => {
+			const [accounts, keys] = await Promise.all([
+				dbOps.getAllAccounts(),
+				dbOps.getActiveApiKeys(),
+			]);
+			// A configured account pin has no substitute. Provider-class pins
+			// allowing Codex admit the same Codex alternatives as the global pool.
+			if (keys.some((key) => key.pinnedAccountId === accountId)) return false;
+			const now = nowMs();
+			for (const [id, attemptedAt] of usageRefreshAttempts) {
+				if (now - attemptedAt >= RESET_CREDIT_AUTO_APPLY_TICK_MS)
+					usageRefreshAttempts.delete(id);
+			}
+			const unknown: Account[] = [];
+			for (const account of accounts) {
+				if (account.id === accountId || !usable(account, now)) continue;
+				// Check both included-quota windows, irrespective of reset toggles.
+				const capacity = getAccountCapacitySignal(
+					usageCache.get(account.id),
+					account.provider,
+					now,
+				);
+				if (capacity && capacity.minHeadroom > 0) return true;
+				if (!capacity) unknown.push(account);
+			}
+			for (const account of unknown) {
+				if (!usageRefreshAttempts.has(account.id)) {
+					usageRefreshAttempts.set(account.id, nowMs());
+					try {
+						// Free GET, bounded by the coordinator's timeout; never a ping.
+						await coordinator.readUsageStatus(account.id);
+					} catch (error) {
+						log.debug(
+							`Reset-credit pool usage refresh failed for '${account.name}': ${error}`,
+						);
+					}
+				}
+				const current = await dbOps.getAccount(account.id);
+				if (!current || !usable(current, nowMs())) continue;
+				const capacity = getAccountCapacitySignal(
+					usageCache.get(account.id),
+					"codex",
+					nowMs(),
+				);
+				if (capacity) {
+					if (capacity.minHeadroom > 0) return true;
+					continue;
+				}
+				// A just-resolved reset (or nothingToReset) is evidence against
+				// another immediate redemption while usage catches up. After one
+				// tick, an alternative we still cannot verify no longer blocks.
+				const restoredAt =
+					await dbOps.getCodexResetCreditAutoApplyCooldownAnchorAt(account.id);
+				if (
+					restoredAt !== null &&
+					nowMs() - restoredAt < RESET_CREDIT_AUTO_APPLY_TICK_MS
+				)
+					return true;
+			}
+			return false;
 		},
 		getAutoApplyCooldownAnchorAt: (accountId) =>
 			dbOps.getCodexResetCreditAutoApplyCooldownAnchorAt(accountId),

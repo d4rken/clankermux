@@ -61,6 +61,37 @@ function usage(
 }
 
 describe("computePacingFromAccounts", () => {
+	it("does not count a paused Codex account as budget, pressure or fallback capacity", () => {
+		const active = account({
+			id: "codex-1",
+			provider: "codex",
+			usageData: usage(10, 8),
+		});
+		const paused = account({
+			id: "codex-2",
+			provider: "codex",
+			paused: true,
+			usageData: usage(100, 100),
+		});
+		const pacing = computePacingFromAccounts([active, paused], NOW);
+		expect(pacing).toEqual(computePacingFromAccounts([active], NOW));
+		expect(pacing.classes[0]?.eligibleTotal).toBe(1);
+		expect(pacing.classes[0]?.singlePointOfFailure).toBe(true);
+		expect(pacing.fiveHour.classes[0]?.unavailable).toBe(0);
+	});
+
+	it("omits classes with only paused accounts", () => {
+		const paused = account({
+			provider: "codex",
+			paused: true,
+			usageData: usage(10, 8),
+		});
+		const pacing = computePacingFromAccounts([paused], NOW);
+		expect(pacing.classes).toEqual([]);
+		expect(pacing.fiveHour.classes).toEqual([]);
+		expect(pacing.bindingClassId).toBeNull();
+	});
+
 	it("keys each class's figures on its LEAST-USED account", () => {
 		// The class's real headroom, because routing picks one account and the pool
 		// keeps serving until every account is spent. A mean of 20 and 80 would

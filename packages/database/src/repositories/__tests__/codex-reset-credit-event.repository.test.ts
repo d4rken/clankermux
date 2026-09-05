@@ -53,6 +53,60 @@ describe("CodexResetCreditEventRepository", () => {
 	});
 
 	describe("claimAutoAttempt", () => {
+		it("blocks a different weekly credit until the pending account attempt resolves", async () => {
+			const first = await repo.claimAutoAttempt({
+				...CLAIM_INPUT,
+				cause: "weekly-limit",
+			});
+			const secondInput = {
+				...CLAIM_INPUT,
+				creditId: "credit-b",
+				cause: "weekly-limit" as const,
+			};
+			expect(await repo.claimAutoAttempt(secondInput)).toBeNull();
+			// A fresh repository sees the unresolved attempt after a restart.
+			const reopened = new CodexResetCreditEventRepository(
+				new BunSqlAdapter(db),
+			);
+			expect(
+				(await reopened.findPendingForAccount("acc-1"))?.idempotency_key,
+			).toBe(first?.idempotencyKey);
+			if (!first) throw new Error("Expected the initial weekly claim");
+			await repo.resolveAttempt(first.id, "alreadyRedeemed", 1, null, NOW + 1);
+			expect(await reopened.findPendingForAccount("acc-1")).toBeNull();
+			expect(await repo.claimAutoAttempt(secondInput)).not.toBeNull();
+		});
+
+		it("allows only one of two concurrent weekly claims for different credits", async () => {
+			const claims = await Promise.all([
+				repo.claimAutoAttempt({ ...CLAIM_INPUT, cause: "weekly-limit" }),
+				repo.claimAutoAttempt({
+					...CLAIM_INPUT,
+					cause: "weekly-limit",
+					creditId: "credit-b",
+				}),
+			]);
+			expect(claims.filter(Boolean)).toHaveLength(1);
+			expect(await repo.findRecentForAccount("acc-1", 10)).toHaveLength(1);
+		});
+
+		it("protects an expiring credit even with a deferred weekly attempt", async () => {
+			await repo.claimAutoAttempt({ ...CLAIM_INPUT, cause: "weekly-limit" });
+			expect(
+				await repo.claimAutoAttempt({
+					...CLAIM_INPUT,
+					creditId: "expiring-credit",
+				}),
+			).not.toBeNull();
+			expect(
+				await repo.claimAutoAttempt({
+					...CLAIM_INPUT,
+					creditId: "weekly-credit",
+					cause: "weekly-limit",
+				}),
+			).toBeNull();
+		});
+
 		it("mints attempt 1 with deterministic id and idempotency key", async () => {
 			const claim = await repo.claimAutoAttempt(CLAIM_INPUT);
 			expect(claim).not.toBeNull();

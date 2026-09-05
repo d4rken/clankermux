@@ -2814,6 +2814,12 @@ OAuth tokens will need to be re-authenticated.
 		);
 	}
 
+	async getPendingCodexResetCreditAttempt(
+		accountId: string,
+	): Promise<CodexResetCreditEventRow | null> {
+		return this.codexResetCreditEvents.findPendingForAccount(accountId);
+	}
+
 	async getCodexResetCreditAutoApplyCooldownAnchorAt(
 		accountId: string,
 	): Promise<number | null> {

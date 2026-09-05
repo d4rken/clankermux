@@ -61,9 +61,9 @@ import {
  * running the scan. Serving that composition is what lets a desktop widget or
  * any other non-dashboard client read a runway without reimplementing it.
  *
- * QUOTA, not availability: pauses, rate-limit cooldowns, usage throttling and
- * the provider-overload breaker are deliberately not read. Copy built on this
- * must say "quota", never "available".
+ * Paused accounts are excluded from runway and workload pacing. Temporary
+ * rate-limit cooldowns, usage throttling and overload are not exclusions from
+ * the quota projection. The evidence list still describes every account.
  *
  * FRESHNESS — the response deliberately reads the usage cache through BOTH of
  * its documented views, because it carries two different kinds of thing:
@@ -734,6 +734,7 @@ export async function computeRunwayScan(
 			id: account.id,
 			name: account.name,
 			provider: account.provider || "anthropic",
+			paused: account.paused,
 			// Already extracted above, so the scan and the evidence block below
 			// cannot end up reading two different resolutions of the same account.
 			usageData: null,

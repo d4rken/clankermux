@@ -85,6 +85,38 @@ function byId(runways: KeyRunway[], id: string | null): KeyRunway {
 }
 
 describe("computeApiKeyRunways", () => {
+	it("excludes paused accounts from capacity, causes and pace headroom", () => {
+		const active = spent("codex-1", "codex");
+		const paused = { ...healthy("codex-2", "codex"), paused: true };
+		const keys = [mkKey({ pinnedProviders: ["codex"] })];
+		expect(computeApiKeyRunways(keys, [active, paused], NOW)).toEqual(
+			computeApiKeyRunways(keys, [active], NOW),
+		);
+		paused.paused = false;
+		expect(
+			computeApiKeyRunways(keys, [active, paused], NOW)[0].outcome.kind,
+		).toBe("beyond-horizon");
+	});
+
+	it("does not count paused unmetered capacity in the unauthenticated pool", () => {
+		const active = spent("codex-1", "codex");
+		const paused = { ...healthy("local", "ollama"), paused: true };
+		expect(computeApiKeyRunways([], [active, paused], NOW)).toEqual(
+			computeApiKeyRunways([], [active], NOW),
+		);
+	});
+
+	it("reports no eligible capacity for an account pin targeting a paused account", () => {
+		const keys = [mkKey({ pinnedAccountId: "paused" })];
+		const row = computeApiKeyRunways(
+			keys,
+			[{ ...healthy("paused"), paused: true }],
+			NOW,
+		)[0];
+		expect(row.eligibleAccountIds).toEqual([]);
+		expect(row.outcome.kind).toBe("no-accounts");
+	});
+
 	it("scopes an account-pinned key to that one account", () => {
 		const accounts = [spent("acc-1"), healthy("acc-2")];
 		const keys = [

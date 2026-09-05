@@ -1,7 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it, spyOn } from "bun:test";
 import { RUNWAY_HORIZON_MS } from "@clankermux/core";
 import type { DatabaseOperations } from "@clankermux/database";
-import { type AnyUsageData, usageCache } from "@clankermux/providers";
+import {
+	type AnyUsageData,
+	codexRateLimitResetCreditsCache,
+	usageCache,
+} from "@clankermux/providers";
 import type {
 	Account,
 	ApiKey,
@@ -180,6 +184,7 @@ const SEEDED_IDS = [
 	"acc-2",
 	"anthropic-1",
 	"codex-1",
+	"codex-2",
 	"local-1",
 	"aged-1",
 	"fresh-1",
@@ -201,7 +206,56 @@ describe("GET /api/runway", () => {
 
 	afterEach(() => {
 		for (const id of SEEDED_IDS) usageCache.delete(id);
+		codexRateLimitResetCreditsCache.delete("codex-1");
 		nowSpy.mockRestore();
+	});
+
+	it("excludes paused Codex-2 while retaining Codex-1's two modeled resets", async () => {
+		usageCache.set("codex-1", {
+			five_hour: null,
+			seven_day: {
+				utilization: 10,
+				resets_at: new Date(BASE + 7 * DAY_MS - HOUR_MS).toISOString(),
+			},
+		});
+		usageCache.set("codex-2", SPENT());
+		codexRateLimitResetCreditsCache.set(
+			"codex-1",
+			{ availableCount: 2, credits: null },
+			BASE,
+		);
+		const body = await runway(
+			makeDbOps({
+				accounts: [
+					makeAccount({
+						id: "codex-1",
+						provider: "codex",
+						codex_auto_apply_reset_on_weekly_limit_enabled: true,
+					}),
+					makeAccount({
+						id: "codex-2",
+						provider: "codex",
+						paused: true,
+						pause_reason: "manual",
+					}),
+				],
+				keys: [makeKey({ pinnedProviders: ["codex"] })],
+			}),
+		);
+		const row = body.keys[0];
+		expect(row.eligibleAccountIds).toEqual(["codex-1"]);
+		expect(row.outcome.kind).toBe("runway");
+		if (row.outcome.kind !== "runway")
+			throw new Error("Expected a finite runway at this high burn rate");
+		expect(row.outcome.assumedResetCredits).toEqual([
+			{ accountId: "codex-1", count: 2 },
+		]);
+		expect(row.outcome.causes).toEqual([
+			{ accountId: "codex-1", windowKind: "seven_day" },
+		]);
+		expect(row.outcome.durationMs).toBeCloseTo(29 * HOUR_MS, 0);
+		// Pausing excludes modeled capacity; it does not hide account evidence.
+		expect(body.accounts.map((a) => a.id)).toContain("codex-2");
 	});
 
 	it("scopes a provider-pinned key to that provider's accounts", async () => {

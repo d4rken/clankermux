@@ -391,12 +391,13 @@ export function computeWorkloadHeadroom(
 	horizonMs: number = RUNWAY_HORIZON_MS,
 ): WorkloadHeadroomRow[] {
 	const rows: WorkloadHeadroomRow[] = [];
+	const activeAccounts = accounts.filter((account) => !account.paused);
 
 	const byClass = new Map<
 		string,
 		{ label: string; accounts: RunwayAccountSource[] }
 	>();
-	for (const account of accounts) {
+	for (const account of activeAccounts) {
 		const servable = servableClassFor(account.provider);
 		const bucket = byClass.get(servable.classId);
 		if (bucket) bucket.accounts.push(account);
@@ -437,7 +438,7 @@ export function computeWorkloadHeadroom(
 	// server's scan deliberately leaves null — and the whole family dimension
 	// came out empty in production while every test passed.
 	const familyLabels = new Map<ModelFamily, string>();
-	for (const account of accounts) {
+	for (const account of activeAccounts) {
 		for (const limit of scopedFamilyReadings(account, now) ?? []) {
 			if (!familyLabels.has(limit.family)) {
 				familyLabels.set(limit.family, limit.displayName);
@@ -449,7 +450,7 @@ export function computeWorkloadHeadroom(
 	// evidence can be told apart from one that reports none. Both look like an
 	// absent Fable entry; only the first might still be able to serve Fable.
 	const reportingClasses = new Map<ModelFamily, Set<string>>();
-	for (const account of accounts) {
+	for (const account of activeAccounts) {
 		for (const limit of scopedFamilyReadings(account, now) ?? []) {
 			const classId = servableClassFor(account.provider).classId;
 			const existing = reportingClasses.get(limit.family);
@@ -467,7 +468,7 @@ export function computeWorkloadHeadroom(
 		const considered: string[] = [];
 		const rejected: string[] = [];
 		const classes = reportingClasses.get(family) ?? new Set<string>();
-		for (const account of accounts) {
+		for (const account of activeAccounts) {
 			const readings = scopedFamilyReadings(account, now);
 			// THREE states, and collapsing any two of them loses an account or
 			// invents one:

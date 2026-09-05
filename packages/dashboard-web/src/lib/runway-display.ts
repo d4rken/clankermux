@@ -7,8 +7,8 @@ import { formatDurationDhm } from "./format-prediction";
  * and the Usage-page panel so the two can never state the same outcome
  * differently.
  *
- * Copy says QUOTA, never "available": the runway ignores pauses, cooldowns,
- * throttling and the overload breaker by design.
+ * Copy says QUOTA, never "available": paused accounts are excluded, but the
+ * runway still projects through temporary cooldowns, throttling and overload.
  *
  * Everything that renders a duration takes `now`. The outcome is served from
  * `/api/runway` and refreshed on a poll, so rendering the server's

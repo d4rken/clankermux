@@ -81,6 +81,15 @@ function accountWideConstrained(id: string): RunwayAccountSource {
 }
 
 describe("computeWorkloadHeadroom — class rows", () => {
+	it("ignores paused capacity and constraints in class and family projections", () => {
+		const active = accountWideConstrained("active");
+		const paused = { ...accountWideConstrained("paused"), paused: true };
+		expect(computeWorkloadHeadroom([active, paused], NOW)).toEqual(
+			computeWorkloadHeadroom([active], NOW),
+		);
+		expect(computeWorkloadHeadroom([paused], NOW)).toEqual([]);
+	});
+
 	it("reports one row per servable class and never pools across them", () => {
 		const rows = computeWorkloadHeadroom(
 			[

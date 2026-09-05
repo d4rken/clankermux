@@ -37,10 +37,9 @@ export type { RunwayAssumedCredits, RunwayBand, RunwayCause, RunwayOutcome };
  *    instant?
  *
  * Scope of "out of quota" for the runway: the account-wide 5-hour and weekly
- * windows only. Pauses, rate-limit cooldowns, usage throttling and the
- * provider-overload breaker are deliberately IGNORED — runway answers "when
- * does the quota run out", not "what is routable right now", so a paused or
- * cooling account still counts as capacity.
+ * windows only. The composition layer excludes paused accounts before passing
+ * inputs to this model. Temporary rate-limit cooldowns, usage throttling and
+ * overload are not modeled here: quota windows describe when capacity returns.
  */
 
 const HOUR_MS = TIME_CONSTANTS.HOUR;

@@ -428,11 +428,11 @@ function CodexUsageResetChip({
 	const autoApplyLine =
 		summary.availableCount > 0
 			? expiryArmed && weeklyArmed
-				? " Auto-apply armed (expiry + weekly limit) — a reset will be consumed automatically shortly before expiry or when the weekly limit is hit."
+				? " Auto-apply armed (expiry + weekly limit) — a reset will be consumed automatically shortly before expiry, or at the weekly limit when no usable Codex alternative is available. Manual pauses defer weekly resets."
 				: expiryArmed
 					? " Auto-apply armed — a reset will be consumed automatically shortly before expiry."
 					: weeklyArmed
-						? " Auto-apply armed (weekly limit) — a reset will be consumed automatically when the weekly limit is hit."
+						? " Auto-apply armed (weekly limit) — a reset will be consumed automatically at the weekly limit when no usable Codex alternative is available. Manual pauses defer weekly resets."
 						: " Auto-apply is off — this reset may expire unused."
 			: "";
 

@@ -392,7 +392,7 @@ export function AccountListItem({
 													onAutoApplyResetOnWeeklyLimitToggle(account)
 												}
 												onSelect={(e) => e.preventDefault()}
-												title="Automatically consume a banked usage reset when this account's weekly usage reaches 100%. At most one auto-apply per hour."
+												title="Automatically consume a banked usage reset at 100% weekly usage when no usable Codex alternative is available. Respects API-key account pins. Manual pauses conserve weekly resets. At most one auto-apply per hour."
 											>
 												Auto-apply reset at weekly limit
 											</DropdownMenuCheckboxItem>

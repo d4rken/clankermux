@@ -40,11 +40,9 @@ import {
  * mapping those onto the runway model is the part a non-dashboard client would
  * otherwise have to reimplement.
  *
- * Pure QUOTA scope: `paused`, `rateLimitedUntil`, `usageThrottledUntil` and
- * `providerOverloadedUntil` are deliberately NOT read. Runway answers "when
- * does the quota run out", so an account that is merely paused or cooling still
- * counts as capacity. Surfaces built on this must say "quota", not
- * "available".
+ * Paused accounts are excluded: their capacity is not part of the active
+ * workload. Temporary rate-limit cooldowns, throttling and overload are not
+ * exclusions from this quota projection; the quota windows model recovery.
  */
 
 /**
@@ -68,6 +66,8 @@ export interface RunwayAccountSource {
 	id: string;
 	name: string;
 	provider: string;
+	/** Paused accounts contribute neither capacity nor pacing constraints. */
+	paused?: boolean;
 	usageData: FullUsageData | null;
 	prediction?: AccountUsagePrediction | null;
 	/**
@@ -392,8 +392,8 @@ function runwayFor(
 	outcome: RunwayOutcome;
 	band: RunwayBand | null;
 } {
-	const eligible = accounts.filter((account) =>
-		isAccountAllowedByPin(pin, account),
+	const eligible = accounts.filter(
+		(account) => !account.paused && isAccountAllowedByPin(pin, account),
 	);
 	const inputs = eligible.map(toRunwayAccountInput);
 	const outcome = computeCapacityRunway(inputs, now);

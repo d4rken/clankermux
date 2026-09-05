@@ -459,7 +459,7 @@ export interface AccountResponse {
 	peakHoursPauseEnabled?: boolean;
 	/** Codex-only: auto-consume expiring usage-limit reset credits (opt-in). */
 	autoApplyResetCreditsEnabled?: boolean;
-	/** Codex-only: auto-consume a reset credit when the weekly limit is hit (opt-in). */
+	/** Codex-only: auto-consume at the weekly limit with no usable Codex alternative; respects account pins and manual pauses (opt-in). */
 	autoApplyResetOnWeeklyLimitEnabled?: boolean;
 	customEndpoint: string | null;
 	modelMappings: { [key: string]: string | string[] } | null; // Parsed model mappings (arrays = cycling models)

@@ -90,6 +90,9 @@ export class CodexResetCreditEventRepository extends BaseRepository<CodexResetCr
 		const attemptSeq = (latest?.attempt_seq ?? 0) + 1;
 		const id = `${input.accountId}:${input.creditId}:${attemptSeq}`;
 		const idempotencyKey = `codex-reset-auto:${id}`;
+		// Atomic account-wide guard: two different weekly credits cannot both
+		// be claimed while an outcome is uncertain. Expiry protection remains
+		// independent so a deferred weekly attempt cannot let another credit lapse.
 		const changes = await this.runWithChanges(
 			`
 			INSERT OR IGNORE INTO codex_reset_credit_events (
@@ -97,7 +100,11 @@ export class CodexResetCreditEventRepository extends BaseRepository<CodexResetCr
 				idempotency_key, status, windows_reset, error_message,
 				credit_expires_at, created_at, resolved_at
 			)
-			VALUES (?, ?, ?, ?, 'auto', ?, ?, ?, 'pending', NULL, NULL, ?, ?, NULL)
+			SELECT ?, ?, ?, ?, 'auto', ?, ?, ?, 'pending', NULL, NULL, ?, ?, NULL
+			WHERE ? = 'expiry' OR NOT EXISTS (
+				SELECT 1 FROM codex_reset_credit_events
+				WHERE account_id = ? AND trigger = 'auto' AND status = 'pending'
+			)
 		`,
 			[
 				id,
@@ -109,21 +116,36 @@ export class CodexResetCreditEventRepository extends BaseRepository<CodexResetCr
 				idempotencyKey,
 				input.creditExpiresAt,
 				input.now,
+				input.cause,
+				input.accountId,
 			],
 		);
 		if (changes > 0) {
 			return { id, idempotencyKey, attemptSeq, reused: false };
 		}
 
-		// A concurrent claim won the INSERT race — reuse the winner's row.
+		// A concurrent claim may have won, or a different pending credit blocked
+		// this weekly claim. Reuse only a still-pending row for THIS credit.
 		const winner = await this.latestAutoRow(input.accountId, input.creditId);
-		if (!winner) return null;
+		if (!winner || winner.status !== "pending") return null;
 		return {
 			id: winner.id,
 			idempotencyKey: winner.idempotency_key,
 			attemptSeq: winner.attempt_seq ?? 0,
 			reused: true,
 		};
+	}
+
+	/** Oldest unresolved automatic attempt, independent of current credit metadata. */
+	async findPendingForAccount(
+		accountId: string,
+	): Promise<CodexResetCreditEventRow | null> {
+		return this.get<CodexResetCreditEventRow>(
+			`SELECT * FROM codex_reset_credit_events
+			 WHERE account_id = ? AND trigger = 'auto' AND status = 'pending'
+			 ORDER BY created_at ASC, id ASC LIMIT 1`,
+			[accountId],
+		);
 	}
 
 	/** Resolve a pending attempt. No-op for unknown or already-resolved rows. */

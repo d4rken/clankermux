@@ -3004,8 +3004,9 @@ export function createAccountAutoApplyResetCreditsHandler(
 /**
  * Create an account auto-apply-on-weekly-limit toggle handler (Codex accounts
  * only). Opt-in: when enabled, a usage-limit reset credit is consumed
- * automatically as soon as the account hits its weekly limit, instead of only
- * when a credit is about to expire.
+ * automatically at the weekly limit when no usable Codex alternative is
+ * available, respecting active account pins and manual pauses. Expiry
+ * protection is controlled independently.
  */
 export function createAccountAutoApplyResetOnWeeklyLimitHandler(
 	dbOps: DatabaseOperations,
