@@ -3,7 +3,6 @@ import type { PredictionPoint, UsagePrediction } from "@clankermux/types";
 const HOUR_MS = 3_600_000;
 const MIN_POINTS = 3;
 const MIN_SPAN_MS = 5 * 60 * 1000;
-const RESET_DROP_THRESHOLD = 5;
 const RESET_JITTER_TOLERANCE_MS = 60_000;
 const LIMIT = 100;
 
@@ -29,8 +28,32 @@ export function isResetBoundary(
 }
 
 /**
+ * Smallest downward move in reported utilization (percentage points) that
+ * counts as a MID-WINDOW REVISION: a refund, a gift credit, or a reset the
+ * `resets_at` column has not caught up with yet.
+ *
+ * This is the ONE threshold for that judgement. The regression restarts its fit
+ * on it (`isFitBoundary`) and the burn-anchor registry anchors the lifetime
+ * baseline on it (`observeUsageReading` in `@clankermux/proxy`); the two must
+ * agree, or a drop can anchor the lifetime path while the regression keeps
+ * fitting across it.
+ */
+export const REVISION_MIN_DROP_PCT = 5;
+
+/**
+ * True when `curPct` is a revision below `prevPct`.
+ *
+ * INCLUSIVE at the threshold: providers report whole percents, so 5.0 pp is the
+ * smallest drop the threshold can actually observe, and treating it as a
+ * revision only ever shortens a fit (the conservative direction).
+ */
+export function isRevisionDrop(prevPct: number, curPct: number): boolean {
+	return prevPct - curPct >= REVISION_MIN_DROP_PCT;
+}
+
+/**
  * FIT boundary: the point at which the regression restarts. A reset boundary,
- * or a utilization drop larger than `RESET_DROP_THRESHOLD` (a refund, or a
+ * or a utilization drop of at least `REVISION_MIN_DROP_PCT` (a refund, or a
  * reset the `resets_at` column has not caught up with yet).
  */
 export function isFitBoundary(
@@ -38,8 +61,7 @@ export function isFitBoundary(
 	cur: PredictionPoint,
 ): boolean {
 	return (
-		isResetBoundary(prev, cur) ||
-		cur.utilization < prev.utilization - RESET_DROP_THRESHOLD
+		isResetBoundary(prev, cur) || isRevisionDrop(prev.utilization, cur.utilization)
 	);
 }
 
@@ -110,7 +132,7 @@ export function computeUsagePrediction(
 		if (active.length >= 2) pts = active;
 	}
 	// Segment to the current window: cut at the last boundary — a resets_at change
-	// beyond jitter tolerance OR a drop larger than RESET_DROP_THRESHOLD.
+	// beyond jitter tolerance OR a drop of at least REVISION_MIN_DROP_PCT.
 	let segStart = 0;
 	for (let i = 1; i < pts.length; i++) {
 		if (isFitBoundary(pts[i - 1], pts[i])) segStart = i;

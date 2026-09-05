@@ -73,6 +73,19 @@ describe("usage revision anchors", () => {
 		expect(anchor?.anchorPct).toBe(2);
 	});
 
+	it("anchors on a drop of exactly the revision threshold", () => {
+		feed([
+			{ pct: 60, observedAtMs: NOW },
+			{ pct: 60 - REVISION_MIN_DROP_PCT, observedAtMs: NOW + 2 * MINUTE },
+		]);
+
+		expect(getUsageRevisionAnchor("acc", "seven_day", RESET)).toEqual({
+			anchorMs: NOW + 2 * MINUTE,
+			anchorPct: 55,
+			windowResetMs: RESET,
+		});
+	});
+
 	it("ignores drops below the revision threshold", () => {
 		feed([
 			{ pct: 60, observedAtMs: NOW },

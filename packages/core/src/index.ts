@@ -301,6 +301,8 @@ export {
 	computeUsagePrediction,
 	isFitBoundary,
 	isResetBoundary,
+	isRevisionDrop,
+	REVISION_MIN_DROP_PCT,
 	splitSeries,
 } from "./usage-prediction";
 export {
