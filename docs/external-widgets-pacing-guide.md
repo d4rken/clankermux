@@ -170,12 +170,18 @@ corresponding automation and usable credit metadata permit it. Do not manually
 add a week, 100 percentage points, or a fixed token allowance for each credit
 on top of the returned forecast; that would count the same credit twice.
 
-Manual pauses (including legacy pauses with no reason) stop weekly-exhaustion
-redemption. Expiry protection remains enabled on paused accounts when its
-separate opt-in is on; accounts needing reauthentication are excluded from both
-triggers. Other automatic pause reasons are not a universal reset-automation
-stop. This is separate from forecasting: all paused accounts are excluded from
-runway and pacing even when expiry protection remains active.
+A paused account only gets a weekly-exhaustion redemption when it is eligible
+for auto-resume afterwards: the pause reason is `overage` or absent, and the
+account's auto-pause-on-overage toggle is on. That is the same rule the
+auto-resume guard applies, and redemption itself never resumes an account.
+Manual, failure-threshold and subscription-expiry pauses stop weekly-exhaustion
+redemption whatever the toggle says, and so does any pause on an account with
+the toggle off, because the account stays out of routing after the reset and
+the credit would restore quota nobody can use. Expiry protection
+remains enabled on paused accounts when its separate opt-in is on; accounts
+needing reauthentication are excluded from both triggers. This is separate from
+forecasting: all paused accounts are excluded from runway and pacing even when
+expiry protection remains active.
 
 The exhaustion-triggered path conserves a banked reset when another eligible
 Codex account can serve the request. A displayed bank balance is therefore not
