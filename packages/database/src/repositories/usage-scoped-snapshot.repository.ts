@@ -223,6 +223,127 @@ export class UsageScopedSnapshotRepository extends BaseRepository<ScopedUsageSna
 	}
 
 	/**
+	 * The scoped analogue of `UsageSnapshotRepository.getResetPeakRows`, with
+	 * the family and display-name axes added to the grouping.
+	 *
+	 * `display_name` stays in the key rather than being folded into `family`
+	 * because the family mapping is lossy across generations: two display names
+	 * are two ALTERNATIVE spellings of one limit, and the caller has to be able
+	 * to take the binding one instead of summing them.
+	 *
+	 * No tier columns: the scoped table records none. A family row's tier label
+	 * comes from the account-wide samples of the same account.
+	 *
+	 * The edge percentages come from window functions over the same single pass
+	 * as the grouping, for the reason spelled out on the account-wide read:
+	 * correlated scalar subqueries re-scan the series once per group and there
+	 * is no index that covers them.
+	 */
+	async getResetPeakRows(sinceMs: number): Promise<
+		Array<{
+			accountId: string;
+			family: string;
+			displayName: string;
+			resetAt: number;
+			peakPct: number | null;
+			sampleCount: number;
+			firstSampledAt: number;
+			lastSampledAt: number;
+			firstPct: number | null;
+			lastPct: number | null;
+		}>
+	> {
+		const rows = await this.query<{
+			account_id: string;
+			family: string;
+			display_name: string;
+			reset_at: number;
+			peak_pct: number | null;
+			sample_count: number;
+			first_sampled_at: number;
+			last_sampled_at: number;
+			first_pct: number | null;
+			last_pct: number | null;
+		}>(
+			`WITH scanned AS (
+				SELECT account_id, family, display_name, reset_at, pct, sampled_at,
+				       FIRST_VALUE(pct) OVER w AS first_pct,
+				       LAST_VALUE(pct) OVER w AS last_pct
+				FROM usage_scoped_snapshots
+				WHERE sampled_at >= ? AND reset_at IS NOT NULL
+				WINDOW w AS (PARTITION BY account_id, family, display_name, reset_at
+				             ORDER BY sampled_at
+				             ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING)
+			)
+			SELECT account_id,
+			       family,
+			       display_name,
+			       reset_at,
+			       MAX(pct) AS peak_pct,
+			       COUNT(*) AS sample_count,
+			       MIN(sampled_at) AS first_sampled_at,
+			       MAX(sampled_at) AS last_sampled_at,
+			       MIN(first_pct) AS first_pct,
+			       MIN(last_pct) AS last_pct
+			 FROM scanned
+			 GROUP BY account_id, family, display_name, reset_at`,
+			[sinceMs],
+		);
+		return rows.map((row) => ({
+			accountId: row.account_id,
+			family: row.family,
+			displayName: row.display_name,
+			resetAt: Number(row.reset_at),
+			peakPct: row.peak_pct == null ? null : Number(row.peak_pct),
+			sampleCount: Number(row.sample_count),
+			firstSampledAt: Number(row.first_sampled_at),
+			lastSampledAt: Number(row.last_sampled_at),
+			firstPct: row.first_pct == null ? null : Number(row.first_pct),
+			lastPct: row.last_pct == null ? null : Number(row.last_pct),
+		}));
+	}
+
+	/**
+	 * Per `(account, family, calendar day)`, the first and last sample time at
+	 * which the family REPORTED ITS WEEKLY WINDOW — was this family's weekly
+	 * consumption being watched at all in a given span? Samples with no reset
+	 * or no percentage are excluded, mirroring the account-wide presence read:
+	 * they are a blind spot, not evidence of zero. Day buckets bound the row
+	 * count; the values are exact sample times.
+	 */
+	async getDailyPresence(sinceMs: number): Promise<
+		Array<{
+			accountId: string;
+			family: string;
+			firstSampledAt: number;
+			lastSampledAt: number;
+		}>
+	> {
+		const rows = await this.query<{
+			account_id: string;
+			family: string;
+			first_sampled_at: number;
+			last_sampled_at: number;
+		}>(
+			`SELECT account_id, family,
+			        MIN(sampled_at) AS first_sampled_at,
+			        MAX(sampled_at) AS last_sampled_at
+			 FROM usage_scoped_snapshots
+			 WHERE sampled_at >= ?
+			   AND reset_at IS NOT NULL
+			   AND pct IS NOT NULL
+			 GROUP BY account_id, family, (sampled_at / 86400000)`,
+			[sinceMs],
+		);
+		return rows.map((row) => ({
+			accountId: row.account_id,
+			family: row.family,
+			firstSampledAt: Number(row.first_sampled_at),
+			lastSampledAt: Number(row.last_sampled_at),
+		}));
+	}
+
+	/**
 	 * Delete scoped snapshots strictly older than `cutoffMs`. Returns rows
 	 * deleted. Shares the `usage_snapshot_retention_days` knob with
 	 * `usage_snapshots` — one control for one series family.

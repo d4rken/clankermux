@@ -105,6 +105,7 @@ import {
 	createPaymentsSeedHandler,
 	createPaymentsSummaryHandler,
 } from "./handlers/payments";
+import { createPoolSizingHandler } from "./handlers/pool-sizing";
 import { createQuotaDriftHandler } from "./handlers/quota-drift";
 import { parseRequestFilters } from "./handlers/request-filters";
 import {
@@ -257,6 +258,7 @@ export class APIRouter {
 		);
 		const stopsHistoryHandler = createStopsHistoryHandler(this.context);
 		const quotaDriftHandler = createQuotaDriftHandler(this.context);
+		const poolSizingHandler = createPoolSizingHandler(this.context);
 		const memoryHistoryHandler = createMemoryHistoryHandler(this.context);
 		const cacheKeepaliveHandler = createCacheKeepaliveHandler(this.context);
 		const cacheKeepaliveHistoryHandler = createCacheKeepaliveHistoryHandler(
@@ -519,6 +521,14 @@ export class APIRouter {
 				return usageScopedHistoryHandler(url.searchParams);
 			},
 		);
+		// Account-weeks consumed per completed weekly cycle. Takes NO parameters:
+		// the lookback is fixed and the unit is a completed cycle, so a range
+		// filter could only either do nothing or silently change which cycles a
+		// verdict rests on — the same reason the Quota tab's other endpoint
+		// takes none.
+		this.handlers.set("GET:/api/analytics/pool-sizing", (_req, url) => {
+			return poolSizingHandler(url.searchParams);
+		});
 		// How often requests were actually refused, and why. Takes `range` plus
 		// the analytics filter panel (accounts / models / API keys / projects /
 		// status), so the card answers for the same selection as the panels

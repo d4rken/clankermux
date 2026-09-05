@@ -51,6 +51,9 @@ export const queryKeys = {
 	// Unkeyed: the payload is precomputed over the whole retained history, so
 	// there is no range or filter axis to fork the cache on.
 	quotaDrift: () => [...queryKeys.all, "quota-drift"] as const,
+	// Unkeyed: the endpoint takes no parameters, so every reader of the pool
+	// sizing payload shares one cache entry.
+	poolSizing: () => [...queryKeys.all, "pool-sizing"] as const,
 	cacheKeepalive: () => [...queryKeys.all, "cache-keepalive"] as const,
 	cacheKeepaliveHistory: (range?: string) =>
 		[...queryKeys.all, "cache-keepalive-history", { range }] as const,

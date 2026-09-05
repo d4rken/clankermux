@@ -21,6 +21,7 @@ import { createCacheEffectivenessHandler as createDirectCacheEffectivenessHandle
 import { createCacheKeepaliveHistoryHandler as createDirectCacheKeepaliveHistoryHandler } from "./cache-keepalive-history-direct";
 import { createMemoryHistoryHandler as createDirectMemoryHistoryHandler } from "./memory-history-direct";
 import { createPaymentsSummaryDataHandler as createDirectPaymentsSummaryDataHandler } from "./payments-summary-direct";
+import { createPoolSizingHandler as createDirectPoolSizingHandler } from "./pool-sizing-direct";
 import { createQuotaDriftHandler as createDirectQuotaDriftHandler } from "./quota-drift-direct";
 import { createStatsHandler as createDirectStatsHandler } from "./stats-direct";
 import { createStopsHistoryHandler as createDirectStopsHistoryHandler } from "./stops-history-direct";
@@ -61,6 +62,7 @@ const WORKER_SOFT_TIMEOUT_MS_BY_KIND: Record<DashboardWorkerKind, number> = {
 	"payments-summary": DEFAULT_WORKER_TIMEOUT_MS,
 	"filter-options": DEFAULT_WORKER_TIMEOUT_MS,
 	"quota-drift": DEFAULT_WORKER_TIMEOUT_MS,
+	"pool-sizing": DEFAULT_WORKER_TIMEOUT_MS,
 };
 
 // Per-kind response-cache TTL. The filter-options lists change only when a new
@@ -68,8 +70,13 @@ const WORKER_SOFT_TIMEOUT_MS_BY_KIND: Record<DashboardWorkerKind, number> = {
 // dropdowns off the DB entirely between tab switches. Everything else keeps the
 // short default, where staleness is immediately visible to the user.
 const FILTER_OPTIONS_CACHE_TTL_MS = 5 * 60_000;
+// Pool sizing is measured in COMPLETED weekly cycles, so its answer cannot
+// change more than once a week; the only thing a short TTL would refresh is the
+// in-progress cycle, at the price of a 15-week scan per dashboard poll.
+const POOL_SIZING_CACHE_TTL_MS = 5 * 60_000;
 const CACHE_TTL_MS_BY_KIND: Partial<Record<DashboardWorkerKind, number>> = {
 	"filter-options": FILTER_OPTIONS_CACHE_TTL_MS,
+	"pool-sizing": POOL_SIZING_CACHE_TTL_MS,
 };
 
 /** Response-cache TTL (ms) for a dashboard worker kind. */
@@ -180,6 +187,9 @@ const LANE_BY_KIND: Record<DashboardWorkerKind, WorkerLane> = {
 	// row. The seconds-long pass that produced it runs on its own dedicated
 	// worker (quota-drift-worker.ts), never on a lane serving panel reads.
 	"quota-drift": "light",
+	// Sub-second on the live database (0.4s for the reset grouping, 0.2s for the
+	// 5-hour one), and cached for five minutes on top.
+	"pool-sizing": "light",
 };
 
 const WORKER_LANES: readonly WorkerLane[] = ["heavy", "light"];
@@ -266,6 +276,11 @@ const KIND_LABELS: Record<
 		timeoutMessage: "Quota drift request timed out",
 		failureMessage: "Failed to fetch quota drift data",
 		tooManyMessage: "Too many quota drift requests",
+	},
+	"pool-sizing": {
+		timeoutMessage: "Pool sizing request timed out",
+		failureMessage: "Failed to fetch pool sizing data",
+		tooManyMessage: "Too many pool sizing requests",
 	},
 };
 
@@ -373,6 +388,18 @@ export function createIsolatedQuotaDriftHandler(context: APIContext) {
 		context,
 		"quota-drift",
 		createDirectQuotaDriftHandler(context),
+	);
+}
+
+/**
+ * Worker-routed read of account-weeks consumed per completed weekly cycle.
+ * Takes no parameters — see pool-sizing-direct.ts.
+ */
+export function createIsolatedPoolSizingHandler(context: APIContext) {
+	return createIsolatedDashboardHandler(
+		context,
+		"pool-sizing",
+		createDirectPoolSizingHandler(context),
 	);
 }
 

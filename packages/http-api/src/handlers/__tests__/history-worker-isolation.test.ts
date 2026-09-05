@@ -22,6 +22,7 @@ import { join } from "node:path";
 import { DatabaseOperations } from "@clankermux/database";
 import type {
 	MemoryHistoryResponse,
+	PoolSizingResponse,
 	UsageHistoryResponse,
 	UsageScopedHistoryResponse,
 } from "@clankermux/types";
@@ -31,6 +32,7 @@ import {
 	terminateAnalyticsWorker,
 } from "../analytics-runner";
 import { createMemoryHistoryHandler } from "../memory-history";
+import { createPoolSizingHandler } from "../pool-sizing";
 import { createUsageHistoryHandler } from "../usage-history";
 import { createUsageScopedHistoryHandler } from "../usage-scoped-history";
 import { makeContext } from "./dashboard-test-helpers";
@@ -183,6 +185,47 @@ describe("history worker isolation", () => {
 				eventLoopMaxLagMs: 412,
 			},
 		]);
+	});
+
+	it("serves /api/analytics/pool-sizing through the SQLite worker", async () => {
+		// The worker's kind dispatch falls back to the analytics handler, so a
+		// missed branch still compiles and answers 200 with the wrong body shape.
+		const now = Date.now();
+		const reset = now + 2 * HOUR;
+		await insertAccount("acct-1", "Alpha");
+		await dbOps.insertUsageSnapshots([
+			{
+				accountId: "acct-1",
+				provider: "anthropic",
+				sampledAt: now - 2 * HOUR,
+				sevenDayPct: 12,
+				sevenDayReset: reset,
+			},
+			{
+				accountId: "acct-1",
+				provider: "anthropic",
+				sampledAt: now - HOUR,
+				sevenDayPct: 34,
+				sevenDayReset: reset,
+			},
+		]);
+
+		const handler = createPoolSizingHandler(makeContext(dbOps));
+		const response = await handler(new URLSearchParams());
+		const data = (await response.json()) as PoolSizingResponse;
+
+		expect(response.status).toBe(200);
+		expect(response.headers.get("x-clankermux-analytics-mode")).toBe("worker");
+		expect(Array.isArray(data.rows)).toBe(true);
+		const classRow = data.rows.find(
+			(row) => row.kind === "class" && row.classId === "anthropic",
+		);
+		expect(classRow?.classLabel).toBe("Claude");
+		expect(
+			classRow?.cycles.some((cycle) =>
+				cycle.accounts.some((account) => account.accountId === "acct-1"),
+			),
+		).toBe(true);
 	});
 
 	it("keeps usage-history and memory-history cache entries isolated for identical params", async () => {

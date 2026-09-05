@@ -7,6 +7,7 @@ import { createCacheEffectivenessHandler } from "./cache-effectiveness-direct";
 import { createCacheKeepaliveHistoryHandler } from "./cache-keepalive-history-direct";
 import { createMemoryHistoryHandler } from "./memory-history-direct";
 import { createPaymentsSummaryDataHandler } from "./payments-summary-direct";
+import { createPoolSizingHandler } from "./pool-sizing-direct";
 import { createQuotaDriftHandler } from "./quota-drift-direct";
 import { createStatsHandler } from "./stats-direct";
 import { createStopsHistoryHandler } from "./stops-history-direct";
@@ -30,7 +31,8 @@ export type DashboardWorkerKind =
 	| "cache-effectiveness"
 	| "payments-summary"
 	| "filter-options"
-	| "quota-drift";
+	| "quota-drift"
+	| "pool-sizing";
 
 export interface AnalyticsWorkerRequest {
 	id: string;
@@ -88,6 +90,7 @@ self.onmessage = async (event: MessageEvent<AnalyticsWorkerRequest>) => {
 			"payments-summary": createPaymentsSummaryDataHandler,
 			"filter-options": createAnalyticsFilterOptionsHandler,
 			"quota-drift": createQuotaDriftHandler,
+			"pool-sizing": createPoolSizingHandler,
 			analytics: createAnalyticsHandler,
 		} satisfies Record<
 			DashboardWorkerKind,

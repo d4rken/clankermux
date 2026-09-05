@@ -830,6 +830,45 @@ export class RequestRepository extends BaseRepository<RequestData> {
 	}
 
 	/**
+	 * Individual failed requests carrying one of `labels`, as raw rows.
+	 *
+	 * Unaggregated on purpose: the pool-sizing read buckets these into weekly
+	 * cycles whose boundaries are derived from usage samples, so no grouping
+	 * available in SQL matches the buckets they end up in. The label list is a
+	 * closed set of proxy terminals (a handful of values), so the predicate
+	 * stays selective and the result set stays in the hundreds.
+	 *
+	 * `requested_model` is the INGRESS model — what the client asked for — and
+	 * the only key that can say which accounts could have served the request;
+	 * `model` is the fallback for rows recorded before that column existed.
+	 */
+	async getStopRows(
+		sinceMs: number,
+		labels: readonly string[],
+	): Promise<
+		Array<{ label: string; model: string | null; timestamp: number }>
+	> {
+		if (labels.length === 0) return [];
+		const placeholders = labels.map(() => "?").join(", ");
+		const rows = await this.query<{
+			error_message: string;
+			model: string | null;
+			timestamp: number;
+		}>(
+			`SELECT error_message, COALESCE(requested_model, model) AS model, timestamp
+			 FROM requests
+			 WHERE success = 0 AND timestamp >= ? AND error_message IN (${placeholders})
+			 ORDER BY timestamp`,
+			[sinceMs, ...labels],
+		);
+		return rows.map((row) => ({
+			label: row.error_message,
+			model: row.model ?? null,
+			timestamp: Number(row.timestamp),
+		}));
+	}
+
+	/**
 	 * Total requests in range — the denominator a blocked count needs to be a
 	 * rate. Under filters it counts the SAME selection the numerator does, so
 	 * the two figures stay comparable.
