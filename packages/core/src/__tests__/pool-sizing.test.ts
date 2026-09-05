@@ -1249,3 +1249,47 @@ describe("emission", () => {
 		).toBeLessThanOrEqual(POOL_SIZING_MAX_CYCLES);
 	});
 });
+
+describe("tier capture across placeholders", () => {
+	it("keeps the tier reported while an account idled after a completed window", () => {
+		const reset = Date.UTC(2026, 7, 23, 7);
+		const idleAt = reset + 2 * DAY;
+		const response = run({
+			accounts: [account("codex-1", "Codex 1", "codex")],
+			resetPeaks: [
+				// A real, completed window, reported on `pro`.
+				{
+					accountId: "codex-1",
+					resetAt: reset,
+					peakPct: 60,
+					sampleCount: 300,
+					firstSampledAt: reset - 6 * DAY,
+					lastSampledAt: reset - 5 * MINUTE,
+					firstPct: 0,
+					lastPct: 60,
+					planTier: "pro",
+					rateLimitTier: null,
+				},
+				// Then the account idles: `now + 7d` at 0%, a placeholder window
+				// that never started — but the tier reported alongside it is a
+				// DIFFERENT plan, which is evidence the row's account-weeks are not
+				// one unit.
+				{
+					accountId: "codex-1",
+					resetAt: idleAt + WEEK,
+					peakPct: 0,
+					sampleCount: 50,
+					firstSampledAt: idleAt,
+					lastSampledAt: idleAt,
+					firstPct: 0,
+					lastPct: 0,
+					planTier: "plus",
+					rateLimitTier: null,
+				},
+			],
+		});
+		const row = classRow(response, "codex");
+
+		expect(row.tierComparable).toBe(false);
+	});
+});

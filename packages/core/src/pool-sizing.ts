@@ -1075,9 +1075,14 @@ export function computePoolSizing(
 		const series = buildSeries(accountId, accountId, rows);
 		accountWideSeries.set(accountId, series);
 		accountWideWindows.set(accountId, series.windows);
+		// Tier pairs come from the RAW rows, not from the windows: clustering
+		// drops placeholder windows (an idle stretch that never started) and
+		// their tiers with them, so a tier reported only while the account idled
+		// would vanish and the row would pass as one comparable unit although
+		// two tiers were observed.
 		const pairs = new Set<string>();
-		for (const window of series.windows) {
-			for (const pair of window.tiers) pairs.add(pair);
+		for (const row of rows) {
+			if (row.tierPair !== null) pairs.add(row.tierPair);
 		}
 		tierPairsByAccount.set(accountId, pairs);
 	}
