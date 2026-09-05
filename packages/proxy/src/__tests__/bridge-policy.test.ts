@@ -1,5 +1,11 @@
 import { describe, expect, it } from "bun:test";
 import {
+	FALLBACK_BRIDGE_HOURS,
+	FALLBACK_HOURS_PER_RISK_UNIT,
+	FALLBACK_MAX_BRIDGE_HOURS,
+	FALLBACK_REFRESH_MINUTES,
+} from "../../../dashboard-web/src/lib/bridge-horizon";
+import {
 	BRIDGE_HOURS_PER_RISK_UNIT,
 	BRIDGE_JITTER_MAX_MS,
 	bridgeHoursToRiskFactor,
@@ -264,6 +270,23 @@ describe("bridge-horizon conversion", () => {
 
 	it("RISK_FACTOR default (0.4) maps to ~3.8h", () => {
 		expect(riskFactorToBridgeHours(RISK_FACTOR)).toBeCloseTo(3.8333, 3);
+	});
+
+	// The dashboard shows these numbers before its first cache-warming query
+	// resolves. It cannot import this module (server code would land in the
+	// bundle), so it restates the derivation; this pins the restatement to the
+	// real constants so a server-side change fails here instead of drifting.
+	it("dashboard pre-load fallbacks equal the server constants", () => {
+		expect(FALLBACK_HOURS_PER_RISK_UNIT).toBeCloseTo(
+			BRIDGE_HOURS_PER_RISK_UNIT,
+			10,
+		);
+		expect(FALLBACK_MAX_BRIDGE_HOURS).toBeCloseTo(MAX_BRIDGE_HOURS, 10);
+		expect(FALLBACK_BRIDGE_HOURS).toBeCloseTo(
+			riskFactorToBridgeHours(RISK_FACTOR),
+			10,
+		);
+		expect(FALLBACK_REFRESH_MINUTES).toBe(KEEPALIVE_REFRESH_1H_MS / 60_000);
 	});
 
 	it("hours↔risk round-trips", () => {

@@ -2,6 +2,10 @@ import { useEffect, useState } from "react";
 import { useCacheWarming, useSetCacheWarming } from "../../hooks/queries";
 import {
 	clampBridgeHours,
+	FALLBACK_BRIDGE_HOURS,
+	FALLBACK_HOURS_PER_RISK_UNIT,
+	FALLBACK_MAX_BRIDGE_HOURS,
+	FALLBACK_REFRESH_MINUTES,
 	hoursToRiskFactor,
 	keepalivesForHours,
 } from "../../lib/bridge-horizon";
@@ -71,7 +75,9 @@ export function CacheWarmingCard() {
 	const [minTokens, setMinTokens] = useState<number>(
 		data?.minTokens ?? DEFAULT_MIN_TOKENS,
 	);
-	const [hours, setHours] = useState<number>(data?.bridgeHours ?? 6);
+	const [hours, setHours] = useState<number>(
+		data?.bridgeHours ?? round1(FALLBACK_BRIDGE_HOURS),
+	);
 
 	// Keep the local inputs in sync once the server values load/change. The server's
 	// bridgeHours is a derived float (e.g. 6.3333…); round to 1 decimal for a clean
@@ -90,10 +96,11 @@ export function CacheWarmingCard() {
 	const offMode = mode === "off";
 
 	// Bridge-horizon conversion constants are owned by the server (bridge-policy);
-	// fall back to sane values only until the first load resolves.
-	const maxBridgeHours = data?.maxBridgeHours ?? 15.8;
-	const hoursPerRiskUnit = data?.hoursPerRiskUnit ?? 15.8;
-	const refreshMinutes = data?.refreshMinutes ?? 50;
+	// the fallbacks restate its derivation and apply only until the first load.
+	const maxBridgeHours = data?.maxBridgeHours ?? FALLBACK_MAX_BRIDGE_HOURS;
+	const hoursPerRiskUnit =
+		data?.hoursPerRiskUnit ?? FALLBACK_HOURS_PER_RISK_UNIT;
+	const refreshMinutes = data?.refreshMinutes ?? FALLBACK_REFRESH_MINUTES;
 	const validHours =
 		Number.isFinite(hours) && hours >= 0 && hours <= maxBridgeHours + 1e-6;
 	const hoursDirty =
