@@ -21,7 +21,6 @@ import { LiveActivityLanes } from "./overview/LiveActivityLanes";
 import { PricingGapBanner } from "./overview/PricingGapBanner";
 import { RateLimitInfo } from "./overview/RateLimitInfo";
 import { RunwayCard } from "./overview/RunwayCard";
-import { SpendSummaryBand } from "./overview/SpendSummaryBand";
 import { StorageIntegrityBanner } from "./overview/StorageIntegrity";
 import { SystemHealthStrip } from "./overview/SystemHealthStrip";
 import { CompactRecentErrors } from "./overview/system-status/CompactRecentErrors";
@@ -282,9 +281,6 @@ export const OverviewTab = React.memo(() => {
 				}
 				staleNote={accountsStaleNote}
 			/>
-
-			{/* Calendar-month ledger spend + amortized subscription run rates. */}
-			<SpendSummaryBand />
 
 			{/* Everything from here down IS scoped by the selector, and nothing
 			    above it is.

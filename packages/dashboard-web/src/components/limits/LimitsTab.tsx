@@ -264,9 +264,12 @@ export const LimitsTab = React.memo(() => {
 				paymentsSummary={paymentsSummary}
 			/>
 
-			{/* Recent payments-ledger entries (auto renewals + manual credits). */}
+			{/* Calendar-month spend and the amortized run rate, over the ledger
+			    entries that make them up (auto renewals + manual credits). Same
+			    payload the card above reads — no second fetch. */}
 			<PaymentsHistoryCard
 				payments={paymentsSummary?.recentPayments ?? []}
+				summary={paymentsSummary}
 				loading={paymentsPending}
 				unavailableReason={
 					paymentsUnavailable ? "Payments data unavailable" : undefined

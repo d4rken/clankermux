@@ -235,7 +235,7 @@ function seedPayments(db: Database, now: number): void {
 	for (const account of MOCK_ACCOUNTS) {
 		if (account.monthlyUsd == null) continue;
 		// Three months of subscription history each, so the value-per-dollar
-		// figures on Overview and Limits have something to divide by. Stepped by
+		// figures on the Usage page have something to divide by. Stepped by
 		// CALENDAR month, not by 30 days: subtracting 30 days from the 31st lands
 		// in the same calendar month, and "Spend this month" would then count one
 		// account's subscription twice.
