@@ -61,6 +61,37 @@ describe("RateLimitProgress", () => {
 		expect(html).not.toContain("No usage recorded yet in this window");
 	});
 
+	it("renders no dated reset caption for a window the provider has not started", () => {
+		// Same unstarted signature as above: 0% and resets_at = observedAt +
+		// duration. The provider re-stamps that instant on every poll until the
+		// first request pins it, so the caption's "Resets <stamp> (<countdown>)"
+		// beside "Not started" is a placeholder presented as a deadline.
+		const now = Date.now();
+		const html = renderToStaticMarkup(
+			<RateLimitProgress
+				resetIso={new Date(now + 5 * 60 * 60 * 1000).toISOString()}
+				usageUtilization={0}
+				usageWindow="five_hour"
+				usageData={{
+					five_hour: {
+						utilization: 0,
+						resets_at: new Date(now + 5 * 60 * 60 * 1000).toISOString(),
+					},
+				}}
+				usageAsOfIso={new Date(now).toISOString()}
+				provider="anthropic"
+				inlineProjection
+			/>,
+		);
+
+		expect(html).toContain("Not started — the window begins on first use");
+		// The caption branch emits `Resets ${stamp} (${remaining})` and mirrors
+		// it into the span's title; neither may appear for an unstarted window.
+		const captions = html.match(/Resets [^<"]*\([^<"]*\)/g) ?? [];
+		expect(captions).toEqual([]);
+		expect(html).not.toMatch(/\bResets\b/);
+	});
+
 	it("still says no usage recorded for a started window sitting at zero", () => {
 		const now = Date.now();
 		const html = renderToStaticMarkup(
