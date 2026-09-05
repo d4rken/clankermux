@@ -1,4 +1,4 @@
-import { TIME_CONSTANTS } from "@clankermux/core";
+import { type LiveScopedFamily, TIME_CONSTANTS } from "@clankermux/core";
 import type { SessionStats } from "@clankermux/types";
 import { AccountPresenter } from "@clankermux/ui-common";
 import {
@@ -128,6 +128,10 @@ interface AccountListItemProps {
 	// rate-limit card so it can distinguish the first and last capacity returns.
 	earliestResets?: ReadonlyMap<string, number>;
 	latestResets?: ReadonlyMap<string, number>;
+	// Families some unpaused account in THIS account's servable class reports;
+	// forwarded to the rate-limit card, which renders any of them this account
+	// has not used this week as a labelled row instead of omitting it.
+	poolScopedFamilies?: readonly LiveScopedFamily[];
 	onForceAccount?: (account: Account) => void;
 	onPauseToggle: (account: Account) => void;
 	onForceResetRateLimit: (account: Account) => void;
@@ -158,6 +162,7 @@ export function AccountListItem({
 	isForced = false,
 	earliestResets,
 	latestResets,
+	poolScopedFamilies,
 	onForceAccount,
 	onPauseToggle,
 	onForceResetRateLimit,
@@ -701,6 +706,7 @@ export function AccountListItem({
 					burnAnchors={account.burnAnchors}
 					earliestResets={earliestResets}
 					latestResets={latestResets}
+					poolScopedFamilies={poolScopedFamilies}
 					compact
 				/>
 			)}

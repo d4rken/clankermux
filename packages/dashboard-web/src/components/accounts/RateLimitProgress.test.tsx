@@ -235,6 +235,65 @@ describe("RateLimitProgress", () => {
 		});
 	});
 
+	describe("families this account has not used this week", () => {
+		const future = () =>
+			new Date(Date.now() + 3 * 24 * 60 * 60 * 1000).toISOString();
+		const poolScopedFamilies = [
+			{ family: "fable", displayName: "Fable" },
+		] as const;
+
+		function renderWith(limits: unknown[]) {
+			return renderToStaticMarkup(
+				<RateLimitProgress
+					resetIso={future()}
+					usageUtilization={10}
+					usageWindow="five_hour"
+					usageData={{
+						five_hour: { utilization: 10, resets_at: future() },
+						seven_day: { utilization: 20, resets_at: future() },
+						limits,
+					}}
+					poolScopedFamilies={poolScopedFamilies}
+					provider="anthropic"
+					showWeekly
+				/>,
+			);
+		}
+
+		it("names the family and states no reading rather than a zero", () => {
+			const html = renderWith([]);
+
+			expect(html).toContain("Fable");
+			expect(html).toContain("Not used this week");
+			expect(html).toContain("No reading until first use");
+			// A 0% bar would claim a measurement nobody made, and "Usage data
+			// unavailable" would blame the proxy for a fact about the account.
+			expect(html).not.toContain("Usage data unavailable");
+			const card = html.slice(
+				html.indexOf("Fable"),
+				html.indexOf("No reading until first use"),
+			);
+			expect(card).not.toContain("%");
+		});
+
+		it("shows the ordinary percentage once the family has been used", () => {
+			const html = renderWith([
+				{
+					kind: "weekly_scoped",
+					group: "weekly",
+					percent: 12,
+					resets_at: future(),
+					scope: { model: { id: null, display_name: "Fable" }, surface: null },
+					is_active: true,
+				},
+			]);
+
+			expect(html).toContain("Fable");
+			expect(html).toContain("12%");
+			expect(html).not.toContain("Not used this week");
+		});
+	});
+
 	describe("5-hour card 0-vs-null contract", () => {
 		const future = () =>
 			new Date(Date.now() + 3 * 24 * 60 * 60 * 1000).toISOString();

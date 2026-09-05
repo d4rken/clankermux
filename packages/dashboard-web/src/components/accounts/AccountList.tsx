@@ -1,4 +1,8 @@
-import { registerUIRefresh } from "@clankermux/core";
+import {
+	listLiveScopedFamiliesByClass,
+	registerUIRefresh,
+	servableClassFor,
+} from "@clankermux/core";
 import { useEffect, useMemo, useState } from "react";
 import type { Account } from "../../api";
 import { computeWindowResetExtremes } from "../../lib/usage-windows";
@@ -95,6 +99,20 @@ export function AccountList({
 		[accounts, now],
 	);
 
+	// Which model families each servable class currently reports, from UNPAUSED
+	// accounts only — the same set the server's family scan builds its class gate
+	// from, so both surfaces call the same accounts untouched. A card can then
+	// tell "this account has not used Fable" from "this provider has no Fable
+	// window", which a single account's payload cannot say on its own.
+	const familiesByClass = useMemo(
+		() =>
+			listLiveScopedFamiliesByClass(
+				(accounts ?? []).filter((account) => account.paused !== true),
+				now,
+			),
+		[accounts, now],
+	);
+
 	if (!accounts || accounts.length === 0) {
 		return <p className="text-muted-foreground">No accounts configured</p>;
 	}
@@ -111,6 +129,10 @@ export function AccountList({
 					isForced={account.id === forcedAccountId}
 					earliestResets={resetExtremes.earliest}
 					latestResets={resetExtremes.latest}
+					poolScopedFamilies={
+						familiesByClass.get(servableClassFor(account.provider).classId) ??
+						[]
+					}
 					onForceAccount={onForceAccount}
 					onPauseToggle={onPauseToggle}
 					onForceResetRateLimit={onForceResetRateLimit}
