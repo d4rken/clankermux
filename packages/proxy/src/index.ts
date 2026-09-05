@@ -91,6 +91,11 @@ export {
 	getValidAccessToken,
 	hasCapacityRestoredProbePending,
 	isRefreshTokenLikelyExpired,
+	// The weekly headroom the routing gate holds back as failover capacity.
+	// Re-exported so the pool-sizing read can fire its "add an account" signal
+	// at exactly the threshold routing actually reserves at, rather than at a
+	// second number that could drift away from it.
+	LIVENESS_RESERVE_HEADROOM_PCT,
 	markCapacityRestoredProbePending,
 	type PendingRotation,
 	type PendingRotationWriter,
