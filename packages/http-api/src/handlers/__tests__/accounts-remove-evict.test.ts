@@ -8,14 +8,17 @@ import {
 	clearAllPendingRotationsForTests,
 	clearCapacityRestoredProbePending,
 	clearFamilyWeeklyExhaustedForAccount,
+	clearWeeklyBurnSlopes,
 	getCoalescibleRecentRefresh,
 	getFamilyWeeklyExhaustedUntil,
 	getPendingRotation,
+	getWeeklyBurnSlope,
 	hasCapacityRestoredProbePending,
 	markCapacityRestoredProbePending,
 	recordFamilyWeeklyExhausted,
 	recordPendingRotation,
 	recordRecentRefresh,
+	recordWeeklyBurnSlope,
 	sessionCacheStore,
 } from "@clankermux/proxy";
 import { createAccountRemoveHandler } from "../accounts";
@@ -221,6 +224,34 @@ describe("createAccountRemoveHandler — session-cache eviction", () => {
 			codexRateLimitResetCreditsCache.delete("dup-b");
 			clearCapacityRestoredProbePending("dup-a");
 			clearCapacityRestoredProbePending("dup-b");
+		}
+	});
+
+	it("drops the removed account's fitted weekly burn slope", async () => {
+		// Nothing else ever evicts an entry from that store: the freshness filter
+		// hides a stale slope from readers, but the entry itself survives for the
+		// process's lifetime, so a deleted id would occupy one forever.
+		const now = Date.now();
+		const record = {
+			slopePctPerHour: 1.13,
+			lowConfidence: false,
+			observedAt: now,
+			windowResetMs: now + 3 * 24 * 3_600_000,
+		};
+		recordWeeklyBurnSlope(ACCOUNT_ID, record);
+		recordWeeklyBurnSlope(OTHER_ID, record);
+		try {
+			const { dbOps } = makeDbOps();
+			expect(
+				(await makeHandler(dbOps)(deleteRequest(ACCOUNT_NAME), ACCOUNT_ID))
+					.status,
+			).toBe(200);
+
+			expect(getWeeklyBurnSlope(ACCOUNT_ID, now)).toBeNull();
+			expect(getWeeklyBurnSlope(OTHER_ID, now)).not.toBeNull();
+		} finally {
+			clearWeeklyBurnSlopes(ACCOUNT_ID);
+			clearWeeklyBurnSlopes(OTHER_ID);
 		}
 	});
 

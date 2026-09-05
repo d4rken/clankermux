@@ -3,6 +3,7 @@ import {
 	computeThrottleResumeAt,
 	computeWindowStartMs,
 	estimateWindowExhaustion,
+	isUnstartedWindow,
 	type LiveScopedFamily,
 	registerUIRefresh,
 	usageObservedAtMs,
@@ -105,6 +106,14 @@ const WINDOW_CARD_CLASS = "rounded-lg border p-row";
 const COMPACT_WINDOW_CARD_CLASS = "rounded-lg border p-item";
 const PRIMARY_WINDOW_TINT = "border-border/60 bg-muted/50";
 const SECONDARY_WINDOW_TINT = "border-border/50 bg-transparent";
+
+// Reset caption for a window the provider has not started. It REPLACES the
+// dated `Resets <stamp> (<countdown>)` rather than qualifying it: with nothing
+// spent, the provider re-stamps `resets_at = now + duration` on every poll, so
+// that instant slides forward until the first request pins it. Printing it
+// beside "Not started — the window begins on first use" would show a
+// placeholder as the deadline the same card says it is not.
+const UNSTARTED_RESET_CAPTION = "Not started; begins on first use";
 
 // The three standalone message blocks (rate-limited, stale, Kilo credits) all
 // render as a single primary card. They sit behind early returns, so they take
@@ -228,6 +237,15 @@ function computeProjectedMessage(
 	);
 
 	if (estimate.source === "none") return null;
+	if (estimate.source === "unstarted") {
+		// Nothing spent AND the window's structural start tracks the reading: the
+		// provider re-stamps `resets_at = now + duration` on every poll until the
+		// first request pins it, so the date beside this is not a deadline.
+		return {
+			message: "Not started — the window begins on first use",
+			tone: "neutral",
+		};
+	}
 	if (estimate.source === "no-usage") {
 		return { message: "No usage recorded yet in this window", tone: "neutral" };
 	}
@@ -727,6 +745,21 @@ export function RateLimitProgress({
 								observedAtMs,
 								windowBurnAnchor(burnAnchors, usage.window),
 							);
+				// Whether the provider has started this window at all, from the same
+				// three inputs the projection above derives — utilization, the
+				// structural start behind the reported reset, and when the reading
+				// was observed — so the caption and the projection line can never
+				// disagree about it. Only the boolean is recomputed here; the
+				// estimate itself is not run a second time.
+				const isUnstarted =
+					percentage !== null &&
+					liveResetMs !== null &&
+					!!usage.window &&
+					isUnstartedWindow({
+						utilizationPct: percentage,
+						windowStartMs: computeWindowStartMs(liveResetMs, usage.window),
+						observedAtMs,
+					});
 				// The one tone every surface reads: the bar's fill, the click popover
 				// and the inline line all derive from this, so none of them can
 				// disagree about how bad a window is. Null both when there is nothing
@@ -758,6 +791,12 @@ export function RateLimitProgress({
 					const resetMs = new Date(usage.resetTime).getTime();
 					if (resetMs <= now) {
 						resetStatus = "Ready to refresh";
+					} else if (isUnstarted) {
+						// No stamp, no countdown, and no first/last-reset ranking: the
+						// instant is a sliding placeholder, so it is neither a deadline
+						// here nor comparable against accounts whose windows are running.
+						resetStatus = UNSTARTED_RESET_CAPTION;
+						resetStatusFull = UNSTARTED_RESET_CAPTION;
 					} else {
 						const stamp = formatResetStamp(usage.resetTime, usage.window, now);
 						const remaining = formatRemaining(resetMs - now);

@@ -11,6 +11,7 @@ import {
 	mergeScopedFamilies,
 	pickBindingScopedLimit,
 	poolClassOutlook,
+	scopeResultToClass,
 	willRunOutCount,
 } from "../pool-usage";
 
@@ -601,6 +602,143 @@ describe("computePoolUsage", () => {
 		const FIVE_HOUR_MS = 5 * 60 * 60 * 1000;
 		const SEVEN_DAY_MS = 7 * 24 * 60 * 60 * 1000;
 		const HOUR_MS = 60 * 60 * 1000;
+
+		const isoAt = (ms: number): string => new Date(ms).toISOString();
+
+		/** One weekly reading, with the observation time the estimator needs. */
+		function weeklyAccount(
+			name: string,
+			provider: string,
+			pct: number,
+			resetMs: number,
+		): AccountResponse {
+			return mkAccount({
+				name,
+				provider,
+				usageData: {
+					seven_day: { utilization: pct, resets_at: isoAt(resetMs) },
+				} as never,
+				usageAsOfIso: isoAt(NOW),
+			});
+		}
+
+		it("withholds a projection built on minutes of evidence", () => {
+			// Codex-1 as observed live: 1% used 623 s after the weekly window
+			// started. Extrapolated that is a 17-hour run-out well inside the
+			// week; measured, it is one reading's worth of noise.
+			const resetMs = NOW - 623_000 + SEVEN_DAY_MS;
+			const result = computePoolUsage(
+				[weeklyAccount("codex-1", "codex", 1, resetMs)],
+				"seven_day",
+				NOW,
+			);
+
+			expect(result.atRisk).toEqual([]);
+			expect(result.learning).toEqual([
+				{
+					accountId: "codex-1",
+					name: "codex-1",
+					pct: 1,
+					resetMs,
+					state: "learning",
+				},
+			]);
+			expect(willRunOutCount(result, "seven_day")).toEqual({
+				willRunOut: 0,
+				capacity: 1,
+				spent: 0,
+				learning: 1,
+			});
+		});
+
+		it("flags an unstarted window and refuses its sliding reset", () => {
+			// Nothing spent and the structural start tracks the reading: the
+			// provider re-stamps resets_at = now + 7d every poll, so naming it the
+			// earliest reset would advertise a deadline that never arrives.
+			const resetMs = NOW + SEVEN_DAY_MS;
+			const result = computePoolUsage(
+				[weeklyAccount("codex-2", "codex", 0, resetMs)],
+				"seven_day",
+				NOW,
+			);
+
+			expect(result.classes[0].accounts[0].unstarted).toBe(true);
+			expect(result.learning).toHaveLength(1);
+			expect(result.learning[0].state).toBe("unstarted");
+			expect(result.classes[0].unstartedCount).toBe(1);
+			expect(result.classes[0].earliestResetMs).toBeNull();
+			expect(result.earliestResetMs).toBeNull();
+		});
+
+		it("still states the earliest reset a started window carries", () => {
+			const startedResetMs = NOW + 2 * 24 * HOUR_MS;
+			const result = computePoolUsage(
+				[
+					weeklyAccount("started", "codex", 40, startedResetMs),
+					weeklyAccount("unstarted", "codex", 0, NOW + SEVEN_DAY_MS),
+				],
+				"seven_day",
+				NOW,
+			);
+
+			expect(result.earliestResetMs).toBe(startedResetMs);
+			expect(result.classes[0].earliestResetMs).toBe(startedResetMs);
+			expect(result.classes[0].earliestResetAccountName).toBe("started");
+			expect(result.classes[0].unstartedCount).toBe(1);
+		});
+
+		it("scopes the learning list to the class it is asked about", () => {
+			const result = computePoolUsage(
+				[
+					weeklyAccount("codex-1", "codex", 1, NOW - 623_000 + SEVEN_DAY_MS),
+					weeklyAccount(
+						"claude-1",
+						"anthropic",
+						2,
+						NOW - 623_000 + SEVEN_DAY_MS,
+					),
+				],
+				"seven_day",
+				NOW,
+			);
+			expect(result.learning.map((l) => l.accountId).sort()).toEqual([
+				"claude-1",
+				"codex-1",
+			]);
+
+			for (const pool of result.classes) {
+				const scoped = scopeResultToClass(result, pool);
+				expect(scoped.learning.map((l) => l.accountId)).toEqual(
+					pool.accounts.map((a) => a.accountId),
+				);
+			}
+		});
+
+		it("reproduces the live all-learning Codex pool", () => {
+			// 2026-09-05T14:09Z: one account 623 s into its week at 1%, one that
+			// has not started. Nothing is projectable, one reset is real.
+			const codex1ResetMs = NOW - 623_000 + SEVEN_DAY_MS;
+			const result = computePoolUsage(
+				[
+					weeklyAccount("codex-1", "codex", 1, codex1ResetMs),
+					weeklyAccount("codex-2", "codex", 0, NOW + SEVEN_DAY_MS),
+				],
+				"seven_day",
+				NOW,
+			);
+
+			expect(willRunOutCount(result, "seven_day")).toEqual({
+				willRunOut: 0,
+				capacity: 2,
+				spent: 0,
+				learning: 2,
+			});
+			expect(result.classes[0].unstartedCount).toBe(1);
+			// Only the UNSTARTED bar is kept out of the reset candidates: a
+			// learning account whose window is genuinely running still has a real
+			// deadline.
+			expect(result.earliestResetMs).toBe(codex1ResetMs);
+		});
 
 		it("re-anchors the weekly at-risk projection at a served burn anchor", () => {
 			// Gift reset 12h ago (60% → ~0), then 40% burned since. Structurally,
@@ -1409,7 +1547,23 @@ describe("computeFamilyWeeklyUsage", () => {
 			expect(result).toHaveLength(1);
 			expect(result[0].accounts[0].exhaustsAtMs).toBe(NOW + DAY);
 			expect(result[0].atRiskCount).toBe(1);
+			expect(result[0].learningCount).toBe(0);
 			expect(result[0].soonestExhaustsAtMs).toBe(NOW + DAY);
+		});
+
+		it("withholds a family projection built on minutes of evidence", () => {
+			// 1% used 623 s in extrapolates to a 17-hour run-out inside the week.
+			// Dropping it from atRiskCount without saying so would read as "this
+			// family is fine"; the count says which it is.
+			const resetMs = NOW - 623_000 + 7 * DAY;
+			const result = computeFamilyWeeklyUsage(
+				[mkScopedAccount("young", [scopedEntry("Fable", 1, resetMs)])],
+				NOW,
+			);
+
+			expect(result[0].accounts[0].exhaustsAtMs).toBeNull();
+			expect(result[0].atRiskCount).toBe(0);
+			expect(result[0].learningCount).toBe(1);
 		});
 
 		it("leaves an account that clears its reset unprojected", () => {
@@ -1444,6 +1598,9 @@ describe("computeFamilyWeeklyUsage", () => {
 			);
 			expect(result[0].accounts[0].exhaustsAtMs).toBeNull();
 			expect(result[0].atRiskCount).toBe(0);
+			// 0% is no evidence of burn, so the account is waiting for evidence
+			// rather than known to be safe.
+			expect(result[0].learningCount).toBe(1);
 		});
 
 		it("counts each at-risk account and takes the soonest instant", () => {
@@ -1531,6 +1688,31 @@ describe("computeFamilyWeeklyUsage", () => {
 			expect(result[0].accounts[0].exhaustsAtMs).toBeNull();
 			expect(result[0].exhaustedCount).toBe(1);
 			expect(result[0].atRiskCount).toBe(0);
+			expect(result[0].soonestExhaustsAtMs).toBeNull();
+		});
+
+		it("withholds the run-out instant when one folded window is still learning", () => {
+			// Fable at 80% over 4d projects a 1d run-out; Mythos at 0% has no
+			// measured burn. The fold takes the EARLIEST instant, and the unmeasured
+			// window could have been the earliest, so the account is learning, not
+			// at risk: it must not sit in BOTH atRiskCount and learningCount, and
+			// the row must not carry the confident window's instant.
+			const result = computeFamilyWeeklyUsage(
+				[
+					mkScopedAccount("mixed-learning", [
+						scopedEntry("Fable", 80, RESET_3D),
+						scopedEntry("Mythos 5", 0, RESET_3D),
+					]),
+				],
+				NOW,
+			);
+			expect(result).toHaveLength(1);
+			expect(result[0].family).toBe("fable");
+			expect(result[0].accounts).toHaveLength(1);
+			expect(result[0].accounts[0].pct).toBe(80);
+			expect(result[0].learningCount).toBe(1);
+			expect(result[0].atRiskCount).toBe(0);
+			expect(result[0].accounts[0].exhaustsAtMs).toBeNull();
 			expect(result[0].soonestExhaustsAtMs).toBeNull();
 		});
 
@@ -1854,6 +2036,9 @@ describe("willRunOutCount", () => {
 			// versus "projected" — so the split is part of the contract, not an
 			// incidental extra field.
 			spent: 1,
+			// Every contributing account here has a full window of evidence, so
+			// none of them is withheld.
+			learning: 0,
 		});
 	});
 
@@ -1864,6 +2049,7 @@ describe("willRunOutCount", () => {
 			willRunOut: 2,
 			capacity: 2,
 			spent: 1,
+			learning: 0,
 		});
 	});
 });

@@ -80,6 +80,69 @@ describe("computePacingFromAccounts", () => {
 		expect(pacing.fiveHour.classes[0]?.unavailable).toBe(0);
 	});
 
+	it("withholds unmeasured weekly burn from the class budget", () => {
+		// The live 2026-09-05T14:09Z Codex pool: one account 623 s into its week
+		// at 1%, one whose week has not started. Extrapolated, the first ran out
+		// inside the week and the row read `willRunOut: 1` beside a 0%
+		// utilization; withheld, the row says how many it is waiting on.
+		const startedResetMs = NOW - 623_000 + 7 * DAY;
+		const pacing = computePacingFromAccounts(
+			[
+				account({
+					id: "codex-1",
+					name: "codex-1",
+					provider: "codex",
+					usageAsOfIso: new Date(NOW).toISOString(),
+					usageData: usage(1, 1, { sevenDayResetMs: startedResetMs }),
+				}),
+				account({
+					id: "codex-2",
+					name: "codex-2",
+					provider: "codex",
+					usageAsOfIso: new Date(NOW).toISOString(),
+					usageData: usage(0, 0, { sevenDayResetMs: NOW + 7 * DAY }),
+				}),
+			],
+			NOW,
+		);
+
+		const codex = pacing.classes.find((c) => c.classId === "codex");
+		expect(codex?.willRunOut).toBe(0);
+		expect(codex?.learning).toBe(2);
+		expect(codex?.unstartedCount).toBe(1);
+		// Learning is not unstarted: codex-1's week IS running, so its reset is a
+		// real deadline and stays the class's earliest.
+		expect(codex?.earliestResetMs).toBe(startedResetMs);
+		expect(codex?.earliestResetAccountId).toBe("codex-1");
+	});
+
+	it("states no earliest reset when every weekly window is unstarted", () => {
+		const pacing = computePacingFromAccounts(
+			[
+				account({
+					id: "codex-1",
+					name: "codex-1",
+					provider: "codex",
+					usageAsOfIso: new Date(NOW).toISOString(),
+					usageData: usage(0, 0, { sevenDayResetMs: NOW + 7 * DAY }),
+				}),
+				account({
+					id: "codex-2",
+					name: "codex-2",
+					provider: "codex",
+					usageAsOfIso: new Date(NOW).toISOString(),
+					usageData: usage(0, 0, { sevenDayResetMs: NOW + 7 * DAY - 60_000 }),
+				}),
+			],
+			NOW,
+		);
+
+		const codex = pacing.classes.find((c) => c.classId === "codex");
+		expect(codex?.unstartedCount).toBe(2);
+		expect(codex?.earliestResetMs).toBeNull();
+		expect(codex?.earliestResetAccountId).toBeNull();
+	});
+
 	it("omits classes with only paused accounts", () => {
 		const paused = account({
 			provider: "codex",

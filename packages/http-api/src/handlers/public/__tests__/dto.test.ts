@@ -150,6 +150,7 @@ function runway(
 			activeKeyCount: 3,
 			statedKeyCount: 2,
 			unobservedKeyCount: 1,
+			learningAccountCount: 1,
 		},
 		worstStatedOutcome: {
 			kind: "runway",
@@ -192,6 +193,7 @@ function workloadHeadroom(): {
 				eligibleAccountIds: ["acct-1", "acct-2"],
 				unreadableAccountIds: [],
 				unopenedAccountIds: [],
+				learningAccountIds: [],
 				spentAccountIds: [],
 			},
 			{
@@ -211,6 +213,9 @@ function workloadHeadroom(): {
 				eligibleAccountIds: ["acct-1", "acct-2"],
 				unreadableAccountIds: ["acct-3"],
 				unopenedAccountIds: [],
+				// A subset of the unreadable list: acct-3 is excluded only because
+				// its burn is not measured yet.
+				learningAccountIds: ["acct-3"],
 				spentAccountIds: ["acct-1"],
 			},
 		],
@@ -237,6 +242,8 @@ function pacing(over: Partial<PacingSnapshot> = {}): PacingSnapshot {
 				willRunOut: 5,
 				willRunOutCapacity: 5,
 				alreadySpent: 0,
+				learning: 1,
+				unstartedCount: 1,
 				earliestResetMs: NOW + 2 * 3_600_000,
 				earliestResetAccountId: "acct-2",
 				earliestResetAccountName: "Claude-1",
@@ -608,6 +615,7 @@ describe("golden: GET /public/v1/runway", () => {
 				activeKeyCount: 3,
 				statedKeyCount: 2,
 				unobservedKeyCount: 1,
+				learningAccountCount: 1,
 			},
 			worstStatedOutcome: {
 				kind: "runway",
@@ -638,6 +646,8 @@ describe("golden: GET /public/v1/runway", () => {
 			"isActive",
 			"eligibleAccountIds",
 			"unprojectableAccountIds",
+			// The wire carries a COUNT of learning accounts, never the ids.
+			"learningAccountIds",
 			"impatience",
 		]) {
 			expect(wire).not.toContain(forbidden);
@@ -772,6 +782,8 @@ describe("golden: GET /public/v1/pacing", () => {
 					eligibleTotal: 5,
 					willRunOut: 5,
 					alreadySpent: 0,
+					learning: 1,
+					unstarted: 1,
 					resetsAt: "2023-11-14T23:56:40.000Z",
 					resetsAtAccountId: "acct-2",
 					singlePointOfFailure: false,
@@ -943,6 +955,7 @@ describe("golden: GET /public/v1/workload-headroom", () => {
 					eligibleAccounts: 2,
 					unreadableAccounts: 0,
 					unopenedAccounts: 0,
+					learningAccounts: 0,
 					spentAccounts: 0,
 				},
 				{
@@ -966,6 +979,9 @@ describe("golden: GET /public/v1/workload-headroom", () => {
 					// excluding one can only bring the all-out instant earlier.
 					unreadableAccounts: 1,
 					unopenedAccounts: 0,
+					// Of that one, all of it: the exclusion resolves on its own as the
+					// window accumulates evidence.
+					learningAccounts: 1,
 					spentAccounts: 1,
 				},
 			],
@@ -1045,6 +1061,30 @@ describe("golden: GET /public/v1/workload-headroom", () => {
 		});
 		expect(dto.rows[0].projectionBasis).toBeNull();
 		expect(dto.rows[0].outcomeKind).toBe("unknown");
+	});
+
+	it("maps the headroom absence to a closed set", () => {
+		const scan = workloadHeadroom();
+		const absenceFor = (absence: string) =>
+			toPublicWorkloadHeadroomDto({
+				...scan,
+				rows: [
+					{
+						...scan.rows[0],
+						outcome: { kind: "unknown", learningAccountIds: ["acct-3"] },
+						headroom: null,
+						headroomAbsence:
+							absence as (typeof scan.rows)[0]["headroomAbsence"],
+					},
+				],
+			}).rows[0].headroomAbsence;
+
+		// "Nothing to probe" is a different answer from "the probe found nothing",
+		// and a client that reads them as one would treat an early window as a
+		// robust pool.
+		expect(absenceFor("learning-accounts")).toBe("learning_accounts");
+		expect(absenceFor("beyond-probe-range")).toBe("beyond_probe_range");
+		expect(absenceFor("something-new")).toBe("other");
 	});
 
 	it("never re-serves an account name or id list", () => {

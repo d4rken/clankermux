@@ -257,6 +257,15 @@ export function FamilyWeeklyCard({
 														reset
 													</p>
 												)}
+												{/* The counterweight: an account whose burn is not
+												    measured yet is excluded from the count above, so
+												    without this a family early in its week reads as one
+												    nothing is projected to hit. */}
+												{usage.learningCount > 0 && (
+													<p className="truncate text-muted-foreground">
+														{usage.learningCount} not yet projectable
+													</p>
+												)}
 											</div>
 										</>
 									)}

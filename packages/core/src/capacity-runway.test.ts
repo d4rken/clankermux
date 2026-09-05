@@ -4,11 +4,14 @@ import {
 	computeCapacityRunway,
 	computeCapacityRunwayBand,
 	estimateWindowExhaustion,
+	isLearningEstimate,
+	isUnstartedWindow,
 	RUNWAY_HORIZON_MS,
 	type RunwayAccountInput,
 	type RunwayResetCreditBank,
 	type RunwayWindowInput,
 	runwayPaceHeadroom,
+	UNSTARTED_WINDOW_TOLERANCE_MS,
 } from "./capacity-runway";
 
 const NOW = Date.UTC(2026, 7, 22, 12, 0, 0);
@@ -1291,9 +1294,11 @@ describe("computeCapacityRunway with a reset-credit bank", () => {
 
 	it("expiry truncation actually shortens the dead span (pool-visible)", () => {
 		// Account A is weekly-dead from NOW; its credit's expiry at +6h truncates
-		// that span. Account B is 5h-dead over [+7h, +20h). Without the
-		// truncation the pool's first all-dead instant is +7h (a 7h runway);
-		// with it, A is alive again by +6h and the pool never goes all-dead.
+		// that span. Account B is dead over [+7h, +20h) — a 24h window four hours
+		// in, so the reading carries a full evidence span and B stays projectable.
+		// Without the truncation the pool's first all-dead instant is +7h (a 7h
+		// runway); with it, A is alive again by +6h and the pool never goes
+		// all-dead.
 		const a: RunwayAccountInput = {
 			accountId: "codex-1",
 			unmetered: false,
@@ -1308,10 +1313,10 @@ describe("computeCapacityRunway with a reset-credit bank", () => {
 			unmetered: false,
 			windows: [
 				window({
-					windowKind: "five_hour",
+					windowKind: "daily",
 					utilizationPct: 50,
 					resetsAtMs: NOW + 20 * HOUR,
-					windowStartMs: NOW + 15 * HOUR,
+					windowStartMs: NOW - 4 * HOUR,
 					prediction: prediction({
 						resetsAtMs: NOW + 20 * HOUR,
 						slopePerHour: 100 / 24,
@@ -2079,5 +2084,560 @@ describe("confidence after window starts and banked resets", () => {
 				NOW,
 			).lowConfidence,
 		).toBe(false);
+	});
+});
+
+describe("isUnstartedWindow", () => {
+	it("is true when the structural start coincides with the observation", () => {
+		expect(
+			isUnstartedWindow({
+				utilizationPct: 0,
+				windowStartMs: NOW,
+				observedAtMs: NOW,
+			}),
+		).toBe(true);
+	});
+
+	it("tolerates one poll interval of lag in either direction", () => {
+		for (const delta of [
+			UNSTARTED_WINDOW_TOLERANCE_MS,
+			-UNSTARTED_WINDOW_TOLERANCE_MS,
+		]) {
+			expect(
+				isUnstartedWindow({
+					utilizationPct: 0,
+					windowStartMs: NOW + delta,
+					observedAtMs: NOW,
+				}),
+			).toBe(true);
+		}
+		for (const delta of [
+			UNSTARTED_WINDOW_TOLERANCE_MS + 1,
+			-(UNSTARTED_WINDOW_TOLERANCE_MS + 1),
+		]) {
+			expect(
+				isUnstartedWindow({
+					utilizationPct: 0,
+					windowStartMs: NOW + delta,
+					observedAtMs: NOW,
+				}),
+			).toBe(false);
+		}
+	});
+
+	it("requires a zero reading", () => {
+		expect(
+			isUnstartedWindow({
+				utilizationPct: 0.5,
+				windowStartMs: NOW,
+				observedAtMs: NOW,
+			}),
+		).toBe(false);
+	});
+
+	it("is false when the reading cannot be placed in time", () => {
+		expect(
+			isUnstartedWindow({
+				utilizationPct: 0,
+				windowStartMs: NOW,
+				observedAtMs: null,
+			}),
+		).toBe(false);
+		expect(isUnstartedWindow({ utilizationPct: 0, windowStartMs: NOW })).toBe(
+			false,
+		);
+		expect(
+			isUnstartedWindow({
+				utilizationPct: 0,
+				windowStartMs: null,
+				observedAtMs: NOW,
+			}),
+		).toBe(false);
+	});
+});
+
+describe("isLearningEstimate", () => {
+	const weekly = (
+		overrides: Partial<Parameters<typeof estimateWindowExhaustion>[0]>,
+	) =>
+		estimateWindowExhaustion(
+			{
+				utilizationPct: 1,
+				resetsAtMs: NOW + 6 * DAY,
+				windowStartMs: NOW - DAY,
+				prediction: null,
+				lifetimeConfidence: "full" as const,
+				observedAtMs: NOW,
+				...overrides,
+			},
+			NOW,
+		);
+
+	it("is true for a lifetime estimate inside the evidence span", () => {
+		const estimate = weekly({
+			windowStartMs: NOW - 623_000,
+			resetsAtMs: NOW - 623_000 + 7 * DAY,
+		});
+		expect(estimate.source).toBe("lifetime-primary");
+		expect(estimate.evidenceSpanMs).toBe(623_000);
+		expect(isLearningEstimate(estimate, 1)).toBe(true);
+	});
+
+	it("is false at exactly the evidence span", () => {
+		const estimate = weekly({
+			windowStartMs: NOW - HOUR,
+			resetsAtMs: NOW - HOUR + 7 * DAY,
+		});
+		expect(estimate.evidenceSpanMs).toBe(HOUR);
+		expect(isLearningEstimate(estimate, 1)).toBe(false);
+	});
+
+	it("does not key on lowConfidence", () => {
+		// The low lifetime path flags every estimate low-confidence, so keying the
+		// rule on the flag would mark a three-hour-old window "learning" forever.
+		const estimate = estimateWindowExhaustion(
+			{
+				utilizationPct: 10,
+				resetsAtMs: NOW + 2 * HOUR,
+				windowStartMs: NOW - 3 * HOUR,
+				prediction: null,
+			},
+			NOW,
+		);
+		expect(estimate.source).toBe("lifetime-average");
+		expect(estimate.lowConfidence).toBe(true);
+		expect(estimate.evidenceSpanMs).toBe(3 * HOUR);
+		expect(isLearningEstimate(estimate, 10)).toBe(false);
+	});
+
+	it("measures the regression against the same span", () => {
+		const young = weekly({
+			windowStartMs: NOW - 30 * 60_000,
+			resetsAtMs: NOW - 30 * 60_000 + 7 * DAY,
+			prediction: prediction({
+				resetsAtMs: NOW - 30 * 60_000 + 7 * DAY,
+				etaExhaustMs: NOW + 5 * HOUR,
+			}),
+		});
+		expect(young.source).toBe("regression");
+		expect(isLearningEstimate(young, 1)).toBe(true);
+
+		const mature = weekly({
+			windowStartMs: NOW - 2 * HOUR,
+			resetsAtMs: NOW - 2 * HOUR + 7 * DAY,
+			prediction: prediction({
+				resetsAtMs: NOW - 2 * HOUR + 7 * DAY,
+				etaExhaustMs: NOW + 5 * HOUR,
+			}),
+		});
+		expect(mature.source).toBe("regression");
+		expect(isLearningEstimate(mature, 1)).toBe(false);
+	});
+
+	it("treats a zero reading as learning regardless of source", () => {
+		const unused = weekly({ utilizationPct: 0, windowStartMs: NOW - 3 * DAY });
+		expect(unused.source).toBe("no-usage");
+		expect(isLearningEstimate(unused, 0)).toBe(true);
+
+		// A flat regression over three zero readings is a USABLE prediction, so it
+		// wins the branch order — the pct clause is what stops "unknown burn" from
+		// reading as "no burn" once the window is past its first hour.
+		const flatReset = NOW - 3 * HOUR + 7 * DAY;
+		const flat = weekly({
+			utilizationPct: 0,
+			windowStartMs: NOW - 3 * HOUR,
+			resetsAtMs: flatReset,
+			prediction: prediction({
+				state: "flat",
+				slopePerHour: 0,
+				etaExhaustMs: null,
+				resetsAtMs: flatReset,
+			}),
+		});
+		expect(flat.source).toBe("regression");
+		expect(isLearningEstimate(flat, 0)).toBe(true);
+	});
+
+	it("is true for an unstarted window", () => {
+		const unstarted = weekly({
+			utilizationPct: 0,
+			windowStartMs: NOW,
+			resetsAtMs: NOW + 7 * DAY,
+		});
+		expect(unstarted.source).toBe("unstarted");
+		expect(isLearningEstimate(unstarted, 0)).toBe(true);
+	});
+
+	it("is false for a spent window and for no evidence at all", () => {
+		const spent = weekly({ utilizationPct: 100 });
+		expect(spent.source).toBe("already-exhausted");
+		expect(isLearningEstimate(spent, 100)).toBe(false);
+
+		const none = weekly({ resetsAtMs: null, utilizationPct: 50 });
+		expect(none.source).toBe("none");
+		expect(isLearningEstimate(none, 50)).toBe(false);
+	});
+});
+
+describe("estimateWindowExhaustion evidence span and unstarted windows", () => {
+	const RESET = NOW + 5 * DAY;
+	const START = NOW - 2 * DAY;
+	const ANCHOR = {
+		anchorMs: NOW - 6 * HOUR,
+		anchorPct: 10,
+		windowResetMs: RESET,
+	};
+
+	it("reports the elapsed each projecting path measured its burn over", () => {
+		const cases: Array<{
+			name: string;
+			source: string;
+			expected: number;
+			input: Parameters<typeof estimateWindowExhaustion>[0];
+		}> = [
+			{
+				name: "regression",
+				source: "regression",
+				expected: NOW - START,
+				input: {
+					utilizationPct: 40,
+					resetsAtMs: RESET,
+					windowStartMs: START,
+					observedAtMs: NOW,
+					prediction: prediction({
+						resetsAtMs: RESET,
+						etaExhaustMs: NOW + 3 * HOUR,
+					}),
+				},
+			},
+			{
+				name: "lifetime-primary anchored",
+				source: "lifetime-primary",
+				expected: NOW - ANCHOR.anchorMs,
+				input: {
+					utilizationPct: 40,
+					resetsAtMs: RESET,
+					windowStartMs: START,
+					prediction: null,
+					lifetimeConfidence: "full",
+					observedAtMs: NOW,
+					anchor: ANCHOR,
+				},
+			},
+			{
+				name: "lifetime-primary structural",
+				source: "lifetime-primary",
+				expected: NOW - START,
+				input: {
+					utilizationPct: 40,
+					resetsAtMs: RESET,
+					windowStartMs: START,
+					prediction: null,
+					lifetimeConfidence: "full",
+					observedAtMs: NOW,
+				},
+			},
+			{
+				name: "lifetime-average anchored",
+				source: "lifetime-average",
+				expected: NOW - ANCHOR.anchorMs,
+				input: {
+					utilizationPct: 40,
+					resetsAtMs: RESET,
+					windowStartMs: START,
+					prediction: null,
+					observedAtMs: NOW,
+					anchor: ANCHOR,
+				},
+			},
+			{
+				name: "lifetime-average structural",
+				source: "lifetime-average",
+				expected: NOW - START,
+				input: {
+					utilizationPct: 40,
+					resetsAtMs: RESET,
+					windowStartMs: START,
+					prediction: null,
+				},
+			},
+		];
+		for (const { name, source, expected, input } of cases) {
+			const estimate = estimateWindowExhaustion(input, NOW);
+			expect(`${name}:${estimate.source}`).toBe(`${name}:${source}`);
+			expect(`${name}:${estimate.evidenceSpanMs}`).toBe(`${name}:${expected}`);
+		}
+	});
+
+	it("states no span on the non-projecting paths", () => {
+		for (const input of [
+			{
+				utilizationPct: 100,
+				resetsAtMs: RESET,
+				windowStartMs: START,
+				prediction: null,
+			},
+			{
+				utilizationPct: 0,
+				resetsAtMs: RESET,
+				windowStartMs: START,
+				prediction: null,
+			},
+			{
+				utilizationPct: 40,
+				resetsAtMs: null,
+				windowStartMs: null,
+				prediction: null,
+			},
+		]) {
+			expect(
+				estimateWindowExhaustion(input, NOW).evidenceSpanMs,
+			).toBeUndefined();
+		}
+	});
+
+	it("classifies a window the provider has not started yet", () => {
+		// The provider slides `resets_at = now + 7d` on every poll until the first
+		// request pins it, so the reset is a placeholder and not a deadline.
+		const unstarted = estimateWindowExhaustion(
+			{
+				utilizationPct: 0,
+				resetsAtMs: NOW + 7 * DAY,
+				windowStartMs: NOW,
+				prediction: null,
+				lifetimeConfidence: "full",
+				observedAtMs: NOW,
+			},
+			NOW,
+		);
+		expect(unstarted).toEqual({
+			source: "unstarted",
+			slopePctPerHour: null,
+			exhaustsAtMs: null,
+			lowConfidence: false,
+		});
+	});
+
+	it("still reports no-usage for a started window sitting at zero", () => {
+		const idle = estimateWindowExhaustion(
+			{
+				utilizationPct: 0,
+				resetsAtMs: NOW - 2 * DAY + 7 * DAY,
+				windowStartMs: NOW - 2 * DAY,
+				prediction: null,
+				lifetimeConfidence: "full",
+				observedAtMs: NOW,
+			},
+			NOW,
+		);
+		expect(idle.source).toBe("no-usage");
+	});
+});
+
+describe("computeCapacityRunway with learning accounts", () => {
+	/** Weekly window one day in at `pct`: lifetime-average, confidently read. */
+	function confidentWeekly(accountId: string, pct: number): RunwayAccountInput {
+		return account(accountId, [
+			window({
+				windowKind: "seven_day",
+				utilizationPct: pct,
+				resetsAtMs: NOW + 6 * DAY,
+				windowStartMs: NOW - DAY,
+				prediction: null,
+			}),
+		]);
+	}
+
+	/** Weekly window 623 s after its structural start: readable, unprojectable. */
+	function learningWeekly(pct = 1): RunwayWindowInput {
+		return window({
+			windowKind: "seven_day",
+			utilizationPct: pct,
+			resetsAtMs: NOW - 623_000 + 7 * DAY,
+			windowStartMs: NOW - 623_000,
+			observedAtMs: NOW,
+			lifetimeConfidence: "full",
+			prediction: null,
+		});
+	}
+
+	it("withholds a learning account from the survival set and discloses it", () => {
+		const accounts = [
+			confidentWeekly("a", 20),
+			account("b", [learningWeekly()]),
+		];
+		const result = computeCapacityRunway(accounts, NOW);
+		const alone = computeCapacityRunway([confidentWeekly("a", 20)], NOW);
+
+		expect(result.kind).toBe("runway");
+		if (result.kind !== "runway") throw new Error("unreachable");
+		if (alone.kind !== "runway") throw new Error("unreachable");
+		expect(result.exhaustsAtMs).toBe(alone.exhaustsAtMs);
+		expect(result.unprojectableAccountIds).toEqual(["b"]);
+		expect(result.learningAccountIds).toEqual(["b"]);
+	});
+
+	it("excludes a whole account when only one of its windows is learning", () => {
+		// Strict by design: keeping the account on its confident window alone
+		// would apply half its constraints and lengthen the pool runway.
+		const mixed = account("m", [
+			learningWeekly(1),
+			window({
+				windowKind: "five_hour",
+				utilizationPct: 90,
+				resetsAtMs: NOW + HOUR,
+				windowStartMs: NOW - 4 * HOUR,
+				prediction: null,
+			}),
+		]);
+		const accounts = [confidentWeekly("a", 20), mixed];
+		const result = computeCapacityRunway(accounts, NOW);
+		const without = computeCapacityRunway([confidentWeekly("a", 20)], NOW);
+
+		expect(result.kind).toBe("runway");
+		if (result.kind !== "runway") throw new Error("unreachable");
+		if (without.kind !== "runway") throw new Error("unreachable");
+		expect(result.exhaustsAtMs).toBe(without.exhaustsAtMs);
+		expect(result.causes).toEqual(without.causes);
+		expect(result.unprojectableAccountIds).toEqual(["m"]);
+		expect(result.learningAccountIds).toEqual(["m"]);
+	});
+
+	it("reports unknown, not infinity, when every account is learning", () => {
+		const result = computeCapacityRunway(
+			[account("b", [learningWeekly()]), account("c", [learningWeekly(2)])],
+			NOW,
+		);
+		expect(result).toEqual({
+			kind: "unknown",
+			learningAccountIds: ["b", "c"],
+		});
+	});
+
+	it("keeps an unmetered account alive beside a learner", () => {
+		const result = computeCapacityRunway(
+			[account("free", [], true), account("b", [learningWeekly()])],
+			NOW,
+		);
+		expect(result).toEqual({
+			kind: "beyond-horizon",
+			horizonMs: RUNWAY_HORIZON_MS,
+			unprojectableAccountIds: ["b"],
+			learningAccountIds: ["b"],
+		});
+	});
+
+	it("runs the pace probe on the learning-excluded pool", () => {
+		const confident = [confidentWeekly("a", 20), confidentWeekly("c", 20)];
+		const withLearner = computeCapacityRunway(
+			[...confident, account("b", [learningWeekly()])],
+			NOW,
+		);
+		const without = computeCapacityRunway(confident, NOW);
+
+		expect(withLearner.kind).toBe("runway");
+		if (withLearner.kind !== "runway") throw new Error("unreachable");
+		if (without.kind !== "runway") throw new Error("unreachable");
+		expect(withLearner.paceDeficit).toEqual(without.paceDeficit);
+	});
+
+	it("excludes a window whose usable regression is flat at zero", () => {
+		const flatReset = NOW - 3 * HOUR + 7 * DAY;
+		const zeroRegression = account("z", [
+			window({
+				windowKind: "seven_day",
+				utilizationPct: 0,
+				resetsAtMs: flatReset,
+				windowStartMs: NOW - 3 * HOUR,
+				observedAtMs: NOW,
+				prediction: prediction({
+					state: "flat",
+					slopePerHour: 0,
+					etaExhaustMs: null,
+					resetsAtMs: flatReset,
+				}),
+			}),
+		]);
+		const result = computeCapacityRunway(
+			[confidentWeekly("a", 20), zeroRegression],
+			NOW,
+		);
+		expect(result.kind).toBe("runway");
+		if (result.kind !== "runway") throw new Error("unreachable");
+		expect(result.learningAccountIds).toEqual(["z"]);
+		expect(result.unprojectableAccountIds).toEqual(["z"]);
+	});
+
+	it("brackets the band on the same learning-excluded pool", () => {
+		// The ±0.5 pp perturbation turns a mature 0% learner into a projectable
+		// 0.5% account, which would push the upper probe past the horizon and
+		// leave the band open on a side the baseline never had.
+		const matureZero = account("z", [
+			window({
+				windowKind: "seven_day",
+				utilizationPct: 0,
+				resetsAtMs: NOW + 4 * DAY,
+				windowStartMs: NOW - 3 * DAY,
+				observedAtMs: NOW,
+				prediction: null,
+			}),
+		]);
+		const accounts = [confidentWeekly("a", 80), matureZero];
+		const baseline = computeCapacityRunway(accounts, NOW);
+		const band = computeCapacityRunwayBand(accounts, NOW, baseline);
+
+		expect(baseline.kind).toBe("runway");
+		if (baseline.kind !== "runway") throw new Error("unreachable");
+		expect(band).not.toBeNull();
+		expect(band?.earliestExhaustsAtMs).not.toBeNull();
+		expect(band?.latestExhaustsAtMs).not.toBeNull();
+		expect(band?.earliestExhaustsAtMs ?? 0).toBeLessThanOrEqual(
+			baseline.exhaustsAtMs,
+		);
+		expect(band?.latestExhaustsAtMs ?? 0).toBeGreaterThanOrEqual(
+			baseline.exhaustsAtMs,
+		);
+	});
+
+	it("reproduces the live all-learning Codex pool", () => {
+		// 2026-09-05T14:09Z: Codex-1 at 1% 623 s after its structural start,
+		// Codex-2 at 0% with a reset that slides forward on every poll.
+		const codex1 = account("codex-1", [
+			window({
+				windowKind: "seven_day",
+				utilizationPct: 1,
+				resetsAtMs: NOW - 623_000 + 7 * DAY,
+				windowStartMs: NOW - 623_000,
+				observedAtMs: NOW,
+				lifetimeConfidence: "full",
+				prediction: null,
+			}),
+		]);
+		const codex2 = account("codex-2", [
+			window({
+				windowKind: "seven_day",
+				utilizationPct: 0,
+				resetsAtMs: NOW + 7 * DAY,
+				windowStartMs: NOW,
+				observedAtMs: NOW,
+				lifetimeConfidence: "full",
+				prediction: null,
+			}),
+		]);
+		const outcome = computeCapacityRunway([codex1, codex2], NOW);
+
+		expect(outcome).toEqual({
+			kind: "unknown",
+			learningAccountIds: ["codex-1", "codex-2"],
+		});
+		expect(estimateWindowExhaustion(codex2.windows[0], NOW).source).toBe(
+			"unstarted",
+		);
+		expect(
+			isLearningEstimate(estimateWindowExhaustion(codex1.windows[0], NOW), 1),
+		).toBe(true);
+		expect(
+			computeCapacityRunwayBand([codex1, codex2], NOW, outcome),
+		).toBeNull();
 	});
 });

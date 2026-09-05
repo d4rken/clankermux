@@ -53,6 +53,8 @@ export {
 	computeCapacityRunway,
 	computeCapacityRunwayBand,
 	estimateWindowExhaustion,
+	isLearningEstimate,
+	isUnstartedWindow,
 	type LifetimeConfidence,
 	PACE_DEFICIT_PROBE_MIN,
 	RUNWAY_HORIZON_MS,
@@ -64,6 +66,7 @@ export {
 	type RunwayResetCreditBank,
 	type RunwayWindowInput,
 	runwayPaceHeadroom,
+	UNSTARTED_WINDOW_TOLERANCE_MS,
 	type WindowExhaustion,
 	type WindowExhaustionInput,
 	type WindowExhaustionSource,
@@ -224,6 +227,7 @@ export {
 	type PoolUsageContribution,
 	type PoolUsageExclusion,
 	type PoolUsageFallback,
+	type PoolUsageLearning,
 	type PoolUsageProjection,
 	type PoolUsageResult,
 	type PoolWindow,
@@ -301,6 +305,8 @@ export {
 	computeUsagePrediction,
 	isFitBoundary,
 	isResetBoundary,
+	isRevisionDrop,
+	REVISION_MIN_DROP_PCT,
 	splitSeries,
 } from "./usage-prediction";
 export {

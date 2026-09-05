@@ -955,6 +955,13 @@ export interface PublicRunwayDto {
 		activeKeyCount: number;
 		statedKeyCount: number;
 		unobservedKeyCount: number;
+		/**
+		 * Accounts, deduped across active keys, whose burn is not measured yet —
+		 * early in a window, at 0%, or on a window that has not started. A COUNT,
+		 * never ids. Above zero with `worstStatedOutcome: null` means "not yet",
+		 * which is a different thing from "no evidence".
+		 */
+		learningAccountCount: number;
 	};
 	worstStatedOutcome: PublicWorstOutcomeDto | null;
 }
@@ -970,6 +977,7 @@ export function toPublicRunwayDto(
 			activeKeyCount: snapshot.coverage.activeKeyCount,
 			statedKeyCount: snapshot.coverage.statedKeyCount,
 			unobservedKeyCount: snapshot.coverage.unobservedKeyCount,
+			learningAccountCount: snapshot.coverage.learningAccountCount,
 		},
 		worstStatedOutcome: snapshot.worstStatedOutcome
 			? {
@@ -1397,6 +1405,18 @@ export interface PublicPacingClassDto {
 	/** How many reach 100% before their own reset, and how many already have. */
 	willRunOut: number;
 	alreadySpent: number;
+	/**
+	 * Reporting accounts EXCLUDED from `willRunOut` because their burn is not
+	 * measured yet — under an hour into the window, or still at 0%. A reader
+	 * shown only `willRunOut` reads the exclusion as good news.
+	 */
+	learning: number;
+	/**
+	 * Of `learning`, the weekly windows the provider has not started. `resetsAt`
+	 * never names one: with nothing spent the provider re-stamps the reset on
+	 * every poll, so it is a sliding placeholder and not a deadline.
+	 */
+	unstarted: number;
 	/** Earliest weekly reset in the class, and whose. */
 	resetsAt: string | null;
 	resetsAtAccountId: string | null;
@@ -1507,6 +1527,8 @@ export function toPublicPacingDto(snapshot: PacingSnapshot): PublicPacingDto {
 					eligibleTotal: 0,
 					willRunOut: 0,
 					alreadySpent: 0,
+					learning: 0,
+					unstarted: 0,
 					resetsAt: null,
 					resetsAtAccountId: null,
 					singlePointOfFailure: false,
@@ -1539,6 +1561,8 @@ export function toPublicPacingDto(snapshot: PacingSnapshot): PublicPacingDto {
 				eligibleTotal: budget.eligibleTotal,
 				willRunOut: budget.willRunOut,
 				alreadySpent: budget.alreadySpent,
+				learning: budget.learning,
+				unstarted: budget.unstartedCount,
 				resetsAt: instant(budget.earliestResetMs),
 				resetsAtAccountId: optionalIdentifier(budget.earliestResetAccountId),
 				singlePointOfFailure: budget.singlePointOfFailure,
@@ -1662,6 +1686,13 @@ export interface PublicWorkloadHeadroomRowDto {
 	 * disagrees with the account-wide one). Class rows carry 0.
 	 */
 	unopenedAccounts: number;
+	/**
+	 * Of `unreadableAccounts` (or, on an `unknown` row, of `eligibleAccounts`),
+	 * the ones excluded only because their burn is not measured yet. Their
+	 * exclusion resolves on its own as the windows accumulate evidence, which an
+	 * account with no readable window at all cannot promise.
+	 */
+	learningAccounts: number;
 	/** Of the eligible ones, those already at or past 100% on any pooled window. */
 	spentAccounts: number;
 }
@@ -1672,6 +1703,7 @@ export type PublicHeadroomAbsenceDto =
 	| "beyond_probe_range"
 	| "not_projected"
 	| "bound_broken_by_credits"
+	| "learning_accounts"
 	| "other";
 export type PublicProjectionBasisDto = "measured" | "structural" | "other";
 
@@ -1708,6 +1740,8 @@ function toPublicHeadroomAbsence(
 			return "not_projected";
 		case "bound-broken-by-credits":
 			return "bound_broken_by_credits";
+		case "learning-accounts":
+			return "learning_accounts";
 		default:
 			return "other";
 	}
@@ -1797,6 +1831,7 @@ export function toPublicWorkloadHeadroomDto(snapshot: {
 			unreadableAccounts:
 				row.unreadableAccountIds.length + row.unopenedAccountIds.length,
 			unopenedAccounts: row.unopenedAccountIds.length,
+			learningAccounts: row.learningAccountIds.length,
 			spentAccounts: row.spentAccountIds.length,
 		})),
 	};

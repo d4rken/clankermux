@@ -390,6 +390,49 @@ describe("GET /public/v1/runway", () => {
 		expect(snapshot.worstStatedOutcome).toBeNull();
 		expect(snapshot.coverage.statedKeyCount).toBe(0);
 		expect(snapshot.coverage.unobservedKeyCount).toBe(1);
+		// No reading at all is a different absence from "not measured yet".
+		expect(snapshot.coverage.learningAccountCount).toBe(0);
+	});
+
+	it("says how many accounts it is waiting on when nothing can be stated", async () => {
+		// Both accounts read 0% on their weekly window and 623 s into a 5-hour
+		// one: readable, not projectable. Without this count the wire says only
+		// "no evidence", which is what an unpolled pool says too.
+		const young = (id: string) => {
+			usageCache.set(
+				id,
+				usage(1, BASE - 623_000 + 5 * HOUR_MS, 1, BASE - 623_000 + 7 * DAY_MS),
+			);
+			return makeAccount({ id });
+		};
+		const snapshot = await read(
+			makeDbOps({
+				accounts: [young("acc-1"), young("acc-2")],
+				keys: [makeKey({})],
+			}),
+		);
+
+		expect(snapshot.worstStatedOutcome).toBeNull();
+		expect(snapshot.coverage.statedKeyCount).toBe(0);
+		expect(snapshot.coverage.learningAccountCount).toBe(2);
+	});
+
+	it("dedupes the learning count across keys that share an account", async () => {
+		usageCache.set(
+			"acc-1",
+			usage(1, BASE - 623_000 + 5 * HOUR_MS, 1, BASE - 623_000 + 7 * DAY_MS),
+		);
+		const snapshot = await read(
+			makeDbOps({
+				accounts: [makeAccount({ id: "acc-1" })],
+				keys: [makeKey({ id: "k1" }), makeKey({ id: "k2" })],
+			}),
+		);
+
+		// Two keys, one account behind both: the union is a set of accounts, not
+		// a sum over rows.
+		expect(snapshot.coverage.activeKeyCount).toBe(2);
+		expect(snapshot.coverage.learningAccountCount).toBe(1);
 	});
 
 	it("counts the unauthenticated pool ONCE when no key is configured", async () => {
@@ -448,7 +491,13 @@ describe("GET /public/v1/runway", () => {
 		// opened six days ago projects ~4 minutes out; the clock then advances
 		// six, staying inside the routing freshness bar so the reading is still
 		// projectable.
-		usageCache.set("acc-1", usage(0, BASE + 4 * HOUR_MS, 99.95, BASE + DAY_MS));
+		// The 5-hour window carries a confident reading of its own: a window at 0%
+		// is still LEARNING its burn, which withholds the whole account and would
+		// leave nothing for the headline to rank.
+		usageCache.set(
+			"acc-1",
+			usage(10, BASE + 3 * HOUR_MS, 99.95, BASE + DAY_MS),
+		);
 		nowSpy.mockReturnValue(BASE + 6 * MINUTE_MS);
 		const snapshot = await read(
 			makeDbOps({

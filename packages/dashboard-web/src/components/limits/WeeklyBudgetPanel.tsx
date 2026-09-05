@@ -100,6 +100,17 @@ function classBadges(
 			colorClass: "text-warning-strong",
 		});
 	}
+	if (budget.learning > 0) {
+		// The counterweight to the badge above: `willRunOut` excludes accounts
+		// whose burn is not measured yet, so without this a class early in its
+		// week reads as one nothing is projected to run out of.
+		badges.push({
+			label: `${budget.learning} ${
+				budget.learning === 1 ? "account" : "accounts"
+			} not yet projectable`,
+			colorClass: "text-muted-foreground",
+		});
+	}
 	const pool = sevenDay.classes.find((c) => c.classId === budget.classId);
 	const family =
 		pool == null
@@ -138,15 +149,30 @@ function coverageLine(
 	// A reset is stated only when there IS one in the future. "reset not
 	// reported" is the honest alternative: the class may well reset, but nothing
 	// in the polled state says when, and a missing figure must not be filled in.
-	parts.push(
-		budget.earliestResetMs == null
-			? "reset not reported"
-			: `resets in ${formatDurationDhm(budget.earliestResetMs - now)}${
-					budget.earliestResetAccountName
-						? ` · ${budget.earliestResetAccountName}`
-						: ""
-				}`,
-	);
+	//
+	// An UNSTARTED window is a third case between the two: the provider does
+	// report a reset, but it is `now + 7d` re-stamped on every poll and slides
+	// forward until the first request pins it. It is excluded from
+	// `earliestResetMs` upstream, so saying only "reset not reported" here would
+	// describe a window nobody has touched as an unread one.
+	if (budget.earliestResetMs == null) {
+		parts.push(
+			budget.unstartedCount > 0
+				? "not started; resets 7d after first use"
+				: "reset not reported",
+		);
+	} else {
+		if (budget.unstartedCount > 0) {
+			parts.push(`${budget.unstartedCount} not started`);
+		}
+		parts.push(
+			`resets in ${formatDurationDhm(budget.earliestResetMs - now)}${
+				budget.earliestResetAccountName
+					? ` · ${budget.earliestResetAccountName}`
+					: ""
+			}`,
+		);
+	}
 	return parts.join(" · ");
 }
 

@@ -28,18 +28,19 @@
  *    distorts the next window.
  */
 
+import { isRevisionDrop, REVISION_MIN_DROP_PCT } from "@clankermux/core";
 import type { UsageBurnAnchor } from "@clankermux/types";
 import { RESET_JITTER_TOLERANCE_MS } from "@clankermux/types";
 
 /**
  * Smallest drop in reported percentage (points) between consecutive readings
- * that counts as a revision. Matches the regression's `isFitBoundary`
- * threshold: integer quantization and small refund wobble stay below it, a
- * gift/credit reset (tens of points) clears it easily. A drop this size on a
- * window at or below the threshold cannot meaningfully distort the lifetime
- * slope in the first place.
+ * that counts as a revision. Re-exported from `@clankermux/core`: this registry
+ * shares `isRevisionDrop` with the regression's `isFitBoundary`, so a 5.0 pp
+ * drop anchors AND restarts the fit, or does neither. Integer quantization and
+ * small refund wobble stay below it, a gift/credit reset (tens of points)
+ * clears it easily.
  */
-export const REVISION_MIN_DROP_PCT = 5;
+export { REVISION_MIN_DROP_PCT };
 
 interface WindowObservationState {
 	/** Newest observation consumed, for the write-side ordering guard. */
@@ -133,7 +134,7 @@ export function observeUsageReading(
 
 	if (
 		state.lastPct != null &&
-		state.lastPct - pct >= REVISION_MIN_DROP_PCT &&
+		isRevisionDrop(state.lastPct, pct) &&
 		resetMs != null
 	) {
 		state.anchor = {

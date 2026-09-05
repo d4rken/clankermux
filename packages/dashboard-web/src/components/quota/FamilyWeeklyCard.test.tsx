@@ -81,6 +81,21 @@ function rowsFor(accounts: AccountResponse[]) {
 }
 
 describe("FamilyWeeklyCard", () => {
+	it("discloses an account whose family burn is not measured yet", () => {
+		// 1% used 623 s after the scoped window opened extrapolates to a run-out
+		// inside the week. Withheld from `atRiskCount` and said out loud here, so
+		// the card does not read as "nothing is projected to hit the cap".
+		const rows = rowsFor([
+			scopedAccount("alpha", [
+				scopedEntry("Claude Fable 5", 1, NOW - 623_000 + 7 * DAY),
+			]),
+		]);
+		const html = render(rows);
+
+		expect(html).toContain("1 not yet projectable");
+		expect(html).not.toContain("projected to hit the cap before reset");
+	});
+
 	it("states the least-used account's reading, its bars and its reset", () => {
 		const html = render(
 			rowsFor([

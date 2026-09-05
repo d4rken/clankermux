@@ -13,7 +13,7 @@ import {
 	unprojectableCount,
 } from "../../lib/runway-display";
 import {
-	msUntilNextReset,
+	nextResetEvidence,
 	reachableAccounts,
 	tightestWindow,
 } from "../../lib/runway-evidence";
@@ -108,9 +108,16 @@ export function RunwayCard({
 	// read succeeded and simply has nothing to project from. That is a resolved
 	// dash with a reason beside it, never the unavailable slot — routing it there
 	// would present a successful read as a failed one.
+	// Accounts the scan is still WAITING on, deduped across every active key.
+	// Read from the headline summary and not from `worst.outcome`, because the
+	// case this exists for is exactly the one where every key is `unknown` and
+	// `worst` is null.
+	const learningAccounts = headline.learningAccountIds.length;
 	const unquantifiable = worst
 		? runwayUnavailableReason(worst.outcome)
-		: "No quota evidence for any account";
+		: learningAccounts > 0
+			? `${learningAccounts} account${learningAccounts === 1 ? "" : "s"} not yet projectable`
+			: "No quota evidence for any account";
 	const caption = !resolved
 		? undefined
 		: (unquantifiable ??
@@ -139,7 +146,7 @@ export function RunwayCard({
 	// routes to cannot drive a reading the runway figure never considered.
 	const pool = reachableAccounts(runways, accounts);
 	const tightest = tightestWindow(pool, now);
-	const nextResetMs = msUntilNextReset(pool, now);
+	const nextReset = nextResetEvidence(pool, now);
 
 	const subRows: MetricCardSubRow[] = [
 		{
@@ -151,10 +158,20 @@ export function RunwayCard({
 		},
 		{
 			label: "Next reset",
-			value: nextResetMs == null ? "—" : formatDurationDhm(nextResetMs),
+			// An unstarted window's reset is a placeholder that slides forward on
+			// every poll, so it is skipped rather than shown as the soonest one —
+			// and when it is the ONLY candidate the row says so instead of dashing.
+			value:
+				nextReset.msUntilReset == null
+					? nextReset.onlyUnstarted
+						? "not started"
+						: "—"
+					: formatDurationDhm(nextReset.msUntilReset),
 			tooltip:
-				nextResetMs == null
-					? "No window reported a reset still ahead"
+				nextReset.msUntilReset == null
+					? nextReset.onlyUnstarted
+						? "Every reachable window has not started yet: the provider reports a reset seven days out and re-stamps it on every poll until the first request lands."
+						: "No window reported a reset still ahead"
 					: "Soonest quota window reset across the reachable pool",
 		},
 	];
@@ -195,6 +212,19 @@ export function RunwayCard({
 			label: "Unobserved",
 			value: parts.join(" · "),
 			tooltip: tooltipParts.join(" "),
+		});
+	}
+
+	// Withheld for want of evidence, not for want of a poll — the figure is a
+	// lower bound that resolves ON ITS OWN as the windows fill. Counted over
+	// every active key rather than the headline one, so the row survives the
+	// all-unknown case where there is no headline key to read.
+	if (learningAccounts > 0) {
+		subRows.push({
+			label: "Learning",
+			value: `${learningAccounts} account${learningAccounts === 1 ? "" : "s"}`,
+			tooltip:
+				"Not yet projectable: less than an hour of usage evidence, no usage yet, or a weekly window that has not started. Excluded from the figure, which is a lower bound until they report.",
 		});
 	}
 

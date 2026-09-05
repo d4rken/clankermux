@@ -18,7 +18,11 @@ import type {
 	UsageBurnAnchor,
 	UsagePrediction,
 } from "@clankermux/types";
-import { estimateWindowExhaustion } from "./capacity-runway";
+import {
+	estimateWindowExhaustion,
+	isLearningEstimate,
+	isUnstartedWindow,
+} from "./capacity-runway";
 import {
 	usageObservedAtMs,
 	weeklyLifetimeConfidence,
@@ -105,6 +109,12 @@ export interface PoolAccountBar {
 	state: "reporting" | "exhausted" | "unknown";
 	reason: ExcludedReason | null;
 	resetMs: number | null;
+	/**
+	 * True for a reporting bar at 0% whose window the provider has not started:
+	 * its `resetMs` is the sliding placeholder the provider re-stamps on every
+	 * poll, and is NEVER a deadline. Omitted otherwise.
+	 */
+	unstarted?: boolean;
 }
 
 /**
@@ -144,6 +154,13 @@ export interface ServableClassPool {
 	 * averaged in.
 	 */
 	singlePointOfFailure: boolean;
+	/**
+	 * Reporting bars in this class whose window has not started (see
+	 * {@link PoolAccountBar.unstarted}). Never counted into `earliestResetMs`,
+	 * which is why a class can have a reset-bearing account and still state no
+	 * earliest reset.
+	 */
+	unstartedCount: number;
 	earliestResetMs: number | null;
 	earliestResetAccountName: string | null;
 	/**
@@ -202,6 +219,13 @@ export function willRunOutCount(
 	capacity: number;
 	/** Of `willRunOut`, how many are ALREADY at 100% rather than projected. */
 	spent: number;
+	/**
+	 * Contributing accounts EXCLUDED from `willRunOut` because their burn is not
+	 * measured yet. A learning estimate is not a projection, so counting one
+	 * either way would be an invention; a caller that renders `willRunOut`
+	 * without this number understates what it does not know.
+	 */
+	learning: number;
 } {
 	const spentOnThisWindow = result.exhausted.filter(
 		(e) => e.reason === `${window}_exhausted`,
@@ -210,6 +234,7 @@ export function willRunOutCount(
 		willRunOut: result.atRisk.length + spentOnThisWindow,
 		capacity: result.contributing.length + spentOnThisWindow,
 		spent: spentOnThisWindow,
+		learning: result.learning.length,
 	};
 }
 
@@ -283,12 +308,31 @@ export function scopeResultToClass(
 		excluded,
 		fallback: [],
 		atRisk: result.atRisk.filter((a) => ids.has(a.accountId)),
+		learning: result.learning.filter((l) => ids.has(l.accountId)),
 		familyWeekly,
 		earliestResetMs: pool.earliestResetMs,
 		earliestResetAccountName: pool.earliestResetAccountName,
 		classes: [pool],
 		bindingClass: pool,
 	};
+}
+
+/**
+ * A contributing account whose projection for this window is WITHHELD: the
+ * estimate exists but rests on too little evidence to state a run-out (see
+ * `isLearningEstimate`).
+ *
+ * Surfaced rather than dropped silently. Excluding these accounts from
+ * `atRisk` is right — a learning estimate is not a projection — but a count
+ * that shrinks with no explanation reads as the pool improving.
+ */
+export interface PoolUsageLearning {
+	accountId: string;
+	name: string;
+	pct: number;
+	resetMs: number;
+	/** `unstarted` when the provider has not started the window at all. */
+	state: "learning" | "unstarted";
 }
 
 /** One account's contribution to a per-family weekly bucket. */
@@ -357,6 +401,13 @@ export interface FamilyWeeklyUsage {
 	 */
 	atRiskCount: number;
 	/**
+	 * Accounts of `accounts` whose projection is WITHHELD for lack of evidence —
+	 * inside the first hour of the window, or sitting at 0%. Disjoint from
+	 * `atRiskCount`: they are excluded from it, and this is what stops that
+	 * exclusion reading as "nothing is at risk".
+	 */
+	learningCount: number;
+	/**
 	 * Soonest `exhaustsAtMs` across `accounts`; null when none is at risk. Low
 	 * confidence for the reason documented on
 	 * {@link FamilyWeeklyAccountUsage.exhaustsAtMs}.
@@ -391,6 +442,12 @@ export interface PoolUsageResult {
 	earliestResetMs: number | null;
 	earliestResetAccountName: string | null;
 	atRisk: PoolUsageProjection[];
+	/**
+	 * Contributing accounts whose projection is withheld for lack of evidence.
+	 * Never in `atRisk` — a learning estimate is not a projection — and surfaced
+	 * here so the count is disclosed rather than silently dropped.
+	 */
+	learning: PoolUsageLearning[];
 	familyWeekly: FamilyWeeklyUsage[];
 	/** One pool per group of accounts that can cover for each other. */
 	classes: ServableClassPool[];
@@ -539,13 +596,20 @@ function soonerOf(a: number | null, b: number | null): number | null {
 	return Math.min(a, b);
 }
 
+/**
+ * A family window's projected run-out, or null when there is none TO STATE.
+ *
+ * Null covers three different situations the caller distinguishes by the flag
+ * beside it: already spent, projected to survive its reset, and — via
+ * `learning` — a burn nobody has measured yet.
+ */
 function projectFamilyExhaustion(
 	pct: number,
 	resetMs: number,
 	observedAtMs: number | null,
 	now: number,
-): number | null {
-	if (pct >= 100) return null;
+): { exhaustsAtMs: number | null; learning: boolean } {
+	if (pct >= 100) return { exhaustsAtMs: null, learning: false };
 	const estimate = estimateWindowExhaustion(
 		{
 			utilizationPct: pct,
@@ -565,9 +629,17 @@ function projectFamilyExhaustion(
 		},
 		now,
 	);
-	if (estimate.exhaustsAtMs === null) return null;
-	if (estimate.exhaustsAtMs >= resetMs) return null;
-	return estimate.exhaustsAtMs;
+	// Withheld before the instant is read: an estimate built on minutes of
+	// evidence, or on a window still at 0%, is not a projection.
+	if (isLearningEstimate(estimate, pct)) {
+		return { exhaustsAtMs: null, learning: true };
+	}
+	if (estimate.exhaustsAtMs === null)
+		return { exhaustsAtMs: null, learning: false };
+	if (estimate.exhaustsAtMs >= resetMs) {
+		return { exhaustsAtMs: null, learning: false };
+	}
+	return { exhaustsAtMs: estimate.exhaustsAtMs, learning: false };
 }
 
 /**
@@ -883,7 +955,17 @@ export function computeFamilyWeeklyUsage(
 	// because names are user-set and need not be unique.
 	const buckets = new Map<
 		ModelFamily,
-		{ label: string; accounts: Map<string, FamilyWeeklyAccountUsage> }
+		{
+			label: string;
+			accounts: Map<string, FamilyWeeklyAccountUsage>;
+			/**
+			 * Accounts of this family whose fold hit at least one window with no
+			 * measured burn yet. Tracked beside the rows rather than on them: the
+			 * per-account row states an instant, and "there is no instant yet" is a
+			 * fact about the family aggregate's coverage, not another instant.
+			 */
+			learning: Set<string>;
+		}
 	>();
 
 	for (const account of accounts) {
@@ -916,7 +998,11 @@ export function computeFamilyWeeklyUsage(
 			if (binding === null) continue;
 			let bucket = buckets.get(family);
 			if (bucket === undefined) {
-				bucket = { label: limits[0].displayName, accounts: new Map() };
+				bucket = {
+					label: limits[0].displayName,
+					accounts: new Map(),
+					learning: new Set(),
+				};
 				buckets.set(family, bucket);
 			}
 			// The PROJECTION is folded across every window in this family, not taken
@@ -927,23 +1013,28 @@ export function computeFamilyWeeklyUsage(
 			// account as not at risk. The account runs out of the family when its
 			// FIRST constituent window does, so take the earliest.
 			let exhaustsAtMs: number | null = null;
+			let learning = false;
 			for (const limit of limits) {
-				exhaustsAtMs = soonerOf(
-					exhaustsAtMs,
-					projectFamilyExhaustion(
-						limit.percent,
-						limit.resetsAtMs,
-						observedAtMs,
-						now,
-					),
+				const projection = projectFamilyExhaustion(
+					limit.percent,
+					limit.resetsAtMs,
+					observedAtMs,
+					now,
 				);
+				// ONE unmeasured window withholds the account from this family's
+				// at-risk count: the fold takes the EARLIEST run-out, so an unmeasured
+				// window could have been the earliest and the surviving instant would
+				// be a lower bound presented as the answer.
+				if (projection.learning) learning = true;
+				exhaustsAtMs = soonerOf(exhaustsAtMs, projection.exhaustsAtMs);
 			}
+			if (learning) bucket.learning.add(account.id);
 			bucket.accounts.set(account.id, {
 				accountId: account.id,
 				name: account.name,
 				pct: binding.percent,
 				resetMs: binding.resetsAtMs,
-				exhaustsAtMs,
+				exhaustsAtMs: learning ? null : exhaustsAtMs,
 			});
 		}
 	}
@@ -961,6 +1052,11 @@ export function computeFamilyWeeklyUsage(
 		const rows = [...bucket.accounts.values()].map((row) =>
 			row.pct >= 100 ? { ...row, exhaustsAtMs: null } : row,
 		);
+		// Same resolution as the projection above: an account whose binding window
+		// is spent is already OUT of this family, not waiting for evidence.
+		const learningCount = rows.filter(
+			(row) => row.pct < 100 && bucket.learning.has(row.accountId),
+		).length;
 		const sortedAccounts = rows.sort((a, b) => b.pct - a.pct);
 		const worst = sortedAccounts[0];
 		const earliestResetMs = Math.min(...rows.map((a) => a.resetMs));
@@ -979,6 +1075,7 @@ export function computeFamilyWeeklyUsage(
 				(a) => a.pct >= FAMILY_WEEKLY_ELEVATED_THRESHOLD_PCT,
 			).length,
 			atRiskCount: projected.length,
+			learningCount,
 			soonestExhaustsAtMs:
 				projected.length === 0 ? null : Math.min(...projected),
 			accounts: sortedAccounts,
@@ -1083,6 +1180,7 @@ export function computePoolUsage(
 			continue;
 		}
 
+		const observedAtMs = usageObservedAtMs(account.usageAsOfIso);
 		accountBars.push({
 			accountId: account.id,
 			name: account.name,
@@ -1091,6 +1189,19 @@ export function computePoolUsage(
 			state: "reporting",
 			reason: null,
 			resetMs: extracted.resetMs,
+			// A 0% window whose structural start tracks the reading is one the
+			// provider has not started: its reset slides forward every poll, so it
+			// must never be offered as a deadline.
+			...(isUnstartedWindow({
+				utilizationPct: extracted.pct,
+				windowStartMs:
+					extracted.resetMs == null
+						? null
+						: computeWindowStartMs(extracted.resetMs, window),
+				observedAtMs,
+			})
+				? { unstarted: true }
+				: {}),
 		});
 		predictions.set(
 			account.id,
@@ -1098,18 +1209,25 @@ export function computePoolUsage(
 				? account.prediction?.fiveHour
 				: account.prediction?.sevenDay,
 		);
-		observedAt.set(account.id, usageObservedAtMs(account.usageAsOfIso));
+		observedAt.set(account.id, observedAtMs);
 		anchors.set(account.id, windowBurnAnchor(account.burnAnchors, window));
 	}
 
 	const { contributing, exhausted, excluded } = projectAccountBars(accountBars);
 
+	// An unstarted window's reset is a placeholder the provider re-stamps every
+	// poll, so it would win "earliest" forever and name a deadline that never
+	// arrives.
+	const unstartedBarIds = new Set(
+		accountBars.filter((bar) => bar.unstarted).map((bar) => bar.accountId),
+	);
 	const resetCandidates = [...contributing, ...exhausted].filter(
 		(
 			c,
 		): c is (PoolUsageContribution | PoolUsageExclusion) & {
 			resetMs: number;
-		} => c.resetMs != null && c.resetMs > now,
+		} =>
+			c.resetMs != null && c.resetMs > now && !unstartedBarIds.has(c.accountId),
 	);
 	const earliestResetMs =
 		resetCandidates.length === 0
@@ -1126,6 +1244,7 @@ export function computePoolUsage(
 	// otherwise. That makes this list agree with the per-account progress bars
 	// and the forecast lines, which already prefer the regression.
 	const atRisk: PoolUsageProjection[] = [];
+	const learning: PoolUsageLearning[] = [];
 	for (const c of contributing) {
 		if (c.resetMs == null) continue;
 		const estimate = estimateWindowExhaustion(
@@ -1140,6 +1259,19 @@ export function computePoolUsage(
 			},
 			now,
 		);
+		// Before the run-out is read, not after: an estimate over minutes of
+		// evidence, or over a window still at 0%, states nothing. Dropping it into
+		// "not at risk" would report unknown burn as no burn.
+		if (isLearningEstimate(estimate, c.pct)) {
+			learning.push({
+				accountId: c.accountId,
+				name: c.name,
+				pct: c.pct,
+				resetMs: c.resetMs,
+				state: estimate.source === "unstarted" ? "unstarted" : "learning",
+			});
+			continue;
+		}
 		if (estimate.exhaustsAtMs == null) continue;
 		if (estimate.exhaustsAtMs >= c.resetMs) continue;
 		atRisk.push({
@@ -1166,6 +1298,7 @@ export function computePoolUsage(
 		earliestResetMs,
 		earliestResetAccountName,
 		atRisk,
+		learning,
 		familyWeekly,
 		classes,
 		bindingClass: pickBindingClass(classes),
@@ -1246,6 +1379,7 @@ function groupIntoServableClasses(
 		let reportingCount = 0;
 		let exhaustedCount = 0;
 		let unknownCount = 0;
+		let unstartedCount = 0;
 		let earliestResetMs: number | null = null;
 		let earliestResetAccountName: string | null = null;
 		let earliestResetAccountId: string | null = null;
@@ -1253,6 +1387,7 @@ function groupIntoServableClasses(
 		for (const bar of sorted) {
 			if (bar.state === "reporting" && bar.pct != null) {
 				reportingCount++;
+				if (bar.unstarted) unstartedCount++;
 				const entry: PoolUsageContribution = {
 					accountId: bar.accountId,
 					name: bar.name,
@@ -1283,9 +1418,13 @@ function groupIntoServableClasses(
 			// had already come and gone as the next one. The pool-wide
 			// `earliestResetMs` has always used `> now`; this makes the per-class
 			// figure agree with it.
+			// An unstarted window is skipped outright: its reset is the provider's
+			// sliding placeholder, so it would take the earliest slot on every poll
+			// and hide the class's real next reset behind a date that keeps moving.
 			if (
 				bar.resetMs != null &&
 				bar.resetMs > now &&
+				!bar.unstarted &&
 				(earliestResetMs === null || bar.resetMs < earliestResetMs)
 			) {
 				earliestResetMs = bar.resetMs;
@@ -1306,6 +1445,7 @@ function groupIntoServableClasses(
 			eligibleTotal: capacityCount + unknownCount,
 			singlePointOfFailure:
 				capacityCount <= 1 && capacityCount + unknownCount > 0,
+			unstartedCount,
 			earliestResetMs,
 			earliestResetAccountName,
 			earliestResetAccountId,

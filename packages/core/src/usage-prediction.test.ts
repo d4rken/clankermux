@@ -4,6 +4,7 @@ import {
 	computeUsagePrediction,
 	isFitBoundary,
 	isResetBoundary,
+	isRevisionDrop,
 	splitSeries,
 } from "./usage-prediction";
 
@@ -191,20 +192,23 @@ describe("computeUsagePrediction", () => {
 		expect(pred.slopePerHour).toBeCloseTo(5, 5);
 	});
 
-	test("exactly 5pp drop is NOT a reset (strictly-greater rule)", () => {
+	test("exactly 5pp drop IS a fit boundary (inclusive rule)", () => {
 		const t0 = 1_000_000_000_000;
 		const reset = t0 + 100 * HOUR_MS;
-		// prev->cur drops EXACTLY 5.0pp -> must stay in one segment.
+		// prev->cur drops EXACTLY 5.0pp -> the fit restarts there.
 		const points: PredictionPoint[] = [
 			{ t: t0, utilization: 30, resetsAt: reset },
 			{ t: t0 + HOUR_MS, utilization: 40, resetsAt: reset },
-			{ t: t0 + 2 * HOUR_MS, utilization: 35, resetsAt: reset }, // exactly -5
-			{ t: t0 + 3 * HOUR_MS, utilization: 45, resetsAt: reset },
+			{ t: t0 + 2 * HOUR_MS, utilization: 50, resetsAt: reset },
+			{ t: t0 + 3 * HOUR_MS, utilization: 45, resetsAt: reset }, // exactly -5
+			{ t: t0 + 4 * HOUR_MS, utilization: 47, resetsAt: reset },
+			{ t: t0 + 5 * HOUR_MS, utilization: 49, resetsAt: reset },
 		];
 		const pred = computeUsagePrediction(points);
-		// All four points remain one segment -> a real regression over them,
-		// not a restart at index 2 (which would leave only 2 points).
-		expect(pred.state).not.toBe("insufficient_data");
+		// Only the post-drop segment (45,47,49) -> +2pp/h, not the +10pp/h
+		// the whole series would give.
+		expect(pred.state).toBe("rising");
+		expect(pred.slopePerHour).toBeCloseTo(2, 5);
 	});
 
 	test("lowConfidence: MIN_POINTS spanning < 5min", () => {
@@ -319,14 +323,35 @@ describe("isResetBoundary / isFitBoundary", () => {
 		expect(isFitBoundary(prev, cur)).toBe(true);
 	});
 
-	test("a drop of exactly the threshold is neither (strictly-greater rule)", () => {
+	test("a drop of exactly the threshold is a FIT boundary, not a window one", () => {
+		expect(
+			isResetBoundary(p(40, FIXTURE_RESET_1), p(35, FIXTURE_RESET_1)),
+		).toBe(false);
 		expect(isFitBoundary(p(40, FIXTURE_RESET_1), p(35, FIXTURE_RESET_1))).toBe(
-			false,
+			true,
 		);
 	});
 
 	test("isFitBoundary inherits every reset boundary", () => {
 		expect(isFitBoundary(p(10, null), p(20, FIXTURE_RESET_1))).toBe(true);
+	});
+});
+
+describe("isRevisionDrop", () => {
+	test("a drop of exactly the threshold counts", () => {
+		expect(isRevisionDrop(40, 35)).toBe(true);
+	});
+
+	test("a drop below the threshold does not", () => {
+		expect(isRevisionDrop(40, 35.5)).toBe(false);
+	});
+
+	test("a drop past the threshold counts", () => {
+		expect(isRevisionDrop(40, 34.9)).toBe(true);
+	});
+
+	test("a rise is never a revision", () => {
+		expect(isRevisionDrop(35, 40)).toBe(false);
 	});
 });
 

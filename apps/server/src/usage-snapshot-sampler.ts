@@ -49,7 +49,11 @@ import {
 } from "@clankermux/core";
 import { Logger } from "@clankermux/logger";
 import type { AnyUsageData, UsageData } from "@clankermux/providers";
-import { observeUsageReading, recordWeeklyBurnSlope } from "@clankermux/proxy";
+import {
+	observeUsageReading,
+	pruneWeeklyBurnSlopes,
+	recordWeeklyBurnSlope,
+} from "@clankermux/proxy";
 import type {
 	Account,
 	AnthropicUsageData,
@@ -304,6 +308,9 @@ export class UsageSnapshotSampler {
 	 * unchanged history is both wasted work and a freshness lie (the fit would be
 	 * re-recorded with the same, already-aging evidence), so an account whose
 	 * newest sample has not advanced is skipped entirely.
+	 *
+	 * Pruned against the live roster on every `refreshBurnSlopes()` tick — see
+	 * the comment there for why a delete-time hook cannot own this.
 	 */
 	private readonly lastFittedSampleAt = new Map<string, number>();
 
@@ -502,6 +509,7 @@ export class UsageSnapshotSampler {
 			const accountIds = (await this.deps.getAccounts())
 				.filter((a) => a.provider === "anthropic" || a.provider === "codex")
 				.map((a) => a.id);
+
 			if (accountIds.length === 0) return;
 
 			const samples = await this.deps.getRecentSnapshots(
@@ -543,6 +551,23 @@ export class UsageSnapshotSampler {
 			const accountIds = (await this.deps.getAccounts())
 				.filter((a) => a.provider === "anthropic" || a.provider === "codex")
 				.map((a) => a.id);
+
+			// Reconcile BOTH per-account maps against the live roster, before the
+			// early return so an emptied roster is cleaned up too.
+			//
+			// Pruned per tick rather than from a delete hook, for three reasons.
+			// The sampler is a server-owned instance the HTTP delete handler cannot
+			// reach, and no account-removed hook exists. `getAccounts` is re-read
+			// every tick anyway, so the roster costs nothing here. And a DELETE that
+			// lands while a tick is awaiting its history read below races the
+			// handler's own clear: the fit re-records the slope AFTER the clear, so
+			// the store has to be reconciled from the roster as well.
+			const liveIds = new Set(accountIds);
+			for (const accountId of this.lastFittedSampleAt.keys()) {
+				if (!liveIds.has(accountId)) this.lastFittedSampleAt.delete(accountId);
+			}
+			pruneWeeklyBurnSlopes(liveIds);
+
 			if (accountIds.length === 0) return;
 
 			const samples = await this.deps.getRecentSnapshots(

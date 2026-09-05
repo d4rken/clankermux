@@ -210,7 +210,9 @@ export {
 	REVISION_MIN_DROP_PCT,
 } from "./usage-revision-anchor";
 export {
+	clearWeeklyBurnSlopes,
 	getWeeklyBurnSlope,
+	pruneWeeklyBurnSlopes,
 	recordWeeklyBurnSlope,
 	resolveEffectiveWeeklySlope,
 	WEEKLY_SLOPE_MAX_AGE_MS,

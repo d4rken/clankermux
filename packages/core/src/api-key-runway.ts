@@ -567,6 +567,12 @@ export function effectiveRunwayOutcome(
 		kind: "out-now",
 		causes: outcome.causes,
 		unprojectableAccountIds: outcome.unprojectableAccountIds,
+		// Carried through: accounts withheld for lack of evidence are still
+		// withheld after the ETA lapses, so the lapsed row keeps disclosing that
+		// its figure is a lower bound.
+		...(outcome.learningAccountIds !== undefined
+			? { learningAccountIds: outcome.learningAccountIds }
+			: {}),
 		// Carried through: an outage the scan reached only by ASSUMING credit
 		// redemptions is still assumption-dependent after the ETA lapses.
 		...(outcome.assumedResetCredits !== undefined
@@ -735,6 +741,17 @@ export interface RunwayHeadline {
 	unobservedKeyCount: number;
 	/** Every active key, i.e. `statedKeyCount + unobservedKeyCount`. */
 	activeKeyCount: number;
+	/**
+	 * Every account, across ALL active keys, that some outcome withheld for lack
+	 * of evidence — deduped, in order of first appearance.
+	 *
+	 * Collected over every outcome kind INCLUDING `unknown`, which `stateable`
+	 * filters out of the ranking. That is the whole point: a pool where every
+	 * key is `unknown` yields `worst === null`, and without this list the
+	 * headline would have nothing to say beyond "no evidence" — silently losing
+	 * the fact that the evidence is on its way.
+	 */
+	learningAccountIds: string[];
 }
 
 /**
@@ -756,10 +773,22 @@ export function summarizeKeyRunways(
 	const stateable = active.filter(
 		(runway) => effectiveRunwayOutcome(runway.outcome, now).kind !== "unknown",
 	);
+	const learningAccountIds: string[] = [];
+	const seen = new Set<string>();
+	for (const runway of active) {
+		const outcome = effectiveRunwayOutcome(runway.outcome, now);
+		if (!("learningAccountIds" in outcome)) continue;
+		for (const accountId of outcome.learningAccountIds ?? []) {
+			if (seen.has(accountId)) continue;
+			seen.add(accountId);
+			learningAccountIds.push(accountId);
+		}
+	}
 	return {
 		worst: worstKeyRunway(stateable, now),
 		statedKeyCount: stateable.length,
 		unobservedKeyCount: active.length - stateable.length,
 		activeKeyCount: active.length,
+		learningAccountIds,
 	};
 }

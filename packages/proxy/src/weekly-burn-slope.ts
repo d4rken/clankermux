@@ -75,6 +75,41 @@ export function recordWeeklyBurnSlope(
 }
 
 /**
+ * Drop one account's fitted slope, or every one of them.
+ *
+ * Mirrors `clearUsageRevisionAnchors`: an account can be deleted while its
+ * entry sits in this map, and nothing else ever evicts it — the freshness
+ * filter hides a stale slope from readers but the entry itself stays for the
+ * process's lifetime, so a long-lived server accumulates one per removed
+ * account.
+ */
+export function clearWeeklyBurnSlopes(accountId?: string): void {
+	if (accountId === undefined) {
+		slopes.clear();
+		return;
+	}
+	slopes.delete(accountId);
+}
+
+/**
+ * Reconcile the store against the LIVE account roster, dropping every entry the
+ * roster no longer names.
+ *
+ * The delete-time clear is not sufficient on its own: a sampler tick that is
+ * already awaiting its history read when the DELETE lands re-records the slope
+ * after the handler cleared it. Reconciling from the roster each tick is what
+ * closes that race, and it also covers an account removed by any path that does
+ * not go through the handler.
+ */
+export function pruneWeeklyBurnSlopes(
+	liveAccountIds: ReadonlySet<string>,
+): void {
+	for (const accountId of slopes.keys()) {
+		if (!liveAccountIds.has(accountId)) slopes.delete(accountId);
+	}
+}
+
+/**
  * The usable slope entry for `accountId`, or `null`.
  *
  * Null when the account has no record, the evidence is older than

@@ -283,6 +283,29 @@ describe("LimitsCapacityOverview", () => {
 		expect(html).not.toContain("sustainable pace");
 	});
 
+	it("distinguishes an unstarted week from an unreported reset", () => {
+		// The provider DOES report a reset here — `now + 7d`, re-stamped on every
+		// poll while nothing has been spent — so it is excluded upstream from the
+		// earliest reset. Saying only "reset not reported" would describe a window
+		// nobody has touched as an unread one.
+		const html = renderOverview(
+			pools([
+				account({
+					id: "acc-1",
+					name: "alpha",
+					usageAsOfIso: new Date(NOW).toISOString(),
+					usageData: usage(0, 0, { sevenDayResetMs: NOW + 7 * DAY }),
+				}),
+			]),
+		);
+
+		expect(html).toContain("not started; resets 7d after first use");
+		expect(html).not.toContain("reset not reported");
+		// And the withheld projection is disclosed rather than reading as
+		// "nothing is projected to run out".
+		expect(html).toContain("1 account not yet projectable");
+	});
+
 	it("says a reset is not reported rather than inventing one", () => {
 		const html = renderOverview(
 			pools([
@@ -527,6 +550,26 @@ describe("LimitsCapacityOverview runway panel", () => {
 		expect(html).toContain("Runway unknown");
 		expect(html).not.toContain("∞");
 		expect(html).not.toContain(">0<");
+	});
+
+	it("says what it is waiting on when every key is merely early", () => {
+		// `summarizeKeyRunways` drops every `unknown` from the ranking, so the
+		// panel used to print "No quota evidence" for a pool whose accounts are
+		// readable and have simply not burned anything yet.
+		const html = renderRunway({
+			runways: [
+				keyRunway({
+					outcome: {
+						kind: "unknown",
+						learningAccountIds: ["acc-1", "acc-2"],
+					},
+				}),
+			],
+		});
+
+		expect(html).toContain("2 accounts not yet projectable");
+		expect(html).not.toContain("No quota evidence for any account");
+		expect(html).not.toContain("∞");
 	});
 
 	it("reports a key that can route to nothing as a dash", () => {

@@ -83,6 +83,19 @@ export interface ClassBudget {
 	willRunOut: number;
 	willRunOutCapacity: number;
 	alreadySpent: number;
+	/**
+	 * Reporting accounts whose weekly projection is WITHHELD for lack of
+	 * evidence — under an hour into the window, or sitting at 0%. Not in
+	 * `willRunOut`: a learning estimate is not a projection, and a reader
+	 * shown only the count that shrank would read the withholding as good news.
+	 */
+	learning: number;
+	/**
+	 * Of `learning`, the weekly windows the provider has not started at all.
+	 * `earliestResetMs` never names one — their reset slides forward on every
+	 * poll — so a class can have reset-bearing accounts and still state none.
+	 */
+	unstartedCount: number;
 	/** Earliest weekly reset in the class, and whose. */
 	earliestResetMs: number | null;
 	earliestResetAccountId: string | null;
@@ -108,7 +121,10 @@ function classBudget(
 	now: number,
 ): ClassBudget {
 	const scoped = scopeResultToClass(sevenDay, pool);
-	const { willRunOut, capacity, spent } = willRunOutCount(scoped, "seven_day");
+	const { willRunOut, capacity, spent, learning } = willRunOutCount(
+		scoped,
+		"seven_day",
+	);
 	const leastUsed = pool.leastUsed;
 	// Keyed on the least-used account, matching the percentage above it. A ratio
 	// computed over any other account would sit beside a figure it does not
@@ -135,6 +151,8 @@ function classBudget(
 		willRunOut,
 		willRunOutCapacity: capacity,
 		alreadySpent: spent,
+		learning,
+		unstartedCount: pool.unstartedCount,
 		earliestResetMs: pool.earliestResetMs,
 		earliestResetAccountId: pool.earliestResetAccountId ?? null,
 		earliestResetAccountName: pool.earliestResetAccountName,

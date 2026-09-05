@@ -15,6 +15,7 @@ function emptyPool(familyWeekly: FamilyWeeklyUsage[]): PoolUsageResult {
 		earliestResetMs: NOW + 3 * DAY,
 		earliestResetAccountName: "alpha",
 		atRisk: [],
+		learning: [],
 		familyWeekly,
 	};
 }
@@ -68,6 +69,7 @@ function family(overrides: Partial<FamilyWeeklyUsage>): FamilyWeeklyUsage {
 		exhaustedCount: 0,
 		elevatedCount: 1,
 		atRiskCount: 0,
+		learningCount: 0,
 		soonestExhaustsAtMs: null,
 		accounts: [
 			{
@@ -86,6 +88,14 @@ describe("PoolDetailSection family at-risk projection", () => {
 	it("says nothing when no account is projected to hit the cap", () => {
 		const html = render([family({})]);
 		expect(html).toContain("Fable");
+		expect(html).not.toContain("projected to hit the cap");
+	});
+
+	it("discloses an account whose family burn is not measured yet", () => {
+		// `atRiskCount` excludes it, so with nothing else on the line a family
+		// early in its week would read as one nothing is projected to hit.
+		const html = render([family({ learningCount: 1 })]);
+		expect(html).toContain("1 not yet projectable");
 		expect(html).not.toContain("projected to hit the cap");
 	});
 

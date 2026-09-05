@@ -134,7 +134,7 @@ describe("computeWorkloadHeadroom — class rows", () => {
 					name: "codex-1",
 					provider: "codex",
 					usageData: anthropicUsage({
-						fiveHourPct: 0,
+						fiveHourPct: 1,
 						fiveHourResetMs: NOW + HOUR,
 						weeklyPct: 1,
 						weeklyResetMs: NOW + 6 * DAY,
@@ -500,7 +500,7 @@ describe("computeWorkloadHeadroom — counts that must not mislead", () => {
 			name: "credited",
 			provider: "codex",
 			usageData: anthropicUsage({
-				fiveHourPct: 0,
+				fiveHourPct: 1,
 				fiveHourResetMs: NOW + HOUR,
 				weeklyPct: 100,
 				weeklyResetMs: NOW + 2 * DAY,
@@ -854,7 +854,7 @@ describe("computeWorkloadHeadroom — four states of scoped evidence", () => {
 			name: "c1",
 			provider: "codex",
 			usageData: anthropicUsage({
-				fiveHourPct: 0,
+				fiveHourPct: 1,
 				fiveHourResetMs: NOW + HOUR,
 				weeklyPct: 100,
 				weeklyResetMs: NOW + 2 * DAY,
@@ -888,7 +888,7 @@ describe("computeWorkloadHeadroom — four states of scoped evidence", () => {
 			name: "c1",
 			provider: "anthropic",
 			usageData: {
-				five_hour: { utilization: 0, resets_at: iso(NOW + HOUR) },
+				five_hour: { utilization: 1, resets_at: iso(NOW + HOUR) },
 				seven_day: { utilization: 40, resets_at: null },
 				limits: [],
 			} as unknown as AnthropicUsageData,
@@ -900,6 +900,80 @@ describe("computeWorkloadHeadroom — four states of scoped evidence", () => {
 		);
 		expect(row?.outcome.kind).toBe("beyond-horizon");
 		expect(row?.projectionBasis).toBe("structural");
+	});
+});
+
+describe("computeWorkloadHeadroom — learning accounts", () => {
+	/** Weekly window `ageMs` after its structural start, at `pct`. */
+	function youngWeekly(id: string, pct: number, ageMs: number) {
+		return {
+			id,
+			name: id,
+			provider: "codex",
+			usageData: anthropicUsage({
+				fiveHourPct: 1,
+				fiveHourResetMs: NOW + HOUR,
+				weeklyPct: pct,
+				weeklyResetMs: NOW - ageMs + 7 * DAY,
+				scoped: null,
+			}),
+			usageObservedAtMs: NOW,
+		} satisfies RunwayAccountSource;
+	}
+
+	it("names the accounts it is waiting on instead of stating infinity", () => {
+		const row = computeWorkloadHeadroom(
+			[youngWeekly("codex-1", 1, 623_000), youngWeekly("codex-2", 2, 623_000)],
+			NOW,
+		).find((candidate) => candidate.dimensionId === "codex");
+
+		expect(row?.outcome.kind).toBe("unknown");
+		expect(row?.headroomAbsence).toBe("learning-accounts");
+		expect(row?.learningAccountIds).toEqual(["codex-1", "codex-2"]);
+		// Learning accounts are unprojectable too — the narrower list only says
+		// WHY, and that the exclusion is temporary.
+		expect(row?.unreadableAccountIds).toEqual(["codex-1", "codex-2"]);
+		expect(row?.projectionBasis).toBeNull();
+	});
+
+	it("does not blame a probe that never ran on the probe's range", () => {
+		const row = computeWorkloadHeadroom(
+			[youngWeekly("codex-1", 1, 623_000), youngWeekly("codex-2", 40, 5 * DAY)],
+			NOW,
+		).find((candidate) => candidate.dimensionId === "codex");
+
+		expect(row?.outcome.kind).not.toBe("unknown");
+		expect(row?.headroomAbsence).not.toBe("learning-accounts");
+		expect(row?.learningAccountIds).toEqual(["codex-1"]);
+	});
+
+	it("refuses an unstarted window as the next planning reset", () => {
+		const unstarted = {
+			id: "codex-2",
+			name: "codex-2",
+			provider: "codex",
+			usageData: anthropicUsage({
+				fiveHourPct: 1,
+				fiveHourResetMs: NOW + HOUR,
+				weeklyPct: 0,
+				weeklyResetMs: NOW + 7 * DAY,
+				scoped: null,
+			}),
+			usageObservedAtMs: NOW,
+		} satisfies RunwayAccountSource;
+
+		const alone = computeWorkloadHeadroom([unstarted], NOW).find(
+			(candidate) => candidate.dimensionId === "codex",
+		);
+		// The provider re-stamps that reset on every poll, so publishing it as a
+		// planning deadline states a date that never arrives.
+		expect(alone?.nextReset).toBeNull();
+
+		const beside = computeWorkloadHeadroom(
+			[unstarted, youngWeekly("codex-1", 40, 5 * DAY)],
+			NOW,
+		).find((candidate) => candidate.dimensionId === "codex");
+		expect(beside?.nextReset?.resetsAtMs).toBe(NOW - 5 * DAY + 7 * DAY);
 	});
 });
 
@@ -974,12 +1048,24 @@ describe("next weekly reset planning", () => {
 		const source = {
 			...accountWideConstrained("recent-burn"),
 			usageData: anthropicUsage({
-				fiveHourPct: 0,
+				fiveHourPct: 1,
 				fiveHourResetMs: NOW + HOUR,
 				weeklyPct: 70,
 				weeklyResetMs: resetsAtMs,
 			}),
 			prediction: {
+				// A confident five-hour regression too, so the only weak evidence
+				// left is the thing this test is about: neither window is learning,
+				// and the row rests on measured burn.
+				fiveHour: {
+					state: "rising" as const,
+					slopePerHour: 0.25,
+					etaExhaustMs: NOW + 396 * HOUR,
+					predictedAtReset: 2,
+					resetsAtMs: NOW + HOUR,
+					willExhaustBeforeReset: false,
+					lowConfidence: false,
+				},
 				sevenDay: {
 					state: "rising" as const,
 					slopePerHour: 1,
@@ -999,17 +1085,22 @@ describe("next weekly reset planning", () => {
 		expect(row.headroom?.direction).toBe("deficit");
 	});
 	it("withholds a precise cut from an immature weekly estimate", () => {
+		// Ten minutes of evidence is not a burn rate. The account is withheld from
+		// the scan entirely rather than projected weakly, so there is no basis to
+		// characterise and no cut to state — with the account named, so the row
+		// says "not yet" rather than "no evidence".
 		const source = {
 			...accountWideConstrained("young"),
 			usageData: anthropicUsage({
-				fiveHourPct: 0,
+				fiveHourPct: 1,
 				fiveHourResetMs: NOW + HOUR,
 				weeklyPct: 2,
 				weeklyResetMs: NOW + 7 * DAY - 10 * 60_000,
 			}),
 		};
 		const row = computeWorkloadHeadroom([source], NOW)[0];
-		expect(row.nextReset?.projectionBasis).toBe("structural");
+		expect(row.nextReset?.outcome.kind).toBe("unknown");
+		expect(row.nextReset?.projectionBasis).toBeNull();
 		expect(row.nextReset?.headroom).toBeNull();
 	});
 	it("does not invent a reset date for an unreadable account", () => {

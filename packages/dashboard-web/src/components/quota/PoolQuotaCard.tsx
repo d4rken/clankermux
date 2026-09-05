@@ -108,10 +108,20 @@ export function PoolQuotaCard({
 		now,
 	);
 
+	// An UNSTARTED weekly window reports a reset, but it is `now + 7d`
+	// re-stamped on every poll until the first request pins it. Those windows are
+	// excluded from `earliestResetMs` upstream, so the absence here has to say
+	// which kind of absence it is rather than falling silent.
 	const checkpoint =
 		weekly.earliestResetMs == null
-			? null
-			: `resets ${windowTimeLabel(weekly.earliestResetMs, "seven_day")}${
+			? weekly.unstartedCount > 0
+				? "not started; resets 7d after first use"
+				: null
+			: `${
+					weekly.unstartedCount > 0
+						? `${weekly.unstartedCount} not started · `
+						: ""
+				}resets ${windowTimeLabel(weekly.earliestResetMs, "seven_day")}${
 					weekly.earliestResetAccountName
 						? ` · ${weekly.earliestResetAccountName}`
 						: ""
@@ -212,6 +222,15 @@ export function PoolQuotaCard({
 							{capacity === 1 ? "account" : "accounts"}{" "}
 							{spent > 0 ? "spent or projected" : "projected"} to hit 100%
 							before {willRunOut === 1 ? "its" : "their"} own reset
+						</p>
+					)}
+					{/* The counterweight to the line above: `willRunOut` excludes an
+					    account whose burn is not measured yet, so a class early in its
+					    week would otherwise read as one nothing is projected to run out
+					    of. Muted, because it is a "wait", not a warning. */}
+					{resolved && scoped.learning.length > 0 && (
+						<p className="truncate text-xs text-muted-foreground">
+							{scoped.learning.length} not yet projectable
 						</p>
 					)}
 					{resolved && weekly.reportingCount < weekly.eligibleTotal && (

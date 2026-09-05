@@ -159,6 +159,48 @@ describe("RunwayCard", () => {
 		expect(html).not.toContain(">0<");
 	});
 
+	it("refuses an unstarted window as the next reset", () => {
+		const fresh = account("acc-3", "Fresh", [
+			{
+				kind: "seven_day",
+				utilizationPct: 0,
+				resetsAtMs: NOW + 7 * DAY,
+				unstarted: true,
+			},
+		]);
+		const html = render({
+			runways: [row({ eligibleAccountIds: ["acc-3"] })],
+			accounts: [fresh],
+		});
+
+		// The placeholder reset slides forward on every poll, so the row states
+		// the window's STATE instead of a countdown to a date that never arrives.
+		expect(html).toContain("Next reset");
+		expect(html).toContain("not started");
+		expect(html).not.toContain("7d");
+	});
+
+	it("still counts a started window beside an unstarted one", () => {
+		const fresh = account("acc-3", "Fresh", [
+			{
+				kind: "seven_day",
+				utilizationPct: 0,
+				resetsAtMs: NOW + 7 * DAY,
+				unstarted: true,
+			},
+		]);
+		const running = account("acc-4", "Running", [
+			{ kind: "seven_day", utilizationPct: 20, resetsAtMs: NOW + 2 * DAY },
+		]);
+		const html = render({
+			runways: [row({ eligibleAccountIds: ["acc-3", "acc-4"] })],
+			accounts: [fresh, running],
+		});
+
+		expect(html).toContain("2d");
+		expect(html).not.toContain("not started");
+	});
+
 	it("renders a dash and a reason when no account has quota evidence", () => {
 		const html = render({
 			runways: [row({ outcome: { kind: "unknown" } })],
@@ -309,6 +351,51 @@ describe("RunwayCard", () => {
 			expect(html).not.toContain("No quota evidence for any account");
 		});
 
+		it("says what it is waiting on when every key is merely early", () => {
+			// The case the disclosure exists for: `summarizeKeyRunways` drops every
+			// `unknown` from the ranking, so `worst` is null and the tile used to
+			// print "No quota evidence" for a pool whose accounts are readable and
+			// simply have not burned anything yet.
+			const html = render({
+				runways: [
+					row({
+						outcome: {
+							kind: "unknown",
+							learningAccountIds: ["acc-1", "acc-2"],
+						},
+					}),
+				],
+			});
+
+			expect(html).toContain("2 accounts not yet projectable");
+			expect(html).toContain("Learning");
+			expect(html).not.toContain("No quota evidence for any account");
+			expect(html).not.toContain("∞");
+		});
+
+		it("names the learning accounts beside a stated figure", () => {
+			const html = render({
+				runways: [
+					row({
+						outcome: {
+							kind: "runway",
+							exhaustsAtMs: NOW + 12 * HOUR,
+							durationMs: 12 * HOUR,
+							causes: [{ accountId: "acc-1", windowKind: "five_hour" }],
+							unprojectableAccountIds: ["acc-9"],
+							learningAccountIds: ["acc-9"],
+						},
+					}),
+				],
+			});
+
+			expect(html).toContain("Learning");
+			expect(html).toContain("1 account");
+			// The account is withheld for want of evidence, not for want of a poll,
+			// so it must not also be reported as never observed.
+			expect(html).not.toContain("Unobserved");
+		});
+
 		it("falls back to a dash when no key can be stated at all", () => {
 			// The floor holds: with no evidence anywhere the tile still refuses to
 			// name a figure rather than reaching for the least-bad row.
@@ -322,6 +409,9 @@ describe("RunwayCard", () => {
 			expect(html).toContain("—");
 			expect(html).toContain("No quota evidence for any account");
 			expect(html).not.toContain("∞");
+			// Nothing is learning, so the tile keeps the older literal rather than
+			// inventing a count.
+			expect(html).not.toContain("not yet projectable");
 			// A RESOLVED dash, not the unavailable slot: the read succeeded and
 			// simply has nothing to project from. The warning styling belongs to a
 			// backing-read failure alone.
