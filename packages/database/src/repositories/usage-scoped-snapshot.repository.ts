@@ -223,6 +223,121 @@ export class UsageScopedSnapshotRepository extends BaseRepository<ScopedUsageSna
 	}
 
 	/**
+	 * The scoped analogue of `UsageSnapshotRepository.getResetPeakRows`, with
+	 * the family and display-name axes added to the grouping.
+	 *
+	 * `display_name` stays in the key rather than being folded into `family`
+	 * because the family mapping is lossy across generations: two display names
+	 * are two ALTERNATIVE spellings of one limit, and the caller has to be able
+	 * to take the binding one instead of summing them.
+	 *
+	 * No tier columns: the scoped table records none. A family row's tier label
+	 * comes from the account-wide samples of the same account.
+	 */
+	async getResetPeakRows(sinceMs: number): Promise<
+		Array<{
+			accountId: string;
+			family: string;
+			displayName: string;
+			resetAt: number;
+			peakPct: number | null;
+			sampleCount: number;
+			firstSampledAt: number;
+			lastSampledAt: number;
+			firstPct: number | null;
+			lastPct: number | null;
+		}>
+	> {
+		const rows = await this.query<{
+			account_id: string;
+			family: string;
+			display_name: string;
+			reset_at: number;
+			peak_pct: number | null;
+			sample_count: number;
+			first_sampled_at: number;
+			last_sampled_at: number;
+			first_pct: number | null;
+			last_pct: number | null;
+		}>(
+			`SELECT
+				s.account_id,
+				s.family,
+				s.display_name,
+				s.reset_at,
+				MAX(s.pct) AS peak_pct,
+				COUNT(*) AS sample_count,
+				MIN(s.sampled_at) AS first_sampled_at,
+				MAX(s.sampled_at) AS last_sampled_at,
+				(SELECT f.pct FROM usage_scoped_snapshots f
+				  WHERE f.account_id = s.account_id
+				    AND f.family = s.family
+				    AND f.display_name = s.display_name
+				    AND f.reset_at = s.reset_at
+				    AND f.sampled_at >= ?
+				  ORDER BY f.sampled_at ASC LIMIT 1) AS first_pct,
+				(SELECT l.pct FROM usage_scoped_snapshots l
+				  WHERE l.account_id = s.account_id
+				    AND l.family = s.family
+				    AND l.display_name = s.display_name
+				    AND l.reset_at = s.reset_at
+				    AND l.sampled_at >= ?
+				  ORDER BY l.sampled_at DESC LIMIT 1) AS last_pct
+			 FROM usage_scoped_snapshots s
+			 WHERE s.sampled_at >= ? AND s.reset_at IS NOT NULL
+			 GROUP BY s.account_id, s.family, s.display_name, s.reset_at`,
+			[sinceMs, sinceMs, sinceMs],
+		);
+		return rows.map((row) => ({
+			accountId: row.account_id,
+			family: row.family,
+			displayName: row.display_name,
+			resetAt: Number(row.reset_at),
+			peakPct: row.peak_pct == null ? null : Number(row.peak_pct),
+			sampleCount: Number(row.sample_count),
+			firstSampledAt: Number(row.first_sampled_at),
+			lastSampledAt: Number(row.last_sampled_at),
+			firstPct: row.first_pct == null ? null : Number(row.first_pct),
+			lastPct: row.last_pct == null ? null : Number(row.last_pct),
+		}));
+	}
+
+	/**
+	 * Per `(account, family, calendar day)`, the first and last sample time —
+	 * was this family being reported at all in a given span? Day buckets bound
+	 * the row count; the values are exact sample times.
+	 */
+	async getDailyPresence(sinceMs: number): Promise<
+		Array<{
+			accountId: string;
+			family: string;
+			firstSampledAt: number;
+			lastSampledAt: number;
+		}>
+	> {
+		const rows = await this.query<{
+			account_id: string;
+			family: string;
+			first_sampled_at: number;
+			last_sampled_at: number;
+		}>(
+			`SELECT account_id, family,
+			        MIN(sampled_at) AS first_sampled_at,
+			        MAX(sampled_at) AS last_sampled_at
+			 FROM usage_scoped_snapshots
+			 WHERE sampled_at >= ?
+			 GROUP BY account_id, family, (sampled_at / 86400000)`,
+			[sinceMs],
+		);
+		return rows.map((row) => ({
+			accountId: row.account_id,
+			family: row.family,
+			firstSampledAt: Number(row.first_sampled_at),
+			lastSampledAt: Number(row.last_sampled_at),
+		}));
+	}
+
+	/**
 	 * Delete scoped snapshots strictly older than `cutoffMs`. Returns rows
 	 * deleted. Shares the `usage_snapshot_retention_days` knob with
 	 * `usage_snapshots` — one control for one series family.
