@@ -171,10 +171,30 @@ describe("UsageSnapshotRepository.getResetPeakRows", () => {
 describe("UsageSnapshotRepository.getDailyPresence", () => {
 	it("reports exact first and last sample times per account and day", async () => {
 		const day = Date.UTC(2026, 7, 10);
+		// Every sample reports the weekly window, which is what presence means:
+		// the last one at 0 % is a placeholder window and still counts.
 		await usage.insertSnapshots([
-			{ accountId: "a1", provider: "anthropic", sampledAt: day + HOUR },
-			{ accountId: "a1", provider: "anthropic", sampledAt: day + 20 * HOUR },
-			{ accountId: "a1", provider: "anthropic", sampledAt: day + DAY + HOUR },
+			{
+				accountId: "a1",
+				provider: "anthropic",
+				sampledAt: day + HOUR,
+				sevenDayPct: 10,
+				sevenDayReset: RESET,
+			},
+			{
+				accountId: "a1",
+				provider: "anthropic",
+				sampledAt: day + 20 * HOUR,
+				sevenDayPct: 20,
+				sevenDayReset: RESET,
+			},
+			{
+				accountId: "a1",
+				provider: "anthropic",
+				sampledAt: day + DAY + HOUR,
+				sevenDayPct: 0,
+				sevenDayReset: RESET,
+			},
 		]);
 
 		const rows = await usage.getDailyPresence(SINCE);
@@ -295,6 +315,8 @@ describe("UsageScopedSnapshotRepository", () => {
 
 	it("reports scoped presence per account, family and day", async () => {
 		const day = Date.UTC(2026, 7, 10);
+		// 0 % under a reported reset is a family that was watched and consumed
+		// nothing, which is presence; a null reset would be a blind spot.
 		await scoped.insertSnapshots([
 			{
 				accountId: "a1",
@@ -302,7 +324,7 @@ describe("UsageScopedSnapshotRepository", () => {
 				family: "fable",
 				displayName: "Fable",
 				pct: 0,
-				resetAt: null,
+				resetAt: RESET,
 			},
 			{
 				accountId: "a1",
@@ -310,7 +332,7 @@ describe("UsageScopedSnapshotRepository", () => {
 				family: "fable",
 				displayName: "Fable",
 				pct: 0,
-				resetAt: null,
+				resetAt: RESET,
 			},
 		]);
 
@@ -370,5 +392,105 @@ describe("RequestRepository.getStopRows", () => {
 	it("short-circuits an empty label list", async () => {
 		insertStop("s1", "pool_exhausted", "claude-sonnet-4-5", null, RESET);
 		expect(await requests.getStopRows(SINCE, [])).toEqual([]);
+	});
+});
+
+describe("pool-sizing reset-peak reads: query plan", () => {
+	/**
+	 * Captures the SQL a repository sends without changing what it runs, so the
+	 * plan is taken from the statement the production code actually executes
+	 * rather than from a copy that could drift away from it.
+	 */
+	class RecordingAdapter extends BunSqlAdapter {
+		readonly sent: Array<{ sql: string; params: unknown[] }> = [];
+
+		override async query<R>(sql: string, params: unknown[] = []): Promise<R[]> {
+			this.sent.push({ sql, params });
+			return super.query<R>(sql, params);
+		}
+	}
+
+	async function planFor(
+		call: (adapter: BunSqlAdapter) => Promise<unknown>,
+	): Promise<string[]> {
+		const recorder = new RecordingAdapter(db);
+		await call(recorder);
+		const sent = recorder.sent[0];
+		if (!sent) throw new Error("the repository sent no query");
+		const plan = db
+			.query(`EXPLAIN QUERY PLAN ${sent.sql}`)
+			.all(...(sent.params as Array<string | number | null>)) as Array<{
+			detail: string;
+		}>;
+		return plan.map((step) => step.detail);
+	}
+
+	it("reads the account-wide edge values without a correlated scalar subquery", async () => {
+		const details = await planFor((adapter) =>
+			new UsageSnapshotRepository(adapter).getResetPeakRows(SINCE),
+		);
+		expect(
+			details.filter((detail) => detail.includes("CORRELATED SCALAR SUBQUERY")),
+		).toEqual([]);
+	});
+
+	it("reads the scoped edge values without a correlated scalar subquery", async () => {
+		const details = await planFor((adapter) =>
+			new UsageScopedSnapshotRepository(adapter).getResetPeakRows(SINCE),
+		);
+		expect(
+			details.filter((detail) => detail.includes("CORRELATED SCALAR SUBQUERY")),
+		).toEqual([]);
+	});
+});
+
+describe("pool-sizing presence: samples that carry no weekly window", () => {
+	const day = Date.UTC(2026, 7, 12);
+
+	it("omits an account whose weekly reset was never reported", async () => {
+		await usage.insertSnapshots([
+			{
+				accountId: "no-weekly",
+				provider: "codex",
+				sampledAt: day + HOUR,
+				fiveHourPct: 40,
+				sevenDayPct: null,
+				sevenDayReset: null,
+			},
+			{
+				accountId: "no-weekly",
+				provider: "codex",
+				sampledAt: day + 6 * HOUR,
+				fiveHourPct: 55,
+				sevenDayPct: null,
+				sevenDayReset: null,
+			},
+		]);
+
+		const rows = await usage.getDailyPresence(SINCE);
+		expect(rows.filter((row) => row.accountId === "no-weekly")).toEqual([]);
+	});
+
+	it("omits a scoped family whose reset and percentage were never reported", async () => {
+		await scoped.insertSnapshots([
+			{
+				accountId: "a1",
+				sampledAt: day + HOUR,
+				family: "fable",
+				displayName: "Fable",
+				pct: null,
+				resetAt: null,
+			},
+			{
+				accountId: "a1",
+				sampledAt: day + 6 * HOUR,
+				family: "fable",
+				displayName: "Fable",
+				pct: null,
+				resetAt: null,
+			},
+		]);
+
+		expect(await scoped.getDailyPresence(SINCE)).toEqual([]);
 	});
 });

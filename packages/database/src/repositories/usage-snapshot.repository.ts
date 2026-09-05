@@ -304,10 +304,17 @@ export class UsageSnapshotRepository extends BaseRepository<UsageSnapshotRow> {
 	 * reported values are the same window is a rule with evidence behind it and
 	 * belongs in one place in TypeScript, not encoded twice as SQL rounding.
 	 *
-	 * `first_pct` / `last_pct` are correlated subqueries over the same
-	 * `(account, reset)` pair — the only way to get a value AT an aggregate's
-	 * edge — and cost nothing at this cardinality: 13 weeks of the live series
-	 * produce a few hundred groups.
+	 * `first_pct` / `last_pct` are the percentages at the edges of the
+	 * `(account, reset)` partition, computed by window functions in the same
+	 * pass as the grouping. Correlated scalar subqueries would express the same
+	 * values, but they re-scan the account's samples once per group and there
+	 * is no covering index: on the live history that is thousands of Codex
+	 * idle-creep groups and minutes of work, far past the worker timeout.
+	 *
+	 * The partition deliberately ignores the tier columns, so both halves of a
+	 * group split by an identity-capture boundary report the edges of the WHOLE
+	 * window rather than of their own half. `MIN` over a value that is constant
+	 * within the partition merely carries it through the outer grouping.
 	 *
 	 * Tier columns join the GROUP BY so a window that spans the moment identity
 	 * capture started reports both the null and the captured pair rather than
@@ -343,29 +350,30 @@ export class UsageSnapshotRepository extends BaseRepository<UsageSnapshotRow> {
 			plan_tier: string | null;
 			rate_limit_tier: string | null;
 		}>(
-			`SELECT
-				s.account_id,
-				s.seven_day_reset AS reset_at,
-				s.plan_tier,
-				s.rate_limit_tier,
-				MAX(s.seven_day_pct) AS peak_pct,
-				COUNT(*) AS sample_count,
-				MIN(s.sampled_at) AS first_sampled_at,
-				MAX(s.sampled_at) AS last_sampled_at,
-				(SELECT f.seven_day_pct FROM usage_snapshots f
-				  WHERE f.account_id = s.account_id
-				    AND f.seven_day_reset = s.seven_day_reset
-				    AND f.sampled_at >= ?
-				  ORDER BY f.sampled_at ASC LIMIT 1) AS first_pct,
-				(SELECT l.seven_day_pct FROM usage_snapshots l
-				  WHERE l.account_id = s.account_id
-				    AND l.seven_day_reset = s.seven_day_reset
-				    AND l.sampled_at >= ?
-				  ORDER BY l.sampled_at DESC LIMIT 1) AS last_pct
-			 FROM usage_snapshots s
-			 WHERE s.sampled_at >= ? AND s.seven_day_reset IS NOT NULL
-			 GROUP BY s.account_id, s.seven_day_reset, s.plan_tier, s.rate_limit_tier`,
-			[sinceMs, sinceMs, sinceMs],
+			`WITH scanned AS (
+				SELECT account_id, seven_day_reset, seven_day_pct, sampled_at,
+				       plan_tier, rate_limit_tier,
+				       FIRST_VALUE(seven_day_pct) OVER w AS first_pct,
+				       LAST_VALUE(seven_day_pct) OVER w AS last_pct
+				FROM usage_snapshots
+				WHERE sampled_at >= ? AND seven_day_reset IS NOT NULL
+				WINDOW w AS (PARTITION BY account_id, seven_day_reset
+				             ORDER BY sampled_at
+				             ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING)
+			)
+			SELECT account_id,
+			       seven_day_reset AS reset_at,
+			       plan_tier,
+			       rate_limit_tier,
+			       MAX(seven_day_pct) AS peak_pct,
+			       COUNT(*) AS sample_count,
+			       MIN(sampled_at) AS first_sampled_at,
+			       MAX(sampled_at) AS last_sampled_at,
+			       MIN(first_pct) AS first_pct,
+			       MIN(last_pct) AS last_pct
+			 FROM scanned
+			 GROUP BY account_id, seven_day_reset, plan_tier, rate_limit_tier`,
+			[sinceMs],
 		);
 		return rows.map((row) => ({
 			accountId: row.account_id,
@@ -382,8 +390,15 @@ export class UsageSnapshotRepository extends BaseRepository<UsageSnapshotRow> {
 	}
 
 	/**
-	 * Per `(account, calendar day)`, the first and last sample time — was this
-	 * account being watched at all in a given span?
+	 * Per `(account, calendar day)`, the first and last sample time at which the
+	 * account REPORTED THE WEEKLY WINDOW — was its weekly consumption being
+	 * watched at all in a given span?
+	 *
+	 * Samples carrying no weekly window are excluded, for the same reason the
+	 * reset-peak read excludes them: they attach consumption to nothing, so
+	 * counting them as observation would turn an account whose weekly usage is
+	 * unknown into an account measured at zero. A placeholder sample (0 % under
+	 * a reset that never arrived) does report the window and still counts.
 	 *
 	 * Day buckets only bound the row count; the values returned are EXACT
 	 * sample times, because the question the caller asks is whether the
@@ -406,6 +421,8 @@ export class UsageSnapshotRepository extends BaseRepository<UsageSnapshotRow> {
 			        MAX(sampled_at) AS last_sampled_at
 			 FROM usage_snapshots
 			 WHERE sampled_at >= ?
+			   AND seven_day_reset IS NOT NULL
+			   AND seven_day_pct IS NOT NULL
 			 GROUP BY account_id, (sampled_at / 86400000)`,
 			[sinceMs],
 		);
