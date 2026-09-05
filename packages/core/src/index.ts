@@ -201,6 +201,10 @@ export {
 	type ServableClass,
 	servableClassFor,
 } from "./pool-classes";
+// Account-weeks consumed per completed weekly cycle. `@clankermux/core` exposes
+// only its root entry, so an unexported module here is unreachable from
+// http-api.
+export * from "./pool-sizing";
 export {
 	computeFamilyWeeklyUsage,
 	computePoolUsage,
@@ -268,6 +272,7 @@ export {
 	FIXED_WINDOW_DURATION_MS,
 	type SupportedWindow,
 } from "./throttle-utils";
+export { formatPlanTierLabel } from "./tier-label";
 export { TtlCache } from "./ttl-cache";
 export {
 	type AccountWideClaimHeadroom,

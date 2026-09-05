@@ -88,6 +88,45 @@ const EXACT_LABELS: Readonly<Record<string, StopCause>> = {
 };
 
 /**
+ * CLIENT-FACING refusals: the request ended here, with no account left to try.
+ *
+ * `family_weekly_exhausted` and `pool_exhausted` are written by the
+ * zero-candidates terminals, so one row is one refused request. These are the
+ * only stop labels the pool-sizing add signal may act on — anything that
+ * failed over successfully is not evidence that the pool was too small.
+ */
+export const POOL_SIZING_TERMINAL_STOP_LABELS = [
+	"family_weekly_exhausted",
+	"pool_exhausted",
+] as const;
+
+/**
+ * PER-ATTEMPT rejections, written with a synthetic request id before failover
+ * continues. A row here usually sits behind a request the client was served
+ * anyway, so counting it as a refusal would inflate the failure rate by the
+ * pool's own retry depth. Shown, never counted.
+ */
+export const POOL_SIZING_REJECTED_ATTEMPT_LABELS = [
+	"weekly_exhausted_429",
+	"session_exhausted_429",
+	"family_weekly_exhausted_429",
+] as const;
+
+/**
+ * Stops shown apart from every capacity row.
+ *
+ * `all_accounts_failed` is the give-up terminal after failovers, and in the
+ * measured 45-day window 300 of its 304 rows were a single retired model that
+ * no account could serve — a model-availability event wearing a capacity
+ * label. `anthropic_excluded_no_account` is a routing exclusion, not a spent
+ * window. Neither says anything about pool size, so neither is attributed.
+ */
+export const POOL_SIZING_SEPARATE_STOP_LABELS = [
+	"all_accounts_failed",
+	"anthropic_excluded_no_account",
+] as const;
+
+/**
  * Classify one `requests.error_message` into a {@link StopCause}.
  *
  * Pure, so it can be unit-tested without a database and shared unchanged by the

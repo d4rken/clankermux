@@ -1,3 +1,4 @@
+import { formatPlanTierLabel } from "@clankermux/core";
 import type { Account } from "../../api";
 import { cn } from "../../lib/utils";
 import { InsetPanel } from "../ui/inset-panel";
@@ -6,15 +7,16 @@ import { InsetPanel } from "../ui/inset-panel";
  * Combined plan label: Title-cased plan tier with the rate-limit multiplier
  * appended when present, e.g. plan "max" + tier "20x" → "Max 20x". When only the
  * multiplier is known (plan null), show it alone; null when neither is captured.
+ *
+ * Delegates to the shared {@link formatPlanTierLabel} so the pool-sizing panel,
+ * which reads the same two fields off stored usage samples, spells the label
+ * identically.
  */
 export function formatIdentityPlanLabel(account: Account): string | null {
-	const plan = account.identityPlanTier
-		? account.identityPlanTier.charAt(0).toUpperCase() +
-			account.identityPlanTier.slice(1)
-		: null;
-	const tier = account.identityRateLimitTier;
-	if (plan && tier) return `${plan} ${tier}`;
-	return plan ?? tier ?? null;
+	return formatPlanTierLabel(
+		account.identityPlanTier,
+		account.identityRateLimitTier,
+	);
 }
 
 interface AccountIdentityLineProps {

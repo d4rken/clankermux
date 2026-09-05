@@ -15,6 +15,7 @@ export * from "./logging";
 export * from "./memory-snapshot";
 export * from "./native-responses";
 export * from "./payment";
+export * from "./pool-sizing";
 export * from "./pricing";
 export * from "./project-rules";
 export * from "./quota-drift";
