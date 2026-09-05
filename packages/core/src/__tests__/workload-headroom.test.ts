@@ -245,7 +245,7 @@ describe("computeWorkloadHeadroom — family rows", () => {
 		expect(row?.basis).toBe("conservative-bound");
 	});
 
-	it("drops an account that reports no scoped window for the family", () => {
+	it("lists an account that reports no scoped window as unopened, not pooled", () => {
 		const withScope = accountWideConstrained("c1");
 		const withoutScope: RunwayAccountSource = {
 			id: "c2",
@@ -264,9 +264,13 @@ describe("computeWorkloadHeadroom — family rows", () => {
 		const row = computeWorkloadHeadroom([withScope, withoutScope], NOW).find(
 			(candidate) => candidate.dimensionKind === "family",
 		);
-		// c2 has plenty of account-wide room, so pooling it would make the family
-		// look beyond-horizon on capacity it may not have for Fable at all.
-		expect(row?.eligibleAccountIds).toEqual(["c1"]);
+		// c2 has plenty of account-wide room, but it has not used Fable this week —
+		// it is eligible and disclosed as unopened, and NOT pooled, because pooling
+		// it would make the family look beyond-horizon on capacity it may not have
+		// for Fable at all.
+		expect(row?.eligibleAccountIds).toEqual(["c1", "c2"]);
+		expect(row?.unopenedAccountIds).toEqual(["c2"]);
+		expect(row?.unreadableAccountIds).toEqual([]);
 		expect(row?.outcome.kind).toBe("runway");
 	});
 
