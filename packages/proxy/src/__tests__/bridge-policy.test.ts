@@ -7,6 +7,7 @@ import {
 	clampBridgeHours,
 	clampRiskFactor,
 	DEFAULT_MIN_CACHE_TOKENS,
+	FIVE_MINUTE_WRITE_MULT,
 	hasCacheWritePremium,
 	IDLE_GAP_FOR_PROMOTION_MS,
 	isBridgeableProvider,
@@ -22,7 +23,6 @@ import {
 	MAX_SESSION_BODY_BYTES,
 	MAX_SESSION_BRIDGE_BYTES,
 	MAX_SESSION_SLOTS,
-	ONE_HOUR_WRITE_MULT,
 	PREMIUM_CACHE_PROVIDERS,
 	PROMOTE_AFTER_TURNS,
 	RISK_FACTOR,
@@ -255,15 +255,15 @@ describe("isEligibleByTokens", () => {
 describe("bridge-horizon conversion", () => {
 	it("BRIDGE_HOURS_PER_RISK_UNIT matches the derived rate-ratio × cadence", () => {
 		const expected =
-			((ONE_HOUR_WRITE_MULT - CACHE_READ_MULT) / CACHE_READ_MULT) *
+			((FIVE_MINUTE_WRITE_MULT - CACHE_READ_MULT) / CACHE_READ_MULT) *
 			(KEEPALIVE_REFRESH_1H_MS / 3_600_000);
 		expect(BRIDGE_HOURS_PER_RISK_UNIT).toBeCloseTo(expected, 10);
-		// Sanity: ~15.83h per 1.0 risk.
-		expect(BRIDGE_HOURS_PER_RISK_UNIT).toBeCloseTo(15.8333, 3);
+		// Sanity: ~9.58h per 1.0 risk, using the native rewrite penalty.
+		expect(BRIDGE_HOURS_PER_RISK_UNIT).toBeCloseTo(9.5833, 3);
 	});
 
-	it("RISK_FACTOR default (0.4) maps to ~6.3h", () => {
-		expect(riskFactorToBridgeHours(RISK_FACTOR)).toBeCloseTo(6.3333, 3);
+	it("RISK_FACTOR default (0.4) maps to ~3.8h", () => {
+		expect(riskFactorToBridgeHours(RISK_FACTOR)).toBeCloseTo(3.8333, 3);
 	});
 
 	it("hours↔risk round-trips", () => {

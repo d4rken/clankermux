@@ -6,8 +6,8 @@ import {
 } from "./bridge-horizon";
 
 // Server-supplied conversion constants for the 1h-promoted bridge.
-const HOURS_PER_RISK_UNIT = 15.8333; // ((2-0.1)/0.1) × (50/60)
-const MAX_BRIDGE_HOURS = 15.8333;
+const HOURS_PER_RISK_UNIT = 9.5833; // ((1.25-0.1)/0.1) × (50/60)
+const MAX_BRIDGE_HOURS = 9.5833;
 const REFRESH_MINUTES = 50;
 
 describe("clampBridgeHours", () => {
@@ -24,8 +24,8 @@ describe("clampBridgeHours", () => {
 
 describe("hoursToRiskFactor", () => {
 	it("inverts the server conversion and clamps to [0,1]", () => {
-		expect(hoursToRiskFactor(6.3333, HOURS_PER_RISK_UNIT)).toBeCloseTo(0.4, 3);
-		expect(hoursToRiskFactor(9.5, HOURS_PER_RISK_UNIT)).toBeCloseTo(0.6, 2);
+		expect(hoursToRiskFactor(3.8333, HOURS_PER_RISK_UNIT)).toBeCloseTo(0.4, 3);
+		expect(hoursToRiskFactor(5.75, HOURS_PER_RISK_UNIT)).toBeCloseTo(0.6, 2);
 		expect(
 			hoursToRiskFactor(MAX_BRIDGE_HOURS, HOURS_PER_RISK_UNIT),
 		).toBeCloseTo(1, 3);
@@ -41,8 +41,8 @@ describe("hoursToRiskFactor", () => {
 
 describe("keepalivesForHours", () => {
 	it("counts refreshes across the horizon", () => {
-		// 6.33h at a 50-min cadence ≈ 7.6 keepalives.
-		expect(keepalivesForHours(6.3333, REFRESH_MINUTES)).toBeCloseTo(7.6, 1);
+		// 3.83h at a 50-min cadence ≈ 4.6 keepalives.
+		expect(keepalivesForHours(3.8333, REFRESH_MINUTES)).toBeCloseTo(4.6, 1);
 		expect(keepalivesForHours(9.5, REFRESH_MINUTES)).toBeCloseTo(11.4, 1);
 	});
 

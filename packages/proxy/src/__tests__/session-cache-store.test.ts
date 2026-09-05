@@ -624,21 +624,15 @@ describe("SessionCacheStore — per-slot refresh cadence (1h promotion)", () => 
 			now += KEEPALIVE_REFRESH_1H_MS;
 			if (hits > 20) break; // safety
 		}
-		// With the TRUE 1h write rate (2x input = 10/M for Opus), the budget is
-		// (10-0.5)/1e6*100000*0.4 = $0.38 and each hit is $0.05, so ~7-8 hourly
-		// refreshes fit → a multi-HOUR bridge (~5h, vs ~3.3h on the 5m write rate).
-		expect(hits).toBeGreaterThanOrEqual(6);
-		expect(hits).toBeLessThanOrEqual(8);
-		// Total wall-clock bridged spans well over the ~3.3h a 5m-rate budget gives.
-		const hoursBridged = (hits * KEEPALIVE_REFRESH_1H_MS) / 3_600_000;
-		expect(hoursBridged).toBeGreaterThanOrEqual(5);
+		// Native 5m rewrite savings fund 4.6 cache reads at risk factor 0.4.
+		expect(hits).toBe(5);
 	});
 });
 
 describe("SessionCacheStore — promoted slot uses the true 1h write rate (2x input)", () => {
 	// Opus 4.8: input 5, cache_read 0.5, 5m cache_write 6.25. A promoted (1h) slot's
 	// real write is 2x input = 10/M, which is LARGER than the 5m cache_write rate.
-	it("a promoted slot's budget reflects the 2x write rate and exceeds a 5m slot's", () => {
+	it("promotion does not inflate the avoided rewrite budget", () => {
 		// 5-minute (non-promoted) slot.
 		register({ sessionKey: "plain", cacheReadTokens: 100_000 });
 		const plain = sessionCacheStore.getAllSlots()[0];
@@ -655,9 +649,11 @@ describe("SessionCacheStore — promoted slot uses the true 1h write rate (2x in
 		// Effective write = inputPer1M (5) * 2 = 10/M, NOT the 5m cache_write 6.25.
 		expect(hot.cacheWriteEffectivePer1M).toBe(10);
 		expect(hot.cacheWritePer1M).toBe(6.25); // raw 5m rate is still recorded
-		// (10 - 0.5)/1e6 * 100000 * 0.4 = $0.38 — larger than the 5m slot's $0.23.
-		expect(hot.budgetUsd).toBeCloseTo(0.38, 10);
-		expect(hot.budgetUsd).toBeGreaterThan(plain.budgetUsd);
+		// Both budgets use the native 5m rewrite penalty.
+		expect(hot.budgetUsd).toBeCloseTo(0.23, 10);
+		expect(hot.budgetUsd).toBe(plain.budgetUsd);
+		sessionCacheStore.setRiskFactor(0.8);
+		expect(hot.budgetUsd).toBeCloseTo(0.46, 10);
 	});
 
 	it("a promoted slot charges a MISS at the 2x rate (not the 5m cache_write rate)", () => {

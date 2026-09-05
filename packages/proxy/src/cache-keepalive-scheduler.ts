@@ -184,7 +184,7 @@ export class CacheKeepaliveScheduler {
 		// Per-tick bridge economics heartbeat. INFO when there are warm sessions to
 		// report on, DEBUG when idle (keeps the journal quiet while inactive).
 		const s = bridgeStats.snapshot();
-		const summary = `[CacheBridge] summary mode=${this.config.getCacheWarmingMode()} warm=${sessionCacheStore.getSize()} promoted=${sessionCacheStore.getPromotedSessions()} hits=${s.hits} misses=${s.misses} hitRate=${(s.hitRate * 100).toFixed(0)}% failures=${s.failures} resumes=${s.warmResumes} spentUsd=${s.spentUsd.toFixed(4)} savedUsd=${s.savedUsd.toFixed(4)} netUsd=${s.netUsd.toFixed(4)}`;
+		const summary = `[CacheBridge] summary mode=${this.config.getCacheWarmingMode()} warm=${sessionCacheStore.getSize()} promoted=${sessionCacheStore.getPromotedSessions()} hits=${s.hits} misses=${s.misses} hitRate=${(s.hitRate * 100).toFixed(0)}% failures=${s.failures} resumes=${s.warmResumes} spentUsd=${s.spentUsd.toFixed(4)} savedUsd=${s.savedUsdConservative.toFixed(4)} netUsd=${s.netUsdConservative.toFixed(4)}`;
 		if (sessionCacheStore.getSize() > 0) {
 			log.info(summary);
 		} else {
@@ -349,12 +349,21 @@ export class CacheKeepaliveScheduler {
 			return;
 		}
 
-		// created > 0 means the cached prefix had to be re-created → the cache had
-		// already died → a miss (≈ whole budget). created === 0 → still warm (hit).
-		// created === null (no field, e.g. unexpected body) is treated as a hit so
-		// the small read cost is charged rather than the large miss cost.
 		const created = extractCacheCreationTokens(text);
-		const hit = created === null || created === 0;
+		if (created === null) {
+			log.warn(
+				`Cache warming ${slot.accountId}:${slot.sessionKey}: missing usage; stopping speculative replays`,
+			);
+			sessionCacheStore.recordKeepaliveFailure(
+				slot.accountId,
+				slot.sessionKey,
+				Date.now(),
+				dispatchedActivityTs,
+				{ usageUnknown: true },
+			);
+			return;
+		}
+		const hit = created === 0;
 		sessionCacheStore.recordKeepaliveResult(
 			slot.accountId,
 			slot.sessionKey,

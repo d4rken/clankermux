@@ -61,7 +61,9 @@ mock.module("@clankermux/core", () => ({
 const capturedDispatchCalls: Array<{ req: Request; url: URL }> = [];
 const mockDispatchProxyRequest = mock(async (req: Request, url: URL) => {
 	capturedDispatchCalls.push({ req, url });
-	return new Response("", { status: 200 });
+	return new Response('{"usage":{"cache_creation_input_tokens":0}}', {
+		status: 200,
+	});
 });
 
 mock.module("../dispatch", () => ({
@@ -73,6 +75,7 @@ import {
 	KEEPALIVE_REFRESH_MS,
 	MAX_KEEPALIVE_FAILURES,
 } from "../bridge-policy";
+import { bridgeStats } from "../bridge-stats";
 import { cacheBodyStore } from "../cache-body-store";
 // Import AFTER mock.module so the scheduler gets the mocked registerHeartbeat
 // and dispatchProxyRequest.
@@ -207,12 +210,14 @@ function resetMocks(): void {
 	mockRegisterHeartbeat.mockClear();
 	mockUnregister.mockClear();
 	mockDispatchProxyRequest.mockClear();
-	// Restore the default 200/empty-body implementation so a persistent
+	// Restore the default 200/known-hit implementation so a persistent
 	// mockImplementation set by one test doesn't leak into the next.
 	mockDispatchProxyRequest.mockImplementation(
 		async (req: Request, url: URL) => {
 			capturedDispatchCalls.push({ req, url });
-			return new Response("", { status: 200 });
+			return new Response('{"usage":{"cache_creation_input_tokens":0}}', {
+				status: 200,
+			});
 		},
 	);
 	capturedCallback = null;
@@ -522,6 +527,28 @@ describe("CacheKeepaliveScheduler", () => {
 			const decoded = JSON.parse(await req.text());
 			expect(decoded.max_tokens).toBe(1);
 
+			scheduler.stop();
+		});
+
+		it("stops an unknown replay without claiming a hit or resume saving", async () => {
+			const { config } = makeConfig(true);
+			const scheduler = new CacheKeepaliveScheduler(makeProxyContext(), config);
+			scheduler.start();
+			seedSessionEntry("unknown", "unknown");
+			mockDispatchProxyRequest.mockImplementation(
+				async () => new Response("event: error\ndata: {}\n\n", { status: 200 }),
+			);
+			const before = bridgeStats.snapshot();
+			await capturedCallback?.();
+			const after = bridgeStats.snapshot();
+			expect(after.hits).toBe(before.hits);
+			expect(after.misses).toBe(before.misses);
+			expect(after.failures).toBe(before.failures + 1);
+			expect(after.spentUsd).toBeGreaterThan(before.spentUsd);
+			expect(after.savedUsdConservative).toBe(before.savedUsdConservative);
+			expect(sessionCacheStore.getAllSlots()).toHaveLength(0);
+			await capturedCallback?.();
+			expect(mockDispatchProxyRequest).toHaveBeenCalledTimes(1);
 			scheduler.stop();
 		});
 
@@ -837,8 +864,8 @@ describe("CacheKeepaliveScheduler", () => {
 		});
 
 		it("bridges for HOURS: multiple hits across simulated hourly ticks until the budget exhausts", async () => {
-			// Default 200/empty-body dispatch => cache_creation absent => treated as a
-			// hit (small read-cost charge). Each tick we re-backdate the slot past its
+			// Default dispatch provides explicit cache-hit evidence.
+			// Each tick we re-backdate the slot past its
 			// 1h window so it is due, then fire — counting how many hourly refreshes the
 			// budget supports before exhaustion.
 			const { config } = makeConfig(true);
@@ -871,13 +898,8 @@ describe("CacheKeepaliveScheduler", () => {
 				dispatches += mockDispatchProxyRequest.mock.calls.length - before;
 			}
 
-			// With the TRUE 1h write rate (2x input), a promoted slot's budget is larger
-			// than on the old 5m cache_write rate, so ~7-8 hourly refreshes fit → an even
-			// longer multi-HOUR bridge from a single session.
-			expect(dispatches).toBeGreaterThanOrEqual(6);
-			expect(dispatches).toBeLessThanOrEqual(8);
-			const hoursBridged = (dispatches * KEEPALIVE_REFRESH_1H_MS) / 3_600_000;
-			expect(hoursBridged).toBeGreaterThanOrEqual(5);
+			// Native 5m savings fund 4.6 reads at the default risk factor.
+			expect(dispatches).toBe(5);
 
 			scheduler.stop();
 		});

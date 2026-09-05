@@ -3099,3 +3099,48 @@ describe("SessionStrategy — clearAffinityForAccount", () => {
 		expect(again.routing?.decision).toBe("affinity_hit");
 	});
 });
+
+describe("active affinity is independent of quota session age", () => {
+	it("keeps a recently used account across five hours, but expires idle affinity", () => {
+		const realNow = Date.now;
+		const start = realNow();
+		let now = start;
+		Date.now = () => now;
+		try {
+			const strategy = new SessionStrategy();
+			const store = new MockStrategyStore();
+			strategy.initialize(store);
+			const a = makeAccount({ id: "a", session_start: start });
+			const b = makeAccount({ id: "b", session_start: start });
+			store.utilizationMap.set("a", 10);
+			store.utilizationMap.set("b", 20);
+			const meta = (): RequestMeta => ({
+				id: "review",
+				method: "POST",
+				path: "/v1/messages",
+				timestamp: now,
+				affinityKey: "active",
+				affinityScope: "session",
+			});
+			expect(strategy.select([a, b], meta())[0].id).toBe("a");
+			store.utilizationMap.set("a", 30);
+			now = start + 4.99 * 3_600_000;
+			expect(strategy.select([a, b], meta())[0].id).toBe("a");
+			now = start + 5.01 * 3_600_000;
+			const acrossReset = meta();
+			expect(strategy.select([a, b], acrossReset)[0].id).toBe("a");
+			expect(acrossReset.routing?.decision).toBe("affinity_hit");
+			expect(
+				store.resetCalls.some(
+					(call) => call.accountId === "a" && call.timestamp === now,
+				),
+			).toBe(true);
+			now += 5.01 * 3_600_000;
+			const idle = meta();
+			expect(strategy.select([a, b], idle)[0].id).toBe("b");
+			expect(idle.routing?.decision).toBe("affinity_miss");
+		} finally {
+			Date.now = realNow;
+		}
+	});
+});

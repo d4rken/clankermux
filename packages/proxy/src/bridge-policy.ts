@@ -53,7 +53,7 @@ export function isBridgeableProvider(
  * DEFAULT derate factor on the resume-penalty budget — hedges abandoned sessions.
  * Configurable at runtime via the dashboard (stored as `cache_warming_risk_factor`,
  * surfaced in the UI as a bridge horizon in hours; see {@link riskFactorToBridgeHours}).
- * 0.4 ≈ a ~6.3h horizon for promoted 1h sessions. The store holds the live value.
+ * 0.4 ≈ a ~3.8h horizon for promoted 1h sessions. The store holds the live value.
  */
 export const RISK_FACTOR = 0.4;
 
@@ -127,20 +127,21 @@ export const KEEPALIVE_REFRESH_1H_MS = 50 * 60_000;
  */
 export const ONE_HOUR_WRITE_MULT = 2;
 export const CACHE_READ_MULT = 0.1;
+export const FIVE_MINUTE_WRITE_MULT = 1.25;
 
 /**
  * How many hours an idle, promoted (1h-TTL) session stays bridged per 1.0 of
  * RISK_FACTOR. Derived, not magic: a slot keeps bridging while spend < budget, so
  *   keepalives-to-exhaust = budget / hitCost
  *                         = RISK_FACTOR·(write−read)·tokens / (read·tokens)
- *                         = RISK_FACTOR · (ONE_HOUR_WRITE_MULT − CACHE_READ_MULT)/CACHE_READ_MULT
+ *                         = RISK_FACTOR · (FIVE_MINUTE_WRITE_MULT − CACHE_READ_MULT)/CACHE_READ_MULT
  * and hours = keepalives · (KEEPALIVE_REFRESH_1H_MS / 1h). The token count cancels,
  * so the horizon in hours depends only on the rate ratio and the refresh cadence —
  * NOT on session size. Only valid for the 1h-promoted bridge (5m slots use the
  * 3-min cadence and the 1.25× write rate, a much shorter horizon).
  */
 export const BRIDGE_HOURS_PER_RISK_UNIT =
-	((ONE_HOUR_WRITE_MULT - CACHE_READ_MULT) / CACHE_READ_MULT) *
+	((FIVE_MINUTE_WRITE_MULT - CACHE_READ_MULT) / CACHE_READ_MULT) *
 	(KEEPALIVE_REFRESH_1H_MS / 3_600_000);
 
 /**

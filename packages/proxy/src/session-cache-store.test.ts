@@ -216,9 +216,8 @@ describe("sessionCacheStore telemetry", () => {
 		// ...while the conservative figure uses the 5m rate and is strictly lower.
 		expect(s.savedUsdConservative).toBeCloseTo(expectedConservative, 10);
 		expect(s.savedUsdConservative).toBeLessThan(s.savedUsd);
-		// priorityUsd now also uses the effective (1h) rate, so a promoted slot is
-		// valued for LRU at its true recreate cost — matching the optimistic saving.
-		expect(priorityUsd).toBeCloseTo(s.savedUsd, 10);
+		// Eviction priority follows the conservative saving, irrespective of TTL.
+		expect(priorityUsd).toBeCloseTo(s.savedUsdConservative, 10);
 	});
 
 	it("register books a warm resume on the common read+create resume after keepalive spend", () => {
@@ -323,6 +322,48 @@ describe("sessionCacheStore telemetry", () => {
 		expect(
 			sessionCacheStore.getAllSlots().find((s) => s.sessionKey === "min1"),
 		).toBeUndefined();
+	});
+
+	it("unknown usage charges a rewrite estimate and cannot book a later saving", () => {
+		register("acc", "unknown", 200_000, true);
+		const slot = sessionCacheStore.getAllSlots()[0];
+		const before = bridgeStats.snapshot();
+		sessionCacheStore.recordKeepaliveFailure(
+			"acc",
+			"unknown",
+			Date.now(),
+			slot.lastActivityTs,
+			{ usageUnknown: true },
+		);
+		const after = bridgeStats.snapshot();
+		expect(after.spentUsd - before.spentUsd).toBeCloseTo(
+			(slot.cachedTokens * slot.cacheWriteEffectivePer1M) / 1_000_000,
+			10,
+		);
+		expect(after.hits).toBe(before.hits);
+		expect(after.misses).toBe(before.misses);
+		expect(after.failures).toBe(before.failures + 1);
+		expect(sessionCacheStore.getAllSlots()).toHaveLength(0);
+		sessionCacheStore.touchActivity("acc", "unknown", Date.now() + 1);
+		expect(bridgeStats.snapshot().savedUsdConservative).toBe(
+			before.savedUsdConservative,
+		);
+	});
+
+	it("a stale unknown replay does not evict a session that resumed during dispatch", () => {
+		register("acc", "resumed", 200_000);
+		const activity = sessionCacheStore.getAllSlots()[0].lastActivityTs;
+		sessionCacheStore.touchActivity("acc", "resumed", activity + 1);
+		const before = bridgeStats.snapshot();
+		sessionCacheStore.recordKeepaliveFailure(
+			"acc",
+			"resumed",
+			activity + 2,
+			activity,
+			{ usageUnknown: true },
+		);
+		expect(sessionCacheStore.getAllSlots()).toHaveLength(1);
+		expect(bridgeStats.snapshot()).toEqual(before);
 	});
 
 	it("setRiskFactor recomputes existing slots' budget (scales linearly)", () => {

@@ -130,12 +130,15 @@ export async function getOrderedAccounts(
 	ctx: ProxyContext,
 ): Promise<Account[]> {
 	try {
-		const allAccounts = await ctx.dbOps.getAllAccounts();
+		const allAccounts = (await ctx.dbOps.getAllAccounts()).filter((account) =>
+			isAccountAllowedByPin(meta.pin, account),
+		);
+		// Filter before selection: strategy.select records affinity and pick history.
 		// Warm unknown Anthropic usage so the FEFO comparator has real capacity
 		// data on cold-start requests. Never stalls a request beyond a brief
 		// soft wait, and only at a true cold start (see helper).
 		await ensureUsageFreshForSelection(allAccounts, ctx, Date.now());
-		// Return all accounts - the provider will be determined dynamically per account
+		// Provider resolution happens dynamically for each allowed account.
 		return ctx.strategy.select(allAccounts, meta);
 	} catch (error) {
 		log.error("Failed to get accounts from database:", error);
@@ -222,7 +225,10 @@ async function selectByStrategy(
 							continue;
 						}
 
-						if (!isAccountAvailable(account)) {
+						if (
+							!isAccountAllowedByPin(meta.pin, account) ||
+							!isAccountAvailable(account)
+						) {
 							continue;
 						}
 
@@ -392,8 +398,8 @@ async function selectWithPin(
 		return [target];
 	}
 
-	// Class pin, no header: run normal combo+strategy selection, then filter the
-	// ordered result to allowed providers.
+	// Combo and strategy selection filter the pool BEFORE recording affinity.
+	// Keep the final filter as defense in depth for custom strategies.
 	const ordered = await selectByStrategy(meta, ctx, model);
 	const filtered = ordered.filter(isAllowed);
 	if (filtered.length === 0) {

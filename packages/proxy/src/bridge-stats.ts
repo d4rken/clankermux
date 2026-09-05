@@ -21,7 +21,7 @@ export interface BridgeStatsSnapshot {
 	failures: number;
 	/** Real cache-read turns that resumed a session we'd spent budget on. */
 	warmResumes: number;
-	/** Sum of all keepalive hit+miss costs charged, in USD. */
+	/** Sum of keepalive costs, including conservative estimates for unknown outcomes. */
 	spentUsd: number;
 	/**
 	 * Sum of resume penalties avoided on real warm resumes, valued at the slot's
@@ -50,7 +50,7 @@ class BridgeStats {
 	private hits = 0;
 	private misses = 0;
 	private failures = 0;
-	private spentUsd = 0; // sum of all keepalive hit+miss costs charged
+	private spentUsd = 0; // includes conservative estimates for unknown outcomes
 	private savedUsd = 0; // resume penalties avoided, valued at the 1h (effective) write rate
 	private savedUsdConservative = 0; // same, valued at the 5m (native counterfactual) write rate
 	private warmResumes = 0; // count of real cache-read turns that resumed a kept-warm session
@@ -63,9 +63,13 @@ class BridgeStats {
 		this.spentUsd += Number.isFinite(costUsd) && costUsd > 0 ? costUsd : 0;
 	}
 
-	/** A keepalive that failed (non-routable / non-ok / threw). */
-	recordFailure(): void {
+	/** A failed/unknown keepalive, optionally charged a conservative spend estimate. */
+	recordFailure(estimatedCostUsd = 0): void {
 		this.failures++;
+		this.spentUsd +=
+			Number.isFinite(estimatedCostUsd) && estimatedCostUsd > 0
+				? estimatedCostUsd
+				: 0;
 	}
 
 	/**

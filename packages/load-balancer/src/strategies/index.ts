@@ -240,23 +240,6 @@ export class SessionStrategy implements LoadBalancingStrategy {
 		);
 	}
 
-	/**
-	 * Whether the account's session window is still valid, ignoring rate-limit
-	 * state. Used by resolveAffinity to distinguish "session genuinely expired"
-	 * (reassign) from "rate-limited but session conceptually alive" (hold/check).
-	 *
-	 * hasActiveSession() returns false for rate-limited accounts — correct for
-	 * routing, but it would short-circuit the hold/reassign decision in affinity
-	 * resolution. This helper separates the two concerns.
-	 */
-	private hasValidSessionWindow(account: Account, now: number): boolean {
-		if (!requiresSessionDurationTracking(account.provider)) return true;
-		return (
-			!!account.session_start &&
-			now - account.session_start < this.sessionDurationMs
-		);
-	}
-
 	private getAffinityKey(meta: RequestMeta): string | null {
 		const partition = meta.affinityPartition?.trim();
 		const prefix = partition ? `partition:${partition}:` : "";
@@ -396,7 +379,7 @@ export class SessionStrategy implements LoadBalancingStrategy {
 	 *                   when the original account recovers and its prompt cache
 	 *                   is still warm.
 	 *  - `reassign`  — affined account is durably gone (real 5h/7d exhaustion,
-	 *                   any pause, session expired, removed). Delete the
+	 *                   any pause, removed). Delete the
 	 *                   affinity entry and pick a fresh account.
 	 *  - `miss`      — no affinity entry exists for this key yet.
 	 */
@@ -415,13 +398,11 @@ export class SessionStrategy implements LoadBalancingStrategy {
 
 		const account = accounts.find((a) => a.id === entry.accountId);
 
-		// Account removed or session window genuinely expired → reassign.
-		// Note: we check hasValidSessionWindow (ignores rate-limit state)
-		// rather than hasActiveSession (returns false for rate-limited
-		// accounts), because a rate-limited account with a valid session
-		// window should flow into the hold/reassign decision below — not
-		// be force-reassigned.
-		if (!account || !this.hasValidSessionWindow(account, now)) {
+		// Idle affinity already expired in pruneAffinity(). An account's quota
+		// session clock is independent: active conversations can keep a warm
+		// prompt cache across many quota windows. Only removal invalidates the
+		// identity here; availability below handles pauses and exhaustion.
+		if (!account) {
 			this.affinityByKey.delete(key);
 			return { kind: "reassign", previousAccountId: entry.accountId };
 		}

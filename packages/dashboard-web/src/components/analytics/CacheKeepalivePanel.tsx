@@ -59,7 +59,7 @@ export function CacheKeepalivePanel({ range }: { range: TimeRange }) {
 		return points.map((p) => ({
 			ts: p.ts,
 			spentUsd: p.spentUsd,
-			savedUsd: p.savedUsd,
+			savedUsd: p.savedUsdConservative,
 			hitRatePct: p.hitRate * 100,
 		}));
 	}, [history]);
@@ -68,7 +68,7 @@ export function CacheKeepalivePanel({ range }: { range: TimeRange }) {
 	const isEmpty = rows.length < 2;
 
 	const modeLabel = live ? (MODE_LABELS[live.mode] ?? live.mode) : "—";
-	const netUsd = live?.netUsd ?? 0;
+	const netUsd = live?.netUsdConservative ?? 0;
 
 	return (
 		<Card>
@@ -99,7 +99,10 @@ export function CacheKeepalivePanel({ range }: { range: TimeRange }) {
 					/>
 					<StatTile
 						label="Saved"
-						value={liveLoading ? "—" : formatUsd(live?.savedUsd ?? 0)}
+						sub="Estimated at native 5-minute cache rates"
+						value={
+							liveLoading ? "—" : formatUsd(live?.savedUsdConservative ?? 0)
+						}
 					/>
 					<StatTile
 						label="Net"

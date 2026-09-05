@@ -169,10 +169,10 @@ describe("createConfigHandlers", () => {
 		};
 
 		expect(body.riskFactor).toBe(0.4);
-		// 0.4 × ~15.83 ≈ 6.33h.
-		expect(body.bridgeHours).toBeCloseTo(6.3333, 2);
-		expect(body.hoursPerRiskUnit).toBeCloseTo(15.8333, 2);
-		expect(body.maxBridgeHours).toBeCloseTo(15.8333, 2);
+		// 0.4 × ~9.58 ≈ 3.83h.
+		expect(body.bridgeHours).toBeCloseTo(3.8333, 2);
+		expect(body.hoursPerRiskUnit).toBeCloseTo(9.5833, 2);
+		expect(body.maxBridgeHours).toBeCloseTo(9.5833, 2);
 		expect(body.refreshMinutes).toBe(50);
 	});
 
@@ -187,8 +187,8 @@ describe("createConfigHandlers", () => {
 			new Request("http://localhost/api/config/cache-warming", {
 				method: "POST",
 				headers: { "Content-Type": "application/json" },
-				// ~9.5h ≈ risk factor 0.6.
-				body: JSON.stringify({ bridgeHours: 9.5 }),
+				// ~5.75h ≈ risk factor 0.6.
+				body: JSON.stringify({ bridgeHours: 5.75 }),
 			}),
 		);
 		const body = (await response.json()) as {
@@ -200,7 +200,7 @@ describe("createConfigHandlers", () => {
 		const rf = (config.setCacheWarmingRiskFactor as ReturnType<typeof mock>)
 			.mock.calls[0][0] as number;
 		expect(rf).toBeCloseTo(0.6, 2);
-		expect(body.bridgeHours).toBeCloseTo(9.5, 1);
+		expect(body.bridgeHours).toBeCloseTo(5.75, 1);
 	});
 
 	it("accepts a raw riskFactor when bridgeHours is absent", async () => {

@@ -8,6 +8,7 @@ import {
 	mock,
 	spyOn,
 } from "bun:test";
+import { SessionStrategy } from "@clankermux/load-balancer";
 import { usageCache } from "@clankermux/providers";
 import type { Account, ComboWithSlots, RequestMeta } from "@clankermux/types";
 import {
@@ -1242,5 +1243,73 @@ describe("ensureUsageFreshForSelection", () => {
 		await ensureUsageFreshForSelection([paused, rateLimited], ctx, Date.now());
 
 		expect(refreshSpy).not.toHaveBeenCalled();
+	});
+});
+
+describe("provider pins preserve real strategy affinity", () => {
+	it("keeps the served account sticky when a disallowed provider ranks first", async () => {
+		const accounts = [
+			makeAccount({ id: "codex", provider: "codex", priority: 0 }),
+			makeAccount({ id: "claude-a", priority: 1 }),
+			makeAccount({ id: "claude-b", priority: 1 }),
+		];
+		let preferred = "claude-a";
+		const strategy = new SessionStrategy();
+		strategy.initialize({
+			resetAccountSession: () => {},
+			getAccountUtilization: (id) => (id === preferred ? 10 : 30),
+		});
+		const ctx = makeCtx({ accounts });
+		ctx.strategy = strategy;
+		const meta = () =>
+			makeRequestMeta({
+				affinityKey: "conversation",
+				affinityScope: "session",
+				pin: { accountId: null, providers: ["anthropic"] },
+			});
+		const first = meta();
+		expect((await selectAccountsForRequest(first, ctx))[0].id).toBe("claude-a");
+		preferred = "claude-b";
+		const second = meta();
+		expect((await selectAccountsForRequest(second, ctx))[0].id).toBe(
+			"claude-a",
+		);
+		expect(second.routing?.decision).toBe("affinity_hit");
+		expect(second.routing?.heldAccountId).toBe("claude-a");
+		expect(second.routing?.previousAccountId).toBe("claude-a");
+		// Editing the key's provider pin invalidates its former affinity.
+		const changed = makeRequestMeta({
+			...meta(),
+			pin: { accountId: null, providers: ["codex"] },
+		});
+		expect((await selectAccountsForRequest(changed, ctx))[0].id).toBe("codex");
+		expect(changed.routing?.decision).toBe("affinity_reassigned");
+	});
+
+	it("falls back to the allowed pool when a combo has only disallowed slots", async () => {
+		const codex = makeAccount({ id: "codex", provider: "codex" });
+		const claude = makeAccount({ id: "claude" });
+		const combo = makeCombo([
+			{
+				id: "slot",
+				combo_id: "combo-1",
+				account_id: codex.id,
+				model: "gpt-6",
+				priority: 0,
+				enabled: true,
+			},
+		]);
+		const ctx = makeCtx({ accounts: [codex, claude], activeCombo: combo });
+		ctx.strategy = new SessionStrategy();
+		const meta = makeRequestMeta({
+			pin: { accountId: null, providers: ["anthropic"] },
+		});
+		expect(
+			(await selectAccountsForRequest(meta, ctx, "claude-sonnet-4-5")).map(
+				(a) => a.id,
+			),
+		).toEqual(["claude"]);
+		expect(getComboSlotInfo(meta)).toBeNull();
+		expect(meta.comboName).toBeUndefined();
 	});
 });

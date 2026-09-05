@@ -90,10 +90,10 @@ export interface SessionCacheSlot {
 	/** Cache-write rate (USD per 1M) of the model — the 5-minute rate (1.25x input). */
 	cacheWritePer1M: number;
 	/**
-	 * Effective cache-write rate (USD per 1M) for THIS slot's TTL — used to size the
-	 * spend budget and charge miss costs. For a PROMOTED (1h-TTL) slot the real write
-	 * is 2x input (vs the 5-minute 1.25x), so the budget stretches further and a miss
-	 * is charged at the true recreate cost. For a non-promoted (5m-TTL) slot this
+	 * Effective cache-write rate (USD per 1M) for THIS slot's TTL — used to
+	 * charge misses and estimate uncertain spend. For a PROMOTED (1h-TTL) slot
+	 * the real write is 2x input (vs the 5-minute 1.25x). Budgets use the native
+	 * 5m penalty regardless of TTL. For a non-promoted (5m-TTL) slot this
 	 * equals {@link cacheWritePer1M}.
 	 */
 	cacheWriteEffectivePer1M: number;
@@ -183,8 +183,8 @@ class SessionCacheStore {
 	/**
 	 * Set the spend-budget derate factor (the bridge-horizon knob, surfaced in the UI
 	 * as hours). NaN-safe-clamped to [0, MAX_RISK_FACTOR]. Existing slots have their
-	 * budgetUsd recomputed at the new factor against their OWN effective write rate
-	 * (5m vs 1h), so a change takes effect immediately. We deliberately do NOT reset
+	 * budgetUsd recomputed against the native 5m rewrite penalty, so a change takes
+	 * effect immediately. We deliberately do NOT reset
 	 * spentUsd: lowering the budget below what a slot already spent makes it
 	 * immediately ineligible (it gives up now), while leaving the slot in place so a
 	 * still-warm cache can still book a warm-resume win.
@@ -195,7 +195,7 @@ class SessionCacheStore {
 			slot.budgetUsd = keepaliveBudgetUsd(
 				slot.cachedTokens,
 				slot.cacheReadPer1M,
-				slot.cacheWriteEffectivePer1M,
+				slot.cacheWritePer1M,
 				this.riskFactor,
 			);
 		}
@@ -297,9 +297,9 @@ class SessionCacheStore {
 		// straddle, a mid-session minTokens change, or a client that set ttl itself.
 		// A 1h cache is written at 2x input (Anthropic), NOT the 5-minute cache_write
 		// rate (1.25x input) getModelCacheRates() returns — so a 1h slot uses the true
-		// 1h write rate to size the budget (a larger premium → larger budget → the
-		// multi-hour bridge stretches further) and to charge a miss (a recreate at 1h
-		// costs 2x). A 5m slot keeps the 5-minute rate. Malformed body → 5m default.
+		// 1h write rate to charge a miss. Budgets and eviction priority use the
+		// native 5m rewrite penalty: without bridging, promotion would not add
+		// a 1h premium to the next request. Malformed body → 5m default.
 		let isOneHour = false;
 		try {
 			isOneHour = bodyCacheTtlIsOneHour(
@@ -328,19 +328,16 @@ class SessionCacheStore {
 			cacheReadPer1M: rates.cacheReadPer1M,
 			cacheWritePer1M: rates.cacheWritePer1M,
 			cacheWriteEffectivePer1M,
-			// LRU priority = the real re-cache cost avoided by keeping this slot. Use the
-			// slot's EFFECTIVE write rate so a promoted (1h, 2x-input) session is valued
-			// above a 5m session of the same size under eviction pressure (it's costlier
-			// to rebuild). For a 5m slot this is the 5-minute rate, unchanged.
+			// Value the rewrite avoided at the native 5m rate, for every TTL.
 			priorityUsd: resumePenaltyUsd(
 				cachedTokens,
 				rates.cacheReadPer1M,
-				cacheWriteEffectivePer1M,
+				rates.cacheWritePer1M,
 			),
 			budgetUsd: keepaliveBudgetUsd(
 				cachedTokens,
 				rates.cacheReadPer1M,
-				cacheWriteEffectivePer1M,
+				rates.cacheWritePer1M,
 				this.riskFactor,
 			),
 			spentUsd: 0,
@@ -506,6 +503,8 @@ class SessionCacheStore {
 	 * {@link MAX_KEEPALIVE_FAILURES} consecutive failures accumulate, the slot is
 	 * evicted: the account is gone or persistently paused, so re-attempting it
 	 * every tick only wastes the per-tick cap and crowds out healthy sessions.
+	 * Unknown usage after a successful dispatch instead charges a full rewrite
+	 * estimate and evicts immediately, without booking a hit or miss.
 	 * No-op when no slot exists for the key.
 	 */
 	recordKeepaliveFailure(
@@ -513,6 +512,7 @@ class SessionCacheStore {
 		sessionKey: string,
 		now: number,
 		expectedLastActivityTs?: number,
+		options?: { usageUnknown?: boolean },
 	): void {
 		const key = SessionCacheStore.key(accountId, sessionKey);
 		const slot = this.slots.get(key);
@@ -524,6 +524,16 @@ class SessionCacheStore {
 			expectedLastActivityTs !== undefined &&
 			slot.lastActivityTs !== expectedLastActivityTs
 		) {
+			return;
+		}
+		if (options?.usageUnknown) {
+			// The request may have rewritten the entire prefix. Book that upper
+			// estimate as uncertain spend, never as a hit/miss or a future saving,
+			// and stop replaying this body until a real request supplies evidence.
+			bridgeStats.recordFailure(
+				keepaliveMissCostUsd(slot.cachedTokens, slot.cacheWriteEffectivePer1M),
+			);
+			this.deleteKey(key);
 			return;
 		}
 		bridgeStats.recordFailure();
