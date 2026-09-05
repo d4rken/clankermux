@@ -32,8 +32,10 @@ import GOLDEN from "./__fixtures__/analytics-unscoped-golden.json";
 import {
 	ACCOUNT_A,
 	ACCOUNT_B,
+	API_KEY_DELETED,
 	API_KEY_LIVE,
 	API_KEY_RENAMED,
+	API_KEY_RENAMED_NAME,
 	FIXED_NOW,
 	PROJECT_ALPHA,
 	PROJECT_BETA,
@@ -278,9 +280,9 @@ describe("conditional additional-data UNION (branch-local bind order)", () => {
 		expect(alone.body[section]).toEqual(full.body[section] as never);
 	});
 
-	it("the Overview subset returns the same UNION rows as the full request", async () => {
+	it("the Overview subset returns the same rows as the full request", async () => {
 		const overviewSections =
-			"totals,timeSeries,modelDistribution,accountModelUsage,projectBreakdown,activeSessions";
+			"totals,timeSeries,modelDistribution,apiKeyModelUsage,projectBreakdown,activeSessions";
 		const subset = await fetchAnalytics(
 			`${FILTERED_QUERY}&sections=${overviewSections}`,
 		);
@@ -289,8 +291,11 @@ describe("conditional additional-data UNION (branch-local bind order)", () => {
 		expect(subset.body.modelDistribution).toEqual(
 			full.body.modelDistribution as never,
 		);
-		expect(subset.body.accountModelUsage).toEqual(
-			full.body.accountModelUsage as never,
+		// Not a UNION branch (its rows need three columns where the shared shape
+		// carries two), so this is the standalone phase answering the same way
+		// inside a subset as it does in the full response.
+		expect(subset.body.apiKeyModelUsage).toEqual(
+			full.body.apiKeyModelUsage as never,
 		);
 		expect(subset.body.projectBreakdown).toEqual(
 			full.body.projectBreakdown as never,
@@ -320,5 +325,225 @@ describe("conditional additional-data UNION (branch-local bind order)", () => {
 		for (const section of UNION_SECTIONS) {
 			expect(body).not.toHaveProperty(section);
 		}
+	});
+});
+
+/**
+ * `apiKeyModelUsage` — the Overview's "Usage by API key" donut.
+ *
+ * The section's whole difficulty is that a display name is not an identity. A
+ * key can be renamed, hard-deleted (leaving only whatever snapshot name each
+ * request row happened to carry), and two different keys can end up wearing the
+ * same string — including "No key", which is both the label for requests that
+ * carried no key at all and a name a user is free to give a real one. Every
+ * case below is one way that confusion would reach the donut as a slice whose
+ * number belongs to nobody.
+ */
+describe("apiKeyModelUsage", () => {
+	it("gives a hard-deleted key ONE label across its differing snapshot names", async () => {
+		// The fixture's deleted key carries "retired-key" on one request row and
+		// "retired-key-older" on another. Grouping is on the id, so both rows come
+		// back under one identity and one label.
+		const { body } = await fetchAnalytics(
+			"range=all&sections=apiKeyModelUsage",
+		);
+		const rows = (body.apiKeyModelUsage ?? []).filter(
+			(row) => row.apiKeyId === API_KEY_DELETED,
+		);
+		expect(rows.length).toBe(2);
+		expect(new Set(rows.map((row) => row.apiKey)).size).toBe(1);
+		expect(new Set(rows.map((row) => row.model)).size).toBe(2);
+	});
+
+	it("labels a renamed key with its CURRENT name, not the stamped snapshot", async () => {
+		const { body } = await fetchAnalytics(
+			"range=all&sections=apiKeyModelUsage",
+		);
+		const rows = (body.apiKeyModelUsage ?? []).filter(
+			(row) => row.apiKeyId === API_KEY_RENAMED,
+		);
+		expect(rows.length).toBeGreaterThan(0);
+		for (const row of rows) {
+			expect(row.apiKey).toBe(API_KEY_RENAMED_NAME);
+		}
+	});
+
+	it("reports the no-key bucket as apiKeyId null labelled 'No key'", async () => {
+		const { body } = await fetchAnalytics(
+			"range=all&sections=apiKeyModelUsage",
+		);
+		const rows = (body.apiKeyModelUsage ?? []).filter(
+			(row) => row.apiKeyId === null,
+		);
+		expect(rows.length).toBeGreaterThan(0);
+		for (const row of rows) {
+			expect(row.apiKey).toBe("No key");
+		}
+	});
+
+	it("puts a row with no model under 'Unknown' rather than dropping it", async () => {
+		// Dropping null-model rows would make the per-key sums disagree with the
+		// request count shown beside the donut. ~1.2% of live rows over 7 days.
+		const { body } = await fetchAnalytics(
+			"range=all&sections=apiKeyModelUsage",
+		);
+		expect(
+			(body.apiKeyModelUsage ?? []).some((row) => row.model === "Unknown"),
+		).toBe(true);
+	});
+
+	it("reconciles with totals.requests under the same filters", async () => {
+		// No row cap and no null-model exclusion, so the slices add up to the
+		// number the rest of the page reports for the same selection.
+		const { body } = await fetchAnalytics(
+			`${FILTERED_QUERY}&sections=totals,apiKeyModelUsage`,
+		);
+		const sum = (body.apiKeyModelUsage ?? []).reduce(
+			(total, row) => total + row.count,
+			0,
+		);
+		expect(sum).toBeGreaterThan(0);
+		expect(sum).toBe(body.totals?.requests ?? -1);
+	});
+
+	it("is omitted, not zero-filled, when it was not requested", async () => {
+		const { body } = await fetchAnalytics("range=all&sections=totals");
+		expect(body).not.toHaveProperty("apiKeyModelUsage");
+	});
+});
+
+/**
+ * Identity cases the shared fixture cannot carry.
+ *
+ * These need rows the golden-fixture dataset deliberately does not have —
+ * adding them there would change every other section's captured response — so
+ * each runs against its own throwaway database.
+ */
+describe("apiKeyModelUsage identity edge cases", () => {
+	function seedKeyUsage(
+		keys: Array<{ id: string; name: string }>,
+		requests: Array<{
+			id: string;
+			apiKeyId: string | null;
+			apiKeyName: string | null;
+			model: string | null;
+		}>,
+	): APIContext {
+		const edgeDb = new Database(":memory:");
+		ensureSchema(edgeDb);
+		for (const key of keys) {
+			edgeDb.run(
+				`INSERT INTO api_keys (id, name, hashed_key, prefix_last_8, created_at, last_used, usage_count, is_active)
+				 VALUES (?, ?, ?, ?, ?, NULL, 0, 1)`,
+				[key.id, key.name, `hash-${key.id}`, key.id.slice(-8), FIXED_NOW],
+			);
+		}
+		const insert = edgeDb.prepare(
+			`INSERT INTO requests
+				(id, timestamp, method, path, account_used, status_code, success,
+				 error_message, response_time_ms, failover_attempts, model,
+				 api_key_id, api_key_name)
+			 VALUES (?, ?, 'POST', '/v1/messages', NULL, 200, 1, NULL, 100, 0, ?, ?, ?)`,
+		);
+		for (const request of requests) {
+			insert.run(
+				request.id,
+				FIXED_NOW - 60_000,
+				request.model,
+				request.apiKeyId,
+				request.apiKeyName,
+			);
+		}
+		const adapter = new BunSqlAdapter(edgeDb);
+		return {
+			db: adapter,
+			config: {},
+			dbOps: { getAdapter: () => adapter },
+		} as unknown as APIContext;
+	}
+
+	async function readUsage(edgeContext: APIContext) {
+		const response = await createAnalyticsHandler(edgeContext)(
+			new URLSearchParams("range=all&sections=apiKeyModelUsage"),
+		);
+		const body = (await response.json()) as AnalyticsResponse;
+		return body.apiKeyModelUsage ?? [];
+	}
+
+	it("keeps two ids apart when they wear the same display name", async () => {
+		// A hard-deleted key's snapshot name can equal a live key's current name.
+		// They are different keys; merging them would report one number for two.
+		const rows = await readUsage(
+			seedKeyUsage(
+				[{ id: "k-live", name: "shared-name" }],
+				[
+					{
+						id: "q-1",
+						apiKeyId: "k-live",
+						apiKeyName: "shared-name",
+						model: "opus",
+					},
+					{
+						id: "q-2",
+						apiKeyId: "k-gone",
+						apiKeyName: "shared-name",
+						model: "opus",
+					},
+				],
+			),
+		);
+
+		expect(rows).toHaveLength(2);
+		expect(rows.every((row) => row.apiKey === "shared-name")).toBe(true);
+		expect(new Set(rows.map((row) => row.apiKeyId))).toEqual(
+			new Set(["k-live", "k-gone"]),
+		);
+	});
+
+	it("keeps a real key named 'No key' apart from the no-key bucket", async () => {
+		// The bucket's label is a label. The identity is the id, and null is not
+		// a name anyone can take.
+		const rows = await readUsage(
+			seedKeyUsage(
+				[{ id: "k-named", name: "No key" }],
+				[
+					{
+						id: "q-1",
+						apiKeyId: "k-named",
+						apiKeyName: "No key",
+						model: "opus",
+					},
+					{ id: "q-2", apiKeyId: null, apiKeyName: null, model: "opus" },
+				],
+			),
+		);
+
+		expect(rows).toHaveLength(2);
+		expect(rows.every((row) => row.apiKey === "No key")).toBe(true);
+		expect(rows.filter((row) => row.apiKeyId === null)).toHaveLength(1);
+		expect(rows.filter((row) => row.apiKeyId === "k-named")).toHaveLength(1);
+	});
+
+	it("returns every (key, model) pair — there is no row cap", async () => {
+		// A LIMIT would silently stop the slices summing to the request count
+		// beside them, and the cut would land on the smallest keys, which is
+		// exactly where an unexpected caller shows up.
+		const keys = Array.from({ length: 12 }, (_, i) => ({
+			id: `k-${i}`,
+			name: `key-${i}`,
+		}));
+		const requests = keys.flatMap((key, i) =>
+			Array.from({ length: 5 }, (_, m) => ({
+				id: `q-${i}-${m}`,
+				apiKeyId: key.id,
+				apiKeyName: key.name,
+				model: `model-${m}`,
+			})),
+		);
+
+		const rows = await readUsage(seedKeyUsage(keys, requests));
+
+		expect(rows).toHaveLength(60);
+		expect(rows.reduce((total, row) => total + row.count, 0)).toBe(60);
 	});
 });

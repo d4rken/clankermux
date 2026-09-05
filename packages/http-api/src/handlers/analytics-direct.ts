@@ -114,6 +114,7 @@ const FULL_RESPONSE_FIELDS: Record<keyof FullAnalyticsResponse, true> = {
 	apiKeyPerformance: true,
 	costByModel: true,
 	accountModelUsage: true,
+	apiKeyModelUsage: true,
 	modelPerformance: true,
 	speedTimeSeries: true,
 	routing: true,
@@ -783,6 +784,70 @@ export function createAnalyticsHandler(context: APIContext) {
 							model: row.secondary_name ?? "Unknown",
 							count: Number(row.count) || 0,
 						}));
+
+			// Per-API-key × model request counts, STANDALONE rather than a UNION
+			// branch: the shared UNION row shape carries two string columns (`name`,
+			// `secondary_name`) and this section needs three — the key's id, its
+			// display label, and the model.
+			//
+			// No LIMIT: the rows are bounded by keys × models (26 pairs over 7 days
+			// on the live database), and truncating them would make the donut's
+			// slices stop summing to the request count shown beside it. No
+			// `model IS NOT NULL` either, for the same reason — ~1.2% of rows over
+			// 7 days carry no model and they are real requests.
+			//
+			// Grouping on `r.api_key_id` collapses a renamed key onto one entry,
+			// and NULL ids group together as the no-key bucket.
+			const apiKeyModelUsageRows =
+				(await runPhase("api_key_model_usage", want("apiKeyModelUsage"), () =>
+					db.query<{
+						api_key_id: string | null;
+						name: string;
+						model: string;
+						count: number;
+					}>(
+						`SELECT
+					r.api_key_id AS api_key_id,
+					MAX(COALESCE(k.name, r.api_key_name, 'No key')) AS name,
+					COALESCE(r.model, 'Unknown') AS model,
+					COUNT(*) AS count
+				FROM requests r
+				LEFT JOIN api_keys k ON k.id = r.api_key_id
+				WHERE ${whereClause}
+				GROUP BY r.api_key_id, COALESCE(r.model, 'Unknown')
+				ORDER BY count DESC`,
+						queryParams,
+					),
+				)) ?? [];
+
+			// One label per id, chosen from the id's biggest row (ties broken
+			// lexicographically). A hard-deleted key keeps only the snapshot name
+			// each request row happened to carry, and those can differ per model
+			// ("retired-key" vs "retired-key-older"); without this the same key
+			// would appear as two legend entries.
+			const apiKeyModelUsage = !want("apiKeyModelUsage")
+				? undefined
+				: (() => {
+						const labels = new Map<string, { label: string; count: number }>();
+						for (const row of apiKeyModelUsageRows) {
+							const key = row.api_key_id ?? "";
+							const count = Number(row.count) || 0;
+							const current = labels.get(key);
+							if (
+								!current ||
+								count > current.count ||
+								(count === current.count && row.name < current.label)
+							) {
+								labels.set(key, { label: row.name, count });
+							}
+						}
+						return apiKeyModelUsageRows.map((row) => ({
+							apiKeyId: row.api_key_id,
+							apiKey: labels.get(row.api_key_id ?? "")?.label ?? row.name,
+							model: row.model,
+							count: Number(row.count) || 0,
+						}));
+					})();
 
 			const toProjectRow = (row: (typeof additionalData)[number]) => ({
 				// q6 selects the raw r.project column and q7 selects a literal
@@ -2021,6 +2086,7 @@ export function createAnalyticsHandler(context: APIContext) {
 				apiKeyPerformance,
 				costByModel,
 				accountModelUsage,
+				apiKeyModelUsage,
 				modelPerformance,
 				speedTimeSeries,
 				routing,

@@ -102,7 +102,7 @@ function renderOverview(gaps: PricingGap[]): string {
 			timeSeries: [],
 			modelDistribution: [],
 			accountPerformance: [],
-			accountModelUsage: [],
+			apiKeyModelUsage: [],
 			projectBreakdown: [],
 			tokenBreakdown: {
 				inputTokens: 0,

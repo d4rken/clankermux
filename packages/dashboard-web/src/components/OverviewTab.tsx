@@ -69,7 +69,7 @@ export const OVERVIEW_SECTIONS: readonly AnalyticsSection[] = [
 	"totals",
 	"timeSeries",
 	"modelDistribution",
-	"accountModelUsage",
+	"apiKeyModelUsage",
 	"projectBreakdown",
 	"activeSessions",
 ];
@@ -175,7 +175,7 @@ export const OverviewTab = React.memo(() => {
 			value: model.count,
 		})) || [];
 
-	const accountModelUsageData = analytics?.accountModelUsage || [];
+	const apiKeyModelUsageData = analytics?.apiKeyModelUsage || [];
 	const projectBreakdownData = analytics?.projectBreakdown || [];
 
 	return (
@@ -306,7 +306,7 @@ export const OverviewTab = React.memo(() => {
 				timeSeriesData={timeSeriesData}
 				timeRange={timeRange}
 				modelData={modelData}
-				accountModelUsageData={accountModelUsageData}
+				apiKeyModelUsageData={apiKeyModelUsageData}
 				projectBreakdownData={projectBreakdownData}
 				loading={analyticsPending}
 				unavailable={analyticsUnavailable}
