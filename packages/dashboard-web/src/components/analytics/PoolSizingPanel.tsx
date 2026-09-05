@@ -1,4 +1,5 @@
 import type {
+	PoolSizingBoundaryRule,
 	PoolSizingCycle,
 	PoolSizingResponse,
 	PoolSizingRow,
@@ -93,8 +94,42 @@ function formatDay(ms: number): string {
 	return format(new Date(ms), "MMM d");
 }
 
-/** The span the cycle's windows actually ended in, not the grid boundaries. */
-function endRangeLabel(cycle: PoolSizingCycle): string {
+const UTC_DAY_FORMAT = new Intl.DateTimeFormat("en-US", {
+	month: "short",
+	day: "numeric",
+	timeZone: "UTC",
+});
+
+/**
+ * A day on the cycle grid, which is defined in UTC. Grid boundaries must not
+ * shift with the viewer's timezone; `formatDay` stays local because it renders
+ * window-end instants, which are moments the reader lived through.
+ */
+function formatUtcDay(ms: number): string {
+	return UTC_DAY_FORMAT.format(new Date(ms));
+}
+
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * How one cycle is named, which differs by how the row's cycles are bounded.
+ *
+ * `iso_week` rows are bucketed by a calendar week (Monday 00:00 UTC), so the
+ * label is that week — Monday through Sunday. The windows inside it end
+ * wherever the rolling window happened to land, and naming a row by that day
+ * names the window rather than the cycle the row is boundaried by.
+ *
+ * `reset_phase_gap` rows have no calendar week: the 7-day grid is anchored at
+ * the pool's reset phases, so the label is the span the cycle's windows
+ * actually ended in, collapsed to one day when they coincide.
+ */
+function cycleLabel(
+	cycle: PoolSizingCycle,
+	boundaryRule: PoolSizingBoundaryRule,
+): string {
+	if (boundaryRule === "iso_week") {
+		return `${formatUtcDay(cycle.start)} – ${formatUtcDay(cycle.end - DAY_MS)}`;
+	}
 	if (cycle.resetFrom === null || cycle.resetTo === null) {
 		return `${formatDay(cycle.start)} – ${formatDay(cycle.end)}`;
 	}
@@ -236,7 +271,7 @@ function SummaryTable({ rows }: { rows: PoolSizingRow[] }) {
 										<>
 											{consumedText(latest)} account-weeks
 											<span className="block text-muted-foreground">
-												{endRangeLabel(latest)}
+												{cycleLabel(latest, row.boundaryRule)}
 											</span>
 										</>
 									) : (
@@ -250,7 +285,7 @@ function SummaryTable({ rows }: { rows: PoolSizingRow[] }) {
 										? "—"
 										: inProgress.map((cycle) => (
 												<span key={cycle.start} className="block">
-													{`${endRangeLabel(cycle)}: ${cycle.consumed.toFixed(2)} of ${cycle.accountsInPool} so far`}
+													{`${cycleLabel(cycle, row.boundaryRule)}: ${cycle.consumed.toFixed(2)} of ${cycle.accountsInPool} so far`}
 												</span>
 											))}
 								</TableCell>
@@ -288,7 +323,7 @@ function CycleDetails({ row }: { row: PoolSizingRow }) {
 					<TableBody>
 						{row.cycles.map((cycle) => (
 							<TableRow key={cycle.start} className="align-top">
-								<TableCell>{endRangeLabel(cycle)}</TableCell>
+								<TableCell>{cycleLabel(cycle, row.boundaryRule)}</TableCell>
 								<TableCell>
 									{cycle.status === "completed" ? "Completed" : "In progress"}
 								</TableCell>

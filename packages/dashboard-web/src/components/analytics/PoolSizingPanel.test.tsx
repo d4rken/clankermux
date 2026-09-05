@@ -215,3 +215,76 @@ describe("PoolSizingPanel — separate stops with no sampled pools", () => {
 		expect(html).toContain("Stops not counted as capacity");
 	});
 });
+
+describe("PoolSizingPanel — an iso_week cycle labelled by its week span", () => {
+	it("labels a GPT cycle by its Monday-to-Sunday week, not by where its windows ended", () => {
+		const DAY_MS = 24 * 60 * 60 * 1000;
+		const WEEK_MS = 7 * DAY_MS;
+		// Monday 2026-08-31 00:00 UTC through Monday 2026-09-07 00:00 UTC: one
+		// ISO week. The row's single Codex window ended inside it, on Sep 5, so
+		// the end-range label collapses to that one day — which names the window,
+		// not the cycle this row is boundaried by.
+		const start = Date.UTC(2026, 7, 31);
+		const windowEnd = Date.UTC(2026, 8, 5, 7);
+		const html = render({
+			data: {
+				...emptyPoolSizingFixture(),
+				rows: [
+					{
+						kind: "class",
+						classId: "codex",
+						classLabel: "GPT",
+						family: null,
+						familyLabel: null,
+						boundaryRule: "iso_week",
+						accountsVoting: 1,
+						accountsLocked: 1,
+						tierComparable: true,
+						verdict: "removal_not_established",
+						verdictBasis: "at_or_below_threshold",
+						verdictCycles: 1,
+						reserveBandCycles: 0,
+						terminalStopCycles: 0,
+						cycles: [
+							{
+								start,
+								end: start + WEEK_MS,
+								resetFrom: windowEnd,
+								resetTo: windowEnd,
+								status: "completed",
+								accountsInPool: 1,
+								accountsObserved: 1,
+								consumed: 0.9,
+								lowerBound: false,
+								removalInfeasible: false,
+								verdictBasis: "at_or_below_threshold",
+								reserveBandEntered: false,
+								terminalStops: 0,
+								rejectedAttempts: 0,
+								burstPeakAccounts: null,
+								tierLabel: "Pro",
+								accounts: [
+									{
+										accountId: "codex-1",
+										accountName: "Codex 1",
+										peakPct: 90,
+										windows: 1,
+										resetAt: windowEnd,
+										effectiveEnd: windowEnd,
+										abandoned: false,
+										sampleCount: 120,
+										observedThroughEnd: true,
+										tierLabel: "Pro",
+									},
+								],
+							},
+						],
+					},
+				],
+			},
+		});
+
+		expect(html).toContain("Aug 31 – Sep 6");
+		expect(html).not.toMatch(/>Sep 5</);
+	});
+});
