@@ -2636,6 +2636,8 @@ describe("computeCapacityRunway with learning accounts", () => {
 		expect(
 			isLearningEstimate(estimateWindowExhaustion(codex1.windows[0], NOW), 1),
 		).toBe(true);
-		expect(computeCapacityRunwayBand([codex1, codex2], NOW, outcome)).toBeNull();
+		expect(
+			computeCapacityRunwayBand([codex1, codex2], NOW, outcome),
+		).toBeNull();
 	});
 });

@@ -113,6 +113,23 @@ describe("computeFiveHourPacing", () => {
 		expect(pacing.outlook).toEqual({ label: "Pacing", tone: "warning" });
 	});
 
+	it("does not call a window with minutes of evidence running hot", () => {
+		// The same 90% reading, but 30 minutes into the window instead of four
+		// hours in. `runningHot` reads `fiveHour.atRisk`, which now withholds an
+		// estimate this young, so the account counts as room and not as a
+		// projection nobody measured.
+		const pacing = pacingFor([
+			account({
+				id: "a",
+				name: "alpha",
+				usageData: usage(90, 20, { fiveHourResetMs: NOW + 4.5 * HOUR }),
+			}),
+		]);
+
+		expect(pacing.runningHot).toBe(0);
+		expect(pacing.room).toBe(1);
+	});
+
 	it("counts a provider with no 5-hour window as unknown, never as room", () => {
 		const pacing = pacingFor([
 			account({ id: "a", name: "alpha", usageData: usage(20, 20) }),

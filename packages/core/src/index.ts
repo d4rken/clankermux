@@ -227,6 +227,7 @@ export {
 	type PoolUsageContribution,
 	type PoolUsageExclusion,
 	type PoolUsageFallback,
+	type PoolUsageLearning,
 	type PoolUsageProjection,
 	type PoolUsageResult,
 	type PoolWindow,

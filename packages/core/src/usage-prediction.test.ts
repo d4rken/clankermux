@@ -324,9 +324,9 @@ describe("isResetBoundary / isFitBoundary", () => {
 	});
 
 	test("a drop of exactly the threshold is a FIT boundary, not a window one", () => {
-		expect(isResetBoundary(p(40, FIXTURE_RESET_1), p(35, FIXTURE_RESET_1))).toBe(
-			false,
-		);
+		expect(
+			isResetBoundary(p(40, FIXTURE_RESET_1), p(35, FIXTURE_RESET_1)),
+		).toBe(false);
 		expect(isFitBoundary(p(40, FIXTURE_RESET_1), p(35, FIXTURE_RESET_1))).toBe(
 			true,
 		);

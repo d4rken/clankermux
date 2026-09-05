@@ -296,7 +296,9 @@ export function estimateWindowExhaustion(
 		// first request pins it. Safe to test after the regression branch — every
 		// poll of a sliding window is an `isResetBoundary`, so no usable
 		// prediction can exist for one.
-		if (isUnstartedWindow({ utilizationPct: pct, windowStartMs, observedAtMs })) {
+		if (
+			isUnstartedWindow({ utilizationPct: pct, windowStartMs, observedAtMs })
+		) {
 			return {
 				source: "unstarted",
 				slopePctPerHour: null,
@@ -967,8 +969,12 @@ export function computeCapacityRunway(
 	if (accounts.length === 0) return { kind: "no-accounts" };
 
 	const horizonEndMs = now + horizonMs;
-	const { pooled, unprojectableAccountIds, learningAccountIds, assumedCredits } =
-		buildPool(accounts, now, horizonEndMs, 1);
+	const {
+		pooled,
+		unprojectableAccountIds,
+		learningAccountIds,
+		assumedCredits,
+	} = buildPool(accounts, now, horizonEndMs, 1);
 
 	// Every eligible account still learning is "we do not know yet", not
 	// "forever": the same `unknown` every other insufficient-evidence pool
@@ -1371,7 +1377,12 @@ function buildPool(
 		});
 	}
 
-	return { pooled, unprojectableAccountIds, learningAccountIds, assumedCredits };
+	return {
+		pooled,
+		unprojectableAccountIds,
+		learningAccountIds,
+		assumedCredits,
+	};
 }
 
 /**

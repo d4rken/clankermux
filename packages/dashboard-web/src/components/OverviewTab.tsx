@@ -51,6 +51,7 @@ const PLACEHOLDER_CLASS_POOL: ServableClassPool = {
 	capacityCount: 0,
 	eligibleTotal: 0,
 	singlePointOfFailure: false,
+	unstartedCount: 0,
 	earliestResetMs: null,
 	earliestResetAccountName: null,
 	earliestResetAccountId: null,

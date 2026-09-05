@@ -61,7 +61,8 @@ export function isFitBoundary(
 	cur: PredictionPoint,
 ): boolean {
 	return (
-		isResetBoundary(prev, cur) || isRevisionDrop(prev.utilization, cur.utilization)
+		isResetBoundary(prev, cur) ||
+		isRevisionDrop(prev.utilization, cur.utilization)
 	);
 }
 

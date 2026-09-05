@@ -66,6 +66,17 @@ export interface PublicRunwayCoverage {
 	statedKeyCount: number;
 	/** Those whose accounts had no readable window. The two counts sum. */
 	unobservedKeyCount: number;
+	/**
+	 * Accounts, deduped across every active key, that the scan withheld because
+	 * their burn is not measured yet — inside the first hour of a window, at 0%,
+	 * or on a window the provider has not started.
+	 *
+	 * A COUNT, not ids: account identity is not this surface's to publish. It is
+	 * the only thing said about the case where every key is unobserved, which is
+	 * exactly when `worstStatedOutcome` is null — without it the wire would carry
+	 * "no evidence" for a pool that is merely early in its window.
+	 */
+	learningAccountCount: number;
 }
 
 /** The worst stateable outcome, stripped to the pool-level facts. */
@@ -126,6 +137,7 @@ export function createPublicRunwayReader(dbOps: DatabaseOperations) {
 				activeKeyCount: headline.activeKeyCount,
 				statedKeyCount: headline.statedKeyCount,
 				unobservedKeyCount: headline.unobservedKeyCount,
+				learningAccountCount: headline.learningAccountIds.length,
 			},
 			worstStatedOutcome: outcome
 				? {

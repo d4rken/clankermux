@@ -14,6 +14,7 @@ import {
 import {
 	computeCapacityRunway,
 	estimateWindowExhaustion,
+	isUnstartedWindow,
 	RUNWAY_HORIZON_MS,
 	type RunwayAccountInput,
 	type RunwayOutcome,
@@ -83,7 +84,15 @@ export type HeadroomAbsence =
 	 * nesting, so neither end of the share range dominates the other and no
 	 * single scan bounds the answer.
 	 */
-	| "bound-broken-by-credits";
+	| "bound-broken-by-credits"
+	/**
+	 * `unknown` because every eligible account is still LEARNING its burn —
+	 * inside the first hour of a window, at 0%, or on a window the provider has
+	 * not started. Distinct from `beyond-probe-range`, where a probe actually
+	 * ran and found nothing: here there was nothing to probe, and the answer
+	 * arrives on its own as the accounts accumulate evidence.
+	 */
+	| "learning-accounts";
 
 /**
  * How well-evidenced the row's STATED OUTCOME is — a different claim from
@@ -190,6 +199,15 @@ export interface WorkloadHeadroomRow {
 	 * act on "we could not read it".
 	 */
 	unopenedAccountIds: string[];
+	/**
+	 * Of those, the ones excluded only because their burn is not measured yet.
+	 *
+	 * A subset of {@link unreadableAccountIds} (or, on an `unknown` outcome, of
+	 * {@link eligibleAccountIds}), and the difference matters to a reader: an
+	 * unreadable account may stay unreadable, while these become projectable on
+	 * their own as the window accumulates evidence.
+	 */
+	learningAccountIds: string[];
 	/** Of the eligible ones, those already at or past 100% on any pooled window. */
 	spentAccountIds: string[];
 }
@@ -329,7 +347,20 @@ function unreadableOf(outcome: RunwayOutcome, pooled: string[]): string[] {
 		: [];
 }
 
+/** The accounts an outcome withheld for lack of evidence, or none. */
+function learningOf(outcome: RunwayOutcome): string[] {
+	return "learningAccountIds" in outcome
+		? (outcome.learningAccountIds ?? [])
+		: [];
+}
+
 function absenceFor(outcome: RunwayOutcome): HeadroomAbsence {
+	// "Nothing to probe" before "the probe found nothing": on a `beyond-horizon`
+	// or `runway` a probe genuinely ran, but an `unknown` built entirely of
+	// learning accounts never had a pool to walk.
+	if (outcome.kind === "unknown" && learningOf(outcome).length > 0) {
+		return "learning-accounts";
+	}
 	return outcome.kind === "beyond-horizon" || outcome.kind === "runway"
 		? "beyond-probe-range"
 		: "not-projected";
@@ -429,6 +460,18 @@ function nextResetGuidance(
 				window.windowKind === "seven_day" ||
 				window.windowKind.startsWith("weekly_scoped:"),
 		)
+		// An UNSTARTED window is skipped before the minimum. Its `resetsAtMs` is
+		// the placeholder the provider re-stamps as `now + duration` on every
+		// poll, so it wins "soonest" forever and would name a planning deadline
+		// that keeps sliding away — and the guidance horizon is measured to it.
+		.filter(
+			(window) =>
+				!isUnstartedWindow({
+					utilizationPct: window.utilizationPct,
+					windowStartMs: window.windowStartMs,
+					observedAtMs: window.observedAtMs,
+				}),
+		)
 		.map((window) => window.resetsAtMs)
 		.filter(
 			(at): at is number => at !== null && Number.isFinite(at) && at > now,
@@ -515,6 +558,7 @@ export function computeWorkloadHeadroom(
 			// account reports. "Has not used this family yet" is a claim only a
 			// family row can make.
 			unopenedAccountIds: [],
+			learningAccountIds: learningOf(outcome),
 			spentAccountIds: spentAccountIds(inputs, outcome),
 		});
 	}
@@ -633,6 +677,7 @@ export function computeWorkloadHeadroom(
 				),
 			],
 			unopenedAccountIds: unopened,
+			learningAccountIds: learningOf(bound.outcome),
 			spentAccountIds: spentAccountIds(inputs, bound.outcome),
 		});
 	}

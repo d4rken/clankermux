@@ -903,6 +903,80 @@ describe("computeWorkloadHeadroom — four states of scoped evidence", () => {
 	});
 });
 
+describe("computeWorkloadHeadroom — learning accounts", () => {
+	/** Weekly window `ageMs` after its structural start, at `pct`. */
+	function youngWeekly(id: string, pct: number, ageMs: number) {
+		return {
+			id,
+			name: id,
+			provider: "codex",
+			usageData: anthropicUsage({
+				fiveHourPct: 1,
+				fiveHourResetMs: NOW + HOUR,
+				weeklyPct: pct,
+				weeklyResetMs: NOW - ageMs + 7 * DAY,
+				scoped: null,
+			}),
+			usageObservedAtMs: NOW,
+		} satisfies RunwayAccountSource;
+	}
+
+	it("names the accounts it is waiting on instead of stating infinity", () => {
+		const row = computeWorkloadHeadroom(
+			[youngWeekly("codex-1", 1, 623_000), youngWeekly("codex-2", 2, 623_000)],
+			NOW,
+		).find((candidate) => candidate.dimensionId === "codex");
+
+		expect(row?.outcome.kind).toBe("unknown");
+		expect(row?.headroomAbsence).toBe("learning-accounts");
+		expect(row?.learningAccountIds).toEqual(["codex-1", "codex-2"]);
+		// Learning accounts are unprojectable too — the narrower list only says
+		// WHY, and that the exclusion is temporary.
+		expect(row?.unreadableAccountIds).toEqual(["codex-1", "codex-2"]);
+		expect(row?.projectionBasis).toBeNull();
+	});
+
+	it("does not blame a probe that never ran on the probe's range", () => {
+		const row = computeWorkloadHeadroom(
+			[youngWeekly("codex-1", 1, 623_000), youngWeekly("codex-2", 40, 5 * DAY)],
+			NOW,
+		).find((candidate) => candidate.dimensionId === "codex");
+
+		expect(row?.outcome.kind).not.toBe("unknown");
+		expect(row?.headroomAbsence).not.toBe("learning-accounts");
+		expect(row?.learningAccountIds).toEqual(["codex-1"]);
+	});
+
+	it("refuses an unstarted window as the next planning reset", () => {
+		const unstarted = {
+			id: "codex-2",
+			name: "codex-2",
+			provider: "codex",
+			usageData: anthropicUsage({
+				fiveHourPct: 1,
+				fiveHourResetMs: NOW + HOUR,
+				weeklyPct: 0,
+				weeklyResetMs: NOW + 7 * DAY,
+				scoped: null,
+			}),
+			usageObservedAtMs: NOW,
+		} satisfies RunwayAccountSource;
+
+		const alone = computeWorkloadHeadroom([unstarted], NOW).find(
+			(candidate) => candidate.dimensionId === "codex",
+		);
+		// The provider re-stamps that reset on every poll, so publishing it as a
+		// planning deadline states a date that never arrives.
+		expect(alone?.nextReset).toBeNull();
+
+		const beside = computeWorkloadHeadroom(
+			[unstarted, youngWeekly("codex-1", 40, 5 * DAY)],
+			NOW,
+		).find((candidate) => candidate.dimensionId === "codex");
+		expect(beside?.nextReset?.resetsAtMs).toBe(NOW - 5 * DAY + 7 * DAY);
+	});
+});
+
 describe("toScopedFamilyRunwayInput", () => {
 	it("never names the scoped window with the credit-bearing weekly kind", () => {
 		const input = toScopedFamilyRunwayInput(

@@ -778,6 +778,48 @@ describe("GET /api/runway persisted Codex usage", () => {
 		expect(adapterQueries).toEqual([]);
 	});
 
+	it("names the accounts it is waiting on instead of extrapolating them", async () => {
+		// The live 2026-09-05T14:09Z pool: Codex-1 at 1% 623 s after its weekly
+		// window opened, Codex-2 at 0% with a reset that slides forward on every
+		// poll. Extrapolated, the first stated a 17-hour runway.
+		const body = await runway(
+			makeDbOps({
+				accounts: [
+					makeAccount({ id: "codex-1", provider: "codex", last_used: null }),
+					makeAccount({ id: "codex-2", provider: "codex", last_used: null }),
+				],
+				keys: [makeKey({ id: "k1", pinnedProviders: ["codex"] })],
+				codexColumns: [
+					{
+						id: "codex-1",
+						codex_usage_json: codexSnapshot(1, BASE - 623_000 + 7 * DAY_MS),
+						codex_usage_observed_at: BASE,
+					},
+					{
+						id: "codex-2",
+						codex_usage_json: codexSnapshot(0, BASE + 7 * DAY_MS),
+						codex_usage_observed_at: BASE,
+					},
+				],
+			}),
+		);
+
+		expect(body.keys[0].outcome).toEqual({
+			kind: "unknown",
+			learningAccountIds: ["codex-1", "codex-2"],
+		});
+		// And the unstarted window is flagged on the evidence block, so the
+		// dashboard's "next reset" row cannot offer its sliding placeholder.
+		const codex2 = body.accounts.find((a) => a.id === "codex-2");
+		expect(codex2?.windows.find((w) => w.kind === "seven_day")?.unstarted).toBe(
+			true,
+		);
+		const codex1 = body.accounts.find((a) => a.id === "codex-1");
+		expect(
+			codex1?.windows.find((w) => w.kind === "seven_day")?.unstarted,
+		).toBeUndefined();
+	});
+
 	it("still resolves an Anthropic account from the usage cache", async () => {
 		usageCache.set("anthropic-1", HEALTHY());
 

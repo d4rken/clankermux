@@ -132,7 +132,11 @@ export function observeUsageReading(
 
 	if (pct === null) return;
 
-	if (state.lastPct != null && isRevisionDrop(state.lastPct, pct) && resetMs != null) {
+	if (
+		state.lastPct != null &&
+		isRevisionDrop(state.lastPct, pct) &&
+		resetMs != null
+	) {
 		state.anchor = {
 			anchorMs: reading.observedAtMs,
 			anchorPct: pct,

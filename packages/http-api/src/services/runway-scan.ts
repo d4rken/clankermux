@@ -1,9 +1,11 @@
 import {
 	computeApiKeyRunways,
+	computeWindowStartMs,
 	type ExtractedValue,
 	extractFiveHour,
 	extractSevenDay,
 	FIVE_HOUR_ELIGIBLE_PROVIDERS,
+	isUnstartedWindow,
 	type KeyRunway,
 	normalizeAnthropicUsage,
 	RUNWAY_HORIZON_MS,
@@ -228,12 +230,30 @@ function windowSummary(
 	kind: RunwayWindowKind,
 	extracted: ExtractedValue | null,
 	prediction: UsagePrediction | undefined,
+	sampledAtMs: number | null,
 ): RunwayWindowSummary {
+	// The summary computes no estimate — it maps the resolved reading — so the
+	// unstarted flag is derived from the same three inputs the estimator uses:
+	// nothing spent, and a structural start that tracks the observation because
+	// the provider re-stamps `resets_at = now + duration` on every poll. Omitted
+	// rather than set false, so an existing exact-match consumer is untouched.
+	const unstarted =
+		extracted != null &&
+		extracted.pct != null &&
+		isUnstartedWindow({
+			utilizationPct: extracted.pct,
+			windowStartMs:
+				extracted.resetMs == null
+					? null
+					: computeWindowStartMs(extracted.resetMs, kind),
+			observedAtMs: sampledAtMs,
+		});
 	return {
 		kind,
 		utilizationPct: extracted?.pct ?? null,
 		resetsAtMs: extracted?.resetMs ?? null,
 		prediction: servablePrediction(prediction),
+		...(unstarted ? { unstarted: true } : {}),
 	};
 }
 
@@ -304,6 +324,7 @@ function accountSummary(
 				"five_hour",
 				observations?.fiveHour ?? null,
 				prediction?.fiveHour,
+				sampledAtMs,
 			),
 		);
 	}
@@ -313,6 +334,7 @@ function accountSummary(
 				"seven_day",
 				observations?.sevenDay ?? null,
 				prediction?.sevenDay,
+				sampledAtMs,
 			),
 		);
 	}
