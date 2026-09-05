@@ -346,6 +346,7 @@ export const ANALYTICS_SECTIONS = [
 	"accountPerformance",
 	"activeSessions",
 	"activeSessionsByAccount",
+	"apiKeyModelUsage",
 	"apiKeyPerformance",
 	"cacheFlow",
 	"contextComposition",
@@ -434,6 +435,25 @@ export interface AnalyticsResponse {
 		totalTokens?: number;
 	}>;
 	accountModelUsage?: Array<{ account: string; model: string; count: number }>;
+	/**
+	 * Per-API-key × model request counts.
+	 *
+	 * `apiKeyId` is the IDENTITY (`null` = the request carried no key); `apiKey`
+	 * is a display label and is the same string on every row sharing an
+	 * `apiKeyId` — the key's CURRENT name, else the record-time snapshot name for
+	 * a hard-deleted key, else "No key" for the null bucket. A real key literally
+	 * named "No key" therefore stays a separate entry, because identity is the
+	 * id and never the label. `model` is "Unknown" for rows with no model.
+	 *
+	 * COMPLETE for the scope: no row cap and no null-model exclusion, so the
+	 * per-key sums reconcile with `totals.totalRequests` under the same filters.
+	 */
+	apiKeyModelUsage?: Array<{
+		apiKeyId: string | null;
+		apiKey: string;
+		model: string;
+		count: number;
+	}>;
 	modelPerformance?: ModelPerformance[];
 	// Per-model median output-speed time series (artifact-filtered). Optional
 	// because an older server may not populate it; consumers should `?? []`.

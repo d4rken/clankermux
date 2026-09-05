@@ -20,6 +20,8 @@ interface BasePieChartProps {
 	data: Array<{ name: string; value: number; [key: string]: string | number }>;
 	dataKey?: string;
 	nameKey?: string;
+	/** Entry field used as the React key of each slice. Defaults to nameKey, which is only safe while names are unique. */
+	cellKey?: string;
 	loading?: boolean;
 	height?: keyof typeof CHART_HEIGHTS | number;
 	innerRadius?: number;
@@ -47,6 +49,7 @@ export function BasePieChart({
 	data,
 	dataKey = "value",
 	nameKey = "name",
+	cellKey,
 	loading = false,
 	height = "medium",
 	innerRadius = 0,
@@ -103,7 +106,7 @@ export function BasePieChart({
 					>
 						{data.map((entry, index) => (
 							<Cell
-								key={`cell-${entry[nameKey]}`}
+								key={`cell-${entry[cellKey ?? nameKey]}`}
 								fill={cellColors[index % cellColors.length]}
 							/>
 						))}

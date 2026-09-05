@@ -180,7 +180,7 @@ describe("ChartsSection unavailable", () => {
 		timeSeriesData: [],
 		timeRange: "6h",
 		modelData: [],
-		accountModelUsageData: [],
+		apiKeyModelUsageData: [],
 		projectBreakdownData: [],
 	};
 

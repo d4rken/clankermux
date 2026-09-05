@@ -14,6 +14,7 @@ import {
 	useQueryClient,
 } from "@tanstack/react-query";
 import { api, type RequestPayload, type RequestSummary } from "../api";
+import type { FilterState } from "../components/analytics/AnalyticsFilters";
 import { canonicalSections } from "../lib/analytics-sections";
 import { eventLoopTone } from "../lib/event-loop";
 import { invalidateCapacityQueries, queryKeys } from "../lib/query-keys";
@@ -470,22 +471,31 @@ export const useUsageScopedHistory = (range: string) => {
 };
 
 /**
- * How often requests were actually blocked in the range, by cause.
+ * How often requests were actually blocked in the range, by cause, under the
+ * analytics filter panel.
  *
  * Same cadence as the other range-scoped history reads: a stop is an event
  * already in the past, so a faster poll only re-fetches the same rows.
+ *
+ * `filters` is the panel state verbatim — `api.getStopsHistory` translates the
+ * two NULL-bucket flags into their wire names, exactly as it does for
+ * `getAnalytics`, so no mapping happens here and the two reads on a tab cannot
+ * disagree about what was selected.
  */
-export const stopsHistoryQueryOptions = (range: string) => ({
-	queryKey: queryKeys.stopsHistory(range),
-	queryFn: () => api.getStopsHistory(range),
+export const stopsHistoryQueryOptions = (
+	range: string,
+	filters?: FilterState,
+) => ({
+	queryKey: queryKeys.stopsHistory(range, filters),
+	queryFn: () => api.getStopsHistory(range, filters),
 	staleTime: 45000,
 	refetchInterval: 60000,
 	refetchIntervalInBackground: false,
 	retry: shouldRetryDashboardQuery,
 });
 
-export const useStopsHistory = (range: string) => {
-	return useQuery(stopsHistoryQueryOptions(range));
+export const useStopsHistory = (range: string, filters?: FilterState) => {
+	return useQuery(stopsHistoryQueryOptions(range, filters));
 };
 
 /**

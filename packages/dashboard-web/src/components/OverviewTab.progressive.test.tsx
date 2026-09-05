@@ -12,7 +12,7 @@
  * already on the page.
  */
 import { describe, expect, it } from "bun:test";
-import type { RunwayResponse, StopsHistoryResponse } from "@clankermux/types";
+import type { RunwayResponse } from "@clankermux/types";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { renderToStaticMarkup } from "react-dom/server";
 import { MemoryRouter } from "react-router";
@@ -93,40 +93,6 @@ function seedError(queryClient: QueryClient, key: readonly unknown[]): void {
 			dataUpdatedAt: 0,
 			errorUpdatedAt: Date.now(),
 		});
-}
-
-/** A resolved `/api/analytics/stops-history` payload with one blocked cause. */
-function stopsResponse(): StopsHistoryResponse {
-	const now = Date.now();
-	const HOUR = 60 * 60 * 1000;
-	return {
-		range: "6h",
-		bucketMs: HOUR,
-		windowStartsAt: now - 6 * HOUR,
-		windowEndsAt: now,
-		totalRequests: 500,
-		blockedRequests: 7,
-		causes: [
-			{
-				cause: "pool_quota_exhausted",
-				count: 7,
-				firstSeenMs: now - 3 * HOUR,
-				lastSeenMs: now - HOUR,
-				topRequestedModel: "gpt-5.2-codex",
-				topRequestedModelCount: 7,
-				sampleErrorMessage: "all_accounts_failed",
-				series: [{ ts: now - HOUR, count: 7 }],
-			},
-		],
-		candidates: {
-			observedRequests: 500,
-			zeroCandidateRequests: 7,
-			distribution: [
-				{ candidatesCount: 0, requests: 7 },
-				{ candidatesCount: 2, requests: 493 },
-			],
-		},
-	};
 }
 
 /**
@@ -320,32 +286,6 @@ describe("OverviewTab progressive render", () => {
 		const html = render(queryClient);
 
 		expect(html).not.toContain("Model limits");
-	});
-
-	it("renders the stops card for a seeded range read", () => {
-		const queryClient = client(false);
-		queryClient.setQueryData(queryKeys.stopsHistory("6h"), stopsResponse());
-
-		const html = render(queryClient);
-
-		expect(html).toContain("Stops");
-		expect(html).toContain("7 of 500 requests blocked");
-		expect(html).toContain("Pool quota exhausted");
-	});
-
-	it("blanks only the stops card when its own read fails", () => {
-		// Same rule as the runway tile: one card per read, so a failing stops
-		// query must not take the quota cards or the charts down with it.
-		const queryClient = client(false);
-		queryClient.setQueryData(queryKeys.accounts(), []);
-		seedError(queryClient, queryKeys.stopsHistory("6h"));
-
-		const html = render(queryClient);
-
-		expect(html).toContain("Stops data unavailable");
-		expect(html).not.toContain("requests blocked");
-		expect(html).toContain("Quota");
-		expect(html).toContain("Live Activity");
 	});
 
 	it("renders no error badge on the health strip while stats is pending", () => {

@@ -8,6 +8,7 @@
 			"accountPerformance",
 			"activeSessions",
 			"activeSessionsByAccount",
+			"apiKeyModelUsage",
 			"apiKeyPerformance",
 			"cacheFlow",
 			"contextComposition",
@@ -222,6 +223,50 @@
 		{
 			"account": "Unknown",
 			"model": "claude-opus-4-8",
+			"count": 1
+		}
+	],
+	"apiKeyModelUsage": [
+		{
+			"apiKeyId": "key-live-1",
+			"apiKey": "live-key",
+			"model": "claude-opus-4-8",
+			"count": 5
+		},
+		{
+			"apiKeyId": "key-renamed-2",
+			"apiKey": "new-name",
+			"model": "claude-sonnet-5",
+			"count": 2
+		},
+		{
+			"apiKeyId": null,
+			"apiKey": "No key",
+			"model": "Unknown",
+			"count": 1
+		},
+		{
+			"apiKeyId": null,
+			"apiKey": "No key",
+			"model": "gpt-5-codex",
+			"count": 1
+		},
+		{
+			"apiKeyId": "key-deleted-3",
+			"apiKey": "retired-key",
+			"model": "claude-opus-4-8",
+			"count": 1
+		},
+		{
+			"apiKeyId": "key-deleted-3",
+			"apiKey": "retired-key",
+			"model": "gpt-5-codex",
+			"count": 1
+		},
+		{
+			"apiKeyId": "key-live-1",
+			"apiKey": "live-key",
+			"model": "claude-sonnet-5",
 			"count": 1
 		}
 	],

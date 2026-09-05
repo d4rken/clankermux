@@ -171,6 +171,61 @@ function notifyUnauthorized(): void {
 	}
 }
 
+/**
+ * The analytics filter panel as the API layer takes it.
+ *
+ * The wire names differ from the UI's: the two NULL buckets travel as
+ * `accountsNone` / `projectsNone` while the panel state calls them
+ * `noAccount` / `noProject`. That translation happens in exactly one place —
+ * {@link appendRequestFilterParams} — so every endpoint that honors the panel
+ * spells the query string the same way.
+ */
+export interface AnalyticsRequestFilters {
+	/** Account IDs, not display names. */
+	accounts?: string[];
+	models?: string[];
+	/** api_key_id values, not display names. */
+	apiKeys?: string[];
+	projects?: string[];
+	noAccount?: boolean;
+	noProject?: boolean;
+	status?: "all" | "success" | "error";
+}
+
+/**
+ * Append the filter panel to a query string, in a fixed parameter order.
+ *
+ * Order is not cosmetic: the analytics worker caches on the canonicalized
+ * parameter set, so two callers spelling one selection differently would be
+ * two cache entries for one answer.
+ */
+function appendRequestFilterParams(
+	params: URLSearchParams,
+	filters: AnalyticsRequestFilters | undefined,
+): void {
+	if (filters?.accounts?.length) {
+		params.append("accounts", filters.accounts.join(","));
+	}
+	if (filters?.models?.length) {
+		params.append("models", filters.models.join(","));
+	}
+	if (filters?.apiKeys?.length) {
+		params.append("apiKeys", filters.apiKeys.join(","));
+	}
+	if (filters?.projects?.length) {
+		params.append("projects", filters.projects.join(","));
+	}
+	if (filters?.noAccount) {
+		params.append("accountsNone", "true");
+	}
+	if (filters?.noProject) {
+		params.append("projectsNone", "true");
+	}
+	if (filters?.status && filters.status !== "all") {
+		params.append("status", filters.status);
+	}
+}
+
 /** `GET /api/auth/status`. */
 export interface AuthStatus {
 	/** A management password is set — the API is gated. */
@@ -890,17 +945,7 @@ class API extends HttpClient {
 	 */
 	async getAnalytics(
 		range = "24h",
-		filters?: {
-			/** Account IDs, not display names. */
-			accounts?: string[];
-			models?: string[];
-			/** api_key_id values, not display names. */
-			apiKeys?: string[];
-			projects?: string[];
-			noAccount?: boolean;
-			noProject?: boolean;
-			status?: "all" | "success" | "error";
-		},
+		filters?: AnalyticsRequestFilters,
 		mode: "normal" | "cumulative" = "normal",
 		modelBreakdown?: boolean,
 		sections?: readonly AnalyticsSection[],
@@ -915,27 +960,7 @@ class API extends HttpClient {
 			params.append("sections", canonicalSections(sections).join(","));
 		}
 
-		if (filters?.accounts?.length) {
-			params.append("accounts", filters.accounts.join(","));
-		}
-		if (filters?.models?.length) {
-			params.append("models", filters.models.join(","));
-		}
-		if (filters?.apiKeys?.length) {
-			params.append("apiKeys", filters.apiKeys.join(","));
-		}
-		if (filters?.projects?.length) {
-			params.append("projects", filters.projects.join(","));
-		}
-		if (filters?.noAccount) {
-			params.append("accountsNone", "true");
-		}
-		if (filters?.noProject) {
-			params.append("projectsNone", "true");
-		}
-		if (filters?.status && filters.status !== "all") {
-			params.append("status", filters.status);
-		}
+		appendRequestFilterParams(params, filters);
 		if (mode === "cumulative") {
 			params.append("mode", "cumulative");
 		}
@@ -1077,10 +1102,17 @@ class API extends HttpClient {
 
 	// How often requests were actually blocked in the range, by cause, plus how
 	// many accounts were eligible per request. Range-scoped like the other
-	// history reads.
-	async getStopsHistory(range: string): Promise<StopsHistoryResponse> {
+	// history reads, and filter-scoped like the analytics reads: the card sits
+	// on a tab with a filter panel, so it answers for the same selection as the
+	// panels around it.
+	async getStopsHistory(
+		range: string,
+		filters?: AnalyticsRequestFilters,
+	): Promise<StopsHistoryResponse> {
 		const startTime = Date.now();
-		const url = `/api/analytics/stops-history?range=${encodeURIComponent(range)}`;
+		const params = new URLSearchParams({ range });
+		appendRequestFilterParams(params, filters);
+		const url = `/api/analytics/stops-history?${params.toString()}`;
 		this.logger.debug(`→ GET ${url}`);
 		try {
 			const response = await this.get<StopsHistoryResponse>(url);

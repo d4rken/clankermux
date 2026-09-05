@@ -9,6 +9,7 @@
  */
 
 import { describe, expect, it } from "bun:test";
+import type { RequestFilters } from "@clankermux/database";
 import type { StopsHistorySources } from "../../handlers/stops-history-direct";
 import { createPublicStopsReaderFromSources } from "../public-stops";
 
@@ -32,19 +33,24 @@ function makeSources(
 	calls: string[];
 	sinceValues: number[];
 	bucketValues: number[];
+	/** The filter selection each source was handed, in call order. */
+	filterArgs: Array<RequestFilters | undefined>;
 } {
 	const calls: string[] = [];
 	const sinceValues: number[] = [];
 	const bucketValues: number[] = [];
+	const filterArgs: Array<RequestFilters | undefined> = [];
 	return {
 		calls,
 		sinceValues,
 		bucketValues,
+		filterArgs,
 		now: over.now ?? (() => NOW),
 		getStopsByBucket: async (opts) => {
 			calls.push("getStopsByBucket");
 			sinceValues.push(opts.sinceMs);
 			bucketValues.push(opts.bucketMs);
+			filterArgs.push(opts.filters);
 			if (over.gate) await over.gate;
 			return over.buckets ?? [];
 		},
@@ -52,12 +58,14 @@ function makeSources(
 			calls.push("getStopModelBreakdown");
 			return [];
 		},
-		countRequestsSince: async () => {
+		countRequestsSince: async (opts) => {
 			calls.push("countRequestsSince");
+			filterArgs.push(opts.filters);
 			return over.total ?? 0;
 		},
-		getCandidateCountDistribution: async () => {
+		getCandidateCountDistribution: async (opts) => {
 			calls.push("getCandidateCountDistribution");
+			filterArgs.push(opts.filters);
 			return over.candidates ?? [];
 		},
 	};
@@ -109,6 +117,16 @@ describe("the public stops reader", () => {
 			"pool_quota_exhausted",
 			"model_not_served",
 		]);
+	});
+
+	it("narrows to NOTHING: the pool-level record carries no filter selection", async () => {
+		// The dashboard route scopes to the filter panel a signed-in session had
+		// open. Honoring one here would publish which accounts, keys and projects
+		// exist — the identities this route exists not to disclose — and would
+		// make the memo per-caller.
+		const sources = makeSources({ buckets: BLOCKS, total: 1_000 });
+		await createPublicStopsReaderFromSources(sources)();
+		expect(sources.filterArgs).toEqual([undefined, undefined, undefined]);
 	});
 
 	it("serves the memo inside the TTL instead of re-scanning", async () => {

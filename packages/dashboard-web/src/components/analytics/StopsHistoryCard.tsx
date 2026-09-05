@@ -29,9 +29,10 @@ import {
 interface StopsHistoryCardProps {
 	data: StopsHistoryResponse | undefined;
 	/**
-	 * The tab's ticking clock, for the "last seen" ages. The RANGE is not a prop:
-	 * it lives in the query key, so the payload handed here already belongs to
-	 * the selected range and a second copy could only disagree with it.
+	 * The tab's ticking clock, for the "last seen" ages. Neither the RANGE nor
+	 * the FILTERS are props: both live in the query key, so the payload handed
+	 * here already belongs to the current selection and a second copy could only
+	 * disagree with it.
 	 */
 	now: number;
 	/** Set while the first read is in flight and nothing is cached. */
@@ -95,7 +96,7 @@ function candidatesLine(data: StopsHistoryResponse): string {
 /**
  * How often a request was ACTUALLY blocked, by cause.
  *
- * Every other quota surface on this page is a projection: a percentage, a
+ * Every other quota surface on the dashboard is a projection: a percentage, a
  * runway, a pace. This one is the record of what happened, and it is the only
  * thing that can say whether the projections were describing a real risk. A
  * pool that reads 90% used for a week and never refused a request is not the
@@ -129,7 +130,9 @@ export function StopsHistoryCard({
 				<CardTitle>Stops</CardTitle>
 				<CardDescription>
 					How often a request was actually blocked in this range, by cause, and
-					how many accounts were eligible per request.
+					how many accounts were eligible per request. Requests blocked before
+					an account was chosen carry no account, so an account filter hides
+					them; the no-account bucket shows them.
 				</CardDescription>
 			</CardHeader>
 			<CardContent className="space-y-group">

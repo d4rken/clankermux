@@ -23,8 +23,14 @@ interface ChartsSectionProps {
 	/** Selected dashboard range — forwarded to the time-series chart for labelling. */
 	timeRange: string;
 	modelData: Array<{ name: string; value: number }>;
-	accountModelUsageData: Array<{
-		account: string;
+	/**
+	 * Per-key × model request counts. `apiKeyId` is the identity — `null` is the
+	 * no-key bucket — and `apiKey` is only a label, so two ids sharing a name
+	 * stay two entries.
+	 */
+	apiKeyModelUsageData: Array<{
+		apiKeyId: string | null;
+		apiKey: string;
 		model: string;
 		count: number;
 	}>;
@@ -53,6 +59,15 @@ interface ChartsSectionProps {
  * that height itself. Reserving the full height is the point: a failed read
  * holds the space its chart would occupy rather than collapsing the page.
  */
+/**
+ * Stands in for `apiKeyId: null` as a Map key and a React key.
+ *
+ * A sentinel is safe here where it would not be on the wire: the ids it sits
+ * beside are opaque row ids, never names, so it cannot collide with a key the
+ * user named "No key".
+ */
+const NO_KEY_ID = "__no_key__";
+
 function ChartUnavailable({ height }: { height: keyof typeof CHART_HEIGHTS }) {
 	return (
 		<div
@@ -69,35 +84,44 @@ export function ChartsSection({
 	timeSeriesData,
 	timeRange,
 	modelData,
-	accountModelUsageData,
+	apiKeyModelUsageData,
 	projectBreakdownData,
 	loading,
 	unavailable = false,
 }: ChartsSectionProps) {
 	const series = useSeriesPalette();
-	// Aggregate account-model usage into per-account totals for the donut chart
-	const accountUsageDonutData = useMemo(() => {
-		const totals = new Map<string, number>();
-		for (const row of accountModelUsageData) {
-			totals.set(row.account, (totals.get(row.account) ?? 0) + row.count);
+	// Aggregate per-key model usage into per-key totals for the donut.
+	//
+	// Keyed on the IDENTITY, never on the label: two keys can carry the same
+	// name (a live one and a hard-deleted one whose snapshot name matches), and
+	// the no-key bucket's label "No key" is also a name a real key can be given.
+	// Grouping by label would silently merge those into one slice.
+	const apiKeyUsageDonutData = useMemo(() => {
+		const totals = new Map<string, { name: string; value: number }>();
+		for (const row of apiKeyModelUsageData) {
+			const id = row.apiKeyId ?? NO_KEY_ID;
+			const entry = totals.get(id);
+			if (entry) entry.value += row.count;
+			else totals.set(id, { name: row.apiKey, value: row.count });
 		}
 		return Array.from(totals.entries())
-			.map(([name, value]) => ({ name, value }))
+			.map(([id, entry]) => ({ id, name: entry.name, value: entry.value }))
 			.sort((a, b) => b.value - a.value);
-	}, [accountModelUsageData]);
+	}, [apiKeyModelUsageData]);
 
-	// Build per-account model breakdown for tooltip
-	const accountModelBreakdown = useMemo(() => {
+	// Per-key model breakdown for the sub-rows, on the same identity.
+	const apiKeyModelBreakdown = useMemo(() => {
 		const breakdown = new Map<
 			string,
 			Array<{ model: string; count: number }>
 		>();
-		for (const row of accountModelUsageData) {
-			if (!breakdown.has(row.account)) breakdown.set(row.account, []);
-			breakdown.get(row.account)?.push({ model: row.model, count: row.count });
+		for (const row of apiKeyModelUsageData) {
+			const id = row.apiKeyId ?? NO_KEY_ID;
+			if (!breakdown.has(id)) breakdown.set(id, []);
+			breakdown.get(id)?.push({ model: row.model, count: row.count });
 		}
 		return breakdown;
-	}, [accountModelUsageData]);
+	}, [apiKeyModelUsageData]);
 
 	// Prepare project donut data (total tokens per project)
 	const projectDonutData = useMemo(
@@ -178,12 +202,12 @@ export function ChartsSection({
 					</CardContent>
 				</Card>
 
-				{/* Usage by Account */}
+				{/* Usage by API key */}
 				<Card>
 					<CardHeader className="p-4">
-						<CardTitle>Usage by Account</CardTitle>
+						<CardTitle>Usage by API key</CardTitle>
 						<CardDescription>
-							Request distribution across accounts
+							Request distribution across API keys
 						</CardDescription>
 					</CardHeader>
 					<CardContent className="p-4 pt-0">
@@ -191,7 +215,8 @@ export function ChartsSection({
 							<ChartUnavailable height="compact" />
 						) : (
 							<BasePieChart
-								data={accountUsageDonutData}
+								data={apiKeyUsageDonutData}
+								cellKey="id"
 								loading={loading}
 								height="compact"
 								innerRadius={48}
@@ -200,10 +225,10 @@ export function ChartsSection({
 							/>
 						)}
 						<div className="mt-row space-y-item">
-							{accountUsageDonutData.map((account, index) => {
-								const models = accountModelBreakdown.get(account.name) ?? [];
+							{apiKeyUsageDonutData.map((apiKey, index) => {
+								const models = apiKeyModelBreakdown.get(apiKey.id) ?? [];
 								return (
-									<div key={account.name} className="space-y-tight">
+									<div key={apiKey.id} className="space-y-tight">
 										<div className="flex items-center justify-between text-sm">
 											<div className="flex items-center gap-item">
 												<div
@@ -214,17 +239,17 @@ export function ChartsSection({
 													}}
 												/>
 												<span className="text-muted-foreground font-medium">
-													{account.name}
+													{apiKey.name}
 												</span>
 											</div>
-											<span className="font-medium">{account.value}</span>
+											<span className="font-medium">{apiKey.value}</span>
 										</div>
 										{models.length > 1 && (
 											// `pl-5` is an ALIGNMENT, not a rhythm step, so it stays
-											// off the scale: 20px is the account row's swatch (12px)
+											// off the scale: 20px is the key row's swatch (12px)
 											// plus its `gap-item` (8px), which is what puts these
-											// per-model lines under the account NAME rather than
-											// under its dot.
+											// per-model lines under the key NAME rather than under
+											// its dot.
 											<div className="pl-5 space-y-tight">
 												{models.map((m) => (
 													<div
