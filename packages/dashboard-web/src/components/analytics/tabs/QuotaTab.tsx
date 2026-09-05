@@ -52,7 +52,6 @@ export function QuotaTab() {
 							? "Pool sizing data is unavailable"
 							: undefined
 					}
-					now={Date.now()}
 				/>
 			</section>
 

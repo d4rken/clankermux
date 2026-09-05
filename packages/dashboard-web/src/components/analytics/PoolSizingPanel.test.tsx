@@ -19,9 +19,7 @@ import { PoolSizingPanel } from "./PoolSizingPanel";
 function render(
 	props: Partial<React.ComponentProps<typeof PoolSizingPanel>> = {},
 ): string {
-	return renderToStaticMarkup(
-		<PoolSizingPanel now={POOL_SIZING_NOW} {...props} />,
-	);
+	return renderToStaticMarkup(<PoolSizingPanel {...props} />);
 }
 
 describe("PoolSizingPanel", () => {
@@ -124,5 +122,96 @@ describe("PoolSizingPanel", () => {
 		// "removable" appears once, in the sentence that rules it out.
 		expect(html).toContain("Nothing here ever says an account is removable.");
 		expect(html.split("removable")).toHaveLength(2);
+	});
+});
+
+describe("PoolSizingPanel — an in-progress cycle that opens after now", () => {
+	it("shows the running GPT cycle whose window ends in the next ISO week", () => {
+		const WEEK_MS = 7 * 24 * 60 * 60 * 1000;
+		// Monday 00:00 UTC after POOL_SIZING_NOW (Saturday): the ISO-week cycle a
+		// Codex account produces when its open window resets next week. It is the
+		// only unfinished cycle the row has, and it starts AFTER `now`.
+		const start = Date.UTC(2026, 8, 7);
+		const html = render({
+			data: {
+				...emptyPoolSizingFixture(),
+				rows: [
+					{
+						kind: "class",
+						classId: "codex",
+						classLabel: "GPT",
+						family: null,
+						familyLabel: null,
+						boundaryRule: "iso_week",
+						accountsVoting: 1,
+						accountsLocked: 0,
+						tierComparable: true,
+						verdict: "insufficient_history",
+						verdictBasis: null,
+						verdictCycles: 0,
+						reserveBandCycles: 0,
+						terminalStopCycles: 0,
+						cycles: [
+							{
+								start,
+								end: start + WEEK_MS,
+								resetFrom: start + 3 * 24 * 60 * 60 * 1000,
+								resetTo: start + 3 * 24 * 60 * 60 * 1000,
+								status: "in_progress",
+								accountsInPool: 1,
+								accountsObserved: 1,
+								consumed: 0.3,
+								lowerBound: false,
+								removalInfeasible: false,
+								verdictBasis: "in_progress",
+								reserveBandEntered: false,
+								terminalStops: 0,
+								rejectedAttempts: 0,
+								burstPeakAccounts: null,
+								tierLabel: "Pro",
+								accounts: [
+									{
+										accountId: "codex-1",
+										accountName: "Codex 1",
+										peakPct: 30,
+										windows: 1,
+										resetAt: start + 3 * 24 * 60 * 60 * 1000,
+										effectiveEnd: start + 3 * 24 * 60 * 60 * 1000,
+										abandoned: false,
+										sampleCount: 120,
+										observedThroughEnd: true,
+										tierLabel: "Pro",
+									},
+								],
+							},
+						],
+					},
+				],
+			},
+		});
+
+		expect(html).toContain("0.30 of 1 so far");
+	});
+});
+
+describe("PoolSizingPanel — separate stops with no sampled pools", () => {
+	it("lists stops that are not capacity evidence even when no row has samples", () => {
+		const html = render({
+			data: {
+				...poolSizingFixture(),
+				rows: [],
+				separateStops: [
+					{
+						label: "all_accounts_failed",
+						model: "gpt-5.2-codex",
+						count: 300,
+						firstAt: POOL_SIZING_NOW - 1,
+						lastAt: POOL_SIZING_NOW,
+					},
+				],
+			},
+		});
+
+		expect(html).toContain("Stops not counted as capacity");
 	});
 });
