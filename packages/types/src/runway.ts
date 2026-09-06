@@ -208,6 +208,8 @@ export interface RunwayWindowSummary {
 	 * placeholder 0 that must never be served as a measured slope).
 	 */
 	prediction: UsagePrediction | null;
+	/** Per-window estimate from the scan's reading, independent of other windows. */
+	forecast?: RunwayWindowForecast | null;
 	/**
 	 * True when the window has not started: it reads 0% and its structural start
 	 * coincides with the observation, because the provider slides
@@ -217,6 +219,19 @@ export interface RunwayWindowSummary {
 	 */
 	unstarted?: boolean;
 }
+
+export type RunwayWindowForecast =
+	| {
+			state: "learning";
+			reason: "no-usage" | "unstarted" | "short-history";
+			/** Earliest useful fresh reading; null when usage must begin first. */
+			readyAtMs: number | null;
+	  }
+	| {
+			state: "projected";
+			exhaustsAtMs: number | null;
+			lowConfidence: boolean;
+	  };
 
 export interface RunwayAccountSummary {
 	id: string;

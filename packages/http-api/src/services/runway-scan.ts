@@ -13,6 +13,8 @@ import {
 	type RunwayResetCreditBank,
 	type RunwayWindowObservations,
 	SEVEN_DAY_ELIGIBLE_PROVIDERS,
+	toRunwayAccountInput,
+	windowForecast,
 } from "@clankermux/core";
 import type { DatabaseOperations } from "@clankermux/database";
 import {
@@ -785,6 +787,9 @@ export async function computeRunwayScan(
 	});
 
 	const runways = computeApiKeyRunways(keys, sources, now);
+	const inputsByAccount = new Map(
+		sources.map((source) => [source.id, toRunwayAccountInput(source)]),
+	);
 
 	const accountSummaries: RunwayAccountSummary[] = accounts.map((account) => {
 		const winner = freshestCandidate(
@@ -792,12 +797,28 @@ export async function computeRunwayScan(
 			now,
 			Number.POSITIVE_INFINITY,
 		);
-		return accountSummary(
+		const summary = accountSummary(
 			account,
 			winner?.windows ?? null,
 			winner?.observedAtMs ?? null,
 			predictionByAccount.get(account.id),
 		);
+		const input = inputsByAccount.get(account.id);
+		for (const window of summary.windows) {
+			const scanWindow = input?.windows.find(
+				(w) => w.windowKind === window.kind,
+			);
+			// Display readings can outlive the scan's freshness horizon. Only attach
+			// a derived forecast when both views describe the same observation.
+			window.forecast =
+				scanWindow &&
+				scanWindow.observedAtMs === summary.usageAsOfMs &&
+				scanWindow.utilizationPct === window.utilizationPct &&
+				scanWindow.resetsAtMs === window.resetsAtMs
+					? windowForecast(scanWindow, now)
+					: null;
+		}
+		return summary;
 	});
 
 	return {

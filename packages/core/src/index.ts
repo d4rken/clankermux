@@ -70,6 +70,7 @@ export {
 	type WindowExhaustion,
 	type WindowExhaustionInput,
 	type WindowExhaustionSource,
+	windowForecast,
 } from "./capacity-runway";
 export {
 	BUFFER_SIZES,
