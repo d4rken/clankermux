@@ -1,8 +1,6 @@
 import {
 	FAMILY_WEEKLY_ELEVATED_THRESHOLD_PCT,
 	type FamilyRow,
-	type FamilyWeeklyAccountUsage,
-	type FamilyWeeklyUsage,
 	type Outlook,
 	type PoolAccountBar,
 } from "@clankermux/core";
@@ -32,13 +30,17 @@ interface FamilyWeeklyCardProps {
 	staleNote?: string;
 }
 
-/** The verdict for ONE family, keyed on the account driving its figure. */
+/** The family warning summarizes accounts with elevated or exhausted usage. */
 function familyOutlook(row: FamilyRow): Outlook {
 	const usage = row.usage;
-	if (usage == null) return { label: "No reading", tone: "neutral" };
+	if (usage == null) {
+		return row.unopenedCount > 0
+			? { label: "Unused capacity", tone: "success" }
+			: { label: "No reading", tone: "neutral" };
+	}
 	if (usage.exhaustedCount > 0) {
 		return {
-			label: `Exhausted on ${usage.exhaustedCount} of ${usage.accounts.length}`,
+			label: `Exhausted on ${usage.exhaustedCount} of ${usage.accounts.length + row.unopenedCount}`,
 			tone: "destructive",
 		};
 	}
@@ -48,32 +50,10 @@ function familyOutlook(row: FamilyRow): Outlook {
 	return { label: "On pace", tone: "success" };
 }
 
-/**
- * The account with the most room left in this family.
- *
- * `usage.accounts` is non-empty whenever `usage` exists — a family bucket is
- * only created by an account reporting a window for it — which is the same
- * assumption `worstPct` already rests on.
- */
-function leastUsedAccount(usage: FamilyWeeklyUsage): FamilyWeeklyAccountUsage {
-	return usage.accounts.reduce((least, entry) =>
-		entry.pct < least.pct ? entry : least,
-	);
-}
-
-/**
- * The family's accounts as distribution bars, ordered from most headroom to
- * least, so the account the headline names is the first row.
- *
- * `provider: "anthropic"` because only Anthropic-style payloads carry scoped
- * family windows at all — the bars use it for nothing but the servable-class
- * lookup, which no caller here performs. `state: "reporting"` for the same
- * reason: `computeFamilyWeeklyUsage` has already dropped every account that
- * could not report, so what remains is a reading by construction.
- */
-function familyBars(row: FamilyRow): PoolAccountBar[] {
-	return (row.usage?.accounts ?? [])
-		.map((entry) => ({
+/** Include untouched accounts as zero use without inventing a reset or forecast. */
+function familyBars(row: FamilyRow): Array<PoolAccountBar & { pct: number }> {
+	return [
+		...(row.usage?.accounts ?? []).map((entry) => ({
 			accountId: entry.accountId,
 			name: entry.name,
 			provider: "anthropic",
@@ -81,8 +61,15 @@ function familyBars(row: FamilyRow): PoolAccountBar[] {
 			state: "reporting" as const,
 			reason: null,
 			resetMs: entry.resetMs,
-		}))
-		.sort((a, b) => a.pct - b.pct);
+		})),
+		...row.unopenedAccounts.map((account) => ({
+			...account,
+			pct: 0,
+			state: "reporting" as const,
+			reason: null,
+			resetMs: null,
+		})),
+	].sort((a, b) => a.pct - b.pct);
 }
 
 /**
@@ -114,8 +101,8 @@ const floorPct = (pct: number): string => `${Math.floor(pct)}%`;
  *
  * The reporting line also counts accounts that could serve the family and have
  * not used it this week ("1 of 3 reporting · 2 not used this week"). Anthropic
- * omits a family's window until its first use, so those accounts report no
- * percentage at all — they are stated as a count and never as a 0% reading.
+ * omits a family's window until its first use, so those accounts appear as 0%
+ * used in the distribution and headline, separately counted from reporters.
  *
  * Codex's synthetic per-model weekly windows are not here; see
  * {@link listFamilyRows} for why, and the Accounts tab for where they are.
@@ -158,7 +145,8 @@ export function FamilyWeeklyCard({
 					<div className="space-y-group">
 						{rows.map((row) => {
 							const usage = row.usage;
-							const least = usage == null ? null : leastUsedAccount(usage);
+							const bars = familyBars(row);
+							const least = bars[0];
 							const outlook = familyOutlook(row);
 							// Accounts that could serve the family but have never opened it
 							// belong in the denominator: without them "1 of 1 reporting"
@@ -191,36 +179,28 @@ export function FamilyWeeklyCard({
 										</StatusChip>
 									</div>
 
-									{usage == null || least == null ? (
+									{least == null ? (
 										// The family exists — a live account reports the window —
 										// but every account that has it is unavailable. Saying
 										// nothing would read as "no such limit".
-										<>
-											<p className="mt-tight text-xs text-muted-foreground">
-												Reported only by {row.unavailableReporters}{" "}
-												{row.unavailableReporters === 1
-													? "account"
-													: "accounts"}{" "}
-												that cannot serve right now
-											</p>
-											{row.unopenedCount > 0 && (
-												// Untouched capacity is still capacity. Without this
-												// the card reads as "nobody can serve this family"
-												// while accounts that can are sitting idle — they
-												// simply have no window to report yet.
-												<p className="mt-tight text-xs text-muted-foreground">
-													{row.unopenedCount}{" "}
-													{row.unopenedCount === 1 ? "has" : "have"} not used{" "}
-													{row.displayName} this week
-												</p>
-											)}
-										</>
+										<p className="mt-tight text-xs text-muted-foreground">
+											Reported only by {row.unavailableReporters}{" "}
+											{row.unavailableReporters === 1 ? "account" : "accounts"}{" "}
+											that cannot serve right now
+										</p>
 									) : (
 										<>
 											<p
 												className={cn(
 													"figure-xl",
-													TONE_FIGURE_CLASS[outlook.tone],
+													TONE_FIGURE_CLASS[
+														least.pct >= 100
+															? "destructive"
+															: least.pct >=
+																	FAMILY_WEEKLY_ELEVATED_THRESHOLD_PCT
+																? "warning"
+																: "success"
+													],
 												)}
 											>
 												{floorPct(least.pct)} used
@@ -229,7 +209,7 @@ export function FamilyWeeklyCard({
 												lowest · {least.name}
 											</p>
 											<PoolClassBars
-												accounts={familyBars(row)}
+												accounts={bars}
 												leastUsedAccountId={least.accountId}
 												formatPct={floorPct}
 											/>
@@ -251,7 +231,7 @@ export function FamilyWeeklyCard({
 															: ""}
 													</p>
 												)}
-												{usage.atRiskCount > 0 && (
+												{usage != null && usage.atRiskCount > 0 && (
 													<p className="truncate text-warning-strong">
 														{usage.atRiskCount} projected to hit the cap before
 														reset
@@ -261,7 +241,7 @@ export function FamilyWeeklyCard({
 												    measured yet is excluded from the count above, so
 												    without this a family early in its week reads as one
 												    nothing is projected to hit. */}
-												{usage.learningCount > 0 && (
+												{usage != null && usage.learningCount > 0 && (
 													<p className="truncate text-muted-foreground">
 														{usage.learningCount} not yet projectable
 													</p>
