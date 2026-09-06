@@ -923,6 +923,7 @@ async function forwardToClientInner(
 			terminalSeen: boolean,
 			completedBeforeCut = false,
 			err?: Error,
+			transportOutcome: TransportOutcome = outcome,
 		): void => {
 			if (observedOutcome || !shouldProcessRequest || internalDispatch) return;
 			observedOutcome = true;
@@ -939,6 +940,7 @@ async function forwardToClientInner(
 					model: usageState?.model ?? requestedModel ?? "unknown",
 					httpStatus: response.status,
 					outcome,
+					transportOutcome,
 					reason,
 					terminalSeen,
 					completedBeforeCut,
@@ -1242,14 +1244,14 @@ async function forwardToClientInner(
 				// 1. USAGE (any outcome): the provider's reported token counts are
 				//    authoritative → endedCleanly, no bytes/4 anti-undercount max()
 				//    (which inflated reasoning-heavy Codex streams ~180x).
-				// 2. TRANSPORT: only a GENERIC read error reclassifies to success —
-				//    the "error" is then merely the missing clean EOF. Seen at scale
-				//    on Codex passthrough under the Bun 1.4 canary, whose fetch
-				//    surfaces the ChatGPT backend's abrupt post-response connection
-				//    close as a read error where Bun 1.3.14 reported EOF. A client
-				//    disconnect or timeout keeps its outcome: an ENQUEUED terminal
-				//    chunk does not prove the client consumed it, and a post-terminal
-				//    hang is still an operational timeout worth seeing.
+				// 2. RECORDED OUTCOME: a read error or client cancellation after a
+				//    successful terminal counts as success. Responses clients can
+				//    stop reading at response.completed without waiting for HTTP EOF;
+				//    their inbound abort may reject the upstream read first. Treating
+				//    that race as failure inflated Codex's apparent error rate. This
+				//    records protocol completion, not proof the client consumed every
+				//    byte; preserve the original transport outcome in diagnostics.
+				//    A post-terminal timeout remains operationally actionable.
 				//
 				// An in-band SSE error frame wins over both: a fired sniffer keeps
 				// the error classification and the untrusted counts.
@@ -1277,7 +1279,7 @@ async function forwardToClientInner(
 					(usageState.sawMessageStop === true ||
 						usageState.responsesTerminalKind !== null) &&
 					rateLimitSniffer.firedReason == null;
-				// TRANSPORT reclassification and the probe verdict: only a CLEAN
+				// Outcome reclassification and the probe verdict: only a CLEAN
 				// terminal means the complete response reached the client stream
 				// before the cut. A failed response did not become successful because
 				// the connection also dropped.
@@ -1286,7 +1288,9 @@ async function forwardToClientInner(
 					usageState.providerReportedOutput === true &&
 					rateLimitSniffer.firedReason == null;
 				const completedBeforeCut =
-					terminalSeen && outcome === "error" && success;
+					terminalSeen &&
+					(outcome === "error" || outcome === "disconnect") &&
+					success;
 				// Probe verdict: a complete-then-cut stream is the same family-health
 				// evidence as a clean EOF (mirrors onEnd's success verdict); a
 				// genuinely cut stream releases the lease so another request may probe.
@@ -1313,6 +1317,7 @@ async function forwardToClientInner(
 						terminalSeen,
 						completedBeforeCut,
 						err,
+						outcome,
 					);
 					// R3: finish transport FIRST, then finalize. With the terminal event
 					// parsed, provider counts are trusted (R5, consequence 1 above).
