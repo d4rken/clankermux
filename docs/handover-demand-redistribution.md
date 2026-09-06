@@ -1,13 +1,67 @@
 # Handover: demand-conserving roster scenarios for the pool runway
 
-Status (2026-09-06): **steps 1 and 2 of section 8 are landed** on
-`feat/demand-conserving-runway-scenario`, branched from `bf6cb8f7`:
-`dd5b38eb` (tier capacity table with provenance), `a40eb1d0` (pace-probe grid
-walks extracted so both models share one walk) and `4ec054c4`
+Status (2026-09-06): **steps 1, 2 and 3 of section 8 are landed.** Steps 1 and
+2 landed on `feat/demand-conserving-runway-scenario` (merged as `49c5c23e`,
+v2026.9.10): `dd5b38eb` (tier capacity table with provenance), `a40eb1d0`
+(pace-probe grid walks extracted so both models share one walk) and `4ec054c4`
 (`computeCapacityRunwayScenario` beside `computeCapacityRunway`, with its
-tests). Steps 3 and 4 are not started. Nothing in production calls the new
-code yet, which is this document's own design: the pool-level backtest in
-section 4 decides whether it ships before any surface reads it.
+tests). Step 3 is `feat/redistribution-backtest`: the scenario's projected
+per-window exhaustions, `packages/core/src/redistribution-backtest.ts`,
+`scripts/redistribution-backtest.ts` and the report at
+`docs/prediction-backtest-redistribution.md`. Step 4 is not started, and
+nothing in production calls the new code, which is this document's own design:
+the backtest in section 4 decides whether it ships before any surface reads it.
+
+**The truth target changed, and section 4 is out of date on this point.** A
+read-only scan of the whole recorded history found no instant where every
+account of a multi-account servable class was out at once, counting an
+account that existed but was not being polled as a survivor. Under the
+report's own membership rule (an account with no snapshots at all around an
+instant is absent, not a survivor) one such episode does exist: roughly 14
+minutes on 2026-07-02, when Claude-1 and Claude-2 were both at 100 % on
+their five-hour windows and Claude-3, unpolled from 2026-06-13 to
+2026-07-19, was not a member of the class. That episode, two ticks of a
+9648-instant grid, is what the calibration table's `observed out` column
+counts for `anthropic`; the codex rows count two episodes of the single
+Codex account before it had a sibling. A pool-out score would therefore
+still have rested on almost no positives. Scoring is survivor-conditioned
+instead: at each instant both models project each account's windows, and
+those projections are labelled with the same per-window truth
+(`deriveOutcome`) the 2026-08 backtests use; the pool-level claim is still
+computed, as false-alarm calibration only. Pause and removal cannot be
+replayed at all — snapshots cascade-delete with their account and
+`accounts.paused` keeps no history — so the scenario's `presence:
+"demand-only"` path keeps unit-test coverage only.
+
+**Verdict: `keep-scenario`, provisional.** On lifecycle-balanced records:
+criterion A (not more optimistic on transitions) FAILS — the scenario's paired
+median signed ETA error on transition instants is +14.6 min against the
+current model's −3.6 min (n=16), i.e. the scenario is the optimistic one there,
+even though its recall is better (0.750 against 0.643). Criterion B passes (F1
+0.568 against 0.474) and criterion C passes (the block-bootstrap 95 % CI of the
+overall F1 delta is [−0.007, +0.145], not below zero). So the scenario stays a
+labelled second line and exclusion keeps the headline. It is PROVISIONAL
+because three cohorts, counted per tag AND servable class, are still waiting on
+weekly windows the label horizon dropped: the report lists `peer-exhaustion
+(codex)`, `add (codex)` and `upgrade (codex)` as pending, and lists no cohort
+as structurally unlabelled. Pending and structurally unlabelled are separate
+statements in the report: a pending cohort had tagged weekly windows whose
+truth was still unfolding at the end of the replay interval, which a later
+`--to` labels, while a structurally unlabelled one has no usable, uncensored
+weekly record common to all models — because no tagged survivor existed (a
+lone account's peer exhaustion tags nobody, since the dying account is
+excluded from its own event), or every tagged prediction was withheld, or
+every tagged truth was censored — with nothing pending at the label horizon,
+so a later `--to` alone does not label it. All three here are the first kind:
+the Codex tier flips of 2026-09-05 and the Codex-2 add of 2026-09-04 sit in
+weekly windows that reset 2026-09-07 through 2026-09-12. The anthropic half of
+each of those tags is labelled, and counting per tag alone would have hidden
+the codex half behind it.
+
+**Step 4 waits.** Before acting on the verdict, re-run the reproduce command
+printed in `docs/prediction-backtest-redistribution.md` with a `--to` after
+2026-09-13, once those weekly windows have completed, and re-read the verdict
+from the refreshed report.
 
 What the tier work found, against what section 3.1 assumed:
 

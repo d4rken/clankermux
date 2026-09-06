@@ -83,6 +83,7 @@ export {
 	type RunwayScenarioAccountInput,
 	type RunwayScenarioBasis,
 	type RunwayScenarioDemand,
+	type RunwayScenarioExhaustion,
 	type RunwayScenarioOptions,
 	type RunwayScenarioOutcome,
 	type RunwayScenarioPresence,

@@ -498,6 +498,34 @@ describe("bootstrapDelta", () => {
 		expect(ci.p50 as number).toBeGreaterThan(0);
 	});
 
+	test("median-signed-error statistic keeps the direction of the miss", () => {
+		// Both sides are ~9 min LATE and exact respectively, and both accounts of
+		// a side are identical, so every resample draws the same two statistics
+		// and the interval collapses onto the point delta.
+		const late = [...positive("a", 4), ...positive("b", 4)].map((r) => ({
+			...r,
+			predictedEtaMs: (r.predictedEtaMs as number) + 10 * MIN_MS,
+		}));
+		const onTime = [...positive("a", 4), ...positive("b", 4)].map((r) => ({
+			...r,
+			predictedEtaMs: (r.outcome as { atMs: number }).atMs,
+		}));
+		const pointDelta =
+			(scoreRecords(late).signedEtaError.medianMinutes as number) -
+			(scoreRecords(onTime).signedEtaError.medianMinutes as number);
+		// Positive = predicted later than observed = optimistic.
+		expect(pointDelta).toBeCloseTo(9, 10);
+
+		const ci = bootstrapDelta(late, onTime, {
+			iterations: 300,
+			seed: 7,
+			statistic: "medianSignedErrorMinutes",
+		});
+		expect(Number.isFinite(ci.p50 as number)).toBe(true);
+		expect(ci.p50 as number).toBeCloseTo(pointDelta, 10);
+		expect(ci.samples).toBe(300);
+	});
+
 	test("no scorable records -> null bounds, never fabricated zeros", () => {
 		const ci = bootstrapDelta([], [], {
 			iterations: 50,

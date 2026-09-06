@@ -205,6 +205,16 @@ export interface RunwayScenarioShare {
 }
 
 /**
+ * One pooled window's FIRST projected exhaustion inside its current cycle, from
+ * the pace-1 scan.
+ */
+export interface RunwayScenarioExhaustion {
+	accountId: string;
+	windowKind: string;
+	exhaustsAtMs: number;
+}
+
+/**
  * What a demand-conserving scenario ASSUMED to reach its outcome: the measured
  * class demand it redistributed, the tier weights it redistributed by, and
  * every account the assumptions moved into or out of the pool.
@@ -226,13 +236,29 @@ export interface RunwayScenarioBasis {
 	/** `presence: "demand-only"` accounts whose measured burn joined the class demand. */
 	demandOnlyAccountIds: string[];
 	/**
+	 * Every pooled window the pace-1 baseline scan drove to 100 % BEFORE that
+	 * window's first reset or credit revival in the scan — the cycle the reading
+	 * at `now` belongs to. A window already at 100 % at `now` has no entry (that
+	 * is a fact, not a projection), and neither does one whose first exhaustion
+	 * falls in a later cycle. A dead account's OTHER windows are still walked and
+	 * may have entries, so an `out-now` pool is not automatically an empty list.
+	 * Sorted by `exhaustsAtMs`, then `accountId`, then `windowKind`; `[]` when no
+	 * baseline scan completed.
+	 *
+	 * An ABSENT entry is not survival unless the scan ran to completion: see
+	 * `eventBudgetExhausted: "projection"`.
+	 */
+	projectedExhaustions: RunwayScenarioExhaustion[];
+	/**
 	 * Present only when a scan ran out of its event budget. `"baseline"`: the
 	 * pace-1 scan itself, so the outcome is `unknown`. `"probe"`: the baseline
 	 * completed and stands, but a pace probe did not, so the absent
 	 * `paceMargin`/`paceDeficit` says nothing (absence otherwise means "no flip
-	 * found" / "no safe tail").
+	 * found" / "no safe tail"). `"projection"`: the baseline pool-out stands, but
+	 * the continuation that collects {@link projectedExhaustions} past it ran out
+	 * of budget, so that list may be incomplete and an absent entry says nothing.
 	 */
-	eventBudgetExhausted?: "baseline" | "probe";
+	eventBudgetExhausted?: "baseline" | "probe" | "projection";
 }
 
 /**
