@@ -1545,7 +1545,7 @@ describe("knownLimitsFor", () => {
 			evaluateVerdict(cohorts, replay),
 		);
 		expect(limits).toContain(
-			"`anthropic` supplies 100.0 % of the overall common-cohort records, so the overall numbers are close to that class's numbers.",
+			"`anthropic` supplies 100.0 % of the overall common-cohort records.",
 		);
 	});
 
@@ -1709,7 +1709,7 @@ describe("formatRedistributionReport", () => {
 			10,
 		);
 		expect(pendingMarkdown).toContain(
-			"PROVISIONAL: the add (codex) cohort has no completed weekly window inside the replay interval",
+			"PROVISIONAL: the add (codex) pair holds no usable, uncensored weekly record common to all models, and it carries at least one tagged weekly window still pending at the label horizon",
 		);
 		expect(pendingMarkdown).not.toContain(
 			"No usable, uncensored weekly records common to all models for:",
@@ -1731,7 +1731,7 @@ describe("formatRedistributionReport", () => {
 			10,
 		);
 		expect(structuralMarkdown).toContain(
-			"No usable, uncensored weekly records common to all models for: peer-exhaustion (codex). No weekly windows are pending at the label horizon; missing evidence can reflect absent tagged survivors, withheld predictions, or censored truth.",
+			"No usable, uncensored weekly records common to all models for: peer-exhaustion (codex). No weekly window of that pair is pending at the label horizon; missing evidence can reflect absent tagged survivors, withheld predictions, or censored truth.",
 		);
 		expect(structuralMarkdown).not.toContain("PROVISIONAL:");
 
@@ -1745,7 +1745,7 @@ describe("formatRedistributionReport", () => {
 			10,
 		);
 		expect(labelledMarkdown).toContain(
-			"Every scored cohort has completed windows in both kinds.",
+			"No pending or unlabelled transition tag/class pairs were identified.",
 		);
 		expect(labelledMarkdown).not.toContain("PROVISIONAL:");
 		expect(labelledMarkdown).not.toContain(
@@ -1771,7 +1771,7 @@ describe("formatRedistributionReport", () => {
 			10,
 		);
 		expect(withheldMarkdown).toContain(
-			"No usable, uncensored weekly records common to all models for: add (codex). No weekly windows are pending at the label horizon; missing evidence can reflect absent tagged survivors, withheld predictions, or censored truth.",
+			"No usable, uncensored weekly records common to all models for: add (codex). No weekly window of that pair is pending at the label horizon; missing evidence can reflect absent tagged survivors, withheld predictions, or censored truth.",
 		);
 		expect(withheldMarkdown).not.toContain("PROVISIONAL:");
 	});

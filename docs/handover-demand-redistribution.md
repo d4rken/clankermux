@@ -47,7 +47,7 @@ weekly windows the label horizon dropped: the report lists `peer-exhaustion
 as structurally unlabelled. Pending and structurally unlabelled are separate
 statements in the report: a pending cohort had tagged weekly windows whose
 truth was still unfolding at the end of the replay interval, which a later
-`--to` labels, while a structurally unlabelled one has no usable, uncensored
+`--to` can label, while a structurally unlabelled one has no usable, uncensored
 weekly record common to all models — because no tagged survivor existed (a
 lone account's peer exhaustion tags nobody, since the dying account is
 excluded from its own event), or every tagged prediction was withheld, or
@@ -75,21 +75,21 @@ judged on. What landed instead is the measurement tooling, `6097d175`
 
 **The experiment running now: observation-lag parity, ONE change.** The
 scenario scheduled every window's exhaustion from the instant being replayed
-while the reading it scheduled from was measured to an earlier one, so its ETAs
-were late by the observation lag. The ten-minute freshness bar is on SAMPLE
-time, so it bounds the regression path's lag (that fit is anchored to its own
-last sample); the observation-anchored weekly path can exceed it wherever the
-observation instant precedes the sample instant. Five-hour windows after a peer
-death in the replay ran 0-5 minutes late. The scan now advances each reading
-over that lag, taking it per estimator path from the same anchor the current
-model uses (the fit's own last point on the regression path, the observation
-instant on the observation-anchored lifetime path), so on a lone account,
-wherever that anchor was recoverable and sits behind the replayed instant, the
-window is projected from the anchor the current model projects it from. An
-anchor AHEAD of the replayed instant clamps to zero lag while the current model
-keeps anchoring its own ETA to that future instant, so those two dates stand
-apart by that gap. A window of a lone account can also land elsewhere
-whenever another window of the class exhausts while this one is still
+while the reading it scheduled from was measured to an earlier one, so the burn
+between those two instants entered no projection. The ten-minute freshness bar
+is on SAMPLE time, so it bounds the regression path's lag (that fit is anchored
+to its own last sample); the observation-anchored weekly path can exceed it
+wherever the observation instant precedes the sample instant. Five-hour windows
+after a peer death in the replay ran 0-5 minutes late. The scan now advances
+each reading over that lag, taking it per estimator path from the same anchor
+the current model uses (the fit's own last point on the regression path, the
+observation instant on the observation-anchored lifetime path), so on a lone
+account, wherever that anchor was recoverable and sits behind the replayed
+instant, the window is projected from the anchor the current model projects it
+from. An anchor AHEAD of the replayed instant clamps to zero lag while the
+current model keeps anchoring its own ETA to that future instant, so those two
+dates stand apart by that gap. A window of a lone account can also land
+elsewhere whenever another window of the class exhausts while this one is still
 projecting, including a death the correction applies AT the replayed instant:
 that suspends the account's burn, and the ETA then carries the span it spends
 dead, which is the scenario's own semantics rather than the redistribution.

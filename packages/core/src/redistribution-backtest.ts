@@ -3355,10 +3355,7 @@ function observationLagSection(checks: ObservationLagChecks): string[] {
 	);
 	out.push("|---|---:|---:|---:|---:|---:|---:|");
 	out.push(
-		shiftRow(
-			"first event of both scans, no class window died in lag",
-			checks.shift.firstEvent,
-		),
+		shiftRow("eligible first events in both scans", checks.shift.firstEvent),
 	);
 	out.push(shiftRow("every other lagged record", checks.shift.rest));
 	out.push("");
@@ -3410,7 +3407,7 @@ function observationLagSection(checks: ObservationLagChecks): string[] {
 	);
 	out.push("");
 	out.push(
-		"`no anchor` counts the records of a path whose lag could not be derived at all, and the median and p90 beside it are taken over the remaining ones. The regression path anchors its fit by back-solving the ETA it states, so a fit with NO ETA — a flat or falling six-hour fit, which is what an idle account inside a live window produces — has no recoverable anchor. Such a window is scheduled from the replayed instant in BOTH scans and is advanced by nothing, exactly as it was before the correction existed; the column separates that absence from a lag genuinely measured at zero, which would otherwise pull the path's median and p90 down.",
+		"`no anchor` counts the records of a path whose lag could not be derived at all, and the median and p90 beside it are taken over the remaining ones. The regression path anchors its fit by back-solving the ETA it states, so a fit with NO ETA — a flat or falling six-hour fit, which is what an idle account inside a live window produces — has no recoverable anchor. Such a window is scheduled from the replayed instant in BOTH scans and is advanced by nothing, exactly as it was before the correction existed; the column separates that absence from a lag genuinely measured at zero.",
 	);
 	out.push("");
 	out.push(
@@ -3712,7 +3709,7 @@ export function formatRedistributionReport(
 		replay.records.filter((record) => record.model === model && record.usable)
 			.length;
 	out.push(
-		`Coverage of the two equal-split scans, which must match — the correction changes no usability rule: scenario-equal ${usableOf("scenario-equal")} usable records, scenario-equal-original ${usableOf("scenario-equal-original")}.`,
+		`Coverage of the two equal-split scans: scenario-equal ${usableOf("scenario-equal")} usable records, scenario-equal-original ${usableOf("scenario-equal-original")}.`,
 	);
 	out.push("");
 	out.push(`**Verdict: ${verdict.verdict}**`);
@@ -3720,13 +3717,13 @@ export function formatRedistributionReport(
 	if (verdict.pendingCohorts.length > 0) {
 		const many = verdict.pendingCohorts.length > 1;
 		out.push(
-			`PROVISIONAL: the ${verdict.pendingCohorts.join(", ")} ${many ? "cohorts have" : "cohort has"} no completed weekly window inside the replay interval, so ${many ? "their" : "its"} weekly half is unlabelled and the verdict rests on five-hour evidence there. Re-run the reproduce command above with a later \`--to\` once those windows have reset, and re-read the verdict.`,
+			`PROVISIONAL: the ${verdict.pendingCohorts.join(", ")} ${many ? "pairs hold" : "pair holds"} no usable, uncensored weekly record common to all models, and ${many ? "each carries" : "it carries"} at least one tagged weekly window still pending at the label horizon, so ${many ? "their" : "its"} weekly half is unlabelled. Re-run the reproduce command above with a later \`--to\` once those windows have reset, and re-read the verdict.`,
 		);
 		out.push("");
 	}
 	if (verdict.unlabelledCohorts.length > 0) {
 		out.push(
-			`No usable, uncensored weekly records common to all models for: ${verdict.unlabelledCohorts.join(", ")}. No weekly windows are pending at the label horizon; missing evidence can reflect absent tagged survivors, withheld predictions, or censored truth.`,
+			`No usable, uncensored weekly records common to all models for: ${verdict.unlabelledCohorts.join(", ")}. No weekly window of ${verdict.unlabelledCohorts.length > 1 ? "those pairs" : "that pair"} is pending at the label horizon; missing evidence can reflect absent tagged survivors, withheld predictions, or censored truth.`,
 		);
 		out.push("");
 	}
@@ -3734,7 +3731,9 @@ export function formatRedistributionReport(
 		verdict.pendingCohorts.length === 0 &&
 		verdict.unlabelledCohorts.length === 0
 	) {
-		out.push("Every scored cohort has completed windows in both kinds.");
+		out.push(
+			"No pending or unlabelled transition tag/class pairs were identified.",
+		);
 		out.push("");
 	}
 	out.push("What step 4 does with this:");
@@ -3767,9 +3766,11 @@ export function formatRedistributionReport(
 }
 
 /**
- * A class holding at least this share of the common cohort makes the overall
- * numbers a restatement of that class's numbers, which the report has to say
- * out loud rather than leave the reader to infer from the per-class table.
+ * The share of the common cohort at which the report names the class the
+ * records came from, rather than leaving the reader to infer it from the
+ * per-class table. The share is counted over RAW records while every headline
+ * score is lifecycle-balanced, so a dominant class does not entail that the
+ * overall numbers restate that class's.
  */
 const DOMINANT_CLASS_SHARE = 0.8;
 
@@ -3806,18 +3807,19 @@ export function knownLimitsFor(
 		const share = dominant[1] / classTotal;
 		if (share >= DOMINANT_CLASS_SHARE) {
 			limits.push(
-				`\`${dominant[0]}\` supplies ${(share * 100).toFixed(1)} % of the overall common-cohort records, so the overall numbers are close to that class's numbers.`,
+				`\`${dominant[0]}\` supplies ${(share * 100).toFixed(1)} % of the overall common-cohort records.`,
 			);
 		}
 	}
 	if (verdict.pendingCohorts.length > 0) {
+		const many = verdict.pendingCohorts.length > 1;
 		limits.push(
-			`Pending at this run (tag and servable class): ${verdict.pendingCohorts.join(", ")}. No weekly window of ${verdict.pendingCohorts.length > 1 ? "those classes carrying those tags" : "that class carrying that tag"} had completed by the end of the replay interval, so the cohort carries five-hour evidence only and the verdict is provisional.`,
+			`Pending at this run (tag and servable class): ${verdict.pendingCohorts.join(", ")}. ${many ? "Those pairs hold" : "That pair holds"} no usable, uncensored weekly record common to all models, and ${many ? "each carries" : "it carries"} at least one tagged weekly window still pending at the label horizon, so ${many ? "their" : "its"} weekly half is unlabelled and the verdict is provisional.`,
 		);
 	}
 	if (verdict.unlabelledCohorts.length > 0) {
 		limits.push(
-			`No usable, uncensored weekly records common to all models for: ${verdict.unlabelledCohorts.join(", ")}. No weekly windows are pending at the label horizon; missing evidence can reflect absent tagged survivors, withheld predictions, or censored truth.`,
+			`No usable, uncensored weekly records common to all models for: ${verdict.unlabelledCohorts.join(", ")}. No weekly window of ${verdict.unlabelledCohorts.length > 1 ? "those pairs" : "that pair"} is pending at the label horizon; missing evidence can reflect absent tagged survivors, withheld predictions, or censored truth.`,
 		);
 	}
 	const positives = REPLAY_MODELS.map((model) => {
