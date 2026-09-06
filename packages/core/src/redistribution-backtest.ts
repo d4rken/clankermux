@@ -1635,7 +1635,8 @@ export interface VerdictCriterion {
 	label: string;
 	/** `null` = indeterminate (a needed value was absent). */
 	pass: boolean | null;
-	values: Array<{ name: string; value: number | null }>;
+	/** `digits` omitted prints three decimals; counts pass 0. */
+	values: Array<{ name: string; value: number | null; digits?: number }>;
 }
 
 export type VerdictWord = "replace" | "keep-scenario" | "insufficient-evidence";
@@ -1697,7 +1698,7 @@ export function evaluateVerdict(
 				name: "paired median signed error, current (min)",
 				value: bias.medianB,
 			},
-			{ name: "paired n", value: bias.n },
+			{ name: "paired n", value: bias.n, digits: 0 },
 			{ name: "recall, scenario-equal", value: scenario?.recall ?? null },
 			{ name: "recall, current", value: current?.recall ?? null },
 		],
@@ -1725,7 +1726,7 @@ export function evaluateVerdict(
 			{ name: "F1 delta p2.5", value: overallCi?.p2_5 ?? null },
 			{ name: "F1 delta p50", value: overallCi?.p50 ?? null },
 			{ name: "F1 delta p97.5", value: overallCi?.p97_5 ?? null },
-			{ name: "resamples", value: overallCi?.samples ?? null },
+			{ name: "resamples", value: overallCi?.samples ?? null, digits: 0 },
 		],
 	};
 
@@ -2031,7 +2032,7 @@ export function formatRedistributionReport(
 		out.push("| value | number |");
 		out.push("|---|---:|");
 		for (const value of criterion.values) {
-			out.push(`| ${value.name} | ${num(value.value, 3)} |`);
+			out.push(`| ${value.name} | ${num(value.value, value.digits ?? 3)} |`);
 		}
 		out.push("");
 	}
@@ -2046,8 +2047,9 @@ export function formatRedistributionReport(
 	out.push(`**Verdict: ${verdict.verdict}**`);
 	out.push("");
 	if (verdict.provisional) {
+		const many = verdict.unlabelledCohorts.length > 1;
 		out.push(
-			`PROVISIONAL: ${verdict.unlabelledCohorts.join(", ")} carry no completed weekly window inside the replay interval, so the weekly half of those cohorts is unlabelled. Re-run the reproduce command above with a later \`--to\` once those windows have reset, and re-read the verdict.`,
+			`PROVISIONAL: the ${verdict.unlabelledCohorts.join(", ")} ${many ? "cohorts have" : "cohort has"} no completed weekly window inside the replay interval, so ${many ? "their" : "its"} weekly half is unlabelled and the verdict rests on five-hour evidence there. Re-run the reproduce command above with a later \`--to\` once those windows have reset, and re-read the verdict.`,
 		);
 	} else {
 		out.push("Every scored cohort has completed windows in both kinds.");
@@ -2097,7 +2099,7 @@ export function knownLimitsFor(
 	];
 	if (verdict.unlabelledCohorts.length > 0) {
 		limits.push(
-			`Unlabelled cohorts at this run: ${verdict.unlabelledCohorts.join(", ")}. Their weekly windows had not reset by the end of the replay interval, so those cohorts carry five-hour evidence only and the verdict is provisional.`,
+			`Unlabelled at this run: ${verdict.unlabelledCohorts.join(", ")}. No weekly window carrying ${verdict.unlabelledCohorts.length > 1 ? "those tags" : "that tag"} had completed by the end of the replay interval, so the cohort carries five-hour evidence only and the verdict is provisional.`,
 		);
 	}
 	const positives = REPLAY_MODELS.map((model) => {
