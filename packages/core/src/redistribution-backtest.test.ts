@@ -5,6 +5,7 @@ import {
 	buildRosterAtInstant,
 	type CohortScores,
 	type CohortSet,
+	churnRows,
 	detectTransitions,
 	evaluateVerdict,
 	formatRedistributionReport,
@@ -20,9 +21,12 @@ import {
 	type ReplayResult,
 	type RosterAccount,
 	type RosterSnapshotRow,
+	redistributionRecordToJson,
 	replayInstant,
 	replayRange,
+	SINCE_DEATH_BUCKETS,
 	scoreCohorts,
+	survivorSlopeTrajectory,
 	type TransitionEvent,
 	transitionsAt,
 	type Verdict,
@@ -982,6 +986,7 @@ function record(
 		eventIds: [],
 		learningAtT: false,
 		sinceDeathMs: null,
+		slopePctPerHour: null,
 		...overrides,
 	};
 }
@@ -1215,6 +1220,8 @@ function verdictFixture(options: {
 		anyTransition: transition,
 		byTag: [cohort("add", [], { n: 0, medianA: null, medianB: null })],
 		peerExhaustionBySinceDeath: [],
+		slopeTrajectory: [],
+		churn: [],
 		byClassAndKind: [],
 		scenarioExtra: cohort("Scenario-only", [], {
 			n: 0,
@@ -1619,5 +1626,651 @@ describe("formatRedistributionReport", () => {
 			"No usable, uncensored weekly records common to all models for: add (codex). No weekly windows are pending at the label horizon; missing evidence can reflect absent tagged survivors, withheld predictions, or censored truth.",
 		);
 		expect(withheldMarkdown).not.toContain("PROVISIONAL:");
+	});
+});
+
+// ---------------------------------------------------------------------------
+// Fine since-death buckets, slope trajectory, churn, per-record dump
+// ---------------------------------------------------------------------------
+
+/**
+ * One record per model, tagged `peer-exhaustion`, at a given age since the
+ * death. Each (account, windowKind) is its own lifecycle, exactly as
+ * `replayInstant` builds them.
+ */
+function peerTriple(options: {
+	accountId: string;
+	windowKind: "five_hour" | "seven_day";
+	/** Minutes since the death, one record per entry. */
+	sinceDeathMinutes: number[];
+	deathAtMs?: number;
+	/** Current-model slope at each instant, parallel to `sinceDeathMinutes`. */
+	slopes?: (number | null)[];
+	etaOffsetMinutes?: (index: number) => number;
+	predictsExhaust?: (index: number) => boolean;
+}): RedistributionRecord[] {
+	const deathAtMs = options.deathAtMs ?? T0;
+	const out: RedistributionRecord[] = [];
+	options.sinceDeathMinutes.forEach((age, index) => {
+		const T = deathAtMs + age * MIN;
+		for (const model of [
+			"current",
+			"scenario-equal",
+			"scenario-headroom",
+		] as const) {
+			const predicts = options.predictsExhaust?.(index) ?? true;
+			out.push(
+				record({
+					model,
+					accountId: options.accountId,
+					T,
+					windowKind: options.windowKind,
+					lifecycleId: `${options.accountId}::${options.windowKind}::0`,
+					tags: ["peer-exhaustion"],
+					eventIds: [1],
+					sinceDeathMs: T - deathAtMs,
+					slopePctPerHour: options.slopes?.[index] ?? null,
+					predictsExhaust: predicts,
+					predictedEtaMs: predicts
+						? T + DAY + (options.etaOffsetMinutes?.(index) ?? 0) * MIN
+						: null,
+					outcome: { kind: "exhausted", atMs: T + DAY },
+				}),
+			);
+		}
+	});
+	return out;
+}
+
+describe("SINCE_DEATH_BUCKETS", () => {
+	test("are the eight fine buckets, contiguous and open at the top", () => {
+		expect(SINCE_DEATH_BUCKETS.map((bucket) => bucket.label)).toEqual([
+			"0-30m",
+			"30-60m",
+			"1-2h",
+			"2-3h",
+			"3-4h",
+			"4-6h",
+			"6-12h",
+			"12-24h",
+		]);
+		const bounds = SINCE_DEATH_BUCKETS.map((bucket) => bucket.maxMs);
+		expect(bounds.slice(0, -1)).toEqual([
+			30 * MIN,
+			HOUR,
+			2 * HOUR,
+			3 * HOUR,
+			4 * HOUR,
+			6 * HOUR,
+			12 * HOUR,
+		]);
+		// The transition shadow is 24 h, so the last bucket cannot lose a record.
+		expect(bounds[bounds.length - 1]).toBe(Number.POSITIVE_INFINITY);
+	});
+});
+
+describe("peer exhaustion by since-death bucket, per window kind", () => {
+	test("splits the fine buckets and reports combined plus each window kind", () => {
+		const records = [
+			...peerTriple({
+				accountId: "A",
+				windowKind: "five_hour",
+				sinceDeathMinutes: [10, 45, 90],
+			}),
+			...peerTriple({
+				accountId: "B",
+				windowKind: "seven_day",
+				sinceDeathMinutes: [20, 200, 800],
+			}),
+		];
+		const cohorts = scoreCohorts(replayOf(records));
+		expect(
+			cohorts.peerExhaustionBySinceDeath.map((group) => group.scope),
+		).toEqual(["combined", "five_hour", "seven_day"]);
+		const byScope = new Map(
+			cohorts.peerExhaustionBySinceDeath.map((group) => [group.scope, group]),
+		);
+		for (const group of cohorts.peerExhaustionBySinceDeath) {
+			expect(group.buckets.map((bucket) => bucket.label)).toEqual(
+				SINCE_DEATH_BUCKETS.map((bucket) => bucket.label),
+			);
+		}
+		const countsOf = (scope: "combined" | "five_hour" | "seven_day") =>
+			byScope.get(scope)?.buckets.map((bucket) => bucket.records) ?? [];
+		// 10 min and 20 min -> 0-30m; 45 -> 30-60m; 90 -> 1-2h; 200 -> 3-4h;
+		// 800 -> 12-24h.
+		expect(countsOf("combined")).toEqual([2, 1, 1, 0, 1, 0, 0, 1]);
+		expect(countsOf("five_hour")).toEqual([1, 1, 1, 0, 0, 0, 0, 0]);
+		expect(countsOf("seven_day")).toEqual([1, 0, 0, 0, 1, 0, 0, 1]);
+		// Every bucket still carries the full cohort payload.
+		const first = byScope.get("combined")?.buckets[0];
+		expect(first?.balanced).toHaveLength(3);
+		expect(first?.perRecord).toHaveLength(3);
+		expect(first?.pairedBias.n).toBeGreaterThanOrEqual(0);
+	});
+
+	test("a record with no since-death age never reaches a bucket", () => {
+		const records = triple("A", [T0], {
+			current: () => ({ tags: ["peer-exhaustion"] as const }),
+		});
+		for (const entry of records) entry.tags = ["peer-exhaustion"];
+		const cohorts = scoreCohorts(replayOf(records));
+		const combined = cohorts.peerExhaustionBySinceDeath[0];
+		expect(combined.buckets.every((bucket) => bucket.records === 0)).toBe(true);
+	});
+});
+
+describe("survivorSlopeTrajectory", () => {
+	test("ratios the survivor's slope against the first instant after the death", () => {
+		const records = peerTriple({
+			accountId: "A",
+			windowKind: "five_hour",
+			sinceDeathMinutes: [10, 45, 90],
+			slopes: [4, 8, 2],
+		});
+		const rows = survivorSlopeTrajectory(records);
+		const cell = (
+			label: string,
+			scope: "combined" | "five_hour" | "seven_day",
+		) => rows.find((row) => row.label === label)?.cells[scope];
+		expect(cell("0-30m", "combined")?.medianRatio).toBeCloseTo(1, 9);
+		expect(cell("30-60m", "combined")?.medianRatio).toBeCloseTo(2, 9);
+		expect(cell("1-2h", "combined")?.medianRatio).toBeCloseTo(0.5, 9);
+		expect(cell("30-60m", "five_hour")?.medianRatio).toBeCloseTo(2, 9);
+		expect(cell("30-60m", "seven_day")?.medianRatio).toBeNull();
+		expect(cell("30-60m", "combined")?.lifecycles).toBe(1);
+		expect(cell("30-60m", "combined")?.medianSlopePctPerHour).toBeCloseTo(8, 9);
+	});
+
+	test("medians across lifecycles, not across instants", () => {
+		const records = [
+			// One lifecycle contributes many instants in the same bucket; it must
+			// still count once.
+			...peerTriple({
+				accountId: "A",
+				windowKind: "five_hour",
+				sinceDeathMinutes: [5, 70, 75, 80, 85],
+				slopes: [10, 40, 40, 40, 40],
+			}),
+			...peerTriple({
+				accountId: "B",
+				windowKind: "five_hour",
+				sinceDeathMinutes: [5, 70],
+				slopes: [10, 10],
+			}),
+		];
+		const rows = survivorSlopeTrajectory(records);
+		const cell = rows.find((row) => row.label === "1-2h")?.cells.combined;
+		expect(cell?.lifecycles).toBe(2);
+		// Per-lifecycle medians are 4 and 1; the median across lifecycles is the
+		// lower of the two on an even count.
+		expect(cell?.medianRatio).toBeCloseTo(1, 9);
+	});
+
+	test("drops a lifecycle whose baseline slope is zero", () => {
+		// 9/0 is not a ratio, and imputing one would invent the very absorption
+		// the table exists to measure.
+		const zero = survivorSlopeTrajectory(
+			peerTriple({
+				accountId: "A",
+				windowKind: "five_hour",
+				sinceDeathMinutes: [5, 70],
+				slopes: [0, 9],
+			}),
+		);
+		expect(
+			zero.find((row) => row.label === "1-2h")?.cells.combined.lifecycles,
+		).toBe(0);
+	});
+
+	test("baselines on the earliest post-death instant that HAS a slope", () => {
+		// A survivor is very often still learning at the instant its peer dies,
+		// so requiring a slope at the literal first instant would throw away the
+		// lifecycles the table is about. The baseline is the first reading that
+		// exists, and the ratio is measured from there.
+		const rows = survivorSlopeTrajectory(
+			peerTriple({
+				accountId: "A",
+				windowKind: "five_hour",
+				sinceDeathMinutes: [5, 40, 70],
+				slopes: [null, 9, 18],
+			}),
+		);
+		const at1to2h = rows.find((row) => row.label === "1-2h")?.cells.combined;
+		expect(at1to2h?.lifecycles).toBe(1);
+		expect(at1to2h?.medianRatio).toBeCloseTo(2, 9);
+		// The instant with no slope contributes to no bucket at all.
+		expect(
+			rows.find((row) => row.label === "0-30m")?.cells.combined.lifecycles,
+		).toBe(0);
+		expect(
+			rows.find((row) => row.label === "30-60m")?.cells.combined.medianRatio,
+		).toBeCloseTo(1, 9);
+	});
+
+	test("never baselines on an instant BEFORE the death", () => {
+		// The bucket index already rejects a negative age; the baseline has to
+		// reject it too, or a pre-death reading sets the scale for every ratio
+		// measured after it.
+		const rows = survivorSlopeTrajectory(
+			peerTriple({
+				accountId: "A",
+				windowKind: "five_hour",
+				sinceDeathMinutes: [-30, 5, 70],
+				slopes: [1, 10, 20],
+			}),
+		);
+		expect(
+			rows.find((row) => row.label === "1-2h")?.cells.combined.medianRatio,
+		).toBeCloseTo(2, 9);
+	});
+
+	test("only the named model's records are read", () => {
+		const records = peerTriple({
+			accountId: "A",
+			windowKind: "five_hour",
+			sinceDeathMinutes: [5, 70],
+			slopes: [10, 20],
+		});
+		for (const entry of records) {
+			if (entry.model !== "current") entry.slopePctPerHour = null;
+		}
+		const rows = survivorSlopeTrajectory(records, "current");
+		expect(
+			rows.find((row) => row.label === "1-2h")?.cells.combined.medianRatio,
+		).toBeCloseTo(2, 9);
+	});
+});
+
+describe("churnRows", () => {
+	test("measures ETA movement and yes/no flips over consecutive usable instants", () => {
+		const step = 10;
+		const instants = [T0, T0 + step * MIN, T0 + 2 * step * MIN];
+		const records: RedistributionRecord[] = [];
+		// ETA moves +30 min then -10 min; the verdict never flips.
+		const etas = [DAY, DAY + 30 * MIN, DAY + 20 * MIN];
+		instants.forEach((T, index) => {
+			for (const model of [
+				"current",
+				"scenario-equal",
+				"scenario-headroom",
+			] as const) {
+				records.push(
+					record({
+						model,
+						accountId: "A",
+						T,
+						lifecycleId: "A::seven_day::0",
+						predictedEtaMs: T0 + etas[index],
+						outcome: { kind: "exhausted", atMs: T0 + 2 * DAY },
+					}),
+				);
+			}
+		});
+		const rows = churnRows("Overall", records, step);
+		expect(rows.map((row) => row.model)).toEqual([
+			"current",
+			"scenario-equal",
+			"scenario-headroom",
+		]);
+		const current = rows[0];
+		expect(current.cohort).toBe("Overall");
+		expect(current.lifecycles).toBe(1);
+		expect(current.pairs).toBe(2);
+		// |+30| and |-10| -> per-lifecycle median 10 (lower median of two).
+		expect(current.medianEtaChangeMinutes).toBeCloseTo(10, 9);
+		expect(current.p90EtaChangeMinutes).toBeCloseTo(30, 9);
+		expect(current.medianFlipRate).toBeCloseTo(0, 9);
+	});
+
+	test("counts a flip when the yes/no verdict changes between instants", () => {
+		const step = 10;
+		const records: RedistributionRecord[] = [];
+		[true, false, false, true].forEach((predicts, index) => {
+			const T = T0 + index * step * MIN;
+			for (const model of [
+				"current",
+				"scenario-equal",
+				"scenario-headroom",
+			] as const) {
+				records.push(
+					record({
+						model,
+						accountId: "A",
+						T,
+						lifecycleId: "A::seven_day::0",
+						predictsExhaust: predicts,
+						predictedEtaMs: predicts ? T + DAY : null,
+					}),
+				);
+			}
+		});
+		const rows = churnRows("Overall", records, step);
+		// 3 pairs, 2 of which change the verdict.
+		expect(rows[0].pairs).toBe(3);
+		expect(rows[0].medianFlipRate).toBeCloseTo(2 / 3, 9);
+		// Only one pair had an ETA on both sides (none, in fact: the yes-runs are
+		// never adjacent), so the ETA statistic has nothing to say.
+		expect(rows[0].medianEtaChangeMinutes).toBeNull();
+	});
+
+	test("pairs only instants exactly one grid step apart, never across lifecycles", () => {
+		const step = 10;
+		const records: RedistributionRecord[] = [];
+		for (const [lifecycle, offsets] of [
+			["A::seven_day::0", [0, 10]],
+			// A two-step hole: the pair straddling it is not churn.
+			["A::seven_day::1", [0, 20]],
+			// A three-step hole, likewise.
+			["A::seven_day::2", [0, 30]],
+		] as const) {
+			for (const offset of offsets) {
+				for (const model of [
+					"current",
+					"scenario-equal",
+					"scenario-headroom",
+				] as const) {
+					records.push(
+						record({
+							model,
+							accountId: "A",
+							T: T0 + offset * MIN,
+							lifecycleId: lifecycle,
+							predictedEtaMs: T0 + offset * MIN + DAY,
+						}),
+					);
+				}
+			}
+		}
+		const rows = churnRows("Overall", records, step);
+		expect(rows[0].pairs).toBe(1);
+		expect(rows[0].lifecycles).toBe(1);
+	});
+
+	test("never bridges an unusable instant", () => {
+		const step = 10;
+		const records: RedistributionRecord[] = [];
+		[true, false, true].forEach((usable, index) => {
+			const T = T0 + index * step * MIN;
+			for (const model of [
+				"current",
+				"scenario-equal",
+				"scenario-headroom",
+			] as const) {
+				records.push(
+					record({
+						model,
+						accountId: "A",
+						T,
+						lifecycleId: "A::seven_day::0",
+						usable,
+						unusableReason: usable ? null : "no_slope",
+						predictsExhaust: usable,
+						predictedEtaMs: usable ? T + DAY : null,
+					}),
+				);
+			}
+		});
+		// The statistic is defined on ADJACENT usable instants. An instant the
+		// model could not answer leaves its neighbours two grid steps apart,
+		// which is a hole in the series and not the estimator changing its mind.
+		expect(churnRows("Overall", records, step)[0].pairs).toBe(0);
+		// Fill the hole and both pairs appear.
+		for (const entry of records) entry.usable = true;
+		expect(churnRows("Overall", records, step)[0].pairs).toBe(2);
+	});
+
+	test("does not manufacture a flip across a skipped grid instant", () => {
+		// Minutes 0 and 20 on a 10-minute grid, with opposite verdicts. Pairing
+		// them reports a 100 % flip rate for a change no operator ever saw.
+		const step = 10;
+		const records: RedistributionRecord[] = [];
+		for (const [offset, predicts] of [
+			[0, true],
+			[20, false],
+		] as const) {
+			const T = T0 + offset * MIN;
+			for (const model of [
+				"current",
+				"scenario-equal",
+				"scenario-headroom",
+			] as const) {
+				records.push(
+					record({
+						model,
+						accountId: "A",
+						T,
+						lifecycleId: "A::seven_day::0",
+						predictsExhaust: predicts,
+						predictedEtaMs: predicts ? T + DAY : null,
+					}),
+				);
+			}
+		}
+		const rows = churnRows("Overall", records, step);
+		expect(rows[0].pairs).toBe(0);
+		expect(rows[0].lifecycles).toBe(0);
+		expect(rows[0].medianFlipRate).toBeNull();
+	});
+});
+
+describe("scoreCohorts churn and slope trajectory", () => {
+	test("carries a churn row per model for the overall and any-transition cohorts", () => {
+		const records = [
+			...triple("A", [T0, T0 + 10 * MIN, T0 + 20 * MIN]),
+			...peerTriple({
+				accountId: "B",
+				windowKind: "five_hour",
+				sinceDeathMinutes: [10, 20, 30],
+				slopes: [5, 10, 15],
+				deathAtMs: T0,
+			}),
+		];
+		const cohorts = scoreCohorts(replayOf(records));
+		expect(cohorts.churn.map((row) => row.cohort)).toEqual([
+			"Overall",
+			"Overall",
+			"Overall",
+			"Any transition",
+			"Any transition",
+			"Any transition",
+		]);
+		expect(cohorts.churn[0].pairs).toBeGreaterThan(0);
+		expect(
+			cohorts.slopeTrajectory.some((row) => row.cells.combined.lifecycles > 0),
+		).toBe(true);
+	});
+
+	test("baselines the slope on the earliest post-death instant the replay saw, not the earliest COMPARABLE one", () => {
+		// Slopes 4, 8, 8 at 10, 40 and 70 minutes after the death, with one
+		// scenario model unable to answer at minute 10. Which instants are
+		// SCORED depends on all three models agreeing to answer; where the
+		// survivor's own slope is measured from does not.
+		const records = peerTriple({
+			accountId: "A",
+			windowKind: "five_hour",
+			sinceDeathMinutes: [10, 40, 70],
+			slopes: [4, 8, 8],
+			deathAtMs: T0,
+		});
+		for (const entry of records) {
+			if (entry.model !== "scenario-headroom") continue;
+			if (entry.sinceDeathMs !== 10 * MIN) continue;
+			entry.usable = false;
+			entry.unusableReason = "insufficient_data";
+			entry.predictsExhaust = false;
+			entry.predictedEtaMs = null;
+		}
+		const cohorts = scoreCohorts(replayOf(records));
+		const cell = (label: string) =>
+			cohorts.slopeTrajectory.find((row) => row.label === label)?.cells
+				.combined;
+		expect(cell("0-30m")?.lifecycles).toBe(1);
+		expect(cell("0-30m")?.medianRatio).toBeCloseTo(1, 9);
+		expect(cell("30-60m")?.medianRatio).toBeCloseTo(2, 9);
+		expect(cell("1-2h")?.medianRatio).toBeCloseTo(2, 9);
+		// The SCORED bucket still honours the common cohort: minute 10 is not
+		// comparable across models, so nothing is scored there.
+		expect(cohorts.peerExhaustionBySinceDeath[0].buckets[0].records).toBe(0);
+	});
+
+	test("measures each model's churn on its OWN usable instants", () => {
+		// `scenario-headroom` abstaining empties the common cohort; the other
+		// two models' consecutive predictions are still perfectly measurable,
+		// and their stability is not a claim about the third model.
+		const records = triple("A", [T0, T0 + 10 * MIN, T0 + 20 * MIN]);
+		for (const entry of records) {
+			if (entry.model !== "scenario-headroom") continue;
+			entry.usable = false;
+			entry.unusableReason = "insufficient_data";
+			entry.predictsExhaust = false;
+			entry.predictedEtaMs = null;
+		}
+		const cohorts = scoreCohorts(replayOf(records));
+		expect(cohorts.common).toHaveLength(0);
+		const overall = new Map(
+			cohorts.churn
+				.filter((row) => row.cohort === "Overall")
+				.map((row) => [row.model, row]),
+		);
+		expect(overall.get("current")?.pairs).toBe(2);
+		expect(overall.get("scenario-equal")?.pairs).toBe(2);
+		// The model that could not answer has no pairs of its own, which is the
+		// honest answer for it and no reason to erase the other two.
+		expect(overall.get("scenario-headroom")?.pairs).toBe(0);
+	});
+
+	test("keeps a censored outcome out of the scores but inside the churn cohort", () => {
+		// Truth censoring says the window's fate was never observed. It cannot
+		// say the estimator was unstable, so it must not silence the churn row.
+		const records = triple("A", [T0, T0 + 10 * MIN, T0 + 20 * MIN]);
+		for (const entry of records) entry.outcome = { kind: "censored" };
+		const cohorts = scoreCohorts(replayOf(records));
+		expect(cohorts.common).toHaveLength(0);
+		const current = cohorts.churn.find(
+			(row) => row.cohort === "Overall" && row.model === "current",
+		);
+		expect(current?.pairs).toBe(2);
+	});
+});
+
+describe("redistributionRecordToJson", () => {
+	test("renders every field, with instants as ISO strings", () => {
+		const entry = record({
+			model: "current",
+			accountId: "A",
+			T: T0,
+			windowKind: "five_hour",
+			tags: ["peer-exhaustion"],
+			eventIds: [3, 4],
+			sinceDeathMs: 90 * MIN,
+			slopePctPerHour: 12.5,
+		});
+		const json = redistributionRecordToJson(entry);
+		expect(json.tIso).toBe(new Date(T0).toISOString());
+		expect(json.tMs).toBe(T0);
+		expect(json.model).toBe("current");
+		expect(json.lifecycleId).toBe("A::seven_day::0");
+		expect(json.windowKind).toBe("five_hour");
+		expect(json.tags).toEqual(["peer-exhaustion"]);
+		expect(json.eventIds).toEqual([3, 4]);
+		expect(json.sinceDeathMs).toBe(90 * MIN);
+		expect(json.sinceDeathMinutes).toBeCloseTo(90, 9);
+		expect(json.slopePctPerHour).toBe(12.5);
+		expect(json.outcomeKind).toBe("exhausted");
+		expect(json.outcomeAtIso).toBe(new Date(T0 + DAY).toISOString());
+		expect(json.predictedEtaIso).toBe(new Date(T0 + DAY).toISOString());
+		expect(json.knownResetIso).toBe(new Date(T0 + 3 * DAY).toISOString());
+		// Round-trips through JSON without producing `undefined`.
+		expect(JSON.stringify(json)).not.toContain("undefined");
+	});
+
+	test("nulls rather than fabricates an instant that is absent", () => {
+		const entry = record({
+			model: "scenario-equal",
+			accountId: "A",
+			T: T0,
+			predictsExhaust: false,
+			predictedEtaMs: null,
+			outcome: { kind: "censored" },
+			knownResetAtMs: null,
+			labelResetAtMs: null,
+			sinceDeathMs: null,
+		});
+		const json = redistributionRecordToJson(entry);
+		expect(json.predictedEtaIso).toBeNull();
+		expect(json.outcomeAtIso).toBeNull();
+		expect(json.knownResetIso).toBeNull();
+		expect(json.labelResetIso).toBeNull();
+		expect(json.sinceDeathMinutes).toBeNull();
+	});
+});
+
+describe("replayInstant slope capture", () => {
+	test("records the current estimator's fitted slope on every record at T", () => {
+		const fixture = pairFixture();
+		const roster = buildRosterAtInstant(
+			T0 + 2 * DAY,
+			prepareSeries(fixture.rows, fixture.accounts),
+			fixture.accounts,
+		);
+		const replay = replayInstant(T0 + 2 * DAY, roster, [], {
+			label: "test",
+			fromMs: T0,
+			toMs: T0 + 20 * DAY,
+		});
+		// The 90 %/day account is already at 100 % here, and a full window emits
+		// no record; the 20 %/day survivor is the one being measured.
+		const forA = replay.records.filter((entry) => entry.accountId === "A");
+		expect(forA.length).toBe(3);
+		for (const entry of forA) {
+			// 20 %/day is 0.833 %/h.
+			expect(entry.slopePctPerHour ?? 0).toBeCloseTo(20 / 24, 6);
+		}
+		// Every model's record at one instant carries the SAME reading: the
+		// slope is a property of the account's window, not of the projection.
+		expect(new Set(forA.map((entry) => entry.slopePctPerHour)).size).toBe(1);
+	});
+});
+
+describe("the report's new sections", () => {
+	test("names every since-death scope, the slope table and the churn section", () => {
+		const fixture = pairFixture();
+		const range: ReplayRange = {
+			label: "test",
+			fromMs: T0,
+			toMs: T0 + 8 * DAY,
+		};
+		const result = replayRange(
+			fixture.rows,
+			fixture.accounts,
+			range,
+			60,
+			20260823,
+		);
+		const { markdown } = reportFor(result, fixture.rows);
+		for (const heading of [
+			"### Peer exhaustion by time since death",
+			"#### combined",
+			"#### five_hour",
+			"#### seven_day",
+			"##### since death 0-30m",
+			"##### since death 12-24h",
+			"### Survivor slope trajectory after a death",
+			"## Prediction churn",
+		]) {
+			expect(markdown).toContain(heading);
+		}
+		// The disclosure sentence survives the rework.
+		expect(markdown).toContain(
+			"The scenario adds the dead peer's fill demand on top of a survivor whose own lookback ALREADY contains the traffic it absorbed",
+		);
+		// Churn comes before pool calibration.
+		expect(markdown.indexOf("## Prediction churn")).toBeGreaterThan(0);
+		expect(markdown.indexOf("## Prediction churn")).toBeLessThan(
+			markdown.indexOf("## Pool calibration"),
+		);
+		expect(markdown).not.toContain("undefined");
+		expect(markdown).not.toContain("NaN");
 	});
 });

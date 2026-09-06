@@ -181,6 +181,20 @@ export interface RedistributionRecord extends BacktestRecord {
 	learningAtT: boolean;
 	/** For peer-exhaustion-tagged records: T minus the most recent peer death in the class, else null. */
 	sinceDeathMs: number | null;
+	/**
+	 * The CURRENT estimator's fitted burn slope for this window at T, in
+	 * percentage points per hour, or null where it has none (learning, no
+	 * anchor, already exhausted).
+	 *
+	 * A property of the (account, window, T) reading rather than of a model, so
+	 * every model's record at one instant carries the SAME number: it is the
+	 * survivor's own measured burn, which is exactly what
+	 * {@link survivorSlopeTrajectory} needs to ask how fast a survivor absorbs
+	 * the traffic a dead peer left behind. Read-only capture of
+	 * `estimateWindowExhaustion(...).slopePctPerHour`; nothing here changes what
+	 * either model projects.
+	 */
+	slopePctPerHour: number | null;
 }
 
 export interface ReplayRange {
@@ -980,6 +994,7 @@ export function replayInstant(
 					eventIds: context.eventIds,
 					learningAtT,
 					sinceDeathMs: context.sinceDeathMs,
+					slopePctPerHour: estimates.get(window.kind)?.slopePctPerHour ?? null,
 				};
 
 				const estimate = estimates.get(window.kind);
@@ -1464,13 +1479,31 @@ export function pairedSignedMedian(
 		a.push((first.predictedEtaMs - first.outcome.atMs) / MINUTE_MS);
 		b.push((second.predictedEtaMs - first.outcome.atMs) / MINUTE_MS);
 	}
-	const median = (values: number[]): number | null => {
-		if (values.length === 0) return null;
-		const sorted = [...values].sort((x, y) => x - y);
-		return sorted[Math.max(0, Math.ceil(0.5 * sorted.length) - 1)];
-	};
-	return { n: a.length, medianA: median(a), medianB: median(b) };
+	return { n: a.length, medianA: medianOf(a), medianB: medianOf(b) };
 }
+
+/**
+ * Nearest-rank percentile over an unsorted array; empty reads as null.
+ *
+ * The LOWER median on even counts, matching {@link lifecycleBalanced}'s
+ * instant pick and the harness's own `percentile`, so every median in this
+ * module is the same median.
+ */
+export function percentileOf(
+	values: readonly number[],
+	p: number,
+): number | null {
+	if (values.length === 0) return null;
+	const sorted = [...values].sort((x, y) => x - y);
+	const rank = Math.min(
+		sorted.length,
+		Math.max(1, Math.ceil(p * sorted.length)),
+	);
+	return sorted[rank - 1];
+}
+
+const medianOf = (values: readonly number[]): number | null =>
+	percentileOf(values, 0.5);
 
 export interface CohortScores {
 	label: string;
@@ -1519,17 +1552,72 @@ const metricsOf = (
 ): BacktestMetrics | null =>
 	rows.find((row) => row.estimator === model)?.metrics ?? null;
 
-const SINCE_DEATH_BUCKETS: Array<{ label: string; maxMs: number }> = [
-	{ label: "<1h", maxMs: HOUR_MS },
-	{ label: "1-5h", maxMs: 5 * HOUR_MS },
-	{ label: ">5h", maxMs: Number.POSITIVE_INFINITY },
+export interface SinceDeathBucketSpec {
+	label: string;
+	/** Exclusive upper bound of the bucket, in ms since the death. */
+	maxMs: number;
+}
+
+/**
+ * How long the survivor has been carrying the dead peer's traffic, at the
+ * resolution the absorption actually happens on.
+ *
+ * The five-hour window is only 300 minutes long, so the three coarse buckets
+ * this replaced (`<1h`, `1-5h`, `>5h`) put an entire five-hour lifecycle in one
+ * or two cells and could not show the survivor's slope catching up inside it.
+ * The last bucket is open at the top rather than closed at 24 h so no record
+ * can fall out of the table; the transition shadow is
+ * {@link TRANSITION_WINDOW_MS} = 24 h, so nothing older reaches it anyway.
+ */
+export const SINCE_DEATH_BUCKETS: readonly SinceDeathBucketSpec[] = [
+	{ label: "0-30m", maxMs: 30 * MINUTE_MS },
+	{ label: "30-60m", maxMs: HOUR_MS },
+	{ label: "1-2h", maxMs: 2 * HOUR_MS },
+	{ label: "2-3h", maxMs: 3 * HOUR_MS },
+	{ label: "3-4h", maxMs: 4 * HOUR_MS },
+	{ label: "4-6h", maxMs: 6 * HOUR_MS },
+	{ label: "6-12h", maxMs: 12 * HOUR_MS },
+	{ label: "12-24h", maxMs: Number.POSITIVE_INFINITY },
 ];
+
+/** Which since-death bucket an age falls in, or -1 when it has none. */
+export function sinceDeathBucketIndex(sinceDeathMs: number | null): number {
+	if (sinceDeathMs == null || !Number.isFinite(sinceDeathMs)) return -1;
+	for (let i = 0; i < SINCE_DEATH_BUCKETS.length; i++) {
+		if (sinceDeathMs < SINCE_DEATH_BUCKETS[i].maxMs) return i;
+	}
+	return SINCE_DEATH_BUCKETS.length - 1;
+}
+
+/** `combined` plus each window kind, in the order the report prints them. */
+export type SinceDeathScope = "combined" | BacktestWindowKind;
+
+export const SINCE_DEATH_SCOPES: readonly SinceDeathScope[] = [
+	"combined",
+	"five_hour",
+	"seven_day",
+];
+
+export interface SinceDeathGroup {
+	scope: SinceDeathScope;
+	/** One cohort per {@link SINCE_DEATH_BUCKETS} entry, same order. */
+	buckets: CohortScores[];
+}
+
+const inScope = (
+	record: RedistributionRecord,
+	scope: SinceDeathScope,
+): boolean => scope === "combined" || record.windowKind === scope;
 
 export interface CohortSet {
 	overall: CohortScores;
 	anyTransition: CohortScores;
 	byTag: CohortScores[];
-	peerExhaustionBySinceDeath: CohortScores[];
+	peerExhaustionBySinceDeath: SinceDeathGroup[];
+	/** How the survivor's own slope moves after a death — see {@link survivorSlopeTrajectory}. */
+	slopeTrajectory: SlopeRatioRow[];
+	/** Instant-to-instant instability of each model — see {@link churnRows}. */
+	churn: ChurnRow[];
 	byClassAndKind: CohortScores[];
 	scenarioExtra: CohortScores;
 	bootstrap: ReportBootstrapEntry[];
@@ -1615,19 +1703,32 @@ export function scoreCohorts(result: ReplayResult): CohortSet {
 		(record) =>
 			record.tags.includes("peer-exhaustion") && record.sinceDeathMs != null,
 	);
-	const peerExhaustionBySinceDeath = SINCE_DEATH_BUCKETS.map(
-		(bucket, index) => {
-			const lower = index === 0 ? 0 : SINCE_DEATH_BUCKETS[index - 1].maxMs;
-			return scoreCohort(
-				bucket.label,
-				peerRecords.filter(
-					(record) =>
-						(record.sinceDeathMs ?? 0) >= lower &&
-						(record.sinceDeathMs ?? 0) < bucket.maxMs,
+	const peerExhaustionBySinceDeath: SinceDeathGroup[] = SINCE_DEATH_SCOPES.map(
+		(scope) => {
+			const scoped = peerRecords.filter((record) => inScope(record, scope));
+			return {
+				scope,
+				buckets: SINCE_DEATH_BUCKETS.map((bucket, index) =>
+					scoreCohort(
+						bucket.label,
+						scoped.filter(
+							(record) => sinceDeathBucketIndex(record.sinceDeathMs) === index,
+						),
+					),
 				),
-			);
+			};
 		},
 	);
+	// Deliberately the RAW peer-exhaustion records, not `peerRecords`: the
+	// slope is the survivor's own measured burn, and whether the three models
+	// happen to be comparable at an instant — or whether the window's fate was
+	// ever observed — says nothing about it. Filtering first would move the
+	// baseline off the earliest post-death reading the replay actually has.
+	const rawPeerRecords = result.records.filter(
+		(record) =>
+			record.tags.includes("peer-exhaustion") && record.sinceDeathMs != null,
+	);
+	const slopeTrajectory = survivorSlopeTrajectory(rawPeerRecords, "current");
 
 	const classKinds = new Set<string>();
 	for (const record of commonRecords) {
@@ -1691,15 +1792,336 @@ export function scoreCohorts(result: ReplayResult): CohortSet {
 		),
 	];
 
+	// Also the raw records. Churn is a within-model statistic: one model
+	// abstaining, or a censored outcome, removes nothing that is needed to see
+	// whether ANOTHER model's answer moved between two instants. `churnRows`
+	// applies each model's own usability; the tag filter is applied here, on
+	// the same raw records, so the transition cohort loses no valid pair
+	// either.
+	const churn = [
+		...churnRows("Overall", result.records, result.stepMinutes),
+		...churnRows(
+			"Any transition",
+			result.records.filter((record) => record.tags.length > 0),
+			result.stepMinutes,
+		),
+	];
+
 	return {
 		overall,
 		anyTransition,
 		byTag,
 		peerExhaustionBySinceDeath,
+		slopeTrajectory,
+		churn,
 		byClassAndKind,
 		scenarioExtra,
 		bootstrap,
 		common: commonRecords,
+	};
+}
+
+// ---------------------------------------------------------------------------
+// Survivor slope trajectory
+// ---------------------------------------------------------------------------
+
+export interface SlopeRatioCell {
+	/** Lifecycles (one per window lifecycle × death) contributing to this cell. */
+	lifecycles: number;
+	/** Median over lifecycles of that lifecycle's median slope ratio. */
+	medianRatio: number | null;
+	/** Median over lifecycles of that lifecycle's median absolute slope. */
+	medianSlopePctPerHour: number | null;
+}
+
+export interface SlopeRatioRow {
+	/** A {@link SINCE_DEATH_BUCKETS} label. */
+	label: string;
+	cells: Record<SinceDeathScope, SlopeRatioCell>;
+}
+
+const emptyCell = (): SlopeRatioCell => ({
+	lifecycles: 0,
+	medianRatio: null,
+	medianSlopePctPerHour: null,
+});
+
+/**
+ * How fast a survivor's OWN fitted slope absorbs the traffic a dead peer left.
+ *
+ * For each (window lifecycle × death), the first instant after that death is
+ * the baseline; every later instant in the same lifecycle is expressed as
+ * `slope(t) / slope(t_death+)`. A ratio above 1 means the survivor's measured
+ * burn has already risen — the redistributed traffic is IN the lookback, which
+ * is precisely the double-counting the scenario is disclosed for. A ratio near
+ * 1 means it has not arrived yet.
+ *
+ * Lifecycle-balanced twice over, like every other number in the report: the
+ * median is taken WITHIN a lifecycle-bucket first and only then ACROSS
+ * lifecycles, so a lifecycle that happens to be sampled more often does not
+ * outvote one that is not.
+ *
+ * The baseline is the EARLIEST post-death instant that has a fitted slope at
+ * all, not the literal first instant: a survivor is very often still learning
+ * when its peer dies, and requiring a slope there would discard exactly the
+ * lifecycles this table exists to describe. An instant before the death is
+ * never the baseline. Instants with no slope contribute to no bucket. A
+ * baseline that is zero or negative is dropped outright — 9/0 is not a ratio,
+ * and imputing one would invent the absorption being measured. Both facts are
+ * stated in the report beside the table.
+ *
+ * `records` is the RAW peer-exhaustion set, not a comparability-filtered one:
+ * the slope is a property of the (account, window, T) reading, so every model's
+ * record at an instant carries the same number and reading ONE model's rows is
+ * both the dedup per (lifecycle, instant) and the whole selection. Restricting
+ * to instants where all models are comparable would silently move the
+ * baseline.
+ *
+ * Grouped per DEATH, not merely per lifecycle: a weekly window can outlive two
+ * peer deaths, and `sinceDeathMs` is measured from the most recent one, so the
+ * baseline has to be re-taken at each.
+ */
+export function survivorSlopeTrajectory(
+	records: readonly RedistributionRecord[],
+	model: ReplayModel = "current",
+): SlopeRatioRow[] {
+	const groups = new Map<string, RedistributionRecord[]>();
+	for (const record of records) {
+		if (record.model !== model) continue;
+		if (!record.tags.includes("peer-exhaustion")) continue;
+		if (record.sinceDeathMs == null) continue;
+		if (record.sinceDeathMs < 0) continue;
+		if (record.slopePctPerHour == null) continue;
+		const deathAtMs = record.T - record.sinceDeathMs;
+		const key = `${record.lifecycleId}::${deathAtMs}`;
+		const list = groups.get(key);
+		if (list) list.push(record);
+		else groups.set(key, [record]);
+	}
+
+	// `${scope}::${bucket}` -> one sample per group: the group's OWN median in
+	// that bucket. Collapsing within a group before collecting is what makes the
+	// outer median a median across lifecycles rather than across instants.
+	const ratios = new Map<string, number[]>();
+	const slopes = new Map<string, number[]>();
+	const cellKey = (scope: SinceDeathScope, index: number) =>
+		`${scope}::${index}`;
+	for (const scope of SINCE_DEATH_SCOPES) {
+		for (let i = 0; i < SINCE_DEATH_BUCKETS.length; i++) {
+			ratios.set(cellKey(scope, i), []);
+			slopes.set(cellKey(scope, i), []);
+		}
+	}
+
+	for (const group of groups.values()) {
+		const sorted = [...group].sort(
+			(a, b) => (a.sinceDeathMs ?? 0) - (b.sinceDeathMs ?? 0),
+		);
+		const baseline = sorted[0]?.slopePctPerHour ?? null;
+		if (baseline == null || baseline <= 0) continue;
+		const perBucketRatio = new Map<number, number[]>();
+		const perBucketSlope = new Map<number, number[]>();
+		for (const record of sorted) {
+			const slope = record.slopePctPerHour;
+			if (slope == null) continue;
+			const index = sinceDeathBucketIndex(record.sinceDeathMs);
+			if (index < 0) continue;
+			const ratioList = perBucketRatio.get(index) ?? [];
+			ratioList.push(slope / baseline);
+			perBucketRatio.set(index, ratioList);
+			const slopeList = perBucketSlope.get(index) ?? [];
+			slopeList.push(slope);
+			perBucketSlope.set(index, slopeList);
+		}
+		// A group is window-kind-pure (a lifecycle id names one window), so it
+		// contributes to `combined` and to exactly one kind.
+		const kind = sorted[0].windowKind;
+		for (const scope of SINCE_DEATH_SCOPES) {
+			if (scope !== "combined" && scope !== kind) continue;
+			for (const [index, values] of perBucketRatio) {
+				const cell = ratios.get(cellKey(scope, index));
+				const median = medianOf(values);
+				if (cell && median != null) cell.push(median);
+			}
+			for (const [index, values] of perBucketSlope) {
+				const cell = slopes.get(cellKey(scope, index));
+				const median = medianOf(values);
+				if (cell && median != null) cell.push(median);
+			}
+		}
+	}
+
+	return SINCE_DEATH_BUCKETS.map((bucket, index) => {
+		const cells = {} as Record<SinceDeathScope, SlopeRatioCell>;
+		for (const scope of SINCE_DEATH_SCOPES) {
+			const ratioSamples = ratios.get(cellKey(scope, index)) ?? [];
+			const slopeSamples = slopes.get(cellKey(scope, index)) ?? [];
+			cells[scope] =
+				ratioSamples.length === 0
+					? emptyCell()
+					: {
+							lifecycles: ratioSamples.length,
+							medianRatio: medianOf(ratioSamples),
+							medianSlopePctPerHour: medianOf(slopeSamples),
+						};
+		}
+		return { label: bucket.label, cells };
+	});
+}
+
+// ---------------------------------------------------------------------------
+// Prediction churn
+// ---------------------------------------------------------------------------
+
+export interface ChurnRow {
+	cohort: string;
+	model: ReplayModel;
+	/** Lifecycles that produced at least one consecutive usable pair. */
+	lifecycles: number;
+	/** Consecutive usable pairs behind the flip rate. */
+	pairs: number;
+	/** Median over lifecycles of that lifecycle's median |ΔETA|, in minutes. */
+	medianEtaChangeMinutes: number | null;
+	/** Median over lifecycles of that lifecycle's p90 |ΔETA|, in minutes. */
+	p90EtaChangeMinutes: number | null;
+	/** Median over lifecycles of that lifecycle's yes/no flip rate. */
+	medianFlipRate: number | null;
+}
+
+/**
+ * How much a model's answer MOVES between one instant and the next.
+ *
+ * Accuracy says nothing about stability, and an operator reads the runway on a
+ * dashboard that refreshes: an estimator that oscillates between "out in 40
+ * minutes" and "not this cycle" every ten minutes is unusable at any F1. Two
+ * numbers, both over consecutive usable instants of one window lifecycle:
+ * `|ETA(t+1) − ETA(t)|` where both instants committed to a date, and the
+ * fraction of consecutive pairs where the yes/no verdict changes.
+ *
+ * NOT expressed as a {@link BacktestStatistic}. That vocabulary is consumed by
+ * `statisticOf`, which is a function of an unordered BAG of `BacktestRecord`;
+ * churn is a function of an ORDERED sequence within a lifecycle, and
+ * `BacktestRecord` carries no lifecycle id to group by. Adding it there would
+ * mean teaching the shared per-window harness a grouping key it does not have,
+ * for one caller. `bootstrapDelta` is likewise the wrong shape here — it
+ * resamples blocks with replacement, which destroys the adjacency the statistic
+ * is defined on.
+ *
+ * Two records are a pair only when they are EXACTLY one grid step apart and
+ * both usable for this model. Nothing bridges a hole: an instant the sampler
+ * skipped, or one this model could not answer, is not the estimator changing
+ * its mind, and counting the jump across it would read as instability that
+ * never happened. Usability is this model's own — another model abstaining, or
+ * an outcome nobody observed, does not make this model's two consecutive
+ * answers unmeasurable, so the caller passes the raw replay records.
+ */
+export function churnRows(
+	cohort: string,
+	records: readonly RedistributionRecord[],
+	stepMinutes: number,
+): ChurnRow[] {
+	const stepMs = stepMinutes * MINUTE_MS;
+	return REPLAY_MODELS.map((model) => {
+		const byLifecycle = new Map<string, RedistributionRecord[]>();
+		for (const record of records) {
+			if (record.model !== model) continue;
+			if (!record.usable) continue;
+			const list = byLifecycle.get(record.lifecycleId);
+			if (list) list.push(record);
+			else byLifecycle.set(record.lifecycleId, [record]);
+		}
+		const perLifecycleMedian: number[] = [];
+		const perLifecycleP90: number[] = [];
+		const perLifecycleFlip: number[] = [];
+		let lifecycles = 0;
+		let pairs = 0;
+		for (const list of byLifecycle.values()) {
+			const sorted = [...list].sort((a, b) => a.T - b.T);
+			const deltas: number[] = [];
+			let localPairs = 0;
+			let flips = 0;
+			for (let i = 1; i < sorted.length; i++) {
+				const previous = sorted[i - 1];
+				const current = sorted[i];
+				if (current.T - previous.T !== stepMs) continue;
+				localPairs++;
+				if (previous.predictsExhaust !== current.predictsExhaust) flips++;
+				if (previous.predictedEtaMs != null && current.predictedEtaMs != null) {
+					deltas.push(
+						Math.abs(current.predictedEtaMs - previous.predictedEtaMs) /
+							MINUTE_MS,
+					);
+				}
+			}
+			if (localPairs === 0) continue;
+			lifecycles++;
+			pairs += localPairs;
+			perLifecycleFlip.push(flips / localPairs);
+			const median = medianOf(deltas);
+			if (median != null) perLifecycleMedian.push(median);
+			const p90 = percentileOf(deltas, 0.9);
+			if (p90 != null) perLifecycleP90.push(p90);
+		}
+		return {
+			cohort,
+			model,
+			lifecycles,
+			pairs,
+			medianEtaChangeMinutes: medianOf(perLifecycleMedian),
+			p90EtaChangeMinutes: medianOf(perLifecycleP90),
+			medianFlipRate: medianOf(perLifecycleFlip),
+		};
+	});
+}
+
+// ---------------------------------------------------------------------------
+// Per-record dump
+// ---------------------------------------------------------------------------
+
+/**
+ * One replay record as a flat JSON object, instants rendered as ISO strings
+ * beside their raw epoch milliseconds.
+ *
+ * Exists so a follow-up analysis of a multi-minute replay does not have to
+ * re-run it. Flat rather than nested because the consumer is a JSONL reader
+ * (`jq`, a dataframe), and both forms of every instant because the ISO string
+ * is what a human reads and the epoch is what arithmetic needs.
+ */
+export function redistributionRecordToJson(
+	record: RedistributionRecord,
+): Record<string, unknown> {
+	const isoOrNull = (ms: number | null | undefined): string | null =>
+		ms == null || !Number.isFinite(ms) ? null : new Date(ms).toISOString();
+	const outcome = record.outcome;
+	const outcomeAtMs = outcome.kind === "exhausted" ? outcome.atMs : null;
+	return {
+		tMs: record.T,
+		tIso: new Date(record.T).toISOString(),
+		model: record.model,
+		lifecycleId: record.lifecycleId,
+		accountId: record.accountId,
+		provider: record.provider,
+		windowKind: record.windowKind,
+		windowMs: record.windowMs,
+		tags: record.tags,
+		eventIds: record.eventIds,
+		learningAtT: record.learningAtT,
+		sinceDeathMs: record.sinceDeathMs,
+		sinceDeathMinutes:
+			record.sinceDeathMs == null ? null : record.sinceDeathMs / MINUTE_MS,
+		slopePctPerHour: record.slopePctPerHour,
+		usable: record.usable,
+		unusableReason: record.unusableReason,
+		predictsExhaust: record.predictsExhaust,
+		predictedEtaMs: record.predictedEtaMs,
+		predictedEtaIso: isoOrNull(record.predictedEtaMs),
+		outcomeKind: outcome.kind,
+		outcomeAtMs,
+		outcomeAtIso: isoOrNull(outcomeAtMs),
+		knownResetAtMs: record.knownResetAtMs,
+		knownResetIso: isoOrNull(record.knownResetAtMs),
+		labelResetAtMs: record.labelResetAtMs,
+		labelResetIso: isoOrNull(record.labelResetAtMs),
 	};
 }
 
@@ -1972,6 +2394,38 @@ function cohortSection(cohort: CohortScores, heading: string): string[] {
 	return out;
 }
 
+function slopeTrajectorySection(rows: readonly SlopeRatioRow[]): string[] {
+	const out: string[] = [];
+	out.push("### Survivor slope trajectory after a death");
+	out.push("");
+	out.push(
+		"The survivor's OWN fitted burn slope, expressed against its slope just after the peer died: `slope(t) / slope(t_death+)`. Above 1 means the inherited traffic has already entered the survivor's lookback, which is exactly the demand the scenario then adds a second time; near 1 means it has not arrived yet.",
+	);
+	out.push("");
+	out.push(
+		"Median within a (window lifecycle × death) first, then across them, so a lifecycle that happens to be sampled more often does not outvote one that is not. `t_death+` is the earliest instant at or after the death that has a fitted slope at all, not the literal first instant: a survivor is often still learning when its peer dies, and requiring a slope there would discard the lifecycles this table is about. Instants with no slope enter no bucket, and a lifecycle whose baseline slope is zero is dropped rather than imputed.",
+	);
+	out.push("");
+	out.push(
+		"Unlike the scored buckets above, this table reads every peer-exhaustion instant of the replay, not only the ones where all three models are comparable and the window's fate was observed. The slope belongs to the survivor's own reading, so a model abstaining or an unobserved outcome is no reason to move the baseline off the earliest post-death reading there is.",
+	);
+	out.push("");
+	out.push(
+		"| since death | lifecycles | median ratio | median slope (pct/h) | five_hour n | five_hour ratio | seven_day n | seven_day ratio |",
+	);
+	out.push("|---|---:|---:|---:|---:|---:|---:|---:|");
+	for (const row of rows) {
+		const combined = row.cells.combined;
+		const five = row.cells.five_hour;
+		const seven = row.cells.seven_day;
+		out.push(
+			`| ${row.label} | ${combined.lifecycles} | ${num(combined.medianRatio)} | ${num(combined.medianSlopePctPerHour, 2)} | ${five.lifecycles} | ${num(five.medianRatio)} | ${seven.lifecycles} | ${num(seven.medianRatio)} |`,
+		);
+	}
+	out.push("");
+	return out;
+}
+
 /** The report, in the style of the existing `docs/prediction-backtest-*.md`. */
 export function formatRedistributionReport(
 	input: RedistributionReportInput,
@@ -2102,9 +2556,18 @@ export function formatRedistributionReport(
 		"The scenario adds the dead peer's fill demand on top of a survivor whose own lookback ALREADY contains the traffic it absorbed, so it is expected to read pessimistic the longer the peer has been dead. Disclosed here, not corrected.",
 	);
 	out.push("");
-	for (const cohort of cohorts.peerExhaustionBySinceDeath) {
-		out.push(...cohortSection(cohort, `#### since death ${cohort.label}`));
+	out.push(
+		"Buckets are fine (30 min at the start) because a five-hour window is only 300 minutes long: at the three coarse buckets this replaced, one bucket held a whole five-hour lifecycle. Reported combined and split by window kind, because the two kinds absorb a death on completely different timescales.",
+	);
+	out.push("");
+	for (const group of cohorts.peerExhaustionBySinceDeath) {
+		out.push(`#### ${group.scope}`);
+		out.push("");
+		for (const cohort of group.buckets) {
+			out.push(...cohortSection(cohort, `##### since death ${cohort.label}`));
+		}
 	}
+	out.push(...slopeTrajectorySection(cohorts.slopeTrajectory));
 	out.push("### By class and window");
 	out.push("");
 	for (const cohort of cohorts.byClassAndKind) {
@@ -2127,6 +2590,35 @@ export function formatRedistributionReport(
 	for (const entry of cohorts.bootstrap) {
 		out.push(
 			`| ${entry.label} | ${entry.statistic} | ${num(entry.p2_5)} | ${num(entry.p50)} | ${num(entry.p97_5)} | ${entry.samples} |`,
+		);
+	}
+	out.push("");
+
+	out.push("## Prediction churn");
+	out.push("");
+	out.push(
+		'How much each model\'s answer MOVES between one instant and the next, over adjacent usable instants of the same window lifecycle. Accuracy says nothing about stability: an estimator that alternates between "out in 40 minutes" and "not this cycle" every grid step is unusable at any F1.',
+	);
+	out.push("");
+	out.push(
+		"Lifecycle-balanced the same way the score tables are: the median (and p90) is taken WITHIN a lifecycle first, then across lifecycles. `flip rate` is the fraction of adjacent pairs where the yes/no verdict changed. A pair is two instants EXACTLY one grid step apart, both usable for that model: nothing bridges a skipped instant or one the model could not answer, so a hole in the series does not read as churn.",
+	);
+	out.push("");
+	out.push(
+		"Each model is measured on its OWN usable instants, over every replay record rather than the common cohort the score tables use: another model abstaining, or an outcome nobody observed, does not make a model's two consecutive answers unmeasurable. The three rows of a cohort are therefore each an honest statement about one model, and not a like-for-like comparison the way the scores are.",
+	);
+	out.push("");
+	out.push(
+		"Not a `BacktestStatistic`: that vocabulary is a function of an unordered bag of records, churn is a function of an ordered sequence inside a lifecycle, and `BacktestRecord` carries no lifecycle id to group by. There is therefore no bootstrap CI on these numbers — resampling blocks with replacement would destroy the adjacency they are defined on.",
+	);
+	out.push("");
+	out.push(
+		"| cohort | model | lifecycles | pairs | median abs ETA change (min) | p90 abs ETA change (min) | median flip rate |",
+	);
+	out.push("|---|---|---:|---:|---:|---:|---:|");
+	for (const row of cohorts.churn) {
+		out.push(
+			`| ${row.cohort} | ${row.model} | ${row.lifecycles} | ${row.pairs} | ${num(row.medianEtaChangeMinutes, 1)} | ${num(row.p90EtaChangeMinutes, 1)} | ${num(row.medianFlipRate)} |`,
 		);
 	}
 	out.push("");
