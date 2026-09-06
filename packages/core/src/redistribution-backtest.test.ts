@@ -24,6 +24,7 @@ import {
 	scoreCohorts,
 	type TransitionEvent,
 	transitionsAt,
+	type Verdict,
 } from "./redistribution-backtest";
 
 const MIN = 60_000;
@@ -236,7 +237,7 @@ describe("detectTransitions", () => {
 		const accounts = [
 			account("A"),
 			account("B"),
-			account("N", { createdAtMs: T0 + HOUR }),
+			account("N", { createdAtMs: T0 + HOUR, name: "Claude-N" }),
 		];
 		const series = prepareSeries(snapshotRows, accounts);
 		const events = detectTransitions(series, accounts, RANGE);
@@ -254,6 +255,7 @@ describe("detectTransitions", () => {
 			"peer-exhaustion",
 			"gift-reset",
 		]);
+		expect(events[0].accountName).toBe("Claude-N");
 		expect(events[1].detail).toBe("max/20x → max/5x");
 		expect(events[3].detail).toBe("drop 40 → 10 pp");
 		// The dead span ends at the dying window's own reset, not 24 h later.
@@ -309,6 +311,26 @@ describe("detectTransitions", () => {
 		expect(detectTransitions(series, accounts, RANGE)).toEqual([]);
 	});
 
+	test("falls back to the account id when the account row is gone", () => {
+		const start = T0 - DAY;
+		const snapshotRows = rows({
+			accountId: "B",
+			from: start,
+			to: T0 + 8 * HOUR,
+			stepMs: HOUR,
+			sevenDay: (t) => ({
+				pct: t >= T0 + 3 * HOUR ? 100 : 50,
+				reset: T0 + 10 * HOUR,
+			}),
+		});
+		// Snapshots without an `accounts` row: the id is all the history has.
+		const series = prepareSeries(snapshotRows, []);
+		const events = detectTransitions(series, [], RANGE);
+		expect(events).toHaveLength(1);
+		expect(events[0].kind).toBe("peer-exhaustion");
+		expect(events[0].accountName).toBe("B");
+	});
+
 	test("a placeholder lifecycle never reports a peer exhaustion", () => {
 		const snapshotRows = rows({
 			accountId: "C",
@@ -333,6 +355,7 @@ describe("transitionsAt", () => {
 			endsAtMs: T0 + 5 * HOUR,
 			demandClass: "anthropic",
 			accountId: "B",
+			accountName: "Claude-B",
 			windowKind: "seven_day",
 			detail: "",
 		},
@@ -343,6 +366,7 @@ describe("transitionsAt", () => {
 			endsAtMs: T0 + 26 * HOUR,
 			demandClass: "anthropic",
 			accountId: "N",
+			accountName: "Claude-N",
 			windowKind: null,
 			detail: "",
 		},
@@ -353,6 +377,7 @@ describe("transitionsAt", () => {
 			endsAtMs: T0 + 26 * HOUR,
 			demandClass: "codex",
 			accountId: "X",
+			accountName: "Codex-X",
 			windowKind: null,
 			detail: "",
 		},
@@ -748,6 +773,75 @@ describe("replayRange", () => {
 		expect(peerCoverage?.instantFraction as number).toBeGreaterThan(0);
 	});
 
+	test("reports each contiguous all-out run, and members join only where they have rows", () => {
+		const start = T0 - DAY;
+		const step = 12 * HOUR;
+		const range: ReplayRange = {
+			label: "grid",
+			fromMs: T0,
+			toMs: T0 + 4 * DAY,
+		};
+		const outFrom = T0 + DAY;
+		const outTo = T0 + 2 * DAY;
+		const member = (accountId: string, from: number) =>
+			rows({
+				accountId,
+				from,
+				to: T0 + 4 * DAY,
+				stepMs: step,
+				sevenDay: (t) =>
+					t >= outFrom && t < outTo
+						? { pct: 100, reset: outTo + DAY }
+						: { pct: 50, reset: T0 + 6 * DAY },
+			});
+		const snapshotRows = [
+			...member("A", start),
+			...member("B", start),
+			// C has no row anywhere near the all-out ticks: absent, not a survivor.
+			...member("C", T0 + 3 * DAY),
+		];
+		const accounts = [account("A"), account("B"), account("C")];
+		const result = replayRange(snapshotRows, accounts, range, step / MIN, 7);
+
+		expect(result.allOutIntervals).toEqual([
+			{
+				demandClass: "anthropic",
+				fromMs: outFrom,
+				toMs: outTo,
+				ticks: 2,
+			},
+		]);
+	});
+
+	test("reports no interval for a class the grid never saw all-out", () => {
+		const start = T0 - DAY;
+		const step = 12 * HOUR;
+		const range: ReplayRange = {
+			label: "grid",
+			fromMs: T0,
+			toMs: T0 + 4 * DAY,
+		};
+		const snapshotRows = [
+			...rows({
+				accountId: "A",
+				from: start,
+				to: T0 + 4 * DAY,
+				stepMs: step,
+				sevenDay: weekly(start, 8, 95),
+			}),
+			...rows({
+				accountId: "B",
+				from: start,
+				to: T0 + 4 * DAY,
+				stepMs: step,
+				sevenDay: weekly(start, 9, 95),
+			}),
+		];
+		const accounts = [account("A"), account("B")];
+		const result = replayRange(snapshotRows, accounts, range, step / MIN, 7);
+		expect(result.allOutIntervals).toEqual([]);
+	});
+
 	test("a stale member censors the tick, and censored horizons never enter the false-alarm rate", () => {
 		const start = T0 - DAY;
 		const step = 12 * HOUR;
@@ -860,6 +954,7 @@ const replayOf = (
 	records,
 	events,
 	calibration: [],
+	allOutIntervals: [],
 	placeholderWindowsSkipped: 0,
 	tagCoverage: [],
 });
@@ -998,6 +1093,8 @@ function verdictFixture(options: {
 		{ n: 4, medianA: options.scenarioBias, medianB: options.currentBias },
 	);
 	const overall = cohort("Overall", [], { n: 0, medianA: null, medianB: null });
+	// One `add` per servable class: the anthropic half is always labelled, the
+	// codex half only when the fixture says so.
 	const events: TransitionEvent[] = [
 		{
 			id: 1,
@@ -1006,6 +1103,18 @@ function verdictFixture(options: {
 			endsAtMs: T0 + DAY,
 			demandClass: "anthropic",
 			accountId: "N",
+			accountName: "Claude-N",
+			windowKind: null,
+			detail: "created",
+		},
+		{
+			id: 2,
+			kind: "add",
+			atMs: T0,
+			endsAtMs: T0 + DAY,
+			demandClass: "codex",
+			accountId: "X",
+			accountName: "Codex-X",
 			windowKind: null,
 			detail: "created",
 		},
@@ -1014,6 +1123,13 @@ function verdictFixture(options: {
 		model: "current",
 		accountId: "A",
 		T: T0,
+		tags: ["add"],
+	});
+	const codexWeeklyRecord = record({
+		model: "current",
+		accountId: "X",
+		T: T0,
+		provider: "codex",
 		tags: ["add"],
 	});
 	const cohorts: CohortSet = {
@@ -1037,9 +1153,14 @@ function verdictFixture(options: {
 				samples: 1000,
 			},
 		],
-		common: options.unlabelled ? [] : [weeklyRecord],
+		common: options.unlabelled
+			? [weeklyRecord]
+			: [weeklyRecord, codexWeeklyRecord],
 	};
-	return { cohorts, replay: replayOf([weeklyRecord], events) };
+	return {
+		cohorts,
+		replay: replayOf([weeklyRecord, codexWeeklyRecord], events),
+	};
 }
 
 describe("evaluateVerdict", () => {
@@ -1109,34 +1230,35 @@ describe("evaluateVerdict", () => {
 		const { cohorts, replay } = verdictFixture({ ...base, unlabelled: true });
 		const verdict = evaluateVerdict(cohorts, replay);
 		expect(verdict.provisional).toBe(true);
-		expect(verdict.unlabelledCohorts).toEqual(["add"]);
+		// Per (tag, class): the labelled anthropic half must not cover for the
+		// codex half of the same tag.
+		expect(verdict.unlabelledCohorts).toEqual(["add (codex)"]);
+	});
+
+	test("a tag labelled in every class it has events in is not provisional", () => {
+		const { cohorts, replay } = verdictFixture(base);
+		const verdict = evaluateVerdict(cohorts, replay);
+		expect(verdict.unlabelledCohorts).toEqual([]);
+		expect(verdict.provisional).toBe(false);
 	});
 });
 
-describe("formatRedistributionReport", () => {
-	test("writes every section, states the verdict, and never prints a hole", () => {
-		const fixture = pairFixture();
-		const range: ReplayRange = {
-			label: "test",
-			fromMs: T0,
-			toMs: T0 + 8 * DAY,
-		};
-		const result = replayRange(
-			fixture.rows,
-			fixture.accounts,
-			range,
-			6 * 60,
-			20260823,
-		);
-		const cohorts = scoreCohorts(result);
-		const verdict = evaluateVerdict(cohorts, result);
-		const markdown = formatRedistributionReport({
+/** The report for a replay, with the verdict it was rendered from. */
+function reportFor(
+	result: ReplayResult,
+	snapshotRows: RosterSnapshotRow[],
+): { markdown: string; verdict: Verdict } {
+	const cohorts = scoreCohorts(result);
+	const verdict = evaluateVerdict(cohorts, result);
+	return {
+		verdict,
+		markdown: formatRedistributionReport({
 			title: "Redistribution backtest",
 			generatedAtIso: new Date(T0).toISOString(),
 			command: "bun scripts/redistribution-backtest.ts",
-			config: { stepMinutes: 360, seed: 20260823 },
+			config: { stepMinutes: result.stepMinutes, seed: result.seed },
 			dataset: {
-				rows: fixture.rows.length,
+				rows: snapshotRows.length,
 				accounts: 2,
 				providers: ["anthropic"],
 				firstSampleIso: new Date(T0 - DAY).toISOString(),
@@ -1147,7 +1269,27 @@ describe("formatRedistributionReport", () => {
 			verdict,
 			knownLimits: ["a limit"],
 			notes: ["a note"],
-		});
+		}),
+	};
+}
+
+/** The claim the section used to make unconditionally, whatever the grid said. */
+const OLD_FIXED_SENTENCE = "no multi-account class was ever observed all-out";
+
+describe("formatRedistributionReport", () => {
+	test("writes every section, states the verdict, and never prints a hole", () => {
+		const fixture = pairFixture();
+		const range: ReplayRange = {
+			label: "test",
+			fromMs: T0,
+			toMs: T0 + 8 * DAY,
+		};
+		const named = fixture.accounts.map((entry) => ({
+			...entry,
+			name: `Claude-${entry.accountId}`,
+		}));
+		const result = replayRange(fixture.rows, named, range, 6 * 60, 20260823);
+		const { markdown, verdict } = reportFor(result, fixture.rows);
 
 		for (const heading of [
 			"# Redistribution backtest",
@@ -1171,5 +1313,56 @@ describe("formatRedistributionReport", () => {
 		expect(markdown).toContain(`**Verdict: ${verdict.verdict}**`);
 		expect(markdown).not.toContain("undefined");
 		expect(markdown).not.toContain("NaN");
+		// The transition table names the account rather than printing its id.
+		expect(markdown).toContain("| Claude-B |");
+		// Both accounts read 100 % together, so the section prints the episode
+		// instead of asserting there was none.
+		expect(result.allOutIntervals.length).toBeGreaterThan(0);
+		const interval = result.allOutIntervals[0];
+		expect(markdown).toContain(
+			`- \`anthropic\`: all-out \`${new Date(interval.fromMs).toISOString()}\`–\`${new Date(interval.toMs).toISOString()}\` (\`${interval.ticks}\` ticks)`,
+		);
+		expect(markdown).toContain(
+			"These intervals are the positives behind the `observed out` column",
+		);
+		expect(markdown).not.toContain(OLD_FIXED_SENTENCE);
+	});
+
+	test("states the absence of all-out ticks from the grid, not from a fixed claim", () => {
+		const start = T0 - DAY;
+		const step = 12 * HOUR;
+		const range: ReplayRange = {
+			label: "grid",
+			fromMs: T0,
+			toMs: T0 + 16 * DAY,
+		};
+		const snapshotRows = [
+			...rows({
+				accountId: "A",
+				from: start,
+				to: T0 + 16 * DAY,
+				stepMs: step,
+				sevenDay: weekly(start, 8, 95),
+			}),
+			...rows({
+				accountId: "B",
+				from: start,
+				to: T0 + 16 * DAY,
+				stepMs: step,
+				sevenDay: weekly(start, 9, 95),
+			}),
+		];
+		const accounts = [account("A"), account("B")];
+		const result = replayRange(snapshotRows, accounts, range, step / MIN, 7);
+		const { markdown } = reportFor(result, snapshotRows);
+
+		expect(result.allOutIntervals).toEqual([]);
+		expect(markdown).toContain(
+			"- `anthropic`: no all-out tick observed in the interval",
+		);
+		expect(markdown).toContain(
+			"These intervals are the positives behind the `observed out` column",
+		);
+		expect(markdown).not.toContain(OLD_FIXED_SENTENCE);
 	});
 });

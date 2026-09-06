@@ -9,9 +9,9 @@
  *                                            [--step-minutes=10] [--seed=N] [--out=<path>]
  *
  * The database is opened STRICTLY read-only (`openReadOnlyDatabase`, SQLite
- * `readonly: true`); the live file is ~9.6 GB and serves the running proxy.
- * There is no write path of any kind, and `--out` refuses to resolve to the
- * database file or any of its sidecars.
+ * `readonly: true`); the live file is multi-gigabyte and serves the running
+ * proxy. There is no write path of any kind, and `--out` refuses to resolve to
+ * the database file or any of its sidecars.
  *
  * All scoring lives in `packages/core/src/redistribution-backtest.ts` (pure,
  * unit-tested); this file does I/O and orchestration only. Sibling of

@@ -156,6 +156,8 @@ export interface TransitionEvent {
 	endsAtMs: number;
 	demandClass: string;
 	accountId: string;
+	/** The account's display name, so the report's table is readable. */
+	accountName: string;
 	windowKind: BacktestWindowKind | null;
 	detail: string;
 }
@@ -482,6 +484,14 @@ export function detectTransitions(
 	const found: Omit<TransitionEvent, "id">[] = [];
 	const inRange = (atMs: number): boolean =>
 		atMs >= range.fromMs && atMs < range.toMs;
+	// A name for the report's table. An account with snapshots but no row left
+	// in `accounts` falls back to its id, which is all the history has.
+	const nameByAccount = new Map<string, string>();
+	for (const account of accounts) {
+		nameByAccount.set(account.accountId, account.name);
+	}
+	const nameOf = (accountId: string): string =>
+		nameByAccount.get(accountId) ?? accountId;
 
 	for (const account of accounts) {
 		if (!inRange(account.createdAtMs)) continue;
@@ -491,6 +501,7 @@ export function detectTransitions(
 			endsAtMs: account.createdAtMs + TRANSITION_WINDOW_MS,
 			demandClass: servableClassFor(account.provider).classId,
 			accountId: account.accountId,
+			accountName: nameOf(account.accountId),
 			windowKind: null,
 			detail: "created",
 		});
@@ -517,6 +528,7 @@ export function detectTransitions(
 						endsAtMs: row.sampledAt + TRANSITION_WINDOW_MS,
 						demandClass,
 						accountId: accountSeries.accountId,
+						accountName: nameOf(accountSeries.accountId),
 						windowKind: null,
 						detail: `${prevPlan}/${prevRateLimit ?? "—"} → ${plan}/${rateLimit ?? "—"}`,
 					});
@@ -544,6 +556,7 @@ export function detectTransitions(
 					endsAtMs: cur.t + TRANSITION_WINDOW_MS,
 					demandClass,
 					accountId: accountSeries.accountId,
+					accountName: nameOf(accountSeries.accountId),
 					windowKind: kind,
 					detail: `drop ${prev.utilization} → ${cur.utilization} pp`,
 				});
@@ -575,6 +588,7 @@ export function detectTransitions(
 					endsAtMs,
 					demandClass,
 					accountId: accountSeries.accountId,
+					accountName: nameOf(accountSeries.accountId),
 					windowKind: kind,
 					detail: `hit 100 with ${hours} h to reset`,
 				});
@@ -1042,6 +1056,16 @@ export interface PoolCalibrationRow {
 	falseAlarmRate: number | null;
 }
 
+/** One contiguous run of `"all-out"` ticks on a class's truth grid. */
+export interface AllOutInterval {
+	demandClass: string;
+	/** First all-out tick of the run. */
+	fromMs: number;
+	/** One step past the run's last all-out tick, so the interval is half-open. */
+	toMs: number;
+	ticks: number;
+}
+
 export interface ReplayResult {
 	range: ReplayRange;
 	stepMinutes: number;
@@ -1050,6 +1074,12 @@ export interface ReplayResult {
 	records: RedistributionRecord[];
 	events: TransitionEvent[];
 	calibration: PoolCalibrationRow[];
+	/**
+	 * Every observed all-out episode, per class: the positives behind the
+	 * calibration table's `observed out` column, stated rather than asserted
+	 * away. Empty for a class the grid never saw all-out.
+	 */
+	allOutIntervals: AllOutInterval[];
 	placeholderWindowsSkipped: number;
 	/** Fraction of instants each transition tag covered, for the report. */
 	tagCoverage: Array<{
@@ -1127,10 +1157,12 @@ export function replayRange(
 		string,
 		{ allOutPrefix: number[]; censoredPrefix: number[] }
 	>();
+	const allOutIntervals: AllOutInterval[] = [];
 	for (const [classId, members] of seriesByClass) {
 		const tickStates = truthTicksFor(members, ticks);
 		const allOutPrefix = [0];
 		const censoredPrefix = [0];
+		let runStart: number | null = null;
 		for (let i = 0; i < tickStates.length; i++) {
 			allOutPrefix.push(
 				allOutPrefix[i] + (tickStates[i] === "all-out" ? 1 : 0),
@@ -1138,9 +1170,32 @@ export function replayRange(
 			censoredPrefix.push(
 				censoredPrefix[i] + (tickStates[i] === "censored" ? 1 : 0),
 			);
+			// Contiguous runs of all-out ticks, closed as soon as the run breaks.
+			if (tickStates[i] === "all-out") {
+				if (runStart == null) runStart = i;
+			} else if (runStart != null) {
+				allOutIntervals.push({
+					demandClass: classId,
+					fromMs: ticks[runStart],
+					toMs: ticks[i - 1] + stepMs,
+					ticks: i - runStart,
+				});
+				runStart = null;
+			}
+		}
+		if (runStart != null) {
+			allOutIntervals.push({
+				demandClass: classId,
+				fromMs: ticks[runStart],
+				toMs: ticks[tickStates.length - 1] + stepMs,
+				ticks: tickStates.length - runStart,
+			});
 		}
 		truthByClass.set(classId, { allOutPrefix, censoredPrefix });
 	}
+	allOutIntervals.sort(
+		(a, b) => a.demandClass.localeCompare(b.demandClass) || a.fromMs - b.fromMs,
+	);
 	const horizonTicks = Math.floor(RUNWAY_HORIZON_MS / stepMs);
 
 	interface CalibrationTally {
@@ -1284,6 +1339,7 @@ export function replayRange(
 		records,
 		events,
 		calibration,
+		allOutIntervals,
 		placeholderWindowsSkipped,
 		tagCoverage: TRANSITION_KINDS.map((tag) => ({
 			tag,
@@ -1742,15 +1798,29 @@ export function evaluateVerdict(
 	// A tag whose events are in the data but whose weekly windows have not
 	// completed yet contributes NO seven_day record: the cohort is unlabelled,
 	// and a verdict resting on it is provisional until those windows reset.
+	//
+	// Per (tag, class), not per tag: a tag labelled in one servable class says
+	// nothing about the same tag in another, and taking the tag as labelled
+	// would hide the unlabelled half behind the labelled one.
 	const unlabelledCohorts: string[] = [];
 	for (const tag of TRANSITION_KINDS) {
-		const events = replay.events.filter((event) => event.kind === tag).length;
-		if (events === 0) continue;
-		const labelled = cohorts.common.some(
-			(record) =>
-				record.windowKind === "seven_day" && record.tags.includes(tag),
-		);
-		if (!labelled) unlabelledCohorts.push(tag);
+		const classes = [
+			...new Set(
+				replay.events
+					.filter((event) => event.kind === tag)
+					.map((event) => event.demandClass),
+			),
+		].sort((a, b) => a.localeCompare(b));
+		for (const demandClass of classes) {
+			const labelled = cohorts.common.some(
+				(record) =>
+					record.windowKind === "seven_day" &&
+					record.tags.includes(tag) &&
+					servableClassFor(record.provider ?? "unknown").classId ===
+						demandClass,
+			);
+			if (!labelled) unlabelledCohorts.push(`${tag} (${demandClass})`);
+		}
 	}
 
 	return {
@@ -1907,6 +1977,9 @@ export function formatRedistributionReport(
 		"- Truth is PER WINDOW, from the same `deriveOutcome` the per-window backtests use: exhausted at the first observed 100 %, survived only on positive evidence, censored otherwise. Placeholder windows (codex's one-sample 5 h artefacts) are skipped.",
 	);
 	out.push(
+		"- Truth-grid membership at a tick is every account of the class with a loaded snapshot on both sides of it (first loaded row ≤ tick ≤ last loaded row); an account with no rows around the tick is absent, not censored, so an account unpolled for weeks (Claude-3 between 2026-06-13 and 2026-07-19) is not a survivor during its gap.",
+	);
+	out.push(
 		"- Current model: account-level learning, the strict rule that ships — ONE learning window makes the whole account unprojectable.",
 	);
 	out.push(
@@ -1939,7 +2012,7 @@ export function formatRedistributionReport(
 		out.push("|---:|---|---|---|---|---|---|---|");
 		for (const event of replay.events) {
 			out.push(
-				`| ${event.id} | ${event.kind} | ${iso(event.atMs)} | ${iso(event.endsAtMs)} | ${event.demandClass} | ${event.accountId} | ${event.windowKind ?? EM_DASH} | ${event.detail} |`,
+				`| ${event.id} | ${event.kind} | ${iso(event.atMs)} | ${iso(event.endsAtMs)} | ${event.demandClass} | ${event.accountName} | ${event.windowKind ?? EM_DASH} | ${event.detail} |`,
 			);
 		}
 		out.push("");
@@ -1996,7 +2069,34 @@ export function formatRedistributionReport(
 	out.push("## Pool calibration (all-out within 14 d)");
 	out.push("");
 	out.push(
-		"The pool-level claim, scored against the observed grid. Recall and F1 are NOT stated here: no multi-account class was ever observed all-out, so the positives that would give them a denominator do not exist in this history. What the table can say is how often a predicted pool-out was followed by 14 days with no outage.",
+		"The pool-level claim, scored against the observed grid. What the table can say is how often a predicted pool-out was followed by 14 days with no outage.",
+	);
+	out.push("");
+	const calibratedClasses = [
+		...new Set([
+			...replay.calibration.map((row) => row.demandClass),
+			...replay.allOutIntervals.map((interval) => interval.demandClass),
+		]),
+	].sort((a, b) => a.localeCompare(b));
+	for (const demandClass of calibratedClasses) {
+		const intervals = replay.allOutIntervals.filter(
+			(interval) => interval.demandClass === demandClass,
+		);
+		if (intervals.length === 0) {
+			out.push(
+				`- \`${demandClass}\`: no all-out tick observed in the interval`,
+			);
+			continue;
+		}
+		for (const interval of intervals) {
+			out.push(
+				`- \`${demandClass}\`: all-out \`${iso(interval.fromMs)}\`–\`${iso(interval.toMs)}\` (\`${interval.ticks}\` ticks)`,
+			);
+		}
+	}
+	out.push("");
+	out.push(
+		"These intervals are the positives behind the `observed out` column; pool-level recall and F1 are not stated here because per-window scores decide the verdict.",
 	);
 	out.push("");
 	out.push(
@@ -2099,7 +2199,7 @@ export function knownLimitsFor(
 	];
 	if (verdict.unlabelledCohorts.length > 0) {
 		limits.push(
-			`Unlabelled at this run: ${verdict.unlabelledCohorts.join(", ")}. No weekly window carrying ${verdict.unlabelledCohorts.length > 1 ? "those tags" : "that tag"} had completed by the end of the replay interval, so the cohort carries five-hour evidence only and the verdict is provisional.`,
+			`Unlabelled at this run (tag and servable class): ${verdict.unlabelledCohorts.join(", ")}. No weekly window of ${verdict.unlabelledCohorts.length > 1 ? "those classes carrying those tags" : "that class carrying that tag"} had completed by the end of the replay interval, so the cohort carries five-hour evidence only and the verdict is provisional.`,
 		);
 	}
 	const positives = REPLAY_MODELS.map((model) => {
