@@ -203,6 +203,9 @@ describe("end to end on a fixture database", () => {
 		});
 		expect(markdown).toContain("## Verdict");
 		expect(markdown).toContain("## Transition events");
+		expect(markdown).toContain("## Observation-lag mechanism check");
+		// The pre-correction scan is scored beside the corrected one.
+		expect(markdown).toContain("| scenario-equal-original |");
 		expect(markdown).toContain(`**Verdict: ${verdict.verdict}**`);
 		expect(markdown).not.toContain("undefined");
 	});
@@ -245,6 +248,9 @@ describe("writeRecordsJsonl", () => {
 		expect(first.lifecycleId).toBe(replay.records[0].lifecycleId);
 		expect(Object.keys(first)).toContain("slopePctPerHour");
 		expect(Object.keys(first)).toContain("sinceDeathMinutes");
+		expect(Object.keys(first)).toContain("observationAgeMs");
+		expect(Object.keys(first)).toContain("lagMs");
+		expect(Object.keys(first)).toContain("estimatorSource");
 		// Every line parses; a partially written dump is worse than none.
 		for (const line of lines) expect(() => JSON.parse(line)).not.toThrow();
 	});

@@ -7,10 +7,13 @@ import {
 	type RunwayAccountInput,
 	type RunwayOutcome,
 	type RunwayWindowInput,
+	type WindowExhaustion,
+	type WindowExhaustionSource,
 } from "./capacity-runway";
 import {
 	computeCapacityRunwayScenario,
 	equalShareRule,
+	observationLagMs,
 	type RunwayScenarioAccountInput,
 	type RunwayScenarioOutcome,
 	type ShareCandidate,
@@ -162,13 +165,24 @@ export interface TransitionEvent {
 	detail: string;
 }
 
-export type ReplayModel = "current" | "scenario-equal" | "scenario-headroom";
+export type ReplayModel =
+	| "current"
+	/** The demand-conserving scan as it ships, with the observation-lag advance. */
+	| "scenario-equal"
+	/** The same equal split with the PRE-CORRECTION scan — the lag-parity control. */
+	| "scenario-equal-original"
+	| "scenario-headroom";
 
+/** Every scan the replay runs, in the order the report prints them. */
 export const REPLAY_MODELS: readonly ReplayModel[] = [
 	"current",
 	"scenario-equal",
+	"scenario-equal-original",
 	"scenario-headroom",
 ];
+
+/** The models that are a {@link computeCapacityRunwayScenario} call. */
+export type ScenarioModel = Exclude<ReplayModel, "current">;
 
 export interface RedistributionRecord extends BacktestRecord {
 	model: ReplayModel;
@@ -195,6 +209,38 @@ export interface RedistributionRecord extends BacktestRecord {
 	 * either model projects.
 	 */
 	slopePctPerHour: number | null;
+	/**
+	 * `T - observed_at` of the row this record was projected from, or `null`
+	 * when the row carries no observation instant (most snapshots before
+	 * 2026-08-24 do not). Never `0` for absent — the two are different answers.
+	 */
+	observationAgeMs: number | null;
+	/** `T - sampled_at` of that row. Always known: a row has a sample time. */
+	sampleAgeMs: number;
+	/**
+	 * The window's OWN observation lag, from {@link observationLagMs} — how far
+	 * behind `T` the estimator that produced its projection measured. `0` on the
+	 * now-anchored paths, which carry none.
+	 */
+	lagMs: number;
+	/** Which estimator answered for this window at `T`. */
+	estimatorSource: WindowExhaustionSource;
+	/**
+	 * True when NO pooled window of this record's class carries a lag at `T`.
+	 * The window's own zero lag is not enough: a peer's lag moves the peer's
+	 * death and therefore this window's share, and with it its ETA.
+	 */
+	classLagFree: boolean;
+	/** Pooled accounts of this record's class at `T`, as the corrected scan classified them. */
+	pooledInClass: number;
+	/**
+	 * True when the corrected scan's projected exhaustion for this window
+	 * precedes every other slope-changing event of its class: any other
+	 * projected exhaustion still ahead of `T`, and the reset of any class window
+	 * already at 100 % at `T`. Only then is the window's whole projection
+	 * governed by ONE slope, which is what makes an exact lag shift predictable.
+	 */
+	firstEvent: boolean;
 }
 
 export interface ReplayRange {
@@ -239,11 +285,36 @@ export const headroomShareRule: ShareRule = (candidates) => {
 		: equalShareRule(candidates);
 };
 
-/** The share rule behind each scenario model. */
-export const SHARE_RULES: Record<Exclude<ReplayModel, "current">, ShareRule> = {
-	"scenario-equal": equalShareRule,
-	"scenario-headroom": headroomShareRule,
+/** What one scenario model asks {@link computeCapacityRunwayScenario} for. */
+export interface ScenarioModelSpec {
+	shareRule: ShareRule;
+	/** See `RunwayScenarioOptions.observationLag`. */
+	observationLag: "advance" | "ignore";
+}
+
+/**
+ * The scan behind each scenario model.
+ *
+ * `scenario-equal` and `scenario-equal-original` differ in ONE argument, which
+ * is the whole point of the pair: the equal split is held fixed so the only
+ * thing the comparison can attribute a difference to is the observation-lag
+ * advance. `scenario-equal` stays the pre-declared verdict basis.
+ */
+export const SCENARIO_MODELS: Record<ScenarioModel, ScenarioModelSpec> = {
+	"scenario-equal": { shareRule: equalShareRule, observationLag: "advance" },
+	"scenario-equal-original": {
+		shareRule: equalShareRule,
+		observationLag: "ignore",
+	},
+	"scenario-headroom": {
+		shareRule: headroomShareRule,
+		observationLag: "advance",
+	},
 };
+
+/** {@link REPLAY_MODELS} without the current model, in the same order. */
+export const SCENARIO_MODEL_IDS: readonly ScenarioModel[] =
+	REPLAY_MODELS.filter((model): model is ScenarioModel => model !== "current");
 
 // ---------------------------------------------------------------------------
 // Series preparation
@@ -825,7 +896,7 @@ export interface ClassReplay {
 	inputs: RunwayScenarioAccountInput[];
 	/** The SAME windows as `inputs`, with the scenario-only fields stripped. */
 	currentInputs: RunwayAccountInput[];
-	scenarioOutcomes: Map<Exclude<ReplayModel, "current">, RunwayScenarioOutcome>;
+	scenarioOutcomes: Map<ScenarioModel, RunwayScenarioOutcome>;
 }
 
 export interface InstantReplay {
@@ -876,8 +947,8 @@ const unprojectableIds = (outcome: RunwayScenarioOutcome): string[] =>
  * under a utilization-dependent share rule.
  */
 export interface ReplayInstantOptions {
-	/** Default {@link SHARE_RULES}. One rule per scenario model. */
-	shareRules?: Record<Exclude<ReplayModel, "current">, ShareRule>;
+	/** Overrides {@link SCENARIO_MODELS}' rules. One rule per scenario model. */
+	shareRules?: Record<ScenarioModel, ShareRule>;
 	/**
 	 * Threaded to the scenario scan. A test seam for the budget branches, exactly
 	 * as `MAX_SCENARIO_EVENTS` is for the scan itself; the runs that produce a
@@ -907,16 +978,14 @@ export function replayInstant(
 
 	for (const [demandClass, entries] of byClass) {
 		const inputs = entries.map(scenarioInputOf);
-		const scenarioOutcomes = new Map<
-			Exclude<ReplayModel, "current">,
-			RunwayScenarioOutcome
-		>();
-		const shareRules = options?.shareRules ?? SHARE_RULES;
-		for (const model of ["scenario-equal", "scenario-headroom"] as const) {
+		const scenarioOutcomes = new Map<ScenarioModel, RunwayScenarioOutcome>();
+		for (const model of SCENARIO_MODEL_IDS) {
+			const spec = SCENARIO_MODELS[model];
 			scenarioOutcomes.set(
 				model,
 				computeCapacityRunwayScenario(inputs, T, RUNWAY_HORIZON_MS, {
-					shareRule: shareRules[model],
+					shareRule: options?.shareRules?.[model] ?? spec.shareRule,
+					observationLag: spec.observationLag,
 					probePaceMargin: false,
 					...(options?.maxEvents != null
 						? { maxEvents: options.maxEvents }
@@ -931,15 +1000,77 @@ export function replayInstant(
 			scenarioOutcomes,
 		});
 
+		// Reading-level facts, derived ONCE for the whole class: every model's
+		// record at one instant carries the same ones, exactly as
+		// `slopePctPerHour` does.
+		const estimatesByAccount = new Map<string, Map<string, WindowExhaustion>>();
+		for (const entry of entries) {
+			estimatesByAccount.set(
+				entry.accountId,
+				new Map(
+					entry.windows.map((window) => [
+						window.kind,
+						estimateWindowExhaustion(window.input, T),
+					]),
+				),
+			);
+		}
+		const lagOf = (entry: RosterEntry, window: RosterWindow): number => {
+			const estimate = estimatesByAccount
+				.get(entry.accountId)
+				?.get(window.kind);
+			return estimate == null ? 0 : observationLagMs(estimate, window.input, T);
+		};
+		// Pooled as the CORRECTED scan classified them: everything it did not
+		// exclude. An outcome that states no exclusions (an `unknown` from an
+		// empty pool) reads as "nothing excluded", which over-counts rather than
+		// under-counts and therefore keeps `classLagFree` conservative.
+		const corrected = scenarioOutcomes.get("scenario-equal");
+		const excludedIds = new Set<string>([
+			...(corrected == null ? [] : unprojectableIds(corrected)),
+			...(corrected?.unknownTierAccountIds ?? []),
+		]);
+		const pooledEntries = entries.filter(
+			(entry) => !excludedIds.has(entry.accountId),
+		);
+		const pooledInClass = pooledEntries.length;
+		const classLagFree = pooledEntries.every((entry) =>
+			entry.windows.every((window) => lagOf(entry, window) === 0),
+		);
+		const correctedExhaustions = corrected?.projectedExhaustions ?? [];
+		// A window already at 100 % comes back at its reset, and that revival
+		// re-splits the class just as a death does.
+		const revivalInstants = entries.flatMap((entry) =>
+			entry.windows
+				.filter((window) => window.input.utilizationPct >= 100)
+				.map((window) => window.input.resetsAtMs)
+				.filter(
+					(resetsAtMs): resetsAtMs is number =>
+						resetsAtMs != null && Number.isFinite(resetsAtMs) && resetsAtMs > T,
+				),
+		);
+		const firstEventOf = (accountId: string, windowKind: string): boolean => {
+			const own = correctedExhaustions.find(
+				(exhaustion) =>
+					exhaustion.accountId === accountId &&
+					exhaustion.windowKind === windowKind,
+			)?.exhaustsAtMs;
+			if (own == null) return false;
+			for (const other of correctedExhaustions) {
+				if (other.accountId === accountId && other.windowKind === windowKind) {
+					continue;
+				}
+				if (other.exhaustsAtMs > T && other.exhaustsAtMs <= own) return false;
+			}
+			return revivalInstants.every((resetsAtMs) => resetsAtMs > own);
+		};
+
 		for (const entry of entries) {
 			// Account-level learning, the current model's strict rule: ONE learning
 			// window makes the WHOLE account unprojectable.
-			const estimates = new Map(
-				entry.windows.map((window) => [
-					window.kind,
-					estimateWindowExhaustion(window.input, T),
-				]),
-			);
+			const estimates =
+				estimatesByAccount.get(entry.accountId) ??
+				new Map<string, WindowExhaustion>();
 			const learningAtT = entry.windows.some((window) => {
 				const estimate = estimates.get(window.kind);
 				return (
@@ -980,6 +1111,12 @@ export function replayInstant(
 					}
 					continue;
 				}
+				const estimate = estimates.get(window.kind);
+				const observedAtMs =
+					window.input.observedAtMs != null &&
+					Number.isFinite(window.input.observedAtMs)
+						? window.input.observedAtMs
+						: null;
 				const common = {
 					T,
 					windowKind: window.kind,
@@ -994,10 +1131,16 @@ export function replayInstant(
 					eventIds: context.eventIds,
 					learningAtT,
 					sinceDeathMs: context.sinceDeathMs,
-					slopePctPerHour: estimates.get(window.kind)?.slopePctPerHour ?? null,
+					slopePctPerHour: estimate?.slopePctPerHour ?? null,
+					observationAgeMs: observedAtMs == null ? null : T - observedAtMs,
+					sampleAgeMs: T - entry.sampledAt,
+					lagMs: lagOf(entry, window),
+					estimatorSource: estimate?.source ?? "none",
+					classLagFree,
+					pooledInClass,
+					firstEvent: firstEventOf(entry.accountId, window.kind),
 				};
 
-				const estimate = estimates.get(window.kind);
 				const currentUsable =
 					!learningAtT && estimate != null && estimate.source !== "none";
 				// A beyond-reset ETA is "not this cycle", which is the same statement
@@ -1023,7 +1166,7 @@ export function replayInstant(
 						: null,
 				});
 
-				for (const model of ["scenario-equal", "scenario-headroom"] as const) {
+				for (const model of SCENARIO_MODEL_IDS) {
 					const scenario = scenarioOutcomes.get(model);
 					if (scenario == null) continue;
 					const withheld = withheldIds(scenario).includes(entry.accountId);
@@ -1334,15 +1477,12 @@ export function replayRange(
 			);
 			const kinds: Array<[ReplayModel, RunwayOutcome["kind"]]> = [
 				["current", current.kind],
-				[
-					"scenario-equal",
-					classReplay.scenarioOutcomes.get("scenario-equal")?.kind ?? "unknown",
-				],
-				[
-					"scenario-headroom",
-					classReplay.scenarioOutcomes.get("scenario-headroom")?.kind ??
-						"unknown",
-				],
+				...SCENARIO_MODEL_IDS.map(
+					(model): [ReplayModel, RunwayOutcome["kind"]] => [
+						model,
+						classReplay.scenarioOutcomes.get(model)?.kind ?? "unknown",
+					],
+				),
 			];
 			for (const [model, kind] of kinds) {
 				const entry = tallyFor(classReplay.demandClass, model);
@@ -1458,6 +1598,24 @@ export function pairedSignedMedian(
 	modelA: ReplayModel,
 	modelB: ReplayModel,
 ): PairedBias {
+	const errors = pairedEtaErrors(records, modelA, modelB);
+	return {
+		n: errors.length,
+		medianA: medianOf(errors.map(([a]) => a)),
+		medianB: medianOf(errors.map(([, b]) => b)),
+	};
+}
+
+/**
+ * Signed ETA error in minutes of both models, over the instants where both
+ * committed to a date and the window was observed to exhaust. One row per
+ * (account, window, instant), in no particular order.
+ */
+function pairedEtaErrors(
+	records: readonly RedistributionRecord[],
+	modelA: ReplayModel,
+	modelB: ReplayModel,
+): Array<[number, number]> {
 	const byKey = new Map<string, Map<ReplayModel, RedistributionRecord>>();
 	for (const record of records) {
 		const key = recordKey(record);
@@ -1468,18 +1626,51 @@ export function pairedSignedMedian(
 		}
 		entry.set(record.model, record);
 	}
-	const a: number[] = [];
-	const b: number[] = [];
+	const out: Array<[number, number]> = [];
 	for (const entry of byKey.values()) {
 		const first = entry.get(modelA);
 		const second = entry.get(modelB);
 		if (first == null || second == null) continue;
 		if (first.predictedEtaMs == null || second.predictedEtaMs == null) continue;
 		if (first.outcome.kind !== "exhausted") continue;
-		a.push((first.predictedEtaMs - first.outcome.atMs) / MINUTE_MS);
-		b.push((second.predictedEtaMs - first.outcome.atMs) / MINUTE_MS);
+		out.push([
+			(first.predictedEtaMs - first.outcome.atMs) / MINUTE_MS,
+			(second.predictedEtaMs - first.outcome.atMs) / MINUTE_MS,
+		]);
 	}
-	return { n: a.length, medianA: medianOf(a), medianB: medianOf(b) };
+	return out;
+}
+
+export interface PairedAbsDelta {
+	n: number;
+	/**
+	 * Median of `|error of modelA| - |error of modelB|` in minutes, over the
+	 * records both models dated. Negative = `modelA` is the closer one.
+	 */
+	medianDeltaMinutes: number | null;
+}
+
+/**
+ * How much CLOSER to the observed instant one model lands than another, paired
+ * on the records both dated.
+ *
+ * The sibling of {@link pairedSignedMedian} for a comparison where direction is
+ * not the question: two models can share a median signed error and still
+ * differ in how far off they are, and criterion D asks whether the correction moved the
+ * ETAs toward the truth, not which side of it they land on.
+ */
+export function pairedAbsMedian(
+	records: readonly RedistributionRecord[],
+	modelA: ReplayModel,
+	modelB: ReplayModel,
+): PairedAbsDelta {
+	const errors = pairedEtaErrors(records, modelA, modelB);
+	return {
+		n: errors.length,
+		medianDeltaMinutes: medianOf(
+			errors.map(([a, b]) => Math.abs(a) - Math.abs(b)),
+		),
+	};
 }
 
 /**
@@ -1513,7 +1704,12 @@ export interface CohortScores {
 	episodes: number;
 	balanced: ReportEstimatorMetrics[];
 	perRecord: ReportEstimatorMetrics[];
+	/** `scenario-equal` against the CURRENT model. */
 	pairedBias: PairedBias;
+	/** `scenario-equal` against the PRE-CORRECTION scan. */
+	pairedBiasVsOriginal: PairedBias;
+	/** How much closer to the truth the correction lands than the original scan. */
+	pairedAbsVsOriginal: PairedAbsDelta;
 }
 
 function metricsByModel(
@@ -1543,6 +1739,16 @@ function scoreCohort(
 		balanced: metricsByModel(balanced),
 		perRecord: metricsByModel(records),
 		pairedBias: pairedSignedMedian(balanced, "scenario-equal", "current"),
+		pairedBiasVsOriginal: pairedSignedMedian(
+			balanced,
+			"scenario-equal",
+			"scenario-equal-original",
+		),
+		pairedAbsVsOriginal: pairedAbsMedian(
+			balanced,
+			"scenario-equal",
+			"scenario-equal-original",
+		),
 	};
 }
 
@@ -1620,8 +1826,8 @@ export interface CohortSet {
 	churn: ChurnRow[];
 	byClassAndKind: CohortScores[];
 	scenarioExtra: CohortScores;
-	bootstrap: ReportBootstrapEntry[];
-	/** Records common to all three models, after `commonCohort`. */
+	bootstrap: RedistributionBootstrapEntry[];
+	/** Records common to EVERY model in {@link REPLAY_MODELS}, after `commonCohort`. */
 	common: RedistributionRecord[];
 }
 
@@ -1639,11 +1845,12 @@ export interface CohortSet {
 function blockBootstrap(
 	label: string,
 	scenario: readonly RedistributionRecord[],
-	current: readonly RedistributionRecord[],
+	baselineRecords: readonly RedistributionRecord[],
 	blockOf: (record: RedistributionRecord) => string,
 	seed: number,
 	iterations: number,
-): ReportBootstrapEntry[] {
+	baseline: RedistributionBootstrapEntry["baseline"],
+): RedistributionBootstrapEntry[] {
 	const clone = (records: readonly RedistributionRecord[]): BacktestRecord[] =>
 		records.map((record) => ({ ...record, accountId: blockOf(record) }));
 	const statistics = [
@@ -1652,13 +1859,14 @@ function blockBootstrap(
 		"medianSignedErrorMinutes",
 	] as const;
 	return statistics.map((statistic) => {
-		const ci = bootstrapDelta(clone(scenario), clone(current), {
+		const ci = bootstrapDelta(clone(scenario), clone(baselineRecords), {
 			iterations,
 			seed,
 			statistic,
 		});
 		return {
 			label,
+			baseline,
 			statistic,
 			p2_5: ci.p2_5,
 			p50: ci.p50,
@@ -1667,6 +1875,23 @@ function blockBootstrap(
 		};
 	});
 }
+
+/**
+ * A bootstrap CI of `scenario-equal - baseline`, where the baseline is either
+ * the model that ships or the pre-correction scan.
+ *
+ * The baseline is a FIELD rather than part of the label so a lookup cannot
+ * resolve the wrong entry by prefix: criterion C is defined against the
+ * current model, and the original-scan CI sits in the same table under the
+ * same cohort label.
+ */
+export interface RedistributionBootstrapEntry extends ReportBootstrapEntry {
+	baseline: "current" | "scenario-equal-original";
+}
+
+/** Cohort labels of the bootstrap table, shared by the producer and the lookup. */
+export const OVERALL_BOOTSTRAP_LABEL = "Overall (block = window lifecycle)";
+export const TRANSITION_BOOTSTRAP_LABEL = "Any transition (block = episode)";
 
 export const BOOTSTRAP_ITERATIONS = 1000;
 
@@ -1770,25 +1995,53 @@ export function scoreCohorts(result: ReplayResult): CohortSet {
 
 	const overallBalanced = lifecycleBalanced(commonRecords);
 	const transitionBalanced = lifecycleBalanced(transitionRecords);
-	const bootstrap = [
+	const ofModel = (
+		records: readonly RedistributionRecord[],
+		model: ReplayModel,
+	): RedistributionRecord[] =>
+		records.filter((record) => record.model === model);
+	const lifecycleBlock = (record: RedistributionRecord): string =>
+		record.lifecycleId;
+	const episodeBlock = (record: RedistributionRecord): string =>
+		record.eventIds.length > 0
+			? String(Math.min(...record.eventIds))
+			: record.lifecycleId;
+	const bootstrap: RedistributionBootstrapEntry[] = [
 		...blockBootstrap(
-			"Overall (block = window lifecycle)",
-			overallBalanced.filter((record) => record.model === "scenario-equal"),
-			overallBalanced.filter((record) => record.model === "current"),
-			(record) => record.lifecycleId,
+			OVERALL_BOOTSTRAP_LABEL,
+			ofModel(overallBalanced, "scenario-equal"),
+			ofModel(overallBalanced, "current"),
+			lifecycleBlock,
 			result.seed,
 			BOOTSTRAP_ITERATIONS,
+			"current",
 		),
 		...blockBootstrap(
-			"Any transition (block = episode)",
-			transitionBalanced.filter((record) => record.model === "scenario-equal"),
-			transitionBalanced.filter((record) => record.model === "current"),
-			(record) =>
-				record.eventIds.length > 0
-					? String(Math.min(...record.eventIds))
-					: record.lifecycleId,
+			TRANSITION_BOOTSTRAP_LABEL,
+			ofModel(transitionBalanced, "scenario-equal"),
+			ofModel(transitionBalanced, "current"),
+			episodeBlock,
 			result.seed,
 			BOOTSTRAP_ITERATIONS,
+			"current",
+		),
+		...blockBootstrap(
+			OVERALL_BOOTSTRAP_LABEL,
+			ofModel(overallBalanced, "scenario-equal"),
+			ofModel(overallBalanced, "scenario-equal-original"),
+			lifecycleBlock,
+			result.seed,
+			BOOTSTRAP_ITERATIONS,
+			"scenario-equal-original",
+		),
+		...blockBootstrap(
+			TRANSITION_BOOTSTRAP_LABEL,
+			ofModel(transitionBalanced, "scenario-equal"),
+			ofModel(transitionBalanced, "scenario-equal-original"),
+			episodeBlock,
+			result.seed,
+			BOOTSTRAP_ITERATIONS,
+			"scenario-equal-original",
 		),
 	];
 
@@ -2075,6 +2328,369 @@ export function churnRows(
 }
 
 // ---------------------------------------------------------------------------
+// Observation-lag mechanism check
+// ---------------------------------------------------------------------------
+
+export interface ObservationAgeBucketSpec {
+	label: string;
+	/** Exclusive upper bound of the bucket, in ms of observation age. */
+	maxMs: number;
+}
+
+/**
+ * How old the reading behind a record was, half-open and contiguous.
+ *
+ * The first bucket is negative ages: a reading stamped ahead of the instant
+ * replaying it is a clock artefact, and folding it into `0-2 min` would hide
+ * it. The last is open at the top rather than closed, so no record can fall
+ * out of the table; the projection freshness bar is
+ * {@link READING_STALE_MS} = 10 min, measured on the SAMPLE time, so an
+ * observation age above it is possible whenever the two instants differ.
+ */
+export const OBSERVATION_AGE_BUCKETS: readonly ObservationAgeBucketSpec[] = [
+	{ label: "future (< 0)", maxMs: 0 },
+	{ label: "0-2 min", maxMs: 2 * MINUTE_MS },
+	{ label: "2-5 min", maxMs: 5 * MINUTE_MS },
+	{ label: "5-10 min", maxMs: 10 * MINUTE_MS },
+	{ label: ">= 10 min", maxMs: Number.POSITIVE_INFINITY },
+];
+
+/** The cohort a record with no observation instant lands in. */
+export const UNKNOWN_OBSERVATION_AGE_LABEL = "unknown (null)";
+
+/** Which age bucket an observation age falls in; `-1` when there is none. */
+export function observationAgeBucketIndex(ageMs: number | null): number {
+	if (ageMs == null || !Number.isFinite(ageMs)) return -1;
+	for (let i = 0; i < OBSERVATION_AGE_BUCKETS.length; i++) {
+		if (ageMs < OBSERVATION_AGE_BUCKETS[i].maxMs) return i;
+	}
+	return OBSERVATION_AGE_BUCKETS.length - 1;
+}
+
+export interface ObservationAgeGroup {
+	scope: SinceDeathScope;
+	/** One cohort per {@link OBSERVATION_AGE_BUCKETS} entry, same order. */
+	buckets: CohortScores[];
+	/** Records whose row carried no observation instant. */
+	unknown: CohortScores;
+	/**
+	 * Records of ONE model in this scope — the denominator the buckets plus the
+	 * unknown cohort reconcile to.
+	 */
+	eligible: number;
+}
+
+export interface LagIdentityCheck {
+	/** Records whose class-instant carries no pooled lag at all. */
+	eligible: number;
+	/** Of those, how many the two equal-split models answered differently. */
+	differing: number;
+	/** Span of the replay the eligible records come from; null when there are none. */
+	fromMs: number | null;
+	toMs: number | null;
+}
+
+/** How far apart two instants may sit and still count as the same answer. */
+export const LAG_TOLERANCE_MS = 1000;
+
+export interface LagShiftStats {
+	n: number;
+	/** Median of `original ETA - corrected ETA`, in minutes. */
+	medianShiftMinutes: number | null;
+	/** Median of `shift - the record's own lag`, in minutes. */
+	medianExcessMinutes: number | null;
+	p10ExcessMinutes: number | null;
+	p90ExcessMinutes: number | null;
+	/** Share of records whose shift is within {@link LAG_TOLERANCE_MS} of their own lag. */
+	matchingShare: number | null;
+}
+
+export interface LagParityRow {
+	/** An estimator source, or `other` for every path that carries no anchor lag. */
+	path: string;
+	n: number;
+	/** Share within {@link LAG_TOLERANCE_MS} of the current model's ETA. */
+	withinToleranceShare: number | null;
+}
+
+export interface PairedEtaSubsetRow {
+	cohort: string;
+	model: ReplayModel;
+	n: number;
+	medianSignedErrorMinutes: number | null;
+}
+
+export interface LagPopulationRow {
+	path: string;
+	records: number;
+	medianLagMinutes: number | null;
+	p90LagMinutes: number | null;
+	/** `sampled_at - observed_at`, where the record carries both. */
+	medianSampleToObservationMinutes: number | null;
+	p90SampleToObservationMinutes: number | null;
+	sampleToObservationRecords: number;
+}
+
+/**
+ * Everything the report says about the observation-lag correction ITSELF,
+ * beside what the scores say about its effect.
+ *
+ * Every check states its own denominator, and an empty eligible set is
+ * reported as "no eligible records" rather than as a pass: a mechanism check
+ * that silently has nothing to check is worse than one that fails.
+ */
+export interface ObservationLagChecks {
+	ageGroups: ObservationAgeGroup[];
+	identity: LagIdentityCheck;
+	shift: { firstEvent: LagShiftStats; rest: LagShiftStats };
+	parity: LagParityRow[];
+	pairedEta: PairedEtaSubsetRow[];
+	population: LagPopulationRow[];
+}
+
+const shiftStatsOf = (
+	rows: ReadonlyArray<{ shiftMs: number; lagMs: number }>,
+): LagShiftStats => {
+	const shifts = rows.map((row) => row.shiftMs / MINUTE_MS);
+	const excess = rows.map((row) => (row.shiftMs - row.lagMs) / MINUTE_MS);
+	return {
+		n: rows.length,
+		medianShiftMinutes: medianOf(shifts),
+		medianExcessMinutes: medianOf(excess),
+		p10ExcessMinutes: percentileOf(excess, 0.1),
+		p90ExcessMinutes: percentileOf(excess, 0.9),
+		matchingShare:
+			rows.length === 0
+				? null
+				: rows.filter(
+						(row) => Math.abs(row.shiftMs - row.lagMs) <= LAG_TOLERANCE_MS,
+					).length / rows.length,
+	};
+};
+
+/** The estimator paths whose ETA is anchored behind `now` — see `observationLagMs`. */
+const ANCHORED_PATHS: readonly string[] = ["regression", "lifetime-primary"];
+
+/** One record per model per (account, window, instant), keyed for pairing. */
+function recordsByKey(
+	records: readonly RedistributionRecord[],
+): Map<string, Map<ReplayModel, RedistributionRecord>> {
+	const byKey = new Map<string, Map<ReplayModel, RedistributionRecord>>();
+	for (const record of records) {
+		const key = recordKey(record);
+		let entry = byKey.get(key);
+		if (!entry) {
+			entry = new Map();
+			byKey.set(key, entry);
+		}
+		entry.set(record.model, record);
+	}
+	return byKey;
+}
+
+/** Compute every observation-lag check the report prints. */
+export function observationLagChecks(
+	replay: ReplayResult,
+	cohorts: CohortSet,
+): ObservationLagChecks {
+	// (a) Age cohorts, over the SCORED records — the same common cohort every
+	// other score table is built on.
+	const ageGroups: ObservationAgeGroup[] = SINCE_DEATH_SCOPES.map((scope) => {
+		const scoped = cohorts.common.filter((record) => inScope(record, scope));
+		return {
+			scope,
+			buckets: OBSERVATION_AGE_BUCKETS.map((bucket, index) =>
+				scoreCohort(
+					bucket.label,
+					scoped.filter(
+						(record) =>
+							observationAgeBucketIndex(record.observationAgeMs) === index,
+					),
+				),
+			),
+			unknown: scoreCohort(
+				UNKNOWN_OBSERVATION_AGE_LABEL,
+				scoped.filter(
+					(record) => observationAgeBucketIndex(record.observationAgeMs) === -1,
+				),
+			),
+			eligible: scoped.filter((record) => record.model === "current").length,
+		};
+	});
+
+	const byKey = recordsByKey(replay.records);
+
+	// (b) Identity where the whole class-instant is lag-free.
+	let eligible = 0;
+	let differing = 0;
+	let fromMs: number | null = null;
+	let toMs: number | null = null;
+	for (const entry of byKey.values()) {
+		const corrected = entry.get("scenario-equal");
+		const original = entry.get("scenario-equal-original");
+		if (corrected == null || original == null) continue;
+		if (!corrected.classLagFree) continue;
+		eligible++;
+		fromMs = fromMs == null ? corrected.T : Math.min(fromMs, corrected.T);
+		toMs = toMs == null ? corrected.T : Math.max(toMs, corrected.T);
+		if (
+			corrected.predictsExhaust !== original.predictsExhaust ||
+			corrected.predictedEtaMs !== original.predictedEtaMs
+		) {
+			differing++;
+		}
+	}
+
+	// (c) How far the correction moved each ETA, split on whether ONE slope
+	// governs the whole projection.
+	const firstEventShifts: Array<{ shiftMs: number; lagMs: number }> = [];
+	const restShifts: Array<{ shiftMs: number; lagMs: number }> = [];
+	// (c2) Parity with the current model where the account is alone in its class.
+	const parityByPath = new Map<string, { n: number; within: number }>();
+	for (const path of [...ANCHORED_PATHS, "other"]) {
+		parityByPath.set(path, { n: 0, within: 0 });
+	}
+	for (const entry of byKey.values()) {
+		const corrected = entry.get("scenario-equal");
+		const original = entry.get("scenario-equal-original");
+		if (corrected == null || original == null) continue;
+		if (corrected.predictedEtaMs == null || original.predictedEtaMs == null) {
+			continue;
+		}
+		if (corrected.lagMs > 0) {
+			const row = {
+				shiftMs: original.predictedEtaMs - corrected.predictedEtaMs,
+				lagMs: corrected.lagMs,
+			};
+			(corrected.firstEvent ? firstEventShifts : restShifts).push(row);
+		}
+		const current = entry.get("current");
+		if (
+			corrected.firstEvent &&
+			corrected.pooledInClass === 1 &&
+			current?.predictedEtaMs != null
+		) {
+			const path = ANCHORED_PATHS.includes(corrected.estimatorSource)
+				? corrected.estimatorSource
+				: "other";
+			const tally = parityByPath.get(path);
+			if (tally != null) {
+				tally.n++;
+				if (
+					Math.abs(corrected.predictedEtaMs - current.predictedEtaMs) <=
+					LAG_TOLERANCE_MS
+				) {
+					tally.within++;
+				}
+			}
+		}
+	}
+	const parity: LagParityRow[] = [...parityByPath.entries()].map(
+		([path, tally]) => ({
+			path,
+			n: tally.n,
+			withinToleranceShare: tally.n === 0 ? null : tally.within / tally.n,
+		}),
+	);
+
+	// (d) The FIXED subset: the same records for every model, so the three
+	// medians are comparable without any coverage difference behind them.
+	const pairedEta: PairedEtaSubsetRow[] = [];
+	// The three models the subset is DEFINED by, and the only ones it reports:
+	// a model that did not have to be dated for a record to enter would be
+	// medianed over a different set of records than the others.
+	const subsetModels: readonly ReplayModel[] = [
+		"current",
+		"scenario-equal",
+		"scenario-equal-original",
+	];
+	for (const [label, records] of [
+		["Overall", cohorts.common],
+		[
+			"Any transition",
+			cohorts.common.filter((record) => record.tags.length > 0),
+		],
+	] as const) {
+		const balanced = recordsByKey(lifecycleBalanced(records));
+		const errorsByModel = new Map<ReplayModel, number[]>();
+		for (const model of subsetModels) errorsByModel.set(model, []);
+		let n = 0;
+		for (const entry of balanced.values()) {
+			const anchorRecord = entry.get("current");
+			if (anchorRecord == null || anchorRecord.outcome.kind !== "exhausted") {
+				continue;
+			}
+			const dated = subsetModels.every(
+				(model) => entry.get(model)?.predictedEtaMs != null,
+			);
+			if (!dated) continue;
+			n++;
+			const observedAtMs = anchorRecord.outcome.atMs;
+			for (const model of subsetModels) {
+				const eta = entry.get(model)?.predictedEtaMs;
+				if (eta == null) continue;
+				errorsByModel.get(model)?.push((eta - observedAtMs) / MINUTE_MS);
+			}
+		}
+		for (const model of subsetModels) {
+			pairedEta.push({
+				cohort: label,
+				model,
+				n,
+				medianSignedErrorMinutes: medianOf(errorsByModel.get(model) ?? []),
+			});
+		}
+	}
+
+	// (e) Which estimator paths the correction touched, and by how much. One
+	// model's records only: the lag is a property of the reading.
+	const byPath = new Map<
+		string,
+		{ lags: number[]; sampleToObservation: number[] }
+	>();
+	for (const record of replay.records) {
+		if (record.model !== "current") continue;
+		const entry = byPath.get(record.estimatorSource) ?? {
+			lags: [],
+			sampleToObservation: [],
+		};
+		entry.lags.push(record.lagMs / MINUTE_MS);
+		if (record.observationAgeMs != null) {
+			entry.sampleToObservation.push(
+				(record.observationAgeMs - record.sampleAgeMs) / MINUTE_MS,
+			);
+		}
+		byPath.set(record.estimatorSource, entry);
+	}
+	const population: LagPopulationRow[] = [...byPath.entries()]
+		.map(([path, entry]) => ({
+			path,
+			records: entry.lags.length,
+			medianLagMinutes: medianOf(entry.lags),
+			p90LagMinutes: percentileOf(entry.lags, 0.9),
+			medianSampleToObservationMinutes: medianOf(entry.sampleToObservation),
+			p90SampleToObservationMinutes: percentileOf(
+				entry.sampleToObservation,
+				0.9,
+			),
+			sampleToObservationRecords: entry.sampleToObservation.length,
+		}))
+		.sort((a, b) => a.path.localeCompare(b.path));
+
+	return {
+		ageGroups,
+		identity: { eligible, differing, fromMs, toMs },
+		shift: {
+			firstEvent: shiftStatsOf(firstEventShifts),
+			rest: shiftStatsOf(restShifts),
+		},
+		parity,
+		pairedEta,
+		population,
+	};
+}
+
+// ---------------------------------------------------------------------------
 // Per-record dump
 // ---------------------------------------------------------------------------
 
@@ -2110,6 +2726,19 @@ export function redistributionRecordToJson(
 		sinceDeathMinutes:
 			record.sinceDeathMs == null ? null : record.sinceDeathMs / MINUTE_MS,
 		slopePctPerHour: record.slopePctPerHour,
+		observationAgeMs: record.observationAgeMs,
+		observationAgeMinutes:
+			record.observationAgeMs == null
+				? null
+				: record.observationAgeMs / MINUTE_MS,
+		sampleAgeMs: record.sampleAgeMs,
+		sampleAgeMinutes: record.sampleAgeMs / MINUTE_MS,
+		lagMs: record.lagMs,
+		lagMinutes: record.lagMs / MINUTE_MS,
+		estimatorSource: record.estimatorSource,
+		classLagFree: record.classLagFree,
+		pooledInClass: record.pooledInClass,
+		firstEvent: record.firstEvent,
 		usable: record.usable,
 		unusableReason: record.unusableReason,
 		predictsExhaust: record.predictsExhaust,
@@ -2131,6 +2760,12 @@ export function redistributionRecordToJson(
 
 /** The rule, printed verbatim in the report and evaluated by `evaluateVerdict`. */
 export const VERDICT_RULE = [
+	"MODELS. `scenario-equal` is the demand-conserving scan that ADVANCES each",
+	"   reading over its observation lag; `scenario-equal-original` is the same",
+	"   equal split with the pre-correction scan, which schedules every window",
+	"   from the instant of the replay however old its reading is. Both are",
+	"   scored on the COMMON cohort: every model usable, truth observed.",
+	"",
 	"A. NOT MORE OPTIMISTIC ON TRANSITIONS. On the any-transition cohort,",
 	"   lifecycle-balanced: max(paired median signed error of scenario-equal, 0)",
 	"   <= max(paired median signed error of current, 0), AND recall of",
@@ -2141,16 +2776,23 @@ export const VERDICT_RULE = [
 	"   current.",
 	"C. NO SIGNIFICANT OVERALL LOSS. On the overall cohort, the block-bootstrap",
 	"   95% CI of F1(scenario-equal) - F1(current) is not entirely below zero",
-	"   (p97.5 >= 0).",
+	"   (p97.5 >= 0). Read from the entry whose BASELINE is the current model.",
+	"D. NOT WORSE THAN THE ORIGINAL SCENARIO. On the any-transition common",
+	"   cohort, lifecycle-balanced: F1(scenario-equal) >= F1(scenario-equal-",
+	"   original), AND the paired median of |error of scenario-equal| - |error",
+	"   of scenario-equal-original| <= 0 over the records both models dated.",
+	"   Recall of both is printed beside D and is NOT judged: an ETA moved",
+	"   earlier never leaves the before-reset set, so recall preservation",
+	"   follows from construction rather than from evidence.",
 	"",
-	"replace = A and B and C. keep-scenario = any criterion FALSE.",
+	"replace = A and B and C and D. keep-scenario = any criterion FALSE.",
 	"insufficient-evidence = no criterion false, at least one indeterminate.",
 	"The verdict basis is the EQUAL share rule, pre-declared; the headroom rule",
 	"is reported beside it and is never the basis.",
 ].join("\n");
 
 export interface VerdictCriterion {
-	id: "A" | "B" | "C";
+	id: "A" | "B" | "C" | "D";
 	label: string;
 	/** `null` = indeterminate (a needed value was absent). */
 	pass: boolean | null;
@@ -2185,13 +2827,24 @@ export interface Verdict {
 	}>;
 }
 
+/**
+ * The one bootstrap CI a criterion is defined on.
+ *
+ * All three of label, statistic and baseline are matched EXACTLY: the table
+ * carries the same cohort label twice, once per baseline, and a prefix match
+ * would resolve whichever happens to come first.
+ */
 const bootstrapEntry = (
-	entries: readonly ReportBootstrapEntry[],
+	entries: readonly RedistributionBootstrapEntry[],
 	label: string,
 	statistic: string,
-): ReportBootstrapEntry | null =>
+	baseline: RedistributionBootstrapEntry["baseline"],
+): RedistributionBootstrapEntry | null =>
 	entries.find(
-		(entry) => entry.label.startsWith(label) && entry.statistic === statistic,
+		(entry) =>
+			entry.label === label &&
+			entry.statistic === statistic &&
+			entry.baseline === baseline,
 	) ?? null;
 
 /**
@@ -2247,7 +2900,12 @@ export function evaluateVerdict(
 		],
 	};
 
-	const overallCi = bootstrapEntry(cohorts.bootstrap, "Overall", "f1");
+	const overallCi = bootstrapEntry(
+		cohorts.bootstrap,
+		OVERALL_BOOTSTRAP_LABEL,
+		"f1",
+		"current",
+	);
 	const criterionC: VerdictCriterion = {
 		id: "C",
 		label: "no significant overall loss",
@@ -2260,7 +2918,38 @@ export function evaluateVerdict(
 		],
 	};
 
-	const criteria = [criterionA, criterionB, criterionC];
+	const original = metricsOf(transition.balanced, "scenario-equal-original");
+	const absDelta = transition.pairedAbsVsOriginal;
+	const criterionD: VerdictCriterion = {
+		id: "D",
+		label: "not worse than the original scenario",
+		pass:
+			scenario?.f1 == null ||
+			original?.f1 == null ||
+			absDelta.medianDeltaMinutes == null
+				? null
+				: scenario.f1 >= original.f1 && absDelta.medianDeltaMinutes <= 0,
+		values: [
+			{ name: "F1, scenario-equal", value: scenario?.f1 ?? null },
+			{
+				name: "F1, scenario-equal-original",
+				value: original?.f1 ?? null,
+			},
+			{
+				name: "paired median |error| change vs original (min)",
+				value: absDelta.medianDeltaMinutes,
+			},
+			{ name: "paired n", value: absDelta.n, digits: 0 },
+			// Printed, never judged — see the rule text.
+			{ name: "recall, scenario-equal", value: scenario?.recall ?? null },
+			{
+				name: "recall, scenario-equal-original",
+				value: original?.recall ?? null,
+			},
+		],
+	};
+
+	const criteria = [criterionA, criterionB, criterionC, criterionD];
 	const verdict: VerdictWord = criteria.some(
 		(criterion) => criterion.pass === false,
 	)
@@ -2391,6 +3080,10 @@ function cohortSection(cohort: CohortScores, heading: string): string[] {
 		`Paired median signed error (n=${cohort.pairedBias.n}; positive = optimistic): scenario-equal ${num(cohort.pairedBias.medianA, 1)} min, current ${num(cohort.pairedBias.medianB, 1)} min.`,
 	);
 	out.push("");
+	out.push(
+		`Against the pre-correction scan (n=${cohort.pairedBiasVsOriginal.n}): scenario-equal ${num(cohort.pairedBiasVsOriginal.medianA, 1)} min, scenario-equal-original ${num(cohort.pairedBiasVsOriginal.medianB, 1)} min; paired median change in absolute error ${num(cohort.pairedAbsVsOriginal.medianDeltaMinutes, 1)} min (n=${cohort.pairedAbsVsOriginal.n}, negative = the correction lands closer).`,
+	);
+	out.push("");
 	return out;
 }
 
@@ -2399,7 +3092,7 @@ function slopeTrajectorySection(rows: readonly SlopeRatioRow[]): string[] {
 	out.push("### Survivor slope trajectory after a death");
 	out.push("");
 	out.push(
-		"The survivor's OWN fitted burn slope, expressed against its slope just after the peer died: `slope(t) / slope(t_death+)`. Above 1 means the inherited traffic has already entered the survivor's lookback, which is exactly the demand the scenario then adds a second time; near 1 means it has not arrived yet.",
+		"The survivor's OWN fitted burn slope, expressed against its slope just after the peer died: `slope(t) / slope(t_death+)`. A ratio above 1 is consistent with the inherited traffic having entered the survivor's lookback, which is the demand the scenario would then be adding a second time; a ratio near 1 is consistent with it not having arrived. The table cannot separate absorbed traffic from any other change in the survivor's own burn, and it cannot see absorption at all where the survivor was still learning when its peer died.",
 	);
 	out.push("");
 	out.push(
@@ -2407,7 +3100,7 @@ function slopeTrajectorySection(rows: readonly SlopeRatioRow[]): string[] {
 	);
 	out.push("");
 	out.push(
-		"Unlike the scored buckets above, this table reads every peer-exhaustion instant of the replay, not only the ones where all three models are comparable and the window's fate was observed. The slope belongs to the survivor's own reading, so a model abstaining or an unobserved outcome is no reason to move the baseline off the earliest post-death reading there is.",
+		"Unlike the scored buckets above, this table reads every peer-exhaustion instant of the replay, not only the ones where every model is comparable and the window's fate was observed. The slope belongs to the survivor's own reading, so a model abstaining or an unobserved outcome is no reason to move the baseline off the earliest post-death reading there is.",
 	);
 	out.push("");
 	out.push(
@@ -2420,6 +3113,142 @@ function slopeTrajectorySection(rows: readonly SlopeRatioRow[]): string[] {
 		const seven = row.cells.seven_day;
 		out.push(
 			`| ${row.label} | ${combined.lifecycles} | ${num(combined.medianRatio)} | ${num(combined.medianSlopePctPerHour, 2)} | ${five.lifecycles} | ${num(five.medianRatio)} | ${seven.lifecycles} | ${num(seven.medianRatio)} |`,
+		);
+	}
+	out.push("");
+	return out;
+}
+
+const shiftRow = (label: string, stats: LagShiftStats): string =>
+	`| ${label} | ${stats.n} | ${num(stats.medianShiftMinutes, 2)} | ${num(stats.medianExcessMinutes, 2)} | ${num(stats.p10ExcessMinutes, 2)} | ${num(stats.p90ExcessMinutes, 2)} | ${pct(stats.matchingShare)} |`;
+
+/** The mechanism section: what the correction DID, beside what it scored. */
+function observationLagSection(checks: ObservationLagChecks): string[] {
+	const out: string[] = [];
+	out.push("## Observation-lag mechanism check");
+	out.push("");
+	out.push(
+		"What the correction actually did to the projections, as opposed to what it scored. `scenario-equal` advances each reading over its observation lag; `scenario-equal-original` is the identical equal split with that advance switched off. Every check below states its own denominator, and an eligible set of zero is reported as such rather than as a pass.",
+	);
+	out.push("");
+
+	out.push("### Observation age");
+	out.push("");
+	out.push(
+		"The scored cohort split by how old the reading behind each record was. Buckets are half-open and contiguous; a negative age is a reading stamped ahead of the instant replaying it, and `unknown` is a row with no `observed_at` at all — which is most rows before 2026-08-24, and is why the regression path derives its lag from the fit rather than from the observation.",
+	);
+	out.push("");
+	for (const group of checks.ageGroups) {
+		out.push(`#### ${group.scope}`);
+		out.push("");
+		const counts = [
+			...group.buckets.map((bucket) => bucket.records),
+			group.unknown.records,
+		];
+		const summed = counts.reduce((total, count) => total + count, 0);
+		out.push(
+			`Reconciliation: ${counts.join(" + ")} = ${summed} of ${group.eligible} eligible records.`,
+		);
+		out.push("");
+		for (const bucket of group.buckets) {
+			out.push(...cohortSection(bucket, `##### age ${bucket.label}`));
+		}
+		out.push(
+			...cohortSection(
+				group.unknown,
+				`##### age ${UNKNOWN_OBSERVATION_AGE_LABEL}`,
+			),
+		);
+	}
+
+	out.push("### Identity on lag-free class-instants");
+	out.push("");
+	out.push(
+		"Where NO pooled window of a class carries a lag at an instant, the two equal-split models are the same scan and must answer identically. A window's own zero lag is not sufficient: a peer's lag moves the peer's death, and with it this window's share and its ETA — so eligibility is a property of the whole class-instant, including windows whose anchor sits ahead of the instant and clamps to zero.",
+	);
+	out.push("");
+	if (checks.identity.eligible === 0) {
+		out.push(
+			"No eligible records: every class-instant of this replay carries at least one pooled lag. The check states nothing.",
+		);
+	} else {
+		out.push(
+			`n=${checks.identity.eligible} eligible records, ${checks.identity.differing} of which the two models answered differently (expected: 0). Eligible records span \`${iso(checks.identity.fromMs ?? 0)}\` to \`${iso(checks.identity.toMs ?? 0)}\`.`,
+		);
+		out.push("");
+		out.push(
+			"The eligible population is expected to be dominated by readings whose estimator path carries no anchor lag at all (the now-anchored lifetime average). That is an expectation about this data, not a claim the check verifies.",
+		);
+	}
+	out.push("");
+
+	out.push("### Lag shift");
+	out.push("");
+	out.push(
+		"How far the correction moved each ETA, over the records where both models committed to a date and the record's own window carries a lag. `shift` is `original ETA − corrected ETA`; `excess` is that shift minus the window's own lag.",
+	);
+	out.push("");
+	out.push(
+		"A record is FIRST-EVENT when its corrected exhaustion precedes every other slope-changing event of its class: any other projected exhaustion still ahead of the instant, and the reset of any class window already at 100 %. One slope then governs the whole projection and the shift must equal the lag exactly. Everywhere else the projection crosses at least one breakpoint, where a shift of `s₁·lag/s₂` is what the arithmetic gives, so no exact expectation exists and the rest of the table is descriptive.",
+	);
+	out.push("");
+	out.push(
+		"| split | n | median shift (min) | median excess (min) | p10 excess | p90 excess | within 1 s of own lag |",
+	);
+	out.push("|---|---:|---:|---:|---:|---:|---:|");
+	out.push(shiftRow("first event (expect 100 %)", checks.shift.firstEvent));
+	out.push(shiftRow("rest (descriptive)", checks.shift.rest));
+	out.push("");
+	if (checks.shift.firstEvent.n === 0) {
+		out.push(
+			"No eligible first-event records: the exact-shift expectation is untested in this run.",
+		);
+		out.push("");
+	}
+
+	out.push("### Parity with the current model on lone accounts");
+	out.push("");
+	out.push(
+		"The point of deriving the lag per estimator path. Where an account is the only pooled member of its class, its scenario slope IS its own measured slope, so the corrected scan must land on the current model's ETA. Restricted to first-event records where both models committed to a date, and split by the path the reading came from: the two anchored paths are expected at 100 %, and `other` collects the now-anchored paths, which carry no lag and are not held to the expectation.",
+	);
+	out.push("");
+	out.push("| estimator path | n | within 1 s of the current model |");
+	out.push("|---|---:|---:|");
+	for (const row of checks.parity) {
+		out.push(
+			`| ${row.path} | ${row.n} | ${row.n === 0 ? "no eligible records" : pct(row.withinToleranceShare)} |`,
+		);
+	}
+	out.push("");
+
+	out.push("### Fixed paired-ETA subset");
+	out.push("");
+	out.push(
+		"Median signed ETA error of the three models on ONE fixed set of records: lifecycle-balanced instants where all three committed to a date and the window's exhaustion was observed. Coverage differences cannot move these numbers, because the set is the same for every row.",
+	);
+	out.push("");
+	out.push("| cohort | model | n | median signed error (min) |");
+	out.push("|---|---|---:|---:|");
+	for (const row of checks.pairedEta) {
+		out.push(
+			`| ${row.cohort} | ${row.model} | ${row.n} | ${num(row.medianSignedErrorMinutes, 1)} |`,
+		);
+	}
+	out.push("");
+
+	out.push("### Lag population by estimator path");
+	out.push("");
+	out.push(
+		"Which paths the correction touched and by how much, over one model's records (the lag is a property of the reading, so every model's record at an instant carries the same one). `sample − observation` is the delay between a reading being observed and being stored, on the rows that carry both instants.",
+	);
+	out.push("");
+	out.push(
+		"| estimator path | records | median lag (min) | p90 lag (min) | rows with both instants | median sample − observation (min) | p90 |",
+	);
+	out.push("|---|---:|---:|---:|---:|---:|---:|");
+	for (const row of checks.population) {
+		out.push(
+			`| ${row.path} | ${row.records} | ${num(row.medianLagMinutes, 2)} | ${num(row.p90LagMinutes, 2)} | ${row.sampleToObservationRecords} | ${num(row.medianSampleToObservationMinutes, 2)} | ${num(row.p90SampleToObservationMinutes, 2)} |`,
 		);
 	}
 	out.push("");
@@ -2476,7 +3305,7 @@ export function formatRedistributionReport(
 		"Fixed-grid joint-roster replay. At every instant of the grid the roster is",
 	);
 	out.push(
-		"rebuilt from recorded snapshots and BOTH models are fed the same window",
+		"rebuilt from recorded snapshots and EVERY model is fed the same window",
 	);
 	out.push("inputs; nothing reads a row after the instant it is replaying.");
 	out.push("");
@@ -2512,6 +3341,9 @@ export function formatRedistributionReport(
 	);
 	out.push(
 		"- Sign convention: signed ETA error is `predicted − observed`, so POSITIVE is predicted-later-than-observed, i.e. OPTIMISTIC.",
+	);
+	out.push(
+		"- Observation lag: `scenario-equal` and `scenario-headroom` advance each reading over the gap between the instant its estimator measured to and the instant being replayed, at the share slope the first assignment gives it. The lag is taken from the fit's own last point on the regression path and from the observation instant on the observation-anchored lifetime path, so a lone account's scenario ETA is the current model's ETA. `scenario-equal-original` is the same equal split with that advance switched off, and is the control the mechanism checks below are measured against.",
 	);
 	out.push("");
 	out.push("Verdict rule, declared before the run:");
@@ -2553,7 +3385,7 @@ export function formatRedistributionReport(
 	out.push("### Peer exhaustion by time since death");
 	out.push("");
 	out.push(
-		"The scenario adds the dead peer's fill demand on top of a survivor whose own lookback ALREADY contains the traffic it absorbed, so it is expected to read pessimistic the longer the peer has been dead. Disclosed here, not corrected.",
+		"IF a survivor's own lookback already contains the traffic it absorbed, the scenario would be adding that demand a second time and would read pessimistic the longer the peer has been dead. That is the hypothesis this cohort exists to test, not a property the measurements here establish; the slope table below is what speaks to it. Disclosed, not corrected.",
 	);
 	out.push("");
 	out.push(
@@ -2582,17 +3414,21 @@ export function formatRedistributionReport(
 	out.push("### Bootstrap");
 	out.push("");
 	out.push(
-		"Block bootstrap of `scenario-equal − current`, resampling blocks rather than instants (window lifecycles overall, episodes on transitions).",
+		"Block bootstrap of `scenario-equal − baseline`, resampling blocks rather than instants (window lifecycles overall, episodes on transitions). The baseline is the current model for criteria A-C and the pre-correction scan for criterion D; both rows are printed for both cohorts.",
 	);
 	out.push("");
-	out.push("| cohort | statistic | p2.5 | p50 | p97.5 | resamples |");
-	out.push("|---|---|---:|---:|---:|---:|");
+	out.push(
+		"| cohort | baseline | statistic | p2.5 | p50 | p97.5 | resamples |",
+	);
+	out.push("|---|---|---|---:|---:|---:|---:|");
 	for (const entry of cohorts.bootstrap) {
 		out.push(
-			`| ${entry.label} | ${entry.statistic} | ${num(entry.p2_5)} | ${num(entry.p50)} | ${num(entry.p97_5)} | ${entry.samples} |`,
+			`| ${entry.label} | ${entry.baseline} | ${entry.statistic} | ${num(entry.p2_5)} | ${num(entry.p50)} | ${num(entry.p97_5)} | ${entry.samples} |`,
 		);
 	}
 	out.push("");
+
+	out.push(...observationLagSection(observationLagChecks(replay, cohorts)));
 
 	out.push("## Prediction churn");
 	out.push("");
@@ -2605,7 +3441,7 @@ export function formatRedistributionReport(
 	);
 	out.push("");
 	out.push(
-		"Each model is measured on its OWN usable instants, over every replay record rather than the common cohort the score tables use: another model abstaining, or an outcome nobody observed, does not make a model's two consecutive answers unmeasurable. The three rows of a cohort are therefore each an honest statement about one model, and not a like-for-like comparison the way the scores are.",
+		"Each model is measured on its OWN usable instants, over every replay record rather than the common cohort the score tables use: another model abstaining, or an outcome nobody observed, does not make a model's two consecutive answers unmeasurable. Each row of a cohort is therefore an honest statement about one model, and not a like-for-like comparison the way the scores are.",
 	);
 	out.push("");
 	out.push(
@@ -2701,6 +3537,13 @@ export function formatRedistributionReport(
 		);
 	}
 	out.push("");
+	const usableOf = (model: ReplayModel): number =>
+		replay.records.filter((record) => record.model === model && record.usable)
+			.length;
+	out.push(
+		`Coverage of the two equal-split scans, which must match — the correction changes no usability rule: scenario-equal ${usableOf("scenario-equal")} usable records, scenario-equal-original ${usableOf("scenario-equal-original")}.`,
+	);
+	out.push("");
 	out.push(`**Verdict: ${verdict.verdict}**`);
 	out.push("");
 	if (verdict.pendingCohorts.length > 0) {
@@ -2770,7 +3613,9 @@ export function knownLimitsFor(
 		"Snapshots before 2026-08-24 carry no `plan_tier`/`rate_limit_tier` and no `observed_at`. Tiers there are today's, marked `assumed`; without an observation instant the weekly full-confidence path is unavailable to BOTH models, so the two are still compared like for like.",
 		"No reset-credit bank is modelled, and no live usage point is injected — the replay only has what the sampler stored.",
 		"The headroom share rule is reported, never used as the verdict basis. The verdict basis is the equal split, pre-declared.",
-		"The scenario double-counts a dead peer's demand while the survivor's own lookback already contains the traffic it absorbed. That is a property of the model, disclosed in the peer-exhaustion cohort rather than corrected here.",
+		"IF a survivor's own lookback already contains the traffic it absorbed, the scenario would be adding that demand a second time. Whether it does is a hypothesis this replay reports on (the peer-exhaustion cohort and the survivor slope table) rather than a property these measurements establish; nothing here corrects for it.",
+		"The observation-lag advance never rewinds the scan clock below the instant being replayed: a window that fills inside its lag dies AT that instant, though the projection it records carries the true, earlier one. Any redistribution such a death causes therefore starts at the instant, not at the fill.",
+		"A reading whose row carries no `observed_at` and whose estimator is the now-anchored lifetime average has no derivable lag and is advanced by nothing. That is a real absence, not a measured zero, and the mechanism section reports those records under `unknown` rather than folding them into the fresh bucket.",
 	];
 
 	// Measured, never assumed: one model's records only, because the three
