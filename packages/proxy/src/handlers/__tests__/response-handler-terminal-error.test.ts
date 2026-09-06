@@ -335,16 +335,19 @@ describe("stream read error AFTER the terminal event → recorded as success", (
 		expect(calls.summaries[0]?.outputTokens).toBe(135);
 	});
 
-	it("client disconnect after the terminal event → outcome stays 'disconnect' but provider counts are trusted", async () => {
-		// An ENQUEUED terminal chunk does not prove the client consumed it, so the
-		// transport outcome stays truthful — but the terminal event makes the
-		// provider's token counts authoritative (no bytes/4 inflation).
+	it.each([
+		"completed",
+		"failed",
+		"incomplete",
+	])("client disconnect after response.%s preserves the protocol completion and provider counts", async (kind) => {
+		// A client can stop reading at response.completed without waiting for EOF.
+		// Failed/incomplete terminals must never become completed successes.
 		const { ctx, calls } = makeStreamCtx("codex");
 		// Terminal event, then the stream stays open (no error) — the CLIENT cancels.
 		const body = streamFrom(
 			[
 				'event: response.created\ndata: {"type":"response.created","response":{"model":"gpt-5.6-sol"}}\n\n',
-				'event: response.completed\ndata: {"type":"response.completed","response":{"usage":{"input_tokens":10,"output_tokens":7,"total_tokens":17}}}\n\n',
+				`event: response.${kind}\ndata: {"type":"response.${kind}","response":{"usage":{"input_tokens":10,"output_tokens":7,"total_tokens":17}}}\n\n`,
 			],
 			{ hang: true },
 		);
@@ -359,7 +362,9 @@ describe("stream read error AFTER the terminal event → recorded as success", (
 		await new Promise((r) => setTimeout(r, 20));
 
 		expect(calls.finishTransport).toHaveLength(1);
-		expect(calls.finishTransport[0]?.outcome).toBe("disconnect");
+		expect(calls.finishTransport[0]?.outcome).toBe(
+			kind === "completed" ? "success" : "disconnect",
+		);
 		expect(calls.summaries[0]?.outputTokens).toBe(7);
 		expect(calls.summaries[0]?.outputApproximate).toBeFalsy();
 	});
@@ -458,16 +463,27 @@ describe("stream read error WITHOUT the terminal event → unchanged error path"
 
 describe("final client stream alert quality", () => {
 	const warnings: Array<Record<string, unknown>> = [];
+	const outcomes: Array<Record<string, unknown>> = [];
+	let debug: ReturnType<typeof spyOn>;
 	let warn: ReturnType<typeof spyOn>;
 	beforeEach(() => {
 		warnings.length = 0;
+		outcomes.length = 0;
+		debug = spyOn(Logger.prototype, "debug").mockImplementation(
+			(_message, data) => {
+				if (data?.event === "client_stream_outcome") outcomes.push(data);
+			},
+		);
 		warn = spyOn(Logger.prototype, "warn").mockImplementation(
 			(_message, data) => {
 				if (data?.event === EVENT_CLIENT_STREAM_FAILURE) warnings.push(data);
 			},
 		);
 	});
-	afterEach(() => warn.mockRestore());
+	afterEach(() => {
+		warn.mockRestore();
+		debug.mockRestore();
+	});
 
 	it("non-client AbortError with a live inbound signal warns beyond the old sample budget", async () => {
 		const before = getClientStreamOutcomeCounts();
@@ -505,7 +521,7 @@ describe("final client stream alert quality", () => {
 	it.each([
 		false,
 		true,
-	])("inbound abort wins the upstream read race (terminal already seen: %s), regardless of error shape", async (terminalEvent) => {
+	])("inbound abort records completion when already seen (%s), regardless of error shape", async (terminalEvent) => {
 		for (const error of [
 			new DOMException("client stopped", "AbortError"),
 			new Error("connection closed"),
@@ -541,11 +557,24 @@ describe("final client stream alert quality", () => {
 			await new Promise((resolve) => setTimeout(resolve, 20));
 			// Explicit downstream cancellation has not occurred at all.
 			expect(calls.finishTransport).toHaveLength(1);
-			expect(calls.finishTransport[0]?.outcome).toBe("disconnect");
+			expect(calls.finishTransport[0]?.outcome).toBe(
+				terminalEvent ? "success" : "disconnect",
+			);
 			expect(warnings).toHaveLength(0);
+			expect(outcomes.at(-1)).toMatchObject({
+				outcome: terminalEvent ? "success" : "disconnect",
+				transportOutcome: "disconnect",
+				reason: terminalEvent ? "terminal_event_before_cut" : "client_cancel",
+				terminalSeen: terminalEvent,
+				completedBeforeCut: terminalEvent,
+				errorName: error.name,
+				errorMessage: error.message,
+			});
 			expect(getClientStreamOutcomeCounts()).toEqual({
 				...before,
-				disconnect: before.disconnect + 1,
+				success: before.success + (terminalEvent ? 1 : 0),
+				disconnect: before.disconnect + (terminalEvent ? 0 : 1),
+				completedBeforeCut: before.completedBeforeCut + (terminalEvent ? 1 : 0),
 			});
 			if (terminalEvent) {
 				expect(calls.summaries[0]?.outputTokens).toBe(135);
