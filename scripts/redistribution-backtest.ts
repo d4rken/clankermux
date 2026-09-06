@@ -7,6 +7,7 @@
  *
  *     bun scripts/redistribution-backtest.ts [--db=<path>] [--from=<ISO>] [--to=<ISO>]
  *                                            [--step-minutes=10] [--seed=N] [--out=<path>]
+ *                                            [--records-out=<path.jsonl>]
  *
  * The database is opened STRICTLY read-only (`openReadOnlyDatabase`, SQLite
  * `readonly: true`); the live file is multi-gigabyte and serves the running
@@ -24,6 +25,8 @@ import {
 	evaluateVerdict,
 	formatRedistributionReport,
 	knownLimitsFor,
+	type RedistributionRecord,
+	redistributionRecordToJson,
 	type ReplayRange,
 	replayRange,
 	type RosterAccount,
@@ -51,7 +54,8 @@ const DEFAULT_SEED = 20260823;
 const DEFAULT_STEP_MINUTES = 10;
 
 const USAGE = `Usage: bun scripts/redistribution-backtest.ts [--db=<path>] [--from=<ISO>] [--to=<ISO>]
-       [--step-minutes=${DEFAULT_STEP_MINUTES}] [--seed=${DEFAULT_SEED}] [--out=<path>]`;
+       [--step-minutes=${DEFAULT_STEP_MINUTES}] [--seed=${DEFAULT_SEED}] [--out=<path>]
+       [--records-out=<path.jsonl>]`;
 
 export interface CliOptions {
 	dbPath: string | null;
@@ -60,6 +64,12 @@ export interface CliOptions {
 	stepMinutes: number;
 	seed: number;
 	outPath: string | null;
+	/**
+	 * Where to dump one JSON line per replay record. Optional: the report is the
+	 * product, this is the raw material a follow-up analysis would otherwise
+	 * have to re-run the multi-minute replay to get.
+	 */
+	recordsOutPath: string | null;
 }
 
 export function parseCliArgs(argv: string[]): CliOptions {
@@ -70,6 +80,7 @@ export function parseCliArgs(argv: string[]): CliOptions {
 		stepMinutes: DEFAULT_STEP_MINUTES,
 		seed: DEFAULT_SEED,
 		outPath: null,
+		recordsOutPath: null,
 	};
 	for (const arg of argv) {
 		if (arg.startsWith("--db=")) options.dbPath = arg.slice(5);
@@ -85,6 +96,8 @@ export function parseCliArgs(argv: string[]): CliOptions {
 			const n = Number(arg.slice(7));
 			if (!Number.isInteger(n)) throw new Error(`Invalid --seed: ${arg}`);
 			options.seed = n;
+		} else if (arg.startsWith("--records-out=")) {
+			options.recordsOutPath = arg.slice(14);
 		} else if (arg.startsWith("--out=")) options.outPath = arg.slice(6);
 		else if (arg === "--help" || arg === "-h") {
 			console.log(USAGE);
@@ -225,12 +238,34 @@ export function loadAccounts(db: Database): RosterAccount[] {
 		}));
 }
 
+/**
+ * One JSON line per record, streamed rather than joined: a full-range replay
+ * produces hundreds of thousands of records, and building one string of them
+ * would hold the whole dump in memory for no reason.
+ */
+export async function writeRecordsJsonl(
+	path: string,
+	records: readonly RedistributionRecord[],
+): Promise<void> {
+	const writer = Bun.file(path).writer();
+	try {
+		for (const record of records) {
+			writer.write(`${JSON.stringify(redistributionRecordToJson(record))}\n`);
+		}
+	} finally {
+		await writer.end();
+	}
+}
+
 async function main(): Promise<void> {
 	const options = parseCliArgs(process.argv.slice(2));
 	const dbPath = options.dbPath ?? resolveDbPath();
 	// Before a single row is read, so a mistyped `--out` cannot be discovered
 	// after a multi-minute replay.
 	if (options.outPath) assertSafeOutPath(options.outPath, dbPath);
+	if (options.recordsOutPath) {
+		assertSafeOutPath(options.recordsOutPath, dbPath);
+	}
 
 	const db = openBacktestDatabase(dbPath);
 	let dataset: ReturnType<typeof readDataset>;
@@ -268,6 +303,13 @@ async function main(): Promise<void> {
 	console.error(
 		`Replay: ${replay.instants} instants, ${replay.records.length} records, ${replay.events.length} transitions in ${(replayMs / 1000).toFixed(1)} s`,
 	);
+
+	if (options.recordsOutPath) {
+		await writeRecordsJsonl(options.recordsOutPath, replay.records);
+		console.error(
+			`Wrote ${replay.records.length} records to ${options.recordsOutPath}`,
+		);
+	}
 
 	const scoringStartedAt = Date.now();
 	const cohorts = scoreCohorts(replay);

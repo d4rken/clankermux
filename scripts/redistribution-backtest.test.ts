@@ -1,6 +1,6 @@
 import { afterAll, describe, expect, test } from "bun:test";
 import { Database } from "bun:sqlite";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -17,6 +17,7 @@ import {
 	parseCliArgs,
 	parseIso,
 	readDataset,
+	writeRecordsJsonl,
 } from "./redistribution-backtest";
 
 const MIN_MS = 60_000;
@@ -114,6 +115,7 @@ describe("parseCliArgs", () => {
 			stepMinutes: 10,
 			seed: 20260823,
 			outPath: null,
+			recordsOutPath: null,
 		});
 	});
 
@@ -125,11 +127,19 @@ describe("parseCliArgs", () => {
 			"--step-minutes=30",
 			"--seed=7",
 			"--out=/tmp/report.md",
+			"--records-out=/tmp/records.jsonl",
 		]);
 		expect(options.dbPath).toBe("/tmp/x.db");
 		expect(options.stepMinutes).toBe(30);
 		expect(options.seed).toBe(7);
 		expect(options.outPath).toBe("/tmp/report.md");
+		expect(options.recordsOutPath).toBe("/tmp/records.jsonl");
+	});
+
+	test("--records-out is not swallowed by the --out prefix", () => {
+		const options = parseCliArgs(["--records-out=/tmp/records.jsonl"]);
+		expect(options.outPath).toBeNull();
+		expect(options.recordsOutPath).toBe("/tmp/records.jsonl");
 	});
 
 	test("rejects an unknown flag and a nonsense step", () => {
@@ -206,5 +216,36 @@ describe("end to end on a fixture database", () => {
 		} finally {
 			db.close();
 		}
+	});
+});
+
+describe("writeRecordsJsonl", () => {
+	test("writes one parseable JSON line per record, with ISO instants", async () => {
+		const db = openBacktestDatabase(dbPath);
+		const rows = loadRows(db, T0 - 8 * DAY_MS, T0 + 14 * DAY_MS);
+		const accounts = loadAccounts(db);
+		db.close();
+		const replay = replayRange(
+			rows,
+			accounts,
+			{ label: "Replay range", fromMs: T0, toMs: T0 + 6 * DAY_MS },
+			6 * 60,
+			20260823,
+		);
+		expect(replay.records.length).toBeGreaterThan(0);
+
+		const path = join(tempDir, "records.jsonl");
+		await writeRecordsJsonl(path, replay.records);
+		const lines = readFileSync(path, "utf8").trimEnd().split("\n");
+		expect(lines).toHaveLength(replay.records.length);
+
+		const first = JSON.parse(lines[0]) as Record<string, unknown>;
+		expect(first.tIso).toBe(new Date(replay.records[0].T).toISOString());
+		expect(first.model).toBe(replay.records[0].model);
+		expect(first.lifecycleId).toBe(replay.records[0].lifecycleId);
+		expect(Object.keys(first)).toContain("slopePctPerHour");
+		expect(Object.keys(first)).toContain("sinceDeathMinutes");
+		// Every line parses; a partially written dump is worse than none.
+		for (const line of lines) expect(() => JSON.parse(line)).not.toThrow();
 	});
 });
