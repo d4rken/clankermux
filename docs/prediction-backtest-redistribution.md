@@ -1,6 +1,6 @@
 # ClankerMux runway redistribution backtest
 
-Generated: 2026-09-06T13:54:00.429Z
+Generated: 2026-09-06T14:18:01.372Z
 
 Reproduce with:
 
@@ -20,11 +20,11 @@ bun scripts/redistribution-backtest.ts --db=/home/darken/.config/clankermux/clan
 
 | field | value |
 |---|---|
-| usage_snapshots rows | 192578 |
+| usage_snapshots rows | 192648 |
 | accounts | 7 |
 | providers | anthropic, codex |
 | first sample | 2026-06-02T12:48:00.294Z |
-| last sample | 2026-09-06T13:53:33.006Z |
+| last sample | 2026-09-06T14:17:33.008Z |
 | replay interval | `[2026-07-01T00:00:00.000Z, 2026-09-06T00:00:00.000Z)` |
 | grid instants | 9648 |
 
@@ -39,6 +39,7 @@ inputs; nothing reads a row after the instant it is replaying.
 - Burn anchors are reconstructed from the revision drops observed up to the instant, and never from later ones. Tiers come from the row's own `plan_tier`/`rate_limit_tier` when it has them (`recorded`), else from today's account row (`assumed`).
 - No reset-credit bank is modelled: the credit ledger is not reconstructible per instant, so both models run without it.
 - Truth is PER WINDOW, from the same `deriveOutcome` the per-window backtests use: exhausted at the first observed 100 %, survived only on positive evidence, censored otherwise. Placeholder windows (codex's one-sample 5 h artefacts) are skipped.
+- Truth-grid membership at a tick is every account of the class with a loaded snapshot on both sides of it (first loaded row ≤ tick ≤ last loaded row); an account with no rows around the tick is absent, not censored, so an account unpolled for weeks (Claude-3 between 2026-06-13 and 2026-07-19) is not a survivor during its gap.
 - Current model: account-level learning, the strict rule that ships — ONE learning window makes the whole account unprojectable.
 - Transition tagging: class-wide, 24 h after the event, except a peer exhaustion whose shadow ends at the dying window's own reset. The dying account is excluded from its own event.
 - ETA parity: the current model's beyond-reset ETA is recorded as no prediction, which is the same statement the scenario makes when it projects no exhaustion this cycle.
@@ -70,71 +71,71 @@ is reported beside it and is never the basis.
 
 | id | kind | at | ends | class | account | window | detail |
 |---:|---|---|---|---|---|---|---|
-| 1 | gift-reset | 2026-07-01T21:14:40.129Z | 2026-07-02T21:14:40.129Z | anthropic | ae9e13bd-0a0d-4044-addb-5920075cd70f | seven_day | drop 52 → 0 pp |
-| 2 | peer-exhaustion | 2026-07-02T00:40:40.683Z | 2026-07-02T02:09:59.771Z | anthropic | ae9e13bd-0a0d-4044-addb-5920075cd70f | five_hour | hit 100 with 1.5 h to reset |
-| 3 | peer-exhaustion | 2026-07-02T09:38:41.152Z | 2026-07-02T12:10:00.173Z | anthropic | ae9e13bd-0a0d-4044-addb-5920075cd70f | five_hour | hit 100 with 2.5 h to reset |
-| 4 | peer-exhaustion | 2026-07-02T11:56:41.474Z | 2026-07-02T12:10:00.448Z | anthropic | 1135d045-b26c-4118-8db2-00f0f0ecdf9b | five_hour | hit 100 with 0.2 h to reset |
-| 5 | peer-exhaustion | 2026-07-02T14:11:22.339Z | 2026-07-02T15:10:00.000Z | codex | 1cae47ec-5813-41bc-837d-4f209e2ae1e7 | five_hour | hit 100 with 1.0 h to reset |
-| 6 | peer-exhaustion | 2026-07-03T13:19:27.425Z | 2026-07-04T13:19:27.425Z | anthropic | ae9e13bd-0a0d-4044-addb-5920075cd70f | seven_day | hit 100 with 41.7 h to reset |
-| 7 | gift-reset | 2026-07-07T14:03:18.524Z | 2026-07-08T14:03:18.524Z | codex | 1cae47ec-5813-41bc-837d-4f209e2ae1e7 | seven_day | drop 36 → 31 pp |
-| 8 | peer-exhaustion | 2026-07-10T13:35:13.432Z | 2026-07-10T13:49:59.517Z | anthropic | ae9e13bd-0a0d-4044-addb-5920075cd70f | five_hour | hit 100 with 0.2 h to reset |
-| 9 | peer-exhaustion | 2026-07-11T11:41:13.710Z | 2026-07-11T14:50:00.235Z | anthropic | 1135d045-b26c-4118-8db2-00f0f0ecdf9b | five_hour | hit 100 with 3.1 h to reset |
-| 10 | peer-exhaustion | 2026-07-14T14:57:14.374Z | 2026-07-14T17:09:59.951Z | anthropic | ae9e13bd-0a0d-4044-addb-5920075cd70f | five_hour | hit 100 with 2.2 h to reset |
-| 11 | peer-exhaustion | 2026-07-19T10:59:04.428Z | 2026-07-19T11:49:59.613Z | anthropic | 1135d045-b26c-4118-8db2-00f0f0ecdf9b | five_hour | hit 100 with 0.8 h to reset |
-| 12 | peer-exhaustion | 2026-07-19T14:25:04.566Z | 2026-07-19T15:49:59.659Z | anthropic | ae9e13bd-0a0d-4044-addb-5920075cd70f | five_hour | hit 100 with 1.4 h to reset |
-| 13 | peer-exhaustion | 2026-07-19T15:15:05.073Z | 2026-07-19T16:50:00.165Z | anthropic | 1135d045-b26c-4118-8db2-00f0f0ecdf9b | five_hour | hit 100 with 1.6 h to reset |
-| 14 | peer-exhaustion | 2026-07-19T16:29:05.469Z | 2026-07-19T20:10:00.261Z | anthropic | 2acdf5e9-8298-42d5-816b-baecdb4498ca | five_hour | hit 100 with 3.7 h to reset |
-| 15 | peer-exhaustion | 2026-07-19T18:21:05.585Z | 2026-07-19T20:50:00.351Z | anthropic | ae9e13bd-0a0d-4044-addb-5920075cd70f | five_hour | hit 100 with 2.5 h to reset |
-| 16 | peer-exhaustion | 2026-07-19T22:23:06.461Z | 2026-07-20T01:09:59.598Z | anthropic | 2acdf5e9-8298-42d5-816b-baecdb4498ca | five_hour | hit 100 with 2.8 h to reset |
-| 17 | peer-exhaustion | 2026-07-20T19:22:06.633Z | 2026-07-20T21:10:00.250Z | anthropic | 2acdf5e9-8298-42d5-816b-baecdb4498ca | five_hour | hit 100 with 1.8 h to reset |
-| 18 | add | 2026-07-24T13:50:43.342Z | 2026-07-25T13:50:43.342Z | anthropic | 4b3a18eb-5acb-4e1d-bb48-b3b36e29437a | — | created |
-| 19 | peer-exhaustion | 2026-07-24T16:20:53.492Z | 2026-07-25T16:20:53.492Z | codex | 1cae47ec-5813-41bc-837d-4f209e2ae1e7 | seven_day | hit 100 with 96.7 h to reset |
-| 20 | peer-exhaustion | 2026-07-24T17:16:53.597Z | 2026-07-24T18:49:59.773Z | anthropic | 4b3a18eb-5acb-4e1d-bb48-b3b36e29437a | five_hour | hit 100 with 1.6 h to reset |
-| 21 | peer-exhaustion | 2026-07-24T17:42:54.184Z | 2026-07-25T17:42:54.184Z | anthropic | 1135d045-b26c-4118-8db2-00f0f0ecdf9b | seven_day | hit 100 with 81.3 h to reset |
-| 22 | peer-exhaustion | 2026-07-24T19:46:54.680Z | 2026-07-25T19:46:54.680Z | anthropic | ae9e13bd-0a0d-4044-addb-5920075cd70f | seven_day | hit 100 with 35.2 h to reset |
-| 23 | peer-exhaustion | 2026-07-24T19:48:54.680Z | 2026-07-25T19:48:54.680Z | anthropic | 2acdf5e9-8298-42d5-816b-baecdb4498ca | seven_day | hit 100 with 58.2 h to reset |
-| 24 | peer-exhaustion | 2026-07-26T15:26:25.563Z | 2026-07-26T15:40:00.147Z | anthropic | 4b3a18eb-5acb-4e1d-bb48-b3b36e29437a | five_hour | hit 100 with 0.2 h to reset |
-| 25 | peer-exhaustion | 2026-07-26T19:02:46.831Z | 2026-07-26T20:40:00.262Z | anthropic | 4b3a18eb-5acb-4e1d-bb48-b3b36e29437a | five_hour | hit 100 with 1.6 h to reset |
-| 26 | peer-exhaustion | 2026-07-26T21:16:47.529Z | 2026-07-27T21:16:47.529Z | anthropic | 4b3a18eb-5acb-4e1d-bb48-b3b36e29437a | seven_day | hit 100 with 35.7 h to reset |
-| 27 | peer-exhaustion | 2026-07-27T06:00:48.362Z | 2026-07-28T06:00:48.362Z | anthropic | 2acdf5e9-8298-42d5-816b-baecdb4498ca | seven_day | hit 100 with unknown h to reset |
-| 28 | peer-exhaustion | 2026-07-28T13:42:08.510Z | 2026-07-28T16:59:59.546Z | anthropic | 2acdf5e9-8298-42d5-816b-baecdb4498ca | five_hour | hit 100 with 3.3 h to reset |
-| 29 | gift-reset | 2026-07-28T13:52:08.511Z | 2026-07-29T13:52:08.511Z | anthropic | ae9e13bd-0a0d-4044-addb-5920075cd70f | five_hour | drop 90 → 13 pp |
-| 30 | peer-exhaustion | 2026-07-28T15:18:09.431Z | 2026-07-28T18:00:00.061Z | anthropic | 1135d045-b26c-4118-8db2-00f0f0ecdf9b | five_hour | hit 100 with 2.7 h to reset |
-| 31 | peer-exhaustion | 2026-07-28T19:36:41.291Z | 2026-07-28T21:59:59.677Z | anthropic | 2acdf5e9-8298-42d5-816b-baecdb4498ca | five_hour | hit 100 with 2.4 h to reset |
-| 32 | gift-reset | 2026-07-30T13:58:17.381Z | 2026-07-31T13:58:17.381Z | codex | 1cae47ec-5813-41bc-837d-4f209e2ae1e7 | seven_day | drop 65 → 56 pp |
-| 33 | gift-reset | 2026-07-30T16:04:17.392Z | 2026-07-31T16:04:17.392Z | codex | 1cae47ec-5813-41bc-837d-4f209e2ae1e7 | seven_day | drop 65 → 58 pp |
-| 34 | peer-exhaustion | 2026-08-03T18:06:23.413Z | 2026-08-04T03:00:00.308Z | anthropic | 1135d045-b26c-4118-8db2-00f0f0ecdf9b | seven_day | hit 100 with 8.9 h to reset |
-| 35 | peer-exhaustion | 2026-08-04T15:44:49.581Z | 2026-08-04T17:00:00.368Z | anthropic | 2acdf5e9-8298-42d5-816b-baecdb4498ca | five_hour | hit 100 with 1.3 h to reset |
-| 36 | peer-exhaustion | 2026-08-04T20:36:50.624Z | 2026-08-05T20:36:50.624Z | codex | 1cae47ec-5813-41bc-837d-4f209e2ae1e7 | seven_day | hit 100 with 79.0 h to reset |
-| 37 | peer-exhaustion | 2026-08-06T12:49:40.245Z | 2026-08-07T12:49:40.245Z | anthropic | ae9e13bd-0a0d-4044-addb-5920075cd70f | seven_day | hit 100 with 66.2 h to reset |
-| 38 | peer-exhaustion | 2026-08-07T19:02:42.073Z | 2026-08-08T19:02:42.073Z | anthropic | 1135d045-b26c-4118-8db2-00f0f0ecdf9b | seven_day | hit 100 with 80.0 h to reset |
-| 39 | peer-exhaustion | 2026-08-07T19:58:42.079Z | 2026-08-08T19:58:42.079Z | anthropic | 2acdf5e9-8298-42d5-816b-baecdb4498ca | seven_day | hit 100 with 58.0 h to reset |
-| 40 | gift-reset | 2026-08-07T20:52:42.084Z | 2026-08-08T20:52:42.084Z | anthropic | 1135d045-b26c-4118-8db2-00f0f0ecdf9b | five_hour | drop 41 → 9 pp |
-| 41 | peer-exhaustion | 2026-08-17T13:17:38.486Z | 2026-08-17T13:50:00.035Z | anthropic | ae9e13bd-0a0d-4044-addb-5920075cd70f | five_hour | hit 100 with 0.5 h to reset |
-| 42 | peer-exhaustion | 2026-08-17T17:53:47.828Z | 2026-08-17T20:59:59.877Z | anthropic | 2acdf5e9-8298-42d5-816b-baecdb4498ca | five_hour | hit 100 with 3.1 h to reset |
-| 43 | gift-reset | 2026-08-19T15:59:10.008Z | 2026-08-20T15:59:10.008Z | anthropic | 2acdf5e9-8298-42d5-816b-baecdb4498ca | seven_day | drop 81 → 0 pp |
-| 44 | add | 2026-08-21T10:35:02.252Z | 2026-08-22T10:35:02.252Z | anthropic | fb5944a3-df9e-49cd-b1d6-294988cd0fc4 | — | created |
-| 45 | peer-exhaustion | 2026-08-24T12:12:49.311Z | 2026-08-24T12:59:59.609Z | anthropic | ae9e13bd-0a0d-4044-addb-5920075cd70f | five_hour | hit 100 with 0.8 h to reset |
-| 46 | gift-reset | 2026-09-01T18:00:44.047Z | 2026-09-02T18:00:44.047Z | anthropic | 2acdf5e9-8298-42d5-816b-baecdb4498ca | seven_day | drop 28 → 0 pp |
-| 47 | gift-reset | 2026-09-01T18:00:44.047Z | 2026-09-02T18:00:44.047Z | anthropic | ae9e13bd-0a0d-4044-addb-5920075cd70f | seven_day | drop 91 → 1 pp |
-| 48 | peer-exhaustion | 2026-09-02T07:17:12.861Z | 2026-09-02T08:50:00.007Z | anthropic | ae9e13bd-0a0d-4044-addb-5920075cd70f | five_hour | hit 100 with 1.5 h to reset |
-| 49 | peer-exhaustion | 2026-09-02T16:02:28.745Z | 2026-09-02T18:50:00.497Z | anthropic | ae9e13bd-0a0d-4044-addb-5920075cd70f | five_hour | hit 100 with 2.8 h to reset |
-| 50 | peer-exhaustion | 2026-09-02T16:06:28.745Z | 2026-09-02T18:49:59.539Z | anthropic | 1135d045-b26c-4118-8db2-00f0f0ecdf9b | five_hour | hit 100 with 2.7 h to reset |
-| 51 | peer-exhaustion | 2026-09-02T17:18:29.332Z | 2026-09-02T19:00:00.149Z | anthropic | fb5944a3-df9e-49cd-b1d6-294988cd0fc4 | five_hour | hit 100 with 1.7 h to reset |
-| 52 | peer-exhaustion | 2026-09-02T18:08:29.337Z | 2026-09-02T18:50:00.166Z | anthropic | 2acdf5e9-8298-42d5-816b-baecdb4498ca | five_hour | hit 100 with 0.7 h to reset |
-| 53 | peer-exhaustion | 2026-09-03T12:37:55.770Z | 2026-09-03T14:50:00.082Z | anthropic | 1135d045-b26c-4118-8db2-00f0f0ecdf9b | five_hour | hit 100 with 2.2 h to reset |
-| 54 | add | 2026-09-04T16:07:18.911Z | 2026-09-05T16:07:18.911Z | codex | 383ace05-37d2-4826-acde-1e758557be8f | — | created |
-| 55 | upgrade | 2026-09-05T07:11:10.649Z | 2026-09-06T07:11:10.649Z | codex | 1cae47ec-5813-41bc-837d-4f209e2ae1e7 | — | pro/— → prolite/— |
-| 56 | peer-exhaustion | 2026-09-05T13:43:12.377Z | 2026-09-05T18:29:09.000Z | codex | 383ace05-37d2-4826-acde-1e758557be8f | five_hour | hit 100 with 4.8 h to reset |
-| 57 | upgrade | 2026-09-05T13:57:12.378Z | 2026-09-06T13:57:12.378Z | codex | 383ace05-37d2-4826-acde-1e758557be8f | — | plus/— → pro/— |
-| 58 | upgrade | 2026-09-05T13:59:12.378Z | 2026-09-06T13:59:12.378Z | codex | 1cae47ec-5813-41bc-837d-4f209e2ae1e7 | — | prolite/— → pro/— |
-| 59 | peer-exhaustion | 2026-09-05T14:11:12.387Z | 2026-09-05T16:00:00.258Z | anthropic | ae9e13bd-0a0d-4044-addb-5920075cd70f | five_hour | hit 100 with 1.8 h to reset |
-| 60 | peer-exhaustion | 2026-09-05T15:09:12.393Z | 2026-09-05T16:10:00.260Z | anthropic | fb5944a3-df9e-49cd-b1d6-294988cd0fc4 | five_hour | hit 100 with 1.0 h to reset |
-| 61 | peer-exhaustion | 2026-09-05T16:01:10.300Z | 2026-09-06T16:01:10.300Z | anthropic | ae9e13bd-0a0d-4044-addb-5920075cd70f | five_hour | hit 100 with unknown h to reset |
-| 62 | peer-exhaustion | 2026-09-05T18:02:28.976Z | 2026-09-05T21:09:59.968Z | anthropic | fb5944a3-df9e-49cd-b1d6-294988cd0fc4 | five_hour | hit 100 with 3.1 h to reset |
-| 63 | peer-exhaustion | 2026-09-05T18:12:28.976Z | 2026-09-05T20:50:00.116Z | anthropic | 1135d045-b26c-4118-8db2-00f0f0ecdf9b | five_hour | hit 100 with 2.6 h to reset |
-| 64 | peer-exhaustion | 2026-09-05T18:38:28.979Z | 2026-09-05T21:00:00.312Z | anthropic | 2acdf5e9-8298-42d5-816b-baecdb4498ca | five_hour | hit 100 with 2.4 h to reset |
-| 65 | peer-exhaustion | 2026-09-05T19:33:14.876Z | 2026-09-05T20:59:59.734Z | anthropic | 4b3a18eb-5acb-4e1d-bb48-b3b36e29437a | five_hour | hit 100 with 1.4 h to reset |
+| 1 | gift-reset | 2026-07-01T21:14:40.129Z | 2026-07-02T21:14:40.129Z | anthropic | Claude-1 | seven_day | drop 52 → 0 pp |
+| 2 | peer-exhaustion | 2026-07-02T00:40:40.683Z | 2026-07-02T02:09:59.771Z | anthropic | Claude-1 | five_hour | hit 100 with 1.5 h to reset |
+| 3 | peer-exhaustion | 2026-07-02T09:38:41.152Z | 2026-07-02T12:10:00.173Z | anthropic | Claude-1 | five_hour | hit 100 with 2.5 h to reset |
+| 4 | peer-exhaustion | 2026-07-02T11:56:41.474Z | 2026-07-02T12:10:00.448Z | anthropic | Claude-2 | five_hour | hit 100 with 0.2 h to reset |
+| 5 | peer-exhaustion | 2026-07-02T14:11:22.339Z | 2026-07-02T15:10:00.000Z | codex | Codex-1 | five_hour | hit 100 with 1.0 h to reset |
+| 6 | peer-exhaustion | 2026-07-03T13:19:27.425Z | 2026-07-04T13:19:27.425Z | anthropic | Claude-1 | seven_day | hit 100 with 41.7 h to reset |
+| 7 | gift-reset | 2026-07-07T14:03:18.524Z | 2026-07-08T14:03:18.524Z | codex | Codex-1 | seven_day | drop 36 → 31 pp |
+| 8 | peer-exhaustion | 2026-07-10T13:35:13.432Z | 2026-07-10T13:49:59.517Z | anthropic | Claude-1 | five_hour | hit 100 with 0.2 h to reset |
+| 9 | peer-exhaustion | 2026-07-11T11:41:13.710Z | 2026-07-11T14:50:00.235Z | anthropic | Claude-2 | five_hour | hit 100 with 3.1 h to reset |
+| 10 | peer-exhaustion | 2026-07-14T14:57:14.374Z | 2026-07-14T17:09:59.951Z | anthropic | Claude-1 | five_hour | hit 100 with 2.2 h to reset |
+| 11 | peer-exhaustion | 2026-07-19T10:59:04.428Z | 2026-07-19T11:49:59.613Z | anthropic | Claude-2 | five_hour | hit 100 with 0.8 h to reset |
+| 12 | peer-exhaustion | 2026-07-19T14:25:04.566Z | 2026-07-19T15:49:59.659Z | anthropic | Claude-1 | five_hour | hit 100 with 1.4 h to reset |
+| 13 | peer-exhaustion | 2026-07-19T15:15:05.073Z | 2026-07-19T16:50:00.165Z | anthropic | Claude-2 | five_hour | hit 100 with 1.6 h to reset |
+| 14 | peer-exhaustion | 2026-07-19T16:29:05.469Z | 2026-07-19T20:10:00.261Z | anthropic | Claude-3 | five_hour | hit 100 with 3.7 h to reset |
+| 15 | peer-exhaustion | 2026-07-19T18:21:05.585Z | 2026-07-19T20:50:00.351Z | anthropic | Claude-1 | five_hour | hit 100 with 2.5 h to reset |
+| 16 | peer-exhaustion | 2026-07-19T22:23:06.461Z | 2026-07-20T01:09:59.598Z | anthropic | Claude-3 | five_hour | hit 100 with 2.8 h to reset |
+| 17 | peer-exhaustion | 2026-07-20T19:22:06.633Z | 2026-07-20T21:10:00.250Z | anthropic | Claude-3 | five_hour | hit 100 with 1.8 h to reset |
+| 18 | add | 2026-07-24T13:50:43.342Z | 2026-07-25T13:50:43.342Z | anthropic | Claude-4 | — | created |
+| 19 | peer-exhaustion | 2026-07-24T16:20:53.492Z | 2026-07-25T16:20:53.492Z | codex | Codex-1 | seven_day | hit 100 with 96.7 h to reset |
+| 20 | peer-exhaustion | 2026-07-24T17:16:53.597Z | 2026-07-24T18:49:59.773Z | anthropic | Claude-4 | five_hour | hit 100 with 1.6 h to reset |
+| 21 | peer-exhaustion | 2026-07-24T17:42:54.184Z | 2026-07-25T17:42:54.184Z | anthropic | Claude-2 | seven_day | hit 100 with 81.3 h to reset |
+| 22 | peer-exhaustion | 2026-07-24T19:46:54.680Z | 2026-07-25T19:46:54.680Z | anthropic | Claude-1 | seven_day | hit 100 with 35.2 h to reset |
+| 23 | peer-exhaustion | 2026-07-24T19:48:54.680Z | 2026-07-25T19:48:54.680Z | anthropic | Claude-3 | seven_day | hit 100 with 58.2 h to reset |
+| 24 | peer-exhaustion | 2026-07-26T15:26:25.563Z | 2026-07-26T15:40:00.147Z | anthropic | Claude-4 | five_hour | hit 100 with 0.2 h to reset |
+| 25 | peer-exhaustion | 2026-07-26T19:02:46.831Z | 2026-07-26T20:40:00.262Z | anthropic | Claude-4 | five_hour | hit 100 with 1.6 h to reset |
+| 26 | peer-exhaustion | 2026-07-26T21:16:47.529Z | 2026-07-27T21:16:47.529Z | anthropic | Claude-4 | seven_day | hit 100 with 35.7 h to reset |
+| 27 | peer-exhaustion | 2026-07-27T06:00:48.362Z | 2026-07-28T06:00:48.362Z | anthropic | Claude-3 | seven_day | hit 100 with unknown h to reset |
+| 28 | peer-exhaustion | 2026-07-28T13:42:08.510Z | 2026-07-28T16:59:59.546Z | anthropic | Claude-3 | five_hour | hit 100 with 3.3 h to reset |
+| 29 | gift-reset | 2026-07-28T13:52:08.511Z | 2026-07-29T13:52:08.511Z | anthropic | Claude-1 | five_hour | drop 90 → 13 pp |
+| 30 | peer-exhaustion | 2026-07-28T15:18:09.431Z | 2026-07-28T18:00:00.061Z | anthropic | Claude-2 | five_hour | hit 100 with 2.7 h to reset |
+| 31 | peer-exhaustion | 2026-07-28T19:36:41.291Z | 2026-07-28T21:59:59.677Z | anthropic | Claude-3 | five_hour | hit 100 with 2.4 h to reset |
+| 32 | gift-reset | 2026-07-30T13:58:17.381Z | 2026-07-31T13:58:17.381Z | codex | Codex-1 | seven_day | drop 65 → 56 pp |
+| 33 | gift-reset | 2026-07-30T16:04:17.392Z | 2026-07-31T16:04:17.392Z | codex | Codex-1 | seven_day | drop 65 → 58 pp |
+| 34 | peer-exhaustion | 2026-08-03T18:06:23.413Z | 2026-08-04T03:00:00.308Z | anthropic | Claude-2 | seven_day | hit 100 with 8.9 h to reset |
+| 35 | peer-exhaustion | 2026-08-04T15:44:49.581Z | 2026-08-04T17:00:00.368Z | anthropic | Claude-3 | five_hour | hit 100 with 1.3 h to reset |
+| 36 | peer-exhaustion | 2026-08-04T20:36:50.624Z | 2026-08-05T20:36:50.624Z | codex | Codex-1 | seven_day | hit 100 with 79.0 h to reset |
+| 37 | peer-exhaustion | 2026-08-06T12:49:40.245Z | 2026-08-07T12:49:40.245Z | anthropic | Claude-1 | seven_day | hit 100 with 66.2 h to reset |
+| 38 | peer-exhaustion | 2026-08-07T19:02:42.073Z | 2026-08-08T19:02:42.073Z | anthropic | Claude-2 | seven_day | hit 100 with 80.0 h to reset |
+| 39 | peer-exhaustion | 2026-08-07T19:58:42.079Z | 2026-08-08T19:58:42.079Z | anthropic | Claude-3 | seven_day | hit 100 with 58.0 h to reset |
+| 40 | gift-reset | 2026-08-07T20:52:42.084Z | 2026-08-08T20:52:42.084Z | anthropic | Claude-2 | five_hour | drop 41 → 9 pp |
+| 41 | peer-exhaustion | 2026-08-17T13:17:38.486Z | 2026-08-17T13:50:00.035Z | anthropic | Claude-1 | five_hour | hit 100 with 0.5 h to reset |
+| 42 | peer-exhaustion | 2026-08-17T17:53:47.828Z | 2026-08-17T20:59:59.877Z | anthropic | Claude-3 | five_hour | hit 100 with 3.1 h to reset |
+| 43 | gift-reset | 2026-08-19T15:59:10.008Z | 2026-08-20T15:59:10.008Z | anthropic | Claude-3 | seven_day | drop 81 → 0 pp |
+| 44 | add | 2026-08-21T10:35:02.252Z | 2026-08-22T10:35:02.252Z | anthropic | Claude-5 | — | created |
+| 45 | peer-exhaustion | 2026-08-24T12:12:49.311Z | 2026-08-24T12:59:59.609Z | anthropic | Claude-1 | five_hour | hit 100 with 0.8 h to reset |
+| 46 | gift-reset | 2026-09-01T18:00:44.047Z | 2026-09-02T18:00:44.047Z | anthropic | Claude-3 | seven_day | drop 28 → 0 pp |
+| 47 | gift-reset | 2026-09-01T18:00:44.047Z | 2026-09-02T18:00:44.047Z | anthropic | Claude-1 | seven_day | drop 91 → 1 pp |
+| 48 | peer-exhaustion | 2026-09-02T07:17:12.861Z | 2026-09-02T08:50:00.007Z | anthropic | Claude-1 | five_hour | hit 100 with 1.5 h to reset |
+| 49 | peer-exhaustion | 2026-09-02T16:02:28.745Z | 2026-09-02T18:50:00.497Z | anthropic | Claude-1 | five_hour | hit 100 with 2.8 h to reset |
+| 50 | peer-exhaustion | 2026-09-02T16:06:28.745Z | 2026-09-02T18:49:59.539Z | anthropic | Claude-2 | five_hour | hit 100 with 2.7 h to reset |
+| 51 | peer-exhaustion | 2026-09-02T17:18:29.332Z | 2026-09-02T19:00:00.149Z | anthropic | Claude-5 | five_hour | hit 100 with 1.7 h to reset |
+| 52 | peer-exhaustion | 2026-09-02T18:08:29.337Z | 2026-09-02T18:50:00.166Z | anthropic | Claude-3 | five_hour | hit 100 with 0.7 h to reset |
+| 53 | peer-exhaustion | 2026-09-03T12:37:55.770Z | 2026-09-03T14:50:00.082Z | anthropic | Claude-2 | five_hour | hit 100 with 2.2 h to reset |
+| 54 | add | 2026-09-04T16:07:18.911Z | 2026-09-05T16:07:18.911Z | codex | Codex-2 | — | created |
+| 55 | upgrade | 2026-09-05T07:11:10.649Z | 2026-09-06T07:11:10.649Z | codex | Codex-1 | — | pro/— → prolite/— |
+| 56 | peer-exhaustion | 2026-09-05T13:43:12.377Z | 2026-09-05T18:29:09.000Z | codex | Codex-2 | five_hour | hit 100 with 4.8 h to reset |
+| 57 | upgrade | 2026-09-05T13:57:12.378Z | 2026-09-06T13:57:12.378Z | codex | Codex-2 | — | plus/— → pro/— |
+| 58 | upgrade | 2026-09-05T13:59:12.378Z | 2026-09-06T13:59:12.378Z | codex | Codex-1 | — | prolite/— → pro/— |
+| 59 | peer-exhaustion | 2026-09-05T14:11:12.387Z | 2026-09-05T16:00:00.258Z | anthropic | Claude-1 | five_hour | hit 100 with 1.8 h to reset |
+| 60 | peer-exhaustion | 2026-09-05T15:09:12.393Z | 2026-09-05T16:10:00.260Z | anthropic | Claude-5 | five_hour | hit 100 with 1.0 h to reset |
+| 61 | peer-exhaustion | 2026-09-05T16:01:10.300Z | 2026-09-06T16:01:10.300Z | anthropic | Claude-1 | five_hour | hit 100 with unknown h to reset |
+| 62 | peer-exhaustion | 2026-09-05T18:02:28.976Z | 2026-09-05T21:09:59.968Z | anthropic | Claude-5 | five_hour | hit 100 with 3.1 h to reset |
+| 63 | peer-exhaustion | 2026-09-05T18:12:28.976Z | 2026-09-05T20:50:00.116Z | anthropic | Claude-2 | five_hour | hit 100 with 2.6 h to reset |
+| 64 | peer-exhaustion | 2026-09-05T18:38:28.979Z | 2026-09-05T21:00:00.312Z | anthropic | Claude-3 | five_hour | hit 100 with 2.4 h to reset |
+| 65 | peer-exhaustion | 2026-09-05T19:33:14.876Z | 2026-09-05T20:59:59.734Z | anthropic | Claude-4 | five_hour | hit 100 with 1.4 h to reset |
 
 | tag | events | share of grid instants |
 |---|---:|---:|
@@ -810,7 +811,13 @@ Block bootstrap of `scenario-equal − current`, resampling blocks rather than i
 
 ## Pool calibration (all-out within 14 d)
 
-The pool-level claim, scored against the observed grid. Recall and F1 are NOT stated here: no multi-account class was ever observed all-out, so the positives that would give them a denominator do not exist in this history. What the table can say is how often a predicted pool-out was followed by 14 days with no outage.
+The pool-level claim, scored against the observed grid. What the table can say is how often a predicted pool-out was followed by 14 days with no outage.
+
+- `anthropic`: all-out `2026-07-02T12:00:00.000Z`–`2026-07-02T12:20:00.000Z` (`2` ticks)
+- `codex`: all-out `2026-07-02T14:20:00.000Z`–`2026-07-02T14:30:00.000Z` (`1` ticks)
+- `codex`: all-out `2026-08-04T20:40:00.000Z`–`2026-08-04T22:00:00.000Z` (`8` ticks)
+
+These intervals are the positives behind the `observed out` column; pool-level recall and F1 are not stated here because per-window scores decide the verdict.
 
 Only instants whose full 14-day horizon fits inside the replay interval are calibrated.
 
@@ -877,7 +884,7 @@ is reported beside it and is never the basis.
 
 **Verdict: keep-scenario**
 
-PROVISIONAL: the upgrade cohort has no completed weekly window inside the replay interval, so its weekly half is unlabelled and the verdict rests on five-hour evidence there. Re-run the reproduce command above with a later `--to` once those windows have reset, and re-read the verdict.
+PROVISIONAL: the peer-exhaustion (codex), add (codex), upgrade (codex) cohorts have no completed weekly window inside the replay interval, so their weekly half is unlabelled and the verdict rests on five-hour evidence there. Re-run the reproduce command above with a later `--to` once those windows have reset, and re-read the verdict.
 
 What step 4 does with this:
 
@@ -893,11 +900,11 @@ What step 4 does with this:
 - The headroom share rule is reported, never used as the verdict basis. The verdict basis is the equal split, pre-declared.
 - The scenario double-counts a dead peer's demand while the survivor's own lookback already contains the traffic it absorbed. That is a property of the model, disclosed in the peer-exhaustion cohort rather than corrected here.
 - One servable class dominates the roster, so the overall numbers are close to that class's numbers.
-- Unlabelled at this run: upgrade. No weekly window carrying that tag had completed by the end of the replay interval, so the cohort carries five-hour evidence only and the verdict is provisional.
+- Unlabelled at this run (tag and servable class): peer-exhaustion (codex), add (codex), upgrade (codex). No weekly window of those classes carrying those tags had completed by the end of the replay interval, so the cohort carries five-hour evidence only and the verdict is provisional.
 - Positive counts (all records, per model) — current: 3686 actual positives of 25200 scored; scenario-equal: 5826 actual positives of 42295 scored; scenario-headroom: 5826 actual positives of 42295 scored.
 
 ## Notes
 
 - Placeholder windows skipped: 233.
-- Replay took 11.7 s over 9648 instants; scoring and bootstrap 1.6 s.
+- Replay took 16.1 s over 9648 instants; scoring and bootstrap 2.3 s.
 - Grid step 10 min; rows loaded 8 days either side of the replay interval.
