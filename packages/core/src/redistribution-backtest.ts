@@ -1719,7 +1719,16 @@ export function scoreCohorts(result: ReplayResult): CohortSet {
 			};
 		},
 	);
-	const slopeTrajectory = survivorSlopeTrajectory(peerRecords, "current");
+	// Deliberately the RAW peer-exhaustion records, not `peerRecords`: the
+	// slope is the survivor's own measured burn, and whether the three models
+	// happen to be comparable at an instant — or whether the window's fate was
+	// ever observed — says nothing about it. Filtering first would move the
+	// baseline off the earliest post-death reading the replay actually has.
+	const rawPeerRecords = result.records.filter(
+		(record) =>
+			record.tags.includes("peer-exhaustion") && record.sinceDeathMs != null,
+	);
+	const slopeTrajectory = survivorSlopeTrajectory(rawPeerRecords, "current");
 
 	const classKinds = new Set<string>();
 	for (const record of commonRecords) {
@@ -1783,9 +1792,19 @@ export function scoreCohorts(result: ReplayResult): CohortSet {
 		),
 	];
 
+	// Also the raw records. Churn is a within-model statistic: one model
+	// abstaining, or a censored outcome, removes nothing that is needed to see
+	// whether ANOTHER model's answer moved between two instants. `churnRows`
+	// applies each model's own usability; the tag filter is applied here, on
+	// the same raw records, so the transition cohort loses no valid pair
+	// either.
 	const churn = [
-		...churnRows("Overall", commonRecords, result.stepMinutes),
-		...churnRows("Any transition", transitionRecords, result.stepMinutes),
+		...churnRows("Overall", result.records, result.stepMinutes),
+		...churnRows(
+			"Any transition",
+			result.records.filter((record) => record.tags.length > 0),
+			result.stepMinutes,
+		),
 	];
 
 	return {
@@ -1845,10 +1864,18 @@ const emptyCell = (): SlopeRatioCell => ({
  * The baseline is the EARLIEST post-death instant that has a fitted slope at
  * all, not the literal first instant: a survivor is very often still learning
  * when its peer dies, and requiring a slope there would discard exactly the
- * lifecycles this table exists to describe. Instants with no slope contribute
- * to no bucket. A baseline that is zero or negative is dropped outright — 9/0
- * is not a ratio, and imputing one would invent the absorption being measured.
- * Both facts are stated in the report beside the table.
+ * lifecycles this table exists to describe. An instant before the death is
+ * never the baseline. Instants with no slope contribute to no bucket. A
+ * baseline that is zero or negative is dropped outright — 9/0 is not a ratio,
+ * and imputing one would invent the absorption being measured. Both facts are
+ * stated in the report beside the table.
+ *
+ * `records` is the RAW peer-exhaustion set, not a comparability-filtered one:
+ * the slope is a property of the (account, window, T) reading, so every model's
+ * record at an instant carries the same number and reading ONE model's rows is
+ * both the dedup per (lifecycle, instant) and the whole selection. Restricting
+ * to instants where all models are comparable would silently move the
+ * baseline.
  *
  * Grouped per DEATH, not merely per lifecycle: a weekly window can outlive two
  * peer deaths, and `sinceDeathMs` is measured from the most recent one, so the
@@ -1863,6 +1890,7 @@ export function survivorSlopeTrajectory(
 		if (record.model !== model) continue;
 		if (!record.tags.includes("peer-exhaustion")) continue;
 		if (record.sinceDeathMs == null) continue;
+		if (record.sinceDeathMs < 0) continue;
 		if (record.slopePctPerHour == null) continue;
 		const deathAtMs = record.T - record.sinceDeathMs;
 		const key = `${record.lifecycleId}::${deathAtMs}`;
@@ -1979,17 +2007,20 @@ export interface ChurnRow {
  * resamples blocks with replacement, which destroys the adjacency the statistic
  * is defined on.
  *
- * Pairs separated by more than twice the grid step are NOT paired: a hole in
- * the scored series (a censored stretch, a sampler gap) is not the estimator
- * changing its mind, and counting the jump across it as churn would read as
- * instability that never happened.
+ * Two records are a pair only when they are EXACTLY one grid step apart and
+ * both usable for this model. Nothing bridges a hole: an instant the sampler
+ * skipped, or one this model could not answer, is not the estimator changing
+ * its mind, and counting the jump across it would read as instability that
+ * never happened. Usability is this model's own — another model abstaining, or
+ * an outcome nobody observed, does not make this model's two consecutive
+ * answers unmeasurable, so the caller passes the raw replay records.
  */
 export function churnRows(
 	cohort: string,
 	records: readonly RedistributionRecord[],
 	stepMinutes: number,
 ): ChurnRow[] {
-	const maxGapMs = 2 * stepMinutes * MINUTE_MS;
+	const stepMs = stepMinutes * MINUTE_MS;
 	return REPLAY_MODELS.map((model) => {
 		const byLifecycle = new Map<string, RedistributionRecord[]>();
 		for (const record of records) {
@@ -2012,7 +2043,7 @@ export function churnRows(
 			for (let i = 1; i < sorted.length; i++) {
 				const previous = sorted[i - 1];
 				const current = sorted[i];
-				if (current.T - previous.T > maxGapMs) continue;
+				if (current.T - previous.T !== stepMs) continue;
 				localPairs++;
 				if (previous.predictsExhaust !== current.predictsExhaust) flips++;
 				if (previous.predictedEtaMs != null && current.predictedEtaMs != null) {
@@ -2372,7 +2403,11 @@ function slopeTrajectorySection(rows: readonly SlopeRatioRow[]): string[] {
 	);
 	out.push("");
 	out.push(
-		"Median within a (window lifecycle × death) first, then across them, so a lifecycle that happens to be sampled more often does not outvote one that is not. `t_death+` is the earliest post-death instant that has a fitted slope at all, not the literal first instant: a survivor is often still learning when its peer dies, and requiring a slope there would discard the lifecycles this table is about. Instants with no slope enter no bucket, and a lifecycle whose baseline slope is zero is dropped rather than imputed.",
+		"Median within a (window lifecycle × death) first, then across them, so a lifecycle that happens to be sampled more often does not outvote one that is not. `t_death+` is the earliest instant at or after the death that has a fitted slope at all, not the literal first instant: a survivor is often still learning when its peer dies, and requiring a slope there would discard the lifecycles this table is about. Instants with no slope enter no bucket, and a lifecycle whose baseline slope is zero is dropped rather than imputed.",
+	);
+	out.push("");
+	out.push(
+		"Unlike the scored buckets above, this table reads every peer-exhaustion instant of the replay, not only the ones where all three models are comparable and the window's fate was observed. The slope belongs to the survivor's own reading, so a model abstaining or an unobserved outcome is no reason to move the baseline off the earliest post-death reading there is.",
 	);
 	out.push("");
 	out.push(
@@ -2562,11 +2597,15 @@ export function formatRedistributionReport(
 	out.push("## Prediction churn");
 	out.push("");
 	out.push(
-		'How much each model\'s answer MOVES between one instant and the next, over consecutive usable instants of the same window lifecycle. Accuracy says nothing about stability: an estimator that alternates between "out in 40 minutes" and "not this cycle" every grid step is unusable at any F1.',
+		'How much each model\'s answer MOVES between one instant and the next, over adjacent usable instants of the same window lifecycle. Accuracy says nothing about stability: an estimator that alternates between "out in 40 minutes" and "not this cycle" every grid step is unusable at any F1.',
 	);
 	out.push("");
 	out.push(
-		"Lifecycle-balanced the same way the score tables are: the median (and p90) is taken WITHIN a lifecycle first, then across lifecycles. `flip rate` is the fraction of consecutive pairs where the yes/no verdict changed. Pairs more than two grid steps apart are not paired, so a hole in the scored series does not read as churn.",
+		"Lifecycle-balanced the same way the score tables are: the median (and p90) is taken WITHIN a lifecycle first, then across lifecycles. `flip rate` is the fraction of adjacent pairs where the yes/no verdict changed. A pair is two instants EXACTLY one grid step apart, both usable for that model: nothing bridges a skipped instant or one the model could not answer, so a hole in the series does not read as churn.",
+	);
+	out.push("");
+	out.push(
+		"Each model is measured on its OWN usable instants, over every replay record rather than the common cohort the score tables use: another model abstaining, or an outcome nobody observed, does not make a model's two consecutive answers unmeasurable. The three rows of a cohort are therefore each an honest statement about one model, and not a like-for-like comparison the way the scores are.",
 	);
 	out.push("");
 	out.push(

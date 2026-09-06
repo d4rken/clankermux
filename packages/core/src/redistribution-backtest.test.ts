@@ -1848,6 +1848,23 @@ describe("survivorSlopeTrajectory", () => {
 		).toBeCloseTo(1, 9);
 	});
 
+	test("never baselines on an instant BEFORE the death", () => {
+		// The bucket index already rejects a negative age; the baseline has to
+		// reject it too, or a pre-death reading sets the scale for every ratio
+		// measured after it.
+		const rows = survivorSlopeTrajectory(
+			peerTriple({
+				accountId: "A",
+				windowKind: "five_hour",
+				sinceDeathMinutes: [-30, 5, 70],
+				slopes: [1, 10, 20],
+			}),
+		);
+		expect(
+			rows.find((row) => row.label === "1-2h")?.cells.combined.medianRatio,
+		).toBeCloseTo(2, 9);
+	});
+
 	test("only the named model's records are read", () => {
 		const records = peerTriple({
 			accountId: "A",
@@ -1937,13 +1954,15 @@ describe("churnRows", () => {
 		expect(rows[0].medianEtaChangeMinutes).toBeNull();
 	});
 
-	test("does not pair across a gap in the grid, or across lifecycles", () => {
+	test("pairs only instants exactly one grid step apart, never across lifecycles", () => {
 		const step = 10;
 		const records: RedistributionRecord[] = [];
 		for (const [lifecycle, offsets] of [
 			["A::seven_day::0", [0, 10]],
-			// A three-step hole: the pair straddling it is not churn.
-			["A::seven_day::1", [0, 30]],
+			// A two-step hole: the pair straddling it is not churn.
+			["A::seven_day::1", [0, 20]],
+			// A three-step hole, likewise.
+			["A::seven_day::2", [0, 30]],
 		] as const) {
 			for (const offset of offsets) {
 				for (const model of [
@@ -1968,7 +1987,7 @@ describe("churnRows", () => {
 		expect(rows[0].lifecycles).toBe(1);
 	});
 
-	test("pairs consecutive USABLE instants across a single unusable one", () => {
+	test("never bridges an unusable instant", () => {
 		const step = 10;
 		const records: RedistributionRecord[] = [];
 		[true, false, true].forEach((usable, index) => {
@@ -1992,20 +2011,46 @@ describe("churnRows", () => {
 				);
 			}
 		});
-		// The statistic is defined on consecutive USABLE instants, so the middle
-		// instant being unusable does not break the pair: 20 min apart on a
-		// 10 min step is inside the two-step tolerance.
-		const rows = churnRows("Overall", records, step);
-		expect(rows[0].pairs).toBe(1);
-		expect(rows[0].medianFlipRate).toBeCloseTo(0, 9);
-		// Two unusable instants in a row would exceed the tolerance.
-		const wider = records.filter(
-			(entry) => entry.T !== T0 + step * MIN || entry.usable,
-		);
-		for (const entry of wider) {
-			if (entry.T === T0 + 2 * step * MIN) entry.T = T0 + 3 * step * MIN;
+		// The statistic is defined on ADJACENT usable instants. An instant the
+		// model could not answer leaves its neighbours two grid steps apart,
+		// which is a hole in the series and not the estimator changing its mind.
+		expect(churnRows("Overall", records, step)[0].pairs).toBe(0);
+		// Fill the hole and both pairs appear.
+		for (const entry of records) entry.usable = true;
+		expect(churnRows("Overall", records, step)[0].pairs).toBe(2);
+	});
+
+	test("does not manufacture a flip across a skipped grid instant", () => {
+		// Minutes 0 and 20 on a 10-minute grid, with opposite verdicts. Pairing
+		// them reports a 100 % flip rate for a change no operator ever saw.
+		const step = 10;
+		const records: RedistributionRecord[] = [];
+		for (const [offset, predicts] of [
+			[0, true],
+			[20, false],
+		] as const) {
+			const T = T0 + offset * MIN;
+			for (const model of [
+				"current",
+				"scenario-equal",
+				"scenario-headroom",
+			] as const) {
+				records.push(
+					record({
+						model,
+						accountId: "A",
+						T,
+						lifecycleId: "A::seven_day::0",
+						predictsExhaust: predicts,
+						predictedEtaMs: predicts ? T + DAY : null,
+					}),
+				);
+			}
 		}
-		expect(churnRows("Overall", wider, step)[0].pairs).toBe(0);
+		const rows = churnRows("Overall", records, step);
+		expect(rows[0].pairs).toBe(0);
+		expect(rows[0].lifecycles).toBe(0);
+		expect(rows[0].medianFlipRate).toBeNull();
 	});
 });
 
@@ -2034,6 +2079,78 @@ describe("scoreCohorts churn and slope trajectory", () => {
 		expect(
 			cohorts.slopeTrajectory.some((row) => row.cells.combined.lifecycles > 0),
 		).toBe(true);
+	});
+
+	test("baselines the slope on the earliest post-death instant the replay saw, not the earliest COMPARABLE one", () => {
+		// Slopes 4, 8, 8 at 10, 40 and 70 minutes after the death, with one
+		// scenario model unable to answer at minute 10. Which instants are
+		// SCORED depends on all three models agreeing to answer; where the
+		// survivor's own slope is measured from does not.
+		const records = peerTriple({
+			accountId: "A",
+			windowKind: "five_hour",
+			sinceDeathMinutes: [10, 40, 70],
+			slopes: [4, 8, 8],
+			deathAtMs: T0,
+		});
+		for (const entry of records) {
+			if (entry.model !== "scenario-headroom") continue;
+			if (entry.sinceDeathMs !== 10 * MIN) continue;
+			entry.usable = false;
+			entry.unusableReason = "insufficient_data";
+			entry.predictsExhaust = false;
+			entry.predictedEtaMs = null;
+		}
+		const cohorts = scoreCohorts(replayOf(records));
+		const cell = (label: string) =>
+			cohorts.slopeTrajectory.find((row) => row.label === label)?.cells
+				.combined;
+		expect(cell("0-30m")?.lifecycles).toBe(1);
+		expect(cell("0-30m")?.medianRatio).toBeCloseTo(1, 9);
+		expect(cell("30-60m")?.medianRatio).toBeCloseTo(2, 9);
+		expect(cell("1-2h")?.medianRatio).toBeCloseTo(2, 9);
+		// The SCORED bucket still honours the common cohort: minute 10 is not
+		// comparable across models, so nothing is scored there.
+		expect(cohorts.peerExhaustionBySinceDeath[0].buckets[0].records).toBe(0);
+	});
+
+	test("measures each model's churn on its OWN usable instants", () => {
+		// `scenario-headroom` abstaining empties the common cohort; the other
+		// two models' consecutive predictions are still perfectly measurable,
+		// and their stability is not a claim about the third model.
+		const records = triple("A", [T0, T0 + 10 * MIN, T0 + 20 * MIN]);
+		for (const entry of records) {
+			if (entry.model !== "scenario-headroom") continue;
+			entry.usable = false;
+			entry.unusableReason = "insufficient_data";
+			entry.predictsExhaust = false;
+			entry.predictedEtaMs = null;
+		}
+		const cohorts = scoreCohorts(replayOf(records));
+		expect(cohorts.common).toHaveLength(0);
+		const overall = new Map(
+			cohorts.churn
+				.filter((row) => row.cohort === "Overall")
+				.map((row) => [row.model, row]),
+		);
+		expect(overall.get("current")?.pairs).toBe(2);
+		expect(overall.get("scenario-equal")?.pairs).toBe(2);
+		// The model that could not answer has no pairs of its own, which is the
+		// honest answer for it and no reason to erase the other two.
+		expect(overall.get("scenario-headroom")?.pairs).toBe(0);
+	});
+
+	test("keeps a censored outcome out of the scores but inside the churn cohort", () => {
+		// Truth censoring says the window's fate was never observed. It cannot
+		// say the estimator was unstable, so it must not silence the churn row.
+		const records = triple("A", [T0, T0 + 10 * MIN, T0 + 20 * MIN]);
+		for (const entry of records) entry.outcome = { kind: "censored" };
+		const cohorts = scoreCohorts(replayOf(records));
+		expect(cohorts.common).toHaveLength(0);
+		const current = cohorts.churn.find(
+			(row) => row.cohort === "Overall" && row.model === "current",
+		);
+		expect(current?.pairs).toBe(2);
 	});
 });
 
