@@ -85,10 +85,14 @@ over that lag, taking it per estimator path from the same anchor the current
 model uses (the fit's own last point on the regression path, the observation
 instant on the observation-anchored lifetime path), so on a lone account the
 window that exhausts FIRST lands on the current model's ETA for it. A later
-window of the same account does not: it carries the span the account spends
-dead after the first one fills, which is the scenario's own semantics rather
-than the redistribution. Fill demand, the share rule and the overlap treatment
-are untouched.
+window of the same account can drift from it, but only where that first
+exhaustion falls after the replayed instant: it then suspends the later
+window's burn while that window is still projecting, and the later ETA carries
+the span the account spends dead, which is the scenario's own semantics rather
+than the redistribution. A later window that itself fills inside its own lag
+still agrees, because its death is applied at the replayed instant alongside
+the first one and leaves no dead span between them. Fill demand, the share rule
+and the overlap treatment are untouched.
 
 The backtest scores the corrected scan against a control that is the same equal
 split with the advance switched off (`scenario-equal-original`), under a rule

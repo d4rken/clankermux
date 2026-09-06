@@ -3376,7 +3376,7 @@ function observationLagSection(checks: ObservationLagChecks): string[] {
 	);
 	out.push("");
 	out.push(
-		"A record whose class lost another window inside ITS lag is excluded as well, even on a lone account: the correction fills that window and applies the death at the instant, so the account is idle until that window's reset and the projection carries a dead span the current model does not model at all. Agreement is not the expectation there, so counting it would score the correction against a claim it never made.",
+		"One more exclusion, even on a lone account: a record whose OWN corrected exhaustion is still ahead of the instant while another window of its class filled inside ITS lag. The correction applies that peer's death at the instant, so the account is idle until that window's reset and this projection carries a dead span the current model does not model at all. Agreement is not the expectation there, so counting it would score the correction against a claim it never made. A record whose own exhaustion the correction moved to the instant is not excluded by this: its death lands there with no dead span ahead of it, and it is held to the expectation like any other.",
 	);
 	out.push("");
 	out.push("| estimator path | n | within 1 s of the current model |");
@@ -3514,7 +3514,7 @@ export function formatRedistributionReport(
 		"- Sign convention: signed ETA error is `predicted − observed`, so POSITIVE is predicted-later-than-observed, i.e. OPTIMISTIC.",
 	);
 	out.push(
-		"- Observation lag: `scenario-equal` and `scenario-headroom` advance each reading over the gap between the instant its estimator measured to and the instant being replayed, at the share slope the first assignment gives it. The lag is taken from the fit's own last point on the regression path and from the observation instant on the observation-anchored lifetime path, so on a lone account the scenario ETA of the window that exhausts FIRST is the current model's ETA for it. A later window of the same account is not: it additionally carries the span the account spends dead after the first window fills, which is the scenario's own semantics rather than the redistribution. `scenario-equal-original` is the same equal split with that advance switched off, and is the control the mechanism checks below are measured against.",
+		"- Observation lag: `scenario-equal` and `scenario-headroom` advance each reading over the gap between the instant its estimator measured to and the instant being replayed, at the share slope the first assignment gives it. The lag is taken from the fit's own last point on the regression path and from the observation instant on the observation-anchored lifetime path, so on a lone account the scenario ETA of the window that exhausts FIRST is the current model's ETA for it. A later window of the same account can differ, but only where that first exhaustion falls AFTER the replayed instant: it then suspends the later window's burn while that window is still projecting, and the later ETA carries the span the account spends dead, which is the scenario's own semantics rather than the redistribution. A later window that itself fills inside its own lag still agrees, because its death is applied at the replayed instant alongside the first one and leaves no dead span between them. `scenario-equal-original` is the same equal split with that advance switched off, and is the control the mechanism checks below are measured against.",
 	);
 	out.push("");
 	out.push("Verdict rule, declared before the run:");
