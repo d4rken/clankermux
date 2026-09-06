@@ -83,16 +83,17 @@ observation instant precedes the sample instant. Five-hour windows after a peer
 death in the replay ran 0-5 minutes late. The scan now advances each reading
 over that lag, taking it per estimator path from the same anchor the current
 model uses (the fit's own last point on the regression path, the observation
-instant on the observation-anchored lifetime path), so on a lone account the
-window that exhausts FIRST lands on the current model's ETA for it. A later
-window of the same account can drift from it, but only where that first
-exhaustion falls after the replayed instant: it then suspends the later
-window's burn while that window is still projecting, and the later ETA carries
-the span the account spends dead, which is the scenario's own semantics rather
-than the redistribution. A later window that itself fills inside its own lag
-still agrees, because its death is applied at the replayed instant alongside
-the first one and leaves no dead span between them. Fill demand, the share rule
-and the overlap treatment are untouched.
+instant on the observation-anchored lifetime path), so on a lone account,
+wherever that anchor was recoverable and sits behind the replayed instant, the
+window is projected from the anchor the current model projects it from. An
+anchor AHEAD of the replayed instant clamps to zero lag while the current model
+keeps anchoring its own ETA to that future instant, so those two dates stand
+apart by that gap. A window of a lone account can also land elsewhere
+whenever another window of the class exhausts while this one is still
+projecting, including a death the correction applies AT the replayed instant:
+that suspends the account's burn, and the ETA then carries the span it spends
+dead, which is the scenario's own semantics rather than the redistribution.
+Fill demand, the share rule and the overlap treatment are untouched.
 
 The backtest scores the corrected scan against a control that is the same equal
 split with the advance switched off (`scenario-equal-original`), under a rule
@@ -103,11 +104,13 @@ beside D and not judged: the correction can change the order of a class's
 events, and with it which windows get a dated exhaustion before their reset at
 all, in either direction. Beside the verdict the report carries a mechanism
 section that states what the correction did rather than what it scored:
-observation-age cohorts, an identity check where no pooled window of a class
-carries a lag, the shift each ETA moved (exact where one slope governs the
-projection in both scans, descriptive where it does not), a direct parity check
-against the current model on lone accounts, a fixed paired-ETA subset, and the
-lag population per estimator path.
+observation-age cohorts, an identity check over the class-instants where no
+pooled window carries a lag, the shift each ETA moved (split on whether one
+slope governs the projection in both scans), a direct parity check against the
+current model on lone accounts, a fixed paired-ETA subset, and the lag
+population per estimator path. Each check states what it measures and over
+which records, and leaves reading the number against that mechanism to the
+reader.
 
 Codex ranked the follow-ups behind this one: measure the first-100 % fill
 directly, and derive the ledger shares from the history BEFORE each instant
