@@ -19,6 +19,7 @@ import {
 	type RunwayAccountInput,
 	type RunwayResetCreditBank,
 	type RunwayWindowInput,
+	type WindowExhaustion,
 	weeklyTimeToFull,
 } from "./capacity-runway";
 import { TIME_CONSTANTS } from "./constants";
@@ -67,11 +68,21 @@ export type {
  *     until every pooled account is dead at once, the horizon ends, or the
  *     event budget runs out.
  *
- * Readings are taken AT `now` with no observation-lag advance: from `now` on it
- * is the shared class slope that governs the window, not the account's own
- * measured one, so advancing the reading to `now` by its own slope first would
- * apply a pace this model does not believe in for the interval it is correcting
- * for.
+ * Readings are ADVANCED over their observation lag before the walk starts. A
+ * reading is a statement about the instant its estimator measured to — the
+ * fit's last point on the regression path, the observation instant on the
+ * observation-anchored lifetime path — and that instant can sit minutes behind
+ * `now`. The window burned through those minutes, so the scan advances it by
+ * the share slope the first assignment gives it, at pace 1: the lag interval is
+ * the PAST, and a pace probe must not re-burn the past at its probe pace. A
+ * window that fills inside its lag is an exhaustion AT `now` carrying its true,
+ * sub-`now` instant in {@link RunwayScenarioBasis.projectedExhaustions}.
+ *
+ * The scan clock never rewinds below `now`: the redistribution such a death
+ * causes starts at `now` rather than at the instant the window actually
+ * filled. Deliberate, and the reason the correction is a single step rather
+ * than a replay of the lag interval — see
+ * {@link RunwayScenarioOptions.observationLag}.
  *
  * Demand is conserved WITHIN a class and never moved across classes: a Codex
  * account cannot serve an Anthropic request, so a dead Anthropic account's
@@ -163,6 +174,16 @@ export interface RunwayScenarioOptions {
 	probePaceMargin?: boolean;
 	/** Default {@link MAX_SCENARIO_EVENTS}. A test seam for the budget branches. */
 	maxEvents?: number;
+	/**
+	 * Whether readings are advanced over their observation lag (see the module
+	 * doc). Default `"advance"`.
+	 *
+	 * `"ignore"` reproduces the pre-correction scan, which schedules every
+	 * window from `now` however old its reading is. It exists for the
+	 * redistribution backtest's comparison model and for the tests that pin the
+	 * difference; production callers never set it.
+	 */
+	observationLag?: "advance" | "ignore";
 }
 
 /** A window as the scan carries it, mutated in place across the walk. */
@@ -189,6 +210,18 @@ interface ScanWindow {
 	 * so only those reach {@link RunwayScenarioBasis.projectedExhaustions}.
 	 */
 	firstCycle: boolean;
+	/**
+	 * Observation lag still to consume, in ms; `0` once the first assignment at
+	 * `now` has advanced the window over it (or decided there was nothing to
+	 * advance). See {@link observationLagMs}.
+	 */
+	lagMs: number;
+	/**
+	 * The true, sub-`now` instant at which the lag advance drove this window to
+	 * 100 %, until the candidate pass has turned it into an event. `null`
+	 * whenever no such death is pending.
+	 */
+	lagExhaustAtMs: number | null;
 }
 
 /** What the setup derived for one window, before any scan state exists. */
@@ -208,6 +241,8 @@ interface PreparedWindow {
 	 * measured flat slope) and marks the kind measured; `null` does not.
 	 */
 	contribution: number | null;
+	/** How far behind `now` this reading's estimator measured — see {@link observationLagMs}. */
+	lagMs: number;
 }
 
 type PreparedStatus =
@@ -259,6 +294,17 @@ interface ScanEvent {
 	account: ScanAccount;
 	window: ScanWindow;
 	credit?: { expiresAtMs: number | null };
+	/**
+	 * An exhaustion the lag advance produced. Its `atMs` is `now` — the clock
+	 * never rewinds — which is why it is the one event kind admitted AT the
+	 * current instant rather than strictly after it.
+	 */
+	lagOrigin?: boolean;
+	/**
+	 * The instant the window actually reached 100 %, when that is not `atMs`.
+	 * Only a lag-origin event carries one, and it is always at or before `now`.
+	 */
+	exhaustsAtMs?: number;
 }
 
 type ScanResult =
@@ -286,7 +332,12 @@ interface HitSnapshot {
 
 /** What only the pace-1 scan may report. */
 interface BaselineCapture {
-	/** `w_j/Σw` at each account's FIRST alive assignment. */
+	/**
+	 * `w_j/Σw` at each account's FIRST alive assignment — except at `now`, where
+	 * the LAST assignment wins: a share captured before a lag death is
+	 * provisional, and the re-split that death forces is the one the account
+	 * actually starts on.
+	 */
 	shares: Map<string, number>;
 	assumedCredits: RunwayAssumedCredits[];
 	/**
@@ -358,6 +409,7 @@ export function computeCapacityRunwayScenario(
 	const shareRule = options?.shareRule ?? equalShareRule;
 	const capacityUnitsOf = options?.capacityUnits ?? tierCapacityUnits;
 	const maxEvents = options?.maxEvents ?? MAX_SCENARIO_EVENTS;
+	const observationLag = options?.observationLag ?? "advance";
 
 	// ── Setup ────────────────────────────────────────────────────────────────
 	// Per account: capacity, window classification, and the burn each window
@@ -414,7 +466,13 @@ export function computeCapacityRunwayScenario(
 
 		const windows: PreparedWindow[] = [];
 		for (const window of account.windows) {
-			const preparedWindow = prepareWindow(window, units, now, horizonEndMs);
+			const preparedWindow = prepareWindow(
+				window,
+				units,
+				now,
+				horizonEndMs,
+				observationLag,
+			);
 			if (preparedWindow === null) continue;
 			windows.push(preparedWindow);
 			if (preparedWindow.contribution !== null) {
@@ -582,6 +640,8 @@ export function computeCapacityRunwayScenario(
 				inactive: window.inactive,
 				slope: 0,
 				firstCycle: true,
+				lagMs: window.lagMs,
+				lagExhaustAtMs: null,
 			})),
 			credits: account.bank === null ? [] : sortedCredits(account.bank),
 			onWeeklyLimitEnabled: account.bank?.onWeeklyLimitEnabled ?? false,
@@ -720,7 +780,15 @@ export function computeCapacityRunwayScenario(
 				}
 				candidates.forEach((account, index) => {
 					const share = total > 0 ? weights[index] / total : 0;
-					if (capture !== null && !capture.shares.has(account.accountId)) {
+					// At `now` the LAST assignment stands: a lag death re-splits the
+					// class, and the share an account starts on is the one it holds
+					// once every lag has been consumed. After `now` the first
+					// assignment stands, so a revived account still reports the share
+					// it woke up to.
+					if (
+						capture !== null &&
+						(t === now || !capture.shares.has(account.accountId))
+					) {
 						capture.shares.set(account.accountId, share);
 					}
 					for (const window of account.windows) {
@@ -737,6 +805,26 @@ export function computeCapacityRunwayScenario(
 							window.resetsAtMs =
 								window.durationMs === null ? null : t + window.durationMs;
 						}
+						if (t === now && window.lagMs > 0) {
+							// The lag interval already happened, and it happened at pace 1:
+							// a probe advances the reading exactly as the baseline does,
+							// so no probed multiplier re-burns the past.
+							const lagSlope = window.slope / pace;
+							const advancePct =
+								lagSlope > 0 ? (lagSlope * window.lagMs) / HOUR_MS : 0;
+							if (advancePct > 0 && window.pct + advancePct >= 100) {
+								// Filled inside the lag. The reading stands for the event —
+								// the exhaust handler is what applies the death — and the
+								// window carries the instant it actually reached 100 %.
+								window.lagExhaustAtMs =
+									now -
+									window.lagMs +
+									((100 - window.pct) / lagSlope) * HOUR_MS;
+							} else {
+								window.pct += advancePct;
+							}
+							window.lagMs = 0;
+						}
 					}
 				});
 			}
@@ -744,12 +832,27 @@ export function computeCapacityRunwayScenario(
 			// Candidate events, strictly ahead of the clock and inside the horizon.
 			const candidates: ScanEvent[] = [];
 			const push = (event: ScanEvent): void => {
-				if (event.atMs > t && event.atMs < horizonEndMs) candidates.push(event);
+				// Strictly ahead of the clock, except for a lag-origin exhaustion:
+				// that one happened BEFORE `now` and is reported at `now`, so
+				// requiring it to be later would drop it entirely.
+				const reached =
+					event.lagOrigin === true ? event.atMs >= t : event.atMs > t;
+				if (reached && event.atMs < horizonEndMs) candidates.push(event);
 			};
 			for (const account of state) {
 				const accountAlive = isAlive(account);
 				for (const window of account.windows) {
-					if (accountAlive && window.slope > 0 && window.pct < 100) {
+					if (accountAlive && window.lagExhaustAtMs !== null) {
+						push({
+							kind: "exhaust",
+							atMs: t,
+							account,
+							window,
+							lagOrigin: true,
+							exhaustsAtMs: window.lagExhaustAtMs,
+						});
+						window.lagExhaustAtMs = null;
+					} else if (accountAlive && window.slope > 0 && window.pct < 100) {
 						push({
 							kind: "exhaust",
 							atMs: t + ((100 - window.pct) / window.slope) * HOUR_MS,
@@ -875,7 +978,9 @@ export function computeCapacityRunwayScenario(
 					capture.exhaustions.set(key, {
 						accountId: event.account.accountId,
 						windowKind: window.kind,
-						exhaustsAtMs: event.atMs,
+						// A lag-origin event is applied at `now` but happened earlier,
+						// and the projection states when the window actually filled.
+						exhaustsAtMs: event.exhaustsAtMs ?? event.atMs,
 					});
 				}
 				if (
@@ -1029,6 +1134,7 @@ function prepareWindow(
 	capacityUnits: number,
 	now: number,
 	horizonEndMs: number,
+	observationLag: "advance" | "ignore",
 ): PreparedWindow | null {
 	const estimate = estimateWindowExhaustion(
 		{
@@ -1080,6 +1186,7 @@ function prepareWindow(
 			inactive: false,
 			learning: false,
 			contribution,
+			lagMs: 0,
 		};
 	}
 
@@ -1103,6 +1210,7 @@ function prepareWindow(
 			inactive: true,
 			learning: true,
 			contribution: null,
+			lagMs: 0,
 		};
 	}
 
@@ -1123,5 +1231,57 @@ function prepareWindow(
 		contribution: learning
 			? null
 			: (estimate.slopePctPerHour ?? 0) * capacityUnits,
+		// A learning window carries its lag like any other: it has no slope of
+		// its own, but it burned the share it was assigned through the interval
+		// the reading does not cover.
+		lagMs:
+			observationLag === "advance"
+				? observationLagMs(estimate, window, now)
+				: 0,
 	};
+}
+
+/**
+ * How far behind `now` the estimator that produced `estimate` measured, in ms.
+ *
+ * Derived PER ESTIMATOR PATH from the same anchor the current model uses for
+ * that window, so a lone account's advanced reading reaches exactly the
+ * current model's ETA and every remaining difference between the two models is
+ * the redistribution itself:
+ *
+ *  - `regression`: the fit's own anchor, back-solved from the ETA it states
+ *    (`anchor = etaExhaustMs − ((100 − pct) / slope) · 1 h`, exact because the
+ *    fit's newest sample IS this reading). Available even when the reading
+ *    carries no observation instant, which most persisted snapshots do not. A
+ *    fit with no ETA (a non-positive slope) has nothing to advance.
+ *  - `lifetime-primary`: the observation instant, which is what that path
+ *    anchors its ETA to.
+ *  - every other source — `lifetime-average` (now-anchored), plus
+ *    `already-exhausted`, `no-usage`, `unstarted` and `none`, which measure no
+ *    burn — carries no lag.
+ *
+ * An anchor ahead of `now` clamps to `0`: a reading from the future is a clock
+ * problem, and rewinding a window would invent burn that has not happened.
+ */
+export function observationLagMs(
+	estimate: WindowExhaustion,
+	window: RunwayWindowInput,
+	now: number,
+): number {
+	if (estimate.source === "regression") {
+		const slope = estimate.slopePctPerHour;
+		const exhaustsAtMs = estimate.exhaustsAtMs;
+		if (exhaustsAtMs === null || slope === null || slope <= 0) return 0;
+		const pct = window.utilizationPct;
+		if (!Number.isFinite(pct)) return 0;
+		const anchorMs = exhaustsAtMs - ((100 - pct) / slope) * HOUR_MS;
+		if (!Number.isFinite(anchorMs)) return 0;
+		return Math.max(0, now - anchorMs);
+	}
+	if (estimate.source === "lifetime-primary") {
+		const observedAtMs = finiteOrNull(window.observedAtMs);
+		if (observedAtMs === null) return 0;
+		return Math.max(0, now - observedAtMs);
+	}
+	return 0;
 }
