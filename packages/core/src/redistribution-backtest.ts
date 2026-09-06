@@ -1144,8 +1144,8 @@ export function replayInstant(
 				const currentUsable =
 					!learningAtT && estimate != null && estimate.source !== "none";
 				// A beyond-reset ETA is "not this cycle", which is the same statement
-				// as the scenario's absent projection: both models are held to what
-				// they can express about the window in front of them.
+				// as a scenario's absent projection: every model is held to what it
+				// can express about the window in front of it.
 				const predictsExhaust =
 					currentUsable &&
 					estimate?.exhaustsAtMs != null &&
@@ -1945,8 +1945,8 @@ export function scoreCohorts(result: ReplayResult): CohortSet {
 		},
 	);
 	// Deliberately the RAW peer-exhaustion records, not `peerRecords`: the
-	// slope is the survivor's own measured burn, and whether the three models
-	// happen to be comparable at an instant — or whether the window's fate was
+	// slope is the survivor's own measured burn, and whether every model
+	// happens to be comparable at an instant — or whether the window's fate was
 	// ever observed — says nothing about it. Filtering first would move the
 	// baseline off the earliest post-death reading the replay actually has.
 	const rawPeerRecords = result.records.filter(
@@ -3319,7 +3319,7 @@ export function formatRedistributionReport(
 		"- Burn anchors are reconstructed from the revision drops observed up to the instant, and never from later ones. Tiers come from the row's own `plan_tier`/`rate_limit_tier` when it has them (`recorded`), else from today's account row (`assumed`).",
 	);
 	out.push(
-		"- No reset-credit bank is modelled: the credit ledger is not reconstructible per instant, so both models run without it.",
+		"- No reset-credit bank is modelled: the credit ledger is not reconstructible per instant, so every model runs without it.",
 	);
 	out.push(
 		"- Truth is PER WINDOW, from the same `deriveOutcome` the per-window backtests use: exhausted at the first observed 100 %, survived only on positive evidence, censored otherwise. Placeholder windows (codex's one-sample 5 h artefacts) are skipped.",
@@ -3618,9 +3618,9 @@ export function knownLimitsFor(
 		"A reading whose row carries no `observed_at` and whose estimator is the now-anchored lifetime average has no derivable lag and is advanced by nothing. That is a real absence, not a measured zero, and the mechanism section reports those records under `unknown` rather than folding them into the fresh bucket.",
 	];
 
-	// Measured, never assumed: one model's records only, because the three
-	// models score the SAME windows and counting all of them would just triple
-	// every class.
+	// Measured, never assumed: one model's records only, because every model
+	// scores the SAME windows and counting all of them would just multiply
+	// every class by `REPLAY_MODELS.length`.
 	const classRecords = new Map<string, number>();
 	let classTotal = 0;
 	for (const record of cohorts.common) {
