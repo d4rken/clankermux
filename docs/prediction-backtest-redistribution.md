@@ -1,6 +1,6 @@
 # ClankerMux runway redistribution backtest
 
-Generated: 2026-09-06T16:49:10.496Z
+Generated: 2026-09-06T17:18:29.927Z
 
 Reproduce with:
 
@@ -20,11 +20,11 @@ bun scripts/redistribution-backtest.ts --db=/home/darken/.config/clankermux/clan
 
 | field | value |
 |---|---|
-| usage_snapshots rows | 193043 |
+| usage_snapshots rows | 193135 |
 | accounts | 7 |
 | providers | anthropic, codex |
 | first sample | 2026-06-02T12:48:00.294Z |
-| last sample | 2026-09-06T16:47:37.430Z |
+| last sample | 2026-09-06T17:17:37.736Z |
 | replay interval | `[2026-07-01T00:00:00.000Z, 2026-09-06T00:00:00.000Z)` |
 | grid instants | 9648 |
 
@@ -1542,18 +1542,20 @@ Paired median signed error (n=2; positive = optimistic): scenario-equal -82.2 mi
 
 The survivor's OWN fitted burn slope, expressed against its slope just after the peer died: `slope(t) / slope(t_death+)`. Above 1 means the inherited traffic has already entered the survivor's lookback, which is exactly the demand the scenario then adds a second time; near 1 means it has not arrived yet.
 
-Median within a (window lifecycle × death) first, then across them, so a lifecycle that happens to be sampled more often does not outvote one that is not. `t_death+` is the earliest post-death instant that has a fitted slope at all, not the literal first instant: a survivor is often still learning when its peer dies, and requiring a slope there would discard the lifecycles this table is about. Instants with no slope enter no bucket, and a lifecycle whose baseline slope is zero is dropped rather than imputed.
+Median within a (window lifecycle × death) first, then across them, so a lifecycle that happens to be sampled more often does not outvote one that is not. `t_death+` is the earliest instant at or after the death that has a fitted slope at all, not the literal first instant: a survivor is often still learning when its peer dies, and requiring a slope there would discard the lifecycles this table is about. Instants with no slope enter no bucket, and a lifecycle whose baseline slope is zero is dropped rather than imputed.
+
+Unlike the scored buckets above, this table reads every peer-exhaustion instant of the replay, not only the ones where all three models are comparable and the window's fate was observed. The slope belongs to the survivor's own reading, so a model abstaining or an unobserved outcome is no reason to move the baseline off the earliest post-death reading there is.
 
 | since death | lifecycles | median ratio | median slope (pct/h) | five_hour n | five_hour ratio | seven_day n | seven_day ratio |
 |---|---:|---:|---:|---:|---:|---:|---:|
-| 0-30m | 119 | 1.000 | 2.00 | 70 | 1.000 | 49 | 0.999 |
-| 30-60m | 103 | 1.004 | 3.18 | 62 | 1.093 | 41 | 0.998 |
-| 1-2h | 89 | 1.005 | 2.65 | 52 | 1.000 | 37 | 1.011 |
-| 2-3h | 50 | 0.986 | 2.28 | 28 | 0.742 | 22 | 0.989 |
-| 3-4h | 19 | 0.959 | 1.61 | 10 | 0.405 | 9 | 0.979 |
-| 4-6h | 18 | 0.885 | 1.40 | 10 | 0.633 | 8 | 0.954 |
-| 6-12h | 21 | 0.924 | 1.45 | 12 | 0.907 | 9 | 0.924 |
-| 12-24h | 24 | 1.070 | 2.17 | 16 | 1.483 | 8 | 0.977 |
+| 0-30m | 130 | 1.000 | 1.84 | 70 | 1.002 | 60 | 0.999 |
+| 30-60m | 112 | 1.003 | 1.94 | 59 | 1.092 | 53 | 0.997 |
+| 1-2h | 90 | 0.990 | 1.92 | 46 | 0.945 | 44 | 0.992 |
+| 2-3h | 56 | 0.971 | 1.96 | 27 | 0.716 | 29 | 0.987 |
+| 3-4h | 26 | 0.957 | 1.43 | 12 | 0.328 | 14 | 0.973 |
+| 4-6h | 20 | 0.919 | 1.32 | 9 | 0.127 | 11 | 0.957 |
+| 6-12h | 17 | 0.903 | 1.24 | 5 | 0.462 | 12 | 0.910 |
+| 12-24h | 14 | 0.868 | 0.91 | 6 | 0.367 | 8 | 0.895 |
 
 ### By class and window
 
@@ -1802,20 +1804,22 @@ Block bootstrap of `scenario-equal − current`, resampling blocks rather than i
 
 ## Prediction churn
 
-How much each model's answer MOVES between one instant and the next, over consecutive usable instants of the same window lifecycle. Accuracy says nothing about stability: an estimator that alternates between "out in 40 minutes" and "not this cycle" every grid step is unusable at any F1.
+How much each model's answer MOVES between one instant and the next, over adjacent usable instants of the same window lifecycle. Accuracy says nothing about stability: an estimator that alternates between "out in 40 minutes" and "not this cycle" every grid step is unusable at any F1.
 
-Lifecycle-balanced the same way the score tables are: the median (and p90) is taken WITHIN a lifecycle first, then across lifecycles. `flip rate` is the fraction of consecutive pairs where the yes/no verdict changed. Pairs more than two grid steps apart are not paired, so a hole in the scored series does not read as churn.
+Lifecycle-balanced the same way the score tables are: the median (and p90) is taken WITHIN a lifecycle first, then across lifecycles. `flip rate` is the fraction of adjacent pairs where the yes/no verdict changed. A pair is two instants EXACTLY one grid step apart, both usable for that model: nothing bridges a skipped instant or one the model could not answer, so a hole in the series does not read as churn.
+
+Each model is measured on its OWN usable instants, over every replay record rather than the common cohort the score tables use: another model abstaining, or an outcome nobody observed, does not make a model's two consecutive answers unmeasurable. The three rows of a cohort are therefore each an honest statement about one model, and not a like-for-like comparison the way the scores are.
 
 Not a `BacktestStatistic`: that vocabulary is a function of an unordered bag of records, churn is a function of an ordered sequence inside a lifecycle, and `BacktestRecord` carries no lifecycle id to group by. There is therefore no bootstrap CI on these numbers — resampling blocks with replacement would destroy the adjacency they are defined on.
 
 | cohort | model | lifecycles | pairs | median abs ETA change (min) | p90 abs ETA change (min) | median flip rate |
 |---|---|---:|---:|---:|---:|---:|
-| Overall | current | 606 | 24050 | 11.1 | 19.6 | 0.000 |
-| Overall | scenario-equal | 606 | 24050 | 12.6 | 28.3 | 0.000 |
-| Overall | scenario-headroom | 606 | 24050 | 15.1 | 27.5 | 0.000 |
+| Overall | current | 617 | 24471 | 11.1 | 19.7 | 0.000 |
+| Overall | scenario-equal | 767 | 41666 | 11.7 | 32.7 | 0.000 |
+| Overall | scenario-headroom | 767 | 41666 | 12.8 | 27.0 | 0.000 |
 | Any transition | current | 165 | 4016 | 11.5 | 18.7 | 0.000 |
-| Any transition | scenario-equal | 165 | 4016 | 11.7 | 19.9 | 0.000 |
-| Any transition | scenario-headroom | 165 | 4016 | 12.8 | 21.1 | 0.000 |
+| Any transition | scenario-equal | 198 | 6506 | 11.7 | 24.9 | 0.000 |
+| Any transition | scenario-headroom | 198 | 6506 | 12.8 | 24.2 | 0.000 |
 
 ## Pool calibration (all-out within 14 d)
 
@@ -1913,5 +1917,5 @@ What step 4 does with this:
 ## Notes
 
 - Placeholder windows skipped: 233.
-- Replay took 19.6 s over 9648 instants; scoring and bootstrap 2.3 s.
+- Replay took 12.5 s over 9648 instants; scoring and bootstrap 1.7 s.
 - Grid step 10 min; rows loaded 8 days either side of the replay interval.
