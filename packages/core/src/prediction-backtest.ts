@@ -711,7 +711,16 @@ export function commonCohort(
 // Bootstrap
 // ---------------------------------------------------------------------------
 
-export type BacktestStatistic = "f1" | "medianAbsErrorMinutes";
+export type BacktestStatistic =
+	| "f1"
+	| "medianAbsErrorMinutes"
+	/**
+	 * Median SIGNED ETA error, in minutes: positive is predicted-later-than-
+	 * observed, i.e. OPTIMISTIC. Unlike the absolute error it separates the
+	 * expensive direction from the cheap one, which is the whole question a
+	 * roster-scenario comparison asks.
+	 */
+	| "medianSignedErrorMinutes";
 
 export interface BootstrapOptions {
 	iterations: number;
@@ -758,7 +767,11 @@ function statisticOf(
 	statistic: BacktestStatistic,
 ): number | null {
 	const m = scoreRecords(records);
-	return statistic === "f1" ? m.f1 : m.absoluteEtaError.medianMinutes;
+	if (statistic === "f1") return m.f1;
+	if (statistic === "medianSignedErrorMinutes") {
+		return m.signedEtaError.medianMinutes;
+	}
+	return m.absoluteEtaError.medianMinutes;
 }
 
 function groupByAccount(
@@ -1475,12 +1488,12 @@ export interface BacktestReportInput {
 
 const EM_DASH = "—";
 
-function num(v: number | null, digits = 3): string {
+export function num(v: number | null, digits = 3): string {
 	if (v == null || !Number.isFinite(v)) return EM_DASH;
 	return v.toFixed(digits);
 }
 
-function pct(v: number | null): string {
+export function pct(v: number | null): string {
 	if (v == null || !Number.isFinite(v)) return EM_DASH;
 	return `${(v * 100).toFixed(1)}%`;
 }
@@ -1489,7 +1502,7 @@ function coverageFraction(m: BacktestMetrics): number | null {
 	return m.instants > 0 ? m.coverage.usable / m.instants : null;
 }
 
-function metricsTable(rows: ReportEstimatorMetrics[]): string {
+export function metricsTable(rows: ReportEstimatorMetrics[]): string {
 	const head = [
 		"| estimator | instants | usable | scored | censored | TP | FP | TN | FN | precision | recall | F1 | median signed err (min) | median abs err (min) | median abs err (window) |",
 		"|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
@@ -1501,7 +1514,7 @@ function metricsTable(rows: ReportEstimatorMetrics[]): string {
 	return [...head, ...body].join("\n");
 }
 
-function coverageTable(rows: ReportEstimatorMetrics[]): string {
+export function coverageTable(rows: ReportEstimatorMetrics[]): string {
 	const head = [
 		"| estimator | usable | insufficient_data | low_confidence | no_slope | no_reset | total |",
 		"|---|---:|---:|---:|---:|---:|---:|",
@@ -1513,7 +1526,7 @@ function coverageTable(rows: ReportEstimatorMetrics[]): string {
 	return [...head, ...body].join("\n");
 }
 
-function leadTimeTable(rows: ReportEstimatorMetrics[]): string {
+export function leadTimeTable(rows: ReportEstimatorMetrics[]): string {
 	const head = [
 		"| estimator | lead-time bucket | TP | FN | recall | median signed err (min) | FP predicted in bucket |",
 		"|---|---|---:|---:|---:|---:|---:|",
