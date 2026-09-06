@@ -467,7 +467,7 @@ export function createAnalyticsHandler(context: APIContext) {
 		 *
 		 * Exactly `startMs !== null` — the flag that decided whether
 		 * `r.timestamp > ?` entered the WHERE clause just above. The two
-		 * `active_sessions` queries read it to pin their join order; see the
+		 * `active_sessions` queries use it to pin join order; see the
 		 * comment at the `active_sessions` CTE for why.
 		 */
 		const pinRequestsFirst = startMs !== null;
@@ -505,7 +505,9 @@ export function createAnalyticsHandler(context: APIContext) {
 				return result;
 			};
 
-			// Consolidated query to get all analytics data in a single roundtrip
+			// Aggregate the filtered rows once. Scalar subqueries for each metric
+			// made SQLite repeat the range scan 18 times (including four table
+			// lookups for attribution); one aggregate preserves empty/NULL semantics.
 			const consolidatedResult = await runPhase("totals", want("totals"), () =>
 				db.get<{
 					total_requests: number;
@@ -533,31 +535,31 @@ export function createAnalyticsHandler(context: APIContext) {
 					WHERE ${whereClause}
 				)
 				SELECT
-					(SELECT COUNT(*) FROM filtered_requests) as total_requests,
-					(SELECT SUM(CASE WHEN success = TRUE THEN 1 ELSE 0 END) * 100.0 / NULLIF(COUNT(*), 0) FROM filtered_requests) as success_rate,
-					(SELECT AVG(response_time_ms) FROM filtered_requests) as avg_response_time,
-					(SELECT SUM(COALESCE(total_tokens, 0)) FROM filtered_requests) as total_tokens,
-					(SELECT SUM(COALESCE(cost_usd, 0)) FROM filtered_requests) as total_cost_usd,
-					(SELECT SUM(CASE WHEN billing_type = 'plan' THEN COALESCE(cost_usd, 0) ELSE 0 END) FROM filtered_requests) as plan_cost_usd,
-					(SELECT SUM(CASE WHEN COALESCE(billing_type, 'api') != 'plan' THEN COALESCE(cost_usd, 0) ELSE 0 END) FROM filtered_requests) as api_cost_usd,
-					(SELECT SUM(COALESCE(cache_read_input_tokens, 0)) * 100.0 /
-						NULLIF(SUM(COALESCE(input_tokens, 0) + COALESCE(cache_read_input_tokens, 0) + COALESCE(cache_creation_input_tokens, 0)), 0) FROM filtered_requests) as cache_hit_rate,
-					(SELECT AVG(CASE WHEN ${SPEED_IN_RANGE_SQL} THEN output_tokens_per_second END) FROM filtered_requests) as avg_tokens_per_second,
-					(SELECT COUNT(DISTINCT COALESCE(account_used, ?)) FROM filtered_requests) as active_accounts,
-					(SELECT SUM(COALESCE(input_tokens, 0)) FROM filtered_requests) as input_tokens,
-					(SELECT SUM(COALESCE(cache_read_input_tokens, 0)) FROM filtered_requests) as cache_read_input_tokens,
-					(SELECT SUM(COALESCE(cache_creation_input_tokens, 0)) FROM filtered_requests) as cache_creation_input_tokens,
-					(SELECT SUM(COALESCE(output_tokens, 0)) FROM filtered_requests) as output_tokens,
+					COUNT(*) as total_requests,
+					SUM(CASE WHEN success = TRUE THEN 1 ELSE 0 END) * 100.0 / NULLIF(COUNT(*), 0) as success_rate,
+					AVG(response_time_ms) as avg_response_time,
+					SUM(COALESCE(total_tokens, 0)) as total_tokens,
+					SUM(COALESCE(cost_usd, 0)) as total_cost_usd,
+					SUM(CASE WHEN billing_type = 'plan' THEN COALESCE(cost_usd, 0) ELSE 0 END) as plan_cost_usd,
+					SUM(CASE WHEN COALESCE(billing_type, 'api') != 'plan' THEN COALESCE(cost_usd, 0) ELSE 0 END) as api_cost_usd,
+					SUM(COALESCE(cache_read_input_tokens, 0)) * 100.0 /
+						NULLIF(SUM(COALESCE(input_tokens, 0) + COALESCE(cache_read_input_tokens, 0) + COALESCE(cache_creation_input_tokens, 0)), 0) as cache_hit_rate,
+					AVG(CASE WHEN ${SPEED_IN_RANGE_SQL} THEN output_tokens_per_second END) as avg_tokens_per_second,
+					COUNT(DISTINCT COALESCE(account_used, ?)) as active_accounts,
+					SUM(COALESCE(input_tokens, 0)) as input_tokens,
+					SUM(COALESCE(cache_read_input_tokens, 0)) as cache_read_input_tokens,
+					SUM(COALESCE(cache_creation_input_tokens, 0)) as cache_creation_input_tokens,
+					SUM(COALESCE(output_tokens, 0)) as output_tokens,
 					-- Project-attribution coverage over the WHOLE filtered range.
 					-- Deliberately computed here and not by summing the
 					-- project_breakdown branch: that branch is truncated to the
 					-- top-N projects, so summing it would report full coverage
-					-- while unmeasured rows sit outside the cut. Appended last so
-					-- the existing positional bind order is untouched.
-					(SELECT SUM(CASE WHEN project_attribution_source IS NOT NULL THEN 1 ELSE 0 END) FROM filtered_requests) as attribution_measured,
-					(SELECT SUM(CASE WHEN project_attribution_source = 'none' THEN 1 ELSE 0 END) FROM filtered_requests) as attribution_none,
-					(SELECT SUM(CASE WHEN project_attribution_source = 'session_inherited' THEN 1 ELSE 0 END) FROM filtered_requests) as attribution_inherited,
-					(SELECT SUM(CASE WHEN project_attribution_source = 'session_ambiguous' THEN 1 ELSE 0 END) FROM filtered_requests) as attribution_ambiguous
+					-- while unmeasured rows sit outside the cut.
+					SUM(CASE WHEN project_attribution_source IS NOT NULL THEN 1 ELSE 0 END) as attribution_measured,
+					SUM(CASE WHEN project_attribution_source = 'none' THEN 1 ELSE 0 END) as attribution_none,
+					SUM(CASE WHEN project_attribution_source = 'session_inherited' THEN 1 ELSE 0 END) as attribution_inherited,
+					SUM(CASE WHEN project_attribution_source = 'session_ambiguous' THEN 1 ELSE 0 END) as attribution_ambiguous
+				FROM filtered_requests
 			`,
 					[...queryParams, NO_ACCOUNT_ID],
 				),
@@ -1709,7 +1711,13 @@ export function createAnalyticsHandler(context: APIContext) {
 			// Tool-call error analytics (1/3): per-tool call/error totals over the
 			// filtered range. Tool rows join back to requests so the shared
 			// whereClause (range + account/model/key/project/status filters)
-			// applies identically to every block.
+			// applies identically to every block. Pin only windows up to the measured
+			// 24h range: request-first joins cut seconds off that view, but the 30d
+			// top-messages query regressed 3–7x. Leave wider ranges to SQLite, even
+			// with filters; their selectivity has not been measured. See
+			// docs/analytics-performance-2026-09-06.md for the paired comparisons.
+			const pinToolRequestsFirst =
+				bucket.windowMs !== null && bucket.windowMs <= dayMs;
 			const toolErrorRows = await runPhase(
 				"tool_errors",
 				want("toolCallErrors"),
@@ -1726,8 +1734,7 @@ export function createAnalyticsHandler(context: APIContext) {
 					SUM(tc.call_count) as total_calls,
 					SUM(tc.error_count) as total_errors,
 					SUM(tc.error_count) * 100.0 / NULLIF(SUM(tc.call_count), 0) as error_rate_pct
-				FROM request_tool_calls tc
-				JOIN requests r ON r.id = tc.request_id
+				FROM requests r ${pinToolRequestsFirst ? "CROSS JOIN" : "JOIN"} request_tool_calls tc ON tc.request_id = r.id
 				WHERE ${whereClause}
 				GROUP BY tc.tool_name
 				ORDER BY total_errors DESC, total_calls DESC
@@ -1750,8 +1757,7 @@ export function createAnalyticsHandler(context: APIContext) {
 						`
 				WITH top_error_tools AS (
 					SELECT tc.tool_name as tool_name
-					FROM request_tool_calls tc
-					JOIN requests r ON r.id = tc.request_id
+					FROM requests r ${pinToolRequestsFirst ? "CROSS JOIN" : "JOIN"} request_tool_calls tc ON tc.request_id = r.id
 					WHERE ${whereClause}
 					GROUP BY tc.tool_name
 					ORDER BY SUM(tc.error_count) DESC, SUM(tc.call_count) DESC
@@ -1762,8 +1768,7 @@ export function createAnalyticsHandler(context: APIContext) {
 					tc.tool_name,
 					SUM(tc.call_count) as calls,
 					SUM(tc.error_count) as errors
-				FROM request_tool_calls tc
-				JOIN requests r ON r.id = tc.request_id
+				FROM requests r ${pinToolRequestsFirst ? "CROSS JOIN" : "JOIN"} request_tool_calls tc ON tc.request_id = r.id
 				WHERE ${whereClause}
 					AND tc.tool_name IN (SELECT tool_name FROM top_error_tools)
 				GROUP BY ts, tc.tool_name
@@ -1794,8 +1799,7 @@ export function createAnalyticsHandler(context: APIContext) {
 							PARTITION BY te.tool_name
 							ORDER BY COUNT(*) DESC
 						) as rn
-					FROM request_tool_errors te
-					JOIN requests r ON r.id = te.request_id
+					FROM requests r ${pinToolRequestsFirst ? "CROSS JOIN" : "JOIN"} request_tool_errors te ON te.request_id = r.id
 					WHERE ${whereClause} AND te.error_text IS NOT NULL
 					GROUP BY te.tool_name, te.error_text
 				)

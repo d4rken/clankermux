@@ -2,10 +2,16 @@ import { afterEach, beforeEach, describe, expect, it, mock } from "bun:test";
 import { usageCache } from "@clankermux/providers";
 import type { Account, RequestMeta } from "@clankermux/types";
 import { cacheBodyStore } from "../cache-body-store";
+import {
+	isFamilyWeeklyMemoExhausted,
+	resetFamilyWeeklyMemoForTests,
+} from "../family-weekly-memo";
 import type { ProxyContext } from "../handlers";
 import {
 	BURST_RETRY_MAX_CONCURRENT_HOLDS,
 	clearAnthropicBurstThrottle,
+	getActiveHoldCount,
+	getAnthropicBurstThrottleUntil,
 	markAnthropicBurstThrottle,
 	resetHoldSlots,
 	tryAcquireHoldSlot,
@@ -253,12 +259,12 @@ function makeThrottledHitContext(
 	return ctx as unknown as ProxyContext;
 }
 
-function makeRequest(): Request {
+function makeRequest(model = "claude-sonnet-4-5"): Request {
 	return new Request("https://proxy.local/v1/messages", {
 		method: "POST",
 		headers: { "Content-Type": "application/json" },
 		body: JSON.stringify({
-			model: "claude-sonnet-4-5",
+			model,
 			messages: [{ role: "user", content: "hello" }],
 			max_tokens: 10,
 		}),
@@ -352,6 +358,7 @@ describe("burst-retry hold integration (handleProxy)", () => {
 	let originalFetch: typeof globalThis.fetch;
 
 	beforeEach(() => {
+		resetFamilyWeeklyMemoForTests();
 		originalFetch = globalThis.fetch;
 		clearProviderOverloadCooldown();
 		clearAnthropicBurstThrottle();
@@ -364,6 +371,7 @@ describe("burst-retry hold integration (handleProxy)", () => {
 	});
 
 	afterEach(() => {
+		resetFamilyWeeklyMemoForTests();
 		globalThis.fetch = originalFetch;
 		clearProviderOverloadCooldown();
 		clearAnthropicBurstThrottle();
@@ -435,6 +443,102 @@ describe("burst-retry hold integration (handleProxy)", () => {
 		// Marker-active path goes straight to the hold (one re-probe), no first
 		// attempt and no sibling diversion.
 		expect(calls).toHaveLength(1);
+	});
+
+	it("a genuine hold reprobe 429 renews old evidence and the next success leaves it unchanged", async () => {
+		const held = makeAccount({ id: "held", name: "Cache" });
+		const sibling = makeAccount({ id: "sibling", name: "Sibling" });
+		seedFreshHeadroom("held");
+		const observedAt = Date.now() - 60_000;
+		markAnthropicBurstThrottle(observedAt);
+		const originalUntil = observedAt + 120_000;
+		let renewedUntil: number | null = null;
+		let calls = 0;
+		globalThis.fetch = mock(
+			async (input: RequestInfo | URL, init?: RequestInit) => {
+				if (!isProxyCall(input)) return originalFetch(input as never, init);
+				calls += 1;
+				if (calls === 1) {
+					// Admission itself must not renew evidence (the hold's injected
+					// clock is ten minutes ahead of the real upstream evidence clock).
+					expect(getAnthropicBurstThrottleUntil()).toBe(originalUntil);
+					return rl429({ "x-should-retry": "true" });
+				}
+				renewedUntil = getAnthropicBurstThrottleUntil();
+				expect(renewedUntil).toBeGreaterThan(originalUntil);
+				expect(renewedUntil).toBeLessThanOrEqual(Date.now() + 120_000);
+				return ok200();
+			},
+		);
+		const res = await callHandleProxy(
+			makeRequest(),
+			new URL("https://proxy.local/v1/messages"),
+			makeContext([held, sibling], "held"),
+		);
+		expect(res.status).toBe(200);
+		expect(calls).toBe(2);
+		expect(renewedUntil).not.toBeNull();
+		expect(getAnthropicBurstThrottleUntil()).toBe(renewedUntil);
+	});
+
+	it.each([
+		"claude-unknown-future",
+		"claude-fable-5-1",
+	])("active hold declines scoped rejection without a memo for %s after one reprobe", async (model) => {
+		const held = makeAccount({
+			id: "held",
+			name: "Cache",
+			access_token: "at-held",
+		});
+		const sibling = makeAccount({
+			id: "sibling",
+			name: "Sibling",
+			access_token: "at-sibling",
+		});
+		seedFreshHeadroom(held.id);
+		markAnthropicBurstThrottle();
+		const markerUntil = getAnthropicBurstThrottleUntil();
+		let heldProbes = 0;
+		let siblingCalls = 0;
+		globalThis.fetch = mock(
+			async (input: RequestInfo | URL, init?: RequestInit) => {
+				if (!isProxyCall(input)) return originalFetch(input as never, init);
+				const headers =
+					input instanceof Request ? input.headers : new Headers(init?.headers);
+				if (headers.get("authorization")?.includes("at-held")) {
+					heldProbes += 1;
+					// No scoped reset or cached family window: neither an unknown family
+					// nor a known family can persist a memo that stops another attempt.
+					return rl429({
+						"anthropic-ratelimit-unified-status": "rejected",
+						"anthropic-ratelimit-unified-5h-status": "allowed",
+						"anthropic-ratelimit-unified-5h-utilization": "0.61",
+						"anthropic-ratelimit-unified-7d-status": "allowed",
+						"anthropic-ratelimit-unified-7d-utilization": "0.57",
+						"anthropic-ratelimit-unified-7d_oi-status": "rejected",
+						"anthropic-ratelimit-unified-7d_oi-utilization": "1",
+						"x-should-retry": "true",
+					});
+				}
+				siblingCalls += 1;
+				return ok200();
+			},
+		);
+		const ctx = makeContext([held, sibling], held.id);
+		const res = await callHandleProxy(
+			makeRequest(model),
+			new URL("https://proxy.local/v1/messages"),
+			ctx,
+		);
+		expect(res.status).toBe(200);
+		expect(heldProbes).toBe(1);
+		expect(siblingCalls).toBe(1);
+		expect(held.rate_limited_until).toBeNull();
+		expect(ctx.dbOps.markAccountRateLimited).not.toHaveBeenCalled();
+		expect(ctx.dbOps.markAccountRateLimitedDeadlineOnly).not.toHaveBeenCalled();
+		expect(isFamilyWeeklyMemoExhausted(held, model, Date.now())).toBe(false);
+		expect(getAnthropicBurstThrottleUntil()).toBe(markerUntil);
+		expect(getActiveHoldCount()).toBe(0);
 	});
 
 	it("non-storm regression: held cooled + healthy sibling + marker INACTIVE ⇒ serves from sibling, NO hold", async () => {

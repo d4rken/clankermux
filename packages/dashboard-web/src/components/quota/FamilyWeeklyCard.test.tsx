@@ -200,7 +200,37 @@ describe("FamilyWeeklyCard", () => {
 		expect(html).not.toContain("unavailable");
 	});
 
-	it("mentions unopened accounts when nobody who reports can serve", () => {
+	for (const idle of [false, true]) {
+		it(`includes ${idle ? "idle" : "omitted"} zero-use accounts in the headline, bars and exhaustion count`, () => {
+			const entries = idle
+				? [{ ...scopedEntry("Fable", 0), resets_at: null, is_active: false }]
+				: [];
+			const html = render(
+				rowsFor([
+					windowedAccount("Claude-2", [scopedEntry("Fable", 73)]),
+					windowedAccount("Claude-3", [scopedEntry("Fable", 99)]),
+					windowedAccount("Claude-4", [scopedEntry("Fable", 40)]),
+					windowedAccount("Claude-5", [scopedEntry("Fable", 100)]),
+					windowedAccount(
+						"Claude-1",
+						entries as ReturnType<typeof scopedEntry>[],
+					),
+				]),
+			);
+
+			expect(html).toContain('class="figure-xl text-success-strong">0% used');
+			expect(html).toContain("lowest · Claude-1");
+			expect(html).toContain("Exhausted on 1 of 5");
+			expect(html).toContain("4 of 5 reporting · 1 not used this week");
+			expect(html).toContain('aria-valuetext="Claude-1: 0% used"');
+			expect(html.match(/role="progressbar"/g)).toHaveLength(5);
+			expect(html.indexOf('aria-valuenow="0"')).toBeLessThan(
+				html.indexOf('aria-valuenow="40"'),
+			);
+		});
+	}
+
+	it("shows unused capacity when nobody who reports can serve", () => {
 		// The only reporter is out of its account-wide weekly quota, so there is
 		// no aggregate to state — but a sibling that has never opened Fable is
 		// still there, and the reader has to be told before concluding the family
@@ -221,12 +251,14 @@ describe("FamilyWeeklyCard", () => {
 			]),
 		);
 
-		expect(html).toContain("No reading");
+		expect(html).toContain("Unused capacity");
+		expect(html).toContain("0% used");
+		expect(html).toContain("lowest · untouched");
 		expect(html).toContain(
-			"Reported only by 1 account that cannot serve right now",
+			"0 of 2 reporting · 1 not used this week · 1 unavailable",
 		);
-		expect(html).toContain("1 has not used Fable this week");
-		expect(html).not.toContain("% used");
+		expect(html).not.toContain("resets in");
+		expect(html).not.toContain("projected");
 	});
 
 	it("renders nothing at all when no family reports a cap", () => {

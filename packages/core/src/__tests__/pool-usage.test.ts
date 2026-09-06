@@ -2254,6 +2254,13 @@ describe("listFamilyRows", () => {
 			expect(rows).toHaveLength(1);
 			expect(rows[0].reportingCount).toBe(1);
 			expect(rows[0].unopenedCount).toBe(1);
+			expect(rows[0].unopenedAccounts).toEqual([
+				{
+					accountId: expect.any(String),
+					name: "untouched",
+					provider: "anthropic",
+				},
+			]);
 			expect(rows[0].unavailableReporters).toBe(0);
 		});
 
@@ -2281,6 +2288,9 @@ describe("listFamilyRows", () => {
 			expect(rows).toHaveLength(1);
 			expect(rows[0].reportingCount).toBe(1);
 			expect(rows[0].unopenedCount).toBe(1);
+			expect(rows[0].unopenedAccounts).toEqual([
+				{ accountId: expect.any(String), name: "idle", provider: "anthropic" },
+			]);
 		});
 
 		it("counts a sibling that reports only another family", () => {

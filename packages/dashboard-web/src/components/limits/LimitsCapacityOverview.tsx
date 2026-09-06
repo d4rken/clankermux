@@ -26,12 +26,13 @@ import {
 } from "../ui/card";
 import { InsetPanel } from "../ui/inset-panel";
 import { Popover, PopoverContent, PopoverTrigger } from "../ui/popover";
+import { AccountForecasts, type ForecastAccount } from "./AccountForecasts";
 import { FiveHourPacingPanel } from "./FiveHourPacingPanel";
 import { WeeklyBudgetPanel } from "./WeeklyBudgetPanel";
 
 interface RunwayPanelProps {
 	runways: KeyRunway[];
-	accounts: { id: string; name: string }[];
+	accounts: ForecastAccount[];
 	/**
 	 * The tab's ticking clock. Rendered durations are derived from
 	 * `outcome.exhaustsAtMs` against this, so a countdown served by
@@ -291,7 +292,7 @@ interface LimitsCapacityOverviewProps {
 	/** Per-key runway rows, straight from `/api/runway`. */
 	runways: KeyRunway[];
 	/** Account names for the pin labels and causes, from the same response. */
-	accounts: { id: string; name: string }[];
+	accounts: ForecastAccount[];
 	/**
 	 * State of the `/api/accounts` read the two window panels are computed from.
 	 * Scoped to those panels alone: it says nothing about the runway beside them,
@@ -408,6 +409,18 @@ export function LimitsCapacityOverview({
 					<p className="mt-row text-xs text-muted-foreground">
 						Not on a rolling quota: {fallbackNames.join(", ")}
 					</p>
+				)}
+				{!runwaysLoading && !runwaysUnavailableReason && (
+					<AccountForecasts
+						accounts={accounts.filter((account) =>
+							runways.some(
+								(runway) =>
+									runway.isActive &&
+									runway.eligibleAccountIds.includes(account.id),
+							),
+						)}
+						now={now}
+					/>
 				)}
 				<div className="mt-row flex justify-end">
 					<a

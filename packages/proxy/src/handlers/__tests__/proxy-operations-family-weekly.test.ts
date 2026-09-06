@@ -1,8 +1,16 @@
 import { afterEach, beforeEach, describe, expect, it, mock } from "bun:test";
 import { usageCache } from "@clankermux/providers";
 import type { Account, RequestMeta } from "@clankermux/types";
+import {
+	clearFamilyWeeklyExhaustedForAccount,
+	getFamilyWeeklyExhaustedUntil,
+	isFamilyWeeklyMemoExhausted,
+} from "../../family-weekly-memo";
 import { clearProviderOverloadCooldown } from "../../provider-overload-cooldown";
-import { clearAnthropicBurstThrottle } from "../burst-cooldown";
+import {
+	clearAnthropicBurstThrottle,
+	isAnthropicBurstThrottleActive,
+} from "../burst-cooldown";
 import { proxyWithAccount } from "../proxy-operations";
 import type { ProxyContext } from "../proxy-types";
 
@@ -221,6 +229,7 @@ describe("proxyWithAccount — reactive family-weekly 429 guard", () => {
 		clearProviderOverloadCooldown();
 		clearAnthropicBurstThrottle();
 		usageCache.delete(ACCOUNT_ID);
+		clearFamilyWeeklyExhaustedForAccount(ACCOUNT_ID);
 	});
 
 	afterEach(() => {
@@ -228,6 +237,7 @@ describe("proxyWithAccount — reactive family-weekly 429 guard", () => {
 		clearProviderOverloadCooldown();
 		clearAnthropicBurstThrottle();
 		usageCache.delete(ACCOUNT_ID);
+		clearFamilyWeeklyExhaustedForAccount(ACCOUNT_ID);
 	});
 
 	it("fails over without an account-wide cooldown and records family_weekly_exhausted_429", async () => {
@@ -654,11 +664,37 @@ describe("proxyWithAccount — reactive family-weekly 429 guard", () => {
 		expect(account.rate_limited_until).not.toBeNull();
 	});
 
-	it("fresh cache saying NOT exhausted wins over scoped headers (header fallback is cache-unavailable-only)", async () => {
-		// A fresh cache that does NOT confirm family exhaustion means the header
-		// fallback must stay out of the decision: the rung is scoped to the
-		// evidence-starved case only, so cache-vs-header disagreements keep the
-		// existing (burst/model-fallback) behavior.
+	it.each([
+		{ reprobe: false, unifiedPercent: 61, familyPercent: 50 },
+		{ reprobe: true, unifiedPercent: 61, familyPercent: 50 },
+		{ reprobe: false, unifiedPercent: 100, familyPercent: 50 },
+		{ reprobe: false, unifiedPercent: 61, familyPercent: 100 },
+		...[false, true].map((reprobe) => ({
+			reprobe,
+			unifiedPercent: 61,
+			familyPercent: 50,
+			headerReset: "missing",
+			memoized: false,
+		})),
+		...[false, true].flatMap((reprobe) =>
+			["missing", "invalid", "past"].map((headerReset) => ({
+				reprobe,
+				unifiedPercent: 61,
+				familyPercent: 100,
+				headerReset,
+			})),
+		),
+	])("live scoped rejection overrides fresh cache: %j", async ({
+		reprobe,
+		unifiedPercent,
+		familyPercent,
+		headerReset = "valid",
+		memoized = true,
+	}) => {
+		// 2026-09-06: the poll still shows family headroom while the live
+		// 7d_oi claim rejects. This must never enter the 90-second burst hold.
+		const resetAt = Math.floor(Date.now() / 1000) * 1000 + 40_698_000;
+		const cachedResetAt = Date.now() + 16 * 3_600_000;
 		globalThis.fetch = mock(
 			async () =>
 				new Response(
@@ -671,44 +707,58 @@ describe("proxyWithAccount — reactive family-weekly 429 guard", () => {
 						headers: {
 							"content-type": "application/json",
 							"anthropic-ratelimit-unified-5h-status": "allowed",
-							"anthropic-ratelimit-unified-5h-utilization": "0.0",
-							"anthropic-ratelimit-unified-7d-status": "allowed_warning",
-							"anthropic-ratelimit-unified-7d-utilization": "0.94",
+							"anthropic-ratelimit-unified-5h-utilization": "0.61",
+							"anthropic-ratelimit-unified-7d-status": "allowed",
+							"anthropic-ratelimit-unified-7d-utilization": "0.57",
 							"anthropic-ratelimit-unified-7d_oi-status": "rejected",
 							"anthropic-ratelimit-unified-7d_oi-utilization": "1.0",
+							...(headerReset === "missing"
+								? {}
+								: {
+										"anthropic-ratelimit-unified-7d_oi-reset":
+											headerReset === "invalid"
+												? "garbled"
+												: headerReset === "past"
+													? "1"
+													: String(resetAt / 1000),
+									}),
+							"anthropic-ratelimit-unified-representative-claim":
+								"seven_day_overage_included",
+							"retry-after": "40698",
 							"anthropic-ratelimit-unified-status": "rejected",
 							"x-should-retry": "true",
 						},
 					},
 				),
 		);
-		// Fresh cache: fable weekly at 50% — NOT exhausted.
+		// Fresh snapshots may lag either exhaustion or account-wide recovery.
 		usageCache.set(ACCOUNT_ID, {
 			five_hour: {
-				utilization: 0,
+				utilization: unifiedPercent,
 				resets_at: new Date(Date.now() + 4 * 3_600_000).toISOString(),
 			},
 			seven_day: {
-				utilization: 83,
+				utilization: 57,
 				resets_at: new Date(Date.now() + 7 * 86_400_000).toISOString(),
 			},
 			limits: [
 				{
 					kind: "weekly_scoped",
 					group: "weekly",
-					percent: 50,
-					resets_at: new Date(Date.now() + 16 * 3_600_000).toISOString(),
+					percent: familyPercent,
+					resets_at: new Date(cachedResetAt).toISOString(),
 					scope: { model: { id: "claude-fable-5", display_name: "Fable" } },
 					is_active: true,
 				},
 			],
 		} as never);
 
-		const { ctx, saveRequestCalls } = makeProxyContext();
+		const { ctx, saveRequestCalls, markCalls } = makeProxyContext();
 		const account = makeOAuthAnthropicAccount();
 		const bodyBuffer = makeRequestBody("claude-fable-5");
 
-		await proxyWithAccount(
+		const outcomes: string[] = [];
+		const result = await proxyWithAccount(
 			makeRequest(bodyBuffer),
 			new URL("https://proxy.local/v1/messages"),
 			account,
@@ -717,13 +767,42 @@ describe("proxyWithAccount — reactive family-weekly 429 guard", () => {
 			() => undefined,
 			0,
 			ctx,
+			undefined,
+			undefined,
+			undefined,
+			undefined,
+			false,
+			{ reprobe, onOutcome: (outcome) => outcomes.push(outcome.kind) },
 		);
 
 		expect(
 			saveRequestCalls.find(
 				(row) => row.errorMessage === "family_weekly_exhausted_429",
 			),
-		).toBeUndefined();
+		).toBeDefined();
+		expect(result).toBeNull();
+		expect(outcomes).toEqual(["other"]);
+		expect(markCalls).toHaveLength(0);
+		expect(account.rate_limited_until).toBeNull();
+		expect(account.rate_limited_reason).toBeNull();
+		expect(isAnthropicBurstThrottleActive()).toBe(false);
+		if (memoized) {
+			expect(
+				getFamilyWeeklyExhaustedUntil(ACCOUNT_ID, "fable", Date.now()),
+			).toBe(headerReset === "valid" ? resetAt : cachedResetAt);
+		} else {
+			// A below-threshold cached family is not an exhausted reset source.
+			// Missing live reset must leave the verdict nonmemoized, even on reprobe.
+			expect(
+				getFamilyWeeklyExhaustedUntil(ACCOUNT_ID, "fable", Date.now()),
+			).toBeNull();
+		}
+		expect(
+			isFamilyWeeklyMemoExhausted(account, "claude-fable-5-1", Date.now()),
+		).toBe(memoized);
+		expect(
+			isFamilyWeeklyMemoExhausted(account, "claude-opus-4-8", Date.now()),
+		).toBe(false);
 	});
 
 	it("usage aged between the two bounds (120s < age <= 180s) does NOT buy an extra refresh", async () => {

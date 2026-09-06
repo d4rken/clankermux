@@ -78,6 +78,57 @@ describe("classify429Transient", () => {
 		expect(result).toEqual({ retryable: true, confidence: "fresh_headroom" });
 	});
 
+	it("live 7d_oi rejection wins over fresh 5h/7d headroom and retry hints", () => {
+		const headers = {
+			"anthropic-ratelimit-unified-status": "rejected",
+			"anthropic-ratelimit-unified-5h-status": "allowed",
+			"anthropic-ratelimit-unified-5h-utilization": "0.61",
+			"anthropic-ratelimit-unified-7d-status": "allowed",
+			"anthropic-ratelimit-unified-7d-utilization": "0.57",
+			"anthropic-ratelimit-unified-7d_oi-status": "rejected",
+			"anthropic-ratelimit-unified-7d_oi-utilization": "1",
+			"anthropic-ratelimit-unified-7d_oi-reset": String(NOW / 1000 + 40_698),
+			"anthropic-ratelimit-unified-representative-claim":
+				"seven_day_overage_included",
+			"retry-after": "40698",
+			"x-should-retry": "true",
+		};
+		for (const getCapacity of [freshHeadroom(39), noCapacity]) {
+			expect(
+				classify({ response: makeResponse(headers), getCapacity }),
+			).toEqual({
+				retryable: false,
+				reason: "scoped_quota_rejection",
+			});
+		}
+		// Account-wide hard limits retain precedence over the scoped guard.
+		expect(
+			classify({
+				response: makeResponse({
+					...headers,
+					"anthropic-ratelimit-unified-status": "rate_limited",
+				}),
+				getCapacity: freshHeadroom(39),
+			}),
+		).toEqual({ retryable: false, reason: "hard_limit_status" });
+	});
+
+	it.each([
+		"5h",
+		"7d",
+	])("live %s rejection wins over lagging fresh headroom", (window) => {
+		expect(
+			classify({
+				response: makeResponse({
+					"anthropic-ratelimit-unified-status": "rejected",
+					[`anthropic-ratelimit-unified-${window}-status`]: "rejected",
+					"x-should-retry": "true",
+				}),
+				getCapacity: freshHeadroom(39),
+			}),
+		).toEqual({ retryable: false, reason: "account_quota_rejection" });
+	});
+
 	it("OAuth-Anthropic + stale/absent capacity + x-should-retry:true ⇒ stale_should_retry", () => {
 		const result = classify({
 			response: makeResponse({ "x-should-retry": "true" }),

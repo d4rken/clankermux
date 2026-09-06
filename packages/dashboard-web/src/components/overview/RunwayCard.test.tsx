@@ -80,6 +80,35 @@ function render(props: Partial<Parameters<typeof RunwayCard>[0]> = {}) {
 }
 
 describe("RunwayCard", () => {
+	it("counts down to fresh evidence without claiming the account has become forecastable", () => {
+		const props = {
+			runways: [
+				row({
+					outcome: { kind: "unknown" as const, learningAccountIds: ["acc-1"] },
+				}),
+			],
+			accounts: [
+				account("acc-1", "Claude-5", [
+					{
+						kind: "five_hour",
+						utilizationPct: 13,
+						resetsAtMs: NOW + 5 * HOUR,
+						prediction: null,
+						forecast: {
+							state: "learning",
+							reason: "short-history",
+							readyAtMs: NOW + HOUR,
+						},
+					},
+				]),
+			],
+		};
+		expect(render(props)).toContain("1h + fresh reading");
+		expect(render({ ...props, now: NOW + HOUR })).toContain("Fresh reading");
+		expect(render({ ...props, now: NOW + HOUR })).toContain(
+			"1 account not yet projectable",
+		);
+	});
 	it("states the horizon it checked behind the infinity glyph", () => {
 		const html = render();
 

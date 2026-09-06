@@ -10,6 +10,7 @@ import {
 	formatRunwayValue,
 	runwayPaceMargin,
 	runwayUnavailableReason,
+	runwayWindowLabel,
 	unprojectableCount,
 } from "../../lib/runway-display";
 import {
@@ -17,6 +18,7 @@ import {
 	reachableAccounts,
 	tightestWindow,
 } from "../../lib/runway-evidence";
+import { windowForecastMessage } from "../../lib/window-forecast-display";
 import { MetricCard, type MetricCardSubRow } from "./MetricCard";
 import { RunwayHorizonStrip } from "./RunwayHorizonStrip";
 
@@ -220,11 +222,53 @@ export function RunwayCard({
 	// every active key rather than the headline one, so the row survives the
 	// all-unknown case where there is no headline key to read.
 	if (learningAccounts > 0) {
+		const learningDetails = pool.flatMap((account) =>
+			account.windows
+				.filter((window) => window.forecast?.state === "learning")
+				.map(
+					(window) =>
+						`${account.name} ${runwayWindowLabel(window.kind)}: ${windowForecastMessage(window, now)}`,
+				),
+		);
 		subRows.push({
 			label: "Learning",
 			value: `${learningAccounts} account${learningAccounts === 1 ? "" : "s"}`,
 			tooltip:
-				"Not yet projectable: less than an hour of usage evidence, no usage yet, or a weekly window that has not started. Excluded from the figure, which is a lower bound until they report.",
+				learningDetails.length > 0
+					? learningDetails.join("; ")
+					: "Waiting for nonzero usage or enough evidence after a reset or credit. A fresh reading is required before the forecast can resume.",
+		});
+		const timed = pool
+			.flatMap((account) => account.windows)
+			.filter(
+				(window) =>
+					window.forecast?.state === "learning" &&
+					window.forecast.reason === "short-history",
+			);
+		const next = timed.sort(
+			(a, b) =>
+				(a.forecast?.state === "learning"
+					? (a.forecast.readyAtMs ?? Infinity)
+					: Infinity) -
+				(b.forecast?.state === "learning"
+					? (b.forecast.readyAtMs ?? Infinity)
+					: Infinity),
+		)[0];
+		const readyAt =
+			next?.forecast?.state === "learning" ? next.forecast.readyAtMs : null;
+		subRows.push({
+			label: "Waiting for",
+			value:
+				readyAt != null
+					? readyAt > now
+						? `${formatDurationDhm(readyAt - now)} + fresh reading`
+						: "Fresh reading"
+					: learningDetails.length > 0
+						? "Nonzero usage"
+						: "More usage evidence",
+			tooltip:
+				learningDetails.join("; ") ||
+				"See account forecasts on the Usage page for each window's status.",
 		});
 	}
 

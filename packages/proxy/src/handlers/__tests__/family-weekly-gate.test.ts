@@ -642,21 +642,21 @@ describe("resolveFamilyWeeklyExclusionFromHeaders", () => {
 		).toBeNull();
 	});
 
-	it("falls back to `now` when the scoped claim's reset is missing or malformed", () => {
+	it("reports a null reset when the scoped claim's reset is missing or malformed", () => {
 		const h = incidentHeaders();
 		delete h["anthropic-ratelimit-unified-7d_oi-reset"];
 		const exclusion = resolve(h);
-		expect(exclusion?.resetAt).toBe(INCIDENT_NOW);
+		expect(exclusion?.resetAt).toBeNull();
 
 		const h2 = incidentHeaders();
 		h2["anthropic-ratelimit-unified-7d_oi-reset"] = "not-a-number";
-		expect(resolve(h2)?.resetAt).toBe(INCIDENT_NOW);
+		expect(resolve(h2)?.resetAt).toBeNull();
 	});
 
-	it("falls back to `now` when the scoped reset is in the past", () => {
+	it("reports a null reset when the scoped reset is in the past", () => {
 		const h = incidentHeaders();
 		const exclusion = resolve(h, "claude-fable-5", INCIDENT_RESET_MS + 1);
-		expect(exclusion?.resetAt).toBe(INCIDENT_RESET_MS + 1);
+		expect(exclusion?.resetAt).toBeNull();
 	});
 });
 
@@ -719,10 +719,10 @@ describe("resolveFamilyWeeklyExclusionFromHeaders — hardening (Codex review)",
 		expect(resolve(h)).not.toBeNull();
 	});
 
-	it("a malformed scoped reset falls back to now instead of poisoning resetAt", () => {
+	it("a malformed scoped reset is explicitly absent instead of poisoning resetAt", () => {
 		const h = incidentHeaders();
 		h["anthropic-ratelimit-unified-7d_oi-reset"] = "1785736800garbage";
-		expect(resolve(h)?.resetAt).toBe(INCIDENT_NOW);
+		expect(resolve(h)?.resetAt).toBeNull();
 	});
 
 	it("trusts only the official Anthropic OAuth upstream", () => {

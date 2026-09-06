@@ -76,7 +76,14 @@ import {
  * stream-analytics.ts): a total/chunk timeout ("Stream timeout: ..."), a client
  * cancel ("client disconnected"), or any other read error.
  */
-function streamErrorToOutcome(err: Error): TransportOutcome {
+function streamErrorToOutcome(
+	err: Error,
+	clientSignal?: AbortSignal,
+): TransportOutcome {
+	// The inbound signal also aborts upstream fetch: reader.read() can reject
+	// before downstream cancel runs. Only this signal proves client cancellation;
+	// AbortError alone can also come from an upstream/internal timeout.
+	if (clientSignal?.aborted) return "disconnect";
 	const message = err.message || "";
 	if (message.includes("client disconnected")) return "disconnect";
 	if (message.includes("Stream timeout")) return "timeout";
@@ -94,10 +101,25 @@ const MID_STREAM_RATE_LIMIT_COOLDOWN_MS =
 const log = new Logger("ResponseHandler");
 const MAX_REQUEST_BODY_BYTES = BUFFER_SIZES.MAX_REQUEST_BODY_BYTES;
 
-// Per-boot INFO budget for non-disconnect stream read errors (see onError):
-// enough samples to identify a runtime-level regression's error shape from a
-// default-level journal, without flooding it when a shape occurs at scale.
-let readErrorInfoSamples = 5;
+/** Final client streams only; never synthetic retry audit rows or internal probes.
+ * These per-boot counts describe streams, not overall end-user availability.
+ * Non-streaming body read errors remain outside this stream-only telemetry.
+ */
+const clientStreamOutcomes = {
+	success: 0,
+	error: 0,
+	timeout: 0,
+	disconnect: 0,
+	completedBeforeCut: 0,
+};
+
+export function getClientStreamOutcomeCounts(): Readonly<
+	typeof clientStreamOutcomes
+> {
+	return { ...clientStreamOutcomes };
+}
+
+export const EVENT_CLIENT_STREAM_FAILURE = "client_stream_failure";
 
 /**
  * Stable event id — the non-streaming analytics read stopped at its 256 KiB cap
@@ -492,6 +514,8 @@ function isExpectedResponse(path: string, response: Response): boolean {
 
 export interface ResponseHandlerOptions {
 	requestId: string;
+	/** Original inbound request signal, never a composed upstream timeout signal. */
+	clientSignal?: AbortSignal;
 	method: string;
 	path: string;
 	account: Account | null;
@@ -890,6 +914,41 @@ async function forwardToClientInner(
 			completeProviderOverloadProbe(token, outcome, evidence);
 		};
 
+		// This runs only for the response actually forwarded to a client. Retry
+		// audit rows are written by the recorder elsewhere and never enter here.
+		let observedOutcome = false;
+		const observeOutcome = (
+			outcome: TransportOutcome,
+			reason: string,
+			terminalSeen: boolean,
+			completedBeforeCut = false,
+			err?: Error,
+		): void => {
+			if (observedOutcome || !shouldProcessRequest || internalDispatch) return;
+			observedOutcome = true;
+			clientStreamOutcomes[outcome]++;
+			if (completedBeforeCut) clientStreamOutcomes.completedBeforeCut++;
+			const failed = outcome === "error" || outcome === "timeout";
+			log[failed ? "warn" : "debug"](
+				failed ? "Client stream failed" : "Client stream finished",
+				{
+					event: failed ? EVENT_CLIENT_STREAM_FAILURE : "client_stream_outcome",
+					scope: "final_client_stream",
+					requestId,
+					provider: accountProvider,
+					model: usageState?.model ?? requestedModel ?? "unknown",
+					httpStatus: response.status,
+					outcome,
+					reason,
+					terminalSeen,
+					completedBeforeCut,
+					// A read error alone cannot identify which peer caused the cut.
+					...(err ? { errorName: err.name, errorMessage: err.message } : {}),
+					countsSinceRestart: getClientStreamOutcomeCounts(),
+				},
+			);
+		};
+
 		const clientStream = createStreamAnalyticsPassthrough(response.body, {
 			totalTimeoutMs: STREAM_TIMEOUT_MS,
 			chunkTimeoutMs: CHUNK_TIMEOUT_MS,
@@ -1102,6 +1161,17 @@ async function forwardToClientInner(
 					// no model and no tokens, which is not a success.
 					const truncatedBeforeStart =
 						mustSeeMessageStart && !usageState.sawMessageStart;
+					const endReason =
+						rateLimitSniffer.firedReason ??
+						(truncatedBeforeStart
+							? STREAM_TRUNCATED_MID_CONTENT
+							: nativeEndReason);
+					observeOutcome(
+						endReason || !success ? "error" : "success",
+						endReason ?? (success ? "clean_eof" : "http_status"),
+						usageState.sawMessageStop ||
+							usageState.responsesTerminalKind !== null,
+					);
 					// R3: finish transport FIRST (terminal responseTimeMs computed
 					// here), then finalize usage as a tracked async promise. The stream
 					// drained to completion → endedCleanly so the provider's reported
@@ -1162,7 +1232,7 @@ async function forwardToClientInner(
 				if (usageState) {
 					flushPendingSseLine(usageState);
 				}
-				const outcome = streamErrorToOutcome(err);
+				const outcome = streamErrorToOutcome(err, options.clientSignal);
 				// A stream whose terminal event was already parsed (`message_stop`, or
 				// `response.completed` on the Codex native path — both set
 				// `sawMessageStop` together with `providerReportedOutput`) delivered
@@ -1227,22 +1297,23 @@ async function forwardToClientInner(
 						: "stream_read_error",
 				);
 				if (usageState) {
-					// The read error's message is surfaced nowhere else — log it so
-					// runtime-level read-error regressions (e.g. canary end-of-stream
-					// shapes) stay visible and reportable. Routine client disconnects
-					// go to DEBUG; everything else gets a few INFO samples per boot so
-					// the next incident is diagnosable without DEBUG logging enabled.
-					const detail =
-						`Stream read error for request ${requestId} ` +
-						`(provider=${ctx.provider.name}, model=${usageState.model ?? "unknown"}, ` +
-						`outcome=${completedBeforeCut ? "success (terminal event seen before cut)" : outcome}, ` +
-						`terminalSeen=${terminalSeen}): ${err.name}: ${err.message}`;
-					if (outcome !== "disconnect" && readErrorInfoSamples > 0) {
-						readErrorInfoSamples--;
-						log.info(detail);
-					} else {
-						log.debug(detail);
-					}
+					const readReason =
+						outcome === "disconnect"
+							? "client_cancel"
+							: outcome === "timeout"
+								? "stream_timeout"
+								: (rateLimitSniffer.firedReason ??
+									(mustSeeResponsesTerminal
+										? classifyNativeResponsesEnd(usageState)
+										: null) ??
+									"stream_read_error");
+					observeOutcome(
+						completedBeforeCut ? "success" : outcome,
+						completedBeforeCut ? "terminal_event_before_cut" : readReason,
+						terminalSeen,
+						completedBeforeCut,
+						err,
+					);
 					// R3: finish transport FIRST, then finalize. With the terminal event
 					// parsed, provider counts are trusted (R5, consequence 1 above).
 					// Otherwise the stream was cut mid-content → NOT endedCleanly, so

@@ -12,13 +12,15 @@
  * here (see payload-write-client / cross-thread integration tests for that).
  */
 
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, spyOn, test } from "bun:test";
+import { Logger } from "@clankermux/logger";
 import {
 	AsyncDbWriter,
 	type AsyncWriterHealth,
 	MAX_PAYLOAD_ENTRY_BYTES,
 	type PayloadReservation,
 	shouldLogAsyncWriterHealth,
+	shouldWarnAsyncWriterHealth,
 } from "../async-writer";
 import {
 	type PayloadEntryInput,
@@ -224,6 +226,42 @@ describe("AsyncDbWriter", () => {
 				// ignore cleanup failures
 			}
 			writer = null;
+		}
+	});
+
+	test("health sampler logs a fresh payload at DEBUG, then warns when it ages", () => {
+		const intervals = spyOn(globalThis, "setInterval");
+		const warn = spyOn(Logger.prototype, "warn").mockImplementation(() => {});
+		const debug = spyOn(Logger.prototype, "debug").mockImplementation(() => {});
+		try {
+			const harness = makeWriter();
+			writer = harness.writer;
+			const sample = intervals.mock.calls.find(
+				(call) => call[1] === 30000,
+			)?.[0];
+			if (typeof sample !== "function")
+				throw new Error("health sampler not registered");
+			const reservation = writer.reservePayload(4096);
+			if (!reservation) throw new Error("expected reservation");
+			publish(writer, reservation, "healthy-inflight", "abc");
+			sample();
+			expect(warn).not.toHaveBeenCalled();
+			expect(debug.mock.calls[0]?.[0]).toContain("payloadInFlight=1");
+			expect(debug.mock.calls[0]?.[0]).toContain("oldestPayloadAgeMs=0");
+
+			harness.fake().stats.oldestUnackedAgeMs = 5000;
+			sample();
+			expect(warn).toHaveBeenCalledTimes(1);
+			expect(warn.mock.calls[0]?.[0]).toContain("oldestPayloadAgeMs=5000");
+
+			harness.fake().settle(0, "committed");
+			harness.fake().stats.oldestUnackedAgeMs = 0;
+			sample();
+			expect(warn).toHaveBeenCalledTimes(1);
+		} finally {
+			intervals.mockRestore();
+			warn.mockRestore();
+			debug.mockRestore();
 		}
 	});
 
@@ -670,6 +708,99 @@ describe("AsyncDbWriter — 30s health log condition", () => {
 			...overrides,
 		};
 	}
+
+	test("ordinary fresh queued or in-flight work stays below warning severity", () => {
+		for (const h of [
+			health(),
+			health({ queuedJobs: 3, metadataQueuedJobs: 3 }),
+			health({
+				queuedJobs: 1,
+				payloadInFlightJobs: 1,
+				payloadBytesPending: 4096,
+			}),
+		]) {
+			expect(shouldWarnAsyncWriterHealth(h)).toBe(false);
+			expect(shouldWarnAsyncWriterHealth(h, h)).toBe(false);
+		}
+	});
+
+	test("sustained metadata or payload age warns with no queued jobs", () => {
+		for (const key of ["oldestMetadataAgeMs", "oldestPayloadAgeMs"] as const) {
+			expect(shouldWarnAsyncWriterHealth(health({ [key]: 4999 }))).toBe(false);
+			expect(shouldWarnAsyncWriterHealth(health({ [key]: 5000 }))).toBe(true);
+		}
+	});
+
+	test("backlog size and material growth between samples warn before admission fails", () => {
+		expect(shouldWarnAsyncWriterHealth(health({ queuedJobs: 100 }))).toBe(true);
+		expect(
+			shouldWarnAsyncWriterHealth(
+				health({ queuedJobs: 11 }),
+				health({ queuedJobs: 1 }),
+			),
+		).toBe(true);
+		expect(
+			shouldWarnAsyncWriterHealth(
+				health({ payloadBytesPending: ONE_MB + 4096 }),
+				health({ payloadBytesPending: 4096 }),
+			),
+		).toBe(true);
+		// A draining backlog and small fluctuations are ordinary activity.
+		expect(
+			shouldWarnAsyncWriterHealth(
+				health({ queuedJobs: 1 }),
+				health({ queuedJobs: 11 }),
+			),
+		).toBe(false);
+		expect(
+			shouldWarnAsyncWriterHealth(
+				health({ queuedJobs: 2 }),
+				health({ queuedJobs: 1 }),
+			),
+		).toBe(false);
+	});
+
+	test("growth from an empty sample warns without aged work or the 100-job floor", () => {
+		const empty = health();
+		expect(shouldWarnAsyncWriterHealth(health({ queuedJobs: 90 }), empty)).toBe(
+			true,
+		);
+		expect(
+			shouldWarnAsyncWriterHealth(
+				health({ payloadBytesPending: 5 * ONE_MB }),
+				empty,
+			),
+		).toBe(true);
+		expect(shouldWarnAsyncWriterHealth(empty, empty)).toBe(false);
+		expect(
+			shouldWarnAsyncWriterHealth(
+				health({
+					queuedJobs: 1,
+					payloadInFlightJobs: 1,
+					payloadBytesPending: 4096,
+				}),
+				empty,
+			),
+		).toBe(false);
+	});
+
+	test("unhealthy, suspended, fatal and recent drops warn even when idle", () => {
+		for (const h of [
+			health({ healthy: false }),
+			health({ payloadWriterHealthy: false }),
+			health({ payloadWriterSuspended: true }),
+			health({ payloadWriterFatal: "SQLITE_FULL" }),
+			health({ recentDrops: 1 }),
+		]) {
+			expect(shouldWarnAsyncWriterHealth(h)).toBe(true);
+		}
+		// Historical cumulative drops must not warn forever after recovery.
+		expect(
+			shouldWarnAsyncWriterHealth(
+				health({ metadataDropped: 4, payloadDropped: 7 }),
+			),
+		).toBe(false);
+	});
 
 	test("stays quiet when everything is idle", () => {
 		expect(shouldLogAsyncWriterHealth(health(), 0)).toBe(false);

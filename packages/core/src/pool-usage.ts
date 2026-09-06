@@ -791,9 +791,8 @@ export interface FamilyRow {
 	 *
 	 * Anthropic states a family's window as untouched until its first use in the
 	 * week — either by omitting it or by listing it at 0% with no reset — so this
-	 * is the pool's untouched capacity for the family. It is NEVER a percentage:
-	 * the account states no reading, and a 0% bar would claim a measurement
-	 * nobody made.
+	 * is the pool's untouched capacity for the family. The dashboard can display
+	 * it as 0% used, while keeping it separate from measured readings.
 	 *
 	 * Counted in neither {@link reportingCount} nor {@link unavailableReporters}
 	 * — an unopened account contributes nothing to the aggregate and is not
@@ -801,6 +800,12 @@ export interface FamilyRow {
 	 * unopened, and lands in none of the three.
 	 */
 	unopenedCount: number;
+	/** Identities of servable accounts with untouched capacity for this family. */
+	unopenedAccounts: Array<{
+		accountId: string;
+		name: string;
+		provider: string;
+	}>;
 }
 
 /**
@@ -864,7 +869,10 @@ export function listFamilyRows(
 	}
 
 	const live = listLiveScopedFamilies(accounts, now);
-	const unopenedByFamily = new Map<ModelFamily, number>();
+	const unopenedByFamily = new Map<
+		ModelFamily,
+		FamilyRow["unopenedAccounts"]
+	>();
 	for (const account of accounts) {
 		if (!account.usageData) continue;
 		if (!isAnthropicStyleShape(account.usageData)) continue;
@@ -890,10 +898,13 @@ export function listFamilyRows(
 				now,
 			});
 			if (evidence !== "unopened") continue;
-			unopenedByFamily.set(
-				family.family,
-				(unopenedByFamily.get(family.family) ?? 0) + 1,
-			);
+			const unopened = unopenedByFamily.get(family.family) ?? [];
+			unopened.push({
+				accountId: account.id,
+				name: account.name,
+				provider: account.provider,
+			});
+			unopenedByFamily.set(family.family, unopened);
 		}
 	}
 
@@ -906,7 +917,8 @@ export function listFamilyRows(
 			usage,
 			reportingCount: usage?.accounts.length ?? 0,
 			unavailableReporters: unavailableByFamily.get(family.family) ?? 0,
-			unopenedCount: unopenedByFamily.get(family.family) ?? 0,
+			unopenedCount: unopenedByFamily.get(family.family)?.length ?? 0,
+			unopenedAccounts: unopenedByFamily.get(family.family) ?? [],
 		});
 	}
 	// Worst first, and families nobody can report last: an unstated cap is not

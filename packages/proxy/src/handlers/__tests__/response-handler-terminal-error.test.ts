@@ -15,7 +15,8 @@
  * Streams that error WITHOUT having seen their terminal event keep the
  * existing error classification and the bytes/4 anti-undercount fallback.
  */
-import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, spyOn } from "bun:test";
+import { Logger } from "@clankermux/logger";
 import type { Account } from "@clankermux/types";
 import {
 	applyProviderOverloadCooldown,
@@ -23,7 +24,11 @@ import {
 	inspectProviderOverload,
 	tryAcquireProviderOverloadProbe,
 } from "../../provider-overload-cooldown";
-import { forwardToClient } from "../../response-handler";
+import {
+	EVENT_CLIENT_STREAM_FAILURE,
+	forwardToClient,
+	getClientStreamOutcomeCounts,
+} from "../../response-handler";
 import { clearAnthropicBurstThrottle } from "../burst-cooldown";
 import type { ProxyContext } from "../proxy-types";
 
@@ -226,7 +231,10 @@ function forward(
 	ctx: ProxyContext,
 	opts: {
 		requestId: string;
+		clientSignal?: AbortSignal;
 		nativeResponses?: boolean;
+		internal?: boolean;
+		retryAttempt?: number;
 		overloadProbeToken?: unknown;
 	},
 ) {
@@ -237,6 +245,7 @@ function forward(
 	return forwardToClient(
 		{
 			requestId: opts.requestId,
+			clientSignal: opts.clientSignal,
 			method: "POST",
 			path: "/v1/messages",
 			account: makeAccount(),
@@ -244,7 +253,8 @@ function forward(
 			requestBody: enc.encode("{}").buffer as ArrayBuffer,
 			response: new Response(body, { status: 200, headers }),
 			timestamp: Date.now(),
-			retryAttempt: 0,
+			internal: opts.internal,
+			retryAttempt: opts.retryAttempt ?? 0,
 			failoverAttempts: 0,
 			// biome-ignore lint/suspicious/noExplicitAny: probe token is opaque here
 			overloadProbeToken: (opts.overloadProbeToken as any) ?? null,
@@ -443,5 +453,225 @@ describe("stream read error WITHOUT the terminal event → unchanged error path"
 		// max(42, bytes/4) wins with the padding, flagged approximate
 		expect(calls.summaries[0]?.outputTokens).toBeGreaterThan(42);
 		expect(calls.summaries[0]?.outputApproximate).toBe(true);
+	});
+});
+
+describe("final client stream alert quality", () => {
+	const warnings: Array<Record<string, unknown>> = [];
+	let warn: ReturnType<typeof spyOn>;
+	beforeEach(() => {
+		warnings.length = 0;
+		warn = spyOn(Logger.prototype, "warn").mockImplementation(
+			(_message, data) => {
+				if (data?.event === EVENT_CLIENT_STREAM_FAILURE) warnings.push(data);
+			},
+		);
+	});
+	afterEach(() => warn.mockRestore());
+
+	it("non-client AbortError with a live inbound signal warns beyond the old sample budget", async () => {
+		const before = getClientStreamOutcomeCounts();
+		for (let i = 0; i < 7; i++) {
+			const { ctx, calls } = makeStreamCtx("codex");
+			const response = await forward(
+				streamFrom(codexChunks({ terminalEvent: false }), {
+					error: new DOMException("connection closed", "AbortError"),
+				}),
+				ctx,
+				{
+					requestId: `alert-cut-${i}`,
+					clientSignal: new AbortController().signal,
+					nativeResponses: true,
+					retryAttempt: 3,
+				},
+			);
+			await drain(response);
+			expect(response.status).toBe(200);
+			expect(calls.finishTransport).toHaveLength(1);
+			expect(calls.finishTransport[0]?.outcome).toBe("error");
+		}
+		expect(warnings).toHaveLength(7);
+		expect(warnings[0]).toMatchObject({
+			httpStatus: 200,
+			outcome: "error",
+			terminalSeen: false,
+			errorName: "AbortError",
+			scope: "final_client_stream",
+		});
+		// A delivered response after three retries is still ONE outcome.
+		expect(getClientStreamOutcomeCounts().error - before.error).toBe(7);
+	});
+
+	it.each([
+		false,
+		true,
+	])("inbound abort wins the upstream read race (terminal already seen: %s), regardless of error shape", async (terminalEvent) => {
+		for (const error of [
+			new DOMException("client stopped", "AbortError"),
+			new Error("connection closed"),
+			new Error("Stream timeout: no data received for 300000ms"),
+		]) {
+			const before = getClientStreamOutcomeCounts();
+			const client = new AbortController();
+			const chunks = codexChunks({ terminalEvent });
+			// Model the upstream fetch using the SAME inbound signal. Aborting
+			// rejects its pending read before any downstream cancel callback.
+			const body = new ReadableStream<Uint8Array>({
+				start(controller) {
+					for (const chunk of chunks) controller.enqueue(enc.encode(chunk));
+					client.signal.addEventListener(
+						"abort",
+						() => controller.error(client.signal.reason),
+						{ once: true },
+					);
+				},
+			});
+			const { ctx, calls } = makeStreamCtx("codex");
+			const response = await forward(body, ctx, {
+				requestId: `alert-abort-race-${terminalEvent}-${error.name}`,
+				clientSignal: client.signal,
+				nativeResponses: true,
+			});
+			if (!response.body) throw new Error("expected streaming response");
+			const reader = response.body.getReader();
+			for (const _chunk of chunks) await reader.read();
+			const pendingRead = reader.read();
+			client.abort(error);
+			await expect(pendingRead).rejects.toThrow(error.message);
+			await new Promise((resolve) => setTimeout(resolve, 20));
+			// Explicit downstream cancellation has not occurred at all.
+			expect(calls.finishTransport).toHaveLength(1);
+			expect(calls.finishTransport[0]?.outcome).toBe("disconnect");
+			expect(warnings).toHaveLength(0);
+			expect(getClientStreamOutcomeCounts()).toEqual({
+				...before,
+				disconnect: before.disconnect + 1,
+			});
+			if (terminalEvent) {
+				expect(calls.summaries[0]?.outputTokens).toBe(135);
+				expect(calls.summaries[0]?.outputApproximate).toBeFalsy();
+			} else {
+				expect(calls.summaries[0]?.outputApproximate).toBe(true);
+			}
+		}
+	});
+
+	it("clean-terminal AbortError stays successful and does not warn", async () => {
+		const before = getClientStreamOutcomeCounts();
+		const { ctx, calls } = makeStreamCtx("codex");
+		await drain(
+			await forward(
+				streamFrom(
+					codexChunks({ terminalEvent: true, unterminatedFinalLine: true }),
+					{
+						error: new DOMException("connection closed", "AbortError"),
+					},
+				),
+				ctx,
+				{
+					requestId: "alert-terminal-cut",
+					clientSignal: new AbortController().signal,
+					nativeResponses: true,
+				},
+			),
+		);
+		expect(warnings).toHaveLength(0);
+		expect(calls.finishTransport[0]?.outcome).toBe("success");
+		expect(getClientStreamOutcomeCounts().success - before.success).toBe(1);
+		expect(
+			getClientStreamOutcomeCounts().completedBeforeCut -
+				before.completedBeforeCut,
+		).toBe(1);
+		expect(getClientStreamOutcomeCounts().error).toBe(before.error);
+	});
+
+	it("explicit cancellation before completion is separate from failures and never warns", async () => {
+		const before = getClientStreamOutcomeCounts();
+		const { ctx, calls } = makeStreamCtx("codex");
+		const response = await forward(
+			streamFrom(codexChunks({ terminalEvent: false }).slice(0, 1), {
+				hang: true,
+			}),
+			ctx,
+			{
+				requestId: "alert-client-cancel",
+				nativeResponses: true,
+			},
+		);
+		if (!response.body) throw new Error("expected streaming response");
+		const reader = response.body.getReader();
+		await reader.read();
+		await reader.cancel();
+		expect(warnings).toHaveLength(0);
+		expect(calls.finishTransport[0]?.outcome).toBe("disconnect");
+		expect(getClientStreamOutcomeCounts().disconnect - before.disconnect).toBe(
+			1,
+		);
+		expect(getClientStreamOutcomeCounts().error).toBe(before.error);
+	});
+
+	it("a timeout remains actionable even after a successful terminal", async () => {
+		const before = getClientStreamOutcomeCounts();
+		const { ctx, calls } = makeStreamCtx("codex");
+		await drain(
+			await forward(
+				streamFrom(codexChunks({ terminalEvent: true }), {
+					error: new Error("Stream timeout: no data received for 300000ms"),
+				}),
+				ctx,
+				{
+					requestId: "alert-timeout",
+					clientSignal: new AbortController().signal,
+					nativeResponses: true,
+				},
+			),
+		);
+		expect(calls.finishTransport[0]?.outcome).toBe("timeout");
+		expect(warnings).toHaveLength(1);
+		expect(warnings[0]).toMatchObject({
+			outcome: "timeout",
+			terminalSeen: true,
+		});
+		expect(getClientStreamOutcomeCounts().timeout - before.timeout).toBe(1);
+	});
+
+	it.each([
+		"failed",
+		"missing",
+		"incomplete",
+	])("native %s at clean EOF follows the protocol outcome, not HTTP 200", async (kind) => {
+		const { ctx, calls } = makeStreamCtx("codex");
+		const chunks = codexChunks({ terminalEvent: false }).slice(0, 1);
+		if (kind !== "missing")
+			chunks.push(
+				`event: response.${kind}\ndata: {"type":"response.${kind}","response":{"usage":{"input_tokens":1,"output_tokens":2}}}\n\n`,
+			);
+		await drain(
+			await forward(streamFrom(chunks), ctx, {
+				requestId: `alert-eof-${kind}`,
+				nativeResponses: true,
+			}),
+		);
+		// An explicit response.incomplete is a normal token-limit/refusal stop,
+		// unlike a missing terminal or an explicit provider failure.
+		const failed = kind !== "incomplete";
+		expect(calls.finishTransport[0]?.outcome).toBe(
+			failed ? "error" : "success",
+		);
+		expect(warnings).toHaveLength(failed ? 1 : 0);
+	});
+
+	it("internal dispatches never contribute to final client stream counters", async () => {
+		const before = getClientStreamOutcomeCounts();
+		const { ctx } = makeStreamCtx("codex");
+		await drain(
+			await forward(codexStream({ terminalEvent: false }), ctx, {
+				requestId: "alert-internal",
+				nativeResponses: true,
+				internal: true,
+			}),
+		);
+		expect(warnings).toHaveLength(0);
+		expect(getClientStreamOutcomeCounts()).toEqual(before);
 	});
 });

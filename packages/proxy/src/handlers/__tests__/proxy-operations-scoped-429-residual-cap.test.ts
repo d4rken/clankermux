@@ -10,14 +10,21 @@ import {
 import { usageCache } from "@clankermux/providers";
 import type { Account, RequestMeta } from "@clankermux/types";
 import { clearProviderOverloadCooldown } from "../../provider-overload-cooldown";
-import { clearAnthropicBurstThrottle } from "../burst-cooldown";
+import {
+	clearAnthropicBurstThrottle,
+	isAnthropicBurstThrottleActive,
+} from "../burst-cooldown";
 import {
 	capResidualRung429Cooldown,
 	proxyWithAccount,
 	RESIDUAL_429_COOLDOWN_CAP_MS,
 } from "../proxy-operations";
 import type { ProxyContext } from "../proxy-types";
-import { BURST_RETRY_COOLDOWN_CAP_MS } from "../transparent-retry";
+import {
+	getRateLimitProbeAdmission,
+	markCapacityRestoredProbePending,
+	resetRateLimitProbeGatesForTests,
+} from "../rate-limit-cooldown";
 
 /**
  * The residual 429 rungs (`model_fallback_429`, `all_models_exhausted_429`)
@@ -31,7 +38,7 @@ import { BURST_RETRY_COOLDOWN_CAP_MS } from "../transparent-retry";
  *
  * Two caps now apply (capResidualRung429Cooldown):
  *  - provably scoped-only rejection on a trusted official-Anthropic account →
- *    the same ~90s cap the re-probe and burst-intercept rungs already use;
+ *    no account-wide cooldown, even when the family is unknown;
  *  - everything else → a flat 24h ceiling (honest short retry-afters pass
  *    through verbatim; multi-day/headerless pathologies are bounded).
  */
@@ -125,6 +132,7 @@ function makeProxyContext() {
 	const deadlineCalls: CooldownCall[] = [];
 	const escalatingCalls: CooldownCall[] = [];
 	const metaCalls: Array<{ status: string; resetTime: number | null }> = [];
+	const auditCalls: Array<{ errorMessage: string }> = [];
 	const ctx = {
 		strategy: { getNextAccount: () => null } as never,
 		dbOps: {
@@ -140,7 +148,10 @@ function makeProxyContext() {
 					return Promise.resolve();
 				},
 			),
-			saveRequest: mock((..._args: unknown[]) => Promise.resolve()),
+			saveRequest: mock((row: { errorMessage: string }) => {
+				auditCalls.push(row);
+				return Promise.resolve();
+			}),
 			updateAccountUsage: mock(() => Promise.resolve()),
 			updateAccountRateLimitMeta: mock(
 				(
@@ -200,7 +211,7 @@ function makeProxyContext() {
 			dispose: mock(() => {}),
 		} as never,
 	} as unknown as ProxyContext;
-	return { ctx, deadlineCalls, escalatingCalls, metaCalls };
+	return { ctx, deadlineCalls, escalatingCalls, metaCalls, auditCalls };
 }
 
 function makeRequest(body: ArrayBuffer) {
@@ -245,7 +256,7 @@ async function drive(
 describe("capResidualRung429Cooldown (unit)", () => {
 	const farFuture = INCIDENT_NOW + 4.5 * 24 * 60 * 60 * 1000;
 
-	it("caps a provably scoped-only rejection on a trusted account at the burst cap", () => {
+	it("returns no cooldown for a provably scoped-only rejection on a trusted account", () => {
 		expect(
 			capResidualRung429Cooldown(
 				makeAccount(),
@@ -253,7 +264,7 @@ describe("capResidualRung429Cooldown (unit)", () => {
 				farFuture,
 				INCIDENT_NOW,
 			),
-		).toBe(INCIDENT_NOW + BURST_RETRY_COOLDOWN_CAP_MS);
+		).toBeNull();
 	});
 
 	it("applies the flat 24h ceiling for a custom-endpoint account (untrusted headers)", () => {
@@ -300,6 +311,7 @@ describe("proxyWithAccount — residual rung 429 cooldown caps", () => {
 		clearProviderOverloadCooldown();
 		clearAnthropicBurstThrottle();
 		usageCache.delete("acc-oauth");
+		resetRateLimitProbeGatesForTests();
 	});
 
 	afterEach(() => {
@@ -308,23 +320,50 @@ describe("proxyWithAccount — residual rung 429 cooldown caps", () => {
 		clearProviderOverloadCooldown();
 		clearAnthropicBurstThrottle();
 		usageCache.delete("acc-oauth");
+		resetRateLimitProbeGatesForTests();
 	});
 
-	it("scoped incident 429 reaching the no-fallback rung: ~90s cap, reason model_fallback_429", async () => {
-		globalThis.fetch = mock(async () => rl429(scopedIncidentHeaders()));
-		const { ctx, deadlineCalls, escalatingCalls, metaCalls } =
+	it.each([
+		{ fallbacks: false, scope: "7d_oi" },
+		{ fallbacks: true, scope: "7d_oi" },
+		{ fallbacks: false, scope: "5h_unknown" },
+		{ fallbacks: true, scope: "5h_unknown" },
+	])("unknown-family scoped rejection has no cooldown: %j", async ({
+		fallbacks,
+		scope,
+	}) => {
+		const headers = Object.fromEntries(
+			Object.entries(scopedIncidentHeaders()).map(([key, value]) => [
+				key.replace("7d_oi", scope),
+				value,
+			]),
+		);
+		globalThis.fetch = mock(async () => rl429(headers));
+		const { ctx, deadlineCalls, escalatingCalls, metaCalls, auditCalls } =
 			makeProxyContext();
+		const account = makeAccount({
+			model_mappings: fallbacks
+				? JSON.stringify({
+						"totally-unknown-model": ["unknown-primary", "unknown-fallback"],
+					})
+				: null,
+		});
+		markCapacityRestoredProbePending(account.id);
+		expect(getRateLimitProbeAdmission(account)).toBe("admitted");
+		expect(getRateLimitProbeAdmission(account)).toBe("suppressed");
 
-		const result = await drive(ctx, makeAccount());
+		const result = await drive(ctx, account);
 
 		expect(result).toBeNull();
-		const call = [...deadlineCalls, ...escalatingCalls].find(
-			(c) => c.reason === "model_fallback_429",
-		);
-		expect(call).toBeDefined();
-		expect((call as CooldownCall).until).toBeLessThanOrEqual(
-			INCIDENT_NOW + BURST_RETRY_COOLDOWN_CAP_MS,
-		);
+		expect(globalThis.fetch).toHaveBeenCalledTimes(fallbacks ? 2 : 1);
+		expect(deadlineCalls).toHaveLength(0);
+		expect(escalatingCalls).toHaveLength(0);
+		expect(account.rate_limited_until).toBeNull();
+		expect(account.rate_limited_reason).toBeNull();
+		expect(getRateLimitProbeAdmission(account)).toBe("admitted");
+		expect(isAnthropicBurstThrottleActive()).toBe(false);
+		expect(auditCalls).toHaveLength(1);
+		expect(auditCalls[0]?.errorMessage).toBe("scoped_quota_rejected_429");
 		// The scoped projection also keeps the persisted meta honest: the 5h
 		// claim's own pair, never the summary rejected + weekly epoch.
 		expect(metaCalls).toHaveLength(1);

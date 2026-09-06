@@ -74,6 +74,7 @@ export {
 	type WindowExhaustionInput,
 	type WindowExhaustionSource,
 	weeklyTimeToFull,
+	windowForecast,
 } from "./capacity-runway";
 export {
 	computeCapacityRunwayScenario,

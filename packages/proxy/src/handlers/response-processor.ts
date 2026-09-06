@@ -297,7 +297,19 @@ export async function processProxyResponse(
 		const isKeepalive =
 			requestMeta?.internal === true &&
 			requestMeta?.headers?.get("x-clankermux-keepalive") === "true";
-		if (isKeepalive) {
+		const scopedOnlyRejection =
+			response.status === 429 &&
+			account.provider === "anthropic" &&
+			!account.custom_endpoint &&
+			isScopedOnlyUnifiedRejection(response.headers);
+		if (scopedOnlyRejection) {
+			// The request must fail over, but the live account-wide claims prove
+			// other families can serve. The projected 5h reset is metadata only;
+			// it must never become a cooldown or shared burst marker.
+			// With no known family to memoize, later requests may re-ask it;
+			// that is the accepted cost of preserving other models' availability.
+			completeRateLimitProbe(account, "abandoned");
+		} else if (isKeepalive) {
 			log.warn(
 				`Keepalive replay for ${account.name} got ${response.status} — skipping cooldown (synthetic burst, not a real per-account rate limit)`,
 			);

@@ -8,16 +8,16 @@ const log = new Logger("BurstCooldown");
 // unconditionally on and not env-configurable.
 
 /**
- * Lifetime (ms) of the shared burst marker that suppresses sibling diversion.
- *
- * Sized to cover (≥) a SINGLE transparent-retry hold budget
- * (`BURST_RETRY_MAX_HOLD_MS = 120_000` in transparent-retry.ts). A request that
- * holds its cache account for the full budget must keep the marker live for the
- * whole hold, so concurrent affinity requests keep holding their own cache
- * accounts (sibling diversion suppressed) rather than seeing the marker lapse
- * mid-storm and diverting. If you change the hold budget, change this in step.
+ * Lifetime (ms) of upstream burst evidence suppressing sibling diversion.
+ * Only a fresh upstream burst observation renews it. Individual holds have
+ * independent budgets and may finish after this marker expires. Success on one
+ * account neither renews nor clears provider-wide evidence: concurrent requests
+ * may still encounter a real burst. Without new evidence, recovery is bounded
+ * by this lifetime regardless of successful traffic volume.
  */
 const BURST_RETRY_MARKER_MS = 120_000;
+/** At most one continued-burst summary per interval, emitted on observation. */
+const BURST_RETRY_SUMMARY_MS = 30_000;
 /**
  * Module-level cap on simultaneously-held requests. Exported so callers/tests
  * that need to reason about the cap (e.g. to saturate it) read the single
@@ -46,10 +46,14 @@ export const BURST_RETRY_MAX_CONCURRENT_HOLDS = 8;
 
 // Single provider-family marker (no per-account keying — see note above).
 let anthropicBurstThrottleUntil: number | null = null;
+let burstObservations = 0;
+let observationsSinceSummary = 0;
+let lastSummaryAt = 0;
 
 /**
- * Mark the Anthropic per-IP burst throttle as active until
+ * Record upstream burst evidence and mark the Anthropic throttle active until
  * `now + BURST_RETRY_MARKER_MS`. Extends (never shortens) an existing marker.
+ * Do not call on hold admission, suppressed probes, or successful responses.
  *
  * `markerMs` is an injectable override for tests; it defaults to the fixed
  * `BURST_RETRY_MARKER_MS` constant. Production never passes it.
@@ -59,15 +63,33 @@ export function markAnthropicBurstThrottle(
 	markerMs = BURST_RETRY_MARKER_MS,
 ): void {
 	const until = now + markerMs;
-	const previous =
-		anthropicBurstThrottleUntil && anthropicBurstThrottleUntil > now
-			? anthropicBurstThrottleUntil
-			: null;
-	const effectiveUntil = previous ? Math.max(previous, until) : until;
+	let previous = anthropicBurstThrottleUntil;
+	if (previous !== null && previous <= now) {
+		// Fresh evidence immediately reactivates protection. Retain the old
+		// window's counts without claiming that routing has recovered.
+		log.info(
+			`Anthropic-OAuth previous burst evidence expired before fresh evidence; observations=${burstObservations}, newObservations=${observationsSinceSummary}`,
+		);
+		clearAnthropicBurstThrottle();
+		previous = null;
+	}
+	const effectiveUntil = previous !== null ? Math.max(previous, until) : until;
 	anthropicBurstThrottleUntil = effectiveUntil;
-	log.warn(
-		`Anthropic-OAuth burst throttle active until ${new Date(effectiveUntil).toISOString()}; holding cache accounts (sibling diversion suppressed)`,
-	);
+	burstObservations += 1;
+	observationsSinceSummary += 1;
+	if (previous === null) {
+		lastSummaryAt = now;
+		log.warn(
+			`Anthropic-OAuth burst throttle active until ${new Date(effectiveUntil).toISOString()}; holding cache accounts (sibling diversion suppressed); observations=1`,
+		);
+		observationsSinceSummary = 0;
+	} else if (now - lastSummaryAt >= BURST_RETRY_SUMMARY_MS) {
+		log.info(
+			`Anthropic-OAuth burst throttle continues until ${new Date(effectiveUntil).toISOString()}; observations=${burstObservations}, newObservations=${observationsSinceSummary}`,
+		);
+		lastSummaryAt = now;
+		observationsSinceSummary = 0;
+	}
 }
 
 /**
@@ -80,7 +102,10 @@ export function getAnthropicBurstThrottleUntil(
 	const until = anthropicBurstThrottleUntil;
 	if (!until) return null;
 	if (until <= now) {
-		anthropicBurstThrottleUntil = null;
+		log.info(
+			`Anthropic-OAuth burst evidence expired; observations=${burstObservations}, newObservations=${observationsSinceSummary}; sibling diversion restored`,
+		);
+		clearAnthropicBurstThrottle();
 		return null;
 	}
 	return until;
@@ -98,6 +123,9 @@ export function isAnthropicBurstThrottleActive(now = Date.now()): boolean {
  */
 export function clearAnthropicBurstThrottle(): void {
 	anthropicBurstThrottleUntil = null;
+	burstObservations = 0;
+	observationsSinceSummary = 0;
+	lastSummaryAt = 0;
 }
 
 // ---------------------------------------------------------------------------

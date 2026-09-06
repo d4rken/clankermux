@@ -347,6 +347,29 @@ describe("GET /api/runway", () => {
 		expect(body.accounts[0].windows[0].utilizationPct).toBe(10);
 	});
 
+	it("serves weekly evidence independently while a fresh five-hour window holds the account out", async () => {
+		usageCache.set(
+			"acc-1",
+			usage(13, BASE + 292 * MINUTE_MS, 47, BASE + DAY_MS),
+		);
+		const body = await runway(
+			makeDbOps({ accounts: [makeAccount({})], keys: [makeKey({})] }),
+		);
+		expect(body.keys[0].outcome).toMatchObject({
+			kind: "unknown",
+			learningAccountIds: ["acc-1"],
+		});
+		expect(body.accounts[0].windows[0].forecast).toEqual({
+			state: "learning",
+			reason: "short-history",
+			readyAtMs: BASE + 52 * MINUTE_MS,
+		});
+		expect(body.accounts[0].windows[1].forecast).toMatchObject({
+			state: "projected",
+			lowConfidence: false,
+		});
+	});
+
 	it("serves a prediction only once a trend has been established", async () => {
 		const reset = BASE + 3 * HOUR_MS;
 		usageCache.set("acc-1", usage(60, reset, 20, reset));
@@ -503,6 +526,10 @@ describe("GET /api/runway usage freshness", () => {
 		]);
 		expect(body.accounts[0].usageAsOfMs).toBe(BASE);
 		expect(body.generatedAt).toBe(BASE + 15 * MINUTE_MS);
+		expect(body.accounts[0].windows.map((w) => w.forecast)).toEqual([
+			null,
+			null,
+		]);
 		// Nothing DERIVED comes off it: no prediction, and the scan cannot see the
 		// account at all, so the key's outcome is unknown rather than "out now".
 		expect(body.accounts[0].windows.map((w) => w.prediction)).toEqual([

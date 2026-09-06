@@ -3,6 +3,7 @@ import type {
 	RunwayBand,
 	RunwayCause,
 	RunwayOutcome,
+	RunwayWindowForecast,
 	UsageBurnAnchor,
 	UsagePrediction,
 } from "@clankermux/types";
@@ -465,6 +466,45 @@ export function isLearningEstimate(
 		estimate.evidenceSpanMs != null &&
 		estimate.evidenceSpanMs < ANCHOR_FULL_CONFIDENCE_MIN_SPAN_MS
 	);
+}
+
+/** Describe a single window without discarding its evidence when a sibling is learning. */
+export function windowForecast(
+	input: WindowExhaustionInput,
+	now: number,
+): RunwayWindowForecast | null {
+	const estimate = estimateWindowExhaustion(input, now);
+	if (estimate.source === "none") return null;
+	if (isLearningEstimate(estimate, input.utilizationPct)) {
+		const reason =
+			estimate.source === "unstarted"
+				? "unstarted"
+				: input.utilizationPct <= 0
+					? "no-usage"
+					: "short-history";
+		// The estimator's span is measured at the observation on its primary and
+		// regression paths, and at now on the lifetime fallback. Preserve that
+		// origin (including revision anchors), rather than restarting a timer.
+		const measuredAt =
+			estimate.source === "lifetime-average"
+				? now
+				: (input.observedAtMs ?? now);
+		return {
+			state: "learning",
+			reason,
+			readyAtMs:
+				reason === "short-history" && estimate.evidenceSpanMs != null
+					? measuredAt -
+						estimate.evidenceSpanMs +
+						ANCHOR_FULL_CONFIDENCE_MIN_SPAN_MS
+					: null,
+		};
+	}
+	return {
+		state: "projected",
+		exhaustsAtMs: estimate.exhaustsAtMs,
+		lowConfidence: estimate.lowConfidence,
+	};
 }
 
 /**

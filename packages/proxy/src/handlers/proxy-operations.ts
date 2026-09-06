@@ -69,7 +69,10 @@ import {
 	resolveFamilyWeeklyExclusionFromHeaders,
 } from "./family-weekly-gate";
 import { ERROR_MESSAGES, type ProxyContext } from "./proxy-types";
-import { applyRateLimitCooldown } from "./rate-limit-cooldown";
+import {
+	applyRateLimitCooldown,
+	completeRateLimitProbe,
+} from "./rate-limit-cooldown";
 import { makeProxyRequest, validateProviderPath } from "./request-handler";
 import {
 	handleProxyError,
@@ -404,7 +407,8 @@ export function extractCooldownUntil(
 export const RESIDUAL_429_COOLDOWN_CAP_MS = 24 * 60 * 60 * 1000;
 
 /**
- * Cap the cooldown deadline the two residual 429 rungs write.
+ * Cap the cooldown deadline the two residual 429 rungs write, or return null
+ * when live scoped-only evidence proves no account-wide cooldown is warranted.
  *
  * These rungs are by construction the residue after every evidence-gated rung
  * declined — they possess NO corroborating account-wide evidence, so an
@@ -418,8 +422,9 @@ export const RESIDUAL_429_COOLDOWN_CAP_MS = 24 * 60 * 60 * 1000;
  *
  * Two arms:
  *  - a PROVABLY scoped-only rejection on a trusted official-Anthropic account
- *    gets the same ~90s cap the re-probe (:re-probe rung) and burst-intercept
- *    rungs already apply to this exact `7d_oi` shape;
+ *    gets no account-wide cooldown. An unknown family cannot be memoized, so
+ *    later requests may re-ask it; this is the accepted cost of keeping other
+ *    models available rather than disabling the entire account;
  *  - everything else gets the flat 24h ceiling. The asymmetry is deliberate:
  *    an over-capped genuine exhaustion self-corrects on the next 429 (which
  *    lands on an evidence rung once the usage cache recovers), whereas an
@@ -434,13 +439,14 @@ export function capResidualRung429Cooldown(
 	response: Response,
 	uncappedUntil: number,
 	now: number,
-): number {
+): number | null {
 	if (
+		response.status === 429 &&
 		account.provider === "anthropic" &&
 		!account.custom_endpoint &&
 		isScopedOnlyUnifiedRejection(response.headers)
 	) {
-		return Math.min(uncappedUntil, now + BURST_RETRY_COOLDOWN_CAP_MS);
+		return null;
 	}
 	return Math.min(uncappedUntil, now + RESIDUAL_429_COOLDOWN_CAP_MS);
 }
@@ -825,6 +831,7 @@ export async function proxyUnauthenticated(
 
 		return forwardToClient(
 			{
+				clientSignal: req.signal,
 				requestId: requestMeta.id,
 				method: req.method,
 				path: url.pathname,
@@ -1507,6 +1514,23 @@ export async function proxyWithAccount(
 			let requestedModel: string | null = null;
 			if (effectiveBodyBuffer) requestedModel = effectiveBodyContext.getModel();
 
+			// Live scoped rejection is newer than even a freshly polled snapshot.
+			// Resolve it before the reprobe shortcut as quota can run out mid-hold.
+			const liveScopedOnlyRejection =
+				rawResponse.status === 429 &&
+				account.provider === "anthropic" &&
+				!account.custom_endpoint &&
+				isScopedOnlyUnifiedRejection(rawResponse.headers);
+			const headerFamilyExclusion =
+				rawResponse.status === 429 && !isTrustedProbe("any")
+					? resolveFamilyWeeklyExclusionFromHeaders(
+							account,
+							requestedModel,
+							rawResponse,
+							Date.now(),
+						)
+					: null;
+
 			// ── Transparent burst-retry: re-probe mode ──────────────────────────
 			// A re-probe of a held account that came back 429 (still throttled):
 			// apply the no-streak/no-anchor cooldown and signal "still throttled"
@@ -1520,9 +1544,29 @@ export async function proxyWithAccount(
 			// never a transient burst worth re-probing.
 			if (
 				options?.reprobe &&
+				!liveScopedOnlyRejection &&
 				rawResponse.status === 429 &&
 				!isAnthropicOutOfCredits(rawResponse)
 			) {
+				// Hold admission does not renew shared evidence. A new upstream
+				// burst does, using the same live-evidence classifier as first attempts.
+				const now = Date.now();
+				const classification = classify429Transient({
+					response: rawResponse,
+					account,
+					now,
+					getCapacity: () =>
+						getFreshCapacity(
+							usageCache,
+							account.id,
+							account.provider,
+							now,
+							BURST_RETRY_MAX_USAGE_AGE_MS,
+						),
+				});
+				if (classification.retryable) {
+					markAnthropicBurstThrottle(now);
+				}
 				// Same ceiling as the burst intercept, for the same reason and with
 				// more force: a re-probe only happens INSIDE an active hold, so this
 				// 429 is by construction one the orchestrator is still treating as
@@ -1714,6 +1758,7 @@ export async function proxyWithAccount(
 			if (
 				rawResponse.status === 429 &&
 				account.provider === "anthropic" &&
+				!liveScopedOnlyRejection &&
 				!options?.reprobe &&
 				!isTrustedProbe("any")
 			) {
@@ -1820,7 +1865,7 @@ export async function proxyWithAccount(
 			if (
 				rawResponse.status === 429 &&
 				requestedModel &&
-				!options?.reprobe &&
+				(!options?.reprobe || headerFamilyExclusion !== null) &&
 				!isTrustedProbe("any") &&
 				!isAnthropicHardLimitStatus(rawResponse) &&
 				// Live account-wide evidence outranks EVERY family verdict: when the
@@ -1846,29 +1891,22 @@ export async function proxyWithAccount(
 					familyFreshCapacity,
 					now,
 				);
-				// Header-evidence fallback, gated on the cache being UNAVAILABLE
-				// (null even after the shared refresh above — post-restart with the
-				// usage endpoint down, or the endpoint 429ing its own poll). The
-				// cache path stays primary: when fresh usage exists, whatever it
-				// says (including "not exhausted") wins and the headers stay out of
-				// the decision. See resolveFamilyWeeklyExclusionFromHeaders for why
-				// this cannot misread a burst (bursts carry no unified headers) or
-				// an account-wide 429 (its 5h/7d reject), and why the worst case of
-				// an unknown claim shape is bounded (failover without a cooldown,
-				// never a lock). Without this, the exact 2026-08-02 input — cache
-				// empty, refresh failed, `7d_oi` rejected with 5h/7d headroom —
-				// fell to the model-fallback rung, which copied the claim-scoped
-				// retry-after into a 14.4h ACCOUNT-WIDE lock.
-				const headerFamilyExclusion =
-					!cacheFamilyExclusion && familyFreshCapacity === null
-						? resolveFamilyWeeklyExclusionFromHeaders(
-								account,
-								requestedModel,
-								rawResponse,
-								now,
-							)
+				// The response is authoritative: a recent usage poll can still lag a
+				// scoped rejection. If it lacks a usable reset, retain the fresh
+				// same-family cache reset so the memo still prevents repeat 429s.
+				const cachedReset =
+					cacheFamilyExclusion &&
+					cacheFamilyExclusion.family === headerFamilyExclusion?.family &&
+					Number.isFinite(cacheFamilyExclusion.resetAt) &&
+					cacheFamilyExclusion.resetAt > now
+						? cacheFamilyExclusion.resetAt
 						: null;
-				const familyExclusion = cacheFamilyExclusion ?? headerFamilyExclusion;
+				const familyExclusion = headerFamilyExclusion
+					? {
+							...headerFamilyExclusion,
+							resetAt: headerFamilyExclusion.resetAt ?? cachedReset ?? now,
+						}
+					: cacheFamilyExclusion;
 				if (familyExclusion) {
 					const reason: RateLimitReason = "family_weekly_exhausted_429";
 					// Remember what this 429 just taught us, so the proactive gate can
@@ -1884,6 +1922,7 @@ export async function proxyWithAccount(
 						familyExclusion.resetAt,
 						now,
 					);
+					completeRateLimitProbe(account, "abandoned");
 					// Persist the 429's unified-status header so the dashboard chip
 					// reflects the live value rather than the last success.
 					persistRateLimitStatusMeta(account, rawResponse, ctx, provider);
@@ -1924,7 +1963,7 @@ export async function proxyWithAccount(
 						}),
 					);
 					log.warn(
-						`Account ${account.name} weekly-exhausted for family=${familyExclusion.family} (429, unified headroom present${headerFamilyExclusion ? "; header evidence — usage cache unavailable" : ""}) — failing over WITHOUT account-wide cooldown`,
+						`Account ${account.name} weekly-exhausted for family=${familyExclusion.family} (429, unified headroom present${headerFamilyExclusion ? "; live scoped header evidence" : ""}) — failing over WITHOUT account-wide cooldown`,
 					);
 					return await fail({ kind: "other" }, rawResponse);
 				}
@@ -1997,10 +2036,10 @@ export async function proxyWithAccount(
 					// concurrency race (Finding 1): a sibling-Anthropic affinity
 					// request that arrives after this account is marked cooled but
 					// before the marker is set would otherwise divert to a sibling,
-					// breaking the "never sibling on burst" invariant. The hold
-					// orchestrator also sets the marker (extends-never-shortens, so a
-					// double set is harmless), but the authoritative set must happen
-					// here, regardless of whether a hold slot is later acquired.
+					// breaking the "never sibling on burst" invariant. Hold
+					// admission does not renew the marker: only a new upstream 429
+					// extends burst evidence, regardless of whether a hold slot is
+					// later acquired.
 					markAnthropicBurstThrottle(now);
 					// Cap the deadline at the burst ceiling. The classification above
 					// and `extractCooldownUntil` read different evidence — headroom vs
@@ -2144,7 +2183,10 @@ export async function proxyWithAccount(
 						// cooldown deadline; rateLimitInfo drives the header-only
 						// status-meta persistence (a no-op for Codex, which has no
 						// unified-status header).
-						if (account.provider === "codex") {
+						if (cooldownUntil === null) {
+							completeRateLimitProbe(account, "abandoned");
+							persistRateLimitStatusMeta(account, rawResponse, ctx, provider);
+						} else if (account.provider === "codex") {
 							applyCodexObservation(account, rawResponse, ctx, {
 								source: "real-traffic",
 								rateLimitInfo: provider.parseRateLimit(rawResponse),
@@ -2178,7 +2220,8 @@ export async function proxyWithAccount(
 								accountUsed: account.id,
 								statusCode: 429,
 								success: false,
-								errorMessage: reason,
+								errorMessage:
+									cooldownUntil === null ? "scoped_quota_rejected_429" : reason,
 								responseTime,
 								failoverAttempts,
 								usage: requestedModel ? { model: requestedModel } : undefined,
@@ -2202,7 +2245,12 @@ export async function proxyWithAccount(
 								fallbackFromModel: requestMeta.fallbackFromModel ?? undefined,
 							}),
 						);
-						return await fail({ kind: "hard_429", cooldownUntil }, rawResponse);
+						return await fail(
+							cooldownUntil === null
+								? { kind: "other" }
+								: { kind: "hard_429", cooldownUntil },
+							rawResponse,
+						);
 					}
 					// Codex/ChatGPT entitlement error: the model exists, but THIS
 					// account's plan is not entitled to it. That is account-scoped —
@@ -2425,7 +2473,10 @@ export async function proxyWithAccount(
 						// cooldown deadline; rateLimitInfo drives the header-only
 						// status-meta persistence (a no-op for Codex, which has no
 						// unified-status header).
-						if (account.provider === "codex") {
+						if (cooldownUntil === null) {
+							completeRateLimitProbe(account, "abandoned");
+							persistRateLimitStatusMeta(account, rawResponse, ctx, provider);
+						} else if (account.provider === "codex") {
 							applyCodexObservation(account, rawResponse, ctx, {
 								source: "real-traffic",
 								rateLimitInfo: provider.parseRateLimit(rawResponse),
@@ -2459,7 +2510,8 @@ export async function proxyWithAccount(
 								accountUsed: account.id,
 								statusCode: 429,
 								success: false,
-								errorMessage: reason,
+								errorMessage:
+									cooldownUntil === null ? "scoped_quota_rejected_429" : reason,
 								responseTime,
 								failoverAttempts,
 								usage: requestedModel ? { model: requestedModel } : undefined,
@@ -2640,6 +2692,7 @@ export async function proxyWithAccount(
 				);
 				return forwardToClient(
 					{
+						clientSignal: req.signal,
 						requestId: requestMeta.id,
 						method: req.method,
 						path: url.pathname,
@@ -2721,6 +2774,7 @@ export async function proxyWithAccount(
 				settleOverloadProbe("abandoned");
 				return forwardToClient(
 					{
+						clientSignal: req.signal,
 						requestId: requestMeta.id,
 						method: req.method,
 						path: url.pathname,
@@ -2837,6 +2891,7 @@ export async function proxyWithAccount(
 		overloadProbeToken = null;
 		return forwardToClient(
 			{
+				clientSignal: req.signal,
 				requestId: requestMeta.id,
 				method: req.method,
 				path: url.pathname,
@@ -2997,6 +3052,7 @@ export async function proxyForcedAccount(
 		);
 		return forwardToClient(
 			{
+				clientSignal: req.signal,
 				requestId: requestMeta.id,
 				method: req.method,
 				path: url.pathname,
@@ -3195,6 +3251,7 @@ export async function proxyForcedAccount(
 		liveForcedUpstream = null;
 		return forwardToClient(
 			{
+				clientSignal: req.signal,
 				requestId: requestMeta.id,
 				method: req.method,
 				path: url.pathname,
