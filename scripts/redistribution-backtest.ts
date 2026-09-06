@@ -297,7 +297,7 @@ async function main(): Promise<void> {
 		replay,
 		cohorts,
 		verdict,
-		knownLimits: knownLimitsFor(replay, verdict),
+		knownLimits: knownLimitsFor(replay, cohorts, verdict),
 		notes: [
 			`Replay took ${(replayMs / 1000).toFixed(1)} s over ${replay.instants} instants; scoring and bootstrap ${(scoringMs / 1000).toFixed(1)} s.`,
 			`Grid step ${options.stepMinutes} min; rows loaded ${LOAD_PAD_MS / DAY_MS} days either side of the replay interval.`,

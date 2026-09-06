@@ -950,6 +950,60 @@ describe("computeCapacityRunwayScenario", () => {
 			expect(result.projectedExhaustions).toEqual([]);
 		});
 
+		/**
+		 * A's weekly is spent and resets one hour out, so the pool is out AT `now`
+		 * and A's five-hour window is the one still pending.
+		 *
+		 * Weekly demand: the spent window filled 100 pp over 7 d − 1 h, which is
+		 * demand the survivors carry, but nothing here turns on its size. Five-hour
+		 * demand: 60 pp in the 1 h since the window started = 60 %/h x 20 units =
+		 * 1200 units/h. A is alone in its class, so from the weekly reset at
+		 * NOW+1 h it takes all of it back at 60 %/h and fills the last 40 pp
+		 * 40/60 h later, at NOW+1h+2/3h — still inside the five-hour window's FIRST
+		 * cycle, which runs to its reset at NOW+4 h.
+		 */
+		const outNowWithPendingSibling = (): RunwayScenarioAccountInput[] => [
+			acct("A", [weekly(100, 7 - 1 / 24), fiveHour(60, 1)]),
+		];
+
+		it("keeps walking a dead account's other windows when the pool is out now", () => {
+			const result = computeCapacityRunwayScenario(
+				outNowWithPendingSibling(),
+				NOW,
+			);
+			expect(result.kind).toBe("out-now");
+			if (result.kind !== "out-now") throw new Error("unreachable");
+			expect(result.causes).toEqual([
+				{ accountId: "A", windowKind: "seven_day" },
+			]);
+			expect(result.eventBudgetExhausted).toBeUndefined();
+			// The weekly itself is a fact at 100 %, never a projection; the
+			// five-hour window is the projection the caller can still act on.
+			expect(result.projectedExhaustions).toHaveLength(1);
+			expect(result.projectedExhaustions[0]).toMatchObject({
+				accountId: "A",
+				windowKind: "five_hour",
+			});
+			expect(result.projectedExhaustions[0].exhaustsAtMs).toBeCloseTo(
+				NOW + HOUR + (40 / 60) * HOUR,
+				-3,
+			);
+		});
+
+		it("discloses a truncated walk on an out-now pool too", () => {
+			// One event (the weekly reset at NOW+1 h) fits the budget; the five-hour
+			// exhaustion is the second, so the scan stops right after recording it
+			// and cannot say the list is complete.
+			const result = computeCapacityRunwayScenario(
+				outNowWithPendingSibling(),
+				NOW,
+				undefined,
+				{ maxEvents: 1 },
+			);
+			expect(result.kind).toBe("out-now");
+			expect(result.eventBudgetExhausted).toBe("projection");
+		});
+
 		it("lists an included learner's own exhaustion", () => {
 			// The add case: 60%/d over three accounts, 20%/d each. A and B fill at
 			// 3.5d with the newcomer at 70%, which then takes all of it and fills

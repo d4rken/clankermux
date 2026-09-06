@@ -188,7 +188,7 @@ describe("end to end on a fixture database", () => {
 			replay,
 			cohorts,
 			verdict,
-			knownLimits: knownLimitsFor(replay, verdict),
+			knownLimits: knownLimitsFor(replay, cohorts, verdict),
 			notes: ["fixture run"],
 		});
 		expect(markdown).toContain("## Verdict");

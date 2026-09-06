@@ -240,8 +240,10 @@ export interface RunwayScenarioBasis {
 	 * window's first reset or credit revival in the scan — the cycle the reading
 	 * at `now` belongs to. A window already at 100 % at `now` has no entry (that
 	 * is a fact, not a projection), and neither does one whose first exhaustion
-	 * falls in a later cycle. Sorted by `exhaustsAtMs`, then `accountId`, then
-	 * `windowKind`; `[]` when no baseline scan completed.
+	 * falls in a later cycle. A dead account's OTHER windows are still walked and
+	 * may have entries, so an `out-now` pool is not automatically an empty list.
+	 * Sorted by `exhaustsAtMs`, then `accountId`, then `windowKind`; `[]` when no
+	 * baseline scan completed.
 	 *
 	 * An ABSENT entry is not survival unless the scan ran to completion: see
 	 * `eventBudgetExhausted: "projection"`.

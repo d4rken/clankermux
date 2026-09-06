@@ -818,6 +818,13 @@ export interface InstantReplay {
 	records: RedistributionRecord[];
 	classes: ClassReplay[];
 	placeholderWindowsSkipped: number;
+	/**
+	 * `${tag}::${demandClass}` → seven-day windows the label horizon dropped
+	 * while carrying that tag. A pair with a count > 0 is unlabelled only
+	 * because its weekly truth is still unfolding, which a later `--to` fixes;
+	 * a pair with no count never had a tagged weekly window at all.
+	 */
+	pendingWeeklyByTagClass: Map<string, number>;
 }
 
 const scenarioInputOf = (entry: RosterEntry): RunwayScenarioAccountInput => ({
@@ -882,6 +889,7 @@ export function replayInstant(
 	const records: RedistributionRecord[] = [];
 	const classes: ClassReplay[] = [];
 	let placeholderWindowsSkipped = 0;
+	const pendingWeeklyByTagClass = new Map<string, number>();
 
 	for (const [demandClass, entries] of byClass) {
 		const inputs = entries.map(scenarioInputOf);
@@ -938,13 +946,26 @@ export function replayInstant(
 					window.labelResetAtMs,
 					window.nextWindowStartsMs,
 				);
+				// Tagged BEFORE the horizon drop: a dropped weekly window is what
+				// distinguishes a (tag, class) pair that a later `--to` can label
+				// from one this roster can never label.
+				const context = transitionsAt(events, T, entry.accountId, demandClass);
 				// Label horizon: a window whose truth is still unfolding at the end of
 				// the loaded history would be scored on an outcome nobody observed.
 				const truthEnd =
 					outcome.kind === "exhausted" ? outcome.atMs : window.labelResetAtMs;
-				if (truthEnd == null || truthEnd >= range.toMs) continue;
-
-				const context = transitionsAt(events, T, entry.accountId, demandClass);
+				if (truthEnd == null || truthEnd >= range.toMs) {
+					if (window.kind === "seven_day") {
+						for (const tag of context.tags) {
+							const key = `${tag}::${demandClass}`;
+							pendingWeeklyByTagClass.set(
+								key,
+								(pendingWeeklyByTagClass.get(key) ?? 0) + 1,
+							);
+						}
+					}
+					continue;
+				}
 				const common = {
 					T,
 					windowKind: window.kind,
@@ -1019,7 +1040,12 @@ export function replayInstant(
 		}
 	}
 
-	return { records, classes, placeholderWindowsSkipped };
+	return {
+		records,
+		classes,
+		placeholderWindowsSkipped,
+		pendingWeeklyByTagClass,
+	};
 }
 
 // ---------------------------------------------------------------------------
@@ -1081,6 +1107,13 @@ export interface ReplayResult {
 	 */
 	allOutIntervals: AllOutInterval[];
 	placeholderWindowsSkipped: number;
+	/**
+	 * `${tag}::${demandClass}` → seven-day windows the label horizon dropped
+	 * over the whole replay, summed from {@link InstantReplay}. Tells an
+	 * unlabelled cohort that is merely PENDING apart from one that is
+	 * structurally unlabelled in this roster.
+	 */
+	pendingWeeklyByTagClass: Map<string, number>;
 	/** Fraction of instants each transition tag covered, for the report. */
 	tagCoverage: Array<{
 		tag: TransitionKind;
@@ -1230,6 +1263,7 @@ export function replayRange(
 
 	const records: RedistributionRecord[] = [];
 	let placeholderWindowsSkipped = 0;
+	const pendingWeeklyByTagClass = new Map<string, number>();
 	const instantsWithTag = new Map<TransitionKind, number>();
 
 	for (let i = 0; i < ticks.length; i++) {
@@ -1238,6 +1272,12 @@ export function replayRange(
 		const replay = replayInstant(T, roster, events, range);
 		records.push(...replay.records);
 		placeholderWindowsSkipped += replay.placeholderWindowsSkipped;
+		for (const [key, count] of replay.pendingWeeklyByTagClass) {
+			pendingWeeklyByTagClass.set(
+				key,
+				(pendingWeeklyByTagClass.get(key) ?? 0) + count,
+			);
+		}
 
 		// Coverage of the GRID, not of the records: an instant sits in a tag's
 		// shadow whether or not a scorable window happened to exist there, and
@@ -1341,6 +1381,7 @@ export function replayRange(
 		calibration,
 		allOutIntervals,
 		placeholderWindowsSkipped,
+		pendingWeeklyByTagClass,
 		tagCoverage: TRANSITION_KINDS.map((tag) => ({
 			tag,
 			events: events.filter((event) => event.kind === tag).length,
@@ -1701,7 +1742,18 @@ export interface Verdict {
 	verdict: VerdictWord;
 	criteria: VerdictCriterion[];
 	provisional: boolean;
-	/** Cohorts whose windows have not completed yet, hence `provisional`. */
+	/**
+	 * `(tag, class)` pairs with no labelled weekly record whose weekly windows
+	 * are still unfolding at the end of the replay interval. These alone make a
+	 * verdict `provisional`: a later `--to` labels them.
+	 */
+	pendingCohorts: string[];
+	/**
+	 * `(tag, class)` pairs with no labelled weekly record and none pending
+	 * either — the class had no sibling to tag, or every tagged weekly record
+	 * was withheld or censored. Structural in this data: re-running later cannot
+	 * label them, so they never make the verdict provisional.
+	 */
 	unlabelledCohorts: string[];
 	n: Array<{
 		cohort: string;
@@ -1795,13 +1847,20 @@ export function evaluateVerdict(
 			? "insufficient-evidence"
 			: "replace";
 
-	// A tag whose events are in the data but whose weekly windows have not
-	// completed yet contributes NO seven_day record: the cohort is unlabelled,
-	// and a verdict resting on it is provisional until those windows reset.
+	// A tag whose events are in the data but which carries NO seven_day record is
+	// unlabelled on its weekly half. WHY it is unlabelled decides what to do
+	// about it, so the two causes are separated rather than both prescribing a
+	// re-run: a pair whose tagged weekly windows were dropped by the label
+	// horizon is PENDING (a later `--to` labels it, and only that makes the
+	// verdict provisional), while a pair with no pending window never had a
+	// tagged weekly window in this roster at all — a lone account whose peer
+	// exhaustion tags nobody, or a tagged window that was withheld or censored.
+	// Re-running changes nothing there.
 	//
 	// Per (tag, class), not per tag: a tag labelled in one servable class says
 	// nothing about the same tag in another, and taking the tag as labelled
 	// would hide the unlabelled half behind the labelled one.
+	const pendingCohorts: string[] = [];
 	const unlabelledCohorts: string[] = [];
 	for (const tag of TRANSITION_KINDS) {
 		const classes = [
@@ -1819,14 +1878,20 @@ export function evaluateVerdict(
 					servableClassFor(record.provider ?? "unknown").classId ===
 						demandClass,
 			);
-			if (!labelled) unlabelledCohorts.push(`${tag} (${demandClass})`);
+			if (labelled) continue;
+			const pending =
+				(replay.pendingWeeklyByTagClass.get(`${tag}::${demandClass}`) ?? 0) > 0;
+			(pending ? pendingCohorts : unlabelledCohorts).push(
+				`${tag} (${demandClass})`,
+			);
 		}
 	}
 
 	return {
 		verdict,
 		criteria,
-		provisional: unlabelledCohorts.length > 0,
+		provisional: pendingCohorts.length > 0,
+		pendingCohorts,
 		unlabelledCohorts,
 		n: [
 			{
@@ -1977,7 +2042,7 @@ export function formatRedistributionReport(
 		"- Truth is PER WINDOW, from the same `deriveOutcome` the per-window backtests use: exhausted at the first observed 100 %, survived only on positive evidence, censored otherwise. Placeholder windows (codex's one-sample 5 h artefacts) are skipped.",
 	);
 	out.push(
-		"- Truth-grid membership at a tick is every account of the class with a loaded snapshot on both sides of it (first loaded row ≤ tick ≤ last loaded row); an account with no rows around the tick is absent, not censored, so an account unpolled for weeks (Claude-3 between 2026-06-13 and 2026-07-19) is not a survivor during its gap.",
+		`- Truth-grid membership at a tick is every account of the class with a loaded snapshot on both sides of it (first loaded row ≤ tick ≤ last loaded row). Outside that loaded span, the account is absent. Inside it, a reading older than ${READING_STALE_MS / MINUTE_MS} minutes censors the tick.`,
 	);
 	out.push(
 		"- Current model: account-level learning, the strict rule that ships — ONE learning window makes the whole account unprojectable.",
@@ -2146,15 +2211,26 @@ export function formatRedistributionReport(
 	out.push("");
 	out.push(`**Verdict: ${verdict.verdict}**`);
 	out.push("");
-	if (verdict.provisional) {
-		const many = verdict.unlabelledCohorts.length > 1;
+	if (verdict.pendingCohorts.length > 0) {
+		const many = verdict.pendingCohorts.length > 1;
 		out.push(
-			`PROVISIONAL: the ${verdict.unlabelledCohorts.join(", ")} ${many ? "cohorts have" : "cohort has"} no completed weekly window inside the replay interval, so ${many ? "their" : "its"} weekly half is unlabelled and the verdict rests on five-hour evidence there. Re-run the reproduce command above with a later \`--to\` once those windows have reset, and re-read the verdict.`,
+			`PROVISIONAL: the ${verdict.pendingCohorts.join(", ")} ${many ? "cohorts have" : "cohort has"} no completed weekly window inside the replay interval, so ${many ? "their" : "its"} weekly half is unlabelled and the verdict rests on five-hour evidence there. Re-run the reproduce command above with a later \`--to\` once those windows have reset, and re-read the verdict.`,
 		);
-	} else {
-		out.push("Every scored cohort has completed windows in both kinds.");
+		out.push("");
 	}
-	out.push("");
+	if (verdict.unlabelledCohorts.length > 0) {
+		out.push(
+			`No tagged survivor weekly record in this data for: ${verdict.unlabelledCohorts.join(", ")}; a later run cannot label these without a roster change.`,
+		);
+		out.push("");
+	}
+	if (
+		verdict.pendingCohorts.length === 0 &&
+		verdict.unlabelledCohorts.length === 0
+	) {
+		out.push("Every scored cohort has completed windows in both kinds.");
+		out.push("");
+	}
 	out.push("What step 4 does with this:");
 	out.push("");
 	out.push(
@@ -2184,9 +2260,17 @@ export function formatRedistributionReport(
 	return out.join("\n");
 }
 
+/**
+ * A class holding at least this share of the common cohort makes the overall
+ * numbers a restatement of that class's numbers, which the report has to say
+ * out loud rather than leave the reader to infer from the per-class table.
+ */
+const DOMINANT_CLASS_SHARE = 0.8;
+
 /** The limits every run of this report has to state, plus what it measured. */
 export function knownLimitsFor(
 	replay: ReplayResult,
+	cohorts: CohortSet,
 	verdict: Verdict,
 ): string[] {
 	const limits = [
@@ -2195,11 +2279,36 @@ export function knownLimitsFor(
 		"No reset-credit bank is modelled, and no live usage point is injected — the replay only has what the sampler stored.",
 		"The headroom share rule is reported, never used as the verdict basis. The verdict basis is the equal split, pre-declared.",
 		"The scenario double-counts a dead peer's demand while the survivor's own lookback already contains the traffic it absorbed. That is a property of the model, disclosed in the peer-exhaustion cohort rather than corrected here.",
-		"One servable class dominates the roster, so the overall numbers are close to that class's numbers.",
 	];
+
+	// Measured, never assumed: one model's records only, because the three
+	// models score the SAME windows and counting all of them would just triple
+	// every class.
+	const classRecords = new Map<string, number>();
+	let classTotal = 0;
+	for (const record of cohorts.common) {
+		if (record.model !== "current") continue;
+		const classId = servableClassFor(record.provider ?? "unknown").classId;
+		classRecords.set(classId, (classRecords.get(classId) ?? 0) + 1);
+		classTotal++;
+	}
+	const dominant = [...classRecords.entries()].sort((a, b) => b[1] - a[1])[0];
+	if (dominant != null && classTotal > 0) {
+		const share = dominant[1] / classTotal;
+		if (share >= DOMINANT_CLASS_SHARE) {
+			limits.push(
+				`\`${dominant[0]}\` supplies ${(share * 100).toFixed(1)} % of the overall common-cohort records, so the overall numbers are close to that class's numbers.`,
+			);
+		}
+	}
+	if (verdict.pendingCohorts.length > 0) {
+		limits.push(
+			`Pending at this run (tag and servable class): ${verdict.pendingCohorts.join(", ")}. No weekly window of ${verdict.pendingCohorts.length > 1 ? "those classes carrying those tags" : "that class carrying that tag"} had completed by the end of the replay interval, so the cohort carries five-hour evidence only and the verdict is provisional.`,
+		);
+	}
 	if (verdict.unlabelledCohorts.length > 0) {
 		limits.push(
-			`Unlabelled at this run (tag and servable class): ${verdict.unlabelledCohorts.join(", ")}. No weekly window of ${verdict.unlabelledCohorts.length > 1 ? "those classes carrying those tags" : "that class carrying that tag"} had completed by the end of the replay interval, so the cohort carries five-hour evidence only and the verdict is provisional.`,
+			`No tagged survivor weekly record in this data (tag and servable class): ${verdict.unlabelledCohorts.join(", ")}. Nothing tagged a weekly window of ${verdict.unlabelledCohorts.length > 1 ? "those classes" : "that class"} inside the replay interval — the dying account is excluded from its own event, so a class with no sibling tags nobody — and the cohort carries five-hour evidence only.`,
 		);
 	}
 	const positives = REPLAY_MODELS.map((model) => {

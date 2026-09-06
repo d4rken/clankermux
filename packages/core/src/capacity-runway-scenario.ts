@@ -662,9 +662,11 @@ export function computeCapacityRunwayScenario(
 						}
 					}
 				}
-				// A probe only ever needs the instant, and an out-now pool has no
-				// projection to complete: both stop here, exactly as they always did.
-				if (capture === null || t === now) {
+				// A probe only ever needs the instant, so it stops here as it always
+				// did. The capture scan keeps walking even when the pool is out AT
+				// `now`: a dead account's OTHER windows still have first-cycle
+				// exhaustions to project, and an absent entry has to mean survival.
+				if (capture === null) {
 					return finish({ kind: "hit", t, causes });
 				}
 				firstHit = { t, causes, assumedCredits: consumedSoFar() };
@@ -935,7 +937,13 @@ export function computeCapacityRunwayScenario(
 			...(assumedCredits.length > 0
 				? { assumedResetCredits: assumedCredits }
 				: {}),
-			...basisOf(includedLearningAccounts),
+			// An out-now pool projects too, so it discloses a truncated walk for
+			// the same reason a runway does: without the flag the missing entries
+			// would read as survival.
+			...basisOf(
+				includedLearningAccounts,
+				baseline.projectionBudgetExhausted === true ? "projection" : undefined,
+			),
 		};
 	}
 

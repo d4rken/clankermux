@@ -9,6 +9,7 @@ import {
 	evaluateVerdict,
 	formatRedistributionReport,
 	headroomShareRule,
+	knownLimitsFor,
 	lifecycleBalanced,
 	pairedSignedMedian,
 	prepareSeries,
@@ -707,6 +708,71 @@ describe("replayInstant", () => {
 		).toEqual(["anthropic", "codex"]);
 	});
 
+	test("counts a tagged weekly window the label horizon dropped as pending", () => {
+		const fixture = pairFixture();
+		const series = prepareSeries(fixture.rows, fixture.accounts);
+		const roster = buildRosterAtInstant(T0, series, fixture.accounts);
+		// A fills at T0+4d, past this range's end, so its weekly truth is still
+		// unfolding and nothing scores it. B fills at T0+2.7h and is scored.
+		const short: ReplayRange = {
+			label: "short",
+			fromMs: T0,
+			toMs: T0 + 3 * DAY,
+		};
+		const events: TransitionEvent[] = [
+			{
+				id: 1,
+				kind: "peer-exhaustion",
+				atMs: T0 - HOUR,
+				endsAtMs: T0 + HOUR,
+				demandClass: "anthropic",
+				accountId: "B",
+				accountName: "B",
+				windowKind: "seven_day",
+				detail: "hit 100 with 2 h to reset",
+			},
+		];
+		const replay = replayInstant(T0, roster, events, short);
+		expect(replay.records.some((entry) => entry.accountId === "A")).toBe(false);
+		expect(replay.records.some((entry) => entry.accountId === "B")).toBe(true);
+		// Only A's dropped window is pending: B is excluded from its own event, so
+		// it carries no tag to be pending FOR.
+		expect([...replay.pendingWeeklyByTagClass]).toEqual([
+			["peer-exhaustion::anthropic", 1],
+		]);
+	});
+
+	test("a dead account's sibling window is still projected at an out-now instant", () => {
+		// A's weekly is spent and resets at T0+1h, so the class is out AT T0. Its
+		// five-hour window is at 60 % on a 60 %/h burn and resets at T0+4h: once
+		// the weekly reset revives A it takes the whole class demand back and
+		// fills the last 40 pp 40 min later, inside the cycle the reading is from.
+		const cycleStart = (t: number) =>
+			T0 - HOUR + Math.floor((t - (T0 - HOUR)) / (5 * HOUR)) * 5 * HOUR;
+		const snapshotRows = rows({
+			accountId: "A",
+			from: T0 - DAY,
+			to: T0,
+			sevenDay: () => ({ pct: 100, reset: T0 + HOUR }),
+			fiveHour: (t) => ({
+				pct: Math.min(100, ((t - cycleStart(t)) / HOUR) * 60),
+				reset: cycleStart(t) + 5 * HOUR,
+			}),
+		});
+		const replay = build(snapshotRows, [account("A")]);
+		expect(replay.classes[0].scenarioOutcomes.get("scenario-equal")?.kind).toBe(
+			"out-now",
+		);
+		const scenario = recordFor(replay, "A", "scenario-equal");
+		expect(scenario?.windowKind).toBe("five_hour");
+		expect(scenario?.usable).toBe(true);
+		expect(scenario?.predictsExhaust).toBe(true);
+		expect(scenario?.predictedEtaMs as number).toBeCloseTo(
+			T0 + HOUR + (40 / 60) * HOUR,
+			-3,
+		);
+	});
+
 	test("an incomplete projection list makes the scenario records unusable", () => {
 		const fixture = pairFixture();
 		// Two events reach the pool-out (B fills, then A does); the third is the
@@ -946,6 +1012,7 @@ function triple(
 const replayOf = (
 	records: RedistributionRecord[],
 	events: TransitionEvent[] = [],
+	pendingWeekly: Record<string, number> = {},
 ): ReplayResult => ({
 	range: RANGE,
 	stepMinutes: 10,
@@ -956,6 +1023,7 @@ const replayOf = (
 	calibration: [],
 	allOutIntervals: [],
 	placeholderWindowsSkipped: 0,
+	pendingWeeklyByTagClass: new Map(Object.entries(pendingWeekly)),
 	tagCoverage: [],
 });
 
@@ -1079,6 +1147,10 @@ function verdictFixture(options: {
 	currentF1: number | null;
 	p97_5: number | null;
 	unlabelled?: boolean;
+	/** What the codex account's own event (and its record) is tagged with. */
+	codexEvent?: "add" | "peer-exhaustion";
+	/** Weekly windows the label horizon dropped, per `${tag}::${class}`. */
+	pendingWeekly?: Record<string, number>;
 }): { cohorts: CohortSet; replay: ReplayResult } {
 	const transition = cohort(
 		"Any transition",
@@ -1095,6 +1167,7 @@ function verdictFixture(options: {
 	const overall = cohort("Overall", [], { n: 0, medianA: null, medianB: null });
 	// One `add` per servable class: the anthropic half is always labelled, the
 	// codex half only when the fixture says so.
+	const codexEvent = options.codexEvent ?? "add";
 	const events: TransitionEvent[] = [
 		{
 			id: 1,
@@ -1109,14 +1182,14 @@ function verdictFixture(options: {
 		},
 		{
 			id: 2,
-			kind: "add",
+			kind: codexEvent,
 			atMs: T0,
 			endsAtMs: T0 + DAY,
 			demandClass: "codex",
 			accountId: "X",
 			accountName: "Codex-X",
-			windowKind: null,
-			detail: "created",
+			windowKind: codexEvent === "add" ? null : "seven_day",
+			detail: codexEvent === "add" ? "created" : "hit 100",
 		},
 	];
 	const weeklyRecord = record({
@@ -1130,7 +1203,7 @@ function verdictFixture(options: {
 		accountId: "X",
 		T: T0,
 		provider: "codex",
-		tags: ["add"],
+		tags: [codexEvent],
 	});
 	const cohorts: CohortSet = {
 		overall,
@@ -1159,20 +1232,26 @@ function verdictFixture(options: {
 	};
 	return {
 		cohorts,
-		replay: replayOf([weeklyRecord, codexWeeklyRecord], events),
+		replay: replayOf(
+			[weeklyRecord, codexWeeklyRecord],
+			events,
+			options.pendingWeekly,
+		),
 	};
 }
 
+const VERDICT_BASE = {
+	scenarioBias: -20,
+	currentBias: 40,
+	scenarioRecall: 0.8,
+	currentRecall: 0.6,
+	scenarioF1: 0.7,
+	currentF1: 0.5,
+	p97_5: 0.2,
+};
+
 describe("evaluateVerdict", () => {
-	const base = {
-		scenarioBias: -20,
-		currentBias: 40,
-		scenarioRecall: 0.8,
-		currentRecall: 0.6,
-		scenarioF1: 0.7,
-		currentF1: 0.5,
-		p97_5: 0.2,
-	};
+	const base = VERDICT_BASE;
 
 	test("replace when every criterion passes", () => {
 		const { cohorts, replay } = verdictFixture(base);
@@ -1226,22 +1305,103 @@ describe("evaluateVerdict", () => {
 		expect(verdict.verdict).toBe("insufficient-evidence");
 	});
 
-	test("flags a cohort whose weekly windows have not completed as provisional", () => {
-		const { cohorts, replay } = verdictFixture({ ...base, unlabelled: true });
+	test("flags a cohort whose tagged weekly windows are still unfolding as provisional", () => {
+		const { cohorts, replay } = verdictFixture({
+			...base,
+			unlabelled: true,
+			// Two tagged codex weekly windows were dropped by the label horizon, so
+			// a later `--to` is exactly what labels this pair.
+			pendingWeekly: { "add::codex": 2 },
+		});
 		const verdict = evaluateVerdict(cohorts, replay);
 		expect(verdict.provisional).toBe(true);
 		// Per (tag, class): the labelled anthropic half must not cover for the
 		// codex half of the same tag.
-		expect(verdict.unlabelledCohorts).toEqual(["add (codex)"]);
+		expect(verdict.pendingCohorts).toEqual(["add (codex)"]);
+		expect(verdict.unlabelledCohorts).toEqual([]);
+	});
+
+	test("a lone account's peer exhaustion is unlabelled, not pending", () => {
+		// The Codex-1 case: the dying account is excluded from its own event and
+		// there is no sibling to carry the tag, so nothing was ever dropped for a
+		// later run to pick up.
+		const { cohorts, replay } = verdictFixture({
+			...base,
+			unlabelled: true,
+			codexEvent: "peer-exhaustion",
+		});
+		const verdict = evaluateVerdict(cohorts, replay);
+		expect(verdict.unlabelledCohorts).toEqual(["peer-exhaustion (codex)"]);
+		expect(verdict.pendingCohorts).toEqual([]);
+		expect(verdict.provisional).toBe(false);
 	});
 
 	test("a tag labelled in every class it has events in is not provisional", () => {
 		const { cohorts, replay } = verdictFixture(base);
 		const verdict = evaluateVerdict(cohorts, replay);
+		expect(verdict.pendingCohorts).toEqual([]);
 		expect(verdict.unlabelledCohorts).toEqual([]);
 		expect(verdict.provisional).toBe(false);
 	});
 });
+
+describe("knownLimitsFor", () => {
+	test("states a dominant class with its measured share", () => {
+		// `unlabelled` drops the codex record, leaving the common cohort entirely
+		// anthropic.
+		const { cohorts, replay } = verdictFixture({
+			...VERDICT_BASE,
+			unlabelled: true,
+		});
+		const limits = knownLimitsFor(
+			replay,
+			cohorts,
+			evaluateVerdict(cohorts, replay),
+		);
+		expect(limits).toContain(
+			"`anthropic` supplies 100.0 % of the overall common-cohort records, so the overall numbers are close to that class's numbers.",
+		);
+	});
+
+	test("says nothing about dominance when the classes are balanced", () => {
+		const { cohorts, replay } = verdictFixture(VERDICT_BASE);
+		const limits = knownLimitsFor(
+			replay,
+			cohorts,
+			evaluateVerdict(cohorts, replay),
+		);
+		expect(
+			limits.some((limit) => limit.includes("of the overall common-cohort")),
+		).toBe(false);
+	});
+});
+
+/** One report, from parts the caller controls. */
+function reportOf(
+	result: ReplayResult,
+	cohorts: CohortSet,
+	verdict: Verdict,
+	rows: number,
+): string {
+	return formatRedistributionReport({
+		title: "Redistribution backtest",
+		generatedAtIso: new Date(T0).toISOString(),
+		command: "bun scripts/redistribution-backtest.ts",
+		config: { stepMinutes: result.stepMinutes, seed: result.seed },
+		dataset: {
+			rows,
+			accounts: 2,
+			providers: ["anthropic"],
+			firstSampleIso: new Date(T0 - DAY).toISOString(),
+			lastSampleIso: new Date(T0 + 6 * DAY).toISOString(),
+		},
+		replay: result,
+		cohorts,
+		verdict,
+		knownLimits: ["a limit"],
+		notes: ["a note"],
+	});
+}
 
 /** The report for a replay, with the verdict it was rendered from. */
 function reportFor(
@@ -1252,24 +1412,7 @@ function reportFor(
 	const verdict = evaluateVerdict(cohorts, result);
 	return {
 		verdict,
-		markdown: formatRedistributionReport({
-			title: "Redistribution backtest",
-			generatedAtIso: new Date(T0).toISOString(),
-			command: "bun scripts/redistribution-backtest.ts",
-			config: { stepMinutes: result.stepMinutes, seed: result.seed },
-			dataset: {
-				rows: snapshotRows.length,
-				accounts: 2,
-				providers: ["anthropic"],
-				firstSampleIso: new Date(T0 - DAY).toISOString(),
-				lastSampleIso: new Date(T0 + 6 * DAY).toISOString(),
-			},
-			replay: result,
-			cohorts,
-			verdict,
-			knownLimits: ["a limit"],
-			notes: ["a note"],
-		}),
+		markdown: reportOf(result, cohorts, verdict, snapshotRows.length),
 	};
 }
 
@@ -1364,5 +1507,63 @@ describe("formatRedistributionReport", () => {
 			"These intervals are the positives behind the `observed out` column",
 		);
 		expect(markdown).not.toContain(OLD_FIXED_SENTENCE);
+	});
+
+	test("prescribes a re-run only for the cohorts a re-run can label", () => {
+		const pending = verdictFixture({
+			...VERDICT_BASE,
+			unlabelled: true,
+			pendingWeekly: { "add::codex": 2 },
+		});
+		const pendingVerdict = evaluateVerdict(pending.cohorts, pending.replay);
+		const pendingMarkdown = reportOf(
+			pending.replay,
+			pending.cohorts,
+			pendingVerdict,
+			10,
+		);
+		expect(pendingMarkdown).toContain(
+			"PROVISIONAL: the add (codex) cohort has no completed weekly window inside the replay interval",
+		);
+		expect(pendingMarkdown).not.toContain(
+			"No tagged survivor weekly record in this data for:",
+		);
+
+		const structural = verdictFixture({
+			...VERDICT_BASE,
+			unlabelled: true,
+			codexEvent: "peer-exhaustion",
+		});
+		const structuralVerdict = evaluateVerdict(
+			structural.cohorts,
+			structural.replay,
+		);
+		const structuralMarkdown = reportOf(
+			structural.replay,
+			structural.cohorts,
+			structuralVerdict,
+			10,
+		);
+		expect(structuralMarkdown).toContain(
+			"No tagged survivor weekly record in this data for: peer-exhaustion (codex); a later run cannot label these without a roster change.",
+		);
+		expect(structuralMarkdown).not.toContain("PROVISIONAL:");
+
+		// Neither sentence when every pair is labelled.
+		const labelled = verdictFixture(VERDICT_BASE);
+		const labelledVerdict = evaluateVerdict(labelled.cohorts, labelled.replay);
+		const labelledMarkdown = reportOf(
+			labelled.replay,
+			labelled.cohorts,
+			labelledVerdict,
+			10,
+		);
+		expect(labelledMarkdown).toContain(
+			"Every scored cohort has completed windows in both kinds.",
+		);
+		expect(labelledMarkdown).not.toContain("PROVISIONAL:");
+		expect(labelledMarkdown).not.toContain(
+			"No tagged survivor weekly record in this data for:",
+		);
 	});
 });
