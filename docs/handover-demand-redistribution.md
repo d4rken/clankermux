@@ -90,14 +90,15 @@ split with the advance switched off (`scenario-equal-original`), under a rule
 declared before the run: criteria A-C as before, plus D, the corrected scan may
 not score worse than the control on the any-transition common cohort, neither
 on F1 nor on the paired median change in absolute ETA error. Recall is printed
-beside D and not judged — moving an ETA earlier never takes a window out of the
-before-reset set. Beside the verdict the report carries a mechanism section
-that states what the correction did rather than what it scored: observation-age
-cohorts, an identity check where no pooled window of a class carries a lag, the
-shift each ETA moved (exact where one slope governs the projection,
-descriptive where it does not), a direct parity check against the current model
-on lone accounts, a fixed paired-ETA subset, and the lag population per
-estimator path.
+beside D and not judged: the correction can change the order of a class's
+events, and with it which windows get a dated exhaustion before their reset at
+all, in either direction. Beside the verdict the report carries a mechanism
+section that states what the correction did rather than what it scored:
+observation-age cohorts, an identity check where no pooled window of a class
+carries a lag, the shift each ETA moved (exact where one slope governs the
+projection in both scans, descriptive where it does not), a direct parity check
+against the current model on lone accounts, a fixed paired-ETA subset, and the
+lag population per estimator path.
 
 Codex ranked the follow-ups behind this one: measure the first-100 % fill
 directly, and derive the ledger shares from the history BEFORE each instant

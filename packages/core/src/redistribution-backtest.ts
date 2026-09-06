@@ -238,9 +238,20 @@ export interface RedistributionRecord extends BacktestRecord {
 	 * precedes every other slope-changing event of its class: any other
 	 * projected exhaustion still ahead of `T`, and the reset of any class window
 	 * already at 100 % at `T`. Only then is the window's whole projection
-	 * governed by ONE slope, which is what makes an exact lag shift predictable.
+	 * governed by ONE slope in THAT scan.
 	 */
 	firstEvent: boolean;
+	/**
+	 * True when the window is the first event of BOTH equal-split scans — the
+	 * corrected one and the pre-correction one.
+	 *
+	 * One scan is not enough to expect an exact lag shift: a peer the correction
+	 * fills inside its own lag dies at `T` in the corrected scan, so it never
+	 * stands ahead of this window there, while in the original scan it is alive
+	 * at `T` and dies part-way to this window's ETA. The shift is then the
+	 * arithmetic of two slopes rather than the window's own lag.
+	 */
+	exactShiftEligible: boolean;
 }
 
 export interface ReplayRange {
@@ -1037,7 +1048,6 @@ export function replayInstant(
 		const classLagFree = pooledEntries.every((entry) =>
 			entry.windows.every((window) => lagOf(entry, window) === 0),
 		);
-		const correctedExhaustions = corrected?.projectedExhaustions ?? [];
 		// A window already at 100 % comes back at its reset, and that revival
 		// re-splits the class just as a death does.
 		const revivalInstants = entries.flatMap((entry) =>
@@ -1049,21 +1059,50 @@ export function replayInstant(
 						resetsAtMs != null && Number.isFinite(resetsAtMs) && resetsAtMs > T,
 				),
 		);
-		const firstEventOf = (accountId: string, windowKind: string): boolean => {
-			const own = correctedExhaustions.find(
-				(exhaustion) =>
-					exhaustion.accountId === accountId &&
-					exhaustion.windowKind === windowKind,
-			)?.exhaustsAtMs;
-			if (own == null) return false;
-			for (const other of correctedExhaustions) {
-				if (other.accountId === accountId && other.windowKind === windowKind) {
-					continue;
+		/**
+		 * First-event eligibility inside ONE scan, from that scan's OWN ordering
+		 * of the class's slope-changing events.
+		 *
+		 * Built per scan because the two scans order those events differently:
+		 * the correction can fill a peer inside its observation lag, and that
+		 * death lands at `T` here while the same peer is alive at `T` in the
+		 * pre-correction scan and dies somewhere ahead of it.
+		 */
+		const firstEventInScan = (
+			model: ScenarioModel,
+		): ((accountId: string, windowKind: string) => boolean) => {
+			const exhaustions =
+				scenarioOutcomes.get(model)?.projectedExhaustions ?? [];
+			// A window filled inside its lag reports the sub-`T` instant it truly
+			// reached 100 %, but the scan applies that death AT `T`, so `T` is
+			// where it orders against everything else.
+			const orderedAt = (exhaustsAtMs: number): number =>
+				Math.max(T, exhaustsAtMs);
+			return (accountId: string, windowKind: string): boolean => {
+				const own = exhaustions.find(
+					(exhaustion) =>
+						exhaustion.accountId === accountId &&
+						exhaustion.windowKind === windowKind,
+				)?.exhaustsAtMs;
+				if (own == null) return false;
+				const ownAt = orderedAt(own);
+				for (const other of exhaustions) {
+					if (
+						other.accountId === accountId &&
+						other.windowKind === windowKind
+					) {
+						continue;
+					}
+					const otherAt = orderedAt(other.exhaustsAtMs);
+					// An event at `T` itself is already part of the share this window
+					// starts on; only one still ahead of `T` breaks its single slope.
+					if (otherAt > T && otherAt <= ownAt) return false;
 				}
-				if (other.exhaustsAtMs > T && other.exhaustsAtMs <= own) return false;
-			}
-			return revivalInstants.every((resetsAtMs) => resetsAtMs > own);
+				return revivalInstants.every((resetsAtMs) => resetsAtMs > ownAt);
+			};
 		};
+		const firstEventCorrected = firstEventInScan("scenario-equal");
+		const firstEventOriginal = firstEventInScan("scenario-equal-original");
 
 		for (const entry of entries) {
 			// Account-level learning, the current model's strict rule: ONE learning
@@ -1117,6 +1156,7 @@ export function replayInstant(
 					Number.isFinite(window.input.observedAtMs)
 						? window.input.observedAtMs
 						: null;
+				const firstEvent = firstEventCorrected(entry.accountId, window.kind);
 				const common = {
 					T,
 					windowKind: window.kind,
@@ -1138,7 +1178,9 @@ export function replayInstant(
 					estimatorSource: estimate?.source ?? "none",
 					classLagFree,
 					pooledInClass,
-					firstEvent: firstEventOf(entry.accountId, window.kind),
+					firstEvent,
+					exactShiftEligible:
+						firstEvent && firstEventOriginal(entry.accountId, window.kind),
 				};
 
 				const currentUsable =
@@ -2542,14 +2584,9 @@ export function observationLagChecks(
 	}
 
 	// (c) How far the correction moved each ETA, split on whether ONE slope
-	// governs the whole projection.
+	// governs the whole projection in BOTH scans.
 	const firstEventShifts: Array<{ shiftMs: number; lagMs: number }> = [];
 	const restShifts: Array<{ shiftMs: number; lagMs: number }> = [];
-	// (c2) Parity with the current model where the account is alone in its class.
-	const parityByPath = new Map<string, { n: number; within: number }>();
-	for (const path of [...ANCHORED_PATHS, "other"]) {
-		parityByPath.set(path, { n: 0, within: 0 });
-	}
 	for (const entry of byKey.values()) {
 		const corrected = entry.get("scenario-equal");
 		const original = entry.get("scenario-equal-original");
@@ -2562,26 +2599,38 @@ export function observationLagChecks(
 				shiftMs: original.predictedEtaMs - corrected.predictedEtaMs,
 				lagMs: corrected.lagMs,
 			};
-			(corrected.firstEvent ? firstEventShifts : restShifts).push(row);
+			(corrected.exactShiftEligible ? firstEventShifts : restShifts).push(row);
 		}
+	}
+
+	// (c2) Parity with the current model where the account is alone in its
+	// class. Its own pass, over the corrected and current records ONLY: the
+	// original model's ETA is no part of this comparison, and requiring it
+	// would drop exactly the records the correction moved from beyond the reset
+	// to inside it — the ones where the two models most need to agree.
+	const parityByPath = new Map<string, { n: number; within: number }>();
+	for (const path of [...ANCHORED_PATHS, "other"]) {
+		parityByPath.set(path, { n: 0, within: 0 });
+	}
+	for (const entry of byKey.values()) {
+		const corrected = entry.get("scenario-equal");
 		const current = entry.get("current");
-		if (
-			corrected.firstEvent &&
-			corrected.pooledInClass === 1 &&
-			current?.predictedEtaMs != null
-		) {
-			const path = ANCHORED_PATHS.includes(corrected.estimatorSource)
-				? corrected.estimatorSource
-				: "other";
-			const tally = parityByPath.get(path);
-			if (tally != null) {
-				tally.n++;
-				if (
-					Math.abs(corrected.predictedEtaMs - current.predictedEtaMs) <=
-					LAG_TOLERANCE_MS
-				) {
-					tally.within++;
-				}
+		if (corrected == null || current == null) continue;
+		if (corrected.predictedEtaMs == null || current.predictedEtaMs == null) {
+			continue;
+		}
+		if (!corrected.firstEvent || corrected.pooledInClass !== 1) continue;
+		const path = ANCHORED_PATHS.includes(corrected.estimatorSource)
+			? corrected.estimatorSource
+			: "other";
+		const tally = parityByPath.get(path);
+		if (tally != null) {
+			tally.n++;
+			if (
+				Math.abs(corrected.predictedEtaMs - current.predictedEtaMs) <=
+				LAG_TOLERANCE_MS
+			) {
+				tally.within++;
 			}
 		}
 	}
@@ -2739,6 +2788,7 @@ export function redistributionRecordToJson(
 		classLagFree: record.classLagFree,
 		pooledInClass: record.pooledInClass,
 		firstEvent: record.firstEvent,
+		exactShiftEligible: record.exactShiftEligible,
 		usable: record.usable,
 		unusableReason: record.unusableReason,
 		predictsExhaust: record.predictsExhaust,
@@ -2781,9 +2831,9 @@ export const VERDICT_RULE = [
 	"   cohort, lifecycle-balanced: F1(scenario-equal) >= F1(scenario-equal-",
 	"   original), AND the paired median of |error of scenario-equal| - |error",
 	"   of scenario-equal-original| <= 0 over the records both models dated.",
-	"   Recall of both is printed beside D and is NOT judged: an ETA moved",
-	"   earlier never leaves the before-reset set, so recall preservation",
-	"   follows from construction rather than from evidence.",
+	"   Recall of both is printed beside D and is NOT judged: the correction",
+	"   can change the ORDER of a class's events, and with it which windows are",
+	"   dated before their reset at all, in EITHER direction.",
 	"",
 	"replace = A and B and C and D. keep-scenario = any criterion FALSE.",
 	"insufficient-evidence = no criterion false, at least one indeterminate.",
@@ -3189,19 +3239,24 @@ function observationLagSection(checks: ObservationLagChecks): string[] {
 	);
 	out.push("");
 	out.push(
-		"A record is FIRST-EVENT when its corrected exhaustion precedes every other slope-changing event of its class: any other projected exhaustion still ahead of the instant, and the reset of any class window already at 100 %. One slope then governs the whole projection and the shift must equal the lag exactly. Everywhere else the projection crosses at least one breakpoint, where a shift of `s₁·lag/s₂` is what the arithmetic gives, so no exact expectation exists and the rest of the table is descriptive.",
+		"A record is held to the exact expectation only when it is the FIRST EVENT OF BOTH SCANS: in each of them its own exhaustion precedes every other slope-changing event of its class — any other projected exhaustion still ahead of the instant, and the reset of any class window already at 100 %. One slope then governs the whole projection on both sides and the shift must equal the lag exactly. One scan is not enough: a peer the correction fills inside its own lag dies at the instant here and is alive at it there, so the two scans cross different breakpoints. Everywhere else the projection crosses at least one breakpoint, where a shift of `s₁·lag/s₂` is what the arithmetic gives, so no exact expectation exists and the rest of the table is descriptive.",
 	);
 	out.push("");
 	out.push(
 		"| split | n | median shift (min) | median excess (min) | p10 excess | p90 excess | within 1 s of own lag |",
 	);
 	out.push("|---|---:|---:|---:|---:|---:|---:|");
-	out.push(shiftRow("first event (expect 100 %)", checks.shift.firstEvent));
+	out.push(
+		shiftRow(
+			"first event in both scans (expect 100 %)",
+			checks.shift.firstEvent,
+		),
+	);
 	out.push(shiftRow("rest (descriptive)", checks.shift.rest));
 	out.push("");
 	if (checks.shift.firstEvent.n === 0) {
 		out.push(
-			"No eligible first-event records: the exact-shift expectation is untested in this run.",
+			"No records are the first event of both scans: the exact-shift expectation is untested in this run.",
 		);
 		out.push("");
 	}

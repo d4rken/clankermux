@@ -1005,6 +1005,7 @@ function record(
 		classLagFree: true,
 		pooledInClass: 1,
 		firstEvent: false,
+		exactShiftEligible: false,
 		...overrides,
 	};
 }
@@ -2465,6 +2466,78 @@ function weeklyFixture(options: {
 	};
 }
 
+/**
+ * The instant of {@link lagDeathPairFixture}: ten minutes past the last sample,
+ * so every reading carries a ten-minute lag.
+ */
+const LAG_DEATH_T = T0 + 2 * HOUR + 10 * MIN;
+
+/**
+ * Two equal-capacity accounts in one class, each burning 12 pp/h on a five-hour
+ * window, reading 99 % and 90 % at the last sample.
+ *
+ * At {@link LAG_DEATH_T} the corrected scan advances A over its lag, fills it
+ * part-way through and applies that death at the instant itself; the original
+ * scan keeps A alive at the instant and kills it five minutes later, part-way
+ * to B's ETA. The two scans therefore order the class's events differently.
+ */
+function lagDeathPairFixture(): {
+	rows: RosterSnapshotRow[];
+	accounts: RosterAccount[];
+} {
+	const burn = (basePct: number) => (t: number) => ({
+		pct: basePct + ((t - T0) / HOUR) * 12,
+		reset: FIVE_HOUR_RESET,
+	});
+	return {
+		rows: [
+			...rows({
+				accountId: "A",
+				from: T0,
+				to: T0 + 2 * HOUR,
+				stepMs: 10 * MIN,
+				fiveHour: burn(75),
+			}),
+			...rows({
+				accountId: "B",
+				from: T0,
+				to: T0 + 2 * HOUR,
+				stepMs: 10 * MIN,
+				fiveHour: burn(66),
+			}),
+		],
+		accounts: [account("A"), account("B")],
+	};
+}
+
+/** The instant of {@link resetCrossingFixture}, ten minutes past its last sample. */
+const RESET_CROSSING_T = T0 + HOUR + 10 * MIN;
+
+/**
+ * One account reading 50 % on a ten-minute-old sample, burning 50 pp/h on a
+ * window that resets 55 minutes after {@link RESET_CROSSING_T}.
+ *
+ * The current model and the corrected scan both date exhaustion 50 minutes out;
+ * the pre-correction scan needs 60 minutes from the instant and so projects
+ * nothing before the reset.
+ */
+function resetCrossingFixture(): {
+	rows: RosterSnapshotRow[];
+	accounts: RosterAccount[];
+} {
+	const reset = RESET_CROSSING_T + 55 * MIN;
+	return {
+		rows: rows({
+			accountId: "A",
+			from: T0,
+			to: T0 + HOUR,
+			stepMs: 10 * MIN,
+			fiveHour: (t) => ({ pct: ((t - T0) / HOUR) * 50, reset }),
+		}),
+		accounts: [account("A")],
+	};
+}
+
 const merge = (
 	...parts: Array<{ rows: RosterSnapshotRow[]; accounts: RosterAccount[] }>
 ): { rows: RosterSnapshotRow[]; accounts: RosterAccount[] } => ({
@@ -2519,6 +2592,7 @@ describe("replayInstant reading-level fields", () => {
 			expect(entry.pooledInClass).toBe(1);
 			expect(entry.classLagFree).toBe(false);
 			expect(entry.firstEvent).toBe(true);
+			expect(entry.exactShiftEligible).toBe(true);
 		}
 		// The corrected scan lands on the fit's own ETA; the original one is the
 		// lag later.
@@ -2603,6 +2677,23 @@ describe("replayInstant reading-level fields", () => {
 		).toBe(true);
 		expect(forB?.firstEvent).toBe(true);
 		expect(forA?.firstEvent).toBe(false);
+	});
+
+	test("a peer killed inside its lag leaves the survivor first-event but not exact-shift", () => {
+		const replay = replayFixtureAt(LAG_DEATH_T, lagDeathPairFixture());
+		const forB = recordOf(replay, "B", "scenario-equal");
+		expect(forB?.estimatorSource).toBe("regression");
+		expect(Math.abs((forB?.lagMs ?? 0) - 10 * MIN)).toBeLessThanOrEqual(1);
+		// A fills inside its lag, so the corrected scan applies its death at the
+		// instant: nothing is left ahead of B's own exhaustion in THAT scan.
+		expect(forB?.firstEvent).toBe(true);
+		// The original scan keeps A alive at the instant and kills it part-way to
+		// B's ETA, so one slope does not govern B's projection across both scans.
+		expect(forB?.exactShiftEligible).toBe(false);
+		// A itself is the first event of both scans.
+		const forA = recordOf(replay, "A", "scenario-equal");
+		expect(forA?.firstEvent).toBe(true);
+		expect(forA?.exactShiftEligible).toBe(true);
 	});
 
 	test("a peer's revival re-times the shares and takes the flag away", () => {
@@ -2700,6 +2791,39 @@ describe("observationLagChecks", () => {
 		const checks = observationLagChecks(replay, scoreCohorts(replay));
 		expect(checks.shift.firstEvent.n).toBe(1);
 		expect(checks.shift.rest.n).toBe(1);
+	});
+
+	test("keeps a survivor whose peer died inside its lag out of the exact split", () => {
+		const replay = replayOfInstant(
+			replayFixtureAt(LAG_DEATH_T, lagDeathPairFixture()),
+		);
+		const checks = observationLagChecks(replay, scoreCohorts(replay));
+		// Only A, whose own death instant moved by exactly its lag.
+		expect(checks.shift.firstEvent.n).toBe(1);
+		expect(checks.shift.firstEvent.medianShiftMinutes).toBeCloseTo(10, 3);
+		expect(checks.shift.firstEvent.matchingShare).toBe(1);
+		// B's shift is 7.5 min against a 10 min lag, and it is described only.
+		expect(checks.shift.rest.n).toBe(1);
+		expect(checks.shift.rest.medianShiftMinutes).toBeCloseTo(7.5, 3);
+	});
+
+	test("counts parity on a record the original scan never dated", () => {
+		const replay = replayOfInstant(
+			replayFixtureAt(RESET_CROSSING_T, resetCrossingFixture()),
+		);
+		const current = recordOf(replay, "A", "current");
+		const corrected = recordOf(replay, "A", "scenario-equal");
+		const original = recordOf(replay, "A", "scenario-equal-original");
+		expect(current?.predictedEtaMs).not.toBeNull();
+		expect(corrected?.predictedEtaMs).not.toBeNull();
+		expect(original?.predictedEtaMs).toBeNull();
+		const checks = observationLagChecks(replay, scoreCohorts(replay));
+		const regression = checks.parity.find((row) => row.path === "regression");
+		expect(regression?.n).toBe(1);
+		expect(regression?.withinToleranceShare).toBe(1);
+		// The shift statistic still needs both ETAs, so this record is not in it.
+		expect(checks.shift.firstEvent.n).toBe(0);
+		expect(checks.shift.rest.n).toBe(0);
 	});
 
 	test("checks parity with the current model per estimator path", () => {
