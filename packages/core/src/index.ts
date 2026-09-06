@@ -76,6 +76,22 @@ export {
 	weeklyTimeToFull,
 } from "./capacity-runway";
 export {
+	computeCapacityRunwayScenario,
+	equalShareRule,
+	MAX_SCENARIO_EVENTS,
+	type RunwayScenarioAccountInput,
+	type RunwayScenarioBasis,
+	type RunwayScenarioDemand,
+	type RunwayScenarioOptions,
+	type RunwayScenarioOutcome,
+	type RunwayScenarioPresence,
+	type RunwayScenarioShare,
+	type RunwayScenarioTier,
+	type RunwayTierProvenance,
+	type ShareCandidate,
+	type ShareRule,
+} from "./capacity-runway-scenario";
+export {
 	BUFFER_SIZES,
 	CACHE,
 	computeRateLimitBackoffMs,
