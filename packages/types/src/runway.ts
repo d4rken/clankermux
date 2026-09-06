@@ -194,7 +194,13 @@ export interface RunwayScenarioDemand {
 
 export interface RunwayScenarioShare {
 	accountId: string;
-	/** `w_j / Σw` over the alive accounts of its class, at `now`. */
+	/**
+	 * `w_j / Σw` over the alive accounts of its class, taken at the FIRST
+	 * assignment in which this account is alive — `now` for an account alive at
+	 * `now`, later for one that is dead at `now` and revives (an exhausted 5 h
+	 * window beside a learning weekly). `0` when it is never alive inside the
+	 * horizon, so no share was ever assigned to it.
+	 */
 	shareOfClass: number;
 }
 
