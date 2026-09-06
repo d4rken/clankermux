@@ -58,10 +58,56 @@ weekly windows that reset 2026-09-07 through 2026-09-12. The anthropic half of
 each of those tags is labelled, and counting per tag alone would have hidden
 the codex half behind it.
 
-**Step 4 waits.** Before acting on the verdict, re-run the reproduce command
-printed in `docs/prediction-backtest-redistribution.md` with a `--to` after
-2026-09-13, once those weekly windows have completed, and re-read the verdict
-from the refreshed report.
+**Step 4 did not ship (2026-09-06 decision).** The mechanism it was going to
+correct for — the scenario double-counting a dead peer's demand because the
+survivor's own lookback already contains the traffic it absorbed — is not
+evidenced by the measurements taken so far. The survivor slope table reads flat
+after a death, with the caveat that it cannot see absorption where the survivor
+was still learning at the instant its peer died. The ledger says roughly 0.6 of
+the dying account's request rate is absorbed at all, and only when the dying
+account carried at least 30 % of its class's traffic; below that the traffic
+stops rather than moving, and where it does move the largest survivor takes
+about 0.78 of the moved volume. So the taper that step 4 proposed, and a flat
+0.6 coefficient, were both rejected: the taper points the wrong way against the
+flat slopes, and the coefficient would be tuned on the same run it would be
+judged on. What landed instead is the measurement tooling, `6097d175`
+(v2026.9.12).
+
+**The experiment running now: observation-lag parity, ONE change.** The
+scenario scheduled every window's exhaustion from the instant being replayed
+while the reading it scheduled from was measured to an earlier one, so its ETAs
+were late by the observation lag — up to the ten-minute freshness bar, and 0-5
+minutes on five-hour windows after a peer death in the replay. The scan now
+advances each reading over that lag, taking it per estimator path from the same
+anchor the current model uses (the fit's own last point on the regression path,
+the observation instant on the observation-anchored lifetime path), so a lone
+account's scenario ETA is the current model's ETA and every remaining
+difference between the two models is the redistribution itself. Fill demand,
+the share rule and the overlap treatment are untouched.
+
+The backtest scores the corrected scan against a control that is the same equal
+split with the advance switched off (`scenario-equal-original`), under a rule
+declared before the run: criteria A-C as before, plus D, the corrected scan may
+not score worse than the control on the any-transition common cohort, neither
+on F1 nor on the paired median change in absolute ETA error. Recall is printed
+beside D and not judged — moving an ETA earlier never takes a window out of the
+before-reset set. Beside the verdict the report carries a mechanism section
+that states what the correction did rather than what it scored: observation-age
+cohorts, an identity check where no pooled window of a class carries a lag, the
+shift each ETA moved (exact where one slope governs the projection,
+descriptive where it does not), a direct parity check against the current model
+on lone accounts, a fixed paired-ETA subset, and the lag population per
+estimator path.
+
+Codex ranked the follow-ups behind this one: measure the first-100 % fill
+directly, and derive the ledger shares from the history BEFORE each instant
+rather than from the whole run. The taper and the 0.6 coefficient are the two
+it ranked out, for the reasons above.
+
+Before acting on any verdict, re-run the reproduce command printed in
+`docs/prediction-backtest-redistribution.md` with a `--to` after 2026-09-13,
+once the pending weekly windows have completed, and re-read the verdict from
+the refreshed report.
 
 What the tier work found, against what section 3.1 assumed:
 
