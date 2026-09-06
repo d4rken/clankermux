@@ -76,14 +76,19 @@ judged on. What landed instead is the measurement tooling, `6097d175`
 **The experiment running now: observation-lag parity, ONE change.** The
 scenario scheduled every window's exhaustion from the instant being replayed
 while the reading it scheduled from was measured to an earlier one, so its ETAs
-were late by the observation lag — up to the ten-minute freshness bar, and 0-5
-minutes on five-hour windows after a peer death in the replay. The scan now
-advances each reading over that lag, taking it per estimator path from the same
-anchor the current model uses (the fit's own last point on the regression path,
-the observation instant on the observation-anchored lifetime path), so a lone
-account's scenario ETA is the current model's ETA and every remaining
-difference between the two models is the redistribution itself. Fill demand,
-the share rule and the overlap treatment are untouched.
+were late by the observation lag. The ten-minute freshness bar is on SAMPLE
+time, so it bounds the regression path's lag (that fit is anchored to its own
+last sample); the observation-anchored weekly path can exceed it wherever the
+observation instant precedes the sample instant. Five-hour windows after a peer
+death in the replay ran 0-5 minutes late. The scan now advances each reading
+over that lag, taking it per estimator path from the same anchor the current
+model uses (the fit's own last point on the regression path, the observation
+instant on the observation-anchored lifetime path), so on a lone account the
+window that exhausts FIRST lands on the current model's ETA for it. A later
+window of the same account does not: it carries the span the account spends
+dead after the first one fills, which is the scenario's own semantics rather
+than the redistribution. Fill demand, the share rule and the overlap treatment
+are untouched.
 
 The backtest scores the corrected scan against a control that is the same equal
 split with the advance switched off (`scenario-equal-original`), under a rule

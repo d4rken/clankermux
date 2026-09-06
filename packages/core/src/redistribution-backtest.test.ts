@@ -1005,7 +1005,9 @@ function record(
 		classLagFree: true,
 		pooledInClass: 1,
 		firstEvent: false,
+		peerDiedInLag: false,
 		exactShiftEligible: false,
+		lagAnchorKnown: true,
 		...overrides,
 	};
 }
@@ -2538,6 +2540,107 @@ function resetCrossingFixture(): {
 	};
 }
 
+/** The instant of {@link lagFillPairFixture}, one minute past A's last sample. */
+const LAG_FILL_T = T0 + 2 * HOUR + MIN;
+
+/**
+ * Two equal-capacity accounts burning 12 pp/h on a five-hour window, sampled on
+ * different cadences: A reads 99 % one minute before {@link LAG_FILL_T}, B
+ * reads 98.8 % ten minutes before it.
+ *
+ * B fills inside its OWN lag, so the corrected scan applies its death at the
+ * instant and doubles A's share from there on. A is still the first event of
+ * both scans — in the pre-correction scan B dies a minute after A — but its ETA
+ * moves by three minutes against a one-minute lag of its own, because the peer
+ * that died at the instant is what moved it.
+ */
+function lagFillPairFixture(): {
+	rows: RosterSnapshotRow[];
+	accounts: RosterAccount[];
+} {
+	const burn = (endPct: number, endAt: number) => (t: number) => ({
+		pct: endPct - ((endAt - t) / HOUR) * 12,
+		reset: FIVE_HOUR_RESET,
+	});
+	const aEnd = LAG_FILL_T - MIN;
+	const bEnd = LAG_FILL_T - 10 * MIN;
+	return {
+		rows: [
+			...rows({
+				accountId: "A",
+				from: aEnd - 2 * HOUR,
+				to: aEnd,
+				stepMs: 10 * MIN,
+				fiveHour: burn(99, aEnd),
+			}),
+			...rows({
+				accountId: "B",
+				from: bEnd - 2 * HOUR,
+				to: bEnd,
+				stepMs: 10 * MIN,
+				fiveHour: burn(98.8, bEnd),
+			}),
+		],
+		accounts: [account("A"), account("B")],
+	};
+}
+
+/** The instant of {@link ownFillInsideLagFixture}, ten minutes past its last sample. */
+const OWN_FILL_T = T0 + 2 * HOUR + 10 * MIN;
+
+/**
+ * ONE pooled account, whose five-hour window reads 98 % on a ten-minute-old
+ * sample while burning 24 pp/h, and whose weekly window is still projecting.
+ *
+ * The corrected scan advances the five-hour reading past 100 % and applies that
+ * death at the instant, so the account is idle until the five-hour reset and
+ * the weekly's projection carries that whole dead span.
+ */
+function ownFillInsideLagFixture(): {
+	rows: RosterSnapshotRow[];
+	accounts: RosterAccount[];
+} {
+	const start = T0 - DAY;
+	const fiveHourEnd = OWN_FILL_T - 10 * MIN;
+	return {
+		rows: rows({
+			accountId: "A",
+			from: start,
+			to: fiveHourEnd,
+			stepMs: 10 * MIN,
+			sevenDay: weekly(start, 20),
+			fiveHour: (t) =>
+				t < T0
+					? { pct: null, reset: null }
+					: {
+							pct: 98 - ((fiveHourEnd - t) / HOUR) * 24,
+							reset: FIVE_HOUR_RESET,
+						},
+		}),
+		accounts: [account("A")],
+	};
+}
+
+/**
+ * One account idle at 40 % inside a live five-hour window: the fit is flat, so
+ * the regression path states no ETA and its anchor cannot be back-solved.
+ */
+function flatFiveHourFixture(): {
+	rows: RosterSnapshotRow[];
+	accounts: RosterAccount[];
+} {
+	return {
+		rows: rows({
+			accountId: "A",
+			from: T0,
+			to: T0 + 2 * HOUR,
+			stepMs: 10 * MIN,
+			fiveHour: () => ({ pct: 40, reset: FIVE_HOUR_RESET }),
+		}),
+		accounts: [account("A")],
+	};
+}
+
 const merge = (
 	...parts: Array<{ rows: RosterSnapshotRow[]; accounts: RosterAccount[] }>
 ): { rows: RosterSnapshotRow[]; accounts: RosterAccount[] } => ({
@@ -2696,6 +2799,70 @@ describe("replayInstant reading-level fields", () => {
 		expect(forA?.exactShiftEligible).toBe(true);
 	});
 
+	test("a peer that fills inside its lag disqualifies the survivor's exact shift", () => {
+		const replay = replayFixtureAt(LAG_FILL_T, lagFillPairFixture());
+		const forA = recordOf(replay, "A", "scenario-equal");
+		const forB = recordOf(replay, "B", "scenario-equal");
+		expect(Math.abs((forA?.lagMs ?? 0) - MIN)).toBeLessThanOrEqual(1);
+		expect(Math.abs((forB?.lagMs ?? 0) - 10 * MIN)).toBeLessThanOrEqual(1);
+		// B fills inside its own lag, so the corrected scan applies its death at
+		// the instant: nothing of the class is left ahead of A there, and in the
+		// pre-correction scan B dies AFTER A. A is the first event of both scans.
+		expect(forA?.firstEvent).toBe(true);
+		// But A's share doubled at the instant, so its shift is the arithmetic of
+		// two slopes rather than its own lag.
+		expect(forA?.peerDiedInLag).toBe(true);
+		expect(forA?.exactShiftEligible).toBe(false);
+		const corrected = forA?.predictedEtaMs as number;
+		const original = recordOf(replay, "A", "scenario-equal-original")
+			?.predictedEtaMs as number;
+		expect((original - corrected) / MIN).toBeCloseTo(3, 1);
+	});
+
+	test("a record whose own account died inside its lag is peer-died-in-lag", () => {
+		const replay = replayFixtureAt(OWN_FILL_T, ownFillInsideLagFixture());
+		const weeklyRecord = recordOf(replay, "A", "scenario-equal", "seven_day");
+		expect(weeklyRecord?.pooledInClass).toBe(1);
+		expect(weeklyRecord?.firstEvent).toBe(true);
+		expect(weeklyRecord?.predictedEtaMs).not.toBeNull();
+		// The five-hour window of the SAME account filled inside its lag, and the
+		// weekly's projection carries the dead span that death opened.
+		expect(weeklyRecord?.peerDiedInLag).toBe(true);
+	});
+
+	test("reports a flat regression fit as having no derivable lag anchor", () => {
+		const replay = replayFixtureAt(
+			T0 + 2 * HOUR + 5 * MIN,
+			flatFiveHourFixture(),
+		);
+		const record = recordOf(replay, "A", "current");
+		expect(record?.estimatorSource).toBe("regression");
+		expect(record?.lagMs).toBe(0);
+		// A measured zero would say the correction moved this reading by nothing;
+		// the truth is that its anchor is unrecoverable.
+		expect(record?.lagAnchorKnown).toBe(false);
+	});
+
+	test("keeps the lag anchor known where the estimator derived one", () => {
+		const regression = replayFixtureAt(
+			T0 + 2 * HOUR + 5 * MIN,
+			fiveHourFixture({ pctPerHour: 30 }),
+		);
+		expect(recordOf(regression, "A", "current")?.lagAnchorKnown).toBe(true);
+		const weeklyReplay = replayFixtureAt(T0 + 5 * MIN, weeklyFixture({}));
+		expect(
+			recordOf(weeklyReplay, "A", "current", "seven_day")?.lagAnchorKnown,
+		).toBe(true);
+		// A now-anchored reading admits no lag at all, so its zero is derived.
+		const lowReplay = replayFixtureAt(
+			T0 + 5 * MIN,
+			weeklyFixture({ observed: false }),
+		);
+		expect(
+			recordOf(lowReplay, "A", "current", "seven_day")?.lagAnchorKnown,
+		).toBe(true);
+	});
+
 	test("a peer's revival re-times the shares and takes the flag away", () => {
 		// C is spent at T and comes back 30 min later, which re-splits the class
 		// before A reaches 100 %.
@@ -2805,6 +2972,35 @@ describe("observationLagChecks", () => {
 		// B's shift is 7.5 min against a 10 min lag, and it is described only.
 		expect(checks.shift.rest.n).toBe(1);
 		expect(checks.shift.rest.medianShiftMinutes).toBeCloseTo(7.5, 3);
+	});
+
+	test("keeps a survivor whose peer filled inside its lag out of the exact split", () => {
+		const replay = replayOfInstant(
+			replayFixtureAt(LAG_FILL_T, lagFillPairFixture()),
+		);
+		const checks = observationLagChecks(replay, scoreCohorts(replay));
+		// A's shift is 3 min against its own 1 min lag: no exact expectation
+		// exists for it, so it is described beside B rather than held to one.
+		expect(checks.shift.firstEvent.n).toBe(0);
+		expect(checks.shift.rest.n).toBe(2);
+	});
+
+	test("keeps a lone account that died inside its own lag out of the parity check", () => {
+		const replay = replayOfInstant(
+			replayFixtureAt(OWN_FILL_T, ownFillInsideLagFixture()),
+		);
+		const checks = observationLagChecks(replay, scoreCohorts(replay));
+		// The weekly is a lone account's first event, but the account is dead
+		// until its five-hour reset, so parity with the current model is not the
+		// expectation and the row must not count it.
+		expect(
+			checks.parity.find((row) => row.path === "lifetime-primary")?.n,
+		).toBe(0);
+		// The five-hour window itself still counts: it is the window that died,
+		// not one carrying a dead span, and it agrees with the current model.
+		const regression = checks.parity.find((row) => row.path === "regression");
+		expect(regression?.n).toBe(1);
+		expect(regression?.withinToleranceShare).toBe(1);
 	});
 
 	test("counts parity on a record the original scan never dated", () => {
@@ -2958,6 +3154,36 @@ describe("observationLagChecks", () => {
 			byPath.get("regression")?.medianSampleToObservationMinutes,
 		).toBeCloseTo(3, 6);
 		expect(byPath.get("lifetime-primary")?.medianLagMinutes).toBeCloseTo(8, 6);
+	});
+
+	test("counts a record with no derivable anchor apart from the lags", () => {
+		const records = [
+			...perModel("A", [T0], {
+				current: () => ({
+					estimatorSource: "regression",
+					lagMs: 4 * MIN,
+					lagAnchorKnown: true,
+				}),
+			}),
+			...perModel("B", [T0], {
+				current: () => ({
+					estimatorSource: "regression",
+					lagMs: 0,
+					lagAnchorKnown: false,
+				}),
+			}),
+		];
+		const replay = replayOf(records);
+		const checks = observationLagChecks(replay, scoreCohorts(replay));
+		const regression = checks.population.find(
+			(row) => row.path === "regression",
+		);
+		expect(regression?.records).toBe(2);
+		expect(regression?.noAnchorRecords).toBe(1);
+		// The unrecoverable anchor is a 0 nobody measured: folding it in would
+		// halve the median the correction actually moved this path by.
+		expect(regression?.medianLagMinutes).toBeCloseTo(4, 6);
+		expect(regression?.p90LagMinutes).toBeCloseTo(4, 6);
 	});
 });
 

@@ -242,16 +242,46 @@ export interface RedistributionRecord extends BacktestRecord {
 	 */
 	firstEvent: boolean;
 	/**
+	 * True when this window is still projecting ahead of `T` in the corrected
+	 * scan while ANOTHER window of its class — a peer's, or another window of
+	 * its own account — was filled inside its observation lag and so died AT
+	 * `T`.
+	 *
+	 * Such a death is invisible to {@link firstEvent}, which orders events at
+	 * `T` and therefore sees nothing standing ahead of this window. It still
+	 * re-splits the class from `T` on: this window's share, and with it its
+	 * whole projection, is not the one the pre-correction scan gave it, and on a
+	 * lone account the dead span until that window's reset is something the
+	 * current model does not model at all.
+	 */
+	peerDiedInLag: boolean;
+	/**
 	 * True when the window is the first event of BOTH equal-split scans — the
-	 * corrected one and the pre-correction one.
+	 * corrected one and the pre-correction one — and no other window of its
+	 * class died inside its lag.
 	 *
 	 * One scan is not enough to expect an exact lag shift: a peer the correction
 	 * fills inside its own lag dies at `T` in the corrected scan, so it never
 	 * stands ahead of this window there, while in the original scan it is alive
 	 * at `T` and dies part-way to this window's ETA. The shift is then the
-	 * arithmetic of two slopes rather than the window's own lag.
+	 * arithmetic of two slopes rather than the window's own lag. A peer that
+	 * dies at `T` in BOTH scans is the same story told at one instant: this
+	 * window's share doubles from `T` on, so {@link peerDiedInLag} disqualifies
+	 * it too.
 	 */
 	exactShiftEligible: boolean;
+	/**
+	 * False exactly where the estimator path admits a lag but no anchor could be
+	 * derived for it: a `regression` estimate with no ETA or a non-positive
+	 * slope (the fit's anchor is recoverable only through its ETA), and a
+	 * `lifetime-primary` estimate with no finite observation instant.
+	 *
+	 * Those records carry `lagMs: 0` because nothing could be derived, which is
+	 * not the same statement as a measured zero and must not be medianed beside
+	 * one. The now-anchored paths carry no lag at all, so their zero IS derived
+	 * and this stays true for them.
+	 */
+	lagAnchorKnown: boolean;
 }
 
 export interface ReplayRange {
@@ -1032,6 +1062,27 @@ export function replayInstant(
 				?.get(window.kind);
 			return estimate == null ? 0 : observationLagMs(estimate, window.input, T);
 		};
+		// Whether that zero is a derivation or an absence. Mirrors
+		// `observationLagMs`' own guards on the two paths that admit a lag; every
+		// other path carries none, so its zero is derived.
+		const lagAnchorKnownOf = (
+			entry: RosterEntry,
+			window: RosterWindow,
+		): boolean => {
+			const estimate = estimatesByAccount
+				.get(entry.accountId)
+				?.get(window.kind);
+			if (estimate == null) return true;
+			if (estimate.source === "regression") {
+				const slope = estimate.slopePctPerHour;
+				return estimate.exhaustsAtMs != null && slope != null && slope > 0;
+			}
+			if (estimate.source === "lifetime-primary") {
+				const observedAtMs = window.input.observedAtMs;
+				return observedAtMs != null && Number.isFinite(observedAtMs);
+			}
+			return true;
+		};
 		// Pooled as the CORRECTED scan classified them: everything it did not
 		// exclude. An outcome that states no exclusions (an `unknown` from an
 		// empty pool) reads as "nothing excluded", which over-counts rather than
@@ -1059,6 +1110,19 @@ export function replayInstant(
 						resetsAtMs != null && Number.isFinite(resetsAtMs) && resetsAtMs > T,
 				),
 		);
+		// A window filled inside its lag reports the sub-`T` instant it truly
+		// reached 100 %, but the scan applies that death AT `T`, so `T` is where
+		// it orders against everything else. Shared by the two predicates below
+		// so they agree on that ordering by construction.
+		const orderedAt = (exhaustsAtMs: number): number =>
+			Math.max(T, exhaustsAtMs);
+		const isSameWindow = (
+			exhaustion: { accountId: string; windowKind: string },
+			accountId: string,
+			windowKind: string,
+		): boolean =>
+			exhaustion.accountId === accountId &&
+			exhaustion.windowKind === windowKind;
 		/**
 		 * First-event eligibility inside ONE scan, from that scan's OWN ordering
 		 * of the class's slope-changing events.
@@ -1073,26 +1137,14 @@ export function replayInstant(
 		): ((accountId: string, windowKind: string) => boolean) => {
 			const exhaustions =
 				scenarioOutcomes.get(model)?.projectedExhaustions ?? [];
-			// A window filled inside its lag reports the sub-`T` instant it truly
-			// reached 100 %, but the scan applies that death AT `T`, so `T` is
-			// where it orders against everything else.
-			const orderedAt = (exhaustsAtMs: number): number =>
-				Math.max(T, exhaustsAtMs);
 			return (accountId: string, windowKind: string): boolean => {
-				const own = exhaustions.find(
-					(exhaustion) =>
-						exhaustion.accountId === accountId &&
-						exhaustion.windowKind === windowKind,
+				const own = exhaustions.find((exhaustion) =>
+					isSameWindow(exhaustion, accountId, windowKind),
 				)?.exhaustsAtMs;
 				if (own == null) return false;
 				const ownAt = orderedAt(own);
 				for (const other of exhaustions) {
-					if (
-						other.accountId === accountId &&
-						other.windowKind === windowKind
-					) {
-						continue;
-					}
+					if (isSameWindow(other, accountId, windowKind)) continue;
 					const otherAt = orderedAt(other.exhaustsAtMs);
 					// An event at `T` itself is already part of the share this window
 					// starts on; only one still ahead of `T` breaks its single slope.
@@ -1103,6 +1155,30 @@ export function replayInstant(
 		};
 		const firstEventCorrected = firstEventInScan("scenario-equal");
 		const firstEventOriginal = firstEventInScan("scenario-equal-original");
+		/**
+		 * The death `firstEventInScan` cannot see: another window of the class
+		 * that the correction filled inside its own lag, which the scan applies
+		 * AT `T` and which therefore never orders ahead of anything.
+		 *
+		 * It still re-splits the class from `T` on, so a window projecting past
+		 * `T` beside one is neither an exact-shift case nor a parity case.
+		 */
+		const peerDiedInLagOf = (
+			accountId: string,
+			windowKind: string,
+		): boolean => {
+			const exhaustions =
+				scenarioOutcomes.get("scenario-equal")?.projectedExhaustions ?? [];
+			const own = exhaustions.find((exhaustion) =>
+				isSameWindow(exhaustion, accountId, windowKind),
+			)?.exhaustsAtMs;
+			if (own == null || orderedAt(own) <= T) return false;
+			return exhaustions.some(
+				(other) =>
+					!isSameWindow(other, accountId, windowKind) &&
+					orderedAt(other.exhaustsAtMs) <= T,
+			);
+		};
 
 		for (const entry of entries) {
 			// Account-level learning, the current model's strict rule: ONE learning
@@ -1157,6 +1233,7 @@ export function replayInstant(
 						? window.input.observedAtMs
 						: null;
 				const firstEvent = firstEventCorrected(entry.accountId, window.kind);
+				const peerDiedInLag = peerDiedInLagOf(entry.accountId, window.kind);
 				const common = {
 					T,
 					windowKind: window.kind,
@@ -1179,8 +1256,12 @@ export function replayInstant(
 					classLagFree,
 					pooledInClass,
 					firstEvent,
+					peerDiedInLag,
 					exactShiftEligible:
-						firstEvent && firstEventOriginal(entry.accountId, window.kind),
+						firstEvent &&
+						!peerDiedInLag &&
+						firstEventOriginal(entry.accountId, window.kind),
+					lagAnchorKnown: lagAnchorKnownOf(entry, window),
 				};
 
 				const currentUsable =
@@ -2465,6 +2546,13 @@ export interface PairedEtaSubsetRow {
 export interface LagPopulationRow {
 	path: string;
 	records: number;
+	/**
+	 * Records of this path whose lag anchor could not be derived — see
+	 * {@link RedistributionRecord.lagAnchorKnown}. Counted apart, and excluded
+	 * from this row's median and p90: their `0` is an absence, not a
+	 * measurement.
+	 */
+	noAnchorRecords: number;
 	medianLagMinutes: number | null;
 	p90LagMinutes: number | null;
 	/** `sampled_at - observed_at`, where the record carries both. */
@@ -2608,6 +2696,11 @@ export function observationLagChecks(
 	// original model's ETA is no part of this comparison, and requiring it
 	// would drop exactly the records the correction moved from beyond the reset
 	// to inside it — the ones where the two models most need to agree.
+	//
+	// A record whose class lost a window inside its lag is excluded: the
+	// correction killed that window AT the instant, so the projection carries a
+	// dead span the current model does not model, and parity is not the
+	// expectation there.
 	const parityByPath = new Map<string, { n: number; within: number }>();
 	for (const path of [...ANCHORED_PATHS, "other"]) {
 		parityByPath.set(path, { n: 0, within: 0 });
@@ -2620,6 +2713,7 @@ export function observationLagChecks(
 			continue;
 		}
 		if (!corrected.firstEvent || corrected.pooledInClass !== 1) continue;
+		if (corrected.peerDiedInLag) continue;
 		const path = ANCHORED_PATHS.includes(corrected.estimatorSource)
 			? corrected.estimatorSource
 			: "other";
@@ -2695,15 +2789,26 @@ export function observationLagChecks(
 	// model's records only: the lag is a property of the reading.
 	const byPath = new Map<
 		string,
-		{ lags: number[]; sampleToObservation: number[] }
+		{
+			records: number;
+			noAnchor: number;
+			lags: number[];
+			sampleToObservation: number[];
+		}
 	>();
 	for (const record of replay.records) {
 		if (record.model !== "current") continue;
 		const entry = byPath.get(record.estimatorSource) ?? {
+			records: 0,
+			noAnchor: 0,
 			lags: [],
 			sampleToObservation: [],
 		};
-		entry.lags.push(record.lagMs / MINUTE_MS);
+		entry.records++;
+		// A record whose anchor could not be derived carries `0` because nothing
+		// was derivable, so it is counted and never medianed.
+		if (record.lagAnchorKnown) entry.lags.push(record.lagMs / MINUTE_MS);
+		else entry.noAnchor++;
 		if (record.observationAgeMs != null) {
 			entry.sampleToObservation.push(
 				(record.observationAgeMs - record.sampleAgeMs) / MINUTE_MS,
@@ -2714,7 +2819,8 @@ export function observationLagChecks(
 	const population: LagPopulationRow[] = [...byPath.entries()]
 		.map(([path, entry]) => ({
 			path,
-			records: entry.lags.length,
+			records: entry.records,
+			noAnchorRecords: entry.noAnchor,
 			medianLagMinutes: medianOf(entry.lags),
 			p90LagMinutes: percentileOf(entry.lags, 0.9),
 			medianSampleToObservationMinutes: medianOf(entry.sampleToObservation),
@@ -2788,7 +2894,9 @@ export function redistributionRecordToJson(
 		classLagFree: record.classLagFree,
 		pooledInClass: record.pooledInClass,
 		firstEvent: record.firstEvent,
+		peerDiedInLag: record.peerDiedInLag,
 		exactShiftEligible: record.exactShiftEligible,
+		lagAnchorKnown: record.lagAnchorKnown,
 		usable: record.usable,
 		unusableReason: record.unusableReason,
 		predictsExhaust: record.predictsExhaust,
@@ -3239,7 +3347,7 @@ function observationLagSection(checks: ObservationLagChecks): string[] {
 	);
 	out.push("");
 	out.push(
-		"A record is held to the exact expectation only when it is the FIRST EVENT OF BOTH SCANS: in each of them its own exhaustion precedes every other slope-changing event of its class — any other projected exhaustion still ahead of the instant, and the reset of any class window already at 100 %. One slope then governs the whole projection on both sides and the shift must equal the lag exactly. One scan is not enough: a peer the correction fills inside its own lag dies at the instant here and is alive at it there, so the two scans cross different breakpoints. Everywhere else the projection crosses at least one breakpoint, where a shift of `s₁·lag/s₂` is what the arithmetic gives, so no exact expectation exists and the rest of the table is descriptive.",
+		"A record is held to the exact expectation only when it is the FIRST EVENT OF BOTH SCANS: in each of them its own exhaustion precedes every other slope-changing event of its class — any other projected exhaustion still ahead of the instant, and the reset of any class window already at 100 %. One slope then governs the whole projection on both sides and the shift must equal the lag exactly. One scan is not enough: a peer the correction fills inside its own lag dies at the instant here and is alive at it there, so the two scans cross different breakpoints. Nor is being the first event of both, on its own: a window of the class that the correction filled inside ITS lag dies AT the instant, which orders ahead of nothing and so leaves the flag standing, while re-splitting the class from the instant on. Such a record is excluded too, and is described with the rest. Everywhere else the projection crosses at least one breakpoint, where a shift of `s₁·lag/s₂` is what the arithmetic gives, so no exact expectation exists and the rest of the table is descriptive.",
 	);
 	out.push("");
 	out.push(
@@ -3256,7 +3364,7 @@ function observationLagSection(checks: ObservationLagChecks): string[] {
 	out.push("");
 	if (checks.shift.firstEvent.n === 0) {
 		out.push(
-			"No records are the first event of both scans: the exact-shift expectation is untested in this run.",
+			"No positive-lag records with a dated ETA in both scans met the exact-shift conditions: the expectation is untested in this run.",
 		);
 		out.push("");
 	}
@@ -3265,6 +3373,10 @@ function observationLagSection(checks: ObservationLagChecks): string[] {
 	out.push("");
 	out.push(
 		"The point of deriving the lag per estimator path. Where an account is the only pooled member of its class, its scenario slope IS its own measured slope, so the corrected scan must land on the current model's ETA. Restricted to first-event records where both models committed to a date, and split by the path the reading came from: the two anchored paths are expected at 100 %, and `other` collects the now-anchored paths, which carry no lag and are not held to the expectation.",
+	);
+	out.push("");
+	out.push(
+		"A record whose class lost another window inside ITS lag is excluded as well, even on a lone account: the correction fills that window and applies the death at the instant, so the account is idle until that window's reset and the projection carries a dead span the current model does not model at all. Agreement is not the expectation there, so counting it would score the correction against a claim it never made.",
 	);
 	out.push("");
 	out.push("| estimator path | n | within 1 s of the current model |");
@@ -3298,12 +3410,16 @@ function observationLagSection(checks: ObservationLagChecks): string[] {
 	);
 	out.push("");
 	out.push(
-		"| estimator path | records | median lag (min) | p90 lag (min) | rows with both instants | median sample − observation (min) | p90 |",
+		"`no anchor` counts the records of a path whose lag could not be derived at all, and the median and p90 beside it are taken over the remaining ones. The regression path anchors its fit by back-solving the ETA it states, so a fit with NO ETA — a flat or falling six-hour fit, which is what an idle account inside a live window produces — has no recoverable anchor. Such a window is scheduled from the replayed instant in BOTH scans and is advanced by nothing, exactly as it was before the correction existed; the column separates that absence from a lag genuinely measured at zero, which would otherwise pull the path's median and p90 down.",
 	);
-	out.push("|---|---:|---:|---:|---:|---:|---:|");
+	out.push("");
+	out.push(
+		"| estimator path | records | no anchor | median lag (min) | p90 lag (min) | rows with both instants | median sample − observation (min) | p90 |",
+	);
+	out.push("|---|---:|---:|---:|---:|---:|---:|---:|");
 	for (const row of checks.population) {
 		out.push(
-			`| ${row.path} | ${row.records} | ${num(row.medianLagMinutes, 2)} | ${num(row.p90LagMinutes, 2)} | ${row.sampleToObservationRecords} | ${num(row.medianSampleToObservationMinutes, 2)} | ${num(row.p90SampleToObservationMinutes, 2)} |`,
+			`| ${row.path} | ${row.records} | ${row.noAnchorRecords} | ${num(row.medianLagMinutes, 2)} | ${num(row.p90LagMinutes, 2)} | ${row.sampleToObservationRecords} | ${num(row.medianSampleToObservationMinutes, 2)} | ${num(row.p90SampleToObservationMinutes, 2)} |`,
 		);
 	}
 	out.push("");
@@ -3398,7 +3514,7 @@ export function formatRedistributionReport(
 		"- Sign convention: signed ETA error is `predicted − observed`, so POSITIVE is predicted-later-than-observed, i.e. OPTIMISTIC.",
 	);
 	out.push(
-		"- Observation lag: `scenario-equal` and `scenario-headroom` advance each reading over the gap between the instant its estimator measured to and the instant being replayed, at the share slope the first assignment gives it. The lag is taken from the fit's own last point on the regression path and from the observation instant on the observation-anchored lifetime path, so a lone account's scenario ETA is the current model's ETA. `scenario-equal-original` is the same equal split with that advance switched off, and is the control the mechanism checks below are measured against.",
+		"- Observation lag: `scenario-equal` and `scenario-headroom` advance each reading over the gap between the instant its estimator measured to and the instant being replayed, at the share slope the first assignment gives it. The lag is taken from the fit's own last point on the regression path and from the observation instant on the observation-anchored lifetime path, so on a lone account the scenario ETA of the window that exhausts FIRST is the current model's ETA for it. A later window of the same account is not: it additionally carries the span the account spends dead after the first window fills, which is the scenario's own semantics rather than the redistribution. `scenario-equal-original` is the same equal split with that advance switched off, and is the control the mechanism checks below are measured against.",
 	);
 	out.push("");
 	out.push("Verdict rule, declared before the run:");
@@ -3671,6 +3787,7 @@ export function knownLimitsFor(
 		"IF a survivor's own lookback already contains the traffic it absorbed, the scenario would be adding that demand a second time. Whether it does is a hypothesis this replay reports on (the peer-exhaustion cohort and the survivor slope table) rather than a property these measurements establish; nothing here corrects for it.",
 		"The observation-lag advance never rewinds the scan clock below the instant being replayed: a window that fills inside its lag dies AT that instant, though the projection it records carries the true, earlier one. Any redistribution such a death causes therefore starts at the instant, not at the fill.",
 		"A reading whose row carries no `observed_at` and whose estimator is the now-anchored lifetime average has no derivable lag and is advanced by nothing. That is a real absence, not a measured zero, and the mechanism section reports those records under `unknown` rather than folding them into the fresh bucket.",
+		"A regression fit that states no ETA — a flat or falling six-hour fit, which an idle account inside a live window produces — has no recoverable anchor either: the fit's anchor is back-solved from the ETA. Such a window is scheduled from the replayed instant in BOTH scans, which is pre-existing behaviour and not something the correction introduced, and the lag-population table counts those records apart from the lags it medians.",
 	];
 
 	// Measured, never assumed: one model's records only, because every model
