@@ -532,9 +532,12 @@ describe("computeCapacityRunwayScenario", () => {
 	});
 
 	it("keeps a baseline that finished and says which scan ran out of budget", () => {
-		// The baseline needs one event (A's exhaustion at 4d). The deficit walk
-		// starts at pace 0.5, where A survives its first cycle and needs two reset
-		// events before it can conclude.
+		// The pool-out itself needs one event (A's exhaustion at 4d) and stands.
+		// What runs out of budget is the walk PAST it: the baseline keeps going to
+		// complete `projectedExhaustions`, and A's reset at 6d is a second event.
+		// The deficit walk is also cut short (at pace 0.5 A survives its first
+		// cycle and needs two reset events before it can conclude), but the
+		// incomplete projection list is the stronger caveat and is the one named.
 		const result = computeCapacityRunwayScenario(
 			[acct("A", [weekly(20)])],
 			NOW,
@@ -545,7 +548,7 @@ describe("computeCapacityRunwayScenario", () => {
 		if (result.kind !== "runway") throw new Error("unreachable");
 		expect(result.exhaustsAtMs).toBeCloseTo(NOW + 4 * DAY, -3);
 		expect(result.paceDeficit).toBeUndefined();
-		expect(result.eventBudgetExhausted).toBe("probe");
+		expect(result.eventBudgetExhausted).toBe("projection");
 	});
 
 	it("keeps the pool alive on an unmetered account and probes nothing", () => {
@@ -767,6 +770,7 @@ describe("computeCapacityRunwayScenario", () => {
 			includedLearningAccounts: [],
 			unknownTierAccountIds: [],
 			demandOnlyAccountIds: [],
+			projectedExhaustions: [],
 		});
 	});
 
@@ -843,6 +847,232 @@ describe("computeCapacityRunwayScenario", () => {
 		expect(skewed.kind).toBe("runway");
 		if (skewed.kind !== "runway") throw new Error("unreachable");
 		expect(skewed.exhaustsAtMs).toBeCloseTo(NOW + 2.6 * HOUR, -3);
+	});
+
+	describe("projectedExhaustions", () => {
+		it("lists every window the baseline drove to 100% in its first cycle", () => {
+			// The module's first case: 60%/d of demand split 30%/d each, B out at
+			// 2d, A — then carrying all of it from 80% — 8h later.
+			const result = computeCapacityRunwayScenario(
+				[acct("A", [weekly(20)]), acct("B", [weekly(40)])],
+				NOW,
+			);
+			expect(result.kind).toBe("runway");
+			if (result.kind !== "runway") throw new Error("unreachable");
+			expect(result.exhaustsAtMs).toBeCloseTo(NOW + 2 * DAY + 8 * HOUR, -3);
+			expect(result.projectedExhaustions).toHaveLength(2);
+			expect(result.projectedExhaustions[0].accountId).toBe("B");
+			expect(result.projectedExhaustions[0].windowKind).toBe("seven_day");
+			expect(result.projectedExhaustions[0].exhaustsAtMs).toBeCloseTo(
+				NOW + 2 * DAY,
+				-3,
+			);
+			expect(result.projectedExhaustions[1].accountId).toBe("A");
+			expect(result.projectedExhaustions[1].exhaustsAtMs).toBeCloseTo(
+				NOW + 2 * DAY + 8 * HOUR,
+				-3,
+			);
+		});
+
+		it("omits an exhaustion that only happens in a later cycle", () => {
+			// D = 50 + 1600 units/h, 825 each => 41.25%/h each. B (80%, resets at
+			// +4h) dies at 20/41.25 h; A then takes all 1650 units (82.5%/h) from
+			// 30%, reaches 72.5% at its own reset at +1h, and only exhausts ~1.21h
+			// into the SECOND cycle — which the caller's reading says nothing about.
+			const result = computeCapacityRunwayScenario(
+				[acct("A", [fiveHour(10, 4)]), acct("B", [fiveHour(80, 1)])],
+				NOW,
+			);
+			expect(result.kind).toBe("runway");
+			if (result.kind !== "runway") throw new Error("unreachable");
+			expect(result.projectedExhaustions).toHaveLength(1);
+			expect(result.projectedExhaustions[0]).toMatchObject({
+				accountId: "B",
+				windowKind: "five_hour",
+			});
+			expect(result.projectedExhaustions[0].exhaustsAtMs).toBeCloseTo(
+				NOW + (20 / 41.25) * HOUR,
+				-3,
+			);
+		});
+
+		it("keeps walking past the pool-out to finish a still-pending window", () => {
+			// A: 5h at 80% (1h in, resets at +4h) and a weekly at 99% (3.5d in);
+			// B: a weekly already spent, 3.5d in, whose fill demand still counts.
+			//
+			// Weekly demand = (99 + 100)/84 %/h x 20 = 47.38 units/h, and B is dead
+			// throughout, so A carries all of it at 199/84 %/h. A's 5h carries the
+			// whole 1600 units/h => 80%/h, so it dies 0.25h in and the pool is out
+			// there. A's weekly is at 99 + 199/336 % by then; the 5h window resets
+			// at +4h, A is alive again, and 137/796 h later the weekly fills — still
+			// inside the cycle the reading came from (its reset is at +3.5d).
+			const accounts = [
+				acct("A", [fiveHour(80, 1), weekly(99, 3.5)]),
+				acct("B", [weekly(100, 3.5)]),
+			];
+			const result = computeCapacityRunwayScenario(accounts, NOW);
+			expect(result.kind).toBe("runway");
+			if (result.kind !== "runway") throw new Error("unreachable");
+			expect(result.exhaustsAtMs).toBeCloseTo(NOW + 0.25 * HOUR, -3);
+			expect(result.causes).toEqual([
+				{ accountId: "A", windowKind: "five_hour" },
+				{ accountId: "B", windowKind: "seven_day" },
+			]);
+			expect(result.eventBudgetExhausted).toBeUndefined();
+			expect(result.projectedExhaustions).toHaveLength(2);
+			expect(result.projectedExhaustions[0]).toMatchObject({
+				accountId: "A",
+				windowKind: "five_hour",
+			});
+			expect(result.projectedExhaustions[0].exhaustsAtMs).toBeCloseTo(
+				NOW + 0.25 * HOUR,
+				-3,
+			);
+			expect(result.projectedExhaustions[1]).toMatchObject({
+				accountId: "A",
+				windowKind: "seven_day",
+			});
+			expect(result.projectedExhaustions[1].exhaustsAtMs).toBeCloseTo(
+				NOW + 4 * HOUR + (137 / 796) * HOUR,
+				-3,
+			);
+			expect(result.projectedExhaustions[1].exhaustsAtMs).toBeLessThan(
+				NOW + 3.5 * DAY,
+			);
+		});
+
+		it("reports nothing for a pool that is already out", () => {
+			const result = computeCapacityRunwayScenario(
+				[acct("A", [weekly(100)])],
+				NOW,
+			);
+			expect(result.kind).toBe("out-now");
+			expect(result.projectedExhaustions).toEqual([]);
+		});
+
+		it("lists an included learner's own exhaustion", () => {
+			// The add case: 60%/d over three accounts, 20%/d each. A and B fill at
+			// 3.5d with the newcomer at 70%, which then takes all of it and fills
+			// half a day later.
+			const result = computeCapacityRunwayScenario(
+				[
+					acct("A", [weekly(30)]),
+					acct("B", [weekly(30)]),
+					acct("N", [weekly(0)]),
+				],
+				NOW,
+			);
+			expect(result.kind).toBe("runway");
+			if (result.kind !== "runway") throw new Error("unreachable");
+			expect(
+				result.projectedExhaustions.map((entry) => entry.accountId),
+			).toEqual(["A", "B", "N"]);
+			expect(result.projectedExhaustions[0].exhaustsAtMs).toBeCloseTo(
+				NOW + 3.5 * DAY,
+				-3,
+			);
+			expect(result.projectedExhaustions[2].exhaustsAtMs).toBeCloseTo(
+				NOW + 4 * DAY,
+				-3,
+			);
+		});
+
+		it("reports nothing at all when the baseline itself ran out of budget", () => {
+			const result = computeCapacityRunwayScenario(
+				[acct("A", [weekly(20)])],
+				NOW,
+				undefined,
+				{ maxEvents: 0 },
+			);
+			expect(result.kind).toBe("unknown");
+			expect(result.eventBudgetExhausted).toBe("baseline");
+			expect(result.projectedExhaustions).toEqual([]);
+		});
+
+		it("says the list may be incomplete when only the walk past the hit ran out", () => {
+			// The fixture above reaches its pool-out on ONE event (the 5h exhaustion
+			// at +0.25h). Everything after that is the walk for A's still-pending
+			// weekly: the 5h reset at +4h is the second event, and the budget stops
+			// the scan there, before the weekly fill it was walking towards.
+			const accounts = [
+				acct("A", [fiveHour(80, 1), weekly(99, 3.5)]),
+				acct("B", [weekly(100, 3.5)]),
+			];
+			const result = computeCapacityRunwayScenario(accounts, NOW, undefined, {
+				maxEvents: 1,
+			});
+			expect(result.kind).toBe("runway");
+			if (result.kind !== "runway") throw new Error("unreachable");
+			expect(result.exhaustsAtMs).toBeCloseTo(NOW + 0.25 * HOUR, -3);
+			expect(result.eventBudgetExhausted).toBe("projection");
+			expect(result.projectedExhaustions).toHaveLength(1);
+			expect(result.projectedExhaustions[0]).toMatchObject({
+				accountId: "A",
+				windowKind: "five_hour",
+			});
+		});
+
+		it("lists the later fill of a window a setup credit revived", () => {
+			const bank: RunwayResetCreditBank = {
+				onWeeklyLimitEnabled: true,
+				onExpiryEnabled: false,
+				credits: [{ expiresAtMs: null }],
+			};
+			// C is revived at 0% before the first assignment, so its own later fill
+			// is the first one the caller can act on: 75%/d each, D out at 2/3 d,
+			// C alone at 150%/d for the last third of a day.
+			const result = computeCapacityRunwayScenario(
+				[
+					acct("C", [weekly(100)], {
+						tier: CODEX_PRO,
+						demandClass: "codex",
+						codexResetCredits: bank,
+					}),
+					acct("D", [weekly(50)], { tier: CODEX_PRO, demandClass: "codex" }),
+				],
+				NOW,
+			);
+			expect(result.kind).toBe("runway");
+			if (result.kind !== "runway") throw new Error("unreachable");
+			expect(result.projectedExhaustions).toHaveLength(2);
+			expect(result.projectedExhaustions[0].accountId).toBe("D");
+			expect(result.projectedExhaustions[0].exhaustsAtMs).toBeCloseTo(
+				NOW + (2 / 3) * DAY,
+				-3,
+			);
+			expect(result.projectedExhaustions[1].accountId).toBe("C");
+			expect(result.projectedExhaustions[1].exhaustsAtMs).toBeCloseTo(
+				NOW + DAY,
+				-3,
+			);
+		});
+
+		it("leaves the pace probes exactly where they were", () => {
+			// The same fixture and the same expectations as the probe test above:
+			// probes never capture, so they still stop at their first pool-out.
+			const result = computeCapacityRunwayScenario(
+				[acct("A", [weekly(20)])],
+				NOW,
+			);
+			expect(result.kind).toBe("runway");
+			if (result.kind !== "runway") throw new Error("unreachable");
+			expect(result.paceDeficit?.multiplier).toBeCloseTo(0.66, 5);
+			expect(result.eventBudgetExhausted).toBeUndefined();
+			expect(result.projectedExhaustions).toHaveLength(1);
+			expect(result.projectedExhaustions[0].exhaustsAtMs).toBeCloseTo(
+				NOW + 4 * DAY,
+				-3,
+			);
+
+			const margin = computeCapacityRunwayScenario(
+				[acct("A", [weekly(14)])],
+				NOW,
+			);
+			expect(margin.kind).toBe("beyond-horizon");
+			if (margin.kind !== "beyond-horizon") throw new Error("unreachable");
+			expect(margin.paceMargin?.multiplier).toBeCloseTo(1.03, 5);
+			expect(margin.projectedExhaustions).toEqual([]);
+		});
 	});
 
 	describe("contract violations", () => {

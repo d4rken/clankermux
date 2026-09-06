@@ -3,6 +3,7 @@ import type {
 	RunwayCause,
 	RunwayScenarioBasis,
 	RunwayScenarioDemand,
+	RunwayScenarioExhaustion,
 	RunwayScenarioOutcome,
 	RunwayScenarioShare,
 	RunwayScenarioTier,
@@ -33,6 +34,7 @@ import { type AccountTier, tierCapacityUnits } from "./tier-capacity";
 export type {
 	RunwayScenarioBasis,
 	RunwayScenarioDemand,
+	RunwayScenarioExhaustion,
 	RunwayScenarioOutcome,
 	RunwayScenarioShare,
 	RunwayScenarioTier,
@@ -180,6 +182,13 @@ interface ScanWindow {
 	inactive: boolean;
 	/** %/hour, assigned at every assignment. */
 	slope: number;
+	/**
+	 * True while the window is still in the cycle its READING belongs to: no
+	 * reset and no credit revival has ended it inside this scan. Only a
+	 * first-cycle exhaustion is a statement about the reading the caller holds,
+	 * so only those reach {@link RunwayScenarioBasis.projectedExhaustions}.
+	 */
+	firstCycle: boolean;
 }
 
 /** What the setup derived for one window, before any scan state exists. */
@@ -253,15 +262,39 @@ interface ScanEvent {
 }
 
 type ScanResult =
-	| { kind: "hit"; t: number; causes: RunwayCause[] }
+	| {
+			kind: "hit";
+			t: number;
+			causes: RunwayCause[];
+			/**
+			 * The pool-out stands, but the capture-mode continuation past it (the
+			 * one that completes {@link BaselineCapture.exhaustions}) ran out of
+			 * budget. Never set on a probe, which stops at the hit.
+			 */
+			projectionBudgetExhausted?: boolean;
+	  }
 	| { kind: "clear" }
 	| { kind: "budget" };
+
+/** The pool-out the capture-mode scan reports, snapshotted where it happened. */
+interface HitSnapshot {
+	t: number;
+	causes: RunwayCause[];
+	/** Credits consumed AT the hit — the continuation past it may consume more. */
+	assumedCredits: RunwayAssumedCredits[];
+}
 
 /** What only the pace-1 scan may report. */
 interface BaselineCapture {
 	/** `w_j/Σw` at each account's FIRST alive assignment. */
 	shares: Map<string, number>;
 	assumedCredits: RunwayAssumedCredits[];
+	/**
+	 * `${accountId}::${windowKind}` → that window's first-cycle exhaustion. Keyed
+	 * rather than listed so a later cycle cannot overwrite the first one; the
+	 * entry carries its own ids so nothing has to parse the key back apart.
+	 */
+	exhaustions: Map<string, RunwayScenarioExhaustion>;
 }
 
 const finiteOrNull = (value: number | null | undefined): number | null =>
@@ -317,6 +350,7 @@ export function computeCapacityRunwayScenario(
 		includedLearningAccounts: [],
 		unknownTierAccountIds: [],
 		demandOnlyAccountIds: [],
+		projectedExhaustions: [],
 	};
 	if (accounts.length === 0) return { kind: "no-accounts", ...emptyBasis };
 
@@ -482,9 +516,17 @@ export function computeCapacityRunwayScenario(
 				a.windowKind.localeCompare(b.windowKind),
 		);
 
+	// Declared before the first `basisOf` call so an early return reports an
+	// empty projection list rather than reaching for a scan that never ran.
+	const capture: BaselineCapture = {
+		shares: new Map(),
+		assumedCredits: [],
+		exhaustions: new Map(),
+	};
+
 	const basisOf = (
 		includedLearningAccounts: RunwayScenarioShare[],
-		eventBudgetExhausted?: "baseline" | "probe",
+		eventBudgetExhausted?: "baseline" | "probe" | "projection",
 	): RunwayScenarioBasis => ({
 		basis: "demand-conserving",
 		demandUnitsPerHour,
@@ -492,6 +534,12 @@ export function computeCapacityRunwayScenario(
 		includedLearningAccounts,
 		unknownTierAccountIds,
 		demandOnlyAccountIds,
+		projectedExhaustions: [...capture.exhaustions.values()].sort(
+			(a, b) =>
+				a.exhaustsAtMs - b.exhaustsAtMs ||
+				a.accountId.localeCompare(b.accountId) ||
+				a.windowKind.localeCompare(b.windowKind),
+		),
 		...(eventBudgetExhausted ? { eventBudgetExhausted } : {}),
 	});
 
@@ -533,6 +581,7 @@ export function computeCapacityRunwayScenario(
 				deadUntilMs: window.deadUntilMs,
 				inactive: window.inactive,
 				slope: 0,
+				firstCycle: true,
 			})),
 			credits: account.bank === null ? [] : sortedCredits(account.bank),
 			onWeeklyLimitEnabled: account.bank?.onWeeklyLimitEnabled ?? false,
@@ -540,16 +589,28 @@ export function computeCapacityRunwayScenario(
 			consumed: 0,
 		}));
 
-		const finish = (result: ScanResult): ScanResult => {
+		/** Credits consumed so far, in account order. */
+		const consumedSoFar = (): RunwayAssumedCredits[] =>
+			state
+				.filter((account) => account.consumed > 0)
+				.map((account) => ({
+					accountId: account.accountId,
+					count: account.consumed,
+				}));
+
+		const finish = (
+			result: ScanResult,
+			// The hit's own snapshot, when the scan walked PAST the pool-out: the
+			// credits reported are the ones the runway assumed, never the extra
+			// ones the continuation spent collecting projections.
+			assumedCredits?: RunwayAssumedCredits[],
+		): ScanResult => {
 			if (capture !== null) {
-				for (const account of state) {
-					if (account.consumed > 0) {
-						capture.assumedCredits.push({
-							accountId: account.accountId,
-							count: account.consumed,
-						});
-					}
-				}
+				capture.assumedCredits.push(...(assumedCredits ?? consumedSoFar()));
+				// A scan that never reached a verdict reports no projections at all:
+				// the exhaustions it happened to walk past describe a scan the caller
+				// is being told not to believe.
+				if (result.kind === "budget") capture.exhaustions.clear();
 			}
 			return result;
 		};
@@ -580,9 +641,16 @@ export function computeCapacityRunwayScenario(
 
 		let t = now;
 		let events = 0;
+		/**
+		 * The pool-out, once seen, while the capture scan keeps walking. The
+		 * runway is this instant and nothing later can change it; the walk
+		 * continues only so a window whose own first-cycle exhaustion is still
+		 * pending gets its projection recorded.
+		 */
+		let firstHit: HitSnapshot | null = null;
 		for (;;) {
 			const alive = state.filter(isAlive);
-			if (alive.length === 0) {
+			if (alive.length === 0 && firstHit === null) {
 				const causes: RunwayCause[] = [];
 				for (const account of state) {
 					for (const window of account.windows) {
@@ -594,7 +662,12 @@ export function computeCapacityRunwayScenario(
 						}
 					}
 				}
-				return finish({ kind: "hit", t, causes });
+				// A probe only ever needs the instant, and an out-now pool has no
+				// projection to complete: both stop here, exactly as they always did.
+				if (capture === null || t === now) {
+					return finish({ kind: "hit", t, causes });
+				}
+				firstHit = { t, causes, assumedCredits: consumedSoFar() };
 			}
 
 			// Assignment: the class demand, split over the accounts alive right now.
@@ -715,7 +788,14 @@ export function computeCapacityRunwayScenario(
 					}
 				}
 			}
-			if (candidates.length === 0) return finish({ kind: "clear" });
+			if (candidates.length === 0) {
+				return firstHit === null
+					? finish({ kind: "clear" })
+					: finish(
+							{ kind: "hit", t: firstHit.t, causes: firstHit.causes },
+							firstHit.assumedCredits,
+						);
+			}
 
 			const next = Math.min(...candidates.map((event) => event.atMs));
 			const batch = candidates.filter(
@@ -744,6 +824,9 @@ export function computeCapacityRunwayScenario(
 				const window = event.window;
 				window.pct = 0;
 				window.deadUntilMs = null;
+				// The reading's own cycle is over: an exhaustion from here on is a
+				// statement about a window the caller has not seen.
+				window.firstCycle = false;
 				if (window.durationMs === null) {
 					// One-time recovery: nothing says when the next cycle would start,
 					// so a later exhaustion holds the window dead to the horizon.
@@ -764,6 +847,7 @@ export function computeCapacityRunwayScenario(
 				event.account.credits.splice(index, 1);
 				event.window.pct = 0;
 				event.window.deadUntilMs = null;
+				event.window.firstCycle = false;
 				event.account.consumed++;
 				touched.add(event.window);
 			}
@@ -777,6 +861,21 @@ export function computeCapacityRunwayScenario(
 				const window = event.window;
 				window.pct = 100;
 				window.deadUntilMs = window.resetsAtMs ?? horizonEndMs;
+				// The FIRST exhaustion of the cycle the reading belongs to, at the
+				// event's own instant rather than the batch clock (a tie inside the
+				// tolerance would otherwise move it by the width of the batch).
+				const key = `${event.account.accountId}::${window.kind}`;
+				if (
+					capture !== null &&
+					window.firstCycle &&
+					!capture.exhaustions.has(key)
+				) {
+					capture.exhaustions.set(key, {
+						accountId: event.account.accountId,
+						windowKind: window.kind,
+						exhaustsAtMs: event.atMs,
+					});
+				}
 				if (
 					window.kind === "seven_day" &&
 					event.account.onWeeklyLimitEnabled &&
@@ -784,17 +883,31 @@ export function computeCapacityRunwayScenario(
 				) {
 					window.pct = 0;
 					window.deadUntilMs = null;
+					// Revived: the reading's cycle ended here, so a later exhaustion of
+					// this window belongs to a cycle the caller cannot act on.
+					window.firstCycle = false;
 					event.account.consumed++;
 				}
 			}
 
 			t = batchEnd;
 			events++;
-			if (events > maxEvents) return finish({ kind: "budget" });
+			if (events > maxEvents) {
+				return firstHit === null
+					? finish({ kind: "budget" })
+					: finish(
+							{
+								kind: "hit",
+								t: firstHit.t,
+								causes: firstHit.causes,
+								projectionBudgetExhausted: true,
+							},
+							firstHit.assumedCredits,
+						);
+			}
 		}
 	};
 
-	const capture: BaselineCapture = { shares: new Map(), assumedCredits: [] };
 	const baseline = runScan(1, capture);
 	const includedLearningAccounts: RunwayScenarioShare[] = pooled
 		.filter((account) => account.windows.some((window) => window.learning))
@@ -856,9 +969,16 @@ export function computeCapacityRunwayScenario(
 				? { assumedResetCredits: assumedCredits }
 				: {}),
 			...(paceDeficit !== null ? { paceDeficit } : {}),
+			// The projection continuation is reported ahead of the probes: an
+			// incomplete `projectedExhaustions` misreads as survival, while an
+			// absent `paceDeficit` only withholds a caveat.
 			...basisOf(
 				includedLearningAccounts,
-				probeBudgetExhausted ? "probe" : undefined,
+				baseline.projectionBudgetExhausted === true
+					? "projection"
+					: probeBudgetExhausted
+						? "probe"
+						: undefined,
 			),
 		};
 	}
