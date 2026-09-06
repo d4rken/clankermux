@@ -1,11 +1,11 @@
 # ClankerMux runway redistribution backtest
 
-Generated: 2026-09-06T15:02:33.066Z
+Generated: 2026-09-06T16:49:10.496Z
 
 Reproduce with:
 
 ```
-bun scripts/redistribution-backtest.ts --db=/home/darken/.config/clankermux/clankermux.db --from=2026-07-01T00:00:00Z --to=2026-09-06T00:00:00Z --out=docs/prediction-backtest-redistribution.md
+bun scripts/redistribution-backtest.ts --db=/home/darken/.config/clankermux/clankermux.db --from=2026-07-01T00:00:00Z --to=2026-09-06T00:00:00Z --out=docs/prediction-backtest-redistribution.md --records-out=/tmp/claude-1000/redistribution-records.jsonl
 ```
 
 | config | value |
@@ -20,11 +20,11 @@ bun scripts/redistribution-backtest.ts --db=/home/darken/.config/clankermux/clan
 
 | field | value |
 |---|---|
-| usage_snapshots rows | 192783 |
+| usage_snapshots rows | 193043 |
 | accounts | 7 |
 | providers | anthropic, codex |
 | first sample | 2026-06-02T12:48:00.294Z |
-| last sample | 2026-09-06T15:01:33.014Z |
+| last sample | 2026-09-06T16:47:37.430Z |
 | replay interval | `[2026-07-01T00:00:00.000Z, 2026-09-06T00:00:00.000Z)` |
 | grid instants | 9648 |
 
@@ -426,143 +426,1134 @@ Paired median signed error (n=5; positive = optimistic): scenario-equal 21.0 min
 
 The scenario adds the dead peer's fill demand on top of a survivor whose own lookback ALREADY contains the traffic it absorbed, so it is expected to read pessimistic the longer the peer has been dead. Disclosed here, not corrected.
 
-#### since death <1h
+Buckets are fine (30 min at the start) because a five-hour window is only 300 minutes long: at the three coarse buckets this replaced, one bucket held a whole five-hour lifecycle. Reported combined and split by window kind, because the two kinds absorb a death on completely different timescales.
 
-n: 575 records, 88 window lifecycles, 50 episodes.
+#### combined
+
+##### since death 0-30m
+
+n: 308 records, 85 window lifecycles, 49 episodes.
 
 Lifecycle-balanced (one record per window lifecycle, median instant):
 
 | estimator | instants | usable | scored | censored | TP | FP | TN | FN | precision | recall | F1 | median signed err (min) | median abs err (min) | median abs err (window) |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
-| current | 88 | 100.0% | 88 | 0 | 11 | 20 | 49 | 8 | 0.355 | 0.579 | 0.440 | -36.6 | 93.0 | 0.122 |
-| scenario-equal | 88 | 100.0% | 88 | 0 | 16 | 24 | 45 | 3 | 0.400 | 0.842 | 0.542 | 6.9 | 53.1 | 0.106 |
-| scenario-headroom | 88 | 100.0% | 88 | 0 | 14 | 21 | 48 | 5 | 0.400 | 0.737 | 0.519 | 6.9 | 110.6 | 0.067 |
+| current | 85 | 100.0% | 85 | 0 | 9 | 17 | 50 | 9 | 0.346 | 0.500 | 0.409 | -887.9 | 887.9 | 0.088 |
+| scenario-equal | 85 | 100.0% | 85 | 0 | 15 | 26 | 41 | 3 | 0.366 | 0.833 | 0.508 | 7.6 | 63.2 | 0.114 |
+| scenario-headroom | 85 | 100.0% | 85 | 0 | 12 | 22 | 45 | 6 | 0.353 | 0.667 | 0.462 | -11.1 | 109.9 | 0.089 |
 
 | estimator | usable | insufficient_data | low_confidence | no_slope | no_reset | total |
 |---|---:|---:|---:|---:|---:|---:|
-| current | 88 | 0 | 0 | 0 | 0 | 88 |
-| scenario-equal | 88 | 0 | 0 | 0 | 0 | 88 |
-| scenario-headroom | 88 | 0 | 0 | 0 | 0 | 88 |
+| current | 85 | 0 | 0 | 0 | 0 | 85 |
+| scenario-equal | 85 | 0 | 0 | 0 | 0 | 85 |
+| scenario-headroom | 85 | 0 | 0 | 0 | 0 | 85 |
 
 | estimator | lead-time bucket | TP | FN | recall | median signed err (min) | FP predicted in bucket |
 |---|---|---:|---:|---:|---:|---:|
-| current | <30m | 2 | 3 | 0.400 | 88.9 | 3 |
-| current | 30m-2h | 4 | 3 | 0.571 | 0.4 | 5 |
-| current | 2h-12h | 0 | 0 | — | — | 3 |
-| current | 12h-48h | 2 | 1 | 0.667 | -1822.2 | 4 |
-| current | >48h | 3 | 1 | 0.750 | -5878.0 | 5 |
-| scenario-equal | <30m | 4 | 1 | 0.800 | 15.7 | 4 |
-| scenario-equal | 30m-2h | 6 | 1 | 0.857 | 34.4 | 7 |
-| scenario-equal | 2h-12h | 0 | 0 | — | — | 6 |
-| scenario-equal | 12h-48h | 2 | 1 | 0.667 | -1594.9 | 2 |
-| scenario-equal | >48h | 4 | 0 | 1.000 | -4291.2 | 5 |
-| scenario-headroom | <30m | 4 | 1 | 0.800 | 20.1 | 2 |
-| scenario-headroom | 30m-2h | 4 | 3 | 0.571 | 6.9 | 8 |
-| scenario-headroom | 2h-12h | 0 | 0 | — | — | 4 |
-| scenario-headroom | 12h-48h | 2 | 1 | 0.667 | -906.0 | 1 |
-| scenario-headroom | >48h | 4 | 0 | 1.000 | -2712.3 | 6 |
+| current | <30m | 2 | 1 | 0.667 | 7.8 | 3 |
+| current | 30m-2h | 1 | 5 | 0.167 | 8.2 | 4 |
+| current | 2h-12h | 1 | 1 | 0.500 | 70.9 | 2 |
+| current | 12h-48h | 2 | 1 | 0.667 | -1780.6 | 4 |
+| current | >48h | 3 | 1 | 0.750 | -5878.0 | 4 |
+| scenario-equal | <30m | 3 | 0 | 1.000 | 15.7 | 4 |
+| scenario-equal | 30m-2h | 4 | 2 | 0.667 | 41.7 | 6 |
+| scenario-equal | 2h-12h | 2 | 0 | 1.000 | -11.1 | 8 |
+| scenario-equal | 12h-48h | 2 | 1 | 0.667 | -1557.0 | 4 |
+| scenario-equal | >48h | 4 | 0 | 1.000 | -4291.2 | 4 |
+| scenario-headroom | <30m | 3 | 0 | 1.000 | 69.5 | 2 |
+| scenario-headroom | 30m-2h | 2 | 4 | 0.333 | -14.5 | 8 |
+| scenario-headroom | 2h-12h | 2 | 0 | 1.000 | -11.1 | 4 |
+| scenario-headroom | 12h-48h | 2 | 1 | 0.667 | -895.2 | 2 |
+| scenario-headroom | >48h | 3 | 1 | 0.750 | -2712.3 | 6 |
 
 Per record (every scored instant):
 
 | estimator | instants | usable | scored | censored | TP | FP | TN | FN | precision | recall | F1 | median signed err (min) | median abs err (min) | median abs err (window) |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
-| current | 575 | 100.0% | 575 | 0 | 87 | 154 | 293 | 41 | 0.361 | 0.680 | 0.472 | -887.9 | 887.9 | 0.130 |
-| scenario-equal | 575 | 100.0% | 575 | 0 | 117 | 181 | 266 | 11 | 0.393 | 0.914 | 0.549 | -14.5 | 621.0 | 0.112 |
-| scenario-headroom | 575 | 100.0% | 575 | 0 | 101 | 161 | 286 | 27 | 0.385 | 0.789 | 0.518 | -14.5 | 468.8 | 0.089 |
+| current | 308 | 100.0% | 308 | 0 | 42 | 81 | 160 | 25 | 0.341 | 0.627 | 0.442 | -887.9 | 875.8 | 0.089 |
+| scenario-equal | 308 | 100.0% | 308 | 0 | 60 | 103 | 138 | 7 | 0.368 | 0.896 | 0.522 | -9.4 | 87.7 | 0.102 |
+| scenario-headroom | 308 | 100.0% | 308 | 0 | 51 | 91 | 150 | 16 | 0.359 | 0.761 | 0.488 | -9.4 | 235.9 | 0.067 |
 
-Paired median signed error (n=11; positive = optimistic): scenario-equal 6.9 min, current -36.6 min.
+Paired median signed error (n=9; positive = optimistic): scenario-equal -1075.2 min, current -887.9 min.
 
-#### since death 1-5h
+##### since death 30-60m
 
-n: 761 records, 70 window lifecycles, 42 episodes.
+n: 267 records, 77 window lifecycles, 47 episodes.
 
 Lifecycle-balanced (one record per window lifecycle, median instant):
 
 | estimator | instants | usable | scored | censored | TP | FP | TN | FN | precision | recall | F1 | median signed err (min) | median abs err (min) | median abs err (window) |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
-| current | 70 | 100.0% | 70 | 0 | 13 | 16 | 38 | 3 | 0.448 | 0.813 | 0.578 | -0.5 | 16.6 | 0.053 |
-| scenario-equal | 70 | 100.0% | 70 | 0 | 15 | 14 | 40 | 1 | 0.517 | 0.938 | 0.667 | 1.0 | 24.3 | 0.081 |
-| scenario-headroom | 70 | 100.0% | 70 | 0 | 14 | 11 | 43 | 2 | 0.560 | 0.875 | 0.683 | 28.0 | 82.7 | 0.127 |
+| current | 77 | 100.0% | 77 | 0 | 11 | 21 | 40 | 5 | 0.344 | 0.688 | 0.458 | -36.6 | 53.9 | 0.104 |
+| scenario-equal | 77 | 100.0% | 77 | 0 | 14 | 21 | 40 | 2 | 0.400 | 0.875 | 0.549 | 0.3 | 30.6 | 0.102 |
+| scenario-headroom | 77 | 100.0% | 77 | 0 | 12 | 16 | 45 | 4 | 0.429 | 0.750 | 0.545 | 0.3 | 111.5 | 0.085 |
 
 | estimator | usable | insufficient_data | low_confidence | no_slope | no_reset | total |
 |---|---:|---:|---:|---:|---:|---:|
-| current | 70 | 0 | 0 | 0 | 0 | 70 |
-| scenario-equal | 70 | 0 | 0 | 0 | 0 | 70 |
-| scenario-headroom | 70 | 0 | 0 | 0 | 0 | 70 |
+| current | 77 | 0 | 0 | 0 | 0 | 77 |
+| scenario-equal | 77 | 0 | 0 | 0 | 0 | 77 |
+| scenario-headroom | 77 | 0 | 0 | 0 | 0 | 77 |
 
 | estimator | lead-time bucket | TP | FN | recall | median signed err (min) | FP predicted in bucket |
 |---|---|---:|---:|---:|---:|---:|
-| current | <30m | 4 | 0 | 1.000 | -0.5 | 4 |
-| current | 30m-2h | 4 | 2 | 0.667 | 15.8 | 6 |
+| current | <30m | 2 | 2 | 0.500 | 25.3 | 3 |
+| current | 30m-2h | 4 | 2 | 0.667 | -1.3 | 6 |
+| current | 2h-12h | 0 | 0 | — | — | 4 |
+| current | 12h-48h | 2 | 0 | 1.000 | -1809.7 | 5 |
+| current | >48h | 3 | 1 | 0.750 | -4879.7 | 3 |
+| scenario-equal | <30m | 3 | 1 | 0.750 | 3.9 | 5 |
+| scenario-equal | 30m-2h | 5 | 1 | 0.833 | 29.6 | 6 |
+| scenario-equal | 2h-12h | 0 | 0 | — | — | 4 |
+| scenario-equal | 12h-48h | 2 | 0 | 1.000 | -1573.7 | 2 |
+| scenario-equal | >48h | 4 | 0 | 1.000 | -2518.8 | 4 |
+| scenario-headroom | <30m | 2 | 2 | 0.500 | 0.3 | 2 |
+| scenario-headroom | 30m-2h | 4 | 2 | 0.667 | 6.9 | 7 |
+| scenario-headroom | 2h-12h | 0 | 0 | — | — | 1 |
+| scenario-headroom | 12h-48h | 2 | 0 | 1.000 | -903.2 | 1 |
+| scenario-headroom | >48h | 4 | 0 | 1.000 | -2476.7 | 5 |
+
+Per record (every scored instant):
+
+| estimator | instants | usable | scored | censored | TP | FP | TN | FN | precision | recall | F1 | median signed err (min) | median abs err (min) | median abs err (window) |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| current | 267 | 100.0% | 267 | 0 | 45 | 73 | 133 | 16 | 0.381 | 0.738 | 0.503 | -1646.3 | 1646.3 | 0.180 |
+| scenario-equal | 267 | 100.0% | 267 | 0 | 57 | 78 | 128 | 4 | 0.422 | 0.934 | 0.582 | -1061.0 | 1131.2 | 0.118 |
+| scenario-headroom | 267 | 100.0% | 267 | 0 | 50 | 70 | 136 | 11 | 0.417 | 0.820 | 0.552 | -771.9 | 887.4 | 0.116 |
+
+Paired median signed error (n=11; positive = optimistic): scenario-equal 3.9 min, current -36.6 min.
+
+##### since death 1-2h
+
+n: 403 records, 66 window lifecycles, 42 episodes.
+
+Lifecycle-balanced (one record per window lifecycle, median instant):
+
+| estimator | instants | usable | scored | censored | TP | FP | TN | FN | precision | recall | F1 | median signed err (min) | median abs err (min) | median abs err (window) |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| current | 66 | 100.0% | 66 | 0 | 13 | 16 | 34 | 3 | 0.448 | 0.813 | 0.578 | -0.5 | 16.6 | 0.053 |
+| scenario-equal | 66 | 100.0% | 66 | 0 | 15 | 13 | 37 | 1 | 0.536 | 0.938 | 0.682 | 1.0 | 25.2 | 0.084 |
+| scenario-headroom | 66 | 100.0% | 66 | 0 | 14 | 13 | 37 | 2 | 0.519 | 0.875 | 0.651 | 28.0 | 82.7 | 0.130 |
+
+| estimator | usable | insufficient_data | low_confidence | no_slope | no_reset | total |
+|---|---:|---:|---:|---:|---:|---:|
+| current | 66 | 0 | 0 | 0 | 0 | 66 |
+| scenario-equal | 66 | 0 | 0 | 0 | 0 | 66 |
+| scenario-headroom | 66 | 0 | 0 | 0 | 0 | 66 |
+
+| estimator | lead-time bucket | TP | FN | recall | median signed err (min) | FP predicted in bucket |
+|---|---|---:|---:|---:|---:|---:|
+| current | <30m | 4 | 0 | 1.000 | -0.5 | 3 |
+| current | 30m-2h | 4 | 2 | 0.667 | 15.8 | 7 |
 | current | 2h-12h | 0 | 0 | — | — | 1 |
-| current | 12h-48h | 0 | 1 | 0.000 | — | 4 |
-| current | >48h | 5 | 0 | 1.000 | -2531.6 | 1 |
-| scenario-equal | <30m | 4 | 0 | 1.000 | 10.9 | 4 |
-| scenario-equal | 30m-2h | 5 | 1 | 0.833 | 18.0 | 4 |
+| current | 12h-48h | 0 | 0 | — | — | 3 |
+| current | >48h | 5 | 1 | 0.833 | -2561.3 | 2 |
+| scenario-equal | <30m | 4 | 0 | 1.000 | 10.9 | 5 |
+| scenario-equal | 30m-2h | 5 | 1 | 0.833 | 18.0 | 3 |
 | scenario-equal | 2h-12h | 0 | 0 | — | — | 0 |
-| scenario-equal | 12h-48h | 1 | 0 | 1.000 | -1233.4 | 5 |
-| scenario-equal | >48h | 5 | 0 | 1.000 | -2273.3 | 1 |
-| scenario-headroom | <30m | 3 | 1 | 0.750 | 67.5 | 0 |
+| scenario-equal | 12h-48h | 0 | 0 | — | — | 4 |
+| scenario-equal | >48h | 6 | 0 | 1.000 | -2243.0 | 1 |
+| scenario-headroom | <30m | 3 | 1 | 0.750 | 67.5 | 3 |
 | scenario-headroom | 30m-2h | 5 | 1 | 0.833 | 36.2 | 5 |
 | scenario-headroom | 2h-12h | 0 | 0 | — | — | 0 |
-| scenario-headroom | 12h-48h | 1 | 0 | 1.000 | -1233.4 | 4 |
-| scenario-headroom | >48h | 5 | 0 | 1.000 | -1398.7 | 2 |
+| scenario-headroom | 12h-48h | 0 | 0 | — | — | 3 |
+| scenario-headroom | >48h | 6 | 0 | 1.000 | -1398.7 | 2 |
 
 Per record (every scored instant):
 
 | estimator | instants | usable | scored | censored | TP | FP | TN | FN | precision | recall | F1 | median signed err (min) | median abs err (min) | median abs err (window) |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
-| current | 761 | 100.0% | 761 | 0 | 142 | 193 | 396 | 30 | 0.424 | 0.826 | 0.560 | -2422.2 | 2406.5 | 0.240 |
-| scenario-equal | 761 | 100.0% | 761 | 0 | 171 | 190 | 399 | 1 | 0.474 | 0.994 | 0.642 | -2068.9 | 2068.9 | 0.205 |
-| scenario-headroom | 761 | 100.0% | 761 | 0 | 170 | 170 | 419 | 2 | 0.500 | 0.988 | 0.664 | -1137.5 | 1137.5 | 0.121 |
+| current | 403 | 100.0% | 403 | 0 | 83 | 105 | 199 | 16 | 0.441 | 0.838 | 0.578 | -815.6 | 815.6 | 0.092 |
+| scenario-equal | 403 | 100.0% | 403 | 0 | 98 | 105 | 199 | 1 | 0.483 | 0.990 | 0.649 | -1096.6 | 1084.9 | 0.114 |
+| scenario-headroom | 403 | 100.0% | 403 | 0 | 97 | 92 | 212 | 2 | 0.513 | 0.980 | 0.674 | -23.2 | 615.4 | 0.130 |
 
 Paired median signed error (n=13; positive = optimistic): scenario-equal 1.0 min, current -0.5 min.
 
-#### since death >5h
+##### since death 2-3h
 
-n: 909 records, 33 window lifecycles, 12 episodes.
+n: 198 records, 42 window lifecycles, 27 episodes.
 
 Lifecycle-balanced (one record per window lifecycle, median instant):
 
 | estimator | instants | usable | scored | censored | TP | FP | TN | FN | precision | recall | F1 | median signed err (min) | median abs err (min) | median abs err (window) |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
-| current | 33 | 100.0% | 33 | 0 | 2 | 5 | 25 | 1 | 0.286 | 0.667 | 0.400 | -241.6 | 241.6 | 0.024 |
-| scenario-equal | 33 | 100.0% | 33 | 0 | 3 | 5 | 25 | 0 | 0.375 | 1.000 | 0.545 | -20.8 | 171.9 | 0.017 |
-| scenario-headroom | 33 | 100.0% | 33 | 0 | 2 | 5 | 25 | 1 | 0.286 | 0.667 | 0.400 | -151.2 | 151.2 | 0.015 |
+| current | 42 | 100.0% | 42 | 0 | 4 | 9 | 27 | 2 | 0.308 | 0.667 | 0.421 | -5736.9 | 2538.2 | 0.252 |
+| scenario-equal | 42 | 100.0% | 42 | 0 | 6 | 8 | 28 | 0 | 0.429 | 1.000 | 0.600 | -2187.0 | 2142.4 | 0.213 |
+| scenario-headroom | 42 | 100.0% | 42 | 0 | 6 | 5 | 31 | 0 | 0.545 | 1.000 | 0.706 | -1233.4 | 1172.4 | 0.116 |
 
 | estimator | usable | insufficient_data | low_confidence | no_slope | no_reset | total |
 |---|---:|---:|---:|---:|---:|---:|
-| current | 33 | 0 | 0 | 0 | 0 | 33 |
-| scenario-equal | 33 | 0 | 0 | 0 | 0 | 33 |
-| scenario-headroom | 33 | 0 | 0 | 0 | 0 | 33 |
+| current | 42 | 0 | 0 | 0 | 0 | 42 |
+| scenario-equal | 42 | 0 | 0 | 0 | 0 | 42 |
+| scenario-headroom | 42 | 0 | 0 | 0 | 0 | 42 |
+
+| estimator | lead-time bucket | TP | FN | recall | median signed err (min) | FP predicted in bucket |
+|---|---|---:|---:|---:|---:|---:|
+| current | <30m | 0 | 1 | 0.000 | — | 3 |
+| current | 30m-2h | 0 | 0 | — | — | 2 |
+| current | 2h-12h | 0 | 0 | — | — | 0 |
+| current | 12h-48h | 0 | 1 | 0.000 | — | 2 |
+| current | >48h | 4 | 0 | 1.000 | -5736.9 | 2 |
+| scenario-equal | <30m | 1 | 0 | 1.000 | 1.7 | 2 |
+| scenario-equal | 30m-2h | 0 | 0 | — | — | 1 |
+| scenario-equal | 2h-12h | 0 | 0 | — | — | 0 |
+| scenario-equal | 12h-48h | 1 | 0 | 1.000 | -1233.4 | 4 |
+| scenario-equal | >48h | 4 | 0 | 1.000 | -3459.4 | 1 |
+| scenario-headroom | <30m | 1 | 0 | 1.000 | 1.7 | 0 |
+| scenario-headroom | 30m-2h | 0 | 0 | — | — | 0 |
+| scenario-headroom | 2h-12h | 0 | 0 | — | — | 0 |
+| scenario-headroom | 12h-48h | 1 | 0 | 1.000 | -1233.4 | 3 |
+| scenario-headroom | >48h | 4 | 0 | 1.000 | -3401.4 | 2 |
+
+Per record (every scored instant):
+
+| estimator | instants | usable | scored | censored | TP | FP | TN | FN | precision | recall | F1 | median signed err (min) | median abs err (min) | median abs err (window) |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| current | 198 | 100.0% | 198 | 0 | 32 | 45 | 114 | 7 | 0.416 | 0.821 | 0.552 | -5611.4 | 5589.1 | 0.554 |
+| scenario-equal | 198 | 100.0% | 198 | 0 | 39 | 45 | 114 | 0 | 0.464 | 1.000 | 0.634 | -2187.0 | 2187.0 | 0.217 |
+| scenario-headroom | 198 | 100.0% | 198 | 0 | 39 | 38 | 121 | 0 | 0.506 | 1.000 | 0.672 | -1246.0 | 1246.0 | 0.124 |
+
+Paired median signed error (n=4; positive = optimistic): scenario-equal -3459.4 min, current -5736.9 min.
+
+##### since death 3-4h
+
+n: 85 records, 17 window lifecycles, 15 episodes.
+
+Lifecycle-balanced (one record per window lifecycle, median instant):
+
+| estimator | instants | usable | scored | censored | TP | FP | TN | FN | precision | recall | F1 | median signed err (min) | median abs err (min) | median abs err (window) |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| current | 17 | 100.0% | 17 | 0 | 3 | 3 | 10 | 1 | 0.500 | 0.750 | 0.600 | -5594.0 | 5594.0 | 0.555 |
+| scenario-equal | 17 | 100.0% | 17 | 0 | 4 | 3 | 10 | 0 | 0.571 | 1.000 | 0.727 | -3811.0 | 2164.9 | 0.215 |
+| scenario-headroom | 17 | 100.0% | 17 | 0 | 4 | 3 | 10 | 0 | 0.571 | 1.000 | 0.727 | -3784.8 | 1158.2 | 0.115 |
+
+| estimator | usable | insufficient_data | low_confidence | no_slope | no_reset | total |
+|---|---:|---:|---:|---:|---:|---:|
+| current | 17 | 0 | 0 | 0 | 0 | 17 |
+| scenario-equal | 17 | 0 | 0 | 0 | 0 | 17 |
+| scenario-headroom | 17 | 0 | 0 | 0 | 0 | 17 |
 
 | estimator | lead-time bucket | TP | FN | recall | median signed err (min) | FP predicted in bucket |
 |---|---|---:|---:|---:|---:|---:|
 | current | <30m | 0 | 0 | — | — | 0 |
-| current | 30m-2h | 0 | 0 | — | — | 1 |
-| current | 2h-12h | 1 | 0 | 1.000 | 526.8 | 0 |
-| current | 12h-48h | 1 | 1 | 0.500 | -241.6 | 3 |
+| current | 30m-2h | 0 | 0 | — | — | 0 |
+| current | 2h-12h | 0 | 0 | — | — | 0 |
+| current | 12h-48h | 0 | 1 | 0.000 | — | 0 |
+| current | >48h | 3 | 0 | 1.000 | -5594.0 | 3 |
+| scenario-equal | <30m | 0 | 0 | — | — | 0 |
+| scenario-equal | 30m-2h | 0 | 0 | — | — | 0 |
+| scenario-equal | 2h-12h | 0 | 0 | — | — | 0 |
+| scenario-equal | 12h-48h | 1 | 0 | 1.000 | -1158.2 | 3 |
+| scenario-equal | >48h | 3 | 0 | 1.000 | -3811.0 | 0 |
+| scenario-headroom | <30m | 0 | 0 | — | — | 0 |
+| scenario-headroom | 30m-2h | 0 | 0 | — | — | 0 |
+| scenario-headroom | 2h-12h | 0 | 0 | — | — | 0 |
+| scenario-headroom | 12h-48h | 1 | 0 | 1.000 | -1158.2 | 2 |
+| scenario-headroom | >48h | 3 | 0 | 1.000 | -3784.8 | 1 |
+
+Per record (every scored instant):
+
+| estimator | instants | usable | scored | censored | TP | FP | TN | FN | precision | recall | F1 | median signed err (min) | median abs err (min) | median abs err (window) |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| current | 85 | 100.0% | 85 | 0 | 12 | 20 | 47 | 6 | 0.375 | 0.667 | 0.480 | -5594.0 | 2531.6 | 0.251 |
+| scenario-equal | 85 | 100.0% | 85 | 0 | 18 | 21 | 46 | 0 | 0.462 | 1.000 | 0.632 | -2164.9 | 2164.1 | 0.215 |
+| scenario-headroom | 85 | 100.0% | 85 | 0 | 18 | 21 | 46 | 0 | 0.462 | 1.000 | 0.632 | -1158.2 | 1145.7 | 0.114 |
+
+Paired median signed error (n=3; positive = optimistic): scenario-equal -3811.0 min, current -5594.0 min.
+
+##### since death 4-6h
+
+n: 144 records, 16 window lifecycles, 9 episodes.
+
+Lifecycle-balanced (one record per window lifecycle, median instant):
+
+| estimator | instants | usable | scored | censored | TP | FP | TN | FN | precision | recall | F1 | median signed err (min) | median abs err (min) | median abs err (window) |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| current | 16 | 100.0% | 16 | 0 | 2 | 5 | 8 | 1 | 0.286 | 0.667 | 0.400 | -2406.5 | 2140.4 | 0.212 |
+| scenario-equal | 16 | 100.0% | 16 | 0 | 3 | 4 | 9 | 0 | 0.429 | 1.000 | 0.600 | -1916.7 | 1916.7 | 0.190 |
+| scenario-headroom | 16 | 100.0% | 16 | 0 | 3 | 4 | 9 | 0 | 0.429 | 1.000 | 0.600 | -986.9 | 986.9 | 0.098 |
+
+| estimator | usable | insufficient_data | low_confidence | no_slope | no_reset | total |
+|---|---:|---:|---:|---:|---:|---:|
+| current | 16 | 0 | 0 | 0 | 0 | 16 |
+| scenario-equal | 16 | 0 | 0 | 0 | 0 | 16 |
+| scenario-headroom | 16 | 0 | 0 | 0 | 0 | 16 |
+
+| estimator | lead-time bucket | TP | FN | recall | median signed err (min) | FP predicted in bucket |
+|---|---|---:|---:|---:|---:|---:|
+| current | <30m | 0 | 0 | — | — | 0 |
+| current | 30m-2h | 0 | 0 | — | — | 0 |
+| current | 2h-12h | 0 | 0 | — | — | 2 |
+| current | 12h-48h | 0 | 1 | 0.000 | — | 2 |
+| current | >48h | 2 | 0 | 1.000 | -2406.5 | 1 |
+| scenario-equal | <30m | 0 | 0 | — | — | 0 |
+| scenario-equal | 30m-2h | 0 | 0 | — | — | 0 |
+| scenario-equal | 2h-12h | 0 | 0 | — | — | 1 |
+| scenario-equal | 12h-48h | 1 | 0 | 1.000 | -1108.1 | 3 |
+| scenario-equal | >48h | 2 | 0 | 1.000 | -2037.8 | 0 |
+| scenario-headroom | <30m | 0 | 0 | — | — | 0 |
+| scenario-headroom | 30m-2h | 0 | 0 | — | — | 0 |
+| scenario-headroom | 2h-12h | 0 | 0 | — | — | 1 |
+| scenario-headroom | 12h-48h | 1 | 0 | 1.000 | -1108.1 | 2 |
+| scenario-headroom | >48h | 2 | 0 | 1.000 | -986.9 | 1 |
+
+Per record (every scored instant):
+
+| estimator | instants | usable | scored | censored | TP | FP | TN | FN | precision | recall | F1 | median signed err (min) | median abs err (min) | median abs err (window) |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| current | 144 | 100.0% | 144 | 0 | 27 | 47 | 69 | 1 | 0.365 | 0.964 | 0.529 | -2265.4 | 2265.4 | 0.225 |
+| scenario-equal | 144 | 100.0% | 144 | 0 | 28 | 42 | 74 | 0 | 0.400 | 1.000 | 0.571 | -1975.7 | 1955.9 | 0.194 |
+| scenario-headroom | 144 | 100.0% | 144 | 0 | 28 | 42 | 74 | 0 | 0.400 | 1.000 | 0.571 | -537.6 | 688.5 | 0.068 |
+
+Paired median signed error (n=2; positive = optimistic): scenario-equal -2037.8 min, current -2406.5 min.
+
+##### since death 6-12h
+
+n: 328 records, 18 window lifecycles, 12 episodes.
+
+Lifecycle-balanced (one record per window lifecycle, median instant):
+
+| estimator | instants | usable | scored | censored | TP | FP | TN | FN | precision | recall | F1 | median signed err (min) | median abs err (min) | median abs err (window) |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| current | 18 | 100.0% | 18 | 0 | 1 | 4 | 12 | 1 | 0.200 | 0.500 | 0.286 | -369.8 | 369.8 | 0.037 |
+| scenario-equal | 18 | 100.0% | 18 | 0 | 2 | 4 | 12 | 0 | 0.333 | 1.000 | 0.500 | -688.4 | 289.3 | 0.029 |
+| scenario-headroom | 18 | 100.0% | 18 | 0 | 1 | 4 | 12 | 1 | 0.200 | 0.500 | 0.286 | -325.4 | 325.4 | 0.032 |
+
+| estimator | usable | insufficient_data | low_confidence | no_slope | no_reset | total |
+|---|---:|---:|---:|---:|---:|---:|
+| current | 18 | 0 | 0 | 0 | 0 | 18 |
+| scenario-equal | 18 | 0 | 0 | 0 | 0 | 18 |
+| scenario-headroom | 18 | 0 | 0 | 0 | 0 | 18 |
+
+| estimator | lead-time bucket | TP | FN | recall | median signed err (min) | FP predicted in bucket |
+|---|---|---:|---:|---:|---:|---:|
+| current | <30m | 0 | 0 | — | — | 0 |
+| current | 30m-2h | 0 | 0 | — | — | 0 |
+| current | 2h-12h | 0 | 0 | — | — | 0 |
+| current | 12h-48h | 1 | 1 | 0.500 | -369.8 | 3 |
 | current | >48h | 0 | 0 | — | — | 1 |
 | scenario-equal | <30m | 0 | 0 | — | — | 0 |
-| scenario-equal | 30m-2h | 0 | 0 | — | — | 1 |
-| scenario-equal | 2h-12h | 1 | 0 | 1.000 | 171.9 | 0 |
-| scenario-equal | 12h-48h | 2 | 0 | 1.000 | -540.3 | 3 |
+| scenario-equal | 30m-2h | 0 | 0 | — | — | 0 |
+| scenario-equal | 2h-12h | 0 | 0 | — | — | 0 |
+| scenario-equal | 12h-48h | 2 | 0 | 1.000 | -688.4 | 3 |
 | scenario-equal | >48h | 0 | 0 | — | — | 1 |
 | scenario-headroom | <30m | 0 | 0 | — | — | 0 |
-| scenario-headroom | 30m-2h | 0 | 0 | — | — | 1 |
-| scenario-headroom | 2h-12h | 1 | 0 | 1.000 | 467.4 | 0 |
-| scenario-headroom | 12h-48h | 1 | 1 | 0.500 | -151.2 | 2 |
+| scenario-headroom | 30m-2h | 0 | 0 | — | — | 0 |
+| scenario-headroom | 2h-12h | 0 | 0 | — | — | 0 |
+| scenario-headroom | 12h-48h | 1 | 1 | 0.500 | -325.4 | 2 |
 | scenario-headroom | >48h | 0 | 0 | — | — | 2 |
 
 Per record (every scored instant):
 
 | estimator | instants | usable | scored | censored | TP | FP | TN | FN | precision | recall | F1 | median signed err (min) | median abs err (min) | median abs err (window) |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
-| current | 909 | 100.0% | 909 | 0 | 92 | 304 | 448 | 65 | 0.232 | 0.586 | 0.333 | -284.7 | 296.4 | 0.029 |
-| scenario-equal | 909 | 100.0% | 909 | 0 | 157 | 298 | 454 | 0 | 0.345 | 1.000 | 0.513 | -232.0 | 232.0 | 0.023 |
-| scenario-headroom | 909 | 100.0% | 909 | 0 | 92 | 298 | 454 | 65 | 0.236 | 0.586 | 0.336 | -138.8 | 423.4 | 0.042 |
+| current | 328 | 100.0% | 328 | 0 | 42 | 128 | 153 | 5 | 0.247 | 0.894 | 0.387 | -369.8 | 357.7 | 0.035 |
+| scenario-equal | 328 | 100.0% | 328 | 0 | 47 | 124 | 157 | 0 | 0.275 | 1.000 | 0.431 | -665.0 | 665.0 | 0.066 |
+| scenario-headroom | 328 | 100.0% | 328 | 0 | 42 | 124 | 157 | 5 | 0.253 | 0.894 | 0.394 | -337.9 | 325.4 | 0.032 |
 
-Paired median signed error (n=2; positive = optimistic): scenario-equal -540.3 min, current -241.6 min.
+Paired median signed error (n=1; positive = optimistic): scenario-equal -688.4 min, current -369.8 min.
+
+##### since death 12-24h
+
+n: 512 records, 24 window lifecycles, 11 episodes.
+
+Lifecycle-balanced (one record per window lifecycle, median instant):
+
+| estimator | instants | usable | scored | censored | TP | FP | TN | FN | precision | recall | F1 | median signed err (min) | median abs err (min) | median abs err (window) |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| current | 24 | 100.0% | 24 | 0 | 2 | 5 | 16 | 1 | 0.286 | 0.667 | 0.400 | 109.2 | 109.2 | 0.011 |
+| scenario-equal | 24 | 100.0% | 24 | 0 | 3 | 5 | 16 | 0 | 0.375 | 1.000 | 0.545 | 27.5 | 82.2 | 0.008 |
+| scenario-headroom | 24 | 100.0% | 24 | 0 | 2 | 5 | 16 | 1 | 0.286 | 0.667 | 0.400 | 464.2 | 464.2 | 0.046 |
+
+| estimator | usable | insufficient_data | low_confidence | no_slope | no_reset | total |
+|---|---:|---:|---:|---:|---:|---:|
+| current | 24 | 0 | 0 | 0 | 0 | 24 |
+| scenario-equal | 24 | 0 | 0 | 0 | 0 | 24 |
+| scenario-headroom | 24 | 0 | 0 | 0 | 0 | 24 |
+
+| estimator | lead-time bucket | TP | FN | recall | median signed err (min) | FP predicted in bucket |
+|---|---|---:|---:|---:|---:|---:|
+| current | <30m | 0 | 0 | — | — | 0 |
+| current | 30m-2h | 0 | 0 | — | — | 1 |
+| current | 2h-12h | 2 | 0 | 1.000 | 109.2 | 0 |
+| current | 12h-48h | 0 | 1 | 0.000 | — | 3 |
+| current | >48h | 0 | 0 | — | — | 1 |
+| scenario-equal | <30m | 0 | 0 | — | — | 0 |
+| scenario-equal | 30m-2h | 0 | 0 | — | — | 1 |
+| scenario-equal | 2h-12h | 2 | 0 | 1.000 | -82.2 | 1 |
+| scenario-equal | 12h-48h | 1 | 0 | 1.000 | 27.5 | 2 |
+| scenario-equal | >48h | 0 | 0 | — | — | 1 |
+| scenario-headroom | <30m | 0 | 0 | — | — | 0 |
+| scenario-headroom | 30m-2h | 0 | 0 | — | — | 1 |
+| scenario-headroom | 2h-12h | 2 | 0 | 1.000 | 464.2 | 1 |
+| scenario-headroom | 12h-48h | 0 | 1 | 0.000 | — | 1 |
+| scenario-headroom | >48h | 0 | 0 | — | — | 2 |
+
+Per record (every scored instant):
+
+| estimator | instants | usable | scored | censored | TP | FP | TN | FN | precision | recall | F1 | median signed err (min) | median abs err (min) | median abs err (window) |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| current | 512 | 100.0% | 512 | 0 | 38 | 152 | 262 | 60 | 0.200 | 0.388 | 0.264 | -33.5 | 151.3 | 0.015 |
+| scenario-equal | 512 | 100.0% | 512 | 0 | 98 | 151 | 263 | 0 | 0.394 | 1.000 | 0.565 | -97.7 | 125.3 | 0.012 |
+| scenario-headroom | 512 | 100.0% | 512 | 0 | 38 | 151 | 263 | 60 | 0.201 | 0.388 | 0.265 | 425.8 | 425.8 | 0.042 |
+
+Paired median signed error (n=2; positive = optimistic): scenario-equal -82.2 min, current 109.2 min.
+
+#### five_hour
+
+##### since death 0-30m
+
+n: 180 records, 58 window lifecycles, 47 episodes.
+
+Lifecycle-balanced (one record per window lifecycle, median instant):
+
+| estimator | instants | usable | scored | censored | TP | FP | TN | FN | precision | recall | F1 | median signed err (min) | median abs err (min) | median abs err (window) |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| current | 58 | 100.0% | 58 | 0 | 2 | 7 | 42 | 7 | 0.222 | 0.222 | 0.222 | 7.8 | 7.8 | 0.026 |
+| scenario-equal | 58 | 100.0% | 58 | 0 | 7 | 16 | 33 | 2 | 0.304 | 0.778 | 0.438 | 15.7 | 15.7 | 0.052 |
+| scenario-headroom | 58 | 100.0% | 58 | 0 | 5 | 14 | 35 | 4 | 0.263 | 0.556 | 0.357 | 39.2 | 39.2 | 0.131 |
+
+| estimator | usable | insufficient_data | low_confidence | no_slope | no_reset | total |
+|---|---:|---:|---:|---:|---:|---:|
+| current | 58 | 0 | 0 | 0 | 0 | 58 |
+| scenario-equal | 58 | 0 | 0 | 0 | 0 | 58 |
+| scenario-headroom | 58 | 0 | 0 | 0 | 0 | 58 |
+
+| estimator | lead-time bucket | TP | FN | recall | median signed err (min) | FP predicted in bucket |
+|---|---|---:|---:|---:|---:|---:|
+| current | <30m | 1 | 1 | 0.500 | 7.8 | 3 |
+| current | 30m-2h | 1 | 5 | 0.167 | 8.2 | 4 |
+| current | 2h-12h | 0 | 1 | 0.000 | — | 0 |
+| current | 12h-48h | 0 | 0 | — | — | 0 |
+| current | >48h | 0 | 0 | — | — | 0 |
+| scenario-equal | <30m | 2 | 0 | 1.000 | 7.6 | 4 |
+| scenario-equal | 30m-2h | 4 | 2 | 0.667 | 41.7 | 6 |
+| scenario-equal | 2h-12h | 1 | 0 | 1.000 | -11.1 | 6 |
+| scenario-equal | 12h-48h | 0 | 0 | — | — | 0 |
+| scenario-equal | >48h | 0 | 0 | — | — | 0 |
+| scenario-headroom | <30m | 2 | 0 | 1.000 | 39.2 | 2 |
+| scenario-headroom | 30m-2h | 2 | 4 | 0.333 | -14.5 | 8 |
+| scenario-headroom | 2h-12h | 1 | 0 | 1.000 | -11.1 | 4 |
+| scenario-headroom | 12h-48h | 0 | 0 | — | — | 0 |
+| scenario-headroom | >48h | 0 | 0 | — | — | 0 |
+
+Per record (every scored instant):
+
+| estimator | instants | usable | scored | censored | TP | FP | TN | FN | precision | recall | F1 | median signed err (min) | median abs err (min) | median abs err (window) |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| current | 180 | 100.0% | 180 | 0 | 4 | 34 | 125 | 17 | 0.105 | 0.190 | 0.136 | 8.2 | 8.2 | 0.027 |
+| scenario-equal | 180 | 100.0% | 180 | 0 | 16 | 53 | 106 | 5 | 0.232 | 0.762 | 0.356 | 20.1 | 20.1 | 0.067 |
+| scenario-headroom | 180 | 100.0% | 180 | 0 | 10 | 49 | 110 | 11 | 0.169 | 0.476 | 0.250 | 20.1 | 20.1 | 0.067 |
+
+Paired median signed error (n=2; positive = optimistic): scenario-equal 7.6 min, current 7.8 min.
+
+##### since death 30-60m
+
+n: 161 records, 54 window lifecycles, 46 episodes.
+
+Lifecycle-balanced (one record per window lifecycle, median instant):
+
+| estimator | instants | usable | scored | censored | TP | FP | TN | FN | precision | recall | F1 | median signed err (min) | median abs err (min) | median abs err (window) |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| current | 54 | 100.0% | 54 | 0 | 5 | 11 | 34 | 4 | 0.313 | 0.556 | 0.400 | 14.9 | 25.3 | 0.084 |
+| scenario-equal | 54 | 100.0% | 54 | 0 | 7 | 12 | 33 | 2 | 0.368 | 0.778 | 0.500 | 6.9 | 17.5 | 0.058 |
+| scenario-headroom | 54 | 100.0% | 54 | 0 | 5 | 9 | 36 | 4 | 0.357 | 0.556 | 0.435 | 3.9 | 6.9 | 0.023 |
+
+| estimator | usable | insufficient_data | low_confidence | no_slope | no_reset | total |
+|---|---:|---:|---:|---:|---:|---:|
+| current | 54 | 0 | 0 | 0 | 0 | 54 |
+| scenario-equal | 54 | 0 | 0 | 0 | 0 | 54 |
+| scenario-headroom | 54 | 0 | 0 | 0 | 0 | 54 |
+
+| estimator | lead-time bucket | TP | FN | recall | median signed err (min) | FP predicted in bucket |
+|---|---|---:|---:|---:|---:|---:|
+| current | <30m | 2 | 2 | 0.500 | 25.3 | 3 |
+| current | 30m-2h | 3 | 2 | 0.600 | -1.3 | 6 |
+| current | 2h-12h | 0 | 0 | — | — | 2 |
+| current | 12h-48h | 0 | 0 | — | — | 0 |
+| current | >48h | 0 | 0 | — | — | 0 |
+| scenario-equal | <30m | 3 | 1 | 0.750 | 3.9 | 5 |
+| scenario-equal | 30m-2h | 4 | 1 | 0.800 | 6.9 | 6 |
+| scenario-equal | 2h-12h | 0 | 0 | — | — | 1 |
+| scenario-equal | 12h-48h | 0 | 0 | — | — | 0 |
+| scenario-equal | >48h | 0 | 0 | — | — | 0 |
+| scenario-headroom | <30m | 2 | 2 | 0.500 | 0.3 | 2 |
+| scenario-headroom | 30m-2h | 3 | 2 | 0.600 | 6.9 | 7 |
+| scenario-headroom | 2h-12h | 0 | 0 | — | — | 0 |
+| scenario-headroom | 12h-48h | 0 | 0 | — | — | 0 |
+| scenario-headroom | >48h | 0 | 0 | — | — | 0 |
+
+Per record (every scored instant):
+
+| estimator | instants | usable | scored | censored | TP | FP | TN | FN | precision | recall | F1 | median signed err (min) | median abs err (min) | median abs err (window) |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| current | 161 | 100.0% | 161 | 0 | 14 | 35 | 102 | 10 | 0.286 | 0.583 | 0.384 | 15.7 | 16.9 | 0.056 |
+| scenario-equal | 161 | 100.0% | 161 | 0 | 20 | 40 | 97 | 4 | 0.333 | 0.833 | 0.476 | 6.5 | 14.8 | 0.049 |
+| scenario-headroom | 161 | 100.0% | 161 | 0 | 14 | 34 | 103 | 10 | 0.292 | 0.583 | 0.389 | 0.9 | 7.5 | 0.025 |
+
+Paired median signed error (n=5; positive = optimistic): scenario-equal 17.5 min, current 14.9 min.
+
+##### since death 1-2h
+
+n: 230 records, 48 window lifecycles, 41 episodes.
+
+Lifecycle-balanced (one record per window lifecycle, median instant):
+
+| estimator | instants | usable | scored | censored | TP | FP | TN | FN | precision | recall | F1 | median signed err (min) | median abs err (min) | median abs err (window) |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| current | 48 | 100.0% | 48 | 0 | 7 | 11 | 28 | 2 | 0.389 | 0.778 | 0.519 | 10.0 | 10.0 | 0.033 |
+| scenario-equal | 48 | 100.0% | 48 | 0 | 8 | 8 | 31 | 1 | 0.500 | 0.889 | 0.640 | 14.6 | 15.3 | 0.051 |
+| scenario-headroom | 48 | 100.0% | 48 | 0 | 7 | 8 | 31 | 2 | 0.467 | 0.778 | 0.583 | 49.1 | 49.1 | 0.164 |
+
+| estimator | usable | insufficient_data | low_confidence | no_slope | no_reset | total |
+|---|---:|---:|---:|---:|---:|---:|
+| current | 48 | 0 | 0 | 0 | 0 | 48 |
+| scenario-equal | 48 | 0 | 0 | 0 | 0 | 48 |
+| scenario-headroom | 48 | 0 | 0 | 0 | 0 | 48 |
+
+| estimator | lead-time bucket | TP | FN | recall | median signed err (min) | FP predicted in bucket |
+|---|---|---:|---:|---:|---:|---:|
+| current | <30m | 4 | 0 | 1.000 | -0.5 | 3 |
+| current | 30m-2h | 3 | 2 | 0.600 | 15.8 | 7 |
+| current | 2h-12h | 0 | 0 | — | — | 1 |
+| current | 12h-48h | 0 | 0 | — | — | 0 |
+| current | >48h | 0 | 0 | — | — | 0 |
+| scenario-equal | <30m | 4 | 0 | 1.000 | 10.9 | 5 |
+| scenario-equal | 30m-2h | 4 | 1 | 0.800 | 14.6 | 3 |
+| scenario-equal | 2h-12h | 0 | 0 | — | — | 0 |
+| scenario-equal | 12h-48h | 0 | 0 | — | — | 0 |
+| scenario-equal | >48h | 0 | 0 | — | — | 0 |
+| scenario-headroom | <30m | 3 | 1 | 0.750 | 67.5 | 3 |
+| scenario-headroom | 30m-2h | 4 | 1 | 0.800 | 28.0 | 5 |
+| scenario-headroom | 2h-12h | 0 | 0 | — | — | 0 |
+| scenario-headroom | 12h-48h | 0 | 0 | — | — | 0 |
+| scenario-headroom | >48h | 0 | 0 | — | — | 0 |
+
+Per record (every scored instant):
+
+| estimator | instants | usable | scored | censored | TP | FP | TN | FN | precision | recall | F1 | median signed err (min) | median abs err (min) | median abs err (window) |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| current | 230 | 100.0% | 230 | 0 | 26 | 55 | 140 | 9 | 0.321 | 0.743 | 0.448 | 8.2 | 9.2 | 0.031 |
+| scenario-equal | 230 | 100.0% | 230 | 0 | 34 | 48 | 147 | 1 | 0.415 | 0.971 | 0.581 | 12.4 | 15.4 | 0.051 |
+| scenario-headroom | 230 | 100.0% | 230 | 0 | 33 | 35 | 160 | 2 | 0.485 | 0.943 | 0.641 | 37.2 | 37.2 | 0.124 |
+
+Paired median signed error (n=7; positive = optimistic): scenario-equal 14.6 min, current 10.0 min.
+
+##### since death 2-3h
+
+n: 106 records, 28 window lifecycles, 25 episodes.
+
+Lifecycle-balanced (one record per window lifecycle, median instant):
+
+| estimator | instants | usable | scored | censored | TP | FP | TN | FN | precision | recall | F1 | median signed err (min) | median abs err (min) | median abs err (window) |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| current | 28 | 100.0% | 28 | 0 | 0 | 5 | 22 | 1 | 0.000 | 0.000 | 0.000 | — | — | — |
+| scenario-equal | 28 | 100.0% | 28 | 0 | 1 | 3 | 24 | 0 | 0.250 | 1.000 | 0.400 | 1.7 | 1.7 | 0.006 |
+| scenario-headroom | 28 | 100.0% | 28 | 0 | 1 | 0 | 27 | 0 | 1.000 | 1.000 | 1.000 | 1.7 | 1.7 | 0.006 |
+
+| estimator | usable | insufficient_data | low_confidence | no_slope | no_reset | total |
+|---|---:|---:|---:|---:|---:|---:|
+| current | 28 | 0 | 0 | 0 | 0 | 28 |
+| scenario-equal | 28 | 0 | 0 | 0 | 0 | 28 |
+| scenario-headroom | 28 | 0 | 0 | 0 | 0 | 28 |
+
+| estimator | lead-time bucket | TP | FN | recall | median signed err (min) | FP predicted in bucket |
+|---|---|---:|---:|---:|---:|---:|
+| current | <30m | 0 | 1 | 0.000 | — | 3 |
+| current | 30m-2h | 0 | 0 | — | — | 2 |
+| current | 2h-12h | 0 | 0 | — | — | 0 |
+| current | 12h-48h | 0 | 0 | — | — | 0 |
+| current | >48h | 0 | 0 | — | — | 0 |
+| scenario-equal | <30m | 1 | 0 | 1.000 | 1.7 | 2 |
+| scenario-equal | 30m-2h | 0 | 0 | — | — | 1 |
+| scenario-equal | 2h-12h | 0 | 0 | — | — | 0 |
+| scenario-equal | 12h-48h | 0 | 0 | — | — | 0 |
+| scenario-equal | >48h | 0 | 0 | — | — | 0 |
+| scenario-headroom | <30m | 1 | 0 | 1.000 | 1.7 | 0 |
+| scenario-headroom | 30m-2h | 0 | 0 | — | — | 0 |
+| scenario-headroom | 2h-12h | 0 | 0 | — | — | 0 |
+| scenario-headroom | 12h-48h | 0 | 0 | — | — | 0 |
+| scenario-headroom | >48h | 0 | 0 | — | — | 0 |
+
+Per record (every scored instant):
+
+| estimator | instants | usable | scored | censored | TP | FP | TN | FN | precision | recall | F1 | median signed err (min) | median abs err (min) | median abs err (window) |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| current | 106 | 100.0% | 106 | 0 | 1 | 13 | 91 | 1 | 0.071 | 0.500 | 0.125 | -5.5 | 5.5 | 0.018 |
+| scenario-equal | 106 | 100.0% | 106 | 0 | 2 | 7 | 97 | 0 | 0.222 | 1.000 | 0.364 | -5.4 | 1.7 | 0.006 |
+| scenario-headroom | 106 | 100.0% | 106 | 0 | 2 | 0 | 104 | 0 | 1.000 | 1.000 | 1.000 | -5.4 | 1.7 | 0.006 |
+
+Paired median signed error (n=0; positive = optimistic): scenario-equal — min, current — min.
+
+##### since death 3-4h
+
+n: 46 records, 10 window lifecycles, 12 episodes.
+
+Lifecycle-balanced (one record per window lifecycle, median instant):
+
+| estimator | instants | usable | scored | censored | TP | FP | TN | FN | precision | recall | F1 | median signed err (min) | median abs err (min) | median abs err (window) |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| current | 10 | 100.0% | 10 | 0 | 0 | 0 | 10 | 0 | — | — | — | — | — | — |
+| scenario-equal | 10 | 100.0% | 10 | 0 | 0 | 0 | 10 | 0 | — | — | — | — | — | — |
+| scenario-headroom | 10 | 100.0% | 10 | 0 | 0 | 0 | 10 | 0 | — | — | — | — | — | — |
+
+| estimator | usable | insufficient_data | low_confidence | no_slope | no_reset | total |
+|---|---:|---:|---:|---:|---:|---:|
+| current | 10 | 0 | 0 | 0 | 0 | 10 |
+| scenario-equal | 10 | 0 | 0 | 0 | 0 | 10 |
+| scenario-headroom | 10 | 0 | 0 | 0 | 0 | 10 |
+
+| estimator | lead-time bucket | TP | FN | recall | median signed err (min) | FP predicted in bucket |
+|---|---|---:|---:|---:|---:|---:|
+| current | <30m | 0 | 0 | — | — | 0 |
+| current | 30m-2h | 0 | 0 | — | — | 0 |
+| current | 2h-12h | 0 | 0 | — | — | 0 |
+| current | 12h-48h | 0 | 0 | — | — | 0 |
+| current | >48h | 0 | 0 | — | — | 0 |
+| scenario-equal | <30m | 0 | 0 | — | — | 0 |
+| scenario-equal | 30m-2h | 0 | 0 | — | — | 0 |
+| scenario-equal | 2h-12h | 0 | 0 | — | — | 0 |
+| scenario-equal | 12h-48h | 0 | 0 | — | — | 0 |
+| scenario-equal | >48h | 0 | 0 | — | — | 0 |
+| scenario-headroom | <30m | 0 | 0 | — | — | 0 |
+| scenario-headroom | 30m-2h | 0 | 0 | — | — | 0 |
+| scenario-headroom | 2h-12h | 0 | 0 | — | — | 0 |
+| scenario-headroom | 12h-48h | 0 | 0 | — | — | 0 |
+| scenario-headroom | >48h | 0 | 0 | — | — | 0 |
+
+Per record (every scored instant):
+
+| estimator | instants | usable | scored | censored | TP | FP | TN | FN | precision | recall | F1 | median signed err (min) | median abs err (min) | median abs err (window) |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| current | 46 | 100.0% | 46 | 0 | 0 | 0 | 46 | 0 | — | — | — | — | — | — |
+| scenario-equal | 46 | 100.0% | 46 | 0 | 0 | 0 | 46 | 0 | — | — | — | — | — | — |
+| scenario-headroom | 46 | 100.0% | 46 | 0 | 0 | 0 | 46 | 0 | — | — | — | — | — | — |
+
+Paired median signed error (n=0; positive = optimistic): scenario-equal — min, current — min.
+
+##### since death 4-6h
+
+n: 76 records, 10 window lifecycles, 9 episodes.
+
+Lifecycle-balanced (one record per window lifecycle, median instant):
+
+| estimator | instants | usable | scored | censored | TP | FP | TN | FN | precision | recall | F1 | median signed err (min) | median abs err (min) | median abs err (window) |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| current | 10 | 100.0% | 10 | 0 | 0 | 2 | 8 | 0 | 0.000 | — | 0.000 | — | — | — |
+| scenario-equal | 10 | 100.0% | 10 | 0 | 0 | 1 | 9 | 0 | 0.000 | — | 0.000 | — | — | — |
+| scenario-headroom | 10 | 100.0% | 10 | 0 | 0 | 1 | 9 | 0 | 0.000 | — | 0.000 | — | — | — |
+
+| estimator | usable | insufficient_data | low_confidence | no_slope | no_reset | total |
+|---|---:|---:|---:|---:|---:|---:|
+| current | 10 | 0 | 0 | 0 | 0 | 10 |
+| scenario-equal | 10 | 0 | 0 | 0 | 0 | 10 |
+| scenario-headroom | 10 | 0 | 0 | 0 | 0 | 10 |
+
+| estimator | lead-time bucket | TP | FN | recall | median signed err (min) | FP predicted in bucket |
+|---|---|---:|---:|---:|---:|---:|
+| current | <30m | 0 | 0 | — | — | 0 |
+| current | 30m-2h | 0 | 0 | — | — | 0 |
+| current | 2h-12h | 0 | 0 | — | — | 2 |
+| current | 12h-48h | 0 | 0 | — | — | 0 |
+| current | >48h | 0 | 0 | — | — | 0 |
+| scenario-equal | <30m | 0 | 0 | — | — | 0 |
+| scenario-equal | 30m-2h | 0 | 0 | — | — | 0 |
+| scenario-equal | 2h-12h | 0 | 0 | — | — | 1 |
+| scenario-equal | 12h-48h | 0 | 0 | — | — | 0 |
+| scenario-equal | >48h | 0 | 0 | — | — | 0 |
+| scenario-headroom | <30m | 0 | 0 | — | — | 0 |
+| scenario-headroom | 30m-2h | 0 | 0 | — | — | 0 |
+| scenario-headroom | 2h-12h | 0 | 0 | — | — | 1 |
+| scenario-headroom | 12h-48h | 0 | 0 | — | — | 0 |
+| scenario-headroom | >48h | 0 | 0 | — | — | 0 |
+
+Per record (every scored instant):
+
+| estimator | instants | usable | scored | censored | TP | FP | TN | FN | precision | recall | F1 | median signed err (min) | median abs err (min) | median abs err (window) |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| current | 76 | 100.0% | 76 | 0 | 0 | 7 | 69 | 0 | 0.000 | — | 0.000 | — | — | — |
+| scenario-equal | 76 | 100.0% | 76 | 0 | 0 | 2 | 74 | 0 | 0.000 | — | 0.000 | — | — | — |
+| scenario-headroom | 76 | 100.0% | 76 | 0 | 0 | 2 | 74 | 0 | 0.000 | — | 0.000 | — | — | — |
+
+Paired median signed error (n=0; positive = optimistic): scenario-equal — min, current — min.
+
+##### since death 6-12h
+
+n: 162 records, 12 window lifecycles, 9 episodes.
+
+Lifecycle-balanced (one record per window lifecycle, median instant):
+
+| estimator | instants | usable | scored | censored | TP | FP | TN | FN | precision | recall | F1 | median signed err (min) | median abs err (min) | median abs err (window) |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| current | 12 | 100.0% | 12 | 0 | 0 | 0 | 12 | 0 | — | — | — | — | — | — |
+| scenario-equal | 12 | 100.0% | 12 | 0 | 0 | 0 | 12 | 0 | — | — | — | — | — | — |
+| scenario-headroom | 12 | 100.0% | 12 | 0 | 0 | 0 | 12 | 0 | — | — | — | — | — | — |
+
+| estimator | usable | insufficient_data | low_confidence | no_slope | no_reset | total |
+|---|---:|---:|---:|---:|---:|---:|
+| current | 12 | 0 | 0 | 0 | 0 | 12 |
+| scenario-equal | 12 | 0 | 0 | 0 | 0 | 12 |
+| scenario-headroom | 12 | 0 | 0 | 0 | 0 | 12 |
+
+| estimator | lead-time bucket | TP | FN | recall | median signed err (min) | FP predicted in bucket |
+|---|---|---:|---:|---:|---:|---:|
+| current | <30m | 0 | 0 | — | — | 0 |
+| current | 30m-2h | 0 | 0 | — | — | 0 |
+| current | 2h-12h | 0 | 0 | — | — | 0 |
+| current | 12h-48h | 0 | 0 | — | — | 0 |
+| current | >48h | 0 | 0 | — | — | 0 |
+| scenario-equal | <30m | 0 | 0 | — | — | 0 |
+| scenario-equal | 30m-2h | 0 | 0 | — | — | 0 |
+| scenario-equal | 2h-12h | 0 | 0 | — | — | 0 |
+| scenario-equal | 12h-48h | 0 | 0 | — | — | 0 |
+| scenario-equal | >48h | 0 | 0 | — | — | 0 |
+| scenario-headroom | <30m | 0 | 0 | — | — | 0 |
+| scenario-headroom | 30m-2h | 0 | 0 | — | — | 0 |
+| scenario-headroom | 2h-12h | 0 | 0 | — | — | 0 |
+| scenario-headroom | 12h-48h | 0 | 0 | — | — | 0 |
+| scenario-headroom | >48h | 0 | 0 | — | — | 0 |
+
+Per record (every scored instant):
+
+| estimator | instants | usable | scored | censored | TP | FP | TN | FN | precision | recall | F1 | median signed err (min) | median abs err (min) | median abs err (window) |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| current | 162 | 100.0% | 162 | 0 | 0 | 9 | 153 | 0 | 0.000 | — | 0.000 | — | — | — |
+| scenario-equal | 162 | 100.0% | 162 | 0 | 0 | 5 | 157 | 0 | 0.000 | — | 0.000 | — | — | — |
+| scenario-headroom | 162 | 100.0% | 162 | 0 | 0 | 5 | 157 | 0 | 0.000 | — | 0.000 | — | — | — |
+
+Paired median signed error (n=0; positive = optimistic): scenario-equal — min, current — min.
+
+##### since death 12-24h
+
+n: 266 records, 17 window lifecycles, 11 episodes.
+
+Lifecycle-balanced (one record per window lifecycle, median instant):
+
+| estimator | instants | usable | scored | censored | TP | FP | TN | FN | precision | recall | F1 | median signed err (min) | median abs err (min) | median abs err (window) |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| current | 17 | 100.0% | 17 | 0 | 0 | 1 | 16 | 0 | 0.000 | — | 0.000 | — | — | — |
+| scenario-equal | 17 | 100.0% | 17 | 0 | 0 | 1 | 16 | 0 | 0.000 | — | 0.000 | — | — | — |
+| scenario-headroom | 17 | 100.0% | 17 | 0 | 0 | 1 | 16 | 0 | 0.000 | — | 0.000 | — | — | — |
+
+| estimator | usable | insufficient_data | low_confidence | no_slope | no_reset | total |
+|---|---:|---:|---:|---:|---:|---:|
+| current | 17 | 0 | 0 | 0 | 0 | 17 |
+| scenario-equal | 17 | 0 | 0 | 0 | 0 | 17 |
+| scenario-headroom | 17 | 0 | 0 | 0 | 0 | 17 |
+
+| estimator | lead-time bucket | TP | FN | recall | median signed err (min) | FP predicted in bucket |
+|---|---|---:|---:|---:|---:|---:|
+| current | <30m | 0 | 0 | — | — | 0 |
+| current | 30m-2h | 0 | 0 | — | — | 1 |
+| current | 2h-12h | 0 | 0 | — | — | 0 |
+| current | 12h-48h | 0 | 0 | — | — | 0 |
+| current | >48h | 0 | 0 | — | — | 0 |
+| scenario-equal | <30m | 0 | 0 | — | — | 0 |
+| scenario-equal | 30m-2h | 0 | 0 | — | — | 1 |
+| scenario-equal | 2h-12h | 0 | 0 | — | — | 0 |
+| scenario-equal | 12h-48h | 0 | 0 | — | — | 0 |
+| scenario-equal | >48h | 0 | 0 | — | — | 0 |
+| scenario-headroom | <30m | 0 | 0 | — | — | 0 |
+| scenario-headroom | 30m-2h | 0 | 0 | — | — | 1 |
+| scenario-headroom | 2h-12h | 0 | 0 | — | — | 0 |
+| scenario-headroom | 12h-48h | 0 | 0 | — | — | 0 |
+| scenario-headroom | >48h | 0 | 0 | — | — | 0 |
+
+Per record (every scored instant):
+
+| estimator | instants | usable | scored | censored | TP | FP | TN | FN | precision | recall | F1 | median signed err (min) | median abs err (min) | median abs err (window) |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| current | 266 | 100.0% | 266 | 0 | 0 | 4 | 262 | 0 | 0.000 | — | 0.000 | — | — | — |
+| scenario-equal | 266 | 100.0% | 266 | 0 | 0 | 3 | 263 | 0 | 0.000 | — | 0.000 | — | — | — |
+| scenario-headroom | 266 | 100.0% | 266 | 0 | 0 | 3 | 263 | 0 | 0.000 | — | 0.000 | — | — | — |
+
+Paired median signed error (n=0; positive = optimistic): scenario-equal — min, current — min.
+
+#### seven_day
+
+##### since death 0-30m
+
+n: 128 records, 27 window lifecycles, 34 episodes.
+
+Lifecycle-balanced (one record per window lifecycle, median instant):
+
+| estimator | instants | usable | scored | censored | TP | FP | TN | FN | precision | recall | F1 | median signed err (min) | median abs err (min) | median abs err (window) |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| current | 27 | 100.0% | 27 | 0 | 7 | 10 | 8 | 2 | 0.412 | 0.778 | 0.538 | -1737.3 | 1737.3 | 0.172 |
+| scenario-equal | 27 | 100.0% | 27 | 0 | 8 | 10 | 8 | 1 | 0.444 | 0.889 | 0.593 | -1145.2 | 1145.2 | 0.114 |
+| scenario-headroom | 27 | 100.0% | 27 | 0 | 7 | 8 | 10 | 2 | 0.467 | 0.778 | 0.583 | -895.2 | 895.2 | 0.089 |
+
+| estimator | usable | insufficient_data | low_confidence | no_slope | no_reset | total |
+|---|---:|---:|---:|---:|---:|---:|
+| current | 27 | 0 | 0 | 0 | 0 | 27 |
+| scenario-equal | 27 | 0 | 0 | 0 | 0 | 27 |
+| scenario-headroom | 27 | 0 | 0 | 0 | 0 | 27 |
+
+| estimator | lead-time bucket | TP | FN | recall | median signed err (min) | FP predicted in bucket |
+|---|---|---:|---:|---:|---:|---:|
+| current | <30m | 1 | 0 | 1.000 | 93.0 | 0 |
+| current | 30m-2h | 0 | 0 | — | — | 0 |
+| current | 2h-12h | 1 | 0 | 1.000 | 70.9 | 2 |
+| current | 12h-48h | 2 | 1 | 0.667 | -1780.6 | 4 |
+| current | >48h | 3 | 1 | 0.750 | -5878.0 | 4 |
+| scenario-equal | <30m | 1 | 0 | 1.000 | 119.0 | 0 |
+| scenario-equal | 30m-2h | 0 | 0 | — | — | 0 |
+| scenario-equal | 2h-12h | 1 | 0 | 1.000 | 44.6 | 2 |
+| scenario-equal | 12h-48h | 2 | 1 | 0.667 | -1557.0 | 4 |
+| scenario-equal | >48h | 4 | 0 | 1.000 | -4291.2 | 4 |
+| scenario-headroom | <30m | 1 | 0 | 1.000 | 246.3 | 0 |
+| scenario-headroom | 30m-2h | 0 | 0 | — | — | 0 |
+| scenario-headroom | 2h-12h | 1 | 0 | 1.000 | 109.9 | 0 |
+| scenario-headroom | 12h-48h | 2 | 1 | 0.667 | -895.2 | 2 |
+| scenario-headroom | >48h | 3 | 1 | 0.750 | -2712.3 | 6 |
+
+Per record (every scored instant):
+
+| estimator | instants | usable | scored | censored | TP | FP | TN | FN | precision | recall | F1 | median signed err (min) | median abs err (min) | median abs err (window) |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| current | 128 | 100.0% | 128 | 0 | 38 | 47 | 35 | 8 | 0.447 | 0.826 | 0.580 | -983.2 | 899.9 | 0.089 |
+| scenario-equal | 128 | 100.0% | 128 | 0 | 44 | 50 | 32 | 2 | 0.468 | 0.957 | 0.629 | -995.8 | 1075.2 | 0.107 |
+| scenario-headroom | 128 | 100.0% | 128 | 0 | 41 | 42 | 40 | 5 | 0.494 | 0.891 | 0.636 | -187.4 | 614.6 | 0.061 |
+
+Paired median signed error (n=7; positive = optimistic): scenario-equal -1145.2 min, current -1737.3 min.
+
+##### since death 30-60m
+
+n: 106 records, 23 window lifecycles, 32 episodes.
+
+Lifecycle-balanced (one record per window lifecycle, median instant):
+
+| estimator | instants | usable | scored | censored | TP | FP | TN | FN | precision | recall | F1 | median signed err (min) | median abs err (min) | median abs err (window) |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| current | 23 | 100.0% | 23 | 0 | 6 | 10 | 6 | 1 | 0.375 | 0.857 | 0.522 | -1907.7 | 1809.7 | 0.180 |
+| scenario-equal | 23 | 100.0% | 23 | 0 | 7 | 9 | 7 | 0 | 0.438 | 1.000 | 0.609 | -1318.0 | 1318.0 | 0.131 |
+| scenario-headroom | 23 | 100.0% | 23 | 0 | 7 | 7 | 9 | 0 | 0.500 | 1.000 | 0.667 | -903.2 | 1363.2 | 0.135 |
+
+| estimator | usable | insufficient_data | low_confidence | no_slope | no_reset | total |
+|---|---:|---:|---:|---:|---:|---:|
+| current | 23 | 0 | 0 | 0 | 0 | 23 |
+| scenario-equal | 23 | 0 | 0 | 0 | 0 | 23 |
+| scenario-headroom | 23 | 0 | 0 | 0 | 0 | 23 |
+
+| estimator | lead-time bucket | TP | FN | recall | median signed err (min) | FP predicted in bucket |
+|---|---|---:|---:|---:|---:|---:|
+| current | <30m | 0 | 0 | — | — | 0 |
+| current | 30m-2h | 1 | 0 | 1.000 | 53.9 | 0 |
+| current | 2h-12h | 0 | 0 | — | — | 2 |
+| current | 12h-48h | 2 | 0 | 1.000 | -1809.7 | 5 |
+| current | >48h | 3 | 1 | 0.750 | -4879.7 | 3 |
+| scenario-equal | <30m | 0 | 0 | — | — | 0 |
+| scenario-equal | 30m-2h | 1 | 0 | 1.000 | 29.6 | 0 |
+| scenario-equal | 2h-12h | 0 | 0 | — | — | 3 |
+| scenario-equal | 12h-48h | 2 | 0 | 1.000 | -1573.7 | 2 |
+| scenario-equal | >48h | 4 | 0 | 1.000 | -2518.8 | 4 |
+| scenario-headroom | <30m | 0 | 0 | — | — | 0 |
+| scenario-headroom | 30m-2h | 1 | 0 | 1.000 | 111.5 | 0 |
+| scenario-headroom | 2h-12h | 0 | 0 | — | — | 1 |
+| scenario-headroom | 12h-48h | 2 | 0 | 1.000 | -903.2 | 1 |
+| scenario-headroom | >48h | 4 | 0 | 1.000 | -2476.7 | 5 |
+
+Per record (every scored instant):
+
+| estimator | instants | usable | scored | censored | TP | FP | TN | FN | precision | recall | F1 | median signed err (min) | median abs err (min) | median abs err (window) |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| current | 106 | 100.0% | 106 | 0 | 31 | 38 | 31 | 6 | 0.449 | 0.838 | 0.585 | -2069.2 | 2069.2 | 0.205 |
+| scenario-equal | 106 | 100.0% | 106 | 0 | 37 | 38 | 31 | 0 | 0.493 | 1.000 | 0.661 | -1573.7 | 1573.7 | 0.156 |
+| scenario-headroom | 106 | 100.0% | 106 | 0 | 36 | 36 | 33 | 1 | 0.500 | 0.973 | 0.661 | -1346.2 | 1358.7 | 0.135 |
+
+Paired median signed error (n=6; positive = optimistic): scenario-equal -1573.7 min, current -1907.7 min.
+
+##### since death 1-2h
+
+n: 173 records, 18 window lifecycles, 30 episodes.
+
+Lifecycle-balanced (one record per window lifecycle, median instant):
+
+| estimator | instants | usable | scored | censored | TP | FP | TN | FN | precision | recall | F1 | median signed err (min) | median abs err (min) | median abs err (window) |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| current | 18 | 100.0% | 18 | 0 | 6 | 5 | 6 | 1 | 0.545 | 0.857 | 0.667 | -2561.3 | 2090.4 | 0.207 |
+| scenario-equal | 18 | 100.0% | 18 | 0 | 7 | 5 | 6 | 0 | 0.583 | 1.000 | 0.737 | -2164.0 | 2164.0 | 0.215 |
+| scenario-headroom | 18 | 100.0% | 18 | 0 | 7 | 5 | 6 | 0 | 0.583 | 1.000 | 0.737 | -1308.6 | 1308.6 | 0.130 |
+
+| estimator | usable | insufficient_data | low_confidence | no_slope | no_reset | total |
+|---|---:|---:|---:|---:|---:|---:|
+| current | 18 | 0 | 0 | 0 | 0 | 18 |
+| scenario-equal | 18 | 0 | 0 | 0 | 0 | 18 |
+| scenario-headroom | 18 | 0 | 0 | 0 | 0 | 18 |
+
+| estimator | lead-time bucket | TP | FN | recall | median signed err (min) | FP predicted in bucket |
+|---|---|---:|---:|---:|---:|---:|
+| current | <30m | 0 | 0 | — | — | 0 |
+| current | 30m-2h | 1 | 0 | 1.000 | 27.3 | 0 |
+| current | 2h-12h | 0 | 0 | — | — | 0 |
+| current | 12h-48h | 0 | 0 | — | — | 3 |
+| current | >48h | 5 | 1 | 0.833 | -2561.3 | 2 |
+| scenario-equal | <30m | 0 | 0 | — | — | 0 |
+| scenario-equal | 30m-2h | 1 | 0 | 1.000 | 20.4 | 0 |
+| scenario-equal | 2h-12h | 0 | 0 | — | — | 0 |
+| scenario-equal | 12h-48h | 0 | 0 | — | — | 4 |
+| scenario-equal | >48h | 6 | 0 | 1.000 | -2243.0 | 1 |
+| scenario-headroom | <30m | 0 | 0 | — | — | 0 |
+| scenario-headroom | 30m-2h | 1 | 0 | 1.000 | 180.5 | 0 |
+| scenario-headroom | 2h-12h | 0 | 0 | — | — | 0 |
+| scenario-headroom | 12h-48h | 0 | 0 | — | — | 3 |
+| scenario-headroom | >48h | 6 | 0 | 1.000 | -1398.7 | 2 |
+
+Per record (every scored instant):
+
+| estimator | instants | usable | scored | censored | TP | FP | TN | FN | precision | recall | F1 | median signed err (min) | median abs err (min) | median abs err (window) |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| current | 173 | 100.0% | 173 | 0 | 57 | 50 | 59 | 7 | 0.533 | 0.891 | 0.667 | -2545.2 | 2545.2 | 0.252 |
+| scenario-equal | 173 | 100.0% | 173 | 0 | 64 | 57 | 52 | 0 | 0.529 | 1.000 | 0.692 | -2243.0 | 2210.0 | 0.219 |
+| scenario-headroom | 173 | 100.0% | 173 | 0 | 64 | 57 | 52 | 0 | 0.529 | 1.000 | 0.692 | -1308.6 | 1308.6 | 0.130 |
+
+Paired median signed error (n=6; positive = optimistic): scenario-equal -2243.0 min, current -2561.3 min.
+
+##### since death 2-3h
+
+n: 92 records, 14 window lifecycles, 24 episodes.
+
+Lifecycle-balanced (one record per window lifecycle, median instant):
+
+| estimator | instants | usable | scored | censored | TP | FP | TN | FN | precision | recall | F1 | median signed err (min) | median abs err (min) | median abs err (window) |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| current | 14 | 100.0% | 14 | 0 | 4 | 4 | 5 | 1 | 0.500 | 0.800 | 0.615 | -5736.9 | 2538.2 | 0.252 |
+| scenario-equal | 14 | 100.0% | 14 | 0 | 5 | 5 | 4 | 0 | 0.500 | 1.000 | 0.667 | -2187.0 | 2187.0 | 0.217 |
+| scenario-headroom | 14 | 100.0% | 14 | 0 | 5 | 5 | 4 | 0 | 0.500 | 1.000 | 0.667 | -1233.4 | 1233.4 | 0.122 |
+
+| estimator | usable | insufficient_data | low_confidence | no_slope | no_reset | total |
+|---|---:|---:|---:|---:|---:|---:|
+| current | 14 | 0 | 0 | 0 | 0 | 14 |
+| scenario-equal | 14 | 0 | 0 | 0 | 0 | 14 |
+| scenario-headroom | 14 | 0 | 0 | 0 | 0 | 14 |
+
+| estimator | lead-time bucket | TP | FN | recall | median signed err (min) | FP predicted in bucket |
+|---|---|---:|---:|---:|---:|---:|
+| current | <30m | 0 | 0 | — | — | 0 |
+| current | 30m-2h | 0 | 0 | — | — | 0 |
+| current | 2h-12h | 0 | 0 | — | — | 0 |
+| current | 12h-48h | 0 | 1 | 0.000 | — | 2 |
+| current | >48h | 4 | 0 | 1.000 | -5736.9 | 2 |
+| scenario-equal | <30m | 0 | 0 | — | — | 0 |
+| scenario-equal | 30m-2h | 0 | 0 | — | — | 0 |
+| scenario-equal | 2h-12h | 0 | 0 | — | — | 0 |
+| scenario-equal | 12h-48h | 1 | 0 | 1.000 | -1233.4 | 4 |
+| scenario-equal | >48h | 4 | 0 | 1.000 | -3459.4 | 1 |
+| scenario-headroom | <30m | 0 | 0 | — | — | 0 |
+| scenario-headroom | 30m-2h | 0 | 0 | — | — | 0 |
+| scenario-headroom | 2h-12h | 0 | 0 | — | — | 0 |
+| scenario-headroom | 12h-48h | 1 | 0 | 1.000 | -1233.4 | 3 |
+| scenario-headroom | >48h | 4 | 0 | 1.000 | -3401.4 | 2 |
+
+Per record (every scored instant):
+
+| estimator | instants | usable | scored | censored | TP | FP | TN | FN | precision | recall | F1 | median signed err (min) | median abs err (min) | median abs err (window) |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| current | 92 | 100.0% | 92 | 0 | 31 | 32 | 23 | 6 | 0.492 | 0.838 | 0.620 | -5611.4 | 5611.4 | 0.557 |
+| scenario-equal | 92 | 100.0% | 92 | 0 | 37 | 38 | 17 | 0 | 0.493 | 1.000 | 0.661 | -2188.3 | 2188.3 | 0.217 |
+| scenario-headroom | 92 | 100.0% | 92 | 0 | 37 | 38 | 17 | 0 | 0.493 | 1.000 | 0.661 | -1258.5 | 1258.5 | 0.125 |
+
+Paired median signed error (n=4; positive = optimistic): scenario-equal -3459.4 min, current -5736.9 min.
+
+##### since death 3-4h
+
+n: 39 records, 7 window lifecycles, 15 episodes.
+
+Lifecycle-balanced (one record per window lifecycle, median instant):
+
+| estimator | instants | usable | scored | censored | TP | FP | TN | FN | precision | recall | F1 | median signed err (min) | median abs err (min) | median abs err (window) |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| current | 7 | 100.0% | 7 | 0 | 3 | 3 | 0 | 1 | 0.500 | 0.750 | 0.600 | -5594.0 | 5594.0 | 0.555 |
+| scenario-equal | 7 | 100.0% | 7 | 0 | 4 | 3 | 0 | 0 | 0.571 | 1.000 | 0.727 | -3811.0 | 2164.9 | 0.215 |
+| scenario-headroom | 7 | 100.0% | 7 | 0 | 4 | 3 | 0 | 0 | 0.571 | 1.000 | 0.727 | -3784.8 | 1158.2 | 0.115 |
+
+| estimator | usable | insufficient_data | low_confidence | no_slope | no_reset | total |
+|---|---:|---:|---:|---:|---:|---:|
+| current | 7 | 0 | 0 | 0 | 0 | 7 |
+| scenario-equal | 7 | 0 | 0 | 0 | 0 | 7 |
+| scenario-headroom | 7 | 0 | 0 | 0 | 0 | 7 |
+
+| estimator | lead-time bucket | TP | FN | recall | median signed err (min) | FP predicted in bucket |
+|---|---|---:|---:|---:|---:|---:|
+| current | <30m | 0 | 0 | — | — | 0 |
+| current | 30m-2h | 0 | 0 | — | — | 0 |
+| current | 2h-12h | 0 | 0 | — | — | 0 |
+| current | 12h-48h | 0 | 1 | 0.000 | — | 0 |
+| current | >48h | 3 | 0 | 1.000 | -5594.0 | 3 |
+| scenario-equal | <30m | 0 | 0 | — | — | 0 |
+| scenario-equal | 30m-2h | 0 | 0 | — | — | 0 |
+| scenario-equal | 2h-12h | 0 | 0 | — | — | 0 |
+| scenario-equal | 12h-48h | 1 | 0 | 1.000 | -1158.2 | 3 |
+| scenario-equal | >48h | 3 | 0 | 1.000 | -3811.0 | 0 |
+| scenario-headroom | <30m | 0 | 0 | — | — | 0 |
+| scenario-headroom | 30m-2h | 0 | 0 | — | — | 0 |
+| scenario-headroom | 2h-12h | 0 | 0 | — | — | 0 |
+| scenario-headroom | 12h-48h | 1 | 0 | 1.000 | -1158.2 | 2 |
+| scenario-headroom | >48h | 3 | 0 | 1.000 | -3784.8 | 1 |
+
+Per record (every scored instant):
+
+| estimator | instants | usable | scored | censored | TP | FP | TN | FN | precision | recall | F1 | median signed err (min) | median abs err (min) | median abs err (window) |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| current | 39 | 100.0% | 39 | 0 | 12 | 20 | 1 | 6 | 0.375 | 0.667 | 0.480 | -5594.0 | 2531.6 | 0.251 |
+| scenario-equal | 39 | 100.0% | 39 | 0 | 18 | 21 | 0 | 0 | 0.462 | 1.000 | 0.632 | -2164.9 | 2164.1 | 0.215 |
+| scenario-headroom | 39 | 100.0% | 39 | 0 | 18 | 21 | 0 | 0 | 0.462 | 1.000 | 0.632 | -1158.2 | 1145.7 | 0.114 |
+
+Paired median signed error (n=3; positive = optimistic): scenario-equal -3811.0 min, current -5594.0 min.
+
+##### since death 4-6h
+
+n: 68 records, 6 window lifecycles, 9 episodes.
+
+Lifecycle-balanced (one record per window lifecycle, median instant):
+
+| estimator | instants | usable | scored | censored | TP | FP | TN | FN | precision | recall | F1 | median signed err (min) | median abs err (min) | median abs err (window) |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| current | 6 | 100.0% | 6 | 0 | 2 | 3 | 0 | 1 | 0.400 | 0.667 | 0.500 | -2406.5 | 2140.4 | 0.212 |
+| scenario-equal | 6 | 100.0% | 6 | 0 | 3 | 3 | 0 | 0 | 0.500 | 1.000 | 0.667 | -1916.7 | 1916.7 | 0.190 |
+| scenario-headroom | 6 | 100.0% | 6 | 0 | 3 | 3 | 0 | 0 | 0.500 | 1.000 | 0.667 | -986.9 | 986.9 | 0.098 |
+
+| estimator | usable | insufficient_data | low_confidence | no_slope | no_reset | total |
+|---|---:|---:|---:|---:|---:|---:|
+| current | 6 | 0 | 0 | 0 | 0 | 6 |
+| scenario-equal | 6 | 0 | 0 | 0 | 0 | 6 |
+| scenario-headroom | 6 | 0 | 0 | 0 | 0 | 6 |
+
+| estimator | lead-time bucket | TP | FN | recall | median signed err (min) | FP predicted in bucket |
+|---|---|---:|---:|---:|---:|---:|
+| current | <30m | 0 | 0 | — | — | 0 |
+| current | 30m-2h | 0 | 0 | — | — | 0 |
+| current | 2h-12h | 0 | 0 | — | — | 0 |
+| current | 12h-48h | 0 | 1 | 0.000 | — | 2 |
+| current | >48h | 2 | 0 | 1.000 | -2406.5 | 1 |
+| scenario-equal | <30m | 0 | 0 | — | — | 0 |
+| scenario-equal | 30m-2h | 0 | 0 | — | — | 0 |
+| scenario-equal | 2h-12h | 0 | 0 | — | — | 0 |
+| scenario-equal | 12h-48h | 1 | 0 | 1.000 | -1108.1 | 3 |
+| scenario-equal | >48h | 2 | 0 | 1.000 | -2037.8 | 0 |
+| scenario-headroom | <30m | 0 | 0 | — | — | 0 |
+| scenario-headroom | 30m-2h | 0 | 0 | — | — | 0 |
+| scenario-headroom | 2h-12h | 0 | 0 | — | — | 0 |
+| scenario-headroom | 12h-48h | 1 | 0 | 1.000 | -1108.1 | 2 |
+| scenario-headroom | >48h | 2 | 0 | 1.000 | -986.9 | 1 |
+
+Per record (every scored instant):
+
+| estimator | instants | usable | scored | censored | TP | FP | TN | FN | precision | recall | F1 | median signed err (min) | median abs err (min) | median abs err (window) |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| current | 68 | 100.0% | 68 | 0 | 27 | 40 | 0 | 1 | 0.403 | 0.964 | 0.568 | -2265.4 | 2265.4 | 0.225 |
+| scenario-equal | 68 | 100.0% | 68 | 0 | 28 | 40 | 0 | 0 | 0.412 | 1.000 | 0.583 | -1975.7 | 1955.9 | 0.194 |
+| scenario-headroom | 68 | 100.0% | 68 | 0 | 28 | 40 | 0 | 0 | 0.412 | 1.000 | 0.583 | -537.6 | 688.5 | 0.068 |
+
+Paired median signed error (n=2; positive = optimistic): scenario-equal -2037.8 min, current -2406.5 min.
+
+##### since death 6-12h
+
+n: 166 records, 6 window lifecycles, 12 episodes.
+
+Lifecycle-balanced (one record per window lifecycle, median instant):
+
+| estimator | instants | usable | scored | censored | TP | FP | TN | FN | precision | recall | F1 | median signed err (min) | median abs err (min) | median abs err (window) |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| current | 6 | 100.0% | 6 | 0 | 1 | 4 | 0 | 1 | 0.200 | 0.500 | 0.286 | -369.8 | 369.8 | 0.037 |
+| scenario-equal | 6 | 100.0% | 6 | 0 | 2 | 4 | 0 | 0 | 0.333 | 1.000 | 0.500 | -688.4 | 289.3 | 0.029 |
+| scenario-headroom | 6 | 100.0% | 6 | 0 | 1 | 4 | 0 | 1 | 0.200 | 0.500 | 0.286 | -325.4 | 325.4 | 0.032 |
+
+| estimator | usable | insufficient_data | low_confidence | no_slope | no_reset | total |
+|---|---:|---:|---:|---:|---:|---:|
+| current | 6 | 0 | 0 | 0 | 0 | 6 |
+| scenario-equal | 6 | 0 | 0 | 0 | 0 | 6 |
+| scenario-headroom | 6 | 0 | 0 | 0 | 0 | 6 |
+
+| estimator | lead-time bucket | TP | FN | recall | median signed err (min) | FP predicted in bucket |
+|---|---|---:|---:|---:|---:|---:|
+| current | <30m | 0 | 0 | — | — | 0 |
+| current | 30m-2h | 0 | 0 | — | — | 0 |
+| current | 2h-12h | 0 | 0 | — | — | 0 |
+| current | 12h-48h | 1 | 1 | 0.500 | -369.8 | 3 |
+| current | >48h | 0 | 0 | — | — | 1 |
+| scenario-equal | <30m | 0 | 0 | — | — | 0 |
+| scenario-equal | 30m-2h | 0 | 0 | — | — | 0 |
+| scenario-equal | 2h-12h | 0 | 0 | — | — | 0 |
+| scenario-equal | 12h-48h | 2 | 0 | 1.000 | -688.4 | 3 |
+| scenario-equal | >48h | 0 | 0 | — | — | 1 |
+| scenario-headroom | <30m | 0 | 0 | — | — | 0 |
+| scenario-headroom | 30m-2h | 0 | 0 | — | — | 0 |
+| scenario-headroom | 2h-12h | 0 | 0 | — | — | 0 |
+| scenario-headroom | 12h-48h | 1 | 1 | 0.500 | -325.4 | 2 |
+| scenario-headroom | >48h | 0 | 0 | — | — | 2 |
+
+Per record (every scored instant):
+
+| estimator | instants | usable | scored | censored | TP | FP | TN | FN | precision | recall | F1 | median signed err (min) | median abs err (min) | median abs err (window) |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| current | 166 | 100.0% | 166 | 0 | 42 | 119 | 0 | 5 | 0.261 | 0.894 | 0.404 | -369.8 | 357.7 | 0.035 |
+| scenario-equal | 166 | 100.0% | 166 | 0 | 47 | 119 | 0 | 0 | 0.283 | 1.000 | 0.441 | -665.0 | 665.0 | 0.066 |
+| scenario-headroom | 166 | 100.0% | 166 | 0 | 42 | 119 | 0 | 5 | 0.261 | 0.894 | 0.404 | -337.9 | 325.4 | 0.032 |
+
+Paired median signed error (n=1; positive = optimistic): scenario-equal -688.4 min, current -369.8 min.
+
+##### since death 12-24h
+
+n: 246 records, 7 window lifecycles, 11 episodes.
+
+Lifecycle-balanced (one record per window lifecycle, median instant):
+
+| estimator | instants | usable | scored | censored | TP | FP | TN | FN | precision | recall | F1 | median signed err (min) | median abs err (min) | median abs err (window) |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| current | 7 | 100.0% | 7 | 0 | 2 | 4 | 0 | 1 | 0.333 | 0.667 | 0.444 | 109.2 | 109.2 | 0.011 |
+| scenario-equal | 7 | 100.0% | 7 | 0 | 3 | 4 | 0 | 0 | 0.429 | 1.000 | 0.600 | 27.5 | 82.2 | 0.008 |
+| scenario-headroom | 7 | 100.0% | 7 | 0 | 2 | 4 | 0 | 1 | 0.333 | 0.667 | 0.444 | 464.2 | 464.2 | 0.046 |
+
+| estimator | usable | insufficient_data | low_confidence | no_slope | no_reset | total |
+|---|---:|---:|---:|---:|---:|---:|
+| current | 7 | 0 | 0 | 0 | 0 | 7 |
+| scenario-equal | 7 | 0 | 0 | 0 | 0 | 7 |
+| scenario-headroom | 7 | 0 | 0 | 0 | 0 | 7 |
+
+| estimator | lead-time bucket | TP | FN | recall | median signed err (min) | FP predicted in bucket |
+|---|---|---:|---:|---:|---:|---:|
+| current | <30m | 0 | 0 | — | — | 0 |
+| current | 30m-2h | 0 | 0 | — | — | 0 |
+| current | 2h-12h | 2 | 0 | 1.000 | 109.2 | 0 |
+| current | 12h-48h | 0 | 1 | 0.000 | — | 3 |
+| current | >48h | 0 | 0 | — | — | 1 |
+| scenario-equal | <30m | 0 | 0 | — | — | 0 |
+| scenario-equal | 30m-2h | 0 | 0 | — | — | 0 |
+| scenario-equal | 2h-12h | 2 | 0 | 1.000 | -82.2 | 1 |
+| scenario-equal | 12h-48h | 1 | 0 | 1.000 | 27.5 | 2 |
+| scenario-equal | >48h | 0 | 0 | — | — | 1 |
+| scenario-headroom | <30m | 0 | 0 | — | — | 0 |
+| scenario-headroom | 30m-2h | 0 | 0 | — | — | 0 |
+| scenario-headroom | 2h-12h | 2 | 0 | 1.000 | 464.2 | 1 |
+| scenario-headroom | 12h-48h | 0 | 1 | 0.000 | — | 1 |
+| scenario-headroom | >48h | 0 | 0 | — | — | 2 |
+
+Per record (every scored instant):
+
+| estimator | instants | usable | scored | censored | TP | FP | TN | FN | precision | recall | F1 | median signed err (min) | median abs err (min) | median abs err (window) |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| current | 246 | 100.0% | 246 | 0 | 38 | 148 | 0 | 60 | 0.204 | 0.388 | 0.268 | -33.5 | 151.3 | 0.015 |
+| scenario-equal | 246 | 100.0% | 246 | 0 | 98 | 148 | 0 | 0 | 0.398 | 1.000 | 0.570 | -97.7 | 125.3 | 0.012 |
+| scenario-headroom | 246 | 100.0% | 246 | 0 | 38 | 148 | 0 | 60 | 0.204 | 0.388 | 0.268 | 425.8 | 425.8 | 0.042 |
+
+Paired median signed error (n=2; positive = optimistic): scenario-equal -82.2 min, current 109.2 min.
+
+### Survivor slope trajectory after a death
+
+The survivor's OWN fitted burn slope, expressed against its slope just after the peer died: `slope(t) / slope(t_death+)`. Above 1 means the inherited traffic has already entered the survivor's lookback, which is exactly the demand the scenario then adds a second time; near 1 means it has not arrived yet.
+
+Median within a (window lifecycle × death) first, then across them, so a lifecycle that happens to be sampled more often does not outvote one that is not. `t_death+` is the earliest post-death instant that has a fitted slope at all, not the literal first instant: a survivor is often still learning when its peer dies, and requiring a slope there would discard the lifecycles this table is about. Instants with no slope enter no bucket, and a lifecycle whose baseline slope is zero is dropped rather than imputed.
+
+| since death | lifecycles | median ratio | median slope (pct/h) | five_hour n | five_hour ratio | seven_day n | seven_day ratio |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| 0-30m | 119 | 1.000 | 2.00 | 70 | 1.000 | 49 | 0.999 |
+| 30-60m | 103 | 1.004 | 3.18 | 62 | 1.093 | 41 | 0.998 |
+| 1-2h | 89 | 1.005 | 2.65 | 52 | 1.000 | 37 | 1.011 |
+| 2-3h | 50 | 0.986 | 2.28 | 28 | 0.742 | 22 | 0.989 |
+| 3-4h | 19 | 0.959 | 1.61 | 10 | 0.405 | 9 | 0.979 |
+| 4-6h | 18 | 0.885 | 1.40 | 10 | 0.633 | 8 | 0.954 |
+| 6-12h | 21 | 0.924 | 1.45 | 12 | 0.907 | 9 | 0.924 |
+| 12-24h | 24 | 1.070 | 2.17 | 16 | 1.483 | 8 | 0.977 |
 
 ### By class and window
 
@@ -809,6 +1800,23 @@ Block bootstrap of `scenario-equal − current`, resampling blocks rather than i
 | Any transition (block = episode) | medianAbsErrorMinutes | -220.541 | 8.659 | 171.271 | 1000 |
 | Any transition (block = episode) | medianSignedErrorMinutes | -87.925 | 6.959 | 320.561 | 1000 |
 
+## Prediction churn
+
+How much each model's answer MOVES between one instant and the next, over consecutive usable instants of the same window lifecycle. Accuracy says nothing about stability: an estimator that alternates between "out in 40 minutes" and "not this cycle" every grid step is unusable at any F1.
+
+Lifecycle-balanced the same way the score tables are: the median (and p90) is taken WITHIN a lifecycle first, then across lifecycles. `flip rate` is the fraction of consecutive pairs where the yes/no verdict changed. Pairs more than two grid steps apart are not paired, so a hole in the scored series does not read as churn.
+
+Not a `BacktestStatistic`: that vocabulary is a function of an unordered bag of records, churn is a function of an ordered sequence inside a lifecycle, and `BacktestRecord` carries no lifecycle id to group by. There is therefore no bootstrap CI on these numbers — resampling blocks with replacement would destroy the adjacency they are defined on.
+
+| cohort | model | lifecycles | pairs | median abs ETA change (min) | p90 abs ETA change (min) | median flip rate |
+|---|---|---:|---:|---:|---:|---:|
+| Overall | current | 606 | 24050 | 11.1 | 19.6 | 0.000 |
+| Overall | scenario-equal | 606 | 24050 | 12.6 | 28.3 | 0.000 |
+| Overall | scenario-headroom | 606 | 24050 | 15.1 | 27.5 | 0.000 |
+| Any transition | current | 165 | 4016 | 11.5 | 18.7 | 0.000 |
+| Any transition | scenario-equal | 165 | 4016 | 11.7 | 19.9 | 0.000 |
+| Any transition | scenario-headroom | 165 | 4016 | 12.8 | 21.1 | 0.000 |
+
 ## Pool calibration (all-out within 14 d)
 
 The pool-level claim, scored against the observed grid. What the table can say is how often a predicted pool-out was followed by 14 days with no outage.
@@ -905,5 +1913,5 @@ What step 4 does with this:
 ## Notes
 
 - Placeholder windows skipped: 233.
-- Replay took 11.9 s over 9648 instants; scoring and bootstrap 1.7 s.
+- Replay took 19.6 s over 9648 instants; scoring and bootstrap 2.3 s.
 - Grid step 10 min; rows loaded 8 days either side of the replay interval.
