@@ -57,6 +57,9 @@ export {
 	isUnstartedWindow,
 	type LifetimeConfidence,
 	PACE_DEFICIT_PROBE_MIN,
+	PACE_MARGIN_PRECISION,
+	probeDeficitOver,
+	probeMarginOver,
 	RUNWAY_HORIZON_MS,
 	type RunwayAccountInput,
 	type RunwayAssumedCredits,
@@ -70,6 +73,7 @@ export {
 	type WindowExhaustion,
 	type WindowExhaustionInput,
 	type WindowExhaustionSource,
+	weeklyTimeToFull,
 } from "./capacity-runway";
 export {
 	BUFFER_SIZES,
