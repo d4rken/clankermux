@@ -157,6 +157,20 @@ export interface RunwayBand {
 	halfWidthPct: number;
 }
 
+/**
+ * Where an account's tier came from when a runway scenario turned it into a
+ * capacity number. `"recorded"` = read off the account row or a tier-stamped
+ * usage snapshot; `"assumed"` = substituted, e.g. today's tier standing in for
+ * a snapshot row from before 2026-08-25, when the sampler did not stamp tiers.
+ *
+ * The same two-value vocabulary quota-drift carries as its own
+ * `QuotaDriftTierProvenance`. Deliberately a SECOND declaration rather than a
+ * shared one: the two surfaces answer different questions (a drift fit's
+ * cohort tier vs. a scenario's capacity weight), and coupling them would make
+ * one surface's future third value appear in the other's wire type.
+ */
+export type RunwayTierProvenance = "recorded" | "assumed";
+
 /** The account-wide quota windows the runway scan models. */
 export type RunwayWindowKind = "five_hour" | "seven_day";
 

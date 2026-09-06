@@ -276,6 +276,12 @@ export {
 	FIXED_WINDOW_DURATION_MS,
 	type SupportedWindow,
 } from "./throttle-utils";
+export {
+	type AccountTier,
+	TIER_CAPACITY_TABLE,
+	type TierCapacityEntry,
+	tierCapacityUnits,
+} from "./tier-capacity";
 export { formatPlanTierLabel } from "./tier-label";
 export { TtlCache } from "./ttl-cache";
 export {
