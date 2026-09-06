@@ -152,17 +152,12 @@ export function resolveFamilyWeeklyPacing(
 }
 
 /**
- * Header-evidence fallback for the REACTIVE family-weekly rung, used ONLY when
- * the usage cache is unavailable (empty/stale even after the shared pre-ladder
- * refresh — post-restart with the usage endpoint down, or the endpoint 429ing
- * its own poll). In that evidence-starved state the 429 response ITSELF can
- * carry the verdict: Anthropic's unified headers enumerate per-claim status
- * lines, and both 2026-08-02 incidents showed the exact shape this reads —
- * `7d_oi` rejected at 1.0 while the account-wide `5h`/`7d` pair reported
- * headroom. Without this fallback that input fell through to the
- * model-fallback rung, which copied the claim-scoped retry-after (the weekly
- * reset, 14.4h) into an account-wide lock under a reason the poller's
- * capacity-restored release may not clear.
+ * Authoritative live-header evidence for the REACTIVE family-weekly rung.
+ * Anthropic can reject a scoped claim while a recent usage poll still reports
+ * capacity. Trust the response's scoped verdict regardless of cache freshness,
+ * provided BOTH account-wide windows positively prove headroom. This prevents
+ * a scoped weekly retry-after from becoming an account-wide cooldown or burst
+ * hold, including when the rejection first appears during a held reprobe.
  *
  * Why this cannot misfire on the shapes that matter (measured over 1,145
  * production 429s — see the rate-limiting skill's 429-signals reference):
@@ -203,7 +198,12 @@ export function resolveFamilyWeeklyExclusionFromHeaders(
 	modelForGate: string | null,
 	response: Response,
 	now: number,
-): FamilyWeeklyExcludedAccount | null {
+):
+	| (Omit<FamilyWeeklyExcludedAccount, "resetAt"> & {
+			/** Null when the live claim supplies no usable future reset. */
+			resetAt: number | null;
+	  })
+	| null {
 	// Header evidence is only trusted from the official Anthropic OAuth
 	// upstream: anthropic-compatible providers (and anthropic accounts pointed
 	// at a custom endpoint) could emit or forward these headers with different
@@ -224,7 +224,7 @@ export function resolveFamilyWeeklyExclusionFromHeaders(
 	const scoped = getScopedClaimRejection(h, now);
 	if (scoped === null) return null;
 
-	return { account, family, resetAt: scoped.soonestResetMs ?? now };
+	return { account, family, resetAt: scoped.soonestResetMs };
 }
 
 /**

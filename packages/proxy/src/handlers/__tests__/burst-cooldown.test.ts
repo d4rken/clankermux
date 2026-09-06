@@ -1,4 +1,5 @@
-import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, spyOn } from "bun:test";
+import { Logger } from "@clankermux/logger";
 import {
 	clearAnthropicBurstThrottle,
 	getActiveHoldCount,
@@ -30,7 +31,7 @@ describe("burst cooldown", () => {
 
 		it("set ⇒ active until expiry; after expiry ⇒ null/false", () => {
 			// Default marker lifetime is 120_000ms (BURST_RETRY_MARKER_MS in
-			// burst-cooldown.ts), sized to cover a single 120s hold budget.
+			// burst-cooldown.ts), measured from upstream evidence, not hold entry.
 			const now = 1_700_000_000_000;
 			markAnthropicBurstThrottle(now);
 
@@ -86,6 +87,85 @@ describe("burst cooldown", () => {
 			expect(getAnthropicBurstThrottleUntil(now)).toBe(now + 30_000);
 			expect(isAnthropicBurstThrottleActive(now + 29_999)).toBe(true);
 			expect(isAnthropicBurstThrottleActive(now + 30_000)).toBe(false);
+		});
+
+		it("logs one warning per activation and bounded summaries with observation counts", () => {
+			const warn = spyOn(Logger.prototype, "warn").mockImplementation(() => {});
+			const info = spyOn(Logger.prototype, "info").mockImplementation(() => {});
+			try {
+				const now = 1_700_000_000_000;
+				markAnthropicBurstThrottle(now);
+				for (let i = 1; i < 30; i++) {
+					markAnthropicBurstThrottle(now + i * 1_000);
+				}
+				expect(warn).toHaveBeenCalledTimes(1);
+				expect(info).not.toHaveBeenCalled();
+				markAnthropicBurstThrottle(now + 30_000);
+				expect(info).toHaveBeenCalledTimes(1);
+				expect(info.mock.calls[0]?.[0]).toContain(
+					"observations=31, newObservations=30",
+				);
+				// Backdated concurrent evidence cannot reopen the summary interval.
+				markAnthropicBurstThrottle(now + 29_000);
+				markAnthropicBurstThrottle(now + 59_999);
+				expect(info).toHaveBeenCalledTimes(1);
+				markAnthropicBurstThrottle(now + 60_000);
+				expect(info).toHaveBeenCalledTimes(2);
+				expect(info.mock.calls[1]?.[0]).toContain(
+					"observations=34, newObservations=3",
+				);
+				expect(warn).toHaveBeenCalledTimes(1);
+				expect(getAnthropicBurstThrottleUntil(now + 60_000)).toBe(
+					now + 180_000,
+				);
+				// Lazy expiry emits one final summary, including unsummarized marks.
+				markAnthropicBurstThrottle(now + 61_000);
+				expect(isAnthropicBurstThrottleActive(now + 181_000)).toBe(false);
+				expect(isAnthropicBurstThrottleActive(now + 181_001)).toBe(false);
+				expect(info).toHaveBeenCalledTimes(3);
+				expect(info.mock.calls[2]?.[0]).toContain(
+					"expired; observations=35, newObservations=1",
+				);
+				expect(info.mock.calls[2]?.[0]).toContain("sibling diversion restored");
+				markAnthropicBurstThrottle(now + 182_000);
+				expect(warn).toHaveBeenCalledTimes(2);
+				expect(warn.mock.calls[1]?.[0]).toContain("observations=1");
+			} finally {
+				warn.mockRestore();
+				info.mockRestore();
+			}
+		});
+
+		it("reactivation preserves prior counts without claiming recovery and resets new summary counts", () => {
+			const warn = spyOn(Logger.prototype, "warn").mockImplementation(() => {});
+			const info = spyOn(Logger.prototype, "info").mockImplementation(() => {});
+			try {
+				const now = 1_700_000_000_000;
+				markAnthropicBurstThrottle(now, 100);
+				markAnthropicBurstThrottle(now + 50, 100);
+				markAnthropicBurstThrottle(now + 150);
+				expect(warn).toHaveBeenCalledTimes(2);
+				expect(info).toHaveBeenCalledTimes(1);
+				expect(info.mock.calls[0]?.[0]).toContain(
+					"expired before fresh evidence; observations=2, newObservations=1",
+				);
+				expect(info.mock.calls[0]?.[0]).not.toContain(
+					"sibling diversion restored",
+				);
+				expect(getAnthropicBurstThrottleUntil(now + 150)).toBe(now + 120_150);
+				expect(warn.mock.calls[1]?.[0]).toContain("observations=1");
+				clearAnthropicBurstThrottle();
+				markAnthropicBurstThrottle(now + 200);
+				expect(warn).toHaveBeenCalledTimes(3);
+				markAnthropicBurstThrottle(now + 30_200);
+				expect(info).toHaveBeenCalledTimes(2);
+				expect(info.mock.calls[1]?.[0]).toContain(
+					"observations=2, newObservations=1",
+				);
+			} finally {
+				warn.mockRestore();
+				info.mockRestore();
+			}
 		});
 	});
 

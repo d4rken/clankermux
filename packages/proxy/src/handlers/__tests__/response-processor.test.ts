@@ -6,6 +6,11 @@ import {
 	isAnthropicBurstThrottleActive,
 } from "../burst-cooldown";
 import type { ProxyContext } from "../proxy-types";
+import {
+	getRateLimitProbeAdmission,
+	markCapacityRestoredProbePending,
+	resetRateLimitProbeGatesForTests,
+} from "../rate-limit-cooldown";
 import { processProxyResponse } from "../response-processor";
 
 // Minimal Account fixture used by every test in this file. Only the fields
@@ -69,6 +74,7 @@ function makeCtx(opts: {
 		enqueueCount: 0,
 		updateAccountUsage: 0,
 		manualUsageRun: 0,
+		statusMeta: [] as string[],
 	};
 	let persistedCounter = 0;
 
@@ -112,7 +118,9 @@ function makeCtx(opts: {
 			updateAccountUsage: () => {
 				calls.updateAccountUsage++;
 			},
-			updateAccountRateLimitMeta: () => {},
+			updateAccountRateLimitMeta: (_accountId: string, status: string) => {
+				calls.statusMeta.push(status);
+			},
 			getAdapter: () => ({
 				get: async () => ({ rate_limited_until: null }),
 				run: async () => {
@@ -1237,5 +1245,89 @@ describe("processProxyResponse — guarded success-path rate-limit clear", () =>
 			"rate_limited_at IS NULL OR rate_limited_at <",
 		);
 		expect(calls[0].params[1]).toBe(now - 60_000);
+	});
+});
+
+describe("processProxyResponse — live scoped rejection with lagging fresh usage", () => {
+	afterEach(() => {
+		clearAnthropicBurstThrottle();
+		usageCache.delete("acct-1");
+		resetRateLimitProbeGatesForTests();
+	});
+
+	it.each([
+		{ contentType: "application/json", guard: null },
+		{ contentType: "text/event-stream", guard: null },
+		{ contentType: "application/json", guard: "custom_endpoint" },
+		{ contentType: "application/json", guard: "5h" },
+		{ contentType: "application/json", guard: "7d" },
+	])("scoped cooldown policy preserves trust and account-wide guards: %j", async ({
+		contentType,
+		guard,
+	}) => {
+		clearAnthropicBurstThrottle();
+		const account = makeAccount({
+			custom_endpoint:
+				guard === "custom_endpoint" ? "https://relay.example" : null,
+		});
+		markCapacityRestoredProbePending(account.id);
+		expect(getRateLimitProbeAdmission(account)).toBe("admitted");
+		expect(getRateLimitProbeAdmission(account)).toBe("suppressed");
+		usageCache.set(account.id, {
+			five_hour: { utilization: 61, resets_at: null },
+			seven_day: { utilization: 57, resets_at: null },
+		});
+		const resetTime = Date.now() + 40_698_000;
+		const { ctx, calls } = makeCtx({
+			isStream: contentType === "text/event-stream",
+			rateLimited: true,
+			resetTime,
+		});
+		const response = new Response("{}", {
+			status: 429,
+			headers: {
+				"content-type": contentType,
+				"anthropic-ratelimit-unified-status": "rejected",
+				"anthropic-ratelimit-unified-5h-status": "allowed",
+				"anthropic-ratelimit-unified-5h-utilization": "0.61",
+				"anthropic-ratelimit-unified-5h-reset": String(
+					Math.floor(Date.now() / 1000) + 3600,
+				),
+				"anthropic-ratelimit-unified-7d-status": "allowed",
+				"anthropic-ratelimit-unified-7d-utilization": "0.57",
+				"anthropic-ratelimit-unified-7d_oi-status": "rejected",
+				"anthropic-ratelimit-unified-7d_oi-utilization": "1.0",
+				"anthropic-ratelimit-unified-7d_oi-reset": String(
+					Math.floor(resetTime / 1000),
+				),
+				"anthropic-ratelimit-unified-representative-claim":
+					"seven_day_overage_included",
+				"retry-after": "40698",
+				"x-should-retry": "true",
+			},
+		});
+		if (guard === "5h" || guard === "7d") {
+			response.headers.set(
+				`anthropic-ratelimit-unified-${guard}-status`,
+				"rejected",
+			);
+			response.headers.set(
+				`anthropic-ratelimit-unified-${guard}-utilization`,
+				"1.0",
+			);
+		}
+
+		expect(await processProxyResponse(response, account, ctx)).toBe(true);
+		if (guard === null) {
+			expect(calls.markRateLimited).toHaveLength(0);
+			expect(account.rate_limited_until).toBeNull();
+			expect(account.rate_limited_reason).toBeNull();
+			expect(calls.statusMeta).toEqual(["allowed"]);
+		} else {
+			expect(calls.markRateLimited).toHaveLength(1);
+			expect(account.rate_limited_until).toBeGreaterThan(Date.now());
+		}
+		expect(getRateLimitProbeAdmission(account)).toBe("admitted");
+		expect(isAnthropicBurstThrottleActive()).toBe(false);
 	});
 });

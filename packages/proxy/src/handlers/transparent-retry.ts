@@ -1,4 +1,8 @@
-import { REJECTING_STATUSES } from "@clankermux/core";
+import {
+	hasAccountWideUnifiedRejection,
+	isScopedOnlyUnifiedRejection,
+	REJECTING_STATUSES,
+} from "@clankermux/core";
 import { Logger } from "@clankermux/logger";
 import { isAnthropicHardLimitStatus } from "@clankermux/providers";
 import {
@@ -6,10 +10,10 @@ import {
 	PROVIDER_NAMES,
 	supportsUsageTracking,
 } from "@clankermux/types";
+import { isFamilyWeeklyMemoExhausted } from "../family-weekly-memo";
 import { getProviderOverloadUntil } from "../provider-overload-cooldown";
 import {
 	getActiveHoldCount,
-	markAnthropicBurstThrottle,
 	releaseHoldSlot,
 	tryAcquireHoldSlot,
 } from "./burst-cooldown";
@@ -177,6 +181,9 @@ export function isOAuthAnthropicAccount(account: Account): boolean {
  *  1. Not OAuth-Anthropic            → not retryable (`not_oauth_anthropic`).
  *  2. Hard-limit unified-status      → not retryable (`hard_limit_status`),
  *     even when `x-should-retry: true` is present.
+ *     Live scoped-only rejection    → not retryable (`scoped_quota_rejection`),
+ *     even when cached account-wide headroom is positive.
+ *     Live account-wide rejection   → not retryable (`account_quota_rejection`).
  *  3. Fresh capacity, minHeadroom>0  → retryable, `fresh_headroom`.
  *  4. Stale/absent capacity (or zero headroom):
  *       - REJECTING unified-status   → not retryable
@@ -208,6 +215,14 @@ export function classify429Transient(args: {
 	//    per-IP burst — never hold, even if the upstream set x-should-retry.
 	if (isAnthropicHardLimitStatus(response)) {
 		return { retryable: false, reason: "hard_limit_status" };
+	}
+	if (hasAccountWideUnifiedRejection(response.headers)) {
+		return { retryable: false, reason: "account_quota_rejection" };
+	}
+	// Live scoped quota evidence is authoritative over a recent account-wide
+	// usage snapshot; headroom in the 5h/7d windows cannot rescue a rejected 7d_oi.
+	if (isScopedOnlyUnifiedRejection(response.headers)) {
+		return { retryable: false, reason: "scoped_quota_rejection" };
 	}
 
 	// 3. Fresh, positive headroom → the 429 is the per-IP burst throttle while the
@@ -278,13 +293,16 @@ export type HoldResult = Response | null | typeof HOLD_OVERFLOW;
  */
 export type ReprobeOutcome =
 	| { kind: "response"; response: Response }
+	/** Only an attempt explicitly classified as a retryable burst 429. */
 	| { kind: "throttled" }
+	/** Non-burst failure, including an uncategorized null response. */
+	| { kind: "declined" }
 	| { kind: "suppressed" };
 
 /**
  * A closure that re-probes the held account once via the reprobe path
  * (`proxyWithAccount` in reprobe mode). See {@link ReprobeOutcome}: a real
- * Response, "still throttled" (429 / failed over), or "not attempted at all".
+ * Response, retryable burst, non-burst failure, or "not attempted at all".
  */
 export type ReprobeFn = (
 	account: Account,
@@ -325,9 +343,10 @@ export function abortableSleep(
  * Behaviour:
  *  - Acquires a module-level hold slot; if the cap is reached, returns
  *    {@link HOLD_OVERFLOW} immediately (caller does filtered last-resort).
- *  - Sets the shared burst marker so concurrent OAuth-Anthropic-affinity
- *    requests are held on their own cache account (sibling diversion suppressed
- *    pool-wide) for the marker lifetime.
+ *  - Has its own hold budget, independent of the shared burst evidence expiry.
+ *    Only upstream burst observations set/renew that marker. Admission and
+ *    successful probes neither renew nor clear it: success on one account must
+ *    not erase a concurrent burst observed by another request.
  *  - Loops up to `BURST_RETRY_MAX_ATTEMPTS` re-probes within a single always-on
  *    `BURST_RETRY_MAX_HOLD_MS` total wall-clock budget. We do NOT bail early to a
  *    non-Anthropic fallback: Codex serves gpt-5.5, a full model change from Opus
@@ -391,10 +410,6 @@ export async function holdAndRetryCacheAccount(args: {
 		return HOLD_OVERFLOW;
 	}
 
-	// Activate the shared marker so concurrent affinity requests hold their own
-	// cache accounts (sibling diversion suppressed) while this window plays out.
-	markAnthropicBurstThrottle(clock());
-
 	const start = clock();
 	const budgetMs = maxHoldMs;
 	// stale_should_retry: a single short probe only (Codex: don't spend the full
@@ -409,6 +424,12 @@ export async function holdAndRetryCacheAccount(args: {
 			if (signal.aborted) {
 				log.info(
 					`Burst-retry hold aborted for ${account.name} after ${heldMs}ms (${attempt}/${maxAttempts} attempts)`,
+				);
+				return null;
+			}
+			if (isFamilyWeeklyMemoExhausted(account, args.model ?? null, clock())) {
+				log.info(
+					`Burst-retry giving up on ${account.name}: requested family has a known weekly quota rejection`,
 				);
 				return null;
 			}
@@ -497,6 +518,24 @@ export async function holdAndRetryCacheAccount(args: {
 				clearTimeout(budgetTimer);
 			}
 			heldMs = clock() - start;
+			if (outcome.kind === "declined") {
+				log.info(
+					`Burst-retry giving up on ${account.name} after ${heldMs}ms: reprobe was not a retryable burst`,
+				);
+				return null;
+			}
+			// The reprobe (or a concurrent request) may have learned a scoped
+			// quota wall. Stop before another cooldown/suppression wait. Preserve
+			// an already successful response from this request.
+			if (
+				outcome.kind !== "response" &&
+				isFamilyWeeklyMemoExhausted(account, args.model ?? null, clock())
+			) {
+				log.info(
+					`Burst-retry giving up on ${account.name}: reprobe observed a weekly quota rejection for the requested family`,
+				);
+				return null;
+			}
 
 			if (outcome.kind === "suppressed") {
 				// NOT an attempt: another request holds the account's single-flight

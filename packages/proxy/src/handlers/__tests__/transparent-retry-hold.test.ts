@@ -1,6 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import type { Account } from "@clankermux/types";
 import {
+	isFamilyWeeklyMemoExhausted,
+	recordFamilyWeeklyExhausted,
+	resetFamilyWeeklyMemoForTests,
+} from "../../family-weekly-memo";
+import {
 	applyProviderOverloadCooldown,
 	clearProviderOverloadCooldown,
 } from "../../provider-overload-cooldown";
@@ -8,7 +13,9 @@ import {
 	BURST_RETRY_MAX_CONCURRENT_HOLDS,
 	clearAnthropicBurstThrottle,
 	getActiveHoldCount,
+	getAnthropicBurstThrottleUntil,
 	isAnthropicBurstThrottleActive,
+	markAnthropicBurstThrottle,
 	resetHoldSlots,
 	tryAcquireHoldSlot,
 } from "../burst-cooldown";
@@ -73,12 +80,14 @@ function okResponse(): Response {
 
 describe("holdAndRetryCacheAccount", () => {
 	beforeEach(() => {
+		resetFamilyWeeklyMemoForTests();
 		resetHoldSlots();
 		clearAnthropicBurstThrottle();
 		clearProviderOverloadCooldown();
 	});
 
 	afterEach(() => {
+		resetFamilyWeeklyMemoForTests();
 		resetHoldSlots();
 		clearAnthropicBurstThrottle();
 		clearProviderOverloadCooldown();
@@ -105,7 +114,7 @@ describe("holdAndRetryCacheAccount", () => {
 		expect(getActiveHoldCount()).toBe(0);
 	});
 
-	it("activates the shared burst marker on entry", async () => {
+	it("does not create burst evidence merely by entering a successful hold", async () => {
 		const account = makeAccount({ rate_limited_until: Date.now() - 1 });
 		expect(isAnthropicBurstThrottleActive()).toBe(false);
 		await holdAndRetryCacheAccount({
@@ -118,7 +127,180 @@ describe("holdAndRetryCacheAccount", () => {
 			}),
 			...TEST_HOLD_OVERRIDES,
 		});
-		expect(isAnthropicBurstThrottleActive()).toBe(true);
+		expect(isAnthropicBurstThrottleActive()).toBe(false);
+	});
+
+	it("recovers after the evidence lifetime under steady successful holds", async () => {
+		const start = 1_700_000_000_000;
+		let now = start;
+		markAnthropicBurstThrottle(now);
+		// New requests keep arriving throughout the marker's lifetime. None may
+		// push its deadline forward, even just before it expires.
+		for (const elapsed of [10_000, 30_000, 60_000, 90_000, 119_999]) {
+			now = start + elapsed;
+			const result = await holdAndRetryCacheAccount({
+				account: makeAccount(),
+				confidence: "fresh_headroom",
+				signal: new AbortController().signal,
+				now: () => now,
+				reprobe: async () => ({ kind: "response", response: okResponse() }),
+				...TEST_HOLD_OVERRIDES,
+			});
+			expect((result as Response).status).toBe(200);
+			expect(getAnthropicBurstThrottleUntil(now)).toBe(start + 120_000);
+		}
+		expect(isAnthropicBurstThrottleActive(start + 120_000)).toBe(false);
+		expect(getActiveHoldCount()).toBe(0);
+	});
+
+	it("an in-flight successful probe preserves newer concurrent burst evidence", async () => {
+		const start = 1_700_000_000_000;
+		let now = start;
+		markAnthropicBurstThrottle(now);
+		let finishProbe!: (outcome: ReprobeOutcome) => void;
+		const held = holdAndRetryCacheAccount({
+			account: makeAccount(),
+			confidence: "fresh_headroom",
+			signal: new AbortController().signal,
+			now: () => now,
+			reprobe: () =>
+				new Promise((resolve) => {
+					finishProbe = resolve;
+				}),
+			...TEST_HOLD_OVERRIDES,
+		});
+		expect(getActiveHoldCount()).toBe(1);
+		now += 1_000;
+		// Another request receives a genuine burst while this probe is in flight.
+		markAnthropicBurstThrottle(now);
+		finishProbe({ kind: "response", response: okResponse() });
+		expect(((await held) as Response).status).toBe(200);
+		expect(getAnthropicBurstThrottleUntil(now)).toBe(start + 121_000);
+		expect(isAnthropicBurstThrottleActive(start + 120_000)).toBe(true);
+		expect(isAnthropicBurstThrottleActive(start + 121_000)).toBe(false);
+		expect(getActiveHoldCount()).toBe(0);
+	});
+
+	it("a held request can finish after provider evidence expires without renewing it", async () => {
+		const start = 1_700_000_000_000;
+		let now = start;
+		markAnthropicBurstThrottle(now, 100);
+		let probes = 0;
+		const result = await holdAndRetryCacheAccount({
+			account: makeAccount(),
+			confidence: "fresh_headroom",
+			signal: new AbortController().signal,
+			now: () => now,
+			reprobe: async () => {
+				probes += 1;
+				now += 100;
+				expect(isAnthropicBurstThrottleActive(now)).toBe(false);
+				if (probes === 1) return { kind: "suppressed" };
+				return { kind: "response", response: okResponse() };
+			},
+			...TEST_HOLD_OVERRIDES,
+			suppressedPollMs: 0,
+		});
+		expect((result as Response).status).toBe(200);
+		expect(probes).toBe(2);
+		expect(isAnthropicBurstThrottleActive(now)).toBe(false);
+		expect(getActiveHoldCount()).toBe(0);
+	});
+
+	it.each([
+		"throttled",
+		"suppressed",
+	] as const)("stops after %s reveals a family quota wall, before another wait", async (kind) => {
+		const now = Date.now();
+		const account = makeAccount();
+		let probes = 0;
+		const result = await holdAndRetryCacheAccount({
+			account,
+			model: "claude-fable-5-1",
+			confidence: "fresh_headroom",
+			signal: new AbortController().signal,
+			reprobe: async () => {
+				probes += 1;
+				recordFamilyWeeklyExhausted(account.id, "fable", now + 40_698_000, now);
+				// Both another cooldown wait and a suppression poll would fit.
+				account.rate_limited_until = Date.now() + 500;
+				return { kind };
+			},
+			...TEST_HOLD_OVERRIDES,
+			suppressedPollMs: 500,
+		});
+		expect(result).toBeNull();
+		expect(probes).toBe(1);
+		expect(isFamilyWeeklyMemoExhausted(account, "claude-fable-5-1", now)).toBe(
+			true,
+		);
+		expect(getActiveHoldCount()).toBe(0);
+		expect(isAnthropicBurstThrottleActive()).toBe(false);
+	});
+
+	it("a different family's memo does not stop recovery", async () => {
+		const now = Date.now();
+		const account = makeAccount();
+		recordFamilyWeeklyExhausted(account.id, "fable", now + 40_698_000, now);
+		let probes = 0;
+		const result = await holdAndRetryCacheAccount({
+			account,
+			model: "claude-opus-4-8",
+			confidence: "fresh_headroom",
+			signal: new AbortController().signal,
+			reprobe: async () => {
+				probes += 1;
+				return probes === 1
+					? { kind: "throttled" }
+					: { kind: "response", response: okResponse() };
+			},
+			...TEST_HOLD_OVERRIDES,
+		});
+		expect((result as Response).status).toBe(200);
+		expect(probes).toBe(2);
+		expect(getActiveHoldCount()).toBe(0);
+	});
+
+	it("a known family rejection skips the hold probe and releases its slot", async () => {
+		const now = Date.now();
+		const account = makeAccount();
+		recordFamilyWeeklyExhausted(account.id, "fable", now + 40_698_000, now);
+		let probes = 0;
+		const result = await holdAndRetryCacheAccount({
+			account,
+			model: "claude-fable-5-1",
+			confidence: "fresh_headroom",
+			signal: new AbortController().signal,
+			reprobe: async () => {
+				probes += 1;
+				return { kind: "response", response: okResponse() };
+			},
+			...TEST_HOLD_OVERRIDES,
+		});
+		expect(result).toBeNull();
+		expect(probes).toBe(0);
+		expect(getActiveHoldCount()).toBe(0);
+	});
+
+	it("declines a non-burst reprobe without another attempt and releases its slot", async () => {
+		const account = makeAccount();
+		markAnthropicBurstThrottle();
+		const markerUntil = getAnthropicBurstThrottleUntil();
+		let probes = 0;
+		const result = await holdAndRetryCacheAccount({
+			account,
+			confidence: "fresh_headroom",
+			signal: new AbortController().signal,
+			reprobe: async () => {
+				probes += 1;
+				return { kind: "declined" };
+			},
+			...TEST_HOLD_OVERRIDES,
+		});
+		expect(result).toBeNull();
+		expect(probes).toBe(1);
+		expect(getActiveHoldCount()).toBe(0);
+		expect(getAnthropicBurstThrottleUntil()).toBe(markerUntil);
 	});
 
 	it("re-probes up to MAX_ATTEMPTS, returning null when always throttled", async () => {
@@ -473,25 +655,27 @@ describe("holdAndRetryCacheAccount", () => {
 		const account = makeAccount({ rate_limited_until: Date.now() - 1 });
 		let calls = 0;
 		const start = Date.now();
+		let now = start;
 		const result = await holdAndRetryCacheAccount({
 			account,
 			confidence: "fresh_headroom",
 			signal: new AbortController().signal,
+			now: () => now,
 			reprobe: async () => {
 				calls += 1;
+				// Inject elapsed time so scheduler load cannot turn the wall-clock
+				// budget into fewer than four probes and hide attempt consumption.
+				now += 20;
 				return { kind: "suppressed" as const };
 			},
 			...TEST_HOLD_OVERRIDES,
 			maxHoldMs: 200,
-			suppressedPollMs: 20,
+			suppressedPollMs: 0,
 		});
-		const elapsed = Date.now() - start;
 		expect(result).toBeNull();
-		// It polled repeatedly (rather than giving up after MAX_ATTEMPTS) and used
-		// most of the budget doing so.
-		expect(calls).toBeGreaterThan(3);
-		expect(elapsed).toBeGreaterThanOrEqual(150);
-		expect(elapsed).toBeLessThan(2000);
+		// It polled past MAX_ATTEMPTS and consumed the entire injected budget.
+		expect(calls).toBe(10);
+		expect(now - start).toBe(200);
 		expect(getActiveHoldCount()).toBe(0);
 	});
 

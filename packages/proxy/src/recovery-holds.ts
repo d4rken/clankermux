@@ -1240,6 +1240,7 @@ export function createRecoveryHolds(deps: RecoveryHoldsDeps): RecoveryHolds {
 		probeAccount: Account,
 		signal: AbortSignal,
 	): Promise<ReprobeOutcome> => {
+		const captured: { outcome: ProxyAttemptOutcome | null } = { outcome: null };
 		const gated = await attemptThroughProbeGate(probeAccount, () => {
 			logFinalOrderOnce(probeAccount.id);
 			return proxyWithAccount(
@@ -1258,13 +1259,23 @@ export function createRecoveryHolds(deps: RecoveryHoldsDeps): RecoveryHolds {
 				false,
 				// `fromHold`: log-level only — this re-probe runs inside the burst
 				// hold, which reports its own outcome (see runBurstHold).
-				{ reprobe: true, signal, fromHold: true },
+				{
+					reprobe: true,
+					signal,
+					fromHold: true,
+					onOutcome: (outcome) => {
+						captured.outcome = outcome;
+					},
+				},
 			);
 		});
 		if (gated.suppressed) return { kind: "suppressed" };
-		return gated.response
-			? { kind: "response", response: gated.response }
-			: { kind: "throttled" };
+		if (gated.response) return { kind: "response", response: gated.response };
+		// A null response is not itself burst evidence. Quota failures without a
+		// memoizable family/reset, and other failed attempts, must end the hold.
+		return captured.outcome?.kind === "retryable_429"
+			? { kind: "throttled" }
+			: { kind: "declined" };
 	};
 
 	// Run the hold on `heldAccount` and apply the shared give-up machinery

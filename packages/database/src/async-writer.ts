@@ -113,6 +113,32 @@ export function shouldLogAsyncWriterHealth(
 	);
 }
 
+/**
+ * Warning policy for the 30 s sample. Small, fresh writes are ordinary DEBUG
+ * telemetry. Five seconds of outstanding work, a 100-job backlog, or material
+ * growth since the previous sample merits attention before admission hits its
+ * hard cap. Drops and unhealthy/suspended writers warn even with empty queues.
+ */
+export function shouldWarnAsyncWriterHealth(
+	health: AsyncWriterHealth,
+	previous?: AsyncWriterHealth,
+): boolean {
+	return (
+		!health.healthy ||
+		!health.payloadWriterHealthy ||
+		health.payloadWriterSuspended ||
+		health.payloadWriterFatal !== null ||
+		health.recentDrops > 0 ||
+		health.oldestMetadataAgeMs >= 5_000 ||
+		health.oldestPayloadAgeMs >= 5_000 ||
+		health.queuedJobs >= 100 ||
+		(previous !== undefined &&
+			(health.queuedJobs - previous.queuedJobs >= 10 ||
+				health.payloadBytesPending - previous.payloadBytesPending >=
+					1024 * 1024))
+	);
+}
+
 export interface AsyncDbWriterOptions {
 	/**
 	 * Factory for the off-thread payload writer. Injected lazily and owned
@@ -153,6 +179,7 @@ export class AsyncDbWriter implements Disposable {
 	private runningPromise: Promise<void> | null = null;
 	private intervalId: Timer | null = null;
 	private healthInterval: Timer | null = null;
+	private previousHealth: AsyncWriterHealth | undefined;
 
 	private readonly METADATA_QUEUE_CAP = 2000;
 	private readonly PAYLOAD_QUEUE_HARD_CAP = 1000;
@@ -216,9 +243,11 @@ export class AsyncDbWriter implements Disposable {
 			this.payloadDroppedSinceLastLog = 0;
 			this.lastIntervalDrops = recentDrops;
 			const h = this.getHealth();
-			if (shouldLogAsyncWriterHealth(h, recentDrops)) {
-				logger.warn(
-					`AsyncDbWriter health: metadataQueued=${h.metadataQueuedJobs}, payloadReserved=${h.payloadQueuedJobs}, payloadInFlight=${h.payloadInFlightJobs}, payloadBytesPending=${h.payloadBytesPending}, oldestMetadataAgeMs=${h.oldestMetadataAgeMs}, oldestPayloadAgeMs=${h.oldestPayloadAgeMs}, metadataDropped=${h.metadataDropped}, payloadDropped=${h.payloadDropped}, payloadDroppedBytes=${h.payloadDroppedBytes}, payloadCommitted=${h.payloadCommitted}, payloadExpired=${h.payloadExpired}, writerHealthy=${h.payloadWriterHealthy}, writerFatal=${h.payloadWriterFatal ?? "none"}, droppedThisInterval=${recentDrops}`,
+			const warn = shouldWarnAsyncWriterHealth(h, this.previousHealth);
+			this.previousHealth = h;
+			if (warn || shouldLogAsyncWriterHealth(h, recentDrops)) {
+				logger[warn ? "warn" : "debug"](
+					`AsyncDbWriter health: metadataQueued=${h.metadataQueuedJobs}, payloadReserved=${h.payloadQueuedJobs}, payloadInFlight=${h.payloadInFlightJobs}, payloadBytesPending=${h.payloadBytesPending}, oldestMetadataAgeMs=${h.oldestMetadataAgeMs}, oldestPayloadAgeMs=${h.oldestPayloadAgeMs}, metadataDropped=${h.metadataDropped}, payloadDropped=${h.payloadDropped}, payloadDroppedBytes=${h.payloadDroppedBytes}, payloadCommitted=${h.payloadCommitted}, payloadExpired=${h.payloadExpired}, healthy=${h.healthy}, writerHealthy=${h.payloadWriterHealthy}, writerSuspended=${h.payloadWriterSuspended}, writerFatal=${h.payloadWriterFatal ?? "none"}, droppedThisInterval=${recentDrops}`,
 				);
 			}
 		}, 30000);
