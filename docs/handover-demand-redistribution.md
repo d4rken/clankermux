@@ -41,12 +41,19 @@ even though its recall is better (0.750 against 0.643). Criterion B passes (F1
 0.568 against 0.474) and criterion C passes (the block-bootstrap 95 % CI of the
 overall F1 delta is [−0.007, +0.145], not below zero). So the scenario stays a
 labelled second line and exclusion keeps the headline. It is PROVISIONAL
-because three cohorts, counted per tag AND servable class, have no completed
-weekly window inside the replay interval: `peer-exhaustion (codex)`,
-`add (codex)` and `upgrade (codex)`. The Codex tier flips of 2026-09-05 and
-the Codex-2 add of 2026-09-04 sit in weekly windows that reset 2026-09-07
-through 2026-09-12; the anthropic half of each of those tags is labelled, and
-counting per tag alone would have hidden the codex half behind it.
+because three cohorts, counted per tag AND servable class, are still waiting on
+weekly windows the label horizon dropped: the report lists `peer-exhaustion
+(codex)`, `add (codex)` and `upgrade (codex)` as pending, and lists no cohort
+as structurally unlabelled. Pending and structurally unlabelled are separate
+statements in the report: a pending cohort had tagged weekly windows whose
+truth was still unfolding at the end of the replay interval, which a later
+`--to` labels, while a structurally unlabelled one never had a tagged weekly
+window at all (a lone account's peer exhaustion tags nobody, because the dying
+account is excluded from its own event) and no re-run can fix it. All three
+here are the first kind: the Codex tier flips of 2026-09-05 and the Codex-2 add
+of 2026-09-04 sit in weekly windows that reset 2026-09-07 through 2026-09-12.
+The anthropic half of each of those tags is labelled, and counting per tag
+alone would have hidden the codex half behind it.
 
 **Step 4 waits.** Before acting on the verdict, re-run the reproduce command
 printed in `docs/prediction-backtest-redistribution.md` with a `--to` after

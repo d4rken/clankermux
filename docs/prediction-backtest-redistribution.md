@@ -1,6 +1,6 @@
 # ClankerMux runway redistribution backtest
 
-Generated: 2026-09-06T14:18:01.372Z
+Generated: 2026-09-06T14:51:33.250Z
 
 Reproduce with:
 
@@ -20,11 +20,11 @@ bun scripts/redistribution-backtest.ts --db=/home/darken/.config/clankermux/clan
 
 | field | value |
 |---|---|
-| usage_snapshots rows | 192648 |
+| usage_snapshots rows | 192745 |
 | accounts | 7 |
 | providers | anthropic, codex |
 | first sample | 2026-06-02T12:48:00.294Z |
-| last sample | 2026-09-06T14:17:33.008Z |
+| last sample | 2026-09-06T14:49:33.013Z |
 | replay interval | `[2026-07-01T00:00:00.000Z, 2026-09-06T00:00:00.000Z)` |
 | grid instants | 9648 |
 
@@ -39,7 +39,7 @@ inputs; nothing reads a row after the instant it is replaying.
 - Burn anchors are reconstructed from the revision drops observed up to the instant, and never from later ones. Tiers come from the row's own `plan_tier`/`rate_limit_tier` when it has them (`recorded`), else from today's account row (`assumed`).
 - No reset-credit bank is modelled: the credit ledger is not reconstructible per instant, so both models run without it.
 - Truth is PER WINDOW, from the same `deriveOutcome` the per-window backtests use: exhausted at the first observed 100 %, survived only on positive evidence, censored otherwise. Placeholder windows (codex's one-sample 5 h artefacts) are skipped.
-- Truth-grid membership at a tick is every account of the class with a loaded snapshot on both sides of it (first loaded row ≤ tick ≤ last loaded row); an account with no rows around the tick is absent, not censored, so an account unpolled for weeks (Claude-3 between 2026-06-13 and 2026-07-19) is not a survivor during its gap.
+- Truth-grid membership at a tick is every account of the class with a loaded snapshot on both sides of it (first loaded row ≤ tick ≤ last loaded row). Outside that loaded span, the account is absent. Inside it, a reading older than 10 minutes censors the tick.
 - Current model: account-level learning, the strict rule that ships — ONE learning window makes the whole account unprojectable.
 - Transition tagging: class-wide, 24 h after the event, except a peer exhaustion whose shadow ends at the dying window's own reset. The dying account is excluded from its own event.
 - ETA parity: the current model's beyond-reset ETA is recorded as no prediction, which is the same statement the scenario makes when it projects no exhaustion this cycle.
@@ -187,8 +187,8 @@ Per record (every scored instant):
 | estimator | instants | usable | scored | censored | TP | FP | TN | FN | precision | recall | F1 | median signed err (min) | median abs err (min) | median abs err (window) |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
 | current | 25200 | 100.0% | 25200 | 0 | 2992 | 7726 | 13788 | 694 | 0.279 | 0.812 | 0.415 | -70.4 | 1205.8 | 0.123 |
-| scenario-equal | 25200 | 100.0% | 25200 | 0 | 3148 | 7573 | 13941 | 538 | 0.294 | 0.854 | 0.437 | -401.8 | 1049.7 | 0.110 |
-| scenario-headroom | 25200 | 100.0% | 25200 | 0 | 2744 | 6194 | 15320 | 942 | 0.307 | 0.744 | 0.435 | -13.0 | 965.6 | 0.103 |
+| scenario-equal | 25200 | 100.0% | 25200 | 0 | 3148 | 7574 | 13940 | 538 | 0.294 | 0.854 | 0.437 | -401.8 | 1049.7 | 0.110 |
+| scenario-headroom | 25200 | 100.0% | 25200 | 0 | 2744 | 6195 | 15319 | 942 | 0.307 | 0.744 | 0.435 | -13.0 | 965.6 | 0.103 |
 
 Paired median signed error (n=27; positive = optimistic): scenario-equal 14.8 min, current -12.4 min.
 
@@ -745,8 +745,8 @@ Per record (every scored instant):
 | estimator | instants | usable | scored | censored | TP | FP | TN | FN | precision | recall | F1 | median signed err (min) | median abs err (min) | median abs err (window) |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
 | current | 4996 | 100.0% | 4996 | 0 | 579 | 1991 | 2258 | 168 | 0.225 | 0.775 | 0.349 | 1340.0 | 1340.0 | 0.133 |
-| scenario-equal | 4996 | 100.0% | 4996 | 0 | 579 | 1989 | 2260 | 168 | 0.225 | 0.775 | 0.349 | 1340.0 | 1340.0 | 0.133 |
-| scenario-headroom | 4996 | 100.0% | 4996 | 0 | 579 | 1989 | 2260 | 168 | 0.225 | 0.775 | 0.349 | 1340.0 | 1340.0 | 0.133 |
+| scenario-equal | 4996 | 100.0% | 4996 | 0 | 579 | 1990 | 2259 | 168 | 0.225 | 0.775 | 0.349 | 1340.0 | 1340.0 | 0.133 |
+| scenario-headroom | 4996 | 100.0% | 4996 | 0 | 579 | 1990 | 2259 | 168 | 0.225 | 0.775 | 0.349 | 1340.0 | 1340.0 | 0.133 |
 
 Paired median signed error (n=2; positive = optimistic): scenario-equal 758.8 min, current 758.8 min.
 
@@ -899,12 +899,11 @@ What step 4 does with this:
 - No reset-credit bank is modelled, and no live usage point is injected — the replay only has what the sampler stored.
 - The headroom share rule is reported, never used as the verdict basis. The verdict basis is the equal split, pre-declared.
 - The scenario double-counts a dead peer's demand while the survivor's own lookback already contains the traffic it absorbed. That is a property of the model, disclosed in the peer-exhaustion cohort rather than corrected here.
-- One servable class dominates the roster, so the overall numbers are close to that class's numbers.
-- Unlabelled at this run (tag and servable class): peer-exhaustion (codex), add (codex), upgrade (codex). No weekly window of those classes carrying those tags had completed by the end of the replay interval, so the cohort carries five-hour evidence only and the verdict is provisional.
+- Pending at this run (tag and servable class): peer-exhaustion (codex), add (codex), upgrade (codex). No weekly window of those classes carrying those tags had completed by the end of the replay interval, so the cohort carries five-hour evidence only and the verdict is provisional.
 - Positive counts (all records, per model) — current: 3686 actual positives of 25200 scored; scenario-equal: 5826 actual positives of 42295 scored; scenario-headroom: 5826 actual positives of 42295 scored.
 
 ## Notes
 
 - Placeholder windows skipped: 233.
-- Replay took 16.1 s over 9648 instants; scoring and bootstrap 2.3 s.
+- Replay took 11.9 s over 9648 instants; scoring and bootstrap 1.7 s.
 - Grid step 10 min; rows loaded 8 days either side of the replay interval.
