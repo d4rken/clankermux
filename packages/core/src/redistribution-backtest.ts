@@ -2220,7 +2220,7 @@ export function formatRedistributionReport(
 	}
 	if (verdict.unlabelledCohorts.length > 0) {
 		out.push(
-			`No tagged survivor weekly record in this data for: ${verdict.unlabelledCohorts.join(", ")}; a later run cannot label these without a roster change.`,
+			`No usable, uncensored weekly records common to all models for: ${verdict.unlabelledCohorts.join(", ")}. No weekly windows are pending at the label horizon; missing evidence can reflect absent tagged survivors, withheld predictions, or censored truth.`,
 		);
 		out.push("");
 	}
@@ -2308,7 +2308,7 @@ export function knownLimitsFor(
 	}
 	if (verdict.unlabelledCohorts.length > 0) {
 		limits.push(
-			`No tagged survivor weekly record in this data (tag and servable class): ${verdict.unlabelledCohorts.join(", ")}. Nothing tagged a weekly window of ${verdict.unlabelledCohorts.length > 1 ? "those classes" : "that class"} inside the replay interval — the dying account is excluded from its own event, so a class with no sibling tags nobody — and the cohort carries five-hour evidence only.`,
+			`No usable, uncensored weekly records common to all models for: ${verdict.unlabelledCohorts.join(", ")}. No weekly windows are pending at the label horizon; missing evidence can reflect absent tagged survivors, withheld predictions, or censored truth.`,
 		);
 	}
 	const positives = REPLAY_MODELS.map((model) => {

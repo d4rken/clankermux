@@ -1,6 +1,6 @@
 # ClankerMux runway redistribution backtest
 
-Generated: 2026-09-06T14:51:33.250Z
+Generated: 2026-09-06T15:02:33.066Z
 
 Reproduce with:
 
@@ -20,11 +20,11 @@ bun scripts/redistribution-backtest.ts --db=/home/darken/.config/clankermux/clan
 
 | field | value |
 |---|---|
-| usage_snapshots rows | 192745 |
+| usage_snapshots rows | 192783 |
 | accounts | 7 |
 | providers | anthropic, codex |
 | first sample | 2026-06-02T12:48:00.294Z |
-| last sample | 2026-09-06T14:49:33.013Z |
+| last sample | 2026-09-06T15:01:33.014Z |
 | replay interval | `[2026-07-01T00:00:00.000Z, 2026-09-06T00:00:00.000Z)` |
 | grid instants | 9648 |
 

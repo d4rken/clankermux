@@ -1151,6 +1151,11 @@ function verdictFixture(options: {
 	codexEvent?: "add" | "peer-exhaustion";
 	/** Weekly windows the label horizon dropped, per `${tag}::${class}`. */
 	pendingWeekly?: Record<string, number>;
+	/**
+	 * The codex weekly record exists and is tagged, but one model could not use
+	 * it, so it never reaches the common cohort. Implies `unlabelled`.
+	 */
+	codexWithheld?: boolean;
 }): { cohorts: CohortSet; replay: ReplayResult } {
 	const transition = cohort(
 		"Any transition",
@@ -1226,14 +1231,40 @@ function verdictFixture(options: {
 				samples: 1000,
 			},
 		],
-		common: options.unlabelled
-			? [weeklyRecord]
-			: [weeklyRecord, codexWeeklyRecord],
+		common:
+			options.unlabelled || options.codexWithheld
+				? [weeklyRecord]
+				: [weeklyRecord, codexWeeklyRecord],
 	};
+	// When the record is withheld it is still replayed by every model; one of
+	// them just cannot score it, which is why it drops out of the common cohort.
+	const withheldRecords = [
+		codexWeeklyRecord,
+		record({
+			model: "scenario-equal",
+			accountId: "X",
+			T: T0,
+			provider: "codex",
+			tags: [codexEvent],
+			usable: false,
+			unusableReason: "low_confidence",
+			predictsExhaust: false,
+			predictedEtaMs: null,
+		}),
+		record({
+			model: "scenario-headroom",
+			accountId: "X",
+			T: T0,
+			provider: "codex",
+			tags: [codexEvent],
+		}),
+	];
 	return {
 		cohorts,
 		replay: replayOf(
-			[weeklyRecord, codexWeeklyRecord],
+			options.codexWithheld
+				? [weeklyRecord, ...withheldRecords]
+				: [weeklyRecord, codexWeeklyRecord],
 			events,
 			options.pendingWeekly,
 		),
@@ -1526,7 +1557,7 @@ describe("formatRedistributionReport", () => {
 			"PROVISIONAL: the add (codex) cohort has no completed weekly window inside the replay interval",
 		);
 		expect(pendingMarkdown).not.toContain(
-			"No tagged survivor weekly record in this data for:",
+			"No usable, uncensored weekly records common to all models for:",
 		);
 
 		const structural = verdictFixture({
@@ -1545,7 +1576,7 @@ describe("formatRedistributionReport", () => {
 			10,
 		);
 		expect(structuralMarkdown).toContain(
-			"No tagged survivor weekly record in this data for: peer-exhaustion (codex); a later run cannot label these without a roster change.",
+			"No usable, uncensored weekly records common to all models for: peer-exhaustion (codex). No weekly windows are pending at the label horizon; missing evidence can reflect absent tagged survivors, withheld predictions, or censored truth.",
 		);
 		expect(structuralMarkdown).not.toContain("PROVISIONAL:");
 
@@ -1563,7 +1594,30 @@ describe("formatRedistributionReport", () => {
 		);
 		expect(labelledMarkdown).not.toContain("PROVISIONAL:");
 		expect(labelledMarkdown).not.toContain(
-			"No tagged survivor weekly record in this data for:",
+			"No usable, uncensored weekly records common to all models for:",
 		);
+	});
+
+	test("a withheld tagged weekly record is structural, not pending", () => {
+		// The record exists and carries the tag, but `scenario-equal` had to
+		// withhold it, so the pair has no weekly evidence common to all models —
+		// and nothing is pending, so a later `--to` changes nothing.
+		const withheld = verdictFixture({
+			...VERDICT_BASE,
+			codexWithheld: true,
+		});
+		const withheldVerdict = evaluateVerdict(withheld.cohorts, withheld.replay);
+		expect(withheldVerdict.unlabelledCohorts).toEqual(["add (codex)"]);
+		expect(withheldVerdict.pendingCohorts).toEqual([]);
+		const withheldMarkdown = reportOf(
+			withheld.replay,
+			withheld.cohorts,
+			withheldVerdict,
+			10,
+		);
+		expect(withheldMarkdown).toContain(
+			"No usable, uncensored weekly records common to all models for: add (codex). No weekly windows are pending at the label horizon; missing evidence can reflect absent tagged survivors, withheld predictions, or censored truth.",
+		);
+		expect(withheldMarkdown).not.toContain("PROVISIONAL:");
 	});
 });
