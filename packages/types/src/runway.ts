@@ -157,6 +157,98 @@ export interface RunwayBand {
 	halfWidthPct: number;
 }
 
+/**
+ * Where an account's tier came from when a runway scenario turned it into a
+ * capacity number. `"recorded"` = read off the account row or a tier-stamped
+ * usage snapshot; `"assumed"` = substituted, e.g. today's tier standing in for
+ * a snapshot row from before 2026-08-25, when the sampler did not stamp tiers.
+ *
+ * The same two-value vocabulary quota-drift carries as its own
+ * `QuotaDriftTierProvenance`. Deliberately a SECOND declaration rather than a
+ * shared one: the two surfaces answer different questions (a drift fit's
+ * cohort tier vs. a scenario's capacity weight), and coupling them would make
+ * one surface's future third value appear in the other's wire type.
+ */
+export type RunwayTierProvenance = "recorded" | "assumed";
+
+/** One account's tier as a runway scenario weighted it. */
+export interface RunwayScenarioTier {
+	accountId: string;
+	provider: string;
+	planTier: string | null;
+	rateLimitTier: string | null;
+	/**
+	 * What the scenario converted the tier into. Only ratios WITHIN one servable
+	 * class carry meaning; an Anthropic unit and a Codex unit are not comparable.
+	 */
+	capacityUnits: number;
+	provenance: RunwayTierProvenance;
+}
+
+/** Measured class demand at pace 1, per account-wide window kind. */
+export interface RunwayScenarioDemand {
+	demandClass: string;
+	windowKind: string;
+	unitsPerHour: number;
+}
+
+export interface RunwayScenarioShare {
+	accountId: string;
+	/**
+	 * `w_j / Σw` over the alive accounts of its class, taken at the FIRST
+	 * assignment in which this account is alive — `now` for an account alive at
+	 * `now`, later for one that is dead at `now` and revives (an exhausted 5 h
+	 * window beside a learning weekly). `0` when it is never alive inside the
+	 * horizon, so no share was ever assigned to it.
+	 */
+	shareOfClass: number;
+}
+
+/**
+ * What a demand-conserving scenario ASSUMED to reach its outcome: the measured
+ * class demand it redistributed, the tier weights it redistributed by, and
+ * every account the assumptions moved into or out of the pool.
+ *
+ * Carried alongside the outcome rather than folded into it because none of it
+ * is a measurement of the pool's future: the tiers are declared ratios (see
+ * `@clankermux/core`'s tier-capacity table) and the redistribution is a
+ * counterfactual about where a dead account's traffic goes.
+ */
+export interface RunwayScenarioBasis {
+	basis: "demand-conserving";
+	demandUnitsPerHour: RunwayScenarioDemand[];
+	/** Every metered account the scan converted to capacity units (alive and demand-only). */
+	tiers: RunwayScenarioTier[];
+	/** Learning accounts the scan INCLUDED with a share (the exclusion this scenario replaces). */
+	includedLearningAccounts: RunwayScenarioShare[];
+	/** Metered accounts dropped because no capacity could be assigned. Disclosed, never weighted 1. */
+	unknownTierAccountIds: string[];
+	/** `presence: "demand-only"` accounts whose measured burn joined the class demand. */
+	demandOnlyAccountIds: string[];
+	/**
+	 * Present only when a scan ran out of its event budget. `"baseline"`: the
+	 * pace-1 scan itself, so the outcome is `unknown`. `"probe"`: the baseline
+	 * completed and stands, but a pace probe did not, so the absent
+	 * `paceMargin`/`paceDeficit` says nothing (absence otherwise means "no flip
+	 * found" / "no safe tail").
+	 */
+	eventBudgetExhausted?: "baseline" | "probe";
+}
+
+/**
+ * The same outcome vocabulary as the current model, plus what the scenario
+ * assumed.
+ *
+ * The `kind`s are reused DELIBERATELY rather than extended: a new kind would
+ * map to `other` on the public wire and land in the `default` arm of every
+ * dashboard `switch` (`LimitsCapacityOverview.tsx` defaults to a green chip),
+ * so a scenario-only kind would render as "fine" on the surfaces that matter
+ * most. `learningAccountIds` keeps its current meaning — accounts WITHHELD for
+ * lack of evidence; the learners this scenario includes with a share are in
+ * {@link RunwayScenarioBasis.includedLearningAccounts} instead.
+ */
+export type RunwayScenarioOutcome = RunwayOutcome & RunwayScenarioBasis;
+
 /** The account-wide quota windows the runway scan models. */
 export type RunwayWindowKind = "five_hour" | "seven_day";
 

@@ -57,6 +57,9 @@ export {
 	isUnstartedWindow,
 	type LifetimeConfidence,
 	PACE_DEFICIT_PROBE_MIN,
+	PACE_MARGIN_PRECISION,
+	probeDeficitOver,
+	probeMarginOver,
 	RUNWAY_HORIZON_MS,
 	type RunwayAccountInput,
 	type RunwayAssumedCredits,
@@ -70,8 +73,25 @@ export {
 	type WindowExhaustion,
 	type WindowExhaustionInput,
 	type WindowExhaustionSource,
+	weeklyTimeToFull,
 	windowForecast,
 } from "./capacity-runway";
+export {
+	computeCapacityRunwayScenario,
+	equalShareRule,
+	MAX_SCENARIO_EVENTS,
+	type RunwayScenarioAccountInput,
+	type RunwayScenarioBasis,
+	type RunwayScenarioDemand,
+	type RunwayScenarioOptions,
+	type RunwayScenarioOutcome,
+	type RunwayScenarioPresence,
+	type RunwayScenarioShare,
+	type RunwayScenarioTier,
+	type RunwayTierProvenance,
+	type ShareCandidate,
+	type ShareRule,
+} from "./capacity-runway-scenario";
 export {
 	BUFFER_SIZES,
 	CACHE,
@@ -277,6 +297,12 @@ export {
 	FIXED_WINDOW_DURATION_MS,
 	type SupportedWindow,
 } from "./throttle-utils";
+export {
+	type AccountTier,
+	TIER_CAPACITY_TABLE,
+	type TierCapacityEntry,
+	tierCapacityUnits,
+} from "./tier-capacity";
 export { formatPlanTierLabel } from "./tier-label";
 export { TtlCache } from "./ttl-cache";
 export {

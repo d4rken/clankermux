@@ -713,8 +713,15 @@ function windowDeadIntervals(
  * the caller then lets one credit suppress a dead span once without modeling a
  * re-exhaustion, which errs optimistic for at most that one span and is
  * disclosed via `assumedResetCredits`.
+ *
+ * Exported for the demand-conserving scenario, which reads the observed-fill
+ * branch for a DIFFERENT purpose than the credit model does: an
+ * `already-exhausted` window still measured the burn that filled it, and that
+ * burn has to enter the pool's demand or the scenario would silently drop a
+ * dead account's traffic. Same function, so the two models cannot disagree on
+ * what an exhausted window's observed pace was.
  */
-function weeklyTimeToFull(
+export function weeklyTimeToFull(
 	window: RunwayWindowInput,
 	estimate: WindowExhaustion,
 	now: number,
@@ -1478,7 +1485,38 @@ function firstAllOut(
 export const PACE_MARGIN_PROBE_MAX = 1.5;
 
 /** Grid step at which the probe walks candidate multipliers. */
-const PACE_MARGIN_PRECISION = 0.01;
+export const PACE_MARGIN_PRECISION = 0.01;
+
+/**
+ * The margin grid walk, over any scan.
+ *
+ * Walks `pace = 1 + step × PACE_MARGIN_PRECISION` up to
+ * {@link PACE_MARGIN_PROBE_MAX} and returns the first multiplier whose scan is
+ * FINITE, or null when none is. `scan` returns the all-out instant, `null` when
+ * the scan finds none, or `"abort"` to stop the whole walk with null — which is
+ * how a caller reports "there is nothing to probe" (an empty pool) without
+ * pretending the remaining grid points were checked.
+ *
+ * Extracted so a second runway model reuses the walk itself rather than a copy
+ * of it: same grid, same cap, same integer-step recomputation of `pace` (never
+ * an accumulated float, which would drift the grid), same "no flip found"
+ * meaning for a null result. The reasons the walk is a GRID and not a bisection
+ * are on {@link probePaceMargin}, and they hold for every scan passed here.
+ */
+export function probeMarginOver(
+	scan: (pace: number) => number | null | "abort",
+): { multiplier: number; exhaustsAtMs: number } | null {
+	const steps = Math.round((PACE_MARGIN_PROBE_MAX - 1) / PACE_MARGIN_PRECISION);
+	for (let step = 1; step <= steps; step++) {
+		// Recomputed from the integer step so accumulation error cannot drift
+		// the grid.
+		const pace = 1 + step * PACE_MARGIN_PRECISION;
+		const hit = scan(pace);
+		if (hit === "abort") return null;
+		if (hit !== null) return { multiplier: pace, exhaustsAtMs: hit };
+	}
+	return null;
+}
 
 /**
  * How fragile a `beyond-horizon` verdict is: the smallest probed uniform
@@ -1530,11 +1568,7 @@ function probePaceMargin(
 	// An unmetered account is never out of quota at ANY pace, so the pool can
 	// never be all-out and every probe step would rebuild it for nothing.
 	if (accounts.some((account) => account.unmetered)) return null;
-	const steps = Math.round((PACE_MARGIN_PROBE_MAX - 1) / PACE_MARGIN_PRECISION);
-	for (let step = 1; step <= steps; step++) {
-		// Recomputed from the integer step so accumulation error cannot drift
-		// the grid.
-		const pace = 1 + step * PACE_MARGIN_PRECISION;
+	return probeMarginOver((pace) => {
 		const { pooled } = buildPool(
 			accounts,
 			now,
@@ -1542,11 +1576,10 @@ function probePaceMargin(
 			pace,
 			pacedWindowKinds,
 		);
-		if (pooled.length === 0) return null;
+		if (pooled.length === 0) return "abort";
 		const hit = firstAllOut(pooled, now, horizonEndMs);
-		if (hit !== null) return { multiplier: pace, exhaustsAtMs: hit.t };
-	}
-	return null;
+		return hit === null ? null : hit.t;
+	});
 }
 
 /**
@@ -1556,6 +1589,38 @@ function probePaceMargin(
  * gate.
  */
 export const PACE_DEFICIT_PROBE_MIN = 0.5;
+
+/**
+ * The deficit grid walk, over any scan.
+ *
+ * Walks upward from {@link PACE_DEFICIT_PROBE_MIN} in
+ * {@link PACE_MARGIN_PRECISION} steps and returns the TOP of the contiguous
+ * tail of multipliers that all clear the horizon, or null when the floor itself
+ * still runs out. `runsOut(pace)` is true when the scan at that pace is finite;
+ * `"abort"` stops the walk with null, for a caller with nothing to probe.
+ *
+ * Ascending from the floor rather than descending from 1 so the loop can stop
+ * at the first pace that runs out with everything already accepted known to lie
+ * below it — see {@link probePaceDeficit} for why the whole tail, and not the
+ * first clearing multiplier, is the only figure a reader can act on.
+ */
+export function probeDeficitOver(
+	runsOut: (pace: number) => boolean | "abort",
+): { multiplier: number } | null {
+	const steps = Math.round(
+		(1 - PACE_DEFICIT_PROBE_MIN) / PACE_MARGIN_PRECISION,
+	);
+	let safest: number | null = null;
+	for (let step = steps; step >= 1; step--) {
+		// From the integer step, so accumulated float error cannot drift the grid.
+		const pace = 1 - step * PACE_MARGIN_PRECISION;
+		const verdict = runsOut(pace);
+		if (verdict === "abort") return null;
+		if (verdict) break;
+		safest = pace;
+	}
+	return safest === null ? null : { multiplier: safest };
+}
 
 /**
  * The least slowdown a reader can act on: the largest probed multiplier such
@@ -1611,15 +1676,7 @@ function probePaceDeficit(
 	// unmetered account in the pool the scan can never be all-out, so it would
 	// not have reached this branch at all.
 	if (accounts.some((account) => account.unmetered)) return null;
-	const steps = Math.round(
-		(1 - PACE_DEFICIT_PROBE_MIN) / PACE_MARGIN_PRECISION,
-	);
-	// Ascending from the floor, so the loop can stop at the first pace that runs
-	// out and everything it already accepted is known to be below that point.
-	let safest: number | null = null;
-	for (let step = steps; step >= 1; step--) {
-		// From the integer step, so accumulated float error cannot drift the grid.
-		const pace = 1 - step * PACE_MARGIN_PRECISION;
+	return probeDeficitOver((pace) => {
 		const { pooled } = buildPool(
 			accounts,
 			now,
@@ -1627,9 +1684,7 @@ function probePaceDeficit(
 			pace,
 			pacedWindowKinds,
 		);
-		if (pooled.length === 0) return null;
-		if (firstAllOut(pooled, now, horizonEndMs) !== null) break;
-		safest = pace;
-	}
-	return safest === null ? null : { multiplier: safest };
+		if (pooled.length === 0) return "abort";
+		return firstAllOut(pooled, now, horizonEndMs) !== null;
+	});
 }

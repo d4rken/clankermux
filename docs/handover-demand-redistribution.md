@@ -1,11 +1,48 @@
 # Handover: demand-conserving roster scenarios for the pool runway
 
-Status (2026-09-05): **not started.** Written against `main` at `13f5ea3d`
-(v2026.9.9), the commit that landed the "learning accounts" batch this document
-builds on. It supersedes **Item 1** of `docs/handover-usage-prediction.md`
-("model load redistribution"), whose prerequisite, a token-ledger demand model,
-was measured as not feasible (`docs/ledger-burn-feasibility.md`). The plan
-below works from per-account percent slopes plus tier capacities instead.
+Status (2026-09-06): **steps 1 and 2 of section 8 are landed** on
+`feat/demand-conserving-runway-scenario`, branched from `bf6cb8f7`:
+`dd5b38eb` (tier capacity table with provenance), `a40eb1d0` (pace-probe grid
+walks extracted so both models share one walk) and `4ec054c4`
+(`computeCapacityRunwayScenario` beside `computeCapacityRunway`, with its
+tests). Steps 3 and 4 are not started. Nothing in production calls the new
+code yet, which is this document's own design: the pool-level backtest in
+section 4 decides whether it ships before any surface reads it.
+
+What the tier work found, against what section 3.1 assumed:
+
+- `prolite` is a distinct persisted ChatGPT plan value with its own
+  `account_tier_history` rows, not a spelling of `plus`. It reads as OpenAI's
+  $100 Codex tier.
+- OpenAI's current pricing framing is Pro $100 = 5x Plus and Pro $200 = 20x
+  Plus, so the "Plus to Pro is 4x" line in section 1 does not hold. The table
+  uses plus=1, prolite=5, pro=20, the same 1/5/20 scale as Anthropic pro /
+  max 5x / max 20x.
+- The quota-drift cross-check on 2026-09-06 could neither confirm nor refute
+  those ratios: identified coefficients exist for `anthropic|max|20x` and
+  `codex|pro|` only, so no within-provider ratio has two identified
+  endpoints. The values are declared assumptions and the module says so.
+
+The input shape steps 3 and 4 build on: `RunwayScenarioAccountInput` extends
+`RunwayAccountInput` with `demandClass` (the servable class demand is
+conserved within), `tier: AccountTier | null` (null is excluded and disclosed,
+never weighted 1) and `presence?: "alive" | "demand-only"`, where a
+demand-only account is a paused or removed one whose measured burn stays in
+the class demand without ever absorbing load. Options carry `shareRule`,
+`capacityUnits`, `probePaceMargin` and `maxEvents`. The outcome is
+`RunwayScenarioOutcome`, the current model's outcome union intersected with
+`RunwayScenarioBasis` (measured demand per class and kind, the tiers it
+weighted by, the learners it included with a share, unknown-tier and
+demand-only ids, and which scan ran out of its event budget). Roster wiring
+(tiers on the runway sources, paused and removed accounts as demand sources)
+is step 3's, not delivered here.
+
+Written against `main` at `13f5ea3d` (v2026.9.9), the commit that landed the
+"learning accounts" batch this document builds on. It supersedes **Item 1** of
+`docs/handover-usage-prediction.md` ("model load redistribution"), whose
+prerequisite, a token-ledger demand model, was measured as not feasible
+(`docs/ledger-burn-feasibility.md`). The plan below works from per-account
+percent slopes plus tier capacities instead.
 
 Read `CLAUDE.md`, then this file, then the code it points at. Section 7 lists
 decisions that were already made and are not yours to reopen.
