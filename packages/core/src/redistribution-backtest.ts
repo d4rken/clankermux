@@ -237,8 +237,7 @@ export interface RedistributionRecord extends BacktestRecord {
 	 * True when the corrected scan's projected exhaustion for this window
 	 * precedes every other slope-changing event of its class: any other
 	 * projected exhaustion still ahead of `T`, and the reset of any class window
-	 * already at 100 % at `T`. Only then is the window's whole projection
-	 * governed by ONE slope in THAT scan.
+	 * already at 100 % at `T`.
 	 */
 	firstEvent: boolean;
 	/**
@@ -257,8 +256,7 @@ export interface RedistributionRecord extends BacktestRecord {
 	peerDiedInLag: boolean;
 	/**
 	 * True when the window is the first event of BOTH equal-split scans — the
-	 * corrected one and the pre-correction one — and no other window of its
-	 * class died inside its lag.
+	 * corrected one and the pre-correction one — and `peerDiedInLag` is false.
 	 *
 	 * One scan is not enough to expect an exact lag shift: a peer the correction
 	 * fills inside its own lag dies at `T` in the corrected scan, so it never
@@ -1356,9 +1354,10 @@ export interface PoolCalibrationRow {
 	observedNonOutage: number;
 	censored: number;
 	/**
-	 * Predicted-out instants whose 14 days were observed to hold NO outage, over
-	 * the predicted-out instants whose truth is determinate. `null` with no
-	 * determinate denominator — never 0, which would read as "no false alarms".
+	 * Predicted-out instants followed by a horizon with no observed all-out tick
+	 * and at most 5 % of its ticks censored, over the predicted-out instants
+	 * whose truth is determinate. `null` with no determinate denominator —
+	 * never 0, which would read as "no false alarms".
 	 */
 	falseAlarmRate: number | null;
 }
@@ -2227,10 +2226,7 @@ const emptyCell = (): SlopeRatioCell => ({
  *
  * For each (window lifecycle × death), the first instant after that death is
  * the baseline; every later instant in the same lifecycle is expressed as
- * `slope(t) / slope(t_death+)`. A ratio above 1 means the survivor's measured
- * burn has already risen — the redistributed traffic is IN the lookback, which
- * is precisely the double-counting the scenario is disclosed for. A ratio near
- * 1 means it has not arrived yet.
+ * `slope(t) / slope(t_death+)`.
  *
  * Lifecycle-balanced twice over, like every other number in the report: the
  * median is taken WITHIN a lifecycle-bucket first and only then ACROSS
@@ -2379,9 +2375,7 @@ export interface ChurnRow {
  * churn is a function of an ORDERED sequence within a lifecycle, and
  * `BacktestRecord` carries no lifecycle id to group by. Adding it there would
  * mean teaching the shared per-window harness a grouping key it does not have,
- * for one caller. `bootstrapDelta` is likewise the wrong shape here — it
- * resamples blocks with replacement, which destroys the adjacency the statistic
- * is defined on.
+ * for one caller. `bootstrapDelta` is likewise the wrong shape here.
  *
  * Two records are a pair only when they are EXACTLY one grid step apart and
  * both usable for this model. Nothing bridges a hole: an instant the sampler
@@ -2967,14 +2961,13 @@ export interface Verdict {
 	/**
 	 * `(tag, class)` pairs with no labelled weekly record whose weekly windows
 	 * are still unfolding at the end of the replay interval. These alone make a
-	 * verdict `provisional`: a later `--to` labels them.
+	 * verdict `provisional`.
 	 */
 	pendingCohorts: string[];
 	/**
 	 * `(tag, class)` pairs with no labelled weekly record and none pending
 	 * either — the class had no sibling to tag, or every tagged weekly record
-	 * was withheld or censored. Structural in this data: re-running later cannot
-	 * label them, so they never make the verdict provisional.
+	 * was withheld or censored.
 	 */
 	unlabelledCohorts: string[];
 	n: Array<{
@@ -3258,7 +3251,7 @@ function slopeTrajectorySection(rows: readonly SlopeRatioRow[]): string[] {
 	);
 	out.push("");
 	out.push(
-		"Unlike the scored buckets above, this table reads every peer-exhaustion instant of the replay, not only the ones where every model is comparable and the window's fate was observed. The slope belongs to the survivor's own reading, so a model abstaining or an unobserved outcome is no reason to move the baseline off the earliest post-death reading there is.",
+		"Unlike the scored buckets above, this table reads the peer-exhaustion records that survive the replay's label-horizon filtering, not only the ones where every model is comparable and the window's fate was observed. The slope belongs to the survivor's own reading, so a model abstaining or an unobserved outcome is no reason to move the baseline off the earliest post-death reading there is.",
 	);
 	out.push("");
 	out.push(
@@ -3347,7 +3340,7 @@ function observationLagSection(checks: ObservationLagChecks): string[] {
 	);
 	out.push("");
 	out.push(
-		"The split is a property of the record, decided before any ETA is compared. A record enters the first row when, in BOTH scans, its own projected exhaustion precedes every other slope-changing event of its class — any other projected exhaustion still ahead of the instant, and the reset of any class window already at 100 % — and no other window of its class was filled inside ITS own lag while this window is still projecting past the instant. The exhaustions it compares against are the class's first-cycle projected ones, beside the resets of the windows already at 100 % at the instant. Both halves of that predicate do work. The two-scan half: a peer the correction fills inside its own lag dies at the instant in the corrected scan and is alive at it in the pre-correction one, so a window can be the first event of one scan and not of the other. The died-in-lag half: a death applied AT the instant orders ahead of nothing, so it leaves the first-event flag standing while re-splitting the class from the instant on. The second row is every other record with a positive lag and a date in both scans, over the same columns.",
+		"The split is a property of the record, decided before any ETA is compared. A record enters the first row when, in BOTH scans, its own projected exhaustion precedes both any other projected exhaustion still ahead of the instant and the reset of any class window already at 100 %, and no other window of its class was filled inside ITS own lag while this window is still projecting past the instant. The exhaustions it compares against are the class's first-cycle projected ones, beside the resets of the windows already at 100 % at the instant. Both halves of that predicate do work. The two-scan half: a peer the correction fills inside its own lag dies at the instant in the corrected scan and is alive at it in the pre-correction one, so a window can be the first event of one scan and not of the other. The died-in-lag half: a death applied AT the instant orders ahead of nothing, so it leaves the first-event flag standing while re-splitting the class from the instant on. The second row is every other record with a positive lag and a date in both scans, over the same columns.",
 	);
 	out.push("");
 	out.push(
@@ -3499,7 +3492,7 @@ export function formatRedistributionReport(
 		"- Current model: account-level learning, the strict rule that ships — ONE learning window makes the whole account unprojectable.",
 	);
 	out.push(
-		`- Transition tagging: class-wide, ${TRANSITION_WINDOW_MS / HOUR_MS} h after the event, except a peer exhaustion whose shadow ends at the dying window's own reset. The dying account is excluded from its own event.`,
+		`- Transition tagging: class-wide, ${TRANSITION_WINDOW_MS / HOUR_MS} h after the event, shortened to the dying window's reset for a peer exhaustion when that reset comes sooner. The dying account is excluded from its own event.`,
 	);
 	out.push(
 		"- ETA parity: the current model's beyond-reset ETA is recorded as no prediction, which is the same statement the scenario makes when it projects no exhaustion this cycle.",
@@ -3613,7 +3606,7 @@ export function formatRedistributionReport(
 	);
 	out.push("");
 	out.push(
-		"Not a `BacktestStatistic`: that vocabulary is a function of an unordered bag of records, churn is a function of an ordered sequence inside a lifecycle, and `BacktestRecord` carries no lifecycle id to group by. There is therefore no bootstrap CI on these numbers — resampling blocks with replacement would destroy the adjacency they are defined on.",
+		"Not a `BacktestStatistic`: that vocabulary is a function of an unordered bag of records, churn is a function of an ordered sequence inside a lifecycle, and `BacktestRecord` carries no lifecycle id to group by. There is therefore no bootstrap CI on these numbers.",
 	);
 	out.push("");
 	out.push(
@@ -3630,7 +3623,7 @@ export function formatRedistributionReport(
 	out.push("## Pool calibration (all-out within 14 d)");
 	out.push("");
 	out.push(
-		"The pool-level claim, scored against the observed grid. What the table can say is how often a predicted pool-out was followed by 14 days with no outage.",
+		"The pool-level claim, scored against the observed grid. What the table can say is how often a predicted pool-out was followed by a horizon with no observed all-out tick and at most 5 % of its ticks censored.",
 	);
 	out.push("");
 	const calibratedClasses = [
