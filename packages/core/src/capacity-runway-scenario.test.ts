@@ -136,12 +136,34 @@ describe("computeCapacityRunwayScenario", () => {
 		if (fixed.kind !== "runway") throw new Error("unreachable");
 		expect(fixed.exhaustsAtMs).toBeCloseTo(NOW + 4 * DAY, -3);
 
-		// Conserved: 60%/d of MAX20 demand, split 30%/d each. B dies at 2d, A is
-		// then at 80% and takes the whole 60%/d — 8h later the pool is out.
+		// Conserved: 60%/d of MAX20 demand. The proportional default hands each
+		// account back its own measured burn while both are alive, so A holds
+		// 20%/d and B 40%/d: B dies at 1.5d, A is then at 50% and takes the whole
+		// 60%/d — 20h later the pool is out.
 		const result = computeCapacityRunwayScenario(accounts, NOW);
 		expect(result.kind).toBe("runway");
 		if (result.kind !== "runway") throw new Error("unreachable");
 		expect(result.exhaustsAtMs).toBeCloseTo(NOW + 2 * DAY + 8 * HOUR, -3);
+		// The pool instant alone does not pin the share rule: demand is conserved,
+		// so an equal split empties the same units by the same instant and only
+		// differs in WHEN B dies (2d there, 1.5d here). Assert that instant.
+		expect(result.projectedExhaustions).toHaveLength(2);
+		expect(result.projectedExhaustions[0]).toMatchObject({
+			accountId: "B",
+			windowKind: "seven_day",
+		});
+		expect(result.projectedExhaustions[0].exhaustsAtMs).toBeCloseTo(
+			NOW + 36 * HOUR,
+			-3,
+		);
+		expect(result.projectedExhaustions[1]).toMatchObject({
+			accountId: "A",
+			windowKind: "seven_day",
+		});
+		expect(result.projectedExhaustions[1].exhaustsAtMs).toBeCloseTo(
+			NOW + 56 * HOUR,
+			-3,
+		);
 		expect(result.causes).toEqual([
 			{ accountId: "A", windowKind: "seven_day" },
 			{ accountId: "B", windowKind: "seven_day" },
@@ -188,8 +210,12 @@ describe("computeCapacityRunwayScenario", () => {
 		expect(excluded.exhaustsAtMs).toBeCloseTo(NOW + (7 / 3) * DAY, -3);
 
 		// Conserved: the same 60%/d over three accounts, 20%/d each. A and B die
-		// at 3.5d with N at 70%, which then takes the whole 60%/d.
-		const result = computeCapacityRunwayScenario(accounts, NOW);
+		// at 3.5d with N at 70%, which then takes the whole 60%/d. The equal
+		// split is passed explicitly because that even division is what this
+		// case is about; the scan's default is the proportional rule.
+		const result = computeCapacityRunwayScenario(accounts, NOW, undefined, {
+			shareRule: equalShareRule,
+		});
 		expect(result.kind).toBe("runway");
 		if (result.kind !== "runway") throw new Error("unreachable");
 		expect(result.exhaustsAtMs).toBeCloseTo(NOW + 4 * DAY, -3);
@@ -215,10 +241,13 @@ describe("computeCapacityRunwayScenario", () => {
 		if (withheld.kind !== "beyond-horizon") throw new Error("unreachable");
 		expect(withheld.learningAccountIds).toEqual(["B"]);
 
-		// Conserved: 45%/d of weekly demand split 22.5%/d each. B dies at 8/3 d
-		// with A at 65%, which then takes the whole 45%/d. Neither 5h window can
-		// fill inside a cycle, so no 5h window is ever a cause.
-		const result = computeCapacityRunwayScenario(accounts, NOW);
+		// Conserved: 45%/d of weekly demand split 22.5%/d each — the equal split,
+		// passed explicitly, since the even division is the arithmetic below. B
+		// dies at 8/3 d with A at 65%, which then takes the whole 45%/d. Neither
+		// 5h window can fill inside a cycle, so no 5h window is ever a cause.
+		const result = computeCapacityRunwayScenario(accounts, NOW, undefined, {
+			shareRule: equalShareRule,
+		});
 		expect(result.kind).toBe("runway");
 		if (result.kind !== "runway") throw new Error("unreachable");
 		expect(result.exhaustsAtMs).toBeCloseTo(NOW + (8 / 3 + 35 / 45) * DAY, -3);
@@ -272,12 +301,18 @@ describe("computeCapacityRunwayScenario", () => {
 	});
 
 	it("redistributes capacity units, never averaged percentages", () => {
+		// The equal split is passed explicitly because an EVEN division is what
+		// this case contrasts with an even division of percentages; the scan's
+		// default is the proportional rule, which hands each account its own burn
+		// back and so divides nothing evenly.
 		const result = computeCapacityRunwayScenario(
 			[
 				acct("A", [weekly(90)], { tier: MAX20 }),
 				acct("B", [weekly(10)], { tier: PRO1 }),
 			],
 			NOW,
+			undefined,
+			{ shareRule: equalShareRule },
 		);
 
 		// Averaging the percentages would give both 50%/d and put the pool out at
@@ -449,11 +484,24 @@ describe("computeCapacityRunwayScenario", () => {
 			],
 			NOW,
 		);
-		// C comes back at 0.1d with D at 65%; from there they share 75%/d each,
-		// D dies at 0.5667d and C carries the whole 150%/d from 35%.
+		// C comes back at 0.1d with D at 65%. The proportional default then hands
+		// each account its own measured burn — C 100%/d, D 50%/d — so D dies at
+		// 0.8d with C at 70%, and C carries the whole 150%/d for the last 0.2d.
 		expect(withBank.kind).toBe("runway");
 		if (withBank.kind !== "runway") throw new Error("unreachable");
 		expect(withBank.exhaustsAtMs).toBeCloseTo(NOW + DAY, -3);
+		// The pool instant is the conserved demand emptying the conserved units
+		// and is the same under any share rule; D's own death is what the split
+		// decides, so it is asserted rather than left implied.
+		expect(withBank.projectedExhaustions).toHaveLength(1);
+		expect(withBank.projectedExhaustions[0]).toMatchObject({
+			accountId: "D",
+			windowKind: "seven_day",
+		});
+		expect(withBank.projectedExhaustions[0].exhaustsAtMs).toBeCloseTo(
+			NOW + 0.8 * DAY,
+			-3,
+		);
 		expect(withBank.assumedResetCredits).toEqual([
 			{ accountId: "C", count: 1 },
 		]);
@@ -477,11 +525,25 @@ describe("computeCapacityRunwayScenario", () => {
 			NOW,
 		);
 
-		// Revived before the first assignment: 75%/d each from now, D out at 2/3 d
-		// with C at 50%, C alone at 150%/d for the last third of a day.
+		// Revived before the first assignment, so C is IN the split at `now`: the
+		// proportional default hands it its own 100%/d back while D keeps 50%/d,
+		// and from 0% and 50% the two run out together at exactly 1d. Had the
+		// credit not applied, C would have contributed demand while dead and D
+		// alone would have carried 150%/d, out at 1/3 d.
 		expect(pair.kind).toBe("runway");
 		if (pair.kind !== "runway") throw new Error("unreachable");
 		expect(pair.exhaustsAtMs).toBeCloseTo(NOW + DAY, -3);
+		// Both deaths, not just the pool's: a simultaneous departure is what the
+		// proportional split produces here, and a rule that moved either account
+		// off its own burn would separate them.
+		expect(pair.projectedExhaustions).toHaveLength(2);
+		expect(pair.projectedExhaustions.map((entry) => entry.accountId)).toEqual([
+			"C",
+			"D",
+		]);
+		for (const entry of pair.projectedExhaustions) {
+			expect(entry.exhaustsAtMs).toBeCloseTo(NOW + DAY, -3);
+		}
 		expect(pair.assumedResetCredits).toEqual([{ accountId: "C", count: 1 }]);
 
 		const alone = computeCapacityRunwayScenario(
@@ -606,6 +668,9 @@ describe("computeCapacityRunwayScenario", () => {
 		const withPeer = computeCapacityRunwayScenario(
 			[acct("A", [fiveHour(100, 4), weekly(0)]), acct("B", [weekly(20)])],
 			NOW,
+			undefined,
+			// The halves below are the equal split's, so it is the rule passed.
+			{ shareRule: equalShareRule },
 		);
 		// A's weekly kind is measured by B, and an exhausted window is a fact
 		// rather than a projection, so A stays in and takes half the class at its
@@ -623,6 +688,8 @@ describe("computeCapacityRunwayScenario", () => {
 		const alone = computeCapacityRunwayScenario(
 			[acct("A", [fiveHour(100, 4), weekly(0)])],
 			NOW,
+			undefined,
+			{ shareRule: equalShareRule },
 		);
 		expect(alone.kind).toBe("unknown");
 		if (alone.kind !== "unknown") throw new Error("unreachable");
@@ -712,12 +779,24 @@ describe("computeCapacityRunwayScenario", () => {
 			],
 			NOW,
 		);
-		// B carries 30%/d alone to +1d (at 60%), then 15%/d each: B dies at 11/3 d
-		// with A at 40%, and A alone at 30%/d takes two more days. Without the
-		// recovery the pool would have been out at 7/3 d.
+		// A contributed no demand, so the proportional default weights it 0 and B
+		// keeps the whole 30%/d for as long as it lives: B dies at 7/3 d — the
+		// same instant the pool would have been out at without the recovery — and
+		// the recovered A then carries the whole 30%/d from 0% for 10/3 d more.
 		expect(recovered.kind).toBe("runway");
 		if (recovered.kind !== "runway") throw new Error("unreachable");
 		expect(recovered.exhaustsAtMs).toBeCloseTo(NOW + (17 / 3) * DAY, -3);
+		// B's own death is what the share rule decides here; the pool instant is
+		// the conserved demand emptying the conserved units either way.
+		expect(recovered.projectedExhaustions).toHaveLength(1);
+		expect(recovered.projectedExhaustions[0]).toMatchObject({
+			accountId: "B",
+			windowKind: "seven_day",
+		});
+		expect(recovered.projectedExhaustions[0].exhaustsAtMs).toBeCloseTo(
+			NOW + (7 / 3) * DAY,
+			-3,
+		);
 
 		// (b) A stale reset: the reading itself is stale, so it contributes no
 		// demand and the window never revives.
@@ -746,6 +825,12 @@ describe("computeCapacityRunwayScenario", () => {
 	});
 
 	it("activates an unstarted window on its first burn and ignores the placeholder reset", () => {
+		// The equal split is passed explicitly because activation AT `now` is this
+		// case's premise: it puts N's first burn a full hour before the
+		// placeholder reset at +1h, which is what makes ignoring that reset
+		// observable. Under the proportional default N's measured burn is 0, so it
+		// is weighted 0 and does not burn until A dies at +1h — the very instant
+		// the placeholder names, where honouring it would change nothing.
 		const result = computeCapacityRunwayScenario(
 			[
 				acct("A", [fiveHour(50, 1)]),
@@ -762,6 +847,8 @@ describe("computeCapacityRunwayScenario", () => {
 				]),
 			],
 			NOW,
+			undefined,
+			{ shareRule: equalShareRule },
 		);
 
 		// Activated at now, so N's real cycle ends at +5h. At 25%/h each A dies at
@@ -770,6 +857,25 @@ describe("computeCapacityRunwayScenario", () => {
 		expect(result.kind).toBe("runway");
 		if (result.kind !== "runway") throw new Error("unreachable");
 		expect(result.exhaustsAtMs).toBeCloseTo(NOW + 3 * HOUR, -3);
+		// N's activation instant, not just the pool's: it is what the placeholder
+		// would have moved, and at +2h A's death is still ahead of N's own.
+		expect(result.projectedExhaustions).toHaveLength(2);
+		expect(result.projectedExhaustions[0]).toMatchObject({
+			accountId: "A",
+			windowKind: "five_hour",
+		});
+		expect(result.projectedExhaustions[0].exhaustsAtMs).toBeCloseTo(
+			NOW + 2 * HOUR,
+			-3,
+		);
+		expect(result.projectedExhaustions[1]).toMatchObject({
+			accountId: "N",
+			windowKind: "five_hour",
+		});
+		expect(result.projectedExhaustions[1].exhaustsAtMs).toBeCloseTo(
+			NOW + 3 * HOUR,
+			-3,
+		);
 	});
 
 	it("reports an empty roster without inventing a basis", () => {
@@ -864,11 +970,14 @@ describe("computeCapacityRunwayScenario", () => {
 
 	describe("projectedExhaustions", () => {
 		it("lists every window the baseline drove to 100% in its first cycle", () => {
-			// The module's first case: 60%/d of demand split 30%/d each, B out at
-			// 2d, A — then carrying all of it from 80% — 8h later.
+			// The module's first case: 60%/d of demand split 30%/d each — the equal
+			// split, passed explicitly — B out at 2d, A — then carrying all of it
+			// from 80% — 8h later.
 			const result = computeCapacityRunwayScenario(
 				[acct("A", [weekly(20)]), acct("B", [weekly(40)])],
 				NOW,
+				undefined,
+				{ shareRule: equalShareRule },
 			);
 			expect(result.kind).toBe("runway");
 			if (result.kind !== "runway") throw new Error("unreachable");
@@ -895,6 +1004,8 @@ describe("computeCapacityRunwayScenario", () => {
 			const result = computeCapacityRunwayScenario(
 				[acct("A", [fiveHour(10, 4)]), acct("B", [fiveHour(80, 1)])],
 				NOW,
+				undefined,
+				{ shareRule: equalShareRule },
 			);
 			expect(result.kind).toBe("runway");
 			if (result.kind !== "runway") throw new Error("unreachable");
@@ -1028,6 +1139,8 @@ describe("computeCapacityRunwayScenario", () => {
 					acct("N", [weekly(0)]),
 				],
 				NOW,
+				undefined,
+				{ shareRule: equalShareRule },
 			);
 			expect(result.kind).toBe("runway");
 			if (result.kind !== "runway") throw new Error("unreachable");
@@ -1086,8 +1199,9 @@ describe("computeCapacityRunwayScenario", () => {
 				credits: [{ expiresAtMs: null }],
 			};
 			// C is revived at 0% before the first assignment, so its own later fill
-			// is the first one the caller can act on: 75%/d each, D out at 2/3 d,
-			// C alone at 150%/d for the last third of a day.
+			// is the first one the caller can act on: 75%/d each on the equal
+			// split, passed explicitly, D out at 2/3 d, C alone at 150%/d for the
+			// last third of a day.
 			const result = computeCapacityRunwayScenario(
 				[
 					acct("C", [weekly(100)], {
@@ -1098,6 +1212,8 @@ describe("computeCapacityRunwayScenario", () => {
 					acct("D", [weekly(50)], { tier: CODEX_PRO, demandClass: "codex" }),
 				],
 				NOW,
+				undefined,
+				{ shareRule: equalShareRule },
 			);
 			expect(result.kind).toBe("runway");
 			if (result.kind !== "runway") throw new Error("unreachable");
@@ -1172,6 +1288,8 @@ describe("computeCapacityRunwayScenario", () => {
 			const result = computeCapacityRunwayScenario(
 				[acct("A", [fiveHour(10, 4)]), acct("B", [fiveHour(80, 1)])],
 				NOW,
+				undefined,
+				{ shareRule: equalShareRule },
 			);
 			expect(result.firstExhaustionAfterNowByClass).toHaveLength(1);
 			expect(result.firstExhaustionAfterNowByClass[0].atMs).toBeCloseTo(
@@ -1402,6 +1520,33 @@ describe("proportionalShareRule", () => {
 			probePaceMargin: false,
 		});
 		expect(exhaustOf(equal, "A")).toBeCloseTo(NOW + (40 / 0.9375) * HOUR, -3);
+	});
+
+	it("is the rule a call with no shareRule option runs on", () => {
+		// The scan's default, and the identity that makes it one: on a two-account
+		// roster with nothing dead yet, the default projects each window exactly
+		// where the current model does. The equal split does not.
+		const accounts = [acct("A", [weekly(60, 3)]), acct("B", [weekly(50, 2)])];
+		const byDefault = computeCapacityRunwayScenario(accounts, NOW);
+		expect(byDefault).toEqual(
+			computeCapacityRunwayScenario(accounts, NOW, undefined, {
+				shareRule: proportionalShareRule,
+			}),
+		);
+		for (const account of accounts) {
+			const alone = computeCapacityRunway(baselineInputs([account]), NOW);
+			expect(alone.kind).toBe("runway");
+			if (alone.kind !== "runway") throw new Error("unreachable");
+			expect(exhaustOf(byDefault, account.accountId)).toBeCloseTo(
+				alone.exhaustsAtMs,
+				-3,
+			);
+		}
+		expect(byDefault).not.toEqual(
+			computeCapacityRunwayScenario(accounts, NOW, undefined, {
+				shareRule: equalShareRule,
+			}),
+		);
 	});
 
 	it("splits each kind by that kind's own demand, never a blend of both", () => {
@@ -1699,16 +1844,27 @@ function weeklyObserved(options: {
 	};
 }
 
+/*
+ * The lag block holds the share rule FIXED at the equal split, the way the
+ * redistribution backtest's `scenario-equal`/`scenario-equal-original` pair
+ * does: the only thing that may differ between two runs here is the lag
+ * treatment, so the split each case's arithmetic is written for cannot move
+ * under it. The scan's own default is the proportional rule, covered above.
+ */
 const ignored = (
 	accounts: RunwayScenarioAccountInput[],
 ): RunwayScenarioOutcome =>
 	computeCapacityRunwayScenario(accounts, NOW, undefined, {
+		shareRule: equalShareRule,
 		observationLag: "ignore",
 	});
 
 const corrected = (
 	accounts: RunwayScenarioAccountInput[],
-): RunwayScenarioOutcome => computeCapacityRunwayScenario(accounts, NOW);
+): RunwayScenarioOutcome =>
+	computeCapacityRunwayScenario(accounts, NOW, undefined, {
+		shareRule: equalShareRule,
+	});
 
 const runwayEtaOf = (outcome: RunwayScenarioOutcome): number => {
 	if (outcome.kind !== "runway") {

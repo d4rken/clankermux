@@ -185,13 +185,15 @@ export interface TransitionEvent {
 
 export type ReplayModel =
 	| "current"
-	/** The demand-conserving scan as it ships, with the observation-lag advance. */
+	/** The equal split with the observation-lag advance — the PRIOR verdict basis. */
 	| "scenario-equal"
-	/** The same equal split with the PRE-CORRECTION scan — the lag-parity control. */
+	/** The same equal split with the PRE-CORRECTION scan — the prior basis's control. */
 	| "scenario-equal-original"
 	| "scenario-headroom"
-	/** The declared candidate — see {@link CANDIDATE_MODEL}. */
-	| "scenario-proportional";
+	/** The verdict basis — see {@link VERDICT_BASIS_MODEL}. */
+	| "scenario-proportional"
+	/** The basis's own PRE-CORRECTION scan — see {@link VERDICT_BASIS_CONTROL_MODEL}. */
+	| "scenario-proportional-original";
 
 /** Every scan the replay runs, in the order the report prints them. */
 export const REPLAY_MODELS: readonly ReplayModel[] = [
@@ -200,21 +202,70 @@ export const REPLAY_MODELS: readonly ReplayModel[] = [
 	"scenario-equal-original",
 	"scenario-headroom",
 	"scenario-proportional",
+	"scenario-proportional-original",
 ];
 
 /**
- * The share rule scored as a DECLARED CANDIDATE beside the verdict.
+ * The share rule the VERDICT is computed on, re-declared on 2026-09-07.
  *
- * Declared before it was scored and carrying no fitted coefficient, so nothing
- * about it is read off the tables it is judged on. It is not the verdict basis
- * and does not enter {@link VERDICT_RULE}: the report scores it under its own
- * heading, against the same criteria, and says so.
+ * It was declared as a candidate in v2026.9.19 and scored beside
+ * {@link PRIOR_BASIS_MODEL}, the equal split, which had been the basis until
+ * then. What re-declared it is the MECHANISM rather than any score: the equal
+ * split discards every account's own burn from the first instant, which is
+ * where the prior basis's optimism at transitions came from, while the
+ * proportional rule reproduces the current model until a death.
+ *
+ * Nothing in this file reads a coefficient off the tables it is judged on, and
+ * {@link VERDICT_RULE} still states no number.
  */
-export const CANDIDATE_MODEL =
+export const VERDICT_BASIS_MODEL =
 	"scenario-proportional" as const satisfies ScenarioModel;
+
+/**
+ * The basis's own pre-correction control: the SAME share rule with the
+ * observation-lag advance switched off, so criterion D can attribute a
+ * difference to the advance and to nothing else.
+ */
+export const VERDICT_BASIS_CONTROL_MODEL =
+	"scenario-proportional-original" as const satisfies ScenarioModel;
+
+/**
+ * The verdict basis through v2026.9.19, scored BESIDE the basis ever since and
+ * never inside the verdict.
+ */
+export const PRIOR_BASIS_MODEL =
+	"scenario-equal" as const satisfies ScenarioModel;
+
+/** The prior basis's own pre-correction control, the object of the lag checks. */
+export const PRIOR_BASIS_CONTROL_MODEL =
+	"scenario-equal-original" as const satisfies ScenarioModel;
 
 /** The models that are a {@link computeCapacityRunwayScenario} call. */
 export type ScenarioModel = Exclude<ReplayModel, "current">;
+
+/**
+ * The pre-correction control criterion D judges each model against: the same
+ * share rule with the lag advance switched off.
+ *
+ * A model with no such twin has NO control, and its D is indeterminate rather
+ * than judged against another rule's control — a comparison across two share
+ * rules and the advance at once cannot attribute a difference to either.
+ */
+export const CONTROL_MODELS: Partial<Record<ScenarioModel, ScenarioModel>> = {
+	[VERDICT_BASIS_MODEL]: VERDICT_BASIS_CONTROL_MODEL,
+	[PRIOR_BASIS_MODEL]: PRIOR_BASIS_CONTROL_MODEL,
+};
+
+/**
+ * The share rules scored beside the basis, in the order the report prints them.
+ *
+ * None of them enters the verdict: {@link evaluateVerdict} reads nothing from
+ * this list, and the report says so where it prints them.
+ */
+export const BESIDE_BASIS_MODELS: readonly ScenarioModel[] = [
+	PRIOR_BASIS_MODEL,
+	"scenario-headroom",
+];
 
 export interface RedistributionRecord extends BacktestRecord {
 	model: ReplayModel;
@@ -312,7 +363,7 @@ export interface RedistributionRecord extends BacktestRecord {
 	 */
 	lagAnchorKnown: boolean;
 	/**
-	 * True where the CANDIDATE scan ({@link CANDIDATE_MODEL}) projects this
+	 * True where the BASIS scan ({@link VERDICT_BASIS_MODEL}) projects this
 	 * window on its first assignment with every contributor to the class demand
 	 * both alive and IN that assignment: no class window is already at 100 % at
 	 * `T`, no account whose measured burn joined the class demand was withheld
@@ -333,11 +384,11 @@ export interface RedistributionRecord extends BacktestRecord {
 	 * holds first-cycle deaths only, and a window that resets and fills again
 	 * re-splits the class just as its first fill would have.
 	 *
-	 * Taken from the candidate's OWN scan: two share rules order a class's
-	 * events differently, so `scenario-equal`'s first-event flag is not a
-	 * statement about where this scan's first assignment ends.
+	 * Taken from the BASIS's OWN scan: two share rules order a class's events
+	 * differently, so another rule's first-event flag is not a statement about
+	 * where this scan's first assignment ends.
 	 */
-	proportionalFirstAssignment: boolean;
+	basisFirstAssignment: boolean;
 }
 
 export interface ReplayRange {
@@ -358,8 +409,8 @@ export interface ReplayRange {
  * of a Max 20x is not a percent of a Pro. `maxPct` is the account's FULLEST
  * window: an account is only as routable as its tightest constraint.
  *
- * Reported as a secondary column and never as the verdict basis (that is the
- * equal split, pre-declared). When every weight is zero — every alive account
+ * Reported as a secondary column and never as the verdict basis (that is
+ * {@link VERDICT_BASIS_MODEL}). When every weight is zero — every alive account
  * at 100 % or unmetered-with-no-capacity — it falls back to the equal split:
  * there is nothing left to weight by, and the scan's next event kills them all
  * anyway.
@@ -396,10 +447,10 @@ export interface ScenarioModelSpec {
 /**
  * The scan behind each scenario model.
  *
- * `scenario-equal` and `scenario-equal-original` differ in ONE argument, which
- * is the whole point of the pair: the equal split is held fixed so the only
- * thing the comparison can attribute a difference to is the observation-lag
- * advance. `scenario-equal` stays the pre-declared verdict basis.
+ * Each `-original` differs from its own rule in ONE argument, which is the
+ * whole point of a pair: the share rule is held fixed so the only thing the
+ * comparison can attribute a difference to is the observation-lag advance. See
+ * {@link CONTROL_MODELS} for which model each control belongs to.
  */
 export const SCENARIO_MODELS: Record<ScenarioModel, ScenarioModelSpec> = {
 	"scenario-equal": { shareRule: equalShareRule, observationLag: "advance" },
@@ -414,6 +465,10 @@ export const SCENARIO_MODELS: Record<ScenarioModel, ScenarioModelSpec> = {
 	"scenario-proportional": {
 		shareRule: proportionalShareRule,
 		observationLag: "advance",
+	},
+	"scenario-proportional-original": {
+		shareRule: proportionalShareRule,
+		observationLag: "ignore",
 	},
 };
 
@@ -3053,7 +3108,14 @@ export function replayInstant(
 		// exclude. An outcome that states no exclusions (an `unknown` from an
 		// empty pool) reads as "nothing excluded", which over-counts rather than
 		// under-counts and therefore keeps `classLagFree` conservative.
-		const corrected = scenarioOutcomes.get("scenario-equal");
+		//
+		// The equal pair BY NAME, not the verdict basis: `classLagFree`,
+		// `pooledInClass`, `firstEvent`, `peerDiedInLag` and `exactShiftEligible`
+		// are what the observation-lag mechanism check is computed on, and that
+		// check's subject is the correction measured on the equal split. Moving
+		// them to the basis would change what those checks are about without
+		// saying so.
+		const corrected = scenarioOutcomes.get(PRIOR_BASIS_MODEL);
 		const excludedIds = new Set<string>([
 			...(corrected == null ? [] : unprojectableIds(corrected)),
 			...(corrected?.unknownTierAccountIds ?? []),
@@ -3119,9 +3181,9 @@ export function replayInstant(
 				return revivalInstants.every((resetsAtMs) => resetsAtMs > ownAt);
 			};
 		};
-		const firstEventCorrected = firstEventInScan("scenario-equal");
-		const firstEventOriginal = firstEventInScan("scenario-equal-original");
-		const firstEventCandidate = firstEventInScan(CANDIDATE_MODEL);
+		const firstEventCorrected = firstEventInScan(PRIOR_BASIS_MODEL);
+		const firstEventOriginal = firstEventInScan(PRIOR_BASIS_CONTROL_MODEL);
+		const firstEventBasis = firstEventInScan(VERDICT_BASIS_MODEL);
 		// A class member already at 100 % at `T` is a contributor the survivors
 		// carry from the first assignment on, so no scan of this instant starts
 		// on own-slopes. Read from the READINGS rather than from any scan: it is
@@ -3129,9 +3191,9 @@ export function replayInstant(
 		const classDeadAtT = entries.some((entry) =>
 			entry.windows.some((window) => window.input.utilizationPct >= 100),
 		);
-		const candidateScan = scenarioOutcomes.get(CANDIDATE_MODEL);
+		const basisScan = scenarioOutcomes.get(VERDICT_BASIS_MODEL);
 		/**
-		 * True when the CANDIDATE scan kept measured demand OUT of its own
+		 * True when the BASIS scan kept measured demand OUT of its own
 		 * assignments: an account whose burn joined the class demand but which is
 		 * not in the pool the demand is split over.
 		 *
@@ -3152,13 +3214,13 @@ export function replayInstant(
 		 * ever removes records from the population; it can never admit one whose
 		 * demand was redistributed.
 		 */
-		const candidateWithholdsDemand =
-			candidateScan == null ||
-			withheldIds(candidateScan).length > 0 ||
-			candidateScan.demandOnlyAccountIds.length > 0;
+		const basisWithholdsDemand =
+			basisScan == null ||
+			withheldIds(basisScan).length > 0 ||
+			basisScan.demandOnlyAccountIds.length > 0;
 		/**
 		 * True when NO exhaustion of this class stands between `T` and this
-		 * window's own projected exhaustion in the CANDIDATE scan — in ANY cycle.
+		 * window's own projected exhaustion in the BASIS scan — in ANY cycle.
 		 *
 		 * `firstEventInScan` reads `projectedExhaustions`, which by design holds
 		 * first-cycle deaths only, so a window that resets and fills again before
@@ -3172,15 +3234,15 @@ export function replayInstant(
 		 * tie with it) and changes nothing before it, which is why the comparison
 		 * is not strict.
 		 */
-		const noClassDeathBeforeCandidate = (
+		const noClassDeathBeforeBasis = (
 			accountId: string,
 			windowKind: string,
 		): boolean => {
-			const own = candidateScan?.projectedExhaustions.find((exhaustion) =>
+			const own = basisScan?.projectedExhaustions.find((exhaustion) =>
 				isSameWindow(exhaustion, accountId, windowKind),
 			)?.exhaustsAtMs;
 			if (own == null) return false;
-			const firstDeath = candidateScan?.firstExhaustionAfterNowByClass.find(
+			const firstDeath = basisScan?.firstExhaustionAfterNowByClass.find(
 				(entry) => entry.demandClass === demandClass,
 			)?.atMs;
 			return firstDeath == null || firstDeath >= orderedAt(own);
@@ -3196,7 +3258,7 @@ export function replayInstant(
 		const peerDiedInLagOf = (
 			accountId: string,
 			windowKind: string,
-			model: ScenarioModel = "scenario-equal",
+			model: ScenarioModel = PRIOR_BASIS_MODEL,
 		): boolean => {
 			const exhaustions =
 				scenarioOutcomes.get(model)?.projectedExhaustions ?? [];
@@ -3291,12 +3353,16 @@ export function replayInstant(
 						firstEvent &&
 						!peerDiedInLag &&
 						firstEventOriginal(entry.accountId, window.kind),
-					proportionalFirstAssignment:
+					basisFirstAssignment:
 						!classDeadAtT &&
-						!candidateWithholdsDemand &&
-						firstEventCandidate(entry.accountId, window.kind) &&
-						!peerDiedInLagOf(entry.accountId, window.kind, CANDIDATE_MODEL) &&
-						noClassDeathBeforeCandidate(entry.accountId, window.kind),
+						!basisWithholdsDemand &&
+						firstEventBasis(entry.accountId, window.kind) &&
+						!peerDiedInLagOf(
+							entry.accountId,
+							window.kind,
+							VERDICT_BASIS_MODEL,
+						) &&
+						noClassDeathBeforeBasis(entry.accountId, window.kind),
 					lagAnchorKnown: lagAnchorKnownOf(entry, window),
 				};
 
@@ -3880,21 +3946,48 @@ export interface CohortScores {
 	episodes: number;
 	balanced: ReportEstimatorMetrics[];
 	perRecord: ReportEstimatorMetrics[];
-	/** `scenario-equal` against the CURRENT model. */
-	pairedBias: PairedBias;
-	/** `scenario-equal` against the PRE-CORRECTION scan. */
-	pairedBiasVsOriginal: PairedBias;
-	/** How much closer to the truth the correction lands than the original scan. */
-	pairedAbsVsOriginal: PairedAbsDelta;
 	/**
-	 * {@link CANDIDATE_MODEL} against the CURRENT model, the candidate's
-	 * criterion A. Its own pairing: a paired median is taken over the records
-	 * BOTH models dated, and which records those are is a property of the pair.
+	 * Every scenario model against the CURRENT model — criterion A's statistic.
+	 *
+	 * Keyed by model rather than held as one number, because each pair carries
+	 * its OWN pairing: a paired median is taken over the records both models of
+	 * the pair dated, and which records those are is a property of the pair. The
+	 * basis, the prior basis and the headroom rule are all scored on it.
 	 */
-	candidateBias: PairedBias;
-	/** {@link CANDIDATE_MODEL} against the pre-correction scan — its criterion D. */
-	candidateAbsVsOriginal: PairedAbsDelta;
+	biasVsCurrent: Record<ScenarioModel, PairedBias>;
+	/**
+	 * Every model that has a pre-correction control ({@link CONTROL_MODELS}),
+	 * against that control. Absent for a model with no control.
+	 */
+	biasVsControl: Partial<Record<ScenarioModel, PairedBias>>;
+	/**
+	 * The same pairs as a change in ABSOLUTE error — criterion D's statistic —
+	 * so a model states how much closer to the truth its correction lands than
+	 * its own uncorrected scan.
+	 */
+	absVsControl: Partial<Record<ScenarioModel, PairedAbsDelta>>;
 }
+
+const EMPTY_BIAS: PairedBias = { n: 0, medianA: null, medianB: null };
+const EMPTY_ABS: PairedAbsDelta = { n: 0, medianDeltaMinutes: null };
+
+/** A model's pair against the current model, never `undefined`. */
+export const biasVsCurrentOf = (
+	cohort: CohortScores,
+	model: ScenarioModel,
+): PairedBias => cohort.biasVsCurrent[model] ?? EMPTY_BIAS;
+
+/** A model's pair against its own control, empty where it has none. */
+export const biasVsControlOf = (
+	cohort: CohortScores,
+	model: ScenarioModel,
+): PairedBias => cohort.biasVsControl[model] ?? EMPTY_BIAS;
+
+/** A model's absolute-error change against its own control, empty where it has none. */
+export const absVsControlOf = (
+	cohort: CohortScores,
+	model: ScenarioModel,
+): PairedAbsDelta => cohort.absVsControl[model] ?? EMPTY_ABS;
 
 function metricsByModel(
 	records: readonly RedistributionRecord[],
@@ -3915,6 +4008,16 @@ function scoreCohort(
 	for (const record of records) {
 		for (const id of record.eventIds) episodes.add(id);
 	}
+	const biasVsCurrent = {} as Record<ScenarioModel, PairedBias>;
+	const biasVsControl: Partial<Record<ScenarioModel, PairedBias>> = {};
+	const absVsControl: Partial<Record<ScenarioModel, PairedAbsDelta>> = {};
+	for (const model of SCENARIO_MODEL_IDS) {
+		biasVsCurrent[model] = pairedSignedMedian(balanced, model, "current");
+		const control = CONTROL_MODELS[model];
+		if (control == null) continue;
+		biasVsControl[model] = pairedSignedMedian(balanced, model, control);
+		absVsControl[model] = pairedAbsMedian(balanced, model, control);
+	}
 	return {
 		label,
 		records: records.filter((record) => record.model === "current").length,
@@ -3922,23 +4025,9 @@ function scoreCohort(
 		episodes: episodes.size,
 		balanced: metricsByModel(balanced),
 		perRecord: metricsByModel(records),
-		pairedBias: pairedSignedMedian(balanced, "scenario-equal", "current"),
-		pairedBiasVsOriginal: pairedSignedMedian(
-			balanced,
-			"scenario-equal",
-			"scenario-equal-original",
-		),
-		pairedAbsVsOriginal: pairedAbsMedian(
-			balanced,
-			"scenario-equal",
-			"scenario-equal-original",
-		),
-		candidateBias: pairedSignedMedian(balanced, CANDIDATE_MODEL, "current"),
-		candidateAbsVsOriginal: pairedAbsMedian(
-			balanced,
-			CANDIDATE_MODEL,
-			"scenario-equal-original",
-		),
+		biasVsCurrent,
+		biasVsControl,
+		absVsControl,
 	};
 }
 
@@ -4070,17 +4159,17 @@ function blockBootstrap(
 
 /**
  * A bootstrap CI of `scenario - baseline`, where `scenario` is the verdict
- * basis or the declared candidate and the baseline is the model that ships, the
- * pre-correction scan, or the verdict basis itself.
+ * basis or a share rule scored beside it, and the baseline is the model that
+ * ships or that scenario's own pre-correction control.
  *
  * Both the scenario and the baseline are FIELDS rather than part of the label,
  * so a lookup cannot resolve the wrong entry by prefix: criterion C is defined
  * against the current model, and the same cohort label carries the
- * original-scan CI and the candidate's CIs too.
+ * control-baseline CI and the prior basis's CIs too.
  */
 export interface RedistributionBootstrapEntry extends ReportBootstrapEntry {
 	scenario: ScenarioModel;
-	baseline: "current" | "scenario-equal" | "scenario-equal-original";
+	baseline: ReplayModel;
 }
 
 /** Cohort labels of the bootstrap table, shared by the producer and the lookup. */
@@ -4200,91 +4289,43 @@ export function scoreCohorts(result: ReplayResult): CohortSet {
 		record.eventIds.length > 0
 			? String(Math.min(...record.eventIds))
 			: record.lifecycleId;
-	const bootstrap: RedistributionBootstrapEntry[] = [
-		...blockBootstrap(
-			OVERALL_BOOTSTRAP_LABEL,
-			"scenario-equal",
-			ofModel(overallBalanced, "scenario-equal"),
-			ofModel(overallBalanced, "current"),
-			lifecycleBlock,
-			result.seed,
-			BOOTSTRAP_ITERATIONS,
-			"current",
-		),
-		...blockBootstrap(
-			TRANSITION_BOOTSTRAP_LABEL,
-			"scenario-equal",
-			ofModel(transitionBalanced, "scenario-equal"),
-			ofModel(transitionBalanced, "current"),
-			episodeBlock,
-			result.seed,
-			BOOTSTRAP_ITERATIONS,
-			"current",
-		),
-		...blockBootstrap(
-			OVERALL_BOOTSTRAP_LABEL,
-			"scenario-equal",
-			ofModel(overallBalanced, "scenario-equal"),
-			ofModel(overallBalanced, "scenario-equal-original"),
-			lifecycleBlock,
-			result.seed,
-			BOOTSTRAP_ITERATIONS,
-			"scenario-equal-original",
-		),
-		...blockBootstrap(
-			TRANSITION_BOOTSTRAP_LABEL,
-			"scenario-equal",
-			ofModel(transitionBalanced, "scenario-equal"),
-			ofModel(transitionBalanced, "scenario-equal-original"),
-			episodeBlock,
-			result.seed,
-			BOOTSTRAP_ITERATIONS,
-			"scenario-equal-original",
-		),
-		// The candidate's own pairs: against the current model, which is what its
-		// criterion C is defined on, and against the verdict basis, which is the
-		// rule it is offered as an alternative to.
-		...blockBootstrap(
-			OVERALL_BOOTSTRAP_LABEL,
-			CANDIDATE_MODEL,
-			ofModel(overallBalanced, CANDIDATE_MODEL),
-			ofModel(overallBalanced, "current"),
-			lifecycleBlock,
-			result.seed,
-			BOOTSTRAP_ITERATIONS,
-			"current",
-		),
-		...blockBootstrap(
-			TRANSITION_BOOTSTRAP_LABEL,
-			CANDIDATE_MODEL,
-			ofModel(transitionBalanced, CANDIDATE_MODEL),
-			ofModel(transitionBalanced, "current"),
-			episodeBlock,
-			result.seed,
-			BOOTSTRAP_ITERATIONS,
-			"current",
-		),
-		...blockBootstrap(
-			OVERALL_BOOTSTRAP_LABEL,
-			CANDIDATE_MODEL,
-			ofModel(overallBalanced, CANDIDATE_MODEL),
-			ofModel(overallBalanced, "scenario-equal"),
-			lifecycleBlock,
-			result.seed,
-			BOOTSTRAP_ITERATIONS,
-			"scenario-equal",
-		),
-		...blockBootstrap(
-			TRANSITION_BOOTSTRAP_LABEL,
-			CANDIDATE_MODEL,
-			ofModel(transitionBalanced, CANDIDATE_MODEL),
-			ofModel(transitionBalanced, "scenario-equal"),
-			episodeBlock,
-			result.seed,
-			BOOTSTRAP_ITERATIONS,
-			"scenario-equal",
-		),
-	];
+	// One pair set per model whose criteria the report states: the verdict basis
+	// and the PRIOR basis, each against the current model (criterion C is defined
+	// on that delta) and against its OWN pre-correction control. The prior
+	// basis's pairs are also the ones the observation-lag mechanism check's
+	// subject is built on. The headroom rule carries no pair and no control, so
+	// its C and D are indeterminate and the section beside the basis says so
+	// rather than borrowing another rule's baseline.
+	const bootstrap: RedistributionBootstrapEntry[] = [];
+	for (const model of [VERDICT_BASIS_MODEL, PRIOR_BASIS_MODEL]) {
+		const control = CONTROL_MODELS[model];
+		const baselines: ReplayModel[] =
+			control == null ? ["current"] : ["current", control];
+		for (const baseline of baselines) {
+			bootstrap.push(
+				...blockBootstrap(
+					OVERALL_BOOTSTRAP_LABEL,
+					model,
+					ofModel(overallBalanced, model),
+					ofModel(overallBalanced, baseline),
+					lifecycleBlock,
+					result.seed,
+					BOOTSTRAP_ITERATIONS,
+					baseline,
+				),
+				...blockBootstrap(
+					TRANSITION_BOOTSTRAP_LABEL,
+					model,
+					ofModel(transitionBalanced, model),
+					ofModel(transitionBalanced, baseline),
+					episodeBlock,
+					result.seed,
+					BOOTSTRAP_ITERATIONS,
+					baseline,
+				),
+			);
+		}
+	}
 
 	// Also the raw records. Churn is a within-model statistic: one model
 	// abstaining, or a censored outcome, removes nothing that is needed to see
@@ -4731,7 +4772,25 @@ function recordsByKey(
 	return byKey;
 }
 
-/** Compute every observation-lag check the report prints. */
+/**
+ * Compute every observation-lag check the report prints.
+ *
+ * Every pair below names `scenario-equal` and `scenario-equal-original`
+ * LITERALLY rather than through the basis constants, and that is the point: the
+ * subject of this section is the lag correction as it was measured on the equal
+ * split, which was the verdict basis when the correction shipped. Re-pointing
+ * these reads at whatever the basis happens to be would change what the section
+ * measures without saying so.
+ *
+ * What the two share rules DO have in common is the lag duration and the
+ * per-path anchor it is derived from, both properties of the reading. The
+ * advance is not one of them: the scan assigns each window a share-dependent
+ * slope and only then advances the reading by that slope over the lag, so its
+ * size, which windows it drives to 100 % inside their own lag, and therefore
+ * which records are eligible for the checks below can all differ between the
+ * rules. Nothing computed here is a measurement of the proportional basis's own
+ * scan.
+ */
 export function observationLagChecks(
 	replay: ReplayResult,
 	cohorts: CohortSet,
@@ -5009,7 +5068,11 @@ export function redistributionRecordToJson(
 		firstEvent: record.firstEvent,
 		peerDiedInLag: record.peerDiedInLag,
 		exactShiftEligible: record.exactShiftEligible,
-		proportionalFirstAssignment: record.proportionalFirstAssignment,
+		// The KEY is frozen at the name the previous release emitted, whatever the
+		// field is called internally: every exported record would otherwise differ
+		// from an earlier artifact by this one key, and a run-to-run comparison
+		// would read as a change in the data rather than a rename.
+		proportionalFirstAssignment: record.basisFirstAssignment,
 		lagAnchorKnown: record.lagAnchorKnown,
 		usable: record.usable,
 		unusableReason: record.unusableReason,
@@ -5032,35 +5095,41 @@ export function redistributionRecordToJson(
 
 /** The rule, printed verbatim in the report and evaluated by `evaluateVerdict`. */
 export const VERDICT_RULE = [
-	"MODELS. `scenario-equal` is the demand-conserving scan that ADVANCES each",
-	"   reading over its observation lag; `scenario-equal-original` is the same",
-	"   equal split with the pre-correction scan, which schedules every window",
-	"   from the instant of the replay however old its reading is. Both are",
-	"   scored on the COMMON cohort: every model usable, truth observed.",
+	"MODELS. `scenario-proportional` is the demand-conserving scan that splits",
+	"   each class's demand across the accounts alive at an instant in",
+	"   proportion to their own measured burn, and ADVANCES each reading over",
+	"   its observation lag; `scenario-proportional-original` is the same",
+	"   proportional rule with the pre-correction scan, which schedules every",
+	"   window from the instant of the replay however old its reading is. Both",
+	"   are scored on the COMMON cohort: every model usable, truth observed.",
 	"",
 	"A. NOT MORE OPTIMISTIC ON TRANSITIONS. On the any-transition cohort,",
-	"   lifecycle-balanced: max(paired median signed error of scenario-equal, 0)",
-	"   <= max(paired median signed error of current, 0), AND recall of",
-	"   scenario-equal >= recall of current. (Positive signed error = predicted",
-	"   later than observed = optimistic; a model that is EARLY is not rewarded",
-	"   for it, which is why both sides are clamped at 0.)",
-	"B. BETTER AT TRANSITIONS. On the same cohort, F1 of scenario-equal >= F1 of",
-	"   current.",
+	"   lifecycle-balanced: max(paired median signed error of scenario-",
+	"   proportional, 0) <= max(paired median signed error of current, 0), AND",
+	"   recall of scenario-proportional >= recall of current. (Positive signed",
+	"   error = predicted later than observed = optimistic; a model that is",
+	"   EARLY is not rewarded for it, which is why both sides are clamped at 0.)",
+	"B. BETTER AT TRANSITIONS. On the same cohort, F1 of scenario-proportional",
+	"   >= F1 of current.",
 	"C. NO SIGNIFICANT OVERALL LOSS. On the overall cohort, the block-bootstrap",
-	"   95% CI of F1(scenario-equal) - F1(current) is not entirely below zero",
-	"   (p97.5 >= 0). Read from the entry whose BASELINE is the current model.",
+	"   95% CI of F1(scenario-proportional) - F1(current) is not entirely below",
+	"   zero (p97.5 >= 0). Read from the entry whose BASELINE is the current",
+	"   model.",
 	"D. NOT WORSE THAN THE ORIGINAL SCENARIO. On the any-transition common",
-	"   cohort, lifecycle-balanced: F1(scenario-equal) >= F1(scenario-equal-",
-	"   original), AND the paired median of |error of scenario-equal| - |error",
-	"   of scenario-equal-original| <= 0 over the records both models dated.",
-	"   Recall of both is printed beside D and is NOT judged: the correction",
-	"   can change the ORDER of a class's events, and with it which windows are",
-	"   dated before their reset at all, in EITHER direction.",
+	"   cohort, lifecycle-balanced: F1(scenario-proportional) >= F1(scenario-",
+	"   proportional-original), AND the paired median of |error of scenario-",
+	"   proportional| - |error of scenario-proportional-original| <= 0 over the",
+	"   records both models dated. Recall of both is printed beside D and is NOT",
+	"   judged: the correction can change the ORDER of a class's events, and",
+	"   with it which windows are dated before their reset at all, in EITHER",
+	"   direction.",
 	"",
 	"replace = A and B and C and D. keep-scenario = any criterion FALSE.",
 	"insufficient-evidence = no criterion false, at least one indeterminate.",
-	"The verdict basis is the EQUAL share rule, pre-declared; the headroom rule",
-	"is reported beside it and is never the basis.",
+	"The verdict basis is the PROPORTIONAL share rule, re-declared on 2026-09-07",
+	"after it was scored as a candidate beside the equal split, which had been",
+	"the basis through v2026.9.19. The equal split and the headroom rule are",
+	"scored beside it and never enter the verdict.",
 ].join("\n");
 
 export interface VerdictCriterion {
@@ -5130,15 +5199,21 @@ const bootstrapEntry = (
 export interface CriterionInputs {
 	/** The model being judged. Every value name states it. */
 	model: ScenarioModel;
+	/**
+	 * `model`'s OWN pre-correction control ({@link CONTROL_MODELS}), or null
+	 * where it has none — criterion D is then indeterminate rather than judged
+	 * against another rule's control.
+	 */
+	control: ScenarioModel | null;
 	/** `model`'s metrics on the any-transition cohort, lifecycle-balanced. */
 	scenario: BacktestMetrics | null;
 	/** The current model's, on the same cohort. */
 	current: BacktestMetrics | null;
-	/** The pre-correction scan's, on the same cohort — criterion D's comparison. */
+	/** `control`'s metrics on the same cohort — criterion D's comparison. */
 	original: BacktestMetrics | null;
 	/** `model` against the current model, paired. */
 	bias: PairedBias;
-	/** `model` against the pre-correction scan, paired absolute error. */
+	/** `model` against its own control, paired absolute error. */
 	absDelta: PairedAbsDelta;
 	/** The overall F1-delta CI of `model` against the current model. */
 	overallCi: RedistributionBootstrapEntry | null;
@@ -5147,15 +5222,26 @@ export interface CriterionInputs {
 /**
  * Criteria A to D for one model, from numbers the caller has already computed.
  *
- * ONE implementation for the verdict basis and for the declared candidate: the
- * candidate is scored by the same functions on the same cohorts, and the only
- * thing that varies is which model's records the inputs were taken over. The
- * rule text ({@link VERDICT_RULE}) is written for `scenario-equal` and the
+ * ONE implementation for the verdict basis and for every rule scored beside
+ * it: the same functions on the same cohorts, and the only thing that varies is
+ * which model's records the inputs were taken over. The rule text
+ * ({@link VERDICT_RULE}) is written for {@link VERDICT_BASIS_MODEL} and the
  * VERDICT is computed on it alone; nothing here changes that.
  */
 export function criteriaFor(inputs: CriterionInputs): VerdictCriterion[] {
-	const { model, scenario, current, original, bias, absDelta, overallCi } =
-		inputs;
+	const {
+		model,
+		control,
+		scenario,
+		current,
+		original,
+		bias,
+		absDelta,
+		overallCi,
+	} = inputs;
+	// A model with no control has no benchmark for D, and the row says which
+	// number is missing rather than printing a bare blank.
+	const controlName = control ?? "no pre-correction control";
 
 	const criterionA: VerdictCriterion = {
 		id: "A",
@@ -5220,18 +5306,18 @@ export function criteriaFor(inputs: CriterionInputs): VerdictCriterion[] {
 		values: [
 			{ name: `F1, ${model}`, value: scenario?.f1 ?? null },
 			{
-				name: "F1, scenario-equal-original",
+				name: `F1, ${controlName}`,
 				value: original?.f1 ?? null,
 			},
 			{
-				name: "paired median |error| change vs original (min)",
+				name: "paired median |error| change vs own control (min)",
 				value: absDelta.medianDeltaMinutes,
 			},
 			{ name: "paired n", value: absDelta.n, digits: 0 },
 			// Printed, never judged — see the rule text.
 			{ name: `recall, ${model}`, value: scenario?.recall ?? null },
 			{
-				name: "recall, scenario-equal-original",
+				name: `recall, ${controlName}`,
 				value: original?.recall ?? null,
 			},
 		],
@@ -5246,17 +5332,18 @@ export function evaluateVerdict(
 ): Verdict {
 	const transition = cohorts.anyTransition;
 	const criteria = criteriaFor({
-		model: "scenario-equal",
-		scenario: metricsOf(transition.balanced, "scenario-equal"),
+		model: VERDICT_BASIS_MODEL,
+		control: VERDICT_BASIS_CONTROL_MODEL,
+		scenario: metricsOf(transition.balanced, VERDICT_BASIS_MODEL),
 		current: metricsOf(transition.balanced, "current"),
-		original: metricsOf(transition.balanced, "scenario-equal-original"),
-		bias: transition.pairedBias,
-		absDelta: transition.pairedAbsVsOriginal,
+		original: metricsOf(transition.balanced, VERDICT_BASIS_CONTROL_MODEL),
+		bias: biasVsCurrentOf(transition, VERDICT_BASIS_MODEL),
+		absDelta: absVsControlOf(transition, VERDICT_BASIS_MODEL),
 		overallCi: bootstrapEntry(
 			cohorts.bootstrap,
 			OVERALL_BOOTSTRAP_LABEL,
 			"f1",
-			"scenario-equal",
+			VERDICT_BASIS_MODEL,
 			"current",
 		),
 	});
@@ -5328,24 +5415,23 @@ export function evaluateVerdict(
 	};
 }
 
-// ---------------------------------------------------------------------------
-// Share-rule candidate
-// ---------------------------------------------------------------------------
-
 /** How far apart two ETAs may sit and still be the same answer, for the identity. */
 export const IDENTITY_TOLERANCE_MS = 1;
 
 /**
- * How often the candidate rule IS the current model where it is constructed to
- * be: on the records its own scan projects from its first assignment with every
+ * How often the BASIS rule IS the current model where it is constructed to be:
+ * on the records its own scan projects from its first assignment with every
  * contributor to the class demand alive and pooled — see
- * {@link RedistributionRecord.proportionalFirstAssignment} for the population.
+ * {@link RedistributionRecord.basisFirstAssignment} for the population.
  *
- * A mechanism check, in the style of the observation-lag section's: it states
- * its population, counts it, and prints the number that falls out. Records
- * either model did not date do not enter — an ETA cannot equal an abstention.
+ * A property of the verdict basis, printed under the verdict: it is what makes
+ * the basis a re-declaration of the current model's arithmetic rather than a
+ * different answer everywhere. A mechanism check in the style of the
+ * observation-lag section's — it states its population, counts it, and prints
+ * the number that falls out. Records either model did not date do not enter: an
+ * ETA cannot equal an abstention.
  */
-export interface CandidateIdentityCheck {
+export interface BasisIdentityCheck {
 	/** Records in the population, both models dated. */
 	eligible: number;
 	/** Of those, how many agree within {@link IDENTITY_TOLERANCE_MS}. */
@@ -5354,22 +5440,20 @@ export interface CandidateIdentityCheck {
 	share: number | null;
 }
 
-export function candidateIdentityCheck(
-	replay: ReplayResult,
-): CandidateIdentityCheck {
+export function basisIdentityCheck(replay: ReplayResult): BasisIdentityCheck {
 	let eligible = 0;
 	let matching = 0;
 	for (const entry of recordsByKey(replay.records).values()) {
-		const candidate = entry.get(CANDIDATE_MODEL);
+		const basis = entry.get(VERDICT_BASIS_MODEL);
 		const current = entry.get("current");
-		if (candidate == null || current == null) continue;
-		if (!candidate.proportionalFirstAssignment) continue;
-		if (candidate.predictedEtaMs == null || current.predictedEtaMs == null) {
+		if (basis == null || current == null) continue;
+		if (!basis.basisFirstAssignment) continue;
+		if (basis.predictedEtaMs == null || current.predictedEtaMs == null) {
 			continue;
 		}
 		eligible++;
 		if (
-			Math.abs(candidate.predictedEtaMs - current.predictedEtaMs) <=
+			Math.abs(basis.predictedEtaMs - current.predictedEtaMs) <=
 			IDENTITY_TOLERANCE_MS
 		) {
 			matching++;
@@ -5382,152 +5466,202 @@ export function candidateIdentityCheck(
 	};
 }
 
-/** One criterion of the candidate, beside the models it is read against. */
-export interface CandidateCriterionRow {
+// ---------------------------------------------------------------------------
+// Share rules beside the basis
+// ---------------------------------------------------------------------------
+
+/** One criterion of a rule scored beside the basis, with what it is read against. */
+export interface BesideBasisCriterionRow {
 	id: VerdictCriterion["id"];
 	label: string;
 	/**
 	 * What the model columns hold. A criterion that turns on TWO statistics has
-	 * one row per statistic — criterion D fails on its F1 comparison while its
-	 * error comparison passes, and a table that printed one of the two would
+	 * one row per statistic — criterion D can fail on its F1 comparison while
+	 * its error comparison passes, and a table that printed one of the two would
 	 * state a result no number in the row accounts for. Both rows carry the
 	 * criterion's single result.
 	 */
 	statistic: string;
-	candidate: number | null;
+	/** The scored rule's own number. */
+	value: number | null;
 	/** The verdict basis's number for the same statistic. */
 	verdictBasis: number | null;
 	/** The current model's, or null where the statistic is a delta against it. */
 	current: number | null;
 	/**
-	 * The pre-correction scan's number for the same statistic — the FIXED
-	 * benchmark criterion D judges against — or null on every criterion that
-	 * does not read it.
+	 * The scored rule's OWN pre-correction control for the same statistic — the
+	 * benchmark its criterion D judges against — or null on every criterion that
+	 * does not read it and on a rule that has no control.
 	 */
-	original: number | null;
+	control: number | null;
 	pass: boolean | null;
 }
 
 /**
- * The declared candidate, scored against the same four criteria as the verdict
- * basis.
+ * One share rule scored BESIDE the verdict, against the same four criteria.
  *
- * Beside the verdict, never part of it: {@link evaluateVerdict} reads nothing
- * from here, and the criteria below are computed by {@link criteriaFor} from
- * the candidate's own records on the same cohorts.
+ * Never part of the verdict: {@link evaluateVerdict} reads nothing from here,
+ * and the criteria below are computed by {@link criteriaFor} from this model's
+ * own records on the same cohorts.
  */
-export interface CandidateScores {
+export interface BesideBasisScores {
 	model: ScenarioModel;
+	/** What this model is: the prior basis, the headroom rule. Printed as given. */
+	role: string;
+	/** Its own pre-correction control, or null where it has none. */
+	control: ScenarioModel | null;
 	/** Criteria A to D applied to {@link model}. */
 	criteria: VerdictCriterion[];
 	/** The same four, summarised beside the verdict basis and the current model. */
-	rows: CandidateCriterionRow[];
-	identity: CandidateIdentityCheck;
+	rows: BesideBasisCriterionRow[];
+	/**
+	 * Why a criterion of THIS model is indeterminate, stated rather than left as
+	 * a bare INDETERMINATE. Empty when every criterion had its numbers.
+	 */
+	notes: string[];
 }
 
-export function evaluateCandidate(
-	cohorts: CohortSet,
-	replay: ReplayResult,
-): CandidateScores {
+/** What each rule beside the basis is, in the order the report prints them. */
+const BESIDE_BASIS_ROLES: Record<string, string> = {
+	[PRIOR_BASIS_MODEL]:
+		"the PRIOR verdict basis, pre-declared and scored as the basis through v2026.9.19",
+	"scenario-headroom":
+		"the headroom rule, reported since the first run and never a basis",
+};
+
+/**
+ * The four criteria for every rule scored beside the basis.
+ *
+ * Same functions, same lifecycle-balanced cohorts, same comparison models as
+ * the verdict — only the model whose records the inputs were taken over
+ * differs. A rule with no pre-correction control of its own gets an
+ * INDETERMINATE criterion D and a note saying why, rather than a comparison
+ * against another rule's control, which would mix two share rules and the lag
+ * advance into one number. The same holds for criterion C, which is defined on
+ * a bootstrap pair only the basis and the prior basis carry.
+ */
+export function evaluateBesideBasis(cohorts: CohortSet): BesideBasisScores[] {
 	const transition = cohorts.anyTransition;
-	const candidateCi = bootstrapEntry(
-		cohorts.bootstrap,
-		OVERALL_BOOTSTRAP_LABEL,
-		"f1",
-		CANDIDATE_MODEL,
-		"current",
-	);
+	const current = metricsOf(transition.balanced, "current");
+	const basisMetrics = metricsOf(transition.balanced, VERDICT_BASIS_MODEL);
 	const basisCi = bootstrapEntry(
 		cohorts.bootstrap,
 		OVERALL_BOOTSTRAP_LABEL,
 		"f1",
-		"scenario-equal",
+		VERDICT_BASIS_MODEL,
 		"current",
 	);
-	const candidate = metricsOf(transition.balanced, CANDIDATE_MODEL);
-	const basis = metricsOf(transition.balanced, "scenario-equal");
-	const current = metricsOf(transition.balanced, "current");
-	const original = metricsOf(transition.balanced, "scenario-equal-original");
-	const criteria = criteriaFor({
-		model: CANDIDATE_MODEL,
-		scenario: candidate,
-		current,
-		original,
-		bias: transition.candidateBias,
-		absDelta: transition.candidateAbsVsOriginal,
-		overallCi: candidateCi,
+	const basisBias = biasVsCurrentOf(transition, VERDICT_BASIS_MODEL);
+	const basisAbs = absVsControlOf(transition, VERDICT_BASIS_MODEL);
+
+	return BESIDE_BASIS_MODELS.map((model) => {
+		const control = CONTROL_MODELS[model] ?? null;
+		const scenario = metricsOf(transition.balanced, model);
+		const original =
+			control == null ? null : metricsOf(transition.balanced, control);
+		const bias = biasVsCurrentOf(transition, model);
+		const absDelta = absVsControlOf(transition, model);
+		const overallCi = bootstrapEntry(
+			cohorts.bootstrap,
+			OVERALL_BOOTSTRAP_LABEL,
+			"f1",
+			model,
+			"current",
+		);
+		const criteria = criteriaFor({
+			model,
+			control,
+			scenario,
+			current,
+			original,
+			bias,
+			absDelta,
+			overallCi,
+		});
+		const passOf = (id: VerdictCriterion["id"]): boolean | null =>
+			criteria.find((criterion) => criterion.id === id)?.pass ?? null;
+		const notes: string[] = [];
+		if (overallCi == null) {
+			notes.push(
+				`C is indeterminate: the replay bootstraps the verdict basis and \`${PRIOR_BASIS_MODEL}\` only, so \`${model}\` has no F1-delta CI against the current model here.`,
+			);
+		}
+		if (control == null) {
+			notes.push(
+				`D is indeterminate: \`${model}\` has no pre-correction scan of its own in this replay, and judging it against another rule's control would compare two share rules and the lag advance at once.`,
+			);
+		}
+		const rows: BesideBasisCriterionRow[] = [
+			{
+				id: "A",
+				label: "not more optimistic on transitions",
+				statistic: "paired median signed error (min)",
+				value: bias.medianA,
+				verdictBasis: basisBias.medianA,
+				// Each model's own pairing, which is why this is not one number: a
+				// paired median is taken over the records BOTH models dated.
+				current: bias.medianB,
+				control: null,
+				pass: passOf("A"),
+			},
+			{
+				id: "B",
+				label: "better at transitions",
+				statistic: "F1 on transitions",
+				value: scenario?.f1 ?? null,
+				verdictBasis: basisMetrics?.f1 ?? null,
+				current: current?.f1 ?? null,
+				control: null,
+				pass: passOf("B"),
+			},
+			{
+				id: "C",
+				label: "no significant overall loss",
+				statistic: "overall F1 delta against current, p97.5",
+				value: overallCi?.p97_5 ?? null,
+				verdictBasis: basisCi?.p97_5 ?? null,
+				// The statistic IS a delta against the current model, so the current
+				// model has no column of its own here.
+				current: null,
+				control: null,
+				pass: passOf("C"),
+			},
+			{
+				id: "D",
+				label: "not worse than the original scenario",
+				// Judged against this rule's OWN pre-correction scan, in the last
+				// column, not against either of the two middle ones.
+				statistic: "F1 on transitions",
+				value: scenario?.f1 ?? null,
+				verdictBasis: basisMetrics?.f1 ?? null,
+				current: current?.f1 ?? null,
+				control: original?.f1 ?? null,
+				pass: passOf("D"),
+			},
+			{
+				id: "D",
+				label: "not worse than the original scenario",
+				// Not the value list's `|error|`: a pipe inside a cell would split it.
+				statistic:
+					"paired median absolute-error change against its own pre-correction scan (min)",
+				value: absDelta.medianDeltaMinutes,
+				verdictBasis: basisAbs.medianDeltaMinutes,
+				// The statistic IS a change against a pre-correction scan, so neither
+				// comparison model has a column of its own here.
+				current: null,
+				control: null,
+				pass: passOf("D"),
+			},
+		];
+		return {
+			model,
+			role: BESIDE_BASIS_ROLES[model] ?? "scored beside the basis",
+			control,
+			criteria,
+			rows,
+			notes,
+		};
 	});
-	const passOf = (id: VerdictCriterion["id"]): boolean | null =>
-		criteria.find((criterion) => criterion.id === id)?.pass ?? null;
-	const rows: CandidateCriterionRow[] = [
-		{
-			id: "A",
-			label: "not more optimistic on transitions",
-			statistic: "paired median signed error (min)",
-			candidate: transition.candidateBias.medianA,
-			verdictBasis: transition.pairedBias.medianA,
-			// Each model's own pairing, which is why this is not one number: a
-			// paired median is taken over the records BOTH models dated.
-			current: transition.candidateBias.medianB,
-			original: null,
-			pass: passOf("A"),
-		},
-		{
-			id: "B",
-			label: "better at transitions",
-			statistic: "F1 on transitions",
-			candidate: candidate?.f1 ?? null,
-			verdictBasis: basis?.f1 ?? null,
-			current: current?.f1 ?? null,
-			original: null,
-			pass: passOf("B"),
-		},
-		{
-			id: "C",
-			label: "no significant overall loss",
-			statistic: "overall F1 delta against current, p97.5",
-			candidate: candidateCi?.p97_5 ?? null,
-			verdictBasis: basisCi?.p97_5 ?? null,
-			// The statistic IS a delta against the current model, so the current
-			// model has no column of its own here.
-			current: null,
-			original: null,
-			pass: passOf("C"),
-		},
-		{
-			id: "D",
-			label: "not worse than the original scenario",
-			// The half of D that FAILS for the candidate, and the reason it has a
-			// row of its own: judged against the pre-correction scan's own F1, in
-			// the last column, not against either of the two middle ones.
-			statistic: "F1 on transitions",
-			candidate: candidate?.f1 ?? null,
-			verdictBasis: basis?.f1 ?? null,
-			current: current?.f1 ?? null,
-			original: original?.f1 ?? null,
-			pass: passOf("D"),
-		},
-		{
-			id: "D",
-			label: "not worse than the original scenario",
-			// Not the value list's `|error|`: a pipe inside a cell would split it.
-			statistic:
-				"paired median absolute-error change against the pre-correction scan (min)",
-			candidate: transition.candidateAbsVsOriginal.medianDeltaMinutes,
-			verdictBasis: transition.pairedAbsVsOriginal.medianDeltaMinutes,
-			// The statistic IS a change against the pre-correction scan, so
-			// neither comparison model has a column of its own here.
-			current: null,
-			original: null,
-			pass: passOf("D"),
-		},
-	];
-	return {
-		model: CANDIDATE_MODEL,
-		criteria,
-		rows,
-		identity: candidateIdentityCheck(replay),
-	};
 }
 
 // ---------------------------------------------------------------------------
@@ -5592,12 +5726,15 @@ function cohortSection(cohort: CohortScores, heading: string): string[] {
 	out.push("");
 	out.push(metricsTable(cohort.perRecord));
 	out.push("");
+	const basisBias = biasVsCurrentOf(cohort, VERDICT_BASIS_MODEL);
+	const basisBiasVsControl = biasVsControlOf(cohort, VERDICT_BASIS_MODEL);
+	const basisAbsVsControl = absVsControlOf(cohort, VERDICT_BASIS_MODEL);
 	out.push(
-		`Paired median signed error (n=${cohort.pairedBias.n}; positive = optimistic): scenario-equal ${num(cohort.pairedBias.medianA, 1)} min, current ${num(cohort.pairedBias.medianB, 1)} min.`,
+		`Paired median signed error (n=${basisBias.n}; positive = optimistic): ${VERDICT_BASIS_MODEL} ${num(basisBias.medianA, 1)} min, current ${num(basisBias.medianB, 1)} min.`,
 	);
 	out.push("");
 	out.push(
-		`Against the pre-correction scan (n=${cohort.pairedBiasVsOriginal.n}): scenario-equal ${num(cohort.pairedBiasVsOriginal.medianA, 1)} min, scenario-equal-original ${num(cohort.pairedBiasVsOriginal.medianB, 1)} min; paired median change in absolute error ${num(cohort.pairedAbsVsOriginal.medianDeltaMinutes, 1)} min (n=${cohort.pairedAbsVsOriginal.n}, negative = the correction lands closer).`,
+		`Against its own pre-correction scan (n=${basisBiasVsControl.n}): ${VERDICT_BASIS_MODEL} ${num(basisBiasVsControl.medianA, 1)} min, ${VERDICT_BASIS_CONTROL_MODEL} ${num(basisBiasVsControl.medianB, 1)} min; paired median change in absolute error ${num(basisAbsVsControl.medianDeltaMinutes, 1)} min (n=${basisAbsVsControl.n}, negative = the correction lands closer).`,
 	);
 	out.push("");
 	return out;
@@ -6131,7 +6268,7 @@ function observationLagSection(checks: ObservationLagChecks): string[] {
 	out.push("## Observation-lag mechanism check");
 	out.push("");
 	out.push(
-		"What the correction actually did to the projections, as opposed to what it scored. `scenario-equal` advances each reading over its observation lag; `scenario-equal-original` is the identical equal split with that advance switched off. Each check below states what it measures, which records enter it, which are excluded and by which predicate, and prints the number that falls out of that population. None of them states what the number ought to be; reading it against the mechanism described is the reader's job. An eligible set of zero is reported as such rather than as a pass.",
+		"What the correction actually did to the projections, as opposed to what it scored. `scenario-equal` advances each reading over its observation lag; `scenario-equal-original` is the identical equal split with that advance switched off. Every check in this section is measured on THAT pair, which is the equal split — the verdict basis when the correction shipped, and kept as the subject here so the section cannot silently change what it is about. What the proportional rule, the basis since 2026-09-07, shares with it is the lag DURATION and the per-path anchor that duration is derived from, both properties of the reading. The advance itself is not shared: the scan assigns each window a share-dependent slope and only then advances the reading by that slope over the lag, so the size of the advance, which windows it drives to 100 % inside their own lag, and therefore which records are eligible for the checks below can all differ between the two rules. Nothing below is a measurement of the basis's own scan. Each check below states what it measures, which records enter it, which are excluded and by which predicate, and prints the number that falls out of that population. None of them states what the number ought to be; reading it against the mechanism described is the reader's job. An eligible set of zero is reported as such rather than as a pass.",
 	);
 	out.push("");
 
@@ -6275,7 +6412,7 @@ const criterionState = (pass: boolean | null): string =>
 /**
  * One criterion's heading and its value table.
  *
- * Shared by the verdict and the share-rule candidate so the two cannot print
+ * Shared by the verdict and the rules scored beside it so the two cannot print
  * the same criterion in two different shapes.
  */
 function criterionBlock(criterion: VerdictCriterion): string[] {
@@ -6293,53 +6430,104 @@ function criterionBlock(criterion: VerdictCriterion): string[] {
 	return out;
 }
 
-/** The declared candidate's section: the same four criteria, beside the verdict. */
-function candidateSection(candidate: CandidateScores): string[] {
-	const out: string[] = [];
-	out.push("## Share-rule candidate");
-	out.push("");
-	out.push(
-		`\`${candidate.model}\` is a DECLARED CANDIDATE. The quantity it conserves is the CLASS demand for a window kind; each alive account's share of it is that account's own measured demand for the kind over the ALIVE accounts' measured demand for it. The denominator is the survivors, not the class: with burns of 80, 20 and 10 and the 80 dead, the two survivors take two thirds and one third of the whole class demand, not 20/110 and 10/110 of it. It was declared before it was scored and has no fitted coefficient, so no number in this report enters the rule. It is not the verdict basis: the verdict above is computed on \`scenario-equal\` alone and is the same with or without this section.`,
+/**
+ * What criterion D compares for the BASIS, and which of its two legs decided
+ * this run, printed beside the criterion instead of left to the rule text.
+ *
+ * D is the criterion most easily misread as a comparison between share rules,
+ * because the basis changed and the prior basis is still scored a section
+ * below. It is not one: the comparison is the basis against its own scan with
+ * the observation-lag advance switched off, so a difference is the advance's.
+ *
+ * Every number here is read from the criterion's OWN computed values at render
+ * time. {@link VERDICT_RULE} is pre-declared and must carry no number this run
+ * produced, so the leg that failed cannot be stated there.
+ */
+function basisCriterionDNote(criterion: VerdictCriterion): string {
+	const computed = (name: string): number | null =>
+		criterion.values.find((value) => value.name === name)?.value ?? null;
+	const basisF1 = computed(`F1, ${VERDICT_BASIS_MODEL}`);
+	const controlF1 = computed(`F1, ${VERDICT_BASIS_CONTROL_MODEL}`);
+	const absChange = computed(
+		"paired median |error| change vs own control (min)",
 	);
-	out.push("");
-	out.push(
-		"This section applies the four criteria of the verdict rule above to the candidate, computed by the same functions, on the same lifecycle-balanced cohorts, against the same comparison models. The table states, per criterion and statistic, the number it turns on for the candidate, for the verdict basis, for the current model and for the pre-correction scan, and whether the criterion holds FOR THE CANDIDATE. A criterion that turns on two statistics — D, which reads an F1 and an error change — has a row for each, both carrying that criterion's single result. The full value list of each criterion follows it. Criterion A's paired median is taken over the records the pair being compared both dated, so the candidate's column and the basis's column are medians over their own populations; each column's `paired n` is in the value list below. A model column is empty where the statistic is already a delta against that model.",
-	);
-	out.push("");
-	out.push(
-		"| criterion | statistic | candidate | scenario-equal | current | scenario-equal-original | candidate result |",
-	);
-	out.push("|---|---|---:|---:|---:|---:|---|");
-	for (const row of candidate.rows) {
-		out.push(
-			`| ${row.id}. ${row.label} | ${row.statistic} | ${num(row.candidate)} | ${num(row.verdictBasis)} | ${row.current == null ? EM_DASH : num(row.current)} | ${row.original == null ? EM_DASH : num(row.original)} | ${criterionState(row.pass)} |`,
-		);
-	}
-	out.push("");
-	out.push(
-		"D compares against the fixed uncorrected-equal benchmark; a fail on F1 there does not isolate the candidate's lag correction, which would need an uncorrected proportional scan.",
-	);
-	out.push("");
-	for (const criterion of candidate.criteria) {
-		out.push(...criterionBlock(criterion));
-	}
+	const pairedN = computed("paired n");
 
+	const f1Leg =
+		basisF1 == null || controlF1 == null
+			? "Its F1 leg has no number this run, so it decides nothing."
+			: basisF1 >= controlF1
+				? `Its F1 leg holds, at ${num(basisF1)} against the control's ${num(controlF1)} on the lifecycle-balanced any-transition cohort.`
+				: `Its F1 leg is the one that FAILED this run: ${num(basisF1)} against the control's ${num(controlF1)} on the lifecycle-balanced any-transition cohort, short by ${num(controlF1 - basisF1)}.`;
+	// "too" only when the F1 leg failed as well; an error-only failure must not
+	// read as a second failure beside a leg that held.
+	const f1Failed = basisF1 != null && controlF1 != null && basisF1 < controlF1;
+	const errorLeg =
+		absChange == null
+			? "Its error leg has no number this run, so it decides nothing."
+			: absChange <= 0
+				? `Its error leg holds, at ${num(absChange)} min of paired median absolute-error change over the ${num(pairedN, 0)} records both scans dated.`
+				: `Its error leg FAILED${f1Failed ? " too" : ""}: the correction landed ${num(absChange)} min further from the truth in paired median absolute error, over the ${num(pairedN, 0)} records both scans dated.`;
+
+	return `D compares \`${VERDICT_BASIS_MODEL}\` with its OWN lag-uncorrected scan, \`${VERDICT_BASIS_CONTROL_MODEL}\` — the same share rule with the observation-lag advance switched off — and with nothing else: it does not compare the proportional rule with the equal split, and no number in it is a statement about \`${PRIOR_BASIS_MODEL}\`. ${f1Leg} ${errorLeg}`;
+}
+
+/** The identity block: a property of the basis, printed under the verdict. */
+function basisIdentitySection(identity: BasisIdentityCheck): string[] {
+	const out: string[] = [];
 	out.push("### Identity with the current model on the first assignment");
 	out.push("");
 	out.push(
-		"The identity the rule is constructed to have: while every account whose measured burn is in the class demand is alive AND in the assignment, the demand handed back to an account is the burn it contributed, so it burns at its own measured slope and the candidate's projection IS the current model's. The population is the records whose window the candidate's own scan projects entirely on its first assignment — no class window already at 100 % at the instant, no account whose burn joined the class demand withheld from the pool that demand is split over, no class exhaustion of ANY cycle between the instant and this window's own, and no class window filled inside its own observation lag — and where both the candidate and the current model committed to a date. The withheld and later-cycle conditions are the two the scan's first-cycle projection list cannot state on its own: one redistributes demand with nothing having died, the other is a death after a reset. Below the tolerance an ETA is the same instant; the column is a count, not a claim about the rest of the replay.",
+		`The identity the basis is constructed to have: while every account whose measured burn is in the class demand is alive AND in the assignment, the demand handed back to an account is the burn it contributed, so it burns at its own measured slope and \`${VERDICT_BASIS_MODEL}\`'s projection IS the current model's. The population is the records whose window the basis's own scan projects entirely on its first assignment — no class window already at 100 % at the instant, no account whose burn joined the class demand withheld from the pool that demand is split over, no class exhaustion of ANY cycle between the instant and this window's own, and no class window filled inside its own observation lag — and where both the basis and the current model committed to a date. The withheld and later-cycle conditions are the two the scan's first-cycle projection list cannot state on its own: one redistributes demand with nothing having died, the other is a death after a reset. Below the tolerance an ETA is the same instant; the column is a count, not a claim about the rest of the replay.`,
 	);
 	out.push("");
-	if (candidate.identity.eligible === 0) {
+	if (identity.eligible === 0) {
 		out.push(
 			"No eligible records: nothing in this replay entered this population, so the check measures nothing about this run.",
 		);
 	} else {
 		out.push(
-			`n=${candidate.identity.eligible} eligible records, ${candidate.identity.matching} of which the candidate dated within ${IDENTITY_TOLERANCE_MS} ms of the current model (${pct(candidate.identity.share)}).`,
+			`n=${identity.eligible} eligible records, ${identity.matching} of which the basis dated within ${IDENTITY_TOLERANCE_MS} ms of the current model (${pct(identity.share)}).`,
 		);
 	}
 	out.push("");
+	return out;
+}
+
+/** The rules scored beside the basis: the same four criteria, none of them the verdict. */
+function besideBasisSection(scored: readonly BesideBasisScores[]): string[] {
+	const out: string[] = [];
+	out.push("## Share rules beside the basis");
+	out.push("");
+	out.push(
+		`Every other share rule the replay scans, held to the same four criteria as the verdict, computed by the same functions on the same lifecycle-balanced cohorts and against the same comparison models. NONE of it enters the verdict: \`evaluateVerdict\` reads nothing from this section, and the verdict above is the same with or without it. \`${PRIOR_BASIS_MODEL}\` is here because it WAS the verdict basis through v2026.9.19, and is kept scored beside the basis that replaced it so the change of basis can be read rather than taken on trust. Each rule's criterion D is judged against its OWN pre-correction scan; a rule that has none says so instead of borrowing another rule's control.`,
+	);
+	out.push("");
+	out.push(
+		`A paired median is taken over the records the pair being compared BOTH dated, so the columns of criterion A are medians over different populations and are not each other's comparators. The scored rule's column and the \`current\` column come from that rule's own pairing with the current model; the \`${VERDICT_BASIS_MODEL}\` column comes from the BASIS's pairing with the current model, and the number the basis is actually judged against — the current model over the basis's own pairing — is under \`## Verdict\` rather than in this table. Each pairing's \`paired n\` is in the value list of the criterion it belongs to: this rule's below the table, the basis's under \`## Verdict\`. A model column is empty where the statistic is already a delta against that model.`,
+	);
+	out.push("");
+	for (const entry of scored) {
+		out.push(`### \`${entry.model}\` — ${entry.role}`);
+		out.push("");
+		out.push(
+			`| criterion | statistic | ${entry.model} | ${VERDICT_BASIS_MODEL} | current | ${entry.control ?? "own control"} | result |`,
+		);
+		out.push("|---|---|---:|---:|---:|---:|---|");
+		for (const row of entry.rows) {
+			out.push(
+				`| ${row.id}. ${row.label} | ${row.statistic} | ${num(row.value)} | ${num(row.verdictBasis)} | ${row.current == null ? EM_DASH : num(row.current)} | ${row.control == null ? EM_DASH : num(row.control)} | ${criterionState(row.pass)} |`,
+			);
+		}
+		out.push("");
+		for (const note of entry.notes) {
+			out.push(`- ${note}`);
+		}
+		if (entry.notes.length > 0) out.push("");
+		for (const criterion of entry.criteria) {
+			out.push(...criterionBlock(criterion));
+		}
+	}
 	return out;
 }
 
@@ -6431,7 +6619,7 @@ export function formatRedistributionReport(
 		"- Sign convention: signed ETA error is `predicted − observed`, so POSITIVE is predicted-later-than-observed, i.e. OPTIMISTIC.",
 	);
 	out.push(
-		"- Observation lag: `scenario-equal` and `scenario-headroom` advance each reading over the gap between the instant its estimator measured to and the instant being replayed, at the share slope the first assignment gives it. The lag is taken per estimator path from the same anchor the current model uses: the fit's own last point on the regression path, the observation instant on the observation-anchored lifetime path, and nothing on the now-anchored paths, which carry none. An anchor ahead of the replayed instant clamps to zero lag, while the current model keeps anchoring its own ETA to that future instant, so the two part company there. On a lone account, wherever the anchor was recoverable and sits behind the instant, this projects the window from the same anchor the current model projects it from; a window there can still land elsewhere whenever another window of the class exhausts while this one is still projecting — including a death the correction applies AT the replayed instant — because that suspends the account's burn and the ETA then carries the span it spends dead, which is the scenario's own semantics rather than the redistribution. `scenario-equal-original` is the same equal split with that advance switched off, and is the control the mechanism checks below are measured against.",
+		"- Observation lag: `scenario-equal`, `scenario-proportional` and `scenario-headroom` advance each reading over the gap between the instant its estimator measured to and the instant being replayed, at the share slope the first assignment gives it. The lag is taken per estimator path from the same anchor the current model uses: the fit's own last point on the regression path, the observation instant on the observation-anchored lifetime path, and nothing on the now-anchored paths, which carry none. An anchor ahead of the replayed instant clamps to zero lag, while the current model keeps anchoring its own ETA to that future instant, so the two part company there. On a lone account, wherever the anchor was recoverable and sits behind the instant, this projects the window from the same anchor the current model projects it from; a window there can still land elsewhere whenever another window of the class exhausts while this one is still projecting — including a death the correction applies AT the replayed instant — because that suspends the account's burn and the ETA then carries the span it spends dead, which is the scenario's own semantics rather than the redistribution. `scenario-equal-original` is the same equal split with that advance switched off, and `scenario-proportional-original` is the proportional rule with it switched off: each is the control its OWN rule's criterion D is measured against, and the equal pair is additionally the subject of the mechanism checks below.",
 	);
 	out.push("");
 	out.push("Verdict rule, declared before the run:");
@@ -6502,7 +6690,7 @@ export function formatRedistributionReport(
 	out.push("### Bootstrap");
 	out.push("");
 	out.push(
-		"Block bootstrap of `scenario − baseline`, resampling blocks rather than instants (window lifecycles overall, episodes on transitions). For `scenario-equal`, the verdict basis, the baseline is the current model for criteria A-C and the pre-correction scan for criterion D; both rows are printed for both cohorts. The declared candidate scored under `Share-rule candidate`, below the verdict, carries its own pairs: against the current model, which is what its criterion C is defined on, and against the verdict basis.",
+		"Block bootstrap of `scenario − baseline`, resampling blocks rather than instants (window lifecycles overall, episodes on transitions). For `scenario-proportional`, the verdict basis, the baseline is the current model for criteria A-C and its own pre-correction scan `scenario-proportional-original` for criterion D; both rows are printed for both cohorts. `scenario-equal`, the prior basis scored under `Share rules beside the basis`, carries the same two pairs so its criteria C and D can be read there. The headroom rule carries none, and that section states its C and D as indeterminate rather than resampling it against a baseline that is not its own.",
 	);
 	out.push("");
 	out.push(
@@ -6606,6 +6794,10 @@ export function formatRedistributionReport(
 	out.push("");
 	for (const criterion of verdict.criteria) {
 		out.push(...criterionBlock(criterion));
+		if (criterion.id === "D") {
+			out.push(basisCriterionDNote(criterion));
+			out.push("");
+		}
 	}
 	out.push("| cohort | records | lifecycles | episodes |");
 	out.push("|---|---:|---:|---:|");
@@ -6619,7 +6811,7 @@ export function formatRedistributionReport(
 		replay.records.filter((record) => record.model === model && record.usable)
 			.length;
 	out.push(
-		`Coverage of the two equal-split scans: scenario-equal ${usableOf("scenario-equal")} usable records, scenario-equal-original ${usableOf("scenario-equal-original")}.`,
+		`Coverage of the basis and its control: ${VERDICT_BASIS_MODEL} ${usableOf(VERDICT_BASIS_MODEL)} usable records, ${VERDICT_BASIS_CONTROL_MODEL} ${usableOf(VERDICT_BASIS_CONTROL_MODEL)}.`,
 	);
 	out.push("");
 	out.push(`**Verdict: ${verdict.verdict}**`);
@@ -6658,8 +6850,9 @@ export function formatRedistributionReport(
 		"- `insufficient-evidence`: nothing ships; the run repeats when the missing windows have completed.",
 	);
 	out.push("");
+	out.push(...basisIdentitySection(basisIdentityCheck(replay)));
 
-	out.push(...candidateSection(evaluateCandidate(cohorts, replay)));
+	out.push(...besideBasisSection(evaluateBesideBasis(cohorts)));
 
 	out.push("## Known limits");
 	out.push("");
@@ -6697,8 +6890,8 @@ export function knownLimitsFor(
 		'Pause and removal cannot be replayed: `usage_snapshots` rows cascade-delete with their account, so no removed account has history, and `accounts.paused` keeps none. The scenario\'s `presence: "demand-only"` path is covered by its unit tests only.',
 		"Snapshots before 2026-08-24 carry no `plan_tier`/`rate_limit_tier` and no `observed_at`. Tiers there are today's, marked `assumed`; without an observation instant the weekly full-confidence path is unavailable to BOTH models, so the two are still compared like for like.",
 		"No reset-credit bank is modelled, and no live usage point is injected — the replay only has what the sampler stored.",
-		"The headroom share rule is reported, never used as the verdict basis. The verdict basis is the equal split, pre-declared.",
-		"The declared candidate share rule weights each account by its OWN measured demand, and that demand is the same fitted slope the current model projects from. A window still learning has no accepted measured-demand contribution — the preparation withholds it whatever its fitted slope says — so it carries no weight of its own and takes demand only through the rule's equal-split fallback; where a class's live accounts are all learning for a kind, the candidate IS the equal split for that kind.",
+		"The headroom share rule is reported, never used as the verdict basis. The verdict basis is the proportional share rule, re-declared on 2026-09-07 after it was scored as a candidate beside the equal split, which had been the basis through v2026.9.19; both the equal split and the headroom rule are scored beside it and neither enters the verdict.",
+		"The verdict basis weights each account by its OWN measured demand, and that demand is the same fitted slope the current model projects from. Each alive account's share of a kind's class demand is its own measured demand for the kind over the ALIVE accounts' measured demand for it. The denominator is the survivors, not the class: with burns of 80, 20 and 10 and the 80 dead, the two survivors take two thirds and one third of the whole class demand, not 20/110 and 10/110 of it. A window still learning has no accepted measured-demand contribution — the preparation withholds it whatever its fitted slope says — so it carries no weight of its own and takes demand only through the rule's equal-split fallback; where a class's live accounts are all learning for a kind, the basis IS the equal split for that kind.",
 		"IF a survivor's own lookback already contains the traffic it absorbed, the scenario would be adding that demand a second time. Whether it does is a hypothesis this replay reports on (the peer-exhaustion cohort and the survivor slope table) rather than a property these measurements establish; nothing here corrects for it.",
 		"The observation-lag advance never rewinds the scan clock below the instant being replayed: a window that fills inside its lag dies AT that instant, though the projection it records carries the true, earlier one. Any redistribution such a death causes therefore starts at the instant, not at the fill.",
 		"A reading whose row carries no `observed_at` and whose estimator is the now-anchored lifetime average has no derivable lag and is advanced by nothing. That is a real absence, not a measured zero, and the mechanism section reports those records under `unknown` rather than folding them into the fresh bucket.",

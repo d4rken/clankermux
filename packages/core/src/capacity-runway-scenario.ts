@@ -62,8 +62,17 @@ export type {
  *     created when an account joins, and not destroyed when one dies.
  *  2. At every event instant the demand is re-split across the accounts that
  *     are alive AT THAT INSTANT, by an injectable {@link ShareRule} (default:
- *     equal shares, the handover's option 1), and each account's windows burn
- *     at the share its capacity implies.
+ *     {@link proportionalShareRule}, each alive account's share of a kind's
+ *     class demand being its own measured burn over the alive accounts'), and
+ *     each account's windows burn at the share its capacity implies.
+ *     {@link equalShareRule}, the handover's option 1, was the default through
+ *     v2026.9.19 and changed because it discards every account's own burn from
+ *     the FIRST instant — with five alive accounts the one carrying 70 % of the
+ *     class's traffic is handed 20 % of the demand at `now`, before anything
+ *     has died — which the redistribution backtest measured as +14 min of
+ *     optimism at transitions. The proportional rule reproduces the current
+ *     model exactly until the first death, so only a death moves it off the
+ *     scan that ships.
  *  3. The scan walks event to event — exhaustions, resets, credit expiries —
  *     until every pooled account is dead at once, the horizon ends, or the
  *     event budget runs out.
@@ -222,7 +231,11 @@ export const proportionalShareRule: ShareRule = (candidates, windowKind) => {
 };
 
 export interface RunwayScenarioOptions {
-	/** Default {@link equalShareRule}. */
+	/**
+	 * Default {@link proportionalShareRule}. {@link equalShareRule} was the
+	 * default through v2026.9.19 — see the module doc's step 2 for why it
+	 * changed.
+	 */
 	shareRule?: ShareRule;
 	/**
 	 * Default {@link tierCapacityUnits}. Must return `null` (unknown tier, which
@@ -483,7 +496,7 @@ export function computeCapacityRunwayScenario(
 	if (accounts.length === 0) return { kind: "no-accounts", ...emptyBasis };
 
 	const horizonEndMs = now + horizonMs;
-	const shareRule = options?.shareRule ?? equalShareRule;
+	const shareRule = options?.shareRule ?? proportionalShareRule;
 	const capacityUnitsOf = options?.capacityUnits ?? tierCapacityUnits;
 	const maxEvents = options?.maxEvents ?? MAX_SCENARIO_EVENTS;
 	const observationLag = options?.observationLag ?? "advance";

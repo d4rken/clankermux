@@ -311,22 +311,33 @@ describe("end to end on a fixture database", () => {
 		);
 		expect(markdown).toContain("## Transition events");
 		expect(markdown).toContain("## Observation-lag mechanism check");
-		// The declared candidate is scored under its own heading, beside the
-		// verdict rather than inside it.
-		expect(markdown).toContain("## Share-rule candidate");
+		// The rules beside the basis are scored under their own heading, after the
+		// verdict rather than inside it, and the identity is the basis's own and
+		// sits under the verdict.
+		expect(markdown).toContain("## Share rules beside the basis");
 		expect(markdown).toContain(
 			"### Identity with the current model on the first assignment",
 		);
 		expect(markdown.indexOf("\n## Verdict\n")).toBeLessThan(
-			markdown.indexOf("\n## Share-rule candidate\n"),
+			markdown.indexOf(
+				"\n### Identity with the current model on the first assignment\n",
+			),
 		);
-		expect(markdown.indexOf("\n## Share-rule candidate\n")).toBeLessThan(
+		expect(
+			markdown.indexOf(
+				"\n### Identity with the current model on the first assignment\n",
+			),
+		).toBeLessThan(markdown.indexOf("\n## Share rules beside the basis\n"));
+		expect(markdown.indexOf("\n## Share rules beside the basis\n")).toBeLessThan(
 			markdown.indexOf("\n## Known limits\n"),
 		);
-		// The pre-correction scan and the candidate are scored beside the
-		// corrected one, in every per-model table.
+		// Every scan is scored beside the basis, in every per-model table: both
+		// pre-correction controls, the prior basis and the headroom rule.
+		expect(markdown).toContain("| scenario-equal |");
 		expect(markdown).toContain("| scenario-equal-original |");
+		expect(markdown).toContain("| scenario-headroom |");
 		expect(markdown).toContain("| scenario-proportional |");
+		expect(markdown).toContain("| scenario-proportional-original |");
 		expect(markdown).toContain(`**Verdict: ${verdict.verdict}**`);
 		expect(markdown).not.toContain("undefined");
 	});
