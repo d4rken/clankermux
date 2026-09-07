@@ -566,7 +566,9 @@ describe("RateLimitProgress", () => {
 				/>,
 			);
 
-			expect(html).toContain("On track to reset before running out");
+			expect(html).toContain(
+				"At this pace, on track to reset before running out",
+			);
 			expect(html).toContain("text-success-strong");
 			expect(html).not.toContain("text-destructive-strong");
 		});
@@ -609,7 +611,9 @@ describe("RateLimitProgress", () => {
 				/>,
 			);
 
-			expect(html).toContain("On track to reset before running out");
+			expect(html).toContain(
+				"At this pace, on track to reset before running out",
+			);
 			expect(html).toContain("text-success-strong");
 			expect(html).not.toContain("text-destructive-strong");
 		});
@@ -898,7 +902,7 @@ describe("RateLimitProgress", () => {
 				/>,
 			);
 
-			expect(html).toContain("Runs out 10h 0m before reset");
+			expect(html).toContain("At this pace, runs out 10h 0m before reset");
 			expect(html).toContain("bg-warning");
 			expect(html).toContain("text-warning-strong");
 			expect(html).not.toContain("bg-destructive");
@@ -1590,11 +1594,13 @@ describe("burn-anchored weekly projection", () => {
 				windowResetMs: resetMs,
 			},
 		});
-		expect(anchored).toContain("Runs out");
+		expect(anchored).toContain("At this pace, runs out");
 		expect(anchored).toContain("text-destructive-strong");
 
 		const unanchored = render({ pct: 40, resetMs, asOfMs: now, anchor: null });
-		expect(unanchored).toContain("On track to reset before running out");
+		expect(unanchored).toContain(
+			"At this pace, on track to reset before running out",
+		);
 	});
 
 	it("caps the anchored run-out at amber within the first hour of evidence", () => {
@@ -1612,8 +1618,96 @@ describe("burn-anchored weekly projection", () => {
 				windowResetMs: resetMs,
 			},
 		});
-		expect(html).toContain("Runs out");
+		expect(html).toContain("At this pace, runs out");
 		expect(html).toContain("text-warning-strong");
 		expect(html).not.toContain("text-destructive-strong");
+	});
+});
+
+describe("conditional projection wording", () => {
+	const HOUR = 60 * 60 * 1000;
+
+	// Every rendered run-out claim is an extrapolation of the current pace, so it
+	// has to say so. Scans the markup for the phrase rather than for one known
+	// string, which is what catches a NEW projection line added without the
+	// qualifier.
+	function unqualifiedRunOutPhrases(html: string): string[] {
+		const prefix = "At this pace, ";
+		const found: string[] = [];
+		for (const match of html.matchAll(/[Rr]uns out/g)) {
+			const start = match.index ?? 0;
+			const preceding = html.slice(Math.max(0, start - prefix.length), start);
+			if (preceding !== prefix) {
+				found.push(html.slice(Math.max(0, start - 30), start + 30));
+			}
+		}
+		return found;
+	}
+
+	it("qualifies the projection on every window it renders", () => {
+		const now = Date.now();
+		const fiveReset = now + HOUR;
+		const weeklyReset = now + 3 * 24 * HOUR;
+		const html = renderToStaticMarkup(
+			<RateLimitProgress
+				resetIso={new Date(fiveReset).toISOString()}
+				usageUtilization={90}
+				usageWindow="five_hour"
+				usageData={{
+					// Over-pacing five-hour window (a run-out projection) beside a
+					// barely-used weekly one (the reassuring branch), so both wordings
+					// render in the same markup.
+					five_hour: {
+						utilization: 90,
+						resets_at: new Date(fiveReset).toISOString(),
+					},
+					seven_day: {
+						utilization: 2,
+						resets_at: new Date(weeklyReset).toISOString(),
+					},
+				}}
+				usageAsOfIso={new Date(now).toISOString()}
+				provider="anthropic"
+				showWeekly
+				inlineProjection
+			/>,
+		);
+
+		expect(html).toContain("At this pace, runs out");
+		expect(html).toContain(
+			"At this pace, on track to reset before running out",
+		);
+		expect(unqualifiedRunOutPhrases(html)).toEqual([]);
+	});
+
+	it("reports a spent window as exhausted with the time until its reset", () => {
+		// 100% used: the window IS out, and the only duration left to state is the
+		// wait for the reset — not a margin, and not a prediction. The 20s offset
+		// keeps the rounded figure at "2h 0m" regardless of render time.
+		const now = Date.now();
+		const resetMs = now + 2 * HOUR + 20_000;
+		const html = renderToStaticMarkup(
+			<RateLimitProgress
+				resetIso={new Date(resetMs).toISOString()}
+				usageUtilization={100}
+				usageWindow="five_hour"
+				usageData={{
+					five_hour: {
+						utilization: 100,
+						resets_at: new Date(resetMs).toISOString(),
+					},
+					seven_day: null,
+				}}
+				usageAsOfIso={new Date(now).toISOString()}
+				provider="anthropic"
+				showWeekly
+				inlineProjection
+			/>,
+		);
+
+		expect(html).toContain("Quota exhausted — resets in 2h 0m");
+		// Tone is unchanged by this rewording: amber, not red.
+		expect(html).toContain("text-warning-strong");
+		expect(unqualifiedRunOutPhrases(html)).toEqual([]);
 	});
 });

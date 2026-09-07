@@ -43,7 +43,7 @@ it("shows a usable weekly forecast beside the reason a session is learning", () 
 		/>,
 	);
 	expect(html).toContain("52m remaining, then a fresh reading");
-	expect(html).toContain("Runs out in 2h");
+	expect(html).toContain("At this pace, runs out in 2h");
 	expect(html).toContain("combined account runway unknown");
 });
 

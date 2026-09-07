@@ -95,3 +95,59 @@ describe("PoolDetailSection with duplicate account names", () => {
 		expect(errors.filter((e) => e.includes('unique "key" prop'))).toEqual([]);
 	});
 });
+
+describe("projection wording", () => {
+	it("states the at-risk and family-cap projections as conditional on the pace", () => {
+		const base = sharedNamePool();
+		const { html } = renderCapturingErrors({
+			...base,
+			atRisk: [
+				{
+					accountId: "id-reporting",
+					name: "claude",
+					pct: 40,
+					resetMs: NOW + DAY,
+					exhaustsAtMs: NOW + DAY / 2,
+					timeToExhaustMs: DAY / 2,
+					remainingMs: DAY / 2,
+				},
+			],
+			familyWeekly: [
+				{
+					family: "opus",
+					label: "Opus",
+					worstPct: 90,
+					worstAccountName: "claude",
+					earliestResetMs: NOW + DAY,
+					elevated: true,
+					exhaustedCount: 0,
+					elevatedCount: 1,
+					atRiskCount: 1,
+					learningCount: 0,
+					soonestExhaustsAtMs: NOW + DAY / 3,
+					accounts: [
+						{
+							accountId: "id-reporting",
+							name: "claude",
+							pct: 90,
+							resetMs: NOW + DAY,
+							exhaustsAtMs: NOW + DAY / 3,
+						},
+						{
+							accountId: "id-other",
+							name: "other",
+							pct: 10,
+							resetMs: NOW + DAY,
+							exhaustsAtMs: null,
+						},
+					],
+				},
+			],
+		});
+		expect(html).toContain("at this pace, runs out in");
+		expect(html).toContain("at this pace, hits the cap");
+		// No projection on this surface reads as a fact.
+		expect(html).not.toMatch(/[^,] runs out in/);
+		expect(html).not.toMatch(/>out /);
+	});
+});

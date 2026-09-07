@@ -241,7 +241,9 @@ export function runwayQualifier(
 	const effective = effectiveRunwayOutcome(outcome, now);
 	const parts: string[] = [];
 	if (effective.kind === "beyond-horizon") {
-		parts.push(`no run-out within ${formatDurationDhm(effective.horizonMs)}`);
+		parts.push(
+			`at this pace, no run-out within ${formatDurationDhm(effective.horizonMs)}`,
+		);
 		const margin = runwayPaceMargin(effective, now);
 		if (margin) {
 			parts.push(`out ${margin.remainingLabel} at +${margin.pacePct}% pace`);

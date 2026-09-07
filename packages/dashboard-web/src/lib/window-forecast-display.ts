@@ -27,9 +27,9 @@ export function windowForecastMessage(
 		forecast.exhaustsAtMs == null ||
 		(window.resetsAtMs != null && forecast.exhaustsAtMs >= window.resetsAtMs)
 	) {
-		return `On track to reset before running out${qualifier}`;
+		return `At this pace, on track to reset before running out${qualifier}`;
 	}
 	return forecast.exhaustsAtMs <= now
 		? `Projected run-out reached — waiting for a fresh reading${qualifier}`
-		: `Runs out in ${formatDurationDhm(forecast.exhaustsAtMs - now)}${qualifier}`;
+		: `At this pace, runs out in ${formatDurationDhm(forecast.exhaustsAtMs - now)}${qualifier}`;
 }

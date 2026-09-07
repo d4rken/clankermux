@@ -252,8 +252,13 @@ function computeProjectedMessage(
 	if (estimate.source === "already-exhausted") {
 		// A spent window with no live reset left has no margin to report.
 		if (!Number.isFinite(resetMs) || resetMs <= now) return null;
+		// The window IS at 100 %: this is an observation, and the duration is the
+		// wait for the reset, not a margin between a projected run-out and it.
+		// Every other run-out line on the screen is explicitly conditional on the
+		// current pace, so a bare "Runs out" surviving here would read as the one
+		// remaining prediction stated as fact.
 		return {
-			message: `Runs out ${formatDuration(resetMs - now)} before reset`,
+			message: `Quota exhausted — resets in ${formatDuration(resetMs - now)}`,
 			tone: "warning",
 		};
 	}
@@ -263,7 +268,7 @@ function computeProjectedMessage(
 	}
 	const marginMs = resetMs - estimate.exhaustsAtMs;
 	return {
-		message: `Runs out ${formatDuration(marginMs)} before reset`,
+		message: `At this pace, runs out ${formatDuration(marginMs)} before reset`,
 		tone: estimate.lowConfidence
 			? "warning"
 			: earlyExhaustionTone(marginMs, windowDurationMs),
