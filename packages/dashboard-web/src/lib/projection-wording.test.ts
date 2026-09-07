@@ -17,17 +17,33 @@ const SOURCE_GLOB = "**/*.{ts,tsx}";
 const TEST_FILE = /\.(test|dom-test)\.tsx?$/;
 
 /**
- * String and template literals that OPEN with "Runs out " — the shape a
- * projection line takes. A trailing space is required, so prose mentioning
- * `"Runs out"` in a comment is not a match.
+ * The phrases a projection line is built from, in either case and whether they
+ * sit in a string literal or in raw JSX text: "runs out …", "no run-out
+ * within …", "on track to reset …", "hits the cap …". Each must be preceded on
+ * its line by the qualifier, "at this pace, " (any case), or it reads as a
+ * statement of fact.
  */
-const RUN_OUT_LITERAL = /["'`]Runs out [^\n]*/g;
+const PROJECTION_PHRASE =
+	/\b(runs out |no run-out within |on track to reset |hits the cap )/i;
+const QUALIFIED =
+	/at this pace, [^\n]*\b(runs out |no run-out within |on track to reset |hits the cap )/i;
+
+/** A comment line: prose about projections, not a projection. */
+const COMMENT_LINE = /^\s*(\/\/|\/?\*)/;
 
 /**
  * The single legitimate exception: the runway chip on the Limits page, whose
- * label carries the qualifier itself because it has no room for a sentence.
+ * label carries the qualifier AFTER the phrase because it has no room for a
+ * sentence.
  */
-const CHIP_LABEL = '"Runs out at this pace"';
+const CHIP_LABEL = /"Runs out at this pace"/;
+
+/**
+ * Explanatory prose that mentions running out without projecting anything:
+ * the credit tooltip's "when the weekly window runs out". Listed verbatim so a
+ * new sentence cannot hide behind the exemption.
+ */
+const PROSE_EXEMPT = [/when the weekly window runs out/];
 
 it("leaves no unqualified run-out projection in the dashboard sources", () => {
 	const offenders: string[] = [];
@@ -36,12 +52,27 @@ it("leaves no unqualified run-out projection in the dashboard sources", () => {
 	})) {
 		if (TEST_FILE.test(relativePath)) continue;
 		const source = readFileSync(join(SRC_ROOT, relativePath), "utf8");
-		for (const match of source.matchAll(RUN_OUT_LITERAL)) {
-			if (match[0].startsWith(CHIP_LABEL)) continue;
-			offenders.push(`${relativePath}: ${match[0].slice(0, 60)}`);
-		}
+		source.split("\n").forEach((line, index) => {
+			if (COMMENT_LINE.test(line)) return;
+			if (!PROJECTION_PHRASE.test(line)) return;
+			if (QUALIFIED.test(line)) return;
+			if (CHIP_LABEL.test(line)) return;
+			if (PROSE_EXEMPT.some((prose) => prose.test(line))) return;
+			offenders.push(
+				`${relativePath}:${index + 1}: ${line.trim().slice(0, 70)}`,
+			);
+		});
 	}
 	expect(offenders).toEqual([]);
+});
+
+it("would flag an unqualified projection in raw JSX text", () => {
+	// The pool detail's at-risk line is JSX text, not a string literal; the
+	// scan has to see it, or the line could lose its qualifier unnoticed.
+	const line = '\t\t\t\t\t\t\t\t\truns out in{" "}';
+	expect(PROJECTION_PHRASE.test(line)).toBe(true);
+	expect(QUALIFIED.test(line)).toBe(false);
+	expect(QUALIFIED.test(`at this pace, ${line.trim()}`)).toBe(true);
 });
 
 it("scans a non-empty set of dashboard sources", () => {

@@ -353,7 +353,7 @@ export function PoolDetailSection({
 													<span className="tabular-nums whitespace-nowrap">
 														{a.exhaustsAtMs !== null && (
 															<span className="text-muted-foreground">
-																out{" "}
+																at this pace, hits the cap{" "}
 																{windowTimeLabel(a.exhaustsAtMs, "seven_day")} ·{" "}
 															</span>
 														)}

@@ -65,7 +65,8 @@ describe("MetricCard availability states", () => {
 		// the caption is caller-generated and unbounded, so the CAPTION has to be
 		// the element that yields. Asserted through the two tags rather than by
 		// pinning the exact markup around the title text.
-		const caption = "11 keys · no run-out within 14d · 3 accounts unknown";
+		const caption =
+			"11 keys · at this pace, no run-out within 14d · 3 accounts unknown";
 		const html = renderToStaticMarkup(
 			<MetricCard
 				title="Quota Runway"
