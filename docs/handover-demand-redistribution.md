@@ -166,9 +166,10 @@ the burn that account contributed, and at a death it moves the dead account's
 demand to the survivors in proportion to their own burn. It is scored on the
 current replay range against the same criteria A to D, under
 `## Share-rule candidate` in the report, with its identity with the current
-model checked in the replay. It is a candidate and nothing more: the verdict
-basis is still the pre-declared equal split, `VERDICT_RULE` is unchanged, and
-the verdict above is computed without it.
+model checked in the replay. Through v2026.9.19 it was a candidate and nothing
+more: the verdict basis was the pre-declared equal split, `VERDICT_RULE` was
+unchanged, and the verdict above was computed without it. That is no longer the
+case — see the re-declaration below.
 
 Scored on 2026-07-01 to 2026-09-06 (`## Share-rule candidate` in the report):
 criterion A passes with a paired median signed error on transitions of −11.9 min
@@ -187,6 +188,27 @@ changed from optimistic to pessimistic when the equal split was replaced by own
 burn, which is the mechanism this candidate was declared to test. What it does
 not settle is the trade the two rules make on Claude five-hour windows: the
 equal split has the higher F1 through precision, the candidate through recall.
+
+**The verdict basis is re-declared as `scenario-proportional` on 2026-09-07.**
+What re-declares it is the mechanism rather than the scores above: the equal
+split discards each account's own burn from the first instant, which is where
+the prior basis's +14 min of optimism at transitions comes from, and the
+proportional rule reproduces the current model until a death. The equal split
+is kept scored beside it as the PRIOR basis, under
+`## Share rules beside the basis` in the report, together with the headroom
+rule; neither enters the verdict. The basis gains its own pre-correction
+control, `scenario-proportional-original`, so criterion D compares each rule
+against its own uncorrected scan instead of against the equal split's — the
+comparison that made D's F1 leg fail above was across two share rules and the
+lag advance at once. `## Observation-lag mechanism check` keeps the equal pair
+as its subject, because that is the pair the correction was measured on when it
+shipped, and its conclusion carries over by the same mechanism: both scans take
+the same advance, from the same per-path anchor, before the walk starts. The
+scenario's own default share rule is now the proportional one
+(`computeCapacityRunwayScenario` with no `shareRule` option); `equalShareRule`
+stays exported and unchanged. Nothing in production reads the scenario, so
+putting either rule in front of a user is a separate step, gated on the verdict
+as before.
 
 The pending Codex weekly windows do not gate the verdict. In both Codex
 classes the scenario and the current model score identically, row for row,
@@ -606,7 +628,8 @@ not instants (the composite study's lesson).
    quota-drift's implied capacities. Half a day.
 2. Scenario computation in core beside the current model: demand memory for
    paused/removed accounts, share rule as an injected function (equal split
-   first), event loop, tests from section 5. Two to three days.
+   first; the default became the proportional rule on 2026-09-07), event loop,
+   tests from section 5. Two to three days.
 3. Pool-level backtest mode and the transition replays; write the report;
    apply the verdict rule. One to two days, mostly waiting on runs.
 4. Only then the surfaces: `/api/runway` scenario field, RunwayCard second

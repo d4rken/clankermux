@@ -11,16 +11,17 @@ import {
 	type AvailabilityTimeline,
 	absorptionChecks,
 	availabilityAt,
+	BESIDE_BASIS_MODELS,
+	type BesideBasisScores,
+	basisIdentityCheck,
 	buildAvailabilityTimelines,
 	buildRosterAtInstant,
-	CANDIDATE_MODEL,
-	type CandidateScores,
+	CONTROL_MODELS,
 	type CohortScores,
 	type CohortSet,
-	candidateIdentityCheck,
 	churnRows,
 	detectTransitions,
-	evaluateCandidate,
+	evaluateBesideBasis,
 	evaluateVerdict,
 	formatRedistributionReport,
 	headroomShareRule,
@@ -30,7 +31,11 @@ import {
 	OBSERVATION_AGE_BUCKETS,
 	OVERALL_BOOTSTRAP_LABEL,
 	observationLagChecks,
+	type PairedAbsDelta,
+	type PairedBias,
 	PEER_LOSS_PREFIX_MS,
+	PRIOR_BASIS_CONTROL_MODEL,
+	PRIOR_BASIS_MODEL,
 	pairedAbsMedian,
 	pairedSignedMedian,
 	prepareSeries,
@@ -49,6 +54,7 @@ import {
 	replayRange,
 	SCENARIO_MODEL_IDS,
 	SCENARIO_MODELS,
+	type ScenarioModel,
 	SINCE_DEATH_BUCKETS,
 	scoreCohorts,
 	survivorSlopeTrajectory,
@@ -56,6 +62,8 @@ import {
 	type TransitionEvent,
 	tallyWindowFills,
 	transitionsAt,
+	VERDICT_BASIS_CONTROL_MODEL,
+	VERDICT_BASIS_MODEL,
 	VERDICT_RULE,
 	type Verdict,
 	type WindowFill,
@@ -1031,6 +1039,7 @@ function record(
 		firstEvent: false,
 		peerDiedInLag: false,
 		exactShiftEligible: false,
+		basisFirstAssignment: false,
 		lagAnchorKnown: true,
 		...overrides,
 	};
@@ -1147,8 +1156,9 @@ describe("scoreCohorts", () => {
 			true,
 		);
 		// Three statistics, two cohorts, and four (scenario, baseline) pairs: the
-		// verdict basis against the current model and against the pre-correction
-		// scan, and the candidate against the current model and against the basis.
+		// verdict basis against the current model and against its OWN
+		// pre-correction scan, and the prior basis against the same two of its
+		// own. The headroom rule carries no pair.
 		expect(cohorts.bootstrap).toHaveLength(24);
 		expect(
 			cohorts.bootstrap.filter(
@@ -1163,12 +1173,15 @@ describe("scoreCohorts", () => {
 			),
 		).toEqual(
 			new Set([
-				"scenario-equal::current",
-				"scenario-equal::scenario-equal-original",
-				`${CANDIDATE_MODEL}::current`,
-				`${CANDIDATE_MODEL}::scenario-equal`,
+				`${VERDICT_BASIS_MODEL}::current`,
+				`${VERDICT_BASIS_MODEL}::${VERDICT_BASIS_CONTROL_MODEL}`,
+				`${PRIOR_BASIS_MODEL}::current`,
+				`${PRIOR_BASIS_MODEL}::${PRIOR_BASIS_CONTROL_MODEL}`,
 			]),
 		);
+		expect(
+			cohorts.bootstrap.some((entry) => entry.scenario === "scenario-headroom"),
+		).toBe(false);
 		expect(cohorts.bootstrap.map((entry) => entry.statistic)).toContain(
 			"medianSignedErrorMinutes",
 		);
@@ -1185,61 +1198,59 @@ const metrics = (over: Partial<BacktestMetrics>): BacktestMetrics => ({
 	...over,
 });
 
+const NO_BIAS: PairedBias = { n: 0, medianA: null, medianB: null };
+const _NO_ABS: PairedAbsDelta = { n: 0, medianDeltaMinutes: null };
+
+/** One cohort's scores, from the pairs a test cares about. */
 const cohort = (
 	label: string,
 	rows: Array<[ReplayModel, Partial<BacktestMetrics>]>,
-	pairedBias: CohortScores["pairedBias"],
-	vsOriginal?: {
-		bias?: CohortScores["pairedBias"];
-		abs?: CohortScores["pairedAbsVsOriginal"];
-	},
-	candidate?: {
-		bias?: CohortScores["candidateBias"];
-		abs?: CohortScores["candidateAbsVsOriginal"];
-	},
-): CohortScores => ({
-	label,
-	records: 10,
-	lifecycles: 5,
-	episodes: 2,
-	balanced: rows.map(([model, over]) => ({
-		estimator: model,
-		metrics: metrics(over),
-	})),
-	perRecord: rows.map(([model, over]) => ({
-		estimator: model,
-		metrics: metrics(over),
-	})),
-	pairedBias,
-	pairedBiasVsOriginal: vsOriginal?.bias ?? {
-		n: 0,
-		medianA: null,
-		medianB: null,
-	},
-	pairedAbsVsOriginal: vsOriginal?.abs ?? { n: 0, medianDeltaMinutes: null },
-	candidateBias: candidate?.bias ?? { n: 0, medianA: null, medianB: null },
-	candidateAbsVsOriginal: candidate?.abs ?? {
-		n: 0,
-		medianDeltaMinutes: null,
-	},
-});
+	pairs: {
+		biasVsCurrent?: Partial<Record<ScenarioModel, PairedBias>>;
+		biasVsControl?: Partial<Record<ScenarioModel, PairedBias>>;
+		absVsControl?: Partial<Record<ScenarioModel, PairedAbsDelta>>;
+	} = {},
+): CohortScores => {
+	const biasVsCurrent = {} as Record<ScenarioModel, PairedBias>;
+	for (const model of SCENARIO_MODEL_IDS) {
+		biasVsCurrent[model] = pairs.biasVsCurrent?.[model] ?? NO_BIAS;
+	}
+	return {
+		label,
+		records: 10,
+		lifecycles: 5,
+		episodes: 2,
+		balanced: rows.map(([model, over]) => ({
+			estimator: model,
+			metrics: metrics(over),
+		})),
+		perRecord: rows.map(([model, over]) => ({
+			estimator: model,
+			metrics: metrics(over),
+		})),
+		biasVsCurrent,
+		biasVsControl: pairs.biasVsControl ?? {},
+		absVsControl: pairs.absVsControl ?? {},
+	};
+};
 
 function verdictFixture(options: {
+	/** The VERDICT BASIS's numbers: `scenario-proportional`. */
 	scenarioBias: number | null;
 	currentBias: number | null;
 	scenarioRecall: number | null;
 	currentRecall: number | null;
 	scenarioF1: number | null;
 	currentF1: number | null;
-	/** F1 of the pre-correction scan, criterion D's comparison. */
+	/** F1 of the basis's OWN pre-correction scan, criterion D's comparison. */
 	originalF1?: number | null;
 	originalRecall?: number | null;
-	/** Paired median of |err corrected| - |err original|, in minutes. */
+	/** Paired median of |err basis| - |err basis control|, in minutes. */
 	pairedAbsVsOriginal?: number | null;
 	p97_5: number | null;
-	/** p97.5 of the entry whose baseline is the ORIGINAL scan. */
+	/** p97.5 of the entry whose baseline is the basis's own control. */
 	p97_5Original?: number | null;
-	/** Drop the current-baseline bootstrap entry, leaving only the original one. */
+	/** Drop the current-baseline bootstrap entry, leaving only the control one. */
 	originalBaselineOnly?: boolean;
 	unlabelled?: boolean;
 	/** What the codex account's own event (and its record) is tagged with. */
@@ -1251,68 +1262,87 @@ function verdictFixture(options: {
 	 * it, so it never reaches the common cohort. Implies `unlabelled`.
 	 */
 	codexWithheld?: boolean;
-	/** The DECLARED CANDIDATE's numbers, which no criterion of the verdict reads. */
-	candidateBias?: number | null;
-	candidateF1?: number | null;
-	candidateAbsVsOriginal?: number | null;
-	candidateP97_5?: number | null;
+	/** The PRIOR basis's numbers, which no criterion of the verdict reads. */
+	priorBias?: number | null;
+	priorF1?: number | null;
+	priorAbsVsOriginal?: number | null;
+	priorP97_5?: number | null;
+	/** The prior basis's own pre-correction scan, its criterion D benchmark. */
+	priorOriginalF1?: number | null;
 }): { cohorts: CohortSet; replay: ReplayResult } {
 	const transition = cohort(
 		"Any transition",
 		[
 			["current", { recall: options.currentRecall, f1: options.currentF1 }],
 			[
-				"scenario-equal",
+				PRIOR_BASIS_MODEL,
+				{
+					recall: options.scenarioRecall,
+					f1: options.priorF1 === undefined ? 0.65 : options.priorF1,
+				},
+			],
+			[
+				PRIOR_BASIS_CONTROL_MODEL,
+				{
+					recall: options.originalRecall ?? 0.75,
+					f1:
+						options.priorOriginalF1 === undefined
+							? 0.6
+							: options.priorOriginalF1,
+				},
+			],
+			["scenario-headroom", {}],
+			[
+				VERDICT_BASIS_MODEL,
 				{ recall: options.scenarioRecall, f1: options.scenarioF1 },
 			],
 			[
-				"scenario-equal-original",
+				VERDICT_BASIS_CONTROL_MODEL,
 				{
 					recall: options.originalRecall ?? 0.75,
 					f1: options.originalF1 === undefined ? 0.6 : options.originalF1,
 				},
 			],
-			["scenario-headroom", {}],
-			[
-				"scenario-proportional",
-				{
-					recall: options.scenarioRecall,
-					f1: options.candidateF1 === undefined ? 0.65 : options.candidateF1,
-				},
-			],
 		],
-		{ n: 4, medianA: options.scenarioBias, medianB: options.currentBias },
 		{
-			bias: {
-				n: 4,
-				medianA: options.scenarioBias,
-				medianB: options.scenarioBias,
+			biasVsCurrent: {
+				[VERDICT_BASIS_MODEL]: {
+					n: 4,
+					medianA: options.scenarioBias,
+					medianB: options.currentBias,
+				},
+				[PRIOR_BASIS_MODEL]: {
+					n: 4,
+					medianA: options.priorBias === undefined ? -10 : options.priorBias,
+					medianB: options.currentBias,
+				},
 			},
-			abs: {
-				n: 4,
-				medianDeltaMinutes:
-					options.pairedAbsVsOriginal === undefined
-						? -3
-						: options.pairedAbsVsOriginal,
+			biasVsControl: {
+				[VERDICT_BASIS_MODEL]: {
+					n: 4,
+					medianA: options.scenarioBias,
+					medianB: options.scenarioBias,
+				},
 			},
-		},
-		{
-			bias: {
-				n: 4,
-				medianA:
-					options.candidateBias === undefined ? -10 : options.candidateBias,
-				medianB: options.currentBias,
-			},
-			abs: {
-				n: 4,
-				medianDeltaMinutes:
-					options.candidateAbsVsOriginal === undefined
-						? -2
-						: options.candidateAbsVsOriginal,
+			absVsControl: {
+				[VERDICT_BASIS_MODEL]: {
+					n: 4,
+					medianDeltaMinutes:
+						options.pairedAbsVsOriginal === undefined
+							? -3
+							: options.pairedAbsVsOriginal,
+				},
+				[PRIOR_BASIS_MODEL]: {
+					n: 4,
+					medianDeltaMinutes:
+						options.priorAbsVsOriginal === undefined
+							? -2
+							: options.priorAbsVsOriginal,
+				},
 			},
 		},
 	);
-	const overall = cohort("Overall", [], { n: 0, medianA: null, medianB: null });
+	const overall = cohort("Overall", []);
 	// One `add` per servable class: the anthropic half is always labelled, the
 	// codex half only when the fixture says so.
 	const codexEvent = options.codexEvent ?? "add";
@@ -1356,16 +1386,12 @@ function verdictFixture(options: {
 	const cohorts: CohortSet = {
 		overall,
 		anyTransition: transition,
-		byTag: [cohort("add", [], { n: 0, medianA: null, medianB: null })],
+		byTag: [cohort("add", [])],
 		peerExhaustionBySinceDeath: [],
 		slopeTrajectory: [],
 		churn: [],
 		byClassAndKind: [],
-		scenarioExtra: cohort("Scenario-only", [], {
-			n: 0,
-			medianA: null,
-			medianB: null,
-		}),
+		scenarioExtra: cohort("Scenario-only", []),
 		bootstrap: [
 			...(options.originalBaselineOnly
 				? []
@@ -1373,7 +1399,7 @@ function verdictFixture(options: {
 						{
 							label: OVERALL_BOOTSTRAP_LABEL,
 							statistic: "f1",
-							scenario: "scenario-equal" as const,
+							scenario: VERDICT_BASIS_MODEL,
 							baseline: "current" as const,
 							p2_5: -0.1,
 							p50: 0.01,
@@ -1384,8 +1410,8 @@ function verdictFixture(options: {
 			{
 				label: OVERALL_BOOTSTRAP_LABEL,
 				statistic: "f1",
-				scenario: "scenario-equal" as const,
-				baseline: "scenario-equal-original" as const,
+				scenario: VERDICT_BASIS_MODEL,
+				baseline: VERDICT_BASIS_CONTROL_MODEL,
 				p2_5: -0.4,
 				p50: -0.3,
 				p97_5:
@@ -1395,12 +1421,11 @@ function verdictFixture(options: {
 			{
 				label: OVERALL_BOOTSTRAP_LABEL,
 				statistic: "f1",
-				scenario: CANDIDATE_MODEL,
+				scenario: PRIOR_BASIS_MODEL,
 				baseline: "current" as const,
 				p2_5: -0.15,
 				p50: 0.02,
-				p97_5:
-					options.candidateP97_5 === undefined ? 0.18 : options.candidateP97_5,
+				p97_5: options.priorP97_5 === undefined ? 0.18 : options.priorP97_5,
 				samples: 1000,
 			},
 		],
@@ -1414,7 +1439,7 @@ function verdictFixture(options: {
 	const withheldRecords = [
 		codexWeeklyRecord,
 		record({
-			model: "scenario-equal",
+			model: VERDICT_BASIS_MODEL,
 			accountId: "X",
 			T: T0,
 			provider: "codex",
@@ -1586,15 +1611,54 @@ describe("evaluateVerdict", () => {
 		});
 		const verdict = evaluateVerdict(cohorts, replay);
 		const names = verdict.criteria[3].values.map((value) => value.name);
-		expect(names).toContain("recall, scenario-equal");
-		expect(names).toContain("recall, scenario-equal-original");
+		expect(names).toContain(`recall, ${VERDICT_BASIS_MODEL}`);
+		expect(names).toContain(`recall, ${VERDICT_BASIS_CONTROL_MODEL}`);
 		// A worse recall than the original does not fail D: an ETA moved earlier
 		// never leaves the before-reset set.
 		expect(verdict.criteria[3].pass).toBe(true);
 	});
 
+	test("the verdict is computed on the proportional basis, not the equal split", () => {
+		// The two scans differ everywhere they can: the basis is pessimistic by 20
+		// minutes on transitions, the prior basis optimistic by 90, and the prior
+		// basis's own F1 and CI would fail B and C if the verdict read them.
+		const { cohorts, replay } = verdictFixture({
+			...base,
+			scenarioBias: -20,
+			priorBias: 90,
+			priorF1: 0.1,
+			priorP97_5: -0.5,
+		});
+		const verdict = evaluateVerdict(cohorts, replay);
+		const criterionA = verdict.criteria[0];
+		expect(criterionA.values[0].name).toBe(
+			`paired median signed error, ${VERDICT_BASIS_MODEL} (min)`,
+		);
+		expect(criterionA.values[0].value).toBe(-20);
+		expect(criterionA.values.map((value) => value.value)).not.toContain(90);
+		expect(verdict.criteria.map((entry) => entry.pass)).toEqual([
+			true,
+			true,
+			true,
+			true,
+		]);
+		expect(verdict.verdict).toBe("replace");
+
+		// And criterion D reads the basis's OWN control: worsening the prior
+		// basis's control changes nothing, worsening the basis's own fails it.
+		const priorControl = verdictFixture({ ...base, priorOriginalF1: 0.99 });
+		expect(
+			evaluateVerdict(priorControl.cohorts, priorControl.replay).criteria[3]
+				.pass,
+		).toBe(true);
+		const ownControl = verdictFixture({ ...base, originalF1: 0.99 });
+		expect(
+			evaluateVerdict(ownControl.cohorts, ownControl.replay).criteria[3].pass,
+		).toBe(false);
+	});
+
 	test("criterion C reads the CURRENT-baseline bootstrap entry only", () => {
-		// The original-baseline entry is entirely below zero; C must not see it.
+		// The control-baseline entry is entirely below zero; C must not see it.
 		const { cohorts, replay } = verdictFixture({
 			...base,
 			p97_5Original: -0.2,
@@ -1659,13 +1723,27 @@ describe("knownLimitsFor", () => {
 			cohorts,
 			evaluateVerdict(cohorts, replay),
 		);
-		const candidateLimit = limits.find((limit) =>
-			limit.startsWith("The declared candidate share rule"),
+		const basisLimit = limits.find((limit) =>
+			limit.startsWith("The verdict basis weights each account"),
 		);
-		expect(candidateLimit).toContain(
+		expect(basisLimit).toContain(
 			"has no accepted measured-demand contribution",
 		);
-		expect(candidateLimit).not.toContain("has no slope");
+		expect(basisLimit).not.toContain("has no slope");
+		// The rule's own declaration: the survivors are the denominator.
+		expect(basisLimit).toContain(
+			"The denominator is the survivors, not the class",
+		);
+		expect(basisLimit).not.toContain(
+			"over the class's measured demand for that kind",
+		);
+		const headroomLimit = limits.find((limit) =>
+			limit.startsWith("The headroom share rule"),
+		);
+		expect(headroomLimit).toContain(
+			"The verdict basis is the proportional share rule, re-declared on 2026-09-07",
+		);
+		expect(headroomLimit).toContain("the basis through v2026.9.19");
 	});
 });
 
@@ -1729,7 +1807,7 @@ describe("formatRedistributionReport", () => {
 		const result = replayRange(fixture.rows, named, range, 6 * 60, 20260823);
 		const { markdown, verdict } = reportFor(result, fixture.rows);
 
-		for (const heading of [
+		const headings = [
 			"# Redistribution backtest",
 			"## Dataset",
 			"## Methodology",
@@ -1743,11 +1821,23 @@ describe("formatRedistributionReport", () => {
 			"### Bootstrap",
 			"## Pool calibration (all-out within 14 d)",
 			"## Verdict",
+			"### Identity with the current model on the first assignment",
+			"## Share rules beside the basis",
+			`### \`${PRIOR_BASIS_MODEL}\``,
+			"### `scenario-headroom`",
 			"## Known limits",
 			"## Notes",
-		]) {
+		];
+		for (const heading of headings) {
 			expect(markdown).toContain(heading);
 		}
+		// And in that order: the identity is part of the verdict, the rules
+		// scored beside it come after it and before the limits.
+		expect(headings.map((heading) => markdown.indexOf(heading))).toEqual(
+			[...headings.map((heading) => markdown.indexOf(heading))].sort(
+				(a, b) => a - b,
+			),
+		);
 		expect(markdown).toContain(`**Verdict: ${verdict.verdict}**`);
 		expect(markdown).not.toContain("undefined");
 		expect(markdown).not.toContain("NaN");
@@ -1935,11 +2025,12 @@ function peerPerModel(options: {
 	return out;
 }
 
-describe("the share-rule candidate section", () => {
-	const candidateFixture = (): {
+describe("the share rules beside the basis", () => {
+	const besideFixture = (): {
 		markdown: string;
 		verdict: Verdict;
-		candidate: CandidateScores;
+		beside: BesideBasisScores[];
+		identity: ReturnType<typeof basisIdentityCheck>;
 		replay: ReplayResult;
 		cohorts: CohortSet;
 	} => {
@@ -1956,7 +2047,8 @@ describe("the share-rule candidate section", () => {
 		return {
 			markdown: reportOf(replay, cohorts, verdict, fixture.rows.length),
 			verdict,
-			candidate: evaluateCandidate(cohorts, replay),
+			beside: evaluateBesideBasis(cohorts),
+			identity: basisIdentityCheck(replay),
 			replay,
 			cohorts,
 		};
@@ -1964,108 +2056,134 @@ describe("the share-rule candidate section", () => {
 
 	/** The section itself, without the mentions of it elsewhere in the report. */
 	const sectionOf = (markdown: string): string => {
-		const from = markdown.indexOf("\n## Share-rule candidate\n");
+		const from = markdown.indexOf("\n## Share rules beside the basis\n");
 		expect(from).toBeGreaterThan(-1);
 		return markdown.slice(from, markdown.indexOf("\n## Known limits\n"));
 	};
 
-	test("renders all four criteria, their verdicts and the identity line", () => {
-		const { markdown, candidate } = candidateFixture();
+	/** The verdict section, up to the rules scored beside it. */
+	const verdictSectionOf = (markdown: string): string =>
+		markdown.slice(
+			markdown.indexOf("\n## Verdict\n"),
+			markdown.indexOf("\n## Share rules beside the basis\n"),
+		);
+
+	test("renders the prior basis and the headroom rule, four criteria each", () => {
+		const { markdown, beside } = besideFixture();
 		const section = sectionOf(markdown);
 
-		// Placed between the verdict and the known limits, and named as declared.
+		// Placed between the verdict and the known limits, and named for what it
+		// holds rather than for one candidate.
 		expect(markdown.indexOf("\n## Verdict\n")).toBeLessThan(
-			markdown.indexOf("\n## Share-rule candidate\n"),
+			markdown.indexOf("\n## Share rules beside the basis\n"),
 		);
-		expect(markdown.indexOf("\n## Share-rule candidate\n")).toBeLessThan(
-			markdown.indexOf("\n## Known limits\n"),
-		);
-		expect(section).toContain("DECLARED CANDIDATE");
-		expect(section).toContain("has no fitted coefficient");
-		expect(section).toContain("It is not the verdict basis");
-
-		expect(candidate.criteria.map((entry) => entry.id)).toEqual([
-			"A",
-			"B",
-			"C",
-			"D",
-		]);
-		for (const row of candidate.rows) {
-			expect(section).toContain(`| ${row.id}. ${row.label} |`);
-			// Every criterion states its own result for the candidate.
-			expect(
-				section.includes("PASS") ||
-					section.includes("FAIL") ||
-					section.includes("INDETERMINATE"),
-			).toBe(true);
-		}
+		expect(
+			markdown.indexOf("\n## Share rules beside the basis\n"),
+		).toBeLessThan(markdown.indexOf("\n## Known limits\n"));
+		expect(section).toContain("NONE of it enters the verdict");
 		expect(section).toContain(
-			"### Identity with the current model on the first assignment",
+			`\`${PRIOR_BASIS_MODEL}\` is here because it WAS the verdict basis through v2026.9.19`,
 		);
-		expect(section).toContain("eligible records");
+
+		expect(beside.map((entry) => entry.model)).toEqual([
+			PRIOR_BASIS_MODEL,
+			"scenario-headroom",
+		]);
+		for (const entry of beside) {
+			expect(entry.criteria.map((criterion) => criterion.id)).toEqual([
+				"A",
+				"B",
+				"C",
+				"D",
+			]);
+			expect(section).toContain(`### \`${entry.model}\``);
+			for (const row of entry.rows) {
+				expect(section).toContain(`| ${row.id}. ${row.label} |`);
+			}
+		}
 		expect(section).not.toContain("undefined");
 		expect(section).not.toContain("NaN");
 		expect(markdown).not.toContain("undefined");
 		expect(markdown).not.toContain("NaN");
 	});
 
-	test("D's rows print the F1 it fails on, beside the benchmark it is judged against", () => {
-		const { markdown, candidate } = candidateFixture();
+	test("the prior basis is judged against its OWN pre-correction control", () => {
+		const { markdown, beside } = besideFixture();
 		const section = sectionOf(markdown);
+		const prior = beside[0];
+		expect(prior.control).toBe(PRIOR_BASIS_CONTROL_MODEL);
 		expect(section).toContain(
-			"| criterion | statistic | candidate | scenario-equal | current | scenario-equal-original | candidate result |",
+			`| criterion | statistic | ${PRIOR_BASIS_MODEL} | ${VERDICT_BASIS_MODEL} | current | ${PRIOR_BASIS_CONTROL_MODEL} | result |`,
 		);
-
-		// D turns on two statistics, so it has a row for each: the error change it
-		// passed on, and the F1 comparison that decides it against the fixed
-		// benchmark.
-		const dRows = candidate.rows.filter((row) => row.id === "D");
+		// D turns on two statistics, so it has a row for each: the F1 comparison
+		// against its own control, and the error change it is judged on beside it.
+		const dRows = prior.rows.filter((row) => row.id === "D");
 		expect(dRows.map((row) => row.statistic)).toEqual([
 			"F1 on transitions",
-			"paired median absolute-error change against the pre-correction scan (min)",
+			"paired median absolute-error change against its own pre-correction scan (min)",
 		]);
-		expect(dRows[0].original).not.toBeNull();
-		expect(dRows[1].original).toBeNull();
+		expect(dRows[0].control).not.toBeNull();
+		expect(dRows[1].control).toBeNull();
 		expect(dRows[0].pass).toBe(dRows[1].pass);
-		expect(section).toContain(
-			`| D. ${dRows[0].label} | F1 on transitions | ${(dRows[0].candidate as number).toFixed(3)} | ${(dRows[0].verdictBasis as number).toFixed(3)} | ${(dRows[0].current as number).toFixed(3)} | ${(dRows[0].original as number).toFixed(3)} |`,
+		expect(prior.criteria[3].values.map((value) => value.name)).toContain(
+			`F1, ${PRIOR_BASIS_CONTROL_MODEL}`,
 		);
-
-		// And the table says what a fail there does and does not establish.
-		expect(section).toContain(
-			"D compares against the fixed uncorrected-equal benchmark; a fail on F1 there does not isolate the candidate's lag correction, which would need an uncorrected proportional scan.",
-		);
+		expect(prior.notes).toEqual([]);
 	});
 
-	test("the rule's declaration names the alive accounts as the denominator", () => {
-		const { markdown } = candidateFixture();
+	test("the headroom rule's D is indeterminate, with the reason printed", () => {
+		const { markdown, beside } = besideFixture();
+		const headroom = beside[1];
+		expect(headroom.model).toBe("scenario-headroom");
+		expect(headroom.control).toBeNull();
+		const dRows = headroom.rows.filter((row) => row.id === "D");
+		expect(dRows.every((row) => row.pass === null)).toBe(true);
+		expect(dRows[0].control).toBeNull();
+		expect(
+			headroom.criteria.find((criterion) => criterion.id === "D")?.pass,
+		).toBeNull();
+		expect(headroom.notes.join(" ")).toContain(
+			"D is indeterminate: `scenario-headroom` has no pre-correction scan of its own",
+		);
+		// C too: it is defined on a bootstrap pair only the two bases carry.
+		expect(
+			headroom.criteria.find((criterion) => criterion.id === "C")?.pass,
+		).toBeNull();
+		expect(headroom.notes.join(" ")).toContain("C is indeterminate");
+
 		const section = sectionOf(markdown);
+		expect(section).toContain("INDETERMINATE");
 		expect(section).toContain(
-			"over the ALIVE accounts' measured demand for it",
+			"has no pre-correction scan of its own in this replay",
 		);
-		expect(section).toContain(
-			"The denominator is the survivors, not the class",
-		);
-		expect(section).not.toContain(
-			"over the class's measured demand for that kind",
-		);
+		expect(section).not.toContain("undefined");
+		expect(section).not.toContain("NaN");
 	});
 
-	test("the identity is exact where the rule is constructed to have it", () => {
+	test("the identity line renders under the verdict, on the basis", () => {
 		// Two accounts and no death before either window is projected on the
-		// scan's first assignment: the candidate IS the current model there.
-		const { markdown, candidate } = candidateFixture();
-		expect(candidate.identity.eligible).toBeGreaterThan(0);
-		expect(candidate.identity.matching).toBe(candidate.identity.eligible);
-		expect(candidate.identity.share).toBe(1);
-		expect(sectionOf(markdown)).toContain(
-			`n=${candidate.identity.eligible} eligible records, ${candidate.identity.matching} of which the candidate dated within 1 ms of the current model (100.0%)`,
+		// scan's first assignment: the basis IS the current model there.
+		const { markdown, identity } = besideFixture();
+		expect(identity.eligible).toBeGreaterThan(0);
+		expect(identity.matching).toBe(identity.eligible);
+		expect(identity.share).toBe(1);
+		const verdictSection = verdictSectionOf(markdown);
+		expect(verdictSection).toContain(
+			"### Identity with the current model on the first assignment",
+		);
+		expect(verdictSection).toContain(
+			`n=${identity.eligible} eligible records, ${identity.matching} of which the basis dated within 1 ms of the current model (100.0%)`,
+		);
+		// And nowhere else: it is a property of the basis, not of the rules
+		// scored beside it.
+		expect(sectionOf(markdown)).not.toContain(
+			"### Identity with the current model on the first assignment",
 		);
 	});
 
-	test("the candidate's numbers do not move the verdict", () => {
-		// The same replay twice, differing only in what the CANDIDATE answered:
-		// once agreeing with the verdict basis, once wrong by a week.
+	test("the numbers beside the basis do not move the verdict", () => {
+		// The same replay twice, differing only in what the PRIOR BASIS answered:
+		// once as it scans, once wrong by a week.
 		const fixture = pairFixture();
 		const replay = replayRange(
 			fixture.rows,
@@ -2077,45 +2195,38 @@ describe("the share-rule candidate section", () => {
 		const wrecked: ReplayResult = {
 			...replay,
 			records: replay.records.map((entry) =>
-				entry.model === CANDIDATE_MODEL && entry.predictedEtaMs != null
+				entry.model === PRIOR_BASIS_MODEL && entry.predictedEtaMs != null
 					? { ...entry, predictedEtaMs: entry.predictedEtaMs + 7 * DAY }
 					: entry,
 			),
 		};
 		const verdictOf = (result: ReplayResult): Verdict =>
 			evaluateVerdict(scoreCohorts(result), result);
-		const sectionBetween = (markdown: string): string =>
-			markdown.slice(
-				markdown.indexOf("\n## Verdict\n"),
-				markdown.indexOf("\n## Share-rule candidate\n"),
-			);
 
 		const before = verdictOf(replay);
 		const after = verdictOf(wrecked);
 		expect(after.verdict).toBe(before.verdict);
 		expect(after.criteria).toEqual(before.criteria);
 		expect(
-			sectionBetween(
+			verdictSectionOf(
 				reportOf(wrecked, scoreCohorts(wrecked), after, fixture.rows.length),
 			),
 		).toBe(
-			sectionBetween(
+			verdictSectionOf(
 				reportOf(replay, scoreCohorts(replay), before, fixture.rows.length),
 			),
 		);
-		// The candidate's own scoring DID move, so the check is not vacuous.
+		// The prior basis's own scoring DID move, so the check is not vacuous.
 		expect(
-			evaluateCandidate(scoreCohorts(wrecked), wrecked).rows[0].candidate,
-		).not.toBe(
-			evaluateCandidate(scoreCohorts(replay), replay).rows[0].candidate,
-		);
+			evaluateBesideBasis(scoreCohorts(wrecked))[0].rows[0].value,
+		).not.toBe(evaluateBesideBasis(scoreCohorts(replay))[0].rows[0].value);
 	});
 
 	test("the identity population excludes instants a class member is already dead at", () => {
-		const { replay } = candidateFixture();
+		const { replay } = besideFixture();
 		const eligible = replay.records.filter(
 			(entry) =>
-				entry.model === CANDIDATE_MODEL && entry.proportionalFirstAssignment,
+				entry.model === VERDICT_BASIS_MODEL && entry.basisFirstAssignment,
 		);
 		expect(eligible.length).toBeGreaterThan(0);
 		// B reads 100 % from early on day 1; nothing at or after that instant is
@@ -2134,7 +2245,7 @@ describe("the share-rule candidate section", () => {
 				),
 		);
 		expect(eligible.every((entry) => entry.T < deathAt)).toBe(true);
-		expect(candidateIdentityCheck(replay).eligible).toBeLessThanOrEqual(
+		expect(basisIdentityCheck(replay).eligible).toBeLessThanOrEqual(
 			eligible.length,
 		);
 	});
@@ -2191,7 +2302,7 @@ describe("the share-rule candidate section", () => {
 			],
 			[account("A"), account("B")],
 		);
-		const scan = replay.classes[0].scenarioOutcomes.get(CANDIDATE_MODEL);
+		const scan = replay.classes[0].scenarioOutcomes.get(VERDICT_BASIS_MODEL);
 		expect(
 			scan != null && "learningAccountIds" in scan
 				? (scan.learningAccountIds ?? [])
@@ -2205,10 +2316,10 @@ describe("the share-rule candidate section", () => {
 			-4,
 		);
 		expect(
-			weeklyRecordOf(replay, "A", CANDIDATE_MODEL)?.predictedEtaMs,
+			weeklyRecordOf(replay, "A", VERDICT_BASIS_MODEL)?.predictedEtaMs,
 		).toBeCloseTo(T0 + (64 / 3) * HOUR, -4);
 		expect(
-			weeklyRecordOf(replay, "A", CANDIDATE_MODEL)?.proportionalFirstAssignment,
+			weeklyRecordOf(replay, "A", VERDICT_BASIS_MODEL)?.basisFirstAssignment,
 		).toBe(false);
 	});
 
@@ -2218,7 +2329,7 @@ describe("the share-rule candidate section", () => {
 		// out: it never fills in the cycle the reading is from, and
 		// `projectedExhaustions` — first cycles only — has no entry for it. EVERY
 		// later five-hour cycle fills in 3⅓ h and then holds the account dead for
-		// the rest of it, which suspends the weekly burn: the candidate dates the
+		// the rest of it, which suspends the weekly burn: the basis dates the
 		// weekly 34 h out where the current model, holding one slope, says 24 h.
 		const weeklyStart = T0 - 4 * DAY;
 		const fiveReset = T0 + HOUR;
@@ -2244,7 +2355,7 @@ describe("the share-rule candidate section", () => {
 			[account("A")],
 			T0 + 10 * DAY,
 		);
-		const scan = replay.classes[0].scenarioOutcomes.get(CANDIDATE_MODEL);
+		const scan = replay.classes[0].scenarioOutcomes.get(VERDICT_BASIS_MODEL);
 		// The death the first-cycle list cannot carry: only the weekly is in it.
 		expect(scan?.projectedExhaustions.map((entry) => entry.windowKind)).toEqual(
 			["seven_day"],
@@ -2255,10 +2366,10 @@ describe("the share-rule candidate section", () => {
 			-4,
 		);
 		expect(
-			weeklyRecordOf(replay, "A", CANDIDATE_MODEL)?.predictedEtaMs,
+			weeklyRecordOf(replay, "A", VERDICT_BASIS_MODEL)?.predictedEtaMs,
 		).toBeCloseTo(T0 + 34 * HOUR, -4);
 		expect(
-			weeklyRecordOf(replay, "A", CANDIDATE_MODEL)?.proportionalFirstAssignment,
+			weeklyRecordOf(replay, "A", VERDICT_BASIS_MODEL)?.basisFirstAssignment,
 		).toBe(false);
 	});
 });
@@ -2327,7 +2438,9 @@ describe("peer exhaustion by since-death bucket, per window kind", () => {
 		const first = byScope.get("combined")?.buckets[0];
 		expect(first?.balanced).toHaveLength(REPLAY_MODELS.length);
 		expect(first?.perRecord).toHaveLength(REPLAY_MODELS.length);
-		expect(first?.pairedBias.n).toBeGreaterThanOrEqual(0);
+		expect(first?.biasVsCurrent[VERDICT_BASIS_MODEL].n).toBeGreaterThanOrEqual(
+			0,
+		);
 	});
 
 	test("a record with no since-death age never reaches a bucket", () => {
@@ -2834,43 +2947,83 @@ describe("the report's new sections", () => {
 // ---------------------------------------------------------------------------
 
 describe("scenario models", () => {
-	test("carries the pre-correction scan beside the corrected one", () => {
+	test("carries a pre-correction scan beside each corrected one", () => {
 		expect([...REPLAY_MODELS]).toEqual([
 			"current",
 			"scenario-equal",
 			"scenario-equal-original",
 			"scenario-headroom",
 			"scenario-proportional",
+			"scenario-proportional-original",
 		]);
 		expect([...SCENARIO_MODEL_IDS]).toEqual([
 			"scenario-equal",
 			"scenario-equal-original",
 			"scenario-headroom",
 			"scenario-proportional",
+			"scenario-proportional-original",
 		]);
 		expect(SCENARIO_MODELS["scenario-equal"].observationLag).toBe("advance");
 		expect(SCENARIO_MODELS["scenario-equal-original"].observationLag).toBe(
 			"ignore",
 		);
 		expect(SCENARIO_MODELS["scenario-headroom"].observationLag).toBe("advance");
-		// The two equal-split models differ ONLY in the lag treatment.
+		expect(
+			SCENARIO_MODELS["scenario-proportional-original"].observationLag,
+		).toBe("ignore");
+		// Each pair differs ONLY in the lag treatment.
 		expect(SCENARIO_MODELS["scenario-equal-original"].shareRule).toBe(
 			SCENARIO_MODELS["scenario-equal"].shareRule,
 		);
+		expect(SCENARIO_MODELS["scenario-proportional-original"].shareRule).toBe(
+			SCENARIO_MODELS["scenario-proportional"].shareRule,
+		);
+		// And each corrected rule names its own control, never another's.
+		expect(CONTROL_MODELS[VERDICT_BASIS_MODEL]).toBe(
+			VERDICT_BASIS_CONTROL_MODEL,
+		);
+		expect(CONTROL_MODELS[PRIOR_BASIS_MODEL]).toBe(PRIOR_BASIS_CONTROL_MODEL);
+		expect(CONTROL_MODELS["scenario-headroom"]).toBeUndefined();
 	});
 
-	test("the declared candidate is the proportional rule, on the corrected scan", () => {
-		expect(CANDIDATE_MODEL).toBe("scenario-proportional");
-		expect(SCENARIO_MODELS[CANDIDATE_MODEL].shareRule).toBe(
+	test("the verdict basis is the proportional rule, on the corrected scan", () => {
+		expect(VERDICT_BASIS_MODEL).toBe("scenario-proportional");
+		expect(SCENARIO_MODELS[VERDICT_BASIS_MODEL].shareRule).toBe(
 			proportionalShareRule,
 		);
-		expect(SCENARIO_MODELS[CANDIDATE_MODEL].observationLag).toBe("advance");
-		// It is scored beside the verdict basis, never as it.
-		expect(CANDIDATE_MODEL).not.toBe("scenario-equal");
-		expect(VERDICT_RULE).not.toContain(CANDIDATE_MODEL);
+		expect(SCENARIO_MODELS[VERDICT_BASIS_MODEL].observationLag).toBe("advance");
+		expect(SCENARIO_MODELS[VERDICT_BASIS_CONTROL_MODEL].shareRule).toBe(
+			proportionalShareRule,
+		);
+		// The equal split is kept beside it as the prior basis, never as it.
+		expect(PRIOR_BASIS_MODEL).toBe("scenario-equal");
+		expect(VERDICT_BASIS_MODEL).not.toBe(PRIOR_BASIS_MODEL);
+		expect([...BESIDE_BASIS_MODELS]).toEqual([
+			PRIOR_BASIS_MODEL,
+			"scenario-headroom",
+		]);
+		expect(BESIDE_BASIS_MODELS).not.toContain(VERDICT_BASIS_MODEL);
 	});
 
-	test("every per-model table carries the candidate", () => {
+	test("the rule states the basis, the re-declaration and no score", () => {
+		expect(VERDICT_RULE).toContain(VERDICT_BASIS_MODEL);
+		expect(VERDICT_RULE).toContain(VERDICT_BASIS_CONTROL_MODEL);
+		expect(VERDICT_RULE).toContain(
+			"The verdict basis is the PROPORTIONAL share rule, re-declared on 2026-09-07",
+		);
+		expect(VERDICT_RULE).toContain(
+			"after it was scored as a candidate beside the equal split, which had been",
+		);
+		expect(VERDICT_RULE).toContain("the basis through v2026.9.19");
+		expect(VERDICT_RULE).toContain(
+			"scored beside it and never enter the verdict",
+		);
+		// No number the run produced: a rule that quoted a score would be read off
+		// the tables it judges.
+		expect(VERDICT_RULE).not.toMatch(/0\.\d/);
+	});
+
+	test("every per-model table carries the basis and its control", () => {
 		const fixture = pairFixture();
 		const result = replayRange(
 			fixture.rows,
@@ -2880,19 +3033,17 @@ describe("scenario models", () => {
 			20260823,
 		);
 		const cohorts = scoreCohorts(result);
-		expect(
-			result.records.some((entry) => entry.model === CANDIDATE_MODEL),
-		).toBe(true);
-		for (const rows of [
-			cohorts.overall.balanced,
-			cohorts.overall.perRecord,
-			cohorts.anyTransition.balanced,
-		]) {
-			expect(rows.map((row) => row.estimator)).toContain(CANDIDATE_MODEL);
+		for (const model of [VERDICT_BASIS_MODEL, VERDICT_BASIS_CONTROL_MODEL]) {
+			expect(result.records.some((entry) => entry.model === model)).toBe(true);
+			for (const rows of [
+				cohorts.overall.balanced,
+				cohorts.overall.perRecord,
+				cohorts.anyTransition.balanced,
+			]) {
+				expect(rows.map((row) => row.estimator)).toContain(model);
+			}
+			expect(cohorts.churn.some((row) => row.model === model)).toBe(true);
 		}
-		expect(cohorts.churn.some((row) => row.model === CANDIDATE_MODEL)).toBe(
-			true,
-		);
 
 		// The calibration grid needs a whole horizon of observed truth after each
 		// instant, which the range above does not reach, so it is checked on the
@@ -2923,8 +3074,11 @@ describe("scenario models", () => {
 		);
 		const rowsFor = (model: ReplayModel): number =>
 			calibrated.calibration.filter((row) => row.model === model).length;
-		expect(rowsFor(CANDIDATE_MODEL)).toBeGreaterThan(0);
-		expect(rowsFor(CANDIDATE_MODEL)).toBe(rowsFor("scenario-equal"));
+		expect(rowsFor(VERDICT_BASIS_MODEL)).toBeGreaterThan(0);
+		expect(rowsFor(VERDICT_BASIS_MODEL)).toBe(rowsFor(PRIOR_BASIS_MODEL));
+		expect(rowsFor(VERDICT_BASIS_CONTROL_MODEL)).toBe(
+			rowsFor(VERDICT_BASIS_MODEL),
+		);
 	});
 });
 
