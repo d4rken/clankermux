@@ -2220,7 +2220,12 @@ describe("the share rules beside the basis", () => {
 		expect(byError).toContain("4.000 min further from the truth");
 
 		// Both legs failing is the one case that reads as "too".
-		const byBoth = sectionFor({ ...VERDICT_BASE, pairedAbsVsOriginal: 4 });
+		const byBoth = sectionFor({
+			...VERDICT_BASE,
+			scenarioF1: 0.5,
+			originalF1: 0.6,
+			pairedAbsVsOriginal: 4,
+		});
 		expect(byBoth).toContain("Its F1 leg is the one that FAILED this run");
 		expect(byBoth).toContain("Its error leg FAILED too: the correction landed");
 
