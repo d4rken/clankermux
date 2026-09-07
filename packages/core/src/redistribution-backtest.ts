@@ -943,9 +943,7 @@ export interface InstantReplay {
 	placeholderWindowsSkipped: number;
 	/**
 	 * `${tag}::${demandClass}` → seven-day windows the label horizon dropped
-	 * while carrying that tag. A pair with a count > 0 is unlabelled only
-	 * because its weekly truth is still unfolding; a pair with no count never
-	 * had a tagged weekly window at all.
+	 * while carrying that tag.
 	 */
 	pendingWeeklyByTagClass: Map<string, number>;
 }
@@ -1204,8 +1202,7 @@ export function replayInstant(
 					window.nextWindowStartsMs,
 				);
 				// Tagged BEFORE the horizon drop: a dropped weekly window is what
-				// distinguishes a (tag, class) pair still pending at the label
-				// horizon from one this roster can never label.
+				// marks a (tag, class) pair still pending at the label horizon.
 				const context = transitionsAt(events, T, entry.accountId, demandClass);
 				// Label horizon: a window whose truth is still unfolding at the end of
 				// the loaded history would be scored on an outcome nobody observed.
@@ -3110,12 +3107,10 @@ export function evaluateVerdict(
 
 	// A tag whose events are in the data but which carries NO seven_day record is
 	// unlabelled on its weekly half. WHY it is unlabelled decides what to do
-	// about it, so the two causes are separated rather than both prescribing a
-	// re-run: a pair whose tagged weekly windows were dropped by the label
-	// horizon is PENDING (only that makes the verdict provisional), while a
-	// pair with no pending window never had a tagged weekly window in this
-	// roster at all — a lone account whose peer exhaustion tags nobody, or a
-	// tagged window that was withheld or censored.
+	// about it, so the two are separated rather than both prescribing a re-run:
+	// a pair whose tagged weekly windows were dropped by the label horizon is
+	// PENDING (only that makes the verdict provisional), while a pair with no
+	// pending window is not.
 	//
 	// Per (tag, class), not per tag: a tag labelled in one servable class says
 	// nothing about the same tag in another, and taking the tag as labelled

@@ -15,17 +15,16 @@ the backtest in section 4 decides whether it ships before any surface reads it.
 **The truth target changed, and section 4 is out of date on this point.** A
 read-only scan of the whole recorded history found no instant where every
 account of a multi-account servable class was out at once, counting an account
-that existed but was not being polled as a survivor. The report's own
-membership rule is that an account with no snapshots at all around an instant
-is absent, not a survivor. The codex rows count two episodes of the single
-Codex account before it had a sibling. A pool-out score would therefore still
-have rested on almost no positives. Scoring is survivor-conditioned instead:
-at each instant both models project each account's windows, and those
-projections are labelled with the same per-window truth (`deriveOutcome`) the
-2026-08 backtests use; the pool-level claim is still computed, as false-alarm
-calibration only. Pause and removal cannot be replayed at all — snapshots
-cascade-delete with their account and `accounts.paused` keeps no history — so
-the scenario's `presence: "demand-only"` path keeps unit-test coverage only.
+that existed but was not being polled as a survivor. The codex rows count two
+episodes of the single Codex account before it had a sibling. A pool-out score
+would therefore still have rested on almost no positives. Scoring is
+survivor-conditioned instead: at each instant both models project each
+account's windows, and those projections are labelled with the same per-window
+truth (`deriveOutcome`) the 2026-08 backtests use; the pool-level claim is
+still computed, as false-alarm calibration only. Pause and removal cannot be
+replayed at all — snapshots cascade-delete with their account and
+`accounts.paused` keeps no history — so the scenario's
+`presence: "demand-only"` path keeps unit-test coverage only.
 
 **Verdict: `keep-scenario`, provisional.** On lifecycle-balanced records:
 criterion A (not more optimistic on transitions) FAILS — the scenario's paired
