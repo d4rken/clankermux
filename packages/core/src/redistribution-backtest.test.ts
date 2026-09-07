@@ -1,7 +1,16 @@
 import { describe, expect, test } from "bun:test";
 import type { BacktestMetrics } from "./prediction-backtest";
-import { scoreRecords } from "./prediction-backtest";
+import { SEGMENT_COVERAGE_SLACK_MS, scoreRecords } from "./prediction-backtest";
 import {
+	ABSORPTION_EXCLUSION_REASONS,
+	ABSORPTION_POPULATION_LABELS,
+	type AbsorptionChecks,
+	type AbsorptionInput,
+	type AccountSeries,
+	type AvailabilityTimeline,
+	absorptionChecks,
+	availabilityAt,
+	buildAvailabilityTimelines,
 	buildRosterAtInstant,
 	type CohortScores,
 	type CohortSet,
@@ -12,18 +21,22 @@ import {
 	headroomShareRule,
 	knownLimitsFor,
 	lifecycleBalanced,
+	nearestAvailabilityChangeMs,
 	OBSERVATION_AGE_BUCKETS,
 	OVERALL_BOOTSTRAP_LABEL,
 	observationLagChecks,
+	PEER_LOSS_PREFIX_MS,
 	pairedAbsMedian,
 	pairedSignedMedian,
 	prepareSeries,
 	READING_STALE_MS,
 	REPLAY_MODELS,
+	REQUEST_BUCKET_MS,
 	type RedistributionRecord,
 	type ReplayModel,
 	type ReplayRange,
 	type ReplayResult,
+	type RequestBucket,
 	type RosterAccount,
 	type RosterSnapshotRow,
 	redistributionRecordToJson,
@@ -36,8 +49,13 @@ import {
 	survivorSlopeTrajectory,
 	TRANSITION_BOOTSTRAP_LABEL,
 	type TransitionEvent,
+	tallyWindowFills,
 	transitionsAt,
 	type Verdict,
+	type WindowFill,
+	type WindowFillRow,
+	type WindowFillTally,
+	windowFillMetrics,
 } from "./redistribution-backtest";
 
 const MIN = 60_000;
@@ -1047,6 +1065,8 @@ const replayOf = (
 	placeholderWindowsSkipped: 0,
 	pendingWeeklyByTagClass: new Map(Object.entries(pendingWeekly)),
 	tagCoverage: [],
+	fills: [],
+	placeholderLifecyclesSkipped: 0,
 });
 
 describe("scoreCohorts", () => {
@@ -1568,6 +1588,7 @@ function reportOf(
 	cohorts: CohortSet,
 	verdict: Verdict,
 	rows: number,
+	absorption: AbsorptionChecks | null = null,
 ): string {
 	return formatRedistributionReport({
 		title: "Redistribution backtest",
@@ -1584,6 +1605,7 @@ function reportOf(
 		replay: result,
 		cohorts,
 		verdict,
+		absorption,
 		knownLimits: ["a limit"],
 		notes: ["a note"],
 	});
@@ -3250,5 +3272,2740 @@ describe("the observation-lag report section", () => {
 		expect(markdown).toContain("| baseline |");
 		expect(markdown).not.toContain("undefined");
 		expect(markdown).not.toContain("NaN");
+	});
+});
+
+// ---------------------------------------------------------------------------
+// Absorption measurements: time to first 100 %
+// ---------------------------------------------------------------------------
+
+/** A five-hour window whose start is `reset - 5 h`, filling at `fillAt`. */
+const fiveHourRamp =
+	(start: number, reset: number, fillAt: number | null, cap = 99) =>
+	(t: number) => ({
+		pct:
+			fillAt != null && t >= fillAt
+				? 100
+				: Math.min(cap, Math.max(0, ((t - start) / HOUR) * 25)),
+		reset,
+	});
+
+const fillsFor = (
+	snapshotRows: RosterSnapshotRow[],
+	accounts: RosterAccount[],
+	range: ReplayRange,
+): ReplayResult => replayRange(snapshotRows, accounts, range, 6 * 60, 11);
+
+const rowOf = (
+	tally: WindowFillTally,
+	exposure: string,
+	window: WindowFillRow["window"],
+): WindowFillRow => {
+	const found = [...tally.prefixRows, ...tally.duringFillRows].find(
+		(entry) => entry.exposure === exposure && entry.window === window,
+	);
+	if (!found) throw new Error(`no row for ${exposure} / ${window}`);
+	return found;
+};
+
+/** One synthetic fill, filled at `+1 h` unless overridden. */
+const windowFill = (over: Partial<WindowFill> = {}): WindowFill => ({
+	accountId: "A",
+	demandClass: "anthropic",
+	windowKind: "five_hour",
+	lifecycleId: `A::five_hour::${T0}`,
+	windowStartMs: T0,
+	labelResetAtMs: T0 + 5 * HOUR,
+	firstSampleMs: T0,
+	firstSampleUtilization: 0,
+	lastSampleMs: T0 + 4 * HOUR,
+	nextWindowStartsMs: T0 + 5 * HOUR,
+	firstHundredMs: T0 + HOUR,
+	resolutionMs: 10 * MIN,
+	peerLostInPrefix: false,
+	peerLostDuringFill: false,
+	exposureObservable: true,
+	duringFillObservable: true,
+	...over,
+});
+
+describe("window fills", () => {
+	test("the prefix is one hour on a five-hour window and 24 h on a weekly one", () => {
+		expect(PEER_LOSS_PREFIX_MS).toEqual({
+			five_hour: HOUR,
+			seven_day: 24 * HOUR,
+		});
+	});
+
+	test("measures from the derived window start, not the first sample", () => {
+		const reset = T0 + 5 * HOUR;
+		const snapshotRows = rows({
+			accountId: "A",
+			from: T0 + 40 * MIN,
+			to: T0 + 4 * HOUR,
+			stepMs: 10 * MIN,
+			fiveHour: fiveHourRamp(T0, reset, T0 + 3 * HOUR),
+		});
+		const { fills } = fillsFor(snapshotRows, [account("A")], {
+			label: "fill",
+			fromMs: T0 - DAY,
+			toMs: T0 + DAY,
+		});
+
+		expect(fills).toHaveLength(1);
+		const fill = fills[0];
+		expect(fill.windowStartMs).toBe(T0);
+		expect(fill.firstSampleMs).toBe(T0 + 40 * MIN);
+		expect(fill.firstHundredMs).toBe(T0 + 3 * HOUR);
+		expect(fill.resolutionMs).toBe(10 * MIN);
+
+		const metrics = windowFillMetrics(fill);
+		expect(metrics.fillDurationMs).toBe(3 * HOUR);
+		expect(metrics.observedSpanMs).toBe(3 * HOUR - 40 * MIN);
+		expect(metrics.unobservedHeadMs).toBe(40 * MIN);
+		// The 40 minutes of fill that happened before the first sample.
+		expect((metrics.fillDurationMs ?? 0) - (metrics.observedSpanMs ?? 0)).toBe(
+			40 * MIN,
+		);
+	});
+
+	test("a window that never reaches 100 % is censored, not dropped", () => {
+		const reset = T0 + 5 * HOUR;
+		const snapshotRows = rows({
+			accountId: "A",
+			from: T0,
+			to: T0 + 4 * HOUR,
+			stepMs: 10 * MIN,
+			fiveHour: fiveHourRamp(T0, reset, null, 80),
+		});
+		const { fills } = fillsFor(snapshotRows, [account("A")], {
+			label: "censored",
+			fromMs: T0 - DAY,
+			toMs: T0 + DAY,
+		});
+
+		expect(fills).toHaveLength(1);
+		expect(fills[0].firstHundredMs).toBeNull();
+		expect(windowFillMetrics(fills[0]).fillDurationMs).toBeNull();
+
+		const tally = tallyWindowFills(fills);
+		expect(tally.filled).toBe(0);
+		expect(tally.censored).toBe(1);
+		expect(rowOf(tally, "no peer lost in prefix", "five_hour").censored).toBe(
+			1,
+		);
+	});
+
+	test("a segment with no reset is counted apart from the fills", () => {
+		const reset = T0 + 5 * HOUR;
+		const snapshotRows = [
+			...rows({
+				accountId: "A",
+				from: T0,
+				to: T0 + 2 * HOUR,
+				stepMs: 10 * MIN,
+				fiveHour: () => ({ pct: 20, reset }),
+			}),
+			...rows({
+				accountId: "A",
+				from: T0 + 2 * HOUR + 10 * MIN,
+				to: T0 + 2 * HOUR + 30 * MIN,
+				stepMs: 10 * MIN,
+				fiveHour: () => ({ pct: 20, reset: null }),
+			}),
+		];
+		const { fills } = fillsFor(snapshotRows, [account("A")], {
+			label: "null-reset",
+			fromMs: T0 - DAY,
+			toMs: T0 + DAY,
+		});
+
+		expect(fills).toHaveLength(2);
+		expect(fills.filter((fill) => fill.windowStartMs == null)).toHaveLength(1);
+
+		const tally = tallyWindowFills(fills);
+		expect(tally.noResetOnSegment).toBe(1);
+		// The null-reset segment enters no arm: only the dated one is counted.
+		expect(tally.filled + tally.censored).toBe(1);
+	});
+
+	test("a first sample already at 100 % is counted apart from the fills", () => {
+		const snapshotRows = rows({
+			accountId: "A",
+			from: T0,
+			to: T0 + HOUR,
+			stepMs: 10 * MIN,
+			fiveHour: () => ({ pct: 100, reset: T0 + 5 * HOUR }),
+		});
+		const { fills } = fillsFor(snapshotRows, [account("A")], {
+			label: "already-full",
+			fromMs: T0 - DAY,
+			toMs: T0 + DAY,
+		});
+
+		expect(fills).toHaveLength(1);
+		expect(fills[0].firstSampleUtilization).toBe(100);
+
+		const tally = tallyWindowFills(fills);
+		expect(tally.firstSampleAlreadyFull).toBe(1);
+		expect(tally.filled + tally.censored).toBe(0);
+		expect(rowOf(tally, "no peer lost in prefix", "combined").fills).toBe(0);
+	});
+
+	test("placeholder lifecycles never appear", () => {
+		const snapshotRows = [
+			// Two samples, never above 0 %: a codex-style artefact, not a window.
+			...rows({
+				accountId: "A",
+				from: T0,
+				to: T0 + 10 * MIN,
+				stepMs: 10 * MIN,
+				fiveHour: () => ({ pct: 0, reset: T0 + 2 * HOUR }),
+			}),
+			...rows({
+				accountId: "A",
+				from: T0 + 20 * MIN,
+				to: T0 + 4 * HOUR,
+				stepMs: 10 * MIN,
+				fiveHour: fiveHourRamp(T0, T0 + 5 * HOUR, T0 + 3 * HOUR),
+			}),
+		];
+		const result = fillsFor(snapshotRows, [account("A")], {
+			label: "placeholder",
+			fromMs: T0 - DAY,
+			toMs: T0 + DAY,
+		});
+
+		expect(result.fills).toHaveLength(1);
+		expect(result.fills[0].lifecycleId).toBe(`A::five_hour::${T0 + 20 * MIN}`);
+		expect(result.placeholderLifecyclesSkipped).toBe(1);
+	});
+
+	test("segments on the reset boundary, so a jittered 5 h move splits", () => {
+		const firstReset = T0 + 5 * HOUR;
+		// Exactly one window later, with about a second of rollover jitter.
+		const secondReset = firstReset + 5 * HOUR + 1_000;
+		const snapshotRows = [
+			...rows({
+				accountId: "A",
+				from: T0,
+				to: T0 + 4 * HOUR + 50 * MIN,
+				stepMs: 10 * MIN,
+				fiveHour: fiveHourRamp(T0, firstReset, T0 + 3 * HOUR),
+			}),
+			...rows({
+				accountId: "A",
+				from: T0 + 5 * HOUR + 10 * MIN,
+				to: T0 + 9 * HOUR,
+				stepMs: 10 * MIN,
+				fiveHour: fiveHourRamp(
+					secondReset - 5 * HOUR,
+					secondReset,
+					T0 + 8 * HOUR,
+				),
+			}),
+		];
+		const { fills } = fillsFor(snapshotRows, [account("A")], {
+			label: "jitter",
+			fromMs: T0 - DAY,
+			toMs: T0 + DAY,
+		});
+
+		expect(fills).toHaveLength(2);
+		expect(fills.map((fill) => fill.firstHundredMs)).toEqual([
+			T0 + 3 * HOUR,
+			T0 + 8 * HOUR,
+		]);
+		expect(fills[1].windowStartMs).toBe(secondReset - 5 * HOUR);
+	});
+});
+
+describe("window fill peer exposure", () => {
+	/** A survivor filling at +4 h beside a peer that dies at `deathOffsetMs`. */
+	const peerFixture = (deathOffsetMs: number) => {
+		const reset = T0 + 5 * HOUR;
+		return {
+			rows: [
+				...rows({
+					accountId: "S",
+					from: T0,
+					to: T0 + 4 * HOUR + 50 * MIN,
+					stepMs: 10 * MIN,
+					fiveHour: fiveHourRamp(T0, reset, T0 + 4 * HOUR),
+				}),
+				...rows({
+					accountId: "P",
+					from: T0,
+					to: T0 + 4 * HOUR + 50 * MIN,
+					stepMs: 10 * MIN,
+					fiveHour: fiveHourRamp(T0, reset, T0 + deathOffsetMs),
+				}),
+			],
+			accounts: [account("S"), account("P")],
+			range: { label: "peer", fromMs: T0 - HOUR, toMs: T0 + DAY },
+		};
+	};
+
+	test("a peer death inside the fixed prefix sets peerLostInPrefix", () => {
+		const fixture = peerFixture(30 * MIN);
+		const { fills } = fillsFor(fixture.rows, fixture.accounts, fixture.range);
+		const survivor = fills.find((fill) => fill.accountId === "S");
+		expect(survivor?.peerLostInPrefix).toBe(true);
+		expect(survivor?.peerLostDuringFill).toBe(true);
+		expect(survivor?.exposureObservable).toBe(true);
+	});
+
+	test("a peer death past the prefix sets only peerLostDuringFill", () => {
+		const fixture = peerFixture(90 * MIN);
+		const { fills } = fillsFor(fixture.rows, fixture.accounts, fixture.range);
+		const survivor = fills.find((fill) => fill.accountId === "S");
+		expect(survivor?.peerLostInPrefix).toBe(false);
+		expect(survivor?.peerLostDuringFill).toBe(true);
+	});
+
+	test("an account's own death never sets its own exposure", () => {
+		const fixture = peerFixture(30 * MIN);
+		const { fills } = fillsFor(fixture.rows, fixture.accounts, fixture.range);
+		// P dies 30 min into its OWN window, which is inside its own prefix.
+		const dying = fills.find((fill) => fill.accountId === "P");
+		expect(dying?.firstHundredMs).toBe(T0 + 30 * MIN);
+		expect(dying?.peerLostInPrefix).toBe(false);
+		expect(dying?.peerLostDuringFill).toBe(false);
+	});
+
+	test("a peer's five-hour death sets the exposure on a weekly fill", () => {
+		const snapshotRows = [
+			...rows({
+				accountId: "S",
+				from: T0,
+				to: T0 + 6 * DAY,
+				stepMs: 6 * HOUR,
+				sevenDay: weekly(T0, 20),
+			}),
+			...rows({
+				accountId: "P",
+				from: T0,
+				to: T0 + 4 * HOUR,
+				stepMs: 10 * MIN,
+				fiveHour: fiveHourRamp(T0, T0 + 5 * HOUR, T0 + 3 * HOUR),
+			}),
+		];
+		const result = fillsFor(snapshotRows, [account("S"), account("P")], {
+			label: "cross-window",
+			fromMs: T0 - HOUR,
+			toMs: T0 + 8 * DAY,
+		});
+
+		const death = result.events.find(
+			(event) => event.kind === "peer-exhaustion" && event.accountId === "P",
+		);
+		expect(death?.windowKind).toBe("five_hour");
+
+		const weeklyFill = result.fills.find(
+			(fill) => fill.accountId === "S" && fill.windowKind === "seven_day",
+		);
+		expect(weeklyFill?.windowStartMs).toBe(T0);
+		expect(weeklyFill?.peerLostInPrefix).toBe(true);
+	});
+
+	test("a prefix that starts before the range enters neither arm", () => {
+		const reset = T0 + 5 * HOUR;
+		const snapshotRows = rows({
+			accountId: "A",
+			from: T0,
+			to: T0 + 4 * HOUR,
+			stepMs: 10 * MIN,
+			fiveHour: fiveHourRamp(T0, reset, T0 + 3 * HOUR),
+		});
+		// The window starts 10 min before the replay does, so a peer death in its
+		// prefix could not have been detected.
+		const { fills } = fillsFor(snapshotRows, [account("A")], {
+			label: "unobservable",
+			fromMs: T0 + 10 * MIN,
+			toMs: T0 + DAY,
+		});
+
+		expect(fills).toHaveLength(1);
+		expect(fills[0].exposureObservable).toBe(false);
+
+		const tally = tallyWindowFills(fills);
+		expect(rowOf(tally, "peer lost in prefix", "combined").fills).toBe(0);
+		expect(rowOf(tally, "no peer lost in prefix", "combined").fills).toBe(0);
+		expect(rowOf(tally, "exposure unobservable", "combined").fills).toBe(1);
+	});
+
+	test("a fill running past the range is observable for the prefix split only", () => {
+		const start = T0;
+		const snapshotRows = rows({
+			accountId: "A",
+			from: start,
+			to: start + 6 * DAY,
+			stepMs: 6 * HOUR,
+			sevenDay: weekly(start, 20),
+		});
+		// The 24 h prefix is wholly inside the range; the fill at +5 d is not.
+		const { fills } = fillsFor(snapshotRows, [account("A")], {
+			label: "during-fill",
+			fromMs: start - HOUR,
+			toMs: start + 3 * DAY,
+		});
+
+		expect(fills).toHaveLength(1);
+		expect(fills[0].windowStartMs).toBe(start);
+		expect(fills[0].firstHundredMs).toBe(start + 5 * DAY);
+		expect(fills[0].exposureObservable).toBe(true);
+		expect(fills[0].duringFillObservable).toBe(false);
+
+		const tally = tallyWindowFills(fills);
+		expect(
+			rowOf(tally, "peer lost in prefix", "seven_day").fills +
+				rowOf(tally, "no peer lost in prefix", "seven_day").fills,
+		).toBe(1);
+		expect(rowOf(tally, "peer lost during fill", "combined").fills).toBe(0);
+		expect(rowOf(tally, "no peer lost during fill", "combined").fills).toBe(0);
+		expect(
+			rowOf(tally, "during-fill exposure unobservable", "combined").fills,
+		).toBe(1);
+	});
+
+	test("the during-fill split is length-biased where the prefix split is not", () => {
+		const reset = T0 + 5 * HOUR;
+		const filler = (accountId: string, fillAt: number) =>
+			rows({
+				accountId,
+				from: T0,
+				to: T0 + 4 * HOUR + 50 * MIN,
+				stepMs: 10 * MIN,
+				fiveHour: fiveHourRamp(T0, reset, fillAt),
+			});
+		const snapshotRows = [
+			...filler("X", T0 + 60 * MIN),
+			...filler("Y", T0 + 240 * MIN),
+			...filler("Z", T0 + 120 * MIN),
+		];
+		const { fills } = fillsFor(
+			snapshotRows,
+			[account("X"), account("Y"), account("Z")],
+			{ label: "length-bias", fromMs: T0 - HOUR, toMs: T0 + DAY },
+		);
+
+		const shortFill = fills.find((fill) => fill.accountId === "X");
+		const longFill = fills.find((fill) => fill.accountId === "Y");
+		expect(shortFill?.firstHundredMs).toBe(T0 + 60 * MIN);
+		expect(longFill?.firstHundredMs).toBe(T0 + 240 * MIN);
+
+		// Z dies at +120 min: inside the long fill's calendar span and outside
+		// the short one's, purely because the long fill is longer.
+		expect(longFill?.peerLostDuringFill).toBe(true);
+		expect(shortFill?.peerLostDuringFill).toBe(false);
+		// The prefix is the same hour for both, and holds no peer death: X's own
+		// death lands exactly on the half-open boundary at +60 min.
+		expect(longFill?.peerLostInPrefix).toBe(false);
+		expect(shortFill?.peerLostInPrefix).toBe(false);
+	});
+});
+
+describe("tallyWindowFills", () => {
+	test("censoring moves the fill fraction, not the median over the filled", () => {
+		const filled = [
+			windowFill({ lifecycleId: "A::1", firstHundredMs: T0 + HOUR }),
+			windowFill({ lifecycleId: "A::2", firstHundredMs: T0 + 3 * HOUR }),
+		];
+		const censored = windowFill({
+			lifecycleId: "A::3",
+			firstHundredMs: null,
+			resolutionMs: null,
+			lastSampleMs: T0 + 4 * HOUR,
+		});
+
+		const withoutCensored = rowOf(
+			tallyWindowFills(filled),
+			"no peer lost in prefix",
+			"five_hour",
+		);
+		const withCensored = rowOf(
+			tallyWindowFills([...filled, censored]),
+			"no peer lost in prefix",
+			"five_hour",
+		);
+
+		expect(withoutCensored.censored).toBe(0);
+		expect(withCensored.censored).toBe(1);
+		expect(withoutCensored.fillFraction).toBe(1);
+		expect(withCensored.fillFraction).toBeCloseTo(2 / 3, 10);
+		expect(withCensored.medianFillHours).toBe(withoutCensored.medianFillHours);
+		expect(withCensored.medianFillHours).toBe(1);
+		expect(withCensored.medianCensoredSpanHours).toBe(4);
+	});
+
+	test("a window observed to its reset is completed below 100 %", () => {
+		const tally = tallyWindowFills([
+			windowFill({
+				lifecycleId: "A::4",
+				firstHundredMs: null,
+				resolutionMs: null,
+				// Ten minutes short of the reset: the slack the label rule allows.
+				lastSampleMs: T0 + 5 * HOUR - SEGMENT_COVERAGE_SLACK_MS,
+			}),
+		]);
+		const cell = rowOf(tally, "no peer lost in prefix", "five_hour");
+		expect(cell.censored).toBe(1);
+		expect(cell.completedBelowHundred).toBe(1);
+		expect(cell.followUpIncomplete).toBe(0);
+		expect(tally.completedBelowHundred).toBe(1);
+		expect(tally.followUpIncomplete).toBe(0);
+	});
+
+	test("a window whose samples stop half an hour early is follow-up incomplete", () => {
+		const tally = tallyWindowFills([
+			windowFill({
+				lifecycleId: "A::5",
+				firstHundredMs: null,
+				resolutionMs: null,
+				lastSampleMs: T0 + 5 * HOUR - 30 * MIN,
+			}),
+		]);
+		const cell = rowOf(tally, "no peer lost in prefix", "five_hour");
+		expect(cell.censored).toBe(1);
+		expect(cell.completedBelowHundred).toBe(0);
+		expect(cell.followUpIncomplete).toBe(1);
+		expect(tally.followUpIncomplete).toBe(1);
+	});
+
+	test("a censored window with no observed successor is follow-up incomplete", () => {
+		// Two minutes short of its own reset, so proximity alone would call it
+		// completed; `deriveOutcome` also requires the next window to have been
+		// observed to start, and this one was never followed that far.
+		const tally = tallyWindowFills([
+			windowFill({
+				lifecycleId: "A::10",
+				firstHundredMs: null,
+				resolutionMs: null,
+				lastSampleMs: T0 + 5 * HOUR - 2 * MIN,
+				nextWindowStartsMs: null,
+			}),
+		]);
+		const cell = rowOf(tally, "no peer lost in prefix", "five_hour");
+		expect(cell.censored).toBe(1);
+		expect(cell.completedBelowHundred).toBe(0);
+		expect(cell.followUpIncomplete).toBe(1);
+		expect(tally.completedBelowHundred).toBe(0);
+		expect(tally.followUpIncomplete).toBe(1);
+	});
+
+	test("a censored window with no reset on its segment is follow-up incomplete", () => {
+		const tally = tallyWindowFills([
+			windowFill({
+				lifecycleId: "A::6",
+				firstHundredMs: null,
+				resolutionMs: null,
+				labelResetAtMs: null,
+			}),
+		]);
+		expect(tally.followUpIncomplete).toBe(1);
+	});
+
+	test("a window followed to its successor's start is completed below 100 %", () => {
+		// Three hours short of its own reset, but the successor was observed to
+		// start five minutes after the last sample. `deriveOutcome` ends a window
+		// at the EARLIER of its reset and its successor's start and calls this one
+		// survived, so the census has to end it at the same instant.
+		const tally = tallyWindowFills([
+			windowFill({
+				lifecycleId: "A::11",
+				firstHundredMs: null,
+				resolutionMs: null,
+				lastSampleMs: T0 + 2 * HOUR,
+				nextWindowStartsMs: T0 + 2 * HOUR + 5 * MIN,
+			}),
+		]);
+		const cell = rowOf(tally, "no peer lost in prefix", "five_hour");
+		expect(cell.censored).toBe(1);
+		expect(cell.completedBelowHundred).toBe(1);
+		expect(cell.followUpIncomplete).toBe(0);
+		expect(tally.completedBelowHundred).toBe(1);
+		expect(tally.followUpIncomplete).toBe(0);
+	});
+
+	test("the censored span pools both censored kinds into one median", () => {
+		// One window observed to its reset, two cut short: spans of about 4.8 h,
+		// 1 h and 2 h from the same window start.
+		const censored = (lifecycleId: string, lastSampleMs: number) =>
+			windowFill({
+				lifecycleId,
+				firstHundredMs: null,
+				resolutionMs: null,
+				lastSampleMs,
+			});
+		const cell = rowOf(
+			tallyWindowFills([
+				censored("A::7", T0 + 5 * HOUR - SEGMENT_COVERAGE_SLACK_MS),
+				censored("A::8", T0 + HOUR),
+				censored("A::9", T0 + 2 * HOUR),
+			]),
+			"no peer lost in prefix",
+			"five_hour",
+		);
+		expect(cell.completedBelowHundred).toBe(1);
+		expect(cell.followUpIncomplete).toBe(2);
+		// The median of all three spans. Over the follow-up-incomplete ones alone
+		// it would be 1 h, over the completed one alone about 4.8 h.
+		expect(cell.medianCensoredSpanHours).toBe(2);
+	});
+
+	test("an empty cell carries counts and nulls rather than NaN", () => {
+		const tally = tallyWindowFills([]);
+		const cell = rowOf(tally, "peer lost in prefix", "seven_day");
+		expect(cell.fills).toBe(0);
+		expect(cell.censored).toBe(0);
+		expect(cell.completedBelowHundred).toBe(0);
+		expect(cell.followUpIncomplete).toBe(0);
+		expect(cell.fillFraction).toBeNull();
+		expect(cell.medianFillHours).toBeNull();
+		expect(cell.medianObservedSpanHours).toBeNull();
+		expect(cell.medianUnobservedHeadMinutes).toBeNull();
+		expect(cell.medianResolutionMinutes).toBeNull();
+		expect(cell.medianCensoredSpanHours).toBeNull();
+		expect(cell.fillDurationsHours).toEqual([]);
+	});
+});
+
+describe("the absorption measurements section", () => {
+	const absorptionReport = () => {
+		const fixture = pairFixture();
+		const range: ReplayRange = {
+			label: "test",
+			fromMs: T0,
+			toMs: T0 + 8 * DAY,
+		};
+		const result = replayRange(
+			fixture.rows,
+			fixture.accounts,
+			range,
+			6 * 60,
+			20260823,
+		);
+		return reportFor(result, fixture.rows);
+	};
+
+	test("emits the heading pair and prints no hole", () => {
+		const { markdown } = absorptionReport();
+		expect(markdown).toContain("## Absorption measurements");
+		expect(markdown).toContain("### Time to first 100 %");
+		expect(markdown).not.toContain("undefined");
+		expect(markdown).not.toContain("NaN");
+		// Between the bootstrap block and the observation-lag section. Anchored
+		// on the heading line, because the slope section names the section too.
+		const heading = markdown.indexOf("\n## Absorption measurements\n");
+		expect(heading).toBeGreaterThan(markdown.indexOf("### Bootstrap"));
+		expect(heading).toBeLessThan(
+			markdown.indexOf("## Observation-lag mechanism check"),
+		);
+		// The slope table points at the direct measurement of its own question.
+		expect(markdown).toContain(
+			"The direct, slope-free measurement of the same question",
+		);
+	});
+
+	test("renders an empty cell as a dash beside its counts", () => {
+		const { markdown } = absorptionReport();
+		// The fixture has weekly windows only, so every five-hour cell is empty.
+		expect(markdown).toContain(
+			"| peer lost in prefix | five_hour | 0 | 0 | 0 | — | — | — | — | — | — |",
+		);
+		expect(markdown).toContain("(0 fills): —");
+	});
+
+	test("states what the fill medians are conditional on, and the length bias", () => {
+		const { markdown } = absorptionReport();
+		expect(markdown).toContain("conditional on an observed fill");
+		expect(markdown).toContain(
+			"a larger censored fraction does not by itself establish a larger bias",
+		);
+		expect(markdown).not.toContain(
+			"understates typical time-to-fill, and it understates it more in whichever cell censors more",
+		);
+		expect(markdown).toContain(
+			"length-biased in the direction of longer fills",
+		);
+		expect(markdown).toContain(
+			"equally consistent with absorption and with common cause",
+		);
+	});
+
+	test("splits the censored windows into two counted columns", () => {
+		const { markdown } = absorptionReport();
+		expect(markdown).toContain("| completed below 100 % |");
+		expect(markdown).toContain("| follow-up incomplete |");
+		expect(markdown).toContain(
+			"`completed below 100 %` counts the windows whose sampling ran to within",
+		);
+	});
+
+	test("says the censored-span column covers both censored kinds", () => {
+		const { markdown } = absorptionReport();
+		expect(markdown).toContain("| median censored span, both kinds (h) |");
+		expect(markdown).toContain(
+			"it pools both censored kinds — completed below 100 % and follow-up incomplete — into one median",
+		);
+	});
+
+	test("labels the exposure arms and reads the combined rows carefully", () => {
+		const { markdown } = absorptionReport();
+		expect(markdown).toContain("exposure labels");
+		expect(markdown).toContain(
+			"does not require the focal account to have been available when the peer died",
+		);
+		expect(markdown).toContain("already exhausted at the window start");
+		expect(markdown).toContain("composition problem");
+		expect(markdown).not.toContain("not a summary of anything");
+		expect(markdown).toContain("the median summarises few observed fills");
+	});
+
+	test("reconciles every lifecycle it saw", () => {
+		const { markdown } = absorptionReport();
+		expect(markdown).toMatch(
+			/Reconciliation: \d+ filled \+ \d+ completed below 100 % \+ \d+ follow-up incomplete \+ \d+ with no reset on the segment \+ \d+ already full at the first sample \+ \d+ placeholder lifecycles skipped = \d+ window lifecycles\./,
+		);
+	});
+
+	test("names the sampled-crossing limit", () => {
+		const { cohorts, replay } = verdictFixture(VERDICT_BASE);
+		const limits = knownLimitsFor(
+			replay,
+			cohorts,
+			evaluateVerdict(cohorts, replay),
+		);
+		expect(limits.some((limit) => limit.includes("sampled crossing"))).toBe(
+			true,
+		);
+	});
+});
+
+// ---------------------------------------------------------------------------
+// Request-volume changes around observed exhaustion
+// ---------------------------------------------------------------------------
+
+const ABS_D = T0 + 10 * DAY;
+const ABS_RANGE: ReplayRange = {
+	label: "absorption",
+	fromMs: ABS_D - 8 * DAY,
+	toMs: ABS_D + 8 * DAY,
+};
+/** The loaded request span: wide enough for a ±7 d control at W = 6 h. */
+const ABS_FROM = ABS_D - 9 * DAY;
+const ABS_TO = ABS_D + 9 * DAY;
+
+/**
+ * Minute buckets at a constant rate over `[from, to)`, aligned to the grid the
+ * loader groups on.
+ */
+function buckets(spec: {
+	accountId: string;
+	from: number;
+	to: number;
+	perMinute: number;
+	tokensPerMinute?: number;
+}): RequestBucket[] {
+	const out: RequestBucket[] = [];
+	const first = Math.ceil(spec.from / REQUEST_BUCKET_MS) * REQUEST_BUCKET_MS;
+	for (let t = first; t < spec.to; t += REQUEST_BUCKET_MS) {
+		out.push({
+			accountId: spec.accountId,
+			bucketStartMs: t,
+			requests: spec.perMinute,
+			tokens: spec.tokensPerMinute ?? spec.perMinute * 1000,
+		});
+	}
+	return out;
+}
+
+function deathEvent(over: Partial<TransitionEvent> = {}): TransitionEvent {
+	return {
+		id: 1,
+		kind: "peer-exhaustion",
+		atMs: ABS_D,
+		endsAtMs: ABS_D + DAY,
+		demandClass: "anthropic",
+		accountId: "D",
+		accountName: "acct-d",
+		windowKind: "five_hour",
+		detail: "five_hour hit 100 %",
+		...over,
+	};
+}
+
+const ABS_ACCOUNTS: RosterAccount[] = [
+	account("D"),
+	account("S1"),
+	account("S2"),
+];
+
+/** One account's observed availability, as snapshot rows the timeline reads. */
+interface AvailabilitySpec {
+	accountId: string;
+	/** Intervals `[from, to)` the account reads 100 % over. */
+	exhausted?: Array<[number, number]>;
+	/** Intervals `[from, to)` with no samples at all: an unknown stretch. */
+	gaps?: Array<[number, number]>;
+	fromMs?: number;
+	toMs?: number;
+}
+
+/**
+ * Snapshot rows on a five-minute grid, half the staleness bar, so a stretch is
+ * `unknown` only where the spec says to drop the samples.
+ */
+function availabilityRows(specs: AvailabilitySpec[]): RosterSnapshotRow[] {
+	const out: RosterSnapshotRow[] = [];
+	for (const spec of specs) {
+		const inside = (list: Array<[number, number]> | undefined, t: number) =>
+			(list ?? []).some(([from, to]) => t >= from && t < to);
+		out.push(
+			...rows({
+				accountId: spec.accountId,
+				from: spec.fromMs ?? ABS_FROM,
+				to: spec.toMs ?? ABS_TO,
+				stepMs: 5 * MIN,
+				skip: (t) => inside(spec.gaps, t),
+				fiveHour: (t) => ({
+					pct: inside(spec.exhausted, t) ? 100 : 20,
+					reset: null,
+				}),
+			}),
+		);
+	}
+	return out;
+}
+
+const absSeries = (
+	specs: AvailabilitySpec[],
+	accounts: RosterAccount[] = ABS_ACCOUNTS,
+): Map<string, AccountSeries> =>
+	prepareSeries(availabilityRows(specs), accounts);
+
+/** The dying account available until `D` and exhausted after it; peers alive. */
+const ABS_SERIES = absSeries([
+	{ accountId: "D", exhausted: [[ABS_D, ABS_D + 12 * HOUR]] },
+	{ accountId: "S1" },
+	{ accountId: "S2" },
+]);
+
+function absorptionInput(over: Partial<AbsorptionInput> = {}): AbsorptionInput {
+	return {
+		events: [deathEvent()],
+		accounts: ABS_ACCOUNTS,
+		series: ABS_SERIES,
+		buckets: [],
+		range: ABS_RANGE,
+		requestsFromMs: ABS_FROM,
+		requestsToMs: ABS_TO,
+		...over,
+	};
+}
+
+/** Flat traffic either side of an instant, with a rate step at it. */
+function flatBuckets(spec: {
+	accountId: string;
+	prePerMinute: number;
+	postPerMinute: number;
+	preTokensPerMinute?: number;
+	postTokensPerMinute?: number;
+	atMs?: number;
+	from?: number;
+	to?: number;
+}): RequestBucket[] {
+	const at = spec.atMs ?? ABS_D;
+	return [
+		...buckets({
+			accountId: spec.accountId,
+			from: spec.from ?? at - 12 * HOUR,
+			to: at,
+			perMinute: spec.prePerMinute,
+			tokensPerMinute: spec.preTokensPerMinute,
+		}),
+		...buckets({
+			accountId: spec.accountId,
+			from: at,
+			to: spec.to ?? at + 12 * HOUR,
+			perMinute: spec.postPerMinute,
+			tokensPerMinute: spec.postTokensPerMinute,
+		}),
+	];
+}
+
+/**
+ * Flat before the death, doubled after it, tripled again from the +7 d control
+ * on: the two matched controls therefore carry DIFFERENT ratios, so a paired
+ * delta that dropped an eligible control would print a different number.
+ */
+function controlBuckets(): RequestBucket[] {
+	const survivor = (accountId: string): RequestBucket[] => [
+		...buckets({ accountId, from: ABS_FROM, to: ABS_D, perMinute: 5 }),
+		...buckets({
+			accountId,
+			from: ABS_D,
+			to: ABS_D + 7 * DAY,
+			perMinute: 10,
+		}),
+		...buckets({
+			accountId,
+			from: ABS_D + 7 * DAY,
+			to: ABS_TO,
+			perMinute: 30,
+		}),
+	];
+	return [
+		...buckets({ accountId: "D", from: ABS_FROM, to: ABS_D, perMinute: 10 }),
+		...survivor("S1"),
+		...survivor("S2"),
+	];
+}
+
+describe("account availability", () => {
+	const timelineFor = (
+		snapshotRows: RosterSnapshotRow[],
+		accountId = "A",
+	): AvailabilityTimeline => {
+		const timelines = buildAvailabilityTimelines(
+			prepareSeries(snapshotRows, [account(accountId)]),
+		);
+		const timeline = timelines.get(accountId);
+		if (timeline == null) throw new Error("no timeline");
+		return timeline;
+	};
+
+	test("a reading at or above 100 % on either window is exhausted", () => {
+		const timeline = timelineFor(
+			rows({
+				accountId: "A",
+				from: T0,
+				to: T0 + HOUR,
+				stepMs: 5 * MIN,
+				fiveHour: () => ({ pct: 40, reset: T0 + 5 * HOUR }),
+				sevenDay: () => ({ pct: 100, reset: T0 + 7 * DAY }),
+			}),
+		);
+		expect(availabilityAt(timeline, T0 + 30 * MIN)).toBe("exhausted");
+	});
+
+	test("a reading below 100 % on both windows is available", () => {
+		const timeline = timelineFor(
+			rows({
+				accountId: "A",
+				from: T0,
+				to: T0 + HOUR,
+				stepMs: 5 * MIN,
+				fiveHour: () => ({ pct: 40, reset: T0 + 5 * HOUR }),
+				sevenDay: () => ({ pct: 99.9, reset: T0 + 7 * DAY }),
+			}),
+		);
+		expect(availabilityAt(timeline, T0 + 30 * MIN)).toBe("available");
+	});
+
+	test("no reading inside the staleness bar is unknown, not available", () => {
+		const timeline = timelineFor(
+			rows({
+				accountId: "A",
+				from: T0,
+				to: T0 + HOUR,
+				stepMs: 5 * MIN,
+				fiveHour: () => ({ pct: 40, reset: T0 + 5 * HOUR }),
+			}),
+		);
+		// Before any sample, and past the bar after the last one. The bar is
+		// inclusive, as `buildRosterAtInstant` reads it: a reading exactly
+		// READING_STALE_MS old is still projected from.
+		expect(availabilityAt(timeline, T0 - MIN)).toBe("unknown");
+		expect(availabilityAt(timeline, T0 + HOUR + READING_STALE_MS - 1)).toBe(
+			"available",
+		);
+		expect(availabilityAt(timeline, T0 + HOUR + READING_STALE_MS)).toBe(
+			"available",
+		);
+		expect(availabilityAt(timeline, T0 + HOUR + READING_STALE_MS + 1)).toBe(
+			"unknown",
+		);
+	});
+
+	test("the staleness bar matches the roster's at the expiry instant", () => {
+		const last = T0 + HOUR;
+		const expiry = last + READING_STALE_MS;
+		const reading = (from: number, to: number): RosterSnapshotRow[] =>
+			rows({
+				accountId: "A",
+				from,
+				to,
+				stepMs: 5 * MIN,
+				fiveHour: () => ({ pct: 40, reset: T0 + 5 * HOUR }),
+			});
+		const base = reading(T0, last);
+
+		for (const offset of [-1, 0, 1]) {
+			const T = expiry + offset;
+			for (const replacement of [false, true]) {
+				const snapshotRows = replacement ? [...base, ...reading(T, T)] : base;
+				const series = prepareSeries(snapshotRows, [account("A")]);
+				const timeline = buildAvailabilityTimelines(series).get("A");
+				const roster = buildRosterAtInstant(T, series, [account("A")]);
+				const inRoster = roster.accounts.some(
+					(entry) => entry.accountId === "A",
+				);
+				expect(availabilityAt(timeline, T) !== "unknown").toBe(inRoster);
+				expect(inRoster).toBe(replacement || offset <= 0);
+			}
+		}
+	});
+
+	test("a row with both windows null reads as unknown, not available", () => {
+		const timeline = timelineFor(
+			rows({ accountId: "A", from: T0, to: T0 + HOUR, stepMs: 5 * MIN }),
+		);
+		expect(availabilityAt(timeline, T0 + 30 * MIN)).toBe("unknown");
+	});
+
+	test("a single null window imposes no constraint of its own", () => {
+		// The Codex placeholder shape: no five-hour reading, a live weekly one.
+		const under = timelineFor(
+			rows({
+				accountId: "A",
+				from: T0,
+				to: T0 + HOUR,
+				stepMs: 5 * MIN,
+				sevenDay: () => ({ pct: 40, reset: T0 + 7 * DAY }),
+			}),
+		);
+		expect(availabilityAt(under, T0 + 30 * MIN)).toBe("available");
+
+		const over = timelineFor(
+			rows({
+				accountId: "A",
+				from: T0,
+				to: T0 + HOUR,
+				stepMs: 5 * MIN,
+				sevenDay: () => ({ pct: 100, reset: T0 + 7 * DAY }),
+			}),
+		);
+		expect(availabilityAt(over, T0 + 30 * MIN)).toBe("exhausted");
+	});
+
+	test("an exhausted account whose readings go null is unknown, not revived", () => {
+		const timeline = timelineFor([
+			...rows({
+				accountId: "A",
+				from: T0,
+				to: T0 + 30 * MIN,
+				stepMs: 5 * MIN,
+				fiveHour: () => ({ pct: 100, reset: T0 + 5 * HOUR }),
+			}),
+			...rows({
+				accountId: "A",
+				from: T0 + 35 * MIN,
+				to: T0 + HOUR,
+				stepMs: 5 * MIN,
+			}),
+		]);
+		expect(availabilityAt(timeline, T0 + 30 * MIN)).toBe("exhausted");
+		expect(availabilityAt(timeline, T0 + 40 * MIN)).toBe("unknown");
+		expect(availabilityAt(timeline, T0 + HOUR)).toBe("unknown");
+	});
+
+	test("the nearest state change is measured on either side", () => {
+		const timeline = timelineFor(
+			rows({
+				accountId: "A",
+				from: T0,
+				to: T0 + 4 * HOUR,
+				stepMs: 5 * MIN,
+				fiveHour: (t) => ({
+					pct: t >= T0 + 2 * HOUR && t < T0 + 3 * HOUR ? 100 : 10,
+					reset: T0 + 5 * HOUR,
+				}),
+			}),
+		);
+		// 20 minutes before the revival at +3 h, 40 after the death at +2 h.
+		expect(
+			nearestAvailabilityChangeMs(timeline, T0 + 2 * HOUR + 40 * MIN),
+		).toBe(20 * MIN);
+		// The change at the instant itself is ignorable, for the dying account.
+		expect(
+			nearestAvailabilityChangeMs(timeline, T0 + 2 * HOUR, {
+				ignoreAtMs: T0 + 2 * HOUR,
+			}),
+		).toBe(HOUR);
+	});
+});
+
+describe("absorptionChecks survivor set", () => {
+	const traffic = (): RequestBucket[] => [
+		...flatBuckets({ accountId: "D", prePerMinute: 10, postPerMinute: 0 }),
+		...flatBuckets({ accountId: "S1", prePerMinute: 5, postPerMinute: 10 }),
+		...flatBuckets({ accountId: "S2", prePerMinute: 5, postPerMinute: 10 }),
+	];
+
+	test("a peer exhausted just before the death is excluded from S and listed", () => {
+		const checks = absorptionChecks(
+			absorptionInput({
+				buckets: traffic(),
+				series: absSeries([
+					{ accountId: "D", exhausted: [[ABS_D, ABS_D + 12 * HOUR]] },
+					{ accountId: "S1" },
+					{ accountId: "S2", exhausted: [[ABS_D - 3 * DAY, ABS_TO + 1]] },
+				]),
+			}),
+		);
+		expect(checks.deaths).toHaveLength(1);
+		const death = checks.deaths[0];
+		expect(death.survivorIds).toEqual(["S1"]);
+		expect(death.excludedMembers).toEqual([
+			{ accountId: "S2", state: "exhausted" },
+		]);
+		expect(
+			death.narrow.measurements.requests.survivors.map(
+				(entry) => entry.accountId,
+			),
+		).toEqual(["S1"]);
+	});
+
+	test("a peer with no reading inside the bar is listed as unknown", () => {
+		const checks = absorptionChecks(
+			absorptionInput({
+				buckets: traffic(),
+				series: absSeries([
+					{ accountId: "D", exhausted: [[ABS_D, ABS_D + 12 * HOUR]] },
+					{ accountId: "S1" },
+					{ accountId: "S2", gaps: [[ABS_D - 2 * HOUR, ABS_D + 2 * HOUR]] },
+				]),
+			}),
+		);
+		const death = checks.deaths[0];
+		expect(death.survivorIds).toEqual(["S1"]);
+		expect(death.excludedMembers).toEqual([
+			{ accountId: "S2", state: "unknown" },
+		]);
+	});
+
+	test("a dying account already exhausted on its other window is excluded", () => {
+		const checks = absorptionChecks(
+			absorptionInput({
+				buckets: traffic(),
+				series: absSeries([
+					{ accountId: "D", exhausted: [[ABS_D - 2 * DAY, ABS_TO + 1]] },
+					{ accountId: "S1" },
+					{ accountId: "S2" },
+				]),
+			}),
+		);
+		expect(checks.deaths).toHaveLength(0);
+		expect(checks.excluded.alreadyExhausted).toBe(1);
+		expect(checks.excludedDeaths[0].reason).toBe("alreadyExhausted");
+	});
+
+	test("a dying account with no reading before the death is excluded as unknown", () => {
+		const checks = absorptionChecks(
+			absorptionInput({
+				buckets: traffic(),
+				series: absSeries([
+					{
+						accountId: "D",
+						exhausted: [[ABS_D, ABS_D + 12 * HOUR]],
+						gaps: [[ABS_D - 2 * HOUR, ABS_D]],
+					},
+					{ accountId: "S1" },
+					{ accountId: "S2" },
+				]),
+			}),
+		);
+		expect(checks.deaths).toHaveLength(0);
+		expect(checks.excluded.dyingStateUnknown).toBe(1);
+	});
+});
+
+describe("absorptionChecks interval", () => {
+	const traffic = (): RequestBucket[] => [
+		...flatBuckets({
+			accountId: "D",
+			prePerMinute: 10,
+			postPerMinute: 0,
+			from: ABS_D - 12 * HOUR,
+			to: ABS_D + 12 * HOUR,
+		}),
+		...flatBuckets({
+			accountId: "S1",
+			prePerMinute: 5,
+			postPerMinute: 10,
+			from: ABS_D - 12 * HOUR,
+			to: ABS_D + 12 * HOUR,
+		}),
+		...flatBuckets({
+			accountId: "S2",
+			prePerMinute: 5,
+			postPerMinute: 10,
+			from: ABS_D - 12 * HOUR,
+			to: ABS_D + 12 * HOUR,
+		}),
+	];
+
+	test("a survivor reviving 20 minutes after the death caps both halves", () => {
+		const checks = absorptionChecks(
+			absorptionInput({
+				buckets: traffic(),
+				series: absSeries([
+					{ accountId: "D", exhausted: [[ABS_D, ABS_D + 12 * HOUR]] },
+					{ accountId: "S1" },
+					// Exhausted well before the death, back 20 minutes after it: it is
+					// not in S, and its revival is a regime change all the same.
+					{
+						accountId: "S2",
+						exhausted: [[ABS_D - 3 * DAY, ABS_D + 20 * MIN]],
+					},
+				]),
+			}),
+		);
+		const death = checks.deaths[0];
+		expect(death.availabilityBoundMs).toBe(20 * MIN);
+		expect(death.narrow.halfWidthMs).toBe(20 * MIN);
+		expect(death.narrow.measurements.requests.preMinutes).toBe(20);
+		expect(death.narrow.measurements.requests.postMinutes).toBe(20);
+	});
+
+	test("a survivor of S changing state 25 minutes before the death caps W", () => {
+		const checks = absorptionChecks(
+			absorptionInput({
+				buckets: traffic(),
+				series: absSeries([
+					{ accountId: "D", exhausted: [[ABS_D, ABS_D + 12 * HOUR]] },
+					{ accountId: "S1" },
+					// Available again 25 minutes before the death.
+					{
+						accountId: "S2",
+						exhausted: [[ABS_D - 3 * DAY, ABS_D - 25 * MIN]],
+					},
+				]),
+			}),
+		);
+		const death = checks.deaths[0];
+		expect(death.availabilityBoundMs).toBe(25 * MIN);
+		expect(death.narrow.halfWidthMs).toBe(25 * MIN);
+	});
+
+	test("an unknown stretch inside the interval caps W at its start", () => {
+		const checks = absorptionChecks(
+			absorptionInput({
+				buckets: traffic(),
+				series: absSeries([
+					{ accountId: "D", exhausted: [[ABS_D, ABS_D + 12 * HOUR]] },
+					{ accountId: "S1" },
+					// Samples stop 15 minutes after the death; the staleness bar makes
+					// the account unknown ten minutes after the last one.
+					{
+						accountId: "S2",
+						gaps: [[ABS_D + 20 * MIN, ABS_D + 4 * HOUR]],
+					},
+				]),
+			}),
+		);
+		const death = checks.deaths[0];
+		// Last sample at +15 min on the five-minute grid; the bar is inclusive,
+		// so the reading is still projectable at +25 min and unknown begins one
+		// millisecond later.
+		expect(death.availabilityBoundMs).toBe(15 * MIN + READING_STALE_MS + 1);
+		expect(death.narrow.halfWidthMs).toBe(25 * MIN + 1);
+	});
+
+	test("a bound under fifteen minutes excludes the death and records it", () => {
+		const checks = absorptionChecks(
+			absorptionInput({
+				buckets: traffic(),
+				series: absSeries([
+					{ accountId: "D", exhausted: [[ABS_D, ABS_D + 12 * HOUR]] },
+					{ accountId: "S1" },
+					{ accountId: "S2", exhausted: [[ABS_D + 10 * MIN, ABS_TO + 1]] },
+				]),
+			}),
+		);
+		expect(checks.deaths).toHaveLength(0);
+		expect(checks.excluded.intervalTooShort).toBe(1);
+		expect(checks.excludedDeaths[0].reason).toBe("intervalTooShort");
+		expect(checks.excludedDeaths[0].boundMs).toBe(10 * MIN);
+		expect(checks.excludedDeaths[0].detail).toContain("S2");
+	});
+
+	test("the narrow horizon is measured where the wide one collapses onto it", () => {
+		const checks = absorptionChecks(
+			absorptionInput({
+				buckets: traffic(),
+				series: absSeries([
+					{ accountId: "D", exhausted: [[ABS_D, ABS_D + 12 * HOUR]] },
+					{ accountId: "S1" },
+					{ accountId: "S2", exhausted: [[ABS_D + 40 * MIN, ABS_TO + 1]] },
+				]),
+			}),
+		);
+		const death = checks.deaths[0];
+		expect(death.availabilityBoundMs).toBe(40 * MIN);
+		expect(death.narrow.halfWidthMs).toBe(40 * MIN);
+		expect(death.narrow.measurements.requests.preMinutes).toBe(40);
+		expect(death.wide).toBeNull();
+		expect(death.wideAbsentReason).toContain("40");
+	});
+
+	test("nothing near the death leaves both horizons at their own width", () => {
+		const checks = absorptionChecks(
+			absorptionInput({ buckets: controlBuckets() }),
+		);
+		const death = checks.deaths[0];
+		expect(death.narrow.halfWidthMs).toBe(60 * MIN);
+		expect(death.wide?.halfWidthMs).toBe(6 * HOUR);
+		expect(death.wideAbsentReason).toBeNull();
+	});
+
+	test("the pre-death weights do not move with a survivor exhausting later", () => {
+		// Identical up to D, and identical requests: the only difference is a
+		// survivor leaving 30 minutes AFTER the death, which no quantity
+		// computable at D may see.
+		const stable = absorptionChecks(
+			absorptionInput({
+				buckets: traffic(),
+				series: absSeries([
+					{ accountId: "D", exhausted: [[ABS_D, ABS_D + 12 * HOUR]] },
+					{ accountId: "S1" },
+					{ accountId: "S2" },
+				]),
+			}),
+		);
+		const churned = absorptionChecks(
+			absorptionInput({
+				buckets: traffic(),
+				series: absSeries([
+					{ accountId: "D", exhausted: [[ABS_D, ABS_D + 12 * HOUR]] },
+					{ accountId: "S1" },
+					{ accountId: "S2", exhausted: [[ABS_D + 30 * MIN, ABS_TO + 1]] },
+				]),
+			}),
+		);
+		const a = stable.deaths[0];
+		const b = churned.deaths[0];
+		expect(a.survivorIds).toEqual(b.survivorIds);
+
+		// The symmetric interval DOES move: that is what the future bounds.
+		expect(a.narrow.halfWidthMs).toBe(60 * MIN);
+		expect(b.narrow.halfWidthMs).toBe(30 * MIN);
+		// The pre-only lookback does not.
+		expect(a.narrow.preWeightHalfWidthMs).toBe(60 * MIN);
+		expect(b.narrow.preWeightHalfWidthMs).toBe(60 * MIN);
+
+		for (const basis of ["requests", "tokens"] as const) {
+			expect(b.narrow.measurements[basis].dyingPreShare).toBe(
+				a.narrow.measurements[basis].dyingPreShare,
+			);
+			expect(b.narrow.measurements[basis].equalSplitShare).toBe(
+				a.narrow.measurements[basis].equalSplitShare,
+			);
+			expect(
+				b.narrow.measurements[basis].survivors.map((entry) => entry.preShare),
+			).toEqual(
+				a.narrow.measurements[basis].survivors.map((entry) => entry.preShare),
+			);
+		}
+	});
+
+	test("the pre-only lookback stops at a change before the death", () => {
+		const checks = absorptionChecks(
+			absorptionInput({
+				buckets: traffic(),
+				series: absSeries([
+					{ accountId: "D", exhausted: [[ABS_D, ABS_D + 12 * HOUR]] },
+					{ accountId: "S1" },
+					{ accountId: "S2", exhausted: [[ABS_D - 3 * DAY, ABS_D - 25 * MIN]] },
+				]),
+			}),
+		);
+		const death = checks.deaths[0];
+		expect(death.narrow.halfWidthMs).toBe(25 * MIN);
+		expect(death.narrow.preWeightHalfWidthMs).toBe(25 * MIN);
+	});
+
+	test("an account created after the death bounds W and stays out of S", () => {
+		const late = account("L", { createdAtMs: ABS_D + 20 * MIN });
+		const accounts = [...ABS_ACCOUNTS, late];
+		const checks = absorptionChecks(
+			absorptionInput({
+				accounts,
+				series: absSeries(
+					[
+						{ accountId: "D", exhausted: [[ABS_D, ABS_D + 12 * HOUR]] },
+						{ accountId: "S1" },
+						{ accountId: "S2" },
+						{ accountId: "L", fromMs: ABS_D + 20 * MIN },
+					],
+					accounts,
+				),
+				buckets: traffic(),
+			}),
+		);
+		const death = checks.deaths[0];
+		expect(death.survivorIds).toEqual(["S1", "S2"]);
+		expect(death.availabilityBoundMs).toBe(20 * MIN);
+		expect(death.availabilityBoundAccountId).toBe("L");
+		expect(death.narrow.halfWidthMs).toBe(20 * MIN);
+	});
+
+	test("an account created after the death still rejects a control", () => {
+		const late = account("L", { createdAtMs: ABS_D + 3 * DAY });
+		const accounts = [...ABS_ACCOUNTS, late];
+		const checks = absorptionChecks(
+			absorptionInput({
+				accounts,
+				series: absSeries(
+					[
+						{ accountId: "D", exhausted: [[ABS_D, ABS_D + 12 * HOUR]] },
+						{ accountId: "S1" },
+						{ accountId: "S2" },
+						{
+							accountId: "L",
+							fromMs: ABS_D + 3 * DAY,
+							exhausted: [
+								[ABS_D + 7 * DAY - 20 * MIN, ABS_D + 7 * DAY + 20 * MIN],
+							],
+						},
+					],
+					accounts,
+				),
+				buckets: controlBuckets(),
+			}),
+		);
+		const death = checks.deaths[0];
+		expect(death.survivorIds).toEqual(["S1", "S2"]);
+		expect(death.narrow.controls[0].eligible).toBe(true);
+		expect(death.narrow.controls[1].eligible).toBe(false);
+		expect(death.narrow.controls[1].rejection).toBe(
+			"availability-change-inside",
+		);
+		expect(death.narrow.controls[1].rejectionDetail).toContain("L");
+	});
+
+	test("the pre-only lookback stops at the edge of the loaded requests", () => {
+		// The 30 minutes before the death are loaded; the 30 before those are not
+		// there at all. `X` reviving at +30 min caps `W` at 30 min, so the death is
+		// measured; read over the 60-minute cap instead, the weights would count
+		// the unloaded half as no traffic rather than as no data.
+		const accounts = [...ABS_ACCOUNTS, account("X")];
+		const near = (
+			accountId: string,
+			preRate: number,
+			postRate: number,
+		): RequestBucket[] => [
+			...buckets({
+				accountId,
+				from: ABS_D - 30 * MIN,
+				to: ABS_D,
+				perMinute: preRate,
+			}),
+			...buckets({
+				accountId,
+				from: ABS_D,
+				to: ABS_D + 30 * MIN,
+				perMinute: postRate,
+			}),
+		];
+		// Dying-heavy in the earlier half, evenly split in the later one, so the
+		// two widths do not agree on the pre-share.
+		const full = (
+			accountId: string,
+			earlyRate: number,
+			lateRate: number,
+			postRate: number,
+		): RequestBucket[] => [
+			...buckets({
+				accountId,
+				from: ABS_D - 12 * HOUR,
+				to: ABS_D - 30 * MIN,
+				perMinute: earlyRate,
+			}),
+			...buckets({
+				accountId,
+				from: ABS_D - 30 * MIN,
+				to: ABS_D,
+				perMinute: lateRate,
+			}),
+			...buckets({
+				accountId,
+				from: ABS_D,
+				to: ABS_D + 12 * HOUR,
+				perMinute: postRate,
+			}),
+		];
+		const presentBuckets = [
+			...full("D", 10, 10, 0),
+			...full("S1", 1, 5, 10),
+			...full("S2", 1, 5, 10),
+		];
+
+		const truncated = absorptionChecks(
+			absorptionInput({
+				accounts,
+				requestsFromMs: ABS_D - 30 * MIN,
+				requestsToMs: ABS_D + 30 * MIN,
+				buckets: [
+					...near("D", 10, 0),
+					...near("S1", 5, 10),
+					...near("S2", 5, 10),
+				],
+				series: absSeries(
+					[
+						{ accountId: "D", exhausted: [[ABS_D, ABS_D + 12 * HOUR]] },
+						{ accountId: "S1" },
+						{ accountId: "S2" },
+						{
+							accountId: "X",
+							exhausted: [[ABS_D - 3 * DAY, ABS_D + 30 * MIN]],
+						},
+					],
+					accounts,
+				),
+			}),
+		);
+		const death = truncated.deaths[0];
+		expect(death.survivorIds).toEqual(["S1", "S2"]);
+		expect(death.narrow.halfWidthMs).toBe(30 * MIN);
+		expect(death.narrow.preWeightHalfWidthMs).toBe(30 * MIN);
+		expect(death.narrow.preWeightBoundedBy).toBe("coverage");
+		// The rates the weights divide by: over the 60-minute cap the same volume
+		// would read as half the rate, with the missing half counted as zero.
+		expect(death.narrow.measurements.requests.preWeightMinutes).toBe(30);
+		expect(death.narrow.measurements.requests.preWeightRateDying).toBe(10);
+		expect(death.narrow.measurements.requests.preWeightRateSurvivors).toBe(10);
+
+		// The identical buckets over the identical `W_pre`, shortened by a class
+		// member's availability instead of by the loaded span.
+		const present = absorptionChecks(
+			absorptionInput({
+				accounts,
+				buckets: presentBuckets,
+				series: absSeries(
+					[
+						{ accountId: "D", exhausted: [[ABS_D, ABS_D + 12 * HOUR]] },
+						{ accountId: "S1" },
+						{ accountId: "S2" },
+						{
+							accountId: "X",
+							exhausted: [[ABS_D - 30 * MIN, ABS_D + 12 * HOUR]],
+						},
+					],
+					accounts,
+				),
+			}),
+		);
+		const matched = present.deaths[0];
+		expect(matched.survivorIds).toEqual(["S1", "S2"]);
+		expect(matched.narrow.preWeightHalfWidthMs).toBe(30 * MIN);
+		expect(matched.narrow.preWeightBoundedBy).toBe("availability");
+		for (const basis of ["requests", "tokens"] as const) {
+			const shortened = death.narrow.measurements[basis];
+			const reference = matched.narrow.measurements[basis];
+			expect(shortened.preWeightMinutes).toBe(reference.preWeightMinutes);
+			expect(shortened.preWeightRateDying).toBe(reference.preWeightRateDying);
+			expect(shortened.preWeightRateSurvivors).toBe(
+				reference.preWeightRateSurvivors,
+			);
+			expect(shortened.dyingPreShare).toBe(reference.dyingPreShare);
+			expect(shortened.survivors.map((entry) => entry.preShare)).toEqual(
+				reference.survivors.map((entry) => entry.preShare),
+			);
+		}
+
+		// The same buckets read over the full 60-minute cap: the earlier half is
+		// dying-heavy, so the width the weights are taken over moves the share.
+		const uncapped = absorptionChecks(
+			absorptionInput({ buckets: presentBuckets }),
+		).deaths[0];
+		expect(uncapped.narrow.preWeightHalfWidthMs).toBe(60 * MIN);
+		expect(uncapped.narrow.preWeightBoundedBy).toBe("cap");
+		expect(uncapped.narrow.measurements.requests.dyingPreShare).toBeCloseTo(
+			0.625,
+			10,
+		);
+		expect(death.narrow.measurements.requests.dyingPreShare).toBeCloseTo(
+			0.5,
+			10,
+		);
+	});
+
+	test("an account created 20 minutes after the death caps W at its creation", () => {
+		// Creation and the first snapshot do NOT coincide here: the account exists
+		// from +20 min and is first sampled at +40 min, and it is the creation that
+		// changed the class.
+		const late = account("L", { createdAtMs: ABS_D + 20 * MIN });
+		const accounts = [...ABS_ACCOUNTS, late];
+		const checks = absorptionChecks(
+			absorptionInput({
+				accounts,
+				series: absSeries(
+					[
+						{ accountId: "D", exhausted: [[ABS_D, ABS_D + 12 * HOUR]] },
+						{ accountId: "S1" },
+						{ accountId: "S2" },
+						{ accountId: "L", fromMs: ABS_D + 40 * MIN },
+					],
+					accounts,
+				),
+				buckets: traffic(),
+			}),
+		);
+		const death = checks.deaths[0];
+		expect(death.survivorIds).toEqual(["S1", "S2"]);
+		expect(death.availabilityBoundMs).toBe(20 * MIN);
+		expect(death.availabilityBoundAccountId).toBe("L");
+		expect(death.narrow.halfWidthMs).toBe(20 * MIN);
+	});
+
+	test("an account created inside a control interval rejects that control", () => {
+		// Never sampled at all, so no availability transition exists to find: the
+		// creation is the only change the class went through.
+		const late = account("L", { createdAtMs: ABS_D + 7 * DAY });
+		const accounts = [...ABS_ACCOUNTS, late];
+		const checks = absorptionChecks(
+			absorptionInput({
+				accounts,
+				series: absSeries(
+					[
+						{ accountId: "D", exhausted: [[ABS_D, ABS_D + 12 * HOUR]] },
+						{ accountId: "S1" },
+						{ accountId: "S2" },
+					],
+					accounts,
+				),
+				buckets: controlBuckets(),
+			}),
+		);
+		const death = checks.deaths[0];
+		expect(death.survivorIds).toEqual(["S1", "S2"]);
+		expect(death.narrow.halfWidthMs).toBe(60 * MIN);
+		expect(death.narrow.controls[0].eligible).toBe(true);
+		expect(death.narrow.controls[1].eligible).toBe(false);
+		expect(death.narrow.controls[1].rejection).toBe(
+			"availability-change-inside",
+		);
+		expect(death.narrow.controls[1].rejectionDetail).toContain("L");
+	});
+
+	test("request coverage of 90 minutes keeps the primary and drops the wide", () => {
+		const checks = absorptionChecks(
+			absorptionInput({
+				buckets: traffic(),
+				requestsFromMs: ABS_D - 90 * MIN,
+				requestsToMs: ABS_D + 90 * MIN,
+			}),
+		);
+		expect(checks.excluded.outsideLoadedSpan).toBe(0);
+		expect(checks.deaths).toHaveLength(1);
+		const death = checks.deaths[0];
+		expect(death.narrow.halfWidthMs).toBe(60 * MIN);
+		expect(death.narrow.measurements.requests.preMinutes).toBe(60);
+		expect(death.wide).toBeNull();
+		expect(death.wideAbsentReason).toContain("request coverage");
+	});
+});
+
+describe("absorptionChecks", () => {
+	test("no post-death bucket enters any pre-death share or weight", () => {
+		const pre = [
+			...buckets({
+				accountId: "D",
+				from: ABS_D - 12 * HOUR,
+				to: ABS_D,
+				perMinute: 10,
+			}),
+			...buckets({
+				accountId: "S1",
+				from: ABS_D - 12 * HOUR,
+				to: ABS_D,
+				perMinute: 6,
+			}),
+			...buckets({
+				accountId: "S2",
+				from: ABS_D - 12 * HOUR,
+				to: ABS_D,
+				perMinute: 2,
+			}),
+		];
+		const postOf = (perMinute: number): RequestBucket[] => [
+			...buckets({
+				accountId: "S1",
+				from: ABS_D,
+				to: ABS_D + 12 * HOUR,
+				perMinute,
+			}),
+			...buckets({
+				accountId: "S2",
+				from: ABS_D,
+				to: ABS_D + 12 * HOUR,
+				perMinute,
+			}),
+		];
+
+		const huge = absorptionChecks(
+			absorptionInput({ buckets: [...pre, ...postOf(1_000_000)] }),
+		).deaths[0];
+		const zero = absorptionChecks(
+			absorptionInput({ buckets: [...pre, ...postOf(0)] }),
+		).deaths[0];
+
+		for (const basis of ["requests", "tokens"] as const) {
+			const a = huge.wide?.measurements[basis];
+			const b = zero.wide?.measurements[basis];
+			expect(a?.preRateDying).toBe(b?.preRateDying);
+			expect(a?.preRateSurvivors).toBe(b?.preRateSurvivors);
+			expect(a?.dyingPreShare).toBe(b?.dyingPreShare);
+			expect(a?.equalSplitShare).toBe(b?.equalSplitShare);
+			expect(a?.survivors.map((entry) => entry.preRate)).toEqual(
+				b?.survivors.map((entry) => entry.preRate) ?? [],
+			);
+			expect(a?.survivors.map((entry) => entry.preShare)).toEqual(
+				b?.survivors.map((entry) => entry.preShare) ?? [],
+			);
+			// Only the post-death observables move.
+			expect(a?.alpha).not.toBe(b?.alpha);
+			expect(a?.survivorRateRatio).not.toBe(b?.survivorRateRatio);
+			expect(a?.largestGainShare).not.toBe(b?.largestGainShare);
+		}
+		// The shares are the ones the pre-death rates imply, not the equal split.
+		const wide = huge.wide?.measurements.requests;
+		expect(wide?.dyingPreShare).toBeCloseTo(10 / 18, 12);
+		expect(wide?.survivors[0].preShare).toBeCloseTo(0.75, 12);
+		expect(wide?.equalSplitShare).toBeCloseTo(0.5, 12);
+	});
+
+	test("alpha is 1 when the survivors take exactly the dying rate", () => {
+		const checks = absorptionChecks(
+			absorptionInput({
+				buckets: [
+					...flatBuckets({
+						accountId: "D",
+						prePerMinute: 10,
+						postPerMinute: 0,
+					}),
+					...flatBuckets({
+						accountId: "S1",
+						prePerMinute: 5,
+						postPerMinute: 10,
+					}),
+					...flatBuckets({
+						accountId: "S2",
+						prePerMinute: 5,
+						postPerMinute: 10,
+					}),
+				],
+			}),
+		);
+		expect(checks.deaths).toHaveLength(1);
+		const wide = checks.deaths[0].wide?.measurements.requests;
+		expect(wide?.alpha).toBeCloseTo(1, 12);
+		expect(wide?.survivorRateRatio).toBeCloseTo(2, 12);
+	});
+
+	test("alpha is 0 when the dying traffic simply stops", () => {
+		const checks = absorptionChecks(
+			absorptionInput({
+				buckets: [
+					...flatBuckets({
+						accountId: "D",
+						prePerMinute: 10,
+						postPerMinute: 0,
+					}),
+					...flatBuckets({
+						accountId: "S1",
+						prePerMinute: 5,
+						postPerMinute: 5,
+					}),
+					...flatBuckets({
+						accountId: "S2",
+						prePerMinute: 5,
+						postPerMinute: 5,
+					}),
+				],
+			}),
+		);
+		const wide = checks.deaths[0].wide?.measurements.requests;
+		expect(wide?.alpha).toBeCloseTo(0, 12);
+		expect(wide?.survivorRateRatio).toBeCloseTo(1, 12);
+	});
+
+	test("the per-survivor contributions sum to alpha", () => {
+		const accounts = [...ABS_ACCOUNTS, account("S3")];
+		const checks = absorptionChecks(
+			absorptionInput({
+				accounts,
+				series: absSeries(
+					[
+						{ accountId: "D", exhausted: [[ABS_D, ABS_D + 12 * HOUR]] },
+						{ accountId: "S1" },
+						{ accountId: "S2" },
+						{ accountId: "S3" },
+					],
+					accounts,
+				),
+				buckets: [
+					...flatBuckets({
+						accountId: "D",
+						prePerMinute: 10,
+						postPerMinute: 0,
+					}),
+					// Mixed signs: one gains, one gains less, one loses.
+					...flatBuckets({
+						accountId: "S1",
+						prePerMinute: 5,
+						postPerMinute: 12,
+					}),
+					...flatBuckets({
+						accountId: "S2",
+						prePerMinute: 4,
+						postPerMinute: 6,
+					}),
+					...flatBuckets({
+						accountId: "S3",
+						prePerMinute: 6,
+						postPerMinute: 1,
+					}),
+				],
+			}),
+		);
+		for (const basis of ["requests", "tokens"] as const) {
+			for (const horizon of [checks.deaths[0].narrow, checks.deaths[0].wide]) {
+				const cell = horizon?.measurements[basis];
+				if (cell == null) throw new Error("no measurement");
+				const sum = cell.survivors.reduce(
+					(total, entry) => total + (entry.contribution ?? 0),
+					0,
+				);
+				expect(cell.alpha).not.toBeNull();
+				expect(sum).toBeCloseTo(cell.alpha ?? 0, 9);
+			}
+		}
+	});
+
+	test("the largest gain share splits the positive changes, not the net", () => {
+		const checks = absorptionChecks(
+			absorptionInput({
+				buckets: [
+					...flatBuckets({
+						accountId: "D",
+						prePerMinute: 10,
+						postPerMinute: 0,
+					}),
+					...flatBuckets({
+						accountId: "S1",
+						prePerMinute: 4,
+						postPerMinute: 10,
+					}),
+					...flatBuckets({
+						accountId: "S2",
+						prePerMinute: 4,
+						postPerMinute: 6,
+					}),
+				],
+			}),
+		);
+		const wide = checks.deaths[0].wide?.measurements.requests;
+		expect(wide?.grossPositive).toBeCloseTo(8, 12);
+		expect(wide?.grossNegative).toBeCloseTo(0, 12);
+		expect(wide?.netChange).toBeCloseTo(8, 12);
+		expect(wide?.largestGainShare).toBeCloseTo(0.75, 12);
+	});
+
+	test("the largest gain share is null when the net change is not positive", () => {
+		const checks = absorptionChecks(
+			absorptionInput({
+				buckets: [
+					...flatBuckets({
+						accountId: "D",
+						prePerMinute: 10,
+						postPerMinute: 0,
+					}),
+					// One rises, the other falls further: G <= 0, so the share of the
+					// positive changes describes nothing.
+					...flatBuckets({
+						accountId: "S1",
+						prePerMinute: 5,
+						postPerMinute: 7,
+					}),
+					...flatBuckets({
+						accountId: "S2",
+						prePerMinute: 5,
+						postPerMinute: 1,
+					}),
+				],
+			}),
+		);
+		const wide = checks.deaths[0].wide?.measurements.requests;
+		expect(wide?.grossPositive).toBeCloseTo(2, 12);
+		expect(wide?.grossNegative).toBeCloseTo(4, 12);
+		expect(wide?.netChange).toBeCloseTo(-2, 12);
+		expect(wide?.largestGainShare).toBeNull();
+	});
+
+	test("the bucket straddling the death enters neither half", () => {
+		const at = ABS_D + 30_000;
+		const steady = (accountId: string, perMinute: number): RequestBucket[] =>
+			buckets({
+				accountId,
+				from: ABS_D - 6 * HOUR,
+				to: ABS_D + 6 * HOUR + REQUEST_BUCKET_MS,
+				perMinute,
+			});
+		const checks = absorptionChecks(
+			absorptionInput({
+				events: [deathEvent({ atMs: at, endsAtMs: at + DAY })],
+				series: absSeries([
+					{ accountId: "D", toMs: at - 1 },
+					{
+						accountId: "D",
+						fromMs: at,
+						exhausted: [[at, at + 12 * HOUR]],
+					},
+					{ accountId: "S1" },
+					{ accountId: "S2" },
+				]),
+				buckets: [
+					...steady("D", 10),
+					...steady("S1", 5),
+					...steady("S2", 5),
+					// The whole of one minute's volume, in the minute the death
+					// falls inside.
+					{
+						accountId: "S1",
+						bucketStartMs: ABS_D,
+						requests: 1_000_000,
+						tokens: 1_000_000_000,
+					},
+				],
+			}),
+		);
+		const wide = checks.deaths[0].wide?.measurements.requests;
+		// Six hours of whole minutes either side, less the straddled one.
+		expect(wide?.preMinutes).toBe(359);
+		expect(wide?.postMinutes).toBe(359);
+		expect(wide?.preVolumeDying).toBe(10 * 359);
+		expect(wide?.preVolumeSurvivors).toBe(2 * 5 * 359);
+		expect(wide?.postVolumeSurvivors).toBe(2 * 5 * 359);
+	});
+
+	test("a dying account with no pre-death traffic is excluded, never coerced to zero", () => {
+		const checks = absorptionChecks(
+			absorptionInput({
+				buckets: [
+					...flatBuckets({ accountId: "D", prePerMinute: 0, postPerMinute: 4 }),
+					...flatBuckets({
+						accountId: "S1",
+						prePerMinute: 5,
+						postPerMinute: 8,
+					}),
+					...flatBuckets({
+						accountId: "S2",
+						prePerMinute: 5,
+						postPerMinute: 8,
+					}),
+				],
+			}),
+		);
+		expect(checks.deaths).toHaveLength(0);
+		expect(checks.excluded.noPreDeathDyingTraffic).toBe(1);
+
+		// The same absence one basis down: the requests are there, the tokens are
+		// not, so the token alpha has no denominator and says so.
+		const mixed = absorptionChecks(
+			absorptionInput({
+				buckets: [
+					...flatBuckets({
+						accountId: "D",
+						prePerMinute: 10,
+						postPerMinute: 0,
+						preTokensPerMinute: 0,
+						postTokensPerMinute: 0,
+					}),
+					...flatBuckets({
+						accountId: "S1",
+						prePerMinute: 5,
+						postPerMinute: 8,
+					}),
+					...flatBuckets({
+						accountId: "S2",
+						prePerMinute: 5,
+						postPerMinute: 8,
+					}),
+				],
+			}),
+		);
+		expect(mixed.deaths).toHaveLength(1);
+		expect(mixed.deaths[0].wide?.measurements.tokens.alpha).toBeNull();
+		expect(
+			mixed.deaths[0].wide?.measurements.tokens.survivors[0].contribution,
+		).toBeNull();
+		expect(mixed.deaths[0].wide?.measurements.requests.alpha).toBeCloseTo(
+			0.6,
+			12,
+		);
+	});
+
+	test("a control whose survivor changes state inside it is rejected by name", () => {
+		const clean = absorptionChecks(
+			absorptionInput({ buckets: controlBuckets() }),
+		);
+		const cleanDeath = clean.deaths[0];
+		expect(
+			cleanDeath.narrow.controls.map((control) => control.eligible),
+		).toEqual([true, true]);
+		expect(cleanDeath.narrow.controlsEligible).toBe(2);
+		expect(
+			cleanDeath.narrow.controls[0].measurements?.requests.survivorRateRatio,
+		).toBeCloseTo(1, 12);
+		expect(
+			cleanDeath.narrow.controls[1].measurements?.requests.survivorRateRatio,
+		).toBeCloseTo(3, 12);
+		// The control reads the death's own survivor set and half-width.
+		expect(
+			cleanDeath.narrow.controls[0].measurements?.requests.survivors.map(
+				(entry) => entry.accountId,
+			),
+		).toEqual(cleanDeath.survivorIds);
+		expect(
+			cleanDeath.narrow.controls[0].measurements?.requests.preMinutes,
+		).toBe(cleanDeath.narrow.measurements.requests.preMinutes);
+		// Ratio at death 2, mean control ratio (1 + 3) / 2 = 2.
+		const cleanPaired = clean.paired.find(
+			(entry) => entry.basis === "requests" && entry.horizon === "narrow",
+		);
+		expect(cleanPaired?.n).toBe(1);
+		expect(cleanPaired?.medianDelta).toBeCloseTo(0, 12);
+
+		const blocked = absorptionChecks(
+			absorptionInput({
+				buckets: controlBuckets(),
+				series: absSeries([
+					{ accountId: "D", exhausted: [[ABS_D, ABS_D + 12 * HOUR]] },
+					{ accountId: "S1" },
+					{
+						accountId: "S2",
+						exhausted: [
+							[ABS_D - 7 * DAY - 20 * MIN, ABS_D - 7 * DAY + 20 * MIN],
+						],
+					},
+				]),
+			}),
+		);
+		const death = blocked.deaths[0];
+		expect(death.narrow.controls[0].eligible).toBe(false);
+		expect(death.narrow.controls[0].rejection).toBe(
+			"availability-change-inside",
+		);
+		expect(death.narrow.controls[0].rejectionDetail).toContain("S2");
+		expect(death.narrow.controls[0].measurements).toBeNull();
+		expect(death.narrow.controls[1].eligible).toBe(true);
+		expect(death.narrow.controlsEligible).toBe(1);
+		// Only the accepted control feeds the delta: 2 − 3 = −1.
+		const blockedPaired = blocked.paired.find(
+			(entry) => entry.basis === "requests" && entry.horizon === "narrow",
+		);
+		expect(blockedPaired?.medianDelta).toBeCloseTo(-1, 12);
+	});
+
+	test("a control interval outside the loaded request span is rejected, not read as silence", () => {
+		const checks = absorptionChecks(
+			absorptionInput({
+				buckets: controlBuckets(),
+				requestsFromMs: ABS_D - 3 * DAY,
+			}),
+		);
+		const death = checks.deaths[0];
+		expect(death.narrow.controls[0].eligible).toBe(false);
+		expect(death.narrow.controls[0].rejection).toBe("outside-loaded-span");
+		expect(death.narrow.controls[0].measurements).toBeNull();
+		expect(death.narrow.controls[1].eligible).toBe(true);
+		expect(
+			checks.controlsIneligible["outside-loaded-span"],
+		).toBeGreaterThanOrEqual(1);
+	});
+
+	test("a class member that joins after the death is in neither the death nor its controls", () => {
+		const late = account("L", { createdAtMs: ABS_D + DAY });
+		const accounts = [...ABS_ACCOUNTS, late];
+		const checks = absorptionChecks(
+			absorptionInput({
+				accounts,
+				series: absSeries(
+					[
+						{ accountId: "D", exhausted: [[ABS_D, ABS_D + 12 * HOUR]] },
+						{ accountId: "S1" },
+						{ accountId: "S2" },
+						{ accountId: "L" },
+					],
+					accounts,
+				),
+				buckets: [
+					...controlBuckets(),
+					...buckets({
+						accountId: "L",
+						from: ABS_FROM,
+						to: ABS_TO,
+						perMinute: 50,
+					}),
+				],
+			}),
+		);
+		const death = checks.deaths[0];
+		expect(death.survivorIds).toEqual(["S1", "S2"]);
+		expect(
+			death.narrow.measurements.requests.survivors.map(
+				(entry) => entry.accountId,
+			),
+		).toEqual(["S1", "S2"]);
+		for (const control of death.narrow.controls) {
+			expect(
+				control.measurements?.requests.survivors.map(
+					(entry) => entry.accountId,
+				),
+			).toEqual(["S1", "S2"]);
+		}
+	});
+
+	test("an empty other class reports no concurrent context rather than a number", () => {
+		const checks = absorptionChecks(
+			absorptionInput({ buckets: controlBuckets() }),
+		);
+		expect(checks.deaths[0].narrow.placebo).toBeNull();
+		const rows = checks.groups.filter(
+			(row) => row.population === ABSORPTION_POPULATION_LABELS.placeboNarrow,
+		);
+		expect(rows).toHaveLength(2);
+		for (const row of rows) {
+			expect(row.measurements).toBe(0);
+			expect(row.survivorRateRatio.median).toBeNull();
+			expect(row.alpha.median).toBeNull();
+		}
+	});
+
+	test("no buckets at all excludes every death for want of request coverage", () => {
+		const checks = absorptionChecks(absorptionInput({ buckets: [] }));
+		expect(checks.deaths).toHaveLength(0);
+		expect(checks.excluded.noRequestCoverage).toBe(1);
+		expect(checks.peerExhaustionEvents).toBe(1);
+		for (const row of checks.groups) {
+			expect(row.measurements).toBe(0);
+			expect(row.survivorRateRatio.median).toBeNull();
+			expect(row.largestGainShare.median).toBeNull();
+		}
+		for (const entry of checks.paired) {
+			expect(entry.n).toBe(0);
+			expect(entry.medianDelta).toBeNull();
+		}
+	});
+
+	test("the two bases are computed independently and can disagree", () => {
+		const checks = absorptionChecks(
+			absorptionInput({
+				buckets: [
+					...flatBuckets({
+						accountId: "D",
+						prePerMinute: 10,
+						postPerMinute: 0,
+						preTokensPerMinute: 10_000,
+						postTokensPerMinute: 0,
+					}),
+					// Many small requests: the request rate doubles while the token
+					// rate barely moves.
+					...flatBuckets({
+						accountId: "S1",
+						prePerMinute: 5,
+						postPerMinute: 10,
+						preTokensPerMinute: 5_000,
+						postTokensPerMinute: 5_100,
+					}),
+					...flatBuckets({
+						accountId: "S2",
+						prePerMinute: 5,
+						postPerMinute: 10,
+						preTokensPerMinute: 5_000,
+						postTokensPerMinute: 5_100,
+					}),
+				],
+			}),
+		);
+		const wide = checks.deaths[0].wide?.measurements;
+		expect(wide?.requests.alpha).toBeCloseTo(1, 12);
+		expect(wide?.tokens.alpha).toBeCloseTo(0.02, 12);
+		expect(wide?.requests.survivorRateRatio).toBeCloseTo(2, 12);
+		expect(wide?.tokens.survivorRateRatio).toBeCloseTo(1.02, 12);
+	});
+
+	test("each aggregate statistic carries its own denominator", () => {
+		// Two deaths of the same class, days apart in the availability history so
+		// neither bounds the other's interval. The first has survivors with no
+		// pre-death traffic (no ratio); the second has a net loss (no largest-gain
+		// share).
+		const second = ABS_D + 3 * DAY;
+		const checks = absorptionChecks(
+			absorptionInput({
+				events: [
+					deathEvent(),
+					deathEvent({
+						id: 2,
+						atMs: second,
+						endsAtMs: second + DAY,
+						accountId: "S2",
+						accountName: "acct-s2",
+					}),
+				],
+				series: absSeries([
+					{ accountId: "D", exhausted: [[ABS_D, ABS_D + 12 * HOUR]] },
+					{ accountId: "S1" },
+					{ accountId: "S2", exhausted: [[second, ABS_TO + 1]] },
+				]),
+				buckets: [
+					// First death: the survivors start from nothing, so the ratio has
+					// no denominator while the gain share does.
+					...buckets({
+						accountId: "D",
+						from: ABS_D - 12 * HOUR,
+						to: ABS_D,
+						perMinute: 10,
+					}),
+					...buckets({
+						accountId: "S1",
+						from: ABS_D,
+						to: ABS_D + 2 * HOUR,
+						perMinute: 4,
+					}),
+					// Second death: S1 loses traffic, so G <= 0 and the gain share has
+					// no denominator while the ratio does.
+					...buckets({
+						accountId: "S2",
+						from: second - 12 * HOUR,
+						to: second,
+						perMinute: 10,
+					}),
+					...buckets({
+						accountId: "S1",
+						from: second - 12 * HOUR,
+						to: second,
+						perMinute: 8,
+					}),
+					...buckets({
+						accountId: "S1",
+						from: second,
+						to: second + 12 * HOUR,
+						perMinute: 2,
+					}),
+				],
+			}),
+		);
+		expect(checks.deaths).toHaveLength(2);
+		const row = checks.groups.find(
+			(entry) =>
+				entry.population === ABSORPTION_POPULATION_LABELS.narrow &&
+				entry.basis === "requests",
+		);
+		expect(row?.measurements).toBe(2);
+		expect(row?.survivorRateRatio.n).toBe(1);
+		expect(row?.largestGainShare.n).toBe(1);
+		expect(row?.alpha.n).toBe(2);
+	});
+
+	test("both windows filling in one sample are one departure with two kinds", () => {
+		const checks = absorptionChecks(
+			absorptionInput({
+				events: [
+					deathEvent({ id: 1, windowKind: "five_hour" }),
+					deathEvent({ id: 2, windowKind: "seven_day" }),
+				],
+				buckets: controlBuckets(),
+			}),
+		);
+		expect(checks.peerExhaustionEvents).toBe(2);
+		expect(checks.deaths).toHaveLength(1);
+		expect(checks.deaths[0].windowKinds).toEqual(["five_hour", "seven_day"]);
+		expect(checks.foldedSimultaneous).toBe(1);
+		// The two folded events share one S and one W, so measuring both would
+		// have counted the same departure twice.
+		expect(checks.deaths[0].survivorIds).toEqual(["S1", "S2"]);
+
+		const total =
+			checks.deaths.length +
+			checks.foldedSimultaneous +
+			ABSORPTION_EXCLUSION_REASONS.reduce(
+				(sum, reason) => sum + checks.excluded[reason],
+				0,
+			);
+		expect(total).toBe(checks.peerExhaustionEvents);
+	});
+
+	test("the reconciliation accounts for every peer-exhaustion event in range", () => {
+		const checks = absorptionChecks(
+			absorptionInput({
+				events: [
+					deathEvent(),
+					deathEvent({
+						id: 2,
+						demandClass: "codex",
+						accountId: "C1",
+						accountName: "acct-c1",
+					}),
+				],
+				buckets: controlBuckets(),
+			}),
+		);
+		const total =
+			checks.deaths.length +
+			checks.foldedSimultaneous +
+			ABSORPTION_EXCLUSION_REASONS.reduce(
+				(sum, reason) => sum + checks.excluded[reason],
+				0,
+			);
+		expect(checks.peerExhaustionEvents).toBe(2);
+		expect(checks.foldedSimultaneous).toBe(0);
+		expect(total).toBe(checks.peerExhaustionEvents);
+		expect(checks.excluded.noSurvivors).toBe(1);
+	});
+
+	test("the other class's accounts are the concurrent context, with no dying share", () => {
+		const codex = account("C1", {
+			provider: "codex",
+			createdAtMs: T0 - 30 * DAY,
+		});
+		const accounts = [...ABS_ACCOUNTS, codex];
+		const checks = absorptionChecks(
+			absorptionInput({
+				accounts,
+				series: absSeries(
+					[
+						{ accountId: "D", exhausted: [[ABS_D, ABS_D + 12 * HOUR]] },
+						{ accountId: "S1" },
+						{ accountId: "S2" },
+						{ accountId: "C1" },
+					],
+					accounts,
+				),
+				buckets: [
+					...controlBuckets(),
+					...flatBuckets({
+						accountId: "C1",
+						prePerMinute: 4,
+						postPerMinute: 6,
+					}),
+				],
+			}),
+		);
+		const placebo = checks.deaths[0].wide?.placebo;
+		expect(placebo?.requests.survivorRateRatio).toBeCloseTo(1.5, 12);
+		expect(placebo?.requests.dyingPreShare).toBeNull();
+		expect(placebo?.requests.alpha).toBeNull();
+		expect(
+			checks.groups.find(
+				(row) =>
+					row.population === ABSORPTION_POPULATION_LABELS.placeboWide &&
+					row.basis === "requests",
+			)?.measurements,
+		).toBe(1);
+	});
+});
+
+describe("the request-volume report section", () => {
+	const reportWith = (absorption: AbsorptionChecks | null): string => {
+		const fixture = pairFixture();
+		const result = replayRange(
+			fixture.rows,
+			fixture.accounts,
+			{ label: "test", fromMs: T0, toMs: T0 + 8 * DAY },
+			6 * 60,
+			20260823,
+		);
+		const cohorts = scoreCohorts(result);
+		const verdict = evaluateVerdict(cohorts, result);
+		return reportOf(result, cohorts, verdict, fixture.rows.length, absorption);
+	};
+
+	const measured = (): AbsorptionChecks =>
+		absorptionChecks(absorptionInput({ buckets: controlBuckets() }));
+
+	/** The whole section body, below its own `##` line. */
+	const sectionBody = (markdown: string): string => {
+		const heading = "\n## Absorption measurements\n";
+		const start = markdown.indexOf(heading);
+		expect(start).toBeGreaterThan(-1);
+		const from = start + heading.length;
+		const end = markdown.indexOf("\n## ", from);
+		return markdown.slice(from, end === -1 ? undefined : end);
+	};
+
+	/** The subsection alone, so a claim about it is not read off another one. */
+	const subsection = (markdown: string): string => {
+		const start = markdown.indexOf(
+			"### Request-volume changes around observed exhaustion",
+		);
+		expect(start).toBeGreaterThan(-1);
+		const end = markdown.indexOf("\n## ", start);
+		return markdown.slice(start, end === -1 ? undefined : end);
+	};
+
+	test("emits the renamed subsection and prints no hole", () => {
+		const markdown = reportWith(measured());
+		expect(markdown).toContain(
+			"### Request-volume changes around observed exhaustion",
+		);
+		expect(markdown).not.toContain("undefined");
+		expect(markdown).not.toContain("NaN");
+		const heading = markdown.indexOf(
+			"### Request-volume changes around observed exhaustion",
+		);
+		expect(heading).toBeGreaterThan(
+			markdown.indexOf("### Time to first 100 %"),
+		);
+		expect(heading).toBeLessThan(
+			markdown.indexOf("## Observation-lag mechanism check"),
+		);
+	});
+
+	test("never states that the demand reached the survivors", () => {
+		const body = sectionBody(reportWith(measured()));
+		for (const phrase of [
+			"lands on the survivors",
+			"absorbing",
+			"absorbed",
+			"absorption of",
+		]) {
+			expect(body).not.toContain(phrase);
+		}
+		expect(body).toContain(
+			"how fill durations and fill fractions differ between the exposure groups",
+		);
+		expect(body).toContain("whether demand moved is not identified here");
+	});
+
+	test("claims no causality and drops the pool-wide-surge sentence", () => {
+		const section = subsection(reportWith(measured()));
+		expect(section).not.toContain("causal");
+		expect(section).not.toContain("Causal");
+		expect(section).not.toContain("removes a pool-wide surge");
+		expect(section).toContain("concurrent context");
+		expect(section).toContain("substitute between providers");
+	});
+
+	test("states the timing misalignment rather than a signed bias", () => {
+		const section = subsection(reportWith(measured()));
+		expect(section).toContain("persistence lag");
+		expect(section).toContain(
+			"direction and magnitude of the resulting error are unmeasured",
+		);
+		expect(section).toContain("first sampled 100 % reading");
+		expect(section).not.toContain("biases alpha upward");
+	});
+
+	test("states what alpha depends on and how the population was selected", () => {
+		const section = subsection(reportWith(measured()));
+		expect(section).toContain(
+			"alpha = (ratio - 1) * preRateSurv / preRateDying",
+		);
+		expect(section).toContain(
+			"does not measure a fraction of the dying account's demand",
+		);
+		expect(section).toContain("zero pre-death traffic");
+		expect(section).toContain("rapid cascades");
+		expect(section).toContain("sufficiently-isolated departures");
+		expect(section).toContain(
+			"largest account's share of positive rate increases",
+		);
+		expect(section).not.toContain("share of moved volume");
+	});
+
+	test("says the request table was unreadable when it could not be loaded", () => {
+		const markdown = reportWith(null);
+		expect(markdown).toContain(
+			"### Request-volume changes around observed exhaustion",
+		);
+		expect(markdown).toContain("request table was unreadable");
+		expect(markdown).not.toContain("undefined");
+	});
+
+	test("prints its zero rows rather than an empty table when no death is analysed", () => {
+		const markdown = reportWith(
+			absorptionChecks(absorptionInput({ buckets: [] })),
+		);
+		expect(markdown).toContain(
+			`| ${ABSORPTION_POPULATION_LABELS.narrow} | requests | 0 |`,
+		);
+		expect(markdown).toContain("No death was analysed in this run");
+	});
+
+	test("prints the 60-minute row above the six-hour one, and the pairing as a row", () => {
+		const markdown = reportWith(measured());
+		const narrow = markdown.indexOf(
+			`| ${ABSORPTION_POPULATION_LABELS.narrow} | requests |`,
+		);
+		const wide = markdown.indexOf(
+			`| ${ABSORPTION_POPULATION_LABELS.wide} | requests |`,
+		);
+		const control = markdown.indexOf(
+			`| ${ABSORPTION_POPULATION_LABELS.controlBeforeNarrow} | requests |`,
+		);
+		expect(narrow).toBeGreaterThan(-1);
+		expect(narrow).toBeLessThan(wide);
+		expect(wide).toBeLessThan(control);
+		expect(markdown).toContain(
+			"paired median of (ratio at death − mean ratio at eligible controls)",
+		);
+	});
+
+	test("prints each survivor, each control and the excluded members", () => {
+		const checks = absorptionChecks(
+			absorptionInput({
+				buckets: controlBuckets(),
+				series: absSeries([
+					{ accountId: "D", exhausted: [[ABS_D, ABS_D + 12 * HOUR]] },
+					{ accountId: "S1" },
+					{ accountId: "S2", exhausted: [[ABS_FROM, ABS_TO + 1]] },
+				]),
+			}),
+		);
+		const markdown = reportWith(checks);
+		expect(markdown).toContain("contribution");
+		expect(markdown).toContain("excluded members: S2 (exhausted)");
+		expect(markdown).toContain("control -7 d");
+	});
+
+	/** UUID-style ids with names that share no substring with them. */
+	const namedAccounts = [
+		account("1135d045-dying", { name: "acct-dying" }),
+		account("2acdf5e9-surv", { name: "acct-survivor" }),
+		account("3bd0e7aa-gone", { name: "acct-excluded" }),
+	];
+
+	const namedChecks = (): AbsorptionChecks =>
+		absorptionChecks(
+			absorptionInput({
+				accounts: namedAccounts,
+				events: [
+					deathEvent({
+						accountId: "1135d045-dying",
+						accountName: "acct-dying",
+					}),
+				],
+				series: absSeries(
+					[
+						{
+							accountId: "1135d045-dying",
+							exhausted: [[ABS_D, ABS_D + 12 * HOUR]],
+						},
+						{ accountId: "2acdf5e9-surv" },
+						{ accountId: "3bd0e7aa-gone", exhausted: [[ABS_FROM, ABS_TO + 1]] },
+					],
+					namedAccounts,
+				),
+				buckets: [
+					...flatBuckets({
+						accountId: "1135d045-dying",
+						prePerMinute: 10,
+						postPerMinute: 0,
+					}),
+					...flatBuckets({
+						accountId: "2acdf5e9-surv",
+						prePerMinute: 5,
+						postPerMinute: 10,
+					}),
+					...flatBuckets({
+						accountId: "3bd0e7aa-gone",
+						prePerMinute: 5,
+						postPerMinute: 5,
+					}),
+				],
+			}),
+		);
+
+	test("prints every account of the block by name rather than by id", () => {
+		const checks = namedChecks();
+		expect(checks.deaths).toHaveLength(1);
+		const section = subsection(reportWith(checks));
+		expect(section).toContain("S = `acct-survivor`");
+		expect(section).toContain("- `acct-survivor`: requests pre");
+		expect(section).toContain("excluded members: acct-excluded (exhausted)");
+		expect(section).toContain("set by `acct-dying`");
+		for (const accountId of namedAccounts.map((entry) => entry.accountId)) {
+			expect(section).not.toContain(accountId);
+		}
+	});
+
+	test("names the peers of a death that had no survivor at all", () => {
+		const accounts = [
+			account("1135d045-dying", { name: "acct-dying" }),
+			account("2acdf5e9-surv", { name: "acct-survivor" }),
+		];
+		const checks = absorptionChecks(
+			absorptionInput({
+				accounts,
+				events: [
+					deathEvent({
+						accountId: "1135d045-dying",
+						accountName: "acct-dying",
+					}),
+				],
+				series: absSeries(
+					[
+						{
+							accountId: "1135d045-dying",
+							exhausted: [[ABS_D, ABS_D + 12 * HOUR]],
+						},
+						{ accountId: "2acdf5e9-surv", exhausted: [[ABS_FROM, ABS_TO + 1]] },
+					],
+					accounts,
+				),
+				buckets: controlBuckets(),
+			}),
+		);
+		expect(checks.excluded.noSurvivors).toBe(1);
+		const section = subsection(reportWith(checks));
+		expect(section).toContain("every peer was acct-survivor (exhausted)");
+		expect(section).not.toContain("2acdf5e9-surv");
+	});
+
+	test("prints token rates as whole tokens and request rates to three decimals", () => {
+		const section = subsection(reportWith(namedChecks()));
+		const survivorLine = section
+			.split("\n")
+			.find((line) => line.includes("`acct-survivor`: requests"));
+		expect(survivorLine).toBeDefined();
+		expect(survivorLine).toMatch(
+			/requests pre -?\d+\.\d{3}, post -?\d+\.\d{3}, delta -?\d+\.\d{3}, contribution/,
+		);
+		expect(survivorLine).toMatch(
+			/tokens pre -?\d+, post -?\d+, delta -?\d+, contribution/,
+		);
+
+		// P, N and G on the tokens row are rate sums, and print as whole tokens.
+		// Their columns are read off the header rather than counted by hand, so a
+		// new column moves the check with the table instead of past it.
+		const headerCells = section
+			.split("\n")
+			.find((line) => line.startsWith("| horizon | basis | W_pre (min) |"))
+			?.split("|")
+			.map((cell) => cell.trim());
+		expect(headerCells).toBeDefined();
+		const rateSumColumns = ["P", "N", "G"].map((column) => {
+			const index = (headerCells ?? []).indexOf(column);
+			expect(index).toBeGreaterThan(-1);
+			return index;
+		});
+
+		const tokenRow = section
+			.split("\n")
+			.find((line) => line.startsWith("| W = 60 min | tokens |"));
+		expect(tokenRow).toBeDefined();
+		const cells = (tokenRow ?? "").split("|").map((cell) => cell.trim());
+		for (const index of rateSumColumns) {
+			expect(cells[index]).toMatch(/^-?\d+$/);
+		}
+		const requestRow = section
+			.split("\n")
+			.find((line) => line.startsWith("| W = 60 min | requests |"));
+		const requestCells = (requestRow ?? "").split("|").map((c) => c.trim());
+		for (const index of rateSumColumns) {
+			expect(requestCells[index]).toMatch(/^-?\d+\.\d{3}$/);
+		}
+	});
+
+	test("prints both bases without preferring either", () => {
+		const section = subsection(reportWith(measured()));
+		expect(section).toContain(
+			"where the two disagree, both are printed, and neither is preferred here",
+		);
+		expect(section).not.toContain("that disagreement is the finding");
+	});
+
+	test("attributes a fill to the account's own demand, not to the class", () => {
+		const section = subsection(reportWith(measured()));
+		expect(section).toContain(
+			"A window fills because its account was busy, and often its class with it.",
+		);
+		expect(section).not.toContain("Deaths happen because the class is busy");
+		expect(section).toContain("not removable from observational data");
+	});
+
+	test("states what the matched control tests rather than a conclusion", () => {
+		const section = subsection(reportWith(measured()));
+		expect(section).toContain(
+			"Whether the workload repeats at a one-week offset is what the control ratios show",
+		);
+		expect(section).not.toContain("not weekly-periodic");
+		expect(section).toContain("so the reader can see which");
+	});
+
+	test("keeps the pairing out of the aggregate's ratio columns", () => {
+		const section = subsection(reportWith(measured()));
+		expect(section).toContain("| measurements in population |");
+		const aggregate = section.indexOf("| population | basis |");
+		const pairing = section.indexOf("| pairing | basis | n | median delta |");
+		const pairedRow = section.indexOf(
+			"| paired median of (ratio at death − mean ratio at eligible controls)",
+		);
+		expect(aggregate).toBeGreaterThan(-1);
+		expect(pairing).toBeGreaterThan(aggregate);
+		expect(pairedRow).toBeGreaterThan(pairing);
+		// Four cells, so no ratio column is reused for the difference.
+		const row = section.slice(pairedRow, section.indexOf("\n", pairedRow));
+		expect(row.split("|").filter((cell) => cell.trim() !== "")).toHaveLength(4);
+		expect(section).toContain("difference of two ratios rather than a ratio");
+	});
+
+	test("labels the horizon populations as caps and prints the actual widths", () => {
+		expect(ABSORPTION_POPULATION_LABELS.narrow).toContain("W ≤ 60 min");
+		expect(ABSORPTION_POPULATION_LABELS.wide).toContain("W ≤ 6 h");
+
+		const checks = absorptionChecks(
+			absorptionInput({
+				buckets: controlBuckets(),
+				series: absSeries([
+					{ accountId: "D", exhausted: [[ABS_D, ABS_D + 12 * HOUR]] },
+					{ accountId: "S1" },
+					{ accountId: "S2", exhausted: [[ABS_D + 40 * MIN, ABS_TO + 1]] },
+				]),
+			}),
+		);
+		expect(checks.deaths[0].narrow.halfWidthMs).toBe(40 * MIN);
+		const section = subsection(reportWith(checks));
+		expect(section).toContain("| W = 40 min | requests |");
+		expect(section).toContain("- Survivors, at W = 40 min (W_pre = 60 min):");
+		expect(section).toContain(
+			`| ${ABSORPTION_POPULATION_LABELS.narrow} | requests |`,
+		);
+		expect(section).toContain("| W_pre (min) |");
+	});
+
+	test("compares the two horizons on the deaths that carry both", () => {
+		const section = subsection(reportWith(measured()));
+		expect(section).toContain(
+			`| ${ABSORPTION_POPULATION_LABELS.narrowWithWide} | requests |`,
+		);
+		expect(ABSORPTION_POPULATION_LABELS.narrowWithWide).toContain(
+			"also measured at W ≤ 6 h",
+		);
+	});
+
+	test("names the token-coverage and timing limits", () => {
+		const { cohorts, replay } = verdictFixture(VERDICT_BASE);
+		const limits = knownLimitsFor(
+			replay,
+			cohorts,
+			evaluateVerdict(cohorts, replay),
+			{ attributedRows: 807_705, zeroOrNullTokenRows: 14_769 },
+		);
+		expect(limits.some((limit) => limit.includes("persistence time"))).toBe(
+			true,
+		);
+		expect(limits.some((limit) => limit.includes("are unmeasured"))).toBe(true);
+		expect(limits.some((limit) => limit.includes("14769"))).toBe(true);
+		expect(
+			limits.some((limit) => limit.includes("no foreign key to `accounts`")),
+		).toBe(true);
+		expect(limits.some((limit) => limit.includes("Pause has no history"))).toBe(
+			true,
+		);
 	});
 });

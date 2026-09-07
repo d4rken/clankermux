@@ -1,6 +1,6 @@
 # Handover: demand-conserving roster scenarios for the pool runway
 
-Status (2026-09-06): **steps 1, 2 and 3 of section 8 are landed.** Steps 1 and
+Status (2026-09-07): **steps 1, 2 and 3 of section 8 are landed; the lag-parity experiment is closed and two absorption measurements are in the report.** Steps 1 and
 2 landed on `feat/demand-conserving-runway-scenario` (merged as `49c5c23e`,
 v2026.9.10): `dd5b38eb` (tier capacity table with provenance), `a40eb1d0`
 (pace-probe grid walks extracted so both models share one walk) and `4ec054c4`
@@ -65,49 +65,88 @@ flat slopes, and the coefficient would be tuned on the same run it would be
 judged on. What landed instead is the measurement tooling, `6097d175`
 (v2026.9.12).
 
-**The experiment running now: observation-lag parity, ONE change.** The
-scenario scheduled every window's exhaustion from the instant being replayed
-while the reading it scheduled from was measured to an earlier one, so the burn
-between those two instants entered no projection. The ten-minute freshness bar
-is on SAMPLE time, so it bounds the regression path's lag (that fit is anchored
-to its own last sample); the observation-anchored weekly path can exceed it
-wherever the observation instant precedes the sample instant. Five-hour windows
-after a peer death in the replay ran 0-5 minutes late. The scan now advances
-each reading over that lag, taking it per estimator path from the same anchor
-the current model uses (the fit's own last point on the regression path, the
-observation instant on the observation-anchored lifetime path), so on a lone
-account, wherever that anchor was recoverable and sits behind the replayed
-instant, the window is projected from the anchor the current model projects it
-from. An anchor AHEAD of the replayed instant clamps to zero lag while the
-current model keeps anchoring its own ETA to that future instant. A window of
-a lone account can also land elsewhere whenever another window of the class
-exhausts while this one is still projecting, including a death the correction
-applies AT the replayed instant: that suspends the account's burn, and the ETA
-then carries the span it spends dead, which is the scenario's own semantics
-rather than the redistribution. Fill demand, the share rule and the overlap
-treatment are untouched.
+**The observation-lag parity experiment is complete (v2026.9.14,
+`7a0173e6`).** The scenario had scheduled every
+window's exhaustion from the replayed instant while the reading it scheduled
+from was measured at an earlier one, so the burn between those two instants
+entered no projection. The scan now advances each reading over that lag, taking
+it per estimator path from the same anchor the current model uses (the fit's
+own last point on the regression path, the observation instant on the
+observation-anchored lifetime path). The correction is mechanically exact: the
+forecast shifts by exactly its own lag in 100 % of the 1731 eligible records,
+and a lone account's projection equals the current model's on both anchored
+paths. It moves criterion A by 28 seconds (to 14.106 min) and leaves
+criterion D's F1, recall and paired absolute error unchanged. The lags it
+advances over are small (median 3.8 min on the lifetime path, 1.2 min on the
+regression path) and 11183 of 23540 regression records carry no derivable anchor
+to advance from at all. That is the measured result and the whole of it: this
+correction, over this population, moves criterion A by 28 seconds. What share of
+the transition optimism observation lag accounts for is not established by that
+number in either direction, and what the remaining optimism is instead is not
+isolated by this experiment. The backtest keeps
+the uncorrected scan as a control model (`scenario-equal-original`) and the
+`## Observation-lag mechanism check` section states what each check measures.
 
-The backtest scores the corrected scan against a control that is the same equal
-split with the advance switched off (`scenario-equal-original`), under a rule
-declared before the run: criteria A-C as before, plus D, the corrected scan may
-not score worse than the control on the any-transition common cohort, neither
-on F1 nor on the paired median change in absolute ETA error. Recall is printed
-beside D and not judged: the correction can change the order of a class's
-events, and with it which windows get a dated exhaustion before their reset at
-all, in either direction. Beside the verdict the report carries a mechanism
-section that states what the correction did rather than what it scored:
-observation-age cohorts, an identity check over the class-instants where no
-pooled window carries a lag, the shift each ETA moved (split on first-event
-eligibility in both scans with no class window having died inside its lag
-while this one is still projecting), a direct parity check against the current
-model on lone accounts, a fixed paired-ETA subset, and the lag population per
-estimator path. Each check states what it measures and over which records, and
-leaves reading the number against that mechanism to the reader.
+**Two absorption measurements are landed (this branch), replacing numbers that
+had no tooling behind them.** An earlier ad-hoc pass against the live database
+produced "about 0.6 of the dying account's rate is absorbed, only above a 30 %
+traffic share, and the largest survivor takes 0.78 of the moved volume". Those
+numbers were derived from whole-run data in a session that is gone, and a share
+rule built on them would be tuned on the run that judges it. The report's new
+`## Absorption measurements` section carries two committed, re-runnable
+measurements instead; both are descriptive at their n, neither fits or
+thresholds anything, and nothing in production reads either.
 
-Codex ranked the follow-ups behind this one: measure the first-100 % fill
-directly, and derive the ledger shares from the history BEFORE each instant
-rather than from the whole run. The taper and the 0.6 coefficient are the two
-it ranked out, for the reasons above.
+- `### Time to first 100 %` measures how long a window took from its derived
+  start (`reset − window length`) to its first reading at or above 100 %, split
+  by whether the account's demand class lost a peer inside a FIXED prefix of the
+  window (its first hour for five-hour windows, first 24 h for weekly). The
+  fixed prefix exists because the naive "a peer died during the fill" is
+  length-biased toward longer fills; that naive split is printed too, labelled.
+  Censoring is counted, not dropped, and split into windows observed to their
+  reset below 100 % and windows whose follow-up stopped early. On
+  2026-07-01 to 2026-09-06: 51 fills among 1082 measurable lifecycles. Five-hour
+  windows filled in 7 of 13 cases when a peer died in the first hour and in 30 of
+  847 otherwise; weekly in 4 of 16 against 6 of 63. The fill fraction is the one
+  figure not selected on the outcome. A peer dies because its account was busy,
+  often with its class, and the same busy period fills a survivor faster, so
+  this section is direct and slope-free but not causal.
+
+- `### Request-volume changes around observed exhaustion` measures, for each
+  peer death, what each survivor's own request and token volume did across the
+  death, with every share and weight derived from the window before it only. The
+  survivor set is the class members observed AVAILABLE just before the death
+  from the snapshot series across both window kinds (an account at 100 % on
+  either window is out of routing; an unread stretch is a third state, not
+  availability), and the half-width is the largest symmetric interval in which no
+  class member changes availability, capped at 60 min for the primary horizon and
+  6 h for the second. That rule preferentially removes cascades and says so. On
+  the same range, 33 of 50 deaths are analysed (5 had no survivor, 2 were already
+  exhausted on the other window, 10 had a clean interval under 15 min). At the
+  60-minute horizon the median survivor rate ratio across the death is 1.46 on
+  requests and 1.81 on tokens; the median of alpha, the survivors' rate change
+  over the dying account's pre-death rate, is 0.20 and 0.35; the dying account's
+  median pre-death share of its class is 67 % and 73.8 %; the median survivor set
+  is two accounts, and in at least half of the 22 deaths with a positive net
+  change one survivor took all of the rise. At the 6-hour horizon, 17 deaths survive
+  the interval rule and the ratio medians are 0.59 and 0.74. Matched ±7 d
+  controls are printed per death as diagnostics; only 5 to 9 per offset have a
+  defined ratio at 60 min, because most control intervals hold no survivor
+  traffic at all, and the paired median is one row of the aggregate, not a
+  headline. The section states the residual
+  confound: a class-specific surge that both killed the peer and raised survivor
+  traffic is not removable from observational data.
+
+What these permit, and what they do not: the equal-split rule assumes a dead
+account's demand moves in full and divides evenly. What the request-volume
+measurement reports is a median survivor rate ratio across the death of 1.46 on
+requests and 1.81 on tokens, and a median normalised change (alpha) of 0.20 and
+0.35, over the 33 deaths analysed at the 60-minute horizon; over the 17 that
+also carry a 6-hour reading, the ratio medians are 0.59 and 0.74. A positive
+change does not identify inherited traffic, and a negative one does not
+establish its absence. Any replacement
+share rule has to be declared before it is scored, scored against criteria A to
+D on the same backtest, and must not read its coefficients off these tables.
 
 Before acting on any verdict, re-run the reproduce command printed in
 `docs/prediction-backtest-redistribution.md` with a `--to` after 2026-09-13,
