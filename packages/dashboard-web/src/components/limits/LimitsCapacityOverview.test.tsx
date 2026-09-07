@@ -214,16 +214,16 @@ describe("LimitsCapacityOverview", () => {
 				account({ id: "limited", usageData: usage(100, 50) }),
 			]),
 		);
-		expect(html).toContain("50% remaining");
+		expect(html).toContain("50% used");
 		expect(html).toContain("3 of 3 reporting");
-		expect(html).not.toContain("80% remaining");
+		expect(html).not.toContain("20% used");
 	});
 
 	it("retains a provider row when all its accounts are paused", () => {
 		const html = renderOverview(
 			pools([account({ paused: true, usageData: usage(10, 35) })]),
 		);
-		expect(html).toContain("65% remaining");
+		expect(html).toContain("35% used");
 		expect(html).toContain("Anthropic");
 		expect(html).toContain("0 of 1 available");
 	});
@@ -236,19 +236,19 @@ describe("LimitsCapacityOverview", () => {
 			]),
 		);
 		expect(html).toContain("incomplete weekly readings");
-		expect(html).not.toContain("75% remaining");
+		expect(html).not.toContain("25% used");
 	});
 
-	it("retains the weekly panel and lists average remaining by provider", () => {
+	it("retains the weekly panel and lists average usage by provider", () => {
 		const html = renderOverview();
 
 		expect(html).toContain("Quota overview");
 		expect(html).toContain("Weekly budget");
 		expect(html).toContain("5-hour pacing");
 		expect(html).not.toContain("2 providers");
-		expect(html).toContain("Lowest provider average");
-		expect(html).toContain("66% remaining");
-		expect(html).toContain("45% remaining");
+		expect(html).toContain("Highest provider usage average");
+		expect(html).toContain("34% used");
+		expect(html).toContain("55% used");
 		expect(html).not.toContain("lowest");
 		expect(html).not.toContain("Tightest class");
 	});
@@ -264,7 +264,7 @@ describe("LimitsCapacityOverview", () => {
 		const html = renderOverview();
 
 		expect(html).toContain('aria-label="Weekly budget by provider"');
-		expect(html).toContain("66% remaining");
+		expect(html).toContain("34% used");
 		expect(html).toContain("average per account");
 		expect(html).toContain("resets in 1h 30m · alpha");
 		expect(html).toContain("resets in 3d · gamma");
@@ -459,7 +459,7 @@ describe("LimitsCapacityOverview", () => {
 		expect(html).toContain("spare (claude-console-api)");
 	});
 
-	it("agrees with the Overview card about each provider's remaining percentage", () => {
+	it("agrees with the Overview card about each provider's used percentage", () => {
 		const windows = pools();
 		const { fiveHour, sevenDay } = windows;
 		const binding = sevenDay.bindingClass;
@@ -483,7 +483,7 @@ describe("LimitsCapacityOverview", () => {
 			/>,
 		);
 
-		const headline = `${Math.round(summary.remainingPct)}% remaining`;
+		const headline = `${Math.round(100 - summary.remainingPct)}% used`;
 		expect(panelHtml).toContain(headline);
 		expect(cardHtml).toContain(headline);
 	});

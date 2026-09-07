@@ -79,7 +79,7 @@ function familyBars(row: FamilyRow): PoolAccountBar[] {
 	);
 }
 
-/** Floor remaining quota so rounding never overstates capacity. */
+/** Floor utilization consistently with the account bars and status thresholds. */
 const floorPct = (pct: number): string => `${Math.floor(pct)}%`;
 
 /** Per-model weekly quota, averaged across configured accounts independently of availability. */
@@ -116,8 +116,8 @@ export function FamilyWeeklyCard({
 			<CardHeader>
 				<CardTitle>Model limits</CardTitle>
 				<CardDescription>
-					Average weekly quota remaining per model. Includes accounts that are
-					paused or temporarily limited.
+					Average weekly quota used per model. Includes accounts that are paused
+					or temporarily limited.
 				</CardDescription>
 			</CardHeader>
 			<CardContent>
@@ -222,18 +222,14 @@ export function FamilyWeeklyCard({
 									>
 										{averageRemaining === null
 											? "—"
-											: `${floorPct(averageRemaining)} remaining`}
+											: `${floorPct(100 - averageRemaining)} used`}
 									</p>
 									<p className="truncate text-xs text-muted-foreground">
 										{averageRemaining === null
 											? `${knownCount} of ${total} quota readings`
 											: `average across ${total} account${total === 1 ? "" : "s"}`}
 									</p>
-									<PoolClassBars
-										accounts={bars}
-										display="remaining"
-										formatPct={floorPct}
-									/>
+									<PoolClassBars accounts={bars} formatPct={floorPct} />
 									{total > 0 && (
 										<div className="mt-item space-y-tight text-xs text-muted-foreground">
 											<p className="truncate">

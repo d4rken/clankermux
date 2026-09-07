@@ -31,7 +31,7 @@ function classBurn(budget: ClassBudget) {
 }
 
 interface WeeklyBudgetPanelProps {
-	/** Served pacing and forecast details; remaining percentages come from summaryRows. */
+	/** Served pacing and forecast details; usage percentages come from summaryRows. */
 	pacing: PacingSnapshot | undefined;
 	/**
 	 * The locally-computed weekly pool, for the per-model-family line ALONE.
@@ -182,7 +182,7 @@ function coverageLine(
 	return parts.join(" · ");
 }
 
-/** Weekly remaining quota per provider, with availability and served pacing kept separate. */
+/** Weekly quota used per provider, with availability and served pacing kept separate. */
 export function WeeklyBudgetPanel({
 	pacing,
 	sevenDay,
@@ -263,11 +263,11 @@ export function WeeklyBudgetPanel({
 						<div className="flex items-baseline justify-between gap-row">
 							<p
 								className={cn("figure-xl", toneClasses.figure)}
-								title="Lowest provider average; each provider is listed below."
+								title="Highest provider usage average; each provider is listed below."
 							>
 								{headline?.remainingPct == null
 									? "—"
-									: `${Math.round(headline.remainingPct)}% remaining`}
+									: `${Math.round(100 - headline.remainingPct)}% used`}
 							</p>
 							<p className="text-xs text-muted-foreground">{headline?.label}</p>
 						</div>
@@ -301,7 +301,7 @@ export function WeeklyBudgetPanel({
 										) : (
 											<>
 												<span className="tabular-nums">
-													{Math.round(row.remainingPct)}% remaining
+													{Math.round(100 - row.remainingPct)}% used
 												</span>
 												{" · average per account"}
 												{burn && (

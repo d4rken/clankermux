@@ -41,7 +41,7 @@ interface PoolQuotaCardProps {
 	staleNote?: string;
 }
 
-/** The original provider card, showing average quota remaining across its accounts. */
+/** The original provider card, showing average quota used across its accounts. */
 export function PoolQuotaCard({
 	weekly,
 	summary,
@@ -116,7 +116,7 @@ export function PoolQuotaCard({
 	const paceText =
 		fiveHourRemaining == null
 			? null
-			: `5h: ${Math.round(fiveHourRemaining)}% remaining · account average`;
+			: `5h: ${Math.round(100 - fiveHourRemaining)}% used · account average`;
 	// Compare each account against its own weekly window before averaging pace.
 	const burns = bars.map((bar) =>
 		bar.pct === null
@@ -194,7 +194,7 @@ export function PoolQuotaCard({
 				) : (
 					<>
 						<p className={cn("figure-xl", tone)}>
-							{Math.round(remainingPct)}% remaining
+							{Math.round(100 - remainingPct)}% used
 						</p>
 						<p
 							className="truncate text-xs text-muted-foreground"
@@ -219,7 +219,7 @@ export function PoolQuotaCard({
 					</p>
 				)}
 
-				{resolved && <PoolClassBars accounts={bars} display="remaining" />}
+				{resolved && <PoolClassBars accounts={bars} />}
 
 				<div className="mt-item space-y-tight">
 					{/* "hit 100% before their OWN reset", never "run out". This counts

@@ -347,8 +347,8 @@ export function LimitsCapacityOverview({
 					<div className="min-w-0">
 						<CardTitle>Quota overview</CardTitle>
 						<CardDescription>
-							Latest remaining quota per provider. This is polled quota state,
-							not routing availability.
+							Latest quota usage per provider. This is polled quota state, not
+							routing availability.
 						</CardDescription>
 					</div>
 					<Popover>
@@ -364,7 +364,7 @@ export function LimitsCapacityOverview({
 						<PopoverContent align="end" className="space-y-item text-xs">
 							<p className="font-medium">How the overview is calculated</p>
 							<p className="text-muted-foreground">
-								Weekly budget: remaining percentages are equal account averages
+								Weekly budget: usage percentages are equal account averages
 								within each provider. Paused and temporarily limited accounts
 								are included. Incomplete readings leave the percentage unknown.
 							</p>

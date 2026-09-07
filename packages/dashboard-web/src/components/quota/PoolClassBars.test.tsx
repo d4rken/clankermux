@@ -16,18 +16,17 @@ function bar(over: Partial<PoolClassBar> = {}): PoolClassBar {
 }
 
 describe("PoolClassBars", () => {
-	it("keeps a blocked account's remaining quota visible and gray", () => {
+	it("keeps a blocked account's quota used visible and gray", () => {
 		const html = renderToStaticMarkup(
 			<PoolClassBars
-				display="remaining"
 				accounts={[bar({ state: "exhausted", reason: "5h limit reached" })]}
 			/>,
 		);
-		expect(html).toContain('aria-valuenow="52"');
+		expect(html).toContain('aria-valuenow="48"');
 		expect(html).toContain(
-			'aria-valuetext="alpha: 52% remaining · 5h limit reached"',
+			'aria-valuetext="alpha: 48% used · 5h limit reached"',
 		);
-		expect(html).toContain("width:52%");
+		expect(html).toContain("width:48%");
 		expect(html).toContain("bg-muted-foreground/30");
 		expect(html).toContain("5h limit reached");
 	});

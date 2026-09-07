@@ -173,7 +173,7 @@ describe("PoolQuotaCard pace", () => {
 		]);
 
 		expect(html).toContain("pace 1.5× sustainable pace");
-		expect(html).toContain("5h: 80% remaining");
+		expect(html).toContain("5h: 20% used");
 	});
 
 	it("says nothing about pace without a weekly reset to measure against", () => {
@@ -184,12 +184,12 @@ describe("PoolQuotaCard pace", () => {
 			account({ usageData: bothAt(75, NOW + 2.5 * HOUR, 20, null) as never }),
 		]);
 
-		expect(html).toContain("5h: 25% remaining");
+		expect(html).toContain("5h: 75% used");
 		expect(html).not.toContain("sustainable pace");
 	});
 });
 
-describe("PoolQuotaCard remaining quota", () => {
+describe("PoolQuotaCard quota used", () => {
 	it("averages all accounts, including a five-hour block, without naming the lowest", () => {
 		const accounts = [
 			account({
@@ -203,13 +203,13 @@ describe("PoolQuotaCard remaining quota", () => {
 			}),
 		];
 		const html = render(accounts);
-		expect(html).toContain("50% remaining");
+		expect(html).toContain("50% used");
 		expect(html).toContain("Weekly · account average");
 		expect(html).not.toContain("lowest");
-		expect(html).toContain("Claud1: 80% remaining · 5h limit reached");
+		expect(html).toContain("Claud1: 20% used · 5h limit reached");
 		expect(html).toContain("1/2 available");
 		expect(render(accounts.map((a) => ({ ...a, paused: true })))).toContain(
-			"50% remaining",
+			"50% used",
 		);
 	});
 	it("does not shrink the average's denominator when a reading is missing", () => {
@@ -218,7 +218,7 @@ describe("PoolQuotaCard remaining quota", () => {
 			account({ id: "acc-2", name: "Claud2" }),
 		]);
 		expect(html).toContain("Weekly quota incomplete");
-		expect(html).not.toContain(">80% remaining</p>");
+		expect(html).not.toContain(">20% used</p>");
 		expect(html).toContain("1 of 2 accounts reporting");
 	});
 });
