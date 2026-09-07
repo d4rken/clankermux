@@ -22,7 +22,10 @@ import {
 	churnRows,
 	detectTransitions,
 	evaluateBesideBasis,
+	evaluateFailoverLine,
 	evaluateVerdict,
+	FAILOVER_LINE_MIN_NEW_LIFECYCLES,
+	FAILOVER_LINE_RULE,
 	formatRedistributionReport,
 	headroomShareRule,
 	knownLimitsFor,
@@ -57,6 +60,7 @@ import {
 	type ScenarioModel,
 	SINCE_DEATH_BUCKETS,
 	scoreCohorts,
+	scoreFailoverLine,
 	survivorSlopeTrajectory,
 	TRANSITION_BOOTSTRAP_LABEL,
 	type TransitionEvent,
@@ -1041,6 +1045,9 @@ function record(
 		exactShiftEligible: false,
 		basisFirstAssignment: false,
 		lagAnchorKnown: true,
+		failoverEtaMs: null,
+		standaloneLineEtaMs: null,
+		failoverWeeklyDriven: false,
 		...overrides,
 	};
 }
@@ -1078,6 +1085,7 @@ const replayOf = (
 	calibration: [],
 	allOutIntervals: [],
 	placeholderWindowsSkipped: 0,
+	failoverShownAtHorizon: 0,
 	pendingWeeklyByTagClass: new Map(Object.entries(pendingWeekly)),
 	tagCoverage: [],
 	fills: [],
@@ -1879,6 +1887,10 @@ function reportOf(
 		cohorts,
 		verdict,
 		absorption,
+		failoverLine: {
+			scores: scoreFailoverLine(result),
+			verdict: evaluateFailoverLine(scoreFailoverLine(result)),
+		},
 		knownLimits: ["a limit"],
 		notes: ["a note"],
 	});
@@ -6846,5 +6858,331 @@ describe("the request-volume report section", () => {
 		expect(limits.some((limit) => limit.includes("Pause has no history"))).toBe(
 			true,
 		);
+	});
+});
+
+describe("failover line", () => {
+	// A five-hour donor/recipient pair, both Max 20x. The donor is at 90 % with
+	// 2 h to its reset (30 %/h, dies at T0+20 min); the recipient is at 45 % with
+	// 3.5 h to its reset (30 %/h, standalone run-out at T0+110 min). Once the
+	// donor dies the recipient carries the whole class demand: 60 %/h from 55 %,
+	// which is T0+65 min.
+	const donorStart = T0 - 3 * HOUR;
+	const recipientStart = T0 - 1.5 * HOUR;
+	const linear = (start: number, pctPerHour: number) => (t: number) => ({
+		pct: Math.min(100, ((t - start) / HOUR) * pctPerHour),
+		reset: start + 5 * HOUR,
+	});
+	const pairRows = () => [
+		...rows({
+			accountId: "A",
+			from: donorStart,
+			to: donorStart + 5 * HOUR,
+			fiveHour: linear(donorStart, 30),
+		}),
+		...rows({
+			accountId: "B",
+			from: recipientStart,
+			to: recipientStart + 5 * HOUR,
+			fiveHour: linear(recipientStart, 30),
+		}),
+	];
+	const replayPair = () => {
+		const accounts = [account("A"), account("B")];
+		const series = prepareSeries(pairRows(), accounts);
+		const roster = buildRosterAtInstant(T0, series, accounts);
+		return replayInstant(T0, roster, [], RANGE);
+	};
+	const currentOf = (
+		replay: ReturnType<typeof replayInstant>,
+		accountId: string,
+	) =>
+		replay.records.find(
+			(entry) => entry.accountId === accountId && entry.model === "current",
+		);
+
+	test("the replay carries the line exactly as production would show it", () => {
+		const replay = replayPair();
+		const recipient = currentOf(replay, "B");
+		const donor = currentOf(replay, "A");
+		expect(recipient?.standaloneLineEtaMs as number).toBeCloseTo(
+			T0 + 110 * MIN,
+			-4,
+		);
+		expect(recipient?.failoverEtaMs as number).toBeCloseTo(T0 + 65 * MIN, -4);
+		expect(recipient?.failoverWeeklyDriven).toBe(false);
+		// The donor runs out first on its own burn: the scan agrees with its own
+		// line, so no failover line.
+		expect(donor?.failoverEtaMs).toBeNull();
+		expect(donor?.standaloneLineEtaMs as number).toBeCloseTo(T0 + 20 * MIN, -4);
+		// Every model's record at the instant carries the same line fields.
+		for (const model of REPLAY_MODELS) {
+			const entry = replay.records.find(
+				(record) => record.accountId === "B" && record.model === model,
+			);
+			expect(entry?.failoverEtaMs).toBe(recipient?.failoverEtaMs ?? null);
+		}
+	});
+
+	test("a line shown at an instant the label horizon drops is counted, not lost", () => {
+		const accounts = [account("A"), account("B")];
+		const series = prepareSeries(pairRows(), accounts);
+		const roster = buildRosterAtInstant(T0, series, accounts);
+		// The recipient's truth (100 % at T0+110 min) is past this horizon; the
+		// donor's (T0+20 min) is not.
+		const replay = replayInstant(T0, roster, [], {
+			...RANGE,
+			toMs: T0 + 30 * MIN,
+		});
+		expect(replay.records.some((entry) => entry.accountId === "B")).toBe(false);
+		expect(replay.records.some((entry) => entry.accountId === "A")).toBe(true);
+		expect(replay.failoverShownAtHorizon).toBe(1);
+		expect(replayPair().failoverShownAtHorizon).toBe(0);
+	});
+
+	test("the JSON record carries the line fields", () => {
+		const replay = replayPair();
+		const json = redistributionRecordToJson(
+			currentOf(replay, "B") as RedistributionRecord,
+		);
+		expect(json.failoverEtaMs).toBe(currentOf(replay, "B")?.failoverEtaMs);
+		expect(json.failoverEtaIso).toBe(
+			new Date(currentOf(replay, "B")?.failoverEtaMs as number).toISOString(),
+		);
+		expect(json.standaloneLineEtaMs).toBe(
+			currentOf(replay, "B")?.standaloneLineEtaMs,
+		);
+		expect(json.failoverWeeklyDriven).toBe(false);
+		const donorJson = redistributionRecordToJson(
+			currentOf(replay, "A") as RedistributionRecord,
+		);
+		expect(donorJson.failoverEtaMs).toBeNull();
+		expect(donorJson.failoverEtaIso).toBeNull();
+	});
+
+	const lineRecord = (
+		lifecycle: string,
+		T: number,
+		over: Partial<RedistributionRecord> = {},
+	): RedistributionRecord =>
+		record({
+			model: "current",
+			accountId: lifecycle,
+			T,
+			windowKind: "five_hour",
+			lifecycleId: `${lifecycle}::five_hour::0`,
+			predictsExhaust: false,
+			predictedEtaMs: null,
+			...over,
+		});
+
+	test("scores the shown, new and standalone sets per lifecycle and per record", () => {
+		const exhausted = { kind: "exhausted" as const, atMs: T0 + 2 * HOUR };
+		const survived = { kind: "survived" as const };
+		const records = [
+			// L1: failover line first at T0, standalone only at T0+30m; exhausted.
+			lineRecord("L1", T0, { failoverEtaMs: T0 + HOUR, outcome: exhausted }),
+			lineRecord("L1", T0 + 30 * MIN, {
+				failoverEtaMs: T0 + HOUR,
+				standaloneLineEtaMs: T0 + 90 * MIN,
+				outcome: exhausted,
+			}),
+			// L2: both lines at the first shown instant; survived (a false alarm).
+			lineRecord("L2", T0, {
+				failoverEtaMs: T0 + HOUR,
+				standaloneLineEtaMs: T0 + 2 * HOUR,
+				outcome: survived,
+			}),
+			// L3: failover line only, weekly-driven; survived.
+			lineRecord("L3", T0, {
+				failoverEtaMs: T0 + HOUR,
+				failoverWeeklyDriven: true,
+				outcome: survived,
+			}),
+			// L4: standalone line only; survived.
+			lineRecord("L4", T0, {
+				standaloneLineEtaMs: T0 + HOUR,
+				outcome: survived,
+			}),
+			// L5: shown, but its truth is censored: excluded everywhere, counted.
+			lineRecord("L5", T0, {
+				failoverEtaMs: T0 + HOUR,
+				outcome: { kind: "censored" },
+			}),
+			// L7: shown; the 100 % was observed AFTER the window's own reset, so
+			// it is the next window filling, not this one running out: a miss.
+			lineRecord("L7", T0, {
+				failoverEtaMs: T0 + HOUR,
+				outcome: { kind: "exhausted", atMs: T0 + 4 * DAY },
+			}),
+			// Weekly records and other models never enter the population.
+			record({
+				model: "current",
+				accountId: "W",
+				T: T0,
+				failoverEtaMs: T0 + HOUR,
+			}),
+			lineRecord("L6", T0, {
+				model: "scenario-proportional",
+				failoverEtaMs: T0 + HOUR,
+				outcome: exhausted,
+			}),
+		];
+		const scored = scoreFailoverLine(
+			replayOf(records) as unknown as ReplayResult,
+		);
+		expect(scored.classes).toHaveLength(1);
+		const cls = scored.classes[0];
+		expect(cls.demandClass).toBe("anthropic");
+		expect(cls.records).toBe(6);
+		expect(cls.shownCensored).toBe(1);
+		expect(cls.shownLifecycles).toEqual({
+			lifecycles: 4,
+			exhausted: 1,
+			precision: 0.25,
+		});
+		// L1 (standalone silent at T0), L3 and L7; L2 had both lines at once.
+		expect(cls.newLifecycles).toEqual({
+			lifecycles: 3,
+			exhausted: 1,
+			precision: 1 / 3,
+		});
+		expect(cls.standaloneLifecycles).toEqual({
+			lifecycles: 3,
+			exhausted: 1,
+			precision: 1 / 3,
+		});
+		expect(cls.shown).toEqual({ records: 5, exhausted: 2, precision: 0.4 });
+		expect(cls.newRecords).toEqual({
+			records: 3,
+			exhausted: 1,
+			precision: 1 / 3,
+		});
+		expect(scored.shownAtHorizon).toBe(0);
+		expect(cls.standaloneRecords).toEqual({
+			records: 3,
+			exhausted: 1,
+			precision: 1 / 3,
+		});
+		expect(cls.weeklyDriven).toEqual({
+			records: 1,
+			exhausted: 0,
+			precision: 0,
+		});
+		expect(cls.leadOverStandaloneMinutes).toEqual([30]);
+		expect(cls.failoverWarningMinutes).toEqual([120]);
+		expect(cls.standaloneWarningMinutes).toEqual([90]);
+		expect(cls.failoverSignedErrorMinutes).toEqual([-60, -60]);
+		expect(cls.standaloneSignedErrorMinutes).toEqual([-30]);
+	});
+
+	test("applies the declared rule and names the failing criterion", () => {
+		const scoresOf = (
+			newLifecycles: number,
+			newExhausted: number,
+			standaloneLifecycles: number,
+			standaloneExhausted: number,
+		) => ({
+			shownAtHorizon: 0,
+			classes: [
+				{
+					demandClass: "anthropic",
+					records: 0,
+					shownCensored: 0,
+					shown: { records: 0, exhausted: 0, precision: null },
+					newRecords: { records: 0, exhausted: 0, precision: null },
+					standaloneRecords: { records: 0, exhausted: 0, precision: null },
+					weeklyDriven: { records: 0, exhausted: 0, precision: null },
+					shownLifecycles: { lifecycles: 0, exhausted: 0, precision: null },
+					newLifecycles: {
+						lifecycles: newLifecycles,
+						exhausted: newExhausted,
+						precision:
+							newLifecycles === 0 ? null : newExhausted / newLifecycles,
+					},
+					standaloneLifecycles: {
+						lifecycles: standaloneLifecycles,
+						exhausted: standaloneExhausted,
+						precision:
+							standaloneLifecycles === 0
+								? null
+								: standaloneExhausted / standaloneLifecycles,
+					},
+					leadOverStandaloneMinutes: [],
+					failoverWarningMinutes: [],
+					standaloneWarningMinutes: [],
+					failoverSignedErrorMinutes: [],
+					standaloneSignedErrorMinutes: [],
+				},
+			],
+		});
+		expect(FAILOVER_LINE_MIN_NEW_LIFECYCLES).toBe(10);
+		expect(FAILOVER_LINE_RULE).toContain("|NEW| >= 10");
+		expect(evaluateFailoverLine(scoresOf(12, 5, 40, 12))).toMatchObject({
+			reliable: true,
+			enough: true,
+			decision: "ship",
+		});
+		// Equal precision passes: the added lines are no worse.
+		expect(evaluateFailoverLine(scoresOf(10, 3, 40, 12))).toMatchObject({
+			decision: "ship",
+		});
+		expect(evaluateFailoverLine(scoresOf(12, 3, 40, 12))).toMatchObject({
+			reliable: false,
+			enough: true,
+			decision: "no-line",
+		});
+		expect(evaluateFailoverLine(scoresOf(9, 9, 40, 12))).toMatchObject({
+			reliable: true,
+			enough: false,
+			decision: "insufficient-evidence",
+		});
+		expect(
+			evaluateFailoverLine({ classes: [], shownAtHorizon: 0 }),
+		).toMatchObject({
+			newLifecycles: 0,
+			reliable: null,
+			decision: "insufficient-evidence",
+		});
+		// Enough NEW lifecycles but no standalone comparator: nothing was
+		// measured, so this is not a `no-line`.
+		expect(evaluateFailoverLine(scoresOf(12, 12, 0, 0))).toMatchObject({
+			enough: true,
+			reliable: null,
+			decision: "insufficient-evidence",
+		});
+	});
+
+	test("the report carries the rule, the sets and the decision", () => {
+		const replay = replayPair();
+		const result = {
+			...(replayOf(replay.records) as unknown as ReplayResult),
+		};
+		const scores = scoreFailoverLine(result);
+		const markdown = reportOf(
+			result,
+			scoreCohorts(result),
+			evaluateVerdict(scoreCohorts(result), result),
+			0,
+		);
+		expect(markdown).toContain("## Failover line");
+		expect(markdown).toContain("FAILOVER LINE.");
+		expect(markdown).toContain("### anthropic");
+		expect(markdown).toContain(
+			"| new (standalone silent when the line first appeared) |",
+		);
+		expect(markdown).toContain("### Decision (anthropic)");
+		expect(markdown).toContain(
+			"window-instants at which the line would have been shown fell at the label horizon",
+		);
+		expect(markdown).toMatch(
+			/Criterion D of the model verdict (passed|failed|is indeterminate) on this run/,
+		);
+		expect(markdown).toContain(
+			`- Decision: \`${evaluateFailoverLine(scores).decision}\``,
+		);
+		const before = markdown.indexOf("## Failover line");
+		expect(before).toBeGreaterThan(markdown.indexOf("## Verdict"));
+		expect(before).toBeLessThan(markdown.indexOf("## Known limits"));
 	});
 });
