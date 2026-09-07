@@ -16,6 +16,7 @@ import {
 import {
 	REQUEST_BUCKET_SQL,
 	loadAccounts,
+	loadedRequestSpan,
 	loadRequestBuckets,
 	loadRequestTokenCoverage,
 	loadRows,
@@ -138,8 +139,12 @@ function seedFixture(path: string): Fixture {
 	const windowStart = T0 - DAY_MS;
 	const reset = windowStart + 7 * DAY_MS;
 	const step = 30 * MIN_MS;
+	// Inside the ten-minute staleness bar the availability history reads
+	// under: a wider snapshot grid would leave every account `unknown`
+	// between samples and no death would have a survivor set at all.
+	const snapshotStep = 10 * MIN_MS;
 	let deathAt: number | null = null;
-	for (let t = windowStart; t <= T0 + 6 * DAY_MS; t += step) {
+	for (let t = windowStart; t <= T0 + 6 * DAY_MS; t += snapshotStep) {
 		const elapsedDays = (t - windowStart) / DAY_MS;
 		const a = Math.min(100, elapsedDays * 12);
 		const b = Math.min(100, elapsedDays * 45);
@@ -261,19 +266,21 @@ describe("end to end on a fixture database", () => {
 		const cohorts = scoreCohorts(replay);
 		const verdict = evaluateVerdict(cohorts, replay);
 		const requestDb = openBacktestDatabase(dbPath);
+		const loadedBuckets = loadRequestBuckets(
+			requestDb,
+			accounts.map((entry) => entry.accountId),
+			REQ_FROM,
+			REQ_TO,
+		);
+		const span = loadedRequestSpan(loadedBuckets, REQ_FROM, REQ_TO);
 		const absorption = absorptionChecks({
 			events: replay.events,
 			accounts,
 			series: prepareSeries(rows, accounts),
-			buckets: loadRequestBuckets(
-				requestDb,
-				accounts.map((entry) => entry.accountId),
-				REQ_FROM,
-				REQ_TO,
-			),
+			buckets: loadedBuckets,
 			range,
-			requestsFromMs: REQ_FROM,
-			requestsToMs: REQ_TO,
+			requestsFromMs: span.fromMs,
+			requestsToMs: span.toMs,
 		});
 		requestDb.close();
 		expect(absorption.deaths.length).toBeGreaterThan(0);
@@ -299,7 +306,9 @@ describe("end to end on a fixture database", () => {
 			notes: ["fixture run"],
 		});
 		expect(markdown).toContain("## Verdict");
-		expect(markdown).toContain("### Causal absorption shares around a death");
+		expect(markdown).toContain(
+			"### Request-volume changes around observed exhaustion",
+		);
 		expect(markdown).toContain("## Transition events");
 		expect(markdown).toContain("## Observation-lag mechanism check");
 		// The pre-correction scan is scored beside the corrected one.
@@ -425,6 +434,67 @@ describe("loadRequestBuckets", () => {
 		expect(coverage?.zeroOrNullTokenRows).toBe(
 			fixture.requests.filter((row) => (row.tokens ?? 0) === 0).length,
 		);
+	});
+});
+
+describe("loadedRequestSpan", () => {
+	test("bounds the span at the last loaded bucket, not the padded query bound", () => {
+		const db = openBacktestDatabase(dbPath);
+		const loaded = loadRequestBuckets(db, ["A", "B"], REQ_FROM, REQ_TO);
+		db.close();
+
+		const span = loadedRequestSpan(loaded, REQ_FROM, REQ_TO);
+		const starts = loaded.map((bucket) => bucket.bucketStartMs);
+		expect(span.fromMs).toBe(Math.min(...starts));
+		expect(span.toMs).toBe(Math.max(...starts) + REQUEST_BUCKET_MS);
+		// The seeded traffic stops well inside the padded bound.
+		expect(span.toMs).toBeLessThan(REQ_TO);
+	});
+
+	test("an empty load falls back to the query bound rather than an empty span", () => {
+		const span = loadedRequestSpan([], REQ_FROM, REQ_TO);
+		expect(span).toEqual({ fromMs: REQ_FROM, toMs: REQ_TO });
+	});
+
+	test("a control past the last loaded bucket is rejected, not measured", () => {
+		const db = openBacktestDatabase(dbPath);
+		const rows = loadRows(db, REQ_FROM, REQ_TO);
+		const accounts = loadAccounts(db);
+		const loaded = loadRequestBuckets(
+			db,
+			accounts.map((entry) => entry.accountId),
+			REQ_FROM,
+			REQ_TO,
+		);
+		db.close();
+
+		// Traffic that stops a day after the death, so the +7 d control reads an
+		// empty span unless the loader bounds it.
+		const truncated = loaded.filter(
+			(bucket) => bucket.bucketStartMs < fixture.deathAt + DAY_MS,
+		);
+		const span = loadedRequestSpan(truncated, REQ_FROM, REQ_TO);
+		const range = { label: "Replay range", fromMs: T0, toMs: T0 + 6 * DAY_MS };
+		const replay = replayRange(rows, accounts, range, 6 * 60, 20260823);
+		const absorption = absorptionChecks({
+			events: replay.events,
+			accounts,
+			series: prepareSeries(rows, accounts),
+			buckets: truncated,
+			range,
+			requestsFromMs: span.fromMs,
+			requestsToMs: span.toMs,
+		});
+
+		const controls = absorption.deaths.flatMap((death) =>
+			death.narrow.controls.filter((control) => control.label === "+7 d"),
+		);
+		expect(controls.length).toBeGreaterThan(0);
+		for (const control of controls) {
+			expect(control.eligible).toBe(false);
+			expect(control.rejection).toBe("outside-loaded-span");
+			expect(control.measurements).toBeNull();
+		}
 	});
 });
 

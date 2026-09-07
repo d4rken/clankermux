@@ -331,6 +331,36 @@ export function loadRequestBuckets(
 	return out;
 }
 
+/**
+ * The span the request data ACTUALLY covers, not the span it was asked for.
+ *
+ * The loader queries a padded window either side of the replay interval, but
+ * the table stops where the traffic stops. Passing the padded bound on would
+ * let a matched control sit past the last row and read an empty interval as a
+ * measured zero instead of being rejected as outside the loaded span. The
+ * upper bound is the last bucket's END, since a bucket covers
+ * `[start, start + REQUEST_BUCKET_MS)`.
+ *
+ * An empty load has no extent to state, so the query bound is returned
+ * unchanged; every death is then excluded for want of request coverage.
+ */
+export function loadedRequestSpan(
+	buckets: readonly RequestBucket[],
+	queriedFromMs: number,
+	queriedToMs: number,
+): { fromMs: number; toMs: number } {
+	if (buckets.length === 0) {
+		return { fromMs: queriedFromMs, toMs: queriedToMs };
+	}
+	let first = buckets[0].bucketStartMs;
+	let last = buckets[0].bucketStartMs;
+	for (const bucket of buckets) {
+		if (bucket.bucketStartMs < first) first = bucket.bucketStartMs;
+		if (bucket.bucketStartMs > last) last = bucket.bucketStartMs;
+	}
+	return { fromMs: first, toMs: last + REQUEST_BUCKET_MS };
+}
+
 /** The attributed rows in the span, and how many carry no token total. */
 export function loadRequestTokenCoverage(
 	db: Database,
@@ -430,6 +460,11 @@ async function main(): Promise<void> {
 		requestsReadable = requestsTableExists(db);
 		const accountIds = accounts.map((account) => account.accountId);
 		buckets = loadRequestBuckets(db, accountIds, requestsFromMs, requestsToMs);
+		// The absorption measurement reads the extent the data has, not the
+		// window it was queried over.
+		const span = loadedRequestSpan(buckets, requestsFromMs, requestsToMs);
+		requestsFromMs = span.fromMs;
+		requestsToMs = span.toMs;
 		tokenCoverage = loadRequestTokenCoverage(
 			db,
 			accountIds,
@@ -508,8 +543,8 @@ async function main(): Promise<void> {
 			`Replay took ${(replayMs / 1000).toFixed(1)} s over ${replay.instants} instants; scoring and bootstrap ${(scoringMs / 1000).toFixed(1)} s.`,
 			`Grid step ${options.stepMinutes} min; rows loaded ${LOAD_PAD_MS / DAY_MS} days either side of the replay interval.`,
 		requestsReadable
-			? `Request buckets loaded: ${buckets.length} minute buckets over ${accounts.length} accounts, on a ${REQUEST_BUCKET_MS / 1000}-second grid.`
-			: "No `requests` table in this database: the causal absorption subsection reports it as unreadable.",
+			? `Request buckets loaded: ${buckets.length} minute buckets over ${accounts.length} accounts, on a ${REQUEST_BUCKET_MS / 1000}-second grid, spanning ${new Date(requestsFromMs).toISOString()} to ${new Date(requestsToMs).toISOString()}.`
+			: "No `requests` table in this database: the request-volume subsection reports it as unreadable.",
 		],
 	});
 

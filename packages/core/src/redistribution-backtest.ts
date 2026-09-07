@@ -35,6 +35,7 @@ import {
 	pct,
 	type ReportBootstrapEntry,
 	type ReportEstimatorMetrics,
+	SEGMENT_COVERAGE_SLACK_MS,
 	SEVEN_DAY_WINDOW_MS,
 	scoreRecords,
 } from "./prediction-backtest";
@@ -812,6 +813,8 @@ export interface WindowFill {
 	lifecycleId: string;
 	/** `computeWindowStartMs(labelResetAtMs, kind)`; null when the segment carries no reset. */
 	windowStartMs: number | null;
+	/** The reset the lifecycle was labelled with; null when it carries none. */
+	labelResetAtMs: number | null;
 	firstSampleMs: number;
 	firstSampleUtilization: number;
 	lastSampleMs: number;
@@ -899,6 +902,7 @@ export function scanWindowFills(
 					windowKind: kind,
 					lifecycleId: lifecycle.id,
 					windowStartMs,
+					labelResetAtMs: lifecycle.labelResetAtMs,
 					firstSampleMs,
 					firstSampleUtilization:
 						window.points[lifecycle.startIndex].utilization,
@@ -962,6 +966,24 @@ const WINDOW_FILL_SCOPES: readonly WindowFillScope[] = [
 /** Fills below which a cell prints its raw durations instead of a median. */
 export const RAW_FILL_DURATION_LIMIT = 20;
 
+/**
+ * Whether a window that never read 100 % was FOLLOWED to its end.
+ *
+ * The same rule `deriveOutcome` labels outcomes with: sampling that ran to
+ * within {@link SEGMENT_COVERAGE_SLACK_MS} of the window's own reset observed
+ * the window not filling; anything else stopped early and says nothing about
+ * whether it filled afterwards. Read as one `censored` count, a cell whose
+ * follow-up simply ended looks like a cell of slow windows.
+ */
+export function fillCensoring(
+	fill: WindowFill,
+): "completed-below-hundred" | "follow-up-incomplete" {
+	if (fill.labelResetAtMs == null) return "follow-up-incomplete";
+	return fill.labelResetAtMs - fill.lastSampleMs <= SEGMENT_COVERAGE_SLACK_MS
+		? "completed-below-hundred"
+		: "follow-up-incomplete";
+}
+
 export interface WindowFillRow {
 	exposure: string;
 	window: WindowFillScope;
@@ -969,6 +991,10 @@ export interface WindowFillRow {
 	fills: number;
 	/** Windows of this cell whose last sample was still below 100 %. */
 	censored: number;
+	/** Of those, the ones observed to within the slack of their own reset. */
+	completedBelowHundred: number;
+	/** Of those, the ones whose sampling stopped before the window ended. */
+	followUpIncomplete: number;
 	fillFraction: number | null;
 	medianFillHours: number | null;
 	medianObservedSpanHours: number | null;
@@ -987,6 +1013,8 @@ export interface WindowFillTally {
 	duringFillRows: WindowFillRow[];
 	filled: number;
 	censored: number;
+	completedBelowHundred: number;
+	followUpIncomplete: number;
 	noResetOnSegment: number;
 	firstSampleAlreadyFull: number;
 }
@@ -1015,6 +1043,12 @@ function windowFillRow(
 		window,
 		fills: filled.length,
 		censored: censored.length,
+		completedBelowHundred: censored.filter(
+			(fill) => fillCensoring(fill) === "completed-below-hundred",
+		).length,
+		followUpIncomplete: censored.filter(
+			(fill) => fillCensoring(fill) === "follow-up-incomplete",
+		).length,
 		fillFraction: denominator > 0 ? filled.length / denominator : null,
 		medianFillHours: percentileOf(durations.map(HOURS), 0.5),
 		medianObservedSpanHours: percentileOf(
@@ -1101,6 +1135,16 @@ export function tallyWindowFills(
 		],
 		filled: measurable.filter((fill) => fill.firstHundredMs != null).length,
 		censored: measurable.filter((fill) => fill.firstHundredMs == null).length,
+		completedBelowHundred: measurable.filter(
+			(fill) =>
+				fill.firstHundredMs == null &&
+				fillCensoring(fill) === "completed-below-hundred",
+		).length,
+		followUpIncomplete: measurable.filter(
+			(fill) =>
+				fill.firstHundredMs == null &&
+				fillCensoring(fill) === "follow-up-incomplete",
+		).length,
 		noResetOnSegment: fills.filter((fill) => fill.windowStartMs == null).length,
 		firstSampleAlreadyFull: fills.filter(
 			(fill) =>
@@ -1110,7 +1154,7 @@ export function tallyWindowFills(
 }
 
 // ---------------------------------------------------------------------------
-// Causal absorption shares around a death
+// Request-volume changes around observed exhaustion
 // ---------------------------------------------------------------------------
 
 /**
@@ -1136,16 +1180,192 @@ export interface RequestTokenCoverage {
 	zeroOrNullTokenRows: number;
 }
 
+// ---------------------------------------------------------------------------
+// Observed availability
+// ---------------------------------------------------------------------------
+
+/**
+ * Whether an account was routable at an instant, as the recorded snapshots
+ * show it.
+ *
+ * THREE states, not two. `unknown` is not `available`: a stretch with no
+ * reading inside the staleness bar says nothing about whether the account was
+ * taking traffic, and treating it as alive would put an account into a
+ * survivor set on the strength of missing data.
+ */
+export type AvailabilityState = "available" | "exhausted" | "unknown";
+
+/** One state, from `fromMs` until the next segment starts. */
+export interface AvailabilitySegment {
+	fromMs: number;
+	state: AvailabilityState;
+}
+
+/**
+ * One account's availability over the whole loaded history.
+ *
+ * Ascending, adjacent segments always differ, and the first one starts at
+ * `-Infinity` in state `unknown`, so every instant lands inside exactly one
+ * segment.
+ */
+export interface AvailabilityTimeline {
+	accountId: string;
+	segments: AvailabilitySegment[];
+}
+
+/**
+ * Exhausted on EITHER window: an account at 100 % on its weekly window is out
+ * of routing whatever its five-hour window reads, and the second window
+ * filling afterwards is not a second departure.
+ */
+const availabilityOfRow = (row: RosterSnapshotRow): AvailabilityState =>
+	WINDOW_KINDS.some((kind) => (pctOf(row, kind) ?? 0) >= 100)
+		? "exhausted"
+		: "available";
+
+/**
+ * Per-account availability, read off the snapshot series rather than off the
+ * event list.
+ *
+ * NOT derived from `TransitionEvent.endsAtMs`: that is `min(death + 24 h,
+ * reset)`, or `death + 24 h` when the reset is unknown, i.e. a tagging horizon
+ * rather than an instant anything was observed to happen at. A window's reset
+ * can sit 66 h out while the tag expires in 24, and some deaths carry no reset
+ * at all.
+ *
+ * The staleness bar is {@link READING_STALE_MS}, the same one
+ * {@link buildRosterAtInstant} projects under, measured on the sample time.
+ */
+export function buildAvailabilityTimelines(
+	series: ReadonlyMap<string, AccountSeries>,
+): Map<string, AvailabilityTimeline> {
+	const out = new Map<string, AvailabilityTimeline>();
+	for (const [accountId, accountSeries] of series) {
+		const segments: AvailabilitySegment[] = [
+			{ fromMs: Number.NEGATIVE_INFINITY, state: "unknown" },
+		];
+		const push = (fromMs: number, state: AvailabilityState): void => {
+			const last = segments[segments.length - 1];
+			if (last.state === state) return;
+			if (segments.length > 1 && last.fromMs >= fromMs) {
+				last.state = state;
+				return;
+			}
+			segments.push({ fromMs, state });
+		};
+		let staleAtMs: number | null = null;
+		for (const row of accountSeries.rows) {
+			if (staleAtMs != null && row.sampledAt > staleAtMs) {
+				push(staleAtMs, "unknown");
+			}
+			push(row.sampledAt, availabilityOfRow(row));
+			staleAtMs = row.sampledAt + READING_STALE_MS;
+		}
+		if (staleAtMs != null) push(staleAtMs, "unknown");
+		// An overwritten segment can leave two equal states adjacent.
+		const merged: AvailabilitySegment[] = [];
+		for (const segment of segments) {
+			if (
+				merged.length > 0 &&
+				merged[merged.length - 1].state === segment.state
+			) {
+				continue;
+			}
+			merged.push(segment);
+		}
+		out.set(accountId, { accountId, segments: merged });
+	}
+	return out;
+}
+
+/** Index of the segment holding `atMs`. */
+function availabilityIndexAt(
+	timeline: AvailabilityTimeline,
+	atMs: number,
+): number {
+	let lo = 0;
+	let hi = timeline.segments.length;
+	while (lo < hi) {
+		const mid = (lo + hi) >> 1;
+		if (timeline.segments[mid].fromMs <= atMs) lo = mid + 1;
+		else hi = mid;
+	}
+	return lo - 1;
+}
+
+/** The account's state at `atMs`; `unknown` when there is no timeline at all. */
+export function availabilityAt(
+	timeline: AvailabilityTimeline | undefined,
+	atMs: number,
+): AvailabilityState {
+	if (timeline == null) return "unknown";
+	return timeline.segments[availabilityIndexAt(timeline, atMs)].state;
+}
+
+/**
+ * Distance to the nearest state change on either side of `atMs`, or null when
+ * the account never changes state.
+ *
+ * `ignoreAtMs` drops a change at exactly that instant, which is how the dying
+ * account's own transition is kept from bounding the interval it defines.
+ */
+export function nearestAvailabilityChangeMs(
+	timeline: AvailabilityTimeline | undefined,
+	atMs: number,
+	options: { ignoreAtMs?: number } = {},
+): number | null {
+	if (timeline == null) return null;
+	const segments = timeline.segments;
+	const after = availabilityIndexAt(timeline, atMs) + 1;
+	let best: number | null = null;
+	// The change at or before `atMs`, the one after it, and one further out
+	// either way, so an ignored instant does not hide its neighbour.
+	for (const index of [after - 2, after - 1, after, after + 1]) {
+		if (index < 1 || index >= segments.length) continue;
+		const changeAtMs = segments[index].fromMs;
+		if (options.ignoreAtMs != null && changeAtMs === options.ignoreAtMs)
+			continue;
+		const distance = Math.abs(changeAtMs - atMs);
+		if (best == null || distance < best) best = distance;
+	}
+	return best;
+}
+
+/** The first state change inside `[fromMs, toMs]`, or null when there is none. */
+function availabilityChangeInside(
+	timeline: AvailabilityTimeline | undefined,
+	fromMs: number,
+	toMs: number,
+): number | null {
+	if (timeline == null) return null;
+	const segments = timeline.segments;
+	for (
+		let index = availabilityIndexAt(timeline, fromMs) + 1;
+		index < segments.length;
+		index++
+	) {
+		const changeAtMs = segments[index].fromMs;
+		if (changeAtMs > toMs) return null;
+		if (changeAtMs >= fromMs) return changeAtMs;
+	}
+	return null;
+}
+
 /**
  * The primary half-width. NOT tuned: it is the production regression lookback
  * the replay already reconstructs, fixed before any number was read.
  */
 export const ABSORPTION_HALF_WIDTH_MS = 6 * HOUR_MS;
 
-/** The second, always-computed half-width. Printed beside the first, never chosen against it. */
+/**
+ * The reporting horizon, and the one every headline is read off.
+ *
+ * Printed beside the six-hour one, never chosen against it: both are computed
+ * for every death whose interval is long enough to carry them.
+ */
 export const ABSORPTION_NARROW_HALF_WIDTH_MS = 60 * MINUTE_MS;
 
-/** Below this much dead span there is no post window worth dividing by. */
+/** Below this much clean interval there is no window worth dividing by. */
 export const ABSORPTION_MIN_HALF_WIDTH_MS = 15 * MINUTE_MS;
 
 /** The matched-control offset: same weekday, same hour. */
@@ -1166,7 +1386,7 @@ export const ABSORPTION_BASES: readonly AbsorptionBasis[] = [
 export interface AbsorptionInput {
 	events: readonly TransitionEvent[];
 	accounts: readonly RosterAccount[];
-	/** For the control's "no account of the class at 100 %" test. */
+	/** The snapshot history the availability timelines are read off. */
 	series: Map<string, AccountSeries>;
 	buckets: readonly RequestBucket[];
 	range: ReplayRange;
@@ -1181,6 +1401,8 @@ export interface AbsorptionSurvivorRates {
 	preRate: number;
 	postRate: number;
 	delta: number;
+	/** `delta / preRateDying`. These sum to alpha. Null with no dying rate. */
+	contribution: number | null;
 	/** Share of the survivors' PRE-death rate. Null when they had none. */
 	preShare: number | null;
 }
@@ -1188,11 +1410,10 @@ export interface AbsorptionSurvivorRates {
 /**
  * One (instant × half-width × basis) measurement.
  *
- * CAUSAL CONSTRAINT: `preRate*`, `dyingPreShare`, `survivorPreShare` and
- * `equalSplitShare` read nothing at or after the instant. The moved-volume
- * split (`movedPositive`, `topMovedShare`) is necessarily observed after it —
- * it IS the moved volume — and that is what is being split, not what is
- * weighting it.
+ * PRE-INSTANT DERIVATION: `preRate*`, `dyingPreShare`, `preShare` and
+ * `equalSplitShare` read nothing at or after the instant, so no post-death
+ * quantity can enter a weight. That prevents leakage into the weights; it does
+ * not make any of these numbers causal.
  */
 export interface AbsorptionMeasurement {
 	basis: AbsorptionBasis;
@@ -1206,21 +1427,26 @@ export interface AbsorptionMeasurement {
 	preRateDying: number;
 	preRateSurvivors: number;
 	postRateSurvivors: number;
-	/** `preRateDying / (preRateDying + preRateSurvivors)`; null for the placebo, which has no dying account. */
+	/** `preRateDying / (preRateDying + preRateSurvivors)`; null with no dying account. */
 	dyingPreShare: number | null;
 	/** `1 / |S|`, the split the scenario assumes. */
 	equalSplitShare: number | null;
-	/** `(postRateSurvivors − preRateSurvivors) / preRateDying`; null when the dying account had no pre-death traffic. */
+	/** `(postRateSurv − preRateSurv) / preRateDying`; null when the dying account had no pre-death traffic. */
 	alpha: number | null;
-	/** `postRateSurvivors / preRateSurvivors`; null when the survivors had none. */
+	/** `postRateSurv / preRateSurv`; null when the survivors had none. */
 	survivorRateRatio: number | null;
-	/** `sum over S of max(delta, 0)`. */
-	movedPositive: number;
-	topMoverAccountId: string | null;
-	/** The largest positive delta over `movedPositive`; null when nothing moved. */
-	topMovedShare: number | null;
-	/** That same account's PRE-death share of the survivors' rate. */
-	topMoverPreShare: number | null;
+	/** `P`: the sum of the positive rate changes. */
+	grossPositive: number;
+	/** `N`: the sum of the negative rate changes, as a positive number. */
+	grossNegative: number;
+	/** `G = P − N`: the net rate change over the survivor set. */
+	netChange: number;
+	/**
+	 * The largest single positive change over `P`, i.e. the largest account's
+	 * share of the POSITIVE rate increases. Null when `G <= 0`, where a share of
+	 * the increases describes nothing about where volume went.
+	 */
+	largestGainShare: number | null;
 	survivors: AbsorptionSurvivorRates[];
 }
 
@@ -1232,8 +1458,7 @@ export type AbsorptionMeasurementSet = Record<
 /** Why a matched control could not be used. Counted, never silently skipped. */
 export type AbsorptionControlRejection =
 	| "outside-loaded-span"
-	| "peer-exhaustion-inside"
-	| "class-at-hundred";
+	| "availability-change-inside";
 
 export interface AbsorptionControl {
 	/** `-7 d` or `+7 d`, in the order the report prints them. */
@@ -1241,8 +1466,30 @@ export interface AbsorptionControl {
 	atMs: number;
 	eligible: boolean;
 	rejection: AbsorptionControlRejection | null;
+	/** Which account, in which state, made it ineligible. */
+	rejectionDetail: string | null;
 	/** Null when ineligible: an unread interval is not a measured zero. */
 	measurements: AbsorptionMeasurementSet | null;
+}
+
+/** The two half-widths a death is read at. The 60-minute one is primary. */
+export type AbsorptionHorizonLabel = "narrow" | "wide";
+
+/** One death read at one half-width, with the controls measured at that width. */
+export interface AbsorptionHorizon {
+	label: AbsorptionHorizonLabel;
+	halfWidthMs: number;
+	measurements: AbsorptionMeasurementSet;
+	controls: AbsorptionControl[];
+	controlsEligible: number;
+	/** The other servable class over the same interval; null when it has no account yet. */
+	placebo: AbsorptionMeasurementSet | null;
+}
+
+/** A class member the survivor set could not take, and why. */
+export interface AbsorptionExcludedMember {
+	accountId: string;
+	state: AvailabilityState;
 }
 
 /** One analysed death, with everything the per-death table prints. */
@@ -1254,31 +1501,38 @@ export interface AbsorptionDeath {
 	dyingAccountId: string;
 	dyingAccountName: string;
 	survivorIds: string[];
-	halfWidthMs: number;
-	narrowHalfWidthMs: number;
-	wide: AbsorptionMeasurementSet;
-	narrow: AbsorptionMeasurementSet;
-	controls: AbsorptionControl[];
-	controlsEligible: number;
-	/** The other servable class over the same interval; null when it has no account yet. */
-	placebo: AbsorptionMeasurementSet | null;
+	/** Class members that were exhausted or unknown just before the death. */
+	excludedMembers: AbsorptionExcludedMember[];
+	/** The nearest availability change of any class member; null when there is none. */
+	availabilityBoundMs: number | null;
+	/** The account whose change set that bound. */
+	availabilityBoundAccountId: string | null;
+	narrow: AbsorptionHorizon;
+	/** Null when the bound caps the wide horizon down onto the narrow one. */
+	wide: AbsorptionHorizon | null;
+	wideAbsentReason: string | null;
 	placeboAccountIds: string[];
 }
 
 export type AbsorptionExclusionReason =
-	| "noRequestCoverage"
-	| "postWindowTooShort"
-	| "noPreDeathDyingTraffic"
 	| "noSurvivors"
-	| "outsideLoadedSpan";
+	| "alreadyExhausted"
+	| "dyingStateUnknown"
+	| "intervalTooShort"
+	| "outsideLoadedSpan"
+	| "noRequestCoverage"
+	| "noPreDeathDyingTraffic";
 
-const ABSORPTION_EXCLUSION_REASONS: readonly AbsorptionExclusionReason[] = [
-	"noRequestCoverage",
-	"postWindowTooShort",
-	"noPreDeathDyingTraffic",
-	"noSurvivors",
-	"outsideLoadedSpan",
-];
+export const ABSORPTION_EXCLUSION_REASONS: readonly AbsorptionExclusionReason[] =
+	[
+		"noSurvivors",
+		"alreadyExhausted",
+		"dyingStateUnknown",
+		"intervalTooShort",
+		"outsideLoadedSpan",
+		"noRequestCoverage",
+		"noPreDeathDyingTraffic",
+	];
 
 /** A death that was not measured, printed rather than dropped. */
 export interface AbsorptionExcludedDeath {
@@ -1289,32 +1543,47 @@ export interface AbsorptionExcludedDeath {
 	dyingAccountId: string;
 	dyingAccountName: string;
 	reason: AbsorptionExclusionReason;
+	/** The availability bound, for an `intervalTooShort`. */
+	boundMs: number | null;
+	/** What produced the bound, in words. */
+	detail: string | null;
 }
 
 /** The populations the aggregate table has one row per, times the two bases. */
 export const ABSORPTION_POPULATION_LABELS = {
-	wide: "at death (W = min(6 h, dead span))",
-	narrow: "at death (W = min(60 min, dead span))",
-	controlBefore: "matched control -7 d",
-	controlAfter: "matched control +7 d",
-	placebo: "other-class placebo at death",
+	narrow: "at death (W = 60 min)",
+	wide: "at death (W = 6 h)",
+	controlBeforeNarrow: "matched control -7 d (W = 60 min)",
+	controlAfterNarrow: "matched control +7 d (W = 60 min)",
+	controlBeforeWide: "matched control -7 d (W = 6 h)",
+	controlAfterWide: "matched control +7 d (W = 6 h)",
+	placeboNarrow: "other class, same interval (W = 60 min)",
+	placeboWide: "other class, same interval (W = 6 h)",
 } as const;
+
+/** One statistic over a population, with the denominator it was taken over. */
+export interface AbsorptionStat {
+	/** Measurements where this statistic has a value. */
+	n: number;
+	median: number | null;
+}
 
 export interface AbsorptionGroupRow {
 	population: string;
 	basis: AbsorptionBasis;
 	/** Measurements in this population, whether or not each statistic is defined. */
-	n: number;
-	medianSurvivorRateRatio: number | null;
-	medianAlpha: number | null;
-	medianTopMovedShare: number | null;
-	medianEqualSplitShare: number | null;
-	medianTopMoverPreShare: number | null;
+	measurements: number;
+	survivorRateRatio: AbsorptionStat;
+	alpha: AbsorptionStat;
+	largestGainShare: AbsorptionStat;
+	equalSplitShare: AbsorptionStat;
+	dyingPreShare: AbsorptionStat;
 }
 
-/** The headline: paired within a death, so the level confound cancels. */
+/** The death-minus-control pairing, one row of the aggregate table. */
 export interface AbsorptionPairedDelta {
 	basis: AbsorptionBasis;
+	horizon: AbsorptionHorizonLabel;
 	/** Deaths with a defined ratio at the death AND at an eligible control. */
 	n: number;
 	medianDelta: number | null;
@@ -1331,6 +1600,7 @@ export interface AbsorptionChecks {
 	controlsIneligible: Record<AbsorptionControlRejection, number>;
 	halfWidthMs: number;
 	narrowHalfWidthMs: number;
+	minHalfWidthMs: number;
 }
 
 /**
@@ -1423,7 +1693,7 @@ function volumeOf(
  * post only if it starts at or after it, so the minute containing the instant
  * is in neither half. Rates divide by the minutes actually counted, not by `W`.
  *
- * `dyingAccountId` is null for the other-class placebo, which has no dying
+ * `dyingAccountId` is null for the other-class reading, which has no dying
  * account: `alpha` and `dyingPreShare` are then null rather than zero.
  */
 function measureAbsorption(
@@ -1461,18 +1731,22 @@ function measureAbsorption(
 
 	const survivors: AbsorptionSurvivorRates[] = rates.map((entry) => ({
 		...entry,
+		contribution: preRateDying > 0 ? entry.delta / preRateDying : null,
 		preShare: preRateSurvivors > 0 ? entry.preRate / preRateSurvivors : null,
 	}));
 
-	const movedPositive = survivors.reduce(
-		(sum, entry) => sum + Math.max(entry.delta, 0),
-		0,
-	);
-	let top: AbsorptionSurvivorRates | null = null;
+	let grossPositive = 0;
+	let grossNegative = 0;
+	let largestGain = 0;
 	for (const entry of survivors) {
-		if (entry.delta <= 0) continue;
-		if (top == null || entry.delta > top.delta) top = entry;
+		if (entry.delta > 0) {
+			grossPositive += entry.delta;
+			if (entry.delta > largestGain) largestGain = entry.delta;
+		} else {
+			grossNegative += -entry.delta;
+		}
 	}
+	const netChange = grossPositive - grossNegative;
 	const preRateTotal = preRateDying + preRateSurvivors;
 
 	return {
@@ -1497,11 +1771,13 @@ function measureAbsorption(
 				: null,
 		survivorRateRatio:
 			preRateSurvivors > 0 ? postRateSurvivors / preRateSurvivors : null,
-		movedPositive,
-		topMoverAccountId: top?.accountId ?? null,
-		topMovedShare:
-			top != null && movedPositive > 0 ? top.delta / movedPositive : null,
-		topMoverPreShare: top?.preShare ?? null,
+		grossPositive,
+		grossNegative,
+		netChange,
+		// A structural boundary, not a data threshold: with no net gain there is
+		// no gain to hold a share of.
+		largestGainShare:
+			netChange > 0 && grossPositive > 0 ? largestGain / grossPositive : null,
 		survivors,
 	};
 }
@@ -1531,91 +1807,95 @@ const measureBoth = (
 	),
 });
 
+/** One statistic's own denominator and median over a population. */
+const absorptionStat = (
+	members: readonly AbsorptionMeasurement[],
+	pick: (entry: AbsorptionMeasurement) => number | null,
+): AbsorptionStat => {
+	const values = members
+		.map(pick)
+		.filter(
+			(value): value is number => value != null && Number.isFinite(value),
+		);
+	return { n: values.length, median: percentileOf(values, 0.5) };
+};
+
 function absorptionGroupRow(
 	population: string,
 	basis: AbsorptionBasis,
 	members: readonly AbsorptionMeasurement[],
 ): AbsorptionGroupRow {
-	const defined = (
-		pick: (entry: AbsorptionMeasurement) => number | null,
-	): number[] =>
-		members
-			.map(pick)
-			.filter(
-				(value): value is number => value != null && Number.isFinite(value),
-			);
 	return {
 		population,
 		basis,
-		n: members.length,
-		medianSurvivorRateRatio: percentileOf(
-			defined((entry) => entry.survivorRateRatio),
-			0.5,
+		measurements: members.length,
+		survivorRateRatio: absorptionStat(
+			members,
+			(entry) => entry.survivorRateRatio,
 		),
-		medianAlpha: percentileOf(
-			defined((entry) => entry.alpha),
-			0.5,
+		alpha: absorptionStat(members, (entry) => entry.alpha),
+		largestGainShare: absorptionStat(
+			members,
+			(entry) => entry.largestGainShare,
 		),
-		medianTopMovedShare: percentileOf(
-			defined((entry) => entry.topMovedShare),
-			0.5,
-		),
-		medianEqualSplitShare: percentileOf(
-			defined((entry) => entry.equalSplitShare),
-			0.5,
-		),
-		medianTopMoverPreShare: percentileOf(
-			defined((entry) => entry.topMoverPreShare),
-			0.5,
-		),
+		equalSplitShare: absorptionStat(members, (entry) => entry.equalSplitShare),
+		dyingPreShare: absorptionStat(members, (entry) => entry.dyingPreShare),
 	};
 }
 
+const absorptionIso = (ms: number): string => new Date(ms).toISOString();
+
 /**
- * Causal absorption shares around each peer death.
+ * What each survivor's own request volume did around an observed exhaustion.
  *
  * Every share and every weight is derived from history STRICTLY BEFORE the
- * death instant. Deriving a share from the whole run and then using it to build
- * a share rule would tune the rule on the run that judges it; that is the flaw
- * this measurement exists to remove, and
- * `absorptionChecks` never reads a bucket at or after `D` into one.
+ * instant, so no post-death quantity can enter a denominator. That is a
+ * leakage constraint, not a causal claim.
+ *
+ * THE POPULATION IS SELECTED, and the selection is the point: a death enters
+ * only when its own class holds an available peer over a symmetric interval in
+ * which no member of the class changes availability state. That preferentially
+ * removes rapid cascades, and strong absorption can itself precipitate the next
+ * death, so what is measured here is the sufficiently-isolated departures and
+ * nothing about cascades follows from it.
  *
  * MEASUREMENT ONLY: nothing here fits, tunes or thresholds anything, and no
- * model, cohort or verdict consumes it. In particular there is no split of the
- * deaths on any cut point read off these same numbers.
+ * model, cohort or verdict consumes it.
  */
 export function absorptionChecks(input: AbsorptionInput): AbsorptionChecks {
 	const index = indexBuckets(input.buckets);
+	const timelines = buildAvailabilityTimelines(input.series);
 	const classOf = new Map<string, string>();
 	for (const account of input.accounts) {
 		classOf.set(account.accountId, servableClassFor(account.provider).classId);
 	}
 
-	const allDeaths = input.events.filter(
-		(event) => event.kind === "peer-exhaustion",
-	);
-	const deathsInRange = allDeaths.filter(
+	const deathsInRange = input.events.filter(
 		(event) =>
-			event.atMs >= input.range.fromMs && event.atMs < input.range.toMs,
+			event.kind === "peer-exhaustion" &&
+			event.atMs >= input.range.fromMs &&
+			event.atMs < input.range.toMs,
 	);
 
 	const deaths: AbsorptionDeath[] = [];
 	const excludedDeaths: AbsorptionExcludedDeath[] = [];
 	const excluded: Record<AbsorptionExclusionReason, number> = {
-		noRequestCoverage: 0,
-		postWindowTooShort: 0,
-		noPreDeathDyingTraffic: 0,
 		noSurvivors: 0,
+		alreadyExhausted: 0,
+		dyingStateUnknown: 0,
+		intervalTooShort: 0,
 		outsideLoadedSpan: 0,
+		noRequestCoverage: 0,
+		noPreDeathDyingTraffic: 0,
 	};
 	const controlsIneligible: Record<AbsorptionControlRejection, number> = {
 		"outside-loaded-span": 0,
-		"peer-exhaustion-inside": 0,
-		"class-at-hundred": 0,
+		"availability-change-inside": 0,
 	};
 	const exclude = (
 		event: TransitionEvent,
 		reason: AbsorptionExclusionReason,
+		bound: { boundMs?: number | null; detail?: string | null } = {},
 	): void => {
 		excluded[reason]++;
 		excludedDeaths.push({
@@ -1626,6 +1906,8 @@ export function absorptionChecks(input: AbsorptionInput): AbsorptionChecks {
 			dyingAccountId: event.accountId,
 			dyingAccountName: event.accountName,
 			reason,
+			boundMs: bound.boundMs ?? null,
+			detail: bound.detail ?? null,
 		});
 	};
 
@@ -1640,105 +1922,109 @@ export function absorptionChecks(input: AbsorptionInput): AbsorptionChecks {
 			)
 			.map((account) => account.accountId)
 			.sort((a, b) => a.localeCompare(b));
-		const survivorIds = members.filter(
-			(accountId) => accountId !== event.accountId,
-		);
+
+		// Strictly before the death reading, so the dying account's own 100 %
+		// row does not decide anybody's state.
+		const justBeforeMs = event.atMs - 1;
+		const survivorIds: string[] = [];
+		const excludedMembers: AbsorptionExcludedMember[] = [];
+		for (const accountId of members) {
+			if (accountId === event.accountId) continue;
+			const state = availabilityAt(timelines.get(accountId), justBeforeMs);
+			if (state === "available") survivorIds.push(accountId);
+			else excludedMembers.push({ accountId, state });
+		}
 		if (survivorIds.length === 0) {
-			exclude(event, "noSurvivors");
+			exclude(event, "noSurvivors", {
+				detail:
+					excludedMembers.length > 0
+						? `every peer was ${excludedMembers
+								.map((entry) => `${entry.accountId} (${entry.state})`)
+								.join(", ")}`
+						: "the class held no other account",
+			});
 			continue;
 		}
 
-		const deadSpanMs = event.endsAtMs - event.atMs;
-		if (deadSpanMs < ABSORPTION_MIN_HALF_WIDTH_MS) {
-			exclude(event, "postWindowTooShort");
+		const dyingState = availabilityAt(
+			timelines.get(event.accountId),
+			justBeforeMs,
+		);
+		if (dyingState === "exhausted") {
+			// Already out of routing on its other window: this reading is not a
+			// departure from routing, so there is nothing for a peer to absorb.
+			exclude(event, "alreadyExhausted", {
+				detail: `${event.accountId} already read 100 % on a window before the death`,
+			});
 			continue;
 		}
-		const halfWidthMs = Math.min(ABSORPTION_HALF_WIDTH_MS, deadSpanMs);
+		if (dyingState === "unknown") {
+			exclude(event, "dyingStateUnknown", {
+				detail: `${event.accountId} had no reading inside the staleness bar before the death`,
+			});
+			continue;
+		}
+
+		// The interval carries no other regime change: the nearest availability
+		// transition of ANY class member bounds it, including the members that
+		// are not in `S` — a peer reviving into the post window takes traffic
+		// back just as surely as a survivor leaving does.
+		let availabilityBoundMs: number | null = null;
+		let availabilityBoundAccountId: string | null = null;
+		for (const accountId of members) {
+			const distance = nearestAvailabilityChangeMs(
+				timelines.get(accountId),
+				event.atMs,
+				accountId === event.accountId ? { ignoreAtMs: event.atMs } : {},
+			);
+			if (distance == null) continue;
+			if (availabilityBoundMs == null || distance < availabilityBoundMs) {
+				availabilityBoundMs = distance;
+				availabilityBoundAccountId = accountId;
+			}
+		}
+		const boundMs = availabilityBoundMs ?? Number.POSITIVE_INFINITY;
 		const narrowHalfWidthMs = Math.min(
 			ABSORPTION_NARROW_HALF_WIDTH_MS,
-			deadSpanMs,
+			boundMs,
 		);
+		const wideHalfWidthMs = Math.min(ABSORPTION_HALF_WIDTH_MS, boundMs);
+		if (narrowHalfWidthMs < ABSORPTION_MIN_HALF_WIDTH_MS) {
+			exclude(event, "intervalTooShort", {
+				boundMs: availabilityBoundMs,
+				detail: `${availabilityBoundAccountId ?? "a class member"} changes availability ${Math.round(
+					boundMs / MINUTE_MS,
+				)} min from the death`,
+			});
+			continue;
+		}
 		if (
-			event.atMs - halfWidthMs < input.requestsFromMs ||
-			event.atMs + halfWidthMs > input.requestsToMs
+			event.atMs - wideHalfWidthMs < input.requestsFromMs ||
+			event.atMs + wideHalfWidthMs > input.requestsToMs
 		) {
 			exclude(event, "outsideLoadedSpan");
 			continue;
 		}
 
-		const wide = measureBoth(
+		const wideMeasurements = measureBoth(
 			index,
 			event.accountId,
 			survivorIds,
 			event.atMs,
-			halfWidthMs,
+			wideHalfWidthMs,
 		);
 		const coverage =
-			wide.requests.preVolumeDying +
-			wide.requests.postVolumeDying +
-			wide.requests.preVolumeSurvivors +
-			wide.requests.postVolumeSurvivors;
+			wideMeasurements.requests.preVolumeDying +
+			wideMeasurements.requests.postVolumeDying +
+			wideMeasurements.requests.preVolumeSurvivors +
+			wideMeasurements.requests.postVolumeSurvivors;
 		if (coverage === 0) {
 			exclude(event, "noRequestCoverage");
 			continue;
 		}
-		if (wide.requests.preRateDying === 0) {
+		if (wideMeasurements.requests.preRateDying === 0) {
 			exclude(event, "noPreDeathDyingTraffic");
 			continue;
-		}
-
-		const controls: AbsorptionControl[] = [];
-		for (const offset of [
-			-ABSORPTION_CONTROL_OFFSET_MS,
-			ABSORPTION_CONTROL_OFFSET_MS,
-		]) {
-			const atMs = event.atMs + offset;
-			const fromMs = atMs - halfWidthMs;
-			const toMs = atMs + halfWidthMs;
-			let rejection: AbsorptionControlRejection | null = null;
-			if (fromMs < input.requestsFromMs || toMs > input.requestsToMs) {
-				rejection = "outside-loaded-span";
-			} else if (
-				allDeaths.some(
-					(other) =>
-						other.demandClass === event.demandClass &&
-						other.atMs >= fromMs &&
-						other.atMs <= toMs,
-				)
-			) {
-				rejection = "peer-exhaustion-inside";
-			} else if (
-				members.some((accountId) =>
-					(input.series.get(accountId)?.rows ?? []).some(
-						(row) =>
-							row.sampledAt >= fromMs &&
-							row.sampledAt <= toMs &&
-							WINDOW_KINDS.some((kind) => (pctOf(row, kind) ?? 0) >= 100),
-					),
-				)
-			) {
-				rejection = "class-at-hundred";
-			}
-			if (rejection != null) controlsIneligible[rejection]++;
-			controls.push({
-				label: offset < 0 ? "-7 d" : "+7 d",
-				atMs,
-				eligible: rejection == null,
-				rejection,
-				// The identical survivor set and the identical half-width: a
-				// control that measured a different set would compare two
-				// populations rather than two instants.
-				measurements:
-					rejection == null
-						? measureBoth(
-								index,
-								event.accountId,
-								survivorIds,
-								atMs,
-								halfWidthMs,
-							)
-						: null,
-			});
 		}
 
 		const placeboAccountIds = input.accounts
@@ -1749,6 +2035,119 @@ export function absorptionChecks(input: AbsorptionInput): AbsorptionChecks {
 			)
 			.map((account) => account.accountId)
 			.sort((a, b) => a.localeCompare(b));
+		const outsideS = members.filter(
+			(accountId) =>
+				accountId !== event.accountId && !survivorIds.includes(accountId),
+		);
+
+		const horizonAt = (
+			label: AbsorptionHorizonLabel,
+			halfWidthMs: number,
+			measurements: AbsorptionMeasurementSet,
+		): AbsorptionHorizon => {
+			const controls: AbsorptionControl[] = [];
+			for (const offset of [
+				-ABSORPTION_CONTROL_OFFSET_MS,
+				ABSORPTION_CONTROL_OFFSET_MS,
+			]) {
+				const atMs = event.atMs + offset;
+				const fromMs = atMs - halfWidthMs;
+				const toMs = atMs + halfWidthMs;
+				let rejection: AbsorptionControlRejection | null = null;
+				let rejectionDetail: string | null = null;
+				if (fromMs < input.requestsFromMs || toMs > input.requestsToMs) {
+					rejection = "outside-loaded-span";
+					rejectionDetail =
+						"the interval leaves the span the request table was read over";
+				}
+				// The control has to be the same regime as well as the same
+				// weekday and hour: every account of `S` and the dying account
+				// available across the whole of it, and no member of the class
+				// changing state inside it.
+				for (const accountId of [event.accountId, ...survivorIds]) {
+					if (rejection != null) break;
+					const state = availabilityAt(timelines.get(accountId), fromMs);
+					if (state !== "available") {
+						rejection = "availability-change-inside";
+						rejectionDetail = `${accountId} is ${state} at the start of the interval`;
+					}
+				}
+				for (const accountId of [
+					event.accountId,
+					...survivorIds,
+					...outsideS,
+				]) {
+					if (rejection != null) break;
+					const changeAtMs = availabilityChangeInside(
+						timelines.get(accountId),
+						fromMs,
+						toMs,
+					);
+					if (changeAtMs != null) {
+						rejection = "availability-change-inside";
+						rejectionDetail = `${accountId} changes availability at ${absorptionIso(
+							changeAtMs,
+						)}`;
+					}
+				}
+				if (rejection != null) controlsIneligible[rejection]++;
+				controls.push({
+					label: offset < 0 ? "-7 d" : "+7 d",
+					atMs,
+					eligible: rejection == null,
+					rejection,
+					rejectionDetail,
+					// The identical survivor set and the identical half-width: a
+					// control that measured a different set would compare two
+					// populations rather than two instants.
+					measurements:
+						rejection == null
+							? measureBoth(
+									index,
+									event.accountId,
+									survivorIds,
+									atMs,
+									halfWidthMs,
+								)
+							: null,
+				});
+			}
+			return {
+				label,
+				halfWidthMs,
+				measurements,
+				controls,
+				controlsEligible: controls.filter((control) => control.eligible).length,
+				placebo:
+					placeboAccountIds.length > 0
+						? measureBoth(
+								index,
+								null,
+								placeboAccountIds,
+								event.atMs,
+								halfWidthMs,
+							)
+						: null,
+			};
+		};
+
+		const narrow = horizonAt(
+			"narrow",
+			narrowHalfWidthMs,
+			narrowHalfWidthMs === wideHalfWidthMs
+				? wideMeasurements
+				: measureBoth(
+						index,
+						event.accountId,
+						survivorIds,
+						event.atMs,
+						narrowHalfWidthMs,
+					),
+		);
+		// A wide horizon the bound has pulled down onto the narrow one is the
+		// same measurement twice: printed once, with the reason it is not a
+		// six-hour reading.
+		const wideCollapsed = wideHalfWidthMs <= narrowHalfWidthMs;
 
 		deaths.push({
 			eventId: event.id,
@@ -1758,69 +2157,90 @@ export function absorptionChecks(input: AbsorptionInput): AbsorptionChecks {
 			dyingAccountId: event.accountId,
 			dyingAccountName: event.accountName,
 			survivorIds,
-			halfWidthMs,
-			narrowHalfWidthMs,
-			wide,
-			narrow: measureBoth(
-				index,
-				event.accountId,
-				survivorIds,
-				event.atMs,
-				narrowHalfWidthMs,
-			),
-			controls,
-			controlsEligible: controls.filter((control) => control.eligible).length,
-			placebo:
-				placeboAccountIds.length > 0
-					? measureBoth(index, null, placeboAccountIds, event.atMs, halfWidthMs)
-					: null,
+			excludedMembers,
+			availabilityBoundMs,
+			availabilityBoundAccountId,
+			narrow,
+			wide: wideCollapsed
+				? null
+				: horizonAt("wide", wideHalfWidthMs, wideMeasurements),
+			wideAbsentReason: wideCollapsed
+				? `the availability bound of ${Math.round(
+						boundMs / MINUTE_MS,
+					)} min caps the six-hour horizon at the ${Math.round(
+						narrowHalfWidthMs / MINUTE_MS,
+					)} min it is already measured over`
+				: null,
 			placeboAccountIds,
 		});
 	}
 
-	// Sorted by the dying account's pre-death share, so the reader sees the
-	// shape rather than a cut point somebody chose. Nulls last.
+	// Sorted by the dying account's pre-death share on the primary horizon, so
+	// the reader sees the shape rather than a cut point somebody chose. Nulls
+	// last.
 	deaths.sort((a, b) => {
-		const left = a.wide.requests.dyingPreShare;
-		const right = b.wide.requests.dyingPreShare;
+		const left = a.narrow.measurements.requests.dyingPreShare;
+		const right = b.narrow.measurements.requests.dyingPreShare;
 		if (left == null && right == null) return a.atMs - b.atMs;
 		if (left == null) return 1;
 		if (right == null) return -1;
 		return left - right || a.atMs - b.atMs;
 	});
 
-	const controlAt = (label: string): AbsorptionControl[] =>
+	const horizonOf = (
+		death: AbsorptionDeath,
+		horizon: AbsorptionHorizonLabel,
+	): AbsorptionHorizon | null =>
+		horizon === "narrow" ? death.narrow : death.wide;
+
+	const controlSets = (
+		horizon: AbsorptionHorizonLabel,
+		label: string,
+	): AbsorptionMeasurementSet[] =>
 		deaths
-			.map((death) =>
-				death.controls.find(
-					(control) => control.label === label && control.eligible,
-				),
+			.map(
+				(death) =>
+					horizonOf(death, horizon)?.controls.find(
+						(control) => control.label === label && control.eligible,
+					)?.measurements ?? null,
 			)
-			.filter((control): control is AbsorptionControl => control != null);
+			.filter((set): set is AbsorptionMeasurementSet => set != null);
 
 	const populations: Array<{
 		label: string;
 		sets: Array<AbsorptionMeasurementSet | null>;
 	}> = [
 		{
-			label: ABSORPTION_POPULATION_LABELS.wide,
-			sets: deaths.map((death) => death.wide),
-		},
-		{
 			label: ABSORPTION_POPULATION_LABELS.narrow,
-			sets: deaths.map((death) => death.narrow),
+			sets: deaths.map((death) => death.narrow.measurements),
 		},
 		{
-			label: ABSORPTION_POPULATION_LABELS.controlBefore,
-			sets: controlAt("-7 d").map((control) => control.measurements),
+			label: ABSORPTION_POPULATION_LABELS.wide,
+			sets: deaths.map((death) => death.wide?.measurements ?? null),
 		},
 		{
-			label: ABSORPTION_POPULATION_LABELS.controlAfter,
-			sets: controlAt("+7 d").map((control) => control.measurements),
+			label: ABSORPTION_POPULATION_LABELS.controlBeforeNarrow,
+			sets: controlSets("narrow", "-7 d"),
 		},
 		{
-			label: ABSORPTION_POPULATION_LABELS.placebo,
-			sets: deaths.map((death) => death.placebo),
+			label: ABSORPTION_POPULATION_LABELS.controlAfterNarrow,
+			sets: controlSets("narrow", "+7 d"),
+		},
+		{
+			label: ABSORPTION_POPULATION_LABELS.controlBeforeWide,
+			sets: controlSets("wide", "-7 d"),
+		},
+		{
+			label: ABSORPTION_POPULATION_LABELS.controlAfterWide,
+			sets: controlSets("wide", "+7 d"),
+		},
+		{
+			label: ABSORPTION_POPULATION_LABELS.placeboNarrow,
+			sets: deaths.map((death) => death.narrow.placebo),
+		},
+		{
+			label: ABSORPTION_POPULATION_LABELS.placeboWide,
+			sets: deaths.map((death) => death.wide?.placebo ?? null),
 		},
 	];
 	const groups: AbsorptionGroupRow[] = [];
@@ -1839,24 +2259,35 @@ export function absorptionChecks(input: AbsorptionInput): AbsorptionChecks {
 	}
 
 	// Paired within the death, over the same accounts and the same weekday and
-	// hour: two unpaired medians would leave the seasonal level in.
-	const paired: AbsorptionPairedDelta[] = ABSORPTION_BASES.map((basis) => {
-		const deltas: number[] = [];
-		for (const death of deaths) {
-			const atDeath = death.wide[basis].survivorRateRatio;
-			if (atDeath == null) continue;
-			const controlRatios = death.controls
-				.filter((control) => control.eligible)
-				.map((control) => control.measurements?.[basis].survivorRateRatio)
-				.filter((value): value is number => value != null);
-			if (controlRatios.length === 0) continue;
-			const mean =
-				controlRatios.reduce((sum, value) => sum + value, 0) /
-				controlRatios.length;
-			deltas.push(atDeath - mean);
+	// hour. One row of the aggregate table, not a headline: it inherits every
+	// weakness of the controls it is built on.
+	const paired: AbsorptionPairedDelta[] = [];
+	for (const horizon of ["narrow", "wide"] as const) {
+		for (const basis of ABSORPTION_BASES) {
+			const deltas: number[] = [];
+			for (const death of deaths) {
+				const cell = horizonOf(death, horizon);
+				if (cell == null) continue;
+				const atDeath = cell.measurements[basis].survivorRateRatio;
+				if (atDeath == null) continue;
+				const controlRatios = cell.controls
+					.filter((control) => control.eligible)
+					.map((control) => control.measurements?.[basis].survivorRateRatio)
+					.filter((value): value is number => value != null);
+				if (controlRatios.length === 0) continue;
+				const mean =
+					controlRatios.reduce((sum, value) => sum + value, 0) /
+					controlRatios.length;
+				deltas.push(atDeath - mean);
+			}
+			paired.push({
+				basis,
+				horizon,
+				n: deltas.length,
+				medianDelta: percentileOf(deltas, 0.5),
+			});
 		}
-		return { basis, n: deltas.length, medianDelta: percentileOf(deltas, 0.5) };
-	});
+	}
 
 	return {
 		deaths,
@@ -1868,6 +2299,7 @@ export function absorptionChecks(input: AbsorptionInput): AbsorptionChecks {
 		controlsIneligible,
 		halfWidthMs: ABSORPTION_HALF_WIDTH_MS,
 		narrowHalfWidthMs: ABSORPTION_NARROW_HALF_WIDTH_MS,
+		minHalfWidthMs: ABSORPTION_MIN_HALF_WIDTH_MS,
 	};
 }
 
@@ -4302,7 +4734,8 @@ export interface RedistributionReportInput {
 	cohorts: CohortSet;
 	verdict: Verdict;
 	/**
-	 * The causal absorption measurement, precomputed by the caller the way
+	 * The request-volume measurement around each death, precomputed by the
+	 * caller the way
 	 * `cohorts` and `verdict` are. Null when the `requests` table could not be
 	 * read at all, which the section says rather than printing an empty table.
 	 */
@@ -4388,11 +4821,12 @@ function slopeTrajectorySection(rows: readonly SlopeRatioRow[]): string[] {
 }
 
 const FILL_TABLE_HEADER =
-	"| exposure | window | fills | censored | fill fraction | median fill (h) | median observed span (h) | median unobserved head (min) | median resolution (min) | median censored span (h) |";
-const FILL_TABLE_ALIGN = "|---|---|---:|---:|---:|---:|---:|---:|---:|---:|";
+	"| exposure | window | fills | completed below 100 % | follow-up incomplete | fill fraction | median fill (h) | median observed span (h) | median unobserved head (min) | median resolution (min) | median censored span (h) |";
+const FILL_TABLE_ALIGN =
+	"|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|";
 
 const fillTableRow = (row: WindowFillRow): string =>
-	`| ${row.exposure} | ${row.window} | ${row.fills} | ${row.censored} | ${pct(row.fillFraction)} | ${num(row.medianFillHours, 2)} | ${num(row.medianObservedSpanHours, 2)} | ${num(row.medianUnobservedHeadMinutes, 1)} | ${num(row.medianResolutionMinutes, 1)} | ${num(row.medianCensoredSpanHours, 2)} |`;
+	`| ${row.exposure} | ${row.window} | ${row.fills} | ${row.completedBelowHundred} | ${row.followUpIncomplete} | ${pct(row.fillFraction)} | ${num(row.medianFillHours, 2)} | ${num(row.medianObservedSpanHours, 2)} | ${num(row.medianUnobservedHeadMinutes, 1)} | ${num(row.medianResolutionMinutes, 1)} | ${num(row.medianCensoredSpanHours, 2)} |`;
 
 const fillDurationsLine = (row: WindowFillRow): string =>
 	`- \`${row.exposure}\` ${row.window} (${row.fills} fills): ${
@@ -4420,7 +4854,11 @@ function absorptionSection(replay: ReplayResult): string[] {
 	);
 	out.push("");
 	out.push(
-		"A median over only the windows that filled selects on the outcome: the windows that never filled are the slow ones, so this median understates typical time-to-fill, and it understates it more in whichever cell censors more. Compare the `censored` column before comparing medians.",
+		"The fill medians are conditional on an observed fill: they describe the windows that reached 100 % and no others. The two censored columns are what to read first, and a larger censored fraction does not by itself establish a larger bias in the conditional median, because the censored windows are not known to be slower ones — the follow-up-incomplete ones are not known to have failed to fill at all.",
+	);
+	out.push("");
+	out.push(
+		`\`completed below 100 %\` counts the windows whose sampling ran to within ${SEGMENT_COVERAGE_SLACK_MS / MINUTE_MS} min of the window's own reset without ever reading 100 %, which is the same rule the outcome labels use. \`follow-up incomplete\` counts the ones whose samples stopped earlier, or that carry no reset to end at: those windows were not observed to their end and say nothing about whether they filled. One combined census makes a cell whose follow-up merely ended look like a cell of slow windows.`,
 	);
 	out.push("");
 	out.push(
@@ -4432,7 +4870,15 @@ function absorptionSection(replay: ReplayResult): string[] {
 	);
 	out.push("");
 	out.push(
-		"`fills` counts the windows of a cell that reached 100 %, `censored` the ones whose last sample was still below it. `median fill` runs from the derived window start, `median observed span` from the first sample instead, and `median unobserved head` is the gap between those two origins, i.e. how much of the window had already elapsed when the sampler first saw it. `median resolution` is the gap between the crossing sample and the sample before it. `median censored span` is the one column taken over the censored windows: window start to last sample.",
+		"`peer lost in prefix` and its complement are exposure labels rather than statements about the focal account: the prefix rule does not require the focal account to have been available when the peer died, and `no peer lost` does not exclude a peer already exhausted at the window start, only one that crossed 100 % inside the prefix.",
+	);
+	out.push("");
+	out.push(
+		"The `combined` rows put five-hour and weekly windows in one median. A combined duration median has a composition problem — the two kinds have different lengths and different fill rates, so the combined value moves with the mix — and the per-kind rows are the ones to read.",
+	);
+	out.push("");
+	out.push(
+		"`fills` counts the windows of a cell that reached 100 %, the two censored columns the ones whose last sample was still below it. `median fill` runs from the derived window start, `median observed span` from the first sample instead, and `median unobserved head` is the gap between those two origins, i.e. how much of the window had already elapsed when the sampler first saw it. `median resolution` is the gap between the crossing sample and the sample before it. `median censored span` is the one column taken over the censored windows: window start to last sample.",
 	);
 	out.push("");
 	out.push(FILL_TABLE_HEADER);
@@ -4448,7 +4894,7 @@ function absorptionSection(replay: ReplayResult): string[] {
 	for (const row of tally.duringFillRows) out.push(fillTableRow(row));
 	out.push("");
 	out.push(
-		`Every cell with fewer than ${RAW_FILL_DURATION_LIMIT} fills prints its fill durations, sorted, in hours. At that n a median is not a summary of anything, and the values themselves are what a reader can judge.`,
+		`Every cell with fewer than ${RAW_FILL_DURATION_LIMIT} fills prints its fill durations, sorted, in hours. At that n the median summarises few observed fills, and the values themselves are what a reader can judge.`,
 	);
 	out.push("");
 	for (const row of [...tally.prefixRows, ...tally.duringFillRows]) {
@@ -4462,60 +4908,115 @@ function absorptionSection(replay: ReplayResult): string[] {
 		tally.firstSampleAlreadyFull +
 		replay.placeholderLifecyclesSkipped;
 	out.push(
-		`Reconciliation: ${tally.filled} filled + ${tally.censored} censored + ${tally.noResetOnSegment} with no reset on the segment + ${tally.firstSampleAlreadyFull} already full at the first sample + ${replay.placeholderLifecyclesSkipped} placeholder lifecycles skipped = ${lifecycles} window lifecycles.`,
+		`Reconciliation: ${tally.filled} filled + ${tally.completedBelowHundred} completed below 100 % + ${tally.followUpIncomplete} follow-up incomplete + ${tally.noResetOnSegment} with no reset on the segment + ${tally.firstSampleAlreadyFull} already full at the first sample + ${replay.placeholderLifecyclesSkipped} placeholder lifecycles skipped = ${lifecycles} window lifecycles.`,
 	);
 	out.push("");
 	return out;
 }
 
 const ABSORPTION_GROUP_HEADER =
-	"| population | basis | n | median survivor rate ratio | median alpha | median top-mover share of moved volume | median equal split 1/S | median top-mover pre-death share |";
-const ABSORPTION_GROUP_ALIGN = "|---|---|---:|---:|---:|---:|---:|---:|";
+	"| population | basis | measurements | ratio n | median survivor rate ratio | alpha n | median alpha | gain-share n | median largest gain share | split n | median equal split 1/S | dying-share n | median dying pre-share |";
+const ABSORPTION_GROUP_ALIGN =
+	"|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|";
+
+const absorptionGroupLine = (row: AbsorptionGroupRow): string =>
+	[
+		`| ${row.population}`,
+		row.basis,
+		`${row.measurements}`,
+		`${row.survivorRateRatio.n}`,
+		num(row.survivorRateRatio.median),
+		`${row.alpha.n}`,
+		num(row.alpha.median),
+		`${row.largestGainShare.n}`,
+		pct(row.largestGainShare.median),
+		`${row.equalSplitShare.n}`,
+		pct(row.equalSplitShare.median),
+		`${row.dyingPreShare.n}`,
+		`${pct(row.dyingPreShare.median)} |`,
+	].join(" | ");
 
 const ABSORPTION_DEATH_HEADER =
-	"| event | instant | class | window | dying account | basis | W (min) | pre volume (dying) | pre volume (survivors) | post volume (survivors) | dying pre-share | alpha | survivor rate ratio | top mover | top-mover moved share | top-mover pre-share | equal split | controls eligible |";
+	"| horizon | basis | W (min) | pre min | post min | pre vol (dying) | post vol (dying) | pre vol (surv) | post vol (surv) | dying pre-share | alpha | ratio | P | N | G | largest gain share | control -7 d | control +7 d |";
 const ABSORPTION_DEATH_ALIGN =
-	"|---:|---|---|---|---|---|---:|---:|---:|---:|---:|---:|---:|---|---:|---:|---:|---:|";
+	"|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|---|";
 
-function absorptionDeathRow(
-	death: AbsorptionDeath,
+/** A control's own ratio, or the reason it was not measured. */
+const absorptionControlCell = (
+	control: AbsorptionControl | undefined,
+	basis: AbsorptionBasis,
+): string => {
+	if (control == null) return EM_DASH;
+	if (!control.eligible) {
+		return `${control.rejection ?? "ineligible"}: ${
+			control.rejectionDetail ?? EM_DASH
+		}`;
+	}
+	return num(control.measurements?.[basis].survivorRateRatio ?? null);
+};
+
+function absorptionHorizonRow(
+	horizon: AbsorptionHorizon,
 	basis: AbsorptionBasis,
 ): string {
-	const cell = death.wide[basis];
+	const cell = horizon.measurements[basis];
 	return [
-		`| ${death.eventId}`,
-		iso(death.atMs),
-		death.demandClass,
-		death.windowKind ?? EM_DASH,
-		death.dyingAccountName,
+		`| ${horizon.label === "narrow" ? "60 min" : "6 h"}`,
 		basis,
-		num(death.halfWidthMs / MINUTE_MS, 0),
+		num(horizon.halfWidthMs / MINUTE_MS, 0),
+		`${cell.preMinutes}`,
+		`${cell.postMinutes}`,
 		num(cell.preVolumeDying, 0),
+		num(cell.postVolumeDying, 0),
 		num(cell.preVolumeSurvivors, 0),
 		num(cell.postVolumeSurvivors, 0),
 		pct(cell.dyingPreShare),
 		num(cell.alpha),
 		num(cell.survivorRateRatio),
-		cell.topMoverAccountId ?? EM_DASH,
-		pct(cell.topMovedShare),
-		pct(cell.topMoverPreShare),
-		pct(cell.equalSplitShare),
-		`${death.controlsEligible} |`,
+		num(cell.grossPositive),
+		num(cell.grossNegative),
+		num(cell.netChange),
+		pct(cell.largestGainShare),
+		absorptionControlCell(
+			horizon.controls.find((control) => control.label === "-7 d"),
+			basis,
+		),
+		`${absorptionControlCell(
+			horizon.controls.find((control) => control.label === "+7 d"),
+			basis,
+		)} |`,
 	].join(" | ");
 }
 
+/** One line per survivor, both bases, on the primary horizon. */
+function absorptionSurvivorLine(
+	horizon: AbsorptionHorizon,
+	accountId: string,
+): string {
+	const of = (basis: AbsorptionBasis): string => {
+		const entry = horizon.measurements[basis].survivors.find(
+			(survivor) => survivor.accountId === accountId,
+		);
+		if (entry == null) return `${basis} —`;
+		return `${basis} pre ${num(entry.preRate)}, post ${num(entry.postRate)}, delta ${num(
+			entry.delta,
+		)}, contribution ${num(entry.contribution)}, pre-share ${pct(entry.preShare)}`;
+	};
+	return `  - \`${accountId}\`: ${of("requests")}; ${of("tokens")}`;
+}
+
 /**
- * The measurement whose every share and weight predates the death it is about.
+ * What the request table says happened around each observed exhaustion.
  *
  * Prose rule for this section, and the reason it reads as flatly as it does:
  * it states what was measured and over which population, and never what a
  * number ought to be, would confirm, or is consistent with.
  */
-function causalAbsorptionSection(
+function requestVolumeChangeSection(
 	absorption: AbsorptionChecks | null,
 ): string[] {
 	const out: string[] = [];
-	out.push("### Causal absorption shares around a death");
+	out.push("### Request-volume changes around observed exhaustion");
 	out.push("");
 	if (absorption == null) {
 		out.push(
@@ -4526,15 +5027,19 @@ function causalAbsorptionSection(
 	}
 
 	out.push(
-		`What each survivor's own request volume did around the instant a peer of its demand class reached 100 %. The population is every peer-exhaustion event inside the replayed interval, ${absorption.peerExhaustionEvents} of them, reduced by the exclusions reconciled at the end of this subsection. Volumes come from the \`requests\` table on a fixed ${REQUEST_BUCKET_MS / MINUTE_MS}-minute grid, per account, and are turned into rates by dividing by the minutes actually counted.`,
+		`What each survivor's own request volume did around the instant a peer of its demand class first read 100 %. The population is every peer-exhaustion event inside the replayed interval, ${absorption.peerExhaustionEvents} of them, reduced by the exclusions reconciled at the end of this subsection. Volumes come from the \`requests\` table on a fixed ${REQUEST_BUCKET_MS / MINUTE_MS}-minute grid, per account, and are turned into rates by dividing by the minutes actually counted.`,
 	);
 	out.push("");
 	out.push(
-		"Nothing at or after the death enters any share or weight: the dying account's pre-death share, each survivor's pre-death share, and the equal split are all functions of the window `[D − W, D)` alone. The moved-volume split is necessarily observed after the death, because it IS the moved volume; the causal constraint binds the shares and the weights, not the observable being split.",
+		"The survivor set `S` is the class members observed AVAILABLE just before the death: their newest snapshot inside the staleness bar reads under 100 % on both windows. A member reading 100 % on either window, or carrying no reading inside the bar, is listed under the death rather than counted as a survivor — an account at 100 % is already out of routing, and an unread stretch is not evidence of being in it. The dying account itself must be available just before the death, so a window filling while its account was already exhausted on the other window is excluded rather than measured as a departure.",
 	);
 	out.push("");
 	out.push(
-		`Two half-widths are ALWAYS computed and always printed beside each other: \`W = min(${absorption.halfWidthMs / HOUR_MS} h, dead span)\` and \`W = min(${absorption.narrowHalfWidthMs / MINUTE_MS} min, dead span)\`. Neither was selected on its result, and neither is a fitted parameter: the wide one is the production regression lookback this replay already reconstructs, and the narrow one is a fixed second reading of the same event. The pre and post windows are symmetric, so the ratio is directly interpretable and diurnal drift is held to one window's width.`,
+		`The half-width \`W\` is the largest symmetric width in which NO member of the class changes availability state, capped at ${absorption.narrowHalfWidthMs / MINUTE_MS} min for the primary horizon and ${absorption.halfWidthMs / HOUR_MS} h for the second one. The dying account's own transition at the death is the one change the rule ignores. A death whose clean interval falls under ${absorption.minHalfWidthMs / MINUTE_MS} min is excluded, with the account and the distance that bounded it printed beside it. This selection preferentially removes rapid cascades, and strong absorption can itself precipitate the next death, so the analysed population is the sufficiently-isolated departures and nothing here is a claim about cascades.`,
+	);
+	out.push("");
+	out.push(
+		"Nothing at or after the death enters any share or weight: the dying account's pre-death share, each survivor's pre-death share, and the equal split are all functions of the window `[D − W, D)` alone. That prevents post-death volume from leaking into the weights. It does not make any of these numbers a measurement of what the death caused, and none of them is read that way here.",
 	);
 	out.push("");
 	out.push(
@@ -4542,7 +5047,7 @@ function causalAbsorptionSection(
 	);
 	out.push("");
 	out.push(
-		"`requests.timestamp` is stamped when the row is persisted rather than when the request was made, so the pre/post boundary is fuzzy by the write lag. That biases alpha upward: a pre-death survivor request whose row is stamped after the death lands in the post window.",
+		"`requests.timestamp` is stamped when the row is persisted rather than when the request was made, and `D` is the first sampled 100 % reading rather than the instant routing changed, so persistence lag and sampled exhaustion timing misalign these intervals with both request execution and the routing change. The direction and magnitude of the resulting error are unmeasured. The misalignment matters more as `W` shrinks. `D` can be later than the routing interruption, so redistribution can already appear inside the nominal pre window.",
 	);
 	out.push("");
 	out.push(
@@ -4554,7 +5059,7 @@ function causalAbsorptionSection(
 	);
 	out.push("");
 	out.push(
-		"Deaths happen because the class is busy. The matched control removes the seasonal level and the placebo removes a pool-wide surge, but a class-specific surge that both killed the peer and raised survivor traffic is not removable from observational data.",
+		"Deaths happen because the class is busy. A class-specific surge that both killed the peer and raised survivor traffic is not removable from observational data, and nothing here removes it.",
 	);
 	out.push("");
 
@@ -4574,42 +5079,59 @@ function causalAbsorptionSection(
 	out.push("alpha              = (postRateSurv - preRateSurv) / preRateDying");
 	out.push("survivorRateRatio  = postRateSurv / preRateSurv");
 	out.push("delta_s            = postRate_s - preRate_s");
-	out.push("movedPositive      = sum over S of max(delta_s, 0)");
-	out.push("topMovedShare      = max_s max(delta_s, 0) / movedPositive");
-	out.push("topMoverPreShare   = survivorPreShare of that same account");
+	out.push(
+		"contribution_s     = delta_s / preRateDying      (these sum to alpha)",
+	);
+	out.push("P                  = sum over S of max(delta_s, 0)");
+	out.push("N                  = sum over S of max(-delta_s, 0)");
+	out.push("G                  = P - N");
+	out.push(
+		"largestGainShare   = max_s max(delta_s, 0) / P   (null when G <= 0)",
+	);
 	out.push("```");
 	out.push("");
 	out.push(
-		"A quantity with no value prints a dash and is never coerced to zero: alpha has no value when the dying account had no pre-death traffic, the top-mover share has none when no survivor's rate rose, and the survivor rate ratio has none when the survivors had no pre-death traffic.",
+		"`alpha = (ratio - 1) * preRateSurv / preRateDying`, so the same ratio change is a different normalised gain at a different dying pre-share, and a ratio difference is not an absorbed fraction. The raw rates are printed beside both.",
+	);
+	out.push("");
+	out.push(
+		"`largestGainShare` is the largest account's share of positive rate increases. It is not a share of the volume that moved: it divides one account's rise by the sum of the rises and does not see the falls, which is why it has no value where the survivor set's net change `G` is zero or negative.",
+	);
+	out.push("");
+	out.push(
+		"A survivor with zero pre-death traffic leaves the ratio and the pre-share without a value. It stays visible in the per-death table with its raw rates rather than being dropped from the pairing, because dropping it would silently change the survivor set the aggregate is taken over.",
+	);
+	out.push("");
+	out.push(
+		"A quantity with no value prints a dash and is never coerced to zero: alpha has no value when the dying account had no pre-death traffic, the largest gain share has none when `G <= 0`, and the survivor rate ratio has none when the survivors had no pre-death traffic.",
 	);
 	out.push("");
 
 	out.push(
-		`Matched controls sit at the same instant ±${ABSORPTION_CONTROL_OFFSET_MS / DAY_MS} d, so weekday and hour are both matched, and are measured over the IDENTICAL survivor set at the IDENTICAL half-width. A control is used only when its whole interval lies inside the loaded request span, no peer-exhaustion event of the same class falls inside it, and no account of the class reads at or above 100 % at any snapshot inside it. Ineligible controls are counted rather than skipped: ${absorption.controlsIneligible["outside-loaded-span"]} outside the loaded span, ${absorption.controlsIneligible["peer-exhaustion-inside"]} holding a same-class death, ${absorption.controlsIneligible["class-at-hundred"]} with an account of the class already at 100 %.`,
+		`Matched controls sit at the same instant ±${ABSORPTION_CONTROL_OFFSET_MS / DAY_MS} d, so weekday and hour are both matched, and are measured over the IDENTICAL survivor set at the IDENTICAL half-width. A control is used only when its whole interval lies inside the loaded request span, every account of \`S\` and the dying account is available across the whole of it, and no member of the class changes availability state inside it. The workload here is not weekly-periodic, so a control's own interval can be a quiet stretch rather than a matched one; the per-death table prints each control's ratio beside the death's, and the pairing below is one row of the aggregate rather than a headline. Ineligible controls are counted rather than skipped: ${absorption.controlsIneligible["outside-loaded-span"]} outside the loaded span, ${absorption.controlsIneligible["availability-change-inside"]} with an availability change inside the interval.`,
 	);
 	out.push("");
 	out.push(
-		"The other-class placebo measures the same ratio over the other servable class's accounts across the same interval at the death. It is thin by construction, and it is uninformative for anthropic deaths before 2026-09-04, when the codex class held a single account and so had no survivor set to speak of.",
+		"The other class's ratio over the same interval is printed as concurrent context, and never enters any subtraction. A single account can supply it, in which case its concentration statistics are mechanically trivial: with one account the equal split is 1 and the largest gain share is 1 or nothing. A developer can substitute between providers, so the other class is not assumed unaffected by the death either.",
 	);
 	out.push("");
 
 	out.push(ABSORPTION_GROUP_HEADER);
 	out.push(ABSORPTION_GROUP_ALIGN);
-	for (const row of absorption.groups) {
+	for (const row of absorption.groups) out.push(absorptionGroupLine(row));
+	for (const entry of absorption.paired) {
 		out.push(
-			`| ${row.population} | ${row.basis} | ${row.n} | ${num(row.medianSurvivorRateRatio)} | ${num(row.medianAlpha)} | ${pct(row.medianTopMovedShare)} | ${pct(row.medianEqualSplitShare)} | ${pct(row.medianTopMoverPreShare)} |`,
+			`| paired median of (ratio at death − mean ratio at eligible controls), ${
+				entry.horizon === "narrow" ? "W = 60 min" : "W = 6 h"
+			} | ${entry.basis} | ${entry.n} | ${entry.n} | ${num(
+				entry.medianDelta,
+			)} | 0 | ${EM_DASH} | 0 | ${EM_DASH} | 0 | ${EM_DASH} | 0 | ${EM_DASH} |`,
 		);
 	}
 	out.push("");
 	out.push(
-		"Paired within a death, over the same accounts and the same weekday and hour; where both offsets are eligible their ratios are averaged first. Two unpaired medians would leave the seasonal level in.",
+		"Each statistic carries its own denominator: a row's `measurements` count is the population, and the `n` beside a median is the measurements where that statistic has a value. Where both control offsets are eligible their ratios are averaged before the difference is taken.",
 	);
-	out.push("");
-	for (const entry of absorption.paired) {
-		out.push(
-			`- \`${entry.basis}\`: paired median (ratio at death minus ratio at matched control): ${num(entry.medianDelta)} over ${entry.n} ${entry.n === 1 ? "death" : "deaths"} with an eligible control.`,
-		);
-	}
 	out.push("");
 
 	if (absorption.deaths.length === 0) {
@@ -4619,29 +5141,70 @@ function causalAbsorptionSection(
 		out.push("");
 	} else {
 		out.push(
-			"Every analysed death, one row pair per death — requests above tokens — because eighteen columns twice over is not a table anyone can read. Volumes are raw counts and raw tokens over the half-window; rates are those divided by the minutes counted.",
+			"Every analysed death, one block each — requests above tokens on both horizons — with one line per survivor underneath. Volumes are raw counts and raw tokens over the half-window; rates are those divided by the minutes counted.",
 		);
 		out.push("");
-		out.push(ABSORPTION_DEATH_HEADER);
-		out.push(ABSORPTION_DEATH_ALIGN);
 		for (const death of absorption.deaths) {
-			for (const basis of ABSORPTION_BASES) {
-				out.push(absorptionDeathRow(death, basis));
+			out.push(
+				`**Event ${death.eventId}** — ${iso(death.atMs)} — ${death.demandClass} / ${
+					death.windowKind ?? EM_DASH
+				} — dying \`${death.dyingAccountName}\` — S = ${
+					death.survivorIds.map((id) => `\`${id}\``).join(", ") || EM_DASH
+				}`,
+			);
+			out.push("");
+			out.push(ABSORPTION_DEATH_HEADER);
+			out.push(ABSORPTION_DEATH_ALIGN);
+			for (const horizon of [death.narrow, death.wide]) {
+				if (horizon == null) continue;
+				for (const basis of ABSORPTION_BASES) {
+					out.push(absorptionHorizonRow(horizon, basis));
+				}
 			}
+			out.push("");
+			if (death.wide == null && death.wideAbsentReason != null) {
+				out.push(`- 6 h horizon absent: ${death.wideAbsentReason}.`);
+			}
+			out.push(
+				`- Availability bound: ${
+					death.availabilityBoundMs == null
+						? "no class member changes state in the loaded history"
+						: `${num(death.availabilityBoundMs / MINUTE_MS, 0)} min, set by \`${
+								death.availabilityBoundAccountId ?? EM_DASH
+							}\``
+				}.`,
+			);
+			out.push("- Survivors, at W = 60 min:");
+			for (const accountId of death.survivorIds) {
+				out.push(absorptionSurvivorLine(death.narrow, accountId));
+			}
+			out.push(
+				`- excluded members: ${
+					death.excludedMembers.length === 0
+						? "none"
+						: death.excludedMembers
+								.map((entry) => `${entry.accountId} (${entry.state})`)
+								.join(", ")
+				}`,
+			);
+			out.push("");
 		}
-		out.push("");
 	}
 
 	if (absorption.excludedDeaths.length > 0) {
 		out.push("Deaths that were not measured, printed rather than dropped:");
 		out.push("");
 		out.push(
-			"| event | instant | class | window | dying account | excluded by |",
+			"| event | instant | class | window | dying account | excluded by | bound |",
 		);
-		out.push("|---:|---|---|---|---|---|");
+		out.push("|---:|---|---|---|---|---|---|");
 		for (const death of absorption.excludedDeaths) {
 			out.push(
-				`| ${death.eventId} | ${iso(death.atMs)} | ${death.demandClass} | ${death.windowKind ?? EM_DASH} | ${death.dyingAccountName} | ${death.reason} |`,
+				`| ${death.eventId} | ${iso(death.atMs)} | ${death.demandClass} | ${
+					death.windowKind ?? EM_DASH
+				} | ${death.dyingAccountName} | ${death.reason} | ${
+					death.detail ?? EM_DASH
+				} |`,
 			);
 		}
 		out.push("");
@@ -4976,7 +5539,7 @@ export function formatRedistributionReport(
 	out.push("");
 
 	out.push(...absorptionSection(replay));
-	out.push(...causalAbsorptionSection(input.absorption));
+	out.push(...requestVolumeChangeSection(input.absorption));
 
 	out.push(...observationLagSection(observationLagChecks(replay, cohorts)));
 
@@ -5172,8 +5735,8 @@ export function knownLimitsFor(
 		"The observation-lag advance never rewinds the scan clock below the instant being replayed: a window that fills inside its lag dies AT that instant, though the projection it records carries the true, earlier one. Any redistribution such a death causes therefore starts at the instant, not at the fill.",
 		"A reading whose row carries no `observed_at` and whose estimator is the now-anchored lifetime average has no derivable lag and is advanced by nothing. That is a real absence, not a measured zero, and the mechanism section reports those records under `unknown` rather than folding them into the fresh bucket.",
 		"The absorption section's first reading at or above 100 % is a sampled crossing, not the instant the window filled, so every fill duration there is an upper bound within the sample gap printed beside it in that section's `median resolution` column.",
-		"`requests.timestamp` is persistence time, not request time, so the pre/post boundary of the causal absorption measurement is fuzzy by the write lag, and the resulting bias in alpha is upward.",
-		"`requests` has no foreign key to `accounts`, so a deleted account's traffic is unattributed. Such an account also has no snapshots, which cascade-delete with it, and so cannot appear as a survivor in the absorption measurement either.",
+		"`requests.timestamp` is persistence time, not request time, and the death instant is the first sampled 100 % reading rather than the moment routing changed. Persistence lag and sampled exhaustion timing misalign the request-volume intervals with request execution and with the routing change; the direction and magnitude of the resulting error are unmeasured, and the misalignment matters more as the half-width shrinks.",
+		"`requests` has no foreign key to `accounts`, so a deleted account's traffic is unattributed. Such an account also has no snapshots, which cascade-delete with it, so it can appear neither in a survivor set nor in the availability history the survivor set is derived from.",
 		"Pause has no history in the database, so an account idle during a matched-control interval cannot be told from one deliberately parked, and no adjustment for that is possible.",
 		"A regression fit that states no ETA — a flat or falling six-hour fit, which an idle account inside a live window produces — has no recoverable anchor either: the fit's anchor is back-solved from the ETA. Such a window is scheduled from the replayed instant in BOTH scans, which is pre-existing behaviour and not something the correction introduced, and the lag-population table counts those records apart from the lags it medians.",
 	];
