@@ -268,7 +268,7 @@ function runwayOutlook(
 				? { label: "Spent, unconfirmed", tone: "warning" }
 				: { label: "Out of quota", tone: "destructive" };
 		case "runway":
-			return { label: "Runs out", tone: "warning" };
+			return { label: "Runs out at this pace", tone: "warning" };
 		default:
 			return { label: "No run-out projected", tone: "success" };
 	}

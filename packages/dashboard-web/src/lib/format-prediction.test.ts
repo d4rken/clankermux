@@ -4,6 +4,7 @@ import {
 	formatDuration,
 	formatDurationDhm,
 	formatPredictionMessage,
+	type ProjectionTone,
 	RESETS_BEFORE_EXHAUSTION_MESSAGE,
 } from "./format-prediction";
 
@@ -101,7 +102,10 @@ describe("formatPredictionMessage", () => {
 				now,
 				FIVE_HOUR,
 			),
-		).toEqual({ message: "Runs out 2h 15m before reset", tone: "danger" });
+		).toEqual({
+			message: "At this pace, runs out 2h 15m before reset",
+			tone: "danger",
+		});
 	});
 
 	// The two early-exhaustion tiers. A margin wide relative to the window is a
@@ -118,7 +122,10 @@ describe("formatPredictionMessage", () => {
 				now,
 				FIVE_HOUR,
 			),
-		).toEqual({ message: "Runs out 20m before reset", tone: "warning" });
+		).toEqual({
+			message: "At this pace, runs out 20m before reset",
+			tone: "warning",
+		});
 	});
 
 	it("keeps a margin past the threshold at 'danger'", () => {
@@ -207,7 +214,10 @@ describe("formatPredictionMessage", () => {
 				now,
 				FIVE_HOUR,
 			),
-		).toEqual({ message: "Runs out in 1h 30m", tone: "warning" });
+		).toEqual({
+			message: "At this pace, runs out in 1h 30m",
+			tone: "warning",
+		});
 	});
 
 	it("returns null for a rising state with no ETA", () => {
@@ -219,5 +229,111 @@ describe("formatPredictionMessage", () => {
 				FIVE_HOUR,
 			),
 		).toBeNull();
+	});
+});
+
+// The conditional wording is a prefix and nothing else. Each case below states
+// its tone and rebuilds its expected message from `formatDuration`, so the test
+// fails the moment a tone decision moves or a rendered duration stops being the
+// exact figure the branch computed — the two things this copy change promised
+// not to touch.
+describe("formatPredictionMessage conditional wording", () => {
+	const now = 1_000_000_000_000;
+
+	const cases: ReadonlyArray<{
+		name: string;
+		prediction: UsagePrediction;
+		resetTimeMs: number | null;
+		windowDurationMs: number | null;
+		tone: ProjectionTone;
+		durationMs: number | null;
+		message: (duration: string) => string;
+	}> = [
+		{
+			name: "an exhausted window states the observation, unqualified",
+			prediction: pred({ state: "exhausted" }),
+			resetTimeMs: null,
+			windowDurationMs: null,
+			tone: "danger",
+			durationMs: null,
+			message: () => "Quota exhausted",
+		},
+		{
+			name: "a wide margin before the reset",
+			prediction: pred({ etaExhaustMs: now + 2 * HOUR }),
+			resetTimeMs: now + 4 * HOUR + 15 * 60 * 1000,
+			windowDurationMs: FIVE_HOUR,
+			tone: "danger",
+			durationMs: 2 * HOUR + 15 * 60 * 1000,
+			message: (duration) => `At this pace, runs out ${duration} before reset`,
+		},
+		{
+			name: "a thin margin before the reset",
+			prediction: pred({ etaExhaustMs: now + 3 * HOUR - 20 * 60 * 1000 }),
+			resetTimeMs: now + 3 * HOUR,
+			windowDurationMs: FIVE_HOUR,
+			tone: "warning",
+			durationMs: 20 * 60 * 1000,
+			message: (duration) => `At this pace, runs out ${duration} before reset`,
+		},
+		{
+			name: "the reset arriving first",
+			prediction: pred({ etaExhaustMs: now + 4 * HOUR }),
+			resetTimeMs: now + 2 * HOUR + 30 * 60 * 1000,
+			windowDurationMs: FIVE_HOUR,
+			tone: "safe",
+			durationMs: null,
+			message: () => RESETS_BEFORE_EXHAUSTION_MESSAGE,
+		},
+		{
+			name: "no reset to measure a margin against",
+			prediction: pred({ etaExhaustMs: now + 90 * 60 * 1000 }),
+			resetTimeMs: null,
+			windowDurationMs: FIVE_HOUR,
+			tone: "warning",
+			durationMs: 90 * 60 * 1000,
+			message: (duration) => `At this pace, runs out in ${duration}`,
+		},
+	];
+
+	for (const testCase of cases) {
+		it(`keeps the tone and the duration for ${testCase.name}`, () => {
+			const result = formatPredictionMessage(
+				testCase.prediction,
+				testCase.resetTimeMs,
+				now,
+				testCase.windowDurationMs,
+			);
+			expect(result).not.toBeNull();
+			expect(result?.tone).toBe(testCase.tone);
+			const duration =
+				testCase.durationMs === null ? "" : formatDuration(testCase.durationMs);
+			expect(result?.message).toBe(testCase.message(duration));
+			if (testCase.durationMs !== null) {
+				expect(result?.message).toContain(duration);
+			}
+		});
+	}
+
+	it("qualifies every run-out message it can produce", () => {
+		for (const testCase of cases) {
+			const result = formatPredictionMessage(
+				testCase.prediction,
+				testCase.resetTimeMs,
+				now,
+				testCase.windowDurationMs,
+			);
+			if (result == null) continue;
+			// "Quota exhausted" is an observation and stays bare; anything that
+			// projects a run-out has to say what it is conditional on.
+			if (result.message === "Quota exhausted") continue;
+			expect(result.message.startsWith("At this pace, ")).toBe(true);
+		}
+	});
+
+	it("states the safe case conditionally too", () => {
+		expect(RESETS_BEFORE_EXHAUSTION_MESSAGE).toBe(
+			"At this pace, on track to reset before running out",
+		);
 	});
 });
