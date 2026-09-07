@@ -19,13 +19,62 @@ One sanctioned exception, approved 2026-08-25: the server's own hourly
 (`AnthropicModelCatalogCache`). It costs no tokens and starts no quota window.
 Everything else stays forbidden, including curling that endpoint by hand.
 
-## This directory is the live deployment
+## This directory builds the deployment; it is not the deployment
 
-`/home/darken/clankermux` is what `clankermux.service` runs. On every restart it
-rebuilds the dashboard and regenerates the inline DB workers **from this working
-tree**. There is no build artifact, staging dir, or deploy pipeline in between —
-whatever HEAD and the working tree say at the next start is what ships, including
-a crash-recovery restart or a reboot.
+`clankermux.service` does **not** run from `/home/darken/clankermux`. The
+`zz-release.conf` systemd drop-in pins `WorkingDirectory` to a release snapshot
+under `.cache/releases/<sha>` — a detached worktree of one reviewed commit, with
+its own `node_modules`, built dashboard and inline DB workers. An unfinished
+working tree therefore cannot reach production through a crash restart, a
+watchdog restart or a reboot.
+
+**Merging into `main` deploys nothing.** It changes what will ship the next time
+someone promotes, and nothing about what is running now. Promote explicitly:
+
+```
+scripts/promote-release.sh              # promote refs/heads/main
+scripts/promote-release.sh <commit-ish> # promote (or roll back to) a specific commit
+```
+
+The script creates the snapshot, installs and runs the guarded builds inside it
+while the old release keeps serving, rewrites the drop-in, reloads, restarts,
+and then checks that the unit really restarted (a new systemd invocation id,
+not just a reloaded config), that the serving process's own cwd is the new
+snapshot, that it logged the version its own `package.json` declares, and that
+it stayed `active`, on one invocation, answering 200 for a settle window rather
+than only reaching readiness once. It prints the rollback command first and
+records each release that passes verification in `.cache/releases/LAST_VERIFIED`,
+so the way back is always a release that actually came up rather than whatever
+the pin happens to name after a failure. A settle window is a sampled check,
+not a guarantee: a service that dies minutes later still passes it. It never
+deletes old
+snapshots; prune them by hand with `git worktree remove .cache/releases/<sha>`
+once you no longer want them as rollback targets. Keeping several is cheap:
+bun hardlinks `node_modules` from its global cache, so five snapshots occupied
+712 MB together on 2026-09-07 despite each measuring ~500 MB alone, and
+removing one frees far less than its apparent size.
+
+To check what is running, ask the serving process, not the repo and not the
+unit config. `WorkingDirectory` is only the pin systemd would use at the next
+start: install a new drop-in and reload, and it reports the new release while
+the old one is still serving. The process's own cwd names the sha that is
+actually answering requests:
+
+```
+readlink /proc/$(systemctl show clankermux -p MainPID --value)/cwd
+systemctl show clankermux -p ActiveState -p WorkingDirectory -p InvocationID
+journalctl -u clankermux \
+  --since "$(systemctl show clankermux -p ExecMainStartTimestamp --value)" \
+  --no-pager | grep -F "ClankerMux Server v" | tail -1
+```
+
+Scope the journal to the current start. An unscoped `journalctl` happily prints
+a banner from an earlier boot, so it can report a healthy version for a service
+that is down right now. The banner names a version string in any case, and many
+commits can share one; the path is what identifies a commit.
+
+A version banner that lags the root `package.json` is not a bug — it is the pin
+telling you which commit is serving traffic.
 
 **Forbidden here** (all fine inside `.claude/worktrees/`):
 
@@ -36,12 +85,17 @@ git clean -fd|-fx           git stash [push]    git rebase [-i]
 git revert (without explicit user approval)     gh pr checkout <n>
 ```
 
+These stay forbidden even though production is now insulated from the working
+tree. This is the one checkout that owns `main` and the git dir every worktree
+and release snapshot hangs off: moving HEAD here breaks the merge-into-`main`
+workflow, and the destructive commands can strand or delete other agents' WIP.
+
 **Allowed here:** `status` `log` `diff` `show` `branch` `ls-files` `ls-tree`
 `rev-parse` `reflog` `blame`; `fetch`; `add <specific-files>` and `commit` on the
-current branch; `pull --ff-only` when the user asks; and
-`merge --no-ff <branch>` into the currently-checked-out `main` — that advances
-`main` in place rather than switching HEAD, and is how work lands. Confirm the
-tree is clean first so a conflict can't leave markers in the deployed tree;
+current branch; `pull --ff-only` when the user asks; `worktree add|list|remove`;
+and `merge --no-ff <branch>` into the currently-checked-out `main` — that
+advances `main` in place rather than switching HEAD, and is how work lands.
+Confirm the tree is clean first so a conflict can't leave markers behind;
 `git merge --abort` if it conflicts and resolve on the branch instead.
 
 To switch branches, review a PR, or work on a different feature: use a worktree
