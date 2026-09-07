@@ -202,9 +202,14 @@ against its own uncorrected scan instead of against the equal split's — the
 comparison that made D's F1 leg fail above was across two share rules and the
 lag advance at once. `## Observation-lag mechanism check` keeps the equal pair
 as its subject, because that is the pair the correction was measured on when it
-shipped, and its conclusion carries over by the same mechanism: both scans take
-the same advance, from the same per-path anchor, before the walk starts. The
-scenario's own default share rule is now the proportional one
+shipped. What the proportional rule shares with it is the lag duration and the
+per-path anchor that duration comes from, both properties of the reading; the
+advance is not shared, because the scan assigns a share-dependent slope first
+and advances the reading by that slope, so the size of the advance, the deaths
+it causes inside a lag and the eligible populations that follow can all differ
+between the rules. Those numbers state what the correction did on the equal
+split and measure nothing about the basis's own scan. The scenario's own
+default share rule is now the proportional one
 (`computeCapacityRunwayScenario` with no `shareRule` option); `equalShareRule`
 stays exported and unchanged. Nothing in production reads the scenario, so
 putting either rule in front of a user is a separate step, gated on the verdict

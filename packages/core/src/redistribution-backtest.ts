@@ -4780,9 +4780,16 @@ function recordsByKey(
  * subject of this section is the lag correction as it was measured on the equal
  * split, which was the verdict basis when the correction shipped. Re-pointing
  * these reads at whatever the basis happens to be would change what the section
- * measures without saying so. The conclusion carries over to the proportional
- * basis by the mechanism, not by re-running the checks on it: both scans take
- * the same advance, from the same per-path anchor, before the walk starts.
+ * measures without saying so.
+ *
+ * What the two share rules DO have in common is the lag duration and the
+ * per-path anchor it is derived from, both properties of the reading. The
+ * advance is not one of them: the scan assigns each window a share-dependent
+ * slope and only then advances the reading by that slope over the lag, so its
+ * size, which windows it drives to 100 % inside their own lag, and therefore
+ * which records are eligible for the checks below can all differ between the
+ * rules. Nothing computed here is a measurement of the proportional basis's own
+ * scan.
  */
 export function observationLagChecks(
 	replay: ReplayResult,
@@ -6261,7 +6268,7 @@ function observationLagSection(checks: ObservationLagChecks): string[] {
 	out.push("## Observation-lag mechanism check");
 	out.push("");
 	out.push(
-		"What the correction actually did to the projections, as opposed to what it scored. `scenario-equal` advances each reading over its observation lag; `scenario-equal-original` is the identical equal split with that advance switched off. Every check in this section is measured on THAT pair, which is the equal split — the verdict basis when the correction shipped, and kept as the subject here so the section cannot silently change what it is about. Its conclusion carries over to `scenario-proportional`, the basis since 2026-09-07, by the same mechanism: both scans take the same advance, from the same per-path anchor, before the walk starts, and the advance is a property of the reading rather than of the share rule that splits the demand afterwards. Each check below states what it measures, which records enter it, which are excluded and by which predicate, and prints the number that falls out of that population. None of them states what the number ought to be; reading it against the mechanism described is the reader's job. An eligible set of zero is reported as such rather than as a pass.",
+		"What the correction actually did to the projections, as opposed to what it scored. `scenario-equal` advances each reading over its observation lag; `scenario-equal-original` is the identical equal split with that advance switched off. Every check in this section is measured on THAT pair, which is the equal split — the verdict basis when the correction shipped, and kept as the subject here so the section cannot silently change what it is about. What the proportional rule, the basis since 2026-09-07, shares with it is the lag DURATION and the per-path anchor that duration is derived from, both properties of the reading. The advance itself is not shared: the scan assigns each window a share-dependent slope and only then advances the reading by that slope over the lag, so the size of the advance, which windows it drives to 100 % inside their own lag, and therefore which records are eligible for the checks below can all differ between the two rules. Nothing below is a measurement of the basis's own scan. Each check below states what it measures, which records enter it, which are excluded and by which predicate, and prints the number that falls out of that population. None of them states what the number ought to be; reading it against the mechanism described is the reader's job. An eligible set of zero is reported as such rather than as a pass.",
 	);
 	out.push("");
 
