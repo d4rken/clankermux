@@ -797,6 +797,72 @@ describe("RateLimitProgress", () => {
 			expect(html).toContain("text-destructive-strong");
 		});
 
+		// The floor: early in a weekly window the lifetime average stands on hours
+		// of a 168-hour cycle, and the five reds the weekly bar has shown since it
+		// shipped each began around hour 34 and each sat on a window that ended
+		// at 95-96 % without running out. The projection is unchanged — same
+		// instant, same line — and only the colour waits. See `weeklyRedEligible`.
+		it("holds the weekly bar at amber until the window has run the evidence floor", () => {
+			const now = Date.now();
+			const DAY = 24 * HOUR;
+			const fiveHourReset = new Date(now + 4 * HOUR).toISOString();
+			// 30 % used 36 hours into the week: 20 %/day, so the remaining 70 %
+			// takes 3.5 more days and exhaustion lands well over a day before the
+			// reset — far past the 10 % margin, and red under the margin rule alone.
+			const weeklyReset = new Date(now + 5.5 * DAY).toISOString();
+			const html = renderToStaticMarkup(
+				<RateLimitProgress
+					resetIso={fiveHourReset}
+					usageUtilization={5}
+					usageWindow="five_hour"
+					usageData={{
+						five_hour: { utilization: 5, resets_at: fiveHourReset },
+						seven_day: { utilization: 30, resets_at: weeklyReset },
+					}}
+					usageAsOfIso={new Date(now).toISOString()}
+					provider="anthropic"
+					showWeekly
+					inlineProjection
+				/>,
+			);
+
+			// The warning still says exactly what it said.
+			expect(html).toContain("before reset");
+			// It just is not red.
+			expect(html).not.toContain("text-destructive-strong");
+			expect(html).not.toContain("bg-destructive");
+			expect(html).toContain("text-warning-strong");
+		});
+
+		it("leaves the five-hour window alone", () => {
+			const now = Date.now();
+			// 60 % one hour into a five-hour window, with no server fit: the last
+			// 40 % takes 40 more minutes, so exhaustion lands over three hours
+			// before the reset — past the 10 % margin. It is amber all the same,
+			// and was before this rule existed: the five-hour window is
+			// amber-capped on the lifetime path (`weeklyLifetimeConfidence` grants
+			// "full" to the weekly window only), so its red comes from the server
+			// regression and never from the floor.
+			const fiveHourReset = new Date(now + 4 * HOUR).toISOString();
+			const html = renderToStaticMarkup(
+				<RateLimitProgress
+					resetIso={fiveHourReset}
+					usageUtilization={60}
+					usageWindow="five_hour"
+					usageData={{
+						five_hour: { utilization: 60, resets_at: fiveHourReset },
+					}}
+					usageAsOfIso={new Date(now).toISOString()}
+					provider="anthropic"
+					inlineProjection
+				/>,
+			);
+
+			expect(html).toContain("before reset");
+			expect(html).toContain("text-warning-strong");
+			expect(html).not.toContain("text-destructive-strong");
+		});
+
 		// No sample stamp means no instant to anchor to, and an unanchored lifetime
 		// projection may not claim red however wide its margin looks — the same
 		// fixture as above, which reaches red once the reading is stamped.

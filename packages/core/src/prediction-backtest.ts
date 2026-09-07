@@ -441,6 +441,13 @@ export interface RedRuleMetrics {
 /**
  * Confusion under the DISPLAY rule, not the estimator's own boolean.
  *
+ * INCOMPLETE since 2026-09-07: the display also caps a low-confidence estimate
+ * at amber, and caps the weekly window until it has been running for
+ * `WEEKLY_RED_MIN_WINDOW_AGE_MS` (see `weeklyRedEligible`). A
+ * {@link BacktestRecord} carries neither, so this counts reds the dashboard
+ * would not show. The production-faithful version is `scoreWeeklyRedFloor` in
+ * `./redistribution-backtest`, whose records carry both; do not compare the two.
+ *
  * `format-prediction.ts` renders red only when projected exhaustion clears the
  * reset by more than `CERTAIN_MARGIN_FRACTION` of the window's own length; a
  * tighter margin sits inside the extrapolation's error and stays amber. What a

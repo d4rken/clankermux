@@ -12,8 +12,10 @@ import {
 	prepareSeries,
 	replayRange,
 	evaluateFailoverLine,
+	evaluateWeeklyRedFloor,
 	scoreCohorts,
 	scoreFailoverLine,
+	scoreWeeklyRedFloor,
 } from "../packages/core/src/redistribution-backtest";
 import {
 	REQUEST_BUCKET_SQL,
@@ -308,11 +310,16 @@ describe("end to end on a fixture database", () => {
 				scores: scoreFailoverLine(replay),
 				verdict: evaluateFailoverLine(scoreFailoverLine(replay)),
 			},
+			weeklyRedFloor: {
+				scores: scoreWeeklyRedFloor(replay),
+				verdict: evaluateWeeklyRedFloor(scoreWeeklyRedFloor(replay)),
+			},
 			knownLimits: knownLimitsFor(replay, cohorts, verdict, null),
 			notes: ["fixture run"],
 		});
 		expect(markdown).toContain("## Verdict");
 		expect(markdown).toContain("## Failover line");
+		expect(markdown).toContain("## Weekly red floor");
 		expect(markdown).toContain(
 			"### Request-volume changes around observed exhaustion",
 		);

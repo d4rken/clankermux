@@ -22,6 +22,10 @@ import {
 	type ShareRule,
 } from "./capacity-runway-scenario";
 import { FAILOVER_WINDOW_KIND, failoverForecast } from "./failover-forecast";
+import {
+	WEEKLY_RED_MIN_WINDOW_AGE_MS,
+	weeklyRedEligible,
+} from "./lifetime-confidence";
 import { servableClassFor } from "./pool-classes";
 import {
 	type BacktestMetrics,
@@ -337,6 +341,20 @@ export interface RedistributionRecord extends BacktestRecord {
 	lagMs: number;
 	/** Which estimator answered for this window at `T`. */
 	estimatorSource: WindowExhaustionSource;
+	/**
+	 * The estimate's own `lowConfidence` at `T`. The display caps a
+	 * low-confidence projection at amber, so the red rule a user actually sees
+	 * is `margin AND NOT this` — scoring the margin alone counts alarms
+	 * production never showed.
+	 */
+	estimateLowConfidence: boolean;
+	/**
+	 * `WindowExhaustion.evidenceSpanMs` at `T`: how much elapsed time the burn
+	 * behind the projection is measured over, from the burn anchor when one is
+	 * active and from the structural window start otherwise. `null` on the
+	 * sources that measure no burn.
+	 */
+	evidenceSpanMs: number | null;
 	/**
 	 * True when NO pooled window of this record's class carries a lag at `T`.
 	 * The window's own zero lag is not enough: a peer's lag moves the peer's
@@ -3423,6 +3441,8 @@ export function replayInstant(
 					learningAtT,
 					sinceDeathMs: context.sinceDeathMs,
 					slopePctPerHour: estimate?.slopePctPerHour ?? null,
+					estimateLowConfidence: estimate?.lowConfidence ?? false,
+					evidenceSpanMs: estimate?.evidenceSpanMs ?? null,
 					observationAgeMs: observedAtMs == null ? null : T - observedAtMs,
 					sampleAgeMs: T - entry.sampledAt,
 					lagMs: lagOf(entry, window),
@@ -5151,6 +5171,10 @@ export function redistributionRecordToJson(
 		lagMs: record.lagMs,
 		lagMinutes: record.lagMs / MINUTE_MS,
 		estimatorSource: record.estimatorSource,
+		estimateLowConfidence: record.estimateLowConfidence,
+		evidenceSpanMs: record.evidenceSpanMs,
+		evidenceSpanHours:
+			record.evidenceSpanMs == null ? null : record.evidenceSpanMs / HOUR_MS,
 		classLagFree: record.classLagFree,
 		pooledInClass: record.pooledInClass,
 		firstEvent: record.firstEvent,
@@ -5180,6 +5204,392 @@ export function redistributionRecordToJson(
 		labelResetAtMs: record.labelResetAtMs,
 		labelResetIso: isoOrNull(record.labelResetAtMs),
 	};
+}
+
+// ---------------------------------------------------------------------------
+// Weekly red floor
+// ---------------------------------------------------------------------------
+
+/**
+ * The acceptance rule for {@link weeklyRedEligible}, printed verbatim in the
+ * report and applied by {@link evaluateWeeklyRedFloor}. Declared 2026-09-07,
+ * BEFORE the run it is first applied to.
+ */
+export const WEEKLY_RED_FLOOR_RULE = [
+	"WEEKLY RED FLOOR. A weekly window's projection may be rendered RED only",
+	"   once the WINDOW has been running for at least",
+	"   WEEKLY_RED_MIN_WINDOW_AGE_MS (72 h), measured from its structural start",
+	"   (`reset - 168 h`). Below the floor the projection is unchanged in every",
+	"   other respect — same instant, same line, same coverage — and renders",
+	"   amber. Five-hour windows and every other kind are untouched, as is",
+	"   whether a projection exists at all.",
+	"",
+	"POPULATION. `current`-model records of anthropic seven_day windows whose",
+	"   truth was observed. RED means what the dashboard shows: the projected",
+	"   run-out clears the KNOWN reset by more than 10 % of the window AND the",
+	"   estimate is not low-confidence. Only instants from 2026-08-23, when the",
+	"   weekly red shipped, can be red at all; the report states how many red",
+	"   instants fall before that date as a check on this claim.",
+	"",
+	"1. FEWER FALSE REDS. Over weekly windows observed NOT to run out, the",
+	"   floor must remove at least half of the red instants.",
+	"2. NO WARNING LOST. Over weekly windows observed TO run out, the floor",
+	"   must not remove a red instant that is the FIRST red of its window, and",
+	"   must leave at least one red instant strictly before the observed",
+	"   run-out wherever one existed without it. A single window losing its",
+	"   whole warning fails the rule outright.",
+	"3. REPORTED, NOT GATED. Red exposure in hours, the window age at which",
+	"   the first red appears with and without the floor, and the margin",
+	"   between the floor and the EARLIEST observed run-out age. That margin",
+	"   is the only safety evidence available while criterion 2 is vacuous:",
+	"   it says the floor lifts before any run-out this history contains, not",
+	"   that a warning would have been shown.",
+	"",
+	"DECISION. 1 and 2 hold: `ship`. 2 fails: `no-floor`. 1 fails, or either",
+	"   population is empty so its side cannot be measured:",
+	"   `insufficient-evidence`.",
+].join("\n");
+
+/** Criterion 1 of {@link WEEKLY_RED_FLOOR_RULE}. */
+export const WEEKLY_RED_FLOOR_MIN_REMOVED_FRACTION = 0.5;
+
+/** The instant the weekly red became renderable (commit `d711b93f`). */
+export const WEEKLY_RED_SHIPPED_MS = Date.UTC(2026, 7, 23);
+
+export interface WeeklyRedFloorSide {
+	/** Weekly lifecycles in this side of the population. */
+	lifecycles: number;
+	/** Instants that render red today. */
+	red: number;
+	/** Of those, instants the floor holds at amber. */
+	removed: number;
+	/** Lifecycles that show red at some instant today. */
+	redLifecycles: number;
+	/**
+	 * What the floor cost this side, and the two sides ask different questions.
+	 *
+	 * On the EXHAUSTED side it is lifecycles that lost their WARNING: the floor
+	 * removed the first red, or left no red standing before the observed
+	 * run-out. Criterion 2 is `0` here. A red kept only after the window had
+	 * already run out — a gift can reopen quota inside one lifecycle — is not a
+	 * warning and counts as lost.
+	 *
+	 * On the SURVIVED side it is lifecycles the floor leaves with no red at
+	 * all, which is the outcome that side is FOR: those are alarms that never
+	 * had a run-out behind them.
+	 */
+	silencedLifecycles: number;
+}
+
+export interface WeeklyRedFloorScores {
+	/** Never-exhausted weekly windows: criterion 1. */
+	survived: WeeklyRedFloorSide;
+	/** Exhausted weekly windows: criterion 2. */
+	exhausted: WeeklyRedFloorSide;
+	/** Red instants dated before the weekly red shipped; expected to be 0. */
+	redBeforeShipped: number;
+	/**
+	 * Per exhausted lifecycle: window age at the first red today, the same
+	 * under the floor, and the age at which it was observed to run out. Hours.
+	 */
+	exhaustedTiming: Array<{
+		resetAtMs: number | null;
+		firstRedAgeHours: number | null;
+		firstRedAgeHoursFloored: number | null;
+		runOutAgeHours: number | null;
+	}>;
+	/**
+	 * Hours between the floor and the EARLIEST window age at which any weekly
+	 * window was observed to run out — positive means the floor lifts before
+	 * every run-out this history contains. `null` when no run-out was observed.
+	 * Criterion 3, never a gate: it bounds when a red COULD appear, and says
+	 * nothing about whether one would have.
+	 */
+	floorMarginToEarliestRunOutHours: number | null;
+	/** Per survived lifecycle that shows red today: hours of red exposure, before and after. */
+	survivedExposureHours: Array<{ before: number; after: number }>;
+	/** Grid step, so exposure hours can be read as instants x step. */
+	stepMinutes: number;
+}
+
+/**
+ * The red the DASHBOARD shows for one window at one instant.
+ *
+ * Reads `standaloneLineEtaMs` — the window's OWN forecast — and never the
+ * `current` model's `predictedEtaMs`, which is account-level: one learning
+ * five-hour window withholds the whole account there, while the bar projects
+ * each window independently. Scoring the account-level field counted no red at
+ * all for a weekly window the dashboard was showing in red beside a five-hour
+ * window that had just started.
+ *
+ * A red the display could not have rendered is not one: instants before
+ * {@link WEEKLY_RED_SHIPPED_MS} are excluded here rather than merely counted,
+ * so a range that predates the weekly red contributes no alarms and no
+ * warnings. The lifecycle stays in the population — its run-out timing is
+ * still evidence — and {@link WeeklyRedFloorScores.redBeforeShipped} reports
+ * how many instants this removed.
+ */
+const isWeeklyRed = (record: RedistributionRecord): boolean =>
+	record.T >= WEEKLY_RED_SHIPPED_MS && isWeeklyRedIgnoringDate(record);
+
+const isWeeklyRedIgnoringDate = (record: RedistributionRecord): boolean =>
+	record.standaloneLineEtaMs != null &&
+	record.knownResetAtMs != null &&
+	!record.estimateLowConfidence &&
+	record.knownResetAtMs - record.standaloneLineEtaMs > 0.1 * record.windowMs;
+
+const emptySide = (): WeeklyRedFloorSide => ({
+	lifecycles: 0,
+	red: 0,
+	removed: 0,
+	redLifecycles: 0,
+	silencedLifecycles: 0,
+});
+
+/**
+ * Score {@link weeklyRedEligible} against the shipped display rule on the
+ * replayed history.
+ *
+ * The `current` model only: this is a claim about the estimator that ships, not
+ * about any scenario. Censored lifecycles are excluded — a red on an instant
+ * whose truth nobody observed is neither an alarm nor a warning.
+ */
+export function scoreWeeklyRedFloor(
+	replay: ReplayResult,
+): WeeklyRedFloorScores {
+	const byLifecycle = new Map<string, RedistributionRecord[]>();
+	let redBeforeShipped = 0;
+	for (const record of replay.records) {
+		if (record.model !== "current") continue;
+		if (record.windowKind !== "seven_day") continue;
+		if (
+			servableClassFor(record.provider ?? "anthropic").classId !== "anthropic"
+		)
+			continue;
+		if (record.outcome.kind === "censored") continue;
+		if (isWeeklyRedIgnoringDate(record) && record.T < WEEKLY_RED_SHIPPED_MS)
+			redBeforeShipped++;
+		const list = byLifecycle.get(record.lifecycleId) ?? [];
+		byLifecycle.set(record.lifecycleId, list);
+		list.push(record);
+	}
+	const scores: WeeklyRedFloorScores = {
+		survived: emptySide(),
+		exhausted: emptySide(),
+		redBeforeShipped,
+		exhaustedTiming: [],
+		floorMarginToEarliestRunOutHours: null,
+		survivedExposureHours: [],
+		stepMinutes: replay.stepMinutes,
+	};
+	const stepHours = replay.stepMinutes / 60;
+	for (const list of byLifecycle.values()) {
+		const sorted = [...list].sort((a, b) => a.T - b.T);
+		const runOutAtMs =
+			sorted
+				.map((r) => (r.outcome.kind === "exhausted" ? r.outcome.atMs : null))
+				.find((at) => at != null) ?? null;
+		const side = runOutAtMs != null ? scores.exhausted : scores.survived;
+		side.lifecycles++;
+		const reds = sorted.filter(isWeeklyRed);
+		const kept = reds.filter((record) =>
+			weeklyRedEligible(
+				"seven_day",
+				record.knownResetAtMs == null
+					? null
+					: record.T - (record.knownResetAtMs - record.windowMs),
+			),
+		);
+		side.red += reds.length;
+		side.removed += reds.length - kept.length;
+		if (reds.length > 0) {
+			side.redLifecycles++;
+			if (runOutAtMs == null) {
+				// Nothing ran out: the question is only whether any alarm survives.
+				if (kept.length === 0) side.silencedLifecycles++;
+			} else if (reds.some((record) => record.T < runOutAtMs)) {
+				// A warning is only a warning if it stands BEFORE the run-out, and
+				// the floor must not delay the first one either.
+				//
+				// Gated on there having BEEN a red before the run-out: a lifecycle
+				// whose only red follows its exhaustion (a gift can reopen quota
+				// inside one cycle) never warned about it, so the floor removes no
+				// warning there however it treats that red. Counting it would fail
+				// the rule for a loss the floor did not cause.
+				const lostFirstRed = kept.length === 0 || kept[0].T > reds[0].T;
+				const keptBeforeRunOut = kept.some((record) => record.T < runOutAtMs);
+				if (lostFirstRed || !keptBeforeRunOut) side.silencedLifecycles++;
+			}
+		}
+		// Window age uses the reset the record KNEW at its instant, which is what
+		// production derives the structural start from.
+		const ageHoursOf = (
+			record: RedistributionRecord | undefined,
+		): number | null =>
+			record?.knownResetAtMs == null
+				? null
+				: (record.T - (record.knownResetAtMs - record.windowMs)) / HOUR_MS;
+		if (runOutAtMs != null) {
+			const anyRecord = sorted[0];
+			scores.exhaustedTiming.push({
+				resetAtMs: anyRecord?.labelResetAtMs ?? null,
+				firstRedAgeHours: ageHoursOf(reds[0]),
+				firstRedAgeHoursFloored: ageHoursOf(kept[0]),
+				runOutAgeHours:
+					anyRecord?.knownResetAtMs == null
+						? null
+						: (runOutAtMs - (anyRecord.knownResetAtMs - anyRecord.windowMs)) /
+							HOUR_MS,
+			});
+		} else if (reds.length > 0) {
+			scores.survivedExposureHours.push({
+				before: reds.length * stepHours,
+				after: kept.length * stepHours,
+			});
+		}
+	}
+	scores.exhaustedTiming.sort(
+		(a, b) => (a.resetAtMs ?? 0) - (b.resetAtMs ?? 0),
+	);
+	const runOutAges = scores.exhaustedTiming
+		.map((row) => row.runOutAgeHours)
+		.filter((age): age is number => age != null);
+	scores.floorMarginToEarliestRunOutHours =
+		runOutAges.length === 0
+			? null
+			: Math.min(...runOutAges) - WEEKLY_RED_MIN_WINDOW_AGE_MS / HOUR_MS;
+	return scores;
+}
+
+export type WeeklyRedFloorDecision =
+	| "ship"
+	| "no-floor"
+	| "insufficient-evidence";
+
+export interface WeeklyRedFloorVerdict {
+	/** Criterion 1: share of false red instants the floor removes, or null when there were none. */
+	removedFraction: number | null;
+	fewerFalseReds: boolean | null;
+	/** Criterion 2: no exhausted window loses its warning. Null when none was red today. */
+	noWarningLost: boolean | null;
+	decision: WeeklyRedFloorDecision;
+}
+
+/** Apply {@link WEEKLY_RED_FLOOR_RULE}. Nothing here reads a number the report does not print. */
+export function evaluateWeeklyRedFloor(
+	scores: WeeklyRedFloorScores,
+): WeeklyRedFloorVerdict {
+	const { survived, exhausted } = scores;
+	const removedFraction =
+		survived.red === 0 ? null : survived.removed / survived.red;
+	const fewerFalseReds =
+		removedFraction == null
+			? null
+			: removedFraction >= WEEKLY_RED_FLOOR_MIN_REMOVED_FRACTION;
+	const noWarningLost =
+		exhausted.redLifecycles === 0 ? null : exhausted.silencedLifecycles === 0;
+	// Criterion 2 is a safety floor: a measured failure decides, and it decides
+	// before criterion 1 is consulted.
+	const decision: WeeklyRedFloorDecision =
+		noWarningLost === false
+			? "no-floor"
+			: fewerFalseReds === true && noWarningLost === true
+				? "ship"
+				: "insufficient-evidence";
+	return { removedFraction, fewerFalseReds, noWarningLost, decision };
+}
+
+function weeklyRedFloorSection(
+	scores: WeeklyRedFloorScores,
+	verdict: WeeklyRedFloorVerdict,
+): string[] {
+	const out: string[] = [];
+	out.push("## Weekly red floor");
+	out.push("");
+	out.push(
+		"A display-tone candidate for the SHIPPED weekly estimator, scored as the exact predicate the dashboard would apply (`weeklyRedEligible`). It changes no projection: the run-out instant, the line and the coverage are identical, and only whether that line may be red moves. It is unrelated to the redistribution verdict above, which is about a different model.",
+	);
+	out.push("");
+	out.push("```");
+	out.push(WEEKLY_RED_FLOOR_RULE);
+	out.push("```");
+	out.push("");
+	const sideRow = (label: string, side: WeeklyRedFloorSide): string =>
+		`| ${label} | ${side.lifecycles} | ${side.redLifecycles} | ${side.red} | ${side.removed} | ${pct(side.red === 0 ? null : side.removed / side.red)} | ${side.silencedLifecycles} |`;
+	out.push(
+		"| population | lifecycles | show red today | red instants | held at amber | removed | lost (see below) |",
+	);
+	out.push("|---|---:|---:|---:|---:|---:|---:|");
+	out.push(sideRow("never ran out", scores.survived));
+	out.push(sideRow("ran out", scores.exhausted));
+	out.push("");
+	out.push(
+		"The last column asks a different question of each row. On `never ran out` it is windows the floor leaves with no red at all — the outcome that row is for. On `ran out` it is windows that lost their WARNING: the first red removed, or no red left standing before the run-out itself. Criterion 2 is that second number being zero.",
+	);
+	out.push("");
+	out.push(
+		`Instants that would have been red but fall before the weekly red shipped (${new Date(WEEKLY_RED_SHIPPED_MS).toISOString().slice(0, 10)}): ${scores.redBeforeShipped}. They are EXCLUDED from every count above — production could not have shown them — while their lifecycles stay in the population for their run-out timing.`,
+	);
+	out.push("");
+	if (scores.exhaustedTiming.length > 0) {
+		out.push(
+			"Windows observed to run out — window age in hours at the first red, and at the run-out itself:",
+		);
+		out.push("");
+		out.push(
+			"| reset | first red today | first red with the floor | ran out at |",
+		);
+		out.push("|---|---:|---:|---:|");
+		for (const row of scores.exhaustedTiming) {
+			out.push(
+				`| ${row.resetAtMs == null ? EM_DASH : iso(row.resetAtMs).slice(0, 10)} | ${num(row.firstRedAgeHours, 1)} | ${num(row.firstRedAgeHoursFloored, 1)} | ${num(row.runOutAgeHours, 1)} |`,
+			);
+		}
+		out.push("");
+		const everRed = scores.exhausted.redLifecycles;
+		out.push(
+			`The floor (${num(WEEKLY_RED_MIN_WINDOW_AGE_MS / HOUR_MS, 0)} h) lifts ${num(scores.floorMarginToEarliestRunOutHours, 1)} h before the earliest of those run-outs. That bounds the floor from above. ${
+				everRed === 0
+					? "It is not evidence that a warning would have been shown: none of these windows was red at any instant, so criterion 2 has nothing to measure."
+					: `${everRed} of them was red at some instant, so criterion 2 is measured on those rather than on this bound.`
+			}`,
+		);
+		out.push("");
+	}
+	if (scores.survivedExposureHours.length > 0) {
+		const before = scores.survivedExposureHours.map((e) => e.before);
+		const after = scores.survivedExposureHours.map((e) => e.after);
+		const sum = (xs: number[]): number => xs.reduce((a, b) => a + b, 0);
+		out.push(
+			`Red exposure on windows that never ran out, over ${scores.survivedExposureHours.length} such windows at a ${scores.stepMinutes}-minute grid: ${num(sum(before), 1)} h today, ${num(sum(after), 1)} h with the floor (median per window ${num(medianOf(before), 1)} h then ${num(medianOf(after), 1)} h).`,
+		);
+		out.push("");
+	}
+	out.push("### Decision");
+	out.push("");
+	out.push(
+		`- 1. FEWER FALSE REDS: ${pct(verdict.removedFraction)} of false red instants removed, needs ${pct(WEEKLY_RED_FLOOR_MIN_REMOVED_FRACTION)}: ${verdict.fewerFalseReds == null ? "not decidable (no false red instants)" : verdict.fewerFalseReds ? "PASS" : "FAIL"}${
+			verdict.removedFraction == null
+				? ""
+				: ` (${num((verdict.removedFraction - WEEKLY_RED_FLOOR_MIN_REMOVED_FRACTION) * 100, 1)} points of margin, over ${scores.survived.redLifecycles} window${scores.survived.redLifecycles === 1 ? "" : "s"} whose grid instants are strongly correlated — a measured pass, not a robust one)`
+		}`,
+	);
+	out.push(
+		`- 2. NO WARNING LOST: ${scores.exhausted.silencedLifecycles} of ${scores.exhausted.redLifecycles} red run-out windows lost their warning: ${verdict.noWarningLost == null ? "not decidable (no run-out window is red today)" : verdict.noWarningLost ? "PASS" : "FAIL"}`,
+	);
+	out.push(`- Decision: \`${verdict.decision}\``);
+	out.push("");
+	out.push(
+		`The floor SHIPPED on 2026-09-07. On the 2026-07-01 to 2026-09-06 run it was decided on, this decision read \`insufficient-evidence\`: criterion 1 passed and criterion 2 had nothing to measure, because every window on record that ran out predates the weekly red itself. Shipping was a human call on criterion 3's margin, scoped to that run. It was not a pass then and this line does not make it one now.${
+			verdict.noWarningLost == null
+				? " Criterion 2 stays undecidable until a weekly window BOTH runs out and was red before it did; a run-out with no red beforehand settles nothing."
+				: verdict.noWarningLost
+					? " Criterion 2 is now measured and passes on this run: no window that ran out lost its warning."
+					: " Criterion 2 is now measured and FAILS on this run: a window that ran out lost its warning, which is the condition the floor was to be withdrawn on."
+		}`,
+	);
+	out.push("");
+	return out;
 }
 
 // ---------------------------------------------------------------------------
@@ -6213,6 +6623,11 @@ export interface RedistributionReportInput {
 	absorption: AbsorptionChecks | null;
 	/** The failover line's scores and decision, precomputed by the caller like `verdict`. */
 	failoverLine: { scores: FailoverLineScores; verdict: FailoverLineVerdict };
+	/** The weekly red floor's scores and decision, precomputed the same way. */
+	weeklyRedFloor: {
+		scores: WeeklyRedFloorScores;
+		verdict: WeeklyRedFloorVerdict;
+	};
 	knownLimits: string[];
 	notes: string[];
 }
@@ -7379,6 +7794,13 @@ export function formatRedistributionReport(
 			input.failoverLine.scores,
 			input.failoverLine.verdict,
 			verdict,
+		),
+	);
+
+	out.push(
+		...weeklyRedFloorSection(
+			input.weeklyRedFloor.scores,
+			input.weeklyRedFloor.verdict,
 		),
 	);
 

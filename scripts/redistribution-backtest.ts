@@ -28,6 +28,7 @@ import {
 	absorptionChecks,
 	evaluateFailoverLine,
 	evaluateVerdict,
+	evaluateWeeklyRedFloor,
 	formatRedistributionReport,
 	knownLimitsFor,
 	prepareSeries,
@@ -42,6 +43,7 @@ import {
 	type RosterSnapshotRow,
 	scoreCohorts,
 	scoreFailoverLine,
+	scoreWeeklyRedFloor,
 } from "../packages/core/src/redistribution-backtest";
 import { resolveDbPath } from "../packages/database/src/paths";
 import {
@@ -510,6 +512,8 @@ async function main(): Promise<void> {
 	const verdict = evaluateVerdict(cohorts, replay);
 	const failoverScores = scoreFailoverLine(replay);
 	const failoverVerdict = evaluateFailoverLine(failoverScores);
+	const redFloorScores = scoreWeeklyRedFloor(replay);
+	const redFloorVerdict = evaluateWeeklyRedFloor(redFloorScores);
 	// Precomputed by the caller, the way `cohorts` and `verdict` are. The
 	// segmentation is rebuilt here rather than threaded out of `replayRange`,
 	// which keeps that function's result the record of the replay alone.
@@ -551,6 +555,7 @@ async function main(): Promise<void> {
 		verdict,
 		absorption,
 		failoverLine: { scores: failoverScores, verdict: failoverVerdict },
+		weeklyRedFloor: { scores: redFloorScores, verdict: redFloorVerdict },
 		knownLimits: knownLimitsFor(replay, cohorts, verdict, tokenCoverage),
 		notes: [
 			`Replay took ${(replayMs / 1000).toFixed(1)} s over ${replay.instants} instants; scoring and bootstrap ${(scoringMs / 1000).toFixed(1)} s.`,

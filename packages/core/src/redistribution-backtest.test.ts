@@ -24,6 +24,7 @@ import {
 	evaluateBesideBasis,
 	evaluateFailoverLine,
 	evaluateVerdict,
+	evaluateWeeklyRedFloor,
 	FAILOVER_LINE_MIN_NEW_LIFECYCLES,
 	FAILOVER_LINE_RULE,
 	formatRedistributionReport,
@@ -61,6 +62,7 @@ import {
 	SINCE_DEATH_BUCKETS,
 	scoreCohorts,
 	scoreFailoverLine,
+	scoreWeeklyRedFloor,
 	survivorSlopeTrajectory,
 	TRANSITION_BOOTSTRAP_LABEL,
 	type TransitionEvent,
@@ -70,6 +72,9 @@ import {
 	VERDICT_BASIS_MODEL,
 	VERDICT_RULE,
 	type Verdict,
+	WEEKLY_RED_FLOOR_MIN_REMOVED_FRACTION,
+	WEEKLY_RED_FLOOR_RULE,
+	WEEKLY_RED_SHIPPED_MS,
 	type WindowFill,
 	type WindowFillRow,
 	type WindowFillTally,
@@ -1048,6 +1053,8 @@ function record(
 		failoverEtaMs: null,
 		standaloneLineEtaMs: null,
 		failoverWeeklyDriven: false,
+		estimateLowConfidence: false,
+		evidenceSpanMs: 6 * HOUR,
 		...overrides,
 	};
 }
@@ -1890,6 +1897,10 @@ function reportOf(
 		failoverLine: {
 			scores: scoreFailoverLine(result),
 			verdict: evaluateFailoverLine(scoreFailoverLine(result)),
+		},
+		weeklyRedFloor: {
+			scores: scoreWeeklyRedFloor(result),
+			verdict: evaluateWeeklyRedFloor(scoreWeeklyRedFloor(result)),
 		},
 		knownLimits: ["a limit"],
 		notes: ["a note"],
@@ -7184,5 +7195,214 @@ describe("failover line", () => {
 		const before = markdown.indexOf("## Failover line");
 		expect(before).toBeGreaterThan(markdown.indexOf("## Verdict"));
 		expect(before).toBeLessThan(markdown.indexOf("## Known limits"));
+	});
+});
+
+describe("weekly red floor", () => {
+	// The display red: the projection clears the KNOWN reset by more than 10 %
+	// of the window (16.8 h weekly) and the estimate is not low-confidence.
+	const WEEK = 7 * DAY;
+	const redRecord = (
+		lifecycle: string,
+		ageHours: number,
+		over: Partial<RedistributionRecord> = {},
+	): RedistributionRecord => {
+		const reset = WEEKLY_RED_SHIPPED_MS + 10 * DAY;
+		const T = reset - WEEK + ageHours * HOUR;
+		return record({
+			model: "current",
+			accountId: lifecycle,
+			T,
+			windowKind: "seven_day",
+			windowMs: WEEK,
+			lifecycleId: `${lifecycle}::seven_day::0`,
+			knownResetAtMs: reset,
+			labelResetAtMs: reset,
+			// 3 days before the reset: well past the 16.8 h margin. The scorer
+			// reads the WINDOW's own line, not the account-level model field.
+			standaloneLineEtaMs: reset - 3 * DAY,
+			predictedEtaMs: reset - 3 * DAY,
+			predictsExhaust: true,
+			estimateLowConfidence: false,
+			evidenceSpanMs: ageHours * HOUR,
+			outcome: { kind: "survived" },
+			...over,
+		});
+	};
+
+	test("holds early red at amber and leaves the late red standing", () => {
+		const scores = scoreWeeklyRedFloor(
+			replayOf([
+				// Never ran out: red from day 1.5 to day 4.
+				redRecord("S", 36),
+				redRecord("S", 48),
+				redRecord("S", 71),
+				redRecord("S", 96),
+			]) as unknown as ReplayResult,
+		);
+		expect(scores.survived).toMatchObject({
+			lifecycles: 1,
+			redLifecycles: 1,
+			red: 4,
+			removed: 3,
+			silencedLifecycles: 0,
+		});
+		expect(scores.redBeforeShipped).toBe(0);
+		expect(evaluateWeeklyRedFloor(scores)).toMatchObject({
+			removedFraction: 0.75,
+			fewerFalseReds: true,
+			decision: "insufficient-evidence",
+		});
+	});
+
+	test("counts only what the dashboard would show as red", () => {
+		const scores = scoreWeeklyRedFloor(
+			replayOf([
+				// Low-confidence: production caps it at amber, so it is not a red.
+				redRecord("A", 96, { estimateLowConfidence: true }),
+				// Inside the 10 % margin: amber under the display rule.
+				redRecord("B", 96, {
+					standaloneLineEtaMs: WEEKLY_RED_SHIPPED_MS + 10 * DAY - 10 * HOUR,
+				}),
+				// The window's own line says nothing, and a censored truth.
+				redRecord("C", 96, { standaloneLineEtaMs: null }),
+				redRecord("D", 96, { outcome: { kind: "censored" } }),
+				// A five-hour window and a codex account are out of population.
+				redRecord("E", 96, { windowKind: "five_hour", windowMs: 5 * HOUR }),
+				redRecord("F", 96, { provider: "codex" }),
+			]) as unknown as ReplayResult,
+		);
+		expect(scores.survived.red).toBe(0);
+		expect(scores.exhausted.red).toBe(0);
+		// The account-level model field is set on every one of these; only the
+		// window's own line decides, so none of them counts.
+		expect(scores.redBeforeShipped).toBe(0);
+		expect(evaluateWeeklyRedFloor(scores)).toMatchObject({
+			removedFraction: null,
+			fewerFalseReds: null,
+			decision: "insufficient-evidence",
+		});
+	});
+
+	test("counts no red the dashboard could not have shown, and says how many", () => {
+		// The whole fixture sits a week before the weekly red shipped.
+		const early = (lifecycle: string, ageHours: number) =>
+			record({
+				...redRecord(lifecycle, ageHours),
+				T: WEEKLY_RED_SHIPPED_MS - 7 * DAY + ageHours * HOUR,
+			});
+		const scores = scoreWeeklyRedFloor(
+			replayOf([early("S", 96), early("S", 100)]) as unknown as ReplayResult,
+		);
+		expect(scores.redBeforeShipped).toBe(2);
+		expect(scores.survived.red).toBe(0);
+		// The lifecycle still counts — its run-out timing is evidence.
+		expect(scores.survived.lifecycles).toBe(1);
+		expect(evaluateWeeklyRedFloor(scores).decision).toBe(
+			"insufficient-evidence",
+		);
+	});
+
+	test("fails outright when a window that ran out loses its whole warning", () => {
+		const reset = WEEKLY_RED_SHIPPED_MS + 10 * DAY;
+		const ranOut = { kind: "exhausted" as const, atMs: reset - 4 * DAY };
+		const scores = scoreWeeklyRedFloor(
+			replayOf([
+				// Red only on day 1.5, and it ran out on day 3.
+				redRecord("X", 36, { outcome: ranOut }),
+				redRecord("X", 40, { outcome: ranOut }),
+			]) as unknown as ReplayResult,
+		);
+		expect(scores.exhausted).toMatchObject({
+			lifecycles: 1,
+			redLifecycles: 1,
+			silencedLifecycles: 1,
+		});
+		expect(scores.exhaustedTiming[0]).toMatchObject({
+			firstRedAgeHours: 36,
+			firstRedAgeHoursFloored: null,
+			runOutAgeHours: 72,
+		});
+		expect(evaluateWeeklyRedFloor(scores)).toMatchObject({
+			noWarningLost: false,
+			decision: "no-floor",
+		});
+	});
+
+	test("a warning kept only AFTER the run-out is not a warning", () => {
+		// A gift can reopen quota inside one lifecycle, so a window can go red
+		// again after it has already run out. Keeping only that red leaves the
+		// window with no notice of the run-out it actually had.
+		const reset = WEEKLY_RED_SHIPPED_MS + 10 * DAY;
+		const ranOut = {
+			kind: "exhausted" as const,
+			atMs: reset - 7 * DAY + 60 * HOUR,
+		};
+		const scores = scoreWeeklyRedFloor(
+			replayOf([
+				redRecord("X", 36, { outcome: ranOut }),
+				redRecord("X", 96, { outcome: ranOut }),
+			]) as unknown as ReplayResult,
+		);
+		expect(scores.exhausted.silencedLifecycles).toBe(1);
+		expect(evaluateWeeklyRedFloor(scores)).toMatchObject({
+			noWarningLost: false,
+			decision: "no-floor",
+		});
+	});
+
+	test("ships when the floor removes false red and every run-out keeps its first warning", () => {
+		const reset = WEEKLY_RED_SHIPPED_MS + 10 * DAY;
+		// Ran out on day 6, and its first red was on day 4 — after the floor, so
+		// the floor removes nothing from it.
+		const ranOut = {
+			kind: "exhausted" as const,
+			atMs: reset - 7 * DAY + 144 * HOUR,
+		};
+		const scores = scoreWeeklyRedFloor(
+			replayOf([
+				redRecord("S", 36),
+				redRecord("S", 40),
+				redRecord("S", 44),
+				redRecord("S", 100),
+				redRecord("X", 96, { outcome: ranOut }),
+				redRecord("X", 120, { outcome: ranOut }),
+			]) as unknown as ReplayResult,
+		);
+		const verdict = evaluateWeeklyRedFloor(scores);
+		expect(verdict.removedFraction).toBe(0.75);
+		expect(scores.exhausted.removed).toBe(0);
+		expect(verdict).toMatchObject({
+			fewerFalseReds: true,
+			noWarningLost: true,
+			decision: "ship",
+		});
+		expect(WEEKLY_RED_FLOOR_MIN_REMOVED_FRACTION).toBe(0.5);
+	});
+
+	test("the report prints the rule, both populations and the decision", () => {
+		const reset = WEEKLY_RED_SHIPPED_MS + 10 * DAY;
+		const result = replayOf([
+			redRecord("S", 36),
+			redRecord("S", 96),
+			redRecord("X", 36, {
+				outcome: { kind: "exhausted", atMs: reset - 2 * DAY },
+			}),
+		]) as unknown as ReplayResult;
+		const markdown = reportOf(
+			result,
+			scoreCohorts(result),
+			evaluateVerdict(scoreCohorts(result), result),
+			0,
+		);
+		expect(markdown).toContain("## Weekly red floor");
+		expect(markdown).toContain("WEEKLY RED FLOOR.");
+		expect(markdown).toContain("| never ran out |");
+		expect(markdown).toContain("| ran out |");
+		expect(markdown).toContain("fall before the weekly red shipped");
+		expect(markdown).toContain(
+			`- Decision: \`${evaluateWeeklyRedFloor(scoreWeeklyRedFloor(result)).decision}\``,
+		);
+		expect(WEEKLY_RED_FLOOR_RULE).toContain("72 h");
 	});
 });

@@ -1,6 +1,6 @@
 # ClankerMux runway redistribution backtest
 
-Generated: 2026-09-07T18:35:40.238Z
+Generated: 2026-09-07T20:15:53.850Z
 
 Reproduce with:
 
@@ -20,11 +20,11 @@ bun scripts/redistribution-backtest.ts --db=/home/darken/.config/clankermux/clan
 
 | field | value |
 |---|---|
-| usage_snapshots rows | 196758 |
+| usage_snapshots rows | 197080 |
 | accounts | 7 |
 | providers | anthropic, codex |
 | first sample | 2026-06-02T12:48:00.294Z |
-| last sample | 2026-09-07T18:30:41.085Z |
+| last sample | 2026-09-07T20:14:55.608Z |
 | replay interval | `[2026-07-01T00:00:00.000Z, 2026-09-06T00:00:00.000Z)` |
 | grid instants | 9648 |
 
@@ -2782,7 +2782,7 @@ The `combined` rows put five-hour and weekly windows in one median. A combined d
 | no peer lost in prefix | five_hour | 30 | 804 | 13 | 3.5% | 3.31 | 3.21 | 2.7 | 2.0 | 4.98 |
 | no peer lost in prefix | seven_day | 6 | 46 | 11 | 9.5% | 89.01 | 86.68 | 2.1 | 2.0 | 89.09 |
 | no peer lost in prefix | combined | 36 | 850 | 24 | 4.0% | 3.45 | 3.34 | 2.7 | 2.0 | 4.99 |
-| exposure unobservable | combined | 5 | 122 | 23 | 3.3% | 4.59 | 4.57 | 1.6 | 2.0 | 4.99 |
+| exposure unobservable | combined | 6 | 124 | 22 | 3.9% | 3.66 | 3.63 | 1.6 | 2.0 | 4.99 |
 
 The same rows again, split instead by whether a same-class peer died anywhere between the window start and the crossing. That definition is length-biased in the direction of longer fills, because a longer fill has more calendar time in which to contain a peer death, and that is why the fixed-prefix split above is the primary one. Both are printed; neither was chosen on its result. This split reads a different span from the prefix one, so it carries its own observability row: a window whose span from its start to its crossing (or to its last sample, uncrossed) leaves the replayed range is `during-fill exposure unobservable` here, whatever the prefix split could say about it.
 
@@ -2794,7 +2794,7 @@ The same rows again, split instead by whether a same-class peer died anywhere be
 | no peer lost during fill | five_hour | 24 | 746 | 13 | 3.1% | 3.19 | 3.15 | 2.5 | 2.0 | 4.98 |
 | no peer lost during fill | seven_day | 2 | 31 | 10 | 4.7% | 71.29 | 71.28 | 0.8 | 2.0 | 51.39 |
 | no peer lost during fill | combined | 26 | 777 | 23 | 3.1% | 3.20 | 3.17 | 2.4 | 2.0 | 4.98 |
-| during-fill exposure unobservable | combined | 5 | 129 | 25 | 3.1% | 4.59 | 4.57 | 1.6 | 2.0 | 4.99 |
+| during-fill exposure unobservable | combined | 6 | 131 | 24 | 3.7% | 3.66 | 3.63 | 1.6 | 2.0 | 4.99 |
 
 Every cell with fewer than 20 fills prints its fill durations, sorted, in hours. At that n the median summarises few observed fills, and the values themselves are what a reader can judge.
 
@@ -2802,13 +2802,13 @@ Every cell with fewer than 20 fills prints its fill durations, sorted, in hours.
 - `peer lost in prefix` seven_day (4 fills): 88.05, 109.98, 132.78, 159.11 h
 - `peer lost in prefix` combined (11 fills): 1.32, 2.30, 2.37, 2.52, 2.64, 3.55, 3.58, 88.05, 109.98, 132.78, 159.11 h
 - `no peer lost in prefix` seven_day (6 fills): 71.29, 86.71, 89.01, 101.83, 109.82, 132.28 h
-- `exposure unobservable` combined (5 fills): 2.69, 3.66, 4.59, 87.03, 126.32 h
+- `exposure unobservable` combined (6 fills): 1.82, 2.69, 3.66, 4.59, 87.03, 126.32 h
 - `peer lost during fill` five_hour (13 fills): 1.32, 2.27, 2.30, 2.37, 2.52, 2.64, 3.31, 3.42, 3.55, 3.58, 3.99, 4.31, 4.78 h
 - `peer lost during fill` seven_day (8 fills): 86.71, 88.05, 101.83, 109.82, 109.98, 132.28, 132.78, 159.11 h
 - `no peer lost during fill` seven_day (2 fills): 71.29, 89.01 h
-- `during-fill exposure unobservable` combined (5 fills): 2.69, 3.66, 4.59, 87.03, 126.32 h
+- `during-fill exposure unobservable` combined (6 fills): 1.82, 2.69, 3.66, 4.59, 87.03, 126.32 h
 
-Reconciliation: 52 filled + 989 completed below 100 % + 48 follow-up incomplete + 182 with no reset on the segment + 1 already full at the first sample + 19721 placeholder lifecycles skipped = 20993 window lifecycles.
+Reconciliation: 53 filled + 991 completed below 100 % + 47 follow-up incomplete + 182 with no reset on the segment + 1 already full at the first sample + 19722 placeholder lifecycles skipped = 20996 window lifecycles.
 
 ### Request-volume changes around observed exhaustion
 
@@ -4995,6 +4995,80 @@ Timing over lifecycles observed exhausted (minutes; medians, with n):
 - 2. ENOUGH: new lifecycles 29 >= 10: PASS
 - Decision: `no-line`
 
+## Weekly red floor
+
+A display-tone candidate for the SHIPPED weekly estimator, scored as the exact predicate the dashboard would apply (`weeklyRedEligible`). It changes no projection: the run-out instant, the line and the coverage are identical, and only whether that line may be red moves. It is unrelated to the redistribution verdict above, which is about a different model.
+
+```
+WEEKLY RED FLOOR. A weekly window's projection may be rendered RED only
+   once the WINDOW has been running for at least
+   WEEKLY_RED_MIN_WINDOW_AGE_MS (72 h), measured from its structural start
+   (`reset - 168 h`). Below the floor the projection is unchanged in every
+   other respect — same instant, same line, same coverage — and renders
+   amber. Five-hour windows and every other kind are untouched, as is
+   whether a projection exists at all.
+
+POPULATION. `current`-model records of anthropic seven_day windows whose
+   truth was observed. RED means what the dashboard shows: the projected
+   run-out clears the KNOWN reset by more than 10 % of the window AND the
+   estimate is not low-confidence. Only instants from 2026-08-23, when the
+   weekly red shipped, can be red at all; the report states how many red
+   instants fall before that date as a check on this claim.
+
+1. FEWER FALSE REDS. Over weekly windows observed NOT to run out, the
+   floor must remove at least half of the red instants.
+2. NO WARNING LOST. Over weekly windows observed TO run out, the floor
+   must not remove a red instant that is the FIRST red of its window, and
+   must leave at least one red instant strictly before the observed
+   run-out wherever one existed without it. A single window losing its
+   whole warning fails the rule outright.
+3. REPORTED, NOT GATED. Red exposure in hours, the window age at which
+   the first red appears with and without the floor, and the margin
+   between the floor and the EARLIEST observed run-out age. That margin
+   is the only safety evidence available while criterion 2 is vacuous:
+   it says the floor lifts before any run-out this history contains, not
+   that a warning would have been shown.
+
+DECISION. 1 and 2 hold: `ship`. 2 fails: `no-floor`. 1 fails, or either
+   population is empty so its side cannot be measured:
+   `insufficient-evidence`.
+```
+
+| population | lifecycles | show red today | red instants | held at amber | removed | lost (see below) |
+|---|---:|---:|---:|---:|---:|---:|
+| never ran out | 29 | 5 | 3470 | 1808 | 52.1% | 0 |
+| ran out | 9 | 0 | 0 | 0 | — | 0 |
+
+The last column asks a different question of each row. On `never ran out` it is windows the floor leaves with no red at all — the outcome that row is for. On `ran out` it is windows that lost their WARNING: the first red removed, or no red left standing before the run-out itself. Criterion 2 is that second number being zero.
+
+Instants that would have been red but fall before the weekly red shipped (2026-08-23): 0. They are EXCLUDED from every count above — production could not have shown them — while their lifecycles stay in the population for their run-out timing.
+
+Windows observed to run out — window age in hours at the first red, and at the run-out itself:
+
+| reset | first red today | first red with the floor | ran out at |
+|---|---:|---:|---:|
+| 2026-07-05 | — | — | 126.3 |
+| 2026-07-26 | — | — | 132.8 |
+| 2026-07-27 | — | — | 109.8 |
+| 2026-07-28 | — | — | 86.7 |
+| 2026-07-28 | — | — | 132.3 |
+| 2026-08-04 | — | — | 159.1 |
+| 2026-08-09 | — | — | 101.8 |
+| 2026-08-10 | — | — | 110.0 |
+| 2026-08-11 | — | — | 88.0 |
+
+The floor (72 h) lifts 14.7 h before the earliest of those run-outs. That bounds the floor from above. It is not evidence that a warning would have been shown: none of these windows was red at any instant, so criterion 2 has nothing to measure.
+
+Red exposure on windows that never ran out, over 5 such windows at a 10-minute grid: 578.3 h today, 277.0 h with the floor (median per window 119.7 h then 61.2 h).
+
+### Decision
+
+- 1. FEWER FALSE REDS: 52.1% of false red instants removed, needs 50.0%: PASS (2.1 points of margin, over 5 windows whose grid instants are strongly correlated — a measured pass, not a robust one)
+- 2. NO WARNING LOST: 0 of 0 red run-out windows lost their warning: not decidable (no run-out window is red today)
+- Decision: `insufficient-evidence`
+
+The floor SHIPPED on 2026-09-07. On the 2026-07-01 to 2026-09-06 run it was decided on, this decision read `insufficient-evidence`: criterion 1 passed and criterion 2 had nothing to measure, because every window on record that ran out predates the weekly red itself. Shipping was a human call on criterion 3's margin, scoped to that run. It was not a pass then and this line does not make it one now. Criterion 2 stays undecidable until a weekly window BOTH runs out and was red before it did; a run-out with no red beforehand settles nothing.
+
 ## Known limits
 
 - Pause and removal cannot be replayed: `usage_snapshots` rows cascade-delete with their account, so no removed account has history, and `accounts.paused` keeps none. The scenario's `presence: "demand-only"` path is covered by its unit tests only.
@@ -5012,11 +5086,11 @@ Timing over lifecycles observed exhausted (minutes; medians, with n):
 - A regression fit that states no ETA — a flat or falling six-hour fit, which an idle account inside a live window produces — has no recoverable anchor either: the fit's anchor is back-solved from the ETA. Such a window is scheduled from the replayed instant in BOTH scans, which is pre-existing behaviour and not something the correction introduced, and the lag-population table counts those records apart from the lags it medians.
 - Pending at this run (tag and servable class): peer-exhaustion (codex), add (codex), upgrade (codex). Those pairs hold no usable, uncensored weekly record common to all models, and each carries at least one tagged weekly window still pending at the label horizon, so their weekly half is unlabelled and the verdict is provisional.
 - Positive counts (all records, per model) — current: 3686 actual positives of 25200 scored; scenario-equal: 5826 actual positives of 42295 scored; scenario-equal-original: 5826 actual positives of 42295 scored; scenario-headroom: 5826 actual positives of 42295 scored; scenario-proportional: 5826 actual positives of 42295 scored; scenario-proportional-original: 5826 actual positives of 42295 scored.
-- `total_tokens` is null or zero on 9086 of 624679 attributed `requests` rows in the loaded span (1.5 %); those contribute zero to the absorption measurement's token basis.
+- `total_tokens` is null or zero on 9146 of 627572 attributed `requests` rows in the loaded span (1.5 %); those contribute zero to the absorption measurement's token basis.
 
 ## Notes
 
 - Placeholder windows skipped: 233.
-- Replay took 65.0 s over 9648 instants; scoring and bootstrap 9.8 s.
+- Replay took 37.8 s over 9648 instants; scoring and bootstrap 6.2 s.
 - Grid step 10 min; rows loaded 8 days either side of the replay interval.
-- Request buckets loaded: 64846 minute buckets over 7 accounts, on a 60-second grid, spanning 2026-06-23T09:31:00.000Z to 2026-09-07T18:35:00.000Z.
+- Request buckets loaded: 65131 minute buckets over 7 accounts, on a 60-second grid, spanning 2026-06-23T09:31:00.000Z to 2026-09-07T20:16:00.000Z.
