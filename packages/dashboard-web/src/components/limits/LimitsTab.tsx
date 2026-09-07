@@ -1,182 +1,283 @@
 import type { ModelFamily } from "@clankermux/core";
+import { listLiveScopedFamilies, mergeScopedFamilies } from "@clankermux/core";
+import type { AnalyticsSection } from "@clankermux/types";
+import { useQueries } from "@tanstack/react-query";
 import React, { useMemo, useState } from "react";
-import { useSearchParams } from "react-router";
 import type { TimeRange } from "../../constants";
-import { useUsageHistory, useUsageScopedHistory } from "../../hooks/queries";
+import {
+	usageScopedHistoryQueryOptions,
+	useAccounts,
+	useAnalytics,
+	usePacing,
+	usePaymentsSummary,
+	useRunway,
+	useUsageHistory,
+	useUsageScopedHistory,
+} from "../../hooks/queries";
+import { usePoolUsage } from "../../hooks/usePoolUsage";
 import { useQuotaSummary } from "../../hooks/useQuotaSummary";
 import { dataAvailability } from "../../lib/data-availability";
-import { TimeRangeSelector } from "../overview/TimeRangeSelector";
-import { QuotaAttention } from "../quota/QuotaAttention";
-import { QuotaAccountTable, QuotaSummary } from "../quota/QuotaSummary";
-import { Card, CardContent, CardHeader, CardTitle } from "../ui/card";
-import { FocusedQuotaChart } from "./UsageSawtoothChart";
+import { AccountPerformanceSection } from "./AccountPerformanceSection";
+import { AccountUtilizationCard } from "./AccountUtilizationCard";
+import { LimitsCapacityOverview } from "./LimitsCapacityOverview";
+import { PaymentsHistoryCard } from "./PaymentsHistoryCard";
+import { UsageSawtoothChart } from "./UsageSawtoothChart";
+
+// Account Performance table plus the plan-cost / burn-rate summary band, both
+// of which come from `totals`.
+//
+// Exported so tests seeding the query cache key on the SAME list — a divergent
+// list yields `undefined` analytics, and the sections computed from it render
+// their own pending state instead of the numbers under test.
+export const LIMITS_SECTIONS: readonly AnalyticsSection[] = [
+	"totals",
+	"accountPerformance",
+];
+
+/**
+ * Range every family panel starts on, and the range of the always-on discovery
+ * read. Weekly windows, so a weekly span.
+ */
+const DEFAULT_FAMILY_RANGE: TimeRange = "7d";
 
 export const LimitsTab = React.memo(() => {
-	const summary = useQuotaSummary();
-	const [params, setParams] = useSearchParams();
-	const providers = summary.rows.filter((row) => row.model === null);
-	const provider =
-		providers.find((row) => row.provider === params.get("provider"))
-			?.provider ?? providers[0]?.provider;
-	const models = summary.rows.filter((row) => row.provider === provider);
-	const selected =
-		models.find((row) => row.model === (params.get("model") || null)) ??
-		models[0];
-	const [range, setRange] = useState<TimeRange>("7d");
-	const [window, setWindow] = useState<"seven_day" | "five_hour">("seven_day");
-	const showForecast = params.get("forecast") === "1";
-	const setShowForecast = (value: boolean) =>
-		setParams(
-			(prev) => {
-				const next = new URLSearchParams(prev);
-				if (value) next.set("forecast", "1");
-				else next.delete("forecast");
-				return next;
-			},
-			{ replace: true },
-		);
-	const [showAccounts, setShowAccounts] = useState(false);
-	const history = useUsageHistory(range, !!selected && !selected.model);
-	const scoped = useUsageScopedHistory(range, !!selected?.model);
-	const query = selected?.model ? scoped : history;
-	const availability = dataAvailability(query, query.isLoading);
-	const accounts = useMemo(
-		() => summary.accounts.filter((a) => a.provider === provider),
-		[summary.accounts, provider],
+	// Each time-ranged card owns its own range now (the live pool tiles and
+	// utilization card below are range-independent and get no selector).
+	const [fiveHourUsageRange, setFiveHourUsageRange] =
+		useState<TimeRange>("24h");
+	const [sevenDayUsageRange, setSevenDayUsageRange] = useState<TimeRange>("7d");
+	const [perfRange, setPerfRange] = useState<TimeRange>("7d");
+	// One range per family panel, defaulting to 7d. Sparse: a family the user
+	// has not touched shares the discovery query's cache entry.
+	const [familyRanges, setFamilyRanges] = useState<
+		Partial<Record<ModelFamily, TimeRange>>
+	>({});
+
+	const accountsQuery = useAccounts();
+	const { data: accounts, isLoading: accountsLoading } = accountsQuery;
+	// The runway is computed server-side; this tab owns the query and hands the
+	// rows down, so LimitsCapacityOverview stays a pure view component.
+	const runwayQuery = useRunway();
+	const { data: runway, isLoading: runwayLoading } = runwayQuery;
+	// Pacing is computed server-side too, from the same account array the list
+	// endpoint serves, so the panels and the desk widget cannot disagree about
+	// whether a pace is sustainable.
+	const pacingQuery = usePacing();
+	const { data: pacing, isLoading: pacingLoading } = pacingQuery;
+	const analyticsQuery = useAnalytics(
+		perfRange,
+		{ accounts: [], models: [], status: "all" },
+		"normal",
+		false,
+		{ sections: LIMITS_SECTIONS },
 	);
-	const forecastWindow = useMemo(
+	const { data: analytics, isLoading: analyticsLoading } = analyticsQuery;
+	// One query per window: each graph states the availability of its OWN read.
+	const fiveHourUsageQuery = useUsageHistory(fiveHourUsageRange);
+	const { data: fiveHourUsageHistory, isLoading: fiveHourUsageHistoryLoading } =
+		fiveHourUsageQuery;
+	const sevenDayUsageQuery = useUsageHistory(sevenDayUsageRange);
+	const { data: sevenDayUsageHistory, isLoading: sevenDayUsageHistoryLoading } =
+		sevenDayUsageQuery;
+	// Per-model-family weekly history. This one read is always on: it discovers
+	// which families HAVE recorded history, which is half of the panel list (the
+	// other half is what the accounts currently report). It also serves every
+	// family panel still on the default range, since one response carries them
+	// all and react-query dedupes the identical key.
+	const scopedDefaultQuery = useUsageScopedHistory(DEFAULT_FAMILY_RANGE);
+	// Payments-ledger spend summary follows the Account Performance card's range.
+	const paymentsQuery = usePaymentsSummary(perfRange);
+	const { data: paymentsSummary, isLoading: paymentsLoading } = paymentsQuery;
+
+	// One computation and one clock, shared with the Overview. Both pages used to
+	// run their own `computePoolUsage` against their own 30s interval, so the
+	// same two numbers could differ between tabs by up to a refresh period.
+	const { now, fiveHour: fiveHourPool, sevenDay: weeklyPool } = usePoolUsage();
+	const { rows: summaryRows } = useQuotaSummary();
+	// Which per-family panels exist: the union of what the pool reports right now
+	// and what has been recorded. Live-only would blink the panel out at every
+	// window rollover (a scoped limit disappears from the payload the moment its
+	// reset passes) and whenever the accounts read fails; history-only could not
+	// show a family whose first snapshot has not been written yet.
+	const scopedFamilies = useMemo(
 		() =>
-			selected?.model
-				? { kind: "family" as const, family: selected.model as ModelFamily }
-				: window,
-		[selected?.model, window],
+			mergeScopedFamilies(
+				listLiveScopedFamilies(accounts ?? [], now),
+				scopedDefaultQuery.data?.families ?? [],
+			),
+		[accounts, now, scopedDefaultQuery.data],
 	);
-	function select(provider: string, model: string | null) {
-		setParams((prev) => {
-			const next = new URLSearchParams(prev);
-			next.set("provider", provider);
-			if (model) next.set("model", model);
-			else next.delete("model");
-			return next;
-		});
-	}
+	// One query per panel, through the SHARED options so the key and the polling
+	// cadence cannot drift from the discovery read above.
+	const scopedResults = useQueries({
+		queries: scopedFamilies.map((family) =>
+			usageScopedHistoryQueryOptions(
+				familyRanges[family.family] ?? DEFAULT_FAMILY_RANGE,
+			),
+		),
+	});
+	// There is deliberately no page-wide loading gate. Each section states the
+	// availability of the ONE query it is computed from, so a slow or failed read
+	// can only blank the section that depends on it. `/api/analytics` is the
+	// slowest read on this page; letting it hold the whole tab hostage is exactly
+	// what hid a resolved runway behind an unrelated request.
+	//
+	// `pending` is `isLoading && !data`, so a background refetch never blanks a
+	// section that already has numbers to show.
+	const accountsUnavailable =
+		dataAvailability(accountsQuery, accountsLoading).state === "unavailable";
+	const accountsPending = accountsLoading && !accounts;
+	const accountsUnavailableReason = accountsUnavailable
+		? "Account data unavailable"
+		: undefined;
+	// The quota panels read PACING, so a failed pacing read has to reach them as
+	// an unavailable reason of its own. Folding it into `loading` alone was not
+	// enough: after a first-load failure `isLoading` goes false with `data` still
+	// undefined, so both panels fell through to "No rolling-quota accounts" —
+	// asserting a measured empty pool on the strength of a request that failed.
+	// The accounts reason still wins, since without accounts there is nothing to
+	// pace either way.
+	const pacingUnavailable =
+		dataAvailability(pacingQuery, pacingLoading).state === "unavailable";
+	const quotaUnavailableReason =
+		accountsUnavailableReason ??
+		(pacingUnavailable ? "Pacing data unavailable" : undefined);
+	const analyticsUnavailable =
+		dataAvailability(analyticsQuery, analyticsLoading).state === "unavailable";
+	const analyticsPending = analyticsLoading && !analytics;
+	// The sawtooth graphs claim "Collecting data" when they have no rows, which
+	// asserts that no history EXISTS. That claim is only true once the read has
+	// resolved, so each window carries its own pending/unavailable state.
+	const fiveHourUsageUnavailable =
+		dataAvailability(fiveHourUsageQuery, fiveHourUsageHistoryLoading).state ===
+		"unavailable";
+	const sevenDayUsageUnavailable =
+		dataAvailability(sevenDayUsageQuery, sevenDayUsageHistoryLoading).state ===
+		"unavailable";
+	// Same rule the two account-wide panels use, per family: `isError && !data`
+	// would let a query that has simply never run fall through to the panel's
+	// "Collecting data" claim, which asserts that no history EXISTS.
+	const familyPanels = scopedFamilies.map((family, index) => {
+		const result = scopedResults[index];
+		const unavailable =
+			result === undefined ||
+			dataAvailability(result, result.isLoading).state === "unavailable";
+		return {
+			family: family.family,
+			displayName: family.displayName,
+			usageHistory: result?.data,
+			loading: result?.isLoading === true && !result.data,
+			unavailableReason: unavailable ? "Usage history unavailable" : undefined,
+			range: familyRanges[family.family] ?? DEFAULT_FAMILY_RANGE,
+			onRangeChange: (range: TimeRange) =>
+				setFamilyRanges((previous) => ({
+					...previous,
+					[family.family]: range,
+				})),
+		};
+	});
+	const paymentsUnavailable =
+		dataAvailability(paymentsQuery, paymentsLoading).state === "unavailable";
+	const paymentsPending = paymentsLoading && !paymentsSummary;
+	// Gated on the runway read ALONE. The response carries the account names its
+	// pin labels and causes need, so a failing /api/accounts — which empties the
+	// two window panels beside it — must not empty this one too.
+	const runwayUnavailable =
+		dataAvailability(runwayQuery, runwayLoading).state === "unavailable";
+	const runwaysUnavailableReason = runwayUnavailable
+		? "Runway data unavailable"
+		: undefined;
+
+	const totals = analytics?.totals;
+	const accountList = accounts ?? [];
+	// Null, never 0: an unresolved analytics read has no figure, and "$0.00"
+	// would read as a range that genuinely cost nothing.
+	const analyticsResolved = !analyticsPending && !analyticsUnavailable;
+	const costSummary = {
+		planCostUsd: analyticsResolved ? (totals?.planCostUsd ?? null) : null,
+		avgDailyPlanCostUsd: analyticsResolved
+			? (totals?.avgDailyPlanCostUsd ?? null)
+			: null,
+		avgWeeklyPlanCostUsd: analyticsResolved
+			? (totals?.avgWeeklyPlanCostUsd ?? null)
+			: null,
+	};
+
 	return (
 		<div className="space-y-section">
-			<QuotaSummary
-				{...summary}
-				selectedId={selected?.id}
-				showBreakdown={false}
+			{/* The two rolling windows share one visual hierarchy so their usage,
+			    reporting coverage and recovery timing can be compared at a glance. */}
+			<LimitsCapacityOverview
+				summaryRows={summaryRows}
+				pacing={pacing}
+				fiveHour={fiveHourPool}
+				sevenDay={weeklyPool}
+				now={now}
+				runways={runway?.keys ?? []}
+				accounts={runway?.accounts ?? []}
+				windowsLoading={accountsPending || (pacingLoading && !pacing)}
+				windowsUnavailableReason={quotaUnavailableReason}
+				runwaysLoading={runwayLoading && !runway}
+				runwaysUnavailableReason={runwaysUnavailableReason}
 			/>
-			<QuotaAttention rows={summary.rows} now={summary.now} />
-			<Card id="forecast">
-				<CardHeader>
-					<CardTitle>Usage history</CardTitle>
-				</CardHeader>
-				<CardContent>
-					<div className="mb-group flex flex-wrap items-end gap-group">
-						<label className="text-sm">
-							Provider
-							<select
-								aria-label="Provider"
-								className="ml-item rounded border bg-background p-2"
-								value={provider ?? ""}
-								onChange={(e) => select(e.target.value, null)}
-							>
-								{providers.map((row) => (
-									<option key={row.provider} value={row.provider}>
-										{row.label}
-									</option>
-								))}
-							</select>
-						</label>
-						<label className="text-sm">
-							Model
-							<select
-								aria-label="Model"
-								className="ml-item rounded border bg-background p-2"
-								value={selected?.model ?? ""}
-								onChange={(e) => select(provider ?? "", e.target.value || null)}
-							>
-								{models.map((row) => (
-									<option key={row.id} value={row.model ?? ""}>
-										{row.model ? row.label : "All models"}
-									</option>
-								))}
-							</select>
-						</label>
-						<label className="text-sm">
-							Window
-							<select
-								aria-label="Quota window"
-								className="ml-item rounded border bg-background p-2"
-								disabled={!!selected?.model}
-								value={selected?.model ? "seven_day" : window}
-								onChange={(e) => setWindow(e.target.value as typeof window)}
-							>
-								<option value="seven_day">Weekly</option>
-								<option value="five_hour">5 hours</option>
-							</select>
-						</label>
-						<TimeRangeSelector value={range} onChange={setRange} />
-					</div>
-					<div className="mb-group flex flex-wrap gap-group text-sm">
-						<label className="flex items-center gap-item">
-							<input
-								type="checkbox"
-								checked={showForecast}
-								onChange={(e) => setShowForecast(e.target.checked)}
-							/>
-							Show forecast
-						</label>
-						<label className="flex items-center gap-item">
-							<input
-								type="checkbox"
-								checked={showAccounts}
-								onChange={(e) => setShowAccounts(e.target.checked)}
-							/>
-							Show account lines
-						</label>
-					</div>
-					{selected && (
-						<FocusedQuotaChart
-							accounts={accounts}
-							now={summary.now}
-							window={forecastWindow}
-							history={history.data}
-							scopedHistory={scoped.data}
-							loading={availability.state === "loading"}
-							unavailableReason={
-								availability.state === "unavailable"
-									? "Usage history unavailable"
-									: undefined
-							}
-							showForecast={showForecast}
-							showAccounts={showAccounts}
-						/>
-					)}
-					{showForecast && (
-						<p className="mt-item text-xs text-muted-foreground">
-							Dashed lines assume the current pace continues. Missing evidence
-							leaves a gap; resets do not guarantee future availability.
-						</p>
-					)}
-					{availability.state === "stale" && (
-						<p className="mt-item text-xs text-warning-strong">
-							Showing saved history; refresh failed.
-						</p>
-					)}
-				</CardContent>
-			</Card>
-			{selected && (
-				<Card id="accounts">
-					<CardHeader>
-						<CardTitle>{selected.label} accounts</CardTitle>
-					</CardHeader>
-					<CardContent>
-						<QuotaAccountTable row={selected} now={summary.now} />
-					</CardContent>
-				</Card>
-			)}
+
+			{/* Per-account live utilization — grouped with the pool tiles above as the
+			    live, range-independent capacity view (no range selector). */}
+			<AccountUtilizationCard
+				accounts={accountList}
+				now={now}
+				loading={accountsPending}
+				unavailableReason={accountsUnavailableReason}
+			/>
+
+			{/* Recorded usage history + forecast; each graph owns its range picker. */}
+			<UsageSawtoothChart
+				accounts={accountList}
+				now={now}
+				fiveHour={{
+					usageHistory: fiveHourUsageHistory,
+					loading: fiveHourUsageHistoryLoading && !fiveHourUsageHistory,
+					unavailableReason: fiveHourUsageUnavailable
+						? "Usage history unavailable"
+						: undefined,
+					range: fiveHourUsageRange,
+					onRangeChange: setFiveHourUsageRange,
+				}}
+				sevenDay={{
+					usageHistory: sevenDayUsageHistory,
+					loading: sevenDayUsageHistoryLoading && !sevenDayUsageHistory,
+					unavailableReason: sevenDayUsageUnavailable
+						? "Usage history unavailable"
+						: undefined,
+					range: sevenDayUsageRange,
+					onRangeChange: setSevenDayUsageRange,
+				}}
+				families={familyPanels}
+			/>
+
+			{/* Account performance + folded-in Plan Value / Cost / Value Ratio summary;
+			    own range picker in the card header. */}
+			<AccountPerformanceSection
+				accountPerformance={analytics?.accountPerformance ?? []}
+				loading={analyticsPending}
+				unavailable={analyticsUnavailable}
+				range={perfRange}
+				onRangeChange={setPerfRange}
+				costSummary={costSummary}
+				paymentsSummary={paymentsSummary}
+			/>
+
+			{/* Calendar-month spend and the amortized run rate, over the ledger
+			    entries that make them up (auto renewals + manual credits). Same
+			    payload the card above reads — no second fetch. */}
+			<PaymentsHistoryCard
+				payments={paymentsSummary?.recentPayments ?? []}
+				summary={paymentsSummary}
+				loading={paymentsPending}
+				unavailableReason={
+					paymentsUnavailable ? "Payments data unavailable" : undefined
+				}
+			/>
 		</div>
 	);
 });

@@ -5,11 +5,14 @@ import {
 	computePoolUsage,
 	type PacingSnapshot,
 	type PoolUsageResult,
-	poolClassOutlook,
 	UNAUTHENTICATED_POOL_KEY_NAME,
 } from "@clankermux/core";
 import type { AccountResponse } from "@clankermux/types";
 import { renderToStaticMarkup } from "react-dom/server";
+import {
+	buildQuotaSummary,
+	type QuotaSummaryRow,
+} from "../../lib/quota-summary";
 import { PoolQuotaCard } from "../quota/PoolQuotaCard";
 import { LimitsCapacityOverview } from "./LimitsCapacityOverview";
 
@@ -91,10 +94,7 @@ function usage(
 	} as never;
 }
 
-/**
- * Two servable classes, so "tightest class" means something: the GPT account is
- * the most spent of the two least-used accounts and therefore binds.
- */
+/** Unequal account counts and quota levels distinguish provider averages from best-account readings. */
 const DEFAULT_ACCOUNTS: AccountResponse[] = [
 	account({ id: "acc-1", name: "alpha", usageData: usage(48, 48) }),
 	account({
@@ -123,6 +123,7 @@ function pools(accounts: AccountResponse[] = DEFAULT_ACCOUNTS, now = NOW) {
 		fiveHour: computePoolUsage(accounts, "five_hour", now),
 		sevenDay: computePoolUsage(accounts, "seven_day", now),
 		pacing: computePacingFromAccounts(accounts, now),
+		summaryRows: buildQuotaSummary(accounts, now),
 	};
 }
 
@@ -131,6 +132,7 @@ function renderOverview(
 		fiveHour: PoolUsageResult;
 		sevenDay: PoolUsageResult;
 		pacing: PacingSnapshot;
+		summaryRows?: QuotaSummaryRow[];
 	} = pools(),
 	runwayProps: {
 		runways?: KeyRunway[];
@@ -144,6 +146,7 @@ function renderOverview(
 	return renderToStaticMarkup(
 		<LimitsCapacityOverview
 			pacing={windows.pacing}
+			summaryRows={windows.summaryRows}
 			fiveHour={windows.fiveHour}
 			sevenDay={windows.sevenDay}
 			now={runwayProps.now ?? NOW}
@@ -203,22 +206,54 @@ function renderRunway(
 }
 
 describe("LimitsCapacityOverview", () => {
-	it("headlines the tightest class and the account with the most room in it", () => {
+	it("keeps paused and 5h-limited accounts in weekly averages", () => {
+		const html = renderOverview(
+			pools([
+				account({ id: "active", usageData: usage(10, 20) }),
+				account({ id: "paused", paused: true, usageData: usage(10, 80) }),
+				account({ id: "limited", usageData: usage(100, 50) }),
+			]),
+		);
+		expect(html).toContain("50% remaining");
+		expect(html).toContain("3 of 3 reporting");
+		expect(html).not.toContain("80% remaining");
+	});
+
+	it("retains a provider row when all its accounts are paused", () => {
+		const html = renderOverview(
+			pools([account({ paused: true, usageData: usage(10, 35) })]),
+		);
+		expect(html).toContain("65% remaining");
+		expect(html).toContain("Anthropic");
+		expect(html).toContain("0 of 1 available");
+	});
+
+	it("withholds the provider percentage when any account is unread", () => {
+		const html = renderOverview(
+			pools([
+				account({ id: "known", usageData: usage(10, 25) }),
+				account({ id: "unknown", paused: true }),
+			]),
+		);
+		expect(html).toContain("incomplete weekly readings");
+		expect(html).not.toContain("75% remaining");
+	});
+
+	it("retains the weekly panel and lists average remaining by provider", () => {
 		const html = renderOverview();
 
 		expect(html).toContain("Quota overview");
 		expect(html).toContain("Weekly budget");
 		expect(html).toContain("5-hour pacing");
-		// GPT's least-used account sits at 55%, Claude's at 20%, so GPT binds.
-		expect(html).toContain("55% used");
-		expect(html).toContain("Tightest class");
-		expect(html).toContain("GPT · lowest gamma");
+		expect(html).not.toContain("2 providers");
+		expect(html).toContain("Lowest provider average");
+		expect(html).toContain("66% remaining");
+		expect(html).toContain("45% remaining");
+		expect(html).not.toContain("lowest");
+		expect(html).not.toContain("Tightest class");
 	});
 
-	it("drops the pooled average and the checkpoint cell entirely", () => {
-		// Both stated a quantity nobody routes on: an average across accounts
-		// that cannot cover for each other, and the next reset of whichever
-		// account happened to be soonest regardless of class.
+	it("does not combine unrelated providers into one percentage", () => {
 		const html = renderOverview();
 
 		expect(html).not.toContain("Average quota used");
@@ -228,9 +263,9 @@ describe("LimitsCapacityOverview", () => {
 	it("gives every class a row with its own reading and reset", () => {
 		const html = renderOverview();
 
-		expect(html).toContain('aria-label="Weekly budget by class"');
-		expect(html).toContain("20% used");
-		expect(html).toContain("lowest beta");
+		expect(html).toContain('aria-label="Weekly budget by provider"');
+		expect(html).toContain("66% remaining");
+		expect(html).toContain("average per account");
 		expect(html).toContain("resets in 1h 30m · alpha");
 		expect(html).toContain("resets in 3d · gamma");
 		expect(html).toContain("2 of 2 reporting");
@@ -241,11 +276,9 @@ describe("LimitsCapacityOverview", () => {
 		// burn would sit at 4/7 = 57.1% and this reads just under sustainable.
 		const html = renderOverview();
 
-		// Two occurrences: the headline sub-line for the binding class and that
-		// class's own row. The tinted span breaks the run of text, so the prefix
-		// is asserted separately.
+		// Preserve the served forecast and name its account separately from the average.
 		expect(countOccurrences(html, "1.0× sustainable pace")).toBeGreaterThan(0);
-		expect(html).toContain("GPT · lowest gamma");
+		expect(html).toContain("gamma: ");
 	});
 
 	it("puts the pace on the line naming the account it was computed over", () => {
@@ -261,9 +294,7 @@ describe("LimitsCapacityOverview", () => {
 		// whole-document `toContain` passes on the broken layout too.
 		const html = renderOverview();
 
-		expect(paragraphContaining(html, "lowest beta")).toContain(
-			"sustainable pace",
-		);
+		expect(paragraphContaining(html, "beta: ")).toContain("sustainable pace");
 		expect(paragraphContaining(html, "resets in 1h 30m · alpha")).not.toContain(
 			"sustainable pace",
 		);
@@ -328,8 +359,7 @@ describe("LimitsCapacityOverview", () => {
 			]),
 		);
 
-		// Weekly row: the account is not reporting weekly, and the reason it is
-		// missing is the 5-hour limit rather than a spent weekly quota.
+		// The weekly average includes this account while its temporary hold is disclosed.
 		expect(html).toContain("1 waiting on 5h");
 		// Pacing row plus its headline lift time.
 		expect(html).toContain("1 waiting");
@@ -371,7 +401,7 @@ describe("LimitsCapacityOverview", () => {
 		expect(countOccurrences(html, "Reading accounts")).toBe(2);
 		expect(html).toContain("Loading");
 		expect(html).not.toContain("55% used");
-		expect(html).not.toContain('aria-label="Weekly budget by class"');
+		expect(html).not.toContain('aria-label="Weekly budget by provider"');
 	});
 
 	it("reports a failed accounts read as unavailable, not as loading", () => {
@@ -429,25 +459,22 @@ describe("LimitsCapacityOverview", () => {
 		expect(html).toContain("spare (claude-console-api)");
 	});
 
-	it("agrees with the Overview card about the same class's figure and verdict", () => {
-		// The regression this exists to make non-recurring: the two pages ran
-		// separate rules for the same question and painted the same pool two
-		// colours. Asserted against each other rather than against literals,
-		// because pinning both to fixed strings is exactly how they drifted.
-		//
-		// It now checks something stronger than when it was written. This panel
-		// renders the SERVER's pacing scan while the Overview card still computes
-		// from the pool in the browser, so the two sides are no longer the same
-		// arithmetic run twice — they are the two implementations that the pacing
-		// endpoint exists to keep in agreement.
+	it("agrees with the Overview card about each provider's remaining percentage", () => {
 		const windows = pools();
 		const { fiveHour, sevenDay } = windows;
 		const binding = sevenDay.bindingClass;
 		if (!binding) throw new Error("no binding class");
 
+		const summary = windows.summaryRows.find(
+			(row) => row.provider === binding.classId && row.model === null,
+		);
+		if (!summary || summary.remainingPct === null)
+			throw new Error("no provider reading");
 		const panelHtml = renderOverview(windows);
 		const cardHtml = renderToStaticMarkup(
 			<PoolQuotaCard
+				summary={summary}
+				now={NOW}
 				weekly={binding}
 				fiveHour={
 					fiveHour.classes.find((c) => c.classId === binding.classId) ?? null
@@ -456,10 +483,9 @@ describe("LimitsCapacityOverview", () => {
 			/>,
 		);
 
-		const headline = `${Math.round(binding.leastUsed?.pct ?? 0)}% used`;
+		const headline = `${Math.round(summary.remainingPct)}% remaining`;
 		expect(panelHtml).toContain(headline);
 		expect(cardHtml).toContain(headline);
-		expect(panelHtml).toContain(poolClassOutlook(binding).label);
 	});
 });
 

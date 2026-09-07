@@ -7,6 +7,7 @@ import type {
 import { effectiveRunwayOutcome, summarizeKeyRunways } from "@clankermux/core";
 import { ChevronDown, Hourglass, Info } from "lucide-react";
 import { describePinTarget } from "../../lib/api-key-pin-label";
+import type { QuotaSummaryRow } from "../../lib/quota-summary";
 import {
 	describeRunwayCause,
 	formatRunwayBand,
@@ -288,6 +289,7 @@ interface LimitsCapacityOverviewProps {
 	 */
 	fiveHour: PoolUsageResult;
 	sevenDay: PoolUsageResult;
+	summaryRows?: QuotaSummaryRow[];
 	now: number;
 	/** Per-key runway rows, straight from `/api/runway`. */
 	runways: KeyRunway[];
@@ -313,6 +315,7 @@ export function LimitsCapacityOverview({
 	pacing,
 	fiveHour,
 	sevenDay,
+	summaryRows,
 	now,
 	runways,
 	accounts,
@@ -344,8 +347,8 @@ export function LimitsCapacityOverview({
 					<div className="min-w-0">
 						<CardTitle>Quota overview</CardTitle>
 						<CardDescription>
-							Latest reported quota per servable class. This is polled quota
-							state, not routing availability.
+							Latest remaining quota per provider. This is polled quota state,
+							not routing availability.
 						</CardDescription>
 					</div>
 					<Popover>
@@ -361,9 +364,9 @@ export function LimitsCapacityOverview({
 						<PopoverContent align="end" className="space-y-item text-xs">
 							<p className="font-medium">How the overview is calculated</p>
 							<p className="text-muted-foreground">
-								Weekly budget: for each servable class (accounts that can cover
-								for each other) the account with the most weekly room is the
-								real constraint; the headline names the tightest class.
+								Weekly budget: remaining percentages are equal account averages
+								within each provider. Paused and temporarily limited accounts
+								are included. Incomplete readings leave the percentage unknown.
 							</p>
 							<p className="text-muted-foreground">
 								5-hour pacing: how many accounts are currently held by the
@@ -387,6 +390,7 @@ export function LimitsCapacityOverview({
 					<WeeklyBudgetPanel
 						pacing={pacing}
 						sevenDay={sevenDay}
+						summaryRows={summaryRows}
 						now={now}
 						loading={windowsLoading}
 						unavailableReason={windowsUnavailableReason}

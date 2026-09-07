@@ -2,6 +2,7 @@ import { describe, expect, it } from "bun:test";
 import { computePoolUsage } from "@clankermux/core";
 import type { AccountResponse } from "@clankermux/types";
 import { renderToStaticMarkup } from "react-dom/server";
+import { buildQuotaSummary } from "../../lib/quota-summary";
 import { PoolQuotaCard } from "./PoolQuotaCard";
 
 const NOW = Date.UTC(2026, 8, 3, 12, 0, 0);
@@ -63,6 +64,7 @@ function render(accounts: AccountResponse[]) {
 				fiveHourResult.classes.find((c) => c.classId === weekly.classId) ?? null
 			}
 			weeklyResult={result}
+			summary={buildQuotaSummary(accounts, NOW)[0]}
 			now={NOW}
 		/>,
 	);
@@ -171,7 +173,7 @@ describe("PoolQuotaCard pace", () => {
 		]);
 
 		expect(html).toContain("pace 1.5× sustainable pace");
-		expect(html).toContain("5h pace: 20% used");
+		expect(html).toContain("5h: 80% remaining");
 	});
 
 	it("says nothing about pace without a weekly reset to measure against", () => {
@@ -182,7 +184,41 @@ describe("PoolQuotaCard pace", () => {
 			account({ usageData: bothAt(75, NOW + 2.5 * HOUR, 20, null) as never }),
 		]);
 
-		expect(html).toContain("5h pace: 75% used");
+		expect(html).toContain("5h: 25% remaining");
 		expect(html).not.toContain("sustainable pace");
+	});
+});
+
+describe("PoolQuotaCard remaining quota", () => {
+	it("averages all accounts, including a five-hour block, without naming the lowest", () => {
+		const accounts = [
+			account({
+				name: "Claud1",
+				usageData: bothAt(100, NOW + HOUR, 20, NOW + DAY) as never,
+			}),
+			account({
+				id: "acc-2",
+				name: "Claud2",
+				usageData: bothAt(10, NOW + HOUR, 80, NOW + DAY) as never,
+			}),
+		];
+		const html = render(accounts);
+		expect(html).toContain("50% remaining");
+		expect(html).toContain("Weekly · account average");
+		expect(html).not.toContain("lowest");
+		expect(html).toContain("Claud1: 80% remaining · 5h limit reached");
+		expect(html).toContain("1/2 available");
+		expect(render(accounts.map((a) => ({ ...a, paused: true })))).toContain(
+			"50% remaining",
+		);
+	});
+	it("does not shrink the average's denominator when a reading is missing", () => {
+		const html = render([
+			account({ usageData: weeklyAt(20, NOW + DAY) as never }),
+			account({ id: "acc-2", name: "Claud2" }),
+		]);
+		expect(html).toContain("Weekly quota incomplete");
+		expect(html).not.toContain(">80% remaining</p>");
+		expect(html).toContain("1 of 2 accounts reporting");
 	});
 });
