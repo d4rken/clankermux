@@ -1084,6 +1084,62 @@ const replayOf = (
 	placeholderLifecyclesSkipped: 0,
 });
 
+/**
+ * How many of {@link BOOTSTRAP_LIFECYCLES} truly-exhausted lifecycles each model
+ * dates in {@link bootstrapFixture}, abstaining on the rest.
+ *
+ * Deliberately different per model. A fixture that fed every model the same
+ * records would score them all identically, and every bootstrap pair would then
+ * read zero however its records were labelled — so a producer that handed a
+ * control's records to the pair labelled for the current model, or swapped the
+ * two bases, would pass unnoticed.
+ */
+const BOOTSTRAP_DATED: Record<ReplayModel, number> = {
+	current: 4,
+	[VERDICT_BASIS_MODEL]: 8,
+	[VERDICT_BASIS_CONTROL_MODEL]: 2,
+	[PRIOR_BASIS_MODEL]: 3,
+	[PRIOR_BASIS_CONTROL_MODEL]: 6,
+	"scenario-headroom": 5,
+};
+
+const BOOTSTRAP_LIFECYCLES = 8;
+
+/**
+ * F1 of a model that dates `k` of `BOOTSTRAP_LIFECYCLES` exhaustions and
+ * abstains on the rest: no false positive, `k` true positives and the remainder
+ * false negatives, so `2k / (k + n)`.
+ */
+const f1OfDated = (dated: number): number =>
+	(2 * dated) / (dated + BOOTSTRAP_LIFECYCLES);
+
+const F1_OF = Object.fromEntries(
+	Object.entries(BOOTSTRAP_DATED).map(([model, dated]) => [
+		model,
+		f1OfDated(dated),
+	]),
+) as Record<ReplayModel, number>;
+
+/** One lifecycle per account, one instant each, every outcome an exhaustion. */
+function bootstrapFixture(): RedistributionRecord[] {
+	const out: RedistributionRecord[] = [];
+	for (let index = 0; index < BOOTSTRAP_LIFECYCLES; index++) {
+		const accountId = `acct-${index}`;
+		for (const model of REPLAY_MODELS) {
+			const dates = index < BOOTSTRAP_DATED[model];
+			out.push(
+				record({
+					model,
+					accountId,
+					T: T0,
+					...(dates ? {} : { predictsExhaust: false, predictedEtaMs: null }),
+				}),
+			);
+		}
+	}
+	return out;
+}
+
 describe("scoreCohorts", () => {
 	test("keeps one record per lifecycle, at the group's median instant", () => {
 		const instants = [T0, T0 + HOUR, T0 + 2 * HOUR, T0 + 3 * HOUR];
@@ -1147,12 +1203,9 @@ describe("scoreCohorts", () => {
 	});
 
 	test("bootstraps by block without touching the records it scores", () => {
-		const records = [
-			...perModel("A", [T0, T0 + HOUR]),
-			...perModel("B", [T0, T0 + HOUR]),
-		];
+		const records = bootstrapFixture();
 		const cohorts = scoreCohorts(replayOf(records));
-		expect(records.every((entry) => ["A", "B"].includes(entry.accountId))).toBe(
+		expect(records.every((entry) => entry.accountId.startsWith("acct-"))).toBe(
 			true,
 		);
 		// Three statistics, two cohorts, and four (scenario, baseline) pairs: the
@@ -1184,6 +1237,61 @@ describe("scoreCohorts", () => {
 		).toBe(false);
 		expect(cohorts.bootstrap.map((entry) => entry.statistic)).toContain(
 			"medianSignedErrorMinutes",
+		);
+	});
+
+	test("labels each pair with the baseline whose records it actually resampled", () => {
+		const cohorts = scoreCohorts(replayOf(bootstrapFixture()));
+		const f1Delta = (
+			scenario: ScenarioModel,
+			baseline: ReplayModel,
+		): number => {
+			const entry = cohorts.bootstrap.find(
+				(row) =>
+					row.label === OVERALL_BOOTSTRAP_LABEL &&
+					row.statistic === "f1" &&
+					row.scenario === scenario &&
+					row.baseline === baseline,
+			);
+			if (entry?.p50 == null) {
+				throw new Error(`no f1 CI for ${scenario} against ${baseline}`);
+			}
+			return entry.p50;
+		};
+
+		// The four deltas the fixture's F1s imply, each with a sign and a size of
+		// its own. Were a control's records handed to the pair labelled for the
+		// current model — or either basis's to the other's — the number here would
+		// land on one of the other three.
+		expect(f1Delta(VERDICT_BASIS_MODEL, "current")).toBeCloseTo(
+			F1_OF[VERDICT_BASIS_MODEL] - F1_OF.current,
+			1,
+		);
+		expect(
+			f1Delta(VERDICT_BASIS_MODEL, VERDICT_BASIS_CONTROL_MODEL),
+		).toBeCloseTo(
+			F1_OF[VERDICT_BASIS_MODEL] - F1_OF[VERDICT_BASIS_CONTROL_MODEL],
+			1,
+		);
+		expect(f1Delta(PRIOR_BASIS_MODEL, "current")).toBeCloseTo(
+			F1_OF[PRIOR_BASIS_MODEL] - F1_OF.current,
+			1,
+		);
+		expect(f1Delta(PRIOR_BASIS_MODEL, PRIOR_BASIS_CONTROL_MODEL)).toBeCloseTo(
+			F1_OF[PRIOR_BASIS_MODEL] - F1_OF[PRIOR_BASIS_CONTROL_MODEL],
+			1,
+		);
+
+		// The signs, stated separately from the magnitudes: the basis beats both
+		// of its baselines here and the prior basis loses to both of its own, so
+		// no pair can be swapped for another without flipping one of them.
+		expect(f1Delta(VERDICT_BASIS_MODEL, "current")).toBeGreaterThan(0.2);
+		expect(
+			f1Delta(VERDICT_BASIS_MODEL, VERDICT_BASIS_CONTROL_MODEL),
+		).toBeGreaterThan(0.45);
+		expect(f1Delta(PRIOR_BASIS_MODEL, "current")).toBeLessThan(-0.05);
+		expect(f1Delta(PRIOR_BASIS_MODEL, PRIOR_BASIS_CONTROL_MODEL)).toBeLessThan(
+			-0.2,
 		);
 	});
 });
