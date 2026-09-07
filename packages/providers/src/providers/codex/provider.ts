@@ -1021,33 +1021,6 @@ export class CodexProvider extends BaseProvider {
 	}
 
 	/**
-	 * True when the final content block of the final message is a `tool_result`
-	 * for a `Skill` tool call earlier in the same history. Reads the original
-	 * Anthropic blocks so the result is independent of convertMessage's item
-	 * ordering. Returns false for string-content messages, non-Skill terminal
-	 * tool results, mid-history Skill results, and orphaned tool results whose
-	 * matching `Skill` tool_use is absent.
-	 */
-	private endsWithSkillToolResult(messages: AnthropicMessage[]): boolean {
-		const lastMsg = messages[messages.length - 1];
-		if (!lastMsg || !Array.isArray(lastMsg.content)) return false;
-		const lastBlock = lastMsg.content[lastMsg.content.length - 1];
-		if (!lastBlock || lastBlock.type !== "tool_result") return false;
-
-		// Collect the call IDs of every `Skill` tool_use across the history.
-		const skillCallIds = new Set<string>();
-		for (const msg of messages) {
-			if (!Array.isArray(msg.content)) continue;
-			for (const block of msg.content) {
-				if (block.type === "tool_use" && block.name === "Skill") {
-					skillCallIds.add(block.id);
-				}
-			}
-		}
-		return skillCallIds.has(lastBlock.tool_use_id);
-	}
-
-	/**
 	 * Map an Anthropic `tool_choice` to the Responses API `tool_choice`.
 	 * `auto`→auto, `any`→required, `none`→none, `tool`→a forced function (validated
 	 * against the declared tools). Unknown types and named choices that reference a
@@ -1416,39 +1389,36 @@ export class CodexProvider extends BaseProvider {
 		}
 		const instructions = this.extractSystemPrompt(body.system);
 
-		// Convert messages
+		// Rebuild nudges at the same message boundary on every replay: removing a
+		// formerly terminal nudge when another turn arrives changes the cache prefix.
+		// Keep the original rule: only a message ending in a matched Skill result
+		// gets a nudge, so subsequent text in that message can redirect the task.
 		const input: CodexRequest["input"] = [];
+		const skillCallIds = new Set<string>();
 		for (const msg of body.messages) {
-			const items = this.convertMessage(msg);
-			for (const item of items) {
-				input.push(item);
+			for (const item of this.convertMessage(msg)) input.push(item);
+			let endsWithSkillResult = false;
+			if (Array.isArray(msg.content)) {
+				for (const block of msg.content) {
+					endsWithSkillResult = false;
+					if (block.type === "tool_use" && block.name === "Skill") {
+						skillCallIds.add(block.id);
+					} else if (block.type === "tool_result") {
+						endsWithSkillResult = skillCallIds.delete(block.tool_use_id);
+					}
+				}
 			}
-		}
-
-		// Continuation nudge for the `Skill` tool. `Skill` is local to the
-		// Anthropic-compatible client/harness (Claude Code): after it returns, the
-		// useful behavior is for the model to continue the user's original request
-		// using the freshly-loaded instructions, not to stall waiting for another
-		// user message. A Codex backend handed a history ending in a bare
-		// function_call_output often treats the turn as complete and stalls. So
-		// when the final content block of the final message is a `Skill`
-		// tool_result, append exactly one continuation nudge.
-		//
-		// The terminality check reads the original Anthropic content blocks (not
-		// the converted Codex items) so it is unaffected by how convertMessage
-		// groups/reorders items. A mid-history Skill result, a non-Skill terminal
-		// tool result, or any block after the Skill result (text or another tool
-		// result) all correctly skip the nudge.
-		if (this.endsWithSkillToolResult(body.messages)) {
-			input.push({
-				role: "user",
-				content: [
-					{
-						type: "input_text",
-						text: "The requested Skill tool has loaded additional instructions. Continue the user's original request now, applying those instructions. Do not wait for another user message.",
-					},
-				],
-			});
+			if (endsWithSkillResult) {
+				input.push({
+					role: "user",
+					content: [
+						{
+							type: "input_text",
+							text: "The requested Skill tool has loaded additional instructions. Continue the user's original request now, applying those instructions. Do not wait for another user message.",
+						},
+					],
+				});
+			}
 		}
 
 		// Convert tools
@@ -1938,23 +1908,25 @@ export class CodexProvider extends BaseProvider {
 
 					// Process complete SSE events in buffer
 					while (true) {
-						const newlineIdx = state.buffer.indexOf("\n\n");
-						if (newlineIdx === -1) break;
+						const boundary = /\r?\n\r?\n/.exec(state.buffer);
+						if (!boundary || boundary.index === undefined) break;
+						const newlineIdx = boundary.index;
 
 						const eventText = state.buffer.slice(0, newlineIdx);
-						state.buffer = state.buffer.slice(newlineIdx + 2);
+						state.buffer = state.buffer.slice(newlineIdx + boundary[0].length);
 
-						const eventLine = eventText
-							.split("\n")
-							.find((l) => l.startsWith("event:"));
-						const dataLine = eventText
-							.split("\n")
-							.find((l) => l.startsWith("data:"));
-
-						if (!eventLine || !dataLine) continue;
-
-						const eventName = eventLine.slice("event:".length).trim();
-						const dataStr = dataLine.slice("data:".length).trim();
+						let eventName = "";
+						const dataLines: string[] = [];
+						for (const line of eventText.split(/\r?\n/)) {
+							if (line.startsWith("event:")) {
+								eventName = line.slice(6).trim();
+							} else if (line.startsWith("data:")) {
+								const value = line.slice(5);
+								dataLines.push(value.startsWith(" ") ? value.slice(1) : value);
+							}
+						}
+						if (!eventName || dataLines.length === 0) continue;
+						const dataStr = dataLines.join("\n");
 
 						if (dataStr === "[DONE]") continue;
 

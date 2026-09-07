@@ -1,4 +1,5 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, spyOn, test } from "bun:test";
+import { Logger } from "@clankermux/logger";
 import { translateAnthropicStreamToResponses } from "../stream-translator";
 
 async function collectSseEvents(
@@ -39,6 +40,111 @@ function sseEvent(type: string, data: unknown): string {
 }
 
 describe("translateAnthropicStreamToResponses", () => {
+	for (const newline of ["\n", "\r\n"]) {
+		test(`translates fragmented multiline SSE (${JSON.stringify(newline)})`, async () => {
+			const frames = [
+				[
+					"message_start",
+					{ message: { id: "msg_1", usage: { input_tokens: 17 } } },
+				],
+				[
+					"content_block_start",
+					{ index: 0, content_block: { type: "text", text: "" } },
+				],
+				[
+					"content_block_delta",
+					{ index: 0, delta: { type: "text_delta", text: "héllo" } },
+				],
+				["content_block_stop", { index: 0 }],
+				[
+					"message_delta",
+					{ delta: { stop_reason: "end_turn" }, usage: { output_tokens: 3 } },
+				],
+				["message_stop", {}],
+			] as const;
+			const wire = frames
+				.map(
+					([event, data]) =>
+						`event:${event}${newline}: comment${newline}${JSON.stringify(
+							data,
+							null,
+							2,
+						)
+							.split("\n")
+							.map((line) => `data:${line}`)
+							.join(newline)}${newline}${newline}`,
+				)
+				.join("");
+			const bytes = new TextEncoder().encode(wire);
+			let offset = 0;
+			const upstream = new Response(
+				new ReadableStream<Uint8Array>({
+					pull(controller) {
+						if (offset === bytes.length) controller.close();
+						else controller.enqueue(bytes.slice(offset, ++offset));
+					},
+				}),
+			);
+			const events = await collectSseEvents(
+				translateAnthropicStreamToResponses(upstream, "resp_sse", "test-model"),
+			);
+			expect(
+				events.find((event) => event.event === "response.output_text.done")
+					?.data,
+			).toMatchObject({ text: "héllo" });
+			expect(
+				events.filter((event) => event.event === "response.completed"),
+			).toHaveLength(1);
+			expect(events.at(-1)?.data).toMatchObject({
+				response: { usage: { input_tokens: 17, output_tokens: 3 } },
+			});
+		});
+	}
+
+	test("malformed SSE diagnostics exclude both event names and payloads", async () => {
+		const warning = spyOn(Logger.prototype, "warn").mockImplementation(
+			() => {},
+		);
+		try {
+			const upstream = new Response(
+				"event: secret-event\ndata: secret-prompt\n\n",
+			);
+			await translateAnthropicStreamToResponses(
+				upstream,
+				"resp_bad",
+				"test-model",
+			).text();
+			expect(warning).toHaveBeenCalledWith(
+				"Failed to parse upstream SSE event data",
+			);
+			expect(JSON.stringify(warning.mock.calls)).not.toContain("secret-");
+		} finally {
+			warning.mockRestore();
+		}
+	});
+
+	test("valid JSON that fails event processing has a separate payload-free diagnostic", async () => {
+		const warning = spyOn(Logger.prototype, "warn").mockImplementation(
+			() => {},
+		);
+		try {
+			const upstream = new Response("event: message_start\ndata: null\n\n");
+			await translateAnthropicStreamToResponses(
+				upstream,
+				"resp_bad",
+				"test-model",
+			).text();
+			expect(warning).toHaveBeenCalledWith(
+				"Failed to process upstream SSE event",
+			);
+			expect(warning).not.toHaveBeenCalledWith(
+				"Failed to parse upstream SSE event data",
+			);
+		} finally {
+			warning.mockRestore();
+		}
+	});
+
 	test("simple text streaming — correct event sequence and content", async () => {
 		const events = [
 			sseEvent("message_start", {
