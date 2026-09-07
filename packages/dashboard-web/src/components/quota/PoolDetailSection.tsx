@@ -385,7 +385,8 @@ export function PoolDetailSection({
 									{a.name}
 								</span>
 								<span className="tabular-nums">
-									runs out in {formatShortDuration(a.timeToExhaustMs)}
+									at this pace, runs out in{" "}
+									{formatShortDuration(a.timeToExhaustMs)}
 								</span>
 							</li>
 						))}
