@@ -3805,6 +3805,28 @@ describe("tallyWindowFills", () => {
 		expect(tally.followUpIncomplete).toBe(1);
 	});
 
+	test("a window followed to its successor's start is completed below 100 %", () => {
+		// Three hours short of its own reset, but the successor was observed to
+		// start five minutes after the last sample. `deriveOutcome` ends a window
+		// at the EARLIER of its reset and its successor's start and calls this one
+		// survived, so the census has to end it at the same instant.
+		const tally = tallyWindowFills([
+			windowFill({
+				lifecycleId: "A::11",
+				firstHundredMs: null,
+				resolutionMs: null,
+				lastSampleMs: T0 + 2 * HOUR,
+				nextWindowStartsMs: T0 + 2 * HOUR + 5 * MIN,
+			}),
+		]);
+		const cell = rowOf(tally, "no peer lost in prefix", "five_hour");
+		expect(cell.censored).toBe(1);
+		expect(cell.completedBelowHundred).toBe(1);
+		expect(cell.followUpIncomplete).toBe(0);
+		expect(tally.completedBelowHundred).toBe(1);
+		expect(tally.followUpIncomplete).toBe(0);
+	});
+
 	test("the censored span pools both censored kinds into one median", () => {
 		// One window observed to its reset, two cut short: spans of about 4.8 h,
 		// 1 h and 2 h from the same window start.
@@ -4663,6 +4685,211 @@ describe("absorptionChecks interval", () => {
 		expect(death.narrow.controls[1].rejectionDetail).toContain("L");
 	});
 
+	test("the pre-only lookback stops at the edge of the loaded requests", () => {
+		// The 30 minutes before the death are loaded; the 30 before those are not
+		// there at all. `X` reviving at +30 min caps `W` at 30 min, so the death is
+		// measured; read over the 60-minute cap instead, the weights would count
+		// the unloaded half as no traffic rather than as no data.
+		const accounts = [...ABS_ACCOUNTS, account("X")];
+		const near = (
+			accountId: string,
+			preRate: number,
+			postRate: number,
+		): RequestBucket[] => [
+			...buckets({
+				accountId,
+				from: ABS_D - 30 * MIN,
+				to: ABS_D,
+				perMinute: preRate,
+			}),
+			...buckets({
+				accountId,
+				from: ABS_D,
+				to: ABS_D + 30 * MIN,
+				perMinute: postRate,
+			}),
+		];
+		// Dying-heavy in the earlier half, evenly split in the later one, so the
+		// two widths do not agree on the pre-share.
+		const full = (
+			accountId: string,
+			earlyRate: number,
+			lateRate: number,
+			postRate: number,
+		): RequestBucket[] => [
+			...buckets({
+				accountId,
+				from: ABS_D - 12 * HOUR,
+				to: ABS_D - 30 * MIN,
+				perMinute: earlyRate,
+			}),
+			...buckets({
+				accountId,
+				from: ABS_D - 30 * MIN,
+				to: ABS_D,
+				perMinute: lateRate,
+			}),
+			...buckets({
+				accountId,
+				from: ABS_D,
+				to: ABS_D + 12 * HOUR,
+				perMinute: postRate,
+			}),
+		];
+		const presentBuckets = [
+			...full("D", 10, 10, 0),
+			...full("S1", 1, 5, 10),
+			...full("S2", 1, 5, 10),
+		];
+
+		const truncated = absorptionChecks(
+			absorptionInput({
+				accounts,
+				requestsFromMs: ABS_D - 30 * MIN,
+				requestsToMs: ABS_D + 30 * MIN,
+				buckets: [
+					...near("D", 10, 0),
+					...near("S1", 5, 10),
+					...near("S2", 5, 10),
+				],
+				series: absSeries(
+					[
+						{ accountId: "D", exhausted: [[ABS_D, ABS_D + 12 * HOUR]] },
+						{ accountId: "S1" },
+						{ accountId: "S2" },
+						{
+							accountId: "X",
+							exhausted: [[ABS_D - 3 * DAY, ABS_D + 30 * MIN]],
+						},
+					],
+					accounts,
+				),
+			}),
+		);
+		const death = truncated.deaths[0];
+		expect(death.survivorIds).toEqual(["S1", "S2"]);
+		expect(death.narrow.halfWidthMs).toBe(30 * MIN);
+		expect(death.narrow.preWeightHalfWidthMs).toBe(30 * MIN);
+		expect(death.narrow.preWeightBoundedBy).toBe("coverage");
+		// The rates the weights divide by: over the 60-minute cap the same volume
+		// would read as half the rate, with the missing half counted as zero.
+		expect(death.narrow.measurements.requests.preWeightMinutes).toBe(30);
+		expect(death.narrow.measurements.requests.preWeightRateDying).toBe(10);
+		expect(death.narrow.measurements.requests.preWeightRateSurvivors).toBe(10);
+
+		// The identical buckets over the identical `W_pre`, shortened by a class
+		// member's availability instead of by the loaded span.
+		const present = absorptionChecks(
+			absorptionInput({
+				accounts,
+				buckets: presentBuckets,
+				series: absSeries(
+					[
+						{ accountId: "D", exhausted: [[ABS_D, ABS_D + 12 * HOUR]] },
+						{ accountId: "S1" },
+						{ accountId: "S2" },
+						{
+							accountId: "X",
+							exhausted: [[ABS_D - 30 * MIN, ABS_D + 12 * HOUR]],
+						},
+					],
+					accounts,
+				),
+			}),
+		);
+		const matched = present.deaths[0];
+		expect(matched.survivorIds).toEqual(["S1", "S2"]);
+		expect(matched.narrow.preWeightHalfWidthMs).toBe(30 * MIN);
+		expect(matched.narrow.preWeightBoundedBy).toBe("availability");
+		for (const basis of ["requests", "tokens"] as const) {
+			const shortened = death.narrow.measurements[basis];
+			const reference = matched.narrow.measurements[basis];
+			expect(shortened.preWeightMinutes).toBe(reference.preWeightMinutes);
+			expect(shortened.preWeightRateDying).toBe(reference.preWeightRateDying);
+			expect(shortened.preWeightRateSurvivors).toBe(
+				reference.preWeightRateSurvivors,
+			);
+			expect(shortened.dyingPreShare).toBe(reference.dyingPreShare);
+			expect(shortened.survivors.map((entry) => entry.preShare)).toEqual(
+				reference.survivors.map((entry) => entry.preShare),
+			);
+		}
+
+		// The same buckets read over the full 60-minute cap: the earlier half is
+		// dying-heavy, so the width the weights are taken over moves the share.
+		const uncapped = absorptionChecks(
+			absorptionInput({ buckets: presentBuckets }),
+		).deaths[0];
+		expect(uncapped.narrow.preWeightHalfWidthMs).toBe(60 * MIN);
+		expect(uncapped.narrow.preWeightBoundedBy).toBe("cap");
+		expect(uncapped.narrow.measurements.requests.dyingPreShare).toBeCloseTo(
+			0.625,
+			10,
+		);
+		expect(death.narrow.measurements.requests.dyingPreShare).toBeCloseTo(
+			0.5,
+			10,
+		);
+	});
+
+	test("an account created 20 minutes after the death caps W at its creation", () => {
+		// Creation and the first snapshot do NOT coincide here: the account exists
+		// from +20 min and is first sampled at +40 min, and it is the creation that
+		// changed the class.
+		const late = account("L", { createdAtMs: ABS_D + 20 * MIN });
+		const accounts = [...ABS_ACCOUNTS, late];
+		const checks = absorptionChecks(
+			absorptionInput({
+				accounts,
+				series: absSeries(
+					[
+						{ accountId: "D", exhausted: [[ABS_D, ABS_D + 12 * HOUR]] },
+						{ accountId: "S1" },
+						{ accountId: "S2" },
+						{ accountId: "L", fromMs: ABS_D + 40 * MIN },
+					],
+					accounts,
+				),
+				buckets: traffic(),
+			}),
+		);
+		const death = checks.deaths[0];
+		expect(death.survivorIds).toEqual(["S1", "S2"]);
+		expect(death.availabilityBoundMs).toBe(20 * MIN);
+		expect(death.availabilityBoundAccountId).toBe("L");
+		expect(death.narrow.halfWidthMs).toBe(20 * MIN);
+	});
+
+	test("an account created inside a control interval rejects that control", () => {
+		// Never sampled at all, so no availability transition exists to find: the
+		// creation is the only change the class went through.
+		const late = account("L", { createdAtMs: ABS_D + 7 * DAY });
+		const accounts = [...ABS_ACCOUNTS, late];
+		const checks = absorptionChecks(
+			absorptionInput({
+				accounts,
+				series: absSeries(
+					[
+						{ accountId: "D", exhausted: [[ABS_D, ABS_D + 12 * HOUR]] },
+						{ accountId: "S1" },
+						{ accountId: "S2" },
+					],
+					accounts,
+				),
+				buckets: controlBuckets(),
+			}),
+		);
+		const death = checks.deaths[0];
+		expect(death.survivorIds).toEqual(["S1", "S2"]);
+		expect(death.narrow.halfWidthMs).toBe(60 * MIN);
+		expect(death.narrow.controls[0].eligible).toBe(true);
+		expect(death.narrow.controls[1].eligible).toBe(false);
+		expect(death.narrow.controls[1].rejection).toBe(
+			"availability-change-inside",
+		);
+		expect(death.narrow.controls[1].rejectionDetail).toContain("L");
+	});
+
 	test("request coverage of 90 minutes keeps the primary and drops the wide", () => {
 		const checks = absorptionChecks(
 			absorptionInput({
@@ -5449,8 +5676,9 @@ describe("the request-volume report section", () => {
 			expect(body).not.toContain(phrase);
 		}
 		expect(body).toContain(
-			"whether any of that demand reaches the survivors is what this section measures",
+			"how fill durations and fill fractions differ between the exposure groups",
 		);
+		expect(body).toContain("whether demand moved is not identified here");
 	});
 
 	test("claims no causality and drops the pool-wide-surge sentence", () => {
@@ -5652,19 +5880,33 @@ describe("the request-volume report section", () => {
 		);
 
 		// P, N and G on the tokens row are rate sums, and print as whole tokens.
+		// Their columns are read off the header rather than counted by hand, so a
+		// new column moves the check with the table instead of past it.
+		const headerCells = section
+			.split("\n")
+			.find((line) => line.startsWith("| horizon | basis | W_pre (min) |"))
+			?.split("|")
+			.map((cell) => cell.trim());
+		expect(headerCells).toBeDefined();
+		const rateSumColumns = ["P", "N", "G"].map((column) => {
+			const index = (headerCells ?? []).indexOf(column);
+			expect(index).toBeGreaterThan(-1);
+			return index;
+		});
+
 		const tokenRow = section
 			.split("\n")
 			.find((line) => line.startsWith("| W = 60 min | tokens |"));
 		expect(tokenRow).toBeDefined();
 		const cells = (tokenRow ?? "").split("|").map((cell) => cell.trim());
-		for (const index of [13, 14, 15]) {
+		for (const index of rateSumColumns) {
 			expect(cells[index]).toMatch(/^-?\d+$/);
 		}
 		const requestRow = section
 			.split("\n")
 			.find((line) => line.startsWith("| W = 60 min | requests |"));
 		const requestCells = (requestRow ?? "").split("|").map((c) => c.trim());
-		for (const index of [13, 14, 15]) {
+		for (const index of rateSumColumns) {
 			expect(requestCells[index]).toMatch(/^-?\d+\.\d{3}$/);
 		}
 	});

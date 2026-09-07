@@ -996,18 +996,25 @@ export const RAW_FILL_DURATION_LIMIT = 20;
  * BOTH halves of `deriveOutcome`'s rule, not the proximity half alone: the
  * successor window has to have been OBSERVED to start, and this window's
  * sampling has to have run to within {@link SEGMENT_COVERAGE_SLACK_MS} of its
- * own reset. A last sample two minutes before a reset that nothing was ever
- * recorded after is a run that stopped, not a window observed not to fill;
- * proximity alone would label it completed and disagree with the outcome
- * labels the rest of the harness scores against. Read as one `censored` count,
- * a cell whose follow-up simply ended looks like a cell of slow windows.
+ * end. A last sample two minutes before that end with nothing ever recorded
+ * after it is a run that stopped, not a window observed not to fill; proximity
+ * alone would label it completed and disagree with the outcome labels the rest
+ * of the harness scores against. Read as one `censored` count, a cell whose
+ * follow-up simply ended looks like a cell of slow windows.
+ *
+ * The end is the EARLIER of the reset and the observed start of the successor,
+ * the same instant `deriveOutcome` measures to. A window whose successor was
+ * seen to start three hours before its own reset ended there, whatever the
+ * reset column says; measuring to the reset alone calls that window's follow-up
+ * incomplete while the outcome labels call the same window survived.
  */
 export function fillCensoring(
 	fill: WindowFill,
 ): "completed-below-hundred" | "follow-up-incomplete" {
 	if (fill.labelResetAtMs == null) return "follow-up-incomplete";
 	if (fill.nextWindowStartsMs == null) return "follow-up-incomplete";
-	return fill.labelResetAtMs - fill.lastSampleMs <= SEGMENT_COVERAGE_SLACK_MS
+	const windowEndMs = Math.min(fill.labelResetAtMs, fill.nextWindowStartsMs);
+	return windowEndMs - fill.lastSampleMs <= SEGMENT_COVERAGE_SLACK_MS
 		? "completed-below-hundred"
 		: "follow-up-incomplete";
 }
@@ -1524,6 +1531,10 @@ export interface AbsorptionMeasurement {
 	preRateDying: number;
 	preRateSurvivors: number;
 	postRateSurvivors: number;
+	/** The dying account's volume over `[D − W_pre, D)`. */
+	preWeightVolumeDying: number;
+	/** The survivor set's volume over `[D − W_pre, D)`. */
+	preWeightVolumeSurvivors: number;
 	/** The dying account's rate over `[D − W_pre, D)`. */
 	preWeightRateDying: number;
 	/** The survivor set's rate over `[D − W_pre, D)`. */
@@ -1576,6 +1587,15 @@ export interface AbsorptionControl {
 /** The two half-widths a death is read at. The 60-minute one is primary. */
 export type AbsorptionHorizonLabel = "narrow" | "wide";
 
+/**
+ * Which of the three rules shortened `W_pre` to the width it was read at.
+ *
+ * `availability` is the nearest availability change of a class member before
+ * the instant, `cap` the horizon's own ceiling, and `coverage` the near edge of
+ * the loaded request span.
+ */
+export type AbsorptionPreWeightBound = "availability" | "cap" | "coverage";
+
 /** One death read at one half-width, with the controls measured at that width. */
 export interface AbsorptionHorizon {
 	label: AbsorptionHorizonLabel;
@@ -1583,6 +1603,8 @@ export interface AbsorptionHorizon {
 	halfWidthMs: number;
 	/** The pre-only lookback `W_pre` the weights were taken over. */
 	preWeightHalfWidthMs: number;
+	/** Which rule that width came from. */
+	preWeightBoundedBy: AbsorptionPreWeightBound;
 	measurements: AbsorptionMeasurementSet;
 	controls: AbsorptionControl[];
 	controlsEligible: number;
@@ -1818,6 +1840,42 @@ function volumeOf(
 	return sums[to] - sums[from];
 }
 
+/** A pre-only lookback and the rule that produced its width. */
+interface PreWeightWidth {
+	halfWidthMs: number;
+	boundedBy: AbsorptionPreWeightBound;
+}
+
+/**
+ * `W_pre` at `atMs`, and which of its three bounds was the binding one.
+ *
+ * THE THIRD BOUND IS NOT OPTIONAL. The weights are read off the loaded request
+ * buckets, and a bucket that was never loaded is ABSENT rather than empty: a
+ * lookback reaching past `requestsFromMs` divides a partly-loaded volume by its
+ * whole width and reads the unloaded stretch as no traffic. `W` is checked
+ * against the loaded span on both sides already, but `W_pre` is a different
+ * width and can exceed it — 30 minutes of loaded prehistory under a 60-minute
+ * cap is exactly the case — so it carries its own bound.
+ *
+ * A tie names the data bound rather than the cap. The cap is the ceiling every
+ * lookback starts at, so where a change or the span edge sits exactly on it, the
+ * data is what the width is describing.
+ */
+function preWeightWidth(
+	atMs: number,
+	capMs: number,
+	availabilityBoundMs: number,
+	requestsFromMs: number,
+): PreWeightWidth {
+	const coverageMs = Math.max(0, atMs - requestsFromMs);
+	const halfWidthMs = Math.min(capMs, availabilityBoundMs, coverageMs);
+	if (availabilityBoundMs <= halfWidthMs) {
+		return { halfWidthMs, boundedBy: "availability" };
+	}
+	if (coverageMs <= halfWidthMs) return { halfWidthMs, boundedBy: "coverage" };
+	return { halfWidthMs, boundedBy: "cap" };
+}
+
 /**
  * One measurement at `atMs` over the symmetric half-width `W`, with the weights
  * over the pre-only lookback `W_pre`.
@@ -1866,10 +1924,11 @@ function measureAbsorption(
 
 	// The weights, over the pre-only lookback. Identical to the rates above
 	// whenever `W_pre` equals `W`, which is the common case.
-	const preWeightRateDying =
+	const preWeightVolumeDying =
 		dyingAccountId == null
 			? 0
-			: rate(volumeOf(index, dyingAccountId, basis, preWeight), preWeight);
+			: volumeOf(index, dyingAccountId, basis, preWeight);
+	const preWeightRateDying = rate(preWeightVolumeDying, preWeight);
 	let preWeightVolumeSurvivors = 0;
 	const weightRates = survivorIds.map((accountId) => {
 		const volume = volumeOf(index, accountId, basis, preWeight);
@@ -1914,6 +1973,8 @@ function measureAbsorption(
 		preRateDying,
 		preRateSurvivors,
 		postRateSurvivors,
+		preWeightVolumeDying,
+		preWeightVolumeSurvivors,
 		preWeightRateDying,
 		preWeightRateSurvivors,
 		dyingPreShare:
@@ -2178,20 +2239,38 @@ export function absorptionChecks(input: AbsorptionInput): AbsorptionChecks {
 		// that are not in `S` and the ones created after the death — a peer
 		// reviving into the post window takes traffic back just as surely as a
 		// survivor leaving does, and a new account arriving is the same kind of
-		// change.
+		// change. An arrival is bounded at its CREATION, not at its first
+		// reading: the account was in the class from the moment it existed.
 		let availabilityBoundMs: number | null = null;
 		let availabilityBoundAccountId: string | null = null;
-		for (const accountId of classRoster) {
-			const distance = nearestAvailabilityChangeMs(
-				timelines.get(accountId),
-				event.atMs,
-				accountId === event.accountId ? { ignoreAtMs: event.atMs } : {},
-			);
-			if (distance == null) continue;
+		const bound = (accountId: string, distance: number | null): void => {
+			if (distance == null) return;
 			if (availabilityBoundMs == null || distance < availabilityBoundMs) {
 				availabilityBoundMs = distance;
 				availabilityBoundAccountId = accountId;
 			}
+		};
+		for (const accountId of classRoster) {
+			bound(
+				accountId,
+				nearestAvailabilityChangeMs(
+					timelines.get(accountId),
+					event.atMs,
+					accountId === event.accountId ? { ignoreAtMs: event.atMs } : {},
+				),
+			);
+			// The creation itself, which the snapshot timeline cannot carry: the
+			// segments run from absent to `unknown` without changing state, so
+			// nothing is pushed at the instant the account joined the class. An
+			// account created at `D + 20 min` and first sampled at `D + 40 min`
+			// changed the class at 20 min, and one never sampled at all changed it
+			// without leaving a single segment behind.
+			const createdAtMs = createdAtOf.get(accountId);
+			if (createdAtMs == null) continue;
+			// The same instant the dying account's own transition sits at is the
+			// one change this rule ignores, whichever kind of change it is.
+			if (accountId === event.accountId && createdAtMs === event.atMs) continue;
+			bound(accountId, Math.abs(createdAtMs - event.atMs));
 		}
 		const boundMs = availabilityBoundMs ?? Number.POSITIVE_INFINITY;
 		// The same rule looking BACKWARDS only, for the weights: `W` is chosen
@@ -2212,11 +2291,18 @@ export function absorptionChecks(input: AbsorptionInput): AbsorptionChecks {
 			boundMs,
 		);
 		const wideHalfWidthMs = Math.min(ABSORPTION_HALF_WIDTH_MS, boundMs);
-		const narrowPreWidthMs = Math.min(
+		const narrowPreWidth = preWeightWidth(
+			event.atMs,
 			ABSORPTION_NARROW_HALF_WIDTH_MS,
 			preBound,
+			input.requestsFromMs,
 		);
-		const widePreWidthMs = Math.min(ABSORPTION_HALF_WIDTH_MS, preBound);
+		const widePreWidth = preWeightWidth(
+			event.atMs,
+			ABSORPTION_HALF_WIDTH_MS,
+			preBound,
+			input.requestsFromMs,
+		);
 		if (narrowHalfWidthMs < ABSORPTION_MIN_HALF_WIDTH_MS) {
 			exclude(departure, "intervalTooShort", {
 				boundMs: availabilityBoundMs,
@@ -2254,7 +2340,7 @@ export function absorptionChecks(input: AbsorptionInput): AbsorptionChecks {
 			survivorIds,
 			event.atMs,
 			narrowHalfWidthMs,
-			narrowPreWidthMs,
+			narrowPreWidth.halfWidthMs,
 		);
 		if (coverageOf(narrowMeasurements) === 0) {
 			exclude(departure, "noRequestCoverage");
@@ -2289,7 +2375,7 @@ export function absorptionChecks(input: AbsorptionInput): AbsorptionChecks {
 				survivorIds,
 				event.atMs,
 				wideHalfWidthMs,
-				widePreWidthMs,
+				widePreWidth.halfWidthMs,
 			);
 			if (coverageOf(candidate) === 0) {
 				wideAbsentReason =
@@ -2318,7 +2404,7 @@ export function absorptionChecks(input: AbsorptionInput): AbsorptionChecks {
 		const horizonAt = (
 			label: AbsorptionHorizonLabel,
 			halfWidthMs: number,
-			preWeightHalfWidthMs: number,
+			preWeight: PreWeightWidth,
 			measurements: AbsorptionMeasurementSet,
 		): AbsorptionHorizon => {
 			const controls: AbsorptionControl[] = [];
@@ -2354,6 +2440,22 @@ export function absorptionChecks(input: AbsorptionInput): AbsorptionChecks {
 					...outsideS,
 				]) {
 					if (rejection != null) break;
+					// Creation first, for the same reason the interval bound reads it:
+					// an account that joined the class inside the control interval is a
+					// regime change there, and it can join without the snapshot series
+					// showing a transition anywhere near it.
+					const createdAtMs = createdAtOf.get(accountId);
+					if (
+						createdAtMs != null &&
+						createdAtMs >= fromMs &&
+						createdAtMs <= toMs
+					) {
+						rejection = "availability-change-inside";
+						rejectionDetail = `${nameOf(accountId)} was created at ${absorptionIso(
+							createdAtMs,
+						)}`;
+						break;
+					}
 					const changeAtMs = availabilityChangeInside(
 						timelines.get(accountId),
 						fromMs,
@@ -2384,7 +2486,13 @@ export function absorptionChecks(input: AbsorptionInput): AbsorptionChecks {
 									survivorIds,
 									atMs,
 									halfWidthMs,
-									preWeightHalfWidthMs,
+									// The control reads its OWN loaded prehistory: the death's
+									// lookback is measured seven days away from here, where the
+									// same width can reach past the near edge of the span.
+									Math.min(
+										preWeight.halfWidthMs,
+										Math.max(0, atMs - input.requestsFromMs),
+									),
 								)
 							: null,
 				});
@@ -2392,7 +2500,8 @@ export function absorptionChecks(input: AbsorptionInput): AbsorptionChecks {
 			return {
 				label,
 				halfWidthMs,
-				preWeightHalfWidthMs,
+				preWeightHalfWidthMs: preWeight.halfWidthMs,
+				preWeightBoundedBy: preWeight.boundedBy,
 				measurements,
 				controls,
 				controlsEligible: controls.filter((control) => control.eligible).length,
@@ -2404,7 +2513,7 @@ export function absorptionChecks(input: AbsorptionInput): AbsorptionChecks {
 								placeboAccountIds,
 								event.atMs,
 								halfWidthMs,
-								preWeightHalfWidthMs,
+								preWeight.halfWidthMs,
 							)
 						: null,
 			};
@@ -2413,7 +2522,7 @@ export function absorptionChecks(input: AbsorptionInput): AbsorptionChecks {
 		const narrow = horizonAt(
 			"narrow",
 			narrowHalfWidthMs,
-			narrowPreWidthMs,
+			narrowPreWidth,
 			narrowMeasurements,
 		);
 
@@ -2440,12 +2549,7 @@ export function absorptionChecks(input: AbsorptionInput): AbsorptionChecks {
 			wide:
 				wideMeasurements == null
 					? null
-					: horizonAt(
-							"wide",
-							wideHalfWidthMs,
-							widePreWidthMs,
-							wideMeasurements,
-						),
+					: horizonAt("wide", wideHalfWidthMs, widePreWidth, wideMeasurements),
 			wideAbsentReason,
 			placeboAccountIds,
 		});
@@ -5137,7 +5241,7 @@ function absorptionSection(replay: ReplayResult): string[] {
 	out.push("### Time to first 100 %");
 	out.push("");
 	out.push(
-		"How long a window took to reach its first reading at or above 100 %, measured from the window start its reset implies (`reset - window length`, the same derivation the projections use) to that reading. The population is every non-placeholder window lifecycle in the replayed snapshot history, both window kinds, every account the history holds, split by whether the account's demand class lost a peer early in the window. Early is a FIXED prefix of the window: its first hour for a five-hour window, its first 24 hours for a weekly one. A peer's death counts whichever of the peer's own windows filled, because an account at 100 % in either window leaves routing; whether any of that demand reaches the survivors is what this section measures, not what it assumes.",
+		"How long a window took to reach its first reading at or above 100 %, measured from the window start its reset implies (`reset - window length`, the same derivation the projections use) to that reading. The population is every non-placeholder window lifecycle in the replayed snapshot history, both window kinds, every account the history holds, split by whether the account's demand class lost a peer early in the window. Early is a FIXED prefix of the window: its first hour for a five-hour window, its first 24 hours for a weekly one. A peer's death counts whichever of the peer's own windows filled, because an account at 100 % in either window leaves routing. What this section measures is how fill durations and fill fractions differ between the exposure groups; whether demand moved is not identified here.",
 	);
 	out.push("");
 	out.push(
@@ -5145,7 +5249,7 @@ function absorptionSection(replay: ReplayResult): string[] {
 	);
 	out.push("");
 	out.push(
-		`\`completed below 100 %\` counts the windows whose sampling ran to within ${SEGMENT_COVERAGE_SLACK_MS / MINUTE_MS} min of the window's own reset without ever reading 100 % AND whose successor window was observed to start, which is the same rule the outcome labels use, both halves of it. \`follow-up incomplete\` counts the ones whose samples stopped earlier, that carry no reset to end at, or that nothing was ever recorded after: those windows were not observed to their end and say nothing about whether they filled. Proximity to the reset alone would label a run that simply stopped as a window observed not to fill, and one combined census makes a cell whose follow-up merely ended look like a cell of slow windows.`,
+		`\`completed below 100 %\` counts the windows whose sampling ran to within ${SEGMENT_COVERAGE_SLACK_MS / MINUTE_MS} min of the window's own end without ever reading 100 % AND whose successor window was observed to start, which is the same rule the outcome labels use, both halves of it, ending the window at the same instant: the earlier of its reset and its successor's observed start. \`follow-up incomplete\` counts the ones whose samples stopped earlier, that carry no reset to end at, or that nothing was ever recorded after: those windows were not observed to their end and say nothing about whether they filled. Proximity to the reset alone would label a run that simply stopped as a window observed not to fill, and one combined census makes a cell whose follow-up merely ended look like a cell of slow windows.`,
 	);
 	out.push("");
 	out.push(
@@ -5245,10 +5349,20 @@ const absorptionPairedLine = (entry: AbsorptionPairedDelta): string =>
 		entry.horizon === "narrow" ? "W ≤ 60 min" : "W ≤ 6 h"
 	} | ${entry.basis} | ${entry.n} | ${num(entry.medianDelta)} |`;
 
+/** What shortened a horizon's `W_pre`, in the words the block prints. */
+const ABSORPTION_PRE_WEIGHT_BOUND_WORDS: Record<
+	AbsorptionPreWeightBound,
+	string
+> = {
+	availability: "the nearest availability change of a class member before it",
+	cap: "the horizon's own cap",
+	coverage: "the near edge of the loaded request span",
+};
+
 const ABSORPTION_DEATH_HEADER =
-	"| horizon | basis | W_pre (min) | pre min | post min | pre vol (dying) | post vol (dying) | pre vol (surv) | post vol (surv) | dying pre-share | alpha | ratio | P | N | G | largest gain share | control -7 d | control +7 d |";
+	"| horizon | basis | W_pre (min) | W_pre vol (dying) | W_pre vol (surv) | pre min | post min | pre vol (dying) | post vol (dying) | pre vol (surv) | post vol (surv) | dying pre-share | alpha | ratio | P | N | G | largest gain share | control -7 d | control +7 d |";
 const ABSORPTION_DEATH_ALIGN =
-	"|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|---|";
+	"|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|---|";
 
 /** A control's own ratio, or the reason it was not measured. */
 const absorptionControlCell = (
@@ -5274,6 +5388,10 @@ function absorptionHorizonRow(
 		`| W = ${num(horizon.halfWidthMs / MINUTE_MS, 0)} min`,
 		basis,
 		num(horizon.preWeightHalfWidthMs / MINUTE_MS, 0),
+		// The weight numerators, so the printed shares can be recomputed: both
+		// divide by the same `W_pre` minutes, so the volumes alone give the split.
+		num(cell.preWeightVolumeDying, 0),
+		num(cell.preWeightVolumeSurvivors, 0),
 		`${cell.preMinutes}`,
 		`${cell.postMinutes}`,
 		num(cell.preVolumeDying, 0),
@@ -5349,11 +5467,11 @@ function requestVolumeChangeSection(
 	);
 	out.push("");
 	out.push(
-		`The half-width \`W\` is the largest symmetric width in which NO member of the class changes availability state, capped at ${absorption.narrowHalfWidthMs / MINUTE_MS} min for the primary horizon and ${absorption.halfWidthMs / HOUR_MS} h for the second one. The cap is a cap: most deaths are read at less, and the per-death table prints the width each one was read at. Every member of the class bounds it, including a member that is not in \`S\` and one created after the death — an account arriving is a regime change even though it was never a candidate for the traffic. The dying account's own transition at the death is the one change the rule ignores. A death whose clean interval falls under ${absorption.minHalfWidthMs / MINUTE_MS} min is excluded, with the account and the distance that bounded it printed beside it. This selection preferentially removes rapid cascades, and strong absorption can itself precipitate the next death, so the analysed population is the sufficiently-isolated departures and nothing here is a claim about cascades.`,
+		`The half-width \`W\` is the largest symmetric width in which NO member of the class changes availability state, capped at ${absorption.narrowHalfWidthMs / MINUTE_MS} min for the primary horizon and ${absorption.halfWidthMs / HOUR_MS} h for the second one. The cap is a cap: most deaths are read at less, and the per-death table prints the width each one was read at. Every member of the class bounds it, including a member that is not in \`S\` and one created after the death — an account arriving is a regime change even though it was never a candidate for the traffic, and it is bounded at the instant it was created rather than at its first reading, which can be an hour later or never come at all. The dying account's own transition at the death is the one change the rule ignores. A death whose clean interval falls under ${absorption.minHalfWidthMs / MINUTE_MS} min is excluded, with the account and the distance that bounded it printed beside it. This selection preferentially removes rapid cascades, and strong absorption can itself precipitate the next death, so the analysed population is the sufficiently-isolated departures and nothing here is a claim about cascades.`,
 	);
 	out.push("");
 	out.push(
-		`The weights are read over a different width, \`W_pre\`, and the reason is that \`W\` is bounded on BOTH sides of the death: which width \`W\` takes depends on what happened after \`D\`, so a weight computed over it would not have been computable at \`D\`. \`W_pre\` runs back from \`D\` to the nearest availability change of any class member before \`D\`, capped at the same horizon cap, and reads nothing at or after \`D\`. The dying account's pre-death share, each survivor's pre-death share and the equal split are therefore computable at \`D\` from data available at \`D\`. The rate comparison — alpha, the ratio, each \`delta_s\`, \`P\`, \`N\`, \`G\` and the matched controls — uses the symmetric \`W\` instead, chosen retrospectively so that no availability change sits inside it; a comparison needs the same clean regime on both sides. Both widths are printed for every death.`,
+		`The weights are read over a different width, \`W_pre\`, and the reason is that \`W\` is bounded on BOTH sides of the death: which width \`W\` takes depends on what happened after \`D\`, so a weight computed over it would not have been computable at \`D\`. \`W_pre\` runs back from \`D\` to the nearest availability change of any class member before \`D\`, capped at the same horizon cap and at the near edge of the loaded request span, and reads nothing at or after \`D\`. That third bound is what keeps the weights over LOADED buckets: a bucket the run never loaded is absent rather than empty, and a lookback reaching past it would divide a partly-loaded volume by its whole width and read the missing stretch as no traffic. Which of the three bounds was the binding one is printed under each death, and each control's weights are shortened to its own loaded prehistory the same way. The dying account's pre-death share, each survivor's pre-death share and the equal split are therefore computable at \`D\` from data available at \`D\`. The rate comparison — alpha, the ratio, each \`delta_s\`, \`P\`, \`N\`, \`G\` and the matched controls — uses the symmetric \`W\` instead, chosen retrospectively so that no availability change sits inside it; a comparison needs the same clean regime on both sides. Both widths are printed for every death.`,
 	);
 	out.push("");
 	out.push(
@@ -5423,7 +5541,7 @@ function requestVolumeChangeSection(
 	out.push("```");
 	out.push("");
 	out.push(
-		"`alpha = (ratio - 1) * preRateSurv / preRateDying`, so the same ratio change is a different normalised gain at a different dying pre-share, and a ratio difference does not measure a fraction of the dying account's demand. The raw rates are printed beside both.",
+		"`alpha = (ratio - 1) * preRateSurv / preRateDying`, so the same ratio change is a different normalised gain at a different PRE-DEATH RATE BALANCE OVER `W`: the dying account's share of pre-death rate over `W`, `preRateDying / (preRateDying + preRateSurv)`. That balance is not the `dying pre-share` column, which is measured over `W_pre`; where the two widths differ the two numbers differ, and both are correct over their own interval. A ratio difference does not measure a fraction of the dying account's demand. The raw rates over `W` and the raw volumes over `W_pre` are printed beside both.",
 	);
 	out.push("");
 	out.push(
@@ -5440,7 +5558,7 @@ function requestVolumeChangeSection(
 	out.push("");
 
 	out.push(
-		`Matched controls sit at the same instant ±${ABSORPTION_CONTROL_OFFSET_MS / DAY_MS} d, so weekday and hour are both matched, and are measured over the IDENTICAL survivor set at the IDENTICAL half-width. A control is used only when its whole interval lies inside the loaded request span, every account of \`S\` and the dying account is available across the whole of it, and no member of the class changes availability state inside it. Whether the workload repeats at a one-week offset is what the control ratios show, and a control's own interval can be a quiet stretch rather than a matched one; the per-death table prints each control's ratio beside the death's so the reader can see which, and the pairing below is stated apart from the aggregate rather than as a headline. Ineligible controls are counted rather than skipped: ${absorption.controlsIneligible["outside-loaded-span"]} outside the loaded span, ${absorption.controlsIneligible["availability-change-inside"]} with an availability change inside the interval.`,
+		`Matched controls sit at the same instant ±${ABSORPTION_CONTROL_OFFSET_MS / DAY_MS} d, so weekday and hour are both matched, and are measured over the IDENTICAL survivor set at the IDENTICAL half-width. A control is used only when its whole interval lies inside the loaded request span, every account of \`S\` and the dying account is available across the whole of it, and no member of the class changes availability state or is created inside it. Whether the workload repeats at a one-week offset is what the control ratios show, and a control's own interval can be a quiet stretch rather than a matched one; the per-death table prints each control's ratio beside the death's so the reader can see which, and the pairing below is stated apart from the aggregate rather than as a headline. Ineligible controls are counted rather than skipped: ${absorption.controlsIneligible["outside-loaded-span"]} outside the loaded span, ${absorption.controlsIneligible["availability-change-inside"]} with a class member changing availability state or being created inside the interval.`,
 	);
 	out.push("");
 	out.push(
@@ -5510,6 +5628,17 @@ function requestVolumeChangeSection(
 							}\``
 				}.`,
 			);
+			for (const horizon of [death.narrow, death.wide]) {
+				if (horizon == null) continue;
+				out.push(
+					`- W_pre at W = ${num(horizon.halfWidthMs / MINUTE_MS, 0)} min: ${num(
+						horizon.preWeightHalfWidthMs / MINUTE_MS,
+						0,
+					)} min, bounded by ${
+						ABSORPTION_PRE_WEIGHT_BOUND_WORDS[horizon.preWeightBoundedBy]
+					}.`,
+				);
+			}
 			out.push(
 				`- Survivors, at W = ${num(
 					death.narrow.halfWidthMs / MINUTE_MS,

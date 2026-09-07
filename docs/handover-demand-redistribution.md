@@ -76,12 +76,14 @@ observation-anchored lifetime path). The correction is mechanically exact: the
 forecast shifts by exactly its own lag in 100 % of the 1731 eligible records,
 and a lone account's projection equals the current model's on both anchored
 paths. It moves criterion A by 28 seconds (to 14.106 min) and leaves
-criterion D's F1, recall and paired absolute error unchanged, because the lags
-are small (median 3.8 min on the lifetime path, 1.2 min on the regression path)
-and 11183 of 23540 regression records have no derivable anchor. Observation lag
-is therefore not where the transition optimism comes from: correcting it leaves
-criterion A within 28 seconds of the uncorrected scan. What the remaining
-optimism is instead is not isolated by this experiment. The backtest keeps
+criterion D's F1, recall and paired absolute error unchanged. The lags it
+advances over are small (median 3.8 min on the lifetime path, 1.2 min on the
+regression path) and 11183 of 23540 regression records carry no derivable anchor
+to advance from at all. That is the measured result and the whole of it: this
+correction, over this population, moves criterion A by 28 seconds. What share of
+the transition optimism observation lag accounts for is not established by that
+number in either direction, and what the remaining optimism is instead is not
+isolated by this experiment. The backtest keeps
 the uncorrected scan as a control model (`scenario-equal-original`) and the
 `## Observation-lag mechanism check` section states what each check measures.
 
@@ -124,7 +126,7 @@ thresholds anything, and nothing in production reads either.
   60-minute horizon the median survivor rate ratio across the death is 1.46 on
   requests and 1.81 on tokens; the median of alpha, the survivors' rate change
   over the dying account's pre-death rate, is 0.20 and 0.35; the dying account's
-  median pre-death share of its class is 67 % and 75 %; the median survivor set
+  median pre-death share of its class is 67 % and 73.8 %; the median survivor set
   is two accounts, and in at least half of the 22 deaths with a positive net
   change one survivor took all of the rise. At the 6-hour horizon, 17 deaths survive
   the interval rule and the ratio medians are 0.59 and 0.74. Matched ±7 d
