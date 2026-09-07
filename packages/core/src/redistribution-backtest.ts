@@ -3115,8 +3115,7 @@ export function evaluateVerdict(
 	// horizon is PENDING (only that makes the verdict provisional), while a
 	// pair with no pending window never had a tagged weekly window in this
 	// roster at all — a lone account whose peer exhaustion tags nobody, or a
-	// tagged window that was withheld or censored. Re-running changes nothing
-	// there.
+	// tagged window that was withheld or censored.
 	//
 	// Per (tag, class), not per tag: a tag labelled in one servable class says
 	// nothing about the same tag in another, and taking the tag as labelled
