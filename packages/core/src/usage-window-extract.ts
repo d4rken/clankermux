@@ -1,4 +1,8 @@
-import type { AnthropicUsageData, FullUsageData } from "@clankermux/types";
+import type {
+	AnthropicUsageData,
+	FullUsageData,
+	ZaiUsageData,
+} from "@clankermux/types";
 import {
 	isAnthropicUsageShape,
 	normalizeAnthropicUsage,
@@ -34,6 +38,7 @@ export const FIVE_HOUR_ELIGIBLE_PROVIDERS: ReadonlySet<string> = new Set([
 
 /** Providers whose accounts report an account-wide weekly quota window. */
 export const SEVEN_DAY_ELIGIBLE_PROVIDERS: ReadonlySet<string> = new Set([
+	"zai",
 	"anthropic",
 	"codex",
 	"alibaba-coding-plan",
@@ -143,7 +148,13 @@ export function extractSevenDay(
 		};
 	}
 	if (isZaiShape(usageData)) {
-		return null;
+		const weekly = (usageData as ZaiUsageData).tokens_limit_weekly;
+		return weekly
+			? {
+					pct: weekly.percentage ?? null,
+					resetMs: normalizeResetMs(weekly.resetAt),
+				}
+			: null;
 	}
 	if (isAnthropicStyleShape(usageData)) {
 		// Read the account-wide weekly window via the normalizer so a `limits[]`-only

@@ -187,10 +187,11 @@ export function classifyUsageCard(
 				: null,
 		});
 	} else if (isZaiData && showWeekly) {
-		// Zai usage data - show tokens_limit (5-hour token quota) and time_limit (peak-hour limit)
+		// Zai model quotas and the separate web-tool quota.
 		const zaiData = usageData as {
 			time_limit?: { percentage: number; resetAt: number } | null;
 			tokens_limit?: { percentage: number; resetAt: number } | null;
+			tokens_limit_weekly?: { percentage: number; resetAt: number } | null;
 		};
 
 		// Tokens limit usage (5-hour token quota)
@@ -204,7 +205,17 @@ export function classifyUsageCard(
 			});
 		}
 
-		// Time limit usage (peak-hour quota)
+		if (zaiData.tokens_limit_weekly) {
+			usages.push({
+				utilization: zaiData.tokens_limit_weekly.percentage,
+				window: "tokens_limit_weekly",
+				resetTime: zaiData.tokens_limit_weekly.resetAt
+					? new Date(zaiData.tokens_limit_weekly.resetAt).toISOString()
+					: null,
+			});
+		}
+
+		// TIME_LIMIT covers web tools, not model usage.
 		if (zaiData.time_limit) {
 			usages.push({
 				utilization: zaiData.time_limit.percentage,
@@ -358,6 +369,7 @@ export function usageWindowLabel(usage: UsageDisplay): string {
 	switch (usage.window) {
 		case "five_hour":
 			return "5-hour";
+		case "tokens_limit_weekly":
 		case "seven_day":
 			return "Weekly";
 		case "seven_day_opus":

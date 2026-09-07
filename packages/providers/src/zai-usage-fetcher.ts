@@ -1,19 +1,9 @@
 import { Logger } from "@clankermux/logger";
+import type { ZaiUsageData, ZaiUsageWindow } from "@clankermux/types";
 
 const log = new Logger("ZaiUsageFetcher");
 
-export interface ZaiUsageWindow {
-	used: number;
-	remaining: number;
-	percentage: number; // 0-100 from API
-	resetAt: number | null; // Unix timestamp in milliseconds
-	type: string;
-}
-
-export interface ZaiUsageData {
-	time_limit: ZaiUsageWindow | null;
-	tokens_limit: ZaiUsageWindow | null;
-}
+export type { ZaiUsageData, ZaiUsageWindow } from "@clankermux/types";
 
 /**
  * Fetch usage data from Zai's monitoring usage endpoint
@@ -94,7 +84,12 @@ export async function fetchZaiUsageData(
 		const result: ZaiUsageData = {
 			time_limit: null,
 			tokens_limit: null,
+			tokens_limit_weekly: null,
 		};
+
+		const tokenCount = limits.filter(
+			(limit: { type?: string }) => limit.type === "TOKENS_LIMIT",
+		).length;
 
 		// Parse each limit type
 		for (const limit of limits) {
@@ -107,12 +102,27 @@ export async function fetchZaiUsageData(
 					type: "time_limit",
 				};
 			} else if (limit.type === "TOKENS_LIMIT") {
-				result.tokens_limit = {
+				// The upstream fixture identifies hours as unit 3 and weeks as unit 6.
+				// Reset order is NOT duration order: the week can reset sooner.
+				const key =
+					limit.unit === 6 && limit.number === 1
+						? "tokens_limit_weekly"
+						: (limit.unit === 3 && limit.number === 5) ||
+								(tokenCount === 1 && limit.unit == null && limit.number == null)
+							? "tokens_limit"
+							: null;
+				if (!key || result[key]) {
+					// Dropping an unknown quota could hide an exhausted window.
+					// Report unavailable rather than publishing partial capacity.
+					log.warn("Unrecognized or duplicate Zai token quota duration");
+					return null;
+				}
+				result[key] = {
 					used: limit.currentValue ?? 0,
 					remaining: limit.remaining ?? 0,
 					percentage: limit.percentage ?? 0,
 					resetAt: limit.nextResetTime ?? null,
-					type: "tokens_limit",
+					type: key,
 				};
 			}
 		}
@@ -128,49 +138,39 @@ export async function fetchZaiUsageData(
 	}
 }
 
-/**
- * Get the representative utilization percentage (0-100)
- * Returns the tokens_limit utilization (5-hour token quota)
- */
+/** Model quotas only: TIME_LIMIT caps web tools, not inference. */
+export function getRepresentativeZaiTokenWindow(
+	usage: ZaiUsageData | null,
+): { name: "five_hour" | "seven_day"; window: ZaiUsageWindow } | null {
+	let winner: {
+		name: "five_hour" | "seven_day";
+		window: ZaiUsageWindow;
+	} | null = null;
+	for (const [name, window] of [
+		["five_hour", usage?.tokens_limit],
+		["seven_day", usage?.tokens_limit_weekly],
+	] as const) {
+		if (!window || !Number.isFinite(window.percentage)) continue;
+		if (
+			!winner ||
+			window.percentage > winner.window.percentage ||
+			(window.percentage === winner.window.percentage &&
+				(window.resetAt ?? Infinity) > (winner.window.resetAt ?? Infinity))
+		) {
+			winner = { name, window };
+		}
+	}
+	return winner;
+}
+
 export function getRepresentativeZaiUtilization(
 	usage: ZaiUsageData | null,
 ): number | null {
-	if (!usage) return null;
-
-	// Only consider tokens_limit (5-hour token quota)
-	// time_limit is not displayed to users
-	if (usage.tokens_limit && usage.tokens_limit.percentage !== undefined) {
-		return usage.tokens_limit.percentage;
-	}
-
-	return null;
+	return getRepresentativeZaiTokenWindow(usage)?.window.percentage ?? null;
 }
 
-/**
- * Determine which limit is the most restrictive (highest utilization)
- * Returns "five_hour" (for tokens_limit) to match Claude terminology
- */
 export function getRepresentativeZaiWindow(
 	usage: ZaiUsageData | null,
 ): string | null {
-	if (!usage) return null;
-
-	const windows: Array<{ name: string; percentage: number }> = [];
-
-	// Only consider tokens_limit (5-hour token quota)
-	// time_limit is not displayed to users
-	if (usage.tokens_limit && usage.tokens_limit.percentage !== undefined) {
-		windows.push({
-			name: "five_hour", // Map to "5-hour" to match Claude terminology
-			percentage: usage.tokens_limit.percentage,
-		});
-	}
-
-	if (windows.length === 0) return null;
-
-	const max = windows.reduce((prev, current) =>
-		current.percentage > prev.percentage ? current : prev,
-	);
-
-	return max.name;
+	return getRepresentativeZaiTokenWindow(usage)?.name ?? null;
 }

@@ -404,13 +404,13 @@ describe("LimitsCapacityOverview", () => {
 		const html = renderOverview(
 			pools([
 				account({ id: "acc-1", name: "alpha", usageData: usage(20, 20) }),
-				account({ id: "acc-9", name: "zai-1", provider: "zai" }),
+				account({ id: "acc-9", name: "router-1", provider: "openrouter" }),
 			]),
 		);
 
 		// The line is a union over BOTH windows, so it cannot name one of them —
 		// and it says nothing about how the account is billed.
-		expect(html).toContain("Not on a rolling quota: zai-1 (zai)");
+		expect(html).toContain("Not on a rolling quota: router-1 (openrouter)");
 	});
 
 	it("lists two identically-named accounts rather than one", () => {
@@ -420,12 +420,12 @@ describe("LimitsCapacityOverview", () => {
 		const html = renderOverview(
 			pools([
 				account({ id: "acc-1", name: "alpha", usageData: usage(20, 20) }),
-				account({ id: "acc-8", name: "spare", provider: "zai" }),
+				account({ id: "acc-8", name: "spare", provider: "openrouter" }),
 				account({ id: "acc-9", name: "spare", provider: "claude-console-api" }),
 			]),
 		);
 
-		expect(html).toContain("spare (zai)");
+		expect(html).toContain("spare (openrouter)");
 		expect(html).toContain("spare (claude-console-api)");
 	});
 

@@ -15,11 +15,188 @@ import {
 	isProviderOverloaded,
 } from "../../provider-overload-cooldown";
 import {
+	isAccountWideFailure,
+	isOrdinaryAttemptFailure,
+} from "../../recovery-holds";
+import type { ProxyAttemptOutcome } from "../proxy-operations";
+import {
 	isCodexEntitlementModelError,
 	isModelUnavailableError,
 	proxyWithAccount,
 } from "../proxy-operations";
 import type { ProxyContext } from "../proxy-types";
+
+describe("Zai 1305 recovery through the account/model loop", () => {
+	const originalFetch = globalThis.fetch;
+	afterEach(() => {
+		globalThis.fetch = originalFetch;
+		cacheBodyStore.discardStaged("req-1");
+	});
+	const overloaded = () =>
+		new Response('data: {"error":{"code":1305}}\n\n', {
+			headers: { "content-type": "text/event-stream" },
+		});
+	const success = () =>
+		Response.json({
+			type: "message",
+			role: "assistant",
+			content: [{ type: "text", text: "ok" }],
+			usage: { input_tokens: 1, output_tokens: 1 },
+		});
+	async function run(
+		account: Account,
+		ctx: ProxyContext,
+		terminal = false,
+		body = makeRequestBody(),
+		onOutcome?: (outcome: ProxyAttemptOutcome) => void,
+	) {
+		return proxyWithAccount(
+			makeRequest(body),
+			new URL("https://proxy.local/v1/messages"),
+			account,
+			makeRequestMeta(),
+			body,
+			() => undefined,
+			0,
+			ctx,
+			undefined,
+			undefined,
+			undefined,
+			undefined,
+			terminal,
+			{ onOutcome },
+		);
+	}
+	const account = (fallbacks = false) =>
+		makeAccount({
+			provider: "zai",
+			custom_endpoint: null,
+			model_mappings: JSON.stringify({
+				sonnet: fallbacks ? ["glm-primary", "glm-fallback"] : "glm-primary",
+			}),
+		});
+	it("fails over after one retry without mutating quota cooldowns", async () => {
+		const fetcher = mock(async () => overloaded());
+		globalThis.fetch = fetcher as unknown as typeof fetch;
+		const ctx = makeProxyContext();
+		const acc = account();
+		expect(await run(acc, ctx)).toBeNull();
+		expect(fetcher).toHaveBeenCalledTimes(2);
+		expect(ctx.dbOps.markAccountRateLimited).not.toHaveBeenCalled();
+		expect(acc.rate_limited_until).toBeNull();
+	});
+	it("does not seed an Anthropic recovery hold or exclude other models on the account", async () => {
+		globalThis.fetch = (async () => overloaded()) as typeof fetch;
+		const outcomes: ProxyAttemptOutcome[] = [];
+		await run(
+			account(),
+			makeProxyContext(),
+			false,
+			makeRequestBody(),
+			(outcome) => outcomes.push(outcome),
+		);
+		expect(outcomes).toHaveLength(1);
+		expect(isOrdinaryAttemptFailure(outcomes[0])).toBe(true);
+		expect(isAccountWideFailure(outcomes[0])).toBe(false);
+	});
+	it("returns an overload terminal rather than successful SSE when all accounts are exhausted", async () => {
+		globalThis.fetch = (async () => overloaded()) as typeof fetch;
+		const ctx = makeProxyContext();
+		const response = await run(account(), ctx, true);
+		expect(response?.status).toBe(529);
+		if (!response) throw new Error("missing overload response");
+		expect((await response.json()).error.code).toBe(1305);
+		expect(ctx.requestRecorder.begin).toHaveBeenCalled();
+		expect(ctx.requestRecorder.finishTransport).toHaveBeenCalled();
+		expect(ctx.dbOps.markAccountRateLimited).not.toHaveBeenCalled();
+	});
+	it("releases the previous model response when the Zai retry throws", async () => {
+		// A stream with no initial pull lets bodyUsed distinguish disposal from
+		// merely receiving an upstream Response. 429 classification is header-only.
+		const previous = new Response(
+			new ReadableStream<Uint8Array>(
+				{
+					pull(c) {
+						c.enqueue(new TextEncoder().encode("rate limited"));
+						c.close();
+					},
+				},
+				{ highWaterMark: 0 },
+			),
+			{ status: 429 },
+		);
+		let calls = 0;
+		globalThis.fetch = (async () => {
+			calls++;
+			if (calls === 1) return previous;
+			if (calls === 2) return overloaded();
+			throw new Error("retry network failure");
+		}) as typeof fetch;
+		expect(await run(account(true), makeProxyContext())).toBeNull();
+		expect(calls).toBe(3);
+		expect(previous.bodyUsed).toBe(true);
+	});
+	it("cycles models after bounded retries and forwards the successful fallback", async () => {
+		const models: string[] = [];
+		globalThis.fetch = (async (input: RequestInfo | URL) => {
+			const body = await (input as Request).json();
+			models.push(body.model);
+			return models.length <= 2 ? overloaded() : success();
+		}) as typeof fetch;
+		const response = await run(account(true), makeProxyContext());
+		expect(response?.status).toBe(200);
+		await response?.text();
+		expect(models).toHaveLength(3);
+		expect(models[0]).toBe(models[1]);
+		expect(models[2]).toBe("glm-fallback");
+	});
+	it("classifies overload on every fallback model without a quota lock", async () => {
+		const fetcher = mock(async () => overloaded());
+		globalThis.fetch = fetcher as unknown as typeof fetch;
+		const ctx = makeProxyContext();
+		expect(await run(account(true), ctx)).toBeNull();
+		expect(fetcher).toHaveBeenCalledTimes(4);
+		expect(ctx.dbOps.markAccountRateLimited).not.toHaveBeenCalled();
+	});
+	it("keeps the cache-control-stripped body for overload retries", async () => {
+		const bodies: unknown[] = [];
+		globalThis.fetch = (async (input: RequestInfo | URL) => {
+			bodies.push(await (input as Request).json());
+			if (bodies.length === 1)
+				return Response.json(
+					{ error: { message: "unknown field cache_control" } },
+					{ status: 400 },
+				);
+			return bodies.length === 2 ? overloaded() : success();
+		}) as typeof fetch;
+		const ctx = makeProxyContext();
+		const body = new TextEncoder().encode(
+			JSON.stringify({
+				model: "claude-sonnet-4-5",
+				messages: [
+					{
+						role: "user",
+						content: [
+							{
+								type: "text",
+								text: "hi",
+								cache_control: { type: "ephemeral" },
+							},
+						],
+					},
+				],
+				max_tokens: 10,
+			}),
+		).buffer;
+		const response = await run(account(), ctx, false, body);
+		expect(response?.status).toBe(200);
+		await response?.text();
+		expect(bodies).toHaveLength(3);
+		expect(JSON.stringify(bodies[0])).toContain("cache_control");
+		expect(JSON.stringify(bodies[1])).not.toContain("cache_control");
+		expect(bodies[2]).toEqual(bodies[1]);
+	});
+});
 
 // Minimal Account fixture for openai-compatible provider
 function makeAccount(overrides: Partial<Account> = {}): Account {

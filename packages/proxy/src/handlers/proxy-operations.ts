@@ -90,6 +90,8 @@ import {
 	classify429Transient,
 } from "./transparent-retry";
 
+import { isZaiOverloadResponse, recoverZaiOverload } from "./zai-overload";
+
 const log = new Logger("ProxyOperations");
 
 /**
@@ -673,6 +675,8 @@ async function isCacheControlRejectionError(
 export async function isModelUnavailableError(
 	response: Response,
 ): Promise<boolean> {
+	if (isZaiOverloadResponse(response)) return true;
+
 	if (
 		response.status !== 404 &&
 		response.status !== 400 &&
@@ -1364,21 +1368,98 @@ export async function proxyWithAccount(
 				ctx,
 			);
 
+		// Classify Zai's leading HTTP-200 overload on every normal-path attempt,
+		// including cache-control retries and model fallbacks. Forced requests
+		// deliberately bypass this policy and keep forwarding upstream verbatim.
+		const forwardAttempt = async (
+			attemptRequest: Request,
+		): Promise<Response> => {
+			const previousUpstream = liveUpstream;
+			// fetch consumes bodies; retain a replayable template only for Zai.
+			const replay = account.provider === "zai" ? attemptRequest.clone() : null;
+			const send = async (): Promise<Response> => {
+				const outgoing = replay ? replay.clone() : attemptRequest;
+				const response = captureAttempt(
+					outgoing,
+					await makeProxyRequest(
+						outgoing,
+						undefined,
+						undefined,
+						undefined,
+						undefined,
+						options?.signal,
+					),
+				);
+				liveUpstream = response;
+				return response;
+			};
+			const response = await send();
+			if (account.provider !== "zai") return response;
+			try {
+				return await recoverZaiOverload(response, send, options?.signal);
+			} catch (error) {
+				// A failed/aborted peek may own a retry response already. Release
+				// it even when the cache-control retry's local catch keeps its 400.
+				discardUpstreamBody(liveUpstream ?? response);
+				liveUpstream = previousUpstream;
+				throw error;
+			}
+		};
+
+		const finishZaiOverload = async (
+			response: Response,
+		): Promise<Response | null> => {
+			log.warn(
+				`Z.ai overload retries and model fallbacks exhausted on account ${account.name}`,
+			);
+			if (isTerminalAttempt()) {
+				settleOverloadProbe("abandoned", "sse_overloaded_error");
+				options?.onOutcome?.({ kind: "other" });
+				return forwardToClient(
+					{
+						clientSignal: req.signal,
+						requestId: requestMeta.id,
+						method: req.method,
+						path: url.pathname,
+						account,
+						internal: requestMeta.internal === true,
+						requestHeaders: req.headers,
+						requestBody: effectiveBodyBuffer,
+						requestedModel: requestMeta.requestedModel,
+						fallbackCreditClaimed: requestMeta.fallbackCreditClaimed,
+						fallbackFromModel: requestMeta.fallbackFromModel,
+						project: requestMeta.project,
+						projectAttributionSource: requestMeta.projectAttributionSource,
+						contextComposition: requestMeta.contextComposition,
+						toolCallStats: requestMeta.toolCallStats,
+						reasoningEffort: requestMeta.reasoningEffort,
+						sessionKey: requestMeta.sessionKey,
+						cachePrefixHashes: requestMeta.cachePrefixHashes,
+						response,
+						timestamp: requestMeta.timestamp,
+						retryAttempt: 0,
+						failoverAttempts,
+						comboName: requestMeta.comboName,
+						apiKeyId,
+						apiKeyName,
+						routing: requestMeta.routing ?? null,
+						upstreamModel: overloadAttributionModel,
+						bumpIdleTimeout,
+					},
+					{ ...ctx, provider },
+				);
+			}
+			// This model exhausted its local retry budget. It has no provider
+			// breaker to wait on, so do not seed the Anthropic overload hold or
+			// exclude the account from attempts using another model.
+			return fail({ kind: "other" }, response);
+		};
+
 		// Make the request. Thread the caller's AbortSignal (if any) into the
 		// upstream fetch so a client disconnect aborts it immediately — essential
 		// in re-probe mode so a disconnect releases the hold slot promptly. When
 		// absent, makeProxyRequest installs its own timeout controller as before.
-		let rawResponse = captureAttempt(
-			transformedRequest,
-			await makeProxyRequest(
-				transformedRequest,
-				undefined,
-				undefined,
-				undefined,
-				undefined,
-				options?.signal,
-			),
-		);
+		let rawResponse = await forwardAttempt(transformedRequest);
 		liveUpstream = rawResponse;
 
 		// Check if this is a Claude provider and we got an invalid thinking signature error
@@ -1414,17 +1495,7 @@ export async function proxyWithAccount(
 				// socket + ~512 KB read buffer is released. Acquiring first means a
 				// throw here leaves the original intact for the outer catch/failover
 				// instead of proceeding with an already-discarded body.
-				const retryResponse = captureAttempt(
-					retryTransformedRequest,
-					await makeProxyRequest(
-						retryTransformedRequest,
-						undefined,
-						undefined,
-						undefined,
-						undefined,
-						options?.signal,
-					),
-				);
+				const retryResponse = await forwardAttempt(retryTransformedRequest);
 				discardUpstreamBody(rawResponse);
 				rawResponse = retryResponse;
 				liveUpstream = rawResponse;
@@ -1461,21 +1532,13 @@ export async function proxyWithAccount(
 				// catch below continues with the original 400 still intact (its body
 				// not yet discarded), preserving the "forward the original 400 on
 				// retry failure" contract.
-				const retryResponse = captureAttempt(
-					retryRequest,
-					await makeProxyRequest(
-						retryRequest,
-						undefined,
-						undefined,
-						undefined,
-						undefined,
-						options?.signal,
-					),
-				);
+				const retryResponse = await forwardAttempt(retryRequest);
 				discardUpstreamBody(rawResponse);
 				rawResponse = retryResponse;
 				liveUpstream = rawResponse;
 			} catch (err) {
+				if (options?.signal?.aborted || req.signal.aborted) throw err;
+				liveUpstream = rawResponse;
 				log.warn("Failed to retry without cache_control:", err);
 			}
 		}
@@ -2127,6 +2190,8 @@ export async function proxyWithAccount(
 			if (requestedModel) {
 				const modelList = getModelList(requestedModel, account);
 				if (!modelList || modelList.length <= 1) {
+					if (isZaiOverloadResponse(rawResponse))
+						return await finishZaiOverload(rawResponse);
 					// No fallback models configured — fail over to the next account.
 					// 429s should never be forwarded to the client when other
 					// accounts are available; only genuine model-not-found
@@ -2395,17 +2460,7 @@ export async function proxyWithAccount(
 
 					// Acquire the retry first, then discard the previous attempt's
 					// body — a throw here leaves the prior body for the outer catch.
-					const retryResponse = captureAttempt(
-						retryTransformedRequest,
-						await makeProxyRequest(
-							retryTransformedRequest,
-							undefined,
-							undefined,
-							undefined,
-							undefined,
-							options?.signal,
-						),
-					);
+					const retryResponse = await forwardAttempt(retryTransformedRequest);
 					discardUpstreamBody(rawResponse);
 					rawResponse = retryResponse;
 					liveUpstream = rawResponse;
@@ -2424,6 +2479,8 @@ export async function proxyWithAccount(
 			// failover to the next account. OpenAI-compatible providers never set
 			// isRateLimited:true in parseRateLimit, so we must handle it here.
 			if (await isModelUnavailableError(rawResponse)) {
+				if (isZaiOverloadResponse(rawResponse))
+					return await finishZaiOverload(rawResponse);
 				log.warn(
 					`All models exhausted on account ${account.name}, failing over to next account`,
 				);

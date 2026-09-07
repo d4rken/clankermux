@@ -10,6 +10,41 @@ import {
 } from "./usage-windows";
 
 const NOW = Date.parse("2026-08-21T12:00:00.000Z");
+
+it("displays both Zai token quotas with the matching reset and weekly label", () => {
+	const quota = (percentage: number, resetAt: number) => ({
+		used: 0,
+		remaining: 0,
+		percentage,
+		resetAt,
+		type: "tokens_limit",
+	});
+	const card = classifyUsageCard(
+		{
+			resetIso: null,
+			provider: "zai",
+			showWeekly: true,
+			usageData: {
+				time_limit: null,
+				tokens_limit: quota(20, NOW + 20000),
+				tokens_limit_weekly: quota(90, NOW + 10000),
+			},
+		},
+		NOW,
+	);
+	expect(card.kind).toBe("windows");
+	if (card.kind !== "windows") throw new Error("missing quotas");
+	expect(
+		card.usages.map((usage) => [
+			usageWindowLabel(usage),
+			usage.utilization,
+			usage.resetTime,
+		]),
+	).toEqual([
+		["5-hour", 20, new Date(NOW + 20000).toISOString()],
+		["Weekly", 90, new Date(NOW + 10000).toISOString()],
+	]);
+});
 const inHours = (hours: number) =>
 	new Date(NOW + hours * 60 * 60 * 1000).toISOString();
 

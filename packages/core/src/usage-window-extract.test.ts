@@ -172,14 +172,20 @@ describe("extractSevenDay", () => {
 		).toEqual({ pct: 55, resetMs: NOW + 7 * 24 * HOUR });
 	});
 
-	it("has no weekly window for Zai at all", () => {
-		// Zai reports a token window but no weekly one, so this is `null` (the
-		// provider has no such window) rather than an unread value.
+	it("preserves single-window Zai plans without a weekly quota", () => {
 		expect(
 			extractSevenDay({
 				tokens_limit: { percentage: 88, resetAt: NOW + HOUR },
 			} as never),
 		).toBeNull();
+	});
+	it("reads Zai weekly quota independently of the five-hour reset", () => {
+		expect(
+			extractSevenDay({
+				tokens_limit: { percentage: 20, resetAt: NOW + HOUR },
+				tokens_limit_weekly: { percentage: 90, resetAt: NOW + 1000 },
+			} as never),
+		).toEqual({ pct: 90, resetMs: NOW + 1000 });
 	});
 
 	it("returns null for a payload it does not recognise", () => {
