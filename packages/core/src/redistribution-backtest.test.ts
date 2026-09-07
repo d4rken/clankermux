@@ -2176,6 +2176,53 @@ describe("the share rules beside the basis", () => {
 			markdown.indexOf("\n## Share rules beside the basis\n"),
 		);
 
+	test("states beside criterion D what it compares and which leg decided it", () => {
+		const sectionFor = (options: Parameters<typeof verdictFixture>[0]) => {
+			const fixture = verdictFixture(options);
+			const verdict = evaluateVerdict(fixture.cohorts, fixture.replay);
+			const markdown = reportOf(fixture.replay, fixture.cohorts, verdict, 2);
+			return markdown.slice(
+				markdown.indexOf("\n## Verdict\n"),
+				markdown.indexOf("\n## Share rules beside the basis\n"),
+			);
+		};
+
+		const failing = sectionFor({
+			...VERDICT_BASE,
+			scenarioF1: 0.5,
+			originalF1: 0.6,
+		});
+		// What D is a comparison OF, beside the criterion rather than left to the
+		// pre-declared rule: the basis against its own uncorrected scan.
+		expect(failing).toContain(
+			`D compares \`${VERDICT_BASIS_MODEL}\` with its OWN lag-uncorrected scan, \`${VERDICT_BASIS_CONTROL_MODEL}\``,
+		);
+		expect(failing).toContain(
+			`it does not compare the proportional rule with the equal split, and no number in it is a statement about \`${PRIOR_BASIS_MODEL}\``,
+		);
+		// The failing leg, its two numbers, the shortfall and the population.
+		expect(failing).toContain(
+			"Its F1 leg is the one that FAILED this run: 0.500 against the control's 0.600 on the lifecycle-balanced any-transition cohort, short by 0.100",
+		);
+		expect(failing).toContain("Its error leg holds");
+		expect(failing).not.toContain("Its error leg FAILED");
+
+		// The other leg failing is reported as that leg, not as D's F1.
+		const byError = sectionFor({
+			...VERDICT_BASE,
+			originalF1: VERDICT_BASE.scenarioF1,
+			pairedAbsVsOriginal: 4,
+		});
+		expect(byError).toContain("Its F1 leg holds");
+		expect(byError).toContain(
+			"Its error leg FAILED too: the correction landed",
+		);
+		expect(byError).toContain("4.000 min further from the truth");
+
+		// The rule itself stays free of every number this run produced.
+		expect(VERDICT_RULE).not.toMatch(/0\.\d/);
+	});
+
 	test("says which pairing each of criterion A's columns is a median over", () => {
 		const section = sectionOf(besideFixture().markdown);
 

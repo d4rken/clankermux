@@ -6430,6 +6430,45 @@ function criterionBlock(criterion: VerdictCriterion): string[] {
 	return out;
 }
 
+/**
+ * What criterion D compares for the BASIS, and which of its two legs decided
+ * this run, printed beside the criterion instead of left to the rule text.
+ *
+ * D is the criterion most easily misread as a comparison between share rules,
+ * because the basis changed and the prior basis is still scored a section
+ * below. It is not one: the comparison is the basis against its own scan with
+ * the observation-lag advance switched off, so a difference is the advance's.
+ *
+ * Every number here is read from the criterion's OWN computed values at render
+ * time. {@link VERDICT_RULE} is pre-declared and must carry no number this run
+ * produced, so the leg that failed cannot be stated there.
+ */
+function basisCriterionDNote(criterion: VerdictCriterion): string {
+	const computed = (name: string): number | null =>
+		criterion.values.find((value) => value.name === name)?.value ?? null;
+	const basisF1 = computed(`F1, ${VERDICT_BASIS_MODEL}`);
+	const controlF1 = computed(`F1, ${VERDICT_BASIS_CONTROL_MODEL}`);
+	const absChange = computed(
+		"paired median |error| change vs own control (min)",
+	);
+	const pairedN = computed("paired n");
+
+	const f1Leg =
+		basisF1 == null || controlF1 == null
+			? "Its F1 leg has no number this run, so it decides nothing."
+			: basisF1 >= controlF1
+				? `Its F1 leg holds, at ${num(basisF1)} against the control's ${num(controlF1)} on the lifecycle-balanced any-transition cohort.`
+				: `Its F1 leg is the one that FAILED this run: ${num(basisF1)} against the control's ${num(controlF1)} on the lifecycle-balanced any-transition cohort, short by ${num(controlF1 - basisF1)}.`;
+	const errorLeg =
+		absChange == null
+			? "Its error leg has no number this run, so it decides nothing."
+			: absChange <= 0
+				? `Its error leg holds, at ${num(absChange)} min of paired median absolute-error change over the ${num(pairedN, 0)} records both scans dated.`
+				: `Its error leg FAILED too: the correction landed ${num(absChange)} min further from the truth in paired median absolute error, over the ${num(pairedN, 0)} records both scans dated.`;
+
+	return `D compares \`${VERDICT_BASIS_MODEL}\` with its OWN lag-uncorrected scan, \`${VERDICT_BASIS_CONTROL_MODEL}\` — the same share rule with the observation-lag advance switched off — and with nothing else: it does not compare the proportional rule with the equal split, and no number in it is a statement about \`${PRIOR_BASIS_MODEL}\`. ${f1Leg} ${errorLeg}`;
+}
+
 /** The identity block: a property of the basis, printed under the verdict. */
 function basisIdentitySection(identity: BasisIdentityCheck): string[] {
 	const out: string[] = [];
@@ -6752,6 +6791,10 @@ export function formatRedistributionReport(
 	out.push("");
 	for (const criterion of verdict.criteria) {
 		out.push(...criterionBlock(criterion));
+		if (criterion.id === "D") {
+			out.push(basisCriterionDNote(criterion));
+			out.push("");
+		}
 	}
 	out.push("| cohort | records | lifecycles | episodes |");
 	out.push("|---|---:|---:|---:|");
