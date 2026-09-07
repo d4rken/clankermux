@@ -5541,7 +5541,7 @@ function requestVolumeChangeSection(
 	out.push("```");
 	out.push("");
 	out.push(
-		"`alpha = (ratio - 1) * preRateSurv / preRateDying`, so the same ratio change is a different normalised gain at a different PRE-DEATH RATE BALANCE OVER `W`: the dying account's share of pre-death rate over `W`, `preRateDying / (preRateDying + preRateSurv)`. That balance is not the `dying pre-share` column, which is measured over `W_pre`; where the two widths differ the two numbers differ, and both are correct over their own interval. A ratio difference does not measure a fraction of the dying account's demand. The raw rates over `W` and the raw volumes over `W_pre` are printed beside both.",
+		"`alpha = (ratio - 1) * preRateSurv / preRateDying`, so the same ratio change is a different normalised gain at a different PRE-DEATH RATE BALANCE OVER `W`: the dying account's share of pre-death rate over `W`, `preRateDying / (preRateDying + preRateSurv)`. That balance is not the `dying pre-share` column, which is measured over `W_pre`; where the two widths differ the two numbers can differ, and both are correct over their own interval. A ratio difference does not measure a fraction of the dying account's demand. The raw rates over `W` and the raw volumes over `W_pre` are printed beside both.",
 	);
 	out.push("");
 	out.push(

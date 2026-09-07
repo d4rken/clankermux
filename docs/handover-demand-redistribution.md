@@ -65,8 +65,8 @@ flat slopes, and the coefficient would be tuned on the same run it would be
 judged on. What landed instead is the measurement tooling, `6097d175`
 (v2026.9.12).
 
-**The observation-lag parity experiment is complete and refuted its own
-hypothesis (v2026.9.14, `7a0173e6`).** The scenario had scheduled every
+**The observation-lag parity experiment is complete (v2026.9.14,
+`7a0173e6`).** The scenario had scheduled every
 window's exhaustion from the replayed instant while the reading it scheduled
 from was measured at an earlier one, so the burn between those two instants
 entered no projection. The scan now advances each reading over that lag, taking

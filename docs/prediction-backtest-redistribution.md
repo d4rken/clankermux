@@ -1,6 +1,6 @@
 # ClankerMux runway redistribution backtest
 
-Generated: 2026-09-07T12:52:38.718Z
+Generated: 2026-09-07T12:56:41.148Z
 
 Reproduce with:
 
@@ -20,11 +20,11 @@ bun scripts/redistribution-backtest.ts --db=/home/darken/.config/clankermux/clan
 
 | field | value |
 |---|---|
-| usage_snapshots rows | 195681 |
+| usage_snapshots rows | 195692 |
 | accounts | 7 |
 | providers | anthropic, codex |
 | first sample | 2026-06-02T12:48:00.294Z |
-| last sample | 2026-09-07T12:51:46.618Z |
+| last sample | 2026-09-07T12:55:46.621Z |
 | replay interval | `[2026-07-01T00:00:00.000Z, 2026-09-06T00:00:00.000Z)` |
 | grid instants | 9648 |
 
@@ -2277,7 +2277,7 @@ G                  = P - N
 largestGainShare   = max_s max(delta_s, 0) / P   (null when G <= 0)
 ```
 
-`alpha = (ratio - 1) * preRateSurv / preRateDying`, so the same ratio change is a different normalised gain at a different PRE-DEATH RATE BALANCE OVER `W`: the dying account's share of pre-death rate over `W`, `preRateDying / (preRateDying + preRateSurv)`. That balance is not the `dying pre-share` column, which is measured over `W_pre`; where the two widths differ the two numbers differ, and both are correct over their own interval. A ratio difference does not measure a fraction of the dying account's demand. The raw rates over `W` and the raw volumes over `W_pre` are printed beside both.
+`alpha = (ratio - 1) * preRateSurv / preRateDying`, so the same ratio change is a different normalised gain at a different PRE-DEATH RATE BALANCE OVER `W`: the dying account's share of pre-death rate over `W`, `preRateDying / (preRateDying + preRateSurv)`. That balance is not the `dying pre-share` column, which is measured over `W_pre`; where the two widths differ the two numbers can differ, and both are correct over their own interval. A ratio difference does not measure a fraction of the dying account's demand. The raw rates over `W` and the raw volumes over `W_pre` are printed beside both.
 
 `largestGainShare` is the largest account's share of positive rate increases. It is not a share of the volume that moved: it divides one account's rise by the sum of the rises and does not see the falls, which is why it has no value where the survivor set's net change `G` is zero or negative.
 
@@ -3961,11 +3961,11 @@ What step 4 does with this:
 - A regression fit that states no ETA — a flat or falling six-hour fit, which an idle account inside a live window produces — has no recoverable anchor either: the fit's anchor is back-solved from the ETA. Such a window is scheduled from the replayed instant in BOTH scans, which is pre-existing behaviour and not something the correction introduced, and the lag-population table counts those records apart from the lags it medians.
 - Pending at this run (tag and servable class): peer-exhaustion (codex), add (codex), upgrade (codex). Those pairs hold no usable, uncensored weekly record common to all models, and each carries at least one tagged weekly window still pending at the label horizon, so their weekly half is unlabelled and the verdict is provisional.
 - Positive counts (all records, per model) — current: 3686 actual positives of 25200 scored; scenario-equal: 5826 actual positives of 42295 scored; scenario-equal-original: 5826 actual positives of 42295 scored; scenario-headroom: 5826 actual positives of 42295 scored.
-- `total_tokens` is null or zero on 8938 of 618946 attributed `requests` rows in the loaded span (1.4 %); those contribute zero to the absorption measurement's token basis.
+- `total_tokens` is null or zero on 8938 of 618961 attributed `requests` rows in the loaded span (1.4 %); those contribute zero to the absorption measurement's token basis.
 
 ## Notes
 
 - Placeholder windows skipped: 233.
-- Replay took 17.9 s over 9648 instants; scoring and bootstrap 3.3 s.
+- Replay took 14.6 s over 9648 instants; scoring and bootstrap 3.3 s.
 - Grid step 10 min; rows loaded 8 days either side of the replay interval.
-- Request buckets loaded: 64057 minute buckets over 7 accounts, on a 60-second grid, spanning 2026-06-23T09:31:00.000Z to 2026-09-07T12:53:00.000Z.
+- Request buckets loaded: 64062 minute buckets over 7 accounts, on a 60-second grid, spanning 2026-06-23T09:31:00.000Z to 2026-09-07T12:56:00.000Z.
