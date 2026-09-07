@@ -149,7 +149,7 @@ describe("LimitsTab per-section gating", () => {
 		expect(html).toContain("Quota runway");
 		expect(html).toContain("3d 2h");
 		expect(html).toContain("Backup weekly");
-		expect(html).toContain("Runs out at this pace");
+		expect(html).toContain("Runs out");
 		// The sections that DO depend on those reads say so, rather than printing
 		// a measured-looking zero.
 		expect(html).toContain("Quota overview");
@@ -167,7 +167,7 @@ describe("LimitsTab per-section gating", () => {
 		const html = render(queryClient);
 
 		expect(html).toContain("3d 2h");
-		expect(html).toContain("Runs out at this pace");
+		expect(html).toContain("Runs out");
 		expect(html).toContain("Account performance data unavailable");
 		expect(html).not.toContain("Runway data unavailable");
 		expect(html).not.toContain("$0.00");
@@ -186,7 +186,7 @@ describe("LimitsTab per-section gating", () => {
 
 		expect(html).toContain("3d 2h");
 		expect(html).toContain("Backup weekly");
-		expect(html).toContain("Runs out at this pace");
+		expect(html).toContain("Runs out");
 		expect(html).not.toContain("Runway data unavailable");
 		// The two window panels beside it, and the utilization card below, are the
 		// ones that go dark.

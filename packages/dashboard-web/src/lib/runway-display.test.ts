@@ -260,7 +260,7 @@ describe("runwayQualifier", () => {
 				},
 				NOW,
 			),
-		).toBe("at this pace, no run-out within 14d");
+		).toBe("no run-out within 14d");
 	});
 
 	it("counts the accounts the figure could not see", () => {
@@ -279,7 +279,7 @@ describe("runwayQualifier", () => {
 				},
 				NOW,
 			),
-		).toBe("at this pace, no run-out within 14d · 1 account unknown");
+		).toBe("no run-out within 14d · 1 account unknown");
 	});
 
 	it("is null when there is nothing to qualify", () => {
@@ -306,7 +306,7 @@ describe("runwayQualifier", () => {
 				},
 				NOW,
 			),
-		).toBe("at this pace, no run-out within 14d · out in 2d 12h at +12% pace");
+		).toBe("no run-out within 14d · out in 2d 12h at +12% pace");
 	});
 
 	it("renders a not-ahead pace-margin instant as 'now', never negative time", () => {
@@ -320,7 +320,7 @@ describe("runwayQualifier", () => {
 				},
 				NOW,
 			),
-		).toBe("at this pace, no run-out within 14d · out now at +12% pace");
+		).toBe("no run-out within 14d · out now at +12% pace");
 	});
 });
 
@@ -408,7 +408,7 @@ describe("runwayPaceMargin", () => {
 				NOW,
 			),
 		).toBe(
-			"at this pace, no run-out within 14d · out in 12h at +5% pace · 1 account unknown",
+			"no run-out within 14d · out in 12h at +5% pace · 1 account unknown",
 		);
 	});
 });

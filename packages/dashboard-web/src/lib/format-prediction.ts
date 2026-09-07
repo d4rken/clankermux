@@ -33,7 +33,7 @@ export interface ProjectedUsage {
  * figure. Shared by both projection paths so they read identically.
  */
 export const RESETS_BEFORE_EXHAUSTION_MESSAGE =
-	"At this pace, on track to reset before running out";
+	"On track to reset before running out";
 
 /**
  * Formats a positive millisecond duration as "Xh Ym" (or "Ym" under an hour).
@@ -135,7 +135,7 @@ export function formatPredictionMessage(
 			if (pred.etaExhaustMs < resetTimeMs) {
 				const marginMs = resetTimeMs - pred.etaExhaustMs;
 				return {
-					message: `At this pace, runs out ${formatDuration(marginMs)} before reset`,
+					message: `Runs out ${formatDuration(marginMs)} before reset`,
 					tone: earlyExhaustionTone(marginMs, windowDurationMs),
 				};
 			}
@@ -147,7 +147,7 @@ export function formatPredictionMessage(
 		// No reset to run out "before" means no margin at all to measure, so the
 		// tier rule cannot reach red however near the ETA is.
 		return {
-			message: `At this pace, runs out in ${formatDuration(pred.etaExhaustMs - now)}`,
+			message: `Runs out in ${formatDuration(pred.etaExhaustMs - now)}`,
 			tone: "warning",
 		};
 	}

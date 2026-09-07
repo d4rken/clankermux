@@ -566,9 +566,7 @@ describe("RateLimitProgress", () => {
 				/>,
 			);
 
-			expect(html).toContain(
-				"At this pace, on track to reset before running out",
-			);
+			expect(html).toContain("On track to reset before running out");
 			expect(html).toContain("text-success-strong");
 			expect(html).not.toContain("text-destructive-strong");
 		});
@@ -611,9 +609,7 @@ describe("RateLimitProgress", () => {
 				/>,
 			);
 
-			expect(html).toContain(
-				"At this pace, on track to reset before running out",
-			);
+			expect(html).toContain("On track to reset before running out");
 			expect(html).toContain("text-success-strong");
 			expect(html).not.toContain("text-destructive-strong");
 		});
@@ -902,7 +898,7 @@ describe("RateLimitProgress", () => {
 				/>,
 			);
 
-			expect(html).toContain("At this pace, runs out 10h 0m before reset");
+			expect(html).toContain("Runs out 10h 0m before reset");
 			expect(html).toContain("bg-warning");
 			expect(html).toContain("text-warning-strong");
 			expect(html).not.toContain("bg-destructive");
@@ -1594,13 +1590,11 @@ describe("burn-anchored weekly projection", () => {
 				windowResetMs: resetMs,
 			},
 		});
-		expect(anchored).toContain("At this pace, runs out");
+		expect(anchored).toContain("Runs out");
 		expect(anchored).toContain("text-destructive-strong");
 
 		const unanchored = render({ pct: 40, resetMs, asOfMs: now, anchor: null });
-		expect(unanchored).toContain(
-			"At this pace, on track to reset before running out",
-		);
+		expect(unanchored).toContain("On track to reset before running out");
 	});
 
 	it("caps the anchored run-out at amber within the first hour of evidence", () => {
@@ -1618,33 +1612,28 @@ describe("burn-anchored weekly projection", () => {
 				windowResetMs: resetMs,
 			},
 		});
-		expect(html).toContain("At this pace, runs out");
+		expect(html).toContain("Runs out");
 		expect(html).toContain("text-warning-strong");
 		expect(html).not.toContain("text-destructive-strong");
 	});
 });
 
-describe("conditional projection wording", () => {
+describe("projection wording", () => {
 	const HOUR = 60 * 60 * 1000;
 
-	// Every rendered run-out claim is an extrapolation of the current pace, so it
-	// has to say so. Scans the markup for the phrase rather than for one known
-	// string, which is what catches a NEW projection line added without the
-	// qualifier.
-	function unqualifiedRunOutPhrases(html: string): string[] {
-		const prefix = "At this pace, ";
+	// The copy states each projection plainly. Scans the markup for the hedge
+	// rather than for one known string, which is what catches a NEW projection
+	// line added with a prefix.
+	function hedgedPhrases(html: string): string[] {
 		const found: string[] = [];
-		for (const match of html.matchAll(/[Rr]uns out/g)) {
+		for (const match of html.matchAll(/at this pace/gi)) {
 			const start = match.index ?? 0;
-			const preceding = html.slice(Math.max(0, start - prefix.length), start);
-			if (preceding !== prefix) {
-				found.push(html.slice(Math.max(0, start - 30), start + 30));
-			}
+			found.push(html.slice(Math.max(0, start - 30), start + 30));
 		}
 		return found;
 	}
 
-	it("qualifies the projection on every window it renders", () => {
+	it("states the projection plainly on every window it renders", () => {
 		const now = Date.now();
 		const fiveReset = now + HOUR;
 		const weeklyReset = now + 3 * 24 * HOUR;
@@ -1673,11 +1662,9 @@ describe("conditional projection wording", () => {
 			/>,
 		);
 
-		expect(html).toContain("At this pace, runs out");
-		expect(html).toContain(
-			"At this pace, on track to reset before running out",
-		);
-		expect(unqualifiedRunOutPhrases(html)).toEqual([]);
+		expect(html).toContain("Runs out");
+		expect(html).toContain("On track to reset before running out");
+		expect(hedgedPhrases(html)).toEqual([]);
 	});
 
 	it("reports a spent window as exhausted with the time until its reset", () => {
@@ -1708,6 +1695,6 @@ describe("conditional projection wording", () => {
 		expect(html).toContain("Quota exhausted — resets in 2h 0m");
 		// Tone is unchanged by this rewording: amber, not red.
 		expect(html).toContain("text-warning-strong");
-		expect(unqualifiedRunOutPhrases(html)).toEqual([]);
+		expect(hedgedPhrases(html)).toEqual([]);
 	});
 });
