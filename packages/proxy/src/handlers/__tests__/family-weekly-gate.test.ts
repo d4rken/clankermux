@@ -773,3 +773,16 @@ describe("hasAccountWideUnifiedRejection", () => {
 		).toBe(false);
 	});
 });
+
+it("does not wait for a family sibling with an organization access restriction", () => {
+	expect(
+		resolveTransientlyCooledFamilySibling(
+			makeAccount({ rate_limited_reason: "org_permission_denied" }),
+			"fable",
+			null,
+			NOW + 30_000,
+			null,
+			NOW,
+		),
+	).toBeNull();
+});

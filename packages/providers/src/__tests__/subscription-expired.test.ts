@@ -11,9 +11,9 @@ const EXPIRED_BODY = JSON.stringify({
 });
 
 describe("classifyUsageFetchFailure", () => {
-	it("classifies a 403 permission_error as subscription_expired", () => {
+	it("classifies a 403 permission_error as usage_permission_denied", () => {
 		expect(classifyUsageFetchFailure(403, EXPIRED_BODY)).toBe(
-			"subscription_expired",
+			"usage_permission_denied",
 		);
 	});
 
@@ -58,7 +58,7 @@ async function settle() {
 	await new Promise((resolve) => setTimeout(resolve, 20));
 }
 
-describe("usageCache subscription-expired transitions", () => {
+describe("usageCache usage-permission-denied transitions", () => {
 	const ACCOUNT = "test-subscription-expired-account";
 	let fetchSpy: ReturnType<typeof spyOn> | null = null;
 
@@ -68,7 +68,7 @@ describe("usageCache subscription-expired transitions", () => {
 		fetchSpy = null;
 	});
 
-	it("fires onSubscriptionExpired once per transition and onUsageRecovered on recovery", async () => {
+	it("fires onUsagePermissionDenied once per transition and onUsageRecovered on recovery", async () => {
 		let mode: "expired" | "ok" = "expired";
 		fetchSpy = spyOn(globalThis, "fetch").mockImplementation(async () =>
 			mode === "expired" ? expiredResponse() : successResponse(),
@@ -125,7 +125,7 @@ describe("usageCache subscription-expired transitions", () => {
 		);
 		await settle();
 
-		// First success after process start fires so a subscription_expired
+		// First success after process start fires so a usage_permission_denied
 		// pause persisted before a restart can be lifted (the callback checks
 		// the pause reason in the DB and no-ops otherwise).
 		expect(recoveredCalls).toEqual([ACCOUNT]);

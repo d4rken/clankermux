@@ -25,6 +25,7 @@ import {
 	getFreshCapacity,
 	getProvider,
 	isAnthropicHardLimitStatus,
+	isAnthropicOrgPermissionDenied,
 	isAnthropicOutOfCredits,
 	usageCache,
 } from "@clankermux/providers";
@@ -202,6 +203,7 @@ export type ProxyAttemptOutcome =
 	  }
 	| { kind: "hard_429"; cooldownUntil?: number }
 	| { kind: "auth" }
+	| { kind: "org_permission_denied" }
 	| { kind: "overload_529"; cooldownUntil?: number }
 	| { kind: "overload_suppressed"; until: number | null }
 	| { kind: "model_not_found" }
@@ -227,6 +229,9 @@ export type ProxyAttemptOutcome =
  * callers and tests are unaffected.
  */
 export interface ProxyAttemptOptions {
+	/** True only when no account failover remains. Separate from the 529 flag,
+	 * which can stop early when all remaining accounts share the overloaded provider. */
+	isLastAccountAttempt?: () => boolean;
 	/**
 	 * Sink invoked exactly once with the categorical outcome whenever the attempt
 	 * fails over (returns `null`) or forwards a model-not-found. The proxy uses it
@@ -2603,6 +2608,61 @@ export async function proxyWithAccount(
 			}
 		}
 
+		// All model/cache-control retries have settled. A confirmed organization
+		// restriction removes this account, while the caller's candidate list still
+		// enforces API-key account/provider pins. The global force-account path is
+		// separate and deliberately never reaches this policy.
+		const orgPermissionDenied =
+			isClaudeProvider &&
+			(await isAnthropicOrgPermissionDenied(rawResponse, req.signal));
+		if (orgPermissionDenied) {
+			const reason: RateLimitReason = "org_permission_denied";
+			// Share the existing escalating cooldown counter deliberately (30s to
+			// 5min). Access denials are not quotas; the distinct reason excludes them
+			// from quota recovery and transient holds despite sharing that storage.
+			applyRateLimitCooldown(account, { reason }, ctx);
+			log.warn(
+				`Account ${account.name} org_permission_denied (403): organization disabled OAuth/Claude Code access; cooling down this account`,
+			);
+			if (!options?.isLastAccountAttempt?.()) {
+				if (!isTrustedProbe("any")) {
+					ctx.asyncWriter.enqueue(() =>
+						ctx.dbOps.saveRequest({
+							id: crypto.randomUUID(),
+							method: req.method,
+							path: url.pathname,
+							accountUsed: account.id,
+							statusCode: 403,
+							success: false,
+							errorMessage: reason,
+							responseTime: Date.now() - requestMeta.timestamp,
+							failoverAttempts,
+							usage: activeUpstreamModel
+								? { model: activeUpstreamModel }
+								: undefined,
+							apiKeyId: apiKeyId ?? undefined,
+							apiKeyName: apiKeyName ?? undefined,
+							project: requestMeta.project ?? null,
+							projectAttributionSource:
+								requestMeta.projectAttributionSource ?? null,
+							comboName: requestMeta.comboName ?? null,
+							reasoningEffort: requestMeta.reasoningEffort ?? null,
+							sessionKey: requestMeta.sessionKey ?? null,
+							cachePrefixHashes: requestMeta.cachePrefixHashes ?? null,
+							requestedModel: requestMeta.requestedModel ?? null,
+							fallbackCreditClaimed:
+								requestMeta.fallbackCreditClaimed ?? undefined,
+							fallbackFromModel: requestMeta.fallbackFromModel ?? undefined,
+						}),
+					);
+				}
+				return await fail({ kind: "org_permission_denied" }, rawResponse);
+			}
+			// Preserve the actionable upstream 403 when no allowed fallback remains.
+			// The normal forwarding path records it exactly once and owns its body.
+			options?.onOutcome?.({ kind: "org_permission_denied" });
+		}
+
 		// Inject request metadata into response headers so providers can read
 		// stream intent and request ID without needing the original request object.
 		const responseHeaders = new Headers(rawResponse.headers);
@@ -2796,15 +2856,17 @@ export async function proxyWithAccount(
 			response.status === 529 && isTerminalAttempt()
 				? response.clone()
 				: response;
-		const isRateLimited = await processProxyResponse(
-			responseForRateLimitCheck,
-			account,
-			{
-				...ctx,
-				provider,
-			},
-			requestMeta,
-		);
+		const isRateLimited = orgPermissionDenied
+			? false
+			: await processProxyResponse(
+					responseForRateLimitCheck,
+					account,
+					{
+						...ctx,
+						provider,
+					},
+					requestMeta,
+				);
 		// processProxyResponse only needed the rate-limit view (headers, or a
 		// provider body-parse that consumes it). When it was a distinct clone
 		// (final-529 path), release its tee branch now — the original `response`

@@ -846,3 +846,19 @@ describe("isAccountWideFailure", () => {
 		).toBe(true);
 	});
 });
+
+it("does not use organization cooldowns as a transient recovery signal", async () => {
+	const clock = fakeHoldClock();
+	const account = makeAccount({
+		id: uniqueId("org-denied"),
+		rate_limited_reason: "org_permission_denied",
+		rate_limited_until: clock.now() + 20,
+	});
+	const { holds, gated } = makeHolds([account], alwaysSuppressed, {}, clock);
+	expect(
+		await holds.holdForNonCodexRecovery(100, "organization test", {
+			eligible: () => true,
+		}),
+	).toBeNull();
+	expect(gated).toEqual([]);
+});

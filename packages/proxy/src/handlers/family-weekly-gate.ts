@@ -375,7 +375,9 @@ export function resolveTransientlyCooledFamilySibling(
 	now: number,
 ): TransientlyCooledFamilySibling | null {
 	if (account.provider !== "anthropic") return null;
-	if (account.paused) return null;
+	// An admin-gated restriction is not evidence of transient recovery.
+	if (account.paused || account.rate_limited_reason === "org_permission_denied")
+		return null;
 
 	const rl =
 		rateLimitedUntil != null && rateLimitedUntil > now ? rateLimitedUntil : 0;
