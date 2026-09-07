@@ -282,7 +282,7 @@ decisions that were already made and are not yours to reopen.
 
 ---
 
-**The failover line was scored and does not ship (2026-09-07, v2026.9.23).**
+**The failover line was scored and does not ship (2026-09-07, v2026.9.25).**
 Before any surface read the scenario, its one candidate use was written down as
 a predicate, `packages/core/src/failover-forecast.ts`: under a five-hour
 window's standalone forecast, show the scenario's run-out for that window when
@@ -320,7 +320,7 @@ production calls it and no wire type carries its result. A future surface
 needs a re-declared rule on outcomes not yet inspected, with a paired
 warning-benefit check beside precision; if it excludes the weekly-associated
 subset it must do so before that run, and re-running the same inspected period
-is exploratory rather than a decision. What shipped in v2026.9.23 is the
+is exploratory rather than a decision. What shipped in v2026.9.25 is the
 revert of the "At this pace" wording alone.
 
 ## 1. The problem in one picture
