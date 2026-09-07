@@ -29,6 +29,11 @@ const LazyLimitsTab = lazy(() =>
 		default: module.LazyLimits,
 	})),
 );
+const LazyCostsTab = lazy(() =>
+	import("./components/CostsTab").then((module) => ({
+		default: module.CostsTab,
+	})),
+);
 const LoadingSkeleton = () => (
 	<div className="space-y-section p-6">
 		<div className="animate-pulse">
@@ -78,6 +83,15 @@ export function App() {
 					</Suspense>
 				),
 				title: "Usage",
+			},
+			{
+				path: "/costs",
+				title: "Costs",
+				element: (
+					<Suspense fallback={<LoadingSkeleton />}>
+						<LazyCostsTab />
+					</Suspense>
+				),
 			},
 			{
 				path: "/requests",

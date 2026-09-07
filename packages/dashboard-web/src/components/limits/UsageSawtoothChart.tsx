@@ -199,6 +199,7 @@ function buildWindowChart(
 	// stay a pure function so the useMemo below keeps working.
 	sequence: readonly string[],
 	poolStroke: string,
+	showForecast = true,
 ): WindowChart {
 	const pool = history?.pool ?? [];
 	const series = history?.series ?? [];
@@ -241,13 +242,9 @@ function buildWindowChart(
 	// range so a 7-day projection can't dwarf a short history window.
 	const cadenceMs = bucketMs > 0 ? bucketMs : Math.max(60_000, rangeMs / 48);
 	const horizonMs = now + rangeMs;
-	const forecast = computeWindowForecast(
-		accounts,
-		window,
-		now,
-		cadenceMs,
-		horizonMs,
-	);
+	const forecast = showForecast
+		? computeWindowForecast(accounts, window, now, cadenceMs, horizonMs)
+		: [];
 	let nextColor = series.length;
 	for (const f of forecast) {
 		const solidKey = f.accountId ?? POOL_KEY;
@@ -505,5 +502,153 @@ export function UsageSawtoothChart({
 				))}
 			</CardContent>
 		</Card>
+	);
+}
+
+interface FocusedQuotaChartProps {
+	accounts: AccountResponse[];
+	now: number;
+	window: ForecastWindow;
+	history?: UsageHistoryResponse;
+	scopedHistory?: UsageScopedHistoryResponse;
+	loading: boolean;
+	unavailableReason?: string;
+	showForecast: boolean;
+	showAccounts: boolean;
+}
+export function buildFocusedQuotaChart(
+	{
+		accounts,
+		now,
+		window,
+		history,
+		scopedHistory,
+		showForecast,
+		showAccounts,
+	}: Omit<FocusedQuotaChartProps, "loading" | "unavailableReason">,
+	sequence: readonly string[],
+): WindowChart {
+	const normalized =
+		typeof window === "string"
+			? windowHistoryFromUsage(history, window)
+			: windowHistoryFromScopedFamily(scopedHistory, window.family);
+	const ids = new Set(accounts.map((a) => a.id));
+	const selected = normalized
+		? {
+				...normalized,
+				series: normalized.series.filter((s) => ids.has(s.accountId)),
+				pool: [],
+			}
+		: undefined;
+	const built = buildWindowChart(
+		selected,
+		accounts,
+		window,
+		now,
+		sequence,
+		"var(--primary)",
+		showForecast,
+	);
+	for (const row of built.data) {
+		for (const [key, value] of Object.entries(row))
+			if (key !== "ts" && key !== "time" && typeof value === "number")
+				row[key] = Math.max(0, Math.min(100, 100 - value));
+		// Missing account readings never shrink the denominator of the average.
+		for (const suffix of ["", "__fc"]) {
+			const values = [...ids].map((id) => row[`${id}${suffix}`]);
+			row[`pool${suffix}`] =
+				values.length && values.every((v) => typeof v === "number")
+					? values.reduce<number>((sum, v) => sum + (v as number), 0) /
+						values.length
+					: null;
+		}
+	}
+	built.lines = built.lines
+		.filter(
+			(line) =>
+				showAccounts || line.dataKey === "pool" || line.dataKey === "pool__fc",
+		)
+		.map((line) => ({
+			...line,
+			name:
+				line.dataKey === "pool"
+					? "Average remaining"
+					: line.dataKey === "pool__fc"
+						? "At current pace"
+						: line.name,
+		}));
+	return built;
+}
+
+/** One selected provider/model and window; Overview links select this same scope. */
+export function FocusedQuotaChart({
+	accounts,
+	now,
+	window,
+	history,
+	scopedHistory,
+	loading,
+	unavailableReason,
+	showForecast,
+	showAccounts,
+}: FocusedQuotaChartProps) {
+	const palette = useSeriesPalette();
+	const chart = useMemo(
+		() =>
+			buildFocusedQuotaChart(
+				{
+					accounts,
+					now,
+					window,
+					history,
+					scopedHistory,
+					showForecast,
+					showAccounts,
+				},
+				palette.sequence,
+			),
+		[
+			accounts,
+			now,
+			window,
+			history,
+			scopedHistory,
+			showForecast,
+			showAccounts,
+			palette.sequence,
+		],
+	);
+
+	if (unavailableReason)
+		return (
+			<p className="py-12 text-center text-muted-foreground">
+				{unavailableReason}
+			</p>
+		);
+	const hasValues = chart.data.some((row) =>
+		chart.lines.some((line) => row[line.dataKey] != null),
+	);
+	if (!loading && !hasValues)
+		return (
+			<p className="py-12 text-center text-muted-foreground">
+				No complete history for this selection yet. Enable account lines to
+				inspect partial history, or see account details below.
+			</p>
+		);
+	return (
+		<BaseLineChart
+			data={chart.data as unknown as ChartDataPoint[]}
+			lines={chart.lines}
+			loading={loading}
+			height="medium"
+			lineType="linear"
+			showLegend
+			yAxisDomain={[0, 100]}
+			yAxisTickFormatter={(v) => `${v}%`}
+			tooltipFormatter={(value, name) => [
+				`${Number(value).toFixed(0)}% remaining`,
+				name,
+			]}
+		/>
 	);
 }

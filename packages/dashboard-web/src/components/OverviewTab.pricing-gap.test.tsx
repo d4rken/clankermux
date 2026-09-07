@@ -3,13 +3,8 @@ import type { PricingGap, SystemStatusResponse } from "@clankermux/types";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { renderToStaticMarkup } from "react-dom/server";
 import { MemoryRouter } from "react-router";
-import { canonicalSections } from "../lib/analytics-sections";
 import { queryKeys } from "../lib/query-keys";
-import {
-	OVERVIEW_ERROR_WINDOW_HOURS,
-	OVERVIEW_SECTIONS,
-	OverviewTab,
-} from "./OverviewTab";
+import { OVERVIEW_ERROR_WINDOW_HOURS, OverviewTab } from "./OverviewTab";
 
 /**
  * Wiring test: a unit test of the banner component proves it renders, not that
@@ -78,42 +73,6 @@ function renderOverview(gaps: PricingGap[]): string {
 		recentErrors: [],
 		topModels: [],
 	});
-	// The analytics key embeds the section list too — same reason as the error
-	// window above: a mismatched key means `undefined` analytics and a tile that
-	// never leaves its placeholder.
-	client.setQueryData(
-		queryKeys.analytics(
-			"6h",
-			{ accounts: [], models: [], status: "all" },
-			"normal",
-			false,
-			canonicalSections(OVERVIEW_SECTIONS),
-		),
-		{
-			totals: {
-				requests: 0,
-				successRate: 0,
-				activeAccounts: 0,
-				avgResponseTime: 0,
-				totalTokens: 0,
-				totalCostUsd: 0,
-				cacheHitRate: 0,
-			},
-			timeSeries: [],
-			modelDistribution: [],
-			accountPerformance: [],
-			apiKeyModelUsage: [],
-			projectBreakdown: [],
-			tokenBreakdown: {
-				inputTokens: 0,
-				cacheReadInputTokens: 0,
-				cacheCreationInputTokens: 0,
-				outputTokens: 0,
-			},
-			costByModel: [],
-			modelPerformance: [],
-		},
-	);
 	client.setQueryData(queryKeys.accounts(), []);
 
 	// MemoryRouter, not just the query provider: the Overview's health strip and
