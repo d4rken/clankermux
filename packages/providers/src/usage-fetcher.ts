@@ -31,7 +31,11 @@ import {
 } from "./minimax-usage-fetcher";
 import type { CodexCreditsInfo } from "./providers/codex/usage";
 import { isGenuineWindowRoll } from "./window-reset";
-import { fetchZaiUsageData, type ZaiUsageData } from "./zai-usage-fetcher";
+import {
+	fetchZaiUsageData,
+	getRepresentativeZaiUtilization,
+	type ZaiUsageData,
+} from "./zai-usage-fetcher";
 
 const log = new Logger("UsageFetcher");
 
@@ -349,7 +353,7 @@ export function extractWindowResetTime(
 ): number | null {
 	if (provider === "zai") {
 		const zai = data as ZaiUsageData;
-		return zai.tokens_limit?.resetAt ?? null;
+		return (zai.tokens_limit ?? zai.tokens_limit_weekly)?.resetAt ?? null;
 	}
 	if (provider === "minimax") {
 		const m = data as MinimaxUsageData;
@@ -740,14 +744,8 @@ export function getRepresentativeUtilizationForProvider(
 				utils.push(d.extra_usage.utilization);
 			return utils.length > 0 ? Math.max(...utils) : null;
 		}
-		case "zai": {
-			const zai = data as ZaiUsageData;
-			const candidates = [
-				zai.time_limit?.percentage ?? null,
-				zai.tokens_limit?.percentage ?? null,
-			].filter((v): v is number => v !== null);
-			return candidates.length > 0 ? Math.max(...candidates) : null;
-		}
+		case "zai":
+			return getRepresentativeZaiUtilization(data as ZaiUsageData);
 		case "kilo": {
 			return getRepresentativeKiloUtilization(data as KiloUsageData);
 		}
@@ -2154,8 +2152,25 @@ class UsageCache {
 		const previous = this.cache.get(accountId);
 		if (!previous) return; // first poll — no baseline to compare against
 
-		const prevResetAt = extractWindowResetTime(previous.data, provider);
-		const newResetAt = extractWindowResetTime(newData, provider);
+		// Compare like windows. Comparing whichever window currently wins by
+		// utilization can mistake a winner change for a reset of one window.
+		const pairs =
+			provider === "zai"
+				? (["tokens_limit", "tokens_limit_weekly"] as const).map((key) => ({
+						prevResetAt: (previous.data as ZaiUsageData)[key]?.resetAt ?? null,
+						newResetAt: (newData as ZaiUsageData)[key]?.resetAt ?? null,
+					}))
+				: [
+						{
+							prevResetAt: extractWindowResetTime(previous.data, provider),
+							newResetAt: extractWindowResetTime(newData, provider),
+						},
+					];
+		const rolled = pairs.find(({ prevResetAt, newResetAt }) =>
+			isGenuineWindowRoll(prevResetAt, newResetAt, now),
+		);
+		if (!rolled) return;
+		const { prevResetAt, newResetAt } = rolled;
 
 		if (isGenuineWindowRoll(prevResetAt, newResetAt, now)) {
 			// isGenuineWindowRoll guarantees both are non-null here; the assertions

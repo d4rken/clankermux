@@ -122,6 +122,70 @@ describe("usageCache window-reset callback", () => {
 	// and the NEW one to still be in the future, which nominal small integers
 	// (both decades in the past) cannot express.
 	const NOW = 1_000_000_000_000;
+	it("notifies a weekly-only Zai rollover and a weekly rollover alongside an unchanged short quota", () => {
+		const quota = (resetAt: number, percentage = 0) => ({
+			used: 0,
+			remaining: 0,
+			percentage,
+			resetAt,
+			type: "tokens_limit",
+		});
+		for (const short of [null, quota(NOW + 10000)]) {
+			const before = {
+				time_limit: null,
+				tokens_limit: short,
+				tokens_limit_weekly: quota(NOW - 1000, 100),
+			};
+			const after = { ...before, tokens_limit_weekly: quota(NOW + 604800000) };
+			const callback = mock(() => {});
+			usageCache.set("zai-weekly-reset", before);
+			usageCache.notifyWindowReset(
+				"zai-weekly-reset",
+				after,
+				"zai",
+				callback,
+				NOW,
+			);
+			expect(callback).toHaveBeenCalledTimes(1);
+			usageCache.delete("zai-weekly-reset");
+		}
+		expect(
+			extractWindowResetTime(
+				{
+					time_limit: null,
+					tokens_limit: null,
+					tokens_limit_weekly: quota(NOW + 1000),
+				},
+				"zai",
+			),
+		).toBe(NOW + 1000);
+	});
+	it("does not mistake a change of the most-used Zai window for a rollover", () => {
+		const quota = (resetAt: number, percentage: number) => ({
+			used: 0,
+			remaining: 0,
+			percentage,
+			resetAt,
+			type: "tokens_limit",
+		});
+		const before = {
+			time_limit: null,
+			tokens_limit: quota(NOW - 1000, 90),
+			tokens_limit_weekly: quota(NOW + 10000, 80),
+		};
+		const after = { ...before, tokens_limit: quota(NOW - 1000, 10) };
+		const callback = mock(() => {});
+		usageCache.set("zai-winner-switch", before);
+		usageCache.notifyWindowReset(
+			"zai-winner-switch",
+			after,
+			"zai",
+			callback,
+			NOW,
+		);
+		expect(callback).not.toHaveBeenCalled();
+		usageCache.delete("zai-winner-switch");
+	});
 
 	it("fires onWindowReset when zai resetAt advances to a later value", () => {
 		const accountId = "zai-window-reset-test";
