@@ -200,6 +200,11 @@ export interface RunwayScenarioShare {
 	 * `now`, later for one that is dead at `now` and revives (an exhausted 5 h
 	 * window beside a learning weekly). `0` when it is never alive inside the
 	 * horizon, so no share was ever assigned to it.
+	 *
+	 * At `now` the FINAL assignment is the one reported: a peer that fills
+	 * inside its observation lag dies at `now` and the class is re-split there,
+	 * so the share captured before that death is provisional and the one the
+	 * account actually starts burning at is the later one.
 	 */
 	shareOfClass: number;
 }
@@ -211,6 +216,11 @@ export interface RunwayScenarioShare {
 export interface RunwayScenarioExhaustion {
 	accountId: string;
 	windowKind: string;
+	/**
+	 * May be at or before `now`: a window whose reading is older than `now` and
+	 * which filled inside that observation lag reports the instant it actually
+	 * reached 100 %, even though the scan applies the death at `now`.
+	 */
 	exhaustsAtMs: number;
 }
 
@@ -238,9 +248,10 @@ export interface RunwayScenarioBasis {
 	/**
 	 * Every pooled window the pace-1 baseline scan drove to 100 % BEFORE that
 	 * window's first reset or credit revival in the scan — the cycle the reading
-	 * at `now` belongs to. A window already at 100 % at `now` has no entry (that
-	 * is a fact, not a projection), and neither does one whose first exhaustion
-	 * falls in a later cycle. A dead account's OTHER windows are still walked and
+	 * at `now` belongs to. A window whose READING is already at 100 % has no
+	 * entry (that is a fact, not a projection), and neither does one whose first
+	 * exhaustion falls in a later cycle. A window the observation-lag advance
+	 * drives to 100 % by `now` DOES have one, at its true sub-`now` instant. A dead account's OTHER windows are still walked and
 	 * may have entries, so an `out-now` pool is not automatically an empty list.
 	 * Sorted by `exhaustsAtMs`, then `accountId`, then `windowKind`; `[]` when no
 	 * baseline scan completed.

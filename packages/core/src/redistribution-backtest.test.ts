@@ -12,9 +12,14 @@ import {
 	headroomShareRule,
 	knownLimitsFor,
 	lifecycleBalanced,
+	OBSERVATION_AGE_BUCKETS,
+	OVERALL_BOOTSTRAP_LABEL,
+	observationLagChecks,
+	pairedAbsMedian,
 	pairedSignedMedian,
 	prepareSeries,
 	READING_STALE_MS,
+	REPLAY_MODELS,
 	type RedistributionRecord,
 	type ReplayModel,
 	type ReplayRange,
@@ -24,9 +29,12 @@ import {
 	redistributionRecordToJson,
 	replayInstant,
 	replayRange,
+	SCENARIO_MODEL_IDS,
+	SCENARIO_MODELS,
 	SINCE_DEATH_BUCKETS,
 	scoreCohorts,
 	survivorSlopeTrajectory,
+	TRANSITION_BOOTSTRAP_LABEL,
 	type TransitionEvent,
 	transitionsAt,
 	type Verdict,
@@ -50,6 +58,8 @@ interface RowSpec {
 	/** Instants to leave a hole at (a sampler gap). */
 	skip?: (t: number) => boolean;
 	observed?: boolean;
+	/** How far `observed_at` sits BEFORE the sample time. Default 0. */
+	observedOffsetMs?: number;
 }
 
 function rows(spec: RowSpec): RosterSnapshotRow[] {
@@ -63,7 +73,8 @@ function rows(spec: RowSpec): RosterSnapshotRow[] {
 			accountId: spec.accountId,
 			provider: spec.provider ?? "anthropic",
 			sampledAt: t,
-			observedAt: spec.observed === false ? null : t,
+			observedAt:
+				spec.observed === false ? null : t - (spec.observedOffsetMs ?? 0),
 			fiveHourPct: five.pct,
 			fiveHourReset: five.reset,
 			sevenDayPct: seven.pct,
@@ -829,7 +840,7 @@ describe("replayRange", () => {
 		const anthropic = result.calibration.filter(
 			(row) => row.demandClass === "anthropic",
 		);
-		expect(anthropic).toHaveLength(3);
+		expect(anthropic).toHaveLength(REPLAY_MODELS.length);
 		expect(anthropic[0].observedOut).toBeGreaterThan(0);
 		expect(anthropic.every((row) => row.instants > 0)).toBe(true);
 		// A peer exhaustion is detected and its shadow tags instants.
@@ -987,27 +998,33 @@ function record(
 		learningAtT: false,
 		sinceDeathMs: null,
 		slopePctPerHour: null,
+		observationAgeMs: null,
+		sampleAgeMs: 0,
+		lagMs: 0,
+		estimatorSource: "lifetime-primary",
+		classLagFree: true,
+		pooledInClass: 1,
+		firstEvent: false,
+		peerDiedInLag: false,
+		exactShiftEligible: false,
+		lagAnchorKnown: true,
 		...overrides,
 	};
 }
 
 /** One record per model at each of `instants`, for one account. */
-function triple(
+function perModel(
 	accountId: string,
 	instants: number[],
-	perModel: Partial<
+	overrides: Partial<
 		Record<ReplayModel, (T: number) => Partial<RedistributionRecord>>
 	> = {},
 ): RedistributionRecord[] {
 	const out: RedistributionRecord[] = [];
 	for (const T of instants) {
-		for (const model of [
-			"current",
-			"scenario-equal",
-			"scenario-headroom",
-		] as const) {
+		for (const model of REPLAY_MODELS) {
 			out.push(
-				record({ model, accountId, T, ...(perModel[model]?.(T) ?? {}) }),
+				record({ model, accountId, T, ...(overrides[model]?.(T) ?? {}) }),
 			);
 		}
 	}
@@ -1035,8 +1052,8 @@ const replayOf = (
 describe("scoreCohorts", () => {
 	test("keeps one record per lifecycle, at the group's median instant", () => {
 		const instants = [T0, T0 + HOUR, T0 + 2 * HOUR, T0 + 3 * HOUR];
-		const balanced = lifecycleBalanced(triple("A", instants));
-		expect(balanced).toHaveLength(3);
+		const balanced = lifecycleBalanced(perModel("A", instants));
+		expect(balanced).toHaveLength(REPLAY_MODELS.length);
 		// Four instants -> the LOWER median, so the pick is deterministic.
 		expect(new Set(balanced.map((entry) => entry.T))).toEqual(
 			new Set([T0 + HOUR]),
@@ -1045,8 +1062,8 @@ describe("scoreCohorts", () => {
 
 	test("the common cohort drops an instant one model could not answer", () => {
 		const records = [
-			...triple("A", [T0, T0 + HOUR]),
-			...triple("B", [T0], {
+			...perModel("A", [T0, T0 + HOUR]),
+			...perModel("B", [T0], {
 				"scenario-headroom": () => ({
 					usable: false,
 					unusableReason: "insufficient_data",
@@ -1059,11 +1076,11 @@ describe("scoreCohorts", () => {
 	});
 
 	test("pairs the bias only where both models committed to a date", () => {
-		const records = triple("A", [T0, T0 + HOUR], {
+		const records = perModel("A", [T0, T0 + HOUR], {
 			"scenario-equal": (T) => ({ predictedEtaMs: T + DAY + 30 * MIN }),
 		});
 		records.push(
-			...triple("B", [T0], {
+			...perModel("B", [T0], {
 				current: () => ({ predictsExhaust: false, predictedEtaMs: null }),
 			}),
 		);
@@ -1074,7 +1091,7 @@ describe("scoreCohorts", () => {
 	});
 
 	test("scores the instants the current model withholds as a cohort of their own", () => {
-		const records = triple("A", [T0, T0 + HOUR], {
+		const records = perModel("A", [T0, T0 + HOUR], {
 			current: () => ({
 				learningAtT: true,
 				usable: false,
@@ -1096,17 +1113,23 @@ describe("scoreCohorts", () => {
 
 	test("bootstraps by block without touching the records it scores", () => {
 		const records = [
-			...triple("A", [T0, T0 + HOUR]),
-			...triple("B", [T0, T0 + HOUR]),
+			...perModel("A", [T0, T0 + HOUR]),
+			...perModel("B", [T0, T0 + HOUR]),
 		];
 		const cohorts = scoreCohorts(replayOf(records));
 		expect(records.every((entry) => ["A", "B"].includes(entry.accountId))).toBe(
 			true,
 		);
-		expect(cohorts.bootstrap).toHaveLength(6);
+		// Three statistics, two cohorts, two baselines.
+		expect(cohorts.bootstrap).toHaveLength(12);
 		expect(
-			cohorts.bootstrap.filter((entry) => entry.label.startsWith("Overall")),
-		).toHaveLength(3);
+			cohorts.bootstrap.filter(
+				(entry) => entry.label === OVERALL_BOOTSTRAP_LABEL,
+			),
+		).toHaveLength(6);
+		expect(new Set(cohorts.bootstrap.map((entry) => entry.baseline))).toEqual(
+			new Set(["current", "scenario-equal-original"]),
+		);
 		expect(cohorts.bootstrap.map((entry) => entry.statistic)).toContain(
 			"medianSignedErrorMinutes",
 		);
@@ -1127,6 +1150,10 @@ const cohort = (
 	label: string,
 	rows: Array<[ReplayModel, Partial<BacktestMetrics>]>,
 	pairedBias: CohortScores["pairedBias"],
+	vsOriginal?: {
+		bias?: CohortScores["pairedBias"];
+		abs?: CohortScores["pairedAbsVsOriginal"];
+	},
 ): CohortScores => ({
 	label,
 	records: 10,
@@ -1141,6 +1168,12 @@ const cohort = (
 		metrics: metrics(over),
 	})),
 	pairedBias,
+	pairedBiasVsOriginal: vsOriginal?.bias ?? {
+		n: 0,
+		medianA: null,
+		medianB: null,
+	},
+	pairedAbsVsOriginal: vsOriginal?.abs ?? { n: 0, medianDeltaMinutes: null },
 });
 
 function verdictFixture(options: {
@@ -1150,7 +1183,16 @@ function verdictFixture(options: {
 	currentRecall: number | null;
 	scenarioF1: number | null;
 	currentF1: number | null;
+	/** F1 of the pre-correction scan, criterion D's comparison. */
+	originalF1?: number | null;
+	originalRecall?: number | null;
+	/** Paired median of |err corrected| - |err original|, in minutes. */
+	pairedAbsVsOriginal?: number | null;
 	p97_5: number | null;
+	/** p97.5 of the entry whose baseline is the ORIGINAL scan. */
+	p97_5Original?: number | null;
+	/** Drop the current-baseline bootstrap entry, leaving only the original one. */
+	originalBaselineOnly?: boolean;
 	unlabelled?: boolean;
 	/** What the codex account's own event (and its record) is tagged with. */
 	codexEvent?: "add" | "peer-exhaustion";
@@ -1170,9 +1212,30 @@ function verdictFixture(options: {
 				"scenario-equal",
 				{ recall: options.scenarioRecall, f1: options.scenarioF1 },
 			],
+			[
+				"scenario-equal-original",
+				{
+					recall: options.originalRecall ?? 0.75,
+					f1: options.originalF1 === undefined ? 0.6 : options.originalF1,
+				},
+			],
 			["scenario-headroom", {}],
 		],
 		{ n: 4, medianA: options.scenarioBias, medianB: options.currentBias },
+		{
+			bias: {
+				n: 4,
+				medianA: options.scenarioBias,
+				medianB: options.scenarioBias,
+			},
+			abs: {
+				n: 4,
+				medianDeltaMinutes:
+					options.pairedAbsVsOriginal === undefined
+						? -3
+						: options.pairedAbsVsOriginal,
+			},
+		},
 	);
 	const overall = cohort("Overall", [], { n: 0, medianA: null, medianB: null });
 	// One `add` per servable class: the anthropic half is always labelled, the
@@ -1229,12 +1292,27 @@ function verdictFixture(options: {
 			medianB: null,
 		}),
 		bootstrap: [
+			...(options.originalBaselineOnly
+				? []
+				: [
+						{
+							label: OVERALL_BOOTSTRAP_LABEL,
+							statistic: "f1",
+							baseline: "current" as const,
+							p2_5: -0.1,
+							p50: 0.01,
+							p97_5: options.p97_5,
+							samples: 1000,
+						},
+					]),
 			{
-				label: "Overall (block = window lifecycle)",
+				label: OVERALL_BOOTSTRAP_LABEL,
 				statistic: "f1",
-				p2_5: -0.1,
-				p50: 0.01,
-				p97_5: options.p97_5,
+				baseline: "scenario-equal-original" as const,
+				p2_5: -0.4,
+				p50: -0.3,
+				p97_5:
+					options.p97_5Original === undefined ? -0.2 : options.p97_5Original,
 				samples: 1000,
 			},
 		],
@@ -1295,7 +1373,14 @@ describe("evaluateVerdict", () => {
 		const { cohorts, replay } = verdictFixture(base);
 		const verdict = evaluateVerdict(cohorts, replay);
 		expect(verdict.verdict).toBe("replace");
+		expect(verdict.criteria.map((entry) => entry.id)).toEqual([
+			"A",
+			"B",
+			"C",
+			"D",
+		]);
 		expect(verdict.criteria.map((entry) => entry.pass)).toEqual([
+			true,
 			true,
 			true,
 			true,
@@ -1374,6 +1459,69 @@ describe("evaluateVerdict", () => {
 		expect(verdict.provisional).toBe(false);
 	});
 
+	test("keeps the scenario when the correction scores worse than the original", () => {
+		const worseF1 = verdictFixture({
+			...base,
+			scenarioF1: 0.5,
+			originalF1: 0.6,
+		});
+		const byF1 = evaluateVerdict(worseF1.cohorts, worseF1.replay);
+		expect(byF1.criteria[3].pass).toBe(false);
+		expect(byF1.verdict).toBe("keep-scenario");
+
+		// Same F1, but the corrected ETAs are further from the truth.
+		const worseError = verdictFixture({
+			...base,
+			originalF1: base.scenarioF1,
+			pairedAbsVsOriginal: 4,
+		});
+		const byError = evaluateVerdict(worseError.cohorts, worseError.replay);
+		expect(byError.criteria[3].pass).toBe(false);
+		expect(byError.verdict).toBe("keep-scenario");
+	});
+
+	test("criterion D is indeterminate when a number is missing", () => {
+		const { cohorts, replay } = verdictFixture({
+			...base,
+			pairedAbsVsOriginal: null,
+		});
+		const verdict = evaluateVerdict(cohorts, replay);
+		expect(verdict.criteria[3].pass).toBeNull();
+		expect(verdict.verdict).toBe("insufficient-evidence");
+	});
+
+	test("criterion D prints both recalls without deciding on them", () => {
+		const { cohorts, replay } = verdictFixture({
+			...base,
+			scenarioRecall: 0.8,
+			originalRecall: 0.9,
+		});
+		const verdict = evaluateVerdict(cohorts, replay);
+		const names = verdict.criteria[3].values.map((value) => value.name);
+		expect(names).toContain("recall, scenario-equal");
+		expect(names).toContain("recall, scenario-equal-original");
+		// A worse recall than the original does not fail D: an ETA moved earlier
+		// never leaves the before-reset set.
+		expect(verdict.criteria[3].pass).toBe(true);
+	});
+
+	test("criterion C reads the CURRENT-baseline bootstrap entry only", () => {
+		// The original-baseline entry is entirely below zero; C must not see it.
+		const { cohorts, replay } = verdictFixture({
+			...base,
+			p97_5Original: -0.2,
+		});
+		expect(evaluateVerdict(cohorts, replay).criteria[2].pass).toBe(true);
+
+		const originalOnly = verdictFixture({
+			...base,
+			originalBaselineOnly: true,
+		});
+		const verdict = evaluateVerdict(originalOnly.cohorts, originalOnly.replay);
+		expect(verdict.criteria[2].pass).toBeNull();
+		expect(verdict.verdict).toBe("insufficient-evidence");
+	});
+
 	test("a tag labelled in every class it has events in is not provisional", () => {
 		const { cohorts, replay } = verdictFixture(base);
 		const verdict = evaluateVerdict(cohorts, replay);
@@ -1397,7 +1545,7 @@ describe("knownLimitsFor", () => {
 			evaluateVerdict(cohorts, replay),
 		);
 		expect(limits).toContain(
-			"`anthropic` supplies 100.0 % of the overall common-cohort records, so the overall numbers are close to that class's numbers.",
+			"`anthropic` supplies 100.0 % of the overall common-cohort records.",
 		);
 	});
 
@@ -1561,7 +1709,7 @@ describe("formatRedistributionReport", () => {
 			10,
 		);
 		expect(pendingMarkdown).toContain(
-			"PROVISIONAL: the add (codex) cohort has no completed weekly window inside the replay interval",
+			"PROVISIONAL: the add (codex) pair holds no usable, uncensored weekly record common to all models, and it carries at least one tagged weekly window still pending at the label horizon",
 		);
 		expect(pendingMarkdown).not.toContain(
 			"No usable, uncensored weekly records common to all models for:",
@@ -1583,7 +1731,7 @@ describe("formatRedistributionReport", () => {
 			10,
 		);
 		expect(structuralMarkdown).toContain(
-			"No usable, uncensored weekly records common to all models for: peer-exhaustion (codex). No weekly windows are pending at the label horizon; missing evidence can reflect absent tagged survivors, withheld predictions, or censored truth.",
+			"No usable, uncensored weekly records common to all models for: peer-exhaustion (codex). No weekly window of that pair is pending at the label horizon; missing evidence can reflect absent tagged survivors, withheld predictions, or censored truth.",
 		);
 		expect(structuralMarkdown).not.toContain("PROVISIONAL:");
 
@@ -1597,7 +1745,7 @@ describe("formatRedistributionReport", () => {
 			10,
 		);
 		expect(labelledMarkdown).toContain(
-			"Every scored cohort has completed windows in both kinds.",
+			"No pending or unlabelled transition tag/class pairs were identified.",
 		);
 		expect(labelledMarkdown).not.toContain("PROVISIONAL:");
 		expect(labelledMarkdown).not.toContain(
@@ -1623,7 +1771,7 @@ describe("formatRedistributionReport", () => {
 			10,
 		);
 		expect(withheldMarkdown).toContain(
-			"No usable, uncensored weekly records common to all models for: add (codex). No weekly windows are pending at the label horizon; missing evidence can reflect absent tagged survivors, withheld predictions, or censored truth.",
+			"No usable, uncensored weekly records common to all models for: add (codex). No weekly window of that pair is pending at the label horizon; missing evidence can reflect absent tagged survivors, withheld predictions, or censored truth.",
 		);
 		expect(withheldMarkdown).not.toContain("PROVISIONAL:");
 	});
@@ -1638,7 +1786,7 @@ describe("formatRedistributionReport", () => {
  * death. Each (account, windowKind) is its own lifecycle, exactly as
  * `replayInstant` builds them.
  */
-function peerTriple(options: {
+function peerPerModel(options: {
 	accountId: string;
 	windowKind: "five_hour" | "seven_day";
 	/** Minutes since the death, one record per entry. */
@@ -1653,11 +1801,7 @@ function peerTriple(options: {
 	const out: RedistributionRecord[] = [];
 	options.sinceDeathMinutes.forEach((age, index) => {
 		const T = deathAtMs + age * MIN;
-		for (const model of [
-			"current",
-			"scenario-equal",
-			"scenario-headroom",
-		] as const) {
+		for (const model of REPLAY_MODELS) {
 			const predicts = options.predictsExhaust?.(index) ?? true;
 			out.push(
 				record({
@@ -1712,12 +1856,12 @@ describe("SINCE_DEATH_BUCKETS", () => {
 describe("peer exhaustion by since-death bucket, per window kind", () => {
 	test("splits the fine buckets and reports combined plus each window kind", () => {
 		const records = [
-			...peerTriple({
+			...peerPerModel({
 				accountId: "A",
 				windowKind: "five_hour",
 				sinceDeathMinutes: [10, 45, 90],
 			}),
-			...peerTriple({
+			...peerPerModel({
 				accountId: "B",
 				windowKind: "seven_day",
 				sinceDeathMinutes: [20, 200, 800],
@@ -1744,13 +1888,13 @@ describe("peer exhaustion by since-death bucket, per window kind", () => {
 		expect(countsOf("seven_day")).toEqual([1, 0, 0, 0, 1, 0, 0, 1]);
 		// Every bucket still carries the full cohort payload.
 		const first = byScope.get("combined")?.buckets[0];
-		expect(first?.balanced).toHaveLength(3);
-		expect(first?.perRecord).toHaveLength(3);
+		expect(first?.balanced).toHaveLength(REPLAY_MODELS.length);
+		expect(first?.perRecord).toHaveLength(REPLAY_MODELS.length);
 		expect(first?.pairedBias.n).toBeGreaterThanOrEqual(0);
 	});
 
 	test("a record with no since-death age never reaches a bucket", () => {
-		const records = triple("A", [T0], {
+		const records = perModel("A", [T0], {
 			current: () => ({ tags: ["peer-exhaustion"] as const }),
 		});
 		for (const entry of records) entry.tags = ["peer-exhaustion"];
@@ -1762,7 +1906,7 @@ describe("peer exhaustion by since-death bucket, per window kind", () => {
 
 describe("survivorSlopeTrajectory", () => {
 	test("ratios the survivor's slope against the first instant after the death", () => {
-		const records = peerTriple({
+		const records = peerPerModel({
 			accountId: "A",
 			windowKind: "five_hour",
 			sinceDeathMinutes: [10, 45, 90],
@@ -1786,13 +1930,13 @@ describe("survivorSlopeTrajectory", () => {
 		const records = [
 			// One lifecycle contributes many instants in the same bucket; it must
 			// still count once.
-			...peerTriple({
+			...peerPerModel({
 				accountId: "A",
 				windowKind: "five_hour",
 				sinceDeathMinutes: [5, 70, 75, 80, 85],
 				slopes: [10, 40, 40, 40, 40],
 			}),
-			...peerTriple({
+			...peerPerModel({
 				accountId: "B",
 				windowKind: "five_hour",
 				sinceDeathMinutes: [5, 70],
@@ -1811,7 +1955,7 @@ describe("survivorSlopeTrajectory", () => {
 		// 9/0 is not a ratio, and imputing one would invent the very absorption
 		// the table exists to measure.
 		const zero = survivorSlopeTrajectory(
-			peerTriple({
+			peerPerModel({
 				accountId: "A",
 				windowKind: "five_hour",
 				sinceDeathMinutes: [5, 70],
@@ -1829,7 +1973,7 @@ describe("survivorSlopeTrajectory", () => {
 		// lifecycles the table is about. The baseline is the first reading that
 		// exists, and the ratio is measured from there.
 		const rows = survivorSlopeTrajectory(
-			peerTriple({
+			peerPerModel({
 				accountId: "A",
 				windowKind: "five_hour",
 				sinceDeathMinutes: [5, 40, 70],
@@ -1853,7 +1997,7 @@ describe("survivorSlopeTrajectory", () => {
 		// reject it too, or a pre-death reading sets the scale for every ratio
 		// measured after it.
 		const rows = survivorSlopeTrajectory(
-			peerTriple({
+			peerPerModel({
 				accountId: "A",
 				windowKind: "five_hour",
 				sinceDeathMinutes: [-30, 5, 70],
@@ -1866,7 +2010,7 @@ describe("survivorSlopeTrajectory", () => {
 	});
 
 	test("only the named model's records are read", () => {
-		const records = peerTriple({
+		const records = peerPerModel({
 			accountId: "A",
 			windowKind: "five_hour",
 			sinceDeathMinutes: [5, 70],
@@ -1890,11 +2034,7 @@ describe("churnRows", () => {
 		// ETA moves +30 min then -10 min; the verdict never flips.
 		const etas = [DAY, DAY + 30 * MIN, DAY + 20 * MIN];
 		instants.forEach((T, index) => {
-			for (const model of [
-				"current",
-				"scenario-equal",
-				"scenario-headroom",
-			] as const) {
+			for (const model of REPLAY_MODELS) {
 				records.push(
 					record({
 						model,
@@ -1908,11 +2048,7 @@ describe("churnRows", () => {
 			}
 		});
 		const rows = churnRows("Overall", records, step);
-		expect(rows.map((row) => row.model)).toEqual([
-			"current",
-			"scenario-equal",
-			"scenario-headroom",
-		]);
+		expect(rows.map((row) => row.model)).toEqual([...REPLAY_MODELS]);
 		const current = rows[0];
 		expect(current.cohort).toBe("Overall");
 		expect(current.lifecycles).toBe(1);
@@ -1928,11 +2064,7 @@ describe("churnRows", () => {
 		const records: RedistributionRecord[] = [];
 		[true, false, false, true].forEach((predicts, index) => {
 			const T = T0 + index * step * MIN;
-			for (const model of [
-				"current",
-				"scenario-equal",
-				"scenario-headroom",
-			] as const) {
+			for (const model of REPLAY_MODELS) {
 				records.push(
 					record({
 						model,
@@ -1965,11 +2097,7 @@ describe("churnRows", () => {
 			["A::seven_day::2", [0, 30]],
 		] as const) {
 			for (const offset of offsets) {
-				for (const model of [
-					"current",
-					"scenario-equal",
-					"scenario-headroom",
-				] as const) {
+				for (const model of REPLAY_MODELS) {
 					records.push(
 						record({
 							model,
@@ -1992,11 +2120,7 @@ describe("churnRows", () => {
 		const records: RedistributionRecord[] = [];
 		[true, false, true].forEach((usable, index) => {
 			const T = T0 + index * step * MIN;
-			for (const model of [
-				"current",
-				"scenario-equal",
-				"scenario-headroom",
-			] as const) {
+			for (const model of REPLAY_MODELS) {
 				records.push(
 					record({
 						model,
@@ -2030,11 +2154,7 @@ describe("churnRows", () => {
 			[20, false],
 		] as const) {
 			const T = T0 + offset * MIN;
-			for (const model of [
-				"current",
-				"scenario-equal",
-				"scenario-headroom",
-			] as const) {
+			for (const model of REPLAY_MODELS) {
 				records.push(
 					record({
 						model,
@@ -2057,8 +2177,8 @@ describe("churnRows", () => {
 describe("scoreCohorts churn and slope trajectory", () => {
 	test("carries a churn row per model for the overall and any-transition cohorts", () => {
 		const records = [
-			...triple("A", [T0, T0 + 10 * MIN, T0 + 20 * MIN]),
-			...peerTriple({
+			...perModel("A", [T0, T0 + 10 * MIN, T0 + 20 * MIN]),
+			...peerPerModel({
 				accountId: "B",
 				windowKind: "five_hour",
 				sinceDeathMinutes: [10, 20, 30],
@@ -2068,12 +2188,8 @@ describe("scoreCohorts churn and slope trajectory", () => {
 		];
 		const cohorts = scoreCohorts(replayOf(records));
 		expect(cohorts.churn.map((row) => row.cohort)).toEqual([
-			"Overall",
-			"Overall",
-			"Overall",
-			"Any transition",
-			"Any transition",
-			"Any transition",
+			...REPLAY_MODELS.map(() => "Overall"),
+			...REPLAY_MODELS.map(() => "Any transition"),
 		]);
 		expect(cohorts.churn[0].pairs).toBeGreaterThan(0);
 		expect(
@@ -2086,7 +2202,7 @@ describe("scoreCohorts churn and slope trajectory", () => {
 		// scenario model unable to answer at minute 10. Which instants are
 		// SCORED depends on all three models agreeing to answer; where the
 		// survivor's own slope is measured from does not.
-		const records = peerTriple({
+		const records = peerPerModel({
 			accountId: "A",
 			windowKind: "five_hour",
 			sinceDeathMinutes: [10, 40, 70],
@@ -2118,7 +2234,7 @@ describe("scoreCohorts churn and slope trajectory", () => {
 		// `scenario-headroom` abstaining empties the common cohort; the other
 		// two models' consecutive predictions are still perfectly measurable,
 		// and their stability is not a claim about the third model.
-		const records = triple("A", [T0, T0 + 10 * MIN, T0 + 20 * MIN]);
+		const records = perModel("A", [T0, T0 + 10 * MIN, T0 + 20 * MIN]);
 		for (const entry of records) {
 			if (entry.model !== "scenario-headroom") continue;
 			entry.usable = false;
@@ -2143,7 +2259,7 @@ describe("scoreCohorts churn and slope trajectory", () => {
 	test("keeps a censored outcome out of the scores but inside the churn cohort", () => {
 		// Truth censoring says the window's fate was never observed. It cannot
 		// say the estimator was unstable, so it must not silence the churn row.
-		const records = triple("A", [T0, T0 + 10 * MIN, T0 + 20 * MIN]);
+		const records = perModel("A", [T0, T0 + 10 * MIN, T0 + 20 * MIN]);
 		for (const entry of records) entry.outcome = { kind: "censored" };
 		const cohorts = scoreCohorts(replayOf(records));
 		expect(cohorts.common).toHaveLength(0);
@@ -2222,7 +2338,7 @@ describe("replayInstant slope capture", () => {
 		// The 90 %/day account is already at 100 % here, and a full window emits
 		// no record; the 20 %/day survivor is the one being measured.
 		const forA = replay.records.filter((entry) => entry.accountId === "A");
-		expect(forA.length).toBe(3);
+		expect(forA.length).toBe(REPLAY_MODELS.length);
 		for (const entry of forA) {
 			// 20 %/day is 0.833 %/h.
 			expect(entry.slopePctPerHour ?? 0).toBeCloseTo(20 / 24, 6);
@@ -2261,15 +2377,877 @@ describe("the report's new sections", () => {
 		]) {
 			expect(markdown).toContain(heading);
 		}
-		// The disclosure sentence survives the rework.
+		// The disclosure survives the rework, as a hypothesis rather than as a
+		// claim the run establishes.
 		expect(markdown).toContain(
-			"The scenario adds the dead peer's fill demand on top of a survivor whose own lookback ALREADY contains the traffic it absorbed",
+			"IF a survivor's own lookback already contains the traffic it absorbed, the scenario would be adding that demand a second time",
 		);
 		// Churn comes before pool calibration.
 		expect(markdown.indexOf("## Prediction churn")).toBeGreaterThan(0);
 		expect(markdown.indexOf("## Prediction churn")).toBeLessThan(
 			markdown.indexOf("## Pool calibration"),
 		);
+		expect(markdown).not.toContain("undefined");
+		expect(markdown).not.toContain("NaN");
+	});
+});
+
+// ---------------------------------------------------------------------------
+// Observation lag
+// ---------------------------------------------------------------------------
+
+describe("scenario models", () => {
+	test("carries the pre-correction scan beside the corrected one", () => {
+		expect([...REPLAY_MODELS]).toEqual([
+			"current",
+			"scenario-equal",
+			"scenario-equal-original",
+			"scenario-headroom",
+		]);
+		expect([...SCENARIO_MODEL_IDS]).toEqual([
+			"scenario-equal",
+			"scenario-equal-original",
+			"scenario-headroom",
+		]);
+		expect(SCENARIO_MODELS["scenario-equal"].observationLag).toBe("advance");
+		expect(SCENARIO_MODELS["scenario-equal-original"].observationLag).toBe(
+			"ignore",
+		);
+		expect(SCENARIO_MODELS["scenario-headroom"].observationLag).toBe("advance");
+		// The two equal-split models differ ONLY in the lag treatment.
+		expect(SCENARIO_MODELS["scenario-equal-original"].shareRule).toBe(
+			SCENARIO_MODELS["scenario-equal"].shareRule,
+		);
+	});
+});
+
+const FIVE_HOUR_RESET = T0 + 5 * HOUR;
+
+/** One anthropic account burning `pctPerHour` on a five-hour window. */
+function fiveHourFixture(options: {
+	accountId?: string;
+	pctPerHour: number;
+	observedOffsetMs?: number;
+}): { rows: RosterSnapshotRow[]; accounts: RosterAccount[] } {
+	const accountId = options.accountId ?? "A";
+	return {
+		rows: rows({
+			accountId,
+			from: T0,
+			to: T0 + 2 * HOUR,
+			stepMs: 10 * MIN,
+			observedOffsetMs: options.observedOffsetMs,
+			fiveHour: (t) => ({
+				pct: ((t - T0) / HOUR) * options.pctPerHour,
+				reset: FIVE_HOUR_RESET,
+			}),
+		}),
+		accounts: [account(accountId)],
+	};
+}
+
+/** One weekly window burning 20 %/day since `T0 - DAY`. */
+function weeklyFixture(options: {
+	accountId?: string;
+	observed?: boolean;
+	observedOffsetMs?: number;
+}): { rows: RosterSnapshotRow[]; accounts: RosterAccount[] } {
+	const accountId = options.accountId ?? "A";
+	const start = T0 - DAY;
+	return {
+		rows: rows({
+			accountId,
+			from: start,
+			to: T0,
+			stepMs: 30 * MIN,
+			observed: options.observed,
+			observedOffsetMs: options.observedOffsetMs,
+			sevenDay: weekly(start, 20),
+		}),
+		accounts: [account(accountId)],
+	};
+}
+
+/**
+ * The instant of {@link lagDeathPairFixture}: ten minutes past the last sample,
+ * so every reading carries a ten-minute lag.
+ */
+const LAG_DEATH_T = T0 + 2 * HOUR + 10 * MIN;
+
+/**
+ * Two equal-capacity accounts in one class, each burning 12 pp/h on a five-hour
+ * window, reading 99 % and 90 % at the last sample.
+ *
+ * At {@link LAG_DEATH_T} the corrected scan advances A over its lag, fills it
+ * part-way through and applies that death at the instant itself; the original
+ * scan keeps A alive at the instant and kills it five minutes later, part-way
+ * to B's ETA. The two scans therefore order the class's events differently.
+ */
+function lagDeathPairFixture(): {
+	rows: RosterSnapshotRow[];
+	accounts: RosterAccount[];
+} {
+	const burn = (basePct: number) => (t: number) => ({
+		pct: basePct + ((t - T0) / HOUR) * 12,
+		reset: FIVE_HOUR_RESET,
+	});
+	return {
+		rows: [
+			...rows({
+				accountId: "A",
+				from: T0,
+				to: T0 + 2 * HOUR,
+				stepMs: 10 * MIN,
+				fiveHour: burn(75),
+			}),
+			...rows({
+				accountId: "B",
+				from: T0,
+				to: T0 + 2 * HOUR,
+				stepMs: 10 * MIN,
+				fiveHour: burn(66),
+			}),
+		],
+		accounts: [account("A"), account("B")],
+	};
+}
+
+/** The instant of {@link resetCrossingFixture}, ten minutes past its last sample. */
+const RESET_CROSSING_T = T0 + HOUR + 10 * MIN;
+
+/**
+ * One account reading 50 % on a ten-minute-old sample, burning 50 pp/h on a
+ * window that resets 55 minutes after {@link RESET_CROSSING_T}.
+ *
+ * The current model and the corrected scan both date exhaustion 50 minutes out;
+ * the pre-correction scan needs 60 minutes from the instant and so projects
+ * nothing before the reset.
+ */
+function resetCrossingFixture(): {
+	rows: RosterSnapshotRow[];
+	accounts: RosterAccount[];
+} {
+	const reset = RESET_CROSSING_T + 55 * MIN;
+	return {
+		rows: rows({
+			accountId: "A",
+			from: T0,
+			to: T0 + HOUR,
+			stepMs: 10 * MIN,
+			fiveHour: (t) => ({ pct: ((t - T0) / HOUR) * 50, reset }),
+		}),
+		accounts: [account("A")],
+	};
+}
+
+/** The instant of {@link lagFillPairFixture}, one minute past A's last sample. */
+const LAG_FILL_T = T0 + 2 * HOUR + MIN;
+
+/**
+ * Two equal-capacity accounts burning 12 pp/h on a five-hour window, sampled on
+ * different cadences: A reads 99 % one minute before {@link LAG_FILL_T}, B
+ * reads 98.8 % ten minutes before it.
+ *
+ * B fills inside its OWN lag, so the corrected scan applies its death at the
+ * instant and doubles A's share from there on. A is still the first event of
+ * both scans — in the pre-correction scan B dies a minute after A — but its ETA
+ * moves by three minutes against a one-minute lag of its own, because the peer
+ * that died at the instant is what moved it.
+ */
+function lagFillPairFixture(): {
+	rows: RosterSnapshotRow[];
+	accounts: RosterAccount[];
+} {
+	const burn = (endPct: number, endAt: number) => (t: number) => ({
+		pct: endPct - ((endAt - t) / HOUR) * 12,
+		reset: FIVE_HOUR_RESET,
+	});
+	const aEnd = LAG_FILL_T - MIN;
+	const bEnd = LAG_FILL_T - 10 * MIN;
+	return {
+		rows: [
+			...rows({
+				accountId: "A",
+				from: aEnd - 2 * HOUR,
+				to: aEnd,
+				stepMs: 10 * MIN,
+				fiveHour: burn(99, aEnd),
+			}),
+			...rows({
+				accountId: "B",
+				from: bEnd - 2 * HOUR,
+				to: bEnd,
+				stepMs: 10 * MIN,
+				fiveHour: burn(98.8, bEnd),
+			}),
+		],
+		accounts: [account("A"), account("B")],
+	};
+}
+
+/** The instant of {@link ownFillInsideLagFixture}, ten minutes past its last sample. */
+const OWN_FILL_T = T0 + 2 * HOUR + 10 * MIN;
+
+/**
+ * ONE pooled account, whose five-hour window reads 98 % on a ten-minute-old
+ * sample while burning 24 pp/h, and whose weekly window is still projecting.
+ *
+ * The corrected scan advances the five-hour reading past 100 % and applies that
+ * death at the instant, so the account is idle until the five-hour reset and
+ * the weekly's projection carries that whole dead span.
+ */
+function ownFillInsideLagFixture(): {
+	rows: RosterSnapshotRow[];
+	accounts: RosterAccount[];
+} {
+	const start = T0 - DAY;
+	const fiveHourEnd = OWN_FILL_T - 10 * MIN;
+	return {
+		rows: rows({
+			accountId: "A",
+			from: start,
+			to: fiveHourEnd,
+			stepMs: 10 * MIN,
+			sevenDay: weekly(start, 20),
+			fiveHour: (t) =>
+				t < T0
+					? { pct: null, reset: null }
+					: {
+							pct: 98 - ((fiveHourEnd - t) / HOUR) * 24,
+							reset: FIVE_HOUR_RESET,
+						},
+		}),
+		accounts: [account("A")],
+	};
+}
+
+/**
+ * One account idle at 40 % inside a live five-hour window: the fit is flat, so
+ * the regression path states no ETA and its anchor cannot be back-solved.
+ */
+function flatFiveHourFixture(): {
+	rows: RosterSnapshotRow[];
+	accounts: RosterAccount[];
+} {
+	return {
+		rows: rows({
+			accountId: "A",
+			from: T0,
+			to: T0 + 2 * HOUR,
+			stepMs: 10 * MIN,
+			fiveHour: () => ({ pct: 40, reset: FIVE_HOUR_RESET }),
+		}),
+		accounts: [account("A")],
+	};
+}
+
+const merge = (
+	...parts: Array<{ rows: RosterSnapshotRow[]; accounts: RosterAccount[] }>
+): { rows: RosterSnapshotRow[]; accounts: RosterAccount[] } => ({
+	rows: parts.flatMap((part) => part.rows),
+	accounts: parts.flatMap((part) => part.accounts),
+});
+
+/** `replayInstant` at `T` over a fixture, with a range that labels everything. */
+function replayFixtureAt(
+	T: number,
+	fixture: { rows: RosterSnapshotRow[]; accounts: RosterAccount[] },
+	toMs = T0 + 8 * DAY,
+) {
+	const roster = buildRosterAtInstant(
+		T,
+		prepareSeries(fixture.rows, fixture.accounts),
+		fixture.accounts,
+	);
+	return replayInstant(T, roster, [], { label: "test", fromMs: T0, toMs });
+}
+
+const recordOf = (
+	replay: { records: RedistributionRecord[] },
+	accountId: string,
+	model: ReplayModel,
+	windowKind = "five_hour",
+): RedistributionRecord | undefined =>
+	replay.records.find(
+		(entry) =>
+			entry.accountId === accountId &&
+			entry.model === model &&
+			entry.windowKind === windowKind,
+	);
+
+describe("replayInstant reading-level fields", () => {
+	test("derives the regression lag from the FIT, not from the observation", () => {
+		// The row was observed 3 min before it was sampled, and the instant is 5
+		// min past the sample. The fit's last point is the SAMPLE, so that is
+		// what the regression path's ETA is anchored to.
+		const T = T0 + 2 * HOUR + 5 * MIN;
+		const replay = replayFixtureAt(
+			T,
+			fiveHourFixture({ pctPerHour: 30, observedOffsetMs: 3 * MIN }),
+		);
+		const forA = replay.records.filter((entry) => entry.accountId === "A");
+		expect(forA).toHaveLength(REPLAY_MODELS.length);
+		for (const entry of forA) {
+			expect(entry.estimatorSource).toBe("regression");
+			expect(entry.observationAgeMs).toBe(8 * MIN);
+			expect(entry.sampleAgeMs).toBe(5 * MIN);
+			expect(Math.abs((entry.lagMs ?? 0) - 5 * MIN)).toBeLessThanOrEqual(1);
+			expect(entry.pooledInClass).toBe(1);
+			expect(entry.classLagFree).toBe(false);
+			expect(entry.firstEvent).toBe(true);
+			expect(entry.exactShiftEligible).toBe(true);
+		}
+		// The corrected scan lands on the fit's own ETA; the original one is the
+		// lag later.
+		const corrected = recordOf(replay, "A", "scenario-equal");
+		const original = recordOf(replay, "A", "scenario-equal-original");
+		const current = recordOf(replay, "A", "current");
+		expect(
+			Math.abs(
+				(corrected?.predictedEtaMs as number) -
+					(current?.predictedEtaMs as number),
+			),
+		).toBeLessThanOrEqual(1000);
+		expect(
+			(original?.predictedEtaMs as number) -
+				(corrected?.predictedEtaMs as number),
+		).toBeCloseTo(5 * MIN, -3);
+	});
+
+	test("derives an observation-anchored weekly lag from the observation", () => {
+		const T = T0 + 5 * MIN;
+		const replay = replayFixtureAt(
+			T,
+			weeklyFixture({ observedOffsetMs: 3 * MIN }),
+		);
+		const corrected = recordOf(replay, "A", "scenario-equal", "seven_day");
+		const current = recordOf(replay, "A", "current", "seven_day");
+		expect(corrected?.estimatorSource).toBe("lifetime-primary");
+		expect(corrected?.lagMs).toBe(8 * MIN);
+		expect(corrected?.observationAgeMs).toBe(8 * MIN);
+		expect(corrected?.sampleAgeMs).toBe(5 * MIN);
+		expect(
+			Math.abs(
+				(corrected?.predictedEtaMs as number) -
+					(current?.predictedEtaMs as number),
+			),
+		).toBeLessThanOrEqual(1000);
+	});
+
+	test("reports no lag and no observation age for a now-anchored reading", () => {
+		const replay = replayFixtureAt(
+			T0 + 5 * MIN,
+			weeklyFixture({ observed: false }),
+		);
+		const record = recordOf(replay, "A", "scenario-equal", "seven_day");
+		expect(record?.estimatorSource).toBe("lifetime-average");
+		expect(record?.lagMs).toBe(0);
+		expect(record?.observationAgeMs).toBeNull();
+		expect(record?.classLagFree).toBe(true);
+	});
+
+	test("a peer's lag makes the whole class-instant not lag-free", () => {
+		const T = T0 + 5 * MIN;
+		const replay = replayFixtureAt(
+			T,
+			merge(
+				weeklyFixture({ accountId: "A", observed: false }),
+				weeklyFixture({ accountId: "B" }),
+			),
+		);
+		const forA = recordOf(replay, "A", "scenario-equal", "seven_day");
+		expect(forA?.lagMs).toBe(0);
+		// A's own window carries no lag, but its ETA still moves with B's.
+		expect(forA?.classLagFree).toBe(false);
+		expect(forA?.pooledInClass).toBe(2);
+	});
+
+	test("a peer that exhausts first takes the first-event flag away", () => {
+		const T = T0 + 2 * HOUR + 5 * MIN;
+		const replay = replayFixtureAt(
+			T,
+			merge(
+				fiveHourFixture({ accountId: "A", pctPerHour: 30 }),
+				fiveHourFixture({ accountId: "B", pctPerHour: 45 }),
+			),
+		);
+		const forA = recordOf(replay, "A", "scenario-equal");
+		const forB = recordOf(replay, "B", "scenario-equal");
+		expect(forA?.predictedEtaMs).not.toBeNull();
+		expect(forB?.predictedEtaMs).not.toBeNull();
+		expect(
+			(forB?.predictedEtaMs as number) < (forA?.predictedEtaMs as number),
+		).toBe(true);
+		expect(forB?.firstEvent).toBe(true);
+		expect(forA?.firstEvent).toBe(false);
+	});
+
+	test("a peer killed inside its lag leaves the survivor first-event but not exact-shift", () => {
+		const replay = replayFixtureAt(LAG_DEATH_T, lagDeathPairFixture());
+		const forB = recordOf(replay, "B", "scenario-equal");
+		expect(forB?.estimatorSource).toBe("regression");
+		expect(Math.abs((forB?.lagMs ?? 0) - 10 * MIN)).toBeLessThanOrEqual(1);
+		// A fills inside its lag, so the corrected scan applies its death at the
+		// instant: nothing is left ahead of B's own exhaustion in THAT scan.
+		expect(forB?.firstEvent).toBe(true);
+		// The original scan keeps A alive at the instant and kills it part-way to
+		// B's ETA, so one slope does not govern B's projection across both scans.
+		expect(forB?.exactShiftEligible).toBe(false);
+		// A itself is the first event of both scans.
+		const forA = recordOf(replay, "A", "scenario-equal");
+		expect(forA?.firstEvent).toBe(true);
+		expect(forA?.exactShiftEligible).toBe(true);
+	});
+
+	test("a peer that fills inside its lag disqualifies the survivor's exact shift", () => {
+		const replay = replayFixtureAt(LAG_FILL_T, lagFillPairFixture());
+		const forA = recordOf(replay, "A", "scenario-equal");
+		const forB = recordOf(replay, "B", "scenario-equal");
+		expect(Math.abs((forA?.lagMs ?? 0) - MIN)).toBeLessThanOrEqual(1);
+		expect(Math.abs((forB?.lagMs ?? 0) - 10 * MIN)).toBeLessThanOrEqual(1);
+		// B fills inside its own lag, so the corrected scan applies its death at
+		// the instant: nothing of the class is left ahead of A there, and in the
+		// pre-correction scan B dies AFTER A. A is the first event of both scans.
+		expect(forA?.firstEvent).toBe(true);
+		// But A's share doubled at the instant, so its shift is the arithmetic of
+		// two slopes rather than its own lag.
+		expect(forA?.peerDiedInLag).toBe(true);
+		expect(forA?.exactShiftEligible).toBe(false);
+		const corrected = forA?.predictedEtaMs as number;
+		const original = recordOf(replay, "A", "scenario-equal-original")
+			?.predictedEtaMs as number;
+		expect((original - corrected) / MIN).toBeCloseTo(3, 1);
+	});
+
+	test("a record whose own account died inside its lag is peer-died-in-lag", () => {
+		const replay = replayFixtureAt(OWN_FILL_T, ownFillInsideLagFixture());
+		const weeklyRecord = recordOf(replay, "A", "scenario-equal", "seven_day");
+		expect(weeklyRecord?.pooledInClass).toBe(1);
+		expect(weeklyRecord?.firstEvent).toBe(true);
+		expect(weeklyRecord?.predictedEtaMs).not.toBeNull();
+		// The five-hour window of the SAME account filled inside its lag, and the
+		// weekly's projection carries the dead span that death opened.
+		expect(weeklyRecord?.peerDiedInLag).toBe(true);
+	});
+
+	test("reports a flat regression fit as having no derivable lag anchor", () => {
+		const replay = replayFixtureAt(
+			T0 + 2 * HOUR + 5 * MIN,
+			flatFiveHourFixture(),
+		);
+		const record = recordOf(replay, "A", "current");
+		expect(record?.estimatorSource).toBe("regression");
+		expect(record?.lagMs).toBe(0);
+		// A measured zero would say the correction moved this reading by nothing;
+		// the truth is that its anchor is unrecoverable.
+		expect(record?.lagAnchorKnown).toBe(false);
+	});
+
+	test("keeps the lag anchor known where the estimator derived one", () => {
+		const regression = replayFixtureAt(
+			T0 + 2 * HOUR + 5 * MIN,
+			fiveHourFixture({ pctPerHour: 30 }),
+		);
+		expect(recordOf(regression, "A", "current")?.lagAnchorKnown).toBe(true);
+		const weeklyReplay = replayFixtureAt(T0 + 5 * MIN, weeklyFixture({}));
+		expect(
+			recordOf(weeklyReplay, "A", "current", "seven_day")?.lagAnchorKnown,
+		).toBe(true);
+		// A now-anchored reading admits no lag at all, so its zero is derived.
+		const lowReplay = replayFixtureAt(
+			T0 + 5 * MIN,
+			weeklyFixture({ observed: false }),
+		);
+		expect(
+			recordOf(lowReplay, "A", "current", "seven_day")?.lagAnchorKnown,
+		).toBe(true);
+	});
+
+	test("a peer's revival re-times the shares and takes the flag away", () => {
+		// C is spent at T and comes back 30 min later, which re-splits the class
+		// before A reaches 100 %.
+		const T = T0 + 2 * HOUR + 5 * MIN;
+		const revivalReset = T + 30 * MIN;
+		const spent = {
+			rows: rows({
+				accountId: "C",
+				from: T0,
+				to: T0 + 2 * HOUR,
+				stepMs: 10 * MIN,
+				fiveHour: (t) => ({
+					pct: Math.min(100, ((t - T0) / HOUR) * 60),
+					reset: revivalReset,
+				}),
+			}),
+			accounts: [account("C")],
+		};
+		const replay = replayFixtureAt(
+			T,
+			merge(fiveHourFixture({ accountId: "A", pctPerHour: 30 }), spent),
+		);
+		const forA = recordOf(replay, "A", "scenario-equal");
+		expect(forA?.predictedEtaMs).not.toBeNull();
+		expect(forA?.firstEvent).toBe(false);
+		// C is at 100 %, so it emits no record of its own.
+		expect(recordOf(replay, "C", "scenario-equal")).toBeUndefined();
+	});
+});
+
+/** A replay result carrying one instant's records. */
+const replayOfInstant = (replay: {
+	records: RedistributionRecord[];
+}): ReplayResult => replayOf(replay.records);
+
+describe("observationLagChecks", () => {
+	test("the two models are identical where no pooled window has a lag", () => {
+		const replay = replayOfInstant(
+			replayFixtureAt(
+				T0 + 5 * MIN,
+				merge(
+					weeklyFixture({ accountId: "A", observed: false }),
+					weeklyFixture({ accountId: "B", observed: false }),
+				),
+			),
+		);
+		const checks = observationLagChecks(replay, scoreCohorts(replay));
+		expect(checks.identity.eligible).toBe(2);
+		expect(checks.identity.differing).toBe(0);
+		expect(checks.identity.fromMs).toBe(T0 + 5 * MIN);
+	});
+
+	test("a class-instant with a lagged peer is not eligible for the identity check", () => {
+		const replay = replayOfInstant(
+			replayFixtureAt(
+				T0 + 5 * MIN,
+				merge(
+					weeklyFixture({ accountId: "A", observed: false }),
+					weeklyFixture({ accountId: "B" }),
+				),
+			),
+		);
+		const checks = observationLagChecks(replay, scoreCohorts(replay));
+		expect(checks.identity.eligible).toBe(0);
+		expect(checks.identity.differing).toBe(0);
+	});
+
+	test("a first-event record's ETA moves by exactly its own lag", () => {
+		const replay = replayOfInstant(
+			replayFixtureAt(
+				T0 + 2 * HOUR + 5 * MIN,
+				fiveHourFixture({ pctPerHour: 30 }),
+			),
+		);
+		const checks = observationLagChecks(replay, scoreCohorts(replay));
+		expect(checks.shift.firstEvent.n).toBe(1);
+		expect(checks.shift.firstEvent.medianShiftMinutes).toBeCloseTo(5, 3);
+		expect(checks.shift.firstEvent.medianExcessMinutes).toBeCloseTo(0, 3);
+		expect(checks.shift.firstEvent.matchingShare).toBe(1);
+		expect(checks.shift.rest.n).toBe(0);
+	});
+
+	test("a record whose peer dies first is described, not held to its own lag", () => {
+		const replay = replayOfInstant(
+			replayFixtureAt(
+				T0 + 2 * HOUR + 5 * MIN,
+				merge(
+					fiveHourFixture({ accountId: "A", pctPerHour: 30 }),
+					fiveHourFixture({ accountId: "B", pctPerHour: 45 }),
+				),
+			),
+		);
+		const checks = observationLagChecks(replay, scoreCohorts(replay));
+		expect(checks.shift.firstEvent.n).toBe(1);
+		expect(checks.shift.rest.n).toBe(1);
+	});
+
+	test("keeps a survivor whose peer died inside its lag out of the exact split", () => {
+		const replay = replayOfInstant(
+			replayFixtureAt(LAG_DEATH_T, lagDeathPairFixture()),
+		);
+		const checks = observationLagChecks(replay, scoreCohorts(replay));
+		// Only A, whose own death instant moved by exactly its lag.
+		expect(checks.shift.firstEvent.n).toBe(1);
+		expect(checks.shift.firstEvent.medianShiftMinutes).toBeCloseTo(10, 3);
+		expect(checks.shift.firstEvent.matchingShare).toBe(1);
+		// B's shift is 7.5 min against a 10 min lag, and it is described only.
+		expect(checks.shift.rest.n).toBe(1);
+		expect(checks.shift.rest.medianShiftMinutes).toBeCloseTo(7.5, 3);
+	});
+
+	test("keeps a survivor whose peer filled inside its lag out of the exact split", () => {
+		const replay = replayOfInstant(
+			replayFixtureAt(LAG_FILL_T, lagFillPairFixture()),
+		);
+		const checks = observationLagChecks(replay, scoreCohorts(replay));
+		// A's shift is 3 min against its own 1 min lag: no exact expectation
+		// exists for it, so it is described beside B rather than held to one.
+		expect(checks.shift.firstEvent.n).toBe(0);
+		expect(checks.shift.rest.n).toBe(2);
+	});
+
+	test("keeps a lone account that died inside its own lag out of the parity check", () => {
+		const replay = replayOfInstant(
+			replayFixtureAt(OWN_FILL_T, ownFillInsideLagFixture()),
+		);
+		const checks = observationLagChecks(replay, scoreCohorts(replay));
+		// The weekly is a lone account's first event, but the account is dead
+		// until its five-hour reset, so parity with the current model is not the
+		// expectation and the row must not count it.
+		expect(
+			checks.parity.find((row) => row.path === "lifetime-primary")?.n,
+		).toBe(0);
+		// The five-hour window itself still counts: it is the window that died,
+		// not one carrying a dead span, and it agrees with the current model.
+		const regression = checks.parity.find((row) => row.path === "regression");
+		expect(regression?.n).toBe(1);
+		expect(regression?.withinToleranceShare).toBe(1);
+	});
+
+	test("counts parity on a record the original scan never dated", () => {
+		const replay = replayOfInstant(
+			replayFixtureAt(RESET_CROSSING_T, resetCrossingFixture()),
+		);
+		const current = recordOf(replay, "A", "current");
+		const corrected = recordOf(replay, "A", "scenario-equal");
+		const original = recordOf(replay, "A", "scenario-equal-original");
+		expect(current?.predictedEtaMs).not.toBeNull();
+		expect(corrected?.predictedEtaMs).not.toBeNull();
+		expect(original?.predictedEtaMs).toBeNull();
+		const checks = observationLagChecks(replay, scoreCohorts(replay));
+		const regression = checks.parity.find((row) => row.path === "regression");
+		expect(regression?.n).toBe(1);
+		expect(regression?.withinToleranceShare).toBe(1);
+		// The shift statistic still needs both ETAs, so this record is not in it.
+		expect(checks.shift.firstEvent.n).toBe(0);
+		expect(checks.shift.rest.n).toBe(0);
+	});
+
+	test("checks parity with the current model per estimator path", () => {
+		const regression = observationLagChecks(
+			replayOfInstant(
+				replayFixtureAt(
+					T0 + 2 * HOUR + 5 * MIN,
+					fiveHourFixture({ pctPerHour: 30 }),
+				),
+			),
+			scoreCohorts(
+				replayOfInstant(
+					replayFixtureAt(
+						T0 + 2 * HOUR + 5 * MIN,
+						fiveHourFixture({ pctPerHour: 30 }),
+					),
+				),
+			),
+		);
+		const byPath = (checks: typeof regression, path: string) =>
+			checks.parity.find((row) => row.path === path);
+		expect(byPath(regression, "regression")?.n).toBe(1);
+		expect(byPath(regression, "regression")?.withinToleranceShare).toBe(1);
+
+		const weeklyReplay = replayOfInstant(
+			replayFixtureAt(
+				T0 + 5 * MIN,
+				weeklyFixture({ observedOffsetMs: 3 * MIN }),
+			),
+		);
+		const weekly = observationLagChecks(
+			weeklyReplay,
+			scoreCohorts(weeklyReplay),
+		);
+		expect(byPath(weekly, "lifetime-primary")?.n).toBe(1);
+		expect(byPath(weekly, "lifetime-primary")?.withinToleranceShare).toBe(1);
+		expect(byPath(weekly, "other")?.n).toBe(0);
+
+		// A now-anchored reading is neither anchored path, so it is reported
+		// under `other` and never held to the parity expectation.
+		const lowReplay = replayOfInstant(
+			replayFixtureAt(T0 + 5 * MIN, weeklyFixture({ observed: false })),
+		);
+		const low = observationLagChecks(lowReplay, scoreCohorts(lowReplay));
+		expect(byPath(low, "lifetime-primary")?.n).toBe(0);
+		expect(byPath(low, "other")?.n).toBe(1);
+	});
+
+	test("buckets the observation ages, reconciling to the eligible count", () => {
+		const ages = [-1 * MIN, MIN, 3 * MIN, 7 * MIN, 15 * MIN, null];
+		const records: RedistributionRecord[] = [];
+		ages.forEach((age, index) => {
+			records.push(
+				...perModel(`A${index}`, [T0 + index * 10 * MIN], {
+					current: () => ({ observationAgeMs: age }),
+					"scenario-equal": () => ({ observationAgeMs: age }),
+					"scenario-equal-original": () => ({ observationAgeMs: age }),
+					"scenario-headroom": () => ({ observationAgeMs: age }),
+				}),
+			);
+		});
+		for (const entry of records) {
+			entry.lifecycleId = `${entry.accountId}::seven_day::0`;
+		}
+		const replay = replayOf(records);
+		const checks = observationLagChecks(replay, scoreCohorts(replay));
+		const combined = checks.ageGroups.find(
+			(group) => group.scope === "combined",
+		);
+		expect(combined?.buckets.map((bucket) => bucket.label)).toEqual(
+			OBSERVATION_AGE_BUCKETS.map((bucket) => bucket.label),
+		);
+		expect(combined?.buckets.map((bucket) => bucket.records)).toEqual([
+			1, 1, 1, 1, 1,
+		]);
+		expect(combined?.unknown.records).toBe(1);
+		const summed =
+			(combined?.buckets.reduce((sum, bucket) => sum + bucket.records, 0) ??
+				0) + (combined?.unknown.records ?? 0);
+		expect(summed).toBe(combined?.eligible);
+		expect(combined?.eligible).toBe(6);
+	});
+
+	test("the fixed subset takes only records every model dated", () => {
+		const records = [
+			...perModel("A", [T0]),
+			...perModel("B", [T0], {
+				"scenario-equal-original": () => ({
+					predictsExhaust: false,
+					predictedEtaMs: null,
+				}),
+			}),
+		];
+		const replay = replayOf(records);
+		const checks = observationLagChecks(replay, scoreCohorts(replay));
+		const overall = checks.pairedEta.filter((row) => row.cohort === "Overall");
+		// The three models the subset is defined by, and only those.
+		expect(overall.map((row) => row.model)).toEqual([
+			"current",
+			"scenario-equal",
+			"scenario-equal-original",
+		]);
+		for (const row of overall) expect(row.n).toBe(1);
+	});
+
+	test("reports the lag population per estimator path", () => {
+		const records = [
+			...perModel("A", [T0], {
+				current: () => ({
+					estimatorSource: "regression",
+					lagMs: 4 * MIN,
+					observationAgeMs: 7 * MIN,
+					sampleAgeMs: 4 * MIN,
+				}),
+			}),
+			...perModel("B", [T0], {
+				current: () => ({
+					estimatorSource: "lifetime-primary",
+					lagMs: 8 * MIN,
+					observationAgeMs: 8 * MIN,
+					sampleAgeMs: 5 * MIN,
+				}),
+			}),
+		];
+		const replay = replayOf(records);
+		const checks = observationLagChecks(replay, scoreCohorts(replay));
+		const byPath = new Map(checks.population.map((row) => [row.path, row]));
+		expect(byPath.get("regression")?.records).toBe(1);
+		expect(byPath.get("regression")?.medianLagMinutes).toBeCloseTo(4, 6);
+		// sampled_at - observed_at, from the two ages the record carries.
+		expect(
+			byPath.get("regression")?.medianSampleToObservationMinutes,
+		).toBeCloseTo(3, 6);
+		expect(byPath.get("lifetime-primary")?.medianLagMinutes).toBeCloseTo(8, 6);
+	});
+
+	test("counts a record with no derivable anchor apart from the lags", () => {
+		const records = [
+			...perModel("A", [T0], {
+				current: () => ({
+					estimatorSource: "regression",
+					lagMs: 4 * MIN,
+					lagAnchorKnown: true,
+				}),
+			}),
+			...perModel("B", [T0], {
+				current: () => ({
+					estimatorSource: "regression",
+					lagMs: 0,
+					lagAnchorKnown: false,
+				}),
+			}),
+		];
+		const replay = replayOf(records);
+		const checks = observationLagChecks(replay, scoreCohorts(replay));
+		const regression = checks.population.find(
+			(row) => row.path === "regression",
+		);
+		expect(regression?.records).toBe(2);
+		expect(regression?.noAnchorRecords).toBe(1);
+		// The unrecoverable anchor is a 0 nobody measured: folding it in would
+		// halve the median the correction actually moved this path by.
+		expect(regression?.medianLagMinutes).toBeCloseTo(4, 6);
+		expect(regression?.p90LagMinutes).toBeCloseTo(4, 6);
+	});
+});
+
+describe("pairedAbsMedian", () => {
+	test("medians the change in absolute error over records both models dated", () => {
+		const records = [
+			...perModel("A", [T0], {
+				"scenario-equal": (T) => ({ predictedEtaMs: T + DAY + 10 * MIN }),
+				"scenario-equal-original": (T) => ({
+					predictedEtaMs: T + DAY + 30 * MIN,
+				}),
+			}),
+			// Only one side committed to a date: not a pair.
+			...perModel("B", [T0], {
+				"scenario-equal-original": () => ({
+					predictsExhaust: false,
+					predictedEtaMs: null,
+				}),
+			}),
+		];
+		const delta = pairedAbsMedian(
+			records,
+			"scenario-equal",
+			"scenario-equal-original",
+		);
+		expect(delta.n).toBe(1);
+		expect(delta.medianDeltaMinutes).toBeCloseTo(-20, 6);
+	});
+});
+
+describe("the observation-lag report section", () => {
+	test("names every check and prints the original model beside the corrected one", () => {
+		const fixture = pairFixture();
+		const range: ReplayRange = {
+			label: "test",
+			fromMs: T0,
+			toMs: T0 + 8 * DAY,
+		};
+		const result = replayRange(
+			fixture.rows,
+			fixture.accounts,
+			range,
+			60,
+			20260823,
+		);
+		const { markdown } = reportFor(result, fixture.rows);
+		for (const heading of [
+			"## Observation-lag mechanism check",
+			"### Observation age",
+			"### Identity on lag-free class-instants",
+			"### Lag shift",
+			"### Parity with the current model on lone accounts",
+			"### Fixed paired-ETA subset",
+			"### Lag population by estimator path",
+		]) {
+			expect(markdown).toContain(heading);
+		}
+		// The section comes before the churn one, as declared.
+		expect(markdown.indexOf("## Observation-lag mechanism check")).toBeLessThan(
+			markdown.indexOf("## Prediction churn"),
+		);
+		expect(markdown).toContain("| scenario-equal-original |");
+		expect(markdown).toContain(TRANSITION_BOOTSTRAP_LABEL);
+		expect(markdown).toContain("| baseline |");
 		expect(markdown).not.toContain("undefined");
 		expect(markdown).not.toContain("NaN");
 	});

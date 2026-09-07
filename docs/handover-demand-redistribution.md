@@ -14,54 +14,105 @@ the backtest in section 4 decides whether it ships before any surface reads it.
 
 **The truth target changed, and section 4 is out of date on this point.** A
 read-only scan of the whole recorded history found no instant where every
-account of a multi-account servable class was out at once, counting an
-account that existed but was not being polled as a survivor. Under the
-report's own membership rule (an account with no snapshots at all around an
-instant is absent, not a survivor) one such episode does exist: roughly 14
-minutes on 2026-07-02, when Claude-1 and Claude-2 were both at 100 % on
-their five-hour windows and Claude-3, unpolled from 2026-06-13 to
-2026-07-19, was not a member of the class. That episode, two ticks of a
-9648-instant grid, is what the calibration table's `observed out` column
-counts for `anthropic`; the codex rows count two episodes of the single
-Codex account before it had a sibling. A pool-out score would therefore
-still have rested on almost no positives. Scoring is survivor-conditioned
-instead: at each instant both models project each account's windows, and
-those projections are labelled with the same per-window truth
-(`deriveOutcome`) the 2026-08 backtests use; the pool-level claim is still
-computed, as false-alarm calibration only. Pause and removal cannot be
+account of a multi-account servable class was out at once, counting an account
+that existed but was not being polled as a survivor. The codex rows count two
+episodes of the single Codex account before it had a sibling. A pool-out score
+would therefore still have rested on almost no positives. Scoring is
+survivor-conditioned instead: at each instant both models project each
+account's windows, and those projections are labelled with the same per-window
+truth (`deriveOutcome`) the 2026-08 backtests use; the pool-level claim is
+still computed, as false-alarm calibration only. Pause and removal cannot be
 replayed at all — snapshots cascade-delete with their account and
-`accounts.paused` keeps no history — so the scenario's `presence:
-"demand-only"` path keeps unit-test coverage only.
+`accounts.paused` keeps no history — so the scenario's
+`presence: "demand-only"` path keeps unit-test coverage only.
 
 **Verdict: `keep-scenario`, provisional.** On lifecycle-balanced records:
 criterion A (not more optimistic on transitions) FAILS — the scenario's paired
 median signed ETA error on transition instants is +14.6 min against the
-current model's −3.6 min (n=16), i.e. the scenario is the optimistic one there,
-even though its recall is better (0.750 against 0.643). Criterion B passes (F1
-0.568 against 0.474) and criterion C passes (the block-bootstrap 95 % CI of the
-overall F1 delta is [−0.007, +0.145], not below zero). So the scenario stays a
-labelled second line and exclusion keeps the headline. It is PROVISIONAL
-because three cohorts, counted per tag AND servable class, are still waiting on
-weekly windows the label horizon dropped: the report lists `peer-exhaustion
-(codex)`, `add (codex)` and `upgrade (codex)` as pending, and lists no cohort
-as structurally unlabelled. Pending and structurally unlabelled are separate
-statements in the report: a pending cohort had tagged weekly windows whose
-truth was still unfolding at the end of the replay interval, which a later
-`--to` labels, while a structurally unlabelled one has no usable, uncensored
-weekly record common to all models — because no tagged survivor existed (a
-lone account's peer exhaustion tags nobody, since the dying account is
-excluded from its own event), or every tagged prediction was withheld, or
-every tagged truth was censored — with nothing pending at the label horizon,
-so a later `--to` alone does not label it. All three here are the first kind:
-the Codex tier flips of 2026-09-05 and the Codex-2 add of 2026-09-04 sit in
-weekly windows that reset 2026-09-07 through 2026-09-12. The anthropic half of
-each of those tags is labelled, and counting per tag alone would have hidden
-the codex half behind it.
+current model's −3.6 min (n=16), i.e. the scenario is the optimistic one
+there, even though its recall is better (0.750 against 0.643). Criterion B
+passes (F1 0.568 against 0.474) and criterion C passes (the block-bootstrap
+95 % CI of the overall F1 delta is [−0.007, +0.145], not below zero). So the
+scenario stays a labelled second line and exclusion keeps the headline. It is
+PROVISIONAL because three cohorts, counted per tag AND servable class, are
+still waiting on weekly windows the label horizon dropped: the report lists
+`peer-exhaustion (codex)`, `add (codex)` and `upgrade (codex)` as pending, and
+lists no cohort as structurally unlabelled. Pending and structurally
+unlabelled are separate statements in the report: a pending cohort had tagged
+weekly windows whose truth was still unfolding at the end of the replay
+interval, while a structurally unlabelled one has no usable, uncensored weekly
+record common to all models — because no tagged survivor existed (a lone
+account's peer exhaustion tags nobody, since the dying account is excluded from
+its own event), or every tagged prediction was withheld, or every tagged truth
+was censored — with nothing pending at the label horizon. All three here are
+the first kind: the Codex tier flips of 2026-09-05 and the Codex-2 add of
+2026-09-04 sit in weekly windows that reset 2026-09-07 through 2026-09-12. The
+anthropic half of each of those tags is labelled, and counting per tag alone
+would have hidden the codex half behind it.
 
-**Step 4 waits.** Before acting on the verdict, re-run the reproduce command
-printed in `docs/prediction-backtest-redistribution.md` with a `--to` after
-2026-09-13, once those weekly windows have completed, and re-read the verdict
-from the refreshed report.
+**Step 4 did not ship (2026-09-06 decision).** The mechanism it was going to
+correct for — the scenario double-counting a dead peer's demand because the
+survivor's own lookback already contains the traffic it absorbed — is not
+evidenced by the measurements taken so far. The survivor slope table reads flat
+after a death, with the caveat that it cannot see absorption where the survivor
+was still learning at the instant its peer died. The ledger says roughly 0.6 of
+the dying account's request rate is absorbed at all, and only when the dying
+account carried at least 30 % of its class's traffic; below that the traffic
+stops rather than moving, and where it does move the largest survivor takes
+about 0.78 of the moved volume. So the taper that step 4 proposed, and a flat
+0.6 coefficient, were both rejected: the taper points the wrong way against the
+flat slopes, and the coefficient would be tuned on the same run it would be
+judged on. What landed instead is the measurement tooling, `6097d175`
+(v2026.9.12).
+
+**The experiment running now: observation-lag parity, ONE change.** The
+scenario scheduled every window's exhaustion from the instant being replayed
+while the reading it scheduled from was measured to an earlier one, so the burn
+between those two instants entered no projection. The ten-minute freshness bar
+is on SAMPLE time, so it bounds the regression path's lag (that fit is anchored
+to its own last sample); the observation-anchored weekly path can exceed it
+wherever the observation instant precedes the sample instant. Five-hour windows
+after a peer death in the replay ran 0-5 minutes late. The scan now advances
+each reading over that lag, taking it per estimator path from the same anchor
+the current model uses (the fit's own last point on the regression path, the
+observation instant on the observation-anchored lifetime path), so on a lone
+account, wherever that anchor was recoverable and sits behind the replayed
+instant, the window is projected from the anchor the current model projects it
+from. An anchor AHEAD of the replayed instant clamps to zero lag while the
+current model keeps anchoring its own ETA to that future instant. A window of
+a lone account can also land elsewhere whenever another window of the class
+exhausts while this one is still projecting, including a death the correction
+applies AT the replayed instant: that suspends the account's burn, and the ETA
+then carries the span it spends dead, which is the scenario's own semantics
+rather than the redistribution. Fill demand, the share rule and the overlap
+treatment are untouched.
+
+The backtest scores the corrected scan against a control that is the same equal
+split with the advance switched off (`scenario-equal-original`), under a rule
+declared before the run: criteria A-C as before, plus D, the corrected scan may
+not score worse than the control on the any-transition common cohort, neither
+on F1 nor on the paired median change in absolute ETA error. Recall is printed
+beside D and not judged: the correction can change the order of a class's
+events, and with it which windows get a dated exhaustion before their reset at
+all, in either direction. Beside the verdict the report carries a mechanism
+section that states what the correction did rather than what it scored:
+observation-age cohorts, an identity check over the class-instants where no
+pooled window carries a lag, the shift each ETA moved (split on first-event
+eligibility in both scans with no class window having died inside its lag
+while this one is still projecting), a direct parity check against the current
+model on lone accounts, a fixed paired-ETA subset, and the lag population per
+estimator path. Each check states what it measures and over which records, and
+leaves reading the number against that mechanism to the reader.
+
+Codex ranked the follow-ups behind this one: measure the first-100 % fill
+directly, and derive the ledger shares from the history BEFORE each instant
+rather than from the whole run. The taper and the 0.6 coefficient are the two
+it ranked out, for the reasons above.
+
+Before acting on any verdict, re-run the reproduce command printed in
+`docs/prediction-backtest-redistribution.md` with a `--to` after 2026-09-13,
+once the pending weekly windows have completed, and re-read the verdict from
+the refreshed report.
 
 What the tier work found, against what section 3.1 assumed:
 

@@ -1,13 +1,16 @@
 import { describe, expect, it } from "bun:test";
 import {
 	computeCapacityRunway,
+	estimateWindowExhaustion,
 	type RunwayAccountInput,
 	type RunwayResetCreditBank,
 	type RunwayWindowInput,
 } from "./capacity-runway";
 import {
 	computeCapacityRunwayScenario,
+	observationLagMs,
 	type RunwayScenarioAccountInput,
+	type RunwayScenarioOutcome,
 	type RunwayScenarioPresence,
 	type ShareRule,
 } from "./capacity-runway-scenario";
@@ -1176,5 +1179,482 @@ describe("computeCapacityRunwayScenario", () => {
 				}),
 			).toThrow(/capacityUnits/);
 		});
+	});
+});
+
+// ---------------------------------------------------------------------------
+// Observation lag
+// ---------------------------------------------------------------------------
+
+const MIN = 60 * 1000;
+
+/**
+ * A five-hour window whose server regression is anchored `lagMinutes` before
+ * `NOW` — the fit's own last point, which is what the regression path's ETA is
+ * measured from and what the correction has to consume.
+ */
+function regressionWindow(options: {
+	pct: number;
+	slopePctPerHour: number;
+	lagMinutes: number;
+	startedHoursAgo?: number;
+	/** Overrides the window's own `start + 5 h`, for the tie fixtures. */
+	resetsAtMs?: number;
+	observedAtMs?: number;
+}): RunwayWindowInput {
+	const startedHoursAgo = options.startedHoursAgo ?? 3;
+	const startMs = NOW - startedHoursAgo * HOUR;
+	const resetsAtMs = options.resetsAtMs ?? startMs + 5 * HOUR;
+	const anchorMs = NOW - options.lagMinutes * MIN;
+	const etaExhaustMs =
+		options.slopePctPerHour > 0
+			? anchorMs + ((100 - options.pct) / options.slopePctPerHour) * HOUR
+			: null;
+	return {
+		windowKind: "five_hour",
+		utilizationPct: options.pct,
+		windowStartMs: startMs,
+		resetsAtMs,
+		prediction: {
+			state: "rising",
+			slopePerHour: options.slopePctPerHour,
+			etaExhaustMs,
+			predictedAtReset: null,
+			resetsAtMs,
+			willExhaustBeforeReset:
+				etaExhaustMs !== null && etaExhaustMs < resetsAtMs,
+			lowConfidence: false,
+		},
+		lifetimeConfidence: "full",
+		observedAtMs: options.observedAtMs ?? NOW,
+	};
+}
+
+/** A weekly window read at `pct`, observed `lagMinutes` before `NOW`. */
+function weeklyObserved(options: {
+	pct: number;
+	startedMs: number;
+	lagMinutes: number;
+}): RunwayWindowInput {
+	return {
+		windowKind: "seven_day",
+		utilizationPct: options.pct,
+		windowStartMs: options.startedMs,
+		resetsAtMs: options.startedMs + 7 * DAY,
+		prediction: null,
+		lifetimeConfidence: "full",
+		observedAtMs: NOW - options.lagMinutes * MIN,
+	};
+}
+
+const ignored = (
+	accounts: RunwayScenarioAccountInput[],
+): RunwayScenarioOutcome =>
+	computeCapacityRunwayScenario(accounts, NOW, undefined, {
+		observationLag: "ignore",
+	});
+
+const corrected = (
+	accounts: RunwayScenarioAccountInput[],
+): RunwayScenarioOutcome => computeCapacityRunwayScenario(accounts, NOW);
+
+const runwayEtaOf = (outcome: RunwayScenarioOutcome): number => {
+	if (outcome.kind !== "runway") {
+		throw new Error(`expected a runway, got ${outcome.kind}`);
+	}
+	return outcome.exhaustsAtMs;
+};
+
+const currentEtaOf = (accounts: RunwayScenarioAccountInput[]): number => {
+	const outcome = computeCapacityRunway(baselineInputs(accounts), NOW);
+	if (outcome.kind !== "runway") {
+		throw new Error(`expected a runway, got ${outcome.kind}`);
+	}
+	return outcome.exhaustsAtMs;
+};
+
+describe("observation lag", () => {
+	it("advances a regression reading to now, reaching the current model's ETA", () => {
+		// The fit's last point sits 10 min back; the scenario used to schedule the
+		// remaining 50 % from `now`, which is 10 min of burn nobody projected.
+		const accounts = [
+			acct("A", [
+				regressionWindow({ pct: 50, slopePctPerHour: 50, lagMinutes: 10 }),
+			]),
+		];
+
+		const advanced = runwayEtaOf(corrected(accounts));
+		const raw = runwayEtaOf(ignored(accounts));
+		expect(raw).toBeCloseTo(NOW + HOUR, -3);
+		expect(advanced).toBeCloseTo(raw - 10 * MIN, -3);
+		// A lone account's scenario slope IS its own slope, so the corrected scan
+		// must land exactly where the current model does.
+		expect(advanced).toBeCloseTo(currentEtaOf(accounts), -3);
+	});
+
+	it("advances an observation-anchored weekly reading by its observation age", () => {
+		const accounts = [
+			acct("A", [
+				weeklyObserved({ pct: 40, startedMs: NOW - 2 * DAY, lagMinutes: 10 }),
+			]),
+		];
+
+		const advanced = runwayEtaOf(corrected(accounts));
+		expect(advanced).toBeCloseTo(runwayEtaOf(ignored(accounts)) - 10 * MIN, -3);
+		expect(advanced).toBeCloseTo(currentEtaOf(accounts), -3);
+	});
+
+	it("leaves a now-anchored lifetime-average reading where it is", () => {
+		// The low lifetime path measures its burn to `now`, so there is no lag to
+		// consume and the corrected scan must not invent one.
+		const accounts = [
+			acct("A", [
+				{
+					windowKind: "five_hour",
+					utilizationPct: 70,
+					windowStartMs: NOW - 3 * HOUR,
+					resetsAtMs: NOW + 2 * HOUR,
+					prediction: null,
+					observedAtMs: NOW - 10 * MIN,
+				},
+			]),
+		];
+
+		const advanced = runwayEtaOf(corrected(accounts));
+		expect(advanced).toBeCloseTo(runwayEtaOf(ignored(accounts)), -3);
+		expect(advanced).toBeCloseTo(currentEtaOf(accounts), -3);
+	});
+
+	describe("observationLagMs", () => {
+		const lagOf = (window: RunwayWindowInput): number =>
+			observationLagMs(estimateWindowExhaustion(window, NOW), window, NOW);
+
+		it("has nothing to advance when the regression states no ETA", () => {
+			expect(
+				lagOf(
+					regressionWindow({ pct: 50, slopePctPerHour: 0, lagMinutes: 10 }),
+				),
+			).toBe(0);
+		});
+
+		it("clamps a fit or an observation that is ahead of now", () => {
+			expect(
+				lagOf(
+					regressionWindow({ pct: 50, slopePctPerHour: 50, lagMinutes: -5 }),
+				),
+			).toBe(0);
+			expect(
+				lagOf(
+					weeklyObserved({
+						pct: 40,
+						startedMs: NOW - 2 * DAY,
+						lagMinutes: -5,
+					}),
+				),
+			).toBe(0);
+		});
+
+		it("reports no lag for the sources that measure no burn", () => {
+			// already-exhausted: a fact, not a projection.
+			expect(
+				lagOf({
+					windowKind: "seven_day",
+					utilizationPct: 100,
+					windowStartMs: NOW - DAY,
+					resetsAtMs: NOW + 6 * DAY,
+					prediction: null,
+					lifetimeConfidence: "full",
+					observedAtMs: NOW - 10 * MIN,
+				}),
+			).toBe(0);
+			// unstarted: the provider's reset is a sliding placeholder.
+			expect(
+				lagOf({
+					windowKind: "five_hour",
+					utilizationPct: 0,
+					windowStartMs: NOW - 10 * MIN,
+					resetsAtMs: NOW + 5 * HOUR,
+					prediction: null,
+					lifetimeConfidence: "full",
+					observedAtMs: NOW - 10 * MIN,
+				}),
+			).toBe(0);
+			// none: no usable evidence at all.
+			expect(
+				lagOf({
+					windowKind: "seven_day",
+					utilizationPct: 40,
+					windowStartMs: null,
+					resetsAtMs: null,
+					prediction: null,
+					lifetimeConfidence: "full",
+					observedAtMs: NOW - 10 * MIN,
+				}),
+			).toBe(0);
+		});
+	});
+
+	it("changes nothing when the reading cannot be placed before now", () => {
+		const cases: RunwayWindowInput[] = [
+			// No observation instant: the estimate degrades to the now-anchored path.
+			{
+				windowKind: "seven_day",
+				utilizationPct: 40,
+				windowStartMs: NOW - 2 * DAY,
+				resetsAtMs: NOW + 5 * DAY,
+				prediction: null,
+				lifetimeConfidence: "full",
+				observedAtMs: null,
+			},
+			weeklyObserved({ pct: 40, startedMs: NOW - 2 * DAY, lagMinutes: 0 }),
+			weeklyObserved({ pct: 40, startedMs: NOW - 2 * DAY, lagMinutes: -5 }),
+		];
+		for (const window of cases) {
+			const accounts = [acct("A", [window])];
+			expect(corrected(accounts)).toEqual(ignored(accounts));
+		}
+	});
+
+	it("kills a window that fills inside its lag at now, keeping its true instant", () => {
+		// A is 0.3 pp short and takes half the class demand; B has no measured
+		// burn of its own, so the whole demand is A's and B's share is what A
+		// leaves behind.
+		const aStart = NOW - DAY;
+		const accounts = [
+			acct("A", [
+				weeklyObserved({ pct: 99.7, startedMs: aStart, lagMinutes: 10 }),
+			]),
+			acct("B", [
+				weeklyObserved({ pct: 5, startedMs: NOW - 30 * MIN, lagMinutes: 0 }),
+			]),
+		];
+
+		const slopeA = 99.7 / ((DAY - 10 * MIN) / HOUR);
+		const shareOfA = slopeA / 2;
+		const result = corrected(accounts);
+		expect(result.kind).toBe("runway");
+		if (result.kind !== "runway") throw new Error("unreachable");
+		// B survives A and inherits the whole class demand from `now`.
+		expect(result.exhaustsAtMs).toBeCloseTo(
+			NOW + ((100 - 5) / slopeA) * HOUR,
+			-3,
+		);
+		const aExhaust = result.projectedExhaustions.find(
+			(entry) => entry.accountId === "A",
+		);
+		expect(aExhaust?.exhaustsAtMs).toBeCloseTo(
+			NOW - 10 * MIN + ((100 - 99.7) / shareOfA) * HOUR,
+			-3,
+		);
+		expect(aExhaust?.exhaustsAtMs as number).toBeLessThan(NOW);
+		// The share reported for a learning account is its FINAL assignment at
+		// `now`: the split that stood before the lag death was provisional.
+		expect(result.includedLearningAccounts).toEqual([
+			{ accountId: "B", shareOfClass: 1 },
+		]);
+		// Without the correction A is still alive at `now` and the pool lasts
+		// longer.
+		expect(runwayEtaOf(ignored(accounts))).toBeGreaterThan(result.exhaustsAtMs);
+	});
+
+	it("reports out-now when the only account fills inside its lag", () => {
+		const accounts = [
+			acct("A", [
+				weeklyObserved({ pct: 99.9, startedMs: NOW - DAY, lagMinutes: 10 }),
+			]),
+		];
+		const slope = 99.9 / ((DAY - 10 * MIN) / HOUR);
+
+		const result = corrected(accounts);
+		expect(result.kind).toBe("out-now");
+		if (result.kind !== "out-now") throw new Error("unreachable");
+		expect(result.causes).toEqual([
+			{ accountId: "A", windowKind: "seven_day" },
+		]);
+		expect(result.projectedExhaustions).toHaveLength(1);
+		expect(result.projectedExhaustions[0].exhaustsAtMs).toBeCloseTo(
+			NOW - 10 * MIN + ((100 - 99.9) / slope) * HOUR,
+			-3,
+		);
+		expect(ignored(accounts).kind).toBe("runway");
+	});
+
+	it("leaves an already-exhausted reading alone whatever its observation age", () => {
+		const accounts = [
+			acct("A", [
+				{
+					windowKind: "seven_day",
+					utilizationPct: 100,
+					windowStartMs: NOW - DAY,
+					resetsAtMs: NOW + 6 * DAY,
+					prediction: null,
+					lifetimeConfidence: "full",
+					observedAtMs: NOW - 10 * MIN,
+				},
+			]),
+			acct("B", [
+				weeklyObserved({ pct: 30, startedMs: NOW - DAY, lagMinutes: 0 }),
+			]),
+		];
+		expect(corrected(accounts)).toEqual(ignored(accounts));
+	});
+
+	it("advances a learning window by its ASSIGNED share, not a slope of its own", () => {
+		// A has 20 minutes of evidence, so it borrows the class slope; the lag is
+		// still real and its share still burned through it.
+		const accounts = [
+			acct("A", [
+				weeklyObserved({ pct: 20, startedMs: NOW - 30 * MIN, lagMinutes: 10 }),
+			]),
+			acct("B", [
+				weeklyObserved({ pct: 90, startedMs: NOW - 12 * HOUR, lagMinutes: 0 }),
+			]),
+		];
+
+		const demand = 90 / 12;
+		const advance = (demand / 2) * (10 / 60);
+		const raw = runwayEtaOf(ignored(accounts));
+		// B dies first either way; A carries the whole demand from there, so the
+		// advance shows up divided by the FINAL slope.
+		expect(runwayEtaOf(corrected(accounts))).toBeCloseTo(
+			raw - (advance / demand) * HOUR,
+			-3,
+		);
+		expect(corrected(accounts).includedLearningAccounts).toEqual([
+			{ accountId: "A", shareOfClass: 0.5 },
+		]);
+	});
+
+	describe("a weekly lag death and reset credits", () => {
+		const weeklyBank = (
+			credits: Array<{ expiresAtMs: number | null }>,
+		): RunwayResetCreditBank => ({
+			onWeeklyLimitEnabled: true,
+			onExpiryEnabled: false,
+			credits,
+		});
+		const filling = (lagMinutes: number, pct = 99.9): RunwayWindowInput =>
+			weeklyObserved({ pct, startedMs: NOW - DAY, lagMinutes });
+		const slope = 99.9 / ((DAY - 10 * MIN) / HOUR);
+
+		it("redeems a credit at now and keeps the first exhaustion", () => {
+			const accounts = [
+				acct("A", [filling(10)], {
+					codexResetCredits: weeklyBank([{ expiresAtMs: null }]),
+				}),
+			];
+			const result = corrected(accounts);
+			expect(result.kind).toBe("runway");
+			if (result.kind !== "runway") throw new Error("unreachable");
+			expect(result.assumedResetCredits).toEqual([
+				{ accountId: "A", count: 1 },
+			]);
+			// Revived at `now` and burning the whole demand from 0 %.
+			expect(result.exhaustsAtMs).toBeCloseTo(NOW + (100 / slope) * HOUR, -3);
+			expect(result.projectedExhaustions).toHaveLength(1);
+			expect(result.projectedExhaustions[0].exhaustsAtMs).toBeLessThan(NOW);
+		});
+
+		it("is out-now with an empty bank", () => {
+			expect(
+				corrected([
+					acct("A", [filling(10)], { codexResetCredits: weeklyBank([]) }),
+				]).kind,
+			).toBe("out-now");
+		});
+
+		it("treats a credit expiring AT now exactly as the plain exhaust path does", () => {
+			const viaLag = corrected([
+				acct("A", [filling(10)], {
+					codexResetCredits: weeklyBank([{ expiresAtMs: NOW }]),
+				}),
+			]);
+			// The same window one second of burn short of full, with no lag: its
+			// exhaustion is an ordinary event just after `now`.
+			const viaEvent = corrected([
+				acct("A", [filling(0)], {
+					codexResetCredits: weeklyBank([{ expiresAtMs: NOW }]),
+				}),
+			]);
+			expect(viaLag.kind).toBe("out-now");
+			expect(viaEvent.kind).toBe("runway");
+			// Neither path spends a credit that has already expired.
+			expect("assumedResetCredits" in viaLag).toBe(false);
+			expect("assumedResetCredits" in viaEvent).toBe(false);
+		});
+	});
+
+	it("applies the reset tie policy to a lag death", () => {
+		// The scan batches events within one millisecond of each other, and a
+		// projected exhaustion tied with the window's own reset is not a dead
+		// span. A lag death at `now` is held to the same policy.
+		const tiedReset = corrected([
+			acct("A", [
+				regressionWindow({
+					pct: 99,
+					slopePctPerHour: 12,
+					lagMinutes: 10,
+					startedHoursAgo: 5,
+					resetsAtMs: NOW + 0.5,
+				}),
+			]),
+		]);
+		expect(tiedReset.kind).toBe("beyond-horizon");
+		expect(tiedReset.projectedExhaustions).toEqual([]);
+
+		const separateReset = corrected([
+			acct("A", [
+				regressionWindow({
+					pct: 99,
+					slopePctPerHour: 12,
+					lagMinutes: 10,
+					startedHoursAgo: 5,
+					resetsAtMs: NOW + 2,
+				}),
+			]),
+		]);
+		expect(separateReset.kind).toBe("out-now");
+		expect(separateReset.projectedExhaustions[0]?.exhaustsAtMs).toBeCloseTo(
+			NOW - 10 * MIN + (1 / 12) * HOUR,
+			-3,
+		);
+	});
+
+	it("never re-burns the past at a probe's pace", () => {
+		// The lag interval already happened, at pace 1. A probe that re-burned it
+		// at its own pace would report a different margin from the identical
+		// reading advanced by hand.
+		const lagged = computeCapacityRunwayScenario(
+			[
+				acct("A", [
+					regressionWindow({
+						pct: 50,
+						slopePctPerHour: 12,
+						lagMinutes: 10,
+						startedHoursAgo: 2,
+					}),
+				]),
+			],
+			NOW,
+		);
+		const preAdvanced = computeCapacityRunwayScenario(
+			[
+				acct("A", [
+					regressionWindow({
+						pct: 52,
+						slopePctPerHour: 12,
+						lagMinutes: 0,
+						startedHoursAgo: 2,
+					}),
+				]),
+			],
+			NOW,
+		);
+		expect(lagged.kind).toBe("beyond-horizon");
+		expect(preAdvanced.kind).toBe("beyond-horizon");
+		if (lagged.kind !== "beyond-horizon") throw new Error("unreachable");
+		if (preAdvanced.kind !== "beyond-horizon") throw new Error("unreachable");
+		expect(lagged.paceMargin).not.toBeNull();
+		expect(lagged.paceMargin).toEqual(preAdvanced.paceMargin);
 	});
 });
