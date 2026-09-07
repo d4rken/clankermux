@@ -1,6 +1,6 @@
 # Handover: demand-conserving roster scenarios for the pool runway
 
-Status (2026-09-07): **steps 1, 2 and 3 of section 8 are landed; the lag-parity experiment is closed and two absorption measurements are in the report.** Steps 1 and
+Status (2026-09-07): **steps 1, 2 and 3 of section 8 are landed; the lag-parity experiment is closed and two absorption measurements are in the report.** The scenario's first candidate surface, a per-window failover line, was scored on 2026-09-07 against a rule declared before the run and failed it; nothing in production reads the scenario. See the last status paragraph before section 1. Steps 1 and
 2 landed on `feat/demand-conserving-runway-scenario` (merged as `49c5c23e`,
 v2026.9.10): `dd5b38eb` (tier capacity table with provenance), `a40eb1d0`
 (pace-probe grid walks extracted so both models share one walk) and `4ec054c4`
@@ -281,6 +281,47 @@ Read `CLAUDE.md`, then this file, then the code it points at. Section 7 lists
 decisions that were already made and are not yours to reopen.
 
 ---
+
+**The failover line was scored and does not ship (2026-09-07, v2026.9.25).**
+Before any surface read the scenario, its one candidate use was written down as
+a predicate, `packages/core/src/failover-forecast.ts`: under a five-hour
+window's standalone forecast, show the scenario's run-out for that window when
+it is earlier than the standalone one and before the reset; five-hour windows
+only, never beside a learning or exhausted window, never on an outcome that
+assumed a reset credit, and with no named peer, because the scan's exhaustion
+list is not a causal record. The acceptance rule, `FAILOVER_LINE_RULE` in the
+backtest module, was declared before the run: the lifecycles on which the line
+would have spoken while the standalone forecast was still silent must be right
+at least as often as the lifecycles the standalone forecast flags, and there
+must be at least ten of them. On 2026-07-01 to 2026-09-06 there were 29, right
+7 times (24.1 %), against 33 of 121 (27.3 %) for the standalone line, so the
+decision is `no-line` (`## Failover line` in the report). A hit is a 100 %
+observed before the window's own reset, the per-window scorer's predicate; a
+line shown at an instant the label horizon drops is counted apart
+(`failoverShownAtHorizon`, 0 on this range) because the horizon keeps
+lifecycles that exhaust before the boundary and drops those that survive past
+it. That is the declared
+rule's answer at that sample size, not proof the line is worse: a three-point
+gap on 29 lifecycles is inside what one lifecycle moves, and "NEW" means the
+line spoke first, not that it caught something the standalone line never
+caught. Where both flagged, the line spoke no earlier (median lead 0.0 min
+over 15 lifecycles). Its median warning lead to the observed exhaustion was
+62.5 min (16 lifecycles) against the standalone line's 56.7 (33), medians over
+different sets rather than a paired difference. Its 56 shown instants that
+coincided with a dead or dying weekly window in the class were right 0 times;
+the report tags that as an association, and the mechanism by which an early
+weekly error could reach the five-hour line (a dead weekly stops the account's
+five-hour burn, which the scan moves onto the survivors) is a hypothesis this
+run did not test. The predicate and the scoring stay in the repository so the
+decision is reproducible; the record export carries `failoverEtaMs`,
+`standaloneLineEtaMs` and `failoverWeeklyDriven`; `@clankermux/core` does not
+export the predicate, the backtest imports the file directly. Nothing in
+production calls it and no wire type carries its result. A future surface
+needs a re-declared rule on outcomes not yet inspected, with a paired
+warning-benefit check beside precision; if it excludes the weekly-associated
+subset it must do so before that run, and re-running the same inspected period
+is exploratory rather than a decision. What shipped in v2026.9.25 is the
+revert of the "At this pace" wording alone.
 
 ## 1. The problem in one picture
 

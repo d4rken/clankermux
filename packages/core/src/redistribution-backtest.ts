@@ -9,6 +9,7 @@ import {
 	type RunwayWindowInput,
 	type WindowExhaustion,
 	type WindowExhaustionSource,
+	windowForecast,
 } from "./capacity-runway";
 import {
 	computeCapacityRunwayScenario,
@@ -20,6 +21,7 @@ import {
 	type ShareCandidate,
 	type ShareRule,
 } from "./capacity-runway-scenario";
+import { FAILOVER_WINDOW_KIND, failoverForecast } from "./failover-forecast";
 import { servableClassFor } from "./pool-classes";
 import {
 	type BacktestMetrics,
@@ -269,6 +271,33 @@ export const BESIDE_BASIS_MODELS: readonly ScenarioModel[] = [
 
 export interface RedistributionRecord extends BacktestRecord {
 	model: ReplayModel;
+	/**
+	 * The failover line a surface WOULD show for this window at `T`, as
+	 * `failoverForecast` decides it from the verdict basis's scan and the
+	 * window's standalone `windowForecast`: the projected instant, or null when
+	 * no line is shown. A property of the (account, window, T) reading, so
+	 * every model's record at one instant carries the same value; the line is
+	 * scored on the `current` model's records only, one per window-instant.
+	 * No production surface reads the predicate (see its module doc).
+	 */
+	failoverEtaMs: number | null;
+	/**
+	 * The standalone line's own run-out at `T`: `windowForecast`'s projected
+	 * instant when it precedes the known reset, else null. The per-WINDOW
+	 * forecast the dashboard shows beside the failover line, not the
+	 * account-level `current` model — one learning sibling withholds the latter
+	 * and not the former.
+	 */
+	standaloneLineEtaMs: number | null;
+	/**
+	 * True when the line is shown AND a weekly window of this record's class is
+	 * dead at `T` or is projected by the basis scan to die before the line's
+	 * instant. Such a death stops that account's five-hour burn and moves it
+	 * onto the survivors too, so an early weekly error CAN reach the line. An
+	 * association tag, not a causal one: it does not say the weekly event moved
+	 * this ETA. The section scores the subset apart.
+	 */
+	failoverWeeklyDriven: boolean;
 	/** Stable id of the (account, windowKind, lifecycle) this record belongs to. */
 	lifecycleId: string;
 	tags: TransitionKind[];
@@ -2968,6 +2997,17 @@ export interface InstantReplay {
 	classes: ClassReplay[];
 	placeholderWindowsSkipped: number;
 	/**
+	 * Window-instants at which the failover line would have been shown but
+	 * which the label horizon dropped (truth still unfolding at the end of the
+	 * loaded history). Counted here because the drop happens before any record
+	 * exists, so such a line would otherwise vanish from the scoring without a
+	 * trace, neither counted nor censored. The horizon admits a lifecycle that
+	 * exhausts before the boundary and drops one that survives past it, so
+	 * near the boundary the admitted lines skew toward hits; the count says how
+	 * many instants that can involve.
+	 */
+	failoverShownAtHorizon: number;
+	/**
 	 * `${tag}::${demandClass}` → seven-day windows the label horizon dropped
 	 * while carrying that tag.
 	 */
@@ -3036,6 +3076,7 @@ export function replayInstant(
 	const records: RedistributionRecord[] = [];
 	const classes: ClassReplay[] = [];
 	let placeholderWindowsSkipped = 0;
+	let failoverShownAtHorizon = 0;
 	const pendingWeeklyByTagClass = new Map<string, number>();
 
 	for (const [demandClass, entries] of byClass) {
@@ -3302,11 +3343,49 @@ export function replayInstant(
 				// Tagged BEFORE the horizon drop: a dropped weekly window is what
 				// marks a (tag, class) pair still pending at the label horizon.
 				const context = transitionsAt(events, T, entry.accountId, demandClass);
+				// The line EXACTLY as a surface would decide it: the same shared rule,
+				// fed the basis scan and the same per-window standalone forecast.
+				// Computed BEFORE the label-horizon drop below, so a line shown at an
+				// instant the horizon drops is counted rather than lost.
+				const standaloneLine = windowForecast(window.input, T);
+				const basisScanForLine =
+					scenarioOutcomes.get(VERDICT_BASIS_MODEL) ?? null;
+				const failover = failoverForecast({
+					scenario: basisScanForLine,
+					accountId: entry.accountId,
+					windowKind: window.kind,
+					utilizationPct: window.input.utilizationPct,
+					resetsAtMs: window.input.resetsAtMs,
+					standalone: standaloneLine,
+					now: T,
+				});
+				const standaloneLineEtaMs =
+					standaloneLine?.state === "projected" &&
+					standaloneLine.exhaustsAtMs != null &&
+					window.input.resetsAtMs != null &&
+					standaloneLine.exhaustsAtMs < window.input.resetsAtMs
+						? standaloneLine.exhaustsAtMs
+						: null;
+				const failoverWeeklyDriven =
+					failover != null &&
+					(entries.some((peer) =>
+						peer.windows.some(
+							(peerWindow) =>
+								peerWindow.kind === "seven_day" &&
+								peerWindow.input.utilizationPct >= 100,
+						),
+					) ||
+						(basisScanForLine?.projectedExhaustions ?? []).some(
+							(exhaustion) =>
+								exhaustion.windowKind === "seven_day" &&
+								orderedAt(exhaustion.exhaustsAtMs) <= failover.exhaustsAtMs,
+						));
 				// Label horizon: a window whose truth is still unfolding at the end of
 				// the loaded history would be scored on an outcome nobody observed.
 				const truthEnd =
 					outcome.kind === "exhausted" ? outcome.atMs : window.labelResetAtMs;
 				if (truthEnd == null || truthEnd >= range.toMs) {
+					if (failover != null) failoverShownAtHorizon++;
 					if (window.kind === "seven_day") {
 						for (const tag of context.tags) {
 							const key = `${tag}::${demandClass}`;
@@ -3327,6 +3406,9 @@ export function replayInstant(
 				const firstEvent = firstEventCorrected(entry.accountId, window.kind);
 				const peerDiedInLag = peerDiedInLagOf(entry.accountId, window.kind);
 				const common = {
+					failoverEtaMs: failover?.exhaustsAtMs ?? null,
+					standaloneLineEtaMs,
+					failoverWeeklyDriven,
 					T,
 					windowKind: window.kind,
 					accountId: entry.accountId,
@@ -3427,6 +3509,7 @@ export function replayInstant(
 		records,
 		classes,
 		placeholderWindowsSkipped,
+		failoverShownAtHorizon,
 		pendingWeeklyByTagClass,
 	};
 }
@@ -3491,6 +3574,8 @@ export interface ReplayResult {
 	 */
 	allOutIntervals: AllOutInterval[];
 	placeholderWindowsSkipped: number;
+	/** Summed from {@link InstantReplay.failoverShownAtHorizon} over the replay. */
+	failoverShownAtHorizon: number;
 	/**
 	 * `${tag}::${demandClass}` → seven-day windows the label horizon dropped
 	 * over the whole replay, summed from {@link InstantReplay}. Tells an
@@ -3661,6 +3746,7 @@ export function replayRange(
 
 	const records: RedistributionRecord[] = [];
 	let placeholderWindowsSkipped = 0;
+	let failoverShownAtHorizon = 0;
 	const pendingWeeklyByTagClass = new Map<string, number>();
 	const instantsWithTag = new Map<TransitionKind, number>();
 
@@ -3670,6 +3756,7 @@ export function replayRange(
 		const replay = replayInstant(T, roster, events, range);
 		records.push(...replay.records);
 		placeholderWindowsSkipped += replay.placeholderWindowsSkipped;
+		failoverShownAtHorizon += replay.failoverShownAtHorizon;
 		for (const [key, count] of replay.pendingWeeklyByTagClass) {
 			pendingWeeklyByTagClass.set(
 				key,
@@ -3776,6 +3863,7 @@ export function replayRange(
 		calibration,
 		allOutIntervals,
 		placeholderWindowsSkipped,
+		failoverShownAtHorizon,
 		pendingWeeklyByTagClass,
 		tagCoverage: TRANSITION_KINDS.map((tag) => ({
 			tag,
@@ -5079,6 +5167,11 @@ export function redistributionRecordToJson(
 		predictsExhaust: record.predictsExhaust,
 		predictedEtaMs: record.predictedEtaMs,
 		predictedEtaIso: isoOrNull(record.predictedEtaMs),
+		failoverEtaMs: record.failoverEtaMs,
+		failoverEtaIso: isoOrNull(record.failoverEtaMs),
+		standaloneLineEtaMs: record.standaloneLineEtaMs,
+		standaloneLineEtaIso: isoOrNull(record.standaloneLineEtaMs),
+		failoverWeeklyDriven: record.failoverWeeklyDriven,
 		outcomeKind: outcome.kind,
 		outcomeAtMs,
 		outcomeAtIso: isoOrNull(outcomeAtMs),
@@ -5087,6 +5180,431 @@ export function redistributionRecordToJson(
 		labelResetAtMs: record.labelResetAtMs,
 		labelResetIso: isoOrNull(record.labelResetAtMs),
 	};
+}
+
+// ---------------------------------------------------------------------------
+// Failover line
+// ---------------------------------------------------------------------------
+
+/**
+ * The acceptance rule for the Limits page's failover line, printed verbatim in
+ * the report and applied by {@link evaluateFailoverLine}. Declared before the
+ * run it is first applied to (2026-09-07).
+ */
+export const FAILOVER_LINE_RULE = [
+	"FAILOVER LINE. Under a five-hour window's standalone forecast a surface",
+	"   would show the run-out `failoverForecast` derives from the verdict",
+	"   basis's scan, only when that run-out is earlier than the standalone",
+	"   one and before the reset. The rule below decides whether that line",
+	"   ships. It is scored on the SAME predicate a surface would apply, over",
+	"   the replayed history.",
+	"",
+	"POPULATION. Records of the `current` model (one per window-instant) for",
+	"   anthropic/five_hour windows whose truth was observed: exhausted before",
+	"   the reset, or survived it. A record is SHOWN when the line would have",
+	"   been on screen at its instant. A lifecycle is SHOWN when any of its",
+	"   instants is; NEW when, at its first shown instant, the standalone line",
+	"   had flagged no run-out at that or any earlier instant; STANDALONE when",
+	"   the standalone line flagged a run-out at any instant.",
+	"",
+	"1. RELIABLE. precision(NEW) >= precision(STANDALONE), precision being the",
+	"   share of a set's lifecycles observed to exhaust before the reset. The",
+	"   lines the surface adds must be right at least as often as the lines it",
+	"   already shows.",
+	"2. ENOUGH. |NEW| >= 10 lifecycles. Below that a single lifecycle moves the",
+	"   precision by ten points or more and criterion 1 is noise.",
+	"3. REPORTED, NOT GATED. Lead over the standalone line where both flagged,",
+	"   warning lead to the observed exhaustion, ETA error of the shown lines,",
+	"   and the weekly-associated subset. The two warning leads are medians",
+	"   over different lifecycle sets, not a paired difference.",
+	"",
+	"DECISION. 1 and 2 hold: `ship`. 2 fails, or either set in 1 is empty so",
+	"   its precision cannot be stated: `insufficient-evidence`. 1 is measured",
+	"   and fails: `no-line`.",
+	"   On either failure the wording revert ships alone and the line does not.",
+].join("\n");
+
+/** Criterion 2 of {@link FAILOVER_LINE_RULE}. */
+export const FAILOVER_LINE_MIN_NEW_LIFECYCLES = 10;
+
+/** The class {@link FAILOVER_LINE_RULE} is decided on. */
+export const FAILOVER_LINE_CLASS = "anthropic";
+
+/** One set of lifecycles: how many, how many observed exhausted before the reset. */
+export interface FailoverLineSet {
+	lifecycles: number;
+	exhausted: number;
+	/** `exhausted / lifecycles`, null when empty. */
+	precision: number | null;
+}
+
+/** Record-level counts for one subset of shown instants. */
+export interface FailoverLineRecordSet {
+	records: number;
+	exhausted: number;
+	precision: number | null;
+}
+
+export interface FailoverLineClassScores {
+	demandClass: string;
+	/** Truth-observed records of the population; the denominator of nothing, printed for scale. */
+	records: number;
+	/** Shown instants whose truth was censored, excluded from every set. */
+	shownCensored: number;
+	shown: FailoverLineRecordSet;
+	/** Shown instants at which the standalone line flagged nothing. */
+	newRecords: FailoverLineRecordSet;
+	/** Instants at which the standalone line flagged a run-out. */
+	standaloneRecords: FailoverLineRecordSet;
+	weeklyDriven: FailoverLineRecordSet;
+	shownLifecycles: FailoverLineSet;
+	newLifecycles: FailoverLineSet;
+	standaloneLifecycles: FailoverLineSet;
+	/**
+	 * Over lifecycles observed exhausted where BOTH lines flagged: first
+	 * standalone flag minus first failover flag, in minutes. Positive = the
+	 * failover line spoke first.
+	 */
+	leadOverStandaloneMinutes: number[];
+	/** Observed exhaustion minus the first failover flag, minutes, over exhausted shown lifecycles. */
+	failoverWarningMinutes: number[];
+	/** Observed exhaustion minus the first standalone flag, minutes, over exhausted standalone lifecycles. */
+	standaloneWarningMinutes: number[];
+	/** `failoverEtaMs − observed`, minutes, over shown records observed exhausted. Positive = optimistic. */
+	failoverSignedErrorMinutes: number[];
+	/** `standaloneLineEtaMs − observed`, minutes, over standalone records observed exhausted. */
+	standaloneSignedErrorMinutes: number[];
+}
+
+export interface FailoverLineScores {
+	classes: FailoverLineClassScores[];
+	/** See {@link ReplayResult.failoverShownAtHorizon}. Across every class. */
+	shownAtHorizon: number;
+}
+
+const setOf = (lifecycles: number, exhausted: number): FailoverLineSet => ({
+	lifecycles,
+	exhausted,
+	precision: lifecycles === 0 ? null : exhausted / lifecycles,
+});
+
+const recordSetOf = (
+	records: number,
+	exhausted: number,
+): FailoverLineRecordSet => ({
+	records,
+	exhausted,
+	precision: records === 0 ? null : exhausted / records,
+});
+
+/**
+ * Score the failover line on the replayed history, per class.
+ *
+ * Reads the `current` model's records only — every model's record at one
+ * instant carries the same line fields, and one record per window-instant is
+ * what the population is. Censored instants are counted and excluded: a line
+ * shown at an instant whose truth nobody observed is neither right nor wrong.
+ */
+export function scoreFailoverLine(replay: ReplayResult): FailoverLineScores {
+	const byClass = new Map<string, RedistributionRecord[]>();
+	for (const record of replay.records) {
+		if (record.model !== "current") continue;
+		if (record.windowKind !== FAILOVER_WINDOW_KIND) continue;
+		const demandClass = servableClassFor(
+			record.provider ?? "anthropic",
+		).classId;
+		const list = byClass.get(demandClass) ?? [];
+		byClass.set(demandClass, list);
+		list.push(record);
+	}
+	const classes: FailoverLineClassScores[] = [];
+	for (const [demandClass, records] of [...byClass].sort(([a], [b]) =>
+		a.localeCompare(b),
+	)) {
+		const observed = records.filter(
+			(record) => record.outcome.kind !== "censored",
+		);
+		const shownCensored = records.filter(
+			(record) =>
+				record.outcome.kind === "censored" && record.failoverEtaMs != null,
+		).length;
+		// The same positive the per-window scorer counts: a 100 % observed BEFORE
+		// the window's own reset. `deriveOutcome` can return an exhaustion at or
+		// after the label reset (the next window's fill), and that is not this
+		// window running out before its reset.
+		const exhaustedAt = (record: RedistributionRecord): number | null =>
+			record.outcome.kind === "exhausted" &&
+			(record.labelResetAtMs == null ||
+				record.outcome.atMs < record.labelResetAtMs)
+				? record.outcome.atMs
+				: null;
+		const count = (
+			subset: readonly RedistributionRecord[],
+		): FailoverLineRecordSet =>
+			recordSetOf(
+				subset.length,
+				subset.filter((record) => exhaustedAt(record) != null).length,
+			);
+		const shownRecords = observed.filter(
+			(record) => record.failoverEtaMs != null,
+		);
+		const standaloneRecords = observed.filter(
+			(record) => record.standaloneLineEtaMs != null,
+		);
+
+		const byLifecycle = new Map<string, RedistributionRecord[]>();
+		for (const record of observed) {
+			const list = byLifecycle.get(record.lifecycleId) ?? [];
+			byLifecycle.set(record.lifecycleId, list);
+			list.push(record);
+		}
+		let shownLifecycles = 0;
+		let shownExhausted = 0;
+		let newLifecycles = 0;
+		let newExhausted = 0;
+		let standaloneLifecycles = 0;
+		let standaloneExhausted = 0;
+		const leadOverStandaloneMinutes: number[] = [];
+		const failoverWarningMinutes: number[] = [];
+		const standaloneWarningMinutes: number[] = [];
+		for (const list of byLifecycle.values()) {
+			const sorted = [...list].sort((a, b) => a.T - b.T);
+			// A lifecycle's truth is one outcome: exhausted at one instant, or
+			// survived. Any record saying exhausted settles it.
+			const observedExhaustionMs =
+				sorted.map(exhaustedAt).find((at) => at != null) ?? null;
+			const exhausted = observedExhaustionMs != null;
+			const firstFailover = sorted.find(
+				(record) => record.failoverEtaMs != null,
+			);
+			const firstStandalone = sorted.find(
+				(record) => record.standaloneLineEtaMs != null,
+			);
+			if (firstFailover) {
+				shownLifecycles++;
+				if (exhausted) shownExhausted++;
+				const standaloneBefore = sorted.some(
+					(record) =>
+						record.T <= firstFailover.T && record.standaloneLineEtaMs != null,
+				);
+				if (!standaloneBefore) {
+					newLifecycles++;
+					if (exhausted) newExhausted++;
+				}
+				if (exhausted) {
+					failoverWarningMinutes.push(
+						(observedExhaustionMs - firstFailover.T) / MINUTE_MS,
+					);
+					if (firstStandalone) {
+						leadOverStandaloneMinutes.push(
+							(firstStandalone.T - firstFailover.T) / MINUTE_MS,
+						);
+					}
+				}
+			}
+			if (firstStandalone) {
+				standaloneLifecycles++;
+				if (exhausted) {
+					standaloneExhausted++;
+					standaloneWarningMinutes.push(
+						(observedExhaustionMs - firstStandalone.T) / MINUTE_MS,
+					);
+				}
+			}
+		}
+		const signedErrors = (
+			subset: readonly RedistributionRecord[],
+			etaOf: (record: RedistributionRecord) => number | null,
+		): number[] =>
+			subset.flatMap((record) => {
+				const eta = etaOf(record);
+				const at = exhaustedAt(record);
+				return eta == null || at == null ? [] : [(eta - at) / MINUTE_MS];
+			});
+		classes.push({
+			demandClass,
+			records: observed.length,
+			shownCensored,
+			shown: count(shownRecords),
+			newRecords: count(
+				shownRecords.filter((record) => record.standaloneLineEtaMs == null),
+			),
+			standaloneRecords: count(standaloneRecords),
+			weeklyDriven: count(
+				shownRecords.filter((record) => record.failoverWeeklyDriven),
+			),
+			shownLifecycles: setOf(shownLifecycles, shownExhausted),
+			newLifecycles: setOf(newLifecycles, newExhausted),
+			standaloneLifecycles: setOf(standaloneLifecycles, standaloneExhausted),
+			leadOverStandaloneMinutes,
+			failoverWarningMinutes,
+			standaloneWarningMinutes,
+			failoverSignedErrorMinutes: signedErrors(
+				shownRecords,
+				(record) => record.failoverEtaMs,
+			),
+			standaloneSignedErrorMinutes: signedErrors(
+				standaloneRecords,
+				(record) => record.standaloneLineEtaMs,
+			),
+		});
+	}
+	return { classes, shownAtHorizon: replay.failoverShownAtHorizon };
+}
+
+export type FailoverLineDecision = "ship" | "insufficient-evidence" | "no-line";
+
+export interface FailoverLineVerdict {
+	demandClass: string;
+	newLifecycles: number;
+	newPrecision: number | null;
+	standalonePrecision: number | null;
+	/** Criterion 1; null when either precision is undefined. */
+	reliable: boolean | null;
+	/** Criterion 2. */
+	enough: boolean;
+	decision: FailoverLineDecision;
+}
+
+/** Apply {@link FAILOVER_LINE_RULE} to the scored class. Nothing here reads a number the report does not print. */
+export function evaluateFailoverLine(
+	scores: FailoverLineScores,
+	demandClass: string = FAILOVER_LINE_CLASS,
+): FailoverLineVerdict {
+	const scored = scores.classes.find(
+		(entry) => entry.demandClass === demandClass,
+	);
+	const newLifecycles = scored?.newLifecycles.lifecycles ?? 0;
+	const newPrecision = scored?.newLifecycles.precision ?? null;
+	const standalonePrecision = scored?.standaloneLifecycles.precision ?? null;
+	const enough = newLifecycles >= FAILOVER_LINE_MIN_NEW_LIFECYCLES;
+	const reliable =
+		newPrecision == null || standalonePrecision == null
+			? null
+			: newPrecision >= standalonePrecision;
+	// `no-line` is reserved for a MEASURED failure of criterion 1. With either
+	// precision undefined (an empty set) nothing was measured, whatever the
+	// count says.
+	const decision: FailoverLineDecision =
+		!enough || reliable == null
+			? "insufficient-evidence"
+			: reliable
+				? "ship"
+				: "no-line";
+	return {
+		demandClass,
+		newLifecycles,
+		newPrecision,
+		standalonePrecision,
+		reliable,
+		enough,
+		decision,
+	};
+}
+
+function failoverLineSection(
+	scores: FailoverLineScores,
+	verdict: FailoverLineVerdict,
+	modelVerdict: Verdict,
+): string[] {
+	const out: string[] = [];
+	out.push("## Failover line");
+	out.push("");
+	const criterionD = modelVerdict.criteria.find((c) => c.id === "D");
+	const criterionDStatus =
+		criterionD == null || criterionD.pass == null
+			? "is indeterminate"
+			: criterionD.pass
+				? "passed"
+				: "failed";
+	out.push(
+		`The per-window line a surface would add under a five-hour forecast, scored as the exact predicate it would apply (\`failoverForecast\`, fed the verdict basis's scan and the per-window standalone forecast) over every replayed instant. This is NOT the verdict on the scenario model above, which is scored on every window of every class: it is the narrower claim that the lines a reader would actually see are worth showing. Criterion D of the model verdict ${criterionDStatus} on this run; either way the model-wide numbers do not decide the line, this rule does. Nothing in production reads the predicate until a run passes it. NEW means the line spoke FIRST, not that it caught something the standalone line never caught: the two lifecycle sets overlap. "First" is first among the lifecycle's truth-observed instants; censored instants are set aside before it is found, so a gap in the history can hide an earlier standalone flag. Ten lifecycles is a floor on the count, not a statistical assurance.`,
+	);
+	out.push("");
+	out.push(
+		`${scores.shownAtHorizon} window-instants at which the line would have been shown fell at the label horizon (their truth was still unfolding at the end of the loaded history) and were dropped before scoring; they are in no set below. The horizon keeps a lifecycle that exhausts before the boundary and drops one that survives past it, so admitted lines near the boundary skew toward hits.`,
+	);
+	out.push("");
+	out.push("```");
+	out.push(FAILOVER_LINE_RULE);
+	out.push("```");
+	out.push("");
+	const setCell = (set: FailoverLineSet): string =>
+		`${set.lifecycles} | ${set.exhausted} | ${pct(set.precision)}`;
+	const recordCell = (set: FailoverLineRecordSet): string =>
+		`${set.records} | ${set.exhausted} | ${pct(set.precision)}`;
+	if (scores.classes.length === 0) {
+		out.push("No five-hour records with observed truth in the replay.");
+		out.push("");
+	}
+	for (const entry of scores.classes) {
+		out.push(`### ${entry.demandClass}`);
+		out.push("");
+		out.push(
+			`${entry.records} truth-observed five-hour records; ${entry.shownCensored} shown instants had censored truth and are excluded from every set below.`,
+		);
+		out.push("");
+		out.push(
+			"Lifecycles (a lifecycle is in a set when any of its instants is):",
+		);
+		out.push("");
+		out.push("| set | lifecycles | exhausted before reset | precision |");
+		out.push("|---|---:|---:|---:|");
+		out.push(`| shown | ${setCell(entry.shownLifecycles)} |`);
+		out.push(
+			`| new (standalone silent when the line first appeared) | ${setCell(entry.newLifecycles)} |`,
+		);
+		out.push(
+			`| standalone line flagged | ${setCell(entry.standaloneLifecycles)} |`,
+		);
+		out.push("");
+		out.push("Per record (every scored instant):");
+		out.push("");
+		out.push("| set | records | exhausted before reset | precision |");
+		out.push("|---|---:|---:|---:|");
+		out.push(`| shown | ${recordCell(entry.shown)} |`);
+		out.push(`| shown, standalone silent | ${recordCell(entry.newRecords)} |`);
+		out.push(
+			`| standalone line flagged | ${recordCell(entry.standaloneRecords)} |`,
+		);
+		out.push(
+			`| shown, weekly-associated (a class weekly window dead at T or dying before the line's instant) | ${recordCell(entry.weeklyDriven)} |`,
+		);
+		out.push("");
+		out.push(
+			"Timing over lifecycles observed exhausted (minutes; medians, with n):",
+		);
+		out.push("");
+		out.push("| statistic | median | n |");
+		out.push("|---|---:|---:|");
+		out.push(
+			`| lead of the failover line over the standalone line, where both flagged (positive = failover first) | ${num(medianOf(entry.leadOverStandaloneMinutes), 1)} | ${entry.leadOverStandaloneMinutes.length} |`,
+		);
+		out.push(
+			`| warning lead, first failover flag to observed exhaustion | ${num(medianOf(entry.failoverWarningMinutes), 1)} | ${entry.failoverWarningMinutes.length} |`,
+		);
+		out.push(
+			`| warning lead, first standalone flag to observed exhaustion | ${num(medianOf(entry.standaloneWarningMinutes), 1)} | ${entry.standaloneWarningMinutes.length} |`,
+		);
+		out.push(
+			`| signed ETA error of shown lines (positive = optimistic), per record | ${num(medianOf(entry.failoverSignedErrorMinutes), 1)} | ${entry.failoverSignedErrorMinutes.length} |`,
+		);
+		out.push(
+			`| signed ETA error of the standalone line, per record | ${num(medianOf(entry.standaloneSignedErrorMinutes), 1)} | ${entry.standaloneSignedErrorMinutes.length} |`,
+		);
+		out.push("");
+	}
+	out.push(`### Decision (${verdict.demandClass})`);
+	out.push("");
+	out.push(
+		`- 1. RELIABLE: precision(new) ${pct(verdict.newPrecision)} >= precision(standalone) ${pct(verdict.standalonePrecision)}: ${verdict.reliable == null ? "not decidable (a set is empty)" : verdict.reliable ? "PASS" : "FAIL"}`,
+	);
+	out.push(
+		`- 2. ENOUGH: new lifecycles ${verdict.newLifecycles} >= ${FAILOVER_LINE_MIN_NEW_LIFECYCLES}: ${verdict.enough ? "PASS" : "FAIL"}`,
+	);
+	out.push(`- Decision: \`${verdict.decision}\``);
+	out.push("");
+	return out;
 }
 
 // ---------------------------------------------------------------------------
@@ -5693,6 +6211,8 @@ export interface RedistributionReportInput {
 	 * read at all, which the section says rather than printing an empty table.
 	 */
 	absorption: AbsorptionChecks | null;
+	/** The failover line's scores and decision, precomputed by the caller like `verdict`. */
+	failoverLine: { scores: FailoverLineScores; verdict: FailoverLineVerdict };
 	knownLimits: string[];
 	notes: string[];
 }
@@ -6853,6 +7373,14 @@ export function formatRedistributionReport(
 	out.push(...basisIdentitySection(basisIdentityCheck(replay)));
 
 	out.push(...besideBasisSection(evaluateBesideBasis(cohorts)));
+
+	out.push(
+		...failoverLineSection(
+			input.failoverLine.scores,
+			input.failoverLine.verdict,
+			verdict,
+		),
+	);
 
 	out.push("## Known limits");
 	out.push("");

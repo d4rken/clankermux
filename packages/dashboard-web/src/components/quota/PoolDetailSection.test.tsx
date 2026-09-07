@@ -97,7 +97,7 @@ describe("PoolDetailSection with duplicate account names", () => {
 });
 
 describe("projection wording", () => {
-	it("states the at-risk and family-cap projections as conditional on the pace", () => {
+	it("states the at-risk and family-cap projections plainly", () => {
 		const base = sharedNamePool();
 		const { html } = renderCapturingErrors({
 			...base,
@@ -144,10 +144,8 @@ describe("projection wording", () => {
 				},
 			],
 		});
-		expect(html).toContain("at this pace, runs out in");
-		expect(html).toContain("at this pace, hits the cap");
-		// No projection on this surface reads as a fact.
-		expect(html).not.toMatch(/[^,] runs out in/);
-		expect(html).not.toMatch(/>out /);
+		expect(html).toContain("runs out in");
+		expect(html).toContain("hits the cap");
+		expect(html).not.toMatch(/at this pace/i);
 	});
 });

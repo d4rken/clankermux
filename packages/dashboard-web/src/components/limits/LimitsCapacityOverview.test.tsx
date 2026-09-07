@@ -492,7 +492,7 @@ describe("LimitsCapacityOverview runway panel", () => {
 		expect(html).toContain("3d 2h");
 		expect(html).toContain("beta weekly");
 		expect(html).toContain("Binding window");
-		expect(html).toContain("Runs out at this pace");
+		expect(html).toContain("Runs out");
 		expect(html).not.toContain("≥");
 	});
 
@@ -647,7 +647,7 @@ describe("LimitsCapacityOverview runway panel", () => {
 
 		const fresh = renderRunway({ runways, now: NOW });
 		expect(fresh).toContain("4h");
-		expect(fresh).toContain("Runs out at this pace");
+		expect(fresh).toContain("Runs out");
 
 		const later = renderRunway({ runways, now: NOW + HOUR });
 		expect(later).toContain("3h");

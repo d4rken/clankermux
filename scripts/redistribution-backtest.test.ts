@@ -11,7 +11,9 @@ import {
 	knownLimitsFor,
 	prepareSeries,
 	replayRange,
+	evaluateFailoverLine,
 	scoreCohorts,
+	scoreFailoverLine,
 } from "../packages/core/src/redistribution-backtest";
 import {
 	REQUEST_BUCKET_SQL,
@@ -302,10 +304,15 @@ describe("end to end on a fixture database", () => {
 			cohorts,
 			verdict,
 			absorption,
+			failoverLine: {
+				scores: scoreFailoverLine(replay),
+				verdict: evaluateFailoverLine(scoreFailoverLine(replay)),
+			},
 			knownLimits: knownLimitsFor(replay, cohorts, verdict, null),
 			notes: ["fixture run"],
 		});
 		expect(markdown).toContain("## Verdict");
+		expect(markdown).toContain("## Failover line");
 		expect(markdown).toContain(
 			"### Request-volume changes around observed exhaustion",
 		);

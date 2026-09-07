@@ -1,11 +1,11 @@
 # ClankerMux runway redistribution backtest
 
-Generated: 2026-09-07T15:57:18.694Z
+Generated: 2026-09-07T18:35:40.238Z
 
 Reproduce with:
 
 ```
-bun scripts/redistribution-backtest.ts --db=/home/darken/.config/clankermux/clankermux.db --from=2026-07-01T00:00:00Z --to=2026-09-06T00:00:00Z --out=docs/prediction-backtest-redistribution.md --records-out=/tmp/claude-1000/redistribution-records-basis.jsonl
+bun scripts/redistribution-backtest.ts --db=/home/darken/.config/clankermux/clankermux.db --from=2026-07-01T00:00:00Z --to=2026-09-06T00:00:00Z --out=docs/prediction-backtest-redistribution.md
 ```
 
 | config | value |
@@ -20,11 +20,11 @@ bun scripts/redistribution-backtest.ts --db=/home/darken/.config/clankermux/clan
 
 | field | value |
 |---|---|
-| usage_snapshots rows | 196288 |
+| usage_snapshots rows | 196758 |
 | accounts | 7 |
 | providers | anthropic, codex |
 | first sample | 2026-06-02T12:48:00.294Z |
-| last sample | 2026-09-07T15:55:46.889Z |
+| last sample | 2026-09-07T18:30:41.085Z |
 | replay interval | `[2026-07-01T00:00:00.000Z, 2026-09-06T00:00:00.000Z)` |
 | grid instants | 9648 |
 
@@ -2782,7 +2782,7 @@ The `combined` rows put five-hour and weekly windows in one median. A combined d
 | no peer lost in prefix | five_hour | 30 | 804 | 13 | 3.5% | 3.31 | 3.21 | 2.7 | 2.0 | 4.98 |
 | no peer lost in prefix | seven_day | 6 | 46 | 11 | 9.5% | 89.01 | 86.68 | 2.1 | 2.0 | 89.09 |
 | no peer lost in prefix | combined | 36 | 850 | 24 | 4.0% | 3.45 | 3.34 | 2.7 | 2.0 | 4.99 |
-| exposure unobservable | combined | 4 | 120 | 23 | 2.7% | 4.59 | 4.57 | 1.6 | 2.0 | 4.99 |
+| exposure unobservable | combined | 5 | 122 | 23 | 3.3% | 4.59 | 4.57 | 1.6 | 2.0 | 4.99 |
 
 The same rows again, split instead by whether a same-class peer died anywhere between the window start and the crossing. That definition is length-biased in the direction of longer fills, because a longer fill has more calendar time in which to contain a peer death, and that is why the fixed-prefix split above is the primary one. Both are printed; neither was chosen on its result. This split reads a different span from the prefix one, so it carries its own observability row: a window whose span from its start to its crossing (or to its last sample, uncrossed) leaves the replayed range is `during-fill exposure unobservable` here, whatever the prefix split could say about it.
 
@@ -2794,7 +2794,7 @@ The same rows again, split instead by whether a same-class peer died anywhere be
 | no peer lost during fill | five_hour | 24 | 746 | 13 | 3.1% | 3.19 | 3.15 | 2.5 | 2.0 | 4.98 |
 | no peer lost during fill | seven_day | 2 | 31 | 10 | 4.7% | 71.29 | 71.28 | 0.8 | 2.0 | 51.39 |
 | no peer lost during fill | combined | 26 | 777 | 23 | 3.1% | 3.20 | 3.17 | 2.4 | 2.0 | 4.98 |
-| during-fill exposure unobservable | combined | 4 | 127 | 25 | 2.6% | 4.59 | 4.57 | 1.6 | 2.0 | 4.99 |
+| during-fill exposure unobservable | combined | 5 | 129 | 25 | 3.1% | 4.59 | 4.57 | 1.6 | 2.0 | 4.99 |
 
 Every cell with fewer than 20 fills prints its fill durations, sorted, in hours. At that n the median summarises few observed fills, and the values themselves are what a reader can judge.
 
@@ -2802,13 +2802,13 @@ Every cell with fewer than 20 fills prints its fill durations, sorted, in hours.
 - `peer lost in prefix` seven_day (4 fills): 88.05, 109.98, 132.78, 159.11 h
 - `peer lost in prefix` combined (11 fills): 1.32, 2.30, 2.37, 2.52, 2.64, 3.55, 3.58, 88.05, 109.98, 132.78, 159.11 h
 - `no peer lost in prefix` seven_day (6 fills): 71.29, 86.71, 89.01, 101.83, 109.82, 132.28 h
-- `exposure unobservable` combined (4 fills): 2.69, 4.59, 87.03, 126.32 h
+- `exposure unobservable` combined (5 fills): 2.69, 3.66, 4.59, 87.03, 126.32 h
 - `peer lost during fill` five_hour (13 fills): 1.32, 2.27, 2.30, 2.37, 2.52, 2.64, 3.31, 3.42, 3.55, 3.58, 3.99, 4.31, 4.78 h
 - `peer lost during fill` seven_day (8 fills): 86.71, 88.05, 101.83, 109.82, 109.98, 132.28, 132.78, 159.11 h
 - `no peer lost during fill` seven_day (2 fills): 71.29, 89.01 h
-- `during-fill exposure unobservable` combined (4 fills): 2.69, 4.59, 87.03, 126.32 h
+- `during-fill exposure unobservable` combined (5 fills): 2.69, 3.66, 4.59, 87.03, 126.32 h
 
-Reconciliation: 51 filled + 987 completed below 100 % + 48 follow-up incomplete + 182 with no reset on the segment + 1 already full at the first sample + 19718 placeholder lifecycles skipped = 20987 window lifecycles.
+Reconciliation: 52 filled + 989 completed below 100 % + 48 follow-up incomplete + 182 with no reset on the segment + 1 already full at the first sample + 19721 placeholder lifecycles skipped = 20993 window lifecycles.
 
 ### Request-volume changes around observed exhaustion
 
@@ -4888,6 +4888,113 @@ A paired median is taken over the records the pair being compared BOTH dated, so
 | recall, scenario-headroom | 0.607 |
 | recall, no pre-correction control | — |
 
+## Failover line
+
+The per-window line a surface would add under a five-hour forecast, scored as the exact predicate it would apply (`failoverForecast`, fed the verdict basis's scan and the per-window standalone forecast) over every replayed instant. This is NOT the verdict on the scenario model above, which is scored on every window of every class: it is the narrower claim that the lines a reader would actually see are worth showing. Criterion D of the model verdict failed on this run; either way the model-wide numbers do not decide the line, this rule does. Nothing in production reads the predicate until a run passes it. NEW means the line spoke FIRST, not that it caught something the standalone line never caught: the two lifecycle sets overlap. "First" is first among the lifecycle's truth-observed instants; censored instants are set aside before it is found, so a gap in the history can hide an earlier standalone flag. Ten lifecycles is a floor on the count, not a statistical assurance.
+
+0 window-instants at which the line would have been shown fell at the label horizon (their truth was still unfolding at the end of the loaded history) and were dropped before scoring; they are in no set below. The horizon keeps a lifecycle that exhausts before the boundary and drops one that survives past it, so admitted lines near the boundary skew toward hits.
+
+```
+FAILOVER LINE. Under a five-hour window's standalone forecast a surface
+   would show the run-out `failoverForecast` derives from the verdict
+   basis's scan, only when that run-out is earlier than the standalone
+   one and before the reset. The rule below decides whether that line
+   ships. It is scored on the SAME predicate a surface would apply, over
+   the replayed history.
+
+POPULATION. Records of the `current` model (one per window-instant) for
+   anthropic/five_hour windows whose truth was observed: exhausted before
+   the reset, or survived it. A record is SHOWN when the line would have
+   been on screen at its instant. A lifecycle is SHOWN when any of its
+   instants is; NEW when, at its first shown instant, the standalone line
+   had flagged no run-out at that or any earlier instant; STANDALONE when
+   the standalone line flagged a run-out at any instant.
+
+1. RELIABLE. precision(NEW) >= precision(STANDALONE), precision being the
+   share of a set's lifecycles observed to exhaust before the reset. The
+   lines the surface adds must be right at least as often as the lines it
+   already shows.
+2. ENOUGH. |NEW| >= 10 lifecycles. Below that a single lifecycle moves the
+   precision by ten points or more and criterion 1 is noise.
+3. REPORTED, NOT GATED. Lead over the standalone line where both flagged,
+   warning lead to the observed exhaustion, ETA error of the shown lines,
+   and the weekly-associated subset. The two warning leads are medians
+   over different lifecycle sets, not a paired difference.
+
+DECISION. 1 and 2 hold: `ship`. 2 fails, or either set in 1 is empty so
+   its precision cannot be stated: `insufficient-evidence`. 1 is measured
+   and fails: `no-line`.
+   On either failure the wording revert ships alone and the line does not.
+```
+
+### anthropic
+
+23593 truth-observed five-hour records; 0 shown instants had censored truth and are excluded from every set below.
+
+Lifecycles (a lifecycle is in a set when any of its instants is):
+
+| set | lifecycles | exhausted before reset | precision |
+|---|---:|---:|---:|
+| shown | 58 | 16 | 27.6% |
+| new (standalone silent when the line first appeared) | 29 | 7 | 24.1% |
+| standalone line flagged | 121 | 33 | 27.3% |
+
+Per record (every scored instant):
+
+| set | records | exhausted before reset | precision |
+|---|---:|---:|---:|
+| shown | 469 | 87 | 18.6% |
+| shown, standalone silent | 188 | 34 | 18.1% |
+| standalone line flagged | 1164 | 236 | 20.3% |
+| shown, weekly-associated (a class weekly window dead at T or dying before the line's instant) | 56 | 0 | 0.0% |
+
+Timing over lifecycles observed exhausted (minutes; medians, with n):
+
+| statistic | median | n |
+|---|---:|---:|
+| lead of the failover line over the standalone line, where both flagged (positive = failover first) | 0.0 | 15 |
+| warning lead, first failover flag to observed exhaustion | 62.5 | 16 |
+| warning lead, first standalone flag to observed exhaustion | 56.7 | 33 |
+| signed ETA error of shown lines (positive = optimistic), per record | -7.7 | 87 |
+| signed ETA error of the standalone line, per record | 0.2 | 236 |
+
+### codex
+
+269 truth-observed five-hour records; 0 shown instants had censored truth and are excluded from every set below.
+
+Lifecycles (a lifecycle is in a set when any of its instants is):
+
+| set | lifecycles | exhausted before reset | precision |
+|---|---:|---:|---:|
+| shown | 0 | 0 | — |
+| new (standalone silent when the line first appeared) | 0 | 0 | — |
+| standalone line flagged | 5 | 1 | 20.0% |
+
+Per record (every scored instant):
+
+| set | records | exhausted before reset | precision |
+|---|---:|---:|---:|
+| shown | 0 | 0 | — |
+| shown, standalone silent | 0 | 0 | — |
+| standalone line flagged | 51 | 18 | 35.3% |
+| shown, weekly-associated (a class weekly window dead at T or dying before the line's instant) | 0 | 0 | — |
+
+Timing over lifecycles observed exhausted (minutes; medians, with n):
+
+| statistic | median | n |
+|---|---:|---:|
+| lead of the failover line over the standalone line, where both flagged (positive = failover first) | — | 0 |
+| warning lead, first failover flag to observed exhaustion | — | 0 |
+| warning lead, first standalone flag to observed exhaustion | 171.4 | 1 |
+| signed ETA error of shown lines (positive = optimistic), per record | — | 0 |
+| signed ETA error of the standalone line, per record | -0.9 | 18 |
+
+### Decision (anthropic)
+
+- 1. RELIABLE: precision(new) 24.1% >= precision(standalone) 27.3%: FAIL
+- 2. ENOUGH: new lifecycles 29 >= 10: PASS
+- Decision: `no-line`
+
 ## Known limits
 
 - Pause and removal cannot be replayed: `usage_snapshots` rows cascade-delete with their account, so no removed account has history, and `accounts.paused` keeps none. The scenario's `presence: "demand-only"` path is covered by its unit tests only.
@@ -4905,11 +5012,11 @@ A paired median is taken over the records the pair being compared BOTH dated, so
 - A regression fit that states no ETA — a flat or falling six-hour fit, which an idle account inside a live window produces — has no recoverable anchor either: the fit's anchor is back-solved from the ETA. Such a window is scheduled from the replayed instant in BOTH scans, which is pre-existing behaviour and not something the correction introduced, and the lag-population table counts those records apart from the lags it medians.
 - Pending at this run (tag and servable class): peer-exhaustion (codex), add (codex), upgrade (codex). Those pairs hold no usable, uncensored weekly record common to all models, and each carries at least one tagged weekly window still pending at the label horizon, so their weekly half is unlabelled and the verdict is provisional.
 - Positive counts (all records, per model) — current: 3686 actual positives of 25200 scored; scenario-equal: 5826 actual positives of 42295 scored; scenario-equal-original: 5826 actual positives of 42295 scored; scenario-headroom: 5826 actual positives of 42295 scored; scenario-proportional: 5826 actual positives of 42295 scored; scenario-proportional-original: 5826 actual positives of 42295 scored.
-- `total_tokens` is null or zero on 8974 of 622105 attributed `requests` rows in the loaded span (1.4 %); those contribute zero to the absorption measurement's token basis.
+- `total_tokens` is null or zero on 9086 of 624679 attributed `requests` rows in the loaded span (1.5 %); those contribute zero to the absorption measurement's token basis.
 
 ## Notes
 
 - Placeholder windows skipped: 233.
-- Replay took 37.4 s over 9648 instants; scoring and bootstrap 5.4 s.
+- Replay took 65.0 s over 9648 instants; scoring and bootstrap 9.8 s.
 - Grid step 10 min; rows loaded 8 days either side of the replay interval.
-- Request buckets loaded: 64499 minute buckets over 7 accounts, on a 60-second grid, spanning 2026-06-23T09:31:00.000Z to 2026-09-07T15:57:00.000Z.
+- Request buckets loaded: 64846 minute buckets over 7 accounts, on a 60-second grid, spanning 2026-06-23T09:31:00.000Z to 2026-09-07T18:35:00.000Z.
