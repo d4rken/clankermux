@@ -2176,6 +2176,24 @@ describe("the share rules beside the basis", () => {
 			markdown.indexOf("\n## Share rules beside the basis\n"),
 		);
 
+	test("says which pairing each of criterion A's columns is a median over", () => {
+		const section = sectionOf(besideFixture().markdown);
+
+		// The table puts medians from three populations side by side, so the
+		// section has to say so: without it the basis's column reads as this
+		// rule's comparator, which it is not.
+		expect(section).toContain(
+			"A paired median is taken over the records the pair being compared BOTH dated",
+		);
+		expect(section).toContain(
+			"The scored rule's column and the `current` column come from that rule's own pairing with the current model",
+		);
+		expect(section).toContain(
+			`the \`${VERDICT_BASIS_MODEL}\` column comes from the BASIS's pairing with the current model`,
+		);
+		expect(section).toContain("Each pairing's `paired n` is in the value list");
+	});
+
 	test("renders the prior basis and the headroom rule, four criteria each", () => {
 		const { markdown, beside } = besideFixture();
 		const section = sectionOf(markdown);

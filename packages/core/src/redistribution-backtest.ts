@@ -6461,6 +6461,10 @@ function besideBasisSection(scored: readonly BesideBasisScores[]): string[] {
 		`Every other share rule the replay scans, held to the same four criteria as the verdict, computed by the same functions on the same lifecycle-balanced cohorts and against the same comparison models. NONE of it enters the verdict: \`evaluateVerdict\` reads nothing from this section, and the verdict above is the same with or without it. \`${PRIOR_BASIS_MODEL}\` is here because it WAS the verdict basis through v2026.9.19, and is kept scored beside the basis that replaced it so the change of basis can be read rather than taken on trust. Each rule's criterion D is judged against its OWN pre-correction scan; a rule that has none says so instead of borrowing another rule's control.`,
 	);
 	out.push("");
+	out.push(
+		`A paired median is taken over the records the pair being compared BOTH dated, so the columns of criterion A are medians over different populations and are not each other's comparators. The scored rule's column and the \`current\` column come from that rule's own pairing with the current model; the \`${VERDICT_BASIS_MODEL}\` column comes from the BASIS's pairing with the current model, and the number the basis is actually judged against — the current model over the basis's own pairing — is under \`## Verdict\` rather than in this table. Each pairing's \`paired n\` is in the value list of the criterion it belongs to: this rule's below the table, the basis's under \`## Verdict\`. A model column is empty where the statistic is already a delta against that model.`,
+	);
+	out.push("");
 	for (const entry of scored) {
 		out.push(`### \`${entry.model}\` — ${entry.role}`);
 		out.push("");
