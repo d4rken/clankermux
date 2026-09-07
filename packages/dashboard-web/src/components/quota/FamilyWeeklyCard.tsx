@@ -36,7 +36,7 @@ function familyOutlook(row: FamilyRow): Outlook {
 	if (usage == null) {
 		return row.unopenedCount > 0
 			? { label: "Unused capacity", tone: "success" }
-			: { label: "No reading", tone: "neutral" };
+			: { label: "Unavailable", tone: "neutral" };
 	}
 	if (usage.exhaustedCount > 0) {
 		return {
@@ -51,8 +51,9 @@ function familyOutlook(row: FamilyRow): Outlook {
 }
 
 /** Include untouched accounts as zero use without inventing a reset or forecast. */
-function familyBars(row: FamilyRow): Array<PoolAccountBar & { pct: number }> {
+function familyBars(row: FamilyRow): PoolAccountBar[] {
 	return [
+		...row.unavailableAccounts,
 		...(row.usage?.accounts ?? []).map((entry) => ({
 			accountId: entry.accountId,
 			name: entry.name,
@@ -69,7 +70,7 @@ function familyBars(row: FamilyRow): Array<PoolAccountBar & { pct: number }> {
 			reason: null,
 			resetMs: null,
 		})),
-	].sort((a, b) => a.pct - b.pct);
+	].sort((a, b) => (a.pct ?? Infinity) - (b.pct ?? Infinity));
 }
 
 /**
@@ -146,16 +147,17 @@ export function FamilyWeeklyCard({
 						{rows.map((row) => {
 							const usage = row.usage;
 							const bars = familyBars(row);
-							const least = bars[0];
+							const least = bars.find(
+								(bar) => bar.state === "reporting" && bar.pct != null,
+							);
+							const unavailableCount = row.unavailableAccounts.length;
 							const outlook = familyOutlook(row);
 							// Accounts that could serve the family but have never opened it
 							// belong in the denominator: without them "1 of 1 reporting"
 							// described a single account while four more could take the
 							// work.
 							const total =
-								row.reportingCount +
-								row.unavailableReporters +
-								row.unopenedCount;
+								row.reportingCount + unavailableCount + row.unopenedCount;
 							// Only a FUTURE reset is offered. `earliestResetMs` is the
 							// soonest across the family's accounts, so the name beside it
 							// has to be that account's — not `worstAccountName`, which is
@@ -179,14 +181,14 @@ export function FamilyWeeklyCard({
 										</StatusChip>
 									</div>
 
-									{least == null ? (
+									{least?.pct == null ? (
 										// The family exists — a live account reports the window —
 										// but every account that has it is unavailable. Saying
 										// nothing would read as "no such limit".
 										<p className="mt-tight text-xs text-muted-foreground">
-											Reported only by {row.unavailableReporters}{" "}
-											{row.unavailableReporters === 1 ? "account" : "accounts"}{" "}
-											that cannot serve right now
+											{unavailableCount}{" "}
+											{unavailableCount === 1 ? "account" : "accounts"} cannot
+											serve right now
 										</p>
 									) : (
 										<>
@@ -208,46 +210,48 @@ export function FamilyWeeklyCard({
 											<p className="truncate text-xs text-muted-foreground">
 												lowest · {least.name}
 											</p>
-											<PoolClassBars
-												accounts={bars}
-												leastUsedAccountId={least.accountId}
-												formatPct={floorPct}
-											/>
-											<div className="mt-item space-y-tight text-xs text-muted-foreground">
+										</>
+									)}
+									<PoolClassBars
+										accounts={bars}
+										leastUsedAccountId={least?.accountId}
+										formatPct={floorPct}
+									/>
+									{least != null && (
+										<div className="mt-item space-y-tight text-xs text-muted-foreground">
+											<p className="truncate">
+												{row.reportingCount} of {total} reporting
+												{row.unopenedCount > 0
+													? ` · ${row.unopenedCount} not used this week`
+													: ""}
+												{unavailableCount > 0
+													? ` · ${unavailableCount} unavailable`
+													: ""}
+											</p>
+											{resetsInMs != null && (
 												<p className="truncate">
-													{row.reportingCount} of {total} reporting
-													{row.unopenedCount > 0
-														? ` · ${row.unopenedCount} not used this week`
-														: ""}
-													{row.unavailableReporters > 0
-														? ` · ${row.unavailableReporters} unavailable`
+													resets in {formatDurationDhm(resetsInMs)}
+													{earliestResetAccountName
+														? ` · ${earliestResetAccountName}`
 														: ""}
 												</p>
-												{resetsInMs != null && (
-													<p className="truncate">
-														resets in {formatDurationDhm(resetsInMs)}
-														{earliestResetAccountName
-															? ` · ${earliestResetAccountName}`
-															: ""}
-													</p>
-												)}
-												{usage != null && usage.atRiskCount > 0 && (
-													<p className="truncate text-warning-strong">
-														{usage.atRiskCount} projected to hit the cap before
-														reset
-													</p>
-												)}
-												{/* The counterweight: an account whose burn is not
+											)}
+											{usage != null && usage.atRiskCount > 0 && (
+												<p className="truncate text-warning-strong">
+													{usage.atRiskCount} projected to hit the cap before
+													reset
+												</p>
+											)}
+											{/* The counterweight: an account whose burn is not
 												    measured yet is excluded from the count above, so
 												    without this a family early in its week reads as one
 												    nothing is projected to hit. */}
-												{usage != null && usage.learningCount > 0 && (
-													<p className="truncate text-muted-foreground">
-														{usage.learningCount} not yet projectable
-													</p>
-												)}
-											</div>
-										</>
+											{usage != null && usage.learningCount > 0 && (
+												<p className="truncate text-muted-foreground">
+													{usage.learningCount} not yet projectable
+												</p>
+											)}
+										</div>
 									)}
 								</div>
 							);

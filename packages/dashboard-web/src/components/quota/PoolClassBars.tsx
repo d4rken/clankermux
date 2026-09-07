@@ -58,16 +58,21 @@ export function PoolClassBars({
 		<ul className="mt-item space-y-tight" aria-label="Per-account utilization">
 			{accounts.map((bar) => {
 				const isHeadline = bar.accountId === leastUsedAccountId;
+				const reason = bar.reason ? REASON_SHORT[bar.reason] : null;
+				const status = reason && bar.pct != null ? ` · ${reason}` : "";
 				const width =
 					bar.pct == null ? 100 : Math.max(0, Math.min(100, bar.pct));
 				return (
 					<li
 						key={bar.accountId}
-						className="flex items-center gap-item text-xs"
+						className={cn(
+							"flex items-center gap-item text-xs",
+							bar.state !== "reporting" && "text-muted-foreground",
+						)}
 						title={
 							bar.pct == null
 								? `${bar.name} — ${REASON_SHORT[bar.reason ?? ""] ?? "no reading"}`
-								: `${bar.name} — ${formatPct(bar.pct)} used`
+								: `${bar.name} — ${formatPct(bar.pct)} used${status}`
 						}
 					>
 						<span
@@ -95,7 +100,7 @@ export function PoolClassBars({
 							aria-valuetext={
 								bar.pct == null
 									? `${bar.name}: no reading`
-									: `${bar.name}: ${formatPct(bar.pct)} used`
+									: `${bar.name}: ${formatPct(bar.pct)} used${status}`
 							}
 							className="relative h-1.5 min-w-0 flex-1 overflow-hidden rounded-full bg-muted"
 						>
@@ -120,6 +125,9 @@ export function PoolClassBars({
 								? (REASON_SHORT[bar.reason ?? ""] ?? "—")
 								: formatPct(bar.pct)}
 						</span>
+						{reason && bar.pct != null && (
+							<span className="shrink-0 text-muted-foreground">{reason}</span>
+						)}
 					</li>
 				);
 			})}
