@@ -8,6 +8,7 @@ import {
 	registerUIRefresh,
 	usageObservedAtMs,
 	weeklyLifetimeConfidence,
+	weeklyRedEligible,
 	windowBurnAnchor,
 } from "@clankermux/core";
 import type {
@@ -221,13 +222,14 @@ function computeProjectedMessage(
 ): ProjectedUsage | null {
 	if (!resetTime || !window || percentage === null) return null;
 	const resetMs = new Date(resetTime).getTime();
+	const windowStartMs = Number.isFinite(resetMs)
+		? computeWindowStartMs(resetMs, window)
+		: null;
 	const estimate = estimateWindowExhaustion(
 		{
 			utilizationPct: percentage,
 			resetsAtMs: Number.isFinite(resetMs) ? resetMs : null,
-			windowStartMs: Number.isFinite(resetMs)
-				? computeWindowStartMs(resetMs, window)
-				: null,
+			windowStartMs,
 			prediction,
 			lifetimeConfidence: weeklyLifetimeConfidence(window),
 			observedAtMs,
@@ -267,9 +269,19 @@ function computeProjectedMessage(
 	const marginMs = resetMs - estimate.exhaustsAtMs;
 	return {
 		message: `Runs out ${formatDuration(marginMs)} before reset`,
-		tone: estimate.lowConfidence
-			? "warning"
-			: earlyExhaustionTone(marginMs, windowDurationMs),
+		// Two independent caps, both amber, both leaving the message and the
+		// instant alone: the estimate's own confidence, and — on the weekly
+		// window only — how long the window itself has been running. See
+		// `weeklyRedEligible` for why one hour of a 168-hour cycle is not enough
+		// to colour a projection red.
+		tone:
+			estimate.lowConfidence ||
+			!weeklyRedEligible(
+				window,
+				windowStartMs == null ? null : now - windowStartMs,
+			)
+				? "warning"
+				: earlyExhaustionTone(marginMs, windowDurationMs),
 	};
 }
 
@@ -730,7 +742,19 @@ export function RateLimitProgress({
 					liveResetMs,
 					usage.window,
 				);
-				const projection =
+				// The floor applies to BOTH projection paths. The server emits no
+				// weekly fit today, so the regression branch is unreachable for the
+				// weekly window — but the window's age is derivable here either way,
+				// so the rule is applied rather than documented as a gap that a
+				// future server-side weekly fit would walk through.
+				const weeklyFloorCaps =
+					!weeklyRedEligible(
+						usage.window,
+						liveResetMs == null || windowDurationMs == null
+							? null
+							: now - (liveResetMs - windowDurationMs),
+					) && percentage !== null;
+				const rawProjection =
 					percentage !== null &&
 					isUsablePrediction(windowPrediction, liveResetMs)
 						? formatPredictionMessage(
@@ -749,6 +773,10 @@ export function RateLimitProgress({
 								observedAtMs,
 								windowBurnAnchor(burnAnchors, usage.window),
 							);
+				const projection =
+					weeklyFloorCaps && rawProjection?.tone === "danger"
+						? { ...rawProjection, tone: "warning" as const }
+						: rawProjection;
 				// Whether the provider has started this window at all, from the same
 				// three inputs the projection above derives — utilization, the
 				// structural start behind the reported reset, and when the reading

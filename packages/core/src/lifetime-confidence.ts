@@ -75,3 +75,61 @@ export function windowBurnAnchor(
 	if (windowKind === "seven_day") return burnAnchors.sevenDay ?? null;
 	return null;
 }
+
+/**
+ * How long a weekly window must have been RUNNING before its projection may be
+ * rendered RED.
+ *
+ * DECLARED BEFORE SCORING (2026-09-07), and bounded by two measurements rather
+ * than fitted to either: every weekly window observed to run out did so no
+ * earlier than 86.7 h into its 168 h cycle (median 110 h, n=9, 2026-07-01 to
+ * 2026-09-06), and every red the weekly bar has shown since that red shipped on
+ * 2026-08-23 began between 33 h and 36 h into the cycle (n=5, none of which ran
+ * out). 72 h sits inside that gap; it is not the value that optimises any
+ * score, and the gate in `redistribution-backtest.ts` (`WEEKLY_RED_FLOOR_RULE`)
+ * fails the rule outright if any observed run-out would lose its warning.
+ *
+ * Inline named constant — NO env var / feature gate.
+ */
+export const WEEKLY_RED_MIN_WINDOW_AGE_MS = 72 * 60 * 60_000;
+
+/**
+ * Whether a window's projection may be rendered RED, given how long the window
+ * itself has been open.
+ *
+ * The weekly window is the only one this constrains, and it exists because of
+ * an asymmetry the shared one-hour confidence floor cannot express: that floor
+ * (`ANCHOR_FULL_CONFIDENCE_MIN_SPAN_MS`) is 20 % of a five-hour cycle and 0.6 %
+ * of a weekly one, so a burst in the first hours of a week projects a run-out
+ * days early at FULL confidence. Measured on the shipped estimator, the five
+ * weekly reds since 2026-08-23 each claimed the quota would run out 20 to 117
+ * hours before the reset, each stood for 40 to 135 hours, and each sat on a
+ * window that ended between 95 % and 96 % without running out.
+ *
+ * TONE ONLY. Below the floor the projection is unchanged — same instant, same
+ * "Runs out X before reset" line, same coverage — it simply may not reach red.
+ * Nothing here may gate whether a projection EXISTS: withholding, learning,
+ * readiness and the scenario's demand all key on
+ * `ANCHOR_FULL_CONFIDENCE_MIN_SPAN_MS`, which this deliberately does not touch.
+ *
+ * `windowAgeMs` is the age of the WINDOW — `now` minus its structural start —
+ * and deliberately NOT the estimate's `evidenceSpanMs`, which restarts at a
+ * mid-window burn anchor. Measured against the span, a gift reset would hold
+ * the window amber for the next three days however fast it then burned, which
+ * on a cycle with two days left means it could never go red again. The
+ * post-anchor case already has its own guard: the estimate is low-confidence
+ * for the first hour after the anchor, which caps it at amber on its own.
+ * These two compose — an hour of evidence AND a window that has been running —
+ * and neither subsumes the other.
+ *
+ * An unknown age is not red-eligible: a window whose start cannot be derived
+ * has no reset to measure a margin against either.
+ */
+export function weeklyRedEligible(
+	windowKind: string | null,
+	windowAgeMs: number | null | undefined,
+): boolean {
+	if (windowKind !== "seven_day") return true;
+	if (windowAgeMs == null || !Number.isFinite(windowAgeMs)) return false;
+	return windowAgeMs >= WEEKLY_RED_MIN_WINDOW_AGE_MS;
+}

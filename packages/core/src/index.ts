@@ -161,7 +161,9 @@ export {
 } from "./interval-manager";
 export {
 	usageObservedAtMs,
+	WEEKLY_RED_MIN_WINDOW_AGE_MS,
 	weeklyLifetimeConfidence,
+	weeklyRedEligible,
 	windowBurnAnchor,
 } from "./lifetime-confidence";
 export {
