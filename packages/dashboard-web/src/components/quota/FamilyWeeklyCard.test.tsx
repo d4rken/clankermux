@@ -2,6 +2,7 @@ import { describe, expect, it } from "bun:test";
 import { type FamilyRow, listFamilyRows } from "@clankermux/core";
 import type { AccountResponse } from "@clankermux/types";
 import { renderToStaticMarkup } from "react-dom/server";
+import { buildQuotaSummary } from "../../lib/quota-summary";
 import { FamilyWeeklyCard } from "./FamilyWeeklyCard";
 
 const NOW = Date.UTC(2026, 8, 3, 12, 0, 0);
@@ -96,7 +97,7 @@ describe("FamilyWeeklyCard", () => {
 		expect(html).not.toContain("projected to hit the cap before reset");
 	});
 
-	it("states the least-used account's reading, its bars and its reset", () => {
+	it("states average remaining quota, its bars and its reset", () => {
 		const html = render(
 			rowsFor([
 				scopedAccount("acct-a", [scopedEntry("Fable", 45)]),
@@ -106,21 +107,19 @@ describe("FamilyWeeklyCard", () => {
 
 		expect(html).toContain("Model limits");
 		expect(html).toContain("Fable");
-		// Routing picks ONE account, so the account with room is what decides
-		// whether the next Fable request goes through — not the worst one.
-		expect(html).toContain("20% used");
-		expect(html).toContain("lowest · acct-b");
+		// Average the remaining quota without naming one account as the headline.
+		expect(html).toContain("67% remaining");
+		expect(html).toContain("average across 2 accounts");
+		expect(html).not.toContain("lowest ·");
 		expect(html).toContain("acct-a");
 		expect(html).toContain("2 of 2 reporting");
-		// The reset named is the SOONEST one, which here happens to be the same
-		// account the headline names; the two are computed separately.
+		// The reset named is the soonest one across the accounts.
 		expect(html).toContain("resets in 1d · acct-b");
-		expect(html).toContain('aria-valuenow="45"');
-		expect(html).toContain('aria-valuenow="20"');
-		// Ascending, so the headline account is the first bar — as on the
-		// servable-class cards.
-		expect(html.indexOf('aria-valuenow="20"')).toBeLessThan(
-			html.indexOf('aria-valuenow="45"'),
+		expect(html).toContain('aria-valuenow="55"');
+		expect(html).toContain('aria-valuenow="80"');
+		// Name order stays fixed as the readings change.
+		expect(html.indexOf('aria-valuenow="55"')).toBeLessThan(
+			html.indexOf('aria-valuenow="80"'),
 		);
 	});
 
@@ -148,16 +147,14 @@ describe("FamilyWeeklyCard", () => {
 		expect(html).toContain("On pace");
 	});
 
-	it("quantises the headline the way the chip thresholds do", () => {
-		// 79.6%: the chip's threshold is a hard 80, so a rounded headline printed
-		// "80% used" directly above a chip saying "On pace".
+	it("floors the remaining quota without overstating capacity", () => {
 		const html = render(
 			rowsFor([scopedAccount("a", [scopedEntry("Fable", 79.6)])]),
 		);
 
-		expect(html).toContain("79% used");
+		expect(html).toContain("20% remaining");
 		expect(html).toContain("On pace");
-		expect(html).not.toContain("80% used");
+		expect(html).not.toContain("lowest ·");
 	});
 
 	it("says who cannot report rather than hiding the family", () => {
@@ -168,8 +165,9 @@ describe("FamilyWeeklyCard", () => {
 		);
 
 		expect(html).toContain("Unavailable");
-		expect(html).toContain("1 account cannot serve right now");
-		expect(html).toContain('aria-valuetext="paused: 45% used · paused"');
+		expect(html).toContain("55% remaining");
+		expect(html).toContain("1 unavailable");
+		expect(html).toContain('aria-valuetext="paused: 55% remaining · paused"');
 		expect(html).not.toContain("lowest ·");
 	});
 
@@ -217,23 +215,23 @@ describe("FamilyWeeklyCard", () => {
 				]),
 			);
 
-			expect(html).toContain('class="figure-xl text-success-strong">0% used');
-			expect(html).toContain("lowest · Claude-1");
+			expect(html).toContain(
+				'class="figure-xl text-success-strong">37% remaining',
+			);
+			expect(html).toContain("average across 5 accounts");
 			expect(html).toContain("Exhausted on 1 of 5");
 			expect(html).toContain("4 of 5 reporting · 1 not used this week");
-			expect(html).toContain('aria-valuetext="Claude-1: 0% used"');
+			expect(html).toContain('aria-valuetext="Claude-1: 100% remaining"');
 			expect(html.match(/role="progressbar"/g)).toHaveLength(5);
-			expect(html.indexOf('aria-valuenow="0"')).toBeLessThan(
-				html.indexOf('aria-valuenow="40"'),
+			expect(html.indexOf('aria-valuenow="100"')).toBeLessThan(
+				html.indexOf('aria-valuenow="60"'),
 			);
 		});
 	}
 
 	it("shows unused capacity when nobody who reports can serve", () => {
-		// The only reporter is out of its account-wide weekly quota, so there is
-		// no aggregate to state — but a sibling that has never opened Fable is
-		// still there, and the reader has to be told before concluding the family
-		// is unreachable.
+		// Weekly exhaustion affects availability, while both scoped readings
+		// still contribute to average remaining model quota.
 		const html = render(
 			rowsFor([
 				windowedAccount("spent-reporter", [scopedEntry("Fable", 45)], {
@@ -251,8 +249,8 @@ describe("FamilyWeeklyCard", () => {
 		);
 
 		expect(html).toContain("Unused capacity");
-		expect(html).toContain("0% used");
-		expect(html).toContain("lowest · untouched");
+		expect(html).toContain("77% remaining");
+		expect(html).toContain("average across 2 accounts");
 		expect(html).toContain(
 			"0 of 2 reporting · 1 not used this week · 1 unavailable",
 		);
@@ -277,18 +275,45 @@ describe("FamilyWeeklyCard", () => {
 			const sibling = windowedAccount("Claud2", [scopedEntry("Fable", 45)]);
 			const html = render(rowsFor([sibling, blocked]));
 			expect(html).toContain(
-				`aria-valuetext="Claud1: ${percent}% used · 5h spent"`,
+				`aria-valuetext="Claud1: ${100 - percent}% remaining · 5h spent"`,
 			);
 			expect(html).toContain("bg-muted-foreground/30");
-			expect(html).toContain("lowest · Claud2");
+			expect(html).toContain(
+				`${Math.floor((100 - percent + 55) / 2)}% remaining`,
+			);
 			expect(html).toContain("1 of 2 reporting · 1 unavailable");
 			expect(html.match(/role="progressbar"/g)).toHaveLength(2);
 
 			const recovered = render(rowsFor([sibling, active]));
-			expect(recovered).toContain(`aria-valuetext="Claud1: ${percent}% used"`);
+			expect(recovered).toContain(
+				`aria-valuetext="Claud1: ${100 - percent}% remaining"`,
+			);
 			expect(recovered).not.toContain("5h spent");
-			expect(recovered).toContain("lowest · Claud1");
+			expect(recovered).toContain(
+				`${Math.floor((100 - percent + 55) / 2)}% remaining`,
+			);
 			expect(recovered.match(/role="progressbar"/g)).toHaveLength(2);
+			const summaryBlocked = render(rowsFor([sibling, blocked]), {
+				summaryRows: buildQuotaSummary([sibling, blocked], NOW),
+			});
+			const summaryRecovered = render(rowsFor([sibling, active]), {
+				summaryRows: buildQuotaSummary([sibling, active], NOW),
+			});
+			expect(summaryBlocked).toContain(
+				`aria-valuetext="Claud1: ${100 - percent}% remaining · 5h limit reached"`,
+			);
+			expect(summaryBlocked).toContain(
+				`${Math.floor((100 - percent + 55) / 2)}% remaining`,
+			);
+			expect(summaryRecovered).toContain(
+				`${Math.floor((100 - percent + 55) / 2)}% remaining`,
+			);
+			expect(summaryBlocked.indexOf("Claud1")).toBeLessThan(
+				summaryBlocked.indexOf("Claud2"),
+			);
+			expect(summaryRecovered.indexOf("Claud1")).toBeLessThan(
+				summaryRecovered.indexOf("Claud2"),
+			);
 		});
 	}
 
@@ -301,11 +326,14 @@ describe("FamilyWeeklyCard", () => {
 				windowedAccount("untouched", [], { paused: true }),
 			]),
 		);
-		expect(html).toContain("2 accounts cannot serve right now");
+		expect(html).toContain("77% remaining");
+		expect(html).toContain("2 unavailable");
 		expect(html).toContain(
-			'aria-valuetext="reporter: 45% used · cooling down"',
+			'aria-valuetext="reporter: 55% remaining · cooling down"',
 		);
-		expect(html).toContain('aria-valuetext="untouched: 0% used · paused"');
+		expect(html).toContain(
+			'aria-valuetext="untouched: 100% remaining · paused"',
+		);
 		expect(html).not.toContain("lowest ·");
 		expect(html).not.toContain("Unused capacity");
 	});
@@ -318,12 +346,54 @@ describe("FamilyWeeklyCard", () => {
 		const html = render([], { loading: true });
 
 		expect(html).toContain("Model limits");
-		expect(html).not.toContain("% used");
+		expect(html).not.toContain("% remaining");
 	});
 
 	it("reports a failed accounts read as unavailable", () => {
 		const html = render([], { unavailableReason: "Account data unavailable" });
 
 		expect(html).toContain("Account data unavailable");
+	});
+});
+
+describe("FamilyWeeklyCard configured model membership", () => {
+	it("includes paused accounts in the average and keeps their reading gray", () => {
+		const accounts = [
+			windowedAccount("Claud2", [scopedEntry("Fable", 80)]),
+			windowedAccount("Claud1", [scopedEntry("Fable", 20)], { paused: true }),
+		];
+		const html = render(rowsFor(accounts), {
+			summaryRows: buildQuotaSummary(accounts, NOW),
+		});
+		expect(html).toContain("50% remaining");
+		expect(html).toContain("average across 2 accounts");
+		expect(html).toContain('aria-valuetext="Claud1: 80% remaining · Paused"');
+		expect(html).toContain("bg-muted-foreground/30");
+		expect(html.indexOf("Claud1")).toBeLessThan(html.indexOf("Claud2"));
+	});
+	it("retains history-only models and unknown accounts without shrinking the average", () => {
+		const accounts = [
+			windowedAccount("Claud1", []),
+			scopedAccount("Claud2", [], { usageData: null }),
+		];
+		const history = {
+			families: [
+				{
+					family: "fable",
+					displayName: "Fable",
+					series: [{ accountId: "Claud1", points: [] }],
+				},
+			],
+		} as unknown as Parameters<typeof buildQuotaSummary>[2];
+		const html = render([], {
+			summaryRows: buildQuotaSummary(accounts, NOW, history),
+		});
+		expect(html).toContain("Fable");
+		expect(html).toContain("1 of 2 quota readings");
+		expect(html).toContain("Claud2");
+		expect(html).not.toContain(
+			'class="figure-xl text-success-strong">100% remaining',
+		);
+		expect(html.match(/role="progressbar"/g)).toHaveLength(2);
 	});
 });

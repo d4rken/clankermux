@@ -1,6 +1,10 @@
 import type { PoolAccountBar } from "@clankermux/core";
 import { cn } from "../../lib/utils";
 
+export type PoolClassBar = Omit<PoolAccountBar, "reason"> & {
+	reason: string | null;
+};
+
 const REASON_SHORT: Record<string, string> = {
 	paused: "paused",
 	rate_limited: "cooling down",
@@ -11,7 +15,7 @@ const REASON_SHORT: Record<string, string> = {
 	no_usage_data: "no reading",
 };
 
-function barTone(bar: PoolAccountBar): string {
+function barTone(bar: PoolClassBar): string {
 	if (bar.state !== "reporting" || bar.pct == null)
 		return "bg-muted-foreground/30";
 	if (bar.pct >= 90) return "bg-destructive";
@@ -19,25 +23,15 @@ function barTone(bar: PoolAccountBar): string {
 	return "bg-success";
 }
 
-/**
- * One row per account in a servable class, ordered from most headroom to least.
- *
- * This is the antidote to the pooled average, and the reason it is a list rather
- * than a single figure: an average of 96% and 16% is 56%, a number describing
- * neither account and no decision. Seeing both bars answers the question the
- * average was standing in for — is there an account with room, and how much.
- *
- * An account with no reading draws a hatched track and its reason, never an
- * empty bar. "Nobody has polled this" and "this is untouched" look identical as
- * a 0% bar, and the second is the reassuring one — so the ambiguity would always
- * resolve in the flattering direction.
- */
+/** Per-account readings stay visible during temporary holds, with muted bars. */
 export function PoolClassBars({
 	accounts,
 	leastUsedAccountId,
+	display = "used",
 	formatPct = (pct) => `${Math.round(pct)}%`,
 }: {
-	accounts: PoolAccountBar[];
+	accounts: PoolClassBar[];
+	display?: "used" | "remaining";
 	/** Emphasised as the one the headline names. */
 	leastUsedAccountId?: string | null;
 	/**
@@ -55,13 +49,27 @@ export function PoolClassBars({
 	if (accounts.length === 0) return null;
 
 	return (
-		<ul className="mt-item space-y-tight" aria-label="Per-account utilization">
+		<ul
+			className="mt-item space-y-tight"
+			aria-label={
+				display === "remaining"
+					? "Per-account remaining quota"
+					: "Per-account utilization"
+			}
+		>
 			{accounts.map((bar) => {
 				const isHeadline = bar.accountId === leastUsedAccountId;
-				const reason = bar.reason ? REASON_SHORT[bar.reason] : null;
+				const reason = bar.reason
+					? (REASON_SHORT[bar.reason] ?? bar.reason)
+					: null;
+				const pct =
+					bar.pct == null
+						? null
+						: display === "remaining"
+							? 100 - bar.pct
+							: bar.pct;
 				const status = reason && bar.pct != null ? ` · ${reason}` : "";
-				const width =
-					bar.pct == null ? 100 : Math.max(0, Math.min(100, bar.pct));
+				const width = pct == null ? 100 : Math.max(0, Math.min(100, pct));
 				return (
 					<li
 						key={bar.accountId}
@@ -71,8 +79,8 @@ export function PoolClassBars({
 						)}
 						title={
 							bar.pct == null
-								? `${bar.name} — ${REASON_SHORT[bar.reason ?? ""] ?? "no reading"}`
-								: `${bar.name} — ${formatPct(bar.pct)} used${status}`
+								? `${bar.name} — ${reason ?? "no reading"}`
+								: `${bar.name} — ${formatPct(pct as number)} ${display}${status}`
 						}
 					>
 						<span
@@ -96,11 +104,11 @@ export function PoolClassBars({
 							role="progressbar"
 							aria-valuemin={0}
 							aria-valuemax={100}
-							aria-valuenow={bar.pct ?? undefined}
+							aria-valuenow={pct ?? undefined}
 							aria-valuetext={
 								bar.pct == null
 									? `${bar.name}: no reading`
-									: `${bar.name}: ${formatPct(bar.pct)} used${status}`
+									: `${bar.name}: ${formatPct(pct as number)} ${display}${status}`
 							}
 							className="relative h-1.5 min-w-0 flex-1 overflow-hidden rounded-full bg-muted"
 						>
@@ -117,16 +125,16 @@ export function PoolClassBars({
 						</span>
 						<span
 							className={cn(
-								"w-14 shrink-0 text-right tabular-nums",
+								"w-14 shrink-0 truncate text-right tabular-nums",
 								bar.pct == null ? "text-muted-foreground" : undefined,
 							)}
 						>
-							{bar.pct == null
-								? (REASON_SHORT[bar.reason ?? ""] ?? "—")
-								: formatPct(bar.pct)}
+							{bar.pct == null ? (reason ?? "—") : formatPct(pct as number)}
 						</span>
 						{reason && bar.pct != null && (
-							<span className="shrink-0 text-muted-foreground">{reason}</span>
+							<span className="max-w-24 shrink-0 truncate text-muted-foreground">
+								{reason}
+							</span>
 						)}
 					</li>
 				);

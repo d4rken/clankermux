@@ -8,7 +8,6 @@ import {
 	sanitizeTab,
 } from "../lib/analytics-tabs";
 import { EMPTY_FILTERS, type FilterState } from "./analytics/AnalyticsFilters";
-import { AccountsPerformanceTab } from "./analytics/tabs/AccountsPerformanceTab";
 import { CachingTab } from "./analytics/tabs/CachingTab";
 import { ModelsTab } from "./analytics/tabs/ModelsTab";
 import { ProjectsReliabilityTab } from "./analytics/tabs/ProjectsReliabilityTab";
@@ -91,13 +90,12 @@ export const AnalyticsTab = React.memo(() => {
 				value={activeTab}
 				onValueChange={(v) => setActiveTab(v as AnalyticsTabId)}
 			>
-				<TabsList className="flex w-full flex-wrap h-auto">
+				<TabsList className="grid w-full grid-cols-5">
 					<TabsTrigger value="traffic">Traffic</TabsTrigger>
 					<TabsTrigger value="models">Models & Speed</TabsTrigger>
 					<TabsTrigger value="caching">Caching</TabsTrigger>
 					<TabsTrigger value="projects">Projects & Reliability</TabsTrigger>
-					<TabsTrigger value="accounts">Accounts</TabsTrigger>
-					<TabsTrigger value="quota">Quota diagnostics</TabsTrigger>
+					<TabsTrigger value="quota">Quota</TabsTrigger>
 				</TabsList>
 				<TabsContent value="traffic" className="space-y-section">
 					<TrafficTab
@@ -132,12 +130,6 @@ export const AnalyticsTab = React.memo(() => {
 				</TabsContent>
 				{/* No range or filter props: the quota fit is precomputed over the
 				    whole retained history and its endpoint takes no parameters. */}
-				<TabsContent value="accounts" className="space-y-section">
-					<AccountsPerformanceTab
-						range={ranges.accounts}
-						onRangeChange={(r) => setRange("accounts", r)}
-					/>
-				</TabsContent>
 				<TabsContent value="quota" className="space-y-section">
 					<QuotaTab />
 				</TabsContent>

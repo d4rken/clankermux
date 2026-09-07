@@ -125,8 +125,8 @@ describe("PoolQuotaCard loading and unavailable", () => {
 	it("renders the headline, chip and reset line once resolved", () => {
 		const html = poolCard();
 
-		expect(html).toContain("61% used");
-		expect(html).toContain("1/1 active");
+		expect(html).toContain("39% remaining");
+		expect(html).toContain("1/1 available");
 		expect(html).toContain("resets");
 	});
 
@@ -136,8 +136,8 @@ describe("PoolQuotaCard loading and unavailable", () => {
 		// not render a pool at all.
 		const html = poolCard({ loading: true });
 
-		expect(html).not.toContain("61% used");
-		expect(html).not.toContain("active)");
+		expect(html).not.toContain("39% remaining");
+		expect(html).not.toContain("available)");
 		expect(html).not.toContain("resets");
 		expect(html).toContain("animate-pulse");
 	});
@@ -146,8 +146,8 @@ describe("PoolQuotaCard loading and unavailable", () => {
 		const html = poolCard({ unavailableReason: "Account data unavailable" });
 
 		expect(html).toContain("Account data unavailable");
-		expect(html).not.toContain("61% used");
-		expect(html).not.toContain("active)");
+		expect(html).not.toContain("39% remaining");
+		expect(html).not.toContain("available)");
 		expect(html).not.toContain("animate-pulse");
 	});
 
@@ -158,7 +158,7 @@ describe("PoolQuotaCard loading and unavailable", () => {
 		const html = poolCard({ staleNote: "Last updated 3m ago" });
 
 		expect(html).toContain("Last updated 3m ago");
-		expect(html).toContain("61% used");
+		expect(html).toContain("39% remaining");
 		expect(html).toContain("resets");
 	});
 

@@ -1,13 +1,14 @@
 import {
 	type ClassBudget,
 	formatBurnRatio,
-	type Outlook,
 	type PacingSnapshot,
 	type PoolUsageResult,
 	scopeResultToClass,
+	servableClassFor,
 } from "@clankermux/core";
 import { AlertCircle, BarChart3 } from "lucide-react";
 import { formatDurationDhm } from "../../lib/format-prediction";
+import type { QuotaSummaryRow } from "../../lib/quota-summary";
 import { cn } from "../../lib/utils";
 import { StatusChip } from "../accounts/StatusChip";
 import { TONE_CLASSES, TONE_FIGURE_CLASS } from "../quota/outlook-tone";
@@ -30,7 +31,7 @@ function classBurn(budget: ClassBudget) {
 }
 
 interface WeeklyBudgetPanelProps {
-	/** The served pacing scan. Every figure on this panel except the family line. */
+	/** Served pacing and forecast details; remaining percentages come from summaryRows. */
 	pacing: PacingSnapshot | undefined;
 	/**
 	 * The locally-computed weekly pool, for the per-model-family line ALONE.
@@ -41,6 +42,8 @@ interface WeeklyBudgetPanelProps {
 	 * the same way from the same accounts.
 	 */
 	sevenDay: PoolUsageResult;
+	/** Weekly averages across all configured accounts, independent of availability. */
+	summaryRows?: QuotaSummaryRow[];
 	now: number;
 	/**
 	 * Set while the first pacing read is in flight and nothing is cached.
@@ -55,7 +58,7 @@ interface WeeklyBudgetPanelProps {
 /**
  * The per-class badges, in one place so the row and its states cannot drift.
  *
- * Everything but the family line comes from the SERVED budget. The family line
+ * Forecast badges come from the SERVED budget. The family line
  * is still derived here, from the local pool, because a per-model-family cap is
  * not a pace and is not on the pacing wire — an account at its Fable cap still
  * has account-wide weekly quota for every other family, and the Overview's
@@ -134,18 +137,21 @@ function classBadges(
  * that is about exactly that number.
  */
 function coverageLine(
-	budget: ClassBudget,
+	budget: ClassBudget | undefined,
+	row: QuotaSummaryRow,
 	waitingOnFiveHour: number,
 	now: number,
 ): string {
 	const parts = [
-		`${budget.reportingCount} of ${budget.eligibleTotal} reporting`,
+		`${row.knownCount} of ${row.accounts.length} reporting`,
+		`${row.availableCount} of ${row.accounts.length} available`,
 	];
 	if (waitingOnFiveHour > 0) parts.push(`${waitingOnFiveHour} waiting on 5h`);
+	if (row.unknownCount > 0) parts.push(`${row.unknownCount} unknown`);
+	if (!budget) return parts.join(" · ");
 	if (budget.alreadySpent > 0) {
 		parts.push(`${budget.alreadySpent} weekly spent`);
 	}
-	if (budget.unknownCount > 0) parts.push(`${budget.unknownCount} unknown`);
 	// A reset is stated only when there IS one in the future. "reset not
 	// reported" is the honest alternative: the class may well reset, but nothing
 	// in the polled state says when, and a missing figure must not be filled in.
@@ -176,24 +182,11 @@ function coverageLine(
 	return parts.join(" · ");
 }
 
-/**
- * The weekly quota as a BUDGET: how much of the week's allowance the freshest
- * account in each servable class has left.
- *
- * This is the number that decides whether work gets done at all. Its counterpart
- * next door — the 5-hour pacing — decides only how fast you may spend it, and
- * the two were rendered as symmetric panels headlined by the same statistic (a
- * pooled average of both), which stated that they are two budgets of the same
- * kind. They are not: resetting or dodging the 5-hour window grants no capacity.
- *
- * The headline names the TIGHTEST class rather than averaging across classes. A
- * Claude request cannot be served by a Codex account, so a figure spanning both
- * describes no decision anyone makes, and the class with the least room is the
- * one that stops you first.
- */
+/** Weekly remaining quota per provider, with availability and served pacing kept separate. */
 export function WeeklyBudgetPanel({
 	pacing,
 	sevenDay,
+	summaryRows = [],
 	now,
 	loading,
 	unavailableReason,
@@ -201,18 +194,27 @@ export function WeeklyBudgetPanel({
 	const pending = loading && unavailableReason == null;
 	const resolved = !pending && unavailableReason == null && pacing != null;
 	const classes = pacing?.classes ?? [];
-	const binding =
-		classes.find((c) => c.classId === pacing?.bindingClassId) ?? null;
-	// The verdict LABEL and TONE are served. The thresholds behind them (60%
-	// "watch", 80% "high") are policy, and re-deriving them here is how the page
-	// and the widget come to disagree about the same pool.
-	const outlook: Outlook = !resolved
-		? { label: pending ? "Loading" : "Unavailable", tone: "neutral" }
-		: binding == null
-			? { label: "No reading", tone: "neutral" }
-			: { label: binding.outlookLabel, tone: binding.outlookTone };
+	const providers = summaryRows.filter(
+		(row) => row.model === null && row.metered,
+	);
+	// Keep the original limiting-provider headline, using its account average.
+	// An incomplete provider takes precedence so missing data cannot look healthy.
+	const headline = [...providers].sort(
+		(a, b) => (a.remainingPct ?? -1) - (b.remainingPct ?? -1),
+	)[0];
+	const outlook = {
+		label: !resolved
+			? pending
+				? "Loading"
+				: "Unavailable"
+			: providers.length === 0
+				? "No reading"
+				: providers.some((row) => row.remainingPct === null)
+					? "Incomplete"
+					: "Reported",
+		tone: "neutral" as const,
+	};
 	const toneClasses = TONE_CLASSES[outlook.tone];
-	const bindingBurn = binding == null ? null : classBurn(binding);
 	/** The served 5-hour waiting count for one class, for the coverage line. */
 	const waitingFor = (classId: string): number =>
 		pacing?.fiveHour.classes.find((c) => c.classId === classId)?.waiting ?? 0;
@@ -249,85 +251,65 @@ export function WeeklyBudgetPanel({
 							Reading accounts
 						</p>
 					</>
-				) : classes.length === 0 ? (
+				) : providers.length === 0 ? (
 					<>
 						<p className="figure-xl text-muted-foreground">—</p>
 						<p className="mt-tight text-xs text-muted-foreground">
 							No rolling-quota accounts
 						</p>
 					</>
-				) : binding == null ? (
-					<>
-						<p className="figure-xl text-muted-foreground">—</p>
-						<p className="mt-tight text-xs text-muted-foreground">
-							No class reporting weekly usage
-						</p>
-					</>
 				) : (
 					<>
 						<div className="flex items-baseline justify-between gap-row">
-							<p className={cn("figure-xl", toneClasses.figure)}>
-								{Math.round(binding.utilizationPct ?? 0)}% used
+							<p
+								className={cn("figure-xl", toneClasses.figure)}
+								title="Lowest provider average; each provider is listed below."
+							>
+								{headline?.remainingPct == null
+									? "—"
+									: `${Math.round(headline.remainingPct)}% remaining`}
 							</p>
-							<p className="text-xs text-muted-foreground">Tightest class</p>
+							<p className="text-xs text-muted-foreground">{headline?.label}</p>
 						</div>
 						<p className="mt-tight truncate text-xs text-muted-foreground">
-							{binding.label} · lowest {binding.leastUsedAccountName}
-							{bindingBurn && (
-								<>
-									{" · "}
-									<span className={bindingBurn.tone}>{bindingBurn.text}</span>
-								</>
-							)}
+							Average per account within each provider
 						</p>
 					</>
 				)}
 			</div>
 
-			{resolved && classes.length > 0 && (
+			{resolved && providers.length > 0 && (
 				<ul
 					className="mt-group space-y-item"
-					aria-label="Weekly budget by class"
+					aria-label="Weekly budget by provider"
 				>
-					{classes.map((budget) => {
-						const badges = classBadges(budget, sevenDay);
-						const burn = classBurn(budget);
+					{providers.map((row) => {
+						const classId = servableClassFor(row.provider).classId;
+						const budget = classes.find((entry) => entry.classId === classId);
+						const badges = budget ? classBadges(budget, sevenDay) : [];
+						const burn = budget ? classBurn(budget) : null;
 						return (
-							<li key={budget.classId} className="min-w-0 text-xs">
+							<li key={row.id} className="min-w-0 text-xs">
 								<p className="truncate">
-									<span
-										className={cn(
-											budget.classId === binding?.classId
-												? "font-medium text-foreground"
-												: "text-muted-foreground",
-										)}
-									>
-										{budget.label}
+									<span className="font-medium text-foreground">
+										{row.label}
 									</span>
 									<span className="text-muted-foreground">
 										{" · "}
-										{budget.utilizationPct == null ? (
-											"— · no weekly reading"
+										{row.remainingPct == null ? (
+											"— · incomplete weekly readings"
 										) : (
 											<>
 												<span className="tabular-nums">
-													{Math.round(budget.utilizationPct)}% used
+													{Math.round(row.remainingPct)}% remaining
 												</span>
-												{" · lowest "}
-												{budget.leastUsedAccountName}
-												{/* The pace belongs on THIS line and nowhere else: it
-												    is computed over the least-used account named
-												    immediately to its left. Below, it sat at the end of
-												    the coverage line, whose own trailing name is the
-												    class's EARLIEST-resetting account — a different
-												    account whenever the two differ, which read as
-												    "Claude-1 · 1.2× sustainable pace" while the 1.2×
-												    described Claude-4. Same placement the Overview's
-												    PoolQuotaCard already uses. */}
+												{" · average per account"}
 												{burn && (
 													<>
 														{" · "}
-														<span className={burn.tone}>{burn.text}</span>
+														<span className={burn.tone}>
+															{budget?.leastUsedAccountName}: {burn.text}
+														</span>
 													</>
 												)}
 											</>
@@ -335,7 +317,7 @@ export function WeeklyBudgetPanel({
 									</span>
 								</p>
 								<p className="truncate text-xs text-muted-foreground">
-									{coverageLine(budget, waitingFor(budget.classId), now)}
+									{coverageLine(budget, row, waitingFor(classId), now)}
 								</p>
 								{badges.map((badge) => (
 									<p

@@ -6,6 +6,7 @@ import {
 } from "@clankermux/core";
 import { AlertCircle, Clock } from "lucide-react";
 import { formatDurationDhm } from "../../lib/format-prediction";
+import type { QuotaSummaryRow } from "../../lib/quota-summary";
 import { cn } from "../../lib/utils";
 import { StatusChip } from "../accounts/StatusChip";
 import {
@@ -17,10 +18,12 @@ import {
 } from "../ui/card";
 import { Skeleton } from "../ui/skeleton";
 import { TONE_CLASSES, TONE_FIGURE_CLASS } from "./outlook-tone";
-import { PoolClassBars } from "./PoolClassBars";
+import { type PoolClassBar, PoolClassBars } from "./PoolClassBars";
 
 interface FamilyWeeklyCardProps {
 	rows: FamilyRow[];
+	/** Complete configured membership, including historical model windows. */
+	summaryRows?: QuotaSummaryRow[];
 	now: number;
 	/** Set while the first `/api/accounts` read is in flight and nothing is cached. */
 	loading?: boolean;
@@ -70,65 +73,51 @@ function familyBars(row: FamilyRow): PoolAccountBar[] {
 			reason: null,
 			resetMs: null,
 		})),
-	].sort((a, b) => (a.pct ?? Infinity) - (b.pct ?? Infinity));
+	].sort(
+		(a, b) =>
+			a.name.localeCompare(b.name) || a.accountId.localeCompare(b.accountId),
+	);
 }
 
-/**
- * The card's own wording for a reading: FLOORED, never rounded.
- *
- * The chip already floors (`At 80%`) and switches at a hard 80, so a rounded
- * headline printed "80% used" directly above an "On pace" chip for the same
- * 79.6. One quantisation for every figure on the card.
- */
+/** Floor remaining quota so rounding never overstates capacity. */
 const floorPct = (pct: number): string => `${Math.floor(pct)}%`;
 
-/**
- * Per-model weekly caps, one block per family.
- *
- * A model family's weekly quota is INDEPENDENT of the account-wide weekly
- * window, so Fable can be spent while the account-wide figure the quota cards
- * show still reads healthy. Every other surface reduced that to a one-line badge
- * ("Fable weekly at 92% on 1 of 3 accounts"), which states the worst account and
- * hides the distribution — the thing that decides whether a sibling can still
- * take the request.
- *
- * THE HEADLINE IS THE LEAST-USED ACCOUNT, as on the servable-class cards.
- * Routing picks ONE account, so what decides whether the next request for this
- * family goes through is whether ANY account still has room for it; headlining
- * the worst one announced a problem the pool could already route around, and
- * put the two Overview quota surfaces in different frames for the same
- * question. The chip is the other end deliberately: `Exhausted on 1 of 3` /
- * `At 92%` count who is spent, which is what the headline no longer says.
- *
- * The reporting line also counts accounts that could serve the family and have
- * not used it this week ("1 of 3 reporting · 2 not used this week"). Anthropic
- * omits a family's window until its first use, so those accounts appear as 0%
- * used in the distribution and headline, separately counted from reporters.
- *
- * Codex's synthetic per-model weekly windows are not here; see
- * {@link listFamilyRows} for why, and the Accounts tab for where they are.
- */
+/** Per-model weekly quota, averaged across configured accounts independently of availability. */
 export function FamilyWeeklyCard({
 	rows,
+	summaryRows,
 	now,
 	loading = false,
 	unavailableReason,
 	staleNote,
 }: FamilyWeeklyCardProps) {
+	const displayedRows = summaryRows
+		? summaryRows
+				.filter((summary) => summary.model !== null)
+				.map((summary) => ({
+					row: rows.find(
+						(row) =>
+							summary.provider === "anthropic" && row.family === summary.model,
+					),
+					summary,
+				}))
+		: [...rows]
+				.sort((a, b) => a.family.localeCompare(b.family))
+				.map((row) => ({ row, summary: undefined }));
 	const pending = loading && !unavailableReason;
 	const resolved = !pending && !unavailableReason;
 	// Nothing to disclose and nothing outstanding: a card saying "no model
 	// limits" would be a permanent empty frame for every pool without a scoped
 	// window, which is most of them.
-	if (resolved && rows.length === 0) return null;
+	if (resolved && displayedRows.length === 0) return null;
 
 	return (
 		<Card>
 			<CardHeader>
 				<CardTitle>Model limits</CardTitle>
 				<CardDescription>
-					Per-model weekly caps. A model can be spent while the account-wide
-					weekly still has room.
+					Average weekly quota remaining per model. Includes accounts that are
+					paused or temporarily limited.
 				</CardDescription>
 			</CardHeader>
 			<CardContent>
@@ -144,85 +133,115 @@ export function FamilyWeeklyCard({
 					</div>
 				) : (
 					<div className="space-y-group">
-						{rows.map((row) => {
-							const usage = row.usage;
-							const bars = familyBars(row);
-							const least = bars.find(
-								(bar) => bar.state === "reporting" && bar.pct != null,
-							);
-							const unavailableCount = row.unavailableAccounts.length;
-							const outlook = familyOutlook(row);
-							// Accounts that could serve the family but have never opened it
-							// belong in the denominator: without them "1 of 1 reporting"
-							// described a single account while four more could take the
-							// work.
-							const total =
-								row.reportingCount + unavailableCount + row.unopenedCount;
-							// Only a FUTURE reset is offered. `earliestResetMs` is the
-							// soonest across the family's accounts, so the name beside it
-							// has to be that account's — not `worstAccountName`, which is
-							// the account driving the percentage above and need not be the
-							// same one.
-							const resetsInMs =
-								usage != null && usage.earliestResetMs > now
+						{displayedRows.map(({ row, summary }) => {
+							const usage = row?.usage;
+							const bars: PoolClassBar[] = summary
+								? summary.accounts.map((account) => ({
+										accountId: account.id,
+										name: account.name,
+										provider: summary.provider,
+										pct:
+											account.remainingPct === null
+												? null
+												: 100 - account.remainingPct,
+										state: account.available
+											? "reporting"
+											: account.unknown
+												? "unknown"
+												: "exhausted",
+										reason: account.available ? null : account.status,
+										resetMs: account.resetMs,
+									}))
+								: row
+									? familyBars(row)
+									: [];
+							const total = bars.length;
+							const knownCount = bars.filter((bar) => bar.pct !== null).length;
+							const averageRemaining = summary
+								? summary.remainingPct
+								: total > 0 && knownCount === total
+									? bars.reduce((sum, bar) => sum + 100 - (bar.pct ?? 0), 0) /
+										total
+									: null;
+							const unavailableCount = bars.filter(
+								(bar) => bar.state !== "reporting",
+							).length;
+							const outlook: Outlook = summary
+								? {
+										label: `${summary.availableCount} of ${total} available`,
+										tone: summary.availableCount > 0 ? "success" : "neutral",
+									}
+								: row
+									? familyOutlook(row)
+									: { label: "Unavailable", tone: "neutral" };
+							// Reset evidence is independent of which accounts can serve now.
+							const nextReset = summary?.accounts
+								.filter(
+									(account) =>
+										account.resetMs !== null && account.resetMs > now,
+								)
+								.sort(
+									(a, b) => (a.resetMs ?? Infinity) - (b.resetMs ?? Infinity),
+								)[0];
+							const resetsInMs = summary
+								? nextReset?.resetMs
+									? nextReset.resetMs - now
+									: null
+								: usage != null && usage.earliestResetMs > now
 									? usage.earliestResetMs - now
 									: null;
 							const earliestResetAccountName =
+								nextReset?.name ??
 								usage?.accounts.find((a) => a.resetMs === usage.earliestResetMs)
-									?.name ?? null;
+									?.name ??
+								null;
 							return (
-								<div key={row.family} className="min-w-0">
+								<div key={summary?.id ?? row?.family} className="min-w-0">
 									<div className="flex items-center justify-between gap-item">
 										<p className="truncate text-sm font-medium">
-											{row.displayName}
+											{summary?.label ?? row?.displayName}
 										</p>
 										<StatusChip className={TONE_CLASSES[outlook.tone].chip}>
 											{outlook.label}
 										</StatusChip>
 									</div>
 
-									{least?.pct == null ? (
-										// The family exists — a live account reports the window —
-										// but every account that has it is unavailable. Saying
-										// nothing would read as "no such limit".
-										<p className="mt-tight text-xs text-muted-foreground">
-											{unavailableCount}{" "}
-											{unavailableCount === 1 ? "account" : "accounts"} cannot
-											serve right now
-										</p>
-									) : (
-										<>
-											<p
-												className={cn(
-													"figure-xl",
-													TONE_FIGURE_CLASS[
-														least.pct >= 100
-															? "destructive"
-															: least.pct >=
-																	FAMILY_WEEKLY_ELEVATED_THRESHOLD_PCT
-																? "warning"
-																: "success"
-													],
-												)}
-											>
-												{floorPct(least.pct)} used
-											</p>
-											<p className="truncate text-xs text-muted-foreground">
-												lowest · {least.name}
-											</p>
-										</>
-									)}
+									<p
+										className={cn(
+											"figure-xl",
+											TONE_FIGURE_CLASS[
+												averageRemaining === null
+													? "neutral"
+													: averageRemaining <= 0
+														? "destructive"
+														: averageRemaining <= 20
+															? "warning"
+															: "success"
+											],
+										)}
+									>
+										{averageRemaining === null
+											? "—"
+											: `${floorPct(averageRemaining)} remaining`}
+									</p>
+									<p className="truncate text-xs text-muted-foreground">
+										{averageRemaining === null
+											? `${knownCount} of ${total} quota readings`
+											: `average across ${total} account${total === 1 ? "" : "s"}`}
+									</p>
 									<PoolClassBars
 										accounts={bars}
-										leastUsedAccountId={least?.accountId}
+										display="remaining"
 										formatPct={floorPct}
 									/>
-									{least != null && (
+									{total > 0 && (
 										<div className="mt-item space-y-tight text-xs text-muted-foreground">
 											<p className="truncate">
-												{row.reportingCount} of {total} reporting
-												{row.unopenedCount > 0
-													? ` · ${row.unopenedCount} not used this week`
+												{summary
+													? `${knownCount} of ${total} quota readings`
+													: `${row?.reportingCount ?? 0} of ${total} reporting`}
+												{(row?.unopenedCount ?? 0) > 0
+													? ` · ${row?.unopenedCount} not used this week`
 													: ""}
 												{unavailableCount > 0
 													? ` · ${unavailableCount} unavailable`

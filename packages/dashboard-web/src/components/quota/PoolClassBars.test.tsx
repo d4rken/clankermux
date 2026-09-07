@@ -1,9 +1,8 @@
 import { describe, expect, it } from "bun:test";
-import type { PoolAccountBar } from "@clankermux/core";
 import { renderToStaticMarkup } from "react-dom/server";
-import { PoolClassBars } from "./PoolClassBars";
+import { type PoolClassBar, PoolClassBars } from "./PoolClassBars";
 
-function bar(over: Partial<PoolAccountBar> = {}): PoolAccountBar {
+function bar(over: Partial<PoolClassBar> = {}): PoolClassBar {
 	return {
 		accountId: "acc-1",
 		name: "alpha",
@@ -17,6 +16,22 @@ function bar(over: Partial<PoolAccountBar> = {}): PoolAccountBar {
 }
 
 describe("PoolClassBars", () => {
+	it("keeps a blocked account's remaining quota visible and gray", () => {
+		const html = renderToStaticMarkup(
+			<PoolClassBars
+				display="remaining"
+				accounts={[bar({ state: "exhausted", reason: "5h limit reached" })]}
+			/>,
+		);
+		expect(html).toContain('aria-valuenow="52"');
+		expect(html).toContain(
+			'aria-valuetext="alpha: 52% remaining · 5h limit reached"',
+		);
+		expect(html).toContain("width:52%");
+		expect(html).toContain("bg-muted-foreground/30");
+		expect(html).toContain("5h limit reached");
+	});
+
 	it("exposes a reading as a progressbar value", () => {
 		const html = renderToStaticMarkup(
 			<PoolClassBars accounts={[bar()]} leastUsedAccountId="acc-1" />,
