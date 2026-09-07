@@ -1568,6 +1568,10 @@ export function AccountAddForm({
 						<Label htmlFor="code">Authorization Code</Label>
 						<Input
 							id="code"
+							autoComplete="off"
+							autoCorrect="off"
+							autoCapitalize="none"
+							spellCheck={false}
 							value={authCode}
 							onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
 								setAuthCode((e.target as HTMLInputElement).value)

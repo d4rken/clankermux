@@ -132,6 +132,10 @@ export function AnthropicReauthDialog({
 								<Label htmlFor="auth-code">Authorization Code</Label>
 								<Input
 									id="auth-code"
+									autoComplete="off"
+									autoCorrect="off"
+									autoCapitalize="none"
+									spellCheck={false}
 									placeholder="Paste the authorization code here"
 									value={code}
 									onChange={(e) => setCode(e.target.value)}
