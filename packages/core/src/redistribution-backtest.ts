@@ -5061,7 +5061,11 @@ export function redistributionRecordToJson(
 		firstEvent: record.firstEvent,
 		peerDiedInLag: record.peerDiedInLag,
 		exactShiftEligible: record.exactShiftEligible,
-		basisFirstAssignment: record.basisFirstAssignment,
+		// The KEY is frozen at the name the previous release emitted, whatever the
+		// field is called internally: every exported record would otherwise differ
+		// from an earlier artifact by this one key, and a run-to-run comparison
+		// would read as a change in the data rather than a rename.
+		proportionalFirstAssignment: record.basisFirstAssignment,
 		lagAnchorKnown: record.lagAnchorKnown,
 		usable: record.usable,
 		unusableReason: record.unusableReason,

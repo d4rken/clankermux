@@ -2978,6 +2978,23 @@ describe("redistributionRecordToJson", () => {
 		expect(json.labelResetIso).toBeNull();
 		expect(json.sinceDeathMinutes).toBeNull();
 	});
+
+	test("keeps the exported key of the first-assignment flag frozen", () => {
+		// The field was renamed when the basis was re-declared; the KEY was not,
+		// so an exported record still compares field-for-field against one an
+		// earlier release wrote.
+		const json = redistributionRecordToJson(
+			record({
+				model: VERDICT_BASIS_MODEL,
+				accountId: "A",
+				T: T0,
+				basisFirstAssignment: true,
+			}),
+		);
+		expect(json).toHaveProperty("proportionalFirstAssignment", true);
+		expect(Object.keys(json)).not.toContain("basisFirstAssignment");
+		expect(JSON.stringify(json)).not.toContain("basisFirstAssignment");
+	});
 });
 
 describe("replayInstant slope capture", () => {
