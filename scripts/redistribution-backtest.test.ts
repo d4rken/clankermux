@@ -451,6 +451,38 @@ describe("loadedRequestSpan", () => {
 		expect(span.toMs).toBeLessThan(REQ_TO);
 	});
 
+	test("a non-minute-aligned query clips the extent to the query bounds", () => {
+		// The SQL counted only [30 s, 45 s) of this minute; the outer bucket
+		// boundaries would report the whole of it as observed.
+		const bucketStartMs = 1_000 * REQUEST_BUCKET_MS;
+		const loaded = [
+			{ accountId: "A", bucketStartMs, requests: 1, tokens: 10 },
+		];
+		expect(
+			loadedRequestSpan(loaded, bucketStartMs + 30_000, bucketStartMs + 45_000),
+		).toEqual({
+			fromMs: bucketStartMs + 30_000,
+			toMs: bucketStartMs + 45_000,
+		});
+	});
+
+	test("a query wider than the loaded data still bounds at the buckets", () => {
+		const bucketStartMs = 1_000 * REQUEST_BUCKET_MS;
+		const loaded = [
+			{ accountId: "A", bucketStartMs, requests: 1, tokens: 10 },
+		];
+		expect(
+			loadedRequestSpan(
+				loaded,
+				bucketStartMs - 5 * REQUEST_BUCKET_MS,
+				bucketStartMs + 5 * REQUEST_BUCKET_MS,
+			),
+		).toEqual({
+			fromMs: bucketStartMs,
+			toMs: bucketStartMs + REQUEST_BUCKET_MS,
+		});
+	});
+
 	test("an empty load falls back to the query bound rather than an empty span", () => {
 		const span = loadedRequestSpan([], REQ_FROM, REQ_TO);
 		expect(span).toEqual({ fromMs: REQ_FROM, toMs: REQ_TO });

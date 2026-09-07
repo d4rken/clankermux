@@ -358,7 +358,15 @@ export function loadedRequestSpan(
 		if (bucket.bucketStartMs < first) first = bucket.bucketStartMs;
 		if (bucket.bucketStartMs > last) last = bucket.bucketStartMs;
 	}
-	return { fromMs: first, toMs: last + REQUEST_BUCKET_MS };
+	// INTERSECTED with what was actually asked for. The bucket boundaries are
+	// outer: a query over [30 s, 45 s) lands in the minute starting at 0 s, and
+	// reporting that whole minute as observed would present a partial bucket as
+	// a fully counted one to everything downstream that treats this as the span
+	// the request table was read over.
+	return {
+		fromMs: Math.max(first, queriedFromMs),
+		toMs: Math.min(last + REQUEST_BUCKET_MS, queriedToMs),
+	};
 }
 
 /** The attributed rows in the span, and how many carry no token total. */

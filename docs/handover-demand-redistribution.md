@@ -78,9 +78,10 @@ and a lone account's projection equals the current model's on both anchored
 paths. It moves criterion A by 28 seconds (to 14.106 min) and leaves
 criterion D's F1, recall and paired absolute error unchanged, because the lags
 are small (median 3.8 min on the lifetime path, 1.2 min on the regression path)
-and 11183 of 23540 regression records have no derivable anchor. The scenario's
-roughly fourteen minutes of optimism at transitions is therefore the
-redistribution rule itself, not the timing of the reading. The backtest keeps
+and 11183 of 23540 regression records have no derivable anchor. Observation lag
+is therefore not where the transition optimism comes from: correcting it leaves
+criterion A within 28 seconds of the uncorrected scan. What the remaining
+optimism is instead is not isolated by this experiment. The backtest keeps
 the uncorrected scan as a control model (`scenario-equal-original`) and the
 `## Observation-lag mechanism check` section states what each check measures.
 
@@ -135,9 +136,13 @@ thresholds anything, and nothing in production reads either.
   traffic is not removable from observational data.
 
 What these permit, and what they do not: the equal-split rule assumes a dead
-account's demand moves in full and divides evenly; the request-volume
-measurement reports survivors absorbing a fraction of it at the hour scale,
-concentrated on one account, and nothing at the six-hour scale. Any replacement
+account's demand moves in full and divides evenly. What the request-volume
+measurement reports is a median survivor rate ratio across the death of 1.46 on
+requests and 1.81 on tokens, and a median normalised change (alpha) of 0.20 and
+0.35, over the 33 deaths analysed at the 60-minute horizon; over the 17 that
+also carry a 6-hour reading, the ratio medians are 0.59 and 0.74. A positive
+change does not identify inherited traffic, and a negative one does not
+establish its absence. Any replacement
 share rule has to be declared before it is scored, scored against criteria A to
 D on the same backtest, and must not read its coefficients off these tables.
 
