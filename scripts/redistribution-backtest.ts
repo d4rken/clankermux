@@ -22,13 +22,21 @@
 
 import type { Database } from "bun:sqlite";
 import {
+	ABSORPTION_CONTROL_OFFSET_MS,
+	ABSORPTION_HALF_WIDTH_MS,
+	type AbsorptionChecks,
+	absorptionChecks,
 	evaluateVerdict,
 	formatRedistributionReport,
 	knownLimitsFor,
+	prepareSeries,
 	type RedistributionRecord,
 	redistributionRecordToJson,
+	REQUEST_BUCKET_MS,
 	type ReplayRange,
 	replayRange,
+	type RequestBucket,
+	type RequestTokenCoverage,
 	type RosterAccount,
 	type RosterSnapshotRow,
 	scoreCohorts,
@@ -49,6 +57,17 @@ const DAY_MS = 24 * 60 * 60 * 1000;
  * (the label horizon inside the module then decides what is scorable).
  */
 const LOAD_PAD_MS = 8 * DAY_MS;
+
+/**
+ * A matched control sits a week off the death and reads a half-window either
+ * side of itself, so the padded span has to contain both or a control would
+ * silently read outside the loaded data instead of being rejected.
+ */
+if (ABSORPTION_CONTROL_OFFSET_MS + ABSORPTION_HALF_WIDTH_MS > LOAD_PAD_MS) {
+	throw new Error(
+		"LOAD_PAD_MS is too small for a matched absorption control at +/- 7 d",
+	);
+}
 
 const DEFAULT_SEED = 20260823;
 const DEFAULT_STEP_MINUTES = 10;
@@ -220,6 +239,120 @@ export function loadRows(
 		}));
 }
 
+/**
+ * The per-account request scan behind the causal absorption measurement.
+ *
+ * Two-sided and bounded on `account_used`, so it plans as a SEARCH on
+ * `idx_requests_account_timestamp` rather than a scan; the script test asserts
+ * that plan, and a degradation to a table scan is a defect on a multi-gigabyte
+ * file rather than a slowdown. All measured on 2026-09-07 against the live
+ * database:
+ *
+ * - Selecting `total_tokens` demotes the plan from a covering index scan to an
+ *   index search with table lookups, because the index carries only
+ *   `(account_used, timestamp)`. The whole history, all seven accounts, with
+ *   the token sum, takes 3.0 s. That is nothing in an offline backtest, and
+ *   request count alone is a weak proxy for quota burn: the scenario
+ *   redistributes capacity units, not requests. Both volumes are measured.
+ * - `total_tokens` is null or zero on 14,769 of 807,705 attributed rows
+ *   (1.8 %). {@link loadRequestTokenCoverage} counts them for the report
+ *   rather than letting them sum silently as zeros.
+ * - No `success` or `model` filter: 118 of 376 k recent rows are 429s and 580
+ *   have any failover, so filtering would move counts by under 0.3 % while
+ *   costing another column.
+ * - One row per client request, not per upstream attempt (`failover_attempts`
+ *   is a column, not a row multiplier), so a failover storm near a death does
+ *   not double-count.
+ */
+export const REQUEST_BUCKET_SQL = `SELECT (timestamp / ?1) * ?1 AS bucket_start,
+       COUNT(*) AS n,
+       SUM(COALESCE(total_tokens, 0)) AS tokens
+FROM requests
+WHERE account_used = ?2 AND timestamp >= ?3 AND timestamp < ?4
+GROUP BY bucket_start
+ORDER BY bucket_start`;
+
+/** How much of the token basis is actually populated, for the known limits. */
+export const REQUEST_TOKEN_COVERAGE_SQL = `SELECT COUNT(*) AS n,
+       SUM(CASE WHEN COALESCE(total_tokens, 0) = 0 THEN 1 ELSE 0 END) AS zero_rows
+FROM requests
+WHERE account_used = ?1 AND timestamp >= ?2 AND timestamp < ?3`;
+
+/**
+ * Whether this database has a `requests` table at all.
+ *
+ * An older or trimmed file has none, and the report has to say the table was
+ * unreadable rather than print an empty absorption section as if it had
+ * measured silence.
+ */
+export function requestsTableExists(db: Database): boolean {
+	const row = db
+		.query<{ n: number }, []>(
+			`SELECT COUNT(*) AS n FROM sqlite_master WHERE type='table' AND name='requests'`,
+		)
+		.get();
+	return (row?.n ?? 0) > 0;
+}
+
+/**
+ * Minute buckets of request volume per account over `[fromMs, toMs)`.
+ *
+ * One statement per account, never a single `WHERE timestamp BETWEEN` over all
+ * of them: that plans on `idx_requests_timestamp`, which does not carry
+ * `account_used`, and would do a table lookup per row of the whole span.
+ */
+export function loadRequestBuckets(
+	db: Database,
+	accountIds: readonly string[],
+	fromMs: number,
+	toMs: number,
+): RequestBucket[] {
+	if (!requestsTableExists(db)) return [];
+	const statement = db.query<
+		{ bucket_start: number; n: number; tokens: number | null },
+		[number, string, number, number]
+	>(REQUEST_BUCKET_SQL);
+	const out: RequestBucket[] = [];
+	for (const accountId of accountIds) {
+		for (const row of statement.all(
+			REQUEST_BUCKET_MS,
+			accountId,
+			fromMs,
+			toMs,
+		)) {
+			out.push({
+				accountId,
+				bucketStartMs: row.bucket_start,
+				requests: row.n,
+				tokens: row.tokens ?? 0,
+			});
+		}
+	}
+	return out;
+}
+
+/** The attributed rows in the span, and how many carry no token total. */
+export function loadRequestTokenCoverage(
+	db: Database,
+	accountIds: readonly string[],
+	fromMs: number,
+	toMs: number,
+): RequestTokenCoverage | null {
+	if (!requestsTableExists(db)) return null;
+	const statement = db.query<
+		{ n: number; zero_rows: number | null },
+		[string, number, number]
+	>(REQUEST_TOKEN_COVERAGE_SQL);
+	let attributedRows = 0;
+	let zeroOrNullTokenRows = 0;
+	for (const accountId of accountIds) {
+		const row = statement.get(accountId, fromMs, toMs);
+		attributedRows += row?.n ?? 0;
+		zeroOrNullTokenRows += row?.zero_rows ?? 0;
+	}
+	return { attributedRows, zeroOrNullTokenRows };
+}
+
 export function loadAccounts(db: Database): RosterAccount[] {
 	return db
 		.query<AccountRow, []>(
@@ -272,6 +405,11 @@ async function main(): Promise<void> {
 	let rows: RosterSnapshotRow[];
 	let accounts: RosterAccount[];
 	let range: ReplayRange;
+	let requestsFromMs: number;
+	let requestsToMs: number;
+	let buckets: RequestBucket[];
+	let requestsReadable: boolean;
+	let tokenCoverage: RequestTokenCoverage | null;
 	try {
 		dataset = readDataset(db);
 		if (dataset.firstMs == null || dataset.lastMs == null) {
@@ -285,8 +423,19 @@ async function main(): Promise<void> {
 			: dataset.lastMs;
 		if (toMs <= fromMs) throw new Error("--to must be after --from");
 		range = { label: "Replay range", fromMs, toMs };
-		rows = loadRows(db, fromMs - LOAD_PAD_MS, toMs + LOAD_PAD_MS);
+		requestsFromMs = fromMs - LOAD_PAD_MS;
+		requestsToMs = toMs + LOAD_PAD_MS;
+		rows = loadRows(db, requestsFromMs, requestsToMs);
 		accounts = loadAccounts(db);
+		requestsReadable = requestsTableExists(db);
+		const accountIds = accounts.map((account) => account.accountId);
+		buckets = loadRequestBuckets(db, accountIds, requestsFromMs, requestsToMs);
+		tokenCoverage = loadRequestTokenCoverage(
+			db,
+			accountIds,
+			requestsFromMs,
+			requestsToMs,
+		);
 	} finally {
 		db.close();
 	}
@@ -314,6 +463,20 @@ async function main(): Promise<void> {
 	const scoringStartedAt = Date.now();
 	const cohorts = scoreCohorts(replay);
 	const verdict = evaluateVerdict(cohorts, replay);
+	// Precomputed by the caller, the way `cohorts` and `verdict` are. The
+	// segmentation is rebuilt here rather than threaded out of `replayRange`,
+	// which keeps that function's result the record of the replay alone.
+	const absorption: AbsorptionChecks | null = requestsReadable
+		? absorptionChecks({
+				events: replay.events,
+				accounts,
+				series: prepareSeries(rows, accounts),
+				buckets,
+				range,
+				requestsFromMs,
+				requestsToMs,
+			})
+		: null;
 	const scoringMs = Date.now() - scoringStartedAt;
 	console.error(
 		`Scoring and bootstrap: ${(scoringMs / 1000).toFixed(1)} s; verdict ${verdict.verdict}${verdict.provisional ? " (provisional)" : ""}`,
@@ -339,10 +502,14 @@ async function main(): Promise<void> {
 		replay,
 		cohorts,
 		verdict,
-		knownLimits: knownLimitsFor(replay, cohorts, verdict),
+		absorption,
+		knownLimits: knownLimitsFor(replay, cohorts, verdict, tokenCoverage),
 		notes: [
 			`Replay took ${(replayMs / 1000).toFixed(1)} s over ${replay.instants} instants; scoring and bootstrap ${(scoringMs / 1000).toFixed(1)} s.`,
 			`Grid step ${options.stepMinutes} min; rows loaded ${LOAD_PAD_MS / DAY_MS} days either side of the replay interval.`,
+		requestsReadable
+			? `Request buckets loaded: ${buckets.length} minute buckets over ${accounts.length} accounts, on a ${REQUEST_BUCKET_MS / 1000}-second grid.`
+			: "No `requests` table in this database: the causal absorption subsection reports it as unreadable.",
 		],
 	});
 
