@@ -19,13 +19,43 @@ One sanctioned exception, approved 2026-08-25: the server's own hourly
 (`AnthropicModelCatalogCache`). It costs no tokens and starts no quota window.
 Everything else stays forbidden, including curling that endpoint by hand.
 
-## This directory is the live deployment
+## This directory builds the deployment; it is not the deployment
 
-`/home/darken/clankermux` is what `clankermux.service` runs. On every restart it
-rebuilds the dashboard and regenerates the inline DB workers **from this working
-tree**. There is no build artifact, staging dir, or deploy pipeline in between —
-whatever HEAD and the working tree say at the next start is what ships, including
-a crash-recovery restart or a reboot.
+`clankermux.service` does **not** run from `/home/darken/clankermux`. The
+`zz-release.conf` systemd drop-in pins `WorkingDirectory` to a release snapshot
+under `.cache/releases/<sha>` — a detached worktree of one reviewed commit, with
+its own `node_modules`, built dashboard and inline DB workers. An unfinished
+working tree therefore cannot reach production through a crash restart, a
+watchdog restart or a reboot.
+
+**Merging into `main` deploys nothing.** It changes what will ship the next time
+someone promotes, and nothing about what is running now. Promote explicitly:
+
+```
+scripts/promote-release.sh              # promote refs/heads/main
+scripts/promote-release.sh <commit-ish> # promote (or roll back to) a specific commit
+```
+
+The script creates the snapshot, installs and builds inside it while the old
+release keeps serving, rewrites the drop-in, reloads, restarts, and then proves
+the unit came up: active, restart counter unmoved, answering on its port, and
+logging the version its own `package.json` declares. It prints the outgoing
+snapshot's sha first, which is the rollback argument. It never deletes old
+snapshots; prune them by hand with `git worktree remove .cache/releases/<sha>`
+once you no longer want them as rollback targets. Keeping several is cheap:
+bun hardlinks `node_modules` from its global cache, so five snapshots occupied
+712 MB together on 2026-09-07 despite each measuring ~500 MB alone, and
+removing one frees far less than its apparent size.
+
+To check what is actually running, read it from the unit, never from the repo:
+
+```
+systemctl show clankermux -p WorkingDirectory --value
+journalctl -u clankermux --no-pager | grep -F "ClankerMux Server v" | tail -1
+```
+
+A version banner that lags the root `package.json` is not a bug — it is the pin
+telling you which commit is serving traffic.
 
 **Forbidden here** (all fine inside `.claude/worktrees/`):
 
@@ -36,12 +66,17 @@ git clean -fd|-fx           git stash [push]    git rebase [-i]
 git revert (without explicit user approval)     gh pr checkout <n>
 ```
 
+These stay forbidden even though production is now insulated from the working
+tree. This is the one checkout that owns `main` and the git dir every worktree
+and release snapshot hangs off: moving HEAD here breaks the merge-into-`main`
+workflow, and the destructive commands can strand or delete other agents' WIP.
+
 **Allowed here:** `status` `log` `diff` `show` `branch` `ls-files` `ls-tree`
 `rev-parse` `reflog` `blame`; `fetch`; `add <specific-files>` and `commit` on the
-current branch; `pull --ff-only` when the user asks; and
-`merge --no-ff <branch>` into the currently-checked-out `main` — that advances
-`main` in place rather than switching HEAD, and is how work lands. Confirm the
-tree is clean first so a conflict can't leave markers in the deployed tree;
+current branch; `pull --ff-only` when the user asks; `worktree add|list|remove`;
+and `merge --no-ff <branch>` into the currently-checked-out `main` — that
+advances `main` in place rather than switching HEAD, and is how work lands.
+Confirm the tree is clean first so a conflict can't leave markers behind;
 `git merge --abort` if it conflicts and resolve on the branch instead.
 
 To switch branches, review a PR, or work on a different feature: use a worktree

@@ -1,9 +1,15 @@
 #!/bin/sh
-# restart.sh — Build DB workers + dashboard while old proxy is still serving,
-# then restart.
+# restart.sh — Restart the service on the release it is ALREADY pinned to,
+# pre-building so the restart is server init rather than a build.
 #
-# Why: with the dashboard-build.conf drop-in, ExecStartPre rebuilds the
-# dashboard AFTER the old process is killed, so the build (~10-20s) is
+# This does not deploy anything. The zz-release.conf drop-in pins
+# WorkingDirectory to a release snapshot under .cache/releases/<sha>, and this
+# script builds in whatever snapshot is pinned right now — never in the
+# development checkout, whose contents the service does not run. To ship a new
+# commit, use scripts/promote-release.sh.
+#
+# Why pre-build: with the dashboard-build.conf drop-in, ExecStartPre rebuilds
+# the dashboard AFTER the old process is killed, so the build (~10-20s) is
 # downtime. Building first inverts that — the old proxy keeps serving during
 # the build, and the actual restart is just server init (~5s).
 #
@@ -20,8 +26,33 @@
 
 set -e
 
-cd "$(cd "$(dirname "$0")/.." && pwd)"
-bun run build:db-workers
-bun run build:dashboard
+# Build where the unit actually runs. An unset WorkingDirectory fails safely,
+# but a present one pointing at the development checkout does not: that is what
+# the base unit says when the release drop-in is missing, and building and
+# restarting it is exactly what this script must never do. So require a release
+# snapshot by path.
+RELEASES=$(cd "$(dirname "$0")/.." && pwd)/.cache/releases
+TARGET=$(systemctl show clankermux -p WorkingDirectory --value)
+case "$TARGET" in
+"$RELEASES"/?*) ;;
+*)
+	echo "restart.sh: the unit's WorkingDirectory is '${TARGET:-<unset>}', not a" >&2
+	echo "release snapshot under $RELEASES. The zz-release.conf drop-in is" >&2
+	echo "missing or broken — fix it with scripts/promote-release.sh." >&2
+	exit 1
+	;;
+esac
+if [ ! -d "$TARGET" ]; then
+	echo "restart.sh: pinned release $TARGET does not exist" >&2
+	exit 1
+fi
+
+echo "Restarting on $TARGET"
+cd "$TARGET"
+# The GUARDED commands, which are what ExecStartPre runs. Unguarded builds
+# leave no content-hash marker, so ExecStartPre would rebuild from scratch
+# inside the restart window and undo the point of pre-building.
+bun run build:db-workers:guarded
+bun run build:dashboard:guarded
 sudo systemctl restart clankermux
 echo "Done. Tail logs: journalctl -u clankermux -f"
