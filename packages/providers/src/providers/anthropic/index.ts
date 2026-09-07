@@ -1,5 +1,6 @@
 export { extractAnthropicIdentity } from "./identity";
 export { AnthropicOAuthProvider } from "./oauth";
+export { isAnthropicOrgPermissionDenied } from "./org-permission-denied";
 export {
 	ANTHROPIC_PROFILE_ENDPOINT,
 	fetchAnthropicProfile,

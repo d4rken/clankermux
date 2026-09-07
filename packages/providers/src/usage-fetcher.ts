@@ -410,27 +410,25 @@ export interface UsageFetchResult {
 	data: UsageData | null;
 	retryAfterMs: number | null; // Set when server returns retry-after on 429
 	/**
-	 * Distinguishes failures that mean "this account's subscription/seat is
-	 * gone" from transient ones. Anthropic answers the usage endpoint with
-	 * 403 permission_error ("OAuth authentication is currently not allowed
-	 * for this organization.") once a subscription lapses.
+	 * The usage endpoint refused access. This can be an organization setting
+	 * or a subscription/seat problem; the response does not prove expiration.
 	 */
-	failureKind: "subscription_expired" | null;
+	failureKind: "usage_permission_denied" | null;
 }
 
 /**
  * Classify a non-OK usage-endpoint response. A 403 with an Anthropic
- * permission_error body is the expired-subscription signature.
+ * permission_error body proves access was denied, not that a subscription expired.
  */
 export function classifyUsageFetchFailure(
 	status: number,
 	errorBody: string | null,
-): "subscription_expired" | null {
+): "usage_permission_denied" | null {
 	if (status !== 403 || !errorBody) return null;
 	try {
 		const parsed = JSON.parse(errorBody) as { error?: { type?: string } };
 		return parsed.error?.type === "permission_error"
-			? "subscription_expired"
+			? "usage_permission_denied"
 			: null;
 	} catch {
 		return null;
@@ -954,11 +952,11 @@ class UsageCache {
 		string,
 		(evidence: CapacityRestoredEvidence) => void
 	>();
-	// Accounts whose last usage fetch failed with the expired-subscription
-	// signature. Drives the once-per-transition subscriptionExpired /
+	// Accounts whose last usage fetch failed with the usage-permission-denied
+	// signature. Drives the once-per-transition usagePermissionDenied /
 	// usageRecovered callbacks.
-	private subscriptionExpiredAccounts = new Set<string>();
-	private subscriptionExpiredCallbacks = new Map<
+	private usagePermissionDeniedAccounts = new Set<string>();
+	private usagePermissionDeniedCallbacks = new Map<
 		string,
 		(accountId: string) => void
 	>();
@@ -975,8 +973,8 @@ class UsageCache {
 		(accountId: string, error: unknown) => boolean | Promise<boolean>
 	>();
 	// Accounts that have had at least one successful fetch this process. The
-	// first success also fires usageRecovered so a subscription_expired pause
-	// persisted before a restart can still be lifted once the seat is back.
+	// first success also fires usageRecovered so a usage_permission_denied pause
+	// persisted before a restart can still be lifted once usage access returns.
 	private hasSucceededOnce = new Set<string>();
 	// In-flight fetch dedup, tagged with the poll generation that issued it. The
 	// generation tag matters: a startPolling REPLACEMENT bumps the generation while
@@ -1301,7 +1299,7 @@ class UsageCache {
 		customEndpoint?: string | null,
 		onWindowReset?: (accountId: string) => void,
 		onCapacityRestored?: (evidence: CapacityRestoredEvidence) => void,
-		onSubscriptionExpired?: (accountId: string) => void,
+		onUsagePermissionDenied?: (accountId: string) => void,
 		onUsageRecovered?: (accountId: string) => void,
 		onTokenRefreshFailure?: (
 			accountId: string,
@@ -1366,10 +1364,13 @@ class UsageCache {
 		} else {
 			this.capacityRestoredCallbacks.delete(accountId);
 		}
-		if (onSubscriptionExpired) {
-			this.subscriptionExpiredCallbacks.set(accountId, onSubscriptionExpired);
+		if (onUsagePermissionDenied) {
+			this.usagePermissionDeniedCallbacks.set(
+				accountId,
+				onUsagePermissionDenied,
+			);
 		} else {
-			this.subscriptionExpiredCallbacks.delete(accountId);
+			this.usagePermissionDeniedCallbacks.delete(accountId);
 		}
 		if (onUsageRecovered) {
 			this.usageRecoveredCallbacks.set(accountId, onUsageRecovered);
@@ -1564,10 +1565,10 @@ class UsageCache {
 			this.failureCounts.delete(accountId);
 			this.windowResetCallbacks.delete(accountId);
 			this.capacityRestoredCallbacks.delete(accountId);
-			this.subscriptionExpiredCallbacks.delete(accountId);
+			this.usagePermissionDeniedCallbacks.delete(accountId);
 			this.usageRecoveredCallbacks.delete(accountId);
 			this.tokenRefreshFailureHandlers.delete(accountId);
-			this.subscriptionExpiredAccounts.delete(accountId);
+			this.usagePermissionDeniedAccounts.delete(accountId);
 			this.hasSucceededOnce.delete(accountId);
 			// Clean up cache entry when polling stops to prevent memory leaks
 			this.cache.delete(accountId);
@@ -1842,15 +1843,16 @@ class UsageCache {
 				if (!this.isLiveFetchGeneration(accountId, generation, tokenProvider))
 					return superseded;
 				if (result.data) {
-					// Subscription-expired recovery: fire usageRecovered on the
+					// Usage-access recovery: fire usageRecovered on the
 					// failure→success transition, and also on the FIRST success of this
-					// process so a 'subscription_expired' pause persisted before a
-					// restart is lifted once the seat works again. The callback is
+					// process so a 'usage_permission_denied' pause persisted before a
+					// restart is lifted once usage access returns. The callback is
 					// expected to check the account's pause_reason and no-op otherwise.
-					const wasExpired = this.subscriptionExpiredAccounts.delete(accountId);
+					const wasDenied =
+						this.usagePermissionDeniedAccounts.delete(accountId);
 					const firstSuccess = !this.hasSucceededOnce.has(accountId);
 					this.hasSucceededOnce.add(accountId);
-					if (wasExpired || firstSuccess) {
+					if (wasDenied || firstSuccess) {
 						const recoveredCallback =
 							this.usageRecoveredCallbacks.get(accountId);
 						if (recoveredCallback) recoveredCallback(accountId);
@@ -1911,19 +1913,19 @@ class UsageCache {
 					// Non-429 failure: clear any stale rate-limit marker
 					this.usageRateLimitedUntil.delete(accountId);
 				}
-				// Subscription-expired detection: fire the callback once per
-				// transition into the expired state (not on every failing poll).
+				// Usage-access denial detection: fire the callback once per
+				// transition into the denied state (not on every failing poll).
 				if (
-					result.failureKind === "subscription_expired" &&
-					!this.subscriptionExpiredAccounts.has(accountId)
+					result.failureKind === "usage_permission_denied" &&
+					!this.usagePermissionDeniedAccounts.has(accountId)
 				) {
-					this.subscriptionExpiredAccounts.add(accountId);
+					this.usagePermissionDeniedAccounts.add(accountId);
 					log.warn(
-						`Usage endpoint reports expired subscription for account ${accountId}`,
+						`Usage endpoint reports permission denied for account ${accountId}`,
 					);
-					const expiredCallback =
-						this.subscriptionExpiredCallbacks.get(accountId);
-					if (expiredCallback) expiredCallback(accountId);
+					const deniedCallback =
+						this.usagePermissionDeniedCallbacks.get(accountId);
+					if (deniedCallback) deniedCallback(accountId);
 				}
 				return { success: false, retryAfterMs: result.retryAfterMs };
 			}

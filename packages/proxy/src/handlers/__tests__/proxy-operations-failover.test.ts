@@ -1431,3 +1431,83 @@ describe("proxyWithAccount — Codex entitlement model error fails over", () => 
 		expect(result?.status).toBe(400);
 	});
 });
+
+describe("Anthropic organization access denial", () => {
+	const originalFetch = globalThis.fetch;
+	afterEach(() => {
+		globalThis.fetch = originalFetch;
+		cacheBodyStore.discardStaged("req-1");
+	});
+	const body = {
+		error: {
+			type: "permission_error",
+			details: { error_code: "oauth_not_allowed_for_organization" },
+		},
+	};
+	it("benches, audits and fails over without model retries or recovery holds", async () => {
+		globalThis.fetch = mock(async () =>
+			Response.json(body, { status: 403 }),
+		) as never;
+		const acc = makeAccount({
+			provider: "anthropic",
+			custom_endpoint: null,
+			model_mappings: null,
+			model_fallbacks: JSON.stringify({
+				"claude-sonnet-4-5": "claude-haiku-4-5",
+			}),
+		});
+		const ctx = makeProxyContextWithAsyncExec();
+		const outcomes: ProxyAttemptOutcome[] = [];
+		const reqBody = makeRequestBody();
+		const res = await proxyWithAccount(
+			makeRequest(reqBody),
+			new URL("https://proxy.local/v1/messages"),
+			acc,
+			makeRequestMeta(),
+			reqBody,
+			() => {},
+			0,
+			ctx,
+			undefined,
+			undefined,
+			undefined,
+			undefined,
+			false,
+			{ onOutcome: (o) => outcomes.push(o) },
+		);
+		expect(res).toBeNull();
+		expect(globalThis.fetch).toHaveBeenCalledTimes(1);
+		expect(acc.rate_limited_reason).toBe("org_permission_denied");
+		expect(acc.rate_limited_until).toBeGreaterThan(Date.now());
+		expect(ctx.dbOps.saveRequest).toHaveBeenCalledWith(
+			expect.objectContaining({
+				statusCode: 403,
+				errorMessage: "org_permission_denied",
+				accountUsed: acc.id,
+			}),
+		);
+		expect(outcomes).toEqual([{ kind: "org_permission_denied" }]);
+		expect(isAccountWideFailure(outcomes[0])).toBe(true);
+	});
+	it("passes through the same body from an unmaintained compatible provider", async () => {
+		globalThis.fetch = mock(async () =>
+			Response.json(body, { status: 403 }),
+		) as never;
+		const acc = makeAccount();
+		const ctx = makeProxyContext();
+		const reqBody = makeRequestBody();
+		const res = await proxyWithAccount(
+			makeRequest(reqBody),
+			new URL("https://proxy.local/v1/messages"),
+			acc,
+			makeRequestMeta(),
+			reqBody,
+			() => {},
+			0,
+			ctx,
+		);
+		expect(res?.status).toBe(403);
+		expect(acc.rate_limited_until).toBeNull();
+		await res?.text();
+	});
+});

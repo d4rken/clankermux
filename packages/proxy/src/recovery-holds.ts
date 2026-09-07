@@ -1070,7 +1070,8 @@ export function createRecoveryHolds(deps: RecoveryHoldsDeps): RecoveryHolds {
 		opts?: { eligible?: (a: Account) => boolean; clearPinFailure?: boolean },
 	): Promise<Response | null> => {
 		const isEligible = (a: Account): boolean =>
-			opts?.eligible ? opts.eligible(a) : a.provider !== "codex";
+			a.rate_limited_reason !== "org_permission_denied" &&
+			(opts?.eligible ? opts.eligible(a) : a.provider !== "codex");
 		const holdStart = nonCodexNow();
 		// The candidates the PREVIOUS round skipped via the single-flight
 		// recovery-probe gate. Such a candidate has no cooldown deadline to wait

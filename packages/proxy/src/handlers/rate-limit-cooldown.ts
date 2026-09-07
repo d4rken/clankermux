@@ -293,7 +293,13 @@ function inspectProbeGate(account: Account, now: number): ProbeGateInspection {
 		account.id,
 	)?.generation;
 	return {
-		gatingRequired: expiredMatureCooldown || capacityGeneration !== undefined,
+		// Keep the reason through the expiry sweep: NULL deadline means the
+		// sweep released it, not that Claude Code access has been confirmed.
+		gatingRequired:
+			expiredMatureCooldown ||
+			capacityGeneration !== undefined ||
+			(account.rate_limited_reason === "org_permission_denied" &&
+				(!account.rate_limited_until || account.rate_limited_until <= now)),
 		capacityGeneration,
 	};
 }
@@ -302,7 +308,9 @@ function inspectProbeGate(account: Account, now: number): ProbeGateInspection {
  * Admits one process-local recovery probe for an account that just became
  * selectable again — either because a MATURE cooldown streak expired, or
  * because the usage poller released the cooldown EARLY (capacity restored).
- * Ordinary accounts are not gated ("not_required").
+ * Organization-access restrictions also gate from the FIRST failure, even
+ * after the expiry sweep removes the deadline. Ordinary accounts are not
+ * gated ("not_required").
  *
  * The two triggers are separate on purpose: the mature-streak condition
  * requires `consecutive_rate_limits >= MATURE_COOLDOWN_STREAK` and an
@@ -548,6 +556,7 @@ export function applyRateLimitCooldown(
 		// the stability window; leave consecutive_rate_limits UNTOUCHED.
 		account.rate_limited_until = rateLimitInfo.resetTime;
 		account.rate_limited_at = now;
+		account.rate_limited_reason = reason;
 
 		const cooldownUntil = rateLimitInfo.resetTime;
 		ctx.asyncWriter.enqueue(async () => {
@@ -596,6 +605,7 @@ export function applyRateLimitCooldown(
 
 	// In-memory update so the rest of this request sees consistent state.
 	account.rate_limited_until = cooldownUntil;
+	account.rate_limited_reason = reason;
 	account.rate_limited_at = now;
 	account.consecutive_rate_limits = nextCount;
 

@@ -1566,6 +1566,7 @@ describe("availability reason refines the state, or is null", () => {
 		"oauth_invalid_grant",
 		"rate_limit_window",
 		"subscription_expired",
+		"usage_permission_denied",
 	]) {
 		it(`passes the pause reason ${reason} through`, () => {
 			expect(toPublicAvailabilityReason("ok", true, reason)).toBe(

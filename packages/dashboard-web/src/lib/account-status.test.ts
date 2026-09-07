@@ -636,7 +636,7 @@ describe("deriveAccountStatus — renewal", () => {
 			}),
 			NOW,
 		);
-		expect(status.isSubscriptionExpired).toBe(true);
+		expect(status.isUsagePermissionDenied).toBe(true);
 		// The underlying renewal facts are still derived…
 		expect(status.renewalNextDate).not.toBeNull();
 		// …but the chip is suppressed.
@@ -653,19 +653,19 @@ describe("deriveAccountStatus — renewal", () => {
 			}),
 			NOW,
 		);
-		expect(status.isSubscriptionExpired).toBe(true);
+		expect(status.isUsagePermissionDenied).toBe(true);
 		expect(status.showRenewalChip).toBe(false);
 	});
 });
 
 describe("deriveAccountStatus — subscription expired", () => {
-	it("flags isSubscriptionExpired when paused with pause_reason subscription_expired", () => {
+	it("flags isUsagePermissionDenied when paused with pause_reason subscription_expired", () => {
 		const status = deriveAccountStatus(
 			makeAccount({ paused: true, pauseReason: "subscription_expired" }),
 			NOW,
 		);
 		expect(status.isPaused).toBe(true);
-		expect(status.isSubscriptionExpired).toBe(true);
+		expect(status.isUsagePermissionDenied).toBe(true);
 	});
 
 	it("does not flag manually paused accounts", () => {
@@ -673,7 +673,7 @@ describe("deriveAccountStatus — subscription expired", () => {
 			makeAccount({ paused: true, pauseReason: "manual" }),
 			NOW,
 		);
-		expect(status.isSubscriptionExpired).toBe(false);
+		expect(status.isUsagePermissionDenied).toBe(false);
 	});
 
 	it("does not flag unpaused accounts even with a stale reason", () => {
@@ -681,7 +681,7 @@ describe("deriveAccountStatus — subscription expired", () => {
 			makeAccount({ paused: false, pauseReason: "subscription_expired" }),
 			NOW,
 		);
-		expect(status.isSubscriptionExpired).toBe(false);
+		expect(status.isUsagePermissionDenied).toBe(false);
 	});
 });
 
@@ -758,7 +758,7 @@ describe("deriveAccountStatus — needs reauth", () => {
 		expect(status.isPaused).toBe(true);
 		expect(status.isNeedsReauth).toBe(true);
 		// Distinct from the subscription-expired state.
-		expect(status.isSubscriptionExpired).toBe(false);
+		expect(status.isUsagePermissionDenied).toBe(false);
 	});
 
 	it("does not flag other pause reasons", () => {
@@ -1125,4 +1125,25 @@ describe("deriveAccountStatus — exhausted scoped families (family-weekly chip)
 		const status = deriveAccountStatus(makeAccount(), NOW);
 		expect(status.exhaustedScopedFamilies).toEqual([]);
 	});
+});
+
+it("treats usage_permission_denied as a durable access pause", () => {
+	const status = deriveAccountStatus(
+		makeAccount({ paused: true, pauseReason: "usage_permission_denied" }),
+		NOW,
+	);
+	expect(status.isUsagePermissionDenied).toBe(true);
+	expect(status.showForceReset).toBe(false);
+});
+it("does not offer a quota reset for an organization access restriction", () => {
+	const status = deriveAccountStatus(
+		makeAccount({
+			rateLimitedReason: "org_permission_denied",
+			rateLimitedUntil: NOW + 60_000,
+			usageUtilization: 5,
+		}),
+		NOW,
+	);
+	expect(status.showForceReset).toBe(false);
+	expect(status.staleLockDetected).toBe(false);
 });

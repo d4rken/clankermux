@@ -178,6 +178,7 @@ function makeFullContext(accounts: Account[], pin: PinCfg): ProxyContext {
 		} as never,
 		requestRecorder: {
 			begin: mock(() => {}),
+			hasRecord: mock(() => false),
 			captureResponseChunk: mock(() => {}),
 			finishTransport: mock(() => {}),
 			attachUsageSummary: mock(() => {}),
@@ -210,6 +211,112 @@ const CLASS_PIN: PinCfg = {
 };
 
 describe("pin-transient hold", () => {
+	it("does not hold a pinned organization restriction even when its cooldown expires soon", async () => {
+		const acc = makeAccount({
+			rate_limited_until: Date.now() + 60_000,
+			rate_limited_reason: "org_permission_denied",
+		});
+		const ctx = makeFullContext([acc], CLASS_PIN);
+		const abort = new AbortController();
+		const timer = setTimeout(() => abort.abort(), 100);
+		try {
+			const res = await callHandleProxy(
+				makeRequest(abort.signal),
+				new URL("https://proxy.local/v1/messages"),
+				ctx,
+			);
+			expect(res.status).toBe(503);
+			expect(res.headers.get("x-clankermux-pool-status")).toBe(
+				"pinned-target-unavailable",
+			);
+		} finally {
+			clearTimeout(timer);
+		}
+	});
+	for (const pinned of [true, false]) {
+		it(`fails over to a healthy Anthropic sibling after an org denial (${pinned ? "provider pin" : "unpinned"})`, async () => {
+			const a = makeAccount({ id: "a", api_key: "key-a" });
+			const b = makeAccount({ id: "b", api_key: "key-b" });
+			const other = makeAccount({ id: "other", provider: "codex" });
+			const ctx = makeFullContext(
+				pinned ? [a, other, b] : [a, b],
+				pinned ? CLASS_PIN : { pinnedAccountId: null, pinnedProviders: null },
+			);
+			const keys: string[] = [];
+			globalThis.fetch = mock(
+				async (input: RequestInfo | URL, init?: RequestInit) => {
+					const headers =
+						input instanceof Request
+							? input.headers
+							: new Headers(init?.headers);
+					const key = headers.get("x-api-key") ?? "";
+					keys.push(key);
+					return key === "key-a"
+						? Response.json(
+								{
+									error: {
+										type: "permission_error",
+										details: {
+											error_code: "oauth_not_allowed_for_organization",
+										},
+									},
+								},
+								{ status: 403 },
+							)
+						: ok200();
+				},
+			) as never;
+			const res = await callHandleProxy(
+				makeRequest(),
+				new URL("https://proxy.local/v1/messages"),
+				ctx,
+			);
+			expect(res.status).toBe(200);
+			await res.text();
+			expect(keys).toEqual(["key-a", "key-b"]);
+		});
+	}
+
+	it("never escapes a specific account pin after an org denial", async () => {
+		const a = makeAccount({ id: "a" });
+		const ctx = makeFullContext([a, makeAccount({ id: "b" })], {
+			pinnedAccountId: "a",
+			pinnedProviders: null,
+		});
+		globalThis.fetch = mock(async () =>
+			Response.json(
+				{
+					error: {
+						type: "permission_error",
+						details: { error_code: "oauth_not_allowed_for_organization" },
+					},
+				},
+				{ status: 403 },
+			),
+		) as never;
+		const res = await callHandleProxy(
+			makeRequest(),
+			new URL("https://proxy.local/v1/messages"),
+			ctx,
+		);
+		expect(res.status).toBe(403);
+		expect((await res.json()).error.details.error_code).toBe(
+			"oauth_not_allowed_for_organization",
+		);
+		expect(ctx.requestRecorder.begin).toHaveBeenCalledTimes(1);
+		expect(globalThis.fetch).toHaveBeenCalledTimes(1);
+		const next = await callHandleProxy(
+			makeRequest(),
+			new URL("https://proxy.local/v1/messages"),
+			ctx,
+		);
+		expect(next.status).toBe(503);
+		expect(next.headers.get("x-clankermux-pool-status")).toBe(
+			"pinned-target-unavailable",
+		);
+		expect(globalThis.fetch).toHaveBeenCalledTimes(1);
+	});
+
 	let originalFetch: typeof globalThis.fetch;
 
 	beforeEach(() => {

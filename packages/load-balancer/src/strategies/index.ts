@@ -466,6 +466,11 @@ export class SessionStrategy implements LoadBalancingStrategy {
 		// A pause is never brief enough to be worth holding a pin through.
 		if (account.paused) return true;
 
+		// The deadline is only when we may probe again; admin action can take
+		// arbitrarily long. Move session affinity to the healthy sibling. This
+		// never changes API-key account/provider pins, which filter the pool first.
+		if (account.rate_limited_reason === "org_permission_denied") return true;
+
 		const until = account.rate_limited_until;
 		if (!until || until <= now) return false;
 

@@ -518,13 +518,22 @@ export function AccountStatusChips({
 				</span>
 			)}
 			{status.isPaused && <span className="text-muted-foreground">Paused</span>}
-			{status.isSubscriptionExpired && (
+			{status.isUsagePermissionDenied && (
 				<StatusChip
 					className="bg-destructive/15 text-destructive-strong"
-					title="The provider reports this account's subscription has lapsed (OAuth no longer allowed for the organization). The account was auto-paused and will auto-resume once usage data is reachable again after renewal."
+					title="Anthropic denied access to this account's usage data. Check organization permissions and subscription access. This pause clears when usage access returns; a separate Claude Code access restriction must recover independently."
 				>
 					<AlertCircle className="h-3.5 w-3.5" />
-					Subscription expired
+					Usage access denied
+				</StatusChip>
+			)}
+			{account.rateLimitedReason === "org_permission_denied" && (
+				<StatusChip
+					className="bg-destructive/15 text-destructive-strong"
+					title="The organization disabled OAuth or Claude Code subscription access. Ask an admin to restore it. While cooling down, the account is skipped. Once eligible again, requests check recovery one at a time until access is confirmed; routing pins still apply."
+				>
+					<AlertCircle className="h-3.5 w-3.5" />
+					Organization access disabled
 				</StatusChip>
 			)}
 			{status.isNeedsReauth && (

@@ -9,6 +9,7 @@ export {
 	OUT_OF_CREDITS_REASON,
 	SOFT_WARNING_STATUSES,
 } from "./anthropic/index";
+export { isAnthropicOrgPermissionDenied } from "./anthropic/org-permission-denied";
 export {
 	type AnthropicCompatibleConfig,
 	AnthropicCompatibleProvider,

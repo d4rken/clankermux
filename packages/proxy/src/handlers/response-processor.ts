@@ -228,7 +228,7 @@ export async function processProxyResponse(
 	account: Account,
 	ctx: ProxyContext,
 	requestMeta?: Pick<RequestMeta, "headers" | "internal"> &
-		Partial<Pick<RequestMeta, "timestamp">>,
+		Partial<Pick<RequestMeta, "timestamp" | "method" | "path">>,
 ): Promise<boolean> {
 	// Scoped projection BEFORE any consumer: both the cooldown applied below
 	// and the status-meta persisted via updateAccountMetadata must see the
@@ -400,9 +400,15 @@ export async function processProxyResponse(
 		// 429 branch above releases via applyRateLimitCooldown ("cooldown_reapplied")
 		// instead, and proxy.ts's try/finally is the belt-and-suspenders catch-all
 		// for exceptions/skips.
-		completeRateLimitProbe(account, response.ok ? "recovered" : "abandoned");
+		// Metadata/usage endpoints can work while Claude Code access is disabled.
+		const provesAccess =
+			response.ok &&
+			(account.rate_limited_reason !== "org_permission_denied" ||
+				(requestMeta?.method === "POST" &&
+					requestMeta.path === "/v1/messages"));
+		completeRateLimitProbe(account, provesAccess ? "recovered" : "abandoned");
 
-		if (response.ok) {
+		if (provesAccess) {
 			applySuccessRateLimitClear(
 				account,
 				ctx,
