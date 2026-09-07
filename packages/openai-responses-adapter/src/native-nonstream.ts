@@ -13,7 +13,7 @@ import { Buffer } from "node:buffer";
  * the client actually asked for.
  *
  * The extraction is a standalone, line-oriented SSE scanner rather than a reuse
- * of `parseAndProcessChunk` from stream-translator.ts: that parser is welded to
+ * of `parseAndProcessEvent` from stream-translator.ts: that parser is welded to
  * the Anthropic→Responses translation state machine and emits events, while
  * this one only has to find one envelope and forget everything else.
  */

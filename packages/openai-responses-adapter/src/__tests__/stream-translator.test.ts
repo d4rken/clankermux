@@ -145,6 +145,57 @@ describe("translateAnthropicStreamToResponses", () => {
 		}
 	});
 
+	for (const newline of ["\n", "\r\n"]) {
+		test(`flush preserves final undelimited usage (${JSON.stringify(newline)})`, async () => {
+			const frames = [
+				[
+					"message_start",
+					{ message: { id: "msg_eof", usage: { input_tokens: 5 } } },
+				],
+				[
+					"content_block_start",
+					{ index: 0, content_block: { type: "text", text: "" } },
+				],
+				[
+					"content_block_delta",
+					{ index: 0, delta: { type: "text_delta", text: "hi" } },
+				],
+				["content_block_stop", { index: 0 }],
+				[
+					"message_delta",
+					{ delta: { stop_reason: "end_turn" }, usage: { output_tokens: 7 } },
+				],
+			] as const;
+			// No message_stop or final blank line: output_tokens must come from
+			// processing the buffered message_delta, not emitDone's defaults.
+			const body = frames
+				.map(
+					([event, data]) =>
+						`event: ${event}${newline}data: ${JSON.stringify(data)}`,
+				)
+				.join(newline + newline);
+			const events = await collectSseEvents(
+				translateAnthropicStreamToResponses(
+					new Response(body),
+					"resp_eof",
+					"test-model",
+				),
+			);
+			expect(
+				events.find((event) => event.event === "response.output_text.delta")
+					?.data,
+			).toMatchObject({ delta: "hi" });
+			expect(
+				events.filter((event) => event.event === "response.completed"),
+			).toHaveLength(1);
+			expect(events.at(-1)?.data).toMatchObject({
+				response: {
+					usage: { input_tokens: 5, output_tokens: 7, total_tokens: 12 },
+				},
+			});
+		});
+	}
+
 	test("simple text streaming — correct event sequence and content", async () => {
 		const events = [
 			sseEvent("message_start", {

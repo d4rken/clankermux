@@ -394,46 +394,41 @@ function processEvent(
 	}
 }
 
-function parseAndProcessChunk(
-	chunk: string,
+function parseAndProcessEvent(
+	rawEvent: string,
 	controller: TransformStreamDefaultController,
 	state: State,
 ): void {
-	// Split on double newline to get complete SSE events
-	const rawEvents = chunk.split(/\r?\n\r?\n/);
+	if (!rawEvent.trim()) return;
 
-	for (const rawEvent of rawEvents) {
-		if (!rawEvent.trim()) continue;
+	const lines = rawEvent.split(/\r?\n/);
+	let eventType = "";
+	const dataLines: string[] = [];
 
-		const lines = rawEvent.split(/\r?\n/);
-		let eventType = "";
-		const dataLines: string[] = [];
-
-		for (const line of lines) {
-			if (line.startsWith("event:")) {
-				eventType = line.slice(6).trim();
-			} else if (line.startsWith("data:")) {
-				const value = line.slice(5);
-				dataLines.push(value.startsWith(" ") ? value.slice(1) : value);
-			}
+	for (const line of lines) {
+		if (line.startsWith("event:")) {
+			eventType = line.slice(6).trim();
+		} else if (line.startsWith("data:")) {
+			const value = line.slice(5);
+			dataLines.push(value.startsWith(" ") ? value.slice(1) : value);
 		}
+	}
 
-		const dataStr = dataLines.join("\n");
-		if (!eventType || !dataStr) continue;
+	const dataStr = dataLines.join("\n");
+	if (!eventType || !dataStr) return;
 
-		let data: Record<string, unknown>;
-		try {
-			data = JSON.parse(dataStr) as Record<string, unknown>;
-		} catch {
-			// Event fields, data, and SyntaxError messages can contain payloads.
-			log.warn("Failed to parse upstream SSE event data");
-			continue;
-		}
-		try {
-			processEvent(eventType, data, controller, state);
-		} catch {
-			log.warn("Failed to process upstream SSE event");
-		}
+	let data: Record<string, unknown>;
+	try {
+		data = JSON.parse(dataStr) as Record<string, unknown>;
+	} catch {
+		// Event fields, data, and SyntaxError messages can contain payloads.
+		log.warn("Failed to parse upstream SSE event data");
+		return;
+	}
+	try {
+		processEvent(eventType, data, controller, state);
+	} catch {
+		log.warn("Failed to process upstream SSE event");
 	}
 }
 
@@ -478,9 +473,9 @@ export function translateAnthropicStreamToResponses(
 						const boundary = /\r?\n\r?\n/.exec(state.lineBuffer);
 						if (!boundary || boundary.index === undefined) break;
 						const end = boundary.index + boundary[0].length;
-						const complete = state.lineBuffer.slice(0, end);
+						const complete = state.lineBuffer.slice(0, boundary.index);
 						state.lineBuffer = state.lineBuffer.slice(end);
-						parseAndProcessChunk(complete, controller, state);
+						parseAndProcessEvent(complete, controller, state);
 					}
 				} catch (err) {
 					log.warn(`Stream transform error: ${String(err)}`);
@@ -495,7 +490,7 @@ export function translateAnthropicStreamToResponses(
 
 					// Process any remaining buffered content
 					if (state.lineBuffer.trim()) {
-						parseAndProcessChunk(`${state.lineBuffer}\n\n`, controller, state);
+						parseAndProcessEvent(state.lineBuffer, controller, state);
 						state.lineBuffer = "";
 					}
 					// Ensure done event is always emitted
