@@ -167,11 +167,10 @@ describe("FamilyWeeklyCard", () => {
 			]),
 		);
 
-		expect(html).toContain("No reading");
-		expect(html).toContain(
-			"Reported only by 1 account that cannot serve right now",
-		);
-		expect(html).not.toContain("% used");
+		expect(html).toContain("Unavailable");
+		expect(html).toContain("1 account cannot serve right now");
+		expect(html).toContain('aria-valuetext="paused: 45% used · paused"');
+		expect(html).not.toContain("lowest ·");
 	});
 
 	it("counts both sides of a mixed family", () => {
@@ -259,6 +258,56 @@ describe("FamilyWeeklyCard", () => {
 		);
 		expect(html).not.toContain("resets in");
 		expect(html).not.toContain("projected");
+	});
+
+	for (const percent of [0, 30]) {
+		it(`keeps Claud1 visible at ${percent}% during a five-hour block and after recovery`, () => {
+			const entries = percent === 0 ? [] : [scopedEntry("Fable", percent)];
+			const active = windowedAccount("Claud1", entries);
+			const blocked = {
+				...active,
+				usageData: {
+					...active.usageData,
+					five_hour: {
+						utilization: 100,
+						resets_at: new Date(NOW + HOUR).toISOString(),
+					},
+				},
+			} as AccountResponse;
+			const sibling = windowedAccount("Claud2", [scopedEntry("Fable", 45)]);
+			const html = render(rowsFor([sibling, blocked]));
+			expect(html).toContain(
+				`aria-valuetext="Claud1: ${percent}% used · 5h spent"`,
+			);
+			expect(html).toContain("bg-muted-foreground/30");
+			expect(html).toContain("lowest · Claud2");
+			expect(html).toContain("1 of 2 reporting · 1 unavailable");
+			expect(html.match(/role="progressbar"/g)).toHaveLength(2);
+
+			const recovered = render(rowsFor([sibling, active]));
+			expect(recovered).toContain(`aria-valuetext="Claud1: ${percent}% used"`);
+			expect(recovered).not.toContain("5h spent");
+			expect(recovered).toContain("lowest · Claud1");
+			expect(recovered.match(/role="progressbar"/g)).toHaveLength(2);
+		});
+	}
+
+	it("shows every blocked row when no account can serve", () => {
+		const html = render(
+			rowsFor([
+				windowedAccount("reporter", [scopedEntry("Fable", 45)], {
+					rateLimitedUntil: NOW + HOUR,
+				}),
+				windowedAccount("untouched", [], { paused: true }),
+			]),
+		);
+		expect(html).toContain("2 accounts cannot serve right now");
+		expect(html).toContain(
+			'aria-valuetext="reporter: 45% used · cooling down"',
+		);
+		expect(html).toContain('aria-valuetext="untouched: 0% used · paused"');
+		expect(html).not.toContain("lowest ·");
+		expect(html).not.toContain("Unused capacity");
 	});
 
 	it("renders nothing at all when no family reports a cap", () => {

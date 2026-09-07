@@ -523,26 +523,6 @@ function classifyQuotaExhaustion(
 }
 
 /**
- * Whether an account could serve a request RIGHT NOW: not paused, cooling down,
- * token-expired or hidden by a usage-429, and not out of either account-wide
- * window.
- *
- * One named predicate rather than the condition spelled out at each call site.
- * {@link listFamilyRows} tests it twice — once to say who cannot report a
- * family and once to count who has not used one — and two copies of it would be
- * free to drift into a card whose two numbers describe two different pools.
- *
- * `classifyQuotaExhaustion` rejects on EITHER window regardless of the argument;
- * `"seven_day"` only decides which reason it would report, which this discards.
- */
-function canServeNow(account: AccountResponse, now: number): boolean {
-	return (
-		classifyExclusion(account, now) === null &&
-		classifyQuotaExhaustion(account, "seven_day") === null
-	);
-}
-
-/**
  * Aggregate per-model-family weekly usage across the pool. A family's weekly
  * quota is independent of the account-wide 5h/7d windows, so a family can be
  * spent while the pool headline reads healthy — that is the case this exists to
@@ -783,6 +763,8 @@ export interface FamilyRow {
 	 * cannot tell "no such limit" from "nobody who has it can be reached".
 	 */
 	unavailableReporters: number;
+	/** Visible blocked accounts, including untouched family windows. */
+	unavailableAccounts: PoolAccountBar[];
 	/**
 	 * Accounts that could serve right now, carry a live Anthropic-style payload
 	 * with a future account-wide weekly reset, and report no window for this
@@ -830,26 +812,6 @@ export function listFamilyRows(
 		computeFamilyWeeklyUsage(accounts, now).map((u) => [u.family, u]),
 	);
 
-	// Which families each UNAVAILABLE account reports, so the card can say a
-	// family exists but nobody who has it can serve it.
-	const unavailableByFamily = new Map<ModelFamily, number>();
-	for (const account of accounts) {
-		if (!account.usageData) continue;
-		if (!isAnthropicStyleShape(account.usageData)) continue;
-		if (canServeNow(account, now)) continue;
-		const scoped = normalizeAnthropicUsage(
-			account.usageData as AnthropicUsageData,
-			now,
-		).weeklyScoped;
-		// One account reporting two windows that fold onto one family counts once.
-		for (const family of new Set(scoped.map((limit) => limit.family))) {
-			unavailableByFamily.set(
-				family,
-				(unavailableByFamily.get(family) ?? 0) + 1,
-			);
-		}
-	}
-
 	// Row DISCOVERY stays unfiltered (a family only a paused account reports
 	// still gets a row), but the class gate for "unopened" is built from UNPAUSED
 	// reporters only — matching the server's scan, which drops paused accounts
@@ -869,6 +831,8 @@ export function listFamilyRows(
 	}
 
 	const live = listLiveScopedFamilies(accounts, now);
+	const unavailableByFamily = new Map<ModelFamily, PoolAccountBar[]>();
+	const unavailableReporters = new Map<ModelFamily, number>();
 	const unopenedByFamily = new Map<
 		ModelFamily,
 		FamilyRow["unopenedAccounts"]
@@ -876,11 +840,9 @@ export function listFamilyRows(
 	for (const account of accounts) {
 		if (!account.usageData) continue;
 		if (!isAnthropicStyleShape(account.usageData)) continue;
-		// The count answers "how many accounts could serve this family right now
-		// but have not touched it", so an account that cannot serve anything is
-		// not one of them. The account-card row uses a DIFFERENT rule on purpose:
-		// there the row is a fact about one account's own reading.
-		if (!canServeNow(account, now)) continue;
+		const blocked =
+			classifyExclusion(account, now) ??
+			classifyQuotaExhaustion(account, "seven_day");
 		const normalized = normalizeAnthropicUsage(
 			account.usageData as AnthropicUsageData,
 			now,
@@ -897,6 +859,32 @@ export function listFamilyRows(
 				reportingClasses: reportingClasses.get(family.family) ?? new Set(),
 				now,
 			});
+			if (blocked) {
+				const binding = pickBindingScopedLimit(
+					normalized.weeklyScoped.filter(
+						(limit) => limit.family === family.family,
+					),
+				);
+				if (binding === null && evidence !== "unopened") continue;
+				const unavailable = unavailableByFamily.get(family.family) ?? [];
+				unavailable.push({
+					accountId: account.id,
+					name: account.name,
+					provider: account.provider,
+					pct: binding?.percent ?? 0,
+					state: "exhausted",
+					reason: blocked.reason,
+					resetMs: binding?.resetsAtMs ?? null,
+				});
+				unavailableByFamily.set(family.family, unavailable);
+				if (binding !== null) {
+					unavailableReporters.set(
+						family.family,
+						(unavailableReporters.get(family.family) ?? 0) + 1,
+					);
+				}
+				continue;
+			}
 			if (evidence !== "unopened") continue;
 			const unopened = unopenedByFamily.get(family.family) ?? [];
 			unopened.push({
@@ -916,7 +904,8 @@ export function listFamilyRows(
 			displayName: family.displayName,
 			usage,
 			reportingCount: usage?.accounts.length ?? 0,
-			unavailableReporters: unavailableByFamily.get(family.family) ?? 0,
+			unavailableReporters: unavailableReporters.get(family.family) ?? 0,
+			unavailableAccounts: unavailableByFamily.get(family.family) ?? [],
 			unopenedCount: unopenedByFamily.get(family.family)?.length ?? 0,
 			unopenedAccounts: unopenedByFamily.get(family.family) ?? [],
 		});

@@ -12,6 +12,7 @@ import {
 	Menu,
 	Settings,
 	Users,
+	Wallet,
 	X,
 	Zap,
 } from "lucide-react";
@@ -47,8 +48,9 @@ interface NavItem {
 
 const NAV_ITEMS: NavItem[] = [
 	{ label: "Overview", icon: LayoutDashboard, path: "/" },
-	{ label: "Analytics", icon: BarChart3, path: "/analytics" },
 	{ label: "Usage", icon: Gauge, path: "/limits" },
+	{ label: "Costs", icon: Wallet, path: "/costs" },
+	{ label: "Analytics", icon: BarChart3, path: "/analytics" },
 	{ label: "Requests", icon: Activity, path: "/requests" },
 	{ label: "Accounts", icon: Users, path: "/accounts" },
 	{ label: "Routing Chains", icon: Zap, path: "/combos" },

@@ -2205,6 +2205,13 @@ describe("listFamilyRows", () => {
 
 		expect(rows).toHaveLength(1);
 		expect(rows[0].unavailableReporters).toBe(1);
+		expect(rows[0].unavailableAccounts).toEqual([
+			expect.objectContaining({
+				accountId: "paused",
+				pct: 60,
+				reason: "paused",
+			}),
+		]);
 	});
 
 	it("orders the worst family first and unreadable ones last", () => {
@@ -2321,6 +2328,10 @@ describe("listFamilyRows", () => {
 					NOW,
 				);
 				expect(rows[0].unopenedCount).toBe(0);
+				expect(rows[0].unavailableAccounts).toEqual([
+					expect.objectContaining({ name: "untouched", pct: 0 }),
+				]);
+				expect(rows[0].unavailableReporters).toBe(0);
 			}
 		});
 

@@ -6,6 +6,7 @@ export const TAB_IDS = [
 	"caching",
 	"projects",
 	"quota",
+	"accounts",
 ] as const;
 export type AnalyticsTabId = (typeof TAB_IDS)[number];
 export const DEFAULT_TAB: AnalyticsTabId = "traffic";
@@ -22,6 +23,7 @@ export const DEFAULT_RANGES: Record<AnalyticsTabId, TimeRange> = {
 	caching: "7d",
 	projects: "7d",
 	quota: "all",
+	accounts: "7d",
 };
 
 /** Map a raw ?tab= search-param value to a valid tab id, falling back to the default. */

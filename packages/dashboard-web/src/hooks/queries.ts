@@ -438,9 +438,10 @@ export const useAnalyticsFilterOptions = () => {
  * chart. Mirrors useAnalytics' polling cadence (45s stale, 60s refetch, paused
  * in the background) since both feed time-series charts.
  */
-export const useUsageHistory = (range: string) => {
+export const useUsageHistory = (range: string, enabled = true) => {
 	return useQuery({
 		queryKey: queryKeys.usageHistory(range),
+		enabled,
 		queryFn: () => api.getUsageHistory(range),
 		staleTime: 45000,
 		refetchInterval: 60000,
@@ -466,8 +467,8 @@ export const usageScopedHistoryQueryOptions = (range: string) => ({
 	retry: shouldRetryDashboardQuery,
 });
 
-export const useUsageScopedHistory = (range: string) => {
-	return useQuery(usageScopedHistoryQueryOptions(range));
+export const useUsageScopedHistory = (range: string, enabled = true) => {
+	return useQuery({ ...usageScopedHistoryQueryOptions(range), enabled });
 };
 
 /**
