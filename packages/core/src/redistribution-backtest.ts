@@ -140,6 +140,21 @@ export interface RosterAccount {
 	currentRateLimitTier: string | null;
 }
 
+/**
+ * A name for the report's tables. An account with snapshots or traffic but no
+ * row left in `accounts` falls back to its id, which is all the history has.
+ */
+function accountNameLookup(
+	accounts: readonly RosterAccount[],
+): (accountId: string) => string {
+	const nameByAccount = new Map<string, string>();
+	for (const account of accounts) {
+		nameByAccount.set(account.accountId, account.name);
+	}
+	return (accountId: string): string =>
+		nameByAccount.get(accountId) ?? accountId;
+}
+
 export type TransitionKind =
 	| "peer-exhaustion"
 	| "add"
@@ -609,14 +624,7 @@ export function detectTransitions(
 	const found: Omit<TransitionEvent, "id">[] = [];
 	const inRange = (atMs: number): boolean =>
 		atMs >= range.fromMs && atMs < range.toMs;
-	// A name for the report's table. An account with snapshots but no row left
-	// in `accounts` falls back to its id, which is all the history has.
-	const nameByAccount = new Map<string, string>();
-	for (const account of accounts) {
-		nameByAccount.set(account.accountId, account.name);
-	}
-	const nameOf = (accountId: string): string =>
-		nameByAccount.get(accountId) ?? accountId;
+	const nameOf = accountNameLookup(accounts);
 
 	for (const account of accounts) {
 		if (!inRange(account.createdAtMs)) continue;
@@ -1000,7 +1008,10 @@ export interface WindowFillRow {
 	medianObservedSpanHours: number | null;
 	medianUnobservedHeadMinutes: number | null;
 	medianResolutionMinutes: number | null;
-	/** The one column over the CENSORED windows: window start to last sample. */
+	/**
+	 * The one column over the CENSORED windows, and over BOTH censored kinds
+	 * together: window start to last sample.
+	 */
 	medianCensoredSpanHours: number | null;
 	/** Sorted, in hours; printed under the table below the raw-values limit. */
 	fillDurationsHours: number[];
@@ -1501,6 +1512,12 @@ export interface AbsorptionDeath {
 	dyingAccountId: string;
 	dyingAccountName: string;
 	survivorIds: string[];
+	/**
+	 * The display name of every account id this death's block prints: the
+	 * survivors, the excluded members and the account that set the availability
+	 * bound. An id with no account row is absent here and prints as itself.
+	 */
+	accountNames: Record<string, string>;
 	/** Class members that were exhausted or unknown just before the death. */
 	excludedMembers: AbsorptionExcludedMember[];
 	/** The nearest availability change of any class member; null when there is none. */
@@ -1865,6 +1882,9 @@ const absorptionIso = (ms: number): string => new Date(ms).toISOString();
 export function absorptionChecks(input: AbsorptionInput): AbsorptionChecks {
 	const index = indexBuckets(input.buckets);
 	const timelines = buildAvailabilityTimelines(input.series);
+	// Every account this section prints is printed by name: an id is a fallback
+	// for an account the roster no longer holds, not the normal rendering.
+	const nameOf = accountNameLookup(input.accounts);
 	const classOf = new Map<string, string>();
 	for (const account of input.accounts) {
 		classOf.set(account.accountId, servableClassFor(account.provider).classId);
@@ -1939,7 +1959,7 @@ export function absorptionChecks(input: AbsorptionInput): AbsorptionChecks {
 				detail:
 					excludedMembers.length > 0
 						? `every peer was ${excludedMembers
-								.map((entry) => `${entry.accountId} (${entry.state})`)
+								.map((entry) => `${nameOf(entry.accountId)} (${entry.state})`)
 								.join(", ")}`
 						: "the class held no other account",
 			});
@@ -1954,13 +1974,13 @@ export function absorptionChecks(input: AbsorptionInput): AbsorptionChecks {
 			// Already out of routing on its other window: this reading is not a
 			// departure from routing, so there is nothing for a peer to absorb.
 			exclude(event, "alreadyExhausted", {
-				detail: `${event.accountId} already read 100 % on a window before the death`,
+				detail: `${nameOf(event.accountId)} already read 100 % on a window before the death`,
 			});
 			continue;
 		}
 		if (dyingState === "unknown") {
 			exclude(event, "dyingStateUnknown", {
-				detail: `${event.accountId} had no reading inside the staleness bar before the death`,
+				detail: `${nameOf(event.accountId)} had no reading inside the staleness bar before the death`,
 			});
 			continue;
 		}
@@ -1992,7 +2012,11 @@ export function absorptionChecks(input: AbsorptionInput): AbsorptionChecks {
 		if (narrowHalfWidthMs < ABSORPTION_MIN_HALF_WIDTH_MS) {
 			exclude(event, "intervalTooShort", {
 				boundMs: availabilityBoundMs,
-				detail: `${availabilityBoundAccountId ?? "a class member"} changes availability ${Math.round(
+				detail: `${
+					availabilityBoundAccountId == null
+						? "a class member"
+						: nameOf(availabilityBoundAccountId)
+				} changes availability ${Math.round(
 					boundMs / MINUTE_MS,
 				)} min from the death`,
 			});
@@ -2069,7 +2093,7 @@ export function absorptionChecks(input: AbsorptionInput): AbsorptionChecks {
 					const state = availabilityAt(timelines.get(accountId), fromMs);
 					if (state !== "available") {
 						rejection = "availability-change-inside";
-						rejectionDetail = `${accountId} is ${state} at the start of the interval`;
+						rejectionDetail = `${nameOf(accountId)} is ${state} at the start of the interval`;
 					}
 				}
 				for (const accountId of [
@@ -2085,7 +2109,7 @@ export function absorptionChecks(input: AbsorptionInput): AbsorptionChecks {
 					);
 					if (changeAtMs != null) {
 						rejection = "availability-change-inside";
-						rejectionDetail = `${accountId} changes availability at ${absorptionIso(
+						rejectionDetail = `${nameOf(accountId)} changes availability at ${absorptionIso(
 							changeAtMs,
 						)}`;
 					}
@@ -2149,6 +2173,13 @@ export function absorptionChecks(input: AbsorptionInput): AbsorptionChecks {
 		// six-hour reading.
 		const wideCollapsed = wideHalfWidthMs <= narrowHalfWidthMs;
 
+		// The whole class, so the block can name a survivor, an excluded member
+		// and whichever member set the availability bound. Every member came out
+		// of `input.accounts`, so each of these is a real name.
+		const accountNames: Record<string, string> = {};
+		for (const accountId of members)
+			accountNames[accountId] = nameOf(accountId);
+
 		deaths.push({
 			eventId: event.id,
 			atMs: event.atMs,
@@ -2157,6 +2188,7 @@ export function absorptionChecks(input: AbsorptionInput): AbsorptionChecks {
 			dyingAccountId: event.accountId,
 			dyingAccountName: event.accountName,
 			survivorIds,
+			accountNames,
 			excludedMembers,
 			availabilityBoundMs,
 			availabilityBoundAccountId,
@@ -4821,7 +4853,7 @@ function slopeTrajectorySection(rows: readonly SlopeRatioRow[]): string[] {
 }
 
 const FILL_TABLE_HEADER =
-	"| exposure | window | fills | completed below 100 % | follow-up incomplete | fill fraction | median fill (h) | median observed span (h) | median unobserved head (min) | median resolution (min) | median censored span (h) |";
+	"| exposure | window | fills | completed below 100 % | follow-up incomplete | fill fraction | median fill (h) | median observed span (h) | median unobserved head (min) | median resolution (min) | median censored span, both kinds (h) |";
 const FILL_TABLE_ALIGN =
 	"|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|";
 
@@ -4878,7 +4910,7 @@ function absorptionSection(replay: ReplayResult): string[] {
 	);
 	out.push("");
 	out.push(
-		"`fills` counts the windows of a cell that reached 100 %, the two censored columns the ones whose last sample was still below it. `median fill` runs from the derived window start, `median observed span` from the first sample instead, and `median unobserved head` is the gap between those two origins, i.e. how much of the window had already elapsed when the sampler first saw it. `median resolution` is the gap between the crossing sample and the sample before it. `median censored span` is the one column taken over the censored windows: window start to last sample.",
+		"`fills` counts the windows of a cell that reached 100 %, the two censored columns the ones whose last sample was still below it. `median fill` runs from the derived window start, `median observed span` from the first sample instead, and `median unobserved head` is the gap between those two origins, i.e. how much of the window had already elapsed when the sampler first saw it. `median resolution` is the gap between the crossing sample and the sample before it. `median censored span, both kinds` is the one column taken over the censored windows, and it pools both censored kinds — completed below 100 % and follow-up incomplete — into one median: window start to last sample.",
 	);
 	out.push("");
 	out.push(FILL_TABLE_HEADER);
@@ -4915,7 +4947,7 @@ function absorptionSection(replay: ReplayResult): string[] {
 }
 
 const ABSORPTION_GROUP_HEADER =
-	"| population | basis | measurements | ratio n | median survivor rate ratio | alpha n | median alpha | gain-share n | median largest gain share | split n | median equal split 1/S | dying-share n | median dying pre-share |";
+	"| population | basis | measurements in population | ratio n | median survivor rate ratio | alpha n | median alpha | gain-share n | median largest gain share | split n | median equal split 1/S | dying-share n | median dying pre-share |";
 const ABSORPTION_GROUP_ALIGN =
 	"|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|";
 
@@ -4935,6 +4967,28 @@ const absorptionGroupLine = (row: AbsorptionGroupRow): string =>
 		`${row.dyingPreShare.n}`,
 		`${pct(row.dyingPreShare.median)} |`,
 	].join(" | ");
+
+/**
+ * Rates and volumes, per basis: a token count is a whole token, so printing it
+ * to three decimals states a precision the counter does not have. A request
+ * rate keeps its decimals, where a fraction of a request per minute is the
+ * whole quantity.
+ */
+const rateNum = (value: number | null, basis: AbsorptionBasis): string =>
+	num(value, basis === "tokens" ? 0 : 3);
+
+/**
+ * The pairing prints apart from the aggregate: its median is a difference of
+ * two ratios, and putting it in the `ratio n` / `median survivor rate ratio`
+ * columns would have those cells hold two different quantities.
+ */
+const ABSORPTION_PAIRED_HEADER = "| pairing | basis | n | median delta |";
+const ABSORPTION_PAIRED_ALIGN = "|---|---|---:|---:|";
+
+const absorptionPairedLine = (entry: AbsorptionPairedDelta): string =>
+	`| paired median of (ratio at death − mean ratio at eligible controls), ${
+		entry.horizon === "narrow" ? "W = 60 min" : "W = 6 h"
+	} | ${entry.basis} | ${entry.n} | ${num(entry.medianDelta)} |`;
 
 const ABSORPTION_DEATH_HEADER =
 	"| horizon | basis | W (min) | pre min | post min | pre vol (dying) | post vol (dying) | pre vol (surv) | post vol (surv) | dying pre-share | alpha | ratio | P | N | G | largest gain share | control -7 d | control +7 d |";
@@ -4973,9 +5027,9 @@ function absorptionHorizonRow(
 		pct(cell.dyingPreShare),
 		num(cell.alpha),
 		num(cell.survivorRateRatio),
-		num(cell.grossPositive),
-		num(cell.grossNegative),
-		num(cell.netChange),
+		rateNum(cell.grossPositive, basis),
+		rateNum(cell.grossNegative, basis),
+		rateNum(cell.netChange, basis),
 		pct(cell.largestGainShare),
 		absorptionControlCell(
 			horizon.controls.find((control) => control.label === "-7 d"),
@@ -4992,17 +5046,21 @@ function absorptionHorizonRow(
 function absorptionSurvivorLine(
 	horizon: AbsorptionHorizon,
 	accountId: string,
+	accountName: string,
 ): string {
 	const of = (basis: AbsorptionBasis): string => {
 		const entry = horizon.measurements[basis].survivors.find(
 			(survivor) => survivor.accountId === accountId,
 		);
 		if (entry == null) return `${basis} —`;
-		return `${basis} pre ${num(entry.preRate)}, post ${num(entry.postRate)}, delta ${num(
-			entry.delta,
-		)}, contribution ${num(entry.contribution)}, pre-share ${pct(entry.preShare)}`;
+		return `${basis} pre ${rateNum(entry.preRate, basis)}, post ${rateNum(
+			entry.postRate,
+			basis,
+		)}, delta ${rateNum(entry.delta, basis)}, contribution ${num(
+			entry.contribution,
+		)}, pre-share ${pct(entry.preShare)}`;
 	};
-	return `  - \`${accountId}\`: ${of("requests")}; ${of("tokens")}`;
+	return `  - \`${accountName}\`: ${of("requests")}; ${of("tokens")}`;
 }
 
 /**
@@ -5051,7 +5109,7 @@ function requestVolumeChangeSection(
 	);
 	out.push("");
 	out.push(
-		"Both bases are reported because request count and token volume answer different questions — the scenario redistributes capacity units, not requests — and where the two disagree, that disagreement is the finding rather than an error in one of them.",
+		"Both bases are reported because request count and token volume answer different questions — the scenario redistributes capacity units, not requests — and where the two disagree, both are printed, and neither is preferred here.",
 	);
 	out.push("");
 	out.push(
@@ -5059,7 +5117,7 @@ function requestVolumeChangeSection(
 	);
 	out.push("");
 	out.push(
-		"Deaths happen because the class is busy. A class-specific surge that both killed the peer and raised survivor traffic is not removable from observational data, and nothing here removes it.",
+		"A window fills because its account was busy, and often its class with it. A class-specific surge that both killed the peer and raised survivor traffic is not removable from observational data, and nothing here removes it.",
 	);
 	out.push("");
 
@@ -5108,7 +5166,7 @@ function requestVolumeChangeSection(
 	out.push("");
 
 	out.push(
-		`Matched controls sit at the same instant ±${ABSORPTION_CONTROL_OFFSET_MS / DAY_MS} d, so weekday and hour are both matched, and are measured over the IDENTICAL survivor set at the IDENTICAL half-width. A control is used only when its whole interval lies inside the loaded request span, every account of \`S\` and the dying account is available across the whole of it, and no member of the class changes availability state inside it. The workload here is not weekly-periodic, so a control's own interval can be a quiet stretch rather than a matched one; the per-death table prints each control's ratio beside the death's, and the pairing below is one row of the aggregate rather than a headline. Ineligible controls are counted rather than skipped: ${absorption.controlsIneligible["outside-loaded-span"]} outside the loaded span, ${absorption.controlsIneligible["availability-change-inside"]} with an availability change inside the interval.`,
+		`Matched controls sit at the same instant ±${ABSORPTION_CONTROL_OFFSET_MS / DAY_MS} d, so weekday and hour are both matched, and are measured over the IDENTICAL survivor set at the IDENTICAL half-width. A control is used only when its whole interval lies inside the loaded request span, every account of \`S\` and the dying account is available across the whole of it, and no member of the class changes availability state inside it. Whether the workload repeats at a one-week offset is what the control ratios show, and a control's own interval can be a quiet stretch rather than a matched one; the per-death table prints each control's ratio beside the death's so the reader can see which, and the pairing below is stated apart from the aggregate rather than as a headline. Ineligible controls are counted rather than skipped: ${absorption.controlsIneligible["outside-loaded-span"]} outside the loaded span, ${absorption.controlsIneligible["availability-change-inside"]} with an availability change inside the interval.`,
 	);
 	out.push("");
 	out.push(
@@ -5119,19 +5177,18 @@ function requestVolumeChangeSection(
 	out.push(ABSORPTION_GROUP_HEADER);
 	out.push(ABSORPTION_GROUP_ALIGN);
 	for (const row of absorption.groups) out.push(absorptionGroupLine(row));
-	for (const entry of absorption.paired) {
-		out.push(
-			`| paired median of (ratio at death − mean ratio at eligible controls), ${
-				entry.horizon === "narrow" ? "W = 60 min" : "W = 6 h"
-			} | ${entry.basis} | ${entry.n} | ${entry.n} | ${num(
-				entry.medianDelta,
-			)} | 0 | ${EM_DASH} | 0 | ${EM_DASH} | 0 | ${EM_DASH} | 0 | ${EM_DASH} |`,
-		);
-	}
 	out.push("");
 	out.push(
-		"Each statistic carries its own denominator: a row's `measurements` count is the population, and the `n` beside a median is the measurements where that statistic has a value. Where both control offsets are eligible their ratios are averaged before the difference is taken.",
+		"Each statistic carries its own denominator: a row's `measurements in population` count is every measurement of that population, and the `n` beside a median is the subset of them where that statistic has a value.",
 	);
+	out.push("");
+	out.push(
+		"The pairing is a difference of two ratios rather than a ratio, so it is printed in its own table rather than in the columns above. Its `n` is the deaths carrying a ratio at the death AND at an eligible control, and where both control offsets are eligible their ratios are averaged before the difference is taken.",
+	);
+	out.push("");
+	out.push(ABSORPTION_PAIRED_HEADER);
+	out.push(ABSORPTION_PAIRED_ALIGN);
+	for (const entry of absorption.paired) out.push(absorptionPairedLine(entry));
 	out.push("");
 
 	if (absorption.deaths.length === 0) {
@@ -5145,11 +5202,14 @@ function requestVolumeChangeSection(
 		);
 		out.push("");
 		for (const death of absorption.deaths) {
+			const nameOf = (accountId: string): string =>
+				death.accountNames[accountId] ?? accountId;
 			out.push(
 				`**Event ${death.eventId}** — ${iso(death.atMs)} — ${death.demandClass} / ${
 					death.windowKind ?? EM_DASH
 				} — dying \`${death.dyingAccountName}\` — S = ${
-					death.survivorIds.map((id) => `\`${id}\``).join(", ") || EM_DASH
+					death.survivorIds.map((id) => `\`${nameOf(id)}\``).join(", ") ||
+					EM_DASH
 				}`,
 			);
 			out.push("");
@@ -5170,20 +5230,24 @@ function requestVolumeChangeSection(
 					death.availabilityBoundMs == null
 						? "no class member changes state in the loaded history"
 						: `${num(death.availabilityBoundMs / MINUTE_MS, 0)} min, set by \`${
-								death.availabilityBoundAccountId ?? EM_DASH
+								death.availabilityBoundAccountId == null
+									? EM_DASH
+									: nameOf(death.availabilityBoundAccountId)
 							}\``
 				}.`,
 			);
 			out.push("- Survivors, at W = 60 min:");
 			for (const accountId of death.survivorIds) {
-				out.push(absorptionSurvivorLine(death.narrow, accountId));
+				out.push(
+					absorptionSurvivorLine(death.narrow, accountId, nameOf(accountId)),
+				);
 			}
 			out.push(
 				`- excluded members: ${
 					death.excludedMembers.length === 0
 						? "none"
 						: death.excludedMembers
-								.map((entry) => `${entry.accountId} (${entry.state})`)
+								.map((entry) => `${nameOf(entry.accountId)} (${entry.state})`)
 								.join(", ")
 				}`,
 			);

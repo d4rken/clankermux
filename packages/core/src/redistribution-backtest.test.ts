@@ -3748,6 +3748,32 @@ describe("tallyWindowFills", () => {
 		expect(tally.followUpIncomplete).toBe(1);
 	});
 
+	test("the censored span pools both censored kinds into one median", () => {
+		// One window observed to its reset, two cut short: spans of about 4.8 h,
+		// 1 h and 2 h from the same window start.
+		const censored = (lifecycleId: string, lastSampleMs: number) =>
+			windowFill({
+				lifecycleId,
+				firstHundredMs: null,
+				resolutionMs: null,
+				lastSampleMs,
+			});
+		const cell = rowOf(
+			tallyWindowFills([
+				censored("A::7", T0 + 5 * HOUR - SEGMENT_COVERAGE_SLACK_MS),
+				censored("A::8", T0 + HOUR),
+				censored("A::9", T0 + 2 * HOUR),
+			]),
+			"no peer lost in prefix",
+			"five_hour",
+		);
+		expect(cell.completedBelowHundred).toBe(1);
+		expect(cell.followUpIncomplete).toBe(2);
+		// The median of all three spans. Over the follow-up-incomplete ones alone
+		// it would be 1 h, over the completed one alone about 4.8 h.
+		expect(cell.medianCensoredSpanHours).toBe(2);
+	});
+
 	test("an empty cell carries counts and nulls rather than NaN", () => {
 		const tally = tallyWindowFills([]);
 		const cell = rowOf(tally, "peer lost in prefix", "seven_day");
@@ -3834,6 +3860,14 @@ describe("the absorption measurements section", () => {
 		expect(markdown).toContain("| follow-up incomplete |");
 		expect(markdown).toContain(
 			"`completed below 100 %` counts the windows whose sampling ran to within",
+		);
+	});
+
+	test("says the censored-span column covers both censored kinds", () => {
+		const { markdown } = absorptionReport();
+		expect(markdown).toContain("| median censored span, both kinds (h) |");
+		expect(markdown).toContain(
+			"it pools both censored kinds — completed below 100 % and follow-up incomplete — into one median",
 		);
 	});
 
@@ -5163,6 +5197,174 @@ describe("the request-volume report section", () => {
 		expect(markdown).toContain("contribution");
 		expect(markdown).toContain("excluded members: S2 (exhausted)");
 		expect(markdown).toContain("control -7 d");
+	});
+
+	/** UUID-style ids with names that share no substring with them. */
+	const namedAccounts = [
+		account("1135d045-dying", { name: "acct-dying" }),
+		account("2acdf5e9-surv", { name: "acct-survivor" }),
+		account("3bd0e7aa-gone", { name: "acct-excluded" }),
+	];
+
+	const namedChecks = (): AbsorptionChecks =>
+		absorptionChecks(
+			absorptionInput({
+				accounts: namedAccounts,
+				events: [
+					deathEvent({
+						accountId: "1135d045-dying",
+						accountName: "acct-dying",
+					}),
+				],
+				series: absSeries(
+					[
+						{
+							accountId: "1135d045-dying",
+							exhausted: [[ABS_D, ABS_D + 12 * HOUR]],
+						},
+						{ accountId: "2acdf5e9-surv" },
+						{ accountId: "3bd0e7aa-gone", exhausted: [[ABS_FROM, ABS_TO + 1]] },
+					],
+					namedAccounts,
+				),
+				buckets: [
+					...flatBuckets({
+						accountId: "1135d045-dying",
+						prePerMinute: 10,
+						postPerMinute: 0,
+					}),
+					...flatBuckets({
+						accountId: "2acdf5e9-surv",
+						prePerMinute: 5,
+						postPerMinute: 10,
+					}),
+					...flatBuckets({
+						accountId: "3bd0e7aa-gone",
+						prePerMinute: 5,
+						postPerMinute: 5,
+					}),
+				],
+			}),
+		);
+
+	test("prints every account of the block by name rather than by id", () => {
+		const checks = namedChecks();
+		expect(checks.deaths).toHaveLength(1);
+		const section = subsection(reportWith(checks));
+		expect(section).toContain("S = `acct-survivor`");
+		expect(section).toContain("- `acct-survivor`: requests pre");
+		expect(section).toContain("excluded members: acct-excluded (exhausted)");
+		expect(section).toContain("set by `acct-dying`");
+		for (const accountId of namedAccounts.map((entry) => entry.accountId)) {
+			expect(section).not.toContain(accountId);
+		}
+	});
+
+	test("names the peers of a death that had no survivor at all", () => {
+		const accounts = [
+			account("1135d045-dying", { name: "acct-dying" }),
+			account("2acdf5e9-surv", { name: "acct-survivor" }),
+		];
+		const checks = absorptionChecks(
+			absorptionInput({
+				accounts,
+				events: [
+					deathEvent({
+						accountId: "1135d045-dying",
+						accountName: "acct-dying",
+					}),
+				],
+				series: absSeries(
+					[
+						{
+							accountId: "1135d045-dying",
+							exhausted: [[ABS_D, ABS_D + 12 * HOUR]],
+						},
+						{ accountId: "2acdf5e9-surv", exhausted: [[ABS_FROM, ABS_TO + 1]] },
+					],
+					accounts,
+				),
+				buckets: controlBuckets(),
+			}),
+		);
+		expect(checks.excluded.noSurvivors).toBe(1);
+		const section = subsection(reportWith(checks));
+		expect(section).toContain("every peer was acct-survivor (exhausted)");
+		expect(section).not.toContain("2acdf5e9-surv");
+	});
+
+	test("prints token rates as whole tokens and request rates to three decimals", () => {
+		const section = subsection(reportWith(namedChecks()));
+		const survivorLine = section
+			.split("\n")
+			.find((line) => line.includes("`acct-survivor`: requests"));
+		expect(survivorLine).toBeDefined();
+		expect(survivorLine).toMatch(
+			/requests pre -?\d+\.\d{3}, post -?\d+\.\d{3}, delta -?\d+\.\d{3}, contribution/,
+		);
+		expect(survivorLine).toMatch(
+			/tokens pre -?\d+, post -?\d+, delta -?\d+, contribution/,
+		);
+
+		// P, N and G on the tokens row are rate sums, and print as whole tokens.
+		const tokenRow = section
+			.split("\n")
+			.find((line) => line.startsWith("| 60 min | tokens |"));
+		expect(tokenRow).toBeDefined();
+		const cells = (tokenRow ?? "").split("|").map((cell) => cell.trim());
+		for (const index of [13, 14, 15]) {
+			expect(cells[index]).toMatch(/^-?\d+$/);
+		}
+		const requestRow = section
+			.split("\n")
+			.find((line) => line.startsWith("| 60 min | requests |"));
+		const requestCells = (requestRow ?? "").split("|").map((c) => c.trim());
+		for (const index of [13, 14, 15]) {
+			expect(requestCells[index]).toMatch(/^-?\d+\.\d{3}$/);
+		}
+	});
+
+	test("prints both bases without preferring either", () => {
+		const section = subsection(reportWith(measured()));
+		expect(section).toContain(
+			"where the two disagree, both are printed, and neither is preferred here",
+		);
+		expect(section).not.toContain("that disagreement is the finding");
+	});
+
+	test("attributes a fill to the account's own demand, not to the class", () => {
+		const section = subsection(reportWith(measured()));
+		expect(section).toContain(
+			"A window fills because its account was busy, and often its class with it.",
+		);
+		expect(section).not.toContain("Deaths happen because the class is busy");
+		expect(section).toContain("not removable from observational data");
+	});
+
+	test("states what the matched control tests rather than a conclusion", () => {
+		const section = subsection(reportWith(measured()));
+		expect(section).toContain(
+			"Whether the workload repeats at a one-week offset is what the control ratios show",
+		);
+		expect(section).not.toContain("not weekly-periodic");
+		expect(section).toContain("so the reader can see which");
+	});
+
+	test("keeps the pairing out of the aggregate's ratio columns", () => {
+		const section = subsection(reportWith(measured()));
+		expect(section).toContain("| measurements in population |");
+		const aggregate = section.indexOf("| population | basis |");
+		const pairing = section.indexOf("| pairing | basis | n | median delta |");
+		const pairedRow = section.indexOf(
+			"| paired median of (ratio at death − mean ratio at eligible controls)",
+		);
+		expect(aggregate).toBeGreaterThan(-1);
+		expect(pairing).toBeGreaterThan(aggregate);
+		expect(pairedRow).toBeGreaterThan(pairing);
+		// Four cells, so no ratio column is reused for the difference.
+		const row = section.slice(pairedRow, section.indexOf("\n", pairedRow));
+		expect(row.split("|").filter((cell) => cell.trim() !== "")).toHaveLength(4);
+		expect(section).toContain("difference of two ratios rather than a ratio");
 	});
 
 	test("names the token-coverage and timing limits", () => {
