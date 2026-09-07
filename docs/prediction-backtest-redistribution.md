@@ -1,6 +1,6 @@
 # ClankerMux runway redistribution backtest
 
-Generated: 2026-09-07T13:45:31.672Z
+Generated: 2026-09-07T14:24:12.462Z
 
 Reproduce with:
 
@@ -20,11 +20,11 @@ bun scripts/redistribution-backtest.ts --db=/home/darken/.config/clankermux/clan
 
 | field | value |
 |---|---|
-| usage_snapshots rows | 195857 |
+| usage_snapshots rows | 195989 |
 | accounts | 7 |
 | providers | anthropic, codex |
 | first sample | 2026-06-02T12:48:00.294Z |
-| last sample | 2026-09-07T13:43:46.625Z |
+| last sample | 2026-09-07T14:21:46.914Z |
 | replay interval | `[2026-07-01T00:00:00.000Z, 2026-09-06T00:00:00.000Z)` |
 | grid instants | 9648 |
 
@@ -2496,7 +2496,7 @@ The `combined` rows put five-hour and weekly windows in one median. A combined d
 | no peer lost in prefix | five_hour | 30 | 804 | 13 | 3.5% | 3.31 | 3.21 | 2.7 | 2.0 | 4.98 |
 | no peer lost in prefix | seven_day | 6 | 46 | 11 | 9.5% | 89.01 | 86.68 | 2.1 | 2.0 | 89.09 |
 | no peer lost in prefix | combined | 36 | 850 | 24 | 4.0% | 3.45 | 3.34 | 2.7 | 2.0 | 4.99 |
-| exposure unobservable | combined | 4 | 118 | 23 | 2.8% | 4.59 | 4.57 | 1.6 | 2.0 | 4.99 |
+| exposure unobservable | combined | 4 | 120 | 23 | 2.7% | 4.59 | 4.57 | 1.6 | 2.0 | 4.99 |
 
 The same rows again, split instead by whether a same-class peer died anywhere between the window start and the crossing. That definition is length-biased in the direction of longer fills, because a longer fill has more calendar time in which to contain a peer death, and that is why the fixed-prefix split above is the primary one. Both are printed; neither was chosen on its result. This split reads a different span from the prefix one, so it carries its own observability row: a window whose span from its start to its crossing (or to its last sample, uncrossed) leaves the replayed range is `during-fill exposure unobservable` here, whatever the prefix split could say about it.
 
@@ -2508,7 +2508,7 @@ The same rows again, split instead by whether a same-class peer died anywhere be
 | no peer lost during fill | five_hour | 24 | 746 | 13 | 3.1% | 3.19 | 3.15 | 2.5 | 2.0 | 4.98 |
 | no peer lost during fill | seven_day | 2 | 31 | 10 | 4.7% | 71.29 | 71.28 | 0.8 | 2.0 | 51.39 |
 | no peer lost during fill | combined | 26 | 777 | 23 | 3.1% | 3.20 | 3.17 | 2.4 | 2.0 | 4.98 |
-| during-fill exposure unobservable | combined | 4 | 125 | 25 | 2.6% | 4.59 | 4.57 | 1.6 | 2.0 | 4.99 |
+| during-fill exposure unobservable | combined | 4 | 127 | 25 | 2.6% | 4.59 | 4.57 | 1.6 | 2.0 | 4.99 |
 
 Every cell with fewer than 20 fills prints its fill durations, sorted, in hours. At that n the median summarises few observed fills, and the values themselves are what a reader can judge.
 
@@ -2522,7 +2522,7 @@ Every cell with fewer than 20 fills prints its fill durations, sorted, in hours.
 - `no peer lost during fill` seven_day (2 fills): 71.29, 89.01 h
 - `during-fill exposure unobservable` combined (4 fills): 2.69, 4.59, 87.03, 126.32 h
 
-Reconciliation: 51 filled + 985 completed below 100 % + 48 follow-up incomplete + 182 with no reset on the segment + 1 already full at the first sample + 19717 placeholder lifecycles skipped = 20984 window lifecycles.
+Reconciliation: 51 filled + 987 completed below 100 % + 48 follow-up incomplete + 182 with no reset on the segment + 1 already full at the first sample + 19718 placeholder lifecycles skipped = 20987 window lifecycles.
 
 ### Request-volume changes around observed exhaustion
 
@@ -4363,16 +4363,19 @@ What step 4 does with this:
 
 ## Share-rule candidate
 
-`scenario-proportional` is a DECLARED CANDIDATE: each alive account's share of its class's demand for a window kind is its own measured demand for that kind over the class's measured demand for that kind. It was declared before it was scored and has no fitted coefficient, so no number in this report enters the rule. It is not the verdict basis: the verdict above is computed on `scenario-equal` alone and is the same with or without this section.
+`scenario-proportional` is a DECLARED CANDIDATE. The quantity it conserves is the CLASS demand for a window kind; each alive account's share of it is that account's own measured demand for the kind over the ALIVE accounts' measured demand for it. The denominator is the survivors, not the class: with burns of 80, 20 and 10 and the 80 dead, the two survivors take two thirds and one third of the whole class demand, not 20/110 and 10/110 of it. It was declared before it was scored and has no fitted coefficient, so no number in this report enters the rule. It is not the verdict basis: the verdict above is computed on `scenario-equal` alone and is the same with or without this section.
 
-This section applies the four criteria of the verdict rule above to the candidate, computed by the same functions, on the same lifecycle-balanced cohorts, against the same comparison models. The table states, per criterion, the statistic it turns on for the candidate, for the verdict basis and for the current model, and whether the criterion holds FOR THE CANDIDATE. The full value list of each criterion follows it. Criterion A's paired median is taken over the records the pair being compared both dated, so the candidate's column and the basis's column are medians over their own populations; each column's `paired n` is in the value list below. A criterion whose statistic is a delta against the current model has no current column.
+This section applies the four criteria of the verdict rule above to the candidate, computed by the same functions, on the same lifecycle-balanced cohorts, against the same comparison models. The table states, per criterion and statistic, the number it turns on for the candidate, for the verdict basis, for the current model and for the pre-correction scan, and whether the criterion holds FOR THE CANDIDATE. A criterion that turns on two statistics — D, which reads an F1 and an error change — has a row for each, both carrying that criterion's single result. The full value list of each criterion follows it. Criterion A's paired median is taken over the records the pair being compared both dated, so the candidate's column and the basis's column are medians over their own populations; each column's `paired n` is in the value list below. A model column is empty where the statistic is already a delta against that model.
 
-| criterion | statistic | candidate | scenario-equal | current | candidate result |
-|---|---|---:|---:|---:|---|
-| A. not more optimistic on transitions | paired median signed error (min) | -11.930 | 14.106 | -0.435 | PASS |
-| B. better at transitions | F1 on transitions | 0.533 | 0.568 | 0.474 | PASS |
-| C. no significant overall loss | overall F1 delta against current, p97.5 | 0.091 | 0.145 | — | PASS |
-| D. not worse than the original scenario | paired median absolute-error change against the pre-correction scan (min) | -0.916 | 0.000 | — | FAIL |
+| criterion | statistic | candidate | scenario-equal | current | scenario-equal-original | candidate result |
+|---|---|---:|---:|---:|---:|---|
+| A. not more optimistic on transitions | paired median signed error (min) | -11.930 | 14.106 | -0.435 | — | PASS |
+| B. better at transitions | F1 on transitions | 0.533 | 0.568 | 0.474 | — | PASS |
+| C. no significant overall loss | overall F1 delta against current, p97.5 | 0.091 | 0.145 | — | — | PASS |
+| D. not worse than the original scenario | F1 on transitions | 0.533 | 0.568 | 0.474 | 0.568 | FAIL |
+| D. not worse than the original scenario | paired median absolute-error change against the pre-correction scan (min) | -0.916 | 0.000 | — | — | FAIL |
+
+D compares against the fixed uncorrected-equal benchmark; a fail on F1 there does not isolate the candidate's lag correction, which would need an uncorrected proportional scan.
 
 **A. not more optimistic on transitions: PASS**
 
@@ -4413,9 +4416,9 @@ This section applies the four criteria of the verdict rule above to the candidat
 
 ### Identity with the current model on the first assignment
 
-The identity the rule is constructed to have: while every account whose measured burn is in the class demand is still alive, the demand handed back to an account is the burn it contributed, so it burns at its own measured slope and the candidate's projection IS the current model's. The population is the records whose window the candidate's own scan projects entirely on its first assignment — no class window already at 100 % at the instant, no other projected class exhaustion between the instant and this window's own, and no class window filled inside its own observation lag — and where both the candidate and the current model committed to a date. Below the tolerance an ETA is the same instant; the column is a count, not a claim about the rest of the replay.
+The identity the rule is constructed to have: while every account whose measured burn is in the class demand is alive AND in the assignment, the demand handed back to an account is the burn it contributed, so it burns at its own measured slope and the candidate's projection IS the current model's. The population is the records whose window the candidate's own scan projects entirely on its first assignment — no class window already at 100 % at the instant, no account whose burn joined the class demand withheld from the pool that demand is split over, no class exhaustion of ANY cycle between the instant and this window's own, and no class window filled inside its own observation lag — and where both the candidate and the current model committed to a date. The withheld and later-cycle conditions are the two the scan's first-cycle projection list cannot state on its own: one redistributes demand with nothing having died, the other is a death after a reset. Below the tolerance an ETA is the same instant; the column is a count, not a claim about the rest of the replay.
 
-n=5068 eligible records, 5008 of which the candidate dated within 1 ms of the current model (98.8%).
+n=5007 eligible records, 5007 of which the candidate dated within 1 ms of the current model (100.0%).
 
 ## Known limits
 
@@ -4423,7 +4426,7 @@ n=5068 eligible records, 5008 of which the candidate dated within 1 ms of the cu
 - Snapshots before 2026-08-24 carry no `plan_tier`/`rate_limit_tier` and no `observed_at`. Tiers there are today's, marked `assumed`; without an observation instant the weekly full-confidence path is unavailable to BOTH models, so the two are still compared like for like.
 - No reset-credit bank is modelled, and no live usage point is injected — the replay only has what the sampler stored.
 - The headroom share rule is reported, never used as the verdict basis. The verdict basis is the equal split, pre-declared.
-- The declared candidate share rule weights each account by its OWN measured demand, and that demand is the same fitted slope the current model projects from. A window still learning has no slope, so it carries no weight of its own and takes demand only through the rule's equal-split fallback; where a class's live accounts are all learning for a kind, the candidate IS the equal split for that kind.
+- The declared candidate share rule weights each account by its OWN measured demand, and that demand is the same fitted slope the current model projects from. A window still learning has no accepted measured-demand contribution — the preparation withholds it whatever its fitted slope says — so it carries no weight of its own and takes demand only through the rule's equal-split fallback; where a class's live accounts are all learning for a kind, the candidate IS the equal split for that kind.
 - IF a survivor's own lookback already contains the traffic it absorbed, the scenario would be adding that demand a second time. Whether it does is a hypothesis this replay reports on (the peer-exhaustion cohort and the survivor slope table) rather than a property these measurements establish; nothing here corrects for it.
 - The observation-lag advance never rewinds the scan clock below the instant being replayed: a window that fills inside its lag dies AT that instant, though the projection it records carries the true, earlier one. Any redistribution such a death causes therefore starts at the instant, not at the fill.
 - A reading whose row carries no `observed_at` and whose estimator is the now-anchored lifetime average has no derivable lag and is advanced by nothing. That is a real absence, not a measured zero, and the mechanism section reports those records under `unknown` rather than folding them into the fresh bucket.
@@ -4434,11 +4437,11 @@ n=5068 eligible records, 5008 of which the candidate dated within 1 ms of the cu
 - A regression fit that states no ETA — a flat or falling six-hour fit, which an idle account inside a live window produces — has no recoverable anchor either: the fit's anchor is back-solved from the ETA. Such a window is scheduled from the replayed instant in BOTH scans, which is pre-existing behaviour and not something the correction introduced, and the lag-population table counts those records apart from the lags it medians.
 - Pending at this run (tag and servable class): peer-exhaustion (codex), add (codex), upgrade (codex). Those pairs hold no usable, uncensored weekly record common to all models, and each carries at least one tagged weekly window still pending at the label horizon, so their weekly half is unlabelled and the verdict is provisional.
 - Positive counts (all records, per model) — current: 3686 actual positives of 25200 scored; scenario-equal: 5826 actual positives of 42295 scored; scenario-equal-original: 5826 actual positives of 42295 scored; scenario-headroom: 5826 actual positives of 42295 scored; scenario-proportional: 5826 actual positives of 42295 scored.
-- `total_tokens` is null or zero on 8945 of 620029 attributed `requests` rows in the loaded span (1.4 %); those contribute zero to the absorption measurement's token basis.
+- `total_tokens` is null or zero on 8956 of 621015 attributed `requests` rows in the loaded span (1.4 %); those contribute zero to the absorption measurement's token basis.
 
 ## Notes
 
 - Placeholder windows skipped: 233.
-- Replay took 27.8 s over 9648 instants; scoring and bootstrap 5.1 s.
+- Replay took 29.2 s over 9648 instants; scoring and bootstrap 5.3 s.
 - Grid step 10 min; rows loaded 8 days either side of the replay interval.
-- Request buckets loaded: 64213 minute buckets over 7 accounts, on a 60-second grid, spanning 2026-06-23T09:31:00.000Z to 2026-09-07T13:45:00.000Z.
+- Request buckets loaded: 64331 minute buckets over 7 accounts, on a 60-second grid, spanning 2026-06-23T09:31:00.000Z to 2026-09-07T14:24:00.000Z.
