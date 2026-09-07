@@ -59,6 +59,7 @@ export interface AccountPerformanceCostSummary {
 }
 
 interface AccountPerformanceSectionProps {
+	view?: "combined" | "costs" | "performance";
 	accountPerformance: AccountPerformanceRow[];
 	loading: boolean;
 	/**
@@ -82,6 +83,7 @@ interface AccountPerformanceSectionProps {
  * payments summary are supplied by the parent.
  */
 export function AccountPerformanceSection({
+	view = "combined",
 	accountPerformance,
 	loading,
 	unavailable = false,
@@ -149,117 +151,129 @@ export function AccountPerformanceSection({
 			<CardHeader>
 				<div className="flex items-center justify-between gap-group">
 					<div>
-						<CardTitle>Account Performance</CardTitle>
+						<CardTitle>
+							{view === "costs"
+								? "Costs and plan value"
+								: "Account Performance"}
+						</CardTitle>
 						<CardDescription>
-							Request distribution, success rates, and cost by account
+							{view === "costs"
+								? "Spend and equivalent API value in the selected period."
+								: "Request distribution and success rates by account."}
 						</CardDescription>
 					</div>
 					<TimeRangeSelector value={range} onChange={onRangeChange} />
 				</div>
 			</CardHeader>
 			<CardContent>
+				{view === "costs" && unavailable && (
+					<p className="text-warning-strong">Cost data unavailable</p>
+				)}
 				{/* Range-scoped Plan Value / Cost / Value Ratio headlines (formerly
 				    standalone tiles). The averages below Plan Value are fixed 7d/30d
 				    windows and stay put when the range above changes; the amortized
 				    rows under Cost are likewise range-independent run rates. */}
-				<div className="mb-group grid grid-cols-2 md:grid-cols-3 gap-group border-b pb-group">
-					{/* Every figure in this card is a range AGGREGATE — hundreds to
+				{view !== "performance" && (
+					<div className="mb-group grid grid-cols-2 md:grid-cols-3 gap-group border-b pb-group">
+						{/* Every figure in this card is a range AGGREGATE — hundreds to
 					    tens of thousands of dollars — so they all take the money
 					    formatter: two decimals, grouped. `formatCost`'s four decimals
 					    exist for per-request token costs, where a sub-cent difference is
 					    real; here they only produced "$16378.2839" sitting beside a
 					    "$600.00" that came from the other formatter. */}
-					<div>
-						<p className="text-sm text-muted-foreground">Plan Value</p>
-						<p className="figure-xl">
-							{costSummary.planCostUsd != null
-								? formatUsd(costSummary.planCostUsd)
-								: "—"}
-						</p>
-						<div className="mt-item space-y-tight text-xs">
-							{planAvgRows.map((row) => (
-								<div
-									key={row.label}
-									className="flex items-baseline justify-between"
-								>
-									<span className="text-muted-foreground" title={row.title}>
-										{row.label}
-									</span>
-									<span className="font-medium tabular-nums">
-										{row.value != null ? formatUsd(row.value) : "—"}
-									</span>
-								</div>
-							))}
+						<div>
+							<p className="text-sm text-muted-foreground">Plan Value</p>
+							<p className="figure-xl">
+								{costSummary.planCostUsd != null
+									? formatUsd(costSummary.planCostUsd)
+									: "—"}
+							</p>
+							<div className="mt-item space-y-tight text-xs">
+								{planAvgRows.map((row) => (
+									<div
+										key={row.label}
+										className="flex items-baseline justify-between"
+									>
+										<span className="text-muted-foreground" title={row.title}>
+											{row.label}
+										</span>
+										<span className="font-medium tabular-nums">
+											{row.value != null ? formatUsd(row.value) : "—"}
+										</span>
+									</div>
+								))}
+							</div>
+						</div>
+						<div>
+							<p className="text-sm text-muted-foreground">Cost</p>
+							<p
+								className="figure-xl"
+								title="Ledger payments (subscriptions + credits) plus token-billed cost in the selected range"
+							>
+								{paymentsSummary
+									? formatUsd(paymentsSummary.range.totalUsd)
+									: "—"}
+							</p>
+							<div className="mt-item space-y-tight text-xs">
+								{costAmortizedRows.map((row) => (
+									<div
+										key={row.label}
+										className="flex items-baseline justify-between"
+									>
+										<span className="text-muted-foreground" title={row.title}>
+											{row.label}
+										</span>
+										<span className="font-medium tabular-nums">
+											{row.value != null ? formatUsd(row.value) : "—"}
+										</span>
+									</div>
+								))}
+							</div>
+						</div>
+						<div>
+							<p className="text-sm text-muted-foreground">Value Ratio</p>
+							<p className="figure-xl">
+								{formatValueRatio(paymentsSummary?.range.valueRatio)}
+							</p>
+							<p className="mt-item text-xs text-muted-foreground">
+								plan value ÷ amortized spend
+							</p>
 						</div>
 					</div>
-					<div>
-						<p className="text-sm text-muted-foreground">Cost</p>
-						<p
-							className="figure-xl"
-							title="Ledger payments (subscriptions + credits) plus token-billed cost in the selected range"
-						>
-							{paymentsSummary
-								? formatUsd(paymentsSummary.range.totalUsd)
-								: "—"}
-						</p>
-						<div className="mt-item space-y-tight text-xs">
-							{costAmortizedRows.map((row) => (
-								<div
-									key={row.label}
-									className="flex items-baseline justify-between"
-								>
-									<span className="text-muted-foreground" title={row.title}>
-										{row.label}
-									</span>
-									<span className="font-medium tabular-nums">
-										{row.value != null ? formatUsd(row.value) : "—"}
-									</span>
-								</div>
-							))}
-						</div>
-					</div>
-					<div>
-						<p className="text-sm text-muted-foreground">Value Ratio</p>
-						<p className="figure-xl">
-							{formatValueRatio(paymentsSummary?.range.valueRatio)}
-						</p>
-						<p className="mt-item text-xs text-muted-foreground">
-							plan value ÷ amortized spend
-						</p>
-					</div>
-				</div>
-				{unavailable ? (
-					<div className="flex h-48 items-center justify-center gap-item text-xs text-warning-strong">
-						<AlertCircle className="h-3.5 w-3.5 shrink-0" />
-						Account performance data unavailable
-					</div>
-				) : (
-					<BaseBarChart
-						data={accountPerformance as unknown as ChartDataPoint[]}
-						bars={[
-							{ dataKey: "requests", yAxisId: "left", name: "Requests" },
-							{
-								dataKey: "successRate",
-								yAxisId: "right",
-								fill: CHART_TOKENS.success,
-								name: "Success %",
-							},
-						]}
-						xAxisKey="name"
-						loading={loading}
-						height="small"
-						secondaryYAxis={true}
-						showLegend={true}
-					/>
 				)}
-				{!analyticsResolved && !unavailable && (
+				{view !== "costs" &&
+					(unavailable ? (
+						<div className="flex h-48 items-center justify-center gap-item text-xs text-warning-strong">
+							<AlertCircle className="h-3.5 w-3.5 shrink-0" />
+							Account performance data unavailable
+						</div>
+					) : (
+						<BaseBarChart
+							data={accountPerformance as unknown as ChartDataPoint[]}
+							bars={[
+								{ dataKey: "requests", yAxisId: "left", name: "Requests" },
+								{
+									dataKey: "successRate",
+									yAxisId: "right",
+									fill: CHART_TOKENS.success,
+									name: "Success %",
+								},
+							]}
+							xAxisKey="name"
+							loading={loading}
+							height="small"
+							secondaryYAxis={true}
+							showLegend={true}
+						/>
+					))}
+				{!analyticsResolved && !unavailable && view !== "performance" && (
 					<div className="mt-group space-y-item">
 						{[0, 1, 2].map((index) => (
 							<Skeleton key={index} className="h-8 w-full" />
 						))}
 					</div>
 				)}
-				{analyticsResolved && (
+				{view !== "performance" && analyticsResolved && (
 					<TableFrame className="mt-group">
 						{/* The `scope="row"` in the footer is what keeps the totals label
 						    out of `.label-caps`: TableHead derives its type treatment
