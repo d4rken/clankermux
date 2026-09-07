@@ -6459,12 +6459,15 @@ function basisCriterionDNote(criterion: VerdictCriterion): string {
 			: basisF1 >= controlF1
 				? `Its F1 leg holds, at ${num(basisF1)} against the control's ${num(controlF1)} on the lifecycle-balanced any-transition cohort.`
 				: `Its F1 leg is the one that FAILED this run: ${num(basisF1)} against the control's ${num(controlF1)} on the lifecycle-balanced any-transition cohort, short by ${num(controlF1 - basisF1)}.`;
+	// "too" only when the F1 leg failed as well; an error-only failure must not
+	// read as a second failure beside a leg that held.
+	const f1Failed = basisF1 != null && controlF1 != null && basisF1 < controlF1;
 	const errorLeg =
 		absChange == null
 			? "Its error leg has no number this run, so it decides nothing."
 			: absChange <= 0
 				? `Its error leg holds, at ${num(absChange)} min of paired median absolute-error change over the ${num(pairedN, 0)} records both scans dated.`
-				: `Its error leg FAILED too: the correction landed ${num(absChange)} min further from the truth in paired median absolute error, over the ${num(pairedN, 0)} records both scans dated.`;
+				: `Its error leg FAILED${f1Failed ? " too" : ""}: the correction landed ${num(absChange)} min further from the truth in paired median absolute error, over the ${num(pairedN, 0)} records both scans dated.`;
 
 	return `D compares \`${VERDICT_BASIS_MODEL}\` with its OWN lag-uncorrected scan, \`${VERDICT_BASIS_CONTROL_MODEL}\` — the same share rule with the observation-lag advance switched off — and with nothing else: it does not compare the proportional rule with the equal split, and no number in it is a statement about \`${PRIOR_BASIS_MODEL}\`. ${f1Leg} ${errorLeg}`;
 }

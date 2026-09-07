@@ -2214,10 +2214,15 @@ describe("the share rules beside the basis", () => {
 			pairedAbsVsOriginal: 4,
 		});
 		expect(byError).toContain("Its F1 leg holds");
-		expect(byError).toContain(
-			"Its error leg FAILED too: the correction landed",
-		);
+		// "too" would claim a second failure beside a leg that held.
+		expect(byError).toContain("Its error leg FAILED: the correction landed");
+		expect(byError).not.toContain("FAILED too");
 		expect(byError).toContain("4.000 min further from the truth");
+
+		// Both legs failing is the one case that reads as "too".
+		const byBoth = sectionFor({ ...VERDICT_BASE, pairedAbsVsOriginal: 4 });
+		expect(byBoth).toContain("Its F1 leg is the one that FAILED this run");
+		expect(byBoth).toContain("Its error leg FAILED too: the correction landed");
 
 		// The rule itself stays free of every number this run produced.
 		expect(VERDICT_RULE).not.toMatch(/0\.\d/);
