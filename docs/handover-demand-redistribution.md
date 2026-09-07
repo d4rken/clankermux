@@ -149,12 +149,15 @@ share rule has to be declared before it is scored, scored against criteria A to
 D on the same backtest, and must not read its coefficients off these tables.
 
 **A candidate share rule is declared and scored (this branch):
-`scenario-proportional`.** Each alive account's share of its class's demand for
-a window kind is its own measured demand for that kind over the class's
-measured demand for that kind. It exists because the equal split discards an
-account's own burn from the FIRST instant: with five alive accounts, the
-account carrying 70 % of its class's traffic is assigned 20 % of the demand at
-`now`, before any account has died. The absorption section above measures the
+`scenario-proportional`.** The quantity it conserves is the class's demand for
+a window kind; each alive account's share of it is that account's own measured
+demand for the kind over the ALIVE accounts' measured demand for it. The
+denominator is the survivors rather than the class, so with burns of 80, 20 and
+10 and the 80 dead, the survivors take two thirds and one third of the whole
+class demand, not 20/110 and 10/110 of it. It exists because the equal split
+discards an account's own burn from the FIRST instant: with five alive
+accounts, the account carrying 70 % of its class's traffic is assigned 20 % of
+the demand at `now`, before any account has died. The absorption section above measures the
 dying account's median pre-death share of its class at 67 % on requests and
 73.8 % on tokens, so who was carrying the traffic is not close to uniform. The
 rule has no coefficient and reads nothing off these tables: before any death it

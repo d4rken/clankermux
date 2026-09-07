@@ -230,6 +230,15 @@ export interface RunwayScenarioExhaustion {
 }
 
 /**
+ * The earliest instant strictly after `now` at which a scenario scan drove ANY
+ * window of one demand class to 100 %.
+ */
+export interface RunwayScenarioClassExhaustion {
+	demandClass: string;
+	atMs: number;
+}
+
+/**
  * What a demand-conserving scenario ASSUMED to reach its outcome: the measured
  * class demand it redistributed, the tier weights it redistributed by, and
  * every account the assumptions moved into or out of the pool.
@@ -265,6 +274,23 @@ export interface RunwayScenarioBasis {
 	 * `eventBudgetExhausted: "projection"`.
 	 */
 	projectedExhaustions: RunwayScenarioExhaustion[];
+	/**
+	 * Per demand class, the earliest instant strictly after `now` at which the
+	 * pace-1 baseline scan drove ANY window of that class to 100 % — in ANY
+	 * projected cycle, including the later ones {@link projectedExhaustions}
+	 * excludes by construction, and including a window that had already reset
+	 * once. A class with no such exhaustion has no entry; `[]` when no baseline
+	 * scan completed. Sorted by `demandClass`.
+	 *
+	 * BACKTEST-FACING. It answers one question the projection list cannot: did
+	 * the class re-split at all between `now` and some later instant. A window
+	 * that dies in its second cycle changes every survivor's slope exactly as a
+	 * first-cycle death does, and `redistribution-backtest.ts` needs that to
+	 * state the population its share-rule identity check is defined on. Nothing
+	 * a user sees reads it, and it is NOT a projection: an entry says a death
+	 * happened somewhere in the class, never which window it was.
+	 */
+	firstExhaustionAfterNowByClass: RunwayScenarioClassExhaustion[];
 	/**
 	 * Present only when a scan ran out of its event budget. `"baseline"`: the
 	 * pace-1 scan itself, so the outcome is `unknown`. `"probe"`: the baseline

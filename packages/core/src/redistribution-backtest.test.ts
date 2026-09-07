@@ -1648,6 +1648,25 @@ describe("knownLimitsFor", () => {
 			limits.some((limit) => limit.includes("of the overall common-cohort")),
 		).toBe(false);
 	});
+
+	test("states what a learning window withholds, not what it lacks", () => {
+		// A learning window can carry a positive fitted slope; what the scenario
+		// does with it is refuse the contribution, and that is the policy to
+		// state.
+		const { cohorts, replay } = verdictFixture(VERDICT_BASE);
+		const limits = knownLimitsFor(
+			replay,
+			cohorts,
+			evaluateVerdict(cohorts, replay),
+		);
+		const candidateLimit = limits.find((limit) =>
+			limit.startsWith("The declared candidate share rule"),
+		);
+		expect(candidateLimit).toContain(
+			"has no accepted measured-demand contribution",
+		);
+		expect(candidateLimit).not.toContain("has no slope");
+	});
 });
 
 /** One report, from parts the caller controls. */
@@ -1990,6 +2009,48 @@ describe("the share-rule candidate section", () => {
 		expect(markdown).not.toContain("NaN");
 	});
 
+	test("D's rows print the F1 it fails on, beside the benchmark it is judged against", () => {
+		const { markdown, candidate } = candidateFixture();
+		const section = sectionOf(markdown);
+		expect(section).toContain(
+			"| criterion | statistic | candidate | scenario-equal | current | scenario-equal-original | candidate result |",
+		);
+
+		// D turns on two statistics, so it has a row for each: the error change it
+		// passed on, and the F1 comparison that decides it against the fixed
+		// benchmark.
+		const dRows = candidate.rows.filter((row) => row.id === "D");
+		expect(dRows.map((row) => row.statistic)).toEqual([
+			"F1 on transitions",
+			"paired median absolute-error change against the pre-correction scan (min)",
+		]);
+		expect(dRows[0].original).not.toBeNull();
+		expect(dRows[1].original).toBeNull();
+		expect(dRows[0].pass).toBe(dRows[1].pass);
+		expect(section).toContain(
+			`| D. ${dRows[0].label} | F1 on transitions | ${(dRows[0].candidate as number).toFixed(3)} | ${(dRows[0].verdictBasis as number).toFixed(3)} | ${(dRows[0].current as number).toFixed(3)} | ${(dRows[0].original as number).toFixed(3)} |`,
+		);
+
+		// And the table says what a fail there does and does not establish.
+		expect(section).toContain(
+			"D compares against the fixed uncorrected-equal benchmark; a fail on F1 there does not isolate the candidate's lag correction, which would need an uncorrected proportional scan.",
+		);
+	});
+
+	test("the rule's declaration names the alive accounts as the denominator", () => {
+		const { markdown } = candidateFixture();
+		const section = sectionOf(markdown);
+		expect(section).toContain(
+			"over the ALIVE accounts' measured demand for it",
+		);
+		expect(section).toContain(
+			"The denominator is the survivors, not the class",
+		);
+		expect(section).not.toContain(
+			"over the class's measured demand for that kind",
+		);
+	});
+
 	test("the identity is exact where the rule is constructed to have it", () => {
 		// Two accounts and no death before either window is projected on the
 		// scan's first assignment: the candidate IS the current model there.
@@ -2076,6 +2137,129 @@ describe("the share-rule candidate section", () => {
 		expect(candidateIdentityCheck(replay).eligible).toBeLessThanOrEqual(
 			eligible.length,
 		);
+	});
+
+	/** One instant of a hand-built roster, every model's records. */
+	const instantOf = (
+		snapshotRows: RosterSnapshotRow[],
+		accounts: RosterAccount[],
+		toMs = T0 + 8 * DAY,
+	): ReturnType<typeof replayInstant> =>
+		replayInstant(
+			T0,
+			buildRosterAtInstant(T0, prepareSeries(snapshotRows, accounts), accounts),
+			[],
+			{ label: "test", fromMs: T0, toMs },
+		);
+
+	const weeklyRecordOf = (
+		replay: ReturnType<typeof replayInstant>,
+		accountId: string,
+		model: ReplayModel,
+	): RedistributionRecord | undefined =>
+		replay.records.find(
+			(entry) =>
+				entry.accountId === accountId &&
+				entry.windowKind === "seven_day" &&
+				entry.model === model,
+		);
+
+	test("the identity population excludes an instant whose demand was withheld from the assignment", () => {
+		// B's zero-usage five-hour window is a kind the class never measured, so
+		// the strict unmeasured rule withholds B from the assignment. B's WEEKLY
+		// burn is in the class demand all the same, and A is handed every bit of
+		// it at the first assignment — nobody is exhausted, nothing dies, and the
+		// two models still disagree.
+		const aStart = T0 - 3 * DAY;
+		const bStart = T0 - 2 * DAY;
+		const fiveStart = T0 - 4 * HOUR;
+		const replay = instantOf(
+			[
+				...rows({
+					accountId: "A",
+					from: aStart,
+					to: T0,
+					sevenDay: weekly(aStart, 20),
+				}),
+				...rows({
+					accountId: "B",
+					from: bStart,
+					to: T0,
+					sevenDay: weekly(bStart, 25),
+					fiveHour: () => ({ pct: 0, reset: fiveStart + 5 * HOUR }),
+				}),
+			],
+			[account("A"), account("B")],
+		);
+		const scan = replay.classes[0].scenarioOutcomes.get(CANDIDATE_MODEL);
+		expect(
+			scan != null && "learningAccountIds" in scan
+				? (scan.learningAccountIds ?? [])
+				: [],
+		).toEqual(["B"]);
+
+		// A's own burn is 20 %/d, so the current model dates it 48 h out; carrying
+		// the class's whole 37.5 units/h it fills in 21⅓ h.
+		expect(weeklyRecordOf(replay, "A", "current")?.predictedEtaMs).toBeCloseTo(
+			T0 + 48 * HOUR,
+			-4,
+		);
+		expect(
+			weeklyRecordOf(replay, "A", CANDIDATE_MODEL)?.predictedEtaMs,
+		).toBeCloseTo(T0 + (64 / 3) * HOUR, -4);
+		expect(
+			weeklyRecordOf(replay, "A", CANDIDATE_MODEL)?.proportionalFirstAssignment,
+		).toBe(false);
+	});
+
+	test("the identity population excludes a class death in a later cycle", () => {
+		// A alone. Its five-hour window was refunded 90 minutes ago and has burned
+		// 30 %/h since, so it reads 45 % and is projected past the reset an hour
+		// out: it never fills in the cycle the reading is from, and
+		// `projectedExhaustions` — first cycles only — has no entry for it. EVERY
+		// later five-hour cycle fills in 3⅓ h and then holds the account dead for
+		// the rest of it, which suspends the weekly burn: the candidate dates the
+		// weekly 34 h out where the current model, holding one slope, says 24 h.
+		const weeklyStart = T0 - 4 * DAY;
+		const fiveReset = T0 + HOUR;
+		const dropAt = T0 - 90 * MIN;
+		const cycleStartOf = (t: number): number =>
+			fiveReset -
+			5 * HOUR +
+			Math.floor((t - (fiveReset - 5 * HOUR)) / (5 * HOUR)) * 5 * HOUR;
+		const replay = instantOf(
+			rows({
+				accountId: "A",
+				from: T0 - DAY,
+				to: T0,
+				sevenDay: weekly(weeklyStart, 20),
+				fiveHour: (t) => ({
+					pct:
+						t >= dropAt
+							? ((t - dropAt) / HOUR) * 30
+							: Math.min(60, ((t - cycleStartOf(t)) / HOUR) * 20),
+					reset: cycleStartOf(t) + 5 * HOUR,
+				}),
+			}),
+			[account("A")],
+			T0 + 10 * DAY,
+		);
+		const scan = replay.classes[0].scenarioOutcomes.get(CANDIDATE_MODEL);
+		// The death the first-cycle list cannot carry: only the weekly is in it.
+		expect(scan?.projectedExhaustions.map((entry) => entry.windowKind)).toEqual(
+			["seven_day"],
+		);
+
+		expect(weeklyRecordOf(replay, "A", "current")?.predictedEtaMs).toBeCloseTo(
+			T0 + 24 * HOUR,
+			-4,
+		);
+		expect(
+			weeklyRecordOf(replay, "A", CANDIDATE_MODEL)?.predictedEtaMs,
+		).toBeCloseTo(T0 + 34 * HOUR, -4);
+		expect(
+			weeklyRecordOf(replay, "A", CANDIDATE_MODEL)?.proportionalFirstAssignment,
+		).toBe(false);
 	});
 });
 

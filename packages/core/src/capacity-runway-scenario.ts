@@ -415,6 +415,13 @@ interface BaselineCapture {
 	 * entry carries its own ids so nothing has to parse the key back apart.
 	 */
 	exhaustions: Map<string, RunwayScenarioExhaustion>;
+	/**
+	 * demand class → the earliest instant strictly after `now` at which ANY
+	 * window of that class was driven to 100 %, in ANY cycle. The complement of
+	 * {@link exhaustions}, which is first cycles only: this one exists to say
+	 * that the class re-split, not which window did it.
+	 */
+	firstExhaustionAfterNow: Map<string, number>;
 }
 
 const finiteOrNull = (value: number | null | undefined): number | null =>
@@ -471,6 +478,7 @@ export function computeCapacityRunwayScenario(
 		unknownTierAccountIds: [],
 		demandOnlyAccountIds: [],
 		projectedExhaustions: [],
+		firstExhaustionAfterNowByClass: [],
 	};
 	if (accounts.length === 0) return { kind: "no-accounts", ...emptyBasis };
 
@@ -649,6 +657,7 @@ export function computeCapacityRunwayScenario(
 		shares: new Map(),
 		assumedCredits: [],
 		exhaustions: new Map(),
+		firstExhaustionAfterNow: new Map(),
 	};
 
 	const basisOf = (
@@ -667,6 +676,11 @@ export function computeCapacityRunwayScenario(
 				a.accountId.localeCompare(b.accountId) ||
 				a.windowKind.localeCompare(b.windowKind),
 		),
+		firstExhaustionAfterNowByClass: [
+			...capture.firstExhaustionAfterNow.entries(),
+		]
+			.map(([demandClass, atMs]) => ({ demandClass, atMs }))
+			.sort((a, b) => a.demandClass.localeCompare(b.demandClass)),
 		...(eventBudgetExhausted ? { eventBudgetExhausted } : {}),
 	});
 
@@ -739,8 +753,13 @@ export function computeCapacityRunwayScenario(
 				capture.assumedCredits.push(...(assumedCredits ?? consumedSoFar()));
 				// A scan that never reached a verdict reports no projections at all:
 				// the exhaustions it happened to walk past describe a scan the caller
-				// is being told not to believe.
-				if (result.kind === "budget") capture.exhaustions.clear();
+				// is being told not to believe. The class-level list goes with them —
+				// an empty one reads as "the class never re-split", which is the one
+				// thing an abandoned walk cannot say.
+				if (result.kind === "budget") {
+					capture.exhaustions.clear();
+					capture.firstExhaustionAfterNow.clear();
+				}
 			}
 			return result;
 		};
@@ -1054,6 +1073,17 @@ export function computeCapacityRunwayScenario(
 				const window = event.window;
 				window.pct = 100;
 				window.deadUntilMs = window.resetsAtMs ?? horizonEndMs;
+				// A death in ANY cycle re-splits the class from here on. Recorded at
+				// the instant the scan APPLIES it, so a lag-origin death — applied at
+				// `now`, from a fill that happened before it — is not one of these:
+				// nothing this list is read for stands between `now` and itself.
+				if (capture !== null && event.atMs > now) {
+					const demandClass = event.account.demandClass;
+					const earliest = capture.firstExhaustionAfterNow.get(demandClass);
+					if (earliest == null || event.atMs < earliest) {
+						capture.firstExhaustionAfterNow.set(demandClass, event.atMs);
+					}
+				}
 				// The FIRST exhaustion of the cycle the reading belongs to, at the
 				// event's own instant rather than the batch clock (a tie inside the
 				// tolerance would otherwise move it by the width of the batch).

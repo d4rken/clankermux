@@ -29,6 +29,12 @@ const MAX20: AccountTier = {
 	rateLimitTier: "20x",
 	provenance: "recorded",
 };
+const MAX5: AccountTier = {
+	provider: "anthropic",
+	planTier: "max",
+	rateLimitTier: "5x",
+	provenance: "recorded",
+};
 const PRO1: AccountTier = {
 	provider: "anthropic",
 	planTier: "pro",
@@ -777,6 +783,7 @@ describe("computeCapacityRunwayScenario", () => {
 			unknownTierAccountIds: [],
 			demandOnlyAccountIds: [],
 			projectedExhaustions: [],
+			firstExhaustionAfterNowByClass: [],
 		});
 	});
 
@@ -1135,6 +1142,60 @@ describe("computeCapacityRunwayScenario", () => {
 		});
 	});
 
+	describe("firstExhaustionAfterNowByClass", () => {
+		it("carries a death no first cycle can, in the class it happened in", () => {
+			// A's five-hour window is spent AT `now` — a fact rather than a
+			// projection, so the first-cycle list is empty — and it resets at +4h.
+			// The cycle after that reset burns the demand the fill measured
+			// (100 %/h) and dies an hour later. Nothing in the projection list can
+			// say the class re-split there; this is what does.
+			const result = computeCapacityRunwayScenario(
+				[acct("A", [fiveHour(100, 1)])],
+				NOW,
+			);
+			expect(result.kind).toBe("out-now");
+			expect(result.projectedExhaustions).toEqual([]);
+			expect(result.firstExhaustionAfterNowByClass).toHaveLength(1);
+			expect(result.firstExhaustionAfterNowByClass[0].demandClass).toBe(
+				"anthropic",
+			);
+			expect(result.firstExhaustionAfterNowByClass[0].atMs).toBeCloseTo(
+				NOW + 5 * HOUR,
+				-3,
+			);
+		});
+
+		it("is the earliest of them, first cycle or not", () => {
+			// The roster two blocks up: B dies in its first cycle at 20/41.25 h and
+			// A only in its second. The earliest is B's, and it is the same instant
+			// the projection list carries for it.
+			const result = computeCapacityRunwayScenario(
+				[acct("A", [fiveHour(10, 4)]), acct("B", [fiveHour(80, 1)])],
+				NOW,
+			);
+			expect(result.firstExhaustionAfterNowByClass).toHaveLength(1);
+			expect(result.firstExhaustionAfterNowByClass[0].atMs).toBeCloseTo(
+				result.projectedExhaustions[0].exhaustsAtMs,
+				-3,
+			);
+			expect(result.firstExhaustionAfterNowByClass[0].atMs).toBeCloseTo(
+				NOW + (20 / 41.25) * HOUR,
+				-3,
+			);
+		});
+
+		it("says nothing when the baseline itself ran out of budget", () => {
+			const result = computeCapacityRunwayScenario(
+				[acct("A", [weekly(20)])],
+				NOW,
+				undefined,
+				{ maxEvents: 0 },
+			);
+			expect(result.eventBudgetExhausted).toBe("baseline");
+			expect(result.firstExhaustionAfterNowByClass).toEqual([]);
+		});
+	});
+
 	describe("contract violations", () => {
 		const roster = (): RunwayScenarioAccountInput[] => [
 			acct("A", [weekly(20)]),
@@ -1240,6 +1301,60 @@ const exhaustOf = (
 	result.projectedExhaustions.find((entry) => entry.accountId === accountId)
 		?.exhaustsAtMs;
 
+const exhaustOfWindow = (
+	result: RunwayScenarioOutcome,
+	accountId: string,
+	windowKind: string,
+): number | undefined =>
+	result.projectedExhaustions.find(
+		(entry) => entry.accountId === accountId && entry.windowKind === windowKind,
+	)?.exhaustsAtMs;
+
+/** How far behind `now` every {@link tied} reading was observed. */
+const TIED_LAG_MS = 0.5 * HOUR;
+/** How long after ITS OWN observation a {@link tied} window projects to fill. */
+const TIED_RUN_MS = 1.6 * HOUR;
+
+/**
+ * A window read at `pct`, observed {@link TIED_LAG_MS} ago, whose own measured
+ * burn fills it exactly {@link TIED_RUN_MS} after that reading.
+ *
+ * The elapsed time is solved from the two: a lifetime-primary estimate burns
+ * `pct` in `elapsed`, so it needs `elapsed · (100 − pct) / pct` more, and
+ * fixing that at `TIED_RUN_MS` fixes the window's start. Every window built
+ * this way therefore projects to the SAME instant however it is read, whatever
+ * its percentage, cycle length or account's capacity.
+ */
+function tied(
+	windowKind: string,
+	pct: number,
+	cycleMs: number,
+): RunwayWindowInput {
+	const observedAtMs = NOW - TIED_LAG_MS;
+	const windowStartMs = observedAtMs - (TIED_RUN_MS * pct) / (100 - pct);
+	return {
+		windowKind,
+		utilizationPct: pct,
+		windowStartMs,
+		resetsAtMs: windowStartMs + cycleMs,
+		prediction: null,
+		lifetimeConfidence: "full",
+		observedAtMs,
+	};
+}
+
+/** Where the CURRENT model puts this one window, with nothing else in the pool. */
+function aloneExhaust(accountId: string, window: RunwayWindowInput): number {
+	const alone = computeCapacityRunway(
+		[{ accountId, unmetered: false, windows: [window] }],
+		NOW,
+	);
+	if (alone.kind !== "runway") {
+		throw new Error(`expected a runway for ${accountId}/${window.windowKind}`);
+	}
+	return alone.exhaustsAtMs;
+}
+
 describe("proportionalShareRule", () => {
 	it("reproduces the current model exactly while every account is alive", () => {
 		// A is 0.833 %/h with 40 points left, B is 1.042 %/h with 50: different
@@ -1308,6 +1423,78 @@ describe("proportionalShareRule", () => {
 		expect(first("five_hour").shares[1]).toBeCloseTo(0.3, 10);
 		expect(first("seven_day").shares[0]).toBeCloseTo(0.4, 10);
 		expect(first("seven_day").shares[1]).toBeCloseTo(0.6, 10);
+	});
+
+	it("applies each kind's share to that kind's own windows, in the scan", () => {
+		// What the call-level test above cannot see: which window the scan gave
+		// each weight to. Every window here is read half an hour behind `now` and
+		// projects to fill exactly TIED_RUN_MS after that reading, so all four
+		// die at ONE instant — nothing re-splits the class before any of them,
+		// and the rule's identity with the current model therefore has to hold
+		// for every window at once. A window that took its ACCOUNT's other
+		// kind's share instead would burn at a slope its own reading never
+		// measured, and land somewhere else.
+		const aFive = tied("five_hour", 65, 5 * HOUR);
+		const aWeek = tied("seven_day", 90, 7 * DAY);
+		const bFive = tied("five_hour", 40, 5 * HOUR);
+		const bWeek = tied("seven_day", 40, 7 * DAY);
+		// Unequal capacity: 20 units against 5, so a share is not a slope ratio.
+		const accounts = [
+			acct("A", [aFive, aWeek]),
+			acct("B", [bFive, bWeek], { tier: MAX5 }),
+		];
+		const calls: RuleCall[] = [];
+		const result = runProportional(accounts, calls);
+		expect(result.tiers.map((tier) => tier.capacityUnits)).toEqual([20, 5]);
+
+		// A carries 70 % of the five-hour demand and 40 % of the weekly.
+		expect(calls[0].windowKind).toBe("five_hour");
+		expect(calls[0].shares[0]).toBeCloseTo(0.7, 9);
+		expect(calls[1].windowKind).toBe("seven_day");
+		expect(calls[1].shares[0]).toBeCloseTo(0.4, 9);
+
+		// The identity, window by window: each one lands where the current model
+		// puts it from its own reading, observation lag included.
+		for (const [accountId, window] of [
+			["A", aFive],
+			["A", aWeek],
+			["B", bFive],
+			["B", bWeek],
+		] as const) {
+			const projected = exhaustOfWindow(result, accountId, window.windowKind);
+			// Absent is a failure of its own: a window given another kind's share
+			// misses its cycle instead of landing late.
+			expect(projected).toBeDefined();
+			expect(projected as number).toBeCloseTo(
+				aloneExhaust(accountId, window),
+				-3,
+			);
+		}
+		expect(exhaustOfWindow(result, "A", "seven_day")).toBeCloseTo(
+			NOW + TIED_RUN_MS - TIED_LAG_MS,
+			-3,
+		);
+
+		// And the shares are not interchangeable: answering each kind with the
+		// OTHER kind's weights moves A's weekly — 0.7 of the weekly demand rather
+		// than 0.4 — hours earlier, and with it the whole pool-out.
+		const swapped = computeCapacityRunwayScenario(accounts, NOW, undefined, {
+			shareRule: (candidates, windowKind) =>
+				proportionalShareRule(
+					candidates,
+					windowKind === "five_hour" ? "seven_day" : "five_hour",
+				),
+			probePaceMargin: false,
+		});
+		expect(exhaustOfWindow(swapped, "A", "seven_day") as number).toBeLessThan(
+			exhaustOfWindow(result, "A", "seven_day") as number,
+		);
+		expect(result.kind).toBe("runway");
+		expect(swapped.kind).toBe("runway");
+		if (result.kind !== "runway" || swapped.kind !== "runway") {
+			throw new Error("unreachable");
+		}
+		expect(swapped.exhaustsAtMs).toBeLessThan(result.exhaustsAtMs);
 	});
 
 	it("moves a dead account's demand in proportion to the survivors' own burn", () => {

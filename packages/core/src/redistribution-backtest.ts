@@ -314,17 +314,24 @@ export interface RedistributionRecord extends BacktestRecord {
 	/**
 	 * True where the CANDIDATE scan ({@link CANDIDATE_MODEL}) projects this
 	 * window on its first assignment with every contributor to the class demand
-	 * still alive: no class window is already at 100 % at `T`, no other
-	 * projected class exhaustion stands between `T` and this window's own, and
-	 * no class window was filled inside its own observation lag.
+	 * both alive and IN that assignment: no class window is already at 100 % at
+	 * `T`, no account whose measured burn joined the class demand was withheld
+	 * from the pool it is split over, no class exhaustion of any cycle stands
+	 * between `T` and this window's own, and no class window was filled inside
+	 * its own observation lag.
 	 *
 	 * That is exactly the population the proportional rule's identity with the
-	 * current model is defined on — with every contributor alive the demand
-	 * handed back to an account is the burn it contributed, so it burns at its
-	 * own measured slope. An account that is dead AT `T` is a contributor whose
-	 * demand the survivors already carry from the first assignment, which is why
-	 * a class member at 100 % disqualifies the instant rather than only the
-	 * events after it.
+	 * current model is defined on — with every contributor alive AND pooled the
+	 * demand handed back to an account is the burn it contributed, so it burns
+	 * at its own measured slope. An account that is dead AT `T` is a contributor
+	 * whose demand the survivors already carry from the first assignment, which
+	 * is why a class member at 100 % disqualifies the instant rather than only
+	 * the events after it; a withheld or demand-only contributor does the same
+	 * thing without anything having died at all.
+	 *
+	 * "Of any cycle" is the second thing a projection list cannot state: it
+	 * holds first-cycle deaths only, and a window that resets and fills again
+	 * re-splits the class just as its first fill would have.
 	 *
 	 * Taken from the candidate's OWN scan: two share rules order a class's
 	 * events differently, so `scenario-equal`'s first-event flag is not a
@@ -3122,6 +3129,62 @@ export function replayInstant(
 		const classDeadAtT = entries.some((entry) =>
 			entry.windows.some((window) => window.input.utilizationPct >= 100),
 		);
+		const candidateScan = scenarioOutcomes.get(CANDIDATE_MODEL);
+		/**
+		 * True when the CANDIDATE scan kept measured demand OUT of its own
+		 * assignments: an account whose burn joined the class demand but which is
+		 * not in the pool the demand is split over.
+		 *
+		 * The identity is not about deaths alone. The scan takes a withheld
+		 * account's measured burn into the class demand and then hands it to the
+		 * accounts it did pool, so a survivor burns faster than its own reading
+		 * from the FIRST assignment on, with nobody exhausted and nothing having
+		 * died. Two of the scan's statuses can do that — `withheld` (the strict
+		 * unmeasured rule) and `demand-only` (paused or removed) — and both are
+		 * disclosed by id. Every other non-pooled status carries no window at all
+		 * and therefore no burn to contribute.
+		 *
+		 * A class-level fact, not a per-account one: the demand is pooled, so one
+		 * withheld contributor moves every projection in the class. The withheld
+		 * list is not filtered by contribution — the scan does not report which
+		 * of a withheld account's windows measured anything — so an account whose
+		 * every window is learning disqualifies the instant as well. That only
+		 * ever removes records from the population; it can never admit one whose
+		 * demand was redistributed.
+		 */
+		const candidateWithholdsDemand =
+			candidateScan == null ||
+			withheldIds(candidateScan).length > 0 ||
+			candidateScan.demandOnlyAccountIds.length > 0;
+		/**
+		 * True when NO exhaustion of this class stands between `T` and this
+		 * window's own projected exhaustion in the CANDIDATE scan — in ANY cycle.
+		 *
+		 * `firstEventInScan` reads `projectedExhaustions`, which by design holds
+		 * first-cycle deaths only, so a window that resets and fills again before
+		 * this one's ETA is invisible to it. Such a death re-splits the class
+		 * exactly like a first-cycle one: the survivors carry its demand until it
+		 * revives, and this window stops burning at its own measured slope.
+		 * `firstExhaustionAfterNowByClass` is the scan's own statement that it
+		 * happened.
+		 *
+		 * An instant EQUAL to this window's own exhaustion is its own death (or a
+		 * tie with it) and changes nothing before it, which is why the comparison
+		 * is not strict.
+		 */
+		const noClassDeathBeforeCandidate = (
+			accountId: string,
+			windowKind: string,
+		): boolean => {
+			const own = candidateScan?.projectedExhaustions.find((exhaustion) =>
+				isSameWindow(exhaustion, accountId, windowKind),
+			)?.exhaustsAtMs;
+			if (own == null) return false;
+			const firstDeath = candidateScan?.firstExhaustionAfterNowByClass.find(
+				(entry) => entry.demandClass === demandClass,
+			)?.atMs;
+			return firstDeath == null || firstDeath >= orderedAt(own);
+		};
 		/**
 		 * The death `firstEventInScan` cannot see: another window of the class
 		 * that the correction filled inside its own lag, which the scan applies
@@ -3230,8 +3293,10 @@ export function replayInstant(
 						firstEventOriginal(entry.accountId, window.kind),
 					proportionalFirstAssignment:
 						!classDeadAtT &&
+						!candidateWithholdsDemand &&
 						firstEventCandidate(entry.accountId, window.kind) &&
-						!peerDiedInLagOf(entry.accountId, window.kind, CANDIDATE_MODEL),
+						!peerDiedInLagOf(entry.accountId, window.kind, CANDIDATE_MODEL) &&
+						noClassDeathBeforeCandidate(entry.accountId, window.kind),
 					lagAnchorKnown: lagAnchorKnownOf(entry, window),
 				};
 
@@ -5273,7 +5338,8 @@ export const IDENTITY_TOLERANCE_MS = 1;
 /**
  * How often the candidate rule IS the current model where it is constructed to
  * be: on the records its own scan projects from its first assignment with every
- * contributor to the class demand alive.
+ * contributor to the class demand alive and pooled — see
+ * {@link RedistributionRecord.proportionalFirstAssignment} for the population.
  *
  * A mechanism check, in the style of the observation-lag section's: it states
  * its population, counts it, and prints the number that falls out. Records
@@ -5316,17 +5382,29 @@ export function candidateIdentityCheck(
 	};
 }
 
-/** One criterion of the candidate, beside the two models it is read against. */
+/** One criterion of the candidate, beside the models it is read against. */
 export interface CandidateCriterionRow {
 	id: VerdictCriterion["id"];
 	label: string;
-	/** What the three model columns hold. */
+	/**
+	 * What the model columns hold. A criterion that turns on TWO statistics has
+	 * one row per statistic — criterion D fails on its F1 comparison while its
+	 * error comparison passes, and a table that printed one of the two would
+	 * state a result no number in the row accounts for. Both rows carry the
+	 * criterion's single result.
+	 */
 	statistic: string;
 	candidate: number | null;
 	/** The verdict basis's number for the same statistic. */
 	verdictBasis: number | null;
 	/** The current model's, or null where the statistic is a delta against it. */
 	current: number | null;
+	/**
+	 * The pre-correction scan's number for the same statistic — the FIXED
+	 * benchmark criterion D judges against — or null on every criterion that
+	 * does not read it.
+	 */
+	original: number | null;
 	pass: boolean | null;
 }
 
@@ -5391,6 +5469,7 @@ export function evaluateCandidate(
 			// Each model's own pairing, which is why this is not one number: a
 			// paired median is taken over the records BOTH models dated.
 			current: transition.candidateBias.medianB,
+			original: null,
 			pass: passOf("A"),
 		},
 		{
@@ -5400,6 +5479,7 @@ export function evaluateCandidate(
 			candidate: candidate?.f1 ?? null,
 			verdictBasis: basis?.f1 ?? null,
 			current: current?.f1 ?? null,
+			original: null,
 			pass: passOf("B"),
 		},
 		{
@@ -5411,7 +5491,21 @@ export function evaluateCandidate(
 			// The statistic IS a delta against the current model, so the current
 			// model has no column of its own here.
 			current: null,
+			original: null,
 			pass: passOf("C"),
+		},
+		{
+			id: "D",
+			label: "not worse than the original scenario",
+			// The half of D that FAILS for the candidate, and the reason it has a
+			// row of its own: judged against the pre-correction scan's own F1, in
+			// the last column, not against either of the two middle ones.
+			statistic: "F1 on transitions",
+			candidate: candidate?.f1 ?? null,
+			verdictBasis: basis?.f1 ?? null,
+			current: current?.f1 ?? null,
+			original: original?.f1 ?? null,
+			pass: passOf("D"),
 		},
 		{
 			id: "D",
@@ -5421,7 +5515,10 @@ export function evaluateCandidate(
 				"paired median absolute-error change against the pre-correction scan (min)",
 			candidate: transition.candidateAbsVsOriginal.medianDeltaMinutes,
 			verdictBasis: transition.pairedAbsVsOriginal.medianDeltaMinutes,
+			// The statistic IS a change against the pre-correction scan, so
+			// neither comparison model has a column of its own here.
 			current: null,
+			original: null,
 			pass: passOf("D"),
 		},
 	];
@@ -6202,22 +6299,26 @@ function candidateSection(candidate: CandidateScores): string[] {
 	out.push("## Share-rule candidate");
 	out.push("");
 	out.push(
-		`\`${candidate.model}\` is a DECLARED CANDIDATE: each alive account's share of its class's demand for a window kind is its own measured demand for that kind over the class's measured demand for that kind. It was declared before it was scored and has no fitted coefficient, so no number in this report enters the rule. It is not the verdict basis: the verdict above is computed on \`scenario-equal\` alone and is the same with or without this section.`,
+		`\`${candidate.model}\` is a DECLARED CANDIDATE. The quantity it conserves is the CLASS demand for a window kind; each alive account's share of it is that account's own measured demand for the kind over the ALIVE accounts' measured demand for it. The denominator is the survivors, not the class: with burns of 80, 20 and 10 and the 80 dead, the two survivors take two thirds and one third of the whole class demand, not 20/110 and 10/110 of it. It was declared before it was scored and has no fitted coefficient, so no number in this report enters the rule. It is not the verdict basis: the verdict above is computed on \`scenario-equal\` alone and is the same with or without this section.`,
 	);
 	out.push("");
 	out.push(
-		"This section applies the four criteria of the verdict rule above to the candidate, computed by the same functions, on the same lifecycle-balanced cohorts, against the same comparison models. The table states, per criterion, the statistic it turns on for the candidate, for the verdict basis and for the current model, and whether the criterion holds FOR THE CANDIDATE. The full value list of each criterion follows it. Criterion A's paired median is taken over the records the pair being compared both dated, so the candidate's column and the basis's column are medians over their own populations; each column's `paired n` is in the value list below. A criterion whose statistic is a delta against the current model has no current column.",
+		"This section applies the four criteria of the verdict rule above to the candidate, computed by the same functions, on the same lifecycle-balanced cohorts, against the same comparison models. The table states, per criterion and statistic, the number it turns on for the candidate, for the verdict basis, for the current model and for the pre-correction scan, and whether the criterion holds FOR THE CANDIDATE. A criterion that turns on two statistics — D, which reads an F1 and an error change — has a row for each, both carrying that criterion's single result. The full value list of each criterion follows it. Criterion A's paired median is taken over the records the pair being compared both dated, so the candidate's column and the basis's column are medians over their own populations; each column's `paired n` is in the value list below. A model column is empty where the statistic is already a delta against that model.",
 	);
 	out.push("");
 	out.push(
-		"| criterion | statistic | candidate | scenario-equal | current | candidate result |",
+		"| criterion | statistic | candidate | scenario-equal | current | scenario-equal-original | candidate result |",
 	);
-	out.push("|---|---|---:|---:|---:|---|");
+	out.push("|---|---|---:|---:|---:|---:|---|");
 	for (const row of candidate.rows) {
 		out.push(
-			`| ${row.id}. ${row.label} | ${row.statistic} | ${num(row.candidate)} | ${num(row.verdictBasis)} | ${row.current == null ? EM_DASH : num(row.current)} | ${criterionState(row.pass)} |`,
+			`| ${row.id}. ${row.label} | ${row.statistic} | ${num(row.candidate)} | ${num(row.verdictBasis)} | ${row.current == null ? EM_DASH : num(row.current)} | ${row.original == null ? EM_DASH : num(row.original)} | ${criterionState(row.pass)} |`,
 		);
 	}
+	out.push("");
+	out.push(
+		"D compares against the fixed uncorrected-equal benchmark; a fail on F1 there does not isolate the candidate's lag correction, which would need an uncorrected proportional scan.",
+	);
 	out.push("");
 	for (const criterion of candidate.criteria) {
 		out.push(...criterionBlock(criterion));
@@ -6226,7 +6327,7 @@ function candidateSection(candidate: CandidateScores): string[] {
 	out.push("### Identity with the current model on the first assignment");
 	out.push("");
 	out.push(
-		"The identity the rule is constructed to have: while every account whose measured burn is in the class demand is still alive, the demand handed back to an account is the burn it contributed, so it burns at its own measured slope and the candidate's projection IS the current model's. The population is the records whose window the candidate's own scan projects entirely on its first assignment — no class window already at 100 % at the instant, no other projected class exhaustion between the instant and this window's own, and no class window filled inside its own observation lag — and where both the candidate and the current model committed to a date. Below the tolerance an ETA is the same instant; the column is a count, not a claim about the rest of the replay.",
+		"The identity the rule is constructed to have: while every account whose measured burn is in the class demand is alive AND in the assignment, the demand handed back to an account is the burn it contributed, so it burns at its own measured slope and the candidate's projection IS the current model's. The population is the records whose window the candidate's own scan projects entirely on its first assignment — no class window already at 100 % at the instant, no account whose burn joined the class demand withheld from the pool that demand is split over, no class exhaustion of ANY cycle between the instant and this window's own, and no class window filled inside its own observation lag — and where both the candidate and the current model committed to a date. The withheld and later-cycle conditions are the two the scan's first-cycle projection list cannot state on its own: one redistributes demand with nothing having died, the other is a death after a reset. Below the tolerance an ETA is the same instant; the column is a count, not a claim about the rest of the replay.",
 	);
 	out.push("");
 	if (candidate.identity.eligible === 0) {
@@ -6597,7 +6698,7 @@ export function knownLimitsFor(
 		"Snapshots before 2026-08-24 carry no `plan_tier`/`rate_limit_tier` and no `observed_at`. Tiers there are today's, marked `assumed`; without an observation instant the weekly full-confidence path is unavailable to BOTH models, so the two are still compared like for like.",
 		"No reset-credit bank is modelled, and no live usage point is injected — the replay only has what the sampler stored.",
 		"The headroom share rule is reported, never used as the verdict basis. The verdict basis is the equal split, pre-declared.",
-		"The declared candidate share rule weights each account by its OWN measured demand, and that demand is the same fitted slope the current model projects from. A window still learning has no slope, so it carries no weight of its own and takes demand only through the rule's equal-split fallback; where a class's live accounts are all learning for a kind, the candidate IS the equal split for that kind.",
+		"The declared candidate share rule weights each account by its OWN measured demand, and that demand is the same fitted slope the current model projects from. A window still learning has no accepted measured-demand contribution — the preparation withholds it whatever its fitted slope says — so it carries no weight of its own and takes demand only through the rule's equal-split fallback; where a class's live accounts are all learning for a kind, the candidate IS the equal split for that kind.",
 		"IF a survivor's own lookback already contains the traffic it absorbed, the scenario would be adding that demand a second time. Whether it does is a hypothesis this replay reports on (the peer-exhaustion cohort and the survivor slope table) rather than a property these measurements establish; nothing here corrects for it.",
 		"The observation-lag advance never rewinds the scan clock below the instant being replayed: a window that fills inside its lag dies AT that instant, though the projection it records carries the true, earlier one. Any redistribution such a death causes therefore starts at the instant, not at the fill.",
 		"A reading whose row carries no `observed_at` and whose estimator is the now-anchored lifetime average has no derivable lag and is advanced by nothing. That is a real absence, not a measured zero, and the mechanism section reports those records under `unknown` rather than folding them into the fresh bucket.",
