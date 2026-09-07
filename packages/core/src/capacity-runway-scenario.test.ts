@@ -8,10 +8,13 @@ import {
 } from "./capacity-runway";
 import {
 	computeCapacityRunwayScenario,
+	equalShareRule,
 	observationLagMs,
+	proportionalShareRule,
 	type RunwayScenarioAccountInput,
 	type RunwayScenarioOutcome,
 	type RunwayScenarioPresence,
+	type ShareCandidate,
 	type ShareRule,
 } from "./capacity-runway-scenario";
 import { type AccountTier, tierCapacityUnits } from "./tier-capacity";
@@ -186,10 +189,9 @@ describe("computeCapacityRunwayScenario", () => {
 		expect(result.exhaustsAtMs).toBeCloseTo(NOW + 4 * DAY, -3);
 		expect(result.includedLearningAccounts).toHaveLength(1);
 		expect(result.includedLearningAccounts[0].accountId).toBe("N");
-		expect(result.includedLearningAccounts[0].shareOfClass).toBeCloseTo(
-			1 / 3,
-			10,
-		);
+		expect(
+			result.includedLearningAccounts[0].shareOfClassByKind.seven_day,
+		).toBeCloseTo(1 / 3, 10);
 		expect(result.learningAccountIds).toBeUndefined();
 		expect(result.unprojectableAccountIds).toEqual([]);
 	});
@@ -219,10 +221,9 @@ describe("computeCapacityRunwayScenario", () => {
 		).toBe(true);
 		expect(result.includedLearningAccounts).toHaveLength(1);
 		expect(result.includedLearningAccounts[0].accountId).toBe("B");
-		expect(result.includedLearningAccounts[0].shareOfClass).toBeCloseTo(
-			0.5,
-			10,
-		);
+		expect(
+			result.includedLearningAccounts[0].shareOfClassByKind.seven_day,
+		).toBeCloseTo(0.5, 10);
 	});
 
 	it("keeps a paused or removed account's burn as demand without ever making it alive", () => {
@@ -606,10 +607,12 @@ describe("computeCapacityRunwayScenario", () => {
 		expect(withPeer.unprojectableAccountIds).toEqual([]);
 		expect(withPeer.includedLearningAccounts).toHaveLength(1);
 		expect(withPeer.includedLearningAccounts[0].accountId).toBe("A");
-		expect(withPeer.includedLearningAccounts[0].shareOfClass).toBeCloseTo(
-			0.5,
-			10,
-		);
+		expect(
+			withPeer.includedLearningAccounts[0].shareOfClassByKind.seven_day,
+		).toBeCloseTo(0.5, 10);
+		expect(
+			withPeer.includedLearningAccounts[0].shareOfClassByKind.five_hour,
+		).toBeCloseTo(0.5, 10);
 
 		const alone = computeCapacityRunwayScenario(
 			[acct("A", [fiveHour(100, 4), weekly(0)])],
@@ -810,14 +813,14 @@ describe("computeCapacityRunwayScenario", () => {
 		const seen: Array<Array<{ accountId: string; pct: number }>> = [];
 		const record =
 			(rule: ShareRule): ShareRule =>
-			(candidates) => {
+			(candidates, windowKind) => {
 				seen.push(
 					candidates.map((candidate) => ({
 						accountId: candidate.accountId,
 						pct: candidate.windows[0].utilizationPct,
 					})),
 				);
-				return rule(candidates);
+				return rule(candidates, windowKind);
 			};
 
 		// Equal: B resets at +1h with A at 81.25%, A dies at +1.6h, and B alone
@@ -1183,6 +1186,268 @@ describe("computeCapacityRunwayScenario", () => {
 });
 
 // ---------------------------------------------------------------------------
+// The proportional share rule
+// ---------------------------------------------------------------------------
+
+/** Every share rule call of one scan, in order. */
+interface RuleCall {
+	windowKind: string;
+	accountIds: string[];
+	/** `w_j/Σw`, so a test can read the split rather than the raw weights. */
+	shares: number[];
+}
+
+/**
+ * `proportionalShareRule` with every call recorded. The rule itself answers, so
+ * what the test reads is what the scan used.
+ */
+function recordingProportional(calls: RuleCall[]): ShareRule {
+	return (candidates, windowKind) => {
+		const weights = proportionalShareRule(candidates, windowKind);
+		const total = weights.reduce((sum, weight) => sum + weight, 0);
+		calls.push({
+			windowKind,
+			accountIds: candidates.map((candidate) => candidate.accountId),
+			shares: weights.map((weight) => (total > 0 ? weight / total : 0)),
+		});
+		return weights;
+	};
+}
+
+const runProportional = (
+	accounts: RunwayScenarioAccountInput[],
+	calls?: RuleCall[],
+): RunwayScenarioOutcome =>
+	computeCapacityRunwayScenario(accounts, NOW, undefined, {
+		shareRule:
+			calls === undefined
+				? proportionalShareRule
+				: recordingProportional(calls),
+		probePaceMargin: false,
+	});
+
+/** The window's OWN measured burn, in percentage points per hour. */
+function ownSlope(window: RunwayWindowInput): number {
+	const slope = estimateWindowExhaustion(window, NOW).slopePctPerHour;
+	if (slope == null) throw new Error("expected a measured slope");
+	return slope;
+}
+
+const exhaustOf = (
+	result: RunwayScenarioOutcome,
+	accountId: string,
+): number | undefined =>
+	result.projectedExhaustions.find((entry) => entry.accountId === accountId)
+		?.exhaustsAtMs;
+
+describe("proportionalShareRule", () => {
+	it("reproduces the current model exactly while every account is alive", () => {
+		// A is 0.833 %/h with 40 points left, B is 1.042 %/h with 50: different
+		// slopes, the same 48 h. Neither death precedes the other, so BOTH
+		// windows are projected on the scan's first assignment, which is the
+		// instant the identity is about.
+		const aWindow = weekly(60, 3);
+		const bWindow = weekly(50, 2);
+		const accounts = [acct("A", [aWindow]), acct("B", [bWindow])];
+		const calls: RuleCall[] = [];
+		const result = runProportional(accounts, calls);
+
+		// The assigned slope IS the measured one: demand times share over units.
+		const demand = result.demandUnitsPerHour[0].unitsPerHour;
+		expect(calls[0].windowKind).toBe("seven_day");
+		expect(calls[0].accountIds).toEqual(["A", "B"]);
+		expect((demand * calls[0].shares[0]) / 20).toBeCloseTo(
+			ownSlope(aWindow),
+			10,
+		);
+		expect((demand * calls[0].shares[1]) / 20).toBeCloseTo(
+			ownSlope(bWindow),
+			10,
+		);
+
+		// And so the projection is the current model's, window by window.
+		for (const account of accounts) {
+			const alone = computeCapacityRunway(baselineInputs([account]), NOW);
+			expect(alone.kind).toBe("runway");
+			if (alone.kind !== "runway") throw new Error("unreachable");
+			expect(alone.exhaustsAtMs).toBeCloseTo(NOW + 48 * HOUR, -3);
+			expect(exhaustOf(result, account.accountId)).toBeCloseTo(
+				alone.exhaustsAtMs,
+				-3,
+			);
+		}
+		expect(result.kind).toBe("runway");
+		if (result.kind !== "runway") throw new Error("unreachable");
+		expect(result.exhaustsAtMs).toBeCloseTo(NOW + 48 * HOUR, -3);
+
+		// Not a property of any share rule: the equal split moves A's projection
+		// more than five hours earlier over the same reading.
+		const equal = computeCapacityRunwayScenario(accounts, NOW, undefined, {
+			shareRule: equalShareRule,
+			probePaceMargin: false,
+		});
+		expect(exhaustOf(equal, "A")).toBeCloseTo(NOW + (40 / 0.9375) * HOUR, -3);
+	});
+
+	it("splits each kind by that kind's own demand, never a blend of both", () => {
+		// A carries 70 % of the class's five-hour burn and 40 % of its weekly.
+		const accounts = [
+			acct("A", [fiveHour(70, 1), weekly(40, 1)]),
+			acct("B", [fiveHour(30, 1), weekly(60, 1)]),
+		];
+		const calls: RuleCall[] = [];
+		runProportional(accounts, calls);
+
+		const first = (windowKind: string): RuleCall => {
+			const call = calls.find((entry) => entry.windowKind === windowKind);
+			if (call === undefined) throw new Error(`no call for ${windowKind}`);
+			return call;
+		};
+		expect(first("five_hour").accountIds).toEqual(["A", "B"]);
+		expect(first("five_hour").shares[0]).toBeCloseTo(0.7, 10);
+		expect(first("five_hour").shares[1]).toBeCloseTo(0.3, 10);
+		expect(first("seven_day").shares[0]).toBeCloseTo(0.4, 10);
+		expect(first("seven_day").shares[1]).toBeCloseTo(0.6, 10);
+	});
+
+	it("moves a dead account's demand in proportion to the survivors' own burn", () => {
+		// 80/20/10 %/h on one class. A dies at +0.25 h, and its 80 %/h goes 2:1
+		// to B and C: B burns 20 + 80·(2/3) = 73.33 %/h from 25 %, C burns
+		// 10 + 80·(1/3) = 36.67 %/h from 12.5 %.
+		const accounts = [
+			acct("A", [fiveHour(80, 1)]),
+			acct("B", [fiveHour(20, 1)]),
+			acct("C", [fiveHour(10, 1)]),
+		];
+		const calls: RuleCall[] = [];
+		const result = runProportional(accounts, calls);
+
+		const aDies = NOW + 0.25 * HOUR;
+		const bDies = aDies + (75 / (110 * (2 / 3))) * HOUR;
+		expect(exhaustOf(result, "A")).toBeCloseTo(aDies, -3);
+		expect(exhaustOf(result, "B")).toBeCloseTo(bDies, -3);
+		// C is at 50 % when B dies and then carries all 110 %/h.
+		expect(exhaustOf(result, "C")).toBeCloseTo(bDies + (50 / 110) * HOUR, -3);
+
+		// The re-split itself: the first assignment without A.
+		const afterDeath = calls.find(
+			(call) => !call.accountIds.includes("A"),
+		) as RuleCall;
+		expect(afterDeath.accountIds).toEqual(["B", "C"]);
+		expect(afterDeath.shares[0]).toBeCloseTo(2 / 3, 10);
+		expect(afterDeath.shares[1]).toBeCloseTo(1 / 3, 10);
+	});
+
+	it("falls back to the equal split for a kind no live account measured", () => {
+		// Both learners have no slope of their own, so nothing can be weighted by
+		// burn — but R's removed burn is still demand that has to be placed.
+		const calls: RuleCall[] = [];
+		const result = runProportional(
+			[
+				acct("N1", [weekly(0)]),
+				acct("N2", [weekly(0)]),
+				acct("R", [weekly(40)], { presence: "demand-only" }),
+			],
+			calls,
+		);
+
+		expect(calls[0].windowKind).toBe("seven_day");
+		expect(calls[0].accountIds).toEqual(["N1", "N2"]);
+		expect(calls[0].shares).toEqual([0.5, 0.5]);
+		// 40 %/d of demand, halved: 20 %/d each from 0 %, so five days.
+		expect(result.kind).toBe("runway");
+		if (result.kind !== "runway") throw new Error("unreachable");
+		expect(result.exhaustsAtMs).toBeCloseTo(NOW + 5 * DAY, -3);
+		expect(result.includedLearningAccounts).toEqual([
+			{ accountId: "N1", shareOfClassByKind: { seven_day: 0.5 } },
+			{ accountId: "N2", shareOfClassByKind: { seven_day: 0.5 } },
+		]);
+	});
+
+	it("is asked once per measured kind, and told which kind it is answering for", () => {
+		const calls: RuleCall[] = [];
+		runProportional([acct("A", [fiveHour(50, 1), weekly(20)])], calls);
+
+		// One assignment, one call per kind, in the order the kinds were measured.
+		expect(calls.slice(0, 2).map((call) => call.windowKind)).toEqual([
+			"five_hour",
+			"seven_day",
+		]);
+		expect(
+			calls.every((call) =>
+				["five_hour", "seven_day"].includes(call.windowKind),
+			),
+		).toBe(true);
+		// No assignment asks twice about one kind.
+		for (let index = 0; index + 1 < calls.length; index += 2) {
+			expect(calls[index].windowKind).not.toBe(calls[index + 1].windowKind);
+		}
+	});
+
+	it("weights a candidate by its own measured units, and zero without them", () => {
+		const seen: ShareCandidate[][] = [];
+		const rule: ShareRule = (candidates, windowKind) => {
+			seen.push(candidates.map((candidate) => candidate));
+			return proportionalShareRule(candidates, windowKind);
+		};
+		computeCapacityRunwayScenario(
+			[acct("A", [weekly(24)]), acct("N", [weekly(0)])],
+			NOW,
+			undefined,
+			{ shareRule: rule, probePaceMargin: false },
+		);
+
+		// 24 %/d is 1 %/h, so A's window carries its tier's units per hour.
+		expect(seen[0][0].windows[0].measuredUnitsPerHour).toBeCloseTo(20, 10);
+		// A learning window measured nothing, and `null` is not `0`.
+		expect(seen[0][1].windows[0].measuredUnitsPerHour).toBeNull();
+	});
+});
+
+describe("equalShareRule", () => {
+	it("ignores the window kind it is asked about", () => {
+		const candidates: ShareCandidate[] = [
+			{
+				accountId: "A",
+				demandClass: "anthropic",
+				capacityUnits: 20,
+				windows: [
+					{
+						windowKind: "five_hour",
+						utilizationPct: 10,
+						measuredUnitsPerHour: 200,
+					},
+					{
+						windowKind: "seven_day",
+						utilizationPct: 10,
+						measuredUnitsPerHour: 1,
+					},
+				],
+			},
+			{
+				accountId: "B",
+				demandClass: "anthropic",
+				capacityUnits: 20,
+				windows: [
+					{
+						windowKind: "five_hour",
+						utilizationPct: 90,
+						measuredUnitsPerHour: 1,
+					},
+				],
+			},
+		];
+		expect(equalShareRule(candidates, "five_hour")).toEqual([1, 1]);
+		expect(equalShareRule(candidates, "seven_day")).toEqual(
+			equalShareRule(candidates, "five_hour"),
+		);
+		// The proportional rule is the one that reads the kind.
+		expect(proportionalShareRule(candidates, "five_hour")).toEqual([200, 1]);
+		expect(proportionalShareRule(candidates, "seven_day")).toEqual([1, 0]);
+	});
+});
+
+// ---------------------------------------------------------------------------
 // Observation lag
 // ---------------------------------------------------------------------------
 
@@ -1450,7 +1715,7 @@ describe("observation lag", () => {
 		// The share reported for a learning account is its FINAL assignment at
 		// `now`: the split that stood before the lag death was provisional.
 		expect(result.includedLearningAccounts).toEqual([
-			{ accountId: "B", shareOfClass: 1 },
+			{ accountId: "B", shareOfClassByKind: { seven_day: 1 } },
 		]);
 		// Without the correction A is still alive at `now` and the pool lasts
 		// longer.
@@ -1521,7 +1786,7 @@ describe("observation lag", () => {
 			-3,
 		);
 		expect(corrected(accounts).includedLearningAccounts).toEqual([
-			{ accountId: "A", shareOfClass: 0.5 },
+			{ accountId: "A", shareOfClassByKind: { seven_day: 0.5 } },
 		]);
 	});
 

@@ -195,18 +195,23 @@ export interface RunwayScenarioDemand {
 export interface RunwayScenarioShare {
 	accountId: string;
 	/**
-	 * `w_j / Σw` over the alive accounts of its class, taken at the FIRST
-	 * assignment in which this account is alive — `now` for an account alive at
-	 * `now`, later for one that is dead at `now` and revives (an exhausted 5 h
-	 * window beside a learning weekly). `0` when it is never alive inside the
-	 * horizon, so no share was ever assigned to it.
+	 * Window kind → `w_j / Σw` over the alive accounts of its class for THAT
+	 * kind, taken at the FIRST assignment in which this account is alive —
+	 * `now` for an account alive at `now`, later for one that is dead at `now`
+	 * and revives (an exhausted 5 h window beside a learning weekly). An EMPTY
+	 * record when the account is never alive inside the horizon, so no share was
+	 * ever assigned to it, and an absent kind is one its class never measured.
+	 *
+	 * Per kind because the demand being split is per (class, kind): a rule may
+	 * give an account most of its class's five-hour traffic and little of its
+	 * weekly, and a single number could not say so.
 	 *
 	 * At `now` the FINAL assignment is the one reported: a peer that fills
 	 * inside its observation lag dies at `now` and the class is re-split there,
 	 * so the share captured before that death is provisional and the one the
 	 * account actually starts burning at is the later one.
 	 */
-	shareOfClass: number;
+	shareOfClassByKind: Record<string, number>;
 }
 
 /**

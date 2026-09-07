@@ -321,8 +321,12 @@ export interface ReplayRange {
  * at 100 % or unmetered-with-no-capacity — it falls back to the equal split:
  * there is nothing left to weight by, and the scan's next event kills them all
  * anyway.
+ *
+ * Ignores `windowKind`: `maxPct` is an ACCOUNT-wide statement — an account is
+ * only as routable as its tightest window — so this rule weights every kind the
+ * same way.
  */
-export const headroomShareRule: ShareRule = (candidates) => {
+export const headroomShareRule: ShareRule = (candidates, windowKind) => {
 	const weights = candidates.map((candidate: ShareCandidate) => {
 		const units = candidate.capacityUnits;
 		if (units == null || !Number.isFinite(units)) return 0;
@@ -337,7 +341,7 @@ export const headroomShareRule: ShareRule = (candidates) => {
 	});
 	return weights.some((weight) => weight > 0)
 		? weights
-		: equalShareRule(candidates);
+		: equalShareRule(candidates, windowKind);
 };
 
 /** What one scenario model asks {@link computeCapacityRunwayScenario} for. */
