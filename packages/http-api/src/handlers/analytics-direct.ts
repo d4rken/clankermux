@@ -231,27 +231,40 @@ function additionalDataBranches(whereClause: string): AdditionalDataBranch[] {
 		{
 			section: "accountPerformance",
 			label: "q2",
+			// Aggregate by account ID before looking up its current display name.
+			// Joining per request made the 7d view perform ~139k account lookups
+			// and sort by (account ID, name); only the grouped rows need a join.
+			// Keep the NULL/deleted-account fallback and SELECT-first sentinel bind.
 			sql: `			SELECT * FROM (
 				SELECT
 					'account_performance' as data_type,
 					COALESCE(a.name, r.account_used, ?) as name,
 					CAST(NULL AS TEXT) as secondary_name,
 					CAST(NULL AS BIGINT) as count,
-					COUNT(r.id) as requests,
-					SUM(CASE WHEN r.success = TRUE THEN 1 ELSE 0 END) * 100.0 / NULLIF(COUNT(r.id), 0) as success_rate,
+					r.requests as requests,
+					r.successful_requests * 100.0 / NULLIF(r.requests, 0) as success_rate,
 					CAST(NULL AS DOUBLE PRECISION) as cost_usd,
-					SUM(CASE WHEN r.billing_type = 'plan' THEN COALESCE(r.cost_usd, 0) ELSE 0 END) as plan_cost_usd,
-					SUM(CASE WHEN COALESCE(r.billing_type, 'api') != 'plan' THEN COALESCE(r.cost_usd, 0) ELSE 0 END) as api_cost_usd,
-					SUM(COALESCE(r.cost_usd, 0)) as total_cost_usd,
+					r.plan_cost_usd as plan_cost_usd,
+					r.api_cost_usd as api_cost_usd,
+					r.total_cost_usd as total_cost_usd,
 					CAST(NULL AS BIGINT) as total_tokens,
 					CAST(NULL AS BIGINT) as measured_requests,
 					CAST(NULL AS BIGINT) as inferred_requests,
 					CAST(NULL AS BIGINT) as ambiguous_requests
-				FROM requests r
+				FROM (
+					SELECT
+						r.account_used,
+						COUNT(r.id) as requests,
+						SUM(CASE WHEN r.success = TRUE THEN 1 ELSE 0 END) as successful_requests,
+						SUM(CASE WHEN r.billing_type = 'plan' THEN COALESCE(r.cost_usd, 0) ELSE 0 END) as plan_cost_usd,
+						SUM(CASE WHEN COALESCE(r.billing_type, 'api') != 'plan' THEN COALESCE(r.cost_usd, 0) ELSE 0 END) as api_cost_usd,
+						SUM(COALESCE(r.cost_usd, 0)) as total_cost_usd
+					FROM requests r
+					WHERE ${whereClause}
+					GROUP BY r.account_used
+					HAVING COUNT(r.id) > 0
+				) r
 				LEFT JOIN accounts a ON a.id = r.account_used
-				WHERE ${whereClause}
-				GROUP BY r.account_used, a.name
-				HAVING COUNT(r.id) > 0
 				ORDER BY requests DESC
 				LIMIT 10
 			) q2`,

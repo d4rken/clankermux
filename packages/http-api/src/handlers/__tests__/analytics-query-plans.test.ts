@@ -12,6 +12,7 @@ import type { APIContext } from "../../types";
 import { createAnalyticsHandler } from "../analytics-direct";
 import {
 	ACCOUNT_A,
+	ACCOUNT_B,
 	FIXED_NOW,
 	seedAnalyticsFixture,
 } from "./analytics-section-fixture";
@@ -117,6 +118,102 @@ describe("analytics totals aggregate", () => {
 		expect(body.totals.requests).toBe(2);
 		expect(body.totals.activeAccounts).toBe(1);
 		expect(body.totals.totalTokens).toBe(1000);
+	});
+});
+
+describe("account performance aggregation", () => {
+	it("joins account names only after aggregating requests", async () => {
+		await fetch("range=7d&sections=accountPerformance");
+		const details = plan(firstStatement());
+		const grouped = details.findIndex((detail) => /CO-ROUTINE r$/.test(detail));
+		const scanGroups = details.findIndex((detail) => /^SCAN r$/.test(detail));
+		const accountLookup = details.findIndex((detail) =>
+			/(?:SEARCH|SCAN) a .*LEFT-JOIN/.test(detail),
+		);
+		expect(grouped).toBeGreaterThanOrEqual(0);
+		expect(scanGroups).toBeGreaterThan(grouped);
+		expect(accountLookup).toBeGreaterThan(scanGroups);
+	});
+
+	it.each([
+		"1h",
+		"6h",
+		"24h",
+		"7d",
+		"30d",
+		"all",
+	])("preserves account identity, null billing and filters for %s", async (range) => {
+		db.run("UPDATE accounts SET name = 'same-name' WHERE id IN (?, ?)", [
+			ACCOUNT_A,
+			ACCOUNT_B,
+		]);
+		const insert = db.prepare(
+			`INSERT INTO requests (id, timestamp, account_used, project, model, success, billing_type, cost_usd, method, path) VALUES (?, ?, ?, 'account-test', ?, ?, ?, ?, 'POST', '/v1/messages')`,
+		);
+		for (const [id, account, model, success, billing, cost] of [
+			["ap-1", ACCOUNT_A, "model-a", 1, "plan", 2],
+			["ap-2", ACCOUNT_A, "model-a", 0, null, 3],
+			["ap-3", ACCOUNT_A, "model-a", 1, "api", null],
+			["ap-4", ACCOUNT_B, "model-a", 1, "api", 7],
+			["ap-5", "deleted-account", "model-a", 1, "plan", 11],
+			["ap-6", null, "model-a", 1, null, 13],
+			["ap-7", ACCOUNT_A, "excluded-model", 1, "plan", 99],
+		] as const)
+			insert.run(id, FIXED_NOW - 1000, account, model, success, billing, cost);
+		const query = `range=${range}&sections=accountPerformance&projects=account-test&models=model-a`;
+		const body = await fetch(query);
+		expect(body.accountPerformance).toHaveLength(4);
+		expect(body.accountPerformance[0]).toEqual({
+			name: "same-name",
+			requests: 3,
+			successRate: 200 / 3,
+			planCostUsd: 2,
+			apiCostUsd: 3,
+			totalCostUsd: 5,
+		});
+		expect(
+			body.accountPerformance.filter(
+				(row: { name: string }) => row.name === "same-name",
+			),
+		).toHaveLength(2);
+		expect(body.accountPerformance).toContainEqual({
+			name: "same-name",
+			requests: 1,
+			successRate: 100,
+			planCostUsd: 0,
+			apiCostUsd: 7,
+			totalCostUsd: 7,
+		});
+		expect(body.accountPerformance).toContainEqual({
+			name: "deleted-account",
+			requests: 1,
+			successRate: 100,
+			planCostUsd: 11,
+			apiCostUsd: 0,
+			totalCostUsd: 11,
+		});
+		const nullAccount = await fetch(`${query}&accountsNone=true`);
+		expect(nullAccount.accountPerformance).toHaveLength(1);
+		expect(nullAccount.accountPerformance[0]).toMatchObject({
+			requests: 1,
+			apiCostUsd: 13,
+			totalCostUsd: 13,
+		});
+		const selected = await fetch(
+			`${query}&accounts=${ACCOUNT_A}&status=success`,
+		);
+		expect(selected.accountPerformance).toEqual([
+			{
+				name: "same-name",
+				requests: 2,
+				successRate: 100,
+				planCostUsd: 2,
+				apiCostUsd: 0,
+				totalCostUsd: 2,
+			},
+		]);
+		const empty = await fetch(`${query}&accounts=absent-account`);
+		expect(empty.accountPerformance).toEqual([]);
 	});
 });
 
