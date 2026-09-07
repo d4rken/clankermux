@@ -27,11 +27,9 @@ function barTone(bar: PoolClassBar): string {
 export function PoolClassBars({
 	accounts,
 	leastUsedAccountId,
-	display = "used",
 	formatPct = (pct) => `${Math.round(pct)}%`,
 }: {
 	accounts: PoolClassBar[];
-	display?: "used" | "remaining";
 	/** Emphasised as the one the headline names. */
 	leastUsedAccountId?: string | null;
 	/**
@@ -49,25 +47,13 @@ export function PoolClassBars({
 	if (accounts.length === 0) return null;
 
 	return (
-		<ul
-			className="mt-item space-y-tight"
-			aria-label={
-				display === "remaining"
-					? "Per-account remaining quota"
-					: "Per-account utilization"
-			}
-		>
+		<ul className="mt-item space-y-tight" aria-label="Per-account utilization">
 			{accounts.map((bar) => {
 				const isHeadline = bar.accountId === leastUsedAccountId;
 				const reason = bar.reason
 					? (REASON_SHORT[bar.reason] ?? bar.reason)
 					: null;
-				const pct =
-					bar.pct == null
-						? null
-						: display === "remaining"
-							? 100 - bar.pct
-							: bar.pct;
+				const pct = bar.pct;
 				const status = reason && bar.pct != null ? ` · ${reason}` : "";
 				const width = pct == null ? 100 : Math.max(0, Math.min(100, pct));
 				return (
@@ -80,7 +66,7 @@ export function PoolClassBars({
 						title={
 							bar.pct == null
 								? `${bar.name} — ${reason ?? "no reading"}`
-								: `${bar.name} — ${formatPct(pct as number)} ${display}${status}`
+								: `${bar.name} — ${formatPct(pct as number)} used${status}`
 						}
 					>
 						<span
@@ -108,7 +94,7 @@ export function PoolClassBars({
 							aria-valuetext={
 								bar.pct == null
 									? `${bar.name}: no reading`
-									: `${bar.name}: ${formatPct(pct as number)} ${display}${status}`
+									: `${bar.name}: ${formatPct(pct as number)} used${status}`
 							}
 							className="relative h-1.5 min-w-0 flex-1 overflow-hidden rounded-full bg-muted"
 						>
