@@ -9,7 +9,7 @@ import {
 	NETWORK,
 	ProviderError,
 	resolveCodexTargetModel,
-	resolveModelContextWindow,
+	resolveModelMaxContextWindow,
 	TIME_CONSTANTS,
 	ValidationError,
 } from "@clankermux/core";
@@ -3544,7 +3544,7 @@ export function createContextWindowExceededResponse(
 ): Response {
 	const backendDescriptions = excludedBackends.map(({ account, model }) => {
 		const target = resolveCodexTargetModel(model, account);
-		const window = resolveModelContextWindow(target);
+		const window = resolveModelMaxContextWindow(target);
 		return {
 			name: account.name,
 			model: target,

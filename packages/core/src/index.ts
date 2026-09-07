@@ -198,6 +198,7 @@ export {
 	parseModelMappings,
 	resolveCodexTargetModel,
 	resolveModelContextWindow,
+	resolveModelMaxContextWindow,
 	SAFETY_MARGIN,
 	validateAndSanitizeModelFallbacks,
 	validateAndSanitizeModelMappings,
