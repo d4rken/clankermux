@@ -1,6 +1,6 @@
 # ClankerMux runway redistribution backtest
 
-Generated: 2026-09-07T11:54:14.361Z
+Generated: 2026-09-07T12:23:24.696Z
 
 Reproduce with:
 
@@ -20,11 +20,11 @@ bun scripts/redistribution-backtest.ts --db=/home/darken/.config/clankermux/clan
 
 | field | value |
 |---|---|
-| usage_snapshots rows | 195507 |
+| usage_snapshots rows | 195587 |
 | accounts | 7 |
 | providers | anthropic, codex |
 | first sample | 2026-06-02T12:48:00.294Z |
-| last sample | 2026-09-07T11:53:46.603Z |
+| last sample | 2026-09-07T12:21:46.609Z |
 | replay interval | `[2026-07-01T00:00:00.000Z, 2026-09-06T00:00:00.000Z)` |
 | grid instants | 9648 |
 
@@ -2180,15 +2180,15 @@ Direct measurements of what a survivor's own window does when its demand class l
 
 ### Time to first 100 %
 
-How long a window took to reach its first reading at or above 100 %, measured from the window start its reset implies (`reset - window length`, the same derivation the projections use) to that reading. The population is every non-placeholder window lifecycle in the replayed snapshot history, both window kinds, every account the history holds, split by whether the account's demand class lost a peer early in the window. Early is a FIXED prefix of the window: its first hour for a five-hour window, its first 24 hours for a weekly one. A peer's death counts whichever of the peer's own windows filled, because an account at 100 % in either window leaves routing and its share of the class demand lands on the survivors.
+How long a window took to reach its first reading at or above 100 %, measured from the window start its reset implies (`reset - window length`, the same derivation the projections use) to that reading. The population is every non-placeholder window lifecycle in the replayed snapshot history, both window kinds, every account the history holds, split by whether the account's demand class lost a peer early in the window. Early is a FIXED prefix of the window: its first hour for a five-hour window, its first 24 hours for a weekly one. A peer's death counts whichever of the peer's own windows filled, because an account at 100 % in either window leaves routing; whether any of that demand reaches the survivors is what this section measures, not what it assumes.
 
 The fill medians are conditional on an observed fill: they describe the windows that reached 100 % and no others. The two censored columns are what to read first, and a larger censored fraction does not by itself establish a larger bias in the conditional median, because the censored windows are not known to be slower ones — the follow-up-incomplete ones are not known to have failed to fill at all.
 
-`completed below 100 %` counts the windows whose sampling ran to within 10 min of the window's own reset without ever reading 100 %, which is the same rule the outcome labels use. `follow-up incomplete` counts the ones whose samples stopped earlier, or that carry no reset to end at: those windows were not observed to their end and say nothing about whether they filled. One combined census makes a cell whose follow-up merely ended look like a cell of slow windows.
+`completed below 100 %` counts the windows whose sampling ran to within 10 min of the window's own reset without ever reading 100 % AND whose successor window was observed to start, which is the same rule the outcome labels use, both halves of it. `follow-up incomplete` counts the ones whose samples stopped earlier, that carry no reset to end at, or that nothing was ever recorded after: those windows were not observed to their end and say nothing about whether they filled. Proximity to the reset alone would label a run that simply stopped as a window observed not to fill, and one combined census makes a cell whose follow-up merely ended look like a cell of slow windows.
 
 A peer dies because its class is busy, and the same busy period fills a survivor faster, so a shorter fill under peer loss is equally consistent with absorption and with common cause. This section is direct and slope-free; it is not causal.
 
-Three populations sit outside the two arms rather than inside them. A segment whose reset column is null carries no derivable window start, so it has no fill duration to state. A lifecycle whose first sample already reads 100 % filled before observation began, which is not a fill duration either. And a lifecycle whose prefix is not wholly inside the replayed range has its own row: peer deaths are only detected inside that range, so such a window would read as `no peer lost` from missing data alone. The reconciliation line below accounts for all of them.
+Three populations sit outside the two arms rather than inside them. A segment whose reset column is null carries no derivable window start, so it has no fill duration to state. A lifecycle whose first sample already reads 100 % filled before observation began, which is not a fill duration either. And a lifecycle whose exposure span is not wholly inside the replayed range has its own row in each table: peer deaths are only detected inside that range, so such a window would read as `no peer lost` from missing data alone. The span each table checks is its own — the fixed prefix above, the window start to the crossing below — so a window can be readable in one and not the other. The reconciliation line below accounts for all of them.
 
 `peer lost in prefix` and its complement are exposure labels rather than statements about the focal account: the prefix rule does not require the focal account to have been available when the peer died, and `no peer lost` does not exclude a peer already exhausted at the window start, only one that crossed 100 % inside the prefix.
 
@@ -2206,16 +2206,17 @@ The `combined` rows put five-hour and weekly windows in one median. A combined d
 | no peer lost in prefix | combined | 36 | 810 | 64 | 4.0% | 3.45 | 3.34 | 2.7 | 2.0 | 4.99 |
 | exposure unobservable | combined | 4 | 102 | 37 | 2.8% | 4.59 | 4.57 | 1.6 | 2.0 | 4.99 |
 
-The same rows again, split instead by whether a same-class peer died anywhere between the window start and the crossing. That definition is length-biased in the direction of longer fills, because a longer fill has more calendar time in which to contain a peer death, and that is why the fixed-prefix split above is the primary one. Both are printed; neither was chosen on its result.
+The same rows again, split instead by whether a same-class peer died anywhere between the window start and the crossing. That definition is length-biased in the direction of longer fills, because a longer fill has more calendar time in which to contain a peer death, and that is why the fixed-prefix split above is the primary one. Both are printed; neither was chosen on its result. This split reads a different span from the prefix one, so it carries its own observability row: a window whose span from its start to its crossing (or to its last sample, uncrossed) leaves the replayed range is `during-fill exposure unobservable` here, whatever the prefix split could say about it.
 
 | exposure | window | fills | completed below 100 % | follow-up incomplete | fill fraction | median fill (h) | median observed span (h) | median unobserved head (min) | median resolution (min) | median censored span, both kinds (h) |
 |---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
 | peer lost during fill | five_hour | 13 | 59 | 0 | 18.1% | 3.31 | 3.24 | 3.2 | 2.0 | 4.99 |
-| peer lost during fill | seven_day | 8 | 20 | 8 | 22.2% | 109.82 | 101.66 | 3.1 | 2.0 | 167.97 |
-| peer lost during fill | combined | 21 | 79 | 8 | 19.4% | 3.99 | 3.95 | 3.2 | 2.0 | 5.00 |
-| no peer lost during fill | five_hour | 24 | 738 | 26 | 3.0% | 3.19 | 3.15 | 2.5 | 2.0 | 4.98 |
+| peer lost during fill | seven_day | 8 | 17 | 7 | 25.0% | 109.82 | 101.66 | 3.1 | 2.0 | 167.97 |
+| peer lost during fill | combined | 21 | 76 | 7 | 20.2% | 3.99 | 3.95 | 3.2 | 2.0 | 5.00 |
+| no peer lost during fill | five_hour | 24 | 733 | 26 | 3.1% | 3.19 | 3.15 | 2.5 | 2.0 | 4.98 |
 | no peer lost during fill | seven_day | 2 | 7 | 34 | 4.7% | 71.29 | 71.28 | 0.8 | 2.0 | 51.39 |
-| no peer lost during fill | combined | 26 | 745 | 60 | 3.1% | 3.20 | 3.17 | 2.4 | 2.0 | 4.98 |
+| no peer lost during fill | combined | 26 | 740 | 60 | 3.1% | 3.20 | 3.17 | 2.4 | 2.0 | 4.98 |
+| during-fill exposure unobservable | combined | 4 | 110 | 38 | 2.6% | 4.59 | 4.57 | 1.6 | 2.0 | 4.99 |
 
 Every cell with fewer than 20 fills prints its fill durations, sorted, in hours. At that n the median summarises few observed fills, and the values themselves are what a reader can judge.
 
@@ -2227,6 +2228,7 @@ Every cell with fewer than 20 fills prints its fill durations, sorted, in hours.
 - `peer lost during fill` five_hour (13 fills): 1.32, 2.27, 2.30, 2.37, 2.52, 2.64, 3.31, 3.42, 3.55, 3.58, 3.99, 4.31, 4.78 h
 - `peer lost during fill` seven_day (8 fills): 86.71, 88.05, 101.83, 109.82, 109.98, 132.28, 132.78, 159.11 h
 - `no peer lost during fill` seven_day (2 fills): 71.29, 89.01 h
+- `during-fill exposure unobservable` combined (4 fills): 2.69, 4.59, 87.03, 126.32 h
 
 Reconciliation: 51 filled + 926 completed below 100 % + 105 follow-up incomplete + 182 with no reset on the segment + 1 already full at the first sample + 19717 placeholder lifecycles skipped = 20982 window lifecycles.
 
@@ -2236,9 +2238,15 @@ What each survivor's own request volume did around the instant a peer of its dem
 
 The survivor set `S` is the class members observed AVAILABLE just before the death: their newest snapshot inside the staleness bar reads under 100 % on both windows. A member reading 100 % on either window, or carrying no reading inside the bar, is listed under the death rather than counted as a survivor — an account at 100 % is already out of routing, and an unread stretch is not evidence of being in it. The dying account itself must be available just before the death, so a window filling while its account was already exhausted on the other window is excluded rather than measured as a departure.
 
-The half-width `W` is the largest symmetric width in which NO member of the class changes availability state, capped at 60 min for the primary horizon and 6 h for the second one. The dying account's own transition at the death is the one change the rule ignores. A death whose clean interval falls under 15 min is excluded, with the account and the distance that bounded it printed beside it. This selection preferentially removes rapid cascades, and strong absorption can itself precipitate the next death, so the analysed population is the sufficiently-isolated departures and nothing here is a claim about cascades.
+The half-width `W` is the largest symmetric width in which NO member of the class changes availability state, capped at 60 min for the primary horizon and 6 h for the second one. The cap is a cap: most deaths are read at less, and the per-death table prints the width each one was read at. Every member of the class bounds it, including a member that is not in `S` and one created after the death — an account arriving is a regime change even though it was never a candidate for the traffic. The dying account's own transition at the death is the one change the rule ignores. A death whose clean interval falls under 15 min is excluded, with the account and the distance that bounded it printed beside it. This selection preferentially removes rapid cascades, and strong absorption can itself precipitate the next death, so the analysed population is the sufficiently-isolated departures and nothing here is a claim about cascades.
 
-Nothing at or after the death enters any share or weight: the dying account's pre-death share, each survivor's pre-death share, and the equal split are all functions of the window `[D − W, D)` alone. That prevents post-death volume from leaking into the weights. It does not make any of these numbers a measurement of what the death caused, and none of them is read that way here.
+The weights are read over a different width, `W_pre`, and the reason is that `W` is bounded on BOTH sides of the death: which width `W` takes depends on what happened after `D`, so a weight computed over it would not have been computable at `D`. `W_pre` runs back from `D` to the nearest availability change of any class member before `D`, capped at the same horizon cap, and reads nothing at or after `D`. The dying account's pre-death share, each survivor's pre-death share and the equal split are therefore computable at `D` from data available at `D`. The rate comparison — alpha, the ratio, each `delta_s`, `P`, `N`, `G` and the matched controls — uses the symmetric `W` instead, chosen retrospectively so that no availability change sits inside it; a comparison needs the same clean regime on both sides. Both widths are printed for every death.
+
+Nothing at or after the death enters any share or weight: they are functions of `[D − W_pre, D)` alone. That prevents post-death volume from leaking into the weights. It does not make any of these numbers a measurement of what the death caused, and none of them is read that way here.
+
+An account whose five-hour and weekly windows first read 100 % in the SAME sample left routing once, not twice. Those events are folded into one departure, both window kinds are recorded on it, and the folded event is counted in the reconciliation at the end rather than measured a second time over an identical survivor set and interval.
+
+Request coverage is checked per horizon rather than once at the widest. A death whose loaded request span carries the whole primary interval keeps its primary measurement even where the six-hour interval runs outside that span; the six-hour row is then absent with its reason stated under the death. The gate that excludes a death for having no pre-death traffic reads the PRIMARY horizon, the one the numbers are reported from.
 
 The bucket containing the death is in neither half — a bucket enters pre only if it ends at or before `D`, and post only if it starts at or after it — so up to one minute is uncounted on each side.
 
@@ -2253,9 +2261,11 @@ A window fills because its account was busy, and often its class with it. A clas
 Definitions, per basis, over the survivor set `S` and the dying account `d`:
 
 ```
-preRate_a          = volume(a, [D-W, D)) / minutes counted in [D-W, D)
-dyingPreShare      = preRate_d / (preRate_d + sum over S of preRate_s)
-survivorPreShare_s = preRate_s / sum over S of preRate_s
+preRate_a          = volume(a, [D-W, D))     / minutes counted in [D-W, D)
+postRate_a         = volume(a, [D, D+W))     / minutes counted in [D, D+W)
+weightRate_a       = volume(a, [D-W_pre, D)) / minutes counted in [D-W_pre, D)
+dyingPreShare      = weightRate_d / (weightRate_d + sum over S of weightRate_s)
+survivorPreShare_s = weightRate_s / sum over S of weightRate_s
 equalSplitShare    = 1 / |S|
 alpha              = (postRateSurv - preRateSurv) / preRateDying
 survivorRateRatio  = postRateSurv / preRateSurv
@@ -2267,7 +2277,7 @@ G                  = P - N
 largestGainShare   = max_s max(delta_s, 0) / P   (null when G <= 0)
 ```
 
-`alpha = (ratio - 1) * preRateSurv / preRateDying`, so the same ratio change is a different normalised gain at a different dying pre-share, and a ratio difference is not an absorbed fraction. The raw rates are printed beside both.
+`alpha = (ratio - 1) * preRateSurv / preRateDying`, so the same ratio change is a different normalised gain at a different dying pre-share, and a ratio difference does not measure a fraction of the dying account's demand. The raw rates are printed beside both.
 
 `largestGainShare` is the largest account's share of positive rate increases. It is not a share of the volume that moved: it divides one account's rise by the sum of the rises and does not see the falls, which is why it has no value where the survivor set's net change `G` is zero or negative.
 
@@ -2281,22 +2291,24 @@ The other class's ratio over the same interval is printed as concurrent context,
 
 | population | basis | measurements in population | ratio n | median survivor rate ratio | alpha n | median alpha | gain-share n | median largest gain share | split n | median equal split 1/S | dying-share n | median dying pre-share |
 |---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
-| at death (W = 60 min) | requests | 33 | 31 | 1.457 | 33 | 0.200 | 22 | 100.0% | 33 | 50.0% | 33 | 67.4% |
-| at death (W = 60 min) | tokens | 33 | 30 | 1.812 | 33 | 0.351 | 24 | 100.0% | 33 | 50.0% | 33 | 74.5% |
-| at death (W = 6 h) | requests | 17 | 16 | 0.586 | 17 | -0.222 | 8 | 100.0% | 17 | 50.0% | 17 | 62.1% |
-| at death (W = 6 h) | tokens | 17 | 15 | 0.744 | 17 | -0.203 | 8 | 100.0% | 17 | 50.0% | 17 | 69.1% |
-| matched control -7 d (W = 60 min) | requests | 15 | 5 | 0.950 | 2 | -0.354 | 2 | 69.0% | 15 | 50.0% | 5 | 0.0% |
-| matched control -7 d (W = 60 min) | tokens | 15 | 5 | 0.992 | 2 | 1.606 | 2 | 92.7% | 15 | 50.0% | 5 | 0.0% |
-| matched control +7 d (W = 60 min) | requests | 16 | 9 | 1.518 | 6 | 0.506 | 7 | 100.0% | 16 | 50.0% | 9 | 7.7% |
-| matched control +7 d (W = 60 min) | tokens | 16 | 8 | 1.108 | 6 | 0.474 | 7 | 100.0% | 16 | 50.0% | 9 | 3.3% |
-| matched control -7 d (W = 6 h) | requests | 5 | 3 | 0.878 | 2 | -1.166 | 1 | 100.0% | 5 | 33.3% | 3 | 9.5% |
-| matched control -7 d (W = 6 h) | tokens | 5 | 3 | 0.912 | 2 | -2.261 | 1 | 100.0% | 5 | 33.3% | 3 | 3.7% |
-| matched control +7 d (W = 6 h) | requests | 9 | 7 | 2.784 | 7 | 0.113 | 4 | 97.6% | 9 | 33.3% | 8 | 51.7% |
-| matched control +7 d (W = 6 h) | tokens | 9 | 6 | 1.018 | 7 | 0.106 | 5 | 100.0% | 9 | 33.3% | 8 | 32.1% |
-| other class, same interval (W = 60 min) | requests | 33 | 31 | 0.514 | 0 | — | 9 | 100.0% | 33 | 100.0% | 0 | — |
-| other class, same interval (W = 60 min) | tokens | 33 | 31 | 0.458 | 0 | — | 10 | 100.0% | 33 | 100.0% | 0 | — |
-| other class, same interval (W = 6 h) | requests | 17 | 16 | 0.256 | 0 | — | 4 | 100.0% | 17 | 100.0% | 0 | — |
-| other class, same interval (W = 6 h) | tokens | 17 | 16 | 0.256 | 0 | — | 5 | 100.0% | 17 | 100.0% | 0 | — |
+| at death (W ≤ 60 min) | requests | 33 | 31 | 1.457 | 33 | 0.200 | 22 | 100.0% | 33 | 50.0% | 33 | 67.0% |
+| at death (W ≤ 60 min) | tokens | 33 | 30 | 1.812 | 33 | 0.351 | 24 | 100.0% | 33 | 50.0% | 33 | 73.8% |
+| at death (W ≤ 6 h) | requests | 17 | 16 | 0.586 | 17 | -0.222 | 8 | 100.0% | 17 | 50.0% | 17 | 66.2% |
+| at death (W ≤ 6 h) | tokens | 17 | 15 | 0.744 | 17 | -0.203 | 8 | 100.0% | 17 | 50.0% | 17 | 69.1% |
+| at death (W ≤ 60 min, deaths also measured at W ≤ 6 h) | requests | 17 | 16 | 1.032 | 17 | 0.160 | 10 | 100.0% | 17 | 50.0% | 17 | 55.6% |
+| at death (W ≤ 60 min, deaths also measured at W ≤ 6 h) | tokens | 17 | 15 | 1.051 | 17 | 0.158 | 10 | 100.0% | 17 | 50.0% | 17 | 61.7% |
+| matched control -7 d (W ≤ 60 min) | requests | 15 | 5 | 0.950 | 2 | -0.354 | 2 | 69.0% | 15 | 50.0% | 5 | 0.0% |
+| matched control -7 d (W ≤ 60 min) | tokens | 15 | 5 | 0.992 | 2 | 1.606 | 2 | 92.7% | 15 | 50.0% | 5 | 0.0% |
+| matched control +7 d (W ≤ 60 min) | requests | 16 | 9 | 1.518 | 6 | 0.506 | 7 | 100.0% | 16 | 50.0% | 9 | 7.7% |
+| matched control +7 d (W ≤ 60 min) | tokens | 16 | 8 | 1.108 | 6 | 0.474 | 7 | 100.0% | 16 | 50.0% | 9 | 3.3% |
+| matched control -7 d (W ≤ 6 h) | requests | 5 | 3 | 0.878 | 2 | -1.166 | 1 | 100.0% | 5 | 33.3% | 3 | 8.8% |
+| matched control -7 d (W ≤ 6 h) | tokens | 5 | 3 | 0.912 | 2 | -2.261 | 1 | 100.0% | 5 | 33.3% | 3 | 3.5% |
+| matched control +7 d (W ≤ 6 h) | requests | 9 | 7 | 2.784 | 7 | 0.113 | 4 | 97.6% | 9 | 33.3% | 8 | 51.7% |
+| matched control +7 d (W ≤ 6 h) | tokens | 9 | 6 | 1.018 | 7 | 0.106 | 5 | 100.0% | 9 | 33.3% | 8 | 32.1% |
+| other class, same interval (W ≤ 60 min) | requests | 33 | 31 | 0.514 | 0 | — | 9 | 100.0% | 33 | 100.0% | 0 | — |
+| other class, same interval (W ≤ 60 min) | tokens | 33 | 31 | 0.458 | 0 | — | 10 | 100.0% | 33 | 100.0% | 0 | — |
+| other class, same interval (W ≤ 6 h) | requests | 17 | 16 | 0.256 | 0 | — | 4 | 100.0% | 17 | 100.0% | 0 | — |
+| other class, same interval (W ≤ 6 h) | tokens | 17 | 16 | 0.256 | 0 | — | 5 | 100.0% | 17 | 100.0% | 0 | — |
 
 Each statistic carries its own denominator: a row's `measurements in population` count is every measurement of that population, and the `n` beside a median is the subset of them where that statistic has a value.
 
@@ -2304,24 +2316,24 @@ The pairing is a difference of two ratios rather than a ratio, so it is printed 
 
 | pairing | basis | n | median delta |
 |---|---|---:|---:|
-| paired median of (ratio at death − mean ratio at eligible controls), W = 60 min | requests | 12 | -0.021 |
-| paired median of (ratio at death − mean ratio at eligible controls), W = 60 min | tokens | 11 | 0.444 |
-| paired median of (ratio at death − mean ratio at eligible controls), W = 6 h | requests | 8 | -0.399 |
-| paired median of (ratio at death − mean ratio at eligible controls), W = 6 h | tokens | 7 | 0.702 |
+| paired median of (ratio at death − mean ratio at eligible controls), W ≤ 60 min | requests | 12 | -0.021 |
+| paired median of (ratio at death − mean ratio at eligible controls), W ≤ 60 min | tokens | 11 | 0.444 |
+| paired median of (ratio at death − mean ratio at eligible controls), W ≤ 6 h | requests | 8 | -0.399 |
+| paired median of (ratio at death − mean ratio at eligible controls), W ≤ 6 h | tokens | 7 | 0.702 |
 
 Every analysed death, one block each — requests above tokens on both horizons — with one line per survivor underneath. Volumes are raw counts and raw tokens over the half-window; rates are those divided by the minutes counted.
 
 **Event 31** — 2026-07-28T19:36:41.291Z — anthropic / five_hour — dying `Claude-3` — S = `Claude-2`, `Claude-4`, `Claude-1`
 
-| horizon | basis | W (min) | pre min | post min | pre vol (dying) | post vol (dying) | pre vol (surv) | post vol (surv) | dying pre-share | alpha | ratio | P | N | G | largest gain share | control -7 d | control +7 d |
+| horizon | basis | W_pre (min) | pre min | post min | pre vol (dying) | post vol (dying) | pre vol (surv) | post vol (surv) | dying pre-share | alpha | ratio | P | N | G | largest gain share | control -7 d | control +7 d |
 |---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|---|
-| 60 min | requests | 60 | 59 | 59 | 79 | 6 | 1069 | 675 | 6.9% | -4.987 | 0.631 | 0.000 | 6.678 | -6.678 | — | availability-change-inside: Claude-4 is unknown at the start of the interval | 5.190 |
-| 60 min | tokens | 60 | 59 | 59 | 20149740 | 1250961 | 196248569 | 130934536 | 9.3% | -3.241 | 0.667 | 0 | 1107018 | -1107018 | — | availability-change-inside: Claude-4 is unknown at the start of the interval | 2.673 |
-| 6 h | requests | 96 | 95 | 95 | 393 | 6 | 1732 | 884 | 18.5% | -2.158 | 0.510 | 0.189 | 9.116 | -8.926 | — | availability-change-inside: Claude-4 is unknown at the start of the interval | 4.542 |
-| 6 h | tokens | 96 | 95 | 95 | 87356580 | 1250961 | 319775924 | 180627433 | 21.5% | -1.593 | 0.565 | 40584 | 1505305 | -1464721 | — | availability-change-inside: Claude-4 is unknown at the start of the interval | 2.566 |
+| W = 60 min | requests | 60 | 59 | 59 | 79 | 6 | 1069 | 675 | 6.9% | -4.987 | 0.631 | 0.000 | 6.678 | -6.678 | — | availability-change-inside: Claude-4 is unknown at the start of the interval | 5.190 |
+| W = 60 min | tokens | 60 | 59 | 59 | 20149740 | 1250961 | 196248569 | 130934536 | 9.3% | -3.241 | 0.667 | 0 | 1107018 | -1107018 | — | availability-change-inside: Claude-4 is unknown at the start of the interval | 2.673 |
+| W = 96 min | requests | 96 | 95 | 95 | 393 | 6 | 1732 | 884 | 18.5% | -2.158 | 0.510 | 0.189 | 9.116 | -8.926 | — | availability-change-inside: Claude-4 is unknown at the start of the interval | 4.542 |
+| W = 96 min | tokens | 96 | 95 | 95 | 87356580 | 1250961 | 319775924 | 180627433 | 21.5% | -1.593 | 0.565 | 40584 | 1505305 | -1464721 | — | availability-change-inside: Claude-4 is unknown at the start of the interval | 2.566 |
 
 - Availability bound: 96 min, set by `Claude-2`.
-- Survivors, at W = 60 min:
+- Survivors, at W = 60 min (W_pre = 60 min):
   - `Claude-2`: requests pre 18.085, post 11.441, delta -6.644, contribution -4.962, pre-share 99.8%; tokens pre 3321770, post 2219229, delta -1102540, contribution -3.228, pre-share 99.9%
   - `Claude-4`: requests pre 0.017, post 0.000, delta -0.017, contribution -0.013, pre-share 0.1%; tokens pre 4201, post 0, delta -4201, contribution -0.012, pre-share 0.1%
   - `Claude-1`: requests pre 0.017, post 0.000, delta -0.017, contribution -0.013, pre-share 0.1%; tokens pre 276, post 0, delta -276, contribution -0.001, pre-share 0.0%
@@ -2329,15 +2341,15 @@ Every analysed death, one block each — requests above tokens on both horizons 
 
 **Event 53** — 2026-09-03T12:37:55.770Z — anthropic / five_hour — dying `Claude-2` — S = `Claude-3`, `Claude-4`, `Claude-1`, `Claude-5`
 
-| horizon | basis | W (min) | pre min | post min | pre vol (dying) | post vol (dying) | pre vol (surv) | post vol (surv) | dying pre-share | alpha | ratio | P | N | G | largest gain share | control -7 d | control +7 d |
+| horizon | basis | W_pre (min) | pre min | post min | pre vol (dying) | post vol (dying) | pre vol (surv) | post vol (surv) | dying pre-share | alpha | ratio | P | N | G | largest gain share | control -7 d | control +7 d |
 |---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|---|
-| 60 min | requests | 60 | 59 | 59 | 439 | 0 | 5172 | 2759 | 7.8% | -5.497 | 0.533 | 39.390 | 80.288 | -40.898 | — | 0.950 | outside-loaded-span: the interval leaves the span the request table was read over |
-| 60 min | tokens | 60 | 59 | 59 | 85874020 | 0 | 849544915 | 484180964 | 9.2% | -4.255 | 0.570 | 6588842 | 12781452 | -6192609 | — | 1.082 | outside-loaded-span: the interval leaves the span the request table was read over |
-| 6 h | requests | 134 | 133 | 133 | 3284 | 0 | 8657 | 2835 | 27.5% | -1.773 | 0.327 | 18.030 | 61.805 | -43.774 | — | 0.878 | outside-loaded-span: the interval leaves the span the request table was read over |
-| 6 h | tokens | 134 | 133 | 133 | 455727177 | 0 | 1288343021 | 490616977 | 26.1% | -1.750 | 0.381 | 2971261 | 8969201 | -5997940 | — | 0.912 | outside-loaded-span: the interval leaves the span the request table was read over |
+| W = 60 min | requests | 60 | 59 | 59 | 439 | 0 | 5172 | 2759 | 7.8% | -5.497 | 0.533 | 39.390 | 80.288 | -40.898 | — | 0.950 | outside-loaded-span: the interval leaves the span the request table was read over |
+| W = 60 min | tokens | 60 | 59 | 59 | 85874020 | 0 | 849544915 | 484180964 | 9.2% | -4.255 | 0.570 | 6588842 | 12781452 | -6192609 | — | 1.082 | outside-loaded-span: the interval leaves the span the request table was read over |
+| W = 134 min | requests | 360 | 133 | 133 | 3284 | 0 | 8657 | 2835 | 21.5% | -1.773 | 0.327 | 18.030 | 61.805 | -43.774 | — | 0.878 | outside-loaded-span: the interval leaves the span the request table was read over |
+| W = 134 min | tokens | 360 | 133 | 133 | 455727177 | 0 | 1288343021 | 490616977 | 20.7% | -1.750 | 0.381 | 2971261 | 8969201 | -5997940 | — | 0.912 | outside-loaded-span: the interval leaves the span the request table was read over |
 
 - Availability bound: 134 min, set by `Claude-2`.
-- Survivors, at W = 60 min:
+- Survivors, at W = 60 min (W_pre = 60 min):
   - `Claude-3`: requests pre 74.475, post 1.034, delta -73.441, contribution -9.870, pre-share 85.0%; tokens pre 11720798, post 206909, delta -11513888, contribution -7.911, pre-share 81.4%
   - `Claude-4`: requests pre 6.254, post 45.644, delta 39.390, contribution 5.294, pre-share 7.1%; tokens pre 1400378, post 7989220, delta 6588842, contribution 4.527, pre-share 9.7%
   - `Claude-1`: requests pre 0.119, post 0.085, delta -0.034, contribution -0.005, pre-share 0.1%; tokens pre 18170, post 10328, delta -7842, contribution -0.005, pre-share 0.1%
@@ -2346,15 +2358,15 @@ Every analysed death, one block each — requests above tokens on both horizons 
 
 **Event 35** — 2026-08-04T15:44:49.581Z — anthropic / five_hour — dying `Claude-3` — S = `Claude-2`, `Claude-4`, `Claude-1`
 
-| horizon | basis | W (min) | pre min | post min | pre vol (dying) | post vol (dying) | pre vol (surv) | post vol (surv) | dying pre-share | alpha | ratio | P | N | G | largest gain share | control -7 d | control +7 d |
+| horizon | basis | W_pre (min) | pre min | post min | pre vol (dying) | post vol (dying) | pre vol (surv) | post vol (surv) | dying pre-share | alpha | ratio | P | N | G | largest gain share | control -7 d | control +7 d |
 |---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|---|
-| 60 min | requests | 60 | 59 | 59 | 187 | 2 | 2077 | 1532 | 8.3% | -2.914 | 0.738 | 3.373 | 12.610 | -9.237 | — | availability-change-inside: Claude-3 is exhausted at the start of the interval | 0.025 |
-| 60 min | tokens | 60 | 59 | 59 | 64500800 | 835476 | 210555452 | 169365189 | 23.5% | -0.639 | 0.804 | 960957 | 1659097 | -698140 | — | availability-change-inside: Claude-3 is exhausted at the start of the interval | 0.047 |
-| 6 h | requests | 76 | 75 | 75 | 385 | 2 | 2473 | 1716 | 13.5% | -1.966 | 0.694 | 4.613 | 14.707 | -10.093 | — | availability-change-inside: Claude-3 is exhausted at the start of the interval | 0.009 |
-| 6 h | tokens | 76 | 75 | 75 | 86510601 | 835476 | 265172853 | 197248619 | 24.6% | -0.785 | 0.744 | 1079612 | 1985269 | -905656 | — | availability-change-inside: Claude-3 is exhausted at the start of the interval | 0.008 |
+| W = 60 min | requests | 60 | 59 | 59 | 187 | 2 | 2077 | 1532 | 8.3% | -2.914 | 0.738 | 3.373 | 12.610 | -9.237 | — | availability-change-inside: Claude-3 is exhausted at the start of the interval | 0.025 |
+| W = 60 min | tokens | 60 | 59 | 59 | 64500800 | 835476 | 210555452 | 169365189 | 23.5% | -0.639 | 0.804 | 960957 | 1659097 | -698140 | — | availability-change-inside: Claude-3 is exhausted at the start of the interval | 0.047 |
+| W = 76 min | requests | 360 | 75 | 75 | 385 | 2 | 2473 | 1716 | 13.9% | -1.966 | 0.694 | 4.613 | 14.707 | -10.093 | — | availability-change-inside: Claude-3 is exhausted at the start of the interval | 0.009 |
+| W = 76 min | tokens | 360 | 75 | 75 | 86510601 | 835476 | 265172853 | 197248619 | 25.7% | -0.785 | 0.744 | 1079612 | 1985269 | -905656 | — | availability-change-inside: Claude-3 is exhausted at the start of the interval | 0.008 |
 
 - Availability bound: 76 min, set by `Claude-3`.
-- Survivors, at W = 60 min:
+- Survivors, at W = 60 min (W_pre = 60 min):
   - `Claude-2`: requests pre 4.576, post 7.949, delta 3.373, contribution 1.064, pre-share 13.0%; tokens pre 527372, post 1488329, delta 960957, contribution 0.879, pre-share 14.8%
   - `Claude-4`: requests pre 0.000, post 0.000, delta 0.000, contribution 0.000, pre-share 0.0%; tokens pre 0, post 0, delta 0, contribution 0.000, pre-share 0.0%
   - `Claude-1`: requests pre 30.627, post 18.017, delta -12.610, contribution -3.979, pre-share 87.0%; tokens pre 3041365, post 1382268, delta -1659097, contribution -1.518, pre-share 85.2%
@@ -2362,31 +2374,46 @@ Every analysed death, one block each — requests above tokens on both horizons 
 
 **Event 45** — 2026-08-24T12:12:49.311Z — anthropic / five_hour — dying `Claude-1` — S = `Claude-2`, `Claude-3`, `Claude-4`, `Claude-5`
 
-| horizon | basis | W (min) | pre min | post min | pre vol (dying) | post vol (dying) | pre vol (surv) | post vol (surv) | dying pre-share | alpha | ratio | P | N | G | largest gain share | control -7 d | control +7 d |
+| horizon | basis | W_pre (min) | pre min | post min | pre vol (dying) | post vol (dying) | pre vol (surv) | post vol (surv) | dying pre-share | alpha | ratio | P | N | G | largest gain share | control -7 d | control +7 d |
 |---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|---|
-| 60 min | requests | 49 | 47 | 48 | 222 | 0 | 1144 | 1052 | 16.3% | -0.513 | 0.900 | 11.073 | 13.497 | -2.424 | — | availability-change-inside: Claude-5 is unknown at the start of the interval | 1.040 |
-| 60 min | tokens | 49 | 47 | 48 | 90642551 | 0 | 254961313 | 262496895 | 26.2% | 0.023 | 1.008 | 2645348 | 2601372 | 43977 | 89.1% | availability-change-inside: Claude-5 is unknown at the start of the interval | 1.108 |
+| W = 49 min | requests | 60 | 47 | 48 | 222 | 0 | 1144 | 1052 | 21.2% | -0.513 | 0.900 | 11.073 | 13.497 | -2.424 | — | availability-change-inside: Claude-5 is unknown at the start of the interval | 1.040 |
+| W = 49 min | tokens | 60 | 47 | 48 | 90642551 | 0 | 254961313 | 262496895 | 30.5% | 0.023 | 1.008 | 2645348 | 2601372 | 43977 | 89.1% | availability-change-inside: Claude-5 is unknown at the start of the interval | 1.108 |
 
 - 6 h horizon absent: the availability bound of 49 min caps the six-hour horizon at the 49 min it is already measured over.
 - Availability bound: 49 min, set by `Claude-1`.
-- Survivors, at W = 60 min:
-  - `Claude-2`: requests pre 1.596, post 1.333, delta -0.262, contribution -0.056, pre-share 6.6%; tokens pre 213852, post 169543, delta -44309, contribution -0.023, pre-share 3.9%
-  - `Claude-3`: requests pre 1.574, post 10.958, delta 9.384, contribution 1.987, pre-share 6.5%; tokens pre 341510, post 2699518, delta 2358009, contribution 1.223, pre-share 6.3%
-  - `Claude-4`: requests pre 0.915, post 2.604, delta 1.689, contribution 0.358, pre-share 3.8%; tokens pre 388364, post 675704, delta 287340, contribution 0.149, pre-share 7.2%
-  - `Claude-5`: requests pre 20.255, post 7.021, delta -13.234, contribution -2.802, pre-share 83.2%; tokens pre 4480983, post 1923920, delta -2557062, contribution -1.326, pre-share 82.6%
+- Survivors, at W = 49 min (W_pre = 60 min):
+  - `Claude-2`: requests pre 1.596, post 1.333, delta -0.262, contribution -0.056, pre-share 6.2%; tokens pre 213852, post 169543, delta -44309, contribution -0.023, pre-share 3.8%
+  - `Claude-3`: requests pre 1.574, post 10.958, delta 9.384, contribution 1.987, pre-share 9.5%; tokens pre 341510, post 2699518, delta 2358009, contribution 1.223, pre-share 7.8%
+  - `Claude-4`: requests pre 0.915, post 2.604, delta 1.689, contribution 0.358, pre-share 3.6%; tokens pre 388364, post 675704, delta 287340, contribution 0.149, pre-share 7.1%
+  - `Claude-5`: requests pre 20.255, post 7.021, delta -13.234, contribution -2.802, pre-share 80.6%; tokens pre 4480983, post 1923920, delta -2557062, contribution -1.326, pre-share 81.2%
+- excluded members: none
+
+**Event 20** — 2026-07-24T17:16:53.597Z — anthropic / five_hour — dying `Claude-4` — S = `Claude-2`, `Claude-3`, `Claude-1`
+
+| horizon | basis | W_pre (min) | pre min | post min | pre vol (dying) | post vol (dying) | pre vol (surv) | post vol (surv) | dying pre-share | alpha | ratio | P | N | G | largest gain share | control -7 d | control +7 d |
+|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|---|
+| W = 26 min | requests | 60 | 25 | 25 | 313 | 6 | 230 | 354 | 26.1% | 0.396 | 1.539 | 7.240 | 2.280 | 4.960 | 56.9% | availability-change-inside: Claude-4 is unknown at the start of the interval | — |
+| W = 26 min | tokens | 60 | 25 | 25 | 74643969 | 914686 | 20511874 | 46696842 | 54.3% | 0.351 | 2.277 | 1317971 | 270573 | 1047399 | 76.1% | availability-change-inside: Claude-4 is unknown at the start of the interval | — |
+
+- 6 h horizon absent: the availability bound of 26 min caps the six-hour horizon at the 26 min it is already measured over.
+- Availability bound: 26 min, set by `Claude-2`.
+- Survivors, at W = 26 min (W_pre = 60 min):
+  - `Claude-2`: requests pre 1.120, post 5.240, delta 4.120, contribution 0.329, pre-share 4.1%; tokens pre 97832, post 1101418, delta 1003586, contribution 0.336, pre-share 15.1%
+  - `Claude-3`: requests pre 8.080, post 5.800, delta -2.280, contribution -0.182, pre-share 95.9%; tokens pre 722643, post 452070, delta -270573, contribution -0.091, pre-share 84.9%
+  - `Claude-1`: requests pre 0.000, post 3.120, delta 3.120, contribution 0.249, pre-share 0.0%; tokens pre 0, post 314385, delta 314385, contribution 0.105, pre-share 0.0%
 - excluded members: none
 
 **Event 42** — 2026-08-17T17:53:47.828Z — anthropic / five_hour — dying `Claude-3` — S = `Claude-2`, `Claude-4`, `Claude-1`
 
-| horizon | basis | W (min) | pre min | post min | pre vol (dying) | post vol (dying) | pre vol (surv) | post vol (surv) | dying pre-share | alpha | ratio | P | N | G | largest gain share | control -7 d | control +7 d |
+| horizon | basis | W_pre (min) | pre min | post min | pre vol (dying) | post vol (dying) | pre vol (surv) | post vol (surv) | dying pre-share | alpha | ratio | P | N | G | largest gain share | control -7 d | control +7 d |
 |---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|---|
-| 60 min | requests | 60 | 59 | 59 | 305 | 0 | 731 | 913 | 29.4% | 0.597 | 1.249 | 3.085 | 0.000 | 3.085 | 99.5% | availability-change-inside: Claude-2 is exhausted at the start of the interval | 1.270 |
-| 60 min | tokens | 60 | 59 | 59 | 149799554 | 0 | 167424270 | 253530689 | 47.2% | 0.575 | 1.514 | 1459431 | 0 | 1459431 | 99.5% | availability-change-inside: Claude-2 is exhausted at the start of the interval | 1.071 |
-| 6 h | requests | 196 | 195 | 195 | 683 | 0 | 3102 | 1819 | 18.0% | -1.878 | 0.586 | 0.005 | 6.585 | -6.579 | — | availability-change-inside: Claude-2 is exhausted at the start of the interval | 0.985 |
-| 6 h | tokens | 196 | 195 | 195 | 287205309 | 0 | 654162354 | 552819641 | 30.5% | -0.353 | 0.845 | 2100 | 521806 | -519706 | — | availability-change-inside: Claude-2 is exhausted at the start of the interval | 1.018 |
+| W = 60 min | requests | 60 | 59 | 59 | 305 | 0 | 731 | 913 | 29.4% | 0.597 | 1.249 | 3.085 | 0.000 | 3.085 | 99.5% | availability-change-inside: Claude-2 is exhausted at the start of the interval | 1.270 |
+| W = 60 min | tokens | 60 | 59 | 59 | 149799554 | 0 | 167424270 | 253530689 | 47.2% | 0.575 | 1.514 | 1459431 | 0 | 1459431 | 99.5% | availability-change-inside: Claude-2 is exhausted at the start of the interval | 1.071 |
+| W = 196 min | requests | 208 | 195 | 195 | 683 | 0 | 3102 | 1819 | 17.8% | -1.878 | 0.586 | 0.005 | 6.585 | -6.579 | — | availability-change-inside: Claude-2 is exhausted at the start of the interval | 0.985 |
+| W = 196 min | tokens | 208 | 195 | 195 | 287205309 | 0 | 654162354 | 552819641 | 30.2% | -0.353 | 0.845 | 2100 | 521806 | -519706 | — | availability-change-inside: Claude-2 is exhausted at the start of the interval | 1.018 |
 
 - Availability bound: 196 min, set by `Claude-3`.
-- Survivors, at W = 60 min:
+- Survivors, at W = 60 min (W_pre = 60 min):
   - `Claude-2`: requests pre 12.390, post 15.458, delta 3.068, contribution 0.593, pre-share 100.0%; tokens pre 2837699, post 4290190, delta 1452490, contribution 0.572, pre-share 100.0%
   - `Claude-4`: requests pre 0.000, post 0.017, delta 0.017, contribution 0.003, pre-share 0.0%; tokens pre 0, post 6941, delta 6941, contribution 0.003, pre-share 0.0%
   - `Claude-1`: requests pre 0.000, post 0.000, delta 0.000, contribution 0.000, pre-share 0.0%; tokens pre 0, post 0, delta 0, contribution 0.000, pre-share 0.0%
@@ -2394,15 +2421,15 @@ Every analysed death, one block each — requests above tokens on both horizons 
 
 **Event 48** — 2026-09-02T07:17:12.861Z — anthropic / five_hour — dying `Claude-1` — S = `Claude-2`, `Claude-3`, `Claude-4`, `Claude-5`
 
-| horizon | basis | W (min) | pre min | post min | pre vol (dying) | post vol (dying) | pre vol (surv) | post vol (surv) | dying pre-share | alpha | ratio | P | N | G | largest gain share | control -7 d | control +7 d |
+| horizon | basis | W_pre (min) | pre min | post min | pre vol (dying) | post vol (dying) | pre vol (surv) | post vol (surv) | dying pre-share | alpha | ratio | P | N | G | largest gain share | control -7 d | control +7 d |
 |---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|---|
-| 60 min | requests | 60 | 59 | 59 | 403 | 0 | 837 | 914 | 32.5% | 0.191 | 1.092 | 6.068 | 4.763 | 1.305 | 100.0% | — | outside-loaded-span: the interval leaves the span the request table was read over |
-| 60 min | tokens | 60 | 59 | 59 | 77668505 | 0 | 98782521 | 178969268 | 44.0% | 1.032 | 1.812 | 1476467 | 117370 | 1359097 | 100.0% | — | outside-loaded-span: the interval leaves the span the request table was read over |
-| 6 h | requests | 74 | 73 | 73 | 466 | 0 | 837 | 1313 | 35.8% | 1.021 | 1.569 | 7.219 | 0.699 | 6.521 | 98.3% | — | outside-loaded-span: the interval leaves the span the request table was read over |
-| 6 h | tokens | 74 | 73 | 73 | 91874577 | 0 | 98782521 | 236436094 | 48.2% | 1.498 | 2.394 | 1885665 | 0 | 1885665 | 80.5% | — | outside-loaded-span: the interval leaves the span the request table was read over |
+| W = 60 min | requests | 60 | 59 | 59 | 403 | 0 | 837 | 914 | 32.5% | 0.191 | 1.092 | 6.068 | 4.763 | 1.305 | 100.0% | — | outside-loaded-span: the interval leaves the span the request table was read over |
+| W = 60 min | tokens | 60 | 59 | 59 | 77668505 | 0 | 98782521 | 178969268 | 44.0% | 1.032 | 1.812 | 1476467 | 117370 | 1359097 | 100.0% | — | outside-loaded-span: the interval leaves the span the request table was read over |
+| W = 74 min | requests | 360 | 73 | 73 | 466 | 0 | 837 | 1313 | 66.8% | 1.021 | 1.569 | 7.219 | 0.699 | 6.521 | 98.3% | — | outside-loaded-span: the interval leaves the span the request table was read over |
+| W = 74 min | tokens | 360 | 73 | 73 | 91874577 | 0 | 98782521 | 236436094 | 75.1% | 1.498 | 2.394 | 1885665 | 0 | 1885665 | 80.5% | — | outside-loaded-span: the interval leaves the span the request table was read over |
 
 - Availability bound: 74 min, set by `Claude-1`.
-- Survivors, at W = 60 min:
+- Survivors, at W = 60 min (W_pre = 60 min):
   - `Claude-2`: requests pre 0.000, post 6.068, delta 6.068, contribution 0.888, pre-share 0.0%; tokens pre 0, post 1476467, delta 1476467, contribution 1.122, pre-share 0.0%
   - `Claude-3`: requests pre 0.000, post 0.000, delta 0.000, contribution 0.000, pre-share 0.0%; tokens pre 0, post 0, delta 0, contribution 0.000, pre-share 0.0%
   - `Claude-4`: requests pre 0.000, post 0.000, delta 0.000, contribution 0.000, pre-share 0.0%; tokens pre 0, post 0, delta 0, contribution 0.000, pre-share 0.0%
@@ -2411,15 +2438,15 @@ Every analysed death, one block each — requests above tokens on both horizons 
 
 **Event 28** — 2026-07-28T13:42:08.510Z — anthropic / five_hour — dying `Claude-3` — S = `Claude-2`, `Claude-4`, `Claude-1`
 
-| horizon | basis | W (min) | pre min | post min | pre vol (dying) | post vol (dying) | pre vol (surv) | post vol (surv) | dying pre-share | alpha | ratio | P | N | G | largest gain share | control -7 d | control +7 d |
+| horizon | basis | W_pre (min) | pre min | post min | pre vol (dying) | post vol (dying) | pre vol (surv) | post vol (surv) | dying pre-share | alpha | ratio | P | N | G | largest gain share | control -7 d | control +7 d |
 |---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|---|
-| 60 min | requests | 60 | 59 | 59 | 548 | 3 | 1055 | 1537 | 34.2% | 0.880 | 1.457 | 8.763 | 0.593 | 8.169 | 100.0% | availability-change-inside: Claude-4 is unknown at the start of the interval | 2.480 |
-| 60 min | tokens | 60 | 59 | 59 | 100350762 | 740068 | 92704341 | 191316826 | 52.0% | 0.983 | 2.064 | 1865065 | 193667 | 1671398 | 100.0% | availability-change-inside: Claude-4 is unknown at the start of the interval | 1.826 |
-| 6 h | requests | 96 | 95 | 95 | 1731 | 3 | 1056 | 2005 | 62.1% | 0.548 | 1.899 | 10.053 | 0.063 | 9.989 | 64.8% | availability-change-inside: Claude-4 is unknown at the start of the interval | 2.983 |
-| 6 h | tokens | 96 | 95 | 95 | 285724171 | 740068 | 92845819 | 294426524 | 75.5% | 0.706 | 3.171 | 2138105 | 16203 | 2121902 | 69.7% | availability-change-inside: Claude-4 is unknown at the start of the interval | 1.772 |
+| W = 60 min | requests | 60 | 59 | 59 | 548 | 3 | 1055 | 1537 | 34.2% | 0.880 | 1.457 | 8.763 | 0.593 | 8.169 | 100.0% | availability-change-inside: Claude-4 is unknown at the start of the interval | 2.480 |
+| W = 60 min | tokens | 60 | 59 | 59 | 100350762 | 740068 | 92704341 | 191316826 | 52.0% | 0.983 | 2.064 | 1865065 | 193667 | 1671398 | 100.0% | availability-change-inside: Claude-4 is unknown at the start of the interval | 1.826 |
+| W = 96 min | requests | 280 | 95 | 95 | 1731 | 3 | 1056 | 2005 | 62.3% | 0.548 | 1.899 | 10.053 | 0.063 | 9.989 | 64.8% | availability-change-inside: Claude-4 is unknown at the start of the interval | 2.983 |
+| W = 96 min | tokens | 280 | 95 | 95 | 285724171 | 740068 | 92845819 | 294426524 | 61.6% | 0.706 | 3.171 | 2138105 | 16203 | 2121902 | 69.7% | availability-change-inside: Claude-4 is unknown at the start of the interval | 1.772 |
 
 - Availability bound: 96 min, set by `Claude-2`.
-- Survivors, at W = 60 min:
+- Survivors, at W = 60 min (W_pre = 60 min):
   - `Claude-2`: requests pre 16.492, post 25.254, delta 8.763, contribution 0.943, pre-share 92.2%; tokens pre 1327549, post 3192614, delta 1865065, contribution 1.097, pre-share 84.5%
   - `Claude-4`: requests pre 1.305, post 0.797, delta -0.508, contribution -0.055, pre-share 7.3%; tokens pre 220019, post 50044, delta -169975, contribution -0.100, pre-share 14.0%
   - `Claude-1`: requests pre 0.085, post 0.000, delta -0.085, contribution -0.009, pre-share 0.5%; tokens pre 23692, post 0, delta -23692, contribution -0.014, pre-share 1.5%
@@ -2427,43 +2454,29 @@ Every analysed death, one block each — requests above tokens on both horizons 
 
 **Event 38** — 2026-08-07T19:02:42.073Z — anthropic / seven_day — dying `Claude-2` — S = `Claude-3`, `Claude-4`
 
-| horizon | basis | W (min) | pre min | post min | pre vol (dying) | post vol (dying) | pre vol (surv) | post vol (surv) | dying pre-share | alpha | ratio | P | N | G | largest gain share | control -7 d | control +7 d |
+| horizon | basis | W_pre (min) | pre min | post min | pre vol (dying) | post vol (dying) | pre vol (surv) | post vol (surv) | dying pre-share | alpha | ratio | P | N | G | largest gain share | control -7 d | control +7 d |
 |---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|---|
-| 60 min | requests | 56 | 55 | 55 | 253 | 220 | 303 | 177 | 45.5% | -0.498 | 0.584 | 0.582 | 2.873 | -2.291 | — | — | — |
-| 60 min | tokens | 56 | 55 | 55 | 121273187 | 43653296 | 51644585 | 44194344 | 70.1% | -0.061 | 0.856 | 378452 | 513911 | -135459 | — | — | — |
+| W = 56 min | requests | 60 | 55 | 55 | 253 | 220 | 303 | 177 | 46.3% | -0.498 | 0.584 | 0.582 | 2.873 | -2.291 | — | — | — |
+| W = 56 min | tokens | 60 | 55 | 55 | 121273187 | 43653296 | 51644585 | 44194344 | 70.6% | -0.061 | 0.856 | 378452 | 513911 | -135459 | — | — | — |
 
 - 6 h horizon absent: the availability bound of 56 min caps the six-hour horizon at the 56 min it is already measured over.
 - Availability bound: 56 min, set by `Claude-3`.
-- Survivors, at W = 60 min:
-  - `Claude-3`: requests pre 2.545, post 3.127, delta 0.582, contribution 0.126, pre-share 46.2%; tokens pre 400929, post 779380, delta 378452, contribution 0.172, pre-share 42.7%
-  - `Claude-4`: requests pre 2.964, post 0.091, delta -2.873, contribution -0.625, pre-share 53.8%; tokens pre 538064, post 24153, delta -513911, contribution -0.233, pre-share 57.3%
+- Survivors, at W = 56 min (W_pre = 60 min):
+  - `Claude-3`: requests pre 2.545, post 3.127, delta 0.582, contribution 0.126, pre-share 45.2%; tokens pre 400929, post 779380, delta 378452, contribution 0.172, pre-share 41.9%
+  - `Claude-4`: requests pre 2.964, post 0.091, delta -2.873, contribution -0.625, pre-share 54.8%; tokens pre 538064, post 24153, delta -513911, contribution -0.233, pre-share 58.1%
 - excluded members: Claude-1 (exhausted)
-
-**Event 51** — 2026-09-02T17:18:29.332Z — anthropic / five_hour — dying `Claude-5` — S = `Claude-3`, `Claude-4`
-
-| horizon | basis | W (min) | pre min | post min | pre vol (dying) | post vol (dying) | pre vol (surv) | post vol (surv) | dying pre-share | alpha | ratio | P | N | G | largest gain share | control -7 d | control +7 d |
-|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|---|
-| 60 min | requests | 50 | 49 | 49 | 1442 | 0 | 1396 | 3366 | 50.8% | 1.366 | 2.411 | 40.204 | 0.000 | 40.204 | 92.2% | — | outside-loaded-span: the interval leaves the span the request table was read over |
-| 60 min | tokens | 50 | 49 | 49 | 264189702 | 0 | 170161909 | 429356762 | 60.8% | 0.981 | 2.523 | 5289691 | 0 | 5289691 | 92.7% | — | outside-loaded-span: the interval leaves the span the request table was read over |
-
-- 6 h horizon absent: the availability bound of 50 min caps the six-hour horizon at the 50 min it is already measured over.
-- Availability bound: 50 min, set by `Claude-3`.
-- Survivors, at W = 60 min:
-  - `Claude-3`: requests pre 28.245, post 65.306, delta 37.061, contribution 1.259, pre-share 99.1%; tokens pre 3453357, post 8356267, delta 4902911, contribution 0.909, pre-share 99.4%
-  - `Claude-4`: requests pre 0.245, post 3.388, delta 3.143, contribution 0.107, pre-share 0.9%; tokens pre 19335, post 406116, delta 386780, contribution 0.072, pre-share 0.6%
-- excluded members: Claude-2 (exhausted), Claude-1 (exhausted)
 
 **Event 34** — 2026-08-03T18:06:23.413Z — anthropic / seven_day — dying `Claude-2` — S = `Claude-3`, `Claude-4`, `Claude-1`
 
-| horizon | basis | W (min) | pre min | post min | pre vol (dying) | post vol (dying) | pre vol (surv) | post vol (surv) | dying pre-share | alpha | ratio | P | N | G | largest gain share | control -7 d | control +7 d |
+| horizon | basis | W_pre (min) | pre min | post min | pre vol (dying) | post vol (dying) | pre vol (surv) | post vol (surv) | dying pre-share | alpha | ratio | P | N | G | largest gain share | control -7 d | control +7 d |
 |---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|---|
-| 60 min | requests | 60 | 59 | 59 | 374 | 0 | 310 | 320 | 54.7% | 0.027 | 1.032 | 2.136 | 1.966 | 0.169 | 100.0% | availability-change-inside: Claude-2 is exhausted at the start of the interval | availability-change-inside: Claude-2 is exhausted at the start of the interval |
-| 60 min | tokens | 60 | 59 | 59 | 65967343 | 0 | 66814799 | 82950713 | 49.7% | 0.245 | 1.242 | 455247 | 181757 | 273490 | 100.0% | availability-change-inside: Claude-2 is exhausted at the start of the interval | availability-change-inside: Claude-2 is exhausted at the start of the interval |
-| 6 h | requests | 360 | 359 | 359 | 1175 | 0 | 3002 | 732 | 28.1% | -1.932 | 0.244 | 0.482 | 6.805 | -6.323 | — | availability-change-inside: Claude-2 is exhausted at the start of the interval | availability-change-inside: Claude-2 is exhausted at the start of the interval |
-| 6 h | tokens | 360 | 359 | 359 | 221990571 | 0 | 605224950 | 200503730 | 26.8% | -1.823 | 0.331 | 125046 | 1252403 | -1127357 | — | availability-change-inside: Claude-2 is exhausted at the start of the interval | availability-change-inside: Claude-2 is exhausted at the start of the interval |
+| W = 60 min | requests | 60 | 59 | 59 | 374 | 0 | 310 | 320 | 54.7% | 0.027 | 1.032 | 2.136 | 1.966 | 0.169 | 100.0% | availability-change-inside: Claude-2 is exhausted at the start of the interval | availability-change-inside: Claude-2 is exhausted at the start of the interval |
+| W = 60 min | tokens | 60 | 59 | 59 | 65967343 | 0 | 66814799 | 82950713 | 49.7% | 0.245 | 1.242 | 455247 | 181757 | 273490 | 100.0% | availability-change-inside: Claude-2 is exhausted at the start of the interval | availability-change-inside: Claude-2 is exhausted at the start of the interval |
+| W = 360 min | requests | 360 | 359 | 359 | 1175 | 0 | 3002 | 732 | 28.1% | -1.932 | 0.244 | 0.482 | 6.805 | -6.323 | — | availability-change-inside: Claude-2 is exhausted at the start of the interval | availability-change-inside: Claude-2 is exhausted at the start of the interval |
+| W = 360 min | tokens | 360 | 359 | 359 | 221990571 | 0 | 605224950 | 200503730 | 26.8% | -1.823 | 0.331 | 125046 | 1252403 | -1127357 | — | availability-change-inside: Claude-2 is exhausted at the start of the interval | availability-change-inside: Claude-2 is exhausted at the start of the interval |
 
 - Availability bound: 536 min, set by `Claude-2`.
-- Survivors, at W = 60 min:
+- Survivors, at W = 60 min (W_pre = 60 min):
   - `Claude-3`: requests pre 0.678, post 2.814, delta 2.136, contribution 0.337, pre-share 12.9%; tokens pre 360223, post 815470, delta 455247, contribution 0.407, pre-share 31.8%
   - `Claude-4`: requests pre 0.000, post 0.000, delta 0.000, contribution 0.000, pre-share 0.0%; tokens pre 0, post 0, delta 0, contribution 0.000, pre-share 0.0%
   - `Claude-1`: requests pre 4.576, post 2.610, delta -1.966, contribution -0.310, pre-share 87.1%; tokens pre 772231, post 590475, delta -181757, contribution -0.163, pre-share 68.2%
@@ -2471,171 +2484,170 @@ Every analysed death, one block each — requests above tokens on both horizons 
 
 **Event 17** — 2026-07-20T19:22:06.633Z — anthropic / five_hour — dying `Claude-3` — S = `Claude-2`, `Claude-1`
 
-| horizon | basis | W (min) | pre min | post min | pre vol (dying) | post vol (dying) | pre vol (surv) | post vol (surv) | dying pre-share | alpha | ratio | P | N | G | largest gain share | control -7 d | control +7 d |
+| horizon | basis | W_pre (min) | pre min | post min | pre vol (dying) | post vol (dying) | pre vol (surv) | post vol (surv) | dying pre-share | alpha | ratio | P | N | G | largest gain share | control -7 d | control +7 d |
 |---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|---|
-| 60 min | requests | 60 | 59 | 59 | 541 | 2 | 440 | 138 | 55.1% | -0.558 | 0.314 | 0.000 | 5.119 | -5.119 | — | availability-change-inside: Claude-3 is unknown at the start of the interval | availability-change-inside: Claude-2 is exhausted at the start of the interval |
-| 60 min | tokens | 60 | 59 | 59 | 128116355 | 374105 | 76298277 | 38863590 | 62.7% | -0.292 | 0.509 | 0 | 634486 | -634486 | — | availability-change-inside: Claude-3 is unknown at the start of the interval | availability-change-inside: Claude-2 is exhausted at the start of the interval |
-| 6 h | requests | 110 | 109 | 109 | 890 | 2 | 779 | 138 | 53.3% | -0.720 | 0.177 | 0.000 | 5.881 | -5.881 | — | availability-change-inside: Claude-3 is unknown at the start of the interval | availability-change-inside: Claude-2 is exhausted at the start of the interval |
-| 6 h | tokens | 110 | 109 | 109 | 178554414 | 374105 | 141641958 | 38863590 | 55.8% | -0.576 | 0.274 | 0 | 942921 | -942921 | — | availability-change-inside: Claude-3 is unknown at the start of the interval | availability-change-inside: Claude-2 is exhausted at the start of the interval |
+| W = 60 min | requests | 60 | 59 | 59 | 541 | 2 | 440 | 138 | 55.1% | -0.558 | 0.314 | 0.000 | 5.119 | -5.119 | — | availability-change-inside: Claude-3 is unknown at the start of the interval | availability-change-inside: Claude-2 is exhausted at the start of the interval |
+| W = 60 min | tokens | 60 | 59 | 59 | 128116355 | 374105 | 76298277 | 38863590 | 62.7% | -0.292 | 0.509 | 0 | 634486 | -634486 | — | availability-change-inside: Claude-3 is unknown at the start of the interval | availability-change-inside: Claude-2 is exhausted at the start of the interval |
+| W = 110 min | requests | 360 | 109 | 109 | 890 | 2 | 779 | 138 | 34.1% | -0.720 | 0.177 | 0.000 | 5.881 | -5.881 | — | availability-change-inside: Claude-3 is unknown at the start of the interval | availability-change-inside: Claude-2 is exhausted at the start of the interval |
+| W = 110 min | tokens | 360 | 109 | 109 | 178554414 | 374105 | 141641958 | 38863590 | 33.0% | -0.576 | 0.274 | 0 | 942921 | -942921 | — | availability-change-inside: Claude-3 is unknown at the start of the interval | availability-change-inside: Claude-2 is exhausted at the start of the interval |
 
 - Availability bound: 110 min, set by `Claude-3`.
-- Survivors, at W = 60 min:
+- Survivors, at W = 60 min (W_pre = 60 min):
   - `Claude-2`: requests pre 7.458, post 2.339, delta -5.119, contribution -0.558, pre-share 100.0%; tokens pre 1293191, post 658705, delta -634486, contribution -0.292, pre-share 100.0%
   - `Claude-1`: requests pre 0.000, post 0.000, delta 0.000, contribution 0.000, pre-share 0.0%; tokens pre 0, post 0, delta 0, contribution 0.000, pre-share 0.0%
 - excluded members: none
 
 **Event 9** — 2026-07-11T11:41:13.710Z — anthropic / five_hour — dying `Claude-2` — S = `Claude-1`
 
-| horizon | basis | W (min) | pre min | post min | pre vol (dying) | post vol (dying) | pre vol (surv) | post vol (surv) | dying pre-share | alpha | ratio | P | N | G | largest gain share | control -7 d | control +7 d |
+| horizon | basis | W_pre (min) | pre min | post min | pre vol (dying) | post vol (dying) | pre vol (surv) | post vol (surv) | dying pre-share | alpha | ratio | P | N | G | largest gain share | control -7 d | control +7 d |
 |---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|---|
-| 60 min | requests | 60 | 59 | 59 | 250 | 0 | 200 | 0 | 55.6% | -0.800 | 0.000 | 0.000 | 3.390 | -3.390 | — | availability-change-inside: Claude-1 is exhausted at the start of the interval | — |
-| 60 min | tokens | 60 | 59 | 59 | 144677611 | 0 | 89817002 | 0 | 61.7% | -0.621 | 0.000 | 0 | 1522322 | -1522322 | — | availability-change-inside: Claude-1 is exhausted at the start of the interval | — |
-| 6 h | requests | 192 | 191 | 191 | 847 | 0 | 415 | 0 | 67.1% | -0.490 | 0.000 | 0.000 | 2.173 | -2.173 | — | availability-change-inside: Claude-1 is exhausted at the start of the interval | — |
-| 6 h | tokens | 192 | 191 | 191 | 474299892 | 0 | 170103353 | 0 | 73.6% | -0.359 | 0.000 | 0 | 890593 | -890593 | — | availability-change-inside: Claude-1 is exhausted at the start of the interval | — |
+| W = 60 min | requests | 60 | 59 | 59 | 250 | 0 | 200 | 0 | 55.6% | -0.800 | 0.000 | 0.000 | 3.390 | -3.390 | — | availability-change-inside: Claude-1 is exhausted at the start of the interval | — |
+| W = 60 min | tokens | 60 | 59 | 59 | 144677611 | 0 | 89817002 | 0 | 61.7% | -0.621 | 0.000 | 0 | 1522322 | -1522322 | — | availability-change-inside: Claude-1 is exhausted at the start of the interval | — |
+| W = 192 min | requests | 360 | 191 | 191 | 847 | 0 | 415 | 0 | 67.1% | -0.490 | 0.000 | 0.000 | 2.173 | -2.173 | — | availability-change-inside: Claude-1 is exhausted at the start of the interval | — |
+| W = 192 min | tokens | 360 | 191 | 191 | 474299892 | 0 | 170103353 | 0 | 73.6% | -0.359 | 0.000 | 0 | 890593 | -890593 | — | availability-change-inside: Claude-1 is exhausted at the start of the interval | — |
 
 - Availability bound: 192 min, set by `Claude-2`.
-- Survivors, at W = 60 min:
+- Survivors, at W = 60 min (W_pre = 60 min):
   - `Claude-1`: requests pre 3.390, post 0.000, delta -3.390, contribution -0.800, pre-share 100.0%; tokens pre 1522322, post 0, delta -1522322, contribution -0.621, pre-share 100.0%
 - excluded members: Claude-3 (unknown)
 
 **Event 30** — 2026-07-28T15:18:09.431Z — anthropic / five_hour — dying `Claude-2` — S = `Claude-4`, `Claude-1`
 
-| horizon | basis | W (min) | pre min | post min | pre vol (dying) | post vol (dying) | pre vol (surv) | post vol (surv) | dying pre-share | alpha | ratio | P | N | G | largest gain share | control -7 d | control +7 d |
+| horizon | basis | W_pre (min) | pre min | post min | pre vol (dying) | post vol (dying) | pre vol (surv) | post vol (surv) | dying pre-share | alpha | ratio | P | N | G | largest gain share | control -7 d | control +7 d |
 |---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|---|
-| 60 min | requests | 60 | 59 | 59 | 558 | 0 | 412 | 1058 | 57.5% | 1.158 | 2.568 | 10.949 | 0.000 | 10.949 | 99.2% | availability-change-inside: Claude-4 is unknown at the start of the interval | availability-change-inside: Claude-3 changes availability at 2026-08-04T15:44:49.581Z |
-| 60 min | tokens | 60 | 59 | 59 | 89184934 | 0 | 74217344 | 230221300 | 54.6% | 1.749 | 3.102 | 2644135 | 0 | 2644135 | 99.4% | availability-change-inside: Claude-4 is unknown at the start of the interval | availability-change-inside: Claude-3 changes availability at 2026-08-04T15:44:49.581Z |
-| 6 h | requests | 94 | 93 | 92 | 1585 | 0 | 412 | 1226 | 79.4% | 0.522 | 3.008 | 8.896 | 0.000 | 8.896 | 98.0% | availability-change-inside: Claude-4 is unknown at the start of the interval | availability-change-inside: Claude-3 changes availability at 2026-08-04T15:44:49.581Z |
-| 6 h | tokens | 94 | 93 | 92 | 218970968 | 0 | 74217344 | 259212353 | 74.7% | 0.858 | 3.531 | 2019490 | 0 | 2019490 | 99.2% | availability-change-inside: Claude-4 is unknown at the start of the interval | availability-change-inside: Claude-3 changes availability at 2026-08-04T15:44:49.581Z |
+| W = 60 min | requests | 60 | 59 | 59 | 558 | 0 | 412 | 1058 | 57.5% | 1.158 | 2.568 | 10.949 | 0.000 | 10.949 | 99.2% | availability-change-inside: Claude-4 is unknown at the start of the interval | availability-change-inside: Claude-3 changes availability at 2026-08-04T15:44:49.581Z |
+| W = 60 min | tokens | 60 | 59 | 59 | 89184934 | 0 | 74217344 | 230221300 | 54.6% | 1.749 | 3.102 | 2644135 | 0 | 2644135 | 99.4% | availability-change-inside: Claude-4 is unknown at the start of the interval | availability-change-inside: Claude-3 changes availability at 2026-08-04T15:44:49.581Z |
+| W = 94 min | requests | 96 | 93 | 92 | 1585 | 0 | 412 | 1226 | 79.4% | 0.522 | 3.008 | 8.896 | 0.000 | 8.896 | 98.0% | availability-change-inside: Claude-4 is unknown at the start of the interval | availability-change-inside: Claude-3 changes availability at 2026-08-04T15:44:49.581Z |
+| W = 94 min | tokens | 96 | 93 | 92 | 218970968 | 0 | 74217344 | 259212353 | 74.7% | 0.858 | 3.531 | 2019490 | 0 | 2019490 | 99.2% | availability-change-inside: Claude-4 is unknown at the start of the interval | availability-change-inside: Claude-3 changes availability at 2026-08-04T15:44:49.581Z |
 
 - Availability bound: 94 min, set by `Claude-2`.
-- Survivors, at W = 60 min:
+- Survivors, at W = 60 min (W_pre = 60 min):
   - `Claude-4`: requests pre 6.983, post 17.847, delta 10.864, contribution 1.149, pre-share 100.0%; tokens pre 1257921, post 3885168, delta 2627247, contribution 1.738, pre-share 100.0%
   - `Claude-1`: requests pre 0.000, post 0.085, delta 0.085, contribution 0.009, pre-share 0.0%; tokens pre 0, post 16888, delta 16888, contribution 0.011, pre-share 0.0%
 - excluded members: Claude-3 (exhausted)
 
-**Event 20** — 2026-07-24T17:16:53.597Z — anthropic / five_hour — dying `Claude-4` — S = `Claude-2`, `Claude-3`, `Claude-1`
+**Event 51** — 2026-09-02T17:18:29.332Z — anthropic / five_hour — dying `Claude-5` — S = `Claude-3`, `Claude-4`
 
-| horizon | basis | W (min) | pre min | post min | pre vol (dying) | post vol (dying) | pre vol (surv) | post vol (surv) | dying pre-share | alpha | ratio | P | N | G | largest gain share | control -7 d | control +7 d |
+| horizon | basis | W_pre (min) | pre min | post min | pre vol (dying) | post vol (dying) | pre vol (surv) | post vol (surv) | dying pre-share | alpha | ratio | P | N | G | largest gain share | control -7 d | control +7 d |
 |---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|---|
-| 60 min | requests | 26 | 25 | 25 | 313 | 6 | 230 | 354 | 57.6% | 0.396 | 1.539 | 7.240 | 2.280 | 4.960 | 56.9% | availability-change-inside: Claude-4 is unknown at the start of the interval | — |
-| 60 min | tokens | 26 | 25 | 25 | 74643969 | 914686 | 20511874 | 46696842 | 78.4% | 0.351 | 2.277 | 1317971 | 270573 | 1047399 | 76.1% | availability-change-inside: Claude-4 is unknown at the start of the interval | — |
+| W = 50 min | requests | 60 | 49 | 49 | 1442 | 0 | 1396 | 3366 | 57.7% | 1.366 | 2.411 | 40.204 | 0.000 | 40.204 | 92.2% | — | outside-loaded-span: the interval leaves the span the request table was read over |
+| W = 50 min | tokens | 60 | 49 | 49 | 264189702 | 0 | 170161909 | 429356762 | 66.2% | 0.981 | 2.523 | 5289691 | 0 | 5289691 | 92.7% | — | outside-loaded-span: the interval leaves the span the request table was read over |
 
-- 6 h horizon absent: the availability bound of 26 min caps the six-hour horizon at the 26 min it is already measured over.
-- Availability bound: 26 min, set by `Claude-2`.
-- Survivors, at W = 60 min:
-  - `Claude-2`: requests pre 1.120, post 5.240, delta 4.120, contribution 0.329, pre-share 12.2%; tokens pre 97832, post 1101418, delta 1003586, contribution 0.336, pre-share 11.9%
-  - `Claude-3`: requests pre 8.080, post 5.800, delta -2.280, contribution -0.182, pre-share 87.8%; tokens pre 722643, post 452070, delta -270573, contribution -0.091, pre-share 88.1%
-  - `Claude-1`: requests pre 0.000, post 3.120, delta 3.120, contribution 0.249, pre-share 0.0%; tokens pre 0, post 314385, delta 314385, contribution 0.105, pre-share 0.0%
-- excluded members: none
+- 6 h horizon absent: the availability bound of 50 min caps the six-hour horizon at the 50 min it is already measured over.
+- Availability bound: 50 min, set by `Claude-3`.
+- Survivors, at W = 50 min (W_pre = 60 min):
+  - `Claude-3`: requests pre 28.245, post 65.306, delta 37.061, contribution 1.259, pre-share 99.1%; tokens pre 3453357, post 8356267, delta 4902911, contribution 0.909, pre-share 99.4%
+  - `Claude-4`: requests pre 0.245, post 3.388, delta 3.143, contribution 0.107, pre-share 0.9%; tokens pre 19335, post 406116, delta 386780, contribution 0.072, pre-share 0.6%
+- excluded members: Claude-2 (exhausted), Claude-1 (exhausted)
 
 **Event 12** — 2026-07-19T14:25:04.566Z — anthropic / five_hour — dying `Claude-1` — S = `Claude-2`
 
-| horizon | basis | W (min) | pre min | post min | pre vol (dying) | post vol (dying) | pre vol (surv) | post vol (surv) | dying pre-share | alpha | ratio | P | N | G | largest gain share | control -7 d | control +7 d |
+| horizon | basis | W_pre (min) | pre min | post min | pre vol (dying) | post vol (dying) | pre vol (surv) | post vol (surv) | dying pre-share | alpha | ratio | P | N | G | largest gain share | control -7 d | control +7 d |
 |---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|---|
-| 60 min | requests | 50 | 49 | 49 | 138 | 0 | 101 | 653 | 57.7% | 4.000 | 6.465 | 11.265 | 0.000 | 11.265 | 100.0% | — | availability-change-inside: Claude-2 is exhausted at the start of the interval |
-| 60 min | tokens | 50 | 49 | 49 | 59013204 | 0 | 17616561 | 188839663 | 77.0% | 2.901 | 10.719 | 3494349 | 0 | 3494349 | 100.0% | — | availability-change-inside: Claude-2 is exhausted at the start of the interval |
+| W = 50 min | requests | 60 | 49 | 49 | 138 | 0 | 101 | 653 | 57.7% | 4.000 | 6.465 | 11.265 | 0.000 | 11.265 | 100.0% | — | availability-change-inside: Claude-2 is exhausted at the start of the interval |
+| W = 50 min | tokens | 60 | 49 | 49 | 59013204 | 0 | 17616561 | 188839663 | 77.0% | 2.901 | 10.719 | 3494349 | 0 | 3494349 | 100.0% | — | availability-change-inside: Claude-2 is exhausted at the start of the interval |
 
 - 6 h horizon absent: the availability bound of 50 min caps the six-hour horizon at the 50 min it is already measured over.
 - Availability bound: 50 min, set by `Claude-2`.
-- Survivors, at W = 60 min:
+- Survivors, at W = 50 min (W_pre = 60 min):
   - `Claude-2`: requests pre 2.061, post 13.327, delta 11.265, contribution 4.000, pre-share 100.0%; tokens pre 359522, post 3853871, delta 3494349, contribution 2.901, pre-share 100.0%
 - excluded members: Claude-3 (unknown)
 
 **Event 15** — 2026-07-19T18:21:05.585Z — anthropic / five_hour — dying `Claude-1` — S = `Claude-2`
 
-| horizon | basis | W (min) | pre min | post min | pre vol (dying) | post vol (dying) | pre vol (surv) | post vol (surv) | dying pre-share | alpha | ratio | P | N | G | largest gain share | control -7 d | control +7 d |
+| horizon | basis | W_pre (min) | pre min | post min | pre vol (dying) | post vol (dying) | pre vol (surv) | post vol (surv) | dying pre-share | alpha | ratio | P | N | G | largest gain share | control -7 d | control +7 d |
 |---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|---|
-| 60 min | requests | 60 | 59 | 59 | 306 | 0 | 188 | 237 | 61.9% | 0.160 | 1.261 | 0.831 | 0.000 | 0.831 | 100.0% | — | availability-change-inside: Claude-2 is exhausted at the start of the interval |
-| 60 min | tokens | 60 | 59 | 59 | 161804618 | 0 | 89314423 | 93911103 | 64.4% | 0.028 | 1.051 | 77910 | 0 | 77910 | 100.0% | — | availability-change-inside: Claude-2 is exhausted at the start of the interval |
-| 6 h | requests | 90 | 89 | 89 | 391 | 0 | 200 | 257 | 66.2% | 0.146 | 1.285 | 0.640 | 0.000 | 0.640 | 100.0% | — | availability-change-inside: Claude-2 is exhausted at the start of the interval |
-| 6 h | tokens | 90 | 89 | 89 | 213799060 | 0 | 95711818 | 103825404 | 69.1% | 0.038 | 1.085 | 91164 | 0 | 91164 | 100.0% | — | availability-change-inside: Claude-2 is exhausted at the start of the interval |
+| W = 60 min | requests | 60 | 59 | 59 | 306 | 0 | 188 | 237 | 61.9% | 0.160 | 1.261 | 0.831 | 0.000 | 0.831 | 100.0% | — | availability-change-inside: Claude-2 is exhausted at the start of the interval |
+| W = 60 min | tokens | 60 | 59 | 59 | 161804618 | 0 | 89314423 | 93911103 | 64.4% | 0.028 | 1.051 | 77910 | 0 | 77910 | 100.0% | — | availability-change-inside: Claude-2 is exhausted at the start of the interval |
+| W = 90 min | requests | 90 | 89 | 89 | 391 | 0 | 200 | 257 | 66.2% | 0.146 | 1.285 | 0.640 | 0.000 | 0.640 | 100.0% | — | availability-change-inside: Claude-2 is exhausted at the start of the interval |
+| W = 90 min | tokens | 90 | 89 | 89 | 213799060 | 0 | 95711818 | 103825404 | 69.1% | 0.038 | 1.085 | 91164 | 0 | 91164 | 100.0% | — | availability-change-inside: Claude-2 is exhausted at the start of the interval |
 
 - Availability bound: 90 min, set by `Claude-2`.
-- Survivors, at W = 60 min:
+- Survivors, at W = 60 min (W_pre = 60 min):
   - `Claude-2`: requests pre 3.186, post 4.017, delta 0.831, contribution 0.160, pre-share 100.0%; tokens pre 1513804, post 1591714, delta 77910, contribution 0.028, pre-share 100.0%
 - excluded members: Claude-3 (exhausted)
 
 **Event 25** — 2026-07-26T19:02:46.831Z — anthropic / five_hour — dying `Claude-4` — S = `Claude-1`
 
-| horizon | basis | W (min) | pre min | post min | pre vol (dying) | post vol (dying) | pre vol (surv) | post vol (surv) | dying pre-share | alpha | ratio | P | N | G | largest gain share | control -7 d | control +7 d |
+| horizon | basis | W_pre (min) | pre min | post min | pre vol (dying) | post vol (dying) | pre vol (surv) | post vol (surv) | dying pre-share | alpha | ratio | P | N | G | largest gain share | control -7 d | control +7 d |
 |---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|---|
-| 60 min | requests | 48 | 47 | 47 | 834 | 1 | 403 | 1373 | 67.4% | 1.163 | 3.407 | 20.638 | 0.000 | 20.638 | 100.0% | availability-change-inside: Claude-4 is unknown at the start of the interval | 4.000 |
-| 60 min | tokens | 48 | 47 | 47 | 134222630 | 181342 | 84638510 | 234265559 | 61.3% | 1.115 | 2.768 | 3183554 | 0 | 3183554 | 100.0% | availability-change-inside: Claude-4 is unknown at the start of the interval | 4.343 |
+| W = 48 min | requests | 60 | 47 | 47 | 834 | 1 | 403 | 1373 | 67.0% | 1.163 | 3.407 | 20.638 | 0.000 | 20.638 | 100.0% | availability-change-inside: Claude-4 is unknown at the start of the interval | 4.000 |
+| W = 48 min | tokens | 60 | 47 | 47 | 134222630 | 181342 | 84638510 | 234265559 | 61.6% | 1.115 | 2.768 | 3183554 | 0 | 3183554 | 100.0% | availability-change-inside: Claude-4 is unknown at the start of the interval | 4.343 |
 
 - 6 h horizon absent: the availability bound of 48 min caps the six-hour horizon at the 48 min it is already measured over.
 - Availability bound: 48 min, set by `Claude-2`.
-- Survivors, at W = 60 min:
+- Survivors, at W = 48 min (W_pre = 60 min):
   - `Claude-1`: requests pre 8.574, post 29.213, delta 20.638, contribution 1.163, pre-share 100.0%; tokens pre 1800819, post 4984374, delta 3183554, contribution 1.115, pre-share 100.0%
 - excluded members: Claude-2 (exhausted), Claude-3 (exhausted)
 
-**Event 11** — 2026-07-19T10:59:04.428Z — anthropic / five_hour — dying `Claude-2` — S = `Claude-1`
-
-| horizon | basis | W (min) | pre min | post min | pre vol (dying) | post vol (dying) | pre vol (surv) | post vol (surv) | dying pre-share | alpha | ratio | P | N | G | largest gain share | control -7 d | control +7 d |
-|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|---|
-| 60 min | requests | 52 | 51 | 51 | 653 | 3 | 237 | 234 | 73.4% | -0.005 | 0.987 | 0.000 | 0.059 | -0.059 | — | — | availability-change-inside: Claude-2 is exhausted at the start of the interval |
-| 60 min | tokens | 52 | 51 | 51 | 159513622 | 752637 | 58638330 | 66588651 | 73.1% | 0.050 | 1.136 | 155889 | 0 | 155889 | 100.0% | — | availability-change-inside: Claude-2 is exhausted at the start of the interval |
-
-- 6 h horizon absent: the availability bound of 52 min caps the six-hour horizon at the 52 min it is already measured over.
-- Availability bound: 52 min, set by `Claude-2`.
-- Survivors, at W = 60 min:
-  - `Claude-1`: requests pre 4.647, post 4.588, delta -0.059, contribution -0.005, pre-share 100.0%; tokens pre 1149771, post 1305660, delta 155889, contribution 0.050, pre-share 100.0%
-- excluded members: Claude-3 (unknown)
-
 **Event 59** — 2026-09-05T14:11:12.387Z — anthropic / five_hour — dying `Claude-1` — S = `Claude-2`, `Claude-3`, `Claude-4`, `Claude-5`
 
-| horizon | basis | W (min) | pre min | post min | pre vol (dying) | post vol (dying) | pre vol (surv) | post vol (surv) | dying pre-share | alpha | ratio | P | N | G | largest gain share | control -7 d | control +7 d |
+| horizon | basis | W_pre (min) | pre min | post min | pre vol (dying) | post vol (dying) | pre vol (surv) | post vol (surv) | dying pre-share | alpha | ratio | P | N | G | largest gain share | control -7 d | control +7 d |
 |---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|---|
-| 60 min | requests | 58 | 57 | 57 | 1118 | 0 | 402 | 1739 | 73.6% | 1.196 | 4.326 | 27.351 | 3.895 | 23.456 | 99.4% | 1.249 | outside-loaded-span: the interval leaves the span the request table was read over |
-| 60 min | tokens | 58 | 57 | 57 | 173285586 | 0 | 59240648 | 329034555 | 74.5% | 1.557 | 5.554 | 5300013 | 566787 | 4733226 | 98.9% | 0.992 | outside-loaded-span: the interval leaves the span the request table was read over |
+| W = 58 min | requests | 60 | 57 | 57 | 1118 | 0 | 402 | 1739 | 72.4% | 1.196 | 4.326 | 27.351 | 3.895 | 23.456 | 99.4% | 1.249 | outside-loaded-span: the interval leaves the span the request table was read over |
+| W = 58 min | tokens | 60 | 57 | 57 | 173285586 | 0 | 59240648 | 329034555 | 73.8% | 1.557 | 5.554 | 5300013 | 566787 | 4733226 | 98.9% | 0.992 | outside-loaded-span: the interval leaves the span the request table was read over |
 
 - 6 h horizon absent: the availability bound of 58 min caps the six-hour horizon at the 58 min it is already measured over.
 - Availability bound: 58 min, set by `Claude-5`.
-- Survivors, at W = 60 min:
-  - `Claude-2`: requests pre 4.544, post 0.649, delta -3.895, contribution -0.199, pre-share 64.4%; tokens pre 808888, post 242101, delta -566787, contribution -0.186, pre-share 77.8%
+- Survivors, at W = 58 min (W_pre = 60 min):
+  - `Claude-2`: requests pre 4.544, post 0.649, delta -3.895, contribution -0.199, pre-share 66.4%; tokens pre 808888, post 242101, delta -566787, contribution -0.186, pre-share 78.6%
   - `Claude-3`: requests pre 0.000, post 0.175, delta 0.175, contribution 0.009, pre-share 0.0%; tokens pre 0, post 58033, delta 58033, contribution 0.019, pre-share 0.0%
   - `Claude-4`: requests pre 0.000, post 0.000, delta 0.000, contribution 0.000, pre-share 0.0%; tokens pre 0, post 0, delta 0, contribution 0.000, pre-share 0.0%
-  - `Claude-5`: requests pre 2.509, post 29.684, delta 27.175, contribution 1.386, pre-share 35.6%; tokens pre 230421, post 5472402, delta 5241980, contribution 1.724, pre-share 22.2%
+  - `Claude-5`: requests pre 2.509, post 29.684, delta 27.175, contribution 1.386, pre-share 33.6%; tokens pre 230421, post 5472402, delta 5241980, contribution 1.724, pre-share 21.4%
 - excluded members: none
 
 **Event 16** — 2026-07-19T22:23:06.461Z — anthropic / five_hour — dying `Claude-3` — S = `Claude-2`, `Claude-1`
 
-| horizon | basis | W (min) | pre min | post min | pre vol (dying) | post vol (dying) | pre vol (surv) | post vol (surv) | dying pre-share | alpha | ratio | P | N | G | largest gain share | control -7 d | control +7 d |
+| horizon | basis | W_pre (min) | pre min | post min | pre vol (dying) | post vol (dying) | pre vol (surv) | post vol (surv) | dying pre-share | alpha | ratio | P | N | G | largest gain share | control -7 d | control +7 d |
 |---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|---|
-| 60 min | requests | 60 | 59 | 59 | 414 | 11 | 133 | 13 | 75.7% | -0.290 | 0.098 | 0.000 | 2.034 | -2.034 | — | availability-change-inside: Claude-3 is unknown at the start of the interval | availability-change-inside: Claude-3 is exhausted at the start of the interval |
-| 60 min | tokens | 60 | 59 | 59 | 129210512 | 1349387 | 38860802 | 2450734 | 76.9% | -0.282 | 0.063 | 0 | 617120 | -617120 | — | availability-change-inside: Claude-3 is unknown at the start of the interval | availability-change-inside: Claude-3 is exhausted at the start of the interval |
-| 6 h | requests | 92 | 91 | 91 | 693 | 11 | 167 | 13 | 80.6% | -0.222 | 0.078 | 0.000 | 1.692 | -1.692 | — | availability-change-inside: Claude-3 is unknown at the start of the interval | availability-change-inside: Claude-3 is exhausted at the start of the interval |
-| 6 h | tokens | 92 | 91 | 91 | 228813189 | 1349387 | 48897873 | 2450734 | 82.4% | -0.203 | 0.050 | 0 | 510408 | -510408 | — | availability-change-inside: Claude-3 is unknown at the start of the interval | availability-change-inside: Claude-3 is exhausted at the start of the interval |
+| W = 60 min | requests | 60 | 59 | 59 | 414 | 11 | 133 | 13 | 75.7% | -0.290 | 0.098 | 0.000 | 2.034 | -2.034 | — | availability-change-inside: Claude-3 is unknown at the start of the interval | availability-change-inside: Claude-3 is exhausted at the start of the interval |
+| W = 60 min | tokens | 60 | 59 | 59 | 129210512 | 1349387 | 38860802 | 2450734 | 76.9% | -0.282 | 0.063 | 0 | 617120 | -617120 | — | availability-change-inside: Claude-3 is unknown at the start of the interval | availability-change-inside: Claude-3 is exhausted at the start of the interval |
+| W = 92 min | requests | 92 | 91 | 91 | 693 | 11 | 167 | 13 | 80.6% | -0.222 | 0.078 | 0.000 | 1.692 | -1.692 | — | availability-change-inside: Claude-3 is unknown at the start of the interval | availability-change-inside: Claude-3 is exhausted at the start of the interval |
+| W = 92 min | tokens | 92 | 91 | 91 | 228813189 | 1349387 | 48897873 | 2450734 | 82.4% | -0.203 | 0.050 | 0 | 510408 | -510408 | — | availability-change-inside: Claude-3 is unknown at the start of the interval | availability-change-inside: Claude-3 is exhausted at the start of the interval |
 
 - Availability bound: 92 min, set by `Claude-1`.
-- Survivors, at W = 60 min:
+- Survivors, at W = 60 min (W_pre = 60 min):
   - `Claude-2`: requests pre 1.644, post 0.000, delta -1.644, contribution -0.234, pre-share 72.9%; tokens pre 440675, post 0, delta -440675, contribution -0.201, pre-share 66.9%
   - `Claude-1`: requests pre 0.610, post 0.220, delta -0.390, contribution -0.056, pre-share 27.1%; tokens pre 217982, post 41538, delta -176444, contribution -0.081, pre-share 33.1%
 - excluded members: none
 
 **Event 65** — 2026-09-05T19:33:14.876Z — anthropic / five_hour — dying `Claude-4` — S = `Claude-1`
 
-| horizon | basis | W (min) | pre min | post min | pre vol (dying) | post vol (dying) | pre vol (surv) | post vol (surv) | dying pre-share | alpha | ratio | P | N | G | largest gain share | control -7 d | control +7 d |
+| horizon | basis | W_pre (min) | pre min | post min | pre vol (dying) | post vol (dying) | pre vol (surv) | post vol (surv) | dying pre-share | alpha | ratio | P | N | G | largest gain share | control -7 d | control +7 d |
 |---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|---|
-| 60 min | requests | 38 | 37 | 37 | 477 | 1 | 151 | 5 | 76.0% | -0.306 | 0.033 | 0.000 | 3.946 | -3.946 | — | — | outside-loaded-span: the interval leaves the span the request table was read over |
-| 60 min | tokens | 38 | 37 | 37 | 93600952 | 0 | 14464003 | 867601 | 86.6% | -0.145 | 0.060 | 0 | 367470 | -367470 | — | — | outside-loaded-span: the interval leaves the span the request table was read over |
+| W = 38 min | requests | 38 | 37 | 37 | 477 | 1 | 151 | 5 | 76.0% | -0.306 | 0.033 | 0.000 | 3.946 | -3.946 | — | — | outside-loaded-span: the interval leaves the span the request table was read over |
+| W = 38 min | tokens | 38 | 37 | 37 | 93600952 | 0 | 14464003 | 867601 | 86.6% | -0.145 | 0.060 | 0 | 367470 | -367470 | — | — | outside-loaded-span: the interval leaves the span the request table was read over |
 
 - 6 h horizon absent: the availability bound of 38 min caps the six-hour horizon at the 38 min it is already measured over.
 - Availability bound: 38 min, set by `Claude-5`.
-- Survivors, at W = 60 min:
+- Survivors, at W = 38 min (W_pre = 38 min):
   - `Claude-1`: requests pre 4.081, post 0.135, delta -3.946, contribution -0.306, pre-share 100.0%; tokens pre 390919, post 23449, delta -367470, contribution -0.145, pre-share 100.0%
 - excluded members: Claude-2 (exhausted), Claude-3 (exhausted), Claude-5 (exhausted)
 
+**Event 11** — 2026-07-19T10:59:04.428Z — anthropic / five_hour — dying `Claude-2` — S = `Claude-1`
+
+| horizon | basis | W_pre (min) | pre min | post min | pre vol (dying) | post vol (dying) | pre vol (surv) | post vol (surv) | dying pre-share | alpha | ratio | P | N | G | largest gain share | control -7 d | control +7 d |
+|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|---|
+| W = 52 min | requests | 60 | 51 | 51 | 653 | 3 | 237 | 234 | 77.6% | -0.005 | 0.987 | 0.000 | 0.059 | -0.059 | — | — | availability-change-inside: Claude-2 is exhausted at the start of the interval |
+| W = 52 min | tokens | 60 | 51 | 51 | 159513622 | 752637 | 58638330 | 66588651 | 77.4% | 0.050 | 1.136 | 155889 | 0 | 155889 | 100.0% | — | availability-change-inside: Claude-2 is exhausted at the start of the interval |
+
+- 6 h horizon absent: the availability bound of 52 min caps the six-hour horizon at the 52 min it is already measured over.
+- Availability bound: 52 min, set by `Claude-2`.
+- Survivors, at W = 52 min (W_pre = 60 min):
+  - `Claude-1`: requests pre 4.647, post 4.588, delta -0.059, contribution -0.005, pre-share 100.0%; tokens pre 1149771, post 1305660, delta 155889, contribution 0.050, pre-share 100.0%
+- excluded members: Claude-3 (unknown)
+
 **Event 37** — 2026-08-06T12:49:40.245Z — anthropic / seven_day — dying `Claude-1` — S = `Claude-2`, `Claude-3`, `Claude-4`
 
-| horizon | basis | W (min) | pre min | post min | pre vol (dying) | post vol (dying) | pre vol (surv) | post vol (surv) | dying pre-share | alpha | ratio | P | N | G | largest gain share | control -7 d | control +7 d |
+| horizon | basis | W_pre (min) | pre min | post min | pre vol (dying) | post vol (dying) | pre vol (surv) | post vol (surv) | dying pre-share | alpha | ratio | P | N | G | largest gain share | control -7 d | control +7 d |
 |---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|---|
-| 60 min | requests | 60 | 59 | 59 | 1011 | 1 | 152 | 1922 | 86.9% | 1.751 | 12.645 | 30.051 | 0.051 | 30.000 | 100.0% | 0.412 | 0.000 |
-| 60 min | tokens | 60 | 59 | 59 | 234739487 | 315948 | 63178819 | 517365368 | 78.8% | 1.935 | 8.189 | 7718972 | 20895 | 7698077 | 100.0% | 0.269 | 0.000 |
-| 6 h | requests | 360 | 359 | 359 | 4055 | 61 | 8333 | 3168 | 32.7% | -1.274 | 0.380 | 0.000 | 14.387 | -14.387 | — | 0.082 | 0.000 |
-| 6 h | tokens | 360 | 359 | 359 | 904148445 | 7171087 | 1119794826 | 817955028 | 44.7% | -0.334 | 0.730 | 667977 | 1508757 | -840779 | — | 0.058 | 0.000 |
+| W = 60 min | requests | 60 | 59 | 59 | 1011 | 1 | 152 | 1922 | 86.9% | 1.751 | 12.645 | 30.051 | 0.051 | 30.000 | 100.0% | 0.412 | 0.000 |
+| W = 60 min | tokens | 60 | 59 | 59 | 234739487 | 315948 | 63178819 | 517365368 | 78.8% | 1.935 | 8.189 | 7718972 | 20895 | 7698077 | 100.0% | 0.269 | 0.000 |
+| W = 360 min | requests | 360 | 359 | 359 | 4055 | 61 | 8333 | 3168 | 32.7% | -1.274 | 0.380 | 0.000 | 14.387 | -14.387 | — | 0.082 | 0.000 |
+| W = 360 min | tokens | 360 | 359 | 359 | 904148445 | 7171087 | 1119794826 | 817955028 | 44.7% | -0.334 | 0.730 | 667977 | 1508757 | -840779 | — | 0.058 | 0.000 |
 
 - Availability bound: 1813 min, set by `Claude-2`.
-- Survivors, at W = 60 min:
+- Survivors, at W = 60 min (W_pre = 60 min):
   - `Claude-2`: requests pre 0.000, post 0.000, delta 0.000, contribution 0.000, pre-share 0.0%; tokens pre 0, post 0, delta 0, contribution 0.000, pre-share 0.0%
   - `Claude-3`: requests pre 0.102, post 0.051, delta -0.051, contribution -0.003, pre-share 3.9%; tokens pre 32343, post 11448, delta -20895, contribution -0.005, pre-share 3.0%
   - `Claude-4`: requests pre 2.475, post 32.525, delta 30.051, contribution 1.754, pre-share 96.1%; tokens pre 1038484, post 8757456, delta 7718972, contribution 1.940, pre-share 97.0%
@@ -2643,151 +2655,151 @@ Every analysed death, one block each — requests above tokens on both horizons 
 
 **Event 10** — 2026-07-14T14:57:14.374Z — anthropic / five_hour — dying `Claude-1` — S = `Claude-2`
 
-| horizon | basis | W (min) | pre min | post min | pre vol (dying) | post vol (dying) | pre vol (surv) | post vol (surv) | dying pre-share | alpha | ratio | P | N | G | largest gain share | control -7 d | control +7 d |
+| horizon | basis | W_pre (min) | pre min | post min | pre vol (dying) | post vol (dying) | pre vol (surv) | post vol (surv) | dying pre-share | alpha | ratio | P | N | G | largest gain share | control -7 d | control +7 d |
 |---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|---|
-| 60 min | requests | 60 | 59 | 59 | 410 | 29 | 31 | 499 | 93.0% | 1.141 | 16.097 | 7.932 | 0.000 | 7.932 | 100.0% | 1.344 | 3.535 |
-| 60 min | tokens | 60 | 59 | 59 | 165079221 | 11835351 | 11476143 | 142893903 | 93.5% | 0.796 | 12.451 | 2227420 | 0 | 2227420 | 100.0% | 2.074 | 1.896 |
-| 6 h | requests | 134 | 133 | 133 | 754 | 29 | 81 | 1058 | 90.3% | 1.296 | 13.062 | 7.346 | 0.000 | 7.346 | 100.0% | 2.129 | 2.784 |
-| 6 h | tokens | 134 | 133 | 133 | 303402808 | 11835351 | 46996265 | 317744790 | 86.6% | 0.892 | 6.761 | 2035703 | 0 | 2035703 | 100.0% | 3.189 | 1.381 |
+| W = 60 min | requests | 60 | 59 | 59 | 410 | 29 | 31 | 499 | 93.0% | 1.141 | 16.097 | 7.932 | 0.000 | 7.932 | 100.0% | 1.344 | 3.535 |
+| W = 60 min | tokens | 60 | 59 | 59 | 165079221 | 11835351 | 11476143 | 142893903 | 93.5% | 0.796 | 12.451 | 2227420 | 0 | 2227420 | 100.0% | 2.074 | 1.896 |
+| W = 134 min | requests | 360 | 133 | 133 | 754 | 29 | 81 | 1058 | 90.3% | 1.296 | 13.062 | 7.346 | 0.000 | 7.346 | 100.0% | 2.129 | 2.784 |
+| W = 134 min | tokens | 360 | 133 | 133 | 303402808 | 11835351 | 46996265 | 317744790 | 86.6% | 0.892 | 6.761 | 2035703 | 0 | 2035703 | 100.0% | 3.189 | 1.381 |
 
 - Availability bound: 134 min, set by `Claude-1`.
-- Survivors, at W = 60 min:
+- Survivors, at W = 60 min (W_pre = 60 min):
   - `Claude-2`: requests pre 0.525, post 8.458, delta 7.932, contribution 1.141, pre-share 100.0%; tokens pre 194511, post 2421931, delta 2227420, contribution 0.796, pre-share 100.0%
 - excluded members: Claude-3 (unknown)
 
 **Event 52** — 2026-09-02T18:08:29.337Z — anthropic / five_hour — dying `Claude-3` — S = `Claude-4`
 
-| horizon | basis | W (min) | pre min | post min | pre vol (dying) | post vol (dying) | pre vol (surv) | post vol (surv) | dying pre-share | alpha | ratio | P | N | G | largest gain share | control -7 d | control +7 d |
+| horizon | basis | W_pre (min) | pre min | post min | pre vol (dying) | post vol (dying) | pre vol (surv) | post vol (surv) | dying pre-share | alpha | ratio | P | N | G | largest gain share | control -7 d | control +7 d |
 |---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|---|
-| 60 min | requests | 42 | 41 | 41 | 2451 | 0 | 156 | 1458 | 94.0% | 0.531 | 9.346 | 31.756 | 0.000 | 31.756 | 100.0% | — | outside-loaded-span: the interval leaves the span the request table was read over |
-| 60 min | tokens | 42 | 41 | 41 | 329729877 | 0 | 19364175 | 258139377 | 94.5% | 0.724 | 13.331 | 5823785 | 0 | 5823785 | 100.0% | — | outside-loaded-span: the interval leaves the span the request table was read over |
+| W = 42 min | requests | 50 | 41 | 41 | 2451 | 0 | 156 | 1458 | 95.1% | 0.531 | 9.346 | 31.756 | 0.000 | 31.756 | 100.0% | — | outside-loaded-span: the interval leaves the span the request table was read over |
+| W = 42 min | tokens | 50 | 41 | 41 | 329729877 | 0 | 19364175 | 258139377 | 95.4% | 0.724 | 13.331 | 5823785 | 0 | 5823785 | 100.0% | — | outside-loaded-span: the interval leaves the span the request table was read over |
 
 - 6 h horizon absent: the availability bound of 42 min caps the six-hour horizon at the 42 min it is already measured over.
 - Availability bound: 42 min, set by `Claude-2`.
-- Survivors, at W = 60 min:
+- Survivors, at W = 42 min (W_pre = 50 min):
   - `Claude-4`: requests pre 3.805, post 35.561, delta 31.756, contribution 0.531, pre-share 100.0%; tokens pre 472297, post 6296082, delta 5823785, contribution 0.724, pre-share 100.0%
 - excluded members: Claude-2 (exhausted), Claude-1 (exhausted), Claude-5 (exhausted)
 
 **Event 6** — 2026-07-03T13:19:27.425Z — anthropic / seven_day — dying `Claude-1` — S = `Claude-2`
 
-| horizon | basis | W (min) | pre min | post min | pre vol (dying) | post vol (dying) | pre vol (surv) | post vol (surv) | dying pre-share | alpha | ratio | P | N | G | largest gain share | control -7 d | control +7 d |
+| horizon | basis | W_pre (min) | pre min | post min | pre vol (dying) | post vol (dying) | pre vol (surv) | post vol (surv) | dying pre-share | alpha | ratio | P | N | G | largest gain share | control -7 d | control +7 d |
 |---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|---|
-| 60 min | requests | 60 | 59 | 59 | 989 | 36 | 45 | 3 | 95.6% | -0.042 | 0.067 | 0.000 | 0.712 | -0.712 | — | availability-change-inside: Claude-1 is exhausted at the start of the interval | availability-change-inside: Claude-1 changes availability at 2026-07-10T13:35:13.432Z |
-| 60 min | tokens | 60 | 59 | 59 | 168454085 | 10575442 | 4607837 | 506323 | 97.3% | -0.024 | 0.110 | 0 | 69517 | -69517 | — | availability-change-inside: Claude-1 is exhausted at the start of the interval | availability-change-inside: Claude-1 changes availability at 2026-07-10T13:35:13.432Z |
-| 6 h | requests | 360 | 359 | 359 | 5368 | 87 | 334 | 2256 | 94.1% | 0.358 | 6.754 | 5.354 | 0.000 | 5.354 | 100.0% | availability-change-inside: Claude-1 is exhausted at the start of the interval | availability-change-inside: Claude-1 changes availability at 2026-07-10T13:35:13.432Z |
-| 6 h | tokens | 360 | 359 | 359 | 799910415 | 28371061 | 38469455 | 436809435 | 95.4% | 0.498 | 11.355 | 1109582 | 0 | 1109582 | 100.0% | availability-change-inside: Claude-1 is exhausted at the start of the interval | availability-change-inside: Claude-1 changes availability at 2026-07-10T13:35:13.432Z |
+| W = 60 min | requests | 60 | 59 | 59 | 989 | 36 | 45 | 3 | 95.6% | -0.042 | 0.067 | 0.000 | 0.712 | -0.712 | — | availability-change-inside: Claude-1 is exhausted at the start of the interval | availability-change-inside: Claude-1 changes availability at 2026-07-10T13:35:13.432Z |
+| W = 60 min | tokens | 60 | 59 | 59 | 168454085 | 10575442 | 4607837 | 506323 | 97.3% | -0.024 | 0.110 | 0 | 69517 | -69517 | — | availability-change-inside: Claude-1 is exhausted at the start of the interval | availability-change-inside: Claude-1 changes availability at 2026-07-10T13:35:13.432Z |
+| W = 360 min | requests | 360 | 359 | 359 | 5368 | 87 | 334 | 2256 | 94.1% | 0.358 | 6.754 | 5.354 | 0.000 | 5.354 | 100.0% | availability-change-inside: Claude-1 is exhausted at the start of the interval | availability-change-inside: Claude-1 changes availability at 2026-07-10T13:35:13.432Z |
+| W = 360 min | tokens | 360 | 359 | 359 | 799910415 | 28371061 | 38469455 | 436809435 | 95.4% | 0.498 | 11.355 | 1109582 | 0 | 1109582 | 100.0% | availability-change-inside: Claude-1 is exhausted at the start of the interval | availability-change-inside: Claude-1 changes availability at 2026-07-10T13:35:13.432Z |
 
 - Availability bound: 1507 min, set by `Claude-2`.
-- Survivors, at W = 60 min:
+- Survivors, at W = 60 min (W_pre = 60 min):
   - `Claude-2`: requests pre 0.763, post 0.051, delta -0.712, contribution -0.042, pre-share 100.0%; tokens pre 78099, post 8582, delta -69517, contribution -0.024, pre-share 100.0%
 - excluded members: Claude-3 (unknown)
 
-**Event 60** — 2026-09-05T15:09:12.393Z — anthropic / five_hour — dying `Claude-5` — S = `Claude-2`, `Claude-3`, `Claude-4`
-
-| horizon | basis | W (min) | pre min | post min | pre vol (dying) | post vol (dying) | pre vol (surv) | post vol (surv) | dying pre-share | alpha | ratio | P | N | G | largest gain share | control -7 d | control +7 d |
-|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|---|
-| 60 min | requests | 54 | 53 | 53 | 1556 | 2 | 46 | 1735 | 97.1% | 1.085 | 37.717 | 31.868 | 0.000 | 31.868 | 75.1% | 0.672 | outside-loaded-span: the interval leaves the span the request table was read over |
-| 60 min | tokens | 54 | 53 | 53 | 290744974 | 453154 | 16683855 | 340690269 | 94.6% | 1.114 | 20.420 | 6113329 | 0 | 6113329 | 80.3% | 0.793 | outside-loaded-span: the interval leaves the span the request table was read over |
-
-- 6 h horizon absent: the availability bound of 54 min caps the six-hour horizon at the 54 min it is already measured over.
-- Availability bound: 54 min, set by `Claude-1`.
-- Survivors, at W = 60 min:
-  - `Claude-2`: requests pre 0.679, post 8.604, delta 7.925, contribution 0.270, pre-share 78.3%; tokens pre 252377, post 1457107, delta 1204730, contribution 0.220, pre-share 80.2%
-  - `Claude-3`: requests pre 0.189, post 24.132, delta 23.943, contribution 0.816, pre-share 21.7%; tokens pre 62413, post 4971011, delta 4908598, contribution 0.895, pre-share 19.8%
-  - `Claude-4`: requests pre 0.000, post 0.000, delta 0.000, contribution 0.000, pre-share 0.0%; tokens pre 0, post 0, delta 0, contribution 0.000, pre-share 0.0%
-- excluded members: Claude-1 (exhausted)
-
 **Event 39** — 2026-08-07T19:58:42.079Z — anthropic / seven_day — dying `Claude-3` — S = `Claude-4`
 
-| horizon | basis | W (min) | pre min | post min | pre vol (dying) | post vol (dying) | pre vol (surv) | post vol (surv) | dying pre-share | alpha | ratio | P | N | G | largest gain share | control -7 d | control +7 d |
+| horizon | basis | W_pre (min) | pre min | post min | pre vol (dying) | post vol (dying) | pre vol (surv) | post vol (surv) | dying pre-share | alpha | ratio | P | N | G | largest gain share | control -7 d | control +7 d |
 |---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|---|
-| 60 min | requests | 56 | 55 | 55 | 172 | 93 | 5 | 22 | 97.2% | 0.099 | 4.400 | 0.309 | 0.000 | 0.309 | 100.0% | — | — |
-| 60 min | tokens | 56 | 55 | 55 | 42865908 | 29441185 | 1328436 | 3846045 | 97.0% | 0.059 | 2.895 | 45775 | 0 | 45775 | 100.0% | — | — |
+| W = 56 min | requests | 56 | 55 | 55 | 172 | 93 | 5 | 22 | 97.2% | 0.099 | 4.400 | 0.309 | 0.000 | 0.309 | 100.0% | — | — |
+| W = 56 min | tokens | 56 | 55 | 55 | 42865908 | 29441185 | 1328436 | 3846045 | 97.0% | 0.059 | 2.895 | 45775 | 0 | 45775 | 100.0% | — | — |
 
 - 6 h horizon absent: the availability bound of 56 min caps the six-hour horizon at the 56 min it is already measured over.
 - Availability bound: 56 min, set by `Claude-2`.
-- Survivors, at W = 60 min:
+- Survivors, at W = 56 min (W_pre = 56 min):
   - `Claude-4`: requests pre 0.091, post 0.400, delta 0.309, contribution 0.099, pre-share 100.0%; tokens pre 24153, post 69928, delta 45775, contribution 0.059, pre-share 100.0%
 - excluded members: Claude-2 (exhausted), Claude-1 (exhausted)
 
+**Event 60** — 2026-09-05T15:09:12.393Z — anthropic / five_hour — dying `Claude-5` — S = `Claude-2`, `Claude-3`, `Claude-4`
+
+| horizon | basis | W_pre (min) | pre min | post min | pre vol (dying) | post vol (dying) | pre vol (surv) | post vol (surv) | dying pre-share | alpha | ratio | P | N | G | largest gain share | control -7 d | control +7 d |
+|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|---|
+| W = 54 min | requests | 58 | 53 | 53 | 1556 | 2 | 46 | 1735 | 97.3% | 1.085 | 37.717 | 31.868 | 0.000 | 31.868 | 75.1% | 0.672 | outside-loaded-span: the interval leaves the span the request table was read over |
+| W = 54 min | tokens | 58 | 53 | 53 | 290744974 | 453154 | 16683855 | 340690269 | 94.8% | 1.114 | 20.420 | 6113329 | 0 | 6113329 | 80.3% | 0.793 | outside-loaded-span: the interval leaves the span the request table was read over |
+
+- 6 h horizon absent: the availability bound of 54 min caps the six-hour horizon at the 54 min it is already measured over.
+- Availability bound: 54 min, set by `Claude-1`.
+- Survivors, at W = 54 min (W_pre = 58 min):
+  - `Claude-2`: requests pre 0.679, post 8.604, delta 7.925, contribution 0.270, pre-share 78.7%; tokens pre 252377, post 1457107, delta 1204730, contribution 0.220, pre-share 80.7%
+  - `Claude-3`: requests pre 0.189, post 24.132, delta 23.943, contribution 0.816, pre-share 21.3%; tokens pre 62413, post 4971011, delta 4908598, contribution 0.895, pre-share 19.3%
+  - `Claude-4`: requests pre 0.000, post 0.000, delta 0.000, contribution 0.000, pre-share 0.0%; tokens pre 0, post 0, delta 0, contribution 0.000, pre-share 0.0%
+- excluded members: Claude-1 (exhausted)
+
 **Event 64** — 2026-09-05T18:38:28.979Z — anthropic / five_hour — dying `Claude-3` — S = `Claude-4`, `Claude-1`
 
-| horizon | basis | W (min) | pre min | post min | pre vol (dying) | post vol (dying) | pre vol (surv) | post vol (surv) | dying pre-share | alpha | ratio | P | N | G | largest gain share | control -7 d | control +7 d |
+| horizon | basis | W_pre (min) | pre min | post min | pre vol (dying) | post vol (dying) | pre vol (surv) | post vol (surv) | dying pre-share | alpha | ratio | P | N | G | largest gain share | control -7 d | control +7 d |
 |---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|---|
-| 60 min | requests | 16 | 15 | 15 | 445 | 1 | 12 | 240 | 97.4% | 0.512 | 20.000 | 15.200 | 0.000 | 15.200 | 99.1% | — | outside-loaded-span: the interval leaves the span the request table was read over |
-| 60 min | tokens | 16 | 15 | 15 | 64165700 | 260325 | 1165042 | 54312792 | 98.2% | 0.828 | 46.619 | 3543183 | 0 | 3543183 | 100.0% | — | outside-loaded-span: the interval leaves the span the request table was read over |
+| W = 16 min | requests | 26 | 15 | 15 | 445 | 1 | 12 | 240 | 98.3% | 0.512 | 20.000 | 15.200 | 0.000 | 15.200 | 99.1% | — | outside-loaded-span: the interval leaves the span the request table was read over |
+| W = 16 min | tokens | 26 | 15 | 15 | 64165700 | 260325 | 1165042 | 54312792 | 98.9% | 0.828 | 46.619 | 3543183 | 0 | 3543183 | 100.0% | — | outside-loaded-span: the interval leaves the span the request table was read over |
 
 - 6 h horizon absent: the availability bound of 16 min caps the six-hour horizon at the 16 min it is already measured over.
 - Availability bound: 16 min, set by `Claude-5`.
-- Survivors, at W = 60 min:
+- Survivors, at W = 16 min (W_pre = 26 min):
   - `Claude-4`: requests pre 0.800, post 15.867, delta 15.067, contribution 0.508, pre-share 100.0%; tokens pre 77669, post 3620853, delta 3543183, contribution 0.828, pre-share 100.0%
   - `Claude-1`: requests pre 0.000, post 0.133, delta 0.133, contribution 0.004, pre-share 0.0%; tokens pre 0, post 0, delta 0, contribution 0.000, pre-share 0.0%
 - excluded members: Claude-2 (exhausted), Claude-5 (exhausted)
 
-**Event 26** — 2026-07-26T21:16:47.529Z — anthropic / seven_day — dying `Claude-4` — S = `Claude-1`
-
-| horizon | basis | W (min) | pre min | post min | pre vol (dying) | post vol (dying) | pre vol (surv) | post vol (surv) | dying pre-share | alpha | ratio | P | N | G | largest gain share | control -7 d | control +7 d |
-|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|---|
-| 60 min | requests | 36 | 35 | 35 | 132 | 72 | 1 | 14 | 99.2% | 0.098 | 14.000 | 0.371 | 0.000 | 0.371 | 100.0% | availability-change-inside: Claude-4 is unknown at the start of the interval | — |
-| 60 min | tokens | 36 | 35 | 35 | 33722493 | 20180952 | 252599 | 5488978 | 99.3% | 0.155 | 21.730 | 149611 | 0 | 149611 | 100.0% | availability-change-inside: Claude-4 is unknown at the start of the interval | — |
-
-- 6 h horizon absent: the availability bound of 36 min caps the six-hour horizon at the 36 min it is already measured over.
-- Availability bound: 36 min, set by `Claude-4`.
-- Survivors, at W = 60 min:
-  - `Claude-1`: requests pre 0.029, post 0.400, delta 0.371, contribution 0.098, pre-share 100.0%; tokens pre 7217, post 156828, delta 149611, contribution 0.155, pre-share 100.0%
-- excluded members: Claude-2 (exhausted), Claude-3 (exhausted)
-
 **Event 14** — 2026-07-19T16:29:05.469Z — anthropic / five_hour — dying `Claude-3` — S = `Claude-1`
 
-| horizon | basis | W (min) | pre min | post min | pre vol (dying) | post vol (dying) | pre vol (surv) | post vol (surv) | dying pre-share | alpha | ratio | P | N | G | largest gain share | control -7 d | control +7 d |
+| horizon | basis | W_pre (min) | pre min | post min | pre vol (dying) | post vol (dying) | pre vol (surv) | post vol (surv) | dying pre-share | alpha | ratio | P | N | G | largest gain share | control -7 d | control +7 d |
 |---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|---|
-| 60 min | requests | 22 | 21 | 21 | 209 | 0 | 1 | 170 | 99.5% | 0.809 | 170.000 | 8.048 | 0.000 | 8.048 | 100.0% | availability-change-inside: Claude-3 is unknown at the start of the interval | availability-change-inside: Claude-3 is exhausted at the start of the interval |
-| 60 min | tokens | 22 | 21 | 21 | 80781624 | 0 | 570888 | 63453242 | 99.3% | 0.778 | 111.148 | 2994398 | 0 | 2994398 | 100.0% | availability-change-inside: Claude-3 is unknown at the start of the interval | availability-change-inside: Claude-3 is exhausted at the start of the interval |
+| W = 22 min | requests | 38 | 21 | 21 | 209 | 0 | 1 | 170 | 98.6% | 0.809 | 170.000 | 8.048 | 0.000 | 8.048 | 100.0% | availability-change-inside: Claude-3 is unknown at the start of the interval | availability-change-inside: Claude-3 is exhausted at the start of the interval |
+| W = 22 min | tokens | 38 | 21 | 21 | 80781624 | 0 | 570888 | 63453242 | 97.6% | 0.778 | 111.148 | 2994398 | 0 | 2994398 | 100.0% | availability-change-inside: Claude-3 is unknown at the start of the interval | availability-change-inside: Claude-3 is exhausted at the start of the interval |
 
 - 6 h horizon absent: the availability bound of 22 min caps the six-hour horizon at the 22 min it is already measured over.
 - Availability bound: 22 min, set by `Claude-2`.
-- Survivors, at W = 60 min:
+- Survivors, at W = 22 min (W_pre = 38 min):
   - `Claude-1`: requests pre 0.048, post 8.095, delta 8.048, contribution 0.809, pre-share 100.0%; tokens pre 27185, post 3021583, delta 2994398, contribution 0.778, pre-share 100.0%
 - excluded members: Claude-2 (exhausted)
 
+**Event 26** — 2026-07-26T21:16:47.529Z — anthropic / seven_day — dying `Claude-4` — S = `Claude-1`
+
+| horizon | basis | W_pre (min) | pre min | post min | pre vol (dying) | post vol (dying) | pre vol (surv) | post vol (surv) | dying pre-share | alpha | ratio | P | N | G | largest gain share | control -7 d | control +7 d |
+|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|---|
+| W = 36 min | requests | 36 | 35 | 35 | 132 | 72 | 1 | 14 | 99.2% | 0.098 | 14.000 | 0.371 | 0.000 | 0.371 | 100.0% | availability-change-inside: Claude-4 is unknown at the start of the interval | — |
+| W = 36 min | tokens | 36 | 35 | 35 | 33722493 | 20180952 | 252599 | 5488978 | 99.3% | 0.155 | 21.730 | 149611 | 0 | 149611 | 100.0% | availability-change-inside: Claude-4 is unknown at the start of the interval | — |
+
+- 6 h horizon absent: the availability bound of 36 min caps the six-hour horizon at the 36 min it is already measured over.
+- Availability bound: 36 min, set by `Claude-4`.
+- Survivors, at W = 36 min (W_pre = 36 min):
+  - `Claude-1`: requests pre 0.029, post 0.400, delta 0.371, contribution 0.098, pre-share 100.0%; tokens pre 7217, post 156828, delta 149611, contribution 0.155, pre-share 100.0%
+- excluded members: Claude-2 (exhausted), Claude-3 (exhausted)
+
 **Event 3** — 2026-07-02T09:38:41.152Z — anthropic / five_hour — dying `Claude-1` — S = `Claude-2`
 
-| horizon | basis | W (min) | pre min | post min | pre vol (dying) | post vol (dying) | pre vol (surv) | post vol (surv) | dying pre-share | alpha | ratio | P | N | G | largest gain share | control -7 d | control +7 d |
+| horizon | basis | W_pre (min) | pre min | post min | pre vol (dying) | post vol (dying) | pre vol (surv) | post vol (surv) | dying pre-share | alpha | ratio | P | N | G | largest gain share | control -7 d | control +7 d |
 |---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|---|
-| 60 min | requests | 60 | 59 | 59 | 681 | 8 | 2 | 584 | 99.7% | 0.855 | 292.000 | 9.864 | 0.000 | 9.864 | 100.0% | availability-change-inside: Claude-1 is exhausted at the start of the interval | 1.518 |
-| 60 min | tokens | 60 | 59 | 59 | 154581017 | 3092132 | 0 | 174482272 | 100.0% | 1.129 | — | 2957327 | 0 | 2957327 | 100.0% | availability-change-inside: Claude-1 is exhausted at the start of the interval | — |
-| 6 h | requests | 138 | 137 | 137 | 859 | 8 | 2 | 1034 | 99.8% | 1.201 | 517.000 | 7.533 | 0.000 | 7.533 | 100.0% | availability-change-inside: Claude-1 is exhausted at the start of the interval | 12.804 |
-| 6 h | tokens | 138 | 137 | 137 | 199194858 | 3092132 | 0 | 324095154 | 100.0% | 1.627 | — | 2365658 | 0 | 2365658 | 100.0% | availability-change-inside: Claude-1 is exhausted at the start of the interval | — |
+| W = 60 min | requests | 60 | 59 | 59 | 681 | 8 | 2 | 584 | 99.7% | 0.855 | 292.000 | 9.864 | 0.000 | 9.864 | 100.0% | availability-change-inside: Claude-1 is exhausted at the start of the interval | 1.518 |
+| W = 60 min | tokens | 60 | 59 | 59 | 154581017 | 3092132 | 0 | 174482272 | 100.0% | 1.129 | — | 2957327 | 0 | 2957327 | 100.0% | availability-change-inside: Claude-1 is exhausted at the start of the interval | — |
+| W = 138 min | requests | 360 | 137 | 137 | 859 | 8 | 2 | 1034 | 99.8% | 1.201 | 517.000 | 7.533 | 0.000 | 7.533 | 100.0% | availability-change-inside: Claude-1 is exhausted at the start of the interval | 12.804 |
+| W = 138 min | tokens | 360 | 137 | 137 | 199194858 | 3092132 | 0 | 324095154 | 100.0% | 1.627 | — | 2365658 | 0 | 2365658 | 100.0% | availability-change-inside: Claude-1 is exhausted at the start of the interval | — |
 
 - Availability bound: 138 min, set by `Claude-2`.
-- Survivors, at W = 60 min:
+- Survivors, at W = 60 min (W_pre = 60 min):
   - `Claude-2`: requests pre 0.034, post 9.898, delta 9.864, contribution 0.855, pre-share 100.0%; tokens pre 0, post 2957327, delta 2957327, contribution 1.129, pre-share —
 - excluded members: Claude-3 (unknown)
 
 **Event 2** — 2026-07-02T00:40:40.683Z — anthropic / five_hour — dying `Claude-1` — S = `Claude-2`
 
-| horizon | basis | W (min) | pre min | post min | pre vol (dying) | post vol (dying) | pre vol (surv) | post vol (surv) | dying pre-share | alpha | ratio | P | N | G | largest gain share | control -7 d | control +7 d |
+| horizon | basis | W_pre (min) | pre min | post min | pre vol (dying) | post vol (dying) | pre vol (surv) | post vol (surv) | dying pre-share | alpha | ratio | P | N | G | largest gain share | control -7 d | control +7 d |
 |---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|---|
-| 60 min | requests | 60 | 59 | 59 | 1162 | 32 | 0 | 232 | 100.0% | 0.200 | — | 3.932 | 0.000 | 3.932 | 100.0% | availability-change-inside: Claude-1 is exhausted at the start of the interval | — |
-| 60 min | tokens | 60 | 59 | 59 | 291677370 | 8473293 | 0 | 46049520 | 100.0% | 0.158 | — | 780500 | 0 | 780500 | 100.0% | availability-change-inside: Claude-1 is exhausted at the start of the interval | — |
-| 6 h | requests | 90 | 89 | 89 | 1414 | 32 | 0 | 303 | 100.0% | 0.214 | — | 3.404 | 0.000 | 3.404 | 100.0% | availability-change-inside: Claude-1 is exhausted at the start of the interval | — |
-| 6 h | tokens | 90 | 89 | 89 | 347953201 | 8473293 | 0 | 60159597 | 100.0% | 0.173 | — | 675951 | 0 | 675951 | 100.0% | availability-change-inside: Claude-1 is exhausted at the start of the interval | — |
+| W = 60 min | requests | 60 | 59 | 59 | 1162 | 32 | 0 | 232 | 100.0% | 0.200 | — | 3.932 | 0.000 | 3.932 | 100.0% | availability-change-inside: Claude-1 is exhausted at the start of the interval | — |
+| W = 60 min | tokens | 60 | 59 | 59 | 291677370 | 8473293 | 0 | 46049520 | 100.0% | 0.158 | — | 780500 | 0 | 780500 | 100.0% | availability-change-inside: Claude-1 is exhausted at the start of the interval | — |
+| W = 90 min | requests | 360 | 89 | 89 | 1414 | 32 | 0 | 303 | 100.0% | 0.214 | — | 3.404 | 0.000 | 3.404 | 100.0% | availability-change-inside: Claude-1 is exhausted at the start of the interval | — |
+| W = 90 min | tokens | 360 | 89 | 89 | 347953201 | 8473293 | 0 | 60159597 | 100.0% | 0.173 | — | 675951 | 0 | 675951 | 100.0% | availability-change-inside: Claude-1 is exhausted at the start of the interval | — |
 
 - Availability bound: 90 min, set by `Claude-1`.
-- Survivors, at W = 60 min:
+- Survivors, at W = 60 min (W_pre = 60 min):
   - `Claude-2`: requests pre 0.000, post 3.932, delta 3.932, contribution 0.200, pre-share —; tokens pre 0, post 780500, delta 780500, contribution 0.158, pre-share —
 - excluded members: Claude-3 (unknown)
 
 **Event 8** — 2026-07-10T13:35:13.432Z — anthropic / five_hour — dying `Claude-1` — S = `Claude-2`
 
-| horizon | basis | W (min) | pre min | post min | pre vol (dying) | post vol (dying) | pre vol (surv) | post vol (surv) | dying pre-share | alpha | ratio | P | N | G | largest gain share | control -7 d | control +7 d |
+| horizon | basis | W_pre (min) | pre min | post min | pre vol (dying) | post vol (dying) | pre vol (surv) | post vol (surv) | dying pre-share | alpha | ratio | P | N | G | largest gain share | control -7 d | control +7 d |
 |---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|---|
-| 60 min | requests | 16 | 15 | 15 | 221 | 4 | 0 | 98 | 100.0% | 0.443 | — | 6.533 | 0.000 | 6.533 | 100.0% | availability-change-inside: Claude-1 changes availability at 2026-07-03T13:19:27.425Z | — |
-| 60 min | tokens | 16 | 15 | 15 | 53445969 | 1039281 | 0 | 28797802 | 100.0% | 0.539 | — | 1919853 | 0 | 1919853 | 100.0% | availability-change-inside: Claude-1 changes availability at 2026-07-03T13:19:27.425Z | — |
+| W = 16 min | requests | 60 | 15 | 15 | 221 | 4 | 0 | 98 | 100.0% | 0.443 | — | 6.533 | 0.000 | 6.533 | 100.0% | availability-change-inside: Claude-1 changes availability at 2026-07-03T13:19:27.425Z | — |
+| W = 16 min | tokens | 60 | 15 | 15 | 53445969 | 1039281 | 0 | 28797802 | 100.0% | 0.539 | — | 1919853 | 0 | 1919853 | 100.0% | availability-change-inside: Claude-1 changes availability at 2026-07-03T13:19:27.425Z | — |
 
 - 6 h horizon absent: the availability bound of 16 min caps the six-hour horizon at the 16 min it is already measured over.
 - Availability bound: 16 min, set by `Claude-1`.
-- Survivors, at W = 60 min:
+- Survivors, at W = 16 min (W_pre = 60 min):
   - `Claude-2`: requests pre 0.000, post 6.533, delta 6.533, contribution 0.443, pre-share —; tokens pre 0, post 1919853, delta 1919853, contribution 0.539, pre-share —
 - excluded members: Claude-3 (unknown)
 
@@ -2813,7 +2825,7 @@ Deaths that were not measured, printed rather than dropped:
 | 62 | 2026-09-05T18:02:28.976Z | anthropic | five_hour | Claude-5 | intervalTooShort | Claude-2 changes availability 10 min from the death |
 | 63 | 2026-09-05T18:12:28.976Z | anthropic | five_hour | Claude-2 | intervalTooShort | Claude-5 changes availability 10 min from the death |
 
-Reconciliation: 33 analysed + 5 noSurvivors + 2 alreadyExhausted + 0 dyingStateUnknown + 10 intervalTooShort + 0 outsideLoadedSpan + 0 noRequestCoverage + 0 noPreDeathDyingTraffic = 50 peer-exhaustion events in the replayed interval.
+Reconciliation: 33 analysed + 5 noSurvivors + 2 alreadyExhausted + 0 dyingStateUnknown + 10 intervalTooShort + 0 outsideLoadedSpan + 0 noRequestCoverage + 0 noPreDeathDyingTraffic + 0 folded into a simultaneous departure = 50 peer-exhaustion events in the replayed interval.
 
 ## Observation-lag mechanism check
 
@@ -3899,11 +3911,11 @@ What step 4 does with this:
 - A regression fit that states no ETA — a flat or falling six-hour fit, which an idle account inside a live window produces — has no recoverable anchor either: the fit's anchor is back-solved from the ETA. Such a window is scheduled from the replayed instant in BOTH scans, which is pre-existing behaviour and not something the correction introduced, and the lag-population table counts those records apart from the lags it medians.
 - Pending at this run (tag and servable class): peer-exhaustion (codex), add (codex), upgrade (codex). Those pairs hold no usable, uncensored weekly record common to all models, and each carries at least one tagged weekly window still pending at the label horizon, so their weekly half is unlabelled and the verdict is provisional.
 - Positive counts (all records, per model) — current: 3686 actual positives of 25200 scored; scenario-equal: 5826 actual positives of 42295 scored; scenario-equal-original: 5826 actual positives of 42295 scored; scenario-headroom: 5826 actual positives of 42295 scored.
-- `total_tokens` is null or zero on 8938 of 618471 attributed `requests` rows in the loaded span (1.4 %); those contribute zero to the absorption measurement's token basis.
+- `total_tokens` is null or zero on 8938 of 618630 attributed `requests` rows in the loaded span (1.4 %); those contribute zero to the absorption measurement's token basis.
 
 ## Notes
 
 - Placeholder windows skipped: 233.
-- Replay took 15.1 s over 9648 instants; scoring and bootstrap 3.2 s.
+- Replay took 15.1 s over 9648 instants; scoring and bootstrap 3.1 s.
 - Grid step 10 min; rows loaded 8 days either side of the replay interval.
-- Request buckets loaded: 63968 minute buckets over 7 accounts, on a 60-second grid, spanning 2026-06-23T09:31:00.000Z to 2026-09-07T11:54:00.000Z.
+- Request buckets loaded: 64004 minute buckets over 7 accounts, on a 60-second grid, spanning 2026-06-23T09:31:00.000Z to 2026-09-07T12:24:00.000Z.
