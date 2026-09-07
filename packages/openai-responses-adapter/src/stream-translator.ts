@@ -400,32 +400,39 @@ function parseAndProcessChunk(
 	state: State,
 ): void {
 	// Split on double newline to get complete SSE events
-	const rawEvents = chunk.split("\n\n");
+	const rawEvents = chunk.split(/\r?\n\r?\n/);
 
 	for (const rawEvent of rawEvents) {
 		if (!rawEvent.trim()) continue;
 
-		const lines = rawEvent.split("\n");
+		const lines = rawEvent.split(/\r?\n/);
 		let eventType = "";
-		let dataStr = "";
+		const dataLines: string[] = [];
 
 		for (const line of lines) {
-			if (line.startsWith("event: ")) {
-				eventType = line.slice(7).trim();
-			} else if (line.startsWith("data: ")) {
-				dataStr = line.slice(6).trim();
+			if (line.startsWith("event:")) {
+				eventType = line.slice(6).trim();
+			} else if (line.startsWith("data:")) {
+				const value = line.slice(5);
+				dataLines.push(value.startsWith(" ") ? value.slice(1) : value);
 			}
 		}
 
+		const dataStr = dataLines.join("\n");
 		if (!eventType || !dataStr) continue;
 
+		let data: Record<string, unknown>;
 		try {
-			const data = JSON.parse(dataStr) as Record<string, unknown>;
+			data = JSON.parse(dataStr) as Record<string, unknown>;
+		} catch {
+			// Event fields, data, and SyntaxError messages can contain payloads.
+			log.warn("Failed to parse upstream SSE event data");
+			continue;
+		}
+		try {
 			processEvent(eventType, data, controller, state);
 		} catch {
-			log.warn(
-				`Failed to parse SSE data for event ${eventType}: ${dataStr.slice(0, 200)}`,
-			);
+			log.warn("Failed to process upstream SSE event");
 		}
 	}
 }
@@ -466,14 +473,15 @@ export function translateAnthropicStreamToResponses(
 				try {
 					state.lineBuffer += decoder.decode(chunk, { stream: true });
 
-					// Process complete events (delimited by \n\n), keep remainder in buffer
-					const lastDoubleNewline = state.lineBuffer.lastIndexOf("\n\n");
-					if (lastDoubleNewline === -1) return;
-
-					const complete = state.lineBuffer.slice(0, lastDoubleNewline + 2);
-					state.lineBuffer = state.lineBuffer.slice(lastDoubleNewline + 2);
-
-					parseAndProcessChunk(complete, controller, state);
+					// Keep partial delimiters, including a CR/LF split across chunks.
+					for (;;) {
+						const boundary = /\r?\n\r?\n/.exec(state.lineBuffer);
+						if (!boundary || boundary.index === undefined) break;
+						const end = boundary.index + boundary[0].length;
+						const complete = state.lineBuffer.slice(0, end);
+						state.lineBuffer = state.lineBuffer.slice(end);
+						parseAndProcessChunk(complete, controller, state);
+					}
 				} catch (err) {
 					log.warn(`Stream transform error: ${String(err)}`);
 				}

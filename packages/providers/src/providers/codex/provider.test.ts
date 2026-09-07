@@ -133,7 +133,7 @@ describe("CodexProvider request conversion", () => {
 		);
 	});
 
-	it("does not inject a Skill continuation nudge into replayed mid-history", async () => {
+	it("preserves the previously sent Skill nudge at its historical boundary", async () => {
 		const provider = new CodexProvider();
 		const request = new Request("https://example.com/v1/messages", {
 			method: "POST",
@@ -170,11 +170,68 @@ describe("CodexProvider request conversion", () => {
 			}),
 		});
 
-		const transformed = await provider.transformRequestBody(request);
-		const body = await transformed.json();
+		const original = await request.json();
+		const convert = async (messages: unknown[]) => {
+			const transformed = await provider.transformRequestBody(
+				new Request(request.url, {
+					method: "POST",
+					headers: request.headers,
+					body: JSON.stringify({ ...original, messages }),
+				}),
+			);
+			return transformed.json();
+		};
+		const firstTurn = await convert(original.messages.slice(0, 3));
+		const body = await convert(original.messages);
 
-		expect(JSON.stringify(body.input)).not.toContain(
+		expect(body.input.slice(0, firstTurn.input.length)).toEqual(
+			firstTurn.input,
+		);
+		expect(JSON.stringify(firstTurn.input)).toContain(
 			"Continue the user's original request now",
+		);
+		// A second Skill invocation must retain the first nudge and add exactly
+		// one at the new boundary; both then survive another ordinary turn.
+		const secondSkill = [
+			...original.messages,
+			{
+				role: "assistant",
+				content: [
+					{
+						type: "tool_use",
+						id: "call_skill_2",
+						name: "Skill",
+						input: { skill: "ce-review" },
+					},
+				],
+			},
+			{
+				role: "user",
+				content: [
+					{
+						type: "tool_result",
+						tool_use_id: "call_skill_2",
+						content: "Loaded review instructions",
+					},
+				],
+			},
+		];
+		const secondTurn = await convert(secondSkill);
+		expect(secondTurn.input.slice(0, body.input.length)).toEqual(body.input);
+		const nudge = firstTurn.input.at(-1);
+		expect(
+			secondTurn.input.filter(
+				(item: unknown) => JSON.stringify(item) === JSON.stringify(nudge),
+			),
+		).toHaveLength(2);
+		expect(secondTurn.input.at(-1)).toEqual(nudge);
+		const replay = await convert([
+			...secondSkill,
+			{ role: "assistant", content: "Review complete." },
+			{ role: "user", content: "continue" },
+		]);
+		expect(replay.input.slice(0, secondTurn.input.length)).toEqual(
+			secondTurn.input,
 		);
 	});
 
@@ -634,6 +691,53 @@ describe("CodexProvider request conversion", () => {
 });
 
 describe("CodexProvider.processResponse", () => {
+	for (const newline of ["\n", "\r\n"]) {
+		it(`translates fragmented multiline SSE (${JSON.stringify(newline)})`, async () => {
+			const frames = [
+				[
+					"response.created",
+					{ response: { id: "resp_sse", model: "gpt-5.4" } },
+				],
+				["response.output_text.delta", { output_index: 0, delta: "héllo" }],
+				[
+					"response.completed",
+					{ response: { usage: { input_tokens: 17, output_tokens: 3 } } },
+				],
+			] as const;
+			const wire = frames
+				.map(
+					([event, data]) =>
+						`event:${event}${newline}: comment${newline}${JSON.stringify(
+							data,
+							null,
+							2,
+						)
+							.split("\n")
+							.map((line) => `data:${line}`)
+							.join(newline)}${newline}${newline}`,
+				)
+				.join("");
+			const bytes = new TextEncoder().encode(wire);
+			let offset = 0;
+			const upstream = new Response(
+				new ReadableStream<Uint8Array>({
+					pull(controller) {
+						if (offset === bytes.length) controller.close();
+						else controller.enqueue(bytes.slice(offset, ++offset));
+					},
+				}),
+				{ headers: { "content-type": "text/event-stream" } },
+			);
+			const output = await (
+				await new CodexProvider().processResponse(upstream, null)
+			).text();
+			expect(output).toContain('"text":"héllo"');
+			expect(output).toContain('"input_tokens":17');
+			expect(output).toContain('"output_tokens":3');
+			expect(output.match(/event: message_stop/g)).toHaveLength(1);
+		});
+	}
+
 	it("buffers tool-call arguments and emits them once before content_block_stop", async () => {
 		const provider = new CodexProvider();
 		const upstreamBody = sseBody([
