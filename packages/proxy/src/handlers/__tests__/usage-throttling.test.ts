@@ -6,6 +6,38 @@ import {
 	getUsageThrottleUntil,
 } from "../usage-throttling";
 
+it("keeps Zai weekly pacing active after the short quota resets", () => {
+	const now = Date.now();
+	const quota = (percentage: number, resetAt: number) => ({
+		used: 0,
+		remaining: 0,
+		percentage,
+		resetAt,
+		type: "tokens_limit",
+	});
+	const data = {
+		time_limit: quota(100, now + 100000),
+		tokens_limit: quota(100, now - 1),
+		tokens_limit_weekly: quota(100, now + 86400000),
+	};
+	const status = getUsageThrottleStatus(
+		data,
+		{ fiveHourEnabled: true, weeklyEnabled: true },
+		now,
+		"zai",
+	);
+	expect(status.throttledWindows).toEqual(["tokens_limit_weekly"]);
+	expect(status.throttleUntil).toBe(now + 86400000);
+	expect(
+		getUsageThrottleStatus(
+			data,
+			{ fiveHourEnabled: true, weeklyEnabled: false },
+			now,
+			"zai",
+		).throttleUntil,
+	).toBeNull();
+});
+
 function makeAccount(overrides: Partial<Account> = {}): Account {
 	return {
 		id: "acc-1",

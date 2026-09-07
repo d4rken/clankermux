@@ -9,6 +9,27 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { RateLimitProgress } from "./RateLimitProgress";
 
 describe("RateLimitProgress", () => {
+	it("shows Zai's weekly quota and explicitly reports its missing reset", () => {
+		const html = renderToStaticMarkup(
+			<RateLimitProgress
+				provider="zai"
+				showWeekly
+				usageData={{
+					time_limit: null,
+					tokens_limit: null,
+					tokens_limit_weekly: {
+						used: 1,
+						remaining: 0,
+						percentage: 100,
+						resetAt: null,
+						type: "tokens_limit_weekly",
+					},
+				}}
+			/>,
+		);
+		expect(html).toContain("Weekly");
+		expect(html).toContain("No reset data available");
+	});
 	it("shows the throttling message for Zai tokens_limit windows", () => {
 		const html = renderToStaticMarkup(
 			<RateLimitProgress

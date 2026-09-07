@@ -872,27 +872,45 @@ export function AccountAddForm({
 								</SelectItem>
 								<SelectItem value="console">Claude API</SelectItem>
 								<SelectItem value="codex">Codex (OpenAI OAuth)</SelectItem>
-								<SelectItem value="qwen">Qwen (Alibaba Cloud OAuth)</SelectItem>
-								<SelectItem value="zai">z.ai (API Key)</SelectItem>
-								<SelectItem value="minimax">Minimax (API Key)</SelectItem>
+								<SelectItem value="qwen">
+									Qwen (Alibaba Cloud OAuth) — Experimental
+								</SelectItem>
+								<SelectItem value="zai">
+									z.ai (API Key) — Experimental
+								</SelectItem>
+								<SelectItem value="minimax">
+									Minimax (API Key) — Experimental
+								</SelectItem>
 								<SelectItem value="anthropic-compatible">
-									Anthropic-Compatible (API Key)
+									Anthropic-Compatible (API Key) — Experimental
 								</SelectItem>
 								<SelectItem value="openai-compatible">
-									OpenAI-Compatible (API Key)
+									OpenAI-Compatible (API Key) — Experimental
 								</SelectItem>
-								<SelectItem value="kilo">Kilo Gateway (API Key)</SelectItem>
-								<SelectItem value="openrouter">OpenRouter (API Key)</SelectItem>
+								<SelectItem value="kilo">
+									Kilo Gateway (API Key) — Experimental
+								</SelectItem>
+								<SelectItem value="openrouter">
+									OpenRouter (API Key) — Experimental
+								</SelectItem>
 								<SelectItem value="alibaba-coding-plan">
-									Alibaba Coding Plan International (API Key)
+									Alibaba Coding Plan International (API Key) — Experimental
 								</SelectItem>
-								<SelectItem value="ollama">Ollama (v0.14.0+, local)</SelectItem>
+								<SelectItem value="ollama">
+									Ollama (v0.14.0+, local) — Experimental
+								</SelectItem>
 								<SelectItem value="ollama-cloud">
-									Ollama Cloud (ollama.com)
+									Ollama Cloud (ollama.com) — Experimental
 								</SelectItem>
 							</SelectContent>
 						</Select>
 					</div>
+					{!["claude-oauth", "console", "codex"].includes(newAccount.mode) && (
+						<Alert title="Experimental provider" tone="warning">
+							This integration has not been validated by us with a live account.
+							Authentication, usage tracking, and recovery may have issues.
+						</Alert>
+					)}
 					{newAccount.mode === "codex" && (
 						<div className="space-y-row">
 							{codexStep === "idle" && (

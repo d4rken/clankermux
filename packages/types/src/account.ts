@@ -211,7 +211,10 @@ export interface ZaiUsageWindow {
 
 export interface ZaiUsageData {
 	time_limit: ZaiUsageWindow | null;
+	/** Five-hour token quota. */
 	tokens_limit: ZaiUsageWindow | null;
+	/** Weekly token quota; absent in cached readings from older releases. */
+	tokens_limit_weekly?: ZaiUsageWindow | null;
 }
 
 // Usage data types for Kilo accounts

@@ -469,6 +469,7 @@ describe("GET /api/runway", () => {
 	it("emits every window the provider supports, and only those", async () => {
 		usageCache.set("acc-1", {
 			tokens_limit: { percentage: 40, resetAt: BASE + HOUR_MS },
+			tokens_limit_weekly: { percentage: 80, resetAt: BASE + 86400000 },
 		} as unknown as AnyUsageData);
 
 		const body = await runway(
@@ -478,10 +479,13 @@ describe("GET /api/runway", () => {
 			}),
 		);
 
-		// Zai has a token window but no weekly one, so the absent weekly window
-		// means "no such window", never "unread".
-		expect(body.accounts[0].windows.map((w) => w.kind)).toEqual(["five_hour"]);
+		// Both token quotas participate in the runway projection.
+		expect(body.accounts[0].windows.map((w) => w.kind)).toEqual([
+			"five_hour",
+			"seven_day",
+		]);
 		expect(body.accounts[0].windows[0].utilizationPct).toBe(40);
+		expect(body.accounts[0].windows[1].utilizationPct).toBe(80);
 		expect(body.accounts[0].metered).toBe(true);
 	});
 });

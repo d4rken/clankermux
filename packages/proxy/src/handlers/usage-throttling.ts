@@ -139,11 +139,20 @@ function collectWindows(
 	if ("tokens_limit" in data || "time_limit" in data) {
 		const zai = data as {
 			tokens_limit?: { percentage?: number; resetAt?: number | null } | null;
+			tokens_limit_weekly?: {
+				percentage?: number;
+				resetAt?: number | null;
+			} | null;
 		};
 		pushWindow(
 			"tokens_limit",
 			zai.tokens_limit?.percentage,
 			zai.tokens_limit?.resetAt,
+		);
+		pushWindow(
+			"tokens_limit_weekly",
+			zai.tokens_limit_weekly?.percentage,
+			zai.tokens_limit_weekly?.resetAt,
 		);
 		return windows;
 	}
@@ -211,6 +220,7 @@ function isWindowThrottlingEnabled(
 		case "daily":
 		case "tokens_limit":
 			return settings.fiveHourEnabled;
+		case "tokens_limit_weekly":
 		case "seven_day":
 		case "weekly":
 		case "monthly":

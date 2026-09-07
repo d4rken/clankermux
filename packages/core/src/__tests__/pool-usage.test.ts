@@ -264,7 +264,7 @@ describe("computePoolUsage", () => {
 			mkAccount({
 				id: "acc-9",
 				name: "spare",
-				provider: "zai",
+				provider: "openrouter",
 				hasRefreshToken: false,
 				usageData: null,
 			}),

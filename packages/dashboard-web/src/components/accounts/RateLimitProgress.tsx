@@ -346,7 +346,8 @@ function shouldShowResetDate(window: string | null): boolean {
 		window === "weekly" ||
 		window === "monthly" ||
 		window === "time_limit" ||
-		window === "tokens_limit"
+		window === "tokens_limit" ||
+		window === "tokens_limit_weekly"
 	);
 }
 
@@ -848,6 +849,8 @@ export function RateLimitProgress({
 							</>
 						);
 					}
+				} else if (usage.window === "tokens_limit_weekly") {
+					resetStatus = "No reset data available";
 				} else if (
 					usage.window === "seven_day" ||
 					usage.window === "seven_day_scoped"
