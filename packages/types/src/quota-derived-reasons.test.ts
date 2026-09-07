@@ -25,6 +25,7 @@ describe("isQuotaDerivedRateLimitReason", () => {
 		"out_of_credits",
 		"all_models_exhausted_429",
 		"family_weekly_exhausted_429",
+		"org_permission_denied",
 	];
 
 	it("accepts exactly the two quota-derived reasons", () => {
