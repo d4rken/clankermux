@@ -311,8 +311,22 @@ describe("end to end on a fixture database", () => {
 		);
 		expect(markdown).toContain("## Transition events");
 		expect(markdown).toContain("## Observation-lag mechanism check");
-		// The pre-correction scan is scored beside the corrected one.
+		// The declared candidate is scored under its own heading, beside the
+		// verdict rather than inside it.
+		expect(markdown).toContain("## Share-rule candidate");
+		expect(markdown).toContain(
+			"### Identity with the current model on the first assignment",
+		);
+		expect(markdown.indexOf("\n## Verdict\n")).toBeLessThan(
+			markdown.indexOf("\n## Share-rule candidate\n"),
+		);
+		expect(markdown.indexOf("\n## Share-rule candidate\n")).toBeLessThan(
+			markdown.indexOf("\n## Known limits\n"),
+		);
+		// The pre-correction scan and the candidate are scored beside the
+		// corrected one, in every per-model table.
 		expect(markdown).toContain("| scenario-equal-original |");
+		expect(markdown).toContain("| scenario-proportional |");
 		expect(markdown).toContain(`**Verdict: ${verdict.verdict}**`);
 		expect(markdown).not.toContain("undefined");
 	});

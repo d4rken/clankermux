@@ -195,18 +195,23 @@ export interface RunwayScenarioDemand {
 export interface RunwayScenarioShare {
 	accountId: string;
 	/**
-	 * `w_j / Σw` over the alive accounts of its class, taken at the FIRST
-	 * assignment in which this account is alive — `now` for an account alive at
-	 * `now`, later for one that is dead at `now` and revives (an exhausted 5 h
-	 * window beside a learning weekly). `0` when it is never alive inside the
-	 * horizon, so no share was ever assigned to it.
+	 * Window kind → `w_j / Σw` over the alive accounts of its class for THAT
+	 * kind, taken at the FIRST assignment in which this account is alive —
+	 * `now` for an account alive at `now`, later for one that is dead at `now`
+	 * and revives (an exhausted 5 h window beside a learning weekly). An EMPTY
+	 * record when the account is never alive inside the horizon, so no share was
+	 * ever assigned to it, and an absent kind is one its class never measured.
+	 *
+	 * Per kind because the demand being split is per (class, kind): a rule may
+	 * give an account most of its class's five-hour traffic and little of its
+	 * weekly, and a single number could not say so.
 	 *
 	 * At `now` the FINAL assignment is the one reported: a peer that fills
 	 * inside its observation lag dies at `now` and the class is re-split there,
 	 * so the share captured before that death is provisional and the one the
 	 * account actually starts burning at is the later one.
 	 */
-	shareOfClass: number;
+	shareOfClassByKind: Record<string, number>;
 }
 
 /**
@@ -222,6 +227,15 @@ export interface RunwayScenarioExhaustion {
 	 * reached 100 %, even though the scan applies the death at `now`.
 	 */
 	exhaustsAtMs: number;
+}
+
+/**
+ * The earliest instant strictly after `now` at which a scenario scan drove ANY
+ * window of one demand class to 100 %.
+ */
+export interface RunwayScenarioClassExhaustion {
+	demandClass: string;
+	atMs: number;
 }
 
 /**
@@ -260,6 +274,23 @@ export interface RunwayScenarioBasis {
 	 * `eventBudgetExhausted: "projection"`.
 	 */
 	projectedExhaustions: RunwayScenarioExhaustion[];
+	/**
+	 * Per demand class, the earliest instant strictly after `now` at which the
+	 * pace-1 baseline scan drove ANY window of that class to 100 % — in ANY
+	 * projected cycle, including the later ones {@link projectedExhaustions}
+	 * excludes by construction, and including a window that had already reset
+	 * once. A class with no such exhaustion has no entry; `[]` when no baseline
+	 * scan completed. Sorted by `demandClass`.
+	 *
+	 * BACKTEST-FACING. It answers one question the projection list cannot: did
+	 * the class re-split at all between `now` and some later instant. A window
+	 * that dies in its second cycle changes every survivor's slope exactly as a
+	 * first-cycle death does, and `redistribution-backtest.ts` needs that to
+	 * state the population its share-rule identity check is defined on. Nothing
+	 * a user sees reads it, and it is NOT a projection: an entry says a death
+	 * happened somewhere in the class, never which window it was.
+	 */
+	firstExhaustionAfterNowByClass: RunwayScenarioClassExhaustion[];
 	/**
 	 * Present only when a scan ran out of its event budget. `"baseline"`: the
 	 * pace-1 scan itself, so the outcome is `unknown`. `"probe"`: the baseline

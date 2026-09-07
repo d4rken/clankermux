@@ -142,25 +142,84 @@ export interface ShareCandidate {
 	demandClass: string;
 	/** null for unmetered accounts. */
 	capacityUnits: number | null;
-	windows: ReadonlyArray<{ windowKind: string; utilizationPct: number }>;
+	windows: ReadonlyArray<{
+		windowKind: string;
+		utilizationPct: number;
+		/**
+		 * What this window's own reading contributed to its class's demand for
+		 * its kind, in capacity units per hour, or `null` when it contributed
+		 * nothing (a learning window, or a reading with no usable slope).
+		 *
+		 * A property of the READING, so the scan never mutates it: it stays the
+		 * measured burn the window arrived with however far the walk has gone.
+		 */
+		measuredUnitsPerHour: number | null;
+	}>;
 }
 
 /**
  * Non-negative weight per candidate, same length and order.
  *
- * Called once per class per assignment with the accounts alive at that instant,
- * so a rule may depend on the current utilizations. A violated contract (wrong
- * length, a negative/NaN weight, or all-zero weights while the class still has
- * demand to place) throws: that is a programming error in the injected rule,
- * never a property of the data.
+ * Called once per class PER WINDOW KIND the class measured, with the accounts
+ * alive at that instant, so a rule may depend on the current utilizations. Per
+ * kind because the demand it splits is per (class, kind): an account's share of
+ * its class's five-hour traffic is not its share of the weekly, and a rule that
+ * had to answer once for both could only be right where the two coincide. A
+ * rule that does not care may ignore `windowKind` and return the same weights
+ * for every kind.
+ *
+ * A violated contract (wrong length, a negative/NaN weight, or all-zero weights
+ * while that kind still has demand to place) throws: that is a programming
+ * error in the injected rule, never a property of the data.
  */
 export type ShareRule = (
 	candidates: readonly ShareCandidate[],
+	windowKind: string,
 ) => readonly number[];
 
-/** Option 1 of the handover: every alive account of the class gets `w = 1`. */
+/**
+ * Option 1 of the handover: every alive account of the class gets `w = 1`.
+ *
+ * Ignores `windowKind`: one weight per account, the same for every kind.
+ */
 export const equalShareRule: ShareRule = (candidates) =>
 	candidates.map(() => 1);
+
+/**
+ * Each alive account's share of a kind's class demand is its OWN measured burn
+ * for that kind over the alive accounts' measured burn for it.
+ *
+ * A property of the model rather than a fitted rule: there is no coefficient
+ * here and nothing is read off any table. Two things follow from the
+ * arithmetic alone.
+ *
+ *  1. BEFORE ANY DEATH it reproduces the current model exactly. With every
+ *     contributor alive, `w_j / Σw = c_j / Σc`, so the slope assigned back is
+ *     `Σc · (c_j / Σc) / units_j = c_j / units_j` — the window's own measured
+ *     burn, which is what the fixed-slope scan holds.
+ *  2. AT A DEATH the dead account's demand goes to the survivors in proportion
+ *     to their own burn: the account already carrying most of the class's
+ *     traffic absorbs most of what the dead one was carrying, rather than an
+ *     equal split's `1/n` of it or the headroom rule's inverse.
+ *
+ * A window with no measured burn — a learning window, or one whose reading
+ * carries no usable slope — weighs 0 and takes demand only through the
+ * fallback: when NO candidate has a positive weight for a kind, this falls back
+ * to {@link equalShareRule} for that kind, the same fallback the headroom rule
+ * uses. There is nothing left to weight by there, and a kind that still carries
+ * demand has to place it somewhere.
+ */
+export const proportionalShareRule: ShareRule = (candidates, windowKind) => {
+	const weights = candidates.map((candidate: ShareCandidate) => {
+		const units = candidate.windows.find(
+			(window) => window.windowKind === windowKind,
+		)?.measuredUnitsPerHour;
+		return units != null && Number.isFinite(units) && units > 0 ? units : 0;
+	});
+	return weights.some((weight) => weight > 0)
+		? weights
+		: equalShareRule(candidates, windowKind);
+};
 
 export interface RunwayScenarioOptions {
 	/** Default {@link equalShareRule}. */
@@ -203,6 +262,12 @@ interface ScanWindow {
 	inactive: boolean;
 	/** %/hour, assigned at every assignment. */
 	slope: number;
+	/**
+	 * {@link PreparedWindow.contribution}, carried onto the scan state so a
+	 * share rule can weight by a window's own measured burn. NEVER mutated by
+	 * the walk: it is what the reading measured, not where the scan has got to.
+	 */
+	measuredUnitsPerHour: number | null;
 	/**
 	 * True while the window is still in the cycle its READING belongs to: no
 	 * reset and no credit revival has ended it inside this scan. Only a
@@ -333,12 +398,16 @@ interface HitSnapshot {
 /** What only the pace-1 scan may report. */
 interface BaselineCapture {
 	/**
-	 * `w_j/Σw` at each account's FIRST alive assignment — except at `now`, where
-	 * the LAST assignment wins: a share captured before a lag death is
-	 * provisional, and the re-split that death forces is the one the account
-	 * actually starts on.
+	 * accountId → window kind → `w_j/Σw` at that account's FIRST alive
+	 * assignment for that kind — except at `now`, where the LAST assignment
+	 * wins: a share captured before a lag death is provisional, and the re-split
+	 * that death forces is the one the account actually starts on.
+	 *
+	 * Per kind because the share is: the demand being split is per (class,
+	 * kind), so one number per account could only describe a rule that splits
+	 * every kind the same way.
 	 */
-	shares: Map<string, number>;
+	shares: Map<string, Map<string, number>>;
 	assumedCredits: RunwayAssumedCredits[];
 	/**
 	 * `${accountId}::${windowKind}` → that window's first-cycle exhaustion. Keyed
@@ -346,6 +415,13 @@ interface BaselineCapture {
 	 * entry carries its own ids so nothing has to parse the key back apart.
 	 */
 	exhaustions: Map<string, RunwayScenarioExhaustion>;
+	/**
+	 * demand class → the earliest instant strictly after `now` at which ANY
+	 * window of that class was driven to 100 %, in ANY cycle. The complement of
+	 * {@link exhaustions}, which is first cycles only: this one exists to say
+	 * that the class re-split, not which window did it.
+	 */
+	firstExhaustionAfterNow: Map<string, number>;
 }
 
 const finiteOrNull = (value: number | null | undefined): number | null =>
@@ -402,6 +478,7 @@ export function computeCapacityRunwayScenario(
 		unknownTierAccountIds: [],
 		demandOnlyAccountIds: [],
 		projectedExhaustions: [],
+		firstExhaustionAfterNowByClass: [],
 	};
 	if (accounts.length === 0) return { kind: "no-accounts", ...emptyBasis };
 
@@ -580,6 +657,7 @@ export function computeCapacityRunwayScenario(
 		shares: new Map(),
 		assumedCredits: [],
 		exhaustions: new Map(),
+		firstExhaustionAfterNow: new Map(),
 	};
 
 	const basisOf = (
@@ -598,6 +676,11 @@ export function computeCapacityRunwayScenario(
 				a.accountId.localeCompare(b.accountId) ||
 				a.windowKind.localeCompare(b.windowKind),
 		),
+		firstExhaustionAfterNowByClass: [
+			...capture.firstExhaustionAfterNow.entries(),
+		]
+			.map(([demandClass, atMs]) => ({ demandClass, atMs }))
+			.sort((a, b) => a.demandClass.localeCompare(b.demandClass)),
 		...(eventBudgetExhausted ? { eventBudgetExhausted } : {}),
 	});
 
@@ -639,6 +722,7 @@ export function computeCapacityRunwayScenario(
 				deadUntilMs: window.deadUntilMs,
 				inactive: window.inactive,
 				slope: 0,
+				measuredUnitsPerHour: window.contribution,
 				firstCycle: true,
 				lagMs: window.lagMs,
 				lagExhaustAtMs: null,
@@ -669,8 +753,13 @@ export function computeCapacityRunwayScenario(
 				capture.assumedCredits.push(...(assumedCredits ?? consumedSoFar()));
 				// A scan that never reached a verdict reports no projections at all:
 				// the exhaustions it happened to walk past describe a scan the caller
-				// is being told not to believe.
-				if (result.kind === "budget") capture.exhaustions.clear();
+				// is being told not to believe. The class-level list goes with them —
+				// an empty one reads as "the class never re-split", which is the one
+				// thing an abandoned walk cannot say.
+				if (result.kind === "budget") {
+					capture.exhaustions.clear();
+					capture.firstExhaustionAfterNow.clear();
+				}
 			}
 			return result;
 		};
@@ -743,56 +832,74 @@ export function computeCapacityRunwayScenario(
 				);
 				if (candidates.length === 0) continue;
 				const perKind = demand.get(demandClass);
-				const weights = shareRule(
-					candidates.map((account) => ({
-						accountId: account.accountId,
-						demandClass: account.demandClass,
-						capacityUnits: account.capacityUnits,
-						windows: account.windows.map((window) => ({
-							windowKind: window.kind,
-							utilizationPct: window.pct,
-						})),
+				// One view of the class, shared by every kind's call: the rule reads
+				// the utilizations as they stand BEFORE this assignment touches them,
+				// so no kind's weights depend on the order the kinds are walked in.
+				const view: ShareCandidate[] = candidates.map((account) => ({
+					accountId: account.accountId,
+					demandClass: account.demandClass,
+					capacityUnits: account.capacityUnits,
+					windows: account.windows.map((window) => ({
+						windowKind: window.kind,
+						utilizationPct: window.pct,
+						measuredUnitsPerHour: window.measuredUnitsPerHour,
 					})),
-				);
-				if (weights.length !== candidates.length) {
-					throw new Error(
-						`shareRule returned ${weights.length} weights for ${candidates.length} candidates of class ${demandClass}`,
-					);
-				}
-				let total = 0;
-				for (const weight of weights) {
-					if (!Number.isFinite(weight) || weight < 0) {
+				}));
+				/** accountId → kind → `w_j/Σw` for that kind. */
+				const sharesByAccount = new Map<string, Map<string, number>>();
+				for (const [windowKind, kindUnits] of perKind ?? []) {
+					const weights = shareRule(view, windowKind);
+					if (weights.length !== candidates.length) {
 						throw new Error(
-							`shareRule returned a weight that is not a finite number >= 0 (${weight}) for class ${demandClass}`,
+							`shareRule returned ${weights.length} weights for ${candidates.length} candidates of class ${demandClass} on window kind ${windowKind}`,
 						);
 					}
-					total += weight;
-				}
-				if (total === 0) {
-					const hasDemand = [...(perKind?.values() ?? [])].some(
-						(units) => units > 0,
-					);
-					if (hasDemand) {
+					let total = 0;
+					for (const weight of weights) {
+						if (!Number.isFinite(weight) || weight < 0) {
+							throw new Error(
+								`shareRule returned a weight that is not a finite number >= 0 (${weight}) for class ${demandClass} on window kind ${windowKind}`,
+							);
+						}
+						total += weight;
+					}
+					if (total === 0 && kindUnits > 0) {
 						throw new Error(
-							`shareRule returned all-zero weights for class ${demandClass}, which still has demand to place`,
+							`shareRule returned all-zero weights for class ${demandClass} on window kind ${windowKind}, which still has demand to place`,
 						);
 					}
+					candidates.forEach((account, index) => {
+						const share = total > 0 ? weights[index] / total : 0;
+						const byKind =
+							sharesByAccount.get(account.accountId) ??
+							new Map<string, number>();
+						sharesByAccount.set(account.accountId, byKind);
+						byKind.set(windowKind, share);
+						// At `now` the LAST assignment stands: a lag death re-splits the
+						// class, and the share an account starts on is the one it holds
+						// once every lag has been consumed. After `now` the first
+						// assignment stands, so a revived account still reports the share
+						// it woke up to.
+						if (capture !== null) {
+							const captured =
+								capture.shares.get(account.accountId) ??
+								new Map<string, number>();
+							capture.shares.set(account.accountId, captured);
+							if (t === now || !captured.has(windowKind)) {
+								captured.set(windowKind, share);
+							}
+						}
+					});
 				}
-				candidates.forEach((account, index) => {
-					const share = total > 0 ? weights[index] / total : 0;
-					// At `now` the LAST assignment stands: a lag death re-splits the
-					// class, and the share an account starts on is the one it holds
-					// once every lag has been consumed. After `now` the first
-					// assignment stands, so a revived account still reports the share
-					// it woke up to.
-					if (
-						capture !== null &&
-						(t === now || !capture.shares.has(account.accountId))
-					) {
-						capture.shares.set(account.accountId, share);
-					}
+				// Applied in a pass of its own, over EVERY window of every alive
+				// candidate: a window whose kind the class never measured still has
+				// to be zeroed, still pins an unstarted cycle, and still consumes its
+				// observation lag exactly once at `now`.
+				candidates.forEach((account) => {
+					const byKind = sharesByAccount.get(account.accountId);
 					for (const window of account.windows) {
 						const units = perKind?.get(window.kind);
+						const share = byKind?.get(window.kind) ?? 0;
 						window.slope =
 							units === undefined || account.capacityUnits === null
 								? 0
@@ -966,6 +1073,17 @@ export function computeCapacityRunwayScenario(
 				const window = event.window;
 				window.pct = 100;
 				window.deadUntilMs = window.resetsAtMs ?? horizonEndMs;
+				// A death in ANY cycle re-splits the class from here on. Recorded at
+				// the instant the scan APPLIES it, so a lag-origin death — applied at
+				// `now`, from a fill that happened before it — is not one of these:
+				// nothing this list is read for stands between `now` and itself.
+				if (capture !== null && event.atMs > now) {
+					const demandClass = event.account.demandClass;
+					const earliest = capture.firstExhaustionAfterNow.get(demandClass);
+					if (earliest == null || event.atMs < earliest) {
+						capture.firstExhaustionAfterNow.set(demandClass, event.atMs);
+					}
+				}
 				// The FIRST exhaustion of the cycle the reading belongs to, at the
 				// event's own instant rather than the batch clock (a tie inside the
 				// tolerance would otherwise move it by the width of the batch).
@@ -1021,7 +1139,9 @@ export function computeCapacityRunwayScenario(
 		.map((account) => ({
 			accountId: account.accountId,
 			// Never alive inside the horizon → no share was ever assigned to it.
-			shareOfClass: capture.shares.get(account.accountId) ?? 0,
+			shareOfClassByKind: Object.fromEntries(
+				capture.shares.get(account.accountId) ?? [],
+			),
 		}));
 	const assumedCredits = capture.assumedCredits;
 

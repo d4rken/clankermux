@@ -14,6 +14,7 @@ import {
 	computeCapacityRunwayScenario,
 	equalShareRule,
 	observationLagMs,
+	proportionalShareRule,
 	type RunwayScenarioAccountInput,
 	type RunwayScenarioOutcome,
 	type ShareCandidate,
@@ -188,7 +189,9 @@ export type ReplayModel =
 	| "scenario-equal"
 	/** The same equal split with the PRE-CORRECTION scan — the lag-parity control. */
 	| "scenario-equal-original"
-	| "scenario-headroom";
+	| "scenario-headroom"
+	/** The declared candidate — see {@link CANDIDATE_MODEL}. */
+	| "scenario-proportional";
 
 /** Every scan the replay runs, in the order the report prints them. */
 export const REPLAY_MODELS: readonly ReplayModel[] = [
@@ -196,7 +199,19 @@ export const REPLAY_MODELS: readonly ReplayModel[] = [
 	"scenario-equal",
 	"scenario-equal-original",
 	"scenario-headroom",
+	"scenario-proportional",
 ];
+
+/**
+ * The share rule scored as a DECLARED CANDIDATE beside the verdict.
+ *
+ * Declared before it was scored and carrying no fitted coefficient, so nothing
+ * about it is read off the tables it is judged on. It is not the verdict basis
+ * and does not enter {@link VERDICT_RULE}: the report scores it under its own
+ * heading, against the same criteria, and says so.
+ */
+export const CANDIDATE_MODEL =
+	"scenario-proportional" as const satisfies ScenarioModel;
 
 /** The models that are a {@link computeCapacityRunwayScenario} call. */
 export type ScenarioModel = Exclude<ReplayModel, "current">;
@@ -296,6 +311,33 @@ export interface RedistributionRecord extends BacktestRecord {
 	 * and this stays true for them.
 	 */
 	lagAnchorKnown: boolean;
+	/**
+	 * True where the CANDIDATE scan ({@link CANDIDATE_MODEL}) projects this
+	 * window on its first assignment with every contributor to the class demand
+	 * both alive and IN that assignment: no class window is already at 100 % at
+	 * `T`, no account whose measured burn joined the class demand was withheld
+	 * from the pool it is split over, no class exhaustion of any cycle stands
+	 * between `T` and this window's own, and no class window was filled inside
+	 * its own observation lag.
+	 *
+	 * That is exactly the population the proportional rule's identity with the
+	 * current model is defined on — with every contributor alive AND pooled the
+	 * demand handed back to an account is the burn it contributed, so it burns
+	 * at its own measured slope. An account that is dead AT `T` is a contributor
+	 * whose demand the survivors already carry from the first assignment, which
+	 * is why a class member at 100 % disqualifies the instant rather than only
+	 * the events after it; a withheld or demand-only contributor does the same
+	 * thing without anything having died at all.
+	 *
+	 * "Of any cycle" is the second thing a projection list cannot state: it
+	 * holds first-cycle deaths only, and a window that resets and fills again
+	 * re-splits the class just as its first fill would have.
+	 *
+	 * Taken from the candidate's OWN scan: two share rules order a class's
+	 * events differently, so `scenario-equal`'s first-event flag is not a
+	 * statement about where this scan's first assignment ends.
+	 */
+	proportionalFirstAssignment: boolean;
 }
 
 export interface ReplayRange {
@@ -321,8 +363,12 @@ export interface ReplayRange {
  * at 100 % or unmetered-with-no-capacity — it falls back to the equal split:
  * there is nothing left to weight by, and the scan's next event kills them all
  * anyway.
+ *
+ * Ignores `windowKind`: `maxPct` is an ACCOUNT-wide statement — an account is
+ * only as routable as its tightest window — so this rule weights every kind the
+ * same way.
  */
-export const headroomShareRule: ShareRule = (candidates) => {
+export const headroomShareRule: ShareRule = (candidates, windowKind) => {
 	const weights = candidates.map((candidate: ShareCandidate) => {
 		const units = candidate.capacityUnits;
 		if (units == null || !Number.isFinite(units)) return 0;
@@ -337,7 +383,7 @@ export const headroomShareRule: ShareRule = (candidates) => {
 	});
 	return weights.some((weight) => weight > 0)
 		? weights
-		: equalShareRule(candidates);
+		: equalShareRule(candidates, windowKind);
 };
 
 /** What one scenario model asks {@link computeCapacityRunwayScenario} for. */
@@ -363,6 +409,10 @@ export const SCENARIO_MODELS: Record<ScenarioModel, ScenarioModelSpec> = {
 	},
 	"scenario-headroom": {
 		shareRule: headroomShareRule,
+		observationLag: "advance",
+	},
+	"scenario-proportional": {
+		shareRule: proportionalShareRule,
 		observationLag: "advance",
 	},
 };
@@ -3071,6 +3121,70 @@ export function replayInstant(
 		};
 		const firstEventCorrected = firstEventInScan("scenario-equal");
 		const firstEventOriginal = firstEventInScan("scenario-equal-original");
+		const firstEventCandidate = firstEventInScan(CANDIDATE_MODEL);
+		// A class member already at 100 % at `T` is a contributor the survivors
+		// carry from the first assignment on, so no scan of this instant starts
+		// on own-slopes. Read from the READINGS rather than from any scan: it is
+		// a property of the instant, and every model sees the same one.
+		const classDeadAtT = entries.some((entry) =>
+			entry.windows.some((window) => window.input.utilizationPct >= 100),
+		);
+		const candidateScan = scenarioOutcomes.get(CANDIDATE_MODEL);
+		/**
+		 * True when the CANDIDATE scan kept measured demand OUT of its own
+		 * assignments: an account whose burn joined the class demand but which is
+		 * not in the pool the demand is split over.
+		 *
+		 * The identity is not about deaths alone. The scan takes a withheld
+		 * account's measured burn into the class demand and then hands it to the
+		 * accounts it did pool, so a survivor burns faster than its own reading
+		 * from the FIRST assignment on, with nobody exhausted and nothing having
+		 * died. Two of the scan's statuses can do that — `withheld` (the strict
+		 * unmeasured rule) and `demand-only` (paused or removed) — and both are
+		 * disclosed by id. Every other non-pooled status carries no window at all
+		 * and therefore no burn to contribute.
+		 *
+		 * A class-level fact, not a per-account one: the demand is pooled, so one
+		 * withheld contributor moves every projection in the class. The withheld
+		 * list is not filtered by contribution — the scan does not report which
+		 * of a withheld account's windows measured anything — so an account whose
+		 * every window is learning disqualifies the instant as well. That only
+		 * ever removes records from the population; it can never admit one whose
+		 * demand was redistributed.
+		 */
+		const candidateWithholdsDemand =
+			candidateScan == null ||
+			withheldIds(candidateScan).length > 0 ||
+			candidateScan.demandOnlyAccountIds.length > 0;
+		/**
+		 * True when NO exhaustion of this class stands between `T` and this
+		 * window's own projected exhaustion in the CANDIDATE scan — in ANY cycle.
+		 *
+		 * `firstEventInScan` reads `projectedExhaustions`, which by design holds
+		 * first-cycle deaths only, so a window that resets and fills again before
+		 * this one's ETA is invisible to it. Such a death re-splits the class
+		 * exactly like a first-cycle one: the survivors carry its demand until it
+		 * revives, and this window stops burning at its own measured slope.
+		 * `firstExhaustionAfterNowByClass` is the scan's own statement that it
+		 * happened.
+		 *
+		 * An instant EQUAL to this window's own exhaustion is its own death (or a
+		 * tie with it) and changes nothing before it, which is why the comparison
+		 * is not strict.
+		 */
+		const noClassDeathBeforeCandidate = (
+			accountId: string,
+			windowKind: string,
+		): boolean => {
+			const own = candidateScan?.projectedExhaustions.find((exhaustion) =>
+				isSameWindow(exhaustion, accountId, windowKind),
+			)?.exhaustsAtMs;
+			if (own == null) return false;
+			const firstDeath = candidateScan?.firstExhaustionAfterNowByClass.find(
+				(entry) => entry.demandClass === demandClass,
+			)?.atMs;
+			return firstDeath == null || firstDeath >= orderedAt(own);
+		};
 		/**
 		 * The death `firstEventInScan` cannot see: another window of the class
 		 * that the correction filled inside its own lag, which the scan applies
@@ -3082,9 +3196,10 @@ export function replayInstant(
 		const peerDiedInLagOf = (
 			accountId: string,
 			windowKind: string,
+			model: ScenarioModel = "scenario-equal",
 		): boolean => {
 			const exhaustions =
-				scenarioOutcomes.get("scenario-equal")?.projectedExhaustions ?? [];
+				scenarioOutcomes.get(model)?.projectedExhaustions ?? [];
 			const own = exhaustions.find((exhaustion) =>
 				isSameWindow(exhaustion, accountId, windowKind),
 			)?.exhaustsAtMs;
@@ -3176,6 +3291,12 @@ export function replayInstant(
 						firstEvent &&
 						!peerDiedInLag &&
 						firstEventOriginal(entry.accountId, window.kind),
+					proportionalFirstAssignment:
+						!classDeadAtT &&
+						!candidateWithholdsDemand &&
+						firstEventCandidate(entry.accountId, window.kind) &&
+						!peerDiedInLagOf(entry.accountId, window.kind, CANDIDATE_MODEL) &&
+						noClassDeathBeforeCandidate(entry.accountId, window.kind),
 					lagAnchorKnown: lagAnchorKnownOf(entry, window),
 				};
 
@@ -3765,6 +3886,14 @@ export interface CohortScores {
 	pairedBiasVsOriginal: PairedBias;
 	/** How much closer to the truth the correction lands than the original scan. */
 	pairedAbsVsOriginal: PairedAbsDelta;
+	/**
+	 * {@link CANDIDATE_MODEL} against the CURRENT model, the candidate's
+	 * criterion A. Its own pairing: a paired median is taken over the records
+	 * BOTH models dated, and which records those are is a property of the pair.
+	 */
+	candidateBias: PairedBias;
+	/** {@link CANDIDATE_MODEL} against the pre-correction scan — its criterion D. */
+	candidateAbsVsOriginal: PairedAbsDelta;
 }
 
 function metricsByModel(
@@ -3802,6 +3931,12 @@ function scoreCohort(
 		pairedAbsVsOriginal: pairedAbsMedian(
 			balanced,
 			"scenario-equal",
+			"scenario-equal-original",
+		),
+		candidateBias: pairedSignedMedian(balanced, CANDIDATE_MODEL, "current"),
+		candidateAbsVsOriginal: pairedAbsMedian(
+			balanced,
+			CANDIDATE_MODEL,
 			"scenario-equal-original",
 		),
 	};
@@ -3899,6 +4034,7 @@ export interface CohortSet {
  */
 function blockBootstrap(
 	label: string,
+	model: ScenarioModel,
 	scenario: readonly RedistributionRecord[],
 	baselineRecords: readonly RedistributionRecord[],
 	blockOf: (record: RedistributionRecord) => string,
@@ -3921,6 +4057,7 @@ function blockBootstrap(
 		});
 		return {
 			label,
+			scenario: model,
 			baseline,
 			statistic,
 			p2_5: ci.p2_5,
@@ -3932,16 +4069,18 @@ function blockBootstrap(
 }
 
 /**
- * A bootstrap CI of `scenario-equal - baseline`, where the baseline is either
- * the model that ships or the pre-correction scan.
+ * A bootstrap CI of `scenario - baseline`, where `scenario` is the verdict
+ * basis or the declared candidate and the baseline is the model that ships, the
+ * pre-correction scan, or the verdict basis itself.
  *
- * The baseline is a FIELD rather than part of the label so a lookup cannot
- * resolve the wrong entry by prefix: criterion C is defined against the
- * current model, and the original-scan CI sits in the same table under the
- * same cohort label.
+ * Both the scenario and the baseline are FIELDS rather than part of the label,
+ * so a lookup cannot resolve the wrong entry by prefix: criterion C is defined
+ * against the current model, and the same cohort label carries the
+ * original-scan CI and the candidate's CIs too.
  */
 export interface RedistributionBootstrapEntry extends ReportBootstrapEntry {
-	baseline: "current" | "scenario-equal-original";
+	scenario: ScenarioModel;
+	baseline: "current" | "scenario-equal" | "scenario-equal-original";
 }
 
 /** Cohort labels of the bootstrap table, shared by the producer and the lookup. */
@@ -4064,6 +4203,7 @@ export function scoreCohorts(result: ReplayResult): CohortSet {
 	const bootstrap: RedistributionBootstrapEntry[] = [
 		...blockBootstrap(
 			OVERALL_BOOTSTRAP_LABEL,
+			"scenario-equal",
 			ofModel(overallBalanced, "scenario-equal"),
 			ofModel(overallBalanced, "current"),
 			lifecycleBlock,
@@ -4073,6 +4213,7 @@ export function scoreCohorts(result: ReplayResult): CohortSet {
 		),
 		...blockBootstrap(
 			TRANSITION_BOOTSTRAP_LABEL,
+			"scenario-equal",
 			ofModel(transitionBalanced, "scenario-equal"),
 			ofModel(transitionBalanced, "current"),
 			episodeBlock,
@@ -4082,6 +4223,7 @@ export function scoreCohorts(result: ReplayResult): CohortSet {
 		),
 		...blockBootstrap(
 			OVERALL_BOOTSTRAP_LABEL,
+			"scenario-equal",
 			ofModel(overallBalanced, "scenario-equal"),
 			ofModel(overallBalanced, "scenario-equal-original"),
 			lifecycleBlock,
@@ -4091,12 +4233,56 @@ export function scoreCohorts(result: ReplayResult): CohortSet {
 		),
 		...blockBootstrap(
 			TRANSITION_BOOTSTRAP_LABEL,
+			"scenario-equal",
 			ofModel(transitionBalanced, "scenario-equal"),
 			ofModel(transitionBalanced, "scenario-equal-original"),
 			episodeBlock,
 			result.seed,
 			BOOTSTRAP_ITERATIONS,
 			"scenario-equal-original",
+		),
+		// The candidate's own pairs: against the current model, which is what its
+		// criterion C is defined on, and against the verdict basis, which is the
+		// rule it is offered as an alternative to.
+		...blockBootstrap(
+			OVERALL_BOOTSTRAP_LABEL,
+			CANDIDATE_MODEL,
+			ofModel(overallBalanced, CANDIDATE_MODEL),
+			ofModel(overallBalanced, "current"),
+			lifecycleBlock,
+			result.seed,
+			BOOTSTRAP_ITERATIONS,
+			"current",
+		),
+		...blockBootstrap(
+			TRANSITION_BOOTSTRAP_LABEL,
+			CANDIDATE_MODEL,
+			ofModel(transitionBalanced, CANDIDATE_MODEL),
+			ofModel(transitionBalanced, "current"),
+			episodeBlock,
+			result.seed,
+			BOOTSTRAP_ITERATIONS,
+			"current",
+		),
+		...blockBootstrap(
+			OVERALL_BOOTSTRAP_LABEL,
+			CANDIDATE_MODEL,
+			ofModel(overallBalanced, CANDIDATE_MODEL),
+			ofModel(overallBalanced, "scenario-equal"),
+			lifecycleBlock,
+			result.seed,
+			BOOTSTRAP_ITERATIONS,
+			"scenario-equal",
+		),
+		...blockBootstrap(
+			TRANSITION_BOOTSTRAP_LABEL,
+			CANDIDATE_MODEL,
+			ofModel(transitionBalanced, CANDIDATE_MODEL),
+			ofModel(transitionBalanced, "scenario-equal"),
+			episodeBlock,
+			result.seed,
+			BOOTSTRAP_ITERATIONS,
+			"scenario-equal",
 		),
 	];
 
@@ -4823,6 +5009,7 @@ export function redistributionRecordToJson(
 		firstEvent: record.firstEvent,
 		peerDiedInLag: record.peerDiedInLag,
 		exactShiftEligible: record.exactShiftEligible,
+		proportionalFirstAssignment: record.proportionalFirstAssignment,
 		lagAnchorKnown: record.lagAnchorKnown,
 		usable: record.usable,
 		unusableReason: record.unusableReason,
@@ -4914,20 +5101,23 @@ export interface Verdict {
 /**
  * The one bootstrap CI a criterion is defined on.
  *
- * All three of label, statistic and baseline are matched EXACTLY: the table
- * carries the same cohort label twice, once per baseline, and a prefix match
- * would resolve whichever happens to come first.
+ * All four of label, statistic, scenario and baseline are matched EXACTLY: the
+ * table carries the same cohort label several times over, once per (scenario,
+ * baseline) pair, and a prefix match would resolve whichever happens to come
+ * first.
  */
 const bootstrapEntry = (
 	entries: readonly RedistributionBootstrapEntry[],
 	label: string,
 	statistic: string,
+	scenario: ScenarioModel,
 	baseline: RedistributionBootstrapEntry["baseline"],
 ): RedistributionBootstrapEntry | null =>
 	entries.find(
 		(entry) =>
 			entry.label === label &&
 			entry.statistic === statistic &&
+			entry.scenario === scenario &&
 			entry.baseline === baseline,
 	) ?? null;
 
@@ -4936,14 +5126,36 @@ const bootstrapEntry = (
  * print, and nothing is decided on a value that is absent — an absent value is
  * INDETERMINATE, never a pass and never a fail.
  */
-export function evaluateVerdict(
-	cohorts: CohortSet,
-	replay: ReplayResult,
-): Verdict {
-	const transition = cohorts.anyTransition;
-	const scenario = metricsOf(transition.balanced, "scenario-equal");
-	const current = metricsOf(transition.balanced, "current");
-	const bias = transition.pairedBias;
+/** Everything criteria A to D read, for ONE scenario model. */
+export interface CriterionInputs {
+	/** The model being judged. Every value name states it. */
+	model: ScenarioModel;
+	/** `model`'s metrics on the any-transition cohort, lifecycle-balanced. */
+	scenario: BacktestMetrics | null;
+	/** The current model's, on the same cohort. */
+	current: BacktestMetrics | null;
+	/** The pre-correction scan's, on the same cohort — criterion D's comparison. */
+	original: BacktestMetrics | null;
+	/** `model` against the current model, paired. */
+	bias: PairedBias;
+	/** `model` against the pre-correction scan, paired absolute error. */
+	absDelta: PairedAbsDelta;
+	/** The overall F1-delta CI of `model` against the current model. */
+	overallCi: RedistributionBootstrapEntry | null;
+}
+
+/**
+ * Criteria A to D for one model, from numbers the caller has already computed.
+ *
+ * ONE implementation for the verdict basis and for the declared candidate: the
+ * candidate is scored by the same functions on the same cohorts, and the only
+ * thing that varies is which model's records the inputs were taken over. The
+ * rule text ({@link VERDICT_RULE}) is written for `scenario-equal` and the
+ * VERDICT is computed on it alone; nothing here changes that.
+ */
+export function criteriaFor(inputs: CriterionInputs): VerdictCriterion[] {
+	const { model, scenario, current, original, bias, absDelta, overallCi } =
+		inputs;
 
 	const criterionA: VerdictCriterion = {
 		id: "A",
@@ -4958,7 +5170,7 @@ export function evaluateVerdict(
 					scenario.recall >= current.recall,
 		values: [
 			{
-				name: "paired median signed error, scenario-equal (min)",
+				name: `paired median signed error, ${model} (min)`,
 				value: bias.medianA,
 			},
 			{
@@ -4966,7 +5178,7 @@ export function evaluateVerdict(
 				value: bias.medianB,
 			},
 			{ name: "paired n", value: bias.n, digits: 0 },
-			{ name: "recall, scenario-equal", value: scenario?.recall ?? null },
+			{ name: `recall, ${model}`, value: scenario?.recall ?? null },
 			{ name: "recall, current", value: current?.recall ?? null },
 		],
 	};
@@ -4979,17 +5191,11 @@ export function evaluateVerdict(
 				? null
 				: scenario.f1 >= current.f1,
 		values: [
-			{ name: "F1, scenario-equal", value: scenario?.f1 ?? null },
+			{ name: `F1, ${model}`, value: scenario?.f1 ?? null },
 			{ name: "F1, current", value: current?.f1 ?? null },
 		],
 	};
 
-	const overallCi = bootstrapEntry(
-		cohorts.bootstrap,
-		OVERALL_BOOTSTRAP_LABEL,
-		"f1",
-		"current",
-	);
 	const criterionC: VerdictCriterion = {
 		id: "C",
 		label: "no significant overall loss",
@@ -5002,8 +5208,6 @@ export function evaluateVerdict(
 		],
 	};
 
-	const original = metricsOf(transition.balanced, "scenario-equal-original");
-	const absDelta = transition.pairedAbsVsOriginal;
 	const criterionD: VerdictCriterion = {
 		id: "D",
 		label: "not worse than the original scenario",
@@ -5014,7 +5218,7 @@ export function evaluateVerdict(
 				? null
 				: scenario.f1 >= original.f1 && absDelta.medianDeltaMinutes <= 0,
 		values: [
-			{ name: "F1, scenario-equal", value: scenario?.f1 ?? null },
+			{ name: `F1, ${model}`, value: scenario?.f1 ?? null },
 			{
 				name: "F1, scenario-equal-original",
 				value: original?.f1 ?? null,
@@ -5025,7 +5229,7 @@ export function evaluateVerdict(
 			},
 			{ name: "paired n", value: absDelta.n, digits: 0 },
 			// Printed, never judged — see the rule text.
-			{ name: "recall, scenario-equal", value: scenario?.recall ?? null },
+			{ name: `recall, ${model}`, value: scenario?.recall ?? null },
 			{
 				name: "recall, scenario-equal-original",
 				value: original?.recall ?? null,
@@ -5033,7 +5237,29 @@ export function evaluateVerdict(
 		],
 	};
 
-	const criteria = [criterionA, criterionB, criterionC, criterionD];
+	return [criterionA, criterionB, criterionC, criterionD];
+}
+
+export function evaluateVerdict(
+	cohorts: CohortSet,
+	replay: ReplayResult,
+): Verdict {
+	const transition = cohorts.anyTransition;
+	const criteria = criteriaFor({
+		model: "scenario-equal",
+		scenario: metricsOf(transition.balanced, "scenario-equal"),
+		current: metricsOf(transition.balanced, "current"),
+		original: metricsOf(transition.balanced, "scenario-equal-original"),
+		bias: transition.pairedBias,
+		absDelta: transition.pairedAbsVsOriginal,
+		overallCi: bootstrapEntry(
+			cohorts.bootstrap,
+			OVERALL_BOOTSTRAP_LABEL,
+			"f1",
+			"scenario-equal",
+			"current",
+		),
+	});
 	const verdict: VerdictWord = criteria.some(
 		(criterion) => criterion.pass === false,
 	)
@@ -5099,6 +5325,208 @@ export function evaluateVerdict(
 				episodes: transition.episodes,
 			},
 		],
+	};
+}
+
+// ---------------------------------------------------------------------------
+// Share-rule candidate
+// ---------------------------------------------------------------------------
+
+/** How far apart two ETAs may sit and still be the same answer, for the identity. */
+export const IDENTITY_TOLERANCE_MS = 1;
+
+/**
+ * How often the candidate rule IS the current model where it is constructed to
+ * be: on the records its own scan projects from its first assignment with every
+ * contributor to the class demand alive and pooled — see
+ * {@link RedistributionRecord.proportionalFirstAssignment} for the population.
+ *
+ * A mechanism check, in the style of the observation-lag section's: it states
+ * its population, counts it, and prints the number that falls out. Records
+ * either model did not date do not enter — an ETA cannot equal an abstention.
+ */
+export interface CandidateIdentityCheck {
+	/** Records in the population, both models dated. */
+	eligible: number;
+	/** Of those, how many agree within {@link IDENTITY_TOLERANCE_MS}. */
+	matching: number;
+	/** `matching / eligible`, or null with nothing eligible. */
+	share: number | null;
+}
+
+export function candidateIdentityCheck(
+	replay: ReplayResult,
+): CandidateIdentityCheck {
+	let eligible = 0;
+	let matching = 0;
+	for (const entry of recordsByKey(replay.records).values()) {
+		const candidate = entry.get(CANDIDATE_MODEL);
+		const current = entry.get("current");
+		if (candidate == null || current == null) continue;
+		if (!candidate.proportionalFirstAssignment) continue;
+		if (candidate.predictedEtaMs == null || current.predictedEtaMs == null) {
+			continue;
+		}
+		eligible++;
+		if (
+			Math.abs(candidate.predictedEtaMs - current.predictedEtaMs) <=
+			IDENTITY_TOLERANCE_MS
+		) {
+			matching++;
+		}
+	}
+	return {
+		eligible,
+		matching,
+		share: eligible === 0 ? null : matching / eligible,
+	};
+}
+
+/** One criterion of the candidate, beside the models it is read against. */
+export interface CandidateCriterionRow {
+	id: VerdictCriterion["id"];
+	label: string;
+	/**
+	 * What the model columns hold. A criterion that turns on TWO statistics has
+	 * one row per statistic — criterion D fails on its F1 comparison while its
+	 * error comparison passes, and a table that printed one of the two would
+	 * state a result no number in the row accounts for. Both rows carry the
+	 * criterion's single result.
+	 */
+	statistic: string;
+	candidate: number | null;
+	/** The verdict basis's number for the same statistic. */
+	verdictBasis: number | null;
+	/** The current model's, or null where the statistic is a delta against it. */
+	current: number | null;
+	/**
+	 * The pre-correction scan's number for the same statistic — the FIXED
+	 * benchmark criterion D judges against — or null on every criterion that
+	 * does not read it.
+	 */
+	original: number | null;
+	pass: boolean | null;
+}
+
+/**
+ * The declared candidate, scored against the same four criteria as the verdict
+ * basis.
+ *
+ * Beside the verdict, never part of it: {@link evaluateVerdict} reads nothing
+ * from here, and the criteria below are computed by {@link criteriaFor} from
+ * the candidate's own records on the same cohorts.
+ */
+export interface CandidateScores {
+	model: ScenarioModel;
+	/** Criteria A to D applied to {@link model}. */
+	criteria: VerdictCriterion[];
+	/** The same four, summarised beside the verdict basis and the current model. */
+	rows: CandidateCriterionRow[];
+	identity: CandidateIdentityCheck;
+}
+
+export function evaluateCandidate(
+	cohorts: CohortSet,
+	replay: ReplayResult,
+): CandidateScores {
+	const transition = cohorts.anyTransition;
+	const candidateCi = bootstrapEntry(
+		cohorts.bootstrap,
+		OVERALL_BOOTSTRAP_LABEL,
+		"f1",
+		CANDIDATE_MODEL,
+		"current",
+	);
+	const basisCi = bootstrapEntry(
+		cohorts.bootstrap,
+		OVERALL_BOOTSTRAP_LABEL,
+		"f1",
+		"scenario-equal",
+		"current",
+	);
+	const candidate = metricsOf(transition.balanced, CANDIDATE_MODEL);
+	const basis = metricsOf(transition.balanced, "scenario-equal");
+	const current = metricsOf(transition.balanced, "current");
+	const original = metricsOf(transition.balanced, "scenario-equal-original");
+	const criteria = criteriaFor({
+		model: CANDIDATE_MODEL,
+		scenario: candidate,
+		current,
+		original,
+		bias: transition.candidateBias,
+		absDelta: transition.candidateAbsVsOriginal,
+		overallCi: candidateCi,
+	});
+	const passOf = (id: VerdictCriterion["id"]): boolean | null =>
+		criteria.find((criterion) => criterion.id === id)?.pass ?? null;
+	const rows: CandidateCriterionRow[] = [
+		{
+			id: "A",
+			label: "not more optimistic on transitions",
+			statistic: "paired median signed error (min)",
+			candidate: transition.candidateBias.medianA,
+			verdictBasis: transition.pairedBias.medianA,
+			// Each model's own pairing, which is why this is not one number: a
+			// paired median is taken over the records BOTH models dated.
+			current: transition.candidateBias.medianB,
+			original: null,
+			pass: passOf("A"),
+		},
+		{
+			id: "B",
+			label: "better at transitions",
+			statistic: "F1 on transitions",
+			candidate: candidate?.f1 ?? null,
+			verdictBasis: basis?.f1 ?? null,
+			current: current?.f1 ?? null,
+			original: null,
+			pass: passOf("B"),
+		},
+		{
+			id: "C",
+			label: "no significant overall loss",
+			statistic: "overall F1 delta against current, p97.5",
+			candidate: candidateCi?.p97_5 ?? null,
+			verdictBasis: basisCi?.p97_5 ?? null,
+			// The statistic IS a delta against the current model, so the current
+			// model has no column of its own here.
+			current: null,
+			original: null,
+			pass: passOf("C"),
+		},
+		{
+			id: "D",
+			label: "not worse than the original scenario",
+			// The half of D that FAILS for the candidate, and the reason it has a
+			// row of its own: judged against the pre-correction scan's own F1, in
+			// the last column, not against either of the two middle ones.
+			statistic: "F1 on transitions",
+			candidate: candidate?.f1 ?? null,
+			verdictBasis: basis?.f1 ?? null,
+			current: current?.f1 ?? null,
+			original: original?.f1 ?? null,
+			pass: passOf("D"),
+		},
+		{
+			id: "D",
+			label: "not worse than the original scenario",
+			// Not the value list's `|error|`: a pipe inside a cell would split it.
+			statistic:
+				"paired median absolute-error change against the pre-correction scan (min)",
+			candidate: transition.candidateAbsVsOriginal.medianDeltaMinutes,
+			verdictBasis: transition.pairedAbsVsOriginal.medianDeltaMinutes,
+			// The statistic IS a change against the pre-correction scan, so
+			// neither comparison model has a column of its own here.
+			current: null,
+			original: null,
+			pass: passOf("D"),
+		},
+	];
+	return {
+		model: CANDIDATE_MODEL,
+		criteria,
+		rows,
+		identity: candidateIdentityCheck(replay),
 	};
 }
 
@@ -5840,6 +6268,81 @@ function observationLagSection(checks: ObservationLagChecks): string[] {
 	return out;
 }
 
+/** PASS / FAIL / INDETERMINATE, never a blank and never a guess. */
+const criterionState = (pass: boolean | null): string =>
+	pass === true ? "PASS" : pass === false ? "FAIL" : "INDETERMINATE";
+
+/**
+ * One criterion's heading and its value table.
+ *
+ * Shared by the verdict and the share-rule candidate so the two cannot print
+ * the same criterion in two different shapes.
+ */
+function criterionBlock(criterion: VerdictCriterion): string[] {
+	const out: string[] = [];
+	out.push(
+		`**${criterion.id}. ${criterion.label}: ${criterionState(criterion.pass)}**`,
+	);
+	out.push("");
+	out.push("| value | number |");
+	out.push("|---|---:|");
+	for (const value of criterion.values) {
+		out.push(`| ${value.name} | ${num(value.value, value.digits ?? 3)} |`);
+	}
+	out.push("");
+	return out;
+}
+
+/** The declared candidate's section: the same four criteria, beside the verdict. */
+function candidateSection(candidate: CandidateScores): string[] {
+	const out: string[] = [];
+	out.push("## Share-rule candidate");
+	out.push("");
+	out.push(
+		`\`${candidate.model}\` is a DECLARED CANDIDATE. The quantity it conserves is the CLASS demand for a window kind; each alive account's share of it is that account's own measured demand for the kind over the ALIVE accounts' measured demand for it. The denominator is the survivors, not the class: with burns of 80, 20 and 10 and the 80 dead, the two survivors take two thirds and one third of the whole class demand, not 20/110 and 10/110 of it. It was declared before it was scored and has no fitted coefficient, so no number in this report enters the rule. It is not the verdict basis: the verdict above is computed on \`scenario-equal\` alone and is the same with or without this section.`,
+	);
+	out.push("");
+	out.push(
+		"This section applies the four criteria of the verdict rule above to the candidate, computed by the same functions, on the same lifecycle-balanced cohorts, against the same comparison models. The table states, per criterion and statistic, the number it turns on for the candidate, for the verdict basis, for the current model and for the pre-correction scan, and whether the criterion holds FOR THE CANDIDATE. A criterion that turns on two statistics — D, which reads an F1 and an error change — has a row for each, both carrying that criterion's single result. The full value list of each criterion follows it. Criterion A's paired median is taken over the records the pair being compared both dated, so the candidate's column and the basis's column are medians over their own populations; each column's `paired n` is in the value list below. A model column is empty where the statistic is already a delta against that model.",
+	);
+	out.push("");
+	out.push(
+		"| criterion | statistic | candidate | scenario-equal | current | scenario-equal-original | candidate result |",
+	);
+	out.push("|---|---|---:|---:|---:|---:|---|");
+	for (const row of candidate.rows) {
+		out.push(
+			`| ${row.id}. ${row.label} | ${row.statistic} | ${num(row.candidate)} | ${num(row.verdictBasis)} | ${row.current == null ? EM_DASH : num(row.current)} | ${row.original == null ? EM_DASH : num(row.original)} | ${criterionState(row.pass)} |`,
+		);
+	}
+	out.push("");
+	out.push(
+		"D compares against the fixed uncorrected-equal benchmark; a fail on F1 there does not isolate the candidate's lag correction, which would need an uncorrected proportional scan.",
+	);
+	out.push("");
+	for (const criterion of candidate.criteria) {
+		out.push(...criterionBlock(criterion));
+	}
+
+	out.push("### Identity with the current model on the first assignment");
+	out.push("");
+	out.push(
+		"The identity the rule is constructed to have: while every account whose measured burn is in the class demand is alive AND in the assignment, the demand handed back to an account is the burn it contributed, so it burns at its own measured slope and the candidate's projection IS the current model's. The population is the records whose window the candidate's own scan projects entirely on its first assignment — no class window already at 100 % at the instant, no account whose burn joined the class demand withheld from the pool that demand is split over, no class exhaustion of ANY cycle between the instant and this window's own, and no class window filled inside its own observation lag — and where both the candidate and the current model committed to a date. The withheld and later-cycle conditions are the two the scan's first-cycle projection list cannot state on its own: one redistributes demand with nothing having died, the other is a death after a reset. Below the tolerance an ETA is the same instant; the column is a count, not a claim about the rest of the replay.",
+	);
+	out.push("");
+	if (candidate.identity.eligible === 0) {
+		out.push(
+			"No eligible records: nothing in this replay entered this population, so the check measures nothing about this run.",
+		);
+	} else {
+		out.push(
+			`n=${candidate.identity.eligible} eligible records, ${candidate.identity.matching} of which the candidate dated within ${IDENTITY_TOLERANCE_MS} ms of the current model (${pct(candidate.identity.share)}).`,
+		);
+	}
+	out.push("");
+	return out;
+}
+
 /** The report, in the style of the existing `docs/prediction-backtest-*.md`. */
 export function formatRedistributionReport(
 	input: RedistributionReportInput,
@@ -5999,16 +6502,16 @@ export function formatRedistributionReport(
 	out.push("### Bootstrap");
 	out.push("");
 	out.push(
-		"Block bootstrap of `scenario-equal − baseline`, resampling blocks rather than instants (window lifecycles overall, episodes on transitions). The baseline is the current model for criteria A-C and the pre-correction scan for criterion D; both rows are printed for both cohorts.",
+		"Block bootstrap of `scenario − baseline`, resampling blocks rather than instants (window lifecycles overall, episodes on transitions). For `scenario-equal`, the verdict basis, the baseline is the current model for criteria A-C and the pre-correction scan for criterion D; both rows are printed for both cohorts. The declared candidate scored under `Share-rule candidate`, below the verdict, carries its own pairs: against the current model, which is what its criterion C is defined on, and against the verdict basis.",
 	);
 	out.push("");
 	out.push(
-		"| cohort | baseline | statistic | p2.5 | p50 | p97.5 | resamples |",
+		"| cohort | scenario | baseline | statistic | p2.5 | p50 | p97.5 | resamples |",
 	);
-	out.push("|---|---|---|---:|---:|---:|---:|");
+	out.push("|---|---|---|---|---:|---:|---:|---:|");
 	for (const entry of cohorts.bootstrap) {
 		out.push(
-			`| ${entry.label} | ${entry.baseline} | ${entry.statistic} | ${num(entry.p2_5)} | ${num(entry.p50)} | ${num(entry.p97_5)} | ${entry.samples} |`,
+			`| ${entry.label} | ${entry.scenario} | ${entry.baseline} | ${entry.statistic} | ${num(entry.p2_5)} | ${num(entry.p50)} | ${num(entry.p97_5)} | ${entry.samples} |`,
 		);
 	}
 	out.push("");
@@ -6102,20 +6605,7 @@ export function formatRedistributionReport(
 	out.push("```");
 	out.push("");
 	for (const criterion of verdict.criteria) {
-		const state =
-			criterion.pass === true
-				? "PASS"
-				: criterion.pass === false
-					? "FAIL"
-					: "INDETERMINATE";
-		out.push(`**${criterion.id}. ${criterion.label}: ${state}**`);
-		out.push("");
-		out.push("| value | number |");
-		out.push("|---|---:|");
-		for (const value of criterion.values) {
-			out.push(`| ${value.name} | ${num(value.value, value.digits ?? 3)} |`);
-		}
-		out.push("");
+		out.push(...criterionBlock(criterion));
 	}
 	out.push("| cohort | records | lifecycles | episodes |");
 	out.push("|---|---:|---:|---:|");
@@ -6169,6 +6659,8 @@ export function formatRedistributionReport(
 	);
 	out.push("");
 
+	out.push(...candidateSection(evaluateCandidate(cohorts, replay)));
+
 	out.push("## Known limits");
 	out.push("");
 	for (const limit of input.knownLimits) out.push(`- ${limit}`);
@@ -6206,6 +6698,7 @@ export function knownLimitsFor(
 		"Snapshots before 2026-08-24 carry no `plan_tier`/`rate_limit_tier` and no `observed_at`. Tiers there are today's, marked `assumed`; without an observation instant the weekly full-confidence path is unavailable to BOTH models, so the two are still compared like for like.",
 		"No reset-credit bank is modelled, and no live usage point is injected — the replay only has what the sampler stored.",
 		"The headroom share rule is reported, never used as the verdict basis. The verdict basis is the equal split, pre-declared.",
+		"The declared candidate share rule weights each account by its OWN measured demand, and that demand is the same fitted slope the current model projects from. A window still learning has no accepted measured-demand contribution — the preparation withholds it whatever its fitted slope says — so it carries no weight of its own and takes demand only through the rule's equal-split fallback; where a class's live accounts are all learning for a kind, the candidate IS the equal split for that kind.",
 		"IF a survivor's own lookback already contains the traffic it absorbed, the scenario would be adding that demand a second time. Whether it does is a hypothesis this replay reports on (the peer-exhaustion cohort and the survivor slope table) rather than a property these measurements establish; nothing here corrects for it.",
 		"The observation-lag advance never rewinds the scan clock below the instant being replayed: a window that fills inside its lag dies AT that instant, though the projection it records carries the true, earlier one. Any redistribution such a death causes therefore starts at the instant, not at the fill.",
 		"A reading whose row carries no `observed_at` and whose estimator is the now-anchored lifetime average has no derivable lag and is advanced by nothing. That is a real absence, not a measured zero, and the mechanism section reports those records under `unknown` rather than folding them into the fresh bucket.",

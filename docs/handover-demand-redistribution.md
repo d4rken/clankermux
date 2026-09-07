@@ -148,10 +148,55 @@ establish its absence. Any replacement
 share rule has to be declared before it is scored, scored against criteria A to
 D on the same backtest, and must not read its coefficients off these tables.
 
-Before acting on any verdict, re-run the reproduce command printed in
-`docs/prediction-backtest-redistribution.md` with a `--to` after 2026-09-13,
-once the pending weekly windows have completed, and re-read the verdict from
-the refreshed report.
+**A candidate share rule is declared and scored (this branch):
+`scenario-proportional`.** The quantity it conserves is the class's demand for
+a window kind; each alive account's share of it is that account's own measured
+demand for the kind over the ALIVE accounts' measured demand for it. The
+denominator is the survivors rather than the class, so with burns of 80, 20 and
+10 and the 80 dead, the survivors take two thirds and one third of the whole
+class demand, not 20/110 and 10/110 of it. It exists because the equal split
+discards an account's own burn from the FIRST instant: with five alive
+accounts, the account carrying 70 % of its class's traffic is assigned 20 % of
+the demand at `now`, before any account has died. The absorption section above measures the
+dying account's median pre-death share of its class at 67 % on requests and
+73.8 % on tokens, so who was carrying the traffic is not close to uniform. The
+rule has no coefficient and reads nothing off these tables: before any death it
+reproduces the current model exactly, because the demand it hands an account is
+the burn that account contributed, and at a death it moves the dead account's
+demand to the survivors in proportion to their own burn. It is scored on the
+current replay range against the same criteria A to D, under
+`## Share-rule candidate` in the report, with its identity with the current
+model checked in the replay. It is a candidate and nothing more: the verdict
+basis is still the pre-declared equal split, `VERDICT_RULE` is unchanged, and
+the verdict above is computed without it.
+
+Scored on 2026-07-01 to 2026-09-06 (`## Share-rule candidate` in the report):
+criterion A passes with a paired median signed error on transitions of −11.9 min
+(the equal split reads +14.1, the current model −0.4; paired n 18); B passes
+(F1 on transitions 0.533 against the current model's 0.474); C passes (the
+block-bootstrap overall F1 delta against the current model has p2.5 at +0.003);
+D fails on its F1 leg (0.533 against the equal split's 0.568) while passing its
+error leg (paired absolute-error change −0.9 min). On Claude five-hour windows
+the candidate's signed error is −5.0 min against the equal split's +15.5 and
+the current model's −0.4, its median absolute error 12.7 min is the lowest of
+the three, its recall 0.771 the highest, and its precision 0.346 sits between
+the current model's 0.324 and the equal split's 0.467. The identity check
+reports 5007 of 5007 eligible first-assignment records dated within 1 ms of the
+current model. The sign of criterion A
+changed from optimistic to pessimistic when the equal split was replaced by own
+burn, which is the mechanism this candidate was declared to test. What it does
+not settle is the trade the two rules make on Claude five-hour windows: the
+equal split has the higher F1 through precision, the candidate through recall.
+
+The pending Codex weekly windows do not gate the verdict. In both Codex
+classes the scenario and the current model score identically, row for row,
+because Codex-1 had no sibling before 2026-09-04 and a lone account's scenario
+is the current model by construction; the windows still pending there add
+records to both models equally and cannot move the difference the verdict
+measures. The verdict is determined by the anthropic class on the data already
+replayed. The declared closing step still stands as a formality: re-run the
+reproduce command printed in `docs/prediction-backtest-redistribution.md` with
+a `--to` after 2026-09-13 and confirm the verdict reads the same.
 
 What the tier work found, against what section 3.1 assumed:
 

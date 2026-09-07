@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { proportionalShareRule } from "./capacity-runway-scenario";
 import type { BacktestMetrics } from "./prediction-backtest";
 import { SEGMENT_COVERAGE_SLACK_MS, scoreRecords } from "./prediction-backtest";
 import {
@@ -12,10 +13,14 @@ import {
 	availabilityAt,
 	buildAvailabilityTimelines,
 	buildRosterAtInstant,
+	CANDIDATE_MODEL,
+	type CandidateScores,
 	type CohortScores,
 	type CohortSet,
+	candidateIdentityCheck,
 	churnRows,
 	detectTransitions,
+	evaluateCandidate,
 	evaluateVerdict,
 	formatRedistributionReport,
 	headroomShareRule,
@@ -51,6 +56,7 @@ import {
 	type TransitionEvent,
 	tallyWindowFills,
 	transitionsAt,
+	VERDICT_RULE,
 	type Verdict,
 	type WindowFill,
 	type WindowFillRow,
@@ -1140,15 +1146,28 @@ describe("scoreCohorts", () => {
 		expect(records.every((entry) => ["A", "B"].includes(entry.accountId))).toBe(
 			true,
 		);
-		// Three statistics, two cohorts, two baselines.
-		expect(cohorts.bootstrap).toHaveLength(12);
+		// Three statistics, two cohorts, and four (scenario, baseline) pairs: the
+		// verdict basis against the current model and against the pre-correction
+		// scan, and the candidate against the current model and against the basis.
+		expect(cohorts.bootstrap).toHaveLength(24);
 		expect(
 			cohorts.bootstrap.filter(
 				(entry) => entry.label === OVERALL_BOOTSTRAP_LABEL,
 			),
-		).toHaveLength(6);
-		expect(new Set(cohorts.bootstrap.map((entry) => entry.baseline))).toEqual(
-			new Set(["current", "scenario-equal-original"]),
+		).toHaveLength(12);
+		expect(
+			new Set(
+				cohorts.bootstrap.map(
+					(entry) => `${entry.scenario}::${entry.baseline}`,
+				),
+			),
+		).toEqual(
+			new Set([
+				"scenario-equal::current",
+				"scenario-equal::scenario-equal-original",
+				`${CANDIDATE_MODEL}::current`,
+				`${CANDIDATE_MODEL}::scenario-equal`,
+			]),
 		);
 		expect(cohorts.bootstrap.map((entry) => entry.statistic)).toContain(
 			"medianSignedErrorMinutes",
@@ -1174,6 +1193,10 @@ const cohort = (
 		bias?: CohortScores["pairedBias"];
 		abs?: CohortScores["pairedAbsVsOriginal"];
 	},
+	candidate?: {
+		bias?: CohortScores["candidateBias"];
+		abs?: CohortScores["candidateAbsVsOriginal"];
+	},
 ): CohortScores => ({
 	label,
 	records: 10,
@@ -1194,6 +1217,11 @@ const cohort = (
 		medianB: null,
 	},
 	pairedAbsVsOriginal: vsOriginal?.abs ?? { n: 0, medianDeltaMinutes: null },
+	candidateBias: candidate?.bias ?? { n: 0, medianA: null, medianB: null },
+	candidateAbsVsOriginal: candidate?.abs ?? {
+		n: 0,
+		medianDeltaMinutes: null,
+	},
 });
 
 function verdictFixture(options: {
@@ -1223,6 +1251,11 @@ function verdictFixture(options: {
 	 * it, so it never reaches the common cohort. Implies `unlabelled`.
 	 */
 	codexWithheld?: boolean;
+	/** The DECLARED CANDIDATE's numbers, which no criterion of the verdict reads. */
+	candidateBias?: number | null;
+	candidateF1?: number | null;
+	candidateAbsVsOriginal?: number | null;
+	candidateP97_5?: number | null;
 }): { cohorts: CohortSet; replay: ReplayResult } {
 	const transition = cohort(
 		"Any transition",
@@ -1240,6 +1273,13 @@ function verdictFixture(options: {
 				},
 			],
 			["scenario-headroom", {}],
+			[
+				"scenario-proportional",
+				{
+					recall: options.scenarioRecall,
+					f1: options.candidateF1 === undefined ? 0.65 : options.candidateF1,
+				},
+			],
 		],
 		{ n: 4, medianA: options.scenarioBias, medianB: options.currentBias },
 		{
@@ -1254,6 +1294,21 @@ function verdictFixture(options: {
 					options.pairedAbsVsOriginal === undefined
 						? -3
 						: options.pairedAbsVsOriginal,
+			},
+		},
+		{
+			bias: {
+				n: 4,
+				medianA:
+					options.candidateBias === undefined ? -10 : options.candidateBias,
+				medianB: options.currentBias,
+			},
+			abs: {
+				n: 4,
+				medianDeltaMinutes:
+					options.candidateAbsVsOriginal === undefined
+						? -2
+						: options.candidateAbsVsOriginal,
 			},
 		},
 	);
@@ -1318,6 +1373,7 @@ function verdictFixture(options: {
 						{
 							label: OVERALL_BOOTSTRAP_LABEL,
 							statistic: "f1",
+							scenario: "scenario-equal" as const,
 							baseline: "current" as const,
 							p2_5: -0.1,
 							p50: 0.01,
@@ -1328,11 +1384,23 @@ function verdictFixture(options: {
 			{
 				label: OVERALL_BOOTSTRAP_LABEL,
 				statistic: "f1",
+				scenario: "scenario-equal" as const,
 				baseline: "scenario-equal-original" as const,
 				p2_5: -0.4,
 				p50: -0.3,
 				p97_5:
 					options.p97_5Original === undefined ? -0.2 : options.p97_5Original,
+				samples: 1000,
+			},
+			{
+				label: OVERALL_BOOTSTRAP_LABEL,
+				statistic: "f1",
+				scenario: CANDIDATE_MODEL,
+				baseline: "current" as const,
+				p2_5: -0.15,
+				p50: 0.02,
+				p97_5:
+					options.candidateP97_5 === undefined ? 0.18 : options.candidateP97_5,
 				samples: 1000,
 			},
 		],
@@ -1579,6 +1647,25 @@ describe("knownLimitsFor", () => {
 		expect(
 			limits.some((limit) => limit.includes("of the overall common-cohort")),
 		).toBe(false);
+	});
+
+	test("states what a learning window withholds, not what it lacks", () => {
+		// A learning window can carry a positive fitted slope; what the scenario
+		// does with it is refuse the contribution, and that is the policy to
+		// state.
+		const { cohorts, replay } = verdictFixture(VERDICT_BASE);
+		const limits = knownLimitsFor(
+			replay,
+			cohorts,
+			evaluateVerdict(cohorts, replay),
+		);
+		const candidateLimit = limits.find((limit) =>
+			limit.startsWith("The declared candidate share rule"),
+		);
+		expect(candidateLimit).toContain(
+			"has no accepted measured-demand contribution",
+		);
+		expect(candidateLimit).not.toContain("has no slope");
 	});
 });
 
@@ -1847,6 +1934,334 @@ function peerPerModel(options: {
 	});
 	return out;
 }
+
+describe("the share-rule candidate section", () => {
+	const candidateFixture = (): {
+		markdown: string;
+		verdict: Verdict;
+		candidate: CandidateScores;
+		replay: ReplayResult;
+		cohorts: CohortSet;
+	} => {
+		const fixture = pairFixture();
+		const replay = replayRange(
+			fixture.rows,
+			fixture.accounts,
+			RANGE,
+			6 * 60,
+			20260823,
+		);
+		const cohorts = scoreCohorts(replay);
+		const verdict = evaluateVerdict(cohorts, replay);
+		return {
+			markdown: reportOf(replay, cohorts, verdict, fixture.rows.length),
+			verdict,
+			candidate: evaluateCandidate(cohorts, replay),
+			replay,
+			cohorts,
+		};
+	};
+
+	/** The section itself, without the mentions of it elsewhere in the report. */
+	const sectionOf = (markdown: string): string => {
+		const from = markdown.indexOf("\n## Share-rule candidate\n");
+		expect(from).toBeGreaterThan(-1);
+		return markdown.slice(from, markdown.indexOf("\n## Known limits\n"));
+	};
+
+	test("renders all four criteria, their verdicts and the identity line", () => {
+		const { markdown, candidate } = candidateFixture();
+		const section = sectionOf(markdown);
+
+		// Placed between the verdict and the known limits, and named as declared.
+		expect(markdown.indexOf("\n## Verdict\n")).toBeLessThan(
+			markdown.indexOf("\n## Share-rule candidate\n"),
+		);
+		expect(markdown.indexOf("\n## Share-rule candidate\n")).toBeLessThan(
+			markdown.indexOf("\n## Known limits\n"),
+		);
+		expect(section).toContain("DECLARED CANDIDATE");
+		expect(section).toContain("has no fitted coefficient");
+		expect(section).toContain("It is not the verdict basis");
+
+		expect(candidate.criteria.map((entry) => entry.id)).toEqual([
+			"A",
+			"B",
+			"C",
+			"D",
+		]);
+		for (const row of candidate.rows) {
+			expect(section).toContain(`| ${row.id}. ${row.label} |`);
+			// Every criterion states its own result for the candidate.
+			expect(
+				section.includes("PASS") ||
+					section.includes("FAIL") ||
+					section.includes("INDETERMINATE"),
+			).toBe(true);
+		}
+		expect(section).toContain(
+			"### Identity with the current model on the first assignment",
+		);
+		expect(section).toContain("eligible records");
+		expect(section).not.toContain("undefined");
+		expect(section).not.toContain("NaN");
+		expect(markdown).not.toContain("undefined");
+		expect(markdown).not.toContain("NaN");
+	});
+
+	test("D's rows print the F1 it fails on, beside the benchmark it is judged against", () => {
+		const { markdown, candidate } = candidateFixture();
+		const section = sectionOf(markdown);
+		expect(section).toContain(
+			"| criterion | statistic | candidate | scenario-equal | current | scenario-equal-original | candidate result |",
+		);
+
+		// D turns on two statistics, so it has a row for each: the error change it
+		// passed on, and the F1 comparison that decides it against the fixed
+		// benchmark.
+		const dRows = candidate.rows.filter((row) => row.id === "D");
+		expect(dRows.map((row) => row.statistic)).toEqual([
+			"F1 on transitions",
+			"paired median absolute-error change against the pre-correction scan (min)",
+		]);
+		expect(dRows[0].original).not.toBeNull();
+		expect(dRows[1].original).toBeNull();
+		expect(dRows[0].pass).toBe(dRows[1].pass);
+		expect(section).toContain(
+			`| D. ${dRows[0].label} | F1 on transitions | ${(dRows[0].candidate as number).toFixed(3)} | ${(dRows[0].verdictBasis as number).toFixed(3)} | ${(dRows[0].current as number).toFixed(3)} | ${(dRows[0].original as number).toFixed(3)} |`,
+		);
+
+		// And the table says what a fail there does and does not establish.
+		expect(section).toContain(
+			"D compares against the fixed uncorrected-equal benchmark; a fail on F1 there does not isolate the candidate's lag correction, which would need an uncorrected proportional scan.",
+		);
+	});
+
+	test("the rule's declaration names the alive accounts as the denominator", () => {
+		const { markdown } = candidateFixture();
+		const section = sectionOf(markdown);
+		expect(section).toContain(
+			"over the ALIVE accounts' measured demand for it",
+		);
+		expect(section).toContain(
+			"The denominator is the survivors, not the class",
+		);
+		expect(section).not.toContain(
+			"over the class's measured demand for that kind",
+		);
+	});
+
+	test("the identity is exact where the rule is constructed to have it", () => {
+		// Two accounts and no death before either window is projected on the
+		// scan's first assignment: the candidate IS the current model there.
+		const { markdown, candidate } = candidateFixture();
+		expect(candidate.identity.eligible).toBeGreaterThan(0);
+		expect(candidate.identity.matching).toBe(candidate.identity.eligible);
+		expect(candidate.identity.share).toBe(1);
+		expect(sectionOf(markdown)).toContain(
+			`n=${candidate.identity.eligible} eligible records, ${candidate.identity.matching} of which the candidate dated within 1 ms of the current model (100.0%)`,
+		);
+	});
+
+	test("the candidate's numbers do not move the verdict", () => {
+		// The same replay twice, differing only in what the CANDIDATE answered:
+		// once agreeing with the verdict basis, once wrong by a week.
+		const fixture = pairFixture();
+		const replay = replayRange(
+			fixture.rows,
+			fixture.accounts,
+			RANGE,
+			6 * 60,
+			20260823,
+		);
+		const wrecked: ReplayResult = {
+			...replay,
+			records: replay.records.map((entry) =>
+				entry.model === CANDIDATE_MODEL && entry.predictedEtaMs != null
+					? { ...entry, predictedEtaMs: entry.predictedEtaMs + 7 * DAY }
+					: entry,
+			),
+		};
+		const verdictOf = (result: ReplayResult): Verdict =>
+			evaluateVerdict(scoreCohorts(result), result);
+		const sectionBetween = (markdown: string): string =>
+			markdown.slice(
+				markdown.indexOf("\n## Verdict\n"),
+				markdown.indexOf("\n## Share-rule candidate\n"),
+			);
+
+		const before = verdictOf(replay);
+		const after = verdictOf(wrecked);
+		expect(after.verdict).toBe(before.verdict);
+		expect(after.criteria).toEqual(before.criteria);
+		expect(
+			sectionBetween(
+				reportOf(wrecked, scoreCohorts(wrecked), after, fixture.rows.length),
+			),
+		).toBe(
+			sectionBetween(
+				reportOf(replay, scoreCohorts(replay), before, fixture.rows.length),
+			),
+		);
+		// The candidate's own scoring DID move, so the check is not vacuous.
+		expect(
+			evaluateCandidate(scoreCohorts(wrecked), wrecked).rows[0].candidate,
+		).not.toBe(
+			evaluateCandidate(scoreCohorts(replay), replay).rows[0].candidate,
+		);
+	});
+
+	test("the identity population excludes instants a class member is already dead at", () => {
+		const { replay } = candidateFixture();
+		const eligible = replay.records.filter(
+			(entry) =>
+				entry.model === CANDIDATE_MODEL && entry.proportionalFirstAssignment,
+		);
+		expect(eligible.length).toBeGreaterThan(0);
+		// B reads 100 % from early on day 1; nothing at or after that instant is
+		// on a first assignment of own slopes, because A carries B's demand from
+		// the start of every scan there.
+		const deathAt = Math.min(
+			...replay.records
+				.filter(
+					(entry) =>
+						entry.accountId === "B" && entry.outcome.kind === "exhausted",
+				)
+				.map((entry) =>
+					entry.outcome.kind === "exhausted"
+						? entry.outcome.atMs
+						: Number.POSITIVE_INFINITY,
+				),
+		);
+		expect(eligible.every((entry) => entry.T < deathAt)).toBe(true);
+		expect(candidateIdentityCheck(replay).eligible).toBeLessThanOrEqual(
+			eligible.length,
+		);
+	});
+
+	/** One instant of a hand-built roster, every model's records. */
+	const instantOf = (
+		snapshotRows: RosterSnapshotRow[],
+		accounts: RosterAccount[],
+		toMs = T0 + 8 * DAY,
+	): ReturnType<typeof replayInstant> =>
+		replayInstant(
+			T0,
+			buildRosterAtInstant(T0, prepareSeries(snapshotRows, accounts), accounts),
+			[],
+			{ label: "test", fromMs: T0, toMs },
+		);
+
+	const weeklyRecordOf = (
+		replay: ReturnType<typeof replayInstant>,
+		accountId: string,
+		model: ReplayModel,
+	): RedistributionRecord | undefined =>
+		replay.records.find(
+			(entry) =>
+				entry.accountId === accountId &&
+				entry.windowKind === "seven_day" &&
+				entry.model === model,
+		);
+
+	test("the identity population excludes an instant whose demand was withheld from the assignment", () => {
+		// B's zero-usage five-hour window is a kind the class never measured, so
+		// the strict unmeasured rule withholds B from the assignment. B's WEEKLY
+		// burn is in the class demand all the same, and A is handed every bit of
+		// it at the first assignment — nobody is exhausted, nothing dies, and the
+		// two models still disagree.
+		const aStart = T0 - 3 * DAY;
+		const bStart = T0 - 2 * DAY;
+		const fiveStart = T0 - 4 * HOUR;
+		const replay = instantOf(
+			[
+				...rows({
+					accountId: "A",
+					from: aStart,
+					to: T0,
+					sevenDay: weekly(aStart, 20),
+				}),
+				...rows({
+					accountId: "B",
+					from: bStart,
+					to: T0,
+					sevenDay: weekly(bStart, 25),
+					fiveHour: () => ({ pct: 0, reset: fiveStart + 5 * HOUR }),
+				}),
+			],
+			[account("A"), account("B")],
+		);
+		const scan = replay.classes[0].scenarioOutcomes.get(CANDIDATE_MODEL);
+		expect(
+			scan != null && "learningAccountIds" in scan
+				? (scan.learningAccountIds ?? [])
+				: [],
+		).toEqual(["B"]);
+
+		// A's own burn is 20 %/d, so the current model dates it 48 h out; carrying
+		// the class's whole 37.5 units/h it fills in 21⅓ h.
+		expect(weeklyRecordOf(replay, "A", "current")?.predictedEtaMs).toBeCloseTo(
+			T0 + 48 * HOUR,
+			-4,
+		);
+		expect(
+			weeklyRecordOf(replay, "A", CANDIDATE_MODEL)?.predictedEtaMs,
+		).toBeCloseTo(T0 + (64 / 3) * HOUR, -4);
+		expect(
+			weeklyRecordOf(replay, "A", CANDIDATE_MODEL)?.proportionalFirstAssignment,
+		).toBe(false);
+	});
+
+	test("the identity population excludes a class death in a later cycle", () => {
+		// A alone. Its five-hour window was refunded 90 minutes ago and has burned
+		// 30 %/h since, so it reads 45 % and is projected past the reset an hour
+		// out: it never fills in the cycle the reading is from, and
+		// `projectedExhaustions` — first cycles only — has no entry for it. EVERY
+		// later five-hour cycle fills in 3⅓ h and then holds the account dead for
+		// the rest of it, which suspends the weekly burn: the candidate dates the
+		// weekly 34 h out where the current model, holding one slope, says 24 h.
+		const weeklyStart = T0 - 4 * DAY;
+		const fiveReset = T0 + HOUR;
+		const dropAt = T0 - 90 * MIN;
+		const cycleStartOf = (t: number): number =>
+			fiveReset -
+			5 * HOUR +
+			Math.floor((t - (fiveReset - 5 * HOUR)) / (5 * HOUR)) * 5 * HOUR;
+		const replay = instantOf(
+			rows({
+				accountId: "A",
+				from: T0 - DAY,
+				to: T0,
+				sevenDay: weekly(weeklyStart, 20),
+				fiveHour: (t) => ({
+					pct:
+						t >= dropAt
+							? ((t - dropAt) / HOUR) * 30
+							: Math.min(60, ((t - cycleStartOf(t)) / HOUR) * 20),
+					reset: cycleStartOf(t) + 5 * HOUR,
+				}),
+			}),
+			[account("A")],
+			T0 + 10 * DAY,
+		);
+		const scan = replay.classes[0].scenarioOutcomes.get(CANDIDATE_MODEL);
+		// The death the first-cycle list cannot carry: only the weekly is in it.
+		expect(scan?.projectedExhaustions.map((entry) => entry.windowKind)).toEqual(
+			["seven_day"],
+		);
+
+		expect(weeklyRecordOf(replay, "A", "current")?.predictedEtaMs).toBeCloseTo(
+			T0 + 24 * HOUR,
+			-4,
+		);
+		expect(
+			weeklyRecordOf(replay, "A", CANDIDATE_MODEL)?.predictedEtaMs,
+		).toBeCloseTo(T0 + 34 * HOUR, -4);
+		expect(
+			weeklyRecordOf(replay, "A", CANDIDATE_MODEL)?.proportionalFirstAssignment,
+		).toBe(false);
+	});
+});
 
 describe("SINCE_DEATH_BUCKETS", () => {
 	test("are the eight fine buckets, contiguous and open at the top", () => {
@@ -2425,11 +2840,13 @@ describe("scenario models", () => {
 			"scenario-equal",
 			"scenario-equal-original",
 			"scenario-headroom",
+			"scenario-proportional",
 		]);
 		expect([...SCENARIO_MODEL_IDS]).toEqual([
 			"scenario-equal",
 			"scenario-equal-original",
 			"scenario-headroom",
+			"scenario-proportional",
 		]);
 		expect(SCENARIO_MODELS["scenario-equal"].observationLag).toBe("advance");
 		expect(SCENARIO_MODELS["scenario-equal-original"].observationLag).toBe(
@@ -2440,6 +2857,74 @@ describe("scenario models", () => {
 		expect(SCENARIO_MODELS["scenario-equal-original"].shareRule).toBe(
 			SCENARIO_MODELS["scenario-equal"].shareRule,
 		);
+	});
+
+	test("the declared candidate is the proportional rule, on the corrected scan", () => {
+		expect(CANDIDATE_MODEL).toBe("scenario-proportional");
+		expect(SCENARIO_MODELS[CANDIDATE_MODEL].shareRule).toBe(
+			proportionalShareRule,
+		);
+		expect(SCENARIO_MODELS[CANDIDATE_MODEL].observationLag).toBe("advance");
+		// It is scored beside the verdict basis, never as it.
+		expect(CANDIDATE_MODEL).not.toBe("scenario-equal");
+		expect(VERDICT_RULE).not.toContain(CANDIDATE_MODEL);
+	});
+
+	test("every per-model table carries the candidate", () => {
+		const fixture = pairFixture();
+		const result = replayRange(
+			fixture.rows,
+			fixture.accounts,
+			RANGE,
+			6 * 60,
+			20260823,
+		);
+		const cohorts = scoreCohorts(result);
+		expect(
+			result.records.some((entry) => entry.model === CANDIDATE_MODEL),
+		).toBe(true);
+		for (const rows of [
+			cohorts.overall.balanced,
+			cohorts.overall.perRecord,
+			cohorts.anyTransition.balanced,
+		]) {
+			expect(rows.map((row) => row.estimator)).toContain(CANDIDATE_MODEL);
+		}
+		expect(cohorts.churn.some((row) => row.model === CANDIDATE_MODEL)).toBe(
+			true,
+		);
+
+		// The calibration grid needs a whole horizon of observed truth after each
+		// instant, which the range above does not reach, so it is checked on the
+		// long-range fixture instead.
+		const start = T0 - DAY;
+		const step = 12 * HOUR;
+		const calibrated = replayRange(
+			[
+				...rows({
+					accountId: "A",
+					from: start,
+					to: T0 + 16 * DAY,
+					stepMs: step,
+					sevenDay: weekly(start, 8, 95),
+				}),
+				...rows({
+					accountId: "B",
+					from: start,
+					to: T0 + 16 * DAY,
+					stepMs: step,
+					sevenDay: weekly(start, 9, 95),
+				}),
+			],
+			[account("A"), account("B")],
+			{ label: "grid", fromMs: T0, toMs: T0 + 16 * DAY },
+			step / MIN,
+			7,
+		);
+		const rowsFor = (model: ReplayModel): number =>
+			calibrated.calibration.filter((row) => row.model === model).length;
+		expect(rowsFor(CANDIDATE_MODEL)).toBeGreaterThan(0);
+		expect(rowsFor(CANDIDATE_MODEL)).toBe(rowsFor("scenario-equal"));
 	});
 });
 
