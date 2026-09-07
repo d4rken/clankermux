@@ -87,13 +87,13 @@ observation instant on the observation-anchored lifetime path), so on a lone
 account, wherever that anchor was recoverable and sits behind the replayed
 instant, the window is projected from the anchor the current model projects it
 from. An anchor AHEAD of the replayed instant clamps to zero lag while the
-current model keeps anchoring its own ETA to that future instant, so those two
-dates stand apart by that gap. A window of a lone account can also land
-elsewhere whenever another window of the class exhausts while this one is still
-projecting, including a death the correction applies AT the replayed instant:
-that suspends the account's burn, and the ETA then carries the span it spends
-dead, which is the scenario's own semantics rather than the redistribution.
-Fill demand, the share rule and the overlap treatment are untouched.
+current model keeps anchoring its own ETA to that future instant. A window of
+a lone account can also land elsewhere whenever another window of the class
+exhausts while this one is still projecting, including a death the correction
+applies AT the replayed instant: that suspends the account's burn, and the ETA
+then carries the span it spends dead, which is the scenario's own semantics
+rather than the redistribution. Fill demand, the share rule and the overlap
+treatment are untouched.
 
 The backtest scores the corrected scan against a control that is the same equal
 split with the advance switched off (`scenario-equal-original`), under a rule
@@ -105,12 +105,12 @@ events, and with it which windows get a dated exhaustion before their reset at
 all, in either direction. Beside the verdict the report carries a mechanism
 section that states what the correction did rather than what it scored:
 observation-age cohorts, an identity check over the class-instants where no
-pooled window carries a lag, the shift each ETA moved (split on whether one
-slope governs the projection in both scans), a direct parity check against the
-current model on lone accounts, a fixed paired-ETA subset, and the lag
-population per estimator path. Each check states what it measures and over
-which records, and leaves reading the number against that mechanism to the
-reader.
+pooled window carries a lag, the shift each ETA moved (split on first-event
+eligibility in both scans with no class window having died inside its lag
+while this one is still projecting), a direct parity check against the current
+model on lone accounts, a fixed paired-ETA subset, and the lag population per
+estimator path. Each check states what it measures and over which records, and
+leaves reading the number against that mechanism to the reader.
 
 Codex ranked the follow-ups behind this one: measure the first-100 % fill
 directly, and derive the ledger shares from the history BEFORE each instant
