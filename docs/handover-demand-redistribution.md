@@ -215,6 +215,21 @@ stays exported and unchanged. Nothing in production reads the scenario, so
 putting either rule in front of a user is a separate step, gated on the verdict
 as before.
 
+On the re-declared basis the verdict reads `keep-scenario` on the same range:
+A passes (paired median signed error −11.9 min against the current model's
+−3.6, paired n 18), B passes (F1 0.533 against 0.474), C passes (overall F1
+delta against the current model, p2.5 +0.003), and D fails on its F1 leg
+against the basis's own pre-correction scan, `scenario-proportional-original`:
+0.533 against 0.545, with recall identical at 0.857 on both and a paired
+absolute-error change of 0.000 over 24 records. The rule declares any failed
+criterion as `keep-scenario`, so that is the verdict. What D reports is that
+the observation-lag advance, applied to the proportional basis, changes no
+recall and no paired error and costs 0.012 of F1 on the transition cohort. The
+identity check reads 5007 of 5007 first-assignment records dated within 1 ms
+of the current model. The equal split, scored beside the basis, fails A at
++14.1 min and passes B, C and D; the headroom rule fails A at +48.6 min with C
+and D indeterminate because it has no bootstrap pair and no control.
+
 The pending Codex weekly windows do not gate the verdict. In both Codex
 classes the scenario and the current model score identically, row for row,
 because Codex-1 had no sibling before 2026-09-04 and a lone account's scenario

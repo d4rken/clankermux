@@ -1,6 +1,6 @@
 # ClankerMux runway redistribution backtest
 
-Generated: 2026-09-07T15:23:24.797Z
+Generated: 2026-09-07T15:52:01.247Z
 
 Reproduce with:
 
@@ -20,11 +20,11 @@ bun scripts/redistribution-backtest.ts --db=/home/darken/.config/clankermux/clan
 
 | field | value |
 |---|---|
-| usage_snapshots rows | 196184 |
+| usage_snapshots rows | 196268 |
 | accounts | 7 |
 | providers | anthropic, codex |
 | first sample | 2026-06-02T12:48:00.294Z |
-| last sample | 2026-09-07T15:21:46.885Z |
+| last sample | 2026-09-07T15:49:46.889Z |
 | replay interval | `[2026-07-01T00:00:00.000Z, 2026-09-06T00:00:00.000Z)` |
 | grid instants | 9648 |
 
@@ -3457,7 +3457,7 @@ Reconciliation: 33 analysed + 5 noSurvivors + 2 alreadyExhausted + 0 dyingStateU
 
 ## Observation-lag mechanism check
 
-What the correction actually did to the projections, as opposed to what it scored. `scenario-equal` advances each reading over its observation lag; `scenario-equal-original` is the identical equal split with that advance switched off. Every check in this section is measured on THAT pair, which is the equal split — the verdict basis when the correction shipped, and kept as the subject here so the section cannot silently change what it is about. Its conclusion carries over to `scenario-proportional`, the basis since 2026-09-07, by the same mechanism: both scans take the same advance, from the same per-path anchor, before the walk starts, and the advance is a property of the reading rather than of the share rule that splits the demand afterwards. Each check below states what it measures, which records enter it, which are excluded and by which predicate, and prints the number that falls out of that population. None of them states what the number ought to be; reading it against the mechanism described is the reader's job. An eligible set of zero is reported as such rather than as a pass.
+What the correction actually did to the projections, as opposed to what it scored. `scenario-equal` advances each reading over its observation lag; `scenario-equal-original` is the identical equal split with that advance switched off. Every check in this section is measured on THAT pair, which is the equal split — the verdict basis when the correction shipped, and kept as the subject here so the section cannot silently change what it is about. What the proportional rule, the basis since 2026-09-07, shares with it is the lag DURATION and the per-path anchor that duration is derived from, both properties of the reading. The advance itself is not shared: the scan assigns each window a share-dependent slope and only then advances the reading by that slope over the lag, so the size of the advance, which windows it drives to 100 % inside their own lag, and therefore which records are eligible for the checks below can all differ between the two rules. Nothing below is a measurement of the basis's own scan. Each check below states what it measures, which records enter it, which are excluded and by which predicate, and prints the number that falls out of that population. None of them states what the number ought to be; reading it against the mechanism described is the reader's job. An eligible set of zero is reported as such rather than as a pass.
 
 ### Observation age
 
@@ -4760,6 +4760,8 @@ scored beside it and never enter the verdict.
 | recall, scenario-proportional | 0.857 |
 | recall, scenario-proportional-original | 0.857 |
 
+D compares `scenario-proportional` with its OWN lag-uncorrected scan, `scenario-proportional-original` — the same share rule with the observation-lag advance switched off — and with nothing else: it does not compare the proportional rule with the equal split, and no number in it is a statement about `scenario-equal`. Its F1 leg is the one that FAILED this run: 0.533 against the control's 0.545 on the lifecycle-balanced any-transition cohort, short by 0.012. Its error leg holds, at 0.000 min of paired median absolute-error change over the 24 records both scans dated.
+
 | cohort | records | lifecycles | episodes |
 |---|---:|---:|---:|
 | Overall | 25200 | 619 | 57 |
@@ -4786,6 +4788,8 @@ n=5007 eligible records, 5007 of which the basis dated within 1 ms of the curren
 ## Share rules beside the basis
 
 Every other share rule the replay scans, held to the same four criteria as the verdict, computed by the same functions on the same lifecycle-balanced cohorts and against the same comparison models. NONE of it enters the verdict: `evaluateVerdict` reads nothing from this section, and the verdict above is the same with or without it. `scenario-equal` is here because it WAS the verdict basis through v2026.9.19, and is kept scored beside the basis that replaced it so the change of basis can be read rather than taken on trust. Each rule's criterion D is judged against its OWN pre-correction scan; a rule that has none says so instead of borrowing another rule's control.
+
+A paired median is taken over the records the pair being compared BOTH dated, so the columns of criterion A are medians over different populations and are not each other's comparators. The scored rule's column and the `current` column come from that rule's own pairing with the current model; the `scenario-proportional` column comes from the BASIS's pairing with the current model, and the number the basis is actually judged against — the current model over the basis's own pairing — is under `## Verdict` rather than in this table. Each pairing's `paired n` is in the value list of the criterion it belongs to: this rule's below the table, the basis's under `## Verdict`. A model column is empty where the statistic is already a delta against that model.
 
 ### `scenario-equal` — the PRIOR verdict basis, pre-declared and scored as the basis through v2026.9.19
 
@@ -4901,11 +4905,11 @@ Every other share rule the replay scans, held to the same four criteria as the v
 - A regression fit that states no ETA — a flat or falling six-hour fit, which an idle account inside a live window produces — has no recoverable anchor either: the fit's anchor is back-solved from the ETA. Such a window is scheduled from the replayed instant in BOTH scans, which is pre-existing behaviour and not something the correction introduced, and the lag-population table counts those records apart from the lags it medians.
 - Pending at this run (tag and servable class): peer-exhaustion (codex), add (codex), upgrade (codex). Those pairs hold no usable, uncensored weekly record common to all models, and each carries at least one tagged weekly window still pending at the label horizon, so their weekly half is unlabelled and the verdict is provisional.
 - Positive counts (all records, per model) — current: 3686 actual positives of 25200 scored; scenario-equal: 5826 actual positives of 42295 scored; scenario-equal-original: 5826 actual positives of 42295 scored; scenario-headroom: 5826 actual positives of 42295 scored; scenario-proportional: 5826 actual positives of 42295 scored; scenario-proportional-original: 5826 actual positives of 42295 scored.
-- `total_tokens` is null or zero on 8957 of 621632 attributed `requests` rows in the loaded span (1.4 %); those contribute zero to the absorption measurement's token basis.
+- `total_tokens` is null or zero on 8972 of 622027 attributed `requests` rows in the loaded span (1.4 %); those contribute zero to the absorption measurement's token basis.
 
 ## Notes
 
 - Placeholder windows skipped: 233.
-- Replay took 38.9 s over 9648 instants; scoring and bootstrap 5.8 s.
+- Replay took 38.1 s over 9648 instants; scoring and bootstrap 7.2 s.
 - Grid step 10 min; rows loaded 8 days either side of the replay interval.
-- Request buckets loaded: 64432 minute buckets over 7 accounts, on a 60-second grid, spanning 2026-06-23T09:31:00.000Z to 2026-09-07T15:23:00.000Z.
+- Request buckets loaded: 64489 minute buckets over 7 accounts, on a 60-second grid, spanning 2026-06-23T09:31:00.000Z to 2026-09-07T15:52:00.000Z.
