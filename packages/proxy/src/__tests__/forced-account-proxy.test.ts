@@ -153,6 +153,37 @@ function makeRequest(headers: Record<string, string> = {}) {
 }
 
 describe("force-account proxy override", () => {
+	it("returns an organization-denied 403 without cooldown or failover", async () => {
+		const a = makeAccount({
+			id: "forced-org",
+			provider: "anthropic",
+			rate_limited_reason: null,
+			consecutive_rate_limits: 0,
+		});
+		const { ctx } = makeContext([a, makeAccount({ id: "other" })], {
+			providerName: "anthropic",
+		});
+		setForcedAccount(a.id);
+		const body = {
+			error: {
+				type: "permission_error",
+				details: { error_code: "oauth_not_allowed_for_organization" },
+			},
+		};
+		globalThis.fetch = mock(async () => jsonResponse(body, 403)) as never;
+		const res = await callHandleProxy(
+			makeRequest(),
+			new URL("https://proxy.local/v1/messages"),
+			ctx,
+		);
+		expect(res.status).toBe(403);
+		expect(await res.json()).toEqual(body);
+		expect(globalThis.fetch).toHaveBeenCalledTimes(1);
+		expect(a.rate_limited_until).toBeNull();
+		expect(a.rate_limited_reason).toBeNull();
+		expect(ctx.dbOps.markAccountRateLimited).not.toHaveBeenCalled();
+	});
+
 	let originalFetch: typeof globalThis.fetch;
 
 	beforeEach(() => {

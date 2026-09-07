@@ -127,6 +127,23 @@ class MockStrategyStore implements StrategyStore {
 }
 
 describe("SessionStrategy", () => {
+	it("reassigns session affinity away from an organization-disabled account", () => {
+		const projectMeta = { ...meta, project: "org-denied-affinity" };
+		const a = makeAccount({
+			id: "org-affined",
+			session_start: Date.now() - 60_000,
+			session_request_count: 4,
+		});
+		const b = makeAccount({ id: "healthy-org-sibling" });
+		expect(strategy.select([a, b], projectMeta)[0]).toBe(a);
+		a.rate_limited_until = Date.now() + 30_000;
+		a.rate_limited_reason = "org_permission_denied";
+		expect(strategy.select([a, b], projectMeta)[0]).toBe(b);
+		expect(projectMeta.routing?.decision).toBe("affinity_reassigned");
+		a.rate_limited_until = null;
+		expect(strategy.select([a, b], projectMeta)[0]).toBe(b);
+	});
+
 	let strategy: SessionStrategy;
 	let mockStore: MockStrategyStore;
 	let meta: RequestMeta;

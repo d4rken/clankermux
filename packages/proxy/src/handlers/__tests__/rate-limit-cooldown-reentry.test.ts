@@ -260,3 +260,19 @@ describe("mature cooldown re-entry / single-flight probe", () => {
 		expect(getRateLimitProbeAdmission(first)).toBe("admitted");
 	});
 });
+
+it("single-flights org-denial recovery from the first failure, including after the expiry sweep", () => {
+	Date.now = () => NOW;
+	for (const deadline of [NOW - 1, null]) {
+		resetRateLimitProbeGatesForTests();
+		const acc = makeAccount({
+			rate_limited_reason: "org_permission_denied",
+			consecutive_rate_limits: 1,
+			rate_limited_until: deadline,
+		});
+		expect(getRateLimitProbeAdmission(acc)).toBe("admitted");
+		expect(getRateLimitProbeAdmission(acc)).toBe("suppressed");
+		completeRateLimitProbe(acc, "abandoned");
+		expect(getRateLimitProbeAdmission(acc)).toBe("admitted");
+	}
+});

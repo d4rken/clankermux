@@ -1000,6 +1000,13 @@ async function handleIngestedProxy(
 							false,
 							{
 								signal: req.signal,
+								// The enclosing primaryAttemptAccountId guard proves that the
+								// held account is accounts[0]; that id is set after the final
+								// gate/reorder pass above, not before candidate selection.
+								isLastAccountAttempt: () =>
+									!comboInfo?.comboName &&
+									(accounts.length === 1 ||
+										gates.everyRemainingCandidateUnattemptable(accounts, 0)),
 								onOutcome: (o) => {
 									firstOutcome = o;
 									noteAttemptOutcome(o);
@@ -1285,6 +1292,10 @@ async function handleIngestedProxy(
 						// running to completion. This loop serves both the main pass and
 						// the combo-fallback pass.
 						signal: req.signal,
+						isLastAccountAttempt: () =>
+							!comboInfo?.comboName &&
+							(i === list.length - 1 ||
+								gates.everyRemainingCandidateUnattemptable(list, i)),
 						onOutcome: (o) => {
 							noteAttemptOutcome(o);
 							holds.noteOverloadSuppression(list[i], o);

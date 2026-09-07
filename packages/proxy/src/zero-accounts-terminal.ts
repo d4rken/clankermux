@@ -226,7 +226,12 @@ export async function resolveZeroAccountsOutcome(
 		try {
 			const allAccs = await ctx.dbOps.getAllAccounts();
 			hasHoldCandidate = allAccs.some((a) => {
-				if (a.paused || !isPinAllowed(a)) return false;
+				if (
+					a.paused ||
+					!isPinAllowed(a) ||
+					a.rate_limited_reason === "org_permission_denied"
+				)
+					return false;
 				const rl =
 					a.rate_limited_until && a.rate_limited_until > nowMs
 						? a.rate_limited_until

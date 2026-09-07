@@ -90,7 +90,7 @@ describe("applyRateLimitCooldown — floorUntil", () => {
 		const until = account.rate_limited_until as number;
 		expect(Math.abs(until - floorUntil)).toBeLessThan(2000);
 		expect(until).toBeGreaterThan(now + FIVE_MIN_MS);
-		expect(account.rate_limited_reason).toBeNull(); // reason is persisted via DB, not on the account here
+		expect(account.rate_limited_reason).toBe("out_of_credits"); // in-memory state agrees with the queued DB write
 		// DB write carried the long cooldown + reason.
 		expect(markAccountRateLimited).toHaveBeenCalledTimes(1);
 		const [, untilArg, reasonArg] = markAccountRateLimited.mock.calls[0];

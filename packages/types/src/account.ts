@@ -97,6 +97,8 @@ export const RATE_LIMIT_REASONS = [
 	 *  depleted; a long cooldown (≥1h, or until window reset) is applied instead of
 	 *  the short no-reset probe loop. */
 	"out_of_credits",
+	/** Anthropic organization disabled OAuth/Claude Code access. Not quota-derived. */
+	"org_permission_denied",
 	/** Anthropic 429 for a model family whose weekly quota is exhausted while the
 	 *  account still has unified 5h/7d headroom. Recorded when the reactive
 	 *  safety net fails the request over WITHOUT an account-wide cooldown, so the
@@ -144,6 +146,7 @@ export function isRateLimitReason(value: string): value is RateLimitReason {
  *    a real successful request; account-wide usage excludes `extra_usage`, so it
  *    can legitimately read < 100% while credits are still depleted.
  *  - `family_weekly_exhausted_429` — never applies an account-wide cooldown.
+ *  - `org_permission_denied` — usage headroom does not prove Claude Code access.
  *  - `null` — a legacy row is not evidence.
  */
 export const QUOTA_DERIVED_RATE_LIMIT_REASONS = [

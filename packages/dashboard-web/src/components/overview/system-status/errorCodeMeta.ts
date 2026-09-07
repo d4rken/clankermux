@@ -67,6 +67,14 @@ const KNOWN_ERROR_META: Record<
 			"No action needed — the account enters an escalating probe cooldown (starting around 30s) and the next request re-probes it automatically.",
 		severity: "warning",
 	},
+	org_permission_denied: {
+		title: "Organization access disabled",
+		description:
+			"Anthropic returned 403 confirming that this organization disabled OAuth or Claude Code subscription access. The account enters a cooldown and requests can try other accounts allowed by their routing pins.",
+		suggestion:
+			"Ask the organization's admin to restore access. After cooldown, one request at a time checks recovery. Usage polling alone cannot clear this restriction.",
+		severity: "error",
+	},
 	out_of_credits: {
 		title: "Account out of credits",
 		description:

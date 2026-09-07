@@ -228,6 +228,7 @@ export type PublicAvailabilityReason =
 	| "oauth_invalid_grant"
 	| "rate_limit_window"
 	| "subscription_expired"
+	| "usage_permission_denied"
 	// Refinements of a non-paused state.
 	| "queueing"
 	| "payment_required"
@@ -241,6 +242,7 @@ const KNOWN_PAUSE_REASONS = new Set([
 	"oauth_invalid_grant",
 	"rate_limit_window",
 	"subscription_expired",
+	"usage_permission_denied",
 ]);
 
 /**

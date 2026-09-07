@@ -1331,3 +1331,33 @@ describe("processProxyResponse — live scoped rejection with lagging fresh usag
 		expect(isAnthropicBurstThrottleActive()).toBe(false);
 	});
 });
+
+it("requires a successful messages request to clear an organization restriction", async () => {
+	const { ctx } = makeCtx({ isStream: false, rateLimited: false });
+	const acc = makeAccount({
+		rate_limited_reason: "org_permission_denied",
+		rate_limited_until: Date.now() + 60_000,
+		rate_limited_at: Date.now() - 1000,
+	});
+	for (const path of [
+		"/api/oauth/usage",
+		"/v1/models",
+		"/v1/messages/count_tokens",
+	]) {
+		await processProxyResponse(Response.json({}), acc, ctx, {
+			headers: new Headers(),
+			method: "GET",
+			path,
+			timestamp: Date.now(),
+		});
+		expect(acc.rate_limited_reason).toBe("org_permission_denied");
+	}
+	await processProxyResponse(Response.json({}), acc, ctx, {
+		headers: new Headers(),
+		method: "POST",
+		path: "/v1/messages",
+		timestamp: Date.now(),
+	});
+	expect(acc.rate_limited_reason).toBeNull();
+	expect(acc.rate_limited_until).toBeNull();
+});

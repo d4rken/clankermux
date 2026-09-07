@@ -48,8 +48,8 @@ export interface AccountStatus {
 	isRateLimited: boolean;
 	/** Account is paused. */
 	isPaused: boolean;
-	/** Auto-paused because the provider reports the subscription lapsed. */
-	isSubscriptionExpired: boolean;
+	/** Auto-paused because usage access was denied (including legacy expiration labels). */
+	isUsagePermissionDenied: boolean;
 	/**
 	 * Auto-paused because the OAuth refresh token was rejected (`invalid_grant`).
 	 * Terminal — requires re-authentication; auto-resumes once reauth succeeds.
@@ -150,9 +150,9 @@ export interface AccountStatus {
 	renewalUrgency: RenewalUrgency;
 	/**
 	 * Whether to render the renewal chip. False when no anchor is set, and also
-	 * suppressed while `isSubscriptionExpired` — real provider state (OAuth
+	 * suppressed while `isUsagePermissionDenied` — usage access state (OAuth
 	 * refused) dominates static, unverified renewal metadata, so we don't show a
-	 * reassuring renewal chip next to the red "Subscription expired" badge.
+	 * reassuring renewal chip next to the red "Usage access denied" badge.
 	 */
 	showRenewalChip: boolean;
 	/** Codex account is on purchased credits past its weekly limit (real spend). */
@@ -190,8 +190,10 @@ export function deriveAccountStatus(
 ): AccountStatus {
 	const presenter = new AccountPresenter(account);
 	const isPaused = presenter.isPaused;
-	const isSubscriptionExpired =
-		isPaused && account.pauseReason === "subscription_expired";
+	const isUsagePermissionDenied =
+		isPaused &&
+		(account.pauseReason === "usage_permission_denied" ||
+			account.pauseReason === "subscription_expired");
 	const isNeedsReauth =
 		isPaused && account.pauseReason === "oauth_invalid_grant";
 	const parsedReauthDeadline = account.refreshTokenExpiresAt
@@ -231,7 +233,10 @@ export function deriveAccountStatus(
 	// so the action is suppressed. (If the provider releases the window early,
 	// usage polling observes it and clears the lock without an operator action.)
 	const showForceReset =
-		(isHardLimited || isBlockedByLegacyLock) && !isPaused && !isUsageExhausted;
+		(isHardLimited || isBlockedByLegacyLock) &&
+		!isPaused &&
+		!isUsageExhausted &&
+		account.rateLimitedReason !== "org_permission_denied";
 	// staleLockDetected only fires when numeric usage data exists (Anthropic
 	// accounts); Zai accounts have usageUtilization === null and are excluded.
 	const staleLockDetected =
@@ -371,7 +376,7 @@ export function deriveAccountStatus(
 		hasRefreshToken: account.hasRefreshToken,
 		isRateLimited: presenter.isRateLimited,
 		isPaused,
-		isSubscriptionExpired,
+		isUsagePermissionDenied,
 		isNeedsReauth,
 		reauthDeadlineMs,
 		isReauthDueSoon,
@@ -402,7 +407,7 @@ export function deriveAccountStatus(
 		renewalNextDate: renewal.nextDate,
 		renewalDaysLeft: renewal.daysLeft,
 		renewalUrgency: renewal.urgency,
-		showRenewalChip: renewal.nextDate !== null && !isSubscriptionExpired,
+		showRenewalChip: renewal.nextDate !== null && !isUsagePermissionDenied,
 		isOnCredits,
 		creditsBalance,
 		creditsPlanType,

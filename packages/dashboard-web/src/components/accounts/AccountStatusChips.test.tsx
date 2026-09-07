@@ -146,7 +146,7 @@ describe("AccountStatusChips — refresh-token re-auth chip", () => {
 });
 
 describe("AccountStatusChips — expired suppresses renewal chip", () => {
-	it("shows 'Subscription expired' and no renewal chip when expired with a past date", () => {
+	it("shows 'Usage access denied' for the legacy expiration label and no renewal chip when expired with a past date", () => {
 		const html = render(
 			makeAccount({
 				paused: true,
@@ -155,7 +155,7 @@ describe("AccountStatusChips — expired suppresses renewal chip", () => {
 				renewalCadence: "none",
 			}),
 		);
-		expect(html).toContain("Subscription expired");
+		expect(html).toContain("Usage access denied");
 		// No renewal chip text at all — real provider state dominates.
 		expect(html).not.toContain("Renewal date passed");
 		expect(html).not.toContain("Renewed");
@@ -171,7 +171,7 @@ describe("AccountStatusChips — expired suppresses renewal chip", () => {
 				renewalCadence: "monthly",
 			}),
 		);
-		expect(html).toContain("Subscription expired");
+		expect(html).toContain("Usage access denied");
 		expect(html).not.toContain("Renews");
 	});
 });
@@ -773,4 +773,24 @@ describe("AccountStatusChips — family-weekly exhausted chip", () => {
 		const html = render(makeAccount());
 		expect(html).not.toContain("weekly exhausted");
 	});
+});
+
+it("labels usage permission denial without claiming the subscription expired", () => {
+	const html = render(
+		makeAccount({ paused: true, pauseReason: "usage_permission_denied" }),
+	);
+	expect(html).toContain("Usage access denied");
+	expect(html).not.toContain("Subscription expired");
+});
+
+it("explains the request-path org restriction even when quota has headroom", () => {
+	const html = render(
+		makeAccount({
+			rateLimitedReason: "org_permission_denied",
+			rateLimitedUntil: NOW + 60_000,
+			usageUtilization: 10,
+		}),
+	);
+	expect(html).toContain("Organization access disabled");
+	expect(html).not.toContain("Subscription expired");
 });

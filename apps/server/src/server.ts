@@ -427,42 +427,52 @@ function startUsagePollingWithRefresh(
 					);
 				},
 				(accountId) => {
-					// Usage endpoint reports the subscription/seat is gone (403
-					// permission_error). Auto-pause so the router stops selecting and
+					// Usage endpoint denies access (403 permission_error), which may
+					// be an org policy or seat problem. Auto-pause to stop selecting and
 					// retrying a dead account. Guarded: never overwrites an existing
 					// pause (e.g. a manual one).
 					proxyContext.dbOps
-						.pauseAccountIfActive(accountId, "subscription_expired")
+						.pauseAccountIfActive(accountId, "usage_permission_denied")
 						.then((pausedNow) => {
 							if (pausedNow) {
 								logger.warn(
-									`Auto-paused account ${account.name} (${accountId}): subscription expired (usage endpoint returned 403 permission_error)`,
+									`Auto-paused account ${account.name} (${accountId}): usage access denied (403 permission_error)`,
 								);
 							}
 						})
 						.catch((err) =>
 							logger.warn(
-								`Failed to auto-pause account ${accountId} on expired subscription: ${err}`,
+								`Failed to auto-pause account ${accountId} on usage access denial: ${err}`,
 							),
 						);
 				},
 				(accountId) => {
 					// Usage fetch works again (fired on the failure→success transition
 					// and on the first success after a restart). Lift a
-					// subscription_expired pause — the seat is back after renewal.
-					// Guarded: only that exact pause reason is resumed.
-					proxyContext.dbOps
-						.resumeAccountIfPausedWithReason(accountId, "subscription_expired")
-						.then((resumedNow) => {
+					// usage-access pause (including legacy subscription_expired rows).
+					// Neither operation clears a request-path org_permission_denied
+					// cooldown: usage access does not prove Claude Code access.
+					Promise.all([
+						proxyContext.dbOps.resumeAccountIfPausedWithReason(
+							accountId,
+							"usage_permission_denied",
+						),
+						proxyContext.dbOps.resumeAccountIfPausedWithReason(
+							accountId,
+							"subscription_expired",
+						),
+					])
+						.then((results) => {
+							const resumedNow = results.some(Boolean);
 							if (resumedNow) {
 								logger.info(
-									`Auto-resumed account ${account.name} (${accountId}): usage endpoint reachable again after subscription renewal`,
+									`Auto-resumed account ${account.name} (${accountId}): usage endpoint reachable again`,
 								);
 							}
 						})
 						.catch((err) =>
 							logger.warn(
-								`Failed to auto-resume account ${accountId} after subscription renewal: ${err}`,
+								`Failed to auto-resume account ${accountId} after usage access recovery: ${err}`,
 							),
 						);
 				},
