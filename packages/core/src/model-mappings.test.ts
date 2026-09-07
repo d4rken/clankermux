@@ -22,6 +22,7 @@ import {
 	parseModelMappings,
 	resolveCodexTargetModel,
 	resolveModelContextWindow,
+	resolveModelMaxContextWindow,
 	SAFETY_MARGIN,
 } from "@clankermux/core";
 import type { Account, ContextComposition } from "@clankermux/types";
@@ -328,8 +329,7 @@ describe("MODEL_CONTEXT_WINDOWS", () => {
 		expect(MODEL_CONTEXT_WINDOWS["gpt-5.4"]).toBe(272_000);
 		expect(MODEL_CONTEXT_WINDOWS["gpt-5.4-mini"]).toBe(272_000);
 		expect(MODEL_CONTEXT_WINDOWS["gpt-5.3-codex-spark"]).toBe(128_000);
-		// GPT-6 Astra shares the 272K billing threshold; its 1.05M ceiling is
-		// deliberately not the gate window (see MODEL_CONTEXT_WINDOWS).
+		// The client default stays at 272K even when routing allows more.
 		expect(MODEL_CONTEXT_WINDOWS["gpt-6-astra"]).toBe(272_000);
 	});
 
@@ -369,6 +369,25 @@ describe("resolveModelContextWindow", () => {
 	test("exact keys are unchanged by the dated fallback", () => {
 		expect(resolveModelContextWindow("gpt-5.6-sol")).toBe(272_000);
 		expect(resolveModelContextWindow("gpt-5.4-mini")).toBe(272_000);
+	});
+});
+
+describe("resolveModelMaxContextWindow", () => {
+	test("separates Astra's subscription maximum from its client default", () => {
+		for (const model of ["gpt-6-astra", "gpt-6-astra-2026-09-03"]) {
+			expect(resolveModelMaxContextWindow(model)).toBe(872_000);
+			expect(resolveModelContextWindow(model)).toBe(272_000);
+		}
+	});
+
+	test("preserves existing limits and unknown-model behavior", () => {
+		expect(resolveModelMaxContextWindow("gpt-5.6-sol")).toBe(272_000);
+		expect(resolveModelMaxContextWindow("gpt-5.6-sol-2026-05-13")).toBe(
+			272_000,
+		);
+		expect(resolveModelMaxContextWindow("gpt-5.3-codex-spark")).toBe(128_000);
+		expect(resolveModelMaxContextWindow("gpt-6-astra-foo")).toBeUndefined();
+		expect(resolveModelMaxContextWindow("unknown-model")).toBeUndefined();
 	});
 });
 
@@ -539,19 +558,24 @@ describe("codexAccountFitsRequest", () => {
 		);
 	});
 
-	test("gates a default-config account on the fable family window", () => {
-		// fable → gpt-6-astra default (272K, threshold 263840).
+	test("gates fable and mythos on Astra's maximum rather than its default", () => {
 		const account = makeCodexAccount({ model_mappings: null });
-		expect(codexAccountFitsRequest(account, "claude-fable-5", 263_840)).toBe(
-			true,
-		);
-		expect(codexAccountFitsRequest(account, "claude-fable-5", 263_841)).toBe(
-			false,
-		);
-		// mythos resolves to the same fable family default.
-		expect(codexAccountFitsRequest(account, "claude-mythos-5", 263_841)).toBe(
-			false,
-		);
+		for (const model of [
+			"claude-fable-5",
+			"claude-mythos-5",
+			"gpt-6-astra",
+			"gpt-6-astra-2026-09-03",
+		]) {
+			expect(codexAccountFitsRequest(account, model, 273_764)).toBe(true);
+			expect(codexAccountFitsRequest(account, model, 845_840)).toBe(true);
+			expect(codexAccountFitsRequest(account, model, 845_841)).toBe(false);
+			expect(codexAccountFitsRequestUnmargined(account, model, 872_000)).toBe(
+				true,
+			);
+			expect(codexAccountFitsRequestUnmargined(account, model, 872_001)).toBe(
+				false,
+			);
+		}
 	});
 });
 

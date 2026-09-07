@@ -1284,18 +1284,22 @@ describe("CodexProvider.processResponse", () => {
 		expect(messageDeltaLine).toContain('"context_window_size":128000');
 	});
 
-	it("synthesizes context_window for a dated model via the family-window fallback", async () => {
+	it.each([
+		"gpt-5.6-sol-2026-05-13",
+		"gpt-6-astra",
+		"gpt-6-astra-2026-09-03",
+	])("preserves the default client context window for %s", async (model) => {
 		const provider = new CodexProvider();
 		// The Codex backend returns a dated variant of a known model. Routing
 		// already resolves the dated suffix; the response-side context_window
 		// synthesis must too, so the client gauge / compaction signal is present.
 		const upstreamBody = sseBody([
 			...eventLine("response.created", {
-				response: { id: "resp_test", model: "gpt-5.6-sol-2026-05-13" },
+				response: { id: "resp_test", model },
 			}),
 			...eventLine("response.completed", {
 				response: {
-					model: "gpt-5.6-sol-2026-05-13",
+					model,
 					usage: {
 						input_tokens: 100,
 						output_tokens: 50,
@@ -1316,9 +1320,8 @@ describe("CodexProvider.processResponse", () => {
 			.find((line) => line.includes('"type":"message_delta"'));
 
 		expect(messageDeltaLine).toContain('"context_window"');
-		// gpt-5.6-sol's Codex-served window, read live from the account's own
-		// model listing (2026-08-21). The dated slug resolves through its base
-		// model, so the client gauge matches what the routing gate sized against.
+		// Default client metadata stays at 272K even when Astra routing admits
+		// up to 872K, so existing client compaction behavior is preserved.
 		expect(messageDeltaLine).toContain('"context_window_size":272000');
 	});
 

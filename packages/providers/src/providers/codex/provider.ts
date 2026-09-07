@@ -210,9 +210,10 @@ const CODEX_ERROR_TYPE_BY_CODE: Record<string, string> = {
 // resolve the same target model. Do not re-declare it here.
 
 // resolveModelContextWindow (over the shared MODEL_CONTEXT_WINDOWS map in
-// @clankermux/core) is the single source of truth for context-window sizes. It
-// feeds both routing-side context-window gating and the display-metadata reuse
-// in extractContextWindow() below, so both apply the dated-suffix fallback.
+// @clankermux/core) is the source of truth for default context-window sizes. It
+// feeds client display / compaction metadata in extractContextWindow() below.
+// Routing uses resolveModelMaxContextWindow so a larger supported request does
+// not force clients to delay their normal compaction.
 
 // ── Codex Responses API types ─────────────────────────────────────────────────
 
@@ -1246,8 +1247,8 @@ export class CodexProvider extends BaseProvider {
 		if (typeof model !== "string") return null;
 		// resolveModelContextWindow (not a direct MODEL_CONTEXT_WINDOWS lookup) so
 		// a dated backend model (e.g. gpt-5.6-sol-2026-05-13) still resolves to its
-		// family window — matching the routing gate — instead of dropping the
-		// client gauge / compaction signal.
+		// default family window instead of dropping the client gauge / compaction
+		// signal.
 		const contextWindowSize = resolveModelContextWindow(model);
 		if (!contextWindowSize) return null;
 

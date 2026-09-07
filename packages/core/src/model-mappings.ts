@@ -470,53 +470,34 @@ export function validateAndSanitizeModelMappings(
 // ── Context-window-aware routing ─────────────────────────────────────────────
 
 /**
- * Codex (ChatGPT-auth) context windows. These are the CODEX caps, not the
- * API-key caps. Source of truth: the codex-cli models cache
- * (~/.codex/models_cache.json, fetched 2026-06-09 by codex 0.136) —
- * `context_window` per slug. The previous 400K figure for gpt-5.5 was stale;
- * the cache reports 272K. gpt-5.4's 1M `max_context_window` is the
- * client-gated experimental tier, NOT reachable via the proxy — use 272K.
- * Retired slugs (gpt-5-codex, gpt-5.3-codex) are no longer served and were
- * removed.
- *
- * Omitted models (compaction/internal models) are treated as
- * "unknown → fits, never gated" — no false exclusion.
+ * Default Codex (ChatGPT-auth) context windows from the subscription catalog.
+ * These feed client context gauges / compaction metadata. Routing may use a
+ * larger verified maximum via resolveModelMaxContextWindow.
+ * Unknown / compaction models remain ungated.
  */
 export const MODEL_CONTEXT_WINDOWS: Record<string, number> = {
 	"gpt-5.5": 272_000,
 	"gpt-5.4": 272_000,
 	"gpt-5.4-mini": 272_000,
 	"gpt-5.3-codex-spark": 128_000,
-	// GPT-5.6 tiers. Read live from `GET /backend-api/codex/models` against a
-	// real account (2026-08-21): `context_window` is 272,000 for all three, and
-	// no value anywhere near 353K appears in the payload.
-	//
-	// This corrects an earlier 353_000 taken from the Codex TUI on 2026-07-10.
-	// Both readings were honest when made: codex-cli v0.144.6 (2026-07-18)
-	// corrected its bundled metadata to cap gpt-5.6 at 272K input tokens, and
-	// the specific 353,400 figure the old comment recorded matches the known
-	// oscillation bug (openai/codex#30875) where the effective window swung
-	// between 258,400 and 353,400 rather than settling.
-	//
-	// 272K is a BILLING threshold, not a hard model limit: prompts above it
-	// bill input at 2x and output at 1.5x for the whole session. So the gate
-	// admitting past this number does not produce an error the way an oversized
-	// request to a hard cap would — it silently doubles the bill, which is
-	// exactly the kind of unasked-for spend this pool exists to avoid.
-	//
-	// The same payload reports `max_context_window` of 872,000 for these three
-	// and 1,000,000 for gpt-5.4, both deliberately ignored: that is the raw
-	// payload ceiling, not the window the harness uses or prices normally.
 	"gpt-5.6-sol": 272_000,
 	"gpt-5.6-terra": 272_000,
 	"gpt-5.6-luna": 272_000,
-	// GPT-6 Astra (released 2026-09-03). The Codex catalog entry that shipped in
-	// codex-cli 0.153.1 (openai/codex#42605) reports `context_window: 272000`
-	// and `max_context_window: 872000`, the same split as the 5.6 tiers, and
-	// the API pricing page keeps the same >272K-input surcharge (2x input, 1.5x
-	// output for the whole request). The documented 1.05M API window is the raw
-	// ceiling, ignored here for the same reason as 5.6's 872K.
 	"gpt-6-astra": 272_000,
+};
+
+/**
+ * Verified subscription routing ceilings, separate from client defaults.
+ * Astra's live catalog (client_version=0.153.1, 2026-09-07) reports
+ * max_context_window=872000 on both pool accounts. Live requests completed
+ * with 300,070 and 850,070 input tokens and correctly returned both markers.
+ * See docs/astra-subscription-context-2026-09-07.md for the probe details.
+ * The API window and pricing threshold do not define this subscription limit.
+ * Other models retain existing routing ceilings until their larger windows
+ * are verified.
+ */
+const MODEL_MAX_CONTEXT_WINDOWS: Record<string, number> = {
+	"gpt-6-astra": 872_000,
 };
 
 /**
@@ -763,6 +744,19 @@ export function resolveModelContextWindow(model: string): number | undefined {
 	return undefined;
 }
 
+/** Maximum verified routing window, falling back to the client default. */
+export function resolveModelMaxContextWindow(
+	model: string,
+): number | undefined {
+	const exact = MODEL_MAX_CONTEXT_WINDOWS[model];
+	if (exact !== undefined) return exact;
+	const base = stripDatedModelSuffix(model);
+	if (base !== null && MODEL_MAX_CONTEXT_WINDOWS[base] !== undefined) {
+		return MODEL_MAX_CONTEXT_WINDOWS[base];
+	}
+	return resolveModelContextWindow(model);
+}
+
 /**
  * Coarse request-size estimate used by the cache-warming session-promotion path
  * (not the context-window gate — that uses `estimateContextWindowTokens`). The
@@ -955,7 +949,7 @@ export function resolveCodexTargetModel(
  *
  * Resolves the target model via `resolveCodexTargetModel` (account mapping, then
  * family default — matching what the provider will actually send), looks up
- * `MODEL_CONTEXT_WINDOWS`, and returns true if the estimate fits within
+ * `resolveModelMaxContextWindow`, and returns true if the estimate fits within
  * `floor(window * SAFETY_MARGIN)`. Models with no known window always fit — no
  * false exclusion.
  *
@@ -970,7 +964,7 @@ export function codexAccountFitsRequest(
 	estimate: number,
 ): boolean {
 	const target = resolveCodexTargetModel(effectiveModel, account);
-	const window = resolveModelContextWindow(target);
+	const window = resolveModelMaxContextWindow(target);
 	if (window === undefined) return true; // unknown model → fits (no false exclusion)
 	return estimate <= Math.floor(window * SAFETY_MARGIN);
 }
@@ -996,7 +990,7 @@ export function codexAccountFitsRequestUnmargined(
 	estimate: number,
 ): boolean {
 	const target = resolveCodexTargetModel(effectiveModel, account);
-	const window = resolveModelContextWindow(target);
+	const window = resolveModelMaxContextWindow(target);
 	if (window === undefined) return true;
 	return estimate <= window;
 }

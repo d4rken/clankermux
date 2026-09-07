@@ -716,3 +716,33 @@ describe("affinity after durable request exclusions", () => {
 		expect(strategy.select(accounts, next)[0].id).toBe("a");
 	});
 });
+
+describe("Astra subscription context admission", () => {
+	it("admits the reported failing request for native and mapped Astra models", () => {
+		const account = makeAccount({
+			provider: "codex",
+			model_mappings: JSON.stringify({ sonnet: "gpt-6-astra" }),
+		});
+		for (const model of ["gpt-6-astra", "gpt-6-astra-2026-09-03", MODEL]) {
+			const gates = makeGates({
+				effectiveRequestModel: model,
+				gateTokenEstimate: 273_764,
+			});
+			expect(gates.applyContextWindowGate([account])).toEqual([account]);
+		}
+	});
+
+	it("uses the combo override's maximum while retaining other models' limits", () => {
+		const account = makeAccount({ provider: "codex" });
+		const gates = makeGates({
+			effectiveRequestModel: MODEL,
+			gateTokenEstimate: 300_000,
+		});
+		expect(gates.applyContextWindowGate([account])).toEqual([]);
+		expect(
+			gates.applyContextWindowGate([account], {
+				slots: [{ accountId: account.id, modelOverride: "gpt-6-astra" }],
+			}),
+		).toEqual([account]);
+	});
+});

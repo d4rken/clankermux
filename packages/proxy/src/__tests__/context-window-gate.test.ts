@@ -120,6 +120,22 @@ function makeSmallRequest(): Request {
 }
 
 describe("context-window gate", () => {
+	it("reports Astra's 872K maximum when a request exceeds it", async () => {
+		const account = makeAccount({
+			model_mappings: JSON.stringify({ opus: "gpt-6-astra" }),
+		});
+		const response = await callHandleProxy(
+			makeLargeRequest(900_000),
+			new URL("https://proxy.local/v1/messages"),
+			makeContext([account]),
+		);
+		expect(response.status).toBe(400);
+		const body = await response.json();
+		expect(body.error.type).toBe("context_window_exceeded");
+		expect(body.error.message).toContain("gpt-6-astra caps at 872000");
+		expect(body.error.excluded_backends[0].max_context_window).toBe(872_000);
+	});
+
 	it("returns 400 context_window_exceeded when request exceeds codex model window and no other backend available", async () => {
 		// gpt-5.5 window = 272K, threshold = floor(272K * 0.97) = 263840
 		const codexAccount = makeAccount({

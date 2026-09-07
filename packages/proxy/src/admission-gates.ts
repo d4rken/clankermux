@@ -6,7 +6,7 @@ import {
 	mapModelName,
 	PROTECTED_FAMILY,
 	resolveCodexTargetModel,
-	resolveModelContextWindow,
+	resolveModelMaxContextWindow,
 } from "@clankermux/core";
 import { Logger } from "@clankermux/logger";
 import { getFreshCapacity, usageCache } from "@clankermux/providers";
@@ -401,7 +401,7 @@ export function createAdmissionGates(deps: AdmissionGateDeps): AdmissionGates {
 
 			if (!codexAccountFitsRequest(account, modelForGate, gateTokenEstimate)) {
 				const target = resolveCodexTargetModel(modelForGate, account);
-				const window = resolveModelContextWindow(target);
+				const window = resolveModelMaxContextWindow(target);
 				log.info(
 					`Context-window gate: excluding Codex account "${account.name}" ` +
 						`(model=${modelForGate}, target=${target}, window=${window ?? "unknown"}, ` +
