@@ -235,9 +235,8 @@ export interface RedistributionRecord extends BacktestRecord {
 	pooledInClass: number;
 	/**
 	 * True when the corrected scan's projected exhaustion for this window
-	 * precedes every other slope-changing event of its class: any other
-	 * projected exhaustion still ahead of `T`, and the reset of any class window
-	 * already at 100 % at `T`.
+	 * precedes any other projected exhaustion still ahead of `T`, and the reset
+	 * of any class window already at 100 % at `T`.
 	 */
 	firstEvent: boolean;
 	/**
@@ -945,8 +944,8 @@ export interface InstantReplay {
 	/**
 	 * `${tag}::${demandClass}` → seven-day windows the label horizon dropped
 	 * while carrying that tag. A pair with a count > 0 is unlabelled only
-	 * because its weekly truth is still unfolding, which a later `--to` fixes;
-	 * a pair with no count never had a tagged weekly window at all.
+	 * because its weekly truth is still unfolding; a pair with no count never
+	 * had a tagged weekly window at all.
 	 */
 	pendingWeeklyByTagClass: Map<string, number>;
 }
@@ -1205,8 +1204,8 @@ export function replayInstant(
 					window.nextWindowStartsMs,
 				);
 				// Tagged BEFORE the horizon drop: a dropped weekly window is what
-				// distinguishes a (tag, class) pair that a later `--to` can label
-				// from one this roster can never label.
+				// distinguishes a (tag, class) pair still pending at the label
+				// horizon from one this roster can never label.
 				const context = transitionsAt(events, T, entry.accountId, demandClass);
 				// Label horizon: a window whose truth is still unfolding at the end of
 				// the loaded history would be scored on an outcome nobody observed.
@@ -3113,11 +3112,11 @@ export function evaluateVerdict(
 	// unlabelled on its weekly half. WHY it is unlabelled decides what to do
 	// about it, so the two causes are separated rather than both prescribing a
 	// re-run: a pair whose tagged weekly windows were dropped by the label
-	// horizon is PENDING (a later `--to` labels it, and only that makes the
-	// verdict provisional), while a pair with no pending window never had a
-	// tagged weekly window in this roster at all — a lone account whose peer
-	// exhaustion tags nobody, or a tagged window that was withheld or censored.
-	// Re-running changes nothing there.
+	// horizon is PENDING (only that makes the verdict provisional), while a
+	// pair with no pending window never had a tagged weekly window in this
+	// roster at all — a lone account whose peer exhaustion tags nobody, or a
+	// tagged window that was withheld or censored. Re-running changes nothing
+	// there.
 	//
 	// Per (tag, class), not per tag: a tag labelled in one servable class says
 	// nothing about the same tag in another, and taking the tag as labelled

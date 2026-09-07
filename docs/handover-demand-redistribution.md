@@ -41,16 +41,15 @@ still waiting on weekly windows the label horizon dropped: the report lists
 lists no cohort as structurally unlabelled. Pending and structurally
 unlabelled are separate statements in the report: a pending cohort had tagged
 weekly windows whose truth was still unfolding at the end of the replay
-interval, which a later `--to` can label, while a structurally unlabelled one
-has no usable, uncensored weekly record common to all models — because no
-tagged survivor existed (a lone account's peer exhaustion tags nobody, since
-the dying account is excluded from its own event), or every tagged prediction
-was withheld, or every tagged truth was censored — with nothing pending at the
-label horizon. All three here are the first kind: the Codex tier flips of
-2026-09-05 and the Codex-2 add of 2026-09-04 sit in weekly windows that reset
-2026-09-07 through 2026-09-12. The anthropic half of each of those tags is
-labelled, and counting per tag alone would have hidden the codex half behind
-it.
+interval, while a structurally unlabelled one has no usable, uncensored weekly
+record common to all models — because no tagged survivor existed (a lone
+account's peer exhaustion tags nobody, since the dying account is excluded from
+its own event), or every tagged prediction was withheld, or every tagged truth
+was censored — with nothing pending at the label horizon. All three here are
+the first kind: the Codex tier flips of 2026-09-05 and the Codex-2 add of
+2026-09-04 sit in weekly windows that reset 2026-09-07 through 2026-09-12. The
+anthropic half of each of those tags is labelled, and counting per tag alone
+would have hidden the codex half behind it.
 
 **Step 4 did not ship (2026-09-06 decision).** The mechanism it was going to
 correct for — the scenario double-counting a dead peer's demand because the
