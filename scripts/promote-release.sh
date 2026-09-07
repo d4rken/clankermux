@@ -61,26 +61,33 @@ SHA=$(git -C "$ROOT" rev-parse --verify "${TARGET}^{commit}" 2>/dev/null) ||
 RELEASE="$ROOT/.cache/releases/$SHA"
 RELEASES_DIR="$ROOT/.cache/releases"
 
+VERIFIED_FILE="$RELEASES_DIR/LAST_VERIFIED"
 CURRENT=$(show WorkingDirectory)
-CURRENT_SHA=""
-case "$CURRENT" in
-"$RELEASES_DIR"/*) CURRENT_SHA=$(basename "$CURRENT") ;;
-esac
-# A previous failed run may have left the pin pointing at the release being
-# promoted, which would make CURRENT a useless rollback target. The recorded
-# value from before that run is the one to trust.
-if [ -z "$CURRENT_SHA" ] || [ "$CURRENT_SHA" = "$SHA" ]; then
-	if [ -r "$RELEASES_DIR/PREVIOUS" ]; then
-		CURRENT_SHA=$(cat "$RELEASES_DIR/PREVIOUS")
-	fi
+
+# The rollback target is the last release that actually PASSED verification,
+# not whatever happens to be pinned. Those differ after a failed promotion:
+# the pin then names a release that did not come up, and recommending it as
+# the way back would send you to the broken one. The current pin is only the
+# fallback for the very first run, before any verified record exists.
+ROLLBACK=""
+if [ -r "$VERIFIED_FILE" ]; then
+	ROLLBACK=$(cat "$VERIFIED_FILE")
+fi
+if [ -z "$ROLLBACK" ]; then
+	case "$CURRENT" in
+	"$RELEASES_DIR"/?*) ROLLBACK=$(basename "$CURRENT") ;;
+	esac
+fi
+if [ "$ROLLBACK" = "$SHA" ]; then
+	ROLLBACK=""
 fi
 
 echo "Promoting $SHA"
 echo "  currently pinned: ${CURRENT:-<none — running the base unit>}"
-if [ -n "$CURRENT_SHA" ] && [ "$CURRENT_SHA" != "$SHA" ]; then
-	echo "  rollback:         scripts/promote-release.sh $CURRENT_SHA"
+if [ -n "$ROLLBACK" ]; then
+	echo "  rollback:         scripts/promote-release.sh $ROLLBACK"
 else
-	echo "  rollback:         no distinct previous release recorded"
+	echo "  rollback:         no distinct verified release on record"
 fi
 echo
 
@@ -134,9 +141,6 @@ ExecStartPre=$RELEASE/scripts/verify-deps.sh
 ExecStartPre=$BUN run build:db-workers:guarded
 ExecStartPre=-$BUN run build:dashboard:guarded
 EOF
-if [ -n "$CURRENT_SHA" ] && [ "$CURRENT_SHA" != "$SHA" ]; then
-	printf '%s\n' "$CURRENT_SHA" >"$RELEASES_DIR/PREVIOUS"
-fi
 sudo install -m 0644 -o root -g root "$CONF" "$DROPIN"
 sudo systemctl daemon-reload
 
@@ -200,22 +204,29 @@ done
 
 STATE=$(show ActiveState)
 SUB=$(show SubState)
-WD=$(show WorkingDirectory)
 INVOCATION_END=$(show InvocationID)
+# WorkingDirectory is the CONFIGURED pin and says nothing about the process
+# that is serving. The running process's own cwd does.
+MAINPID=$(show MainPID)
+RUNNING_WD=""
+if [ -n "$MAINPID" ] && [ "$MAINPID" != "0" ]; then
+	RUNNING_WD=$(readlink "/proc/$MAINPID/cwd" 2>/dev/null || true)
+fi
 # NRestarts counts AUTOMATIC restarts and is reset by an explicit restart, so
 # comparing across the restart is meaningless. Comparing across the settle
 # window is not: a climb there is a crashloop.
 RESTARTS_END=$(show NRestarts)
 
 echo "  state:        $STATE ($SUB)"
-echo "  workdir:      $WD"
+echo "  running cwd:  ${RUNNING_WD:-<unreadable>}"
 echo "  banner:       ${BANNER:-<none logged>}"
 echo "  NRestarts:    $RESTARTS_AT_START -> $RESTARTS_END (during settle)"
 echo "  http:         $CODE"
 
 [ "$STATE" = "active" ] || note_fail "unit is $STATE"
 [ "$SUB" = "running" ] || note_fail "unit sub-state is $SUB"
-[ "$WD" = "$RELEASE" ] || note_fail "workdir is not the new snapshot"
+[ "$RUNNING_WD" = "$RELEASE" ] ||
+	note_fail "the serving process runs from '${RUNNING_WD:-<unreadable>}', not $RELEASE"
 [ "$INVOCATION_END" = "$INVOCATION_AFTER" ] ||
 	note_fail "the unit restarted again during the settle window — it is crashlooping"
 [ "$RESTARTS_END" = "$RESTARTS_AT_START" ] ||
@@ -225,13 +236,17 @@ if [ "$FAIL" -ne 0 ]; then
 	echo >&2
 	echo "Promotion of $SHA did NOT verify. The pin is ALREADY switched to it," >&2
 	echo "so the next restart for any reason will use it. Roll back with:" >&2
-	if [ -n "$CURRENT_SHA" ] && [ "$CURRENT_SHA" != "$SHA" ]; then
-		echo "  scripts/promote-release.sh $CURRENT_SHA" >&2
+	if [ -n "$ROLLBACK" ]; then
+		echo "  scripts/promote-release.sh $ROLLBACK" >&2
 	else
 		echo "  scripts/promote-release.sh <a known-good sha>" >&2
 	fi
 	exit 1
 fi
+
+# Only a release that verified becomes the rollback target for the next
+# promotion, so a failed promotion never gets recommended as the way back.
+printf '%s\n' "$SHA" >"$VERIFIED_FILE"
 
 echo
 echo "Promoted $SHA (v$VERSION)."

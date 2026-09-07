@@ -31,7 +31,10 @@ set -e
 # the base unit says when the release drop-in is missing, and building and
 # restarting it is exactly what this script must never do. So require a release
 # snapshot by path.
-RELEASES=$(cd "$(dirname "$0")/.." && pwd)/.cache/releases
+# Resolve the MAIN checkout, not this copy of the script: run from a worktree,
+# `dirname $0`/.. would name that worktree's own .cache/releases and reject the
+# real production path. The common git dir is shared by every worktree.
+RELEASES=$(dirname "$(git -C "$(dirname "$0")/.." rev-parse --path-format=absolute --git-common-dir)")/.cache/releases
 TARGET=$(systemctl show clankermux -p WorkingDirectory --value)
 case "$TARGET" in
 "$RELEASES"/?*) ;;
