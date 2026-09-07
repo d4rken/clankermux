@@ -15,6 +15,7 @@ import {
 	OBSERVATION_AGE_BUCKETS,
 	OVERALL_BOOTSTRAP_LABEL,
 	observationLagChecks,
+	PEER_LOSS_PREFIX_MS,
 	pairedAbsMedian,
 	pairedSignedMedian,
 	prepareSeries,
@@ -36,8 +37,13 @@ import {
 	survivorSlopeTrajectory,
 	TRANSITION_BOOTSTRAP_LABEL,
 	type TransitionEvent,
+	tallyWindowFills,
 	transitionsAt,
 	type Verdict,
+	type WindowFill,
+	type WindowFillRow,
+	type WindowFillTally,
+	windowFillMetrics,
 } from "./redistribution-backtest";
 
 const MIN = 60_000;
@@ -1047,6 +1053,8 @@ const replayOf = (
 	placeholderWindowsSkipped: 0,
 	pendingWeeklyByTagClass: new Map(Object.entries(pendingWeekly)),
 	tagCoverage: [],
+	fills: [],
+	placeholderLifecyclesSkipped: 0,
 });
 
 describe("scoreCohorts", () => {
@@ -3250,5 +3258,525 @@ describe("the observation-lag report section", () => {
 		expect(markdown).toContain("| baseline |");
 		expect(markdown).not.toContain("undefined");
 		expect(markdown).not.toContain("NaN");
+	});
+});
+
+// ---------------------------------------------------------------------------
+// Absorption measurements: time to first 100 %
+// ---------------------------------------------------------------------------
+
+/** A five-hour window whose start is `reset - 5 h`, filling at `fillAt`. */
+const fiveHourRamp =
+	(start: number, reset: number, fillAt: number | null, cap = 99) =>
+	(t: number) => ({
+		pct:
+			fillAt != null && t >= fillAt
+				? 100
+				: Math.min(cap, Math.max(0, ((t - start) / HOUR) * 25)),
+		reset,
+	});
+
+const fillsFor = (
+	snapshotRows: RosterSnapshotRow[],
+	accounts: RosterAccount[],
+	range: ReplayRange,
+): ReplayResult => replayRange(snapshotRows, accounts, range, 6 * 60, 11);
+
+const rowOf = (
+	tally: WindowFillTally,
+	exposure: string,
+	window: WindowFillRow["window"],
+): WindowFillRow => {
+	const found = [...tally.prefixRows, ...tally.duringFillRows].find(
+		(entry) => entry.exposure === exposure && entry.window === window,
+	);
+	if (!found) throw new Error(`no row for ${exposure} / ${window}`);
+	return found;
+};
+
+/** One synthetic fill, filled at `+1 h` unless overridden. */
+const windowFill = (over: Partial<WindowFill> = {}): WindowFill => ({
+	accountId: "A",
+	demandClass: "anthropic",
+	windowKind: "five_hour",
+	lifecycleId: `A::five_hour::${T0}`,
+	windowStartMs: T0,
+	firstSampleMs: T0,
+	firstSampleUtilization: 0,
+	lastSampleMs: T0 + 4 * HOUR,
+	firstHundredMs: T0 + HOUR,
+	resolutionMs: 10 * MIN,
+	peerLostInPrefix: false,
+	peerLostDuringFill: false,
+	exposureObservable: true,
+	...over,
+});
+
+describe("window fills", () => {
+	test("the prefix is one hour on a five-hour window and 24 h on a weekly one", () => {
+		expect(PEER_LOSS_PREFIX_MS).toEqual({
+			five_hour: HOUR,
+			seven_day: 24 * HOUR,
+		});
+	});
+
+	test("measures from the derived window start, not the first sample", () => {
+		const reset = T0 + 5 * HOUR;
+		const snapshotRows = rows({
+			accountId: "A",
+			from: T0 + 40 * MIN,
+			to: T0 + 4 * HOUR,
+			stepMs: 10 * MIN,
+			fiveHour: fiveHourRamp(T0, reset, T0 + 3 * HOUR),
+		});
+		const { fills } = fillsFor(snapshotRows, [account("A")], {
+			label: "fill",
+			fromMs: T0 - DAY,
+			toMs: T0 + DAY,
+		});
+
+		expect(fills).toHaveLength(1);
+		const fill = fills[0];
+		expect(fill.windowStartMs).toBe(T0);
+		expect(fill.firstSampleMs).toBe(T0 + 40 * MIN);
+		expect(fill.firstHundredMs).toBe(T0 + 3 * HOUR);
+		expect(fill.resolutionMs).toBe(10 * MIN);
+
+		const metrics = windowFillMetrics(fill);
+		expect(metrics.fillDurationMs).toBe(3 * HOUR);
+		expect(metrics.observedSpanMs).toBe(3 * HOUR - 40 * MIN);
+		expect(metrics.unobservedHeadMs).toBe(40 * MIN);
+		// The 40 minutes of fill that happened before the first sample.
+		expect((metrics.fillDurationMs ?? 0) - (metrics.observedSpanMs ?? 0)).toBe(
+			40 * MIN,
+		);
+	});
+
+	test("a window that never reaches 100 % is censored, not dropped", () => {
+		const reset = T0 + 5 * HOUR;
+		const snapshotRows = rows({
+			accountId: "A",
+			from: T0,
+			to: T0 + 4 * HOUR,
+			stepMs: 10 * MIN,
+			fiveHour: fiveHourRamp(T0, reset, null, 80),
+		});
+		const { fills } = fillsFor(snapshotRows, [account("A")], {
+			label: "censored",
+			fromMs: T0 - DAY,
+			toMs: T0 + DAY,
+		});
+
+		expect(fills).toHaveLength(1);
+		expect(fills[0].firstHundredMs).toBeNull();
+		expect(windowFillMetrics(fills[0]).fillDurationMs).toBeNull();
+
+		const tally = tallyWindowFills(fills);
+		expect(tally.filled).toBe(0);
+		expect(tally.censored).toBe(1);
+		expect(rowOf(tally, "no peer lost in prefix", "five_hour").censored).toBe(
+			1,
+		);
+	});
+
+	test("a segment with no reset is counted apart from the fills", () => {
+		const reset = T0 + 5 * HOUR;
+		const snapshotRows = [
+			...rows({
+				accountId: "A",
+				from: T0,
+				to: T0 + 2 * HOUR,
+				stepMs: 10 * MIN,
+				fiveHour: () => ({ pct: 20, reset }),
+			}),
+			...rows({
+				accountId: "A",
+				from: T0 + 2 * HOUR + 10 * MIN,
+				to: T0 + 2 * HOUR + 30 * MIN,
+				stepMs: 10 * MIN,
+				fiveHour: () => ({ pct: 20, reset: null }),
+			}),
+		];
+		const { fills } = fillsFor(snapshotRows, [account("A")], {
+			label: "null-reset",
+			fromMs: T0 - DAY,
+			toMs: T0 + DAY,
+		});
+
+		expect(fills).toHaveLength(2);
+		expect(fills.filter((fill) => fill.windowStartMs == null)).toHaveLength(1);
+
+		const tally = tallyWindowFills(fills);
+		expect(tally.noResetOnSegment).toBe(1);
+		// The null-reset segment enters no arm: only the dated one is counted.
+		expect(tally.filled + tally.censored).toBe(1);
+	});
+
+	test("a first sample already at 100 % is counted apart from the fills", () => {
+		const snapshotRows = rows({
+			accountId: "A",
+			from: T0,
+			to: T0 + HOUR,
+			stepMs: 10 * MIN,
+			fiveHour: () => ({ pct: 100, reset: T0 + 5 * HOUR }),
+		});
+		const { fills } = fillsFor(snapshotRows, [account("A")], {
+			label: "already-full",
+			fromMs: T0 - DAY,
+			toMs: T0 + DAY,
+		});
+
+		expect(fills).toHaveLength(1);
+		expect(fills[0].firstSampleUtilization).toBe(100);
+
+		const tally = tallyWindowFills(fills);
+		expect(tally.firstSampleAlreadyFull).toBe(1);
+		expect(tally.filled + tally.censored).toBe(0);
+		expect(rowOf(tally, "no peer lost in prefix", "combined").fills).toBe(0);
+	});
+
+	test("placeholder lifecycles never appear", () => {
+		const snapshotRows = [
+			// Two samples, never above 0 %: a codex-style artefact, not a window.
+			...rows({
+				accountId: "A",
+				from: T0,
+				to: T0 + 10 * MIN,
+				stepMs: 10 * MIN,
+				fiveHour: () => ({ pct: 0, reset: T0 + 2 * HOUR }),
+			}),
+			...rows({
+				accountId: "A",
+				from: T0 + 20 * MIN,
+				to: T0 + 4 * HOUR,
+				stepMs: 10 * MIN,
+				fiveHour: fiveHourRamp(T0, T0 + 5 * HOUR, T0 + 3 * HOUR),
+			}),
+		];
+		const result = fillsFor(snapshotRows, [account("A")], {
+			label: "placeholder",
+			fromMs: T0 - DAY,
+			toMs: T0 + DAY,
+		});
+
+		expect(result.fills).toHaveLength(1);
+		expect(result.fills[0].lifecycleId).toBe(`A::five_hour::${T0 + 20 * MIN}`);
+		expect(result.placeholderLifecyclesSkipped).toBe(1);
+	});
+
+	test("segments on the reset boundary, so a jittered 5 h move splits", () => {
+		const firstReset = T0 + 5 * HOUR;
+		// Exactly one window later, with about a second of rollover jitter.
+		const secondReset = firstReset + 5 * HOUR + 1_000;
+		const snapshotRows = [
+			...rows({
+				accountId: "A",
+				from: T0,
+				to: T0 + 4 * HOUR + 50 * MIN,
+				stepMs: 10 * MIN,
+				fiveHour: fiveHourRamp(T0, firstReset, T0 + 3 * HOUR),
+			}),
+			...rows({
+				accountId: "A",
+				from: T0 + 5 * HOUR + 10 * MIN,
+				to: T0 + 9 * HOUR,
+				stepMs: 10 * MIN,
+				fiveHour: fiveHourRamp(
+					secondReset - 5 * HOUR,
+					secondReset,
+					T0 + 8 * HOUR,
+				),
+			}),
+		];
+		const { fills } = fillsFor(snapshotRows, [account("A")], {
+			label: "jitter",
+			fromMs: T0 - DAY,
+			toMs: T0 + DAY,
+		});
+
+		expect(fills).toHaveLength(2);
+		expect(fills.map((fill) => fill.firstHundredMs)).toEqual([
+			T0 + 3 * HOUR,
+			T0 + 8 * HOUR,
+		]);
+		expect(fills[1].windowStartMs).toBe(secondReset - 5 * HOUR);
+	});
+});
+
+describe("window fill peer exposure", () => {
+	/** A survivor filling at +4 h beside a peer that dies at `deathOffsetMs`. */
+	const peerFixture = (deathOffsetMs: number) => {
+		const reset = T0 + 5 * HOUR;
+		return {
+			rows: [
+				...rows({
+					accountId: "S",
+					from: T0,
+					to: T0 + 4 * HOUR + 50 * MIN,
+					stepMs: 10 * MIN,
+					fiveHour: fiveHourRamp(T0, reset, T0 + 4 * HOUR),
+				}),
+				...rows({
+					accountId: "P",
+					from: T0,
+					to: T0 + 4 * HOUR + 50 * MIN,
+					stepMs: 10 * MIN,
+					fiveHour: fiveHourRamp(T0, reset, T0 + deathOffsetMs),
+				}),
+			],
+			accounts: [account("S"), account("P")],
+			range: { label: "peer", fromMs: T0 - HOUR, toMs: T0 + DAY },
+		};
+	};
+
+	test("a peer death inside the fixed prefix sets peerLostInPrefix", () => {
+		const fixture = peerFixture(30 * MIN);
+		const { fills } = fillsFor(fixture.rows, fixture.accounts, fixture.range);
+		const survivor = fills.find((fill) => fill.accountId === "S");
+		expect(survivor?.peerLostInPrefix).toBe(true);
+		expect(survivor?.peerLostDuringFill).toBe(true);
+		expect(survivor?.exposureObservable).toBe(true);
+	});
+
+	test("a peer death past the prefix sets only peerLostDuringFill", () => {
+		const fixture = peerFixture(90 * MIN);
+		const { fills } = fillsFor(fixture.rows, fixture.accounts, fixture.range);
+		const survivor = fills.find((fill) => fill.accountId === "S");
+		expect(survivor?.peerLostInPrefix).toBe(false);
+		expect(survivor?.peerLostDuringFill).toBe(true);
+	});
+
+	test("an account's own death never sets its own exposure", () => {
+		const fixture = peerFixture(30 * MIN);
+		const { fills } = fillsFor(fixture.rows, fixture.accounts, fixture.range);
+		// P dies 30 min into its OWN window, which is inside its own prefix.
+		const dying = fills.find((fill) => fill.accountId === "P");
+		expect(dying?.firstHundredMs).toBe(T0 + 30 * MIN);
+		expect(dying?.peerLostInPrefix).toBe(false);
+		expect(dying?.peerLostDuringFill).toBe(false);
+	});
+
+	test("a peer's five-hour death sets the exposure on a weekly fill", () => {
+		const snapshotRows = [
+			...rows({
+				accountId: "S",
+				from: T0,
+				to: T0 + 6 * DAY,
+				stepMs: 6 * HOUR,
+				sevenDay: weekly(T0, 20),
+			}),
+			...rows({
+				accountId: "P",
+				from: T0,
+				to: T0 + 4 * HOUR,
+				stepMs: 10 * MIN,
+				fiveHour: fiveHourRamp(T0, T0 + 5 * HOUR, T0 + 3 * HOUR),
+			}),
+		];
+		const result = fillsFor(snapshotRows, [account("S"), account("P")], {
+			label: "cross-window",
+			fromMs: T0 - HOUR,
+			toMs: T0 + 8 * DAY,
+		});
+
+		const death = result.events.find(
+			(event) => event.kind === "peer-exhaustion" && event.accountId === "P",
+		);
+		expect(death?.windowKind).toBe("five_hour");
+
+		const weeklyFill = result.fills.find(
+			(fill) => fill.accountId === "S" && fill.windowKind === "seven_day",
+		);
+		expect(weeklyFill?.windowStartMs).toBe(T0);
+		expect(weeklyFill?.peerLostInPrefix).toBe(true);
+	});
+
+	test("a prefix that starts before the range enters neither arm", () => {
+		const reset = T0 + 5 * HOUR;
+		const snapshotRows = rows({
+			accountId: "A",
+			from: T0,
+			to: T0 + 4 * HOUR,
+			stepMs: 10 * MIN,
+			fiveHour: fiveHourRamp(T0, reset, T0 + 3 * HOUR),
+		});
+		// The window starts 10 min before the replay does, so a peer death in its
+		// prefix could not have been detected.
+		const { fills } = fillsFor(snapshotRows, [account("A")], {
+			label: "unobservable",
+			fromMs: T0 + 10 * MIN,
+			toMs: T0 + DAY,
+		});
+
+		expect(fills).toHaveLength(1);
+		expect(fills[0].exposureObservable).toBe(false);
+
+		const tally = tallyWindowFills(fills);
+		expect(rowOf(tally, "peer lost in prefix", "combined").fills).toBe(0);
+		expect(rowOf(tally, "no peer lost in prefix", "combined").fills).toBe(0);
+		expect(rowOf(tally, "exposure unobservable", "combined").fills).toBe(1);
+	});
+
+	test("the during-fill split is length-biased where the prefix split is not", () => {
+		const reset = T0 + 5 * HOUR;
+		const filler = (accountId: string, fillAt: number) =>
+			rows({
+				accountId,
+				from: T0,
+				to: T0 + 4 * HOUR + 50 * MIN,
+				stepMs: 10 * MIN,
+				fiveHour: fiveHourRamp(T0, reset, fillAt),
+			});
+		const snapshotRows = [
+			...filler("X", T0 + 60 * MIN),
+			...filler("Y", T0 + 240 * MIN),
+			...filler("Z", T0 + 120 * MIN),
+		];
+		const { fills } = fillsFor(
+			snapshotRows,
+			[account("X"), account("Y"), account("Z")],
+			{ label: "length-bias", fromMs: T0 - HOUR, toMs: T0 + DAY },
+		);
+
+		const shortFill = fills.find((fill) => fill.accountId === "X");
+		const longFill = fills.find((fill) => fill.accountId === "Y");
+		expect(shortFill?.firstHundredMs).toBe(T0 + 60 * MIN);
+		expect(longFill?.firstHundredMs).toBe(T0 + 240 * MIN);
+
+		// Z dies at +120 min: inside the long fill's calendar span and outside
+		// the short one's, purely because the long fill is longer.
+		expect(longFill?.peerLostDuringFill).toBe(true);
+		expect(shortFill?.peerLostDuringFill).toBe(false);
+		// The prefix is the same hour for both, and holds no peer death: X's own
+		// death lands exactly on the half-open boundary at +60 min.
+		expect(longFill?.peerLostInPrefix).toBe(false);
+		expect(shortFill?.peerLostInPrefix).toBe(false);
+	});
+});
+
+describe("tallyWindowFills", () => {
+	test("censoring moves the fill fraction, not the median over the filled", () => {
+		const filled = [
+			windowFill({ lifecycleId: "A::1", firstHundredMs: T0 + HOUR }),
+			windowFill({ lifecycleId: "A::2", firstHundredMs: T0 + 3 * HOUR }),
+		];
+		const censored = windowFill({
+			lifecycleId: "A::3",
+			firstHundredMs: null,
+			resolutionMs: null,
+			lastSampleMs: T0 + 4 * HOUR,
+		});
+
+		const withoutCensored = rowOf(
+			tallyWindowFills(filled),
+			"no peer lost in prefix",
+			"five_hour",
+		);
+		const withCensored = rowOf(
+			tallyWindowFills([...filled, censored]),
+			"no peer lost in prefix",
+			"five_hour",
+		);
+
+		expect(withoutCensored.censored).toBe(0);
+		expect(withCensored.censored).toBe(1);
+		expect(withoutCensored.fillFraction).toBe(1);
+		expect(withCensored.fillFraction).toBeCloseTo(2 / 3, 10);
+		expect(withCensored.medianFillHours).toBe(withoutCensored.medianFillHours);
+		expect(withCensored.medianFillHours).toBe(1);
+		expect(withCensored.medianCensoredSpanHours).toBe(4);
+	});
+
+	test("an empty cell carries counts and nulls rather than NaN", () => {
+		const tally = tallyWindowFills([]);
+		const cell = rowOf(tally, "peer lost in prefix", "seven_day");
+		expect(cell.fills).toBe(0);
+		expect(cell.censored).toBe(0);
+		expect(cell.fillFraction).toBeNull();
+		expect(cell.medianFillHours).toBeNull();
+		expect(cell.medianObservedSpanHours).toBeNull();
+		expect(cell.medianUnobservedHeadMinutes).toBeNull();
+		expect(cell.medianResolutionMinutes).toBeNull();
+		expect(cell.medianCensoredSpanHours).toBeNull();
+		expect(cell.fillDurationsHours).toEqual([]);
+	});
+});
+
+describe("the absorption measurements section", () => {
+	const absorptionReport = () => {
+		const fixture = pairFixture();
+		const range: ReplayRange = {
+			label: "test",
+			fromMs: T0,
+			toMs: T0 + 8 * DAY,
+		};
+		const result = replayRange(
+			fixture.rows,
+			fixture.accounts,
+			range,
+			6 * 60,
+			20260823,
+		);
+		return reportFor(result, fixture.rows);
+	};
+
+	test("emits the heading pair and prints no hole", () => {
+		const { markdown } = absorptionReport();
+		expect(markdown).toContain("## Absorption measurements");
+		expect(markdown).toContain("### Time to first 100 %");
+		expect(markdown).not.toContain("undefined");
+		expect(markdown).not.toContain("NaN");
+		// Between the bootstrap block and the observation-lag section. Anchored
+		// on the heading line, because the slope section names the section too.
+		const heading = markdown.indexOf("\n## Absorption measurements\n");
+		expect(heading).toBeGreaterThan(markdown.indexOf("### Bootstrap"));
+		expect(heading).toBeLessThan(
+			markdown.indexOf("## Observation-lag mechanism check"),
+		);
+		// The slope table points at the direct measurement of its own question.
+		expect(markdown).toContain(
+			"The direct, slope-free measurement of the same question",
+		);
+	});
+
+	test("renders an empty cell as a dash beside its counts", () => {
+		const { markdown } = absorptionReport();
+		// The fixture has weekly windows only, so every five-hour cell is empty.
+		expect(markdown).toContain(
+			"| peer lost in prefix | five_hour | 0 | 0 | — | — | — | — | — | — |",
+		);
+		expect(markdown).toContain("(0 fills): —");
+	});
+
+	test("states the censoring bias and the length bias", () => {
+		const { markdown } = absorptionReport();
+		expect(markdown).toContain(
+			"understates typical time-to-fill, and it understates it more in whichever cell censors more",
+		);
+		expect(markdown).toContain(
+			"length-biased in the direction of longer fills",
+		);
+		expect(markdown).toContain(
+			"equally consistent with absorption and with common cause",
+		);
+	});
+
+	test("reconciles every lifecycle it saw", () => {
+		const { markdown } = absorptionReport();
+		expect(markdown).toMatch(
+			/Reconciliation: \d+ filled \+ \d+ censored \+ \d+ with no reset on the segment \+ \d+ already full at the first sample \+ \d+ placeholder lifecycles skipped = \d+ window lifecycles\./,
+		);
+	});
+
+	test("names the sampled-crossing limit", () => {
+		const { cohorts, replay } = verdictFixture(VERDICT_BASE);
+		const limits = knownLimitsFor(
+			replay,
+			cohorts,
+			evaluateVerdict(cohorts, replay),
+		);
+		expect(limits.some((limit) => limit.includes("sampled crossing"))).toBe(
+			true,
+		);
 	});
 });

@@ -774,6 +774,341 @@ export function transitionsAt(
 }
 
 // ---------------------------------------------------------------------------
+// Window fills: time to first 100 %
+// ---------------------------------------------------------------------------
+
+/**
+ * How much of a window's start counts as its peer-loss exposure.
+ *
+ * A FIXED prefix, not "a peer died at some point during the fill". The naive
+ * definition is length-biased: a longer fill has more calendar time in which to
+ * contain a peer death, so conditioning on it pushes the peer-lost arm toward
+ * LONGER fills, which is the opposite of the direction absorption would move
+ * them and would make a null result uninterpretable. The prefix is a property
+ * of the window, decided before any duration is read.
+ *
+ * One hour of a five-hour window and 24 hours of a weekly one: the same
+ * fraction of each window, roughly, so neither kind's arm is defined over a
+ * wider slice of its own life than the other's.
+ */
+export const PEER_LOSS_PREFIX_MS: Record<BacktestWindowKind, number> = {
+	five_hour: HOUR_MS,
+	seven_day: 24 * HOUR_MS,
+};
+
+/**
+ * One window lifecycle's fill, read straight off the recorded samples.
+ *
+ * MEASUREMENT, not model: nothing here fits, projects or thresholds. It exists
+ * because {@link survivorSlopeTrajectory} answers the absorption question
+ * through fitted slopes and therefore cannot see absorption at all where the
+ * survivor was still learning when its peer died.
+ */
+export interface WindowFill {
+	accountId: string;
+	demandClass: string;
+	windowKind: BacktestWindowKind;
+	lifecycleId: string;
+	/** `computeWindowStartMs(labelResetAtMs, kind)`; null when the segment carries no reset. */
+	windowStartMs: number | null;
+	firstSampleMs: number;
+	firstSampleUtilization: number;
+	lastSampleMs: number;
+	/** First point in the lifecycle with utilization >= 100; null means censored. */
+	firstHundredMs: number | null;
+	/** `firstHundredMs` minus the sample before it: the resolution the crossing sits inside. */
+	resolutionMs: number | null;
+	peerLostInPrefix: boolean;
+	peerLostDuringFill: boolean;
+	exposureObservable: boolean;
+}
+
+export interface WindowFillScan {
+	fills: WindowFill[];
+	/** Placeholder lifecycles skipped, for the report's reconciliation. */
+	placeholderLifecyclesSkipped: number;
+}
+
+/**
+ * Every non-placeholder window lifecycle, with its fill and its peer-loss
+ * exposure.
+ *
+ * Iterates the lifecycles {@link prepareSeries} already segmented on
+ * `isResetBoundary`, so a reset that moves by a window length with a second of
+ * rollover jitter splits exactly where the truth labelling splits it. Grouping
+ * on the raw reset value instead would merge or split on jitter.
+ *
+ * The origin is the DERIVED window start, `reset - duration`: measuring from
+ * the first sample instead would silently drop however much of the fill
+ * happened before the sampler first saw the window.
+ */
+export function scanWindowFills(
+	series: ReadonlyMap<string, AccountSeries>,
+	events: readonly TransitionEvent[],
+	range: ReplayRange,
+): WindowFillScan {
+	const deaths = events.filter((event) => event.kind === "peer-exhaustion");
+	const fills: WindowFill[] = [];
+	let placeholderLifecyclesSkipped = 0;
+
+	for (const accountSeries of series.values()) {
+		const demandClass = servableClassFor(accountSeries.provider).classId;
+		for (const kind of WINDOW_KINDS) {
+			const window = accountSeries.windows[kind];
+			const prefixMs = PEER_LOSS_PREFIX_MS[kind];
+			for (const lifecycle of window.lifecycles) {
+				if (lifecycle.placeholder) {
+					placeholderLifecyclesSkipped++;
+					continue;
+				}
+				const windowStartMs =
+					lifecycle.labelResetAtMs == null
+						? null
+						: computeWindowStartMs(lifecycle.labelResetAtMs, kind);
+
+				let firstHundredMs: number | null = null;
+				let resolutionMs: number | null = null;
+				for (let i = lifecycle.startIndex; i <= lifecycle.endIndex; i++) {
+					if (window.points[i].utilization < 100) continue;
+					firstHundredMs = window.points[i].t;
+					resolutionMs =
+						i > lifecycle.startIndex
+							? window.points[i].t - window.points[i - 1].t
+							: null;
+					break;
+				}
+
+				const firstSampleMs = window.points[lifecycle.startIndex].t;
+				const lastSampleMs = window.points[lifecycle.endIndex].t;
+				// A peer death is a death of ANOTHER account of the same demand
+				// class, in EITHER of its windows: a five-hour death takes the peer
+				// out of routing and so bears on a survivor's weekly window too.
+				const peerDied = (fromMs: number, toMs: number): boolean =>
+					deaths.some(
+						(event) =>
+							event.demandClass === demandClass &&
+							event.accountId !== accountSeries.accountId &&
+							event.atMs >= fromMs &&
+							event.atMs < toMs,
+					);
+
+				fills.push({
+					accountId: accountSeries.accountId,
+					demandClass,
+					windowKind: kind,
+					lifecycleId: lifecycle.id,
+					windowStartMs,
+					firstSampleMs,
+					firstSampleUtilization:
+						window.points[lifecycle.startIndex].utilization,
+					lastSampleMs,
+					firstHundredMs,
+					resolutionMs,
+					peerLostInPrefix:
+						windowStartMs != null &&
+						peerDied(windowStartMs, windowStartMs + prefixMs),
+					peerLostDuringFill:
+						windowStartMs != null &&
+						peerDied(windowStartMs, firstHundredMs ?? lastSampleMs),
+					// `detectTransitions` only finds deaths inside `range`, so a
+					// prefix that reaches outside it would read as "no peer lost"
+					// purely from missing data.
+					exposureObservable:
+						windowStartMs != null &&
+						windowStartMs >= range.fromMs &&
+						windowStartMs + prefixMs <= range.toMs,
+				});
+			}
+		}
+	}
+
+	fills.sort(
+		(a, b) =>
+			a.firstSampleMs - b.firstSampleMs ||
+			a.lifecycleId.localeCompare(b.lifecycleId),
+	);
+	return { fills, placeholderLifecyclesSkipped };
+}
+
+export interface WindowFillMetrics {
+	/** From the derived window start to the crossing. */
+	fillDurationMs: number | null;
+	/** From the first sample to the crossing. */
+	observedSpanMs: number | null;
+	/** From the derived window start to the first sample. */
+	unobservedHeadMs: number | null;
+}
+
+/** The three durations a fill implies, derived rather than stored twice. */
+export function windowFillMetrics(fill: WindowFill): WindowFillMetrics {
+	const start = fill.windowStartMs;
+	const hundred = fill.firstHundredMs;
+	return {
+		fillDurationMs: start != null && hundred != null ? hundred - start : null,
+		observedSpanMs: hundred != null ? hundred - fill.firstSampleMs : null,
+		unobservedHeadMs: start != null ? fill.firstSampleMs - start : null,
+	};
+}
+
+export type WindowFillScope = BacktestWindowKind | "combined";
+
+const WINDOW_FILL_SCOPES: readonly WindowFillScope[] = [
+	"five_hour",
+	"seven_day",
+	"combined",
+];
+
+/** Fills below which a cell prints its raw durations instead of a median. */
+export const RAW_FILL_DURATION_LIMIT = 20;
+
+export interface WindowFillRow {
+	exposure: string;
+	window: WindowFillScope;
+	/** Windows of this cell that reached 100 %. */
+	fills: number;
+	/** Windows of this cell whose last sample was still below 100 %. */
+	censored: number;
+	fillFraction: number | null;
+	medianFillHours: number | null;
+	medianObservedSpanHours: number | null;
+	medianUnobservedHeadMinutes: number | null;
+	medianResolutionMinutes: number | null;
+	/** The one column over the CENSORED windows: window start to last sample. */
+	medianCensoredSpanHours: number | null;
+	/** Sorted, in hours; printed under the table below the raw-values limit. */
+	fillDurationsHours: number[];
+}
+
+export interface WindowFillTally {
+	/** The primary, fixed-prefix split, plus the unobservable-exposure row. */
+	prefixRows: WindowFillRow[];
+	/** The same rows split by the length-biased during-fill definition. */
+	duringFillRows: WindowFillRow[];
+	filled: number;
+	censored: number;
+	noResetOnSegment: number;
+	firstSampleAlreadyFull: number;
+}
+
+const HOURS = (ms: number): number => ms / HOUR_MS;
+const MINUTES = (ms: number): number => ms / MINUTE_MS;
+
+function windowFillRow(
+	exposure: string,
+	window: WindowFillScope,
+	members: readonly WindowFill[],
+): WindowFillRow {
+	const scoped =
+		window === "combined"
+			? members
+			: members.filter((fill) => fill.windowKind === window);
+	const filled = scoped.filter((fill) => fill.firstHundredMs != null);
+	const censored = scoped.filter((fill) => fill.firstHundredMs == null);
+	const metrics = filled.map((fill) => windowFillMetrics(fill));
+	const durations = metrics
+		.map((entry) => entry.fillDurationMs)
+		.filter((value): value is number => value != null);
+	const denominator = filled.length + censored.length;
+	return {
+		exposure,
+		window,
+		fills: filled.length,
+		censored: censored.length,
+		fillFraction: denominator > 0 ? filled.length / denominator : null,
+		medianFillHours: percentileOf(durations.map(HOURS), 0.5),
+		medianObservedSpanHours: percentileOf(
+			metrics
+				.map((entry) => entry.observedSpanMs)
+				.filter((value): value is number => value != null)
+				.map(HOURS),
+			0.5,
+		),
+		medianUnobservedHeadMinutes: percentileOf(
+			metrics
+				.map((entry) => entry.unobservedHeadMs)
+				.filter((value): value is number => value != null)
+				.map(MINUTES),
+			0.5,
+		),
+		medianResolutionMinutes: percentileOf(
+			filled
+				.map((fill) => fill.resolutionMs)
+				.filter((value): value is number => value != null)
+				.map(MINUTES),
+			0.5,
+		),
+		medianCensoredSpanHours: percentileOf(
+			censored
+				.map((fill) =>
+					fill.windowStartMs == null
+						? null
+						: fill.lastSampleMs - fill.windowStartMs,
+				)
+				.filter((value): value is number => value != null)
+				.map(HOURS),
+			0.5,
+		),
+		fillDurationsHours: durations.map(HOURS).sort((a, b) => a - b),
+	};
+}
+
+/**
+ * The report's cells, and the counts that reconcile them against every
+ * lifecycle scanned.
+ *
+ * Two populations are counted APART from the arms rather than folded into
+ * them: a segment carrying no reset has no derivable window start, and a
+ * lifecycle whose first sample already reads 100 % filled before observation
+ * began, which is not a fill duration at all. A third, the lifecycles whose
+ * exposure prefix reaches outside the replayed range, gets its own row.
+ */
+export function tallyWindowFills(
+	fills: readonly WindowFill[],
+): WindowFillTally {
+	const measurable = fills.filter(
+		(fill) => fill.windowStartMs != null && fill.firstSampleUtilization < 100,
+	);
+	const observable = measurable.filter((fill) => fill.exposureObservable);
+	const unobservable = measurable.filter((fill) => !fill.exposureObservable);
+	const rowsFor = (
+		exposure: string,
+		members: readonly WindowFill[],
+	): WindowFillRow[] =>
+		WINDOW_FILL_SCOPES.map((scope) => windowFillRow(exposure, scope, members));
+
+	return {
+		prefixRows: [
+			...rowsFor(
+				"peer lost in prefix",
+				observable.filter((fill) => fill.peerLostInPrefix),
+			),
+			...rowsFor(
+				"no peer lost in prefix",
+				observable.filter((fill) => !fill.peerLostInPrefix),
+			),
+			windowFillRow("exposure unobservable", "combined", unobservable),
+		],
+		duringFillRows: [
+			...rowsFor(
+				"peer lost during fill",
+				observable.filter((fill) => fill.peerLostDuringFill),
+			),
+			...rowsFor(
+				"no peer lost during fill",
+				observable.filter((fill) => !fill.peerLostDuringFill),
+			),
+		],
+		filled: measurable.filter((fill) => fill.firstHundredMs != null).length,
+		censored: measurable.filter((fill) => fill.firstHundredMs == null).length,
+		noResetOnSegment: fills.filter((fill) => fill.windowStartMs == null).length,
+		firstSampleAlreadyFull: fills.filter(
+			(fill) =>
+				fill.windowStartMs != null && fill.firstSampleUtilization >= 100,
+		).length,
+	};
+}
+
+// ---------------------------------------------------------------------------
 // Roster reconstruction
 // ---------------------------------------------------------------------------
 
@@ -1396,6 +1731,19 @@ export interface ReplayResult {
 		events: number;
 		instantFraction: number | null;
 	}>;
+	/**
+	 * Every non-placeholder window lifecycle's fill, from
+	 * {@link scanWindowFills}. Read by the absorption section only: no model,
+	 * cohort or verdict consumes it.
+	 */
+	fills: WindowFill[];
+	/**
+	 * Placeholder LIFECYCLES the fill scan skipped. Not
+	 * {@link ReplayResult.placeholderWindowsSkipped}, which counts per-instant
+	 * window emissions and so scales with the grid rather than with the
+	 * history.
+	 */
+	placeholderLifecyclesSkipped: number;
 }
 
 function truthTicksFor(
@@ -1448,6 +1796,7 @@ export function replayRange(
 ): ReplayResult {
 	const series = prepareSeries(rows, accounts);
 	const events = detectTransitions(series, accounts, range);
+	const fillScan = scanWindowFills(series, events, range);
 	const stepMs = stepMinutes * MINUTE_MS;
 
 	const ticks: number[] = [];
@@ -1663,6 +2012,8 @@ export function replayRange(
 					? (instantsWithTag.get(tag) ?? 0) / ticks.length
 					: null,
 		})),
+		fills: fillScan.fills,
+		placeholderLifecyclesSkipped: fillScan.placeholderLifecyclesSkipped,
 	};
 }
 
@@ -3248,6 +3599,10 @@ function slopeTrajectorySection(rows: readonly SlopeRatioRow[]): string[] {
 	);
 	out.push("");
 	out.push(
+		"The direct, slope-free measurement of the same question, how long a window takes to fill and whether that changes when the class lost a peer, is under `## Absorption measurements` below.",
+	);
+	out.push("");
+	out.push(
 		"| since death | lifecycles | median ratio | median slope (pct/h) | five_hour n | five_hour ratio | seven_day n | seven_day ratio |",
 	);
 	out.push("|---|---:|---:|---:|---:|---:|---:|---:|");
@@ -3259,6 +3614,87 @@ function slopeTrajectorySection(rows: readonly SlopeRatioRow[]): string[] {
 			`| ${row.label} | ${combined.lifecycles} | ${num(combined.medianRatio)} | ${num(combined.medianSlopePctPerHour, 2)} | ${five.lifecycles} | ${num(five.medianRatio)} | ${seven.lifecycles} | ${num(seven.medianRatio)} |`,
 		);
 	}
+	out.push("");
+	return out;
+}
+
+const FILL_TABLE_HEADER =
+	"| exposure | window | fills | censored | fill fraction | median fill (h) | median observed span (h) | median unobserved head (min) | median resolution (min) | median censored span (h) |";
+const FILL_TABLE_ALIGN = "|---|---|---:|---:|---:|---:|---:|---:|---:|---:|";
+
+const fillTableRow = (row: WindowFillRow): string =>
+	`| ${row.exposure} | ${row.window} | ${row.fills} | ${row.censored} | ${pct(row.fillFraction)} | ${num(row.medianFillHours, 2)} | ${num(row.medianObservedSpanHours, 2)} | ${num(row.medianUnobservedHeadMinutes, 1)} | ${num(row.medianResolutionMinutes, 1)} | ${num(row.medianCensoredSpanHours, 2)} |`;
+
+const fillDurationsLine = (row: WindowFillRow): string =>
+	`- \`${row.exposure}\` ${row.window} (${row.fills} fills): ${
+		row.fillDurationsHours.length > 0
+			? `${row.fillDurationsHours.map((hours) => hours.toFixed(2)).join(", ")} h`
+			: EM_DASH
+	}`;
+
+/** The slope-free measurement of what a window does when its class loses a peer. */
+function absorptionSection(replay: ReplayResult): string[] {
+	const tally = tallyWindowFills(replay.fills);
+	const out: string[] = [];
+
+	out.push("## Absorption measurements");
+	out.push("");
+	out.push(
+		"Direct measurements of what a survivor's own window does when its demand class loses a peer. Nothing here fits, tunes or thresholds anything, and nothing here feeds a model: each section states what it measures and over which population, and prints what falls out of that population. The populations are small, so an empty cell is ordinary rather than exceptional; an empty cell prints a dash beside its denominator.",
+	);
+	out.push("");
+
+	out.push("### Time to first 100 %");
+	out.push("");
+	out.push(
+		"How long a window took to reach its first reading at or above 100 %, measured from the window start its reset implies (`reset - window length`, the same derivation the projections use) to that reading. The population is every non-placeholder window lifecycle in the replayed snapshot history, both window kinds, every account the history holds, split by whether the account's demand class lost a peer early in the window. Early is a FIXED prefix of the window: its first hour for a five-hour window, its first 24 hours for a weekly one. A peer's death counts whichever of the peer's own windows filled, because an account at 100 % in either window leaves routing and its share of the class demand lands on the survivors.",
+	);
+	out.push("");
+	out.push(
+		"A median over only the windows that filled selects on the outcome: the windows that never filled are the slow ones, so this median understates typical time-to-fill, and it understates it more in whichever cell censors more. Compare the `censored` column before comparing medians.",
+	);
+	out.push("");
+	out.push(
+		"A peer dies because its class is busy, and the same busy period fills a survivor faster, so a shorter fill under peer loss is equally consistent with absorption and with common cause. This section is direct and slope-free; it is not causal.",
+	);
+	out.push("");
+	out.push(
+		"Three populations sit outside the two arms rather than inside them. A segment whose reset column is null carries no derivable window start, so it has no fill duration to state. A lifecycle whose first sample already reads 100 % filled before observation began, which is not a fill duration either. And a lifecycle whose prefix is not wholly inside the replayed range has its own row: peer deaths are only detected inside that range, so such a window would read as `no peer lost` from missing data alone. The reconciliation line below accounts for all of them.",
+	);
+	out.push("");
+	out.push(
+		"`fills` counts the windows of a cell that reached 100 %, `censored` the ones whose last sample was still below it. `median fill` runs from the derived window start, `median observed span` from the first sample instead, and `median unobserved head` is the gap between those two origins, i.e. how much of the window had already elapsed when the sampler first saw it. `median resolution` is the gap between the crossing sample and the sample before it. `median censored span` is the one column taken over the censored windows: window start to last sample.",
+	);
+	out.push("");
+	out.push(FILL_TABLE_HEADER);
+	out.push(FILL_TABLE_ALIGN);
+	for (const row of tally.prefixRows) out.push(fillTableRow(row));
+	out.push("");
+	out.push(
+		"The same rows again, split instead by whether a same-class peer died anywhere between the window start and the crossing. That definition is length-biased in the direction of longer fills, because a longer fill has more calendar time in which to contain a peer death, and that is why the fixed-prefix split above is the primary one. Both are printed; neither was chosen on its result.",
+	);
+	out.push("");
+	out.push(FILL_TABLE_HEADER);
+	out.push(FILL_TABLE_ALIGN);
+	for (const row of tally.duringFillRows) out.push(fillTableRow(row));
+	out.push("");
+	out.push(
+		`Every cell with fewer than ${RAW_FILL_DURATION_LIMIT} fills prints its fill durations, sorted, in hours. At that n a median is not a summary of anything, and the values themselves are what a reader can judge.`,
+	);
+	out.push("");
+	for (const row of [...tally.prefixRows, ...tally.duringFillRows]) {
+		if (row.fills < RAW_FILL_DURATION_LIMIT) out.push(fillDurationsLine(row));
+	}
+	out.push("");
+	const lifecycles =
+		tally.filled +
+		tally.censored +
+		tally.noResetOnSegment +
+		tally.firstSampleAlreadyFull +
+		replay.placeholderLifecyclesSkipped;
+	out.push(
+		`Reconciliation: ${tally.filled} filled + ${tally.censored} censored + ${tally.noResetOnSegment} with no reset on the segment + ${tally.firstSampleAlreadyFull} already full at the first sample + ${replay.placeholderLifecyclesSkipped} placeholder lifecycles skipped = ${lifecycles} window lifecycles.`,
+	);
 	out.push("");
 	return out;
 }
@@ -3582,6 +4018,8 @@ export function formatRedistributionReport(
 	}
 	out.push("");
 
+	out.push(...absorptionSection(replay));
+
 	out.push(...observationLagSection(observationLagChecks(replay, cohorts)));
 
 	out.push("## Prediction churn");
@@ -3774,6 +4212,7 @@ export function knownLimitsFor(
 		"IF a survivor's own lookback already contains the traffic it absorbed, the scenario would be adding that demand a second time. Whether it does is a hypothesis this replay reports on (the peer-exhaustion cohort and the survivor slope table) rather than a property these measurements establish; nothing here corrects for it.",
 		"The observation-lag advance never rewinds the scan clock below the instant being replayed: a window that fills inside its lag dies AT that instant, though the projection it records carries the true, earlier one. Any redistribution such a death causes therefore starts at the instant, not at the fill.",
 		"A reading whose row carries no `observed_at` and whose estimator is the now-anchored lifetime average has no derivable lag and is advanced by nothing. That is a real absence, not a measured zero, and the mechanism section reports those records under `unknown` rather than folding them into the fresh bucket.",
+		"The absorption section's first reading at or above 100 % is a sampled crossing, not the instant the window filled, so every fill duration there is an upper bound within the sample gap printed beside it in that section's `median resolution` column.",
 		"A regression fit that states no ETA — a flat or falling six-hour fit, which an idle account inside a live window produces — has no recoverable anchor either: the fit's anchor is back-solved from the ETA. Such a window is scheduled from the replayed instant in BOTH scans, which is pre-existing behaviour and not something the correction introduced, and the lag-population table counts those records apart from the lags it medians.",
 	];
 
