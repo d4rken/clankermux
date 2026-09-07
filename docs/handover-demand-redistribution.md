@@ -148,6 +148,25 @@ establish its absence. Any replacement
 share rule has to be declared before it is scored, scored against criteria A to
 D on the same backtest, and must not read its coefficients off these tables.
 
+**A candidate share rule is declared and scored (this branch):
+`scenario-proportional`.** Each alive account's share of its class's demand for
+a window kind is its own measured demand for that kind over the class's
+measured demand for that kind. It exists because the equal split discards an
+account's own burn from the FIRST instant: with five alive accounts, the
+account carrying 70 % of its class's traffic is assigned 20 % of the demand at
+`now`, before any account has died. The absorption section above measures the
+dying account's median pre-death share of its class at 67 % on requests and
+73.8 % on tokens, so who was carrying the traffic is not close to uniform. The
+rule has no coefficient and reads nothing off these tables: before any death it
+reproduces the current model exactly, because the demand it hands an account is
+the burn that account contributed, and at a death it moves the dead account's
+demand to the survivors in proportion to their own burn. It is scored on the
+current replay range against the same criteria A to D, under
+`## Share-rule candidate` in the report, with its identity with the current
+model checked in the replay. It is a candidate and nothing more: the verdict
+basis is still the pre-declared equal split, `VERDICT_RULE` is unchanged, and
+the verdict above is computed without it.
+
 Before acting on any verdict, re-run the reproduce command printed in
 `docs/prediction-backtest-redistribution.md` with a `--to` after 2026-09-13,
 once the pending weekly windows have completed, and re-read the verdict from
