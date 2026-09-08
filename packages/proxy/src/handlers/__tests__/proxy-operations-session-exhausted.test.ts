@@ -1,6 +1,18 @@
-import { afterEach, beforeEach, describe, expect, it, mock } from "bun:test";
+import {
+	afterEach,
+	beforeEach,
+	describe,
+	expect,
+	it,
+	mock,
+	setSystemTime,
+} from "bun:test";
 import { usageCache } from "@clankermux/providers";
 import type { Account, RequestMeta } from "@clankermux/types";
+import {
+	getFamilyWeeklyExhaustedUntil,
+	resetFamilyWeeklyMemoForTests,
+} from "../../family-weekly-memo";
 import { clearProviderOverloadCooldown } from "../../provider-overload-cooldown";
 import {
 	clearAnthropicBurstThrottle,
@@ -8,6 +20,17 @@ import {
 } from "../burst-cooldown";
 import { proxyWithAccount } from "../proxy-operations";
 import type { ProxyContext } from "../proxy-types";
+import {
+	getRateLimitProbeAdmission,
+	resetRateLimitProbeGatesForTests,
+} from "../rate-limit-cooldown";
+import { processProxyResponse } from "../response-processor";
+import {
+	QUOTA_INCIDENT_NOW as NOW,
+	quotaIncidentResponse,
+	QUOTA_INCIDENT_SESSION_RESET as SESSION_RESET,
+	QUOTA_INCIDENT_WEEKLY_RESET as WEEKLY_RESET,
+} from "./anthropic-quota-incident.fixture";
 
 /**
  * The account-wide exhaustion rung now covers EVERY window that sidelines the
@@ -141,6 +164,7 @@ type SaveRequestCall = Record<string, unknown>;
 
 function makeProxyContext() {
 	const saveRequestCalls: SaveRequestCall[] = [];
+	let persistedStreak = 0;
 	const markCalls: Array<{ id: string; until: number; reason: string }> = [];
 	const ctx = {
 		strategy: { getNextAccount: () => null } as never,
@@ -148,7 +172,7 @@ function makeProxyContext() {
 			markAccountRateLimited: mock(
 				(accountId: string, until: number, reason: string) => {
 					markCalls.push({ id: accountId, until, reason });
-					return Promise.resolve(1);
+					return Promise.resolve(++persistedStreak);
 				},
 			),
 			markAccountRateLimitedDeadlineOnly: mock(
@@ -239,7 +263,7 @@ async function run(
 	ctx: ProxyContext,
 	account: Account,
 	model = "claude-opus-4-8",
-	options?: { reprobe?: boolean },
+	options?: Parameters<typeof proxyWithAccount>[13],
 	requestHeaders: Record<string, string> = {},
 	meta: RequestMeta = makeRequestMeta(),
 ) {
@@ -399,5 +423,307 @@ describe("proxyWithAccount — account-wide session-exhausted 429", () => {
 		expect(reasons).toContain("family_weekly_exhausted_429");
 		// The family rung deliberately applies NO account-wide cooldown.
 		expect(account.rate_limited_until).toBeNull();
+	});
+});
+
+describe("live account-wide quota rejection with lagging usage", () => {
+	let originalFetch: typeof globalThis.fetch;
+	beforeEach(() => {
+		setSystemTime(new Date(NOW));
+		originalFetch = globalThis.fetch;
+		clearProviderOverloadCooldown();
+		clearAnthropicBurstThrottle();
+		resetFamilyWeeklyMemoForTests();
+		resetRateLimitProbeGatesForTests();
+		usageCache.setWithAgeForTests(
+			ACCOUNT_ID,
+			{
+				five_hour: {
+					utilization: 97,
+					resets_at: new Date(SESSION_RESET).toISOString(),
+				},
+				seven_day: {
+					utilization: 55,
+					resets_at: new Date(WEEKLY_RESET).toISOString(),
+				},
+				limits: [
+					{
+						kind: "weekly_scoped",
+						percent: 99,
+						resets_at: new Date(WEEKLY_RESET).toISOString(),
+						scope: { model: { display_name: "Claude Fable 5.1" } },
+					},
+				],
+			} as never,
+			92_000,
+		);
+	});
+	afterEach(() => {
+		globalThis.fetch = originalFetch;
+		setSystemTime();
+		usageCache.delete(ACCOUNT_ID);
+		clearProviderOverloadCooldown();
+		clearAnthropicBurstThrottle();
+		resetFamilyWeeklyMemoForTests();
+		resetRateLimitProbeGatesForTests();
+	});
+
+	it("replays Claude-1's mixed rejection with its actual session deadline and a recoverable cause", async () => {
+		globalThis.fetch = mock(async () => quotaIncidentResponse());
+		const { ctx, markCalls, saveRequestCalls } = makeProxyContext();
+		const account = makeOAuthAnthropicAccount();
+		const outcomes: string[] = [];
+		expect(
+			await run(ctx, account, "claude-fable-5-1", {
+				onOutcome: (o) => {
+					outcomes.push(o.kind);
+				},
+			}),
+		).toBeNull();
+		expect(markCalls).toEqual([
+			{ id: ACCOUNT_ID, until: SESSION_RESET, reason: "session_exhausted_429" },
+		]);
+		expect(reasonsFrom(saveRequestCalls)).toEqual(["session_exhausted_429"]);
+		expect(outcomes).toEqual(["hard_429"]);
+		expect(account.rate_limited_until).toBe(SESSION_RESET);
+		expect(account.consecutive_rate_limits).toBe(0);
+		expect(isAnthropicBurstThrottleActive()).toBe(false);
+		expect(getFamilyWeeklyExhaustedUntil(ACCOUNT_ID, "fable", NOW)).toBeNull();
+	});
+
+	it("honors live account quota with no usage cache and without an extra usage fetch", async () => {
+		usageCache.delete(ACCOUNT_ID);
+		globalThis.fetch = mock(async () => quotaIncidentResponse());
+		const { ctx, markCalls } = makeProxyContext();
+		await run(ctx, makeOAuthAnthropicAccount());
+		expect(globalThis.fetch).toHaveBeenCalledTimes(1);
+		expect(markCalls[0]).toEqual({
+			id: ACCOUNT_ID,
+			until: SESSION_RESET,
+			reason: "session_exhausted_429",
+		});
+	});
+
+	it("persists quota exhaustion discovered during a burst reprobe and ends the hold", async () => {
+		globalThis.fetch = mock(async () => quotaIncidentResponse());
+		const { ctx, markCalls } = makeProxyContext();
+		const outcomes: string[] = [];
+		const account = makeOAuthAnthropicAccount({
+			rate_limited_until: NOW + 60_000,
+		});
+		await run(ctx, account, "claude-fable-5-1", {
+			reprobe: true,
+			onOutcome: (o) => {
+				outcomes.push(o.kind);
+			},
+		});
+		expect(markCalls).toEqual([
+			{ id: ACCOUNT_ID, until: SESSION_RESET, reason: "session_exhausted_429" },
+		]);
+		expect(outcomes).toEqual(["hard_429"]);
+	});
+
+	it("stops model cycling when a fallback reveals account quota exhaustion", async () => {
+		let attempts = 0;
+		globalThis.fetch = mock(async () =>
+			++attempts === 1
+				? new Response(
+						'{"error":{"type":"not_found_error","message":"model not found"}}',
+						{ status: 404, headers: { "content-type": "application/json" } },
+					)
+				: quotaIncidentResponse(),
+		);
+		const account = makeOAuthAnthropicAccount({
+			model_mappings: JSON.stringify({
+				sonnet: ["claude-sonnet-4-5", "claude-fable-5-1", "claude-haiku-4-5"],
+			}),
+		});
+		const { ctx, markCalls, saveRequestCalls } = makeProxyContext();
+		await run(ctx, account, "claude-sonnet-4-5");
+		expect(attempts).toBe(2);
+		expect(markCalls).toEqual([
+			{ id: ACCOUNT_ID, until: SESSION_RESET, reason: "session_exhausted_429" },
+		]);
+		expect(reasonsFrom(saveRequestCalls)).toEqual(["session_exhausted_429"]);
+	});
+
+	it("uses the same claim deadline in generic response processing", async () => {
+		const { ctx, markCalls } = makeProxyContext();
+		const account = makeOAuthAnthropicAccount();
+		expect(
+			await processProxyResponse(
+				quotaIncidentResponse({ "content-type": "text/event-stream" }),
+				account,
+				ctx,
+			),
+		).toBe(true);
+		expect(markCalls).toEqual([
+			{ id: ACCOUNT_ID, until: SESSION_RESET, reason: "session_exhausted_429" },
+		]);
+		expect(isAnthropicBurstThrottleActive()).toBe(false);
+	});
+
+	it("keeps billing depletion ahead of live quota exhaustion", async () => {
+		globalThis.fetch = mock(async () =>
+			quotaIncidentResponse({
+				"anthropic-ratelimit-unified-overage-disabled-reason": "out_of_credits",
+			}),
+		);
+		const { ctx, markCalls } = makeProxyContext();
+		await run(ctx, makeOAuthAnthropicAccount());
+		expect(markCalls[0]?.reason).toBe("out_of_credits");
+	});
+
+	it("does not trust custom endpoint claims", async () => {
+		globalThis.fetch = mock(async () => quotaIncidentResponse());
+		const { ctx, markCalls } = makeProxyContext();
+		await run(
+			ctx,
+			makeOAuthAnthropicAccount({ custom_endpoint: "https://proxy.example" }),
+		);
+		expect(markCalls[0]?.reason).toBe("model_fallback_429");
+		expect(markCalls[0]?.until).toBe(NOW + 86_400_000);
+	});
+
+	it("preserves trusted keepalive exemptions while rejecting spoofed ones", async () => {
+		globalThis.fetch = mock(async () => quotaIncidentResponse());
+		const trusted = makeProxyContext();
+		await run(
+			trusted.ctx,
+			makeOAuthAnthropicAccount(),
+			"claude-fable-5-1",
+			undefined,
+			{ "x-clankermux-keepalive": "1" },
+			makeRequestMeta({ internal: true }),
+		);
+		expect(trusted.markCalls).toHaveLength(0);
+		const spoofed = makeProxyContext();
+		await run(
+			spoofed.ctx,
+			makeOAuthAnthropicAccount(),
+			"claude-fable-5-1",
+			undefined,
+			{ "x-clankermux-keepalive": "1" },
+		);
+		expect(spoofed.markCalls[0]?.reason).toBe("session_exhausted_429");
+	});
+
+	it("backs off repeated quota rejections with malformed resets instead of treating defaults as upstream deadlines", async () => {
+		globalThis.fetch = mock(async () =>
+			quotaIncidentResponse({
+				"anthropic-ratelimit-unified-5h-reset": "invalid",
+			}),
+		);
+		const { ctx, markCalls } = makeProxyContext();
+		const account = makeOAuthAnthropicAccount();
+		const deadlines: number[] = [];
+		for (const backoff of [
+			30_000, 60_000, 120_000, 240_000, 300_000, 300_000,
+		]) {
+			const now = Date.now();
+			await run(ctx, account, "claude-fable-5-1", {
+				onOutcome: (o) => {
+					if (o.kind === "hard_429" && o.cooldownUntil)
+						deadlines.push(o.cooldownUntil);
+				},
+			});
+			expect(account.rate_limited_until).toBe(now + backoff);
+			expect(account.rate_limited_reason).toBe("session_exhausted_429");
+			setSystemTime(new Date(now + backoff + 1));
+		}
+		expect(account.consecutive_rate_limits).toBe(6);
+		expect(deadlines).toEqual(markCalls.map((call) => call.until));
+		expect(isAnthropicBurstThrottleActive()).toBe(false);
+	});
+
+	it("classifies an internal auto-refresh quota rejection without writing a client request-history row", async () => {
+		globalThis.fetch = mock(async () => quotaIncidentResponse());
+		const { ctx, markCalls, saveRequestCalls } = makeProxyContext();
+		await run(
+			ctx,
+			makeOAuthAnthropicAccount(),
+			"claude-fable-5-1",
+			undefined,
+			{ "x-clankermux-auto-refresh": "true" },
+			makeRequestMeta({ internal: true }),
+		);
+		expect(markCalls).toEqual([
+			{ id: ACCOUNT_ID, until: SESSION_RESET, reason: "session_exhausted_429" },
+		]);
+		expect(saveRequestCalls).toHaveLength(0);
+	});
+
+	it("keeps a both-rejecting account locked after 5h resets while weekly remains exhausted", async () => {
+		globalThis.fetch = mock(async () =>
+			quotaIncidentResponse({
+				"anthropic-ratelimit-unified-7d-status": "rejected",
+				"anthropic-ratelimit-unified-7d-utilization": "1.0",
+			}),
+		);
+		const { ctx } = makeProxyContext();
+		const account = makeOAuthAnthropicAccount();
+		await run(ctx, account, "claude-fable-5-1");
+		expect(account.rate_limited_until).toBe(WEEKLY_RESET);
+		expect(account.rate_limited_reason).toBe("weekly_exhausted_429");
+		setSystemTime(new Date(SESSION_RESET + 1));
+		globalThis.fetch = mock(
+			async () =>
+				new Response(
+					JSON.stringify({
+						five_hour: { utilization: 0, resets_at: null },
+						seven_day: {
+							utilization: 100,
+							resets_at: new Date(WEEKLY_RESET).toISOString(),
+						},
+					}),
+					{ status: 200, headers: { "content-type": "application/json" } },
+				),
+		);
+		let recoveryReports = 0;
+		try {
+			usageCache.startPolling(
+				ACCOUNT_ID,
+				"token",
+				"anthropic",
+				3_600_000,
+				undefined,
+				undefined,
+				() => {
+					recoveryReports++;
+				},
+			);
+			expect(await usageCache.refreshNow(ACCOUNT_ID)).toBe(true);
+			expect(recoveryReports).toBe(0);
+			expect(account.rate_limited_until).toBe(WEEKLY_RESET);
+			expect(account.rate_limited_until).toBeGreaterThan(Date.now());
+		} finally {
+			usageCache.stopPolling(ACCOUNT_ID);
+		}
+	});
+
+	it("natural session expiry uses ordinary admission and can then discover a scoped-only rejection", async () => {
+		globalThis.fetch = mock(async () => quotaIncidentResponse());
+		const { ctx } = makeProxyContext();
+		const account = makeOAuthAnthropicAccount();
+		await run(ctx, account, "claude-fable-5-1");
+		setSystemTime(new Date(SESSION_RESET + 1));
+		account.expires_at = Date.now() + 3_600_000;
+		expect(account.rate_limited_until).toBeLessThan(Date.now());
+		expect(getRateLimitProbeAdmission(account)).toBe("not_required");
+		globalThis.fetch = mock(async () =>
+			quotaIncidentResponse({
+				"anthropic-ratelimit-unified-5h-status": "allowed",
+				"anthropic-ratelimit-unified-5h-utilization": "0.0",
+			}),
+		);
+		const next = makeProxyContext();
+		await run(next.ctx, account, "claude-fable-5-1");
+		expect(next.markCalls).toHaveLength(0);
+		expect(reasonsFrom(next.saveRequestCalls)).toEqual([
+			"family_weekly_exhausted_429",
+		]);
+		expect(getFamilyWeeklyExhaustedUntil(ACCOUNT_ID, "fable", Date.now())).toBe(
+			WEEKLY_RESET,
+		);
 	});
 });

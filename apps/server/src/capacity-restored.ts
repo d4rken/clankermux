@@ -83,7 +83,8 @@ export interface CapacityRestoredProbeMarker {
  * un-clears a lock — which is why the guards below are strict.
  *
  * REASON-GATED: only cooldowns that are QUOTA-DERIVED BY CONSTRUCTION may be
- * released here — the proxy read the very windows this evidence re-reads (see
+ * released here — the proxy observed the very windows this evidence re-reads,
+ * either in usage polling or explicit trusted 5h/7d response claims (see
  * `QUOTA_DERIVED_RATE_LIMIT_REASONS`). Everything else is refused, notably:
  *  - `out_of_credits`, an intentional billing floor that must expire on its own
  *    or clear on a real successful request. The account-wide representative

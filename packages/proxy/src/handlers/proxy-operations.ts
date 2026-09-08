@@ -58,6 +58,10 @@ import { captureRawUpstreamObservation } from "../raw-response-observations";
 import { RequestBodyContext } from "../request-body-context";
 import { forwardToClient } from "../response-handler";
 import { dispatchObservationSource } from "../should-record-request";
+import {
+	type AccountQuota429,
+	resolveLiveAccountQuota429,
+} from "./anthropic-account-quota";
 import { markAnthropicBurstThrottle } from "./burst-cooldown";
 // Direct leaf import (not via the `handlers` barrel, which re-exports this
 // module) — see the module comment.
@@ -1582,6 +1586,70 @@ export async function proxyWithAccount(
 			let requestedModel: string | null = null;
 			if (effectiveBodyBuffer) requestedModel = effectiveBodyContext.getModel();
 
+			// Shared side effects for cached and live quota evidence, including a
+			// quota rejection first seen on a model fallback.
+			const finishQuotaRejection = async (
+				response: Response,
+				quota: AccountQuota429,
+				model: string | null,
+				source: "claims" | "usage",
+			): Promise<Response | null> => {
+				const { reason } = quota;
+				applyRateLimitCooldown(account, quota, ctx);
+				// The helper sets this synchronously, including adaptive no-reset
+				// backoff. Outcomes must report the applied deadline, not a default.
+				const cooldownUntil = account.rate_limited_until as number;
+				// Persist the 429's unified-status header so the dashboard chip
+				// reflects the live value rather than the last success.
+				persistRateLimitStatusMeta(account, response, ctx, provider);
+				const responseTime = Date.now() - requestMeta.timestamp;
+				// Deliberate direct audit row (synthetic UUID id), NOT
+				// recorder-owned — mirrors the out_of_credits path.
+				// Auto-refresh primes can discover real quota depletion, but never
+				// create client request-history rows.
+				if (!isTrustedProbe("any")) {
+					ctx.asyncWriter.enqueue(() =>
+						ctx.dbOps.saveRequest({
+							id: crypto.randomUUID(),
+							method: req.method,
+							path: url.pathname,
+							accountUsed: account.id,
+							statusCode: 429,
+							success: false,
+							errorMessage: reason,
+							responseTime,
+							failoverAttempts,
+							usage: model ? { model } : undefined,
+							apiKeyId: apiKeyId ?? undefined,
+							apiKeyName: apiKeyName ?? undefined,
+							project: requestMeta.project ?? null,
+							projectAttributionSource:
+								requestMeta.projectAttributionSource ?? null,
+							comboName: requestMeta.comboName ?? null,
+							reasoningEffort: requestMeta.reasoningEffort ?? null,
+							sessionKey: requestMeta.sessionKey ?? null,
+							cachePrefixHashes: requestMeta.cachePrefixHashes ?? null,
+							// The ingress model needs its own column: the usage envelope carries the
+							// provider-reported model, while analytics that group by ingress model
+							// (the fallback model-pair table) read requested_model.
+							requestedModel: requestMeta.requestedModel ?? null,
+							// A retry that ends in a local rejection keeps its fallback mark: the
+							// row is still the redemption of a refusal, whatever happened next.
+							fallbackCreditClaimed:
+								requestMeta.fallbackCreditClaimed ?? undefined,
+							fallbackFromModel: requestMeta.fallbackFromModel ?? undefined,
+						}),
+					);
+				}
+				log.warn(
+					`Account ${account.name} ${quota.binding}-exhausted (429, evidence=${source}) — cooldown until ${new Date(cooldownUntil).toISOString()}, failing over (no burst-retry)`,
+				);
+				return await fail({ kind: "hard_429", cooldownUntil }, response);
+			};
+			const liveAccountQuota = !isTrustedProbe("keepalive")
+				? resolveLiveAccountQuota429(account, rawResponse)
+				: null;
+
 			// Live scoped rejection is newer than even a freshly polled snapshot.
 			// Resolve it before the reprobe shortcut as quota can run out mid-hold.
 			const liveScopedOnlyRejection =
@@ -1612,6 +1680,7 @@ export async function proxyWithAccount(
 			// never a transient burst worth re-probing.
 			if (
 				options?.reprobe &&
+				!liveAccountQuota &&
 				!liveScopedOnlyRejection &&
 				rawResponse.status === 429 &&
 				!isAnthropicOutOfCredits(rawResponse)
@@ -1746,6 +1815,18 @@ export async function proxyWithAccount(
 				);
 			}
 
+			// A current per-claim rejection already names the quota and its reset.
+			// Handle it before polling (even mid-hold): fresh cached headroom may
+			// lag depletion, and the summary may describe a different scoped claim.
+			if (liveAccountQuota) {
+				return await finishQuotaRejection(
+					rawResponse,
+					liveAccountQuota,
+					requestedModel,
+					"claims",
+				);
+			}
+
 			// ── One shared usage refresh for every 429 evidence rung ───────────
 			// The three rungs below — account-wide exhaustion, the family-weekly
 			// safety net, and the transparent burst-retry intercept — all decide
@@ -1798,7 +1879,7 @@ export async function proxyWithAccount(
 				await usageCache.refreshNow(account.id);
 			}
 
-			// ── Account-wide exhaustion: name the cause, skip the hold ─────────
+			// ── Cached account-wide exhaustion: fallback when live claims are absent ─────────
 			// A 429 on an Anthropic account whose ACCOUNT-WIDE window is already
 			// spent (per FRESH usage data) is not a transient burst: the window is
 			// spent right now, so holding and re-probing the account only burns
@@ -1813,11 +1894,9 @@ export async function proxyWithAccount(
 			// weekly window is spent this behaves exactly as it did when the block
 			// was weekly-only; the session-only case is the new behaviour.
 			//
-			// The cooldown DEADLINE is deliberately unchanged — the same
-			// `extractCooldownUntil` value every other path computes. Substituting
-			// the window's `resets_at` would let a stale-cache false positive, or a
-			// malformed far-future reset, create a multi-day lock. A false positive
-			// here costs a mislabelled reason and a skipped hold, nothing more.
+			// Cache-only classification retains its existing retry-after deadline.
+			// Explicit live 5h/7d rejections were handled above using those claims'
+			// own validated resets; a scoped summary cannot override them here.
 			//
 			// Fails open: with stale/absent usage every existing path behaves
 			// exactly as before. Anthropic only — Codex windows belong to
@@ -1861,53 +1940,16 @@ export async function proxyWithAccount(
 						account.id,
 						usageCache.getRateLimitedUntil.bind(usageCache),
 					);
-					applyRateLimitCooldown(
-						account,
-						{ resetTime: cooldownUntil, reason },
-						ctx,
+					return await finishQuotaRejection(
+						rawResponse,
+						{
+							binding: exhaustion.binding === "weekly" ? "weekly" : "session",
+							reason,
+							resetTime: cooldownUntil,
+						},
+						requestedModel,
+						"usage",
 					);
-					// Persist the 429's unified-status header so the dashboard chip
-					// reflects the live value rather than the last success.
-					persistRateLimitStatusMeta(account, rawResponse, ctx, provider);
-					const responseTime = Date.now() - requestMeta.timestamp;
-					// Deliberate direct audit row (synthetic UUID id), NOT
-					// recorder-owned — mirrors the out_of_credits path.
-					ctx.asyncWriter.enqueue(() =>
-						ctx.dbOps.saveRequest({
-							id: crypto.randomUUID(),
-							method: req.method,
-							path: url.pathname,
-							accountUsed: account.id,
-							statusCode: 429,
-							success: false,
-							errorMessage: reason,
-							responseTime,
-							failoverAttempts,
-							usage: requestedModel ? { model: requestedModel } : undefined,
-							apiKeyId: apiKeyId ?? undefined,
-							apiKeyName: apiKeyName ?? undefined,
-							project: requestMeta.project ?? null,
-							projectAttributionSource:
-								requestMeta.projectAttributionSource ?? null,
-							comboName: requestMeta.comboName ?? null,
-							reasoningEffort: requestMeta.reasoningEffort ?? null,
-							sessionKey: requestMeta.sessionKey ?? null,
-							cachePrefixHashes: requestMeta.cachePrefixHashes ?? null,
-							// The ingress model needs its own column: the usage envelope carries the
-							// provider-reported model, while analytics that group by ingress model
-							// (the fallback model-pair table) read requested_model.
-							requestedModel: requestMeta.requestedModel ?? null,
-							// A retry that ends in a local rejection keeps its fallback mark: the
-							// row is still the redemption of a refusal, whatever happened next.
-							fallbackCreditClaimed:
-								requestMeta.fallbackCreditClaimed ?? undefined,
-							fallbackFromModel: requestMeta.fallbackFromModel ?? undefined,
-						}),
-					);
-					log.warn(
-						`Account ${account.name} ${exhaustion.binding}-exhausted (429, ${exhaustion.binding} window spent until ${new Date(exhaustion.resetMs).toISOString()}) — cooldown until ${new Date(cooldownUntil).toISOString()}, failing over (no burst-retry)`,
-					);
-					return await fail({ kind: "hard_429", cooldownUntil }, rawResponse);
 				}
 			}
 
@@ -2469,6 +2511,17 @@ export async function proxyWithAccount(
 					discardUpstreamBody(rawResponse);
 					rawResponse = retryResponse;
 					liveUpstream = rawResponse;
+					const fallbackQuota = !isTrustedProbe("keepalive")
+						? resolveLiveAccountQuota429(account, rawResponse)
+						: null;
+					if (fallbackQuota) {
+						return await finishQuotaRejection(
+							rawResponse,
+							fallbackQuota,
+							nextModel,
+							"claims",
+						);
+					}
 
 					// Pass rawResponse directly (not a .clone()): the helper clones
 					// internally only when it must parse a 400/404 JSON body, and

@@ -32,8 +32,8 @@ Evidence source: `[ProxyOperations] Account X received 429 — headers: {...}`
 
 | Reason | Written when | Quota-derived? |
 |---|---|---|
-| `weekly_exhausted_429` | 429 + account-wide weekly ≥100% on fresh usage | **yes, by construction** |
-| `session_exhausted_429` | 429 + 5h session ≥100% on fresh usage (weekly not spent) | **yes, by construction** |
+| `weekly_exhausted_429` | 429 + fresh account-wide weekly ≥100%, or trusted rejecting 7d claim | **yes, by construction** |
+| `session_exhausted_429` | 429 + fresh 5h session ≥100%, or trusted rejecting 5h claim (weekly not binding) | **yes, by construction** |
 | `upstream_429_with_reset` | default whenever *any* `resetTime` exists | **NO** — see the trap below |
 | `model_fallback_429` | burst intercept **and** the no-fallback path | ambiguous |
 | `all_models_exhausted_429` | every fallback model 429'd | ambiguous |
@@ -49,13 +49,15 @@ Evidence source: `[ProxyOperations] Account X received 429 — headers: {...}`
 > this reason whenever a `resetTime` is present. A transient burst therefore
 > inherits it. Never treat it as quota provenance.
 
-**"Quota-derived by construction"** means the proxy READ the spent window itself
-(fresh usage data) instead of inferring the cause from headers. The set lives in
+**"Quota-derived by construction"** means the proxy observed the spent window
+itself: fresh usage data or explicit trusted 5h/7d rejection headers, never a
+summary reset/retry-after whose scope may be a model family. The set lives in
 `QUOTA_DERIVED_RATE_LIMIT_REASONS` (`packages/types/src/account.ts`) and is the
 ONLY set the capacity-restored path may release early — the evidence that clears
-such a cooldown is the same evidence that created it. Both members come from one
-rung in the 429 ladder, classified via `accountWideExhaustion` (weekly outranks
-session).
+such a cooldown is the same evidence that created it. Both members use the same
+window provenance: `accountWideExhaustion` for cache-only evidence or
+`resolveLiveAccountQuota429` for live claims. Weekly outranks session as the
+cause; live cooldowns wait for all rejecting account-wide claims to reset.
 
 **Adding a reason requires three follow-through sites** or it silently breaks:
 
