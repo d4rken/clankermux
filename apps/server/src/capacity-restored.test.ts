@@ -9,6 +9,11 @@ import {
 	rollbackCapacityRestoredProbePending,
 } from "@clankermux/proxy";
 import { RATE_LIMIT_REASONS } from "@clankermux/types";
+import { resolveLiveAccountQuota429 } from "../../../packages/proxy/src/handlers/anthropic-account-quota";
+import {
+	getRateLimitProbeAdmission,
+	resetRateLimitProbeGatesForTests,
+} from "../../../packages/proxy/src/handlers/rate-limit-cooldown";
 import {
 	type CapacityRestoredLogger,
 	type CapacityRestoredProbeMarker,
@@ -1158,4 +1163,74 @@ describe("clearRateLimitOnCapacityRestored — stranded paused account", () => {
 		expect(h.clearCalls).toHaveLength(1);
 		expect(h.stampCalls).toEqual([]);
 	});
+});
+
+it("live five-hour quota evidence uses guarded polling recovery and a single probe", async () => {
+	const account = makeAccount({
+		provider: "anthropic",
+		custom_endpoint: null,
+		consecutive_rate_limits: 0,
+	});
+	const decision = resolveLiveAccountQuota429(
+		account,
+		new Response(null, {
+			status: 429,
+			headers: {
+				"anthropic-ratelimit-unified-5h-status": "rejected",
+				"anthropic-ratelimit-unified-5h-reset": String(FUTURE / 1000),
+				"anthropic-ratelimit-unified-7d-status": "allowed",
+				"anthropic-ratelimit-unified-7d_oi-status": "rejected",
+				"anthropic-ratelimit-unified-reset": String(
+					(NOW + 5 * 86_400_000) / 1000,
+				),
+			},
+		}),
+		NOW,
+	);
+	expect(decision).not.toBeNull();
+	account.rate_limited_reason = decision?.reason;
+	account.rate_limited_until = decision?.resetTime;
+	const h = makeHarness(account);
+	resetRateLimitProbeGatesForTests();
+	const marker = {
+		markPending: markCapacityRestoredProbePending,
+		rollbackPending: rollbackCapacityRestoredProbePending,
+	};
+	try {
+		await clearRateLimitOnCapacityRestored(
+			h.dbOps,
+			h.logger,
+			evidence({ fetchStartedAt: AT }),
+			marker,
+			NOW,
+			h.warned,
+		);
+		expect(h.clearCalls).toHaveLength(0);
+		expect(hasCapacityRestoredProbePending(account.id)).toBe(false);
+		await clearRateLimitOnCapacityRestored(
+			h.dbOps,
+			h.logger,
+			evidence(),
+			marker,
+			NOW,
+			h.warned,
+		);
+		expect(h.clearCalls).toEqual([
+			{
+				accountId: account.id,
+				expectedUntil: FUTURE,
+				expectedAt: AT,
+				expectedReason: "session_exhausted_429",
+				fetchStartedAt: FETCH_STARTED_AT,
+			},
+		]);
+		expect(hasCapacityRestoredProbePending(account.id)).toBe(true);
+		// Model the DB compare-and-clear's resulting account snapshot.
+		account.rate_limited_until = null;
+		account.rate_limited_reason = null;
+		expect(getRateLimitProbeAdmission(account, NOW)).toBe("admitted");
+		expect(getRateLimitProbeAdmission(account, NOW)).toBe("suppressed");
+	} finally {
+		resetRateLimitProbeGatesForTests();
+	}
 });

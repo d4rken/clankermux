@@ -24,9 +24,10 @@ either when its cooldown expires, or when polling observes the quota recovered.
 `proxy-operations.ts`, in order:
 
 ```
-reprobe
+reprobe (transient only; live quota/credit depletion falls through)
   → out_of_credits            (long floor, no burst-retry)
-  → account-wide exhausted    (weekly OR 5h session spent; no burst-retry)
+  → live account-wide claims (trusted 5h/7d rejection; own claim resets)
+  → cached account-wide exhausted    (weekly OR 5h session spent; no burst-retry)
   → family-weekly safety net  (fails over WITHOUT an account-wide cooldown;
                                cache evidence first — with the cache UNAVAILABLE
                                it can read the 429's own scoped unified headers,
@@ -38,9 +39,15 @@ reprobe
 
 Earlier rungs are more specific and win. **Order is load-bearing** — the
 account-wide and family rungs sit before burst-retry precisely so a spent window
-is never misread as a transient burst. The account-wide rung's DEADLINE is still
-`extractCooldownUntil`, never the window's `resets_at`: a stale-cache false
-positive must not be able to create a multi-day lock.
+is never misread as a transient burst. Explicit trusted 5h/7d rejections outrank
+a lagging usage cache and use the latest valid reset of the rejecting account-wide
+claims, never the scoped summary retry-after. Invalid claim resets use adaptive
+backoff (30s up to 5min) under the same quota reason, not a synthetic
+server-directed deadline. Auto-refresh primes use the same live evidence while
+keeping their request-history suppression; keepalive cooldown exemptions remain. Cache-only exhaustion retains its
+existing `extractCooldownUntil` deadline. Model fallbacks and generic response
+processing use the same live-claim resolver; mixed rejection does not memoize a
+model family from an ambiguous scoped claim.
 
 `classify429Transient`:
 

@@ -128,8 +128,10 @@ export function isRateLimitReason(value: string): value is RateLimitReason {
 
 /**
  * The cooldown reasons that are QUOTA-DERIVED BY CONSTRUCTION: the proxy read
- * the account-wide window at >= 100% from fresh usage data itself, so the cause
- * is observed rather than inferred. Only these reasons may be released early by
+ * the account-wide window at >= 100% from fresh usage data, or an explicit
+ * rejecting 5h/7d claim on a trusted Anthropic 429. The cause is observed
+ * from that window itself, never inferred from a summary retry-after. Only these
+ * reasons may be released early by
  * the usage poller's capacity-restored path — the evidence that would clear them
  * (the same windows, now below 100%) is the exact evidence that created them.
  *

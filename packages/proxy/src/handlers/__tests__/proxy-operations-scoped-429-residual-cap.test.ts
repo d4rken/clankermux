@@ -391,7 +391,7 @@ describe("proxyWithAccount — residual rung 429 cooldown caps", () => {
 		expect((call as CooldownCall).until).toBe(INCIDENT_NOW + 51_811_000);
 	});
 
-	it("genuine account-wide 429 with an honest retry-after is honored verbatim", async () => {
+	it("account-wide rejection without a claim reset gets a short quota probe, not the summary retry-after", async () => {
 		globalThis.fetch = mock(async () =>
 			rl429({
 				"anthropic-ratelimit-unified-7d-status": "rejected",
@@ -406,10 +406,10 @@ describe("proxyWithAccount — residual rung 429 cooldown caps", () => {
 
 		expect(result).toBeNull();
 		const call = [...deadlineCalls, ...escalatingCalls].find(
-			(c) => c.reason === "model_fallback_429",
+			(c) => c.reason === "weekly_exhausted_429",
 		);
 		expect(call).toBeDefined();
-		expect((call as CooldownCall).until).toBe(INCIDENT_NOW + 3_600_000);
+		expect((call as CooldownCall).until).toBe(INCIDENT_NOW + 30_000);
 	});
 
 	it("headerless multi-day retry-after is bounded by the 24h ceiling", async () => {

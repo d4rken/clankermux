@@ -11,6 +11,7 @@ import {
 	usageCache,
 } from "@clankermux/providers";
 import type { Account, RateLimitReason, RequestMeta } from "@clankermux/types";
+import { resolveLiveAccountQuota429 } from "./anthropic-account-quota";
 import { markAnthropicBurstThrottle } from "./burst-cooldown";
 import { applyCodexObservation } from "./codex-observation";
 import type { ProxyContext } from "./proxy-types";
@@ -297,6 +298,7 @@ export async function processProxyResponse(
 		const isKeepalive =
 			requestMeta?.internal === true &&
 			requestMeta?.headers?.get("x-clankermux-keepalive") === "true";
+		const liveAccountQuota = resolveLiveAccountQuota429(account, response);
 		const scopedOnlyRejection =
 			response.status === 429 &&
 			account.provider === "anthropic" &&
@@ -313,6 +315,11 @@ export async function processProxyResponse(
 			log.warn(
 				`Keepalive replay for ${account.name} got ${response.status} — skipping cooldown (synthetic burst, not a real per-account rate limit)`,
 			);
+		} else if (liveAccountQuota) {
+			// Streaming-content-type and other generic 429 paths must use the
+			// same quota cause/deadline as the attempt loop, never the summary's
+			// scoped weekly reset under an unreleasable generic reason.
+			applyRateLimitCooldown(account, liveAccountQuota, ctx);
 		} else {
 			// Single entry point for both with-reset and no-reset paths.
 			// Derive a 529-specific reason override so the audit trail reflects
