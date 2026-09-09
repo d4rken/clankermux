@@ -560,11 +560,31 @@ describe("RequestRecorder — normal terminal end", () => {
 	it("marks the total as PROVIDER-basis when the provider reported the output", async () => {
 		const h = makeHarness();
 		h.recorder.begin(makeMeta());
-		h.recorder.attachUsageSummary("req-1", makeSummary());
+		h.recorder.attachUsageSummary(
+			"req-1",
+			makeSummary({ outputApproximate: false }),
+		);
 		h.recorder.finishTransport("req-1", "success");
 		await h.flush();
 
 		expect(h.emitted[0].totalTokensBasis).toBe("provider");
+	});
+
+	it("states NO basis when the summary never said where the total came from", async () => {
+		// `provider` is a claim about the upstream, and an absent flag is not
+		// evidence for it. The collector always states one or the other, so a
+		// summary without the flag came from somewhere that recorded nothing about
+		// provenance — publishing "the provider reported this" on the strength of
+		// a missing field is how a second producer would ship a false measurement
+		// with nothing to catch it.
+		const h = makeHarness();
+		h.recorder.begin(makeMeta());
+		h.recorder.attachUsageSummary("req-1", makeSummary());
+		h.recorder.finishTransport("req-1", "success");
+		await h.flush();
+
+		expect(h.emitted[0].totalTokens).toBe(165);
+		expect(h.emitted[0].totalTokensBasis).toBeUndefined();
 	});
 
 	it("marks the total as ESTIMATED when the output came from the char fallback", async () => {

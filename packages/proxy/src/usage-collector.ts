@@ -1113,7 +1113,11 @@ export async function finalizeUsage(
 		responseTimeMs: opts.responseTimeMs,
 		cacheCreationInputTokens: state.cacheCreationInputTokens,
 	};
-	if (outputApproximate) summary.outputApproximate = true;
+	// ALWAYS stated, true or false. A consumer reading provenance off the
+	// ABSENCE of this flag is reading "nobody said" as "the provider reported
+	// it", which is the more flattering of the two and wrong for any producer
+	// that simply does not set it.
+	summary.outputApproximate = outputApproximate;
 	if (speed?.approximate) summary.tokensPerSecondApproximate = true;
 	// Top-level, not inside `usage`: these describe how the response ENDED, not
 	// what it cost, and they persist to their own columns.

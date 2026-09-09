@@ -172,6 +172,13 @@ export interface SlimUsageSummary {
 	 * or when the stream did not end cleanly and the estimate exceeded the last
 	 * reported count.
 	 *
+	 * THREE-VALUED, and `false` is not the same fact as absent: the collector
+	 * always states one or the other, so `false` is a positive claim that the
+	 * provider reported the count, while an absent flag means nothing was
+	 * recorded about provenance (a summary that never went through the collector,
+	 * a row read back from the database). Downstream publishes the absence as
+	 * absence rather than assuming the flattering half.
+	 *
 	 * Part of the summary rather than a return-value extra because it travels
 	 * with the number it qualifies: a consumer holding the total and not this is
 	 * holding an estimate that looks measured.
@@ -1234,10 +1241,18 @@ export class RequestRecorder {
 			// behind in the summary. Only stated when there is a total to qualify;
 			// a consumer holding the number and not this one is holding an estimate
 			// that looks measured.
+			//
+			// Three-valued, and the third value is the point: `false` means the
+			// provider reported the output, `true` means the collector estimated
+			// it, and an ABSENT flag means nobody said. Reading absence as
+			// "provider" would publish a measured provenance on the strength of a
+			// missing field — true of today's only producer, and silently false for
+			// the next one or for any path that drops the flag.
 			totalTokensBasis:
-				usage?.totalTokens === undefined
+				usage?.totalTokens === undefined ||
+				summary?.outputApproximate === undefined
 					? undefined
-					: summary?.outputApproximate === true
+					: summary.outputApproximate
 						? "estimated"
 						: "provider",
 			inputTokens: usage?.inputTokens,
