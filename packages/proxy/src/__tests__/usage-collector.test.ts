@@ -598,6 +598,70 @@ describe("usage-collector", () => {
 			expect(cost.calls[0].tokens.outputTokens).toBe(10);
 			expect(summary.usage.totalTokens).toBe(110);
 		});
+
+		it("leaves the cost ABSENT when the model could not be priced", async () => {
+			// `estimateCostUSD` reports a lookup failure as null. Carrying that
+			// through as 0 is what published "we could not price it" as "this was
+			// free", all the way onto the unauthenticated stream.
+			const state = createUsageState();
+			feedChunk(
+				state,
+				sse("message_start", {
+					type: "message_start",
+					message: {
+						model: "some-unpriced-model",
+						usage: { input_tokens: 100, output_tokens: 0 },
+					},
+				}),
+				1000,
+			);
+			feedChunk(
+				state,
+				sse("message_delta", {
+					type: "message_delta",
+					usage: { output_tokens: 10 },
+				}),
+				1100,
+			);
+
+			const summary = await finalizeUsage(
+				state,
+				{ responseTimeMs: 1000, providerName: "anthropic", isStream: true },
+				{ estimateCostUSD: async () => null },
+			);
+
+			expect(summary.usage.costUsd).toBeUndefined();
+			// …and absent once serialized, which is what the recorder persists and
+			// what the stream publishes.
+			expect(JSON.parse(JSON.stringify(summary.usage))).not.toHaveProperty(
+				"costUsd",
+			);
+			// The tokens are still measured — only the price is unknown.
+			expect(summary.usage.totalTokens).toBe(110);
+		});
+
+		it("keeps a genuine zero, which is a measurement rather than a gap", async () => {
+			const state = createUsageState();
+			feedChunk(
+				state,
+				sse("message_start", {
+					type: "message_start",
+					message: {
+						model: "claude-opus-4-8",
+						usage: { input_tokens: 0, output_tokens: 0 },
+					},
+				}),
+				1000,
+			);
+
+			const summary = await finalizeUsage(
+				state,
+				{ responseTimeMs: 1000, providerName: "anthropic", isStream: true },
+				{ estimateCostUSD: async () => 0 },
+			);
+
+			expect(summary.usage.costUsd).toBe(0);
+		});
 	});
 
 	// The collector is the ONE call site that opts into pricing-gap reporting: it

@@ -259,6 +259,13 @@ export interface RequestResponse {
 	cacheReadInputTokens?: number;
 	cacheCreationInputTokens?: number;
 	outputTokens?: number;
+	/**
+	 * Catalogue-based ESTIMATE in USD, absent when the model could not be priced.
+	 *
+	 * Absence is a distinct fact from zero and is preserved as such all the way to
+	 * the wire: a request whose model is missing from the pricing catalogue has no
+	 * cost here, while a request that consumed no metered tokens has 0.
+	 */
 	costUsd?: number;
 	tokensPerSecond?: number;
 	// True when tokensPerSecond is the total-duration fallback (rendered with a

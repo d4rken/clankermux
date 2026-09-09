@@ -1062,7 +1062,13 @@ export async function finalizeUsage(
 	// pricing-gap reporting. It owns the `cost_usd` that is actually persisted (a
 	// failure here is what stores NULL) and runs exactly once per recorded
 	// request, with the real account provider attached.
-	const costUsd =
+	//
+	// ABSENT, never zero, when it could not be priced. `estimateCostUSD` reports
+	// a lookup failure as null and this carries that absence forward as an absent
+	// field — a request nobody could price is not a free request, and downstream
+	// (the live-activity stream above all) has no way back to the distinction
+	// once a failure has been published as the number 0.
+	const estimated =
 		model !== undefined
 			? await estimateCostUSD(
 					model,
@@ -1077,7 +1083,8 @@ export async function finalizeUsage(
 						reportGaps: true,
 					},
 				)
-			: undefined;
+			: null;
+	const costUsd = estimated ?? undefined;
 
 	const speed = computeTokensPerSecond(state, finalOutput, opts);
 

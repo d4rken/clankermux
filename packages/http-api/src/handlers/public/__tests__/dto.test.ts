@@ -1995,6 +1995,20 @@ describe("request.done normalizes the internal summary", () => {
 		expect(dto.costUsd).toBeNull();
 	});
 
+	it("distinguishes an unpriced request from a free one", () => {
+		// The pricing lookup reports a failure as an ABSENT cost, and this surface
+		// publishes that absence. A measured zero — a request that consumed no
+		// metered tokens — stays 0, and the two are now different values on the
+		// wire instead of both being 0.
+		expect(
+			toPublicRequestDoneDto(summary({ costUsd: undefined }), 0).costUsd,
+		).toBeNull();
+		expect(toPublicRequestDoneDto(summary({ costUsd: 0 }), 0).costUsd).toBe(0);
+		expect(toPublicRequestDoneDto(summary({ costUsd: 0.42 }), 0).costUsd).toBe(
+			0.42,
+		);
+	});
+
 	it("keeps responseTimeMs a NUMBER — it is a duration, not an instant", () => {
 		expect(typeof toPublicRequestDoneDto(summary(), 0).responseTimeMs).toBe(
 			"number",

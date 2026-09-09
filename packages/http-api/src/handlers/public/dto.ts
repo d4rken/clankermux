@@ -1285,6 +1285,19 @@ export interface PublicRequestDoneDto {
 	model: string | null;
 	project: string | null;
 	totalTokens: number | null;
+	/**
+	 * What this request is ESTIMATED to have cost, in USD, from the pricing
+	 * catalogue — not the operator's subscription charge. Most accounts here are
+	 * flat-rate plans, where the true marginal cost of a request is nothing like
+	 * this figure; what it answers is "how much would this have cost at list
+	 * price", which is what makes two requests comparable.
+	 *
+	 * NULL means UNPRICED — the model is missing from the catalogue, or its entry
+	 * has no rate for a bucket this request used. A number always means measured,
+	 * so `0` is a request that consumed no metered tokens. The deployed shape
+	 * published a failed lookup as `0`, and no consumer could tell a free request
+	 * from an unpriceable one.
+	 */
 	costUsd: number | null;
 	errorMessage: string | null;
 }

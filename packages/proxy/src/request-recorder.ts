@@ -148,6 +148,14 @@ export interface SlimUsageSummary {
 		cacheReadInputTokens?: number;
 		cacheCreationInputTokens?: number;
 		totalTokens?: number;
+		/**
+		 * The catalogue estimate for this request, ABSENT when the model could not
+		 * be priced. Never 0 for a failed lookup: `estimateCostUSD` reports that as
+		 * null and the collector carries the absence, because "this was free" and
+		 * "we could not price it" are different facts and every consumer of this
+		 * summary — the persisted row, the dashboard, the public stream — would
+		 * otherwise read the second as the first.
+		 */
 		costUsd?: number;
 	};
 	tokensPerSecond?: number;
