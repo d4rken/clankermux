@@ -25,6 +25,7 @@ import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import type { Config } from "@clankermux/config";
 import type { DatabaseOperations } from "@clankermux/database";
 import { BunSqlAdapter, ensureSchema } from "@clankermux/database";
+import { LeastUsedStrategy } from "@clankermux/load-balancer";
 import { USAGE_CACHE_TTL_MS, usageCache } from "@clankermux/providers";
 import {
 	applyProviderOverloadCooldown,
@@ -1095,6 +1096,66 @@ describe("pool rollup", () => {
 		expect(snapshot.pool.nextAvailableAtMs).toBeNull();
 	});
 
+	it("leaves a healthy account's stored reset out of the pool's recovery", async () => {
+		// The regression: the account is fine — a soft provider status beside a
+		// window that resets tomorrow — and the ONLY thing holding it is a
+		// two-minute provider overload. Folding its own instant in because
+		// something else was holding it published `/status` as recovering
+		// tomorrow while `defaultRoutable` was zero, which any widget renders as a
+		// day-long outage.
+		//
+		// Real-clock based: the overload breaker stamps its deadline from
+		// `Date.now()`, so the whole case is anchored to the same clock.
+		const base = Date.now();
+		insertAccount({
+			rate_limit_status: "allowed",
+			rate_limit_reset: base + 86_400_000,
+			expires_at: base + 3_600_000,
+		});
+		usageCache.set("acct-1", {
+			five_hour: {
+				utilization: 10,
+				resets_at: new Date(base + 3_600_000).toISOString(),
+			},
+			seven_day: {
+				utilization: 20,
+				resets_at: new Date(base + 5 * 86_400_000).toISOString(),
+			},
+		} as AnthropicUsageData);
+		const until = applyProviderOverloadCooldown("anthropic", base + 120_000);
+
+		const snapshot = await read(fakeStrategy(), fakeConfig, base);
+
+		expect(snapshot.accounts[0]?.cause).toBe("allowed");
+		// The account still publishes its own quota instant; what changes is that
+		// the pool does not mistake it for a block.
+		expect(snapshot.accounts[0]?.availableAtMs).toBe(base + 86_400_000);
+		expect(snapshot.pool.defaultRoutable).toBe(0);
+		expect(snapshot.pool.nextAvailableAtMs).toBe(until);
+	});
+
+	it("waits for a COOLING account's other gate, which no ranking would show", async () => {
+		// The real `LeastUsedStrategy` drops an account that is cooling down, so
+		// the candidate evaluation never evaluates its gates and its exclusions
+		// cannot mention it. Reading the gates off that evaluation left the pool
+		// promising recovery in one minute for an account the provider-wide
+		// breaker holds for three. A stub that ranked cooling accounts would not
+		// reproduce it, so this uses the strategy the proxy actually runs.
+		const base = Date.now();
+		insertAccount({
+			rate_limited_until: base + 60_000,
+			expires_at: base + 3_600_000,
+		});
+		const until = applyProviderOverloadCooldown("anthropic", base + 180_000);
+
+		const snapshot = await read(new LeastUsedStrategy(), fakeConfig, base);
+
+		expect(snapshot.accounts[0]?.cause).toBe("rate_limited");
+		expect(snapshot.accounts[0]?.availableAtMs).toBe(base + 60_000);
+		expect(snapshot.pool.defaultRoutable).toBe(0);
+		expect(snapshot.pool.nextAvailableAtMs).toBe(until);
+	});
+
 	it("reports the breaker's deadline when only a provider overload emptied the pool", async () => {
 		// `defaultRoutable: 0` beside a null recovery is what a client renders as
 		// `unhealthy`. An overloaded provider has a known deadline, so the honest
@@ -1244,10 +1305,10 @@ describe("earliestPoolRecoveryMs", () => {
 		over: Partial<Parameters<typeof earliestPoolRecoveryMs>[0][number]> = {},
 	) {
 		return {
+			cause: "ok",
 			paused: false,
 			cooldownLockMs: null,
-			usageExhausted: false,
-			availableAtMs: null,
+			causeResetMs: null,
 			gateRecoveryMs: null,
 			...over,
 		};
@@ -1262,17 +1323,51 @@ describe("earliestPoolRecoveryMs", () => {
 		// account is routable NOW, so that instant is a quota fact and not a
 		// recovery the pool is waiting for.
 		expect(
-			earliestPoolRecoveryMs([holds({ availableAtMs: 1_700_000_000_000 })]),
+			earliestPoolRecoveryMs([
+				holds({ cause: "allowed", causeResetMs: 1_700_000_000_000 }),
+			]),
 		).toBeNull();
+	});
+
+	it("leaves a NON-BLOCKING window reset out of a gated account's recovery", () => {
+		// The regression this rule exists for: a healthy account carrying a reset
+		// a day out, held for two minutes by the provider-wide overload breaker.
+		// Reaching for the account's own instant because SOMETHING is holding it
+		// published the pool as recovering tomorrow — the reset binds nothing,
+		// and the only hold in force lifts in two minutes.
+		expect(
+			earliestPoolRecoveryMs([
+				holds({
+					cause: "allowed",
+					causeResetMs: 1_700_086_400_000,
+					gateRecoveryMs: 1_700_000_120_000,
+				}),
+			]),
+		).toBe(1_700_000_120_000);
+	});
+
+	it("keeps the reset when the cause DOES block", () => {
+		// The mirror image, and why the cause is read rather than ignored: a spent
+		// window resetting tomorrow outlasts the two-minute gate, and the account
+		// is not back until it turns over.
+		expect(
+			earliestPoolRecoveryMs([
+				holds({
+					cause: "usage_exhausted",
+					causeResetMs: 1_700_086_400_000,
+					gateRecoveryMs: 1_700_000_120_000,
+				}),
+			]),
+		).toBe(1_700_086_400_000);
 	});
 
 	it("takes the LATEST hold within one account", () => {
 		expect(
 			earliestPoolRecoveryMs([
 				holds({
+					cause: "usage_exhausted",
 					cooldownLockMs: 1_000,
-					usageExhausted: true,
-					availableAtMs: 5_000,
+					causeResetMs: 5_000,
 					gateRecoveryMs: 3_000,
 				}),
 			]),
@@ -1283,8 +1378,9 @@ describe("earliestPoolRecoveryMs", () => {
 		expect(
 			earliestPoolRecoveryMs([
 				holds({
+					cause: "rate_limited",
 					cooldownLockMs: 1_000,
-					availableAtMs: 1_000,
+					causeResetMs: 1_000,
 					gateRecoveryMs: 9_000,
 				}),
 			]),
@@ -1294,8 +1390,16 @@ describe("earliestPoolRecoveryMs", () => {
 	it("takes the EARLIEST across accounts once each is resolved", () => {
 		expect(
 			earliestPoolRecoveryMs([
-				holds({ cooldownLockMs: 8_000, availableAtMs: 8_000 }),
-				holds({ cooldownLockMs: 2_000, availableAtMs: 2_000 }),
+				holds({
+					cause: "rate_limited",
+					cooldownLockMs: 8_000,
+					causeResetMs: 8_000,
+				}),
+				holds({
+					cause: "rate_limited",
+					cooldownLockMs: 2_000,
+					causeResetMs: 2_000,
+				}),
 			]),
 		).toBe(2_000);
 	});
@@ -1305,7 +1409,12 @@ describe("earliestPoolRecoveryMs", () => {
 		// happens to carry says nothing about when this account comes back.
 		expect(
 			earliestPoolRecoveryMs([
-				holds({ paused: true, cooldownLockMs: 1_000, availableAtMs: 1_000 }),
+				holds({
+					cause: "rate_limited",
+					paused: true,
+					cooldownLockMs: 1_000,
+					causeResetMs: 1_000,
+				}),
 			]),
 		).toBeNull();
 	});
@@ -1315,16 +1424,32 @@ describe("earliestPoolRecoveryMs", () => {
 		// pool learns nothing from it; the honest answer is that this account
 		// contributes no deadline, not that it recovers at once.
 		expect(
-			earliestPoolRecoveryMs([holds({ usageExhausted: true })]),
+			earliestPoolRecoveryMs([holds({ cause: "usage_exhausted" })]),
+		).toBeNull();
+	});
+
+	it("keeps an undateable hold indefinite even beside a timed one", () => {
+		// A spent window whose reset nobody reported, plus a routing gate lifting
+		// in three seconds. The gate is not what is holding this account back, so
+		// letting it answer for the account would publish a recovery at a moment
+		// the exhaustion is still in force — the same rule a pause already had.
+		expect(
+			earliestPoolRecoveryMs([
+				holds({ cause: "usage_exhausted", gateRecoveryMs: 3_000 }),
+			]),
 		).toBeNull();
 	});
 
 	it("still answers from the accounts that CAN state a deadline", () => {
 		expect(
 			earliestPoolRecoveryMs([
-				holds({ usageExhausted: true }),
+				holds({ cause: "usage_exhausted" }),
 				holds({ paused: true }),
-				holds({ cooldownLockMs: 4_000, availableAtMs: 4_000 }),
+				holds({
+					cause: "rate_limited",
+					cooldownLockMs: 4_000,
+					causeResetMs: 4_000,
+				}),
 			]),
 		).toBe(4_000);
 	});
