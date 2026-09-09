@@ -7,20 +7,16 @@
  * transport, the worker's own SQLite connection and FK enforcement, replay
  * after a crash before AND after commit, and concurrent main-thread writes.
  *
- * The encryption key is set before the first import-time use of the payload
- * encryption module, so `encryptPayload` is live for the encrypted case; the
+ * The encrypted case initializes its own module instance with a scoped test
+ * key, independent of encryption state initialized by earlier test files. The
  * plaintext case publishes the envelope exactly as a key-less deployment would.
  */
-process.env.PAYLOAD_ENCRYPTION_KEY =
-	"00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff";
-
 import { Database } from "bun:sqlite";
 import { afterEach, beforeEach, expect, test } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { runMigrations } from "../migrations";
-import { decryptPayload, encryptPayload } from "../payload-encryption";
 import {
 	createWorkerTransport,
 	type PayloadSettlement,
@@ -36,6 +32,25 @@ let db: Database;
 let clients: PayloadWriteClient[] = [];
 
 const TEST_TIMEOUT_MS = 20_000;
+
+let encryptionModuleCounter = 0;
+async function loadPayloadEncryptionWithTestKey() {
+	const previousKey = process.env.PAYLOAD_ENCRYPTION_KEY;
+	try {
+		process.env.PAYLOAD_ENCRYPTION_KEY =
+			"00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff";
+		// Match the encryption unit tests: a unique import bypasses the cached
+		// initialization result, including plaintext mode from the backfill suite.
+		const mod = await import(
+			`../payload-encryption?payload-write-integration=${++encryptionModuleCounter}`
+		);
+		expect(await mod.initPayloadEncryption()).toBe(true);
+		return mod;
+	} finally {
+		if (previousKey === undefined) delete process.env.PAYLOAD_ENCRYPTION_KEY;
+		else process.env.PAYLOAD_ENCRYPTION_KEY = previousKey;
+	}
+}
 
 function seedRequest(id: string): void {
 	db.run(
@@ -150,6 +165,8 @@ test(
 test(
 	"writes encrypted payloads the reader can decrypt",
 	async () => {
+		const { encryptPayload, decryptPayload } =
+			await loadPayloadEncryptionWithTestKey();
 		const settlements: PayloadSettlement[] = [];
 		const client = makeClient({ settlements });
 
