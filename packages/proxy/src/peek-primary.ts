@@ -283,6 +283,31 @@ export function evaluateDefaultCandidates(
 }
 
 /**
+ * When each gated account's LAST exclusion lifts, keyed by account id.
+ *
+ * The max-within-account half of {@link earliestExclusionRecoveryMs}, exposed on
+ * its own because a caller that folds these gates together with holds of its own
+ * (a cooldown, a spent quota window) has to take its maximum ACROSS all of them
+ * before any minimum across accounts. Taking this function's minimum first and
+ * then maxing would answer a different question, and one place deriving the
+ * per-account instant is what keeps the two callers agreeing.
+ *
+ * An account absent from the map has no timed gate on it.
+ */
+export function gateRecoveryByAccountMs(
+	exclusions: readonly PeekExclusion[],
+): Map<string, number> {
+	const lastGateByAccount = new Map<string, number>();
+	for (const exclusion of exclusions) {
+		const held = lastGateByAccount.get(exclusion.accountId);
+		if (held === undefined || exclusion.recoversAtMs > held) {
+			lastGateByAccount.set(exclusion.accountId, exclusion.recoversAtMs);
+		}
+	}
+	return lastGateByAccount;
+}
+
+/**
  * The earliest instant at which the pool regains a routable account, judged
  * only by the gate exclusions — or null when no account was gated.
  *
@@ -299,13 +324,7 @@ export function evaluateDefaultCandidates(
 export function earliestExclusionRecoveryMs(
 	exclusions: readonly PeekExclusion[],
 ): number | null {
-	const lastGateByAccount = new Map<string, number>();
-	for (const exclusion of exclusions) {
-		const held = lastGateByAccount.get(exclusion.accountId);
-		if (held === undefined || exclusion.recoversAtMs > held) {
-			lastGateByAccount.set(exclusion.accountId, exclusion.recoversAtMs);
-		}
-	}
+	const lastGateByAccount = gateRecoveryByAccountMs(exclusions);
 
 	let earliest: number | null = null;
 	for (const recoversAtMs of lastGateByAccount.values()) {

@@ -12,8 +12,8 @@ import { Logger } from "@clankermux/logger";
 import { USAGE_CACHE_TTL_MS, usageCache } from "@clankermux/providers";
 import {
 	DEFAULT_ROUTING_CONTEXT,
-	earliestExclusionRecoveryMs,
 	evaluateDefaultCandidates,
+	gateRecoveryByAccountMs,
 	getProviderOverloadSnapshot,
 } from "@clankermux/proxy";
 import type {
@@ -510,6 +510,85 @@ function maxOfPresent(values: Array<number | null>): number | null {
 }
 
 /**
+ * The proxy's own cooldown lock on a row, while it is still holding. Null once
+ * it has passed, or when there never was one.
+ */
+function activeCooldownLockMs(
+	row: Pick<PublicAccountRow, "rate_limited_until"> | undefined,
+	now: number,
+): number | null {
+	const until = row?.rate_limited_until;
+	return until != null && Number(until) > now ? Number(until) : null;
+}
+
+/** Everything currently holding ONE account, as the pool rollup sees it. */
+interface AccountHolds {
+	/** An operator pause: a hold with no scheduled lift at all. */
+	paused: boolean;
+	/** The proxy's cooldown lock, while it holds. */
+	cooldownLockMs: number | null;
+	/** Whether the resolved cause is a spent account-wide window. */
+	usageExhausted: boolean;
+	/**
+	 * The account's own published lift instant — the later of its resolved
+	 * rate-limit reset and its cooldown lock, or null when neither states one.
+	 */
+	availableAtMs: number | null;
+	/** When this account's routing exclusions all lift, or null when it has none. */
+	gateRecoveryMs: number | null;
+}
+
+/**
+ * The soonest instant the pool regains a routable account, or null when nothing
+ * blocked is waiting on a clock.
+ *
+ * MAXIMUM WITHIN an account, MINIMUM ACROSS accounts, and the order is the whole
+ * point. Every hold on one account is resolved first — the cooldown lock, the
+ * spent window, the routing gates — because an account is available only when
+ * the LAST of them lifts; then the pool takes the earliest of those per-account
+ * deadlines, because the pool is back as soon as any one account is. Collecting
+ * every hold into one flat list and taking its minimum is what let a cooldown
+ * ending in a minute speak for an account whose weekly quota does not reset for
+ * an hour, so `/status` promised a recovery that `/accounts` correctly put an
+ * hour later.
+ *
+ * INDEFINITE HOLDS DROP THE ACCOUNT rather than being ignored. A pause has no
+ * scheduled lift, and neither does a spent window whose reset the provider did
+ * not state; an account carrying one has no stateable recovery, and taking the
+ * maximum of its other holds would publish an instant at which it is still
+ * blocked. Dropped, it simply does not speak for the pool — the accounts that
+ * can state a deadline do.
+ *
+ * An account that nothing holds contributes nothing either: it is routable now,
+ * so there is nothing for the pool to be waiting on. That is what keeps a
+ * non-limiting provider status — which still resolves a stored window reset —
+ * from being published as a recovery instant.
+ */
+export function earliestPoolRecoveryMs(
+	accounts: readonly AccountHolds[],
+): number | null {
+	let earliest: number | null = null;
+	for (const account of accounts) {
+		// Indefinite: no clock lifts a pause.
+		if (account.paused) continue;
+		const held =
+			account.cooldownLockMs !== null ||
+			account.usageExhausted ||
+			account.gateRecoveryMs !== null;
+		if (!held) continue;
+		const deadline = maxOfPresent([
+			account.availableAtMs,
+			account.gateRecoveryMs,
+		]);
+		// Held with nothing scheduling a lift — a spent window whose reset is
+		// unknown. Indefinite, so it says nothing about when the pool comes back.
+		if (deadline === null) continue;
+		if (earliest === null || deadline < earliest) earliest = deadline;
+	}
+	return earliest;
+}
+
+/**
  * Combine every overload bucket of a provider into one verdict: open beats
  * half-open beats closed, the deadline is the furthest open one, and a probe
  * anywhere counts as a probe.
@@ -797,10 +876,7 @@ export function createPublicSnapshotReader(
 			// The proxy's OWN cooldown lock, while it is still holding. A gate in its
 			// own right: the presentation resolves the CAUSE, and the cause it picks
 			// may be counting down on a different clock entirely.
-			const cooldownLockMs =
-				row.rate_limited_until != null && Number(row.rate_limited_until) > now
-					? Number(row.rate_limited_until)
-					: null;
+			const cooldownLockMs = activeCooldownLockMs(row, now);
 
 			const windows = buildWindows(
 				provider,
@@ -868,37 +944,29 @@ export function createPublicSnapshotReader(
 			),
 		);
 		let usageExhausted = 0;
-		const recoveryTimes: number[] = [];
 		accounts.forEach((account, index) => {
 			if (!availability[index]) return;
 			if (account.cause === "usage_exhausted" && !account.paused) {
 				usageExhausted++;
-				if (account.availableAtMs !== null) {
-					recoveryTimes.push(account.availableAtMs);
-				}
 			}
 		});
-		const earliestLock = rows.reduce<number | null>((min, row) => {
-			if (row.paused === 1) return min;
-			const until = row.rate_limited_until;
-			if (!until || until < now) return min;
-			return min === null ? Number(until) : Math.min(min, Number(until));
-		}, null);
-		if (earliestLock !== null) recoveryTimes.push(earliestLock);
-		// The gates the candidate evaluation applied, from that SAME evaluation.
-		// A pool emptied only by the provider-wide overload breaker or by
-		// proactive usage throttling is waiting on a clock exactly as one emptied
-		// by cooldowns is, and omitting these instants published it as
+		// The gates the candidate evaluation applied, from that SAME evaluation,
+		// resolved PER ACCOUNT. A pool emptied only by the provider-wide overload
+		// breaker or by proactive usage throttling is waiting on a clock exactly as
+		// one emptied by cooldowns is, and omitting these instants published it as
 		// `unhealthy` when it was recoverable.
-		//
-		// ONE instant, not one per gate: an account held by both gates recovers
-		// when its LATER deadline passes, so pushing each raw entry into a list
-		// this line then takes the minimum of would publish the earlier of two
-		// holds on the same account as the moment the pool comes back.
-		const gateRecoveryMs = earliestExclusionRecoveryMs(
+		const gateRecoveryByAccount = gateRecoveryByAccountMs(
 			routingEvaluation.exclusions,
 		);
-		if (gateRecoveryMs !== null) recoveryTimes.push(gateRecoveryMs);
+		const nextAvailableAtMs = earliestPoolRecoveryMs(
+			accounts.map((account, index) => ({
+				paused: account.paused,
+				cooldownLockMs: activeCooldownLockMs(rows[index], now),
+				usageExhausted: account.cause === "usage_exhausted",
+				availableAtMs: account.availableAtMs,
+				gateRecoveryMs: gateRecoveryByAccount.get(account.id) ?? null,
+			})),
+		);
 
 		const pool: PublicPoolSnapshot = {
 			configured: rows.length,
@@ -911,8 +979,7 @@ export function createPublicSnapshotReader(
 					Number(row.rate_limited_until) >= now,
 			).length,
 			usageExhausted,
-			nextAvailableAtMs:
-				recoveryTimes.length > 0 ? Math.min(...recoveryTimes) : null,
+			nextAvailableAtMs,
 		};
 
 		/**

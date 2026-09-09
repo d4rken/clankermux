@@ -39,6 +39,7 @@ import { toPublicAccountsDto } from "../../handlers/public/dto";
 import {
 	clampPct,
 	createPublicSnapshotReader,
+	earliestPoolRecoveryMs,
 	resolveCredentialState,
 } from "../public-snapshot";
 
@@ -940,6 +941,99 @@ describe("pool rollup", () => {
 		expect((await read()).pool.nextAvailableAtMs).toBeNull();
 	});
 
+	it("waits for the LAST hold on an account, not the first", async () => {
+		// The deployed defect: a cooldown lifting in a minute beside a weekly
+		// window that does not reset for an hour. The exhaustion loop skipped the
+		// account (its cooldown made it unavailable) while the separate lock scan
+		// still contributed the one-minute deadline, so `/status` promised a
+		// recovery in a minute that `/accounts` correctly put an hour out. An
+		// account is available only when EVERY hold on it has lifted.
+		insertAccount({ rate_limited_until: NOW + 60_000 });
+		usageCache.set("acct-1", {
+			five_hour: {
+				utilization: 10,
+				resets_at: new Date(NOW + 30 * 60_000).toISOString(),
+			},
+			seven_day: {
+				utilization: 100,
+				resets_at: new Date(NOW + 3_600_000).toISOString(),
+			},
+		} as AnthropicUsageData);
+
+		const snapshot = await read();
+		expect(snapshot.accounts[0]?.cause).toBe("usage_exhausted");
+		expect(snapshot.accounts[0]?.availableAtMs).toBe(NOW + 3_600_000);
+		// The pool cannot recover before its only account does.
+		expect(snapshot.pool.nextAvailableAtMs).toBe(NOW + 3_600_000);
+	});
+
+	it("takes the EARLIEST of those per-account deadlines across the pool", async () => {
+		// Maximum within an account, minimum across them: the pool is back as soon
+		// as any one account is.
+		insertAccount({
+			id: "late",
+			name: "late",
+			rate_limited_until: NOW + 60_000,
+		});
+		insertAccount({
+			id: "early",
+			name: "early",
+			rate_limited_until: NOW + 600_000,
+		});
+		usageCache.set("late", {
+			seven_day: {
+				utilization: 100,
+				resets_at: new Date(NOW + 3_600_000).toISOString(),
+			},
+		} as AnthropicUsageData);
+		usageCache.set("early", anthropicUsage(10, 10));
+
+		expect((await read()).pool.nextAvailableAtMs).toBe(NOW + 600_000);
+	});
+
+	it("promises nothing for a spent window with no stated reset", async () => {
+		// Core refuses to call an account exhausted on a window whose reset it
+		// cannot read — ambiguous evidence never sidelines an account — so the
+		// account reads as OK and the pool is waiting on nothing. Either way no
+		// recovery instant is invented for it.
+		insertAccount();
+		usageCache.set("acct-1", {
+			seven_day: { utilization: 100, resets_at: null },
+			seven_day_oauth_apps: { utilization: 100, resets_at: null },
+		} as unknown as AnthropicUsageData);
+
+		const snapshot = await read();
+		expect(snapshot.accounts[0]?.availableAtMs).toBeNull();
+		expect(snapshot.pool.nextAvailableAtMs).toBeNull();
+	});
+
+	it("promises nothing for a pause, whatever else the row carries", async () => {
+		// An operator pause has no scheduled lift, so the account contributes no
+		// deadline at all — not the stored cooldown it happens to still carry.
+		insertAccount({
+			paused: 1,
+			pause_reason: "manual",
+			rate_limited_until: NOW + 60_000,
+		});
+		expect((await read()).pool.nextAvailableAtMs).toBeNull();
+	});
+
+	it("stays silent for a healthy account carrying a stored window reset", async () => {
+		// A soft provider status resolves an instant that is a QUOTA FACT, not a
+		// block: the account is routable right now, so there is nothing for the
+		// pool to be waiting on.
+		insertAccount({
+			rate_limit_status: "allowed",
+			rate_limit_reset: NOW + 86_400_000,
+		});
+		usageCache.set("acct-1", anthropicUsage(10, 20));
+
+		const snapshot = await read();
+		expect(snapshot.accounts[0]?.availableAtMs).toBe(NOW + 86_400_000);
+		expect(snapshot.pool.defaultRoutable).toBe(1);
+		expect(snapshot.pool.nextAvailableAtMs).toBeNull();
+	});
+
 	it("reports the breaker's deadline when only a provider overload emptied the pool", async () => {
 		// `defaultRoutable: 0` beside a null recovery is what a client renders as
 		// `unhealthy`. An overloaded provider has a known deadline, so the honest
@@ -1073,5 +1167,104 @@ describe("the read model carries no API key data", () => {
 		const wire = JSON.stringify(await read());
 		expect(wire).not.toContain("at-secret");
 		expect(wire).not.toContain("rt-secret");
+	});
+});
+
+/**
+ * The pool's recovery instant, over hold sets rather than a database.
+ *
+ * `nextAvailableAtMs` is read together with `defaultRoutable`: an empty pool
+ * with an instant renders as `degraded`, and one without renders as
+ * `unhealthy`. The rule the reader above exercises end to end is pinned here on
+ * its own, including the cases a real account cannot easily be manoeuvred into.
+ */
+describe("earliestPoolRecoveryMs", () => {
+	function holds(
+		over: Partial<Parameters<typeof earliestPoolRecoveryMs>[0][number]> = {},
+	) {
+		return {
+			paused: false,
+			cooldownLockMs: null,
+			usageExhausted: false,
+			availableAtMs: null,
+			gateRecoveryMs: null,
+			...over,
+		};
+	}
+
+	it("states nothing for an empty pool", () => {
+		expect(earliestPoolRecoveryMs([])).toBeNull();
+	});
+
+	it("ignores an account nothing is holding", () => {
+		// A non-limiting provider status still resolves a stored window reset. The
+		// account is routable NOW, so that instant is a quota fact and not a
+		// recovery the pool is waiting for.
+		expect(
+			earliestPoolRecoveryMs([holds({ availableAtMs: 1_700_000_000_000 })]),
+		).toBeNull();
+	});
+
+	it("takes the LATEST hold within one account", () => {
+		expect(
+			earliestPoolRecoveryMs([
+				holds({
+					cooldownLockMs: 1_000,
+					usageExhausted: true,
+					availableAtMs: 5_000,
+					gateRecoveryMs: 3_000,
+				}),
+			]),
+		).toBe(5_000);
+	});
+
+	it("takes a routing gate that outlasts the account's own holds", () => {
+		expect(
+			earliestPoolRecoveryMs([
+				holds({
+					cooldownLockMs: 1_000,
+					availableAtMs: 1_000,
+					gateRecoveryMs: 9_000,
+				}),
+			]),
+		).toBe(9_000);
+	});
+
+	it("takes the EARLIEST across accounts once each is resolved", () => {
+		expect(
+			earliestPoolRecoveryMs([
+				holds({ cooldownLockMs: 8_000, availableAtMs: 8_000 }),
+				holds({ cooldownLockMs: 2_000, availableAtMs: 2_000 }),
+			]),
+		).toBe(2_000);
+	});
+
+	it("drops a paused account entirely, cooldown or no cooldown", () => {
+		// An operator pause has no scheduled lift, so the stored cooldown the row
+		// happens to carry says nothing about when this account comes back.
+		expect(
+			earliestPoolRecoveryMs([
+				holds({ paused: true, cooldownLockMs: 1_000, availableAtMs: 1_000 }),
+			]),
+		).toBeNull();
+	});
+
+	it("drops an account held with no scheduled lift rather than treating it as zero", () => {
+		// Held (its window is spent) but with nothing stating when that lifts. The
+		// pool learns nothing from it; the honest answer is that this account
+		// contributes no deadline, not that it recovers at once.
+		expect(
+			earliestPoolRecoveryMs([holds({ usageExhausted: true })]),
+		).toBeNull();
+	});
+
+	it("still answers from the accounts that CAN state a deadline", () => {
+		expect(
+			earliestPoolRecoveryMs([
+				holds({ usageExhausted: true }),
+				holds({ paused: true }),
+				holds({ cooldownLockMs: 4_000, availableAtMs: 4_000 }),
+			]),
+		).toBe(4_000);
 	});
 });
