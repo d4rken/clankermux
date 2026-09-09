@@ -11,6 +11,7 @@ import {
 	DialogTitle,
 } from "../ui/dialog";
 import { AccountIdentityPanel } from "./AccountIdentity";
+import { AuthorizationHandoff } from "./AuthorizationHandoff";
 
 interface QwenReauthDialogProps {
 	account: Account | null;
@@ -53,14 +54,17 @@ export function QwenReauthDialog({
 		if (!account) return;
 		setStep("pending");
 		setError("");
+		// The pending step is entered before the init call resolves, so clear the
+		// previous session's link and code: a retry must not show stale ones while
+		// the new init is in flight.
+		setAuthUrl("");
+		setUserCode("");
 
 		try {
 			const result = await api.initQwenReauth({ accountId: account.id });
 			sessionIdRef.current = result.sessionId;
 			setAuthUrl(result.authUrl);
 			setUserCode(result.userCode);
-
-			window.open(result.authUrl, "_blank");
 
 			pollIntervalRef.current = setInterval(async () => {
 				try {
@@ -120,37 +124,20 @@ export function QwenReauthDialog({
 				<div className="py-group">
 					{step === "idle" && (
 						<p className="text-sm text-muted-foreground">
-							Click the button below to start the Qwen device flow. A browser
-							window will open for you to authorize.
+							Click the button below to start the Qwen device flow. You will get
+							an authorization link and a user code to enter in the browser that
+							is signed in to this account.
 						</p>
 					)}
 
 					{step === "pending" && (
 						<div className="space-y-row">
 							<p className="text-sm text-muted-foreground">
-								Waiting for authorization in browser...
+								Waiting for authorization. Enter the user code on the
+								authorization page.
 							</p>
-							{userCode && (
-								<div className="flex items-center gap-item">
-									<span className="text-sm text-muted-foreground">
-										User code:
-									</span>
-									{/* `py-0.5` stays numeric: 0.125rem maps to no step on the
-									    rhythm scale. */}
-									<code className="text-sm font-mono bg-muted px-item py-0.5 rounded">
-										{userCode}
-									</code>
-								</div>
-							)}
 							{authUrl && (
-								<a
-									href={authUrl}
-									target="_blank"
-									rel="noopener noreferrer"
-									className="text-sm text-primary underline break-all"
-								>
-									Open authorization page
-								</a>
+								<AuthorizationHandoff url={authUrl} userCode={userCode} />
 							)}
 						</div>
 					)}

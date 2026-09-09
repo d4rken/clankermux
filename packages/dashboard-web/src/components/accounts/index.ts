@@ -6,6 +6,7 @@ export { AccountModelMappingsDialog } from "./AccountModelMappingsDialog";
 export { AccountPriorityDialog } from "./AccountPriorityDialog";
 export { AccountRenewalDialog } from "./AccountRenewalDialog";
 export { AnthropicReauthDialog } from "./AnthropicReauthDialog";
+export { AuthorizationHandoff } from "./AuthorizationHandoff";
 export { CodexReauthDialog } from "./CodexReauthDialog";
 export { DeleteConfirmationDialog } from "./DeleteConfirmationDialog";
 export { QwenReauthDialog } from "./QwenReauthDialog";

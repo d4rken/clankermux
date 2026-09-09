@@ -13,6 +13,7 @@ import {
 import { Input } from "../ui/input";
 import { Label } from "../ui/label";
 import { AccountIdentityPanel } from "./AccountIdentity";
+import { AuthorizationHandoff } from "./AuthorizationHandoff";
 
 interface AnthropicReauthDialogProps {
 	account: Account | null;
@@ -38,13 +39,15 @@ export function AnthropicReauthDialog({
 	const handleStart = async () => {
 		if (!account) return;
 		setError("");
+		// A retry must never leave the previous session's link on screen while
+		// the new one is being fetched.
+		setAuthUrl("");
 
 		try {
 			const result = await api.initAnthropicReauth(account.id);
 			setAuthUrl(result.authUrl);
 			setSessionId(result.sessionId);
 			setStep("awaiting-code");
-			window.open(result.authUrl, "_blank");
 		} catch (err) {
 			setStep("error");
 			setError(
@@ -106,28 +109,21 @@ export function AnthropicReauthDialog({
 				<div className="py-group">
 					{step === "idle" && (
 						<p className="text-sm text-muted-foreground">
-							Click the button below to start the Anthropic OAuth flow. A
-							browser window will open for you to authorize. After approving,
-							paste the authorization code here.
+							Click the button below to start the Anthropic OAuth flow. You will
+							get an authorization link to open in the browser that is signed in
+							to this account. After approving, paste the authorization code
+							here.
 						</p>
 					)}
 
 					{step === "awaiting-code" && (
 						<div className="space-y-group">
 							<p className="text-sm text-muted-foreground">
-								A browser window has opened for authorization. After approving,
-								copy the authorization code and paste it below.
+								Open the authorization link in the browser that is signed in to
+								this account, or copy it there. After approving, copy the
+								authorization code and paste it below.
 							</p>
-							{authUrl && (
-								<a
-									href={authUrl}
-									target="_blank"
-									rel="noopener noreferrer"
-									className="text-sm text-primary underline break-all"
-								>
-									Open authorization page
-								</a>
-							)}
+							{authUrl && <AuthorizationHandoff url={authUrl} />}
 							<div className="space-y-item">
 								<Label htmlFor="auth-code">Authorization Code</Label>
 								<Input
