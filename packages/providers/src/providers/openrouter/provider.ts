@@ -14,18 +14,28 @@ export class OpenRouterProvider extends AnthropicCompatibleProvider {
 		});
 	}
 
-	override getEndpoint(): string {
-		return OPENROUTER_DEFAULT_ENDPOINT;
-	}
-
 	override buildUrl(
 		pathname: string,
 		search: string,
 		account?: Account,
 	): string {
-		const baseUrl = (
+		const base = (
 			account?.custom_endpoint || OPENROUTER_DEFAULT_ENDPOINT
-		).replace(/\/$/, "");
-		return `${baseUrl}${pathname}${search}`;
+		).replace(/\/+$/, "");
+		let basePath: string;
+		try {
+			basePath = new URL(base).pathname.replace(/\/+$/, "");
+		} catch {
+			return `${base}${pathname}${search}`;
+		}
+		// The base already carries /v1, and the proxy hands us Anthropic paths
+		// that start with /v1 — drop one, on a segment boundary so /v1beta
+		// survives intact.
+		const path =
+			basePath.endsWith("/v1") &&
+			(pathname === "/v1" || pathname.startsWith("/v1/"))
+				? pathname.slice("/v1".length) || "/"
+				: pathname;
+		return `${base}${path}${search}`;
 	}
 }
