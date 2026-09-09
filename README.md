@@ -23,6 +23,9 @@ requests across multiple backend accounts through one local endpoint, so you sto
 hitting per-account rate limits. Point your coding client at it, add your accounts
 in the dashboard, and it routes and falls back across them.
 
+External displays and applets can use the [public widget API](docs/public-api/README.md),
+with JSON Schemas, example payloads and quota-guidance integration instructions.
+
 ## An opinionated fork
 
 ClankerMux began as a fork of [tombii/better-ccflare](https://github.com/tombii/better-ccflare)

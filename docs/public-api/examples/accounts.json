@@ -1,0 +1,50 @@
+{
+  "schema": "clankermux.public.accounts.v1",
+  "generatedAt": "2026-09-09T12:00:00.000Z",
+  "accounts": [
+    {
+      "id": "acc_example",
+      "name": "Claude Primary",
+      "provider": "anthropic",
+      "isDefaultCandidate": true,
+      "availability": {
+        "state": "available",
+        "reason": null,
+        "availableAt": null
+      },
+      "credential": {
+        "state": "valid",
+        "expiresAt": "2026-09-09T18:00:00.000Z"
+      },
+      "measurementState": "fresh",
+      "usageObservedAt": "2026-09-09T11:59:30.000Z",
+      "utilizationPct": 62,
+      "windows": [
+        {
+          "kind": "five_hour",
+          "scopeId": null,
+          "label": null,
+          "utilizationPct": 35,
+          "observedAt": "2026-09-09T11:59:30.000Z",
+          "resetsAt": "2026-09-09T15:00:00.000Z",
+          "prediction": {
+            "predictedUtilizationAtResetPct": 88,
+            "exhaustsAt": null,
+            "willExhaustBeforeReset": false,
+            "lowConfidence": false,
+            "state": "rising"
+          }
+        },
+        {
+          "kind": "seven_day",
+          "scopeId": null,
+          "label": null,
+          "utilizationPct": 62,
+          "observedAt": "2026-09-09T11:59:30.000Z",
+          "resetsAt": "2026-09-10T12:00:00.000Z",
+          "prediction": null
+        }
+      ]
+    }
+  ]
+}

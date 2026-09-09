@@ -27,7 +27,9 @@
 		"format": "bunx biome format --write .",
 		"lint": "bunx --bun biome check --write --unsafe .",
 		"preview:dashboard": "bun scripts/dashboard-preview.ts",
-		"restart": "./scripts/restart.sh"
+		"restart": "./scripts/restart.sh",
+		"public-api:generate": "bun scripts/public-api/generate.ts",
+		"public-api:check": "bun scripts/public-api/generate.ts --check && bun scripts/public-api/validate.ts && bunx tsc --project scripts/public-api/tsconfig.json --noEmit"
 	},
 	"engines": {
 		"bun": ">=1.4.0"
@@ -36,9 +38,12 @@
 		"@biomejs/biome": "2.4.10",
 		"@clankermux/test-support": "workspace:*",
 		"@types/bun": "1.3.14",
+		"ajv": "8.20.0",
+		"ajv-formats": "3.0.1",
 		"bun": "1.4.0",
 		"bun-types": "1.3.14",
+		"ts-json-schema-generator": "2.9.0",
 		"typescript": "6.0.2"
 	},
-	"version": "2026.9.32"
+	"version": "2026.9.33"
 }

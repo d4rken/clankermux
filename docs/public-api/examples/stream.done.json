@@ -1,0 +1,19 @@
+{
+  "type": "request.done",
+  "id": "req_example",
+  "at": "2026-09-09T12:00:00.000Z",
+  "method": "POST",
+  "path": "/v1/messages",
+  "project": "example-project",
+  "model": "fable",
+  "accountId": "acc_example",
+  "statusCode": 200,
+  "success": true,
+  "rateLimited": false,
+  "responseTimeMs": 1500,
+  "failoverAttempts": 0,
+  "totalTokens": 1000,
+  "totalTokensBasis": "provider",
+  "costUsd": 0.012,
+  "errorMessage": null
+}

@@ -1,10 +1,13 @@
 # Handover: showing PACE instead of RUNWAY on the usage widget
 
-> **2026-09-05 update:** Use the new
+> **Historical document — not current implementation instructions.** Use the
 > [external widget integration guide](external-widgets-pacing-guide.md) for
-> implementation. It supersedes this historical guide's headline selection and
-> null-headroom rendering rules. The new next-reset fields are not deployed yet;
-> clients must also support responses that omit them.
+> implementation and the [public API index](public-api/README.md) for schemas.
+> They supersede this document's headline selection, null-headroom rendering,
+> polling and safe-adjustment claims. In particular, a margin is an approximate
+> first-failing probe threshold; null does not justify pegging a bar to either
+> extreme. Current consumers should use interval-specific `guidanceState` and
+> handle older servers where the additive fields are absent.
 
 For whoever is changing the desk widget. It currently renders the quota runway
 ("when does the pool run dry"). The goal is to render **pace** instead: at a

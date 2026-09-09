@@ -23,6 +23,7 @@ import {
 	requestEvents,
 	resetRequestEventRegistry,
 } from "@clankermux/core";
+import { assertPublicSchema } from "../../../../../../scripts/public-api/validate";
 import { closeAllSseStreams } from "../../../sse-registry";
 import { MAX_STRING_BYTES } from "../dto";
 import {
@@ -373,6 +374,7 @@ describe("event translation", () => {
 		];
 		for (const event of mapped) {
 			expect(event).not.toBeNull();
+			assertPublicSchema("stream", JSON.parse(JSON.stringify(event)));
 			expect(internalTypes).not.toContain(event?.type ?? "");
 		}
 	});

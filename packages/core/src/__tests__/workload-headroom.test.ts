@@ -1,5 +1,6 @@
 import { describe, expect, it } from "bun:test";
 import {
+	classifyWorkloadGuidance,
 	computeCapacityRunway,
 	computeWorkloadHeadroom,
 	normalizeAnthropicUsage,
@@ -181,6 +182,7 @@ describe("computeWorkloadHeadroom — family rows", () => {
 
 		expect(family?.headroom).toBeNull();
 		expect(family?.headroomAbsence).toBe("beyond-probe-range");
+		expect(family?.nextReset?.headroomAbsence).toBe("beyond-probe-range");
 		expect(family?.basis).toBe("conservative-bound");
 
 		// The class row, which legitimately varies everything, still states one.
@@ -225,6 +227,8 @@ describe("computeWorkloadHeadroom — family rows", () => {
 			(candidate) => candidate.dimensionKind === "family",
 		);
 		expect(row?.projectionBasis).toBe("structural");
+		expect(row?.nextReset?.headroomAbsence).toBe("structural-evidence");
+		expect(row?.nextReset?.headroom).toBeNull();
 		if (row?.outcome.kind !== "runway") throw new Error("unreachable");
 		expect(row.outcome.exhaustsAtMs).toBeCloseTo(NOW + 13.33 * HOUR, -6);
 	});
@@ -292,6 +296,7 @@ describe("computeWorkloadHeadroom — family rows", () => {
 		// share range dominates. The bound is simply unavailable.
 		expect(row?.headroom).toBeNull();
 		expect(row?.headroomAbsence).toBe("bound-broken-by-credits");
+		expect(row?.nextReset?.headroomAbsence).toBe("bound-broken-by-credits");
 	});
 });
 
@@ -1010,6 +1015,119 @@ describe("toScopedFamilyRunwayInput", () => {
 });
 
 describe("next weekly reset planning", () => {
+	it("keeps omitted and learning accounts consistent across both intervals", () => {
+		const known = accountWideConstrained("known");
+		const young = {
+			...accountWideConstrained("young"),
+			usageData: anthropicUsage({
+				fiveHourPct: 1,
+				fiveHourResetMs: NOW + HOUR,
+				weeklyPct: 2,
+				weeklyResetMs: NOW + 7 * DAY - 600_000,
+				scoped: { pct: 2 },
+			}),
+		};
+		const missing: RunwayAccountSource = {
+			id: "missing",
+			name: "missing",
+			provider: "anthropic",
+			usageData: null,
+		};
+		const unopened = {
+			...accountWideConstrained("unopened"),
+			usageData: anthropicUsage({
+				fiveHourPct: 1,
+				fiveHourResetMs: NOW + HOUR,
+				weeklyPct: 80,
+				weeklyResetMs: NOW + 2 * DAY,
+			}),
+		};
+		for (const extra of [young, missing, unopened]) {
+			for (const row of computeWorkloadHeadroom([known, extra], NOW)) {
+				const next = row.nextReset;
+				if (!next) throw new Error("Expected next-reset guidance");
+				expect(
+					"unprojectableAccountIds" in next.outcome
+						? next.outcome.unprojectableAccountIds
+						: [],
+				).toEqual(
+					"unprojectableAccountIds" in row.outcome
+						? row.outcome.unprojectableAccountIds
+						: [],
+				);
+				expect(
+					"learningAccountIds" in next.outcome
+						? next.outcome.learningAccountIds
+						: [],
+				).toEqual(
+					"learningAccountIds" in row.outcome
+						? row.outcome.learningAccountIds
+						: [],
+				);
+				if (
+					row.unreadableAccountIds.length + row.unopenedAccountIds.length >
+					0
+				) {
+					expect(classifyWorkloadGuidance(row, row)).toBe("uncertain");
+					expect(classifyWorkloadGuidance(row, next)).toBe("uncertain");
+				}
+			}
+		}
+		// A clean family scan does not erase a missing/unopened sibling outside it.
+		const family = computeWorkloadHeadroom([known, unopened], NOW).find(
+			(row) => row.dimensionKind === "family",
+		);
+		if (!family?.nextReset) throw new Error("Expected family guidance");
+		expect(family.unopenedAccountIds).toEqual(["unopened"]);
+		expect(classifyWorkloadGuidance(family, family.nextReset)).toBe(
+			"uncertain",
+		);
+	});
+
+	it("distinguishes a missing threshold from exhausted quota", () => {
+		for (const [pct, expected] of [
+			[20, "beyond-probe-range"],
+			[100, "not-projected"],
+		] as const) {
+			const source = {
+				...accountWideConstrained("a"),
+				prediction: {
+					fiveHour: {
+						state: "rising" as const,
+						slopePerHour: 0.25,
+						etaExhaustMs: NOW + 396 * HOUR,
+						predictedAtReset: 2,
+						resetsAtMs: NOW + HOUR,
+						willExhaustBeforeReset: false,
+						lowConfidence: false,
+					},
+					sevenDay: {
+						state: "rising" as const,
+						slopePerHour: 0.1,
+						etaExhaustMs: NOW + 800 * HOUR,
+						predictedAtReset: 25,
+						resetsAtMs: NOW + 2 * DAY,
+						willExhaustBeforeReset: false,
+						lowConfidence: false,
+					},
+				},
+				usageData: anthropicUsage({
+					fiveHourPct: 1,
+					fiveHourResetMs: NOW + HOUR,
+					weeklyPct: pct,
+					weeklyResetMs: NOW + 2 * DAY,
+				}),
+			};
+			const row = computeWorkloadHeadroom([source], NOW)[0];
+			expect(row.nextReset?.headroom).toBeNull();
+			expect(row.nextReset?.headroomAbsence).toBe(expected);
+			if (!row.nextReset) throw new Error("Expected next-reset guidance");
+			expect(classifyWorkloadGuidance(row, row.nextReset)).toBe(
+				pct === 100 ? "exhausted" : "unquantified",
+			);
+		}
+	});
+
 	it("ignores an earlier reset on a paused account", () => {
 		const active = accountWideConstrained("active");
 		const paused = {
@@ -1083,6 +1201,10 @@ describe("next weekly reset planning", () => {
 		expect(row.nextReset?.headroom?.direction).toBe("margin");
 		expect(row.outcome.kind).toBe("runway");
 		expect(row.headroom?.direction).toBe("deficit");
+		expect(row.nextReset?.headroomAbsence).toBeNull();
+		expect(classifyWorkloadGuidance(row, row)).toBe("reduce");
+		if (!row.nextReset) throw new Error("Expected next-reset guidance");
+		expect(classifyWorkloadGuidance(row, row.nextReset)).toBe("increase");
 	});
 	it("withholds a precise cut from an immature weekly estimate", () => {
 		// Ten minutes of evidence is not a burn rate. The account is withheld from
@@ -1102,6 +1224,9 @@ describe("next weekly reset planning", () => {
 		expect(row.nextReset?.outcome.kind).toBe("unknown");
 		expect(row.nextReset?.projectionBasis).toBeNull();
 		expect(row.nextReset?.headroom).toBeNull();
+		expect(row.nextReset?.headroomAbsence).toBe("learning-accounts");
+		if (!row.nextReset) throw new Error("Expected next-reset guidance");
+		expect(classifyWorkloadGuidance(row, row.nextReset)).toBe("learning");
 	});
 	it("does not invent a reset date for an unreadable account", () => {
 		const row = computeWorkloadHeadroom(

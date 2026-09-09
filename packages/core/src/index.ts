@@ -379,9 +379,14 @@ export {
 	weeklyExhaustion,
 } from "./weekly-exhaustion";
 export {
+	classifyWorkloadGuidance,
+	type WorkloadGuidanceState,
+} from "./workload-guidance";
+export {
 	computeWorkloadHeadroom,
 	type HeadroomAbsence,
 	type HeadroomBasis,
+	type NextResetHeadroomAbsence,
 	type ProjectionBasis,
 	type WorkloadDimensionKind,
 	type WorkloadHeadroomRow,

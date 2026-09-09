@@ -17,6 +17,7 @@ import {
 	STOP_CAUSES,
 	type StopsHistoryResponse,
 } from "@clankermux/types";
+import { assertPublicSchema } from "../../../../../../scripts/public-api/validate";
 import type { PacingSnapshot } from "../../../services/pacing-scan";
 import type { PublicRunwaySnapshot } from "../../../services/public-runway";
 import type {
@@ -31,7 +32,9 @@ import {
 	toPublicAvailabilityReason,
 	toPublicAvailabilityState,
 	toPublicCredentialState,
+	toPublicGuidanceState,
 	toPublicMeasurementState,
+	toPublicNextResetHeadroomAbsence,
 	toPublicOverloadState,
 	toPublicPacingDto,
 	toPublicPredictionState,
@@ -220,11 +223,11 @@ function workloadHeadroom(): {
 				headroomAbsence: "beyond-probe-range",
 				projectionBasis: "structural",
 				eligibleAccountIds: ["acct-1", "acct-2"],
-				unreadableAccountIds: ["acct-3"],
+				unreadableAccountIds: ["acct-2"],
 				unopenedAccountIds: [],
-				// A subset of the unreadable list: acct-3 is excluded only because
+				// A subset of the unreadable list: acct-2 is excluded only because
 				// its burn is not measured yet.
-				learningAccountIds: ["acct-3"],
+				learningAccountIds: ["acct-2"],
 				spentAccountIds: ["acct-1"],
 			},
 		],
@@ -672,6 +675,7 @@ describe("golden: GET /public/v1/runway", () => {
 	it("matches the pinned shape exactly", () => {
 		expect(toPublicRunwayDto(runway())).toEqual({
 			schema: "clankermux.public.runway.v1",
+			intervalKind: "fixed_horizon",
 			generatedAt: NOW_ISO,
 			horizonMs: 1_209_600_000,
 			coverage: {
@@ -997,15 +1001,79 @@ describe("golden: GET /public/v1/pacing", () => {
 });
 
 describe("golden: GET /public/v1/workload-headroom", () => {
+	it("maps new descriptive enums without extending the existing absence enum", () => {
+		for (const state of [
+			"increase",
+			"reduce",
+			"exhausted",
+			"learning",
+			"unknown",
+			"uncertain",
+			"unquantified",
+		] as const) {
+			expect(toPublicGuidanceState(state)).toBe(state);
+		}
+		expect(toPublicGuidanceState("no-accounts")).toBe("no_accounts");
+		expect(toPublicGuidanceState("future-state")).toBe("other");
+		for (const reason of [
+			"learning-accounts",
+			"structural-evidence",
+			"bound-broken-by-credits",
+			"beyond-probe-range",
+			"not-projected",
+		]) {
+			expect(toPublicNextResetHeadroomAbsence(reason)).toBe(
+				reason.replaceAll("-", "_"),
+			);
+		}
+		expect(toPublicNextResetHeadroomAbsence("future-reason")).toBe("other");
+		expect(toPublicNextResetHeadroomAbsence(null)).toBeNull();
+	});
+
+	it("keeps each interval's guidance and absence separate without leaking source fields", () => {
+		const source = workloadHeadroom();
+		const row = source.rows[0];
+		row.outcome = {
+			kind: "runway",
+			exhaustsAtMs: NOW + 7_200_000,
+			durationMs: 7_200_000,
+			causes: [],
+		};
+		row.headroom = { pct: 20, direction: "deficit" };
+		row.nextReset = {
+			resetsAtMs: NOW + 3_600_000,
+			outcome: { kind: "beyond-horizon", horizonMs: 3_600_000 },
+			headroom: null,
+			headroomAbsence: "structural-evidence",
+			projectionBasis: "structural",
+		};
+		Object.assign(row.nextReset, {
+			accessToken: "private-next-token",
+			eligibleAccountIds: ["private-account"],
+		});
+		const dto = toPublicWorkloadHeadroomDto(source);
+		expect(dto.rows[0].guidanceState).toBe("reduce");
+		expect(dto.rows[0].headroomAbsence).toBeNull();
+		expect(dto.rows[0].nextReset?.guidanceState).toBe("uncertain");
+		expect(dto.rows[0].nextReset?.headroomAbsence).toBe("structural_evidence");
+		expect(JSON.stringify(dto)).not.toContain("private-");
+		assertPublicSchema("workload-headroom", JSON.parse(JSON.stringify(dto)));
+		assertInstantsAreIso(dto);
+		expect(depthOf(dto)).toBeLessThan(8);
+		expect(arrayNesting(dto)).toBeLessThanOrEqual(2);
+	});
+
 	it("matches the pinned shape exactly", () => {
 		expect(toPublicWorkloadHeadroomDto(workloadHeadroom())).toEqual({
 			schema: "clankermux.public.workload-headroom.v1",
+			intervalKind: "fixed_horizon",
 			generatedAt: NOW_ISO,
 			horizonMs: 1_209_600_000,
 			rows: [
 				{
 					dimensionKind: "class",
 					nextReset: null,
+					guidanceState: "increase",
 					dimensionId: "anthropic",
 					label: "Claude",
 					outcomeKind: "beyond_horizon",
@@ -1024,6 +1092,7 @@ describe("golden: GET /public/v1/workload-headroom", () => {
 				{
 					dimensionKind: "family",
 					nextReset: null,
+					guidanceState: "uncertain",
 					dimensionId: "fable",
 					label: "Fable",
 					outcomeKind: "runway",
@@ -1079,10 +1148,14 @@ describe("golden: GET /public/v1/workload-headroom", () => {
 			resetsAtMs: NOW + 3_600_000,
 			outcome: source.rows[0].outcome,
 			headroom: { pct: 12, direction: "margin" },
+			headroomAbsence: null,
 			projectionBasis: "measured",
 		};
 		const dto = toPublicWorkloadHeadroomDto(source);
 		expect(dto.rows[0].nextReset).toEqual({
+			intervalKind: "until_next_weekly_reset",
+			guidanceState: "increase",
+			headroomAbsence: null,
 			resetsAt: new Date(NOW + 3_600_000).toISOString(),
 			outcomeKind: "beyond_horizon",
 			exhaustsAt: null,
@@ -1092,6 +1165,7 @@ describe("golden: GET /public/v1/workload-headroom", () => {
 		});
 		expect(depthOf(dto)).toBeLessThan(8);
 		expect(arrayNesting(dto)).toBeLessThanOrEqual(2);
+		assertPublicSchema("workload-headroom", JSON.parse(JSON.stringify(dto)));
 	});
 
 	it("publishes no pool-level headroom, which lives on the runway resource", () => {
@@ -1330,6 +1404,39 @@ describe("instants vs durations", () => {
 		assertCountsAreStatedWholeNumbers(toPublicPacingDto(pacing()));
 		assertCountsAreStatedWholeNumbers(
 			toPublicWorkloadHeadroomDto(workloadHeadroom()),
+		);
+	});
+
+	it("validates serialized producers for all JSON resources against published schemas", () => {
+		assertPublicSchema(
+			"status",
+			JSON.parse(
+				JSON.stringify(
+					toPublicStatusDto(populated, { uptimeS: 3600, version: "v" }),
+				),
+			),
+		);
+		assertPublicSchema(
+			"accounts",
+			JSON.parse(JSON.stringify(toPublicAccountsDto(populated))),
+		);
+		assertPublicSchema(
+			"runway",
+			JSON.parse(JSON.stringify(toPublicRunwayDto(runway()))),
+		);
+		assertPublicSchema(
+			"stops",
+			JSON.parse(JSON.stringify(toPublicStopsDto(stops(), NOW))),
+		);
+		assertPublicSchema(
+			"pacing",
+			JSON.parse(JSON.stringify(toPublicPacingDto(pacing()))),
+		);
+		assertPublicSchema(
+			"workload-headroom",
+			JSON.parse(
+				JSON.stringify(toPublicWorkloadHeadroomDto(workloadHeadroom())),
+			),
 		);
 	});
 
@@ -2012,6 +2119,12 @@ function summary(over: Partial<RequestResponse> = {}): RequestResponse {
 }
 
 describe("request.done normalizes the internal summary", () => {
+	it("validates the serialized terminal event against the published stream schema", () => {
+		assertPublicSchema(
+			"stream",
+			JSON.parse(JSON.stringify(toPublicRequestDoneDto(summary(), NOW))),
+		);
+	});
 	it("matches the pinned shape exactly", () => {
 		expect(toPublicRequestDoneDto(summary(), 1_700_000_000_000)).toEqual({
 			type: "request.done",

@@ -51,7 +51,7 @@
  */
 
 import type { PacingSnapshot, WorkloadHeadroomRow } from "@clankermux/core";
-import { classIsUnread } from "@clankermux/core";
+import { classIsUnread, classifyWorkloadGuidance } from "@clankermux/core";
 import type {
 	RequestResponse,
 	StopsHistoryResponse,
@@ -84,6 +84,69 @@ export const PUBLIC_WORKLOAD_HEADROOM_SCHEMA =
 
 /** Byte ceiling on every DISPLAY string this surface emits. */
 export const MAX_STRING_BYTES = 96;
+
+/** Starts at envelope generatedAt; ends at generatedAt + horizonMs. */
+export type PublicFixedHorizonKind = "fixed_horizon" | "other";
+/** Starts at envelope generatedAt; ends at nextReset.resetsAt, not after it. */
+export type PublicNextResetIntervalKind = "until_next_weekly_reset" | "other";
+
+/** Snapshot advice, qualified by evidence and coverage; never a concurrency target. */
+export type PublicGuidanceStateDto =
+	| "increase"
+	| "reduce"
+	| "exhausted"
+	| "learning"
+	| "unknown"
+	| "no_accounts"
+	| "uncertain"
+	| "unquantified"
+	| "other";
+
+export function toPublicGuidanceState(state: string): PublicGuidanceStateDto {
+	switch (state) {
+		case "increase":
+		case "reduce":
+		case "exhausted":
+		case "learning":
+		case "unknown":
+		case "uncertain":
+		case "unquantified":
+			return state;
+		case "no-accounts":
+			return "no_accounts";
+		default:
+			return "other";
+	}
+}
+
+/** Unlike long-horizon absence, includes the next-reset evidence withholding gate. */
+export type PublicNextResetHeadroomAbsenceDto =
+	| "learning_accounts"
+	| "structural_evidence"
+	| "bound_broken_by_credits"
+	| "beyond_probe_range"
+	| "not_projected"
+	| "other";
+
+export function toPublicNextResetHeadroomAbsence(
+	absence: string | null,
+): PublicNextResetHeadroomAbsenceDto | null {
+	if (absence == null) return null;
+	switch (absence) {
+		case "learning-accounts":
+			return "learning_accounts";
+		case "structural-evidence":
+			return "structural_evidence";
+		case "bound-broken-by-credits":
+			return "bound_broken_by_credits";
+		case "beyond-probe-range":
+			return "beyond_probe_range";
+		case "not-projected":
+			return "not_projected";
+		default:
+			return "other";
+	}
+}
 
 /**
  * Truncate to at most `maxBytes` UTF-8 bytes WITHOUT splitting a codepoint.
@@ -971,6 +1034,7 @@ export function toPublicHeadroomDirection(
  */
 export interface PublicRunwayDto {
 	schema: string;
+	intervalKind: PublicFixedHorizonKind;
 	/** INSTANT this payload describes. */
 	generatedAt: string;
 	/** DURATION, ms — the horizon the scan modelled, so no client hardcodes it. */
@@ -995,6 +1059,7 @@ export function toPublicRunwayDto(
 ): PublicRunwayDto {
 	return {
 		schema: PUBLIC_RUNWAY_SCHEMA,
+		intervalKind: "fixed_horizon",
 		generatedAt: new Date(snapshot.generatedAtMs).toISOString(),
 		horizonMs: snapshot.horizonMs,
 		coverage: {
@@ -1759,15 +1824,33 @@ export const streamHelpers = {
  * many accounts stand behind a workload, not which ones.
  */
 export interface PublicWorkloadHeadroomRowDto {
-	/** Primary planning interval. Existing top-level fields retain the long horizon. */
+	/**
+	 * Forecast from `generatedAt` UNTIL the earliest known future weekly reset
+	 * among the workload scan inputs (before learning exclusions). This is not
+	 * a forecast after that reset.
+	 * Null when no usable weekly deadline is known; absent on older servers.
+	 * Existing top-level outcome/headroom fields retain the `horizonMs` interval.
+	 */
 	nextReset: {
+		intervalKind: PublicNextResetIntervalKind;
+		guidanceState: PublicGuidanceStateDto;
+		/** Reason for absent headroom over THIS interval; null when a number is stated. */
+		headroomAbsence: PublicNextResetHeadroomAbsenceDto | null;
+		/** End of this planning interval, not a promise every account resets then. */
 		resetsAt: string | null;
 		outcomeKind: PublicRunwayKind;
 		exhaustsAt: string | null;
+		/**
+		 * Change to current consumption rate over THIS interval, not remaining
+		 * quota or an agent count. Withheld unless projectionBasis is measured.
+		 * Family figures retain the row's conservative_bound headroomBasis.
+		 */
 		headroomPct: number | null;
 		headroomDirection: PublicHeadroomDirection | null;
 		projectionBasis: PublicProjectionBasisDto | null;
 	} | null;
+	/** Advisory state over the envelope's fixed horizon, independent of nextReset. */
+	guidanceState: PublicGuidanceStateDto;
 	/** `"class"` (Claude, GPT) or `"family"` (a scoped model family). */
 	dimensionKind: PublicWorkloadDimensionDto;
 	/** Servable class id or model family id. Join key, never truncated. */
@@ -1796,7 +1879,10 @@ export interface PublicWorkloadHeadroomRowDto {
 	 * toward advising restraint and must not be presented as an exact answer.
 	 */
 	headroomBasis: PublicHeadroomBasisDto;
-	/** Why no headroom is stated. Never a stand-in for zero. */
+	/**
+	 * Why no LONG-HORIZON headroom is stated. Never a stand-in for zero, and
+	 * never an explanation for a null `nextReset.headroomPct`.
+	 */
 	headroomAbsence: PublicHeadroomAbsenceDto | null;
 	/**
 	 * How well-evidenced `outcomeKind` / `exhaustsAt` are — a DIFFERENT claim
@@ -1926,6 +2012,7 @@ function toPublicProjectionBasis(
 
 export interface PublicWorkloadHeadroomDto {
 	schema: typeof PUBLIC_WORKLOAD_HEADROOM_SCHEMA;
+	intervalKind: PublicFixedHorizonKind;
 	generatedAt: string;
 	horizonMs: number;
 	rows: PublicWorkloadHeadroomRowDto[];
@@ -1947,11 +2034,20 @@ export function toPublicWorkloadHeadroomDto(snapshot: {
 }): PublicWorkloadHeadroomDto {
 	return {
 		schema: PUBLIC_WORKLOAD_HEADROOM_SCHEMA,
+		intervalKind: "fixed_horizon",
 		generatedAt: new Date(snapshot.generatedAtMs).toISOString(),
 		horizonMs: snapshot.horizonMs,
 		rows: snapshot.rows.map((row) => ({
+			guidanceState: toPublicGuidanceState(classifyWorkloadGuidance(row, row)),
 			nextReset: row.nextReset
 				? {
+						intervalKind: "until_next_weekly_reset",
+						guidanceState: toPublicGuidanceState(
+							classifyWorkloadGuidance(row, row.nextReset),
+						),
+						headroomAbsence: toPublicNextResetHeadroomAbsence(
+							row.nextReset.headroomAbsence,
+						),
 						resetsAt: instant(row.nextReset.resetsAtMs),
 						outcomeKind: toPublicRunwayKind(row.nextReset.outcome.kind),
 						exhaustsAt:

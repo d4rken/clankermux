@@ -33,9 +33,9 @@ import { computeRunwayScan, type RunwayScan } from "./runway-scan";
  *    REFERENCES an account id is a resource reference, which is a different
  *    thing and is kept.
  *
- * QUOTA, not availability: pauses, rate-limit cooldowns, usage throttling and
- * the provider-overload breaker are deliberately not read by the scan. Copy
- * built on this must say "quota", never "available".
+ * QUOTA, not immediate availability: paused accounts are excluded by the shared
+ * scan; rate-limit cooldowns, usage throttling and provider overload are not
+ * modelled as temporary routing gates. Copy must say "quota", not "available".
  *
  * MEMOIZED, SINGLE-FLIGHT on the shared `createPublicReadMemo`, like every
  * other reader on this surface and for the most expensive version of the

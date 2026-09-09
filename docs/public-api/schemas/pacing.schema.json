@@ -1,0 +1,228 @@
+{
+  "$ref": "#/$defs/PublicPacingDto",
+  "$defs": {
+    "PublicPacingDto": {
+      "type": "object",
+      "properties": {
+        "schema": {
+          "type": "string",
+          "const": "clankermux.public.pacing.v1"
+        },
+        "generatedAt": {
+          "type": "string",
+          "description": "INSTANT this payload describes.",
+          "format": "date-time"
+        },
+        "bindingClassId": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "The tightest class's id, or null when none reports."
+        },
+        "fiveHourOutlookTone": {
+          "$ref": "#/$defs/PublicToneDto",
+          "description": "The pool-wide 5-hour verdict. `paced` is the one state where waiting is the only option: some class has nothing that can serve it and the cause is the 5-hour limit."
+        },
+        "classes": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/PublicPacingClassDto"
+          }
+        }
+      },
+      "required": [
+        "schema",
+        "generatedAt",
+        "bindingClassId",
+        "fiveHourOutlookTone",
+        "classes"
+      ],
+      "description": "`GET /public/v1/pacing` — how fast the pool is spending, per servable class.\n\nDeliberately absent, and none of it may be added back:\n\n - Account NAMES. They are display text belonging to the accounts resource;    every reference here is a join key.  - The pool's signed pace headroom. It is computed by the runway scan and    published on `/public/v1/runway`; a copy here would be one measurement in    two places.  - Per-account bars. That is the accounts resource's job, and nesting them    under `classes[]` would put a second array inside a record array, which the    device's scanner cannot descend into.",
+      "additionalProperties": true
+    },
+    "PublicToneDto": {
+      "type": "string",
+      "enum": [
+        "neutral",
+        "success",
+        "warning",
+        "destructive",
+        "other"
+      ],
+      "description": "How a figure should be read, as a CLOSED set.\n\nMirrors the internal `OutlookTone` value for value. Published rather than left to the client because the thresholds behind it (60% \"watch\", 80% \"high\", 1.05x and 1.5x on the burn ratio) are policy, and a widget re-deriving them would drift from the dashboard the first time one moved."
+    },
+    "PublicPacingClassDto": {
+      "type": "object",
+      "properties": {
+        "classId": {
+          "type": "string",
+          "description": "Join key for the class itself; stable across polls."
+        },
+        "label": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Display label, e.g. \"Claude\". Truncated like any display string."
+        },
+        "utilizationPct": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "description": "The LEAST-USED account's weekly utilization, which is this class's real headroom: routing picks one account, so what matters is whether any account still has room, not the mean of a spent one and a fresh one.",
+          "minimum": 0
+        },
+        "leastUsedAccountId": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "The account the two figures above and below describe."
+        },
+        "burnRatio": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "description": "Actual burn over the burn an even spend of the window would have reached. 1.0 is exactly on pace. Null when no honest comparison exists — no reset to measure against, or a window too young to divide by.\n\nNOT the answer to \"should I run more work\": it describes one account, and a pool with staggered resets and failover routinely shows several accounts over pace while the pool as a whole has room. The pool-level signed figure is on `/public/v1/runway`.",
+          "minimum": 0
+        },
+        "burnTone": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PublicToneDto"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "outlookTone": {
+          "$ref": "#/$defs/PublicToneDto"
+        },
+        "reportingCount": {
+          "type": "integer",
+          "description": "Accounts reporting a weekly reading, out of those that could.",
+          "minimum": 0
+        },
+        "eligibleTotal": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "willRunOut": {
+          "type": "integer",
+          "description": "How many reach 100% before their own reset, and how many already have.",
+          "minimum": 0
+        },
+        "alreadySpent": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "learning": {
+          "type": "integer",
+          "description": "Reporting accounts EXCLUDED from `willRunOut` because their burn is not measured yet — under an hour into the window, or still at 0%. A reader shown only `willRunOut` reads the exclusion as good news.",
+          "minimum": 0
+        },
+        "unstarted": {
+          "type": "integer",
+          "description": "Of `learning`, the weekly windows the provider has not started. `resetsAt` never names one: with nothing spent the provider re-stamps the reset on every poll, so it is a sliding placeholder and not a deadline.",
+          "minimum": 0
+        },
+        "resetsAt": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Earliest weekly reset in the class, and whose.",
+          "format": "date-time"
+        },
+        "resetsAtAccountId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "singlePointOfFailure": {
+          "type": "boolean",
+          "description": "One account or fewer can serve this class; a single failure stops it."
+        },
+        "fiveHourRoom": {
+          "type": "integer",
+          "description": "Accounts that can serve right now.",
+          "minimum": 0
+        },
+        "fiveHourRunningHot": {
+          "type": "integer",
+          "description": "Reporting accounts projected to hit the 5-hour limit before it resets.",
+          "minimum": 0
+        },
+        "fiveHourWaiting": {
+          "type": "integer",
+          "description": "Held by the 5-hour limit ALONE — capacity a lift restores. An account also out of its weekly quota is excluded: the lift gives it nothing, and counting it here would promise a recovery that never arrives.",
+          "minimum": 0
+        },
+        "fiveHourUnavailable": {
+          "type": "integer",
+          "description": "Paused, cooling down, token-expired, usage-429 or weekly-spent.",
+          "minimum": 0
+        },
+        "fiveHourUnknown": {
+          "type": "integer",
+          "description": "No 5-hour reading at all. Never counted as zero.",
+          "minimum": 0
+        },
+        "fiveHourUnread": {
+          "type": "boolean",
+          "description": "True when nothing is known about this class's 5-hour state. Codex accounts report no 5-hour window at all, so this is a standing condition for a pool holding one, not a transient error."
+        },
+        "nextLiftAt": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Earliest future lift among this class's waiting accounts.",
+          "format": "date-time"
+        },
+        "nextLiftAccountId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "classId",
+        "label",
+        "utilizationPct",
+        "leastUsedAccountId",
+        "burnRatio",
+        "burnTone",
+        "outlookTone",
+        "reportingCount",
+        "eligibleTotal",
+        "willRunOut",
+        "alreadySpent",
+        "learning",
+        "unstarted",
+        "resetsAt",
+        "resetsAtAccountId",
+        "singlePointOfFailure",
+        "fiveHourRoom",
+        "fiveHourRunningHot",
+        "fiveHourWaiting",
+        "fiveHourUnavailable",
+        "fiveHourUnknown",
+        "fiveHourUnread",
+        "nextLiftAt",
+        "nextLiftAccountId"
+      ],
+      "description": "One servable class's weekly budget and 5-hour governor state.\n\nAccount references are IDs only. Names live once, on `/public/v1/accounts`, and a consumer joins on these — re-serving them here would be the same fact in two places, free to drift.",
+      "additionalProperties": true
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:clankermux:public.pacing.v1",
+  "$comment": "Generated from public DTOs. Unknown properties are accepted; producer allowlist tests enforce privacy. Compatibility metadata fields are optional for older v1 servers."
+}

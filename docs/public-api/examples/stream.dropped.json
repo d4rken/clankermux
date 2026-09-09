@@ -1,0 +1,5 @@
+{
+  "type": "request.dropped",
+  "id": "req_refused_example",
+  "statusCode": 429
+}

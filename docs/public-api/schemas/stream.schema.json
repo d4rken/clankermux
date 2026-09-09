@@ -1,0 +1,431 @@
+{
+  "$ref": "#/$defs/PublicStreamEventDto",
+  "$defs": {
+    "PublicStreamEventDto": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/PublicSnapshotEventDto"
+        },
+        {
+          "$ref": "#/$defs/PublicRequestOpenedDto"
+        },
+        {
+          "$ref": "#/$defs/PublicRequestDroppedDto"
+        },
+        {
+          "$ref": "#/$defs/PublicRequestUpstreamDto"
+        },
+        {
+          "$ref": "#/$defs/PublicRequestDoneDto"
+        }
+      ]
+    },
+    "PublicSnapshotEventDto": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "const": "active.snapshot"
+        },
+        "schema": {
+          "type": "string",
+          "const": "clankermux.public.stream.v1"
+        },
+        "generatedAt": {
+          "type": "string",
+          "description": "INSTANT.",
+          "format": "date-time"
+        },
+        "active": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/PublicActiveRequestDto"
+          }
+        }
+      },
+      "required": [
+        "type",
+        "schema",
+        "generatedAt",
+        "active"
+      ],
+      "description": "Replay of everything in flight, sent on connect. Its ARRIVAL is what tells the device the replay finished, so it is emitted unconditionally — an empty one is meaningful (it retracts rows the device still held) and suppressing it would leave a reconnecting device showing stale in-flight marks forever.",
+      "additionalProperties": true
+    },
+    "PublicActiveRequestDto": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "startedAt": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "INSTANT.",
+          "format": "date-time"
+        },
+        "method": {
+          "type": "string"
+        },
+        "path": {
+          "type": "string"
+        },
+        "project": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "model": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "phase": {
+          "$ref": "#/$defs/PublicRequestPhaseDto"
+        },
+        "accountId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "statusCode": {
+          "type": [
+            "number",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "id",
+        "startedAt",
+        "method",
+        "path",
+        "project",
+        "model",
+        "phase",
+        "accountId",
+        "statusCode"
+      ],
+      "description": "One in-flight request inside the snapshot.",
+      "additionalProperties": true
+    },
+    "PublicRequestPhaseDto": {
+      "type": "string",
+      "enum": [
+        "pending",
+        "streaming",
+        "other"
+      ],
+      "description": "The phase of a request that has not produced a terminal event yet.\n\nDESCRIPTIVE, not a discriminator: the value describes a record the client renders either way, so it carries `other` like every other descriptive enum here. Forwarding the internal phase verbatim would hand a device a value its firmware does not know, and the record it sits in — the connect-time replay snapshot — is the one a client cannot afford to reject."
+    },
+    "PublicRequestOpenedDto": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "const": "request.opened"
+        },
+        "id": {
+          "type": "string"
+        },
+        "at": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "INSTANT.",
+          "format": "date-time"
+        },
+        "method": {
+          "type": "string"
+        },
+        "path": {
+          "type": "string"
+        },
+        "project": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "model": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "type",
+        "id",
+        "at",
+        "method",
+        "path",
+        "project",
+        "model"
+      ],
+      "description": "A request arrived and was admitted; no upstream has been chosen yet.",
+      "additionalProperties": true
+    },
+    "PublicRequestDroppedDto": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "const": "request.dropped"
+        },
+        "id": {
+          "type": "string"
+        },
+        "statusCode": {
+          "type": [
+            "number",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "type",
+        "id",
+        "statusCode"
+      ],
+      "description": "A request that will never produce a completion — rejected at admission, a forced-account failure, a pinned-target refusal, or a probe. A device holding it as pending must DISCARD it rather than render it as an error: nothing else in the system has a row for it either.",
+      "additionalProperties": true
+    },
+    "PublicRequestUpstreamDto": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "const": "request.upstream"
+        },
+        "id": {
+          "type": "string"
+        },
+        "at": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "INSTANT.",
+          "format": "date-time"
+        },
+        "method": {
+          "type": "string"
+        },
+        "path": {
+          "type": "string"
+        },
+        "accountId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "statusCode": {
+          "type": "number"
+        },
+        "project": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "model": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "type",
+        "id",
+        "at",
+        "method",
+        "path",
+        "accountId",
+        "statusCode",
+        "project",
+        "model"
+      ],
+      "description": "An upstream account was selected and answered with headers.",
+      "additionalProperties": true
+    },
+    "PublicRequestDoneDto": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "const": "request.done"
+        },
+        "id": {
+          "type": "string"
+        },
+        "at": {
+          "type": "string",
+          "description": "INSTANT.",
+          "format": "date-time"
+        },
+        "method": {
+          "type": "string"
+        },
+        "path": {
+          "type": "string"
+        },
+        "accountId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "statusCode": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "success": {
+          "type": "boolean"
+        },
+        "rateLimited": {
+          "type": "boolean"
+        },
+        "responseTimeMs": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "description": "DURATION, ms.",
+          "minimum": 0
+        },
+        "failoverAttempts": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "model": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "project": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "totalTokens": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "totalTokensBasis": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PublicTokenBasisDto"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Where `totalTokens` came from, or null when nothing states it.\n\nADDITIVE, and the total keeps its name, its type and its value: the widgets use the number, so the fix is to say what it is rather than to withhold it. `provider` is a count the response reported; `estimated` is the proxy's `ceil(generatedChars / 4)` fallback, which is what a response with no output usage or an uncleanly-ended stream gets — a routine case, not an error.\n\nNULL means the basis is unknown (there is no total, or the record carries no provenance). Never defaulted to `provider`: claiming a measurement nobody made is the overstatement this field exists to remove."
+        },
+        "costUsd": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "description": "What this request is ESTIMATED to have cost, in USD, from the pricing catalogue — not the operator's subscription charge. Most accounts here are flat-rate plans, where the true marginal cost of a request is nothing like this figure; what it answers is \"how much would this have cost at list price\", which is what makes two requests comparable.\n\nNULL means UNPRICED — the model is missing from the catalogue, or its entry has no rate for a bucket this request used. A number always means measured, so `0` is a request that consumed no metered tokens. The deployed shape published a failed lookup as `0`, and no consumer could tell a free request from an unpriceable one.",
+          "minimum": 0
+        },
+        "errorMessage": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PublicErrorCategoryDto"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "WHY the request failed, as an allowlisted CATEGORY — never the upstream's own text. Null when it did not fail.\n\nThe field keeps its name and its `string | null` wire type; what changed is the value space, which is now the closed set in  {@link  PublicErrorCategoryDto } . The raw message is recorder-built from the upstream response body and stays on the management surface, behind the session gate."
+        }
+      },
+      "required": [
+        "type",
+        "id",
+        "at",
+        "method",
+        "path",
+        "accountId",
+        "statusCode",
+        "success",
+        "rateLimited",
+        "responseTimeMs",
+        "failoverAttempts",
+        "model",
+        "project",
+        "totalTokens",
+        "totalTokensBasis",
+        "costUsd",
+        "errorMessage"
+      ],
+      "description": "A request completed.\n\nFLATTENED, not nested under `payload` as the internal event is. The nesting exists internally because the summary is a whole `RequestResponse` object; here it is a field list, and a device that has one array budget should not spend reader depth on a wrapper that carries no information.",
+      "additionalProperties": true
+    },
+    "PublicTokenBasisDto": {
+      "type": "string",
+      "enum": [
+        "provider",
+        "estimated"
+      ],
+      "description": "How a published token total was arrived at, as a CLOSED set.\n\nMirrors the internal `TokenCountBasis` value for value. No `other` member and no fallback value: an unrecognised or absent basis is published as NULL, which on this surface already means \"not stated\" — an `other` here would assert that a basis exists and that we know it is neither of these two, which is more than the record supports."
+    },
+    "PublicErrorCategoryDto": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/PublicStopCauseDto"
+        },
+        {
+          "type": "string",
+          "const": "client_disconnected"
+        },
+        {
+          "type": "string",
+          "const": "request_timed_out"
+        },
+        {
+          "type": "string",
+          "const": "stream_error"
+        }
+      ],
+      "description": "WHY a request failed, as a CLOSED set — never the upstream's own words.\n\n`RequestResponse.errorMessage` is built by the recorder from the upstream response body, so it can carry echoed request values and account-specific diagnostics. The deployed shape published its first 96 UTF-8 bytes on an unauthenticated stream, which bounds the LENGTH of that disclosure and nothing about its sensitivity. `/public/v1/stops` already faced this and answered it the same way: classify server-side, publish the label, keep the prose on the management surface behind the session gate.\n\nThe `/stops` vocabulary is reused verbatim rather than reinvented, so a client needs ONE table for \"why did the pool say no\" whether it is reading counts or watching the stream. The three additions are transport terminals the proxy writes itself, which are not stops at all — the request reached an account and the connection is what ended.\n\n`other` is mandatory and load-bearing, exactly as it is for a stop cause: a terminal invented tomorrow must arrive as something the firmware renders, rather than as a string its closed-set check rejects."
+    },
+    "PublicStopCauseDto": {
+      "type": "string",
+      "enum": [
+        "pool_quota_exhausted",
+        "family_weekly_exhausted",
+        "model_not_served",
+        "oauth_tokens_expired",
+        "pinned_target_unavailable",
+        "provider_overloaded",
+        "usage_throttled",
+        "context_window_exceeded",
+        "upstream_error",
+        "other"
+      ],
+      "description": "Why a request was refused, as a CLOSED set.\n\nMirrors the internal `StopCause` value for value — it is already snake_case and already carries `other`, so no renaming happens here. The mapper is still explicit rather than a cast: a cause added to the proxy later must arrive on this wire as `other`, which the firmware knows how to render, instead of as a string its closed-set check would reject."
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:clankermux:public.stream.v1",
+  "$comment": "Generated from public DTOs. Unknown properties are accepted; producer allowlist tests enforce privacy. Compatibility metadata fields are optional for older v1 servers."
+}

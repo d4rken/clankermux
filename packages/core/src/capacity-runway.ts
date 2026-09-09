@@ -1121,10 +1121,11 @@ function outcomeInstant(outcome: RunwayOutcome, now: number): number | null {
  *    down to the floor clears the horizon. Same absent field, opposite meanings,
  *    which is why `outcome.kind` has to be read alongside it.
  *
- * Rounded AWAY FROM ZERO in both directions, so the figure always understates
- * the pool's comfort: a margin is the increase the pool is known to survive, a
- * deficit is a cut the probe proved sufficient. Rounding a deficit down would
- * advise a cut that the grid step above it demonstrably failed at.
+ * Rounded away from zero after removing floating-point noise. A margin names
+ * the FIRST FAILING 1% probe step, not an increase proved safe; it can sit one
+ * grid step beyond the continuous threshold. A deficit names the tested cut
+ * that clears the horizon. Both remain approximate model thresholds rather
+ * than automatic concurrency targets.
  */
 export function runwayPaceHeadroom(
 	outcome: RunwayOutcome,

@@ -1,0 +1,66 @@
+{
+  "schema": "clankermux.public.workload-headroom.v1",
+  "intervalKind": "fixed_horizon",
+  "generatedAt": "2026-09-09T12:00:00.000Z",
+  "horizonMs": 1209600000,
+  "rows": [
+    {
+      "guidanceState": "uncertain",
+      "nextReset": {
+        "intervalKind": "until_next_weekly_reset",
+        "guidanceState": "uncertain",
+        "headroomAbsence": "structural_evidence",
+        "resetsAt": "2026-09-11T12:00:00.000Z",
+        "outcomeKind": "beyond_horizon",
+        "exhaustsAt": null,
+        "headroomPct": null,
+        "headroomDirection": null,
+        "projectionBasis": "structural"
+      },
+      "dimensionKind": "class",
+      "dimensionId": "anthropic",
+      "label": "Claude",
+      "outcomeKind": "beyond_horizon",
+      "exhaustsAt": null,
+      "headroomPct": 3,
+      "headroomDirection": "margin",
+      "headroomBasis": "exact",
+      "headroomAbsence": null,
+      "projectionBasis": "structural",
+      "eligibleAccounts": 1,
+      "unreadableAccounts": 0,
+      "unopenedAccounts": 0,
+      "learningAccounts": 0,
+      "spentAccounts": 0
+    },
+    {
+      "guidanceState": "uncertain",
+      "nextReset": {
+        "intervalKind": "until_next_weekly_reset",
+        "guidanceState": "uncertain",
+        "headroomAbsence": "structural_evidence",
+        "resetsAt": "2026-09-11T12:00:00.000Z",
+        "outcomeKind": "runway",
+        "exhaustsAt": "2026-09-10T18:00:00.000Z",
+        "headroomPct": null,
+        "headroomDirection": null,
+        "projectionBasis": "structural"
+      },
+      "dimensionKind": "family",
+      "dimensionId": "fable",
+      "label": "Fable",
+      "outcomeKind": "runway",
+      "exhaustsAt": "2026-09-10T18:00:00.000Z",
+      "headroomPct": 38,
+      "headroomDirection": "deficit",
+      "headroomBasis": "conservative_bound",
+      "headroomAbsence": null,
+      "projectionBasis": "structural",
+      "eligibleAccounts": 1,
+      "unreadableAccounts": 0,
+      "unopenedAccounts": 0,
+      "learningAccounts": 0,
+      "spentAccounts": 0
+    }
+  ]
+}

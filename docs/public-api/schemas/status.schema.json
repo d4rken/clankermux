@@ -1,0 +1,363 @@
+{
+  "$ref": "#/$defs/PublicStatusDto",
+  "$defs": {
+    "PublicStatusDto": {
+      "type": "object",
+      "properties": {
+        "schema": {
+          "type": "string",
+          "const": "clankermux.public.status.v1"
+        },
+        "generatedAt": {
+          "type": "string",
+          "description": "INSTANT this payload describes. Also the device's only wall clock.",
+          "format": "date-time"
+        },
+        "status": {
+          "type": "string",
+          "enum": [
+            "ok",
+            "degraded",
+            "unhealthy"
+          ]
+        },
+        "uptimeS": {
+          "type": "number",
+          "description": "DURATION, seconds.",
+          "minimum": 0
+        },
+        "version": {
+          "type": "string"
+        },
+        "pool": {
+          "type": "object",
+          "properties": {
+            "configured": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "defaultRoutable": {
+              "type": "integer",
+              "description": "Routable in `routing.context` — the same question, so the same answer.",
+              "minimum": 0
+            },
+            "paused": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "rateLimited": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "usageExhausted": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "nextAvailableAt": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "INSTANT.",
+              "format": "date-time"
+            }
+          },
+          "required": [
+            "configured",
+            "defaultRoutable",
+            "paused",
+            "rateLimited",
+            "usageExhausted",
+            "nextAvailableAt"
+          ],
+          "additionalProperties": true
+        },
+        "routing": {
+          "type": "object",
+          "properties": {
+            "context": {
+              "type": "string"
+            },
+            "defaultCandidateAccountId": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "context",
+            "defaultCandidateAccountId"
+          ],
+          "additionalProperties": true
+        },
+        "usage": {
+          "type": "object",
+          "properties": {
+            "fiveHour": {
+              "$ref": "#/$defs/PublicWindowAggregateDto"
+            },
+            "sevenDay": {
+              "$ref": "#/$defs/PublicWindowAggregateDto"
+            },
+            "worstAccountUtilizationPct": {
+              "type": [
+                "number",
+                "null"
+              ],
+              "minimum": 0
+            }
+          },
+          "required": [
+            "fiveHour",
+            "sevenDay",
+            "worstAccountUtilizationPct"
+          ],
+          "additionalProperties": true
+        },
+        "providers": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/PublicProviderDto"
+          }
+        }
+      },
+      "required": [
+        "schema",
+        "generatedAt",
+        "status",
+        "uptimeS",
+        "version",
+        "pool",
+        "routing",
+        "usage",
+        "providers"
+      ],
+      "description": "`GET /public/v1/status`. One record array (`providers`), one nested.",
+      "additionalProperties": true
+    },
+    "PublicWindowAggregateDto": {
+      "type": "object",
+      "properties": {
+        "meanUtilizationPct": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "description": "UNWEIGHTED ARITHMETIC MEAN over the accounts that reported the window, paused and stale ones included. Named for what it is: the deployed `fiveHourPct` was this number under a name that implied a pool utilization.\n\nThe percentages behind it may derive from DIFFERENT PLAN CAPACITIES — a Max-20 account and a Pro account both report \"62%\" of quotas that are not the same size — so it is a mean of percentages and never a statement about how much work the pool can still do.",
+          "minimum": 0
+        },
+        "contributingAccountCount": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "unknownAccountCount": {
+          "type": "integer",
+          "description": "Every account in scope that did not contribute. The two counts sum.",
+          "minimum": 0
+        },
+        "earliestResetsAt": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "EARLIEST reset among the contributors, as an INSTANT. Never a mean of reset instants — the mean of two reset times is a moment at which nothing happens.",
+          "format": "date-time"
+        },
+        "oldestObservedAt": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "INSTANT the OLDEST contributing reading was observed, or null when no contributor states one.\n\nADDITIVE, and deliberately NOT `generatedAt`: that one is when this payload was built, this one is when the evidence in it was measured. They can be twenty minutes apart, and the deployed shape published only the first — so a status-only widget rendered an aged mean as a current one.",
+          "format": "date-time"
+        },
+        "unobservedContributingCount": {
+          "type": "integer",
+          "description": "How many contributors carry NO observation time at all (a reconstructed reading, seeded untimed because it cannot honestly say when it was taken).\n\nTheir percentages ARE in the mean, so the instant above does not speak for them. Accounts that contributed nothing are counted by `unknownAccountCount`, not here.",
+          "minimum": 0
+        },
+        "leastUsedUtilizationPct": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "description": "The LOWEST utilization among the contributors — the account with the most room left.\n\nPublished beside the mean because it is the one that answers a widget's actual question. Routing picks ONE account, so what decides whether the next request goes through is whether ANY account still has room; a mean of a spent account and a fresh one describes neither of them. Null when nothing contributed.",
+          "minimum": 0
+        },
+        "leastUsedAccountId": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Whose that reading is: a join key against `accounts[].id`, so NEVER truncated. Without it the percentage names no account and cannot be acted on."
+        }
+      },
+      "required": [
+        "meanUtilizationPct",
+        "contributingAccountCount",
+        "unknownAccountCount",
+        "earliestResetsAt",
+        "oldestObservedAt",
+        "unobservedContributingCount",
+        "leastUsedUtilizationPct",
+        "leastUsedAccountId"
+      ],
+      "description": "A pooled aggregate over one window class.",
+      "additionalProperties": true
+    },
+    "PublicProviderDto": {
+      "type": "object",
+      "properties": {
+        "provider": {
+          "type": "string",
+          "description": "A join key against `accounts[].provider`, so NEVER truncated."
+        },
+        "anyOverload": {
+          "$ref": "#/$defs/PublicOverloadDto",
+          "description": "Worst state across ALL this provider's buckets, family ones included."
+        },
+        "providerWideOverload": {
+          "$ref": "#/$defs/PublicOverloadDto",
+          "description": "The provider-WIDE bucket alone, which gates every model family at once."
+        },
+        "scopedLimits": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/PublicScopedLimitDto"
+          }
+        }
+      },
+      "required": [
+        "provider",
+        "anyOverload",
+        "providerWideOverload",
+        "scopedLimits"
+      ],
+      "description": "One provider on the wire.\n\nProvider-level facts belong HERE, not copied onto every account of the provider: the deployed shape published one overload deadline N times and left a client to notice they were the same fact.",
+      "additionalProperties": true
+    },
+    "PublicOverloadDto": {
+      "type": "object",
+      "properties": {
+        "state": {
+          "$ref": "#/$defs/PublicOverloadStateDto"
+        },
+        "until": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "INSTANT the block lifts. Null while closed AND while half-open.",
+          "format": "date-time"
+        },
+        "probeActive": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "state",
+        "until",
+        "probeActive"
+      ],
+      "description": "The overload breaker for one provider.",
+      "additionalProperties": true
+    },
+    "PublicOverloadStateDto": {
+      "type": "string",
+      "enum": [
+        "closed",
+        "open",
+        "half_open",
+        "other"
+      ],
+      "description": "The provider-overload breaker, as a CLOSED set.\n\n`half_open` is why this is a state rather than a deadline: a half-open breaker has no `until` at all and is emphatically not closed, so a flat timestamp reports the one case worth showing as \"fine\"."
+    },
+    "PublicScopedLimitDto": {
+      "type": "object",
+      "properties": {
+        "meanUtilizationPct": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "description": "UNWEIGHTED ARITHMETIC MEAN over the accounts that reported the window, paused and stale ones included. Named for what it is: the deployed `fiveHourPct` was this number under a name that implied a pool utilization.\n\nThe percentages behind it may derive from DIFFERENT PLAN CAPACITIES — a Max-20 account and a Pro account both report \"62%\" of quotas that are not the same size — so it is a mean of percentages and never a statement about how much work the pool can still do.",
+          "minimum": 0
+        },
+        "contributingAccountCount": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "unknownAccountCount": {
+          "type": "integer",
+          "description": "Every account in scope that did not contribute. The two counts sum.",
+          "minimum": 0
+        },
+        "earliestResetsAt": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "EARLIEST reset among the contributors, as an INSTANT. Never a mean of reset instants — the mean of two reset times is a moment at which nothing happens.",
+          "format": "date-time"
+        },
+        "oldestObservedAt": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "INSTANT the OLDEST contributing reading was observed, or null when no contributor states one.\n\nADDITIVE, and deliberately NOT `generatedAt`: that one is when this payload was built, this one is when the evidence in it was measured. They can be twenty minutes apart, and the deployed shape published only the first — so a status-only widget rendered an aged mean as a current one.",
+          "format": "date-time"
+        },
+        "unobservedContributingCount": {
+          "type": "integer",
+          "description": "How many contributors carry NO observation time at all (a reconstructed reading, seeded untimed because it cannot honestly say when it was taken).\n\nTheir percentages ARE in the mean, so the instant above does not speak for them. Accounts that contributed nothing are counted by `unknownAccountCount`, not here.",
+          "minimum": 0
+        },
+        "leastUsedUtilizationPct": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "description": "The LOWEST utilization among the contributors — the account with the most room left.\n\nPublished beside the mean because it is the one that answers a widget's actual question. Routing picks ONE account, so what decides whether the next request goes through is whether ANY account still has room; a mean of a spent account and a fresh one describes neither of them. Null when nothing contributed.",
+          "minimum": 0
+        },
+        "leastUsedAccountId": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Whose that reading is: a join key against `accounts[].id`, so NEVER truncated. Without it the percentage names no account and cannot be acted on."
+        },
+        "scopeId": {
+          "type": "string",
+          "description": "Stable key, joinable against `accounts[].windows[].scopeId`."
+        },
+        "label": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Display text only."
+        }
+      },
+      "required": [
+        "contributingAccountCount",
+        "earliestResetsAt",
+        "label",
+        "leastUsedAccountId",
+        "leastUsedUtilizationPct",
+        "meanUtilizationPct",
+        "oldestObservedAt",
+        "scopeId",
+        "unknownAccountCount",
+        "unobservedContributingCount"
+      ],
+      "description": "One provider-scoped limit, pooled.",
+      "additionalProperties": true
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:clankermux:public.status.v1",
+  "$comment": "Generated from public DTOs. Unknown properties are accepted; producer allowlist tests enforce privacy. Compatibility metadata fields are optional for older v1 servers."
+}

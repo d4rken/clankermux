@@ -1,0 +1,158 @@
+{
+  "$ref": "#/$defs/PublicStopsDto",
+  "$defs": {
+    "PublicStopsDto": {
+      "type": "object",
+      "properties": {
+        "schema": {
+          "type": "string",
+          "const": "clankermux.public.stops.v1"
+        },
+        "generatedAt": {
+          "type": "string",
+          "description": "INSTANT this payload describes.",
+          "format": "date-time"
+        },
+        "range": {
+          "type": "string",
+          "const": "7d",
+          "description": "Fixed. Stated on the wire so a client never assumes a window length."
+        },
+        "windowStartsAt": {
+          "type": "string",
+          "description": "INSTANT the counted window opens.",
+          "format": "date-time"
+        },
+        "windowEndsAt": {
+          "type": "string",
+          "description": "INSTANT it closes — the read's own clock, not the client's.",
+          "format": "date-time"
+        },
+        "totalRequests": {
+          "type": "integer",
+          "description": "The denominator. A blocked count without it is not a rate.",
+          "minimum": 0
+        },
+        "blockedRequests": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "causes": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/PublicStopCauseRowDto"
+          }
+        },
+        "candidates": {
+          "type": "object",
+          "properties": {
+            "observedRequests": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "zeroCandidateRequests": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "distribution": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "candidatesCount": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "requests": {
+                    "type": "integer",
+                    "minimum": 0
+                  }
+                },
+                "required": [
+                  "candidatesCount",
+                  "requests"
+                ],
+                "additionalProperties": true
+              }
+            }
+          },
+          "required": [
+            "observedRequests",
+            "zeroCandidateRequests",
+            "distribution"
+          ],
+          "description": "How much redundancy the pool actually had, per request: how many accounts were eligible to serve each one. The leading indicator no projection can see — a pool that never drops below two candidates has margin, and one sitting at one candidate is a single failure from a stop however much quota it reports.\n\n`observedRequests` is the denominator for THIS block alone and is normally smaller than `totalRequests`: eligibility is only recorded for requests that reached routing.",
+          "additionalProperties": true
+        }
+      },
+      "required": [
+        "schema",
+        "generatedAt",
+        "range",
+        "windowStartsAt",
+        "windowEndsAt",
+        "totalRequests",
+        "blockedRequests",
+        "causes",
+        "candidates"
+      ],
+      "description": "`GET /public/v1/stops` — how often the pool actually refused a request, and why.\n\nThe counterpart to `/public/v1/runway`: that one is a PROJECTION, this one is what already happened. A panel showing plenty of runway while requests are being refused is showing the two halves of the same question, which is why this is worth publishing at all.\n\nFIXED AT SEVEN DAYS, with no query parameter, and the omission is deliberate. The dashboard's `/api/analytics/stops-history` takes a caller's range because a session picked it; this surface is unauthenticated, so a range parameter is an unauthenticated caller choosing how much of the request table the server scans. Seven days is one figure, memoized, the same for everyone.\n\nDeliberately absent, and none of it may be added back:\n\n - `series`. A per-bucket time series is a second array level inside the    cause records, past what the device's streaming scanner can descend into.  - `sampleErrorMessage`. A raw upstream `error_message` is unreviewed text    from a third party on an unauthenticated wire; it exists as provenance for    a human reading the dashboard, and the cause label is the machine-readable    fact.  - `topRequestedModel`. Which model a caller asked for is traffic detail, not    a pool fact, and this surface is the pool's.",
+      "additionalProperties": true
+    },
+    "PublicStopCauseRowDto": {
+      "type": "object",
+      "properties": {
+        "cause": {
+          "$ref": "#/$defs/PublicStopCauseDto"
+        },
+        "count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "firstSeenAt": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "INSTANT of the first block under this cause inside the window.",
+          "format": "date-time"
+        },
+        "lastSeenAt": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "INSTANT of the most recent one.",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "cause",
+        "count",
+        "firstSeenAt",
+        "lastSeenAt"
+      ],
+      "description": "One cause and how often it stopped a request in the window.",
+      "additionalProperties": true
+    },
+    "PublicStopCauseDto": {
+      "type": "string",
+      "enum": [
+        "pool_quota_exhausted",
+        "family_weekly_exhausted",
+        "model_not_served",
+        "oauth_tokens_expired",
+        "pinned_target_unavailable",
+        "provider_overloaded",
+        "usage_throttled",
+        "context_window_exceeded",
+        "upstream_error",
+        "other"
+      ],
+      "description": "Why a request was refused, as a CLOSED set.\n\nMirrors the internal `StopCause` value for value — it is already snake_case and already carries `other`, so no renaming happens here. The mapper is still explicit rather than a cast: a cause added to the proxy later must arrive on this wire as `other`, which the firmware knows how to render, instead of as a string its closed-set check would reject."
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:clankermux:public.stops.v1",
+  "$comment": "Generated from public DTOs. Unknown properties are accepted; producer allowlist tests enforce privacy. Compatibility metadata fields are optional for older v1 servers."
+}

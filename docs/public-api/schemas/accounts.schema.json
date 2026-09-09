@@ -1,0 +1,334 @@
+{
+  "$ref": "#/$defs/PublicAccountsDto",
+  "$defs": {
+    "PublicAccountsDto": {
+      "type": "object",
+      "properties": {
+        "schema": {
+          "type": "string",
+          "const": "clankermux.public.accounts.v1"
+        },
+        "generatedAt": {
+          "type": "string",
+          "description": "INSTANT this payload describes.",
+          "format": "date-time"
+        },
+        "accounts": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/PublicAccountDto"
+          }
+        }
+      },
+      "required": [
+        "schema",
+        "generatedAt",
+        "accounts"
+      ],
+      "description": "`GET /public/v1/accounts`. One record array (`accounts`), one nested array inside it (`windows`), and nothing deeper.\n\nOrdered by account NAME, ascending. The order is a stable display order and carries no routing meaning: the routing answer is `isDefaultCandidate`, which says so on the record rather than hiding in an array index.",
+      "additionalProperties": true
+    },
+    "PublicAccountDto": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Stable id, so a stream event can be joined to a name. NEVER truncated."
+        },
+        "name": {
+          "type": "string"
+        },
+        "provider": {
+          "type": "string",
+          "description": "A join key against `providers[].provider` on status. NEVER truncated."
+        },
+        "isDefaultCandidate": {
+          "type": "boolean",
+          "description": "The ONE account a fresh, unpinned, nominal-size request would be routed to right now — not \"the account the load balancer is using\", which is not a thing that exists. `routing.context` on `/public/v1/status` names the question this answers, and the gates it deliberately omits."
+        },
+        "availability": {
+          "$ref": "#/$defs/PublicAvailabilityDto"
+        },
+        "credential": {
+          "$ref": "#/$defs/PublicCredentialDto"
+        },
+        "measurementState": {
+          "$ref": "#/$defs/PublicMeasurementStateDto"
+        },
+        "usageObservedAt": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "INSTANT the reading behind every window below was observed.",
+          "format": "date-time"
+        },
+        "utilizationPct": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "description": "DERIVED: the max `utilizationPct` across the account-wide windows below. Served because both clients render an overall gauge; it is a rollup of `windows[]` and never a separate measurement.",
+          "minimum": 0
+        },
+        "windows": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/PublicWindowDto"
+          }
+        }
+      },
+      "required": [
+        "id",
+        "name",
+        "provider",
+        "isDefaultCandidate",
+        "availability",
+        "credential",
+        "measurementState",
+        "usageObservedAt",
+        "utilizationPct",
+        "windows"
+      ],
+      "description": "One account on the wire. Field list is exhaustive and hand-maintained.",
+      "additionalProperties": true
+    },
+    "PublicAvailabilityDto": {
+      "type": "object",
+      "properties": {
+        "state": {
+          "$ref": "#/$defs/PublicAvailabilityState"
+        },
+        "reason": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PublicAvailabilityReason"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "availableAt": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "INSTANT the block named by `state` lifts, and null whenever `state` is `available` — an account nothing is holding has no future moment at which it becomes available, so any instant beside that state is a different fact wearing this field's name.\n\nNull on a gated state too whenever nothing schedules the lift: a pause ends when an operator says so, and a spent window whose reset the provider never reported has no known turnover.",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "state",
+        "reason",
+        "availableAt"
+      ],
+      "description": "Whether the account can be routed to, and until when it cannot.",
+      "additionalProperties": true
+    },
+    "PublicAvailabilityState": {
+      "type": "string",
+      "enum": [
+        "available",
+        "paused",
+        "rate_limited",
+        "usage_exhausted",
+        "blocked",
+        "other"
+      ],
+      "description": "Whether an account can be routed to, and why not.\n\nORTHOGONAL to  {@link  PublicCredentialStateDto } : a valid credential on a rate-limited account and an expired credential on an idle one are different situations, and the deployed shape's single `health` axis could express neither. `other` is not a bug bucket — it is the honest answer when the provider reported a rate-limit status our vocabulary has not been taught. Reporting `available` there is exactly how `rejected` went unnoticed once."
+    },
+    "PublicAvailabilityReason": {
+      "type": "string",
+      "enum": [
+        "manual",
+        "failure_threshold",
+        "overage",
+        "peak_hours",
+        "oauth_invalid_grant",
+        "rate_limit_window",
+        "subscription_expired",
+        "usage_permission_denied",
+        "queueing",
+        "payment_required",
+        "other"
+      ],
+      "description": "The finer reason behind an availability state, or null when the state already says everything there is to say.\n\nEmitted ONLY where it adds information: a `usage_exhausted` state needs no reason repeating it back, but a `paused` state has seven quite different meanings and a `rate_limited` state does not distinguish the provider throttling us from our own queue holding a request back."
+    },
+    "PublicCredentialDto": {
+      "type": "object",
+      "properties": {
+        "state": {
+          "$ref": "#/$defs/PublicCredentialStateDto"
+        },
+        "expiresAt": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "INSTANT the access token expires; null when there is no such deadline.",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "state",
+        "expiresAt"
+      ],
+      "description": "The stored credential, on its own axis.",
+      "additionalProperties": true
+    },
+    "PublicCredentialStateDto": {
+      "type": "string",
+      "enum": [
+        "valid",
+        "refreshable",
+        "expired",
+        "invalid",
+        "missing",
+        "not_applicable",
+        "other"
+      ],
+      "description": "The stored credential's state — an axis of its own, deliberately not folded into availability.\n\nA `refreshable` credential blocks nothing (the proxy renews it on the next request), an `invalid` one needs a human at a browser, and `not_applicable` is the honest answer for an API-key provider that has no token lifecycle. Collapsing all three into one `blocked` destroys exactly the distinction the applet renders."
+    },
+    "PublicMeasurementStateDto": {
+      "type": "string",
+      "enum": [
+        "fresh",
+        "stale",
+        "missing",
+        "not_applicable",
+        "other"
+      ],
+      "description": "How well the account's usage is measured. Replaces a boolean `stale` that conflated an old reading, no reading at all, and a provider that has no such window to read."
+    },
+    "PublicWindowDto": {
+      "type": "object",
+      "properties": {
+        "kind": {
+          "$ref": "#/$defs/PublicWindowKind"
+        },
+        "scopeId": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Stable scope key for a scoped window; null for the account-wide ones."
+        },
+        "label": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Display text only. Join on `scopeId`, never on this."
+        },
+        "utilizationPct": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "observedAt": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "INSTANT the reading was observed.",
+          "format": "date-time"
+        },
+        "resetsAt": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "INSTANT the window rolls over.",
+          "format": "date-time"
+        },
+        "prediction": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PublicPredictionDto"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "kind",
+        "scopeId",
+        "label",
+        "utilizationPct",
+        "observedAt",
+        "resetsAt",
+        "prediction"
+      ],
+      "description": "One quota window on the wire.\n\nREPLACES the deployed `limits[]`, `fiveHourPct`, `fiveHourResetsAt`, `sevenDayPct` and `sevenDayResetsAt` together: those represented one observation three times in two vocabularies, and a client had no way to know which copy to believe when they disagreed.",
+      "additionalProperties": true
+    },
+    "PublicWindowKind": {
+      "type": "string",
+      "enum": [
+        "five_hour",
+        "seven_day",
+        "weekly_scoped",
+        "other"
+      ],
+      "description": "The quota windows this surface names."
+    },
+    "PublicPredictionDto": {
+      "type": "object",
+      "properties": {
+        "predictedUtilizationAtResetPct": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "description": "Where the window is projected to land at its reset, 0..100.",
+          "minimum": 0
+        },
+        "exhaustsAt": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "INSTANT the window is projected to hit 100%.",
+          "format": "date-time"
+        },
+        "willExhaustBeforeReset": {
+          "type": "boolean"
+        },
+        "lowConfidence": {
+          "type": "boolean",
+          "description": "The estimator's own confidence flag. A low-confidence projection is real evidence but must never be rendered at full severity."
+        },
+        "state": {
+          "$ref": "#/$defs/PublicPredictionState"
+        }
+      },
+      "required": [
+        "predictedUtilizationAtResetPct",
+        "exhaustsAt",
+        "willExhaustBeforeReset",
+        "lowConfidence",
+        "state"
+      ],
+      "description": "The estimator's projection for ONE window, or null when there is none.\n\nLives INSIDE the window rather than on a resource of its own: a measurement and the projection built from it describe the same thing and change together, and splitting them lets a client pair a fresh percentage with a projection computed from an older reading without any way to notice.",
+      "additionalProperties": true
+    },
+    "PublicPredictionState": {
+      "type": "string",
+      "enum": [
+        "rising",
+        "stable",
+        "exhausted",
+        "other"
+      ],
+      "description": "What the usage estimator found for a window.\n\n`insufficient_data` is absent by construction: a prediction with no established trend is not served at all (the record is null), because its `slopePerHour` is a placeholder 0 that would read as a measured flat trend."
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:clankermux:public.accounts.v1",
+  "$comment": "Generated from public DTOs. Unknown properties are accepted; producer allowlist tests enforce privacy. Compatibility metadata fields are optional for older v1 servers."
+}

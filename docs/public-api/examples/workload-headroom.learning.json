@@ -1,0 +1,37 @@
+{
+  "schema": "clankermux.public.workload-headroom.v1",
+  "generatedAt": "2026-09-09T12:00:00.000Z",
+  "intervalKind": "fixed_horizon",
+  "horizonMs": 1209600000,
+  "rows": [
+    {
+      "dimensionKind": "class",
+      "dimensionId": "anthropic",
+      "label": "Claude",
+      "nextReset": {
+        "intervalKind": "until_next_weekly_reset",
+        "resetsAt": "2026-09-10T12:00:00.000Z",
+        "outcomeKind": "unknown",
+        "exhaustsAt": null,
+        "headroomPct": null,
+        "headroomDirection": null,
+        "headroomAbsence": "learning_accounts",
+        "projectionBasis": null,
+        "guidanceState": "learning"
+      },
+      "outcomeKind": "unknown",
+      "exhaustsAt": null,
+      "headroomPct": null,
+      "headroomDirection": null,
+      "headroomBasis": "exact",
+      "headroomAbsence": "learning_accounts",
+      "projectionBasis": null,
+      "guidanceState": "learning",
+      "eligibleAccounts": 1,
+      "unreadableAccounts": 1,
+      "unopenedAccounts": 0,
+      "learningAccounts": 1,
+      "spentAccounts": 0
+    }
+  ]
+}

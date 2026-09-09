@@ -1,11 +1,12 @@
 # External widget integration: pacing and next-reset guidance
 
-Updated 2026-09-05. Audience: maintainers of desk widgets, applets, and other
+Audience: maintainers of desk widgets, applets, and other
 external ClankerMux consumers.
 
-The server changes accompanying this guide are **not deployed yet**. Prepare
-clients to accept both the existing response and the additive `nextReset` field.
-The schema remains `clankermux.public.workload-headroom.v1`.
+Accept older v1 responses as well as the additive interval, guidance and absence
+fields described here. The schema remains `clankermux.public.workload-headroom.v1`.
+Deployment versions vary; detect field presence. See the [public API index](public-api/README.md)
+for all seven resource schemas and complete example payloads.
 
 This guide supersedes the headline selection and null-headroom rendering rules
 in [the earlier pacing handover](handover-pacing-widget.md). Use a forecast for
@@ -22,7 +23,8 @@ capacity to imply spare Codex capacity, or add class and family percentages.
 Make `row.nextReset` the primary day-to-day planning view when it is present
 and its deadline is valid and future. Show “Until next weekly reset” and the
 deadline/countdown beside the advice. This models the interval until the
-earliest known weekly reset among the active accounts supporting that workload.
+earliest usable future weekly deadline among the workload scan inputs, before
+learning exclusions.
 It is not necessarily seven days away, and it is not a promise that every
 account recovers together. Five-hour constraints still participate in the scan.
 
@@ -35,6 +37,26 @@ For an overview widget, present one card per class rather than a single green
 pool indicator. A family card may add a constraint that its class card does not
 show. `/public/v1/runway` remains useful for API-key/pool runway context, but
 its aggregate headroom does not answer whether a particular workload can grow.
+
+## Burn ratio is not workload headroom
+
+`/pacing.classes[].burnRatio` compares the least-used account's weekly quota
+consumption with an even spend of that account's window. For example, 50% used
+after 40% of the week gives `50 / 40 = 1.25`. Converting this to
+`1 - 1 / 1.25 = 20%` describes a reduction relative to that baseline; it does
+not establish the slowdown required to make the remaining pool quota last.
+It does not model the other accounts, failover or staggered resets.
+
+Use workload headroom for recommendations on every workload row, including
+Claude, GPT and Fable. Keep burn ratio as spending context. Do not fall back
+to burn ratio when headroom is missing or stale, and do not silently replace
+next-reset guidance with the long-horizon figure.
+
+Stable row selectors are `class/anthropic`, `class/codex`, and `family/fable`
+(`dimensionKind`/`dimensionId`). Fable has no separate public `burnRatio`.
+Its family row is emitted when scoped quota is reported; an absent family row
+does not prove that the family has no accounts or unlimited capacity. A Fable
+constraint overlaps Claude capacity, so never add their headroom percentages.
 
 ## Endpoints
 
@@ -56,12 +78,38 @@ not the observation timestamp of every underlying quota reading.
 
 ## New response fields
 
+`intervalKind` at the envelope is `fixed_horizon`: the interval starts at
+`generatedAt` and ends at `generatedAt + horizonMs`. Inside `nextReset`, it is
+`until_next_weekly_reset`: the start is the same and the end is `resetsAt`.
+Both enums include `other`. Keep the existing timestamps as canonical facts.
+
+Prefer `guidanceState` over rebuilding advice from raw metrics. It exists on
+each row for the long horizon and on `nextReset` for the shorter interval:
+
+| State | Compact presentation |
+| --- | --- |
+| `increase` | Approximate pace margin, qualified by the row's `headroomBasis`. |
+| `reduce` | Approximate pace reduction, qualified by the row's `headroomBasis`. |
+| `exhausted` | Modelled quota exhausted with complete coverage. |
+| `learning` | Every eligible account is still learning burn. |
+| `unknown` | Forecast unavailable; evidence may be missing. |
+| `no_accounts` | No eligible accounts. |
+| `uncertain` | Weak evidence or incomplete coverage; no prescriptive percentage. |
+| `unquantified` | Outcome known, numeric adjustment unavailable; use `outcomeKind`. |
+| `other` or unknown value | Advice unavailable. |
+
+The state is evaluated at `generatedAt`; stale data and passed deadlines override
+it in the client. `projectionBasis` characterizes the baseline outcome, not
+every hypothetical pace probe. Even an `increase`/`reduce` state is advisory,
+not an automatic concurrency command.
+
 The following is an illustrative response fragment showing the two intervals;
 the values are not a production account snapshot:
 
 ```json
 {
   "schema": "clankermux.public.workload-headroom.v1",
+  "intervalKind": "fixed_horizon",
   "generatedAt": "2026-09-05T00:00:00.000Z",
   "horizonMs": 1209600000,
   "rows": [
@@ -69,7 +117,11 @@ the values are not a production account snapshot:
       "dimensionKind": "class",
       "dimensionId": "codex",
       "label": "GPT",
+      "guidanceState": "reduce",
       "nextReset": {
+        "intervalKind": "until_next_weekly_reset",
+        "guidanceState": "increase",
+        "headroomAbsence": null,
         "resetsAt": "2026-09-06T00:00:00.000Z",
         "outcomeKind": "beyond_horizon",
         "exhaustsAt": null,
@@ -116,18 +168,31 @@ The next-reset family calculation uses the same conservative method. Label its
 figures as bounds rather than exact recommendations. For example, a margin is
 a conservative estimate of room to grow; a deficit is a conservative cut.
 
-The nested object has no `headroomAbsence` field. The row's existing
-`headroomAbsence` describes the **long-term** calculation only. Do not copy it
-into the next-reset interpretation.
+`nextReset.headroomAbsence` describes the shorter interval: `learning_accounts`,
+`structural_evidence`, `bound_broken_by_credits`, `beyond_probe_range`,
+`not_projected`, or `other`. It is null when a numeric headroom is stated. When
+multiple barriers coexist, outcome/learning takes precedence, followed by
+unsupported credits, weak evidence and probe limits. `learning_accounts` can
+coexist with missing accounts; only `guidanceState: learning` means all eligible
+accounts are learning. The row's existing `headroomAbsence` describes the
+**long-term** calculation only. Do not copy it into the next-reset interpretation.
+
+The margin number is the first failing 1% probe step, not a tested-safe increase
+at exactly that percentage. Label it approximate; do not drive automatic agent
+counts from it. Existing percentages retain their semantics.
 
 ## Rendering rules
 
 Handle freshness and evidence before interpreting a missing headroom value.
+On updated servers, use `guidanceState` with the table above. For older servers,
+the following rules remain useful, but incomplete coverage must also suppress
+an unqualified recommendation even when `projectionBasis` is `measured`.
 
 | Condition | Suggested display and behavior |
 | --- | --- |
 | Fetch fails or the snapshot is stale | Keep the last reading with its timestamp and “Stale”; avoid presenting it as current advice. |
-| Selected row absent or `no_accounts` | “No active accounts for this workload”; do not borrow another class's row. |
+| Selected row absent | “Forecast unavailable”; for a family, scoped quota may not have been reported. Do not infer account count or unlimited capacity. |
+| `no_accounts` | “No active accounts for this workload”; do not borrow another class's row. |
 | `unknown`, `other`, or unrecognized outcome | “Forecast unavailable”; do not infer zero capacity or ample capacity. |
 | `out_now` | “Available modeled capacity exhausted”; show unreadable-account caveats if present. |
 | `projectionBasis: structural` | “Early / structural estimate”; use a subdued or cautionary forecast, without a precise consumption cut or “cut hard”. |

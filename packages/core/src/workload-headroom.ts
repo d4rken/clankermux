@@ -113,10 +113,14 @@ export type HeadroomAbsence =
  */
 export type ProjectionBasis = "measured" | "structural";
 
+/** Separate from long-horizon absence: next-reset advice has an evidence gate. */
+export type NextResetHeadroomAbsence = HeadroomAbsence | "structural-evidence";
+
 export interface NextResetGuidance {
 	resetsAtMs: number;
 	outcome: RunwayOutcome;
 	headroom: { pct: number; direction: "margin" | "deficit" } | null;
+	headroomAbsence: NextResetHeadroomAbsence | null;
 	projectionBasis: ProjectionBasis | null;
 }
 
@@ -485,16 +489,36 @@ function nextResetGuidance(
 	const outcome =
 		result?.outcome ?? computeCapacityRunway(inputs, now, horizonMs);
 	const projectionBasis = projectionBasisFor(inputs, outcome, now);
+	// Preserve the numeric model; retain WHY the existing evidence gate withheld
+	// its figure. Credits take precedence over weak evidence because more history
+	// cannot repair an unsupported family bound.
+	const headroom =
+		projectionBasis === "measured"
+			? result
+				? result.headroom
+				: runwayPaceHeadroom(outcome)
+			: null;
+	let headroomAbsence: NextResetHeadroomAbsence | null = null;
+	if (headroom === null) {
+		if (
+			outcome.kind === "unknown" ||
+			outcome.kind === "out-now" ||
+			outcome.kind === "no-accounts"
+		) {
+			headroomAbsence = absenceFor(outcome);
+		} else if (result?.absence === "bound-broken-by-credits") {
+			headroomAbsence = result.absence;
+		} else if (projectionBasis !== "measured") {
+			headroomAbsence = "structural-evidence";
+		} else {
+			headroomAbsence = absenceFor(outcome);
+		}
+	}
 	return {
 		resetsAtMs,
 		outcome,
-		// Do not turn weak evidence into a precise slowdown recommendation.
-		headroom:
-			projectionBasis === "measured"
-				? result
-					? result.headroom
-					: runwayPaceHeadroom(outcome)
-				: null,
+		headroom,
+		headroomAbsence,
 		projectionBasis,
 	};
 }
