@@ -34,6 +34,10 @@ import { AccountAddForm } from "./AccountAddForm";
 const AUTH_URL =
 	"https://claude.ai/oauth/authorize?code=true&client_id=abc123&state=xyz";
 const USER_CODE = "ABCD-1234";
+/** Failure the stubbed status poll reports, to send a leg to its error step. */
+const POLL_ERROR = "boom";
+/** Poll cadence both device flows hand to `setInterval`. */
+const POLL_INTERVAL_MS = 3000;
 
 let root: Root | null = null;
 let host: HTMLElement | null = null;
@@ -133,6 +137,61 @@ async function selectMode(optionText: string): Promise<void> {
 	});
 }
 
+/**
+ * Swaps `setInterval` for a pass-through that also hands back the leg's poll
+ * callback, so a test can drive one poll tick synchronously instead of waiting
+ * out the 3 s cadence. Only the form's own interval is captured; every other
+ * timer (React, happy-dom) is scheduled untouched. Undone by `mock.restore()`.
+ */
+function capturePoll(): { fire: () => Promise<void> } {
+	const captured: { poll: ((...args: unknown[]) => unknown) | null } = {
+		poll: null,
+	};
+	const realSetInterval = globalThis.setInterval;
+	spyOn(globalThis, "setInterval").mockImplementation(((
+		handler: unknown,
+		ms?: number,
+		...args: unknown[]
+	) => {
+		if (typeof handler === "function" && ms === POLL_INTERVAL_MS) {
+			captured.poll = handler as (...args: unknown[]) => unknown;
+		}
+		return realSetInterval.call(
+			globalThis,
+			handler as () => void,
+			ms as number,
+			...args,
+		);
+	}) as unknown as typeof globalThis.setInterval);
+
+	return {
+		fire: async () => {
+			const poll = captured.poll;
+			if (!poll) throw new Error("no poll callback captured");
+			await act(async () => {
+				await poll();
+			});
+		},
+	};
+}
+
+/** Mount the form, pick this leg's mode, name the account and click Start. */
+async function startLeg(optionText: string, startLabel: string): Promise<void> {
+	await renderForm(async () => ({
+		authUrl: AUTH_URL,
+		sessionId: "session-1",
+	}));
+	await selectMode(optionText);
+
+	const name = document.querySelector("#name") as HTMLInputElement;
+	await act(async () => {
+		typeInto(name, "work-account");
+	});
+	await act(async () => {
+		byText<HTMLButtonElement>("button", startLabel).click();
+	});
+}
+
 afterEach(async () => {
 	await act(async () => {
 		root?.unmount();
@@ -179,7 +238,21 @@ describe("AccountAddForm — authorization link", () => {
 /** Installs the device-flow spies for one leg. */
 type StubDeviceFlow = () => void;
 
-const DEVICE_FLOWS: Array<[string, string, string, StubDeviceFlow]> = [
+/**
+ * Re-points this leg's status poll at a failure, so the next poll tick sends it
+ * to its error step.
+ */
+type StubStatusError = () => void;
+
+/**
+ * Re-installs this leg's init spy so it only resolves once `gate` does, holding
+ * the retry in its pending step.
+ */
+type StubGatedInit = (gate: () => Promise<void>) => void;
+
+const DEVICE_FLOWS: Array<
+	[string, string, string, StubDeviceFlow, StubStatusError, StubGatedInit]
+> = [
 	[
 		"Codex",
 		"Codex (OpenAI OAuth)",
@@ -193,6 +266,22 @@ const DEVICE_FLOWS: Array<[string, string, string, StubDeviceFlow]> = [
 			spyOn(api, "getCodexAuthStatus").mockImplementation(async () => ({
 				status: "pending" as const,
 			}));
+		},
+		() => {
+			spyOn(api, "getCodexAuthStatus").mockImplementation(async () => ({
+				status: "error" as const,
+				error: POLL_ERROR,
+			}));
+		},
+		(gate) => {
+			spyOn(api, "initCodexDeviceFlow").mockImplementation(async () => {
+				await gate();
+				return {
+					sessionId: "s2",
+					verificationUrl: AUTH_URL,
+					userCode: USER_CODE,
+				};
+			});
 		},
 	],
 	[
@@ -209,27 +298,31 @@ const DEVICE_FLOWS: Array<[string, string, string, StubDeviceFlow]> = [
 				status: "pending" as const,
 			}));
 		},
+		() => {
+			spyOn(api, "getQwenAuthStatus").mockImplementation(async () => ({
+				status: "error" as const,
+				error: POLL_ERROR,
+			}));
+		},
+		(gate) => {
+			spyOn(api, "initQwenDeviceFlow").mockImplementation(async () => {
+				await gate();
+				return {
+					sessionId: "s2",
+					authUrl: AUTH_URL,
+					userCode: USER_CODE,
+				};
+			});
+		},
 	],
 ];
 
 describe.each(
 	DEVICE_FLOWS,
-)("AccountAddForm — %s device flow hand-off", (_leg, optionText, startLabel, stubDeviceFlow) => {
+)("AccountAddForm — %s device flow hand-off", (_leg, optionText, startLabel, stubDeviceFlow, stubStatusError, stubGatedInit) => {
 	it("renders a copyable link and user code, and never opens a tab", async () => {
 		stubDeviceFlow();
-		await renderForm(async () => ({
-			authUrl: AUTH_URL,
-			sessionId: "session-1",
-		}));
-		await selectMode(optionText);
-
-		const name = document.querySelector("#name") as HTMLInputElement;
-		await act(async () => {
-			typeInto(name, "work-account");
-		});
-		await act(async () => {
-			byText<HTMLButtonElement>("button", startLabel).click();
-		});
+		await startLeg(optionText, startLabel);
 
 		expect(openCalls).toBe(0);
 		const link = document.querySelector<HTMLAnchorElement>(
@@ -244,5 +337,51 @@ describe.each(
 			document.querySelector('button[title="Copy user code"]'),
 		).not.toBeNull();
 		expect(document.body.textContent).toContain(USER_CODE);
+	});
+
+	it("drops the failed attempt's link and code while the retry is in flight", async () => {
+		// Attempt 1: the init resolves at once, then the first poll tick
+		// reports a failure, so the leg lands on its error step with the URL
+		// and user code still held in form state.
+		stubDeviceFlow();
+		stubStatusError();
+		const captured = capturePoll();
+
+		await startLeg(optionText, startLabel);
+		expect(document.querySelector(`a[href="${AUTH_URL}"]`)).not.toBeNull();
+
+		await captured.fire();
+		expect(document.body.textContent).toContain(POLL_ERROR);
+		// The error step renders no hand-off, so nothing is on screen yet.
+		expect(document.querySelector("a[href]")).toBeNull();
+
+		// Attempt 2, held open. The footer start button is what restarts a
+		// failed leg (the Alert's "Try again" only returns it to idle), and the
+		// retry re-enters the pending step before the new device code exists,
+		// so the failed attempt's link and code — which belong to a session the
+		// server has finished with — must not still be on screen.
+		let release: (() => void) | null = null;
+		const gate = new Promise<void>((resolve) => {
+			release = resolve;
+		});
+		stubGatedInit(() => gate);
+		await act(async () => {
+			byText<HTMLButtonElement>("button", startLabel).click();
+		});
+
+		expect(document.querySelector("a[href]")).toBeNull();
+		expect(
+			document.querySelector('button[title="Copy authorization link"]'),
+		).toBeNull();
+		expect(document.querySelector('button[title="Copy user code"]')).toBeNull();
+		expect(document.body.textContent).toContain("Requesting a device code…");
+
+		await act(async () => {
+			release?.();
+			await gate;
+		});
+
+		expect(document.querySelector(`a[href="${AUTH_URL}"]`)).not.toBeNull();
+		expect(openCalls).toBe(0);
 	});
 });
