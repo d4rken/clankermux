@@ -25,7 +25,7 @@ import {
 	unregisterCodexResetCreditsRefresher,
 } from "@clankermux/proxy";
 import type { AccountResponse } from "@clankermux/types";
-import { createPublicPacingReader } from "../../services/public-pacing";
+
 import { listAccountResponses } from "../accounts";
 
 const HOUR_MS = 60 * 60 * 1000;
@@ -193,24 +193,5 @@ describe("account assembly side effects — read-only", () => {
 		const readOnly = await run("read-only");
 		expect(readOnly?.usageData?.seven_day?.utilization).toBe(33);
 		expect(readOnly?.usageData).toEqual(managed?.usageData ?? null);
-	});
-});
-
-describe("GET /public/v1/pacing reads under the read-only policy", () => {
-	// The end-to-end version of the two assertions above, through the route that
-	// motivated the policy: an anonymous pacing GET reaches the shared assembler
-	// via `computePacingScan`, and it must arrive there with no entitlement to
-	// write.
-	it("starts no upstream refresh and seeds no cache on a cold read", async () => {
-		const read = createPublicPacingReader(
-			makeDbOps(Date.now() - 5 * 60_000),
-			config,
-		);
-		const snapshot = await read();
-		await Promise.resolve();
-
-		expect(snapshot.generatedAtMs).toBeGreaterThan(0);
-		expect(refreshed).toEqual([]);
-		expect(usageCache.peekAge(ACCOUNT_ID)).toBeNull();
 	});
 });

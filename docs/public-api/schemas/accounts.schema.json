@@ -42,10 +42,6 @@
           "type": "string",
           "description": "A join key against `providers[].provider` on status. NEVER truncated."
         },
-        "isDefaultCandidate": {
-          "type": "boolean",
-          "description": "The ONE account a fresh, unpinned, nominal-size request would be routed to right now — not \"the account the load balancer is using\", which is not a thing that exists. `routing.context` on `/public/v1/status` names the question this answers, and the gates it deliberately omits."
-        },
         "availability": {
           "$ref": "#/$defs/PublicAvailabilityDto"
         },
@@ -63,14 +59,6 @@
           "description": "INSTANT the reading behind every window below was observed.",
           "format": "date-time"
         },
-        "utilizationPct": {
-          "type": [
-            "number",
-            "null"
-          ],
-          "description": "DERIVED: the max `utilizationPct` across the account-wide windows below. Served because both clients render an overall gauge; it is a rollup of `windows[]` and never a separate measurement.",
-          "minimum": 0
-        },
         "windows": {
           "type": "array",
           "items": {
@@ -82,12 +70,10 @@
         "id",
         "name",
         "provider",
-        "isDefaultCandidate",
         "availability",
         "credential",
         "measurementState",
         "usageObservedAt",
-        "utilizationPct",
         "windows"
       ],
       "description": "One account on the wire. Field list is exhaustive and hand-maintained.",
@@ -211,15 +197,13 @@
           "type": [
             "string",
             "null"
-          ],
-          "description": "Stable scope key for a scoped window; null for the account-wide ones."
+          ]
         },
         "label": {
           "type": [
             "string",
             "null"
-          ],
-          "description": "Display text only. Join on `scopeId`, never on this."
+          ]
         },
         "utilizationPct": {
           "type": [
@@ -233,7 +217,6 @@
             "string",
             "null"
           ],
-          "description": "INSTANT the reading was observed.",
           "format": "date-time"
         },
         "resetsAt": {
@@ -241,29 +224,10 @@
             "string",
             "null"
           ],
-          "description": "INSTANT the window rolls over.",
           "format": "date-time"
         },
-        "prediction": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/PublicPredictionDto"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
         "forecast": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/PublicWindowForecastDto"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "description": "Null when fresh, matching estimator evidence is unavailable."
+          "$ref": "#/$defs/PublicWindowForecastDto"
         }
       },
       "required": [
@@ -273,9 +237,8 @@
         "utilizationPct",
         "observedAt",
         "resetsAt",
-        "prediction"
+        "forecast"
       ],
-      "description": "One quota window on the wire.\n\nREPLACES the deployed `limits[]`, `fiveHourPct`, `fiveHourResetsAt`, `sevenDayPct` and `sevenDayResetsAt` together: those represented one observation three times in two vocabularies, and a client had no way to know which copy to believe when they disagreed.",
       "additionalProperties": true
     },
     "PublicWindowKind": {
@@ -288,64 +251,25 @@
       ],
       "description": "The quota windows this surface names."
     },
-    "PublicPredictionDto": {
-      "type": "object",
-      "properties": {
-        "predictedUtilizationAtResetPct": {
-          "type": [
-            "number",
-            "null"
-          ],
-          "description": "Where the window is projected to land at its reset, 0..100.",
-          "minimum": 0
-        },
-        "exhaustsAt": {
-          "type": [
-            "string",
-            "null"
-          ],
-          "description": "INSTANT the window is projected to hit 100%.",
-          "format": "date-time"
-        },
-        "willExhaustBeforeReset": {
-          "type": "boolean"
-        },
-        "lowConfidence": {
-          "type": "boolean",
-          "description": "The estimator's own confidence flag. A low-confidence projection is real evidence but must never be rendered at full severity."
-        },
-        "state": {
-          "$ref": "#/$defs/PublicPredictionState"
-        }
-      },
-      "required": [
-        "predictedUtilizationAtResetPct",
-        "exhaustsAt",
-        "willExhaustBeforeReset",
-        "lowConfidence",
-        "state"
-      ],
-      "description": "The estimator's projection for ONE window, or null when there is none.\n\nLives INSIDE the window rather than on a resource of its own: a measurement and the projection built from it describe the same thing and change together, and splitting them lets a client pair a fresh percentage with a projection computed from an older reading without any way to notice.",
-      "additionalProperties": true
-    },
-    "PublicPredictionState": {
-      "type": "string",
-      "enum": [
-        "rising",
-        "stable",
-        "exhausted",
-        "other"
-      ],
-      "description": "What the usage estimator found for a window.\n\n`insufficient_data` is absent by construction: a prediction with no established trend is not served at all (the record is null), because its `slopePerHour` is a placeholder 0 that would read as a measured flat trend."
-    },
     "PublicWindowForecastDto": {
       "type": "object",
       "properties": {
-        "state": {
+        "outcome": {
           "type": "string",
           "enum": [
-            "projected",
-            "learning",
+            "exhausted",
+            "exhausts_before_reset",
+            "lasts_until_reset",
+            "unknown",
+            "other"
+          ]
+        },
+        "quality": {
+          "type": "string",
+          "enum": [
+            "supported",
+            "limited",
+            "unavailable",
             "other"
           ]
         },
@@ -358,45 +282,39 @@
             "no_usage",
             "unstarted",
             "short_history",
+            "missing_evidence",
+            "stale",
+            "reset_elapsed",
             "other",
             null
           ]
-        },
-        "readyAt": {
-          "type": [
-            "string",
-            "null"
-          ],
-          "description": "Earliest useful fresh reading for short history, not guaranteed readiness.",
-          "format": "date-time"
         },
         "exhaustsAt": {
           "type": [
             "string",
             "null"
           ],
-          "description": "Raw extrapolation: compare with the window reset before warning. Null means no exhaustion estimated.",
           "format": "date-time"
         },
-        "lowConfidence": {
+        "reassessAt": {
           "type": [
-            "boolean",
+            "string",
             "null"
-          ]
+          ],
+          "format": "date-time"
         }
       },
       "required": [
-        "state",
+        "outcome",
+        "quality",
         "reason",
-        "readyAt",
         "exhaustsAt",
-        "lowConfidence"
+        "reassessAt"
       ],
-      "description": "Window estimator evidence; this is not pooled workload advice.",
       "additionalProperties": true
     }
   },
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "urn:clankermux:public.accounts.v1",
-  "$comment": "Generated from public DTOs. Unknown properties are accepted; producer allowlist tests enforce privacy. Compatibility metadata fields are optional for older v1 servers."
+  "$comment": "Generated from public DTOs. Unknown properties are accepted; producer allowlist tests enforce privacy. This is the replacement public contract."
 }

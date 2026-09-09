@@ -1,5 +1,7 @@
 # Handover: showing PACE instead of RUNWAY on the usage widget
 
+Historical document. The replacement contract is documented in [the public API reference](public-api/README.md).
+
 > **Historical document — not current implementation instructions.** Use the
 > [external widget integration guide](external-widgets-pacing-guide.md) for
 > implementation and the [public API index](public-api/README.md) for schemas.

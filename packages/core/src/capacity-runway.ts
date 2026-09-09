@@ -1689,3 +1689,74 @@ function probePaceDeficit(
 		return firstAllOut(pooled, now, horizonEndMs) !== null;
 	});
 }
+
+/** Completed search result for consumer pace advice, distinct from a failed/aborted search. */
+export type ConsumptionPaceResult =
+	| {
+			state: "estimate" | "increase_limit" | "reduction_limit";
+			changePct: number;
+	  }
+	| { state: "unavailable"; changePct: null };
+
+/** Last passing increase, or contiguous passing reduction tail, on the canonical model. */
+export function consumptionPace(
+	accounts: RunwayAccountInput[],
+	now: number,
+	endsAtMs: number,
+	direction: "increase" | "reduce",
+	pacedWindowKinds?: ReadonlySet<string> | null,
+): ConsumptionPaceResult {
+	if (endsAtMs <= now || accounts.some((a) => a.unmetered))
+		return { state: "unavailable", changePct: null };
+	const runsOut = (pace: number): boolean | null => {
+		const { pooled, unprojectableAccountIds, learningAccountIds } = buildPool(
+			accounts,
+			now,
+			endsAtMs,
+			pace,
+			pacedWindowKinds,
+		);
+		if (
+			!pooled.length ||
+			unprojectableAccountIds.length ||
+			learningAccountIds.length
+		)
+			return null;
+		return firstAllOut(pooled, now, endsAtMs) !== null;
+	};
+	const stepPct = PACE_MARGIN_PRECISION * 100;
+	if (direction === "increase") {
+		const steps = Math.round(
+			(PACE_MARGIN_PROBE_MAX - 1) / PACE_MARGIN_PRECISION,
+		);
+		for (let step = 1; step <= steps; step++) {
+			const out = runsOut(1 + step * PACE_MARGIN_PRECISION);
+			if (out === null) return { state: "unavailable", changePct: null };
+			if (out)
+				return {
+					state: "estimate",
+					changePct: Math.round((step - 1) * stepPct),
+				};
+		}
+		return {
+			state: "increase_limit",
+			changePct: Math.round((PACE_MARGIN_PROBE_MAX - 1) * 100),
+		};
+	}
+	const steps = Math.round(
+		(1 - PACE_DEFICIT_PROBE_MIN) / PACE_MARGIN_PRECISION,
+	);
+	let passing: number | null = null;
+	for (let step = steps; step >= 1; step--) {
+		const out = runsOut(1 - step * PACE_MARGIN_PRECISION);
+		if (out === null) return { state: "unavailable", changePct: null };
+		if (out) break;
+		passing = -Math.round(step * stepPct);
+	}
+	return passing === null
+		? {
+				state: "reduction_limit",
+				changePct: -Math.round((1 - PACE_DEFICIT_PROBE_MIN) * 100),
+			}
+		: { state: "estimate", changePct: passing };
+}

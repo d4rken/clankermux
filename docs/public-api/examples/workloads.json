@@ -1,0 +1,51 @@
+{
+  "schema": "clankermux.public.workloads.v1",
+  "generatedAt": "2026-09-09T12:00:10.000Z",
+  "workloads": [
+    {
+      "id": "class:anthropic",
+      "label": "Claude",
+      "parentWorkloadId": null,
+      "availability": {
+        "computedAt": "2026-09-09T12:00:10.000Z",
+        "context": "fresh_unpinned_nominal",
+        "availableAccounts": 1,
+        "constrainedAccounts": 0,
+        "unknownAccounts": 0,
+        "nextRecoveryAt": null
+      },
+      "weekly": {
+        "computedAt": "2026-09-09T12:00:00.000Z",
+        "evidenceObservedAt": "2026-09-09T12:00:00.000Z",
+        "period": {
+          "startsAt": "2026-09-09T12:00:00.000Z",
+          "endsAt": "2026-09-14T12:00:00.000Z",
+          "endReason": "next_weekly_reset"
+        },
+        "outcome": "exhausts_before_end",
+        "quality": "supported",
+        "coverage": {
+          "eligibleAccounts": 1,
+          "modeledAccounts": 1,
+          "idleAccounts": 0,
+          "learningAccounts": 0,
+          "unavailableAccounts": 0
+        },
+        "accountRisk": {
+          "spentAccounts": 0,
+          "atRiskAccounts": 1,
+          "withinBudgetAccounts": 0,
+          "unknownAccounts": 0
+        },
+        "exhaustsAt": "2026-09-12T12:00:00.000Z",
+        "pace": {
+          "state": "estimate",
+          "changePct": -40,
+          "qualification": "estimate",
+          "reason": null
+        },
+        "reason": null
+      }
+    }
+  ]
+}

@@ -128,6 +128,11 @@ export {
 // depend on this package.
 export { createClientAbortResponse } from "./handlers/client-abort-response";
 export {
+	FAMILY_WEEKLY_MAX_USAGE_AGE_MS,
+	resolveFamilyWeeklyExclusion,
+	resolveFamilyWeeklyPacing,
+} from "./handlers/family-weekly-gate";
+export {
 	canonicalize,
 	createIdentityBoundRefusalResponse,
 	IDENTITY_BOUND_PATH_PREFIXES,

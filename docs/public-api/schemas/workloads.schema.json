@@ -1,0 +1,315 @@
+{
+  "$ref": "#/$defs/PublicWorkloadsDto",
+  "$defs": {
+    "PublicWorkloadsDto": {
+      "type": "object",
+      "properties": {
+        "schema": {
+          "type": "string",
+          "const": "clankermux.public.workloads.v1"
+        },
+        "generatedAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "workloads": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/PublicWorkloadDto"
+          }
+        }
+      },
+      "required": [
+        "schema",
+        "generatedAt",
+        "workloads"
+      ],
+      "additionalProperties": true
+    },
+    "PublicWorkloadDto": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "label": {
+          "type": "string"
+        },
+        "parentWorkloadId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "availability": {
+          "type": "object",
+          "properties": {
+            "computedAt": {
+              "type": "string",
+              "format": "date-time"
+            },
+            "context": {
+              "type": "string",
+              "const": "fresh_unpinned_nominal"
+            },
+            "availableAccounts": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "constrainedAccounts": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "unknownAccounts": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "nextRecoveryAt": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "format": "date-time"
+            }
+          },
+          "required": [
+            "computedAt",
+            "context",
+            "availableAccounts",
+            "constrainedAccounts",
+            "unknownAccounts",
+            "nextRecoveryAt"
+          ],
+          "additionalProperties": true
+        },
+        "weekly": {
+          "type": "object",
+          "properties": {
+            "computedAt": {
+              "type": "string",
+              "format": "date-time"
+            },
+            "evidenceObservedAt": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "format": "date-time"
+            },
+            "period": {
+              "anyOf": [
+                {
+                  "type": "object",
+                  "properties": {
+                    "startsAt": {
+                      "type": "string",
+                      "format": "date-time"
+                    },
+                    "endsAt": {
+                      "type": "string",
+                      "format": "date-time"
+                    },
+                    "endReason": {
+                      "type": "string",
+                      "const": "next_weekly_reset"
+                    }
+                  },
+                  "required": [
+                    "startsAt",
+                    "endsAt",
+                    "endReason"
+                  ],
+                  "additionalProperties": true
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "outcome": {
+              "type": "string",
+              "enum": [
+                "exhausted",
+                "exhausts_before_end",
+                "lasts_until_end",
+                "unknown",
+                "no_accounts",
+                "not_applicable",
+                "other"
+              ]
+            },
+            "reason": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "enum": [
+                "no_accounts",
+                "not_applicable",
+                "no_deadline",
+                "missing_evidence",
+                "limited_evidence",
+                "reset_elapsed",
+                "other",
+                null
+              ]
+            },
+            "quality": {
+              "type": "string",
+              "enum": [
+                "supported",
+                "limited",
+                "unavailable",
+                "other"
+              ]
+            },
+            "coverage": {
+              "type": "object",
+              "properties": {
+                "eligibleAccounts": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "modeledAccounts": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "idleAccounts": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "learningAccounts": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "unavailableAccounts": {
+                  "type": "integer",
+                  "minimum": 0
+                }
+              },
+              "required": [
+                "eligibleAccounts",
+                "modeledAccounts",
+                "idleAccounts",
+                "learningAccounts",
+                "unavailableAccounts"
+              ],
+              "additionalProperties": true
+            },
+            "accountRisk": {
+              "type": "object",
+              "properties": {
+                "spentAccounts": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "atRiskAccounts": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "withinBudgetAccounts": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "unknownAccounts": {
+                  "type": "integer",
+                  "minimum": 0
+                }
+              },
+              "required": [
+                "spentAccounts",
+                "atRiskAccounts",
+                "withinBudgetAccounts",
+                "unknownAccounts"
+              ],
+              "additionalProperties": true
+            },
+            "exhaustsAt": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "format": "date-time"
+            },
+            "pace": {
+              "type": "object",
+              "properties": {
+                "state": {
+                  "type": "string",
+                  "enum": [
+                    "estimate",
+                    "increase_limit",
+                    "reduction_limit",
+                    "unavailable",
+                    "other"
+                  ]
+                },
+                "changePct": {
+                  "type": [
+                    "number",
+                    "null"
+                  ]
+                },
+                "qualification": {
+                  "type": "string",
+                  "enum": [
+                    "estimate",
+                    "conservative_bound"
+                  ]
+                },
+                "reason": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "enum": [
+                    "partial_coverage",
+                    "weak_evidence",
+                    "unsupported_credits",
+                    "no_deadline",
+                    "not_projected",
+                    "search_unavailable",
+                    "not_applicable",
+                    "other",
+                    null
+                  ]
+                }
+              },
+              "required": [
+                "state",
+                "changePct",
+                "qualification",
+                "reason"
+              ],
+              "additionalProperties": true
+            }
+          },
+          "required": [
+            "computedAt",
+            "evidenceObservedAt",
+            "period",
+            "outcome",
+            "reason",
+            "quality",
+            "coverage",
+            "accountRisk",
+            "exhaustsAt",
+            "pace"
+          ],
+          "additionalProperties": true
+        }
+      },
+      "required": [
+        "id",
+        "label",
+        "parentWorkloadId",
+        "availability",
+        "weekly"
+      ],
+      "additionalProperties": true
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:clankermux:public.workloads.v1",
+  "$comment": "Generated from public DTOs. Unknown properties are accepted; producer allowlist tests enforce privacy. This is the replacement public contract."
+}

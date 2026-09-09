@@ -1,5 +1,7 @@
 # Public API consumer improvements: implementation plan
 
+Historical document. The replacement contract is documented in [the public API reference](public-api/README.md).
+
 Status: implemented and reviewed with a partner agent. The sections below record the agreed design and acceptance criteria.
 
 ## Objective and scope

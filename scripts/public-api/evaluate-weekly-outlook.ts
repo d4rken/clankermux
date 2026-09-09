@@ -5,6 +5,7 @@
 import {
 	classifyWorkloadGuidance,
 	computeWorkloadHeadroom,
+ computeWeeklyWorkloads,
 	type RunwayAccountSource,
 	toRunwayAccountInput,
 	type WorkloadHeadroomRow,
@@ -182,6 +183,11 @@ if (baselineClass?.projected !== 3 || weeklyClass?.projected !== 5) {
 		"The captured weekly-coverage result changed; revisit the evaluation report",
 	);
 }
+const replacement=computeWeeklyWorkloads(sources,now);
+const replacementClass=replacement.find(w=>w.row.dimensionId==="anthropic");
+if(replacementClass?.coverage.modeledAccounts!==5 || replacementClass.pace.state!=="estimate" || replacementClass.pace.changePct!==-49) {
+ throw new Error("Replacement weekly contract no longer reproduces the captured conditional 49% reduction with full coverage");
+}
 console.log(
 	JSON.stringify(
 		{
@@ -192,6 +198,7 @@ console.log(
 				"Existing fixed account burn; weekly-only is a conditional budget scenario, not concurrency advice",
 			combined,
 			weeklyOnly,
+ replacement:replacement.map(w=>({dimension:w.row.dimensionId,coverage:w.coverage,pace:w.pace,reason:w.paceReason})),
 		},
 		null,
 		2,

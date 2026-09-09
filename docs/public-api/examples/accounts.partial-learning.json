@@ -6,7 +6,6 @@
       "id": "acc_learning_example",
       "name": "Claude Idle Session",
       "provider": "anthropic",
-      "isDefaultCandidate": true,
       "availability": {
         "state": "available",
         "reason": null,
@@ -18,7 +17,6 @@
       },
       "measurementState": "fresh",
       "usageObservedAt": "2026-09-09T11:59:30.000Z",
-      "utilizationPct": 60,
       "windows": [
         {
           "kind": "five_hour",
@@ -27,13 +25,12 @@
           "utilizationPct": 0,
           "observedAt": "2026-09-09T11:59:30.000Z",
           "resetsAt": "2026-09-09T15:00:00.000Z",
-          "prediction": null,
           "forecast": {
-            "state": "learning",
+            "outcome": "unknown",
+            "quality": "unavailable",
             "reason": "no_usage",
-            "readyAt": null,
             "exhaustsAt": null,
-            "lowConfidence": null
+            "reassessAt": null
           }
         },
         {
@@ -43,13 +40,12 @@
           "utilizationPct": 60,
           "observedAt": "2026-09-09T11:59:30.000Z",
           "resetsAt": "2026-09-14T12:00:00.000Z",
-          "prediction": null,
           "forecast": {
-            "state": "projected",
+            "outcome": "exhausts_before_reset",
+            "quality": "supported",
             "reason": null,
-            "readyAt": null,
             "exhaustsAt": "2026-09-10T19:59:10.000Z",
-            "lowConfidence": false
+            "reassessAt": null
           }
         }
       ]

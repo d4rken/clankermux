@@ -380,6 +380,11 @@ export {
 	weeklyExhaustion,
 } from "./weekly-exhaustion";
 export {
+	computeWeeklyWorkloads,
+	type WeeklyWorkload,
+	weeklyOnlySource,
+} from "./weekly-workloads";
+export {
 	classifyWorkloadGuidance,
 	type WorkloadGuidanceState,
 } from "./workload-guidance";

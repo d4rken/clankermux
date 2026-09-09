@@ -1,5 +1,7 @@
 # Weekly-only quota outlook: bounded evaluation
 
+Historical document. The replacement contract is documented in [the public API reference](public-api/README.md).
+
 Evaluated on 2026-09-09 at **12:36:38.782 UTC**, using five active Anthropic
 accounts' recent persisted observations. This is an offline evaluation, not a
 new public forecast mode or a deployment recommendation.

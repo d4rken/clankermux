@@ -427,5 +427,5 @@
   },
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "urn:clankermux:public.stream.v1",
-  "$comment": "Generated from public DTOs. Unknown properties are accepted; producer allowlist tests enforce privacy. Compatibility metadata fields are optional for older v1 servers."
+  "$comment": "Generated from public DTOs. Unknown properties are accepted; producer allowlist tests enforce privacy. This is the replacement public contract."
 }

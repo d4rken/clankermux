@@ -1,58 +1,11 @@
 {
   "schema": "clankermux.public.status.v1",
   "generatedAt": "2026-09-09T12:00:00.000Z",
-  "status": "ok",
-  "uptimeS": 3600,
   "version": "2026.9.example",
-  "pool": {
+  "uptimeS": 3600,
+  "serviceState": "ready",
+  "accounts": {
     "configured": 1,
-    "defaultRoutable": 1,
-    "paused": 0,
-    "rateLimited": 0,
-    "usageExhausted": 0,
-    "nextAvailableAt": null
-  },
-  "routing": {
-    "context": "fresh, unpinned, nominal-size request",
-    "defaultCandidateAccountId": "acc_example"
-  },
-  "usage": {
-    "fiveHour": {
-      "meanUtilizationPct": 35,
-      "contributingAccountCount": 1,
-      "unknownAccountCount": 0,
-      "earliestResetsAt": "2026-09-09T15:00:00.000Z",
-      "oldestObservedAt": "2026-09-09T11:59:30.000Z",
-      "unobservedContributingCount": 0,
-      "leastUsedUtilizationPct": 35,
-      "leastUsedAccountId": "acc_example"
-    },
-    "sevenDay": {
-      "meanUtilizationPct": 62,
-      "contributingAccountCount": 1,
-      "unknownAccountCount": 0,
-      "earliestResetsAt": "2026-09-10T12:00:00.000Z",
-      "oldestObservedAt": "2026-09-09T11:59:30.000Z",
-      "unobservedContributingCount": 0,
-      "leastUsedUtilizationPct": 62,
-      "leastUsedAccountId": "acc_example"
-    },
-    "worstAccountUtilizationPct": 62
-  },
-  "providers": [
-    {
-      "provider": "anthropic",
-      "anyOverload": {
-        "state": "closed",
-        "until": null,
-        "probeActive": false
-      },
-      "providerWideOverload": {
-        "state": "closed",
-        "until": null,
-        "probeActive": false
-      },
-      "scopedLimits": []
-    }
-  ]
+    "paused": 0
+  }
 }

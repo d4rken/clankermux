@@ -2,7 +2,6 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { createGenerator } from "ts-json-schema-generator";
 import {
-	compatibilityFields,
 	countFields,
 	type PublicResource,
 	resources,
@@ -91,7 +90,7 @@ function addWireConstraints(schema: Schema, resource: PublicResource): void {
 			} else if (
 				key.endsWith("Ms") ||
 				key === "uptimeS" ||
-				key.endsWith("Pct") ||
+				(key.endsWith("Pct") && key !== "changePct") ||
 				key === "burnRatio" ||
 				key === "costUsd"
 			) {
@@ -105,51 +104,6 @@ function addWireConstraints(schema: Schema, resource: PublicResource): void {
 				if (isObject(part)) addWireConstraints(part, resource);
 		} else if (isObject(child)) addWireConstraints(child, resource);
 	}
-}
-
-function resolve(schema: Schema, root: Schema): Schema {
-	if (typeof schema.$ref !== "string") return schema;
-	const target = schema.$ref
-		.split("/")
-		.slice(1)
-		.reduce<unknown>(
-			(part, key) =>
-				isObject(part)
-					? part[
-							decodeURIComponent(key).replace(/~1/g, "/").replace(/~0/g, "~")
-						]
-					: undefined,
-			root,
-		);
-	if (!isObject(target))
-		throw new Error(`Unresolved schema reference: ${schema.$ref}`);
-	return resolve(target, root);
-}
-
-function makeOptional(schema: Schema, root: Schema, parts: string[]): void {
-	const current = resolve(schema, root);
-	const [key, ...rest] = parts;
-	if (Array.isArray(current.anyOf)) {
-		const objects = current.anyOf.filter(
-			(part) => isObject(part) && part.type !== "null",
-		);
-		for (const part of objects) makeOptional(part as Schema, root, parts);
-		return;
-	}
-	if (key === "[]" && isObject(current.items)) {
-		makeOptional(current.items, root, rest);
-		return;
-	}
-	const properties = current.properties;
-	if (!key || !isObject(properties) || !isObject(properties[key])) {
-		throw new Error(`Compatibility field disappeared: ${parts.join(".")}`);
-	}
-	if (rest.length) {
-		makeOptional(properties[key], root, rest);
-		return;
-	}
-	if (Array.isArray(current.required))
-		current.required = current.required.filter((field) => field !== key);
 }
 
 export function generateSchemas(): Record<PublicResource, Schema> {
@@ -167,10 +121,8 @@ export function generateSchemas(): Record<PublicResource, Schema> {
 			schema.$schema = "https://json-schema.org/draft/2020-12/schema";
 			schema.$id = `urn:clankermux:${entry.id.replace(/^clankermux\./, "")}`;
 			schema.$comment =
-				"Generated from public DTOs. Unknown properties are accepted; producer allowlist tests enforce privacy. Compatibility metadata fields are optional for older v1 servers.";
+				"Generated from public DTOs. Unknown properties are accepted; producer allowlist tests enforce privacy. This is the replacement public contract.";
 			addWireConstraints(schema, resource);
-			for (const path of compatibilityFields[resource] ?? [])
-				makeOptional(schema, schema, path.split("."));
 			return [resource, schema];
 		}),
 	) as Record<PublicResource, Schema>;
@@ -200,6 +152,6 @@ if (import.meta.main) {
 	console.log(
 		process.argv.includes("--check")
 			? "Public API schemas are current."
-			: "Generated seven public API schemas.",
+			: "Generated five public API schemas.",
 	);
 }

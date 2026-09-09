@@ -40,6 +40,11 @@ import { toPublicAvailabilityState } from "../handlers/public/dto";
 import { buildPredictionsForAccounts } from "./build-account-predictions-for";
 import { createPublicReadMemo } from "./public-read-memo";
 
+import {
+	buildWorkloadAvailability,
+	type WorkloadAvailability,
+} from "./public-workload-availability";
+
 const log = new Logger("PublicSnapshot");
 
 /**
@@ -348,6 +353,7 @@ export interface PublicProviderSnapshot {
 
 /** Everything the public responses are built from. */
 export interface PublicSnapshot {
+	workloadAvailability?: WorkloadAvailability[];
 	nowMs: number;
 	pool: PublicPoolSnapshot;
 	routing: PublicRoutingSnapshot;
@@ -934,9 +940,10 @@ export function createPublicSnapshotReader(
 		// and `routing.defaultCandidateAccountId` (its head). Deriving either
 		// separately would re-rank, and a pool that changed between two rankings
 		// would be published as a state it was never in.
+		const strategy = getStrategy?.() ?? null;
 		const routingEvaluation = evaluateDefaultCandidates(
 			routingAccounts,
-			getStrategy?.() ?? null,
+			strategy,
 			config,
 			now,
 		);
@@ -1225,6 +1232,15 @@ export function createPublicSnapshotReader(
 			},
 			providers,
 			accounts,
+			workloadAvailability: buildWorkloadAvailability(
+				accounts,
+				routingAccounts,
+				candidateIds,
+				routingFresh,
+				strategy !== null,
+				config,
+				now,
+			),
 		};
 	};
 }

@@ -1,91 +1,159 @@
-# Public API
+# Public widget API
 
-The widget API is read-only and requires no credentials. All routes below are `GET /public/v1/<resource>` on the existing server base URL. Successful responses are JSON, except for the SSE stream.
+The read-only API serves small displays, Linux Mint applets and macOS menu-bar
+widgets. All routes are unauthenticated `GET /public/v1/<resource>`. This contract
+replaces the earlier API in place: `/pacing`, `/runway` and `/workload-headroom`
+are removed. There is no compatibility adapter or parallel API version.
 
-| Resource | Data | Contract | Example |
+| Resource | Purpose | Schema | Example |
 | --- | --- | --- | --- |
-| `status` | Health, uptime/version, pool counts, routing candidate, aggregate quota usage and provider overload state | [Schema](schemas/status.schema.json) | [JSON](examples/status.json) |
-| `accounts` | Account IDs/names, providers, availability, credential state/expiry, quota windows, predictions, per-window forecasts and learning reasons | [Schema](schemas/accounts.schema.json) | [JSON](examples/accounts.json) |
-| `runway` | Worst stateable API-key/pool quota outcome, headroom and coverage; key identities/pins omitted | [Schema](schemas/runway.schema.json) | [JSON](examples/runway.json) |
-| `stops` | Seven-day request/block totals, stop causes and candidate-count distribution | [Schema](schemas/stops.schema.json) | [JSON](examples/stops.json) |
-| `pacing` | Per-class spending context, least-used account's weekly burn ratio, five-hour constraints | [Schema](schemas/pacing.schema.json) | [JSON](examples/pacing.json) |
-| `workload-headroom` | Per-class/family quota forecast, advisory state, evidence and coverage for two planning intervals | [Schema](schemas/workload-headroom.schema.json) | [JSON](examples/workload-headroom.json) |
-| `stream` | Active-request snapshot and live request events including project/model, timing, tokens and costs | [Schema](schemas/stream.schema.json) | [Snapshot](examples/stream.snapshot.json) |
+| `status` | Service readiness, version, uptime, configured and paused account totals | [Schema](schemas/status.schema.json) | [JSON](examples/status.json) |
+| `accounts` | Account identity, credentials status, availability, observed quota windows and per-window forecasts | [Schema](schemas/accounts.schema.json) | [JSON](examples/accounts.json) |
+| `workloads` | Current availability and weekly-only budget outlook per class and model family | [Schema](schemas/workloads.schema.json) | [JSON](examples/workloads.json) |
+| `stops` | Seven-day request/block totals, causes and routing-candidate distribution | [Schema](schemas/stops.schema.json) | [JSON](examples/stops.json) |
+| `stream` | Active request snapshot and request lifecycle events over SSE | [Schema](schemas/stream.schema.json) | [Snapshot](examples/stream.snapshot.json) |
 
-Account and project names are public. Credentials, API-key secrets, prompts and response bodies are not published. Account records are sorted by name; join by IDs, not display labels or array positions.
+Account and project names are public. Credentials, prompts and response bodies
+are not exposed. Status `serviceState: ready` describes the serving process; it
+makes no claim about account capacity. Use workloads for availability.
 
-## Choosing parallel-work guidance
+## The default widget endpoint
 
-Use `workload-headroom.rows[].nextReset.guidanceState` for the compact display, with the numeric fields from that same object. Select `class/anthropic` for Claude, `class/codex` for GPT, and `family/fable` for reported Fable quotas. A family constraint overlaps its class capacity; their percentages cannot be added.
+Poll `/workloads` and select stable IDs: `class:anthropic`, `class:codex`, and
+`family:fable`. Labels are display text, never keys. Family rows link through
+`parentWorkloadId` where a single parent class is known. Fable overlaps Claude;
+capacities and percentages must not be added.
 
-The workload and runway envelope's `intervalKind: "fixed_horizon"` starts at `generatedAt` and ends at `generatedAt + horizonMs`. A workload `nextReset.intervalKind: "until_next_weekly_reset"` starts at that same `generatedAt` and ends at `nextReset.resetsAt`. It forecasts **until**, not after, the reset. Keep the long-horizon row's advice separately labelled.
+Each workload has two independently timestamped sections:
 
-| `guidanceState` | Interpretation |
+- `availability`: the candidates for a fresh, unpinned, nominal-size request,
+  after provider and workload-family gates. Counts are available, constrained
+  or unknown (disjoint). Missing usage alone does not block routing.
+  `nextRecoveryAt` is the earliest known lift that clears all known holds on
+  one constrained account; a null value is not proof there will be no recovery.
+- `weekly`: a forecast using account-wide weekly windows and, for a family,
+  its scoped weekly windows. Five-hour evidence never controls weekly coverage.
+  Weekly membership includes subscription accounts reporting weekly quotas; paid
+  or unmetered fallback stays in availability but cannot conceal an exhausted
+  subscription budget. Availability and weekly coverage therefore have different
+  denominators.
+  `computedAt` dates the calculation; `evidenceObservedAt` is the oldest account
+  observation, null if some eligible account has no observation time.
+
+Availability is cached for about five seconds; weekly calculations for sixty
+seconds. A newly assembled `generatedAt` does not refresh either section's
+underlying evidence. Polling faster cannot refresh the provider. Use bounded
+retry/backoff and render stale evidence separately; a three-minute client stale
+indicator is a reasonable UI policy, not a forecast accuracy guarantee.
+
+### Weekly outcome and evidence
+
+`period` states `startsAt`, `endsAt` and `endReason: next_weekly_reset`. This is
+**until the earliest known future weekly reset**, including usable deadlines on
+eligible accounts excluded from modeling. Unstarted sliding reset placeholders
+are ignored. The deadline is a planning checkpoint, not a promise that all
+accounts—or even a blocked account—recover then. Do not label it “safe all week.”
+A missing deadline leaves `period: null`. Refresh at the deadline; expired
+cached advice is withheld until a new calculation is available.
+
+| `outcome` | Meaning |
 | --- | --- |
-| `increase` | A measured, fully covered model states a margin; display the approximate percentage and bound qualification. |
-| `reduce` | A measured, fully covered model states a deficit; display the approximate reduction and bound qualification. |
-| `exhausted` | The fully covered model reports quota exhausted now. |
-| `learning` | Every eligible account is still learning its burn. |
-| `unknown` | No forecast can be established; waiting alone may not resolve missing data. |
-| `no_accounts` | No eligible accounts. |
-| `uncertain` | Evidence is weak or coverage incomplete; withhold a prescriptive percentage. |
-| `unquantified` | Read `outcomeKind`: the model either clears the interval or projects exhaustion, but no numeric adjustment is stated. |
-| `other` | Unrecognized/inconsistent state; show unavailable advice. |
+| `exhausted` | The modeled weekly pool is exhausted now. |
+| `exhausts_before_end` | The modeled pool projects an interruption before the checkpoint; see `exhaustsAt`. |
+| `lasts_until_end` | No all-out interval is projected before the checkpoint. |
+| `unknown` | No outcome can be established. |
+| `no_accounts` | No active accounts were considered. |
+| `not_applicable` | This workload reports no weekly subscription quota. |
+| `other` | Unrecognized state; display neutral/unavailable advice. |
 
-`nextReset.headroomAbsence` explains its missing percentage: `learning_accounts`, `structural_evidence`, `bound_broken_by_credits`, `beyond_probe_range`, `not_projected`, or `other`. It is null when a number is stated. The existing row-level `headroomAbsence` describes only the long horizon. A null `nextReset` means no usable weekly deadline is known.
+`quality` describes estimator evidence: `supported`, `limited` or `unavailable`.
+The separate `reason` explains missing or limited evidence. Quality is not an
+accuracy probability, and supported evidence does not imply complete coverage.
 
-These are advisory model thresholds. The margin is the first failing 1% probe step, not a tested-safe increase of exactly that amount. Family percentages are conservative bounds. `projectionBasis` describes baseline evidence, not confidence in every hypothetical probe. The API does not prescribe agent counts or automatic scaling.
+Coverage categories are disjoint:
 
-Use `/pacing` for spending and five-hour constraints, `/accounts` for operational details, and `/runway` for API-key/pin context. Never convert `/pacing.burnRatio` into a whole-pool recommendation. See the [integration guide](../external-widgets-pacing-guide.md) for rendering rules, compatibility cases and example interpretations.
+```
+eligibleAccounts = modeledAccounts + idleAccounts
+                  + learningAccounts + unavailableAccounts
+```
 
-## Account window evidence
+`idleAccounts` have no burn evidence (including unopened family windows);
+`learningAccounts` need more history; `unavailableAccounts` lack usable evidence.
+These describe forecasting, not routing availability. An idle account can serve
+work now. With partial coverage, describe the projected **subset**, not the
+whole pool. Example: “Weekly risk · 3/5 modeled · 2 idle.”
 
-`accounts[].windows[].forecast` exposes the canonical window estimate separately
-from regression-only `prediction`. Weekly `prediction: null` does not mean no
-forecast exists. A weekly projection remains visible when the five-hour window
-is learning. The forecast states `projected` or `learning`, with `other` as a
-fallback; learning reasons are `no_usage`, `unstarted`, or `short_history`.
-Only short history has a possible `readyAt`, indicating the earliest useful
-fresh observation rather than guaranteed readiness.
+`accountRisk` counts observations of spent accounts, projected exhaustion before
+each account's own reset, accounts projected within their own budget, and
+unassessable accounts. These categories are disjoint, count every eligible
+account, and do not predict how many accounts will be unavailable simultaneously.
+They describe observed windows, before hypothetical automated credit redemption.
 
-A projected forecast carries nullable `exhaustsAt` and `lowConfidence`. Compare
-exhaustion with the window's `resetsAt`: raw extrapolation can extend past the
-reset. Null/absent forecast means no usable forecast; preserve the separate
-reading and its freshness. Stale, untimed, mismatched or already-reset evidence
-is withheld. See [partial learning](examples/accounts.partial-learning.json).
+### Pace adjustment
 
-For partial workload coverage, render `eligibleAccounts - unreadableAccounts`
-from the same workload row: for example, “3/5 modeled · 2 learning”. Do not
-subtract `unopenedAccounts` or `learningAccounts` again, reconstruct coverage
-from a separate accounts response, or turn idle usage into a growth percentage.
+`pace.changePct` is a signed **estimated change in consumption rate at the
+current per-account workload distribution**. It is not remaining quota, tokens,
+or a number of agents. The model keeps account burn fixed and does not move a
+spent account's demand onto its survivors. Five-hour limits can still interrupt
+work separately. Even complete weekly coverage does not remove these assumptions.
 
-The workload envelope's `paceProbe` publishes `maximumReductionPct`,
-`maximumIncreasePct` and `stepPct` (currently 50, 50 and 1). A missing adjustment
-with `beyond_probe_range` means either no tested reduction avoids exhaustion,
-or no tested increase finds failure; use the selected interval's `outcomeKind`
-to distinguish them. Qualify these statements by modeled coverage and family
-bounds. They are search limits, not whole-pool scaling instructions. The model
-holds per-account burn fixed and does not redistribute demand after failover.
+| `pace.state` | Interpretation |
+| --- | --- |
+| `estimate` | Positive: last tested passing increase. Negative: the estimated reduction with a contiguous passing tail to the tested floor. Zero: no additional tested increase fits. |
+| `increase_limit` | Every tested increase passed. `changePct` gives the largest tested increase, not an exact maximum. |
+| `reduction_limit` | The maximum tested reduction was insufficient. `changePct` gives that tested reduction, not a recommended cut. |
+| `unavailable` | No recommendation; `changePct: null` and `reason` explain why. |
+| `other` | Unrecognized result; display neutral/unavailable advice. |
 
-## Compatibility, freshness and errors
+The current search tests 1% steps up to +50% or down to -50%. Aborted searches
+are unavailable, never mislabeled as limits. Positive estimates use the **last
+passing** step, correcting the old API's first-failing-step semantics. Family
+`qualification: conservative_bound` reflects unknown family shares of the
+account-wide burn; other rows use `estimate`. Family bounds with modeled credits
+are withheld. Partial coverage or weak baseline evidence also withholds numeric
+pace advice; per-account risk stays available.
 
-Schemas use Draft 2020-12 and accept unknown object fields. New metadata fields and historically optional `nextReset` are optional in the compatibility schemas; current producers always emit the new fields where their containing object exists. Keep neutral fallbacks for descriptive enum `other` and unknown future values. Schema IDs and v1 paths remain unchanged.
+Examples: [partial coverage](examples/workloads.partial.json),
+[increase limit](examples/workloads.increase-limit.json),
+[reduction limit](examples/workloads.reduction-limit.json),
+[family restriction](examples/workloads.family.json).
 
-Instants are ISO/RFC3339 strings; durations carry units in their names. Null measurements are unavailable, not zero. Display strings are limited to 96 UTF-8 bytes; identifiers are not truncated. JSON Schema length validation cannot replace that byte-level producer rule.
+## Account detail
 
-Poll pacing and workload forecasts about once per minute. Their snapshots are memoized for 60 seconds; `generatedAt` is the computation time, not necessarily the observation time. Consumers own stale-age policy, retry/backoff and deadline expiry. A three-minute stale threshold is a suggested UI policy, not a server guarantee. Do not infer a reset when a countdown expires; fetch a new snapshot.
+Account identity, provider, credential status and availability remain separate
+from quota measurements. There is no overall maximum-utilization gauge or
+routing-candidate flag. `windows[]` retains each window's `kind`, `scopeId`,
+label, utilization, observation time and reset. There is one `forecast` object;
+the regression-only `prediction` object is removed.
 
-Known routes reject non-GET methods with `405` and `Allow: GET`. Unknown public routes return `404`. The SSE connection cap can return `503` with `Retry-After`. Other failed reads can return server errors; handle non-success responses before parsing a resource payload. Error responses are outside the successful-resource schemas and should not be interpreted as zero capacity.
+Window forecast outcomes are `exhausted`, `exhausts_before_reset`,
+`lasts_until_reset`, `unknown` or `other`. An extrapolation after reset is not
+published as exhaustion. `quality` and `reason` explain whether evidence is
+usable. Learning reasons are `no_usage`, `unstarted` and `short_history`.
+`reassessAt` is the earliest useful fresh reading for short history, never an
+automatic readiness promise. Stale, missing and reset-elapsed evidence cannot
+produce a reassuring forecast. See [idle session with weekly evidence](examples/accounts.partial-learning.json).
 
-## Stream transport
+## Wire and transport rules
 
-The response uses `text/event-stream`. JSON `data:` records conform to the stream schema: `active.snapshot`, `request.opened`, `request.dropped`, `request.upstream` and `request.done`. The stream starts with the active snapshot, even when empty, after a `connected` control event. Subscribe/replay can overlap; reconcile requests by ID.
+Instants are ISO/RFC3339 strings; durations include units in field names. Null
+measurements are unavailable, not zero. Join using IDs. Labels are bounded to
+96 UTF-8 bytes; IDs are not truncated. Responses use shallow objects and at
+most two array levels. Accept unknown object fields and neutral enum fallbacks.
+Schemas describe the replacement contract; old payloads are not supported.
 
-The named `connected` and `server-shutdown` events carry plain text (`ok`/`bye`), and `: ping` heartbeats are comments. These control frames are not JSON payloads. Reconnect after disconnect and replace active state from the new snapshot.
+Known routes reject non-GET methods with `405` and `Allow: GET`; removed and
+unknown routes return `404` at the public mount. Failed reads are errors, never
+zero-capacity snapshots. The SSE connection cap can return `503` with
+`Retry-After`. Successful-resource schemas do not describe error responses.
 
-## Maintaining contracts
+`/stream` uses `text/event-stream`: JSON events are `active.snapshot`,
+`request.opened`, `request.dropped`, `request.upstream` and `request.done`.
+The initial snapshot supports reconnect/reconciliation by request ID. The
+`connected` and `server-shutdown` controls carry plain text; `: ping` is a
+heartbeat comment. These controls are not JSON resource events.
 
-The [examples directory](examples/) contains complete invented payloads, including weak evidence, missing quota, credit limitations, opposing interval advice and stream variants.
+## Maintaining the contract
 
 ```sh
 bun run public-api:generate
@@ -93,4 +161,7 @@ bun run public-api:check
 bun test scripts/public-api/schema.test.ts
 ```
 
-Schemas are generated from the public DTO entry points with a reviewed compatibility/constraint manifest. Actual serialized responses, examples and legacy payloads are validated in tests; producer field allowlists independently enforce privacy. No schema-generation or validation dependency runs in the API request path.
+Schemas use Draft 2020-12 and are generated from named public DTO types.
+Examples and actual serializers are validated in tests; no schema tooling runs
+in the API request path. Provider refreshes and routing-cache mutations are
+never initiated by a public GET.

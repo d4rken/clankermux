@@ -285,7 +285,7 @@ function spentAccountIds(
  *  - `unknown` / `no-accounts` assert nothing, so there is no projection to
  *    characterise and the answer is null rather than a reassuring "measured".
  */
-function projectionBasisFor(
+export function projectionBasisFor(
 	inputs: readonly RunwayAccountInput[],
 	outcome: RunwayOutcome,
 	now: number,
@@ -537,6 +537,7 @@ export function computeWorkloadHeadroom(
 	accounts: readonly RunwayAccountSource[],
 	now: number,
 	horizonMs: number = RUNWAY_HORIZON_MS,
+	options: { probe?: boolean; includePresentFamilies?: boolean } = {},
 ): WorkloadHeadroomRow[] {
 	const rows: WorkloadHeadroomRow[] = [];
 	const activeAccounts = accounts.filter((account) => !account.paused);
@@ -561,11 +562,14 @@ export function computeWorkloadHeadroom(
 		const bucket = byClass.get(classId);
 		if (!bucket) continue;
 		const inputs = bucket.accounts.map(toRunwayAccountInput);
-		const outcome = computeCapacityRunway(inputs, now, horizonMs);
+		const outcome = computeCapacityRunway(inputs, now, horizonMs, {
+			probePaceMargin: options.probe !== false,
+		});
 		const headroom = runwayPaceHeadroom(outcome);
 		rows.push({
 			dimensionKind: "class",
-			nextReset: nextResetGuidance(inputs, now),
+			nextReset:
+				options.probe === false ? null : nextResetGuidance(inputs, now),
 			dimensionId: classId,
 			label: bucket.label,
 			outcome,
@@ -600,6 +604,13 @@ export function computeWorkloadHeadroom(
 		}
 	}
 
+	if (options.includePresentFamilies) {
+		for (const account of activeAccounts)
+			for (const family of scopedFamilyPresence(account, now) ?? []) {
+				if (!familyLabels.has(family)) familyLabels.set(family, family);
+			}
+	}
+
 	// The servable classes that report each family, so an account with NO scoped
 	// evidence can be told apart from one that reports none. Both look like an
 	// absent Fable entry; only the first might still be able to serve Fable.
@@ -611,6 +622,15 @@ export function computeWorkloadHeadroom(
 			if (existing) existing.add(classId);
 			else reportingClasses.set(limit.family, new Set([classId]));
 		}
+	}
+
+	if (options.includePresentFamilies) {
+		for (const account of activeAccounts)
+			for (const family of scopedFamilyPresence(account, now) ?? []) {
+				const classes = reportingClasses.get(family) ?? new Set<string>();
+				classes.add(servableClassFor(account.provider).classId);
+				reportingClasses.set(family, classes);
+			}
 	}
 
 	for (const [family, displayName] of familyLabels) {
@@ -680,11 +700,20 @@ export function computeWorkloadHeadroom(
 						headroom: null,
 						absence: "not-projected" as HeadroomAbsence,
 					}
-				: familyHeadroomBound(inputs, family, now, horizonMs);
+				: options.probe === false
+					? {
+							outcome: computeCapacityRunway(inputs, now, horizonMs, {
+								probePaceMargin: false,
+							}),
+							headroom: null,
+							absence: "not-projected" as HeadroomAbsence,
+						}
+					: familyHeadroomBound(inputs, family, now, horizonMs);
 
 		rows.push({
 			dimensionKind: "family",
-			nextReset: nextResetGuidance(inputs, now, family),
+			nextReset:
+				options.probe === false ? null : nextResetGuidance(inputs, now, family),
 			dimensionId: family,
 			label: displayName,
 			outcome: bound.outcome,
