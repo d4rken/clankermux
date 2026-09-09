@@ -90,6 +90,13 @@ bun run build       # builds the dashboard (required before first run)
 bun start           # serves the proxy + dashboard on http://localhost:8080
 ```
 
+For an OpenAI-compatible account, enter its endpoint and API key, then use
+**Fetch models** to search the available model IDs for the Opus/Sonnet/Haiku
+mappings. Fetching preserves your choices; you can also enter IDs manually if
+discovery is unavailable. Changing the endpoint, key, or provider clears the
+mappings so you can choose them again for the new connection. This preview does
+not change the client-facing Models catalogue.
+
 Add your accounts in the dashboard, then point your client at a wire mount:
 `/wire/anthropic` for the Anthropic Messages API, `/wire/openai` for the OpenAI
 Responses API. The mount names the format the client speaks, not the account pool it is

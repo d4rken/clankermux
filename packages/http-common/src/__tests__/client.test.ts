@@ -88,3 +88,24 @@ describe("HttpClient retry policy", () => {
 		expect(fetchStub.calls()).toBe(1);
 	});
 });
+
+it("propagates caller cancellation to fetch without retrying", async () => {
+	let calls = 0;
+	globalThis.fetch = (async (_url, options) => {
+		calls++;
+		return new Promise((_resolve, reject) => {
+			options?.signal?.addEventListener(
+				"abort",
+				() => reject(new DOMException("cancelled", "AbortError")),
+				{ once: true },
+			);
+		});
+	}) as typeof fetch;
+	const controller = new AbortController();
+	const result = new HttpClient({ retries: 1 })
+		.get("/api/models/preview", { signal: controller.signal })
+		.catch((error) => error);
+	controller.abort();
+	expect(await result).toBeInstanceOf(HttpError);
+	expect(calls).toBe(1);
+});

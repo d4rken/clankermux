@@ -1844,6 +1844,13 @@ class API extends HttpClient {
 		}
 	}
 
+	async previewOpenAICompatibleModels(
+		payload: { apiKey: string; endpoint: string },
+		signal: AbortSignal,
+	): Promise<{ models: Array<{ id: string; displayName: string }> }> {
+		return this.post("/api/models/preview", payload, { signal, retries: 0 });
+	}
+
 	// The model catalogue the proxy serves on `GET /v1/models`, per wire dialect,
 	// and the operator's curation of it.
 	async getModelCatalog(dialect: ModelDialect): Promise<ModelCatalogResponse> {

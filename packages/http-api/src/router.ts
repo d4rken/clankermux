@@ -86,6 +86,7 @@ import { createLogsHistoryHandler } from "./handlers/logs-history";
 import { createCleanupHandler } from "./handlers/maintenance";
 import { createMemoryHistoryHandler } from "./handlers/memory-history";
 import { createModelOverrideHandlers } from "./handlers/model-overrides";
+import { createModelsPreviewHandler } from "./handlers/models-preview";
 import {
 	createAnthropicReauthCallbackHandler,
 	createAnthropicReauthInitHandler,
@@ -448,6 +449,7 @@ export class APIRouter {
 		this.handlers.set("POST:/api/config/retention", (req) =>
 			configHandlers.setRetention(req),
 		);
+		this.handlers.set("POST:/api/models/preview", createModelsPreviewHandler());
 		this.handlers.set("GET:/api/models/catalog", (_req, url) =>
 			modelOverrideHandlers.getCatalog(url),
 		);

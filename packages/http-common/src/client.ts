@@ -76,7 +76,9 @@ export class HttpClient {
 				const response = await fetch(fullUrl, {
 					...fetchOptions,
 					headers,
-					signal: controller.signal,
+					signal: fetchOptions.signal
+						? AbortSignal.any([controller.signal, fetchOptions.signal])
+						: controller.signal,
 				});
 
 				clearTimeout(timeoutId);

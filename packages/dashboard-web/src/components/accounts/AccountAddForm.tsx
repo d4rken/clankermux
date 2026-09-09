@@ -13,6 +13,7 @@ import {
 	SelectValue,
 } from "../ui/select";
 import { AuthorizationHandoff } from "./AuthorizationHandoff";
+import { OpenAIModelMappings } from "./OpenAIModelMappings";
 
 interface AccountAddFormProps {
 	onAddAccount: (params: {
@@ -152,6 +153,27 @@ export function AccountAddForm({
 		sonnetModel: "",
 		haikuModel: "",
 	});
+
+	const updateAccountSource = (
+		changes: Partial<
+			Pick<typeof newAccount, "apiKey" | "customEndpoint" | "mode">
+		>,
+	) => {
+		setNewAccount((prev) => {
+			const changed = Object.entries(changes).some(
+				([key, value]) => prev[key as keyof typeof changes] !== value,
+			);
+			return {
+				...prev,
+				...changes,
+				...(changed &&
+				(prev.mode === "openai-compatible" ||
+					changes.mode === "openai-compatible")
+					? { opusModel: "", sonnetModel: "", haikuModel: "" }
+					: {}),
+			};
+		});
+	};
 
 	// Qwen device flow state
 	const [qwenStep, setQwenStep] = useState<
@@ -856,7 +878,7 @@ export function AccountAddForm({
 									| "qwen"
 									| "ollama"
 									| "ollama-cloud",
-							) => setNewAccount({ ...newAccount, mode: value })}
+							) => updateAccountSource({ mode: value })}
 						>
 							<SelectTrigger id="mode">
 								<SelectValue />
@@ -1207,8 +1229,7 @@ export function AccountAddForm({
 									type="password"
 									value={newAccount.apiKey}
 									onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
-										setNewAccount({
-											...newAccount,
+										updateAccountSource({
 											apiKey: (e.target as HTMLInputElement).value,
 										})
 									}
@@ -1221,8 +1242,7 @@ export function AccountAddForm({
 									id="endpoint"
 									value={newAccount.customEndpoint}
 									onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
-										setNewAccount({
-											...newAccount,
+										updateAccountSource({
 											customEndpoint: (e.target as HTMLInputElement).value,
 										})
 									}
@@ -1232,66 +1252,14 @@ export function AccountAddForm({
 									Enter the base URL for the OpenAI-compatible API
 								</p>
 							</div>
-							<div className="space-y-item">
-								<Label>Model Mappings (Optional)</Label>
-								<p className="text-xs text-muted-foreground mb-item">
-									Map Anthropic model names to provider-specific models. Leave
-									empty to use defaults.
-								</p>
-								<div className="space-y-item pl-group">
-									<div>
-										<Label htmlFor="opusModel" className="text-sm">
-											Opus Model
-										</Label>
-										<Input
-											id="opusModel"
-											value={newAccount.opusModel}
-											onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
-												setNewAccount({
-													...newAccount,
-													opusModel: (e.target as HTMLInputElement).value,
-												})
-											}
-											placeholder="openai/gpt-5 (default)"
-											className="mt-tight"
-										/>
-									</div>
-									<div>
-										<Label htmlFor="sonnetModel" className="text-sm">
-											Sonnet Model
-										</Label>
-										<Input
-											id="sonnetModel"
-											value={newAccount.sonnetModel}
-											onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
-												setNewAccount({
-													...newAccount,
-													sonnetModel: (e.target as HTMLInputElement).value,
-												})
-											}
-											placeholder="openai/gpt-5 (default)"
-											className="mt-tight"
-										/>
-									</div>
-									<div>
-										<Label htmlFor="haikuModel" className="text-sm">
-											Haiku Model
-										</Label>
-										<Input
-											id="haikuModel"
-											value={newAccount.haikuModel}
-											onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
-												setNewAccount({
-													...newAccount,
-													haikuModel: (e.target as HTMLInputElement).value,
-												})
-											}
-											placeholder="openai/gpt-5-mini (default)"
-											className="mt-tight"
-										/>
-									</div>
-								</div>
-							</div>
+							<OpenAIModelMappings
+								apiKey={newAccount.apiKey}
+								endpoint={newAccount.customEndpoint}
+								mappings={newAccount}
+								onChange={(field, value) =>
+									setNewAccount((prev) => ({ ...prev, [field]: value }))
+								}
+							/>
 						</>
 					)}
 					{newAccount.mode === "ollama" && (
