@@ -201,3 +201,24 @@ describe("RateLimitStatusChip — usage_exhausted binding", () => {
 		expect(html).toContain("A usage quota is spent");
 	});
 });
+
+it.each([
+	"__proto__",
+	"constructor",
+])("discloses unknown provider status %s", (status) => {
+	for (const html of [
+		render(`${status} (5m)`),
+		renderToStaticMarkup(
+			<RateLimitStatusChip
+				status={`${status} (5m)`}
+				providerStatus={status}
+				cause="unknown"
+			/>,
+		),
+	]) {
+		expect(html).toContain(`Provider rate-limit status: ${status}`);
+		expect(html).toContain(status === "constructor" ? "Constructor" : "Proto");
+		expect(html).toContain("Resets in 5m");
+		expect(html).toContain("bg-secondary");
+	}
+});

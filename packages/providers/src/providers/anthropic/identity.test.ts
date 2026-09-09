@@ -103,3 +103,18 @@ describe("extractAnthropicIdentity", () => {
 		});
 	});
 });
+
+it.each([
+	"__proto__",
+	"constructor",
+])("preserves unknown organization type %s as a lowercased string", (tier) => {
+	for (const value of [tier, tier.toUpperCase()]) {
+		expect(
+			extractAnthropicIdentity({ organization: { organization_type: value } })
+				?.planTier,
+		).toBe(tier);
+		expect(
+			extractAnthropicIdentity({ organization: { type: value } })?.planTier,
+		).toBe(tier);
+	}
+});

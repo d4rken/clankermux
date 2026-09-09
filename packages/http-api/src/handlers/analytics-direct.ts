@@ -2019,30 +2019,22 @@ export function createAnalyticsHandler(context: APIContext) {
 				});
 			} else if (isCumulative && includeModelBreakdown) {
 				// For per-model cumulative, track running totals per model
-				const runningTotals: Record<
+				const runningTotals = new Map<
 					string,
 					{ requests: number; tokens: number; costUsd: number }
-				> = {};
+				>();
 
 				transformedTimeSeries = transformedTimeSeries.map((point) => {
 					if (point.model) {
-						if (!runningTotals[point.model]) {
-							runningTotals[point.model] = {
-								requests: 0,
-								tokens: 0,
-								costUsd: 0,
-							};
+						let totals = runningTotals.get(point.model);
+						if (!totals) {
+							totals = { requests: 0, tokens: 0, costUsd: 0 };
+							runningTotals.set(point.model, totals);
 						}
-						runningTotals[point.model].requests += point.requests;
-						runningTotals[point.model].tokens += point.tokens;
-						runningTotals[point.model].costUsd += point.costUsd;
-
-						return {
-							...point,
-							requests: runningTotals[point.model].requests,
-							tokens: runningTotals[point.model].tokens,
-							costUsd: runningTotals[point.model].costUsd,
-						};
+						totals.requests += point.requests;
+						totals.tokens += point.tokens;
+						totals.costUsd += point.costUsd;
+						return { ...point, ...totals };
 					}
 					return point;
 				});

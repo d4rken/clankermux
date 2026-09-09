@@ -1383,3 +1383,39 @@ describe("measureBodyForEstimate (semantic-position payload stripping)", () => {
 		expect(body).toEqual(before);
 	});
 });
+
+describe("prototype-named models", () => {
+	for (const model of ["__proto__", "constructor"]) {
+		test(`passes ${model} through unless explicitly mapped`, () => {
+			const account = {
+				name: "test",
+				provider: "openai-compatible",
+				model_mappings: '{"sonnet":"target"}',
+				custom_endpoint: null,
+			} as Account;
+			expect(getModelList(model, account)).toEqual([model]);
+			expect(mapModelName(model, account)).toBe(model);
+			account.model_mappings = JSON.stringify({ [model]: "primary" });
+			account.model_fallbacks = JSON.stringify({ [model]: "fallback" });
+			const mappings = getModelMappings(account);
+			expect(Object.getPrototypeOf(mappings)).toBeNull();
+			expect(getModelList(model, account)).toEqual(["primary", "fallback"]);
+			account.model_mappings = "{}";
+			expect(getModelList(model, account)).toEqual(["fallback"]);
+			account.custom_endpoint = JSON.stringify({
+				modelMappings: { [model]: "legacy" },
+			});
+			expect(getModelList(model, account)).toEqual(["legacy", "fallback"]);
+			account.model_fallbacks = null;
+			account.custom_endpoint = null;
+			account.model_mappings = JSON.stringify({ [model]: {} });
+			expect(getModelList(model, account)).toEqual([model]);
+		});
+		test(`returns no context capacity for ${model}, including dated variants`, () => {
+			for (const name of [model, `${model}-2026-09-01`]) {
+				expect(resolveModelContextWindow(name)).toBeUndefined();
+				expect(resolveModelMaxContextWindow(name)).toBeUndefined();
+			}
+		});
+	}
+});

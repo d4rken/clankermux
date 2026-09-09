@@ -149,3 +149,16 @@ describe("reasoning effort support", () => {
 		expect(resolved.downgrades).toEqual([]);
 	});
 });
+
+it.each([
+	"__proto__",
+	"constructor",
+])("passes reasoning effort through for unknown model %s", (model) => {
+	for (const targetModel of [model, ` provider/${model} `]) {
+		expect(getSupportedReasoningEfforts(targetModel)).toBeNull();
+		expect(resolveReasoningEffort("high", { targetModel })).toEqual({
+			effort: "high",
+			downgrades: [],
+		});
+	}
+});

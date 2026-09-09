@@ -547,3 +547,48 @@ describe("apiKeyModelUsage identity edge cases", () => {
 		expect(rows.reduce((total, row) => total + row.count, 0)).toBe(60);
 	});
 });
+
+it.each([
+	"__proto__",
+	"constructor",
+])("accumulates model %s without changing prototypes", async (model) => {
+	db.run("DELETE FROM requests");
+	for (const [index, tokens, cost] of [
+		[0, 100, 0.25],
+		[1, 200, 0.5],
+	]) {
+		db.run(
+			`INSERT INTO requests (id, timestamp, method, path, status_code, success, model, total_tokens, cost_usd)
+            VALUES (?, ?, 'POST', '/v1/messages', 200, 1, ?, ?, ?)`,
+			[
+				`prototype-${index}`,
+				FIXED_NOW - (2 - index) * 3600000,
+				model,
+				tokens,
+				cost,
+			],
+		);
+	}
+	const objectBefore = Object.getOwnPropertyDescriptors(Object.prototype);
+	const constructorBefore = Object.getOwnPropertyDescriptors(Object);
+	const { status, body } = await fetchAnalytics(
+		"range=24h&sections=timeSeries&mode=cumulative&modelBreakdown=true",
+	);
+	expect(Object.getOwnPropertyDescriptors(Object.prototype)).toEqual(
+		objectBefore,
+	);
+	expect(Object.getOwnPropertyDescriptors(Object)).toEqual(constructorBefore);
+	expect(status).toBe(200);
+	const points = body.timeSeries?.filter((point) => point.model === model);
+	expect(points?.length).toBe(2);
+	expect(
+		points?.map(({ requests, tokens, costUsd }) => ({
+			requests,
+			tokens,
+			costUsd,
+		})),
+	).toEqual([
+		{ requests: 1, tokens: 100, costUsd: 0.25 },
+		{ requests: 2, tokens: 300, costUsd: 0.75 },
+	]);
+});

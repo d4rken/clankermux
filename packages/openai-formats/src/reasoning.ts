@@ -61,7 +61,7 @@ export function getSupportedReasoningEfforts(
 		return CLAUDE_REASONING_EFFORTS[family];
 	}
 
-	if (normalized in TARGET_REASONING_EFFORTS) {
+	if (Object.hasOwn(TARGET_REASONING_EFFORTS, normalized)) {
 		return TARGET_REASONING_EFFORTS[normalized];
 	}
 

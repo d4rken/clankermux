@@ -4030,3 +4030,27 @@ describe("Anthropic reasoning controls on translated Codex requests", () => {
 		});
 	}
 });
+
+it.each([
+	"__proto__",
+	"constructor",
+])("preserves upstream error type for unknown Codex code %s", async (code) => {
+	for (const type of ["api_error", "permission_error"]) {
+		const response = new Response(
+			sseBody(eventLine("error", { type, code, message: "Upstream failure" })),
+			{
+				headers: {
+					"content-type": "text/event-stream",
+					"x-clankermux-request-stream": "false",
+				},
+			},
+		);
+		const transformed = await new CodexProvider().processResponse(
+			response,
+			null,
+		);
+		const body = await transformed.json();
+		expect(body.error).toEqual({ type, code, message: "Upstream failure" });
+		expect(transformed.status).toBe(type === "permission_error" ? 403 : 502);
+	}
+});

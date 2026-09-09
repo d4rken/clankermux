@@ -54,7 +54,10 @@ export function ChartTooltip({
 			)}
 			<div className="space-y-tight">
 				{payload.map((entry, index) => {
-					const formatter = formatters[entry.dataKey] || formatters.default;
+					const formatter =
+						(Object.hasOwn(formatters, entry.dataKey)
+							? formatters[entry.dataKey]
+							: undefined) || formatters.default;
 					const value = formatter ? formatter(entry.value) : entry.value;
 
 					return (

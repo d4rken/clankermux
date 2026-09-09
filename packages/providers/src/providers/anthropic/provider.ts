@@ -617,8 +617,12 @@ export class AnthropicProvider extends BaseProvider {
 									event.type === "message_delta" &&
 									event.delta?.stop_reason
 								) {
-									event.finish_reason =
-										stopReasonMap[event.delta.stop_reason] ?? "stop";
+									event.finish_reason = Object.hasOwn(
+										stopReasonMap,
+										event.delta.stop_reason,
+									)
+										? (stopReasonMap[event.delta.stop_reason] ?? "stop")
+										: "stop";
 								}
 
 								controller.enqueue(

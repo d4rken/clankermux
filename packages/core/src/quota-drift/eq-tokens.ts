@@ -128,7 +128,9 @@ export function eqTokens(
 	provider: EqTokenProvider,
 	modelKey: string,
 ): number {
-	const w = MODEL_EQ_WEIGHT_OVERRIDES[modelKey] ?? EQ_WEIGHTS[provider];
+	const w = Object.hasOwn(MODEL_EQ_WEIGHT_OVERRIDES, modelKey)
+		? (MODEL_EQ_WEIGHT_OVERRIDES[modelKey] ?? EQ_WEIGHTS[provider])
+		: EQ_WEIGHTS[provider];
 	return (
 		safe(counts.inputTokens) * w.input +
 		safe(counts.cacheCreationInputTokens) * w.cacheCreate +

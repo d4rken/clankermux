@@ -86,7 +86,9 @@ export function extractAnthropicIdentity(
 	let planTier: string | null = null;
 	if (rawTier) {
 		const key = rawTier.toLowerCase();
-		planTier = ANTHROPIC_TIER_MAP[key] ?? key;
+		planTier = Object.hasOwn(ANTHROPIC_TIER_MAP, key)
+			? (ANTHROPIC_TIER_MAP[key] ?? key)
+			: key;
 	}
 
 	// The rate-limit multiplier lives in a SEPARATE field so it can't be clobbered
