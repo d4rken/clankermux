@@ -164,12 +164,25 @@ export function AccountAddForm({
 			const changed = Object.entries(changes).some(
 				([key, value]) => prev[key as keyof typeof changes] !== value,
 			);
+			// Rule 1: every mode switch starts from a clean source. Each mode
+			// renders its own subset of the source fields, so a value typed under
+			// the previous mode may be invisible (and therefore uneditable) under
+			// the new one while still being submitted with it, and credentials
+			// meant for one provider must never reach another.
+			const switchedMode =
+				changes.mode !== undefined && changes.mode !== prev.mode;
+			// Rule 2: openai-compatible model mappings are discovered against a
+			// specific endpoint and key, so editing either of those *within* the
+			// mode invalidates them too, not just leaving or entering the mode.
+			const staleModelMappings =
+				changed &&
+				(prev.mode === "openai-compatible" ||
+					changes.mode === "openai-compatible");
 			return {
 				...prev,
 				...changes,
-				...(changed &&
-				(prev.mode === "openai-compatible" ||
-					changes.mode === "openai-compatible")
+				...(switchedMode ? { customEndpoint: "", apiKey: "" } : {}),
+				...(switchedMode || staleModelMappings
 					? { opusModel: "", sonnetModel: "", haikuModel: "" }
 					: {}),
 			};
