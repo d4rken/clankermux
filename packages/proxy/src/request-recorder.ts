@@ -165,6 +165,18 @@ export interface SlimUsageSummary {
 	 * it understates the real streaming speed).
 	 */
 	tokensPerSecondApproximate?: boolean;
+	/**
+	 * True when the OUTPUT count — and therefore `usage.totalTokens`, which
+	 * includes it — came from the collector's `ceil(generatedChars / 4)` estimate
+	 * rather than from the provider. Set when output usage was missing entirely,
+	 * or when the stream did not end cleanly and the estimate exceeded the last
+	 * reported count.
+	 *
+	 * Part of the summary rather than a return-value extra because it travels
+	 * with the number it qualifies: a consumer holding the total and not this is
+	 * holding an estimate that looks measured.
+	 */
+	outputApproximate?: boolean;
 	responseTimeMs?: number;
 	cacheCreationInputTokens?: number;
 	/**
@@ -1218,6 +1230,16 @@ export class RequestRecorder {
 			promptTokens: usage?.inputTokens,
 			completionTokens: usage?.outputTokens,
 			totalTokens: usage?.totalTokens,
+			// The PROVENANCE of that total, published beside it rather than left
+			// behind in the summary. Only stated when there is a total to qualify;
+			// a consumer holding the number and not this one is holding an estimate
+			// that looks measured.
+			totalTokensBasis:
+				usage?.totalTokens === undefined
+					? undefined
+					: summary?.outputApproximate === true
+						? "estimated"
+						: "provider",
 			inputTokens: usage?.inputTokens,
 			cacheReadInputTokens: usage?.cacheReadInputTokens,
 			cacheCreationInputTokens:

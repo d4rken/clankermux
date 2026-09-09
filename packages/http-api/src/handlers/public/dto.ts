@@ -1286,6 +1286,20 @@ export interface PublicRequestDoneDto {
 	project: string | null;
 	totalTokens: number | null;
 	/**
+	 * Where `totalTokens` came from, or null when nothing states it.
+	 *
+	 * ADDITIVE, and the total keeps its name, its type and its value: the widgets
+	 * use the number, so the fix is to say what it is rather than to withhold it.
+	 * `provider` is a count the response reported; `estimated` is the proxy's
+	 * `ceil(generatedChars / 4)` fallback, which is what a response with no output
+	 * usage or an uncleanly-ended stream gets — a routine case, not an error.
+	 *
+	 * NULL means the basis is unknown (there is no total, or the record carries no
+	 * provenance). Never defaulted to `provider`: claiming a measurement nobody
+	 * made is the overstatement this field exists to remove.
+	 */
+	totalTokensBasis: PublicTokenBasisDto | null;
+	/**
 	 * What this request is ESTIMATED to have cost, in USD, from the pricing
 	 * catalogue — not the operator's subscription charge. Most accounts here are
 	 * flat-rate plans, where the true marginal cost of a request is nothing like
@@ -1324,6 +1338,31 @@ export type PublicStreamEventDto =
  * emitting null: the device places the record on a time axis, and a null there
  * drops it entirely.
  */
+/**
+ * How a published token total was arrived at, as a CLOSED set.
+ *
+ * Mirrors the internal `TokenCountBasis` value for value. No `other` member and
+ * no fallback value: an unrecognised or absent basis is published as NULL,
+ * which on this surface already means "not stated" — an `other` here would
+ * assert that a basis exists and that we know it is neither of these two, which
+ * is more than the record supports.
+ */
+export type PublicTokenBasisDto = "provider" | "estimated";
+
+/** Total over today's `TokenCountBasis`; anything else is not stated at all. */
+export function toPublicTokenBasis(
+	basis: string | null | undefined,
+): PublicTokenBasisDto | null {
+	switch (basis) {
+		case "provider":
+			return "provider";
+		case "estimated":
+			return "estimated";
+		default:
+			return null;
+	}
+}
+
 export function toPublicRequestDoneDto(
 	payload: RequestResponse,
 	now: number,
@@ -1348,6 +1387,7 @@ export function toPublicRequestDoneDto(
 		model: text(payload.model ?? payload.requestedModel ?? null),
 		project: text(payload.project ?? null),
 		totalTokens: payload.totalTokens ?? null,
+		totalTokensBasis: toPublicTokenBasis(payload.totalTokensBasis),
 		costUsd: payload.costUsd ?? null,
 		errorMessage: text(payload.errorMessage),
 	};

@@ -1004,7 +1004,16 @@ export interface FinalizeDeps {
 	nowMs?: number;
 }
 
-export type FinalizedUsage = SlimUsageSummary & { outputApproximate?: boolean };
+/**
+ * The summary the collector produces.
+ *
+ * `outputApproximate` used to be bolted on here rather than declared on
+ * {@link SlimUsageSummary}, which is why it stopped at the recorder: the flag
+ * was typed as a property of THIS function's return value instead of a property
+ * of the measurement. It now lives on the summary, so the recorder can publish
+ * the provenance beside the total it qualifies.
+ */
+export type FinalizedUsage = SlimUsageSummary;
 
 /**
  * Resolve final usage. Returns a `SlimUsageSummary` (without `requestId` — the

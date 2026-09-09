@@ -1944,6 +1944,7 @@ describe("request.done normalizes the internal summary", () => {
 			model: null,
 			project: null,
 			totalTokens: null,
+			totalTokensBasis: null,
 			costUsd: null,
 			errorMessage: null,
 		});
@@ -1993,6 +1994,36 @@ describe("request.done normalizes the internal summary", () => {
 		const dto = toPublicRequestDoneDto(summary(), 0);
 		expect(dto.totalTokens).toBeNull();
 		expect(dto.costUsd).toBeNull();
+	});
+
+	it("says whether the token total was reported or estimated", () => {
+		// The collector substitutes ceil(generatedChars / 4) when output usage is
+		// missing or the stream ends uncleanly. That provenance used to stop at the
+		// recorder, so an interrupted response published a precise-looking total.
+		// ADDITIVE: the total keeps its name, its type and its value.
+		expect(
+			toPublicRequestDoneDto(summary({ totalTokensBasis: "provider" }), 0)
+				.totalTokensBasis,
+		).toBe("provider");
+		expect(
+			toPublicRequestDoneDto(summary({ totalTokensBasis: "estimated" }), 0)
+				.totalTokensBasis,
+		).toBe("estimated");
+	});
+
+	it("states a null basis when the provenance is unknown", () => {
+		// Never "provider" by default: a summary with no recorded provenance (a
+		// row read back from the database, say) has not been shown to carry a
+		// provider count, and claiming one would be the same overstatement this
+		// field exists to remove.
+		expect(toPublicRequestDoneDto(summary(), 0).totalTokensBasis).toBeNull();
+		expect(
+			toPublicRequestDoneDto(
+				// biome-ignore lint/suspicious/noExplicitAny: modelling a future value
+				summary({ totalTokensBasis: "something-new" as any }),
+				0,
+			).totalTokensBasis,
+		).toBeNull();
 	});
 
 	it("distinguishes an unpriced request from a free one", () => {
