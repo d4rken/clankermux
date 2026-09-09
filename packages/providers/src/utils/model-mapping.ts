@@ -63,7 +63,10 @@ export function getModelName(
 	const toFirst = (v: string | string[]) => (Array.isArray(v) ? v[0] : v);
 
 	// First try exact match
-	if (accountMappings[anthropicModel]) {
+	if (
+		Object.hasOwn(accountMappings, anthropicModel) &&
+		accountMappings[anthropicModel]
+	) {
 		const mappedModel = toFirst(accountMappings[anthropicModel]);
 		log.debug(`Exact model mapping: ${anthropicModel} -> ${mappedModel}`);
 		return mappedModel;

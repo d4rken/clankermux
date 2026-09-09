@@ -170,7 +170,11 @@ export abstract class BaseAnthropicCompatibleProvider extends BaseProvider {
 			}
 
 			// Fall back to static config mappings for backward compatibility
-			if (this.config.modelMappings?.[model]) {
+			if (
+				this.config.modelMappings &&
+				Object.hasOwn(this.config.modelMappings, model) &&
+				this.config.modelMappings[model]
+			) {
 				return this.config.modelMappings[model];
 			}
 

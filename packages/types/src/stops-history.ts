@@ -147,8 +147,7 @@ export function classifyStopCause(
 	// failure it has nothing to say about.
 	const trimmed = errorMessage?.trim() ?? "";
 	if (trimmed === "") return "other";
-	const exact = EXACT_LABELS[trimmed];
-	if (exact) return exact;
+	if (Object.hasOwn(EXACT_LABELS, trimmed)) return EXACT_LABELS[trimmed];
 
 	// Free-form upstream text is recorded as "<status> <provider message>", so a
 	// leading status code is the tell that this is a forwarded failure rather

@@ -2058,9 +2058,10 @@ export class CodexProvider extends BaseProvider {
 		// failover/cooldown logic reacts to the right HTTP status. Unrecognized
 		// codes keep the existing behavior (echo the raw upstream type, else
 		// api_error -> 502).
-		const mappedFromCode = code
-			? CODEX_ERROR_TYPE_BY_CODE[code.toLowerCase()]
-			: undefined;
+		const mappedFromCode =
+			code && Object.hasOwn(CODEX_ERROR_TYPE_BY_CODE, code.toLowerCase())
+				? CODEX_ERROR_TYPE_BY_CODE[code.toLowerCase()]
+				: undefined;
 		let type = mappedFromCode || error?.type || "api_error";
 		// Some Codex endpoints report context overflow without the
 		// context_length_exceeded code, only an "your input exceeds the context

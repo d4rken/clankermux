@@ -250,3 +250,20 @@ describe("model transform does not clone the request body", () => {
 		expect((await result.json()).model).toBe("MiniMax-M2");
 	});
 });
+
+it.each([
+	"__proto__",
+	"constructor",
+])("forwards unknown model %s as a string", async (model) => {
+	const account = { model_mappings: '{"sonnet":"target"}' } as Account;
+	expect(getModelName(model, account)).toBe(model);
+	const request = new Request("https://example.com/v1/messages", {
+		method: "POST",
+		headers: { "content-type": "application/json" },
+		body: JSON.stringify({ model, messages: [] }),
+	});
+	const transformed = await transformRequestBodyModel(request, account);
+	expect((await transformed.json()).model).toBe(model);
+	account.model_mappings = JSON.stringify({ [model]: "explicit-target" });
+	expect(getModelName(model, account)).toBe("explicit-target");
+});

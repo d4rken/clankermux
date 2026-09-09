@@ -109,3 +109,25 @@ describe("classifyStopCause", () => {
 		}
 	});
 });
+
+describe("inherited stop labels", () => {
+	for (const key of [
+		"__proto__",
+		"constructor",
+		"toString",
+		"hasOwnProperty",
+		"valueOf",
+		"isPrototypeOf",
+		"propertyIsEnumerable",
+		"toLocaleString",
+	]) {
+		it(`classifies ${key} using the unknown-label status heuristics`, () => {
+			for (const message of [key, `  ${key} \t`]) {
+				for (const status of [undefined, null, 200])
+					expect(classifyStopCause(message, status)).toBe("other");
+				for (const status of [400, 500, 503])
+					expect(classifyStopCause(message, status)).toBe("upstream_error");
+			}
+		});
+	}
+});

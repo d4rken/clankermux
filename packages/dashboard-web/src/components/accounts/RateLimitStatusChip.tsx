@@ -161,7 +161,9 @@ function parseStatus(raw: string): ParsedStatus {
 	const resetMinutes = match?.[2] ? Number(match[2]) : null;
 	const key = rawBase.toLowerCase().replace(/\s+/g, "_");
 
-	const descriptor: StatusDescriptor = STATUS_MAP[key] ?? {
+	const descriptor: StatusDescriptor = (Object.hasOwn(STATUS_MAP, key)
+		? STATUS_MAP[key]
+		: undefined) ?? {
 		label: humanizeFallback(rawBase) || rawBase,
 		variant: "secondary",
 		description: `Provider rate-limit status: ${rawBase}`,

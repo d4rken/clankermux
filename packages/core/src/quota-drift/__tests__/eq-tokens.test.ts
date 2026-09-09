@@ -235,3 +235,22 @@ describe("eqTokenProviderFor", () => {
 		expect(eqTokenProviderFor(null)).toBe("anthropic");
 	});
 });
+
+it.each([
+	"__proto__",
+	"constructor",
+])("counts usage with provider weights for unknown model %s", (model) => {
+	const counts = {
+		inputTokens: 100,
+		outputTokens: 10,
+		cacheCreationInputTokens: 20,
+		cacheReadInputTokens: 30,
+	};
+	for (const provider of ["anthropic", "openai"] as const) {
+		const w =
+			provider === "anthropic" ? ANTHROPIC_EQ_WEIGHTS : OPENAI_EQ_WEIGHTS;
+		expect(eqTokens(counts, provider, normalizeModelKey(model))).toBe(
+			100 * w.input + 10 * w.output + 20 * w.cacheCreate + 30 * w.cacheRead,
+		);
+	}
+});

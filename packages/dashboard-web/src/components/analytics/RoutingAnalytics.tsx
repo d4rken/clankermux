@@ -17,10 +17,7 @@ import {
 import { CHART_PROPS, CHART_TOKENS, type TimeRange } from "../../constants";
 import { useSeriesPalette } from "../../hooks/useSeriesPalette";
 import { shortLabel } from "../../lib/chart-utils";
-import {
-	formatAxisTime,
-	makeTimeTooltipLabelFormatter,
-} from "../../lib/time-format";
+import { makeTimeTooltipLabelFormatter } from "../../lib/time-format";
 import { ChartTooltip } from "../charts";
 import { Badge } from "../ui/badge";
 import {
@@ -32,6 +29,7 @@ import {
 } from "../ui/card";
 import { PanelEmptyState } from "../ui/panel-empty-state";
 import { labelDecision } from "./routing-labels";
+import { buildRoutingTimeline } from "./routing-timeline";
 
 const OUTCOME_COLORS: Record<RoutingFlowPoint["outcome"], string> = {
 	success: CHART_TOKENS.success,
@@ -39,24 +37,38 @@ const OUTCOME_COLORS: Record<RoutingFlowPoint["outcome"], string> = {
 	error: CHART_TOKENS.error,
 };
 
-const DECISION_EXPLANATIONS: Record<string, string> = {
-	affinity_hit: "A project or thread was already pinned to this account.",
-	affinity_hold: "Affinity was held while the original account recovered.",
-	affinity_miss: "No existing affinity was found, so a new account was pinned.",
-	affinity_reassigned:
+const DECISION_EXPLANATIONS = new Map<string, string>([
+	["affinity_hit", "A project or thread was already pinned to this account."],
+	["affinity_hold", "Affinity was held while the original account recovered."],
+	[
+		"affinity_miss",
+		"No existing affinity was found, so a new account was pinned.",
+	],
+	[
+		"affinity_reassigned",
 		"Affinity moved because priority changed or the prior account was durably unavailable.",
-	auto_fallback:
+	],
+	[
+		"auto_fallback",
 		"A higher-priority fallback account became usable after its window reset.",
-	combo: "An active model-family routing chain selected the account slot.",
-	force_account_global:
+	],
+	["combo", "An active model-family routing chain selected the account slot."],
+	[
+		"force_account_global",
 		"The global force-account override routed all traffic to this account, bypassing selection, gating, and failover.",
-	forced_account: "A request header explicitly selected this account.",
-	global_session: "The current provider session was continued.",
-	least_used: "The lowest effective utilization account was selected.",
-	priority_utilization:
+	],
+	["forced_account", "A request header explicitly selected this account."],
+	["global_session", "The current provider session was continued."],
+	["least_used", "The lowest effective utilization account was selected."],
+	[
+		"priority_utilization",
 		"Accounts were sorted by priority, then upstream utilization.",
-	untracked: "This request was logged before routing telemetry was recorded.",
-};
+	],
+	[
+		"untracked",
+		"This request was logged before routing telemetry was recorded.",
+	],
+]);
 
 function EmptyRoutingState({ loading }: { loading: boolean }) {
 	return (
@@ -209,7 +221,7 @@ function RoutingFlowGraph({ flow }: { flow: RoutingFlowPoint[] }) {
 					return (
 						<g key={name} transform={`translate(${leftX} ${y - 19})`}>
 							<title>
-								{DECISION_EXPLANATIONS[name] ?? labelDecision(name)}
+								{DECISION_EXPLANATIONS.get(name) ?? labelDecision(name)}
 							</title>
 							<rect
 								width={nodeWidth}
@@ -305,44 +317,10 @@ export function RoutingAnalyticsPanel({
 	timeRange,
 }: RoutingAnalyticsPanelProps) {
 	const series = useSeriesPalette();
-	const timeline = useMemo(() => {
-		if (!routing?.timeline.length)
-			return { data: [], accounts: [] as string[] };
-
-		const topAccounts = routing.accountSplit
-			.slice(0, 6)
-			.map((account) => account.accountName);
-		const topAccountSet = new Set(topAccounts);
-		const rows = new Map<number, Record<string, string | number>>();
-
-		for (const point of routing.timeline) {
-			const accountName = topAccountSet.has(point.accountName)
-				? point.accountName
-				: "Other";
-			const row =
-				rows.get(point.ts) ??
-				({
-					ts: point.ts,
-					time: formatAxisTime(point.ts, timeRange),
-				} as Record<string, string | number>);
-			row[accountName] = Number(row[accountName] ?? 0) + point.requests;
-			rows.set(point.ts, row);
-		}
-
-		const accounts = [...topAccounts];
-		if (
-			routing.timeline.some((point) => !topAccountSet.has(point.accountName))
-		) {
-			accounts.push("Other");
-		}
-
-		return {
-			data: Array.from(rows.values()).sort(
-				(a, b) => Number(a.ts) - Number(b.ts),
-			),
-			accounts,
-		};
-	}, [routing, timeRange]);
+	const timeline = useMemo(
+		() => buildRoutingTimeline(routing, timeRange),
+		[routing, timeRange],
+	);
 
 	if (!routing || routing.totalRequests === 0) {
 		return <EmptyRoutingState loading={loading} />;
@@ -429,9 +407,10 @@ export function RoutingAnalyticsPanel({
 								/>
 								{timeline.accounts.map((account, index) => (
 									<Area
-										key={account}
+										key={account.id}
 										type="monotone"
-										dataKey={account}
+										dataKey={account.id}
+										name={account.name}
 										stackId="accounts"
 										stroke={series.sequence[index % series.sequence.length]}
 										fill={series.sequence[index % series.sequence.length]}

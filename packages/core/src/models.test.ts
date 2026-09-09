@@ -144,3 +144,11 @@ describe("Claude Mythos 5.1 registration", () => {
 		expect(isValidModelId("claude-mythos-5-1")).toBe(true);
 	});
 });
+
+it.each([
+	"__proto__",
+	"constructor",
+])("preserves unknown model label %s", (model) => {
+	expect(getModelShortName(model)).toBe(model);
+	expect(getModelDisplayName(model)).toBe(model);
+});

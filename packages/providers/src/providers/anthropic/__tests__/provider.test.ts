@@ -238,3 +238,22 @@ describe("AnthropicProvider", () => {
 		});
 	});
 });
+
+it.each([
+	"__proto__",
+	"constructor",
+])("uses stop for unknown streaming stop reason %s", async (stopReason) => {
+	const event = { type: "message_delta", delta: { stop_reason: stopReason } };
+	const response = new Response(`data: ${JSON.stringify(event)}\n\n`, {
+		headers: { "content-type": "text/event-stream" },
+	});
+	const transformed = await new AnthropicProvider().processResponse(
+		response,
+		null,
+	);
+	const text = await transformed.text();
+	expect(JSON.parse(text.trim().replace(/^data: /, ""))).toEqual({
+		...event,
+		finish_reason: "stop",
+	});
+});

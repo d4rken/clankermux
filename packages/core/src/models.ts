@@ -81,12 +81,16 @@ export type ClaudeModelId =
 
 // Helper function to get short name from full model ID
 export function getModelShortName(modelId: string): string {
-	return MODEL_SHORT_NAMES[modelId] || modelId;
+	return Object.hasOwn(MODEL_SHORT_NAMES, modelId)
+		? MODEL_SHORT_NAMES[modelId] || modelId
+		: modelId;
 }
 
 // Helper function to get display name from model ID
 export function getModelDisplayName(modelId: string): string {
-	return MODEL_DISPLAY_NAMES[modelId] || modelId;
+	return Object.hasOwn(MODEL_DISPLAY_NAMES, modelId)
+		? MODEL_DISPLAY_NAMES[modelId] || modelId
+		: modelId;
 }
 
 // Helper function to validate if a string is a valid model ID

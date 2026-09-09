@@ -200,7 +200,7 @@ function getProviderDefaultMappings(
 export function getModelMappings(
 	account: Account,
 ): Record<string, string | string[]> {
-	const mappings: Record<string, string | string[]> = {};
+	const mappings: Record<string, string | string[]> = Object.create(null);
 
 	// Built-in provider defaults (e.g. qwen → coder-model) — the lowest layer.
 	const providerDefaults = getProviderDefaultMappings(account.provider);
@@ -737,10 +737,13 @@ export function measureBodyForEstimate(
  * to the base model's window (`gpt-5.6-sol`). Non-date suffixes stay unknown.
  */
 export function resolveModelContextWindow(model: string): number | undefined {
-	const exact = MODEL_CONTEXT_WINDOWS[model];
+	const exact = Object.hasOwn(MODEL_CONTEXT_WINDOWS, model)
+		? MODEL_CONTEXT_WINDOWS[model]
+		: undefined;
 	if (exact !== undefined) return exact;
 	const base = stripDatedModelSuffix(model);
-	if (base !== null) return MODEL_CONTEXT_WINDOWS[base];
+	if (base !== null && Object.hasOwn(MODEL_CONTEXT_WINDOWS, base))
+		return MODEL_CONTEXT_WINDOWS[base];
 	return undefined;
 }
 
@@ -748,10 +751,16 @@ export function resolveModelContextWindow(model: string): number | undefined {
 export function resolveModelMaxContextWindow(
 	model: string,
 ): number | undefined {
-	const exact = MODEL_MAX_CONTEXT_WINDOWS[model];
+	const exact = Object.hasOwn(MODEL_MAX_CONTEXT_WINDOWS, model)
+		? MODEL_MAX_CONTEXT_WINDOWS[model]
+		: undefined;
 	if (exact !== undefined) return exact;
 	const base = stripDatedModelSuffix(model);
-	if (base !== null && MODEL_MAX_CONTEXT_WINDOWS[base] !== undefined) {
+	if (
+		base !== null &&
+		Object.hasOwn(MODEL_MAX_CONTEXT_WINDOWS, base) &&
+		MODEL_MAX_CONTEXT_WINDOWS[base] !== undefined
+	) {
 		return MODEL_MAX_CONTEXT_WINDOWS[base];
 	}
 	return resolveModelContextWindow(model);
