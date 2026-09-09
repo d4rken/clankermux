@@ -1491,7 +1491,7 @@ export function AccountAddForm({
 								onChange={(field, value) =>
 									setNewAccount((prev) => ({ ...prev, [field]: value }))
 								}
-								description="Map Anthropic model names to gateway model IDs. Leave empty to use defaults."
+								description="Map Anthropic model names to gateway model IDs. Families left blank forward the original model ID unchanged."
 								placeholders={{
 									opusModel: "provider/model-id (example)",
 									sonnetModel: "provider/model-id (example)",
@@ -1521,7 +1521,7 @@ export function AccountAddForm({
 								onChange={(field, value) =>
 									setNewAccount((prev) => ({ ...prev, [field]: value }))
 								}
-								description="Map Anthropic model names to provider-specific models. Leave empty to use defaults."
+								description="Map Anthropic model names to provider-specific models. Families left blank forward the original model ID unchanged."
 								placeholders={{
 									opusModel: "model-id (example)",
 									sonnetModel: "model-id (example)",
