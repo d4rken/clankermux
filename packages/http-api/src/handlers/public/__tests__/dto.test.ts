@@ -47,7 +47,12 @@ import {
 	toPublicWorkloadHeadroomDto,
 	truncateUtf8,
 } from "../dto";
-import { arrayNesting, assertInstantsAreIso, depthOf } from "./wire-contract";
+import {
+	arrayNesting,
+	assertCountsAreStatedWholeNumbers,
+	assertInstantsAreIso,
+	depthOf,
+} from "./wire-contract";
 
 const NOW = 1_699_999_000_000;
 const NOW_ISO = "2023-11-14T21:56:40.000Z";
@@ -1273,6 +1278,8 @@ describe("instants vs durations", () => {
 						contributingAccountCount: 1,
 						unknownAccountCount: 0,
 						earliestResetsAtMs: 1_700_200_000_000,
+						oldestObservedAtMs: 1_699_999_000_000,
+						unobservedContributingCount: 0,
 						leastUsedUtilizationPct: 12,
 						leastUsedAccountId: "acct-1",
 					},
@@ -1309,6 +1316,21 @@ describe("instants vs durations", () => {
 		assertInstantsAreIso(toPublicStopsDto(stops(), NOW));
 		assertInstantsAreIso(toPublicPacingDto(pacing()));
 		assertInstantsAreIso(toPublicWorkloadHeadroomDto(workloadHeadroom()));
+	});
+
+	it("states every count as a whole number on any resource", () => {
+		// A count is never null on this surface: it is what makes the figure beside
+		// it interpretable, and "we counted none" is a number.
+		assertCountsAreStatedWholeNumbers(
+			toPublicStatusDto(populated, { uptimeS: 3_600, version: "v" }),
+		);
+		assertCountsAreStatedWholeNumbers(toPublicAccountsDto(populated));
+		assertCountsAreStatedWholeNumbers(toPublicRunwayDto(runway()));
+		assertCountsAreStatedWholeNumbers(toPublicStopsDto(stops(), NOW));
+		assertCountsAreStatedWholeNumbers(toPublicPacingDto(pacing()));
+		assertCountsAreStatedWholeNumbers(
+			toPublicWorkloadHeadroomDto(workloadHeadroom()),
+		);
 	});
 
 	it("emits no duration as a string", () => {
@@ -1386,6 +1408,8 @@ describe("identifiers are never truncated", () => {
 						contributingAccountCount: 1,
 						unknownAccountCount: 0,
 						earliestResetsAtMs: null,
+						oldestObservedAtMs: null,
+						unobservedContributingCount: 1,
 						leastUsedUtilizationPct: 42,
 						leastUsedAccountId: longId,
 					},
@@ -1394,6 +1418,8 @@ describe("identifiers are never truncated", () => {
 						contributingAccountCount: 0,
 						unknownAccountCount: 1,
 						earliestResetsAtMs: null,
+						oldestObservedAtMs: null,
+						unobservedContributingCount: 0,
 						leastUsedUtilizationPct: null,
 						leastUsedAccountId: null,
 					},

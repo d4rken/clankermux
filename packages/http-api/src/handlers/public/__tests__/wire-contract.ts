@@ -26,6 +26,12 @@ const INSTANT_KEY = /(?:^|[a-z])At$|^at$|^until$/;
  */
 const DURATION_KEY = /Ms$|[a-z]S$/;
 
+/**
+ * A field name that denotes a COUNT of things: `contributingAccountCount`,
+ * `unobservedContributingCount`, `candidatesCount`, `activeKeyCount`.
+ */
+const COUNT_KEY = /Count$/;
+
 function isIsoInstant(value: unknown): boolean {
 	if (typeof value !== "string") return false;
 	const parsed = Date.parse(value);
@@ -76,6 +82,31 @@ export function assertInstantsAreIso(payload: unknown): void {
 				`${path} is a duration and must be a number, got ${JSON.stringify(value)}`,
 			).toBe(true);
 		}
+	});
+}
+
+/**
+ * Every count anywhere in the payload is a stated, whole, non-negative number.
+ *
+ * NEVER NULL, unlike a measurement: on this surface null means "absent", and a
+ * count of things we could not observe is still a count — zero of them. The
+ * qualifier counts that travel beside a figure exist precisely so a client can
+ * tell how much of the pool it speaks for, and one arriving as null would make
+ * the figure beside it uninterpretable in exactly the case that matters.
+ *
+ * Whole and non-negative because the consumers parse these into fixed-width
+ * integers; a fractional count is a mean that has been given a count's name.
+ */
+export function assertCountsAreStatedWholeNumbers(payload: unknown): void {
+	const wire = JSON.parse(JSON.stringify(payload));
+	walk(wire, "$", (key, value, path) => {
+		if (!COUNT_KEY.test(key)) return;
+		expect(
+			typeof value === "number" &&
+				Number.isInteger(value) &&
+				(value as number) >= 0,
+			`${path} is a count and must be a whole non-negative number, got ${JSON.stringify(value)}`,
+		).toBe(true);
 	});
 }
 
