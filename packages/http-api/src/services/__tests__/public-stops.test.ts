@@ -193,9 +193,11 @@ describe("the public stops reader", () => {
 
 	it("does not pin a failed read in place", async () => {
 		// A rejected promise left in the single-flight slot would serve the same
-		// failure to every later caller for as long as the process lives.
+		// failure to every later caller for as long as the process lives. The
+		// negative TTL is a bound on retries, never a permanent verdict.
 		let attempt = 0;
-		const sources = makeSources({ buckets: BLOCKS });
+		let now = NOW;
+		const sources = makeSources({ buckets: BLOCKS, now: () => now });
 		const failing: StopsHistorySources = {
 			...sources,
 			getStopsByBucket: async (opts) => {
@@ -204,11 +206,40 @@ describe("the public stops reader", () => {
 				return sources.getStopsByBucket(opts);
 			},
 		};
-		const read = createPublicStopsReaderFromSources(failing);
+		const read = createPublicStopsReaderFromSources(failing, {
+			now: () => now,
+			failureTtlMs: 5_000,
+		});
 
 		await expect(read()).rejects.toThrow("db is busy");
+		now = NOW + 5_000;
 		const recovered = await read();
 		expect(recovered.summary.blockedRequests).toBe(7);
+	});
+
+	it("re-runs no range scan while a failure is still backed off", async () => {
+		// Seven days of the request table, for every anonymous poll, precisely
+		// while the database is already struggling.
+		let now = NOW;
+		let attempts = 0;
+		const sources = makeSources({ buckets: BLOCKS, now: () => now });
+		const failing: StopsHistorySources = {
+			...sources,
+			getStopsByBucket: async () => {
+				attempts += 1;
+				throw new Error("db is busy");
+			},
+		};
+		const read = createPublicStopsReaderFromSources(failing, {
+			now: () => now,
+			failureTtlMs: 5_000,
+		});
+
+		await expect(read()).rejects.toThrow("db is busy");
+		now = NOW + 4_999;
+		await expect(read()).rejects.toThrow("db is busy");
+
+		expect(attempts).toBe(1);
 	});
 
 	it("reports zero blocked with the denominator intact", async () => {

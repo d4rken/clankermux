@@ -13,8 +13,12 @@ import type { DatabaseOperations } from "@clankermux/database";
 import { type AnyUsageData, usageCache } from "@clankermux/providers";
 import type { Account, ApiKey } from "@clankermux/types";
 import { toPublicRunwayDto } from "../../handlers/public/dto";
-import { createPublicRunwayReader } from "../public-runway";
+import {
+	createPublicRunwayReader,
+	createPublicRunwayReaderFromScan,
+} from "../public-runway";
 import { clearCodexPayloadScanMemo } from "../resolve-codex-usage";
+import type { RunwayScan } from "../runway-scan";
 
 const MINUTE_MS = 60 * 1000;
 const HOUR_MS = 60 * MINUTE_MS;
@@ -625,5 +629,109 @@ describe("GET /public/v1/runway", () => {
 		} finally {
 			setUntimed.mockRestore();
 		}
+	});
+});
+
+/**
+ * The reader's own memo, over an injected scan.
+ *
+ * Distinct from the payload-scan memo above: that one makes ONE scan cheaper,
+ * this one decides how often a scan happens at all. `/public/v1/runway` had
+ * none, so every anonymous GET ran the full resolution — freshness tiers,
+ * Codex payload recovery, regressions, capacity model — in the process that is
+ * also serving proxy traffic.
+ */
+describe("GET /public/v1/runway — the reader memo", () => {
+	function scanOf(generatedAt: number): RunwayScan {
+		return {
+			generatedAt,
+			horizonMs: RUNWAY_HORIZON_MS,
+			keys: [],
+			accounts: [],
+			sources: [],
+		};
+	}
+
+	it("serves one scan for a burst of polls inside the TTL", async () => {
+		let scans = 0;
+		let clock = BASE;
+		const read = createPublicRunwayReaderFromScan(
+			async () => {
+				scans++;
+				return scanOf(clock);
+			},
+			{ now: () => clock, ttlMs: 60_000 },
+		);
+
+		await read();
+		clock = BASE + 59_000;
+		const second = await read();
+
+		expect(scans).toBe(1);
+		// The SCAN's instant, not the serve's: every projection in the payload is
+		// relative to it.
+		expect(second.generatedAtMs).toBe(BASE);
+	});
+
+	it("re-scans once the minute-scale TTL has passed", async () => {
+		let scans = 0;
+		let clock = BASE;
+		const read = createPublicRunwayReaderFromScan(
+			async () => {
+				scans++;
+				return scanOf(clock);
+			},
+			{ now: () => clock, ttlMs: 60_000 },
+		);
+
+		await read();
+		clock = BASE + 60_001;
+		const second = await read();
+
+		expect(scans).toBe(2);
+		expect(second.generatedAtMs).toBe(BASE + 60_001);
+	});
+
+	it("collapses concurrent cold polls onto one scan", async () => {
+		let scans = 0;
+		let release: () => void = () => {};
+		const gate = new Promise<void>((resolve) => {
+			release = resolve;
+		});
+		const read = createPublicRunwayReaderFromScan(
+			async () => {
+				scans++;
+				await gate;
+				return scanOf(BASE);
+			},
+			{ now: () => BASE, ttlMs: 60_000 },
+		);
+
+		const polls = Promise.all([read(), read(), read()]);
+		release();
+		await polls;
+
+		expect(scans).toBe(1);
+	});
+
+	it("backs a failed scan off instead of re-running it every poll", async () => {
+		let scans = 0;
+		let clock = BASE;
+		const read = createPublicRunwayReaderFromScan(
+			async () => {
+				scans++;
+				throw new Error("scan failed");
+			},
+			{ now: () => clock, ttlMs: 60_000, failureTtlMs: 5_000 },
+		);
+
+		await expect(read()).rejects.toThrow("scan failed");
+		clock = BASE + 4_999;
+		await expect(read()).rejects.toThrow("scan failed");
+		expect(scans).toBe(1);
+
+		clock = BASE + 5_000;
+		await expect(read()).rejects.toThrow("scan failed");
+		expect(scans).toBe(2);
 	});
 });

@@ -25,6 +25,7 @@ import type {
 } from "@clankermux/types";
 import { resolveRateLimitPresentation } from "../handlers/accounts";
 import { buildPredictionsForAccounts } from "./build-account-predictions-for";
+import { createPublicReadMemo } from "./public-read-memo";
 
 const log = new Logger("PublicSnapshot");
 
@@ -1008,3 +1009,48 @@ export function createPublicSnapshotReader(
 export type PublicSnapshotReader = ReturnType<
 	typeof createPublicSnapshotReader
 >;
+
+/**
+ * How long one built snapshot answers `/public/v1/status` and
+ * `/public/v1/accounts` before it is rebuilt.
+ *
+ * SECONDS, not the minute the projections get, because these two are the panel
+ * poll: a desk panel asks every few seconds and the answer is meant to track
+ * the pool that closely. What the memo removes is not the freshness, it is the
+ * cost of a POLL LOOP — the read queries every account, then loads up to 24 h of
+ * usage snapshots and runs a regression per account, and unmemoized every
+ * anonymous GET paid for all of it in the process that is also serving proxy
+ * traffic.
+ */
+export const PUBLIC_SNAPSHOT_TTL_MS = 5_000;
+
+export interface PublicSnapshotMemoOptions {
+	/** Clock seam. Defaults to `Date.now`; tests pin it to a fixed instant. */
+	now?: () => number;
+	/** Memo lifetime. Defaults to {@link PUBLIC_SNAPSHOT_TTL_MS}. */
+	ttlMs?: number;
+	/** Negative-cache lifetime. */
+	failureTtlMs?: number;
+}
+
+/**
+ * The memoized reader the two public pool routes share.
+ *
+ * A WRAPPER rather than a memo baked into {@link createPublicSnapshotReader},
+ * because that reader takes an explicit `now` and is expected to honour it —
+ * every caller that pins the clock (the tests, and anything modelling a stated
+ * instant) must keep getting a snapshot built AT that instant rather than
+ * whatever the memo happens to hold. Here the memo owns the clock: it passes
+ * its own reading in, and `nowMs` on the served snapshot is therefore the
+ * instant the data describes, on a memo hit as much as on a cold read.
+ */
+export function createMemoizedPublicSnapshotReader(
+	read: PublicSnapshotReader,
+	options: PublicSnapshotMemoOptions = {},
+): () => Promise<PublicSnapshot> {
+	return createPublicReadMemo((nowMs) => read(nowMs), {
+		computedAtMs: (snapshot) => snapshot.nowMs,
+		ttlMs: PUBLIC_SNAPSHOT_TTL_MS,
+		...options,
+	});
+}

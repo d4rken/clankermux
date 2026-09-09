@@ -3,6 +3,7 @@ import type { PacingSnapshot } from "@clankermux/core";
 import type { DatabaseOperations } from "@clankermux/database";
 import type { LoadBalancingStrategy } from "@clankermux/types";
 import { computePacingScan } from "./pacing-scan";
+import { createPublicReadMemo } from "./public-read-memo";
 
 /**
  * The de-identified pacing scan for `GET /public/v1/pacing`.
@@ -20,23 +21,23 @@ import { computePacingScan } from "./pacing-scan";
  * parameter. The mount's docstring states the invariant; this is where the
  * pacing route keeps it.
  *
- * MEMOIZED, SINGLE-FLIGHT, on the `public-stops` pattern and for a sharper
- * reason than that reader has. The scan is built from the full account list —
- * session-stats SQL, active-session counts, usage snapshots, prediction
- * regressions and duplicate-login detection — because computing pacing from
+ * MEMOIZED, SINGLE-FLIGHT on the shared `createPublicReadMemo`, and for a
+ * sharper reason than most readers have. The scan is built from the full
+ * account list — session-stats SQL, active-session counts, usage snapshots,
+ * prediction regressions and duplicate-login detection — because computing
+ * pacing from
  * anything narrower would let it drift from the bars it sits beside. That is a
  * deliberate cost, and the memo is what stops an unauthenticated poll loop on
  * the LAN setting how often it is paid.
  */
-
-/** How long one computed answer is served before another read is allowed. */
-const DEFAULT_TTL_MS = 60_000;
 
 export interface PublicPacingOptions {
 	/** Clock seam. Defaults to `Date.now`; tests pin it to a fixed instant. */
 	now?: () => number;
 	/** Memo lifetime. */
 	ttlMs?: number;
+	/** Negative-cache lifetime. */
+	failureTtlMs?: number;
 }
 
 export function createPublicPacingReader(
@@ -64,34 +65,12 @@ export function createPublicPacingReaderFromScan(
 	scan: (nowMs: number) => Promise<PacingSnapshot>,
 	options: PublicPacingOptions = {},
 ) {
-	const now = options.now ?? (() => Date.now());
-	const ttlMs = options.ttlMs ?? DEFAULT_TTL_MS;
-
-	let cached: PacingSnapshot | null = null;
-	let inFlight: Promise<PacingSnapshot> | null = null;
-
-	return async (): Promise<PacingSnapshot> => {
-		const nowMs = now();
-		// `generatedAtMs` is the READ's own clock, so a memo hit reports the
-		// instant it was computed rather than the instant it was asked for. A
-		// client seeing the same value twice is looking at the same measurement
-		// twice, which is the truth.
-		if (cached && nowMs - cached.generatedAtMs < ttlMs) return cached;
-		// Single flight, checked BEFORE starting a read: a burst of concurrent
-		// polls costs one account build rather than one each.
-		if (inFlight) return await inFlight;
-
-		const read = scan(nowMs);
-		inFlight = read;
-		try {
-			cached = await read;
-			return cached;
-		} finally {
-			// Cleared whether the read resolved or threw: a rejected promise left
-			// here would serve the same failure to every later caller.
-			inFlight = null;
-		}
-	};
+	return createPublicReadMemo(scan, {
+		// The READ's own clock, so a memo hit reports the instant it was computed
+		// rather than the instant it was asked for.
+		computedAtMs: (snapshot) => snapshot.generatedAtMs,
+		...options,
+	});
 }
 
 export type PublicPacingReader = ReturnType<typeof createPublicPacingReader>;
