@@ -13,6 +13,7 @@ import {
 	SelectValue,
 } from "../ui/select";
 import { AuthorizationHandoff } from "./AuthorizationHandoff";
+import { ModelMappingFields } from "./ModelMappingFields";
 import { OpenAIModelMappings } from "./OpenAIModelMappings";
 
 interface AccountAddFormProps {
@@ -163,12 +164,25 @@ export function AccountAddForm({
 			const changed = Object.entries(changes).some(
 				([key, value]) => prev[key as keyof typeof changes] !== value,
 			);
+			// Rule 1: every mode switch starts from a clean source. Each mode
+			// renders its own subset of the source fields, so a value typed under
+			// the previous mode may be invisible (and therefore uneditable) under
+			// the new one while still being submitted with it, and credentials
+			// meant for one provider must never reach another.
+			const switchedMode =
+				changes.mode !== undefined && changes.mode !== prev.mode;
+			// Rule 2: openai-compatible model mappings are discovered against a
+			// specific endpoint and key, so editing either of those *within* the
+			// mode invalidates them too, not just leaving or entering the mode.
+			const staleModelMappings =
+				changed &&
+				(prev.mode === "openai-compatible" ||
+					changes.mode === "openai-compatible");
 			return {
 				...prev,
 				...changes,
-				...(changed &&
-				(prev.mode === "openai-compatible" ||
-					changes.mode === "openai-compatible")
+				...(switchedMode ? { customEndpoint: "", apiKey: "" } : {}),
+				...(switchedMode || staleModelMappings
 					? { opusModel: "", sonnetModel: "", haikuModel: "" }
 					: {}),
 			};
@@ -1424,6 +1438,96 @@ export function AccountAddForm({
 									</div>
 								</div>
 							</div>
+						</>
+					)}
+					{newAccount.mode === "openrouter" && (
+						<>
+							<div className="space-y-item">
+								<Label htmlFor="apiKey">OpenRouter API Key</Label>
+								<Input
+									id="apiKey"
+									type="password"
+									value={newAccount.apiKey}
+									onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
+										updateAccountSource({
+											apiKey: (e.target as HTMLInputElement).value,
+										})
+									}
+									placeholder="Enter your OpenRouter API key"
+								/>
+							</div>
+							<ModelMappingFields
+								mappings={newAccount}
+								onChange={(field, value) =>
+									setNewAccount((prev) => ({ ...prev, [field]: value }))
+								}
+								description="OpenRouter model IDs are namespaced (anthropic/claude-sonnet-4.5). Any family left blank is sent upstream unchanged."
+								placeholders={{
+									opusModel: "anthropic/claude-opus-4.1 (example)",
+									sonnetModel: "anthropic/claude-sonnet-4.5 (example)",
+									haikuModel: "anthropic/claude-haiku-4.5 (example)",
+								}}
+							/>
+						</>
+					)}
+					{newAccount.mode === "kilo" && (
+						<>
+							<div className="space-y-item">
+								<Label htmlFor="apiKey">Kilo Gateway API Key</Label>
+								<Input
+									id="apiKey"
+									type="password"
+									value={newAccount.apiKey}
+									onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
+										updateAccountSource({
+											apiKey: (e.target as HTMLInputElement).value,
+										})
+									}
+									placeholder="Enter your Kilo Gateway API key"
+								/>
+							</div>
+							<ModelMappingFields
+								mappings={newAccount}
+								onChange={(field, value) =>
+									setNewAccount((prev) => ({ ...prev, [field]: value }))
+								}
+								description="Map Anthropic model names to gateway model IDs. Families left blank forward the original model ID unchanged."
+								placeholders={{
+									opusModel: "provider/model-id (example)",
+									sonnetModel: "provider/model-id (example)",
+									haikuModel: "provider/model-id (example)",
+								}}
+							/>
+						</>
+					)}
+					{newAccount.mode === "alibaba-coding-plan" && (
+						<>
+							<div className="space-y-item">
+								<Label htmlFor="apiKey">Alibaba Coding Plan API Key</Label>
+								<Input
+									id="apiKey"
+									type="password"
+									value={newAccount.apiKey}
+									onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
+										updateAccountSource({
+											apiKey: (e.target as HTMLInputElement).value,
+										})
+									}
+									placeholder="Enter your Alibaba Coding Plan API key"
+								/>
+							</div>
+							<ModelMappingFields
+								mappings={newAccount}
+								onChange={(field, value) =>
+									setNewAccount((prev) => ({ ...prev, [field]: value }))
+								}
+								description="Map Anthropic model names to provider-specific models. Families left blank forward the original model ID unchanged."
+								placeholders={{
+									opusModel: "model-id (example)",
+									sonnetModel: "model-id (example)",
+									haikuModel: "model-id (example)",
+								}}
+							/>
 						</>
 					)}
 					{(newAccount.mode === "claude-oauth" ||
