@@ -12,6 +12,7 @@ import {
 	SelectTrigger,
 	SelectValue,
 } from "../ui/select";
+import { AuthorizationHandoff } from "./AuthorizationHandoff";
 
 interface AccountAddFormProps {
 	onAddAccount: (params: {
@@ -117,10 +118,11 @@ export function AccountAddForm({
 	const [authCode, setAuthCode] = useState("");
 	const [sessionId, setSessionId] = useState("");
 	/**
-	 * Kept so the code step can render the authorization URL as a link.
-	 * `window.open` alone is not a way back to it: a popup blocker can eat the
-	 * tab, and the dashboard is often open on a different machine than the
-	 * browser that has to do the authorizing.
+	 * The code step renders the authorization URL as a link with a copy button,
+	 * and nothing is opened automatically: the URL usually has to be carried to
+	 * another browser — the one signed in to the account being added — so an
+	 * auto-opened tab would land in the wrong one (and a popup blocker could eat
+	 * it anyway).
 	 */
 	const [authUrl, setAuthUrl] = useState("");
 	const [newAccount, setNewAccount] = useState({
@@ -242,6 +244,10 @@ export function AccountAddForm({
 		}
 		setQwenStep("pending");
 		setQwenError("");
+		// The pending step is entered before the init call resolves, so clear the
+		// previous attempt's link and code rather than showing stale ones.
+		setQwenAuthUrl("");
+		setQwenUserCode("");
 		try {
 			const result = await api.initQwenDeviceFlow({
 				name: newAccount.name,
@@ -250,11 +256,6 @@ export function AccountAddForm({
 			qwenSessionIdRef.current = result.sessionId;
 			setQwenAuthUrl(result.authUrl);
 			setQwenUserCode(result.userCode);
-
-			// Open auth URL in new tab
-			if (typeof window !== "undefined") {
-				window.open(result.authUrl, "_blank");
-			}
 
 			// Poll for status every 3s
 			qwenPollIntervalRef.current = setInterval(async () => {
@@ -307,6 +308,10 @@ export function AccountAddForm({
 		}
 		setCodexStep("pending");
 		setCodexError("");
+		// The pending step is entered before the init call resolves, so clear the
+		// previous attempt's link and code rather than showing stale ones.
+		setCodexVerificationUrl("");
+		setCodexUserCode("");
 		try {
 			const result = await api.initCodexDeviceFlow({
 				name: newAccount.name,
@@ -315,11 +320,6 @@ export function AccountAddForm({
 			codexSessionIdRef.current = result.sessionId;
 			setCodexVerificationUrl(result.verificationUrl);
 			setCodexUserCode(result.userCode);
-
-			// Open auth URL in new tab
-			if (typeof window !== "undefined") {
-				window.open(result.verificationUrl, "_blank");
-			}
 
 			// Poll for status every 3s
 			codexPollIntervalRef.current = setInterval(async () => {
@@ -734,11 +734,6 @@ export function AccountAddForm({
 		setSessionId(result.sessionId);
 		setAuthUrl(result.authUrl);
 
-		// Open auth URL in new tab
-		if (typeof window !== "undefined") {
-			window.open(result.authUrl, "_blank");
-		}
-
 		// Move to code entry step
 		setAuthStep("code");
 	};
@@ -916,27 +911,25 @@ export function AccountAddForm({
 							{codexStep === "idle" && (
 								<Alert title="Device Code Authentication">
 									<p>
-										Click the button below to start Codex authentication. A
-										browser tab will open for you to authorize.
+										Click the button below to start Codex authentication. You
+										will get an authorization link and a user code to enter in
+										your browser.
 									</p>
 								</Alert>
 							)}
 							{codexStep === "pending" && (
 								<Alert title="Waiting for authorization...">
-									<p>Enter this code in the browser tab:</p>
-									<div className="flex items-center gap-item">
-										<code className="text-lg font-mono font-bold tracking-widest bg-info/15 text-foreground px-row py-tight rounded">
-											{codexUserCode}
-										</code>
-										<a
-											href={codexVerificationUrl}
-											target="_blank"
-											rel="noreferrer"
-											className="text-xs text-primary underline"
-										>
-											Open browser
-										</a>
-									</div>
+									{codexVerificationUrl ? (
+										<>
+											<p>Enter this code on the authorization page:</p>
+											<AuthorizationHandoff
+												url={codexVerificationUrl}
+												userCode={codexUserCode}
+											/>
+										</>
+									) : (
+										<p>Requesting a device code…</p>
+									)}
 								</Alert>
 							)}
 							{codexStep === "complete" && (
@@ -967,27 +960,25 @@ export function AccountAddForm({
 							{qwenStep === "idle" && (
 								<Alert title="Device Code Authentication">
 									<p>
-										Click the button below to start Qwen authentication. A
-										browser tab will open for you to authorize.
+										Click the button below to start Qwen authentication. You
+										will get an authorization link and a user code to enter in
+										your browser.
 									</p>
 								</Alert>
 							)}
 							{qwenStep === "pending" && (
 								<Alert title="Waiting for authorization...">
-									<p>Enter this code in the browser tab:</p>
-									<div className="flex items-center gap-item">
-										<code className="text-lg font-mono font-bold tracking-widest bg-info/15 text-foreground px-row py-tight rounded">
-											{qwenUserCode}
-										</code>
-										<a
-											href={qwenAuthUrl}
-											target="_blank"
-											rel="noreferrer"
-											className="text-xs text-primary underline"
-										>
-											Open browser
-										</a>
-									</div>
+									{qwenAuthUrl ? (
+										<>
+											<p>Enter this code on the authorization page:</p>
+											<AuthorizationHandoff
+												url={qwenAuthUrl}
+												userCode={qwenUserCode}
+											/>
+										</>
+									) : (
+										<p>Requesting a device code…</p>
+									)}
 								</Alert>
 							)}
 							{qwenStep === "complete" && (
@@ -1552,19 +1543,11 @@ export function AccountAddForm({
 				<>
 					<div className="space-y-item">
 						<p className="text-sm text-muted-foreground">
-							A new browser tab has opened for authentication. After
-							authorizing, copy the code and paste it below.
+							Open the authorization link in the browser that is signed in to
+							the account you are adding, or copy it there. After authorizing,
+							copy the code and paste it below.
 						</p>
-						{authUrl && (
-							<a
-								href={authUrl}
-								target="_blank"
-								rel="noopener noreferrer"
-								className="block text-sm text-primary underline break-all"
-							>
-								Open authorization page
-							</a>
-						)}
+						{authUrl && <AuthorizationHandoff url={authUrl} />}
 						<Label htmlFor="code">Authorization Code</Label>
 						<Input
 							id="code"
