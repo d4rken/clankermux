@@ -87,6 +87,103 @@ export interface DefaultCandidateEvaluation {
 	livenessReservedIds: string[];
 }
 
+/** Whether each proactive usage-throttle window is switched on. */
+interface ThrottleSettings {
+	fiveHourEnabled: boolean;
+	weeklyEnabled: boolean;
+}
+
+/**
+ * The two hard gates, evaluated for ONE account. Empty when neither holds it.
+ *
+ * EVERY active gate is recorded, not just the first one that hits. The two
+ * gates are independent holds on the same account and can run to different
+ * deadlines: a provider-wide overload until T1 alongside a usage throttle until
+ * a later T2 leaves the account gated until T2. Stopping at the first gate
+ * would leave the second deadline undiscovered, and a caller taking the
+ * earliest recovery across the pool would then publish T1 — a moment at which
+ * nothing is actually routable. Both reads are pure (a non-evicting
+ * `usageCache.peek` and a breaker inspection), so evaluating the second gate
+ * for an already-gated account costs nothing and mutates nothing.
+ */
+function activeGateExclusions(
+	account: Account,
+	settings: ThrottleSettings,
+	throttlingActive: boolean,
+	now: number,
+): PeekExclusion[] {
+	const gates: PeekExclusion[] = [];
+
+	const ov = getProviderWideOverloadUntil(account.provider, now);
+	if (ov && ov > now) {
+		gates.push({
+			accountId: account.id,
+			reason: "provider_overload",
+			recoversAtMs: ov,
+		});
+	}
+
+	if (throttlingActive) {
+		const tu = getUsageThrottleUntil(
+			usageCache.peek(account.id),
+			settings,
+			now,
+			account.provider,
+		);
+		if (tu && tu > now) {
+			gates.push({
+				accountId: account.id,
+				reason: "usage_throttled",
+				recoversAtMs: tu,
+			});
+		}
+	}
+
+	return gates;
+}
+
+/**
+ * WHAT HOLDS EACH ACCOUNT and until when — for every account passed, ranked or
+ * not. Decides no routing eligibility at all.
+ *
+ * Separate from {@link evaluateDefaultCandidates} because that function answers
+ * a different question. It walks `strategy.peekRanked()`, which has ALREADY
+ * dropped the accounts the proxy cannot route to right now (paused without a
+ * simulatable auto-unpause, cooling off), so the exclusions it returns describe
+ * only the accounts that were still in the running. A caller folding those
+ * exclusions together with holds of its own then never learns that the account
+ * cooling down for one more minute is also under a provider overload for three:
+ * it takes the maximum of the one hold it can see and publishes a recovery an
+ * account cannot make. Asking THIS question for every account is what completes
+ * that picture.
+ *
+ * Pure and non-evicting, exactly like the evaluation: a `usageCache.peek` and a
+ * breaker inspection, nothing written.
+ */
+export function gateHoldsForAccounts(
+	accounts: readonly Account[],
+	config: Pick<
+		Config,
+		"getUsageThrottlingFiveHourEnabled" | "getUsageThrottlingWeeklyEnabled"
+	>,
+	now = Date.now(),
+): PeekExclusion[] {
+	// Mirror applyUsageThrottling() in proxy.ts exactly, as the evaluation does.
+	const settings: ThrottleSettings = {
+		fiveHourEnabled: config.getUsageThrottlingFiveHourEnabled(),
+		weeklyEnabled: config.getUsageThrottlingWeeklyEnabled(),
+	};
+	const throttlingActive = settings.fiveHourEnabled || settings.weeklyEnabled;
+
+	const holds: PeekExclusion[] = [];
+	for (const account of accounts) {
+		holds.push(
+			...activeGateExclusions(account, settings, throttlingActive, now),
+		);
+	}
+	return holds;
+}
+
 /**
  * The accounts a FRESH, no-affinity, unpinned, NOMINAL-size request would
  * consider RIGHT NOW, best first, applying the same proxy gates the real
@@ -144,7 +241,7 @@ export function evaluateDefaultCandidates(
 	}
 
 	// Mirror applyUsageThrottling() in proxy.ts exactly.
-	const settings = {
+	const settings: ThrottleSettings = {
 		fiveHourEnabled: config.getUsageThrottlingFiveHourEnabled(),
 		weeklyEnabled: config.getUsageThrottlingWeeklyEnabled(),
 	};
@@ -159,47 +256,17 @@ export function evaluateDefaultCandidates(
 	// prediction skip an account that real routing keeps.
 	const survivors: Account[] = [];
 	for (const account of strategy.peekRanked(accounts)) {
-		// EVERY active gate is recorded, not just the first one that hits. The two
-		// gates are independent holds on the same account and can run to different
-		// deadlines: a provider-wide overload until T1 alongside a usage throttle
-		// until a later T2 leaves the account gated until T2. Stopping at the first
-		// gate would leave the second deadline undiscovered, and a caller taking
-		// the earliest recovery across the pool would then publish T1 — a moment at
-		// which nothing is actually routable. Both reads are pure (a non-evicting
-		// `usageCache.peek` and a breaker inspection), so evaluating the second gate
-		// for an already-gated account costs nothing and mutates nothing.
-		let gated = false;
-
-		const ov = getProviderWideOverloadUntil(account.provider, now);
-		if (ov && ov > now) {
-			exclusions.push({
-				accountId: account.id,
-				reason: "provider_overload",
-				recoversAtMs: ov,
-			});
-			gated = true;
-		}
-
-		if (throttlingActive) {
-			const tu = getUsageThrottleUntil(
-				usageCache.peek(account.id),
-				settings,
-				now,
-				account.provider,
-			);
-			if (tu && tu > now) {
-				exclusions.push({
-					accountId: account.id,
-					reason: "usage_throttled",
-					recoversAtMs: tu,
-				});
-				gated = true;
-			}
-		}
+		const gates = activeGateExclusions(
+			account,
+			settings,
+			throttlingActive,
+			now,
+		);
+		exclusions.push(...gates);
 
 		// Membership is unchanged by the above: an account survives exactly when
 		// NEITHER gate held it, as before.
-		if (gated) continue;
+		if (gates.length > 0) continue;
 
 		survivors.push(account);
 	}

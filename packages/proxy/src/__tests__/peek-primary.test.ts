@@ -9,6 +9,7 @@ import type {
 import {
 	earliestExclusionRecoveryMs,
 	evaluateDefaultCandidates,
+	gateHoldsForAccounts,
 	peekPrimaryAccountId,
 } from "../peek-primary";
 import {
@@ -581,5 +582,80 @@ describe("peekPrimaryAccountId", () => {
 
 		expect(usageCache.peek("anthropicA")).not.toBeNull();
 		expect(usageCache.peek("codex")).not.toBeNull();
+	});
+});
+
+/**
+ * The gate holds on the WHOLE pool, ranked or not.
+ *
+ * `evaluateDefaultCandidates` can only report the gates on accounts the
+ * strategy handed it, and every real strategy has already dropped the accounts
+ * that are cooling down. A caller that folds gate deadlines together with holds
+ * of its own therefore learns nothing about the account whose cooldown lifts in
+ * a minute but whose provider is overloaded for three, and publishes the
+ * minute. This query is what makes that account's gates visible.
+ */
+describe("gateHoldsForAccounts", () => {
+	afterEach(() => {
+		clearProviderOverloadCooldown();
+		usageCache.delete("anthropicA");
+		usageCache.delete("codex");
+	});
+
+	it("reports the gates on an account NO strategy would rank", () => {
+		const now = Date.now();
+		// Cooling down for another minute: `isPeekAvailable` rejects it, so it
+		// never reaches the ranking the candidate evaluation walks.
+		const cooling = makeAccount({
+			id: "anthropicA",
+			provider: "anthropic",
+			rate_limited_until: now + 60_000,
+		});
+		applyProviderOverloadCooldown("anthropic", now + 180_000);
+
+		expect(
+			gateHoldsForAccounts([cooling], throttleDisabledConfig, now),
+		).toEqual([
+			{
+				accountId: "anthropicA",
+				reason: "provider_overload",
+				recoversAtMs: now + 180_000,
+			},
+		]);
+	});
+
+	it("says nothing about an account no gate holds", () => {
+		const now = Date.now();
+		const healthy = makeAccount({ id: "anthropicA", provider: "anthropic" });
+		expect(
+			gateHoldsForAccounts([healthy], throttleDisabledConfig, now),
+		).toEqual([]);
+		expect(gateHoldsForAccounts([], throttleDisabledConfig, now)).toEqual([]);
+	});
+
+	it("records BOTH gates on one account, in the order the evaluation does", () => {
+		const now = Date.now();
+		const a = makeAccount({ id: "anthropicA", provider: "anthropic" });
+		applyProviderOverloadCooldown("anthropic", now + 60_000);
+		usageCache.set("anthropicA", makeThrottlingUsage(now));
+
+		const holds = gateHoldsForAccounts([a], throttleEnabledConfig, now);
+		expect(holds.map((h) => h.reason)).toEqual([
+			"provider_overload",
+			"usage_throttled",
+		]);
+		// The pool is held until the LATER of them, which is the whole reason both
+		// are reported rather than the first that hit.
+		expect(earliestExclusionRecoveryMs(holds)).toBeGreaterThan(now + 60_000);
+	});
+
+	it("stays non-evicting, exactly like the evaluation", () => {
+		const now = Date.now();
+		const a = makeAccount({ id: "anthropicA", provider: "anthropic" });
+		usageCache.set("anthropicA", makeThrottlingUsage(now));
+
+		gateHoldsForAccounts([a], throttleEnabledConfig, now);
+
+		expect(usageCache.peek("anthropicA")).not.toBeNull();
 	});
 });
