@@ -683,6 +683,25 @@ export interface PublicWindowAggregateDto {
 	 */
 	earliestResetsAt: string | null;
 	/**
+	 * INSTANT the OLDEST contributing reading was observed, or null when no
+	 * contributor states one.
+	 *
+	 * ADDITIVE, and deliberately NOT `generatedAt`: that one is when this payload
+	 * was built, this one is when the evidence in it was measured. They can be
+	 * twenty minutes apart, and the deployed shape published only the first — so a
+	 * status-only widget rendered an aged mean as a current one.
+	 */
+	oldestObservedAt: string | null;
+	/**
+	 * How many contributors carry NO observation time at all (a reconstructed
+	 * reading, seeded untimed because it cannot honestly say when it was taken).
+	 *
+	 * Their percentages ARE in the mean, so the instant above does not speak for
+	 * them. Accounts that contributed nothing are counted by
+	 * `unknownAccountCount`, not here.
+	 */
+	unobservedContributingCount: number;
+	/**
 	 * The LOWEST utilization among the contributors — the account with the most
 	 * room left.
 	 *
@@ -785,6 +804,8 @@ function toPublicWindowAggregateDto(
 		contributingAccountCount: aggregate.contributingAccountCount,
 		unknownAccountCount: aggregate.unknownAccountCount,
 		earliestResetsAt: instant(aggregate.earliestResetsAtMs),
+		oldestObservedAt: instant(aggregate.oldestObservedAtMs),
+		unobservedContributingCount: aggregate.unobservedContributingCount,
 		leastUsedUtilizationPct: aggregate.leastUsedUtilizationPct,
 		leastUsedAccountId: optionalIdentifier(aggregate.leastUsedAccountId),
 	};

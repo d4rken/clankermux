@@ -110,6 +110,8 @@ function snapshot(over: Partial<PublicSnapshot> = {}): PublicSnapshot {
 				contributingAccountCount: 1,
 				unknownAccountCount: 2,
 				earliestResetsAtMs: 1_700_000_000_000,
+				oldestObservedAtMs: NOW - 30_000,
+				unobservedContributingCount: 0,
 				leastUsedUtilizationPct: 42,
 				leastUsedAccountId: "acct-1",
 			},
@@ -118,6 +120,8 @@ function snapshot(over: Partial<PublicSnapshot> = {}): PublicSnapshot {
 				contributingAccountCount: 0,
 				unknownAccountCount: 3,
 				earliestResetsAtMs: null,
+				oldestObservedAtMs: null,
+				unobservedContributingCount: 0,
 				leastUsedUtilizationPct: null,
 				leastUsedAccountId: null,
 			},
@@ -352,6 +356,8 @@ describe("golden: GET /public/v1/status", () => {
 					contributingAccountCount: 1,
 					unknownAccountCount: 2,
 					earliestResetsAt: "2023-11-14T22:13:20.000Z",
+					oldestObservedAt: "2023-11-14T21:56:10.000Z",
+					unobservedContributingCount: 0,
 					leastUsedUtilizationPct: 42,
 					leastUsedAccountId: "acct-1",
 				},
@@ -360,6 +366,8 @@ describe("golden: GET /public/v1/status", () => {
 					contributingAccountCount: 0,
 					unknownAccountCount: 3,
 					earliestResetsAt: null,
+					oldestObservedAt: null,
+					unobservedContributingCount: 0,
 					leastUsedUtilizationPct: null,
 					leastUsedAccountId: null,
 				},
@@ -395,6 +403,56 @@ describe("golden: GET /public/v1/status", () => {
 		expect(dto.usage.sevenDay.contributingAccountCount).toBe(0);
 		expect(dto.usage.sevenDay.leastUsedUtilizationPct).toBeNull();
 		expect(dto.usage.sevenDay.leastUsedAccountId).toBeNull();
+	});
+
+	it("dates each aggregate by its oldest input, apart from generatedAt", () => {
+		// `generatedAt` is when the payload was BUILT; `oldestObservedAt` is when
+		// the evidence in it was MEASURED. Publishing only the first is what let a
+		// twenty-minute-old mean render as current.
+		const dto = toPublicStatusDto(snapshot(), { uptimeS: 1, version: "v" });
+		expect(dto.usage.fiveHour.oldestObservedAt).toBe(
+			"2023-11-14T21:56:10.000Z",
+		);
+		expect(dto.generatedAt).toBe(NOW_ISO);
+		expect(dto.usage.fiveHour.oldestObservedAt).not.toBe(dto.generatedAt);
+		// Null, not a borrowed timestamp, when nothing contributed.
+		expect(dto.usage.sevenDay.oldestObservedAt).toBeNull();
+	});
+
+	it("counts contributors that state no observation time", () => {
+		const dto = toPublicStatusDto(
+			snapshot({
+				usage: {
+					fiveHour: {
+						meanUtilizationPct: 42,
+						contributingAccountCount: 2,
+						unknownAccountCount: 0,
+						earliestResetsAtMs: null,
+						oldestObservedAtMs: null,
+						unobservedContributingCount: 2,
+						leastUsedUtilizationPct: 42,
+						leastUsedAccountId: "acct-1",
+					},
+					sevenDay: {
+						meanUtilizationPct: null,
+						contributingAccountCount: 0,
+						unknownAccountCount: 2,
+						earliestResetsAtMs: null,
+						oldestObservedAtMs: null,
+						unobservedContributingCount: 0,
+						leastUsedUtilizationPct: null,
+						leastUsedAccountId: null,
+					},
+					worstAccountUtilizationPct: 42,
+				},
+			}),
+			{ uptimeS: 1, version: "v" },
+		);
+		// The percentages are in the mean; what is absent is any claim about when
+		// they were taken.
+		expect(dto.usage.fiveHour.contributingAccountCount).toBe(2);
+		expect(dto.usage.fiveHour.unobservedContributingCount).toBe(2);
+		expect(dto.usage.fiveHour.oldestObservedAt).toBeNull();
 	});
 
 	it("states the routing context beside the candidate it belongs to", () => {

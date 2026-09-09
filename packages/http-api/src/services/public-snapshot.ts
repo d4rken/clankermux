@@ -240,6 +240,29 @@ export interface PublicWindowAggregate {
 	 */
 	earliestResetsAtMs: number | null;
 	/**
+	 * When the OLDEST contributing reading was observed, or null when no
+	 * contributor states an observation time.
+	 *
+	 * An aggregate is only as current as its worst input, and the readings behind
+	 * one can be twenty minutes apart. Without this the payload put an aged
+	 * percentage beside a freshly generated `generatedAt` and a status-only client
+	 * had nothing to tell current evidence from stale. Distinct from
+	 * `generatedAt`, which is when the PAYLOAD was built and says nothing about
+	 * when anything was measured.
+	 */
+	oldestObservedAtMs: number | null;
+	/**
+	 * Contributors whose reading carries NO observation time at all — a
+	 * reconstructed reading, seeded untimed precisely because it cannot honestly
+	 * say when it was observed.
+	 *
+	 * Counted rather than folded into the instant above: their percentages are in
+	 * the mean, so an age that silently spoke for them would be an age for
+	 * evidence of unknown vintage. Accounts that contributed NOTHING are already
+	 * covered by `unknownAccountCount` and are not counted here.
+	 */
+	unobservedContributingCount: number;
+	/**
 	 * The LOWEST utilization among the contributing accounts, and whose it is.
 	 *
 	 * The mean beside it cannot answer the question a widget is actually asking.
@@ -471,6 +494,10 @@ function aggregateWindow(
 	const resets = contributing
 		.map((r) => r.resetsAtMs)
 		.filter((r): r is number => r !== null);
+	// The AGE of the evidence, over the same contributors the mean is taken over.
+	const observed = contributing
+		.map((r) => r.observedAtMs)
+		.filter((t): t is number => t !== null);
 	let leastUsed: (WindowReading & { utilizationPct: number }) | null = null;
 	for (const reading of contributing) {
 		if (
@@ -492,6 +519,8 @@ function aggregateWindow(
 		contributingAccountCount: contributing.length,
 		unknownAccountCount: inScopeCount - contributing.length,
 		earliestResetsAtMs: resets.length === 0 ? null : Math.min(...resets),
+		oldestObservedAtMs: observed.length === 0 ? null : Math.min(...observed),
+		unobservedContributingCount: contributing.length - observed.length,
 		leastUsedUtilizationPct: leastUsed?.utilizationPct ?? null,
 		leastUsedAccountId: leastUsed?.accountId ?? null,
 	};
@@ -502,6 +531,12 @@ interface WindowReading {
 	accountId: string;
 	utilizationPct: number | null;
 	resetsAtMs: number | null;
+	/**
+	 * When this reading was observed, or null when its source cannot say. Carried
+	 * through aggregation rather than dropped at the account boundary: the pooled
+	 * figure has no age of its own, only the age of its worst input.
+	 */
+	observedAtMs: number | null;
 }
 
 function maxOfPresent(values: Array<number | null>): number | null {
@@ -997,6 +1032,7 @@ export function createPublicSnapshotReader(
 				accountId: account.id,
 				utilizationPct: window?.utilizationPct ?? null,
 				resetsAtMs: window?.resetsAtMs ?? null,
+				observedAtMs: window?.observedAtMs ?? null,
 			};
 		};
 

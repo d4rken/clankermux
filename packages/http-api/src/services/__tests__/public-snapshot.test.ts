@@ -703,6 +703,67 @@ describe("pooled aggregates disclose what they are", () => {
 		).toBe(true);
 	});
 
+	it("dates the aggregate by its OLDEST contributing reading", async () => {
+		// The mean is only as current as the readings behind it. Without this the
+		// payload put a 20-minute-old percentage beside a `generatedAt` from a
+		// second ago, and a status-only widget had no way to tell current evidence
+		// from stale.
+		insertAccount({ id: "a", name: "a" });
+		insertAccount({ id: "b", name: "b" });
+		usageCache.setWithAgeForTests("a", anthropicUsage(80, 20), 60_000);
+		usageCache.setWithAgeForTests("b", anthropicUsage(40, 10), 20 * 60_000);
+
+		const snapshot = await read();
+		const observed = snapshot.accounts.map((a) => a.usageObservedAtMs);
+		// The older of the two accounts' own observation instants, exactly — a
+		// figure derived from the same readings rather than a second clock.
+		expect(snapshot.usage.fiveHour.oldestObservedAtMs).toBe(
+			Math.min(...observed.filter((t): t is number => t !== null)),
+		);
+		expect(snapshot.usage.fiveHour.unobservedContributingCount).toBe(0);
+	});
+
+	it("counts contributors whose reading has no observation time at all", async () => {
+		// A reconstructed reading is seeded untimed on purpose, so it can say when
+		// it was observed only by lying. It still contributes its percentage; the
+		// count is what stops the aggregate's age from speaking for it.
+		insertAccount({ id: "a", name: "a" });
+		insertAccount({ id: "b", name: "b" });
+		usageCache.setWithAgeForTests("a", anthropicUsage(80, 20), 60_000);
+		usageCache.setUntimed("b", anthropicUsage(40, 10));
+
+		const snapshot = await read();
+		expect(snapshot.usage.fiveHour.contributingAccountCount).toBe(2);
+		expect(snapshot.usage.fiveHour.unobservedContributingCount).toBe(1);
+		// …and the stated age belongs to the one reading that has one.
+		expect(snapshot.usage.fiveHour.oldestObservedAtMs).toBe(
+			snapshot.accounts.find((a) => a.id === "a")?.usageObservedAtMs ?? null,
+		);
+	});
+
+	it("states no age when nothing contributing carries one", async () => {
+		insertAccount({ id: "a", name: "a" });
+		usageCache.setUntimed("a", anthropicUsage(80, 20));
+
+		const snapshot = await read();
+		expect(snapshot.usage.fiveHour.oldestObservedAtMs).toBeNull();
+		expect(snapshot.usage.fiveHour.unobservedContributingCount).toBe(1);
+	});
+
+	it("counts only CONTRIBUTORS as unobserved, not accounts with no reading", async () => {
+		// An account that reported nothing is already counted by
+		// `unknownAccountCount`; counting it again here would describe the age of
+		// evidence that does not exist.
+		insertAccount({ id: "a", name: "a" });
+		insertAccount({ id: "b", name: "b" });
+		usageCache.setWithAgeForTests("a", anthropicUsage(80, 20), 60_000);
+
+		const snapshot = await read();
+		expect(snapshot.usage.fiveHour.contributingAccountCount).toBe(1);
+		expect(snapshot.usage.fiveHour.unknownAccountCount).toBe(1);
+		expect(snapshot.usage.fiveHour.unobservedContributingCount).toBe(0);
+	});
+
 	it("takes the EARLIEST reset, never a mean of reset instants", async () => {
 		// The mean of two reset times is an instant at which nothing happens.
 		insertAccount({ id: "a", name: "a" });
