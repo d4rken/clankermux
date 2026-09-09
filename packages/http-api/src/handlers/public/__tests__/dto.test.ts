@@ -2199,6 +2199,23 @@ describe("request.done normalizes the internal summary", () => {
 		}
 	});
 
+	it("treats an INHERITED property name as an unknown label, not a hit", () => {
+		// The lookup used to be an object literal, which answers for everything on
+		// Object.prototype: `__proto__` came back as an object and serialised as
+		// `errorMessage: {}`, while `constructor` and `toString` came back as
+		// functions, which JSON.stringify drops — taking the field off the wire of
+		// a closed-set contract altogether.
+		for (const raw of ["__proto__", "constructor", "toString"]) {
+			const dto = toPublicRequestDoneDto(
+				summary({ success: false, statusCode: null, errorMessage: raw }),
+				0,
+			);
+			expect(dto.errorMessage).toBe("other");
+			// …and it survives the round trip as a string, rather than vanishing.
+			expect(JSON.parse(JSON.stringify(dto)).errorMessage).toBe("other");
+		}
+	});
+
 	it("falls back to `other` for a label it has not been taught", () => {
 		expect(
 			toPublicRequestDoneDto(

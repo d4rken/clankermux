@@ -1411,12 +1411,22 @@ export type PublicErrorCategoryDto =
 	/** The response stream broke after it had started. */
 	| "stream_error";
 
-/** The transport terminals the recorder writes, mapped by exact label. */
-const TRANSPORT_TERMINALS: Readonly<Record<string, PublicErrorCategoryDto>> = {
-	"client disconnected": "client_disconnected",
-	"request timed out": "request_timed_out",
-	"stream error": "stream_error",
-};
+/**
+ * The transport terminals the recorder writes, mapped by exact label.
+ *
+ * A `Map`, not an object literal, because the key is UNTRUSTED text: an object
+ * lookup answers for every inherited property too, so `__proto__` came back as
+ * an object (serialising as `errorMessage: {}`) and `constructor` as a function
+ * (which JSON drops, taking the field off the wire entirely). A Map has no
+ * prototype chain to walk, so the return type is closed by construction rather
+ * than by the absence of a caller who can reach those keys.
+ */
+const TRANSPORT_TERMINALS: ReadonlyMap<string, PublicErrorCategoryDto> =
+	new Map<string, PublicErrorCategoryDto>([
+		["client disconnected", "client_disconnected"],
+		["request timed out", "request_timed_out"],
+		["stream error", "stream_error"],
+	]);
 
 /**
  * Classify a recorded error into {@link PublicErrorCategoryDto}, or null when
@@ -1434,7 +1444,7 @@ export function toPublicErrorCategory(
 ): PublicErrorCategoryDto | null {
 	const trimmed = errorMessage?.trim() ?? "";
 	if (trimmed === "") return null;
-	const transport = TRANSPORT_TERMINALS[trimmed];
+	const transport = TRANSPORT_TERMINALS.get(trimmed);
 	if (transport) return transport;
 	return toPublicStopCause(classifyStopCause(trimmed, statusCode));
 }
