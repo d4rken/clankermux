@@ -376,6 +376,31 @@ export function presentRateLimitStatus(
 }
 
 /**
+ * Which surface is asking for the account array, and therefore what the
+ * assembly is allowed to DO while building it.
+ *
+ * A policy rather than a flag per side effect: the two writes below (an upstream
+ * Codex reset-credit refresh, and the payload tier's re-seed of the usage cache)
+ * are one entitlement, not two knobs, and every future side effect belongs to
+ * the same decision. Nothing about WHICH reading is resolved or how it is
+ * labelled depends on this — only whether the assembly may write.
+ *
+ *  - `management` — `GET /api/accounts` and the pages built on it. The surface
+ *    that has always owned the Codex reset-credit recovery, and the one entitled
+ *    to refresh what the proxy can see.
+ *  - `read-only` — every projection that is not that page, the UNAUTHENTICATED
+ *    `GET /public/v1/pacing` above all. An anonymous GET must initiate no
+ *    upstream request and must not move the usage cache that ROUTING, throttling
+ *    and capacity decisions read.
+ */
+export type AccountAssemblySideEffects = "management" | "read-only";
+
+export interface ListAccountResponsesOptions {
+	/** Defaults to `management`, so no existing caller changes behaviour. */
+	sideEffects?: AccountAssemblySideEffects;
+}
+
+/**
  * Build the account list `GET /api/accounts` serves.
  *
  * Extracted from the handler so a SECOND surface can consume the same array:
@@ -393,13 +418,21 @@ export function presentRateLimitStatus(
  * this exists to prevent. The public widget reader absorbs its share behind a
  * TTL memo; the dashboard pays it twice per refresh while the Usage page is
  * open, which is the cost of the two surfaces never disagreeing.
+ *
+ * What is shared is the RESOLUTION; what is not is the WRITES. See
+ * {@link AccountAssemblySideEffects}: a caller that is not the management page
+ * passes `read-only` and gets the identical array with neither the upstream
+ * Codex refresh nor the usage-cache re-seed.
  */
 export async function listAccountResponses(
 	dbOps: DatabaseOperations,
 	config: Config,
 	getStrategy?: () => LoadBalancingStrategy | null,
+	options: ListAccountResponsesOptions = {},
 ): Promise<AccountResponse[]> {
 	{
+		const sideEffects: AccountAssemblySideEffects =
+			options.sideEffects ?? "management";
 		const db = dbOps.getAdapter();
 		const now = Date.now();
 		const sessionDuration = 5 * 60 * 60 * 1000; // 5 hours
@@ -650,17 +683,25 @@ export async function listAccountResponses(
 		// the /responses headers. Snapshot the cache for this response, then kick a
 		// best-effort background refresh for missing/stale entries. The dashboard's
 		// normal account polling picks up the result without delaying this request.
+		//
+		// The SNAPSHOT is unconditional — reading the cache costs nothing and both
+		// policies serve the same credits state. The REFRESH is the management
+		// page's alone: it is an upstream request (with the token-refresh handling
+		// behind it), and a read-only projection that started one would let an
+		// anonymous caller drive provider traffic.
 		const codexResetCreditsByAccount = new Map(
 			accounts
 				.filter((a) => a.provider === "codex")
 				.map((a) => [a.id, codexRateLimitResetCreditsCache.get(a.id)]),
 		);
-		for (const account of accounts) {
-			if (
-				account.provider === "codex" &&
-				codexRateLimitResetCreditsCache.needsRefresh(account.id, now)
-			) {
-				void refreshCodexResetCreditsForAccount(account.id);
+		if (sideEffects === "management") {
+			for (const account of accounts) {
+				if (
+					account.provider === "codex" &&
+					codexRateLimitResetCreditsCache.needsRefresh(account.id, now)
+				) {
+					void refreshCodexResetCreditsForAccount(account.id);
+				}
 			}
 		}
 
@@ -756,8 +797,11 @@ export async function listAccountResponses(
 						account.last_used != null ? Number(account.last_used) : null,
 						// The management accounts page is the surface that has always
 						// owned this recovery, and it is the one entitled to refresh what
-						// the proxy can see.
-						{ seedCache: true },
+						// the proxy can see. That entitlement is now ENFORCED by the
+						// caller's policy rather than asserted by this call site: the
+						// assembler is shared with read-only projections, so a hardcoded
+						// `true` here promised an invariant the code could not keep.
+						{ seedCache: sideEffects === "management" },
 					);
 					usageData = resolved.data;
 					usageIsLiveCacheEntry = resolved.source === "cache";

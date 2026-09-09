@@ -5,7 +5,10 @@ import {
 } from "@clankermux/core";
 import type { DatabaseOperations } from "@clankermux/database";
 import type { LoadBalancingStrategy } from "@clankermux/types";
-import { listAccountResponses } from "../handlers/accounts";
+import {
+	type AccountAssemblySideEffects,
+	listAccountResponses,
+} from "../handlers/accounts";
 
 /**
  * The database half of the pacing scan.
@@ -24,13 +27,22 @@ import { listAccountResponses } from "../handlers/accounts";
  * tier a Codex reading resolves from), which is what this whole change set
  * exists to remove. The public reader's TTL memo is what stops an anonymous
  * poll loop deciding how often it is paid for.
+ *
+ * The assembly's SIDE EFFECTS are the caller's to choose, and the parameter is
+ * threaded rather than inferred here: `GET /api/pacing` is the management page's
+ * scan and keeps the management writes, while the unauthenticated
+ * `GET /public/v1/pacing` passes `read-only` and gets the same figures with no
+ * upstream refresh and no write into the usage cache routing reads.
  */
 export async function computePacingScan(
 	dbOps: DatabaseOperations,
 	config: Config,
 	getStrategy?: () => LoadBalancingStrategy | null,
 	now: number = Date.now(),
+	sideEffects: AccountAssemblySideEffects = "management",
 ): Promise<PacingSnapshot> {
-	const accounts = await listAccountResponses(dbOps, config, getStrategy);
+	const accounts = await listAccountResponses(dbOps, config, getStrategy, {
+		sideEffects,
+	});
 	return computePacingFromAccounts(accounts, now);
 }

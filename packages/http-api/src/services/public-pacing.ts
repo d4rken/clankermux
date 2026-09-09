@@ -12,6 +12,14 @@ import { computePacingScan } from "./pacing-scan";
  * responses differ in is entirely what each is allowed to SAY — the DTO drops
  * account names and keeps join keys.
  *
+ * READ-ONLY, and that is a property of the SCAN, not of this file: the shared
+ * account assembler is handed `sideEffects: "read-only"` below, which withholds
+ * the upstream Codex reset-credit refresh and the payload tier's re-seed of the
+ * usage cache. Anything an anonymous GET could otherwise start — a provider
+ * request, a token refresh, a write ROUTING then reads — is refused at that
+ * parameter. The mount's docstring states the invariant; this is where the
+ * pacing route keeps it.
+ *
  * MEMOIZED, SINGLE-FLIGHT, on the `public-stops` pattern and for a sharper
  * reason than that reader has. The scan is built from the full account list —
  * session-stats SQL, active-session counts, usage snapshots, prediction
@@ -38,7 +46,8 @@ export function createPublicPacingReader(
 	options: PublicPacingOptions = {},
 ) {
 	return createPublicPacingReaderFromScan(
-		(nowMs) => computePacingScan(dbOps, config, getStrategy, nowMs),
+		(nowMs) =>
+			computePacingScan(dbOps, config, getStrategy, nowMs, "read-only"),
 		options,
 	);
 }
