@@ -5,7 +5,13 @@ import {
 	isAccountAvailable,
 	normalizeAnthropicUsage,
 	PAUSE_REASON_NEEDS_REAUTH,
+	type RunwayAccountSource,
 	SEVEN_DAY_ELIGIBLE_PROVIDERS,
+	scopedFamilyReadings,
+	scopedWeeklyWindowKind,
+	toRunwayAccountInput,
+	toScopedFamilyRunwayInput,
+	windowForecast,
 } from "@clankermux/core";
 import type { DatabaseOperations } from "@clankermux/database";
 import { Logger } from "@clankermux/logger";
@@ -16,12 +22,14 @@ import {
 	gateHoldsForAccounts,
 	gateRecoveryByAccountMs,
 	getProviderOverloadSnapshot,
+	getUsageRevisionAnchor,
 } from "@clankermux/proxy";
 import type {
 	Account,
 	AnthropicUsageData,
 	LoadBalancingStrategy,
 	RateLimitCause,
+	RunwayWindowForecast,
 	UsagePrediction,
 } from "@clankermux/types";
 import { resolveRateLimitPresentation } from "../handlers/accounts";
@@ -80,9 +88,11 @@ export interface PublicWindowSnapshot {
 	resetsAtMs: number | null;
 	/**
 	 * The server regression for this window, or null when there is none. Only
-	 * the two account-wide windows have an estimator today.
+	 * the five-hour window has a regression estimator today.
 	 */
 	prediction: UsagePrediction | null;
+	/** Canonical window estimate, independent of sibling-window learning. */
+	forecast: RunwayWindowForecast | null;
 }
 
 /**
@@ -376,6 +386,42 @@ function parseResetMs(resetsAt: string | null | undefined): number | null {
 	return Number.isFinite(ms) ? ms : null;
 }
 
+/** Attach estimates only to the exact, fresh observation displayed to clients. */
+export function attachWindowForecasts(
+	windows: PublicWindowSnapshot[],
+	source: RunwayAccountSource,
+	now: number,
+): void {
+	for (const window of windows) window.forecast = null;
+	const observedAt = source.usageObservedAtMs;
+	if (observedAt == null || !Number.isFinite(observedAt)) return;
+	const inputs = toRunwayAccountInput(source).windows;
+	for (const family of new Set(
+		(scopedFamilyReadings(source, now) ?? []).map((r) => r.family),
+	)) {
+		const scoped = toScopedFamilyRunwayInput(source, family, now)?.windows.find(
+			(w) => w.windowKind === scopedWeeklyWindowKind(family),
+		);
+		if (scoped) inputs.push(scoped);
+	}
+	for (const window of windows) {
+		const kind =
+			window.kind === "weekly_scoped"
+				? `weekly_scoped:${window.scopeId}`
+				: window.kind;
+		const input = inputs.find((w) => w.windowKind === kind);
+		window.forecast =
+			input &&
+			// An elapsed reset needs a new reading, even if the old one says 100%.
+			(input.resetsAtMs == null || input.resetsAtMs > now) &&
+			input.observedAtMs === window.observedAtMs &&
+			input.utilizationPct === window.utilizationPct &&
+			input.resetsAtMs === window.resetsAtMs
+				? windowForecast(input, now)
+				: null;
+	}
+}
+
 /**
  * Every quota window this account has, in one vocabulary.
  *
@@ -409,6 +455,7 @@ function buildWindows(
 			utilizationPct: clampPct(normalized.session?.utilization ?? null),
 			observedAtMs,
 			resetsAtMs: normalized.session?.resetMs ?? null,
+			forecast: null,
 			prediction: servablePrediction(prediction?.fiveHour),
 		});
 	}
@@ -420,6 +467,7 @@ function buildWindows(
 			utilizationPct: clampPct(normalized.weeklyAll?.utilization ?? null),
 			observedAtMs,
 			resetsAtMs: normalized.weeklyAll?.resetMs ?? null,
+			forecast: null,
 			prediction: servablePrediction(prediction?.sevenDay),
 		});
 	}
@@ -434,8 +482,8 @@ function buildWindows(
 			utilizationPct: clampPct(scoped.percent),
 			observedAtMs,
 			resetsAtMs: scoped.resetsAtMs,
-			// No estimator exists per family; the regression covers the two
-			// account-wide windows only.
+			// No regression exists per family; the canonical forecast is separate.
+			forecast: null,
 			prediction: null,
 		});
 	}
@@ -460,6 +508,7 @@ function buildWindows(
 			utilizationPct: clampPct(oauthApps.utilization),
 			observedAtMs,
 			resetsAtMs: parseResetMs(oauthApps.resets_at),
+			forecast: null,
 			prediction: null,
 		});
 	}
@@ -960,6 +1009,32 @@ export function createPublicSnapshotReader(
 				predictions.get(row.id) ?? null,
 				now,
 			);
+			if (fresh && measurementState === "fresh") {
+				attachWindowForecasts(
+					windows,
+					{
+						id: row.id,
+						name: row.name,
+						provider,
+						usageData: fresh,
+						usageObservedAtMs: entry?.observedAtMs ?? null,
+						prediction: predictions.get(row.id) ?? null,
+						burnAnchors: {
+							fiveHour: getUsageRevisionAnchor(
+								row.id,
+								"five_hour",
+								windows.find((w) => w.kind === "five_hour")?.resetsAtMs ?? null,
+							),
+							sevenDay: getUsageRevisionAnchor(
+								row.id,
+								"seven_day",
+								windows.find((w) => w.kind === "seven_day")?.resetsAtMs ?? null,
+							),
+						},
+					},
+					now,
+				);
+			}
 			const credential = resolveCredentialState(row, now);
 
 			// What holds THIS account, resolved beside the account itself so the

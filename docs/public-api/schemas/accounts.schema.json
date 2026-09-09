@@ -253,6 +253,17 @@
               "type": "null"
             }
           ]
+        },
+        "forecast": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PublicWindowForecastDto"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Null when fresh, matching estimator evidence is unavailable."
         }
       },
       "required": [
@@ -326,6 +337,63 @@
         "other"
       ],
       "description": "What the usage estimator found for a window.\n\n`insufficient_data` is absent by construction: a prediction with no established trend is not served at all (the record is null), because its `slopePerHour` is a placeholder 0 that would read as a measured flat trend."
+    },
+    "PublicWindowForecastDto": {
+      "type": "object",
+      "properties": {
+        "state": {
+          "type": "string",
+          "enum": [
+            "projected",
+            "learning",
+            "other"
+          ]
+        },
+        "reason": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "enum": [
+            "no_usage",
+            "unstarted",
+            "short_history",
+            "other",
+            null
+          ]
+        },
+        "readyAt": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Earliest useful fresh reading for short history, not guaranteed readiness.",
+          "format": "date-time"
+        },
+        "exhaustsAt": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Raw extrapolation: compare with the window reset before warning. Null means no exhaustion estimated.",
+          "format": "date-time"
+        },
+        "lowConfidence": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "state",
+        "reason",
+        "readyAt",
+        "exhaustsAt",
+        "lowConfidence"
+      ],
+      "description": "Window estimator evidence; this is not pooled workload advice.",
+      "additionalProperties": true
     }
   },
   "$schema": "https://json-schema.org/draft/2020-12/schema",

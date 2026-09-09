@@ -29,8 +29,10 @@ export type PublicResource = keyof typeof resources;
  * optional for v1 consumers. Current producers must emit them (tested separately).
  */
 export const compatibilityFields: Partial<Record<PublicResource, string[]>> = {
+	accounts: ["accounts.[].windows.[].forecast"],
 	runway: ["intervalKind"],
 	"workload-headroom": [
+		"paceProbe",
 		"intervalKind",
 		// Historical addition: pre-nextReset v1 servers also remain readable.
 		"rows.[].nextReset",

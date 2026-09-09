@@ -5,7 +5,7 @@ The widget API is read-only and requires no credentials. All routes below are `G
 | Resource | Data | Contract | Example |
 | --- | --- | --- | --- |
 | `status` | Health, uptime/version, pool counts, routing candidate, aggregate quota usage and provider overload state | [Schema](schemas/status.schema.json) | [JSON](examples/status.json) |
-| `accounts` | Account IDs/names, providers, availability, credential state/expiry, quota windows and predictions | [Schema](schemas/accounts.schema.json) | [JSON](examples/accounts.json) |
+| `accounts` | Account IDs/names, providers, availability, credential state/expiry, quota windows, predictions, per-window forecasts and learning reasons | [Schema](schemas/accounts.schema.json) | [JSON](examples/accounts.json) |
 | `runway` | Worst stateable API-key/pool quota outcome, headroom and coverage; key identities/pins omitted | [Schema](schemas/runway.schema.json) | [JSON](examples/runway.json) |
 | `stops` | Seven-day request/block totals, stop causes and candidate-count distribution | [Schema](schemas/stops.schema.json) | [JSON](examples/stops.json) |
 | `pacing` | Per-class spending context, least-used account's weekly burn ratio, five-hour constraints | [Schema](schemas/pacing.schema.json) | [JSON](examples/pacing.json) |
@@ -37,6 +37,35 @@ The workload and runway envelope's `intervalKind: "fixed_horizon"` starts at `ge
 These are advisory model thresholds. The margin is the first failing 1% probe step, not a tested-safe increase of exactly that amount. Family percentages are conservative bounds. `projectionBasis` describes baseline evidence, not confidence in every hypothetical probe. The API does not prescribe agent counts or automatic scaling.
 
 Use `/pacing` for spending and five-hour constraints, `/accounts` for operational details, and `/runway` for API-key/pin context. Never convert `/pacing.burnRatio` into a whole-pool recommendation. See the [integration guide](../external-widgets-pacing-guide.md) for rendering rules, compatibility cases and example interpretations.
+
+## Account window evidence
+
+`accounts[].windows[].forecast` exposes the canonical window estimate separately
+from regression-only `prediction`. Weekly `prediction: null` does not mean no
+forecast exists. A weekly projection remains visible when the five-hour window
+is learning. The forecast states `projected` or `learning`, with `other` as a
+fallback; learning reasons are `no_usage`, `unstarted`, or `short_history`.
+Only short history has a possible `readyAt`, indicating the earliest useful
+fresh observation rather than guaranteed readiness.
+
+A projected forecast carries nullable `exhaustsAt` and `lowConfidence`. Compare
+exhaustion with the window's `resetsAt`: raw extrapolation can extend past the
+reset. Null/absent forecast means no usable forecast; preserve the separate
+reading and its freshness. Stale, untimed, mismatched or already-reset evidence
+is withheld. See [partial learning](examples/accounts.partial-learning.json).
+
+For partial workload coverage, render `eligibleAccounts - unreadableAccounts`
+from the same workload row: for example, “3/5 modeled · 2 learning”. Do not
+subtract `unopenedAccounts` or `learningAccounts` again, reconstruct coverage
+from a separate accounts response, or turn idle usage into a growth percentage.
+
+The workload envelope's `paceProbe` publishes `maximumReductionPct`,
+`maximumIncreasePct` and `stepPct` (currently 50, 50 and 1). A missing adjustment
+with `beyond_probe_range` means either no tested reduction avoids exhaustion,
+or no tested increase finds failure; use the selected interval's `outcomeKind`
+to distinguish them. Qualify these statements by modeled coverage and family
+bounds. They are search limits, not whole-pool scaling instructions. The model
+holds per-account burn fixed and does not redistribute demand after failover.
 
 ## Compatibility, freshness and errors
 

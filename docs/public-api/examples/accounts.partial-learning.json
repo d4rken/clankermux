@@ -3,8 +3,8 @@
   "generatedAt": "2026-09-09T12:00:00.000Z",
   "accounts": [
     {
-      "id": "acc_example",
-      "name": "Claude Primary",
+      "id": "acc_learning_example",
+      "name": "Claude Idle Session",
       "provider": "anthropic",
       "isDefaultCandidate": true,
       "availability": {
@@ -18,43 +18,37 @@
       },
       "measurementState": "fresh",
       "usageObservedAt": "2026-09-09T11:59:30.000Z",
-      "utilizationPct": 62,
+      "utilizationPct": 60,
       "windows": [
         {
           "kind": "five_hour",
           "scopeId": null,
           "label": null,
-          "utilizationPct": 35,
+          "utilizationPct": 0,
           "observedAt": "2026-09-09T11:59:30.000Z",
           "resetsAt": "2026-09-09T15:00:00.000Z",
-          "prediction": {
-            "predictedUtilizationAtResetPct": 88,
-            "exhaustsAt": null,
-            "willExhaustBeforeReset": false,
-            "lowConfidence": false,
-            "state": "rising"
-          },
+          "prediction": null,
           "forecast": {
-            "state": "projected",
-            "reason": null,
+            "state": "learning",
+            "reason": "no_usage",
             "readyAt": null,
             "exhaustsAt": null,
-            "lowConfidence": false
+            "lowConfidence": null
           }
         },
         {
           "kind": "seven_day",
           "scopeId": null,
           "label": null,
-          "utilizationPct": 62,
+          "utilizationPct": 60,
           "observedAt": "2026-09-09T11:59:30.000Z",
-          "resetsAt": "2026-09-10T12:00:00.000Z",
+          "resetsAt": "2026-09-14T12:00:00.000Z",
           "prediction": null,
           "forecast": {
             "state": "projected",
             "reason": null,
             "readyAt": null,
-            "exhaustsAt": null,
+            "exhaustsAt": "2026-09-10T19:59:10.000Z",
             "lowConfidence": false
           }
         }

@@ -58,6 +58,7 @@ export {
 	type LifetimeConfidence,
 	PACE_DEFICIT_PROBE_MIN,
 	PACE_MARGIN_PRECISION,
+	PACE_MARGIN_PROBE_MAX,
 	probeDeficitOver,
 	probeMarginOver,
 	RUNWAY_HORIZON_MS,

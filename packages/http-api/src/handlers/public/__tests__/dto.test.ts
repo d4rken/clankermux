@@ -71,6 +71,7 @@ function window(
 		observedAtMs: NOW - 30_000,
 		resetsAtMs: 1_700_000_000_000,
 		prediction: null,
+		forecast: null,
 		...over,
 	};
 }
@@ -530,6 +531,7 @@ describe("golden: GET /public/v1/accounts", () => {
 							observedAt: "2023-11-14T21:56:10.000Z",
 							resetsAt: "2023-11-14T22:13:20.000Z",
 							prediction: null,
+							forecast: null,
 						},
 					],
 				},
@@ -1069,6 +1071,11 @@ describe("golden: GET /public/v1/workload-headroom", () => {
 			intervalKind: "fixed_horizon",
 			generatedAt: NOW_ISO,
 			horizonMs: 1_209_600_000,
+			paceProbe: {
+				maximumReductionPct: 50,
+				maximumIncreasePct: 50,
+				stepPct: 1,
+			},
 			rows: [
 				{
 					dimensionKind: "class",
@@ -2358,5 +2365,102 @@ describe("request.done normalizes the internal summary", () => {
 			0,
 		);
 		expect(JSON.stringify(dto)).not.toContain("leaky");
+	});
+});
+
+describe("account window forecast wire contract", () => {
+	it.each([
+		[
+			{ state: "projected", exhaustsAtMs: NOW + 60_000, lowConfidence: false },
+			{
+				state: "projected",
+				exhaustsAt: new Date(NOW + 60_000).toISOString(),
+				lowConfidence: false,
+				reason: null,
+				readyAt: null,
+			},
+		],
+		[
+			{ state: "projected", exhaustsAtMs: null, lowConfidence: true },
+			{
+				state: "projected",
+				exhaustsAt: null,
+				lowConfidence: true,
+				reason: null,
+				readyAt: null,
+			},
+		],
+		[
+			{ state: "learning", reason: "no-usage", readyAtMs: null },
+			{
+				state: "learning",
+				reason: "no_usage",
+				readyAt: null,
+				exhaustsAt: null,
+				lowConfidence: null,
+			},
+		],
+		[
+			{ state: "learning", reason: "unstarted", readyAtMs: null },
+			{
+				state: "learning",
+				reason: "unstarted",
+				readyAt: null,
+				exhaustsAt: null,
+				lowConfidence: null,
+			},
+		],
+		[
+			{ state: "learning", reason: "short-history", readyAtMs: NOW + 60_000 },
+			{
+				state: "learning",
+				reason: "short_history",
+				readyAt: new Date(NOW + 60_000).toISOString(),
+				exhaustsAt: null,
+				lowConfidence: null,
+			},
+		],
+		[
+			{ state: "learning", reason: "future", readyAtMs: NOW },
+			{
+				state: "learning",
+				reason: "other",
+				readyAt: null,
+				exhaustsAt: null,
+				lowConfidence: null,
+			},
+		],
+		[
+			{ state: "future" },
+			{
+				state: "other",
+				reason: null,
+				readyAt: null,
+				exhaustsAt: null,
+				lowConfidence: null,
+			},
+		],
+	])("serializes named forecast fields and retains regression null: %j", (forecast, expected) => {
+		const dto = toPublicAccountsDto(
+			snapshot({
+				accounts: [
+					account({
+						windows: [
+							window({
+								kind: "seven_day",
+								forecast: {
+									...forecast,
+									secret: "must-not-leak",
+								} as unknown as PublicWindowSnapshot["forecast"],
+							}),
+						],
+					}),
+				],
+			}),
+		);
+		expect(dto.accounts[0]?.windows[0]?.forecast).toEqual(expected);
+		expect(dto.accounts[0]?.windows[0]?.prediction).toBeNull();
+		expect(JSON.stringify(dto)).not.toContain("must-not-leak");
+		assertPublicSchema("accounts", JSON.parse(JSON.stringify(dto)));
 	});
 });

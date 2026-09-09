@@ -223,6 +223,66 @@ window for the family, or an idle one (0%, no reset), because they have not used
 it this week, so subtracting it a second time would double-count them. `spentAccounts` is existing row-level
 context; it is not a new next-reset-specific count.
 
+## Window forecasts and partial coverage
+
+`GET /public/v1/accounts` now adds nullable `windows[].forecast`, separately
+from the existing regression-only `prediction`. Weekly `prediction: null` is
+normal: the primary weekly estimator uses lifetime burn. A useful weekly
+forecast can coexist with an idle or learning five-hour window on the same
+account. See the [complete partial-learning example](public-api/examples/accounts.partial-learning.json).
+
+| Forecast state | Display |
+| --- | --- |
+| `projected` | A window estimate exists; use `exhaustsAt` and `lowConfidence`. |
+| `learning`, reason `no_usage` | No usage measured in this window; waiting alone need not resolve it. |
+| `learning`, reason `unstarted` | Window has not started. |
+| `learning`, reason `short_history` | Not enough burn history yet. `readyAt` is the earliest useful fresh reading, not a promise of readiness. |
+| Null/absent, `other`, unknown reason/state | Window forecast unavailable. Retain any observed usage separately. |
+
+`exhaustsAt` is a raw extrapolation and may lie **after** the window's
+`resetsAt`. Only flag exhaustion before reset when both timestamps are valid
+and exhaustion precedes reset. A projected null `exhaustsAt` states no estimated
+exhaustion; it does not promise spare workload capacity. `lowConfidence` is
+nullable for learning and true for conservative family estimates. Known elapsed
+resets, stale/untimed/missing observations and mismatched evidence withhold
+forecasts. Refresh after a reset instead of advancing it locally.
+
+For a workload row, show `eligibleAccounts - unreadableAccounts` as modeled
+coverage, using counts from that same response. Example: **“3/5 modeled · 2
+learning”** when `eligibleAccounts: 5`, `unreadableAccounts: 2`, and
+`learningAccounts: 2`. `unopenedAccounts` and `learningAccounts` explain excluded
+accounts; do not subtract them again. Retain the server's `guidanceState` and
+withhold prescriptive percentages when it says `uncertain` or `unknown`.
+Account window reasons can explain individual readings in a popup, but must not
+be used to reconstruct workload coverage from a separately timed `/accounts`
+snapshot. Zero usage is learning, not proof of unlimited spare capacity.
+
+The `/workload-headroom` envelope now states its search limits:
+
+```json
+"paceProbe": { "maximumReductionPct": 50, "maximumIncreasePct": 50, "stepPct": 1 }
+```
+
+This applies to both intervals. When the selected interval reports
+`headroomAbsence: "beyond_probe_range"`, qualify the explanation by outcome:
+
+- `runway`: “Modeled accounts still exhaust at the maximum tested reduction
+  (currently 50%). Required adjustment unavailable.”
+- `beyond_horizon`: “No failure found up to the maximum tested increase
+  (currently 50%). Exact margin unavailable.”
+
+With partial coverage, append the modeled count; never turn this into a
+whole-pool “cut more than 50%” instruction. Preserve family-bound and evidence
+qualifications. On older servers without `paceProbe`, use “outside the tested
+pace range” instead of inventing limits. A numeric margin remains the first
+failing probe step, not an exactly safe increase.
+
+The combined model assumes each account continues its own burn; it does not
+redistribute demand from spent accounts to surviving ones. Per-window forecasts
+and search bounds do not change that assumption. A weekly-only budgeting view
+was [evaluated separately](public-api-weekly-outlook-evaluation.md); it is not a
+new public endpoint or a concurrency recommendation in this release.
+
 ## Paused accounts and banked resets
 
 The server excludes paused accounts from workload forecasts and pacing counts.

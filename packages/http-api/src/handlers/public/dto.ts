@@ -51,9 +51,16 @@
  */
 
 import type { PacingSnapshot, WorkloadHeadroomRow } from "@clankermux/core";
-import { classIsUnread, classifyWorkloadGuidance } from "@clankermux/core";
+import {
+	classIsUnread,
+	classifyWorkloadGuidance,
+	PACE_DEFICIT_PROBE_MIN,
+	PACE_MARGIN_PRECISION,
+	PACE_MARGIN_PROBE_MAX,
+} from "@clankermux/core";
 import type {
 	RequestResponse,
+	RunwayWindowForecast,
 	StopsHistoryResponse,
 	UsagePrediction,
 } from "@clankermux/types";
@@ -560,6 +567,56 @@ function toPublicPredictionDto(
 	};
 }
 
+/** Window estimator evidence; this is not pooled workload advice. */
+export interface PublicWindowForecastDto {
+	state: "projected" | "learning" | "other";
+	reason: "no_usage" | "unstarted" | "short_history" | "other" | null;
+	/** Earliest useful fresh reading for short history, not guaranteed readiness. */
+	readyAt: string | null;
+	/** Raw extrapolation: compare with the window reset before warning. Null means no exhaustion estimated. */
+	exhaustsAt: string | null;
+	lowConfidence: boolean | null;
+}
+
+function toPublicWindowForecastDto(
+	forecast: RunwayWindowForecast | null,
+): PublicWindowForecastDto | null {
+	if (!forecast) return null;
+	if (forecast.state === "projected")
+		return {
+			state: "projected",
+			reason: null,
+			readyAt: null,
+			exhaustsAt: instant(forecast.exhaustsAtMs),
+			lowConfidence: forecast.lowConfidence === true,
+		};
+	if (forecast.state === "learning")
+		return {
+			state: "learning",
+			reason:
+				forecast.reason === "no-usage"
+					? "no_usage"
+					: forecast.reason === "unstarted"
+						? "unstarted"
+						: forecast.reason === "short-history"
+							? "short_history"
+							: "other",
+			readyAt:
+				forecast.reason === "short-history"
+					? instant(forecast.readyAtMs)
+					: null,
+			exhaustsAt: null,
+			lowConfidence: null,
+		};
+	return {
+		state: "other",
+		reason: null,
+		readyAt: null,
+		exhaustsAt: null,
+		lowConfidence: null,
+	};
+}
+
 /**
  * One quota window on the wire.
  *
@@ -580,6 +637,8 @@ export interface PublicWindowDto {
 	/** INSTANT the window rolls over. */
 	resetsAt: string | null;
 	prediction: PublicPredictionDto | null;
+	/** Null when fresh, matching estimator evidence is unavailable. */
+	forecast: PublicWindowForecastDto | null;
 }
 
 function toPublicWindowDto(window: PublicWindowSnapshot): PublicWindowDto {
@@ -593,6 +652,7 @@ function toPublicWindowDto(window: PublicWindowSnapshot): PublicWindowDto {
 		observedAt: instant(window.observedAtMs),
 		resetsAt: instant(window.resetsAtMs),
 		prediction: toPublicPredictionDto(window.prediction),
+		forecast: toPublicWindowForecastDto(window.forecast),
 	};
 }
 
@@ -2010,11 +2070,19 @@ function toPublicProjectionBasis(
 	}
 }
 
+/** Search bounds, not a proven-safe pace or an agent-count recommendation. */
+export interface PublicPaceProbeDto {
+	maximumReductionPct: number;
+	maximumIncreasePct: number;
+	stepPct: number;
+}
+
 export interface PublicWorkloadHeadroomDto {
 	schema: typeof PUBLIC_WORKLOAD_HEADROOM_SCHEMA;
 	intervalKind: PublicFixedHorizonKind;
 	generatedAt: string;
 	horizonMs: number;
+	paceProbe: PublicPaceProbeDto;
 	rows: PublicWorkloadHeadroomRowDto[];
 }
 
@@ -2037,6 +2105,11 @@ export function toPublicWorkloadHeadroomDto(snapshot: {
 		intervalKind: "fixed_horizon",
 		generatedAt: new Date(snapshot.generatedAtMs).toISOString(),
 		horizonMs: snapshot.horizonMs,
+		paceProbe: {
+			maximumReductionPct: Math.round((1 - PACE_DEFICIT_PROBE_MIN) * 100),
+			maximumIncreasePct: Math.round((PACE_MARGIN_PROBE_MAX - 1) * 100),
+			stepPct: PACE_MARGIN_PRECISION * 100,
+		},
 		rows: snapshot.rows.map((row) => ({
 			guidanceState: toPublicGuidanceState(classifyWorkloadGuidance(row, row)),
 			nextReset: row.nextReset

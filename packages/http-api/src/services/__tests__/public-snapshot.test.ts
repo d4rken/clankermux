@@ -38,9 +38,11 @@ import type {
 } from "@clankermux/types";
 import { toPublicAccountsDto } from "../../handlers/public/dto";
 import {
+	attachWindowForecasts,
 	clampPct,
 	createPublicSnapshotReader,
 	earliestPoolRecoveryMs,
+	type PublicWindowSnapshot,
 	resolveCredentialState,
 } from "../public-snapshot";
 
@@ -1452,5 +1454,186 @@ describe("earliestPoolRecoveryMs", () => {
 				}),
 			]),
 		).toBe(4_000);
+	});
+});
+
+describe("per-window forecasts", () => {
+	it("keeps weekly lifetime evidence when the five-hour window is idle", async () => {
+		insertAccount();
+		const now = Date.now();
+		usageCache.set(
+			"acct-1",
+			anthropicUsage(0, 60, {
+				five_hour: {
+					utilization: 0,
+					resets_at: new Date(now + 3_600_000).toISOString(),
+				},
+				seven_day: {
+					utilization: 60,
+					resets_at: new Date(now + 5 * 86_400_000).toISOString(),
+				},
+			}),
+		);
+		const snapshot = await read(fakeStrategy(), fakeConfig, now);
+		expect(windowOf(snapshot, "five_hour")?.forecast).toEqual({
+			state: "learning",
+			reason: "no-usage",
+			readyAtMs: null,
+		});
+		const weekly = windowOf(snapshot, "seven_day");
+		expect(weekly?.prediction).toBeNull();
+		expect(weekly?.forecast).toMatchObject({
+			state: "projected",
+			lowConfidence: false,
+		});
+		const dto = toPublicAccountsDto(snapshot);
+		expect(dto.accounts[0]?.windows[1]?.forecast?.exhaustsAt).toBeString();
+	});
+
+	it.each([
+		"stale",
+		"untimed",
+		"missing",
+	])("withholds forecasts for %s observations", async (mode) => {
+		insertAccount();
+		if (mode === "stale")
+			usageCache.setWithAgeForTests(
+				"acct-1",
+				anthropicUsage(20, 60),
+				USAGE_CACHE_TTL_MS + 1_000,
+			);
+		if (mode === "untimed")
+			usageCache.setUntimed("acct-1", anthropicUsage(20, 60));
+		expect(
+			(await read()).accounts[0]?.windows.every((w) => w.forecast === null),
+		).toBe(true);
+	});
+
+	function weeklyWindow(
+		over: Partial<PublicWindowSnapshot> = {},
+	): PublicWindowSnapshot {
+		return {
+			kind: "seven_day",
+			scopeId: null,
+			label: "Weekly",
+			utilizationPct: 60,
+			observedAtMs: NOW,
+			resetsAtMs: NOW + 5 * 86_400_000,
+			prediction: null,
+			forecast: null,
+			...over,
+		};
+	}
+	const source = () => ({
+		id: "acct-1",
+		name: "example",
+		provider: "anthropic",
+		usageData: anthropicUsage(0, 60),
+		usageObservedAtMs: NOW,
+	});
+
+	it.each([
+		{ observedAtMs: NOW - 1 },
+		{ resetsAtMs: NOW + 1 },
+		{ utilizationPct: 59 },
+	])("does not attach a forecast to mismatched evidence %j", (over) => {
+		const windows = [weeklyWindow(over)];
+		attachWindowForecasts(windows, source(), NOW);
+		expect(windows[0]?.forecast).toBeNull();
+	});
+
+	it("withholds spent evidence after its reset has elapsed", () => {
+		const windows = [
+			weeklyWindow({ utilizationPct: 100, resetsAtMs: NOW - 1 }),
+		];
+		attachWindowForecasts(
+			windows,
+			{
+				...source(),
+				usageData: anthropicUsage(0, 100, {
+					seven_day: {
+						utilization: 100,
+						resets_at: new Date(NOW - 1).toISOString(),
+					},
+				}),
+			},
+			NOW,
+		);
+		expect(windows[0]?.forecast).toBeNull();
+	});
+
+	it("preserves revision-anchor learning instead of using the full weekly age", () => {
+		const windows = [weeklyWindow()];
+		attachWindowForecasts(
+			windows,
+			{
+				...source(),
+				burnAnchors: {
+					sevenDay: {
+						anchorMs: NOW - 30 * 60_000,
+						anchorPct: 50,
+						windowResetMs: NOW + 5 * 86_400_000,
+					},
+				},
+			},
+			NOW,
+		);
+		expect(windows[0]?.forecast).toEqual({
+			state: "learning",
+			reason: "short-history",
+			readyAtMs: NOW + 30 * 60_000,
+		});
+	});
+
+	it("exposes a conservative family forecast only with a matching weekly cycle", () => {
+		const resetsAtMs = NOW + 5 * 86_400_000;
+		const scoped = {
+			kind: "weekly_scoped" as const,
+			group: "7d",
+			percent: 60,
+			resets_at: new Date(resetsAtMs).toISOString(),
+			scope: { model: { id: "fable", display_name: "Fable" } },
+			is_active: true,
+		};
+		const input = {
+			...source(),
+			usageData: anthropicUsage(0, 60, { limits: [scoped] }),
+		};
+		const windows = [
+			weeklyWindow({ kind: "weekly_scoped", scopeId: "fable" }),
+			weeklyWindow({
+				kind: "seven_day_oauth_apps",
+				scopeId: "seven_day_oauth_apps",
+			}),
+		];
+		attachWindowForecasts(windows, input, NOW);
+		expect(windows[0]?.forecast).toMatchObject({
+			state: "projected",
+			lowConfidence: true,
+		});
+		expect(windows[1]?.forecast).toBeNull();
+		const mismatch = [
+			weeklyWindow({
+				kind: "weekly_scoped",
+				scopeId: "fable",
+				resetsAtMs: resetsAtMs + 3_600_000,
+			}),
+		];
+		attachWindowForecasts(
+			mismatch,
+			{
+				...input,
+				usageData: anthropicUsage(0, 60, {
+					limits: [
+						{
+							...scoped,
+							resets_at: new Date(resetsAtMs + 3_600_000).toISOString(),
+						},
+					],
+				}),
+			},
+			NOW,
+		);
+		expect(mismatch[0]?.forecast).toBeNull();
 	});
 });

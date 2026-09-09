@@ -19,6 +19,9 @@
           "type": "number",
           "minimum": 0
         },
+        "paceProbe": {
+          "$ref": "#/$defs/PublicPaceProbeDto"
+        },
         "rows": {
           "type": "array",
           "items": {
@@ -41,6 +44,30 @@
         "other"
       ],
       "description": "Starts at envelope generatedAt; ends at generatedAt + horizonMs."
+    },
+    "PublicPaceProbeDto": {
+      "type": "object",
+      "properties": {
+        "maximumReductionPct": {
+          "type": "number",
+          "minimum": 0
+        },
+        "maximumIncreasePct": {
+          "type": "number",
+          "minimum": 0
+        },
+        "stepPct": {
+          "type": "number",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "maximumReductionPct",
+        "maximumIncreasePct",
+        "stepPct"
+      ],
+      "description": "Search bounds, not a proven-safe pace or an agent-count recommendation.",
+      "additionalProperties": true
     },
     "PublicWorkloadHeadroomRowDto": {
       "type": "object",

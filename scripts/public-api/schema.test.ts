@@ -43,7 +43,7 @@ describe("public API schemas", () => {
 	});
 
 	it("accepts pre-change v1 payloads, with nextReset both present and absent", async () => {
-		for (const resource of ["runway", "workload-headroom"] as const) {
+		for (const resource of ["accounts", "runway", "workload-headroom"] as const) {
 			const legacy = await example(resource);
 			for (const path of compatibilityFields[resource] ?? []) {
 				if (path === "rows.[].nextReset") continue;

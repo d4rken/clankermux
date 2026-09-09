@@ -33,5 +33,10 @@
       "learningAccounts": 0,
       "spentAccounts": 0
     }
-  ]
+  ],
+  "paceProbe": {
+    "maximumReductionPct": 50,
+    "maximumIncreasePct": 50,
+    "stepPct": 1
+  }
 }
