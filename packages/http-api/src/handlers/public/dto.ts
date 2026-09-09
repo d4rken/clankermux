@@ -57,6 +57,7 @@ import type {
 	StopsHistoryResponse,
 	UsagePrediction,
 } from "@clankermux/types";
+import { classifyStopCause } from "@clankermux/types";
 import type { PublicRunwaySnapshot } from "../../services/public-runway";
 import type {
 	PublicAccountSnapshot,
@@ -1334,7 +1335,17 @@ export interface PublicRequestDoneDto {
 	 * from an unpriceable one.
 	 */
 	costUsd: number | null;
-	errorMessage: string | null;
+	/**
+	 * WHY the request failed, as an allowlisted CATEGORY — never the upstream's
+	 * own text. Null when it did not fail.
+	 *
+	 * The field keeps its name and its `string | null` wire type; what changed is
+	 * the value space, which is now the closed set in
+	 * {@link PublicErrorCategoryDto}. The raw message is recorder-built from the
+	 * upstream response body and stays on the management surface, behind the
+	 * session gate.
+	 */
+	errorMessage: PublicErrorCategoryDto | null;
 }
 
 export type PublicStreamEventDto =
@@ -1369,6 +1380,64 @@ export type PublicStreamEventDto =
  * is more than the record supports.
  */
 export type PublicTokenBasisDto = "provider" | "estimated";
+
+/**
+ * WHY a request failed, as a CLOSED set — never the upstream's own words.
+ *
+ * `RequestResponse.errorMessage` is built by the recorder from the upstream
+ * response body, so it can carry echoed request values and account-specific
+ * diagnostics. The deployed shape published its first 96 UTF-8 bytes on an
+ * unauthenticated stream, which bounds the LENGTH of that disclosure and nothing
+ * about its sensitivity. `/public/v1/stops` already faced this and answered it
+ * the same way: classify server-side, publish the label, keep the prose on the
+ * management surface behind the session gate.
+ *
+ * The `/stops` vocabulary is reused verbatim rather than reinvented, so a client
+ * needs ONE table for "why did the pool say no" whether it is reading counts or
+ * watching the stream. The three additions are transport terminals the proxy
+ * writes itself, which are not stops at all — the request reached an account and
+ * the connection is what ended.
+ *
+ * `other` is mandatory and load-bearing, exactly as it is for a stop cause: a
+ * terminal invented tomorrow must arrive as something the firmware renders,
+ * rather than as a string its closed-set check rejects.
+ */
+export type PublicErrorCategoryDto =
+	| PublicStopCauseDto
+	/** The client went away mid-response. */
+	| "client_disconnected"
+	/** The proxy's own deadline elapsed. */
+	| "request_timed_out"
+	/** The response stream broke after it had started. */
+	| "stream_error";
+
+/** The transport terminals the recorder writes, mapped by exact label. */
+const TRANSPORT_TERMINALS: Readonly<Record<string, PublicErrorCategoryDto>> = {
+	"client disconnected": "client_disconnected",
+	"request timed out": "request_timed_out",
+	"stream error": "stream_error",
+};
+
+/**
+ * Classify a recorded error into {@link PublicErrorCategoryDto}, or null when
+ * nothing failed.
+ *
+ * Null rather than `other` for the no-error case: `other` means "something
+ * happened that this vocabulary cannot name", and a successful request has
+ * nothing to name at all. Whitespace counts as nothing, matching
+ * `classifyStopCause`, which this delegates to for every label that is not one
+ * of the transport terminals above.
+ */
+export function toPublicErrorCategory(
+	errorMessage: string | null | undefined,
+	statusCode: number | null | undefined,
+): PublicErrorCategoryDto | null {
+	const trimmed = errorMessage?.trim() ?? "";
+	if (trimmed === "") return null;
+	const transport = TRANSPORT_TERMINALS[trimmed];
+	if (transport) return transport;
+	return toPublicStopCause(classifyStopCause(trimmed, statusCode));
+}
 
 /** Total over today's `TokenCountBasis`; anything else is not stated at all. */
 export function toPublicTokenBasis(
@@ -1410,7 +1479,12 @@ export function toPublicRequestDoneDto(
 		totalTokens: payload.totalTokens ?? null,
 		totalTokensBasis: toPublicTokenBasis(payload.totalTokensBasis),
 		costUsd: payload.costUsd ?? null,
-		errorMessage: text(payload.errorMessage),
+		// A CATEGORY, not the upstream's prose: this is an unauthenticated wire and
+		// the recorder builds that string out of the provider's response body.
+		errorMessage: toPublicErrorCategory(
+			payload.errorMessage,
+			payload.statusCode,
+		),
 	};
 }
 

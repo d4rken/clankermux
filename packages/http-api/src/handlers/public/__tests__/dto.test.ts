@@ -2105,6 +2105,94 @@ describe("request.done normalizes the internal summary", () => {
 		assertInstantsAreIso(toPublicRequestDoneDto(summary(), 0));
 	});
 
+	it("publishes a CATEGORY instead of upstream prose", () => {
+		// `request-recorder` builds this string from the upstream response body,
+		// so it can carry echoed request values and account-specific diagnostics.
+		// Truncation bounded its length, not its sensitivity.
+		const dto = toPublicRequestDoneDto(
+			summary({
+				success: false,
+				statusCode: 400,
+				errorMessage:
+					'400 {"error":{"message":"credential sk-ant-oat01-secret rejected for org acme-corp"}}',
+			}),
+			0,
+		);
+
+		expect(dto.errorMessage).toBe("upstream_error");
+		const wire = JSON.stringify(dto);
+		expect(wire).not.toContain("sk-ant-oat01-secret");
+		expect(wire).not.toContain("acme-corp");
+	});
+
+	it("keeps the field a string, so the wire shape is unchanged", () => {
+		const dto = toPublicRequestDoneDto(
+			summary({
+				success: false,
+				statusCode: 500,
+				errorMessage: "stream error",
+			}),
+			0,
+		);
+		expect(typeof dto.errorMessage).toBe("string");
+	});
+
+	it("maps the proxy's own terminals onto the /stops vocabulary", () => {
+		// One taxonomy for both surfaces: a widget reading `/public/v1/stops` and
+		// the stream must not need two tables for the same fact.
+		expect(
+			toPublicRequestDoneDto(
+				summary({
+					success: false,
+					errorMessage: "family_weekly_exhausted_429",
+				}),
+				0,
+			).errorMessage,
+		).toBe("family_weekly_exhausted");
+		expect(
+			toPublicRequestDoneDto(
+				summary({ success: false, errorMessage: "all_accounts_failed" }),
+				0,
+			).errorMessage,
+		).toBe("pool_quota_exhausted");
+	});
+
+	it("names the transport terminals it can recognise", () => {
+		const cases: Array<[string, string]> = [
+			["client disconnected", "client_disconnected"],
+			["request timed out", "request_timed_out"],
+			["stream error", "stream_error"],
+		];
+		for (const [raw, category] of cases) {
+			expect(
+				toPublicRequestDoneDto(
+					summary({ success: false, errorMessage: raw }),
+					0,
+				).errorMessage,
+			).toBe(category);
+		}
+	});
+
+	it("falls back to `other` for a label it has not been taught", () => {
+		expect(
+			toPublicRequestDoneDto(
+				summary({
+					success: false,
+					statusCode: null,
+					errorMessage: "some_terminal_invented_tomorrow",
+				}),
+				0,
+			).errorMessage,
+		).toBe("other");
+	});
+
+	it("says nothing at all when there was no error", () => {
+		expect(toPublicRequestDoneDto(summary(), 0).errorMessage).toBeNull();
+		expect(
+			toPublicRequestDoneDto(summary({ errorMessage: "   " }), 0).errorMessage,
+		).toBeNull();
+	});
+
 	it("emits every field explicitly — an added RequestResponse field must not leak", () => {
 		const dto = toPublicRequestDoneDto(
 			summary({
