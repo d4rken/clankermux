@@ -155,7 +155,10 @@ async function main() {
 	if (apply && !audit) throw new Error("--apply requires --audit=<new file>");
 	const dbPath = resolveDbPath();
 	const rules = new Config().getProjectRules();
-	const db = new Database(dbPath, { readonly: !apply, create: false });
+	const db = new Database(
+		dbPath,
+		apply ? { readwrite: true, create: false } : { readonly: true },
+	);
 	try {
 		db.exec("PRAGMA busy_timeout = 5000");
 		const plan = await planMissingProjects(db, rules, before);
