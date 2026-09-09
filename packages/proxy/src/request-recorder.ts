@@ -148,6 +148,14 @@ export interface SlimUsageSummary {
 		cacheReadInputTokens?: number;
 		cacheCreationInputTokens?: number;
 		totalTokens?: number;
+		/**
+		 * The catalogue estimate for this request, ABSENT when the model could not
+		 * be priced. Never 0 for a failed lookup: `estimateCostUSD` reports that as
+		 * null and the collector carries the absence, because "this was free" and
+		 * "we could not price it" are different facts and every consumer of this
+		 * summary — the persisted row, the dashboard, the public stream — would
+		 * otherwise read the second as the first.
+		 */
 		costUsd?: number;
 	};
 	tokensPerSecond?: number;
@@ -157,6 +165,25 @@ export interface SlimUsageSummary {
 	 * it understates the real streaming speed).
 	 */
 	tokensPerSecondApproximate?: boolean;
+	/**
+	 * True when the OUTPUT count — and therefore `usage.totalTokens`, which
+	 * includes it — came from the collector's `ceil(generatedChars / 4)` estimate
+	 * rather than from the provider. Set when output usage was missing entirely,
+	 * or when the stream did not end cleanly and the estimate exceeded the last
+	 * reported count.
+	 *
+	 * THREE-VALUED, and `false` is not the same fact as absent: the collector
+	 * always states one or the other, so `false` is a positive claim that the
+	 * provider reported the count, while an absent flag means nothing was
+	 * recorded about provenance (a summary that never went through the collector,
+	 * a row read back from the database). Downstream publishes the absence as
+	 * absence rather than assuming the flattering half.
+	 *
+	 * Part of the summary rather than a return-value extra because it travels
+	 * with the number it qualifies: a consumer holding the total and not this is
+	 * holding an estimate that looks measured.
+	 */
+	outputApproximate?: boolean;
 	responseTimeMs?: number;
 	cacheCreationInputTokens?: number;
 	/**
@@ -1210,6 +1237,24 @@ export class RequestRecorder {
 			promptTokens: usage?.inputTokens,
 			completionTokens: usage?.outputTokens,
 			totalTokens: usage?.totalTokens,
+			// The PROVENANCE of that total, published beside it rather than left
+			// behind in the summary. Only stated when there is a total to qualify;
+			// a consumer holding the number and not this one is holding an estimate
+			// that looks measured.
+			//
+			// Three-valued, and the third value is the point: `false` means the
+			// provider reported the output, `true` means the collector estimated
+			// it, and an ABSENT flag means nobody said. Reading absence as
+			// "provider" would publish a measured provenance on the strength of a
+			// missing field — true of today's only producer, and silently false for
+			// the next one or for any path that drops the flag.
+			totalTokensBasis:
+				usage?.totalTokens === undefined ||
+				summary?.outputApproximate === undefined
+					? undefined
+					: summary.outputApproximate
+						? "estimated"
+						: "provider",
 			inputTokens: usage?.inputTokens,
 			cacheReadInputTokens: usage?.cacheReadInputTokens,
 			cacheCreationInputTokens:

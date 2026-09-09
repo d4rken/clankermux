@@ -5,7 +5,8 @@ import {
 } from "@clankermux/core";
 import type { DatabaseOperations } from "@clankermux/database";
 import type { RunwayBand, RunwayCause } from "@clankermux/types";
-import { computeRunwayScan } from "./runway-scan";
+import { createPublicReadMemo } from "./public-read-memo";
+import { computeRunwayScan, type RunwayScan } from "./runway-scan";
 
 /**
  * The de-identified, POOL-LEVEL projection of the quota-runway scan.
@@ -35,6 +36,13 @@ import { computeRunwayScan } from "./runway-scan";
  * QUOTA, not availability: pauses, rate-limit cooldowns, usage throttling and
  * the provider-overload breaker are deliberately not read by the scan. Copy
  * built on this must say "quota", never "available".
+ *
+ * MEMOIZED, SINGLE-FLIGHT on the shared `createPublicReadMemo`, like every
+ * other reader on this surface and for the most expensive version of the
+ * reason: one GET resolves every account's usage through the freshness tiers,
+ * runs the Codex payload recovery, regresses the stored history and runs the
+ * capacity model. Unmemoized, an anonymous poll loop on the LAN decided how
+ * often the process serving live proxy traffic paid for all of it.
  *
  * NO PROVIDER I/O and NO WRITES, like every other route on this surface: the
  * scan reads the database and the in-memory usage cache (through the
@@ -115,53 +123,88 @@ export interface PublicRunwaySnapshot {
 	worstStatedOutcome: PublicWorstOutcome | null;
 }
 
-export function createPublicRunwayReader(dbOps: DatabaseOperations) {
-	return async (): Promise<PublicRunwaySnapshot> => {
-		const scan = await computeRunwayScan(dbOps);
-		const headline = summarizeKeyRunways(scan.keys, scan.generatedAt);
+export interface PublicRunwayOptions {
+	/** Clock seam. Defaults to `Date.now`; tests pin it to a fixed instant. */
+	now?: () => number;
+	/** Memo lifetime. */
+	ttlMs?: number;
+	/** Negative-cache lifetime. */
+	failureTtlMs?: number;
+}
 
-		// The outcome AS IT STANDS at `generatedAt`, not as the scan recorded it.
-		// A `runway` whose projected instant has already passed is not a runway of
-		// zero and is not still counting down — its own answer is that there is no
-		// quota — so it reads as `out-now`. `summarizeKeyRunways` RANKS by this
-		// same effective view, and publishing the raw outcome instead would let
-		// the served kind contradict the ranking that chose it.
-		const outcome = headline.worst
-			? effectiveRunwayOutcome(headline.worst.outcome, scan.generatedAt)
-			: null;
+export function createPublicRunwayReader(
+	dbOps: DatabaseOperations,
+	options: PublicRunwayOptions = {},
+) {
+	return createPublicRunwayReaderFromScan(
+		() => computeRunwayScan(dbOps),
+		options,
+	);
+}
 
-		return {
-			generatedAtMs: scan.generatedAt,
-			horizonMs: scan.horizonMs,
-			coverage: {
-				activeKeyCount: headline.activeKeyCount,
-				statedKeyCount: headline.statedKeyCount,
-				unobservedKeyCount: headline.unobservedKeyCount,
-				learningAccountCount: headline.learningAccountIds.length,
-			},
-			worstStatedOutcome: outcome
-				? {
-						kind: outcome.kind,
-						exhaustsAtMs:
-							outcome.kind === "runway" ? outcome.exhaustsAtMs : null,
-						// Named explicitly rather than spread: `beyond-horizon` carries
-						// `unprojectableAccountIds` and `runway` carries a `durationMs`
-						// that is already implied by the instant, and neither belongs on
-						// this surface.
-						causes:
-							outcome.kind === "runway" || outcome.kind === "out-now"
-								? outcome.causes
-								: [],
-						// From the key whose outcome is published, not from the scan at
-						// large: `headline.worst` is that key, and `band` is its own.
-						band: headline.worst?.band ?? null,
-						// Read off the EFFECTIVE outcome, the same one `kind` above comes
-						// from. Taking it from the raw recorded outcome could publish a
-						// margin beside a kind that has since become `out-now`.
-						headroom: runwayPaceHeadroom(outcome),
-					}
-				: null,
-		};
+/**
+ * The memo, over an injected scan.
+ *
+ * Split out as a seam so the caching behaviour can be tested without standing
+ * up the whole scan, exactly as `createPublicPacingReaderFromScan` is.
+ */
+export function createPublicRunwayReaderFromScan(
+	scan: () => Promise<RunwayScan>,
+	options: PublicRunwayOptions = {},
+) {
+	return createPublicReadMemo(async () => projectRunway(await scan()), {
+		// The SCAN's own instant, never the instant the answer was served: every
+		// projection in the payload is relative to it, so restamping it on a memo
+		// hit would date the whole snapshot to a moment it does not describe.
+		computedAtMs: (snapshot) => snapshot.generatedAtMs,
+		...options,
+	});
+}
+
+/** The published projection of one scan. Pure: same scan in, same answer out. */
+function projectRunway(scan: RunwayScan): PublicRunwaySnapshot {
+	const headline = summarizeKeyRunways(scan.keys, scan.generatedAt);
+
+	// The outcome AS IT STANDS at `generatedAt`, not as the scan recorded it.
+	// A `runway` whose projected instant has already passed is not a runway of
+	// zero and is not still counting down — its own answer is that there is no
+	// quota — so it reads as `out-now`. `summarizeKeyRunways` RANKS by this
+	// same effective view, and publishing the raw outcome instead would let
+	// the served kind contradict the ranking that chose it.
+	const outcome = headline.worst
+		? effectiveRunwayOutcome(headline.worst.outcome, scan.generatedAt)
+		: null;
+
+	return {
+		generatedAtMs: scan.generatedAt,
+		horizonMs: scan.horizonMs,
+		coverage: {
+			activeKeyCount: headline.activeKeyCount,
+			statedKeyCount: headline.statedKeyCount,
+			unobservedKeyCount: headline.unobservedKeyCount,
+			learningAccountCount: headline.learningAccountIds.length,
+		},
+		worstStatedOutcome: outcome
+			? {
+					kind: outcome.kind,
+					exhaustsAtMs: outcome.kind === "runway" ? outcome.exhaustsAtMs : null,
+					// Named explicitly rather than spread: `beyond-horizon` carries
+					// `unprojectableAccountIds` and `runway` carries a `durationMs`
+					// that is already implied by the instant, and neither belongs on
+					// this surface.
+					causes:
+						outcome.kind === "runway" || outcome.kind === "out-now"
+							? outcome.causes
+							: [],
+					// From the key whose outcome is published, not from the scan at
+					// large: `headline.worst` is that key, and `band` is its own.
+					band: headline.worst?.band ?? null,
+					// Read off the EFFECTIVE outcome, the same one `kind` above comes
+					// from. Taking it from the raw recorded outcome could publish a
+					// margin beside a kind that has since become `out-now`.
+					headroom: runwayPaceHeadroom(outcome),
+				}
+			: null,
 	};
 }
 

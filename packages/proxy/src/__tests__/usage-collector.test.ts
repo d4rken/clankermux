@@ -136,7 +136,7 @@ describe("usage-collector", () => {
 			expect(summary.usage.cacheCreationInputTokens).toBe(5);
 			// total = 100 + 20 + 5 + 250
 			expect(summary.usage.totalTokens).toBe(375);
-			expect(summary.outputApproximate).toBeUndefined();
+			expect(summary.outputApproximate).toBe(false);
 		});
 	});
 
@@ -174,7 +174,7 @@ describe("usage-collector", () => {
 				{ estimateCostUSD: cost.fn },
 			);
 			expect(summary.usage.outputTokens).toBe(77);
-			expect(summary.outputApproximate).toBeUndefined();
+			expect(summary.outputApproximate).toBe(false);
 		});
 
 		it("provider never reports output → fallback from generated content, outputApproximate=true", async () => {
@@ -207,6 +207,42 @@ describe("usage-collector", () => {
 			);
 			expect(summary.outputApproximate).toBe(true);
 			expect(summary.usage.outputTokens).toBe(Math.ceil(expectedChars / 4));
+		});
+
+		it("STATES the provenance either way — the flag is never simply absent", async () => {
+			// Downstream publishes the total's basis from this flag, and it has to
+			// be able to tell "the provider reported it" from "nobody said". An
+			// optional flag collapses those two: a producer that omits it would
+			// have its estimate published as a measurement.
+			const state = createUsageState();
+			feedChunk(
+				state,
+				sse("message_start", {
+					type: "message_start",
+					message: {
+						model: "claude-opus-4-8",
+						usage: { input_tokens: 10, output_tokens: 0 },
+					},
+				}),
+				1000,
+			);
+			feedChunk(
+				state,
+				sse("message_delta", {
+					type: "message_delta",
+					usage: { output_tokens: 25 },
+				}),
+				1100,
+			);
+			const cost = fakeCost();
+			const summary = await finalizeUsage(
+				state,
+				{ responseTimeMs: 1000, providerName: "anthropic", isStream: true },
+				{ estimateCostUSD: cost.fn },
+			);
+
+			expect("outputApproximate" in summary).toBe(true);
+			expect(summary.outputApproximate).toBe(false);
 		});
 	});
 
@@ -541,7 +577,7 @@ describe("usage-collector", () => {
 			expect(summary.usage.cacheReadInputTokens).toBe(50);
 			expect(summary.usage.cacheCreationInputTokens).toBe(10);
 			expect(summary.usage.totalTokens).toBe(200 + 50 + 10 + 333);
-			expect(summary.outputApproximate).toBeUndefined();
+			expect(summary.outputApproximate).toBe(false);
 		});
 
 		it("does not count an unrecognized JSON envelope as generated output", async () => {
@@ -597,6 +633,70 @@ describe("usage-collector", () => {
 			expect(cost.calls[0].tokens.inputTokens).toBe(100);
 			expect(cost.calls[0].tokens.outputTokens).toBe(10);
 			expect(summary.usage.totalTokens).toBe(110);
+		});
+
+		it("leaves the cost ABSENT when the model could not be priced", async () => {
+			// `estimateCostUSD` reports a lookup failure as null. Carrying that
+			// through as 0 is what published "we could not price it" as "this was
+			// free", all the way onto the unauthenticated stream.
+			const state = createUsageState();
+			feedChunk(
+				state,
+				sse("message_start", {
+					type: "message_start",
+					message: {
+						model: "some-unpriced-model",
+						usage: { input_tokens: 100, output_tokens: 0 },
+					},
+				}),
+				1000,
+			);
+			feedChunk(
+				state,
+				sse("message_delta", {
+					type: "message_delta",
+					usage: { output_tokens: 10 },
+				}),
+				1100,
+			);
+
+			const summary = await finalizeUsage(
+				state,
+				{ responseTimeMs: 1000, providerName: "anthropic", isStream: true },
+				{ estimateCostUSD: async () => null },
+			);
+
+			expect(summary.usage.costUsd).toBeUndefined();
+			// …and absent once serialized, which is what the recorder persists and
+			// what the stream publishes.
+			expect(JSON.parse(JSON.stringify(summary.usage))).not.toHaveProperty(
+				"costUsd",
+			);
+			// The tokens are still measured — only the price is unknown.
+			expect(summary.usage.totalTokens).toBe(110);
+		});
+
+		it("keeps a genuine zero, which is a measurement rather than a gap", async () => {
+			const state = createUsageState();
+			feedChunk(
+				state,
+				sse("message_start", {
+					type: "message_start",
+					message: {
+						model: "claude-opus-4-8",
+						usage: { input_tokens: 0, output_tokens: 0 },
+					},
+				}),
+				1000,
+			);
+
+			const summary = await finalizeUsage(
+				state,
+				{ responseTimeMs: 1000, providerName: "anthropic", isStream: true },
+				{ estimateCostUSD: async () => 0 },
+			);
+
+			expect(summary.usage.costUsd).toBe(0);
 		});
 	});
 
@@ -993,7 +1093,7 @@ describe("usage-collector", () => {
 			// inputTokens (93) + cacheRead (1024) reconstructs the 1117 total.
 			expect(summary.usage.totalTokens).toBe(93 + 1024 + 64 + 215);
 			// The provider reported — the content-chars/4 fallback must NOT have been used.
-			expect(summary.outputApproximate).toBeUndefined();
+			expect(summary.outputApproximate).toBe(false);
 			expect(summary.usage.outputTokens).not.toBe(
 				Math.ceil(state.streamedBytes / 4),
 			);
@@ -1049,7 +1149,7 @@ describe("usage-collector", () => {
 				{ estimateCostUSD: cost.fn },
 			);
 			expect(summary.usage.outputTokens).toBe(9);
-			expect(summary.outputApproximate).toBeUndefined();
+			expect(summary.outputApproximate).toBe(false);
 		});
 
 		it("ignores negative cached-token details (mirrors CodexProvider's >= 0 guard)", () => {
@@ -1128,7 +1228,7 @@ describe("usage-collector", () => {
 			);
 			expect(summary.usage.inputTokens).toBe(20);
 			expect(summary.usage.outputTokens).toBe(7);
-			expect(summary.outputApproximate).toBeUndefined();
+			expect(summary.outputApproximate).toBe(false);
 		});
 
 		it("parses a response.completed split across feedChunk calls", () => {
@@ -1188,7 +1288,7 @@ describe("usage-collector", () => {
 				{ estimateCostUSD: fakeCost().fn },
 			);
 			expect(summary.usage.outputTokens).toBe(9);
-			expect(summary.outputApproximate).toBeUndefined();
+			expect(summary.outputApproximate).toBe(false);
 		});
 
 		it.each([
@@ -1335,7 +1435,7 @@ describe("usage-collector", () => {
 			expect(summary.usage.cacheReadInputTokens).toBe(20);
 			expect(summary.usage.cacheCreationInputTokens).toBe(5);
 			expect(summary.usage.totalTokens).toBe(375);
-			expect(summary.outputApproximate).toBeUndefined();
+			expect(summary.outputApproximate).toBe(false);
 			expect(state.sawMessageStop).toBe(true);
 		});
 	});
@@ -1384,7 +1484,7 @@ describe("usage-collector", () => {
 				{ estimateCostUSD: cost.fn },
 			);
 			expect(summary.usage.outputTokens).toBe(5);
-			expect(summary.outputApproximate).toBeUndefined();
+			expect(summary.outputApproximate).toBe(false);
 		});
 
 		it("truncated end uses max(provider, ceil(content-chars/4)) and flags approximate", async () => {
@@ -1527,7 +1627,7 @@ describe("usage-collector", () => {
 			);
 			// Exact, not max(9, ceil(content-chars/4)) which would be in the hundreds.
 			expect(summary.usage.outputTokens).toBe(9);
-			expect(summary.outputApproximate).toBeUndefined();
+			expect(summary.outputApproximate).toBe(false);
 		});
 
 		it("an Anthropic stream cut after the last message_delta still takes the content-chars/4 floor", async () => {
@@ -1629,7 +1729,7 @@ describe("usage-collector", () => {
 				{ estimateCostUSD: cost.fn },
 			);
 			expect(summary.usage.outputTokens).toBe(12);
-			expect(summary.outputApproximate).toBeUndefined();
+			expect(summary.outputApproximate).toBe(false);
 		});
 
 		it("disconnect/onError mid-stream (endedCleanly=false) still uses the max(provider, content-chars/4) fallback", async () => {

@@ -557,6 +557,72 @@ describe("RequestRecorder — normal terminal end", () => {
 		expect(h.emitted[0].tokensPerSecondApproximate).toBeUndefined();
 	});
 
+	it("marks the total as PROVIDER-basis when the provider reported the output", async () => {
+		const h = makeHarness();
+		h.recorder.begin(makeMeta());
+		h.recorder.attachUsageSummary(
+			"req-1",
+			makeSummary({ outputApproximate: false }),
+		);
+		h.recorder.finishTransport("req-1", "success");
+		await h.flush();
+
+		expect(h.emitted[0].totalTokensBasis).toBe("provider");
+	});
+
+	it("states NO basis when the summary never said where the total came from", async () => {
+		// `provider` is a claim about the upstream, and an absent flag is not
+		// evidence for it. The collector always states one or the other, so a
+		// summary without the flag came from somewhere that recorded nothing about
+		// provenance — publishing "the provider reported this" on the strength of
+		// a missing field is how a second producer would ship a false measurement
+		// with nothing to catch it.
+		const h = makeHarness();
+		h.recorder.begin(makeMeta());
+		h.recorder.attachUsageSummary("req-1", makeSummary());
+		h.recorder.finishTransport("req-1", "success");
+		await h.flush();
+
+		expect(h.emitted[0].totalTokens).toBe(165);
+		expect(h.emitted[0].totalTokensBasis).toBeUndefined();
+	});
+
+	it("marks the total as ESTIMATED when the output came from the char fallback", async () => {
+		// The collector substitutes ceil(generatedChars / 4) whenever output usage
+		// is missing or the stream ended uncleanly, and flags it. The flag stopped
+		// at the recorder, so a routine interrupted response published a
+		// precise-looking `totalTokens` with nothing saying it was inferred.
+		const h = makeHarness();
+		h.recorder.begin(makeMeta());
+		h.recorder.attachUsageSummary(
+			"req-1",
+			makeSummary({ outputApproximate: true }),
+		);
+		h.recorder.finishTransport("req-1", "success");
+		await h.flush();
+
+		expect(h.emitted[0].totalTokensBasis).toBe("estimated");
+		// The total itself is unchanged: the widgets use it, and withholding it
+		// would cost more than labelling it.
+		expect(h.emitted[0].totalTokens).toBe(165);
+	});
+
+	it("states no basis when there is no total to characterize", async () => {
+		const h = makeHarness();
+		h.recorder.begin(makeMeta());
+		h.recorder.attachUsageSummary(
+			"req-1",
+			makeSummary({
+				usage: { model: "claude-opus-4-8" },
+			}),
+		);
+		h.recorder.finishTransport("req-1", "success");
+		await h.flush();
+
+		expect(h.emitted[0].totalTokens).toBeUndefined();
+		expect(h.emitted[0].totalTokensBasis).toBeUndefined();
+	});
+
 	it("emits the cacheCreationInputTokens on the event for cache-body-store consumers", async () => {
 		const h = makeHarness();
 		h.recorder.begin(makeMeta());

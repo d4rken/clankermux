@@ -47,7 +47,12 @@ import {
 	toPublicWorkloadHeadroomDto,
 	truncateUtf8,
 } from "../dto";
-import { arrayNesting, assertInstantsAreIso, depthOf } from "./wire-contract";
+import {
+	arrayNesting,
+	assertCountsAreStatedWholeNumbers,
+	assertInstantsAreIso,
+	depthOf,
+} from "./wire-contract";
 
 const NOW = 1_699_999_000_000;
 const NOW_ISO = "2023-11-14T21:56:40.000Z";
@@ -110,6 +115,8 @@ function snapshot(over: Partial<PublicSnapshot> = {}): PublicSnapshot {
 				contributingAccountCount: 1,
 				unknownAccountCount: 2,
 				earliestResetsAtMs: 1_700_000_000_000,
+				oldestObservedAtMs: NOW - 30_000,
+				unobservedContributingCount: 0,
 				leastUsedUtilizationPct: 42,
 				leastUsedAccountId: "acct-1",
 			},
@@ -118,6 +125,8 @@ function snapshot(over: Partial<PublicSnapshot> = {}): PublicSnapshot {
 				contributingAccountCount: 0,
 				unknownAccountCount: 3,
 				earliestResetsAtMs: null,
+				oldestObservedAtMs: null,
+				unobservedContributingCount: 0,
 				leastUsedUtilizationPct: null,
 				leastUsedAccountId: null,
 			},
@@ -352,6 +361,8 @@ describe("golden: GET /public/v1/status", () => {
 					contributingAccountCount: 1,
 					unknownAccountCount: 2,
 					earliestResetsAt: "2023-11-14T22:13:20.000Z",
+					oldestObservedAt: "2023-11-14T21:56:10.000Z",
+					unobservedContributingCount: 0,
 					leastUsedUtilizationPct: 42,
 					leastUsedAccountId: "acct-1",
 				},
@@ -360,6 +371,8 @@ describe("golden: GET /public/v1/status", () => {
 					contributingAccountCount: 0,
 					unknownAccountCount: 3,
 					earliestResetsAt: null,
+					oldestObservedAt: null,
+					unobservedContributingCount: 0,
 					leastUsedUtilizationPct: null,
 					leastUsedAccountId: null,
 				},
@@ -395,6 +408,56 @@ describe("golden: GET /public/v1/status", () => {
 		expect(dto.usage.sevenDay.contributingAccountCount).toBe(0);
 		expect(dto.usage.sevenDay.leastUsedUtilizationPct).toBeNull();
 		expect(dto.usage.sevenDay.leastUsedAccountId).toBeNull();
+	});
+
+	it("dates each aggregate by its oldest input, apart from generatedAt", () => {
+		// `generatedAt` is when the payload was BUILT; `oldestObservedAt` is when
+		// the evidence in it was MEASURED. Publishing only the first is what let a
+		// twenty-minute-old mean render as current.
+		const dto = toPublicStatusDto(snapshot(), { uptimeS: 1, version: "v" });
+		expect(dto.usage.fiveHour.oldestObservedAt).toBe(
+			"2023-11-14T21:56:10.000Z",
+		);
+		expect(dto.generatedAt).toBe(NOW_ISO);
+		expect(dto.usage.fiveHour.oldestObservedAt).not.toBe(dto.generatedAt);
+		// Null, not a borrowed timestamp, when nothing contributed.
+		expect(dto.usage.sevenDay.oldestObservedAt).toBeNull();
+	});
+
+	it("counts contributors that state no observation time", () => {
+		const dto = toPublicStatusDto(
+			snapshot({
+				usage: {
+					fiveHour: {
+						meanUtilizationPct: 42,
+						contributingAccountCount: 2,
+						unknownAccountCount: 0,
+						earliestResetsAtMs: null,
+						oldestObservedAtMs: null,
+						unobservedContributingCount: 2,
+						leastUsedUtilizationPct: 42,
+						leastUsedAccountId: "acct-1",
+					},
+					sevenDay: {
+						meanUtilizationPct: null,
+						contributingAccountCount: 0,
+						unknownAccountCount: 2,
+						earliestResetsAtMs: null,
+						oldestObservedAtMs: null,
+						unobservedContributingCount: 0,
+						leastUsedUtilizationPct: null,
+						leastUsedAccountId: null,
+					},
+					worstAccountUtilizationPct: 42,
+				},
+			}),
+			{ uptimeS: 1, version: "v" },
+		);
+		// The percentages are in the mean; what is absent is any claim about when
+		// they were taken.
+		expect(dto.usage.fiveHour.contributingAccountCount).toBe(2);
+		expect(dto.usage.fiveHour.unobservedContributingCount).toBe(2);
+		expect(dto.usage.fiveHour.oldestObservedAt).toBeNull();
 	});
 
 	it("states the routing context beside the candidate it belongs to", () => {
@@ -1215,6 +1278,8 @@ describe("instants vs durations", () => {
 						contributingAccountCount: 1,
 						unknownAccountCount: 0,
 						earliestResetsAtMs: 1_700_200_000_000,
+						oldestObservedAtMs: 1_699_999_000_000,
+						unobservedContributingCount: 0,
 						leastUsedUtilizationPct: 12,
 						leastUsedAccountId: "acct-1",
 					},
@@ -1251,6 +1316,21 @@ describe("instants vs durations", () => {
 		assertInstantsAreIso(toPublicStopsDto(stops(), NOW));
 		assertInstantsAreIso(toPublicPacingDto(pacing()));
 		assertInstantsAreIso(toPublicWorkloadHeadroomDto(workloadHeadroom()));
+	});
+
+	it("states every count as a whole number on any resource", () => {
+		// A count is never null on this surface: it is what makes the figure beside
+		// it interpretable, and "we counted none" is a number.
+		assertCountsAreStatedWholeNumbers(
+			toPublicStatusDto(populated, { uptimeS: 3_600, version: "v" }),
+		);
+		assertCountsAreStatedWholeNumbers(toPublicAccountsDto(populated));
+		assertCountsAreStatedWholeNumbers(toPublicRunwayDto(runway()));
+		assertCountsAreStatedWholeNumbers(toPublicStopsDto(stops(), NOW));
+		assertCountsAreStatedWholeNumbers(toPublicPacingDto(pacing()));
+		assertCountsAreStatedWholeNumbers(
+			toPublicWorkloadHeadroomDto(workloadHeadroom()),
+		);
 	});
 
 	it("emits no duration as a string", () => {
@@ -1328,6 +1408,8 @@ describe("identifiers are never truncated", () => {
 						contributingAccountCount: 1,
 						unknownAccountCount: 0,
 						earliestResetsAtMs: null,
+						oldestObservedAtMs: null,
+						unobservedContributingCount: 1,
 						leastUsedUtilizationPct: 42,
 						leastUsedAccountId: longId,
 					},
@@ -1336,6 +1418,8 @@ describe("identifiers are never truncated", () => {
 						contributingAccountCount: 0,
 						unknownAccountCount: 1,
 						earliestResetsAtMs: null,
+						oldestObservedAtMs: null,
+						unobservedContributingCount: 0,
 						leastUsedUtilizationPct: null,
 						leastUsedAccountId: null,
 					},
@@ -1944,6 +2028,7 @@ describe("request.done normalizes the internal summary", () => {
 			model: null,
 			project: null,
 			totalTokens: null,
+			totalTokensBasis: null,
 			costUsd: null,
 			errorMessage: null,
 		});
@@ -1995,11 +2080,160 @@ describe("request.done normalizes the internal summary", () => {
 		expect(dto.costUsd).toBeNull();
 	});
 
+	it("says whether the token total was reported or estimated", () => {
+		// The collector substitutes ceil(generatedChars / 4) when output usage is
+		// missing or the stream ends uncleanly. That provenance used to stop at the
+		// recorder, so an interrupted response published a precise-looking total.
+		// ADDITIVE: the total keeps its name, its type and its value.
+		expect(
+			toPublicRequestDoneDto(summary({ totalTokensBasis: "provider" }), 0)
+				.totalTokensBasis,
+		).toBe("provider");
+		expect(
+			toPublicRequestDoneDto(summary({ totalTokensBasis: "estimated" }), 0)
+				.totalTokensBasis,
+		).toBe("estimated");
+	});
+
+	it("states a null basis when the provenance is unknown", () => {
+		// Never "provider" by default: a summary with no recorded provenance (a
+		// row read back from the database, say) has not been shown to carry a
+		// provider count, and claiming one would be the same overstatement this
+		// field exists to remove.
+		expect(toPublicRequestDoneDto(summary(), 0).totalTokensBasis).toBeNull();
+		expect(
+			toPublicRequestDoneDto(
+				// biome-ignore lint/suspicious/noExplicitAny: modelling a future value
+				summary({ totalTokensBasis: "something-new" as any }),
+				0,
+			).totalTokensBasis,
+		).toBeNull();
+	});
+
+	it("distinguishes an unpriced request from a free one", () => {
+		// The pricing lookup reports a failure as an ABSENT cost, and this surface
+		// publishes that absence. A measured zero — a request that consumed no
+		// metered tokens — stays 0, and the two are now different values on the
+		// wire instead of both being 0.
+		expect(
+			toPublicRequestDoneDto(summary({ costUsd: undefined }), 0).costUsd,
+		).toBeNull();
+		expect(toPublicRequestDoneDto(summary({ costUsd: 0 }), 0).costUsd).toBe(0);
+		expect(toPublicRequestDoneDto(summary({ costUsd: 0.42 }), 0).costUsd).toBe(
+			0.42,
+		);
+	});
+
 	it("keeps responseTimeMs a NUMBER — it is a duration, not an instant", () => {
 		expect(typeof toPublicRequestDoneDto(summary(), 0).responseTimeMs).toBe(
 			"number",
 		);
 		assertInstantsAreIso(toPublicRequestDoneDto(summary(), 0));
+	});
+
+	it("publishes a CATEGORY instead of upstream prose", () => {
+		// `request-recorder` builds this string from the upstream response body,
+		// so it can carry echoed request values and account-specific diagnostics.
+		// Truncation bounded its length, not its sensitivity.
+		const dto = toPublicRequestDoneDto(
+			summary({
+				success: false,
+				statusCode: 400,
+				errorMessage:
+					'400 {"error":{"message":"credential sk-ant-oat01-secret rejected for org acme-corp"}}',
+			}),
+			0,
+		);
+
+		expect(dto.errorMessage).toBe("upstream_error");
+		const wire = JSON.stringify(dto);
+		expect(wire).not.toContain("sk-ant-oat01-secret");
+		expect(wire).not.toContain("acme-corp");
+	});
+
+	it("keeps the field a string, so the wire shape is unchanged", () => {
+		const dto = toPublicRequestDoneDto(
+			summary({
+				success: false,
+				statusCode: 500,
+				errorMessage: "stream error",
+			}),
+			0,
+		);
+		expect(typeof dto.errorMessage).toBe("string");
+	});
+
+	it("maps the proxy's own terminals onto the /stops vocabulary", () => {
+		// One taxonomy for both surfaces: a widget reading `/public/v1/stops` and
+		// the stream must not need two tables for the same fact.
+		expect(
+			toPublicRequestDoneDto(
+				summary({
+					success: false,
+					errorMessage: "family_weekly_exhausted_429",
+				}),
+				0,
+			).errorMessage,
+		).toBe("family_weekly_exhausted");
+		expect(
+			toPublicRequestDoneDto(
+				summary({ success: false, errorMessage: "all_accounts_failed" }),
+				0,
+			).errorMessage,
+		).toBe("pool_quota_exhausted");
+	});
+
+	it("names the transport terminals it can recognise", () => {
+		const cases: Array<[string, string]> = [
+			["client disconnected", "client_disconnected"],
+			["request timed out", "request_timed_out"],
+			["stream error", "stream_error"],
+		];
+		for (const [raw, category] of cases) {
+			expect(
+				toPublicRequestDoneDto(
+					summary({ success: false, errorMessage: raw }),
+					0,
+				).errorMessage,
+			).toBe(category);
+		}
+	});
+
+	it("treats an INHERITED property name as an unknown label, not a hit", () => {
+		// The lookup used to be an object literal, which answers for everything on
+		// Object.prototype: `__proto__` came back as an object and serialised as
+		// `errorMessage: {}`, while `constructor` and `toString` came back as
+		// functions, which JSON.stringify drops — taking the field off the wire of
+		// a closed-set contract altogether.
+		for (const raw of ["__proto__", "constructor", "toString"]) {
+			const dto = toPublicRequestDoneDto(
+				summary({ success: false, statusCode: null, errorMessage: raw }),
+				0,
+			);
+			expect(dto.errorMessage).toBe("other");
+			// …and it survives the round trip as a string, rather than vanishing.
+			expect(JSON.parse(JSON.stringify(dto)).errorMessage).toBe("other");
+		}
+	});
+
+	it("falls back to `other` for a label it has not been taught", () => {
+		expect(
+			toPublicRequestDoneDto(
+				summary({
+					success: false,
+					statusCode: null,
+					errorMessage: "some_terminal_invented_tomorrow",
+				}),
+				0,
+			).errorMessage,
+		).toBe("other");
+	});
+
+	it("says nothing at all when there was no error", () => {
+		expect(toPublicRequestDoneDto(summary(), 0).errorMessage).toBeNull();
+		expect(
+			toPublicRequestDoneDto(summary({ errorMessage: "   " }), 0).errorMessage,
+		).toBeNull();
 	});
 
 	it("emits every field explicitly — an added RequestResponse field must not leak", () => {

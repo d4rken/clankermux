@@ -5,6 +5,7 @@ import {
 	computeStopsHistory,
 	type StopsHistorySources,
 } from "../handlers/stops-history-direct";
+import { createPublicReadMemo } from "./public-read-memo";
 
 /**
  * The de-identified, POOL-LEVEL record of requests the proxy actually refused.
@@ -28,20 +29,20 @@ import {
  *    record, so it passes no filters at all: the accounts, keys and projects a
  *    selection names are exactly the identities this route exists not to
  *    disclose, and honoring them would also make the memo below per-caller.
- *  - MEMOIZED, SINGLE-FLIGHT. One read per {@link PublicStopsOptions.ttlMs},
- *    and concurrent callers await the same in-flight promise rather than each
- *    starting a scan. Without it a poll loop on the LAN sets the query rate.
+ *  - MEMOIZED, SINGLE-FLIGHT, on the shared `createPublicReadMemo`. One read
+ *    per {@link PublicStopsOptions.ttlMs}, and concurrent callers await the same
+ *    in-flight promise rather than each starting a scan. Without it a poll loop
+ *    on the LAN sets the query rate.
  */
 export const PUBLIC_STOPS_RANGE = "7d" as const;
-
-/** How long one computed answer is served before another read is allowed. */
-const DEFAULT_TTL_MS = 60_000;
 
 export interface PublicStopsOptions {
 	/** Clock seam. Defaults to `Date.now`; tests pin it to a fixed instant. */
 	now?: () => number;
 	/** Memo lifetime. */
 	ttlMs?: number;
+	/** Negative-cache lifetime. */
+	failureTtlMs?: number;
 }
 
 export interface PublicStopsSnapshot {
@@ -60,7 +61,6 @@ export function createPublicStopsReader(
 	options: PublicStopsOptions = {},
 ) {
 	const now = options.now ?? (() => Date.now());
-	const ttlMs = options.ttlMs ?? DEFAULT_TTL_MS;
 
 	// Built once per reader rather than per call: the repository is a thin
 	// wrapper over the adapter, and rebuilding it on every unauthenticated GET
@@ -75,7 +75,7 @@ export function createPublicStopsReader(
 		now,
 	};
 
-	return createPublicStopsReaderFromSources(sources, { now, ttlMs });
+	return createPublicStopsReaderFromSources(sources, { ...options, now });
 }
 
 /**
@@ -86,36 +86,20 @@ export function createPublicStopsReaderFromSources(
 	sources: StopsHistorySources,
 	options: PublicStopsOptions = {},
 ) {
-	const now = options.now ?? sources.now ?? (() => Date.now());
-	const ttlMs = options.ttlMs ?? DEFAULT_TTL_MS;
-
-	let cached: PublicStopsSnapshot | null = null;
-	let inFlight: Promise<PublicStopsSnapshot> | null = null;
-
-	return async (): Promise<PublicStopsSnapshot> => {
-		const nowMs = now();
-		if (cached && nowMs - cached.generatedAtMs < ttlMs) return cached;
-		// Single flight, checked BEFORE starting a read: a burst of concurrent
-		// polls costs one scan rather than one each.
-		if (inFlight) return await inFlight;
-
-		const read = (async () => {
+	return createPublicReadMemo(
+		async (): Promise<PublicStopsSnapshot> => {
 			const summary = await computeStopsHistory(sources, PUBLIC_STOPS_RANGE, {
 				includeModelBreakdown: false,
 				includeSeries: false,
 			});
 			return { generatedAtMs: summary.windowEndsAt, summary };
-		})();
-		inFlight = read;
-		try {
-			cached = await read;
-			return cached;
-		} finally {
-			// Cleared whether the read resolved or threw: a rejected promise left
-			// here would serve the same failure to every later caller.
-			inFlight = null;
-		}
-	};
+		},
+		{
+			computedAtMs: (snapshot) => snapshot.generatedAtMs,
+			...options,
+			now: options.now ?? sources.now ?? (() => Date.now()),
+		},
+	);
 }
 
 export type PublicStopsReader = ReturnType<typeof createPublicStopsReader>;

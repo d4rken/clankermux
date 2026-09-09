@@ -96,9 +96,10 @@ describe("one request through the main path yields exactly one gap record", () =
 			isStream: false,
 		});
 
-		// The persisted cost collapses to 0 (stored as NULL) — the failure this
-		// banner exists to surface.
-		expect(summary.usage.costUsd).toBe(0);
+		// No cost at all — the failure this banner exists to surface. Absent
+		// rather than 0: the row still persists NULL, and every consumer of the
+		// summary can now tell an unpriceable request from a free one.
+		expect(summary.usage.costUsd).toBeUndefined();
 
 		const gaps = getPricingGaps();
 		expect(gaps).toHaveLength(1);

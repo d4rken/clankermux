@@ -57,6 +57,7 @@ import type {
 	StopsHistoryResponse,
 	UsagePrediction,
 } from "@clankermux/types";
+import { classifyStopCause } from "@clankermux/types";
 import type { PublicRunwaySnapshot } from "../../services/public-runway";
 import type {
 	PublicAccountSnapshot,
@@ -683,6 +684,25 @@ export interface PublicWindowAggregateDto {
 	 */
 	earliestResetsAt: string | null;
 	/**
+	 * INSTANT the OLDEST contributing reading was observed, or null when no
+	 * contributor states one.
+	 *
+	 * ADDITIVE, and deliberately NOT `generatedAt`: that one is when this payload
+	 * was built, this one is when the evidence in it was measured. They can be
+	 * twenty minutes apart, and the deployed shape published only the first — so a
+	 * status-only widget rendered an aged mean as a current one.
+	 */
+	oldestObservedAt: string | null;
+	/**
+	 * How many contributors carry NO observation time at all (a reconstructed
+	 * reading, seeded untimed because it cannot honestly say when it was taken).
+	 *
+	 * Their percentages ARE in the mean, so the instant above does not speak for
+	 * them. Accounts that contributed nothing are counted by
+	 * `unknownAccountCount`, not here.
+	 */
+	unobservedContributingCount: number;
+	/**
 	 * The LOWEST utilization among the contributors — the account with the most
 	 * room left.
 	 *
@@ -785,6 +805,8 @@ function toPublicWindowAggregateDto(
 		contributingAccountCount: aggregate.contributingAccountCount,
 		unknownAccountCount: aggregate.unknownAccountCount,
 		earliestResetsAt: instant(aggregate.earliestResetsAtMs),
+		oldestObservedAt: instant(aggregate.oldestObservedAtMs),
+		unobservedContributingCount: aggregate.unobservedContributingCount,
 		leastUsedUtilizationPct: aggregate.leastUsedUtilizationPct,
 		leastUsedAccountId: optionalIdentifier(aggregate.leastUsedAccountId),
 	};
@@ -1285,8 +1307,45 @@ export interface PublicRequestDoneDto {
 	model: string | null;
 	project: string | null;
 	totalTokens: number | null;
+	/**
+	 * Where `totalTokens` came from, or null when nothing states it.
+	 *
+	 * ADDITIVE, and the total keeps its name, its type and its value: the widgets
+	 * use the number, so the fix is to say what it is rather than to withhold it.
+	 * `provider` is a count the response reported; `estimated` is the proxy's
+	 * `ceil(generatedChars / 4)` fallback, which is what a response with no output
+	 * usage or an uncleanly-ended stream gets — a routine case, not an error.
+	 *
+	 * NULL means the basis is unknown (there is no total, or the record carries no
+	 * provenance). Never defaulted to `provider`: claiming a measurement nobody
+	 * made is the overstatement this field exists to remove.
+	 */
+	totalTokensBasis: PublicTokenBasisDto | null;
+	/**
+	 * What this request is ESTIMATED to have cost, in USD, from the pricing
+	 * catalogue — not the operator's subscription charge. Most accounts here are
+	 * flat-rate plans, where the true marginal cost of a request is nothing like
+	 * this figure; what it answers is "how much would this have cost at list
+	 * price", which is what makes two requests comparable.
+	 *
+	 * NULL means UNPRICED — the model is missing from the catalogue, or its entry
+	 * has no rate for a bucket this request used. A number always means measured,
+	 * so `0` is a request that consumed no metered tokens. The deployed shape
+	 * published a failed lookup as `0`, and no consumer could tell a free request
+	 * from an unpriceable one.
+	 */
 	costUsd: number | null;
-	errorMessage: string | null;
+	/**
+	 * WHY the request failed, as an allowlisted CATEGORY — never the upstream's
+	 * own text. Null when it did not fail.
+	 *
+	 * The field keeps its name and its `string | null` wire type; what changed is
+	 * the value space, which is now the closed set in
+	 * {@link PublicErrorCategoryDto}. The raw message is recorder-built from the
+	 * upstream response body and stays on the management surface, behind the
+	 * session gate.
+	 */
+	errorMessage: PublicErrorCategoryDto | null;
 }
 
 export type PublicStreamEventDto =
@@ -1311,6 +1370,99 @@ export type PublicStreamEventDto =
  * emitting null: the device places the record on a time axis, and a null there
  * drops it entirely.
  */
+/**
+ * How a published token total was arrived at, as a CLOSED set.
+ *
+ * Mirrors the internal `TokenCountBasis` value for value. No `other` member and
+ * no fallback value: an unrecognised or absent basis is published as NULL,
+ * which on this surface already means "not stated" — an `other` here would
+ * assert that a basis exists and that we know it is neither of these two, which
+ * is more than the record supports.
+ */
+export type PublicTokenBasisDto = "provider" | "estimated";
+
+/**
+ * WHY a request failed, as a CLOSED set — never the upstream's own words.
+ *
+ * `RequestResponse.errorMessage` is built by the recorder from the upstream
+ * response body, so it can carry echoed request values and account-specific
+ * diagnostics. The deployed shape published its first 96 UTF-8 bytes on an
+ * unauthenticated stream, which bounds the LENGTH of that disclosure and nothing
+ * about its sensitivity. `/public/v1/stops` already faced this and answered it
+ * the same way: classify server-side, publish the label, keep the prose on the
+ * management surface behind the session gate.
+ *
+ * The `/stops` vocabulary is reused verbatim rather than reinvented, so a client
+ * needs ONE table for "why did the pool say no" whether it is reading counts or
+ * watching the stream. The three additions are transport terminals the proxy
+ * writes itself, which are not stops at all — the request reached an account and
+ * the connection is what ended.
+ *
+ * `other` is mandatory and load-bearing, exactly as it is for a stop cause: a
+ * terminal invented tomorrow must arrive as something the firmware renders,
+ * rather than as a string its closed-set check rejects.
+ */
+export type PublicErrorCategoryDto =
+	| PublicStopCauseDto
+	/** The client went away mid-response. */
+	| "client_disconnected"
+	/** The proxy's own deadline elapsed. */
+	| "request_timed_out"
+	/** The response stream broke after it had started. */
+	| "stream_error";
+
+/**
+ * The transport terminals the recorder writes, mapped by exact label.
+ *
+ * A `Map`, not an object literal, because the key is UNTRUSTED text: an object
+ * lookup answers for every inherited property too, so `__proto__` came back as
+ * an object (serialising as `errorMessage: {}`) and `constructor` as a function
+ * (which JSON drops, taking the field off the wire entirely). A Map has no
+ * prototype chain to walk, so the return type is closed by construction rather
+ * than by the absence of a caller who can reach those keys.
+ */
+const TRANSPORT_TERMINALS: ReadonlyMap<string, PublicErrorCategoryDto> =
+	new Map<string, PublicErrorCategoryDto>([
+		["client disconnected", "client_disconnected"],
+		["request timed out", "request_timed_out"],
+		["stream error", "stream_error"],
+	]);
+
+/**
+ * Classify a recorded error into {@link PublicErrorCategoryDto}, or null when
+ * nothing failed.
+ *
+ * Null rather than `other` for the no-error case: `other` means "something
+ * happened that this vocabulary cannot name", and a successful request has
+ * nothing to name at all. Whitespace counts as nothing, matching
+ * `classifyStopCause`, which this delegates to for every label that is not one
+ * of the transport terminals above.
+ */
+export function toPublicErrorCategory(
+	errorMessage: string | null | undefined,
+	statusCode: number | null | undefined,
+): PublicErrorCategoryDto | null {
+	const trimmed = errorMessage?.trim() ?? "";
+	if (trimmed === "") return null;
+	const transport = TRANSPORT_TERMINALS.get(trimmed);
+	if (transport) return transport;
+	return toPublicStopCause(classifyStopCause(trimmed, statusCode));
+}
+
+/** Total over today's `TokenCountBasis`; anything else is not stated at all. */
+export function toPublicTokenBasis(
+	basis: string | null | undefined,
+): PublicTokenBasisDto | null {
+	switch (basis) {
+		case "provider":
+			return "provider";
+		case "estimated":
+			return "estimated";
+		default:
+			return null;
+	}
+}
+
 export function toPublicRequestDoneDto(
 	payload: RequestResponse,
 	now: number,
@@ -1335,8 +1487,14 @@ export function toPublicRequestDoneDto(
 		model: text(payload.model ?? payload.requestedModel ?? null),
 		project: text(payload.project ?? null),
 		totalTokens: payload.totalTokens ?? null,
+		totalTokensBasis: toPublicTokenBasis(payload.totalTokensBasis),
 		costUsd: payload.costUsd ?? null,
-		errorMessage: text(payload.errorMessage),
+		// A CATEGORY, not the upstream's prose: this is an unauthenticated wire and
+		// the recorder builds that string out of the provider's response body.
+		errorMessage: toPublicErrorCategory(
+			payload.errorMessage,
+			payload.statusCode,
+		),
 	};
 }
 

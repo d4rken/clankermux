@@ -1004,7 +1004,16 @@ export interface FinalizeDeps {
 	nowMs?: number;
 }
 
-export type FinalizedUsage = SlimUsageSummary & { outputApproximate?: boolean };
+/**
+ * The summary the collector produces.
+ *
+ * `outputApproximate` used to be bolted on here rather than declared on
+ * {@link SlimUsageSummary}, which is why it stopped at the recorder: the flag
+ * was typed as a property of THIS function's return value instead of a property
+ * of the measurement. It now lives on the summary, so the recorder can publish
+ * the provenance beside the total it qualifies.
+ */
+export type FinalizedUsage = SlimUsageSummary;
 
 /**
  * Resolve final usage. Returns a `SlimUsageSummary` (without `requestId` — the
@@ -1062,7 +1071,13 @@ export async function finalizeUsage(
 	// pricing-gap reporting. It owns the `cost_usd` that is actually persisted (a
 	// failure here is what stores NULL) and runs exactly once per recorded
 	// request, with the real account provider attached.
-	const costUsd =
+	//
+	// ABSENT, never zero, when it could not be priced. `estimateCostUSD` reports
+	// a lookup failure as null and this carries that absence forward as an absent
+	// field — a request nobody could price is not a free request, and downstream
+	// (the live-activity stream above all) has no way back to the distinction
+	// once a failure has been published as the number 0.
+	const estimated =
 		model !== undefined
 			? await estimateCostUSD(
 					model,
@@ -1077,7 +1092,8 @@ export async function finalizeUsage(
 						reportGaps: true,
 					},
 				)
-			: undefined;
+			: null;
+	const costUsd = estimated ?? undefined;
 
 	const speed = computeTokensPerSecond(state, finalOutput, opts);
 
@@ -1097,7 +1113,11 @@ export async function finalizeUsage(
 		responseTimeMs: opts.responseTimeMs,
 		cacheCreationInputTokens: state.cacheCreationInputTokens,
 	};
-	if (outputApproximate) summary.outputApproximate = true;
+	// ALWAYS stated, true or false. A consumer reading provenance off the
+	// ABSENCE of this flag is reading "nobody said" as "the provider reported
+	// it", which is the more flattering of the two and wrong for any producer
+	// that simply does not set it.
+	summary.outputApproximate = outputApproximate;
 	if (speed?.approximate) summary.tokensPerSecondApproximate = true;
 	// Top-level, not inside `usage`: these describe how the response ENDED, not
 	// what it cost, and they persist to their own columns.

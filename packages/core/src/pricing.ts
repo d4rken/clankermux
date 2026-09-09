@@ -1863,14 +1863,27 @@ export function getPricingGapOverflowCount(): number {
 }
 
 /**
- * Estimate the total cost in USD for a request based on token counts
- * @returns Cost in dollars (NOT per million)
+ * Estimate the total cost in USD for a request based on token counts.
+ *
+ * NULL means UNPRICED, and it is a different answer from `0`. A lookup failure
+ * — an unknown model id, or a catalogue entry missing a rate the request
+ * actually used — produces null; a request that consumed no metered tokens
+ * produces 0, because that zero is a measurement rather than a gap. Returning 0
+ * for both is what published "we could not price this" as "this was free", and
+ * that zero travelled through the collector and the recorder onto an
+ * unauthenticated wire where nothing could tell the two apart.
+ *
+ * The pricing-gap telemetry is unchanged and still records every failure — it is
+ * why an unpriced model is visible at all.
+ *
+ * @returns Cost in dollars (NOT per million), or null when it could not be
+ *   priced.
  */
 export async function estimateCostUSD(
 	modelId: string,
 	tokens: TokenBreakdown,
 	context?: PricingEstimateContext,
-): Promise<number> {
+): Promise<number | null> {
 	const catalogue = PriceCatalogue.get();
 
 	try {
@@ -1973,6 +1986,8 @@ export async function estimateCostUSD(
 					PRICING_GAP_SUPPRESSED_PROVIDERS.has(provider)
 				),
 		});
-		return 0;
+		// The lookup failed, so there is no cost to report — not a cost of zero.
+		// The miss above is the record of WHY; this is the honest absence.
+		return null;
 	}
 }

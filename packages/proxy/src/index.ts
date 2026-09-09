@@ -147,6 +147,8 @@ export {
 	type DefaultCandidateEvaluation,
 	earliestExclusionRecoveryMs,
 	evaluateDefaultCandidates,
+	gateHoldsForAccounts,
+	gateRecoveryByAccountMs,
 	type PeekExclusion,
 	type PeekExclusionReason,
 	peekDefaultCandidateIds,

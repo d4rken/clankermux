@@ -12,8 +12,9 @@ import { Logger } from "@clankermux/logger";
 import { USAGE_CACHE_TTL_MS, usageCache } from "@clankermux/providers";
 import {
 	DEFAULT_ROUTING_CONTEXT,
-	earliestExclusionRecoveryMs,
 	evaluateDefaultCandidates,
+	gateHoldsForAccounts,
+	gateRecoveryByAccountMs,
 	getProviderOverloadSnapshot,
 } from "@clankermux/proxy";
 import type {
@@ -24,7 +25,12 @@ import type {
 	UsagePrediction,
 } from "@clankermux/types";
 import { resolveRateLimitPresentation } from "../handlers/accounts";
+// The public availability vocabulary is decided in ONE place, and the pool
+// rollup asks it the same question the wire does. Type-only in the other
+// direction, so this is not a runtime cycle.
+import { toPublicAvailabilityState } from "../handlers/public/dto";
 import { buildPredictionsForAccounts } from "./build-account-predictions-for";
+import { createPublicReadMemo } from "./public-read-memo";
 
 const log = new Logger("PublicSnapshot");
 
@@ -238,6 +244,29 @@ export interface PublicWindowAggregate {
 	 * over.
 	 */
 	earliestResetsAtMs: number | null;
+	/**
+	 * When the OLDEST contributing reading was observed, or null when no
+	 * contributor states an observation time.
+	 *
+	 * An aggregate is only as current as its worst input, and the readings behind
+	 * one can be twenty minutes apart. Without this the payload put an aged
+	 * percentage beside a freshly generated `generatedAt` and a status-only client
+	 * had nothing to tell current evidence from stale. Distinct from
+	 * `generatedAt`, which is when the PAYLOAD was built and says nothing about
+	 * when anything was measured.
+	 */
+	oldestObservedAtMs: number | null;
+	/**
+	 * Contributors whose reading carries NO observation time at all — a
+	 * reconstructed reading, seeded untimed precisely because it cannot honestly
+	 * say when it was observed.
+	 *
+	 * Counted rather than folded into the instant above: their percentages are in
+	 * the mean, so an age that silently spoke for them would be an age for
+	 * evidence of unknown vintage. Accounts that contributed NOTHING are already
+	 * covered by `unknownAccountCount` and are not counted here.
+	 */
+	unobservedContributingCount: number;
 	/**
 	 * The LOWEST utilization among the contributing accounts, and whose it is.
 	 *
@@ -470,6 +499,10 @@ function aggregateWindow(
 	const resets = contributing
 		.map((r) => r.resetsAtMs)
 		.filter((r): r is number => r !== null);
+	// The AGE of the evidence, over the same contributors the mean is taken over.
+	const observed = contributing
+		.map((r) => r.observedAtMs)
+		.filter((t): t is number => t !== null);
 	let leastUsed: (WindowReading & { utilizationPct: number }) | null = null;
 	for (const reading of contributing) {
 		if (
@@ -491,6 +524,8 @@ function aggregateWindow(
 		contributingAccountCount: contributing.length,
 		unknownAccountCount: inScopeCount - contributing.length,
 		earliestResetsAtMs: resets.length === 0 ? null : Math.min(...resets),
+		oldestObservedAtMs: observed.length === 0 ? null : Math.min(...observed),
+		unobservedContributingCount: contributing.length - observed.length,
 		leastUsedUtilizationPct: leastUsed?.utilizationPct ?? null,
 		leastUsedAccountId: leastUsed?.accountId ?? null,
 	};
@@ -501,11 +536,118 @@ interface WindowReading {
 	accountId: string;
 	utilizationPct: number | null;
 	resetsAtMs: number | null;
+	/**
+	 * When this reading was observed, or null when its source cannot say. Carried
+	 * through aggregation rather than dropped at the account boundary: the pooled
+	 * figure has no age of its own, only the age of its worst input.
+	 */
+	observedAtMs: number | null;
 }
 
 function maxOfPresent(values: Array<number | null>): number | null {
 	const present = values.filter((v): v is number => v !== null);
 	return present.length === 0 ? null : Math.max(...present);
+}
+
+/**
+ * The proxy's own cooldown lock on a row, while it is still holding. Null once
+ * it has passed, or when there never was one.
+ */
+function activeCooldownLockMs(
+	row: Pick<PublicAccountRow, "rate_limited_until"> | undefined,
+	now: number,
+): number | null {
+	const until = row?.rate_limited_until;
+	return until != null && Number(until) > now ? Number(until) : null;
+}
+
+/** Everything currently holding ONE account, as the pool rollup sees it. */
+interface AccountHolds {
+	/**
+	 * The account's resolved rate-limit cause, in the INTERNAL vocabulary. Read
+	 * through the SAME cause-to-state mapping the wire is built with, so whether
+	 * this account is held at all is decided once — see
+	 * {@link earliestPoolRecoveryMs}.
+	 */
+	cause: string;
+	/** An operator pause: a hold with no scheduled lift at all. */
+	paused: boolean;
+	/** The proxy's cooldown lock, while it holds. */
+	cooldownLockMs: number | null;
+	/**
+	 * The lift instant the CAUSE states — the resolved provider reset or spent
+	 * account-wide window — or null when it states none. Consulted ONLY when the
+	 * cause actually blocks: a soft status resolves this field too, and the
+	 * window it names is then a quota fact that binds nothing.
+	 */
+	causeResetMs: number | null;
+	/** When this account's routing exclusions all lift, or null when it has none. */
+	gateRecoveryMs: number | null;
+}
+
+/**
+ * The soonest instant the pool regains a routable account, or null when nothing
+ * blocked is waiting on a clock.
+ *
+ * MAXIMUM WITHIN an account, MINIMUM ACROSS accounts, and the order is the whole
+ * point. Every hold on one account is resolved first — the cooldown lock, the
+ * spent window, the routing gates — because an account is available only when
+ * the LAST of them lifts; then the pool takes the earliest of those per-account
+ * deadlines, because the pool is back as soon as any one account is. Collecting
+ * every hold into one flat list and taking its minimum is what let a cooldown
+ * ending in a minute speak for an account whose weekly quota does not reset for
+ * an hour, so `/status` promised a recovery that `/accounts` correctly put an
+ * hour later.
+ *
+ * WHETHER THE CAUSE HOLDS AT ALL is the DTO layer's decision, taken through the
+ * same mapping the wire is built with rather than restated here. `causeResetMs`
+ * is resolved for a healthy account too — a soft provider status still carries
+ * the stored window reset — so folding it in on the strength of some other gate
+ * being active is exactly how a healthy account with a reset tomorrow and a
+ * two-minute overload came to publish a recovery TOMORROW. That question was
+ * already answered once, by suppressing the lift instant beside `available`;
+ * asking it the same way is what keeps the pool's recovery and the account's
+ * availability from disagreeing.
+ *
+ * INDEFINITE HOLDS DROP THE ACCOUNT rather than being ignored. A pause has no
+ * scheduled lift, and neither does a spent window whose reset the provider did
+ * not state; an account carrying one has no stateable recovery, and taking the
+ * maximum of its OTHER holds would publish an instant at which it is still
+ * blocked — a routing gate lifting in a minute would otherwise speak for an
+ * exhaustion nobody can date. Dropped, it simply does not speak for the pool —
+ * the accounts that can state a deadline do.
+ *
+ * An account that nothing holds contributes nothing either: it is routable now,
+ * so there is nothing for the pool to be waiting on.
+ */
+export function earliestPoolRecoveryMs(
+	accounts: readonly AccountHolds[],
+): number | null {
+	let earliest: number | null = null;
+	for (const account of accounts) {
+		const state = toPublicAvailabilityState(account.cause, account.paused);
+
+		// Every hold on this account, paired with the instant it lifts — null
+		// where nothing states one.
+		const lifts: Array<number | null> = [];
+		// A pause enters as an indefinite hold rather than being skipped outright:
+		// no clock lifts it, so the cooldown a paused row happens to carry must
+		// not speak for the pool either.
+		if (state === "paused") lifts.push(null);
+		else if (state !== "available") lifts.push(account.causeResetMs);
+		if (account.cooldownLockMs !== null) lifts.push(account.cooldownLockMs);
+		if (account.gateRecoveryMs !== null) lifts.push(account.gateRecoveryMs);
+
+		// Nothing holds it: it is routable now, so the pool waits on nothing here.
+		if (lifts.length === 0) continue;
+		const stated = lifts.filter((lift): lift is number => lift !== null);
+		// Held, with at least one hold nobody can date. Indefinite, so it says
+		// nothing about when the pool comes back.
+		if (stated.length < lifts.length) continue;
+		const deadline = Math.max(...stated);
+		if (earliest === null || deadline < earliest) earliest = deadline;
+	}
+	return earliest;
 }
 
 /**
@@ -707,46 +849,44 @@ export function createPublicSnapshotReader(
 			return new Map();
 		});
 
-		// The routing prediction, over the SAME rows this response describes.
-		// Querying the accounts a second time would open a window in which the
-		// candidate lands on a row whose paused/rate-limited fields this very
-		// response reports as blocked. Only the fields `peekRanked` and the two
-		// gates read are mapped; the rest of `Account` is unused.
-		//
-		// ONE evaluation, three published facts: `pool.defaultRoutable` (its
-		// count), `routing.defaultCandidateAccountId` (its head) and the gate
-		// recoveries feeding `pool.nextAvailableAtMs` (its exclusions). Deriving
-		// any of them separately is how a pool reads "nothing routable, nothing
-		// scheduled" while an overload breaker is plainly counting down.
+		// The routing inputs, over the SAME rows this response describes. Querying
+		// the accounts a second time would open a window in which the candidate
+		// lands on a row whose paused/rate-limited fields this very response
+		// reports as blocked. Only the fields `peekRanked` and the two gates read
+		// are mapped; the rest of `Account` is unused.
+		const routingAccounts: Account[] = rows.map(
+			(row) =>
+				({
+					id: row.id,
+					// A null `provider` column means anthropic, everywhere: the domain
+					// conversion says so, and so does the account record this same
+					// response serves. Mapping it to `""` here instead would hide a
+					// legacy row from provider-wide overload and from provider-sensitive
+					// capacity ranking, so `pool.defaultRoutable` and
+					// `routing.defaultCandidateAccountId` would disagree with the routing
+					// they claim to predict.
+					provider: row.provider || "anthropic",
+					paused: row.paused === 1,
+					pause_reason: row.pause_reason ?? null,
+					rate_limited_until:
+						row.rate_limited_until != null
+							? Number(row.rate_limited_until)
+							: null,
+					rate_limit_reset:
+						row.rate_limit_reset != null ? Number(row.rate_limit_reset) : null,
+					session_start:
+						row.session_start != null ? Number(row.session_start) : null,
+					priority: Number(row.priority) || 0,
+					auto_fallback_enabled: row.auto_fallback_enabled === 1,
+				}) as Account,
+		);
+
+		// ONE evaluation, two published facts: `pool.defaultRoutable` (its count)
+		// and `routing.defaultCandidateAccountId` (its head). Deriving either
+		// separately would re-rank, and a pool that changed between two rankings
+		// would be published as a state it was never in.
 		const routingEvaluation = evaluateDefaultCandidates(
-			rows.map(
-				(row) =>
-					({
-						id: row.id,
-						// A null `provider` column means anthropic, everywhere: the
-						// domain conversion says so, and so does the account record this
-						// same response serves. Mapping it to `""` here instead would
-						// hide a legacy row from provider-wide overload and from
-						// provider-sensitive capacity ranking, so `pool.defaultRoutable`
-						// and `routing.defaultCandidateAccountId` would disagree with the
-						// routing they claim to predict.
-						provider: row.provider || "anthropic",
-						paused: row.paused === 1,
-						pause_reason: row.pause_reason ?? null,
-						rate_limited_until:
-							row.rate_limited_until != null
-								? Number(row.rate_limited_until)
-								: null,
-						rate_limit_reset:
-							row.rate_limit_reset != null
-								? Number(row.rate_limit_reset)
-								: null,
-						session_start:
-							row.session_start != null ? Number(row.session_start) : null,
-						priority: Number(row.priority) || 0,
-						auto_fallback_enabled: row.auto_fallback_enabled === 1,
-					}) as Account,
-			),
+			routingAccounts,
 			getStrategy?.() ?? null,
 			config,
 			now,
@@ -754,7 +894,18 @@ export function createPublicSnapshotReader(
 		const candidateIds = routingEvaluation.candidateIds;
 		const defaultCandidateAccountId = candidateIds[0] ?? null;
 
-		const accounts: PublicAccountSnapshot[] = rows.map((row) => {
+		// The gates the SAME evaluation applies, asked for EVERY account rather
+		// than read off its exclusions. The evaluation walks the strategy's
+		// ranking, which has already dropped every account that is cooling down,
+		// so its exclusions are silent about exactly the accounts that carry a
+		// second hold: one cooling down for a minute under a provider overload
+		// lasting three published a one-minute recovery. This query decides no
+		// routing eligibility — it only completes the hold picture below.
+		const gateRecoveryByAccount = gateRecoveryByAccountMs(
+			gateHoldsForAccounts(routingAccounts, config, now),
+		);
+
+		const accountViews = rows.map((row) => {
 			const provider = row.provider || "anthropic";
 			const metered = isMetered(provider);
 			const entry = readings.get(row.id) ?? null;
@@ -796,10 +947,7 @@ export function createPublicSnapshotReader(
 			// The proxy's OWN cooldown lock, while it is still holding. A gate in its
 			// own right: the presentation resolves the CAUSE, and the cause it picks
 			// may be counting down on a different clock entirely.
-			const cooldownLockMs =
-				row.rate_limited_until != null && Number(row.rate_limited_until) > now
-					? Number(row.rate_limited_until)
-					: null;
+			const cooldownLockMs = activeCooldownLockMs(row, now);
 
 			const windows = buildWindows(
 				provider,
@@ -814,7 +962,19 @@ export function createPublicSnapshotReader(
 			);
 			const credential = resolveCredentialState(row, now);
 
-			return {
+			// What holds THIS account, resolved beside the account itself so the
+			// rollup and the account record are two readings of one resolution. The
+			// cause and its stated lift travel separately: whether that instant
+			// binds anything is not this pass's decision.
+			const holds: AccountHolds = {
+				cause: presentation.cause,
+				paused: row.paused === 1,
+				cooldownLockMs,
+				causeResetMs: presentation.resetMs,
+				gateRecoveryMs: gateRecoveryByAccount.get(row.id) ?? null,
+			};
+
+			const snapshot: PublicAccountSnapshot = {
 				id: row.id,
 				name: row.name,
 				provider,
@@ -851,7 +1011,13 @@ export function createPublicSnapshotReader(
 				),
 				windows,
 			};
+
+			return { snapshot, holds };
 		});
+
+		const accounts: PublicAccountSnapshot[] = accountViews.map(
+			(view) => view.snapshot,
+		);
 
 		// The pool rollup. Built from the same fields `/health` uses, so a widget
 		// and a container health check cannot report different pools. `Account` is
@@ -867,37 +1033,20 @@ export function createPublicSnapshotReader(
 			),
 		);
 		let usageExhausted = 0;
-		const recoveryTimes: number[] = [];
 		accounts.forEach((account, index) => {
 			if (!availability[index]) return;
 			if (account.cause === "usage_exhausted" && !account.paused) {
 				usageExhausted++;
-				if (account.availableAtMs !== null) {
-					recoveryTimes.push(account.availableAtMs);
-				}
 			}
 		});
-		const earliestLock = rows.reduce<number | null>((min, row) => {
-			if (row.paused === 1) return min;
-			const until = row.rate_limited_until;
-			if (!until || until < now) return min;
-			return min === null ? Number(until) : Math.min(min, Number(until));
-		}, null);
-		if (earliestLock !== null) recoveryTimes.push(earliestLock);
-		// The gates the candidate evaluation applied, from that SAME evaluation.
-		// A pool emptied only by the provider-wide overload breaker or by
-		// proactive usage throttling is waiting on a clock exactly as one emptied
-		// by cooldowns is, and omitting these instants published it as
-		// `unhealthy` when it was recoverable.
-		//
-		// ONE instant, not one per gate: an account held by both gates recovers
-		// when its LATER deadline passes, so pushing each raw entry into a list
-		// this line then takes the minimum of would publish the earlier of two
-		// holds on the same account as the moment the pool comes back.
-		const gateRecoveryMs = earliestExclusionRecoveryMs(
-			routingEvaluation.exclusions,
+		// Every hold on every account, resolved in the pass above. A pool emptied
+		// only by the provider-wide overload breaker or by proactive usage
+		// throttling is waiting on a clock exactly as one emptied by cooldowns is,
+		// and omitting those instants published it as `unhealthy` when it was
+		// recoverable.
+		const nextAvailableAtMs = earliestPoolRecoveryMs(
+			accountViews.map((view) => view.holds),
 		);
-		if (gateRecoveryMs !== null) recoveryTimes.push(gateRecoveryMs);
 
 		const pool: PublicPoolSnapshot = {
 			configured: rows.length,
@@ -910,8 +1059,7 @@ export function createPublicSnapshotReader(
 					Number(row.rate_limited_until) >= now,
 			).length,
 			usageExhausted,
-			nextAvailableAtMs:
-				recoveryTimes.length > 0 ? Math.min(...recoveryTimes) : null,
+			nextAvailableAtMs,
 		};
 
 		/**
@@ -929,6 +1077,7 @@ export function createPublicSnapshotReader(
 				accountId: account.id,
 				utilizationPct: window?.utilizationPct ?? null,
 				resetsAtMs: window?.resetsAtMs ?? null,
+				observedAtMs: window?.observedAtMs ?? null,
 			};
 		};
 
@@ -1008,3 +1157,48 @@ export function createPublicSnapshotReader(
 export type PublicSnapshotReader = ReturnType<
 	typeof createPublicSnapshotReader
 >;
+
+/**
+ * How long one built snapshot answers `/public/v1/status` and
+ * `/public/v1/accounts` before it is rebuilt.
+ *
+ * SECONDS, not the minute the projections get, because these two are the panel
+ * poll: a desk panel asks every few seconds and the answer is meant to track
+ * the pool that closely. What the memo removes is not the freshness, it is the
+ * cost of a POLL LOOP — the read queries every account, then loads up to 24 h of
+ * usage snapshots and runs a regression per account, and unmemoized every
+ * anonymous GET paid for all of it in the process that is also serving proxy
+ * traffic.
+ */
+export const PUBLIC_SNAPSHOT_TTL_MS = 5_000;
+
+export interface PublicSnapshotMemoOptions {
+	/** Clock seam. Defaults to `Date.now`; tests pin it to a fixed instant. */
+	now?: () => number;
+	/** Memo lifetime. Defaults to {@link PUBLIC_SNAPSHOT_TTL_MS}. */
+	ttlMs?: number;
+	/** Negative-cache lifetime. */
+	failureTtlMs?: number;
+}
+
+/**
+ * The memoized reader the two public pool routes share.
+ *
+ * A WRAPPER rather than a memo baked into {@link createPublicSnapshotReader},
+ * because that reader takes an explicit `now` and is expected to honour it —
+ * every caller that pins the clock (the tests, and anything modelling a stated
+ * instant) must keep getting a snapshot built AT that instant rather than
+ * whatever the memo happens to hold. Here the memo owns the clock: it passes
+ * its own reading in, and `nowMs` on the served snapshot is therefore the
+ * instant the data describes, on a memo hit as much as on a cold read.
+ */
+export function createMemoizedPublicSnapshotReader(
+	read: PublicSnapshotReader,
+	options: PublicSnapshotMemoOptions = {},
+): () => Promise<PublicSnapshot> {
+	return createPublicReadMemo((nowMs) => read(nowMs), {
+		computedAtMs: (snapshot) => snapshot.nowMs,
+		ttlMs: PUBLIC_SNAPSHOT_TTL_MS,
+		...options,
+	});
+}

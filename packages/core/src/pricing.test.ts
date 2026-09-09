@@ -51,7 +51,7 @@ afterAll(() => {
 });
 
 describe("estimateCostUSD", () => {
-	it("returns 0 for an unknown model and records nothing without opt-in", async () => {
+	it("returns null for an unknown model and records nothing without opt-in", async () => {
 		__pricingTestHooks.reset();
 		const tokenBreakdown: TokenBreakdown = {
 			inputTokens: 1000,
@@ -63,23 +63,61 @@ describe("estimateCostUSD", () => {
 			tokenBreakdown,
 		);
 
-		expect(cost).toBe(0);
+		// NULL, never 0: a request we could not price is not a free request, and
+		// the two are indistinguishable once the failure is published as a number.
+		expect(cost).toBeNull();
 		// Reporting is opt-in: a bare call still de-duplicates the log warning
 		// internally, but surfaces no gap.
 		expect(getPricingGaps()).toEqual([]);
 	});
 
+	it("returns 0, not null, for a request with no metered tokens", async () => {
+		// The one case where zero is a MEASUREMENT: nothing was charged because
+		// nothing was consumed. An unknown model on an empty request is not a
+		// pricing gap either, so nothing is looked up and nothing is recorded.
+		// Counted as a DELTA rather than reset: resetting drops the loaded
+		// catalogue, which is shared state the tests below still need.
+		const gapsBefore = getPricingGaps().length;
+
+		const cost = await estimateCostUSD("this-model-does-not-exist", {
+			inputTokens: 0,
+			outputTokens: 0,
+		});
+
+		expect(cost).toBe(0);
+		expect(getPricingGaps()).toHaveLength(gapsBefore);
+	});
+
 	it("computes cost for a known bundled Anthropic model", async () => {
-		// claude-haiku-4-5: input $1/M, output $5/M
+		// The DATED slug, which is the id the bundled table carries. The undated
+		// `claude-haiku-4-5` is a different string and the resolver does not strip
+		// a date to reach it, so with the network disabled and the disk cache
+		// empty (see the top of this file) it prices nothing — which the old
+		// `toBeGreaterThanOrEqual(0)` could not tell apart from a real answer,
+		// because an unpriced model used to return 0.
 		const tokenBreakdown: TokenBreakdown = {
 			inputTokens: 1_000_000,
 			outputTokens: 1_000_000,
 		};
 
-		const cost = await estimateCostUSD("claude-haiku-4-5", tokenBreakdown);
+		const cost = await estimateCostUSD(
+			"claude-haiku-4-5-20251001",
+			tokenBreakdown,
+		);
 
-		// 1M input * $1/M + 1M output * $5/M = $6 (only if remote/bundled has it)
-		expect(cost).toBeGreaterThanOrEqual(0);
+		// 1M input * $1/M + 1M output * $5/M = $6.
+		expect(cost).toBeCloseTo(6, 6);
+	});
+
+	it("prices nothing for a slug the bundled table does not carry", async () => {
+		// The other half of the same fact: offline, an undated alias is simply not
+		// in the table, and the honest answer is absence.
+		const cost = await estimateCostUSD("claude-haiku-4-5", {
+			inputTokens: 1_000_000,
+			outputTokens: 1_000_000,
+		});
+
+		expect(cost).toBeNull();
 	});
 });
 

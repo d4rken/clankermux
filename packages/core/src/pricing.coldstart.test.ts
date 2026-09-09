@@ -103,7 +103,7 @@ describe("cold-start catalogue race", () => {
 			{ provider: "codex", reportGaps: true },
 		);
 
-		expect(cost).toBe(0);
+		expect(cost).toBeNull();
 		const gaps = getPricingGaps();
 		expect(gaps).toHaveLength(1);
 		expect(gaps[0].modelId).toBe("gpt-does-not-exist");
@@ -371,7 +371,7 @@ describe("dated model snapshots", () => {
 			{ provider: "codex", reportGaps: true },
 		);
 
-		expect(cost).toBe(0);
+		expect(cost).toBeNull();
 		const gaps = getPricingGaps();
 		expect(gaps).toHaveLength(1);
 		expect(gaps[0].reason).toBe("cost_missing");
@@ -473,7 +473,7 @@ describe("dated model snapshots", () => {
 			{ provider: "codex", reportGaps: true },
 		);
 
-		expect(cost).toBe(0);
+		expect(cost).toBeNull();
 		expect(getPricingGaps()).toHaveLength(1);
 		expect(getPricingGaps()[0].reason).toBe("cost_missing");
 	});
@@ -555,7 +555,7 @@ describe("dated model snapshots", () => {
 			{ provider: "codex", reportGaps: true },
 		);
 
-		expect(cost).toBe(0);
+		expect(cost).toBeNull();
 		expect(getPricingGaps()).toHaveLength(1);
 	});
 
@@ -603,7 +603,7 @@ describe("dated model snapshots", () => {
 			{ provider: "codex", reportGaps: true },
 		);
 
-		expect(cost).toBe(0);
+		expect(cost).toBeNull();
 		expect(getPricingGaps()).toHaveLength(1);
 	});
 
@@ -618,7 +618,7 @@ describe("dated model snapshots", () => {
 			{ provider: "codex", reportGaps: true },
 		);
 
-		expect(cost).toBe(0);
+		expect(cost).toBeNull();
 		expect(getPricingGaps()).toHaveLength(1);
 	});
 });

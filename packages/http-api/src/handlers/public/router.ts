@@ -4,7 +4,10 @@ import { jsonResponse } from "@clankermux/http-common";
 import type { LoadBalancingStrategy } from "@clankermux/types";
 import { createPublicPacingReader } from "../../services/public-pacing";
 import { createPublicRunwayReader } from "../../services/public-runway";
-import { createPublicSnapshotReader } from "../../services/public-snapshot";
+import {
+	createMemoizedPublicSnapshotReader,
+	createPublicSnapshotReader,
+} from "../../services/public-snapshot";
 import { createPublicStopsReader } from "../../services/public-stops";
 import { createPublicWorkloadHeadroomReader } from "../../services/public-workload-headroom";
 import { createPublicAccountsHandler } from "./accounts";
@@ -48,13 +51,21 @@ export class PublicRouter {
 
 	constructor({ dbOps, config, getStrategy }: PublicRouterDeps) {
 		// One snapshot reader shared by both pool routes, so the two can never
-		// disagree about the pool they are describing.
-		const readSnapshot = createPublicSnapshotReader(dbOps, config, getStrategy);
+		// disagree about the pool they are describing — and MEMOIZED, so a poll
+		// loop on either of them cannot decide how often the pool is rebuilt. The
+		// read queries every account and then runs a usage regression per account
+		// over up to 24 h of stored snapshots; the TTL is seconds rather than the
+		// minute the projections get, because this pair is what the desk panel
+		// polls and the snapshot states the instant it describes.
+		const readSnapshot = createMemoizedPublicSnapshotReader(
+			createPublicSnapshotReader(dbOps, config, getStrategy),
+		);
 		const statusHandler = createPublicStatusHandler(readSnapshot);
 		const accountsHandler = createPublicAccountsHandler(readSnapshot);
 		// The runway has its own reader: it is a different, much more expensive
 		// computation, and folding it into the shared snapshot would make every
-		// `status` poll pay for a scan nobody asked for.
+		// `status` poll pay for a scan nobody asked for. Memoized inside the
+		// reader on the minute-scale TTL the projections share.
 		const runwayHandler = createPublicRunwayHandler(
 			createPublicRunwayReader(dbOps),
 		);

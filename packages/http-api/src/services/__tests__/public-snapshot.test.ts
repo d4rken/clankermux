@@ -25,6 +25,7 @@ import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import type { Config } from "@clankermux/config";
 import type { DatabaseOperations } from "@clankermux/database";
 import { BunSqlAdapter, ensureSchema } from "@clankermux/database";
+import { LeastUsedStrategy } from "@clankermux/load-balancer";
 import { USAGE_CACHE_TTL_MS, usageCache } from "@clankermux/providers";
 import {
 	applyProviderOverloadCooldown,
@@ -39,6 +40,7 @@ import { toPublicAccountsDto } from "../../handlers/public/dto";
 import {
 	clampPct,
 	createPublicSnapshotReader,
+	earliestPoolRecoveryMs,
 	resolveCredentialState,
 } from "../public-snapshot";
 
@@ -702,6 +704,67 @@ describe("pooled aggregates disclose what they are", () => {
 		).toBe(true);
 	});
 
+	it("dates the aggregate by its OLDEST contributing reading", async () => {
+		// The mean is only as current as the readings behind it. Without this the
+		// payload put a 20-minute-old percentage beside a `generatedAt` from a
+		// second ago, and a status-only widget had no way to tell current evidence
+		// from stale.
+		insertAccount({ id: "a", name: "a" });
+		insertAccount({ id: "b", name: "b" });
+		usageCache.setWithAgeForTests("a", anthropicUsage(80, 20), 60_000);
+		usageCache.setWithAgeForTests("b", anthropicUsage(40, 10), 20 * 60_000);
+
+		const snapshot = await read();
+		const observed = snapshot.accounts.map((a) => a.usageObservedAtMs);
+		// The older of the two accounts' own observation instants, exactly — a
+		// figure derived from the same readings rather than a second clock.
+		expect(snapshot.usage.fiveHour.oldestObservedAtMs).toBe(
+			Math.min(...observed.filter((t): t is number => t !== null)),
+		);
+		expect(snapshot.usage.fiveHour.unobservedContributingCount).toBe(0);
+	});
+
+	it("counts contributors whose reading has no observation time at all", async () => {
+		// A reconstructed reading is seeded untimed on purpose, so it can say when
+		// it was observed only by lying. It still contributes its percentage; the
+		// count is what stops the aggregate's age from speaking for it.
+		insertAccount({ id: "a", name: "a" });
+		insertAccount({ id: "b", name: "b" });
+		usageCache.setWithAgeForTests("a", anthropicUsage(80, 20), 60_000);
+		usageCache.setUntimed("b", anthropicUsage(40, 10));
+
+		const snapshot = await read();
+		expect(snapshot.usage.fiveHour.contributingAccountCount).toBe(2);
+		expect(snapshot.usage.fiveHour.unobservedContributingCount).toBe(1);
+		// …and the stated age belongs to the one reading that has one.
+		expect(snapshot.usage.fiveHour.oldestObservedAtMs).toBe(
+			snapshot.accounts.find((a) => a.id === "a")?.usageObservedAtMs ?? null,
+		);
+	});
+
+	it("states no age when nothing contributing carries one", async () => {
+		insertAccount({ id: "a", name: "a" });
+		usageCache.setUntimed("a", anthropicUsage(80, 20));
+
+		const snapshot = await read();
+		expect(snapshot.usage.fiveHour.oldestObservedAtMs).toBeNull();
+		expect(snapshot.usage.fiveHour.unobservedContributingCount).toBe(1);
+	});
+
+	it("counts only CONTRIBUTORS as unobserved, not accounts with no reading", async () => {
+		// An account that reported nothing is already counted by
+		// `unknownAccountCount`; counting it again here would describe the age of
+		// evidence that does not exist.
+		insertAccount({ id: "a", name: "a" });
+		insertAccount({ id: "b", name: "b" });
+		usageCache.setWithAgeForTests("a", anthropicUsage(80, 20), 60_000);
+
+		const snapshot = await read();
+		expect(snapshot.usage.fiveHour.contributingAccountCount).toBe(1);
+		expect(snapshot.usage.fiveHour.unknownAccountCount).toBe(1);
+		expect(snapshot.usage.fiveHour.unobservedContributingCount).toBe(0);
+	});
+
 	it("takes the EARLIEST reset, never a mean of reset instants", async () => {
 		// The mean of two reset times is an instant at which nothing happens.
 		insertAccount({ id: "a", name: "a" });
@@ -940,6 +1003,159 @@ describe("pool rollup", () => {
 		expect((await read()).pool.nextAvailableAtMs).toBeNull();
 	});
 
+	it("waits for the LAST hold on an account, not the first", async () => {
+		// The deployed defect: a cooldown lifting in a minute beside a weekly
+		// window that does not reset for an hour. The exhaustion loop skipped the
+		// account (its cooldown made it unavailable) while the separate lock scan
+		// still contributed the one-minute deadline, so `/status` promised a
+		// recovery in a minute that `/accounts` correctly put an hour out. An
+		// account is available only when EVERY hold on it has lifted.
+		insertAccount({ rate_limited_until: NOW + 60_000 });
+		usageCache.set("acct-1", {
+			five_hour: {
+				utilization: 10,
+				resets_at: new Date(NOW + 30 * 60_000).toISOString(),
+			},
+			seven_day: {
+				utilization: 100,
+				resets_at: new Date(NOW + 3_600_000).toISOString(),
+			},
+		} as AnthropicUsageData);
+
+		const snapshot = await read();
+		expect(snapshot.accounts[0]?.cause).toBe("usage_exhausted");
+		expect(snapshot.accounts[0]?.availableAtMs).toBe(NOW + 3_600_000);
+		// The pool cannot recover before its only account does.
+		expect(snapshot.pool.nextAvailableAtMs).toBe(NOW + 3_600_000);
+	});
+
+	it("takes the EARLIEST of those per-account deadlines across the pool", async () => {
+		// Maximum within an account, minimum across them: the pool is back as soon
+		// as any one account is.
+		insertAccount({
+			id: "late",
+			name: "late",
+			rate_limited_until: NOW + 60_000,
+		});
+		insertAccount({
+			id: "early",
+			name: "early",
+			rate_limited_until: NOW + 600_000,
+		});
+		usageCache.set("late", {
+			seven_day: {
+				utilization: 100,
+				resets_at: new Date(NOW + 3_600_000).toISOString(),
+			},
+		} as AnthropicUsageData);
+		usageCache.set("early", anthropicUsage(10, 10));
+
+		expect((await read()).pool.nextAvailableAtMs).toBe(NOW + 600_000);
+	});
+
+	it("promises nothing for a spent window with no stated reset", async () => {
+		// Core refuses to call an account exhausted on a window whose reset it
+		// cannot read — ambiguous evidence never sidelines an account — so the
+		// account reads as OK and the pool is waiting on nothing. Either way no
+		// recovery instant is invented for it.
+		insertAccount();
+		usageCache.set("acct-1", {
+			seven_day: { utilization: 100, resets_at: null },
+			seven_day_oauth_apps: { utilization: 100, resets_at: null },
+		} as unknown as AnthropicUsageData);
+
+		const snapshot = await read();
+		expect(snapshot.accounts[0]?.availableAtMs).toBeNull();
+		expect(snapshot.pool.nextAvailableAtMs).toBeNull();
+	});
+
+	it("promises nothing for a pause, whatever else the row carries", async () => {
+		// An operator pause has no scheduled lift, so the account contributes no
+		// deadline at all — not the stored cooldown it happens to still carry.
+		insertAccount({
+			paused: 1,
+			pause_reason: "manual",
+			rate_limited_until: NOW + 60_000,
+		});
+		expect((await read()).pool.nextAvailableAtMs).toBeNull();
+	});
+
+	it("stays silent for a healthy account carrying a stored window reset", async () => {
+		// A soft provider status resolves an instant that is a QUOTA FACT, not a
+		// block: the account is routable right now, so there is nothing for the
+		// pool to be waiting on.
+		insertAccount({
+			rate_limit_status: "allowed",
+			rate_limit_reset: NOW + 86_400_000,
+		});
+		usageCache.set("acct-1", anthropicUsage(10, 20));
+
+		const snapshot = await read();
+		expect(snapshot.accounts[0]?.availableAtMs).toBe(NOW + 86_400_000);
+		expect(snapshot.pool.defaultRoutable).toBe(1);
+		expect(snapshot.pool.nextAvailableAtMs).toBeNull();
+	});
+
+	it("leaves a healthy account's stored reset out of the pool's recovery", async () => {
+		// The regression: the account is fine — a soft provider status beside a
+		// window that resets tomorrow — and the ONLY thing holding it is a
+		// two-minute provider overload. Folding its own instant in because
+		// something else was holding it published `/status` as recovering
+		// tomorrow while `defaultRoutable` was zero, which any widget renders as a
+		// day-long outage.
+		//
+		// Real-clock based: the overload breaker stamps its deadline from
+		// `Date.now()`, so the whole case is anchored to the same clock.
+		const base = Date.now();
+		insertAccount({
+			rate_limit_status: "allowed",
+			rate_limit_reset: base + 86_400_000,
+			expires_at: base + 3_600_000,
+		});
+		usageCache.set("acct-1", {
+			five_hour: {
+				utilization: 10,
+				resets_at: new Date(base + 3_600_000).toISOString(),
+			},
+			seven_day: {
+				utilization: 20,
+				resets_at: new Date(base + 5 * 86_400_000).toISOString(),
+			},
+		} as AnthropicUsageData);
+		const until = applyProviderOverloadCooldown("anthropic", base + 120_000);
+
+		const snapshot = await read(fakeStrategy(), fakeConfig, base);
+
+		expect(snapshot.accounts[0]?.cause).toBe("allowed");
+		// The account still publishes its own quota instant; what changes is that
+		// the pool does not mistake it for a block.
+		expect(snapshot.accounts[0]?.availableAtMs).toBe(base + 86_400_000);
+		expect(snapshot.pool.defaultRoutable).toBe(0);
+		expect(snapshot.pool.nextAvailableAtMs).toBe(until);
+	});
+
+	it("waits for a COOLING account's other gate, which no ranking would show", async () => {
+		// The real `LeastUsedStrategy` drops an account that is cooling down, so
+		// the candidate evaluation never evaluates its gates and its exclusions
+		// cannot mention it. Reading the gates off that evaluation left the pool
+		// promising recovery in one minute for an account the provider-wide
+		// breaker holds for three. A stub that ranked cooling accounts would not
+		// reproduce it, so this uses the strategy the proxy actually runs.
+		const base = Date.now();
+		insertAccount({
+			rate_limited_until: base + 60_000,
+			expires_at: base + 3_600_000,
+		});
+		const until = applyProviderOverloadCooldown("anthropic", base + 180_000);
+
+		const snapshot = await read(new LeastUsedStrategy(), fakeConfig, base);
+
+		expect(snapshot.accounts[0]?.cause).toBe("rate_limited");
+		expect(snapshot.accounts[0]?.availableAtMs).toBe(base + 60_000);
+		expect(snapshot.pool.defaultRoutable).toBe(0);
+		expect(snapshot.pool.nextAvailableAtMs).toBe(until);
+	});
+
 	it("reports the breaker's deadline when only a provider overload emptied the pool", async () => {
 		// `defaultRoutable: 0` beside a null recovery is what a client renders as
 		// `unhealthy`. An overloaded provider has a known deadline, so the honest
@@ -1073,5 +1289,168 @@ describe("the read model carries no API key data", () => {
 		const wire = JSON.stringify(await read());
 		expect(wire).not.toContain("at-secret");
 		expect(wire).not.toContain("rt-secret");
+	});
+});
+
+/**
+ * The pool's recovery instant, over hold sets rather than a database.
+ *
+ * `nextAvailableAtMs` is read together with `defaultRoutable`: an empty pool
+ * with an instant renders as `degraded`, and one without renders as
+ * `unhealthy`. The rule the reader above exercises end to end is pinned here on
+ * its own, including the cases a real account cannot easily be manoeuvred into.
+ */
+describe("earliestPoolRecoveryMs", () => {
+	function holds(
+		over: Partial<Parameters<typeof earliestPoolRecoveryMs>[0][number]> = {},
+	) {
+		return {
+			cause: "ok",
+			paused: false,
+			cooldownLockMs: null,
+			causeResetMs: null,
+			gateRecoveryMs: null,
+			...over,
+		};
+	}
+
+	it("states nothing for an empty pool", () => {
+		expect(earliestPoolRecoveryMs([])).toBeNull();
+	});
+
+	it("ignores an account nothing is holding", () => {
+		// A non-limiting provider status still resolves a stored window reset. The
+		// account is routable NOW, so that instant is a quota fact and not a
+		// recovery the pool is waiting for.
+		expect(
+			earliestPoolRecoveryMs([
+				holds({ cause: "allowed", causeResetMs: 1_700_000_000_000 }),
+			]),
+		).toBeNull();
+	});
+
+	it("leaves a NON-BLOCKING window reset out of a gated account's recovery", () => {
+		// The regression this rule exists for: a healthy account carrying a reset
+		// a day out, held for two minutes by the provider-wide overload breaker.
+		// Reaching for the account's own instant because SOMETHING is holding it
+		// published the pool as recovering tomorrow — the reset binds nothing,
+		// and the only hold in force lifts in two minutes.
+		expect(
+			earliestPoolRecoveryMs([
+				holds({
+					cause: "allowed",
+					causeResetMs: 1_700_086_400_000,
+					gateRecoveryMs: 1_700_000_120_000,
+				}),
+			]),
+		).toBe(1_700_000_120_000);
+	});
+
+	it("keeps the reset when the cause DOES block", () => {
+		// The mirror image, and why the cause is read rather than ignored: a spent
+		// window resetting tomorrow outlasts the two-minute gate, and the account
+		// is not back until it turns over.
+		expect(
+			earliestPoolRecoveryMs([
+				holds({
+					cause: "usage_exhausted",
+					causeResetMs: 1_700_086_400_000,
+					gateRecoveryMs: 1_700_000_120_000,
+				}),
+			]),
+		).toBe(1_700_086_400_000);
+	});
+
+	it("takes the LATEST hold within one account", () => {
+		expect(
+			earliestPoolRecoveryMs([
+				holds({
+					cause: "usage_exhausted",
+					cooldownLockMs: 1_000,
+					causeResetMs: 5_000,
+					gateRecoveryMs: 3_000,
+				}),
+			]),
+		).toBe(5_000);
+	});
+
+	it("takes a routing gate that outlasts the account's own holds", () => {
+		expect(
+			earliestPoolRecoveryMs([
+				holds({
+					cause: "rate_limited",
+					cooldownLockMs: 1_000,
+					causeResetMs: 1_000,
+					gateRecoveryMs: 9_000,
+				}),
+			]),
+		).toBe(9_000);
+	});
+
+	it("takes the EARLIEST across accounts once each is resolved", () => {
+		expect(
+			earliestPoolRecoveryMs([
+				holds({
+					cause: "rate_limited",
+					cooldownLockMs: 8_000,
+					causeResetMs: 8_000,
+				}),
+				holds({
+					cause: "rate_limited",
+					cooldownLockMs: 2_000,
+					causeResetMs: 2_000,
+				}),
+			]),
+		).toBe(2_000);
+	});
+
+	it("drops a paused account entirely, cooldown or no cooldown", () => {
+		// An operator pause has no scheduled lift, so the stored cooldown the row
+		// happens to carry says nothing about when this account comes back.
+		expect(
+			earliestPoolRecoveryMs([
+				holds({
+					cause: "rate_limited",
+					paused: true,
+					cooldownLockMs: 1_000,
+					causeResetMs: 1_000,
+				}),
+			]),
+		).toBeNull();
+	});
+
+	it("drops an account held with no scheduled lift rather than treating it as zero", () => {
+		// Held (its window is spent) but with nothing stating when that lifts. The
+		// pool learns nothing from it; the honest answer is that this account
+		// contributes no deadline, not that it recovers at once.
+		expect(
+			earliestPoolRecoveryMs([holds({ cause: "usage_exhausted" })]),
+		).toBeNull();
+	});
+
+	it("keeps an undateable hold indefinite even beside a timed one", () => {
+		// A spent window whose reset nobody reported, plus a routing gate lifting
+		// in three seconds. The gate is not what is holding this account back, so
+		// letting it answer for the account would publish a recovery at a moment
+		// the exhaustion is still in force — the same rule a pause already had.
+		expect(
+			earliestPoolRecoveryMs([
+				holds({ cause: "usage_exhausted", gateRecoveryMs: 3_000 }),
+			]),
+		).toBeNull();
+	});
+
+	it("still answers from the accounts that CAN state a deadline", () => {
+		expect(
+			earliestPoolRecoveryMs([
+				holds({ cause: "usage_exhausted" }),
+				holds({ paused: true }),
+				holds({
+					cause: "rate_limited",
+					cooldownLockMs: 4_000,
+					causeResetMs: 4_000,
+				}),
+			]),
+		).toBe(4_000);
 	});
 });

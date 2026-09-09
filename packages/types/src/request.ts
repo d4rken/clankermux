@@ -187,6 +187,17 @@ export interface RequestRow {
 	fallback_from_model: string | null;
 }
 
+/**
+ * How a token total was arrived at.
+ *
+ * A CLOSED pair, and the distinction is not cosmetic: the collector falls back
+ * to `ceil(generatedChars / 4)` whenever a provider reports no output count or
+ * a stream ends uncleanly, which happens on ordinary interrupted responses. The
+ * resulting total is a reasonable estimate and an unreasonable measurement, and
+ * without this it is published as the latter.
+ */
+export type TokenCountBasis = "provider" | "estimated";
+
 // Domain model
 export interface Request {
 	id: string;
@@ -255,10 +266,29 @@ export interface RequestResponse {
 	promptTokens?: number;
 	completionTokens?: number;
 	totalTokens?: number;
+	/**
+	 * Where `totalTokens` came from: `provider` when the response reported its own
+	 * output count, `estimated` when the collector substituted
+	 * `ceil(generatedChars / 4)` — output usage missing, or a stream that did not
+	 * end cleanly. Absent when there is no total, or for a summary whose
+	 * provenance was never recorded (a row read back from the database).
+	 *
+	 * Travels with the number it qualifies rather than being inferred downstream:
+	 * an interrupted response is routine, and its total is otherwise
+	 * indistinguishable from a measured one.
+	 */
+	totalTokensBasis?: TokenCountBasis;
 	inputTokens?: number;
 	cacheReadInputTokens?: number;
 	cacheCreationInputTokens?: number;
 	outputTokens?: number;
+	/**
+	 * Catalogue-based ESTIMATE in USD, absent when the model could not be priced.
+	 *
+	 * Absence is a distinct fact from zero and is preserved as such all the way to
+	 * the wire: a request whose model is missing from the pricing catalogue has no
+	 * cost here, while a request that consumed no metered tokens has 0.
+	 */
 	costUsd?: number;
 	tokensPerSecond?: number;
 	// True when tokensPerSecond is the total-duration fallback (rendered with a

@@ -85,19 +85,43 @@ describe("public workload-headroom reader memo", () => {
 
 	it("does not pin a failed read for every later caller", async () => {
 		let scans = 0;
+		let clock = NOW;
 		const read = createPublicWorkloadHeadroomReaderFromScan(
 			async () => {
 				scans++;
 				if (scans === 1) throw new Error("scan failed");
 				return snapshot(NOW);
 			},
-			{ now: () => NOW, ttlMs: 60_000 },
+			{ now: () => clock, ttlMs: 60_000, failureTtlMs: 5_000 },
 		);
 
 		await expect(read()).rejects.toThrow("scan failed");
-		// `inFlight` is cleared in a `finally`, so the rejected promise is not left
-		// behind to be handed to everyone who asks next.
+		// The failure is remembered for the negative TTL and no longer: the
+		// rejected promise is not left behind to be handed to everyone who asks
+		// next.
+		clock = NOW + 5_000;
 		await expect(read()).resolves.toEqual(snapshot(NOW));
 		expect(scans).toBe(2);
+	});
+
+	it("re-runs no pace probe while a failure is still backed off", async () => {
+		// Each row of this scan runs up to 50 pool rebuilds. Retrying that for
+		// every anonymous poll while the read is failing is the load the memo
+		// exists to cap.
+		let scans = 0;
+		let clock = NOW;
+		const read = createPublicWorkloadHeadroomReaderFromScan(
+			async () => {
+				scans++;
+				throw new Error("scan failed");
+			},
+			{ now: () => clock, ttlMs: 60_000, failureTtlMs: 5_000 },
+		);
+
+		await expect(read()).rejects.toThrow("scan failed");
+		clock = NOW + 4_999;
+		await expect(read()).rejects.toThrow("scan failed");
+
+		expect(scans).toBe(1);
 	});
 });
