@@ -183,14 +183,30 @@ export function mapWorkingDirToProject(
 
 function extractSystemPrompt(body: RequestJsonBody | null): string | null {
 	if (!body) return null;
-	const system = body.system;
-
-	if (typeof system === "string") {
-		return system;
+	// Claude Code 2.1.265+ can put its environment in a role: "system"
+	// message after the initial user instructions. It is still system context,
+	// not conversation text. Keep the top-level field first for compatibility.
+	const sources: unknown[] = [body.system];
+	if (Array.isArray(body.messages)) {
+		for (const message of body.messages) {
+			if (
+				typeof message === "object" &&
+				message !== null &&
+				message.role === "system"
+			) {
+				sources.push(message.content);
+			}
+		}
 	}
+	const parts = sources.flatMap(collectTextContent);
+	return parts.length > 0 ? parts.join("\n") : null;
+}
 
-	if (Array.isArray(system)) {
-		return system
+function collectTextContent(content: unknown): string[] {
+	if (typeof content === "string") return [content];
+
+	if (Array.isArray(content)) {
+		return content
 			.filter(
 				(item): item is { type?: string; text: string } =>
 					typeof item === "object" &&
@@ -198,11 +214,10 @@ function extractSystemPrompt(body: RequestJsonBody | null): string | null {
 					(item as { type?: string }).type === "text" &&
 					typeof (item as { text?: unknown }).text === "string",
 			)
-			.map((item) => item.text)
-			.join("\n");
+			.map((item) => item.text);
 	}
 
-	return null;
+	return [];
 }
 
 function stripSurroundingQuotes(value: string): {
@@ -267,20 +282,7 @@ function collectFirstUserMessageTexts(body: RequestJsonBody): string[] {
 	);
 	if (!firstUser) return [];
 
-	const content = firstUser.content;
-	if (typeof content === "string") return [content];
-	if (Array.isArray(content)) {
-		return content
-			.filter(
-				(block): block is { type?: string; text: string } =>
-					typeof block === "object" &&
-					block !== null &&
-					(block as { type?: string }).type === "text" &&
-					typeof (block as { text?: unknown }).text === "string",
-			)
-			.map((block) => block.text);
-	}
-	return [];
+	return collectTextContent(firstUser.content);
 }
 
 /** Sources a body-only extraction can report (tiers 2–5, or nothing). */

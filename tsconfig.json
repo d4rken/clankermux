@@ -46,6 +46,7 @@
 		// have written "[object Object]" into every re-derived row — precisely
 		// because it was not typechecked.
 		"scripts/backfill-project-names.ts",
+		"scripts/backfill-missing-projects.ts",
 		// The README screenshot pipeline. Typechecked because seed-mock-db.ts
 		// reaches into packages/http-api for the password hasher and writes raw
 		// SQL against the live schema: a rename on either side should fail here,

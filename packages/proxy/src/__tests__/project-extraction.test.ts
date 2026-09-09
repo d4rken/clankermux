@@ -198,6 +198,98 @@ describe("mapWorkingDirToProject", () => {
 });
 
 describe("extractProjectFromBody", () => {
+	it("reads the Claude Code environment system message after user instructions", () => {
+		const body = {
+			system: [{ type: "text", text: "You are Claude Code." }],
+			messages: [
+				{
+					role: "user",
+					content:
+						"Contents of /home/darken/projects/capod/.claude/CLAUDE.md (project instructions, checked into the codebase):\nInstructions",
+				},
+				{
+					role: "system",
+					content:
+						"# Environment\nYou have been invoked in the following environment:\n - Primary working directory: /home/darken/projects/capod/.claude/worktrees/fix\n - Platform: linux",
+				},
+			],
+		};
+		expect(extractProjectFromBody(body)).toEqual({
+			project: "capod",
+			source: "repo_root",
+		});
+	});
+
+	it("reads text blocks in system messages without a top-level system field", () => {
+		expect(
+			extractProjectFromBody({
+				messages: [
+					null,
+					{
+						role: "system",
+						content: [
+							null,
+							{ type: "text", text: 42 },
+							{ type: "image", text: "Working directory: /home/u/wrong" },
+							{ type: "text", text: "Working directory: /home/u/repo" },
+						],
+					},
+				],
+			}),
+		).toEqual({ project: "repo", source: "wd_plain" });
+	});
+
+	it("keeps top-level primary precedence and primary over plain across system fields", () => {
+		const messages = [
+			{ role: "system", content: "Primary working directory: /home/u/new" },
+		];
+		expect(
+			extractProjectFromBody({
+				system: "Primary working directory: /home/u/original",
+				messages,
+			}),
+		).toEqual({ project: "original", source: "wd_primary" });
+		expect(
+			extractProjectFromBody({
+				system: "Working directory: /home/u/original",
+				messages,
+			}),
+		).toEqual({ project: "new", source: "wd_primary" });
+	});
+
+	it("does not treat working-directory labels in conversation or tool output as system context", () => {
+		for (const role of ["user", "assistant", "tool"]) {
+			expect(
+				extractProjectFromBody({
+					messages: [
+						{ role, content: "Primary working directory: /home/u/wrong" },
+					],
+				}),
+			).toEqual({ project: null, source: "none" });
+		}
+	});
+
+	it("retains path validation and unmatched-path reporting for system messages", () => {
+		for (const path of ["relative/repo", "/home/u/repo unexpected prose"]) {
+			expect(
+				extractProjectFromBody({
+					messages: [{ role: "system", content: `Working directory: ${path}` }],
+				}),
+			).toEqual({ project: null, source: "none" });
+		}
+		expect(
+			extractProjectFromBody({
+				messages: [
+					{ role: "system", content: "Working directory: /unknown/repo" },
+				],
+			}),
+		).toEqual({
+			project: null,
+			source: "none",
+			unmatchedPath: "/unknown/repo",
+		});
+	});
+
 	it("prefers the anchored Primary working directory label over earlier memory paths", () => {
 		// Realistic main-session prompt: memory references appear long before
 		// the environment block that carries the actual working directory.
