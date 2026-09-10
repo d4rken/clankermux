@@ -174,7 +174,10 @@ describe("AccountListItem — session stats", () => {
 		const html = render(makeAccount({ sessionStats: null }));
 
 		expect(html).not.toContain("cache↑");
-		expect(html).not.toContain(" plan");
+		// Scoped to the info row, like the sibling assertion above: the anthropic
+		// extra-spend policy chip's tooltip says "past its plan limit", which is
+		// nothing to do with a session cost segment.
+		expect(infoRow(html)).not.toContain(" plan");
 		// With nothing behind it, the session text advertises no tooltip either.
 		expect(html).not.toContain("cursor-help");
 		expect(html).toContain("Requests</dt><dd");

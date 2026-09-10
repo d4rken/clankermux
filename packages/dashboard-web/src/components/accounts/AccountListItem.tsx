@@ -20,6 +20,10 @@ import {
 } from "lucide-react";
 import { type ReactNode, useState } from "react";
 import type { Account } from "../../api";
+import {
+	type AccountPolicyKey,
+	describeAccountPolicy,
+} from "../../lib/account-policies";
 import { deriveAccountStatus } from "../../lib/account-status";
 import {
 	providerShowsCreditsBalance,
@@ -213,6 +217,12 @@ export function AccountListItem({
 			!!onAnthropicReauth) ||
 		(account.provider === "codex" && !!onCodexReauth);
 
+	// Menu copy for one automation flag. Sourced from the shared descriptors the
+	// policy chips render from, so an item's label and explanation cannot drift
+	// from the chip that reports the same flag's state two rows below.
+	const policyCopy = (key: AccountPolicyKey) =>
+		describeAccountPolicy(key, account.provider);
+
 	// Whether the overflow menu should show the "Automation" toggle group.
 	const hasAutomationToggles =
 		providerSupportsAutoFeatures(account.provider) ||
@@ -315,17 +325,17 @@ export function AccountListItem({
 												checked={account.autoFallbackEnabled}
 												onCheckedChange={() => onAutoFallbackToggle(account)}
 												onSelect={(e) => e.preventDefault()}
-												title="Automatically switch back to this account from lower-priority ones when its rate limit resets. Requires multiple accounts with different priorities."
+												title={policyCopy("autoFallback").description}
 											>
-												Auto-fallback
+												{policyCopy("autoFallback").menuLabel}
 											</DropdownMenuCheckboxItem>
 											<DropdownMenuCheckboxItem
 												checked={account.autoRefreshEnabled}
 												onCheckedChange={() => onAutoRefreshToggle(account)}
 												onSelect={(e) => e.preventDefault()}
-												title="Automatically sends a minimal message when the usage window resets to avoid cold-start latency. Does not affect OAuth token refreshing."
+												title={policyCopy("autoRefresh").description}
 											>
-												Auto-refresh
+												{policyCopy("autoRefresh").menuLabel}
 											</DropdownMenuCheckboxItem>
 										</>
 									)}
@@ -334,9 +344,9 @@ export function AccountListItem({
 											checked={account.billingType === "plan"}
 											onCheckedChange={() => onBillingTypeToggle(account)}
 											onSelect={(e) => e.preventDefault()}
-											title="Toggle plan billing for this account"
+											title={policyCopy("planBilling").description}
 										>
-											Plan billing
+											{policyCopy("planBilling").menuLabel}
 										</DropdownMenuCheckboxItem>
 									)}
 									{(account.provider === "anthropic" ||
@@ -353,15 +363,9 @@ export function AccountListItem({
 													onAutoPauseOnOverageToggle(account)
 												}
 												onSelect={(e) => e.preventDefault()}
-												title={
-													account.provider === "codex"
-														? "When the weekly Codex limit is reached, allow this account to keep running on purchased credits. When OFF (default), the account pauses and traffic fails over to other accounts, then auto-resumes when the weekly window resets."
-														: "Allow this account to incur overage charges past its plan limit. When OFF (default), the account auto-pauses when overage usage is detected and resumes when the usage window resets. Note: detection relies on Anthropic reporting overage, so some overage may occur before pausing."
-												}
+												title={policyCopy("extraSpend").description}
 											>
-												{account.provider === "codex"
-													? "Allow credits past weekly limit"
-													: "Allow overage spend"}
+												{policyCopy("extraSpend").menuLabel}
 											</DropdownMenuCheckboxItem>
 										)}
 									{account.provider === "zai" && onPeakHoursPauseToggle && (
@@ -369,9 +373,9 @@ export function AccountListItem({
 											checked={account.peakHoursPauseEnabled ?? false}
 											onCheckedChange={() => onPeakHoursPauseToggle(account)}
 											onSelect={(e) => e.preventDefault()}
-											title="Automatically pause this account during Zai peak hours (14:00–18:00 SGT)"
+											title={policyCopy("peakHoursPause").description}
 										>
-											Peak hours pause
+											{policyCopy("peakHoursPause").menuLabel}
 										</DropdownMenuCheckboxItem>
 									)}
 									{account.provider === "codex" &&
@@ -382,9 +386,9 @@ export function AccountListItem({
 													onAutoApplyResetCreditsToggle(account)
 												}
 												onSelect={(e) => e.preventDefault()}
-												title="Automatically consume a banked usage reset shortly (~10 min) before it expires so it isn't wasted. Applies even while paused, unless the account needs re-authentication."
+												title={policyCopy("autoApplyExpiry").description}
 											>
-												Auto-apply expiring usage resets
+												{policyCopy("autoApplyExpiry").menuLabel}
 											</DropdownMenuCheckboxItem>
 										)}
 									{account.provider === "codex" &&
@@ -397,9 +401,9 @@ export function AccountListItem({
 													onAutoApplyResetOnWeeklyLimitToggle(account)
 												}
 												onSelect={(e) => e.preventDefault()}
-												title="Automatically consume a banked usage reset at 100% weekly usage when no usable Codex alternative is available. Respects API-key account pins. Manual pauses conserve weekly resets; an overage pause is lifted by the reset. At most one auto-apply per hour."
+												title={policyCopy("autoApplyWeekly").description}
 											>
-												Auto-apply reset at weekly limit
+												{policyCopy("autoApplyWeekly").menuLabel}
 											</DropdownMenuCheckboxItem>
 										)}
 									<DropdownMenuSeparator />
