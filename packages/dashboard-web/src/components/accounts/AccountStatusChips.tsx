@@ -14,6 +14,7 @@ import {
 } from "../../lib/account-status";
 import { Button } from "../ui/button";
 import { Popover, PopoverContent, PopoverTrigger } from "../ui/popover";
+import { AccountPolicyChips } from "./AccountPolicyChips";
 import { RateLimitStatusChip } from "./RateLimitStatusChip";
 import { StatusChip } from "./StatusChip";
 
@@ -683,6 +684,10 @@ export function AccountStatusChips({
 					Duplicate
 				</StatusChip>
 			)}
+			{/* The account's automation-flag inventory, always last: the pills above
+			    are transient state, these are configuration. A fragment, so they
+			    wrap as individual flex items of this row rather than as a block. */}
+			<AccountPolicyChips account={account} />
 		</div>
 	);
 }
