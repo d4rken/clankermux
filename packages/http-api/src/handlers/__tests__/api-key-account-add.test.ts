@@ -261,8 +261,8 @@ describe("createApiKeyAccountAddHandler", () => {
 		});
 	});
 
-	describe("model mappings", () => {
-		it("stores sanitized mappings as JSON", async () => {
+	describe("retired model mappings", () => {
+		it("does not persist retired mappings", async () => {
 			const handler = createApiKeyAccountAddHandler(
 				dbOps,
 				API_KEY_PROVIDERS.kilo,
@@ -277,9 +277,7 @@ describe("createApiKeyAccountAddHandler", () => {
 			);
 
 			expect(res.status).toBe(200);
-			expect(JSON.parse(row("acct")?.model_mappings ?? "null")).toEqual({
-				"claude-sonnet-5": "claude-opus-5",
-			});
+			expect(row("acct")?.model_mappings).toBeNull();
 		});
 
 		it("stores SQL NULL — not the string 'null' — when mappings are absent", async () => {
@@ -298,7 +296,7 @@ describe("createApiKeyAccountAddHandler", () => {
 			expect(stored?.model_mappings).not.toBe("null");
 		});
 
-		it("rejects mappings that do not survive sanitization", async () => {
+		it("ignores obsolete invalid mappings", async () => {
 			const handler = createApiKeyAccountAddHandler(
 				dbOps,
 				API_KEY_PROVIDERS.openai,
@@ -313,10 +311,10 @@ describe("createApiKeyAccountAddHandler", () => {
 				}),
 			);
 
-			expect(res.status).toBe(400);
+			expect(res.status).toBe(200);
 		});
 
-		it("rejects a non-object modelMappings", async () => {
+		it("ignores an obsolete non-object modelMappings", async () => {
 			const handler = createApiKeyAccountAddHandler(
 				dbOps,
 				API_KEY_PROVIDERS.kilo,
@@ -326,7 +324,7 @@ describe("createApiKeyAccountAddHandler", () => {
 				post({ name: "acct", apiKey: "k", modelMappings: "nope" }),
 			);
 
-			expect(res.status).toBe(400);
+			expect(res.status).toBe(200);
 		});
 
 		it("ignores modelMappings for a provider that does not support them", async () => {

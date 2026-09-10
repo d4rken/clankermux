@@ -74,7 +74,7 @@ const HOLD_TIMING_OVERRIDE = {
 };
 
 async function callHandleProxy(req: Request, url: URL, ctx: ProxyContext) {
-	const { handleProxy } = await import("../proxy");
+	const { handleProxy } = await import("./fixtures/routing-harness");
 	return handleProxy(
 		req,
 		url,
@@ -299,7 +299,7 @@ describe("handleProxy burst-hold bookkeeping", () => {
 	let originalFetch: typeof globalThis.fetch;
 
 	beforeAll(async () => {
-		await import("../proxy");
+		await import("./fixtures/routing-harness");
 	});
 
 	beforeEach(() => {

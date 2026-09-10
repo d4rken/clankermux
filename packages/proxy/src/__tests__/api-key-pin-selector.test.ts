@@ -1,442 +1,115 @@
-import { beforeEach, describe, expect, it, mock } from "bun:test";
-import type { Account, RequestMeta } from "@clankermux/types";
-import type { ProxyContext } from "../handlers";
+import { describe, expect, it, mock } from "bun:test";
+import type { RequestMeta } from "@clankermux/types";
+import { makeAccount, makeContext } from "./fixtures/proxy-terminal-harness";
+import { selectAccountsForRequest } from "./fixtures/routing-harness";
 
-mock.module("../inline-worker", () => ({
-	EMBEDDED_WORKER_CODE: "",
-}));
-
-function makeAccount(overrides: Partial<Account> = {}): Account {
-	return {
-		id: "acc-1",
-		name: "test-account",
-		provider: "anthropic",
-		api_key: "test-key",
-		refresh_token: "",
-		access_token: null,
-		expires_at: null,
-		request_count: 0,
-		total_requests: 0,
-		last_used: null,
-		created_at: Date.now(),
-		rate_limited_until: null,
-		session_start: null,
-		session_request_count: 0,
-		paused: false,
-		rate_limit_reset: null,
-		rate_limit_status: null,
-		rate_limit_remaining: null,
-		priority: 0,
-		auto_fallback_enabled: false,
-		auto_refresh_enabled: false,
-		auto_pause_on_overage_enabled: false,
-		custom_endpoint: null,
-		model_mappings: null,
-		cross_region_mode: null,
-		model_fallbacks: null,
-		billing_type: null,
-		pause_reason: null,
-		refresh_token_issued_at: null,
-		...overrides,
-	};
-}
-
-/**
- * Minimal ProxyContext for exercising selectAccountsForRequest directly. The
- * strategy returns all non-paused / non-rate-limited accounts in their given
- * order (so the class-pin filter operates on a deterministic ordered list).
- */
-function makeContext(accounts: Account[]): ProxyContext {
-	return {
-		strategy: {
-			// Mirror the real SessionStrategy: filter to available accounts AND set
-			// meta.routing (the strategy owns routing meta in production, so the
-			// class-pin narrowing has a routing object to mutate).
-			select: (accs: Account[], meta: RequestMeta) => {
-				const now = Date.now();
-				const ordered = accs.filter(
-					(acc) =>
-						!acc.paused &&
-						(!acc.rate_limited_until || acc.rate_limited_until < now),
-				);
-				meta.routing = {
-					strategy: "session",
-					decision: "primary",
-					selectedAccountId: ordered[0]?.id ?? null,
-					candidatesCount: ordered.length,
-					affinityScope: null,
-					affinityKey: null,
-					previousAccountId: null,
-					failoverReason: null,
-					// Carried through from any pre-seeded routing meta so a test can
-					// stage the fields the session strategy / admission gates own.
-					heldAccountId: meta.routing?.heldAccountId ?? null,
-					primaryAttemptAccountId:
-						meta.routing?.primaryAttemptAccountId ?? null,
-				};
-				return ordered;
-			},
-		} as never,
-		dbOps: {
-			getAllAccounts: mock(async () => accounts),
-			getAccount: mock(
-				async (id: string) => accounts.find((a) => a.id === id) ?? null,
-			),
-			getActiveComboForFamily: mock(async () => null),
-		} as never,
-		config: {
-			getUsagePollIntervalMs: () => 60_000,
-		} as never,
-	} as never;
-}
-
-function makeMeta(overrides: Partial<RequestMeta> = {}): RequestMeta {
-	return {
-		id: "req-1",
-		method: "POST",
-		path: "/v1/messages",
-		timestamp: Date.now(),
-		...overrides,
-	};
-}
-
-async function select(meta: RequestMeta, ctx: ProxyContext, model?: string) {
-	const { selectAccountsForRequest } = await import(
-		"../handlers/account-selector"
-	);
-	return selectAccountsForRequest(meta, ctx, model);
-}
-
-describe("API-key pin: account selection", () => {
-	beforeEach(() => {
-		// Each test builds its own context; nothing global to reset here.
-	});
-
-	// --- Specific-account pin --------------------------------------------------
-
-	it("specific-account pin, account available → returns just that account", async () => {
-		const target = makeAccount({ id: "pin-target", name: "Pin-Target" });
-		const other = makeAccount({ id: "other", name: "Other" });
-		const ctx = makeContext([target, other]);
-		const meta = makeMeta({
-			pin: { accountId: "pin-target", providers: null },
-		});
-
-		const result = await select(meta, ctx);
-
-		expect(result.map((a) => a.id)).toEqual(["pin-target"]);
-		expect(meta.pinFailure).toBeFalsy();
-		expect(meta.routing?.decision).toBe("pinned_account");
-		expect(meta.routing?.selectedAccountId).toBe("pin-target");
-		expect(meta.routing?.candidatesCount).toBe(1);
-	});
-
-	it("specific-account pin, account unavailable (paused) → strict-fail pinned_account_unavailable", async () => {
-		const target = makeAccount({
-			id: "pin-target",
-			name: "Pin-Target",
-			paused: true,
-		});
-		const ctx = makeContext([target]);
-		const meta = makeMeta({
-			pin: { accountId: "pin-target", providers: null },
-		});
-
-		const result = await select(meta, ctx);
-
-		expect(result).toEqual([]);
-		expect(meta.pinFailure?.code).toBe("pinned_account_unavailable");
-		expect(meta.pinFailure?.message).toContain("pin-target");
-		expect(meta.routing?.decision).toBe("pinned_rejected");
-	});
-
-	it("specific-account pin, account missing → strict-fail pinned_account_missing", async () => {
-		const other = makeAccount({ id: "other", name: "Other" });
-		const ctx = makeContext([other]);
-		const meta = makeMeta({ pin: { accountId: "ghost", providers: null } });
-
-		const result = await select(meta, ctx);
-
-		expect(result).toEqual([]);
-		expect(meta.pinFailure?.code).toBe("pinned_account_missing");
-		expect(meta.pinFailure?.message).toContain("ghost");
-		expect(meta.routing?.decision).toBe("pinned_rejected");
-	});
-
-	// --- Class (provider) pin --------------------------------------------------
-
-	it("class pin, matching provider available → returns filtered accounts", async () => {
-		const a1 = makeAccount({ id: "a1", name: "A1", provider: "anthropic" });
-		const a2 = makeAccount({ id: "a2", name: "A2", provider: "anthropic" });
-		const ctx = makeContext([a1, a2]);
-		const meta = makeMeta({
-			pin: { accountId: null, providers: ["anthropic"] },
-		});
-
-		const result = await select(meta, ctx);
-
-		expect(result.map((a) => a.id)).toEqual(["a1", "a2"]);
-		expect(meta.pinFailure).toBeFalsy();
-		expect(meta.routing?.selectedAccountId).toBe("a1");
-		expect(meta.routing?.candidatesCount).toBe(2);
-	});
-
-	it("class pin, partial match → returns only the allowed-provider accounts", async () => {
-		const anthropic = makeAccount({
-			id: "a1",
-			name: "A1",
-			provider: "anthropic",
-		});
-		const codex = makeAccount({ id: "c1", name: "C1", provider: "codex" });
-		const ctx = makeContext([anthropic, codex]);
-		const meta = makeMeta({
-			pin: { accountId: null, providers: ["anthropic"] },
-		});
-
-		const result = await select(meta, ctx);
-
-		expect(result.map((a) => a.id)).toEqual(["a1"]);
-		expect(meta.pinFailure).toBeFalsy();
-		expect(meta.routing?.selectedAccountId).toBe("a1");
-		expect(meta.routing?.candidatesCount).toBe(1);
-	});
-
-	it("class pin, no allowed provider available → strict-fail pinned_no_available_account", async () => {
-		// Only a codex account exists; pin allows anthropic only.
-		const codex = makeAccount({ id: "c1", name: "C1", provider: "codex" });
-		const ctx = makeContext([codex]);
-		const meta = makeMeta({
-			pin: { accountId: null, providers: ["anthropic"] },
-		});
-
-		const result = await select(meta, ctx);
-
-		expect(result).toEqual([]);
-		expect(meta.pinFailure?.code).toBe("pinned_no_available_account");
-		expect(meta.pinFailure?.message).toContain("anthropic");
-		expect(meta.routing?.decision).toBe("pinned_rejected");
-	});
-
-	// --- Header narrowing within pin ------------------------------------------
-
-	it("header narrows within pin (allowed + available) → returns the header target", async () => {
-		const a1 = makeAccount({ id: "a1", name: "A1", provider: "anthropic" });
-		const a2 = makeAccount({ id: "a2", name: "A2", provider: "anthropic" });
-		const ctx = makeContext([a1, a2]);
-		const meta = makeMeta({
-			pin: { accountId: null, providers: ["anthropic"] },
-			headers: new Headers({ "x-clankermux-account-id": "a2" }),
-		});
-
-		const result = await select(meta, ctx);
-
-		expect(result.map((a) => a.id)).toEqual(["a2"]);
-		expect(meta.pinFailure).toBeFalsy();
-		expect(meta.routing?.decision).toBe("pinned_header_narrowed");
-		expect(meta.routing?.selectedAccountId).toBe("a2");
-		expect(meta.routing?.candidatesCount).toBe(1);
-	});
-
-	it("header narrows within pin via legacy header name", async () => {
-		const a1 = makeAccount({ id: "a1", name: "A1", provider: "anthropic" });
-		const a2 = makeAccount({ id: "a2", name: "A2", provider: "anthropic" });
-		const ctx = makeContext([a1, a2]);
-		const meta = makeMeta({
-			pin: { accountId: null, providers: ["anthropic"] },
-			headers: new Headers({ "x-better-ccflare-account-id": "a2" }),
-		});
-
-		const result = await select(meta, ctx);
-
-		expect(result.map((a) => a.id)).toEqual(["a2"]);
-		expect(meta.routing?.decision).toBe("pinned_header_narrowed");
-	});
-
-	it("header disallowed by pin → strict-fail pinned_header_rejected", async () => {
-		const anthropic = makeAccount({
-			id: "a1",
-			name: "A1",
-			provider: "anthropic",
-		});
-		const codex = makeAccount({ id: "c1", name: "C1", provider: "codex" });
-		const ctx = makeContext([anthropic, codex]);
-		const meta = makeMeta({
-			pin: { accountId: null, providers: ["anthropic"] },
-			// Header targets the codex account, which the pin disallows.
-			headers: new Headers({ "x-clankermux-account-id": "c1" }),
-		});
-
-		const result = await select(meta, ctx);
-
-		expect(result).toEqual([]);
-		expect(meta.pinFailure?.code).toBe("pinned_header_rejected");
-		expect(meta.routing?.decision).toBe("pinned_rejected");
-	});
-
-	it("header within pin but the target account is unavailable → strict-fail pinned_header_rejected", async () => {
-		const a1 = makeAccount({ id: "a1", name: "A1", provider: "anthropic" });
-		const a2 = makeAccount({
-			id: "a2",
-			name: "A2",
-			provider: "anthropic",
-			paused: true,
-		});
-		const ctx = makeContext([a1, a2]);
-		const meta = makeMeta({
-			pin: { accountId: null, providers: ["anthropic"] },
-			headers: new Headers({ "x-clankermux-account-id": "a2" }),
-		});
-
-		const result = await select(meta, ctx);
-
-		expect(result).toEqual([]);
-		expect(meta.pinFailure?.code).toBe("pinned_header_rejected");
-	});
-
-	// --- No-pin path is unchanged ----------------------------------------------
-
-	it("no pin: header force still honored (legacy behavior unchanged)", async () => {
-		const a1 = makeAccount({ id: "a1", name: "A1" });
-		const a2 = makeAccount({ id: "a2", name: "A2" });
-		const ctx = makeContext([a1, a2]);
-		const meta = makeMeta({
-			headers: new Headers({ "x-clankermux-account-id": "a2" }),
-		});
-
-		const result = await select(meta, ctx);
-
-		expect(result.map((a) => a.id)).toEqual(["a2"]);
-		expect(meta.routing?.decision).toBe("forced_account");
-		expect(meta.pinFailure).toBeFalsy();
-	});
-
-	it("no pin: normal strategy selection still returns the ordered pool", async () => {
-		const a1 = makeAccount({ id: "a1", name: "A1" });
-		const a2 = makeAccount({ id: "a2", name: "A2" });
-		const ctx = makeContext([a1, a2]);
-		const meta = makeMeta();
-
-		const result = await select(meta, ctx);
-
-		expect(result.map((a) => a.id)).toEqual(["a1", "a2"]);
-		expect(meta.pinFailure).toBeFalsy();
-	});
-
-	it("internal request ignores the pin (carries none in practice; explicit guard via empty providers)", async () => {
-		// In production internal probes never carry a pin. Guard the invariant: a
-		// pin with no accountId and an empty providers list is inactive, so normal
-		// selection runs.
-		const a1 = makeAccount({ id: "a1", name: "A1" });
-		const ctx = makeContext([a1]);
-		const meta = makeMeta({
-			internal: true,
-			pin: { accountId: null, providers: [] },
-		});
-
-		const result = await select(meta, ctx);
-
-		expect(result.map((a) => a.id)).toEqual(["a1"]);
-		expect(meta.pinFailure).toBeFalsy();
-	});
+const a = makeAccount({ id: "anthropic", provider: "anthropic" }),
+	c = makeAccount({ id: "codex", provider: "codex" }),
+	o = makeAccount({ id: "openrouter", provider: "openrouter" });
+const meta = (patch: Partial<RequestMeta> = {}): RequestMeta => ({
+	id: crypto.randomUUID(),
+	method: "POST",
+	path: "/v1/messages",
+	timestamp: Date.now(),
+	requestedModel: "claude-fable-5-1",
+	...patch,
 });
-
-describe("createPinnedTargetUnavailableResponse", () => {
-	it("returns a 503 with the standard error envelope and the failure code/message", async () => {
-		const { createPinnedTargetUnavailableResponse } = await import(
-			"../handlers/proxy-operations"
-		);
-		const response = createPinnedTargetUnavailableResponse({
-			code: "pinned_account_unavailable",
-			message: "Pinned account (acc-9) is currently unavailable.",
+describe("API key destination intersection before strategy", () => {
+	it("selects only an explicitly pinned account", async () => {
+		const ctx = makeContext([a, c, o]);
+		const m = meta({ pin: { accountId: c.id, providers: null } });
+		expect((await selectAccountsForRequest(m, ctx)).map((x) => x.id)).toEqual([
+			c.id,
+		]);
+	});
+	it("passes only provider-allowed accounts into the strategy", async () => {
+		const ctx = makeContext([a, c, o]);
+		const select = mock((accounts: (typeof a)[]) => accounts);
+		ctx.strategy.select = select;
+		const m = meta({
+			pin: { accountId: null, providers: ["codex", "openrouter"] },
 		});
-
-		expect(response.status).toBe(503);
-		const body = (await response.json()) as {
-			type: string;
-			error: { type: string; message: string };
-		};
-		expect(body.type).toBe("error");
-		expect(body.error.type).toBe("pinned_account_unavailable");
-		expect(body.error.message).toBe(
-			"Pinned account (acc-9) is currently unavailable.",
-		);
+		expect((await selectAccountsForRequest(m, ctx)).map((x) => x.id)).toEqual([
+			c.id,
+			o.id,
+		]);
+		expect(select.mock.calls[0][0].map((x) => x.id)).toEqual([c.id, o.id]);
 	});
-});
-
-describe("Codex-CLI floor: excludeOfficialAnthropic", () => {
-	it("drops official Claude accounts (anthropic + claude-console-api), keeps others", async () => {
-		const oauth = makeAccount({ id: "oauth", provider: "anthropic" });
-		const console_ = makeAccount({ id: "cc", provider: "claude-console-api" });
-		const codex = makeAccount({ id: "c1", provider: "codex" });
-		const ollama = makeAccount({ id: "o1", provider: "ollama" });
-		const ctx = makeContext([oauth, console_, codex, ollama]);
-
-		const result = await select(
-			makeMeta({ excludeOfficialAnthropic: true }),
-			ctx,
-		);
-
-		expect(result.map((a) => a.id)).toEqual(["c1", "o1"]);
-	});
-
-	it("all-Claude pool → strict-fail with anthropic_excluded_no_account", async () => {
-		const oauth = makeAccount({ id: "oauth", provider: "anthropic" });
-		const console_ = makeAccount({ id: "cc", provider: "claude-console-api" });
-		const ctx = makeContext([oauth, console_]);
-		const meta = makeMeta({ excludeOfficialAnthropic: true });
-		// Stage the routing telemetry the strategy/gates would have produced for
-		// the pre-filter pool, so the fail-closed branch has stale values to clear.
-		meta.routing = {
-			strategy: "session",
-			decision: "primary",
-			selectedAccountId: "oauth",
-			candidatesCount: 2,
-			affinityScope: null,
-			affinityKey: null,
-			previousAccountId: null,
-			failoverReason: null,
-			heldAccountId: "cc",
-			primaryAttemptAccountId: "oauth",
-		};
-
-		const result = await select(meta, ctx);
-
-		expect(result).toEqual([]);
-		expect(meta.pinFailure?.code).toBe("anthropic_excluded_no_account");
-		// Nothing was served: the persisted routing projection must not name an
-		// account that the floor just filtered out.
-		expect(meta.routing?.selectedAccountId).toBeNull();
-		expect(meta.routing?.candidatesCount).toBe(0);
-		expect(meta.routing?.heldAccountId).toBeNull();
-		expect(meta.routing?.primaryAttemptAccountId).toBeNull();
-	});
-
-	it("no Claude accounts in pool → returns the selection unchanged", async () => {
-		const codex = makeAccount({ id: "c1", provider: "codex" });
-		const ollama = makeAccount({ id: "o1", provider: "ollama" });
-		const ctx = makeContext([codex, ollama]);
-
-		const result = await select(
-			makeMeta({ excludeOfficialAnthropic: true }),
-			ctx,
-		);
-
-		expect(result.map((a) => a.id)).toEqual(["c1", "o1"]);
-	});
-
-	it("composes with a codex class pin (floor + pin both hold)", async () => {
-		const oauth = makeAccount({ id: "oauth", provider: "anthropic" });
-		const codex = makeAccount({ id: "c1", provider: "codex" });
-		const ctx = makeContext([oauth, codex]);
-
-		const result = await select(
-			makeMeta({
-				excludeOfficialAnthropic: true,
+	for (const header of [
+		"x-clankermux-account-id",
+		"x-better-ccflare-account-id",
+	]) {
+		it(`narrows a provider pin with ${header}`, async () => {
+			const ctx = makeContext([a, c, o]);
+			const m = meta({
+				pin: { accountId: null, providers: ["codex", "openrouter"] },
+				headers: new Headers({ [header]: o.id }),
+			});
+			expect((await selectAccountsForRequest(m, ctx)).map((x) => x.id)).toEqual(
+				[o.id],
+			);
+		});
+		it(`rejects ${header} outside the allowed providers`, async () => {
+			const ctx = makeContext([a, c, o]);
+			const m = meta({
 				pin: { accountId: null, providers: ["codex"] },
-			}),
-			ctx,
-		);
-
-		expect(result.map((a) => a.id)).toEqual(["c1"]);
+				headers: new Headers({ [header]: a.id }),
+			});
+			await expect(selectAccountsForRequest(m, ctx)).rejects.toThrow(
+				"No permitted destination",
+			);
+		});
+	}
+	it("reports capacity unavailability for a paused pinned account", async () => {
+		const ctx = makeContext([{ ...c, paused: true }, o]);
+		const m = meta({ pin: { accountId: c.id, providers: null } });
+		expect(await selectAccountsForRequest(m, ctx)).toEqual([]);
+		expect(m.pinFailure?.code).toBe("pinned_account_unavailable");
+	});
+	it("reports capacity unavailability for a cooled provider pool", async () => {
+		const ctx = makeContext([
+			{ ...c, rate_limited_until: Date.now() + 60000 },
+			a,
+		]);
+		const m = meta({ pin: { accountId: null, providers: ["codex"] } });
+		expect(await selectAccountsForRequest(m, ctx)).toEqual([]);
+		expect(m.pinFailure?.code).toBe("pinned_no_available_account");
+	});
+	it("rejects a missing pinned account without widening", async () => {
+		await expect(
+			selectAccountsForRequest(
+				meta({ pin: { accountId: "missing", providers: null } }),
+				makeContext([a, c, o]),
+			),
+		).rejects.toThrow("No permitted destination");
+	});
+	it("rejects ambiguous account and provider pins", async () => {
+		await expect(
+			selectAccountsForRequest(
+				meta({ pin: { accountId: c.id, providers: ["codex"] } }),
+				makeContext([a, c, o]),
+			),
+		).rejects.toThrow("Invalid API key destinations");
+	});
+	it("applies the Responses official-Anthropic exclusion to pinned traffic", async () => {
+		await expect(
+			selectAccountsForRequest(
+				meta({
+					pin: { accountId: a.id, providers: null },
+					excludeOfficialAnthropic: true,
+				}),
+				makeContext([a, c]),
+			),
+		).rejects.toThrow("No permitted destination");
+	});
+	it("filters a strategy's stale account reference out of its result", async () => {
+		const ctx = makeContext([a, c]);
+		ctx.strategy.select = () => [a, c];
+		expect(
+			await selectAccountsForRequest(
+				meta({ pin: { accountId: null, providers: ["codex"] } }),
+				ctx,
+			),
+		).toEqual([c]);
 	});
 });

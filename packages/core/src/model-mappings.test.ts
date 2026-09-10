@@ -10,233 +10,18 @@ import {
 	GATE_OUTPUT_RESERVE_CAP,
 	getAllowedModelsMessage,
 	getModelFamily,
-	getModelList,
-	getModelMappings,
 	IMAGE_TOKEN_ESTIMATE,
 	isValidClaudeModel,
 	MODEL_CONTEXT_WINDOWS,
-	mapModelName,
 	measureBodyForEstimate,
 	measureContentBlock,
-	PROVIDER_DEFAULT_MODEL_MAPPINGS,
-	parseModelMappings,
-	resolveCodexTargetModel,
 	resolveModelContextWindow,
 	resolveModelMaxContextWindow,
 	SAFETY_MARGIN,
 } from "@clankermux/core";
 import type { Account, ContextComposition } from "@clankermux/types";
 
-describe("Model Mapping", () => {
-	test("parseModelMappings handles valid JSON", () => {
-		const mappings = JSON.stringify({
-			sonnet: "gpt-4",
-			opus: "gpt-4-turbo",
-			haiku: "gpt-3.5-turbo",
-		});
-
-		const result = parseModelMappings(mappings);
-		expect(result).toEqual({
-			sonnet: "gpt-4",
-			opus: "gpt-4-turbo",
-			haiku: "gpt-3.5-turbo",
-		});
-	});
-
-	test("parseModelMappings handles invalid JSON", () => {
-		const result = parseModelMappings("invalid-json");
-		expect(result).toBeNull();
-	});
-
-	test("parseModelMappings handles null/empty", () => {
-		expect(parseModelMappings(null)).toBeNull();
-		expect(parseModelMappings("")).toBeNull();
-	});
-
-	test("mapModelName uses direct pattern matching", () => {
-		const mockAccount: Account = {
-			id: "test",
-			name: "test-account",
-			provider: "openai-compatible",
-			api_key: "test-key",
-			refresh_token: "",
-			access_token: "",
-			expires_at: null,
-			created_at: Date.now(),
-			request_count: 0,
-			total_requests: 0,
-			priority: 10,
-			model_mappings: JSON.stringify({
-				sonnet: "gpt-4",
-				opus: "gpt-4-turbo",
-				haiku: "gpt-3.5-turbo",
-			}),
-			custom_endpoint: null,
-		};
-
-		// Test direct pattern matching with realistic mappings
-		const result1 = mapModelName("claude-sonnet-4-5-20250929", mockAccount); // Current
-		const result2 = mapModelName("claude-haiku-4-5-20251001", mockAccount); // Current
-		const result3 = mapModelName("claude-opus-4-1-20250805", mockAccount); // Current
-
-		// Future model versions - demonstrating future-proof behavior
-		const result4 = mapModelName("claude-sonnet-4-6-20251129", mockAccount); // Future version
-		const result5 = mapModelName("claude-haiku-4-6-20251101", mockAccount); // Future version
-		const result6 = mapModelName("claude-opus-4-5-20251105", mockAccount); // Future version
-
-		// Current models
-		expect(result1).toBe("gpt-4"); // Matches "sonnet"
-		expect(result2).toBe("gpt-3.5-turbo"); // Matches "haiku"
-		expect(result3).toBe("gpt-4-turbo"); // Matches "opus"
-
-		// Future models - should still work without any code changes
-		expect(result4).toBe("gpt-4"); // Still matches "sonnet"
-		expect(result5).toBe("gpt-3.5-turbo"); // Still matches "haiku"
-		expect(result6).toBe("gpt-4-turbo"); // Still matches "opus"
-	});
-
-	test("real database mappings work correctly", () => {
-		// Test with real mappings from the database
-		const openrouterMappings =
-			'{"opus":"z-ai/glm-4.5-air:free","sonnet":"z-ai/glm-4.5-air:free","haiku":"z-ai/glm-4.5-air:free"}';
-
-		const mockAccount: Account = {
-			id: "test",
-			name: "openrouter-test",
-			provider: "openai-compatible",
-			api_key: "test-key",
-			refresh_token: "",
-			access_token: "",
-			expires_at: null,
-			created_at: Date.now(),
-			request_count: 0,
-			total_requests: 0,
-			priority: 10,
-			model_mappings: openrouterMappings,
-			custom_endpoint: null,
-		};
-
-		// Test real client model names
-		const sonnetRequest = "claude-sonnet-4-5-20250929";
-		const haikuRequest = "claude-haiku-4-5-20251001";
-		const opusRequest = "claude-opus-4-1-20250805";
-
-		// These should be mapped using the direct pattern matching logic
-		const sonnetMapped = mapModelName(sonnetRequest, mockAccount);
-		const haikuMapped = mapModelName(haikuRequest, mockAccount);
-		const opusMapped = mapModelName(opusRequest, mockAccount);
-
-		expect(sonnetMapped).toBe("z-ai/glm-4.5-air:free"); // matches "sonnet"
-		expect(haikuMapped).toBe("z-ai/glm-4.5-air:free"); // matches "haiku"
-		expect(opusMapped).toBe("z-ai/glm-4.5-air:free"); // matches "opus"
-
-		// Test future model versions work
-		const futureSonnet = mapModelName(
-			"claude-sonnet-5-0-20251201",
-			mockAccount,
-		);
-		expect(futureSonnet).toBe("z-ai/glm-4.5-air:free"); // still matches "sonnet"
-	});
-
-	test("mapModelName passes through original model when no mappings configured", () => {
-		const mockAccount: Account = {
-			id: "test",
-			name: "test-account",
-			provider: "openai-compatible",
-			api_key: "test-key",
-			refresh_token: "",
-			access_token: "",
-			expires_at: null,
-			created_at: Date.now(),
-			request_count: 0,
-			total_requests: 0,
-			priority: 10,
-			model_mappings: null, // No custom mappings
-			custom_endpoint: null,
-		};
-
-		// Should return the original model name unchanged
-		const result1 = mapModelName("claude-sonnet-4-5-20250929", mockAccount);
-		const result2 = mapModelName("claude-haiku-4-5-20251001", mockAccount);
-		const result3 = mapModelName("claude-opus-4-1-20250805", mockAccount);
-
-		expect(result1).toBe("claude-sonnet-4-5-20250929");
-		expect(result2).toBe("claude-haiku-4-5-20251001");
-		expect(result3).toBe("claude-opus-4-1-20250805");
-	});
-
-	test("mapModelName handles case insensitive pattern matching correctly", () => {
-		const mockAccount: Account = {
-			id: "test",
-			name: "test-account",
-			provider: "openai-compatible",
-			api_key: "test-key",
-			refresh_token: "",
-			access_token: "",
-			expires_at: null,
-			created_at: Date.now(),
-			request_count: 0,
-			total_requests: 0,
-			priority: 10,
-			model_mappings: JSON.stringify({
-				sonnet: "lowercase-gpt-4",
-				opus: "lowercase-gpt-4-turbo",
-				haiku: "lowercase-gpt-3.5",
-			}),
-			custom_endpoint: null,
-		};
-
-		// Should match using case-insensitive pattern matching
-		const sonnetResult = mapModelName(
-			"claude-sonnet-4-5-20250929",
-			mockAccount,
-		);
-		const haikuResult = mapModelName("claude-haiku-4-5-20251001", mockAccount);
-		const opusResult = mapModelName("claude-opus-4-1-20250805", mockAccount);
-
-		// Should match the lowercase mappings due to case-insensitive pattern matching
-		expect(sonnetResult).toBe("lowercase-gpt-4");
-		expect(haikuResult).toBe("lowercase-gpt-3.5");
-		expect(opusResult).toBe("lowercase-gpt-4-turbo");
-	});
-
-	test("mapModelName passes through unmapped model when only sonnet is configured (regression: no implicit sonnet catch-all)", () => {
-		// Regression test: previously, if an account had a sonnet mapping but no haiku mapping,
-		// requesting a haiku model would silently remap it to the sonnet target.
-		const mockAccount: Account = {
-			id: "test",
-			name: "test-account",
-			provider: "openai-compatible",
-			api_key: "test-key",
-			refresh_token: "",
-			access_token: "",
-			expires_at: null,
-			created_at: Date.now(),
-			request_count: 0,
-			total_requests: 0,
-			priority: 10,
-			model_mappings: JSON.stringify({
-				sonnet: "claude-sonnet-4-6", // Only sonnet is mapped; haiku is NOT
-			}),
-			custom_endpoint: null,
-		};
-
-		// Sonnet should be mapped
-		expect(mapModelName("claude-sonnet-4-5", mockAccount)).toBe(
-			"claude-sonnet-4-6",
-		);
-
-		// Haiku has no mapping — must pass through unchanged, NOT remap to sonnet target
-		expect(mapModelName("claude-haiku-4-5", mockAccount)).toBe(
-			"claude-haiku-4-5",
-		);
-
-		// Opus has no mapping — must also pass through unchanged
-		expect(mapModelName("claude-opus-4-5", mockAccount)).toBe(
-			"claude-opus-4-5",
-		);
-	});
-});
+describe("Model Mapping", () => {});
 
 describe("Model Validation Utilities", () => {
 	test("getModelFamily detects opus models", () => {
@@ -497,72 +282,54 @@ describe("estimateRequestTokens", () => {
 describe("codexAccountFitsRequest", () => {
 	test("returns true when estimate is under window * SAFETY_MARGIN", () => {
 		// gpt-5.5: floor(272000 * 0.97) = 263840
-		const account = makeCodexAccount({
-			model_mappings: JSON.stringify({ opus: "gpt-5.5" }),
-		});
-		expect(codexAccountFitsRequest(account, "claude-opus-4-7", 263_840)).toBe(
-			true,
-		);
-		expect(codexAccountFitsRequest(account, "claude-opus-4-7", 100_000)).toBe(
-			true,
-		);
+		const account = makeCodexAccount({});
+		expect(codexAccountFitsRequest(account, "gpt-5.5", 263_840)).toBe(true);
+		expect(codexAccountFitsRequest(account, "gpt-5.5", 100_000)).toBe(true);
 	});
 
 	test("returns false when estimate exceeds window * SAFETY_MARGIN", () => {
-		const account = makeCodexAccount({
-			model_mappings: JSON.stringify({ opus: "gpt-5.5" }),
-		});
+		const account = makeCodexAccount({});
 		// floor(272000 * 0.97) = 263840
-		expect(codexAccountFitsRequest(account, "claude-opus-4-7", 263_841)).toBe(
-			false,
-		);
-		expect(codexAccountFitsRequest(account, "claude-opus-4-7", 500_000)).toBe(
-			false,
-		);
+		expect(codexAccountFitsRequest(account, "gpt-5.5", 263_841)).toBe(false);
+		expect(codexAccountFitsRequest(account, "gpt-5.5", 500_000)).toBe(false);
 	});
 
 	test("returns true for unknown model (no false exclusion)", () => {
 		// gpt-5.2-codex is intentionally omitted from the table
-		const account = makeCodexAccount({
-			model_mappings: JSON.stringify({ opus: "gpt-5.2-codex" }),
-		});
-		expect(codexAccountFitsRequest(account, "claude-opus-4-7", 999_999)).toBe(
+		const account = makeCodexAccount({});
+		expect(codexAccountFitsRequest(account, "gpt-5.2-codex", 999_999)).toBe(
 			true,
 		);
 	});
 
-	test("respects stored model mapping over defaults", () => {
+	test("uses the supplied resolved target", () => {
 		// Stored mapping: opus→gpt-5.3-codex-spark (128K window)
-		const account = makeCodexAccount({
-			model_mappings: JSON.stringify({ opus: "gpt-5.3-codex-spark" }),
-		});
+		const account = makeCodexAccount({});
 		// floor(128000 * 0.97) = 124160
-		expect(codexAccountFitsRequest(account, "claude-opus-4-7", 124_160)).toBe(
-			true,
-		);
-		expect(codexAccountFitsRequest(account, "claude-opus-4-7", 124_161)).toBe(
-			false,
-		);
+		expect(
+			codexAccountFitsRequest(account, "gpt-5.3-codex-spark", 124_160),
+		).toBe(true);
+		expect(
+			codexAccountFitsRequest(account, "gpt-5.3-codex-spark", 124_161),
+		).toBe(false);
 	});
 
-	test("resolves the family default Codex model when no stored mapping exists", () => {
+	test("gates the resolved default target", () => {
 		// No account mapping → opus resolves to the gpt-5.6-sol family default
 		// (272K window, threshold 263840), matching what the provider actually
 		// sends, so an oversized request is correctly excluded (not "fits").
-		const account = makeCodexAccount({ model_mappings: null });
-		expect(codexAccountFitsRequest(account, "claude-opus-4-7", 999_999)).toBe(
+		const account = makeCodexAccount({});
+		expect(codexAccountFitsRequest(account, "gpt-5.6-sol", 999_999)).toBe(
 			false,
 		);
-		expect(codexAccountFitsRequest(account, "claude-opus-4-7", 100_000)).toBe(
-			true,
-		);
+		expect(codexAccountFitsRequest(account, "gpt-5.6-sol", 100_000)).toBe(true);
 	});
 
-	test("gates fable and mythos on Astra's maximum rather than its default", () => {
-		const account = makeCodexAccount({ model_mappings: null });
+	test("gates Astra on its maximum rather than its default", () => {
+		const account = makeCodexAccount({});
 		for (const model of [
-			"claude-fable-5",
-			"claude-mythos-5",
+			"gpt-6-astra",
+			"gpt-6-astra",
 			"gpt-6-astra",
 			"gpt-6-astra-2026-09-03",
 		]) {
@@ -643,9 +410,9 @@ describe("estimateContextWindowTokens", () => {
 		const est = estimateContextWindowTokens({ max_tokens: 64_000 }, comp);
 		// 675,436 / 3.0 = 225,146 (ceil) + min(64000, 4000) = 229,146.
 		expect(est).toBe(229_146);
-		const account = makeCodexAccount({ model_mappings: null });
+		const account = makeCodexAccount({});
 		// Admitted by the gate (threshold floor(272000 * 0.97) = 263,840).
-		expect(codexAccountFitsRequest(account, "claude-opus-4-8", est)).toBe(true);
+		expect(codexAccountFitsRequest(account, "gpt-5.6-sol", est)).toBe(true);
 	});
 
 	test("fallback path (no composition) caps the reserve too", () => {
@@ -700,15 +467,15 @@ describe("estimateContextWindowTokens", () => {
 		});
 		const est = estimateContextWindowTokens(body, comp);
 		expect(est).toBeLessThan(100_000);
-		const account = makeCodexAccount({ model_mappings: null });
-		expect(codexAccountFitsRequest(account, "claude-opus-4-8", est)).toBe(true);
+		const account = makeCodexAccount({});
+		expect(codexAccountFitsRequest(account, "gpt-5.6-sol", est)).toBe(true);
 
 		// Same body through the no-composition fallback (e.g. count_tokens).
 		const fallbackEst = estimateContextWindowTokens(body);
 		expect(fallbackEst).toBeLessThan(100_000);
-		expect(
-			codexAccountFitsRequest(account, "claude-opus-4-8", fallbackEst),
-		).toBe(true);
+		expect(codexAccountFitsRequest(account, "gpt-5.6-sol", fallbackEst)).toBe(
+			true,
+		);
 	});
 });
 
@@ -776,46 +543,50 @@ describe("estimateRequestTokens is unchanged (cache-warming promotion regression
 
 describe("codexAccountFitsRequestUnmargined (last-resort, no margin)", () => {
 	test("admits up to the FULL window (the margin band is re-admitted)", () => {
-		const account = makeCodexAccount({ model_mappings: null }); // opus→gpt-5.6-sol
+		const account = makeCodexAccount({}); // opus→gpt-5.6-sol
 		// In the (floor(272000*0.97)=263840, 272000] band: margined gate rejects,
 		// unmargined admits.
-		expect(codexAccountFitsRequest(account, "claude-opus-4-8", 270_000)).toBe(
+		expect(codexAccountFitsRequest(account, "gpt-5.6-sol", 270_000)).toBe(
 			false,
 		);
 		expect(
-			codexAccountFitsRequestUnmargined(account, "claude-opus-4-8", 270_000),
+			codexAccountFitsRequestUnmargined(account, "gpt-5.6-sol", 270_000),
 		).toBe(true);
 		// Exactly at the window: admitted.
 		expect(
-			codexAccountFitsRequestUnmargined(account, "claude-opus-4-8", 272_000),
+			codexAccountFitsRequestUnmargined(account, "gpt-5.6-sol", 272_000),
 		).toBe(true);
 	});
 
 	test("rejects beyond the full window", () => {
-		const account = makeCodexAccount({ model_mappings: null });
+		const account = makeCodexAccount({});
 		expect(
-			codexAccountFitsRequestUnmargined(account, "claude-opus-4-8", 272_001),
+			codexAccountFitsRequestUnmargined(account, "gpt-5.6-sol", 272_001),
 		).toBe(false);
 	});
 
 	test("unknown model → fits (no false exclusion), matching the margined gate", () => {
-		const account = makeCodexAccount({
-			model_mappings: JSON.stringify({ opus: "gpt-5.2-codex" }),
-		});
+		const account = makeCodexAccount({});
 		expect(
-			codexAccountFitsRequestUnmargined(account, "claude-opus-4-8", 9_999_999),
+			codexAccountFitsRequestUnmargined(account, "gpt-5.2-codex", 9_999_999),
 		).toBe(true);
 	});
 
 	test("respects the 128k spark window", () => {
-		const account = makeCodexAccount({
-			model_mappings: JSON.stringify({ opus: "gpt-5.3-codex-spark" }),
-		});
+		const account = makeCodexAccount({});
 		expect(
-			codexAccountFitsRequestUnmargined(account, "claude-opus-4-8", 128_000),
+			codexAccountFitsRequestUnmargined(
+				account,
+				"gpt-5.3-codex-spark",
+				128_000,
+			),
 		).toBe(true);
 		expect(
-			codexAccountFitsRequestUnmargined(account, "claude-opus-4-8", 128_001),
+			codexAccountFitsRequestUnmargined(
+				account,
+				"gpt-5.3-codex-spark",
+				128_001,
+			),
 		).toBe(false);
 	});
 });
@@ -825,79 +596,46 @@ describe("codex gates apply the dated-suffix window fallback", () => {
 		// Account maps opus → a dated variant of gpt-5.6-sol (272k window). The
 		// gate must resolve it via resolveModelContextWindow, not treat it as an
 		// unknown model (which would falsely "fit" any size).
-		const account = makeCodexAccount({
-			model_mappings: JSON.stringify({ opus: "gpt-5.6-sol-2026-05-13" }),
-		});
+		const account = makeCodexAccount({});
 		// floor(272000 * 0.97) = 263840 is the margined bound.
-		expect(codexAccountFitsRequest(account, "claude-opus-4-8", 263_840)).toBe(
-			true,
-		);
-		expect(codexAccountFitsRequest(account, "claude-opus-4-8", 263_841)).toBe(
-			false,
-		);
+		expect(
+			codexAccountFitsRequest(account, "gpt-5.6-sol-2026-05-13", 263_840),
+		).toBe(true);
+		expect(
+			codexAccountFitsRequest(account, "gpt-5.6-sol-2026-05-13", 263_841),
+		).toBe(false);
 	});
 
 	test("unmargined gate resolves a dated target to its base window", () => {
-		const account = makeCodexAccount({
-			model_mappings: JSON.stringify({ opus: "gpt-5.6-sol-2026-05-13" }),
-		});
+		const account = makeCodexAccount({});
 		expect(
-			codexAccountFitsRequestUnmargined(account, "claude-opus-4-8", 272_000),
+			codexAccountFitsRequestUnmargined(
+				account,
+				"gpt-5.6-sol-2026-05-13",
+				272_000,
+			),
 		).toBe(true);
 		expect(
-			codexAccountFitsRequestUnmargined(account, "claude-opus-4-8", 272_001),
+			codexAccountFitsRequestUnmargined(
+				account,
+				"gpt-5.6-sol-2026-05-13",
+				272_001,
+			),
 		).toBe(false);
 	});
 
 	test("a non-date suffix stays unknown → fits (no false exclusion)", () => {
-		const account = makeCodexAccount({
-			model_mappings: JSON.stringify({ opus: "gpt-5.6-sol-foo" }),
-		});
-		expect(codexAccountFitsRequest(account, "claude-opus-4-8", 9_999_999)).toBe(
+		const account = makeCodexAccount({});
+		expect(codexAccountFitsRequest(account, "gpt-5.6-sol-foo", 9_999_999)).toBe(
 			true,
 		);
 		expect(
-			codexAccountFitsRequestUnmargined(account, "claude-opus-4-8", 9_999_999),
+			codexAccountFitsRequestUnmargined(account, "gpt-5.6-sol-foo", 9_999_999),
 		).toBe(true);
 	});
 });
 
-describe("resolveCodexTargetModel", () => {
-	test("prefers an explicit account mapping over the family default", () => {
-		const account = makeCodexAccount({
-			model_mappings: JSON.stringify({ opus: "gpt-5.3-codex-spark" }),
-		});
-		expect(resolveCodexTargetModel("claude-opus-4-7", account)).toBe(
-			"gpt-5.3-codex-spark",
-		);
-	});
-
-	test("falls back to the family default when no mapping exists", () => {
-		const account = makeCodexAccount({ model_mappings: null });
-		expect(resolveCodexTargetModel("claude-opus-4-7", account)).toBe(
-			"gpt-5.6-sol",
-		);
-		expect(resolveCodexTargetModel("claude-sonnet-4-5", account)).toBe(
-			"gpt-5.6-terra",
-		);
-		expect(resolveCodexTargetModel("claude-haiku-4-5", account)).toBe(
-			"gpt-5.6-luna",
-		);
-		expect(resolveCodexTargetModel("claude-fable-5", account)).toBe(
-			"gpt-6-astra",
-		);
-		expect(resolveCodexTargetModel("claude-mythos-5", account)).toBe(
-			"gpt-6-astra",
-		);
-	});
-
-	test("returns a non-Claude model with no mapping unchanged", () => {
-		const account = makeCodexAccount({ model_mappings: null });
-		expect(resolveCodexTargetModel("gpt-5.3-codex-spark", account)).toBe(
-			"gpt-5.3-codex-spark",
-		);
-	});
-
+describe("resolved Codex target boundary", () => {
 	test("DEFAULT_CODEX_MODEL_BY_FAMILY covers every family", () => {
 		expect(DEFAULT_CODEX_MODEL_BY_FAMILY).toEqual({
 			opus: "gpt-5.6-sol",
@@ -913,85 +651,41 @@ describe("resolveCodexTargetModel", () => {
 
 	test("boundary: exactly at floor(window * SAFETY_MARGIN) is accepted", () => {
 		// gpt-5.3-codex-spark: 128K * 0.85 = 108800 exactly
-		const account = makeCodexAccount({
-			model_mappings: JSON.stringify({ sonnet: "gpt-5.3-codex-spark" }),
-		});
+		const account = makeCodexAccount({});
 		const boundary = Math.floor(128_000 * SAFETY_MARGIN);
 		expect(
-			codexAccountFitsRequest(account, "claude-sonnet-4-5", boundary),
+			codexAccountFitsRequest(account, "gpt-5.3-codex-spark", boundary),
 		).toBe(true);
 		expect(
-			codexAccountFitsRequest(account, "claude-sonnet-4-5", boundary + 1),
+			codexAccountFitsRequest(account, "gpt-5.3-codex-spark", boundary + 1),
 		).toBe(false);
 	});
 });
 
 describe("claude-opus-5 routing", () => {
-	test("an opus-family account mapping applies to claude-opus-5", () => {
-		const account = makeCodexAccount({
-			provider: "openai-compatible",
-			model_mappings: JSON.stringify({ opus: "z-ai/glm-4.5-air:free" }),
-		});
-		expect(mapModelName("claude-opus-5", account)).toBe(
-			"z-ai/glm-4.5-air:free",
-		);
-	});
-
-	test("resolves to the opus family default Codex target", () => {
-		const account = makeCodexAccount({ model_mappings: null });
-		expect(resolveCodexTargetModel("claude-opus-5", account)).toBe(
-			"gpt-5.6-sol",
-		);
-	});
-
 	test("stays capped at the Codex backend window despite a 1M source model", () => {
 		// Opus 5 advertises a 1M context window, but once the request is rewritten
 		// to gpt-5.6-sol the gate is bound by the CODEX backend window (272K), not
 		// by the source model. Counterintuitive but correct: the request is served
 		// by Codex, so Codex's window is the constraint.
-		const account = makeCodexAccount({ model_mappings: null });
+		const account = makeCodexAccount({});
 		const boundary = Math.floor(272_000 * SAFETY_MARGIN);
-		expect(codexAccountFitsRequest(account, "claude-opus-5", boundary)).toBe(
+		expect(codexAccountFitsRequest(account, "gpt-5.6-sol", boundary)).toBe(
 			true,
 		);
+		expect(codexAccountFitsRequest(account, "gpt-5.6-sol", boundary + 1)).toBe(
+			false,
+		);
 		expect(
-			codexAccountFitsRequest(account, "claude-opus-5", boundary + 1),
-		).toBe(false);
-		expect(
-			codexAccountFitsRequestUnmargined(account, "claude-opus-5", 272_000),
+			codexAccountFitsRequestUnmargined(account, "gpt-5.6-sol", 272_000),
 		).toBe(true);
 		expect(
-			codexAccountFitsRequestUnmargined(account, "claude-opus-5", 272_001),
+			codexAccountFitsRequestUnmargined(account, "gpt-5.6-sol", 272_001),
 		).toBe(false);
-	});
-
-	test("an operator mapping pinned to claude-opus-4-8 deliberately wins", () => {
-		// Family mappings are not auto-migrated: an operator who pinned
-		// {"opus": "claude-opus-4-8"} keeps that explicit downgrade for Opus 5.
-		const account = makeCodexAccount({
-			provider: "anthropic",
-			model_mappings: JSON.stringify({ opus: "claude-opus-4-8" }),
-		});
-		expect(mapModelName("claude-opus-5", account)).toBe("claude-opus-4-8");
-	});
-
-	test("a version-specific claude-opus-4-8 mapping does not apply to Opus 5", () => {
-		// Exact-id mappings are checked before family mappings, so a mapping keyed
-		// on the 4.8 id leaves Opus 5 untouched.
-		const account = makeCodexAccount({
-			provider: "anthropic",
-			model_mappings: JSON.stringify({
-				"claude-opus-4-8": "z-ai/glm-4.5-air:free",
-			}),
-		});
-		expect(mapModelName("claude-opus-4-8", account)).toBe(
-			"z-ai/glm-4.5-air:free",
-		);
-		expect(mapModelName("claude-opus-5", account)).toBe("claude-opus-5");
 	});
 });
 
-function makeQwenAccount(overrides: Partial<Account> = {}): Account {
+function _makeQwenAccount(overrides: Partial<Account> = {}): Account {
 	return {
 		id: "qwen-1",
 		name: "qwen-test",
@@ -1022,159 +716,6 @@ describe("PROVIDER_DEFAULT_MODEL_MAPPINGS", () => {
 			haiku: "coder-model",
 			fable: "coder-model",
 		});
-	});
-
-	test("registers qwen and deliberately not codex", () => {
-		expect(PROVIDER_DEFAULT_MODEL_MAPPINGS.qwen).toBe(
-			DEFAULT_QWEN_MODEL_BY_FAMILY,
-		);
-		// Codex defaults apply through resolveCodexTargetModel / the Codex
-		// provider's own mapModel, never through the generic resolver.
-		expect(PROVIDER_DEFAULT_MODEL_MAPPINGS.codex).toBeUndefined();
-	});
-
-	test("all four families map to coder-model with NULL model_mappings", () => {
-		const account = makeQwenAccount({ model_mappings: null });
-		expect(mapModelName("claude-opus-4-8", account)).toBe("coder-model");
-		expect(mapModelName("claude-sonnet-5", account)).toBe("coder-model");
-		expect(mapModelName("claude-haiku-4-5", account)).toBe("coder-model");
-		expect(mapModelName("claude-fable-5", account)).toBe("coder-model");
-	});
-
-	test("mythos ids map through the fable family", () => {
-		const account = makeQwenAccount({ model_mappings: null });
-		expect(mapModelName("claude-mythos-5", account)).toBe("coder-model");
-	});
-
-	test("a partial custom mapping only overrides the families it names", () => {
-		const account = makeQwenAccount({
-			model_mappings: JSON.stringify({ opus: "custom-x" }),
-		});
-		expect(mapModelName("claude-opus-4-8", account)).toBe("custom-x");
-		expect(mapModelName("claude-sonnet-5", account)).toBe("coder-model");
-		expect(mapModelName("claude-haiku-4-5", account)).toBe("coder-model");
-		expect(mapModelName("claude-fable-5", account)).toBe("coder-model");
-	});
-
-	test("an exact model-id entry wins over its family default", () => {
-		const account = makeQwenAccount({
-			model_mappings: JSON.stringify({ "claude-fable-5": "special-model" }),
-		});
-		expect(mapModelName("claude-fable-5", account)).toBe("special-model");
-		// Other fable-family ids still take the default.
-		expect(mapModelName("claude-mythos-5", account)).toBe("coder-model");
-	});
-
-	test("array mapping values stay arrays with their order preserved", () => {
-		const account = makeQwenAccount({
-			model_mappings: JSON.stringify({ opus: ["first", "second", "third"] }),
-		});
-		expect(getModelList("claude-opus-4-8", account)).toEqual([
-			"first",
-			"second",
-			"third",
-		]);
-	});
-
-	test("the env override beats the provider defaults", () => {
-		process.env.OPENAI_COMPATIBLE_MODEL_MAPPINGS = JSON.stringify({
-			sonnet: "env-sonnet",
-		});
-		const account = makeQwenAccount({ model_mappings: null });
-		expect(mapModelName("claude-sonnet-5", account)).toBe("env-sonnet");
-		expect(mapModelName("claude-opus-4-8", account)).toBe("coder-model");
-	});
-
-	test("account mappings beat the env override", () => {
-		process.env.OPENAI_COMPATIBLE_MODEL_MAPPINGS = JSON.stringify({
-			sonnet: "env-sonnet",
-		});
-		const account = makeQwenAccount({
-			model_mappings: JSON.stringify({ sonnet: "account-sonnet" }),
-		});
-		expect(mapModelName("claude-sonnet-5", account)).toBe("account-sonnet");
-	});
-
-	test("legacy custom_endpoint mappings beat account mappings", () => {
-		const account = makeQwenAccount({
-			model_mappings: JSON.stringify({ sonnet: "account-sonnet" }),
-			custom_endpoint: JSON.stringify({
-				endpoint: "https://example.invalid",
-				modelMappings: { sonnet: "legacy-sonnet" },
-			}),
-		});
-		expect(mapModelName("claude-sonnet-5", account)).toBe("legacy-sonnet");
-	});
-
-	test("a missing-family model_fallbacks entry lands as a secondary behind the default", () => {
-		// Accepted behaviour change: with provider defaults seeded, a fallback for
-		// an unmapped family is appended behind the default instead of becoming the
-		// effective primary.
-		const account = makeQwenAccount({
-			model_mappings: null,
-			model_fallbacks: JSON.stringify({ opus: "fallback-opus" }),
-		});
-		expect(getModelList("claude-opus-4-8", account)).toEqual([
-			"coder-model",
-			"fallback-opus",
-		]);
-	});
-
-	test("invalid mapping values are skipped and cannot shadow a default", () => {
-		const account = makeQwenAccount({
-			model_mappings: JSON.stringify({
-				sonnet: null,
-				opus: 42,
-				haiku: [],
-				fable: [""],
-			}),
-		});
-		expect(mapModelName("claude-sonnet-5", account)).toBe("coder-model");
-		expect(mapModelName("claude-opus-4-8", account)).toBe("coder-model");
-		expect(mapModelName("claude-haiku-4-5", account)).toBe("coder-model");
-		expect(mapModelName("claude-fable-5", account)).toBe("coder-model");
-	});
-
-	test("an invalid env value is skipped and cannot shadow a default", () => {
-		process.env.OPENAI_COMPATIBLE_MODEL_MAPPINGS = JSON.stringify({
-			sonnet: null,
-		});
-		const account = makeQwenAccount({ model_mappings: null });
-		expect(mapModelName("claude-sonnet-5", account)).toBe("coder-model");
-	});
-
-	test("unparseable model_mappings JSON leaves the defaults intact", () => {
-		const account = makeQwenAccount({ model_mappings: "not-json" });
-		expect(mapModelName("claude-opus-4-8", account)).toBe("coder-model");
-	});
-
-	test("an empty {} mapping leaves the defaults intact", () => {
-		const account = makeQwenAccount({ model_mappings: "{}" });
-		expect(getModelMappings(account)).toEqual({
-			opus: "coder-model",
-			sonnet: "coder-model",
-			haiku: "coder-model",
-			fable: "coder-model",
-		});
-	});
-
-	test("a non-qwen account with no mapping configuration still bails to null", () => {
-		const account = makeQwenAccount({
-			provider: "openai-compatible",
-			model_mappings: null,
-		});
-		expect(getModelList("claude-opus-4-8", account)).toBeNull();
-		expect(mapModelName("claude-opus-4-8", account)).toBe("claude-opus-4-8");
-	});
-
-	test("an invalid value on a non-qwen account passes the model through unchanged", () => {
-		// Without value validation this returned the raw `null` as the outbound
-		// model name.
-		const account = makeQwenAccount({
-			provider: "openai-compatible",
-			model_mappings: JSON.stringify({ sonnet: null }),
-		});
-		expect(mapModelName("claude-sonnet-5", account)).toBe("claude-sonnet-5");
 	});
 });
 
@@ -1386,31 +927,6 @@ describe("measureBodyForEstimate (semantic-position payload stripping)", () => {
 
 describe("prototype-named models", () => {
 	for (const model of ["__proto__", "constructor"]) {
-		test(`passes ${model} through unless explicitly mapped`, () => {
-			const account = {
-				name: "test",
-				provider: "openai-compatible",
-				model_mappings: '{"sonnet":"target"}',
-				custom_endpoint: null,
-			} as Account;
-			expect(getModelList(model, account)).toEqual([model]);
-			expect(mapModelName(model, account)).toBe(model);
-			account.model_mappings = JSON.stringify({ [model]: "primary" });
-			account.model_fallbacks = JSON.stringify({ [model]: "fallback" });
-			const mappings = getModelMappings(account);
-			expect(Object.getPrototypeOf(mappings)).toBeNull();
-			expect(getModelList(model, account)).toEqual(["primary", "fallback"]);
-			account.model_mappings = "{}";
-			expect(getModelList(model, account)).toEqual(["fallback"]);
-			account.custom_endpoint = JSON.stringify({
-				modelMappings: { [model]: "legacy" },
-			});
-			expect(getModelList(model, account)).toEqual(["legacy", "fallback"]);
-			account.model_fallbacks = null;
-			account.custom_endpoint = null;
-			account.model_mappings = JSON.stringify({ [model]: {} });
-			expect(getModelList(model, account)).toEqual([model]);
-		});
 		test(`returns no context capacity for ${model}, including dated variants`, () => {
 			for (const name of [model, `${model}-2026-09-01`]) {
 				expect(resolveModelContextWindow(name)).toBeUndefined();

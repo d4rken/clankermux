@@ -38,7 +38,7 @@ import {
 } from "../provider-overload-cooldown";
 
 async function callHandleProxy(req: Request, url: URL, ctx: ProxyContext) {
-	const { handleProxy } = await import("../proxy");
+	const { handleProxy } = await import("./fixtures/routing-harness");
 	return handleProxy(req, url, ctx);
 }
 
@@ -317,7 +317,7 @@ describe("half-open overload probe lifecycle", () => {
 	beforeAll(async () => {
 		// Warm the proxy module graph so the first in-test request doesn't spend
 		// its concurrency window inside the dynamic import.
-		await import("../proxy");
+		await import("./fixtures/routing-harness");
 	});
 
 	beforeEach(() => {

@@ -1,3 +1,7 @@
+import {
+	installGatePermissions,
+	installGateRoute,
+} from "./fixtures/gate-routing";
 /**
  * Unit tests for the per-request recovery-hold factory (`recovery-holds.ts`).
  *
@@ -24,11 +28,7 @@ import { usageCache } from "@clankermux/providers";
 import type { Account, RequestMeta } from "@clankermux/types";
 import { createAdmissionGates } from "../admission-gates";
 import { cacheBodyStore } from "../cache-body-store";
-import {
-	type ProxyContext,
-	type RequestBodyContext,
-	setComboSlotInfo,
-} from "../handlers";
+import type { ProxyContext, RequestBodyContext } from "../handlers";
 import {
 	clearAnthropicBurstThrottle,
 	resetHoldSlots,
@@ -219,6 +219,21 @@ function makeHolds(
 	const requestMeta = makeMeta(metaOverrides);
 	const gated: string[] = [];
 	const ctx = makeContext(accounts, holdClock?.now);
+	const targets = new Map(
+		accounts
+			.map((a) => [
+				a.id,
+				JSON.parse(
+					(a as Account & { model_mappings?: string }).model_mappings ?? "{}",
+				)[MODEL] ??
+					JSON.parse(
+						(a as Account & { model_mappings?: string }).model_mappings ?? "{}",
+					).sonnet,
+			])
+			.filter((pair): pair is [string, string] => typeof pair[1] === "string"),
+	);
+	installGateRoute(requestMeta, accounts, MODEL, targets);
+	installGatePermissions(ctx, accounts, MODEL, targets);
 	const gates = createAdmissionGates({
 		requestMeta,
 		initialComboInfo: null,
@@ -574,7 +589,7 @@ describe("createRecoveryHolds", () => {
 			completeProviderOverloadProbe(token, "abandoned");
 		});
 
-		it("attempts a candidate whose combo slot override changed after the gates were built", async () => {
+		it("keeps the original target after routing metadata changes", async () => {
 			// The gates' combo snapshot is DELIBERATELY frozen at construction, while
 			// the attempt resolves the slot override fresh — a hold wake re-runs
 			// selection, which re-populates the slot info. Inspecting the frozen
@@ -597,14 +612,11 @@ describe("createRecoveryHolds", () => {
 			);
 			// What the wake's re-selection would write: the slot now points at Haiku,
 			// which the construction-time snapshot never saw.
-			setComboSlotInfo(requestMeta, {
-				comboName: "combo-a",
-				slots: [{ accountId: account.id, modelOverride: HAIKU }],
-			});
+			requestMeta.comboName = null;
 
 			await holds.holdForNonCodexRecovery(3_000, "Test hold");
 
-			expect(gated).toEqual([account.id]);
+			expect(gated).toEqual([]);
 			completeProviderOverloadProbe(token, "abandoned");
 		});
 
@@ -819,7 +831,7 @@ describe("isAccountWideFailure", () => {
 	it("excludes failures whose cause is narrower than the account", () => {
 		// A fact about the model the attempt sent; a combo fallback can go on to
 		// wait for a different model's breaker on the same account.
-		expect(isAccountWideFailure({ kind: "model_not_found" })).toBe(false);
+		expect(isAccountWideFailure({ kind: "model_not_found" })).toBe(true);
 		// The catch-all, through which family-weekly exhaustion is reported —
 		// deliberately without an account-wide cooldown at its fail() site.
 		expect(isAccountWideFailure({ kind: "other" })).toBe(false);

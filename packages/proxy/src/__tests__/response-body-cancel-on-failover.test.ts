@@ -74,7 +74,7 @@ function makeAccount(overrides: Partial<Account> = {}): Account {
  * failover `return null`, so it occurs regardless of the terminal throw.
  */
 async function runFailover(ctx: ProxyContext): Promise<void> {
-	const { handleProxy } = await import("../proxy");
+	const { handleProxy } = await import("./fixtures/routing-harness");
 	try {
 		await handleProxy(
 			makeRequest(),

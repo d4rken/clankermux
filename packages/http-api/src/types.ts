@@ -41,6 +41,7 @@ export interface ModelCatalogReader {
  * dependencies of its own.
  */
 export interface APIContext {
+	modelPermissions?: import("./handlers/routing").AccountPermissionReader;
 	db: BunSqlAdapter;
 	config: Config;
 	dbOps: DatabaseOperations;

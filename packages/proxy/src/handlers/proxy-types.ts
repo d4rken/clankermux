@@ -2,9 +2,11 @@ import type { Config, RuntimeConfig } from "@clankermux/config";
 import type { AsyncDbWriter, DatabaseOperations } from "@clankermux/database";
 import type { Provider } from "@clankermux/providers";
 import type { LoadBalancingStrategy } from "@clankermux/types";
+import type { AccountModelPermissionService } from "../account-model-permissions";
 import type { RequestRecorder } from "../request-recorder";
 
 export interface ProxyContext {
+	modelPermissions?: AccountModelPermissionService;
 	strategy: LoadBalancingStrategy;
 	dbOps: DatabaseOperations;
 	runtime: RuntimeConfig;

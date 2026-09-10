@@ -470,8 +470,6 @@ export async function listAccountResponses(
 			codex_auto_apply_reset_credits_enabled: 0 | 1;
 			codex_auto_apply_reset_on_weekly_limit_enabled: 0 | 1;
 			custom_endpoint: string | null;
-			model_mappings: string | null;
-			model_fallbacks: string | null;
 			billing_type: string | null;
 			pause_reason: string | null;
 			notes: string | null;
@@ -519,8 +517,6 @@ export async function listAccountResponses(
 					COALESCE(codex_auto_apply_reset_credits_enabled, 0) as codex_auto_apply_reset_credits_enabled,
 					COALESCE(codex_auto_apply_reset_on_weekly_limit_enabled, 0) as codex_auto_apply_reset_on_weekly_limit_enabled,
 
-					model_mappings,
-					model_fallbacks,
 					billing_type,
 					pause_reason,
 					notes,
@@ -1083,44 +1079,6 @@ export async function listAccountResponses(
 					usageThrottledWindows = usageThrottleStatus.throttledWindows;
 				}
 
-				// Parse model mappings for OpenAI-compatible, Anthropic-compatible, and OpenRouter providers
-				let modelMappings: { [key: string]: string } | null = null;
-				if (account.model_mappings) {
-					try {
-						const parsed = JSON.parse(account.model_mappings);
-						// Handle both formats: direct mappings or wrapped in modelMappings
-						modelMappings = parsed.modelMappings || parsed || null;
-					} catch {
-						// If parsing fails, ignore model mappings
-						modelMappings = null;
-					}
-				} else if (
-					account.provider === "openai-compatible" &&
-					account.custom_endpoint
-				) {
-					// Also try parsing from custom_endpoint for backwards compatibility
-					try {
-						const parsed = JSON.parse(account.custom_endpoint);
-						if (parsed.modelMappings) {
-							modelMappings = parsed.modelMappings;
-						}
-					} catch {
-						// If parsing fails, ignore model mappings
-						modelMappings = null;
-					}
-				}
-
-				// Parse model fallbacks for all providers
-				let modelFallbacks: { [key: string]: string } | null = null;
-				if (account.model_fallbacks) {
-					try {
-						const parsed = JSON.parse(account.model_fallbacks);
-						modelFallbacks = parsed.modelFallbacks || parsed || null;
-					} catch {
-						modelFallbacks = null;
-					}
-				}
-
 				// Revision anchors for the reading this response actually serves,
 				// keyed to ITS window resets — an anchor from another window instance
 				// must not ship with a reading it cannot re-anchor. Only the windowed
@@ -1147,7 +1105,6 @@ export async function listAccountResponses(
 						};
 					}
 				}
-
 				return {
 					id: account.id,
 					name: account.name,
@@ -1202,7 +1159,6 @@ export async function listAccountResponses(
 					autoApplyResetOnWeeklyLimitEnabled:
 						account.codex_auto_apply_reset_on_weekly_limit_enabled === 1,
 					customEndpoint: account.custom_endpoint,
-					modelMappings,
 					usageUtilization,
 					usageWindow,
 					usageData: fullUsageData, // Full usage data for UI
@@ -1240,7 +1196,6 @@ export async function listAccountResponses(
 					hasRefreshToken:
 						!!account.refresh_token &&
 						account.refresh_token !== account.access_token, // API-key providers store key in both fields
-					modelFallbacks,
 					billingType: account.billing_type,
 					notes: account.notes,
 					renewalAnchor: account.renewal_anchor ?? null,
@@ -1627,6 +1582,17 @@ export function createAccountRemoveHandler(dbOps: DatabaseOperations) {
 				message: result.message,
 			});
 		} catch (error) {
+			if (
+				error instanceof Error &&
+				/referenced by routing rules|referenced by routing rules or API key destinations/.test(
+					error.message,
+				)
+			) {
+				return Response.json(
+					{ error: `${error.message}. Edit or remove those references first.` },
+					{ status: 409 },
+				);
+			}
 			return errorResponse(
 				error instanceof Error ? error : new Error("Failed to remove account"),
 			);
@@ -2460,221 +2426,7 @@ export function createAccountCustomEndpointUpdateHandler(
 /**
  * Create an account model mappings update handler
  */
-export function createAccountModelMappingsUpdateHandler(
-	dbOps: DatabaseOperations,
-) {
-	return async (req: Request, accountId: string): Promise<Response> => {
-		try {
-			const body = await req.json();
 
-			// Get account to verify it supports model mappings
-			const db = dbOps.getAdapter();
-			const account = await db.get<{
-				provider: string;
-				custom_endpoint: string | null;
-			}>("SELECT provider, custom_endpoint FROM accounts WHERE id = ?", [
-				accountId,
-			]);
-
-			if (!account) {
-				return errorResponse(NotFound("Account not found"));
-			}
-
-			// Handle model mappings update
-			const modelMappings = body.modelMappings || {};
-
-			// Validate model mappings - values can be string or string[]
-			if (typeof modelMappings !== "object" || Array.isArray(modelMappings)) {
-				return errorResponse(BadRequest("Model mappings must be an object"));
-			}
-
-			for (const [_key, value] of Object.entries(modelMappings)) {
-				if (typeof value === "string") {
-					if (!value.trim()) {
-						return errorResponse(
-							BadRequest(
-								`Model mapping value for key '${_key}' must not be empty`,
-							),
-						);
-					}
-				} else if (Array.isArray(value)) {
-					if (value.length === 0) {
-						return errorResponse(
-							BadRequest(
-								`Model mapping array for key '${_key}' must not be empty`,
-							),
-						);
-					}
-					for (const item of value) {
-						if (typeof item !== "string" || !item.trim()) {
-							return errorResponse(
-								BadRequest(
-									`All model mapping array values for key '${_key}' must be non-empty strings`,
-								),
-							);
-						}
-					}
-				} else {
-					return errorResponse(
-						BadRequest(
-							"Model mapping values must be strings or arrays of strings",
-						),
-					);
-				}
-			}
-
-			// Build the new model mappings as a full replacement (not a merge).
-			// This ensures that sending an empty {} correctly clears all mappings.
-			const mergedModelMappings: Record<string, string | string[]> = {};
-
-			for (const [modelType, modelValue] of Object.entries(modelMappings)) {
-				if (typeof modelValue === "string") {
-					if (modelValue.trim()) {
-						mergedModelMappings[modelType] = modelValue.trim();
-					}
-				} else if (Array.isArray(modelValue)) {
-					const trimmed = modelValue
-						.map((v) => (typeof v === "string" ? v.trim() : ""))
-						.filter(Boolean);
-					if (trimmed.length > 0) {
-						mergedModelMappings[modelType] =
-							trimmed.length === 1 ? trimmed[0] : trimmed;
-					}
-				}
-			}
-
-			// Update the model_mappings field
-			const finalModelMappings =
-				Object.keys(mergedModelMappings).length > 0
-					? JSON.stringify(mergedModelMappings)
-					: null;
-
-			await db.run("UPDATE accounts SET model_mappings = ? WHERE id = ?", [
-				finalModelMappings,
-				accountId,
-			]);
-
-			log.info(`Updated model mappings for account ${accountId}`);
-
-			return jsonResponse({
-				success: true,
-				message: "Model mappings updated successfully",
-				modelMappings: mergedModelMappings,
-			});
-		} catch (error) {
-			log.error("Account model mappings update error:", error);
-			return errorResponse(
-				error instanceof Error
-					? error
-					: new Error("Failed to update model mappings"),
-			);
-		}
-	};
-}
-
-/**
- * Create an account model fallbacks update handler.
- * @deprecated Fallbacks are now merged into model_mappings as arrays.
- * This handler appends fallback models to existing model_mappings arrays.
- */
-export function createAccountModelFallbacksUpdateHandler(
-	dbOps: DatabaseOperations,
-) {
-	return async (req: Request, accountId: string): Promise<Response> => {
-		try {
-			const body = await req.json();
-
-			const db = dbOps.getAdapter();
-			const account = await db.get<{ id: string }>(
-				"SELECT id FROM accounts WHERE id = ?",
-				[accountId],
-			);
-
-			if (!account) {
-				return errorResponse(NotFound("Account not found"));
-			}
-
-			// Validate fallbacks input
-			const modelFallbacks = body.modelFallbacks || {};
-			if (typeof modelFallbacks !== "object" || Array.isArray(modelFallbacks)) {
-				return errorResponse(BadRequest("Model fallbacks must be an object"));
-			}
-			for (const [_key, value] of Object.entries(modelFallbacks)) {
-				if (typeof value !== "string" || !value.trim()) {
-					return errorResponse(
-						BadRequest("All model fallback values must be non-empty strings"),
-					);
-				}
-			}
-
-			// Get existing model_mappings and merge fallbacks into them
-			let existingMappings: Record<string, string | string[]> = {};
-			const result = await db.get<{ model_mappings: string | null }>(
-				"SELECT model_mappings FROM accounts WHERE id = ?",
-				[accountId],
-			);
-
-			if (result?.model_mappings) {
-				try {
-					const parsed = JSON.parse(result.model_mappings);
-					existingMappings = parsed.modelMappings || parsed || {};
-				} catch {
-					existingMappings = {};
-				}
-			}
-
-			// Merge: for each fallback, append to existing mapping array
-			for (const [modelType, fallbackValue] of Object.entries(modelFallbacks)) {
-				const existing = existingMappings[modelType];
-				const fallback = (fallbackValue as string).trim();
-
-				if (typeof existing === "string") {
-					// Promote single string to array with fallback appended
-					existingMappings[modelType] = [existing, fallback];
-				} else if (Array.isArray(existing)) {
-					if (!existing.includes(fallback)) {
-						existingMappings[modelType] = [...existing, fallback];
-					}
-				} else {
-					existingMappings[modelType] = fallback;
-				}
-			}
-
-			const finalMappings =
-				Object.keys(existingMappings).length > 0
-					? JSON.stringify(existingMappings)
-					: null;
-
-			await db.run(
-				"UPDATE accounts SET model_mappings = ?, model_fallbacks = NULL WHERE id = ?",
-				[finalMappings, accountId],
-			);
-
-			log.info(
-				`Merged model fallbacks into model_mappings for account ${accountId}`,
-			);
-
-			return jsonResponse({
-				success: true,
-				message: "Model fallbacks merged into model mappings",
-				modelMappings: existingMappings,
-			});
-		} catch (error) {
-			log.error("Account model fallbacks update error:", error);
-			return errorResponse(
-				error instanceof Error
-					? error
-					: new Error("Failed to update model fallbacks"),
-			);
-		}
-	};
-}
-
-/**
- * Create an account force-reset rate limit handler
- * Clears account lock fields, provider overload cooldown, and triggers
- * immediate usage refresh when possible.
- */
 export function createAccountForceResetRateLimitHandler(
 	dbOps: DatabaseOperations,
 ) {

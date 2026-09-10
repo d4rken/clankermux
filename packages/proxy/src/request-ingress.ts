@@ -329,7 +329,7 @@ export async function ingestProxyRequest(
 		return new Response(finalBodyBuffer).body ?? undefined;
 	};
 
-	const effectiveRequestModel = requestBodyContext.getModel() ?? requestModel;
+	let effectiveRequestModel = requestBodyContext.getModel() ?? requestModel;
 
 	// 4. Create request metadata
 	const requestMeta = createRequestMetadata(req, url);
@@ -337,6 +337,26 @@ export async function ingestProxyRequest(
 	// onto the RequestMeta so it reaches each per-account attempt downstream.
 	const nativeResponsesCtx = getNativeResponsesRequestContext(req);
 	if (nativeResponsesCtx) {
+		try {
+			const native = JSON.parse(nativeResponsesCtx.nativeBody);
+			if (typeof native.model !== "string" || !native.model.trim())
+				throw new Error("Missing native model");
+			effectiveRequestModel = native.model;
+		} catch {
+			return {
+				kind: "response",
+				response: Response.json(
+					{
+						type: "error",
+						error: {
+							type: "invalid_request_error",
+							message: "Invalid native Responses body or model",
+						},
+					},
+					{ status: 400 },
+				),
+			};
+		}
 		setNativeResponsesMetaContext(requestMeta, nativeResponsesCtx);
 	}
 	requestMeta.internal = isInternal;

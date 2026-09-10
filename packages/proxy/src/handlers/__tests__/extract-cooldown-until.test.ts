@@ -1,6 +1,6 @@
 import { describe, expect, it } from "bun:test";
 import { TIME_CONSTANTS } from "@clankermux/core";
-import { extractCooldownUntil } from "../proxy-operations";
+import { extractCooldownUntil } from "../../__tests__/fixtures/routing-harness";
 
 const ACCOUNT_ID = "acct-test";
 const MIN_COOLDOWN_MS = 60 * 1000;

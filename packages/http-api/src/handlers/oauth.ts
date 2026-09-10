@@ -124,9 +124,9 @@ export function createQwenDeviceFlowInitHandler(dbOps: DatabaseOperations) {
 						`INSERT INTO accounts (
 							id, name, provider, api_key, refresh_token, access_token,
 							expires_at, created_at, request_count, total_requests, priority,
-							custom_endpoint, model_mappings, model_fallbacks,
+							custom_endpoint,
 							auto_pause_on_overage_enabled
-						) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, 0, ?, ?, ?, ?, 1)`,
+						) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, 0, ?, ?, 1)`,
 						[
 							accountId,
 							name,
@@ -138,8 +138,6 @@ export function createQwenDeviceFlowInitHandler(dbOps: DatabaseOperations) {
 							now,
 							priority,
 							resourceUrl,
-							null,
-							null,
 						],
 						name,
 					);
@@ -422,11 +420,11 @@ export function createCodexDeviceFlowInitHandler(dbOps: DatabaseOperations) {
 						`INSERT INTO accounts (
 							id, name, provider, api_key, refresh_token, access_token,
 							expires_at, created_at, request_count, total_requests, priority,
-							custom_endpoint, model_mappings, model_fallbacks,
+							custom_endpoint,
 							identity_external_id, identity_email, identity_plan_tier,
 							identity_captured_at,
 							auto_pause_on_overage_enabled
-						) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, 0, ?, ?, ?, ?, ?, ?, ?, ?, 1)`,
+						) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, 0, ?, ?, ?, ?, ?, ?, 1)`,
 						[
 							accountId,
 							name,
@@ -437,8 +435,6 @@ export function createCodexDeviceFlowInitHandler(dbOps: DatabaseOperations) {
 							now + tokens.expires_in * 1000,
 							now,
 							priority,
-							null,
-							null,
 							null,
 							identity?.externalAccountId ?? null,
 							identity?.email ?? null,

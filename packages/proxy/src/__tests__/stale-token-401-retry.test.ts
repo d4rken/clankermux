@@ -202,7 +202,7 @@ async function runProxy(
 	ctx: ProxyContext,
 	req = makeRequest(),
 ): Promise<Response | null> {
-	const { handleProxy } = await import("../proxy");
+	const { handleProxy } = await import("./fixtures/routing-harness");
 	try {
 		return await handleProxy(
 			req,

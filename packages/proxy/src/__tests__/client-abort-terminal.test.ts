@@ -34,7 +34,7 @@ import {
 import { clearProviderOverloadCooldown } from "../provider-overload-cooldown";
 
 async function callHandleProxy(req: Request, url: URL, ctx: ProxyContext) {
-	const { handleProxy } = await import("../proxy");
+	const { handleProxy } = await import("./fixtures/routing-harness");
 	return handleProxy(req, url, ctx);
 }
 
@@ -693,7 +693,7 @@ describe("client-abort terminals", () => {
 		const { handleResponsesRequest } = await import(
 			"@clankermux/openai-responses-adapter"
 		);
-		const { handleProxy } = await import("../proxy");
+		const { handleProxy } = await import("./fixtures/routing-harness");
 
 		// Non-official-Anthropic account (the adapter's unconditional Codex-CLI
 		// floor drops official Claude accounts), resolved through the ctx fallback
@@ -878,7 +878,7 @@ describe("client-abort terminals", () => {
 		// if the attempt-level terminal returned `null` (signalling failover) or
 		// skipped its own `discardStaged`, nothing else in this call could
 		// substitute for either.
-		const { proxyWithAccount } = await import("../handlers");
+		const { proxyWithAccount } = await import("./fixtures/routing-harness");
 		cacheBodyStore.setEnabled(true);
 		const baseline = cacheBodyStore.getStagingSize();
 
@@ -986,7 +986,7 @@ describe("client-abort terminals", () => {
 		// fetch. Without a matching abort check, that change would turn every
 		// client disconnect into a recorded forced-account failure (a local 502 plus
 		// a Request History row) — trading a leak for a new mis-classification.
-		const { proxyForcedAccount } = await import("../handlers");
+		const { proxyForcedAccount } = await import("./fixtures/routing-harness");
 		const account = makeApiKeyPool(1)[0];
 		const ctx = makeContext([account], makeRoundRobinStrategy());
 
@@ -1008,7 +1008,7 @@ describe("client-abort terminals", () => {
 			new URL("https://proxy.local/v1/messages"),
 			account,
 			requestMeta,
-			null,
+			await makeRequest().arrayBuffer(),
 			ctx,
 		);
 
@@ -1043,7 +1043,7 @@ describe("client-abort terminals", () => {
 		// that catch, a disconnect racing a failing refresh becomes a recorded
 		// forced-account failure (local 502 + Request History row) — the same
 		// defect the outer check fixed, one site short.
-		const { proxyForcedAccount } = await import("../handlers");
+		const { proxyForcedAccount } = await import("./fixtures/routing-harness");
 		// OAuth account with an already-expired access token, so
 		// getValidAccessToken must go to the network to refresh.
 		const account = makeAccount({
@@ -1090,7 +1090,7 @@ describe("client-abort terminals", () => {
 			new URL("https://proxy.local/v1/messages"),
 			account,
 			requestMeta,
-			null,
+			await makeRequest().arrayBuffer(),
 			ctx,
 		);
 

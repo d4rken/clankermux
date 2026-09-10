@@ -534,7 +534,7 @@ describe("CodexProvider request conversion", () => {
 		);
 	});
 
-	it("downgrades efforts unsupported by the mapped Codex model", async () => {
+	it("downgrades efforts unsupported by the resolved Codex model", async () => {
 		const provider = new CodexProvider();
 		const account = {
 			model_mappings: JSON.stringify({ sonnet: "gpt-5.4-mini" }),
@@ -544,7 +544,7 @@ describe("CodexProvider request conversion", () => {
 			method: "POST",
 			headers: { "content-type": "application/json" },
 			body: JSON.stringify({
-				model: "claude-3-5-sonnet-20241022",
+				model: "gpt-5.4-mini",
 				max_tokens: 100,
 				reasoning: { effort: "xhigh" },
 				messages: [{ role: "user", content: "Hello" }],
@@ -2071,7 +2071,7 @@ describe("CodexProvider upstream error code classification", () => {
 });
 
 describe("CodexProvider.transformRequestBody", () => {
-	it("maps sonnet-family models to the default Codex model", async () => {
+	it("preserves a Claude-shaped literal target", async () => {
 		const provider = new CodexProvider();
 		const request = new Request("https://example.com/v1/messages", {
 			method: "POST",
@@ -2086,10 +2086,10 @@ describe("CodexProvider.transformRequestBody", () => {
 		const transformed = await provider.transformRequestBody(request, undefined);
 		const body = await transformed.json();
 
-		expect(body.model).toBe("gpt-5.6-terra");
+		expect(body.model).toBe("claude-3-7-sonnet");
 	});
 
-	it("maps fable and mythos models to the top Codex tier (GPT-6 Astra)", async () => {
+	it("preserves literal Fable and Mythos targets without applying defaults", async () => {
 		const provider = new CodexProvider();
 		for (const model of [
 			"claude-fable-5",
@@ -2113,11 +2113,11 @@ describe("CodexProvider.transformRequestBody", () => {
 			);
 			const body = await transformed.json();
 
-			expect(body.model).toBe("gpt-6-astra");
+			expect(body.model).toBe(model);
 		}
 	});
 
-	it("uses account sonnet mapping for sonnet-family models", async () => {
+	it("ignores a retired account mapping", async () => {
 		const provider = new CodexProvider();
 		const account = {
 			model_mappings: JSON.stringify({ sonnet: "gpt-5.3-codex-spark" }),
@@ -2135,10 +2135,10 @@ describe("CodexProvider.transformRequestBody", () => {
 		const transformed = await provider.transformRequestBody(request, account);
 		const body = await transformed.json();
 
-		expect(body.model).toBe("gpt-5.3-codex-spark");
+		expect(body.model).toBe("claude-3-7-sonnet");
 	});
 
-	it("uses first model when account mapping value is an ordered array", async () => {
+	it("ignores a retired ordered model mapping", async () => {
 		const provider = new CodexProvider();
 		const account = {
 			model_mappings: JSON.stringify({
@@ -2158,10 +2158,10 @@ describe("CodexProvider.transformRequestBody", () => {
 		const transformed = await provider.transformRequestBody(request, account);
 		const body = await transformed.json();
 
-		expect(body.model).toBe("gpt-5.3-codex-spark");
+		expect(body.model).toBe("claude-3-7-sonnet");
 	});
 
-	it("uses default Codex mapping for families missing from account mappings", async () => {
+	it("does not apply family defaults in the adapter", async () => {
 		const provider = new CodexProvider();
 		const account = {
 			model_mappings: JSON.stringify({ sonnet: "gpt-5.3-codex-spark" }),
@@ -2179,7 +2179,7 @@ describe("CodexProvider.transformRequestBody", () => {
 		const transformed = await provider.transformRequestBody(request, account);
 		const body = await transformed.json();
 
-		expect(body.model).toBe("gpt-5.6-luna");
+		expect(body.model).toBe("claude-3-haiku");
 	});
 
 	it("passes through unknown model names unchanged", async () => {
@@ -2460,7 +2460,7 @@ describe("CodexProvider native Responses passthrough", () => {
 		const transformed = await provider.transformRequestBody(request, undefined);
 		const body = await transformed.json();
 
-		expect(body.model).toBe("gpt-5.6-terra");
+		expect(body.model).toBe("claude-3-7-sonnet");
 		expect(body.input).toEqual([
 			{ role: "user", content: [{ type: "input_text", text: "hello" }] },
 		]);
@@ -2659,7 +2659,7 @@ describe("CodexProvider ChatGPT-backend parameter sanitation", () => {
 			method: "POST",
 			headers: { "content-type": "application/json" },
 			body: JSON.stringify({
-				model: "claude-3-7-sonnet",
+				model: "gpt-5.6-terra",
 				max_tokens: 10,
 				messages: [{ role: "user", content: "hello" }],
 				...payload,
@@ -2820,7 +2820,7 @@ describe("CodexProvider ChatGPT-backend parameter sanitation", () => {
 		// `none` short-circuit must not swallow `minimal` on the way past: that
 		// would send `none` where the target model's documented minimum is `low`.
 		const body = await translatedTransform(
-			{ reasoning: { effort: "minimal" } },
+			{ model: "gpt-5.4-mini", reasoning: { effort: "minimal" } },
 			codexAccount({
 				model_mappings: JSON.stringify({ sonnet: "gpt-5.4-mini" }),
 			}),
@@ -2841,7 +2841,7 @@ describe("CodexProvider ChatGPT-backend parameter sanitation", () => {
 	it("raises none to low when the translated target is GPT-6", async () => {
 		// gpt-6-astra's catalog levels start at `low`; `none` is a 5.x-only value.
 		const body = await translatedTransform(
-			{ model: "claude-fable-5-1", reasoning: { effort: "none" } },
+			{ model: "gpt-6-astra", reasoning: { effort: "none" } },
 			codexAccount({ model_mappings: null }),
 		);
 		expect(body.model).toBe("gpt-6-astra");
@@ -2853,21 +2853,21 @@ describe("CodexProvider ChatGPT-backend parameter sanitation", () => {
 		// so like `none` it short-circuits the resolver and lands in the
 		// generation-aware clamp: preserved for GPT-6, lowered for 5.x.
 		const astraMax = await translatedTransform(
-			{ model: "claude-fable-5-1", reasoning: { effort: "max" } },
+			{ model: "gpt-6-astra", reasoning: { effort: "max" } },
 			codexAccount({ model_mappings: null }),
 		);
 		expect(astraMax.model).toBe("gpt-6-astra");
 		expect(astraMax.reasoning).toEqual({ effort: "max" });
 
 		const astraUltra = await translatedTransform(
-			{ model: "claude-fable-5-1", reasoning: { effort: "ultra" } },
+			{ model: "gpt-6-astra", reasoning: { effort: "ultra" } },
 			codexAccount({ model_mappings: null }),
 		);
 		expect(astraUltra.model).toBe("gpt-6-astra");
 		expect(astraUltra.reasoning).toEqual({ effort: "ultra" });
 
 		const solUltra = await translatedTransform(
-			{ model: "claude-opus-4-7", reasoning: { effort: "ultra" } },
+			{ model: "gpt-5.6-sol", reasoning: { effort: "ultra" } },
 			codexAccount({ model_mappings: null }),
 		);
 		expect(solUltra.model).toBe("gpt-5.6-sol");

@@ -46,7 +46,7 @@ async function callHandleProxy(
 	ctx: ProxyContext,
 	isInternal = false,
 ) {
-	const { handleProxy } = await import("../proxy");
+	const { handleProxy } = await import("./fixtures/routing-harness");
 	return handleProxy(req, url, ctx, null, null, isInternal);
 }
 
@@ -213,7 +213,7 @@ describe("handleProxy live-dashboard ingress events", () => {
 	let capture: (evt: RequestEvt) => void;
 
 	beforeAll(async () => {
-		await import("../proxy");
+		await import("./fixtures/routing-harness");
 	});
 
 	beforeEach(() => {

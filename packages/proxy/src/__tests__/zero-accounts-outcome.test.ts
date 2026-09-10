@@ -1,3 +1,7 @@
+import {
+	installGatePermissions,
+	installGateRoute,
+} from "./fixtures/gate-routing";
 /**
  * CONTRACT tests for `resolveZeroAccountsOutcome` — the extracted zero-accounts
  * terminal — called directly with stub gates/holds/recorder.
@@ -21,7 +25,7 @@ import { NETWORK } from "@clankermux/core";
 import type { Account, ComboSlotInfo, RequestMeta } from "@clankermux/types";
 import type { AdmissionGates } from "../admission-gates";
 import { cacheBodyStore } from "../cache-body-store";
-import { setComboSlotInfo, setForcedAccount } from "../handlers";
+import { setForcedAccount } from "../handlers";
 import {
 	clearAnthropicBurstThrottle,
 	resetHoldSlots,
@@ -160,7 +164,6 @@ function makeHarness(opts: HarnessOptions = {}): Harness {
 		pinFailure,
 		...(comboName ? { comboName } : {}),
 	} as unknown as RequestMeta;
-	if (currentComboInfo) setComboSlotInfo(requestMeta, currentComboInfo);
 
 	const recorded: string[] = [];
 	let bumps = 0;
@@ -228,6 +231,26 @@ function makeHarness(opts: HarnessOptions = {}): Harness {
 			suppressed: false,
 		}),
 	};
+
+	const targets = new Map(
+		accounts
+			.map((a) => [
+				a.id,
+				currentComboInfo?.slots.find((slot) => slot.accountId === a.id)
+					?.modelOverride ??
+					JSON.parse(
+						(a as Account & { model_mappings?: string }).model_mappings ?? "{}",
+					)[MODEL],
+			])
+			.filter((pair): pair is [string, string] => typeof pair[1] === "string"),
+	);
+	installGateRoute(
+		requestMeta,
+		[...accounts, ...contextExcludedAccounts.map((e) => e.account)],
+		MODEL,
+		targets,
+	);
+	installGatePermissions(deps.ctx, accounts, MODEL, targets);
 
 	return {
 		deps,
@@ -573,12 +596,12 @@ describe("resolveZeroAccountsOutcome contracts", () => {
 	});
 
 	it("arms exactly one re-arm interval per hold and clears it on exit (CW hold)", async () => {
-		const excluded = makeAccount({ id: uniqueId("acc") });
+		const excluded = makeAccount({ id: uniqueId("acc"), provider: "codex" });
 		const harness = makeHarness({
 			// Beyond every backend's FULL window, so the last-resort relaxation has no
 			// candidate and the size verdict returns from inside the try block.
 			gateTokenEstimate: 5_000_000,
-			contextExcludedAccounts: [{ account: excluded, model: MODEL }],
+			contextExcludedAccounts: [{ account: excluded, model: "gpt-5.6-sol" }],
 		});
 
 		const { result, created, cleared } = await withRearmIntervalSpy(() =>
@@ -653,7 +676,7 @@ describe("resolveZeroAccountsOutcome contracts", () => {
 
 	it("returns the staged body to baseline on the context-window fall-through", async () => {
 		const requestId = uniqueId("req");
-		const excluded = makeAccount({ id: uniqueId("acc") });
+		const excluded = makeAccount({ id: uniqueId("acc"), provider: "codex" });
 		const baseline = cacheBodyStore.getStagingSize();
 		cacheBodyStore.setEnabled(true);
 		cacheBodyStore.stageRequest(
@@ -670,7 +693,7 @@ describe("resolveZeroAccountsOutcome contracts", () => {
 		const harness = makeHarness({
 			requestId,
 			gateTokenEstimate: 5_000_000,
-			contextExcludedAccounts: [{ account: excluded, model: MODEL }],
+			contextExcludedAccounts: [{ account: excluded, model: "gpt-5.6-sol" }],
 		});
 		const res = await resolveZeroAccountsOutcome(harness.deps);
 
@@ -689,10 +712,10 @@ describe("resolveZeroAccountsOutcome contracts", () => {
 	});
 
 	it("records NOTHING when the client disconnects during the context-window hold", async () => {
-		const excluded = makeAccount({ id: uniqueId("acc") });
+		const excluded = makeAccount({ id: uniqueId("acc"), provider: "codex" });
 		const harness = makeHarness({
 			gateTokenEstimate: 5_000_000,
-			contextExcludedAccounts: [{ account: excluded, model: MODEL }],
+			contextExcludedAccounts: [{ account: excluded, model: "gpt-5.6-sol" }],
 		});
 		harness.abort();
 

@@ -1,13 +1,14 @@
 import { describe, expect, it, mock } from "bun:test";
 import type { Account } from "@clankermux/types";
 import type { ProxyContext } from "../handlers";
+import { configureLiteralRoute } from "./fixtures/routing-harness";
 
 mock.module("../inline-worker", () => ({
 	EMBEDDED_WORKER_CODE: "",
 }));
 
 async function callHandleProxy(req: Request, url: URL, ctx: ProxyContext) {
-	const { handleProxy } = await import("../proxy");
+	const { handleProxy } = await import("./fixtures/routing-harness");
 	return handleProxy(req, url, ctx);
 }
 
@@ -124,10 +125,17 @@ describe("context-window gate", () => {
 		const account = makeAccount({
 			model_mappings: JSON.stringify({ opus: "gpt-6-astra" }),
 		});
+		const ctx = makeContext([account]);
+		await configureLiteralRoute(
+			ctx,
+			"claude-opus-4-7",
+			account.id,
+			"gpt-6-astra",
+		);
 		const response = await callHandleProxy(
 			makeLargeRequest(900_000),
 			new URL("https://proxy.local/v1/messages"),
-			makeContext([account]),
+			ctx,
 		);
 		expect(response.status).toBe(400);
 		const body = await response.json();
@@ -160,7 +168,7 @@ describe("context-window gate", () => {
 		const error = body.error as Record<string, unknown>;
 		expect(error.type).toBe("context_window_exceeded");
 		expect(typeof error.message).toBe("string");
-		expect(error.message as string).toContain("gpt-5.5");
+		expect(error.message as string).toContain("gpt-5.6-sol");
 		expect(error.estimated_tokens).toBeGreaterThan(0);
 		expect(Array.isArray(error.excluded_backends)).toBe(true);
 	});
@@ -315,11 +323,11 @@ describe("context-window gate", () => {
 		expect(error.type).toBe("context_window_exceeded");
 	});
 
-	it("gates a combo-routed codex account on the slot's model override (not the family default)", async () => {
+	it("gates a rule-routed codex account on the resolved literal target (not the family default)", async () => {
 		// Account default mapping: opus→gpt-5.5 (272K, threshold 263840).
 		// Combo slot overrides model to gpt-5.3-codex-spark (128K, threshold 124160).
 		// A request estimated between 124160 and 263840 passes the family-default
-		// gate but must be excluded by the combo slot's smaller-window model.
+		// gate but must be excluded by the literal route's smaller-window model.
 		const codexAccount = makeAccount({
 			id: "codex-combo",
 			name: "Codex-combo",
@@ -329,20 +337,12 @@ describe("context-window gate", () => {
 
 		const ctx = makeContext([codexAccount]);
 		// Combo returns one slot overriding the model to gpt-5.3-codex-spark
-		(
-			ctx.dbOps as unknown as {
-				getActiveComboForFamily: ReturnType<typeof mock>;
-			}
-		).getActiveComboForFamily = mock(async () => ({
-			name: "test-combo",
-			slots: [
-				{
-					account_id: "codex-combo",
-					model: "gpt-5.3-codex-spark",
-					enabled: true,
-				},
-			],
-		}));
+		await configureLiteralRoute(
+			ctx,
+			"claude-opus-4-7",
+			codexAccount.id,
+			"gpt-5.3-codex-spark",
+		);
 
 		// Estimate ~150K (above 124160 threshold for gpt-5.3-codex-spark,
 		// below 263840 threshold for gpt-5.5)
@@ -353,7 +353,7 @@ describe("context-window gate", () => {
 			ctx,
 		);
 
-		// The combo slot's gpt-5.3-codex-spark (128K) excludes the account → 400
+		// The literal route's gpt-5.3-codex-spark (128K) excludes the account → 400
 		expect(response.status).toBe(400);
 		const body = (await response.json()) as Record<string, unknown>;
 		const error = body.error as Record<string, unknown>;

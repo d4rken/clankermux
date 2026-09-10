@@ -31,7 +31,7 @@ interface AccountListProps {
 	onAutoApplyResetCreditsToggle?: (account: Account) => void;
 	onAutoApplyResetOnWeeklyLimitToggle?: (account: Account) => void;
 	onCustomEndpointChange?: (account: Account) => void;
-	onModelMappingsChange?: (account: Account) => void;
+	onModelPermissionsChange?: (account: Account) => void;
 	onReauth?: (account: Account) => void;
 	onAnthropicReauth?: (account: Account) => void;
 	onCodexReauth?: (account: Account) => void;
@@ -59,7 +59,7 @@ export function AccountList({
 	onAutoApplyResetCreditsToggle,
 	onAutoApplyResetOnWeeklyLimitToggle,
 	onCustomEndpointChange,
-	onModelMappingsChange,
+	onModelPermissionsChange,
 	onReauth,
 	onAnthropicReauth,
 	onCodexReauth,
@@ -154,7 +154,7 @@ export function AccountList({
 						onAutoApplyResetOnWeeklyLimitToggle
 					}
 					onCustomEndpointChange={onCustomEndpointChange}
-					onModelMappingsChange={onModelMappingsChange}
+					onModelPermissionsChange={onModelPermissionsChange}
 					onReauth={onReauth}
 					onAnthropicReauth={onAnthropicReauth}
 					onCodexReauth={onCodexReauth}

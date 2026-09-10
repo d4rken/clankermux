@@ -1,12 +1,15 @@
 import { afterEach, beforeEach, describe, expect, it, mock } from "bun:test";
 import { usageCache } from "@clankermux/providers";
 import type { Account, RequestMeta } from "@clankermux/types";
+import {
+	proxyWithAccount,
+	routingAttempts,
+} from "../../__tests__/fixtures/routing-harness";
 import { clearProviderOverloadCooldown } from "../../provider-overload-cooldown";
 import {
 	clearAnthropicBurstThrottle,
 	isAnthropicBurstThrottleActive,
 } from "../burst-cooldown";
-import { proxyWithAccount } from "../proxy-operations";
 import type { ProxyContext } from "../proxy-types";
 
 /**
@@ -118,7 +121,7 @@ function seedWeeklyHealthy() {
 type SaveRequestCall = Record<string, unknown>;
 
 function makeProxyContext() {
-	const saveRequestCalls: SaveRequestCall[] = [];
+	const attemptCalls: SaveRequestCall[] = [];
 	const markCalls: Array<{ id: string; until: number; reason: string }> = [];
 	const ctx = {
 		strategy: { getNextAccount: () => null } as never,
@@ -136,7 +139,7 @@ function makeProxyContext() {
 				},
 			),
 			saveRequest: mock((data: SaveRequestCall) => {
-				saveRequestCalls.push(data);
+				attemptCalls.push(data);
 				return Promise.resolve();
 			}),
 			updateAccountUsage: mock(() => Promise.resolve()),
@@ -180,7 +183,7 @@ function makeProxyContext() {
 			dispose: mock(() => {}),
 		} as never,
 	} as unknown as ProxyContext;
-	return { ctx, saveRequestCalls, markCalls };
+	return { ctx, attemptCalls: routingAttempts(ctx), markCalls };
 }
 
 function makeRequest(body: ArrayBuffer, headers: Record<string, string> = {}) {
@@ -211,7 +214,7 @@ function rejected429() {
 }
 
 function reasonsFrom(calls: SaveRequestCall[]): unknown[] {
-	return calls.map((row) => row.errorMessage);
+	return calls.map((row) => row.error);
 }
 
 describe("proxyWithAccount — account-wide weekly-exhausted 429", () => {
@@ -235,7 +238,7 @@ describe("proxyWithAccount — account-wide weekly-exhausted 429", () => {
 		globalThis.fetch = mock(async () => rejected429());
 		seedWeeklyExhausted();
 
-		const { ctx, saveRequestCalls, markCalls } = makeProxyContext();
+		const { ctx, attemptCalls, markCalls } = makeProxyContext();
 		const account = makeOAuthAnthropicAccount();
 		const bodyBuffer = makeRequestBody("claude-opus-4-8");
 		const before = Date.now();
@@ -254,13 +257,13 @@ describe("proxyWithAccount — account-wide weekly-exhausted 429", () => {
 		// Failed over rather than forwarding the 429.
 		expect(result).toBeNull();
 		// The audit row names the real cause...
-		const row = saveRequestCalls.find(
-			(row) => row.errorMessage === "weekly_exhausted_429",
+		const row = attemptCalls.find(
+			(row) => row.error === "weekly_exhausted_429",
 		);
 		expect(row).toBeDefined();
-		expect(row?.usage).toEqual({ model: "claude-opus-4-8" });
+		expect(row?.resolved_model).toBe("claude-opus-4-8");
 		// ...and burst-retry was never entered.
-		expect(reasonsFrom(saveRequestCalls)).not.toContain("model_fallback_429");
+		expect(reasonsFrom(attemptCalls)).not.toContain("model_fallback_429");
 		expect(isAnthropicBurstThrottleActive()).toBe(false);
 		// The cooldown deadline is the unchanged extractCooldownUntil value: the
 		// 429's retry-after, NOT the (much later) weekly reset.
@@ -279,7 +282,7 @@ describe("proxyWithAccount — account-wide weekly-exhausted 429", () => {
 		globalThis.fetch = mock(async () => rejected429());
 		seedWeeklyHealthy();
 
-		const { ctx, saveRequestCalls } = makeProxyContext();
+		const { ctx, attemptCalls } = makeProxyContext();
 		const account = makeOAuthAnthropicAccount();
 		const bodyBuffer = makeRequestBody("claude-opus-4-8");
 
@@ -294,14 +297,14 @@ describe("proxyWithAccount — account-wide weekly-exhausted 429", () => {
 			ctx,
 		);
 
-		expect(reasonsFrom(saveRequestCalls)).not.toContain("weekly_exhausted_429");
+		expect(reasonsFrom(attemptCalls)).not.toContain("weekly_exhausted_429");
 	});
 
 	it("fails open to today's behaviour when usage is absent/stale", async () => {
 		globalThis.fetch = mock(async () => rejected429());
 		// No usage cache entry ⇒ getFreshCapacity returns null ⇒ no evidence.
 
-		const { ctx, saveRequestCalls } = makeProxyContext();
+		const { ctx, attemptCalls } = makeProxyContext();
 		const account = makeOAuthAnthropicAccount();
 		const bodyBuffer = makeRequestBody("claude-opus-4-8");
 
@@ -316,14 +319,14 @@ describe("proxyWithAccount — account-wide weekly-exhausted 429", () => {
 			ctx,
 		);
 
-		expect(reasonsFrom(saveRequestCalls)).not.toContain("weekly_exhausted_429");
+		expect(reasonsFrom(attemptCalls)).not.toContain("weekly_exhausted_429");
 	});
 
 	it("is skipped in reprobe mode (the hold orchestrator owns that outcome)", async () => {
 		globalThis.fetch = mock(async () => rejected429());
 		seedWeeklyExhausted();
 
-		const { ctx, saveRequestCalls } = makeProxyContext();
+		const { ctx, attemptCalls } = makeProxyContext();
 		const account = makeOAuthAnthropicAccount();
 		const bodyBuffer = makeRequestBody("claude-opus-4-8");
 
@@ -336,10 +339,15 @@ describe("proxyWithAccount — account-wide weekly-exhausted 429", () => {
 			() => undefined,
 			0,
 			ctx,
+			undefined,
+			undefined,
+			undefined,
+			undefined,
+			false,
 			{ reprobe: true },
 		);
 
-		expect(reasonsFrom(saveRequestCalls)).not.toContain("weekly_exhausted_429");
+		expect(reasonsFrom(attemptCalls)).not.toContain("weekly_exhausted_429");
 	});
 
 	it("still fires for an EXTERNAL request carrying a spoofed keepalive header", async () => {
@@ -349,7 +357,7 @@ describe("proxyWithAccount — account-wide weekly-exhausted 429", () => {
 		globalThis.fetch = mock(async () => rejected429());
 		seedWeeklyExhausted();
 
-		const { ctx, saveRequestCalls } = makeProxyContext();
+		const { ctx, attemptCalls } = makeProxyContext();
 		const account = makeOAuthAnthropicAccount();
 		const bodyBuffer = makeRequestBody("claude-opus-4-8");
 
@@ -364,14 +372,14 @@ describe("proxyWithAccount — account-wide weekly-exhausted 429", () => {
 			ctx,
 		);
 
-		expect(reasonsFrom(saveRequestCalls)).toContain("weekly_exhausted_429");
+		expect(reasonsFrom(attemptCalls)).toContain("weekly_exhausted_429");
 	});
 
 	it("is skipped for a TRUSTED in-process probe (internal + keepalive marker)", async () => {
 		globalThis.fetch = mock(async () => rejected429());
 		seedWeeklyExhausted();
 
-		const { ctx, saveRequestCalls } = makeProxyContext();
+		const { ctx, attemptCalls } = makeProxyContext();
 		const account = makeOAuthAnthropicAccount();
 		const bodyBuffer = makeRequestBody("claude-opus-4-8");
 
@@ -386,14 +394,14 @@ describe("proxyWithAccount — account-wide weekly-exhausted 429", () => {
 			ctx,
 		);
 
-		expect(reasonsFrom(saveRequestCalls)).not.toContain("weekly_exhausted_429");
+		expect(reasonsFrom(attemptCalls)).not.toContain("weekly_exhausted_429");
 	});
 
 	it("does not fire for a non-Anthropic account", async () => {
 		globalThis.fetch = mock(async () => rejected429());
 		seedWeeklyExhausted();
 
-		const { ctx, saveRequestCalls } = makeProxyContext();
+		const { ctx, attemptCalls } = makeProxyContext();
 		const account = makeOAuthAnthropicAccount({ provider: "codex" });
 		const bodyBuffer = makeRequestBody("gpt-5.5");
 
@@ -408,6 +416,6 @@ describe("proxyWithAccount — account-wide weekly-exhausted 429", () => {
 			ctx,
 		);
 
-		expect(reasonsFrom(saveRequestCalls)).not.toContain("weekly_exhausted_429");
+		expect(reasonsFrom(attemptCalls)).not.toContain("weekly_exhausted_429");
 	});
 });

@@ -83,8 +83,6 @@ export const queryKeys = {
 		[...queryKeys.all, "analytics", "filter-options"] as const,
 	logs: () => [...queryKeys.all, "logs"] as const,
 	logHistory: () => [...queryKeys.all, "logs", "history"] as const,
-	combos: () => [...queryKeys.all, "combos"] as const,
-	families: () => [...queryKeys.all, "families"] as const,
 	apiKeys: () => [...queryKeys.all, "api-keys"] as const,
 	storage: () => [...queryKeys.all, "storage"] as const,
 	// Deliberately NOT nested under storage() — the size scan is expensive and

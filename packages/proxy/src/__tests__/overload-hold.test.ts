@@ -1,3 +1,4 @@
+import { configureLiteralRoute } from "./fixtures/routing-harness";
 /**
  * Integration tests for the transparent overload hold (Stage D).
  *
@@ -43,7 +44,7 @@ import {
 } from "../provider-overload-cooldown";
 
 async function callHandleProxy(req: Request, url: URL, ctx: ProxyContext) {
-	const { handleProxy } = await import("../proxy");
+	const { handleProxy } = await import("./fixtures/routing-harness");
 	return handleProxy(req, url, ctx);
 }
 
@@ -250,7 +251,7 @@ describe("transparent overload hold", () => {
 	beforeAll(async () => {
 		// Warm the proxy module graph so the first in-test request doesn't spend
 		// its concurrency window inside the dynamic import.
-		await import("../proxy");
+		await import("./fixtures/routing-harness");
 	});
 
 	beforeEach(() => {
@@ -746,7 +747,7 @@ describe("transparent overload hold", () => {
 		expect(Date.now() - started).toBeLessThan(5_000);
 	}, 15_000);
 
-	it("serves a recovered combo slot with the slot's model override after a hold wake", async () => {
+	it("serves a recovered literal route with the resolved literal target after a hold wake", async () => {
 		const sentBodies: string[] = [];
 		let fetchCalls = 0;
 		globalThis.fetch = upstreamOnlyFetch(
@@ -762,21 +763,12 @@ describe("transparent overload hold", () => {
 		// account is gated out and the request enters the hold.
 		const account = makeAccount();
 		const ctx = makeContext([account]);
-		(
-			ctx.dbOps as unknown as {
-				getActiveComboForFamily: () => Promise<unknown>;
-			}
-		).getActiveComboForFamily = mock(async () => ({
-			name: "test-combo",
-			slots: [
-				{
-					account_id: account.id,
-					model: "claude-haiku-4-5",
-					enabled: true,
-					priority: 0,
-				},
-			],
-		}));
+		await configureLiteralRoute(
+			ctx,
+			"claude-sonnet-4-5",
+			account.id,
+			"claude-haiku-4-5",
+		);
 		applyProviderOverloadCooldown(
 			"anthropic",
 			Date.now() + 400,
@@ -791,7 +783,7 @@ describe("transparent overload hold", () => {
 
 		expect(res.status).toBe(200);
 		expect(fetchCalls).toBe(1);
-		// The wake attempt must carry the combo slot's model override — not the
+		// The wake attempt must carry the literal route's model override — not the
 		// request's sonnet model.
 		const sent = JSON.parse(sentBodies[0]) as { model: string };
 		expect(sent.model).toBe("claude-haiku-4-5");

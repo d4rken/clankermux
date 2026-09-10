@@ -1,11 +1,8 @@
 import { createHash } from "node:crypto";
 import {
-	DEFAULT_CODEX_MODEL_BY_FAMILY,
-	getModelFamily,
 	IMAGE_TOKEN_ESTIMATE,
 	isDebugEnabled,
 	isInvalidGrantMessage,
-	mapModelName,
 	measureBodyForEstimate,
 	OAuthRefreshTokenError,
 	resolveModelContextWindow,
@@ -995,20 +992,6 @@ export class CodexProvider extends BaseProvider {
 
 	// ── Private helpers ──────────────────────────────────────────────────────
 
-	private mapModel(anthropicModel: string, account?: Account): string {
-		if (account) {
-			const mapped = mapModelName(anthropicModel, account);
-			if (mapped !== anthropicModel) {
-				return mapped;
-			}
-		}
-
-		// Family default (opus/sonnet/haiku/fable; mythos resolves to fable).
-		const family = getModelFamily(anthropicModel);
-		if (family) return DEFAULT_CODEX_MODEL_BY_FAMILY[family];
-		return anthropicModel;
-	}
-
 	private extractSystemPrompt(
 		system: AnthropicRequest["system"],
 	): string | undefined {
@@ -1382,7 +1365,7 @@ export class CodexProvider extends BaseProvider {
 		account?: Account,
 		requestId?: string,
 	): CodexRequest {
-		const model = this.mapModel(body.model, account);
+		const model = body.model;
 		if (isDebugEnabled("model")) {
 			log.info(
 				`[codex:model-debug] request_id=${requestId ?? "unknown"} request_model=${body.model} mapped_model=${model} account=${account?.name ?? "unknown"}`,
@@ -1548,7 +1531,7 @@ export class CodexProvider extends BaseProvider {
 	private async transformSseResponseToJson(
 		response: Response,
 	): Promise<Response> {
-		const requestId =
+		const _requestId =
 			response.headers.get("x-clankermux-request-id") ?? "unknown";
 		const transformed = this.transformStreamingResponse(response);
 		const reader = transformed.body
@@ -1712,12 +1695,9 @@ export class CodexProvider extends BaseProvider {
 				: startUsage.cache_creation_input_tokens,
 		};
 		const resolvedModel =
-			typeof startMessage.model === "string" ? startMessage.model : "gpt-5.4";
-		if (resolvedModel === "gpt-5.4" && isDebugEnabled("model")) {
-			log.info(
-				`[codex:model-debug] request_id=${requestId} transformSseResponseToJson used fallback model=gpt-5.4 (startMessage.model missing)`,
-			);
-		}
+			typeof startMessage.model === "string"
+				? startMessage.model
+				: (response.headers.get("x-clankermux-resolved-model") ?? "unknown");
 		const streamDelta = (messageDeltaPayload as Record<string, unknown> | null)
 			?.delta as Record<string, unknown> | undefined;
 		// The assembled content blocks can only ever say tool_use or end_turn, so
@@ -1761,17 +1741,12 @@ export class CodexProvider extends BaseProvider {
 	}
 
 	private transformStreamingResponse(response: Response): Response {
-		const requestId =
+		const _requestId =
 			response.headers.get("x-clankermux-request-id") ?? "unknown";
-		if (isDebugEnabled("model")) {
-			log.info(
-				`[codex:model-debug] request_id=${requestId} transformStreamingResponse initial fallback model=gpt-5.4 until response.created arrives`,
-			);
-		}
 		const state: StreamState = {
 			buffer: "",
 			messageId: `msg_${crypto.randomUUID().replace(/-/g, "").substring(0, 24)}`,
-			model: "gpt-5.4",
+			model: response.headers.get("x-clankermux-resolved-model") ?? "unknown",
 			contentBlockIndex: 0,
 			hasSentMessageStart: false,
 			hasSentContentBlockStart: false,

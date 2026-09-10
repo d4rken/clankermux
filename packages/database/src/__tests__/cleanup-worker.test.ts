@@ -149,6 +149,20 @@ describe("incremental-vacuum worker: cleanup kind", () => {
 		const oldCount = CLEANUP_DELETE_BATCH_ROWS + 15;
 		const recentCount = 8;
 		seed(dbPath, OLD, RECENT, oldCount, recentCount);
+		const auditDb = new Database(dbPath);
+		auditDb.run(
+			"INSERT INTO routing_snapshots(id,content) VALUES('old-snapshot','{}'),('recent-snapshot','{}')",
+		);
+		auditDb.run(
+			"INSERT INTO routing_attempts(id,request_id,route_snapshot_id,requested_model,kind,started_at) VALUES('old-attempt','orphan-old','old-snapshot','m','local_success',?),('recent-attempt','orphan-recent','recent-snapshot','m','local_success',?)",
+			[Date.now() - 25 * 60 * 60 * 1000, Date.now()],
+		);
+		auditDb.run(
+			"INSERT INTO account_model_suppressions(account_id,scope,model,until_at,reason) VALUES('a','scope','expired',?,'rejected'),('a','scope','active',?,'rejected')",
+			[Date.now() - 1, Date.now() + 300000],
+		);
+		auditDb.close();
+
 		expect(count(dbPath, "request_payloads")).toBe(oldCount + recentCount);
 
 		const worker = new Worker(
@@ -191,6 +205,10 @@ describe("incremental-vacuum worker: cleanup kind", () => {
 		}
 
 		expect(result.ok).toBe(true);
+		expect(count(dbPath, "routing_attempts")).toBe(1);
+		expect(count(dbPath, "routing_snapshots")).toBe(1);
+		expect(count(dbPath, "account_model_suppressions")).toBe(1);
+
 		expect(result.cleanup?.removedPayloads).toBe(oldCount);
 		expect(result.cleanup?.removedRequests).toBe(oldCount);
 		// One aged row from EACH usage-snapshot table — the worker folds the

@@ -33,6 +33,7 @@ import {
 	clearAnthropicBurstThrottle,
 	isAnthropicBurstThrottleActive,
 } from "../handlers/burst-cooldown";
+import { routingAttempts } from "./fixtures/routing-harness";
 
 function makeAccount(overrides: Partial<Account> = {}): Account {
 	return {
@@ -189,7 +190,7 @@ async function runProxy(
 	req: Request,
 	isInternal: boolean,
 ): Promise<Response | null> {
-	const { handleProxy } = await import("../proxy");
+	const { handleProxy } = await import("./fixtures/routing-harness");
 	try {
 		return await handleProxy(
 			req,
@@ -476,9 +477,16 @@ describe("synthetic-probe trust gate", () => {
 				access_token: "at",
 				expires_at: Date.now() + 8 * 60 * 60 * 1000,
 			});
-			const { ctx, audits } = makeAuditContext([account]);
+			const { ctx } = makeAuditContext([account]);
 			await runProxy(ctx, makeRequest(headers), isInternal);
-			return { audits, rateLimitedUntil: account.rate_limited_until };
+			return {
+				audits: routingAttempts(ctx).map((a) => ({
+					accountId: a.account_id,
+					status: a.status,
+					reason: a.error,
+				})),
+				rateLimitedUntil: account.rate_limited_until,
+			};
 		}
 
 		it("a TRUSTED probe skips the family-weekly net (no family audit row)", async () => {
@@ -583,30 +591,33 @@ describe("synthetic-probe trust gate", () => {
 			const account = makeAccount({
 				id: `fallbacks-${Math.random()}`,
 				// TWO models for the requested family: the attempt cycles the list and
-				// exhausts it, landing on the all_models_exhausted_429 path.
+				// exhausts it, landing on the model_fallback_429 path.
 				model_mappings: JSON.stringify({
 					sonnet: ["claude-sonnet-4-5", "claude-haiku-4-5"],
 				}),
 			});
-			const { ctx, audits } = makeAuditContext([account]);
+			const { ctx } = makeAuditContext([account]);
 			await runProxy(ctx, makeRequest(headers), isInternal);
-			return { cooled: account.rate_limited_until !== null, audits };
+			return {
+				cooled: account.rate_limited_until !== null,
+				audits: routingAttempts(ctx).map((a) => ({
+					accountId: a.account_id,
+					status: a.status,
+					reason: a.error,
+				})),
+			};
 		}
 
 		it("a TRUSTED keepalive replay skips the post-model-list cooldown", async () => {
 			const { cooled, audits } = await cooldownAppliedFor(KEEPALIVE, true);
 			expect(cooled).toBe(false);
-			expect(audits.some((a) => a.reason === "all_models_exhausted_429")).toBe(
-				false,
-			);
+			expect(audits.some((a) => a.reason === "model_fallback_429")).toBe(false);
 		});
 
 		it("SPOOF GUARD: an external request with a forged keepalive header IS cooled down", async () => {
 			const { cooled, audits } = await cooldownAppliedFor(KEEPALIVE, false);
 			expect(cooled).toBe(true);
-			expect(audits.some((a) => a.reason === "all_models_exhausted_429")).toBe(
-				true,
-			);
+			expect(audits.some((a) => a.reason === "model_fallback_429")).toBe(true);
 		});
 
 		it("CROSS-KIND GUARD: a TRUSTED auto-refresh probe does NOT inherit the keepalive-only skip", async () => {

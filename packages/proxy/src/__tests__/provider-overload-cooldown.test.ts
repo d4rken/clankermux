@@ -206,7 +206,7 @@ describe("provider overload cooldown", () => {
 		});
 
 		const ctx = makeContext([anthropicA, anthropicB, consoleAccount, fallback]);
-		const { handleProxy } = await import("../proxy");
+		const { handleProxy } = await import("./fixtures/routing-harness");
 		const response = await handleProxy(
 			makeRequest(),
 			new URL("https://proxy.local/v1/messages"),
@@ -256,7 +256,7 @@ describe("provider overload cooldown", () => {
 		});
 
 		const ctx = makeContext([anthropicA, anthropicB]);
-		const { handleProxy } = await import("../proxy");
+		const { handleProxy } = await import("./fixtures/routing-harness");
 		const response = await handleProxy(
 			makeRequest(),
 			new URL("https://proxy.local/v1/messages"),
@@ -299,7 +299,7 @@ describe("provider overload cooldown", () => {
 			const recordSynthetic = (
 				ctx.requestRecorder as { recordSynthetic: ReturnType<typeof mock> }
 			).recordSynthetic;
-			const { handleProxy } = await import("../proxy");
+			const { handleProxy } = await import("./fixtures/routing-harness");
 			const response = await handleProxy(
 				makeRequest(),
 				new URL("https://proxy.local/v1/messages"),
@@ -354,7 +354,7 @@ describe("provider overload cooldown", () => {
 			const recordSynthetic = (
 				ctx.requestRecorder as { recordSynthetic: ReturnType<typeof mock> }
 			).recordSynthetic;
-			const { handleProxy } = await import("../proxy");
+			const { handleProxy } = await import("./fixtures/routing-harness");
 			const response = await handleProxy(
 				makeRequest({ "x-clankermux-auto-refresh": "true" }),
 				new URL("https://proxy.local/v1/messages"),
@@ -389,7 +389,7 @@ describe("provider overload cooldown", () => {
 			const ctx = makeContext([
 				makeAccount({ id: "anthropic-a", provider: "anthropic" }),
 			]);
-			const { handleProxy } = await import("../proxy");
+			const { handleProxy } = await import("./fixtures/routing-harness");
 			const controller = new AbortController();
 			const req = new Request("https://proxy.local/v1/messages", {
 				method: "POST",

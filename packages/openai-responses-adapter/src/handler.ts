@@ -12,7 +12,17 @@ import {
 import { translateRequestToAnthropic } from "./request-translator";
 import { translateAnthropicResponseToResponses } from "./response-translator";
 import { translateAnthropicStreamToResponses } from "./stream-translator";
-import type { HandleProxyFn, ResponseItem, ResponsesRequest } from "./types";
+import {
+	createToolTranslation,
+	type ToolTranslation,
+	ToolTranslationError,
+} from "./tool-translation";
+import type {
+	AnthropicRequest,
+	HandleProxyFn,
+	ResponseItem,
+	ResponsesRequest,
+} from "./types";
 
 const log = new Logger("openai-responses-adapter");
 
@@ -211,9 +221,29 @@ export async function handleResponsesRequest(
 	const responseId = `resp_${crypto.randomBytes(12).toString("hex")}`;
 
 	// 4. Translate to Anthropic format
-	const anthropicBody = translateRequestToAnthropic(
-		body as typeof body & { input: ResponseItem[] },
-	);
+	let tools: ToolTranslation;
+	let anthropicBody: AnthropicRequest;
+	try {
+		tools = createToolTranslation(body);
+		anthropicBody = translateRequestToAnthropic(
+			body as typeof body & { input: ResponseItem[] },
+			tools,
+		);
+	} catch (err) {
+		return Response.json(
+			{
+				error: {
+					type: "invalid_request_error",
+					code: "invalid_request_error",
+					message:
+						err instanceof ToolTranslationError
+							? err.message
+							: "Invalid Responses tools or conversation input",
+				},
+			},
+			{ status: 400 },
+		);
+	}
 
 	// 5. Build synthetic request targeting /v1/messages
 	const messagesUrl = new URL(url.toString());
@@ -406,6 +436,7 @@ export async function handleResponsesRequest(
 			anthropicResp,
 			responseId,
 			body.model,
+			tools,
 		);
 	}
 
@@ -425,13 +456,25 @@ export async function handleResponsesRequest(
 			{ status: 502, headers: { "Content-Type": "application/json" } },
 		);
 	}
-	const translated = translateAnthropicResponseToResponses(
-		respBody as Parameters<typeof translateAnthropicResponseToResponses>[0],
-		responseId,
-		body.model,
-	);
-	return new Response(JSON.stringify(translated), {
-		status: 200,
-		headers: { "Content-Type": "application/json" },
-	});
+	try {
+		const translated = translateAnthropicResponseToResponses(
+			respBody as Parameters<typeof translateAnthropicResponseToResponses>[0],
+			responseId,
+			body.model,
+			tools,
+		);
+		return Response.json(translated);
+	} catch {
+		return Response.json(
+			{
+				error: {
+					message:
+						"Upstream returned invalid tool arguments or response content",
+					type: "api_error",
+					code: "invalid_upstream_response",
+				},
+			},
+			{ status: 502 },
+		);
+	}
 }

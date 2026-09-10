@@ -55,7 +55,7 @@ const DECISION_EXPLANATIONS = new Map<string, string>([
 	["combo", "An active model-family routing chain selected the account slot."],
 	[
 		"force_account_global",
-		"The global force-account override routed all traffic to this account, bypassing selection, gating, and failover.",
+		"The global force setting selected this account within the request’s allowed destinations and model permissions.",
 	],
 	["forced_account", "A request header explicitly selected this account."],
 	["global_session", "The current provider session was continued."],

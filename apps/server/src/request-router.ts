@@ -473,6 +473,13 @@ async function serveAgentRequest(
 	dialect: WireDialect,
 	deps: RequestRouterDeps,
 ): Promise<Response> {
+	if (
+		dialect === "anthropic" &&
+		req.method === "HEAD" &&
+		url.pathname === "/api/hello"
+	)
+		return new Response(null, { status: 204 });
+
 	// Codex CLI first tries WebSocket transport for /v1/responses.
 	// We only support HTTP — reject the upgrade cleanly so Codex
 	// falls back to HTTPS without hitting the proxy with an empty body.

@@ -29,6 +29,7 @@ async function mintNewSecret(): Promise<{
 export async function generateApiKey(
 	dbOps: DatabaseOperations,
 	name: string,
+	destinations?: { accountId: string | null; providers: string[] | null },
 ): Promise<ApiKeyGenerationResult> {
 	// Validate name
 	if (!name || name.trim().length === 0) {
@@ -60,6 +61,8 @@ export async function generateApiKey(
 		prefixLast8,
 		createdAt: now,
 		isActive: true,
+		pinnedAccountId: destinations?.accountId ?? null,
+		pinnedProviders: destinations?.providers ?? null,
 	});
 
 	return {

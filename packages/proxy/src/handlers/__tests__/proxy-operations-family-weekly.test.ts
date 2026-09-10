@@ -2,6 +2,10 @@ import { afterEach, beforeEach, describe, expect, it, mock } from "bun:test";
 import { usageCache } from "@clankermux/providers";
 import type { Account, RequestMeta } from "@clankermux/types";
 import {
+	proxyWithAccount,
+	routingAttempts,
+} from "../../__tests__/fixtures/routing-harness";
+import {
 	clearFamilyWeeklyExhaustedForAccount,
 	getFamilyWeeklyExhaustedUntil,
 	isFamilyWeeklyMemoExhausted,
@@ -11,7 +15,6 @@ import {
 	clearAnthropicBurstThrottle,
 	isAnthropicBurstThrottleActive,
 } from "../burst-cooldown";
-import { proxyWithAccount } from "../proxy-operations";
 import type { ProxyContext } from "../proxy-types";
 
 /**
@@ -117,7 +120,7 @@ function seedUsage(fiveHourUtil: number, sevenDayUtil: number) {
 type SaveRequestCall = Record<string, unknown>;
 
 function makeProxyContext() {
-	const saveRequestCalls: SaveRequestCall[] = [];
+	const attemptCalls: SaveRequestCall[] = [];
 	const markCalls: Array<{ id: string; until: number; reason: string }> = [];
 	const ctx = {
 		strategy: { getNextAccount: () => null } as never,
@@ -135,7 +138,7 @@ function makeProxyContext() {
 				},
 			),
 			saveRequest: mock((data: SaveRequestCall) => {
-				saveRequestCalls.push(data);
+				attemptCalls.push(data);
 				return Promise.resolve();
 			}),
 			updateAccountUsage: mock(() => Promise.resolve()),
@@ -179,7 +182,7 @@ function makeProxyContext() {
 			dispose: mock(() => {}),
 		} as never,
 	} as unknown as ProxyContext;
-	return { ctx, saveRequestCalls, markCalls };
+	return { ctx, attemptCalls: routingAttempts(ctx), markCalls };
 }
 
 function makeRequest(body: ArrayBuffer) {
@@ -244,7 +247,7 @@ describe("proxyWithAccount — reactive family-weekly 429 guard", () => {
 		globalThis.fetch = mock(async () => plain429());
 		seedUsage(0, 83); // Fable exhausted, unified 5h/7d have headroom
 
-		const { ctx, saveRequestCalls, markCalls } = makeProxyContext();
+		const { ctx, attemptCalls, markCalls } = makeProxyContext();
 		const account = makeOAuthAnthropicAccount();
 		const bodyBuffer = makeRequestBody("claude-fable-5");
 
@@ -266,11 +269,11 @@ describe("proxyWithAccount — reactive family-weekly 429 guard", () => {
 		expect(account.rate_limited_until).toBeNull();
 		expect(markCalls).toHaveLength(0);
 		// Audit row carries the family reason + the request model.
-		const familyRow = saveRequestCalls.find(
-			(row) => row.errorMessage === "family_weekly_exhausted_429",
+		const familyRow = attemptCalls.find(
+			(row) => row.error === "family_weekly_exhausted_429",
 		);
 		expect(familyRow).toBeDefined();
-		expect(familyRow?.usage).toEqual({ model: "claude-fable-5" });
+		expect(familyRow?.resolved_model).toBe("claude-fable-5");
 	});
 
 	it("defers to a hard account-level unified status (does NOT skip the cooldown)", async () => {
@@ -279,7 +282,7 @@ describe("proxyWithAccount — reactive family-weekly 429 guard", () => {
 		// asserts a hard account-level limit — that is authoritative.
 		seedUsage(0, 83);
 
-		const { ctx, saveRequestCalls } = makeProxyContext();
+		const { ctx, attemptCalls } = makeProxyContext();
 		const account = makeOAuthAnthropicAccount();
 		const bodyBuffer = makeRequestBody("claude-fable-5");
 
@@ -295,8 +298,8 @@ describe("proxyWithAccount — reactive family-weekly 429 guard", () => {
 		);
 
 		// The family guard must NOT fire on a hard account-level 429...
-		const familyRow = saveRequestCalls.find(
-			(row) => row.errorMessage === "family_weekly_exhausted_429",
+		const familyRow = attemptCalls.find(
+			(row) => row.error === "family_weekly_exhausted_429",
 		);
 		expect(familyRow).toBeUndefined();
 		// ...and the account-wide cooldown must be applied (normal handling).
@@ -307,7 +310,7 @@ describe("proxyWithAccount — reactive family-weekly 429 guard", () => {
 		globalThis.fetch = mock(async () => plain429());
 		seedUsage(100, 83); // 5h ALSO exhausted ⇒ minHeadroom 0 ⇒ guard must NOT fire
 
-		const { ctx, saveRequestCalls } = makeProxyContext();
+		const { ctx, attemptCalls } = makeProxyContext();
 		const account = makeOAuthAnthropicAccount();
 		const bodyBuffer = makeRequestBody("claude-fable-5");
 
@@ -323,8 +326,8 @@ describe("proxyWithAccount — reactive family-weekly 429 guard", () => {
 		);
 
 		// The family guard did NOT fire — no family_weekly_exhausted_429 row.
-		const familyRow = saveRequestCalls.find(
-			(row) => row.errorMessage === "family_weekly_exhausted_429",
+		const familyRow = attemptCalls.find(
+			(row) => row.error === "family_weekly_exhausted_429",
 		);
 		expect(familyRow).toBeUndefined();
 	});
@@ -333,7 +336,7 @@ describe("proxyWithAccount — reactive family-weekly 429 guard", () => {
 		globalThis.fetch = mock(async () => plain429());
 		seedUsage(0, 83); // only Fable exhausted; Opus has room
 
-		const { ctx, saveRequestCalls } = makeProxyContext();
+		const { ctx, attemptCalls } = makeProxyContext();
 		const account = makeOAuthAnthropicAccount();
 		const bodyBuffer = makeRequestBody("claude-opus-4-8");
 
@@ -348,8 +351,8 @@ describe("proxyWithAccount — reactive family-weekly 429 guard", () => {
 			ctx,
 		);
 
-		const familyRow = saveRequestCalls.find(
-			(row) => row.errorMessage === "family_weekly_exhausted_429",
+		const familyRow = attemptCalls.find(
+			(row) => row.error === "family_weekly_exhausted_429",
 		);
 		expect(familyRow).toBeUndefined();
 	});
@@ -419,7 +422,7 @@ describe("proxyWithAccount — reactive family-weekly 429 guard", () => {
 					),
 			);
 
-			const { ctx, saveRequestCalls, markCalls } = makeProxyContext();
+			const { ctx, attemptCalls, markCalls } = makeProxyContext();
 			const account = makeOAuthAnthropicAccount();
 			const bodyBuffer = makeRequestBody("claude-fable-5");
 
@@ -442,15 +445,11 @@ describe("proxyWithAccount — reactive family-weekly 429 guard", () => {
 			expect(account.rate_limited_until).toBeNull();
 			expect(markCalls).toHaveLength(0);
 			expect(
-				saveRequestCalls.find(
-					(row) => row.errorMessage === "family_weekly_exhausted_429",
-				),
+				attemptCalls.find((row) => row.error === "family_weekly_exhausted_429"),
 			).toBeDefined();
 			// And specifically NOT the burst rung's reason.
 			expect(
-				saveRequestCalls.find(
-					(row) => row.errorMessage === "model_fallback_429",
-				),
+				attemptCalls.find((row) => row.error === "model_fallback_429"),
 			).toBeUndefined();
 		} finally {
 			usageCache.refreshNow = originalRefreshNow;
@@ -512,7 +511,7 @@ describe("proxyWithAccount — reactive family-weekly 429 guard", () => {
 					),
 			);
 
-			const { ctx, saveRequestCalls, markCalls } = makeProxyContext();
+			const { ctx, attemptCalls, markCalls } = makeProxyContext();
 			const account = makeOAuthAnthropicAccount();
 			const bodyBuffer = makeRequestBody("claude-fable-5");
 
@@ -534,14 +533,10 @@ describe("proxyWithAccount — reactive family-weekly 429 guard", () => {
 			expect(account.rate_limited_until).toBeNull();
 			expect(markCalls).toHaveLength(0);
 			expect(
-				saveRequestCalls.find(
-					(row) => row.errorMessage === "family_weekly_exhausted_429",
-				),
+				attemptCalls.find((row) => row.error === "family_weekly_exhausted_429"),
 			).toBeDefined();
 			expect(
-				saveRequestCalls.find(
-					(row) => row.errorMessage === "model_fallback_429",
-				),
+				attemptCalls.find((row) => row.error === "model_fallback_429"),
 			).toBeUndefined();
 		} finally {
 			usageCache.refreshNow = originalRefreshNow;
@@ -584,7 +579,7 @@ describe("proxyWithAccount — reactive family-weekly 429 guard", () => {
 					),
 			);
 
-			const { ctx, saveRequestCalls } = makeProxyContext();
+			const { ctx, attemptCalls } = makeProxyContext();
 			const account = makeOAuthAnthropicAccount();
 			const bodyBuffer = makeRequestBody("claude-fable-5");
 
@@ -601,9 +596,7 @@ describe("proxyWithAccount — reactive family-weekly 429 guard", () => {
 
 			// No family rescue — the account-wide cooldown applies as before.
 			expect(
-				saveRequestCalls.find(
-					(row) => row.errorMessage === "family_weekly_exhausted_429",
-				),
+				attemptCalls.find((row) => row.error === "family_weekly_exhausted_429"),
 			).toBeUndefined();
 			expect(account.rate_limited_until).not.toBeNull();
 		} finally {
@@ -641,7 +634,7 @@ describe("proxyWithAccount — reactive family-weekly 429 guard", () => {
 		);
 		seedUsage(0, 83); // fresh cache: fable exhausted + unified headroom
 
-		const { ctx, saveRequestCalls } = makeProxyContext();
+		const { ctx, attemptCalls } = makeProxyContext();
 		const account = makeOAuthAnthropicAccount();
 		const bodyBuffer = makeRequestBody("claude-fable-5");
 
@@ -657,9 +650,7 @@ describe("proxyWithAccount — reactive family-weekly 429 guard", () => {
 		);
 
 		expect(
-			saveRequestCalls.find(
-				(row) => row.errorMessage === "family_weekly_exhausted_429",
-			),
+			attemptCalls.find((row) => row.error === "family_weekly_exhausted_429"),
 		).toBeUndefined();
 		expect(account.rate_limited_until).not.toBeNull();
 	});
@@ -753,7 +744,7 @@ describe("proxyWithAccount — reactive family-weekly 429 guard", () => {
 			],
 		} as never);
 
-		const { ctx, saveRequestCalls, markCalls } = makeProxyContext();
+		const { ctx, attemptCalls, markCalls } = makeProxyContext();
 		const account = makeOAuthAnthropicAccount();
 		const bodyBuffer = makeRequestBody("claude-fable-5");
 
@@ -776,9 +767,7 @@ describe("proxyWithAccount — reactive family-weekly 429 guard", () => {
 		);
 
 		expect(
-			saveRequestCalls.find(
-				(row) => row.errorMessage === "family_weekly_exhausted_429",
-			),
+			attemptCalls.find((row) => row.error === "family_weekly_exhausted_429"),
 		).toBeDefined();
 		expect(result).toBeNull();
 		expect(outcomes).toEqual(["other"]);
@@ -848,7 +837,7 @@ describe("proxyWithAccount — reactive family-weekly 429 guard", () => {
 				150_000,
 			);
 
-			const { ctx, saveRequestCalls, markCalls } = makeProxyContext();
+			const { ctx, attemptCalls, markCalls } = makeProxyContext();
 			const account = makeOAuthAnthropicAccount();
 			const bodyBuffer = makeRequestBody("claude-fable-5");
 
@@ -868,9 +857,7 @@ describe("proxyWithAccount — reactive family-weekly 429 guard", () => {
 			expect(account.rate_limited_until).toBeNull();
 			expect(markCalls).toHaveLength(0);
 			expect(
-				saveRequestCalls.find(
-					(row) => row.errorMessage === "family_weekly_exhausted_429",
-				),
+				attemptCalls.find((row) => row.error === "family_weekly_exhausted_429"),
 			).toBeDefined();
 		} finally {
 			usageCache.refreshNow = originalRefreshNow;

@@ -13,8 +13,6 @@ import {
 	createAccountForceGetHandler,
 	createAccountForceHandler,
 	createAccountForceResetRateLimitHandler,
-	createAccountModelFallbacksUpdateHandler,
-	createAccountModelMappingsUpdateHandler,
 	createAccountNotesUpdateHandler,
 	createAccountPauseHandler,
 	createAccountPeakHoursPauseHandler,
@@ -61,19 +59,6 @@ import {
 import { createCacheEffectivenessHandler } from "./handlers/cache-effectiveness";
 import { createCacheKeepaliveHandler } from "./handlers/cache-keepalive";
 import { createCacheKeepaliveHistoryHandler } from "./handlers/cache-keepalive-history";
-import {
-	createComboCreateHandler,
-	createComboDeleteHandler,
-	createComboGetHandler,
-	createCombosListHandler,
-	createComboUpdateHandler,
-	createFamiliesListHandler,
-	createFamilyAssignHandler,
-	createSlotAddHandler,
-	createSlotRemoveHandler,
-	createSlotReorderHandler,
-	createSlotUpdateHandler,
-} from "./handlers/combos";
 import { createConfigHandlers } from "./handlers/config";
 import {
 	createHeapSnapshotHandler,
@@ -117,6 +102,10 @@ import {
 	createRequestsSummaryHandler,
 } from "./handlers/requests";
 import { createRequestsStreamHandler } from "./handlers/requests-stream";
+import {
+	createAccountPermissionsHandler,
+	createRoutingHandler,
+} from "./handlers/routing";
 import { createRunwayHandler } from "./handlers/runway";
 import { createStatsHandler, createStatsResetHandler } from "./handlers/stats";
 import { createStopsHistoryHandler } from "./handlers/stops-history";
@@ -569,19 +558,6 @@ export class APIRouter {
 			apiKeysGenerateHandler(req),
 		);
 		this.handlers.set("GET:/api/api-keys/stats", () => apiKeysStatsHandler());
-
-		// Combo routes
-		this.handlers.set("GET:/api/combos", () =>
-			createCombosListHandler(dbOps)(),
-		);
-		this.handlers.set("POST:/api/combos", (req) =>
-			createComboCreateHandler(dbOps)(req),
-		);
-
-		// Family assignment routes
-		this.handlers.set("GET:/api/families", () =>
-			createFamiliesListHandler(dbOps)(),
-		);
 	}
 
 	/**
@@ -603,9 +579,40 @@ export class APIRouter {
 	 * Handle an incoming request
 	 */
 	async handleRequest(url: URL, req: Request): Promise<Response | null> {
+		const response = await this.dispatchRequest(url, req);
+		if (
+			response?.ok &&
+			!["GET", "HEAD"].includes(req.method) &&
+			/^\/api\/(accounts|oauth)(\/|$)/.test(url.pathname)
+		) {
+			void this.context.modelPermissions?.tick?.().catch(() => {});
+		}
+		return response;
+	}
+	private async dispatchRequest(
+		url: URL,
+		req: Request,
+	): Promise<Response | null> {
 		const path = url.pathname;
 		const method = req.method;
 		const key = `${method}:${path}`;
+
+		if (path === "/api/routing-rules" || path.startsWith("/api/routing-rules/"))
+			return createRoutingHandler(this.context.dbOps.routing)(req);
+		const permissionMatch =
+			/^\/api\/accounts\/([^/]+)\/model-permissions$/.exec(path);
+		if (permissionMatch)
+			return createAccountPermissionsHandler(
+				this.context.dbOps,
+				this.context.modelPermissions,
+			)(req, decodeURIComponent(permissionMatch[1] ?? ""));
+		const attemptMatch = /^\/api\/requests\/([^/]+)\/attempts$/.exec(path);
+		if (attemptMatch && method === "GET")
+			return Response.json({
+				data: await this.context.dbOps.routing.listAttempts(
+					decodeURIComponent(attemptMatch[1] ?? ""),
+				),
+			});
 
 		// Auth is intentionally NOT called here, and that is now load-bearing in
 		// BOTH directions.
@@ -877,26 +884,6 @@ export class APIRouter {
 			}
 
 			// Account model mappings update
-			if (path.endsWith("/model-mappings") && method === "POST") {
-				const modelMappingsHandler = createAccountModelMappingsUpdateHandler(
-					this.context.dbOps,
-				);
-				return await this.wrapHandler((req) =>
-					modelMappingsHandler(req, accountId),
-				)(req, url);
-			}
-
-			// Account model fallbacks update
-			if (path.endsWith("/model-fallbacks") && method === "POST") {
-				const modelFallbacksHandler = createAccountModelFallbacksUpdateHandler(
-					this.context.dbOps,
-				);
-				return await this.wrapHandler((req) =>
-					modelFallbacksHandler(req, accountId),
-				)(req, url);
-			}
-
-			// Account removal
 			if (parts.length === 4 && method === "DELETE") {
 				const removeHandler = createAccountRemoveHandler(this.context.dbOps);
 				return await this.wrapHandler((req) => removeHandler(req, accountId))(
@@ -973,72 +960,6 @@ export class APIRouter {
 					req,
 					url,
 				);
-			}
-		}
-
-		// Check for dynamic combo endpoints
-		if (path.startsWith("/api/combos/")) {
-			const parts = path.split("/");
-			const comboId = decodeURIComponent(parts[3]);
-
-			// Combo slot sub-resource routes
-			if (parts[4] === "slots" && parts[5] === "reorder" && method === "PUT") {
-				const handler = createSlotReorderHandler(this.context.dbOps);
-				return await this.wrapHandler((req) => handler(req, comboId))(req, url);
-			}
-
-			if (parts[4] === "slots" && parts.length === 5 && method === "POST") {
-				const handler = createSlotAddHandler(this.context.dbOps);
-				return await this.wrapHandler((req) => handler(req, comboId))(req, url);
-			}
-
-			if (parts[4] === "slots" && parts.length === 6) {
-				const slotId = decodeURIComponent(parts[5]);
-
-				if (method === "PUT") {
-					const handler = createSlotUpdateHandler(this.context.dbOps);
-					return await this.wrapHandler((req) => handler(req, comboId, slotId))(
-						req,
-						url,
-					);
-				}
-
-				if (method === "DELETE") {
-					const handler = createSlotRemoveHandler(this.context.dbOps);
-					return await this.wrapHandler(() => handler(comboId, slotId))(
-						req,
-						url,
-					);
-				}
-			}
-
-			// GET /api/combos/:id
-			if (parts.length === 4 && method === "GET") {
-				const handler = createComboGetHandler(this.context.dbOps);
-				return await this.wrapHandler(() => handler(comboId))(req, url);
-			}
-
-			// PUT /api/combos/:id
-			if (parts.length === 4 && method === "PUT") {
-				const handler = createComboUpdateHandler(this.context.dbOps);
-				return await this.wrapHandler((req) => handler(req, comboId))(req, url);
-			}
-
-			// DELETE /api/combos/:id
-			if (parts.length === 4 && method === "DELETE") {
-				const handler = createComboDeleteHandler(this.context.dbOps);
-				return await this.wrapHandler(() => handler(comboId))(req, url);
-			}
-		}
-
-		// Check for dynamic family endpoints
-		if (path.startsWith("/api/families/") && method === "PUT") {
-			const parts = path.split("/");
-			const family = decodeURIComponent(parts[3]);
-
-			if (parts.length === 4) {
-				const handler = createFamilyAssignHandler(this.context.dbOps);
-				return await this.wrapHandler((req) => handler(req, family))(req, url);
 			}
 		}
 

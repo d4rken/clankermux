@@ -10,10 +10,6 @@ import type {
 	CacheKeepaliveLiveResponse,
 	CodexRateLimitResetCreditConsumeResponse,
 	CodexResetCreditEventResponse,
-	Combo,
-	ComboFamilyAssignment,
-	ComboSlot,
-	ComboWithSlots,
 	LogEvent,
 	MemoryHistoryResponse,
 	ModelCatalogResponse,
@@ -45,10 +41,7 @@ import {
 } from "./lib/request-filters";
 
 // Re-export types with dashboard-specific aliases for backward compatibility
-export type Account = AccountResponse & {
-	/** @deprecated Fallbacks are now merged into modelMappings as arrays */
-	modelFallbacks?: { [key: string]: string } | null;
-};
+export type Account = AccountResponse;
 export type Stats = StatsWithErrors;
 export type LogEntry = LogEvent;
 export type RequestSummary = RequestResponse;
@@ -439,7 +432,6 @@ class API extends HttpClient {
 		apiKey: string;
 		priority: number;
 		customEndpoint?: string;
-		modelMappings?: { [key: string]: string };
 	}): Promise<{ message: string; account: Account }> {
 		const startTime = Date.now();
 		const url = "/api/accounts/zai";
@@ -472,7 +464,6 @@ class API extends HttpClient {
 		apiKey: string;
 		priority: number;
 		customEndpoint: string;
-		modelMappings?: { [key: string]: string };
 	}): Promise<{ message: string; account: Account }> {
 		const startTime = Date.now();
 		const url = "/api/accounts/openai-compatible";
@@ -504,7 +495,6 @@ class API extends HttpClient {
 		name: string;
 		apiKey: string;
 		priority: number;
-		modelMappings?: { [key: string]: string };
 	}): Promise<{ message: string; account: Account }> {
 		const startTime = Date.now();
 		const url = "/api/accounts/alibaba-coding-plan";
@@ -534,7 +524,6 @@ class API extends HttpClient {
 		name: string;
 		apiKey: string;
 		priority: number;
-		modelMappings?: { [key: string]: string };
 	}): Promise<{ message: string; account: Account }> {
 		const startTime = Date.now();
 		const url = "/api/accounts/kilo";
@@ -564,7 +553,6 @@ class API extends HttpClient {
 		name: string;
 		apiKey: string;
 		priority: number;
-		modelMappings?: { [key: string]: string };
 	}): Promise<{ message: string; account: Account }> {
 		const startTime = Date.now();
 		const url = "/api/accounts/openrouter";
@@ -626,7 +614,6 @@ class API extends HttpClient {
 		apiKey: string;
 		priority: number;
 		customEndpoint?: string;
-		modelMappings?: { [key: string]: string };
 	}): Promise<{ message: string; account: Account }> {
 		const startTime = Date.now();
 		const url = "/api/accounts/anthropic-compatible";
@@ -658,7 +645,6 @@ class API extends HttpClient {
 		name: string;
 		priority: number;
 		customEndpoint?: string;
-		modelMappings?: { [key: string]: string };
 	}): Promise<{ message: string; account: Account }> {
 		const startTime = Date.now();
 		const url = "/api/accounts/ollama";
@@ -690,7 +676,6 @@ class API extends HttpClient {
 		name: string;
 		apiKey: string;
 		priority: number;
-		modelMappings?: { [key: string]: string };
 	}): Promise<{ message: string; account: Account }> {
 		const startTime = Date.now();
 		const url = "/api/accounts/ollama-cloud";
@@ -1723,62 +1708,6 @@ class API extends HttpClient {
 		}
 	}
 
-	async updateAccountModelMappings(
-		accountId: string,
-		modelMappings: { [key: string]: string | string[] },
-	): Promise<void> {
-		const startTime = Date.now();
-		const url = `/api/accounts/${accountId}/model-mappings`;
-
-		this.logger.debug(`→ POST ${url}`, { modelMappings });
-
-		try {
-			await this.post(url, {
-				modelMappings,
-			});
-			const duration = Date.now() - startTime;
-			this.logger.debug(`← POST ${url} - 200 (${duration}ms)`);
-		} catch (error) {
-			const duration = Date.now() - startTime;
-			this.logger.error(`✗ POST ${url} - ERROR (${duration}ms)`, {
-				error: error instanceof Error ? error.message : String(error),
-				stack: error instanceof Error ? error.stack : undefined,
-			});
-			if (error instanceof HttpError) {
-				throw new Error(error.message);
-			}
-			throw error;
-		}
-	}
-
-	async updateAccountModelFallbacks(
-		accountId: string,
-		modelFallbacks: { [key: string]: string },
-	): Promise<void> {
-		const startTime = Date.now();
-		const url = `/api/accounts/${accountId}/model-fallbacks`;
-
-		this.logger.debug(`→ POST ${url}`, { modelFallbacks });
-
-		try {
-			await this.post(url, {
-				modelFallbacks,
-			});
-			const duration = Date.now() - startTime;
-			this.logger.debug(`← POST ${url} - 200 (${duration}ms)`);
-		} catch (error) {
-			const duration = Date.now() - startTime;
-			this.logger.error(`✗ POST ${url} - ERROR (${duration}ms)`, {
-				error: error instanceof Error ? error.message : String(error),
-				stack: error instanceof Error ? error.stack : undefined,
-			});
-			if (error instanceof HttpError) {
-				throw new Error(error.message);
-			}
-			throw error;
-		}
-	}
-
 	async getStrategy(): Promise<string> {
 		const startTime = Date.now();
 		const url = "/api/config/strategy";
@@ -2251,98 +2180,6 @@ class API extends HttpClient {
 			url,
 			"account token health",
 		);
-	}
-
-	async getCombos(): Promise<{ combos: (Combo & { slot_count: number })[] }> {
-		const res = await this.get<{
-			success: boolean;
-			data: (Combo & { slot_count: number })[];
-		}>("/api/combos");
-		return { combos: res.data };
-	}
-
-	async deleteCombo(id: string): Promise<void> {
-		await this.delete(`/api/combos/${id}`);
-	}
-
-	async updateCombo(
-		id: string,
-		params: { name?: string; description?: string; enabled?: boolean },
-	): Promise<{ combo: Combo }> {
-		const res = await this.put<{ success: boolean; data: Combo }>(
-			`/api/combos/${id}`,
-			params,
-		);
-		return { combo: res.data };
-	}
-
-	async createCombo(params: {
-		name: string;
-		description?: string;
-		enabled?: boolean;
-	}): Promise<{ combo: Combo }> {
-		const res = await this.post<{ success: boolean; data: Combo }>(
-			"/api/combos",
-			params,
-		);
-		return { combo: res.data };
-	}
-
-	async getFamilies(): Promise<{ families: ComboFamilyAssignment[] }> {
-		const res = await this.get<{
-			success: boolean;
-			data: ComboFamilyAssignment[];
-		}>("/api/families");
-		return { families: res.data.map((f) => ({ ...f, enabled: !!f.enabled })) };
-	}
-
-	async assignFamily(params: {
-		family: string;
-		comboId: string | null;
-		enabled: boolean;
-	}): Promise<void> {
-		await this.put(`/api/families/${params.family}`, {
-			combo_id: params.comboId,
-			enabled: params.enabled,
-		});
-	}
-
-	async getCombo(id: string): Promise<{ combo: ComboWithSlots }> {
-		const res = await this.get<{ success: boolean; data: ComboWithSlots }>(
-			`/api/combos/${id}`,
-		);
-		return { combo: res.data };
-	}
-
-	async addComboSlot(
-		comboId: string,
-		params: { account_id: string; model: string; enabled?: boolean },
-	): Promise<{ slot: ComboSlot }> {
-		const res = await this.post<{ success: boolean; data: ComboSlot }>(
-			`/api/combos/${comboId}/slots`,
-			params,
-		);
-		return { slot: res.data };
-	}
-
-	async updateComboSlot(
-		comboId: string,
-		slotId: string,
-		params: { model?: string; enabled?: boolean },
-	): Promise<{ slot: ComboSlot }> {
-		const res = await this.put<{ success: boolean; data: ComboSlot }>(
-			`/api/combos/${comboId}/slots/${slotId}`,
-			params,
-		);
-		return { slot: res.data };
-	}
-
-	async removeComboSlot(comboId: string, slotId: string): Promise<void> {
-		await this.delete(`/api/combos/${comboId}/slots/${slotId}`);
-	}
-
-	async reorderComboSlots(comboId: string, slotIds: string[]): Promise<void> {
-		await this.put(`/api/combos/${comboId}/slots/reorder`, { slotIds });
 	}
 
 	async initCodexDeviceFlow(data: { name: string; priority: number }): Promise<{

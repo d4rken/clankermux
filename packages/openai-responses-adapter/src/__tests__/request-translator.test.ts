@@ -554,7 +554,7 @@ describe("translateRequestToAnthropic", () => {
 		expect(toolUse.input).toEqual({});
 	});
 
-	test("custom_tool_call appended like function_call", () => {
+	test("custom_tool_call preserves its raw input", () => {
 		const req: ResponsesRequest = {
 			model: "claude-3-5-sonnet-20241022",
 			input: [
@@ -562,7 +562,7 @@ describe("translateRequestToAnthropic", () => {
 					type: "custom_tool_call",
 					call_id: "call_custom",
 					name: "custom_fn",
-					arguments: '{"a":1}',
+					input: '{"a":1}',
 				},
 			],
 		};
@@ -570,8 +570,8 @@ describe("translateRequestToAnthropic", () => {
 		expect(result.messages[0].content[0]).toEqual({
 			type: "tool_use",
 			id: "call_custom",
-			name: "custom_fn",
-			input: { a: 1 },
+			name: expect.stringMatching(/^cmux_tool_/),
+			input: { input: '{"a":1}' },
 		});
 	});
 
@@ -679,5 +679,71 @@ describe("translateRequestToAnthropic — model passthrough", () => {
 		expect(result.model).toBe("gpt-5.5");
 		expect(result.model).not.toContain("claude");
 		expect(result.model).not.toContain("sonnet");
+	});
+});
+
+describe("Responses easy input messages used by Pi and Oh My Pi", () => {
+	test("preserves omitted-type messages, string content, instruction roles and tool history", () => {
+		const result = translateRequestToAnthropic({
+			model: "gpt-6-astra",
+			instructions: "request instructions",
+			input: [
+				{ role: "system", content: "system instructions" },
+				{
+					role: "developer",
+					content: [{ type: "input_text", text: "developer instructions" }],
+				},
+				{
+					role: "user",
+					content: [{ type: "input_text", text: "Read fixture.txt" }],
+				},
+				{ type: "message", role: "assistant", content: "Reading now" },
+				{
+					type: "function_call",
+					call_id: "call_read",
+					name: "read",
+					arguments: '{"path":"fixture.txt"}',
+				},
+				{ type: "function_call_output", call_id: "call_read", output: "nonce" },
+				{ role: "user", content: "Recall the nonce" },
+			],
+		});
+		expect(result.system).toBe(
+			"system instructions\n\ndeveloper instructions\n\nrequest instructions",
+		);
+		expect(result.messages).toEqual([
+			{ role: "user", content: [{ type: "text", text: "Read fixture.txt" }] },
+			{
+				role: "assistant",
+				content: [
+					{ type: "text", text: "Reading now" },
+					{
+						type: "tool_use",
+						id: "call_read",
+						name: "read",
+						input: { path: "fixture.txt" },
+					},
+				],
+			},
+			{
+				role: "user",
+				content: [
+					{ type: "tool_result", tool_use_id: "call_read", content: "nonce" },
+					{ type: "text", text: "Recall the nonce" },
+				],
+			},
+		]);
+	});
+	test("does not reinterpret explicitly typed non-message items", () => {
+		const result = translateRequestToAnthropic({
+			model: "gpt-6-astra",
+			input: [
+				{ type: "reasoning", role: "user", content: "not a message" },
+				{ role: "user", content: "real message" },
+			],
+		} as never);
+		expect(result.messages).toEqual([
+			{ role: "user", content: [{ type: "text", text: "real message" }] },
+		]);
 	});
 });

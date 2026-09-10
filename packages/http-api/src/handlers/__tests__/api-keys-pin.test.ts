@@ -9,7 +9,10 @@ import {
 import type { DatabaseOperations } from "@clankermux/database";
 import { DatabaseFactory } from "@clankermux/database";
 import { tempDbTracker } from "@clankermux/test-support";
-import { createApiKeyPinHandler } from "../api-keys";
+import {
+	createApiKeyPinHandler,
+	createApiKeysGenerateHandler,
+} from "../api-keys";
 
 const tmpDb = tempDbTracker("test-api-keys-pin");
 
@@ -83,6 +86,26 @@ describe("createApiKeyPinHandler", () => {
 	beforeEach(async () => {
 		await dbOps.getAdapter().run("DELETE FROM api_keys", []);
 		await dbOps.getAdapter().run("DELETE FROM accounts", []);
+	});
+
+	it("creates a key with destinations already installed", async () => {
+		const generate = createApiKeysGenerateHandler(dbOps);
+		const response = await generate(
+			new Request("http://localhost/api/api-keys", {
+				method: "POST",
+				body: JSON.stringify({
+					name: "experiment",
+					providers: ["codex", "openrouter"],
+				}),
+			}),
+		);
+		expect(response.status).toBe(201);
+		const { data } = await response.json();
+		expect(await dbOps.getApiKeyPin(data.id)).toMatchObject({
+			pinnedAccountId: null,
+			pinnedProviders: ["codex", "openrouter"],
+			malformed: false,
+		});
 	});
 
 	it("account mode: pins the key to a valid account", async () => {

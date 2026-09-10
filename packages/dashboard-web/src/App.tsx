@@ -4,7 +4,6 @@ import { Navigate, Route, Routes, useLocation } from "react-router";
 import { AccountsTab } from "./components/AccountsTab";
 import { ApiKeysTab } from "./components/ApiKeysTab";
 import { AuthGate } from "./components/AuthGate";
-import { CombosTab } from "./components/combos/CombosTab";
 import { DebugPanel } from "./components/DebugPanel";
 import { LogsTab } from "./components/LogsTab";
 import { ModelsTab } from "./components/ModelsTab";
@@ -12,6 +11,7 @@ import { Navigation } from "./components/navigation";
 import { OverviewTab } from "./components/OverviewTab";
 import { RequestEventProvider } from "./components/RequestEventProvider";
 import { RequestsTab } from "./components/RequestsTab";
+import { RoutingTab } from "./components/routing/RoutingTab";
 import { SettingsTab } from "./components/SettingsTab";
 import { SystemTab } from "./components/SystemTab";
 import { QUERY_CONFIG, REFRESH_INTERVALS } from "./constants";
@@ -90,9 +90,9 @@ export function App() {
 				title: "Accounts",
 			},
 			{
-				path: "/combos",
-				element: <CombosTab />,
-				title: "Routing Chains",
+				path: "/routing",
+				element: <RoutingTab />,
+				title: "Routing",
 			},
 			{
 				path: "/api-keys",
@@ -102,7 +102,7 @@ export function App() {
 			{
 				path: "/models",
 				element: <ModelsTab />,
-				title: "Models",
+				title: "Client Models",
 			},
 			{
 				path: "/logs",

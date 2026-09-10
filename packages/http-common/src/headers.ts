@@ -65,6 +65,8 @@ export function sanitizeProxyHeaders(original: Headers): Headers {
 	// Remove headers that are invalidated by automatic decompression
 	sanitized.delete("content-encoding");
 	sanitized.delete("content-length");
+	// Adapter fallback metadata is internal to response conversion.
+	sanitized.delete("x-clankermux-resolved-model");
 	stripHopByHopHeaders(sanitized);
 
 	return sanitized;

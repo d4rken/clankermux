@@ -182,7 +182,7 @@ describe("QwenProvider", () => {
 	// -------------------------------------------------------------------------
 	// 5. model mapping (resolver-owned provider defaults)
 	// -------------------------------------------------------------------------
-	describe("model mapping", () => {
+	describe("resolved target preservation", () => {
 		async function transformedModel(
 			anthropicModel: string,
 			account: Account,
@@ -201,38 +201,38 @@ describe("QwenProvider", () => {
 			return body.model;
 		}
 
-		it("maps every Claude family to coder-model when model_mappings is null", async () => {
+		it("preserves literal Claude family targets", async () => {
 			const account = makeAccount({ model_mappings: null });
 			expect(await transformedModel("claude-opus-4-8", account)).toBe(
-				"coder-model",
+				"claude-opus-4-8",
 			);
 			expect(await transformedModel("claude-sonnet-5", account)).toBe(
-				"coder-model",
+				"claude-sonnet-5",
 			);
 			expect(await transformedModel("claude-haiku-4-5", account)).toBe(
-				"coder-model",
+				"claude-haiku-4-5",
 			);
 		});
 
-		it("maps fable and mythos ids to coder-model", async () => {
+		it("preserves literal Fable and Mythos targets", async () => {
 			const account = makeAccount({ model_mappings: null });
 			expect(await transformedModel("claude-fable-5", account)).toBe(
-				"coder-model",
+				"claude-fable-5",
 			);
 			expect(await transformedModel("claude-mythos-5", account)).toBe(
-				"coder-model",
+				"claude-mythos-5",
 			);
 		});
 
-		it("honours a custom mapping and defaults the families it omits", async () => {
+		it("ignores retired mappings", async () => {
 			const account = makeAccount({
 				model_mappings: JSON.stringify({ opus: "my-opus" }),
 			});
 			expect(await transformedModel("claude-opus-4-8", account)).toBe(
-				"my-opus",
+				"claude-opus-4-8",
 			);
 			expect(await transformedModel("claude-fable-5", account)).toBe(
-				"coder-model",
+				"claude-fable-5",
 			);
 		});
 	});
