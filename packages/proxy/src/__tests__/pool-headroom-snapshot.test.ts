@@ -230,6 +230,29 @@ describe("computePoolHeadroom", () => {
 		expect(figures.weekly).toBeNull();
 	});
 
+	it("lets the wire reading override a stale-OPTIMISTIC cache entry", () => {
+		// The dangerous direction. The cache entry may be up to the freshness
+		// bound old; the response being forwarded is authoritative for that
+		// account right now. Taking whichever looked better would show a
+		// comfortable meter for an account that just reported itself nearly spent.
+		seed("serving", { weeklyPct: 10, weeklyResetMs: NOW + 48 * HOUR_MS });
+
+		const figures = computePoolHeadroom(
+			account("serving"),
+			[account("serving")],
+			new Headers({
+				"anthropic-ratelimit-unified-7d-status": "allowed",
+				"anthropic-ratelimit-unified-7d-utilization": "0.90",
+				"anthropic-ratelimit-unified-7d-reset": String(
+					Math.floor((NOW + 48 * HOUR_MS) / 1000),
+				),
+			}),
+			NOW,
+		);
+
+		expect(figures.weekly?.headroomPct).toBe(10);
+	});
+
 	it("prefers the serving account's own wire reading over a stale cached one", () => {
 		// The response being forwarded is strictly fresher than anything the cache
 		// can hold for that account.

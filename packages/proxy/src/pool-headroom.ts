@@ -158,12 +158,22 @@ function readWire(headers: Headers, kind: WindowKind): MemberReading | null {
 	return null;
 }
 
-/** Keep whichever of two readings shows more headroom. */
-function better(a: MemberReading, b: MemberReading | null): MemberReading {
-	if (b === null) return a;
-	if (a === "unknown") return b;
-	if (b === "unknown") return a;
-	return b.pct < a.pct ? b : a;
+/**
+ * The serving account's reading, preferring the wire over the cache.
+ *
+ * The wire reading came from the response being forwarded right now, so it is
+ * strictly fresher and authoritative for that one account. It REPLACES the
+ * cached value rather than competing with it: taking whichever showed more
+ * headroom would let a cache entry up to `MAX_USAGE_AGE_MS` stale override what
+ * the account just reported, and the error runs in the dangerous direction —
+ * the meter would read better than reality on a pool whose best member is the
+ * account that just served.
+ */
+function preferWire(
+	cached: MemberReading,
+	wire: MemberReading | null,
+): MemberReading {
+	return wire ?? cached;
 }
 
 function foldWindow(
@@ -231,7 +241,7 @@ export function computePoolHeadroom(
 			[...members.values()].map((account) => {
 				const cached = readWindow(account, kind);
 				return account.id === servingAccount.id
-					? better(cached, readWire(upstreamHeaders, kind))
+					? preferWire(cached, readWire(upstreamHeaders, kind))
 					: cached;
 			}),
 			nowMs,
