@@ -9,7 +9,7 @@
  * unreadable account in as if it were exhausted would put a 100% meter on screen
  * while the pool was still serving.
  */
-import { afterEach, describe, expect, it } from "bun:test";
+import { afterEach, describe, expect, it, spyOn } from "bun:test";
 import { usageCache } from "@clankermux/providers";
 import type { Account } from "@clankermux/types";
 import { computePoolHeadroom } from "../pool-headroom";
@@ -198,16 +198,28 @@ describe("computePoolHeadroom", () => {
 		// The regression that matters most here: selection reads the same cache,
 		// and an observer that evicts would degrade routing every time a response
 		// was forwarded.
+		//
+		// The entry is aged past the cache's own 10-minute TTL on purpose. On a
+		// FRESH entry the evicting and non-evicting accessors behave identically,
+		// so this assertion would pass against a `getFreshCapacity` implementation
+		// and prove nothing. Past the TTL they diverge: `get()` drops the entry as
+		// a side effect of reading it, `peekWithAge()` leaves it in place.
+		const aged = 15 * 60_000;
+		const clock = spyOn(Date, "now").mockReturnValue(NOW - aged);
 		seed("keep-me", { weeklyPct: 40, weeklyResetMs: NOW + 48 * HOUR_MS });
+		clock.mockRestore();
 
-		computePoolHeadroom(
+		const figures = computePoolHeadroom(
 			account("keep-me"),
 			[account("keep-me")],
 			noHeaders,
 			NOW,
 		);
 
-		expect(usageCache.peek(key("keep-me"))).not.toBeNull();
+		// Too stale to contribute...
+		expect(figures.weekly).toBeNull();
+		// ...but still there for the routing path that owns it.
+		expect(usageCache.peekWithAge(key("keep-me"))).not.toBeNull();
 	});
 
 	it("treats a codex account holding credits as unreadable for the weekly window", () => {
@@ -251,6 +263,93 @@ describe("computePoolHeadroom", () => {
 		);
 
 		expect(figures.weekly?.headroomPct).toBe(10);
+	});
+
+	it("keeps a credit-bearing account unreadable even when the wire reports 100%", () => {
+		// "Cannot be bounded by a quota reading" is a property of the ACCOUNT, not
+		// of the evidence, so a fresher reading must not resolve it. Letting the
+		// wire through here would make a credit-bearing account — one that can
+		// keep serving at 100% — the proof that the pool is exhausted.
+		seed("credits", {
+			weeklyPct: 100,
+			weeklyResetMs: NOW + 48 * HOUR_MS,
+			codexCredits: { hasCredits: true, unlimited: false },
+		});
+
+		const figures = computePoolHeadroom(
+			account("credits", "codex"),
+			[account("credits", "codex")],
+			new Headers({
+				"x-codex-primary-window-minutes": "10080",
+				"x-codex-primary-used-percent": "100",
+				"x-codex-primary-reset-at": String(
+					Math.floor((NOW + 48 * HOUR_MS) / 1000),
+				),
+			}),
+			NOW,
+		);
+
+		expect(figures.weekly).toBeNull();
+	});
+
+	it("reads a wire utilization that arrived without its status header", () => {
+		// The claim enumerator keys off `-status` lines while the writer gates on
+		// `-utilization`. If the reader used the enumerator, a status-less claim
+		// would be missed here, a worse cached value would win, and the client
+		// would be handed a HIGHER utilization than the account reported.
+		seed("serving", { weeklyPct: 80, weeklyResetMs: NOW + 48 * HOUR_MS });
+
+		const figures = computePoolHeadroom(
+			account("serving"),
+			[account("serving")],
+			new Headers({
+				"anthropic-ratelimit-unified-7d-utilization": "0.20",
+				"anthropic-ratelimit-unified-7d-reset": String(
+					Math.floor((NOW + 48 * HOUR_MS) / 1000),
+				),
+			}),
+			NOW,
+		);
+
+		expect(figures.weekly?.headroomPct).toBe(80);
+	});
+
+	it("does not read a codex weekly slot that sent no used-percent as zero", () => {
+		seed("serving", { weeklyPct: 60, weeklyResetMs: NOW + 48 * HOUR_MS });
+
+		const figures = computePoolHeadroom(
+			account("serving", "codex"),
+			[account("serving", "codex")],
+			new Headers({
+				"x-codex-primary-window-minutes": "10080",
+				"x-codex-primary-reset-at": String(
+					Math.floor((NOW + 48 * HOUR_MS) / 1000),
+				),
+			}),
+			NOW,
+		);
+
+		// Falls back to the cached 60% rather than reading the absent header as 0.
+		expect(figures.weekly?.headroomPct).toBe(40);
+	});
+
+	it("still reports the winner's headroom when only a sibling has a reset", () => {
+		// Abandoning the rewrite here would leave the client showing the serving
+		// account's exhaustion while the pool demonstrably had room. The displayed
+		// percentage comes from the utilization alone, so the number is kept and
+		// the reset degrades to the soonest one available in the class.
+		seed("spent", { weeklyPct: 100, weeklyResetMs: NOW + 12 * HOUR_MS });
+		seed("roomy", { weeklyPct: 20, weeklyResetMs: null });
+
+		const figures = computePoolHeadroom(
+			account("spent"),
+			[account("spent"), account("roomy")],
+			noHeaders,
+			NOW,
+		);
+
+		expect(figures.weekly?.headroomPct).toBe(80);
+		expect(figures.weekly?.resetMs).toBe(NOW + 12 * HOUR_MS);
 	});
 
 	it("prefers the serving account's own wire reading over a stale cached one", () => {

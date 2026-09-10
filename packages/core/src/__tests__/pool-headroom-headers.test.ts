@@ -76,6 +76,23 @@ function productionCodexHeaders(): Record<string, string> {
 	};
 }
 
+/**
+ * The same block from an account that is nearly spent on both windows.
+ *
+ * The serving account is a member of its own class, so a pooled figure can
+ * never be WORSE than what it reported — the writer enforces that as a hard
+ * ceiling. Any test that wants to observe a pooled improvement therefore needs
+ * a serving account with less headroom than the pool, and any test about the
+ * sub-100% clamp needs one that is actually at 100%.
+ */
+function spentUnifiedHeaders(): Record<string, string> {
+	return {
+		...productionUnifiedHeaders(),
+		"anthropic-ratelimit-unified-5h-utilization": "0.5",
+		"anthropic-ratelimit-unified-7d-utilization": "1",
+	};
+}
+
 const figures = (
 	over: Partial<PoolHeadroomFigures> = {},
 ): PoolHeadroomFigures => ({
@@ -102,9 +119,9 @@ describe("buildAnthropicUnifiedRewrite", () => {
 	});
 
 	it("writes utilization as a 0..1 fraction, not a percent", () => {
-		// 36% headroom => 64% used => 0.64 on the wire.
+		// 36% headroom => 64% used => 0.64 on the wire; 80% => 0.2.
 		const rewrite = buildAnthropicUnifiedRewrite(
-			h(productionUnifiedHeaders()),
+			h(spentUnifiedHeaders()),
 			figures(),
 			NOW,
 		);
@@ -195,7 +212,7 @@ describe("buildAnthropicUnifiedRewrite", () => {
 		// An unknown account might still serve, so a hard 1.0 — which is the only
 		// value that renders as 100% — must not be claimed on its behalf.
 		const rewrite = buildAnthropicUnifiedRewrite(
-			h(productionUnifiedHeaders()),
+			h(spentUnifiedHeaders()),
 			figures({
 				weekly: { headroomPct: 0, resetMs: RESET_MS, complete: false },
 			}),
@@ -208,7 +225,7 @@ describe("buildAnthropicUnifiedRewrite", () => {
 
 	it("writes a full 1 when the class is provably exhausted", () => {
 		const rewrite = buildAnthropicUnifiedRewrite(
-			h(productionUnifiedHeaders()),
+			h(spentUnifiedHeaders()),
 			figures({
 				weekly: { headroomPct: 0, resetMs: RESET_MS, complete: true },
 			}),
@@ -216,6 +233,44 @@ describe("buildAnthropicUnifiedRewrite", () => {
 		);
 		expect(rewrite.set.get("anthropic-ratelimit-unified-7d-utilization")).toBe(
 			"1",
+		);
+	});
+
+	it("never writes a utilization above the one upstream sent", () => {
+		// The serving account is a member of its own class, so the pooled maximum
+		// can never be worse than its own reading. Enforced at the write boundary
+		// so no reader bug upstream of here can make a client look MORE
+		// constrained than the account that just served it.
+		const rewrite = buildAnthropicUnifiedRewrite(
+			h(productionUnifiedHeaders()),
+			figures({
+				weekly: { headroomPct: 20, resetMs: RESET_MS, complete: true },
+			}),
+			NOW,
+		);
+		// Pooled headroom of 20% would be 0.8; upstream said 0.64.
+		expect(rewrite.set.get("anthropic-ratelimit-unified-7d-utilization")).toBe(
+			"0.64",
+		);
+	});
+
+	it("rounds down, so a near-miss never becomes a full 100%", () => {
+		// Nearest rounding turns 0.99999 into "1", and 1 is the only value that
+		// renders as 100%. That would advertise an exhausted pool built from an
+		// input that was not exhausted.
+		const upstream = h({
+			...productionUnifiedHeaders(),
+			"anthropic-ratelimit-unified-7d-utilization": "1",
+		});
+		const rewrite = buildAnthropicUnifiedRewrite(
+			upstream,
+			figures({
+				weekly: { headroomPct: 0.001, resetMs: RESET_MS, complete: true },
+			}),
+			NOW,
+		);
+		expect(rewrite.set.get("anthropic-ratelimit-unified-7d-utilization")).toBe(
+			"0.9999",
 		);
 	});
 
@@ -378,7 +433,10 @@ describe("buildCodexWeeklyRewrite", () => {
 
 	it("clamps to 99 when a class member had no usable reading", () => {
 		const rewrite = buildCodexWeeklyRewrite(
-			h(productionCodexHeaders()),
+			h({
+				...productionCodexHeaders(),
+				"x-codex-primary-used-percent": "100",
+			}),
 			figures({
 				weekly: { headroomPct: 0, resetMs: RESET_MS, complete: false },
 			}),
@@ -435,6 +493,36 @@ describe("buildCodexWeeklyRewrite", () => {
 		]) {
 			expect(touched.has(name)).toBe(false);
 		}
+	});
+
+	it("ignores a weekly slot that declared its length but sent no figure", () => {
+		// "Recognized window, no reading" must not become "completely unused".
+		// Gating on the window length alone would let this response acquire a
+		// utilization it never reported.
+		const upstream = h({
+			"x-codex-primary-window-minutes": "10080",
+			"x-codex-primary-reset-at": "1789451336",
+		});
+		const rewrite = buildCodexWeeklyRewrite(upstream, figures(), NOW);
+
+		expect(rewrite.set.size).toBe(0);
+		expect(rewrite.skipped).toBe("no-root-weekly-window");
+	});
+
+	it("never writes a used-percent above the one upstream sent", () => {
+		const upstream = h({
+			...productionCodexHeaders(),
+			"x-codex-primary-used-percent": "40",
+		});
+		const rewrite = buildCodexWeeklyRewrite(
+			upstream,
+			figures({
+				weekly: { headroomPct: 10, resetMs: RESET_MS, complete: true },
+			}),
+			NOW,
+		);
+		// Pooled headroom of 10% would be 90 used; upstream said 40.
+		expect(rewrite.set.get("x-codex-primary-used-percent")).toBe("40");
 	});
 
 	it("produces an empty diff when no root slot reports a weekly window", () => {

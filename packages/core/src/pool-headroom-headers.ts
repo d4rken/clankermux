@@ -92,7 +92,12 @@ function parseDecimal(value: string | null): number | null {
  * which, after rounding, it cannot for any value in these ranges.
  */
 function fmt(value: number): string {
-	return String(Math.round(value * 10_000) / 10_000);
+	// FLOOR, not nearest. Nearest rounding can raise a value across the only
+	// threshold that matters: 0.99999 becomes 1 and 99.99999 becomes 100, either
+	// of which advertises an exhausted pool built from an input that was not
+	// exhausted. Rounding down can only ever understate usage by less than the
+	// display grid, which is the harmless direction.
+	return String(Math.floor(value * 10_000) / 10_000);
 }
 
 function clamp(value: number, low: number, high: number): number {
@@ -149,17 +154,24 @@ export function buildAnthropicUnifiedRewrite(
 	const remove: string[] = [];
 
 	for (const [claim, figure] of windows) {
-		const present =
-			parseDecimal(
-				upstream.get(`anthropic-ratelimit-unified-${claim}-utilization`),
-			) !== null;
-		if (present) sawUpstreamClaim = true;
+		const upstreamUtilization = parseDecimal(
+			upstream.get(`anthropic-ratelimit-unified-${claim}-utilization`),
+		);
+		if (upstreamUtilization !== null) sawUpstreamClaim = true;
 		if (figure !== null) sawFigure = true;
-		if (!present || !usable(figure, nowMs)) continue;
+		if (upstreamUtilization === null || !usable(figure, nowMs)) continue;
 
-		// An incomplete class may not claim a full 1.0 — the only value that
-		// renders as 100% — because an unread account might still serve.
-		const ceiling = figure.complete ? 1 : 0.99;
+		// Two ceilings, both hard.
+		//
+		// The upstream value: the serving account is a member of its own class, so
+		// the pooled maximum can never be worse than what it reported. Enforcing
+		// that here rather than trusting the caller means no reader bug upstream
+		// of this point can make a client look MORE constrained than the account
+		// that just served it.
+		//
+		// 0.99 on an incomplete class: an unread account might still serve, and a
+		// full 1.0 is the only value that renders as 100%.
+		const ceiling = Math.min(upstreamUtilization, figure.complete ? 1 : 0.99);
 		const utilization = clamp((100 - figure.headroomPct) / 100, 0, ceiling);
 
 		set.set(
@@ -208,10 +220,15 @@ export function buildCodexWeeklyRewrite(
 ): HeaderRewrite {
 	// Prefer `primary` when both slots somehow declare a weekly length, so the
 	// choice is deterministic rather than dependent on header iteration order.
+	// A slot must declare the weekly length AND carry a utilization. Gating on
+	// the length alone would let a response that declared the window without
+	// reporting a figure acquire one, turning "recognized window, no reading"
+	// into a concrete percentage it never sent.
 	const slot = (["primary", "secondary"] as const).find(
 		(candidate) =>
 			parseDecimal(upstream.get(`x-codex-${candidate}-window-minutes`)) ===
-			WEEKLY_WINDOW_MINUTES,
+				WEEKLY_WINDOW_MINUTES &&
+			parseDecimal(upstream.get(`x-codex-${candidate}-used-percent`)) !== null,
 	);
 	if (slot === undefined) {
 		return { set: EMPTY_SET, remove: [], skipped: "no-root-weekly-window" };
@@ -222,7 +239,11 @@ export function buildCodexWeeklyRewrite(
 		return { set: EMPTY_SET, remove: [], skipped: "no-pooled-figures" };
 	}
 
-	const ceiling = weekly.complete ? 100 : 99;
+	// Same two hard ceilings as the unified writer: never worse than the serving
+	// account's own reported figure, and never a full 100 on an incomplete class.
+	const upstreamUsed =
+		parseDecimal(upstream.get(`x-codex-${slot}-used-percent`)) ?? 100;
+	const ceiling = Math.min(upstreamUsed, weekly.complete ? 100 : 99);
 	const set = new Map<string, string>([
 		[
 			`x-codex-${slot}-used-percent`,

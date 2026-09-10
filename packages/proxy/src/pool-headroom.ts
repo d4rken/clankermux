@@ -32,10 +32,10 @@
 import {
 	extractFiveHour,
 	extractSevenDay,
-	extractUnifiedClaimReadings,
 	FIVE_HOUR_ELIGIBLE_PROVIDERS,
 	type PooledWindowFigure,
 	type PoolHeadroomFigures,
+	parseStrictDecimal,
 	SEVEN_DAY_ELIGIBLE_PROVIDERS,
 	servableClassFor,
 } from "@clankermux/core";
@@ -83,8 +83,21 @@ export function getPoolHeadroomCandidates(
 
 type WindowKind = "session" | "weekly";
 
-/** One member's contribution: a reading, or "we cannot speak for this one". */
-type MemberReading = { pct: number; resetMs: number | null } | "unknown";
+/**
+ * One member's contribution.
+ *
+ * "unknown" and "unbounded" both keep the member out of the maximum, but they
+ * are not interchangeable. "unknown" means we lack evidence and a fresher
+ * source may supply it. "unbounded" means the account's quota reading cannot
+ * bound its ability to serve AT ALL — purchased credits let it keep serving at
+ * 100% — so no reading, however fresh, may resolve it. Collapsing the two lets
+ * a wire reading of 100% turn a credit-bearing account into proof of an
+ * exhausted pool.
+ */
+type MemberReading =
+	| { pct: number; resetMs: number | null }
+	| "unknown"
+	| "unbounded";
 
 /**
  * Read one window for one account out of the usage cache.
@@ -110,7 +123,7 @@ function readWindow(account: Account, kind: WindowKind): MemberReading {
 		| null
 		| undefined;
 	if (kind === "weekly" && (credits?.hasCredits || credits?.unlimited)) {
-		return "unknown";
+		return "unbounded";
 	}
 
 	// `AnyUsageData` is the cache's union and is wider than the extractors'
@@ -133,26 +146,47 @@ function readWindow(account: Account, kind: WindowKind): MemberReading {
  * restates exactly the numbers upstream sent.
  */
 function readWire(headers: Headers, kind: WindowKind): MemberReading | null {
+	// Read the utilization line DIRECTLY rather than through
+	// `extractUnifiedClaimReadings`, which enumerates `-status` lines and so
+	// yields nothing for a claim that sent a utilization without a status. The
+	// writer gates on the utilization alone, and the two predicates disagreeing
+	// is not cosmetic: the wire reading would be missed, a worse cached value
+	// would win, and we would hand the client a HIGHER utilization than the
+	// account it was served by actually reported.
 	const claim = kind === "session" ? "5h" : "7d";
-	const unified = extractUnifiedClaimReadings(headers).find(
-		(reading) => reading.claim === claim,
+	const utilization = parseStrictDecimal(
+		headers.get(`anthropic-ratelimit-unified-${claim}-utilization`),
 	);
-	// Unified utilization is a 0..1 fraction; every figure here is a percent.
-	if (unified?.utilization != null) {
-		return { pct: unified.utilization * 100, resetMs: unified.resetMs };
+	if (utilization !== null) {
+		const resetSec = parseStrictDecimal(
+			headers.get(`anthropic-ratelimit-unified-${claim}-reset`),
+		);
+		// Unified utilization is a 0..1 fraction; every figure here is a percent.
+		return {
+			pct: utilization * 100,
+			resetMs: resetSec === null ? null : resetSec * 1000,
+		};
 	}
 
 	if (kind === "session") return null;
 	for (const slot of ["primary", "secondary"] as const) {
-		const minutes = Number(headers.get(`x-codex-${slot}-window-minutes`));
+		const minutes = parseStrictDecimal(
+			headers.get(`x-codex-${slot}-window-minutes`),
+		);
 		if (minutes !== WEEKLY_WINDOW_MINUTES) continue;
-		const used = Number(headers.get(`x-codex-${slot}-used-percent`));
-		if (!Number.isFinite(used)) return null;
-		const resetSec = Number(headers.get(`x-codex-${slot}-reset-at`));
+		// A window whose length is declared but whose utilization is absent or
+		// unparseable is a RECOGNIZED window with no reading. Coercing that to
+		// zero would turn "we cannot tell" into "completely unused".
+		const used = parseStrictDecimal(
+			headers.get(`x-codex-${slot}-used-percent`),
+		);
+		if (used === null) return null;
+		const resetSec = parseStrictDecimal(
+			headers.get(`x-codex-${slot}-reset-at`),
+		);
 		return {
 			pct: used,
-			resetMs:
-				Number.isFinite(resetSec) && resetSec > 0 ? resetSec * 1000 : null,
+			resetMs: resetSec !== null && resetSec > 0 ? resetSec * 1000 : null,
 		};
 	}
 	return null;
@@ -173,6 +207,11 @@ function preferWire(
 	cached: MemberReading,
 	wire: MemberReading | null,
 ): MemberReading {
+	// "unbounded" is a property of the ACCOUNT, not of the evidence, so no
+	// reading supersedes it. A credit-bearing account reporting 100% on the wire
+	// is still able to serve, and letting that number through would make it the
+	// proof that the pool is exhausted.
+	if (cached === "unbounded") return cached;
 	return wire ?? cached;
 }
 
@@ -181,12 +220,15 @@ function foldWindow(
 	nowMs: number,
 ): PooledWindowFigure | null {
 	const known = readings.filter(
-		(reading): reading is Exclude<MemberReading, "unknown"> =>
-			reading !== "unknown",
+		(reading): reading is Exclude<MemberReading, "unknown" | "unbounded"> =>
+			reading !== "unknown" && reading !== "unbounded",
 	);
 	if (known.length === 0) return null;
 
 	const lowestUsed = Math.min(...known.map((reading) => reading.pct));
+	const usableReset = (reading: { resetMs: number | null }): boolean =>
+		reading.resetMs !== null && reading.resetMs > nowMs;
+
 	// Reset comes from the members TIED at the winning headroom, not the soonest
 	// across the class. The pair (utilization, reset) is consumed together to
 	// derive pacing, so pairing the best member's figure with an unrelated
@@ -194,15 +236,23 @@ function foldWindow(
 	// window it has barely started. When the class is fully spent every member
 	// ties at zero, which is exactly when "soonest reset" is the right answer.
 	const winners = known.filter((reading) => reading.pct <= lowestUsed + 1e-9);
-	const futureResets = winners
-		.map((reading) => reading.resetMs)
-		.filter(
-			(resetMs): resetMs is number => resetMs !== null && resetMs > nowMs,
-		);
+	const winnerResets = winners
+		.filter(usableReset)
+		.map((r) => r.resetMs as number);
+
+	// Fallback when the winning member has no usable reset of its own: pair its
+	// headroom with the soonest usable reset elsewhere in the class rather than
+	// abandoning the rewrite. Abandoning it would leave the client showing the
+	// serving account's own exhaustion while the pool demonstrably had room —
+	// a flatly wrong headline. The percentage a client displays comes from the
+	// utilization alone; the reset only feeds pacing text and thresholds, so
+	// degrading the reset costs far less than degrading the number.
+	const anyResets = known.filter(usableReset).map((r) => r.resetMs as number);
+	const resets = winnerResets.length > 0 ? winnerResets : anyResets;
 
 	return {
 		headroomPct: Math.max(0, Math.min(100, 100 - lowestUsed)),
-		resetMs: futureResets.length === 0 ? null : Math.min(...futureResets),
+		resetMs: resets.length === 0 ? null : Math.min(...resets),
 		complete: known.length === readings.length,
 	};
 }
