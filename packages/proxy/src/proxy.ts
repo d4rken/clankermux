@@ -48,6 +48,7 @@ import {
 	completeRateLimitProbe,
 	getRateLimitProbeAdmission,
 } from "./handlers/rate-limit-cooldown";
+import { setPoolHeadroomCandidates } from "./pool-headroom";
 import {
 	ANTHROPIC_UPSTREAM_OVERLOAD_KEY,
 	getProviderOverloadKey,
@@ -562,6 +563,10 @@ async function handleIngestedProxy(
 		),
 	);
 	gates.reconcileAffinity(accounts);
+	// The pool this request could actually have landed on, for restating the
+	// client-facing rate-limit headers as pool headroom. Stashed here because
+	// this is where the candidate set is final — every gate and reorder has run.
+	setPoolHeadroomCandidates(requestMeta, accounts);
 	if (requestMeta.routing) {
 		requestMeta.routing.selectedAccountId =
 			accounts[0]?.id ?? requestMeta.routing.selectedAccountId ?? null;

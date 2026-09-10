@@ -3,6 +3,7 @@ export { AccountCustomEndpointDialog } from "./AccountCustomEndpointDialog";
 export { AccountList } from "./AccountList";
 export { AccountListItem } from "./AccountListItem";
 export { AccountModelPermissionsDialog } from "./AccountModelPermissionsDialog";
+export { AccountPolicyChips } from "./AccountPolicyChips";
 export { AccountPriorityDialog } from "./AccountPriorityDialog";
 export { AccountRenewalDialog } from "./AccountRenewalDialog";
 export { AnthropicReauthDialog } from "./AnthropicReauthDialog";

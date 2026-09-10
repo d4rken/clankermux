@@ -185,3 +185,37 @@ A separate intentional production smoke test used the saved configuration withou
 The lab server and tunnel were stopped and their closed ports verified. Temporary local account credentials, remote test profiles/sessions/fixtures, and local copies of the new production secret were removed. OpenCode and its permanent production configuration remain installed.
 
 This follow-up changed only the acceptance report in the repository; no proxy source changes were needed. The earlier 9,891 backend / 143 DOM validation remains the latest full-suite result. Live results, including failed cases and remaining limits, are recorded above. git diff --check passed; no commit, merge, push, or deployment was performed.
+
+## Merge preparation — 2026-09-11
+
+The reviewed implementation was checkpointed as `f11717b6`. Main at `fc577c7a` was integrated into the feature worktree, preserving account policy chips and pooled quota response headers. The two conflict resolutions keep the new permitted-model dialog beside the policy chips and keep the retired combo fallback removed. No legacy routing behavior was restored.
+
+Quota headers use account-wide windows from the authorized, post-gate candidate set, retaining main's conservative grouping by quota class. They do not reinterpret the requested alias as a quota family. Recovery waits replace the snapshot after reselection; an eligibility-narrowed hold can therefore reduce the pool represented by the headers. Added coverage checks same-class exclusions by account pin, provider pin, rule pool, and model permission, an allowed peer's positive contribution, global-force header passthrough, and both recovery-wake snapshot updates.
+
+### Cancellation diagnosis
+
+OpenCode 1.18.30 on cnc was tested against a direct local mock and against the actual branch proxy with a local mock OpenRouter account. No real provider credentials or provider inference were used. Both Messages and translated Responses disconnected promptly on the first SIGINT and SIGTERM while the mock streamed text.
+
+A separate integrated-proxy trial held the upstream in a reasoning-only stream. The trigger was an observed active upstream request plus 200 ms, so cancellation did not depend on OpenCode emitting text or a step event. Server-side socket write failures were observed 38/77 ms after SIGINT/SIGTERM for Messages and 38/33 ms for Responses. The mock writes every 50 ms, so these are observed timings rather than precise transport latency measurements. All four processes exited after the first signal. An earlier reasoning-only trial waited for `step_start`, which Responses emitted only after the mock finished; those runs are retained as completed-stream cases and do not count as active cancellation evidence.
+
+The earlier live DeepSeek delay remains unexplained and is retained as a follow-up. These controlled results establish working proxy cancellation for the exercised paths; they do not claim a fix for that provider-specific observation or prove interactive keyboard cancellation.
+
+### Production upgrade rehearsal and promotion prerequisites
+
+A consistent, private SQLite backup of the running production database was migrated offline using the branch's real `runMigrations`, then migrated again. The 13,306,478,592-byte backup completed in 37.77 seconds. Migration took 104 ms, the repeat took 3 ms, and `PRAGMA quick_check` returned `ok`. Both runs retained all eight accounts, 16 API keys, 866,040 requests, and the legacy combo-table row counts. Full account, API-key, and legacy-routing row digests were unchanged. No server, discovery, token refresh, or inference was started against this copy.
+
+The startup permission-initialization path found **all eight accounts unknown**: five Anthropic, two Codex, and one OpenRouter account. This is the expected initial state of the additive migration; existing client-model listings and legacy mappings do not authorize destinations. Startup and request-triggered discovery can populate the evidence, but requests fail closed while the intended model remains unpermitted.
+
+Before normal traffic uses a promoted release:
+
+1. Keep a current database backup and the previous verified release available for rollback. Merging this branch alone changes neither the serving release nor production data.
+2. Verify each account in **Accounts → Permitted models** after authenticated discovery. Check the exact upstream IDs needed by its clients and rules. If discovery is unsupported or a required ID is absent, add that verified ID manually to the specific account; the **Client Models** page is not the authorization source.
+3. For the initial experiments, confirm `gpt-6-astra` on the intended Codex accounts and `deepseek/deepseek-v4-pro` on OpenRouter before enabling the corresponding literal-target rule. Keep experiment keys pinned to Codex/OpenRouter. The existing permanent Pi, OMP, and OpenCode keys retain those pins.
+4. Verify ordinary Claude Code destinations through account-specific metadata and normal Claude Code use; no scripted inference against official Anthropic accounts is part of acceptance.
+5. Smoke-test the selected routes and inspect requested, resolved, outgoing, and reported models plus destination accounts in request attempts. Resolve missing permissions before treating the release as ready for normal traffic.
+
+The remaining OpenRouter invoice-pricing gap, optional OpenRouter token counting, live Claude Code cross-provider continuation refusal, model/tool-format quality limits, and the unreproduced live OpenCode cancellation delay remain bounded follow-ups. They do not require widening destination permissions. README-media fixture scripts still seed inert combo rows; they do not activate legacy routing.
+
+Sanitized upgrade and controlled-cancellation evidence is retained at `/tmp/routing-merge-evidence-20260911/`. The private production copy, mock account databases, remote diagnostic profiles, and temporary tunnels were removed. Permanent harness installations, keys, and configurations were preserved.
+
+Final integrated validation: **9,991 backend tests passed across 627 files** (149.80 seconds), **147 DOM tests passed across 21 files**, lint followed by type checking passed, and the production build passed. The focused routing/recovery run passed 44 tests across two files. `git diff --check` passed. The feature branch is prepared for merging into main; production promotion and model provisioning remain separate actions.

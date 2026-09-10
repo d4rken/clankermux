@@ -47,6 +47,7 @@ import {
 	releaseOverloadHoldSlot,
 	tryAcquireOverloadHoldSlot,
 } from "./overload-hold";
+import { setPoolHeadroomCandidates } from "./pool-headroom";
 import {
 	getOverloadBucketGeneration,
 	getOverloadHoldSlotKey,
@@ -823,6 +824,11 @@ export function createRecoveryHolds(deps: RecoveryHoldsDeps): RecoveryHolds {
 					),
 				);
 				gates.reconcileAffinity(candidates);
+				// The pooled headroom figure follows the same replacement: a hold that
+				// admits accounts the initial gating rejected has a different pool
+				// behind it, and leaving the earlier list in place would advertise the
+				// serving account alone.
+				setPoolHeadroomCandidates(requestMeta, candidates);
 				if (requestMeta.routing) {
 					// The wake re-selection replaces the candidate list, so the post-gate
 					// first attempt moves with it (see the initial pipeline).
@@ -1099,6 +1105,9 @@ export function createRecoveryHolds(deps: RecoveryHoldsDeps): RecoveryHolds {
 				),
 			);
 			gates.reconcileAffinity(candidates);
+			// See the wake pass above: the pooled headroom figure has to describe the
+			// candidate set that is actually about to be attempted.
+			setPoolHeadroomCandidates(requestMeta, candidates);
 
 			// A probe-verdict poll re-attempts ONLY the candidates that were
 			// suppressed — the whole reason this pass exists. A sibling that

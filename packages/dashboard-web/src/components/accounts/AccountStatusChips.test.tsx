@@ -422,6 +422,28 @@ function makeResetCreditAccount(
 	});
 }
 
+/**
+ * The reset-credit chip on its own, cut out of the whole chip row. Anchored on
+ * the tooltip's "Click for reset history" tail, which only that chip carries.
+ */
+function resetCreditChip(html: string): string {
+	const anchor = html.indexOf("Click for reset history");
+	if (anchor === -1) throw new Error("reset-credit chip not found");
+	const start = html.lastIndexOf("<span", anchor);
+	if (start === -1) throw new Error("reset-credit chip has no element start");
+	let depth = 0;
+	let i = start;
+	while (i < html.length) {
+		if (html.startsWith("<span", i)) depth++;
+		else if (html.startsWith("</span>", i)) {
+			depth--;
+			if (depth === 0) return html.slice(start, i + "</span>".length);
+		}
+		i++;
+	}
+	throw new Error("reset-credit chip never closed");
+}
+
 describe("AccountStatusChips — reset-credit urgency colors", () => {
 	it("uses red classes when the soonest expiry is under an hour away", () => {
 		const html = render(
@@ -445,7 +467,10 @@ describe("AccountStatusChips — reset-credit urgency colors", () => {
 		);
 		expect(html).toContain("bg-info/15");
 		expect(html).not.toContain("bg-destructive/15");
-		expect(html).not.toContain("bg-warning/15");
+		// Scoped to the reset chip: this fixture leaves extra spend permitted, so
+		// the policy chip beside it legitimately carries the amber tone. What this
+		// test is about is the reset chip's OWN urgency colour.
+		expect(resetCreditChip(html)).not.toContain("bg-warning/15");
 	});
 });
 
@@ -518,7 +543,10 @@ describe("AccountStatusChips — auto-apply tooltip line", () => {
 				},
 			}),
 		);
-		expect(html).not.toContain("Auto-apply");
+		// The specific tooltip sentences, not the bare word: "Auto-apply" is also
+		// the label of the two policy chips this codex fixture always renders.
+		expect(html).not.toContain("Auto-apply armed");
+		expect(html).not.toContain("Auto-apply is off");
 	});
 });
 

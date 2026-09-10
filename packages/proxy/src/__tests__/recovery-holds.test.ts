@@ -39,6 +39,10 @@ import {
 	setOverloadHoldBudgetOverrideForTests,
 } from "../overload-hold";
 import {
+	getPoolHeadroomCandidates,
+	setPoolHeadroomCandidates,
+} from "../pool-headroom";
+import {
 	applyProviderOverloadCooldown,
 	clearProviderOverloadCooldown,
 	completeProviderOverloadProbe,
@@ -433,6 +437,55 @@ describe("createRecoveryHolds", () => {
 	});
 
 	describe("overload-suppression sink split", () => {
+		it("replaces headroom candidates with the eligible non-Codex wake pool before attempting", async () => {
+			const clock = fakeHoldClock();
+			const recovering = cooledCandidate(
+				uniqueId("recovering"),
+				clock.now() + COOLDOWN_MS,
+			);
+			const excluded = makeAccount({ id: uniqueId("excluded") });
+			let harness: Harness;
+			harness = makeHolds(
+				[recovering, excluded],
+				() => {
+					expect(
+						getPoolHeadroomCandidates(harness.requestMeta)?.map((a) => a.id),
+					).toEqual([recovering.id]);
+					return { response: new Response("ready"), suppressed: false };
+				},
+				{},
+				clock,
+			);
+			setPoolHeadroomCandidates(harness.requestMeta, [excluded]);
+			const response = await harness.holds.holdForNonCodexRecovery(
+				3000,
+				"Quota test",
+				{
+					eligible: (a) => a.id === recovering.id,
+				},
+			);
+			expect(await response?.text()).toBe("ready");
+			expect(harness.gated).toEqual([recovering.id]);
+		});
+
+		it("replaces stale headroom candidates when an overload hold reselects", async () => {
+			const recovering = makeAccount({ id: uniqueId("recovering") });
+			const paused = makeAccount({ id: uniqueId("paused"), paused: true });
+			let harness: Harness;
+			harness = makeHolds([recovering, paused], () => {
+				expect(
+					getPoolHeadroomCandidates(harness.requestMeta)?.map((a) => a.id),
+				).toEqual([recovering.id]);
+				return { response: new Response("ready"), suppressed: false };
+			});
+			setPoolHeadroomCandidates(harness.requestMeta, [paused]);
+			const response = await harness.holds.holdForOverloadRecovery([
+				{ account: recovering, until: Date.now() },
+			]);
+			expect(await response?.text()).toBe("ready");
+			expect(harness.gated).toEqual([recovering.id]);
+		});
+
 		it("keeps hold-wake probe suppressions OUT of overloadSuppressedAttempts, and appends only via noteOverloadSuppression", async () => {
 			// One eligible account on a very short cooldown, so the hold's first pass
 			// has a deadline to wait out and then re-attempts it. The injected gate

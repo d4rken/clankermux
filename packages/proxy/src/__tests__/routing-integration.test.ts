@@ -5,11 +5,13 @@ import {
 	ensureSchema,
 	RoutingRepository,
 } from "@clankermux/database";
+import { usageCache } from "@clankermux/providers";
 import type { Account, RequestMeta, RoutingRule } from "@clankermux/types";
 import {
 	AccountModelPermissionService,
 	modelPermissionScope,
 } from "../account-model-permissions";
+import { setForcedAccount } from "../handlers";
 import { proxyWithAccount } from "../handlers/proxy-operations";
 import { clearProviderOverloadCooldown } from "../provider-overload-cooldown";
 import { handleProxy } from "../proxy";
@@ -20,8 +22,11 @@ import { makeAccount, makeContext } from "./fixtures/proxy-terminal-harness";
 
 const originalFetch = globalThis.fetch;
 const dbs: Database[] = [];
+const headroomAccounts: string[] = [];
 afterEach(() => {
 	globalThis.fetch = originalFetch;
+	setForcedAccount(null);
+	for (const id of headroomAccounts.splice(0)) usageCache.delete(id);
 	clearProviderOverloadCooldown();
 	for (const db of dbs.splice(0)) db.close();
 });
@@ -116,6 +121,105 @@ function codexResponse(model?: string) {
 	);
 }
 describe("routing table through the real proxy", () => {
+	it.each([
+		"rule",
+		"permission",
+		"provider pin",
+		"account pin",
+		"permitted peer",
+		"global force",
+	])("pools quota headers only over authorized destinations: %s", async (boundary) => {
+		const accounts = ["serving", "peer"].map((name) =>
+			makeAccount({
+				id: `routing-headroom-${name}`,
+				provider:
+					boundary === "provider pin" && name === "peer" ? "openai" : "codex",
+				access_token: "test",
+				refresh_token: "test",
+				api_key: null,
+				expires_at: Date.now() + 3600000,
+			}),
+		);
+		const [serving, peer] = accounts;
+		if (boundary === "global force") setForcedAccount(serving.id);
+		const { ctx, routing } = await setup(accounts, [
+			rule({
+				pool_kind: boundary === "rule" ? "accounts" : "inherit",
+				pool_provider: null,
+				pool_account_ids: boundary === "rule" ? [serving.id] : null,
+				target_kind: "literal",
+				target_model: "gpt-6-astra",
+			}),
+		]);
+		Object.assign(ctx.dbOps, {
+			saveCodexWindowObservations: mock(async () => {}),
+			getAdapter: () => ({
+				runWithChanges: async () => 1,
+				run: async () => {},
+				get: async () => null,
+			}),
+		});
+		if (boundary === "account pin")
+			Object.assign(ctx.dbOps, {
+				getApiKeyPin: mock(async () => ({
+					pinnedAccountId: serving.id,
+					pinnedProviders: null,
+				})),
+			});
+		const reset = Date.now() + 72 * 3600000;
+		for (const a of accounts) {
+			await routing.setManualModels(
+				a.id,
+				modelPermissionScope(a),
+				boundary === "permission" && a.id === peer.id ? [] : ["gpt-6-astra"],
+			);
+			headroomAccounts.push(a.id);
+			usageCache.set(a.id, {
+				five_hour: null,
+				// Both candidates are initially outside the liveness reserve. The
+				// serving account's fresher wire reading will replace its cache.
+				seven_day: {
+					utilization: a.id === serving.id ? 40 : 20,
+					resets_at: new Date(reset).toISOString(),
+				},
+			} as never);
+		}
+		const sent: Request[] = [];
+		globalThis.fetch = mock(async (input: Request | string | URL) => {
+			const outgoing = input instanceof Request ? input : new Request(input);
+			if (!outgoing.url.includes("chatgpt.com"))
+				throw new Error(`Unexpected destination ${outgoing.url}`);
+			sent.push(outgoing);
+			const response = codexResponse("gpt-6-astra");
+			response.headers.set("x-codex-primary-window-minutes", "10080");
+			response.headers.set("x-codex-primary-used-percent", "90");
+			response.headers.set("x-codex-primary-reset-after-seconds", "777");
+			response.headers.set(
+				"x-codex-primary-reset-at",
+				String(Math.floor(reset / 1000)),
+			);
+			return response;
+		}) as typeof fetch;
+		const req = request();
+		const response = await handleProxy(
+			req,
+			new URL(req.url),
+			ctx,
+			"experiment",
+		);
+		expect(response.status).toBe(200);
+		await response.text();
+		expect(sent).toHaveLength(1);
+		expect((await sent[0].clone().json()).model).toBe("gpt-6-astra");
+		expect(Number(response.headers.get("x-codex-primary-used-percent"))).toBe(
+			boundary === "permitted peer" ? 20 : 90,
+		);
+		if (boundary === "global force") {
+			expect(response.headers.get("x-codex-primary-reset-after-seconds")).toBe(
+				"777",
+			);
+		}
+	});
 	it("translates Claude Code Fable to Codex Astra and audits raw model separately", async () => {
 		const official = makeAccount({ id: "official", provider: "anthropic" }),
 			codex = makeAccount({

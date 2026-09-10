@@ -212,6 +212,14 @@ export {
 	type ServableClass,
 	servableClassFor,
 } from "./pool-classes";
+export {
+	applyHeaderRewrite,
+	buildAnthropicUnifiedRewrite,
+	buildCodexWeeklyRewrite,
+	type HeaderRewrite,
+	type PooledWindowFigure,
+	type PoolHeadroomFigures,
+} from "./pool-headroom-headers";
 // Account-weeks consumed per completed weekly cycle. `@clankermux/core` exposes
 // only its root entry, so an unexported module here is unreachable from
 // http-api.
