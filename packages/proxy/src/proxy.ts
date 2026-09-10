@@ -52,6 +52,7 @@ import {
 	completeRateLimitProbe,
 	getRateLimitProbeAdmission,
 } from "./handlers/rate-limit-cooldown";
+import { setPoolHeadroomCandidates } from "./pool-headroom";
 import {
 	ANTHROPIC_UPSTREAM_OVERLOAD_KEY,
 	getProviderOverloadKey,
@@ -661,6 +662,10 @@ async function handleIngestedProxy(
 		initialComboInfo,
 	);
 	gates.reconcileAffinity(accounts);
+	// The pool this request could actually have landed on, for restating the
+	// client-facing rate-limit headers as pool headroom. Stashed here because
+	// this is where the candidate set is final — every gate and reorder has run.
+	setPoolHeadroomCandidates(requestMeta, accounts);
 	if (requestMeta.routing) {
 		requestMeta.routing.selectedAccountId =
 			accounts[0]?.id ?? requestMeta.routing.selectedAccountId ?? null;
@@ -1390,6 +1395,9 @@ async function handleIngestedProxy(
 			),
 		);
 		gates.reconcileAffinity(fallbackAccounts);
+		// The combo fallback replaces the candidate set wholesale, so the pooled
+		// figure must follow it rather than describe the combo slots that failed.
+		setPoolHeadroomCandidates(requestMeta, fallbackAccounts);
 		if (requestMeta.routing) {
 			requestMeta.routing.selectedAccountId =
 				fallbackAccounts[0]?.id ??
