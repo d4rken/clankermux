@@ -43,6 +43,7 @@ import {
 	clearFamilyWeeklyExhausted,
 	recordFamilyWeeklyExhausted,
 } from "../family-weekly-memo";
+import { getPoolHeadroomCandidates } from "../pool-headroom";
 import { recordProtectedFamilyDemand } from "../protected-family-demand";
 import {
 	applyProviderOverloadCooldown,
@@ -1431,6 +1432,7 @@ export async function proxyWithAccount(
 						method: req.method,
 						path: url.pathname,
 						account,
+						poolCandidates: getPoolHeadroomCandidates(requestMeta),
 						internal: requestMeta.internal === true,
 						requestHeaders: req.headers,
 						requestBody: effectiveBodyBuffer,
@@ -2867,6 +2869,7 @@ export async function proxyWithAccount(
 						method: req.method,
 						path: url.pathname,
 						account,
+						poolCandidates: getPoolHeadroomCandidates(requestMeta),
 						internal: requestMeta.internal === true,
 						requestHeaders: req.headers,
 						requestBody: effectiveBodyBuffer,
@@ -2951,6 +2954,7 @@ export async function proxyWithAccount(
 						method: req.method,
 						path: url.pathname,
 						account,
+						poolCandidates: getPoolHeadroomCandidates(requestMeta),
 						internal: requestMeta.internal === true,
 						requestHeaders: req.headers,
 						requestBody: effectiveBodyBuffer,
@@ -3068,6 +3072,7 @@ export async function proxyWithAccount(
 				method: req.method,
 				path: url.pathname,
 				account,
+				poolCandidates: getPoolHeadroomCandidates(requestMeta),
 				internal: requestMeta.internal === true,
 				requestHeaders: req.headers,
 				requestBody: effectiveBodyBuffer,

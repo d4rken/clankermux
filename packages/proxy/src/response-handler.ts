@@ -1,5 +1,8 @@
 import {
+	applyHeaderRewrite,
 	BUFFER_SIZES,
+	buildAnthropicUnifiedRewrite,
+	buildCodexWeeklyRewrite,
 	extractUnifiedClaimReadings,
 	extractUnifiedSummaryReading,
 	requestEvents,
@@ -33,6 +36,7 @@ import { applyRateLimitCooldown } from "./handlers/rate-limit-cooldown";
 import { createSseRateLimitSniffer } from "./handlers/sse-rate-limit-sniffer";
 import { isOAuthAnthropicAccount } from "./handlers/transparent-retry";
 import { missingMessageStopStats } from "./missing-message-stop-stats";
+import { computePoolHeadroom } from "./pool-headroom";
 import {
 	applyProviderOverloadCooldown,
 	completeProviderOverloadProbe,
@@ -558,6 +562,19 @@ export interface ResponseHandlerOptions {
 	comboName?: string | null;
 	routing?: RequestRoutingMeta | null;
 	/**
+	 * The post-gate candidate accounts routing materialized for this request.
+	 *
+	 * Present ⇒ the client-facing rate-limit headers may be restated as the
+	 * pool's BEST headroom (see `applyPoolHeadroomHeaders`). ABSENT ⇒ every
+	 * upstream header is forwarded exactly as it arrived.
+	 *
+	 * Absence is the safe default and is what the forced-account and
+	 * unauthenticated paths rely on: neither ran account selection, so neither
+	 * has a pool it can speak for. Omission rather than a flag is deliberate —
+	 * a new call site that forgets this field degrades to passthrough.
+	 */
+	poolCandidates?: readonly Account[] | null;
+	/**
 	 * The canonical overload-attribution model (see proxyWithAccount): the
 	 * model actually sent upstream (post model-mapping / fallback cycling)
 	 * when it resolves to a family, else the request's logical model. A
@@ -619,12 +636,67 @@ export interface ResponseHandlerOptions {
  * reference and must NOT settle again. Completion is idempotent, so the
  * belt-and-suspenders overlap with an already-armed stream verdict is safe.
  */
+/**
+ * Restate the client-facing rate-limit headroom as the POOL's best headroom.
+ *
+ * Applied to the response on its way out, AFTER `forwardToClientInner` has
+ * recorded everything. That ordering is the point: `captureUnifiedClaimObservations`
+ * and the persisted `response_headers` both read the upstream object, and they
+ * must keep seeing what the serving account actually sent. Only the copy handed
+ * to the client is restated, so our own observations, forecasts and history stay
+ * built on provider truth.
+ *
+ * Never throws and never withholds the response: a failure here means the client
+ * sees the serving account's figures, which is exactly today's behavior.
+ */
+function applyPoolHeadroomHeaders(
+	response: Response,
+	options: ResponseHandlerOptions,
+): Response {
+	const { account, poolCandidates } = options;
+	// `internal` dispatches are the proxy's own traffic (auto-refresh probes,
+	// keepalive replays); nothing there is reading a usage meter.
+	if (account === null || poolCandidates == null || options.internal === true) {
+		return response;
+	}
+
+	try {
+		const now = Date.now();
+		const figures = computePoolHeadroom(
+			account,
+			poolCandidates,
+			response.headers,
+			now,
+		);
+		// Each writer is a no-op unless the response already carries that family's
+		// readings, so a response can never acquire a window it did not report.
+		applyHeaderRewrite(
+			response.headers,
+			buildAnthropicUnifiedRewrite(response.headers, figures, now),
+		);
+		applyHeaderRewrite(
+			response.headers,
+			buildCodexWeeklyRewrite(response.headers, figures, now),
+		);
+	} catch (err) {
+		log.warn(
+			`Pool headroom header rewrite failed, forwarding upstream figures: ${
+				err instanceof Error ? err.message : String(err)
+			}`,
+		);
+	}
+	return response;
+}
+
 export async function forwardToClient(
 	options: ResponseHandlerOptions,
 	ctx: ProxyContext,
 ): Promise<Response> {
 	try {
-		return await forwardToClientInner(options, ctx);
+		return applyPoolHeadroomHeaders(
+			await forwardToClientInner(options, ctx),
+			options,
+		);
 	} catch (err) {
 		// A throw during setup would otherwise orphan the probe lease until the
 		// safety TTL (~an hour), wedging the half-open bucket against every
