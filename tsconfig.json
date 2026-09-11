@@ -40,6 +40,8 @@
 		// management password and the only way to recover from a forgotten one,
 		// so it must not be the one file a type error can reach production in.
 		"scripts/auth-password.ts",
+		"scripts/devin-login.ts",
+		"scripts/devin-check.ts",
 		"scripts/auth-password.test.ts",
 		// This one rewrites requests.project in place. It went unnoticed for a
 		// release assigning an object where a string was expected, which would

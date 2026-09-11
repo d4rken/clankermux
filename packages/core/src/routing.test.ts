@@ -156,3 +156,33 @@ describe("routing policy", () => {
 		}
 	});
 });
+
+it("uses Devin defaults only for anchored Claude families and preserves explicit targets", () => {
+	for (const id of [
+		"claude-opus-4-6",
+		"claude-sonnet-4-5",
+		"claude-haiku-4-5",
+		"claude-fable-5",
+		"claude-mythos-5",
+	])
+		expect(resolveRoutingTarget(null, "devin", id)).toEqual({
+			upstreamModel: "swe-2",
+			targetSource: "provider_default",
+		});
+	for (const id of ["swe-2-high", "my-sonnet-model"])
+		expect(resolveRoutingTarget(null, "devin", id).upstreamModel).toBe(id);
+	expect(
+		resolveRoutingTarget(
+			rule({ target_kind: "requested" }),
+			"devin",
+			"claude-sonnet-4-5",
+		).upstreamModel,
+	).toBe("claude-sonnet-4-5");
+	expect(
+		resolveRoutingTarget(
+			rule({ target_kind: "literal", target_model: "swe-1.6" }),
+			"devin",
+			"claude-opus-4-6",
+		).upstreamModel,
+	).toBe("swe-1.6");
+});

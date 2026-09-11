@@ -59,17 +59,27 @@ export function AccountIdentityLine({
 		planLabel,
 	].filter((part): part is string => Boolean(part));
 	const externalId = account.identityExternalId;
+	const organizationId =
+		account.provider === "devin" &&
+		account.usageData &&
+		"kind" in account.usageData &&
+		account.usageData.kind === "devin"
+			? account.usageData.organizationId
+			: null;
+	const idDetails = [
+		externalId ? `Account ID: ${externalId}` : null,
+		organizationId ? `Organization ID: ${organizationId}` : null,
+	]
+		.filter(Boolean)
+		.join("; ");
 
-	if (parts.length === 0 && !externalId && !details) return null;
+	if (parts.length === 0 && !externalId && !organizationId && !details)
+		return null;
 
 	return (
 		<p
 			className={cn("text-xs text-muted-foreground", className)}
-			title={
-				externalIdDisplay === "short" && externalId
-					? `Account ID: ${externalId}`
-					: undefined
-			}
+			title={externalIdDisplay === "short" && idDetails ? idDetails : undefined}
 		>
 			{parts.join(" · ")}
 			{externalId && (
@@ -78,9 +88,23 @@ export function AccountIdentityLine({
 					#{externalIdDisplay === "full" ? externalId : externalId.slice(0, 8)}
 				</span>
 			)}
+			{organizationId &&
+				(externalIdDisplay === "full" ||
+					(parts.length === 0 && !externalId)) && (
+					<span
+						className={cn(
+							(parts.length > 0 || externalId) && "ml-tight",
+							"opacity-60",
+						)}
+					>
+						{externalIdDisplay === "full"
+							? `Organization ID: ${organizationId}`
+							: `Organization #${organizationId.slice(0, 8)}`}
+					</span>
+				)}
 			{details && (
 				<>
-					{(parts.length > 0 || externalId) && " · "}
+					{(parts.length > 0 || externalId || organizationId) && " · "}
 					{details}
 				</>
 			)}

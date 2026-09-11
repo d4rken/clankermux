@@ -12,7 +12,9 @@ import {
 	SelectTrigger,
 	SelectValue,
 } from "../ui/select";
+import { AccountSetupSection } from "./AccountSetupSection";
 import { AuthorizationHandoff } from "./AuthorizationHandoff";
+import { DevinAccountFields } from "./DevinAccountFields";
 
 interface AccountAddFormProps {
 	onAddAccount: (params: {
@@ -70,6 +72,11 @@ interface AccountAddFormProps {
 		apiKey: string;
 		priority: number;
 	}) => Promise<void>;
+	onAddDevinAccount?: (params: {
+		name: string;
+		apiKey: string;
+		priority: number;
+	}) => Promise<void>;
 	onAddOpenRouterAccount: (params: {
 		name: string;
 		apiKey: string;
@@ -100,6 +107,7 @@ export function AccountAddForm({
 	onAddAlibabaCodingPlanAccount,
 	onAddKiloAccount,
 	onAddOpenRouterAccount,
+	onAddDevinAccount,
 	onAddOllamaAccount,
 	onAddOllamaCloudAccount,
 	onCancel,
@@ -132,7 +140,8 @@ export function AccountAddForm({
 			| "codex"
 			| "qwen"
 			| "ollama"
-			| "ollama-cloud",
+			| "ollama-cloud"
+			| "devin",
 		priority: 0,
 		apiKey: "",
 		customEndpoint: "",
@@ -407,6 +416,24 @@ export function AccountAddForm({
 			}),
 		};
 
+		if (newAccount.mode === "devin") {
+			if (!newAccount.apiKey.trim()) {
+				onError(
+					"Devin session token is required; sign in with Devin or import one",
+				);
+				return;
+			}
+			const params = {
+				name: newAccount.name,
+				apiKey: newAccount.apiKey.trim(),
+				priority: newAccount.priority,
+			};
+			if (onAddDevinAccount) await onAddDevinAccount(params);
+			else await api.addDevinAccount(params);
+			setNewAccount((prev) => ({ ...prev, apiKey: "" }));
+			onSuccess();
+			return;
+		}
 		if (newAccount.mode === "zai") {
 			if (!newAccount.apiKey) {
 				onError("API key is required for z.ai accounts");
@@ -733,7 +760,7 @@ export function AccountAddForm({
 	};
 
 	return (
-		<div className="space-y-group mb-section p-group border rounded-lg">
+		<div className="mb-section flex max-w-3xl flex-col gap-section rounded-lg border p-group sm:p-section">
 			{/* A panel heading playing the CardTitle role, so it needs
 			    `.display-face` to pick up the theme's display face and its
 			    --display-tracking. It stays an <h4> rather than becoming a
@@ -744,7 +771,7 @@ export function AccountAddForm({
 			</h4>
 			{authStep === "form" && (
 				<>
-					<div className="space-y-item">
+					<div className="flex flex-col gap-item">
 						<Label htmlFor="name">Account Name</Label>
 						<Input
 							id="name"
@@ -758,8 +785,8 @@ export function AccountAddForm({
 							placeholder="e.g., work-account or user@example.com"
 						/>
 					</div>
-					<div className="space-y-item">
-						<Label htmlFor="mode">Mode</Label>
+					<div className="flex flex-col gap-item">
+						<Label htmlFor="mode">Account Type</Label>
 						<Select
 							value={newAccount.mode}
 							onValueChange={(
@@ -775,18 +802,23 @@ export function AccountAddForm({
 									| "codex"
 									| "qwen"
 									| "ollama"
-									| "ollama-cloud",
+									| "ollama-cloud"
+									| "devin",
 							) => updateAccountSource({ mode: value })}
 						>
-							<SelectTrigger id="mode">
+							<SelectTrigger
+								id="mode"
+								className="h-auto min-h-9 gap-item py-1.5 text-left [&>span]:line-clamp-none [&>span]:min-w-0 [&>svg]:shrink-0"
+							>
 								<SelectValue />
 							</SelectTrigger>
-							<SelectContent>
+							<SelectContent className="max-w-[calc(100vw-2rem)]">
 								<SelectItem value="claude-oauth">
 									Claude CLI OAuth (Recommended)
 								</SelectItem>
 								<SelectItem value="console">Claude API</SelectItem>
 								<SelectItem value="codex">Codex (OpenAI OAuth)</SelectItem>
+								<SelectItem value="devin">Devin (Subscription)</SelectItem>
 								<SelectItem value="qwen">
 									Qwen (Alibaba Cloud OAuth) — Experimental
 								</SelectItem>
@@ -805,9 +837,7 @@ export function AccountAddForm({
 								<SelectItem value="kilo">
 									Kilo Gateway (API Key) — Experimental
 								</SelectItem>
-								<SelectItem value="openrouter">
-									OpenRouter (API Key) — Experimental
-								</SelectItem>
+								<SelectItem value="openrouter">OpenRouter (API Key)</SelectItem>
 								<SelectItem value="alibaba-coding-plan">
 									Alibaba Coding Plan International (API Key) — Experimental
 								</SelectItem>
@@ -820,25 +850,48 @@ export function AccountAddForm({
 							</SelectContent>
 						</Select>
 					</div>
-					{!["claude-oauth", "console", "codex"].includes(newAccount.mode) && (
-						<Alert title="Experimental provider" tone="warning">
+					{![
+						"claude-oauth",
+						"console",
+						"codex",
+						"devin",
+						"openrouter",
+					].includes(newAccount.mode) && (
+						<Alert size="form" title="Experimental provider" tone="warning">
 							This integration has not been validated by us with a live account.
 							Authentication, usage tracking, and recovery may have issues.
 						</Alert>
 					)}
+					{newAccount.mode === "devin" && (
+						<DevinAccountFields
+							name={newAccount.name}
+							priority={newAccount.priority}
+							token={newAccount.apiKey}
+							onTokenChange={(value) => {
+								updateAccountSource({ apiKey: value });
+							}}
+							onSuccess={onSuccess}
+							onError={onError}
+						/>
+					)}
 					{newAccount.mode === "codex" && (
-						<div className="space-y-row">
+						<div className="flex min-w-0 flex-col gap-group">
 							{codexStep === "idle" && (
-								<Alert title="Device Code Authentication">
+								<AccountSetupSection title="Connect to Codex">
 									<p>
-										Click the button below to start Codex authentication. You
-										will get an authorization link and a user code to enter in
-										your browser.
+										Sign in with your Codex account using the button below.
+										You’ll get an authorization link and a code to enter in your
+										browser.
 									</p>
-								</Alert>
+								</AccountSetupSection>
 							)}
 							{codexStep === "pending" && (
-								<Alert title="Waiting for authorization...">
+								<Alert
+									size="form"
+									className="bg-muted/30 border-border"
+									role="status"
+									title="Waiting for authorization..."
+								>
 									{codexVerificationUrl ? (
 										<>
 											<p>Enter this code on the authorization page:</p>
@@ -854,12 +907,19 @@ export function AccountAddForm({
 							)}
 							{codexStep === "complete" && (
 								<Alert
+									size="form"
 									tone="success"
+									role="status"
 									title="Authorization successful! Account added."
 								/>
 							)}
 							{codexStep === "error" && (
-								<Alert tone="destructive" title="Authentication failed">
+								<Alert
+									size="form"
+									tone="destructive"
+									role="alert"
+									title="Authentication failed"
+								>
 									<p>{codexError}</p>
 									<Button
 										variant="outline"
@@ -876,18 +936,23 @@ export function AccountAddForm({
 						</div>
 					)}
 					{newAccount.mode === "qwen" && (
-						<div className="space-y-row">
+						<div className="flex min-w-0 flex-col gap-group">
 							{qwenStep === "idle" && (
-								<Alert title="Device Code Authentication">
+								<AccountSetupSection title="Connect to Qwen">
 									<p>
-										Click the button below to start Qwen authentication. You
-										will get an authorization link and a user code to enter in
-										your browser.
+										Sign in with your Qwen account using the button below.
+										You’ll get an authorization link and a code to enter in your
+										browser.
 									</p>
-								</Alert>
+								</AccountSetupSection>
 							)}
 							{qwenStep === "pending" && (
-								<Alert title="Waiting for authorization...">
+								<Alert
+									size="form"
+									className="bg-muted/30 border-border"
+									role="status"
+									title="Waiting for authorization..."
+								>
 									{qwenAuthUrl ? (
 										<>
 											<p>Enter this code on the authorization page:</p>
@@ -903,12 +968,19 @@ export function AccountAddForm({
 							)}
 							{qwenStep === "complete" && (
 								<Alert
+									size="form"
 									tone="success"
+									role="status"
 									title="Authorization successful! Account added."
 								/>
 							)}
 							{qwenStep === "error" && (
-								<Alert tone="destructive" title="Authentication failed">
+								<Alert
+									size="form"
+									tone="destructive"
+									role="alert"
+									title="Authentication failed"
+								>
 									<p>{qwenError}</p>
 									<Button
 										variant="outline"
@@ -925,7 +997,7 @@ export function AccountAddForm({
 						</div>
 					)}
 					{newAccount.mode === "zai" && (
-						<div className="space-y-item">
+						<div className="flex flex-col gap-item">
 							<Label htmlFor="apiKey">z.ai API Key</Label>
 							<Input
 								id="apiKey"
@@ -942,7 +1014,7 @@ export function AccountAddForm({
 						</div>
 					)}
 					{newAccount.mode === "minimax" && (
-						<div className="space-y-item">
+						<div className="flex flex-col gap-item">
 							<Label htmlFor="apiKey">Minimax API Key</Label>
 							<Input
 								id="apiKey"
@@ -960,7 +1032,7 @@ export function AccountAddForm({
 					)}
 					{newAccount.mode === "anthropic-compatible" && (
 						<>
-							<div className="space-y-item">
+							<div className="flex flex-col gap-item">
 								<Label htmlFor="apiKey">Anthropic-Compatible API Key</Label>
 								<Input
 									id="apiKey"
@@ -975,7 +1047,7 @@ export function AccountAddForm({
 									placeholder="Enter your Anthropic-Compatible API key"
 								/>
 							</div>
-							<div className="space-y-item">
+							<div className="flex flex-col gap-item">
 								<Label htmlFor="customEndpoint">
 									Custom Endpoint URL (Optional)
 								</Label>
@@ -996,7 +1068,7 @@ export function AccountAddForm({
 					)}
 					{newAccount.mode === "openai-compatible" && (
 						<>
-							<div className="space-y-item">
+							<div className="flex flex-col gap-item">
 								<Label htmlFor="apiKey">API Key</Label>
 								<Input
 									id="apiKey"
@@ -1010,7 +1082,7 @@ export function AccountAddForm({
 									placeholder="Enter your API key"
 								/>
 							</div>
-							<div className="space-y-item">
+							<div className="flex flex-col gap-item">
 								<Label htmlFor="endpoint">Endpoint URL</Label>
 								<Input
 									id="endpoint"
@@ -1022,14 +1094,14 @@ export function AccountAddForm({
 									}
 									placeholder="https://api.openrouter.ai/api/v1"
 								/>
-								<p className="text-xs text-muted-foreground">
+								<p className="text-xs leading-relaxed text-muted-foreground">
 									Enter the base URL for the OpenAI-compatible API
 								</p>
 							</div>
 						</>
 					)}
 					{newAccount.mode === "ollama" && (
-						<div className="space-y-item">
+						<div className="flex flex-col gap-item">
 							<Label htmlFor="customEndpoint">
 								Ollama Endpoint URL (Optional)
 							</Label>
@@ -1045,14 +1117,14 @@ export function AccountAddForm({
 								}
 								placeholder="http://localhost:11434"
 							/>
-							<p className="text-xs text-muted-foreground">
+							<p className="text-xs leading-relaxed text-muted-foreground">
 								Leave empty to use default http://localhost:11434. Requires
 								Ollama v0.14.0+.
 							</p>
 						</div>
 					)}
 					{newAccount.mode === "ollama-cloud" && (
-						<div className="space-y-item">
+						<div className="flex flex-col gap-item">
 							<Label htmlFor="apiKey">Ollama Cloud API Key</Label>
 							<Input
 								id="apiKey"
@@ -1069,7 +1141,7 @@ export function AccountAddForm({
 						</div>
 					)}
 					{newAccount.mode === "openrouter" && (
-						<div className="space-y-item">
+						<div className="flex flex-col gap-item">
 							<Label htmlFor="apiKey">OpenRouter API Key</Label>
 							<Input
 								id="apiKey"
@@ -1085,7 +1157,7 @@ export function AccountAddForm({
 						</div>
 					)}
 					{newAccount.mode === "kilo" && (
-						<div className="space-y-item">
+						<div className="flex flex-col gap-item">
 							<Label htmlFor="apiKey">Kilo Gateway API Key</Label>
 							<Input
 								id="apiKey"
@@ -1101,7 +1173,7 @@ export function AccountAddForm({
 						</div>
 					)}
 					{newAccount.mode === "alibaba-coding-plan" && (
-						<div className="space-y-item">
+						<div className="flex flex-col gap-item">
 							<Label htmlFor="apiKey">Alibaba Coding Plan API Key</Label>
 							<Input
 								id="apiKey"
@@ -1118,7 +1190,7 @@ export function AccountAddForm({
 					)}
 					{(newAccount.mode === "claude-oauth" ||
 						newAccount.mode === "console") && (
-						<div className="space-y-item">
+						<div className="flex flex-col gap-item">
 							<Label htmlFor="customEndpoint">
 								Custom Endpoint URL (Optional)
 							</Label>
@@ -1134,13 +1206,13 @@ export function AccountAddForm({
 								}
 								placeholder="https://api.anthropic.com"
 							/>
-							<p className="text-xs text-muted-foreground">
+							<p className="text-xs leading-relaxed text-muted-foreground">
 								Leave empty to use default Anthropic endpoint. Must be a valid
 								URL.
 							</p>
 						</div>
 					)}
-					<div className="space-y-item">
+					<div className="flex flex-col gap-item">
 						<Label htmlFor="priority">Priority</Label>
 						<Select
 							value={String(newAccount.priority)}
@@ -1163,12 +1235,12 @@ export function AccountAddForm({
 				</>
 			)}
 			{authStep === "form" ? (
-				<div className="flex gap-item">
+				<div className="flex flex-wrap gap-item border-t pt-group">
 					{newAccount.mode === "qwen" ? (
 						<>
 							{(qwenStep === "idle" || qwenStep === "error") && (
 								<Button onClick={handleStartQwenAuth} disabled={isSubmitting}>
-									Start Qwen Authentication
+									Sign in with Qwen
 								</Button>
 							)}
 							<Button variant="outline" onClick={handleCancel}>
@@ -1179,7 +1251,7 @@ export function AccountAddForm({
 						<>
 							{(codexStep === "idle" || codexStep === "error") && (
 								<Button onClick={handleStartCodexAuth} disabled={isSubmitting}>
-									Start Codex Authentication
+									Sign in with Codex
 								</Button>
 							)}
 							<Button variant="outline" onClick={handleCancel}>
@@ -1199,28 +1271,32 @@ export function AccountAddForm({
 				</div>
 			) : (
 				<>
-					<div className="space-y-item">
-						<p className="text-sm text-muted-foreground">
-							Open the authorization link in the browser that is signed in to
-							the account you are adding, or copy it there. After authorizing,
-							copy the code and paste it below.
-						</p>
-						{authUrl && <AuthorizationHandoff url={authUrl} />}
-						<Label htmlFor="code">Authorization Code</Label>
-						<Input
-							id="code"
-							autoComplete="off"
-							autoCorrect="off"
-							autoCapitalize="none"
-							spellCheck={false}
-							value={authCode}
-							onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
-								setAuthCode((e.target as HTMLInputElement).value)
-							}
-							placeholder="Paste authorization code here"
-						/>
+					<div className="flex min-w-0 flex-col gap-group rounded-lg border bg-muted/30 p-group">
+						<AccountSetupSection title="Authorize your account">
+							<p>
+								Open the authorization link in the browser that is signed in to
+								the account you are adding, or copy it there. After authorizing,
+								copy the code and paste it below.
+							</p>
+							{authUrl && <AuthorizationHandoff url={authUrl} />}
+						</AccountSetupSection>
+						<div className="flex flex-col gap-item">
+							<Label htmlFor="code">Authorization Code</Label>
+							<Input
+								id="code"
+								autoComplete="off"
+								autoCorrect="off"
+								autoCapitalize="none"
+								spellCheck={false}
+								value={authCode}
+								onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
+									setAuthCode((e.target as HTMLInputElement).value)
+								}
+								placeholder="Paste authorization code here"
+							/>
+						</div>
 					</div>
-					<div className="flex gap-item">
+					<div className="flex flex-wrap gap-item border-t pt-group">
 						<Button onClick={handleCodeSubmit} disabled={isSubmitting}>
 							Complete Setup
 						</Button>

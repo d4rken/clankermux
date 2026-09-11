@@ -538,3 +538,55 @@ describe("classifyUsageCard — families this account has not used", () => {
 		expect(card.usages.some((u) => u.state === "unopened")).toBe(false);
 	});
 });
+
+it("shows Devin daily and weekly quotas without inventing a five-hour window", () => {
+	const card = classifyUsageCard(
+		{
+			resetIso: null,
+			provider: "devin",
+			usageData: {
+				kind: "devin",
+				quotaBased: true,
+				daily: { utilization: 35, resetAt: NOW + 1000 },
+				weekly: { utilization: 80, resetAt: NOW + 2000 },
+				planName: "Pro",
+				email: null,
+				accountId: null,
+				canUseCli: true,
+				overageBalanceUsd: 0,
+				includedCreditsRemaining: null,
+			},
+		},
+		NOW,
+	);
+	expect(card.kind).toBe("windows");
+	if (card.kind !== "windows") throw new Error("missing windows");
+	expect(card.usages.map((u) => [usageWindowLabel(u), u.utilization])).toEqual([
+		["Daily", 35],
+		["Weekly", 80],
+	]);
+});
+it("does not invent Devin daily quota when the plan reports only weekly", () => {
+	const card = classifyUsageCard(
+		{
+			resetIso: null,
+			provider: "devin",
+			usageData: {
+				kind: "devin",
+				quotaBased: true,
+				daily: null,
+				weekly: { utilization: 50, resetAt: NOW + 2000 },
+				planName: "Max",
+				email: null,
+				accountId: null,
+				canUseCli: true,
+				overageBalanceUsd: 0,
+				includedCreditsRemaining: null,
+			},
+		},
+		NOW,
+	);
+	expect(card.kind).toBe("windows");
+	if (card.kind !== "windows") throw new Error("missing windows");
+	expect(card.usages.map(usageWindowLabel)).toEqual(["Weekly"]);
+});

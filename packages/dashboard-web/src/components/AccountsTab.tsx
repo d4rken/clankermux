@@ -20,6 +20,7 @@ import {
 	AnthropicReauthDialog,
 	CodexReauthDialog,
 	DeleteConfirmationDialog,
+	DevinReauthDialog,
 	QwenReauthDialog,
 	RecordPaymentDialog,
 	RenameAccountDialog,
@@ -160,6 +161,9 @@ export function AccountsTab() {
 		isOpen: false,
 		account: null,
 	});
+	const [devinReauthAccount, setDevinReauthAccount] = useState<Account | null>(
+		null,
+	);
 	const [actionError, setActionError] = useState<string | null>(null);
 
 	const handleAddAccount = async (params: {
@@ -278,6 +282,22 @@ export function AccountsTab() {
 	}) => {
 		try {
 			await api.addKiloAccount(params);
+			await loadAccounts();
+			setAdding(false);
+			setActionError(null);
+		} catch (err) {
+			setActionError(formatError(err));
+			throw err;
+		}
+	};
+
+	const handleAddDevinAccount = async (params: {
+		name: string;
+		apiKey: string;
+		priority: number;
+	}) => {
+		try {
+			await api.addDevinAccount(params);
 			await loadAccounts();
 			setAdding(false);
 			setActionError(null);
@@ -686,7 +706,7 @@ export function AccountsTab() {
 					<div className="flex items-center justify-between">
 						<div>
 							<CardTitle>Accounts</CardTitle>
-							<CardDescription>Manage your Claude accounts</CardDescription>
+							<CardDescription>Manage your provider accounts</CardDescription>
 						</div>
 						{!adding && (
 							<Button onClick={() => setAdding(true)} size="sm">
@@ -706,6 +726,7 @@ export function AccountsTab() {
 							onAddAlibabaCodingPlanAccount={handleAddAlibabaCodingPlanAccount}
 							onAddKiloAccount={handleAddKiloAccount}
 							onAddOpenRouterAccount={handleAddOpenRouterAccount}
+							onAddDevinAccount={handleAddDevinAccount}
 							onAddAnthropicCompatibleAccount={
 								handleAddAnthropicCompatibleAccount
 							}
@@ -717,6 +738,7 @@ export function AccountsTab() {
 								setActionError(null);
 							}}
 							onSuccess={() => {
+								void loadAccounts();
 								setAdding(false);
 							}}
 							onError={setActionError}
@@ -751,6 +773,7 @@ export function AccountsTab() {
 						onReauth={handleReauth}
 						onAnthropicReauth={handleAnthropicReauth}
 						onCodexReauth={handleCodexReauth}
+						onDevinReauth={setDevinReauthAccount}
 					/>
 				</CardContent>
 			</Card>
@@ -869,6 +892,14 @@ export function AccountsTab() {
 				onSuccess={() => {
 					loadAccounts();
 					setAnthropicReauthDialog({ isOpen: false, account: null });
+				}}
+			/>
+			<DevinReauthDialog
+				isOpen={devinReauthAccount !== null}
+				account={devinReauthAccount}
+				onClose={() => setDevinReauthAccount(null)}
+				onSuccess={() => {
+					loadAccounts();
 				}}
 			/>
 			<CodexReauthDialog

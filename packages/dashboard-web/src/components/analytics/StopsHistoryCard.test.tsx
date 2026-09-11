@@ -16,6 +16,8 @@ function response(
 		windowEndsAt: NOW,
 		totalRequests: 1000,
 		blockedRequests: 12,
+		outcomeTotals: { blocked: 12, failed: 0, disconnected: 0, unclassified: 0 },
+		excludedAttemptAuditRows: 0,
 		causes: [
 			{
 				cause: "pool_quota_exhausted",
@@ -67,8 +69,8 @@ describe("StopsHistoryCard", () => {
 	it("states the blocked share and the cause breakdown", () => {
 		const html = render();
 
-		expect(html).toContain("Stops");
-		expect(html).toContain("12 of 1000 requests blocked");
+		expect(html).toContain("Request outcomes");
+		expect(html).toContain("12 of 1000 recorded requests did not complete");
 		expect(html).toContain("(1.20%)");
 		expect(html).toContain("Pool quota exhausted");
 		expect(html).toContain("Model not served by any account");
@@ -108,25 +110,44 @@ describe("StopsHistoryCard", () => {
 
 	it("shows a dash instead of a percentage when nothing was requested", () => {
 		const html = render({
-			data: response({ totalRequests: 0, blockedRequests: 0, causes: [] }),
+			data: response({
+				totalRequests: 0,
+				blockedRequests: 0,
+				outcomeTotals: {
+					blocked: 0,
+					failed: 0,
+					disconnected: 0,
+					unclassified: 0,
+				},
+				causes: [],
+			}),
 		});
 
-		expect(html).toContain("0 of 0 requests blocked (—)");
+		expect(html).toContain("0 of 0 recorded requests did not complete (—)");
 		expect(html).not.toContain("NaN");
 	});
 
 	it("says the range was clean rather than drawing an empty chart", () => {
 		const html = render({
-			data: response({ blockedRequests: 0, causes: [] }),
+			data: response({
+				blockedRequests: 0,
+				outcomeTotals: {
+					blocked: 0,
+					failed: 0,
+					disconnected: 0,
+					unclassified: 0,
+				},
+				causes: [],
+			}),
 		});
 
-		expect(html).toContain("No blocked requests in this range");
+		expect(html).toContain("No unsuccessful requests in this range");
 	});
 
 	it("states nothing measured while the read is in flight", () => {
 		const html = render({ data: undefined, loading: true });
 
-		expect(html).toContain("Stops");
+		expect(html).toContain("Request outcomes");
 		expect(html).toContain("animate-pulse");
 		expect(html).not.toContain("requests blocked");
 	});
@@ -134,10 +155,10 @@ describe("StopsHistoryCard", () => {
 	it("reports a failed read as unavailable rather than as a clean range", () => {
 		const html = render({
 			data: undefined,
-			unavailableReason: "Stops data unavailable",
+			unavailableReason: "Request outcomes data unavailable",
 		});
 
-		expect(html).toContain("Stops data unavailable");
-		expect(html).not.toContain("No blocked requests in this range");
+		expect(html).toContain("Request outcomes data unavailable");
+		expect(html).not.toContain("No unsuccessful requests in this range");
 	});
 });

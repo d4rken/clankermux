@@ -19,6 +19,26 @@ function makeBaseResponse(
 }
 
 describe("translateAnthropicResponseToResponses", () => {
+	test("includes cache reads and writes in total input while identifying them separately", () => {
+		const response = translateAnthropicResponseToResponses(
+			makeBaseResponse({
+				usage: {
+					input_tokens: 12,
+					output_tokens: 8,
+					cache_read_input_tokens: 100,
+					cache_creation_input_tokens: 30,
+				},
+			}),
+			"resp_cache",
+			"swe-2",
+		);
+		expect(response.usage).toEqual({
+			input_tokens: 142,
+			output_tokens: 8,
+			total_tokens: 150,
+			input_tokens_details: { cached_tokens: 100, cache_write_tokens: 30 },
+		});
+	});
 	test("text-only response → single OutputMessageItem in output[]", () => {
 		const resp = makeBaseResponse({
 			content: [{ type: "text", text: "Hello world" }],

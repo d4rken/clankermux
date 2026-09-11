@@ -22,14 +22,20 @@ const ICON_TONE: Record<AlertTone, string> = {
 	destructive: "text-destructive-strong",
 };
 
-type AlertSize = "sm" | "md";
+type AlertSize = "sm" | "md" | "form";
 
 const SIZE: Record<AlertSize, { root: string; title: string; body: string }> = {
-	// The eight inline device-flow callouts in AccountAddForm: hints beside a form field.
+	// Compact hints beside a form field.
 	sm: {
 		root: "p-row",
 		title: "text-sm",
 		body: "mt-item text-xs text-muted-foreground",
+	},
+	// Account setup instructions and status messages share the form's body type.
+	form: {
+		root: "p-group",
+		title: "text-sm",
+		body: "mt-item text-sm leading-relaxed text-muted-foreground",
 	},
 	// The delete confirmation: a modal warning before permanent removal. Matches what
 	// that box renders today, so this change does not quieten it.

@@ -2,6 +2,8 @@ import { createHash } from "node:crypto";
 import { parseCustomEndpointData } from "@clankermux/core";
 import type { RoutingRepository } from "@clankermux/database";
 import {
+	DevinClient,
+	devinClient,
 	fetchCodexModelCatalog,
 	readChatgptAccountId,
 } from "@clankermux/providers";
@@ -44,8 +46,10 @@ export class AccountModelPermissionService {
 	private readonly controllers = new Set<AbortController>();
 	private timer: ReturnType<typeof setInterval> | undefined;
 	private readonly now: () => number;
+	private readonly devin: DevinClient;
 	constructor(private readonly deps: DiscoveryDeps) {
 		this.now = deps.now ?? Date.now;
+		this.devin = deps.fetchImpl ? new DevinClient(deps.fetchImpl) : devinClient;
 	}
 	async permissions(account: Account): Promise<AccountModelPermissions> {
 		const scope = modelPermissionScope(account);
@@ -158,6 +162,16 @@ export class AccountModelPermissionService {
 		signal.throwIfAborted();
 		const fetchImpl = this.deps.fetchImpl ?? fetch;
 		const endpoint = parseCustomEndpointData(account.custom_endpoint)?.endpoint;
+		if (account.provider === "devin") {
+			const info = await this.devin.getAccount(token, endpoint, signal);
+			return [
+				...new Set(
+					info.models
+						.filter((m) => !m.disabled && m.id !== "adaptive")
+						.map((m) => m.id),
+				),
+			];
+		}
 		if (account.provider === "codex") {
 			if (endpoint && !endpoint.startsWith("https://chatgpt.com/"))
 				throw new Error("Custom Codex backend requires manual models");

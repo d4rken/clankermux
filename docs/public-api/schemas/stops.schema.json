@@ -30,18 +30,37 @@
         },
         "totalRequests": {
           "type": "integer",
-          "description": "The denominator. A blocked count without it is not a rate.",
+          "description": "Recorded client requests in range, excluding verified legacy retry audit rows.",
           "minimum": 0
         },
         "blockedRequests": {
           "type": "integer",
+          "description": "Explicit proxy refusals only; excludes failures and disconnects.",
+          "minimum": 0
+        },
+        "failedRequests": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "disconnectedRequests": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "unclassifiedRequests": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "excludedAttemptAuditRows": {
+          "type": "integer",
+          "description": "Legacy per-attempt rows excluded from both totalRequests and outcomes.",
           "minimum": 0
         },
         "causes": {
           "type": "array",
           "items": {
             "$ref": "#/$defs/PublicStopCauseRowDto"
-          }
+          },
+          "description": "Blocked causes only. Unknown outcomes are stated in unclassifiedRequests."
         },
         "candidates": {
           "type": "object",
@@ -93,10 +112,14 @@
         "windowEndsAt",
         "totalRequests",
         "blockedRequests",
+        "failedRequests",
+        "disconnectedRequests",
+        "unclassifiedRequests",
+        "excludedAttemptAuditRows",
         "causes",
         "candidates"
       ],
-      "description": "`GET /public/v1/stops` — how often the pool actually refused a request, and why.\n\nThe history beside `/public/v1/workloads`: that one forecasts budget, this one is what already happened. A panel showing plenty of runway while requests are being refused is showing the two halves of the same question, which is why this is worth publishing at all.\n\nFIXED AT SEVEN DAYS, with no query parameter, and the omission is deliberate. The dashboard's `/api/analytics/stops-history` takes a caller's range because a session picked it; this surface is unauthenticated, so a range parameter is an unauthenticated caller choosing how much of the request table the server scans. Seven days is one figure, memoized, the same for everyone.\n\nDeliberately absent, and none of it may be added back:\n\n - `series`. A per-bucket time series is a second array level inside the    cause records, past what the device's streaming scanner can descend into.  - `sampleErrorMessage`. A raw upstream `error_message` is unreviewed text    from a third party on an unauthenticated wire; it exists as provenance for    a human reading the dashboard, and the cause label is the machine-readable    fact.  - `topRequestedModel`. Which model a caller asked for is traffic detail, not    a pool fact, and this surface is the pool's.",
+      "description": "`GET /public/v1/stops` — explicit proxy refusals and separate outcome counts. The causes array accounts only for blockedRequests. Unknown outcomes appear in unclassifiedRequests, not as blocked causes. Legacy retry audit rows are excluded from both the denominator and outcomes and counted separately.\n\nThe history beside `/public/v1/workloads`: that one forecasts budget, this one is what already happened. A panel showing plenty of runway while requests are being refused is showing the two halves of the same question, which is why this is worth publishing at all.\n\nFIXED AT SEVEN DAYS, with no query parameter, and the omission is deliberate. The dashboard's `/api/analytics/stops-history` takes a caller's range because a session picked it; this surface is unauthenticated, so a range parameter is an unauthenticated caller choosing how much of the request table the server scans. Seven days is one figure, memoized, the same for everyone.\n\nDeliberately absent, and none of it may be added back:\n\n - `series`. A per-bucket time series is a second array level inside the    cause records, past what the device's streaming scanner can descend into.  - `sampleErrorMessage`. A raw upstream `error_message` is unreviewed text    from a third party on an unauthenticated wire; it exists as provenance for    a human reading the dashboard, and the cause label is the machine-readable    fact.  - `topRequestedModel`. Which model a caller asked for is traffic detail, not    a pool fact, and this surface is the pool's.",
       "additionalProperties": true
     },
     "PublicStopCauseRowDto": {
@@ -149,7 +172,7 @@
         "upstream_error",
         "other"
       ],
-      "description": "Why a request was refused, as a CLOSED set.\n\nMirrors the internal `StopCause` value for value — it is already snake_case and already carries `other`, so no renaming happens here. The mapper is still explicit rather than a cast: a cause added to the proxy later must arrive on this wire as `other`, which the firmware knows how to render, instead of as a string its closed-set check would reject."
+      "description": "Stable published cause vocabulary shared by Stops and the event stream.\n\nThis is a subset of the internal `StopCause` vocabulary. History-only causes do not extend this closed set. The explicit mapper sends unrecognized causes to `other`; Stops filters to blocked outcomes before mapping, while the event stream retains its legacy classification."
     }
   },
   "$schema": "https://json-schema.org/draft/2020-12/schema",

@@ -9,6 +9,7 @@ import {
 	type AnthropicLimitEntry,
 	type AnthropicUsageData,
 	type CapacitySignal,
+	type DevinUsageData,
 	supportsUsageTracking,
 } from "@clankermux/types";
 import {
@@ -30,6 +31,10 @@ import {
 	type MinimaxUsageData,
 } from "./minimax-usage-fetcher";
 import type { CodexCreditsInfo } from "./providers/codex/usage";
+import {
+	DevinSessionAuthenticationError,
+	devinClient,
+} from "./providers/devin/client";
 import { isGenuineWindowRoll } from "./window-reset";
 import {
 	fetchZaiUsageData,
@@ -337,6 +342,7 @@ export interface UsageData {
 
 // Union type for all provider usage data
 export type AnyUsageData =
+	| DevinUsageData
 	| UsageData
 	| ZaiUsageData
 	| KiloUsageData
@@ -351,6 +357,11 @@ export function extractWindowResetTime(
 	data: AnyUsageData,
 	provider: string,
 ): number | null {
+	if (provider === "devin") {
+		const usage = data as DevinUsageData;
+		const window = getRepresentativeDevinWindow(usage);
+		return window ? (usage[window]?.resetAt ?? null) : null;
+	}
 	if (provider === "zai") {
 		const zai = data as ZaiUsageData;
 		return (zai.tokens_limit ?? zai.tokens_limit_weekly)?.resetAt ?? null;
@@ -718,6 +729,11 @@ export function getRepresentativeUtilizationForProvider(
 	provider: string,
 ): number | null {
 	switch (provider) {
+		case "devin": {
+			const usage = data as DevinUsageData;
+			const window = getRepresentativeDevinWindow(usage);
+			return window ? (usage[window]?.utilization ?? null) : null;
+		}
 		case "anthropic":
 		case "codex": {
 			const d = data as UsageData;
@@ -760,6 +776,63 @@ export function getRepresentativeUtilizationForProvider(
 	}
 }
 
+/** Calendar windows remain distinct from the five-hour session used elsewhere. */
+export function getRepresentativeDevinWindow(
+	usage: DevinUsageData,
+): "daily" | "weekly" | null {
+	let selected: "daily" | "weekly" | null = null;
+	for (const name of ["daily", "weekly"] as const) {
+		const window = usage[name];
+		if (!window || !Number.isFinite(window.utilization)) continue;
+		if (
+			selected === null ||
+			window.utilization > (usage[selected]?.utilization ?? -Infinity)
+		)
+			selected = name;
+	}
+	return selected;
+}
+
+function devinCapacity(
+	usage: DevinUsageData,
+	now: number,
+): CapacitySignal | null {
+	const windows = [usage.daily, usage.weekly].filter(
+		(window): window is NonNullable<DevinUsageData["daily"]> =>
+			window !== null && Number.isFinite(window.utilization),
+	);
+	if (
+		windows.length === 0 ||
+		windows.some((window) => window.resetAt !== null && window.resetAt <= now)
+	)
+		return null;
+	const binding = Math.max(...windows.map((window) => window.utilization));
+	const resets = windows.flatMap((window) =>
+		window.resetAt !== null && Number.isFinite(window.resetAt)
+			? [window.resetAt]
+			: [],
+	);
+	const weekly =
+		usage.weekly && Number.isFinite(usage.weekly.utilization)
+			? usage.weekly
+			: null;
+	const weeklyReset =
+		weekly?.resetAt != null && Number.isFinite(weekly.resetAt)
+			? weekly.resetAt
+			: null;
+	return {
+		minHeadroom: 100 - binding,
+		sessionHeadroom: 100,
+		soonestResetMs: resets.length ? Math.min(...resets) : null,
+		bindingUtilization: binding,
+		weeklyResetMs: weeklyReset,
+		bindingWeeklyResetMs: weeklyReset,
+		weeklyHeadroom: weekly ? 100 - weekly.utilization : 100,
+		sessionResetMs: null,
+		extraUsageUtilization: null,
+	};
+}
+
 /**
  * Reduce a flat `UsageWindow` to {util, resetMs}, or null when absent / its
  * utilization is non-numeric. Used for the flat OAuth-apps weekly window, which
@@ -782,6 +855,7 @@ export function getAccountCapacitySignal(
 	now: number,
 ): CapacitySignal | null {
 	if (!data) return null;
+	if (provider === "devin") return devinCapacity(data as DevinUsageData, now);
 	// Only Anthropic and Codex share the windowed UsageData shape. Others map later.
 	if (provider !== "anthropic" && provider !== "codex") return null;
 	const d = data as UsageData;
@@ -914,6 +988,21 @@ export function getFreshCapacity(
  */
 export type AccessTokenProvider = () => Promise<string>;
 
+/** Observe a successful Devin metadata read; recheck isCurrent after asynchronous work. */
+export type DevinUsageMetadataCallback = (
+	usage: DevinUsageData,
+	sessionToken: string,
+	isCurrent: () => boolean,
+) => void | Promise<void>;
+
+export interface DevinPollingCallbacks {
+	onMetadata?: DevinUsageMetadataCallback;
+	onAuthenticationFailure?: (
+		sessionToken: string,
+		isCurrent: () => boolean,
+	) => void | Promise<void>;
+}
+
 /**
  * One cached reading, with its two independent instants kept apart.
  *
@@ -947,6 +1036,7 @@ class UsageCache {
 	private providerTypes = new Map<string, string>(); // Track provider type for each account
 	private customEndpoints = new Map<string, string | null>(); // Track custom endpoints
 	private windowResetCallbacks = new Map<string, (accountId: string) => void>();
+	private devinMetadataCallbacks = new Map<string, DevinPollingCallbacks>();
 	private usageRateLimitedUntil = new Map<string, number>(); // Tracks when usage API 429 clears
 	private capacityRestoredCallbacks = new Map<
 		string,
@@ -1306,6 +1396,7 @@ class UsageCache {
 			error: unknown,
 		) => boolean | Promise<boolean>,
 		policy?: PollingPolicy,
+		onDevinMetadata?: DevinUsageMetadataCallback | DevinPollingCallbacks,
 	) {
 		// Check if provider supports usage tracking
 		if (provider && !supportsUsageTracking(provider)) {
@@ -1382,6 +1473,14 @@ class UsageCache {
 		} else {
 			this.tokenRefreshFailureHandlers.delete(accountId);
 		}
+		if (onDevinMetadata)
+			this.devinMetadataCallbacks.set(
+				accountId,
+				typeof onDevinMetadata === "function"
+					? { onMetadata: onDevinMetadata }
+					: onDevinMetadata,
+			);
+		else this.devinMetadataCallbacks.delete(accountId);
 		// Demand-aware polling policy (Anthropic only). Absent → fixed cadence.
 		if (policy) {
 			this.pollingPolicies.set(accountId, policy);
@@ -1564,6 +1663,7 @@ class UsageCache {
 			this.tokenProviders.delete(accountId);
 			this.failureCounts.delete(accountId);
 			this.windowResetCallbacks.delete(accountId);
+			this.devinMetadataCallbacks.delete(accountId);
 			this.capacityRestoredCallbacks.delete(accountId);
 			this.usagePermissionDeniedCallbacks.delete(accountId);
 			this.usageRecoveredCallbacks.delete(accountId);
@@ -1655,7 +1755,7 @@ class UsageCache {
 		tokenProvider: AccessTokenProvider,
 		generation: number,
 		provider?: string,
-		_customEndpoint?: string | null,
+		customEndpoint?: string | null,
 	): Promise<UsageFetchOutcome> {
 		/** A superseded fetch reports failure without touching any shared state. */
 		const superseded = {
@@ -1743,7 +1843,59 @@ class UsageCache {
 			// Fetch data based on provider type
 			let data: AnyUsageData | null = null;
 
-			if (provider === "zai") {
+			if (provider === "devin") {
+				try {
+					data = (
+						await devinClient.getAccount(token, customEndpoint ?? undefined)
+					).usage;
+				} catch (error) {
+					if (!this.isLiveFetchGeneration(accountId, generation, tokenProvider))
+						return superseded;
+					if (error instanceof DevinSessionAuthenticationError) {
+						try {
+							await this.devinMetadataCallbacks
+								.get(accountId)
+								?.onAuthenticationFailure?.(token, () =>
+									this.isLiveFetchGeneration(
+										accountId,
+										generation,
+										tokenProvider,
+									),
+								);
+						} catch {
+							log.warn(
+								`Devin authentication callback failed for account ${accountId}`,
+							);
+						}
+						if (
+							!this.isLiveFetchGeneration(accountId, generation, tokenProvider)
+						)
+							return superseded;
+					}
+					throw error;
+				}
+				if (!this.isLiveFetchGeneration(accountId, generation, tokenProvider))
+					return superseded;
+				const onMetadata =
+					this.devinMetadataCallbacks.get(accountId)?.onMetadata;
+				if (onMetadata) {
+					try {
+						await onMetadata(data, token, () =>
+							this.isLiveFetchGeneration(accountId, generation, tokenProvider),
+						);
+					} catch {
+						// Identity persistence is best-effort; a successful quota read remains usable.
+						log.warn(`Devin metadata callback failed for account ${accountId}`);
+					}
+					if (!this.isLiveFetchGeneration(accountId, generation, tokenProvider))
+						return superseded;
+				}
+				const callback = this.windowResetCallbacks.get(accountId);
+				if (callback)
+					this.notifyWindowReset(accountId, data, "devin", callback);
+				this.writeFetchedEntry(accountId, data);
+				return { success: true, retryAfterMs: null };
+			} else if (provider === "zai") {
 				// Fetch Zai usage data
 				data = await fetchZaiUsageData(token);
 				if (!this.isLiveFetchGeneration(accountId, generation, tokenProvider))
@@ -2157,17 +2309,24 @@ class UsageCache {
 		// Compare like windows. Comparing whichever window currently wins by
 		// utilization can mistake a winner change for a reset of one window.
 		const pairs =
-			provider === "zai"
-				? (["tokens_limit", "tokens_limit_weekly"] as const).map((key) => ({
-						prevResetAt: (previous.data as ZaiUsageData)[key]?.resetAt ?? null,
-						newResetAt: (newData as ZaiUsageData)[key]?.resetAt ?? null,
+			provider === "devin"
+				? (["daily", "weekly"] as const).map((key) => ({
+						prevResetAt:
+							(previous.data as DevinUsageData)[key]?.resetAt ?? null,
+						newResetAt: (newData as DevinUsageData)[key]?.resetAt ?? null,
 					}))
-				: [
-						{
-							prevResetAt: extractWindowResetTime(previous.data, provider),
-							newResetAt: extractWindowResetTime(newData, provider),
-						},
-					];
+				: provider === "zai"
+					? (["tokens_limit", "tokens_limit_weekly"] as const).map((key) => ({
+							prevResetAt:
+								(previous.data as ZaiUsageData)[key]?.resetAt ?? null,
+							newResetAt: (newData as ZaiUsageData)[key]?.resetAt ?? null,
+						}))
+					: [
+							{
+								prevResetAt: extractWindowResetTime(previous.data, provider),
+								newResetAt: extractWindowResetTime(newData, provider),
+							},
+						];
 		const rolled = pairs.find(({ prevResetAt, newResetAt }) =>
 			isGenuineWindowRoll(prevResetAt, newResetAt, now),
 		);

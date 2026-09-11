@@ -277,3 +277,36 @@ describe("describeAccountPolicy — descriptions pinned to the menu copy", () =>
 		).toBe("Toggle plan billing for this account");
 	});
 });
+
+it("offers Devin extra spend independently of session automation", () => {
+	expect(keysFor("devin")).toEqual(["autoFallback", "extraSpend"]);
+	const recovery = describeAccountPolicy("autoFallback", "devin");
+	expect(recovery.menuLabel).toBe("Auto-recover quota");
+	expect(recovery.description).toContain("metadata");
+	expect(recovery.description).toContain("new or unpinned");
+	expect(recovery.description).not.toContain("message");
+	expect(
+		policyOf(
+			makeAccount({ provider: "devin", autoPauseOnOverageEnabled: undefined }),
+			"extraSpend",
+		).enabled,
+	).toBe(false);
+	const protectedAccount = makeAccount({
+		provider: "devin",
+		autoPauseOnOverageEnabled: true,
+	});
+	expect(policyOf(protectedAccount, "extraSpend").enabled).toBe(false);
+	expect(
+		policyOf(
+			{ ...protectedAccount, autoPauseOnOverageEnabled: false },
+			"extraSpend",
+		).enabled,
+	).toBe(true);
+	const copy = describeAccountPolicy("extraSpend", "devin");
+	expect(copy.menuLabel).toBe("Allow requests beyond verified included quota");
+	expect(copy.description).toContain("unknown");
+	expect(copy.description).toContain("prepaid credits");
+	expect(copy.description).toContain("CLI, Desktop, and cloud");
+	expect(copy.description).not.toContain("Anthropic");
+	expect(copy.description).not.toContain("five-hour");
+});

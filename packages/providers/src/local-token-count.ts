@@ -3,7 +3,11 @@ export function supportsLocalTokenCounting(
 	provider: string,
 	customEndpoint?: string | null,
 ): boolean {
-	return provider === "codex" || (provider === "openrouter" && !customEndpoint);
+	return (
+		provider === "devin" ||
+		provider === "codex" ||
+		(provider === "openrouter" && !customEndpoint)
+	);
 }
 
 export const TOKEN_COUNT_SOURCE_HEADER = "x-clankermux-token-count-source";

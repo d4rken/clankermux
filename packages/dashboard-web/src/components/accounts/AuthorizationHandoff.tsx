@@ -20,27 +20,30 @@ export function AuthorizationHandoff({
 	userCode,
 }: AuthorizationHandoffProps) {
 	return (
-		<div className="space-y-item">
+		<div className="flex min-w-0 flex-col gap-row">
 			{userCode && (
-				<div className="flex items-center gap-item">
+				<div className="flex flex-wrap items-center gap-item">
 					<span className="text-sm text-muted-foreground">User code:</span>
-					<code className="text-base font-mono font-bold tracking-widest bg-muted px-row py-tight rounded select-all">
-						{userCode}
-					</code>
-					<CopyButton
-						variant="outline"
-						size="sm"
-						value={userCode}
-						title="Copy user code"
-					/>
+					<div className="flex min-w-0 items-center gap-item">
+						<code className="min-w-0 break-all text-sm font-mono font-medium tracking-wider text-foreground bg-muted px-row py-tight rounded select-all">
+							{userCode}
+						</code>
+						<CopyButton
+							variant="outline"
+							size="sm"
+							value={userCode}
+							title="Copy user code"
+							className="shrink-0"
+						/>
+					</div>
 				</div>
 			)}
-			<div className="flex items-center gap-item">
+			<div className="flex min-w-0 items-center gap-item">
 				<a
 					href={url}
 					target="_blank"
 					rel="noopener noreferrer"
-					className="text-sm text-primary underline"
+					className="min-w-0 text-sm text-primary underline"
 				>
 					Open authorization page
 				</a>
@@ -49,6 +52,7 @@ export function AuthorizationHandoff({
 					size="sm"
 					value={url}
 					title="Copy authorization link"
+					className="shrink-0"
 				/>
 			</div>
 		</div>

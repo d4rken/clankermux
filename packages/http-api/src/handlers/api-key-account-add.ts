@@ -17,6 +17,7 @@ import {
 	jsonResponse,
 } from "@clankermux/http-common";
 import { Logger } from "@clankermux/logger";
+import { devinSessionExpiresAt } from "@clankermux/providers";
 import { refreshOpenRouterAccountMetadata } from "../services/openrouter-account-metadata";
 
 const log = new Logger("API:Accounts");
@@ -72,6 +73,13 @@ export interface ApiKeyProviderSpec {
  * The API-key providers, keyed by the name their handler factory used to have.
  */
 export const API_KEY_PROVIDERS = {
+	devin: {
+		provider: "devin",
+		label: "Devin",
+		apiKey: { from: "body" },
+		endpoint: { from: "fixed", value: null },
+		mirrorKeyToTokens: false,
+	},
 	zai: {
 		provider: "zai",
 		label: "z.ai",
@@ -263,7 +271,9 @@ export function createApiKeyAccountAddHandler(
 					apiKey,
 					token,
 					token,
-					now + API_KEY_ACCOUNT_TTL_MS,
+					spec.provider === "devin"
+						? devinSessionExpiresAt(apiKey)
+						: now + API_KEY_ACCOUNT_TTL_MS,
 					now,
 					0,
 					0,
@@ -294,7 +304,7 @@ export function createApiKeyAccountAddHandler(
 				total_requests: number;
 				last_used: number | null;
 				created_at: number;
-				expires_at: number;
+				expires_at: number | null;
 				refresh_token: string;
 				paused: number;
 			}>(
@@ -332,7 +342,10 @@ export function createApiKeyAccountAddHandler(
 					// rather than dropped, so no caller loses a field it had.
 					customEndpoint,
 					tokenStatus: "valid" as const,
-					tokenExpiresAt: new Date(account.expires_at).toISOString(),
+					tokenExpiresAt:
+						account.expires_at != null
+							? new Date(account.expires_at).toISOString()
+							: null,
 					rateLimitStatus: "OK",
 					rateLimitReset: null,
 					rateLimitRemaining: null,

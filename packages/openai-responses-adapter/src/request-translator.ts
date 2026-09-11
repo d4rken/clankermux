@@ -121,9 +121,11 @@ export function translateRequestToAnthropic(
 	tools = createToolTranslation(req),
 ): AnthropicRequest {
 	const messages: AnthropicMessage[] = [];
-	const developerBlocks: string[] = [];
+	const instructionBlocks: string[] = [];
 
 	for (const item of req.input) {
+		if (!item || typeof item !== "object")
+			throw new Error("Invalid Responses message");
 		if (item.type === "message" || item.type === undefined) {
 			if (
 				!["user", "assistant", "system", "developer"].includes(item.role) ||
@@ -138,7 +140,7 @@ export function translateRequestToAnthropic(
 			// instruction roles belong in the Anthropic system prompt.
 			if (item.role === "developer" || item.role === "system") {
 				for (const c of content) {
-					if (c.type === "text") developerBlocks.push(c.text);
+					if (c.type === "text") instructionBlocks.push(c.text);
 				}
 				continue;
 			}
@@ -205,10 +207,10 @@ export function translateRequestToAnthropic(
 		max_tokens: req.max_output_tokens ?? 4096,
 	};
 
-	// Merge developer-role blocks and req.instructions into system prompt.
+	// Merge instruction messages and req.instructions into the system prompt.
 	const systemParts: string[] = [];
-	if (developerBlocks.length > 0)
-		systemParts.push(developerBlocks.join("\n\n"));
+	if (instructionBlocks.length > 0)
+		systemParts.push(instructionBlocks.join("\n\n"));
 	if (req.instructions !== undefined) systemParts.push(req.instructions);
 	if (systemParts.length > 0) result.system = systemParts.join("\n\n");
 

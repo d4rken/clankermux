@@ -94,7 +94,7 @@ describe("stops-history handler", () => {
 						lastSeenMs: NOW - 3 * HOUR + 900,
 					},
 					{
-						errorMessage: "family_weekly_exhausted_429",
+						errorMessage: "family_weekly_exhausted",
 						statusCode: 429,
 						bucketMs: NOW - 2 * HOUR,
 						count: 2,
@@ -106,9 +106,10 @@ describe("stops-history handler", () => {
 		);
 
 		expect(body.totalRequests).toBe(1000);
-		expect(body.blockedRequests).toBe(7);
+		expect(body.blockedRequests).toBe(2);
+		expect(body.outcomeTotals.failed).toBe(5);
 		expect(body.causes.map((c) => c.cause)).toEqual([
-			"pool_quota_exhausted",
+			"all_accounts_failed",
 			"family_weekly_exhausted",
 		]);
 		expect(body.causes[0].count).toBe(5);
@@ -370,5 +371,80 @@ describe("stops-history handler", () => {
 			"provider_overloaded",
 			"family_weekly_exhausted",
 		]);
+	});
+});
+
+describe("request outcome totals", () => {
+	it("reconciles outcomes, audit exclusions and the filtered denominator using existing reads", async () => {
+		const groups = [
+			["pool_exhausted", 503, 2],
+			["all_accounts_failed", 503, 1],
+			["client disconnected", 200, 129],
+			["stream error", 200, 1],
+			["unrecognized", 200, 3],
+			["model_fallback_429", 429, 16],
+			["session_exhausted_429", 429, 11],
+			["family_weekly_exhausted_429", 429, 4],
+			["weekly_exhausted_429", 429, 1],
+		] as const;
+		const sources = makeSources({
+			total: 200,
+			buckets: groups.map(([errorMessage, statusCode, count]) => ({
+				errorMessage,
+				statusCode,
+				count,
+				bucketMs: NOW - HOUR,
+				firstSeenMs: NOW - HOUR,
+				lastSeenMs: NOW - HOUR,
+			})),
+			models: groups.map(([errorMessage, statusCode, count]) => ({
+				errorMessage,
+				statusCode,
+				count,
+				model: errorMessage.includes("_429") ? "audit-only" : "gpt-6-astra",
+			})),
+			candidates: [{ candidatesCount: 2, requests: 168 }],
+		});
+		const body = await run(sources, "24h", "&models=gpt-6-astra");
+		expect(body.outcomeTotals).toEqual({
+			blocked: 2,
+			failed: 2,
+			disconnected: 129,
+			unclassified: 3,
+		});
+		expect(body.excludedAttemptAuditRows).toBe(32);
+		expect(body.totalRequests).toBe(168);
+		expect(body.blockedRequests).toBe(2);
+		expect(
+			Object.values(body.outcomeTotals).reduce((a, b) => a + b, 0) +
+				body.excludedAttemptAuditRows,
+		).toBe(groups.reduce((n, g) => n + g[2], 0));
+		expect(body.causes.some((c) => c.topRequestedModel === "audit-only")).toBe(
+			false,
+		);
+		expect(body.candidates.observedRequests).toBe(168);
+		expect(sources.calls).toHaveLength(4);
+		for (const filters of sources.filterArgs)
+			expect(filters?.models).toEqual(["gpt-6-astra"]);
+	});
+	it("retains an audit-like label at a non-audit status", async () => {
+		const body = await run(
+			makeSources({
+				total: 1,
+				buckets: [
+					{
+						errorMessage: "model_fallback_429",
+						statusCode: 503,
+						count: 1,
+						bucketMs: NOW,
+						firstSeenMs: NOW,
+						lastSeenMs: NOW,
+					},
+				],
+			}),
+		);
+		expect(body.excludedAttemptAuditRows).toBe(0);
+		expect(body.totalRequests).toBe(1);
+		expect(body.outcomeTotals.failed).toBe(1);
 	});
 });

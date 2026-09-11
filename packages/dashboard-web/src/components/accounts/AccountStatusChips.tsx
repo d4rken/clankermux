@@ -507,6 +507,10 @@ export function AccountStatusChips({
 	variant = "account",
 }: AccountStatusChipsProps) {
 	const status = providedStatus ?? deriveAccountStatus(account);
+	const devinQuotaPause =
+		account.provider === "devin" &&
+		(account.pauseReason === "overage" ||
+			account.pauseReason === "rate_limit_window");
 	const isUsage = variant === "usage";
 	const includeAccountDetails = showAccountDetails && !isUsage;
 
@@ -520,7 +524,18 @@ export function AccountStatusChips({
 					<AlertCircle className="h-4 w-4 text-warning-strong" />
 				</span>
 			)}
-			{status.isPaused && <span className="text-muted-foreground">Paused</span>}
+			{status.isPaused && (
+				<span
+					className="text-muted-foreground"
+					title={
+						devinQuotaPause
+							? "Included quota is exhausted or unavailable. Auto-recover quota resumes this account after metadata confirms available capacity. If your plan reports no allowance, review Allow requests beyond verified included quota before resuming manually."
+							: undefined
+					}
+				>
+					{devinQuotaPause ? "Paused: included quota" : "Paused"}
+				</span>
+			)}
 			{status.isUsagePermissionDenied && (
 				<StatusChip
 					className="bg-destructive/15 text-destructive-strong"

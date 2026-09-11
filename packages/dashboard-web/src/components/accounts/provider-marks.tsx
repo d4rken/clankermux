@@ -58,7 +58,7 @@ const ZAI_PATH =
 const CLAUDE_FILL = "fill-[#CE6B4C] dark:fill-[#D97757]";
 
 /**
- * Provider key -> brand mark. Providers absent from this map (Kilo, and any
+ * Provider key -> brand mark. Providers absent from this map (Devin, Kilo, and any
  * custom endpoint) have no published single-color logo we can vendor, so their
  * pill renders as text only.
  */

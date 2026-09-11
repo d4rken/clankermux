@@ -236,6 +236,7 @@ function forward(
 		internal?: boolean;
 		retryAttempt?: number;
 		overloadProbeToken?: unknown;
+		accountProvider?: string;
 	},
 ) {
 	const headers: Record<string, string> = {
@@ -248,7 +249,9 @@ function forward(
 			clientSignal: opts.clientSignal,
 			method: "POST",
 			path: "/v1/messages",
-			account: makeAccount(),
+			account: makeAccount(
+				opts.accountProvider ? { provider: opts.accountProvider } : {},
+			),
 			requestHeaders: new Headers({ "content-type": "application/json" }),
 			requestBody: enc.encode("{}").buffer as ArrayBuffer,
 			response: new Response(body, { status: 200, headers }),
@@ -281,6 +284,73 @@ beforeEach(() => {
 afterEach(() => {
 	clearAnthropicBurstThrottle();
 	clearProviderOverloadCooldown();
+});
+
+describe("Devin normalized SSE errors", () => {
+	for (const errorType of [
+		"api_error",
+		"authentication_error",
+		"permission_error",
+		"invalid_request_error",
+		"rate_limit_error",
+	]) {
+		it(`records late ${errorType} as failure without treating general errors as quota exhaustion`, async () => {
+			const { ctx, calls } = makeStreamCtx("devin");
+			const cooldown = spyOn(ctx.dbOps, "markAccountRateLimited");
+			const deadlineCooldown = spyOn(
+				ctx.dbOps,
+				"markAccountRateLimitedDeadlineOnly",
+			);
+			try {
+				const chunks = anthropicChunks({ messageStop: false });
+				const error = `event: error\ndata: ${JSON.stringify({ type: "error", error: { type: errorType } })}`;
+				// Split the final error, omit its last newline and omit message_stop.
+				chunks.push(error.slice(0, 20), error.slice(20));
+				const response = await forward(streamFrom(chunks), ctx, {
+					requestId: `req-devin-${errorType}`,
+					accountProvider: "devin",
+				});
+				const clientBody = await response.text();
+				await new Promise((resolve) => setTimeout(resolve, 20));
+				expect(clientBody).toContain(`"type":"${errorType}"`);
+				expect(calls.finishTransport).toEqual([
+					{
+						requestId: `req-devin-${errorType}`,
+						outcome: "error",
+						errorMessage: errorType,
+					},
+				]);
+				expect(calls.summaries[0]?.outputTokens).toBe(42);
+				if (errorType === "rate_limit_error")
+					expect(
+						cooldown.mock.calls.length + deadlineCooldown.mock.calls.length,
+					).toBeGreaterThan(0);
+				else {
+					expect(cooldown).not.toHaveBeenCalled();
+					expect(deadlineCooldown).not.toHaveBeenCalled();
+				}
+			} finally {
+				cooldown.mockRestore();
+				deadlineCooldown.mockRestore();
+			}
+		});
+	}
+	it("does not reclassify an error followed by message_stop and a read error as success", async () => {
+		const { ctx, calls } = makeStreamCtx("devin");
+		const chunks = anthropicChunks({ messageStop: false });
+		chunks.push(
+			'event: error\ndata: {"type":"error","error":{"type":"api_error"}}\n\n',
+			'event: message_stop\ndata: {"type":"message_stop"}\n\n',
+		);
+		await drain(
+			await forward(streamFrom(chunks, { error: readError() }), ctx, {
+				requestId: "req-devin-failed-cut",
+				accountProvider: "devin",
+			}),
+		);
+		expect(calls.finishTransport[0]?.outcome).toBe("error");
+		expect(calls.finishTransport[0]?.errorMessage).toBe("api_error");
+	});
 });
 
 describe("stream read error AFTER the terminal event → recorded as success", () => {

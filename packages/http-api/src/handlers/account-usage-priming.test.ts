@@ -30,6 +30,14 @@ beforeEach(() => {
 });
 
 describe("primeUsagePollingForNewAccount", () => {
+	it("starts usage polling for a new Devin account", async () => {
+		await primeUsagePollingForNewAccount({
+			id: "acc-devin",
+			provider: "devin",
+			name: "Free",
+		});
+		expect(restarterCalls).toEqual(["acc-devin"]);
+	});
 	it("starts usage polling for a new Anthropic OAuth account", async () => {
 		await primeUsagePollingForNewAccount({
 			id: "acc-anthropic",

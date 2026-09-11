@@ -249,7 +249,24 @@ export interface AlibabaCodingPlanUsageData {
 }
 
 // Combined usage data type that supports all providers
+export interface DevinUsageData {
+	kind: "devin";
+	quotaBased: boolean;
+	daily: { utilization: number; resetAt: number | null } | null;
+	weekly: { utilization: number; resetAt: number | null } | null;
+	planName: string | null;
+	email: string | null;
+	accountId: string | null;
+	/** Organization metadata from DevinPlanInfo; optional for older snapshots. */
+	organizationId?: string | null;
+	organizationName?: string | null;
+	canUseCli: boolean | null;
+	overageBalanceUsd: number;
+	includedCreditsRemaining: number | null;
+}
+
 export type FullUsageData =
+	| DevinUsageData
 	| AnthropicUsageData
 	| ZaiUsageData
 	| KiloUsageData

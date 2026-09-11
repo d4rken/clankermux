@@ -18,9 +18,9 @@ const log = new Logger("AccountUsagePriming");
  * (`restartUsagePollingForAccount`, whose first fetch is immediate) into the
  * account-creation path.
  *
- * Only Anthropic OAuth accounts have pollable usage windows: Codex usage is
+ * Anthropic OAuth and Devin accounts have pollable usage windows: Codex usage is
  * warmed separately by the CodexSpendCoordinator, and API-key ("claude-console-api")
- * and Qwen accounts have no OAuth usage windows. `restartUsagePollingForAccount`
+ * and Qwen accounts have no pollable usage windows. `restartUsagePollingForAccount`
  * also guards on provider internally, but short-circuiting here keeps the intent
  * explicit and avoids a needless dispatch + DB lookup for those providers.
  *
@@ -32,7 +32,7 @@ export async function primeUsagePollingForNewAccount(account: {
 	provider: string;
 	name: string;
 }): Promise<void> {
-	if (account.provider !== "anthropic") {
+	if (account.provider !== "anthropic" && account.provider !== "devin") {
 		return;
 	}
 	try {

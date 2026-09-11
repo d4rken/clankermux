@@ -28,6 +28,7 @@ import { deriveAccountStatus } from "../../lib/account-status";
 import {
 	providerShowsCreditsBalance,
 	providerShowsWeeklyUsage,
+	providerSupportsAutoFallback,
 	providerSupportsAutoFeatures,
 	providerSupportsCustomBilling,
 } from "../../utils/provider-utils";
@@ -164,6 +165,7 @@ interface AccountListItemProps {
 	onReauth?: (account: Account) => void;
 	onAnthropicReauth?: (account: Account) => void;
 	onCodexReauth?: (account: Account) => void;
+	onDevinReauth?: (account: Account) => void;
 }
 
 export function AccountListItem({
@@ -195,6 +197,7 @@ export function AccountListItem({
 	onReauth,
 	onAnthropicReauth,
 	onCodexReauth,
+	onDevinReauth,
 }: AccountListItemProps) {
 	const [isRefreshingUsage, setIsRefreshingUsage] = useState(false);
 	const [isEditingNotes, setIsEditingNotes] = useState(false);
@@ -219,7 +222,8 @@ export function AccountListItem({
 		(account.provider === "anthropic" &&
 			account.hasRefreshToken &&
 			!!onAnthropicReauth) ||
-		(account.provider === "codex" && !!onCodexReauth);
+		(account.provider === "codex" && !!onCodexReauth) ||
+		(account.provider === "devin" && !!onDevinReauth);
 
 	// Menu copy for one automation flag. Sourced from the shared descriptors the
 	// policy chips render from, so an item's label and explanation cannot drift
@@ -229,9 +233,11 @@ export function AccountListItem({
 
 	// Whether the overflow menu should show the "Automation" toggle group.
 	const hasAutomationToggles =
-		providerSupportsAutoFeatures(account.provider) ||
+		providerSupportsAutoFallback(account.provider) ||
 		providerSupportsCustomBilling(account.provider) ||
-		((account.provider === "anthropic" || account.provider === "codex") &&
+		((account.provider === "anthropic" ||
+			account.provider === "codex" ||
+			account.provider === "devin") &&
 			!!onAutoPauseOnOverageToggle) ||
 		(account.provider === "zai" && !!onPeakHoursPauseToggle) ||
 		(account.provider === "codex" &&
@@ -269,6 +275,7 @@ export function AccountListItem({
 				<div className="flex items-center gap-tight shrink-0">
 					{(account.provider === "anthropic" ||
 						account.provider === "codex" ||
+						account.provider === "devin" ||
 						(account.provider === "openrouter" && !account.customEndpoint)) && (
 						<Button
 							variant="ghost"
@@ -284,11 +291,13 @@ export function AccountListItem({
 								}
 							}}
 							title={
-								account.provider === "openrouter"
-									? "Refresh OpenRouter account details and usage"
-									: account.provider === "codex"
-										? "Refresh usage data (free usage read — does not consume quota)"
-										: "Refresh usage data (restarts usage polling and refreshes token if expired)"
+								account.provider === "devin"
+									? "Refresh Devin account and usage metadata (does not consume inference quota)"
+									: account.provider === "openrouter"
+										? "Refresh OpenRouter account details and usage"
+										: account.provider === "codex"
+											? "Refresh usage data (free usage read — does not consume quota)"
+											: "Refresh usage data (restarts usage polling and refreshes token if expired)"
 							}
 						>
 							<RefreshCw
@@ -335,25 +344,25 @@ export function AccountListItem({
 							{hasAutomationToggles && (
 								<>
 									<DropdownMenuLabel>Automation</DropdownMenuLabel>
+									{providerSupportsAutoFallback(account.provider) && (
+										<DropdownMenuCheckboxItem
+											checked={account.autoFallbackEnabled}
+											onCheckedChange={() => onAutoFallbackToggle(account)}
+											onSelect={(e) => e.preventDefault()}
+											title={policyCopy("autoFallback").description}
+										>
+											{policyCopy("autoFallback").menuLabel}
+										</DropdownMenuCheckboxItem>
+									)}
 									{providerSupportsAutoFeatures(account.provider) && (
-										<>
-											<DropdownMenuCheckboxItem
-												checked={account.autoFallbackEnabled}
-												onCheckedChange={() => onAutoFallbackToggle(account)}
-												onSelect={(e) => e.preventDefault()}
-												title={policyCopy("autoFallback").description}
-											>
-												{policyCopy("autoFallback").menuLabel}
-											</DropdownMenuCheckboxItem>
-											<DropdownMenuCheckboxItem
-												checked={account.autoRefreshEnabled}
-												onCheckedChange={() => onAutoRefreshToggle(account)}
-												onSelect={(e) => e.preventDefault()}
-												title={policyCopy("autoRefresh").description}
-											>
-												{policyCopy("autoRefresh").menuLabel}
-											</DropdownMenuCheckboxItem>
-										</>
+										<DropdownMenuCheckboxItem
+											checked={account.autoRefreshEnabled}
+											onCheckedChange={() => onAutoRefreshToggle(account)}
+											onSelect={(e) => e.preventDefault()}
+											title={policyCopy("autoRefresh").description}
+										>
+											{policyCopy("autoRefresh").menuLabel}
+										</DropdownMenuCheckboxItem>
 									)}
 									{providerSupportsCustomBilling(account.provider) && (
 										<DropdownMenuCheckboxItem
@@ -366,7 +375,8 @@ export function AccountListItem({
 										</DropdownMenuCheckboxItem>
 									)}
 									{(account.provider === "anthropic" ||
-										account.provider === "codex") &&
+										account.provider === "codex" ||
+										account.provider === "devin") &&
 										onAutoPauseOnOverageToggle && (
 											<DropdownMenuCheckboxItem
 												// Inverted polarity: this reads as an "allow extra spend"
@@ -374,7 +384,11 @@ export function AccountListItem({
 												// the default (unchecked) means protected / no extra cost.
 												// The handler flips the stored protected flag, so the
 												// rendered `checked` is the negation of it.
-												checked={!account.autoPauseOnOverageEnabled}
+												checked={
+													account.provider === "devin"
+														? account.autoPauseOnOverageEnabled === false
+														: !account.autoPauseOnOverageEnabled
+												}
 												onCheckedChange={() =>
 													onAutoPauseOnOverageToggle(account)
 												}
@@ -532,6 +546,15 @@ export function AccountListItem({
 										Re-authenticate
 									</DropdownMenuItem>
 								)}
+							{account.provider === "devin" && onDevinReauth && (
+								<DropdownMenuItem
+									onClick={() => onDevinReauth(account)}
+									title="Reconnect this Devin account (preserves all metadata)"
+								>
+									<KeyRound className="mr-item h-4 w-4" />
+									Reconnect
+								</DropdownMenuItem>
+							)}
 							{account.provider === "codex" && onCodexReauth && (
 								<DropdownMenuItem
 									onClick={() => onCodexReauth(account)}

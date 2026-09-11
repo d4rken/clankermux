@@ -219,6 +219,23 @@ describe("AccountListItem — compact quota cards", () => {
 	});
 });
 
+it("renders Devin account identity and a metadata-only refresh action", () => {
+	const html = render(
+		makeAccount({
+			provider: "devin",
+			identityEmail: "devin@example.test",
+			identityExternalId: "devin-account-123",
+			identityPlanTier: "free",
+		}),
+	);
+	expect(html).toContain("devin@example.test · Free");
+	expect(html).toContain("Account ID: devin-account-123");
+	expect(html).toContain("#devin-ac");
+	expect(html).toContain(
+		"Refresh Devin account and usage metadata (does not consume inference quota)",
+	);
+});
+
 describe("AccountListItem — OpenRouter details", () => {
 	it("offers metadata refresh for API-key accounts without OAuth tokens", () => {
 		const html = render(

@@ -4,7 +4,7 @@ Implemented 2026-09-11 from `docs/chat-completions-handover.md`, on
 `feat/chat-completions-ingress` in `.claude/worktrees/chat-completions-ingress`.
 Base: `72d0b78f`, including the routing followups and local token counting.
 This document replaces the initial implementation plan with the final design,
-support contract, and observed validation. Changes remain uncommitted and undeployed.
+support contract, and observed validation. The feature and release integration are prepared for promotion as 2026.9.47.
 
 ## Endpoint and supported fields
 
@@ -232,5 +232,26 @@ existing behavior separately.
 
 Temporary lab servers, SSH forwards, client keys, credential database, CNC profiles,
 fixtures and the separate preview installation were removed after sanitized evidence
-export. The worktree and Opus pane remain available for follow-ups. No commit,
-merge, push or deployment was performed.
+export. These acceptance runs preceded release preparation; production promotion
+and its smoke test are separate from the isolated lab evidence above.
+
+
+## Release integration — 2026.9.47
+
+Integrated main `e7ff5b7b` into the feature worktree before release. Shared routing
+conflicts preserve Devin's canonical targets and response normalization alongside
+Chat capability filtering and per-attempt context. The integration review found
+that Devin's unresolved-alias diagnostic could overwrite Chat rejection messages;
+the diagnostic now applies only to non-Chat requests. Both new regression cases
+failed before this guard and passed afterward.
+
+- Integrated full backend lane: **10,398 passed**, 658 files, zero failures.
+  This run started before the final diagnostic guard; final coverage for that
+  correction is the focused run below.
+- Separate DOM lane: **166 passed**, 23 files, zero failures.
+- Final focused Chat adapter, all Codex provider tests, routing integration,
+  Devin route/dispatch and server dispatch: **542 passed**, 19 files.
+- Final lint followed by typecheck: passed, no lint fixes or warnings.
+
+The Clients page remains a separate follow-up. Promotion uses the repository's
+revision-pinned release procedure, followed by an isolated OpenCode smoke on CNC.

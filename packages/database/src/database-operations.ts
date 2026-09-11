@@ -43,7 +43,10 @@ import {
 	PayloadWriteClient,
 	type PayloadWriterFactory,
 } from "./payload-write-client";
-import { AccountRepository } from "./repositories/account.repository";
+import {
+	AccountRepository,
+	type DevinCredentialReplacement,
+} from "./repositories/account.repository";
 import { AccountPaymentRepository } from "./repositories/account-payment.repository";
 import { ApiKeyRepository } from "./repositories/api-key.repository";
 import {
@@ -1250,6 +1253,39 @@ OAuth tokens will need to be re-authenticated.
 			accountId,
 			expectedReset,
 			observedAt,
+		);
+	}
+
+	async reconnectDevinAccount(
+		accountId: string,
+		replacement: DevinCredentialReplacement,
+	): Promise<boolean> {
+		return this.accounts.reconnectDevinAccount(accountId, replacement);
+	}
+
+	async updateDevinSessionExpiry(
+		accountId: string,
+		expectedApiKey: string,
+		expectedEndpoint: string | null,
+		expiresAt: number | null,
+	): Promise<boolean> {
+		return this.accounts.updateDevinSessionExpiry(
+			accountId,
+			expectedApiKey,
+			expectedEndpoint,
+			expiresAt,
+		);
+	}
+
+	async pauseDevinAccountForReauth(
+		accountId: string,
+		expectedApiKey: string,
+		expectedEndpoint: string | null,
+	): Promise<boolean> {
+		return this.accounts.pauseDevinAccountForReauth(
+			accountId,
+			expectedApiKey,
+			expectedEndpoint,
 		);
 	}
 

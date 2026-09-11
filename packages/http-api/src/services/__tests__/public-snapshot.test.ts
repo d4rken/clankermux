@@ -579,6 +579,87 @@ describe("availability and credential are orthogonal axes", () => {
 	});
 });
 
+describe("Devin public credential read model", () => {
+	it.each([
+		{
+			name: "opaque session",
+			apiKey: "opaque-session-secret",
+			expiresAt: null,
+			paused: 0 as const,
+			reason: null,
+			state: "valid",
+		},
+		{
+			name: "future expiry",
+			apiKey: "jwt-session-secret",
+			expiresAt: NOW + 1_000,
+			paused: 0 as const,
+			reason: null,
+			state: "valid",
+		},
+		{
+			name: "past expiry",
+			apiKey: "expired-session-secret",
+			expiresAt: NOW - 1_000,
+			paused: 0 as const,
+			reason: null,
+			state: "expired",
+		},
+		{
+			name: "no session",
+			apiKey: null,
+			expiresAt: null,
+			paused: 0 as const,
+			reason: null,
+			state: "missing",
+		},
+		{
+			name: "blank session",
+			apiKey: " ",
+			expiresAt: null,
+			paused: 0 as const,
+			reason: null,
+			state: "missing",
+		},
+		{
+			name: "rejected session",
+			apiKey: "rejected-session-secret",
+			expiresAt: NOW + 1_000,
+			paused: 1 as const,
+			reason: "oauth_invalid_grant",
+			state: "invalid",
+		},
+		{
+			name: "manually paused",
+			apiKey: "paused-session-secret",
+			expiresAt: null,
+			paused: 1 as const,
+			reason: "manual",
+			state: "valid",
+		},
+	])("reports $name from the API-key column without leaking credentials", async ({
+		apiKey,
+		expiresAt,
+		paused,
+		reason,
+		state,
+	}) => {
+		const id = insertAccount({
+			provider: "devin",
+			access_token: null,
+			refresh_token: "",
+			expires_at: expiresAt,
+			paused,
+			pause_reason: reason,
+		});
+		db.run("UPDATE accounts SET api_key = ? WHERE id = ?", [apiKey, id]);
+		const snapshot = await read();
+		expect(snapshot.accounts[0]?.credentialState).toBe(state);
+		expect(snapshot.accounts[0]?.credentialExpiresAtMs).toBe(expiresAt);
+		expect(JSON.stringify(snapshot)).not.toContain("session-secret");
+	});
+});
+
 describe("resolveCredentialState", () => {
 	const base = {
 		access_token: "at" as string | null,

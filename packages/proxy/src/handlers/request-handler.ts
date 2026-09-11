@@ -177,9 +177,11 @@ export async function makeProxyRequest(
 		TIME_CONSTANTS.PROXY_REQUEST_TIMEOUT_MS,
 	);
 
-	const effectiveSignal = signal
-		? AbortSignal.any([signal, internalController.signal])
-		: internalController.signal;
+	const effectiveSignal = AbortSignal.any([
+		internalController.signal,
+		...(signal ? [signal] : []),
+		...(target instanceof Request ? [target.signal] : []),
+	]);
 
 	try {
 		if (target instanceof Request) {

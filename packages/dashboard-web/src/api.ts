@@ -549,6 +549,55 @@ class API extends HttpClient {
 		}
 	}
 
+	async addDevinAccount(data: {
+		name: string;
+		apiKey: string;
+		priority: number;
+	}): Promise<{ message: string; account: Account }> {
+		return this.post("/api/accounts/devin", data);
+	}
+	async discoverDevinModels(apiKey: string): Promise<{
+		models: Array<{
+			id: string;
+			name: string;
+			disabled: boolean;
+			disabledReason: string | null;
+		}>;
+		usage: { planName: string | null; canUseCli: boolean | null };
+	}> {
+		return this.post("/api/providers/devin/models", { apiKey });
+	}
+	async startDevinLogin(data: {
+		name: string;
+		priority: number;
+	}): Promise<{ sessionId: string; authUrl: string; expiresAt: number }> {
+		return this.post("/api/accounts/devin/login", data);
+	}
+	async completeDevinLogin(data: {
+		sessionId: string;
+		callback: string;
+	}): Promise<{ message: string; account: Account }> {
+		return this.post("/api/accounts/devin/login/complete", data);
+	}
+	async startDevinReauth(data: { accountId: string }): Promise<{
+		sessionId: string;
+		authUrl: string;
+		expiresAt: number;
+	}> {
+		return this.post("/api/accounts/devin/reauth/start", data);
+	}
+	async completeDevinReauth(data: {
+		sessionId: string;
+		callback: string;
+	}): Promise<{ success: boolean }> {
+		return this.post("/api/accounts/devin/reauth/complete", data);
+	}
+	async reconnectDevinToken(data: {
+		accountId: string;
+		apiKey: string;
+	}): Promise<{ success: boolean }> {
+		return this.post("/api/accounts/devin/reauth/token", data);
+	}
 	async addOpenRouterAccount(data: {
 		name: string;
 		apiKey: string;

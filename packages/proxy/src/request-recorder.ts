@@ -394,6 +394,7 @@ const DEFAULT_CONFIG: RequestRecorderConfig = {
 
 /** Providers whose accounts carry a subscription plan (vs pay-as-you-go API). */
 const PLAN_PROVIDERS = new Set([
+	"devin",
 	"anthropic",
 	"zai",
 	"alibaba-coding-plan",

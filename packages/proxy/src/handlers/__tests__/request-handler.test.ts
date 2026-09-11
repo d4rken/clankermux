@@ -26,6 +26,21 @@ describe("validateProviderPath", () => {
 });
 
 describe("makeProxyRequest — signal composition (Finding 3)", () => {
+	it("retains cancellation carried by a transformed Request", async () => {
+		let seen: AbortSignal | undefined;
+		globalThis.fetch = (async (input: RequestInfo | URL) => {
+			seen = (input as Request).signal;
+			return Response.json({});
+		}) as typeof fetch;
+		const abort = new AbortController();
+		await makeProxyRequest(
+			new Request("https://example.invalid/v1/messages", {
+				signal: abort.signal,
+			}),
+		);
+		abort.abort();
+		expect(seen?.aborted).toBe(true);
+	});
 	let originalFetch: typeof globalThis.fetch;
 
 	beforeEach(() => {
