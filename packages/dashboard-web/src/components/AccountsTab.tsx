@@ -706,7 +706,7 @@ export function AccountsTab() {
 					<div className="flex items-center justify-between">
 						<div>
 							<CardTitle>Accounts</CardTitle>
-							<CardDescription>Manage your Claude accounts</CardDescription>
+							<CardDescription>Manage your provider accounts</CardDescription>
 						</div>
 						{!adding && (
 							<Button onClick={() => setAdding(true)} size="sm">

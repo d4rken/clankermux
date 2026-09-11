@@ -256,7 +256,7 @@ const DEVICE_FLOWS: Array<
 	[
 		"Codex",
 		"Codex (OpenAI OAuth)",
-		"Start Codex Authentication",
+		"Sign in with Codex",
 		() => {
 			spyOn(api, "initCodexDeviceFlow").mockImplementation(async () => ({
 				sessionId: "s1",
@@ -287,7 +287,7 @@ const DEVICE_FLOWS: Array<
 	[
 		"Qwen",
 		"Qwen (Alibaba Cloud OAuth)",
-		"Start Qwen Authentication",
+		"Sign in with Qwen",
 		() => {
 			spyOn(api, "initQwenDeviceFlow").mockImplementation(async () => ({
 				sessionId: "s1",

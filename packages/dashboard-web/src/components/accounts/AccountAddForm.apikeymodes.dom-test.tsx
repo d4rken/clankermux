@@ -216,7 +216,7 @@ describe("account add form: API key provider modes", () => {
 
 it("imports a Devin session token with SWE-2 defaults", async () => {
 	await renderForm();
-	await selectMode("Devin (SWE-2 subscription)");
+	await selectMode("Devin (Subscription)");
 	await edit("name", "devin-free");
 	await edit("devin-token", "session-secret");
 	await act(async () => {
@@ -241,7 +241,7 @@ it("hands Devin login to the chosen browser and completes using the callback URL
 		account: { id: "devin-1" },
 	} as never);
 	await renderForm();
-	await selectMode("Devin (SWE-2 subscription)");
+	await selectMode("Devin (Subscription)");
 	await edit("name", "Free");
 	await act(async () =>
 		byText<HTMLButtonElement>("button", "Sign in with Devin").click(),
@@ -276,7 +276,7 @@ it("shows Devin discovery with central routing guidance and clears it when the t
 		usage: { planName: "Free", canUseCli: true },
 	});
 	await renderForm();
-	await selectMode("Devin (SWE-2 subscription)");
+	await selectMode("Devin (Subscription)");
 	await edit("name", "Free");
 	await edit("devin-token", "first-token");
 	await act(async () =>
