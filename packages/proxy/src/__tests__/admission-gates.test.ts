@@ -495,6 +495,57 @@ describe("createAdmissionGates", () => {
 			expect(gates.applyFamilyMemoDemotion([codex])).toEqual([codex]);
 		});
 
+		// A literal routing rule points this account at a DIFFERENT family from the
+		// one the client asked for, so the memo that governs it is the RESOLVED
+		// target's. Under identity routing the two coincide and the distinction is
+		// invisible, which is why this case needs a literal target.
+		it("demotes on the RESOLVED target's family, not the requested one", () => {
+			const mapped = makeAccount({
+				id: "acc-a",
+				name: "a",
+				resolvedModel: FABLE,
+			});
+			const other = makeAccount({
+				id: "acc-b",
+				name: "b",
+				resolvedModel: FABLE,
+			});
+			memo("acc-a");
+
+			// Requested family is sonnet; the memo is on fable, the family acc-a
+			// will actually serve.
+			const gates = makeGates({ effectiveRequestModel: MODEL });
+
+			expect(
+				gates.applyFamilyMemoDemotion([mapped, other]).map((a) => a.id),
+			).toEqual(["acc-b", "acc-a"]);
+		});
+
+		it("ignores a memo for the REQUESTED family the account will never serve", () => {
+			const mapped = makeAccount({
+				id: "acc-a",
+				name: "a",
+				resolvedModel: FABLE,
+			});
+			const other = makeAccount({
+				id: "acc-b",
+				name: "b",
+				resolvedModel: FABLE,
+			});
+			recordFamilyWeeklyExhausted(
+				"acc-a",
+				"sonnet",
+				Date.now() + 4 * HOUR,
+				Date.now(),
+			);
+
+			const gates = makeGates({ effectiveRequestModel: MODEL });
+
+			// Untouched — identity, which is what "nothing was demoted" looks like.
+			const candidates = [mapped, other];
+			expect(gates.applyFamilyMemoDemotion(candidates)).toBe(candidates);
+		});
+
 		it("returns the candidate list untouched when nothing is memo'd", () => {
 			const a = makeAccount({ id: "acc-a" });
 			const b = makeAccount({ id: "acc-b" });

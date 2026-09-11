@@ -161,13 +161,8 @@ export interface AdmissionGates {
  * is existing behavior, preserved here rather than "fixed".
  */
 export function createAdmissionGates(deps: AdmissionGateDeps): AdmissionGates {
-	const {
-		requestMeta,
-		effectiveRequestModel,
-		gateTokenEstimate,
-		isSyntheticProbeRequest,
-		config,
-	} = deps;
+	const { requestMeta, gateTokenEstimate, isSyntheticProbeRequest, config } =
+		deps;
 
 	// Effective model for per-account overload reads: the combo slot's model
 	// override when an ACTIVE combo targets this account, else the request
@@ -502,7 +497,7 @@ export function createAdmissionGates(deps: AdmissionGateDeps): AdmissionGates {
 		for (const account of candidates) {
 			const family =
 				account.provider === "anthropic"
-					? getModelFamily(effectiveRequestModel ?? "")
+					? getModelFamily(modelForAccount(account))
 					: null;
 			const resetAt = family
 				? getFamilyWeeklyExhaustedUntil(account.id, family, now)

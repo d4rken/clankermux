@@ -2964,7 +2964,7 @@ export async function proxyForcedAccount(
 		// disableCooldown above suppresses COOLDOWN mutation on a forced 429; it
 		// says nothing about honouring a forced success.
 		if (response.ok) {
-			const forcedFamily = getModelFamily(requestMeta.requestedModel ?? "");
+			const forcedFamily = getModelFamily(modelOverride ?? "");
 			if (forcedFamily) {
 				clearFamilyWeeklyExhausted(
 					account.id,
