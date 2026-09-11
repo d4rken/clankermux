@@ -12,6 +12,7 @@ import { getChatContext } from "@clankermux/types";
 import { AccountModelPermissionService } from "./account-model-permissions";
 import type { ProxyContext } from "./handlers/proxy-types";
 import { getValidAccessToken } from "./handlers/token-manager";
+import { isModelExcludedForRequest } from "./request-model-exclusions";
 import {
 	type BuildRouteInput,
 	buildResolvedRoute,
@@ -172,13 +173,17 @@ export async function eligibleRouteAccounts(
 			if (!route.maintenance) {
 				const permissions = await service.permissions(account);
 				if (!route.permits(account, permissions)) return null;
+				// Checked alongside the persisted row, not instead of it: a pair this
+				// request already saw definitively rejected may not have reached the
+				// suppression table yet (see request-model-exclusions).
 				if (
-					await ctx.dbOps.routing.isModelSuppressed(
+					isModelExcludedForRequest(meta, account.id, target.upstreamModel) ||
+					(await ctx.dbOps.routing.isModelSuppressed(
 						account.id,
 						target.scope,
 						target.upstreamModel,
 						Date.now(),
-					)
+					))
 				)
 					return null;
 			}

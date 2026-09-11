@@ -7,6 +7,7 @@ import type { Account, RequestMeta, RoutingAttempt } from "@clankermux/types";
 import { getChatContext } from "@clankermux/types";
 import type { ProxyContext } from "./handlers/proxy-types";
 import { makeProxyRequest } from "./handlers/request-handler";
+import { isModelExcludedForRequest } from "./request-model-exclusions";
 import {
 	enforceOutgoingModel,
 	getAttemptTarget,
@@ -107,6 +108,14 @@ export async function sendAuthorizedRequest(
 				"Destination identity changed before dispatch",
 			);
 		if (!route.maintenance) {
+			// The last gate before the wire, and the only one that is authoritative
+			// the instant a rejection is classified. The suppression row below is
+			// written from the response observer and may still be in flight, so a
+			// transport, body or token-refresh retry can reach here first.
+			if (isModelExcludedForRequest(meta, account.id, target.upstreamModel))
+				throw new RoutingPolicyError(
+					"Destination already rejected the resolved model for this request",
+				);
 			const permissions =
 				await getModelPermissionService(ctx).permissions(current);
 			if (

@@ -18,7 +18,10 @@ import { clearProviderOverloadCooldown } from "../provider-overload-cooldown";
 import { handleProxy } from "../proxy";
 import { sendAuthorizedRequest } from "../routing-dispatch";
 import { isDefinitiveModelError } from "../routing-response-audit";
-import { initializeRequestRoute } from "../routing-service";
+import {
+	eligibleRouteAccounts,
+	initializeRequestRoute,
+} from "../routing-service";
 import { makeAccount, makeContext } from "./fixtures/proxy-terminal-harness";
 
 const originalFetch = globalThis.fetch;
@@ -1087,6 +1090,311 @@ describe("routing table through the real proxy", () => {
 				scope,
 				"gpt-6-astra",
 				Date.now(),
+			),
+		).toBe(true);
+	});
+});
+
+/**
+ * A definitive model rejection that arrives as an HTTP ERROR envelope is
+ * account-scoped evidence, so it fails over. Every boundary that decision must
+ * not cross gets a test here: HTTP 200 stream envelopes (too late to restart),
+ * OpenRouter routing restrictions (provider policy, not the model) and
+ * forced-account requests (which name their destination).
+ */
+describe("definitive model rejection failover", () => {
+	const scopeOf = modelPermissionScope;
+	/** Codex account shaped so `handleProxy` can resolve a token and stream. */
+	const codexAccount = (id: string) =>
+		makeAccount({
+			id,
+			provider: "codex",
+			access_token: "test",
+			refresh_token: "test",
+			api_key: null,
+			expires_at: Date.now() + 3600000,
+		});
+	async function codexPool(ids: string[]) {
+		const accounts = ids.map(codexAccount);
+		const { ctx, routing } = await setup(accounts, [rule()]);
+		Object.assign(ctx.dbOps, {
+			saveCodexWindowObservations: mock(async () => {}),
+			getAdapter: () => ({
+				runWithChanges: async () => 1,
+				run: async () => {},
+				get: async () => null,
+			}),
+		});
+		for (const a of accounts)
+			await routing.setManualModels(a.id, scopeOf(a), ["gpt-6-astra"]);
+		return { accounts, ctx, routing };
+	}
+	const accessDenied = () =>
+		Response.json(
+			{
+				error: {
+					code: "model_access_denied",
+					message: "Your organization is not authorized for gpt-6-astra",
+				},
+			},
+			{ status: 403 },
+		);
+	/** The suppression write rides a fire-and-forget drain, so poll for it. */
+	async function suppressedSoon(
+		routing: RoutingRepository,
+		accountId: string,
+		scope: string,
+		model: string,
+	): Promise<boolean> {
+		for (let i = 0; i < 200; i++) {
+			if (await routing.isModelSuppressed(accountId, scope, model, Date.now()))
+				return true;
+			await new Promise((resolve) => setTimeout(resolve, 5));
+		}
+		return false;
+	}
+
+	it("fails a 403 model_access_denied over to an authorized sibling", async () => {
+		const { ctx } = await codexPool(["denied-403", "authorized-403"]);
+		let calls = 0;
+		const fetcher = mock(async () => {
+			calls++;
+			return calls === 1 ? accessDenied() : codexResponse("gpt-6-astra");
+		});
+		globalThis.fetch = fetcher as typeof fetch;
+		const req = request();
+		const response = await handleProxy(
+			req,
+			new URL(req.url),
+			ctx,
+			"experiment",
+		);
+		expect(response.status).toBe(200);
+		expect((await response.json()).content[0].text).toBe("hello");
+		expect(fetcher).toHaveBeenCalledTimes(2);
+		expect(
+			dbs
+				.at(-1)
+				?.query<{ status: number }, []>(
+					"SELECT status FROM routing_attempts ORDER BY started_at",
+				)
+				.all()
+				.map((r) => r.status),
+		).toEqual([403, 200]);
+	});
+
+	it("does not wait for the persistent suppression write before failing over", async () => {
+		const { ctx, routing } = await codexPool([
+			"denied-slow",
+			"authorized-slow",
+		]);
+		let releaseSuppression = () => {};
+		const blocked = new Promise<void>((resolve) => {
+			releaseSuppression = resolve;
+		});
+		Object.assign(ctx.dbOps.routing, {
+			suppressModel: mock(async () => {
+				await blocked;
+			}),
+		});
+		let calls = 0;
+		const fetcher = mock(async () => {
+			calls++;
+			return calls === 1 ? accessDenied() : codexResponse("gpt-6-astra");
+		});
+		globalThis.fetch = fetcher as typeof fetch;
+		const req = request();
+		const response = await handleProxy(
+			req,
+			new URL(req.url),
+			ctx,
+			"experiment",
+		);
+		expect(response.status).toBe(200);
+		expect((await response.json()).content[0].text).toBe("hello");
+		expect(fetcher).toHaveBeenCalledTimes(2);
+		// Still pending at the moment the sibling served the client.
+		expect(
+			await routing.isModelSuppressed(
+				"denied-slow",
+				scopeOf(codexAccount("denied-slow")),
+				"gpt-6-astra",
+				Date.now(),
+			),
+		).toBe(false);
+		releaseSuppression();
+	});
+
+	it("refuses the rejected pair for the rest of the request without the suppression row", async () => {
+		const { accounts, ctx } = await codexPool(["denied-local"]);
+		const [denied] = accounts;
+		// Prove the request-local set does the work: the persisted row never says
+		// yes, exactly as it would not have landed yet on a real retry.
+		Object.assign(ctx.dbOps.routing, {
+			isModelSuppressed: mock(async () => false),
+		});
+		const fetcher = mock(async () => accessDenied());
+		globalThis.fetch = fetcher as typeof fetch;
+		const meta: RequestMeta = {
+			id: "local-exclusion",
+			method: "POST",
+			path: "/v1/messages",
+			timestamp: Date.now(),
+			requestedModel: requested,
+			headers: new Headers(),
+		};
+		await initializeRequestRoute(meta, ctx, null, null);
+		expect((await eligibleRouteAccounts(meta, ctx)).map((a) => a.id)).toEqual([
+			"denied-local",
+		]);
+		const body = new TextEncoder().encode(
+			JSON.stringify({
+				model: requested,
+				max_tokens: 32,
+				messages: [{ role: "user", content: "hello" }],
+			}),
+		).buffer as ArrayBuffer;
+		expect(
+			await proxyWithAccount(
+				request(),
+				new URL("https://proxy.local/v1/messages"),
+				denied,
+				meta,
+				body,
+				() => undefined,
+				0,
+				ctx,
+				"gpt-6-astra",
+			),
+		).toBeNull();
+		expect(fetcher).toHaveBeenCalledTimes(1);
+		// Eligibility no longer offers the pair...
+		expect(await eligibleRouteAccounts(meta, ctx)).toEqual([]);
+		// ...and the dispatch chokepoint every transport / body / token-refresh
+		// retry passes through refuses it before reaching the network.
+		await expect(
+			sendAuthorizedRequest(
+				new Request("https://upstream.test/v1/messages", {
+					method: "POST",
+					body: JSON.stringify({ model: "gpt-6-astra" }),
+				}),
+				denied,
+				meta,
+				ctx,
+			),
+		).rejects.toThrow("already rejected the resolved model for this request");
+		expect(fetcher).toHaveBeenCalledTimes(1);
+	});
+
+	it("leaves an OpenRouter 403 routing restriction to the client untouched", async () => {
+		const model = "meta/muse-spark-1.3";
+		const accounts = ["or-403-a", "or-403-b"].map((id) =>
+			makeAccount({ id, provider: "openrouter", api_key: "test-only" }),
+		);
+		const { ctx, routing } = await setup(accounts, [
+			rule({
+				pool_provider: "openrouter",
+				target_kind: "literal",
+				target_model: model,
+			}),
+		]);
+		for (const a of accounts)
+			await routing.setManualModels(a.id, scopeOf(a), [model]);
+		const envelope = {
+			type: "error",
+			error: {
+				type: "not_found_error",
+				message:
+					"No allowed providers are available for the selected model. Providers serving meta/muse-spark-1.3: meta, but your account's allowed-providers setting permits only: openai.",
+				error_type: "not_found",
+			},
+			metadata: { failed_routing_step: "Filter by Allowed Providers" },
+		};
+		const fetcher = mock(async () => Response.json(envelope, { status: 403 }));
+		globalThis.fetch = fetcher as typeof fetch;
+		const req = request();
+		const response = await handleProxy(
+			req,
+			new URL(req.url),
+			ctx,
+			"experiment",
+		);
+		expect(response.status).toBe(403);
+		expect(await response.json()).toEqual(envelope);
+		expect(fetcher).toHaveBeenCalledTimes(accounts.length);
+		for (const a of accounts)
+			expect(
+				await routing.isModelSuppressed(a.id, scopeOf(a), model, Date.now()),
+			).toBe(false);
+	});
+
+	it("forwards the rejection on a forced-account request instead of failing over", async () => {
+		const { accounts, ctx } = await codexPool(["forced-403", "spare-403"]);
+		setForcedAccount(accounts[0].id);
+		const fetcher = mock(async () => accessDenied());
+		globalThis.fetch = fetcher as typeof fetch;
+		const req = request();
+		const response = await handleProxy(
+			req,
+			new URL(req.url),
+			ctx,
+			"experiment",
+		);
+		expect(response.status).toBe(403);
+		expect((await response.json()).error.code).toBe("model_access_denied");
+		expect(fetcher).toHaveBeenCalledTimes(1);
+	});
+
+	it("keeps a mid-stream HTTP200 rejection to audit and suppression", async () => {
+		const { accounts, ctx, routing } = await codexPool(["stream-403"]);
+		const fetcher = mock(
+			async () =>
+				new Response(
+					'event: response.created\ndata: {"type":"response.created","response":{"id":"r","model":"gpt-6-astra"}}\n\n' +
+						'event: response.output_text.delta\ndata: {"type":"response.output_text.delta","delta":"partial","output_index":0,"content_index":0}\n\n' +
+						'event: response.failed\ndata: {"type":"response.failed","response":{"error":{"code":"model_access_denied"}}}\n\n',
+					{ headers: { "content-type": "text/event-stream" } },
+				),
+		);
+		globalThis.fetch = fetcher as typeof fetch;
+		const req = request({ stream: true });
+		const response = await handleProxy(
+			req,
+			new URL(req.url),
+			ctx,
+			"experiment",
+		);
+		// Headers — and then real content — reached the client before the observer
+		// could read the envelope that follows them.
+		expect(response.status).toBe(200);
+		expect(await response.text()).toContain("partial");
+		// So nothing was restarted.
+		expect(fetcher).toHaveBeenCalledTimes(1);
+		expect(
+			await suppressedSoon(
+				routing,
+				accounts[0].id,
+				scopeOf(accounts[0]),
+				"gpt-6-astra",
+			),
+		).toBe(true);
+	});
+
+	it("reports the model rejection, not a generic failure, when the pool is out of accounts", async () => {
+		const { accounts, ctx, routing } = await codexPool(["only-403"]);
+		globalThis.fetch = mock(async () => accessDenied()) as typeof fetch;
+		const req = request();
+		await expect(
+			handleProxy(req, new URL(req.url), ctx, "experiment"),
+		).rejects.toThrow(
+			"rejected its resolved model (gpt-6-astra). Requested model: 'claude-fable-5-1'",
+		);
+		expect(
+			await suppressedSoon(
+				routing,
+				accounts[0].id,
+				scopeOf(accounts[0]),
+				"gpt-6-astra",
 			),
 		).toBe(true);
 	});
