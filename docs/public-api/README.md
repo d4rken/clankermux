@@ -134,6 +134,29 @@ usable. Learning reasons are `no_usage`, `unstarted` and `short_history`.
 automatic readiness promise. Stale, missing and reset-elapsed evidence cannot
 produce a reassuring forecast. See [idle session with weekly evidence](examples/accounts.partial-learning.json).
 
+## Recorded request outcomes
+
+`/stops` reports explicit proxy refusals in `blockedRequests` and its `causes`
+array. Failures, recorded downstream disconnects and unknown outcomes have
+separate `failedRequests`, `disconnectedRequests` and `unclassifiedRequests`
+counts. A forwarded upstream error or a generic `all_accounts_failed` terminal
+is a failure; neither proves that the pool ran out of quota.
+
+`totalRequests` excludes verified per-attempt audit rows written by older
+builds. `excludedAttemptAuditRows` states how many were removed from both the
+request denominator and outcome counts. The dashboard's Request outcomes card
+uses the same computation. Request History and general statistics retain their
+existing record-based totals.
+
+These counts describe stored terminal reasons. A disconnect does not establish
+user intent, and aborts that were never recorded cannot be counted. Captured
+upstream errors can replace a transport reason. Historical completion mistakes
+are not rewritten or inferred away.
+
+The v1 field names and public cause vocabulary remain stable; the additional
+counts are additive fields. The public event stream keeps its existing error
+categories, including its older quota category for `all_accounts_failed`.
+
 ## Wire and transport rules
 
 Instants are ISO/RFC3339 strings; durations include units in field names. Null

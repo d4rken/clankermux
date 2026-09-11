@@ -6,7 +6,10 @@ import {
 } from "@clankermux/http-common";
 import { Logger } from "@clankermux/logger";
 import {
-	classifyStopCause,
+	classifyRequestOutcomeCause,
+	isLegacyAttemptAudit,
+	outcomeForCause,
+	type RequestOutcome,
 	type StopCause,
 	type StopsHistoryCause,
 	type StopsHistoryPoint,
@@ -81,7 +84,7 @@ export function createStopsHistoryHandler(context: APIContext) {
 
 /**
  * Direct (in-process) `/api/analytics/stops-history` implementation: how often
- * requests were actually refused in the range, grouped by why.
+ * recorded requests did not complete in the range, grouped by outcome and cause.
  *
  * The dashboard's caller, so it asks {@link computeStopsHistory} for the whole
  * response — model breakdown and series included — and owns the range parsing
@@ -166,7 +169,7 @@ export async function computeStopsHistory(
 	const nowMs = sources.now?.() ?? Date.now();
 	const sinceMs = windowMs === null ? 0 : nowMs - windowMs;
 
-	const [buckets, models, totalRequests, candidateRows] = await Promise.all([
+	const [buckets, models, rawTotalRequests, candidateRows] = await Promise.all([
 		sources.getStopsByBucket({ sinceMs, bucketMs, filters }),
 		includeModelBreakdown
 			? sources.getStopModelBreakdown({ sinceMs, filters })
@@ -207,13 +210,23 @@ export async function computeStopsHistory(
 		return entry;
 	};
 
-	let blockedRequests = 0;
+	const outcomeTotals: Record<RequestOutcome, number> = {
+		blocked: 0,
+		failed: 0,
+		disconnected: 0,
+		unclassified: 0,
+	};
+	let excludedAttemptAuditRows = 0;
 	let firstEvidenceMs: number | null = null;
 	for (const row of buckets) {
-		const cause = classifyStopCause(row.errorMessage, row.statusCode);
+		if (isLegacyAttemptAudit(row.errorMessage, row.statusCode)) {
+			excludedAttemptAuditRows += row.count;
+			continue;
+		}
+		const cause = classifyRequestOutcomeCause(row.errorMessage, row.statusCode);
 		const entry = bucketFor(cause);
 		entry.count += row.count;
-		blockedRequests += row.count;
+		outcomeTotals[outcomeForCause(cause)] += row.count;
 		entry.firstSeenMs = Math.min(entry.firstSeenMs, row.firstSeenMs);
 		entry.lastSeenMs = Math.max(entry.lastSeenMs, row.lastSeenMs);
 		entry.byBucket.set(
@@ -234,9 +247,10 @@ export async function computeStopsHistory(
 	}
 
 	for (const row of models) {
-		if (!row.model) continue;
+		if (!row.model || isLegacyAttemptAudit(row.errorMessage, row.statusCode))
+			continue;
 		const entry = causes.get(
-			classifyStopCause(row.errorMessage, row.statusCode),
+			classifyRequestOutcomeCause(row.errorMessage, row.statusCode),
 		);
 		// A cause present in the model breakdown but not in the bucket rows
 		// cannot happen (same predicate, same range), but creating one here
@@ -295,8 +309,12 @@ export async function computeStopsHistory(
 		bucketMs,
 		windowStartsAt: sinceMs,
 		windowEndsAt: nowMs,
-		totalRequests,
-		blockedRequests,
+		// The audit count comes from the same filtered failed-row scan. Subtract
+		// it here instead of adding an unindexed predicate to the total query.
+		totalRequests: Math.max(0, rawTotalRequests - excludedAttemptAuditRows),
+		blockedRequests: outcomeTotals.blocked,
+		outcomeTotals,
+		excludedAttemptAuditRows,
 		causes: result,
 		candidates: {
 			observedRequests,

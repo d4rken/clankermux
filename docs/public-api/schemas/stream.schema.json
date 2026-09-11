@@ -431,7 +431,7 @@
         "upstream_error",
         "other"
       ],
-      "description": "Why a request was refused, as a CLOSED set.\n\nMirrors the internal `StopCause` value for value — it is already snake_case and already carries `other`, so no renaming happens here. The mapper is still explicit rather than a cast: a cause added to the proxy later must arrive on this wire as `other`, which the firmware knows how to render, instead of as a string its closed-set check would reject."
+      "description": "Stable published cause vocabulary shared by Stops and the event stream.\n\nThis is a subset of the internal `StopCause` vocabulary. History-only causes do not extend this closed set. The explicit mapper sends unrecognized causes to `other`; Stops filters to blocked outcomes before mapping, while the event stream retains its legacy classification."
     }
   },
   "$schema": "https://json-schema.org/draft/2020-12/schema",

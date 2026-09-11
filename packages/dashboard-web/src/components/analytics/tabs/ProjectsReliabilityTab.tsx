@@ -135,7 +135,7 @@ export function ProjectsReliabilityTab(props: ProjectsReliabilityTabProps) {
 				now={now}
 				loading={stopsPending}
 				unavailableReason={
-					stopsUnavailable ? "Stops data unavailable" : undefined
+					stopsUnavailable ? "Request outcomes data unavailable" : undefined
 				}
 				staleNote={stopsStaleNote}
 			/>

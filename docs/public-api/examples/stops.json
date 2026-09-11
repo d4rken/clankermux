@@ -6,6 +6,10 @@
   "windowEndsAt": "2026-09-09T12:00:00.000Z",
   "totalRequests": 1000,
   "blockedRequests": 3,
+  "failedRequests": 1,
+  "disconnectedRequests": 129,
+  "unclassifiedRequests": 0,
+  "excludedAttemptAuditRows": 31,
   "causes": [
     {
       "cause": "pool_quota_exhausted",
