@@ -232,15 +232,16 @@ export function AccountUtilizationCard({
 							);
 							return (
 								<div key={account.id} className="space-y-item">
-									{/* Wraps: the name truncates, but the chips after it do not,
-									    and provider + token warning + pause together outrun a
-									    narrow card even once the name has collapsed. On one
-									    line `justify-between` still parks the chips at the right
-									    edge, so the only visible change is at the width where
-									    the row used to overflow. */}
-									<div className="flex flex-wrap items-center justify-between gap-x-item gap-y-tight">
+									{/* Start-aligned and wrapping, the same heading shape the
+									    Accounts page uses: the name, then what the account IS,
+									    then what it is DOING, each sitting where the eye already
+									    is rather than one cluster pushed to the far edge. It has
+									    to wrap, because the name truncates but none of the chips
+									    do, and provider + token warning + pause together outrun
+									    a narrow card even once the name has collapsed. */}
+									<div className="flex min-w-0 flex-wrap items-center gap-x-item gap-y-tight">
 										<span
-											className="truncate text-sm font-medium"
+											className="max-w-full truncate text-sm font-medium"
 											title={account.name}
 										>
 											{account.name}
