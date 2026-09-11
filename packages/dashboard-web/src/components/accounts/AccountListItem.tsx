@@ -46,7 +46,11 @@ import { InsetPanel } from "../ui/inset-panel";
 import { Popover, PopoverContent, PopoverTrigger } from "../ui/popover";
 import { Textarea } from "../ui/textarea";
 import { AccountIdentityLine } from "./AccountIdentity";
-import { AccountStatusChips } from "./AccountStatusChips";
+import {
+	AccountRenewalInfo,
+	AccountRoutingChips,
+	AccountStatusChips,
+} from "./AccountStatusChips";
 import { ProviderChip } from "./ProviderChip";
 import { RateLimitProgress } from "./RateLimitProgress";
 
@@ -196,8 +200,7 @@ export function AccountListItem({
 	const [notesDraft, setNotesDraft] = useState("");
 	const [isSavingNotes, setIsSavingNotes] = useState(false);
 	const presenter = new AccountPresenter(account);
-	// All per-account status chips — and the Force Reset gating below — are derived
-	// in one place and rendered via <AccountStatusChips>; see lib/account-status.
+	// Header details, status chips and Force Reset gating share derived status.
 	const status = deriveAccountStatus(account);
 	// Spend inside the current session window. Both kinds can be non-zero at
 	// once (a plan account that spilled into overage), and a zero is omitted
@@ -241,17 +244,26 @@ export function AccountListItem({
 	// cards read as one wall of text.
 	return (
 		<div className="p-group border rounded-lg transition-colors space-y-row border-border hover:border-muted-foreground/50">
-			<div className="flex items-center justify-between">
+			<div className="flex items-start justify-between gap-item">
 				<div className="flex flex-col gap-tight min-w-0">
-					<div className="flex items-center gap-item min-w-0">
-						<p className="font-medium truncate">{account.name}</p>
+					<div className="flex flex-wrap items-center gap-x-item gap-y-tight min-w-0">
+						<p className="font-medium max-w-full truncate">{account.name}</p>
 						<ProviderChip provider={account.provider} className="shrink-0" />
 						<OAuthTokenStatusWithBoundary
 							accountName={account.name}
 							hasRefreshToken={account.hasRefreshToken}
 						/>
+						<AccountRoutingChips status={status} />
 					</div>
-					<AccountIdentityLine account={account} className="truncate" />
+					<AccountIdentityLine
+						account={account}
+						className="break-words"
+						details={
+							status.showRenewalChip ? (
+								<AccountRenewalInfo account={account} status={status} inline />
+							) : undefined
+						}
+					/>
 				</div>
 				<div className="flex items-center gap-tight shrink-0">
 					{(account.provider === "anthropic" ||
@@ -605,7 +617,11 @@ export function AccountListItem({
 			    step closer to each other than to the identity above or the quota
 			    bars below. */}
 			<div className="space-y-item">
-				<AccountStatusChips account={account} status={status} />
+				<AccountStatusChips
+					account={account}
+					status={status}
+					showAccountDetails={false}
+				/>
 				<InsetPanel data-testid="account-info-row">
 					<div className="flex flex-wrap items-center gap-row">
 						<dl className="flex min-w-0 flex-1 flex-wrap items-center gap-x-section gap-y-item text-xs">
