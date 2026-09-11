@@ -7,6 +7,7 @@ export * from "./api-key";
 export * from "./cache-effectiveness";
 export * from "./cache-keepalive";
 export * from "./chat-ingress";
+export * from "./clients";
 export * from "./codex-window-observation";
 export * from "./constants";
 export * from "./conversation";

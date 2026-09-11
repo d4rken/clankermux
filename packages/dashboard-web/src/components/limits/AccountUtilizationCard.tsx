@@ -19,7 +19,10 @@ import {
 } from "../../lib/account-utilization-sort";
 import { computeWindowResetExtremes } from "../../lib/usage-windows";
 import { providerShowsWeeklyUsage } from "../../utils/provider-utils";
-import { AccountStatusChips } from "../accounts/AccountStatusChips";
+import {
+	AccountPausedChip,
+	AccountStatusChips,
+} from "../accounts/AccountStatusChips";
 import { ProviderChip } from "../accounts/ProviderChip";
 import { RateLimitProgress } from "../accounts/RateLimitProgress";
 import { OAuthTokenStatusWithBoundary } from "../OAuthTokenStatus";
@@ -229,9 +232,16 @@ export function AccountUtilizationCard({
 							);
 							return (
 								<div key={account.id} className="space-y-item">
-									<div className="flex items-center justify-between gap-item">
+									{/* Start-aligned and wrapping, the same heading shape the
+									    Accounts page uses: the name, then what the account IS,
+									    then what it is DOING, each sitting where the eye already
+									    is rather than one cluster pushed to the far edge. It has
+									    to wrap, because the name truncates but none of the chips
+									    do, and provider + token warning + pause together outrun
+									    a narrow card even once the name has collapsed. */}
+									<div className="flex min-w-0 flex-wrap items-center gap-x-item gap-y-tight">
 										<span
-											className="truncate text-sm font-medium"
+											className="max-w-full truncate text-sm font-medium"
 											title={account.name}
 										>
 											{account.name}
@@ -244,6 +254,7 @@ export function AccountUtilizationCard({
 											accountName={account.name}
 											hasRefreshToken={account.hasRefreshToken}
 										/>
+										<AccountPausedChip account={account} status={status} />
 									</div>
 									<AccountStatusChips
 										account={account}

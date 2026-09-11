@@ -34,6 +34,7 @@ export {
 // dashboard worker against its own connection — stats, usage-history,
 // memory-history and payments-summary all run there)
 export { AccountPaymentRepository } from "./repositories/account-payment.repository";
+export { ApiKeyRepository } from "./repositories/api-key.repository";
 export {
 	AuthRepository,
 	type AuthSessionRecord,
@@ -47,6 +48,7 @@ export {
 	type CacheKeepaliveWindowTotals,
 	sumCounterDeltas,
 } from "./repositories/cache-keepalive-snapshot.repository";
+export { ClientRepository } from "./repositories/client.repository";
 export {
 	type CodexResetCreditAutoClaim,
 	CodexResetCreditEventRepository,

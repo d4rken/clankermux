@@ -1,6 +1,7 @@
 import { Logger } from "@clankermux/logger";
 import type { AnthropicModelCatalogSnapshot } from "@clankermux/proxy";
 import { ANTHROPIC_BUNDLED_MODEL_CREATED_AT } from "@clankermux/proxy";
+import type { ClientFormat } from "@clankermux/types";
 import {
 	applyOverrides,
 	indexOverrides,
@@ -27,15 +28,7 @@ const log = new Logger("ModelsRoute");
  */
 const CLIENT_VERSION_PARAM = "client_version";
 
-/**
- * Ceiling on the override read, and the reason this route can still promise a
- * 200 while depending on the database.
- *
- * The SQLite adapter's busy-retry can persist for minutes. A curation read is a
- * nicety — the upstream catalogue is the answer, the overrides only adjust it —
- * so a slow database degrades to "serve the uncurated list" rather than holding
- * a Claude Code or Codex startup for as long as the lock lasts.
- */
+/** Bound database-backed catalogue reads so client startup cannot wait on SQLite retries. */
 const OVERRIDE_READ_BUDGET_MS = 2_000;
 
 export interface CodexModelCatalogBody {
@@ -44,6 +37,8 @@ export interface CodexModelCatalogBody {
 }
 
 export interface ModelsRouteDeps {
+	/** Saved per-key catalogue; failures return 503 without substituting a shared list. */
+	getClientCatalog?(apiKeyId: string, format: ClientFormat): Promise<Response>;
 	/**
 	 * The Codex catalog this API key may be shown, or null when the pool cannot
 	 * read one. Takes the key because entitlement is per-subscription and a
@@ -74,9 +69,8 @@ export interface ModelsRouteDeps {
  *    route looked healthy while being useless to its only caller.
  *  - `/wire/openai` without it gets OpenAI's `{"object":"list","data":[…]}`.
  *
- * Every failure path still answers 200. A client startup must never be blocked
- * by our inability to read a catalogue; it should just land back on the
- * behaviour it had before.
+ * Authenticated catalogue failures answer 503. Keyless discovery retains its
+ * bundled fallback when upstream metadata or global overrides are unavailable.
  */
 export async function handleModelsRoute(
 	url: URL,
@@ -84,6 +78,39 @@ export async function handleModelsRoute(
 	apiKeyId: string | null,
 	dialect: WireDialect,
 ): Promise<Response> {
+	if (apiKeyId && deps.getClientCatalog) {
+		let timer: ReturnType<typeof setTimeout> | undefined;
+		try {
+			return await Promise.race([
+				deps.getClientCatalog(
+					apiKeyId,
+					dialect === "anthropic"
+						? "anthropic"
+						: url.searchParams.has(CLIENT_VERSION_PARAM)
+							? "codex"
+							: "openai",
+				),
+				new Promise<never>((_, reject) => {
+					timer = setTimeout(
+						() => reject(new Error("Catalogue read timed out")),
+						OVERRIDE_READ_BUDGET_MS,
+					);
+				}),
+			]);
+		} catch {
+			return Response.json(
+				{
+					error: {
+						message: "Client catalogue is temporarily unavailable",
+						type: "server_error",
+					},
+				},
+				{ status: 503, headers: { "Cache-Control": "private, no-store" } },
+			);
+		} finally {
+			clearTimeout(timer);
+		}
+	}
 	const overrides = await readOverrides(deps, dialect);
 
 	if (dialect === "anthropic") {
@@ -280,10 +307,11 @@ async function serveAnthropicModels(
  * body is not the envelope we know how to edit.
  *
  * Entries are carried through as objects rather than rebuilt: Codex requires
- * ~18 fields per entry — reasoning levels, context window, the model's own
+ * model-specific fields: reasoning levels, context window, the model's own
  * `base_instructions` — and a rebuild that quietly dropped one would look
  * exactly like success from here while the CLI fell back to its built-in
- * catalog. Only `slug` and `display_name` are ever written.
+ * catalog. Only display names are edited; unknown custom entries cannot borrow
+ * another target's capabilities.
  */
 function applyOverridesToCodexCatalog(
 	bodyText: string,
@@ -306,14 +334,6 @@ function applyOverridesToCodexCatalog(
 			typeof entry === "object" && entry !== null && !Array.isArray(entry),
 	);
 
-	// Chosen from the UNFILTERED list, before any hide is applied, so which entry
-	// a custom model is cloned from does not change when an unrelated model is
-	// hidden. With no entries at all there is nothing to clone and custom
-	// injection is skipped for this response — a hand-built entry would be
-	// missing the semantic fields Codex needs and would take the whole catalog
-	// down with it.
-	const template = entries[0] ?? null;
-
 	const index = indexOverrides(
 		entries.map((entry) => readSlug(entry)).filter((slug) => slug !== null),
 		overrides,
@@ -325,15 +345,6 @@ function applyOverridesToCodexCatalog(
 		if (slug !== null && index.hidden.has(slug)) continue;
 		const renamed = slug === null ? undefined : index.displayNames.get(slug);
 		models.push(renamed ? { ...entry, display_name: renamed } : entry);
-	}
-	if (template) {
-		for (const addition of index.additions) {
-			models.push({
-				...structuredClone(template),
-				slug: addition.modelId,
-				display_name: addition.displayName ?? addition.modelId,
-			});
-		}
 	}
 
 	return JSON.stringify({ ...envelope, models });

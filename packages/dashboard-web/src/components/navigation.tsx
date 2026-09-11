@@ -2,7 +2,6 @@ import { parseHttpError } from "@clankermux/errors";
 import {
 	Activity,
 	BarChart3,
-	Boxes,
 	FileText,
 	Gauge,
 	GitBranch,
@@ -48,12 +47,11 @@ interface NavItem {
 const NAV_ITEMS: NavItem[] = [
 	{ label: "Overview", icon: LayoutDashboard, path: "/" },
 	{ label: "Analytics", icon: BarChart3, path: "/analytics" },
-	{ label: "Usage", icon: Gauge, path: "/limits" },
+	{ label: "Usage", icon: Gauge, path: "/usage" },
 	{ label: "Requests", icon: Activity, path: "/requests" },
 	{ label: "Accounts", icon: Users, path: "/accounts" },
 	{ label: "Routing", icon: Zap, path: "/routing" },
-	{ label: "API Keys", icon: Key, path: "/api-keys" },
-	{ label: "Client Models", icon: Boxes, path: "/models" },
+	{ label: "Clients", icon: Key, path: "/clients" },
 	{ label: "Logs", icon: FileText, path: "/logs" },
 	{ label: "System", icon: HeartPulse, path: "/system" },
 	{ label: "Settings", icon: Settings, path: "/settings" },
@@ -234,7 +232,10 @@ export function Navigation() {
 					<nav className="flex-1 space-y-tight p-2">
 						{NAV_ITEMS.map((item) => {
 							const Icon = item.icon;
-							const isActive = location.pathname === item.path;
+							const isActive =
+								location.pathname === item.path ||
+								(item.path === "/clients" &&
+									location.pathname.startsWith("/clients/"));
 							return (
 								<Link
 									key={item.path}

@@ -114,6 +114,7 @@ import {
 	type CapacityRestoredProbeMarker,
 	clearRateLimitOnCapacityRestored,
 } from "./capacity-restored";
+import { ClientService } from "./client-service";
 import { runCodexIdentityBackfill } from "./codex-identity-backfill";
 import { applyDevinQuotaAutomation } from "./devin-quota-automation";
 import {
@@ -902,12 +903,20 @@ export default async function startServer(options?: {
 		getAccessToken: catalogAccessToken,
 	});
 
+	const clients = new ClientService({
+		dbOps,
+		modelCatalog: modelCatalogService,
+		permissions: modelPermissions,
+		codexCatalog: codexModelCatalog,
+	});
+
 	const apiRouter = new APIRouter({
 		db,
 		config,
 		dbOps,
 		sessionAuth,
 		modelCatalog: modelCatalogService,
+		clients,
 		modelPermissions,
 		runtime: {
 			port,
@@ -1271,6 +1280,7 @@ export default async function startServer(options?: {
 	// The model-catalogue caches were built before the API router (they are
 	// shared with it) and reach token acquisition through this holder.
 	proxyContextRef = proxyContext;
+	await clients.bootstrap();
 	for (const account of await dbOps.getAllAccounts()) {
 		const evidence = await modelPermissions.permissions(account);
 		if (evidence.completeness === "unknown" && !evidence.manual_ids.length)
@@ -1518,6 +1528,7 @@ export default async function startServer(options?: {
 			handleModelsRoute(
 				url,
 				{
+					getClientCatalog: (keyId, format) => clients.wire(keyId, format),
 					getCatalog: (keyId) => modelCatalogService.getCodexCatalog(keyId),
 					staticModels: handleModelsRequest,
 					staticModelIds: modelCatalogService.staticModelIds,

@@ -172,6 +172,13 @@ describe("AccountUtilizationCard — usage indicators", () => {
 		expect(text).toContain("Needs re-authentication");
 		expect(text).toContain("Provider overloaded (2m)");
 		expect(text).toContain("Anthropic");
+
+		// The pause belongs to the row that names the account, not to the chip
+		// row underneath it: the element carrying it also carries the name.
+		const paused = [...(host?.querySelectorAll("span") ?? [])].find(
+			(span) => span.textContent === "Paused",
+		);
+		expect(paused?.parentElement?.textContent).toContain("acct");
 	});
 
 	it.each([

@@ -339,6 +339,16 @@ export function ensureSchema(db: Database): void {
 		`CREATE INDEX IF NOT EXISTS idx_oauth_sessions_expires ON oauth_sessions(expires_at)`,
 	);
 
+	db.run(`CREATE TABLE IF NOT EXISTS client_profiles (
+		api_key_id TEXT PRIMARY KEY REFERENCES api_keys(id) ON DELETE CASCADE,
+		application TEXT NOT NULL, revision INTEGER NOT NULL,
+		catalogues TEXT NOT NULL, notices TEXT NOT NULL
+	)`);
+	db.run(`CREATE TABLE IF NOT EXISTS client_alias_rules (
+		api_key_id TEXT NOT NULL REFERENCES api_keys(id) ON DELETE CASCADE,
+		rule_id TEXT PRIMARY KEY REFERENCES routing_rules(id) ON DELETE CASCADE
+	)`);
+
 	// Create api_keys table for optional API authentication
 	db.run(`
 		CREATE TABLE IF NOT EXISTS api_keys (

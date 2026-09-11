@@ -51,73 +51,71 @@ export class RoutingRepository extends BaseRepository<RoutingRule> {
 		);
 	}
 	async saveRule(input: RoutingRule, append = false): Promise<RoutingRule> {
+		return this.adapter.runTransaction(() =>
+			this.saveRuleInTransaction(input, append),
+		);
+	}
+	saveRuleInTransaction(input: RoutingRule, append = false): RoutingRule {
 		const r = { ...validateRoutingRule(input) };
-		await this.adapter.runTransaction(() => {
-			const db = this.adapter.getSQLiteDb();
-			if (append)
-				r.position = (
-					db
-						.query(
-							"SELECT COALESCE(MAX(position),-1)+1 AS position FROM routing_rules",
-						)
-						.get() as { position: number }
-				).position;
-			if (
+		const db = this.adapter.getSQLiteDb();
+		if (append)
+			r.position = (
 				db
-					.query("SELECT 1 FROM routing_rules WHERE position=? AND id<>?")
-					.get(r.position, r.id)
-			)
-				throw new RoutingConflictError(
-					"Rule position is already in use; reload the routing table",
-				);
-
-			if (
-				r.match_api_key_id !== null &&
-				!db
-					.query("SELECT id FROM api_keys WHERE id = ?")
-					.get(r.match_api_key_id)
-			)
-				throw new Error("Routing rule references a missing API key");
-			for (const id of r.pool_account_ids ?? [])
-				if (!db.query("SELECT id FROM accounts WHERE id = ?").get(id))
-					throw new Error(`Routing rule references missing account ${id}`);
-			if (r.pool_provider !== null && !isKnownProvider(r.pool_provider))
-				throw new Error("Unknown pool provider");
-			if (r.match_api_key_id !== null) {
-				const key = db
 					.query(
-						"SELECT pinned_account_id,pinned_providers FROM api_keys WHERE id=?",
+						"SELECT COALESCE(MAX(position),-1)+1 AS position FROM routing_rules",
 					)
-					.get(r.match_api_key_id) as {
-					pinned_account_id: string | null;
-					pinned_providers: string | null;
-				};
-				this.assertPinCompatible(
-					r,
-					key.pinned_account_id,
-					key.pinned_providers,
-				);
-			}
-
-			db.query(`INSERT INTO routing_rules (id,name,enabled,position,match_api_key_id,match_model_kind,match_model_value,pool_kind,pool_provider,pool_account_ids,target_kind,target_model)
-    VALUES (?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET name=excluded.name,enabled=excluded.enabled,position=excluded.position,match_api_key_id=excluded.match_api_key_id,match_model_kind=excluded.match_model_kind,match_model_value=excluded.match_model_value,pool_kind=excluded.pool_kind,pool_provider=excluded.pool_provider,pool_account_ids=excluded.pool_account_ids,target_kind=excluded.target_kind,target_model=excluded.target_model`).run(
-				r.id,
-				r.name,
-				r.enabled ? 1 : 0,
-				r.position,
-				r.match_api_key_id,
-				r.match_model_kind,
-				r.match_model_value,
-				r.pool_kind,
-				r.pool_provider,
-				r.pool_account_ids === null ? null : JSON.stringify(r.pool_account_ids),
-				r.target_kind,
-				r.target_model,
+					.get() as { position: number }
+			).position;
+		if (
+			db
+				.query("SELECT 1 FROM routing_rules WHERE position=? AND id<>?")
+				.get(r.position, r.id)
+		)
+			throw new RoutingConflictError(
+				"Rule position is already in use; reload the routing table",
 			);
-		});
+
+		if (
+			r.match_api_key_id !== null &&
+			!db.query("SELECT id FROM api_keys WHERE id = ?").get(r.match_api_key_id)
+		)
+			throw new Error("Routing rule references a missing API key");
+		for (const id of r.pool_account_ids ?? [])
+			if (!db.query("SELECT id FROM accounts WHERE id = ?").get(id))
+				throw new Error(`Routing rule references missing account ${id}`);
+		if (r.pool_provider !== null && !isKnownProvider(r.pool_provider))
+			throw new Error("Unknown pool provider");
+		if (r.match_api_key_id !== null) {
+			const key = db
+				.query(
+					"SELECT pinned_account_id,pinned_providers FROM api_keys WHERE id=?",
+				)
+				.get(r.match_api_key_id) as {
+				pinned_account_id: string | null;
+				pinned_providers: string | null;
+			};
+			this.assertPinCompatible(r, key.pinned_account_id, key.pinned_providers);
+		}
+
+		db.query(`INSERT INTO routing_rules (id,name,enabled,position,match_api_key_id,match_model_kind,match_model_value,pool_kind,pool_provider,pool_account_ids,target_kind,target_model)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET name=excluded.name,enabled=excluded.enabled,position=excluded.position,match_api_key_id=excluded.match_api_key_id,match_model_kind=excluded.match_model_kind,match_model_value=excluded.match_model_value,pool_kind=excluded.pool_kind,pool_provider=excluded.pool_provider,pool_account_ids=excluded.pool_account_ids,target_kind=excluded.target_kind,target_model=excluded.target_model`).run(
+			r.id,
+			r.name,
+			r.enabled ? 1 : 0,
+			r.position,
+			r.match_api_key_id,
+			r.match_model_kind,
+			r.match_model_value,
+			r.pool_kind,
+			r.pool_provider,
+			r.pool_account_ids === null ? null : JSON.stringify(r.pool_account_ids),
+			r.target_kind,
+			r.target_model,
+		);
 		return r;
 	}
-	private assertPinCompatible(
+
+	assertPinCompatible(
 		r: RoutingRule,
 		accountId: string | null,
 		rawProviders: string | null,
@@ -169,47 +167,54 @@ export class RoutingRepository extends BaseRepository<RoutingRule> {
 		accountId: string | null,
 		providers: string[] | null,
 	): Promise<boolean> {
-		return this.adapter.runTransaction(() => {
-			if (
-				(accountId !== null && providers !== null) ||
-				(providers !== null &&
-					(!providers.length || providers.some((p) => !isKnownProvider(p))))
-			)
-				throw new Error("Invalid API key destinations");
-			const db = this.adapter.getSQLiteDb();
-			if (
-				accountId !== null &&
-				!db.query("SELECT id FROM accounts WHERE id=?").get(accountId)
-			)
-				throw new Error("Destination account does not exist");
-			const rows = db
-				.query("SELECT * FROM routing_rules WHERE match_api_key_id=?")
-				.all(id) as RuleRow[];
-			for (const row of rows)
-				this.assertPinCompatible(
-					validateRoutingRule({
-						...row,
-						enabled: row.enabled === 1,
-						pool_account_ids:
-							row.pool_account_ids === null
-								? null
-								: JSON.parse(row.pool_account_ids),
-					}),
+		return this.adapter.runTransaction(() =>
+			this.updateDestinationsInTransaction(id, accountId, providers),
+		);
+	}
+	updateDestinationsInTransaction(
+		id: string,
+		accountId: string | null,
+		providers: string[] | null,
+	): boolean {
+		if (
+			(accountId !== null && providers !== null) ||
+			(providers !== null &&
+				(!providers.length || providers.some((p) => !isKnownProvider(p))))
+		)
+			throw new Error("Invalid API key destinations");
+		const db = this.adapter.getSQLiteDb();
+		if (
+			accountId !== null &&
+			!db.query("SELECT id FROM accounts WHERE id=?").get(accountId)
+		)
+			throw new Error("Destination account does not exist");
+		const rows = db
+			.query("SELECT * FROM routing_rules WHERE match_api_key_id=?")
+			.all(id) as RuleRow[];
+		for (const row of rows)
+			this.assertPinCompatible(
+				validateRoutingRule({
+					...row,
+					enabled: row.enabled === 1,
+					pool_account_ids:
+						row.pool_account_ids === null
+							? null
+							: JSON.parse(row.pool_account_ids),
+				}),
+				accountId,
+				providers === null ? null : JSON.stringify(providers),
+			);
+		return (
+			db
+				.query(
+					"UPDATE api_keys SET pinned_account_id=?,pinned_providers=? WHERE id=?",
+				)
+				.run(
 					accountId,
 					providers === null ? null : JSON.stringify(providers),
-				);
-			return (
-				db
-					.query(
-						"UPDATE api_keys SET pinned_account_id=?,pinned_providers=? WHERE id=?",
-					)
-					.run(
-						accountId,
-						providers === null ? null : JSON.stringify(providers),
-						id,
-					).changes > 0
-			);
-		});
+					id,
+				).changes > 0
+		);
 	}
 
 	async removeRule(id: string): Promise<void> {

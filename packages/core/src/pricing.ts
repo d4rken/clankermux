@@ -1628,7 +1628,8 @@ type CostKind = (typeof COST_KINDS)[number];
  * `cache_read` from another's would silently blend two price tiers into a number
  * that matches no real bill.
  *
- * Among EXACT id matches the first one wins, unchanged from before. It is
+ * When the serving provider is known, only its catalogue is searched.
+ * Otherwise, among EXACT id matches the first one wins. It is
  * tempting to prefer whichever entry covers the most rates — a partial entry
  * otherwise voids the whole request — but across resellers of the same id that
  * trades a visible failure for a silent, badly wrong number. models.dev lists
@@ -1656,7 +1657,26 @@ function selectModelEntry(
 	pricing: ApiResponse,
 	modelId: string,
 	needed: readonly CostKind[],
+	provider?: string,
 ): { entry: ModelDef | null; exact: boolean } {
+	const catalogueProvider =
+		provider === PROVIDER_NAMES.CODEX
+			? "openai"
+			: provider === PROVIDER_NAMES.CLAUDE_CONSOLE_API
+				? PROVIDER_NAMES.ANTHROPIC
+				: provider;
+	// A matching account/catalogue provider uses only its own entries, including
+	// dated fallbacks. Bundled zai/minimax entries make those scopes available
+	// offline too. Account types without a catalogue key (generic compatible
+	// endpoints, for example) retain model-only lookup.
+	if (
+		catalogueProvider &&
+		(catalogueProvider === "openai" ||
+			catalogueProvider === PROVIDER_NAMES.ANTHROPIC ||
+			Object.hasOwn(pricing, catalogueProvider))
+	) {
+		pricing = { [catalogueProvider]: pricing[catalogueProvider] ?? {} };
+	}
 	const exact = firstEntryFor(pricing, modelId);
 	if (exact && entryCovers(exact, needed)) return { entry: exact, exact: true };
 
@@ -1771,6 +1791,7 @@ function rateFromEntry(
  */
 export interface PricingEstimateContext {
 	/**
+	 * Selects the pricing catalogue (Codex uses OpenAI; console uses Anthropic).
 	 * Provider the request was actually served by — the ACCOUNT's provider where
 	 * available, which is not always the registered provider handling it (e.g.
 	 * `claude-console-api` accounts are served by the `anthropic` provider).
@@ -1901,7 +1922,12 @@ export async function estimateCostUSD(
 		// unknown model on an empty request is not a pricing gap.
 		if (needed.length === 0) return 0;
 
-		let match = selectModelEntry(await catalogue.getPricing(), modelId, needed);
+		let match = selectModelEntry(
+			await catalogue.getPricing(),
+			modelId,
+			needed,
+			context?.provider,
+		);
 		// A result that is a miss, a partial entry, or an INFERENCE from a dated
 		// snapshot's base slug proves nothing while a catalogue load is still in
 		// flight. That window is short, but it is exactly when the first requests
@@ -1929,7 +1955,12 @@ export async function estimateCostUSD(
 			round++
 		) {
 			const waited = await catalogue.awaitInFlightLoad();
-			match = selectModelEntry(waited.pricing, modelId, needed);
+			match = selectModelEntry(
+				waited.pricing,
+				modelId,
+				needed,
+				context?.provider,
+			);
 			if (!waited.settled) break;
 		}
 		const entry = match.entry;

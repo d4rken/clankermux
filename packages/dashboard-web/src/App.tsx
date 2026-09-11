@@ -2,8 +2,8 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { lazy, Suspense, useMemo } from "react";
 import { Navigate, Route, Routes, useLocation } from "react-router";
 import { AccountsTab } from "./components/AccountsTab";
-import { ApiKeysTab } from "./components/ApiKeysTab";
 import { AuthGate } from "./components/AuthGate";
+import { ClientsTab } from "./components/ClientsTab";
 import { DebugPanel } from "./components/DebugPanel";
 import { LogsTab } from "./components/LogsTab";
 import { ModelsTab } from "./components/ModelsTab";
@@ -71,7 +71,7 @@ export function App() {
 				title: "Analytics",
 			},
 			{
-				path: "/limits",
+				path: "/usage",
 				element: (
 					<Suspense fallback={<LoadingSkeleton />}>
 						<LazyLimitsTab />
@@ -94,14 +94,20 @@ export function App() {
 				element: <RoutingTab />,
 				title: "Routing",
 			},
+			{ path: "/clients", element: <ClientsTab />, title: "Clients" },
+			{
+				path: "/clients/defaults",
+				element: <ModelsTab />,
+				title: "Unauthenticated catalogue",
+			},
 			{
 				path: "/api-keys",
-				element: <ApiKeysTab />,
+				element: <Navigate to="/clients" replace />,
 				title: "API Keys",
 			},
 			{
 				path: "/models",
-				element: <ModelsTab />,
+				element: <Navigate to="/clients" replace />,
 				title: "Client Models",
 			},
 			{
