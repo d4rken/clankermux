@@ -48,6 +48,7 @@ import { Popover, PopoverContent, PopoverTrigger } from "../ui/popover";
 import { Textarea } from "../ui/textarea";
 import { AccountIdentityLine } from "./AccountIdentity";
 import {
+	AccountPausedChip,
 	AccountRenewalInfo,
 	AccountRoutingChips,
 	AccountStatusChips,
@@ -253,13 +254,17 @@ export function AccountListItem({
 		<div className="p-group border rounded-lg transition-colors space-y-row border-border hover:border-muted-foreground/50">
 			<div className="flex items-start justify-between gap-item">
 				<div className="flex flex-col gap-tight min-w-0">
-					<div className="flex flex-wrap items-center gap-x-item gap-y-tight min-w-0">
+					<div
+						className="flex flex-wrap items-center gap-x-item gap-y-tight min-w-0"
+						data-testid="account-heading-row"
+					>
 						<p className="font-medium max-w-full truncate">{account.name}</p>
 						<ProviderChip provider={account.provider} className="shrink-0" />
 						<OAuthTokenStatusWithBoundary
 							accountName={account.name}
 							hasRefreshToken={account.hasRefreshToken}
 						/>
+						<AccountPausedChip account={account} status={status} />
 						<AccountRoutingChips status={status} />
 					</div>
 					<AccountIdentityLine

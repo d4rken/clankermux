@@ -19,7 +19,10 @@ import {
 } from "../../lib/account-utilization-sort";
 import { computeWindowResetExtremes } from "../../lib/usage-windows";
 import { providerShowsWeeklyUsage } from "../../utils/provider-utils";
-import { AccountStatusChips } from "../accounts/AccountStatusChips";
+import {
+	AccountPausedChip,
+	AccountStatusChips,
+} from "../accounts/AccountStatusChips";
 import { ProviderChip } from "../accounts/ProviderChip";
 import { RateLimitProgress } from "../accounts/RateLimitProgress";
 import { OAuthTokenStatusWithBoundary } from "../OAuthTokenStatus";
@@ -229,7 +232,13 @@ export function AccountUtilizationCard({
 							);
 							return (
 								<div key={account.id} className="space-y-item">
-									<div className="flex items-center justify-between gap-item">
+									{/* Wraps: the name truncates, but the chips after it do not,
+									    and provider + token warning + pause together outrun a
+									    narrow card even once the name has collapsed. On one
+									    line `justify-between` still parks the chips at the right
+									    edge, so the only visible change is at the width where
+									    the row used to overflow. */}
+									<div className="flex flex-wrap items-center justify-between gap-x-item gap-y-tight">
 										<span
 											className="truncate text-sm font-medium"
 											title={account.name}
@@ -244,6 +253,7 @@ export function AccountUtilizationCard({
 											accountName={account.name}
 											hasRefreshToken={account.hasRefreshToken}
 										/>
+										<AccountPausedChip account={account} status={status} />
 									</div>
 									<AccountStatusChips
 										account={account}

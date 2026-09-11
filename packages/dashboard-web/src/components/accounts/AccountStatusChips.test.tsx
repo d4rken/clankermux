@@ -6,6 +6,7 @@ import type {
 import { renderToStaticMarkup } from "react-dom/server";
 import { deriveAccountStatus } from "../../lib/account-status";
 import {
+	AccountPausedChip,
 	AccountStatusChips,
 	ResetCreditApplyPanel,
 	ResetCreditEventsPanel,
@@ -14,26 +15,52 @@ import {
 // 2024-01-03 noon UTC, matching account-status.test.ts.
 const NOW = Date.UTC(2024, 0, 3, 12, 0, 0);
 
-it("explains a Devin quota pause without implying a charge or relabeling manual pauses", () => {
-	const quota = render(
-		makeAccount({
-			provider: "devin",
-			paused: true,
-			pauseReason: "overage",
-			autoFallbackEnabled: true,
-		}),
-	);
-	expect(quota).toContain("Paused: included quota");
-	expect(quota).toContain("exhausted or unavailable");
-	const manual = render(
-		makeAccount({
-			provider: "devin",
-			paused: true,
-			pauseReason: "manual",
-			autoFallbackEnabled: true,
-		}),
-	);
-	expect(manual).not.toContain("Paused: included quota");
+describe("AccountPausedChip", () => {
+	it("explains a Devin quota pause without implying a charge or relabeling manual pauses", () => {
+		const quota = renderPaused(
+			makeAccount({
+				provider: "devin",
+				paused: true,
+				pauseReason: "overage",
+				autoFallbackEnabled: true,
+			}),
+		);
+		expect(quota).toContain("Paused: included quota");
+		expect(quota).toContain("exhausted or unavailable");
+		const manual = renderPaused(
+			makeAccount({
+				provider: "devin",
+				paused: true,
+				pauseReason: "manual",
+				autoFallbackEnabled: true,
+			}),
+		);
+		expect(manual).toContain("Paused");
+		expect(manual).not.toContain("Paused: included quota");
+	});
+
+	it("renders nothing for an account that is in rotation", () => {
+		expect(renderPaused(makeAccount())).toBe("");
+	});
+
+	// The heading row owns the pause now; the chip row must not repeat it beside
+	// the cause chips that explain it.
+	it("is absent from the status chip row", () => {
+		const html = render(
+			makeAccount({ paused: true, pauseReason: "oauth_invalid_grant" }),
+		);
+		expect(html).toContain("Needs re-authentication");
+		expect(html).not.toContain("Paused");
+	});
+
+	function renderPaused(account: AccountResponse): string {
+		return renderToStaticMarkup(
+			<AccountPausedChip
+				account={account}
+				status={deriveAccountStatus(account, NOW)}
+			/>,
+		);
+	}
 });
 
 function makeAccount(
