@@ -168,8 +168,11 @@ export async function resolveZeroAccountsOutcome(
 		attemptThroughProbeGate,
 	} = deps;
 
-	const overloadAttributionModelFor = (account: Account): string =>
+	/** The one model an attempt against this account would send. */
+	const resolvedModelFor = (account: Account): string =>
 		getAttemptTarget(requestMeta, account).upstreamModel;
+
+	const overloadAttributionModelFor = resolvedModelFor;
 
 	// Pin-transient hold: the pin strict-failed selection ONLY because every
 	// pin-ALLOWED account is on a short transient cooldown (a per-account 429 or
@@ -355,18 +358,20 @@ export async function resolveZeroAccountsOutcome(
 			} else if (
 				resolveFamilyWeeklyExclusion(
 					heldAccount,
-					effectiveRequestModel,
+					// The family this account would SERVE, which a literal routing rule
+					// makes different from the family the client asked for.
+					resolvedModelFor(heldAccount),
 					usageCache.get(heldAccount.id),
 					heldCapacity,
 					Date.now(),
 				) !== null
 			) {
-				// The held account's weekly quota for the REQUESTED family is
+				// The held account's weekly quota for the RESOLVED family is
 				// exhausted (with unified headroom) — the family window won't clear
 				// within the hold budget, so holding would only re-probe into another
 				// family 429. Degrade to the terminal instead of burning the hold.
 				log.warn(
-					`Storm-degrade: held account ${heldAccount.name} is weekly-exhausted for the requested family — NOT holding, degrading to terminal`,
+					`Storm-degrade: held account ${heldAccount.name} is weekly-exhausted for the family of ${resolvedModelFor(heldAccount)} — NOT holding, degrading to terminal`,
 				);
 			} else {
 				// Null capacity (usage stale/absent) ⇒ stale_should_retry (single

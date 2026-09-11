@@ -744,16 +744,12 @@ describe("pool-liveness reserve — composite soft-demotion reorder (handleProxy
 	});
 
 	/**
-	 * Tiering follows the LOGICAL request family, so a Codex account serving a
-	 * fable-logical request is judged at the PROTECTED tier — whether the fable →
-	 * gpt-* mapping is explicit or left to the Codex default (in which case
-	 * `modelForAccount` keeps the logical Claude model, since the mapped model has
-	 * no recognized family). Asserted through the final-order DEBUG line so the
-	 * Codex account is never actually attempted: a healthy Anthropic account leads
-	 * the ranking and takes every upstream call.
+	 * Tiering follows the model the account will actually send, which is the
+	 * requested ID unless a literal rule names another. Asserted through the
+	 * final-order DEBUG line so the Codex account is never actually attempted: a
+	 * healthy Anthropic account leads the ranking and takes every upstream call.
 	 */
 	async function codexTierReason(opts: {
-		mappings: string | null;
 		model: string;
 		id: string;
 	}): Promise<string | undefined> {
@@ -769,7 +765,6 @@ describe("pool-liveness reserve — composite soft-demotion reorder (handleProxy
 			api_key: "cx-key",
 			refresh_token: null,
 			access_token: null,
-			model_mappings: opts.mappings,
 		});
 		seedUsage(healthy.id, 10, 10);
 		// 85% weekly ⇒ 15% headroom: inside the non-protected band, above the
@@ -791,37 +786,28 @@ describe("pool-liveness reserve — composite soft-demotion reorder (handleProxy
 		}
 	}
 
-	it("judges Codex capacity using the resolved GPT target (explicit mapping)", async () => {
+	it("judges Codex capacity at the tier of the model it will send", async () => {
+		// 15% headroom sits between the protected reserve (10%) and the ordinary
+		// one (20%), so the tier decides the outcome. A Fable request now reaches
+		// Codex as the Fable ID, which is the protected family: kept.
 		const fable = await codexTierReason({
-			mappings: JSON.stringify({ fable: "gpt-5.6-sol" }),
 			model: "claude-fable-5",
-			id: "codex-explicit-fable",
+			id: "codex-fable",
 		});
 		expect(fable).toContain("Healthy > Codex");
-		expect(fable).toContain("Codex(demoted:pool liveness)");
+		expect(fable).not.toContain("Codex(demoted:pool liveness)");
 
-		// Control: the same account and headroom, ordinary traffic ⇒ demoted.
-		const sonnet = await codexTierReason({
-			mappings: JSON.stringify({ sonnet: "gpt-5.6-terra" }),
-			model: "claude-sonnet-4-5",
-			id: "codex-explicit-sonnet",
+		// A GPT ID resolves to no Claude family, so the ordinary reserve applies.
+		const astra = await codexTierReason({
+			model: "gpt-6-astra",
+			id: "codex-astra",
 		});
-		expect(sonnet).toContain("Codex(demoted:pool liveness)");
-	});
+		expect(astra).toContain("Codex(demoted:pool liveness)");
 
-	it("judges Codex capacity using the resolved GPT target (default mapping)", async () => {
-		const fable = await codexTierReason({
-			mappings: null,
-			model: "claude-fable-5",
-			id: "codex-default-fable",
-		});
-		expect(fable).toContain("Healthy > Codex");
-		expect(fable).toContain("Codex(demoted:pool liveness)");
-
+		// Control: the same account and headroom, ordinary Claude traffic ⇒ demoted.
 		const sonnet = await codexTierReason({
-			mappings: null,
 			model: "claude-sonnet-4-5",
-			id: "codex-default-sonnet",
+			id: "codex-sonnet",
 		});
 		expect(sonnet).toContain("Codex(demoted:pool liveness)");
 	});

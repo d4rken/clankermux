@@ -38,6 +38,7 @@ import {
 	NATIVE_RESPONSES_REQUEST_HEADER,
 	PROVIDER_NAMES,
 	type RateLimitReason,
+	REASONING_EFFORT_ADAPTATION_HEADER,
 	type RequestMeta,
 	transferChatContext,
 } from "@clankermux/types";
@@ -59,6 +60,7 @@ import {
 } from "../provider-overload-cooldown";
 import { captureRawUpstreamObservation } from "../raw-response-observations";
 import { RequestBodyContext } from "../request-body-context";
+import { excludeModelForRequest } from "../request-model-exclusions";
 import {
 	getAttemptTarget,
 	RoutingPolicyError,
@@ -70,7 +72,10 @@ import {
 	recordLocalRoutingOutcome,
 	sendAuthorizedRequest,
 } from "../routing-dispatch";
-import { isModelRouteRestriction } from "../routing-response-audit";
+import {
+	isDefinitiveModelError,
+	isModelRouteRestriction,
+} from "../routing-response-audit";
 import { dispatchObservationSource } from "../should-record-request";
 import {
 	type AccountQuota429,
@@ -230,6 +235,15 @@ export type ProxyAttemptOutcome =
 	| { kind: "model_not_entitled" }
 	| { kind: "network_error" }
 	| { kind: "other" };
+
+/**
+ * The outcome kinds that mean "this destination definitively refused the model
+ * it was given". Registration of the request-scoped exclusion keys off THIS,
+ * not off the individual return sites, so a branch cannot record one of these
+ * outcomes and leave the pair eligible (see the `fail` helper).
+ */
+const MODEL_REJECTION_OUTCOMES: ReadonlySet<ProxyAttemptOutcome["kind"]> =
+	new Set(["model_not_found", "model_not_entitled"]);
 
 /**
  * Optional, behaviour-only extension bag for {@link proxyWithAccount}. Every
@@ -769,8 +783,8 @@ export async function isModelUnavailableError(
  * ENTITLEMENT error, where the model exists but this account's plan may not
  * serve it (e.g. "The 'gpt-5.3-codex' model is not supported when using Codex
  * with a ChatGPT account."). That condition is account-scoped, so failing over
- * to another account can succeed — unlike a generic model-not-found, which is
- * deliberately forwarded to the client.
+ * to another account can succeed. A generic model-not-found fails over too;
+ * the two are kept apart only so the outcome sink can name which it was.
  */
 export async function isCodexEntitlementModelError(
 	response: Response,
@@ -797,6 +811,35 @@ export async function isCodexEntitlementModelError(
 	}
 
 	return false;
+}
+
+/**
+ * A definitive model rejection carried by an HTTP ERROR envelope, decided
+ * before a single byte of the response has been forwarded.
+ *
+ * Status is the whole safety boundary. `isDefinitiveModelError` also accepts
+ * HTTP 200, because the same envelopes turn up inside a stream that the
+ * response observer reads as it is already being written to the client; that
+ * verdict arrives too late to restart anything and can only drive suppression.
+ * Restricting to 400/403/404 also keeps 429 out of reach of this branch, so the
+ * rate-limit ladder above it is untouched.
+ */
+async function isDefinitiveModelRejection(
+	response: Response,
+): Promise<boolean> {
+	if (![400, 403, 404].includes(response.status)) return false;
+	try {
+		const contentType = response.headers.get("content-type");
+		if (!contentType?.includes("application/json")) return false;
+		// Clone only AFTER the content-type guard: a clone() tees the body, so
+		// cloning before an early return orphans an unconsumed tee branch (leak).
+		return isDefinitiveModelError(
+			await response.clone().json(),
+			response.status,
+		);
+	} catch {
+		return false;
+	}
 }
 
 /**
@@ -936,7 +979,13 @@ export async function proxyWithAccount(
 	options?: ProxyAttemptOptions,
 	staleTokenRetryAttempt = 0,
 ): Promise<Response | null> {
-	modelOverride = getAttemptTarget(requestMeta, account).upstreamModel;
+	// The one model this attempt may send, frozen by the route. Named so the
+	// failure chokepoint below can record a rejection against it.
+	const resolvedTargetModel = getAttemptTarget(
+		requestMeta,
+		account,
+	).upstreamModel;
+	modelOverride = resolvedTargetModel;
 	const attemptAudit: RoutingAttemptAudit = { id: null };
 	// Resolved lazily at the 529 decision points (see the param doc). Memoized so
 	// the clone decision and the forward decision, which straddle an await, can
@@ -1014,6 +1063,14 @@ export async function proxyWithAccount(
 		auditReason?: string,
 	): Promise<null> => {
 		settleOverloadProbe("abandoned", "attempt_failed");
+		// Synchronous, and here rather than at each rejecting branch: the next
+		// attempt of THIS request must not be offered a pair the upstream has
+		// already refused, and the suppression row the response observer writes
+		// cannot be relied on for that (it is still in flight while we fail over,
+		// and a recovery hold deliberately discards ordinary-failure tracking
+		// between rounds, so the account comes back eligible).
+		if (MODEL_REJECTION_OUTCOMES.has(outcome.kind))
+			excludeModelForRequest(requestMeta, account.id, resolvedTargetModel);
 		options?.onOutcome?.(outcome);
 		const reason =
 			auditReason ??
@@ -1157,6 +1214,10 @@ export async function proxyWithAccount(
 		headers.delete("x-clankermux-synthetic-status");
 		headers.delete("x-clankermux-retry-after");
 		headers.delete("x-clankermux-upstream-model");
+		// Same reason: only the provider that serialized the body may say what
+		// happened to the reasoning effort, so a client cannot plant an
+		// adaptation on its own attempt row.
+		headers.delete(REASONING_EFFORT_ADAPTATION_HEADER);
 		const targetUrl = provider.buildUrl(url.pathname, url.search, account);
 
 		// ── Native Responses passthrough (Stage A, request leg) ────────────────
@@ -2038,9 +2099,11 @@ export async function proxyWithAccount(
 			if (isZaiOverloadResponse(rawResponse))
 				return await finishZaiOverload(rawResponse);
 			// No fallback models configured — fail over to the next account.
-			// 429s should never be forwarded to the client when other
-			// accounts are available; only genuine model-not-found
-			// errors (404/400) warrant returning the upstream response.
+			// Every branch below fails over, 429 and model rejection alike: a
+			// sibling may have headroom, and a sibling may be authorized for the
+			// model string this one refused. What the client finally sees when the
+			// whole pool refuses is decided once, by the request-level terminal in
+			// proxy.ts.
 			if (rawResponse.status === 429) {
 				// Skip cooldown on synthetic cache-keepalive replays. The
 				// keepalive scheduler replays warm bodies in waves of
@@ -2128,10 +2191,9 @@ export async function proxyWithAccount(
 			// Codex/ChatGPT entitlement error: the model exists, but THIS
 			// account's plan is not entitled to it. That is account-scoped —
 			// another account on a different plan can serve the same model — so
-			// fail over instead of forwarding the 400. The generic
-			// model-not-found below stays a client-facing error: no account can
-			// serve a model that doesn't exist, so cycling the pool for it only
-			// burns attempts and hides the real cause.
+			// fail over. The generic model-not-found below fails over as well,
+			// under its own outcome kind; both feed the same model-rejection
+			// terminal, which only fires once every attempted account has refused.
 			if (await isCodexEntitlementModelError(rawResponse)) {
 				log.warn(
 					`Account ${account.name} is not entitled to the requested model (plan-scoped Codex/ChatGPT restriction) — failing over to next account`,
@@ -2146,6 +2208,23 @@ export async function proxyWithAccount(
 			// If still unavailable/rate-limited after exhausting the model list,
 			// failover to the next account. OpenAI-compatible providers never set
 			// isRateLimited:true in parseRateLimit, so we must handle it here.
+		}
+
+		// Definitive model rejections `isModelUnavailableError` does not recognise
+		// — chiefly the OpenAI-compatible 403 (`model_access_denied`,
+		// `model_not_entitled`). One backend refusing a model string says nothing
+		// about the rest of the pool, which usually holds another account
+		// authorized for the same target, so try one instead of handing the client
+		// a refusal. The routeRestricted guard is the same one the branch above
+		// carries: an OpenRouter provider-policy rejection is account/provider
+		// policy, not a verdict on the model.
+		if (!routeRestricted && (await isDefinitiveModelRejection(rawResponse))) {
+			log.warn(
+				`Account ${account.name} definitively rejected model ${resolvedTargetModel} (HTTP ${rawResponse.status}) — failing over to the next account`,
+			);
+			// Drained, not cancelled: the drain is what feeds the observer the
+			// bytes it classifies, so the persistent suppression write still lands.
+			return await fail({ kind: "model_not_entitled" }, rawResponse);
 		}
 
 		// All model/cache-control retries have settled. A confirmed organization
@@ -2849,6 +2928,10 @@ export async function proxyForcedAccount(
 		headers.delete("x-clankermux-synthetic-status");
 		headers.delete("x-clankermux-retry-after");
 		headers.delete("x-clankermux-upstream-model");
+		// Same reason: only the provider that serialized the body may say what
+		// happened to the reasoning effort, so a client cannot plant an
+		// adaptation on its own attempt row.
+		headers.delete(REASONING_EFFORT_ADAPTATION_HEADER);
 		const targetUrl = provider.buildUrl(url.pathname, url.search, account);
 
 		const requestInit: RequestInit & { duplex?: "half" } = {
@@ -2964,7 +3047,7 @@ export async function proxyForcedAccount(
 		// disableCooldown above suppresses COOLDOWN mutation on a forced 429; it
 		// says nothing about honouring a forced success.
 		if (response.ok) {
-			const forcedFamily = getModelFamily(requestMeta.requestedModel ?? "");
+			const forcedFamily = getModelFamily(modelOverride ?? "");
 			if (forcedFamily) {
 				clearFamilyWeeklyExhausted(
 					account.id,

@@ -538,39 +538,6 @@ export function estimateContextWindowTokens(
 	return inputTokens + outputReserve;
 }
 
-/** Central routing defaults for Claude families on Codex. */
-export const DEFAULT_CODEX_MODEL_BY_FAMILY: Record<
-	"opus" | "sonnet" | "haiku" | "fable",
-	string
-> = {
-	// GPT-5.6 tier-matched: flagship→sol, balanced→terra, efficient→luna. All
-	// three verified served on a prolite plan with a 353K window (see
-	// MODEL_CONTEXT_WINDOWS), 2026-07-10.
-	opus: "gpt-5.6-sol",
-	sonnet: "gpt-5.6-terra",
-	haiku: "gpt-5.6-luna",
-	// Fable/Mythos are above Opus — route to the top Codex tier. Since
-	// 2026-09-03 that is GPT-6 Astra; opus deliberately stays on gpt-5.6-sol,
-	// which lists at roughly half of Astra's per-token price.
-	fable: "gpt-6-astra",
-};
-
-/**
- * Default Anthropic-family → Qwen model mapping. Qwen/DashScope serves every
- * tier from one unified coding model, so all four families collapse onto it.
- *
- * Typed exhaustively over {@link ModelFamily}: adding a family must fail
- * compilation here rather than silently leaving that family unmapped — which is
- * exactly how the previous provider-local map missed `fable`/`mythos` and sent
- * `claude-fable-5` upstream to DashScope as an unknown model.
- */
-export const DEFAULT_QWEN_MODEL_BY_FAMILY: Record<ModelFamily, string> = {
-	opus: "coder-model",
-	sonnet: "coder-model",
-	haiku: "coder-model",
-	fable: "coder-model",
-};
-
 /** Size admission uses the already-resolved upstream model. */
 export function codexAccountFitsRequest(
 	_account: Account,

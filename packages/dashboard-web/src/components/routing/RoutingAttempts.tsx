@@ -1,4 +1,10 @@
 import type { RoutingAttempt } from "@clankermux/types";
+import {
+	REASONING_EFFORT_BACKEND_CLAMP,
+	REASONING_EFFORT_PROXY_DEFAULT,
+	REASONING_EFFORT_REASON_SEPARATOR,
+	REASONING_EFFORT_TARGET_MODEL_PROFILE,
+} from "@clankermux/types";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "../../api";
 
@@ -9,6 +15,48 @@ function formatSnapshot(snapshot: string | null): string {
 	} catch {
 		return "Snapshot unavailable";
 	}
+}
+
+const REASON_PROSE: Record<string, string> = {
+	[REASONING_EFFORT_BACKEND_CLAMP]:
+		"the backend does not accept that effort for this model",
+	[REASONING_EFFORT_TARGET_MODEL_PROFILE]:
+		"the target model has no such effort level",
+	[REASONING_EFFORT_PROXY_DEFAULT]: "the request carried no reasoning effort",
+};
+
+function formatReason(reason: string): string {
+	return reason
+		.split(REASONING_EFFORT_REASON_SEPARATOR)
+		.map((part) => REASON_PROSE[part] ?? part)
+		.join(" and ");
+}
+
+/**
+ * One sentence, and only when the attempt really adapted something: an
+ * unchanged effort is the common case and a row of empty fields on every
+ * attempt would bury the ones that matter. A `requested` of null with an
+ * `effective` value is the proxy-supplied case, which reads as a substitution
+ * rather than a change.
+ */
+function ReasoningEffortAdaptationLine({
+	attempt,
+}: {
+	attempt: RoutingAttempt;
+}) {
+	const requested = attempt.reasoning_effort_requested;
+	const effective = attempt.reasoning_effort_effective;
+	const reason = attempt.reasoning_effort_reason;
+	if (reason === null || effective === null) return null;
+	return (
+		<p>
+			Reasoning effort:{" "}
+			{requested === null
+				? `none requested, sent ${effective}`
+				: `asked for ${requested}, sent ${effective}`}{" "}
+			— {formatReason(reason)}
+		</p>
+	);
 }
 
 export function RoutingAttemptList({
@@ -53,6 +101,7 @@ export function RoutingAttemptList({
 							{attempt.reported_model ?? "Not reported"}
 						</dd>
 					</dl>
+					<ReasoningEffortAdaptationLine attempt={attempt} />
 					{attempt.error && <p>{attempt.error}</p>}
 					<details>
 						<summary className="cursor-pointer">Routing decision</summary>

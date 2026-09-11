@@ -132,21 +132,26 @@ export function isOrdinaryAttemptFailure(
  * Whether an ordinary failure may be held against the ACCOUNT for the rest of
  * the request, rather than only against the attempt that produced it.
  *
- * The exclusion set is keyed by account id alone, so anything whose cause is
- * narrower than the account must stay out of it:
+ * The exclusion set is keyed by account id alone, so a cause that stays
+ * narrower than the account for the REST OF THIS REQUEST must stay out of it.
+ * Exactly one kind does:
  *
- * - `model_not_found` and `model_not_entitled` are facts about the MODEL the
- *   attempt sent. A combo slot can fail entitlement on model A, the combo-
- *   fallback pass then clears the override and waits on model B's breaker;
- *   excluding by id would refuse the account after B recovers, for a reason
- *   that never applied to B.
  * - `other` is the catch-all, and family-weekly exhaustion is emitted through
  *   it — deliberately WITHOUT an account-wide cooldown (see the fail() call in
- *   proxy-operations.ts). Same shape of bug, one family instead of one model.
+ *   proxy-operations.ts). The account can still serve every other family, so
+ *   refusing it by id for the rest of the request would withhold capacity that
+ *   was never exhausted.
  *
- * Erring toward NOT excluding is the safe direction: the cost is a redundant
- * retry on wake, whereas a wrong exclusion can refuse the only account able to
- * serve the request.
+ * `model_not_found` and `model_not_entitled` are facts about the MODEL, and
+ * they DO exclude the account, because the routing table resolves exactly one
+ * target per account per request and nothing may substitute another model
+ * behind it. The destination refused the only model it will ever be asked for
+ * here, so model-scoped and account-scoped coincide for this request and a
+ * re-attempt on wake can only reproduce the refusal.
+ *
+ * Erring toward NOT excluding is otherwise the safe direction: the cost is a
+ * redundant retry on wake, whereas a wrong exclusion can refuse the only
+ * account able to serve the request.
  */
 export function isAccountWideFailure(outcome: ProxyAttemptOutcome): boolean {
 	return isOrdinaryAttemptFailure(outcome) && outcome.kind !== "other";

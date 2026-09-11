@@ -6,6 +6,10 @@ import {
 	newRoutingRule,
 } from "./routing-editor";
 
+it("starts a new rule on the requested model, the only non-literal action left", () => {
+	expect(newRoutingRule(0).target_kind).toBe("requested");
+});
+
 it("switching editor modes removes hidden fields before saving", () => {
 	const r = {
 		...newRoutingRule(0),

@@ -4,9 +4,13 @@ import {
 	supportsLocalTokenCounting,
 } from "@clankermux/providers/local-token-count";
 import type { Account, RequestMeta, RoutingAttempt } from "@clankermux/types";
-import { getChatContext } from "@clankermux/types";
+import {
+	getChatContext,
+	readReasoningEffortAdaptation,
+} from "@clankermux/types";
 import type { ProxyContext } from "./handlers/proxy-types";
 import { makeProxyRequest } from "./handlers/request-handler";
+import { isModelExcludedForRequest } from "./request-model-exclusions";
 import {
 	enforceOutgoingModel,
 	getAttemptTarget,
@@ -51,6 +55,11 @@ export async function recordLocalRoutingOutcome(
 		finished_at: Date.now(),
 		status,
 		error,
+		// A rejection decided before any dispatch: nothing was serialized, so
+		// there is no effective effort and no adaptation to claim.
+		reasoning_effort_requested: null,
+		reasoning_effort_effective: null,
+		reasoning_effort_reason: null,
 	});
 	audit.id = id;
 }
@@ -70,6 +79,11 @@ export async function sendAuthorizedRequest(
 ): Promise<Response> {
 	const target = getAttemptTarget(meta, account);
 	const route = getResolvedRoute(meta);
+	// Read off THIS request, never off shared per-request state: one request can
+	// dispatch several attempts against backends with different effort
+	// vocabularies, and a carried-over value would file one attempt's adaptation
+	// under another.
+	const reasoning = readReasoningEffortAdaptation(request.headers);
 	const attempt: RoutingAttempt & { route_snapshot: string } = {
 		id: crypto.randomUUID(),
 		request_id: meta.id,
@@ -86,6 +100,9 @@ export async function sendAuthorizedRequest(
 		finished_at: null,
 		status: null,
 		error: null,
+		reasoning_effort_requested: reasoning?.requested ?? null,
+		reasoning_effort_effective: reasoning?.effective ?? null,
+		reasoning_effort_reason: reasoning?.reason ?? null,
 	};
 	let response: Response;
 	let recorded = false;
@@ -107,6 +124,14 @@ export async function sendAuthorizedRequest(
 				"Destination identity changed before dispatch",
 			);
 		if (!route.maintenance) {
+			// The last gate before the wire, and the only one that is authoritative
+			// the instant a rejection is classified. The suppression row below is
+			// written from the response observer and may still be in flight, so a
+			// transport, body or token-refresh retry can reach here first.
+			if (isModelExcludedForRequest(meta, account.id, target.upstreamModel))
+				throw new RoutingPolicyError(
+					"Destination already rejected the resolved model for this request",
+				);
 			const permissions =
 				await getModelPermissionService(ctx).permissions(current);
 			if (

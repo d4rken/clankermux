@@ -4,10 +4,6 @@ import type {
 	RoutingModelFamily,
 	RoutingRule,
 } from "@clankermux/types";
-import {
-	DEFAULT_CODEX_MODEL_BY_FAMILY,
-	DEFAULT_QWEN_MODEL_BY_FAMILY,
-} from "./model-mappings";
 
 export const ROUTING_MODEL_FAMILIES: readonly RoutingModelFamily[] = [
 	"anthropic:opus",
@@ -54,9 +50,12 @@ export function matchRoutingRule(
 	);
 }
 
+/**
+ * A literal rule is the ONLY thing that may change a model id. Every other
+ * outcome, including no matching rule at all, sends what the client asked for.
+ */
 export function resolveRoutingTarget(
 	rule: RoutingRule | null,
-	provider: string,
 	requestedModel: string,
 ): ResolvedRoutingTarget {
 	if (rule?.target_kind === "literal") {
@@ -66,22 +65,6 @@ export function resolveRoutingTarget(
 	}
 	if (rule?.target_kind === "requested")
 		return { upstreamModel: requestedModel, targetSource: "requested" };
-	const family = getRoutingModelFamily(requestedModel)?.split(":")[1] as
-		| keyof typeof DEFAULT_CODEX_MODEL_BY_FAMILY
-		| undefined;
-	if (family && provider === "devin")
-		return { upstreamModel: "swe-2", targetSource: "provider_default" };
-	const defaults =
-		provider === "codex"
-			? DEFAULT_CODEX_MODEL_BY_FAMILY
-			: provider === "qwen"
-				? DEFAULT_QWEN_MODEL_BY_FAMILY
-				: undefined;
-	if (family && defaults)
-		return {
-			upstreamModel: defaults[family],
-			targetSource: "provider_default",
-		};
 	return { upstreamModel: requestedModel, targetSource: "identity" };
 }
 
@@ -173,6 +156,11 @@ export function validateRoutingRule(value: unknown): RoutingRule {
 		default:
 			throw new Error("Invalid target kind");
 	}
+	// The retired "default" action now means exactly "requested". Normalizing
+	// here rather than merely accepting matters because the repository runs this
+	// validator on both the read and the write path, so an older API client
+	// cannot recreate `default` rows after the one-shot data pass.
+	const target_kind = r.target_kind === "default" ? "requested" : r.target_kind;
 	return {
 		id: r.id,
 		name: r.name,
@@ -184,7 +172,7 @@ export function validateRoutingRule(value: unknown): RoutingRule {
 		pool_kind: r.pool_kind,
 		pool_provider: r.pool_provider,
 		pool_account_ids: r.pool_account_ids ? [...r.pool_account_ids] : null,
-		target_kind: r.target_kind,
+		target_kind,
 		target_model: r.target_model,
 	};
 }

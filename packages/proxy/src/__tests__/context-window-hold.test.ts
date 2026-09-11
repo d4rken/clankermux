@@ -68,13 +68,16 @@ function makeAccount(overrides: Partial<Account> = {}): Account {
 // gpt-5.5 window = 272K, gate threshold = floor(272K * 0.97) = 263840; the
 // last-resort (unmargined) ceiling is the full 272000.
 // A request estimated above 272000 tokens exceeds even the true Codex window.
+//
+// These requests name gpt-5.5 directly: the gate scores the model the account
+// will actually send, and with no rule in play that is the requested ID.
 function makeLargeRequest(signal?: AbortSignal): Request {
 	const neededChars = Math.ceil((350_000 - 16) * 3.0);
 	return new Request("https://proxy.local/v1/messages", {
 		method: "POST",
 		headers: { "Content-Type": "application/json" },
 		body: JSON.stringify({
-			model: "claude-opus-4-7",
+			model: "gpt-5.5",
 			messages: [{ role: "user", content: "x".repeat(neededChars) }],
 			max_tokens: 16,
 		}),
@@ -91,7 +94,7 @@ function makeRelaxBandRequest(signal?: AbortSignal): Request {
 		method: "POST",
 		headers: { "Content-Type": "application/json" },
 		body: JSON.stringify({
-			model: "claude-opus-4-7",
+			model: "gpt-5.5",
 			messages: [{ role: "user", content: "x".repeat(neededChars) }],
 			max_tokens: 16,
 		}),

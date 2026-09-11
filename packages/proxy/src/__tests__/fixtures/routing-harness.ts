@@ -53,7 +53,7 @@ export async function provisionRouting(
 						...new Set([
 							...row.discovered_ids,
 							model,
-							resolveRoutingTarget(null, account.provider, model).upstreamModel,
+							resolveRoutingTarget(null, model).upstreamModel,
 						]),
 					];
 			}
@@ -82,10 +82,7 @@ export async function provisionRouting(
 			scope: modelPermissionScope(account),
 			generation: 1,
 			completeness: "known-complete",
-			discovered_ids: [
-				model,
-				resolveRoutingTarget(null, account.provider, model).upstreamModel,
-			],
+			discovered_ids: [model, resolveRoutingTarget(null, model).upstreamModel],
 			manual_ids: [],
 			last_success_at: Date.now(),
 			last_attempt_at: Date.now(),
@@ -207,16 +204,23 @@ export async function selectAccountsForRequest(
 	return runSelection(...args);
 }
 
-/** An explicit account-scoped literal rule for behavior tests. */
+/**
+ * An explicit account-scoped literal rule for behavior tests. Several account
+ * ids share ONE rule, which is what a pool routed across a family boundary
+ * looks like: every member resolves to the same cross-family target.
+ */
 export async function configureLiteralRoute(
 	ctx: ProxyContext,
 	requested: string,
-	accountId: string,
+	accountId: string | string[],
 	target: string,
 ) {
+	const accountIds = Array.isArray(accountId) ? accountId : [accountId];
 	await provisionRouting(ctx, requested);
-	const row = fixturePermissions.get(ctx)?.get(accountId);
-	if (row) row.manual_ids.push(target);
+	for (const id of accountIds) {
+		const row = fixturePermissions.get(ctx)?.get(id);
+		if (row) row.manual_ids.push(target);
+	}
 	ctx.dbOps.routing.listRules = mock(async () => [
 		{
 			id: "test-literal",
@@ -228,7 +232,7 @@ export async function configureLiteralRoute(
 			match_model_value: null,
 			pool_kind: "accounts",
 			pool_provider: null,
-			pool_account_ids: [accountId],
+			pool_account_ids: accountIds,
 			target_kind: "literal",
 			target_model: target,
 		},

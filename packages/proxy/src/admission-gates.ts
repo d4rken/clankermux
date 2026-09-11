@@ -69,14 +69,11 @@ export type ProviderOverloadedAccount = {
 export interface AdmissionGateDeps {
 	/**
 	 * The LIVE request metadata object, never a snapshot or a destructured copy
-	 * of its fields: `modelForAccount` reads `requestMeta.comboName` at CALL
-	 * time, and the combo-fallback path nulls it precisely so a cleared combo
-	 * stops applying slot overrides.
+	 * of its fields: it is the identity the frozen route and the session
+	 * affinity state are looked up by, and the affinity gate reads
+	 * `requestMeta.routing` as it stands at CALL time.
 	 */
 	requestMeta: RequestMeta;
-	/** Combo slot info as it stood when the gates were built (see below). */
-	/** The request's effective (post-body-context) model, if any. */
-	effectiveRequestModel: string | null;
 	/** Calibrated context-window token estimate for this request. */
 	gateTokenEstimate: number;
 	/**
@@ -161,26 +158,14 @@ export interface AdmissionGates {
  * is existing behavior, preserved here rather than "fixed".
  */
 export function createAdmissionGates(deps: AdmissionGateDeps): AdmissionGates {
-	const {
-		requestMeta,
-		effectiveRequestModel,
-		gateTokenEstimate,
-		isSyntheticProbeRequest,
-		config,
-	} = deps;
+	const { requestMeta, gateTokenEstimate, isSyntheticProbeRequest, config } =
+		deps;
 
-	// Effective model for per-account overload reads: the combo slot's model
-	// override when an ACTIVE combo targets this account, else the request
-	// model — then resolved through the account's model mapping so the gate
-	// sees the model the account will actually send upstream. mapModelName is
-	// a pure, cheap lookup over the account's mapping columns (no body
-	// parsing), so it is safe on the pre-selection hot path. The mapped-vs-
-	// logical choice is the SHARED resolveOverloadAttributionModel rule the
-	// authoritative admission inside proxyWithAccount also applies, so gate and
-	// admission can never target different buckets. Routing optimization only —
-	// authoritative per-attempt enforcement is the admission chokepoint. The
-	// comboName check keeps a cleared combo (fallback path) from resurrecting
-	// stale overrides.
+	// The model this account will actually send upstream, read from the frozen
+	// route rather than re-derived: the same value the authoritative admission
+	// inside proxyWithAccount uses, so a gate and an admission can never target
+	// different overload buckets. Throws if the account is not an authorized
+	// destination for this request, which is a caller error.
 	const modelForAccount = (account: Account): string =>
 		getAttemptTarget(requestMeta, account).upstreamModel;
 
@@ -502,7 +487,7 @@ export function createAdmissionGates(deps: AdmissionGateDeps): AdmissionGates {
 		for (const account of candidates) {
 			const family =
 				account.provider === "anthropic"
-					? getModelFamily(effectiveRequestModel ?? "")
+					? getModelFamily(modelForAccount(account))
 					: null;
 			const resetAt = family
 				? getFamilyWeeklyExhaustedUntil(account.id, family, now)
