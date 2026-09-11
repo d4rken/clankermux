@@ -1,5 +1,5 @@
 import { Database } from "bun:sqlite";
-import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, spyOn } from "bun:test";
 import type { DatabaseOperations } from "@clankermux/database";
 import { DatabaseFactory, ensureSchema } from "@clankermux/database";
 import { tempDbTracker } from "@clankermux/test-support";
@@ -20,13 +20,18 @@ function post(body: unknown): Request {
 
 describe("createApiKeyAccountAddHandler", () => {
 	let dbOps: DatabaseOperations;
+	let fetchSpy: ReturnType<typeof spyOn>;
 
 	beforeEach(() => {
+		fetchSpy = spyOn(globalThis, "fetch").mockImplementation(
+			async () => new Response(null, { status: 401 }),
+		);
 		DatabaseFactory.initialize(tmpDb.next());
 		dbOps = DatabaseFactory.getInstance();
 	});
 
 	afterEach(() => {
+		fetchSpy.mockRestore();
 		// reset() closes the singleton connection before the files go away.
 		try {
 			DatabaseFactory.reset();

@@ -94,6 +94,10 @@ import {
 	resumeAccount,
 } from "../services/admin/accounts";
 import { buildPredictionsForAccounts } from "../services/build-account-predictions-for";
+import {
+	readOpenRouterAccountMetadata,
+	refreshOpenRouterAccountMetadata,
+} from "../services/openrouter-account-metadata";
 import { getCachedOrPersistedCodexUsage } from "../services/resolve-codex-usage";
 import type { AccountResponse } from "../types";
 import { primeUsagePollingForNewAccount } from "./account-usage-priming";
@@ -483,6 +487,7 @@ export async function listAccountResponses(
 			identity_rate_limit_tier: string | null;
 			identity_captured_at: number | null;
 			identity_profile_fetched_at: number | null;
+			openrouter_metadata_json: string | null;
 			codex_usage_json: string | null;
 			codex_usage_observed_at: number | null;
 			refresh_token_expires_at: number | null;
@@ -530,6 +535,7 @@ export async function listAccountResponses(
 					identity_rate_limit_tier,
 					identity_captured_at,
 					identity_profile_fetched_at,
+					openrouter_metadata_json,
 					codex_usage_json,
 					codex_usage_observed_at,
 					refresh_token_expires_at,
@@ -1209,6 +1215,12 @@ export async function listAccountResponses(
 					sessionStats: sessionStatsMap.get(account.id) ?? null,
 					activeSessionCount: activeSessionCountsByAccount.get(account.id) ?? 0,
 					isPrimary: account.id === primaryId,
+					openRouterMetadata:
+						account.provider === "openrouter" &&
+						!account.custom_endpoint &&
+						account.openrouter_metadata_json
+							? readOpenRouterAccountMetadata(account.openrouter_metadata_json)
+							: null,
 					identityExternalId: account.identity_external_id ?? null,
 					identityEmail: account.identity_email ?? null,
 					identityOrganizationName: account.identity_organization_name ?? null,
@@ -2556,6 +2568,17 @@ export function createAccountRefreshUsageHandler(dbOps: DatabaseOperations) {
 
 			if (!account) {
 				return errorResponse(NotFound("Account not found"));
+			}
+
+			if (account.provider === "openrouter") {
+				const metadata = await refreshOpenRouterAccountMetadata(dbOps, account);
+				return jsonResponse({
+					success: metadata !== null,
+					message: metadata
+						? "OpenRouter account details refreshed."
+						: "Could not refresh OpenRouter account details. Previous details have been kept.",
+					pollingRestarted: false,
+				});
 			}
 
 			if (account.provider !== "anthropic" && account.provider !== "codex") {

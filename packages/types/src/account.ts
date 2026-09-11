@@ -1,3 +1,4 @@
+import type { OpenRouterAccountMetadata } from "./openrouter";
 import { microsToUsd } from "./payment";
 import type {
 	AccountBurnAnchors,
@@ -561,6 +562,7 @@ export interface AccountResponse {
 	/** Anthropic rate-limit multiplier token (e.g. "20x", "5x"); null for Codex or when uncaptured. */
 	identityRateLimitTier: string | null;
 	identityCapturedAt: number | null; // ms-epoch when identity fields were last captured
+	openRouterMetadata?: OpenRouterAccountMetadata | null;
 	identityProfileFetchedAt: number | null; // ms-epoch of last successful profile fetch
 	/** True when this account shares a provider identity (external id or email) with
 	 *  another account — i.e. it is a duplicate login. Requires sibling context to

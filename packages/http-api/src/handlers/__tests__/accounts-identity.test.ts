@@ -1,6 +1,7 @@
 import { describe, expect, it } from "bun:test";
 import type { Config } from "@clankermux/config";
 import type { DatabaseOperations } from "@clankermux/database";
+import { parseOpenRouterMetadata } from "@clankermux/providers";
 import type { AccountResponse } from "@clankermux/types";
 import { createAccountsListHandler } from "../accounts";
 
@@ -49,6 +50,7 @@ interface AccountRow {
 	identity_rate_limit_tier: string | null;
 	identity_captured_at: number | null;
 	identity_profile_fetched_at: number | null;
+	openrouter_metadata_json?: string | null;
 }
 
 function makeAccountRow(overrides: Partial<AccountRow>): AccountRow {
@@ -219,5 +221,54 @@ describe("accounts list — duplicate-login detection", () => {
 		// Unrelated account with a distinct external id is not a duplicate.
 		expect(c?.isDuplicateAccount).toBe(false);
 		expect(c?.duplicateAccountIds).toEqual([]);
+	});
+});
+
+describe("accounts list — OpenRouter metadata", () => {
+	it("returns saved metadata and isolates malformed or inapplicable snapshots", async () => {
+		const metadata = parseOpenRouterMetadata(
+			{ data: { label: "sk-or...abc", creator_user_id: "user_123", usage: 0 } },
+			123,
+		);
+		const saved = JSON.stringify(metadata);
+		const handler = createAccountsListHandler(
+			makeDbOps([
+				makeAccountRow({
+					id: "router",
+					provider: "openrouter",
+					openrouter_metadata_json: saved,
+				}),
+				makeAccountRow({
+					id: "broken",
+					provider: "openrouter",
+					openrouter_metadata_json: "broken json",
+				}),
+				makeAccountRow({
+					id: "bad-shape",
+					provider: "openrouter",
+					openrouter_metadata_json: '{"label": {}}',
+				}),
+				makeAccountRow({
+					id: "custom",
+					provider: "openrouter",
+					custom_endpoint: "https://example.test",
+					openrouter_metadata_json: saved,
+				}),
+				makeAccountRow({
+					id: "other",
+					provider: "codex",
+					openrouter_metadata_json: saved,
+				}),
+			]),
+			config,
+		);
+		const response = await handler();
+		expect(response.status).toBe(200);
+		const body = (await response.json()) as AccountResponse[];
+		expect(body.find((a) => a.id === "router")?.openRouterMetadata).toEqual(
+			metadata,
+		);
+		for (const id of ["broken", "bad-shape", "custom", "other"])
+			expect(body.find((a) => a.id === id)?.openRouterMetadata).toBeNull();
 	});
 });

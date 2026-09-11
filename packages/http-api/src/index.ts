@@ -37,7 +37,7 @@ export {
 	type ManagementAuthRequirement,
 	managementAuthRequirement,
 } from "./services/management-auth-policy";
-
+export { refreshOpenRouterAccountsOnStartup } from "./services/openrouter-account-metadata";
 export {
 	clampPct,
 	createPublicSnapshotReader,

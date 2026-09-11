@@ -75,6 +75,7 @@ export function ensureSchema(db: Database): void {
 			identity_rate_limit_tier TEXT,
 			identity_captured_at INTEGER,
 			identity_profile_fetched_at INTEGER,
+			openrouter_metadata_json TEXT,
 			codex_usage_json TEXT,
 			codex_usage_observed_at INTEGER,
 			refresh_token_expires_at INTEGER
@@ -1306,6 +1307,11 @@ export const ADDITIVE_COLUMNS: ReadonlyArray<{
 		table: "accounts",
 		column: "identity_profile_fetched_at",
 		ddl: "ALTER TABLE accounts ADD COLUMN identity_profile_fetched_at INTEGER",
+	},
+	{
+		table: "accounts",
+		column: "openrouter_metadata_json",
+		ddl: "ALTER TABLE accounts ADD COLUMN openrouter_metadata_json TEXT",
 	},
 	// Which attribution tier produced the row's `project` (see
 	// ProjectAttributionSource): header / wd_primary / wd_plain / codex_cwd /
