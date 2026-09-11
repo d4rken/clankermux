@@ -1,6 +1,8 @@
 import type { PricingGap } from "@clankermux/types";
 import { AlertTriangle } from "lucide-react";
 import { useSystemStatus } from "../../hooks/queries";
+import { Button } from "../ui/button";
+import { useDismissedPricingGaps } from "./useDismissedPricingGaps";
 
 /**
  * Presentational half of {@link PricingGapBanner}, split out so both render
@@ -10,7 +12,13 @@ import { useSystemStatus } from "../../hooks/queries";
  * re-implement the server's provider suppression (e.g. hiding Ollama), because
  * duplicating that policy in two places invites the two copies to drift apart.
  */
-export function PricingGapBannerView({ gaps }: { gaps: PricingGap[] }) {
+export function PricingGapBannerView({
+	gaps,
+	onDismiss,
+}: {
+	gaps: PricingGap[];
+	onDismiss?: () => void;
+}) {
 	if (gaps.length === 0) return null;
 	return (
 		<div
@@ -18,14 +26,15 @@ export function PricingGapBannerView({ gaps }: { gaps: PricingGap[] }) {
 			className="flex items-start gap-row p-row rounded-lg bg-warning/15 border border-warning/30"
 		>
 			<AlertTriangle className="h-5 w-5 text-warning-strong mt-tight shrink-0" />
-			<div className="text-sm min-w-0">
+			<div className="text-sm min-w-0 flex-1">
 				<p className="font-medium text-warning-strong">
 					Requests recorded without pricing
 				</p>
 				<p className="text-muted-foreground">
-					These models missed the pricing catalogue since this process started,
-					so their requests were recorded with no cost and are invisible in cost
-					analytics. Add or complete the pricing entry for each model.
+					Requests for these models were recorded without a price since this
+					process started. Check the provider&apos;s pricing catalogue before
+					recovering missing costs. Dismiss hides these warnings in this browser
+					until a new pricing failure occurs.
 				</p>
 				<ul className="mt-item space-y-tight">
 					{gaps.map((gap) => (
@@ -56,6 +65,18 @@ export function PricingGapBannerView({ gaps }: { gaps: PricingGap[] }) {
 						</li>
 					))}
 				</ul>
+				{onDismiss && (
+					<Button
+						type="button"
+						variant="outline"
+						size="sm"
+						className="mt-item"
+						aria-label="Dismiss pricing warnings"
+						onClick={onDismiss}
+					>
+						Dismiss
+					</Button>
+				)}
 			</div>
 		</div>
 	);
@@ -68,9 +89,19 @@ export function PricingGapBannerView({ gaps }: { gaps: PricingGap[] }) {
  * rather than the destructive red of the corruption banner: requests are still
  * served correctly, only costing is degraded.
  *
- * Reads the System Status poll the Overview already runs — no new fetching.
  */
+export function DismissiblePricingGapBanner({ gaps }: { gaps: PricingGap[] }) {
+	const { dismiss, isDismissed } = useDismissedPricingGaps();
+	const visible = gaps.filter((gap) => !isDismissed(gap));
+	return (
+		<PricingGapBannerView gaps={visible} onDismiss={() => dismiss(visible)} />
+	);
+}
+
+/** Reads the System Status poll the Overview already runs, with no new fetching. */
 export function PricingGapBanner() {
 	const { data } = useSystemStatus();
-	return <PricingGapBannerView gaps={data?.runtime?.pricingGaps ?? []} />;
+	return (
+		<DismissiblePricingGapBanner gaps={data?.runtime?.pricingGaps ?? []} />
+	);
 }

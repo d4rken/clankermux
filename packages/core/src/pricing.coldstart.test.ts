@@ -368,7 +368,7 @@ describe("dated model snapshots", () => {
 		const cost = await estimateCostUSD(
 			"image-preview",
 			{ inputTokens: 1_000_000, cacheReadInputTokens: 1_000_000 },
-			{ provider: "codex", reportGaps: true },
+			{ provider: "openai-compatible", reportGaps: true },
 		);
 
 		expect(cost).toBeNull();
@@ -428,9 +428,13 @@ describe("dated model snapshots", () => {
 		}) as unknown as typeof fetch;
 
 		expect(__pricingTestHooks.isCatalogueLoaded()).toBe(false);
-		const cost = await estimateCostUSD("gpt-5.4-mini-2026-03-17", {
-			inputTokens: 1_000_000,
-		});
+		const cost = await estimateCostUSD(
+			"gpt-5.4-mini-2026-03-17",
+			{
+				inputTokens: 1_000_000,
+			},
+			{ provider: "codex" },
+		);
 		// 42 (the catalogue's own dated rate), not 0.75 (the bundled base).
 		expect(cost).toBeCloseTo(42, 6);
 	});
@@ -470,7 +474,7 @@ describe("dated model snapshots", () => {
 		const cost = await estimateCostUSD(
 			"gpt-9-turbo-2026-01-01",
 			{ inputTokens: 1_000_000, cacheReadInputTokens: 1_000_000 },
-			{ provider: "codex", reportGaps: true },
+			{ provider: "openai-compatible", reportGaps: true },
 		);
 
 		expect(cost).toBeNull();
@@ -511,7 +515,7 @@ describe("dated model snapshots", () => {
 		const cost = await estimateCostUSD(
 			"gpt-9-turbo-2026-01-01",
 			{ inputTokens: 1_000_000, cacheReadInputTokens: 1_000_000 },
-			{ provider: "codex", reportGaps: true },
+			{ provider: "openai-compatible", reportGaps: true },
 		);
 
 		expect(cost).toBeCloseTo(3.3, 6);
@@ -552,7 +556,7 @@ describe("dated model snapshots", () => {
 		const cost = await estimateCostUSD(
 			"gpt-9-vision-2026-01-01",
 			{ inputTokens: 1_000_000, cacheReadInputTokens: 1_000_000 },
-			{ provider: "codex", reportGaps: true },
+			{ provider: "openai-compatible", reportGaps: true },
 		);
 
 		expect(cost).toBeNull();
@@ -600,7 +604,7 @@ describe("dated model snapshots", () => {
 		const cost = await estimateCostUSD(
 			"gpt-9-stub-2026-01-01",
 			{ inputTokens: 1_000_000, cacheReadInputTokens: 1_000_000 },
-			{ provider: "codex", reportGaps: true },
+			{ provider: "openai-compatible", reportGaps: true },
 		);
 
 		expect(cost).toBeNull();

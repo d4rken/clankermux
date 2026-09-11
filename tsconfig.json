@@ -43,6 +43,9 @@
 		"scripts/devin-login.ts",
 		"scripts/devin-check.ts",
 		"scripts/auth-password.test.ts",
+		// Historical cost repair writes estimates against the live request schema.
+		"scripts/backfill-request-costs.ts",
+		"scripts/backfill-request-costs.test.ts",
 		// This one rewrites requests.project in place. It went unnoticed for a
 		// release assigning an object where a string was expected, which would
 		// have written "[object Object]" into every re-derived row — precisely

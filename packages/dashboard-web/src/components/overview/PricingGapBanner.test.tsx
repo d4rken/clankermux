@@ -107,9 +107,9 @@ describe("PricingGapBannerView", () => {
 			/>,
 		);
 
-		// The catch fires both for a model that is absent and for one that is
-		// present but lacks a rate, so the fix is "add OR complete".
-		expect(html).toContain("Add or complete the pricing entry");
+		// Missing models and missing rates both need the provider's catalogue
+		// checked before historical costs can be recovered.
+		expect(html).toContain("pricing catalogue before recovering missing costs");
 		expect(html).toContain("not in the pricing catalogue");
 		expect(html).toContain("pricing entry is incomplete");
 		// Singular/plural on the occurrence count.

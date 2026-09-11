@@ -1,47 +1,16 @@
 #!/usr/bin/env bun
 /**
- * backfill-request-costs.ts — ONE-OFF repair tool for historical
- * `requests.cost_usd` values that were persisted as NULL. Run manually:
+ * Repair historical NULL request costs using today's pricing catalogue.
  *
- *     bun scripts/backfill-request-costs.ts [--dry-run] [--batch-size=500]
+ * bun scripts/backfill-request-costs.ts --dry-run --model=gpt-5.6-luna --provider=codex
  *
- * This is NOT a migration and is not wired into anything. Two things wrote
- * those NULLs:
+ * --provider names the account provider (codex, not openai). Routing history
+ * supplies it first, with the current account as a fallback for older requests.
+ * Repairs set cost_usd and estimated_cost_usd together with cost_source=estimated.
  *
- *   1. the cold-start catalogue race — a request finalizing before the
- *      models.dev catalogue replaced the 26-model bundled seed was priced
- *      against a table that could not contain its model. Fixed at the source:
- *      `estimateCostUSD` now waits on in-flight catalogue work before declaring
- *      a model unpriced;
- *   2. a model that genuinely had no catalogue entry at the time (e.g.
- *      `claude-sonnet-5` before its bundled entry was added, or the dated
- *      Codex snapshots that no catalogue lists — those now resolve via their
- *      base slug).
- *
- * Both leave the same residue: a successful, fully-metered request whose cost
- * is NULL, invisible to every cost analytic. This re-prices those rows with
- * today's catalogue.
- *
- * Rows are only ever written when a price actually resolves. A model that is
- * still unpriced (an unreleased model with no published rates) keeps its NULL —
- * that is the honest value, and re-running later picks it up once pricing lands.
- *
- * Selection scans the requests table: `idx_requests_cost_model` looks like it
- * would serve `cost_usd IS NULL`, but it is PARTIAL (`WHERE cost_usd > 0 AND
- * model IS NOT NULL`, performance-indexes.ts) so it indexes exactly the rows
- * this query excludes. Whatever the planner picks is a scan — measured at ~0.3s
- * over 385k rows on the live database, which is why no index is added for a
- * one-off. That cost is also why this is a manual tool rather than a startup
- * task, along with the more basic reason: a repair that rewrites historical rows
- * should be something you run and read the output of, not something that happens
- * silently on every boot.
- *
- * The deep import below is intentional — one-off scripts may import source
- * directly; library code should not copy this pattern.
- *
- * --dry-run opens the database READ-ONLY (mechanically incapable of writing)
- * and reports everything it would do. A normal run opens read-write with
- * `busy_timeout = 5000` so it coexists with the live service (WAL).
+ * --dry-run opens SQLite read-only. Live runs update only costs still NULL,
+ * in batches with a busy timeout so the tool can coexist with the service.
+ * Missing prices and missing provider provenance remain NULL for a later run.
  */
 
 import { Database } from "bun:sqlite";
@@ -55,25 +24,37 @@ import { resolveDbPath } from "../packages/database/src/paths";
 const SAMPLE_LIMIT = 15;
 
 const USAGE =
-	"Usage: bun scripts/backfill-request-costs.ts [--dry-run] [--batch-size=500] [--allow-stale-catalogue]";
+	"Usage: bun scripts/backfill-request-costs.ts [--dry-run] [--batch-size=500] [--allow-stale-catalogue] [--model=MODEL] [--provider=PROVIDER]";
 
 interface CliOptions {
 	dryRun: boolean;
 	batchSize: number;
 	allowStaleCatalogue: boolean;
+	model: string | null;
+	provider: string | null;
 }
 
 function parseArgs(argv: string[]): CliOptions {
 	let dryRun = false;
 	let batchSize = 500;
 	let allowStaleCatalogue = false;
+	let model: string | null = null;
+	let provider: string | null = null;
 	for (const arg of argv) {
 		if (arg === "--dry-run") {
 			dryRun = true;
 		} else if (arg === "--allow-stale-catalogue") {
 			allowStaleCatalogue = true;
+		} else if (arg.startsWith("--model=") || arg.startsWith("--provider=")) {
+			const value = arg.slice(arg.indexOf("=") + 1).trim();
+			if (!value) {
+				console.error(`Invalid filter value: ${arg}`);
+				process.exit(1);
+			}
+			if (arg.startsWith("--model=")) model = value;
+			else provider = value;
 		} else if (arg.startsWith("--batch-size=")) {
-			const parsed = Number.parseInt(arg.slice("--batch-size=".length), 10);
+			const parsed = Number(arg.slice("--batch-size=".length));
 			if (!Number.isInteger(parsed) || parsed <= 0) {
 				console.error(`Invalid --batch-size value: ${arg}`);
 				process.exit(1);
@@ -85,7 +66,7 @@ function parseArgs(argv: string[]): CliOptions {
 			process.exit(1);
 		}
 	}
-	return { dryRun, batchSize, allowStaleCatalogue };
+	return { dryRun, batchSize, allowStaleCatalogue, model, provider };
 }
 
 // ---------------------------------------------------------------------------
@@ -96,6 +77,7 @@ interface CandidateRow {
 	id: string;
 	timestamp: number;
 	model: string;
+	provider: string | null;
 	input_tokens: number | null;
 	output_tokens: number | null;
 	cache_read_input_tokens: number | null;
@@ -114,17 +96,27 @@ interface ModelOutcome {
  * there is nothing to charge — and are left alone.
  */
 const CANDIDATE_SQL = `
-	SELECT id, timestamp, model,
-	       input_tokens, output_tokens,
-	       cache_read_input_tokens, cache_creation_input_tokens
-	  FROM requests
-	 WHERE cost_usd IS NULL
-	   AND model IS NOT NULL
-	   AND model != ''
-	   AND COALESCE(input_tokens, 0)
-	     + COALESCE(output_tokens, 0)
-	     + COALESCE(cache_read_input_tokens, 0)
-	     + COALESCE(cache_creation_input_tokens, 0) > 0
+	SELECT * FROM (
+		SELECT r.id, r.timestamp, r.model,
+		       COALESCE((
+		         SELECT ra.provider FROM routing_attempts ra
+		          WHERE ra.request_id = r.id AND ra.kind = 'upstream_send'
+		            AND (r.account_used IS NULL OR ra.account_id = r.account_used)
+		            AND ra.provider IS NOT NULL AND ra.provider != ''
+		          ORDER BY ra.started_at DESC, ra.id DESC LIMIT 1
+		       ), NULLIF(a.provider, '')) AS provider,
+		       r.input_tokens, r.output_tokens,
+		       r.cache_read_input_tokens, r.cache_creation_input_tokens
+		  FROM requests r
+		  LEFT JOIN accounts a ON a.id = r.account_used
+		 WHERE r.cost_usd IS NULL
+		   AND r.model IS NOT NULL AND r.model != ''
+		   AND (?1 IS NULL OR r.model = ?1)
+		   AND COALESCE(r.input_tokens, 0)
+		     + COALESCE(r.output_tokens, 0)
+		     + COALESCE(r.cache_read_input_tokens, 0)
+		     + COALESCE(r.cache_creation_input_tokens, 0) > 0
+	) WHERE (?2 IS NULL OR provider = ?2)
 `;
 
 function formatUsd(value: number): string {
@@ -140,6 +132,8 @@ async function main(): Promise<void> {
 		`Backfill request costs — ${options.dryRun ? "DRY-RUN (read-only)" : "LIVE run"}`,
 	);
 	console.log(`Database: ${dbPath}`);
+	if (options.model) console.log(`Model filter: ${options.model}`);
+	if (options.provider) console.log(`Provider filter: ${options.provider}`);
 
 	// Preflight. This also settles the background refresh, so the catalogue
 	// cannot change generation part-way through the row loop and price two rows
@@ -190,7 +184,7 @@ async function main(): Promise<void> {
 
 	const db = options.dryRun
 		? new Database(dbPath, { readonly: true })
-		: new Database(dbPath);
+		: new Database(dbPath, { readwrite: true, create: false });
 	try {
 		if (!options.dryRun) {
 			db.run("PRAGMA busy_timeout = 5000");
@@ -200,8 +194,8 @@ async function main(): Promise<void> {
 		// and an ORDER BY would make SQLite build a temporary B-tree over the whole
 		// scan just to make the sample output read chronologically.
 		const candidates = db
-			.query<CandidateRow, []>(CANDIDATE_SQL)
-			.all()
+			.query<CandidateRow, [string | null, string | null]>(CANDIDATE_SQL)
+			.all(options.model, options.provider)
 			.sort((a, b) => a.timestamp - b.timestamp);
 		console.log(`Candidate rows (NULL cost, model set, tokens > 0): ${candidates.length}`);
 		if (candidates.length === 0) {
@@ -212,13 +206,14 @@ async function main(): Promise<void> {
 		const updateStmt = options.dryRun
 			? null
 			: db.query<unknown, [number, string]>(
-					"UPDATE requests SET cost_usd = ? WHERE id = ? AND cost_usd IS NULL",
+					"UPDATE requests SET cost_usd = ?1, estimated_cost_usd = ?1, cost_source = 'estimated' WHERE id = ?2 AND cost_usd IS NULL",
 				);
 
 		const byModel = new Map<string, ModelOutcome>();
 		const samples: string[] = [];
 		let priced = 0;
 		let unpriced = 0;
+		let missingProvider = 0;
 		let totalCost = 0;
 		let pending: Array<[number, string]> = [];
 
@@ -239,17 +234,18 @@ async function main(): Promise<void> {
 			};
 			outcome.rows++;
 
-			const cost = await estimateCostUSD(row.model, {
-				inputTokens: row.input_tokens ?? 0,
-				outputTokens: row.output_tokens ?? 0,
-				cacheReadInputTokens: row.cache_read_input_tokens ?? 0,
-				cacheCreationInputTokens: row.cache_creation_input_tokens ?? 0,
-			});
+			if (!row.provider) missingProvider++;
+			const cost = row.provider
+				? await estimateCostUSD(row.model, {
+					inputTokens: row.input_tokens ?? 0,
+					outputTokens: row.output_tokens ?? 0,
+					cacheReadInputTokens: row.cache_read_input_tokens ?? 0,
+					cacheCreationInputTokens: row.cache_creation_input_tokens ?? 0,
+				}, { provider: row.provider })
+				: null;
 
-			// estimateCostUSD swallows lookup failures and returns 0. A genuinely
-			// free request is indistinguishable from an unpriced one here, and both
-			// are better left NULL than written as a fabricated 0.00.
-			if (cost > 0) {
+			// A measured zero is priced; only NULL means the lookup failed.
+			if (cost !== null) {
 				priced++;
 				outcome.priced++;
 				outcome.totalCost += cost;
@@ -292,11 +288,13 @@ async function main(): Promise<void> {
 			`\nRows ${options.dryRun ? "that would be updated" : "updated"}: ${priced}` +
 				` — total ${formatUsd(totalCost)}`,
 		);
-		if (unpriced > 0) {
+		if (unpriced > missingProvider) {
 			console.log(
-				`Rows left NULL (model still has no price): ${unpriced} — re-run once pricing lands.`,
+				`Rows left NULL (missing price): ${unpriced - missingProvider} — re-run once pricing lands.`,
 			);
 		}
+
+		if (missingProvider > 0) console.log(`Rows without provider provenance: ${missingProvider}`);
 
 		const elapsed = ((Date.now() - started) / 1000).toFixed(1);
 		console.log(`\nDone in ${elapsed}s.`);

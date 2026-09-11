@@ -214,6 +214,205 @@ describe("bundled cost fields backfill a partial remote entry", () => {
 		}
 	}
 
+	it("prices Codex from OpenAI even when an incomplete reseller comes first", async () => {
+		await withRemoteCatalogue(
+			{
+				bothub: {
+					models: {
+						"gpt-5.6-luna": {
+							id: "gpt-5.6-luna",
+							name: "Luna",
+							cost: { input: 0.06, output: 0.37 },
+						},
+					},
+				},
+				openai: {
+					models: {
+						"gpt-5.6-luna": {
+							id: "gpt-5.6-luna",
+							name: "Luna",
+							cost: { input: 0.2, output: 1.2, cache_read: 0.02 },
+						},
+					},
+				},
+			},
+			async () => {
+				expect(
+					await estimateCostUSD(
+						"gpt-5.6-luna",
+						{
+							inputTokens: 1_000_000,
+							outputTokens: 1_000_000,
+							cacheReadInputTokens: 1_000_000,
+						},
+						{ provider: "codex", reportGaps: true },
+					),
+				).toBeCloseTo(1.42, 6);
+				expect(
+					await estimateCostUSD(
+						"gpt-5.6-luna",
+						{ inputTokens: 1_000_000 },
+						{ provider: "codex" },
+					),
+				).toBeCloseTo(0.2, 6);
+				expect(getPricingGaps()).toEqual([]);
+			},
+		);
+	});
+
+	it("does not price an unknown Codex model from a reseller", async () => {
+		await withRemoteCatalogue(
+			{
+				bothub: {
+					models: {
+						"reseller-only": {
+							id: "reseller-only",
+							name: "Reseller",
+							cost: { input: 1, output: 2 },
+						},
+					},
+				},
+			},
+			async () => {
+				expect(
+					await estimateCostUSD(
+						"reseller-only",
+						{ inputTokens: 1_000_000 },
+						{ provider: "codex", reportGaps: true },
+					),
+				).toBeNull();
+				expect(getPricingGaps()[0].reason).toBe("model_missing");
+			},
+		);
+	});
+
+	it("keeps a provider's incomplete price instead of borrowing another tier", async () => {
+		await withRemoteCatalogue(
+			{
+				bothub: {
+					models: {
+						"shared-model": {
+							id: "shared-model",
+							name: "Shared",
+							cost: { input: 1, output: 2, cache_read: 0.1 },
+						},
+					},
+				},
+				openai: {
+					models: {
+						"shared-model": {
+							id: "shared-model",
+							name: "Shared",
+							cost: { input: 5, output: 20 },
+						},
+					},
+				},
+			},
+			async () => {
+				expect(
+					await estimateCostUSD(
+						"shared-model",
+						{ cacheReadInputTokens: 1_000_000 },
+						{ provider: "codex", reportGaps: true },
+					),
+				).toBeNull();
+				expect(getPricingGaps()[0].reason).toBe("cost_missing");
+				expect(
+					await estimateCostUSD(
+						"shared-model",
+						{ inputTokens: 1_000_000 },
+						{ provider: "bothub" },
+					),
+				).toBeCloseTo(1, 6);
+			},
+		);
+	});
+
+	it("maps console accounts to Anthropic and confines dated fallback to that provider", async () => {
+		await withRemoteCatalogue(
+			{
+				bothub: {
+					models: {
+						"custom-model-2026-01-01": {
+							id: "custom-model-2026-01-01",
+							name: "Dated",
+							cost: { input: 99, output: 99 },
+						},
+					},
+				},
+				anthropic: {
+					models: {
+						"custom-model": {
+							id: "custom-model",
+							name: "Base",
+							cost: { input: 3, output: 15 },
+						},
+					},
+				},
+			},
+			async () => {
+				expect(
+					await estimateCostUSD(
+						"custom-model-2026-01-01",
+						{ inputTokens: 1_000_000 },
+						{ provider: "claude-console-api" },
+					),
+				).toBeCloseTo(3, 6);
+			},
+		);
+	});
+
+	it.each([
+		"zai",
+		"minimax",
+		"openrouter",
+	])("uses only %s catalogue entries for that account provider", async (provider) => {
+		await withRemoteCatalogue(
+			{
+				reseller: {
+					models: {
+						"shared-scoped-model": {
+							id: "shared-scoped-model",
+							name: "Shared",
+							cost: { input: 1, output: 2 },
+						},
+						"other-provider-only": {
+							id: "other-provider-only",
+							name: "Other",
+							cost: { input: 1, output: 2 },
+						},
+					},
+				},
+				[provider]: {
+					models: {
+						"shared-scoped-model": {
+							id: "shared-scoped-model",
+							name: "Shared",
+							cost: { input: 5, output: 20 },
+						},
+					},
+				},
+			},
+			async () => {
+				expect(
+					await estimateCostUSD(
+						"shared-scoped-model",
+						{ inputTokens: 1_000_000 },
+						{ provider },
+					),
+				).toBeCloseTo(5, 6);
+				expect(
+					await estimateCostUSD(
+						"other-provider-only",
+						{ inputTokens: 1_000_000 },
+						{ provider, reportGaps: true },
+					),
+				).toBeNull();
+				expect(getPricingGaps()[0].reason).toBe("model_missing");
+			},
+		);
+	});
+
 	it("fills missing cache costs while the remote input cost still wins", async () => {
 		await withRemoteCatalogue(
 			{
