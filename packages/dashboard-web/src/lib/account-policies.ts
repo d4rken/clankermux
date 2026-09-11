@@ -1,5 +1,6 @@
 import { type AccountResponse, PROVIDER_NAMES } from "@clankermux/types";
 import {
+	providerSupportsAutoFallback,
 	providerSupportsAutoFeatures,
 	providerSupportsCustomBilling,
 } from "../utils/provider-utils";
@@ -7,7 +8,7 @@ import {
 /**
  * The per-account automation flags an operator can configure. One key per
  * toggle in the account overflow menu — `extraSpend` is a single key whose
- * wording (but not its meaning) differs between Codex and Anthropic.
+ * wording reflects the provider’s quota and prepaid-credit behavior.
  */
 export type AccountPolicyKey =
 	| "autoFallback"
@@ -45,9 +46,8 @@ export interface AccountPolicyState {
 }
 
 /**
- * Codex phrases extra spend as running on purchased credits past the weekly
- * limit; every other provider phrases it as plan overage. Same stored flag,
- * same inverted polarity — only the words differ.
+ * Each provider describes its own allowance and billing semantics. The stored
+ * flag protects included usage; extra spend uses the inverse polarity.
  */
 const EXTRA_SPEND_CODEX: AccountPolicyDescriptor = {
 	key: "extraSpend",
@@ -55,6 +55,14 @@ const EXTRA_SPEND_CODEX: AccountPolicyDescriptor = {
 	menuLabel: "Allow credits past weekly limit",
 	description:
 		"When the weekly Codex limit is reached, allow this account to keep running on purchased credits. When OFF (default), the account pauses and traffic fails over to other accounts, then auto-resumes when the weekly window resets.",
+};
+
+const EXTRA_SPEND_DEVIN: AccountPolicyDescriptor = {
+	key: "extraSpend",
+	chipLabel: "Unverified quota spend",
+	menuLabel: "Allow requests beyond verified included quota",
+	description:
+		"Allow Devin requests when included quota is exhausted or unknown. This may consume prepaid credits. When OFF (default), requests require reported included capacity. Usage is shared with Devin CLI, Desktop, and cloud, so concurrent usage can exceed the last reported allowance. Keep prepaid overage disabled in Devin to prevent credit spending.",
 };
 
 const EXTRA_SPEND_ANTHROPIC: AccountPolicyDescriptor = {
@@ -120,7 +128,16 @@ export function describeAccountPolicy(
 	key: AccountPolicyKey,
 	provider: string,
 ): AccountPolicyDescriptor {
+	if (key === "autoFallback" && provider === PROVIDER_NAMES.DEVIN)
+		return {
+			key,
+			chipLabel: "Auto-recover quota",
+			menuLabel: "Auto-recover quota",
+			description:
+				"Use account metadata to pause when protected included quota is exhausted or unknown, and resume quota-paused accounts when capacity returns. Applies to new or unpinned requests; keeps manual and reconnect-required pauses. Does not send inference requests.",
+		};
 	if (key === "extraSpend") {
+		if (provider === PROVIDER_NAMES.DEVIN) return EXTRA_SPEND_DEVIN;
 		return provider === PROVIDER_NAMES.CODEX
 			? EXTRA_SPEND_CODEX
 			: EXTRA_SPEND_ANTHROPIC;
@@ -158,19 +175,28 @@ export function deriveAccountPolicies(
 		});
 	};
 
-	if (providerSupportsAutoFeatures(provider)) {
+	if (providerSupportsAutoFallback(provider)) {
 		add("autoFallback", account.autoFallbackEnabled === true);
+	}
+	if (providerSupportsAutoFeatures(provider)) {
 		add("autoRefresh", account.autoRefreshEnabled === true);
 	}
 	if (
 		provider === PROVIDER_NAMES.ANTHROPIC ||
-		provider === PROVIDER_NAMES.CODEX
+		provider === PROVIDER_NAMES.CODEX ||
+		provider === PROVIDER_NAMES.DEVIN
 	) {
 		// Inverted polarity, matching the menu item and the routing readers: the
 		// stored flag is the PROTECTION ("auto-pause rather than overspend"), so
-		// extra spend is permitted exactly when it is off. An absent flag reads as
-		// permitted, matching the server's `COALESCE(…, 0)`.
-		add("extraSpend", !account.autoPauseOnOverageEnabled, "warning");
+		// extra spend is permitted exactly when it is off. Devin requires explicit
+		// opt-out; older providers retain their existing absent-flag behavior.
+		add(
+			"extraSpend",
+			provider === PROVIDER_NAMES.DEVIN
+				? account.autoPauseOnOverageEnabled === false
+				: !account.autoPauseOnOverageEnabled,
+			"warning",
+		);
 	}
 	if (provider === PROVIDER_NAMES.CODEX) {
 		add("autoApplyExpiry", account.autoApplyResetCreditsEnabled === true);

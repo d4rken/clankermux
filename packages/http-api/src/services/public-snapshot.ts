@@ -745,6 +745,8 @@ function combineOverload(
  */
 export function resolveCredentialState(
 	row: {
+		provider?: string | null;
+		has_api_key?: 0 | 1;
 		access_token: string | null;
 		refresh_token: string | null;
 		expires_at: number | null;
@@ -766,6 +768,17 @@ export function resolveCredentialState(
 	// access token's own expiry says nothing once nothing can renew it.
 	if (row.paused === 1 && row.pause_reason === PAUSE_REASON_NEEDS_REAUTH) {
 		return { state: "invalid", expiresAtMs };
+	}
+
+	// Devin stores the CLI session credential only in api_key. Its
+	// expiry may be unknown for opaque tokens; absence of a deadline is not an
+	// expired credential. Read only a presence flag, never the secret itself.
+	if (row.provider === "devin") {
+		if (row.has_api_key !== 1) return { state: "missing", expiresAtMs: null };
+		return {
+			state: expiresAtMs !== null && expiresAtMs <= now ? "expired" : "valid",
+			expiresAtMs,
+		};
 	}
 
 	if (!accessToken && !refreshToken) {
@@ -803,6 +816,7 @@ interface PublicAccountRow {
 	session_start: number | null;
 	access_token: string | null;
 	refresh_token: string | null;
+	has_api_key: 0 | 1;
 	expires_at: number | null;
 	rate_limited_until: number | null;
 	rate_limited_reason: string | null;
@@ -857,6 +871,7 @@ export function createPublicSnapshotReader(
 					session_start,
 					access_token,
 					refresh_token,
+					CASE WHEN NULLIF(TRIM(api_key), '') IS NOT NULL THEN 1 ELSE 0 END as has_api_key,
 					expires_at,
 					rate_limited_until,
 					rate_limited_reason,

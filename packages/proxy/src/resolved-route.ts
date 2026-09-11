@@ -29,6 +29,10 @@ export interface AuthorizedTarget extends ResolvedRoutingTarget {
 	readonly provider: string;
 	readonly scope: string;
 }
+export interface CanonicalRoutingTarget {
+	readonly upstreamModel: string;
+	readonly scope: string;
+}
 export interface BuildRouteInput {
 	accounts: readonly Account[];
 	rules: readonly RoutingRule[];
@@ -36,6 +40,8 @@ export interface BuildRouteInput {
 	apiKeyId: string | null;
 	pin: RoutingPin | null;
 	permissions: ReadonlyMap<string, ModelPermissionSet>;
+	/** Native account metadata resolves provider aliases before this route is frozen. */
+	canonicalTargets?: ReadonlyMap<string, CanonicalRoutingTarget>;
 	suppressedPairs?: ReadonlySet<string>;
 	forcedAccountId?: string | null;
 	headerAccountId?: string | null;
@@ -146,13 +152,19 @@ export function buildResolvedRoute(input: BuildRouteInput): ResolvedRoute {
 		)
 			continue;
 		// Keepalive replays an already resolved model; auto-refresh uses provider defaults.
-		const resolved =
+		let resolved =
 			input.maintenance?.purpose === "keepalive"
 				? {
 						upstreamModel: input.requestedModel,
 						targetSource: "requested" as const,
 					}
 				: resolveRoutingTarget(winning, account.provider, input.requestedModel);
+		if (account.provider === "devin" && resolved.upstreamModel === "swe-2") {
+			const canonical = input.canonicalTargets?.get(account.id);
+			if (!canonical || canonical.scope !== modelPermissionScope(account))
+				continue;
+			resolved = { ...resolved, upstreamModel: canonical.upstreamModel };
+		}
 		if (
 			!input.maintenance &&
 			!isModelPermitted(

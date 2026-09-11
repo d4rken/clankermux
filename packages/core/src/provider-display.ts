@@ -17,6 +17,7 @@ const PROVIDER_DISPLAY_NAMES: Record<string, string> = {
 	"claude-console-api": "Claude API",
 	"anthropic-compatible": "Anthropic-Compatible",
 	codex: "OpenAI",
+	devin: "Devin",
 	"openai-compatible": "OpenAI-Compatible",
 	zai: "z.ai",
 	minimax: "MiniMax",

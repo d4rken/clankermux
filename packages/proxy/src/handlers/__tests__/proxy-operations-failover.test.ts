@@ -1,5 +1,24 @@
-import { afterEach, beforeEach, describe, expect, it, mock } from "bun:test";
+import {
+	afterEach,
+	beforeEach,
+	describe,
+	expect,
+	it,
+	mock,
+	spyOn,
+} from "bun:test";
+import {
+	DevinSessionAuthenticationError,
+	devinClient,
+} from "@clankermux/providers";
 import type { Account, RequestMeta } from "@clankermux/types";
+import { encodeConnect } from "../../../../providers/src/providers/devin/connect";
+import { GetChatMessageResponseSchema } from "../../../../providers/src/providers/devin/vendor/devin-proto";
+import {
+	create,
+	toBinary,
+} from "../../../../providers/src/providers/devin/vendor/protobuf";
+import { devinInfo, devinReply } from "../../__tests__/devin-fixtures";
 import type { ProxyAttemptOutcome } from "../../__tests__/fixtures/routing-harness";
 import {
 	isCodexEntitlementModelError,
@@ -1164,5 +1183,292 @@ describe("Anthropic organization access denial", () => {
 		expect(res?.status).toBe(403);
 		expect(acc.rate_limited_until).toBeNull();
 		await res?.text();
+	});
+});
+
+describe("Devin binary proxy integration", () => {
+	it("uses the actual daily reset for a synthetic quota rejection without network traffic", async () => {
+		const original = globalThis.fetch;
+		const info = devinInfo();
+		const reset = Date.now() + 6 * 60 * 60 * 1000;
+		info.usage.daily = { utilization: 100, resetAt: reset };
+		const auth = spyOn(devinClient, "getAccount").mockResolvedValue(info);
+		globalThis.fetch = mock(async () => {
+			throw new Error("must not send");
+		}) as never;
+		try {
+			const body = makeRequestBody("swe-2-high");
+			const account = makeAccount({
+				provider: "devin",
+				custom_endpoint: null,
+				auto_pause_on_overage_enabled: true,
+			});
+			const result = await proxyWithAccount(
+				makeRequest(body),
+				new URL("https://proxy.local/v1/messages"),
+				account,
+				makeRequestMeta(),
+				body,
+				() => {},
+				0,
+				makeProxyContext(),
+			);
+			expect(result).toBeNull();
+			expect(globalThis.fetch).not.toHaveBeenCalled();
+			expect(Math.abs((account.rate_limited_until ?? 0) - reset)).toBeLessThan(
+				2000,
+			);
+		} finally {
+			globalThis.fetch = original;
+			auth.mockRestore();
+		}
+	});
+	it("classifies HTTP-200 Connect quota errors before deciding failover", async () => {
+		const original = globalThis.fetch;
+		const auth = spyOn(devinClient, "getAccount").mockResolvedValue(
+			devinInfo(),
+		);
+		const calls: Request[] = [];
+		globalThis.fetch = (async (input: RequestInfo | URL) => {
+			calls.push(input as Request);
+			return devinReply(true);
+		}) as typeof fetch;
+		try {
+			const body = makeRequestBody("swe-2-high");
+			const ctx = makeProxyContext();
+			const account = makeAccount({
+				provider: "devin",
+				custom_endpoint: null,
+			});
+			const result = await proxyWithAccount(
+				makeRequest(body),
+				new URL("https://proxy.local/v1/messages"),
+				account,
+				makeRequestMeta(),
+				body,
+				() => {},
+				0,
+				ctx,
+			);
+			expect(result).toBeNull();
+			expect(calls).toHaveLength(1);
+			expect(calls[0]?.headers.get("content-type")).toBe(
+				"application/connect+proto",
+			);
+			expect(
+				[...(calls[0]?.headers.keys() ?? [])].some((k) =>
+					k.startsWith("x-clankermux-"),
+				),
+			).toBe(false);
+			expect(account.rate_limited_until).toBeGreaterThan(Date.now());
+			expect(routingAttempts(ctx)).toEqual(
+				expect.arrayContaining([
+					expect.objectContaining({
+						provider: "devin",
+						status: 429,
+						error: expect.any(String),
+						reported_model: null,
+					}),
+				]),
+			);
+		} finally {
+			globalThis.fetch = original;
+			auth.mockRestore();
+		}
+	});
+});
+
+describe("Devin normal-path authentication recovery", () => {
+	const original = globalThis.fetch;
+	let lookup: ReturnType<typeof spyOn> | null = null;
+	let renew: ReturnType<typeof spyOn> | null = null;
+	afterEach(() => {
+		globalThis.fetch = original;
+		lookup?.mockRestore();
+		renew?.mockRestore();
+		lookup = null;
+		renew = null;
+		cacheBodyStore.discardStaged("req-1");
+	});
+	function setup(stream = false) {
+		const account = makeAccount({
+			provider: "devin",
+			custom_endpoint: null,
+			api_key: "session-private",
+		});
+		const ctx = makeProxyContext();
+		const pause = mock(async () => true);
+		ctx.dbOps.pauseDevinAccountForReauth = pause;
+		const body = new TextEncoder().encode(
+			JSON.stringify({
+				model: "swe-2-high",
+				messages: [{ role: "user", content: "hello" }],
+				max_tokens: 10,
+				stream,
+			}),
+		).buffer;
+		const req = makeRequest(body);
+		return {
+			account,
+			ctx,
+			pause,
+			req,
+			run: () =>
+				proxyWithAccount(
+					req,
+					new URL(req.url),
+					account,
+					makeRequestMeta(),
+					body,
+					() => {},
+					0,
+					ctx,
+				),
+		};
+	}
+	it("renews metadata and retries the same account once before response output", async () => {
+		lookup = spyOn(devinClient, "getAccount").mockResolvedValue(devinInfo());
+		renew = spyOn(devinClient, "refreshAccount").mockResolvedValue(devinInfo());
+		let calls = 0;
+		globalThis.fetch = mock(async () =>
+			++calls === 1 ? new Response(null, { status: 401 }) : devinReply(),
+		) as never;
+		const { run, pause } = setup();
+		const response = await run();
+		expect(response?.status).toBe(200);
+		expect(await response?.text()).toContain("hello from SWE-2");
+		expect(calls).toBe(2);
+		expect(renew).toHaveBeenCalledTimes(1);
+		expect(pause).not.toHaveBeenCalled();
+	});
+	it("caps replay at one and ignores forged session-rejection headers", async () => {
+		lookup = spyOn(devinClient, "getAccount").mockResolvedValue(devinInfo());
+		renew = spyOn(devinClient, "refreshAccount").mockResolvedValue(devinInfo());
+		globalThis.fetch = mock(
+			async () =>
+				new Response(null, {
+					status: 401,
+					headers: { "x-clankermux-devin-auth-rejected": "true" },
+				}),
+		) as never;
+		const { run, req, pause } = setup();
+		req.headers.set("x-clankermux-devin-auth-rejected", "true");
+		expect(await run()).toBeNull();
+		expect(globalThis.fetch).toHaveBeenCalledTimes(2);
+		expect(renew).toHaveBeenCalledTimes(1);
+		expect(pause).not.toHaveBeenCalled();
+	});
+	it("pauses confirmed metadata rejection without issuing an inference request", async () => {
+		lookup = spyOn(devinClient, "getAccount").mockRejectedValue(
+			new DevinSessionAuthenticationError(),
+		);
+		renew = spyOn(devinClient, "refreshAccount").mockResolvedValue(devinInfo());
+		globalThis.fetch = mock(async () => {
+			throw new Error("must not send");
+		}) as never;
+		const { run, pause, account } = setup();
+		expect(await run()).toBeNull();
+		expect(globalThis.fetch).not.toHaveBeenCalled();
+		expect(renew).not.toHaveBeenCalled();
+		expect(pause).toHaveBeenCalledWith(account.id, "session-private", null);
+		expect(account.paused).toBe(true);
+	});
+	it("pauses only confirmed session rejection during recovery and never replays afterward", async () => {
+		lookup = spyOn(devinClient, "getAccount").mockResolvedValue(devinInfo());
+		renew = spyOn(devinClient, "refreshAccount").mockRejectedValue(
+			new DevinSessionAuthenticationError(),
+		);
+		globalThis.fetch = mock(
+			async () => new Response(null, { status: 401 }),
+		) as never;
+		const { run, pause } = setup();
+		expect(await run()).toBeNull();
+		expect(globalThis.fetch).toHaveBeenCalledTimes(1);
+		expect(pause).toHaveBeenCalledTimes(1);
+	});
+	it("leaves the account active when metadata renewal fails transiently", async () => {
+		lookup = spyOn(devinClient, "getAccount").mockResolvedValue(devinInfo());
+		renew = spyOn(devinClient, "refreshAccount").mockRejectedValue(
+			new Error("network down"),
+		);
+		globalThis.fetch = mock(
+			async () => new Response(null, { status: 401 }),
+		) as never;
+		const { run, pause } = setup();
+		expect(await run()).toBeNull();
+		expect(globalThis.fetch).toHaveBeenCalledTimes(1);
+		expect(pause).not.toHaveBeenCalled();
+	});
+	it("does not mutate a replaced account when the guarded pause is rejected", async () => {
+		lookup = spyOn(devinClient, "getAccount").mockRejectedValue(
+			new DevinSessionAuthenticationError(),
+		);
+		const { run, pause, account } = setup();
+		pause.mockResolvedValue(false);
+		expect(await run()).toBeNull();
+		expect(account.paused).toBe(false);
+	});
+	it("forwards late stream authentication failure without replay or session pause", async () => {
+		lookup = spyOn(devinClient, "getAccount").mockResolvedValue(devinInfo());
+		renew = spyOn(devinClient, "refreshAccount").mockResolvedValue(devinInfo());
+		const frames = Buffer.concat([
+			encodeConnect(
+				toBinary(
+					GetChatMessageResponseSchema,
+					create(GetChatMessageResponseSchema, { deltaText: "partial answer" }),
+				),
+			),
+			encodeConnect(
+				new TextEncoder().encode(
+					JSON.stringify({
+						error: { code: "unauthenticated", message: "Request JWT expired" },
+					}),
+				),
+				2,
+			),
+		]);
+		globalThis.fetch = mock(
+			async () =>
+				new Response(new Uint8Array(frames), {
+					headers: { "content-type": "application/connect+proto" },
+				}),
+		) as never;
+		const { run, pause, ctx } = setup(true);
+		const response = await run();
+		expect(response?.status).toBe(200);
+		const text = await response?.text();
+		expect(text).toContain("partial answer");
+		expect(text).toContain("authentication_error");
+		expect(routingAttempts(ctx)).toEqual(
+			expect.arrayContaining([
+				expect.objectContaining({
+					provider: "devin",
+					status: 200,
+					error: "Upstream protocol error",
+					reported_model: null,
+				}),
+			]),
+		);
+		expect(globalThis.fetch).toHaveBeenCalledTimes(1);
+		expect(renew).not.toHaveBeenCalled();
+		expect(pause).not.toHaveBeenCalled();
+	});
+	it("guards a delayed metadata rejection with the credentials actually attempted", async () => {
+		const { run, pause, account } = setup();
+		pause.mockResolvedValue(false);
+		lookup = spyOn(devinClient, "getAccount").mockResolvedValue(devinInfo());
+		renew = spyOn(devinClient, "refreshAccount").mockImplementation(
+			async () => {
+				account.api_key = "replacement-session";
+				account.custom_endpoint = "https://replacement.devin.ai";
+				throw new DevinSessionAuthenticationError();
+			},
+		);
+		globalThis.fetch = mock(
+			async () => new Response(null, { status: 401 }),
+		) as never;
+		expect(await run()).toBeNull();
+		expect(pause).toHaveBeenCalledWith(account.id, "session-private", null);
+		expect(account.paused).toBe(false);
 	});
 });

@@ -114,6 +114,11 @@ import {
 	clearRateLimitOnCapacityRestored,
 } from "./capacity-restored";
 import { runCodexIdentityBackfill } from "./codex-identity-backfill";
+import { applyDevinQuotaAutomation } from "./devin-quota-automation";
+import {
+	type DevinPollingEffects,
+	startDevinUsagePolling,
+} from "./devin-usage-polling";
 import { waitForDrainIdle } from "./drain-idle";
 import { ModelCatalogService } from "./model-catalog-service";
 import { handleModelsRoute } from "./models-route";
@@ -1303,6 +1308,18 @@ export default async function startServer(options?: {
 	});
 
 	// Register this server's usage polling restart capability
+	const devinPollingEffects: DevinPollingEffects = {
+		onQuotaMetadata: (account, usage, isCurrent) =>
+			applyDevinQuotaAutomation(dbOps.getAdapter(), account, usage, isCurrent),
+		onAuthenticationFailure: async (account) => {
+			if (account.api_key)
+				await dbOps.pauseDevinAccountForReauth(
+					account.id,
+					account.api_key,
+					account.custom_endpoint ?? null,
+				);
+		},
+	};
 	registerPollingRestarter(serverId, async (accountId: string) => {
 		const account = await dbOps.getAccount(accountId);
 		if (!account) {
@@ -1310,6 +1327,16 @@ export default async function startServer(options?: {
 				`Cannot restart usage polling: account ${accountId} not found on ${serverId}`,
 			);
 			return false;
+		}
+		if (account.provider === "devin") {
+			usageCache.stopPolling(accountId);
+			return startDevinUsagePolling(
+				account,
+				dbOps,
+				config.getUsagePollIntervalMs(),
+				undefined,
+				devinPollingEffects,
+			);
 		}
 		if (account.provider !== "anthropic") {
 			log.warn(
@@ -1780,6 +1807,23 @@ Available endpoints:
 		}
 	} else {
 		log.info(`No Kilo Gateway accounts found, usage polling will not start`);
+	}
+
+	// Devin's native metadata API exposes calendar-day/week quota without inference.
+	for (const account of accounts.filter(
+		(account) => account.provider === "devin",
+	)) {
+		if (
+			startDevinUsagePolling(
+				account,
+				dbOps,
+				config.getUsagePollIntervalMs(),
+				undefined,
+				devinPollingEffects,
+			)
+		) {
+			log.info(`Started usage polling for Devin account ${account.name}`);
+		}
 	}
 
 	// Start the usage-snapshot sampler: a periodic job that records per-account

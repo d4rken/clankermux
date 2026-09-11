@@ -7,6 +7,16 @@ import {
 } from "@clankermux/database";
 import type { Account } from "@clankermux/types";
 import {
+	ClientModelConfigSchema,
+	GetCliModelConfigsResponseSchema,
+	GetUserJwtResponseSchema,
+	GetUserStatusResponseSchema,
+} from "../../../providers/src/providers/devin/vendor/devin-proto";
+import {
+	create,
+	toBinary,
+} from "../../../providers/src/providers/devin/vendor/protobuf";
+import {
 	AccountModelPermissionService,
 	modelPermissionScope,
 } from "../account-model-permissions";
@@ -292,4 +302,55 @@ describe("account model discovery", () => {
 		await pending;
 		expect((await repo.getPermissions(a.id))?.last_error).toBeNull();
 	});
+});
+
+it("discovers only enabled concrete Devin models from native account metadata", async () => {
+	const a = account("devin", { provider: "devin", custom_endpoint: null });
+	const paths: string[] = [];
+	const { service } = setup([a], async (input) => {
+		const path = new URL(String(input)).pathname;
+		paths.push(path);
+		if (path.endsWith("GetUserJwt"))
+			return new Response(
+				new Uint8Array(
+					toBinary(
+						GetUserJwtResponseSchema,
+						create(GetUserJwtResponseSchema, { userJwt: "jwt" }),
+					),
+				),
+			);
+		if (path.endsWith("GetCliModelConfigs"))
+			return new Response(
+				new Uint8Array(
+					toBinary(
+						GetCliModelConfigsResponseSchema,
+						create(GetCliModelConfigsResponseSchema, {
+							clientModelConfigs: [
+								create(ClientModelConfigSchema, {
+									modelUid: "swe-2-high",
+									label: "SWE-2 High",
+								}),
+								create(ClientModelConfigSchema, {
+									modelUid: "swe-2-max",
+									disabled: true,
+								}),
+								create(ClientModelConfigSchema, { modelUid: "adaptive" }),
+							],
+						}),
+					),
+				),
+			);
+		return new Response(
+			new Uint8Array(
+				toBinary(
+					GetUserStatusResponseSchema,
+					create(GetUserStatusResponseSchema),
+				),
+			),
+		);
+	});
+	await service.refresh(a);
+	expect((await service.permissions(a)).discovered_ids).toEqual(["swe-2-high"]);
+	expect(paths).toHaveLength(3);
+	expect(paths.some((p) => p.endsWith("/models"))).toBe(false);
 });

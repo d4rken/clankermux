@@ -1,5 +1,6 @@
 import { describe, expect, it } from "bun:test";
 import type { Account, RequestMeta, RoutingRule } from "@clankermux/types";
+import { modelPermissionScope } from "../account-model-permissions";
 import {
 	buildResolvedRoute,
 	enforceOutgoingModel,
@@ -114,4 +115,101 @@ describe("resolved route authority", () => {
 				),
 			).rejects.toThrow();
 	});
+});
+
+it("freezes a Devin alias to its permitted concrete account model and suppresses that pair", () => {
+	const devin = account("d", "devin");
+	const permissions = new Map([
+		["d", { ...known, discovered_ids: ["swe-2-high"] }],
+	]);
+	const canonicalTargets = new Map([
+		["d", { upstreamModel: "swe-2-high", scope: modelPermissionScope(devin) }],
+	]);
+	const input = {
+		accounts: [devin],
+		rules: [],
+		requestedModel: "claude-sonnet-4-5",
+		apiKeyId: null,
+		pin: null,
+		permissions,
+		canonicalTargets,
+	};
+	const route = buildResolvedRoute(input);
+	expect(route.target(devin)?.upstreamModel).toBe("swe-2-high");
+	canonicalTargets.set("d", {
+		upstreamModel: "swe-2-max",
+		scope: modelPermissionScope(devin),
+	});
+	expect(route.target(devin)?.upstreamModel).toBe("swe-2-high");
+	expect(() => buildResolvedRoute(input)).toThrow();
+	expect(() =>
+		buildResolvedRoute({ ...input, canonicalTargets: new Map() }),
+	).toThrow();
+	expect(() =>
+		buildResolvedRoute({
+			...input,
+			canonicalTargets: new Map([
+				[
+					"d",
+					{ upstreamModel: "swe-2-high", scope: modelPermissionScope(devin) },
+				],
+			]),
+			suppressedPairs: new Set([JSON.stringify(["d", "swe-2-high"])]),
+		}),
+	).toThrow();
+	expect(() =>
+		buildResolvedRoute({
+			...input,
+			canonicalTargets: new Map([
+				[
+					"d",
+					{ upstreamModel: "swe-2-high", scope: modelPermissionScope(devin) },
+				],
+			]),
+			permissions: new Map([["d", { ...known, discovered_ids: ["swe-2"] }]]),
+		}),
+	).toThrow();
+});
+it("does not change a concrete Devin target using an alias resolution", () => {
+	const devin = account("d", "devin");
+	const route = buildResolvedRoute({
+		accounts: [devin],
+		rules: [],
+		requestedModel: "swe-1.6",
+		apiKeyId: null,
+		pin: null,
+		permissions: new Map([["d", { ...known, discovered_ids: ["swe-1.6"] }]]),
+		canonicalTargets: new Map([
+			[
+				"d",
+				{ upstreamModel: "swe-2-high", scope: modelPermissionScope(devin) },
+			],
+		]),
+	});
+	expect(route.target(devin)?.upstreamModel).toBe("swe-1.6");
+});
+
+it("discards a Devin canonical target when credentials changed during metadata resolution", () => {
+	const devin = { ...account("d", "devin"), api_key: "new-session" };
+	expect(() =>
+		buildResolvedRoute({
+			accounts: [devin],
+			rules: [],
+			requestedModel: "swe-2",
+			apiKeyId: null,
+			pin: null,
+			permissions: new Map([
+				["d", { ...known, discovered_ids: ["swe-2-high"] }],
+			]),
+			canonicalTargets: new Map([
+				[
+					"d",
+					{
+						upstreamModel: "swe-2-high",
+						scope: modelPermissionScope({ ...devin, api_key: "old-session" }),
+					},
+				],
+			]),
+		}),
+	).toThrow();
 });

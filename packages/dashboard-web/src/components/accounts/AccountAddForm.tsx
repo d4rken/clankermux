@@ -13,6 +13,7 @@ import {
 	SelectValue,
 } from "../ui/select";
 import { AuthorizationHandoff } from "./AuthorizationHandoff";
+import { DevinAccountFields } from "./DevinAccountFields";
 
 interface AccountAddFormProps {
 	onAddAccount: (params: {
@@ -70,6 +71,11 @@ interface AccountAddFormProps {
 		apiKey: string;
 		priority: number;
 	}) => Promise<void>;
+	onAddDevinAccount?: (params: {
+		name: string;
+		apiKey: string;
+		priority: number;
+	}) => Promise<void>;
 	onAddOpenRouterAccount: (params: {
 		name: string;
 		apiKey: string;
@@ -100,6 +106,7 @@ export function AccountAddForm({
 	onAddAlibabaCodingPlanAccount,
 	onAddKiloAccount,
 	onAddOpenRouterAccount,
+	onAddDevinAccount,
 	onAddOllamaAccount,
 	onAddOllamaCloudAccount,
 	onCancel,
@@ -132,7 +139,8 @@ export function AccountAddForm({
 			| "codex"
 			| "qwen"
 			| "ollama"
-			| "ollama-cloud",
+			| "ollama-cloud"
+			| "devin",
 		priority: 0,
 		apiKey: "",
 		customEndpoint: "",
@@ -407,6 +415,24 @@ export function AccountAddForm({
 			}),
 		};
 
+		if (newAccount.mode === "devin") {
+			if (!newAccount.apiKey.trim()) {
+				onError(
+					"Devin session token is required; sign in with Devin or import one",
+				);
+				return;
+			}
+			const params = {
+				name: newAccount.name,
+				apiKey: newAccount.apiKey.trim(),
+				priority: newAccount.priority,
+			};
+			if (onAddDevinAccount) await onAddDevinAccount(params);
+			else await api.addDevinAccount(params);
+			setNewAccount((prev) => ({ ...prev, apiKey: "" }));
+			onSuccess();
+			return;
+		}
 		if (newAccount.mode === "zai") {
 			if (!newAccount.apiKey) {
 				onError("API key is required for z.ai accounts");
@@ -775,7 +801,8 @@ export function AccountAddForm({
 									| "codex"
 									| "qwen"
 									| "ollama"
-									| "ollama-cloud",
+									| "ollama-cloud"
+									| "devin",
 							) => updateAccountSource({ mode: value })}
 						>
 							<SelectTrigger id="mode">
@@ -787,6 +814,9 @@ export function AccountAddForm({
 								</SelectItem>
 								<SelectItem value="console">Claude API</SelectItem>
 								<SelectItem value="codex">Codex (OpenAI OAuth)</SelectItem>
+								<SelectItem value="devin">
+									Devin (SWE-2 subscription)
+								</SelectItem>
 								<SelectItem value="qwen">
 									Qwen (Alibaba Cloud OAuth) — Experimental
 								</SelectItem>
@@ -825,6 +855,18 @@ export function AccountAddForm({
 							This integration has not been validated by us with a live account.
 							Authentication, usage tracking, and recovery may have issues.
 						</Alert>
+					)}
+					{newAccount.mode === "devin" && (
+						<DevinAccountFields
+							name={newAccount.name}
+							priority={newAccount.priority}
+							token={newAccount.apiKey}
+							onTokenChange={(value) => {
+								updateAccountSource({ apiKey: value });
+							}}
+							onSuccess={onSuccess}
+							onError={onError}
+						/>
 					)}
 					{newAccount.mode === "codex" && (
 						<div className="space-y-row">

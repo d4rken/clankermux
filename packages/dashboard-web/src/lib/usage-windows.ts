@@ -125,6 +125,28 @@ export function classifyUsageCard(
 	// persisted snapshot still knows the last-sampled state.
 	if (!usageData && staleUsage) return { kind: "stale", staleUsage };
 
+	if (
+		provider === "devin" &&
+		usageData &&
+		"kind" in usageData &&
+		usageData.kind === "devin"
+	) {
+		const usages: UsageDisplay[] = [];
+		for (const key of ["daily", "weekly"] as const) {
+			const quota = usageData[key];
+			if (quota)
+				usages.push({
+					utilization: quota.utilization,
+					window: key,
+					label: key === "daily" ? "Daily" : "Weekly",
+					resetTime:
+						quota.resetAt === null
+							? null
+							: new Date(quota.resetAt).toISOString(),
+				});
+		}
+		return { kind: "windows", usages };
+	}
 	// Kilo Gateway: a credit balance in USD instead of a utilization window.
 	if (providerShowsCreditsBalance(provider) && usageData) {
 		const kiloData = usageData as {

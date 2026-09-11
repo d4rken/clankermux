@@ -1179,6 +1179,7 @@ async function forwardToClientInner(
 					streamProbeToken &&
 					success &&
 					rateLimitSniffer.firedReason == null &&
+					usageState?.sseErrorType == null &&
 					usageState?.sawMessageStart === true
 				) {
 					settleStreamProbe("recovered", "message_start");
@@ -1225,6 +1226,7 @@ async function forwardToClientInner(
 				const cleanEof =
 					success &&
 					rateLimitSniffer?.firedReason == null &&
+					usageState?.sseErrorType == null &&
 					nativeEndReason !== NATIVE_RESPONSES_STREAM_FAILED;
 				settleStreamProbe(
 					cleanEof ? "recovered" : "abandoned",
@@ -1239,6 +1241,7 @@ async function forwardToClientInner(
 						mustSeeMessageStart && !usageState.sawMessageStart;
 					const endReason =
 						rateLimitSniffer.firedReason ??
+						usageState.sseErrorType ??
 						(truncatedBeforeStart
 							? STREAM_TRUNCATED_MID_CONTENT
 							: nativeEndReason);
@@ -1256,6 +1259,7 @@ async function forwardToClientInner(
 					ctx.requestRecorder.finishTransport(
 						requestId,
 						rateLimitSniffer.firedReason ||
+							usageState.sseErrorType ||
 							truncatedBeforeStart ||
 							nativeEndReason
 							? "error"
@@ -1269,6 +1273,7 @@ async function forwardToClientInner(
 						// load-bearing, not cosmetic. `truncatedBeforeStart` is the one
 						// that cannot fire natively.
 						rateLimitSniffer.firedReason ??
+							usageState.sseErrorType ??
 							(truncatedBeforeStart
 								? STREAM_TRUNCATED_MID_CONTENT
 								: (nativeEndReason ?? undefined)),
@@ -1361,6 +1366,7 @@ async function forwardToClientInner(
 				const terminalSeen =
 					usageState?.sawMessageStop === true &&
 					usageState.providerReportedOutput === true &&
+					usageState.sseErrorType == null &&
 					rateLimitSniffer.firedReason == null;
 				const completedBeforeCut =
 					terminalSeen &&
@@ -1382,6 +1388,7 @@ async function forwardToClientInner(
 							: outcome === "timeout"
 								? "stream_timeout"
 								: (rateLimitSniffer.firedReason ??
+									usageState.sseErrorType ??
 									(mustSeeResponsesTerminal
 										? classifyNativeResponsesEnd(usageState)
 										: null) ??
@@ -1403,6 +1410,7 @@ async function forwardToClientInner(
 					ctx.requestRecorder.finishTransport(
 						requestId,
 						completedBeforeCut ? "success" : outcome,
+						usageState.sseErrorType ?? undefined,
 					);
 					trackFinalize(
 						usageState,

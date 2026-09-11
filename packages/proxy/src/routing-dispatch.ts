@@ -61,6 +61,10 @@ export async function sendAuthorizedRequest(
 	ctx: ProxyContext,
 	signal?: AbortSignal,
 	audit?: RoutingAttemptAudit,
+	devinProvenance: DevinRequestProvenance | null = getDevinRequestProvenance(
+		request,
+	),
+	prepareResponse?: (response: Response) => Promise<Response>,
 ): Promise<Response> {
 	const target = getAttemptTarget(meta, account);
 	const route = getResolvedRoute(meta);
@@ -108,14 +112,62 @@ export async function sendAuthorizedRequest(
 		const synthetic =
 			new URL(request.url).origin === "https://clankermux.local" &&
 			request.headers.get("x-clankermux-synthetic-response") === "true";
+		if (account.provider === "devin") {
+			const credentialSha256 = createHash("sha256")
+				.update(
+					JSON.stringify([
+						account.api_key ?? null,
+						account.custom_endpoint ?? null,
+					]),
+				)
+				.digest("hex");
+			if (
+				!devinProvenance ||
+				devinProvenance.accountId !== account.id ||
+				devinProvenance.credentialSha256 !== credentialSha256 ||
+				devinProvenance.url !== request.url ||
+				devinProvenance.method !== request.method ||
+				devinProvenance.bodySha256 !==
+					createHash("sha256")
+						.update(new Uint8Array(await request.clone().arrayBuffer()))
+						.digest("hex")
+			)
+				throw new RoutingPolicyError("Cannot verify Devin request provenance");
+			if (devinProvenance.kind === "inference") {
+				if (
+					synthetic ||
+					request.headers.get("content-type") !== "application/connect+proto" ||
+					devinProvenance.model !== target.upstreamModel
+				)
+					throw new RoutingPolicyError(
+						"Devin transformation changed the authorized model or transport",
+					);
+			} else if (
+				!synthetic ||
+				String(devinProvenance.status) !==
+					request.headers.get("x-clankermux-synthetic-status") ||
+				(devinProvenance.status < 400 &&
+					!(
+						meta.path === "/v1/messages/count_tokens" &&
+						request.url === localTokenCountUrl("devin")
+					))
+			) {
+				throw new RoutingPolicyError("Unexpected Devin local response");
+			}
+		}
 		if (synthetic) {
 			if (
-				meta.path !== "/v1/messages/count_tokens" ||
-				!supportsLocalTokenCounting(
-					account.provider,
-					account.custom_endpoint,
-				) ||
-				request.url !== localTokenCountUrl(account.provider)
+				!(
+					account.provider === "devin" &&
+					devinProvenance?.kind === "synthetic" &&
+					devinProvenance.status >= 400
+				) &&
+				(meta.path !== "/v1/messages/count_tokens" ||
+					!supportsLocalTokenCounting(
+						account.provider,
+						account.custom_endpoint,
+					) ||
+					request.url !== localTokenCountUrl(account.provider))
 			)
 				throw new RoutingPolicyError("Unexpected local inference response");
 			attempt.kind =
@@ -123,10 +175,10 @@ export async function sendAuthorizedRequest(
 					? "local_success"
 					: "local_reject";
 		} else {
-			attempt.outgoing_model = await enforceOutgoingModel(
-				request,
-				target.upstreamModel,
-			);
+			attempt.outgoing_model =
+				account.provider === "devin" && devinProvenance?.kind === "inference"
+					? devinProvenance.model
+					: await enforceOutgoingModel(request, target.upstreamModel);
 			attempt.kind = "upstream_send";
 		}
 		await ctx.dbOps.routing.recordAttempt(attempt);
@@ -140,6 +192,7 @@ export async function sendAuthorizedRequest(
 			undefined,
 			signal,
 		);
+		if (prepareResponse) response = await prepareResponse(response);
 	} catch (error) {
 		attempt.finished_at = Date.now();
 		attempt.status = error instanceof RoutingPolicyError ? 403 : 502;
@@ -173,7 +226,9 @@ export async function sendAuthorizedRequest(
 			response.status,
 			response.ok
 				? null
-				: `Local token count rejected (HTTP ${response.status})`,
+				: meta.path === "/v1/messages/count_tokens"
+					? `Local token count rejected (HTTP ${response.status})`
+					: `Local provider response rejected (HTTP ${response.status})`,
 			null,
 		);
 		return response;
@@ -204,8 +259,19 @@ export async function sendAuthorizedRequest(
 						: response.ok
 							? null
 							: `Upstream HTTP ${response.status}`),
-				attempt.kind === "upstream_send" ? reportedModel : null,
+				attempt.kind === "upstream_send"
+					? account.provider === "devin"
+						? getDevinReportedModel(response)
+						: reportedModel
+					: null,
 			);
 		},
 	);
 }
+
+import { createHash } from "node:crypto";
+import {
+	type DevinRequestProvenance,
+	getDevinReportedModel,
+	getDevinRequestProvenance,
+} from "@clankermux/providers";

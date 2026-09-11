@@ -101,13 +101,24 @@ describe("modern Responses tools", () => {
 				],
 				stop_reason: "tool_use",
 				stop_sequence: null,
-				usage: { input_tokens: 2, output_tokens: 3 },
+				usage: {
+					input_tokens: 2,
+					output_tokens: 3,
+					cache_read_input_tokens: 90,
+					cache_creation_input_tokens: 8,
+				},
 			},
 			"resp",
 			"alias",
 			ctx,
 		);
 		expect(result.model).toBe("deepseek/actual");
+		expect(result.usage).toEqual({
+			input_tokens: 100,
+			output_tokens: 3,
+			total_tokens: 103,
+			input_tokens_details: { cached_tokens: 90, cache_write_tokens: 8 },
+		});
 		expect(result.output[0]).toMatchObject({
 			type: "custom_tool_call",
 			namespace: "functions",
@@ -143,7 +154,15 @@ describe("modern Responses tools", () => {
 				delta: { type: "input_json_delta", partial_json: JSON.stringify(args) },
 			},
 			{ type: "content_block_stop", index: 0 },
-			{ type: "message_delta", usage: { output_tokens: 3 } },
+			{
+				type: "message_delta",
+				usage: {
+					input_tokens: 2,
+					output_tokens: 3,
+					cache_read_input_tokens: 90,
+					cache_creation_input_tokens: 8,
+				},
+			},
 			{ type: "message_stop" },
 		];
 		const upstream = new Response(
@@ -173,6 +192,12 @@ describe("modern Responses tools", () => {
 			});
 		const completed = out.find((x) => x.type === "response.completed");
 		expect(completed.response.model).toBe("deepseek/actual");
+		expect(completed.response.usage).toEqual({
+			input_tokens: 100,
+			output_tokens: 3,
+			total_tokens: 103,
+			input_tokens_details: { cached_tokens: 90, cache_write_tokens: 8 },
+		});
 		if (type === "custom") {
 			expect(
 				out.some((x) => x.type.startsWith("response.function_call_arguments")),

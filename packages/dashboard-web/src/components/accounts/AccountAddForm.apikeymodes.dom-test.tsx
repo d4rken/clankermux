@@ -1,6 +1,7 @@
-import { afterEach, describe, expect, it, mock } from "bun:test";
+import { afterEach, describe, expect, it, mock, spyOn } from "bun:test";
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
+import { api } from "../../api";
 import { AccountAddForm } from "./AccountAddForm";
 
 (
@@ -62,6 +63,7 @@ function renderForm(): Promise<void> {
 				onAddAlibabaCodingPlanAccount={record("alibaba-coding-plan")}
 				onAddKiloAccount={record("kilo")}
 				onAddOpenRouterAccount={record("openrouter")}
+				onAddDevinAccount={record("devin")}
 				onAddOllamaAccount={async () => {}}
 				onAddOllamaCloudAccount={async () => {}}
 				onCancel={() => {}}
@@ -210,4 +212,83 @@ describe("account add form: API key provider modes", () => {
 			"",
 		);
 	});
+});
+
+it("imports a Devin session token with SWE-2 defaults", async () => {
+	await renderForm();
+	await selectMode("Devin (SWE-2 subscription)");
+	await edit("name", "devin-free");
+	await edit("devin-token", "session-secret");
+	await act(async () => {
+		byText<HTMLButtonElement>("button", "Continue").click();
+	});
+	expect(saved.devin?.[0]).toMatchObject({
+		name: "devin-free",
+		apiKey: "session-secret",
+		priority: 0,
+	});
+	expect(errors).toEqual([]);
+});
+
+it("hands Devin login to the chosen browser and completes using the callback URL", async () => {
+	const start = spyOn(api, "startDevinLogin").mockResolvedValue({
+		sessionId: "login-1",
+		authUrl: "https://app.devin.ai/auth/cli/continue?state=test",
+		expiresAt: Date.now() + 60_000,
+	});
+	const complete = spyOn(api, "completeDevinLogin").mockResolvedValue({
+		message: "Added",
+		account: { id: "devin-1" },
+	} as never);
+	await renderForm();
+	await selectMode("Devin (SWE-2 subscription)");
+	await edit("name", "Free");
+	await act(async () =>
+		byText<HTMLButtonElement>("button", "Sign in with Devin").click(),
+	);
+	expect(start).toHaveBeenCalledWith({ name: "Free", priority: 0 });
+	expect(
+		document.querySelector<HTMLAnchorElement>(
+			'a[href^="https://app.devin.ai/"]',
+		)?.target,
+	).toBe("_blank");
+	const callback =
+		"http://127.0.0.1:59653/callback?state=test&code=private-code";
+	await edit("devin-callback", callback);
+	await act(async () =>
+		byText<HTMLButtonElement>("button", "Complete Devin sign-in").click(),
+	);
+	expect(complete).toHaveBeenCalledWith({ sessionId: "login-1", callback });
+	expect(document.querySelector("#devin-callback")).toBeNull();
+	expect(errors).toEqual([]);
+});
+
+it("shows Devin discovery with central routing guidance and clears it when the token changes", async () => {
+	spyOn(api, "discoverDevinModels").mockResolvedValue({
+		models: [
+			{
+				id: "swe-2-high",
+				name: "SWE-2 High",
+				disabled: false,
+				disabledReason: null,
+			},
+		],
+		usage: { planName: "Free", canUseCli: true },
+	});
+	await renderForm();
+	await selectMode("Devin (SWE-2 subscription)");
+	await edit("name", "Free");
+	await edit("devin-token", "first-token");
+	await act(async () =>
+		byText<HTMLButtonElement>("button", "Check access and models").click(),
+	);
+	expect(document.querySelector("#devin-model")).toBeNull();
+	expect(document.body.textContent).toContain("swe-2-high");
+	expect(document.body.textContent).toContain("Routing page");
+	await edit("devin-token", "second-token");
+	expect(document.body.textContent).not.toContain("swe-2-high");
+	expect(document.querySelector("#devin-model")).toBeNull();
+	await submit();
+	expect(saved.devin?.[0]?.apiKey).toBe("second-token");
+	expect(saved.devin?.[0]?.modelMappings).toBeUndefined();
 });

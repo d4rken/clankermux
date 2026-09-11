@@ -69,6 +69,8 @@ export function resolveRoutingTarget(
 	const family = getRoutingModelFamily(requestedModel)?.split(":")[1] as
 		| keyof typeof DEFAULT_CODEX_MODEL_BY_FAMILY
 		| undefined;
+	if (family && provider === "devin")
+		return { upstreamModel: "swe-2", targetSource: "provider_default" };
 	const defaults =
 		provider === "codex"
 			? DEFAULT_CODEX_MODEL_BY_FAMILY
