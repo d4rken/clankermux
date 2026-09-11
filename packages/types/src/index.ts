@@ -20,6 +20,7 @@ export * from "./pricing";
 export * from "./project-rules";
 export * from "./quota-drift";
 export * from "./request";
+export * from "./request-cost";
 export * from "./routing";
 export * from "./runway";
 export * from "./stats";

@@ -2159,11 +2159,11 @@ describe("RequestRecorder — usage_finalized_at", () => {
 		expect(h.dbOps.saveRequestCalls[0].usageFinalizedAt).toBeNull();
 	});
 
-	it("is null when the summary carried no model (nothing persistable arrived)", async () => {
+	it("is null when the summary carried no model or reported cost", async () => {
 		const h = makeHarness();
 		h.recorder.begin(makeMeta());
-		// toRequestUsage() drops a model-less summary WHOLE, so no token vector
-		// ever became known — a stamp here would claim usage the row lacks.
+		// This summary carries neither a model nor a reported charge, so it is
+		// dropped; no token vector became known and no stamp is justified.
 		h.recorder.attachUsageSummary(
 			"req-1",
 			makeSummary({
@@ -2281,5 +2281,38 @@ describe("RequestRecorder — refusal and fallback-credit marks", () => {
 		expect(event?.refusalCategory).toBe("cyber");
 		expect(event?.fallbackCreditClaimed).toBe(true);
 		expect(event?.fallbackFromModel).toBe("claude-fable-5-1");
+	});
+});
+
+describe("RequestRecorder — cost provenance", () => {
+	it("persists and emits a reported zero without a model or a token-observation timestamp", async () => {
+		const h = makeHarness();
+		h.recorder.begin(makeMeta());
+		h.recorder.attachUsageSummary(
+			"req-1",
+			makeSummary({
+				usage: {
+					costUsd: 0,
+					estimatedCostUsd: 0.02,
+					costSource: "reported",
+					costIsByok: false,
+				},
+			}),
+		);
+		h.recorder.finishTransport("req-1", "success");
+		await h.flush();
+		expect(h.dbOps.saveRequestCalls[0].usage).toMatchObject({
+			costUsd: 0,
+			estimatedCostUsd: 0.02,
+			costSource: "reported",
+			costIsByok: false,
+		});
+		expect(h.dbOps.saveRequestCalls[0].usageFinalizedAt).toBeNull();
+		expect(h.emitted.at(-1)).toMatchObject({
+			costUsd: 0,
+			estimatedCostUsd: 0.02,
+			costSource: "reported",
+			costIsByok: false,
+		});
 	});
 });

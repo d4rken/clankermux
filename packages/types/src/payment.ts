@@ -1,3 +1,5 @@
+import type { CostCoverage } from "./request-cost";
+
 /**
  * Types for the per-account payments ledger (`account_payments` table):
  * subscription renewals (auto-recorded from each account's renewal config or
@@ -77,6 +79,7 @@ export interface PaymentsSummaryPerAccount {
 	amortizedMonthlyUsd: number;
 	rangeLedgerUsd: number;
 	rangeTokenCostUsd: number;
+	rangeCostCoverage?: CostCoverage;
 }
 
 export interface PaymentsSummary {
@@ -88,6 +91,8 @@ export interface PaymentsSummary {
 		subscriptionUsd: number;
 		creditsUsd: number;
 		tokenCostUsd: number;
+		apiCostCoverage?: CostCoverage;
+		/** @deprecated Use ledgerUsd. Recorded payments only; never includes usage. */
 		totalUsd: number;
 	};
 	range: {
@@ -98,6 +103,8 @@ export interface PaymentsSummary {
 		subscriptionUsd: number;
 		creditsUsd: number;
 		tokenCostUsd: number;
+		apiCostCoverage?: CostCoverage;
+		/** @deprecated Use ledgerUsd. Recorded payments only; never includes usage. */
 		totalUsd: number;
 		amortizedUsd: number;
 		planValueUsd: number;

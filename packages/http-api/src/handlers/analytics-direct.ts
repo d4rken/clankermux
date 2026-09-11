@@ -20,6 +20,11 @@ import type {
 } from "../types";
 import { parseAnalyticsRequestFilters } from "./analytics-request-filters";
 import { allSections, parseSectionsParam } from "./analytics-sections";
+import {
+	type CostCoverageRow,
+	costCoverageSql,
+	toCostCoverage,
+} from "./cost-coverage";
 import { getRangeConfig } from "./range-config";
 
 const log = new Logger("AnalyticsHandler");
@@ -522,26 +527,28 @@ export function createAnalyticsHandler(context: APIContext) {
 			// made SQLite repeat the range scan 18 times (including four table
 			// lookups for attribution); one aggregate preserves empty/NULL semantics.
 			const consolidatedResult = await runPhase("totals", want("totals"), () =>
-				db.get<{
-					total_requests: number;
-					success_rate: number;
-					avg_response_time: number;
-					total_tokens: number;
-					total_cost_usd: number;
-					plan_cost_usd: number;
-					api_cost_usd: number;
-					cache_hit_rate: number;
-					avg_tokens_per_second: number;
-					active_accounts: number;
-					input_tokens: number;
-					cache_read_input_tokens: number;
-					cache_creation_input_tokens: number;
-					output_tokens: number;
-					attribution_measured: number;
-					attribution_none: number;
-					attribution_inherited: number;
-					attribution_ambiguous: number;
-				}>(
+				db.get<
+					CostCoverageRow & {
+						total_requests: number;
+						success_rate: number;
+						avg_response_time: number;
+						total_tokens: number;
+						total_cost_usd: number;
+						plan_cost_usd: number;
+						api_cost_usd: number;
+						cache_hit_rate: number;
+						avg_tokens_per_second: number;
+						active_accounts: number;
+						input_tokens: number;
+						cache_read_input_tokens: number;
+						cache_creation_input_tokens: number;
+						output_tokens: number;
+						attribution_measured: number;
+						attribution_none: number;
+						attribution_inherited: number;
+						attribution_ambiguous: number;
+					}
+				>(
 					`
 				WITH filtered_requests AS (
 					SELECT * FROM requests r
@@ -555,6 +562,7 @@ export function createAnalyticsHandler(context: APIContext) {
 					SUM(COALESCE(cost_usd, 0)) as total_cost_usd,
 					SUM(CASE WHEN billing_type = 'plan' THEN COALESCE(cost_usd, 0) ELSE 0 END) as plan_cost_usd,
 					SUM(CASE WHEN COALESCE(billing_type, 'api') != 'plan' THEN COALESCE(cost_usd, 0) ELSE 0 END) as api_cost_usd,
+					${costCoverageSql("COALESCE(billing_type, 'api') != 'plan'")},
 					SUM(COALESCE(cache_read_input_tokens, 0)) * 100.0 /
 						NULLIF(SUM(COALESCE(input_tokens, 0) + COALESCE(cache_read_input_tokens, 0) + COALESCE(cache_creation_input_tokens, 0)), 0) as cache_hit_rate,
 					AVG(CASE WHEN ${SPEED_IN_RANGE_SQL} THEN output_tokens_per_second END) as avg_tokens_per_second,
@@ -2063,6 +2071,7 @@ export function createAnalyticsHandler(context: APIContext) {
 						totalCostUsd: Number(consolidatedResult?.total_cost_usd) || 0,
 						planCostUsd: Number(consolidatedResult?.plan_cost_usd) || 0,
 						apiCostUsd: Number(consolidatedResult?.api_cost_usd) || 0,
+						apiCostCoverage: toCostCoverage(consolidatedResult),
 						cacheHitRate: Number(consolidatedResult?.cache_hit_rate) || 0,
 						avgTokensPerSecond:
 							consolidatedResult?.avg_tokens_per_second != null
