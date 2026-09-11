@@ -3,7 +3,11 @@
  * Instants are ISO strings; durations name their units. Display strings are bounded; IDs are not truncated.
  */
 import type { RequestResponse, StopsHistoryResponse } from "@clankermux/types";
-import { classifyStopCause, resolveCostSource } from "@clankermux/types";
+import {
+	classifyStopCause,
+	outcomeForCause,
+	resolveCostSource,
+} from "@clankermux/types";
 import type {
 	PublicAccountSnapshot,
 	PublicSnapshot,
@@ -542,13 +546,12 @@ export function toPublicStatusDto(
 	};
 }
 /**
- * Why a request was refused, as a CLOSED set.
+ * Stable published cause vocabulary shared by Stops and the event stream.
  *
- * Mirrors the internal `StopCause` value for value — it is already snake_case
- * and already carries `other`, so no renaming happens here. The mapper is still
- * explicit rather than a cast: a cause added to the proxy later must arrive on
- * this wire as `other`, which the firmware knows how to render, instead of as a
- * string its closed-set check would reject.
+ * This is a subset of the internal `StopCause` vocabulary. History-only causes
+ * do not extend this closed set. The explicit mapper sends unrecognized causes
+ * to `other`; Stops filters to blocked outcomes before mapping, while the event
+ * stream retains its legacy classification.
  */
 export type PublicStopCauseDto =
 	| "pool_quota_exhausted"
@@ -570,8 +573,9 @@ export type PublicStopCauseDto =
  * internal one, and a cause added to the proxy shipped onto an unauthenticated
  * wire the same commit it was invented — past closed-set readers that cannot be
  * redeployed on our schedule. Spelled out, adding a cause is a decision this
- * file records, and until it is made the new cause arrives as `other`, which
- * every consumer already renders.
+ * file records. Unknown values map to `other`; public Stops filters to explicit
+ * blocked causes before this mapping and reports unknown outcomes separately
+ * in unclassifiedRequests. The event stream retains this legacy vocabulary.
  */
 export function toPublicStopCause(cause: string): PublicStopCauseDto {
 	switch (cause) {
@@ -611,8 +615,10 @@ export interface PublicStopCauseRowDto {
 }
 
 /**
- * `GET /public/v1/stops` — how often the pool actually refused a request, and
- * why.
+ * `GET /public/v1/stops` — explicit proxy refusals and separate outcome counts.
+ * The causes array accounts only for blockedRequests. Unknown outcomes appear
+ * in unclassifiedRequests, not as blocked causes. Legacy retry audit rows are
+ * excluded from both the denominator and outcomes and counted separately.
  *
  * The history beside `/public/v1/workloads`: that one forecasts budget, this one is
  * what already happened. A panel showing plenty of runway while requests are
@@ -647,9 +653,16 @@ export interface PublicStopsDto {
 	windowStartsAt: string;
 	/** INSTANT it closes — the read's own clock, not the client's. */
 	windowEndsAt: string;
-	/** The denominator. A blocked count without it is not a rate. */
+	/** Recorded client requests in range, excluding verified legacy retry audit rows. */
 	totalRequests: number;
+	/** Explicit proxy refusals only; excludes failures and disconnects. */
 	blockedRequests: number;
+	failedRequests: number;
+	disconnectedRequests: number;
+	unclassifiedRequests: number;
+	/** Legacy per-attempt rows excluded from both totalRequests and outcomes. */
+	excludedAttemptAuditRows: number;
+	/** Blocked causes only. Unknown outcomes are stated in unclassifiedRequests. */
 	causes: PublicStopCauseRowDto[];
 	/**
 	 * How much redundancy the pool actually had, per request: how many accounts
@@ -681,12 +694,18 @@ export function toPublicStopsDto(
 		windowEndsAt: new Date(summary.windowEndsAt).toISOString(),
 		totalRequests: summary.totalRequests,
 		blockedRequests: summary.blockedRequests,
-		causes: summary.causes.map((row) => ({
-			cause: toPublicStopCause(row.cause),
-			count: row.count,
-			firstSeenAt: instant(row.firstSeenMs),
-			lastSeenAt: instant(row.lastSeenMs),
-		})),
+		failedRequests: summary.outcomeTotals.failed,
+		disconnectedRequests: summary.outcomeTotals.disconnected,
+		unclassifiedRequests: summary.outcomeTotals.unclassified,
+		excludedAttemptAuditRows: summary.excludedAttemptAuditRows,
+		causes: summary.causes
+			.filter((row) => outcomeForCause(row.cause) === "blocked")
+			.map((row) => ({
+				cause: toPublicStopCause(row.cause),
+				count: row.count,
+				firstSeenAt: instant(row.firstSeenMs),
+				lastSeenAt: instant(row.lastSeenMs),
+			})),
 		candidates: {
 			observedRequests: summary.candidates.observedRequests,
 			zeroCandidateRequests: summary.candidates.zeroCandidateRequests,
@@ -948,6 +967,8 @@ export function toPublicErrorCategory(
 	if (trimmed === "") return null;
 	const transport = TRANSPORT_TERMINALS.get(trimmed);
 	if (transport) return transport;
+	// Preserve event-stream categories. History deliberately uses the more
+	// precise outcome classifier (e.g. generic all_accounts_failed is Failed).
 	return toPublicStopCause(classifyStopCause(trimmed, statusCode));
 }
 

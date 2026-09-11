@@ -87,9 +87,8 @@ describe("classifyStopCause", () => {
 	});
 
 	it("only ever returns a member of the published set", () => {
-		// The public widget API republishes this value to a device that lights a
-		// warning on an unknown one, so an unlisted return value is a wire break,
-		// not a cosmetic slip.
+		// The classifier must return a declared internal cause. The HTTP API
+		// separately tests compatibility with its closed public vocabulary.
 		const samples: Array<[string | null, number | null]> = [
 			["all_accounts_failed", 503],
 			["family_weekly_exhausted_429", 429],

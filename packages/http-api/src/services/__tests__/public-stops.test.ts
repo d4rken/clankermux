@@ -73,7 +73,7 @@ function makeSources(
 
 const BLOCKS: Bucketed = [
 	{
-		errorMessage: "all_accounts_failed",
+		errorMessage: "pool_exhausted",
 		statusCode: 503,
 		bucketMs: NOW - 3 * HOUR,
 		count: 5,

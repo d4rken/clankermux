@@ -14,7 +14,7 @@
  */
 
 /**
- * Why a request was refused, as a CLOSED set.
+ * Why a recorded request did not complete, as a closed internal set.
  *
  * `requests.error_message` cannot be read as an enum: it holds terminal labels
  * written by the give-up path (`all_accounts_failed`), per-attempt
@@ -25,7 +25,7 @@
  *
  * `other` is mandatory and load-bearing: a proxy that grows a new terminal
  * tomorrow must land somewhere honest rather than silently vanishing from a
- * total that is supposed to account for every blocked request.
+ * total that is supposed to account for every unsuccessful recorded request.
  */
 export type StopCause =
 	/** The pool genuinely had no account with capacity left. */
@@ -46,6 +46,11 @@ export type StopCause =
 	| "context_window_exceeded"
 	/** A non-2xx forwarded from upstream that is none of the above. */
 	| "upstream_error"
+	| "client_disconnected"
+	| "request_timed_out"
+	| "stream_failed"
+	| "stream_limited"
+	| "all_accounts_failed"
 	| "other";
 
 export const STOP_CAUSES: readonly StopCause[] = [
@@ -58,6 +63,11 @@ export const STOP_CAUSES: readonly StopCause[] = [
 	"usage_throttled",
 	"context_window_exceeded",
 	"upstream_error",
+	"client_disconnected",
+	"request_timed_out",
+	"stream_failed",
+	"stream_limited",
+	"all_accounts_failed",
 	"other",
 ];
 
@@ -129,9 +139,9 @@ export const POOL_SIZING_SEPARATE_STOP_LABELS = [
 /**
  * Classify one `requests.error_message` into a {@link StopCause}.
  *
- * Pure, so it can be unit-tested without a database and shared unchanged by the
- * dashboard read and the public widget read — two surfaces that must never
- * disagree about what a row means.
+ * Legacy classification used by the public event stream. History reads use
+ * classifyRequestOutcomeCause below, shared by the dashboard and public Stops
+ * API. Keep this mapping stable for existing event-stream consumers.
  *
  * @param errorMessage the raw stored string, or null
  * @param statusCode the recorded response status, used only to separate a
@@ -161,6 +171,100 @@ export function classifyStopCause(
 		return "upstream_error";
 	}
 	return "other";
+}
+
+/** Outcomes of recorded unsuccessful client requests, separate from HTTP status. */
+export type RequestOutcome =
+	| "blocked"
+	| "failed"
+	| "disconnected"
+	| "unclassified";
+export const REQUEST_OUTCOMES = [
+	"blocked",
+	"failed",
+	"disconnected",
+	"unclassified",
+] as const;
+
+const OUTCOME_BY_CAUSE: Record<StopCause, RequestOutcome> = {
+	pool_quota_exhausted: "blocked",
+	family_weekly_exhausted: "blocked",
+	model_not_served: "blocked",
+	oauth_tokens_expired: "blocked",
+	pinned_target_unavailable: "blocked",
+	provider_overloaded: "blocked",
+	usage_throttled: "blocked",
+	context_window_exceeded: "blocked",
+	upstream_error: "failed",
+	client_disconnected: "disconnected",
+	request_timed_out: "failed",
+	stream_failed: "failed",
+	stream_limited: "failed",
+	all_accounts_failed: "failed",
+	other: "unclassified",
+};
+export function outcomeForCause(cause: StopCause): RequestOutcome {
+	return OUTCOME_BY_CAUSE[cause];
+}
+
+const HISTORY_LABELS: Readonly<Record<string, StopCause>> = {
+	"client disconnected": "client_disconnected",
+	"request timed out": "request_timed_out",
+	"stream error": "stream_failed",
+	upstream_stream_error: "stream_failed",
+	stream_truncated_mid_content: "stream_failed",
+	native_responses_stream_failed: "stream_failed",
+	native_responses_no_terminal: "stream_failed",
+	rate_limit_error: "stream_limited",
+	overloaded_error: "stream_limited",
+	all_accounts_failed: "all_accounts_failed",
+	anthropic_excluded_no_account: "pinned_target_unavailable",
+	pinned_account_missing: "pinned_target_unavailable",
+	pinned_account_unavailable: "pinned_target_unavailable",
+	pinned_header_rejected: "pinned_target_unavailable",
+	pinned_resolution_error: "pinned_target_unavailable",
+};
+
+/**
+ * History reports the stored terminal reason, not intent or delivery proof.
+ * In particular a disconnect can be a user cancellation, harness abort or
+ * network closure. Error-envelope capture can replace the transport reason;
+ * missing historical facts cannot be reconstructed by this reader.
+ *
+ * Deliberately layered over the legacy classifier: the public event stream
+ * still calls all_accounts_failed pool_quota_exhausted for wire compatibility,
+ * while both history surfaces name the generic give-up without asserting quota.
+ */
+export function classifyRequestOutcomeCause(
+	errorMessage: string | null | undefined,
+	statusCode: number | null | undefined,
+): StopCause {
+	const trimmed = errorMessage?.trim() ?? "";
+	return Object.hasOwn(HISTORY_LABELS, trimmed)
+		? HISTORY_LABELS[trimmed]
+		: classifyStopCause(trimmed, statusCode);
+}
+
+/**
+ * Verified legacy direct-saveRequest attempt audits, ONLY at HTTP 429.
+ * These historical writers used synthetic IDs and wrote no request_routing row.
+ * Current attempts live in separate routing tables. Do not widen this to every
+ * 429, a suffix rule, or the pool-sizing list (which serves a different purpose).
+ */
+export const LEGACY_ATTEMPT_AUDIT_429_LABELS: readonly string[] = [
+	"weekly_exhausted_429",
+	"session_exhausted_429",
+	"family_weekly_exhausted_429",
+	"model_fallback_429",
+];
+export function isLegacyAttemptAudit(
+	errorMessage: string | null | undefined,
+	statusCode: number | null | undefined,
+): boolean {
+	return (
+		statusCode === 429 &&
+		LEGACY_ATTEMPT_AUDIT_429_LABELS.includes(errorMessage ?? "")
+	);
 }
 
 /** One bucket of the per-cause time series. */
@@ -215,7 +319,12 @@ export interface StopsHistoryResponse {
 	windowEndsAt: number;
 	/** The denominator. A blocked count without it is not a rate. */
 	totalRequests: number;
+	/** Explicit proxy refusals, also available as outcomeTotals.blocked. */
 	blockedRequests: number;
+	outcomeTotals: Record<RequestOutcome, number>;
+	/** Historical retry audit rows omitted from both outcomes and totalRequests. */
+	excludedAttemptAuditRows: number;
+	/** All recorded unsuccessful outcomes, including failures and disconnects. */
 	causes: StopsHistoryCause[];
 	candidates: StopsHistoryCandidates;
 }

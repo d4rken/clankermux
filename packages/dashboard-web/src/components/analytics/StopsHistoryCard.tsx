@@ -1,20 +1,23 @@
-import { STOP_CAUSES, type StopsHistoryResponse } from "@clankermux/types";
-import { AlertCircle } from "lucide-react";
+import {
+	outcomeForCause,
+	REQUEST_OUTCOMES,
+	type RequestOutcome,
+	STOP_CAUSES,
+	type StopsHistoryResponse,
+} from "@clankermux/types";
+import { AlertCircle, Info } from "lucide-react";
+import { useState } from "react";
 import { formatDurationDhm } from "../../lib/format-prediction";
 import {
 	STOP_CAUSE_COLORS,
 	STOP_CAUSE_LABELS,
 } from "../../lib/stop-cause-labels";
 import { BaseBarChart } from "../charts/BaseBarChart";
-import {
-	Card,
-	CardContent,
-	CardDescription,
-	CardHeader,
-	CardTitle,
-} from "../ui/card";
+import { Button } from "../ui/button";
+import { Card, CardContent, CardHeader, CardTitle } from "../ui/card";
 import { InsetPanel } from "../ui/inset-panel";
 import { PanelEmptyState } from "../ui/panel-empty-state";
+import { Popover, PopoverContent, PopoverTrigger } from "../ui/popover";
 import { Skeleton } from "../ui/skeleton";
 import {
 	Table,
@@ -93,20 +96,14 @@ function candidatesLine(data: StopsHistoryResponse): string {
 	].join(" · ");
 }
 
-/**
- * How often a request was ACTUALLY blocked, by cause.
- *
- * Every other quota surface on the dashboard is a projection: a percentage, a
- * runway, a pace. This one is the record of what happened, and it is the only
- * thing that can say whether the projections were describing a real risk. A
- * pool that reads 90% used for a week and never refused a request is not the
- * same situation as one that reads 60% and stopped twice.
- *
- * The candidate distribution beside it is the leading indicator the forecasts
- * cannot see: a pool that never drops below two eligible accounts has margin no
- * projection can take away, and one that spends its time at one candidate is a
- * single failure from a stop regardless of how much quota it shows.
- */
+const OUTCOME_LABELS: Record<RequestOutcome, string> = {
+	blocked: "Blocked",
+	failed: "Failed",
+	disconnected: "Disconnected",
+	unclassified: "Unclassified",
+};
+
+/** Counts always describe the whole selection; toggles filter only chart and table. */
 export function StopsHistoryCard({
 	data,
 	now,
@@ -114,6 +111,17 @@ export function StopsHistoryCard({
 	unavailableReason,
 	staleNote,
 }: StopsHistoryCardProps) {
+	const [enabled, setEnabled] = useState<Record<RequestOutcome, boolean>>({
+		blocked: true,
+		failed: true,
+		disconnected: false,
+		unclassified: true,
+	});
+	const visibleCauses =
+		data?.causes.filter((c) => enabled[outcomeForCause(c.cause)]) ?? [];
+	const unsuccessfulRequests = data
+		? Object.values(data.outcomeTotals).reduce((n, count) => n + count, 0)
+		: 0;
 	const pending = loading && !unavailableReason;
 	const resolved = !pending && !unavailableReason && data != null;
 
@@ -121,19 +129,46 @@ export function StopsHistoryCard({
 	// this pool has seen rather than the whole vocabulary. Ordered by
 	// STOP_CAUSES so the stack order is stable between polls.
 	const presentCauses = resolved
-		? STOP_CAUSES.filter((cause) => data.causes.some((c) => c.cause === cause))
+		? STOP_CAUSES.filter((cause) =>
+				visibleCauses.some((c) => c.cause === cause),
+			)
 		: [];
 
 	return (
 		<Card>
 			<CardHeader>
-				<CardTitle>Stops</CardTitle>
-				<CardDescription>
-					How often a request was actually blocked in this range, by cause, and
-					how many accounts were eligible per request. Requests blocked before
-					an account was chosen carry no account, so an account filter hides
-					them; the no-account bucket shows them.
-				</CardDescription>
+				<div className="flex items-center gap-item">
+					<CardTitle>Request outcomes</CardTitle>
+					<Popover>
+						<PopoverTrigger asChild>
+							<button
+								type="button"
+								aria-label="About request outcomes"
+								className="rounded text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+							>
+								<Info className="h-4 w-4" aria-hidden="true" />
+							</button>
+						</PopoverTrigger>
+						<PopoverContent className="space-y-item text-xs">
+							<p>
+								Counts describe recorded requests and their stored terminal
+								reason. A disconnect can mean cancellation, a harness abort, or
+								a connection closing; it does not identify who intended to stop.
+							</p>
+							<p>
+								Requests blocked before an account was chosen have no account.
+								An account filter hides them; the no-account filter includes
+								them.
+							</p>
+							<p>
+								Outcome toggles filter the chart and table. The summary always
+								includes every outcome. Captured upstream errors can replace a
+								transport reason. Older completion miscounts cannot be
+								reconstructed from these records.
+							</p>
+						</PopoverContent>
+					</Popover>
+				</div>
 			</CardHeader>
 			<CardContent className="space-y-group">
 				{unavailableReason ? (
@@ -150,25 +185,60 @@ export function StopsHistoryCard({
 					<>
 						<InsetPanel className="space-y-tight text-xs">
 							<p className="text-sm font-medium">
-								{data.blockedRequests} of {data.totalRequests} requests blocked
+								{unsuccessfulRequests} of {data.totalRequests} recorded requests
+								did not complete
 								{data.totalRequests === 0
 									? " (—)"
-									: ` (${((data.blockedRequests / data.totalRequests) * 100).toFixed(2)}%)`}
+									: ` (${((unsuccessfulRequests / data.totalRequests) * 100).toFixed(2)}%)`}
 							</p>
-							<p className="text-muted-foreground">{candidatesLine(data)}</p>
+							<fieldset
+								className="flex min-w-0 flex-wrap gap-item"
+								aria-label="Outcome groups shown in chart and table"
+							>
+								{REQUEST_OUTCOMES.filter(
+									(outcome) =>
+										outcome !== "unclassified" ||
+										data.outcomeTotals.unclassified > 0,
+								).map((outcome) => (
+									<Button
+										key={outcome}
+										type="button"
+										size="sm"
+										variant={enabled[outcome] ? "secondary" : "outline"}
+										aria-pressed={enabled[outcome]}
+										className={
+											outcome === "disconnected"
+												? "text-muted-foreground"
+												: undefined
+										}
+										onClick={() =>
+											setEnabled((previous) => ({
+												...previous,
+												[outcome]: !previous[outcome],
+											}))
+										}
+									>
+										{OUTCOME_LABELS[outcome]} · {data.outcomeTotals[outcome]}
+									</Button>
+								))}
+							</fieldset>
 							{staleNote && (
 								<p className="text-muted-foreground">{staleNote}</p>
 							)}
 						</InsetPanel>
 
-						{data.blockedRequests === 0 ? (
+						{unsuccessfulRequests === 0 ? (
 							<PanelEmptyState>
-								No blocked requests in this range
+								No unsuccessful requests in this range
+							</PanelEmptyState>
+						) : visibleCauses.length === 0 ? (
+							<PanelEmptyState>
+								No requests in the selected outcome groups
 							</PanelEmptyState>
 						) : (
 							<>
 								<BaseBarChart
-									data={chartRows(data)}
+									data={chartRows({ ...data, causes: visibleCauses })}
 									xAxisKey="ts"
 									height="small"
 									showLegend
@@ -191,16 +261,27 @@ export function StopsHistoryCard({
 												<TableHead>Count</TableHead>
 												<TableHead>Top model</TableHead>
 												<TableHead>Last seen</TableHead>
-												<TableHead>Sample</TableHead>
+												<TableHead>Outcome</TableHead>
 											</TableRow>
 										</TableHeader>
 										<TableBody>
-											{[...data.causes]
+											{[...visibleCauses]
 												.sort((a, b) => b.count - a.count)
 												.map((cause) => (
 													<TableRow key={cause.cause}>
 														<TableCell>
-															{STOP_CAUSE_LABELS[cause.cause]}
+															{cause.sampleErrorMessage ? (
+																<details>
+																	<summary className="cursor-pointer rounded focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
+																		{STOP_CAUSE_LABELS[cause.cause]}
+																	</summary>
+																	<p className="mt-2 max-w-sm whitespace-normal break-words text-xs text-muted-foreground">
+																		{cause.sampleErrorMessage}
+																	</p>
+																</details>
+															) : (
+																STOP_CAUSE_LABELS[cause.cause]
+															)}
 														</TableCell>
 														<TableCell className="tabular-nums">
 															{cause.count}
@@ -216,11 +297,8 @@ export function StopsHistoryCard({
 															)}{" "}
 															ago
 														</TableCell>
-														<TableCell
-															className="max-w-56 truncate text-muted-foreground"
-															title={cause.sampleErrorMessage ?? undefined}
-														>
-															{cause.sampleErrorMessage ?? "—"}
+														<TableCell className="max-w-56 truncate text-muted-foreground">
+															{OUTCOME_LABELS[outcomeForCause(cause.cause)]}
 														</TableCell>
 													</TableRow>
 												))}
@@ -229,6 +307,14 @@ export function StopsHistoryCard({
 								</TableFrame>
 							</>
 						)}
+						<div className="space-y-tight text-xs text-muted-foreground">
+							<p>{candidatesLine(data)}</p>
+							{data.excludedAttemptAuditRows > 0 && (
+								<p>
+									{data.excludedAttemptAuditRows} legacy retry attempts excluded
+								</p>
+							)}
+						</div>
 					</>
 				)}
 			</CardContent>

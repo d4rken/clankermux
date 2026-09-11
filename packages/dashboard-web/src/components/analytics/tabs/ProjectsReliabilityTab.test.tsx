@@ -1,5 +1,5 @@
 /**
- * The Stops card on Projects & Reliability.
+ * The Request outcomes card on Projects & Reliability.
  *
  * Two properties are worth pinning. It is FILTER-SCOPED: the card reads a cache
  * entry keyed on the tab's filter selection, so a payload fetched under a
@@ -59,6 +59,8 @@ function stopsResponse(): StopsHistoryResponse {
 		windowEndsAt: now,
 		totalRequests: 500,
 		blockedRequests: 7,
+		outcomeTotals: { blocked: 7, failed: 0, disconnected: 0, unclassified: 0 },
+		excludedAttemptAuditRows: 0,
 		causes: [
 			{
 				cause: "pool_quota_exhausted",
@@ -116,8 +118,8 @@ describe("ProjectsReliabilityTab stops card", () => {
 
 		const html = render(queryClient, FILTERS);
 
-		expect(html).toContain("Stops");
-		expect(html).toContain("7 of 500 requests blocked");
+		expect(html).toContain("Request outcomes");
+		expect(html).toContain("7 of 500 recorded requests did not complete");
 		expect(html).toContain("Pool quota exhausted");
 	});
 
@@ -133,7 +135,7 @@ describe("ProjectsReliabilityTab stops card", () => {
 
 		const html = render(queryClient, FILTERS);
 
-		expect(html).toContain("Stops");
+		expect(html).toContain("Request outcomes");
 		expect(html).not.toContain("requests blocked");
 	});
 
@@ -143,7 +145,7 @@ describe("ProjectsReliabilityTab stops card", () => {
 
 		const html = render(queryClient, FILTERS);
 
-		expect(html).toContain("Stops data unavailable");
+		expect(html).toContain("Request outcomes data unavailable");
 		expect(html).not.toContain("requests blocked");
 		// The neighbours speak for a read that did not fail; both render their
 		// titles in their loading branch.
