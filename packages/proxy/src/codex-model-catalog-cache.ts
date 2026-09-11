@@ -150,6 +150,27 @@ export class CodexModelCatalogCache {
 		);
 		if (scope.kind === "refused") return null;
 
+		return this.getScope(scope);
+	}
+
+	async getForPin(pin: RoutingPin): Promise<CodexModelCatalogEntry | null> {
+		if (
+			(pin.accountId && pin.providers) ||
+			(pin.providers &&
+				(!pin.providers.length || !pin.providers.every(isKnownProvider)))
+		)
+			return null;
+		const key = pin.accountId
+			? `account:${pin.accountId}`
+			: pin.providers
+				? `providers:${JSON.stringify([...pin.providers].sort())}`
+				: "";
+		return this.getScope({ kind: "allowed", key, pin });
+	}
+
+	private async getScope(
+		scope: Extract<PinScope, { kind: "allowed" }>,
+	): Promise<CodexModelCatalogEntry | null> {
 		const { key, pin } = scope;
 		const slot = this.slots.get(key);
 		if (slot) {

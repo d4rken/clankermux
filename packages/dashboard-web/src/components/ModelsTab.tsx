@@ -21,6 +21,11 @@ export function ModelsTab() {
 
 	return (
 		<div className="space-y-section">
+			<p className="text-sm text-muted-foreground">
+				This catalogue applies only when API key authentication is not
+				configured. Configure named clients on the Clients page. Custom IDs
+				without known metadata are omitted from the rich Codex response.
+			</p>
 			<Tabs
 				value={dialect}
 				onValueChange={(value) => setDialect(value as ModelDialect)}
