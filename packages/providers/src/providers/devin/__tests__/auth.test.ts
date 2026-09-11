@@ -1,4 +1,4 @@
-import { describe, expect, it } from "bun:test";
+import { describe, expect, it, mock } from "bun:test";
 import { createHash } from "node:crypto";
 import { createDevinLogin, exchangeDevinLogin } from "../auth";
 
@@ -55,6 +55,49 @@ describe("Devin CLI login", () => {
 			),
 		).rejects.toThrow("expired");
 	});
+	it("offers a hosted code page without a redirect while retaining per-login PKCE", async () => {
+		const login = createDevinLogin("manual");
+		const url = new URL(login.url);
+		expect(login.flow).toBe("manual");
+		expect(url.searchParams.has("redirect_uri")).toBe(false);
+		expect(url.searchParams.get("state")).toBe(login.state);
+		expect(url.searchParams.get("code_challenge_method")).toBe("S256");
+		expect(url.searchParams.get("code_challenge")).toBe(
+			createHash("sha256").update(login.verifier).digest("base64url"),
+		);
+		expect(createDevinLogin("manual").verifier).not.toBe(login.verifier);
+		const fetcher = mock(
+			async (_input: string | URL | Request, init?: RequestInit) => {
+				expect(JSON.parse(String(init?.body))).toEqual({
+					code: "one-use-hosted-code",
+					code_verifier: login.verifier,
+				});
+				return Response.json({ token: "session-token" });
+			},
+		);
+		expect(
+			await exchangeDevinLogin(login, "  one-use-hosted-code  ", fetcher),
+		).toBe("session-token");
+		expect(fetcher).toHaveBeenCalledTimes(1);
+	});
+
+	it("rejects expired or empty hosted codes without exchanging and keeps loopback state checks", async () => {
+		const fetcher = mock(async () => Response.json({ token: "unexpected" }));
+		const login = createDevinLogin("manual");
+		for (const code of ["", "   ", "a".repeat(16_385)]) {
+			await expect(exchangeDevinLogin(login, code, fetcher)).rejects.toThrow(
+				"authorization code",
+			);
+		}
+		await expect(
+			exchangeDevinLogin({ ...login, expiresAt: 0 }, "code", fetcher),
+		).rejects.toThrow("expired");
+		await expect(
+			exchangeDevinLogin(createDevinLogin(), "raw-code", fetcher),
+		).rejects.toThrow("state");
+		expect(fetcher).not.toHaveBeenCalled();
+	});
+
 	it("does not expose token endpoint bodies in errors", async () => {
 		const login = createDevinLogin();
 		await expect(

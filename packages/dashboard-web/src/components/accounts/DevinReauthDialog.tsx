@@ -41,7 +41,7 @@ function DevinReauthSession({
 	const [login, setLogin] = useState<Awaited<
 		ReturnType<typeof api.startDevinReauth>
 	> | null>(null);
-	const [callback, setCallback] = useState("");
+	const [code, setCode] = useState("");
 	const [token, setToken] = useState("");
 	const [error, setError] = useState("");
 	const [busy, setBusy] = useState(false);
@@ -55,7 +55,7 @@ function DevinReauthSession({
 	}, []);
 	const clear = () => {
 		setLogin(null);
-		setCallback("");
+		setCode("");
 		setToken("");
 		setError("");
 	};
@@ -94,12 +94,12 @@ function DevinReauthSession({
 		);
 	};
 	const complete = () => {
-		if (!login || !callback.trim()) return;
+		if (!login || !code.trim()) return;
 		return run(async () => {
-			const data = { sessionId: login.sessionId, callback: callback.trim() };
-			// A callback is single use; failures require a new browser sign-in.
+			const data = { sessionId: login.sessionId, code: code.trim() };
+			// A login code is single use; failures require a new browser sign-in.
 			setLogin(null);
-			setCallback("");
+			setCode("");
 			setToken("");
 			await api.completeDevinReauth(data);
 			success();
@@ -122,8 +122,8 @@ function DevinReauthSession({
 						<div className="space-y-item">
 							<AccountIdentityPanel account={account} />
 							<span className="block">
-								Sign in to the same Devin account. Usage history, priority, and
-								settings will be preserved.
+								Sign in to the same Devin account, then paste your login code
+								here. Usage history, priority, and settings will be preserved.
 							</span>
 							{Number.isFinite(expiresAt) && (
 								<span className="block">
@@ -144,7 +144,7 @@ function DevinReauthSession({
 						onClick={() =>
 							run(async () => {
 								setLogin(null);
-								setCallback("");
+								setCode("");
 								setToken("");
 								const result = await api.startDevinReauth({
 									accountId: account.id,
@@ -158,27 +158,30 @@ function DevinReauthSession({
 					{login && (
 						<div className="space-y-item">
 							<AuthorizationHandoff url={login.authUrl} />
-							<p className="text-sm text-muted-foreground">
-								Open the link in a browser signed in to this account. After
-								signing in, copy the full localhost callback URL from the
-								browser address bar and paste it here, even if the page cannot
-								connect.
+							<p
+								id="devin-reauth-code-help"
+								className="text-sm text-muted-foreground"
+							>
+								Open the link in a browser signed in to this account. Devin
+								shows “Copy your login code”. Copy that code and paste it here.
+								The code expires after 5 minutes.
 							</p>
 							<p className="text-sm text-muted-foreground">
-								Sign-in link expires:{" "}
+								Finish this sign-in by:{" "}
 								{new Date(login.expiresAt).toLocaleString()}
 							</p>
-							<Label htmlFor="devin-reauth-callback">Callback URL</Label>
+							<Label htmlFor="devin-reauth-code">Login code</Label>
 							<Input
-								id="devin-reauth-callback"
+								id="devin-reauth-code"
+								aria-describedby="devin-reauth-code-help"
 								type="password"
 								autoComplete="off"
 								autoCorrect="off"
 								autoCapitalize="none"
 								spellCheck={false}
 								disabled={busy}
-								value={callback}
-								onChange={(event) => setCallback(event.target.value)}
+								value={code}
+								onChange={(event) => setCode(event.target.value)}
 								onKeyDown={(event) => {
 									if (event.key === "Enter") {
 										event.preventDefault();
@@ -188,7 +191,7 @@ function DevinReauthSession({
 							/>
 							<Button
 								type="button"
-								disabled={busy || !callback.trim()}
+								disabled={busy || !code.trim()}
 								onClick={complete}
 							>
 								Complete Devin sign-in
@@ -222,7 +225,7 @@ function DevinReauthSession({
 								run(async () => {
 									const data = { accountId: account.id, apiKey: token.trim() };
 									setToken("");
-									setCallback("");
+									setCode("");
 									setLogin(null);
 									await api.reconnectDevinToken(data);
 									success();

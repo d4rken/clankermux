@@ -8,7 +8,7 @@ const post = (body: unknown) =>
 		body: JSON.stringify(body),
 	});
 describe("Devin account discovery and login", () => {
-	it("persists verified Devin identity on successful creation without echoing credentials", async () => {
+	it("creates an account from a hosted code, preserves verified identity, and prevents replay", async () => {
 		const persist = mock(async () => {});
 		const db = {
 			getAdapter: () => ({
@@ -23,22 +23,40 @@ describe("Devin account discovery and login", () => {
 			}),
 			setAccountIdentityFromProfile: persist,
 		} as unknown as DatabaseOperations;
-		const handlers = createDevinAccountHandlers(db, {
-			getAccount: async () => ({
-				userJwt: "private-jwt",
-				endpoint: "https://server.codeium.com",
-				models: [],
-				usage: {
-					kind: "devin",
-					email: "devin@example.com",
-					accountId: "devin-user-123",
-					planName: "Free",
-				},
-			}),
-		} as never);
-		const response = await handlers.add(
-			post({ name: "Free", apiKey: "private-token" }),
+		const exchange = mock(async () => "private-token");
+		const handlers = createDevinAccountHandlers(
+			db,
+			{
+				getAccount: async () => ({
+					userJwt: "private-jwt",
+					endpoint: "https://server.codeium.com",
+					models: [],
+					usage: {
+						kind: "devin",
+						email: "devin@example.com",
+						accountId: "devin-user-123",
+						planName: "Free",
+					},
+				}),
+			} as never,
+			exchange,
 		);
+		const { sessionId, authUrl } = await (
+			await handlers.login(post({ name: "Free" }))
+		).json();
+		expect(new URL(authUrl).searchParams.has("redirect_uri")).toBe(false);
+		const response = await handlers.complete(
+			post({ sessionId, code: "hosted-code" }),
+		);
+		expect(exchange).toHaveBeenCalledWith(
+			expect.objectContaining({ flow: "manual", verifier: expect.any(String) }),
+			"hosted-code",
+		);
+		expect(
+			(await handlers.complete(post({ sessionId, code: "hosted-code" })))
+				.status,
+		).toBe(400);
+		expect(exchange).toHaveBeenCalledTimes(1);
 		expect(response.status).toBe(200);
 		expect(persist).toHaveBeenCalledWith("created-devin", {
 			email: "devin@example.com",
@@ -139,23 +157,64 @@ describe("Devin account discovery and login", () => {
 		expect(response.status).toBe(400);
 		expect(await response.text()).not.toContain("private-token");
 	});
-	it("consumes a login session when callback validation fails", async () => {
-		const handlers = createDevinAccountHandlers({} as DatabaseOperations);
+	it("consumes a login session when its hosted code exchange fails", async () => {
+		const exchange = mock(async () => {
+			throw new Error("Devin login failed (400)");
+		});
+		const handlers = createDevinAccountHandlers(
+			{} as DatabaseOperations,
+			{
+				getAccount: async () => {
+					throw new Error("must not discover");
+				},
+			},
+			exchange,
+		);
 		const { sessionId } = await (
 			await handlers.login(post({ name: "Free" }))
 		).json();
-		expect(
-			(
-				await handlers.complete(
-					post({ sessionId, callback: "code#wrong-state" }),
-				)
-			).status,
-		).toBe(400);
+		const response = await handlers.complete(
+			post({ sessionId, code: "expired-code" }),
+		);
+		expect(response.status).toBe(400);
 		const replay = await handlers.complete(
-			post({ sessionId, callback: "code#wrong-state" }),
+			post({ sessionId, code: "expired-code" }),
 		);
 		expect(await replay.text()).toContain("expired");
+		expect(exchange).toHaveBeenCalledTimes(1);
 	});
+
+	it("rejects missing codes and expired sessions without exchanging", async () => {
+		const exchange = mock(async () => "must-not-exchange");
+		const handlers = createDevinAccountHandlers(
+			{} as DatabaseOperations,
+			{
+				getAccount: async () => {
+					throw new Error("must not discover");
+				},
+			},
+			exchange,
+		);
+		const { sessionId, expiresAt } = await (
+			await handlers.login(post({ name: "Free" }))
+		).json();
+		for (const code of [undefined, null, 42, "", "  ", "a".repeat(16_385)]) {
+			expect((await handlers.complete(post({ sessionId, code }))).status).toBe(
+				400,
+			);
+		}
+		const now = spyOn(Date, "now").mockReturnValue(expiresAt + 1);
+		try {
+			expect(
+				(await handlers.complete(post({ sessionId, code: "valid-code" })))
+					.status,
+			).toBe(400);
+		} finally {
+			now.mockRestore();
+		}
+		expect(exchange).not.toHaveBeenCalled();
+	});
+
 	it("does not disclose PKCE verifier and rejects unknown completion sessions", async () => {
 		const handlers = createDevinAccountHandlers({} as DatabaseOperations);
 		const start = await handlers.login(post({ name: "Free", priority: 0 }));
@@ -163,11 +222,8 @@ describe("Devin account discovery and login", () => {
 		expect(body.authUrl).toContain("code_challenge=");
 		expect(body.verifier).toBeUndefined();
 		expect(
-			(
-				await handlers.complete(
-					post({ sessionId: "missing", callback: "secret" }),
-				)
-			).status,
+			(await handlers.complete(post({ sessionId: "missing", code: "secret" })))
+				.status,
 		).toBe(400);
 	});
 });

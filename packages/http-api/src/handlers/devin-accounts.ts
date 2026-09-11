@@ -64,6 +64,15 @@ export function createDevinAccountHandlers(
 		if (!value) throw BadRequest("Devin session token is required");
 		return value;
 	};
+	const loginCode = (body: Record<string, unknown>) => {
+		const code = validateString(body.code, "Devin login code", {
+			required: true,
+			maxLength: 16_384,
+			transform: sanitizers.trim,
+		});
+		if (!code) throw BadRequest("Devin login code is required");
+		return code;
+	};
 	const failure = (error: unknown) =>
 		errorResponse(
 			BadRequest(
@@ -165,7 +174,7 @@ export function createDevinAccountHandlers(
 			throw BadRequest(
 				"Devin login limit reached; wait for existing links to expire",
 			);
-		const login = createDevinLogin();
+		const login = createDevinLogin("manual");
 		const sessionId = randomUUID();
 		sessions.set(sessionId, { login, account, target });
 		return jsonResponse({
@@ -204,13 +213,12 @@ export function createDevinAccountHandlers(
 					sessions.delete(sessionId);
 					throw BadRequest("Devin reconnect expired; start again");
 				}
-				if (typeof body.callback !== "string" || body.callback.length > 20_000)
-					throw BadRequest("Devin callback URL is required");
+				const code = loginCode(body);
 				sessions.delete(sessionId);
 				return await reconnect(
 					req,
 					entry.target,
-					await exchange(entry.login, body.callback),
+					await exchange(entry.login, code),
 				);
 			} catch (error) {
 				return failure(error);
@@ -262,10 +270,9 @@ export function createDevinAccountHandlers(
 					sessions.delete(sessionId);
 					throw BadRequest("Devin login expired; start again");
 				}
-				if (typeof body.callback !== "string" || body.callback.length > 20_000)
-					throw BadRequest("Devin callback URL is required");
+				const code = loginCode(body);
 				sessions.delete(sessionId); // Single-use, including failed exchanges.
-				const apiKey = await exchange(entry.login, body.callback);
+				const apiKey = await exchange(entry.login, code);
 				return await save(req, { ...entry.account, apiKey });
 			} catch (error) {
 				return failure(error);

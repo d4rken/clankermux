@@ -138,10 +138,11 @@ describe("Devin reconnect", () => {
 		);
 		const login = await start.json();
 		expect(login.authUrl).toContain("code_challenge=");
+		expect(new URL(login.authUrl).searchParams.has("redirect_uri")).toBe(false);
 		expect(login.verifier).toBeUndefined();
 		get.mockResolvedValue({ ...existing, api_key: "concurrent" });
 		const response = await handlers.reauthComplete(
-			post({ sessionId: login.sessionId, callback: "private-callback" }),
+			post({ sessionId: login.sessionId, code: "private-code" }),
 		);
 		expect(response.status).toBe(200);
 		expect(replace).toHaveBeenCalledWith(
@@ -149,10 +150,14 @@ describe("Devin reconnect", () => {
 			expect.objectContaining({ expectedApiKey: "old" }),
 		);
 		expect(exchange).toHaveBeenCalledTimes(1);
+		expect(exchange).toHaveBeenCalledWith(
+			expect.objectContaining({ flow: "manual" }),
+			"private-code",
+		);
 		expect(
 			(
 				await handlers.reauthComplete(
-					post({ sessionId: login.sessionId, callback: "private-callback" }),
+					post({ sessionId: login.sessionId, code: "private-code" }),
 				)
 			).status,
 		).toBe(400);
@@ -165,7 +170,7 @@ describe("Devin reconnect", () => {
 		expect(
 			(
 				await handlers.complete(
-					post({ sessionId: login.sessionId, callback: "private-callback" }),
+					post({ sessionId: login.sessionId, code: "private-code" }),
 				)
 			).status,
 		).toBe(400);

@@ -575,7 +575,7 @@ class API extends HttpClient {
 	}
 	async completeDevinLogin(data: {
 		sessionId: string;
-		callback: string;
+		code: string;
 	}): Promise<{ message: string; account: Account }> {
 		return this.post("/api/accounts/devin/login/complete", data);
 	}
@@ -588,7 +588,7 @@ class API extends HttpClient {
 	}
 	async completeDevinReauth(data: {
 		sessionId: string;
-		callback: string;
+		code: string;
 	}): Promise<{ success: boolean }> {
 		return this.post("/api/accounts/devin/reauth/complete", data);
 	}

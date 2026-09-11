@@ -230,7 +230,7 @@ it("imports a Devin session token with SWE-2 defaults", async () => {
 	expect(errors).toEqual([]);
 });
 
-it("hands Devin login to the chosen browser and completes using the callback URL", async () => {
+it("hands Devin login to the chosen browser and completes using the hosted login code", async () => {
 	const start = spyOn(api, "startDevinLogin").mockResolvedValue({
 		sessionId: "login-1",
 		authUrl: "https://app.devin.ai/auth/cli/continue?state=test",
@@ -252,14 +252,26 @@ it("hands Devin login to the chosen browser and completes using the callback URL
 			'a[href^="https://app.devin.ai/"]',
 		)?.target,
 	).toBe("_blank");
-	const callback =
-		"http://127.0.0.1:59653/callback?state=test&code=private-code";
-	await edit("devin-callback", callback);
+	expect(document.body.textContent).toContain("Copy your login code");
+	expect(document.body.textContent).toContain("code expires after 5 minutes");
+	expect(document.body.textContent).not.toContain("localhost");
+	const input = document.querySelector<HTMLInputElement>("#devin-code");
+	expect(input?.type).toBe("password");
+	expect(input?.getAttribute("autocomplete")).toBe("off");
+	expect(input?.getAttribute("autocorrect")).toBe("off");
+	expect(input?.getAttribute("autocapitalize")).toBe("none");
+	expect(input?.getAttribute("spellcheck")).toBe("false");
+	await edit("devin-code", "   ");
+	expect(
+		byText<HTMLButtonElement>("button", "Complete Devin sign-in").disabled,
+	).toBe(true);
+	const code = "private-code";
+	await edit("devin-code", ` ${code} `);
 	await act(async () =>
 		byText<HTMLButtonElement>("button", "Complete Devin sign-in").click(),
 	);
-	expect(complete).toHaveBeenCalledWith({ sessionId: "login-1", callback });
-	expect(document.querySelector("#devin-callback")).toBeNull();
+	expect(complete).toHaveBeenCalledWith({ sessionId: "login-1", code });
+	expect(document.querySelector("#devin-code")).toBeNull();
 	expect(errors).toEqual([]);
 });
 

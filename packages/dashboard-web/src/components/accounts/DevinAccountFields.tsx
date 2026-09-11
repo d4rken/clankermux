@@ -27,7 +27,7 @@ export function DevinAccountFields({
 		sessionId: string;
 		authUrl: string;
 	} | null>(null);
-	const [callback, setCallback] = useState("");
+	const [code, setCode] = useState("");
 	const [catalog, setCatalog] = useState<{
 		token: string;
 		data: Models;
@@ -49,6 +49,7 @@ export function DevinAccountFields({
 	return (
 		<div className="flex flex-col gap-group">
 			<AccountSetupSection title="Connect to Devin">
+				<p>Sign in on Devin, then paste your login code here to connect.</p>
 				<p>
 					Use the models available to your Devin account. Claude requests
 					default to SWE-2. If your plan doesn’t include it, select an available
@@ -64,7 +65,7 @@ export function DevinAccountFields({
 						run(async () => {
 							if (!name.trim()) throw new Error("Enter an account name first");
 							setLogin(await api.startDevinLogin({ name, priority }));
-							setCallback("");
+							setCode("");
 						})
 					}
 				>
@@ -74,36 +75,40 @@ export function DevinAccountFields({
 					<div className="flex w-full min-w-0 flex-col gap-row rounded-lg border bg-muted/30 p-group">
 						<AuthorizationHandoff url={login.authUrl} />
 						<p
-							id="devin-callback-help"
+							id="devin-code-help"
 							className="text-sm leading-relaxed text-muted-foreground"
 						>
-							After signing in, copy the full localhost callback URL from the
-							browser address bar and paste it here, even if the page cannot
-							connect. The link expires after 10 minutes.
+							After signing in, Devin shows “Copy your login code”. Copy that
+							code and paste it here. The code expires after 5 minutes. Finish
+							this sign-in within 10 minutes of generating the link.
 						</p>
 						<div className="flex flex-col gap-item">
-							<Label htmlFor="devin-callback">Callback URL</Label>
+							<Label htmlFor="devin-code">Login code</Label>
 							<Input
-								id="devin-callback"
+								id="devin-code"
 								type="password"
 								autoComplete="off"
-								aria-describedby="devin-callback-help"
-								value={callback}
-								onChange={(event) => setCallback(event.target.value)}
+								autoCorrect="off"
+								autoCapitalize="none"
+								spellCheck={false}
+								disabled={busy}
+								aria-describedby="devin-code-help"
+								value={code}
+								onChange={(event) => setCode(event.target.value)}
 							/>
 						</div>
 						<Button
 							className="self-start"
 							type="button"
-							disabled={busy || !callback}
+							disabled={busy || !code.trim()}
 							onClick={() =>
 								run(async () => {
 									const pending = login;
 									setLogin(null);
-									setCallback("");
+									setCode("");
 									await api.completeDevinLogin({
 										sessionId: pending.sessionId,
-										callback,
+										code: code.trim(),
 									});
 									onSuccess();
 								})

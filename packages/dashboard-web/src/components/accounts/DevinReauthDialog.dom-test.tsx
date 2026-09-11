@@ -131,9 +131,16 @@ describe("Devin account reconnect", () => {
 		await click("Sign in with Devin");
 		expect(start).toHaveBeenCalledWith({ accountId: account.id });
 		expect(document.querySelector(`a[href="${login.authUrl}"]`)).not.toBeNull();
-		expect(document.body.textContent).toContain(
-			"even if the page cannot connect",
-		);
+		expect(document.body.textContent).toContain("Copy your login code");
+		expect(document.body.textContent).toContain("code expires after 5 minutes");
+		expect(document.body.textContent).not.toContain("localhost");
+		const input =
+			document.querySelector<HTMLInputElement>("#devin-reauth-code");
+		expect(input?.type).toBe("password");
+		expect(input?.getAttribute("autocomplete")).toBe("off");
+		expect(input?.getAttribute("autocorrect")).toBe("off");
+		expect(input?.getAttribute("autocapitalize")).toBe("none");
+		expect(input?.getAttribute("spellcheck")).toBe("false");
 		expect(open).not.toHaveBeenCalled();
 	});
 	it("guards duplicate starts and completes once, clearing sensitive fields", async () => {
@@ -152,10 +159,9 @@ describe("Devin account reconnect", () => {
 		expect(start).toHaveBeenCalledTimes(1);
 		expect(button("Sign in with Devin").disabled).toBe(true);
 		await act(async () => gate.resolve(login));
-		await type(
-			"devin-reauth-callback",
-			"http://localhost:1234/callback?code=secret&state=test",
-		);
+		await type("devin-reauth-code", "   ");
+		expect(button("Complete Devin sign-in").disabled).toBe(true);
+		await type("devin-reauth-code", " secret ");
 		await act(async () => {
 			const submit = button("Complete Devin sign-in");
 			submit.click();
@@ -164,11 +170,11 @@ describe("Devin account reconnect", () => {
 		expect(complete).toHaveBeenCalledTimes(1);
 		expect(complete).toHaveBeenCalledWith({
 			sessionId: login.sessionId,
-			callback: "http://localhost:1234/callback?code=secret&state=test",
+			code: "secret",
 		});
 		expect(
-			document.querySelector<HTMLInputElement>("#devin-reauth-callback")
-				?.value ?? "",
+			document.querySelector<HTMLInputElement>("#devin-reauth-code")?.value ??
+				"",
 		).toBe("");
 		await act(async () => completeGate.resolve({ success: true }));
 		expect(onSuccess).toHaveBeenCalledTimes(1);
