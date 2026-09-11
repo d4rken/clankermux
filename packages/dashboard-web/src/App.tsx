@@ -71,7 +71,7 @@ export function App() {
 				title: "Analytics",
 			},
 			{
-				path: "/limits",
+				path: "/usage",
 				element: (
 					<Suspense fallback={<LoadingSkeleton />}>
 						<LazyLimitsTab />

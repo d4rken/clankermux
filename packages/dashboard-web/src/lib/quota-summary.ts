@@ -263,5 +263,5 @@ export function usageHref(
 ): string {
 	const params = new URLSearchParams({ provider: row.provider });
 	if (row.model) params.set("model", row.model);
-	return `/limits?${params}`;
+	return `/usage?${params}`;
 }

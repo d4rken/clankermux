@@ -39,7 +39,7 @@ import { join } from "node:path";
 export const CAPTURES = [
 	{ route: "/", name: "overview" },
 	{ route: "/accounts", name: "accounts", height: 1200 },
-	{ route: "/limits", name: "limits" },
+	{ route: "/usage", name: "limits" },
 	{ route: "/analytics", name: "analytics" },
 ] as const;
 
