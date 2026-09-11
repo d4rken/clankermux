@@ -70,6 +70,74 @@ function render(account: AccountResponse): string {
 	);
 }
 
+describe("AccountStatusChips — Usage presentation", () => {
+	function renderUsage(account: AccountResponse) {
+		return renderToStaticMarkup(
+			<AccountStatusChips
+				account={account}
+				status={deriveAccountStatus(account, NOW)}
+				variant="usage"
+			/>,
+		);
+	}
+
+	it("keeps the Accounts inventory while omitting it on Usage", () => {
+		const account = makeAccount({
+			provider: "codex",
+			isPrimary: true,
+			priority: 7,
+			autoFallbackEnabled: true,
+			autoApplyResetCreditsEnabled: true,
+			renewalAnchor: "2024-01-08",
+			renewalCadence: "none",
+			codexRateLimitResetCredits: {
+				availableCount: 0,
+				credits: [],
+				fetchedAt: new Date(NOW).toISOString(),
+			},
+		});
+		const accounts = render(account);
+		const usage = renderUsage(account);
+		for (const label of [
+			"Primary",
+			"Priority: 7",
+			"Auto-fallback",
+			"Auto-refresh",
+			"Auto-apply:",
+			"Credits past weekly",
+			"Renews",
+			"0 usage resets",
+		]) {
+			expect(accounts).toContain(label);
+			expect(usage).not.toContain(label);
+		}
+	});
+
+	it("retains available resets, credit spending and shared-quota warnings", () => {
+		const account = makeAccount({
+			provider: "codex",
+			isDuplicateAccount: true,
+			duplicateAccountIds: ["other"],
+			codexCredits: {
+				hasCredits: true,
+				unlimited: false,
+				weeklyUsedPct: 100,
+				balance: 100,
+				planType: "plus",
+			},
+			codexRateLimitResetCredits: {
+				availableCount: 2,
+				credits: [],
+				fetchedAt: new Date(NOW).toISOString(),
+			},
+		});
+		const usage = renderUsage(account);
+		for (const label of ["2 usage resets", "On credits", "Duplicate"]) {
+			expect(usage).toContain(label);
+		}
+	});
+});
+
 describe("AccountStatusChips — renewal chip wording", () => {
 	it("labels an elapsed one-time date 'Renewal date passed', never 'Renewed'", () => {
 		const html = render(
