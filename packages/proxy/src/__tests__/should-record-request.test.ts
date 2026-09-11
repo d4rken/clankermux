@@ -3,7 +3,7 @@
  * the two historical filter sets:
  *
  *   - response-handler.ts `shouldProcessRequest`
- *       (count_tokens-on-openai-compatible + auto-refresh probe)
+ *       (count_tokens-on-openai-compatible/local-count providers + auto-refresh probe)
  *   - post-processor.worker.ts `shouldLogRequest`
  *       (.well-known 404s)
  *
@@ -73,7 +73,7 @@ describe("shouldRecordRequest — count_tokens on openai-compatible", () => {
 		).toBe(false);
 	});
 
-	it("records count_tokens on a non-openai-compatible, non-codex provider (e.g. anthropic)", () => {
+	it("records count_tokens on a provider that counts upstream (e.g. anthropic)", () => {
 		expect(
 			shouldRecordRequest(
 				makeInput({
@@ -84,15 +84,30 @@ describe("shouldRecordRequest — count_tokens on openai-compatible", () => {
 		).toBe(true);
 	});
 
-	it("does NOT record count_tokens for codex provider", () => {
+	it.each([
+		"codex",
+		"openrouter",
+	])("does NOT record local count_tokens for %s", (providerName) => {
 		expect(
 			shouldRecordRequest(
 				makeInput({
-					providerName: "codex",
+					providerName,
 					path: "/v1/messages/count_tokens",
 				}),
 			),
 		).toBe(false);
+	});
+
+	it("records OpenRouter custom-endpoint counts that reach upstream", () => {
+		expect(
+			shouldRecordRequest(
+				makeInput({
+					providerName: "openrouter",
+					customEndpoint: "https://gateway.example/v1",
+					path: "/v1/messages/count_tokens",
+				}),
+			),
+		).toBe(true);
 	});
 
 	it("records a normal /v1/messages request on openai-compatible", () => {

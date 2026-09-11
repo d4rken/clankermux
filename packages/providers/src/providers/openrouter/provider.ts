@@ -1,5 +1,10 @@
 import { Logger } from "@clankermux/logger";
 import type { Account } from "@clankermux/types";
+import {
+	localTokenCountUrl,
+	supportsLocalTokenCounting,
+} from "../../local-token-count";
+import { buildSyntheticCountTokensRequest } from "../../synthetic-count-tokens";
 import { AnthropicCompatibleProvider } from "../anthropic-compatible/provider";
 
 const log = new Logger("OpenRouterProvider");
@@ -22,6 +27,8 @@ export class OpenRouterProvider extends AnthropicCompatibleProvider {
 	 * keeping the system messages at their original positions in the history. */
 	override async transformRequestBody(request: Request): Promise<Request> {
 		if (request.method !== "POST") return request;
+		if (request.url === localTokenCountUrl(this.name))
+			return buildSyntheticCountTokensRequest(request);
 		let body: Record<string, unknown>;
 		try {
 			body = await request.clone().json();
@@ -80,6 +87,11 @@ export class OpenRouterProvider extends AnthropicCompatibleProvider {
 		search: string,
 		account?: Account,
 	): string {
+		if (
+			pathname === "/v1/messages/count_tokens" &&
+			supportsLocalTokenCounting(this.name, account?.custom_endpoint)
+		)
+			return localTokenCountUrl(this.name);
 		const base = (
 			account?.custom_endpoint || OPENROUTER_DEFAULT_ENDPOINT
 		).replace(/\/+$/, "");

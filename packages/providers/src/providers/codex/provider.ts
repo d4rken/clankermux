@@ -1,9 +1,7 @@
 import { createHash } from "node:crypto";
 import {
-	IMAGE_TOKEN_ESTIMATE,
 	isDebugEnabled,
 	isInvalidGrantMessage,
-	measureBodyForEstimate,
 	OAuthRefreshTokenError,
 	resolveModelContextWindow,
 	ValidationError,
@@ -18,6 +16,8 @@ import {
 	NATIVE_RESPONSES_RESPONSE_HEADER,
 } from "@clankermux/types";
 import { BaseProvider } from "../../base";
+import { localTokenCountUrl } from "../../local-token-count";
+import { buildSyntheticCountTokensRequest } from "../../synthetic-count-tokens";
 import type { RateLimitInfo, TokenRefreshResult } from "../../types";
 import {
 	clampChatGptBackendReasoningEffort,
@@ -554,7 +554,7 @@ export class CodexProvider extends BaseProvider {
 
 	buildUrl(_path: string, _query: string, account?: Account): string {
 		if (_path === "/v1/messages/count_tokens") {
-			return "https://clankermux.local/codex/count_tokens";
+			return localTokenCountUrl(this.name);
 		}
 		if (account?.custom_endpoint) {
 			try {
@@ -615,7 +615,7 @@ export class CodexProvider extends BaseProvider {
 			pathname === "/v1/messages/count_tokens" ||
 			pathname === "/codex/count_tokens"
 		) {
-			return this.buildSyntheticCountTokensRequest(request);
+			return buildSyntheticCountTokensRequest(request);
 		}
 
 		const contentType = request.headers.get("content-type");
@@ -909,85 +909,6 @@ export class CodexProvider extends BaseProvider {
 	getOAuthProvider() {
 		const { CodexOAuthProvider } = require("./oauth.js");
 		return new CodexOAuthProvider();
-	}
-
-	private async buildSyntheticCountTokensRequest(
-		request: Request,
-	): Promise<Request> {
-		const contentType = request.headers.get("content-type");
-		if (!contentType?.includes("application/json")) {
-			// Non-JSON content-type → 400 error
-			const errorBody = JSON.stringify({
-				type: "error",
-				error: {
-					type: "invalid_request_error",
-					message: "Content-Type must be application/json for count_tokens",
-				},
-			});
-			const errorHeaders = new Headers(request.headers);
-			errorHeaders.set("content-type", "application/json");
-			errorHeaders.set("x-clankermux-synthetic-response", "true");
-			errorHeaders.set("x-clankermux-synthetic-status", "400");
-			return new Request(request.url, {
-				method: request.method,
-				headers: errorHeaders,
-				body: errorBody,
-			});
-		}
-
-		let body: unknown;
-		try {
-			body = await request.json();
-		} catch {
-			// Malformed JSON → 400 error
-			const errorBody = JSON.stringify({
-				type: "error",
-				error: {
-					type: "invalid_request_error",
-					message: "Request body must be valid JSON",
-				},
-			});
-			const errorHeaders = new Headers(request.headers);
-			errorHeaders.set("content-type", "application/json");
-			errorHeaders.set("x-clankermux-synthetic-response", "true");
-			errorHeaders.set("x-clankermux-synthetic-status", "400");
-			return new Request(request.url, {
-				method: request.method,
-				headers: errorHeaders,
-				body: errorBody,
-			});
-		}
-
-		// Conservative token estimate: same heuristic used elsewhere in ClankerMux.
-		// Attached images are priced per-image rather than by their base64 size —
-		// counting transport bytes as text answered a one-screenshot request with
-		// hundreds of thousands of tokens.
-		const measured =
-			typeof body === "object" && body !== null
-				? measureBodyForEstimate(body as Record<string, unknown>)
-				: {
-						// Non-object JSON body (string/number/null): measured exactly as
-						// before, it carries no message blocks to recognise.
-						textChars: JSON.stringify(body)?.length ?? 0,
-						imageCount: 0,
-						imagePayloadChars: 0,
-						documentPayloadChars: 0,
-					};
-		const inputTokens = Math.max(
-			1,
-			Math.ceil((measured.textChars + measured.documentPayloadChars) / 3) +
-				measured.imageCount * IMAGE_TOKEN_ESTIMATE,
-		);
-		const responseBody = JSON.stringify({ input_tokens: inputTokens });
-		const successHeaders = new Headers(request.headers);
-		successHeaders.set("content-type", "application/json");
-		successHeaders.set("x-clankermux-synthetic-response", "true");
-		successHeaders.set("x-clankermux-synthetic-status", "200");
-		return new Request(request.url, {
-			method: request.method,
-			headers: successHeaders,
-			body: responseBody,
-		});
 	}
 
 	// ── Private helpers ──────────────────────────────────────────────────────

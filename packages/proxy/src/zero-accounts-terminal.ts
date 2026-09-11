@@ -1,3 +1,4 @@
+import { supportsLocalTokenCounting } from "@clankermux/providers/local-token-count";
 import { getAttemptTarget } from "./resolved-route";
 import { eligibleRouteAccounts } from "./routing-service";
 /**
@@ -273,42 +274,20 @@ export async function resolveZeroAccountsOutcome(
 		return pinnedResponse;
 	}
 
-	// count_tokens last-resort: it is advisory and answered LOCALLY by Codex
-	// (CodexProvider synthesizes { input_tokens } with no upstream call). When
-	// every account has been gated out — provider-overload, usage-throttle, or
-	// the context-window gate — a count_tokens probe would otherwise return a
-	// capacity terminal (503 pool_exhausted / 429 throttled / 400 context). That
-	// is wrong for a purely local "how big is this?" call; ironically the
-	// context-window gate could 400 it for being too big. Synthesize from any
-	// non-paused Codex account instead. We DON'T do this for openai-compatible
-	// (its count_tokens may hit a real upstream) or respect a pin failure
-	// (handled above) — and we honor operator pause, but ignore rate-limit /
-	// throttle / context state because local synthesis needs no capacity.
+	// Local counts need no upstream capacity, but still need an authorized,
+	// non-paused destination. Keep the strict pin failures above and
+	// use the frozen route's current permissions, never an unfiltered pool.
+	// Other providers may perform real upstream counting and cannot use this path.
 	if (url.pathname === "/v1/messages/count_tokens") {
-		// `selectedAccounts` is already filtered by the API-key pin (an
-		// Anthropic-pinned key never contains a Codex account here), so it is
-		// always a safe source. The broader getAllAccounts() net IGNORES pins,
-		// so only consult it for UNPINNED requests — otherwise an Anthropic-
-		// pinned key whose candidates were gated out would be wrongly answered
-		// from an unrelated Codex account instead of falling through to the
-		// pinned terminal below.
-		//
-		// Known, intentional limitation: a key pinned to a *specific* Codex
-		// account that is itself rate-limited gets `pinFailure` set during
-		// selection and returns the pin strict-fail terminal above before
-		// reaching here, so count_tokens yields 503 rather than a local
-		// estimate in that one config. Honoring it would require a second
-		// synthesis site BEFORE the fail-closed pinFailure boundary; that
-		// boundary's job is to never answer a pinned key from the wrong place,
-		// and the edge (specific-Codex pin + that account rate-limited +
-		// count_tokens, a 503 the client already handles) does not justify
-		// reordering it.
-		const codexForSynthesis = (
+		const accountForSynthesis = (
 			await eligibleRouteAccounts(requestMeta, ctx)
-		).find((a) => !a.paused && a.provider === "codex");
-		if (codexForSynthesis) {
+		).find(
+			(a) =>
+				!a.paused && supportsLocalTokenCounting(a.provider, a.custom_endpoint),
+		);
+		if (accountForSynthesis) {
 			log.info(
-				`count_tokens: all accounts gated out — synthesizing a local estimate from Codex account ${codexForSynthesis.name} instead of a capacity terminal`,
+				`count_tokens: all accounts gated out — synthesizing a local estimate from ${accountForSynthesis.provider} account ${accountForSynthesis.name} instead of a capacity terminal`,
 			);
 			// Deliberately NOT routed through attemptThroughProbeGate: this is a
 			// synthetic, locally-answered request (no upstream call), so it must
@@ -317,7 +296,7 @@ export async function resolveZeroAccountsOutcome(
 			const syntheticResponse = await proxyWithAccount(
 				req,
 				url,
-				codexForSynthesis,
+				accountForSynthesis,
 				requestMeta,
 				finalBodyBuffer,
 				finalCreateBodyStream,

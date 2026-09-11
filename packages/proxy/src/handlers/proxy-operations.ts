@@ -24,6 +24,7 @@ import {
 	isAnthropicOutOfCredits,
 	usageCache,
 } from "@clankermux/providers";
+import { supportsLocalTokenCounting } from "@clankermux/providers/local-token-count";
 import {
 	type Account,
 	type AnthropicUsageData,
@@ -1122,12 +1123,12 @@ export async function proxyWithAccount(
 			return await fail({ kind: "other" });
 		}
 
-		// Skip token refresh for synthetic paths (e.g. Codex count_tokens) that
+		// Skip token refresh for explicitly supported local count paths that
 		// never reach the upstream network.
-		const isCodexCountTokens =
-			account.provider === "codex" &&
+		const isLocalCountTokens =
+			supportsLocalTokenCounting(account.provider, account.custom_endpoint) &&
 			url.pathname === "/v1/messages/count_tokens";
-		const accessToken = isCodexCountTokens
+		const accessToken = isLocalCountTokens
 			? undefined
 			: await getValidAccessToken(account, ctx);
 
@@ -1263,7 +1264,7 @@ export async function proxyWithAccount(
 			);
 		}
 
-		if (!isCodexCountTokens) {
+		if (!isLocalCountTokens) {
 			const overloadAdmission = tryAcquireProviderOverloadProbe(
 				account.provider,
 				overloadAttributionModel,
@@ -2672,13 +2673,13 @@ export async function proxyForcedAccount(
 		// Validate that the account-specific provider can handle this path
 		validateProviderPath(provider, url.pathname);
 
-		// Synthetic Codex count_tokens never reaches upstream, so — exactly as on
+		// Synthetic local count_tokens never reaches upstream, so — exactly as on
 		// the normal path — it must not require or refresh OAuth credentials just
 		// to return an advisory local estimate. Without this, force-routing a
-		// Codex account with an expired token would return a local auth error
+		// local-count account with an expired token would return a local auth error
 		// instead of the synthesized 200/400.
-		const isCodexCountTokens =
-			account.provider === "codex" &&
+		const isLocalCountTokens =
+			supportsLocalTokenCounting(account.provider, account.custom_endpoint) &&
 			url.pathname === "/v1/messages/count_tokens";
 
 		// Resolve the access token via the same path the normal flow uses. If it
@@ -2686,7 +2687,7 @@ export async function proxyForcedAccount(
 		// NOT null/failover (R2). Routed through forwardToClient so the local
 		// failure is recorded under the forced account (history intact).
 		let accessToken = "";
-		if (!isCodexCountTokens) {
+		if (!isLocalCountTokens) {
 			try {
 				accessToken = await getValidAccessToken(account, ctx);
 			} catch (tokenErr) {

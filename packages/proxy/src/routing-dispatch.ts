@@ -1,3 +1,7 @@
+import {
+	localTokenCountUrl,
+	supportsLocalTokenCounting,
+} from "@clankermux/providers/local-token-count";
 import type { Account, RequestMeta, RoutingAttempt } from "@clankermux/types";
 import type { ProxyContext } from "./handlers/proxy-types";
 import { makeProxyRequest } from "./handlers/request-handler";
@@ -107,10 +111,17 @@ export async function sendAuthorizedRequest(
 		if (synthetic) {
 			if (
 				meta.path !== "/v1/messages/count_tokens" ||
-				account.provider !== "codex"
+				!supportsLocalTokenCounting(
+					account.provider,
+					account.custom_endpoint,
+				) ||
+				request.url !== localTokenCountUrl(account.provider)
 			)
 				throw new RoutingPolicyError("Unexpected local inference response");
-			attempt.kind = "local_success";
+			attempt.kind =
+				request.headers.get("x-clankermux-synthetic-status") === "200"
+					? "local_success"
+					: "local_reject";
 		} else {
 			attempt.outgoing_model = await enforceOutgoingModel(
 				request,
@@ -153,6 +164,19 @@ export async function sendAuthorizedRequest(
 		if (error instanceof RoutingPolicyError && audit?.id)
 			error.attemptRecorded = true;
 		throw error;
+	}
+
+	if (attempt.kind !== "upstream_send") {
+		await ctx.dbOps.routing.finishAttempt(
+			attempt.id,
+			Date.now(),
+			response.status,
+			response.ok
+				? null
+				: `Local token count rejected (HTTP ${response.status})`,
+			null,
+		);
+		return response;
 	}
 
 	return observeRoutingResponse(

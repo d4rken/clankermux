@@ -1,3 +1,4 @@
+import { supportsLocalTokenCounting } from "@clankermux/providers/local-token-count";
 import type { UnifiedClaimObservationSource as DispatchObservationSource } from "@clankermux/types";
 
 /**
@@ -48,6 +49,7 @@ export interface ShouldRecordRequestInput {
 	method: string;
 	path: string;
 	providerName: string;
+	customEndpoint?: string | null;
 	responseStatus: number;
 	/**
 	 * True only for an in-process dispatch — `handleProxy`'s own `isInternal`
@@ -94,10 +96,11 @@ export function shouldRecordRequest(input: ShouldRecordRequestInput): boolean {
 		internal = false,
 	} = input;
 
-	// (1) count_tokens probes on the openai-compatible or codex provider are not
+	// (1) count_tokens probes on the openai-compatible or local-count provider are not
 	//     billable user traffic.
 	if (
-		(providerName === "openai-compatible" || providerName === "codex") &&
+		(providerName === "openai-compatible" ||
+			supportsLocalTokenCounting(providerName, input.customEndpoint)) &&
 		path === "/v1/messages/count_tokens"
 	) {
 		return false;

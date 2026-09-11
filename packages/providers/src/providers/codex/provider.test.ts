@@ -3485,7 +3485,10 @@ describe("count_tokens synthetic response", () => {
 		const req = new Request("https://clankermux.local/codex/count_tokens", {
 			method: "POST",
 			headers: { "content-type": "application/json" },
-			body: JSON.stringify({}),
+			body: JSON.stringify({
+				model: "claude-opus-4-5",
+				messages: [{ role: "user", content: "" }],
+			}),
 		});
 		const result = await provider.transformRequestBody(req);
 		const body = (await result.json()) as { input_tokens: number };
