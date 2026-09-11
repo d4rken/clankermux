@@ -140,51 +140,51 @@ export class ApiKeyRepository extends BaseRepository<ApiKey> {
 		return row ? row.count > 0 : false;
 	}
 
-	/**
-	 * Create a new API key. New keys start unpinned — the pin columns
-	 * (pinned_account_id, pinned_providers) default to NULL and are set later
-	 * via updatePin — so they're excluded from the create contract.
-	 */
 	async create(
+		apiKey: Parameters<ApiKeyRepository["createInTransaction"]>[0],
+		afterInsert?: () => void,
+	): Promise<void> {
+		await this.adapter.runTransaction(() => {
+			this.createInTransaction(apiKey);
+			afterInsert?.();
+		});
+	}
+
+	createInTransaction(
 		apiKey: Omit<
 			ApiKeyRow,
 			"usage_count" | "pinned_account_id" | "pinned_providers"
 		> & { pinned_account_id?: string | null; pinned_providers?: string | null },
-	): Promise<void> {
-		await this.adapter.runTransaction(() => {
-			const db = this.adapter.getSQLiteDb();
-			const account = apiKey.pinned_account_id ?? null;
-			const raw = apiKey.pinned_providers ?? null;
-			if (
-				account === "" ||
-				(account !== null && raw !== null) ||
-				(raw !== null && !parsePinnedProviders(raw)?.length)
-			)
-				throw new Error("Invalid API key destinations");
-			if (
-				account &&
-				!db.query("SELECT id FROM accounts WHERE id=?").get(account)
-			)
-				throw new Error("Destination account does not exist");
-			db.query(`
-			INSERT INTO api_keys (
-				id, name, hashed_key, prefix_last_8, created_at,
-				last_used, is_active, pinned_account_id, pinned_providers
-			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-		`).run(
-				...[
-					apiKey.id,
-					apiKey.name,
-					apiKey.hashed_key,
-					apiKey.prefix_last_8,
-					apiKey.created_at,
-					apiKey.last_used,
-					apiKey.is_active,
-					apiKey.pinned_account_id ?? null,
-					apiKey.pinned_providers ?? null,
-				],
-			);
-		});
+	): void {
+		const db = this.adapter.getSQLiteDb();
+		const account = apiKey.pinned_account_id ?? null;
+		const raw = apiKey.pinned_providers ?? null;
+		if (
+			account === "" ||
+			(account !== null && raw !== null) ||
+			(raw !== null && !parsePinnedProviders(raw)?.length)
+		)
+			throw new Error("Invalid API key destinations");
+		if (account && !db.query("SELECT id FROM accounts WHERE id=?").get(account))
+			throw new Error("Destination account does not exist");
+		db.query(`
+		INSERT INTO api_keys (
+			id, name, hashed_key, prefix_last_8, created_at,
+			last_used, is_active, pinned_account_id, pinned_providers
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`).run(
+			...[
+				apiKey.id,
+				apiKey.name,
+				apiKey.hashed_key,
+				apiKey.prefix_last_8,
+				apiKey.created_at,
+				apiKey.last_used,
+				apiKey.is_active,
+				apiKey.pinned_account_id ?? null,
+				apiKey.pinned_providers ?? null,
+			],
+		);
 	}
 
 	/**

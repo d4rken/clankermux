@@ -425,6 +425,18 @@ export const POST_FLOOR_TABLE_BASELINES: Readonly<
 		columns: ["token_hash", "created_at", "expires_at", "last_seen_at"],
 		source: "create-table-at-intro",
 	},
+	client_profiles: {
+		shipped: "2026-09-11",
+		commit: "unreleased",
+		columns: ["api_key_id", "application", "revision", "catalogues", "notices"],
+		source: "create-table-at-intro",
+	},
+	client_alias_rules: {
+		shipped: "2026-09-11",
+		commit: "unreleased",
+		columns: ["api_key_id", "rule_id"],
+		source: "create-table-at-intro",
+	},
 	model_overrides: {
 		shipped: "2026-08-25",
 		commit: "unreleased",

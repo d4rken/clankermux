@@ -60,6 +60,7 @@ import {
 import { createCacheEffectivenessHandler } from "./handlers/cache-effectiveness";
 import { createCacheKeepaliveHandler } from "./handlers/cache-keepalive";
 import { createCacheKeepaliveHistoryHandler } from "./handlers/cache-keepalive-history";
+import { createClientsHandler } from "./handlers/clients";
 import { createConfigHandlers } from "./handlers/config";
 import {
 	createHeapSnapshotHandler,
@@ -660,6 +661,15 @@ export class APIRouter {
 		// first, and a `handleApiRequest` invoked from anywhere else would bypass
 		// it entirely. See management-auth-policy.ts for the classification both
 		// sides share.
+
+		if (
+			(path === "/api/clients" || path.startsWith("/api/clients/")) &&
+			this.context.clients
+		) {
+			return this.wrapHandler(
+				createClientsHandler(this.context.clients, this.context.dbOps),
+			)(req, url);
+		}
 
 		// Check for exact match
 		const handler = this.handlers.get(key);

@@ -528,10 +528,7 @@ describe("handleModelsRoute: the codex catalog", () => {
 		});
 	});
 
-	// Codex requires ~18 fields per entry; a hand-built one would be missing the
-	// semantic fields and the CLI would fall back to its built-in catalog without
-	// saying so. Cloning an existing entry is what makes an added model usable.
-	test("clones an existing entry for a custom model", async () => {
+	test("does not fabricate metadata for an unknown custom model", async () => {
 		const { deps } = harness({
 			overrides: [
 				override({
@@ -552,18 +549,13 @@ describe("handleModelsRoute: the codex catalog", () => {
 			models: Array<Record<string, unknown>>;
 		};
 
-		expect(body.models).toHaveLength(3);
-		expect(body.models[2]).toEqual({
-			slug: "gpt-house",
-			display_name: "House Special",
-			context_window: 272000,
-			base_instructions: "sol instructions",
-		});
+		expect(body.models.map((entry) => entry.slug)).toEqual([
+			"gpt-5.6-sol",
+			"gpt-5.5",
+		]);
 	});
 
-	// The template is picked before any hide is applied, so hiding an unrelated
-	// model cannot change which entry a custom model inherits its semantics from.
-	test("picks the clone template from the unfiltered catalog", async () => {
+	test("hiding a known model never makes its metadata available to an unknown ID", async () => {
 		const { deps } = harness({
 			overrides: [
 				override({ modelId: "gpt-5.6-sol", hidden: true }),
@@ -581,14 +573,10 @@ describe("handleModelsRoute: the codex catalog", () => {
 			models: Array<Record<string, unknown>>;
 		};
 
-		expect(body.models.map((entry) => entry.slug)).toEqual([
-			"gpt-5.5",
-			"gpt-house",
-		]);
-		expect(body.models[1].base_instructions).toBe("sol instructions");
+		expect(body.models.map((entry) => entry.slug)).toEqual(["gpt-5.5"]);
 	});
 
-	test("skips custom injection when the catalog has no entry to clone", async () => {
+	test("keeps an empty rich catalogue empty when custom metadata is unknown", async () => {
 		const { deps } = harness({
 			catalog: async () => ({
 				bodyText: JSON.stringify({ models: [] }),

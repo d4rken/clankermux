@@ -12,6 +12,8 @@ import type {
 	Account,
 	AccountIdentity,
 	AccountPaymentRow,
+	ClientDestinations,
+	ClientProfile,
 	CodexWindowObservationRow,
 	IntegrityStatus,
 	InternalDispatchSpendRow,
@@ -60,6 +62,7 @@ import {
 	CacheKeepaliveSnapshotRepository,
 	type CacheKeepaliveSnapshotRow,
 } from "./repositories/cache-keepalive-snapshot.repository";
+import { ClientRepository } from "./repositories/client.repository";
 import {
 	type CodexResetCreditAutoClaim,
 	CodexResetCreditEventRepository,
@@ -484,6 +487,11 @@ export class DatabaseOperations implements StrategyStore, Disposable {
 	private strategy: StrategyRepository;
 	private stats: StatsRepository;
 	private apiKeys: ApiKeyRepository;
+	readonly clients: ClientRepository;
+	clientInitializer?: (
+		id: string,
+		destinations: ClientDestinations,
+	) => Promise<ClientProfile>;
 	private auth: AuthRepository;
 	private usageSnapshots: UsageSnapshotRepository;
 	private usageScopedSnapshots: UsageScopedSnapshotRepository;
@@ -566,6 +574,7 @@ export class DatabaseOperations implements StrategyStore, Disposable {
 		const retrying = <T extends object>(repo: T, label: string): T =>
 			withRetryingMethods(repo, () => this.retryConfig, label);
 
+		this.clients = new ClientRepository(this.adapter);
 		this.routing = retrying(new RoutingRepository(this.adapter), "routing");
 		this.accounts = retrying(new AccountRepository(this.adapter), "accounts");
 		this.requests = retrying(new RequestRepository(this.adapter), "requests");
@@ -2329,19 +2338,26 @@ OAuth tokens will need to be re-authenticated.
 		pinnedAccountId?: string | null;
 		pinnedProviders?: string[] | null;
 	}): Promise<void> {
-		await this.apiKeys.create({
-			id: apiKey.id,
-			name: apiKey.name,
-			hashed_key: apiKey.hashedKey,
-			prefix_last_8: apiKey.prefixLast8,
-			created_at: apiKey.createdAt,
-			last_used: apiKey.lastUsed || null,
-			is_active: apiKey.isActive ? 1 : 0,
-			pinned_account_id: apiKey.pinnedAccountId ?? null,
-			pinned_providers: apiKey.pinnedProviders
-				? JSON.stringify(apiKey.pinnedProviders)
-				: null,
+		const profile = await this.clientInitializer?.(apiKey.id, {
+			accountId: apiKey.pinnedAccountId ?? null,
+			providers: apiKey.pinnedProviders ?? null,
 		});
+		await this.apiKeys.create(
+			{
+				id: apiKey.id,
+				name: apiKey.name,
+				hashed_key: apiKey.hashedKey,
+				prefix_last_8: apiKey.prefixLast8,
+				created_at: apiKey.createdAt,
+				last_used: apiKey.lastUsed || null,
+				is_active: apiKey.isActive ? 1 : 0,
+				pinned_account_id: apiKey.pinnedAccountId ?? null,
+				pinned_providers: apiKey.pinnedProviders
+					? JSON.stringify(apiKey.pinnedProviders)
+					: null,
+			},
+			profile ? () => this.clients.insertInTransaction(profile) : undefined,
+		);
 	}
 
 	async updateApiKeyUsage(id: string, timestamp: number): Promise<void> {

@@ -46,7 +46,7 @@ export interface OverrideIndex {
  * Reduce the rows to the three decisions a caller actually makes.
  *
  * Split from `applyOverrides` because one caller — the Codex catalogue path —
- * cannot use the generic apply: its entries carry ~34 upstream fields that must
+ * cannot use the generic apply: its entries carry model-specific upstream fields that must
  * survive untouched, so it edits them in place against this index instead of
  * being handed rebuilt ones.
  */
