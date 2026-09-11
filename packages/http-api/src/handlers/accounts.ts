@@ -7,6 +7,7 @@ import {
 	extractSevenDay,
 	isAnthropicUsageShape,
 	isIndependentBlock,
+	PAUSE_REASON_NEEDS_REAUTH,
 	patterns,
 	providerStatusToCause,
 	type RateLimitCause,
@@ -35,7 +36,10 @@ import {
 	type AnyUsageData,
 	type CodexCreditsInfo,
 	codexRateLimitResetCreditsCache,
+	devinClient,
+	extractDevinIdentity,
 	fetchUsageData,
+	getRepresentativeDevinWindow,
 	getRepresentativeMinimaxUtilization,
 	getRepresentativeMinimaxWindow,
 	getRepresentativeUtilization,
@@ -119,10 +123,11 @@ function toRateLimitReason(v: string | null): RateLimitReason | null {
 
 /**
  * Providers that support the auto-pause-on-overage/credits toggle. Anthropic
- * has subscription-overage detection; Codex has credits/overage detection.
+ * has subscription-overage detection; Codex has credits/overage detection;
+ * Devin gates requests on reported included quota.
  * Module-level to avoid per-request allocation.
  */
-const OVERAGE_PAUSE_PROVIDERS = new Set(["anthropic", "codex"]);
+const OVERAGE_PAUSE_PROVIDERS = new Set(["anthropic", "codex", "devin"]);
 
 /**
  * Mirror of the usage-snapshot sampler cadence
@@ -538,6 +543,11 @@ export async function listAccountResponses(
 					codex_usage_observed_at,
 					refresh_token_expires_at,
 					CASE
+						WHEN provider = 'devin' AND (
+							NULLIF(TRIM(api_key), '') IS NULL OR
+							(paused = 1 AND pause_reason = '${PAUSE_REASON_NEEDS_REAUTH}')
+						) THEN 0
+						WHEN provider = 'devin' AND expires_at IS NULL THEN 1
 						WHEN expires_at > ? THEN 1
 						ELSE 0
 					END as token_valid,
@@ -923,6 +933,18 @@ export async function listAccountResponses(
 							);
 						}
 					}
+				} else if (
+					account.provider === "devin" &&
+					usageData &&
+					"kind" in usageData &&
+					usageData.kind === "devin"
+				) {
+					fullUsageData = usageData;
+					const window = getRepresentativeDevinWindow(usageData);
+					usageWindow = window;
+					usageUtilization = window
+						? (usageData[window]?.utilization ?? null)
+						: null;
 				} else if (account.provider === "zai" && usageData) {
 					// Zai usage data - type guard to check it's ZaiUsageData
 					const isZaiData =
@@ -1148,6 +1170,16 @@ export async function listAccountResponses(
 					}
 				}
 
+				// Metadata polling also supplies identity for Devin accounts added before
+				// identity capture shipped. This GET stays read-only and needs no RPC.
+				const devinIdentity =
+					provider === "devin" &&
+					fullUsageData &&
+					"kind" in fullUsageData &&
+					fullUsageData.kind === "devin"
+						? extractDevinIdentity(fullUsageData)
+						: null;
+
 				return {
 					id: account.id,
 					name: account.name,
@@ -1254,15 +1286,24 @@ export async function listAccountResponses(
 					sessionStats: sessionStatsMap.get(account.id) ?? null,
 					activeSessionCount: activeSessionCountsByAccount.get(account.id) ?? 0,
 					isPrimary: account.id === primaryId,
-					identityExternalId: account.identity_external_id ?? null,
-					identityEmail: account.identity_email ?? null,
-					identityOrganizationName: account.identity_organization_name ?? null,
-					identityPlanTier: account.identity_plan_tier ?? null,
+					identityExternalId:
+						devinIdentity?.externalAccountId ??
+						account.identity_external_id ??
+						null,
+					identityEmail: devinIdentity?.email ?? account.identity_email ?? null,
+					identityOrganizationName:
+						devinIdentity?.organizationName ??
+						account.identity_organization_name ??
+						null,
+					identityPlanTier:
+						devinIdentity?.planTier ?? account.identity_plan_tier ?? null,
 					identityRateLimitTier: account.identity_rate_limit_tier ?? null,
 					identityCapturedAt:
-						account.identity_captured_at != null
-							? Number(account.identity_captured_at)
-							: null,
+						devinIdentity && liveUsageEntry?.observedAtMs != null
+							? liveUsageEntry.observedAtMs
+							: account.identity_captured_at != null
+								? Number(account.identity_captured_at)
+								: null,
 					identityProfileFetchedAt:
 						account.identity_profile_fetched_at != null
 							? Number(account.identity_profile_fetched_at)
@@ -1964,15 +2005,15 @@ export function createAccountAutoFallbackHandler(dbOps: DatabaseOperations) {
 				return errorResponse(NotFound("Account not found"));
 			}
 
-			// Check if account supports session-based auto-fallback
-			if (!["anthropic", "codex", "zai"].includes(account.provider)) {
+			// Devin uses verified metadata recovery; other providers retain window-based fallback.
+			if (!["anthropic", "codex", "zai", "devin"].includes(account.provider)) {
 				return errorResponse(
 					BadRequest("Auto-fallback is only available for supported accounts"),
 				);
 			}
 
 			// Update auto-fallback setting
-			dbOps.setAutoFallbackEnabled(accountId, enabled === 1);
+			await dbOps.setAutoFallbackEnabled(accountId, enabled === 1);
 
 			const action = enabled === 1 ? "enabled" : "disabled";
 
@@ -2027,7 +2068,7 @@ export function createAccountAutoPauseOnOverageHandler(
 			if (!OVERAGE_PAUSE_PROVIDERS.has(account.provider)) {
 				return errorResponse(
 					BadRequest(
-						"Auto-pause on overage/credits is only available for Anthropic and Codex accounts",
+						"Auto-pause on overage/credits is only available for Anthropic, Codex, and Devin accounts",
 					),
 				);
 			}
@@ -2806,15 +2847,23 @@ export function createAccountRefreshUsageHandler(dbOps: DatabaseOperations) {
 				return errorResponse(NotFound("Account not found"));
 			}
 
-			if (account.provider !== "anthropic" && account.provider !== "codex") {
+			if (
+				account.provider !== "anthropic" &&
+				account.provider !== "codex" &&
+				account.provider !== "devin"
+			) {
 				return errorResponse(
 					BadRequest(
-						"Usage refresh is only available for Anthropic OAuth and Codex accounts",
+						"Usage refresh is available for Anthropic OAuth, Codex, and Devin accounts",
 					),
 				);
 			}
 
-			if (!account.access_token && !account.refresh_token) {
+			if (
+				!account.access_token &&
+				!account.refresh_token &&
+				!(account.provider === "devin" && account.api_key)
+			) {
 				return errorResponse(
 					BadRequest(
 						`Account '${account.name}' has no tokens - please re-authenticate`,
@@ -2834,6 +2883,11 @@ export function createAccountRefreshUsageHandler(dbOps: DatabaseOperations) {
 				});
 			}
 
+			if (account.provider === "devin" && account.api_key)
+				devinClient.invalidateAccount(
+					account.api_key,
+					account.custom_endpoint ?? undefined,
+				);
 			clearAccountRefreshCache(accountId);
 			const pollingRestarted = await restartUsagePollingForAccount(accountId);
 			const cacheRefreshed = await usageCache.refreshNow(accountId);

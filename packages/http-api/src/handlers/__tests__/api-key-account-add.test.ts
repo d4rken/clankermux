@@ -57,6 +57,53 @@ describe("createApiKeyAccountAddHandler", () => {
 	}
 
 	describe("provider identity", () => {
+		it("stores only actual Devin session expiry, leaving opaque tokens undated", async () => {
+			const handler = createApiKeyAccountAddHandler(
+				dbOps,
+				API_KEY_PROVIDERS.devin,
+			);
+			const jwt = `header.${Buffer.from(JSON.stringify({ exp: 2_000_000_000 })).toString("base64url")}.signature`;
+			for (const [name, apiKey, expiresAt] of [
+				["dated", jwt, 2_000_000_000_000],
+				["opaque", "opaque-session", null],
+			] as const) {
+				const response = await handler(post({ name, apiKey }));
+				expect(response.status).toBe(200);
+				const body = await response.json();
+				expect(body.account.tokenExpiresAt).toBe(
+					expiresAt ? new Date(expiresAt).toISOString() : null,
+				);
+				expect(
+					dbOps
+						.getDatabase()
+						.query("SELECT expires_at FROM accounts WHERE name=?")
+						.get(name),
+				).toEqual({ expires_at: expiresAt });
+			}
+		});
+		it("stores Devin session tokens only in api_key and defaults to included quota protection", async () => {
+			const handler = createApiKeyAccountAddHandler(
+				dbOps,
+				API_KEY_PROVIDERS.devin,
+			);
+			const response = await handler(
+				post({
+					name: "devin-free",
+					apiKey: "session-private",
+					modelMappings: { opus: "swe-2-high" },
+				}),
+			);
+			expect(response.status).toBe(200);
+			expect(row("devin-free")).toMatchObject({
+				provider: "devin",
+				api_key: "session-private",
+				access_token: null,
+				refresh_token: null,
+				custom_endpoint: null,
+				model_mappings: '{"opus":"swe-2-high"}',
+			});
+			expect(await response.text()).not.toContain("session-private");
+		});
 		it("writes the spec's provider string, not the spec key", async () => {
 			const handler = createApiKeyAccountAddHandler(
 				dbOps,

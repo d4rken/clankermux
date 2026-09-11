@@ -1,4 +1,6 @@
 import { Logger } from "@clankermux/logger";
+import type { AnthropicUsage } from "./types";
+import { mergeAnthropicUsage, translateAnthropicUsage } from "./usage";
 
 const log = new Logger("openai-responses-adapter");
 
@@ -12,8 +14,7 @@ interface State {
 	blockIndexToOutput: Map<number, number>;
 	textByBlock: Map<number, string>;
 	toolByBlock: Map<number, { callId: string; name: string; argsBuf: string }>;
-	inputTokens: number;
-	outputTokens: number;
+	usage: AnthropicUsage;
 	doneSent: boolean;
 	outputItems: Array<Record<string, unknown>>;
 	streamError: { type: string; message: string } | null;
@@ -55,11 +56,7 @@ function emitDone(
 				model: state.model,
 				status: "completed",
 				output: state.outputItems,
-				usage: {
-					input_tokens: state.inputTokens,
-					output_tokens: state.outputTokens,
-					total_tokens: state.inputTokens + state.outputTokens,
-				},
+				usage: translateAnthropicUsage(state.usage),
 			},
 		},
 		state,
@@ -74,10 +71,10 @@ function processEvent(
 ): void {
 	if (eventType === "message_start") {
 		const message = data.message as Record<string, unknown> | undefined;
-		const usage = message?.usage as Record<string, number> | undefined;
-		if (usage) {
-			state.inputTokens = usage.input_tokens ?? 0;
-		}
+		mergeAnthropicUsage(
+			state.usage,
+			message?.usage as Record<string, unknown> | undefined,
+		);
 
 		if (!state.hasSentCreated) {
 			state.hasSentCreated = true;
@@ -321,10 +318,10 @@ function processEvent(
 	}
 
 	if (eventType === "message_delta") {
-		const usage = data.usage as Record<string, number> | undefined;
-		if (usage) {
-			state.outputTokens = usage.output_tokens ?? 0;
-		}
+		mergeAnthropicUsage(
+			state.usage,
+			data.usage as Record<string, unknown> | undefined,
+		);
 		return;
 	}
 
@@ -353,11 +350,7 @@ function processEvent(
 					status: "failed",
 					error: { code: errType, message: errMsg },
 					output: state.outputItems,
-					usage: {
-						input_tokens: state.inputTokens,
-						output_tokens: state.outputTokens,
-						total_tokens: state.inputTokens + state.outputTokens,
-					},
+					usage: translateAnthropicUsage(state.usage),
 				},
 			},
 			state,
@@ -455,8 +448,7 @@ export function translateAnthropicStreamToResponses(
 		blockIndexToOutput: new Map(),
 		textByBlock: new Map(),
 		toolByBlock: new Map(),
-		inputTokens: 0,
-		outputTokens: 0,
+		usage: { input_tokens: 0, output_tokens: 0 },
 		doneSent: false,
 		outputItems: [],
 		streamError: null,

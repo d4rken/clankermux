@@ -7,6 +7,7 @@ import {
 	isScopedOnlyUnifiedRejection,
 	logError,
 	NETWORK,
+	PAUSE_REASON_NEEDS_REAUTH,
 	ProviderError,
 	resolveCodexTargetModel,
 	resolveModelMaxContextWindow,
@@ -22,11 +23,14 @@ import { withSanitizedProxyHeaders } from "@clankermux/http-common";
 import { Logger } from "@clankermux/logger";
 import { stripCacheControlFromOpenAIRequest } from "@clankermux/openai-formats";
 import {
+	DevinSessionAuthenticationError,
+	devinClient,
 	getFreshCapacity,
 	getProvider,
 	isAnthropicHardLimitStatus,
 	isAnthropicOrgPermissionDenied,
 	isAnthropicOutOfCredits,
+	isDevinSessionAuthenticationFailure,
 	usageCache,
 } from "@clankermux/providers";
 import {
@@ -1179,10 +1183,10 @@ export async function proxyWithAccount(
 
 		// Skip token refresh for synthetic paths (e.g. Codex count_tokens) that
 		// never reach the upstream network.
-		const isCodexCountTokens =
-			account.provider === "codex" &&
+		const isLocalCountTokens =
+			(account.provider === "codex" || account.provider === "devin") &&
 			url.pathname === "/v1/messages/count_tokens";
-		const accessToken = isCodexCountTokens
+		const accessToken = isLocalCountTokens
 			? undefined
 			: await getValidAccessToken(account, ctx);
 
@@ -1202,6 +1206,8 @@ export async function proxyWithAccount(
 		// is the only code that may legitimately set them (on a trusted internal URL).
 		headers.delete("x-clankermux-synthetic-response");
 		headers.delete("x-clankermux-synthetic-status");
+		headers.delete("x-clankermux-retry-after");
+		headers.delete("x-clankermux-upstream-model");
 		const targetUrl = provider.buildUrl(url.pathname, url.search, account);
 
 		// ── Native Responses passthrough (Stage A, request leg) ────────────────
@@ -1237,6 +1243,9 @@ export async function proxyWithAccount(
 		const requestInit: RequestInit & { duplex?: "half" } = {
 			method: req.method,
 			headers,
+			signal: options?.signal
+				? AbortSignal.any([req.signal, options.signal])
+				: req.signal,
 		};
 		if (nativeBodyText !== null) {
 			// Use a copy of the prepared headers: the shared `headers` object is
@@ -1253,13 +1262,25 @@ export async function proxyWithAccount(
 		}
 
 		const providerRequest = new Request(targetUrl, requestInit);
+		const attemptedDevinApiKey = account.api_key;
+		const attemptedDevinEndpoint = account.custom_endpoint ?? null;
 
 		let transformedRequest = provider.transformRequestBody
 			? await provider.transformRequestBody(providerRequest, account)
 			: providerRequest;
+		// Capture local provenance before request wrappers/clones lose its identity.
+		const devinSessionRejected =
+			account.provider === "devin" &&
+			isDevinSessionAuthenticationFailure(transformedRequest);
 
 		// Pre-strip cache_control for (account, model) pairs known to reject it
-		const transformedBodyText = await transformedRequest.clone().text();
+		// Binary transports may carry credentials in protobuf metadata. Never decode
+		// those bytes as loggable text; request recording retains canonical JSON.
+		const transformedBodyText = transformedRequest.headers
+			.get("content-type")
+			?.includes("application/json")
+			? await transformedRequest.clone().text()
+			: "";
 		let transformedBodyJson: Record<string, unknown> | null = null;
 		try {
 			transformedBodyJson = JSON.parse(transformedBodyText);
@@ -1287,7 +1308,9 @@ export async function proxyWithAccount(
 			});
 		}
 		const transformedModel =
-			(transformedBodyJson?.model as string | undefined) ?? "";
+			(transformedBodyJson?.model as string | undefined) ??
+			transformedRequest.headers.get("x-clankermux-upstream-model") ??
+			"";
 		activeUpstreamModel = transformedModel || null;
 
 		// ── Canonical overload-attribution model ────────────────────────────────
@@ -1335,7 +1358,7 @@ export async function proxyWithAccount(
 		// concurrent request already owns the half-open probe — fail over without
 		// touching upstream. Skipped for the synthetic Codex count_tokens path:
 		// it never reaches the network, so its local 200 must not close a bucket.
-		if (!isCodexCountTokens) {
+		if (!isLocalCountTokens) {
 			// Admission is family-scoped by the canonical attribution model (the
 			// model actually sent upstream, with the logical-model fallback when
 			// it resolves to no family) so the attempt is gated exactly like the
@@ -1401,7 +1424,16 @@ export async function proxyWithAccount(
 					),
 				);
 				liveUpstream = response;
-				return response;
+				// Preserve raw evidence above, then classify transport-level errors before retry policy.
+				const normalized = provider.normalizeUpstreamResponse
+					? await provider.normalizeUpstreamResponse(
+							response,
+							outgoing,
+							account,
+						)
+					: response;
+				liveUpstream = normalized;
+				return normalized;
 			};
 			const response = await send();
 			if (account.provider !== "zai") return response;
@@ -2465,6 +2497,9 @@ export async function proxyWithAccount(
 					const retryRequestInit: RequestInit & { duplex?: "half" } = {
 						method: req.method,
 						headers,
+						signal: options?.signal
+							? AbortSignal.any([req.signal, options.signal])
+							: req.signal,
 						body: new Uint8Array(patchedBody),
 						duplex: "half",
 					};
@@ -2479,9 +2514,11 @@ export async function proxyWithAccount(
 					// remap nextModel back to the primary model if it has no Claude family
 					// pattern. Force nextModel into the final request body.
 					try {
-						const transformedText = await retryTransformedRequest
-							.clone()
-							.text();
+						const transformedText = retryTransformedRequest.headers
+							.get("content-type")
+							?.includes("application/json")
+							? await retryTransformedRequest.clone().text()
+							: "";
 						const transformedBody = JSON.parse(transformedText);
 						if (transformedBody.model !== nextModel) {
 							transformedBody.model = nextModel;
@@ -2768,6 +2805,79 @@ export async function proxyWithAccount(
 		// refresh fails. Skipped for synthetic internal requests (keepalive replays,
 		// auto-refresh probes) and for accounts with no refreshable OAuth token.
 		if (response.status === 401) {
+			if (account.provider === "devin") {
+				const pauseConfirmedSession = async () => {
+					if (!attemptedDevinApiKey) return;
+					try {
+						const applied = await ctx.dbOps.pauseDevinAccountForReauth(
+							account.id,
+							attemptedDevinApiKey,
+							attemptedDevinEndpoint,
+						);
+						if (applied) {
+							account.paused = true;
+							account.pause_reason = PAUSE_REASON_NEEDS_REAUTH;
+						}
+					} catch {
+						log.warn(
+							`Could not pause Devin account ${account.name} after session rejection`,
+						);
+					}
+				};
+				if (devinSessionRejected) {
+					await pauseConfirmedSession();
+					return await fail({ kind: "auth" }, response);
+				}
+				if (
+					staleTokenRetryAttempt < STALE_TOKEN_MAX_RETRY &&
+					attemptedDevinApiKey &&
+					!isTrustedProbe("any")
+				) {
+					discardUpstreamBody(response);
+					liveUpstream = null;
+					let renewed = false;
+					try {
+						// Refresh the short-lived request JWT. The upstream session itself
+						// has no supported automatic renewal mechanism.
+						await devinClient.refreshAccount(
+							attemptedDevinApiKey,
+							attemptedDevinEndpoint ?? undefined,
+							options?.signal
+								? AbortSignal.any([req.signal, options.signal])
+								: req.signal,
+						);
+						renewed = true;
+					} catch (error) {
+						if (error instanceof DevinSessionAuthenticationError)
+							await pauseConfirmedSession();
+						else
+							log.warn(
+								`Devin metadata renewal failed for account ${account.name}; failing over`,
+							);
+					}
+					if (renewed) {
+						settleOverloadProbe("abandoned", "stale_token_retry");
+						return await proxyWithAccount(
+							req,
+							url,
+							account,
+							requestMeta,
+							requestBodyBuffer,
+							_createBodyStream,
+							failoverAttempts,
+							ctx,
+							modelOverride,
+							apiKeyId,
+							apiKeyName,
+							requestBodyContext,
+							returnRateLimitedResponseOnExhaustion,
+							options,
+							staleTokenRetryAttempt + 1,
+						);
+					}
+				}
+				return await fail({ kind: "auth" }, response);
+			}
 			const now = Date.now();
 			const cooledDown =
 				now - (lastStaleTokenRefreshAt.get(account.id) ?? 0) >=
@@ -3288,8 +3398,8 @@ export async function proxyForcedAccount(
 		// to return an advisory local estimate. Without this, force-routing a
 		// Codex account with an expired token would return a local auth error
 		// instead of the synthesized 200/400.
-		const isCodexCountTokens =
-			account.provider === "codex" &&
+		const isLocalCountTokens =
+			(account.provider === "codex" || account.provider === "devin") &&
 			url.pathname === "/v1/messages/count_tokens";
 
 		// Resolve the access token via the same path the normal flow uses. If it
@@ -3297,7 +3407,7 @@ export async function proxyForcedAccount(
 		// NOT null/failover (R2). Routed through forwardToClient so the local
 		// failure is recorded under the forced account (history intact).
 		let accessToken = "";
-		if (!isCodexCountTokens) {
+		if (!isLocalCountTokens) {
 			try {
 				accessToken = await getValidAccessToken(account, ctx);
 			} catch (tokenErr) {
@@ -3334,11 +3444,14 @@ export async function proxyForcedAccount(
 		// path) so a client cannot forge a synthetic count_tokens response.
 		headers.delete("x-clankermux-synthetic-response");
 		headers.delete("x-clankermux-synthetic-status");
+		headers.delete("x-clankermux-retry-after");
+		headers.delete("x-clankermux-upstream-model");
 		const targetUrl = provider.buildUrl(url.pathname, url.search, account);
 
 		const requestInit: RequestInit & { duplex?: "half" } = {
 			method: req.method,
 			headers,
+			signal: req.signal,
 		};
 		if (effectiveBodyBuffer) {
 			requestInit.body = new Uint8Array(effectiveBodyBuffer);
@@ -3358,7 +3471,7 @@ export async function proxyForcedAccount(
 		// Captured at the fetch, like every attempt on the normal path: this
 		// function issues exactly one, and the evidence must not depend on what
 		// happens to the response afterwards.
-		const rawResponse = captureUpstreamAttempt(
+		let rawResponse = captureUpstreamAttempt(
 			transformedRequest,
 			await makeProxyRequest(
 				transformedRequest,
@@ -3374,6 +3487,14 @@ export async function proxyForcedAccount(
 			ctx,
 		);
 		liveForcedUpstream = rawResponse;
+		if (provider.normalizeUpstreamResponse) {
+			rawResponse = await provider.normalizeUpstreamResponse(
+				rawResponse,
+				transformedRequest,
+				account,
+			);
+			liveForcedUpstream = rawResponse;
+		}
 
 		// Inject request metadata into response headers so providers can read
 		// stream intent and request ID (mirrors the normal path).

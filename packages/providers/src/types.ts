@@ -73,6 +73,13 @@ export interface Provider {
 	 */
 	parseRateLimit(response: Response): RateLimitInfo;
 
+	/** Normalize a binary/native transport before HTTP error and failover policy runs. */
+	normalizeUpstreamResponse?(
+		response: Response,
+		request: Request,
+		account: Account,
+	): Promise<Response>;
+
 	/**
 	 * Process the response before returning to client
 	 */

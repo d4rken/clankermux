@@ -80,6 +80,7 @@ import {
 	createHeapStatsHandler,
 	createRssHandler,
 } from "./handlers/debug";
+import { createDevinAccountHandlers } from "./handlers/devin-accounts";
 import { createHealthHandler } from "./handlers/health";
 import { createLogsStreamHandler } from "./handlers/logs";
 import { createLogsHistoryHandler } from "./handlers/logs-history";
@@ -200,6 +201,7 @@ export class APIRouter {
 		const runwayHandler = createRunwayHandler(dbOps);
 		const pacingHandler = createPacingHandler(dbOps, config, getStrategy);
 		const accountAddHandler = createAccountAddHandler(dbOps, config);
+		const devinHandlers = createDevinAccountHandlers(dbOps);
 		const zaiAccountAddHandler = createZaiAccountAddHandler(dbOps);
 		const minimaxAccountAddHandler = createMinimaxAccountAddHandler(dbOps);
 		const alibabaCodingPlanAccountAddHandler =
@@ -331,6 +333,25 @@ export class APIRouter {
 		this.handlers.set("POST:/api/accounts/kilo", (req) =>
 			kiloAccountAddHandler(req),
 		);
+		this.handlers.set("POST:/api/accounts/devin", devinHandlers.add);
+		this.handlers.set(
+			"POST:/api/accounts/devin/reauth/start",
+			devinHandlers.reauthStart,
+		);
+		this.handlers.set(
+			"POST:/api/accounts/devin/reauth/complete",
+			devinHandlers.reauthComplete,
+		);
+		this.handlers.set(
+			"POST:/api/accounts/devin/reauth/token",
+			devinHandlers.reauthToken,
+		);
+		this.handlers.set("POST:/api/accounts/devin/login", devinHandlers.login);
+		this.handlers.set(
+			"POST:/api/accounts/devin/login/complete",
+			devinHandlers.complete,
+		);
+		this.handlers.set("POST:/api/providers/devin/models", devinHandlers.models);
 		this.handlers.set("POST:/api/accounts/openrouter", (req) =>
 			openrouterAccountAddHandler(req),
 		);

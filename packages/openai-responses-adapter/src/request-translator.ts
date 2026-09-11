@@ -130,19 +130,27 @@ export function translateRequestToAnthropic(
 	req: ResponsesRequest & { input: ResponseItem[] },
 ): AnthropicRequest {
 	const messages: AnthropicMessage[] = [];
-	const developerBlocks: string[] = [];
+	const instructionBlocks: string[] = [];
 
 	for (const item of req.input) {
-		if (item.type === "message") {
-			const content: AnthropicContent[] = item.content.map((c) =>
-				translateContentItem(c),
-			);
-			// developer role is used by Codex CLI for system-level instructions.
-			// Anthropic /v1/messages does not accept this role in the messages array
-			// so we extract the text and merge it into the system prompt instead.
-			if ((item.role as string) === "developer") {
+		if (!item || typeof item !== "object") continue;
+		if (
+			(item.type === "message" || item.type === undefined) &&
+			"role" in item &&
+			["user", "assistant", "system", "developer"].includes(item.role)
+		) {
+			// Responses easy messages may omit type and use string content (Pi/SDKs).
+			const content: AnthropicContent[] =
+				typeof item.content === "string"
+					? [{ type: "text", text: item.content }]
+					: Array.isArray(item.content)
+						? item.content.map((c) => translateContentItem(c))
+						: [];
+			if (content.length === 0) continue;
+			// Instruction roles belong in the canonical system prompt.
+			if (item.role === "developer" || item.role === "system") {
 				for (const c of content) {
-					if (c.type === "text") developerBlocks.push(c.text);
+					if (c.type === "text") instructionBlocks.push(c.text);
 				}
 				continue;
 			}
@@ -209,10 +217,10 @@ export function translateRequestToAnthropic(
 		max_tokens: req.max_output_tokens ?? 4096,
 	};
 
-	// Merge developer-role blocks and req.instructions into system prompt.
+	// Merge instruction messages and req.instructions into the system prompt.
 	const systemParts: string[] = [];
-	if (developerBlocks.length > 0)
-		systemParts.push(developerBlocks.join("\n\n"));
+	if (instructionBlocks.length > 0)
+		systemParts.push(instructionBlocks.join("\n\n"));
 	if (req.instructions !== undefined) systemParts.push(req.instructions);
 	if (systemParts.length > 0) result.system = systemParts.join("\n\n");
 

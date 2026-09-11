@@ -54,6 +54,49 @@ function fakeCost(): {
 }
 
 describe("usage-collector", () => {
+	describe("parsed SSE errors", () => {
+		it("remembers an error type without requiring usage or a message and keeps the first error", () => {
+			const state = createUsageState();
+			feedChunk(
+				state,
+				sse("error", { type: "error", error: { type: "permission_error" } }),
+				1000,
+			);
+			feedChunk(
+				state,
+				sse("error", { type: "error", error: { type: "api_error" } }),
+				1001,
+			);
+			expect(state.sseErrorType).toBe("permission_error");
+		});
+		it("does not treat literal error envelopes in generated text as stream errors", () => {
+			const state = createUsageState();
+			feedChunk(
+				state,
+				sse("content_block_delta", {
+					type: "content_block_delta",
+					delta: {
+						type: "text_delta",
+						text: 'event: error\ndata: {"type":"error","error":{"type":"api_error"}}',
+					},
+				}),
+				1000,
+			);
+			expect(state.sseErrorType).toBeNull();
+		});
+		it("uses a bounded generic reason for errors without a usable type", () => {
+			const state = createUsageState();
+			feedChunk(
+				state,
+				sse("error", {
+					type: "error",
+					error: { type: "private response text" },
+				}),
+				1000,
+			);
+			expect(state.sseErrorType).toBe("upstream_stream_error");
+		});
+	});
 	describe("Anthropic-style stream", () => {
 		it("computes totals from message_start + message_delta and ignores content_block_delta", async () => {
 			const state = createUsageState();

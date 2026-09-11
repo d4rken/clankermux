@@ -14,6 +14,28 @@ import {
 // 2024-01-03 noon UTC, matching account-status.test.ts.
 const NOW = Date.UTC(2024, 0, 3, 12, 0, 0);
 
+it("explains a Devin quota pause without implying a charge or relabeling manual pauses", () => {
+	const quota = render(
+		makeAccount({
+			provider: "devin",
+			paused: true,
+			pauseReason: "overage",
+			autoFallbackEnabled: true,
+		}),
+	);
+	expect(quota).toContain("Paused: included quota");
+	expect(quota).toContain("exhausted or unavailable");
+	const manual = render(
+		makeAccount({
+			provider: "devin",
+			paused: true,
+			pauseReason: "manual",
+			autoFallbackEnabled: true,
+		}),
+	);
+	expect(manual).not.toContain("Paused: included quota");
+});
+
 function makeAccount(
 	overrides: Partial<AccountResponse> = {},
 ): AccountResponse {
@@ -821,4 +843,15 @@ it("explains the request-path org restriction even when quota has headroom", () 
 	);
 	expect(html).toContain("Organization access disabled");
 	expect(html).not.toContain("Subscription expired");
+});
+
+it("shows Devin quota override state with provider-specific spending consequences", () => {
+	const html = render(
+		makeAccount({ provider: "devin", autoPauseOnOverageEnabled: false }),
+	);
+	expect(html).toContain("Unverified quota spend");
+	expect(html).toContain("prepaid credits");
+	expect(html).toContain("CLI, Desktop, and cloud");
+	expect(html).not.toContain("Anthropic reporting overage");
+	expect(html).not.toContain("Auto-refresh");
 });

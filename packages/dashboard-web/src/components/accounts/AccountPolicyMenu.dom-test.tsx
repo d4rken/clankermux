@@ -77,13 +77,16 @@ afterEach(async () => {
  * renders static markup with the dropdown closed and omits the optional
  * handlers, so the menu's automation group is otherwise never exercised.
  */
-async function openAutomationMenu(account: Account): Promise<void> {
+async function mountAccountItem(
+	account: Account,
+	onRefreshUsage: (account: Account) => Promise<void> = async () => {},
+): Promise<void> {
 	await mount(
 		<AccountListItem
 			account={account}
 			onPauseToggle={noop}
 			onForceResetRateLimit={noop}
-			onRefreshUsage={async () => {}}
+			onRefreshUsage={onRefreshUsage}
 			onRemove={noop}
 			onRename={noop}
 			onPriorityChange={noop}
@@ -99,7 +102,10 @@ async function openAutomationMenu(account: Account): Promise<void> {
 			onAutoApplyResetOnWeeklyLimitToggle={noop}
 		/>,
 	);
+}
 
+async function openAutomationMenu(account: Account): Promise<void> {
+	await mountAccountItem(account);
 	const trigger = document.querySelector<HTMLButtonElement>(
 		'button[title="More actions"]',
 	);
@@ -235,4 +241,61 @@ describe("AccountListItem — automation menu copy", () => {
 			},
 		]);
 	});
+});
+
+it("exposes the Devin quota override without session automation", async () => {
+	await openAutomationMenu(
+		makeAccount({ provider: "devin", autoPauseOnOverageEnabled: true }),
+	);
+	const items = automationItems();
+	expect(items).toHaveLength(2);
+	expect(items[0]).toMatchObject({
+		label: "Auto-recover quota",
+		checked: false,
+	});
+	expect(items[0]?.title).toContain("metadata");
+	expect(items[1]).toMatchObject({
+		label: "Allow requests beyond verified included quota",
+		checked: false,
+	});
+	expect(items[1]?.title).toContain("unknown");
+	expect(items[1]?.title).toContain("prepaid credits");
+	expect(items[1]?.title).not.toContain("Anthropic");
+});
+
+it("refreshes Devin metadata from its account card and stays busy until the read completes", async () => {
+	const account = makeAccount({
+		provider: "devin",
+		identityEmail: "devin@example.test",
+		identityExternalId: "devin-account-123",
+		identityPlanTier: "free",
+	});
+	const calls: Account[] = [];
+	let finish!: () => void;
+	const pending = new Promise<void>((resolve) => {
+		finish = resolve;
+	});
+	await mountAccountItem(account, async (value) => {
+		calls.push(value);
+		await pending;
+	});
+	const button = document.querySelector<HTMLButtonElement>(
+		'button[title="Refresh Devin account and usage metadata (does not consume inference quota)"]',
+	);
+	expect(button).not.toBeNull();
+	if (!button) throw new Error("Missing Devin refresh action");
+	expect(button.disabled).toBe(false);
+	await act(async () => button.click());
+	expect(calls).toEqual([account]);
+	expect(button.disabled).toBe(true);
+	expect(button.querySelector("svg")?.getAttribute("class")).toContain(
+		"animate-spin",
+	);
+	await act(async () => button.click());
+	expect(calls).toHaveLength(1);
+	await act(async () => finish());
+	expect(button.disabled).toBe(false);
+	expect(button.querySelector("svg")?.getAttribute("class")).not.toContain(
+		"animate-spin",
+	);
 });

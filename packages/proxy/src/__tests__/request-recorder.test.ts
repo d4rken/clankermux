@@ -634,6 +634,14 @@ describe("RequestRecorder — normal terminal end", () => {
 });
 
 describe("RequestRecorder — billingType derivation", () => {
+	it("classifies Devin subscription usage as plan", async () => {
+		const h = makeHarness();
+		h.recorder.begin(makeMeta({ providerName: "devin" }));
+		h.recorder.attachUsageSummary("req-1", makeSummary());
+		h.recorder.finishTransport("req-1", "success");
+		await h.flush();
+		expect(h.dbOps.saveRequestCalls[0].billingType).toBe("plan");
+	});
 	it("marks overage when the overage-in-use header is true", async () => {
 		const h = makeHarness();
 		h.recorder.begin(

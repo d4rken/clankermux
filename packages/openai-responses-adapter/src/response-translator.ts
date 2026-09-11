@@ -4,6 +4,7 @@ import type {
 	OutputMessageItem,
 	ResponsesResponse,
 } from "./types";
+import { translateAnthropicUsage } from "./usage";
 
 export function translateAnthropicResponseToResponses(
 	resp: AnthropicResponse,
@@ -45,10 +46,6 @@ export function translateAnthropicResponseToResponses(
 		model,
 		status: "completed",
 		output,
-		usage: {
-			input_tokens: resp.usage.input_tokens,
-			output_tokens: resp.usage.output_tokens,
-			total_tokens: resp.usage.input_tokens + resp.usage.output_tokens,
-		},
+		usage: translateAnthropicUsage(resp.usage),
 	};
 }

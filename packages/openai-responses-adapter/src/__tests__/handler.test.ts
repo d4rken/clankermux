@@ -700,6 +700,17 @@ describe("handleResponsesRequest", () => {
 			);
 		}
 
+		test("keeps easy-message input unchanged for native Responses accounts", async () => {
+			const input = [
+				{ role: "system", content: "Use tools." },
+				{ role: "user", content: [{ type: "input_text", text: "Read x" }] },
+			];
+			const ctx = await captureContext({ input, instructions: "Be concise." });
+			const native = JSON.parse(ctx?.nativeBody ?? "{}");
+			expect(native.input).toEqual(input);
+			expect(native.instructions).toBe("Be concise.");
+		});
+
 		test("attaches the original body for stream:true", async () => {
 			const ctx = await captureContext({
 				stream: true,

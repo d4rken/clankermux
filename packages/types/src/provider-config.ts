@@ -12,6 +12,7 @@ export const PROVIDER_NAMES = {
 	OPENROUTER: "openrouter",
 	ALIBABA_CODING_PLAN: "alibaba-coding-plan",
 	CODEX: "codex",
+	DEVIN: "devin",
 	QWEN: "qwen",
 	OLLAMA: "ollama",
 	OLLAMA_CLOUD: "ollama-cloud",
@@ -44,6 +45,12 @@ export interface ProviderConfig {
  * Provider-specific configuration mapping
  */
 export const PROVIDER_CONFIG: Record<ProviderName, ProviderConfig> = {
+	[PROVIDER_NAMES.DEVIN]: {
+		requiresSessionTracking: false,
+		supportsUsageTracking: true,
+		supportsOAuth: false,
+		defaultEndpoint: "https://server.codeium.com",
+	},
 	[PROVIDER_NAMES.ANTHROPIC]: {
 		requiresSessionTracking: true, // Anthropic OAuth has 5-hour usage windows
 		supportsUsageTracking: true, // Anthropic OAuth supports usage tracking

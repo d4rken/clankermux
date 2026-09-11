@@ -1,4 +1,4 @@
-import { getAppVersionSync } from "@clankermux/core";
+import { getAppVersionSync, PAUSE_REASON_NEEDS_REAUTH } from "@clankermux/core";
 import {
 	type Account,
 	type AccountIdentity,
@@ -34,6 +34,15 @@ function identityBindParams(identity: AccountIdentity): Array<string | null> {
 interface StoredTiers {
 	plan_tier: string | null;
 	rate_limit_tier: string | null;
+}
+
+export interface DevinCredentialReplacement {
+	apiKey: string;
+	expiresAt: number | null;
+	identity: AccountIdentity;
+	expectedApiKey: string | null;
+	expectedEndpoint: string | null;
+	expectedExternalId: string | null;
 }
 
 export class AccountRepository extends BaseRepository<Account> {
@@ -625,6 +634,80 @@ export class AccountRepository extends BaseRepository<Account> {
 	 * token) re-pausing an account that was just re-authenticated — after reauth
 	 * the stored refresh token differs, so the guarded UPDATE no-ops.
 	 */
+	/** Replace only the credential generation verified by the reconnect flow. */
+	async reconnectDevinAccount(
+		accountId: string,
+		replacement: DevinCredentialReplacement,
+	): Promise<boolean> {
+		const {
+			apiKey,
+			expiresAt,
+			identity,
+			expectedApiKey,
+			expectedEndpoint,
+			expectedExternalId,
+		} = replacement;
+		const now = Date.now();
+		const changes = await this.writeIdentityWithTierHistory(
+			accountId,
+			`UPDATE accounts SET api_key = ?, expires_at = ?,
+    ${IDENTITY_COALESCE_SET}, identity_captured_at = ?, identity_profile_fetched_at = ?,
+    paused = CASE WHEN pause_reason = ? THEN 0 ELSE paused END,
+    pause_reason = CASE WHEN pause_reason = ? THEN NULL ELSE pause_reason END
+    WHERE id = ? AND provider = 'devin' AND api_key IS ? AND custom_endpoint IS ? AND identity_external_id IS ?`,
+			[
+				apiKey,
+				expiresAt,
+				...identityBindParams(identity),
+				now,
+				now,
+				PAUSE_REASON_NEEDS_REAUTH,
+				PAUSE_REASON_NEEDS_REAUTH,
+				accountId,
+				expectedApiKey,
+				expectedEndpoint,
+				expectedExternalId,
+			],
+			identity,
+		);
+		return changes > 0;
+	}
+
+	/** Record only observed token expiry; never manufacture a session lifetime. */
+	async updateDevinSessionExpiry(
+		accountId: string,
+		expectedApiKey: string,
+		expectedEndpoint: string | null,
+		expiresAt: number | null,
+	): Promise<boolean> {
+		return (
+			(await this.runWithChanges(
+				`UPDATE accounts SET expires_at = ? WHERE id = ? AND provider = 'devin' AND api_key = ? AND custom_endpoint IS ?`,
+				[expiresAt, accountId, expectedApiKey, expectedEndpoint],
+			)) > 0
+		);
+	}
+
+	/** A stale authentication failure must never pause a reconnected or manually paused account. */
+	async pauseDevinAccountForReauth(
+		accountId: string,
+		expectedApiKey: string,
+		expectedEndpoint: string | null,
+	): Promise<boolean> {
+		return (
+			(await this.runWithChanges(
+				`UPDATE accounts SET paused = 1, pause_reason = ? WHERE id = ? AND provider = 'devin'
+    AND COALESCE(paused, 0) = 0 AND api_key = ? AND custom_endpoint IS ?`,
+				[
+					PAUSE_REASON_NEEDS_REAUTH,
+					accountId,
+					expectedApiKey,
+					expectedEndpoint,
+				],
+			)) > 0
+		);
+	}
+
 	async pauseIfActive(
 		accountId: string,
 		reason: string,

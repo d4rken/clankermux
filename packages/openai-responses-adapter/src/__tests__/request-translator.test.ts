@@ -1,8 +1,96 @@
 import { describe, expect, test } from "bun:test";
 import { translateRequestToAnthropic } from "../request-translator";
-import type { ResponsesRequest } from "../types";
+import type { ResponseItem, ResponsesRequest } from "../types";
 
 describe("translateRequestToAnthropic", () => {
+	test.each([
+		{ role: "user" },
+		{ role: "user", content: null },
+		{ type: "message", role: "user", content: 42 },
+		{ role: "tool", content: "Unsupported role" },
+		{ type: "message", role: "tool", content: "Unsupported role" },
+		null,
+		42,
+	])("does not forward malformed message input %j", (invalid) => {
+		const result = translateRequestToAnthropic({
+			model: "swe-1-6-slow",
+			input: [
+				invalid,
+				{ role: "user", content: "Valid prompt" },
+			] as unknown as ResponseItem[],
+		});
+		expect(result.messages).toEqual([
+			{ role: "user", content: [{ type: "text", text: "Valid prompt" }] },
+		]);
+	});
+
+	test("preserves Pi easy messages with omitted type and string system content", () => {
+		const result = translateRequestToAnthropic({
+			model: "swe-1-6-slow",
+			input: [
+				{ role: "system", content: "Use the supplied tools." },
+				{
+					role: "user",
+					content: [{ type: "input_text", text: "Read total.cjs" }],
+				},
+				{ role: "assistant", content: "I will read it." },
+				{
+					type: "function_call",
+					call_id: "call_read",
+					name: "read",
+					arguments: '{"path":"total.cjs"}',
+				},
+				{
+					type: "function_call_output",
+					call_id: "call_read",
+					output: "source",
+				},
+			],
+		});
+		expect(result.system).toBe("Use the supplied tools.");
+		expect(result.messages).toEqual([
+			{ role: "user", content: [{ type: "text", text: "Read total.cjs" }] },
+			{
+				role: "assistant",
+				content: [
+					{ type: "text", text: "I will read it." },
+					{
+						type: "tool_use",
+						id: "call_read",
+						name: "read",
+						input: { path: "total.cjs" },
+					},
+				],
+			},
+			{
+				role: "user",
+				content: [
+					{ type: "tool_result", tool_use_id: "call_read", content: "source" },
+				],
+			},
+		]);
+	});
+
+	test("merges system and developer messages with top-level instructions", () => {
+		const result = translateRequestToAnthropic({
+			model: "swe-1-6-slow",
+			instructions: "Final instruction",
+			input: [
+				{
+					type: "message",
+					role: "system",
+					content: [{ type: "input_text", text: "System" }],
+				},
+				{ role: "developer", content: "Developer" },
+				{ type: "message", role: "user", content: "Hello" },
+			],
+		});
+		expect(result.system).toBe("System\n\nDeveloper\n\nFinal instruction");
+		expect(result.messages).toEqual([
+			{ role: "user", content: [{ type: "text", text: "Hello" }] },
+		]);
+	});
+
 	test("simple user message → single messages entry", () => {
 		const req: ResponsesRequest = {
 			model: "claude-3-5-sonnet-20241022",

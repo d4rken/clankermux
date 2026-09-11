@@ -200,3 +200,40 @@ describe("AccountIdentityPanel", () => {
 		);
 	});
 });
+
+it("shows Devin organization name and keeps organization ID separate in identity details", () => {
+	const account = makeAccount({
+		provider: "devin",
+		identityEmail: "member@example.test",
+		identityExternalId: "user-123456",
+		identityOrganizationName: "Acme Team",
+		identityPlanTier: "Pro",
+		usageData: {
+			kind: "devin",
+			organizationId: "org-123456",
+		} as import("@clankermux/types").DevinUsageData,
+	});
+	const line = renderToStaticMarkup(<AccountIdentityLine account={account} />);
+	expect(line).toContain("member@example.test · Acme Team · Pro");
+	expect(line).toContain("Account ID: user-123456");
+	expect(line).toContain("Organization ID: org-123456");
+	const panel = renderToStaticMarkup(
+		<AccountIdentityPanel account={account} />,
+	);
+	expect(panel).toContain("Organization ID: org-123456");
+	expect(panel).toContain("#user-123456");
+});
+
+it("keeps Devin organization-only metadata visible without claiming a user ID", () => {
+	const account = makeAccount({
+		provider: "devin",
+		usageData: {
+			kind: "devin",
+			organizationId: "org-only-123",
+		} as import("@clankermux/types").DevinUsageData,
+	});
+	const html = renderToStaticMarkup(<AccountIdentityLine account={account} />);
+	expect(html).toContain("Organization #org-only");
+	expect(html).toContain("Organization ID: org-only-123");
+	expect(html).not.toContain("Account ID:");
+});

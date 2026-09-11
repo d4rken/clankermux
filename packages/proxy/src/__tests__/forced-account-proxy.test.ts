@@ -1,7 +1,17 @@
-import { afterEach, beforeEach, describe, expect, it, mock } from "bun:test";
+import {
+	afterEach,
+	beforeEach,
+	describe,
+	expect,
+	it,
+	mock,
+	spyOn,
+} from "bun:test";
+import { devinClient } from "@clankermux/providers";
 import type { Account } from "@clankermux/types";
 import type { ProxyContext } from "../handlers";
 import { setForcedAccount } from "../handlers";
+import { devinInfo, devinReply } from "./devin-fixtures";
 
 mock.module("../inline-worker", () => ({
 	EMBEDDED_WORKER_CODE: "",
@@ -153,6 +163,83 @@ function makeRequest(headers: Record<string, string> = {}) {
 }
 
 describe("force-account proxy override", () => {
+	it("normalizes Devin Connect responses on forced routing and retains canonical request payload", async () => {
+		const account = makeAccount({
+			id: "forced-devin",
+			provider: "devin",
+			api_key: "private-session-token",
+		});
+		const { ctx } = makeContext([account]);
+		const auth = spyOn(devinClient, "getAccount").mockResolvedValue(
+			devinInfo(),
+		);
+		setForcedAccount(account.id);
+		globalThis.fetch = mock(async () => devinReply()) as never;
+		try {
+			const req = makeRequest();
+			const response = await callHandleProxy(req, new URL(req.url), ctx);
+			expect(response.status).toBe(200);
+			expect((await response.json()).content[0].text).toBe("hello from SWE-2");
+			expect(globalThis.fetch).toHaveBeenCalledTimes(1);
+			const recorded = JSON.stringify(
+				(ctx.requestRecorder.begin as ReturnType<typeof mock>).mock.calls,
+			);
+			expect(recorded).not.toContain("private-session-token");
+			expect(recorded).not.toContain("test-jwt-secret");
+		} finally {
+			auth.mockRestore();
+		}
+	});
+
+	it("forwards a forced Devin401 without metadata renewal, replay, or account mutation", async () => {
+		const account = makeAccount({ id: "forced-devin401", provider: "devin" });
+		const { ctx } = makeContext([account]);
+		const lookup = spyOn(devinClient, "getAccount").mockResolvedValue(
+			devinInfo(),
+		);
+		const renew = spyOn(devinClient, "refreshAccount").mockResolvedValue(
+			devinInfo(),
+		);
+		const pause = mock(async () => true);
+		ctx.dbOps.pauseDevinAccountForReauth = pause;
+		setForcedAccount(account.id);
+		globalThis.fetch = mock(
+			async () => new Response(null, { status: 401 }),
+		) as never;
+		try {
+			const req = makeRequest();
+			const response = await callHandleProxy(req, new URL(req.url), ctx);
+			expect(response.status).toBe(401);
+			await response.text();
+			expect(globalThis.fetch).toHaveBeenCalledTimes(1);
+			expect(renew).not.toHaveBeenCalled();
+			expect(pause).not.toHaveBeenCalled();
+		} finally {
+			lookup.mockRestore();
+			renew.mockRestore();
+		}
+	});
+	it("returns a forced Devin quota trailer as 429 without replay", async () => {
+		const account = makeAccount({
+			id: "forced-devin-quota",
+			provider: "devin",
+		});
+		const { ctx } = makeContext([account]);
+		const auth = spyOn(devinClient, "getAccount").mockResolvedValue(
+			devinInfo(),
+		);
+		setForcedAccount(account.id);
+		globalThis.fetch = mock(async () => devinReply(true)) as never;
+		try {
+			const req = makeRequest();
+			const response = await callHandleProxy(req, new URL(req.url), ctx);
+			expect(response.status).toBe(429);
+			expect((await response.json()).error.type).toBe("rate_limit_error");
+			expect(globalThis.fetch).toHaveBeenCalledTimes(1);
+		} finally {
+			auth.mockRestore();
+		}
+	});
 	it("returns an organization-denied 403 without cooldown or failover", async () => {
 		const a = makeAccount({
 			id: "forced-org",

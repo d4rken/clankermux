@@ -122,6 +122,8 @@ export interface UsageState {
 	 * verdict; `onEnd` already passes `endedCleanly: true` unconditionally.
 	 */
 	sawMessageStop: boolean;
+	/** First parsed in-band error; independent of quota/cooldown classification. */
+	sseErrorType: string | null;
 	/**
 	 * Which Responses terminal was seen FIRST, or null if none has arrived.
 	 *
@@ -205,6 +207,7 @@ export function createUsageState(): UsageState {
 		lineBuffer: "",
 		currentEvent: undefined,
 		sawMessageStop: false,
+		sseErrorType: null,
 		responsesTerminalKind: null,
 		sawMessageStart: false,
 		skippingOverlongLine: false,
@@ -256,6 +259,7 @@ interface SseStopDetails {
 
 interface SseParsed {
 	type?: string;
+	error?: { type?: unknown };
 	model?: string;
 	message?: {
 		model?: string;
@@ -367,6 +371,19 @@ function applySseData(
 	state: UsageState,
 	now: number,
 ): void {
+	// Native Responses terminals can carry type:"error"; retain their terminal
+	// classification and final usage instead of consuming them as generic errors.
+	if (
+		eventType === "error" ||
+		(parsed.type === "error" && responsesTerminalKindOf(eventType) === null)
+	) {
+		const type = parsed.error?.type;
+		state.sseErrorType ??=
+			typeof type === "string" && /^[a-z][a-z0-9_]{0,127}$/.test(type)
+				? type
+				: "upstream_stream_error";
+		return;
+	}
 	const isMessageStart =
 		parsed.type === "message_start" || eventType === "message_start";
 	if (isMessageStart) {
@@ -621,6 +638,8 @@ function processLine(state: UsageState, rawLine: string, now: number): void {
 		!dataMayCarryUsage(parsed.data) &&
 		!parsed.data.includes("delta") &&
 		!parsed.data.includes("content_block") &&
+		state.currentEvent !== "error" &&
+		!parsed.data.includes('"error"') &&
 		responsesTerminalKindOf(state.currentEvent) === null
 	) {
 		return;

@@ -929,6 +929,7 @@ export const PROVIDER_DEFAULT_MODEL_MAPPINGS: Partial<
 	Record<string, Record<ModelFamily, string>>
 > = {
 	qwen: DEFAULT_QWEN_MODEL_BY_FAMILY,
+	devin: { opus: "swe-2", sonnet: "swe-2", haiku: "swe-2", fable: "swe-2" },
 };
 
 /**

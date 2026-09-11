@@ -218,3 +218,20 @@ describe("AccountListItem — compact quota cards", () => {
 		expect(html).toContain("rounded-lg border p-item");
 	});
 });
+
+it("renders Devin account identity and a metadata-only refresh action", () => {
+	const html = render(
+		makeAccount({
+			provider: "devin",
+			identityEmail: "devin@example.test",
+			identityExternalId: "devin-account-123",
+			identityPlanTier: "free",
+		}),
+	);
+	expect(html).toContain("devin@example.test · Free");
+	expect(html).toContain("Account ID: devin-account-123");
+	expect(html).toContain("#devin-ac");
+	expect(html).toContain(
+		"Refresh Devin account and usage metadata (does not consume inference quota)",
+	);
+});

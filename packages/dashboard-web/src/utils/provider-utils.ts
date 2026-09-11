@@ -27,6 +27,13 @@ export function providerSupportsAutoFeatures(provider: string): boolean {
 	);
 }
 
+/** Devin quota recovery uses metadata; its fixed windows do not need warmup. */
+export function providerSupportsAutoFallback(provider: string): boolean {
+	return (
+		provider === PROVIDER_NAMES.DEVIN || providerSupportsAutoFeatures(provider)
+	);
+}
+
 /**
  * Check if a provider supports custom billing type configuration
  * (anthropic-compatible and openai-compatible providers)
@@ -55,7 +62,8 @@ export function providerShowsWeeklyUsage(provider: string): boolean {
 	return (
 		provider === PROVIDER_NAMES.ANTHROPIC ||
 		provider === PROVIDER_NAMES.CODEX ||
-		provider === PROVIDER_NAMES.ZAI
+		provider === PROVIDER_NAMES.ZAI ||
+		provider === PROVIDER_NAMES.DEVIN
 	);
 }
 

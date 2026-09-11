@@ -1,7 +1,8 @@
 import { describe, expect, it } from "bun:test";
 import type { Config } from "@clankermux/config";
 import type { DatabaseOperations } from "@clankermux/database";
-import type { AccountResponse } from "@clankermux/types";
+import { usageCache } from "@clankermux/providers";
+import type { AccountResponse, DevinUsageData } from "@clankermux/types";
 import { createAccountsListHandler } from "../accounts";
 
 // Row shape mirrors the handler's inline SELECT (snake_case, identity columns
@@ -122,6 +123,66 @@ const config = {
 } as unknown as Config;
 
 describe("accounts list — identity fields round-trip", () => {
+	it("shows fresh Devin identity and plan from usage without persisting on GET", async () => {
+		const id = "devin-live-identity";
+		const handler = createAccountsListHandler(
+			makeDbOps([
+				makeAccountRow({
+					id,
+					provider: "devin",
+					identity_email: "old@example.com",
+					identity_plan_tier: "Free",
+					identity_organization_name: "Old Team",
+				}),
+			]),
+			config,
+		);
+		const usage: DevinUsageData = {
+			kind: "devin",
+			quotaBased: true,
+			daily: null,
+			weekly: null,
+			email: "devin@example.com",
+			accountId: "devin-user-123",
+			planName: "Pro",
+			organizationId: "org-new",
+			organizationName: "New Team",
+			canUseCli: true,
+			overageBalanceUsd: 0,
+			includedCreditsRemaining: null,
+		};
+		try {
+			usageCache.set(id, usage);
+			const [account] = (await (await handler()).json()) as AccountResponse[];
+			expect(account).toMatchObject({
+				identityEmail: "devin@example.com",
+				identityExternalId: "devin-user-123",
+				identityPlanTier: "Pro",
+				identityOrganizationName: "New Team",
+				identityRateLimitTier: null,
+			});
+			expect(account?.identityCapturedAt).toBeGreaterThan(0);
+			usageCache.set(id, {
+				...usage,
+				organizationName: undefined,
+				organizationId: undefined,
+			});
+			const [legacySnapshot] = (await (
+				await handler()
+			).json()) as AccountResponse[];
+			expect(legacySnapshot?.identityOrganizationName).toBe("Old Team");
+			usageCache.delete(id);
+			const [fallback] = (await (await handler()).json()) as AccountResponse[];
+			expect(fallback).toMatchObject({
+				identityEmail: "old@example.com",
+				identityPlanTier: "Free",
+				identityOrganizationName: "Old Team",
+			});
+		} finally {
+			usageCache.delete(id);
+		}
+	});
+
 	it("maps the snake_case identity columns to camelCase response fields", async () => {
 		const capturedAt = 1_784_000_000_000;
 		const profileFetchedAt = 1_784_000_100_000;

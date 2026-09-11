@@ -10,6 +10,7 @@ export { AnthropicReauthDialog } from "./AnthropicReauthDialog";
 export { AuthorizationHandoff } from "./AuthorizationHandoff";
 export { CodexReauthDialog } from "./CodexReauthDialog";
 export { DeleteConfirmationDialog } from "./DeleteConfirmationDialog";
+export { DevinReauthDialog } from "./DevinReauthDialog";
 export { QwenReauthDialog } from "./QwenReauthDialog";
 export { RateLimitProgress } from "./RateLimitProgress";
 export { RecordPaymentDialog } from "./RecordPaymentDialog";

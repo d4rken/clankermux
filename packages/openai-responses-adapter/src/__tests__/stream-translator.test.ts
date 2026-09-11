@@ -40,6 +40,90 @@ function sseEvent(type: string, data: unknown): string {
 }
 
 describe("translateAnthropicStreamToResponses", () => {
+	for (const terminal of ["message_stop", "error"] as const) {
+		test(`merges final input and cache counts before ${terminal}`, async () => {
+			const events = await collectSseEvents(
+				translateAnthropicStreamToResponses(
+					makeAnthropicStream([
+						sseEvent("message_start", {
+							message: { usage: { input_tokens: 0, output_tokens: 0 } },
+						}),
+						sseEvent("message_delta", {
+							usage: {
+								input_tokens: 12,
+								output_tokens: 8,
+								cache_read_input_tokens: 100,
+								cache_creation_input_tokens: 30,
+							},
+						}),
+						sseEvent("message_delta", { usage: { output_tokens: 9 } }),
+						sseEvent("message_delta", { delta: { stop_reason: "end_turn" } }),
+						sseEvent(
+							terminal,
+							terminal === "error"
+								? { error: { type: "api_error", message: "interrupted" } }
+								: {},
+						),
+					]),
+					"resp_final_usage",
+					"swe-2",
+				),
+			);
+			expect(events.at(-1)?.event).toBe(
+				terminal === "error" ? "response.failed" : "response.completed",
+			);
+			expect(events.at(-1)?.data).toMatchObject({
+				response: {
+					usage: {
+						input_tokens: 142,
+						output_tokens: 9,
+						total_tokens: 151,
+						input_tokens_details: {
+							cached_tokens: 100,
+							cache_write_tokens: 30,
+						},
+					},
+				},
+			});
+		});
+	}
+	test("preserves initial cache usage and output when final deltas omit those fields", async () => {
+		const events = await collectSseEvents(
+			translateAnthropicStreamToResponses(
+				makeAnthropicStream([
+					sseEvent("message_start", {
+						message: {
+							usage: {
+								input_tokens: 10,
+								output_tokens: 1,
+								cache_read_input_tokens: 40,
+								cache_creation_input_tokens: 20,
+							},
+						},
+					}),
+					sseEvent("message_delta", {
+						usage: { input_tokens: 15, output_tokens: 7 },
+					}),
+					sseEvent("message_delta", {
+						usage: { input_tokens: 0, cache_creation_input_tokens: 0 },
+					}),
+					sseEvent("message_stop", {}),
+				]),
+				"resp_partial_usage",
+				"swe-2",
+			),
+		);
+		expect(events.at(-1)?.data).toMatchObject({
+			response: {
+				usage: {
+					input_tokens: 40,
+					output_tokens: 7,
+					total_tokens: 47,
+					input_tokens_details: { cached_tokens: 40, cache_write_tokens: 0 },
+				},
+			},
+		});
+	});
 	for (const newline of ["\n", "\r\n"]) {
 		test(`translates fragmented multiline SSE (${JSON.stringify(newline)})`, async () => {
 			const frames = [
