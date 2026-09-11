@@ -133,3 +133,16 @@ describe("sanitizeProxyHeaders", () => {
 		expect(h.get("content-type")).toBe("application/json");
 	});
 });
+
+it("keeps adapter model metadata internal while preserving public response headers", () => {
+	const original = new Headers({
+		"x-clankermux-resolved-model": "gpt-6-astra",
+		"x-request-id": "upstream-id",
+		"content-type": "text/event-stream",
+	});
+	const sanitized = sanitizeProxyHeaders(original);
+	expect(sanitized.has("x-clankermux-resolved-model")).toBe(false);
+	expect(sanitized.get("x-request-id")).toBe("upstream-id");
+	expect(sanitized.get("content-type")).toBe("text/event-stream");
+	expect(original.get("x-clankermux-resolved-model")).toBe("gpt-6-astra");
+});

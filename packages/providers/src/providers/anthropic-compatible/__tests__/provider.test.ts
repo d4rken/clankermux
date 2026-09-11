@@ -264,7 +264,7 @@ describe("AnthropicCompatibleProvider", () => {
 				await provider.transformRequestBody(mockRequest);
 			const body = await transformedRequest.json();
 
-			expect(body.model).toBe("custom-model-v1");
+			expect(body.model).toBe("claude-3-sonnet");
 		});
 
 		test("should not transform request when model not in mapping", async () => {
@@ -416,21 +416,6 @@ describe("AnthropicCompatibleProvider", () => {
 
 			expect(zaiProvider.name).toBe("anthropic-zai");
 			expect(minimaxProvider.name).toBe("anthropic-minimax");
-		});
-
-		test("should create provider with model mapping", () => {
-			const mappings = {
-				"claude-3-sonnet": "custom-model",
-			};
-
-			const provider = PresetProviders.createWithModelMapping(
-				"https://custom.api.com",
-				mappings,
-				"authorization",
-			);
-
-			expect(provider.getConfig().modelMappings).toEqual(mappings);
-			expect(provider.getConfig().authHeader).toBe("authorization");
 		});
 	});
 

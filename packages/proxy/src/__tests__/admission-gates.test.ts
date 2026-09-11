@@ -1,3 +1,4 @@
+import { installGateRoute } from "./fixtures/gate-routing";
 /**
  * Unit tests for the per-request admission gates extracted out of handleProxy.
  *
@@ -13,7 +14,7 @@ import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { SessionStrategy } from "@clankermux/load-balancer";
 import { usageCache } from "@clankermux/providers";
 import type { Account, ComboSlotInfo, RequestMeta } from "@clankermux/types";
-import { createAdmissionGates } from "../admission-gates";
+import { createAdmissionGates as makeAdmissionGates } from "../admission-gates";
 import {
 	recordFamilyWeeklyExhausted,
 	resetFamilyWeeklyMemoForTests,
@@ -26,8 +27,16 @@ const HOUR = 3_600_000;
 const DAY = 24 * HOUR;
 const MODEL = "claude-sonnet-4-5";
 
-function makeAccount(overrides: Partial<Account> = {}): Account {
-	return {
+const gateAccounts = new Map<string, Account>();
+const gateTargets = new Map<string, string>();
+beforeEach(() => {
+	gateAccounts.clear();
+	gateTargets.clear();
+});
+function makeAccount(
+	overrides: Partial<Account> & { resolvedModel?: string } = {},
+): Account {
+	const account = {
 		id: "acc-1",
 		name: "account",
 		provider: "anthropic",
@@ -64,6 +73,10 @@ function makeAccount(overrides: Partial<Account> = {}): Account {
 		refresh_token_issued_at: null,
 		...overrides,
 	} as Account;
+	gateAccounts.set(account.id, account);
+	if (overrides.resolvedModel)
+		gateTargets.set(account.id, overrides.resolvedModel);
+	return account;
 }
 
 function makeRequestMeta(overrides: Partial<RequestMeta> = {}): RequestMeta {
@@ -93,6 +106,25 @@ type GateOverrides = {
 	isSyntheticProbeRequest?: boolean;
 	config?: ProxyContext["config"];
 };
+
+function createAdmissionGates(input: Parameters<typeof makeAdmissionGates>[0]) {
+	const gates = makeAdmissionGates(input);
+	return new Proxy(gates, {
+		get(target, key) {
+			const value = Reflect.get(target, key);
+			if (typeof value !== "function") return value;
+			return (...args: unknown[]) => {
+				installGateRoute(
+					input.requestMeta,
+					[...gateAccounts.values()],
+					input.effectiveRequestModel ?? MODEL,
+					gateTargets,
+				);
+				return value(...args);
+			};
+		},
+	});
+}
 
 function makeGates(overrides: GateOverrides = {}) {
 	return createAdmissionGates({
@@ -187,7 +219,7 @@ describe("createAdmissionGates", () => {
 				id: "codex-1",
 				name: "codex-1",
 				provider: "codex",
-				model_mappings: JSON.stringify({ sonnet: "gpt-5.3-codex-spark" }),
+				resolvedModel: "gpt-5.3-codex-spark",
 			});
 			const gates = makeGates({ gateTokenEstimate: 150_000 });
 
@@ -196,50 +228,9 @@ describe("createAdmissionGates", () => {
 
 			expect(gates.contextExcludedAccounts).toHaveLength(1);
 			expect(gates.contextExcludedAccounts[0].account.id).toBe("codex-1");
-			expect(gates.contextExcludedAccounts[0].model).toBe(MODEL);
-		});
-	});
-
-	describe("(b) requestMeta is read LIVE, not snapshotted", () => {
-		it("stops applying slot overrides once requestMeta.comboName is cleared", () => {
-			const account = makeAccount({ id: "acc-a" });
-			const requestMeta = makeRequestMeta({ comboName: "combo-x" });
-			const gates = makeGates({
-				requestMeta,
-				initialComboInfo: {
-					comboName: "combo-x",
-					slots: [{ accountId: "acc-a", modelOverride: "claude-opus-4-5" }],
-				},
-			});
-
-			expect(gates.modelForAccount(account)).toBe("claude-opus-4-5");
-
-			// The combo-fallback path nulls comboName on the SAME meta object.
-			requestMeta.comboName = null;
-			expect(gates.modelForAccount(account)).toBe(MODEL);
-		});
-	});
-
-	describe("(c) combo requests skip the soft-demotion reorder", () => {
-		it("returns the candidate order untouched when combo info is present", () => {
-			const a = makeAccount({ id: "acc-a", name: "a" });
-			const b = makeAccount({ id: "acc-b", name: "b" });
-			// Usage that WOULD demote `a` on the non-combo path.
-			seedUsage("acc-a", 0, 95);
-			seedUsage("acc-b", 20, 20);
-			const gates = makeGates();
-
-			const candidates = [a, b];
-			const reordered = gates.applySoftDemotionReorder(candidates, {
-				slots: [{ accountId: "acc-a", modelOverride: MODEL }],
-			});
-
-			expect(reordered).toBe(candidates);
-			expect(gates.softDemotionReasons.size).toBe(0);
-			// Sanity: without the combo the same input DOES reorder.
-			expect(
-				gates.applySoftDemotionReorder(candidates).map((x) => x.id),
-			).toEqual(["acc-b", "acc-a"]);
+			expect(gates.contextExcludedAccounts[0].model).toBe(
+				"gpt-5.3-codex-spark",
+			);
 		});
 	});
 
@@ -270,32 +261,6 @@ describe("createAdmissionGates", () => {
 			expect(gates.softDemotionReasons.get("acc-c")).toBe("pool liveness");
 			expect(gates.softDemotionReasons.has("acc-b")).toBe(false);
 			expect(gates.softDemotionReasons.has("acc-d")).toBe(false);
-		});
-	});
-
-	describe("(e) modelForAccount family-resolvability fallback", () => {
-		it("falls back to the logical model when the mapped model resolves to no family", () => {
-			const mapped = makeAccount({
-				id: "acc-a",
-				model_mappings: JSON.stringify({ sonnet: "qwen/qwen3-coder" }),
-			});
-			expect(makeGates().modelForAccount(mapped)).toBe(MODEL);
-		});
-
-		it("keeps the mapped model when it DOES resolve to a family", () => {
-			const mapped = makeAccount({
-				id: "acc-a",
-				model_mappings: JSON.stringify({ sonnet: "claude-haiku-4-5" }),
-			});
-			expect(makeGates().modelForAccount(mapped)).toBe("claude-haiku-4-5");
-		});
-
-		it("returns null when there is no logical model at all", () => {
-			expect(
-				makeGates({ effectiveRequestModel: null }).modelForAccount(
-					makeAccount({ id: "acc-a" }),
-				),
-			).toBeNull();
 		});
 	});
 
@@ -352,35 +317,6 @@ describe("createAdmissionGates", () => {
 				"acc-b",
 			]);
 			expect(gates.softDemotionReasons.size).toBe(0);
-		});
-	});
-
-	describe("(h) the combo snapshot behind modelForAccount is frozen", () => {
-		it("ignores combo info handed to a LATER gate call", () => {
-			const account = makeAccount({ id: "acc-a" });
-			const requestMeta = makeRequestMeta({ comboName: "combo-x" });
-			const gates = makeGates({
-				requestMeta,
-				initialComboInfo: {
-					comboName: "combo-x",
-					slots: [{ accountId: "acc-a", modelOverride: "claude-opus-4-5" }],
-				},
-			});
-
-			// A hold wake re-runs the CW / family gates with FRESH combo info …
-			const wakeComboInfo = {
-				slots: [{ accountId: "acc-a", modelOverride: "claude-haiku-4-5" }],
-			};
-			expect(gates.applyContextWindowGate([account], wakeComboInfo)).toEqual([
-				account,
-			]);
-			expect(gates.applyFamilyWeeklyGate([account], wakeComboInfo)).toEqual([
-				account,
-			]);
-
-			// … while modelForAccount keeps the CONSTRUCTION-time snapshot. Existing
-			// behavior, pinned deliberately rather than "fixed".
-			expect(gates.modelForAccount(account)).toBe("claude-opus-4-5");
 		});
 	});
 
@@ -570,25 +506,7 @@ describe("createAdmissionGates", () => {
 
 		// Combo slots are positional; reordering desyncs the account-to-slot
 		// mapping, which is why the soft reorder skips combos too.
-		it("skips combo requests entirely", () => {
-			const account = makeAccount({ id: "acc-a" });
-			const other = makeAccount({ id: "acc-b" });
-			memo("acc-a");
 
-			const gates = makeGates({ effectiveRequestModel: FABLE });
-			const candidates = [account, other];
-
-			expect(
-				gates.applyFamilyMemoDemotion(candidates, {
-					slots: [{ accountId: "acc-a", modelOverride: FABLE }],
-				}),
-			).toBe(candidates);
-		});
-
-		// The reason this runs LAST rather than inside the family gate: stable
-		// partitions do not compose. With the memo applied first, the soft
-		// demotion partition can keep the memo'd account and demote the healthy
-		// sibling, promoting exactly the account a 429 just refused.
 		it("survives a soft-demotion reorder that would otherwise promote it", () => {
 			const memod = makeAccount({ id: "acc-a", name: "a" });
 			const healthy = makeAccount({ id: "acc-b", name: "b" });
@@ -619,9 +537,7 @@ describe("affinity after durable request exclusions", () => {
 				name: id,
 				provider: "codex",
 				priority: i ? 1 : 0,
-				model_mappings: JSON.stringify({
-					sonnet: i ? "gpt-6-astra" : "gpt-5.3-codex-spark",
-				}),
+				resolvedModel: i ? "gpt-6-astra" : "gpt-5.3-codex-spark",
 			}),
 		);
 		let preferred = "large-a";
@@ -721,7 +637,7 @@ describe("Astra subscription context admission", () => {
 	it("admits the reported failing request for native and mapped Astra models", () => {
 		const account = makeAccount({
 			provider: "codex",
-			model_mappings: JSON.stringify({ sonnet: "gpt-6-astra" }),
+			resolvedModel: "gpt-6-astra",
 		});
 		for (const model of ["gpt-6-astra", "gpt-6-astra-2026-09-03", MODEL]) {
 			const gates = makeGates({
@@ -732,17 +648,14 @@ describe("Astra subscription context admission", () => {
 		}
 	});
 
-	it("uses the combo override's maximum while retaining other models' limits", () => {
-		const account = makeAccount({ provider: "codex" });
-		const gates = makeGates({
-			effectiveRequestModel: MODEL,
-			gateTokenEstimate: 300_000,
+	it("keeps a resolved target fixed across later fixture edits", () => {
+		const account = makeAccount({
+			provider: "codex",
+			resolvedModel: "gpt-5.3-codex-spark",
 		});
+		const gates = makeGates({ gateTokenEstimate: 150_000 });
 		expect(gates.applyContextWindowGate([account])).toEqual([]);
-		expect(
-			gates.applyContextWindowGate([account], {
-				slots: [{ accountId: account.id, modelOverride: "gpt-6-astra" }],
-			}),
-		).toEqual([account]);
+		gateTargets.set(account.id, "gpt-6-astra");
+		expect(gates.applyContextWindowGate([account])).toEqual([]);
 	});
 });

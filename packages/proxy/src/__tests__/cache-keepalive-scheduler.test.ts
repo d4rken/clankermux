@@ -12,7 +12,7 @@
 import { afterEach, beforeEach, describe, expect, it, mock } from "bun:test";
 import type { Config } from "@clankermux/config";
 import * as realCore from "@clankermux/core";
-import type { ProxyContext } from "../proxy";
+import type { ProxyContext } from "./fixtures/routing-harness";
 
 // ---------------------------------------------------------------------------
 // Module mocks — must be declared before importing the scheduler so that bun's

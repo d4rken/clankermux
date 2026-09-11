@@ -12,7 +12,7 @@ import type { Account } from "@clankermux/types";
 import {
 	isSyntheticInternalRequest,
 	isTrustedSyntheticProbe,
-} from "../handlers/proxy-operations";
+} from "./fixtures/routing-harness";
 
 // ---------------------------------------------------------------------------
 // Shared fixtures
@@ -357,7 +357,7 @@ describe("response-handler — shouldRecordRequest suppresses auto-refresh probe
 
 describe("proxy.ts — pool-exhausted path skips recording for auto-refresh probes", () => {
 	it("does not record (recorder) when pool is exhausted and request is an auto-refresh probe", async () => {
-		const { handleProxy } = await import("../proxy");
+		const { handleProxy } = await import("./fixtures/routing-harness");
 
 		const recordSynthetic = mock(() => {});
 
@@ -366,7 +366,7 @@ describe("proxy.ts — pool-exhausted path skips recording for auto-refresh prob
 				select: () => [],
 			} as never,
 			dbOps: {
-				getAllAccounts: mock(async () => []),
+				getAllAccounts: mock(async () => [makeAccount({ paused: true })]),
 				getActiveComboForFamily: mock(async () => null),
 			} as never,
 			runtime: { port: 8080, clientId: "test" } as never,
@@ -417,7 +417,7 @@ describe("proxy.ts — pool-exhausted path skips recording for auto-refresh prob
 	});
 
 	it("SPOOF GUARD: DOES record when the auto-refresh header arrives on an external request", async () => {
-		const { handleProxy } = await import("../proxy");
+		const { handleProxy } = await import("./fixtures/routing-harness");
 
 		const recordSynthetic = mock(() => {});
 
@@ -426,7 +426,7 @@ describe("proxy.ts — pool-exhausted path skips recording for auto-refresh prob
 				select: () => [],
 			} as never,
 			dbOps: {
-				getAllAccounts: mock(async () => []),
+				getAllAccounts: mock(async () => [makeAccount({ paused: true })]),
 				getActiveComboForFamily: mock(async () => null),
 			} as never,
 			runtime: { port: 8080, clientId: "test" } as never,
@@ -470,7 +470,7 @@ describe("proxy.ts — pool-exhausted path skips recording for auto-refresh prob
 	});
 
 	it("records via requestRecorder.recordSynthetic when pool is exhausted and request is NOT an auto-refresh probe", async () => {
-		const { handleProxy } = await import("../proxy");
+		const { handleProxy } = await import("./fixtures/routing-harness");
 
 		const recordSynthetic = mock(() => {});
 
@@ -494,7 +494,7 @@ describe("proxy.ts — pool-exhausted path skips recording for auto-refresh prob
 				},
 			} as never,
 			dbOps: {
-				getAllAccounts: mock(async () => []),
+				getAllAccounts: mock(async () => [makeAccount({ paused: true })]),
 				getActiveComboForFamily: mock(async () => null),
 			} as never,
 			runtime: { port: 8080, clientId: "test" } as never,

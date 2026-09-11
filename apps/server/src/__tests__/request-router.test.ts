@@ -233,6 +233,20 @@ describe("mounted agent traffic", () => {
 		expect(calls.dispatch.map((c) => c.pathname)).toEqual(["/v1/messages"]);
 	});
 
+	it("answers authenticated Claude Code hello locally without dispatch", async () => {
+		const { deps, calls } = makeDeps();
+		const response = await routeRequest(
+			makeRequest("/wire/anthropic/api/hello", {
+				method: "HEAD",
+				headers: withKey,
+			}),
+			deps,
+		);
+		expect(response.status).toBe(204);
+		expect(calls.dispatch).toHaveLength(0);
+		expect(calls.auth.length).toBeGreaterThan(0);
+	});
+
 	it("routes the OpenAI mount's own routes to their handlers", async () => {
 		const { deps, calls } = makeDeps();
 

@@ -2,11 +2,7 @@ export {
 	RequestBodyContext,
 	type RequestJsonBody,
 } from "../request-body-context";
-export {
-	getComboSlotInfo,
-	selectAccountsForRequest,
-	setComboSlotInfo,
-} from "./account-selector";
+export { selectAccountsForRequest } from "./account-selector";
 export {
 	getAnthropicBurstThrottleUntil,
 	isAnthropicBurstThrottleActive,
@@ -52,7 +48,6 @@ export {
 	type ProxyAttemptOptions,
 	type ProxyAttemptOutcome,
 	proxyForcedAccount,
-	proxyUnauthenticated,
 	proxyWithAccount,
 } from "./proxy-operations";
 export { ERROR_MESSAGES, type ProxyContext } from "./proxy-types";

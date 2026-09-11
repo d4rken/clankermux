@@ -10,7 +10,7 @@ class TestProvider extends BaseAnthropicCompatibleProvider {
 it.each([
 	"__proto__",
 	"constructor",
-])("forwards unknown static mapping key %s", async (model) => {
+])("preserves a literal target despite obsolete static mapping key %s", async (model) => {
 	for (const configured of [false, true]) {
 		const provider = new TestProvider({
 			modelMappings: configured ? { [model]: "target" } : { sonnet: "target" },
@@ -21,8 +21,6 @@ it.each([
 			body: JSON.stringify({ model, messages: [] }),
 		});
 		const transformed = await provider.transformRequestBody(request);
-		expect((await transformed.json()).model).toBe(
-			configured ? "target" : model,
-		);
+		expect((await transformed.json()).model).toBe(model);
 	}
 });

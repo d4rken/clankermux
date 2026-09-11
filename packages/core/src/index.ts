@@ -94,6 +94,10 @@ export {
 	type ShareCandidate,
 	type ShareRule,
 } from "./capacity-runway-scenario";
+// The standing claim-series audit, on the same terms as the quota-drift
+// estimator below: pure, DB-free, and reachable from http-api only through this
+// root entry.
+export * from "./claim-audit";
 export {
 	BUFFER_SIZES,
 	CACHE,
@@ -108,6 +112,7 @@ export {
 	REFRESH_TOKEN_REAUTH_WARNING_MS,
 	TIME_CONSTANTS,
 } from "./constants";
+export { isDebugEnabled, readEnv } from "./env";
 export {
 	isInvalidGrantMessage,
 	logError,
@@ -122,27 +127,6 @@ export {
 	ValidationError,
 } from "./errors";
 export {
-	type ClassPacing,
-	classIsUnread,
-	computeFiveHourPacing,
-	type FiveHourPacing,
-} from "./five-hour-pacing";
-
-export * from "./lifecycle";
-
-// Export types for model mappings - defined inline in model-mappings.ts
-export type ModelMapping = { [anthropicModel: string]: string | string[] };
-export type ModelMappingData = {
-	endpoint?: string;
-	modelMappings?: ModelMapping;
-};
-export type ModelFallback = { [modelFamily: string]: string };
-// The standing claim-series audit, on the same terms as the quota-drift
-// estimator below: pure, DB-free, and reachable from http-api only through this
-// root entry.
-export * from "./claim-audit";
-export { isDebugEnabled, readEnv } from "./env";
-export {
 	drainEventLoopSnapshotMaxLagMs,
 	EVENT_LOOP_ERROR_THRESHOLD_MS,
 	EVENT_LOOP_TICK_INTERVAL_MS,
@@ -154,12 +138,19 @@ export {
 	stopEventLoopMonitor,
 } from "./event-loop-monitor";
 export {
+	type ClassPacing,
+	classIsUnread,
+	computeFiveHourPacing,
+	type FiveHourPacing,
+} from "./five-hour-pacing";
+export {
 	type IntervalConfig,
 	intervalManager,
 	registerCleanup,
 	registerHeartbeat,
 	registerUIRefresh,
 } from "./interval-manager";
+export * from "./lifecycle";
 export {
 	usageObservedAtMs,
 	WEEKLY_RED_MIN_WINDOW_AGE_MS,
@@ -183,28 +174,19 @@ export {
 	getAllowedModelsMessage,
 	getEndpointUrl,
 	getModelFamily,
-	getModelList,
-	getModelMappings,
 	IMAGE_TOKEN_ESTIMATE,
 	isProtectedFamily,
 	isValidClaudeModel,
 	KNOWN_PATTERNS,
 	MODEL_CONTEXT_WINDOWS,
 	type ModelFamily,
-	mapModelName,
 	measureBodyForEstimate,
 	measureContentBlock,
 	PROTECTED_FAMILY,
-	PROVIDER_DEFAULT_MODEL_MAPPINGS,
 	parseCustomEndpointData,
-	parseModelFallbacks,
-	parseModelMappings,
-	resolveCodexTargetModel,
 	resolveModelContextWindow,
 	resolveModelMaxContextWindow,
 	SAFETY_MARGIN,
-	validateAndSanitizeModelFallbacks,
-	validateAndSanitizeModelMappings,
 } from "./model-mappings";
 export {
 	CLAUDE_MODEL_IDS,
@@ -290,6 +272,7 @@ export { providerDisplayName } from "./provider-display";
 export * from "./quota-drift";
 export * from "./rate-limit-status";
 export * from "./request-events";
+export * from "./routing";
 export {
 	classifyScopedFamilyEvidence,
 	type ScopedFamilyEvidence,

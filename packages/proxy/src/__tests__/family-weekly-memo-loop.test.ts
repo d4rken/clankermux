@@ -26,7 +26,7 @@ import { resetRateLimitProbeGatesForTests } from "../handlers/rate-limit-cooldow
 import { clearProviderOverloadCooldown } from "../provider-overload-cooldown";
 
 async function callHandleProxy(req: Request, url: URL, ctx: ProxyContext) {
-	const { handleProxy } = await import("../proxy");
+	const { handleProxy } = await import("./fixtures/routing-harness");
 	return handleProxy(req, url, ctx);
 }
 

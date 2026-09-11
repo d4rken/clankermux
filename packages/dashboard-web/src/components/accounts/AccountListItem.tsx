@@ -160,7 +160,7 @@ interface AccountListItemProps {
 	onAutoApplyResetCreditsToggle?: (account: Account) => void;
 	onAutoApplyResetOnWeeklyLimitToggle?: (account: Account) => void;
 	onCustomEndpointChange?: (account: Account) => void;
-	onModelMappingsChange?: (account: Account) => void;
+	onModelPermissionsChange?: (account: Account) => void;
 	onReauth?: (account: Account) => void;
 	onAnthropicReauth?: (account: Account) => void;
 	onCodexReauth?: (account: Account) => void;
@@ -191,7 +191,7 @@ export function AccountListItem({
 	onAutoApplyResetCreditsToggle,
 	onAutoApplyResetOnWeeklyLimitToggle,
 	onCustomEndpointChange,
-	onModelMappingsChange,
+	onModelPermissionsChange,
 	onReauth,
 	onAnthropicReauth,
 	onCodexReauth,
@@ -318,8 +318,8 @@ export function AccountListItem({
 							onClick={() => onForceAccount(account)}
 							title={
 								isForced
-									? "Forcing all traffic here — click to release"
-									: "Force all traffic to this account"
+									? "Restricting requests to this destination — click to release"
+									: "Restrict requests to this account"
 							}
 						>
 							<Crosshair className="h-4 w-4" />
@@ -479,7 +479,7 @@ export function AccountListItem({
 									Reset session stickiness
 								</DropdownMenuItem>
 							)}
-							{(onCustomEndpointChange || onModelMappingsChange) && (
+							{(onCustomEndpointChange || onModelPermissionsChange) && (
 								<DropdownMenuSeparator />
 							)}
 							{onCustomEndpointChange && (
@@ -502,24 +502,13 @@ export function AccountListItem({
 									)}
 								</DropdownMenuItem>
 							)}
-							{onModelMappingsChange && (
+							{onModelPermissionsChange && (
 								<DropdownMenuItem
-									onClick={() => onModelMappingsChange(account)}
-									title={
-										account.modelMappings
-											? `Model mappings configured (${Object.keys(account.modelMappings).length} mappings)`
-											: "Configure model mappings"
-									}
+									onClick={() => onModelPermissionsChange(account)}
+									title="Manage permitted models"
 								>
-									<Hash
-										className={`mr-item h-4 w-4 ${account.modelMappings ? "text-primary" : ""}`}
-									/>
-									Model Mappings
-									{account.modelMappings && (
-										<span className="ml-auto text-xs text-muted-foreground">
-											{Object.keys(account.modelMappings).length}
-										</span>
-									)}
+									<Hash className="mr-item h-4 w-4" />
+									Permitted Models
 								</DropdownMenuItem>
 							)}
 							{hasReauth && <DropdownMenuSeparator />}

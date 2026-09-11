@@ -1,3 +1,4 @@
+import { configureLiteralRoute } from "./fixtures/routing-harness";
 /**
  * Integration tests for the context-window hold feature.
  *
@@ -20,7 +21,7 @@ import {
 mock.module("../inline-worker", () => ({ EMBEDDED_WORKER_CODE: "" }));
 
 async function callHandleProxy(req: Request, url: URL, ctx: ProxyContext) {
-	const { handleProxy } = await import("../proxy");
+	const { handleProxy } = await import("./fixtures/routing-harness");
 	return handleProxy(req, url, ctx);
 }
 
@@ -668,8 +669,8 @@ describe("context-window hold", () => {
 		expect(error.type).toBe("client_closed_request");
 	});
 
-	it("last-resort: checks the combo slot's smaller window, not the family default", async () => {
-		// Account default opus→gpt-5.5 (272k), combo slot overrides to
+	it("last-resort: checks the literal route's smaller window, not the family default", async () => {
+		// Account default opus→gpt-5.5 (272k), literal route overrides to
 		// gpt-5.3-codex-spark (128k). A ~150k request is excluded by the gate and
 		// also exceeds spark's FULL 128k window → the unmargined check must reject
 		// (using the override, not the 272k family default) and NOT attempt Codex.
@@ -683,20 +684,12 @@ describe("context-window hold", () => {
 			model_mappings: JSON.stringify({ opus: "gpt-5.5" }),
 		});
 		const ctx = makeFullContext([codex]);
-		(
-			ctx.dbOps as unknown as {
-				getActiveComboForFamily: ReturnType<typeof mock>;
-			}
-		).getActiveComboForFamily = mock(async () => ({
-			name: "test-combo",
-			slots: [
-				{
-					account_id: "codex-combo",
-					model: "gpt-5.3-codex-spark",
-					enabled: true,
-				},
-			],
-		}));
+		await configureLiteralRoute(
+			ctx,
+			"claude-opus-4-7",
+			codex.id,
+			"gpt-5.3-codex-spark",
+		);
 
 		let fetchCount = 0;
 		globalThis.fetch = mock(async () => {

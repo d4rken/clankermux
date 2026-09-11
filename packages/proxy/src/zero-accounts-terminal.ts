@@ -1,3 +1,5 @@
+import { getAttemptTarget } from "./resolved-route";
+import { eligibleRouteAccounts } from "./routing-service";
 /**
  * The ZERO-ACCOUNTS TERMINAL: everything `handleProxy` does once every gate has
  * run and no candidate account survives.
@@ -22,14 +24,10 @@
  * request state it mutates belongs to its caller.
  */
 
-import {
-	codexAccountFitsRequestUnmargined,
-	mapModelName,
-	NETWORK,
-} from "@clankermux/core";
+import { codexAccountFitsRequestUnmargined, NETWORK } from "@clankermux/core";
 import { Logger } from "@clankermux/logger";
 import { getFreshCapacity, usageCache } from "@clankermux/providers";
-import type { Account, ComboSlotInfo, RequestMeta } from "@clankermux/types";
+import type { Account, RequestMeta } from "@clankermux/types";
 import type {
 	AdmissionGates,
 	ProviderOverloadedAccount,
@@ -47,7 +45,6 @@ import {
 	createPoolExhaustedResponse,
 	createUsageThrottledResponse,
 	ERROR_MESSAGES,
-	getComboSlotInfo,
 	isAnthropicBurstThrottleActive,
 	isOAuthAnthropicAccount,
 	type ProxyContext,
@@ -59,10 +56,7 @@ import {
 } from "./handlers";
 // Direct leaf import (not via the `handlers` barrel) — see the module comment.
 import { createClientAbortResponse } from "./handlers/client-abort-response";
-import {
-	getProviderOverloadUntil,
-	resolveOverloadAttributionModel,
-} from "./provider-overload-cooldown";
+import { getProviderOverloadUntil } from "./provider-overload-cooldown";
 import {
 	CW_HOLD_MAX_MS,
 	CW_HOLD_MAX_MS_NO_CODEX_FALLBACK,
@@ -94,7 +88,6 @@ export interface ZeroAccountsOutcomeDeps {
 	finalCreateBodyStream: () => ReadableStream<Uint8Array> | undefined;
 	effectiveRequestModel: string | null;
 	gateTokenEstimate: number;
-	initialComboInfo: ComboSlotInfo | null;
 	/** The strategy's pre-gate selection (empty when selection itself failed). */
 	selectedAccounts: Account[];
 	/** Accounts the usage-throttle gate parked. */
@@ -160,7 +153,6 @@ export async function resolveZeroAccountsOutcome(
 		finalCreateBodyStream,
 		effectiveRequestModel,
 		gateTokenEstimate,
-		initialComboInfo,
 		selectedAccounts,
 		throttledAccounts,
 		providerAvailableAccounts,
@@ -175,25 +167,8 @@ export async function resolveZeroAccountsOutcome(
 		attemptThroughProbeGate,
 	} = deps;
 
-	// The model whose overload bucket an attempt on THIS account would trip, and
-	// therefore the bucket every overload deadline here must read. Mirrors
-	// recovery-holds.ts: the request's logical model alone would consult the
-	// wrong family for an account that maps it (e.g. sonnet -> opus), so a hold
-	// would look eligible against a clear bucket while the attempt runs into an
-	// open one.
-	//
-	// The combo override comes from the CURRENT combo info, not the frozen
-	// `initialComboInfo`: the cooled-sibling detection below runs AFTER
-	// holdForNonCodexRecovery, whose wake re-runs selection and can replace or
-	// clear the combo state.
-	const overloadAttributionModelFor = (account: Account): string | null => {
-		const combo = requestMeta.comboName ? getComboSlotInfo(requestMeta) : null;
-		const slot = combo?.slots.find((s) => s.accountId === account.id);
-		const logical = slot?.modelOverride ?? effectiveRequestModel;
-		return logical
-			? resolveOverloadAttributionModel(mapModelName(logical, account), logical)
-			: null;
-	};
+	const overloadAttributionModelFor = (account: Account): string =>
+		getAttemptTarget(requestMeta, account).upstreamModel;
 
 	// Pin-transient hold: the pin strict-failed selection ONLY because every
 	// pin-ALLOWED account is on a short transient cooldown (a per-account 429 or
@@ -224,7 +199,7 @@ export async function resolveZeroAccountsOutcome(
 		const nowMs = Date.now();
 		let hasHoldCandidate = false;
 		try {
-			const allAccs = await ctx.dbOps.getAllAccounts();
+			const allAccs = await eligibleRouteAccounts(requestMeta, ctx);
 			hasHoldCandidate = allAccs.some((a) => {
 				if (
 					a.paused ||
@@ -328,14 +303,9 @@ export async function resolveZeroAccountsOutcome(
 		// and the edge (specific-Codex pin + that account rate-limited +
 		// count_tokens, a 503 the client already handles) does not justify
 		// reordering it.
-		const isPinned = Boolean(requestMeta.pin);
-		const codexForSynthesis =
-			selectedAccounts.find((a) => !a.paused && a.provider === "codex") ??
-			(isPinned
-				? undefined
-				: (await ctx.dbOps.getAllAccounts()).find(
-						(a) => !a.paused && a.provider === "codex",
-					));
+		const codexForSynthesis = (
+			await eligibleRouteAccounts(requestMeta, ctx)
+		).find((a) => !a.paused && a.provider === "codex");
 		if (codexForSynthesis) {
 			log.info(
 				`count_tokens: all accounts gated out — synthesizing a local estimate from Codex account ${codexForSynthesis.name} instead of a capacity terminal`,
@@ -363,22 +333,7 @@ export async function resolveZeroAccountsOutcome(
 		}
 	}
 
-	// STORM-DEGRADE hold (Finding 1): in the worst burst moment the pinned
-	// cache account AND every sibling are cooled, so the strategy returned ZERO
-	// candidates. Before degrading to the pool_exhausted / throttled / context
-	// terminal, run the transparent burst-retry HOLD on the cache (affinity)
-	// account when it is genuinely a transient per-IP burst — exactly when
-	// holding the warm cache account matters most. Gate identically to the
-	// marker-active branch of the normal decide-before-loop: the held account
-	// must be OAuth-Anthropic, not paused, the shared burst marker active, and
-	// NOT showing fresh real exhaustion (minHeadroom <= 0 — a genuine quota
-	// wall, not a burst). On served → return it; on give-up/abort → fall through
-	// to the existing terminals below (there are no siblings, so the normal loop
-	// is empty; a non-abort give-up degrades to the constructed give-up 429).
-	// `accounts` is empty here so there is no combo slot to honor — gate on the
-	// request's own comboName (filteredComboInfo isn't built until section 9).
 	if (
-		!requestMeta.comboName &&
 		holds.burstHeldId &&
 		// Codex High finding: never hold an account that was gated out by the
 		// usage-throttle / context-window gate. `accounts` is empty here, so the
@@ -390,7 +345,9 @@ export async function resolveZeroAccountsOutcome(
 	) {
 		const heldAccount =
 			selectedAccounts.find((a) => a.id === holds.burstHeldId) ??
-			(await ctx.dbOps.getAccount(holds.burstHeldId));
+			(await eligibleRouteAccounts(requestMeta, ctx)).find(
+				(a) => a.id === holds.burstHeldId,
+			);
 		if (
 			heldAccount &&
 			!heldAccount.paused &&
@@ -525,12 +482,6 @@ export async function resolveZeroAccountsOutcome(
 			let relaxSuppressed = 0;
 			for (let i = 0; i < relaxCandidates.length; i++) {
 				const { account } = relaxCandidates[i];
-				// Re-derive the combo slot's model override exactly as the gate
-				// did, so we send the same model the unmargined check sized
-				// against.
-				const slot = initialComboInfo?.slots.find(
-					(s) => s.accountId === account.id,
-				);
 				log.info(
 					`Context-window last-resort: attempting excluded Codex account ` +
 						`"${account.name}" against full window (estimate=${gateTokenEstimate})`,
@@ -552,7 +503,7 @@ export async function resolveZeroAccountsOutcome(
 						finalCreateBodyStream,
 						i,
 						ctx,
-						slot?.modelOverride,
+						getAttemptTarget(requestMeta, account).upstreamModel,
 						apiKeyId,
 						apiKeyName,
 						requestBodyContext,
@@ -654,7 +605,7 @@ export async function resolveZeroAccountsOutcome(
 		const nowGate = Date.now();
 		const cooledSiblings = requestMeta.pin
 			? []
-			: (await ctx.dbOps.getAllAccounts())
+			: (await eligibleRouteAccounts(requestMeta, ctx))
 					.map((a) =>
 						resolveTransientlyCooledFamilySibling(
 							a,
@@ -806,7 +757,7 @@ export async function resolveZeroAccountsOutcome(
 	// Re-fetch from DB — selectedAccounts is empty here (strategy already
 	// filtered out unavailable accounts), so we need fresh data to populate
 	// per-account cooldown info in the 503 body.
-	const allAccounts = (await ctx.dbOps.getAllAccounts()).filter(
+	const allAccounts = (await eligibleRouteAccounts(requestMeta, ctx)).filter(
 		(a) => a.provider === ctx.provider.name,
 	);
 

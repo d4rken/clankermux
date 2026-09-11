@@ -15,7 +15,7 @@ import {
 	EVENT_ABANDONED_BODY_COMPLETION_MARKER,
 	EVENT_ABANDONED_BODY_OVERSIZE_NO_MARKER,
 	reportAbandonedRateLimitedBody,
-} from "../handlers/proxy-operations";
+} from "./fixtures/routing-harness";
 
 /**
  * Guard B: what the rate-limited failover throws away.
@@ -315,7 +315,7 @@ describe("Guard B — the observer does not delay the failover", () => {
 		}) as never;
 
 		const capture = captureWarnings();
-		const { handleProxy } = await import("../proxy");
+		const { handleProxy } = await import("./fixtures/routing-harness");
 		const ctx = makeContext([makeAccount()], STUB_PROVIDER);
 
 		try {

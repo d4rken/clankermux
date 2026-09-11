@@ -439,7 +439,7 @@ export async function deleteBatched(
  * free string: the column name is interpolated into SQL, so the set of legal
  * values is fixed here rather than trusted from a call site.
  */
-type TimeColumn = "sampled_at" | "observed_at" | "started_at";
+type TimeColumn = "sampled_at" | "observed_at" | "started_at" | "until_at";
 
 /**
  * Best-effort BATCHED delete of aged rows from a time-series table by its own
@@ -560,6 +560,22 @@ async function runCleanup(
 		const removedOrphans = db.run(
 			`DELETE FROM request_payloads WHERE id NOT IN (SELECT id FROM requests)`,
 		).changes;
+
+		// Attempts can precede their parent and internal/local requests may never
+		// create one. Allow a day for in-flight work, then prune those orphans.
+		await deleteBatched(
+			db,
+			"routing_attempts",
+			"started_at < ? AND NOT EXISTS(SELECT 1 FROM requests WHERE requests.id=routing_attempts.request_id)",
+			Date.now() - 24 * 60 * 60 * 1000,
+		);
+
+		await tryDeleteSnapshotsBatched(
+			db,
+			"account_model_suppressions",
+			Date.now(),
+			"until_at",
+		);
 
 		let removedRequests = 0;
 		if (requestCutoff !== null) {

@@ -387,7 +387,7 @@ describe("OpenAICompatibleProvider", () => {
 			);
 			const body = await transformed.json();
 
-			expect(body.model).toBe("openai/gpt-5");
+			expect(body.model).toBe("claude-3-opus-20240229");
 		});
 
 		it("should map sonnet models when account has model_mappings configured", async () => {
@@ -416,7 +416,7 @@ describe("OpenAICompatibleProvider", () => {
 			);
 			const body = await transformed.json();
 
-			expect(body.model).toBe("openai/gpt-5");
+			expect(body.model).toBe("claude-3-5-sonnet-20241022");
 		});
 
 		it("should map haiku models when account has model_mappings configured", async () => {
@@ -445,7 +445,7 @@ describe("OpenAICompatibleProvider", () => {
 			);
 			const body = await transformed.json();
 
-			expect(body.model).toBe("openai/gpt-5-mini");
+			expect(body.model).toBe("claude-3-haiku-20240307");
 		});
 
 		it("should pass through unknown models unchanged when no mappings configured", async () => {
@@ -533,7 +533,7 @@ describe("OpenAICompatibleProvider", () => {
 			);
 			const body = await transformed.json();
 
-			expect(body.model).toBe("custom/haiku-model");
+			expect(body.model).toBe("claude-3-haiku-20240307");
 		});
 	});
 });

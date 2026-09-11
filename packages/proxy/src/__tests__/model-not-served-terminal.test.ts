@@ -90,7 +90,7 @@ describe("model-not-served terminal", () => {
 	let originalFetch: typeof globalThis.fetch;
 
 	beforeAll(async () => {
-		await import("../proxy");
+		await import("./fixtures/routing-harness");
 	});
 
 	beforeEach(() => {
@@ -121,7 +121,7 @@ describe("model-not-served terminal", () => {
 				new URL("https://proxy.local/v1/messages"),
 				ctx,
 			),
-		).rejects.toThrow(/rejected model .* as outside its plan entitlement/);
+		).rejects.toThrow(/rejected its resolved model/);
 
 		const { meta, label } = syntheticCall(ctx.recorder);
 		expect(label).toBe("model_not_served");
@@ -282,7 +282,7 @@ describe("model-not-served terminal", () => {
 				new URL("https://proxy.local/v1/messages"),
 				ctx,
 			),
-		).rejects.toThrow(/rejected model .* as outside its plan entitlement/);
+		).rejects.toThrow(/rejected its resolved model/);
 
 		expect(ctx.recorder.recordSynthetic).not.toHaveBeenCalled();
 	});

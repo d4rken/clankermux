@@ -56,7 +56,7 @@ const WEEKLY_WINDOW_MINUTES = 10_080;
 /**
  * The post-gate candidate accounts, stashed per request.
  *
- * A WeakMap keyed on the live `RequestMeta` object, mirroring the combo-slot
+ * A WeakMap keyed on the live `RequestMeta` object, mirroring the resolved-route
  * and native-responses side channels: it cannot be spoofed by a client header,
  * cannot outlive the request, and adds no field to a type that a dozen call
  * sites construct.
@@ -262,13 +262,13 @@ function foldWindow(
  *
  * Class members are the post-gate candidates that share the serving account's
  * class, plus the serving account itself. It is folded in unconditionally
- * because it can legitimately be off the candidate list — the burst hold
- * reprobes an affinity-pinned account regardless of gate position — and a
- * figure that excluded the account which just served would contradict itself.
+ * because a hold may serve an authorized account outside the earlier post-gate
+ * snapshot. Dispatch still enforces the frozen route and current permissions;
+ * the figure must include the account which actually served the request.
  *
- * Filtering to one class is what makes the number honest in a mixed or combo
- * pool: accounts in another class cannot cover for this request, so folding
- * their headroom in would claim a failover that cannot happen.
+ * The candidates already satisfy routing rules and model permissions. Keep the
+ * existing conservative quota-class grouping within that authorized set:
+ * cross-provider model routing does not make unlike quota windows equivalent.
  */
 export function computePoolHeadroom(
 	servingAccount: Account,

@@ -13,7 +13,7 @@ async function callHandleProxy(
 	ctx: ProxyContext,
 	isInternal = false,
 ) {
-	const { handleProxy } = await import("../proxy");
+	const { handleProxy } = await import("./fixtures/routing-harness");
 	return handleProxy(req, url, ctx, null, null, isInternal);
 }
 
@@ -215,11 +215,11 @@ describe("force-account proxy override", () => {
 		const req = makeRequest({ "x-clankermux-deny-official-anthropic": "1" });
 		const resp = await callHandleProxy(req, new URL(req.url), ctx);
 
-		expect(resp.status).toBe(503);
+		expect(resp.status).toBe(403);
 		const body = (await resp.json()) as {
 			error: { type: string };
 		};
-		expect(body.error.type).toBe("anthropic_excluded_no_account");
+		expect(body.error.type).toBe("routing_policy_rejected");
 		// The forced Claude account must never have been contacted.
 		expect(fetchCalled).toBe(false);
 	});
@@ -386,7 +386,7 @@ describe("force-account proxy override", () => {
 		expect(getAccountMock.mock.calls).toHaveLength(0);
 	});
 
-	it("missing forced id returns 503 forced_account_missing AND auto-clears the force", async () => {
+	it("missing forced destination returns403 without clearing the restriction", async () => {
 		const other = makeAccount({ id: "other-1", name: "Other-1" });
 		const { ctx } = makeContext([other]);
 		// Force points at an account that does not exist.
@@ -400,14 +400,14 @@ describe("force-account proxy override", () => {
 			ctx,
 		);
 
-		expect(response.status).toBe(503);
+		expect(response.status).toBe(403);
 		const body = (await response.json()) as Record<string, unknown>;
 		const error = body.error as Record<string, unknown>;
-		expect(error.type).toBe("forced_account_missing");
+		expect(error.type).toBe("routing_policy_rejected");
 
-		// Force was auto-cleared.
+		// Future requests retain the restriction until the operator changes it.
 		const { getForcedAccount } = await import("../handlers");
-		expect(getForcedAccount()).toBeNull();
+		expect(getForcedAccount()).toBe("ghost-account");
 	});
 
 	it("token-resolution throw returns a local 502 error Response (not null/failover)", async () => {

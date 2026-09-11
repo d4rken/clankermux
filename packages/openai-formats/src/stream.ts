@@ -173,7 +173,8 @@ export function transformStreamingResponse(response: Response): Response {
 				this.context = {
 					buffer: "",
 					hasStarted: false,
-					extractedModel: "unknown",
+					extractedModel:
+						response.headers.get("x-clankermux-resolved-model") ?? "unknown",
 					hasSentStart: false,
 					hasSentContentBlockStart: false,
 					hasSentThinkingBlockStart: false,

@@ -81,7 +81,20 @@ export function readOpenRouterAccountMetadata(
 			!Number.isFinite(value.fetchedAt)
 		)
 			return null;
-		return value;
+		return {
+			label: value.label,
+			creatorUserId: value.creatorUserId,
+			isFreeTier: value.isFreeTier,
+			limitUsd: value.limitUsd,
+			limitRemainingUsd: value.limitRemainingUsd,
+			limitReset: value.limitReset,
+			usageUsd: value.usageUsd,
+			usageDailyUsd: value.usageDailyUsd,
+			usageWeeklyUsd: value.usageWeeklyUsd,
+			usageMonthlyUsd: value.usageMonthlyUsd,
+			expiresAt: value.expiresAt,
+			fetchedAt: value.fetchedAt,
+		};
 	} catch {
 		return null;
 	}

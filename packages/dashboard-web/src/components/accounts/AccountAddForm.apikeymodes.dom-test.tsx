@@ -150,7 +150,7 @@ describe("account add form: API key provider modes", () => {
 		expect(document.querySelector("#endpoint")).toBeNull();
 	});
 
-	it.each(modes)("submits key and model mappings for $provider", async ({
+	it.each(modes)("submits account credentials for $provider", async ({
 		provider,
 		option,
 	}) => {
@@ -158,9 +158,6 @@ describe("account add form: API key provider modes", () => {
 		await selectMode(option);
 		await edit("name", `${provider}-account`);
 		await edit("apiKey", `${provider}-key`);
-		await edit("opusModel", "vendor/opus-model");
-		await edit("sonnetModel", "vendor/sonnet-model");
-		await edit("haikuModel", "vendor/haiku-model");
 		await submit();
 		expect(errors).toEqual([]);
 		expect(saved[provider]).toEqual([
@@ -168,11 +165,6 @@ describe("account add form: API key provider modes", () => {
 				name: `${provider}-account`,
 				apiKey: `${provider}-key`,
 				priority: 0,
-				modelMappings: {
-					opus: "vendor/opus-model",
-					sonnet: "vendor/sonnet-model",
-					haiku: "vendor/haiku-model",
-				},
 			},
 		]);
 	});

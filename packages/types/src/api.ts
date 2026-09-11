@@ -6,14 +6,6 @@ import type {
 	ToolCallStat,
 } from "./request";
 
-/** Combo slot routing info — maps each returned account to its slot's model override */
-export interface ComboSlotInfo {
-	/** The combo name (null when not using combo routing) */
-	comboName: string | null;
-	/** Ordered list of { accountId, modelOverride } for combo slots, indexed by position in the returned accounts array */
-	slots: Array<{ accountId: string; modelOverride: string }>;
-}
-
 export interface RequestMeta {
 	id: string;
 	method: string;
@@ -86,10 +78,8 @@ export interface RequestMeta {
 	headers?: Headers;
 	/** True only for in-process scheduler/probe requests, never from client headers */
 	internal?: boolean;
-	/** Active combo name (set when combo routing is used) */
+	/** Historical attribution on requests recorded before routing tables. */
 	comboName?: string | null;
-	/** Combo slot index being attempted (set per-iteration in proxy loop) */
-	comboSlotIndex?: number | null;
 	/** Internal routing telemetry persisted with the request for optimization analysis */
 	routing?: RequestRoutingMeta;
 	/** Resolved per-key routing pin from the authenticated API key (Feature: API-key→account/class pin). */

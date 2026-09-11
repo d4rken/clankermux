@@ -121,3 +121,126 @@ describe("OpenRouterProvider", () => {
 		});
 	});
 });
+
+describe("OpenRouter conversation reasoning configuration", () => {
+	const provider = new OpenRouterProvider();
+	const body = (model = "deepseek/deepseek-v4-pro") => ({
+		model,
+		thinking: { type: "adaptive" },
+		output_config: { effort: "low", format: { type: "text" } },
+		messages: [
+			{ role: "user", content: "hello" },
+			{
+				role: "system",
+				content: [
+					{
+						type: "text",
+						text: "tokens left",
+						cache_control: { type: "ephemeral" },
+					},
+				],
+				output_config: { effort: "high" },
+			},
+		],
+	});
+	const req = (value: unknown) =>
+		new Request("https://openrouter.ai/api/v1/messages", {
+			method: "POST",
+			body: JSON.stringify(value),
+		});
+	it("folds the last effort into current configuration and preserves message position/content", async () => {
+		const original = body();
+		const result = await provider.transformRequestBody(req(original));
+		const j = await result.clone().json();
+		expect(j).toEqual({
+			...original,
+			output_config: { effort: "high", format: { type: "text" } },
+			messages: [
+				original.messages[0],
+				{ role: "system", content: original.messages[1].content },
+			],
+		});
+		expect(await (await provider.transformRequestBody(result)).text()).toBe(
+			JSON.stringify(j),
+		);
+	});
+	it.each([
+		"anthropic/claude-fable-5-1",
+		"claude-fable-5-1",
+	])("preserves %s bytes", async (model) => {
+		const request = req(body(model));
+		expect(await provider.transformRequestBody(request)).toBe(request);
+	});
+	it("leaves unknown message controls for the upstream to validate", async () => {
+		const original = body();
+		original.messages[1].output_config = {
+			...original.messages[1].output_config,
+			unknown: true,
+		} as (typeof original.messages)[1]["output_config"];
+		const request = req(original);
+		expect(await (await provider.transformRequestBody(request)).json()).toEqual(
+			original,
+		);
+	});
+});
+
+describe("OpenRouter effort ordering", () => {
+	it.each([
+		["low", "high", "low"],
+		["high", "low", "high"],
+	])("applies updates in conversation order (%s,%s,%s)", async (first, second, last) => {
+		const provider = new OpenRouterProvider();
+		const request = new Request("https://openrouter.ai/api/v1/messages", {
+			method: "POST",
+			body: JSON.stringify({
+				model: "deepseek/deepseek-v4-pro",
+				output_config: { effort: first },
+				messages: [
+					{ role: "system", content: "one", output_config: { effort: second } },
+					{ role: "system", content: "two", output_config: { effort: last } },
+				],
+			}),
+		});
+		const body = await (await provider.transformRequestBody(request)).json();
+		expect(body.output_config.effort).toBe(last);
+		expect(body.messages).toEqual([
+			{ role: "system", content: "one" },
+			{ role: "system", content: "two" },
+		]);
+	});
+});
+
+describe("OpenRouter malformed body preservation", () => {
+	it.each([
+		["high"],
+		[42],
+		[null],
+		[[]],
+	])("leaves malformed top-level output_config %j for upstream validation", async (output_config) => {
+		const provider = new OpenRouterProvider();
+		const request = new Request("https://openrouter.ai/api/v1/messages", {
+			method: "POST",
+			body: JSON.stringify({
+				model: "deepseek/deepseek-v4-pro",
+				output_config,
+				messages: [
+					{
+						role: "system",
+						content: "notice",
+						output_config: { effort: "low" },
+					},
+				],
+			}),
+		});
+		expect(await provider.transformRequestBody(request)).toBe(request);
+	});
+	it("leaves a non-JSON POST unchanged", async () => {
+		const request = new Request("https://openrouter.ai/api/v1/messages", {
+			method: "POST",
+			body: "not json",
+		});
+		expect(await new OpenRouterProvider().transformRequestBody(request)).toBe(
+			request,
+		);
+	});
+});

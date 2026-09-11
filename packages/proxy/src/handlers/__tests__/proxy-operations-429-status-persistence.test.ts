@@ -1,9 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it, mock } from "bun:test";
 import { usageCache } from "@clankermux/providers";
 import type { Account, RequestMeta } from "@clankermux/types";
+import { proxyWithAccount } from "../../__tests__/fixtures/routing-harness";
 import { clearProviderOverloadCooldown } from "../../provider-overload-cooldown";
 import { clearAnthropicBurstThrottle } from "../burst-cooldown";
-import { proxyWithAccount } from "../proxy-operations";
 import type { ProxyContext } from "../proxy-types";
 
 /**
@@ -282,9 +282,9 @@ describe("proxyWithAccount — 429 unified-status persistence on cooldown short-
 		});
 	});
 
-	it("all-models-exhausted 429 path persists the unified-status header (all_models_exhausted_429 site)", async () => {
+	it("all-models-exhausted 429 path persists the unified-status header (model_fallback_429 site)", async () => {
 		// Hard status on every attempt: intercept declines, model fallbacks are
-		// cycled and exhausted, landing on the all_models_exhausted_429 site.
+		// cycled and exhausted, landing on the model_fallback_429 site.
 		let fetchCount = 0;
 		globalThis.fetch = mock(async () => {
 			fetchCount++;
@@ -312,7 +312,7 @@ describe("proxyWithAccount — 429 unified-status persistence on cooldown short-
 		);
 
 		expect(result).toBeNull();
-		expect(fetchCount).toBeGreaterThan(1); // model list actually cycled
+		expect(fetchCount).toBe(1); // Frozen target is never cycled.
 		expect(metaCalls).toHaveLength(1);
 		expect(metaCalls[0]).toEqual({
 			accountId: "acc-oauth",

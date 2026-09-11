@@ -225,6 +225,7 @@ export function ApiKeysTab() {
 	const [isDeleteDialogOpen, setIsDeleteDialogOpen] = useState(false);
 	const [isRegenerateDialogOpen, setIsRegenerateDialogOpen] = useState(false);
 	const [isRenameDialogOpen, setIsRenameDialogOpen] = useState(false);
+	const [newKeyDestination, setNewKeyDestination] = useState("unrestricted");
 	const [newKeyName, setNewKeyName] = useState("");
 	const [renameValue, setRenameValue] = useState("");
 	const [selectedKey, setSelectedKey] = useState<ApiKey | null>(null);
@@ -297,6 +298,13 @@ export function ApiKeysTab() {
 		mutationFn: async (params: { name: string }) => {
 			const result = await api.post<ApiKeyGenerationResponse>("/api/api-keys", {
 				name: params.name,
+				...(newKeyDestination === "experiment"
+					? { providers: ["codex", "openrouter"] }
+					: newKeyDestination.startsWith("account:")
+						? { accountId: newKeyDestination.slice(8) }
+						: newKeyDestination.startsWith("provider:")
+							? { providers: [newKeyDestination.slice(9)] }
+							: { accountId: null, providers: null }),
 			});
 			return result.data;
 		},
@@ -568,6 +576,28 @@ export function ApiKeysTab() {
 									onChange={(e) => setNewKeyName(e.target.value)}
 								/>
 							</div>
+							<label className="block">
+								Allowed destinations
+								<select
+									className="w-full rounded-md border bg-background p-2 text-sm"
+									value={newKeyDestination}
+									onChange={(e) => setNewKeyDestination(e.target.value)}
+								>
+									<option value="unrestricted">Unrestricted</option>
+									<option value="experiment">Codex and OpenRouter</option>
+									{[...new Set(accounts.map((a) => a.provider))].map((p) => (
+										<option value={`provider:${p}`} key={p}>
+											{p}
+										</option>
+									))}
+									{accounts.map((a) => (
+										<option value={`account:${a.id}`} key={a.id}>
+											{a.name}
+										</option>
+									))}
+								</select>
+							</label>
+
 							{generateKeyMutation.isError && (
 								<Alert
 									size="sm"
@@ -1112,9 +1142,9 @@ function PinEditor({
 						<SelectValue />
 					</SelectTrigger>
 					<SelectContent>
-						<SelectItem value="unpinned">Unpinned (load-balanced)</SelectItem>
-						<SelectItem value="account">Pin to account</SelectItem>
-						<SelectItem value="provider">Pin to provider class</SelectItem>
+						<SelectItem value="unpinned">Unrestricted</SelectItem>
+						<SelectItem value="account">One account</SelectItem>
+						<SelectItem value="provider">Providers</SelectItem>
 					</SelectContent>
 				</Select>
 			</div>

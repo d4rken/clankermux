@@ -1,4 +1,3 @@
-import { mapModelName } from "@clankermux/core";
 import { Logger } from "@clankermux/logger";
 import type { Account } from "@clankermux/types";
 import { resolveReasoningEffort } from "./reasoning";
@@ -54,12 +53,10 @@ export function stripCacheControlFromOpenAIRequest(body: OpenAIRequest): void {
  */
 export function convertAnthropicRequestToOpenAI(
 	anthropicData: AnthropicRequest,
-	account?: Account,
+	_account?: Account,
 ): OpenAIRequest {
-	// Map model name if account has custom mappings, otherwise forward as-is
-	const mappedModel = account
-		? mapModelName(anthropicData.model, account)
-		: anthropicData.model;
+	// Routing has already resolved the model; format conversion preserves it.
+	const mappedModel = anthropicData.model;
 
 	const openaiRequest: OpenAIRequest = {
 		model: mappedModel,

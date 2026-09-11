@@ -9,6 +9,7 @@ export {
 	listProviders,
 	registerProvider,
 } from "@clankermux/providers";
+export { AccountModelPermissionService } from "./account-model-permissions";
 export {
 	ANTHROPIC_BUNDLED_MODEL_CREATED_AT,
 	ANTHROPIC_MODEL_CATALOG_LOOKUP_BUDGET_MS,

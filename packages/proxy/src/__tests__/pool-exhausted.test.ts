@@ -1,7 +1,7 @@
 import { describe, expect, it, mock } from "bun:test";
 import type { Account } from "@clankermux/types";
 import type { ProxyContext } from "../handlers";
-import { handleProxy } from "../proxy";
+import { handleProxy } from "./fixtures/routing-harness";
 
 function makeAccount(overrides: Partial<Account> = {}): Account {
 	return {
@@ -85,8 +85,8 @@ function makeRequest(): Request {
 }
 
 describe("pool exhausted — 503 response", () => {
-	it("returns 503 with pool_exhausted body when pool is empty", async () => {
-		const ctx = makeContext([]);
+	it("returns 503 with pool_exhausted body when the permitted pool has no available capacity", async () => {
+		const ctx = makeContext([makeAccount({ paused: true })]);
 		const response = await handleProxy(
 			makeRequest(),
 			new URL("https://proxy.local/v1/messages"),
@@ -106,8 +106,8 @@ describe("pool exhausted — 503 response", () => {
 		expect(Array.isArray(error.accounts)).toBe(true);
 	});
 
-	it("returns Retry-After header when pool is empty", async () => {
-		const ctx = makeContext([]);
+	it("returns Retry-After header when the permitted pool has no available capacity", async () => {
+		const ctx = makeContext([makeAccount({ paused: true })]);
 		const response = await handleProxy(
 			makeRequest(),
 			new URL("https://proxy.local/v1/messages"),
@@ -121,7 +121,7 @@ describe("pool exhausted — 503 response", () => {
 	});
 
 	it("returns x-clankermux-pool-status: exhausted header", async () => {
-		const ctx = makeContext([]);
+		const ctx = makeContext([makeAccount({ paused: true })]);
 		const response = await handleProxy(
 			makeRequest(),
 			new URL("https://proxy.local/v1/messages"),
@@ -133,7 +133,7 @@ describe("pool exhausted — 503 response", () => {
 	});
 
 	it("returns Content-Type: application/json header", async () => {
-		const ctx = makeContext([]);
+		const ctx = makeContext([makeAccount({ paused: true })]);
 		const response = await handleProxy(
 			makeRequest(),
 			new URL("https://proxy.local/v1/messages"),

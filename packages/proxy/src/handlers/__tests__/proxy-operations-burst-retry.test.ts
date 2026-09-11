@@ -1,15 +1,15 @@
 import { afterEach, beforeEach, describe, expect, it, mock } from "bun:test";
 import { usageCache } from "@clankermux/providers";
 import type { Account, RequestMeta } from "@clankermux/types";
+import {
+	type ProxyAttemptOutcome,
+	proxyWithAccount,
+} from "../../__tests__/fixtures/routing-harness";
 import { clearProviderOverloadCooldown } from "../../provider-overload-cooldown";
 import {
 	clearAnthropicBurstThrottle,
 	isAnthropicBurstThrottleActive,
 } from "../burst-cooldown";
-import {
-	type ProxyAttemptOutcome,
-	proxyWithAccount,
-} from "../proxy-operations";
 import type { ProxyContext } from "../proxy-types";
 import { BURST_RETRY_COOLDOWN_CAP_MS } from "../transparent-retry";
 

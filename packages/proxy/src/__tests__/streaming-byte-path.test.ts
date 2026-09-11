@@ -61,7 +61,7 @@ const EXPECTED_FRAMES = UPSTREAM_FRAMES.map((frame) =>
 );
 
 async function callHandleProxy(req: Request, url: URL, ctx: ProxyContext) {
-	const { handleProxy } = await import("../proxy");
+	const { handleProxy } = await import("./fixtures/routing-harness");
 	return handleProxy(req, url, ctx);
 }
 
@@ -204,7 +204,7 @@ describe("streaming byte path", () => {
 	let originalFetch: typeof globalThis.fetch;
 
 	beforeAll(async () => {
-		await import("../proxy");
+		await import("./fixtures/routing-harness");
 	});
 
 	const reset = () => {

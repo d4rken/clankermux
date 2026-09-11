@@ -145,7 +145,7 @@ function makeContext(accounts: Account[]): ProxyContext {
 }
 
 async function callHandleProxy(req: Request, url: URL, ctx: ProxyContext) {
-	const { handleProxy } = await import("../proxy");
+	const { handleProxy } = await import("./fixtures/routing-harness");
 	return handleProxy(req, url, ctx);
 }
 
@@ -216,7 +216,7 @@ describe("recovery-probe suppression must not become a size verdict (CW last res
 	let originalFetch: typeof globalThis.fetch;
 
 	beforeAll(async () => {
-		await import("../proxy");
+		await import("./fixtures/routing-harness");
 	});
 
 	beforeEach(() => {
@@ -407,7 +407,7 @@ describe("recovery-probe suppression must not abandon an overload hold", () => {
 	let originalFetch: typeof globalThis.fetch;
 
 	beforeAll(async () => {
-		await import("../proxy");
+		await import("./fixtures/routing-harness");
 	});
 
 	beforeEach(() => {

@@ -63,7 +63,7 @@ async function callHandleProxy(
 	ctx: ProxyContext,
 	apiKeyId?: string | null,
 ) {
-	const { handleProxy } = await import("../proxy");
+	const { handleProxy } = await import("./fixtures/routing-harness");
 	return handleProxy(req, url, ctx, apiKeyId);
 }
 
@@ -138,7 +138,10 @@ function makeHarness(accounts: Account[]): Harness {
 			),
 			getActiveComboForFamily: mock(async () => null),
 			// Unpinned key: without this the pin resolution fails closed with a 503.
-			getApiKeyPin: mock(async () => null),
+			getApiKeyPin: mock(async () => ({
+				pinnedAccountId: null,
+				pinnedProviders: null,
+			})),
 			markAccountRateLimited: mock(async () => 1),
 			markAccountRateLimitedDeadlineOnly: mock(async () => {}),
 			saveRequest: mock(async () => {}),
@@ -275,7 +278,7 @@ describe("handleProxy prologue wiring", () => {
 	let originalFetch: typeof globalThis.fetch;
 
 	beforeAll(async () => {
-		await import("../proxy");
+		await import("./fixtures/routing-harness");
 	});
 
 	beforeEach(() => {

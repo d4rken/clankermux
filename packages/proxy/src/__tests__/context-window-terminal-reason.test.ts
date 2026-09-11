@@ -9,7 +9,7 @@
  */
 import { describe, expect, it } from "bun:test";
 import type { Account } from "@clankermux/types";
-import { createContextWindowExceededResponse } from "../handlers/proxy-operations";
+import { createContextWindowExceededResponse } from "./fixtures/routing-harness";
 
 function codexAccount(): Account {
 	return {

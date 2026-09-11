@@ -133,7 +133,7 @@ describe("AnthropicProvider", () => {
 			const request = makeRequest("claude-sonnet-4-5-20250929");
 			const result = await provider.transformRequestBody(request, account);
 			const body = await result.json();
-			expect(body.model).toBe("custom-model");
+			expect(body.model).toBe("claude-sonnet-4-5-20250929");
 		});
 
 		it("passes model through unchanged when mapping exists for a different family", async () => {
@@ -164,7 +164,7 @@ describe("AnthropicProvider", () => {
 				account,
 			);
 			const sonnetBody = await sonnetResult.json();
-			expect(sonnetBody.model).toBe("mapped-sonnet");
+			expect(sonnetBody.model).toBe("claude-sonnet-4-5-20250929");
 
 			const opusRequest = makeRequest("claude-opus-4-1-20250805");
 			const opusResult = await provider.transformRequestBody(
@@ -172,7 +172,7 @@ describe("AnthropicProvider", () => {
 				account,
 			);
 			const opusBody = await opusResult.json();
-			expect(opusBody.model).toBe("mapped-opus");
+			expect(opusBody.model).toBe("claude-opus-4-1-20250805");
 		});
 	});
 

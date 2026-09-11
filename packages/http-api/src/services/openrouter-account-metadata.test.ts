@@ -11,6 +11,7 @@ import {
 	createApiKeyAccountAddHandler,
 } from "../handlers/api-key-account-add";
 import {
+	readOpenRouterAccountMetadata,
 	refreshOpenRouterAccountMetadata,
 	refreshOpenRouterAccountsOnStartup,
 } from "./openrouter-account-metadata";
@@ -65,6 +66,15 @@ async function snapshot(id: string) {
 }
 
 describe("OpenRouter metadata lifecycle", () => {
+	it("publishes only declared metadata fields from a stored snapshot", async () => {
+		const id = await add();
+		const metadata = JSON.parse((await snapshot(id)) as string);
+		expect(
+			readOpenRouterAccountMetadata(
+				JSON.stringify({ ...metadata, unexpectedPrivateField: "private" }),
+			),
+		).toEqual(metadata);
+	});
 	it("populates a new account, refreshes without OAuth tokens, and keeps a snapshot on failure", async () => {
 		const id = await add();
 		const first = await snapshot(id);

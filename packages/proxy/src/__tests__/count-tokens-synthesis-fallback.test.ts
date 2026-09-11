@@ -1,7 +1,7 @@
 import { describe, expect, it, mock } from "bun:test";
 import type { Account } from "@clankermux/types";
 import type { ProxyContext } from "../handlers";
-import { handleProxy } from "../proxy";
+import { handleProxy } from "./fixtures/routing-harness";
 
 function makeAccount(overrides: Partial<Account> = {}): Account {
 	return {
