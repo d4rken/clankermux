@@ -4,7 +4,13 @@ import type {
 	CodexResetCreditEventResponse,
 } from "@clankermux/types";
 import { formatUsd } from "@clankermux/ui-common";
-import { AlertCircle, CalendarClock, Copy, RotateCcw } from "lucide-react";
+import {
+	AlertCircle,
+	CalendarClock,
+	Copy,
+	Pause,
+	RotateCcw,
+} from "lucide-react";
 import { useState } from "react";
 import { api } from "../../api";
 import {
@@ -498,7 +504,8 @@ function formatFamilyLabel(family: string): string {
  * and the Usage page (`AccountUtilizationCard`). Usage omits routing, renewal,
  * automation settings and routine off-peak / zero-reset indicators. Active
  * warnings and capacity information share `deriveAccountStatus`. Action buttons
- * (e.g. Force Reset) and request/session stats are left to the host.
+ * (e.g. Force Reset) and request/session stats are left to the host, as is the
+ * pause state — both render `AccountPausedChip` in their heading row.
  */
 export function AccountStatusChips({
 	account,
@@ -507,33 +514,18 @@ export function AccountStatusChips({
 	variant = "account",
 }: AccountStatusChipsProps) {
 	const status = providedStatus ?? deriveAccountStatus(account);
-	const devinQuotaPause =
-		account.provider === "devin" &&
-		(account.pauseReason === "overage" ||
-			account.pauseReason === "rate_limit_window");
 	const isUsage = variant === "usage";
 	const includeAccountDetails = showAccountDetails && !isUsage;
 
 	return (
 		<div
 			className={`flex flex-wrap items-center gap-item text-sm${isUsage ? " empty:hidden" : ""}`}
+			data-testid="account-status-chips"
 		>
 			{includeAccountDetails && <AccountRoutingChips status={status} />}
 			{status.isRateLimited && (
 				<span title="Account is rate-limited - requests will be rejected until the limit resets">
 					<AlertCircle className="h-4 w-4 text-warning-strong" />
-				</span>
-			)}
-			{status.isPaused && (
-				<span
-					className="text-muted-foreground"
-					title={
-						devinQuotaPause
-							? "Included quota is exhausted or unavailable. Auto-recover quota resumes this account after metadata confirms available capacity. If your plan reports no allowance, review Allow requests beyond verified included quota before resuming manually."
-							: undefined
-					}
-				>
-					{devinQuotaPause ? "Paused: included quota" : "Paused"}
 				</span>
 			)}
 			{status.isUsagePermissionDenied && (
@@ -709,6 +701,44 @@ export function AccountStatusChips({
 			    wrap as individual flex items of this row rather than as a block. */}
 			{!isUsage && <AccountPolicyChips account={account} />}
 		</div>
+	);
+}
+
+/**
+ * Whether the account is in rotation at all, rendered in the heading row beside
+ * the name rather than among the status chips below it. A pause outranks every
+ * chip in that row: it is the reason the priority, the overload cooldowns and
+ * the quota bars describe an account no request can reach. Warning-tinted for
+ * the same reason every other "not taking traffic" chip in this file is — the
+ * pause being deliberate does not give the pool back its capacity. The causes
+ * that pause an account on their own (`Needs re-authentication`,
+ * `Usage access denied`) keep their louder chips below, so this one says that
+ * traffic stopped and they say why.
+ */
+export function AccountPausedChip({
+	account,
+	status,
+}: {
+	account: AccountResponse;
+	status: AccountStatus;
+}) {
+	if (!status.isPaused) return null;
+	const devinQuotaPause =
+		account.provider === "devin" &&
+		(account.pauseReason === "overage" ||
+			account.pauseReason === "rate_limit_window");
+	return (
+		<StatusChip
+			className="bg-warning/15 text-warning-strong"
+			title={
+				devinQuotaPause
+					? "Included quota is exhausted or unavailable. Auto-recover quota resumes this account after metadata confirms available capacity. If your plan reports no allowance, review Allow requests beyond verified included quota before resuming manually."
+					: "This account is out of rotation and serves no requests until it is resumed."
+			}
+		>
+			<Pause className="h-3.5 w-3.5" />
+			{devinQuotaPause ? "Paused: included quota" : "Paused"}
+		</StatusChip>
 	);
 }
 

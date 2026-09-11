@@ -82,18 +82,18 @@ const SESSION_STATS = {
 };
 
 /**
- * The inset panel carrying request, client, session, cost and re-auth figures.
+ * The markup of one `<div data-testid="…">` and everything nested inside it.
  *
- * Anchored on the panel's `data-testid`, never on its class string: this helper
- * used to match the full `class="…"` verbatim, so it threw "info row not found"
- * the moment the panel moved onto the shared InsetPanel primitive. What these
- * tests are about is the row's CONTENT, so its styling must be free to change.
+ * Anchored on the testid, never on a class string: the info-row helper this grew
+ * out of matched the full `class="…"` verbatim, so it threw the moment the panel
+ * moved onto the shared InsetPanel primitive. What these tests are about is each
+ * region's CONTENT, so its styling must be free to change.
  */
-function infoRow(html: string): string {
-	const testid = html.indexOf('data-testid="account-info-row"');
-	if (testid === -1) throw new Error("info row not found");
+function region(html: string, id: string): string {
+	const testid = html.indexOf(`data-testid="${id}"`);
+	if (testid === -1) throw new Error(`${id} not found`);
 	const start = html.lastIndexOf("<div", testid);
-	if (start === -1) throw new Error("info row has no element start");
+	if (start === -1) throw new Error(`${id} has no element start`);
 	// Walk to the matching close so a nested <span> cannot end the slice early.
 	let depth = 0;
 	let i = start;
@@ -105,8 +105,28 @@ function infoRow(html: string): string {
 		}
 		i++;
 	}
-	throw new Error("info row never closed");
+	throw new Error(`${id} never closed`);
 }
+
+const infoRow = (html: string) => region(html, "account-info-row");
+
+it("leads the heading row's routing cluster with the pause state", () => {
+	const html = render(makeAccount({ paused: true, priority: 3 }));
+	const heading = region(html, "account-heading-row");
+
+	// In the row that names the account, and ahead of "Priority: 3" there — the
+	// first chip of the cluster it governs, because a paused account's priority
+	// decides nothing.
+	expect(heading).toContain("acct");
+	expect(heading.indexOf("Paused")).toBeGreaterThan(-1);
+	expect(heading.indexOf("Paused")).toBeLessThan(
+		heading.indexOf("Priority: 3"),
+	);
+	// And nowhere else: not in the chip row below it, beside the causes that
+	// explain the pause, and not in the statistics panel under that.
+	expect(region(html, "account-status-chips")).not.toContain("Paused");
+	expect(infoRow(html)).not.toContain("Paused");
+});
 
 describe("AccountListItem — session stats", () => {
 	it("drops the standalone session token line", () => {
