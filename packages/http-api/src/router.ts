@@ -40,6 +40,7 @@ import {
 	createAnalyticsFilterOptionsHandler,
 	createAnalyticsHandler,
 } from "./handlers/analytics";
+import { createIsolatedToolErrorsHandler } from "./handlers/analytics-runner";
 import {
 	createApiKeyDeleteHandler,
 	createApiKeyDisableHandler,
@@ -124,6 +125,7 @@ import {
 	createReauthNeededHandler,
 	createTokenHealthHandler,
 } from "./handlers/token-health";
+import { createToolErrorExampleHandler } from "./handlers/tool-errors-direct";
 import { createUsageHistoryHandler } from "./handlers/usage-history";
 import { createUsageScopedHistoryHandler } from "./handlers/usage-scoped-history";
 import { createVersionCheckHandler } from "./handlers/version";
@@ -241,6 +243,8 @@ export class APIRouter {
 		);
 		const logsHistoryHandler = createLogsHistoryHandler();
 		const analyticsHandler = createAnalyticsHandler(this.context);
+		const toolErrorsHandler = createIsolatedToolErrorsHandler(this.context);
+		const toolErrorExampleHandler = createToolErrorExampleHandler(this.context);
 		const analyticsFilterOptionsHandler = createAnalyticsFilterOptionsHandler(
 			this.context,
 		);
@@ -515,6 +519,12 @@ export class APIRouter {
 		this.handlers.set("GET:/api/version/check", () => versionCheckHandler());
 		this.handlers.set("GET:/api/logs/stream", (req) => logsStreamHandler(req));
 		this.handlers.set("GET:/api/logs/history", () => logsHistoryHandler());
+		this.handlers.set("GET:/api/analytics/tool-errors", (_req, url) =>
+			toolErrorsHandler(url.searchParams),
+		);
+		this.handlers.set("GET:/api/analytics/tool-errors/example", (_req, url) =>
+			toolErrorExampleHandler(url.searchParams),
+		);
 		this.handlers.set("GET:/api/analytics", (_req, url) => {
 			return analyticsHandler(url.searchParams);
 		});

@@ -11,6 +11,7 @@ import { createPoolSizingHandler } from "./pool-sizing-direct";
 import { createQuotaDriftHandler } from "./quota-drift-direct";
 import { createStatsHandler } from "./stats-direct";
 import { createStopsHistoryHandler } from "./stops-history-direct";
+import { createToolErrorsHandler } from "./tool-errors-direct";
 import { createUsageHistoryHandler } from "./usage-history-direct";
 import { createUsageScopedHistoryHandler } from "./usage-scoped-history-direct";
 
@@ -21,6 +22,7 @@ import { createUsageScopedHistoryHandler } from "./usage-scoped-history-direct";
  * runs; it defaults to "analytics" for backward compatibility.
  */
 export type DashboardWorkerKind =
+	| "tool-errors"
 	| "analytics"
 	| "stats"
 	| "usage-history"
@@ -92,6 +94,7 @@ self.onmessage = async (event: MessageEvent<AnalyticsWorkerRequest>) => {
 			"quota-drift": createQuotaDriftHandler,
 			"pool-sizing": createPoolSizingHandler,
 			analytics: createAnalyticsHandler,
+			"tool-errors": createToolErrorsHandler,
 		} satisfies Record<
 			DashboardWorkerKind,
 			(context: APIContext) => (params: URLSearchParams) => Promise<Response>

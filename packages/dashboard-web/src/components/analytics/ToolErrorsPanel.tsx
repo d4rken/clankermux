@@ -2,6 +2,7 @@ import type { AnalyticsResponse } from "@clankermux/types";
 import { formatNumber } from "@clankermux/ui-common";
 import { Wrench } from "lucide-react";
 import { useMemo, useState } from "react";
+import type { AnalyticsRequestFilters } from "../../api";
 import type { TimeRange } from "../../constants";
 import { useSeriesPalette } from "../../hooks/useSeriesPalette";
 import {
@@ -34,6 +35,7 @@ import {
 	TableRow,
 } from "../ui/table";
 import { type SortDir, SortHeaderButton } from "./sort-header";
+import { ToolErrorDetailsDialog } from "./ToolErrorDetailsDialog";
 
 type ToolCallErrors = NonNullable<AnalyticsResponse["toolCallErrors"]>;
 type ToolErrorRow = ToolCallErrors["byTool"][number];
@@ -55,7 +57,7 @@ function EmptyState({ loading }: { loading: boolean }) {
 				</CardTitle>
 				<CardDescription>
 					Client-side tool failures (tool_result is_error) mined from request
-					payloads — counted once per execution
+					payloads — observations of reported results
 				</CardDescription>
 			</CardHeader>
 			<CardContent>
@@ -69,7 +71,13 @@ function EmptyState({ loading }: { loading: boolean }) {
 	);
 }
 
-function ToolErrorTable({ rows }: { rows: ToolErrorRow[] }) {
+function ToolErrorTable({
+	rows,
+	onSelect,
+}: {
+	rows: ToolErrorRow[];
+	onSelect: (tool: string) => void;
+}) {
 	const [sortKey, setSortKey] = useState<SortKey>("totalErrors");
 	const [sortDir, setSortDir] = useState<SortDir>("desc");
 
@@ -143,7 +151,13 @@ function ToolErrorTable({ rows }: { rows: ToolErrorRow[] }) {
 						return (
 							<TableRow key={row.toolName} className="hover:bg-muted/40">
 								<TableCell className="align-top">
-									<div className="font-medium">{row.toolName}</div>
+									<button
+										type="button"
+										className="font-medium text-left underline underline-offset-4"
+										onClick={() => onSelect(row.toolName)}
+									>
+										{row.toolName}
+									</button>
 									{lowSample && (
 										<div
 											className="text-xs text-warning-strong"
@@ -245,8 +259,8 @@ function TopMessagesSection({ groups }: { groups: ToolMessageGroup[] }) {
 				Top error messages
 			</h4>
 			<p data-slot="subtitle" className="mb-item text-xs text-muted-foreground">
-				Most frequent error texts per tool — the actionable list for tuning
-				prompts and tool usage
+				Most frequent captured texts per tool. Select a tool above to inspect
+				supporting requests and copy details.
 			</p>
 			<div className="space-y-item">
 				{groups.map((group) => (
@@ -288,6 +302,7 @@ function TopMessagesSection({ groups }: { groups: ToolMessageGroup[] }) {
 }
 
 interface ToolErrorsPanelProps {
+	filters?: AnalyticsRequestFilters;
 	toolCallErrors?: ToolCallErrors;
 	loading: boolean;
 	timeRange: TimeRange;
@@ -304,7 +319,10 @@ export function ToolErrorsPanel({
 	toolCallErrors,
 	loading,
 	timeRange,
+	filters,
 }: ToolErrorsPanelProps) {
+	const [selectedTool, setSelectedTool] = useState<string | null>(null);
+	const [viewRevision, setViewRevision] = useState(0);
 	const messageGroups = useMemo(
 		() => groupToolMessages(toolCallErrors?.topMessages ?? []),
 		[toolCallErrors?.topMessages],
@@ -331,7 +349,7 @@ export function ToolErrorsPanel({
 						</CardTitle>
 						<CardDescription>
 							Client-side tool failures (tool_result is_error) mined from
-							request payloads — counted once per execution
+							request payloads — observations of reported results
 						</CardDescription>
 					</div>
 					<Badge variant="secondary">
@@ -341,7 +359,25 @@ export function ToolErrorsPanel({
 				</div>
 			</CardHeader>
 			<CardContent className="space-y-section">
-				<ToolErrorTable rows={toolCallErrors.byTool} />
+				<ToolErrorTable
+					rows={toolCallErrors.byTool}
+					onSelect={setSelectedTool}
+				/>
+				{selectedTool !== null && (
+					<ToolErrorDetailsDialog
+						key={JSON.stringify([
+							selectedTool,
+							timeRange,
+							filters,
+							viewRevision,
+						])}
+						toolName={selectedTool}
+						timeRange={timeRange}
+						filters={filters}
+						onClose={() => setSelectedTool(null)}
+						onRefresh={() => setViewRevision((value) => value + 1)}
+					/>
+				)}
 				<ErrorRateTrendChart
 					timeSeries={toolCallErrors.timeSeries}
 					timeRange={timeRange}

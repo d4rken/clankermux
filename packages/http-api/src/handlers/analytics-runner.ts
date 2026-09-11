@@ -25,6 +25,7 @@ import { createPoolSizingHandler as createDirectPoolSizingHandler } from "./pool
 import { createQuotaDriftHandler as createDirectQuotaDriftHandler } from "./quota-drift-direct";
 import { createStatsHandler as createDirectStatsHandler } from "./stats-direct";
 import { createStopsHistoryHandler as createDirectStopsHistoryHandler } from "./stops-history-direct";
+import { createToolErrorsHandler as createDirectToolErrorsHandler } from "./tool-errors-direct";
 import { createUsageHistoryHandler as createDirectUsageHistoryHandler } from "./usage-history-direct";
 import { createUsageScopedHistoryHandler as createDirectUsageScopedHistoryHandler } from "./usage-scoped-history-direct";
 
@@ -52,6 +53,7 @@ const DEFAULT_MAX_IN_FLIGHT_ENTRIES = 64;
 
 const WORKER_SOFT_TIMEOUT_MS_BY_KIND: Record<DashboardWorkerKind, number> = {
 	analytics: ANALYTICS_WORKER_TIMEOUT_MS,
+	"tool-errors": ANALYTICS_WORKER_TIMEOUT_MS,
 	stats: DEFAULT_WORKER_TIMEOUT_MS,
 	"usage-history": DEFAULT_WORKER_TIMEOUT_MS,
 	"usage-scoped-history": DEFAULT_WORKER_TIMEOUT_MS,
@@ -174,6 +176,7 @@ type WorkerLane = "heavy" | "light";
 
 const LANE_BY_KIND: Record<DashboardWorkerKind, WorkerLane> = {
 	analytics: "heavy",
+	"tool-errors": "heavy",
 	stats: "light",
 	"usage-history": "light",
 	"usage-scoped-history": "light",
@@ -222,6 +225,12 @@ const KIND_LABELS: Record<
 	DashboardWorkerKind,
 	{ timeoutMessage: string; failureMessage: string; tooManyMessage: string }
 > = {
+	"tool-errors": {
+		timeoutMessage:
+			"Tool error details timed out. The analytics worker may be busy; retry shortly.",
+		failureMessage: "Failed to fetch tool error details",
+		tooManyMessage: "Too many tool error detail requests",
+	},
 	analytics: {
 		timeoutMessage: "Analytics request timed out",
 		failureMessage: "Failed to fetch analytics data",
@@ -785,4 +794,12 @@ export function getAnalyticsCacheStatsForTests(): {
 		responseCacheSize: responseCache.size,
 		inFlightSize: inFlight.size,
 	};
+}
+
+export function createIsolatedToolErrorsHandler(context: APIContext) {
+	return createIsolatedDashboardHandler(
+		context,
+		"tool-errors",
+		createDirectToolErrorsHandler(context),
+	);
 }

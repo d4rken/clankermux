@@ -1,4 +1,8 @@
-import { measureContentBlock } from "@clankermux/core";
+import {
+	extractToolErrorText,
+	measureContentBlock,
+	TOOL_ERROR_MAX_SAMPLES,
+} from "@clankermux/core";
 import type { ContextComposition, ToolCallStat } from "@clankermux/types";
 import type { RequestJsonBody } from "./request-body-context";
 
@@ -24,12 +28,6 @@ import type { RequestJsonBody } from "./request-body-context";
  * is the one new turn). Tool names resolve via the full-history
  * tool_use_id → tool_use.name map built during the walk.
  */
-
-/** Truncation cap for captured tool error texts. */
-const ERROR_TEXT_MAX_CHARS = 500;
-
-/** Per-tool cap on captured error samples (errors beyond this still count). */
-const MAX_ERROR_SAMPLES = 3;
 
 /** JSON.stringify length, 0 for unstringifiable values (circular refs, undefined). */
 function safeJsonLength(value: unknown): number {
@@ -63,29 +61,6 @@ function computeSystemChars(system: unknown): number {
 	return total;
 }
 
-/** Error text for a tool_result block: string content as-is, array content as
- * joined `type:"text"` block texts; anything else yields "" (the error still
- * counts, the sample is just skipped). Truncated to ERROR_TEXT_MAX_CHARS. */
-function extractErrorText(content: unknown): string {
-	let text = "";
-	if (typeof content === "string") {
-		text = content;
-	} else if (Array.isArray(content)) {
-		const parts: string[] = [];
-		for (const item of content) {
-			if (
-				isRecord(item) &&
-				item.type === "text" &&
-				typeof item.text === "string"
-			) {
-				parts.push(item.text);
-			}
-		}
-		text = parts.join("\n");
-	}
-	return text.slice(0, ERROR_TEXT_MAX_CHARS);
-}
-
 /** Per-tool call/error stats for the FINAL message only. Returns null when it
  * contains no tool_result blocks (so non-tool turns produce no stats rows). */
 function extractFinalMessageToolStats(
@@ -117,8 +92,8 @@ function extractFinalMessageToolStats(
 		// Strict boolean check: truthy non-booleans ("true", 1) are NOT errors.
 		if (block.is_error !== true) continue;
 		stat.errorCount++;
-		if (stat.errorSamples.length < MAX_ERROR_SAMPLES) {
-			const sample = extractErrorText(block.content);
+		if (stat.errorSamples.length < TOOL_ERROR_MAX_SAMPLES) {
+			const sample = extractToolErrorText(block.content);
 			if (sample.trim().length > 0) {
 				stat.errorSamples.push(sample);
 			}

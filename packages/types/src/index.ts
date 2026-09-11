@@ -28,6 +28,7 @@ export * from "./stats";
 export * from "./stops-history";
 export * from "./strategy";
 export * from "./system";
+export * from "./tool-error-details";
 export * from "./unified-claim-observation";
 export * from "./unified-summary-observation";
 export * from "./upstream-error";

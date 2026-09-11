@@ -301,6 +301,7 @@ export {
 	tierCapacityUnits,
 } from "./tier-capacity";
 export { formatPlanTierLabel } from "./tier-label";
+export * from "./tool-error-evidence";
 export { TtlCache } from "./ttl-cache";
 export {
 	type AccountWideClaimHeadroom,

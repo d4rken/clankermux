@@ -30,6 +30,8 @@ import type {
 	StopsHistoryResponse,
 	StorageUsageResponse,
 	SystemStatusResponse,
+	ToolErrorDetailsResponse,
+	ToolErrorExampleResponse,
 	UsageHistoryResponse,
 	UsageScopedHistoryResponse,
 } from "@clankermux/types";
@@ -1154,6 +1156,44 @@ class API extends HttpClient {
 			});
 			throw error;
 		}
+	}
+
+	async getToolErrors(
+		selection: {
+			tool: string;
+			range: string;
+			to: number;
+			sampleId?: number;
+			offset?: number;
+		},
+		filters?: AnalyticsRequestFilters,
+	): Promise<ToolErrorDetailsResponse> {
+		const params = new URLSearchParams();
+		for (const [key, value] of Object.entries(selection))
+			if (value !== undefined) params.set(key, String(value));
+		appendRequestFilterParams(params, filters);
+		return this.get<ToolErrorDetailsResponse>(
+			`/api/analytics/tool-errors?${params}`,
+			{ timeout: 70_000 },
+		);
+	}
+	async getToolErrorExample(
+		selection: {
+			tool: string;
+			range: string;
+			to: number;
+			sampleId: number;
+			requestId: string;
+		},
+		filters?: AnalyticsRequestFilters,
+	): Promise<ToolErrorExampleResponse> {
+		const params = new URLSearchParams();
+		for (const [key, value] of Object.entries(selection))
+			params.set(key, String(value));
+		appendRequestFilterParams(params, filters);
+		return this.get<ToolErrorExampleResponse>(
+			`/api/analytics/tool-errors/example?${params}`,
+		);
 	}
 
 	// How often requests were actually blocked in the range, by cause, plus how

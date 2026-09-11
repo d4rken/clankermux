@@ -142,6 +142,8 @@ export function ProjectsReliabilityTab(props: ProjectsReliabilityTabProps) {
 
 			{/* Tool Errors */}
 			<ToolErrorsPanel
+				key={JSON.stringify([range, filters])}
+				filters={filters}
 				toolCallErrors={analytics?.toolCallErrors}
 				loading={loading}
 				timeRange={range}
