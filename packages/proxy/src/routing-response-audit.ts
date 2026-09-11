@@ -165,6 +165,42 @@ export function isModelRouteRestriction(
 	);
 }
 
+/**
+ * Codes that name a FIELD OF THE REQUEST. Whatever prose such an envelope
+ * carries, the backend is complaining about what was sent, not about whether it
+ * can serve the model.
+ */
+const REQUEST_SHAPE_ERROR_CODES = [
+	"unsupported_parameter",
+	"unsupported_value",
+	"unknown_parameter",
+	"invalid_parameter",
+	"missing_required_parameter",
+	"invalid_value",
+];
+
+/** A message that names a request field is about that field. */
+const REQUEST_FIELD_WORD =
+	/\b(?:parameters?|property|properties|field|argument)\b/;
+
+/**
+ * The model has to be what the message REJECTS, not merely something it
+ * mentions, and word order is what carries that:
+ *
+ *   "the 'gpt-5.3-codex' model is not supported ..."      the model is refused
+ *   "the parameter 'temperature' is not supported with this model."  it is not
+ *
+ * Both mention a model and both say "not supported", so a predicate that only
+ * looks for the two in the same string reads the second as a refusal to serve
+ * the model.
+ */
+const MODEL_REJECTED =
+	/\bmodels?\b[^\n]{0,60}?(?:not supported|not found|does not exist|not entitled|not available)/;
+
+/** The mirror form, where the model is the OBJECT of an access refusal. */
+const MODEL_ACCESS_DENIED =
+	/(?:do(?:es)? not have access to|not entitled to|no access to|not authorized)[^\n]{0,60}?\bmodels?\b/;
+
 /** Only protocol error envelopes count; tool results and message content are data. */
 export function isDefinitiveModelError(
 	value: unknown,
@@ -194,12 +230,11 @@ export function isDefinitiveModelError(
 		].includes(code ?? "")
 	)
 		return true;
+	// An explicit request-shape code is decisive and outranks the prose below:
+	// the envelope already named a field of the request as its subject.
+	if (REQUEST_SHAPE_ERROR_CODES.includes(code ?? "")) return false;
 	// Codex/ChatGPT entitlement refusals use a top-level detail string.
 	const message = String(error?.message ?? body.detail ?? "").toLowerCase();
-	return (
-		/\bmodel\b/.test(message) &&
-		/not supported|not found|does not exist|not entitled|do not have access|not available for/.test(
-			message,
-		)
-	);
+	if (REQUEST_FIELD_WORD.test(message)) return false;
+	return MODEL_REJECTED.test(message) || MODEL_ACCESS_DENIED.test(message);
 }

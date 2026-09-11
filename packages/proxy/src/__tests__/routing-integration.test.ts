@@ -1145,8 +1145,9 @@ describe("definitive model rejection failover", () => {
 		accountId: string,
 		scope: string,
 		model: string,
+		tries = 200,
 	): Promise<boolean> {
-		for (let i = 0; i < 200; i++) {
+		for (let i = 0; i < tries; i++) {
 			if (await routing.isModelSuppressed(accountId, scope, model, Date.now()))
 				return true;
 			await new Promise((resolve) => setTimeout(resolve, 5));
@@ -1286,6 +1287,103 @@ describe("definitive model rejection failover", () => {
 		expect(fetcher).toHaveBeenCalledTimes(1);
 	});
 
+	it("forwards a 400 parameter rejection instead of cycling the pool for it", async () => {
+		const { accounts, ctx, routing } = await codexPool([
+			"param-400",
+			"spare-400",
+		]);
+		const envelope = {
+			error: {
+				code: "unsupported_parameter",
+				message:
+					"The parameter 'temperature' is not supported with this model.",
+			},
+		};
+		const fetcher = mock(async () => Response.json(envelope, { status: 400 }));
+		globalThis.fetch = fetcher as typeof fetch;
+		const req = request();
+		const response = await handleProxy(
+			req,
+			new URL(req.url),
+			ctx,
+			"experiment",
+		);
+
+		// The client keeps the one message that names the offending parameter,
+		// rather than an aggregate report that every account refused the model.
+		expect(response.status).toBe(400);
+		expect((await response.json()).error).toEqual(envelope.error);
+		// The sibling was never tried: nothing here is evidence about the account.
+		expect(fetcher).toHaveBeenCalledTimes(1);
+		for (const a of accounts)
+			expect(
+				await suppressedSoon(routing, a.id, scopeOf(a), "gpt-6-astra", 20),
+			).toBe(false);
+	});
+
+	it("leaves the pair usable for the rest of the request after a parameter rejection", async () => {
+		const { accounts, ctx } = await codexPool(["param-local"]);
+		const [rejected] = accounts;
+		const fetcher = mock(async () =>
+			Response.json(
+				{
+					error: {
+						code: "unsupported_parameter",
+						message:
+							"The parameter 'temperature' is not supported with this model.",
+					},
+				},
+				{ status: 400 },
+			),
+		);
+		globalThis.fetch = fetcher as typeof fetch;
+		const meta: RequestMeta = {
+			id: "parameter-rejection",
+			method: "POST",
+			path: "/v1/messages",
+			timestamp: Date.now(),
+			requestedModel: requested,
+			headers: new Headers(),
+		};
+		await initializeRequestRoute(meta, ctx, null, null);
+		const body = new TextEncoder().encode(
+			JSON.stringify({
+				model: requested,
+				max_tokens: 32,
+				messages: [{ role: "user", content: "hello" }],
+			}),
+		).buffer as ArrayBuffer;
+		const forwarded = await proxyWithAccount(
+			request(),
+			new URL("https://proxy.local/v1/messages"),
+			rejected,
+			meta,
+			body,
+			() => undefined,
+			0,
+			ctx,
+			"gpt-6-astra",
+		);
+
+		// Forwarded (a Response, not the null that means "failed over")...
+		expect(forwarded?.status).toBe(400);
+		// ...and the pair is still a destination this request may use.
+		expect((await eligibleRouteAccounts(meta, ctx)).map((a) => a.id)).toEqual([
+			"param-local",
+		]);
+		await expect(
+			sendAuthorizedRequest(
+				new Request("https://upstream.test/v1/messages", {
+					method: "POST",
+					body: JSON.stringify({ model: "gpt-6-astra" }),
+				}),
+				rejected,
+				meta,
+				ctx,
+			),
+		).resolves.toBeDefined();
+	});
+
 	it("leaves an OpenRouter 403 routing restriction to the client untouched", async () => {
 		const model = "meta/muse-spark-1.3";
 		const accounts = ["or-403-a", "or-403-b"].map((id) =>
@@ -1346,16 +1444,50 @@ describe("definitive model rejection failover", () => {
 	});
 
 	it("keeps a mid-stream HTTP200 rejection to audit and suppression", async () => {
-		const { accounts, ctx, routing } = await codexPool(["stream-403"]);
-		const fetcher = mock(
-			async () =>
-				new Response(
-					'event: response.created\ndata: {"type":"response.created","response":{"id":"r","model":"gpt-6-astra"}}\n\n' +
-						'event: response.output_text.delta\ndata: {"type":"response.output_text.delta","delta":"partial","output_index":0,"content_index":0}\n\n' +
-						'event: response.failed\ndata: {"type":"response.failed","response":{"error":{"code":"model_access_denied"}}}\n\n',
-					{ headers: { "content-type": "text/event-stream" } },
-				),
-		);
+		// Two authorized accounts, so "no sibling was used" is a real outcome and
+		// not the only one available. The rejection is withheld until the client
+		// has the delta in hand, which is the boundary this case exists to pin:
+		// once bytes are on their way to the client there is nothing to restart,
+		// however definitive the envelope that arrives next.
+		const { accounts, ctx, routing } = await codexPool([
+			"stream-403",
+			"stream-sibling",
+		]);
+		let releaseRejection = () => {};
+		let released = false;
+		const rejectionGate = new Promise<void>((resolve) => {
+			releaseRejection = () => {
+				released = true;
+				resolve();
+			};
+		});
+		const fetcher = mock(async () => {
+			const encoder = new TextEncoder();
+			return new Response(
+				new ReadableStream<Uint8Array>({
+					async start(controller) {
+						controller.enqueue(
+							encoder.encode(
+								'event: response.created\ndata: {"type":"response.created","response":{"id":"r","model":"gpt-6-astra"}}\n\n',
+							),
+						);
+						controller.enqueue(
+							encoder.encode(
+								'event: response.output_text.delta\ndata: {"type":"response.output_text.delta","delta":"partial","output_index":0,"content_index":0}\n\n',
+							),
+						);
+						await rejectionGate;
+						controller.enqueue(
+							encoder.encode(
+								'event: response.failed\ndata: {"type":"response.failed","response":{"error":{"code":"model_access_denied"}}}\n\n',
+							),
+						);
+						controller.close();
+					},
+				}),
+				{ headers: { "content-type": "text/event-stream" } },
+			);
+		});
 		globalThis.fetch = fetcher as typeof fetch;
 		const req = request({ stream: true });
 		const response = await handleProxy(
@@ -1364,11 +1496,34 @@ describe("definitive model rejection failover", () => {
 			ctx,
 			"experiment",
 		);
-		// Headers — and then real content — reached the client before the observer
-		// could read the envelope that follows them.
 		expect(response.status).toBe(200);
-		expect(await response.text()).toContain("partial");
-		// So nothing was restarted.
+
+		// Safety valve: a regression that buffers the whole upstream stream would
+		// otherwise deadlock the suite. It trips `released`, which the assertion
+		// below then fails on, so it can never turn a buffered delivery green.
+		const valve = setTimeout(releaseRejection, 2_000);
+		const reader = (response.body as ReadableStream<Uint8Array>).getReader();
+		const decoder = new TextDecoder();
+		let delivered = "";
+		while (!delivered.includes("partial")) {
+			const next = await reader.read();
+			if (next.done) break;
+			delivered += decoder.decode(next.value, { stream: true });
+		}
+		clearTimeout(valve);
+		// Content reached the client while the upstream stream was still open.
+		expect(released).toBe(false);
+		expect(delivered).toContain("partial");
+
+		releaseRejection();
+		while (true) {
+			const next = await reader.read();
+			if (next.done) break;
+			delivered += decoder.decode(next.value, { stream: true });
+		}
+
+		// One dispatch: the authorized sibling was never asked to redo a response
+		// the client is already reading.
 		expect(fetcher).toHaveBeenCalledTimes(1);
 		expect(
 			await suppressedSoon(
@@ -1378,6 +1533,15 @@ describe("definitive model rejection failover", () => {
 				"gpt-6-astra",
 			),
 		).toBe(true);
+		// The sibling refused nothing, so nothing about it was recorded.
+		expect(
+			await routing.isModelSuppressed(
+				accounts[1].id,
+				scopeOf(accounts[1]),
+				"gpt-6-astra",
+				Date.now(),
+			),
+		).toBe(false);
 	});
 
 	it("reports the model rejection, not a generic failure, when the pool is out of accounts", async () => {
