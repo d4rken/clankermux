@@ -237,6 +237,15 @@ export type ProxyAttemptOutcome =
 	| { kind: "other" };
 
 /**
+ * The outcome kinds that mean "this destination definitively refused the model
+ * it was given". Registration of the request-scoped exclusion keys off THIS,
+ * not off the individual return sites, so a branch cannot record one of these
+ * outcomes and leave the pair eligible (see the `fail` helper).
+ */
+const MODEL_REJECTION_OUTCOMES: ReadonlySet<ProxyAttemptOutcome["kind"]> =
+	new Set(["model_not_found", "model_not_entitled"]);
+
+/**
  * Optional, behaviour-only extension bag for {@link proxyWithAccount}. Every
  * field is optional and defaults to today's behaviour, so existing positional
  * callers and tests are unaffected.
@@ -970,7 +979,13 @@ export async function proxyWithAccount(
 	options?: ProxyAttemptOptions,
 	staleTokenRetryAttempt = 0,
 ): Promise<Response | null> {
-	modelOverride = getAttemptTarget(requestMeta, account).upstreamModel;
+	// The one model this attempt may send, frozen by the route. Named so the
+	// failure chokepoint below can record a rejection against it.
+	const resolvedTargetModel = getAttemptTarget(
+		requestMeta,
+		account,
+	).upstreamModel;
+	modelOverride = resolvedTargetModel;
 	const attemptAudit: RoutingAttemptAudit = { id: null };
 	// Resolved lazily at the 529 decision points (see the param doc). Memoized so
 	// the clone decision and the forward decision, which straddle an await, can
@@ -1048,6 +1063,14 @@ export async function proxyWithAccount(
 		auditReason?: string,
 	): Promise<null> => {
 		settleOverloadProbe("abandoned", "attempt_failed");
+		// Synchronous, and here rather than at each rejecting branch: the next
+		// attempt of THIS request must not be offered a pair the upstream has
+		// already refused, and the suppression row the response observer writes
+		// cannot be relied on for that (it is still in flight while we fail over,
+		// and a recovery hold deliberately discards ordinary-failure tracking
+		// between rounds, so the account comes back eligible).
+		if (MODEL_REJECTION_OUTCOMES.has(outcome.kind))
+			excludeModelForRequest(requestMeta, account.id, resolvedTargetModel);
 		options?.onOutcome?.(outcome);
 		const reason =
 			auditReason ??
@@ -2196,15 +2219,8 @@ export async function proxyWithAccount(
 		// carries: an OpenRouter provider-policy rejection is account/provider
 		// policy, not a verdict on the model.
 		if (!routeRestricted && (await isDefinitiveModelRejection(rawResponse))) {
-			const rejectedModel = getAttemptTarget(
-				requestMeta,
-				account,
-			).upstreamModel;
-			// Synchronous, so the next attempt of THIS request cannot race the
-			// suppression row the response observer writes while we fail over.
-			excludeModelForRequest(requestMeta, account.id, rejectedModel);
 			log.warn(
-				`Account ${account.name} definitively rejected model ${rejectedModel} (HTTP ${rawResponse.status}) — failing over to the next account`,
+				`Account ${account.name} definitively rejected model ${resolvedTargetModel} (HTTP ${rawResponse.status}) — failing over to the next account`,
 			);
 			// Drained, not cancelled: the drain is what feeds the observer the
 			// bytes it classifies, so the persistent suppression write still lands.

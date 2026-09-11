@@ -13,6 +13,7 @@ import {
 	modelPermissionScope,
 } from "../account-model-permissions";
 import { setForcedAccount } from "../handlers";
+import { selectAccountsForRequest } from "../handlers/account-selector";
 import { proxyWithAccount } from "../handlers/proxy-operations";
 import { clearProviderOverloadCooldown } from "../provider-overload-cooldown";
 import { handleProxy } from "../proxy";
@@ -1226,15 +1227,52 @@ describe("definitive model rejection failover", () => {
 		releaseSuppression();
 	});
 
-	it("refuses the rejected pair for the rest of the request without the suppression row", async () => {
-		const { accounts, ctx } = await codexPool(["denied-local"]);
+	// Every envelope a definitive rejection can arrive in, each taken through a
+	// DIFFERENT branch of the attempt: the OpenAI-compatible 403, the generic
+	// model-not-found, and the plan-scoped Codex/ChatGPT refusal. They share one
+	// registration point, so none of them can fail over while leaving the pair
+	// eligible.
+	const rejections: Array<[string, () => Response]> = [
+		["403 model_access_denied", accessDenied],
+		[
+			"404 model_not_found",
+			() =>
+				Response.json(
+					{
+						error: {
+							code: "model_not_found",
+							message: "The model gpt-6-astra does not exist",
+						},
+					},
+					{ status: 404 },
+				),
+		],
+		[
+			"400 Codex plan entitlement",
+			() =>
+				Response.json(
+					{
+						detail:
+							"The 'gpt-6-astra' model is not supported when using Codex with a ChatGPT account.",
+					},
+					{ status: 400 },
+				),
+		],
+	];
+	it.each(
+		rejections,
+	)("refuses the rejected pair for the rest of the request (%s)", async (_name, reject) => {
+		const { accounts, ctx } = await codexPool([
+			"denied-local",
+			"sibling-local",
+		]);
 		const [denied] = accounts;
 		// Prove the request-local set does the work: the persisted row never says
 		// yes, exactly as it would not have landed yet on a real retry.
 		Object.assign(ctx.dbOps.routing, {
 			isModelSuppressed: mock(async () => false),
 		});
-		const fetcher = mock(async () => accessDenied());
+		const fetcher = mock(async () => reject());
 		globalThis.fetch = fetcher as typeof fetch;
 		const meta: RequestMeta = {
 			id: "local-exclusion",
@@ -1247,6 +1285,7 @@ describe("definitive model rejection failover", () => {
 		await initializeRequestRoute(meta, ctx, null, null);
 		expect((await eligibleRouteAccounts(meta, ctx)).map((a) => a.id)).toEqual([
 			"denied-local",
+			"sibling-local",
 		]);
 		const body = new TextEncoder().encode(
 			JSON.stringify({
@@ -1270,7 +1309,16 @@ describe("definitive model rejection failover", () => {
 		).toBeNull();
 		expect(fetcher).toHaveBeenCalledTimes(1);
 		// Eligibility no longer offers the pair...
-		expect(await eligibleRouteAccounts(meta, ctx)).toEqual([]);
+		expect((await eligibleRouteAccounts(meta, ctx)).map((a) => a.id)).toEqual([
+			"sibling-local",
+		]);
+		// ...including through the re-selection a cooldown-driven recovery hold
+		// runs on wake. That hold discards its ordinary-failure tracking between
+		// rounds, so this set is the only thing that keeps a refused destination
+		// out of a later round of the SAME request.
+		expect(
+			(await selectAccountsForRequest(meta, ctx, requested)).map((a) => a.id),
+		).toEqual(["sibling-local"]);
 		// ...and the dispatch chokepoint every transport / body / token-refresh
 		// retry passes through refuses it before reaching the network.
 		await expect(
