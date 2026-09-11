@@ -166,6 +166,7 @@ function trackFinalize(
 		responseTimeMs: number;
 		providerName: string;
 		accountProvider?: string;
+		accountCustomEndpoint?: string | null;
 		isStream: boolean;
 		endedCleanly: boolean;
 	},
@@ -1277,7 +1278,8 @@ async function forwardToClientInner(
 						{
 							responseTimeMs,
 							providerName: ctx.provider.name,
-							accountProvider,
+							accountProvider: account?.provider,
+							accountCustomEndpoint: account?.custom_endpoint,
 							isStream: true,
 							// onEnd fires when the upstream stream reaches its natural end
 							// (the reader saw `done`), so the body was NOT truncated →
@@ -1407,7 +1409,8 @@ async function forwardToClientInner(
 						{
 							responseTimeMs,
 							providerName: ctx.provider.name,
-							accountProvider,
+							accountProvider: account?.provider,
+							accountCustomEndpoint: account?.custom_endpoint,
 							isStream: true,
 							// The USAGE key, not the transport one: this decides only
 							// whether finalize trusts the provider's counts.
@@ -1464,7 +1467,8 @@ async function forwardToClientInner(
 				{
 					responseTimeMs,
 					providerName: ctx.provider.name,
-					accountProvider,
+					accountProvider: account?.provider,
+					accountCustomEndpoint: account?.custom_endpoint,
 					isStream: false,
 					endedCleanly: true,
 				},
@@ -1597,7 +1601,8 @@ async function forwardToClientInner(
 					{
 						responseTimeMs,
 						providerName: ctx.provider.name,
-						accountProvider,
+						accountProvider: account?.provider,
+						accountCustomEndpoint: account?.custom_endpoint,
 						isStream: false,
 						// Body was fully read (capped) → complete transport, clean end.
 						endedCleanly: true,
@@ -1621,7 +1626,8 @@ async function forwardToClientInner(
 					{
 						responseTimeMs,
 						providerName: ctx.provider.name,
-						accountProvider,
+						accountProvider: account?.provider,
+						accountCustomEndpoint: account?.custom_endpoint,
 						isStream: false,
 						endedCleanly: false,
 					},

@@ -7,10 +7,12 @@ import {
 import {
 	type CachePrefixCapture,
 	type ContextComposition,
+	type CostSource,
 	NO_ACCOUNT_ID,
 	type ProjectAttributionSource,
 	parseUpstreamError,
 	type RequestResponse,
+	resolveCostSource,
 	type ToolCallStat,
 } from "@clankermux/types";
 
@@ -149,7 +151,7 @@ export interface SlimUsageSummary {
 		cacheCreationInputTokens?: number;
 		totalTokens?: number;
 		/**
-		 * The catalogue estimate for this request, ABSENT when the model could not
+		 * The best available cost for this request, ABSENT when it could not
 		 * be priced. Never 0 for a failed lookup: `estimateCostUSD` reports that as
 		 * null and the collector carries the absence, because "this was free" and
 		 * "we could not price it" are different facts and every consumer of this
@@ -157,6 +159,9 @@ export interface SlimUsageSummary {
 		 * otherwise read the second as the first.
 		 */
 		costUsd?: number;
+		estimatedCostUsd?: number;
+		costSource?: CostSource;
+		costIsByok?: boolean;
 	};
 	tokensPerSecond?: number;
 	/**
@@ -419,7 +424,7 @@ interface InternalRecord {
 	/**
 	 * When the FIRST summary yielding a persistable usage vector arrived, from
 	 * the recorder's injected clock. Null until then — including for a summary
-	 * that carried no model, which `toRequestUsage` drops entirely and which
+	 * that carried no model, which cannot establish a token vector and which
 	 * therefore never made a token vector known.
 	 */
 	usageFinalizedAt: number | null;
@@ -650,14 +655,10 @@ export class RequestRecorder {
 		const record = this.records.get(requestId);
 		if (!record) return;
 		// Stamp the moment a PERSISTABLE token vector became known — which is not
-		// the same as "a summary arrived". `toRequestUsage` drops a model-less
-		// summary whole, so such a summary never made a token vector known and
-		// must not stamp. First qualifying summary only: the column records when
-		// usage first existed, so a re-attach cannot move it forward.
-		if (
-			record.usageFinalizedAt === null &&
-			this.toRequestUsage(summary) !== undefined
-		) {
+		// the same as "a summary arrived". A model-less charge is persistable but
+		// does not establish a token vector and must not stamp. The first qualifying
+		// summary records when usage first existed; a re-attach cannot move it forward.
+		if (record.usageFinalizedAt === null && summary.usage.model) {
 			record.usageFinalizedAt = this.now();
 		}
 		if (record.persisted) {
@@ -1261,6 +1262,9 @@ export class RequestRecorder {
 				usage?.cacheCreationInputTokens ?? summary?.cacheCreationInputTokens,
 			outputTokens: usage?.outputTokens,
 			costUsd: usage?.costUsd,
+			estimatedCostUsd: usage?.estimatedCostUsd,
+			costSource: resolveCostSource(usage?.costUsd, usage?.costSource),
+			costIsByok: usage?.costIsByok,
 			tokensPerSecond: summary?.tokensPerSecond,
 			tokensPerSecondApproximate:
 				summary?.tokensPerSecondApproximate || undefined,
@@ -1288,7 +1292,8 @@ export class RequestRecorder {
 	 */
 	private toRequestUsage(summary: SlimUsageSummary): unknown {
 		const u = summary.usage;
-		if (!u.model) return undefined;
+		if (!u.model && !(u.costSource === "reported" && u.costUsd != null))
+			return undefined;
 		return {
 			model: u.model,
 			promptTokens:
@@ -1298,6 +1303,9 @@ export class RequestRecorder {
 			completionTokens: u.outputTokens,
 			totalTokens: u.totalTokens,
 			costUsd: u.costUsd,
+			estimatedCostUsd: u.estimatedCostUsd,
+			costSource: resolveCostSource(u.costUsd, u.costSource),
+			costIsByok: u.costIsByok,
 			inputTokens: u.inputTokens,
 			outputTokens: u.outputTokens,
 			cacheReadInputTokens: u.cacheReadInputTokens,

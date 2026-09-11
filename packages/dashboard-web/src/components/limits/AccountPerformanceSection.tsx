@@ -3,13 +3,13 @@ import { formatUsd } from "@clankermux/ui-common";
 import { AlertCircle } from "lucide-react";
 import { useMemo } from "react";
 import { CHART_TOKENS, type TimeRange } from "../../constants";
+import { CostCoverageNote, formatKnownCost } from "../CostCoverage";
 import { BaseBarChart } from "../charts";
 import type { ChartDataPoint } from "../charts/types";
 import {
 	type AccountCostRow,
 	getAccountCostTotals,
 	getSortedAccountCostRows,
-	hasAnyAccountCostData,
 } from "../overview/account-cost-table-utils";
 import { TimeRangeSelector } from "../overview/TimeRangeSelector";
 import {
@@ -100,6 +100,12 @@ export function AccountPerformanceSection({
 	);
 	// Analytics rows only carry the account *name*, so the subscription join is
 	// by accountName (names are unique per account in practice).
+	const paymentByName = new Map(
+		paymentsSummary?.perAccount.map((account) => [
+			account.accountName,
+			account,
+		]) ?? [],
+	);
 	const subMonthlyByName = useMemo(
 		() => amortizedMonthlyByAccountName(paymentsSummary?.perAccount ?? []),
 		[paymentsSummary],
@@ -162,7 +168,7 @@ export function AccountPerformanceSection({
 				    standalone tiles). The averages below Plan Value are fixed 7d/30d
 				    windows and stay put when the range above changes; the amortized
 				    rows under Cost are likewise range-independent run rates. */}
-				<div className="mb-group grid grid-cols-2 md:grid-cols-3 gap-group border-b pb-group">
+				<div className="mb-group grid grid-cols-2 lg:grid-cols-4 gap-group border-b pb-group">
 					{/* Every figure in this card is a range AGGREGATE — hundreds to
 					    tens of thousands of dollars — so they all take the money
 					    formatter: two decimals, grouped. `formatCost`'s four decimals
@@ -193,13 +199,13 @@ export function AccountPerformanceSection({
 						</div>
 					</div>
 					<div>
-						<p className="text-sm text-muted-foreground">Cost</p>
+						<p className="text-sm text-muted-foreground">Recorded payments</p>
 						<p
 							className="figure-xl"
-							title="Ledger payments (subscriptions + credits) plus token-billed cost in the selected range"
+							title="Recorded subscriptions and credit purchases in the selected range"
 						>
 							{paymentsSummary
-								? formatUsd(paymentsSummary.range.totalUsd)
+								? formatUsd(paymentsSummary.range.ledgerUsd)
 								: "—"}
 						</p>
 						<div className="mt-item space-y-tight text-xs">
@@ -217,6 +223,24 @@ export function AccountPerformanceSection({
 								</div>
 							))}
 						</div>
+					</div>
+					<div>
+						<p className="text-sm text-muted-foreground">API usage cost</p>
+						<p className="figure-xl">
+							{paymentsSummary
+								? formatKnownCost(
+										paymentsSummary.range.tokenCostUsd,
+										paymentsSummary.range.apiCostCoverage,
+									)
+								: "—"}
+						</p>
+						{paymentsSummary && (
+							<p className="mt-tight text-xs text-muted-foreground">
+								<CostCoverageNote
+									coverage={paymentsSummary.range.apiCostCoverage}
+								/>
+							</p>
+						)}
 					</div>
 					<div>
 						<p className="text-sm text-muted-foreground">Value Ratio</p>
@@ -271,13 +295,12 @@ export function AccountPerformanceSection({
 								<TableRow>
 									<TableHead>Account</TableHead>
 									<TableHead className="text-right">Plan Value</TableHead>
-									<TableHead className="text-right">API Value</TableHead>
-									<TableHead className="text-right">Total</TableHead>
+									<TableHead className="text-right">API usage cost</TableHead>
 									<TableHead className="text-right">Sub / mo</TableHead>
 								</TableRow>
 							</TableHeader>
 							<TableBody>
-								{hasAnyAccountCostData(sortedAccountCostRows) ? (
+								{sortedAccountCostRows.length > 0 ? (
 									sortedAccountCostRows.map((row) => {
 										const subMonthly = subMonthlyByName.get(row.name);
 										return (
@@ -289,10 +312,18 @@ export function AccountPerformanceSection({
 													{formatUsd(row.planCostUsd)}
 												</TableCell>
 												<TableCell className="figure text-right">
-													{formatUsd(row.apiCostUsd)}
-												</TableCell>
-												<TableCell className="figure text-right font-medium">
-													{formatUsd(row.totalCostUsd)}
+													{formatKnownCost(
+														paymentByName.get(row.name)?.rangeTokenCostUsd ??
+															row.apiCostUsd,
+														paymentByName.get(row.name)?.rangeCostCoverage,
+													)}
+													<div className="text-xs font-normal text-muted-foreground">
+														<CostCoverageNote
+															coverage={
+																paymentByName.get(row.name)?.rangeCostCoverage
+															}
+														/>
+													</div>
 												</TableCell>
 												<TableCell className="figure text-right">
 													{subMonthly != null ? formatUsd(subMonthly) : "—"}
@@ -304,7 +335,7 @@ export function AccountPerformanceSection({
 									<TableRow>
 										<TableCell
 											className="py-row text-muted-foreground"
-											colSpan={5}
+											colSpan={4}
 										>
 											No cost data
 										</TableCell>
@@ -318,10 +349,19 @@ export function AccountPerformanceSection({
 										{formatUsd(accountCostTotals.planCostUsd)}
 									</TableCell>
 									<TableCell className="figure text-right font-medium">
-										{formatUsd(accountCostTotals.apiCostUsd)}
-									</TableCell>
-									<TableCell className="figure text-right font-medium">
-										{formatUsd(accountCostTotals.totalCostUsd)}
+										{paymentsSummary
+											? formatKnownCost(
+													paymentsSummary.range.tokenCostUsd,
+													paymentsSummary.range.apiCostCoverage,
+												)
+											: "—"}
+										{paymentsSummary && (
+											<div className="text-xs font-normal text-muted-foreground">
+												<CostCoverageNote
+													coverage={paymentsSummary.range.apiCostCoverage}
+												/>
+											</div>
+										)}
 									</TableCell>
 									<TableCell className="figure text-right font-medium">
 										{paymentsSummary

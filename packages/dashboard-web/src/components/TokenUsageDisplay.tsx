@@ -75,11 +75,6 @@ export function TokenUsageDisplay({ summary }: TokenUsageDisplayProps) {
 				<div className="bg-primary/10 p-4 rounded-lg">
 					<h4 className="font-semibold mb-2">{sections.totalTokens.label}</h4>
 					<p className="figure-xl">{sections.totalTokens.value}</p>
-					{sections.cost && (
-						<p className="mt-2 text-lg text-muted-foreground">
-							{sections.cost.label}: {sections.cost.value}
-						</p>
-					)}
 				</div>
 			)}
 

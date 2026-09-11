@@ -31,6 +31,7 @@ import {
 	createIsolatedPaymentsSummaryDataHandler,
 	invalidateDashboardCache,
 } from "./analytics-runner";
+import { toCostCoverage } from "./cost-coverage";
 import type { PaymentsSummaryData } from "./payments-summary-direct";
 
 const log = new Logger("PaymentsHandler");
@@ -118,12 +119,15 @@ export function assemblePaymentsSummary(
 	const tokenCostByAccount = new Map(
 		data.perAccountTokenCostUsd.map((r) => [r.accountId, r.costUsd]),
 	);
+	const coverageByAccount = new Map(
+		data.perAccountTokenCostUsd.map((r) => [r.accountId, r.costCoverage]),
+	);
 	const snapshotNames = new Map(
 		data.ledgerAccountNames.map((r) => [r.accountId, r.accountName]),
 	);
 
 	// Per-account: every account that has a price, plus every account (live or
-	// deleted) with ledger rows in range. Deleted accounts surface under their
+	// deleted) with ledger rows or API usage in range. Deleted accounts surface under their
 	// snapshotted ledger name.
 	const perAccount: PaymentsSummaryPerAccount[] = [];
 	const seen = new Set<string>();
@@ -140,7 +144,7 @@ export function assemblePaymentsSummary(
 			config.renewal_price_usd_micros != null &&
 			config.renewal_price_usd_micros > 0;
 		const hasLedger = ledgerByAccount.has(config.id);
-		if (!hasPrice && !hasLedger) continue;
+		if (!hasPrice && !hasLedger && !tokenCostByAccount.has(config.id)) continue;
 
 		const renewal = computeRenewal(
 			config.renewal_anchor,
@@ -158,12 +162,18 @@ export function assemblePaymentsSummary(
 			amortizedMonthlyUsd: monthly,
 			rangeLedgerUsd: microsToUsd(ledgerByAccount.get(config.id) ?? 0),
 			rangeTokenCostUsd: tokenCostByAccount.get(config.id) ?? 0,
+			rangeCostCoverage:
+				coverageByAccount.get(config.id) ?? toCostCoverage(null),
 		});
 		seen.add(config.id);
 	}
 
-	// Orphaned ledger rows (account removed since payment was recorded).
-	for (const [accountId, micros] of ledgerByAccount) {
+	// Orphaned payments or usage (account removed since they were recorded).
+	for (const accountId of new Set([
+		...ledgerByAccount.keys(),
+		...tokenCostByAccount.keys(),
+	])) {
+		const micros = ledgerByAccount.get(accountId) ?? 0;
 		if (seen.has(accountId)) continue;
 		perAccount.push({
 			accountId,
@@ -174,6 +184,8 @@ export function assemblePaymentsSummary(
 			amortizedMonthlyUsd: 0,
 			rangeLedgerUsd: microsToUsd(micros),
 			rangeTokenCostUsd: tokenCostByAccount.get(accountId) ?? 0,
+			rangeCostCoverage:
+				coverageByAccount.get(accountId) ?? toCostCoverage(null),
 		});
 	}
 
@@ -209,7 +221,8 @@ export function assemblePaymentsSummary(
 			subscriptionUsd: monthSubscriptionUsd,
 			creditsUsd: monthCreditsUsd,
 			tokenCostUsd: data.currentMonth.costs.tokenCostUsd,
-			totalUsd: monthLedgerUsd + data.currentMonth.costs.tokenCostUsd,
+			apiCostCoverage: data.currentMonth.costs.apiCostCoverage,
+			totalUsd: monthLedgerUsd,
 		},
 		range: {
 			from,
@@ -219,7 +232,8 @@ export function assemblePaymentsSummary(
 			subscriptionUsd: rangeSubscriptionUsd,
 			creditsUsd: rangeCreditsUsd,
 			tokenCostUsd: data.rangeWindow.costs.tokenCostUsd,
-			totalUsd: rangeLedgerUsd + data.rangeWindow.costs.tokenCostUsd,
+			apiCostCoverage: data.rangeWindow.costs.apiCostCoverage,
+			totalUsd: rangeLedgerUsd,
 			amortizedUsd,
 			planValueUsd: data.rangeWindow.costs.planValueUsd,
 			valueRatio:
