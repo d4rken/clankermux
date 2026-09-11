@@ -132,7 +132,7 @@ describe("isDialectAllowed: openai is a strict allowlist", () => {
 		for (const [method, path] of [
 			["POST", "/v1/messages"],
 			["POST", "/v1/messages/count_tokens"],
-			["POST", "/v1/chat/completions"],
+			["GET", "/v1/chat/completions"],
 			["POST", "/v1/completions"],
 			["POST", "/api/event_logging/v2/batch"],
 			["GET", "/v1/responses"],

@@ -1,5 +1,6 @@
 import { Logger } from "@clankermux/logger";
 import type { Account } from "@clankermux/types";
+import { getChatContext } from "@clankermux/types";
 import {
 	localTokenCountUrl,
 	supportsLocalTokenCounting,
@@ -34,6 +35,15 @@ export class OpenRouterProvider extends AnthropicCompatibleProvider {
 			body = await request.clone().json();
 		} catch {
 			return request;
+		}
+		const chat = getChatContext(request);
+		if (chat) {
+			if (body.max_tokens === undefined) {
+				body.max_tokens = chat.defaultMaxTokens;
+				const headers = new Headers(request.headers);
+				headers.delete("content-length");
+				request = new Request(request, { headers, body: JSON.stringify(body) });
+			}
 		}
 		if (
 			typeof body?.model !== "string" ||

@@ -28,11 +28,13 @@ import { supportsLocalTokenCounting } from "@clankermux/providers/local-token-co
 import {
 	type Account,
 	type AnthropicUsageData,
+	getChatContext,
 	getNativeResponsesMetaContext,
 	NATIVE_RESPONSES_REQUEST_HEADER,
 	PROVIDER_NAMES,
 	type RateLimitReason,
 	type RequestMeta,
+	transferChatContext,
 } from "@clankermux/types";
 import { cacheBodyStore } from "../cache-body-store";
 import {
@@ -1199,6 +1201,7 @@ export async function proxyWithAccount(
 		}
 
 		const providerRequest = new Request(targetUrl, requestInit);
+		transferChatContext(requestMeta, providerRequest);
 
 		let transformedRequest = provider.transformRequestBody
 			? await provider.transformRequestBody(providerRequest, account)
@@ -2170,6 +2173,17 @@ export async function proxyWithAccount(
 		// the responses that survived every retry branch.
 
 		// Process response (transform format, sanitize headers, etc.) using account-specific provider
+		transferChatContext(requestMeta, taggedRawResponse);
+		const chatContext = getChatContext(requestMeta);
+		if (chatContext) {
+			chatContext.outgoingModel = getAttemptTarget(
+				requestMeta,
+				account,
+			).upstreamModel;
+			chatContext.provider = account.provider;
+			chatContext.reportedModel = undefined;
+			chatContext.usageObserved = undefined;
+		}
 		const response = await provider.processResponse(
 			taggedRawResponse,
 			account,
@@ -2742,6 +2756,7 @@ export async function proxyForcedAccount(
 		}
 
 		const providerRequest = new Request(targetUrl, requestInit);
+		transferChatContext(requestMeta, providerRequest);
 		const transformedRequest = provider.transformRequestBody
 			? await provider.transformRequestBody(providerRequest, account)
 			: providerRequest;
@@ -2790,6 +2805,17 @@ export async function proxyForcedAccount(
 		// processProxyResponse (which applies cooldowns + signals failover) and
 		// do NOT special-case 401/429/529. Whatever the forced account returns is
 		// forwarded as-is.
+		transferChatContext(requestMeta, taggedRawResponse);
+		const chatContext = getChatContext(requestMeta);
+		if (chatContext) {
+			chatContext.outgoingModel = getAttemptTarget(
+				requestMeta,
+				account,
+			).upstreamModel;
+			chatContext.provider = account.provider;
+			chatContext.reportedModel = undefined;
+			chatContext.usageObserved = undefined;
+		}
 		const response = await provider.processResponse(
 			taggedRawResponse,
 			account,

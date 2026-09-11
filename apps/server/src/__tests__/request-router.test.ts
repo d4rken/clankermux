@@ -127,6 +127,9 @@ function makeDeps(options: Options = {}): {
 				status: 200,
 			});
 		},
+		async handleChatCompletions() {
+			return Response.json({ handler: "chat" });
+		},
 		async handleResponses(_req, url) {
 			calls.responses.push({ pathname: url.pathname, search: url.search });
 			return new Response(JSON.stringify({ handler: "responses" }), {
@@ -773,4 +776,82 @@ describe("headless mode routes like dashboard mode", () => {
 
 		expect(calls.dispatch.map((c) => c.pathname)).toEqual(["/v1/messages"]);
 	});
+});
+
+describe("Chat Completions mount", () => {
+	it("dispatches exactly once after API-key authentication with key identity", async () => {
+		const { deps, calls } = makeDeps();
+		const seen: unknown[] = [];
+		deps.handleChatCompletions = async (_req, url, id, name) => {
+			seen.push([url.pathname, id, name]);
+			return Response.json({ chat: true });
+		};
+		const r = await routeRequest(
+			makeRequest("/wire/openai/v1/chat/completions", {
+				method: "POST",
+				headers: { authorization: "Bearer test" },
+			}),
+			deps,
+		);
+		expect(r.status).toBe(200);
+		expect(seen).toEqual([["/v1/chat/completions", "key-1", "test"]]);
+		expect(calls.dispatch).toHaveLength(0);
+		expect(calls.auth[0].requirement).toBe("api_key");
+	});
+	it("returns OpenAI envelopes before adapter dispatch, including thrown auth", async () => {
+		const { deps, calls } = makeDeps({ authenticated: false });
+		const req = () =>
+			makeRequest("/wire/openai/v1/chat/completions", { method: "POST" });
+		let r = await routeRequest(req(), deps);
+		expect(r.status).toBe(401);
+		expect(await r.json()).toMatchObject({
+			error: {
+				message: expect.any(String),
+				type: "authentication_error",
+				param: null,
+				code: "authentication_error",
+			},
+		});
+		expect(calls.dispatch).toHaveLength(0);
+		deps.authenticate = async () => {
+			throw new Error("private auth internals");
+		};
+		r = await routeRequest(req(), deps);
+		const b = await r.json();
+		expect(r.status).toBe(401);
+		expect(b.type).toBeUndefined();
+		expect(b.error.param).toBeNull();
+		expect(JSON.stringify(b)).not.toContain("private");
+	});
+	it("returns OpenAI 404 for wrong verbs and 500 for a dispatch throw", async () => {
+		const { deps } = makeDeps();
+		let r = await routeRequest(
+			makeRequest("/wire/openai/v1/chat/completions"),
+			deps,
+		);
+		expect(r.status).toBe(404);
+		expect((await r.json()).type).toBeUndefined();
+		deps.handleChatCompletions = async () => {
+			throw new Error("internal");
+		};
+		r = await routeRequest(
+			makeRequest("/wire/openai/v1/chat/completions", { method: "POST" }),
+			deps,
+		);
+		expect(r.status).toBe(500);
+		expect((await r.json()).error.code).toBe("internal_error");
+	});
+	for (const path of [
+		"/wire/anthropic/v1/chat/completions",
+		"/wire/openai/v1/completions",
+		"/wire/anthropic/v1/completions",
+		"/wire/openai/v1/chat/completions/",
+		"/wire/openai/v1/chat/%63ompletions",
+	])
+		it(`refuses ${path}`, async () => {
+			const { deps, calls } = makeDeps();
+			const r = await routeRequest(makeRequest(path, { method: "POST" }), deps);
+			expect(r.status).toBe(404);
+			expect(calls.dispatch).toHaveLength(0);
+		});
 });

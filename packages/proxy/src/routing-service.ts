@@ -9,6 +9,7 @@ import type {
 	AccountModelPermissions,
 	RequestMeta,
 } from "@clankermux/types";
+import { getChatContext } from "@clankermux/types";
 import { AccountModelPermissionService } from "./account-model-permissions";
 import type { ProxyContext } from "./handlers/proxy-types";
 import { getValidAccessToken } from "./handlers/token-manager";
@@ -151,6 +152,7 @@ export async function initializeRequestRoute(
 			headerAccountId,
 			excludeOfficialAnthropic: meta.excludeOfficialAnthropic === true,
 			maintenance,
+			chatRequirements: getChatContext(meta)?.requirements,
 			suppressedPairs,
 		}),
 	);

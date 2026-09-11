@@ -286,13 +286,20 @@ export async function handleProxy(
 					kind: "local_reject",
 					started_at: Date.now(),
 					finished_at: Date.now(),
-					status: 403,
+					status: error.statusCode,
 					error: error.message,
 				});
-			retractIfNeverStarted(403);
+			retractIfNeverStarted(error.statusCode);
 			const response = Response.json(
-				{ type: "error", error: { type: error.code, message: error.message } },
-				{ status: 403 },
+				{
+					type: "error",
+					error: {
+						type: error.code,
+						message: error.message,
+						...(error.param ? { param: error.param } : {}),
+					},
+				},
+				{ status: error.statusCode },
 			);
 			await createSyntheticTerminalRecorder(
 				req,

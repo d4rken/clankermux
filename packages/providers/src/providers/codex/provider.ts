@@ -12,6 +12,7 @@ import { Logger } from "@clankermux/logger";
 import { resolveReasoningEffort } from "@clankermux/openai-formats";
 import {
 	type Account,
+	getChatContext,
 	NATIVE_RESPONSES_REQUEST_HEADER,
 	NATIVE_RESPONSES_RESPONSE_HEADER,
 } from "@clankermux/types";
@@ -340,8 +341,10 @@ interface AnthropicRequest {
 // ── SSE streaming state ───────────────────────────────────────────────────────
 
 interface FunctionCallBuffer {
+	argumentChars?: number;
 	contentBlockIndex: number;
 	name: string;
+	/** Legacy non-Chat accumulation; Chat deltas stream directly. */
 	arguments: string[];
 }
 
@@ -357,6 +360,7 @@ interface ContextWindow {
 }
 
 interface StreamState {
+	strictChat?: boolean;
 	buffer: string;
 	messageId: string;
 	model: string;
@@ -829,6 +833,10 @@ export class CodexProvider extends BaseProvider {
 			});
 		}
 
+		// Chat always requests SSE; do not buffer an unlabelled Codex response
+		// for sniffing, which would hide cancellation and delay every delta.
+		if (getChatContext(response) && response.status === 200)
+			return this.transformStreamingResponse(response);
 		const isEventStream = contentType?.includes("text/event-stream") ?? false;
 		if (isEventStream) {
 			if (requestedStream) {
@@ -1662,9 +1670,13 @@ export class CodexProvider extends BaseProvider {
 	}
 
 	private transformStreamingResponse(response: Response): Response {
+		const chatContext = getChatContext(response);
+		const strictChat = chatContext !== undefined;
+		if (chatContext) chatContext.usageObserved = false;
 		const _requestId =
 			response.headers.get("x-clankermux-request-id") ?? "unknown";
 		const state: StreamState = {
+			strictChat,
 			buffer: "",
 			messageId: `msg_${crypto.randomUUID().replace(/-/g, "").substring(0, 24)}`,
 			model: response.headers.get("x-clankermux-resolved-model") ?? "unknown",
@@ -1690,7 +1702,7 @@ export class CodexProvider extends BaseProvider {
 		>();
 		const writer = writable.getWriter();
 		const encoder = new TextEncoder();
-		const decoder = new TextDecoder();
+		const decoder = new TextDecoder("utf-8", { fatal: strictChat });
 
 		const writeSSE = async (event: string, data: unknown) => {
 			const payload =
@@ -1806,9 +1818,15 @@ export class CodexProvider extends BaseProvider {
 					// Process complete SSE events in buffer
 					while (true) {
 						const boundary = /\r?\n\r?\n/.exec(state.buffer);
-						if (!boundary || boundary.index === undefined) break;
+						if (!boundary || boundary.index === undefined) {
+							if (strictChat && state.buffer.length > 1024 * 1024)
+								throw new Error("Codex SSE frame exceeds size limit");
+							break;
+						}
 						const newlineIdx = boundary.index;
 
+						if (strictChat && newlineIdx > 1024 * 1024)
+							throw new Error("Codex SSE frame exceeds size limit");
 						const eventText = state.buffer.slice(0, newlineIdx);
 						state.buffer = state.buffer.slice(newlineIdx + boundary[0].length);
 
@@ -1822,7 +1840,7 @@ export class CodexProvider extends BaseProvider {
 								dataLines.push(value.startsWith(" ") ? value.slice(1) : value);
 							}
 						}
-						if (!eventName || dataLines.length === 0) continue;
+						if ((!eventName && !strictChat) || dataLines.length === 0) continue;
 						const dataStr = dataLines.join("\n");
 
 						if (dataStr === "[DONE]") continue;
@@ -1830,12 +1848,57 @@ export class CodexProvider extends BaseProvider {
 						let data: Record<string, unknown>;
 						try {
 							data = JSON.parse(dataStr);
+							if (
+								strictChat &&
+								(!data || typeof data !== "object" || Array.isArray(data))
+							)
+								throw new Error("Invalid Codex event");
 						} catch {
+							if (strictChat) throw new Error("Malformed Codex SSE event");
 							continue;
 						}
 
+						if (chatContext) {
+							const envelope = data.response as
+								| Record<string, unknown>
+								| undefined;
+							if (
+								[
+									"response.created",
+									"response.completed",
+									"response.incomplete",
+								].includes(eventName || String(data.type ?? "")) &&
+								typeof envelope?.model === "string" &&
+								envelope.model.trim()
+							)
+								chatContext.reportedModel = envelope.model;
+							if (envelope?.usage && typeof envelope.usage === "object") {
+								const observed = envelope.usage as Record<string, unknown>;
+								if (
+									typeof observed.input_tokens === "number" &&
+									typeof observed.output_tokens === "number"
+								)
+									chatContext.usageObserved = true;
+							}
+						}
+						if (strictChat) {
+							const kind = eventName || String(data.type ?? "");
+							const envelope = data.response as
+								| { status?: string; incomplete_details?: { reason?: string } }
+								| undefined;
+							if (
+								(kind === "response.incomplete" ||
+									(kind === "response.completed" &&
+										envelope?.status === "incomplete")) &&
+								!["max_output_tokens", "content_filter"].includes(
+									envelope?.incomplete_details?.reason ?? "",
+								)
+							)
+								throw new Error("Unsupported Codex incomplete reason");
+						}
+
 						await this.handleCodexEvent(
-							eventName,
+							eventName || String(data.type ?? ""),
 							data,
 							state,
 							writeSSE,
@@ -1852,11 +1915,15 @@ export class CodexProvider extends BaseProvider {
 					}
 				}
 
+				if (strictChat && state.buffer.length > 1024 * 1024)
+					throw new Error("Codex SSE frame exceeds size limit");
 				if (state.upstreamError) {
 					cancelUpstreamOnce("Codex upstream reported a stream error");
 					return;
 				}
 
+				if (strictChat && !state.hasSentTerminalEvents)
+					throw new Error("Codex stream ended without a terminal response");
 				// Flush any remaining
 				await ensureMessageStart();
 
@@ -1883,7 +1950,18 @@ export class CodexProvider extends BaseProvider {
 			} catch (error) {
 				// Also covers the client hanging up: the downstream writer rejects,
 				// and the upstream body has to go with it.
-				log.error("Error processing Codex SSE stream:", error);
+				if (strictChat) {
+					try {
+						await writeSSE("error", {
+							type: "error",
+							error: {
+								type: "api_error",
+								message:
+									"Codex response stream failed or ended without a terminal event",
+							},
+						});
+					} catch {}
+				} else log.error("Error processing Codex SSE stream:", error);
 				cancelUpstreamOnce(error);
 			} finally {
 				try {
@@ -2049,15 +2127,32 @@ export class CodexProvider extends BaseProvider {
 					// Text content block will start on content_part.added
 					// Nothing to emit yet
 				} else if (itemType === "function_call") {
+					if (
+						state.strictChat &&
+						(typeof outputIndex !== "number" ||
+							!Number.isSafeInteger(outputIndex) ||
+							outputIndex < 0 ||
+							state.functionCallBlocks.has(outputIndex))
+					)
+						throw new Error("Invalid Codex tool output index");
+
 					const callId = item?.call_id as string;
 					const name = item?.name as string;
 					state.sawToolUse = true;
 
 					if (state.hasSentContentBlockStart) {
-						await writeSSE("content_block_stop", {
-							type: "content_block_stop",
-							index: state.contentBlockIndex,
-						});
+						// Chat can carry overlapping calls; the previous tool closes only
+						// when its own output_item.done arrives.
+						const openTool =
+							state.strictChat &&
+							[...state.functionCallBlocks.values()].some(
+								(b) => b.contentBlockIndex === state.contentBlockIndex,
+							);
+						if (!openTool)
+							await writeSSE("content_block_stop", {
+								type: "content_block_stop",
+								index: state.contentBlockIndex,
+							});
 						state.contentBlockIndex++;
 						state.hasSentContentBlockStart = false;
 					}
@@ -2075,7 +2170,24 @@ export class CodexProvider extends BaseProvider {
 							contentBlockIndex: blockIdx,
 							name,
 							arguments: [],
+							argumentChars: 0,
 						});
+						if (
+							state.strictChat &&
+							typeof item?.arguments === "string" &&
+							item.arguments.length
+						) {
+							const buffer = state.functionCallBlocks.get(outputIndex);
+							if (buffer) buffer.argumentChars = item.arguments.length;
+							await writeSSE("content_block_delta", {
+								type: "content_block_delta",
+								index: blockIdx,
+								delta: {
+									type: "input_json_delta",
+									partial_json: item.arguments,
+								},
+							});
+						}
 					}
 				}
 				break;
@@ -2130,10 +2242,25 @@ export class CodexProvider extends BaseProvider {
 			case "response.function_call_arguments.delta": {
 				const delta = data.delta as string | undefined;
 				const outputIndex = data.output_index as number | undefined;
+				if (
+					state.strictChat &&
+					(typeof delta !== "string" ||
+						outputIndex === undefined ||
+						!state.functionCallBlocks.has(outputIndex))
+				)
+					throw new Error("Delta for missing Codex tool call");
+
 				if (delta && outputIndex !== undefined) {
 					const buffer = state.functionCallBlocks.get(outputIndex);
 					if (buffer) {
-						buffer.arguments.push(delta);
+						if (state.strictChat) {
+							buffer.argumentChars = (buffer.argumentChars ?? 0) + delta.length;
+							await writeSSE("content_block_delta", {
+								type: "content_block_delta",
+								index: buffer.contentBlockIndex,
+								delta: { type: "input_json_delta", partial_json: delta },
+							});
+						} else buffer.arguments.push(delta);
 					}
 				}
 				break;
@@ -2149,18 +2276,34 @@ export class CodexProvider extends BaseProvider {
 						outputIndex !== undefined
 							? state.functionCallBlocks.get(outputIndex)
 							: undefined;
+					if (state.strictChat && !buffer)
+						throw new Error("Completion for missing Codex tool call");
+
 					if (buffer) {
-						await writeSSE("content_block_delta", {
-							type: "content_block_delta",
-							index: buffer.contentBlockIndex,
-							delta: {
-								type: "input_json_delta",
-								partial_json: this.sanitizeToolUsePartialJson(
-									buffer.name,
-									buffer.arguments.join(""),
-								),
-							},
-						});
+						if (state.strictChat && !buffer.argumentChars) {
+							if (typeof item?.arguments !== "string" || !item.arguments.length)
+								throw new Error("Missing Codex tool arguments");
+							await writeSSE("content_block_delta", {
+								type: "content_block_delta",
+								index: buffer.contentBlockIndex,
+								delta: {
+									type: "input_json_delta",
+									partial_json: item.arguments,
+								},
+							});
+						}
+						if (!state.strictChat)
+							await writeSSE("content_block_delta", {
+								type: "content_block_delta",
+								index: buffer.contentBlockIndex,
+								delta: {
+									type: "input_json_delta",
+									partial_json: this.sanitizeToolUsePartialJson(
+										buffer.name,
+										buffer.arguments.join(""),
+									),
+								},
+							});
 						await writeSSE("content_block_stop", {
 							type: "content_block_stop",
 							index: buffer.contentBlockIndex,
@@ -2212,6 +2355,14 @@ export class CodexProvider extends BaseProvider {
 				// SSE sequence (terminal events after an error), so bail out.
 				if (state.upstreamError || state.hasSentTerminalEvents) break;
 				const resp = data.response as Record<string, unknown> | undefined;
+				if (
+					state.strictChat &&
+					eventName === "response.completed" &&
+					resp?.status !== "incomplete" &&
+					state.functionCallBlocks.size
+				)
+					throw new Error("Codex completed with unfinished tool calls");
+
 				const usage = resp?.usage as
 					| {
 							input_tokens?: number;
@@ -2247,6 +2398,23 @@ export class CodexProvider extends BaseProvider {
 				state.cacheReadInputTokens = normalizedInput.cacheReadInputTokens;
 				state.cacheCreationInputTokens = cacheCreation;
 				state.contextWindow = this.extractContextWindow(resp, usage);
+				// Incomplete Chat turns retain partial arguments from every open call.
+				// Successful terminals with unfinished calls were rejected above.
+				if (
+					state.strictChat &&
+					(eventName === "response.incomplete" || resp?.status === "incomplete")
+				) {
+					for (const buffer of state.functionCallBlocks.values()) {
+						await writeSSE("content_block_stop", {
+							type: "content_block_stop",
+							index: buffer.contentBlockIndex,
+						});
+						if (state.contentBlockIndex === buffer.contentBlockIndex)
+							state.hasSentContentBlockStart = false;
+					}
+					state.functionCallBlocks.clear();
+				}
+
 				// Close any lingering content block
 				if (state.hasSentContentBlockStart) {
 					await writeSSE("content_block_stop", {

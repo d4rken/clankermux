@@ -48,6 +48,8 @@ export interface RuntimeConfig {
 }
 
 export interface ConfigData {
+	/** Default output cap for Chat ingress on the OpenRouter Messages transport. */
+	chat_completions_max_tokens?: number;
 	lb_strategy?: StrategyName;
 	client_id?: string;
 	retry_attempts?: number;

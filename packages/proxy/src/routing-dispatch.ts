@@ -1,8 +1,10 @@
+import { supportsChatIngress, unsupportedChatField } from "@clankermux/core";
 import {
 	localTokenCountUrl,
 	supportsLocalTokenCounting,
 } from "@clankermux/providers/local-token-count";
 import type { Account, RequestMeta, RoutingAttempt } from "@clankermux/types";
+import { getChatContext } from "@clankermux/types";
 import type { ProxyContext } from "./handlers/proxy-types";
 import { makeProxyRequest } from "./handlers/request-handler";
 import {
@@ -84,6 +86,17 @@ export async function sendAuthorizedRequest(
 	let response: Response;
 	let recorded = false;
 	try {
+		// A mismatch here is an internal authorization invariant failure (403);
+		// client field incompatibilities were already rejected during route building.
+		const chat = getChatContext(meta);
+		if (
+			chat &&
+			(!supportsChatIngress(account.provider) ||
+				unsupportedChatField(account.provider, chat.requirements))
+		)
+			throw new RoutingPolicyError(
+				"Chat capability boundary changed before dispatch",
+			);
 		const current = await ctx.dbOps.getAccount(account.id);
 		if (!current || !route.target(current))
 			throw new RoutingPolicyError(

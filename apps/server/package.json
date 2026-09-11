@@ -21,7 +21,8 @@
 		"@clankermux/dashboard-web": "workspace:*",
 		"@clankermux/http-api": "workspace:*",
 		"@clankermux/security": "workspace:*",
-		"@clankermux/types": "workspace:*"
+		"@clankermux/types": "workspace:*",
+		"@clankermux/openai-chat-adapter": "workspace:*"
 	},
 	"devDependencies": {
 		"@clankermux/test-support": "workspace:*"

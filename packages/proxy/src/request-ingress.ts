@@ -11,6 +11,7 @@ import {
 	type ProjectAttributionSource,
 	type RequestMeta,
 	setNativeResponsesMetaContext,
+	transferChatContext,
 } from "@clankermux/types";
 import { computeCachePrefixHashes } from "./cache-prefix-hash";
 import { injectCacheTtl1h } from "./cache-ttl-injector";
@@ -333,6 +334,7 @@ export async function ingestProxyRequest(
 
 	// 4. Create request metadata
 	const requestMeta = createRequestMetadata(req, url);
+	transferChatContext(req, requestMeta);
 	// Native Responses passthrough: re-key the adapter's Request-scoped context
 	// onto the RequestMeta so it reaches each per-account attempt downstream.
 	const nativeResponsesCtx = getNativeResponsesRequestContext(req);

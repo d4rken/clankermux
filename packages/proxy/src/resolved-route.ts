@@ -4,9 +4,12 @@ import {
 	matchRoutingRule,
 	type RoutingPin,
 	resolveRoutingTarget,
+	supportsChatIngress,
+	unsupportedChatField,
 } from "@clankermux/core";
 import type {
 	Account,
+	ChatRequirements,
 	ModelPermissionSet,
 	RequestMeta,
 	ResolvedRoutingTarget,
@@ -16,13 +19,24 @@ import { modelPermissionScope } from "./account-model-permissions";
 import { isOfficialAnthropicProvider } from "./provider-overload-cooldown";
 
 export class RoutingPolicyError extends Error {
-	readonly code = "routing_policy_rejected";
+	readonly code: string = "routing_policy_rejected";
+	readonly statusCode: number = 403;
+	readonly param: string | null = null;
 	attemptRecorded = false;
 	routeSnapshot?: string;
 	ruleId?: string | null;
 	constructor(message: string) {
 		super(message);
 		this.name = "RoutingPolicyError";
+	}
+}
+export class ChatCapabilityError extends RoutingPolicyError {
+	override readonly code = "unsupported_parameter";
+	override readonly statusCode = 400;
+	constructor(override readonly param: string) {
+		super(
+			`No permitted destination can honor Chat Completions field "${param}"`,
+		);
 	}
 }
 export interface AuthorizedTarget extends ResolvedRoutingTarget {
@@ -40,6 +54,7 @@ export interface BuildRouteInput {
 	forcedAccountId?: string | null;
 	headerAccountId?: string | null;
 	excludeOfficialAnthropic?: boolean;
+	chatRequirements?: ChatRequirements;
 	/** Only in-process scheduler code supplies this, never client headers alone. */
 	maintenance?: { accountId: string; purpose: "auto_refresh" | "keepalive" };
 }
@@ -73,6 +88,7 @@ export class ResolvedRoute {
 			headerAccountId: input.headerAccountId ?? null,
 			excludeOfficialAnthropic: input.excludeOfficialAnthropic ?? false,
 			maintenance: this.maintenance,
+			chatRequirements: input.chatRequirements,
 			targets: [...this.#targets].map(
 				([id, { upstreamModel, targetSource, provider }]) => ({
 					accountId: id,
@@ -124,6 +140,8 @@ export function buildResolvedRoute(input: BuildRouteInput): ResolvedRoute {
 		? null
 		: matchRoutingRule(input.rules, input.apiKeyId, input.requestedModel);
 	const targets = new Map<string, AuthorizedTarget>();
+	let unsupportedProvider = false;
+	let unsupportedField: string | null = null;
 	for (const account of input.accounts) {
 		if (!isAccountAllowedByPin(input.pin, account)) continue;
 		if (
@@ -169,6 +187,20 @@ export function buildResolvedRoute(input: BuildRouteInput): ResolvedRoute {
 			)
 		)
 			continue;
+		if (input.chatRequirements) {
+			if (!supportsChatIngress(account.provider)) {
+				unsupportedProvider = true;
+				continue;
+			}
+			const field = unsupportedChatField(
+				account.provider,
+				input.chatRequirements,
+			);
+			if (field) {
+				unsupportedField ??= field;
+				continue;
+			}
+		}
 		targets.set(account.id, {
 			...resolved,
 			provider: account.provider,
@@ -176,9 +208,15 @@ export function buildResolvedRoute(input: BuildRouteInput): ResolvedRoute {
 		});
 	}
 	if (!targets.size) {
-		const error = new RoutingPolicyError(
-			`No permitted destination/model pair survives API key destinations${winning ? ` and routing rule "${winning.name}"` : " and provider defaults"}${input.forcedAccountId || input.headerAccountId ? " and forced account selection" : ""}. Configure account model permissions or edit the winning rule.`,
-		);
+		const error = unsupportedField
+			? new ChatCapabilityError(unsupportedField)
+			: unsupportedProvider
+				? new RoutingPolicyError(
+						"No permitted destination supports Chat Completions; supported providers are codex and openrouter",
+					)
+				: new RoutingPolicyError(
+						`No permitted destination/model pair survives API key destinations${winning ? ` and routing rule "${winning.name}"` : " and provider defaults"}${input.forcedAccountId || input.headerAccountId ? " and forced account selection" : ""}. Configure account model permissions or edit the winning rule.`,
+					);
 		error.routeSnapshot = new ResolvedRoute(input, winning, targets).snapshot;
 		error.ruleId = winning?.id ?? null;
 		throw error;

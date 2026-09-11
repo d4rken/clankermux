@@ -1,3 +1,5 @@
+import { errorEnvelope } from "@clankermux/openai-chat-adapter";
+import { canonicalize } from "@clankermux/proxy";
 /**
  * The front door: everything `fetch` does with a request before a handler owns
  * it.
@@ -43,6 +45,7 @@ import {
 } from "@clankermux/proxy";
 import { terminalForRequestError } from "./request-error-terminal";
 import {
+	CHAT_COMPLETIONS_PATH,
 	isDialectAllowed,
 	MODELS_PATH,
 	matchWireMount,
@@ -72,6 +75,12 @@ export interface RequestRouterDeps {
 		requirement?: AuthRequirement,
 	): Promise<AuthenticationResult>;
 	dispatchProxy(
+		req: Request,
+		url: URL,
+		apiKeyId?: string | null,
+		apiKeyName?: string | null,
+	): Promise<Response>;
+	handleChatCompletions(
 		req: Request,
 		url: URL,
 		apiKeyId?: string | null,
@@ -182,13 +191,40 @@ export async function routeRequest(
 		// rewritten and everything else about the URL is carried through.
 		const canonicalUrl = new URL(url);
 		canonicalUrl.pathname = match.logicalPath;
-		return routeMountedRequest(
+		const response = await routeMountedRequest(
 			req,
 			canonicalUrl,
 			match.dialect,
 			match.logicalPath,
 			deps,
 		);
+		if (
+			match.dialect === "openai" &&
+			canonicalize(match.logicalPath) === CHAT_COMPLETIONS_PATH &&
+			response.status >= 400 &&
+			response.status !== 499
+		) {
+			const body = await response.json().catch(() => null);
+			const error = body?.error;
+			const type = typeof error?.type === "string" ? error.type : "api_error";
+			const headers = new Headers({ "content-type": "application/json" });
+			const retry = response.headers.get("retry-after");
+			if (retry) headers.set("retry-after", retry);
+			return new Response(
+				JSON.stringify(
+					errorEnvelope(
+						typeof error?.message === "string"
+							? error.message
+							: "Request failed",
+						type,
+						typeof error?.code === "string" ? error.code : type,
+						typeof error?.param === "string" ? error.param : null,
+					),
+				),
+				{ status: response.status, headers },
+			);
+		}
+		return response;
 	}
 
 	return routeRootRequest(req, url, deps);
@@ -480,6 +516,14 @@ async function serveAgentRequest(
 	)
 		return new Response(null, { status: 204 });
 
+	if (req.method === "POST" && url.pathname === CHAT_COMPLETIONS_PATH) {
+		return deps.handleChatCompletions(
+			req,
+			url,
+			authResult.apiKeyId,
+			authResult.apiKeyName,
+		);
+	}
 	// Codex CLI first tries WebSocket transport for /v1/responses.
 	// We only support HTTP — reject the upgrade cleanly so Codex
 	// falls back to HTTPS without hitting the proxy with an empty body.

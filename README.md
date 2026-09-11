@@ -99,8 +99,17 @@ not change the client-facing Models catalogue.
 
 Add your accounts in the dashboard, then point your client at a wire mount:
 `/wire/anthropic` for the Anthropic Messages API, `/wire/openai` for the OpenAI
-Responses API. The mount names the format the client speaks, not the account pool it is
+Responses and Chat Completions APIs. The mount names the format the client speaks, not the account pool it is
 served from. Bare `/v1/*` and `/messages/*` were removed and answer 404.
+
+Chat clients use `POST /wire/openai/v1/chat/completions` with the usual bearer
+client key. Initial destinations are Codex and OpenRouter, inside the key's
+existing pins and model permissions. Text, function tools, tool history, JSON
+responses and streaming are supported. Explicit output caps and sampling controls
+require OpenRouter; Codex requests must omit them. Unsupported fields return 400.
+Legacy `/v1/completions` remains unsupported. See the
+[Chat support matrix and client test evidence](docs/chat-completions-implementation-plan.md)
+for the isolated OpenCode profile and current limits.
 
 ## Use it with Claude Code
 

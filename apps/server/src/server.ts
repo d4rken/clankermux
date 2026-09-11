@@ -41,6 +41,7 @@ import {
 } from "@clankermux/http-api";
 import { LeastUsedStrategy, SessionStrategy } from "@clankermux/load-balancer";
 import { Logger } from "@clankermux/logger";
+import { handleChatCompletionsRequest } from "@clankermux/openai-chat-adapter";
 import {
 	CODEX_MODELS,
 	handleModelsRequest,
@@ -1467,6 +1468,16 @@ export default async function startServer(options?: {
 			authService.authenticateRequest(req, path, method, requirement),
 		dispatchProxy: (req, url, apiKeyId, apiKeyName) =>
 			dispatchProxyRequest(req, url, proxyContext, apiKeyId, apiKeyName),
+		handleChatCompletions: (req, url, apiKeyId, apiKeyName) =>
+			handleChatCompletionsRequest(
+				req,
+				url,
+				handleProxy as Parameters<typeof handleChatCompletionsRequest>[2],
+				proxyContext,
+				apiKeyId,
+				apiKeyName,
+				config.get("chat_completions_max_tokens", 8192) as number,
+			),
 		handleResponses: (req, url, apiKeyId, apiKeyName) =>
 			handleResponsesRequest(
 				req,
@@ -1631,7 +1642,7 @@ ${tlsEnabled ? "🔒 TLS: enabled" : ""}
 
 Agent base URLs (the mount names the wire dialect the client speaks, not the account pool):
 - Anthropic Messages: ${protocol}://${displayHost}:${serverInstance.port}${WIRE_MOUNTS.anthropic}
-- OpenAI Responses:   ${protocol}://${displayHost}:${serverInstance.port}${WIRE_MOUNTS.openai}
+- OpenAI Responses/Chat: ${protocol}://${displayHost}:${serverInstance.port}${WIRE_MOUNTS.openai}
 
 Available endpoints:
 - GET    ${protocol}://localhost:${serverInstance.port}/api/accounts    → List accounts

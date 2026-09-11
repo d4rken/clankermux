@@ -28,6 +28,7 @@
         "@clankermux/http-api": "workspace:*",
         "@clankermux/load-balancer": "workspace:*",
         "@clankermux/logger": "workspace:*",
+        "@clankermux/openai-chat-adapter": "workspace:*",
         "@clankermux/openai-responses-adapter": "workspace:*",
         "@clankermux/proxy": "workspace:*",
         "@clankermux/security": "workspace:*",
@@ -178,6 +179,13 @@
         "@clankermux/providers": "workspace:*",
       },
     },
+    "packages/openai-chat-adapter": {
+      "name": "@clankermux/openai-chat-adapter",
+      "version": "0.1.0",
+      "dependencies": {
+        "@clankermux/types": "workspace:*",
+      },
+    },
     "packages/openai-formats": {
       "name": "@clankermux/openai-formats",
       "version": "0.1.0",
@@ -298,6 +306,8 @@
     "@clankermux/logger": ["@clankermux/logger@workspace:packages/logger"],
 
     "@clankermux/oauth-flow": ["@clankermux/oauth-flow@workspace:packages/oauth-flow"],
+
+    "@clankermux/openai-chat-adapter": ["@clankermux/openai-chat-adapter@workspace:packages/openai-chat-adapter"],
 
     "@clankermux/openai-formats": ["@clankermux/openai-formats@workspace:packages/openai-formats"],
 

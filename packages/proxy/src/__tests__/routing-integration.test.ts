@@ -5,6 +5,7 @@ import {
 	ensureSchema,
 	RoutingRepository,
 } from "@clankermux/database";
+import { handleChatCompletionsRequest } from "@clankermux/openai-chat-adapter";
 import { usageCache } from "@clankermux/providers";
 import type { Account, RequestMeta, RoutingRule } from "@clankermux/types";
 import {
@@ -104,6 +105,12 @@ function codexResponse(model?: string) {
 		{
 			type: "response.created",
 			response: { id: response.id, ...(model ? { model } : {}) },
+		},
+		{
+			type: "response.content_part.added",
+			output_index: 0,
+			content_index: 0,
+			part: { type: "output_text", text: "" },
 		},
 		{
 			type: "response.output_text.delta",
@@ -1069,4 +1076,459 @@ describe("routing table through the real proxy", () => {
 			),
 		).toBe(true);
 	});
+});
+
+describe("Chat ingress through real route and provider conversion", () => {
+	for (const provider of ["codex", "openrouter"])
+		for (const forced of [false, true])
+			for (const stream of [false, true])
+				it(`${provider}, forced=${forced}, stream=${stream}: one authorized send, truthful model fallback and one usage finalization`, async () => {
+					const account = makeAccount({
+						provider,
+						id: `chat-${provider}-${forced}`,
+						access_token: provider === "codex" ? "test" : null,
+						refresh_token: null,
+						api_key: provider === "openrouter" ? "test" : null,
+						expires_at: Date.now() + 3600000,
+					});
+					const official = makeAccount({
+						provider: "anthropic",
+						id: `denied-${provider}-${forced}`,
+					});
+					const { ctx, routing } = await setup(
+						[official, account],
+						[
+							rule({
+								pool_provider: provider,
+								target_kind: "literal",
+								target_model: "gpt-6-astra",
+							}),
+						],
+					);
+					await routing.setManualModels(
+						account.id,
+						modelPermissionScope(account),
+						["gpt-6-astra"],
+					);
+					if (forced) setForcedAccount(account.id);
+					const sent: Request[] = [];
+					globalThis.fetch = mock(async (input: Request | string | URL) => {
+						const outgoing =
+							input instanceof Request ? input : new Request(input);
+						if (
+							!outgoing.url.includes(
+								provider === "codex" ? "chatgpt.com" : "openrouter.ai",
+							)
+						)
+							throw new Error("Denied destination reached");
+						sent.push(outgoing.clone());
+						if (provider === "codex") return codexResponse();
+						const events = [
+							{
+								type: "message_start",
+								message: {
+									id: "msg",
+									type: "message",
+									role: "assistant",
+									content: [],
+									usage: { input_tokens: 3, output_tokens: 0 },
+								},
+							},
+							{
+								type: "content_block_start",
+								index: 0,
+								content_block: { type: "text", text: "" },
+							},
+							{
+								type: "content_block_delta",
+								index: 0,
+								delta: { type: "text_delta", text: "hello" },
+							},
+							{ type: "content_block_stop", index: 0 },
+							{
+								type: "message_delta",
+								delta: { stop_reason: "end_turn" },
+								usage: { output_tokens: 2 },
+							},
+							{ type: "message_stop" },
+						];
+						return new Response(
+							events
+								.map((e) => `event: ${e.type}\ndata: ${JSON.stringify(e)}\n\n`)
+								.join(""),
+							{ headers: { "content-type": "text/event-stream" } },
+						);
+					}) as typeof fetch;
+					const req = new Request(
+						"http://proxy/wire/openai/v1/chat/completions",
+						{
+							method: "POST",
+							headers: { "content-type": "application/json" },
+							body: JSON.stringify({
+								model: requested,
+								stream,
+								messages: [{ role: "user", content: "hello" }],
+							}),
+						},
+					);
+					const response = await handleChatCompletionsRequest(
+						req,
+						new URL(req.url),
+						handleProxy as Parameters<typeof handleChatCompletionsRequest>[2],
+						ctx,
+						"chat-key",
+						undefined,
+						7777,
+					);
+					if (response.status !== 200) throw new Error(await response.text());
+					expect(response.status).toBe(200);
+					if (stream) {
+						const result = await response.text();
+						expect(result).toContain("[DONE]");
+						expect(result).toContain('"content":"hello"');
+						expect(result).toContain('"model":"gpt-6-astra"');
+					} else {
+						const result = await response.json();
+						expect(result.model).toBe("gpt-6-astra");
+						expect(result.choices[0].message.content).toBe("hello");
+					}
+					expect(sent).toHaveLength(1);
+					const outgoing = await sent[0].json();
+					expect(outgoing.model).toBe("gpt-6-astra");
+					expect(outgoing.stream).toBe(true);
+					if (provider === "openrouter") expect(outgoing.max_tokens).toBe(7777);
+					else expect(outgoing.max_tokens).toBeUndefined();
+					await new Promise((r) => setTimeout(r, 10));
+					const attempts = dbs
+						.at(-1)
+						?.query("SELECT * FROM routing_attempts")
+						.all();
+					expect(attempts).toHaveLength(1);
+					expect(attempts[0]).toMatchObject({
+						kind: "upstream_send",
+						requested_model: requested,
+						resolved_model: "gpt-6-astra",
+						outgoing_model: "gpt-6-astra",
+						reported_model: null,
+						status: 200,
+						error: null,
+					});
+					expect(ctx.recorder.finishTransport).toHaveBeenCalledTimes(1);
+					expect(ctx.recorder.attachUsageSummary.mock.calls.length).toBe(1);
+				});
+	it("rejects explicit Codex output caps locally with 400 and a single local audit", async () => {
+		const account = makeAccount({
+			provider: "codex",
+			id: "chat-cap",
+			access_token: "test",
+			expires_at: Date.now() + 3600000,
+		});
+		const { ctx, routing } = await setup(
+			[account],
+			[rule({ target_kind: "literal", target_model: "gpt-6-astra" })],
+		);
+		await routing.setManualModels(account.id, modelPermissionScope(account), [
+			"gpt-6-astra",
+		]);
+		const fetchMock = mock(async () => {
+			throw new Error("No upstream request expected");
+		});
+		globalThis.fetch = fetchMock as typeof fetch;
+		const req = new Request("http://proxy/wire/openai/v1/chat/completions", {
+			method: "POST",
+			body: JSON.stringify({
+				model: requested,
+				max_tokens: 32,
+				messages: [{ role: "user", content: "hello" }],
+			}),
+		});
+		const response = await handleChatCompletionsRequest(
+			req,
+			new URL(req.url),
+			handleProxy as Parameters<typeof handleChatCompletionsRequest>[2],
+			ctx,
+			"chat-key",
+		);
+		expect(response.status).toBe(400);
+		expect((await response.json()).error.param).toBe("max_tokens");
+		expect(fetchMock).not.toHaveBeenCalled();
+		expect(
+			dbs
+				.at(-1)
+				?.query("SELECT kind,status,outgoing_model FROM routing_attempts")
+				.all(),
+		).toEqual([{ kind: "local_reject", status: 400, outgoing_model: null }]);
+	});
+});
+
+describe("Chat cancellation across routing and providers", () => {
+	for (const provider of ["codex", "openrouter"])
+		for (const phase of ["headers", "before-text", "during-text", "json"]) {
+			it(`${provider}: abort during ${phase} cancels transport without retry`, async () => {
+				const account = makeAccount({
+					id: `cancel-${provider}-${phase}`,
+					provider,
+					access_token: provider === "codex" ? "test" : null,
+					api_key: provider === "openrouter" ? "test" : null,
+					refresh_token: null,
+					expires_at: Date.now() + 3600000,
+				});
+				const { ctx, routing } = await setup([account], []);
+				await routing.setManualModels(
+					account.id,
+					modelPermissionScope(account),
+					["gpt-6-astra"],
+				);
+				const ac = new AbortController();
+				let sends = 0,
+					canceled = false;
+				let started!: () => void;
+				const sent = new Promise<void>((r) => {
+					started = r;
+				});
+				globalThis.fetch = (async (input: Request | string | URL) => {
+					const req = input instanceof Request ? input : new Request(input);
+					sends++;
+					started();
+					if (phase === "headers")
+						return new Promise<Response>((_, reject) => {
+							req.signal.addEventListener(
+								"abort",
+								() => {
+									canceled = true;
+									reject(req.signal.reason);
+								},
+								{ once: true },
+							);
+						});
+					const events =
+						provider === "codex"
+							? [
+									{
+										type: "response.created",
+										response: { id: "r", model: "gpt-6-astra" },
+									},
+									...(phase === "during-text"
+										? [
+												{
+													type: "response.content_part.added",
+													output_index: 0,
+													content_index: 0,
+													part: { type: "output_text", text: "" },
+												},
+												{
+													type: "response.output_text.delta",
+													output_index: 0,
+													content_index: 0,
+													delta: "hello",
+												},
+											]
+										: []),
+								]
+							: [
+									{
+										type: "message_start",
+										message: {
+											id: "m",
+											model: "gpt-6-astra",
+											usage: { input_tokens: 1, output_tokens: 0 },
+										},
+									},
+									...(phase === "during-text"
+										? [
+												{
+													type: "content_block_start",
+													index: 0,
+													content_block: { type: "text", text: "" },
+												},
+												{
+													type: "content_block_delta",
+													index: 0,
+													delta: { type: "text_delta", text: "hello" },
+												},
+											]
+										: []),
+								];
+					return new Response(
+						new ReadableStream({
+							start(c) {
+								c.enqueue(
+									new TextEncoder().encode(
+										events
+											.map(
+												(e) =>
+													`event: ${e.type}\ndata: ${JSON.stringify(e)}\n\n`,
+											)
+											.join(""),
+									),
+								);
+							},
+							cancel() {
+								canceled = true;
+							},
+						}),
+						{ headers: { "content-type": "text/event-stream" } },
+					);
+				}) as typeof fetch;
+				const req = new Request(
+					"http://proxy/wire/openai/v1/chat/completions",
+					{
+						method: "POST",
+						signal: ac.signal,
+						body: JSON.stringify({
+							model: "gpt-6-astra",
+							stream: phase !== "json",
+							messages: [{ role: "user", content: "hello" }],
+						}),
+					},
+				);
+				const pending = handleChatCompletionsRequest(
+					req,
+					new URL(req.url),
+					handleProxy as Parameters<typeof handleChatCompletionsRequest>[2],
+					ctx,
+					"chat-key",
+				);
+				await sent;
+				if (phase === "headers" || phase === "json") {
+					await new Promise((r) => setTimeout(r, 5));
+					ac.abort();
+					expect((await pending).status).toBe(499);
+				} else {
+					const response = await pending;
+					const reader = response.body?.getReader();
+					let content = "";
+					do {
+						const n = await reader.read();
+						content += new TextDecoder().decode(n.value);
+					} while (phase === "during-text" && !content.includes("hello"));
+					ac.abort();
+					await reader.cancel();
+				}
+				await new Promise((r) => setTimeout(r, 25));
+				expect(canceled).toBe(true);
+				expect(sends).toBe(1);
+			});
+		}
+});
+
+it("retries Chat only within the frozen compatible destinations after 429", async () => {
+	const accounts = [
+		makeAccount({ id: "retry-first", provider: "openrouter", api_key: "test" }),
+		makeAccount({
+			id: "incompatible",
+			provider: "codex",
+			access_token: "test",
+		}),
+		makeAccount({
+			id: "retry-second",
+			provider: "openrouter",
+			api_key: "test",
+		}),
+	];
+	const { ctx, routing } = await setup(accounts, []);
+	for (const account of accounts)
+		await routing.setManualModels(account.id, modelPermissionScope(account), [
+			"gpt-6-astra",
+		]);
+	let sends = 0;
+	globalThis.fetch = (async (input: Request | string | URL) => {
+		const req = input instanceof Request ? input : new Request(input);
+		expect(req.url).toContain("openrouter.ai");
+		const body = await req.json();
+		expect(body.max_tokens).toBe(32);
+		sends++;
+		if (sends === 1) {
+			await routing.saveRule(
+				rule({
+					match_model_kind: "any",
+					match_model_value: null,
+					pool_provider: "codex",
+				}),
+			);
+			return Response.json(
+				{ error: { type: "rate_limit_error", message: "limited" } },
+				{ status: 429, headers: { "retry-after": "1" } },
+			);
+		}
+		return new Response(
+			'event: message_start\ndata: {"type":"message_start","message":{"model":"actual","usage":{"input_tokens":1,"output_tokens":0}}}\n\nevent: message_delta\ndata: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":1}}\n\nevent: message_stop\ndata: {"type":"message_stop"}\n\n',
+			{ headers: { "content-type": "text/event-stream" } },
+		);
+	}) as typeof fetch;
+	const req = new Request("http://proxy/wire/openai/v1/chat/completions", {
+		method: "POST",
+		body: JSON.stringify({
+			model: "gpt-6-astra",
+			max_tokens: 32,
+			messages: [{ role: "user", content: "hi" }],
+		}),
+	});
+	const response = await handleChatCompletionsRequest(
+		req,
+		new URL(req.url),
+		handleProxy as Parameters<typeof handleChatCompletionsRequest>[2],
+		ctx,
+		"chat-key",
+	);
+	expect(response.status).toBe(200);
+	await response.text();
+	expect(sends).toBe(2);
+	const attempts = dbs
+		.at(-1)
+		?.query(
+			"SELECT a.account_id,a.status,s.content AS policy_snapshot FROM routing_attempts a JOIN routing_snapshots s ON s.id=a.route_snapshot_id ORDER BY a.account_id",
+		)
+		.all() as { account_id: string; status: number; policy_snapshot: string }[];
+	expect(attempts.map((a) => a.account_id)).toEqual([
+		"retry-first",
+		"retry-second",
+	]);
+	expect(attempts.map((a) => a.status)).toEqual([429, 200]);
+	expect(attempts[0].policy_snapshot).toBe(attempts[1].policy_snapshot);
+	expect(
+		JSON.parse(attempts[0].policy_snapshot).chatRequirements.fields,
+	).toEqual(["max_tokens"]);
+});
+
+it("rejects reasoning history for a Codex-only pin before any send", async () => {
+	const account = makeAccount({ id: "reasoning-codex", provider: "codex" });
+	const { ctx, routing } = await setup([account], []);
+	Object.assign(ctx.dbOps, {
+		getApiKeyPin: async () => ({
+			pinnedAccountId: account.id,
+			pinnedProviders: null,
+		}),
+	});
+	await routing.setManualModels(account.id, modelPermissionScope(account), [
+		"gpt-6-astra",
+	]);
+	const fetcher = mock(async () => {
+		throw new Error("Must not send");
+	});
+	globalThis.fetch = fetcher as typeof fetch;
+	const req = new Request("http://proxy/wire/openai/v1/chat/completions", {
+		method: "POST",
+		body: JSON.stringify({
+			model: "gpt-6-astra",
+			messages: [
+				{
+					role: "assistant",
+					content: "answer",
+					reasoning_content: "prior thought",
+				},
+				{ role: "user", content: "continue" },
+			],
+		}),
+	});
+	const result = await handleChatCompletionsRequest(
+		req,
+		new URL(req.url),
+		handleProxy as Parameters<typeof handleChatCompletionsRequest>[2],
+		ctx,
+		"key",
+	);
+	expect(result.status).toBe(400);
+	expect((await result.json()).error.param).toBe("reasoning_content");
+	expect(fetcher).not.toHaveBeenCalled();
 });

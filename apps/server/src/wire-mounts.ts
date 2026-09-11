@@ -18,8 +18,7 @@
  *
  * The mount names the WIRE DIALECT the client speaks — the request/response
  * shape, nothing else. It is NOT an account pool, NOT a provider, and NOT a
- * routing hint: `/wire/openai` means "this client speaks the OpenAI Responses
- * API", not "serve this from an OpenAI account". Account selection stays exactly
+ * routing hint: `/wire/openai` means "this client speaks an OpenAI API", not "serve this from an OpenAI account". Account selection stays exactly
  * where it was, downstream, deciding on the same inputs it always has.
  *
  * A leaf module with no imports beyond the path canonicalizer, so the router
@@ -107,9 +106,11 @@ export function matchWireMount(pathname: string): WireMatch {
 
 /** The model-listing route, served locally under BOTH dialects. */
 export const MODELS_PATH = "/v1/models";
+export const CHAT_COMPLETIONS_PATH = "/v1/chat/completions";
 
-/** The three routes the OpenAI mount can actually serve, and with what verb. */
+/** Explicit OpenAI routes and their supported verbs. */
 const OPENAI_ROUTES: ReadonlyMap<string, string> = new Map([
+	[CHAT_COMPLETIONS_PATH, "POST"],
 	["/v1/responses", "POST"],
 	["/v1/responses/compact", "POST"],
 	[MODELS_PATH, "GET"],
@@ -118,6 +119,8 @@ const OPENAI_ROUTES: ReadonlyMap<string, string> = new Map([
 /** Routes that belong to the OpenAI mount and must not be forwarded upstream
  *  as if they were Anthropic's. */
 const OPENAI_ONLY_PATHS: readonly string[] = [
+	CHAT_COMPLETIONS_PATH,
+	"/v1/completions",
 	"/v1/responses",
 	"/v1/responses/compact",
 ];
@@ -146,11 +149,10 @@ const OPENAI_ONLY_PATHS: readonly string[] = [
  * corrected URL.
  *
  * `openai` is a STRICT ALLOWLIST, because blind forwarding is not safe here.
- * Only those three paths get OpenAI handling; anything else would enter a
+ * Only allowlisted paths get OpenAI handling; anything else would enter a
  * pipeline whose Anthropic provider accepts EVERY path and where an
- * OpenAI-compatible account applies an Anthropic→OpenAI body conversion. A
- * blind-forwarded `/v1/chat/completions` could therefore reach a Claude account,
- * or have an already-OpenAI body mistransformed.
+ * OpenAI-compatible account applies an Anthropic→OpenAI body conversion. Chat Completions therefore has its own explicit adapter; unsupported
+ * OpenAI paths must never enter the generic Messages pipeline.
  *
  * Both sides reject unnormalized spellings — `/v1/responses/`, `/v1/%72esponses`,
  * `//v1/responses`, `/v1/foo/../responses`. On the denylist side that is

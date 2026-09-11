@@ -115,3 +115,50 @@ describe("resolved route authority", () => {
 			).rejects.toThrow();
 	});
 });
+
+describe("Chat capability boundary", () => {
+	it("filters only within pinned permitted targets and freezes the field requirements", () => {
+		const fields = ["temperature"];
+		const route = build({
+			rules: [],
+			requestedModel: "gpt-6-astra",
+			chatRequirements: { fields },
+		});
+		expect(route.accountIds()).toEqual(["o"]);
+		fields.length = 0;
+		expect(route.accountIds()).toEqual(["o"]);
+		expect(JSON.parse(route.snapshot).chatRequirements.fields).toEqual([
+			"temperature",
+		]);
+		expect(route.target(c)).toBeNull();
+	});
+	it("returns a field-specific capability error for a Codex-only pin", () => {
+		try {
+			build({ chatRequirements: { fields: ["max_tokens"] } });
+			throw new Error("Expected rejection");
+		} catch (error) {
+			expect(error).toMatchObject({
+				statusCode: 400,
+				code: "unsupported_parameter",
+				param: "max_tokens",
+			});
+		}
+	});
+	it("does not classify a permission or pin conflict as a field error", () => {
+		expect(() =>
+			build({
+				pin: { accountId: "o", providers: null },
+				chatRequirements: { fields: ["max_tokens"] },
+			}),
+		).toThrow("No permitted");
+	});
+	it("rejects unsupported providers even without official-Anthropic exclusion headers", () => {
+		expect(() =>
+			build({
+				rules: [],
+				pin: { accountId: "a", providers: null },
+				chatRequirements: { fields: [] },
+			}),
+		).toThrow("Chat Completions");
+	});
+});
