@@ -53,6 +53,8 @@ interface AccountStatusChipsProps {
 	account: AccountResponse;
 	/** Pre-derived status; falls back to deriving from `account` when omitted. */
 	status?: AccountStatus;
+	/** Omit details when the host places them in its account header. */
+	showAccountDetails?: boolean;
 }
 
 /**
@@ -500,19 +502,13 @@ function formatFamilyLabel(family: string): string {
 export function AccountStatusChips({
 	account,
 	status: providedStatus,
+	showAccountDetails = true,
 }: AccountStatusChipsProps) {
 	const status = providedStatus ?? deriveAccountStatus(account);
 
 	return (
 		<div className="flex flex-wrap items-center gap-item text-sm">
-			{status.isPrimary && (
-				<StatusChip className="bg-primary text-primary-foreground">
-					Primary
-				</StatusChip>
-			)}
-			<StatusChip className="bg-secondary text-secondary-foreground">
-				Priority: {status.priority}
-			</StatusChip>
+			{showAccountDetails && <AccountRoutingChips status={status} />}
 			{status.isRateLimited && (
 				<span title="Account is rate-limited - requests will be rejected until the limit resets">
 					<AlertCircle className="h-4 w-4 text-warning-strong" />
@@ -672,8 +668,8 @@ export function AccountStatusChips({
 					{status.peakChipLabel}
 				</StatusChip>
 			)}
-			{status.showRenewalChip && (
-				<RenewalChip account={account} status={status} />
+			{showAccountDetails && status.showRenewalChip && (
+				<AccountRenewalInfo account={account} status={status} />
 			)}
 			{status.isDuplicateAccount && (
 				<StatusChip
@@ -692,6 +688,22 @@ export function AccountStatusChips({
 	);
 }
 
+/** Account-level routing details, also used in the Accounts page heading. */
+export function AccountRoutingChips({ status }: { status: AccountStatus }) {
+	return (
+		<>
+			{status.isPrimary && (
+				<StatusChip className="bg-primary text-primary-foreground">
+					Primary
+				</StatusChip>
+			)}
+			<StatusChip className="bg-secondary text-secondary-foreground">
+				Priority: {status.priority}
+			</StatusChip>
+		</>
+	);
+}
+
 const RENEWAL_URGENCY_CLASSES: Record<string, string> = {
 	...URGENCY_BASE_CLASSES,
 	none: "bg-secondary text-secondary-foreground",
@@ -699,20 +711,23 @@ const RENEWAL_URGENCY_CLASSES: Record<string, string> = {
 };
 
 /**
- * Subscription-renewal chip. Amber when renewal is near, red when imminent,
+ * Subscription renewal, optionally rendered as plain inline text. Amber when
+ * renewal is near, red when imminent,
  * muted for far-off or already-elapsed one-time dates. Only rendered when
  * `status.showRenewalChip` is true (a renewal date is set and the subscription
  * is not reported expired — see `deriveAccountStatus`).
  */
-function RenewalChip({
+export function AccountRenewalInfo({
 	account,
 	status,
+	inline = false,
 }: {
 	account: AccountResponse;
 	status: AccountStatus;
+	inline?: boolean;
 }) {
 	const nextDate = status.renewalNextDate;
-	if (!nextDate) return null;
+	if (!status.showRenewalChip || !nextDate) return null;
 
 	const shortDate = nextDate.toLocaleDateString(undefined, {
 		month: "short",
@@ -751,6 +766,20 @@ function RenewalChip({
 	const colorClasses =
 		RENEWAL_URGENCY_CLASSES[status.renewalUrgency] ??
 		RENEWAL_URGENCY_CLASSES.none;
+
+	if (inline) {
+		const textColor =
+			status.renewalUrgency === "imminent"
+				? "text-destructive-strong"
+				: status.renewalUrgency === "soon"
+					? "text-warning-strong"
+					: "text-muted-foreground";
+		return (
+			<span className={`whitespace-nowrap ${textColor}`} title={title}>
+				{label}
+			</span>
+		);
+	}
 
 	return (
 		<StatusChip className={colorClasses} title={title}>
