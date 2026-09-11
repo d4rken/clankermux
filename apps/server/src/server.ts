@@ -35,6 +35,7 @@ import {
 	AuthService,
 	closeAllSseStreams,
 	PublicRouter,
+	refreshOpenRouterAccountsOnStartup,
 	SessionAuthService,
 	terminateAnalyticsWorker,
 } from "@clankermux/http-api";
@@ -1872,6 +1873,8 @@ Available endpoints:
 		setIdentity: (accountId, identity) =>
 			dbOps.setAccountIdentityFromProfile(accountId, identity),
 	});
+
+	void refreshOpenRouterAccountsOnStartup(dbOps);
 
 	// Codex identity backfill: a Codex account whose token hasn't refreshed since
 	// the identity feature shipped shows no identity in the dashboard (Codex

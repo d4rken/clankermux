@@ -18,6 +18,7 @@ import {
 	jsonResponse,
 } from "@clankermux/http-common";
 import { Logger } from "@clankermux/logger";
+import { refreshOpenRouterAccountMetadata } from "../services/openrouter-account-metadata";
 
 const log = new Logger("API:Accounts");
 
@@ -322,6 +323,13 @@ export function createApiKeyAccountAddHandler(
 				name,
 			);
 
+			const openRouterMetadata = await refreshOpenRouterAccountMetadata(dbOps, {
+				id: accountId,
+				provider: spec.provider,
+				api_key: apiKey,
+				custom_endpoint: customEndpoint,
+			});
+
 			log.info(
 				customEndpoint
 					? `Successfully added ${spec.label} account: ${name} (Endpoint: ${customEndpoint}, Priority ${priority})`
@@ -360,6 +368,7 @@ export function createApiKeyAccountAddHandler(
 					id: account.id,
 					name: account.name,
 					provider: account.provider,
+					...(spec.provider === "openrouter" ? { openRouterMetadata } : {}),
 					requestCount: account.request_count,
 					totalRequests: account.total_requests,
 					lastUsed: account.last_used

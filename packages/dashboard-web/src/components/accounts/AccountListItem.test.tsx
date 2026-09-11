@@ -218,3 +218,23 @@ describe("AccountListItem — compact quota cards", () => {
 		expect(html).toContain("rounded-lg border p-item");
 	});
 });
+
+describe("AccountListItem — OpenRouter details", () => {
+	it("offers metadata refresh for API-key accounts without OAuth tokens", () => {
+		const html = render(
+			makeAccount({ provider: "openrouter", hasRefreshToken: false }),
+		);
+		expect(html).toContain("Refresh OpenRouter account details and usage");
+		expect(html).toContain("OpenRouter account details unavailable");
+	});
+	it("does not offer official OpenRouter metadata for custom endpoints", () => {
+		const html = render(
+			makeAccount({
+				provider: "openrouter",
+				customEndpoint: "https://example.test",
+			}),
+		);
+		expect(html).not.toContain("Refresh OpenRouter account details");
+		expect(html).not.toContain("OpenRouter account details unavailable");
+	});
+});

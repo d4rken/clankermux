@@ -51,6 +51,7 @@ import {
 	AccountRoutingChips,
 	AccountStatusChips,
 } from "./AccountStatusChips";
+import { OpenRouterAccountDetails } from "./OpenRouterAccountDetails";
 import { ProviderChip } from "./ProviderChip";
 import { RateLimitProgress } from "./RateLimitProgress";
 
@@ -267,7 +268,8 @@ export function AccountListItem({
 				</div>
 				<div className="flex items-center gap-tight shrink-0">
 					{(account.provider === "anthropic" ||
-						account.provider === "codex") && (
+						account.provider === "codex" ||
+						(account.provider === "openrouter" && !account.customEndpoint)) && (
 						<Button
 							variant="ghost"
 							size="sm"
@@ -282,9 +284,11 @@ export function AccountListItem({
 								}
 							}}
 							title={
-								account.provider === "codex"
-									? "Refresh usage data (free usage read — does not consume quota)"
-									: "Refresh usage data (restarts usage polling and refreshes token if expired)"
+								account.provider === "openrouter"
+									? "Refresh OpenRouter account details and usage"
+									: account.provider === "codex"
+										? "Refresh usage data (free usage read — does not consume quota)"
+										: "Refresh usage data (restarts usage polling and refreshes token if expired)"
 							}
 						>
 							<RefreshCw
@@ -705,6 +709,9 @@ export function AccountListItem({
 					</div>
 				</InsetPanel>
 			</div>
+			{account.provider === "openrouter" && !account.customEndpoint && (
+				<OpenRouterAccountDetails metadata={account.openRouterMetadata} />
+			)}
 			{(account.rateLimitReset ||
 				account.usageData ||
 				account.staleUsage ||
