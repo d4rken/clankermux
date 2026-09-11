@@ -1,6 +1,5 @@
 import { createHash } from "node:crypto";
 import {
-	isDebugEnabled,
 	isInvalidGrantMessage,
 	OAuthRefreshTokenError,
 	resolveModelContextWindow,
@@ -202,10 +201,6 @@ const CODEX_ERROR_TYPE_BY_CODE: Record<string, string> = {
 	cyber_policy: "invalid_request_error",
 	usage_not_included: "permission_error",
 };
-
-// The default Anthropic-family → Codex model mapping lives in @clankermux/core
-// (DEFAULT_CODEX_MODEL_BY_FAMILY) so the context-window gate and this provider
-// resolve the same target model. Do not re-declare it here.
 
 // resolveModelContextWindow (over the shared MODEL_CONTEXT_WINDOWS map in
 // @clankermux/core) is the source of truth for default context-window sizes. It
@@ -644,11 +639,7 @@ export class CodexProvider extends BaseProvider {
 					ts: Date.now(),
 				});
 			}
-			const codexBody = this.convertToCodexFormat(
-				body,
-				account,
-				requestId ?? undefined,
-			);
+			const codexBody = this.convertToCodexFormat(body, account);
 
 			const newHeaders = new Headers(request.headers);
 			newHeaders.set("content-type", "application/json");
@@ -1292,14 +1283,8 @@ export class CodexProvider extends BaseProvider {
 	private convertToCodexFormat(
 		body: AnthropicRequest,
 		account?: Account,
-		requestId?: string,
 	): CodexRequest {
 		const model = body.model;
-		if (isDebugEnabled("model")) {
-			log.info(
-				`[codex:model-debug] request_id=${requestId ?? "unknown"} request_model=${body.model} mapped_model=${model} account=${account?.name ?? "unknown"}`,
-			);
-		}
 		const instructions = this.extractSystemPrompt(body.system);
 
 		// Rebuild nudges at the same message boundary on every replay: removing a

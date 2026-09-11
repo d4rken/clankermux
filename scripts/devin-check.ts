@@ -29,9 +29,9 @@ console.log(
 );
 if (process.argv.includes("--smoke")) {
 	const modelFlag = process.argv.indexOf("--model");
-	const requestedModel = modelFlag < 0 ? "swe-2" : process.argv[modelFlag + 1];
+	const requestedModel = modelFlag < 0 ? "" : process.argv[modelFlag + 1];
 	if (!requestedModel || requestedModel.startsWith("--"))
-		throw new Error("--model requires a discovered model ID");
+		throw new Error("--smoke requires --model <discovered model ID>");
 	const model = devinClient.resolveModel(info.models, requestedModel);
 	const provider = new DevinProvider();
 	const account = {

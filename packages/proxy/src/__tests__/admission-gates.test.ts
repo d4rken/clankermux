@@ -101,13 +101,17 @@ function makeConfig(switches: ThrottleSwitches): ProxyContext["config"] {
 type GateOverrides = {
 	requestMeta?: RequestMeta;
 	initialComboInfo?: ComboSlotInfo | null;
-	effectiveRequestModel?: string | null;
+	requestModel?: string;
 	gateTokenEstimate?: number;
 	isSyntheticProbeRequest?: boolean;
 	config?: ProxyContext["config"];
 };
 
-function createAdmissionGates(input: Parameters<typeof makeAdmissionGates>[0]) {
+/** The gates read the frozen route, so install one for the model under test. */
+function createAdmissionGates(
+	input: Parameters<typeof makeAdmissionGates>[0],
+	requestModel: string,
+) {
 	const gates = makeAdmissionGates(input);
 	return new Proxy(gates, {
 		get(target, key) {
@@ -117,7 +121,7 @@ function createAdmissionGates(input: Parameters<typeof makeAdmissionGates>[0]) {
 				installGateRoute(
 					input.requestMeta,
 					[...gateAccounts.values()],
-					input.effectiveRequestModel ?? MODEL,
+					requestModel,
 					gateTargets,
 				);
 				return value(...args);
@@ -127,17 +131,17 @@ function createAdmissionGates(input: Parameters<typeof makeAdmissionGates>[0]) {
 }
 
 function makeGates(overrides: GateOverrides = {}) {
-	return createAdmissionGates({
-		requestMeta: overrides.requestMeta ?? makeRequestMeta(),
-		initialComboInfo: overrides.initialComboInfo ?? null,
-		effectiveRequestModel:
-			overrides.effectiveRequestModel === undefined
-				? MODEL
-				: overrides.effectiveRequestModel,
-		gateTokenEstimate: overrides.gateTokenEstimate ?? 1_000,
-		isSyntheticProbeRequest: overrides.isSyntheticProbeRequest ?? false,
-		config: overrides.config ?? makeConfig({ fiveHour: false, weekly: false }),
-	});
+	return createAdmissionGates(
+		{
+			requestMeta: overrides.requestMeta ?? makeRequestMeta(),
+			initialComboInfo: overrides.initialComboInfo ?? null,
+			gateTokenEstimate: overrides.gateTokenEstimate ?? 1_000,
+			isSyntheticProbeRequest: overrides.isSyntheticProbeRequest ?? false,
+			config:
+				overrides.config ?? makeConfig({ fiveHour: false, weekly: false }),
+		},
+		overrides.requestModel ?? MODEL,
+	);
 }
 
 /** Fresh usage for the soft-demotion gate: utilization percentages per window. */
@@ -325,7 +329,7 @@ describe("createAdmissionGates", () => {
 			const account = makeAccount();
 			seedFamilyOverpace(account.id);
 			const gates = makeGates({
-				effectiveRequestModel: "claude-fable-5",
+				requestModel: "claude-fable-5",
 				config: makeConfig({ fiveHour: false, weekly: true }),
 			});
 
@@ -343,7 +347,7 @@ describe("createAdmissionGates", () => {
 			const account = makeAccount();
 			seedFamilyOverpace(account.id);
 			const gates = makeGates({
-				effectiveRequestModel: "claude-fable-5",
+				requestModel: "claude-fable-5",
 				config: makeConfig({ fiveHour: true, weekly: false }),
 			});
 
@@ -355,7 +359,7 @@ describe("createAdmissionGates", () => {
 			const account = makeAccount();
 			seedFamilyOverpace(account.id);
 			const gates = makeGates({
-				effectiveRequestModel: "claude-fable-5",
+				requestModel: "claude-fable-5",
 				isSyntheticProbeRequest: true,
 				config: makeConfig({ fiveHour: true, weekly: true }),
 			});
@@ -368,7 +372,7 @@ describe("createAdmissionGates", () => {
 			const account = makeAccount();
 			seedFamilyOverpace(account.id);
 			const gates = makeGates({
-				effectiveRequestModel: "claude-opus-4-8",
+				requestModel: "claude-opus-4-8",
 				config: makeConfig({ fiveHour: false, weekly: true }),
 			});
 
@@ -380,7 +384,7 @@ describe("createAdmissionGates", () => {
 			const account = makeAccount();
 			seedFamilyOverpace(account.id);
 			const gates = makeGates({
-				effectiveRequestModel: "claude-fable-5",
+				requestModel: "claude-fable-5",
 				config: makeConfig({ fiveHour: false, weekly: true }),
 			});
 
@@ -407,7 +411,7 @@ describe("createAdmissionGates", () => {
 			const other = makeAccount({ id: "acc-b" });
 			memo("acc-a");
 
-			const gates = makeGates({ effectiveRequestModel: FABLE });
+			const gates = makeGates({ requestModel: FABLE });
 
 			// Demoted, not dropped: the healthy sibling is what gets asked, while
 			// the refused account stays available as a last resort.
@@ -424,7 +428,7 @@ describe("createAdmissionGates", () => {
 			const other = makeAccount({ id: "acc-b" });
 			memo("acc-a");
 
-			const gates = makeGates({ effectiveRequestModel: MODEL });
+			const gates = makeGates({ requestModel: MODEL });
 
 			expect(
 				gates.applyFamilyMemoDemotion([account, other]).map((a) => a.id),
@@ -436,7 +440,7 @@ describe("createAdmissionGates", () => {
 			const other = makeAccount({ id: "acc-b" });
 			memo("acc-a", 40);
 
-			const gates = makeGates({ effectiveRequestModel: FABLE });
+			const gates = makeGates({ requestModel: FABLE });
 			expect(
 				gates.applyFamilyMemoDemotion([account, other]).map((a) => a.id),
 			).toEqual(["acc-b", "acc-a"]);
@@ -456,7 +460,7 @@ describe("createAdmissionGates", () => {
 			memo("acc-a");
 			memo("acc-b");
 
-			const gates = makeGates({ effectiveRequestModel: FABLE });
+			const gates = makeGates({ requestModel: FABLE });
 
 			expect(gates.applyFamilyMemoDemotion([a, b]).map((x) => x.id)).toEqual([
 				"acc-a",
@@ -468,7 +472,7 @@ describe("createAdmissionGates", () => {
 			const account = makeAccount({ id: "acc-a" });
 			memo("acc-a");
 
-			const gates = makeGates({ effectiveRequestModel: FABLE });
+			const gates = makeGates({ requestModel: FABLE });
 
 			expect(gates.applyFamilyMemoDemotion([account])).toEqual([account]);
 		});
@@ -480,7 +484,7 @@ describe("createAdmissionGates", () => {
 			const other = makeAccount({ id: "acc-b" });
 			memo("acc-a");
 
-			const gates = makeGates({ effectiveRequestModel: FABLE });
+			const gates = makeGates({ requestModel: FABLE });
 			gates.applyFamilyMemoDemotion([account, other]);
 
 			expect(gates.familyWeeklyExcludedAccounts).toHaveLength(0);
@@ -490,7 +494,7 @@ describe("createAdmissionGates", () => {
 			const codex = makeAccount({ id: "codex-1", provider: "codex" });
 			memo("codex-1");
 
-			const gates = makeGates({ effectiveRequestModel: FABLE });
+			const gates = makeGates({ requestModel: FABLE });
 
 			expect(gates.applyFamilyMemoDemotion([codex])).toEqual([codex]);
 		});
@@ -514,7 +518,7 @@ describe("createAdmissionGates", () => {
 
 			// Requested family is sonnet; the memo is on fable, the family acc-a
 			// will actually serve.
-			const gates = makeGates({ effectiveRequestModel: MODEL });
+			const gates = makeGates({ requestModel: MODEL });
 
 			expect(
 				gates.applyFamilyMemoDemotion([mapped, other]).map((a) => a.id),
@@ -539,7 +543,7 @@ describe("createAdmissionGates", () => {
 				Date.now(),
 			);
 
-			const gates = makeGates({ effectiveRequestModel: MODEL });
+			const gates = makeGates({ requestModel: MODEL });
 
 			// Untouched — identity, which is what "nothing was demoted" looks like.
 			const candidates = [mapped, other];
@@ -549,7 +553,7 @@ describe("createAdmissionGates", () => {
 		it("returns the candidate list untouched when nothing is memo'd", () => {
 			const a = makeAccount({ id: "acc-a" });
 			const b = makeAccount({ id: "acc-b" });
-			const gates = makeGates({ effectiveRequestModel: FABLE });
+			const gates = makeGates({ requestModel: FABLE });
 			const candidates = [a, b];
 
 			expect(gates.applyFamilyMemoDemotion(candidates)).toBe(candidates);
@@ -567,7 +571,7 @@ describe("createAdmissionGates", () => {
 			seedUsage("acc-b", 0, 95);
 			memo("acc-a");
 
-			const gates = makeGates({ effectiveRequestModel: FABLE });
+			const gates = makeGates({ requestModel: FABLE });
 
 			const softReordered = gates.applySoftDemotionReorder([memod, healthy]);
 			expect(softReordered.map((a) => a.id)).toEqual(["acc-a", "acc-b"]);
@@ -604,15 +608,17 @@ describe("affinity after durable request exclusions", () => {
 				affinityScope: "session",
 			});
 			const selected = strategy.select(accounts, meta);
-			const gates = createAdmissionGates({
-				requestMeta: meta,
-				initialComboInfo: null,
-				effectiveRequestModel: MODEL,
-				gateTokenEstimate: 150_000,
-				isSyntheticProbeRequest: false,
-				config: makeConfig({ fiveHour: false, weekly: false }),
-				strategy,
-			});
+			const gates = createAdmissionGates(
+				{
+					requestMeta: meta,
+					initialComboInfo: null,
+					gateTokenEstimate: 150_000,
+					isSyntheticProbeRequest: false,
+					config: makeConfig({ fiveHour: false, weekly: false }),
+					strategy,
+				},
+				MODEL,
+			);
 			const candidates = gates.applyContextWindowGate(selected);
 			gates.reconcileAffinity(candidates);
 			expect(candidates[0].id).toBe("large-a");
@@ -633,15 +639,17 @@ describe("affinity after durable request exclusions", () => {
 			});
 			const selected = strategy.select(accounts, meta);
 			expect(selected[0].id).toBe(accounts[0].id);
-			const gates = createAdmissionGates({
-				requestMeta: meta,
-				initialComboInfo: null,
-				effectiveRequestModel: "claude-fable-5",
-				gateTokenEstimate: 1,
-				isSyntheticProbeRequest: false,
-				config: makeConfig({ fiveHour: false, weekly: false }),
-				strategy,
-			});
+			const gates = createAdmissionGates(
+				{
+					requestMeta: meta,
+					initialComboInfo: null,
+					gateTokenEstimate: 1,
+					isSyntheticProbeRequest: false,
+					config: makeConfig({ fiveHour: false, weekly: false }),
+					strategy,
+				},
+				"claude-fable-5",
+			);
 			const candidates = gates.applyFamilyWeeklyGate(selected);
 			expect(candidates.map((account) => account.id)).toEqual([accounts[1].id]);
 			gates.reconcileAffinity(candidates);
@@ -666,15 +674,17 @@ describe("affinity after durable request exclusions", () => {
 			affinityScope: "session",
 		});
 		strategy.select(accounts, meta);
-		const gates = createAdmissionGates({
-			requestMeta: meta,
-			initialComboInfo: null,
-			effectiveRequestModel: MODEL,
-			gateTokenEstimate: 1,
-			isSyntheticProbeRequest: false,
-			config: makeConfig({ fiveHour: false, weekly: false }),
-			strategy,
-		});
+		const gates = createAdmissionGates(
+			{
+				requestMeta: meta,
+				initialComboInfo: null,
+				gateTokenEstimate: 1,
+				isSyntheticProbeRequest: false,
+				config: makeConfig({ fiveHour: false, weekly: false }),
+				strategy,
+			},
+			MODEL,
+		);
 		gates.reconcileAffinity([accounts[1]]);
 		const next = makeRequestMeta({
 			affinityKey: "conversation",
@@ -692,7 +702,7 @@ describe("Astra subscription context admission", () => {
 		});
 		for (const model of ["gpt-6-astra", "gpt-6-astra-2026-09-03", MODEL]) {
 			const gates = makeGates({
-				effectiveRequestModel: model,
+				requestModel: model,
 				gateTokenEstimate: 273_764,
 			});
 			expect(gates.applyContextWindowGate([account])).toEqual([account]);

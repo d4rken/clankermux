@@ -1,6 +1,5 @@
 import { describe, expect, it } from "bun:test";
 import type { Account, RequestMeta, RoutingRule } from "@clankermux/types";
-import { modelPermissionScope } from "../account-model-permissions";
 import {
 	buildResolvedRoute,
 	enforceOutgoingModel,
@@ -117,101 +116,110 @@ describe("resolved route authority", () => {
 	});
 });
 
-it("freezes a Devin alias to its permitted concrete account model and suppresses that pair", () => {
+it("resolves identity for every provider in the pool", () => {
+	// Codex, Qwen and Devin each once had a default map or an alias expansion
+	// between the client's string and the wire. Now the client's string is the
+	// target everywhere, and only an account permitting THAT string qualifies.
+	const model = "claude-sonnet-4-5";
+	const accounts = [
+		account("cx", "codex"),
+		account("qw", "qwen"),
+		account("dv", "devin"),
+		account("an", "anthropic"),
+	];
+	const route = buildResolvedRoute({
+		accounts,
+		rules: [],
+		requestedModel: model,
+		apiKeyId: null,
+		pin: null,
+		permissions: new Map(
+			accounts.map((a) => [a.id, { ...known, discovered_ids: [model] }]),
+		),
+	});
+	for (const a of accounts)
+		expect(route.target(a)).toMatchObject({
+			upstreamModel: model,
+			targetSource: "identity",
+		});
+});
+it("keeps a Devin account out of the pool unless it permits the exact model", () => {
 	const devin = account("d", "devin");
-	const permissions = new Map([
-		["d", { ...known, discovered_ids: ["swe-2-high"] }],
-	]);
-	const canonicalTargets = new Map([
-		["d", { upstreamModel: "swe-2-high", scope: modelPermissionScope(devin) }],
-	]);
 	const input = {
 		accounts: [devin],
 		rules: [],
-		requestedModel: "claude-sonnet-4-5",
+		requestedModel: "swe-2",
 		apiKeyId: null,
 		pin: null,
-		permissions,
-		canonicalTargets,
+		permissions: new Map([["d", { ...known, discovered_ids: ["swe-2"] }]]),
 	};
-	const route = buildResolvedRoute(input);
-	expect(route.target(devin)?.upstreamModel).toBe("swe-2-high");
-	canonicalTargets.set("d", {
-		upstreamModel: "swe-2-max",
-		scope: modelPermissionScope(devin),
-	});
-	expect(route.target(devin)?.upstreamModel).toBe("swe-2-high");
-	expect(() => buildResolvedRoute(input)).toThrow();
-	expect(() =>
-		buildResolvedRoute({ ...input, canonicalTargets: new Map() }),
-	).toThrow();
+	expect(buildResolvedRoute(input).target(devin)?.upstreamModel).toBe("swe-2");
+	// A variant the account advertises is not a substitute for the requested id.
 	expect(() =>
 		buildResolvedRoute({
 			...input,
-			canonicalTargets: new Map([
-				[
-					"d",
-					{ upstreamModel: "swe-2-high", scope: modelPermissionScope(devin) },
-				],
+			permissions: new Map([
+				["d", { ...known, discovered_ids: ["swe-2-high"] }],
 			]),
-			suppressedPairs: new Set([JSON.stringify(["d", "swe-2-high"])]),
 		}),
-	).toThrow();
+	).toThrow("No permitted");
 	expect(() =>
 		buildResolvedRoute({
 			...input,
-			canonicalTargets: new Map([
-				[
-					"d",
-					{ upstreamModel: "swe-2-high", scope: modelPermissionScope(devin) },
-				],
-			]),
-			permissions: new Map([["d", { ...known, discovered_ids: ["swe-2"] }]]),
+			suppressedPairs: new Set([JSON.stringify(["d", "swe-2"])]),
 		}),
-	).toThrow();
+	).toThrow("No permitted");
 });
-it("does not change a concrete Devin target using an alias resolution", () => {
+it("changes the model only through a literal rule", () => {
 	const devin = account("d", "devin");
-	const route = buildResolvedRoute({
-		accounts: [devin],
-		rules: [],
-		requestedModel: "swe-1.6",
-		apiKeyId: null,
-		pin: null,
-		permissions: new Map([["d", { ...known, discovered_ids: ["swe-1.6"] }]]),
-		canonicalTargets: new Map([
-			[
-				"d",
-				{ upstreamModel: "swe-2-high", scope: modelPermissionScope(devin) },
-			],
-		]),
-	});
-	expect(route.target(devin)?.upstreamModel).toBe("swe-1.6");
-});
-
-it("discards a Devin canonical target when credentials changed during metadata resolution", () => {
-	const devin = { ...account("d", "devin"), api_key: "new-session" };
-	expect(() =>
+	const literal: RoutingRule = {
+		...rule,
+		pool_kind: "inherit",
+		pool_provider: null,
+		target_kind: "literal",
+		target_model: "swe-2-high",
+	};
+	expect(
 		buildResolvedRoute({
 			accounts: [devin],
-			rules: [],
-			requestedModel: "swe-2",
+			rules: [literal],
+			requestedModel: "claude-sonnet-4-5",
 			apiKeyId: null,
 			pin: null,
 			permissions: new Map([
 				["d", { ...known, discovered_ids: ["swe-2-high"] }],
 			]),
-			canonicalTargets: new Map([
-				[
-					"d",
-					{
-						upstreamModel: "swe-2-high",
-						scope: modelPermissionScope({ ...devin, api_key: "old-session" }),
-					},
-				],
+		}).target(devin),
+	).toMatchObject({ upstreamModel: "swe-2-high", targetSource: "literal" });
+});
+it("names the requested model and why each account dropped out", () => {
+	try {
+		buildResolvedRoute({
+			accounts: [c],
+			rules: [],
+			requestedModel: "claude-fable-5-1",
+			apiKeyId: null,
+			pin: null,
+			permissions: new Map([
+				["c", { ...known, discovered_ids: ["gpt-6-astra"] }],
 			]),
-		}),
-	).toThrow();
+			// routing-service drops accounts before they ever reach the loop, so
+			// their reasons arrive this way or the operator never sees them.
+			priorExclusions: new Map([
+				["a", "a (anthropic): excluded by the API key's destinations"],
+			]),
+		});
+		throw new Error("Expected rejection");
+	} catch (error) {
+		const { message } = error as Error;
+		expect(message).toContain('model "claude-fable-5-1"');
+		expect(message).toContain(
+			'c (codex): does not permit model "claude-fable-5-1"',
+		);
+		expect(message).toContain(
+			"a (anthropic): excluded by the API key's destinations",
+		);
+	}
 });
 
 describe("Chat capability boundary", () => {

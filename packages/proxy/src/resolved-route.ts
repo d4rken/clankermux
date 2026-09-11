@@ -33,9 +33,12 @@ export class RoutingPolicyError extends Error {
 export class ChatCapabilityError extends RoutingPolicyError {
 	override readonly code = "unsupported_parameter";
 	override readonly statusCode = 400;
-	constructor(override readonly param: string) {
+	constructor(
+		override readonly param: string,
+		requestedModel: string,
+	) {
 		super(
-			`No permitted destination can honor Chat Completions field "${param}"`,
+			`No permitted destination for model "${requestedModel}" can honor Chat Completions field "${param}"`,
 		);
 	}
 }
@@ -43,9 +46,9 @@ export interface AuthorizedTarget extends ResolvedRoutingTarget {
 	readonly provider: string;
 	readonly scope: string;
 }
-export interface CanonicalRoutingTarget {
-	readonly upstreamModel: string;
-	readonly scope: string;
+/** Operator-facing account label for rejections. Never carries a credential. */
+export function routeAccountLabel(account: Account): string {
+	return `${account.name || account.id} (${account.provider})`;
 }
 export interface BuildRouteInput {
 	accounts: readonly Account[];
@@ -54,8 +57,12 @@ export interface BuildRouteInput {
 	apiKeyId: string | null;
 	pin: RoutingPin | null;
 	permissions: ReadonlyMap<string, ModelPermissionSet>;
-	/** Native account metadata resolves provider aliases before this route is frozen. */
-	canonicalTargets?: ReadonlyMap<string, CanonicalRoutingTarget>;
+	/**
+	 * Why the caller already dropped an account, keyed by account ID. The pool
+	 * handed in here is pre-filtered, so without these an operator sees no reason
+	 * at all for the accounts that never reached the loop below.
+	 */
+	priorExclusions?: ReadonlyMap<string, string>;
 	suppressedPairs?: ReadonlySet<string>;
 	forcedAccountId?: string | null;
 	headerAccountId?: string | null;
@@ -132,6 +139,48 @@ export class ResolvedRoute {
 			: null;
 	}
 }
+/** The destination restrictions that do not depend on the resolved model. */
+export type DestinationRestrictions = Pick<
+	BuildRouteInput,
+	| "pin"
+	| "forcedAccountId"
+	| "headerAccountId"
+	| "excludeOfficialAnthropic"
+	| "maintenance"
+>;
+/**
+ * Why this account cannot be a destination at all, or null if it can.
+ *
+ * Shared with the pre-filter in routing-service so one account cannot be
+ * dropped there for a reason this file would have phrased differently.
+ */
+export function destinationExclusionReason(
+	account: Account,
+	input: DestinationRestrictions,
+	rule: RoutingRule | null,
+): string | null {
+	if (!isAccountAllowedByPin(input.pin ?? null, account))
+		return "excluded by the API key's destinations";
+	if (
+		input.excludeOfficialAnthropic &&
+		isOfficialAnthropicProvider(account.provider)
+	)
+		return "official Anthropic accounts are excluded from this attempt";
+	if (input.forcedAccountId && input.forcedAccountId !== account.id)
+		return "another account was forced for this request";
+	if (input.headerAccountId && input.headerAccountId !== account.id)
+		return "another account was named by request header";
+	if (input.maintenance && input.maintenance.accountId !== account.id)
+		return "maintenance requests target one named account";
+	if (rule?.pool_kind === "provider" && rule.pool_provider !== account.provider)
+		return `rule "${rule.name}" pools provider ${rule.pool_provider}`;
+	if (
+		rule?.pool_kind === "accounts" &&
+		!rule.pool_account_ids?.includes(account.id)
+	)
+		return `rule "${rule.name}" does not pool this account`;
+	return null;
+}
 export function buildResolvedRoute(input: BuildRouteInput): ResolvedRoute {
 	if (!input.requestedModel?.trim())
 		throw new RoutingPolicyError("Inference requests require a model");
@@ -146,43 +195,30 @@ export function buildResolvedRoute(input: BuildRouteInput): ResolvedRoute {
 		? null
 		: matchRoutingRule(input.rules, input.apiKeyId, input.requestedModel);
 	const targets = new Map<string, AuthorizedTarget>();
+	// Why each account dropped out, in pool order, so the rejection can say what
+	// an operator would otherwise have to reconstruct from the dashboard.
+	const exclusions: string[] = [];
+	const exclude = (account: Account, reason: string): void => {
+		exclusions.push(`${routeAccountLabel(account)}: ${reason}`);
+	};
 	let unsupportedProvider = false;
 	let unsupportedField: string | null = null;
 	for (const account of input.accounts) {
-		if (!isAccountAllowedByPin(input.pin, account)) continue;
-		if (
-			input.excludeOfficialAnthropic &&
-			isOfficialAnthropicProvider(account.provider)
-		)
+		const blocked = destinationExclusionReason(account, input, winning);
+		if (blocked) {
+			exclude(account, blocked);
 			continue;
-		if (input.forcedAccountId && input.forcedAccountId !== account.id) continue;
-		if (input.headerAccountId && input.headerAccountId !== account.id) continue;
-		if (input.maintenance && input.maintenance.accountId !== account.id)
-			continue;
-		if (
-			winning?.pool_kind === "provider" &&
-			winning.pool_provider !== account.provider
-		)
-			continue;
-		if (
-			winning?.pool_kind === "accounts" &&
-			!winning.pool_account_ids?.includes(account.id)
-		)
-			continue;
-		// Keepalive replays an already resolved model; auto-refresh uses provider defaults.
-		let resolved =
+		}
+		// Keepalive replays an already resolved model. Everything else takes the
+		// routing table's answer, which is the requested model unless a literal
+		// rule names another.
+		const resolved =
 			input.maintenance?.purpose === "keepalive"
 				? {
 						upstreamModel: input.requestedModel,
 						targetSource: "requested" as const,
 					}
-				: resolveRoutingTarget(winning, account.provider, input.requestedModel);
-		if (account.provider === "devin" && resolved.upstreamModel === "swe-2") {
-			const canonical = input.canonicalTargets?.get(account.id);
-			if (!canonical || canonical.scope !== modelPermissionScope(account))
-				continue;
-			resolved = { ...resolved, upstreamModel: canonical.upstreamModel };
-		}
+				: resolveRoutingTarget(winning, input.requestedModel);
 		if (
 			!input.maintenance &&
 			!isModelPermitted(
@@ -191,17 +227,28 @@ export function buildResolvedRoute(input: BuildRouteInput): ResolvedRoute {
 				resolved.upstreamModel,
 				winning,
 			)
-		)
+		) {
+			exclude(account, `does not permit model "${resolved.upstreamModel}"`);
 			continue;
+		}
 		if (
 			input.suppressedPairs?.has(
 				JSON.stringify([account.id, resolved.upstreamModel]),
 			)
-		)
+		) {
+			exclude(
+				account,
+				`model "${resolved.upstreamModel}" is suppressed on this account`,
+			);
 			continue;
+		}
 		if (input.chatRequirements) {
 			if (!supportsChatIngress(account.provider)) {
 				unsupportedProvider = true;
+				exclude(
+					account,
+					`provider ${account.provider} has no Chat Completions ingress`,
+				);
 				continue;
 			}
 			const field = unsupportedChatField(
@@ -210,6 +257,7 @@ export function buildResolvedRoute(input: BuildRouteInput): ResolvedRoute {
 			);
 			if (field) {
 				unsupportedField ??= field;
+				exclude(account, `cannot honor Chat Completions field "${field}"`);
 				continue;
 			}
 		}
@@ -221,19 +269,29 @@ export function buildResolvedRoute(input: BuildRouteInput): ResolvedRoute {
 	}
 	if (!targets.size) {
 		const error = unsupportedField
-			? new ChatCapabilityError(unsupportedField)
+			? new ChatCapabilityError(unsupportedField, input.requestedModel)
 			: unsupportedProvider
 				? new RoutingPolicyError(
-						"No permitted destination supports Chat Completions; supported providers are codex and openrouter",
+						`No permitted destination for model "${input.requestedModel}" supports Chat Completions; supported providers are codex and openrouter`,
 					)
 				: new RoutingPolicyError(
-						`No permitted destination/model pair survives API key destinations${winning ? ` and routing rule "${winning.name}"` : " and provider defaults"}${input.forcedAccountId || input.headerAccountId ? " and forced account selection" : ""}. Configure account model permissions or edit the winning rule.`,
+						`No permitted destination/model pair for model "${input.requestedModel}" survives API key destinations${winning ? ` and routing rule "${winning.name}"` : ""}${input.forcedAccountId || input.headerAccountId ? " and forced account selection" : ""}.${describeExclusions(
+							[...(input.priorExclusions?.values() ?? []), ...exclusions],
+						)} Permit the model on an account, or add a routing rule targeting a model it already permits.`,
 					);
 		error.routeSnapshot = new ResolvedRoute(input, winning, targets).snapshot;
 		error.ruleId = winning?.id ?? null;
 		throw error;
 	}
 	return new ResolvedRoute(input, winning, targets);
+}
+/** Bounded: a large pool must not turn one rejection into a log-sized message. */
+const REPORTED_EXCLUSIONS = 8;
+function describeExclusions(reasons: readonly string[]): string {
+	if (!reasons.length) return " No account was even considered.";
+	const shown = reasons.slice(0, REPORTED_EXCLUSIONS);
+	const rest = reasons.length - shown.length;
+	return ` Excluded: ${shown.join("; ")}${rest ? `; and ${rest} more account(s)` : ""}.`;
 }
 const routes = new WeakMap<RequestMeta, ResolvedRoute>();
 export function installResolvedRoute(

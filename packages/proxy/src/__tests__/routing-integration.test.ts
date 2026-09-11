@@ -43,8 +43,10 @@ const rule = (patch: Partial<RoutingRule> = {}): RoutingRule => ({
 	pool_kind: "provider",
 	pool_provider: "codex",
 	pool_account_ids: null,
-	target_kind: "default",
-	target_model: null,
+	// A literal target is the only way to reach Codex with a Claude request:
+	// nothing rewrites a model ID outside the routing table.
+	target_kind: "literal",
+	target_model: "gpt-6-astra",
 	...patch,
 });
 async function setup(accounts: Account[], rules: RoutingRule[]) {
@@ -202,7 +204,13 @@ describe("routing table through the real proxy", () => {
 		});
 		const { ctx, routing } = await setup(
 			[account],
-			[rule({ pool_provider: "openrouter", target_kind: "requested" })],
+			[
+				rule({
+					pool_provider: "openrouter",
+					target_kind: "requested",
+					target_model: null,
+				}),
+			],
 		);
 		await routing.setManualModels(account.id, modelPermissionScope(account), [
 			requested,
@@ -776,7 +784,13 @@ describe("routing table through the real proxy", () => {
 		const official = makeAccount({ id: "official", provider: "anthropic" });
 		const { ctx } = await setup(
 			[official],
-			[rule({ pool_provider: "anthropic", target_kind: "requested" })],
+			[
+				rule({
+					pool_provider: "anthropic",
+					target_kind: "requested",
+					target_model: null,
+				}),
+			],
 		);
 		const fetcher = mock(async () => {
 			throw new Error("Must not send");

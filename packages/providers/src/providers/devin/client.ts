@@ -479,50 +479,25 @@ export class DevinClient {
 		};
 	}
 
-	resolveModel(
-		models: DevinModel[],
-		requested: string,
-		effort?: string,
-	): DevinModel {
+	/** Exact catalogue lookup. Nothing here may substitute one model for another. */
+	resolveModel(models: DevinModel[], requested: string): DevinModel {
 		if (requested === "adaptive")
 			throw new DevinRpcError(
 				"invalid_argument",
 				"Select a concrete Devin model; Adaptive routing is not supported",
 			);
 		const exact = models.find((m) => m.id === requested);
-		if (exact) {
-			if (exact.disabled)
-				throw new DevinRpcError(
-					"permission_denied",
-					`Devin model ${requested} is unavailable on this account`,
-				);
-			return exact;
-		}
-		if (requested !== "swe-2")
+		if (!exact)
 			throw new DevinRpcError(
 				"invalid_argument",
 				`Unknown Devin model ${requested}; refresh the model list`,
 			);
-		const candidates = models.filter(
-			(m) =>
-				!m.disabled &&
-				(/^swe-2(?:-|$)/i.test(m.id) || /^SWE[ -]?2\b/i.test(m.name)),
-		);
-		const selected =
-			(effort
-				? candidates.find(
-						(m) =>
-							m.effort?.toLowerCase() === effort || m.id.endsWith(`-${effort}`),
-					)
-				: undefined) ??
-			candidates.find((m) => m.defaultInFamily) ??
-			candidates[0];
-		if (!selected)
+		if (exact.disabled)
 			throw new DevinRpcError(
 				"permission_denied",
-				"SWE-2 is unavailable on this Devin account",
+				`Devin model ${requested} is unavailable on this account`,
 			);
-		return selected;
+		return exact;
 	}
 }
 export const devinClient = new DevinClient();

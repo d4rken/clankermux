@@ -145,15 +145,20 @@ describe("context-window gate", () => {
 	});
 
 	it("returns 400 context_window_exceeded when request exceeds codex model window and no other backend available", async () => {
-		// gpt-5.5 window = 272K, threshold = floor(272K * 0.97) = 263840
+		// gpt-5.6-sol window = 272K, threshold = floor(272K * 0.97) = 263840
 		const codexAccount = makeAccount({
 			id: "codex-me",
 			name: "Codex-me",
 			provider: "codex",
-			model_mappings: JSON.stringify({ opus: "gpt-5.5" }),
 		});
 
 		const ctx = makeContext([codexAccount]);
+		await configureLiteralRoute(
+			ctx,
+			"claude-opus-4-7",
+			codexAccount.id,
+			"gpt-5.6-sol",
+		);
 		// Request estimated above the 263840 threshold
 		const req = makeLargeRequest(350_000);
 		const response = await callHandleProxy(
@@ -173,24 +178,29 @@ describe("context-window gate", () => {
 		expect(Array.isArray(error.excluded_backends)).toBe(true);
 	});
 
-	it("gates a default-config codex account (no model_mappings) on its family-default window", async () => {
-		// No model_mappings → opus resolves to the gpt-5.6-sol family default (272K,
-		// threshold 263840), matching what the provider actually sends. An oversized
-		// request must be excluded by the gate rather than slipping through. Sized
-		// past the FULL 272K window so even the unmargined last-resort rejects it.
+	it("gates on the model actually sent, and cannot gate an unknown window", async () => {
+		// The gate scores the target the route froze. With a literal rule to
+		// gpt-5.6-sol (272K, threshold 263840) an oversized request is excluded —
+		// sized past the FULL window so even the unmargined last resort rejects it.
+		// With no rule the Codex account sends the Claude ID, whose window is not in
+		// MODEL_CONTEXT_WINDOWS, and an unknown window may never exclude an account.
 		const codexAccount = makeAccount({
 			id: "codex-default",
 			name: "Codex-default",
 			provider: "codex",
-			model_mappings: null,
 		});
 
-		const ctx = makeContext([codexAccount]);
-		const req = makeLargeRequest(500_000);
+		const routed = makeContext([codexAccount]);
+		await configureLiteralRoute(
+			routed,
+			"claude-opus-4-7",
+			codexAccount.id,
+			"gpt-5.6-sol",
+		);
 		const response = await callHandleProxy(
-			req,
+			makeLargeRequest(500_000),
 			new URL("https://proxy.local/v1/messages"),
-			ctx,
+			routed,
 		);
 
 		expect(response.status).toBe(400);
@@ -198,6 +208,17 @@ describe("context-window gate", () => {
 		const error = body.error as Record<string, unknown>;
 		expect(error.type).toBe("context_window_exceeded");
 		expect(error.message as string).toContain("gpt-5.6-sol");
+
+		const unrouted = makeContext([codexAccount]);
+		const passed = await callHandleProxy(
+			makeLargeRequest(500_000),
+			new URL("https://proxy.local/v1/messages"),
+			unrouted,
+		).catch(() => null);
+		if (passed?.status === 400)
+			expect(
+				((await passed.json()) as { error: { type: string } }).error.type,
+			).not.toBe("context_window_exceeded");
 	});
 
 	it("returns x-clankermux-pool-status: context-window-exceeded header", async () => {
@@ -205,10 +226,15 @@ describe("context-window gate", () => {
 			id: "codex-me",
 			name: "Codex-me",
 			provider: "codex",
-			model_mappings: JSON.stringify({ opus: "gpt-5.5" }),
 		});
 
 		const ctx = makeContext([codexAccount]);
+		await configureLiteralRoute(
+			ctx,
+			"claude-opus-4-7",
+			codexAccount.id,
+			"gpt-5.5",
+		);
 		const req = makeLargeRequest(350_000);
 		const response = await callHandleProxy(
 			req,
@@ -293,10 +319,15 @@ describe("context-window gate", () => {
 			id: "codex-forced",
 			name: "Codex-forced",
 			provider: "codex",
-			model_mappings: JSON.stringify({ opus: "gpt-5.5" }),
 		});
 
 		const ctx = makeContext([codexAccount]);
+		await configureLiteralRoute(
+			ctx,
+			"claude-opus-4-7",
+			codexAccount.id,
+			"gpt-5.5",
+		);
 		const largeReq = new Request("https://proxy.local/v1/messages", {
 			method: "POST",
 			headers: {

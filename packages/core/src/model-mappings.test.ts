@@ -1,9 +1,7 @@
-import { afterEach, describe, expect, test } from "bun:test";
+import { describe, expect, test } from "bun:test";
 import {
 	codexAccountFitsRequest,
 	codexAccountFitsRequestUnmargined,
-	DEFAULT_CODEX_MODEL_BY_FAMILY,
-	DEFAULT_QWEN_MODEL_BY_FAMILY,
 	estimateContextWindowTokens,
 	estimateRequestTokens,
 	GATE_CHARS_PER_TOKEN,
@@ -636,15 +634,6 @@ describe("codex gates apply the dated-suffix window fallback", () => {
 });
 
 describe("resolved Codex target boundary", () => {
-	test("DEFAULT_CODEX_MODEL_BY_FAMILY covers every family", () => {
-		expect(DEFAULT_CODEX_MODEL_BY_FAMILY).toEqual({
-			opus: "gpt-5.6-sol",
-			sonnet: "gpt-5.6-terra",
-			haiku: "gpt-5.6-luna",
-			fable: "gpt-6-astra",
-		});
-	});
-
 	test("SAFETY_MARGIN is 0.97", () => {
 		expect(SAFETY_MARGIN).toBe(0.97);
 	});
@@ -664,10 +653,9 @@ describe("resolved Codex target boundary", () => {
 
 describe("claude-opus-5 routing", () => {
 	test("stays capped at the Codex backend window despite a 1M source model", () => {
-		// Opus 5 advertises a 1M context window, but once the request is rewritten
-		// to gpt-5.6-sol the gate is bound by the CODEX backend window (272K), not
-		// by the source model. Counterintuitive but correct: the request is served
-		// by Codex, so Codex's window is the constraint.
+		// Opus 5 advertises a 1M context window, but the gate scores the model the
+		// account will actually send. With a literal rule targeting gpt-5.6-sol the
+		// bound is the CODEX backend window (272K), not the source model's.
 		const account = makeCodexAccount({});
 		const boundary = Math.floor(272_000 * SAFETY_MARGIN);
 		expect(codexAccountFitsRequest(account, "gpt-5.6-sol", boundary)).toBe(
@@ -682,40 +670,6 @@ describe("claude-opus-5 routing", () => {
 		expect(
 			codexAccountFitsRequestUnmargined(account, "gpt-5.6-sol", 272_001),
 		).toBe(false);
-	});
-});
-
-function _makeQwenAccount(overrides: Partial<Account> = {}): Account {
-	return {
-		id: "qwen-1",
-		name: "qwen-test",
-		provider: "qwen",
-		api_key: null,
-		refresh_token: null,
-		access_token: null,
-		expires_at: null,
-		created_at: Date.now(),
-		request_count: 0,
-		total_requests: 0,
-		priority: 10,
-		model_mappings: null,
-		custom_endpoint: null,
-		...overrides,
-	};
-}
-
-describe("PROVIDER_DEFAULT_MODEL_MAPPINGS", () => {
-	afterEach(() => {
-		delete process.env.OPENAI_COMPATIBLE_MODEL_MAPPINGS;
-	});
-
-	test("DEFAULT_QWEN_MODEL_BY_FAMILY covers every family", () => {
-		expect(DEFAULT_QWEN_MODEL_BY_FAMILY).toEqual({
-			opus: "coder-model",
-			sonnet: "coder-model",
-			haiku: "coder-model",
-			fable: "coder-model",
-		});
 	});
 });
 

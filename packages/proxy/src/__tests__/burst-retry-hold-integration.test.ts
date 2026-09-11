@@ -746,8 +746,8 @@ describe("burst-retry hold integration (handleProxy)", () => {
 	});
 
 	it("oversized request gates Codex out, no healthy sibling ⇒ holds full budget then constructed 429", async () => {
-		// The request is too large for the Codex account's mapped model (gpt-5.5,
-		// 400K window → 340K threshold), so the context-window gate excludes it.
+		// The request is too large for the requested model's window (gpt-5.5, 272K),
+		// so the context-window gate excludes the Codex account.
 		// With no surviving non-Anthropic candidate AND no healthy Anthropic sibling,
 		// the hold uses the full budget and, when the held account never recovers,
 		// the normal-loop fall-through is empty → constructed retryable 429.
@@ -777,12 +777,12 @@ describe("burst-retry hold integration (handleProxy)", () => {
 			},
 		);
 
-		// Oversized body: ~1.2M chars ⇒ estimate ~400K tokens > 340K gpt-5.5 cap.
+		// Oversized body: ~1.2M chars ⇒ estimate ~400K tokens > the gpt-5.5 cap.
 		const largeReq = new Request("https://proxy.local/v1/messages", {
 			method: "POST",
 			headers: { "Content-Type": "application/json" },
 			body: JSON.stringify({
-				model: "claude-sonnet-4-5",
+				model: "gpt-5.5",
 				messages: [{ role: "user", content: "x".repeat(1_200_000) }],
 				max_tokens: 16,
 			}),

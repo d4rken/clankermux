@@ -469,7 +469,6 @@ async function handleIngestedProxy(
 
 	const gates = createAdmissionGates({
 		requestMeta,
-		effectiveRequestModel: effectiveRequestModel ?? null,
 		gateTokenEstimate,
 		isSyntheticProbeRequest,
 		strategy: ctx.strategy,

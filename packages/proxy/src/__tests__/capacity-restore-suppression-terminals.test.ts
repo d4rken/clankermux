@@ -174,10 +174,15 @@ function backgroundStub(): Response {
 /**
  * A request whose estimate is `targetEstimate` tokens (chars/3.0 + max_tokens).
  * Mirrors context-window-gate.test.ts.
+ *
+ * It names a Codex model directly because the context-window gate scores the
+ * model the account will actually send, which is the requested ID unless a
+ * literal routing rule names another.
  */
+const SIZED_MODEL = "gpt-5.5";
 function makeSizedRequest(targetEstimate: number): Request {
 	const overhead = JSON.stringify({
-		model: "claude-opus-4-7",
+		model: SIZED_MODEL,
 		messages: [{ role: "user", content: "" }],
 		max_tokens: 16,
 	}).length;
@@ -186,7 +191,7 @@ function makeSizedRequest(targetEstimate: number): Request {
 		method: "POST",
 		headers: { "Content-Type": "application/json" },
 		body: JSON.stringify({
-			model: "claude-opus-4-7",
+			model: SIZED_MODEL,
 			messages: [
 				{ role: "user", content: "x".repeat(Math.max(0, neededChars)) },
 			],

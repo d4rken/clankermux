@@ -53,7 +53,7 @@ export async function provisionRouting(
 						...new Set([
 							...row.discovered_ids,
 							model,
-							resolveRoutingTarget(null, account.provider, model).upstreamModel,
+							resolveRoutingTarget(null, model).upstreamModel,
 						]),
 					];
 			}
@@ -82,10 +82,7 @@ export async function provisionRouting(
 			scope: modelPermissionScope(account),
 			generation: 1,
 			completeness: "known-complete",
-			discovered_ids: [
-				model,
-				resolveRoutingTarget(null, account.provider, model).upstreamModel,
-			],
+			discovered_ids: [model, resolveRoutingTarget(null, model).upstreamModel],
 			manual_ids: [],
 			last_success_at: Date.now(),
 			last_attempt_at: Date.now(),

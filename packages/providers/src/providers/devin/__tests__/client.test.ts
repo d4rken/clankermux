@@ -96,9 +96,17 @@ describe("Devin account client", () => {
 		expect(refreshed.userJwt).not.toBe(a.userJwt);
 		expect((await client.getAccount("beta")).userJwt).toBe(b.userJwt);
 		expect(tokens).toHaveLength(3);
-		expect(client.resolveModel(a.models, "swe-2").id).toBe("swe-2-high");
+		expect(client.resolveModel(a.models, "swe-2-high").id).toBe("swe-2-high");
+		// Exact ids only: a family name the catalogue does not list is an error,
+		// never a reason to pick a member of that family.
+		expect(() => client.resolveModel(a.models, "swe-2")).toThrow(
+			"Unknown Devin model swe-2",
+		);
 		expect(() => client.resolveModel(a.models, "swe-2-max")).toThrow(
 			"unavailable",
+		);
+		expect(() => client.resolveModel(a.models, "adaptive")).toThrow(
+			"Adaptive routing is not supported",
 		);
 	});
 	it("treats undated proto-default quota values as absent and honors hidden daily windows", () => {
