@@ -815,6 +815,14 @@ async function handleIngestedProxy(
 					BURST_RETRY_MAX_USAGE_AGE_MS,
 				);
 				heldMinHeadroom = heldCapacity?.minHeadroom ?? null;
+				// The family is the one this account would actually SERVE. A literal
+				// routing rule makes the resolved target differ from the requested
+				// model, and then the requested model names a window that has nothing
+				// to do with the attempt this hold would make.
+				const heldTargetModel = getAttemptTarget(
+					requestMeta,
+					heldAccount,
+				).upstreamModel;
 				if (heldCapacity !== null && heldCapacity.minHeadroom <= 0) {
 					log.warn(
 						`Burst marker active but held account ${heldAccount.name} shows real exhaustion (minHeadroom=${heldCapacity.minHeadroom}) — NOT holding, falling through to normal failover`,
@@ -822,18 +830,14 @@ async function handleIngestedProxy(
 				} else if (
 					resolveFamilyWeeklyExclusion(
 						heldAccount,
-						effectiveRequestModel,
+						heldTargetModel,
 						usageCache.get(heldAccount.id),
 						heldCapacity,
 						Date.now(),
 					) !== null ||
-					isFamilyWeeklyMemoExhausted(
-						heldAccount,
-						effectiveRequestModel,
-						Date.now(),
-					)
+					isFamilyWeeklyMemoExhausted(heldAccount, heldTargetModel, Date.now())
 				) {
-					// Held account's weekly quota for the REQUESTED family is exhausted
+					// Held account's weekly quota for the RESOLVED family is exhausted
 					// (with unified headroom) — the family window won't clear within the
 					// hold budget, so fall through to normal failover (siblings) rather
 					// than pinning this request to an account that will only 429 again.
@@ -847,7 +851,7 @@ async function handleIngestedProxy(
 					// up to two minutes, re-pins every request to the account a 429 just
 					// refused.
 					log.warn(
-						`Burst marker active but held account ${heldAccount.name} is weekly-exhausted for the requested family — NOT holding, falling through to normal failover`,
+						`Burst marker active but held account ${heldAccount.name} is weekly-exhausted for the family of ${heldTargetModel} — NOT holding, falling through to normal failover`,
 					);
 				} else {
 					enterHold = true;

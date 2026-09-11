@@ -4,6 +4,7 @@ import type { Account, RequestMeta } from "@clankermux/types";
 import { cacheBodyStore } from "../cache-body-store";
 import {
 	isFamilyWeeklyMemoExhausted,
+	recordFamilyWeeklyExhausted,
 	resetFamilyWeeklyMemoForTests,
 } from "../family-weekly-memo";
 import type { ProxyContext } from "../handlers";
@@ -47,6 +48,21 @@ async function callHandleProxy(req: Request, url: URL, ctx: ProxyContext) {
 		false,
 		HOLD_TIMING_OVERRIDE,
 	);
+}
+
+/**
+ * Point every listed account at ONE literal target. Used to send a sonnet
+ * request to the fable family, which is the only way the model the client asked
+ * for and the model an attempt would send can differ.
+ */
+async function configureCrossFamilyRoute(
+	ctx: ProxyContext,
+	requested: string,
+	accountIds: string[],
+	target: string,
+) {
+	const { configureLiteralRoute } = await import("./fixtures/routing-harness");
+	await configureLiteralRoute(ctx, requested, accountIds, target);
 }
 
 function makeAccount(overrides: Partial<Account> = {}): Account {
@@ -334,6 +350,33 @@ function seedFreshHeadroom(accountId: string) {
 			utilization: 20,
 			resets_at: new Date(Date.now() + 7 * 86_400_000).toISOString(),
 		},
+	} as never);
+}
+
+/**
+ * Fresh usage where ONE model family's weekly window is spent while the
+ * account-wide 5h/7d windows still have headroom: the shape the family-weekly
+ * gate exists to read, and the only shape in which the requested family and the
+ * resolved family can disagree about the same account.
+ */
+function seedFamilyWeeklyExhausted(accountId: string, family: string) {
+	const resetsAt = new Date(Date.now() + 5 * 86_400_000).toISOString();
+	usageCache.set(accountId, {
+		five_hour: {
+			utilization: 40,
+			resets_at: new Date(Date.now() + 3_600_000).toISOString(),
+		},
+		seven_day: { utilization: 20, resets_at: resetsAt },
+		limits: [
+			{
+				kind: "weekly_scoped",
+				group: "weekly",
+				percent: 100,
+				resets_at: resetsAt,
+				scope: { model: { id: family, display_name: family } },
+				is_active: true,
+			},
+		],
 	} as never);
 }
 
@@ -1418,5 +1461,163 @@ describe("burst-retry hold integration (handleProxy)", () => {
 		expect(res.status).toBe(200);
 		expect(siblingServed).toBe(true);
 		expect(heldProbes).toBe(0);
+	});
+
+	// -------------------------------------------------------------------------
+	// A literal routing rule sends a sonnet request to the fable family, so the
+	// requested model and the model an attempt would send name DIFFERENT weekly
+	// windows. Every family check a hold makes has to read the one it would
+	// actually spend. Identity routing cannot show this: there the two coincide.
+	// -------------------------------------------------------------------------
+	it("burst preflight reads the RESOLVED family's usage, not the requested model's", async () => {
+		const held = makeAccount({
+			id: "family-held",
+			name: "Cache",
+			// Cooled (affinity_hold), so only the marker-active branch can hold it.
+			rate_limited_until: Date.now() + 60_000,
+			access_token: "at-held",
+		});
+		const sibling = makeAccount({
+			id: "family-sibling",
+			name: "Sibling",
+			access_token: "at-sibling",
+		});
+		// Fable is spent on the held account; sonnet, which the client asked for,
+		// is not. The attempt this hold would make sends fable.
+		seedFamilyWeeklyExhausted("family-held", "fable");
+		markAnthropicBurstThrottle();
+
+		let heldProbes = 0;
+		let siblingCalls = 0;
+		globalThis.fetch = mock(
+			async (input: RequestInfo | URL, init?: RequestInit) => {
+				if (!isProxyCall(input)) return originalFetch(input as never, init);
+				const reqHeaders =
+					input instanceof Request ? input.headers : new Headers(init?.headers);
+				if ((reqHeaders.get("authorization") ?? "").includes("at-sibling"))
+					siblingCalls += 1;
+				else heldProbes += 1;
+				return ok200("claude-fable-5");
+			},
+		);
+
+		const ctx = makeContext([held, sibling], "family-held");
+		await configureCrossFamilyRoute(
+			ctx,
+			"claude-sonnet-4-5",
+			["family-held", "family-sibling"],
+			"claude-fable-5",
+		);
+		const res = await callHandleProxy(
+			makeRequest(),
+			new URL("https://proxy.local/v1/messages"),
+			ctx,
+		);
+
+		// The window that would be spent is already spent: no hold, no re-probe,
+		// normal failover to the sibling.
+		expect(res.status).toBe(200);
+		expect(heldProbes).toBe(0);
+		expect(siblingCalls).toBe(1);
+	});
+
+	it("burst preflight reads the RESOLVED family's memo, not the requested model's", async () => {
+		const held = makeAccount({
+			id: "family-held",
+			name: "Cache",
+			rate_limited_until: Date.now() + 60_000,
+			access_token: "at-held",
+		});
+		const sibling = makeAccount({
+			id: "family-sibling",
+			name: "Sibling",
+			access_token: "at-sibling",
+		});
+		// Usage says the account is fine (that check passes); the memo is the
+		// evidence, and it is about fable — the family the attempt would spend.
+		seedFreshHeadroom("family-held");
+		recordFamilyWeeklyExhausted(
+			"family-held",
+			"fable",
+			Date.now() + 4 * 3_600_000,
+			Date.now(),
+		);
+		markAnthropicBurstThrottle();
+
+		let heldProbes = 0;
+		let siblingCalls = 0;
+		globalThis.fetch = mock(
+			async (input: RequestInfo | URL, init?: RequestInit) => {
+				if (!isProxyCall(input)) return originalFetch(input as never, init);
+				const reqHeaders =
+					input instanceof Request ? input.headers : new Headers(init?.headers);
+				if ((reqHeaders.get("authorization") ?? "").includes("at-sibling"))
+					siblingCalls += 1;
+				else heldProbes += 1;
+				return ok200("claude-fable-5");
+			},
+		);
+
+		const ctx = makeContext([held, sibling], "family-held");
+		await configureCrossFamilyRoute(
+			ctx,
+			"claude-sonnet-4-5",
+			["family-held", "family-sibling"],
+			"claude-fable-5",
+		);
+		const res = await callHandleProxy(
+			makeRequest(),
+			new URL("https://proxy.local/v1/messages"),
+			ctx,
+		);
+
+		expect(res.status).toBe(200);
+		expect(heldProbes).toBe(0);
+		expect(siblingCalls).toBe(1);
+		// The memo is still about fable — nothing here cleared or moved it.
+		expect(
+			isFamilyWeeklyMemoExhausted(held, "claude-fable-5", Date.now()),
+		).toBe(true);
+	});
+
+	it("storm-degrade reads the RESOLVED family's usage, not the requested model's", async () => {
+		// Zero available accounts (the only one is cooled), marker active: the
+		// storm-degrade hold decides on the same evidence, and must read the same
+		// family the attempt it would make will spend.
+		const held = makeAccount({
+			id: "family-held",
+			name: "Cache",
+			rate_limited_until: Date.now() + 60_000,
+			access_token: "at-held",
+		});
+		seedFamilyWeeklyExhausted("family-held", "fable");
+		markAnthropicBurstThrottle();
+
+		let upstreamCalls = 0;
+		globalThis.fetch = mock(
+			async (input: RequestInfo | URL, init?: RequestInit) => {
+				if (!isProxyCall(input)) return originalFetch(input as never, init);
+				upstreamCalls += 1;
+				return rl429({ "x-should-retry": "true" });
+			},
+		);
+
+		const ctx = makeContext([held], "family-held");
+		await configureCrossFamilyRoute(
+			ctx,
+			"claude-sonnet-4-5",
+			["family-held"],
+			"claude-fable-5",
+		);
+		const res = await callHandleProxy(
+			makeRequest(),
+			new URL("https://proxy.local/v1/messages"),
+			ctx,
+		);
+
+		// Degraded to the pool_exhausted terminal without burning the hold budget
+		// re-probing a window that is already spent.
+		expect(res.status).toBe(503);
+		expect(upstreamCalls).toBe(0);
 	});
 });
