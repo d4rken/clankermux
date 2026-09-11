@@ -209,16 +209,29 @@ describe("context-window gate", () => {
 		expect(error.type).toBe("context_window_exceeded");
 		expect(error.message as string).toContain("gpt-5.6-sol");
 
+		// With no rule the account sends the Claude ID, whose window is unknown.
+		// The request then fails for its own reasons (this account has no
+		// credentials), and HOW it fails is not the claim — the claim is that the
+		// gate was not what stopped it. Both shapes of ending, a response and a
+		// throw, are folded into one string so the assertion is unconditional: an
+		// unrelated failure can no longer skip it.
 		const unrouted = makeContext([codexAccount]);
-		const passed = await callHandleProxy(
+		const outcome = await callHandleProxy(
 			makeLargeRequest(500_000),
 			new URL("https://proxy.local/v1/messages"),
 			unrouted,
-		).catch(() => null);
-		if (passed?.status === 400)
-			expect(
-				((await passed.json()) as { error: { type: string } }).error.type,
-			).not.toBe("context_window_exceeded");
+		).then(
+			async (response) =>
+				[
+					response.status,
+					response.headers.get("x-clankermux-pool-status") ?? "",
+					await response.text(),
+				].join(" "),
+			(error: unknown) => String((error as Error)?.message ?? error),
+		);
+
+		expect(outcome).not.toContain("context_window_exceeded");
+		expect(outcome).not.toContain("context-window-exceeded");
 	});
 
 	it("returns x-clankermux-pool-status: context-window-exceeded header", async () => {

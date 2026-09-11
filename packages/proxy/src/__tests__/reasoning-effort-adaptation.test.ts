@@ -2,9 +2,11 @@ import { afterEach, beforeEach, describe, expect, it, mock } from "bun:test";
 import {
 	type Account,
 	type NativeResponsesContext,
+	REASONING_EFFORT_ADAPTATION_HEADER,
 	setNativeResponsesRequestContext,
 } from "@clankermux/types";
 import type { ProxyContext } from "../handlers";
+import { setForcedAccount } from "../handlers";
 import { routingAttempts } from "./fixtures/routing-harness";
 
 /**
@@ -101,7 +103,11 @@ function makeContext(accounts: Account[]): ProxyContext {
 			name: "test-provider",
 			canHandle: () => true,
 			buildUrl: () => "https://upstream.local/v1/messages",
-			prepareHeaders: () => new Headers(),
+			// Carries the client's headers through, like every provider that
+			// augments the incoming set instead of building its own (Anthropic's
+			// prepareHeaders is the live example). A provider that discarded them
+			// would hide whether the proxy scrubs what a client may not send.
+			prepareHeaders: (headers: Headers) => new Headers(headers),
 			transformRequestBody: null,
 			processResponse: async (r: Response) => r,
 			parseRateLimit: () => ({
@@ -231,17 +237,20 @@ describe("reasoning-effort adaptation capture", () => {
 
 	beforeEach(() => {
 		originalFetch = globalThis.fetch;
+		setForcedAccount(null);
 	});
 
 	afterEach(() => {
 		globalThis.fetch = originalFetch;
+		setForcedAccount(null);
 	});
 
 	/** Captures the body of every upstream call and answers with Codex SSE. */
 	function captureUpstream(
 		respond: (url: string) => Response = () => codexSseResponse(),
-	): { byUrl: Map<string, string> } {
+	): { byUrl: Map<string, string>; headersByUrl: Map<string, Headers> } {
 		const byUrl = new Map<string, string>();
+		const headersByUrl = new Map<string, Headers>();
 		globalThis.fetch = mock(
 			async (input: RequestInfo | URL, _init?: RequestInit) => {
 				// Anything else (a token endpoint, the pricing catalog) is refused
@@ -249,11 +258,13 @@ describe("reasoning-effort adaptation capture", () => {
 				if (!isProxyCall(input))
 					return new Response("unavailable", { status: 500 });
 				const request = input as Request;
-				byUrl.set(new URL(request.url).host, await request.clone().text());
+				const host = new URL(request.url).host;
+				byUrl.set(host, await request.clone().text());
+				headersByUrl.set(host, new Headers(request.headers));
 				return respond(request.url);
 			},
 		) as never;
-		return { byUrl };
+		return { byUrl, headersByUrl };
 	}
 
 	it("native passthrough: a clamped effort is recorded as requested, effective and why", async () => {
@@ -417,23 +428,89 @@ describe("reasoning-effort adaptation capture", () => {
 		});
 	});
 
-	it("ignores a client-supplied adaptation header", async () => {
-		captureUpstream();
-		const ctx = makeContext([makeCodexAccount()]);
-		const req = makeNativeRequest("gpt-5.5-codex", { effort: "high" });
-		req.headers.set(
-			"x-clankermux-reasoning-effort",
-			btoa('{"requested":"max","effective":"none","reason":"forged"}'),
+	// A client forging the carrier header has to be tested against a backend
+	// whose provider never writes that header: a provider that decides an
+	// outgoing effort overwrites (or deletes) it on every request, so it would
+	// bury a forgery whether or not the proxy scrubs the inbound header. The
+	// fallback provider below produces no adaptation metadata at all, so the
+	// value that reaches the attempt row is the client's unless it was deleted.
+	const forged = btoa(
+		'{"requested":"max","effective":"none","reason":"forged"}',
+	);
+
+	/** An account no registered provider claims, so ctx.provider serves it. */
+	function makePlainAccount(): Account {
+		return makeCodexAccount({ id: "plain-1", provider: "test-provider" });
+	}
+
+	function plainRequest(): Request {
+		const req = makeRequest({
+			model: "claude-sonnet-4-5",
+			messages: [{ role: "user", content: "plain" }],
+			max_tokens: 16,
+		});
+		req.headers.set(REASONING_EFFORT_ADAPTATION_HEADER, forged);
+		return req;
+	}
+
+	function plainReply(): Response {
+		return new Response(
+			JSON.stringify({
+				id: "msg_1",
+				type: "message",
+				role: "assistant",
+				content: [{ type: "text", text: "hi" }],
+				model: "claude-sonnet-4-5",
+				stop_reason: "end_turn",
+				usage: { input_tokens: 1, output_tokens: 1 },
+			}),
+			{ status: 200, headers: { "content-type": "application/json" } },
 		);
+	}
+
+	it("ignores a client-supplied adaptation header", async () => {
+		const captured = captureUpstream(() => plainReply());
+		const ctx = makeContext([makePlainAccount()]);
+		const req = plainRequest();
 
 		const res = await callHandleProxy(req, new URL(req.url), ctx);
 		expect(res.status).toBe(200);
 
-		// `high` is accepted as-is, so the attempt records no adaptation at all.
+		// Nothing adapted this request, and nothing the client sent says otherwise.
 		expect(routingAttempts(ctx)[0]).toMatchObject({
-			reasoning_effort_requested: "high",
-			reasoning_effort_effective: "high",
+			reasoning_effort_requested: null,
+			reasoning_effort_effective: null,
 			reasoning_effort_reason: null,
 		});
+		expect(
+			captured.headersByUrl
+				.get("upstream.local")
+				?.get(REASONING_EFFORT_ADAPTATION_HEADER),
+		).toBeNull();
+	});
+
+	it("ignores a client-supplied adaptation header on a forced dispatch", async () => {
+		// The forced path builds its own request and records its own attempt row,
+		// so it scrubs the inbound header for itself or not at all.
+		const account = makePlainAccount();
+		const captured = captureUpstream(() => plainReply());
+		const ctx = makeContext([account]);
+		setForcedAccount(account.id);
+		const req = plainRequest();
+
+		const res = await callHandleProxy(req, new URL(req.url), ctx);
+		expect(res.status).toBe(200);
+
+		expect(routingAttempts(ctx)[0]).toMatchObject({
+			account_id: account.id,
+			reasoning_effort_requested: null,
+			reasoning_effort_effective: null,
+			reasoning_effort_reason: null,
+		});
+		expect(
+			captured.headersByUrl
+				.get("upstream.local")
+				?.get(REASONING_EFFORT_ADAPTATION_HEADER),
+		).toBeNull();
 	});
 });
