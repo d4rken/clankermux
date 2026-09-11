@@ -237,3 +237,21 @@ it("keeps Devin organization-only metadata visible without claiming a user ID", 
 	expect(html).toContain("Organization ID: org-only-123");
 	expect(html).not.toContain("Account ID:");
 });
+
+it("combines Devin organization-only identity with inline renewal details", () => {
+	const account = makeAccount({
+		provider: "devin",
+		usageData: {
+			kind: "devin",
+			organizationId: "org-only-123",
+		} as import("@clankermux/types").DevinUsageData,
+	});
+	const html = renderToStaticMarkup(
+		<AccountIdentityLine
+			account={account}
+			details={<span>Renews tomorrow</span>}
+		/>,
+	);
+	expect(html).toContain("Organization #org-only");
+	expect(html).toContain(" · <span>Renews tomorrow</span>");
+});

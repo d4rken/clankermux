@@ -8,6 +8,8 @@ export interface DevinResponseContext {
 	model: string;
 	stream: boolean;
 	signal?: AbortSignal;
+	/** Actual provider evidence only, never the requested-model fallback. */
+	onReportedModel?: (model: string) => void;
 }
 type Event = Record<string, unknown> & { type: string };
 type Block = {
@@ -104,6 +106,7 @@ async function* translate(
 		if (totalBytes > 128 * 1024 * 1024)
 			throw new DevinRpcError("data_loss", "Devin stream exceeds size limit");
 		const msg = fromBinary(GetChatMessageResponseSchema, payload);
+		if (msg.actualModelUid) context.onReportedModel?.(msg.actualModelUid);
 		if (!started) {
 			if (msg.messageId) id = msg.messageId;
 			if (msg.actualModelUid) model = msg.actualModelUid;

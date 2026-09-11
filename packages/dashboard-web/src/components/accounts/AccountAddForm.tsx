@@ -14,8 +14,6 @@ import {
 } from "../ui/select";
 import { AuthorizationHandoff } from "./AuthorizationHandoff";
 import { DevinAccountFields } from "./DevinAccountFields";
-import { ModelMappingFields } from "./ModelMappingFields";
-import { OpenAIModelMappings } from "./OpenAIModelMappings";
 
 interface AccountAddFormProps {
 	onAddAccount: (params: {
@@ -45,7 +43,6 @@ interface AccountAddFormProps {
 		apiKey: string;
 		priority: number;
 		customEndpoint?: string;
-		modelMappings?: { [key: string]: string };
 	}) => Promise<void>;
 	onAddMinimaxAccount: (params: {
 		name: string;
@@ -57,50 +54,42 @@ interface AccountAddFormProps {
 		apiKey: string;
 		priority: number;
 		customEndpoint?: string;
-		modelMappings?: { [key: string]: string };
 	}) => Promise<void>;
 	onAddOpenAIAccount: (params: {
 		name: string;
 		apiKey: string;
 		priority: number;
 		customEndpoint: string;
-		modelMappings?: { [key: string]: string };
 	}) => Promise<void>;
 	onAddAlibabaCodingPlanAccount: (params: {
 		name: string;
 		apiKey: string;
 		priority: number;
-		modelMappings?: { [key: string]: string };
 	}) => Promise<void>;
 	onAddKiloAccount: (params: {
 		name: string;
 		apiKey: string;
 		priority: number;
-		modelMappings?: { [key: string]: string };
 	}) => Promise<void>;
 	onAddDevinAccount?: (params: {
 		name: string;
 		apiKey: string;
 		priority: number;
-		modelMappings?: Record<string, string>;
 	}) => Promise<void>;
 	onAddOpenRouterAccount: (params: {
 		name: string;
 		apiKey: string;
 		priority: number;
-		modelMappings?: { [key: string]: string };
 	}) => Promise<void>;
 	onAddOllamaAccount: (params: {
 		name: string;
 		priority: number;
 		customEndpoint?: string;
-		modelMappings?: { [key: string]: string };
 	}) => Promise<void>;
 	onAddOllamaCloudAccount: (params: {
 		name: string;
 		apiKey: string;
 		priority: number;
-		modelMappings?: { [key: string]: string };
 	}) => Promise<void>;
 	onCancel: () => void;
 	onSuccess: () => void;
@@ -159,9 +148,6 @@ export function AccountAddForm({
 		region: "global",
 		profile: "",
 		awsRegion: "",
-		opusModel: "",
-		sonnetModel: "",
-		haikuModel: "",
 	});
 
 	const updateAccountSource = (
@@ -170,9 +156,6 @@ export function AccountAddForm({
 		>,
 	) => {
 		setNewAccount((prev) => {
-			const changed = Object.entries(changes).some(
-				([key, value]) => prev[key as keyof typeof changes] !== value,
-			);
 			// Rule 1: every mode switch starts from a clean source. Each mode
 			// renders its own subset of the source fields, so a value typed under
 			// the previous mode may be invisible (and therefore uneditable) under
@@ -180,20 +163,11 @@ export function AccountAddForm({
 			// meant for one provider must never reach another.
 			const switchedMode =
 				changes.mode !== undefined && changes.mode !== prev.mode;
-			// Rule 2: openai-compatible model mappings are discovered against a
-			// specific endpoint and key, so editing either of those *within* the
-			// mode invalidates them too, not just leaving or entering the mode.
-			const staleModelMappings =
-				changed &&
-				(prev.mode === "openai-compatible" ||
-					changes.mode === "openai-compatible");
+
 			return {
 				...prev,
 				...changes,
 				...(switchedMode ? { customEndpoint: "", apiKey: "" } : {}),
-				...(switchedMode || staleModelMappings
-					? { opusModel: "", sonnetModel: "", haikuModel: "" }
-					: {}),
 			};
 		});
 	};
@@ -323,9 +297,6 @@ export function AccountAddForm({
 								region: "global",
 								profile: "",
 								awsRegion: "",
-								opusModel: "",
-								sonnetModel: "",
-								haikuModel: "",
 							});
 							onSuccess();
 						}, 1500);
@@ -389,9 +360,6 @@ export function AccountAddForm({
 								region: "global",
 								profile: "",
 								awsRegion: "",
-								opusModel: "",
-								sonnetModel: "",
-								haikuModel: "",
 							});
 							onSuccess();
 						}, 1500);
@@ -454,15 +422,10 @@ export function AccountAddForm({
 				);
 				return;
 			}
-			const modelMappings: Record<string, string> = {};
-			if (newAccount.opusModel) modelMappings.opus = newAccount.opusModel;
-			if (newAccount.sonnetModel) modelMappings.sonnet = newAccount.sonnetModel;
-			if (newAccount.haikuModel) modelMappings.haiku = newAccount.haikuModel;
 			const params = {
 				name: newAccount.name,
 				apiKey: newAccount.apiKey.trim(),
 				priority: newAccount.priority,
-				...(Object.keys(modelMappings).length ? { modelMappings } : {}),
 			};
 			if (onAddDevinAccount) await onAddDevinAccount(params);
 			else await api.addDevinAccount(params);
@@ -475,21 +438,13 @@ export function AccountAddForm({
 				onError("API key is required for z.ai accounts");
 				return;
 			}
-			// Build model mappings from form fields
-			const zaiModelMappings: { [key: string]: string } = {};
-			if (newAccount.opusModel) zaiModelMappings.opus = newAccount.opusModel;
-			if (newAccount.sonnetModel)
-				zaiModelMappings.sonnet = newAccount.sonnetModel;
-			if (newAccount.haikuModel) zaiModelMappings.haiku = newAccount.haikuModel;
+
 			// For z.ai accounts, we don't need OAuth flow
 			await onAddZaiAccount({
 				...accountParams,
 				apiKey: newAccount.apiKey,
 				...(newAccount.customEndpoint && {
 					customEndpoint: newAccount.customEndpoint.trim(),
-				}),
-				...(Object.keys(zaiModelMappings).length > 0 && {
-					modelMappings: zaiModelMappings,
 				}),
 			});
 			// Reset form and signal success
@@ -503,9 +458,6 @@ export function AccountAddForm({
 				region: "global",
 				profile: "",
 				awsRegion: "",
-				opusModel: "",
-				sonnetModel: "",
-				haikuModel: "",
 			});
 			onSuccess();
 			return;
@@ -533,9 +485,6 @@ export function AccountAddForm({
 				region: "global",
 				profile: "",
 				awsRegion: "",
-				opusModel: "",
-				sonnetModel: "",
-				haikuModel: "",
 			});
 			onSuccess();
 			return;
@@ -546,20 +495,11 @@ export function AccountAddForm({
 				onError("API key is required for Kilo Gateway accounts");
 				return;
 			}
-			const kiloModelMappings: { [key: string]: string } = {};
-			if (newAccount.opusModel) kiloModelMappings.opus = newAccount.opusModel;
-			if (newAccount.sonnetModel)
-				kiloModelMappings.sonnet = newAccount.sonnetModel;
-			if (newAccount.haikuModel)
-				kiloModelMappings.haiku = newAccount.haikuModel;
+
 			await onAddKiloAccount({
 				name: newAccount.name,
 				apiKey: newAccount.apiKey,
 				priority: newAccount.priority,
-				modelMappings:
-					Object.keys(kiloModelMappings).length > 0
-						? kiloModelMappings
-						: undefined,
 			});
 			setNewAccount({
 				name: "",
@@ -571,9 +511,6 @@ export function AccountAddForm({
 				region: "global",
 				profile: "",
 				awsRegion: "",
-				opusModel: "",
-				sonnetModel: "",
-				haikuModel: "",
 			});
 			onSuccess();
 			return;
@@ -584,16 +521,11 @@ export function AccountAddForm({
 				onError("API key is required for Alibaba Coding Plan accounts");
 				return;
 			}
-			const modelMappings: { [key: string]: string } = {};
-			if (newAccount.opusModel) modelMappings.opus = newAccount.opusModel;
-			if (newAccount.sonnetModel) modelMappings.sonnet = newAccount.sonnetModel;
-			if (newAccount.haikuModel) modelMappings.haiku = newAccount.haikuModel;
+
 			await onAddAlibabaCodingPlanAccount({
 				name: newAccount.name,
 				apiKey: newAccount.apiKey,
 				priority: newAccount.priority,
-				modelMappings:
-					Object.keys(modelMappings).length > 0 ? modelMappings : undefined,
 			});
 			setNewAccount({
 				name: "",
@@ -605,9 +537,6 @@ export function AccountAddForm({
 				region: "global",
 				profile: "",
 				awsRegion: "",
-				opusModel: "",
-				sonnetModel: "",
-				haikuModel: "",
 			});
 			onSuccess();
 			return;
@@ -618,16 +547,11 @@ export function AccountAddForm({
 				onError("API key is required for OpenRouter accounts");
 				return;
 			}
-			const modelMappings: { [key: string]: string } = {};
-			if (newAccount.opusModel) modelMappings.opus = newAccount.opusModel;
-			if (newAccount.sonnetModel) modelMappings.sonnet = newAccount.sonnetModel;
-			if (newAccount.haikuModel) modelMappings.haiku = newAccount.haikuModel;
+
 			await onAddOpenRouterAccount({
 				name: newAccount.name,
 				apiKey: newAccount.apiKey,
 				priority: newAccount.priority,
-				modelMappings:
-					Object.keys(modelMappings).length > 0 ? modelMappings : undefined,
 			});
 			setNewAccount({
 				name: "",
@@ -639,9 +563,6 @@ export function AccountAddForm({
 				region: "global",
 				profile: "",
 				awsRegion: "",
-				opusModel: "",
-				sonnetModel: "",
-				haikuModel: "",
 			});
 			onSuccess();
 			return;
@@ -653,10 +574,6 @@ export function AccountAddForm({
 				return;
 			}
 			// Build model mappings object
-			const modelMappings: { [key: string]: string } = {};
-			if (newAccount.opusModel) modelMappings.opus = newAccount.opusModel;
-			if (newAccount.sonnetModel) modelMappings.sonnet = newAccount.sonnetModel;
-			if (newAccount.haikuModel) modelMappings.haiku = newAccount.haikuModel;
 
 			// For Anthropic-compatible accounts, we don't need OAuth flow and use default tier
 			await onAddAnthropicCompatibleAccount({
@@ -664,8 +581,6 @@ export function AccountAddForm({
 				apiKey: newAccount.apiKey,
 				priority: newAccount.priority,
 				customEndpoint: newAccount.customEndpoint || undefined,
-				modelMappings:
-					Object.keys(modelMappings).length > 0 ? modelMappings : undefined,
 			});
 			// Reset form and signal success
 			setNewAccount({
@@ -678,9 +593,6 @@ export function AccountAddForm({
 				region: "global",
 				profile: "",
 				awsRegion: "",
-				opusModel: "",
-				sonnetModel: "",
-				haikuModel: "",
 			});
 			onSuccess();
 			return;
@@ -697,10 +609,6 @@ export function AccountAddForm({
 			}
 
 			// Build model mappings object
-			const modelMappings: { [key: string]: string } = {};
-			if (newAccount.opusModel) modelMappings.opus = newAccount.opusModel;
-			if (newAccount.sonnetModel) modelMappings.sonnet = newAccount.sonnetModel;
-			if (newAccount.haikuModel) modelMappings.haiku = newAccount.haikuModel;
 
 			// For OpenAI-compatible accounts, we don't need OAuth flow
 			await onAddOpenAIAccount({
@@ -708,8 +616,6 @@ export function AccountAddForm({
 				apiKey: newAccount.apiKey,
 				priority: newAccount.priority,
 				customEndpoint: newAccount.customEndpoint.trim(),
-				modelMappings:
-					Object.keys(modelMappings).length > 0 ? modelMappings : undefined,
 			});
 
 			// Reset form and signal success
@@ -723,26 +629,16 @@ export function AccountAddForm({
 				region: "global",
 				profile: "",
 				awsRegion: "",
-				opusModel: "",
-				sonnetModel: "",
-				haikuModel: "",
 			});
 			onSuccess();
 			return;
 		}
 
 		if (newAccount.mode === "ollama") {
-			const modelMappings: { [key: string]: string } = {};
-			if (newAccount.opusModel) modelMappings.opus = newAccount.opusModel;
-			if (newAccount.sonnetModel) modelMappings.sonnet = newAccount.sonnetModel;
-			if (newAccount.haikuModel) modelMappings.haiku = newAccount.haikuModel;
-
 			await onAddOllamaAccount({
 				name: newAccount.name,
 				priority: newAccount.priority,
 				customEndpoint: newAccount.customEndpoint || undefined,
-				modelMappings:
-					Object.keys(modelMappings).length > 0 ? modelMappings : undefined,
 			});
 			setNewAccount({
 				name: "",
@@ -754,9 +650,6 @@ export function AccountAddForm({
 				region: "global",
 				profile: "",
 				awsRegion: "",
-				opusModel: "",
-				sonnetModel: "",
-				haikuModel: "",
 			});
 			onSuccess();
 			return;
@@ -767,17 +660,11 @@ export function AccountAddForm({
 				onError("API key is required for Ollama Cloud");
 				return;
 			}
-			const modelMappings: { [key: string]: string } = {};
-			if (newAccount.opusModel) modelMappings.opus = newAccount.opusModel;
-			if (newAccount.sonnetModel) modelMappings.sonnet = newAccount.sonnetModel;
-			if (newAccount.haikuModel) modelMappings.haiku = newAccount.haikuModel;
 
 			await onAddOllamaCloudAccount({
 				name: newAccount.name,
 				apiKey: newAccount.apiKey,
 				priority: newAccount.priority,
-				modelMappings:
-					Object.keys(modelMappings).length > 0 ? modelMappings : undefined,
 			});
 			setNewAccount({
 				name: "",
@@ -789,9 +676,6 @@ export function AccountAddForm({
 				region: "global",
 				profile: "",
 				awsRegion: "",
-				opusModel: "",
-				sonnetModel: "",
-				haikuModel: "",
 			});
 			onSuccess();
 			return;
@@ -833,9 +717,6 @@ export function AccountAddForm({
 			region: "global",
 			profile: "",
 			awsRegion: "",
-			opusModel: "",
-			sonnetModel: "",
-			haikuModel: "",
 		});
 		onSuccess();
 	};
@@ -873,9 +754,6 @@ export function AccountAddForm({
 			region: "global",
 			profile: "",
 			awsRegion: "",
-			opusModel: "",
-			sonnetModel: "",
-			haikuModel: "",
 		});
 		onCancel();
 	};
@@ -986,14 +864,6 @@ export function AccountAddForm({
 							onTokenChange={(value) => {
 								updateAccountSource({ apiKey: value });
 							}}
-							onModelChange={(value) =>
-								setNewAccount((prev) => ({
-									...prev,
-									opusModel: value,
-									sonnetModel: value,
-									haikuModel: value,
-								}))
-							}
 							onSuccess={onSuccess}
 							onError={onError}
 						/>
@@ -1097,85 +967,21 @@ export function AccountAddForm({
 						</div>
 					)}
 					{newAccount.mode === "zai" && (
-						<>
-							<div className="space-y-item">
-								<Label htmlFor="apiKey">z.ai API Key</Label>
-								<Input
-									id="apiKey"
-									type="password"
-									value={newAccount.apiKey}
-									onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
-										setNewAccount({
-											...newAccount,
-											apiKey: (e.target as HTMLInputElement).value,
-										})
-									}
-									placeholder="Enter your z.ai API key"
-								/>
-							</div>
-							<div className="space-y-item">
-								<Label className="text-sm font-medium">
-									Model Mappings (Optional)
-								</Label>
-								<p className="text-xs text-muted-foreground">
-									Map Anthropic model names to z.ai-specific models. Leave empty
-									to use Claude models directly.
-								</p>
-								<div className="space-y-item pl-group">
-									<div>
-										<Label htmlFor="opusModel" className="text-sm">
-											Opus Model
-										</Label>
-										<Input
-											id="opusModel"
-											value={newAccount.opusModel}
-											onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
-												setNewAccount({
-													...newAccount,
-													opusModel: (e.target as HTMLInputElement).value,
-												})
-											}
-											placeholder="e.g. glm-4.5-flash"
-											className="mt-tight"
-										/>
-									</div>
-									<div>
-										<Label htmlFor="sonnetModel" className="text-sm">
-											Sonnet Model
-										</Label>
-										<Input
-											id="sonnetModel"
-											value={newAccount.sonnetModel}
-											onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
-												setNewAccount({
-													...newAccount,
-													sonnetModel: (e.target as HTMLInputElement).value,
-												})
-											}
-											placeholder="e.g. glm-4.5-flash"
-											className="mt-tight"
-										/>
-									</div>
-									<div>
-										<Label htmlFor="haikuModel" className="text-sm">
-											Haiku Model
-										</Label>
-										<Input
-											id="haikuModel"
-											value={newAccount.haikuModel}
-											onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
-												setNewAccount({
-													...newAccount,
-													haikuModel: (e.target as HTMLInputElement).value,
-												})
-											}
-											placeholder="e.g. glm-4.5-air"
-											className="mt-tight"
-										/>
-									</div>
-								</div>
-							</div>
-						</>
+						<div className="space-y-item">
+							<Label htmlFor="apiKey">z.ai API Key</Label>
+							<Input
+								id="apiKey"
+								type="password"
+								value={newAccount.apiKey}
+								onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
+									setNewAccount({
+										...newAccount,
+										apiKey: (e.target as HTMLInputElement).value,
+									})
+								}
+								placeholder="Enter your z.ai API key"
+							/>
+						</div>
 					)}
 					{newAccount.mode === "minimax" && (
 						<div className="space-y-item">
@@ -1228,66 +1034,6 @@ export function AccountAddForm({
 									placeholder="https://api.anthropic-compatible.com"
 								/>
 							</div>
-							<div className="space-y-item">
-								<Label>Model Mappings (Optional)</Label>
-								<p className="text-xs text-muted-foreground mb-item">
-									Map Anthropic model names to provider-specific models. Leave
-									empty to use defaults.
-								</p>
-								<div className="space-y-item pl-group">
-									<div>
-										<Label htmlFor="opusModel" className="text-sm">
-											Opus Model
-										</Label>
-										<Input
-											id="opusModel"
-											value={newAccount.opusModel}
-											onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
-												setNewAccount({
-													...newAccount,
-													opusModel: (e.target as HTMLInputElement).value,
-												})
-											}
-											placeholder="claude-3-opus-20240229 (default)"
-											className="mt-tight"
-										/>
-									</div>
-									<div>
-										<Label htmlFor="sonnetModel" className="text-sm">
-											Sonnet Model
-										</Label>
-										<Input
-											id="sonnetModel"
-											value={newAccount.sonnetModel}
-											onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
-												setNewAccount({
-													...newAccount,
-													sonnetModel: (e.target as HTMLInputElement).value,
-												})
-											}
-											placeholder="claude-3-sonnet-20240229 (default)"
-											className="mt-tight"
-										/>
-									</div>
-									<div>
-										<Label htmlFor="haikuModel" className="text-sm">
-											Haiku Model
-										</Label>
-										<Input
-											id="haikuModel"
-											value={newAccount.haikuModel}
-											onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
-												setNewAccount({
-													...newAccount,
-													haikuModel: (e.target as HTMLInputElement).value,
-												})
-											}
-											placeholder="claude-3-haiku-20240307 (default)"
-											className="mt-tight"
-										/>
-									</div>
-								</div>
-							</div>
 						</>
 					)}
 					{newAccount.mode === "openai-compatible" && (
@@ -1322,269 +1068,95 @@ export function AccountAddForm({
 									Enter the base URL for the OpenAI-compatible API
 								</p>
 							</div>
-							<OpenAIModelMappings
-								apiKey={newAccount.apiKey}
-								endpoint={newAccount.customEndpoint}
-								mappings={newAccount}
-								onChange={(field, value) =>
-									setNewAccount((prev) => ({ ...prev, [field]: value }))
-								}
-							/>
 						</>
 					)}
 					{newAccount.mode === "ollama" && (
-						<>
-							<div className="space-y-item">
-								<Label htmlFor="customEndpoint">
-									Ollama Endpoint URL (Optional)
-								</Label>
-								<Input
-									id="customEndpoint"
-									type="url"
-									value={newAccount.customEndpoint}
-									onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
-										setNewAccount({
-											...newAccount,
-											customEndpoint: (e.target as HTMLInputElement).value,
-										})
-									}
-									placeholder="http://localhost:11434"
-								/>
-								<p className="text-xs text-muted-foreground">
-									Leave empty to use default http://localhost:11434. Requires
-									Ollama v0.14.0+.
-								</p>
-							</div>
-							<div className="space-y-item">
-								<Label>Model Mappings (Optional)</Label>
-								<p className="text-xs text-muted-foreground mb-item">
-									Map Anthropic model names to Ollama model names (e.g.
-									qwen3-coder, llama3.3).
-								</p>
-								<div className="space-y-item pl-group">
-									<div>
-										<Label htmlFor="opusModel" className="text-sm">
-											Opus Model
-										</Label>
-										<Input
-											id="opusModel"
-											value={newAccount.opusModel}
-											onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
-												setNewAccount({
-													...newAccount,
-													opusModel: (e.target as HTMLInputElement).value,
-												})
-											}
-											placeholder="qwen3-coder (example)"
-											className="mt-tight"
-										/>
-									</div>
-									<div>
-										<Label htmlFor="sonnetModel" className="text-sm">
-											Sonnet Model
-										</Label>
-										<Input
-											id="sonnetModel"
-											value={newAccount.sonnetModel}
-											onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
-												setNewAccount({
-													...newAccount,
-													sonnetModel: (e.target as HTMLInputElement).value,
-												})
-											}
-											placeholder="qwen3-coder (example)"
-											className="mt-tight"
-										/>
-									</div>
-									<div>
-										<Label htmlFor="haikuModel" className="text-sm">
-											Haiku Model
-										</Label>
-										<Input
-											id="haikuModel"
-											value={newAccount.haikuModel}
-											onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
-												setNewAccount({
-													...newAccount,
-													haikuModel: (e.target as HTMLInputElement).value,
-												})
-											}
-											placeholder="llama3.3 (example)"
-											className="mt-tight"
-										/>
-									</div>
-								</div>
-							</div>
-						</>
+						<div className="space-y-item">
+							<Label htmlFor="customEndpoint">
+								Ollama Endpoint URL (Optional)
+							</Label>
+							<Input
+								id="customEndpoint"
+								type="url"
+								value={newAccount.customEndpoint}
+								onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
+									setNewAccount({
+										...newAccount,
+										customEndpoint: (e.target as HTMLInputElement).value,
+									})
+								}
+								placeholder="http://localhost:11434"
+							/>
+							<p className="text-xs text-muted-foreground">
+								Leave empty to use default http://localhost:11434. Requires
+								Ollama v0.14.0+.
+							</p>
+						</div>
 					)}
 					{newAccount.mode === "ollama-cloud" && (
-						<>
-							<div className="space-y-item">
-								<Label htmlFor="apiKey">Ollama Cloud API Key</Label>
-								<Input
-									id="apiKey"
-									type="password"
-									value={newAccount.apiKey}
-									onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
-										setNewAccount({
-											...newAccount,
-											apiKey: (e.target as HTMLInputElement).value,
-										})
-									}
-									placeholder="Enter your Ollama Cloud API key"
-								/>
-							</div>
-							<div className="space-y-item">
-								<Label>Model Mappings (Optional)</Label>
-								<p className="text-xs text-muted-foreground mb-item">
-									Map Anthropic model names to Ollama model names (e.g.
-									qwen3-coder, llama3.3).
-								</p>
-								<div className="space-y-item pl-group">
-									<div>
-										<Label htmlFor="opusModel" className="text-sm">
-											Opus Model
-										</Label>
-										<Input
-											id="opusModel"
-											value={newAccount.opusModel}
-											onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
-												setNewAccount({
-													...newAccount,
-													opusModel: (e.target as HTMLInputElement).value,
-												})
-											}
-											placeholder="qwen3-coder (example)"
-											className="mt-tight"
-										/>
-									</div>
-									<div>
-										<Label htmlFor="sonnetModel" className="text-sm">
-											Sonnet Model
-										</Label>
-										<Input
-											id="sonnetModel"
-											value={newAccount.sonnetModel}
-											onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
-												setNewAccount({
-													...newAccount,
-													sonnetModel: (e.target as HTMLInputElement).value,
-												})
-											}
-											placeholder="qwen3-coder (example)"
-											className="mt-tight"
-										/>
-									</div>
-									<div>
-										<Label htmlFor="haikuModel" className="text-sm">
-											Haiku Model
-										</Label>
-										<Input
-											id="haikuModel"
-											value={newAccount.haikuModel}
-											onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
-												setNewAccount({
-													...newAccount,
-													haikuModel: (e.target as HTMLInputElement).value,
-												})
-											}
-											placeholder="llama3.3 (example)"
-											className="mt-tight"
-										/>
-									</div>
-								</div>
-							</div>
-						</>
+						<div className="space-y-item">
+							<Label htmlFor="apiKey">Ollama Cloud API Key</Label>
+							<Input
+								id="apiKey"
+								type="password"
+								value={newAccount.apiKey}
+								onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
+									setNewAccount({
+										...newAccount,
+										apiKey: (e.target as HTMLInputElement).value,
+									})
+								}
+								placeholder="Enter your Ollama Cloud API key"
+							/>
+						</div>
 					)}
 					{newAccount.mode === "openrouter" && (
-						<>
-							<div className="space-y-item">
-								<Label htmlFor="apiKey">OpenRouter API Key</Label>
-								<Input
-									id="apiKey"
-									type="password"
-									value={newAccount.apiKey}
-									onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
-										updateAccountSource({
-											apiKey: (e.target as HTMLInputElement).value,
-										})
-									}
-									placeholder="Enter your OpenRouter API key"
-								/>
-							</div>
-							<ModelMappingFields
-								mappings={newAccount}
-								onChange={(field, value) =>
-									setNewAccount((prev) => ({ ...prev, [field]: value }))
+						<div className="space-y-item">
+							<Label htmlFor="apiKey">OpenRouter API Key</Label>
+							<Input
+								id="apiKey"
+								type="password"
+								value={newAccount.apiKey}
+								onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
+									updateAccountSource({
+										apiKey: (e.target as HTMLInputElement).value,
+									})
 								}
-								description="OpenRouter model IDs are namespaced (anthropic/claude-sonnet-4.5). Any family left blank is sent upstream unchanged."
-								placeholders={{
-									opusModel: "anthropic/claude-opus-4.1 (example)",
-									sonnetModel: "anthropic/claude-sonnet-4.5 (example)",
-									haikuModel: "anthropic/claude-haiku-4.5 (example)",
-								}}
+								placeholder="Enter your OpenRouter API key"
 							/>
-						</>
+						</div>
 					)}
 					{newAccount.mode === "kilo" && (
-						<>
-							<div className="space-y-item">
-								<Label htmlFor="apiKey">Kilo Gateway API Key</Label>
-								<Input
-									id="apiKey"
-									type="password"
-									value={newAccount.apiKey}
-									onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
-										updateAccountSource({
-											apiKey: (e.target as HTMLInputElement).value,
-										})
-									}
-									placeholder="Enter your Kilo Gateway API key"
-								/>
-							</div>
-							<ModelMappingFields
-								mappings={newAccount}
-								onChange={(field, value) =>
-									setNewAccount((prev) => ({ ...prev, [field]: value }))
+						<div className="space-y-item">
+							<Label htmlFor="apiKey">Kilo Gateway API Key</Label>
+							<Input
+								id="apiKey"
+								type="password"
+								value={newAccount.apiKey}
+								onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
+									updateAccountSource({
+										apiKey: (e.target as HTMLInputElement).value,
+									})
 								}
-								description="Map Anthropic model names to gateway model IDs. Families left blank forward the original model ID unchanged."
-								placeholders={{
-									opusModel: "provider/model-id (example)",
-									sonnetModel: "provider/model-id (example)",
-									haikuModel: "provider/model-id (example)",
-								}}
+								placeholder="Enter your Kilo Gateway API key"
 							/>
-						</>
+						</div>
 					)}
 					{newAccount.mode === "alibaba-coding-plan" && (
-						<>
-							<div className="space-y-item">
-								<Label htmlFor="apiKey">Alibaba Coding Plan API Key</Label>
-								<Input
-									id="apiKey"
-									type="password"
-									value={newAccount.apiKey}
-									onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
-										updateAccountSource({
-											apiKey: (e.target as HTMLInputElement).value,
-										})
-									}
-									placeholder="Enter your Alibaba Coding Plan API key"
-								/>
-							</div>
-							<ModelMappingFields
-								mappings={newAccount}
-								onChange={(field, value) =>
-									setNewAccount((prev) => ({ ...prev, [field]: value }))
+						<div className="space-y-item">
+							<Label htmlFor="apiKey">Alibaba Coding Plan API Key</Label>
+							<Input
+								id="apiKey"
+								type="password"
+								value={newAccount.apiKey}
+								onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
+									updateAccountSource({
+										apiKey: (e.target as HTMLInputElement).value,
+									})
 								}
-								description="Map Anthropic model names to provider-specific models. Families left blank forward the original model ID unchanged."
-								placeholders={{
-									opusModel: "model-id (example)",
-									sonnetModel: "model-id (example)",
-									haikuModel: "model-id (example)",
-								}}
+								placeholder="Enter your Alibaba Coding Plan API key"
 							/>
-						</>
+						</div>
 					)}
 					{(newAccount.mode === "claude-oauth" ||
 						newAccount.mode === "console") && (

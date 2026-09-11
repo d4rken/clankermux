@@ -3,6 +3,7 @@ import { useCallback, useMemo } from "react";
 import { useAnalyticsData } from "../../../hooks/useAnalyticsData";
 import { toCumulativeSeries } from "../../../lib/cumulative";
 import { formatAxisTime } from "../../../lib/time-format";
+import { CostCoverageNote } from "../../CostCoverage";
 import {
 	ActiveSessionsPanel,
 	AnalyticsControls,
@@ -188,6 +189,12 @@ export function TrafficTab(props: TrafficTabProps) {
 				requested={TRAFFIC_SECTIONS}
 			/>
 
+			{analytics?.totals?.apiCostCoverage && (
+				<p className="text-xs text-muted-foreground">
+					API usage costs in this range:{" "}
+					<CostCoverageNote coverage={analytics.totals.apiCostCoverage} />
+				</p>
+			)}
 			{/* Main Metrics Chart */}
 			<MainMetricsChart
 				data={data}

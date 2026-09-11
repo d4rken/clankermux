@@ -1,14 +1,16 @@
 import { Logger } from "@clankermux/logger";
+import {
+	createToolTranslation,
+	type ToolTranslation,
+} from "./tool-translation";
 import type {
 	AnthropicContent,
 	AnthropicMessage,
 	AnthropicRequest,
-	AnthropicTool,
 	AnthropicToolChoice,
 	AnthropicToolResultContent,
 	ResponseItem,
 	ResponsesRequest,
-	ResponsesTool,
 } from "./types";
 
 const logger = new Logger("openai-responses-adapter");
@@ -30,31 +32,19 @@ function parseArguments(args: string): unknown {
 	}
 }
 
-function translateTools(tools: ResponsesTool[]): AnthropicTool[] {
-	const result: AnthropicTool[] = [];
-	for (const tool of tools) {
-		if (tool.type !== "function") {
-			logger.warn(`Skipping unsupported/built-in tool type: ${tool.type}`);
-			continue;
-		}
-		result.push({
-			name: tool.name,
-			description: tool.description,
-			input_schema: tool.parameters ?? {},
-		});
-	}
-	return result;
-}
-
 function translateToolChoice(
 	choice: ResponsesRequest["tool_choice"],
+	tools: ToolTranslation,
 ): AnthropicToolChoice | undefined {
 	if (choice === undefined) return undefined;
 	if (choice === "auto") return { type: "auto" };
 	if (choice === "required") return { type: "any" };
 	if (choice === "none") return { type: "none" };
-	if (typeof choice === "object" && choice.type === "function") {
-		return { type: "tool", name: choice.name };
+	if (
+		typeof choice === "object" &&
+		(choice.type === "function" || choice.type === "custom")
+	) {
+		return { type: "tool", name: tools.name(choice) };
 	}
 	return undefined;
 }
@@ -128,26 +118,26 @@ function mergeConsecutiveSameRole(
 
 export function translateRequestToAnthropic(
 	req: ResponsesRequest & { input: ResponseItem[] },
+	tools = createToolTranslation(req),
 ): AnthropicRequest {
 	const messages: AnthropicMessage[] = [];
 	const instructionBlocks: string[] = [];
 
 	for (const item of req.input) {
-		if (!item || typeof item !== "object") continue;
-		if (
-			(item.type === "message" || item.type === undefined) &&
-			"role" in item &&
-			["user", "assistant", "system", "developer"].includes(item.role)
-		) {
-			// Responses easy messages may omit type and use string content (Pi/SDKs).
+		if (!item || typeof item !== "object")
+			throw new Error("Invalid Responses message");
+		if (item.type === "message" || item.type === undefined) {
+			if (
+				!["user", "assistant", "system", "developer"].includes(item.role) ||
+				(typeof item.content !== "string" && !Array.isArray(item.content))
+			)
+				throw new Error("Invalid Responses message");
 			const content: AnthropicContent[] =
 				typeof item.content === "string"
 					? [{ type: "text", text: item.content }]
-					: Array.isArray(item.content)
-						? item.content.map((c) => translateContentItem(c))
-						: [];
-			if (content.length === 0) continue;
-			// Instruction roles belong in the canonical system prompt.
+					: item.content.map((c) => translateContentItem(c));
+			// Easy input messages may omit type and use string content. Both
+			// instruction roles belong in the Anthropic system prompt.
 			if (item.role === "developer" || item.role === "system") {
 				for (const c of content) {
 					if (c.type === "text") instructionBlocks.push(c.text);
@@ -162,8 +152,15 @@ export function translateRequestToAnthropic(
 			const toolUseBlock: AnthropicContent = {
 				type: "tool_use",
 				id: item.call_id,
-				name: item.name,
-				input: parseArguments(item.arguments),
+				name: tools.name({
+					type: item.type === "function_call" ? "function" : "custom",
+					name: item.name,
+					...(item.namespace ? { namespace: item.namespace } : {}),
+				}),
+				input:
+					item.type === "custom_tool_call"
+						? { input: item.input }
+						: parseArguments(item.arguments),
 			};
 			const last = messages[messages.length - 1];
 			if (last && last.role === "assistant") {
@@ -204,14 +201,7 @@ export function translateRequestToAnthropic(
 	const mergedMessages = mergeConsecutiveSameRole(messages);
 
 	const result: AnthropicRequest = {
-		// Pass the client's model name straight through. The Codex CLI sends
-		// OpenAI model names (e.g. "gpt-5.5"); forwarding them unchanged lets the
-		// selected account's provider resolve them (the Codex provider passes
-		// unknown gpt-* names to its backend as-is) — so "set model X, get model
-		// X". We deliberately do NOT reverse-map gpt-* → a Claude family here: that
-		// round-trip discarded the exact model the user asked for (e.g. "gpt-5.5"
-		// became sonnet → gpt-5.4). Claude Code traffic is unaffected — it sends
-		// claude-* names, which per-account family model_mappings still handle.
+		// Routing owns model selection; preserve the requested identity here.
 		model: req.model,
 		messages: mergedMessages,
 		max_tokens: req.max_output_tokens ?? 4096,
@@ -228,11 +218,10 @@ export function translateRequestToAnthropic(
 		result.stream = req.stream;
 	}
 
-	const translatedTools =
-		req.tools && req.tools.length > 0 ? translateTools(req.tools) : [];
+	const translatedTools = tools.tools;
 	if (translatedTools.length > 0) {
 		result.tools = translatedTools;
-		const toolChoice = translateToolChoice(req.tool_choice);
+		const toolChoice = translateToolChoice(req.tool_choice, tools);
 		if (toolChoice !== undefined) {
 			result.tool_choice = toolChoice;
 		}

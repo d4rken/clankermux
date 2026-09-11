@@ -258,7 +258,7 @@ async function waitFor(
  * writer queue that carries `saveRequest`.
  */
 async function runAndSettle(h: Harness): Promise<void> {
-	const { handleProxy } = await import("../proxy");
+	const { handleProxy } = await import("./fixtures/routing-harness");
 	const response = await handleProxy(
 		makeRequest(),
 		new URL("https://proxy.local/v1/messages"),

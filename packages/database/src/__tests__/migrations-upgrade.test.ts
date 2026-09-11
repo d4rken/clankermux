@@ -137,6 +137,14 @@ describe("runMigrations() restores every ADDITIVE_COLUMNS entry", () => {
 		}
 		expect(indexDefinitions(db).size).toBe(0);
 
+		// Triggers can reference additive columns too; ensureSchema restores them.
+		for (const row of db
+			.query<{ name: string }, []>(
+				"SELECT name FROM sqlite_master WHERE type='trigger'",
+			)
+			.all()) {
+			db.run(`DROP TRIGGER "${row.name.replaceAll('"', '""')}"`);
+		}
 		for (const { table, column } of ADDITIVE_COLUMNS) {
 			// Entries are allowed to duplicate a column the CREATE TABLE already
 			// has for a table that predates them, so only drop what is there.

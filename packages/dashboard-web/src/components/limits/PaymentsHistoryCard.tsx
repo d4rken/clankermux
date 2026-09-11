@@ -3,6 +3,7 @@ import { formatUsd } from "@clankermux/ui-common";
 import { AlertCircle, Trash2 } from "lucide-react";
 import { useState } from "react";
 import { useDeletePayment } from "../../hooks/queries";
+import { CostCoverageNote, formatKnownCost } from "../CostCoverage";
 import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
 import {
@@ -65,16 +66,11 @@ export function PaymentsHistoryCard({
 }: PaymentsHistoryCardProps) {
 	const pending = loading && unavailableReason == null;
 	const currentMonth = summary?.currentMonth;
-	// A breakdown of what the month's total is made of. Token cost only appears
-	// when there is some: a "· token $0.00" tail on every plan-only month is
-	// noise that reads as a measurement.
+	// Payments and usage are separate: prepaid credits must not be counted twice.
 	const breakdownParts = currentMonth
 		? [
 				`subscriptions ${formatUsd(currentMonth.subscriptionUsd)}`,
 				`credits ${formatUsd(currentMonth.creditsUsd)}`,
-				...(currentMonth.tokenCostUsd > 0
-					? [`token ${formatUsd(currentMonth.tokenCostUsd)}`]
-					: []),
 			]
 		: [];
 	// Nothing amortized and nothing on the ledger is the unconfigured state, not
@@ -103,19 +99,36 @@ export function PaymentsHistoryCard({
 			<CardHeader>
 				<CardTitle>Payments</CardTitle>
 				<CardDescription>
-					Recent subscription renewals and credit purchases
+					Recorded subscription renewals and credit purchases. Automatic entries
+					follow the renewal schedule and do not confirm payment.
 				</CardDescription>
 				{/* Same headline markup as Account Performance's Plan Value / Cost
 				    figures, so the two cards on this page read as one scale. Rendered
 				    only once the summary has resolved: an unread payload has no month
 				    total, and "$0.00" would be a claim it never made. */}
 				{summary && currentMonth && (
-					<div className="mt-row grid grid-cols-2 gap-group border-t pt-group">
+					<div className="mt-row grid grid-cols-1 sm:grid-cols-3 gap-group border-t pt-group">
 						<div>
-							<p className="text-sm text-muted-foreground">Spend this month</p>
-							<p className="figure-xl">{formatUsd(currentMonth.totalUsd)}</p>
+							<p className="text-sm text-muted-foreground">
+								Recorded payments this month
+							</p>
+							<p className="figure-xl">{formatUsd(currentMonth.ledgerUsd)}</p>
 							<p className="mt-tight text-xs text-muted-foreground">
 								{breakdownParts.join(" · ")}
+							</p>
+						</div>
+						<div>
+							<p className="text-sm text-muted-foreground">
+								API usage cost this month
+							</p>
+							<p className="figure-xl">
+								{formatKnownCost(
+									currentMonth.tokenCostUsd,
+									currentMonth.apiCostCoverage,
+								)}
+							</p>
+							<p className="mt-tight text-xs text-muted-foreground">
+								<CostCoverageNote coverage={currentMonth.apiCostCoverage} />
 							</p>
 						</div>
 						<div>
@@ -178,7 +191,7 @@ export function PaymentsHistoryCard({
 								</Badge>
 								{payment.source !== "manual" && (
 									<span className="text-xs text-muted-foreground shrink-0">
-										{payment.source}
+										{payment.source === "auto" ? "scheduled" : payment.source}
 									</span>
 								)}
 								<span className="font-medium tabular-nums shrink-0">

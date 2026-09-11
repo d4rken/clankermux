@@ -27,7 +27,7 @@ async function callHandleProxy(
 	ctx: ProxyContext,
 	apiKeyId: string | null = API_KEY_ID,
 ) {
-	const { handleProxy } = await import("../proxy");
+	const { handleProxy } = await import("./fixtures/routing-harness");
 	return handleProxy(req, url, ctx, apiKeyId, "test-key");
 }
 

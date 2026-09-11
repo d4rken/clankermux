@@ -1,4 +1,5 @@
 import { formatPlanTierLabel } from "@clankermux/core";
+import type { ReactNode } from "react";
 import type { Account } from "../../api";
 import { cn } from "../../lib/utils";
 import { InsetPanel } from "../ui/inset-panel";
@@ -22,6 +23,8 @@ export function formatIdentityPlanLabel(account: Account): string | null {
 interface AccountIdentityLineProps {
 	account: Account;
 	className?: string;
+	/** Optional subscription details appended on the accounts page. */
+	details?: ReactNode;
 	/**
 	 * How much of the provider-side account id to show.
 	 *
@@ -47,6 +50,7 @@ export function AccountIdentityLine({
 	account,
 	className,
 	externalIdDisplay = "short",
+	details,
 }: AccountIdentityLineProps) {
 	const planLabel = formatIdentityPlanLabel(account);
 	const parts = [
@@ -69,7 +73,8 @@ export function AccountIdentityLine({
 		.filter(Boolean)
 		.join("; ");
 
-	if (parts.length === 0 && !externalId && !organizationId) return null;
+	if (parts.length === 0 && !externalId && !organizationId && !details)
+		return null;
 
 	return (
 		<p
@@ -97,6 +102,12 @@ export function AccountIdentityLine({
 							: `Organization #${organizationId.slice(0, 8)}`}
 					</span>
 				)}
+			{details && (
+				<>
+					{(parts.length > 0 || externalId || organizationId) && " · "}
+					{details}
+				</>
+			)}
 		</p>
 	);
 }

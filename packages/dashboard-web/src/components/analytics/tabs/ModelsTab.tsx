@@ -1,5 +1,6 @@
 import type { AnalyticsSection } from "@clankermux/types";
 import { useAnalyticsData } from "../../../hooks/useAnalyticsData";
+import { CostCoverageNote } from "../../CostCoverage";
 import {
 	AnalyticsControls,
 	ContextCompositionPanel,
@@ -81,6 +82,12 @@ export function ModelsTab(props: ModelsTabProps) {
 				requested={MODELS_SECTIONS}
 			/>
 
+			{analytics?.totals?.apiCostCoverage && (
+				<p className="text-xs text-muted-foreground">
+					API usage costs in this range:{" "}
+					<CostCoverageNote coverage={analytics.totals.apiCostCoverage} />
+				</p>
+			)}
 			{/* Enhanced Model Analytics */}
 			<ModelAnalytics
 				modelPerformance={analytics?.modelPerformance || []}

@@ -68,3 +68,8 @@ registry.registerProvider(new OpenAICompatibleProvider());
 registry.registerProvider(new OllamaProvider());
 registry.registerProvider(new OllamaCloudProvider());
 registry.registerProvider(new AnthropicCompatibleProvider());
+
+export {
+	fetchOpenRouterMetadata,
+	parseOpenRouterMetadata,
+} from "./providers/openrouter/metadata";

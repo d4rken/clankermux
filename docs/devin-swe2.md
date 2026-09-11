@@ -1,6 +1,6 @@
 # Devin subscriptions and SWE-2
 
-ClankerMux supports Devin CLI session accounts through its Messages and Responses interfaces. The provider discovers the account's available models and resolves the `swe-2` alias to an enabled SWE-2 variant. Claude family requests map to that alias by default; account mappings can select a concrete discovered model. Adaptive model routing is not supported.
+ClankerMux supports Devin CLI session accounts through its Messages and Responses interfaces. The provider discovers the account's available models and resolves the `swe-2` alias to an enabled SWE-2 variant. Claude family requests map to that alias by default. The central Routing page can select a concrete discovered model, and account model permissions control which models may be sent. Devin aliases resolve to an enabled concrete model before the request’s routing decision is frozen. Adaptive model routing is not supported.
 
 ## Connect an account
 

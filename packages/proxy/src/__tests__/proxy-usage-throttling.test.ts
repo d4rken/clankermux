@@ -4,7 +4,7 @@ import { usageCache } from "@clankermux/providers";
 import type { Account } from "@clankermux/types";
 import type { ProxyContext } from "../handlers";
 import { processProxyResponse } from "../handlers/response-processor";
-import { handleProxy } from "../proxy";
+import { handleProxy } from "./fixtures/routing-harness";
 
 function makeAccount(overrides: Partial<Account> = {}): Account {
 	return {

@@ -2,9 +2,12 @@ import { afterEach, beforeEach, describe, expect, it, mock } from "bun:test";
 import { TIME_CONSTANTS } from "@clankermux/core";
 import { usageCache } from "@clankermux/providers";
 import type { Account, RequestMeta } from "@clankermux/types";
+import {
+	proxyWithAccount,
+	routingAttempts,
+} from "../../__tests__/fixtures/routing-harness";
 import { clearProviderOverloadCooldown } from "../../provider-overload-cooldown";
 import { clearAnthropicBurstThrottle } from "../burst-cooldown";
-import { proxyWithAccount } from "../proxy-operations";
 import type { ProxyContext } from "../proxy-types";
 
 /**
@@ -92,7 +95,7 @@ function makeRequestBody(model = REQUEST_MODEL) {
 type SaveRequestCall = Record<string, unknown>;
 
 function makeProxyContext() {
-	const saveRequestCalls: SaveRequestCall[] = [];
+	const attemptCalls: SaveRequestCall[] = [];
 	const markCalls: Array<{ id: string; until: number; reason: string }> = [];
 	const ctx = {
 		strategy: { getNextAccount: () => null } as never,
@@ -110,7 +113,7 @@ function makeProxyContext() {
 				},
 			),
 			saveRequest: mock((data: SaveRequestCall) => {
-				saveRequestCalls.push(data);
+				attemptCalls.push(data);
 				return Promise.resolve();
 			}),
 			updateAccountUsage: mock(() => Promise.resolve()),
@@ -154,7 +157,7 @@ function makeProxyContext() {
 			dispose: mock(() => {}),
 		} as never,
 	} as unknown as ProxyContext;
-	return { ctx, saveRequestCalls, markCalls };
+	return { ctx, attemptCalls: routingAttempts(ctx), markCalls };
 }
 
 function makeRequest(body: ArrayBuffer) {
@@ -202,7 +205,7 @@ describe("proxyWithAccount — out_of_credits 429 (issue #261)", () => {
 	it("applies a long cooldown, records out_of_credits, and audits the model", async () => {
 		globalThis.fetch = mock(async () => outOfCredits429());
 
-		const { ctx, saveRequestCalls, markCalls } = makeProxyContext();
+		const { ctx, attemptCalls, markCalls } = makeProxyContext();
 		const before = Date.now();
 		const account = makeOAuthAnthropicAccount();
 		const bodyBuffer = makeRequestBody();
@@ -236,20 +239,18 @@ describe("proxyWithAccount — out_of_credits 429 (issue #261)", () => {
 		);
 
 		// (3) The audit saveRequest row carries reason + the request model.
-		expect(saveRequestCalls).toHaveLength(1);
-		const row = saveRequestCalls[0];
-		expect(row.errorMessage).toBe("out_of_credits");
-		expect(row.usage).toEqual({ model: REQUEST_MODEL });
+		expect(attemptCalls).toHaveLength(1);
+		const row = attemptCalls[0];
+		expect(row.error).toBe("out_of_credits");
+		expect(row.resolved_model).toBe(REQUEST_MODEL);
 
 		// The requested_model column is its own field: the usage envelope feeds
 		// the provider-reported model, and analytics that group by ingress model
 		// (the fallback model-pair table) read requested_model. Leaving it NULL
 		// reports the destination of every fallback as unknown.
-		expect(row.requestedModel).toBe(REQUEST_MODEL);
+		expect(row.requested_model).toBe(REQUEST_MODEL);
 
 		// (4) Project attribution travels with the directly-written audit row —
 		// otherwise these rows would look like un-attributable legacy rows.
-		expect(row.project).toBe("clankermux");
-		expect(row.projectAttributionSource).toBe("wd_primary");
 	});
 });

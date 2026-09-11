@@ -1,14 +1,9 @@
-import {
-	ACCOUNT_WIDE_HARD_STATUSES,
-	mapModelName,
-	TIME_CONSTANTS,
-} from "@clankermux/core";
+import { ACCOUNT_WIDE_HARD_STATUSES, TIME_CONSTANTS } from "@clankermux/core";
 import { sanitizeProxyHeaders } from "@clankermux/http-common";
 import { Logger } from "@clankermux/logger";
 import type { Account } from "@clankermux/types";
 import { BaseProvider } from "../base";
 import type { RateLimitInfo, TokenRefreshResult } from "../types";
-import { transformRequestBodyModel } from "../utils/model-mapping";
 
 // Configuration interface for Anthropic-compatible providers
 export interface AnthropicCompatibleConfig {
@@ -16,7 +11,6 @@ export interface AnthropicCompatibleConfig {
 	baseUrl?: string;
 	authHeader?: string; // "x-api-key", "authorization", etc.
 	authType?: "bearer" | "direct"; // Whether to add "Bearer " prefix for authorization header
-	modelMappings?: Record<string, string>; // Model name mappings
 	supportsStreaming?: boolean; // Whether this provider supports streaming
 	defaultModel?: string; // Default model to use
 }
@@ -161,30 +155,9 @@ export abstract class BaseAnthropicCompatibleProvider extends BaseProvider {
 	 */
 	async transformRequestBody(
 		request: Request,
-		account?: Account,
+		_account?: Account,
 	): Promise<Request> {
-		if (!this.config.supportsStreaming) {
-			return request;
-		}
-
-		// Use the shared utility for model mapping
-		return transformRequestBodyModel(request, account, (model, acc) => {
-			if (acc) {
-				// Use core mapModelName which handles arrays, fallbacks, env overrides, and defaults
-				return mapModelName(model, acc);
-			}
-
-			// Fall back to static config mappings for backward compatibility
-			if (
-				this.config.modelMappings &&
-				Object.hasOwn(this.config.modelMappings, model) &&
-				this.config.modelMappings[model]
-			) {
-				return this.config.modelMappings[model];
-			}
-
-			return model;
-		});
+		return request;
 	}
 
 	parseRateLimit(response: Response): RateLimitInfo {

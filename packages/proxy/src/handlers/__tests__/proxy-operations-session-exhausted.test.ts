@@ -10,6 +10,10 @@ import {
 import { usageCache } from "@clankermux/providers";
 import type { Account, RequestMeta } from "@clankermux/types";
 import {
+	proxyWithAccount,
+	routingAttempts,
+} from "../../__tests__/fixtures/routing-harness";
+import {
 	getFamilyWeeklyExhaustedUntil,
 	resetFamilyWeeklyMemoForTests,
 } from "../../family-weekly-memo";
@@ -18,7 +22,6 @@ import {
 	clearAnthropicBurstThrottle,
 	isAnthropicBurstThrottleActive,
 } from "../burst-cooldown";
-import { proxyWithAccount } from "../proxy-operations";
 import type { ProxyContext } from "../proxy-types";
 import {
 	getRateLimitProbeAdmission,
@@ -163,7 +166,7 @@ function seedFamilyOnlyExhausted() {
 type SaveRequestCall = Record<string, unknown>;
 
 function makeProxyContext() {
-	const saveRequestCalls: SaveRequestCall[] = [];
+	const attemptCalls: SaveRequestCall[] = [];
 	let persistedStreak = 0;
 	const markCalls: Array<{ id: string; until: number; reason: string }> = [];
 	const ctx = {
@@ -182,7 +185,7 @@ function makeProxyContext() {
 				},
 			),
 			saveRequest: mock((data: SaveRequestCall) => {
-				saveRequestCalls.push(data);
+				attemptCalls.push(data);
 				return Promise.resolve();
 			}),
 			updateAccountUsage: mock(() => Promise.resolve()),
@@ -226,7 +229,7 @@ function makeProxyContext() {
 			dispose: mock(() => {}),
 		} as never,
 	} as unknown as ProxyContext;
-	return { ctx, saveRequestCalls, markCalls };
+	return { ctx, attemptCalls: routingAttempts(ctx), markCalls };
 }
 
 function makeRequest(body: ArrayBuffer, headers: Record<string, string> = {}) {
@@ -256,7 +259,7 @@ function rejected429() {
 }
 
 function reasonsFrom(calls: SaveRequestCall[]): unknown[] {
-	return calls.map((row) => row.errorMessage);
+	return calls.map((row) => row.error);
 }
 
 async function run(
@@ -307,15 +310,15 @@ describe("proxyWithAccount — account-wide session-exhausted 429", () => {
 		globalThis.fetch = mock(async () => rejected429());
 		seedSessionExhausted();
 
-		const { ctx, saveRequestCalls, markCalls } = makeProxyContext();
+		const { ctx, attemptCalls, markCalls } = makeProxyContext();
 		const account = makeOAuthAnthropicAccount();
 		const before = Date.now();
 
 		const result = await run(ctx, account);
 
 		expect(result).toBeNull();
-		expect(reasonsFrom(saveRequestCalls)).toContain("session_exhausted_429");
-		expect(reasonsFrom(saveRequestCalls)).not.toContain("model_fallback_429");
+		expect(reasonsFrom(attemptCalls)).toContain("session_exhausted_429");
+		expect(reasonsFrom(attemptCalls)).not.toContain("model_fallback_429");
 		expect(isAnthropicBurstThrottleActive()).toBe(false);
 		// The deadline is still extractCooldownUntil's retry-after value, NOT the
 		// (later) 5h window reset.
@@ -331,40 +334,34 @@ describe("proxyWithAccount — account-wide session-exhausted 429", () => {
 		globalThis.fetch = mock(async () => rejected429());
 		seedBothExhausted();
 
-		const { ctx, saveRequestCalls } = makeProxyContext();
+		const { ctx, attemptCalls } = makeProxyContext();
 		await run(ctx, makeOAuthAnthropicAccount());
 
-		expect(reasonsFrom(saveRequestCalls)).toContain("weekly_exhausted_429");
-		expect(reasonsFrom(saveRequestCalls)).not.toContain(
-			"session_exhausted_429",
-		);
+		expect(reasonsFrom(attemptCalls)).toContain("weekly_exhausted_429");
+		expect(reasonsFrom(attemptCalls)).not.toContain("session_exhausted_429");
 	});
 
 	it("fails open to today's behaviour when usage is absent/stale", async () => {
 		globalThis.fetch = mock(async () => rejected429());
 		// No usage cache entry ⇒ getFreshCapacity returns null ⇒ no evidence.
 
-		const { ctx, saveRequestCalls } = makeProxyContext();
+		const { ctx, attemptCalls } = makeProxyContext();
 		await run(ctx, makeOAuthAnthropicAccount());
 
-		expect(reasonsFrom(saveRequestCalls)).not.toContain(
-			"session_exhausted_429",
-		);
-		expect(reasonsFrom(saveRequestCalls)).toContain("model_fallback_429");
+		expect(reasonsFrom(attemptCalls)).not.toContain("session_exhausted_429");
+		expect(reasonsFrom(attemptCalls)).toContain("model_fallback_429");
 	});
 
 	it("is skipped in reprobe mode (the hold orchestrator owns that outcome)", async () => {
 		globalThis.fetch = mock(async () => rejected429());
 		seedSessionExhausted();
 
-		const { ctx, saveRequestCalls } = makeProxyContext();
+		const { ctx, attemptCalls } = makeProxyContext();
 		await run(ctx, makeOAuthAnthropicAccount(), "claude-opus-4-8", {
 			reprobe: true,
 		});
 
-		expect(reasonsFrom(saveRequestCalls)).not.toContain(
-			"session_exhausted_429",
-		);
+		expect(reasonsFrom(attemptCalls)).not.toContain("session_exhausted_429");
 	});
 
 	it("is skipped for a TRUSTED in-process probe but NOT for a spoofed header", async () => {
@@ -380,7 +377,7 @@ describe("proxyWithAccount — account-wide session-exhausted 429", () => {
 			{ "x-clankermux-keepalive": "1" },
 			makeRequestMeta({ internal: true }),
 		);
-		expect(reasonsFrom(trusted.saveRequestCalls)).not.toContain(
+		expect(reasonsFrom(trusted.attemptCalls)).not.toContain(
 			"session_exhausted_429",
 		);
 
@@ -392,7 +389,7 @@ describe("proxyWithAccount — account-wide session-exhausted 429", () => {
 			undefined,
 			{ "x-clankermux-keepalive": "1" },
 		);
-		expect(reasonsFrom(spoofed.saveRequestCalls)).toContain(
+		expect(reasonsFrom(spoofed.attemptCalls)).toContain(
 			"session_exhausted_429",
 		);
 	});
@@ -401,23 +398,21 @@ describe("proxyWithAccount — account-wide session-exhausted 429", () => {
 		globalThis.fetch = mock(async () => rejected429());
 		seedSessionExhausted();
 
-		const { ctx, saveRequestCalls } = makeProxyContext();
+		const { ctx, attemptCalls } = makeProxyContext();
 		await run(ctx, makeOAuthAnthropicAccount({ provider: "codex" }), "gpt-5.5");
 
-		expect(reasonsFrom(saveRequestCalls)).not.toContain(
-			"session_exhausted_429",
-		);
+		expect(reasonsFrom(attemptCalls)).not.toContain("session_exhausted_429");
 	});
 
 	it("leaves the family-weekly rung reachable when only a FAMILY is spent", async () => {
 		globalThis.fetch = mock(async () => rejected429());
 		seedFamilyOnlyExhausted();
 
-		const { ctx, saveRequestCalls } = makeProxyContext();
+		const { ctx, attemptCalls } = makeProxyContext();
 		const account = makeOAuthAnthropicAccount();
 		await run(ctx, account);
 
-		const reasons = reasonsFrom(saveRequestCalls);
+		const reasons = reasonsFrom(attemptCalls);
 		expect(reasons).not.toContain("session_exhausted_429");
 		expect(reasons).not.toContain("weekly_exhausted_429");
 		expect(reasons).toContain("family_weekly_exhausted_429");
@@ -470,7 +465,7 @@ describe("live account-wide quota rejection with lagging usage", () => {
 
 	it("replays Claude-1's mixed rejection with its actual session deadline and a recoverable cause", async () => {
 		globalThis.fetch = mock(async () => quotaIncidentResponse());
-		const { ctx, markCalls, saveRequestCalls } = makeProxyContext();
+		const { ctx, markCalls, attemptCalls } = makeProxyContext();
 		const account = makeOAuthAnthropicAccount();
 		const outcomes: string[] = [];
 		expect(
@@ -483,7 +478,7 @@ describe("live account-wide quota rejection with lagging usage", () => {
 		expect(markCalls).toEqual([
 			{ id: ACCOUNT_ID, until: SESSION_RESET, reason: "session_exhausted_429" },
 		]);
-		expect(reasonsFrom(saveRequestCalls)).toEqual(["session_exhausted_429"]);
+		expect(reasonsFrom(attemptCalls)).toEqual(["session_exhausted_429"]);
 		expect(outcomes).toEqual(["hard_429"]);
 		expect(account.rate_limited_until).toBe(SESSION_RESET);
 		expect(account.consecutive_rate_limits).toBe(0);
@@ -521,30 +516,6 @@ describe("live account-wide quota rejection with lagging usage", () => {
 			{ id: ACCOUNT_ID, until: SESSION_RESET, reason: "session_exhausted_429" },
 		]);
 		expect(outcomes).toEqual(["hard_429"]);
-	});
-
-	it("stops model cycling when a fallback reveals account quota exhaustion", async () => {
-		let attempts = 0;
-		globalThis.fetch = mock(async () =>
-			++attempts === 1
-				? new Response(
-						'{"error":{"type":"not_found_error","message":"model not found"}}',
-						{ status: 404, headers: { "content-type": "application/json" } },
-					)
-				: quotaIncidentResponse(),
-		);
-		const account = makeOAuthAnthropicAccount({
-			model_mappings: JSON.stringify({
-				sonnet: ["claude-sonnet-4-5", "claude-fable-5-1", "claude-haiku-4-5"],
-			}),
-		});
-		const { ctx, markCalls, saveRequestCalls } = makeProxyContext();
-		await run(ctx, account, "claude-sonnet-4-5");
-		expect(attempts).toBe(2);
-		expect(markCalls).toEqual([
-			{ id: ACCOUNT_ID, until: SESSION_RESET, reason: "session_exhausted_429" },
-		]);
-		expect(reasonsFrom(saveRequestCalls)).toEqual(["session_exhausted_429"]);
 	});
 
 	it("uses the same claim deadline in generic response processing", async () => {
@@ -638,7 +609,7 @@ describe("live account-wide quota rejection with lagging usage", () => {
 
 	it("classifies an internal auto-refresh quota rejection without writing a client request-history row", async () => {
 		globalThis.fetch = mock(async () => quotaIncidentResponse());
-		const { ctx, markCalls, saveRequestCalls } = makeProxyContext();
+		const { ctx, markCalls, attemptCalls } = makeProxyContext();
 		await run(
 			ctx,
 			makeOAuthAnthropicAccount(),
@@ -650,7 +621,8 @@ describe("live account-wide quota rejection with lagging usage", () => {
 		expect(markCalls).toEqual([
 			{ id: ACCOUNT_ID, until: SESSION_RESET, reason: "session_exhausted_429" },
 		]);
-		expect(saveRequestCalls).toHaveLength(0);
+		expect(attemptCalls).toHaveLength(1);
+		expect(ctx.dbOps.saveRequest).not.toHaveBeenCalled();
 	});
 
 	it("keeps a both-rejecting account locked after 5h resets while weekly remains exhausted", async () => {
@@ -719,7 +691,7 @@ describe("live account-wide quota rejection with lagging usage", () => {
 		const next = makeProxyContext();
 		await run(next.ctx, account, "claude-fable-5-1");
 		expect(next.markCalls).toHaveLength(0);
-		expect(reasonsFrom(next.saveRequestCalls)).toEqual([
+		expect(reasonsFrom(next.attemptCalls)).toEqual([
 			"family_weekly_exhausted_429",
 		]);
 		expect(getFamilyWeeklyExhaustedUntil(ACCOUNT_ID, "fable", Date.now())).toBe(

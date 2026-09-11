@@ -43,7 +43,7 @@ describe("PaymentsHistoryCard month figures", () => {
 	it("states the month total with the breakdown that explains it", () => {
 		const html = render({ payments: [], summary: summary() });
 
-		expect(html).toContain("Spend this month");
+		expect(html).toContain("Recorded payments this month");
 		expect(html).toContain("$400.00");
 		expect(html).toContain("subscriptions $300.00");
 		expect(html).toContain("credits $100.00");
@@ -51,7 +51,7 @@ describe("PaymentsHistoryCard month figures", () => {
 		expect(html).toContain("$600.00");
 	});
 
-	it("names token cost only when there is some", () => {
+	it("keeps recorded payments separate from consumption", () => {
 		expect(render({ payments: [], summary: summary() })).not.toContain(
 			"token ",
 		);
@@ -64,11 +64,14 @@ describe("PaymentsHistoryCard month figures", () => {
 					subscriptionUsd: 300,
 					creditsUsd: 100,
 					tokenCostUsd: 12.5,
-					totalUsd: 412.5,
+					totalUsd: 400,
 				},
 			}),
 		});
-		expect(withTokens).toContain("token $12.50");
+		expect(withTokens).toContain("API usage cost this month");
+		expect(withTokens).toContain("$12.50");
+		expect(withTokens).toContain("$400.00");
+		expect(withTokens).not.toContain("$412.50");
 	});
 
 	it("offers the configuration hint only when nothing is configured at all", () => {
@@ -105,7 +108,7 @@ describe("PaymentsHistoryCard month figures", () => {
 		// spend, which is the one claim a pending read is not entitled to make.
 		const html = render({ payments: [], loading: true });
 
-		expect(html).not.toContain("Spend this month");
+		expect(html).not.toContain("Recorded payments this month");
 		expect(html).not.toContain("Amortized / month");
 		// The card itself is still there, in its skeleton state.
 		expect(html).toContain("Payments");
@@ -119,6 +122,6 @@ describe("PaymentsHistoryCard month figures", () => {
 		});
 
 		expect(html).toContain("Payments data unavailable");
-		expect(html).not.toContain("Spend this month");
+		expect(html).not.toContain("Recorded payments this month");
 	});
 });

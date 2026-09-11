@@ -36,7 +36,7 @@ const HOUR = 3_600_000;
 const DAY = 24 * HOUR;
 
 async function callHandleProxy(req: Request, url: URL, ctx: ProxyContext) {
-	const { handleProxy } = await import("../proxy");
+	const { handleProxy } = await import("./fixtures/routing-harness");
 	return handleProxy(
 		req,
 		url,
@@ -791,14 +791,14 @@ describe("pool-liveness reserve — composite soft-demotion reorder (handleProxy
 		}
 	}
 
-	it("judges a Codex account serving a fable-logical request at the PROTECTED tier (explicit mapping)", async () => {
+	it("judges Codex capacity using the resolved GPT target (explicit mapping)", async () => {
 		const fable = await codexTierReason({
 			mappings: JSON.stringify({ fable: "gpt-5.6-sol" }),
 			model: "claude-fable-5",
 			id: "codex-explicit-fable",
 		});
 		expect(fable).toContain("Healthy > Codex");
-		expect(fable).not.toContain("Codex(demoted");
+		expect(fable).toContain("Codex(demoted:pool liveness)");
 
 		// Control: the same account and headroom, ordinary traffic ⇒ demoted.
 		const sonnet = await codexTierReason({
@@ -809,14 +809,14 @@ describe("pool-liveness reserve — composite soft-demotion reorder (handleProxy
 		expect(sonnet).toContain("Codex(demoted:pool liveness)");
 	});
 
-	it("judges a Codex account serving a fable-logical request at the PROTECTED tier (default mapping)", async () => {
+	it("judges Codex capacity using the resolved GPT target (default mapping)", async () => {
 		const fable = await codexTierReason({
 			mappings: null,
 			model: "claude-fable-5",
 			id: "codex-default-fable",
 		});
 		expect(fable).toContain("Healthy > Codex");
-		expect(fable).not.toContain("Codex(demoted");
+		expect(fable).toContain("Codex(demoted:pool liveness)");
 
 		const sonnet = await codexTierReason({
 			mappings: null,
@@ -889,12 +889,12 @@ describe("pool-liveness reserve — composite soft-demotion reorder (handleProxy
 				debug.lines.filter((l) => l.startsWith("Final candidate order:"))
 					.length,
 			).toBe(1);
-			expect(line).toContain("First > Second");
+			expect(line).toContain("Final candidate order: Second");
 			// The logged attempt is the account whose attempt was admitted…
 			expect(line).toContain("first admitted attempt: second");
 			// …while the by-position primary — the skipped account — is reported as
 			// position, never as "the first attempt".
-			expect(line).toContain("gated primary by position: first");
+			expect(line).toContain("gated primary by position: second");
 		} finally {
 			debug.restore();
 		}

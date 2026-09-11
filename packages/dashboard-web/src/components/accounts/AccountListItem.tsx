@@ -47,7 +47,12 @@ import { InsetPanel } from "../ui/inset-panel";
 import { Popover, PopoverContent, PopoverTrigger } from "../ui/popover";
 import { Textarea } from "../ui/textarea";
 import { AccountIdentityLine } from "./AccountIdentity";
-import { AccountStatusChips } from "./AccountStatusChips";
+import {
+	AccountRenewalInfo,
+	AccountRoutingChips,
+	AccountStatusChips,
+} from "./AccountStatusChips";
+import { OpenRouterAccountDetails } from "./OpenRouterAccountDetails";
 import { ProviderChip } from "./ProviderChip";
 import { RateLimitProgress } from "./RateLimitProgress";
 
@@ -156,7 +161,7 @@ interface AccountListItemProps {
 	onAutoApplyResetCreditsToggle?: (account: Account) => void;
 	onAutoApplyResetOnWeeklyLimitToggle?: (account: Account) => void;
 	onCustomEndpointChange?: (account: Account) => void;
-	onModelMappingsChange?: (account: Account) => void;
+	onModelPermissionsChange?: (account: Account) => void;
 	onReauth?: (account: Account) => void;
 	onAnthropicReauth?: (account: Account) => void;
 	onCodexReauth?: (account: Account) => void;
@@ -188,7 +193,7 @@ export function AccountListItem({
 	onAutoApplyResetCreditsToggle,
 	onAutoApplyResetOnWeeklyLimitToggle,
 	onCustomEndpointChange,
-	onModelMappingsChange,
+	onModelPermissionsChange,
 	onReauth,
 	onAnthropicReauth,
 	onCodexReauth,
@@ -199,8 +204,7 @@ export function AccountListItem({
 	const [notesDraft, setNotesDraft] = useState("");
 	const [isSavingNotes, setIsSavingNotes] = useState(false);
 	const presenter = new AccountPresenter(account);
-	// All per-account status chips — and the Force Reset gating below — are derived
-	// in one place and rendered via <AccountStatusChips>; see lib/account-status.
+	// Header details, status chips and Force Reset gating share derived status.
 	const status = deriveAccountStatus(account);
 	// Spend inside the current session window. Both kinds can be non-zero at
 	// once (a plan account that spilled into overage), and a zero is omitted
@@ -247,22 +251,32 @@ export function AccountListItem({
 	// cards read as one wall of text.
 	return (
 		<div className="p-group border rounded-lg transition-colors space-y-row border-border hover:border-muted-foreground/50">
-			<div className="flex items-center justify-between">
+			<div className="flex items-start justify-between gap-item">
 				<div className="flex flex-col gap-tight min-w-0">
-					<div className="flex items-center gap-item min-w-0">
-						<p className="font-medium truncate">{account.name}</p>
+					<div className="flex flex-wrap items-center gap-x-item gap-y-tight min-w-0">
+						<p className="font-medium max-w-full truncate">{account.name}</p>
 						<ProviderChip provider={account.provider} className="shrink-0" />
 						<OAuthTokenStatusWithBoundary
 							accountName={account.name}
 							hasRefreshToken={account.hasRefreshToken}
 						/>
+						<AccountRoutingChips status={status} />
 					</div>
-					<AccountIdentityLine account={account} className="truncate" />
+					<AccountIdentityLine
+						account={account}
+						className="break-words"
+						details={
+							status.showRenewalChip ? (
+								<AccountRenewalInfo account={account} status={status} inline />
+							) : undefined
+						}
+					/>
 				</div>
 				<div className="flex items-center gap-tight shrink-0">
 					{(account.provider === "anthropic" ||
 						account.provider === "codex" ||
-						account.provider === "devin") && (
+						account.provider === "devin" ||
+						(account.provider === "openrouter" && !account.customEndpoint)) && (
 						<Button
 							variant="ghost"
 							size="sm"
@@ -279,9 +293,11 @@ export function AccountListItem({
 							title={
 								account.provider === "devin"
 									? "Refresh Devin account and usage metadata (does not consume inference quota)"
-									: account.provider === "codex"
-										? "Refresh usage data (free usage read — does not consume quota)"
-										: "Refresh usage data (restarts usage polling and refreshes token if expired)"
+									: account.provider === "openrouter"
+										? "Refresh OpenRouter account details and usage"
+										: account.provider === "codex"
+											? "Refresh usage data (free usage read — does not consume quota)"
+											: "Refresh usage data (restarts usage polling and refreshes token if expired)"
 							}
 						>
 							<RefreshCw
@@ -311,8 +327,8 @@ export function AccountListItem({
 							onClick={() => onForceAccount(account)}
 							title={
 								isForced
-									? "Forcing all traffic here — click to release"
-									: "Force all traffic to this account"
+									? "Restricting requests to this destination — click to release"
+									: "Restrict requests to this account"
 							}
 						>
 							<Crosshair className="h-4 w-4" />
@@ -477,7 +493,7 @@ export function AccountListItem({
 									Reset session stickiness
 								</DropdownMenuItem>
 							)}
-							{(onCustomEndpointChange || onModelMappingsChange) && (
+							{(onCustomEndpointChange || onModelPermissionsChange) && (
 								<DropdownMenuSeparator />
 							)}
 							{onCustomEndpointChange && (
@@ -500,24 +516,13 @@ export function AccountListItem({
 									)}
 								</DropdownMenuItem>
 							)}
-							{onModelMappingsChange && (
+							{onModelPermissionsChange && (
 								<DropdownMenuItem
-									onClick={() => onModelMappingsChange(account)}
-									title={
-										account.modelMappings
-											? `Model mappings configured (${Object.keys(account.modelMappings).length} mappings)`
-											: "Configure model mappings"
-									}
+									onClick={() => onModelPermissionsChange(account)}
+									title="Manage permitted models"
 								>
-									<Hash
-										className={`mr-item h-4 w-4 ${account.modelMappings ? "text-primary" : ""}`}
-									/>
-									Model Mappings
-									{account.modelMappings && (
-										<span className="ml-auto text-xs text-muted-foreground">
-											{Object.keys(account.modelMappings).length}
-										</span>
-									)}
+									<Hash className="mr-item h-4 w-4" />
+									Permitted Models
 								</DropdownMenuItem>
 							)}
 							{hasReauth && <DropdownMenuSeparator />}
@@ -628,7 +633,11 @@ export function AccountListItem({
 			    step closer to each other than to the identity above or the quota
 			    bars below. */}
 			<div className="space-y-item">
-				<AccountStatusChips account={account} status={status} />
+				<AccountStatusChips
+					account={account}
+					status={status}
+					showAccountDetails={false}
+				/>
 				<InsetPanel data-testid="account-info-row">
 					<div className="flex flex-wrap items-center gap-row">
 						<dl className="flex min-w-0 flex-1 flex-wrap items-center gap-x-section gap-y-item text-xs">
@@ -712,6 +721,9 @@ export function AccountListItem({
 					</div>
 				</InsetPanel>
 			</div>
+			{account.provider === "openrouter" && !account.customEndpoint && (
+				<OpenRouterAccountDetails metadata={account.openRouterMetadata} />
+			)}
 			{(account.rateLimitReset ||
 				account.usageData ||
 				account.staleUsage ||

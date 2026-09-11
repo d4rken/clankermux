@@ -2,7 +2,7 @@ export { AccountAddForm } from "./AccountAddForm";
 export { AccountCustomEndpointDialog } from "./AccountCustomEndpointDialog";
 export { AccountList } from "./AccountList";
 export { AccountListItem } from "./AccountListItem";
-export { AccountModelMappingsDialog } from "./AccountModelMappingsDialog";
+export { AccountModelPermissionsDialog } from "./AccountModelPermissionsDialog";
 export { AccountPolicyChips } from "./AccountPolicyChips";
 export { AccountPriorityDialog } from "./AccountPriorityDialog";
 export { AccountRenewalDialog } from "./AccountRenewalDialog";

@@ -2,20 +2,18 @@ import {
 	consumeRequestStarted,
 	getModelFamily,
 	isDebugEnabled,
-	isPinActive,
 	ModelNotServedError,
 	requestEvents,
 	ServiceUnavailableError,
 	ValidationError,
 } from "@clankermux/core";
-import { sanitizeRequestHeaders } from "@clankermux/http-common";
 import { Logger, LogLevel } from "@clankermux/logger";
 import {
 	getFreshCapacity,
 	getProvider,
 	usageCache,
 } from "@clankermux/providers";
-import type { Account, ComboSlotInfo } from "@clankermux/types";
+import type { Account } from "@clankermux/types";
 import {
 	createAdmissionGates,
 	type ProviderOverloadedAccount,
@@ -29,9 +27,7 @@ import { isFamilyWeeklyMemoExhausted } from "./family-weekly-memo";
 import {
 	BURST_RETRY_MAX_USAGE_AGE_MS,
 	createPinnedTargetUnavailableResponse,
-	createUsageThrottledResponse,
 	ERROR_MESSAGES,
-	getComboSlotInfo,
 	getForcedAccount,
 	isAnthropicBurstThrottleActive,
 	isOAuthAnthropicAccount,
@@ -61,12 +57,18 @@ import {
 } from "./provider-overload-cooldown";
 import { createRecoveryHolds, isAccountWideFailure } from "./recovery-holds";
 import { type IngressContext, ingestProxyRequest } from "./request-ingress";
-import type { RecordMeta, RequestRecorder } from "./request-recorder";
-import { hashRoutingAffinityKey } from "./routing-telemetry";
+import type { RequestRecorder } from "./request-recorder";
 import {
-	isIngressRecordable,
-	shouldRecordRequest,
-} from "./should-record-request";
+	getAttemptTarget,
+	getResolvedRoute,
+	RoutingPolicyError,
+} from "./resolved-route";
+import {
+	eligibleRouteAccounts,
+	initializeRequestRoute,
+} from "./routing-service";
+import { isIngressRecordable } from "./should-record-request";
+import { createSyntheticTerminalRecorder } from "./synthetic-terminal-recorder";
 import { resolveZeroAccountsOutcome } from "./zero-accounts-terminal";
 
 export type { ProxyContext } from "./handlers";
@@ -261,6 +263,48 @@ export async function handleProxy(
 		retractIfNeverStarted(response.status);
 		return response;
 	} catch (error) {
+		if (error instanceof RoutingPolicyError) {
+			let route: ReturnType<typeof getResolvedRoute> | undefined;
+			try {
+				route = getResolvedRoute(requestMeta);
+			} catch {}
+			if (!error.attemptRecorded)
+				await ctx.dbOps.routing.recordAttempt({
+					id: crypto.randomUUID(),
+					request_id: requestMeta.id,
+					rule_id: route?.ruleId ?? error.ruleId ?? null,
+					route_snapshot:
+						route?.snapshot ??
+						error.routeSnapshot ??
+						JSON.stringify({ error: error.message }),
+					account_id: null,
+					provider: null,
+					requested_model: requestMeta.requestedModel ?? "",
+					resolved_model: null,
+					outgoing_model: null,
+					reported_model: null,
+					kind: "local_reject",
+					started_at: Date.now(),
+					finished_at: Date.now(),
+					status: 403,
+					error: error.message,
+				});
+			retractIfNeverStarted(403);
+			const response = Response.json(
+				{ type: "error", error: { type: error.code, message: error.message } },
+				{ status: 403 },
+			);
+			await createSyntheticTerminalRecorder(
+				req,
+				url,
+				ctx,
+				requestMeta,
+				ingress.context.finalBodyBuffer,
+				apiKeyId,
+				apiKeyName,
+			)(response, error.code);
+			return response;
+		}
 		// No response was ever produced; `null` says so rather than inventing a
 		// status the client never saw.
 		retractIfNeverStarted(null);
@@ -295,12 +339,13 @@ async function handleIngestedProxy(
 		finalCreateBodyStream,
 		effectiveRequestModel,
 		gateTokenEstimate,
-		project,
-		projectAttributionSource,
 		requestMeta,
 		bumpIdleTimeout,
 		canRearmIdleTimeout,
 	} = ingressContext;
+
+	const forcedId = isInternal ? null : getForcedAccount();
+	await initializeRequestRoute(requestMeta, ctx, apiKeyId ?? null, forcedId);
 
 	// 4b. Global force-account override (Feature 3). When a forced account is
 	// set, EVERY non-internal client request goes straight to that account:
@@ -309,7 +354,6 @@ async function handleIngestedProxy(
 	// account's response — including errors (429/529/5xx) — is returned as-is.
 	// Internal auto-refresh/probe requests bypass force so other accounts keep
 	// their tokens/usage warm (Q1).
-	const forcedId = getForcedAccount();
 	if (forcedId && !isInternal) {
 		const forcedAccount = await ctx.dbOps.getAccount(forcedId);
 		if (!forcedAccount) {
@@ -389,55 +433,11 @@ async function handleIngestedProxy(
 			requestMeta,
 			finalBodyBuffer,
 			ctx,
-			null,
+			getAttemptTarget(requestMeta, forcedAccount).upstreamModel,
 			apiKeyId,
 			apiKeyName,
 			requestBodyContext,
 		);
-	}
-
-	// Resolve the per-key routing pin (Feature: API-key→account/class pin). Only
-	// for authenticated client requests; internal probes carry no apiKeyId and
-	// must stay unconstrained. On a DB error we FAIL CLOSED — refuse the request
-	// (pinned_resolution_error) rather than silently routing a pinned key to a
-	// disallowed account. For a Codex-pinned key, routing unpinned could answer
-	// from a Claude OAuth account (ban risk + not the intended cross-model path),
-	// so "can't tell what the pin is" must never degrade to "ignore the pin".
-	if (apiKeyId && !isInternal) {
-		try {
-			const pin = await ctx.dbOps.getApiKeyPin(apiKeyId);
-			if (pin?.malformed) {
-				// The pin is stored but unparseable (corruption / manual tampering).
-				// Fail closed — treating it as "unpinned" could route a Codex-pinned
-				// key to a Claude account (ban risk + wrong model).
-				requestMeta.pinFailure = {
-					code: "pinned_resolution_error",
-					message:
-						"The API key routing pin is stored in an invalid form. Refusing to route to avoid violating the pin.",
-				};
-			} else if (pin) {
-				// One shared activation rule with the selector (see isPinActive):
-				// a pin only constrains routing when it names an account or a
-				// non-empty provider class.
-				const routingPin = {
-					accountId: pin.pinnedAccountId,
-					providers: pin.pinnedProviders,
-				};
-				if (isPinActive(routingPin)) {
-					requestMeta.pin = routingPin;
-				}
-			}
-		} catch (err) {
-			log.error(
-				"Failed to resolve API key pin; failing closed to avoid routing a pinned key to a disallowed account",
-				err,
-			);
-			requestMeta.pinFailure = {
-				code: "pinned_resolution_error",
-				message:
-					"Could not resolve the API key routing pin (database error). Refusing to route to avoid violating the pin.",
-			};
-		}
 	}
 
 	// 5. Select accounts
@@ -446,12 +446,6 @@ async function handleIngestedProxy(
 		ctx,
 		effectiveRequestModel ?? undefined,
 	);
-
-	// Combo slot info (if any) is populated by selectAccountsForRequest above.
-	// Hoisted before the provider-overload gate so every per-account model
-	// resolution (overload gate, context-window gate, family-weekly gate) can
-	// honor a combo slot's model override.
-	const initialComboInfo = getComboSlotInfo(requestMeta);
 
 	// Synthetic auto-refresh / keepalive probes must reach their force-routed
 	// account even when it is usage-throttled: throttling them yields a synthetic
@@ -466,14 +460,8 @@ async function handleIngestedProxy(
 		"any",
 	);
 
-	// Per-request admission gates (provider-overload / usage-throttle /
-	// context-window / family-weekly / soft-demotion reorder) plus the
-	// per-account model resolution they share. Built ONCE per request because
-	// two of them accumulate exclusion state that the zero-accounts terminals
-	// read after every pass (main, both hold wakes, combo fallback) has run.
 	const gates = createAdmissionGates({
 		requestMeta,
-		initialComboInfo,
 		effectiveRequestModel: effectiveRequestModel ?? null,
 		gateTokenEstimate,
 		isSyntheticProbeRequest,
@@ -484,98 +472,15 @@ async function handleIngestedProxy(
 	const providerOverloadResponseLabel = (overloadKey: string): string =>
 		overloadKey === ANTHROPIC_UPSTREAM_OVERLOAD_KEY ? "anthropic" : overloadKey;
 
-	const recordSyntheticErrorResponse = async (
-		response: Response,
-		error: string,
-		opts?: { failoverAttempts?: number },
-	): Promise<void> => {
-		// Same recordable-request predicate as forwardToClient (S1) — keeps
-		// synthetic pool/provider-exhaustion rows out of history for the same
-		// filtered set (auto-refresh probes, etc.).
-		if (
-			!shouldRecordRequest({
-				method: req.method,
-				path: url.pathname,
-				providerName: ctx.provider.name,
-				responseStatus: response.status,
-				internal: requestMeta.internal === true,
-				getHeader: (name) => req.headers.get(name),
-			})
-		) {
-			return;
-		}
-
-		// Synthetic terminal responses (pool/provider-exhaustion) write a request
-		// row directly via the recorder. Preserve the already-buffered incoming body
-		// and the small local response when payload storage is enabled so the details
-		// modal can explain the rejection. There is still no provider usage/account.
-		const storePayloads = ctx.config.getStorePayloads?.() ?? true;
-		let responseBody: ArrayBuffer | null = null;
-		if (storePayloads) {
-			try {
-				responseBody = await response.clone().arrayBuffer();
-			} catch {
-				// Metadata/model attribution is still valuable if cloning ever fails.
-			}
-		}
-		const meta: RecordMeta = {
-			requestId: requestMeta.id,
-			method: req.method,
-			path: url.pathname,
-			accountId: null,
-			accountName: null,
-			responseStatus: response.status,
-			responseHeaders: Object.fromEntries(response.headers.entries()),
-			requestHeaders: Object.fromEntries(
-				sanitizeRequestHeaders(req.headers).entries(),
-			),
-			isStream: false,
-			providerName: ctx.provider.name,
-			requestedModel: effectiveRequestModel ?? null,
-			// A locally-rejected retry is still the redemption of a refusal.
-			fallbackCreditClaimed: requestMeta.fallbackCreditClaimed ?? null,
-			fallbackFromModel: requestMeta.fallbackFromModel ?? null,
-			synthetic: true,
-			failureSource:
-				error === "provider_overloaded"
-					? "local_provider_cooldown"
-					: "local_proxy_rejection",
-			accountBillingType: null,
-			accountAutoPauseOnOverageEnabled: 0,
-			authed: false,
-			apiKeyId: apiKeyId || null,
-			apiKeyName: apiKeyName || null,
-			comboName: null,
-			project: project ?? null,
-			projectAttributionSource,
-			reasoningEffort: requestMeta.reasoningEffort ?? null,
-			sessionKey: requestMeta.sessionKey ?? null,
-			cachePrefixHashes: requestMeta.cachePrefixHashes ?? null,
-			routing: requestMeta.routing
-				? {
-						strategy: requestMeta.routing.strategy,
-						decision: requestMeta.routing.decision,
-						affinityScope: requestMeta.routing.affinityScope ?? null,
-						affinityKeyHash: hashRoutingAffinityKey(
-							requestMeta.routing.affinityKey,
-						),
-						selectedAccountId: requestMeta.routing.selectedAccountId ?? null,
-						previousAccountId: requestMeta.routing.previousAccountId ?? null,
-						candidatesCount: requestMeta.routing.candidatesCount ?? null,
-						failoverReason: requestMeta.routing.failoverReason ?? null,
-					}
-				: null,
-			timestamp: requestMeta.timestamp,
-			requestBody: storePayloads ? finalBodyBuffer : null,
-			retryAttempt: 0,
-			// Most synthetic terminals fire before anything was attempted; the
-			// give-up terminal passes the attempts it really made.
-			failoverAttempts: opts?.failoverAttempts ?? 0,
-		};
-		ctx.requestRecorder.recordSynthetic(meta, "error", error, {
-			responseBody,
-		});
-	};
+	const recordSyntheticErrorResponse = createSyntheticTerminalRecorder(
+		req,
+		url,
+		ctx,
+		requestMeta,
+		finalBodyBuffer,
+		apiKeyId,
+		apiKeyName,
+	);
 
 	const createProviderOverloadedResponse = async (
 		overloaded: ProviderOverloadedAccount[],
@@ -647,19 +552,15 @@ async function handleIngestedProxy(
 	const { available: postThrottleAccounts, throttled: throttledAccounts } =
 		gates.applyUsageThrottling(providerAvailableAccounts);
 
-	const postFamilyGateAccounts = gates.applyFamilyWeeklyGate(
-		postThrottleAccounts,
-		initialComboInfo,
-	);
+	const postFamilyGateAccounts =
+		gates.applyFamilyWeeklyGate(postThrottleAccounts);
 	// The memo demotion is applied LAST, after every gate and reorder — running
 	// it earlier lets the soft-demotion partition promote a 429-refused account
 	// back to the front (see applyFamilyMemoDemotion).
 	const accounts = gates.applyFamilyMemoDemotion(
 		gates.applySoftDemotionReorder(
-			gates.applyContextWindowGate(postFamilyGateAccounts, initialComboInfo),
-			initialComboInfo,
+			gates.applyContextWindowGate(postFamilyGateAccounts),
 		),
-		initialComboInfo,
 	);
 	gates.reconcileAffinity(accounts);
 	// The pool this request could actually have landed on, for restating the
@@ -754,21 +655,15 @@ async function handleIngestedProxy(
 	// neither `recordSyntheticErrorResponse`'s hardcoded 0 nor the candidate-list
 	// length the thrown message quotes.
 	let upstreamAttempts = 0;
-	/**
-	 * How many of those attempts failed over because the account's plan is not
-	 * entitled to the requested model, rather than because it had no capacity.
-	 *
-	 * Keyed on `model_not_entitled`, NOT on `model_not_found`. The latter is
-	 * also emitted after an account's model-fallback list is exhausted, where
-	 * the outcome kind is chosen from the LAST response's status alone: a
-	 * primary that 429s followed by a fallback that 404s reports
-	 * `model_not_found` for what was really a capacity failure. Counting that
-	 * here would relabel a genuine outage as a configuration problem — the exact
-	 * inversion of what this terminal exists to fix.
-	 */
-	let modelUnentitledAttempts = 0;
+	/** Both missing-model and plan-entitlement responses reject a frozen target.
+	 * Provider routing restrictions are separate and never count toward this terminal. */
+	let modelRejectedAttempts = 0;
 	const noteAttemptOutcome = (outcome: ProxyAttemptOutcome): void => {
-		if (outcome.kind === "model_not_entitled") modelUnentitledAttempts++;
+		if (
+			outcome.kind === "model_not_entitled" ||
+			outcome.kind === "model_not_found"
+		)
+			modelRejectedAttempts++;
 	};
 	const countedAttemptThroughProbeGate = (
 		account: Account,
@@ -818,7 +713,6 @@ async function handleIngestedProxy(
 			finalCreateBodyStream,
 			effectiveRequestModel,
 			gateTokenEstimate,
-			initialComboInfo,
 			selectedAccounts,
 			throttledAccounts,
 			providerAvailableAccounts,
@@ -843,17 +737,6 @@ async function handleIngestedProxy(
 	}
 
 	// 9. Try each account
-	const comboInfo = getComboSlotInfo(requestMeta);
-	const allowedAccountIds = new Set(accounts.map((account) => account.id));
-	const filteredComboInfo = comboInfo
-		? {
-				...comboInfo,
-				slots: comboInfo.slots.filter((slot) =>
-					allowedAccountIds.has(slot.accountId),
-				),
-			}
-		: null;
-
 	// Codex High finding: the held account may only enter the hold when it is
 	// EITHER present in the gated `accounts` list (still available — fine to
 	// probe) OR genuinely cooldown-unavailable (`affinity_hold`). If it is absent
@@ -865,7 +748,6 @@ async function handleIngestedProxy(
 		? accounts.some((a) => a.id === holds.burstHeldId)
 		: false;
 	if (
-		!filteredComboInfo?.comboName &&
 		holds.burstHeldId &&
 		isBurstHoldEligible(requestMeta.routing?.decision, heldInGatedAccounts)
 	) {
@@ -876,7 +758,9 @@ async function handleIngestedProxy(
 		const heldAccount =
 			accounts.find((a) => a.id === holds.burstHeldId) ??
 			selectedAccounts.find((a) => a.id === holds.burstHeldId) ??
-			(await ctx.dbOps.getAccount(holds.burstHeldId));
+			(await eligibleRouteAccounts(requestMeta, ctx)).find(
+				(a) => a.id === holds.burstHeldId,
+			);
 
 		if (
 			heldAccount &&
@@ -1009,9 +893,8 @@ async function handleIngestedProxy(
 								// held account is accounts[0]; that id is set after the final
 								// gate/reorder pass above, not before candidate selection.
 								isLastAccountAttempt: () =>
-									!comboInfo?.comboName &&
-									(accounts.length === 1 ||
-										gates.everyRemainingCandidateUnattemptable(accounts, 0)),
+									accounts.length === 1 ||
+									gates.everyRemainingCandidateUnattemptable(accounts, 0),
 								onOutcome: (o) => {
 									firstOutcome = o;
 									noteAttemptOutcome(o);
@@ -1134,7 +1017,7 @@ async function handleIngestedProxy(
 	 *    provider-overload skip are byte-for-byte the previous logic; only the
 	 *    log noun is parameterised (`label`, defaulting to the main pass's
 	 *    "account").
-	 *  - TERMINAL FLAG: `!comboInfo?.comboName && (last || no-cross-provider ||
+	 *  - TERMINAL FLAG: `(last || no-cross-provider ||
 	 *    every-remaining-unattemptable)`. The fallback pass previously omitted the
 	 *    `!comboName` conjunct because its combo was already cleared — with
 	 *    `comboInfo === null` the conjunct is vacuously true, so it is the same
@@ -1151,7 +1034,6 @@ async function handleIngestedProxy(
 	 */
 	const runCandidateLoop = async (
 		list: Account[],
-		comboInfo: ComboSlotInfo | null,
 		options: { skipAccountId?: string | null; label?: string } = {},
 	): Promise<Response | null> => {
 		const label = options.label ?? "account";
@@ -1180,32 +1062,11 @@ async function handleIngestedProxy(
 			if (options.skipAccountId && list[i].id === options.skipAccountId) {
 				continue;
 			}
-			// For combo routing: resolve the slot's model override FIRST so the
-			// overload skip below gates on the model this attempt actually sends
-			// upstream (a slot override can land in a different family than the
-			// request model).
-			let modelOverride: string | null = null;
-			if (comboInfo?.slots[i]) {
-				const slot = comboInfo.slots[i];
-				if (slot.accountId !== list[i].id) {
-					log.error(
-						`Combo slot/account desync: slot ${i} expects account ${slot.accountId} but got ${list[i].id}`,
-					);
-				} else {
-					modelOverride = slot.modelOverride;
-				}
-			}
+			const modelOverride = getAttemptTarget(
+				requestMeta,
+				list[i],
+			).upstreamModel;
 
-			// Keyed on the combo override or the request's LOGICAL model, not the
-			// account's mapped model. Deliberately unchanged: switching it to the
-			// canonical per-account model changes WHICH candidate is skipped
-			// during an overload — an account mapping sonnet→opus is gated on the
-			// sonnet bucket today and would stop being — and that is a routing
-			// decision, separate from the skip-recording below.
-			//
-			// The hold no longer disagrees about which bucket that was: the skip
-			// records this model as `gatedModel`, and holdability, slot keying and
-			// the terminal's refresh all follow it rather than re-deriving one.
 			const overloadedUntil = getProviderOverloadUntil(
 				list[i].provider,
 				Date.now(),
@@ -1235,12 +1096,6 @@ async function handleIngestedProxy(
 				// multi-minute hold and then a 529. A candidate that cannot serve
 				// the path is not evidence of anything about the breaker.
 				if (canAccountServePath(list[i])) {
-					// Carries the model the gate DECIDED on, so the hold and the
-					// terminal key on the same bucket. Re-deriving it per account
-					// picks a different one under per-account model mapping: the
-					// gate skips on sonnet, the hold finds opus closed and retries
-					// at once, and the terminal refreshes a deadline that was never
-					// the reason for the skip.
 					holds.noteOverloadGateSkip(
 						list[i],
 						overloadedUntil,
@@ -1248,13 +1103,6 @@ async function handleIngestedProxy(
 					);
 				}
 				continue;
-			}
-
-			if (comboInfo?.slots[i]) {
-				requestMeta.comboSlotIndex = i;
-				log.info(
-					`Attempting combo slot ${i}/${list.length - 1} on account ${list[i].name} with model "${modelOverride}"`,
-				);
 			}
 
 			// Single-flight recovery probe gate (see attemptThroughProbeGate): a
@@ -1282,25 +1130,17 @@ async function handleIngestedProxy(
 					// a pre-fetch snapshot would forward the 529 to the client instead
 					// of failing over to it.
 					() =>
-						!comboInfo?.comboName &&
-						(i === list.length - 1 ||
-							gates.shouldForwardProviderOverloadIfNoCrossProviderFallback(
-								list,
-								i,
-							) ||
-							gates.everyRemainingCandidateUnattemptable(list, i)),
+						i === list.length - 1 ||
+						gates.shouldForwardProviderOverloadIfNoCrossProviderFallback(
+							list,
+							i,
+						) ||
+						gates.everyRemainingCandidateUnattemptable(list, i),
 					{
-						// Thread the CLIENT's signal into the upstream fetch, mirroring
-						// the burst-hold loop. Without it `options?.signal` was undefined
-						// here and the fetch was armed with the internal timeout
-						// controller alone, so a disconnect left the upstream request
-						// running to completion. This loop serves both the main pass and
-						// the combo-fallback pass.
 						signal: req.signal,
 						isLastAccountAttempt: () =>
-							!comboInfo?.comboName &&
-							(i === list.length - 1 ||
-								gates.everyRemainingCandidateUnattemptable(list, i)),
+							i === list.length - 1 ||
+							gates.everyRemainingCandidateUnattemptable(list, i),
 						onOutcome: (o) => {
 							noteAttemptOutcome(o);
 							holds.noteOverloadSuppression(list[i], o);
@@ -1325,20 +1165,13 @@ async function handleIngestedProxy(
 			if (gated.response) {
 				return gated.response;
 			}
-
-			// Log combo slot failure
-			if (comboInfo) {
-				log.info(
-					`Combo slot ${i} failed on account ${list[i].name}${i < list.length - 1 ? ", trying next slot" : ", all combo slots exhausted"}`,
-				);
-			}
 		}
 		return null;
 	};
 
 	// The burst preflight attempts `heldAccount` OUTSIDE this loop; the loop then
 	// skips it via `skipAccountId`.
-	const mainResponse = await runCandidateLoop(accounts, filteredComboInfo, {
+	const mainResponse = await runCandidateLoop(accounts, {
 		skipAccountId: holds.burstAttemptedAccountId,
 	});
 	if (mainResponse) return mainResponse;
@@ -1360,103 +1193,6 @@ async function handleIngestedProxy(
 		);
 		await recordSyntheticErrorResponse(giveUpResponse, "burst_retry_exhausted");
 		return giveUpResponse;
-	}
-
-	// 10. Combo fallback: if combo routing was active and all slots failed,
-	//     fall back to normal SessionStrategy routing (REQ-14)
-	let fallbackAccounts: Account[] | null = null;
-	if (filteredComboInfo?.comboName) {
-		log.warn(
-			`All combo slots failed for combo "${filteredComboInfo.comboName}", falling back to SessionStrategy routing`,
-		);
-		// Clear combo info and retry with normal routing
-		requestMeta.comboName = null;
-		requestMeta.comboSlotIndex = null;
-		const selectedFallbackAccounts = await selectAccountsForRequest(
-			requestMeta,
-			ctx,
-		);
-		const {
-			available: providerFallbackAccounts,
-			overloaded: providerFallbackOverloadedAccounts,
-		} = gates.applyProviderOverloadGate(selectedFallbackAccounts);
-		const {
-			available: filteredFallbackAccounts,
-			throttled: throttledFallbackAccounts,
-		} = gates.applyUsageThrottling(providerFallbackAccounts);
-		// (soft-demotion reorder — family reservation AND pool liveness —
-		// intentionally omitted on the failover/fallback tail: already-degraded
-		// path. For pool liveness this is largely self-enforcing anyway: rule 4
-		// requires an absorbable peer, and on a degraded path there is none, so
-		// the reserve fails open regardless.)
-		fallbackAccounts = gates.applyFamilyMemoDemotion(
-			gates.applyContextWindowGate(
-				gates.applyFamilyWeeklyGate(filteredFallbackAccounts),
-			),
-		);
-		gates.reconcileAffinity(fallbackAccounts);
-		// The combo fallback replaces the candidate set wholesale, so the pooled
-		// figure must follow it rather than describe the combo slots that failed.
-		setPoolHeadroomCandidates(requestMeta, fallbackAccounts);
-		if (requestMeta.routing) {
-			requestMeta.routing.selectedAccountId =
-				fallbackAccounts[0]?.id ??
-				requestMeta.routing.selectedAccountId ??
-				null;
-			requestMeta.routing.candidatesCount = fallbackAccounts.length;
-			requestMeta.routing.failoverReason = "combo_fallback";
-		}
-
-		if (fallbackAccounts.length > 0) {
-			log.info(
-				`Fallback: trying ${fallbackAccounts.length} SessionStrategy accounts`,
-			);
-			// No combo override on the fallback path (the combo was cleared above),
-			// so the request model is the effective model and the terminal-attempt
-			// flag reduces to the loop's own last-candidate / no-cross-provider test.
-			const fallbackResponse = await runCandidateLoop(fallbackAccounts, null, {
-				label: "fallback account",
-			});
-			if (fallbackResponse) return fallbackResponse;
-		} else if (
-			throttledFallbackAccounts.length > 0 ||
-			gates.familyWeeklyPacedAccounts.length > 0
-		) {
-			// Combo slots staged a body but all failed, and the fallback found only
-			// throttled accounts — this terminal return emits no worker summary, so
-			// drop the staged body now (mirrors the all-accounts-failed cleanup).
-			//
-			// `applyFamilyWeeklyGate` runs AFTER `applyUsageThrottling` on this
-			// chain, so an account it paced never reaches `throttledFallbackAccounts`
-			// and the pool would otherwise fall through to the "All accounts failed"
-			// terminal. Pacing is throttle evidence, so it answers here with the
-			// same retryable 529.
-			cacheBodyStore.discardStaged(requestMeta.id);
-			return createUsageThrottledResponse([
-				...throttledFallbackAccounts,
-				...gates.familyWeeklyPacedAccounts.map((paced) => paced.account),
-			]);
-		} else if (
-			selectedFallbackAccounts.length > 0 &&
-			providerFallbackAccounts.length === 0 &&
-			providerFallbackOverloadedAccounts.length > 0
-		) {
-			// Hold (bounded, capped) for recovery instead of bouncing the synthetic
-			// 529 — same treatment as the other two overload terminals. The combo
-			// was already cleared above, so the hold's re-selection runs plain
-			// SessionStrategy routing.
-			const held = await holds.holdForOverloadRecovery(
-				providerFallbackOverloadedAccounts,
-			);
-			if (held) return held;
-			// Terminal return emits no worker summary — drop the staged body
-			// (mirrors the all-accounts-failed cleanup).
-			cacheBodyStore.discardStaged(requestMeta.id);
-			return await createProviderOverloadedResponse(
-				holds.refreshOverloadUntils(providerFallbackOverloadedAccounts),
-				{ failoverAttempts: upstreamAttempts },
-			);
-		}
 	}
 
 	// Overload-blocked correctness: at least one candidate never reached upstream
@@ -1512,9 +1248,7 @@ async function handleIngestedProxy(
 	if (req.signal.aborted) return createClientAbortResponse();
 
 	// Check if OAuth token issues are the cause
-	const allAttemptedAccounts = filteredComboInfo
-		? [...accounts, ...(fallbackAccounts ?? [])]
-		: accounts;
+	const allAttemptedAccounts = accounts;
 	const oauthAccounts = allAttemptedAccounts.filter((acc) => acc.refresh_token);
 	const needsReauth = oauthAccounts.filter((acc) =>
 		isRefreshTokenLikelyExpired(acc),
@@ -1595,14 +1329,20 @@ async function handleIngestedProxy(
 	// unanimity condition below.
 	if (
 		upstreamAttempts > 0 &&
-		modelUnentitledAttempts === upstreamAttempts &&
+		modelRejectedAttempts === upstreamAttempts &&
 		accounts.length >= selectedAccounts.length
 	) {
 		const model = effectiveRequestModel ?? requestMeta.requestedModel ?? null;
-		const modelLabel = model ?? "the requested model";
+		const targets = [
+			...new Set(
+				allAttemptedAccounts
+					.map((a) => getResolvedRoute(requestMeta).target(a)?.upstreamModel)
+					.filter((m): m is string => !!m),
+			),
+		];
 		const unserveableMessage =
-			`Every account attempted (${upstreamAttempts}) rejected model '${modelLabel}' as outside its plan entitlement. ` +
-			`Retrying will not help until an account whose plan serves this model is available.`;
+			`Every account attempted (${upstreamAttempts}) rejected its resolved model (${targets.join(", ")}). Requested model: '${model ?? "unknown"}'. ` +
+			`Check model availability and account permissions before retrying.`;
 		await recordGiveUpTerminal("model_not_served", unserveableMessage, {
 			status: 400,
 			errorType: "invalid_request_error",

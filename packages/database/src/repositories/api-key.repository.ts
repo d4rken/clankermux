@@ -1,4 +1,9 @@
-import { type ApiKey, type ApiKeyRow, toApiKey } from "@clankermux/types";
+import {
+	type ApiKey,
+	type ApiKeyRow,
+	parsePinnedProviders,
+	toApiKey,
+} from "@clankermux/types";
 import { BaseRepository } from "./base.repository";
 
 export class ApiKeyRepository extends BaseRepository<ApiKey> {
@@ -144,25 +149,42 @@ export class ApiKeyRepository extends BaseRepository<ApiKey> {
 		apiKey: Omit<
 			ApiKeyRow,
 			"usage_count" | "pinned_account_id" | "pinned_providers"
-		>,
+		> & { pinned_account_id?: string | null; pinned_providers?: string | null },
 	): Promise<void> {
-		await this.run(
-			`
+		await this.adapter.runTransaction(() => {
+			const db = this.adapter.getSQLiteDb();
+			const account = apiKey.pinned_account_id ?? null;
+			const raw = apiKey.pinned_providers ?? null;
+			if (
+				account === "" ||
+				(account !== null && raw !== null) ||
+				(raw !== null && !parsePinnedProviders(raw)?.length)
+			)
+				throw new Error("Invalid API key destinations");
+			if (
+				account &&
+				!db.query("SELECT id FROM accounts WHERE id=?").get(account)
+			)
+				throw new Error("Destination account does not exist");
+			db.query(`
 			INSERT INTO api_keys (
 				id, name, hashed_key, prefix_last_8, created_at,
-				last_used, is_active
-			) VALUES (?, ?, ?, ?, ?, ?, ?)
-		`,
-			[
-				apiKey.id,
-				apiKey.name,
-				apiKey.hashed_key,
-				apiKey.prefix_last_8,
-				apiKey.created_at,
-				apiKey.last_used,
-				apiKey.is_active,
-			],
-		);
+				last_used, is_active, pinned_account_id, pinned_providers
+			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+		`).run(
+				...[
+					apiKey.id,
+					apiKey.name,
+					apiKey.hashed_key,
+					apiKey.prefix_last_8,
+					apiKey.created_at,
+					apiKey.last_used,
+					apiKey.is_active,
+					apiKey.pinned_account_id ?? null,
+					apiKey.pinned_providers ?? null,
+				],
+			);
+		});
 	}
 
 	/**

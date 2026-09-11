@@ -1,16 +1,14 @@
 import {
-	codexAccountFitsRequest,
 	getModelFamily,
 	isAccountAvailable,
 	isProtectedFamily,
-	mapModelName,
 	PROTECTED_FAMILY,
-	resolveCodexTargetModel,
 	resolveModelMaxContextWindow,
+	SAFETY_MARGIN,
 } from "@clankermux/core";
 import { Logger } from "@clankermux/logger";
 import { getFreshCapacity, usageCache } from "@clankermux/providers";
-import type { Account, ComboSlotInfo, RequestMeta } from "@clankermux/types";
+import type { Account, RequestMeta } from "@clankermux/types";
 import { getFamilyWeeklyExhaustedUntil } from "./family-weekly-memo";
 import {
 	type ContextWindowExcludedBackend,
@@ -36,8 +34,8 @@ import {
 	getProviderOverloadKey,
 	getProviderOverloadUntil,
 	isProviderOverloaded,
-	resolveOverloadAttributionModel,
 } from "./provider-overload-cooldown";
+import { getAttemptTarget } from "./resolved-route";
 import { resolveEffectiveWeeklySlope } from "./weekly-burn-slope";
 
 const log = new Logger("Proxy");
@@ -77,7 +75,6 @@ export interface AdmissionGateDeps {
 	 */
 	requestMeta: RequestMeta;
 	/** Combo slot info as it stood when the gates were built (see below). */
-	initialComboInfo: ComboSlotInfo | null;
 	/** The request's effective (post-body-context) model, if any. */
 	effectiveRequestModel: string | null;
 	/** Calibrated context-window token estimate for this request. */
@@ -114,36 +111,16 @@ export interface AdmissionGates {
 		available: Account[];
 		throttled: Account[];
 	};
-	applyContextWindowGate: (
-		candidates: Account[],
-		comboInfo?: {
-			slots: Array<{ accountId: string; modelOverride: string }>;
-		} | null,
-	) => Account[];
-	applyFamilyWeeklyGate: (
-		candidates: Account[],
-		comboInfo?: {
-			slots: Array<{ accountId: string; modelOverride: string }>;
-		} | null,
-	) => Account[];
-	applySoftDemotionReorder: (
-		candidates: Account[],
-		comboInfo?: {
-			slots: Array<{ accountId: string; modelOverride: string }>;
-		} | null,
-	) => Account[];
+	applyContextWindowGate: (candidates: Account[]) => Account[];
+	applyFamilyWeeklyGate: (candidates: Account[]) => Account[];
+	applySoftDemotionReorder: (candidates: Account[]) => Account[];
 	/**
 	 * Moves accounts a 429 already refused for this request's family to the back.
 	 * MUST be applied last, after every other gate and reorder — see the comment
 	 * on the implementation for why running it earlier lets a later partition
 	 * promote the refused account back to the front.
 	 */
-	applyFamilyMemoDemotion: (
-		candidates: Account[],
-		comboInfo?: {
-			slots: Array<{ accountId: string; modelOverride: string }>;
-		} | null,
-	) => Account[];
+	applyFamilyMemoDemotion: (candidates: Account[]) => Account[];
 	/**
 	 * Accounts the context-window gate excluded, accumulated with per-account-id
 	 * dedup across EVERY gate pass this request makes (main pass, both hold-wake
@@ -186,7 +163,6 @@ export interface AdmissionGates {
 export function createAdmissionGates(deps: AdmissionGateDeps): AdmissionGates {
 	const {
 		requestMeta,
-		initialComboInfo,
 		effectiveRequestModel,
 		gateTokenEstimate,
 		isSyntheticProbeRequest,
@@ -205,20 +181,8 @@ export function createAdmissionGates(deps: AdmissionGateDeps): AdmissionGates {
 	// authoritative per-attempt enforcement is the admission chokepoint. The
 	// comboName check keeps a cleared combo (fallback path) from resurrecting
 	// stale overrides.
-	const modelForAccount = (account: Account): string | null => {
-		let logical = effectiveRequestModel ?? null;
-		if (requestMeta.comboName && initialComboInfo) {
-			const slot = initialComboInfo.slots.find(
-				(s) => s.accountId === account.id,
-			);
-			if (slot?.modelOverride) logical = slot.modelOverride;
-		}
-		if (!logical) return null;
-		return resolveOverloadAttributionModel(
-			mapModelName(logical, account),
-			logical,
-		);
-	};
+	const modelForAccount = (account: Account): string =>
+		getAttemptTarget(requestMeta, account).upstreamModel;
 
 	const applyProviderOverloadGate = (accounts: Account[]) => {
 		const now = Date.now();
@@ -374,12 +338,7 @@ export function createAdmissionGates(deps: AdmissionGateDeps): AdmissionGates {
 	 * @param comboInfo  Optional combo slot info for model override lookup
 	 * @returns Accounts that pass the gate
 	 */
-	const applyContextWindowGate = (
-		candidates: Account[],
-		comboInfo?: {
-			slots: Array<{ accountId: string; modelOverride: string }>;
-		} | null,
-	): Account[] => {
+	const applyContextWindowGate = (candidates: Account[]): Account[] => {
 		const passed: Account[] = [];
 		for (const account of candidates) {
 			if (account.provider !== "codex") {
@@ -389,18 +348,16 @@ export function createAdmissionGates(deps: AdmissionGateDeps): AdmissionGates {
 
 			// Determine the effective model for this account: combo slot
 			// override if available, otherwise the request model.
-			let modelForGate =
-				effectiveRequestModel ??
-				"claude-sonnet-4-5"; /* safe fallback — family match */
-			if (comboInfo) {
-				const slot = comboInfo.slots.find((s) => s.accountId === account.id);
-				if (slot?.modelOverride) {
-					modelForGate = slot.modelOverride;
-				}
-			}
+			const modelForGate = modelForAccount(account);
 
-			if (!codexAccountFitsRequest(account, modelForGate, gateTokenEstimate)) {
-				const target = resolveCodexTargetModel(modelForGate, account);
+			if (
+				resolveModelMaxContextWindow(modelForGate) !== undefined &&
+				gateTokenEstimate >
+					Math.floor(
+						(resolveModelMaxContextWindow(modelForGate) ?? 0) * SAFETY_MARGIN,
+					)
+			) {
+				const target = modelForGate;
 				const window = resolveModelMaxContextWindow(target);
 				log.info(
 					`Context-window gate: excluding Codex account "${account.name}" ` +
@@ -440,12 +397,7 @@ export function createAdmissionGates(deps: AdmissionGateDeps): AdmissionGates {
 	// exhausted 429 and its multi-day Retry-After.
 	const familyWeeklyExcludedAccounts: FamilyWeeklyExcludedAccount[] = [];
 	const familyWeeklyPacedAccounts: FamilyWeeklyPacedAccount[] = [];
-	const applyFamilyWeeklyGate = (
-		candidates: Account[],
-		comboInfo?: {
-			slots: Array<{ accountId: string; modelOverride: string }>;
-		} | null,
-	): Account[] => {
+	const applyFamilyWeeklyGate = (candidates: Account[]): Account[] => {
 		const now = Date.now();
 		// Pacing follows the same switches as the account-wide usage throttle: the
 		// weekly toggle owns weekly windows, and a synthetic probe must never be
@@ -458,13 +410,7 @@ export function createAdmissionGates(deps: AdmissionGateDeps): AdmissionGates {
 				passed.push(account);
 				continue;
 			}
-			let modelForGate = effectiveRequestModel ?? null;
-			if (comboInfo) {
-				const slot = comboInfo.slots.find((s) => s.accountId === account.id);
-				if (slot?.modelOverride) {
-					modelForGate = slot.modelOverride;
-				}
-			}
+			const modelForGate = modelForAccount(account);
 			const capacity = getFreshCapacity(
 				usageCache,
 				account.id,
@@ -549,13 +495,7 @@ export function createAdmissionGates(deps: AdmissionGateDeps): AdmissionGates {
 	//
 	// Combos are skipped for the same reason the soft reorder skips them: their
 	// slots are positional, and reordering desyncs the mapping.
-	const applyFamilyMemoDemotion = (
-		candidates: Account[],
-		comboInfo?: {
-			slots: Array<{ accountId: string; modelOverride: string }>;
-		} | null,
-	): Account[] => {
-		if (comboInfo) return candidates;
+	const applyFamilyMemoDemotion = (candidates: Account[]): Account[] => {
 		const now = Date.now();
 		const kept: Account[] = [];
 		const demoted: Account[] = [];
@@ -618,17 +558,11 @@ export function createAdmissionGates(deps: AdmissionGateDeps): AdmissionGates {
 	// slots[i] POSITIONALLY, so reordering would desync that mapping); for the
 	// non-combo path each account is classified by its EFFECTIVE (mapped) model
 	// via modelForAccount, matching the demand-recording site and the overload gate.
-	const applySoftDemotionReorder = (
-		candidates: Account[],
-		comboInfo?: {
-			slots: Array<{ accountId: string; modelOverride: string }>;
-		} | null,
-	): Account[] => {
+	const applySoftDemotionReorder = (candidates: Account[]): Account[] => {
 		// Combos pin each slot to a specific account POSITIONALLY (the attempt loop
 		// matches accounts[i] to slots[i]); reordering would desync that mapping and
 		// null out slot model overrides. Both demotions are fan-out routing
 		// concerns, so skip combos entirely.
-		if (comboInfo) return candidates;
 		const now = Date.now();
 
 		// Snapshot capacity ONCE up front so every peer count sees a consistent

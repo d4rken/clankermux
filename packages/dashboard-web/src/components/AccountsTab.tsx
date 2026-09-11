@@ -14,7 +14,7 @@ import {
 	AccountAddForm,
 	AccountCustomEndpointDialog,
 	AccountList,
-	AccountModelMappingsDialog,
+	AccountModelPermissionsDialog,
 	AccountPriorityDialog,
 	AccountRenewalDialog,
 	AnthropicReauthDialog,
@@ -133,7 +133,7 @@ export function AccountsTab() {
 		isOpen: false,
 		account: null,
 	});
-	const [modelMappingsDialog, setModelMappingsDialog] = useState<{
+	const [modelPermissionsDialog, setModelPermissionsDialog] = useState<{
 		isOpen: boolean;
 		account: Account | null;
 	}>({
@@ -214,7 +214,6 @@ export function AccountsTab() {
 		apiKey: string;
 		priority: number;
 		customEndpoint?: string;
-		modelMappings?: { [key: string]: string };
 	}) => {
 		try {
 			await api.addZaiAccount(params);
@@ -232,7 +231,6 @@ export function AccountsTab() {
 		apiKey: string;
 		priority: number;
 		customEndpoint: string;
-		modelMappings?: { [key: string]: string };
 	}) => {
 		try {
 			await api.addOpenAIAccount(params);
@@ -265,7 +263,6 @@ export function AccountsTab() {
 		name: string;
 		apiKey: string;
 		priority: number;
-		modelMappings?: { [key: string]: string };
 	}) => {
 		try {
 			await api.addAlibabaCodingPlanAccount(params);
@@ -282,7 +279,6 @@ export function AccountsTab() {
 		name: string;
 		apiKey: string;
 		priority: number;
-		modelMappings?: { [key: string]: string };
 	}) => {
 		try {
 			await api.addKiloAccount(params);
@@ -299,7 +295,6 @@ export function AccountsTab() {
 		name: string;
 		apiKey: string;
 		priority: number;
-		modelMappings?: { [key: string]: string };
 	}) => {
 		try {
 			await api.addDevinAccount(params);
@@ -316,7 +311,6 @@ export function AccountsTab() {
 		name: string;
 		apiKey: string;
 		priority: number;
-		modelMappings?: { [key: string]: string };
 	}) => {
 		try {
 			await api.addOpenRouterAccount(params);
@@ -334,7 +328,6 @@ export function AccountsTab() {
 		apiKey: string;
 		priority: number;
 		customEndpoint?: string;
-		modelMappings?: { [key: string]: string };
 	}) => {
 		try {
 			await api.addAnthropicCompatibleAccount(params);
@@ -351,7 +344,6 @@ export function AccountsTab() {
 		name: string;
 		priority: number;
 		customEndpoint?: string;
-		modelMappings?: { [key: string]: string };
 	}) => {
 		try {
 			await api.addOllamaAccount(params);
@@ -368,7 +360,6 @@ export function AccountsTab() {
 		name: string;
 		apiKey: string;
 		priority: number;
-		modelMappings?: { [key: string]: string };
 	}) => {
 		try {
 			await api.addOllamaCloudAccount(params);
@@ -593,8 +584,8 @@ export function AccountsTab() {
 		setCustomEndpointDialog({ isOpen: true, account });
 	};
 
-	const handleModelMappingsChange = (account: Account) => {
-		setModelMappingsDialog({ isOpen: true, account });
+	const handleModelPermissionsChange = (account: Account) => {
+		setModelPermissionsDialog({ isOpen: true, account });
 	};
 
 	const handleReauth = (account: Account) => {
@@ -658,19 +649,6 @@ export function AccountsTab() {
 		}
 	};
 
-	const handleUpdateModelMappings = async (
-		accountId: string,
-		modelMappings: { [key: string]: string | string[] },
-	) => {
-		try {
-			await api.updateAccountModelMappings(accountId, modelMappings);
-			await loadAccounts();
-		} catch (err) {
-			setActionError(formatError(err));
-			throw err;
-		}
-	};
-
 	if (loading) {
 		return (
 			<Card>
@@ -712,11 +690,11 @@ export function AccountsTab() {
 						<div className="flex items-start gap-item">
 							<Crosshair className="h-5 w-5 shrink-0 text-destructive-strong" />
 							<p className="text-sm text-destructive-strong">
-								<span className="font-semibold">Force mode:</span> ALL traffic
-								is routed to{" "}
+								<span className="font-semibold">Force mode:</span> Requests are
+								restricted to{" "}
 								<span className="font-semibold">{forcedAccountLabel}</span> —
-								selection, gating, and failover are bypassed. Click the force
-								button again to release.
+								API key destinations, routing rules, and model permissions still
+								apply. Click the force button again to release.
 							</p>
 						</div>
 					</CardContent>
@@ -791,7 +769,7 @@ export function AccountsTab() {
 							handleAutoApplyResetOnWeeklyLimitToggle
 						}
 						onCustomEndpointChange={handleCustomEndpointChange}
-						onModelMappingsChange={handleModelMappingsChange}
+						onModelPermissionsChange={handleModelPermissionsChange}
 						onReauth={handleReauth}
 						onAnthropicReauth={handleAnthropicReauth}
 						onCodexReauth={handleCodexReauth}
@@ -884,17 +862,16 @@ export function AccountsTab() {
 					onUpdateEndpoint={handleUpdateCustomEndpoint}
 				/>
 			)}
-			{modelMappingsDialog.isOpen && modelMappingsDialog.account && (
-				<AccountModelMappingsDialog
-					isOpen={modelMappingsDialog.isOpen}
-					account={modelMappingsDialog.account}
+			{modelPermissionsDialog.isOpen && modelPermissionsDialog.account && (
+				<AccountModelPermissionsDialog
+					isOpen={modelPermissionsDialog.isOpen}
+					account={modelPermissionsDialog.account}
 					onOpenChange={(open) =>
-						setModelMappingsDialog({
+						setModelPermissionsDialog({
 							isOpen: open,
-							account: open ? modelMappingsDialog.account : null,
+							account: open ? modelPermissionsDialog.account : null,
 						})
 					}
-					onUpdateModelMappings={handleUpdateModelMappings}
 				/>
 			)}
 			<QwenReauthDialog

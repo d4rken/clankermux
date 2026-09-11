@@ -1,4 +1,5 @@
 import type { RateLimitReason } from "./account";
+import type { CostCoverage } from "./request-cost";
 
 /** Whether a given integrity probe is a fast page-structure check or the
  *  slower full check (page structure + index/table cross-checks + foreign
@@ -377,6 +378,7 @@ export interface AnalyticsTotals {
 	totalCostUsd: number;
 	planCostUsd: number;
 	apiCostUsd: number;
+	apiCostCoverage?: CostCoverage;
 	avgTokensPerSecond: number | null;
 	// Median (p50) and p95 output speed across all in-range requests,
 	// artifact-filtered. Drive the "Typical Output Speed" / "Peak Output

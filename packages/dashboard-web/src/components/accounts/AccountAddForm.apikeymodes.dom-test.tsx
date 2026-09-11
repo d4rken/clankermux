@@ -152,7 +152,7 @@ describe("account add form: API key provider modes", () => {
 		expect(document.querySelector("#endpoint")).toBeNull();
 	});
 
-	it.each(modes)("submits key and model mappings for $provider", async ({
+	it.each(modes)("submits account credentials for $provider", async ({
 		provider,
 		option,
 	}) => {
@@ -160,9 +160,6 @@ describe("account add form: API key provider modes", () => {
 		await selectMode(option);
 		await edit("name", `${provider}-account`);
 		await edit("apiKey", `${provider}-key`);
-		await edit("opusModel", "vendor/opus-model");
-		await edit("sonnetModel", "vendor/sonnet-model");
-		await edit("haikuModel", "vendor/haiku-model");
 		await submit();
 		expect(errors).toEqual([]);
 		expect(saved[provider]).toEqual([
@@ -170,11 +167,6 @@ describe("account add form: API key provider modes", () => {
 				name: `${provider}-account`,
 				apiKey: `${provider}-key`,
 				priority: 0,
-				modelMappings: {
-					opus: "vendor/opus-model",
-					sonnet: "vendor/sonnet-model",
-					haiku: "vendor/haiku-model",
-				},
 			},
 		]);
 	});
@@ -271,7 +263,7 @@ it("hands Devin login to the chosen browser and completes using the callback URL
 	expect(errors).toEqual([]);
 });
 
-it("clears Devin model mappings when the imported token changes", async () => {
+it("shows Devin discovery with central routing guidance and clears it when the token changes", async () => {
 	spyOn(api, "discoverDevinModels").mockResolvedValue({
 		models: [
 			{
@@ -290,13 +282,11 @@ it("clears Devin model mappings when the imported token changes", async () => {
 	await act(async () =>
 		byText<HTMLButtonElement>("button", "Check access and models").click(),
 	);
-	const select = document.querySelector<HTMLSelectElement>("#devin-model");
-	if (!select) throw new Error("No model selector");
-	await act(async () => {
-		select.value = "swe-2-high";
-		select.dispatchEvent(new Event("change", { bubbles: true }));
-	});
+	expect(document.querySelector("#devin-model")).toBeNull();
+	expect(document.body.textContent).toContain("swe-2-high");
+	expect(document.body.textContent).toContain("Routing page");
 	await edit("devin-token", "second-token");
+	expect(document.body.textContent).not.toContain("swe-2-high");
 	expect(document.querySelector("#devin-model")).toBeNull();
 	await submit();
 	expect(saved.devin?.[0]?.apiKey).toBe("second-token");

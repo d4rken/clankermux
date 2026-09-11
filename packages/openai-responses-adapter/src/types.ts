@@ -18,11 +18,19 @@ export interface ResponsesRequest {
 
 // ResponseItem union — all item types codex can send
 export type ResponseItem =
+	| AdditionalToolsItem
 	| ResponseMessageItem
 	| FunctionCallItem
 	| FunctionCallOutputItem
 	| CustomToolCallItem
 	| CustomToolCallOutputItem;
+
+export interface AdditionalToolsItem {
+	type: "additional_tools";
+	role: "developer";
+	id?: string;
+	tools: ResponsesTool[];
+}
 
 export interface ResponseMessageItem {
 	type?: "message";
@@ -63,6 +71,7 @@ export interface FunctionCallItem {
 	id?: string;
 	call_id: string;
 	name: string;
+	namespace?: string;
 	arguments: string; // JSON string
 }
 
@@ -83,7 +92,8 @@ export interface CustomToolCallItem {
 	id?: string;
 	call_id: string;
 	name: string;
-	arguments: string;
+	namespace?: string;
+	input: string;
 }
 
 export interface CustomToolCallOutputItem {
@@ -93,7 +103,26 @@ export interface CustomToolCallOutputItem {
 }
 
 // Tool definition
-export type ResponsesTool = ResponsesFunctionTool | ResponsesBuiltinTool;
+export type ResponsesTool =
+	| ResponsesFunctionTool
+	| ResponsesCustomTool
+	| ResponsesNamespaceTool
+	| ResponsesBuiltinTool;
+
+export interface ResponsesCustomTool {
+	type: "custom";
+	name: string;
+	description?: string;
+	format?:
+		| { type: "text" }
+		| { type: "grammar"; syntax: "lark" | "regex"; definition: string };
+}
+export interface ResponsesNamespaceTool {
+	type: "namespace";
+	name: string;
+	description?: string;
+	tools: ResponsesTool[];
+}
 
 export interface ResponsesFunctionTool {
 	type: "function";
@@ -109,8 +138,9 @@ export interface ResponsesBuiltinTool {
 }
 
 export interface ResponsesToolChoice {
-	type: "function";
+	type: "function" | "custom";
 	name: string;
+	namespace?: string;
 }
 
 export interface ResponsesReasoning {
@@ -133,7 +163,10 @@ export interface ResponsesResponse {
 	error?: ResponsesError;
 }
 
-export type OutputItem = OutputMessageItem | OutputFunctionCallItem;
+export type OutputItem =
+	| OutputMessageItem
+	| OutputFunctionCallItem
+	| OutputCustomToolCallItem;
 
 export interface OutputMessageItem {
 	type: "message";
@@ -160,7 +193,18 @@ export interface OutputFunctionCallItem {
 	id: string;
 	call_id: string;
 	name: string;
+	namespace?: string;
 	arguments: string; // JSON string
+	status: "completed";
+}
+
+export interface OutputCustomToolCallItem {
+	type: "custom_tool_call";
+	id: string;
+	call_id: string;
+	name: string;
+	namespace?: string;
+	input: string;
 	status: "completed";
 }
 

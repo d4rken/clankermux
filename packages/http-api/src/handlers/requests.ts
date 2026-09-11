@@ -1,6 +1,7 @@
 import type { BunSqlAdapter, DatabaseOperations } from "@clankermux/database";
 import { jsonResponse } from "@clankermux/http-common";
 import type { ProjectAttributionSource } from "@clankermux/types";
+import { resolveCostSource } from "@clankermux/types";
 import type { RequestResponse } from "../types";
 import {
 	buildRequestFilterClause,
@@ -65,6 +66,9 @@ export function createRequestsSummaryHandler(db: BunSqlAdapter) {
 			cache_creation_input_tokens: number | null;
 			output_tokens: number | null;
 			cost_usd: number | null;
+			estimated_cost_usd: number | null;
+			cost_source: string | null;
+			cost_is_byok: number | null;
 			output_tokens_per_second: number | null;
 			output_tokens_per_second_approx: number | null;
 			api_key_id: string | null;
@@ -115,7 +119,11 @@ export function createRequestsSummaryHandler(db: BunSqlAdapter) {
 			cacheCreationInputTokens:
 				request.cache_creation_input_tokens || undefined,
 			outputTokens: request.output_tokens || undefined,
-			costUsd: request.cost_usd || undefined,
+			costUsd: request.cost_usd ?? undefined,
+			estimatedCostUsd: request.estimated_cost_usd ?? undefined,
+			costSource: resolveCostSource(request.cost_usd, request.cost_source),
+			costIsByok:
+				request.cost_is_byok == null ? undefined : request.cost_is_byok === 1,
 			tokensPerSecond: request.output_tokens_per_second || undefined,
 			// Only meaningful alongside tokensPerSecond (stored 1 only when the
 			// fallback value was recorded).

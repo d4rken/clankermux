@@ -232,7 +232,7 @@ describe("MinimaxProvider", () => {
 	});
 
 	describe("transformRequest", () => {
-		it("should map models using shared mapModelName", async () => {
+		it("preserves resolved targets despite retired mappings", async () => {
 			// Account with custom mapping to MiniMax-M2.7
 			const accountWithMapping: Account = {
 				...mockAccount,
@@ -250,7 +250,7 @@ describe("MinimaxProvider", () => {
 				{ input: "claude-sonnet-5-0-20251201", expected: "MiniMax-M2.7" }, // future sonnet
 			];
 
-			for (const { input, expected } of testModels) {
+			for (const { input } of testModels) {
 				const requestBody = {
 					model: input,
 					messages: [{ role: "user", content: "test" }],
@@ -268,7 +268,7 @@ describe("MinimaxProvider", () => {
 				);
 
 				const transformedBody = await transformedRequest.json();
-				expect(transformedBody.model).toBe(expected);
+				expect(transformedBody.model).toBe(input);
 			}
 		});
 	});

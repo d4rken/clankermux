@@ -55,24 +55,6 @@ export const PresetProviders = {
 			"https://api.minimax.io/anthropic",
 			"x-api-key",
 		),
-
-	/**
-	 * Generic Anthropic-compatible provider with model mapping
-	 */
-	createWithModelMapping: (
-		endpoint: string,
-		mappings: Record<string, string>,
-		authHeader: string = "x-api-key",
-		authType: "bearer" | "direct" = "direct",
-	) =>
-		createAnthropicCompatibleProvider({
-			name: "custom-anthropic-compatible",
-			baseUrl: endpoint,
-			authHeader: authHeader,
-			authType: authType,
-			modelMappings: mappings,
-			supportsStreaming: true,
-		}),
 };
 
 // Re-export the main class and config for convenience

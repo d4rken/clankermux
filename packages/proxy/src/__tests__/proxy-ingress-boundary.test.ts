@@ -33,7 +33,7 @@ import { sessionPromotionTracker } from "../session-promotion";
 const ACCOUNT_ID = "acc-ingress";
 
 async function callHandleProxy(req: Request, url: URL, ctx: ProxyContext) {
-	const { handleProxy } = await import("../proxy");
+	const { handleProxy } = await import("./fixtures/routing-harness");
 	return handleProxy(req, url, ctx);
 }
 
@@ -212,7 +212,7 @@ describe("handleProxy ingress boundary", () => {
 	let originalFetch: typeof globalThis.fetch;
 
 	beforeAll(async () => {
-		await import("../proxy");
+		await import("./fixtures/routing-harness");
 	});
 
 	beforeEach(() => {
@@ -399,7 +399,7 @@ describe("handleProxy ingress boundary", () => {
 			expect(calls).toHaveLength(0);
 		});
 
-		it("lets an UNPARSEABLE body fall through to normal routing, byte-identical", async () => {
+		it("rejects an unparseable inference body before sending", async () => {
 			// A non-400 status alone would prove nothing (many paths return 200), so
 			// the oracle is: exactly ONE upstream attempt happened AND it carried the
 			// original bytes verbatim — i.e. the validator did not reject it and no
@@ -418,9 +418,8 @@ describe("handleProxy ingress boundary", () => {
 				makeContext([makeAccount()]),
 			);
 
-			expect(res.status).toBe(200);
-			expect(calls).toHaveLength(1);
-			expect(new TextDecoder().decode(calls[0].body)).toBe(raw);
+			expect(res.status).toBe(403);
+			expect(calls).toHaveLength(0);
 		});
 	});
 

@@ -978,3 +978,78 @@ describe("handleResponsesRequest", () => {
 		});
 	});
 });
+
+test("nested tool namespaces return a tagged client error before proxy dispatch", async () => {
+	let sent = false;
+	const req = new Request("http://localhost/v1/responses", {
+		method: "POST",
+		body: JSON.stringify({
+			model: "alias",
+			input: "hello",
+			tools: [
+				{
+					type: "namespace",
+					name: "outer",
+					tools: [{ type: "namespace", name: "inner", tools: [] }],
+				},
+			],
+		}),
+	});
+	const resp = await handleResponsesRequest(
+		req,
+		new URL(req.url),
+		async () => {
+			sent = true;
+			return Response.json({});
+		},
+		{},
+	);
+	expect(resp.status).toBe(400);
+	expect(sent).toBe(false);
+	expect(await resp.json()).toMatchObject({
+		error: {
+			type: "invalid_request_error",
+			message: "Nested tool namespaces are not supported",
+		},
+	});
+});
+
+test("Pi easy input retains user text on translated dispatch and original bytes for native dispatch", async () => {
+	const payload = {
+		model: "gpt-6-astra",
+		input: [
+			{ role: "developer", content: "Follow the user" },
+			{
+				role: "user",
+				content: [{ type: "input_text", text: "Read fixture.txt" }],
+			},
+		],
+		stream: false,
+	};
+	const raw = JSON.stringify(payload);
+	const req = new Request("http://localhost/v1/responses", {
+		method: "POST",
+		body: raw,
+	});
+	let called = false;
+	const resp = await handleResponsesRequest(
+		req,
+		new URL(req.url),
+		async (forwarded) => {
+			called = true;
+			const context = getNativeResponsesRequestContext(forwarded);
+			expect(context?.nativeBody).toBe(raw);
+			const body = await forwarded.json();
+			expect(body.messages).toEqual([
+				{ role: "user", content: [{ type: "text", text: "Read fixture.txt" }] },
+			]);
+			expect(body.system).toBe("Follow the user");
+			return new Response(ANTHROPIC_MESSAGE_BODY, {
+				headers: { "content-type": "application/json" },
+			});
+		},
+		{},
+	);
+	expect(called).toBe(true);
+	expect(resp.status).toBe(200);
+});

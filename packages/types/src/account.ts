@@ -1,3 +1,4 @@
+import type { OpenRouterAccountMetadata } from "./openrouter";
 import { microsToUsd } from "./payment";
 import type {
 	AccountBurnAnchors,
@@ -323,8 +324,6 @@ export interface AccountRow {
 	codex_auto_apply_reset_credits_enabled?: boolean | number | null;
 	codex_auto_apply_reset_on_weekly_limit_enabled?: boolean | number | null;
 	custom_endpoint?: string | null;
-	model_mappings?: string | null; // JSON string for OpenAI-compatible providers
-	model_fallbacks?: string | null; // JSON string for model family fallback mappings
 	billing_type?: string | null; // Per-account billing override
 	pause_reason?: string | null; // null=not paused, 'manual'=user paused, 'failure_threshold'=auto-refresh failures, 'overage'=billing overage, 'oauth_invalid_grant'=OAuth refresh token rejected (needs reauth)
 	notes?: string | null; // Free-text per-account operator notes
@@ -374,8 +373,6 @@ export interface Account {
 	codex_auto_apply_reset_credits_enabled: boolean;
 	codex_auto_apply_reset_on_weekly_limit_enabled: boolean;
 	custom_endpoint: string | null;
-	model_mappings: string | null; // JSON string for OpenAI-compatible providers
-	model_fallbacks: string | null; // JSON string for model family fallback mappings
 	billing_type: string | null;
 	pause_reason: string | null; // null=not paused, 'manual'=user paused, 'failure_threshold'=auto-refresh failures, 'overage'=billing overage, 'oauth_invalid_grant'=OAuth refresh token rejected (needs reauth)
 	notes: string | null; // Free-text per-account operator notes
@@ -487,7 +484,6 @@ export interface AccountResponse {
 	/** Codex-only: auto-consume at the weekly limit with no usable Codex alternative; respects account pins and manual pauses (opt-in). */
 	autoApplyResetOnWeeklyLimitEnabled?: boolean;
 	customEndpoint: string | null;
-	modelMappings: { [key: string]: string | string[] } | null; // Parsed model mappings (arrays = cycling models)
 	usageUtilization: number | null; // Percentage utilization (0-100) from API
 	usageWindow: string | null; // Most restrictive window (e.g., "five_hour")
 	usageData: FullUsageData | null; // Full usage data for Anthropic accounts
@@ -563,7 +559,6 @@ export interface AccountResponse {
 		probeActive: boolean;
 	}> | null;
 	hasRefreshToken: boolean; // Indicates if the account has a refresh token (OAuth account)
-	modelFallbacks?: { [key: string]: string } | null;
 	billingType?: string | null;
 	notes: string | null; // Free-text per-account operator notes
 	renewalAnchor?: string | null;
@@ -584,6 +579,7 @@ export interface AccountResponse {
 	/** Anthropic rate-limit multiplier token (e.g. "20x", "5x"); null for Codex or when uncaptured. */
 	identityRateLimitTier: string | null;
 	identityCapturedAt: number | null; // ms-epoch when identity fields were last captured
+	openRouterMetadata?: OpenRouterAccountMetadata | null;
 	identityProfileFetchedAt: number | null; // ms-epoch of last successful profile fetch
 	/** True when this account shares a provider identity (external id or email) with
 	 *  another account — i.e. it is a duplicate login. Requires sibling context to
@@ -784,8 +780,6 @@ export function toAccount(row: AccountRow): Account {
 		codex_auto_apply_reset_on_weekly_limit_enabled:
 			!!row.codex_auto_apply_reset_on_weekly_limit_enabled,
 		custom_endpoint: row.custom_endpoint || null,
-		model_mappings: row.model_mappings || null,
-		model_fallbacks: row.model_fallbacks || null,
 		billing_type: row.billing_type || null,
 		pause_reason: row.pause_reason || null,
 		notes: row.notes || null,
@@ -817,41 +811,6 @@ export function toAccountResponse(account: Account): AccountResponse {
 	const sessionInfo = account.session_start
 		? `Session: ${account.session_request_count} requests`
 		: "No active session";
-
-	// Parse model mappings (supported for any provider)
-	let modelMappings: { [key: string]: string } | null = null;
-	if (account.model_mappings) {
-		try {
-			const parsed = JSON.parse(account.model_mappings);
-			// Stored as flat {"model": "target"} object
-			modelMappings =
-				typeof parsed === "object" && parsed !== null ? parsed : null;
-		} catch {
-			// If parsing fails, ignore model mappings
-			modelMappings = null;
-		}
-	} else if (account.custom_endpoint) {
-		// Also try parsing from custom_endpoint for backwards compatibility
-		try {
-			const parsed = JSON.parse(account.custom_endpoint);
-			if (parsed.modelMappings) {
-				modelMappings = parsed.modelMappings;
-			}
-		} catch {
-			// If parsing fails, ignore model mappings
-			modelMappings = null;
-		}
-	}
-
-	// Parse model fallbacks for all providers
-	let modelFallbacks: { [key: string]: string } | null = null;
-	if (account.model_fallbacks) {
-		try {
-			modelFallbacks = JSON.parse(account.model_fallbacks);
-		} catch {
-			modelFallbacks = null;
-		}
-	}
 
 	return {
 		id: account.id,
@@ -898,7 +857,6 @@ export function toAccountResponse(account: Account): AccountResponse {
 		autoApplyResetOnWeeklyLimitEnabled:
 			account.codex_auto_apply_reset_on_weekly_limit_enabled,
 		customEndpoint: account.custom_endpoint,
-		modelMappings,
 		usageUtilization: null, // Will be filled in by API handler from cache
 		usageWindow: null, // Will be filled in by API handler from cache
 		usageData: null, // Will be filled in by API handler from cache
@@ -910,7 +868,6 @@ export function toAccountResponse(account: Account): AccountResponse {
 		providerOverloadKey: null,
 		providerOverloadedUntil: null,
 		hasRefreshToken: !!account.refresh_token, // OAuth accounts have refresh tokens
-		modelFallbacks,
 		billingType: account.billing_type,
 		notes: account.notes,
 		renewalAnchor: account.renewal_anchor,

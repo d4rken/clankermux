@@ -51,9 +51,9 @@ const NAV_ITEMS: NavItem[] = [
 	{ label: "Usage", icon: Gauge, path: "/limits" },
 	{ label: "Requests", icon: Activity, path: "/requests" },
 	{ label: "Accounts", icon: Users, path: "/accounts" },
-	{ label: "Routing Chains", icon: Zap, path: "/combos" },
+	{ label: "Routing", icon: Zap, path: "/routing" },
 	{ label: "API Keys", icon: Key, path: "/api-keys" },
-	{ label: "Models", icon: Boxes, path: "/models" },
+	{ label: "Client Models", icon: Boxes, path: "/models" },
 	{ label: "Logs", icon: FileText, path: "/logs" },
 	{ label: "System", icon: HeartPulse, path: "/system" },
 	{ label: "Settings", icon: Settings, path: "/settings" },
@@ -243,7 +243,7 @@ export function Navigation() {
 								>
 									{/* px-2.5 and a tighter gap than the size variant's px-5.
 									    At the 192px sidebar the default padding leaves ~108px
-									    for the label, and "Routing Chains" needs more than that
+									    for the label, and "Client Models" needs more than that
 									    — with `whitespace-nowrap` from buttonVariants it would
 									    overflow the button rather than wrap. tailwind-merge
 									    resolves these over the variant's own padding. */}

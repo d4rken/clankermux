@@ -1,5 +1,6 @@
 import { describe, expect, it } from "bun:test";
 import { encodeConnect } from "../connect";
+import { DevinProvider, getDevinReportedModel } from "../provider";
 import { convertDevinResponse } from "../stream";
 import {
 	ChatToolCallSchema,
@@ -143,4 +144,39 @@ describe("Devin response translation", () => {
 		expect(response.status).toBe(502);
 		expect((await response.json()).type).toBe("error");
 	});
+});
+
+it.each([
+	false,
+	true,
+])("records only actual upstream model evidence, including late stream metadata (stream=%s)", async (stream) => {
+	const provider = new DevinProvider();
+	const request = new Request("https://server.codeium.com/chat", {
+		headers: {
+			"x-clankermux-upstream-model": "swe-2-high",
+			"x-clankermux-request-stream": String(stream),
+		},
+	});
+	const absent = await provider.normalizeUpstreamResponse(
+		upstream([
+			frame({ deltaText: "hello", stopReason: StopReason.STOP_PATTERN }),
+			end,
+		]),
+		request,
+	);
+	await absent.text();
+	expect(getDevinReportedModel(absent)).toBeNull();
+	const actual = await provider.normalizeUpstreamResponse(
+		upstream([
+			frame({ deltaText: "hello" }),
+			frame({
+				actualModelUid: "swe-2-actual",
+				stopReason: StopReason.STOP_PATTERN,
+			}),
+			end,
+		]),
+		request,
+	);
+	await actual.text();
+	expect(getDevinReportedModel(actual)).toBe("swe-2-actual");
 });

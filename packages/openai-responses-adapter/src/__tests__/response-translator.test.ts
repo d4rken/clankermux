@@ -201,7 +201,7 @@ describe("translateAnthropicResponseToResponses", () => {
 		expect(result.id).toBe("resp_006");
 		expect(result.object).toBe("response");
 		expect(result.status).toBe("completed");
-		expect(result.model).toBe("my-model");
+		expect(result.model).toBe(resp.model);
 		expect(typeof result.created_at).toBe("number");
 		expect(result.created_at).toBeGreaterThan(0);
 	});

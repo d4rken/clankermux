@@ -23,7 +23,7 @@ async function callHandleProxy(
 	ctx: ProxyContext,
 	isInternal = false,
 ) {
-	const { handleProxy } = await import("../proxy");
+	const { handleProxy } = await import("./fixtures/routing-harness");
 	return handleProxy(req, url, ctx, null, null, isInternal);
 }
 
@@ -150,12 +150,15 @@ function jsonResponse(body: object, status: number) {
 	});
 }
 
-function makeRequest(headers: Record<string, string> = {}) {
+function makeRequest(
+	headers: Record<string, string> = {},
+	model = "claude-sonnet-4-5",
+) {
 	return new Request("https://proxy.local/v1/messages", {
 		method: "POST",
 		headers: { "Content-Type": "application/json", ...headers },
 		body: JSON.stringify({
-			model: "claude-sonnet-4-5",
+			model,
 			messages: [{ role: "user", content: "hello" }],
 			max_tokens: 16,
 		}),
@@ -176,7 +179,7 @@ describe("force-account proxy override", () => {
 		setForcedAccount(account.id);
 		globalThis.fetch = mock(async () => devinReply()) as never;
 		try {
-			const req = makeRequest();
+			const req = makeRequest({}, "swe-2-high");
 			const response = await callHandleProxy(req, new URL(req.url), ctx);
 			expect(response.status).toBe(200);
 			expect((await response.json()).content[0].text).toBe("hello from SWE-2");
@@ -207,7 +210,7 @@ describe("force-account proxy override", () => {
 			async () => new Response(null, { status: 401 }),
 		) as never;
 		try {
-			const req = makeRequest();
+			const req = makeRequest({}, "swe-2-high");
 			const response = await callHandleProxy(req, new URL(req.url), ctx);
 			expect(response.status).toBe(401);
 			await response.text();
@@ -231,7 +234,7 @@ describe("force-account proxy override", () => {
 		setForcedAccount(account.id);
 		globalThis.fetch = mock(async () => devinReply(true)) as never;
 		try {
-			const req = makeRequest();
+			const req = makeRequest({}, "swe-2-high");
 			const response = await callHandleProxy(req, new URL(req.url), ctx);
 			expect(response.status).toBe(429);
 			expect((await response.json()).error.type).toBe("rate_limit_error");
@@ -302,11 +305,11 @@ describe("force-account proxy override", () => {
 		const req = makeRequest({ "x-clankermux-deny-official-anthropic": "1" });
 		const resp = await callHandleProxy(req, new URL(req.url), ctx);
 
-		expect(resp.status).toBe(503);
+		expect(resp.status).toBe(403);
 		const body = (await resp.json()) as {
 			error: { type: string };
 		};
-		expect(body.error.type).toBe("anthropic_excluded_no_account");
+		expect(body.error.type).toBe("routing_policy_rejected");
 		// The forced Claude account must never have been contacted.
 		expect(fetchCalled).toBe(false);
 	});
@@ -473,7 +476,7 @@ describe("force-account proxy override", () => {
 		expect(getAccountMock.mock.calls).toHaveLength(0);
 	});
 
-	it("missing forced id returns 503 forced_account_missing AND auto-clears the force", async () => {
+	it("missing forced destination returns403 without clearing the restriction", async () => {
 		const other = makeAccount({ id: "other-1", name: "Other-1" });
 		const { ctx } = makeContext([other]);
 		// Force points at an account that does not exist.
@@ -487,14 +490,14 @@ describe("force-account proxy override", () => {
 			ctx,
 		);
 
-		expect(response.status).toBe(503);
+		expect(response.status).toBe(403);
 		const body = (await response.json()) as Record<string, unknown>;
 		const error = body.error as Record<string, unknown>;
-		expect(error.type).toBe("forced_account_missing");
+		expect(error.type).toBe("routing_policy_rejected");
 
-		// Force was auto-cleared.
+		// Future requests retain the restriction until the operator changes it.
 		const { getForcedAccount } = await import("../handlers");
-		expect(getForcedAccount()).toBeNull();
+		expect(getForcedAccount()).toBe("ghost-account");
 	});
 
 	it("token-resolution throw returns a local 502 error Response (not null/failover)", async () => {

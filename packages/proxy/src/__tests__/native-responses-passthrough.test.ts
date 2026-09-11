@@ -9,6 +9,7 @@ import {
 	setNativeResponsesRequestContext,
 } from "@clankermux/types";
 import type { ProxyContext } from "../handlers";
+import { configureLiteralRoute } from "./fixtures/routing-harness";
 
 mock.module("../inline-worker", () => ({ EMBEDDED_WORKER_CODE: "" }));
 
@@ -25,7 +26,7 @@ mock.module("../inline-worker", () => ({ EMBEDDED_WORKER_CODE: "" }));
  */
 
 async function callHandleProxy(req: Request, url: URL, ctx: ProxyContext) {
-	const { handleProxy } = await import("../proxy");
+	const { handleProxy } = await import("./fixtures/routing-harness");
 	return handleProxy(req, url, ctx);
 }
 
@@ -528,7 +529,7 @@ describe("native Responses passthrough (Stage A, request leg)", () => {
 		expect(text).toBe(rawCodexSse);
 	});
 
-	it("applies an active per-attempt model override to the native body", async () => {
+	it("applies the frozen literal routing target to the native body", async () => {
 		const codex = makeCodexAccount();
 		let capturedBody: string | null = null;
 
@@ -540,8 +541,9 @@ describe("native Responses passthrough (Stage A, request leg)", () => {
 			},
 		) as never;
 
-		const { proxyWithAccount } = await import("../handlers/proxy-operations");
+		const { proxyWithAccount } = await import("./fixtures/routing-harness");
 		const ctx = makeContext([codex]);
+		await configureLiteralRoute(ctx, "gpt-5.4", codex.id, "gpt-5.4-override");
 		const req = makeTranslatedRequest();
 		const requestBodyBuffer = await req.clone().arrayBuffer();
 		const requestMeta: RequestMeta = {
@@ -561,7 +563,6 @@ describe("native Responses passthrough (Stage A, request leg)", () => {
 			() => undefined,
 			0,
 			ctx,
-			"gpt-5.4-override",
 		);
 
 		expect(res?.status).toBe(200);
@@ -574,7 +575,7 @@ describe("native Responses passthrough (Stage A, request leg)", () => {
 		expect(JSON.stringify(upstreamBody)).toContain("native marker hello");
 	});
 
-	it("corrupt nativeBody → falls back to the TRANSLATED body, no native flag upstream, response not native-marked", async () => {
+	it("rejects corrupt nativeBody before any upstream send", async () => {
 		const codex = makeCodexAccount();
 		let capturedBody: string | null = null;
 		let capturedNativeHeader: string | null = null;
@@ -597,18 +598,9 @@ describe("native Responses passthrough (Stage A, request leg)", () => {
 		);
 		const res = await callHandleProxy(req, new URL(req.url), ctx);
 
-		expect(res.status).toBe(200);
-		expect(capturedBody).not.toBeNull();
-		// The corrupt native body never goes upstream: the translated Anthropic
-		// body takes over (Anthropic→Codex translation ran on the codex account).
-		expect(JSON.stringify(capturedBody)).toContain("translated marker hello");
-		expect(JSON.stringify(capturedBody)).not.toContain("native marker hello");
-		expect(JSON.stringify(capturedBody)).not.toContain("web_search");
+		expect(res.status).toBe(400);
+		expect(capturedBody).toBeNull();
 		expect(capturedNativeHeader).toBeNull();
-		// And the response is NOT native-marked — the back-translation ran.
-		expect(res.headers.get(NATIVE_RESPONSES_RESPONSE_HEADER)).toBeNull();
-		const resText = await res.text();
-		expect(resText).toContain("message_start");
 	});
 });
 
@@ -643,7 +635,7 @@ describe("native Responses passthrough — request recording", () => {
 		const { handleResponsesRequest } = await import(
 			"@clankermux/openai-responses-adapter"
 		);
-		const { handleProxy } = await import("../proxy");
+		const { handleProxy } = await import("./fixtures/routing-harness");
 
 		globalThis.fetch = mock(
 			async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -773,7 +765,7 @@ describe("native Responses passthrough — non-streaming client (integration)", 
 			const { handleResponsesRequest } = await import(
 				"@clankermux/openai-responses-adapter"
 			);
-			const { handleProxy } = await import("../proxy");
+			const { handleProxy } = await import("./fixtures/routing-harness");
 			const { drainPendingUsageFinalizers } = await import(
 				"../response-handler"
 			);

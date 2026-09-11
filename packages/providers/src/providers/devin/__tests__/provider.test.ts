@@ -8,6 +8,7 @@ import {
 } from "../client";
 import {
 	DevinProvider,
+	getDevinRequestProvenance,
 	isDevinSessionAuthenticationFailure,
 } from "../provider";
 import {
@@ -340,4 +341,53 @@ it("carries confirmed session rejection only through local request provenance", 
 			(key) => key.includes("reauth") || key.includes("auth-rejected"),
 		),
 	).toBe(false);
+});
+
+it("attests the exact generated model and bytes through private request identity", async () => {
+	const provider = new DevinProvider(new Client());
+	const request = new Request("https://server.codeium.com/v1/messages", {
+		method: "POST",
+		headers: { "content-type": "application/json" },
+		body: JSON.stringify({
+			model: "swe-2-high",
+			messages: [{ role: "user", content: "hi" }],
+		}),
+	});
+	const transformed = await provider.transformRequestBody(request, account);
+	const provenance = getDevinRequestProvenance(transformed);
+	expect(provenance).toMatchObject({
+		kind: "inference",
+		model: "swe-2-high",
+		accountId: account.id,
+		url: transformed.url,
+		method: "POST",
+	});
+	expect(provenance?.bodySha256).toBe(
+		new Bun.CryptoHasher("sha256")
+			.update(await transformed.clone().arrayBuffer())
+			.digest("hex"),
+	);
+	expect(getDevinRequestProvenance(transformed.clone())).toBeNull();
+	expect(Object.isFrozen(provenance)).toBe(true);
+});
+it("uses the shared local count URL without loading credentials", async () => {
+	const provider = new DevinProvider(new Client());
+	const url = provider.buildUrl("/v1/messages/count_tokens", "", account);
+	expect(url).toBe("https://clankermux.local/devin/count_tokens");
+	const result = await provider.transformRequestBody(
+		new Request(url, {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({
+				model: "swe-2-high",
+				messages: [{ role: "user", content: "hi" }],
+			}),
+		}),
+	);
+	expect(getDevinRequestProvenance(result)).toMatchObject({
+		kind: "synthetic",
+		status: 200,
+		url,
+	});
+	expect((await result.json()).input_tokens).toBeGreaterThan(0);
 });

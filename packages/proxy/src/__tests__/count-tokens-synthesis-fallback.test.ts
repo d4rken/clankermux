@@ -1,7 +1,7 @@
 import { describe, expect, it, mock } from "bun:test";
 import type { Account } from "@clankermux/types";
 import type { ProxyContext } from "../handlers";
-import { handleProxy } from "../proxy";
+import { handleProxy } from "./fixtures/routing-harness";
 
 function makeAccount(overrides: Partial<Account> = {}): Account {
 	return {
@@ -91,8 +91,11 @@ function makeCountTokensRequest(): Request {
 }
 
 describe("count_tokens last-resort synthesis when pool is exhausted", () => {
-	it("synthesizes a 200 input_tokens from a gated-out Codex account instead of 503", async () => {
-		// The only account is a non-paused Codex account that is rate-limited, so
+	it.each([
+		"codex",
+		"openrouter",
+	])("synthesizes a local count from a gated-out %s account", async (provider) => {
+		// The only account is a non-paused local-count account that is rate-limited, so
 		// selection gates it out → accounts.length === 0. A /v1/messages request
 		// would 503 here (see pool-exhausted.test.ts); count_tokens must NOT.
 		const fetchMock = mock(async () => {
@@ -104,7 +107,7 @@ describe("count_tokens last-resort synthesis when pool is exhausted", () => {
 			const rateLimitedCodex = makeAccount({
 				id: "acc-codex",
 				name: "codex-account",
-				provider: "codex",
+				provider,
 				rate_limited_until: Date.now() + 60_000,
 			});
 			const ctx = makeContext([rateLimitedCodex]);
@@ -117,9 +120,116 @@ describe("count_tokens last-resort synthesis when pool is exhausted", () => {
 
 			expect(fetchMock).toHaveBeenCalledTimes(0);
 			expect(response.status).toBe(200);
+			expect(response.headers.get("x-clankermux-token-count-source")).toBe(
+				"local-estimate",
+			);
 			const body = (await response.json()) as { input_tokens?: number };
 			expect(typeof body.input_tokens).toBe("number");
 			expect(body.input_tokens as number).toBeGreaterThan(0);
+		} finally {
+			globalThis.fetch = originalFetch;
+		}
+	});
+	it.each([
+		["codex", false],
+		["codex", true],
+		["openrouter", false],
+		["openrouter", true],
+	] as const)("counts locally for exhausted %s accounts (account pin=%s)", async (provider, accountPin) => {
+		const account = makeAccount({
+			provider,
+			rate_limited_until: Date.now() + 60_000,
+			refresh_token: null,
+		});
+		const ctx = makeContext([account]);
+		ctx.dbOps.getApiKeyPin = mock(async () => ({
+			pinnedAccountId: accountPin ? account.id : null,
+			pinnedProviders: accountPin ? null : [provider],
+		})) as never;
+		const originalFetch = globalThis.fetch;
+		const fetchMock = mock(async () => {
+			throw new Error("local pinned count contacted upstream");
+		});
+		globalThis.fetch = fetchMock as typeof fetch;
+		try {
+			const req = makeCountTokensRequest();
+			const response = await handleProxy(
+				req,
+				new URL(req.url),
+				ctx,
+				"key-pinned",
+			);
+			expect(response.status).toBe(200);
+			expect(response.headers.get("x-clankermux-token-count-source")).toBe(
+				"local-estimate",
+			);
+			expect((await response.json()).input_tokens).toBeGreaterThan(0);
+			expect(fetchMock).not.toHaveBeenCalled();
+			expect(ctx.requestRecorder.begin).not.toHaveBeenCalled();
+		} finally {
+			globalThis.fetch = originalFetch;
+		}
+	});
+
+	it.each([
+		"paused",
+		"custom-endpoint",
+		"organization-denied",
+	])("does not bypass %s for a pinned local count or substitute an unpinned account", async (reason) => {
+		const account = makeAccount({
+			provider: "openrouter",
+			rate_limited_until: Date.now() + 60_000,
+			paused: reason === "paused",
+			custom_endpoint:
+				reason === "custom-endpoint" ? "https://gateway.example" : null,
+			rate_limited_reason:
+				reason === "organization-denied" ? "org_permission_denied" : null,
+		});
+		const ctx = makeContext([
+			account,
+			makeAccount({ id: "other", provider: "codex" }),
+		]);
+		ctx.dbOps.getApiKeyPin = mock(async () => ({
+			pinnedAccountId: account.id,
+			pinnedProviders: null,
+		})) as never;
+		const originalFetch = globalThis.fetch;
+		const fetchMock = mock(async () => {
+			throw new Error("blocked destination contacted");
+		});
+		globalThis.fetch = fetchMock as typeof fetch;
+		try {
+			const req = makeCountTokensRequest();
+			const response = await handleProxy(
+				req,
+				new URL(req.url),
+				ctx,
+				"key-pinned",
+			);
+			expect(response.status).toBe(503);
+			expect(response.headers.get("x-clankermux-pool-status")).toBe(
+				"pinned-target-unavailable",
+			);
+			expect(fetchMock).not.toHaveBeenCalled();
+		} finally {
+			globalThis.fetch = originalFetch;
+		}
+	});
+
+	it("does not use a paused OpenRouter account for a local count", async () => {
+		const ctx = makeContext([
+			makeAccount({ provider: "openrouter", paused: true }),
+		]);
+		const originalFetch = globalThis.fetch;
+		const fetchMock = mock(async () => {
+			throw new Error("Paused account contacted");
+		});
+		globalThis.fetch = fetchMock as typeof fetch;
+		try {
+			const req = makeCountTokensRequest();
+			const response = await handleProxy(req, new URL(req.url), ctx);
+			expect(response.status).not.toBe(200);
+			expect(fetchMock).not.toHaveBeenCalled();
 		} finally {
 			globalThis.fetch = originalFetch;
 		}

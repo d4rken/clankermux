@@ -3,7 +3,7 @@ import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import { DatabaseOperations } from "@clankermux/database";
 import { tempDbTracker } from "@clankermux/test-support";
 import { AutoRefreshScheduler } from "../auto-refresh-scheduler";
-import type { ProxyContext } from "../proxy";
+import type { ProxyContext } from "./fixtures/routing-harness";
 
 // Test database path
 const tmpDb = tempDbTracker("test-token-refresh-hierarchy");

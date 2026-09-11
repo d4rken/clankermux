@@ -1,3 +1,4 @@
+import { customToolInput, type ToolTranslation } from "./tool-translation";
 import type {
 	AnthropicResponse,
 	OutputFunctionCallItem,
@@ -10,6 +11,7 @@ export function translateAnthropicResponseToResponses(
 	resp: AnthropicResponse,
 	responseId: string,
 	model: string,
+	tools?: ToolTranslation,
 ): ResponsesResponse {
 	const output: ResponsesResponse["output"] = [];
 
@@ -26,11 +28,29 @@ export function translateAnthropicResponseToResponses(
 			output.push(msgItem);
 			outputIdx++;
 		} else if (block.type === "tool_use") {
+			const identity = tools?.identity(block.name) ?? {
+				type: "function",
+				name: block.name,
+			};
+			if (identity.type === "custom") {
+				output.push({
+					type: "custom_tool_call",
+					id: `${responseId}_fc_${outputIdx}`,
+					call_id: block.id,
+					name: identity.name,
+					...(identity.namespace ? { namespace: identity.namespace } : {}),
+					input: customToolInput(block.input),
+					status: "completed",
+				});
+				outputIdx++;
+				continue;
+			}
 			const fcItem: OutputFunctionCallItem = {
 				type: "function_call",
 				id: `${responseId}_fc_${outputIdx}`,
 				call_id: block.id,
-				name: block.name,
+				name: identity.name,
+				...(identity.namespace ? { namespace: identity.namespace } : {}),
 				arguments: JSON.stringify(block.input),
 				status: "completed",
 			};
@@ -43,7 +63,7 @@ export function translateAnthropicResponseToResponses(
 		id: responseId,
 		object: "response",
 		created_at: Math.floor(Date.now() / 1000),
-		model,
+		model: resp.model || model,
 		status: "completed",
 		output,
 		usage: translateAnthropicUsage(resp.usage),

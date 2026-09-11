@@ -46,7 +46,7 @@ async function callHandleProxy(
 	ctx: ProxyContext,
 	isInternal = false,
 ) {
-	const { handleProxy } = await import("../proxy");
+	const { handleProxy } = await import("./fixtures/routing-harness");
 	return handleProxy(req, url, ctx, null, null, isInternal);
 }
 
@@ -213,7 +213,7 @@ describe("handleProxy live-dashboard ingress events", () => {
 	let capture: (evt: RequestEvt) => void;
 
 	beforeAll(async () => {
-		await import("../proxy");
+		await import("./fixtures/routing-harness");
 	});
 
 	beforeEach(() => {
@@ -250,6 +250,35 @@ describe("handleProxy live-dashboard ingress events", () => {
 
 	const ofType = <T extends RequestEvt["type"]>(type: T) =>
 		events.filter((e) => e.type === type) as Extract<RequestEvt, { type: T }>[];
+
+	it.each([
+		200, 400,
+	])("retracts a local OpenRouter count with status %s without recording it", async (status) => {
+		const fetchMock = mock(async () => {
+			throw new Error("local count reached upstream");
+		});
+		globalThis.fetch = fetchMock as typeof fetch;
+		const ctx = makeContext([
+			makeAccount({ provider: "openrouter", api_key: null }),
+		]);
+		const req = new Request("https://proxy.local/v1/messages/count_tokens", {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({
+				model: MODEL,
+				messages: status === 200 ? [{ role: "user", content: "hi" }] : null,
+			}),
+		});
+		const response = await callHandleProxy(req, new URL(req.url), ctx);
+		expect(response.status).toBe(status);
+		expect(fetchMock).not.toHaveBeenCalled();
+		expect(ctx.requestRecorder.begin).not.toHaveBeenCalled();
+		expect(ctx.dbOps.saveRequest).not.toHaveBeenCalled();
+		expect(ofType("start")).toHaveLength(0);
+		expect(ofType("ingress")).toHaveLength(1);
+		expect(ofType("ingress-end")).toHaveLength(1);
+		expect(ofType("ingress-end")[0].id).toBe(ofType("ingress")[0].id);
+	});
 
 	it("announces the request at ingestion, before the upstream is called", async () => {
 		globalThis.fetch = upstreamOnlyFetch(() => ok200());

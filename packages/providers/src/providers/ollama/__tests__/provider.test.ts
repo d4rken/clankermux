@@ -99,7 +99,7 @@ describe("OllamaProvider", () => {
 			const transformed = await provider.transformRequestBody(request, account);
 			const result = (await transformed.json()) as { model?: string };
 
-			expect(result.model).toBe("llama3.1");
+			expect(result.model).toBe("claude-sonnet-4-5");
 		});
 
 		it("should pass through unmapped models unchanged", async () => {
@@ -164,7 +164,7 @@ describe("OllamaProvider", () => {
 			const transformed = await provider.transformRequestBody(request, account);
 			const result = (await transformed.json()) as { model?: string };
 
-			expect(result.model).toBe("llama3.1");
+			expect(result.model).toBe("claude-sonnet-4-5-20250929");
 		});
 
 		it("should apply family-level fallback for opus models", async () => {
@@ -186,7 +186,7 @@ describe("OllamaProvider", () => {
 			const transformed = await provider.transformRequestBody(request, account);
 			const result = (await transformed.json()) as { model?: string };
 
-			expect(result.model).toBe("qwen3");
+			expect(result.model).toBe("claude-opus-4-6");
 		});
 
 		it("should not transform when no account is provided", async () => {
@@ -248,7 +248,7 @@ describe("OllamaProvider", () => {
 			const transformed = await provider.transformRequestBody(request, account);
 			const result = (await transformed.json()) as { model?: string };
 
-			expect(result.model).toBe("llama3.1");
+			expect(result.model).toBe("claude-sonnet-4-5");
 		});
 	});
 });

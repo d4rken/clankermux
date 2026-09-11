@@ -185,7 +185,7 @@ describe("OllamaCloudProvider", () => {
 			const transformed = await provider.transformRequestBody(request, account);
 			const body = await transformed.json();
 
-			expect(body.model).toBe("gemma3:4b");
+			expect(body.model).toBe("claude-sonnet-4-5");
 		});
 
 		it("passes through model unchanged without model_mappings", async () => {

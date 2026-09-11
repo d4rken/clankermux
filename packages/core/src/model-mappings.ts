@@ -1,13 +1,9 @@
 import { Logger } from "@clankermux/logger";
 import type { Account, ContextComposition } from "@clankermux/types";
-import { isDebugEnabled } from "./env";
 import { stripDatedModelSuffix } from "./models";
-import { safeJsonParse, validateModelMappings } from "./validation";
+import { safeJsonParse } from "./validation";
 
 const log = new Logger("ModelMappings");
-
-// Inline types to avoid Bun import issues
-// Types are now defined in index.ts and exported from there
 
 // Known model family patterns for O(1) direct matching
 // Pattern order: Check "opus" before "haiku" before "sonnet" to avoid substring collisions
@@ -19,10 +15,9 @@ export type ModelFamily = "opus" | "sonnet" | "haiku" | "fable";
 
 /**
  * Get the model family (opus/sonnet/haiku/fable) from a model ID
- * Uses the same pattern matching as mapModelName().
+ * Used for quota attribution; routing rule matching lives in routing.ts.
  * Mythos-class IDs (e.g. claude-mythos-5) resolve to the "fable" family —
- * Mythos 5 is the same underlying model as Fable 5, so they share routing,
- * combo, and provider-fallback behaviour.
+ * Mythos and Fable share quota attribution; routing uses its strict classifier.
  * @returns Model family or null if no pattern matches
  */
 export function getModelFamily(modelId: string): ModelFamily | null {
@@ -82,7 +77,7 @@ export function getAllowedModelsMessage(): string {
  */
 export function parseCustomEndpointData(
 	customEndpoint: string | null,
-): { endpoint?: string; modelMappings?: Record<string, string> } | null {
+): { endpoint?: string } | null {
 	if (!customEndpoint) {
 		return null;
 	}
@@ -94,266 +89,19 @@ export function parseCustomEndpointData(
 	}
 
 	try {
-		return safeJsonParse<{
-			endpoint?: string;
-			modelMappings?: Record<string, string>;
-		}>(trimmed, "custom_endpoint");
+		const parsed = safeJsonParse<{ endpoint?: string }>(
+			trimmed,
+			"custom_endpoint",
+		);
+		return parsed && typeof parsed.endpoint === "string"
+			? { endpoint: parsed.endpoint }
+			: null;
 	} catch (error) {
 		log.warn(
 			`Failed to parse custom_endpoint JSON, treating as plain string: ${error instanceof Error ? error.message : String(error)}`,
 		);
 		return { endpoint: trimmed };
 	}
-}
-
-/**
- * Parse model mappings from account's model_mappings field.
- * Values may be a single string or an ordered array of model names to try.
- */
-export function parseModelMappings(
-	modelMappings: string | null,
-): Record<string, string | string[]> | null {
-	if (!modelMappings) {
-		return null;
-	}
-
-	try {
-		return safeJsonParse<Record<string, string | string[]>>(
-			modelMappings,
-			"model_mappings",
-		);
-	} catch (error) {
-		log.warn(
-			`Failed to parse model_mappings JSON: ${error instanceof Error ? error.message : String(error)}`,
-		);
-		return null;
-	}
-}
-
-/**
- * Normalise a model mapping value to an array.
- */
-function toArray(value: string | string[]): string[] {
-	return Array.isArray(value) ? value : [value];
-}
-
-/**
- * True iff a raw mapping value is usable as a model target: a non-empty string,
- * or a non-empty array of non-empty strings.
- */
-function isValidMappingValue(value: unknown): value is string | string[] {
-	if (typeof value === "string") return value.trim().length > 0;
-	if (Array.isArray(value)) {
-		return (
-			value.length > 0 &&
-			value.every((item) => typeof item === "string" && item.trim().length > 0)
-		);
-	}
-	return false;
-}
-
-/**
- * Apply one configuration layer over `target`, dropping entries whose value is
- * not a usable model target. Unvalidated, `{"sonnet": null}` (or `42`, or `[]`)
- * would shadow a lower-precedence default and reach the wire as the outbound
- * model name via {@link toArray}.
- */
-function applyMappingLayer(
-	target: Record<string, string | string[]>,
-	layer: Record<string, unknown> | null | undefined,
-	source: string,
-): void {
-	if (!layer) return;
-	for (const [key, value] of Object.entries(layer)) {
-		if (!isValidMappingValue(value)) {
-			log.warn(
-				`Ignoring invalid model mapping for '${key}' from ${source}: ${JSON.stringify(value)}`,
-			);
-			continue;
-		}
-		target[key] = value;
-	}
-}
-
-/**
- * Built-in family defaults for `account.provider`, or undefined when the
- * provider has none. Own-property lookup only — a provider name that collides
- * with an Object.prototype key must not resolve to an inherited member.
- */
-function getProviderDefaultMappings(
-	provider: string,
-): Record<ModelFamily, string> | undefined {
-	return Object.hasOwn(PROVIDER_DEFAULT_MODEL_MAPPINGS, provider)
-		? PROVIDER_DEFAULT_MODEL_MAPPINGS[provider]
-		: undefined;
-}
-
-/**
- * Get effective model mappings for an account, merging model_fallbacks into
- * the arrays so that model_fallbacks becomes the second+ entry for each family.
- *
- * Layered lowest-precedence first: built-in provider defaults, then the env
- * override, then the account's `model_mappings`, then the legacy
- * `custom_endpoint` payload. Explicit configuration always beats a built-in
- * default.
- */
-export function getModelMappings(
-	account: Account,
-): Record<string, string | string[]> {
-	const mappings: Record<string, string | string[]> = Object.create(null);
-
-	// Built-in provider defaults (e.g. qwen → coder-model) — the lowest layer.
-	const providerDefaults = getProviderDefaultMappings(account.provider);
-	if (providerDefaults) {
-		Object.assign(mappings, providerDefaults);
-	}
-
-	// Check for environment variable overrides (only in Node.js)
-	if (
-		typeof process !== "undefined" &&
-		process.env?.OPENAI_COMPATIBLE_MODEL_MAPPINGS
-	) {
-		try {
-			const envMappings = safeJsonParse<Record<string, unknown>>(
-				process.env.OPENAI_COMPATIBLE_MODEL_MAPPINGS,
-				"OPENAI_COMPATIBLE_MODEL_MAPPINGS environment variable",
-			);
-			applyMappingLayer(
-				mappings,
-				envMappings,
-				"OPENAI_COMPATIBLE_MODEL_MAPPINGS environment variable",
-			);
-		} catch (error) {
-			log.warn(
-				"Failed to parse OPENAI_COMPATIBLE_MODEL_MAPPINGS environment variable:",
-				error,
-			);
-		}
-	}
-
-	// Check for account-specific mappings in model_mappings field
-	const accountMappings = parseModelMappings(account.model_mappings);
-	applyMappingLayer(
-		mappings,
-		accountMappings,
-		`model_mappings for account ${account.name}`,
-	);
-
-	// Check for legacy mappings in custom_endpoint JSON payload (fallback)
-	const customEndpointData = parseCustomEndpointData(account.custom_endpoint);
-	if (customEndpointData?.modelMappings) {
-		log.warn(
-			`Found model mappings in custom_endpoint for account ${account.name} - this is deprecated. Use model_mappings field instead.`,
-		);
-		applyMappingLayer(
-			mappings,
-			customEndpointData.modelMappings,
-			`custom_endpoint for account ${account.name}`,
-		);
-	}
-
-	// Merge model_fallbacks into the arrays so they become the next models to try
-	// after the primary mapping is exhausted. model_fallbacks is now deprecated as
-	// a separate concept — the array in model_mappings supersedes it.
-	if (account.model_fallbacks) {
-		const fallbacks = parseModelFallbacks(account.model_fallbacks);
-		if (fallbacks) {
-			for (const [family, fallbackModel] of Object.entries(fallbacks)) {
-				const existing = mappings[family];
-				if (existing !== undefined) {
-					const arr = toArray(existing);
-					if (!arr.includes(fallbackModel)) {
-						mappings[family] = [...arr, fallbackModel];
-					}
-				} else {
-					mappings[family] = fallbackModel;
-				}
-			}
-		}
-	}
-
-	return mappings;
-}
-
-/**
- * Check whether an account has any model mapping configuration.
- * Returns false if the account should just forward the model name unchanged.
- */
-function hasAccountModelMappings(account: Account): boolean {
-	// A provider with built-in family defaults always maps, even unconfigured.
-	if (getProviderDefaultMappings(account.provider)) return true;
-	if (account.model_mappings) return true;
-	if (account.model_fallbacks) return true;
-
-	const customEndpointData = parseCustomEndpointData(account.custom_endpoint);
-	if (customEndpointData?.modelMappings) return true;
-
-	// Check env override
-	if (
-		typeof process !== "undefined" &&
-		process.env?.OPENAI_COMPATIBLE_MODEL_MAPPINGS
-	) {
-		try {
-			const envMappings = safeJsonParse<Record<string, string | string[]>>(
-				process.env.OPENAI_COMPATIBLE_MODEL_MAPPINGS,
-				"OPENAI_COMPATIBLE_MODEL_MAPPINGS environment variable",
-			);
-			if (envMappings && Object.keys(envMappings).length > 0) return true;
-		} catch {
-			// Ignore — treat parse error as no env override
-		}
-	}
-
-	return false;
-}
-
-/**
- * Get the ordered list of models to try for a given Anthropic model name.
- * Returns [primaryModel, ...fallbacks] from the account's model_mappings.
- * Returns null if the account has no model mapping configuration — the model
- * name should be forwarded unchanged to the upstream provider.
- */
-export function getModelList(
-	anthropicModel: string,
-	account: Account,
-): string[] | null {
-	// No custom mappings configured — don't touch the model name
-	if (!hasAccountModelMappings(account)) {
-		return null;
-	}
-
-	const mappings = getModelMappings(account);
-
-	// Exact match first
-	if (mappings[anthropicModel] !== undefined) {
-		return toArray(mappings[anthropicModel]);
-	}
-
-	// Family match
-	const family = getModelFamily(anthropicModel);
-	if (family && mappings[family] !== undefined) {
-		return toArray(mappings[family]);
-	}
-
-	// No mapping for this model — pass through unchanged
-	return [anthropicModel];
-}
-
-/**
- * Map Anthropic model name to provider-specific model name (first in list).
- * Optimized for known model patterns with direct matching (O(1) vs O(n log n))
- */
-export function mapModelName(anthropicModel: string, account: Account): string {
-	const list = getModelList(anthropicModel, account);
-	if (!list) return anthropicModel;
-
-	const mapped = list[0];
-
-	if (isDebugEnabled("model") || process.env.NODE_ENV === "development") {
-		log.info(`Model mapping: ${anthropicModel} -> ${mapped}`);
-	}
-
-	return mapped;
 }
 
 /**
@@ -380,91 +128,8 @@ export function getEndpointUrl(account: Account): string {
 	return defaultEndpoint;
 }
 
-/**
- * Create custom endpoint data with endpoint and model mappings
- */
-export function createCustomEndpointData(
-	endpoint: string,
-	modelMappings?: Record<string, string>,
-): string {
-	const data: { endpoint?: string; modelMappings?: Record<string, string> } = {
-		endpoint,
-	};
-
-	if (modelMappings && Object.keys(modelMappings).length > 0) {
-		data.modelMappings = modelMappings;
-	}
-
-	return JSON.stringify(data);
-}
-
-/**
- * Parse model fallbacks from account's model_fallbacks field.
- * Model fallbacks map model family names (opus/sonnet/haiku/fable) to fallback model names.
- */
-export function parseModelFallbacks(
-	modelFallbacks: string | null,
-): Record<string, string> | null {
-	if (!modelFallbacks) {
-		return null;
-	}
-
-	try {
-		return safeJsonParse<Record<string, string>>(
-			modelFallbacks,
-			"model_fallbacks",
-		);
-	} catch (error) {
-		log.warn(
-			`Failed to parse model_fallbacks JSON: ${error instanceof Error ? error.message : String(error)}`,
-		);
-		return null;
-	}
-}
-
-/**
- * Validate model fallbacks for storage.
- * @deprecated Prefer storing fallbacks as arrays in model_mappings instead.
- */
-export function validateAndSanitizeModelFallbacks(
-	fallbacks: unknown,
-): Record<string, string> | null {
-	if (!fallbacks) {
-		return null;
-	}
-
-	try {
-		const result = validateModelMappings(fallbacks, "modelFallbacks");
-		// model_fallbacks only ever stored single strings — cast back
-		return Object.fromEntries(
-			Object.entries(result).map(([k, v]) => [k, Array.isArray(v) ? v[0] : v]),
-		);
-	} catch (error) {
-		log.warn(
-			`Invalid model fallbacks: ${error instanceof Error ? error.message : String(error)}`,
-		);
-		return null;
-	}
-}
-
-/**
- * Validate model mappings for storage. Values may be a string or string[].
- */
-export function validateAndSanitizeModelMappings(
-	mappings: unknown,
-): Record<string, string | string[]> | null {
-	if (!mappings) {
-		return null;
-	}
-
-	try {
-		return validateModelMappings(mappings, "modelMappings");
-	} catch (error) {
-		log.warn(
-			`Invalid model mappings: ${error instanceof Error ? error.message : String(error)}`,
-		);
-		return null;
-	}
+export function createCustomEndpointData(endpoint: string): string {
+	return JSON.stringify({ endpoint });
 }
 
 // ── Context-window-aware routing ─────────────────────────────────────────────
@@ -873,15 +538,7 @@ export function estimateContextWindowTokens(
 	return inputTokens + outputReserve;
 }
 
-/**
- * Default Anthropic-family → Codex model mapping, used when a Codex account has
- * no explicit `model_mappings` entry for the requested family.
- *
- * This is the single source of truth shared with the Codex provider's
- * `mapModel()`. Keeping both on this map is load-bearing: the context-window
- * gate and the provider MUST agree on which Codex model a defaulted request
- * actually hits, or the gate would size requests against the wrong window.
- */
+/** Central routing defaults for Claude families on Codex. */
 export const DEFAULT_CODEX_MODEL_BY_FAMILY: Record<
 	"opus" | "sonnet" | "haiku" | "fable",
 	string
@@ -914,66 +571,13 @@ export const DEFAULT_QWEN_MODEL_BY_FAMILY: Record<ModelFamily, string> = {
 	fable: "coder-model",
 };
 
-/**
- * Built-in family defaults per provider, seeded by {@link getModelMappings} as
- * the LOWEST-precedence layer. This is the single mechanism for "this provider
- * has a sensible default target for every Claude family" — providers must not
- * re-implement it in their own request hooks.
- *
- * Codex is deliberately absent: its defaults apply through
- * {@link resolveCodexTargetModel} and the Codex provider's own `mapModel()`,
- * which the context-window gate is built around. Registering them here too
- * would give Codex two disagreeing default paths.
- */
-export const PROVIDER_DEFAULT_MODEL_MAPPINGS: Partial<
-	Record<string, Record<ModelFamily, string>>
-> = {
-	qwen: DEFAULT_QWEN_MODEL_BY_FAMILY,
-	devin: { opus: "swe-2", sonnet: "swe-2", haiku: "swe-2", fable: "swe-2" },
-};
-
-/**
- * Resolve the Codex model a request will actually be sent to for the given
- * account: the account's explicit `model_mappings` entry if one exists,
- * otherwise the family default (`DEFAULT_CODEX_MODEL_BY_FAMILY`). Mirrors the
- * Codex provider's `mapModel()` precedence exactly. A non-Claude model with no
- * mapping is returned unchanged.
- */
-export function resolveCodexTargetModel(
-	effectiveModel: string,
-	account: Account,
-): string {
-	const mapped = mapModelName(effectiveModel, account);
-	if (mapped !== effectiveModel) {
-		return mapped; // explicit account mapping (or combo slot already-gpt model) wins
-	}
-	const family = getModelFamily(effectiveModel);
-	if (family) {
-		return DEFAULT_CODEX_MODEL_BY_FAMILY[family];
-	}
-	return effectiveModel;
-}
-
-/**
- * Check whether a Codex account can serve a request of the given estimated size.
- *
- * Resolves the target model via `resolveCodexTargetModel` (account mapping, then
- * family default — matching what the provider will actually send), looks up
- * `resolveModelMaxContextWindow`, and returns true if the estimate fits within
- * `floor(window * SAFETY_MARGIN)`. Models with no known window always fit — no
- * false exclusion.
- *
- * @param account      The Codex account to check
- * @param effectiveModel  The Anthropic-side model name (e.g. "claude-opus-4-7")
- *                        — resolved through the account's mapping / family default.
- * @param estimate     Token estimate from `estimateRequestTokens()`
- */
+/** Size admission uses the already-resolved upstream model. */
 export function codexAccountFitsRequest(
-	account: Account,
+	_account: Account,
 	effectiveModel: string,
 	estimate: number,
 ): boolean {
-	const target = resolveCodexTargetModel(effectiveModel, account);
+	const target = effectiveModel;
 	const window = resolveModelMaxContextWindow(target);
 	if (window === undefined) return true; // unknown model → fits (no false exclusion)
 	return estimate <= Math.floor(window * SAFETY_MARGIN);
@@ -995,11 +599,11 @@ export function codexAccountFitsRequest(
  * `codexAccountFitsRequest`.
  */
 export function codexAccountFitsRequestUnmargined(
-	account: Account,
+	_account: Account,
 	effectiveModel: string,
 	estimate: number,
 ): boolean {
-	const target = resolveCodexTargetModel(effectiveModel, account);
+	const target = effectiveModel;
 	const window = resolveModelMaxContextWindow(target);
 	if (window === undefined) return true;
 	return estimate <= window;

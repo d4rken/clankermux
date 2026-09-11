@@ -49,7 +49,28 @@ export function createApiKeysGenerateHandler(dbOps: DatabaseOperations) {
 				);
 			}
 
-			const result = await generateApiKey(dbOps, name.trim());
+			const accountId = body.accountId ?? null;
+			const providers = body.providers ?? null;
+			if (
+				(accountId !== null &&
+					(typeof accountId !== "string" || !accountId.trim())) ||
+				(providers !== null &&
+					(!Array.isArray(providers) ||
+						!providers.length ||
+						providers.some(
+							(p: unknown) => typeof p !== "string" || !isKnownProvider(p),
+						))) ||
+				(accountId !== null && providers !== null)
+			)
+				throw BadRequest(
+					"Choose one account, a nonempty provider list, or Unrestricted",
+				);
+			if (accountId !== null && !(await dbOps.getAccount(accountId)))
+				throw BadRequest("Destination account does not exist");
+			const result = await generateApiKey(dbOps, name.trim(), {
+				accountId,
+				providers,
+			});
 			const response: ApiKeyGenerationResult = {
 				id: result.id,
 				name: result.name,
@@ -311,6 +332,17 @@ export function createApiKeyDeleteHandler(dbOps: DatabaseOperations) {
 				headers: { "Content-Type": "application/json" },
 			});
 		} catch (error) {
+			if (
+				error instanceof Error &&
+				/referenced by routing rules|referenced by routing rules or API key destinations/.test(
+					error.message,
+				)
+			) {
+				return Response.json(
+					{ error: `${error.message}. Edit or remove those references first.` },
+					{ status: 409 },
+				);
+			}
 			return errorResponse(error);
 		}
 	};

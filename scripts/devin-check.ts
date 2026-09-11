@@ -39,7 +39,6 @@ if (process.argv.includes("--smoke")) {
 		provider: "devin",
 		api_key: token,
 		custom_endpoint: null,
-		model_mappings: null,
 		auto_pause_on_overage_enabled: true,
 	} as Account;
 	const messages: unknown[] = [

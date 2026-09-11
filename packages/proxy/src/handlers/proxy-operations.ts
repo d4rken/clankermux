@@ -1,15 +1,11 @@
 import {
 	accountWideExhaustion,
 	getModelFamily,
-	getModelList,
 	isDebugEnabled,
 	isProtectedFamily,
 	isScopedOnlyUnifiedRejection,
-	logError,
 	NETWORK,
 	PAUSE_REASON_NEEDS_REAUTH,
-	ProviderError,
-	resolveCodexTargetModel,
 	resolveModelMaxContextWindow,
 	TIME_CONSTANTS,
 	ValidationError,
@@ -19,12 +15,12 @@ import {
 	discardTeeBranch,
 	discardUpstreamBody,
 } from "@clankermux/core/response-body-disposal";
-import { withSanitizedProxyHeaders } from "@clankermux/http-common";
 import { Logger } from "@clankermux/logger";
 import { stripCacheControlFromOpenAIRequest } from "@clankermux/openai-formats";
 import {
 	DevinSessionAuthenticationError,
 	devinClient,
+	getDevinRequestProvenance,
 	getFreshCapacity,
 	getProvider,
 	isAnthropicHardLimitStatus,
@@ -33,6 +29,7 @@ import {
 	isDevinSessionAuthenticationFailure,
 	usageCache,
 } from "@clankermux/providers";
+import { supportsLocalTokenCounting } from "@clankermux/providers/local-token-count";
 import {
 	type Account,
 	type AnthropicUsageData,
@@ -52,7 +49,6 @@ import { recordProtectedFamilyDemand } from "../protected-family-demand";
 import {
 	applyProviderOverloadCooldown,
 	completeProviderOverloadProbe,
-	getProviderOverloadUntil,
 	isOfficialAnthropicProvider,
 	type OverloadProbeEvidence,
 	type OverloadProbeToken,
@@ -61,7 +57,18 @@ import {
 } from "../provider-overload-cooldown";
 import { captureRawUpstreamObservation } from "../raw-response-observations";
 import { RequestBodyContext } from "../request-body-context";
+import {
+	getAttemptTarget,
+	RoutingPolicyError,
+	rejectModelSwitchFields,
+} from "../resolved-route";
 import { forwardToClient } from "../response-handler";
+import {
+	type RoutingAttemptAudit,
+	recordLocalRoutingOutcome,
+	sendAuthorizedRequest,
+} from "../routing-dispatch";
+import { isModelRouteRestriction } from "../routing-response-audit";
 import { dispatchObservationSource } from "../should-record-request";
 import {
 	type AccountQuota429,
@@ -83,7 +90,7 @@ import {
 	applyRateLimitCooldown,
 	completeRateLimitProbe,
 } from "./rate-limit-cooldown";
-import { makeProxyRequest, validateProviderPath } from "./request-handler";
+import { validateProviderPath } from "./request-handler";
 import {
 	handleProxyError,
 	persistRateLimitStatusMeta,
@@ -216,18 +223,8 @@ export type ProxyAttemptOutcome =
 	| { kind: "overload_529"; cooldownUntil?: number }
 	| { kind: "overload_suppressed"; until: number | null }
 	| { kind: "model_not_found" }
-	/**
-	 * The account is not ENTITLED to the model: it exists, but this account's
-	 * plan does not serve it (the Codex/ChatGPT plan-scoped rejection).
-	 *
-	 * Split out from `model_not_found` because only this one is unambiguous
-	 * evidence about the model. `model_not_found` is also emitted after an
-	 * account's model-fallback list is exhausted, where the kind is decided by
-	 * the LAST response's status alone — a primary that 429s and a fallback that
-	 * 404s produces `model_not_found` for what was really a capacity failure.
-	 * Anything that reasons about "the model, not the load" must key on this
-	 * kind, not on that one.
-	 */
+	| { kind: "model_route_restricted" }
+	/** The model exists, but the account plan cannot serve it. */
 	| { kind: "model_not_entitled" }
 	| { kind: "network_error" }
 	| { kind: "other" };
@@ -681,6 +678,24 @@ async function isCacheControlRejectionError(
 	}
 }
 
+async function isModelRouteRestrictedError(
+	response: Response,
+): Promise<boolean> {
+	if (
+		![400, 403, 404].includes(response.status) ||
+		!response.headers.get("content-type")?.includes("application/json")
+	)
+		return false;
+	try {
+		return isModelRouteRestriction(
+			await response.clone().json(),
+			response.status,
+		);
+	} catch {
+		return false;
+	}
+}
+
 /**
  * Checks if a response error indicates the requested model is unavailable.
  * Covers Anthropic (not_found_error), OpenAI-compat (model_not_found),
@@ -698,11 +713,6 @@ export async function isModelUnavailableError(
 	)
 		return false;
 
-	// 429s always trigger slot failover regardless of content-type.
-	// Providers like Qwen return 429 without application/json bodies, and
-	// the content-type guard below would otherwise short-circuit before reaching
-	// this check, causing the 429 to be forwarded to the client instead of
-	// failing over to the next combo slot.
 	if (response.status === 429) {
 		return true;
 	}
@@ -796,16 +806,20 @@ export async function isCodexEntitlementModelError(
  */
 function prepareNativeBody(
 	nativeBody: string,
-	modelOverride: string | null | undefined,
-): string | null {
+	target: string | null | undefined,
+): string {
+	if (!target) throw new RoutingPolicyError("Missing resolved native model");
+	let body: Record<string, unknown>;
 	try {
-		const parsed = JSON.parse(nativeBody) as Record<string, unknown>;
-		if (!modelOverride) return nativeBody;
-		parsed.model = modelOverride;
-		return JSON.stringify(parsed);
+		body = JSON.parse(nativeBody);
 	} catch {
-		return null;
+		throw new RoutingPolicyError("Cannot parse native Responses body");
 	}
+	if (!body || typeof body !== "object" || Array.isArray(body))
+		throw new RoutingPolicyError("Invalid native Responses body");
+	rejectModelSwitchFields(body);
+	body.model = target;
+	return JSON.stringify(body);
 }
 
 /**
@@ -819,77 +833,6 @@ function prepareNativeBody(
  * @returns Promise resolving to the response
  * @throws {ProviderError} If the unauthenticated request fails
  */
-export async function proxyUnauthenticated(
-	req: Request,
-	url: URL,
-	requestMeta: RequestMeta,
-	requestBodyBuffer: ArrayBuffer | null,
-	createBodyStream: () => ReadableStream<Uint8Array> | undefined,
-	ctx: ProxyContext,
-	apiKeyId?: string | null,
-	apiKeyName?: string | null,
-): Promise<Response> {
-	log.warn(ERROR_MESSAGES.NO_ACCOUNTS);
-
-	const targetUrl = ctx.provider.buildUrl(url.pathname, url.search);
-	const headers = ctx.provider.prepareHeaders(
-		req.headers,
-		undefined,
-		undefined,
-	);
-
-	try {
-		const response = await makeProxyRequest(
-			targetUrl,
-			req.method,
-			headers,
-			createBodyStream,
-			!!req.body,
-		);
-
-		return forwardToClient(
-			{
-				clientSignal: req.signal,
-				requestId: requestMeta.id,
-				method: req.method,
-				path: url.pathname,
-				account: null,
-				internal: requestMeta.internal === true,
-				requestHeaders: req.headers,
-				requestBody: requestBodyBuffer,
-				requestedModel: requestMeta.requestedModel,
-				fallbackCreditClaimed: requestMeta.fallbackCreditClaimed,
-				fallbackFromModel: requestMeta.fallbackFromModel,
-				project: requestMeta.project,
-				projectAttributionSource: requestMeta.projectAttributionSource,
-				contextComposition: requestMeta.contextComposition,
-				toolCallStats: requestMeta.toolCallStats,
-				reasoningEffort: requestMeta.reasoningEffort,
-				sessionKey: requestMeta.sessionKey,
-				cachePrefixHashes: requestMeta.cachePrefixHashes,
-				response,
-				timestamp: requestMeta.timestamp,
-				retryAttempt: 0,
-				failoverAttempts: 0,
-				comboName: requestMeta.comboName,
-				apiKeyId,
-				apiKeyName,
-				routing: requestMeta.routing ?? null,
-			},
-			ctx,
-		);
-	} catch (error) {
-		logError(error, log);
-		throw new ProviderError(
-			ERROR_MESSAGES.UNAUTHENTICATED_FAILED,
-			ctx.provider.name,
-			502,
-			{
-				originalError: error instanceof Error ? error.message : String(error),
-			},
-		);
-	}
-}
 
 /**
  * Capture the RAW rate-limit evidence of ONE authenticated upstream attempt, the
@@ -991,6 +934,8 @@ export async function proxyWithAccount(
 	options?: ProxyAttemptOptions,
 	staleTokenRetryAttempt = 0,
 ): Promise<Response | null> {
+	modelOverride = getAttemptTarget(requestMeta, account).upstreamModel;
+	const attemptAudit: RoutingAttemptAudit = { id: null };
 	// Resolved lazily at the 529 decision points (see the param doc). Memoized so
 	// the clone decision and the forward decision, which straddle an await, can
 	// never disagree about whether this attempt is terminal.
@@ -1064,9 +1009,28 @@ export async function proxyWithAccount(
 		outcome: ProxyAttemptOutcome,
 		response?: Response | null,
 		onDrained?: (report: DrainReport) => void,
+		auditReason?: string,
 	): Promise<null> => {
 		settleOverloadProbe("abandoned", "attempt_failed");
 		options?.onOutcome?.(outcome);
+		const reason =
+			auditReason ??
+			(outcome.kind === "hard_429"
+				? (account.rate_limited_reason ?? "rate_limited")
+				: outcome.kind);
+		try {
+			await recordLocalRoutingOutcome(
+				attemptAudit,
+				requestMeta,
+				account,
+				ctx,
+				reason,
+				response?.status ?? null,
+			);
+		} catch (error) {
+			log.warn("Could not persist routing attempt outcome", error);
+		}
+
 		discardUpstreamBody(response, onDrained);
 		return null;
 	};
@@ -1079,11 +1043,6 @@ export async function proxyWithAccount(
 	// the forwardToClient returns transfer ownership (so the catch is unreached on
 	// success; if forwardToClient itself throws, discard's locked-guard no-ops).
 	let liveUpstream: Response | null = null;
-	// The model actually sent upstream for the CURRENT in-flight fetch: the
-	// transformed model (account model-mappings can rewrite it) before the
-	// initial fetch, then re-assigned before every model-fallback fetch. Feeds
-	// family-scoped overload attribution (the 529 trip + forwardToClient's
-	// upstreamModel) so a breaker opens for the family that actually failed.
 	let activeUpstreamModel: string | null = null;
 	// Trust-gated probe predicate for every exemption below. `requestMeta.internal`
 	// is handleProxy's own `isInternal` parameter (default false, sourced only from
@@ -1099,33 +1058,21 @@ export async function proxyWithAccount(
 			);
 		}
 
-		// Apply model override from combo slot (per D-04, REQ-12)
+		// Patch the frozen routing target before provider conversion.
 		const baseBodyContext =
 			requestBodyContext ?? new RequestBodyContext(requestBodyBuffer);
-		let effectiveBodyContext = baseBodyContext;
-		let effectiveBodyBuffer = baseBodyContext.getBuffer();
-		if (modelOverride && effectiveBodyBuffer) {
-			const overriddenContext = baseBodyContext.withPatchedModel(modelOverride);
-			if (overriddenContext) {
-				effectiveBodyContext = overriddenContext;
-				effectiveBodyBuffer = overriddenContext.getBuffer();
-
-				if (isDebugEnabled("proxy") || process.env.NODE_ENV === "development") {
-					log.info(
-						`Combo model override: applying model "${modelOverride}" for account ${account.name}`,
-					);
-				}
-			} else {
-				log.warn(
-					"Failed to patch request body with model override, using original body",
-				);
-				effectiveBodyBuffer = baseBodyContext.getBuffer();
-			}
-		}
+		const originalBody = baseBodyContext.getParsedJson();
+		if (!originalBody)
+			throw new RoutingPolicyError("Cannot parse inference request");
+		rejectModelSwitchFields(originalBody);
+		const effectiveBodyContext =
+			baseBodyContext.withPatchedModel(modelOverride);
+		if (!effectiveBodyContext)
+			throw new RoutingPolicyError("Cannot apply resolved model");
+		const effectiveBodyBuffer = effectiveBodyContext.getBuffer();
 
 		// Stage the original request body + headers for cache keepalive replay.
-		// Uses the pre-transform body (effectiveBodyBuffer may have a model override
-		// patched in, so use the original requestBodyBuffer for a faithful replay).
+		// Preserve the resolved model for a faithful replay to this destination.
 		// Headers are stored because Anthropic's prepareHeaders() copies incoming
 		// client headers (anthropic-version, anthropic-beta, x-stainless-*, etc.)
 		// and augments them — providers that build headers from scratch ignore them.
@@ -1146,7 +1093,7 @@ export async function proxyWithAccount(
 			cacheBodyStore.stageRequest(
 				requestMeta.id,
 				account.id,
-				baseBodyContext.getBuffer(),
+				effectiveBodyBuffer,
 				req.headers,
 				url.pathname,
 				requestMeta.affinityKey ?? null,
@@ -1181,10 +1128,10 @@ export async function proxyWithAccount(
 			return await fail({ kind: "other" });
 		}
 
-		// Skip token refresh for synthetic paths (e.g. Codex count_tokens) that
+		// Skip token refresh for explicitly supported local count paths that
 		// never reach the upstream network.
 		const isLocalCountTokens =
-			(account.provider === "codex" || account.provider === "devin") &&
+			supportsLocalTokenCounting(account.provider, account.custom_endpoint) &&
 			url.pathname === "/v1/messages/count_tokens";
 		const accessToken = isLocalCountTokens
 			? undefined
@@ -1268,6 +1215,8 @@ export async function proxyWithAccount(
 		let transformedRequest = provider.transformRequestBody
 			? await provider.transformRequestBody(providerRequest, account)
 			: providerRequest;
+		const devinRequestProvenance =
+			getDevinRequestProvenance(transformedRequest);
 		// Capture local provenance before request wrappers/clones lose its identity.
 		const devinSessionRejected =
 			account.provider === "devin" &&
@@ -1309,24 +1258,18 @@ export async function proxyWithAccount(
 		}
 		const transformedModel =
 			(transformedBodyJson?.model as string | undefined) ??
-			transformedRequest.headers.get("x-clankermux-upstream-model") ??
+			(devinRequestProvenance?.kind === "inference"
+				? devinRequestProvenance.model
+				: null) ??
 			"";
 		activeUpstreamModel = transformedModel || null;
 
-		// ── Canonical overload-attribution model ────────────────────────────────
-		// Single source for probe admission, the pre-stream 529 trip,
-		// forwardToClient's `upstreamModel` (mid-stream trip), and fallback
-		// tracking. The rule itself lives in resolveOverloadAttributionModel and
-		// is shared with the pre-selection gate (admission-gates' modelForAccount)
-		// and the holds' pre-attempt skip, so no two of them can target different
-		// buckets. Recomputed whenever `activeUpstreamModel` changes
-		// (model-fallback cycling below).
 		const computeOverloadAttributionModel = (): string | null =>
 			resolveOverloadAttributionModel(
 				activeUpstreamModel,
 				effectiveBodyContext.getModel(),
 			);
-		let overloadAttributionModel = computeOverloadAttributionModel();
+		const overloadAttributionModel = computeOverloadAttributionModel();
 		if (
 			transformedModel &&
 			cacheControlRejectors.has(
@@ -1349,22 +1292,7 @@ export async function proxyWithAccount(
 			);
 		}
 
-		// ── Half-open overload-probe admission (single authoritative chokepoint) ──
-		// Every real upstream attempt flows through here (main loop, combo
-		// fallback, hold re-probes, burst first attempt), so admission at this
-		// point cannot be bypassed by a path that skips the pre-selection gate.
-		// Closed buckets return `token: null` (the common case — zero overhead).
-		// A refusal means either an open bucket won a race against the gate or a
-		// concurrent request already owns the half-open probe — fail over without
-		// touching upstream. Skipped for the synthetic Codex count_tokens path:
-		// it never reaches the network, so its local 200 must not close a bucket.
 		if (!isLocalCountTokens) {
-			// Admission is family-scoped by the canonical attribution model (the
-			// model actually sent upstream, with the logical-model fallback when
-			// it resolves to no family) so the attempt is gated exactly like the
-			// pre-selection routing gate — not by the provider-wide conservative
-			// aggregate (which would let an unrelated family's bucket gate a
-			// mapped model).
 			const overloadAdmission = tryAcquireProviderOverloadProbe(
 				account.provider,
 				overloadAttributionModel,
@@ -1401,9 +1329,6 @@ export async function proxyWithAccount(
 				ctx,
 			);
 
-		// Classify Zai's leading HTTP-200 overload on every normal-path attempt,
-		// including cache-control retries and model fallbacks. Forced requests
-		// deliberately bypass this policy and keep forwarding upstream verbatim.
 		const forwardAttempt = async (
 			attemptRequest: Request,
 		): Promise<Response> => {
@@ -1412,28 +1337,27 @@ export async function proxyWithAccount(
 			const replay = account.provider === "zai" ? attemptRequest.clone() : null;
 			const send = async (): Promise<Response> => {
 				const outgoing = replay ? replay.clone() : attemptRequest;
-				const response = captureAttempt(
+				const response = await sendAuthorizedRequest(
 					outgoing,
-					await makeProxyRequest(
-						outgoing,
-						undefined,
-						undefined,
-						undefined,
-						undefined,
-						options?.signal,
-					),
+					account,
+					requestMeta,
+					ctx,
+					options?.signal,
+					attemptAudit,
+					getDevinRequestProvenance(outgoing) ?? devinRequestProvenance,
+					async (raw) => {
+						liveUpstream = captureAttempt(outgoing, raw);
+						if (provider.normalizeUpstreamResponse)
+							liveUpstream = await provider.normalizeUpstreamResponse(
+								liveUpstream,
+								outgoing,
+								account,
+							);
+						return liveUpstream;
+					},
 				);
 				liveUpstream = response;
-				// Preserve raw evidence above, then classify transport-level errors before retry policy.
-				const normalized = provider.normalizeUpstreamResponse
-					? await provider.normalizeUpstreamResponse(
-							response,
-							outgoing,
-							account,
-						)
-					: response;
-				liveUpstream = normalized;
-				return normalized;
+				return response;
 			};
 			const response = await send();
 			if (account.provider !== "zai") return response;
@@ -1451,9 +1375,7 @@ export async function proxyWithAccount(
 		const finishZaiOverload = async (
 			response: Response,
 		): Promise<Response | null> => {
-			log.warn(
-				`Z.ai overload retries and model fallbacks exhausted on account ${account.name}`,
-			);
+			log.warn(`Z.ai overload retries exhausted on account ${account.name}`);
 			if (isTerminalAttempt()) {
 				settleOverloadProbe("abandoned", "sse_overloaded_error");
 				options?.onOutcome?.({ kind: "other" });
@@ -1580,17 +1502,34 @@ export async function proxyWithAccount(
 				rawResponse = retryResponse;
 				liveUpstream = rawResponse;
 			} catch (err) {
+				if (err instanceof RoutingPolicyError) throw err;
 				if (options?.signal?.aborted || req.signal.aborted) throw err;
 				liveUpstream = rawResponse;
 				log.warn("Failed to retry without cache_control:", err);
 			}
 		}
 
-		// On model unavailable / rate-limited: cycle through the model list for
-		// this account. getModelList returns [primary, ...fallbacks] merged from
-		// model_mappings arrays and legacy model_fallbacks. We already tried index 0
-		// (the primary), so start at index 1.
-		if (await isModelUnavailableError(rawResponse)) {
+		const routeRestricted = await isModelRouteRestrictedError(rawResponse);
+		if (routeRestricted) {
+			if (options?.isLastAccountAttempt && !options.isLastAccountAttempt()) {
+				return await fail({ kind: "model_route_restricted" }, rawResponse);
+			}
+			// Preserve the final actionable upstream envelope through normal response handling.
+			options?.onOutcome?.({ kind: "model_route_restricted" });
+			try {
+				await recordLocalRoutingOutcome(
+					attemptAudit,
+					requestMeta,
+					account,
+					ctx,
+					"model_route_restricted",
+					rawResponse.status,
+				);
+			} catch (error) {
+				log.warn("Could not persist routing restriction outcome", error);
+			}
+		}
+		if (!routeRestricted && (await isModelUnavailableError(rawResponse))) {
 			// Log 429 response headers for debugging upstream rate-limit info
 			if (rawResponse.status === 429) {
 				const rlHeaders: Record<string, string> = {};
@@ -1612,23 +1551,15 @@ export async function proxyWithAccount(
 				);
 			}
 
-			// Resolve the requested model up front so every 429 audit row below
-			// (reprobe, out_of_credits, burst-intercept, model-fallback, exhausted)
-			// can record it. Previously this was computed only just before the
-			// model-fallback block, leaving the failover-429 audit rows with a
-			// NULL model.
 			let requestedModel: string | null = null;
 			if (effectiveBodyBuffer) requestedModel = effectiveBodyContext.getModel();
 
-			// Shared side effects for cached and live quota evidence, including a
-			// quota rejection first seen on a model fallback.
 			const finishQuotaRejection = async (
 				response: Response,
 				quota: AccountQuota429,
-				model: string | null,
+				_model: string | null,
 				source: "claims" | "usage",
 			): Promise<Response | null> => {
-				const { reason } = quota;
 				applyRateLimitCooldown(account, quota, ctx);
 				// The helper sets this synchronously, including adaptive no-reset
 				// backoff. Outcomes must report the applied deadline, not a default.
@@ -1636,45 +1567,6 @@ export async function proxyWithAccount(
 				// Persist the 429's unified-status header so the dashboard chip
 				// reflects the live value rather than the last success.
 				persistRateLimitStatusMeta(account, response, ctx, provider);
-				const responseTime = Date.now() - requestMeta.timestamp;
-				// Deliberate direct audit row (synthetic UUID id), NOT
-				// recorder-owned — mirrors the out_of_credits path.
-				// Auto-refresh primes can discover real quota depletion, but never
-				// create client request-history rows.
-				if (!isTrustedProbe("any")) {
-					ctx.asyncWriter.enqueue(() =>
-						ctx.dbOps.saveRequest({
-							id: crypto.randomUUID(),
-							method: req.method,
-							path: url.pathname,
-							accountUsed: account.id,
-							statusCode: 429,
-							success: false,
-							errorMessage: reason,
-							responseTime,
-							failoverAttempts,
-							usage: model ? { model } : undefined,
-							apiKeyId: apiKeyId ?? undefined,
-							apiKeyName: apiKeyName ?? undefined,
-							project: requestMeta.project ?? null,
-							projectAttributionSource:
-								requestMeta.projectAttributionSource ?? null,
-							comboName: requestMeta.comboName ?? null,
-							reasoningEffort: requestMeta.reasoningEffort ?? null,
-							sessionKey: requestMeta.sessionKey ?? null,
-							cachePrefixHashes: requestMeta.cachePrefixHashes ?? null,
-							// The ingress model needs its own column: the usage envelope carries the
-							// provider-reported model, while analytics that group by ingress model
-							// (the fallback model-pair table) read requested_model.
-							requestedModel: requestMeta.requestedModel ?? null,
-							// A retry that ends in a local rejection keeps its fallback mark: the
-							// row is still the redemption of a refusal, whatever happened next.
-							fallbackCreditClaimed:
-								requestMeta.fallbackCreditClaimed ?? undefined,
-							fallbackFromModel: requestMeta.fallbackFromModel ?? undefined,
-						}),
-					);
-				}
 				log.warn(
 					`Account ${account.name} ${quota.binding}-exhausted (429, evidence=${source}) — cooldown until ${new Date(cooldownUntil).toISOString()}, failing over (no burst-retry)`,
 				);
@@ -1701,17 +1593,6 @@ export async function proxyWithAccount(
 						)
 					: null;
 
-			// ── Transparent burst-retry: re-probe mode ──────────────────────────
-			// A re-probe of a held account that came back 429 (still throttled):
-			// apply the no-streak/no-anchor cooldown and signal "still throttled"
-			// to the hold orchestrator WITHOUT cycling model fallbacks at the
-			// throttled IP. The orchestrator decides whether to wait and re-probe
-			// again or give up. Non-429 responses fall through to the normal path.
-			// An out_of_credits 429 that surfaces mid-hold (credits deplete while
-			// the account is held) is deliberately EXCLUDED here so it falls
-			// through to the out_of_credits block below and gets the long cooldown
-			// rather than the short reprobe cooldown — it is a hard depletion,
-			// never a transient burst worth re-probing.
 			if (
 				options?.reprobe &&
 				!liveAccountQuota &&
@@ -1778,16 +1659,6 @@ export async function proxyWithAccount(
 				);
 			}
 
-			// ── Out-of-credits: hard depletion, NOT a transient burst ───────
-			// Anthropic returns 429 + `overage-disabled-reason: out_of_credits`
-			// with NO reset header and `x-should-retry: true`. Left to the generic
-			// path this pins the account at the 60s no-reset probe cooldown and
-			// storms it ~1/min (issue #261); the burst-retry intercept below would
-			// even hold-and-re-probe the depleted account. Short-circuit FIRST:
-			// apply a long cooldown (until the usage-window reset if known, else
-			// OUT_OF_CREDITS_COOLDOWN_MS) so fallback providers take over, skipping
-			// burst-retry and model-fallback cycling. Synthetic keepalive/internal
-			// replays are excluded (handled by their own keepalive cooldown-skip).
 			if (
 				rawResponse.status === 429 &&
 				isAnthropicOutOfCredits(rawResponse) &&
@@ -1806,40 +1677,7 @@ export async function proxyWithAccount(
 				// Persist the 429's unified-status header so the dashboard chip
 				// doesn't freeze at the last successful response's value.
 				persistRateLimitStatusMeta(account, rawResponse, ctx, provider);
-				const responseTime = Date.now() - requestMeta.timestamp;
-				// Deliberate direct audit row (synthetic UUID id), NOT recorder-owned.
-				ctx.asyncWriter.enqueue(() =>
-					ctx.dbOps.saveRequest({
-						id: crypto.randomUUID(),
-						method: req.method,
-						path: url.pathname,
-						accountUsed: account.id,
-						statusCode: 429,
-						success: false,
-						errorMessage: reason,
-						responseTime,
-						failoverAttempts,
-						usage: requestedModel ? { model: requestedModel } : undefined,
-						apiKeyId: apiKeyId ?? undefined,
-						apiKeyName: apiKeyName ?? undefined,
-						project: requestMeta.project ?? null,
-						projectAttributionSource:
-							requestMeta.projectAttributionSource ?? null,
-						comboName: requestMeta.comboName ?? null,
-						reasoningEffort: requestMeta.reasoningEffort ?? null,
-						sessionKey: requestMeta.sessionKey ?? null,
-						cachePrefixHashes: requestMeta.cachePrefixHashes ?? null,
-						// The ingress model needs its own column: the usage envelope carries the
-						// provider-reported model, while analytics that group by ingress model
-						// (the fallback model-pair table) read requested_model.
-						requestedModel: requestMeta.requestedModel ?? null,
-						// A retry that ends in a local rejection keeps its fallback mark: the
-						// row is still the redemption of a refusal, whatever happened next.
-						fallbackCreditClaimed:
-							requestMeta.fallbackCreditClaimed ?? undefined,
-						fallbackFromModel: requestMeta.fallbackFromModel ?? undefined,
-					}),
-				);
+
 				log.warn(
 					`Account ${account.name} out_of_credits (429) — long cooldown until ${new Date(floorUntil).toISOString()}, failing over (no burst-retry, no model cycling)`,
 				);
@@ -2052,7 +1890,6 @@ export async function proxyWithAccount(
 						}
 					: cacheFamilyExclusion;
 				if (familyExclusion) {
-					const reason: RateLimitReason = "family_weekly_exhausted_429";
 					// Remember what this 429 just taught us, so the proactive gate can
 					// act on it before the usage poll catches up. Without this the
 					// finding died here: the next request re-derived eligibility from a
@@ -2070,59 +1907,19 @@ export async function proxyWithAccount(
 					// Persist the 429's unified-status header so the dashboard chip
 					// reflects the live value rather than the last success.
 					persistRateLimitStatusMeta(account, rawResponse, ctx, provider);
-					const responseTime = Date.now() - requestMeta.timestamp;
-					// Direct audit row (synthetic UUID id), NOT recorder-owned — mirrors
-					// the out_of_credits path. No applyRateLimitCooldown: the account
-					// keeps its account-wide availability for other families.
-					ctx.asyncWriter.enqueue(() =>
-						ctx.dbOps.saveRequest({
-							id: crypto.randomUUID(),
-							method: req.method,
-							path: url.pathname,
-							accountUsed: account.id,
-							statusCode: 429,
-							success: false,
-							errorMessage: reason,
-							responseTime,
-							failoverAttempts,
-							usage: requestedModel ? { model: requestedModel } : undefined,
-							apiKeyId: apiKeyId ?? undefined,
-							apiKeyName: apiKeyName ?? undefined,
-							project: requestMeta.project ?? null,
-							projectAttributionSource:
-								requestMeta.projectAttributionSource ?? null,
-							comboName: requestMeta.comboName ?? null,
-							reasoningEffort: requestMeta.reasoningEffort ?? null,
-							sessionKey: requestMeta.sessionKey ?? null,
-							cachePrefixHashes: requestMeta.cachePrefixHashes ?? null,
-							// The ingress model needs its own column: the usage envelope carries the
-							// provider-reported model, while analytics that group by ingress model
-							// (the fallback model-pair table) read requested_model.
-							requestedModel: requestMeta.requestedModel ?? null,
-							// A retry that ends in a local rejection keeps its fallback mark: the
-							// row is still the redemption of a refusal, whatever happened next.
-							fallbackCreditClaimed:
-								requestMeta.fallbackCreditClaimed ?? undefined,
-							fallbackFromModel: requestMeta.fallbackFromModel ?? undefined,
-						}),
-					);
+
 					log.warn(
 						`Account ${account.name} weekly-exhausted for family=${familyExclusion.family} (429, unified headroom present${headerFamilyExclusion ? "; live scoped header evidence" : ""}) — failing over WITHOUT account-wide cooldown`,
 					);
-					return await fail({ kind: "other" }, rawResponse);
+					return await fail(
+						{ kind: "other" },
+						rawResponse,
+						undefined,
+						"family_weekly_exhausted_429",
+					);
 				}
 			}
 
-			// ── Transparent burst-retry: first-attempt early intercept ──────────
-			// Before cycling this account's model fallbacks (which would fire more
-			// requests at the already-throttled per-IP window), classify an
-			// OAuth-Anthropic 429. If it is a retryable transient burst throttle,
-			// record `retryable_429` and fail over WITHOUT model cycling so the
-			// proxy.ts decide-before-loop can hold-and-retry the cache account.
-			// Skipped for: non-429, synthetic keepalive/auto-refresh replays (their
-			// own per-IP-burst handling lives below), and re-probe mode (handled
-			// above). Non-retryable / non-OAuth-Anthropic 429s fall through to
-			// today's model-fallback + failover behaviour unchanged.
 			if (
 				rawResponse.status === 429 &&
 				!options?.reprobe &&
@@ -2221,41 +2018,9 @@ export async function proxyWithAccount(
 					// rate_limit_status chip freezes at the last successful response's
 					// value. Headers only — the body is discarded by fail() below.
 					persistRateLimitStatusMeta(account, rawResponse, ctx, provider);
-					const responseTime = Date.now() - requestMeta.timestamp;
-					ctx.asyncWriter.enqueue(() =>
-						ctx.dbOps.saveRequest({
-							id: crypto.randomUUID(),
-							method: req.method,
-							path: url.pathname,
-							accountUsed: account.id,
-							statusCode: 429,
-							success: false,
-							errorMessage: "model_fallback_429",
-							responseTime,
-							failoverAttempts,
-							usage: requestedModel ? { model: requestedModel } : undefined,
-							apiKeyId: apiKeyId ?? undefined,
-							apiKeyName: apiKeyName ?? undefined,
-							project: requestMeta.project ?? null,
-							projectAttributionSource:
-								requestMeta.projectAttributionSource ?? null,
-							comboName: requestMeta.comboName ?? null,
-							reasoningEffort: requestMeta.reasoningEffort ?? null,
-							sessionKey: requestMeta.sessionKey ?? null,
-							cachePrefixHashes: requestMeta.cachePrefixHashes ?? null,
-							// The ingress model needs its own column: the usage envelope carries the
-							// provider-reported model, while analytics that group by ingress model
-							// (the fallback model-pair table) read requested_model.
-							requestedModel: requestMeta.requestedModel ?? null,
-							// A retry that ends in a local rejection keeps its fallback mark: the
-							// row is still the redemption of a refusal, whatever happened next.
-							fallbackCreditClaimed:
-								requestMeta.fallbackCreditClaimed ?? undefined,
-							fallbackFromModel: requestMeta.fallbackFromModel ?? undefined,
-						}),
-					);
+
 					log.warn(
-						`Account ${account.name} hit transient burst 429 (${classification.confidence}) — intercepting before model-fallback cycling for hold-and-retry`,
+						`Account ${account.name} hit transient burst 429 (${classification.confidence}) — holding for retry on the resolved target`,
 					);
 					return await fail(
 						{
@@ -2267,437 +2032,117 @@ export async function proxyWithAccount(
 					);
 				}
 			}
-
-			if (requestedModel) {
-				const modelList = getModelList(requestedModel, account);
-				if (!modelList || modelList.length <= 1) {
-					if (isZaiOverloadResponse(rawResponse))
-						return await finishZaiOverload(rawResponse);
-					// No fallback models configured — fail over to the next account.
-					// 429s should never be forwarded to the client when other
-					// accounts are available; only genuine model-not-found
-					// errors (404/400) warrant returning the upstream response.
-					if (rawResponse.status === 429) {
-						// Skip cooldown on synthetic cache-keepalive replays. The
-						// keepalive scheduler replays warm bodies in waves of
-						// up to KEEPALIVE_CONCURRENCY, so its own requests can
-						// contend with each other and with live traffic for
-						// Anthropic's per-IP burst allowance and 429 several
-						// accounts at nearly the same instant. Applying real
-						// cooldowns here drains the pool toward zero routable
-						// accounts even though no real user-facing rate limit
-						// was hit.
-						const isKeepalive = isTrustedProbe("keepalive");
-						if (isKeepalive) {
-							log.warn(
-								`Keepalive replay for ${account.name} got 429 — skipping cooldown (synthetic burst, not a real per-account rate limit)`,
-							);
-							return await fail({ kind: "other" }, rawResponse);
-						}
-
-						log.warn(
-							`Account ${account.name} rate-limited (429), no model fallbacks — failing over to next account`,
-						);
-						// Residual rung: no corroborating evidence, so the deadline is
-						// capped (see capResidualRung429Cooldown) — a claim-scoped 429
-						// that slipped past the family rung must not become a multi-day
-						// account-wide lock under a non-releasable reason.
-						const cooldownUntil = capResidualRung429Cooldown(
-							account,
-							rawResponse,
-							extractCooldownUntil(
-								rawResponse,
-								account.id,
-								usageCache.getRateLimitedUntil.bind(usageCache),
-							),
-							Date.now(),
-						);
-						const reason: RateLimitReason = "model_fallback_429";
-						// Route through shared helper so the consecutive_rate_limits
-						// counter and the audit reason are applied uniformly across all
-						// 429 paths. A future cooldownUntil is written as a
-						// server-directed deadline (Lever B) — bounded by the cap above,
-						// never the raw multi-day retry-after. The audit reason is
-						// preserved so saveRequest + DB rate_limited_reason both record
-						// the failure-mode-specific tag.
-						//
-						// Codex accounts route through the single shared observation
-						// applicator (cooldown + status-meta + usage-cache/credits/
-						// window-roll share one owner). requestAccounting "none": this
-						// short-circuit never reached updateAccountMetadata, so no
-						// per-request accounting runs here. cooldownUntil drives the
-						// cooldown deadline; rateLimitInfo drives the header-only
-						// status-meta persistence (a no-op for Codex, which has no
-						// unified-status header).
-						if (cooldownUntil === null) {
-							completeRateLimitProbe(account, "abandoned");
-							persistRateLimitStatusMeta(account, rawResponse, ctx, provider);
-						} else if (account.provider === "codex") {
-							applyCodexObservation(account, rawResponse, ctx, {
-								source: "real-traffic",
-								rateLimitInfo: provider.parseRateLimit(rawResponse),
-								requestAccounting: "none",
-								rateLimitAction: { kind: "apply", reason, cooldownUntil },
-								successRecovery: "standard",
-							});
-						} else {
-							applyRateLimitCooldown(
-								account,
-								{ resetTime: cooldownUntil, reason },
-								ctx,
-							);
-							// Persist the 429's unified-status header (status/reset/remaining).
-							// This short-circuit never reaches processProxyResponse /
-							// updateAccountMetadata, so without this the dashboard's
-							// rate_limit_status chip freezes at the last successful response's
-							// value. Headers only — the body is discarded by fail() below.
-							persistRateLimitStatusMeta(account, rawResponse, ctx, provider);
-						}
-						const responseTime = Date.now() - requestMeta.timestamp;
-						// Deliberate direct audit row (one per failed attempted
-						// account, synthetic UUID id) — NOT owned by RequestRecorder
-						// (S2). The recorder records the single final outcome under
-						// requestMeta.id; these capture each individual failed attempt.
-						ctx.asyncWriter.enqueue(() =>
-							ctx.dbOps.saveRequest({
-								id: crypto.randomUUID(),
-								method: req.method,
-								path: url.pathname,
-								accountUsed: account.id,
-								statusCode: 429,
-								success: false,
-								errorMessage:
-									cooldownUntil === null ? "scoped_quota_rejected_429" : reason,
-								responseTime,
-								failoverAttempts,
-								usage: requestedModel ? { model: requestedModel } : undefined,
-								apiKeyId: apiKeyId ?? undefined,
-								apiKeyName: apiKeyName ?? undefined,
-								project: requestMeta.project ?? null,
-								projectAttributionSource:
-									requestMeta.projectAttributionSource ?? null,
-								comboName: requestMeta.comboName ?? null,
-								reasoningEffort: requestMeta.reasoningEffort ?? null,
-								sessionKey: requestMeta.sessionKey ?? null,
-								cachePrefixHashes: requestMeta.cachePrefixHashes ?? null,
-								// The ingress model needs its own column: the usage envelope carries the
-								// provider-reported model, while analytics that group by ingress model
-								// (the fallback model-pair table) read requested_model.
-								requestedModel: requestMeta.requestedModel ?? null,
-								// A retry that ends in a local rejection keeps its fallback mark: the
-								// row is still the redemption of a refusal, whatever happened next.
-								fallbackCreditClaimed:
-									requestMeta.fallbackCreditClaimed ?? undefined,
-								fallbackFromModel: requestMeta.fallbackFromModel ?? undefined,
-							}),
-						);
-						return await fail(
-							cooldownUntil === null
-								? { kind: "other" }
-								: { kind: "hard_429", cooldownUntil },
-							rawResponse,
-						);
-					}
-					// Codex/ChatGPT entitlement error: the model exists, but THIS
-					// account's plan is not entitled to it. That is account-scoped —
-					// another account on a different plan can serve the same model — so
-					// fail over instead of forwarding the 400. The generic
-					// model-not-found below stays a client-facing error: no account can
-					// serve a model that doesn't exist, so cycling the pool for it only
-					// burns attempts and hides the real cause.
-					if (await isCodexEntitlementModelError(rawResponse)) {
-						log.warn(
-							`Account ${account.name} is not entitled to the requested model (plan-scoped Codex/ChatGPT restriction) — failing over to next account`,
-						);
-						// Default "native" dispose: this short-circuit runs before any
-						// usage-extraction clone exists, so rawResponse is still a plain
-						// fetch body that must be drained, not a tee branch.
-						return await fail({ kind: "model_not_entitled" }, rawResponse);
-					}
-					// Model-not-found (404/400) is forwarded to the client so it can
-					// surface the real error. Strip content-encoding/content-length
-					// first: Bun's fetch already decompressed the body, so leaving the
-					// upstream `content-encoding: gzip` header makes the client try to
-					// gunzip plaintext → "Decompression error: ZlibError".
-					//
-					// This is a DIRECT return that bypasses forwardToClient, so no
-					// onSummary/discardStaged staging signal would ever fire for this
-					// request id. Drop the staged body now or it leaks until the age
-					// sweep (B4) — every other return path either routes through
-					// forwardToClient (→ onSummary) or is a `return null` failover the
-					// proxy.ts caller cleans up via discardStaged.
-					cacheBodyStore.discardStaged(requestMeta.id);
-					// Direct return that bypasses forwardToClient — no stream verdict
-					// will ever arrive, so release a held probe lease here.
-					settleOverloadProbe("abandoned", "model_not_found");
-					options?.onOutcome?.({ kind: "model_not_found" });
-					return withSanitizedProxyHeaders(rawResponse);
+			if (isZaiOverloadResponse(rawResponse))
+				return await finishZaiOverload(rawResponse);
+			// No fallback models configured — fail over to the next account.
+			// 429s should never be forwarded to the client when other
+			// accounts are available; only genuine model-not-found
+			// errors (404/400) warrant returning the upstream response.
+			if (rawResponse.status === 429) {
+				// Skip cooldown on synthetic cache-keepalive replays. The
+				// keepalive scheduler replays warm bodies in waves of
+				// up to KEEPALIVE_CONCURRENCY, so its own requests can
+				// contend with each other and with live traffic for
+				// Anthropic's per-IP burst allowance and 429 several
+				// accounts at nearly the same instant. Applying real
+				// cooldowns here drains the pool toward zero routable
+				// accounts even though no real user-facing rate limit
+				// was hit.
+				const isKeepalive = isTrustedProbe("keepalive");
+				if (isKeepalive) {
+					log.warn(
+						`Keepalive replay for ${account.name} got 429 — skipping cooldown (synthetic burst, not a real per-account rate limit)`,
+					);
+					return await fail({ kind: "other" }, rawResponse);
 				}
 
-				for (let i = 1; i < modelList.length; i++) {
-					const nextModel = modelList[i];
-
-					// Switching models abandons the previous fetch's outcome — a probe
-					// lease held for the previous model's family must be released
-					// (never "recovered": the response that got us here was a
-					// model-unavailable/429, not a health verdict).
-					settleOverloadProbe("abandoned", "model_switch");
-
-					// Family-overload gate: a fallback list can cross model families
-					// (e.g. a Haiku request falling back into Sonnet, or vice versa).
-					// Skip any candidate whose family breaker (or the provider-wide
-					// bucket) is open — cycling into it would hammer a family that is
-					// already known-sick.
-					const fallbackOverloadedUntil = getProviderOverloadUntil(
-						account.provider,
-						Date.now(),
-						nextModel,
+				log.warn(
+					`Account ${account.name} rate-limited (429) — failing over within the resolved route`,
+				);
+				// Residual rung: no corroborating evidence, so the deadline is
+				// capped (see capResidualRung429Cooldown) — a claim-scoped 429
+				// that slipped past the family rung must not become a multi-day
+				// account-wide lock under a non-releasable reason.
+				const cooldownUntil = capResidualRung429Cooldown(
+					account,
+					rawResponse,
+					extractCooldownUntil(
+						rawResponse,
+						account.id,
+						usageCache.getRateLimitedUntil.bind(usageCache),
+					),
+					Date.now(),
+				);
+				const reason: RateLimitReason = "model_fallback_429";
+				// Route through shared helper so the consecutive_rate_limits
+				// counter and the audit reason are applied uniformly across all
+				// 429 paths. A future cooldownUntil is written as a
+				// server-directed deadline (Lever B) — bounded by the cap above,
+				// never the raw multi-day retry-after. The audit reason is
+				// preserved so saveRequest + DB rate_limited_reason both record
+				// the failure-mode-specific tag.
+				//
+				// Codex accounts route through the single shared observation
+				// applicator (cooldown + status-meta + usage-cache/credits/
+				// window-roll share one owner). requestAccounting "none": this
+				// short-circuit never reached updateAccountMetadata, so no
+				// per-request accounting runs here. cooldownUntil drives the
+				// cooldown deadline; rateLimitInfo drives the header-only
+				// status-meta persistence (a no-op for Codex, which has no
+				// unified-status header).
+				if (cooldownUntil === null) {
+					completeRateLimitProbe(account, "abandoned");
+					persistRateLimitStatusMeta(account, rawResponse, ctx, provider);
+				} else if (account.provider === "codex") {
+					applyCodexObservation(account, rawResponse, ctx, {
+						source: "real-traffic",
+						rateLimitInfo: provider.parseRateLimit(rawResponse),
+						requestAccounting: "none",
+						rateLimitAction: { kind: "apply", reason, cooldownUntil },
+						successRecovery: "standard",
+					});
+				} else {
+					applyRateLimitCooldown(
+						account,
+						{ resetTime: cooldownUntil, reason },
+						ctx,
 					);
-					if (fallbackOverloadedUntil !== null) {
-						log.debug(
-							`Skipping model-fallback candidate '${nextModel}' on account ${account.name}: overload breaker open until ${new Date(fallbackOverloadedUntil).toISOString()}`,
-						);
-						continue;
-					}
-
-					// Probe admission for THIS candidate's family (the fallback can
-					// cross into a half-open family): suppressed → skip the candidate
-					// rather than pile onto a bucket another request is probing.
-					const fallbackAdmission = tryAcquireProviderOverloadProbe(
-						account.provider,
-						nextModel,
-					);
-					if (!fallbackAdmission.admitted) {
-						log.debug(
-							`Skipping model-fallback candidate '${nextModel}' on account ${account.name}: overload probe admission refused (${fallbackAdmission.reason})`,
-						);
-						continue;
-					}
-					overloadProbeToken = fallbackAdmission.token;
-
-					log.info(
-						`Model '${modelList[i - 1]}' unavailable/rate-limited on account ${account.name}, ` +
-							`retrying with: ${nextModel} (${i}/${modelList.length - 1})`,
-					);
-
-					// Patch the original request body with the next model name, then let
-					// transformRequestBody handle format conversion (e.g. Anthropic→OpenAI).
-					// After that, re-patch the model name because transformRequestBody calls
-					// mapModelName internally which remaps non-Claude names back to the primary
-					// model (no family match → sonnet fallback). We always want nextModel to
-					// reach the upstream provider verbatim.
-					const patchedContext =
-						effectiveBodyContext.withPatchedModel(nextModel);
-					const patchedBody = patchedContext?.getBuffer() ?? null;
-					if (!patchedBody) {
-						log.warn("Failed to patch request body for model retry");
-						break;
-					}
-
-					const retryRequestInit: RequestInit & { duplex?: "half" } = {
-						method: req.method,
-						headers,
-						signal: options?.signal
-							? AbortSignal.any([req.signal, options.signal])
-							: req.signal,
-						body: new Uint8Array(patchedBody),
-						duplex: "half",
-					};
-
-					const retryProviderRequest = new Request(targetUrl, retryRequestInit);
-					let retryTransformedRequest = provider.transformRequestBody
-						? await provider.transformRequestBody(retryProviderRequest, account)
-						: retryProviderRequest;
-
-					// Re-patch model after transformRequestBody — the provider's conversion
-					// (e.g. convertAnthropicRequestToOpenAI) calls mapModelName which can
-					// remap nextModel back to the primary model if it has no Claude family
-					// pattern. Force nextModel into the final request body.
-					try {
-						const transformedText = retryTransformedRequest.headers
-							.get("content-type")
-							?.includes("application/json")
-							? await retryTransformedRequest.clone().text()
-							: "";
-						const transformedBody = JSON.parse(transformedText);
-						if (transformedBody.model !== nextModel) {
-							transformedBody.model = nextModel;
-							const repatchedHeaders = new Headers(
-								retryTransformedRequest.headers,
-							);
-							retryTransformedRequest = new Request(
-								retryTransformedRequest.url,
-								{
-									method: retryTransformedRequest.method,
-									headers: repatchedHeaders,
-									body: JSON.stringify(transformedBody),
-								},
-							);
-						}
-					} catch {
-						// If re-patching fails, proceed with the transformed request as-is
-					}
-
-					// This fallback fetch sends nextModel upstream — keep the overload
-					// attribution current before the request goes out (same
-					// family-resolvability fallback as the initial fetch).
-					activeUpstreamModel = nextModel;
-					overloadAttributionModel = computeOverloadAttributionModel();
-
-					// Acquire the retry first, then discard the previous attempt's
-					// body — a throw here leaves the prior body for the outer catch.
-					const retryResponse = await forwardAttempt(retryTransformedRequest);
-					discardUpstreamBody(rawResponse);
-					rawResponse = retryResponse;
-					liveUpstream = rawResponse;
-					const fallbackQuota = !isTrustedProbe("keepalive")
-						? resolveLiveAccountQuota429(account, rawResponse)
-						: null;
-					if (fallbackQuota) {
-						return await finishQuotaRejection(
-							rawResponse,
-							fallbackQuota,
-							nextModel,
-							"claims",
-						);
-					}
-
-					// Pass rawResponse directly (not a .clone()): the helper clones
-					// internally only when it must parse a 400/404 JSON body, and
-					// returns early for 429 without touching the body. An outer
-					// .clone() here would orphan an unconsumed tee branch on 429.
-					if (!(await isModelUnavailableError(rawResponse))) {
-						break; // Success — stop cycling
-					}
+					// Persist the 429's unified-status header (status/reset/remaining).
+					// This short-circuit never reaches processProxyResponse /
+					// updateAccountMetadata, so without this the dashboard's
+					// rate_limit_status chip freezes at the last successful response's
+					// value. Headers only — the body is discarded by fail() below.
+					persistRateLimitStatusMeta(account, rawResponse, ctx, provider);
 				}
+
+				return await fail(
+					cooldownUntil === null
+						? { kind: "other" }
+						: { kind: "hard_429", cooldownUntil },
+					rawResponse,
+				);
 			}
+			// Codex/ChatGPT entitlement error: the model exists, but THIS
+			// account's plan is not entitled to it. That is account-scoped —
+			// another account on a different plan can serve the same model — so
+			// fail over instead of forwarding the 400. The generic
+			// model-not-found below stays a client-facing error: no account can
+			// serve a model that doesn't exist, so cycling the pool for it only
+			// burns attempts and hides the real cause.
+			if (await isCodexEntitlementModelError(rawResponse)) {
+				log.warn(
+					`Account ${account.name} is not entitled to the requested model (plan-scoped Codex/ChatGPT restriction) — failing over to next account`,
+				);
+				// Default "native" dispose: this short-circuit runs before any
+				// usage-extraction clone exists, so rawResponse is still a plain
+				// fetch body that must be drained, not a tee branch.
+				return await fail({ kind: "model_not_entitled" }, rawResponse);
+			}
+			return await fail({ kind: "model_not_found" }, rawResponse);
 
 			// If still unavailable/rate-limited after exhausting the model list,
 			// failover to the next account. OpenAI-compatible providers never set
 			// isRateLimited:true in parseRateLimit, so we must handle it here.
-			if (await isModelUnavailableError(rawResponse)) {
-				if (isZaiOverloadResponse(rawResponse))
-					return await finishZaiOverload(rawResponse);
-				log.warn(
-					`All models exhausted on account ${account.name}, failing over to next account`,
-				);
-				// Mark account rate-limited so that isAccountAvailable() excludes it
-				// from future requests until the cooldown expires. The shared
-				// applyRateLimitCooldown helper computes a capped exponential-backoff
-				// cooldown and writes it to the DB; without it the same account would
-				// be retried on every subsequent request.
-				// Only fire for genuine rate-limit responses (429); model-not-found
-				// (404/400) is a configuration issue, not account exhaustion.
-				if (rawResponse.status === 429) {
-					// Same keepalive-skip as the no-fallback path above: synthetic
-					// keepalive bursts can trip Anthropic's per-IP limit even when
-					// individual accounts are healthy.
-					const isKeepalive = isTrustedProbe("keepalive");
-					if (isKeepalive) {
-						log.warn(
-							`Keepalive replay for ${account.name} got 429 (post-model-list) — skipping cooldown`,
-						);
-					} else {
-						// Residual rung: capped like the no-fallback site above — no
-						// corroborating evidence justifies an unbounded deadline here.
-						const cooldownUntil = capResidualRung429Cooldown(
-							account,
-							rawResponse,
-							extractCooldownUntil(
-								rawResponse,
-								account.id,
-								usageCache.getRateLimitedUntil.bind(usageCache),
-							),
-							Date.now(),
-						);
-						const reason: RateLimitReason = "all_models_exhausted_429";
-						// Route through shared helper so the consecutive_rate_limits
-						// counter and the audit reason are applied uniformly across all
-						// 429 paths. A future cooldownUntil is written as a
-						// server-directed deadline (Lever B) — bounded by the cap above,
-						// never the raw multi-day retry-after. The audit reason is
-						// preserved so saveRequest + DB rate_limited_reason both record
-						// the failure-mode-specific tag.
-						//
-						// Codex accounts route through the single shared observation
-						// applicator (cooldown + status-meta + usage-cache/credits/
-						// window-roll share one owner). requestAccounting "none": this
-						// short-circuit never reached updateAccountMetadata, so no
-						// per-request accounting runs here. cooldownUntil drives the
-						// cooldown deadline; rateLimitInfo drives the header-only
-						// status-meta persistence (a no-op for Codex, which has no
-						// unified-status header).
-						if (cooldownUntil === null) {
-							completeRateLimitProbe(account, "abandoned");
-							persistRateLimitStatusMeta(account, rawResponse, ctx, provider);
-						} else if (account.provider === "codex") {
-							applyCodexObservation(account, rawResponse, ctx, {
-								source: "real-traffic",
-								rateLimitInfo: provider.parseRateLimit(rawResponse),
-								requestAccounting: "none",
-								rateLimitAction: { kind: "apply", reason, cooldownUntil },
-								successRecovery: "standard",
-							});
-						} else {
-							applyRateLimitCooldown(
-								account,
-								{ resetTime: cooldownUntil, reason },
-								ctx,
-							);
-							// Persist the 429's unified-status header (status/reset/remaining).
-							// This short-circuit never reaches processProxyResponse /
-							// updateAccountMetadata, so without this the dashboard's
-							// rate_limit_status chip freezes at the last successful response's
-							// value. Headers only — the body is discarded by fail() below.
-							persistRateLimitStatusMeta(account, rawResponse, ctx, provider);
-						}
-						const responseTime = Date.now() - requestMeta.timestamp;
-						// Deliberate direct audit row (one per failed attempted
-						// account, synthetic UUID id) — NOT owned by RequestRecorder
-						// (S2). The recorder records the single final outcome under
-						// requestMeta.id; these capture each individual failed attempt.
-						ctx.asyncWriter.enqueue(() =>
-							ctx.dbOps.saveRequest({
-								id: crypto.randomUUID(),
-								method: req.method,
-								path: url.pathname,
-								accountUsed: account.id,
-								statusCode: 429,
-								success: false,
-								errorMessage:
-									cooldownUntil === null ? "scoped_quota_rejected_429" : reason,
-								responseTime,
-								failoverAttempts,
-								usage: requestedModel ? { model: requestedModel } : undefined,
-								apiKeyId: apiKeyId ?? undefined,
-								apiKeyName: apiKeyName ?? undefined,
-								project: requestMeta.project ?? null,
-								projectAttributionSource:
-									requestMeta.projectAttributionSource ?? null,
-								comboName: requestMeta.comboName ?? null,
-								reasoningEffort: requestMeta.reasoningEffort ?? null,
-								sessionKey: requestMeta.sessionKey ?? null,
-								cachePrefixHashes: requestMeta.cachePrefixHashes ?? null,
-								// The ingress model needs its own column: the usage envelope carries the
-								// provider-reported model, while analytics that group by ingress model
-								// (the fallback model-pair table) read requested_model.
-								requestedModel: requestMeta.requestedModel ?? null,
-								// A retry that ends in a local rejection keeps its fallback mark: the
-								// row is still the redemption of a refusal, whatever happened next.
-								fallbackCreditClaimed:
-									requestMeta.fallbackCreditClaimed ?? undefined,
-								fallbackFromModel: requestMeta.fallbackFromModel ?? undefined,
-							}),
-						);
-					}
-				}
-				return await fail(
-					rawResponse.status === 429
-						? { kind: "hard_429" }
-						: { kind: "model_not_found" },
-					rawResponse,
-				);
-			}
 		}
 
 		// All model/cache-control retries have settled. A confirmed organization
@@ -2717,37 +2162,6 @@ export async function proxyWithAccount(
 				`Account ${account.name} org_permission_denied (403): organization disabled OAuth/Claude Code access; cooling down this account`,
 			);
 			if (!options?.isLastAccountAttempt?.()) {
-				if (!isTrustedProbe("any")) {
-					ctx.asyncWriter.enqueue(() =>
-						ctx.dbOps.saveRequest({
-							id: crypto.randomUUID(),
-							method: req.method,
-							path: url.pathname,
-							accountUsed: account.id,
-							statusCode: 403,
-							success: false,
-							errorMessage: reason,
-							responseTime: Date.now() - requestMeta.timestamp,
-							failoverAttempts,
-							usage: activeUpstreamModel
-								? { model: activeUpstreamModel }
-								: undefined,
-							apiKeyId: apiKeyId ?? undefined,
-							apiKeyName: apiKeyName ?? undefined,
-							project: requestMeta.project ?? null,
-							projectAttributionSource:
-								requestMeta.projectAttributionSource ?? null,
-							comboName: requestMeta.comboName ?? null,
-							reasoningEffort: requestMeta.reasoningEffort ?? null,
-							sessionKey: requestMeta.sessionKey ?? null,
-							cachePrefixHashes: requestMeta.cachePrefixHashes ?? null,
-							requestedModel: requestMeta.requestedModel ?? null,
-							fallbackCreditClaimed:
-								requestMeta.fallbackCreditClaimed ?? undefined,
-							fallbackFromModel: requestMeta.fallbackFromModel ?? undefined,
-						}),
-					);
-				}
 				return await fail({ kind: "org_permission_denied" }, rawResponse);
 			}
 			// Preserve the actionable upstream 403 when no allowed fallback remains.
@@ -2759,6 +2173,10 @@ export async function proxyWithAccount(
 		// stream intent and request ID without needing the original request object.
 		const responseHeaders = new Headers(rawResponse.headers);
 		responseHeaders.set("x-clankermux-request-id", requestMeta.id);
+		responseHeaders.set(
+			"x-clankermux-resolved-model",
+			getAttemptTarget(requestMeta, account).upstreamModel,
+		);
 		const internalRequestStream = transformedRequest.headers.get(
 			"x-clankermux-request-stream",
 		);
@@ -2905,6 +2323,7 @@ export async function proxyWithAccount(
 					// terminal invalid_grant it pauses the account and throws → fall over.
 					refreshedToken = await refreshAccessTokenSafe(account, ctx);
 				} catch (err) {
+					if (err instanceof RoutingPolicyError) throw err;
 					log.warn(
 						`Stale-token refresh failed for account ${account.name}: ${
 							err instanceof Error ? err.message : String(err)
@@ -2952,11 +2371,6 @@ export async function proxyWithAccount(
 			response.status === 529
 		) {
 			const rateLimitInfo = provider.parseRateLimit(response);
-			// Family-scoped trip via the canonical attribution model: the model
-			// actually sent upstream (post model-mapping / fallback cycling) when
-			// it resolves to a family, else the request's logical model — the
-			// SAME model the probe admission above was gated by, so probe and
-			// trip can never target different buckets.
 			applyProviderOverloadCooldown(
 				account.provider,
 				rateLimitInfo.resetTime,
@@ -3120,49 +2534,12 @@ export async function proxyWithAccount(
 			);
 		}
 
-		// Forward response to client. Ownership of a held overload-probe token
-		// TRANSFERS to forwardToClient at CALL time — it settles the probe at the
-		// first healthy `message_start`, else on the stream's end/error verdict
-		// (clean EOF vs mid-stream overloaded_error vs error), and on a throw
-		// during ITS setup it settles the token
-		// "abandoned" itself before rethrowing (see forwardToClient). Null out
-		// the local reference so this side can't double-settle via the catch's
-		// fail() — single owner: after this line the token is forwardToClient's.
-		// Record that this account actually SERVED the protected family (Fable)
-		// upstream — keyed on activeUpstreamModel, which is re-assigned on every
-		// internal model-fallback, so cross-family fallback attributes demand to the
-		// family that actually answered (not the attempted primary). Only on a real
-		// 2xx success. This single organic-success chokepoint covers every serving
-		// path (main loop, combo, burst-hold, idle-wake, fallback), so callers no
-		// longer record demand. Feeds the reservation gate's 7d demand-targeting.
 		if (
 			response.ok &&
 			isProtectedFamily(getModelFamily(activeUpstreamModel ?? ""))
 		) {
 			recordProtectedFamilyDemand(account.id, Date.now());
 		}
-		// Same organic-success chokepoint, opposite purpose: a 2xx for this family
-		// is direct proof its weekly window is open, which outranks whatever a
-		// past 429 taught us. This is the memo's self-heal — without it a memo
-		// written from a misread 429 would keep this family sorted last on this
-		// account until its reset, which for a weekly window can be days.
-		//
-		// Keyed on activeUpstreamModel — the model that actually ANSWERED — so a
-		// cross-family fallback clears the family that really succeeded rather
-		// than the one that was asked for and did not. The memo is written under
-		// the LOGICAL family instead (the reactive rung and the gate both read
-		// the request's own model, unmapped), so on an account whose
-		// model_mappings rewrite that family the two keys differ and a success
-		// cannot clear it. Nothing forbids mappings on an Anthropic account —
-		// they are settable per account for every provider — so this is
-		// reachable, just not currently configured. It stays a comment rather
-		// than a fix because the consequence is now bounded to ORDERING: a memo
-		// that outlives its window sorts the account last for that family until
-		// `resetAt`, and never removes it from the pool.
-		//
-		// `requestMeta.timestamp` is this request's START, which is what the
-		// ordering guard inside the memo needs: a slow success admitted before
-		// the exhaustion must not erase a newer 429's finding.
 		if (response.ok) {
 			const servedFamily = getModelFamily(activeUpstreamModel ?? "");
 			if (servedFamily) {
@@ -3211,6 +2588,7 @@ export async function proxyWithAccount(
 			{ ...ctx, provider },
 		);
 	} catch (err) {
+		if (err instanceof RoutingPolicyError) throw err;
 		handleProxyError(err, account, log);
 		// Release any upstream body owned at the point of failure so a thrown
 		// error (e.g. mid-processResponse) doesn't leak its socket/read buffer.
@@ -3313,6 +2691,8 @@ export async function proxyForcedAccount(
 	apiKeyName?: string | null,
 	requestBodyContext?: RequestBodyContext | null,
 ): Promise<Response> {
+	modelOverride = getAttemptTarget(requestMeta, account).upstreamModel;
+	const attemptAudit: RoutingAttemptAudit = { id: null };
 	// Hoisted to function scope so the outer catch (which may fire before
 	// `provider` is assigned, e.g. a validateProviderPath throw) and the
 	// local-error recorder can reference them. effectiveBodyBuffer feeds the
@@ -3332,7 +2712,19 @@ export async function proxyForcedAccount(
 	// forwardToClient. disableCooldown:true matches the success path — a forced
 	// account never mutates cooldown state. forwardToClient handles a synthetic
 	// small non-streaming JSON error Response via its tee() read path.
-	const recordLocalError = (reason: string): Promise<Response> => {
+	const recordLocalError = async (reason: string): Promise<Response> => {
+		try {
+			await recordLocalRoutingOutcome(
+				attemptAudit,
+				requestMeta,
+				account,
+				ctx,
+				reason,
+				502,
+			);
+		} catch (error) {
+			log.warn("Could not persist forced routing outcome", error);
+		}
 		const errorResponse = createForcedAccountUnavailableResponse(
 			account,
 			reason,
@@ -3372,20 +2764,17 @@ export async function proxyForcedAccount(
 	};
 
 	try {
-		// Apply the account's model mapping exactly as the normal path does. The
-		// combo-style modelOverride patches the request body's `model` field;
-		// when absent, transformRequestBody's mapModelName does the family map.
 		const baseBodyContext =
 			requestBodyContext ?? new RequestBodyContext(requestBodyBuffer);
-		let _effectiveBodyContext = baseBodyContext;
-		effectiveBodyBuffer = baseBodyContext.getBuffer();
-		if (modelOverride && effectiveBodyBuffer) {
-			const overriddenContext = baseBodyContext.withPatchedModel(modelOverride);
-			if (overriddenContext) {
-				_effectiveBodyContext = overriddenContext;
-				effectiveBodyBuffer = overriddenContext.getBuffer();
-			}
-		}
+		const originalBody = baseBodyContext.getParsedJson();
+		if (!originalBody)
+			throw new RoutingPolicyError("Cannot parse inference request");
+		rejectModelSwitchFields(originalBody);
+		const effectiveBodyContext =
+			baseBodyContext.withPatchedModel(modelOverride);
+		if (!effectiveBodyContext)
+			throw new RoutingPolicyError("Cannot apply resolved model");
+		effectiveBodyBuffer = effectiveBodyContext.getBuffer();
 
 		// Get the provider for this account
 		provider = getProvider(account.provider) || ctx.provider;
@@ -3393,13 +2782,13 @@ export async function proxyForcedAccount(
 		// Validate that the account-specific provider can handle this path
 		validateProviderPath(provider, url.pathname);
 
-		// Synthetic Codex count_tokens never reaches upstream, so — exactly as on
+		// Synthetic local count_tokens never reaches upstream, so — exactly as on
 		// the normal path — it must not require or refresh OAuth credentials just
 		// to return an advisory local estimate. Without this, force-routing a
-		// Codex account with an expired token would return a local auth error
+		// local-count account with an expired token would return a local auth error
 		// instead of the synthesized 200/400.
 		const isLocalCountTokens =
-			(account.provider === "codex" || account.provider === "devin") &&
+			supportsLocalTokenCounting(account.provider, account.custom_endpoint) &&
 			url.pathname === "/v1/messages/count_tokens";
 
 		// Resolve the access token via the same path the normal flow uses. If it
@@ -3458,10 +2847,18 @@ export async function proxyForcedAccount(
 			requestInit.duplex = "half";
 		}
 
+		const nativeCtx = getNativeResponsesMetaContext(requestMeta);
+		if (nativeCtx && account.provider === "codex") {
+			requestInit.body = prepareNativeBody(nativeCtx.nativeBody, modelOverride);
+			headers.set(NATIVE_RESPONSES_REQUEST_HEADER, "1");
+		}
+
 		const providerRequest = new Request(targetUrl, requestInit);
 		const transformedRequest = provider.transformRequestBody
 			? await provider.transformRequestBody(providerRequest, account)
 			: providerRequest;
+		const devinRequestProvenance =
+			getDevinRequestProvenance(transformedRequest);
 
 		// Exactly ONE upstream request. No thinking-signature / cache-control
 		// pre-retries, no model-fallback cycling. The CLIENT's signal is threaded
@@ -3471,41 +2868,51 @@ export async function proxyForcedAccount(
 		// Captured at the fetch, like every attempt on the normal path: this
 		// function issues exactly one, and the evidence must not depend on what
 		// happens to the response afterwards.
-		let rawResponse = captureUpstreamAttempt(
+		const rawResponse = await sendAuthorizedRequest(
 			transformedRequest,
-			await makeProxyRequest(
-				transformedRequest,
-				undefined,
-				undefined,
-				undefined,
-				undefined,
-				req.signal,
-			),
 			account,
 			requestMeta,
-			req.headers,
 			ctx,
+			req.signal,
+			attemptAudit,
+			devinRequestProvenance,
+			async (raw) => {
+				liveForcedUpstream = captureUpstreamAttempt(
+					transformedRequest,
+					raw,
+					account,
+					requestMeta,
+					req.headers,
+					ctx,
+				);
+				if (provider.normalizeUpstreamResponse)
+					liveForcedUpstream = await provider.normalizeUpstreamResponse(
+						liveForcedUpstream,
+						transformedRequest,
+						account,
+					);
+				return liveForcedUpstream;
+			},
 		);
 		liveForcedUpstream = rawResponse;
-		if (provider.normalizeUpstreamResponse) {
-			rawResponse = await provider.normalizeUpstreamResponse(
-				rawResponse,
-				transformedRequest,
-				account,
-			);
-			liveForcedUpstream = rawResponse;
-		}
 
 		// Inject request metadata into response headers so providers can read
 		// stream intent and request ID (mirrors the normal path).
 		const responseHeaders = new Headers(rawResponse.headers);
 		responseHeaders.set("x-clankermux-request-id", requestMeta.id);
+		responseHeaders.set(
+			"x-clankermux-resolved-model",
+			getAttemptTarget(requestMeta, account).upstreamModel,
+		);
 		const internalRequestStream = transformedRequest.headers.get(
 			"x-clankermux-request-stream",
 		);
 		if (internalRequestStream === "true" || internalRequestStream === "false") {
 			responseHeaders.set("x-clankermux-request-stream", internalRequestStream);
 		}
+		if (transformedRequest.headers.get(NATIVE_RESPONSES_REQUEST_HEADER) === "1")
+			responseHeaders.set(NATIVE_RESPONSES_REQUEST_HEADER, "1");
+
 		const taggedRawResponse = new Response(rawResponse.body, {
 			status: rawResponse.status,
 			statusText: rawResponse.statusText,
@@ -3580,6 +2987,7 @@ export async function proxyForcedAccount(
 			{ ...ctx, provider },
 		);
 	} catch (err) {
+		if (err instanceof RoutingPolicyError) throw err;
 		// Release any upstream body owned at the point of failure (e.g. a
 		// processResponse throw after the fetch succeeded) before either terminal
 		// below — neither of them forwards it.
@@ -3722,7 +3130,7 @@ export function createContextWindowExceededResponse(
 	excludeOfficialAnthropic = false,
 ): Response {
 	const backendDescriptions = excludedBackends.map(({ account, model }) => {
-		const target = resolveCodexTargetModel(model, account);
+		const target = model;
 		const window = resolveModelMaxContextWindow(target);
 		return {
 			name: account.name,

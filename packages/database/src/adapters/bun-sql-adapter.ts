@@ -55,7 +55,7 @@ export class BunSqlAdapter {
 				const isBusy =
 					err instanceof Error &&
 					"code" in err &&
-					(err as { code?: string }).code === "SQLITE_BUSY";
+					(err as { code?: string }).code?.startsWith("SQLITE_BUSY") === true;
 				if (isBusy && Date.now() < deadline) {
 					await new Promise<void>((resolve) => setTimeout(resolve, 500));
 					continue;

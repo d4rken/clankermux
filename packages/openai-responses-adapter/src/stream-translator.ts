@@ -1,10 +1,16 @@
 import { Logger } from "@clankermux/logger";
+import {
+	customToolInput,
+	type ToolIdentity,
+	type ToolTranslation,
+} from "./tool-translation";
 import type { AnthropicUsage } from "./types";
 import { mergeAnthropicUsage, translateAnthropicUsage } from "./usage";
 
 const log = new Logger("openai-responses-adapter");
 
 interface State {
+	tools?: ToolTranslation;
 	lineBuffer: string;
 	hasSentCreated: boolean;
 	responseId: string;
@@ -13,7 +19,10 @@ interface State {
 	sequenceNumber: number;
 	blockIndexToOutput: Map<number, number>;
 	textByBlock: Map<number, string>;
-	toolByBlock: Map<number, { callId: string; name: string; argsBuf: string }>;
+	toolByBlock: Map<
+		number,
+		{ callId: string; identity: ToolIdentity; argsBuf: string }
+	>;
 	usage: AnthropicUsage;
 	doneSent: boolean;
 	outputItems: Array<Record<string, unknown>>;
@@ -69,8 +78,11 @@ function processEvent(
 	controller: TransformStreamDefaultController,
 	state: State,
 ): void {
+	if (state.doneSent) return;
 	if (eventType === "message_start") {
 		const message = data.message as Record<string, unknown> | undefined;
+		if (typeof message?.model === "string" && message.model)
+			state.model = message.model;
 		mergeAnthropicUsage(
 			state.usage,
 			message?.usage as Record<string, unknown> | undefined,
@@ -148,10 +160,17 @@ function processEvent(
 				state,
 			);
 		} else if (contentBlock.type === "tool_use") {
+			const identity = state.tools?.identity(contentBlock.name as string) ?? {
+				type: "function",
+				name: contentBlock.name as string,
+			};
 			state.toolByBlock.set(blockIndex, {
 				callId: contentBlock.id as string,
-				name: contentBlock.name as string,
-				argsBuf: "",
+				identity,
+				argsBuf:
+					contentBlock.input && Object.keys(contentBlock.input as object).length
+						? JSON.stringify(contentBlock.input)
+						: "",
 			});
 			emitSse(
 				controller,
@@ -160,11 +179,13 @@ function processEvent(
 					type: "response.output_item.added",
 					output_index: outputIdx,
 					item: {
-						type: "function_call",
+						type:
+							identity.type === "custom" ? "custom_tool_call" : "function_call",
 						id: `${state.responseId}_fc_${outputIdx}`,
 						call_id: contentBlock.id as string,
-						name: contentBlock.name as string,
-						arguments: "",
+						name: identity.name,
+						...(identity.namespace ? { namespace: identity.namespace } : {}),
+						...(identity.type === "custom" ? { input: "" } : { arguments: "" }),
 						status: "in_progress",
 					},
 				},
@@ -206,6 +227,7 @@ function processEvent(
 			const tool = state.toolByBlock.get(blockIndex);
 			if (tool) {
 				tool.argsBuf += partial;
+				if (tool.identity.type === "custom") return;
 				emitSse(
 					controller,
 					"response.function_call_arguments.delta",
@@ -281,25 +303,67 @@ function processEvent(
 			if (!tool) {
 				throw new Error(`Tool state missing for block index ${blockIndex}`);
 			}
+			const identity = tool.identity;
+			let input: string | undefined;
+			if (identity.type === "custom") {
+				try {
+					input = customToolInput(JSON.parse(tool.argsBuf));
+				} catch {
+					processEvent(
+						"error",
+						{
+							error: {
+								type: "invalid_tool_arguments",
+								message:
+									"Upstream returned invalid custom tool arguments; expected an input string",
+							},
+						},
+						controller,
+						state,
+					);
+					return;
+				}
+				emitSse(
+					controller,
+					"response.custom_tool_call_input.delta",
+					{
+						type: "response.custom_tool_call_input.delta",
+						item_id: `${state.responseId}_fc_${outputIdx}`,
+						output_index: outputIdx,
+						delta: input,
+					},
+					state,
+				);
+			}
+			const eventType =
+				identity.type === "custom"
+					? "response.custom_tool_call_input.done"
+					: "response.function_call_arguments.done";
 			emitSse(
 				controller,
-				"response.function_call_arguments.done",
+				eventType,
 				{
-					type: "response.function_call_arguments.done",
+					type: eventType,
 					item_id: `${state.responseId}_fc_${outputIdx}`,
 					output_index: outputIdx,
 					call_id: tool.callId,
-					name: tool.name,
-					arguments: tool.argsBuf,
+					name: identity.name,
+					...(identity.namespace ? { namespace: identity.namespace } : {}),
+					...(identity.type === "custom"
+						? { input }
+						: { arguments: tool.argsBuf }),
 				},
 				state,
 			);
 			const doneItem: Record<string, unknown> = {
-				type: "function_call",
+				type: identity.type === "custom" ? "custom_tool_call" : "function_call",
 				id: `${state.responseId}_fc_${outputIdx}`,
 				call_id: tool.callId,
-				name: tool.name,
-				arguments: tool.argsBuf,
+				name: identity.name,
+				...(identity.namespace ? { namespace: identity.namespace } : {}),
+				...(identity.type === "custom"
+					? { input }
+					: { arguments: tool.argsBuf }),
 				status: "completed",
 			};
 			state.outputItems.push(doneItem);
@@ -429,6 +493,7 @@ export function translateAnthropicStreamToResponses(
 	anthropicResponse: Response,
 	responseId: string,
 	model: string,
+	tools?: ToolTranslation,
 ): Response {
 	if (!anthropicResponse.body) {
 		return new Response(null, { status: anthropicResponse.status });
@@ -439,6 +504,7 @@ export function translateAnthropicStreamToResponses(
 	const decoder = new TextDecoder();
 
 	const state: State = {
+		tools,
 		lineBuffer: "",
 		hasSentCreated: false,
 		responseId,

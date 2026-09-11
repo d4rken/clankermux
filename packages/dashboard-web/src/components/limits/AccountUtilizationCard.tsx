@@ -5,6 +5,8 @@ import {
 import type { AccountResponse } from "@clankermux/types";
 import { AlertCircle } from "lucide-react";
 import { useMemo, useState } from "react";
+import { deriveAccountPolicies } from "../../lib/account-policies";
+import { deriveAccountStatus } from "../../lib/account-status";
 import {
 	ACCOUNT_UTILIZATION_SORT_LABELS,
 	ACCOUNT_UTILIZATION_SORT_MODES,
@@ -220,50 +222,70 @@ export function AccountUtilizationCard({
 					</p>
 				) : (
 					<div className="space-y-section">
-						{rows.map((account) => (
-							<div key={account.id} className="space-y-item">
-								<div className="flex items-center justify-between gap-item">
-									<span
-										className="truncate text-sm font-medium"
-										title={account.name}
-									>
-										{account.name}
-									</span>
-									<ProviderChip
+						{rows.map((account) => {
+							const status = deriveAccountStatus(account, now);
+							const extraSpend = deriveAccountPolicies(account).find(
+								(policy) => policy.key === "extraSpend" && policy.enabled,
+							);
+							return (
+								<div key={account.id} className="space-y-item">
+									<div className="flex items-center justify-between gap-item">
+										<span
+											className="truncate text-sm font-medium"
+											title={account.name}
+										>
+											{account.name}
+										</span>
+										<ProviderChip
+											provider={account.provider}
+											className="shrink-0"
+										/>
+										<OAuthTokenStatusWithBoundary
+											accountName={account.name}
+											hasRefreshToken={account.hasRefreshToken}
+										/>
+									</div>
+									<AccountStatusChips
+										account={account}
+										status={status}
+										variant="usage"
+									/>
+									<RateLimitProgress
+										resetIso={account.rateLimitReset}
+										usageUtilization={account.usageUtilization}
+										usageWindow={account.usageWindow}
+										usageData={account.usageData}
+										prediction={account.prediction}
+										burnAnchors={account.burnAnchors}
+										staleUsage={account.staleUsage}
+										usageAsOfIso={account.usageAsOfIso}
+										usageRateLimitedUntil={account.usageRateLimitedUntil}
+										usageThrottledUntil={account.usageThrottledUntil}
+										usageThrottledWindows={account.usageThrottledWindows}
 										provider={account.provider}
-										className="shrink-0"
+										showWeekly={providerShowsWeeklyUsage(account.provider)}
+										earliestResets={resetExtremes.earliest}
+										latestResets={resetExtremes.latest}
+										poolScopedFamilies={
+											familiesByClass.get(
+												servableClassFor(account.provider).classId,
+											) ?? []
+										}
+										inlineProjection
 									/>
-									<OAuthTokenStatusWithBoundary
-										accountName={account.name}
-										hasRefreshToken={account.hasRefreshToken}
-									/>
+									{extraSpend && !status.isOnCredits && (
+										<p
+											className="text-xs text-muted-foreground"
+											title={extraSpend.description}
+										>
+											{account.provider === "codex"
+												? "Credits allowed past weekly limit"
+												: "Overage spend allowed"}
+										</p>
+									)}
 								</div>
-								<AccountStatusChips account={account} />
-								<RateLimitProgress
-									resetIso={account.rateLimitReset}
-									usageUtilization={account.usageUtilization}
-									usageWindow={account.usageWindow}
-									usageData={account.usageData}
-									prediction={account.prediction}
-									burnAnchors={account.burnAnchors}
-									staleUsage={account.staleUsage}
-									usageAsOfIso={account.usageAsOfIso}
-									usageRateLimitedUntil={account.usageRateLimitedUntil}
-									usageThrottledUntil={account.usageThrottledUntil}
-									usageThrottledWindows={account.usageThrottledWindows}
-									provider={account.provider}
-									showWeekly={providerShowsWeeklyUsage(account.provider)}
-									earliestResets={resetExtremes.earliest}
-									latestResets={resetExtremes.latest}
-									poolScopedFamilies={
-										familiesByClass.get(
-											servableClassFor(account.provider).classId,
-										) ?? []
-									}
-									inlineProjection
-								/>
-							</div>
-						))}
+							);
+						})}
 					</div>
 				)}
 			</CardContent>

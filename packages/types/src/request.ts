@@ -1,3 +1,5 @@
+import { type CostSource, resolveCostSource } from "./request-cost";
+
 /**
  * Which tier of project attribution produced a request's `project` value.
  * Shared by the proxy (which derives it), the database (which persists it),
@@ -134,6 +136,9 @@ export interface RequestRow {
 	completion_tokens: number | null;
 	total_tokens: number | null;
 	cost_usd: number | null;
+	estimated_cost_usd?: number | null;
+	cost_source?: string | null;
+	cost_is_byok?: number | null;
 	input_tokens: number | null;
 	cache_read_input_tokens: number | null;
 	cache_creation_input_tokens: number | null;
@@ -217,6 +222,9 @@ export interface Request {
 	completionTokens?: number;
 	totalTokens?: number;
 	costUsd?: number;
+	estimatedCostUsd?: number;
+	costSource?: CostSource;
+	costIsByok?: boolean;
 	inputTokens?: number;
 	cacheReadInputTokens?: number;
 	cacheCreationInputTokens?: number;
@@ -283,13 +291,16 @@ export interface RequestResponse {
 	cacheCreationInputTokens?: number;
 	outputTokens?: number;
 	/**
-	 * Catalogue-based ESTIMATE in USD, absent when the model could not be priced.
+	 * Best available cost in USD: a provider charge or catalogue estimate.
 	 *
 	 * Absence is a distinct fact from zero and is preserved as such all the way to
 	 * the wire: a request whose model is missing from the pricing catalogue has no
 	 * cost here, while a request that consumed no metered tokens has 0.
 	 */
 	costUsd?: number;
+	estimatedCostUsd?: number;
+	costSource?: CostSource;
+	costIsByok?: boolean;
 	tokensPerSecond?: number;
 	// True when tokensPerSecond is the total-duration fallback (rendered with a
 	// "~" prefix in the dashboard). Only meaningful when tokensPerSecond is set.
@@ -407,6 +418,9 @@ export function toRequest(row: RequestRow): Request {
 		totalTokens:
 			row.total_tokens != null ? Number(row.total_tokens) : undefined,
 		costUsd: row.cost_usd != null ? Number(row.cost_usd) : undefined,
+		estimatedCostUsd: row.estimated_cost_usd ?? undefined,
+		costSource: resolveCostSource(row.cost_usd, row.cost_source),
+		costIsByok: row.cost_is_byok == null ? undefined : row.cost_is_byok === 1,
 		inputTokens:
 			row.input_tokens != null ? Number(row.input_tokens) : undefined,
 		cacheReadInputTokens:
@@ -468,6 +482,9 @@ export function toRequestResponse(request: Request): RequestResponse {
 		cacheCreationInputTokens: request.cacheCreationInputTokens,
 		outputTokens: request.outputTokens,
 		costUsd: request.costUsd,
+		estimatedCostUsd: request.estimatedCostUsd,
+		costSource: resolveCostSource(request.costUsd, request.costSource),
+		costIsByok: request.costIsByok,
 		tokensPerSecond: request.tokensPerSecond,
 		tokensPerSecondApproximate: request.tokensPerSecondApproximate,
 		apiKeyId: request.apiKeyId,

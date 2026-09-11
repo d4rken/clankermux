@@ -1,8 +1,9 @@
 import { createHash, randomUUID } from "node:crypto";
 import { gzipSync } from "node:zlib";
-import { estimateRequestTokens, mapModelName } from "@clankermux/core";
 import type { Account, DevinUsageData } from "@clankermux/types";
 import { BaseProvider } from "../../base";
+import { localTokenCountUrl } from "../../local-token-count";
+import { buildSyntheticCountTokensRequest } from "../../synthetic-count-tokens";
 import { usageCache } from "../../usage-fetcher";
 import {
 	DEVIN_CHAT_PATH,
@@ -169,6 +170,60 @@ function buildHistory(messages: unknown, cascade: string, model: string) {
 	});
 }
 
+export type DevinRequestProvenance = Readonly<
+	{
+		accountId: string | null;
+		credentialSha256: string;
+		bodySha256: string;
+		url: string;
+		method: string;
+	} & (
+		| { kind: "inference"; model: string }
+		| { kind: "synthetic"; status: number }
+	)
+>;
+const requestProvenance = new WeakMap<Request, DevinRequestProvenance>();
+const reportedModels = new WeakMap<Response, { model: string | null }>();
+/** Read after response consumption to include actual model metadata from late frames. */
+export function getDevinReportedModel(response: Response): string | null {
+	return reportedModels.get(response)?.model ?? null;
+}
+export function getDevinRequestProvenance(
+	request: Request,
+): DevinRequestProvenance | null {
+	return requestProvenance.get(request) ?? null;
+}
+async function attestRequest(
+	request: Request,
+	account: Account | undefined,
+	detail:
+		| { kind: "inference"; model: string }
+		| { kind: "synthetic"; status: number },
+): Promise<Request> {
+	const bodySha256 = createHash("sha256")
+		.update(new Uint8Array(await request.clone().arrayBuffer()))
+		.digest("hex");
+	requestProvenance.set(
+		request,
+		Object.freeze({
+			...detail,
+			accountId: account?.id ?? null,
+			credentialSha256: createHash("sha256")
+				.update(
+					JSON.stringify([
+						account?.api_key ?? null,
+						account?.custom_endpoint ?? null,
+					]),
+				)
+				.digest("hex"),
+			bodySha256,
+			url: request.url,
+			method: request.method,
+		}),
+	);
+	return request;
+}
+
 const sessionAuthenticationFailures = new WeakSet<Request>();
 
 export function isDevinSessionAuthenticationFailure(request: Request): boolean {
@@ -209,7 +264,9 @@ export class DevinProvider extends BaseProvider {
 		return path === "/v1/messages" || path === "/v1/messages/count_tokens";
 	}
 	buildUrl(path: string, _query: string, account?: Account): string {
-		return `${validateDevinEndpoint(account?.custom_endpoint || DEVIN_ENDPOINT)}${path === "/v1/messages/count_tokens" ? "/v1/messages/count_tokens" : DEVIN_CHAT_PATH}`;
+		if (path === "/v1/messages/count_tokens")
+			return localTokenCountUrl(this.name);
+		return `${validateDevinEndpoint(account?.custom_endpoint || DEVIN_ENDPOINT)}${DEVIN_CHAT_PATH}`;
 	}
 	prepareHeaders(_headers: Headers): Headers {
 		return new Headers({ "content-type": "application/json" });
@@ -221,12 +278,21 @@ export class DevinProvider extends BaseProvider {
 		request: Request,
 		account?: Account,
 	): Promise<Request> {
+		// Bind serialized credentials and provenance to one account snapshot across awaits.
+		account = account ? { ...account } : undefined;
 		try {
-			const body = record(await request.json());
-			if (new URL(request.url).pathname === "/v1/messages/count_tokens")
-				return synthetic({
-					input_tokens: Math.max(1, estimateRequestTokens(body)),
+			const path = new URL(request.url).pathname;
+			if (
+				path === "/v1/messages/count_tokens" ||
+				path === "/devin/count_tokens"
+			) {
+				const result = await buildSyntheticCountTokensRequest(request);
+				return await attestRequest(result, account, {
+					kind: "synthetic",
+					status: Number(result.headers.get("x-clankermux-synthetic-status")),
 				});
+			}
+			const body = record(await request.json());
 			if (!account?.api_key)
 				throw new DevinRpcError(
 					"unauthenticated",
@@ -266,7 +332,7 @@ export class DevinProvider extends BaseProvider {
 						"Devin included quota is unavailable; verify the plan before enabling overage",
 					);
 			}
-			const requested = mapModelName(string(body.model) || "swe-2", account);
+			const requested = string(body.model) || "swe-2";
 			const effort =
 				string(record(body.output_config ?? {}).effort) ||
 				string(body.reasoning_effort);
@@ -369,7 +435,7 @@ export class DevinProvider extends BaseProvider {
 					"invalid_argument",
 					"Devin request exceeds size limit",
 				);
-			return new Request(info.endpoint + DEVIN_CHAT_PATH, {
+			const result = new Request(info.endpoint + DEVIN_CHAT_PATH, {
 				method: "POST",
 				signal: request.signal,
 				headers: {
@@ -383,6 +449,10 @@ export class DevinProvider extends BaseProvider {
 				},
 				body: new Uint8Array(encodeConnect(gzipSync(encoded), 1)),
 			});
+			return await attestRequest(result, account, {
+				kind: "inference",
+				model: model.id,
+			});
 		} catch (error) {
 			if (request.signal.aborted) throw error;
 			const response = devinErrorResponse(error);
@@ -394,7 +464,10 @@ export class DevinProvider extends BaseProvider {
 			if (error instanceof DevinSessionAuthenticationError) {
 				sessionAuthenticationFailures.add(result);
 			}
-			return result;
+			return await attestRequest(result, account, {
+				kind: "synthetic",
+				status: response.status,
+			});
 		}
 	}
 	async normalizeUpstreamResponse(
@@ -408,10 +481,16 @@ export class DevinProvider extends BaseProvider {
 			headers.set("retry-after", retryAfter);
 			return new Response(response.body, { status: response.status, headers });
 		}
-		return convertDevinResponse(response, {
+		const evidence: { model: string | null } = { model: null };
+		const normalized = await convertDevinResponse(response, {
 			model: request.headers.get(DEVIN_UPSTREAM_MODEL) || "swe-2",
 			stream: request.headers.get("x-clankermux-request-stream") === "true",
 			signal: request.signal,
+			onReportedModel: (model) => {
+				evidence.model = model;
+			},
 		});
+		reportedModels.set(normalized, evidence);
+		return normalized;
 	}
 }

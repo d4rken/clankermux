@@ -68,7 +68,7 @@ async function insertRequest(
 	id: string,
 	timestamp: number,
 	accountId: string | null,
-	costUsd: number,
+	costUsd: number | null,
 	billingType: string | null,
 ): Promise<void> {
 	await dbOps.getAdapter().run(
@@ -169,7 +169,7 @@ describe("GET /api/payments/summary", () => {
 		expect(data.currentMonth.creditsUsd).toBeCloseTo(50, 6);
 		expect(data.currentMonth.ledgerUsd).toBeCloseTo(80, 6);
 		expect(data.currentMonth.tokenCostUsd).toBeCloseTo(0.9, 6);
-		expect(data.currentMonth.totalUsd).toBeCloseTo(80.9, 6);
+		expect(data.currentMonth.totalUsd).toBeCloseTo(80, 6);
 
 		// 30d range: 45d-old subscription excluded.
 		expect(data.range.days).toBeCloseTo(30, 3);
@@ -177,7 +177,7 @@ describe("GET /api/payments/summary", () => {
 		expect(data.range.creditsUsd).toBeCloseTo(50, 6);
 		expect(data.range.ledgerUsd).toBeCloseTo(80, 6);
 		expect(data.range.tokenCostUsd).toBeCloseTo(0.9, 6);
-		expect(data.range.totalUsd).toBeCloseTo(80.9, 6);
+		expect(data.range.totalUsd).toBeCloseTo(80, 6);
 		expect(data.range.amortizedUsd).toBeCloseTo(30, 3);
 		expect(data.range.planValueUsd).toBeCloseTo(1.0, 6);
 		expect(data.range.valueRatio).toBeCloseTo(1.0 / 30, 4);
@@ -352,4 +352,60 @@ describe("GET /api/payments/summary", () => {
 		expect(afterData.range.creditsUsd).toBeCloseTo(10, 6);
 		expect(afterData.recentPayments).toHaveLength(1);
 	});
+});
+
+it("separates a credit purchase from reported consumption and reports unpriced coverage", async () => {
+	await insertAccount("router", "Router");
+	await insertAccount("unpriced", "Unpriced");
+	await dbOps.insertCreditPayment(
+		"router",
+		"Router",
+		localDateOf(Date.now()),
+		100_000_000,
+		"manual",
+		null,
+		null,
+	);
+	const at = Date.now() - 1_000;
+	await insertRequest("paid", at, "router", 20, "api");
+	await insertRequest("free", at, "router", 0, "api");
+	await insertRequest("estimated", at, "router", 2, "overage");
+	await insertRequest("legacy", at, "router", 3, "api");
+	await insertRequest("missing", at, "router", null, "api");
+	await insertRequest("only-missing", at, "unpriced", null, "api");
+	await insertRequest("plan", at, "router", 50, "plan");
+	await dbOps
+		.getAdapter()
+		.run(
+			"UPDATE requests SET cost_source = 'reported' WHERE id IN ('paid', 'free')",
+		);
+	await dbOps
+		.getAdapter()
+		.run(
+			"UPDATE requests SET cost_source = 'estimated' WHERE id = 'estimated'",
+		);
+	const { data } = await fetchSummary();
+	for (const window of [data.currentMonth, data.range]) {
+		expect(window.ledgerUsd).toBe(100);
+		expect(window.totalUsd).toBe(100);
+		expect(window.tokenCostUsd).toBe(25);
+		expect(window.apiCostCoverage).toEqual({
+			reportedUsd: 20,
+			estimatedUsd: 2,
+			unknownSourceUsd: 3,
+			pricedRequests: 4,
+			unpricedRequests: 2,
+			reportedRequests: 2,
+			estimatedRequests: 1,
+			unknownSourceRequests: 1,
+		});
+	}
+	expect(data.range.planValueUsd).toBe(50);
+	expect(
+		data.perAccount.find((a) => a.accountId === "router")?.rangeCostCoverage
+			?.unpricedRequests,
+	).toBe(1);
+	expect(
+		data.perAccount.find((a) => a.accountId === "unpriced")?.rangeCostCoverage,
+	).toMatchObject({ pricedRequests: 0, unpricedRequests: 1 });
 });

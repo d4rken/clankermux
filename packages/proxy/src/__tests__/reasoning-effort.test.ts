@@ -105,3 +105,33 @@ describe("parseReasoningEffort", () => {
 		).toBe("high");
 	});
 });
+
+it("recognizes explicit chat effort and prioritizes explicit settings over thinking budget", () => {
+	expect(parseReasoningEffort({ reasoning_effort: "max" })).toBe("max");
+	expect(
+		parseReasoningEffort({
+			reasoning_effort: "",
+			thinking: { type: "enabled", budget_tokens: 100 },
+		}),
+	).toBe("thinking:100");
+	expect(parseReasoningEffort({ reasoning_effort: 3 })).toBeNull();
+	expect(
+		parseReasoningEffort({
+			reasoning: { effort: "high" },
+			reasoning_effort: "max",
+			output_config: { effort: "low" },
+		}),
+	).toBe("high");
+	expect(
+		parseReasoningEffort({
+			reasoning_effort: "max",
+			thinking: { type: "enabled", budget_tokens: 100 },
+		}),
+	).toBe("max");
+	expect(
+		parseReasoningEffort({
+			output_config: { effort: "max" },
+			thinking: { type: "enabled", budget_tokens: 100 },
+		}),
+	).toBe("max");
+});

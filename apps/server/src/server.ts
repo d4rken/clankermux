@@ -35,6 +35,7 @@ import {
 	AuthService,
 	closeAllSseStreams,
 	PublicRouter,
+	refreshOpenRouterAccountsOnStartup,
 	SessionAuthService,
 	terminateAnalyticsWorker,
 } from "@clankermux/http-api";
@@ -55,6 +56,7 @@ import {
 	usageCache,
 } from "@clankermux/providers";
 import {
+	AccountModelPermissionService,
 	AnthropicModelCatalogCache,
 	AutoRefreshScheduler,
 	bridgeStats,
@@ -273,6 +275,7 @@ let stopRateLimitCleanupJob: (() => void) | null = null;
 let stopDataCleanupJob: (() => void) | null = null;
 let stopWalCheckpointJob: (() => void) | null = null;
 let stopIntegritySchedulerJob: (() => void) | null = null;
+let stopModelPermissions: (() => void) | null = null;
 let autoRefreshScheduler: AutoRefreshScheduler | null = null;
 let codexUsagePoller: CodexUsagePoller | null = null;
 let cacheKeepaliveScheduler: CacheKeepaliveScheduler | null = null;
@@ -892,12 +895,19 @@ export default async function startServer(options?: {
 			dbOps.removeModelOverride(dialect, modelId),
 	});
 
+	const modelPermissions = new AccountModelPermissionService({
+		repository: dbOps.routing,
+		listAccounts: () => dbOps.getAllAccounts(),
+		getAccessToken: catalogAccessToken,
+	});
+
 	const apiRouter = new APIRouter({
 		db,
 		config,
 		dbOps,
 		sessionAuth,
 		modelCatalog: modelCatalogService,
+		modelPermissions,
 		runtime: {
 			port,
 			tlsEnabled,
@@ -1247,6 +1257,7 @@ export default async function startServer(options?: {
 	// forwardToClient feeds the per-request UsageState and finalizes it after
 	// transport finish, attaching the summary to the RequestRecorder.
 	const proxyContext: ProxyContext = {
+		modelPermissions,
 		strategy,
 		dbOps,
 		runtime: runtimeConfig,
@@ -1259,6 +1270,25 @@ export default async function startServer(options?: {
 	// The model-catalogue caches were built before the API router (they are
 	// shared with it) and reach token acquisition through this holder.
 	proxyContextRef = proxyContext;
+	for (const account of await dbOps.getAllAccounts()) {
+		const evidence = await modelPermissions.permissions(account);
+		if (evidence.completeness === "unknown" && !evidence.manual_ids.length)
+			log.warn(
+				`Account "${account.name}" has no model permission evidence yet; discovery or an explicit account/literal rule is required before inference`,
+			);
+	}
+	modelPermissions.start();
+	stopModelPermissions = () => modelPermissions.stop();
+	for (const key of await dbOps.getApiKeys()) {
+		const pin = await dbOps.getApiKeyPin(key.id);
+		if (pin?.malformed || (pin?.pinnedAccountId && pin.pinnedProviders?.length))
+			log.warn(
+				`API key "${key.name}" has invalid destinations and will reject inference until corrected`,
+			);
+	}
+	log.info(
+		"Routing tables active: legacy combos and per-account mappings are inactive; account model permissions authorize resolved targets",
+	);
 
 	// The single authority for autonomous (scheduled-prime) and manual
 	// (manual-refresh) Codex spend. Constructed ONCE over this proxyContext and
@@ -1917,6 +1947,8 @@ Available endpoints:
 			dbOps.setAccountIdentityFromProfile(accountId, identity),
 	});
 
+	void refreshOpenRouterAccountsOnStartup(dbOps);
+
 	// Codex identity backfill: a Codex account whose token hasn't refreshed since
 	// the identity feature shipped shows no identity in the dashboard (Codex
 	// identity is captured on token refresh via JWT decode, with no profile
@@ -2060,6 +2092,9 @@ async function handleGracefulShutdown(signal: string) {
 			quotaDriftScheduler.stop();
 			quotaDriftScheduler = null;
 		}
+
+		stopModelPermissions?.();
+		stopModelPermissions = null;
 
 		// Stop memory monitoring
 		if (memoryMonitorInterval) {

@@ -2,6 +2,10 @@ import crypto from "node:crypto";
 import { TIME_CONSTANTS, ValidationError } from "@clankermux/core";
 import { stripHopByHopHeaders } from "@clankermux/http-common";
 import type { Provider } from "@clankermux/providers";
+import {
+	isLocalTokenCountUrl,
+	TOKEN_COUNT_SOURCE_HEADER,
+} from "@clankermux/providers/local-token-count";
 import type { RequestMeta } from "@clankermux/types";
 import { chatGptCloudflareCookieJar } from "../chatgpt-cloudflare-cookies";
 import { ERROR_MESSAGES } from "./proxy-types";
@@ -44,6 +48,8 @@ async function tryUnwrapSyntheticResponse(
 	const body = await request.text();
 	const headers = new Headers();
 	headers.set("content-type", "application/json");
+	if (safeStatus === 200 && isLocalTokenCountUrl(request.url))
+		headers.set(TOKEN_COUNT_SOURCE_HEADER, "local-estimate");
 	return new Response(body, { status: safeStatus, headers });
 }
 

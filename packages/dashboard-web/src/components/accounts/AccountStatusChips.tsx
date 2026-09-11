@@ -53,6 +53,10 @@ interface AccountStatusChipsProps {
 	account: AccountResponse;
 	/** Pre-derived status; falls back to deriving from `account` when omitted. */
 	status?: AccountStatus;
+	/** Omit details when the host places them in its account header. */
+	showAccountDetails?: boolean;
+	/** Usage focuses on capacity and active problems, omitting account settings. */
+	variant?: "account" | "usage";
 }
 
 /**
@@ -491,32 +495,30 @@ function formatFamilyLabel(family: string): string {
 
 /**
  * The per-account status chip row shared by the Accounts page (`AccountListItem`)
- * and the Limits page (`AccountUtilizationCard`): Primary / priority / OAuth
- * token health, the rate-limit state, stale-lock and usage-throttle warnings,
- * the provider-overload cooldown and the peak / off-peak window. All flags come
- * from `deriveAccountStatus` so both pages stay in sync. Action buttons (e.g.
- * Force Reset) and request/session stats are intentionally left to the host.
+ * and the Usage page (`AccountUtilizationCard`). Usage omits routing, renewal,
+ * automation settings and routine off-peak / zero-reset indicators. Active
+ * warnings and capacity information share `deriveAccountStatus`. Action buttons
+ * (e.g. Force Reset) and request/session stats are left to the host.
  */
 export function AccountStatusChips({
 	account,
 	status: providedStatus,
+	showAccountDetails = true,
+	variant = "account",
 }: AccountStatusChipsProps) {
 	const status = providedStatus ?? deriveAccountStatus(account);
 	const devinQuotaPause =
 		account.provider === "devin" &&
 		(account.pauseReason === "overage" ||
 			account.pauseReason === "rate_limit_window");
+	const isUsage = variant === "usage";
+	const includeAccountDetails = showAccountDetails && !isUsage;
 
 	return (
-		<div className="flex flex-wrap items-center gap-item text-sm">
-			{status.isPrimary && (
-				<StatusChip className="bg-primary text-primary-foreground">
-					Primary
-				</StatusChip>
-			)}
-			<StatusChip className="bg-secondary text-secondary-foreground">
-				Priority: {status.priority}
-			</StatusChip>
+		<div
+			className={`flex flex-wrap items-center gap-item text-sm${isUsage ? " empty:hidden" : ""}`}
+		>
+			{includeAccountDetails && <AccountRoutingChips status={status} />}
 			{status.isRateLimited && (
 				<span title="Account is rate-limited - requests will be rejected until the limit resets">
 					<AlertCircle className="h-4 w-4 text-warning-strong" />
@@ -672,8 +674,11 @@ export function AccountStatusChips({
 					{status.creditsPlanType ? ` · ${status.creditsPlanType}` : ""}
 				</StatusChip>
 			)}
-			<CodexUsageResetChip account={account} status={status} />
-			{status.showPeakChip && (
+			{(!isUsage ||
+				(account.codexRateLimitResetCredits?.availableCount ?? 0) > 0) && (
+				<CodexUsageResetChip account={account} status={status} />
+			)}
+			{status.showPeakChip && (!isUsage || status.isPeak) && (
 				<StatusChip
 					className={
 						status.isPeak
@@ -687,8 +692,8 @@ export function AccountStatusChips({
 					{status.peakChipLabel}
 				</StatusChip>
 			)}
-			{status.showRenewalChip && (
-				<RenewalChip account={account} status={status} />
+			{includeAccountDetails && status.showRenewalChip && (
+				<AccountRenewalInfo account={account} status={status} />
 			)}
 			{status.isDuplicateAccount && (
 				<StatusChip
@@ -702,8 +707,24 @@ export function AccountStatusChips({
 			{/* The account's automation-flag inventory, always last: the pills above
 			    are transient state, these are configuration. A fragment, so they
 			    wrap as individual flex items of this row rather than as a block. */}
-			<AccountPolicyChips account={account} />
+			{!isUsage && <AccountPolicyChips account={account} />}
 		</div>
+	);
+}
+
+/** Account-level routing details, also used in the Accounts page heading. */
+export function AccountRoutingChips({ status }: { status: AccountStatus }) {
+	return (
+		<>
+			{status.isPrimary && (
+				<StatusChip className="bg-primary text-primary-foreground">
+					Primary
+				</StatusChip>
+			)}
+			<StatusChip className="bg-secondary text-secondary-foreground">
+				Priority: {status.priority}
+			</StatusChip>
+		</>
 	);
 }
 
@@ -714,20 +735,23 @@ const RENEWAL_URGENCY_CLASSES: Record<string, string> = {
 };
 
 /**
- * Subscription-renewal chip. Amber when renewal is near, red when imminent,
+ * Subscription renewal, optionally rendered as plain inline text. Amber when
+ * renewal is near, red when imminent,
  * muted for far-off or already-elapsed one-time dates. Only rendered when
  * `status.showRenewalChip` is true (a renewal date is set and the subscription
  * is not reported expired — see `deriveAccountStatus`).
  */
-function RenewalChip({
+export function AccountRenewalInfo({
 	account,
 	status,
+	inline = false,
 }: {
 	account: AccountResponse;
 	status: AccountStatus;
+	inline?: boolean;
 }) {
 	const nextDate = status.renewalNextDate;
-	if (!nextDate) return null;
+	if (!status.showRenewalChip || !nextDate) return null;
 
 	const shortDate = nextDate.toLocaleDateString(undefined, {
 		month: "short",
@@ -766,6 +790,20 @@ function RenewalChip({
 	const colorClasses =
 		RENEWAL_URGENCY_CLASSES[status.renewalUrgency] ??
 		RENEWAL_URGENCY_CLASSES.none;
+
+	if (inline) {
+		const textColor =
+			status.renewalUrgency === "imminent"
+				? "text-destructive-strong"
+				: status.renewalUrgency === "soon"
+					? "text-warning-strong"
+					: "text-muted-foreground";
+		return (
+			<span className={`whitespace-nowrap ${textColor}`} title={title}>
+				{label}
+			</span>
+		);
+	}
 
 	return (
 		<StatusChip className={colorClasses} title={title}>

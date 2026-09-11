@@ -75,6 +75,7 @@ export function ensureSchema(db: Database): void {
 			identity_rate_limit_tier TEXT,
 			identity_captured_at INTEGER,
 			identity_profile_fetched_at INTEGER,
+			openrouter_metadata_json TEXT,
 			codex_usage_json TEXT,
 			codex_usage_observed_at INTEGER,
 			refresh_token_expires_at INTEGER
@@ -100,6 +101,9 @@ export function ensureSchema(db: Database): void {
 			completion_tokens INTEGER DEFAULT 0,
 			total_tokens INTEGER DEFAULT 0,
 			cost_usd REAL DEFAULT 0,
+			estimated_cost_usd REAL,
+			cost_source TEXT,
+			cost_is_byok INTEGER,
 			output_tokens_per_second REAL,
 			output_tokens_per_second_approx INTEGER,
 			input_tokens INTEGER DEFAULT 0,
@@ -949,6 +953,75 @@ export function ensureSchema(db: Database): void {
 	);
 
 	// Performance indexes (covering/partial indexes for hot query paths)
+	// Routing policy is additive: retired combo/mapping storage remains inert.
+	db.run(`CREATE TABLE IF NOT EXISTS routing_rules (
+		id TEXT PRIMARY KEY, name TEXT NOT NULL,
+		enabled INTEGER NOT NULL CHECK(enabled IN (0,1)), position INTEGER NOT NULL UNIQUE,
+		match_api_key_id TEXT, match_model_kind TEXT NOT NULL CHECK(match_model_kind IN ('any','exact','family')),
+		match_model_value TEXT, pool_kind TEXT NOT NULL CHECK(pool_kind IN ('inherit','provider','accounts')),
+		pool_provider TEXT, pool_account_ids TEXT,
+		target_kind TEXT NOT NULL CHECK(target_kind IN ('default','literal','requested')), target_model TEXT
+	)`);
+	db.run(`CREATE TABLE IF NOT EXISTS account_model_permissions (
+		account_id TEXT PRIMARY KEY, scope TEXT NOT NULL, generation INTEGER NOT NULL,
+		completeness TEXT NOT NULL CHECK(completeness IN ('unknown','known-complete','known-empty')),
+		discovered_ids TEXT NOT NULL, manual_ids TEXT NOT NULL,
+		last_success_at INTEGER, last_attempt_at INTEGER, last_error TEXT
+	)`);
+	db.run(`CREATE TABLE IF NOT EXISTS account_model_suppressions (
+		account_id TEXT NOT NULL, scope TEXT NOT NULL, model TEXT NOT NULL,
+		until_at INTEGER NOT NULL, reason TEXT NOT NULL,
+		PRIMARY KEY(account_id, scope, model)
+	)`);
+	// Attempts begin before their parent request is finalized, so retention is
+	// explicitly coupled to request deletion rather than an immediate foreign key.
+	db.run(
+		`CREATE TABLE IF NOT EXISTS routing_snapshots (id TEXT PRIMARY KEY, content TEXT NOT NULL)`,
+	);
+	db.run(`CREATE TABLE IF NOT EXISTS routing_attempts (
+		id TEXT PRIMARY KEY, request_id TEXT NOT NULL, rule_id TEXT, route_snapshot_id TEXT NOT NULL,
+		account_id TEXT, provider TEXT, requested_model TEXT NOT NULL, resolved_model TEXT,
+		outgoing_model TEXT, reported_model TEXT,
+		kind TEXT NOT NULL CHECK(kind IN ('upstream_send','local_reject','local_success')),
+		started_at INTEGER NOT NULL, finished_at INTEGER, status INTEGER, error TEXT
+	)`);
+	db.run(
+		`CREATE INDEX IF NOT EXISTS idx_routing_attempts_request ON routing_attempts(request_id, started_at)`,
+	);
+
+	db.run(
+		`CREATE INDEX IF NOT EXISTS idx_routing_attempts_snapshot ON routing_attempts(route_snapshot_id)`,
+	);
+	db.run(
+		`CREATE INDEX IF NOT EXISTS idx_routing_attempts_started ON routing_attempts(started_at)`,
+	);
+	db.run(`CREATE TRIGGER IF NOT EXISTS routing_snapshot_retention AFTER DELETE ON routing_attempts
+      BEGIN DELETE FROM routing_snapshots WHERE id=OLD.route_snapshot_id AND NOT EXISTS(SELECT 1 FROM routing_attempts WHERE route_snapshot_id=OLD.route_snapshot_id); END`);
+
+	// Restrict reference deletion; SET NULL would silently broaden a policy.
+	db.run(`CREATE TRIGGER IF NOT EXISTS routing_account_delete_guard BEFORE DELETE ON accounts
+		WHEN EXISTS(SELECT 1 FROM routing_rules r, json_each(COALESCE(r.pool_account_ids,'[]')) a WHERE r.pool_kind='accounts' AND a.value=OLD.id)
+		OR EXISTS(SELECT 1 FROM api_keys WHERE pinned_account_id=OLD.id)
+		BEGIN SELECT RAISE(ABORT, 'Account is referenced by routing rules or API key destinations'); END`);
+	db.run(`CREATE TRIGGER IF NOT EXISTS routing_key_delete_guard BEFORE DELETE ON api_keys
+		WHEN EXISTS(SELECT 1 FROM routing_rules WHERE match_api_key_id=OLD.id)
+		BEGIN SELECT RAISE(ABORT, 'API key is referenced by routing rules'); END`);
+	db.run(`CREATE TRIGGER IF NOT EXISTS routing_attempt_retention AFTER DELETE ON requests
+		BEGIN DELETE FROM routing_attempts WHERE request_id=OLD.id; END`);
+
+	db.run(`CREATE TRIGGER IF NOT EXISTS routing_permission_account_cleanup AFTER DELETE ON accounts
+  BEGIN DELETE FROM account_model_permissions WHERE account_id=OLD.id;
+  DELETE FROM account_model_suppressions WHERE account_id=OLD.id; END`);
+	// Match the effective endpoint used by modelPermissionScope; retired JSON metadata is inert.
+	const routingEndpoint = (row: "OLD" | "NEW") =>
+		`CASE WHEN ${row}.custom_endpoint='' THEN NULL WHEN substr(ltrim(${row}.custom_endpoint),1,1)='{' AND json_valid(${row}.custom_endpoint) THEN CASE WHEN json_type(${row}.custom_endpoint,'$.endpoint')='text' THEN json_extract(${row}.custom_endpoint,'$.endpoint') ELSE NULL END ELSE trim(${row}.custom_endpoint) END`;
+	db.run(`CREATE TRIGGER IF NOT EXISTS routing_permission_identity_invalidation AFTER UPDATE ON accounts
+  WHEN OLD.provider IS NOT NEW.provider OR (${routingEndpoint("OLD")}) IS NOT (${routingEndpoint("NEW")}) OR OLD.api_key IS NOT NEW.api_key
+   OR OLD.identity_external_id IS NOT NEW.identity_external_id OR OLD.identity_email IS NOT NEW.identity_email
+   OR OLD.identity_organization_name IS NOT NEW.identity_organization_name OR OLD.identity_plan_tier IS NOT NEW.identity_plan_tier
+  BEGIN UPDATE account_model_permissions SET scope='invalidated',generation=generation+1,completeness='unknown',discovered_ids='[]',manual_ids='[]',last_success_at=NULL,last_attempt_at=NULL,last_error=NULL WHERE account_id=OLD.id;
+ DELETE FROM account_model_suppressions WHERE account_id=OLD.id; END`);
+
 	addPerformanceIndexes(db);
 }
 
@@ -1237,6 +1310,27 @@ export const ADDITIVE_COLUMNS: ReadonlyArray<{
 		table: "accounts",
 		column: "identity_profile_fetched_at",
 		ddl: "ALTER TABLE accounts ADD COLUMN identity_profile_fetched_at INTEGER",
+	},
+	{
+		table: "accounts",
+		column: "openrouter_metadata_json",
+		ddl: "ALTER TABLE accounts ADD COLUMN openrouter_metadata_json TEXT",
+	},
+	// Nullable provenance: old amounts must never become provider-verified.
+	{
+		table: "requests",
+		column: "estimated_cost_usd",
+		ddl: "ALTER TABLE requests ADD COLUMN estimated_cost_usd REAL",
+	},
+	{
+		table: "requests",
+		column: "cost_source",
+		ddl: "ALTER TABLE requests ADD COLUMN cost_source TEXT",
+	},
+	{
+		table: "requests",
+		column: "cost_is_byok",
+		ddl: "ALTER TABLE requests ADD COLUMN cost_is_byok INTEGER",
 	},
 	// Which attribution tier produced the row's `project` (see
 	// ProjectAttributionSource): header / wd_primary / wd_plain / codex_cwd /

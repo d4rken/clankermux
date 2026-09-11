@@ -12,7 +12,6 @@ export function DevinAccountFields({
 	priority,
 	token,
 	onTokenChange,
-	onModelChange,
 	onSuccess,
 	onError,
 }: {
@@ -20,7 +19,6 @@ export function DevinAccountFields({
 	priority: number;
 	token: string;
 	onTokenChange: (value: string) => void;
-	onModelChange: (value: string) => void;
 	onSuccess: () => void;
 	onError: (message: string) => void;
 }) {
@@ -113,7 +111,6 @@ export function DevinAccountFields({
 				value={token}
 				onChange={(event) => {
 					setCatalog(null);
-					onModelChange("");
 					onTokenChange(event.target.value);
 				}}
 				placeholder="Devin CLI session token"
@@ -145,23 +142,26 @@ export function DevinAccountFields({
 							? " — CLI access is unavailable"
 							: ""}
 					</p>
-					<Label htmlFor="devin-model">Model for Claude requests</Label>
-					<select
-						id="devin-model"
-						className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
-						defaultValue=""
-						onChange={(event) => onModelChange(event.target.value)}
+					<p className="text-sm text-muted-foreground">
+						After adding the account, use the Routing page to choose which model
+						requests use. Its Permitted Models menu manages model access.
+					</p>
+					<ul
+						className="max-h-40 overflow-auto space-y-tight text-sm"
+						aria-label="Discovered Devin models"
 					>
-						<option value="">SWE-2 (account default)</option>
 						{catalog.data.models.map((model) => (
-							<option key={model.id} value={model.id} disabled={model.disabled}>
-								{model.name}
+							<li key={model.id}>
+								{model.name}{" "}
+								<code className="text-xs text-muted-foreground">
+									{model.id}
+								</code>
 								{model.disabled
 									? ` (${model.disabledReason || "unavailable"})`
 									: ""}
-							</option>
+							</li>
 						))}
-					</select>
+					</ul>
 				</div>
 			)}
 			<p className="text-sm text-muted-foreground">

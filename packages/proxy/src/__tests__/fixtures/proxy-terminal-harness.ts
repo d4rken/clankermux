@@ -189,6 +189,6 @@ export async function callHandleProxy(
 	url: URL,
 	ctx: ProxyContext,
 ): Promise<Response> {
-	const { handleProxy } = await import("../../proxy");
+	const { handleProxy } = await import("./routing-harness");
 	return handleProxy(req, url, ctx);
 }

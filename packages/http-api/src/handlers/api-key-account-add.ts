@@ -2,7 +2,6 @@ import crypto from "node:crypto";
 import {
 	patterns,
 	sanitizers,
-	validateAndSanitizeModelMappings,
 	validateNumber,
 	validateString,
 } from "@clankermux/core";
@@ -19,6 +18,7 @@ import {
 } from "@clankermux/http-common";
 import { Logger } from "@clankermux/logger";
 import { devinSessionExpiresAt } from "@clankermux/providers";
+import { refreshOpenRouterAccountMetadata } from "../services/openrouter-account-metadata";
 
 const log = new Logger("API:Accounts");
 
@@ -67,8 +67,6 @@ export interface ApiKeyProviderSpec {
 	 * NULL instead.
 	 */
 	mirrorKeyToTokens: boolean;
-	/** Whether a `modelMappings` body field is accepted. */
-	modelMappings: boolean;
 }
 
 /**
@@ -81,7 +79,6 @@ export const API_KEY_PROVIDERS = {
 		apiKey: { from: "body" },
 		endpoint: { from: "fixed", value: null },
 		mirrorKeyToTokens: false,
-		modelMappings: true,
 	},
 	zai: {
 		provider: "zai",
@@ -89,7 +86,6 @@ export const API_KEY_PROVIDERS = {
 		apiKey: { from: "body" },
 		endpoint: { from: "body", required: false },
 		mirrorKeyToTokens: true,
-		modelMappings: true,
 	},
 	openai: {
 		provider: "openai-compatible",
@@ -97,7 +93,6 @@ export const API_KEY_PROVIDERS = {
 		apiKey: { from: "body" },
 		endpoint: { from: "body", required: true },
 		mirrorKeyToTokens: true,
-		modelMappings: true,
 	},
 	minimax: {
 		provider: "minimax",
@@ -105,7 +100,6 @@ export const API_KEY_PROVIDERS = {
 		apiKey: { from: "body" },
 		endpoint: { from: "fixed", value: null },
 		mirrorKeyToTokens: true,
-		modelMappings: false,
 	},
 	anthropicCompatible: {
 		provider: "anthropic-compatible",
@@ -113,7 +107,6 @@ export const API_KEY_PROVIDERS = {
 		apiKey: { from: "body" },
 		endpoint: { from: "body", required: false },
 		mirrorKeyToTokens: true,
-		modelMappings: true,
 	},
 	ollama: {
 		provider: "ollama",
@@ -121,7 +114,6 @@ export const API_KEY_PROVIDERS = {
 		apiKey: { from: "fixed", value: "ollama" },
 		endpoint: { from: "body", required: false },
 		mirrorKeyToTokens: true,
-		modelMappings: true,
 	},
 	ollamaCloud: {
 		provider: "ollama-cloud",
@@ -129,7 +121,6 @@ export const API_KEY_PROVIDERS = {
 		apiKey: { from: "body" },
 		endpoint: { from: "fixed", value: "https://ollama.com" },
 		mirrorKeyToTokens: true,
-		modelMappings: true,
 	},
 	kilo: {
 		provider: "kilo",
@@ -137,7 +128,6 @@ export const API_KEY_PROVIDERS = {
 		apiKey: { from: "body" },
 		endpoint: { from: "fixed", value: null },
 		mirrorKeyToTokens: false,
-		modelMappings: true,
 	},
 	alibabaCodingPlan: {
 		provider: "alibaba-coding-plan",
@@ -145,7 +135,6 @@ export const API_KEY_PROVIDERS = {
 		apiKey: { from: "body" },
 		endpoint: { from: "fixed", value: null },
 		mirrorKeyToTokens: true,
-		modelMappings: true,
 	},
 	openrouter: {
 		provider: "openrouter",
@@ -153,7 +142,6 @@ export const API_KEY_PROVIDERS = {
 		apiKey: { from: "body" },
 		endpoint: { from: "fixed", value: null },
 		mirrorKeyToTokens: false,
-		modelMappings: true,
 	},
 } as const satisfies Record<string, ApiKeyProviderSpec>;
 
@@ -198,44 +186,10 @@ function readEndpoint(
 }
 
 /**
- * Parse `modelMappings` into the JSON string stored in `accounts.model_mappings`.
- *
- * Returns a `Response` when the field is present but does not survive
- * sanitization — the caller returns it as-is. Rejecting is deliberate: silently
- * dropping a caller's mappings leaves them with an account that quietly ignores
- * its routing config.
- */
-function readModelMappings(
-	body: Record<string, unknown>,
-	spec: ApiKeyProviderSpec,
-): { json: string | null } | { error: Response } {
-	if (!spec.modelMappings || !body.modelMappings) return { json: null };
-
-	if (typeof body.modelMappings !== "object") {
-		return {
-			error: errorResponse(BadRequest("modelMappings must be an object")),
-		};
-	}
-
-	const sanitized = validateAndSanitizeModelMappings(body.modelMappings);
-	if (!sanitized || Object.keys(sanitized).length === 0) {
-		return {
-			error: errorResponse(
-				BadRequest(
-					"modelMappings contains no valid entries. Each key and value must be a known model identifier.",
-				),
-			),
-		};
-	}
-
-	return { json: JSON.stringify(sanitized) };
-}
-
-/**
  * Build the POST handler that creates an account for an API-key provider.
  *
  * Every such provider shares the same request shape (`name`, `apiKey`,
- * `priority`, optionally `customEndpoint` and `modelMappings`), the same INSERT
+ * `priority`, optionally `customEndpoint`), the same INSERT
  * and the same response body; `spec` supplies the differences.
  */
 export function createApiKeyAccountAddHandler(
@@ -293,9 +247,6 @@ export function createApiKeyAccountAddHandler(
 				}
 			}
 
-			const mappings = readModelMappings(body, spec);
-			if ("error" in mappings) return mappings.error;
-
 			const accountId = crypto.randomUUID();
 			const now = Date.now();
 			const token = spec.mirrorKeyToTokens ? apiKey : null;
@@ -310,9 +261,9 @@ export function createApiKeyAccountAddHandler(
 				db,
 				`INSERT INTO accounts (
 					id, name, provider, api_key, refresh_token, access_token,
-					expires_at, created_at, request_count, total_requests, priority, custom_endpoint, model_mappings,
+					expires_at, created_at, request_count, total_requests, priority, custom_endpoint,
 					auto_pause_on_overage_enabled
-				) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)`,
+				) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)`,
 				[
 					accountId,
 					name,
@@ -328,10 +279,16 @@ export function createApiKeyAccountAddHandler(
 					0,
 					priority,
 					customEndpoint,
-					mappings.json,
 				],
 				name,
 			);
+
+			const openRouterMetadata = await refreshOpenRouterAccountMetadata(dbOps, {
+				id: accountId,
+				provider: spec.provider,
+				api_key: apiKey,
+				custom_endpoint: customEndpoint,
+			});
 
 			log.info(
 				customEndpoint
@@ -371,6 +328,7 @@ export function createApiKeyAccountAddHandler(
 					id: account.id,
 					name: account.name,
 					provider: account.provider,
+					...(spec.provider === "openrouter" ? { openRouterMetadata } : {}),
 					requestCount: account.request_count,
 					totalRequests: account.total_requests,
 					lastUsed: account.last_used

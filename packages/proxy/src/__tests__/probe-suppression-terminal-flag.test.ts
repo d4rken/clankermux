@@ -204,7 +204,7 @@ function installFetch() {
 }
 
 async function callHandleProxy(ctx: ProxyContext) {
-	const { handleProxy } = await import("../proxy");
+	const { handleProxy } = await import("./fixtures/routing-harness");
 	return handleProxy(
 		makeRequest(),
 		new URL("https://proxy.local/v1/messages"),
@@ -216,7 +216,7 @@ describe("terminal-attempt flag vs a probe-suppressed remainder", () => {
 	let originalFetch: typeof globalThis.fetch;
 
 	beforeAll(async () => {
-		await import("../proxy");
+		await import("./fixtures/routing-harness");
 	});
 
 	beforeEach(() => {

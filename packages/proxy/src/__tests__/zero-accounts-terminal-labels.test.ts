@@ -76,7 +76,7 @@ async function callHandleProxy(
 	ctx: ProxyContext,
 	apiKeyId: string | null = null,
 ) {
-	const { handleProxy } = await import("../proxy");
+	const { handleProxy } = await import("./fixtures/routing-harness");
 	return handleProxy(
 		req,
 		url,
@@ -407,7 +407,7 @@ describe("zero-accounts terminal recorder labels", () => {
 	let originalFetch: typeof globalThis.fetch;
 
 	beforeAll(async () => {
-		await import("../proxy");
+		await import("./fixtures/routing-harness");
 	});
 
 	beforeEach(() => {
@@ -520,7 +520,7 @@ describe("zero-accounts terminal recorder labels", () => {
 		expect(recordedErrors).toEqual(["pinned_account_unavailable"]);
 	});
 
-	it("later pinned terminal records the fixed pinned_target_unavailable label", async () => {
+	it("an excluded destination records the routing_policy_rejected label", async () => {
 		// Codex-CLI floor (deny-official-anthropic) with the only account cooled:
 		// selection returns [] BEFORE the floor filter runs, so no pinFailure is set
 		// and no earlier terminal applies — the fixed-label pinned terminal fires.
@@ -540,10 +540,10 @@ describe("zero-accounts terminal recorder labels", () => {
 			ctx,
 		);
 
-		expect(res.status).toBe(503);
+		expect(res.status).toBe(403);
 		const body = (await res.json()) as { error: { type: string } };
-		expect(body.error.type).toBe("pinned_target_unavailable");
-		expect(recordedErrors).toEqual(["pinned_target_unavailable"]);
+		expect(body.error.type).toBe("routing_policy_rejected");
+		expect(recordedErrors).toEqual(["routing_policy_rejected"]);
 	});
 
 	it("family-weekly cooled-sibling terminal records family_weekly_exhausted", async () => {
@@ -602,9 +602,12 @@ describe("zero-accounts terminal recorder labels", () => {
 	});
 
 	it("pool-exhausted terminal records pool_exhausted", async () => {
-		const { ctx, recordedErrors } = makeContext([], {
-			providerName: "codex",
-		});
+		const { ctx, recordedErrors } = makeContext(
+			[makeAccount({ paused: true, provider: "codex" })],
+			{
+				providerName: "codex",
+			},
+		);
 
 		const res = await callHandleProxy(
 			makeRequest("claude-sonnet-4-5"),

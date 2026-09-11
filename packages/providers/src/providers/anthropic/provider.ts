@@ -2,7 +2,6 @@ import {
 	ACCOUNT_WIDE_HARD_STATUSES,
 	isInvalidGrantMessage,
 	isReauthDueSoon,
-	mapModelName,
 	OAuthRefreshTokenError,
 	SOFT_WARNING_STATUSES as SHARED_SOFT_WARNING_STATUSES,
 	validateEndpointUrl,
@@ -12,7 +11,6 @@ import { Logger } from "@clankermux/logger";
 import type { Account } from "@clankermux/types";
 import { BaseProvider } from "../../base";
 import type { RateLimitInfo, TokenRefreshResult } from "../../types";
-import { transformRequestBodyModel } from "../../utils/model-mapping";
 import { extractAnthropicIdentity } from "./identity";
 import { resolveRefreshTokenExpiresAt } from "./refresh-token-expiry";
 
@@ -323,14 +321,9 @@ export class AnthropicProvider extends BaseProvider {
 
 	async transformRequestBody(
 		request: Request,
-		account?: Account,
+		_account?: Account,
 	): Promise<Request> {
-		return transformRequestBodyModel(request, account, (model, acc) => {
-			if (acc) {
-				return mapModelName(model, acc);
-			}
-			return model;
-		});
+		return request;
 	}
 
 	buildUrl(path: string, query: string, account?: Account): string {

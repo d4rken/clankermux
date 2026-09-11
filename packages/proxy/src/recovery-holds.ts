@@ -1,3 +1,5 @@
+import { getAttemptTarget } from "./resolved-route";
+import { eligibleRouteAccounts } from "./routing-service";
 /**
  * The per-request RECOVERY-HOLD family: every path in `handleProxy` that parks a
  * live client connection and re-attempts, rather than bouncing a terminal error
@@ -18,7 +20,7 @@
  * span every pass a single request makes.
  */
 
-import { mapModelName, NETWORK } from "@clankermux/core";
+import { NETWORK } from "@clankermux/core";
 import { Logger } from "@clankermux/logger";
 import type { Account, RequestMeta } from "@clankermux/types";
 import type {
@@ -28,7 +30,6 @@ import type {
 import { cacheBodyStore } from "./cache-body-store";
 import {
 	abortableSleep,
-	getComboSlotInfo,
 	HOLD_OVERFLOW,
 	holdAndRetryCacheAccount,
 	isTrustedSyntheticProbe,
@@ -53,7 +54,6 @@ import {
 	getProviderOverloadKey,
 	getProviderOverloadUntil,
 	inspectProviderOverload,
-	resolveOverloadAttributionModel,
 } from "./provider-overload-cooldown";
 
 // Same channel name as handleProxy's own logger: this module was carved out of
@@ -149,12 +149,7 @@ export function isOrdinaryAttemptFailure(
  * serve the request.
  */
 export function isAccountWideFailure(outcome: ProxyAttemptOutcome): boolean {
-	return (
-		isOrdinaryAttemptFailure(outcome) &&
-		outcome.kind !== "model_not_found" &&
-		outcome.kind !== "model_not_entitled" &&
-		outcome.kind !== "other"
-	);
+	return isOrdinaryAttemptFailure(outcome) && outcome.kind !== "other";
 }
 
 // Outcome of a burst hold once it has run. `served` carries the real upstream
@@ -438,10 +433,6 @@ export function createRecoveryHolds(deps: RecoveryHoldsDeps): RecoveryHolds {
 		const pairs = new Map<string, { provider: string; model: string | null }>();
 		for (const entry of gated) {
 			const { account } = entry;
-			// The model the GATE decided on, when it resolved one. Re-deriving via
-			// modelForAccount would pick a different bucket for an account with
-			// per-account model mapping, so the hold would wait on (or find closed)
-			// a bucket that had nothing to do with the skip.
 			const model =
 				entry.gatedModel !== undefined
 					? entry.gatedModel
@@ -478,33 +469,10 @@ export function createRecoveryHolds(deps: RecoveryHoldsDeps): RecoveryHolds {
 		}));
 	};
 
-	// Current combo slot override for an account, resolved by ACCOUNT ID at
-	// attempt time (not selection time): a hold wake re-runs selection, which
-	// re-populates the combo slot info, and a combo fallback clears comboName —
-	// so the override must be read fresh per attempt or a recovered combo slot
-	// would be served with the wrong (non-overridden) model.
-	const currentComboOverrideForAccount = (account: Account): string | null => {
-		const combo = requestMeta.comboName ? getComboSlotInfo(requestMeta) : null;
-		const slot = combo?.slots.find((s) => s.accountId === account.id);
-		return slot?.modelOverride ?? null;
-	};
+	const resolvedModelForAccount = (account: Account): string =>
+		getAttemptTarget(requestMeta, account).upstreamModel;
 
-	// The model whose overload bucket THIS account's attempt would trip: the
-	// current combo slot override (falling back to the request's logical model),
-	// run through the account's own model mapping and the shared canonical
-	// attribution. Every overload read in this module goes through it so the
-	// deadline a hold waits on, the breaker the burst hold defers to and the
-	// attempt gate below can never key on different families. Reading the
-	// logical model alone made a mapped account (sonnet -> opus) consult the
-	// wrong bucket: a hold would skip a wait its attempt then needed, and the
-	// burst hold would run straight into an open breaker.
-	const overloadAttributionModelFor = (account: Account): string | null => {
-		const logical =
-			currentComboOverrideForAccount(account) ?? effectiveRequestModel;
-		return logical
-			? resolveOverloadAttributionModel(mapModelName(logical, account), logical)
-			: null;
-	};
+	const overloadAttributionModelFor = resolvedModelForAccount;
 
 	// Result of one re-attempt round over re-selected hold candidates.
 	// `sawOverloadSuppression` / `sawRetrip` are derived from the per-attempt
@@ -567,36 +535,6 @@ export function createRecoveryHolds(deps: RecoveryHoldsDeps): RecoveryHolds {
 		};
 		for (let i = 0; i < candidates.length; i++) {
 			const candidate = candidates[i];
-			// Pre-attempt overload read. The authoritative admission lives inside
-			// proxyWithAccount, but by the time it refuses, the attempt has already
-			// staged a ~0.5–1.5MB copy of the body, validated (and possibly
-			// refreshed, over the network + a DB write) the token, and transformed +
-			// re-parsed the body. Inside a hold that happens on every ~1.5s poll for
-			// every candidate, so read the bucket first and skip on a verdict that
-			// is already decided.
-			//
-			// Inspected FRESH per candidate, deliberately: no sticky per-sweep set
-			// and no getOverloadHoldSlotKey dedup. That key collapses families under
-			// a live provider-wide bucket, so it would suppress a family that is
-			// already probeable, and a sticky verdict would go stale exactly when a
-			// probe completes mid-sweep. After an earlier candidate re-trips the
-			// shared bucket, the next inspection reads `open` on its own.
-			//
-			// The model is resolved EXACTLY as the attempt below resolves it: the
-			// CURRENT combo slot override (see currentComboOverrideForAccount —
-			// re-read per attempt, because a hold wake re-runs selection and can
-			// change a slot's override) falling back to the request's logical model,
-			// then run through the shared canonical overload attribution (account
-			// mapping, with the logical-model fallback) that the authoritative
-			// admission re-derives from the transformed body.
-			//
-			// Deliberately NOT gates.modelForAccount: that reads the combo snapshot
-			// frozen at gate construction (admission-gates.ts), so after a wake
-			// changed the slot's override it would inspect one family while the
-			// attempt sends another — suppressing a healthy account on every ~1.5s
-			// round for the whole hold budget. Using the request's logical model
-			// alone would be wrong the other way: it would sideline an account whose
-			// mapped model belongs to a different, healthy family.
 			const overload = inspectProviderOverload(
 				candidate.provider,
 				overloadAttributionModelFor(candidate),
@@ -624,9 +562,7 @@ export function createRecoveryHolds(deps: RecoveryHoldsDeps): RecoveryHolds {
 					finalCreateBodyStream,
 					i,
 					ctx,
-					// HIGH: a recovered combo slot must be served with ITS model, not
-					// the request's — resolve the current slot override by account id.
-					currentComboOverrideForAccount(candidate),
+					resolvedModelForAccount(candidate),
 					apiKeyId,
 					apiKeyName,
 					requestBodyContext,
@@ -880,21 +816,12 @@ export function createRecoveryHolds(deps: RecoveryHoldsDeps): RecoveryHolds {
 					gates.applyProviderOverloadGate(reSelected);
 				const { available: rePostThrottle } =
 					gates.applyUsageThrottling(reAvailable);
-				// Wake-time gates honor the CURRENT combo info (re-selection just
-				// re-populated it; a cleared combo reads null) so a combo slot's
-				// model override is gated exactly like the initial pipeline.
-				const wakeComboInfo = requestMeta.comboName
-					? getComboSlotInfo(requestMeta)
-					: null;
 				const candidates = gates.applyFamilyMemoDemotion(
 					gates.applySoftDemotionReorder(
 						gates.applyContextWindowGate(
-							gates.applyFamilyWeeklyGate(rePostThrottle, wakeComboInfo),
-							wakeComboInfo,
+							gates.applyFamilyWeeklyGate(rePostThrottle),
 						),
-						wakeComboInfo,
 					),
-					wakeComboInfo,
 				);
 				gates.reconcileAffinity(candidates);
 				// The pooled headroom figure follows the same replacement: a hold that
@@ -1100,7 +1027,7 @@ export function createRecoveryHolds(deps: RecoveryHoldsDeps): RecoveryHolds {
 			if (elapsed >= budgetMs) break;
 			const remaining = budgetMs - elapsed;
 
-			const allAccs = await ctx.dbOps.getAllAccounts();
+			const allAccs = await eligibleRouteAccounts(requestMeta, ctx);
 			const unavailable = allAccs
 				.filter((a) => !a.paused && isEligible(a))
 				.map((a) => {
@@ -1172,22 +1099,10 @@ export function createRecoveryHolds(deps: RecoveryHoldsDeps): RecoveryHolds {
 				gates.applyProviderOverloadGate(reSelected);
 			const { available: rePostThrottle } =
 				gates.applyUsageThrottling(reAvailable);
-			// Eligible accounts always pass the context-window gate; still apply
-			// the family-weekly gate so we don't retry an account whose requested
-			// family is weekly-exhausted (it would only 429 again). The gate
-			// honors the CURRENT combo info (re-selection re-populates it) so a
-			// combo slot's model override is evaluated, not the request model.
-			// (soft-demotion reorder — family reservation AND pool liveness —
-			// intentionally omitted on the failover/fallback tail: already-degraded
-			// path. For pool liveness this is largely self-enforcing anyway: rule 4
-			// requires an absorbable peer, and on a degraded path there is none, so
-			// the reserve fails open regardless.)
 			const candidates = gates.applyFamilyMemoDemotion(
 				gates.applyFamilyWeeklyGate(
 					rePostThrottle.filter((a) => isEligible(a)),
-					requestMeta.comboName ? getComboSlotInfo(requestMeta) : null,
 				),
-				requestMeta.comboName ? getComboSlotInfo(requestMeta) : null,
 			);
 			gates.reconcileAffinity(candidates);
 			// See the wake pass above: the pooled headroom figure has to describe the

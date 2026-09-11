@@ -1,7 +1,6 @@
 import { HttpError } from "@clankermux/http-common";
 import {
 	formatBytes,
-	formatCost,
 	formatTimestamp,
 	formatTokens,
 } from "@clankermux/ui-common";
@@ -19,6 +18,8 @@ import {
 } from "../lib/request-model";
 import { ConversationView } from "./ConversationView";
 import { CopyButton } from "./CopyButton";
+import { RequestCostDetails } from "./RequestCostDetails";
+import { RoutingAttempts } from "./routing/RoutingAttempts";
 import { TokenUsageDisplay } from "./TokenUsageDisplay";
 import { Alert } from "./ui/alert";
 import { Badge } from "./ui/badge";
@@ -279,9 +280,6 @@ export function RequestDetailsModal({
 									)}
 								</Badge>
 							)}
-							{summary?.costUsd && summary.costUsd > 0 && (
-								<Badge variant="default">{formatCost(summary.costUsd)}</Badge>
-							)}
 							{attributionLabel && (
 								<Badge
 									variant="outline"
@@ -303,6 +301,7 @@ export function RequestDetailsModal({
 						</div>
 					</DialogDescription>
 				</DialogHeader>
+				<RequestCostDetails summary={summary} />
 
 				{executionError && (
 					<Alert tone="destructive" title={`Error: ${executionError}`} />
@@ -333,14 +332,21 @@ export function RequestDetailsModal({
 				)}
 
 				<Tabs defaultValue="conversation" className="flex-1 overflow-hidden">
-					<TabsList className="grid w-full grid-cols-5">
+					<TabsList className="grid w-full grid-cols-6">
 						<TabsTrigger value="conversation">Conversation</TabsTrigger>
 						<TabsTrigger value="request">Request</TabsTrigger>
 						<TabsTrigger value="response">Response</TabsTrigger>
 						<TabsTrigger value="metadata">Metadata</TabsTrigger>
 						<TabsTrigger value="tokens">Token Usage</TabsTrigger>
+						<TabsTrigger value="routing">Routing</TabsTrigger>
 					</TabsList>
 
+					<TabsContent
+						value="routing"
+						className="mt-group overflow-auto max-h-[60vh]"
+					>
+						<RoutingAttempts requestId={request.id} />
+					</TabsContent>
 					<TabsContent value="conversation" className="mt-group flex-1 min-h-0">
 						<ConversationView
 							requestBody={decodeBase64Utf8(effective.request?.body ?? null)}

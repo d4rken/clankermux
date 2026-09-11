@@ -65,6 +65,9 @@ import type { SlimUsageSummary } from "./request-recorder";
 
 export interface UsageState {
 	model: string | undefined;
+	/** Latest cumulative response charge, gated to OpenRouter during finalization. */
+	providerReportedCostUsd?: number;
+	costIsByok?: boolean;
 	inputTokens: number;
 	cacheReadInputTokens: number;
 	cacheCreationInputTokens: number;
@@ -257,20 +260,25 @@ interface SseStopDetails {
 	fallback_credit_token?: string | null;
 }
 
+interface ReportedCharge {
+	cost?: unknown;
+	is_byok?: unknown;
+}
+
 interface SseParsed {
 	type?: string;
 	error?: { type?: unknown };
 	model?: string;
 	message?: {
 		model?: string;
-		usage?: {
+		usage?: ReportedCharge & {
 			input_tokens?: number;
 			cache_read_input_tokens?: number;
 			cache_creation_input_tokens?: number;
 			output_tokens?: number;
 		};
 	};
-	usage?: {
+	usage?: ReportedCharge & {
 		input_tokens?: number;
 		cache_read_input_tokens?: number;
 		cache_creation_input_tokens?: number;
@@ -286,7 +294,7 @@ interface SseParsed {
 	 */
 	response?: {
 		model?: string;
-		usage?: {
+		usage?: ReportedCharge & {
 			input_tokens?: number;
 			output_tokens?: number;
 			input_tokens_details?: {
@@ -354,6 +362,20 @@ function applyStopReason(
 	}
 }
 
+function captureReportedCharge(state: UsageState, usage: ReportedCharge): void {
+	if (state.sawMessageStop) return;
+	// An explicitly invalid latest reading supersedes an earlier cumulative cost.
+	if ("cost" in usage) {
+		state.providerReportedCostUsd =
+			typeof usage.cost === "number" &&
+			Number.isFinite(usage.cost) &&
+			usage.cost >= 0
+				? usage.cost
+				: undefined;
+	}
+	if (typeof usage.is_byok === "boolean") state.costIsByok = usage.is_byok;
+}
+
 /**
  * Apply a parsed SSE `data:` object to the state. Dispatch is by event name
  * across two disjoint vocabularies:
@@ -410,6 +432,7 @@ function applySseData(
 	if (isMessageDelta) {
 		if (parsed.usage) {
 			const u = parsed.usage;
+			captureReportedCharge(state, u);
 			if (u.output_tokens !== undefined) {
 				state.providerFinalOutputTokens = u.output_tokens;
 				state.providerReportedOutput = true;
@@ -476,6 +499,7 @@ function applySseData(
 		state.responsesTerminalKind = terminalKind;
 		const usage = parsed.response?.usage;
 		if (usage) {
+			captureReportedCharge(state, usage);
 			const inputTokenDetails = usage.input_tokens_details;
 			if (typeof usage.input_tokens === "number") {
 				// Codex's input_tokens is cache-inclusive; normalize to Anthropic's
@@ -940,6 +964,7 @@ export function feedNonStreamBody(state: UsageState, bodyText: string): void {
 		const usage = json.usage;
 		if (usage) {
 			if (json.model) state.model = json.model;
+			captureReportedCharge(state, usage);
 			state.inputTokens = usage.input_tokens ?? 0;
 			state.cacheReadInputTokens = usage.cache_read_input_tokens ?? 0;
 			state.cacheCreationInputTokens = usage.cache_creation_input_tokens ?? 0;
@@ -1014,8 +1039,12 @@ export interface FinalizeOpts {
 	 * is served by the default `anthropic` provider, so attributing its gaps to
 	 * `providerName` would mislabel them. Falls back to `providerName` when the
 	 * request had no account (anonymous/forced paths).
+	 * Also establishes billing trust: an absent account never authorizes a reported
+	 * charge, even if providerName names OpenRouter.
 	 */
 	accountProvider?: string;
+	/** Custom endpoints do not establish OpenRouter billing semantics. */
+	accountCustomEndpoint?: string | null;
 }
 
 export interface FinalizeDeps {
@@ -1087,12 +1116,11 @@ export async function finalizeUsage(
 
 	const model = state.model;
 	// The ONLY pricing call on the request path, and the only one that opts into
-	// pricing-gap reporting. It owns the `cost_usd` that is actually persisted (a
-	// failure here is what stores NULL) and runs exactly once per recorded
-	// request, with the real account provider attached.
+	// pricing-gap reporting. It supplies the fallback cost and comparison estimate
+	// once per recorded request, with the real account provider attached.
 	//
-	// ABSENT, never zero, when it could not be priced. `estimateCostUSD` reports
-	// a lookup failure as null and this carries that absence forward as an absent
+	// If neither source can price the request, cost stays absent rather than zero.
+	// `estimateCostUSD` reports lookup failure as null; carry it forward as an absent
 	// field — a request nobody could price is not a free request, and downstream
 	// (the live-activity stream above all) has no way back to the distinction
 	// once a failure has been published as the number 0.
@@ -1112,7 +1140,23 @@ export async function finalizeUsage(
 					},
 				)
 			: null;
-	const costUsd = estimated ?? undefined;
+	// RequestCostDetails labels reported charges as OpenRouter; widen both together.
+	const trustReportedCost =
+		opts.accountProvider === "openrouter" && !opts.accountCustomEndpoint;
+	// A cut stream can leave a stale cumulative charge. Only a complete transport
+	// or a witnessed message_stop permits trusting the reported cost. A natural
+	// EOF alone does not prove that the provider completed its message.
+	const reportedCost =
+		trustReportedCost && (endedCleanly || state.sawMessageStop)
+			? state.providerReportedCostUsd
+			: undefined;
+	const costUsd = reportedCost ?? estimated ?? undefined;
+	const costSource =
+		reportedCost != null
+			? "reported"
+			: estimated != null
+				? "estimated"
+				: "unknown";
 
 	const speed = computeTokensPerSecond(state, finalOutput, opts);
 
@@ -1127,6 +1171,10 @@ export async function finalizeUsage(
 			cacheCreationInputTokens: state.cacheCreationInputTokens,
 			totalTokens,
 			costUsd,
+			estimatedCostUsd: estimated ?? undefined,
+			costSource,
+			// BYOK is independent of whether this response supplied a usable final cost.
+			costIsByok: trustReportedCost ? state.costIsByok : undefined,
 		},
 		tokensPerSecond: speed?.value,
 		responseTimeMs: opts.responseTimeMs,

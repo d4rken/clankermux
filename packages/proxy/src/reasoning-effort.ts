@@ -7,6 +7,8 @@
  *     budget. `type: "disabled"` → null.
  *   - OpenAI Responses `reasoning: { effort: "<string>" }` → the raw effort
  *     string as-is (arbitrary vocabulary: minimal/low/medium/high/xhigh/max/…).
+ * Explicit reasoning.effort, reasoning_effort and output_config.effort take
+ * precedence over implicit thinking budgets, in that order.
  */
 export function parseReasoningEffort(body: unknown): string | null {
 	if (typeof body !== "object" || body === null || Array.isArray(body)) {
@@ -17,9 +19,14 @@ export function parseReasoningEffort(body: unknown): string | null {
 	const explicit = (record.reasoning as { effort?: unknown } | undefined)
 		?.effort;
 	if (typeof explicit === "string" && explicit.length > 0) return explicit;
+	const chatEffort = record.reasoning_effort;
+	if (typeof chatEffort === "string" && chatEffort.length > 0)
+		return chatEffort;
 	const adaptiveEffort = (
 		record.output_config as { effort?: unknown } | undefined
 	)?.effort;
+	if (typeof adaptiveEffort === "string" && adaptiveEffort.length > 0)
+		return adaptiveEffort;
 	const thinking = record.thinking;
 	if (typeof thinking === "object" && thinking !== null) {
 		const t = thinking as Record<string, unknown>;
@@ -30,11 +37,8 @@ export function parseReasoningEffort(body: unknown): string | null {
 			}
 			return "thinking";
 		}
-		if (t.type === "adaptive" && typeof adaptiveEffort === "string")
-			return adaptiveEffort;
 		return null;
 	}
 
-	if (typeof adaptiveEffort === "string") return adaptiveEffort;
 	return null;
 }

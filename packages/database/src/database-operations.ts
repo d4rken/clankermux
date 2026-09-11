@@ -13,11 +13,6 @@ import type {
 	AccountIdentity,
 	AccountPaymentRow,
 	CodexWindowObservationRow,
-	Combo,
-	ComboFamily,
-	ComboFamilyAssignment,
-	ComboSlot,
-	ComboWithSlots,
 	IntegrityStatus,
 	InternalDispatchSpendRow,
 	MemoryHistoryPoint,
@@ -72,7 +67,6 @@ import {
 	type CodexResetCreditEventRow,
 } from "./repositories/codex-reset-credit-event.repository";
 import { CodexWindowObservationRepository } from "./repositories/codex-window-observation.repository";
-import { ComboRepository } from "./repositories/combo.repository";
 import { InternalDispatchSpendRepository } from "./repositories/internal-dispatch-spend.repository";
 import { MemorySnapshotRepository } from "./repositories/memory-snapshot.repository";
 import {
@@ -92,6 +86,7 @@ import {
 	RequestRepository,
 	type RequestRoutingData,
 } from "./repositories/request.repository";
+import { RoutingRepository } from "./repositories/routing.repository";
 import { StatsRepository } from "./repositories/stats.repository";
 import { StrategyRepository } from "./repositories/strategy.repository";
 import { UnifiedClaimObservationRepository } from "./repositories/unified-claim-observation.repository";
@@ -482,6 +477,7 @@ export class DatabaseOperations implements StrategyStore, Disposable {
 	private retentionUsageGeneration = 0;
 
 	// Repositories
+	readonly routing: RoutingRepository;
 	private accounts: AccountRepository;
 	private requests: RequestRepository;
 	private oauth: OAuthRepository;
@@ -489,7 +485,6 @@ export class DatabaseOperations implements StrategyStore, Disposable {
 	private stats: StatsRepository;
 	private apiKeys: ApiKeyRepository;
 	private auth: AuthRepository;
-	private combo: ComboRepository;
 	private usageSnapshots: UsageSnapshotRepository;
 	private usageScopedSnapshots: UsageScopedSnapshotRepository;
 	private unifiedClaimObservations: UnifiedClaimObservationRepository;
@@ -571,6 +566,7 @@ export class DatabaseOperations implements StrategyStore, Disposable {
 		const retrying = <T extends object>(repo: T, label: string): T =>
 			withRetryingMethods(repo, () => this.retryConfig, label);
 
+		this.routing = retrying(new RoutingRepository(this.adapter), "routing");
 		this.accounts = retrying(new AccountRepository(this.adapter), "accounts");
 		this.requests = retrying(new RequestRepository(this.adapter), "requests");
 		this.oauth = retrying(new OAuthRepository(this.adapter), "oauth");
@@ -578,7 +574,6 @@ export class DatabaseOperations implements StrategyStore, Disposable {
 		this.stats = retrying(new StatsRepository(this.adapter), "stats");
 		this.apiKeys = retrying(new ApiKeyRepository(this.adapter), "apiKeys");
 		this.auth = retrying(new AuthRepository(this.adapter), "auth");
-		this.combo = retrying(new ComboRepository(this.adapter), "combo");
 		this.usageSnapshots = retrying(
 			new UsageSnapshotRepository(this.adapter),
 			"usageSnapshots",
@@ -2331,6 +2326,8 @@ OAuth tokens will need to be re-authenticated.
 		createdAt: number;
 		lastUsed?: number | null;
 		isActive: boolean;
+		pinnedAccountId?: string | null;
+		pinnedProviders?: string[] | null;
 	}): Promise<void> {
 		await this.apiKeys.create({
 			id: apiKey.id,
@@ -2340,6 +2337,10 @@ OAuth tokens will need to be re-authenticated.
 			created_at: apiKey.createdAt,
 			last_used: apiKey.lastUsed || null,
 			is_active: apiKey.isActive ? 1 : 0,
+			pinned_account_id: apiKey.pinnedAccountId ?? null,
+			pinned_providers: apiKey.pinnedProviders
+				? JSON.stringify(apiKey.pinnedProviders)
+				: null,
 		});
 	}
 
@@ -2393,11 +2394,11 @@ OAuth tokens will need to be re-authenticated.
 		pinnedAccountId: string | null,
 		pinnedProviders: string[] | null,
 	): Promise<boolean> {
-		const serialized =
-			pinnedProviders && pinnedProviders.length > 0
-				? JSON.stringify(pinnedProviders)
-				: null;
-		return this.apiKeys.updatePin(id, pinnedAccountId, serialized);
+		return this.routing.updateApiKeyDestinations(
+			id,
+			pinnedAccountId,
+			pinnedProviders,
+		);
 	}
 
 	async disableApiKey(id: string): Promise<boolean> {
@@ -2457,81 +2458,6 @@ OAuth tokens will need to be re-authenticated.
 	 */
 	getStatsRepository(): StatsRepository {
 		return this.stats;
-	}
-
-	// ── Combo operations delegated to repository ──────────────────────────────
-
-	async createCombo(name: string, description?: string | null): Promise<Combo> {
-		return this.combo.create(name, description);
-	}
-
-	async listCombos(): Promise<Combo[]> {
-		return this.combo.findAll();
-	}
-
-	async getCombo(id: string): Promise<Combo | null> {
-		return this.combo.findById(id);
-	}
-
-	async updateCombo(
-		id: string,
-		fields: Partial<{
-			name: string;
-			description: string | null;
-			enabled: boolean;
-		}>,
-	): Promise<Combo> {
-		return this.combo.update(id, fields);
-	}
-
-	async deleteCombo(id: string): Promise<void> {
-		await this.combo.delete(id);
-	}
-
-	async addComboSlot(
-		comboId: string,
-		accountId: string,
-		model: string,
-		priority: number,
-	): Promise<ComboSlot> {
-		return this.combo.addSlot(comboId, accountId, model, priority);
-	}
-
-	async updateComboSlot(
-		slotId: string,
-		fields: Partial<{ model: string; priority: number; enabled: boolean }>,
-	): Promise<ComboSlot> {
-		return this.combo.updateSlot(slotId, fields);
-	}
-
-	async removeComboSlot(slotId: string): Promise<void> {
-		await this.combo.removeSlot(slotId);
-	}
-
-	async getComboSlots(comboId: string): Promise<ComboSlot[]> {
-		return this.combo.getSlots(comboId);
-	}
-
-	async reorderComboSlots(comboId: string, slotIds: string[]): Promise<void> {
-		await this.combo.reorderSlots(comboId, slotIds);
-	}
-
-	async setFamilyCombo(
-		family: ComboFamily,
-		comboId: string | null,
-		enabled: boolean,
-	): Promise<void> {
-		await this.combo.setFamilyAssignment(family, comboId, enabled);
-	}
-
-	async getFamilyAssignments(): Promise<ComboFamilyAssignment[]> {
-		return this.combo.getFamilyAssignments();
-	}
-
-	async getActiveComboForFamily(
-		family: ComboFamily,
-	): Promise<ComboWithSlots | null> {
-		return this.combo.getActiveComboForFamily(family);
 	}
 
 	// ── Usage snapshot operations delegated to repository ─────────────────────

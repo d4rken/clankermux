@@ -9,16 +9,17 @@ import {
 } from "bun:test";
 import { usageCache } from "@clankermux/providers";
 import type { Account, RequestMeta } from "@clankermux/types";
+import {
+	capResidualRung429Cooldown,
+	proxyWithAccount,
+	RESIDUAL_429_COOLDOWN_CAP_MS,
+	routingAttempts,
+} from "../../__tests__/fixtures/routing-harness";
 import { clearProviderOverloadCooldown } from "../../provider-overload-cooldown";
 import {
 	clearAnthropicBurstThrottle,
 	isAnthropicBurstThrottleActive,
 } from "../burst-cooldown";
-import {
-	capResidualRung429Cooldown,
-	proxyWithAccount,
-	RESIDUAL_429_COOLDOWN_CAP_MS,
-} from "../proxy-operations";
 import type { ProxyContext } from "../proxy-types";
 import {
 	getRateLimitProbeAdmission,
@@ -355,15 +356,16 @@ describe("proxyWithAccount — residual rung 429 cooldown caps", () => {
 		const result = await drive(ctx, account);
 
 		expect(result).toBeNull();
-		expect(globalThis.fetch).toHaveBeenCalledTimes(fallbacks ? 2 : 1);
+		expect(globalThis.fetch).toHaveBeenCalledTimes(1);
 		expect(deadlineCalls).toHaveLength(0);
 		expect(escalatingCalls).toHaveLength(0);
 		expect(account.rate_limited_until).toBeNull();
 		expect(account.rate_limited_reason).toBeNull();
 		expect(getRateLimitProbeAdmission(account)).toBe("admitted");
 		expect(isAnthropicBurstThrottleActive()).toBe(false);
-		expect(auditCalls).toHaveLength(1);
-		expect(auditCalls[0]?.errorMessage).toBe("scoped_quota_rejected_429");
+		expect(routingAttempts(ctx)).toHaveLength(1);
+		expect(routingAttempts(ctx)[0]?.error).toBe("other");
+		expect(auditCalls).toHaveLength(0);
 		// The scoped projection also keeps the persisted meta honest: the 5h
 		// claim's own pair, never the summary rejected + weekly epoch.
 		expect(metaCalls).toHaveLength(1);
@@ -448,7 +450,7 @@ describe("proxyWithAccount — residual rung 429 cooldown caps", () => {
 
 		expect(result).toBeNull();
 		const call = [...deadlineCalls, ...escalatingCalls].find(
-			(c) => c.reason === "all_models_exhausted_429",
+			(c) => c.reason === "model_fallback_429",
 		);
 		expect(call).toBeDefined();
 		expect((call as CooldownCall).until).toBeLessThanOrEqual(

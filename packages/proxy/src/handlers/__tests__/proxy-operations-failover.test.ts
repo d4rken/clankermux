@@ -19,9 +19,15 @@ import {
 	toBinary,
 } from "../../../../providers/src/providers/devin/vendor/protobuf";
 import { devinInfo, devinReply } from "../../__tests__/devin-fixtures";
+import type { ProxyAttemptOutcome } from "../../__tests__/fixtures/routing-harness";
+import {
+	isCodexEntitlementModelError,
+	isModelUnavailableError,
+	proxyWithAccount,
+	routingAttempts,
+} from "../../__tests__/fixtures/routing-harness";
 import { cacheBodyStore } from "../../cache-body-store";
 import {
-	applyProviderOverloadCooldown,
 	clearProviderOverloadCooldown,
 	isProviderOverloaded,
 } from "../../provider-overload-cooldown";
@@ -29,12 +35,6 @@ import {
 	isAccountWideFailure,
 	isOrdinaryAttemptFailure,
 } from "../../recovery-holds";
-import type { ProxyAttemptOutcome } from "../proxy-operations";
-import {
-	isCodexEntitlementModelError,
-	isModelUnavailableError,
-	proxyWithAccount,
-} from "../proxy-operations";
 import type { ProxyContext } from "../proxy-types";
 
 describe("Zai 1305 recovery through the account/model loop", () => {
@@ -121,33 +121,8 @@ describe("Zai 1305 recovery through the account/model loop", () => {
 		expect(ctx.requestRecorder.finishTransport).toHaveBeenCalled();
 		expect(ctx.dbOps.markAccountRateLimited).not.toHaveBeenCalled();
 	});
-	it("releases the previous model response when the Zai retry throws", async () => {
-		// A stream with no initial pull lets bodyUsed distinguish disposal from
-		// merely receiving an upstream Response. 429 classification is header-only.
-		const previous = new Response(
-			new ReadableStream<Uint8Array>(
-				{
-					pull(c) {
-						c.enqueue(new TextEncoder().encode("rate limited"));
-						c.close();
-					},
-				},
-				{ highWaterMark: 0 },
-			),
-			{ status: 429 },
-		);
-		let calls = 0;
-		globalThis.fetch = (async () => {
-			calls++;
-			if (calls === 1) return previous;
-			if (calls === 2) return overloaded();
-			throw new Error("retry network failure");
-		}) as typeof fetch;
-		expect(await run(account(true), makeProxyContext())).toBeNull();
-		expect(calls).toBe(3);
-		expect(previous.bodyUsed).toBe(true);
-	});
-	it("cycles models after bounded retries and forwards the successful fallback", async () => {
+
+	it("retries overload on the same target and never cycles retired model arrays", async () => {
 		const models: string[] = [];
 		globalThis.fetch = (async (input: RequestInfo | URL) => {
 			const body = await (input as Request).json();
@@ -155,18 +130,18 @@ describe("Zai 1305 recovery through the account/model loop", () => {
 			return models.length <= 2 ? overloaded() : success();
 		}) as typeof fetch;
 		const response = await run(account(true), makeProxyContext());
-		expect(response?.status).toBe(200);
+		expect(response).toBeNull();
 		await response?.text();
-		expect(models).toHaveLength(3);
+		expect(models).toHaveLength(2);
 		expect(models[0]).toBe(models[1]);
-		expect(models[2]).toBe("glm-fallback");
+		expect(models).not.toContain("glm-fallback");
 	});
-	it("classifies overload on every fallback model without a quota lock", async () => {
+	it("bounds overload retries without cycling targets or writing a quota lock", async () => {
 		const fetcher = mock(async () => overloaded());
 		globalThis.fetch = fetcher as unknown as typeof fetch;
 		const ctx = makeProxyContext();
 		expect(await run(account(true), ctx)).toBeNull();
-		expect(fetcher).toHaveBeenCalledTimes(4);
+		expect(fetcher).toHaveBeenCalledTimes(2);
 		expect(ctx.dbOps.markAccountRateLimited).not.toHaveBeenCalled();
 	});
 	it("keeps the cache-control-stripped body for overload retries", async () => {
@@ -380,67 +355,6 @@ describe("proxyWithAccount — 429 failover", () => {
 		expect(result).toBeNull();
 	});
 
-	it("retries with fallback model on 429, returns response when fallback succeeds", async () => {
-		const fetchCalls: string[] = [];
-		globalThis.fetch = mock(async (input: RequestInfo | URL) => {
-			// Capture request body to verify model was swapped on retry
-			const req = input instanceof Request ? input : new Request(String(input));
-			const bodyText = await req.text().catch(() => "{}");
-			const body = JSON.parse(bodyText);
-			fetchCalls.push(body.model ?? "unknown");
-
-			if (fetchCalls.length === 1) {
-				// Primary model: 429
-				return jsonResponse(
-					{
-						error: {
-							type: "api_error",
-							message:
-								"Rate limit exceeded: limit_rpm/qwen/qwen3.6-plus:free/abc",
-						},
-					},
-					429,
-				);
-			}
-			// Fallback model: success
-			return jsonResponse(
-				{
-					id: "msg_1",
-					type: "message",
-					role: "assistant",
-					content: [{ type: "text", text: "hi" }],
-					model: body.model,
-					stop_reason: "end_turn",
-					usage: { input_tokens: 1, output_tokens: 1 },
-				},
-				200,
-			);
-		});
-
-		const bodyBuffer = makeRequestBody();
-		const req = makeRequest(bodyBuffer);
-		const result = await proxyWithAccount(
-			req,
-			new URL("https://proxy.local/v1/messages"),
-			makeAccount({
-				model_fallbacks: JSON.stringify({
-					sonnet: "bytedance-seed/dola-seed-2.0-pro:free",
-				}),
-			}),
-			makeRequestMeta(),
-			bodyBuffer,
-			() => undefined,
-			0,
-			makeProxyContext(),
-		);
-
-		expect(result).not.toBeNull();
-		expect(result?.status).toBe(200);
-		expect(fetchCalls).toHaveLength(2);
-		// Second call should use the fallback model
-		expect(fetchCalls[1]).toBe("bytedance-seed/dola-seed-2.0-pro:free");
-	});
-
 	it("returns null (failover) when both primary and fallback model return 429", async () => {
 		globalThis.fetch = mock(async () =>
 			jsonResponse(
@@ -472,68 +386,6 @@ describe("proxyWithAccount — 429 failover", () => {
 		);
 
 		expect(result).toBeNull();
-	});
-
-	it("cycles through 3-model array: first two 429, third succeeds", async () => {
-		const fetchCalls: string[] = [];
-		globalThis.fetch = mock(async (input: RequestInfo | URL) => {
-			const req = input instanceof Request ? input : new Request(String(input));
-			const bodyText = await req.text().catch(() => "{}");
-			const body = JSON.parse(bodyText);
-			fetchCalls.push(body.model ?? "unknown");
-
-			if (fetchCalls.length < 3) {
-				return jsonResponse(
-					{
-						error: {
-							type: "api_error",
-							message: "Rate limit exceeded: limit_rpm/model/abc",
-						},
-					},
-					429,
-				);
-			}
-			return jsonResponse(
-				{
-					id: "msg_1",
-					type: "message",
-					role: "assistant",
-					content: [{ type: "text", text: "hi" }],
-					model: body.model,
-					stop_reason: "end_turn",
-					usage: { input_tokens: 1, output_tokens: 1 },
-				},
-				200,
-			);
-		});
-
-		const bodyBuffer = makeRequestBody();
-		const req = makeRequest(bodyBuffer);
-		const result = await proxyWithAccount(
-			req,
-			new URL("https://proxy.local/v1/messages"),
-			makeAccount({
-				model_mappings: JSON.stringify({
-					sonnet: [
-						"qwen/qwen3.6-plus:free",
-						"bytedance-seed/dola-seed-2.0-pro:free",
-						"meta-llama/llama-3.3-70b:free",
-					],
-				}),
-			}),
-			makeRequestMeta(),
-			bodyBuffer,
-			() => undefined,
-			0,
-			makeProxyContext(),
-		);
-
-		expect(result).not.toBeNull();
-		expect(result?.status).toBe(200);
-		expect(fetchCalls).toHaveLength(3);
-		expect(fetchCalls[0]).toBe("qwen/qwen3.6-plus:free");
-		expect(fetchCalls[1]).toBe("bytedance-seed/dola-seed-2.0-pro:free");
-		expect(fetchCalls[2]).toBe("meta-llama/llama-3.3-70b:free");
 	});
 
 	it("returns null when all models in the array are exhausted", async () => {
@@ -643,7 +495,7 @@ describe("proxyWithAccount — rate limit audit trail (issue #178)", () => {
 		expect(reasons).toContain("model_fallback_429");
 	});
 
-	it("calls markAccountRateLimited with reason='all_models_exhausted_429' when all models fail", async () => {
+	it("calls markAccountRateLimited with reason='model_fallback_429' when the resolved target fails despite a legacy fallback array", async () => {
 		// All fetch calls return 429 — primary + every fallback model
 		globalThis.fetch = mock(async () =>
 			jsonResponse(
@@ -679,7 +531,7 @@ describe("proxyWithAccount — rate limit audit trail (issue #178)", () => {
 			ctx,
 		);
 
-		// At least one cooldown call should carry the all_models_exhausted_429
+		// At least one cooldown call should carry the model_fallback_429
 		// reason. Lever B may route a reset-bearing 429 through the deadline-only
 		// setter, so check both setters' calls.
 		const calls = [
@@ -690,7 +542,7 @@ describe("proxyWithAccount — rate limit audit trail (issue #178)", () => {
 			).mock.calls,
 		];
 		const reasons = calls.map((args: unknown[]) => args[2] as string);
-		expect(reasons).toContain("all_models_exhausted_429");
+		expect(reasons).toContain("model_fallback_429");
 	});
 });
 
@@ -791,42 +643,7 @@ describe("proxyWithAccount — in-memory cooldown mutation (issue #178 fix)", ()
 	});
 });
 
-describe("getModelList — model_fallbacks merge", () => {
-	it("merges model_fallbacks into the model list", async () => {
-		const { getModelList } = await import("@clankermux/core");
-		const account = makeAccount({
-			model_mappings: JSON.stringify({ sonnet: "qwen/qwen3.6-plus:free" }),
-			model_fallbacks: JSON.stringify({
-				sonnet: "bytedance-seed/dola-seed-2.0-pro:free",
-			}),
-		});
-		const list = getModelList("claude-sonnet-4-5", account);
-		expect(list).toEqual([
-			"qwen/qwen3.6-plus:free",
-			"bytedance-seed/dola-seed-2.0-pro:free",
-		]);
-	});
-
-	it("returns single-element list when no fallbacks", async () => {
-		const { getModelList } = await import("@clankermux/core");
-		const list = getModelList("claude-sonnet-4-5", makeAccount());
-		expect(list).toEqual(["qwen/qwen3.6-plus:free"]);
-	});
-
-	it("returns array directly when model_mappings value is an array", async () => {
-		const { getModelList } = await import("@clankermux/core");
-		const account = makeAccount({
-			model_mappings: JSON.stringify({
-				sonnet: ["qwen/qwen3.6-plus:free", "meta-llama/llama-3.3-70b:free"],
-			}),
-		});
-		const list = getModelList("claude-sonnet-4-5", account);
-		expect(list).toEqual([
-			"qwen/qwen3.6-plus:free",
-			"meta-llama/llama-3.3-70b:free",
-		]);
-	});
-});
+describe("getModelList — model_fallbacks merge", () => {});
 
 describe("proxyWithAccount — 529 failover", () => {
 	let originalFetch: typeof globalThis.fetch;
@@ -1108,118 +925,6 @@ describe("proxyWithAccount — 529 failover", () => {
 	});
 });
 
-describe("proxyWithAccount — model-fallback loop skips overloaded families", () => {
-	let originalFetch: typeof globalThis.fetch;
-
-	beforeEach(() => {
-		originalFetch = globalThis.fetch;
-		clearProviderOverloadCooldown();
-	});
-
-	afterEach(() => {
-		globalThis.fetch = originalFetch;
-		clearProviderOverloadCooldown();
-	});
-
-	function fetch429Then200() {
-		const fetchCalls: string[] = [];
-		globalThis.fetch = mock(async (input: RequestInfo | URL) => {
-			const req = input instanceof Request ? input : new Request(String(input));
-			const bodyText = await req.text().catch(() => "{}");
-			const body = JSON.parse(bodyText);
-			fetchCalls.push(body.model ?? "unknown");
-			if (fetchCalls.length === 1) {
-				return jsonResponse(
-					{
-						error: {
-							type: "api_error",
-							message: "Rate limit exceeded: limit_rpm/model/abc",
-						},
-					},
-					429,
-				);
-			}
-			return jsonResponse(
-				{
-					id: "msg_1",
-					type: "message",
-					role: "assistant",
-					content: [{ type: "text", text: "hi" }],
-					model: body.model,
-					stop_reason: "end_turn",
-					usage: { input_tokens: 1, output_tokens: 1 },
-				},
-				200,
-			);
-		});
-		return fetchCalls;
-	}
-
-	it("skips a fallback candidate whose family breaker is open (no upstream hammering)", async () => {
-		const fetchCalls = fetch429Then200();
-		// The haiku family of THIS provider is overloaded — the fallback list's
-		// haiku candidate must be skipped, leaving no candidate → failover (null).
-		applyProviderOverloadCooldown(
-			"openai-compatible",
-			undefined,
-			"claude-haiku-4-5",
-		);
-
-		const bodyBuffer = makeRequestBody();
-		const req = makeRequest(bodyBuffer);
-		const result = await proxyWithAccount(
-			req,
-			new URL("https://proxy.local/v1/messages"),
-			makeAccount({
-				model_mappings: JSON.stringify({
-					sonnet: ["qwen/qwen3.6-plus:free", "claude-haiku-4-5"],
-				}),
-			}),
-			makeRequestMeta(),
-			bodyBuffer,
-			() => undefined,
-			0,
-			makeProxyContext(),
-		);
-
-		expect(result).toBeNull();
-		// Only the primary was fetched; the haiku fallback never hit upstream.
-		expect(fetchCalls).toHaveLength(1);
-		expect(fetchCalls[0]).toBe("qwen/qwen3.6-plus:free");
-	});
-
-	it("still attempts a fallback candidate when only a DIFFERENT family's breaker is open", async () => {
-		const fetchCalls = fetch429Then200();
-		applyProviderOverloadCooldown(
-			"openai-compatible",
-			undefined,
-			"claude-opus-4-6",
-		);
-
-		const bodyBuffer = makeRequestBody();
-		const req = makeRequest(bodyBuffer);
-		const result = await proxyWithAccount(
-			req,
-			new URL("https://proxy.local/v1/messages"),
-			makeAccount({
-				model_mappings: JSON.stringify({
-					sonnet: ["qwen/qwen3.6-plus:free", "claude-haiku-4-5"],
-				}),
-			}),
-			makeRequestMeta(),
-			bodyBuffer,
-			() => undefined,
-			0,
-			makeProxyContext(),
-		);
-
-		expect(result).not.toBeNull();
-		expect(result?.status).toBe(200);
-		expect(fetchCalls).toHaveLength(2);
-		expect(fetchCalls[1]).toBe("claude-haiku-4-5");
-	});
-});
-
 describe("proxyWithAccount — 401 failover", () => {
 	let originalFetch: typeof globalThis.fetch;
 
@@ -1304,7 +1009,7 @@ describe("proxyWithAccount — staged-body cleanup on direct model-not-found ret
 	});
 
 	// A cacheable body: /v1/messages + a cache_control hint so stageRequest stages it.
-	function makeCacheableBody() {
+	function _makeCacheableBody() {
 		const body = JSON.stringify({
 			model: "claude-sonnet-4-5",
 			messages: [{ role: "user", content: "hello" }],
@@ -1315,47 +1020,6 @@ describe("proxyWithAccount — staged-body cleanup on direct model-not-found ret
 		});
 		return new TextEncoder().encode(body).buffer;
 	}
-
-	it("discards the staged body before forwarding a model-not-found 404 directly", async () => {
-		// 404 model-not-found (not 429) with no model fallbacks → the direct
-		// withSanitizedProxyHeaders return path that bypasses forwardToClient.
-		globalThis.fetch = mock(async () =>
-			jsonResponse(
-				{
-					error: {
-						type: "not_found_error",
-						code: "model_not_found",
-						message: "model not found: does not exist",
-					},
-				},
-				404,
-			),
-		);
-
-		const discardSpy = spyOn(cacheBodyStore, "discardStaged");
-
-		const bodyBuffer = makeCacheableBody();
-		const req = makeRequest(bodyBuffer);
-		const result = await proxyWithAccount(
-			req,
-			new URL("https://proxy.local/v1/messages"),
-			makeAccount(), // no model_fallbacks → modelList length <= 1
-			makeRequestMeta(),
-			bodyBuffer,
-			() => undefined,
-			0,
-			makeProxyContext(),
-		);
-
-		// The model-not-found response is forwarded directly (not null/failover).
-		expect(result).not.toBeNull();
-		expect(result?.status).toBe(404);
-		// The staged body for this request id was discarded on the direct return,
-		// so it doesn't leak until the age sweep.
-		expect(discardSpy).toHaveBeenCalledWith("req-1");
-		// And nothing is left staged.
-		expect(cacheBodyStore.getStagingSize()).toBe(0);
-	});
 });
 
 describe("proxyWithAccount — Codex entitlement model error fails over", () => {
@@ -1417,7 +1081,7 @@ describe("proxyWithAccount — Codex entitlement model error fails over", () => 
 		expect(result).toBeNull();
 	});
 
-	it("still forwards a generic model-not-found 400 to the client", async () => {
+	it("fails over on a generic model-not-found 400", async () => {
 		globalThis.fetch = mock(async () =>
 			jsonResponse(
 				{ error: { code: "model_not_found", message: "model does not exist" } },
@@ -1438,8 +1102,7 @@ describe("proxyWithAccount — Codex entitlement model error fails over", () => 
 			makeProxyContext(),
 		);
 
-		expect(result).not.toBeNull();
-		expect(result?.status).toBe(400);
+		expect(result).toBeNull();
 	});
 });
 
@@ -1490,11 +1153,11 @@ describe("Anthropic organization access denial", () => {
 		expect(globalThis.fetch).toHaveBeenCalledTimes(1);
 		expect(acc.rate_limited_reason).toBe("org_permission_denied");
 		expect(acc.rate_limited_until).toBeGreaterThan(Date.now());
-		expect(ctx.dbOps.saveRequest).toHaveBeenCalledWith(
+		expect(routingAttempts(ctx)).toContainEqual(
 			expect.objectContaining({
-				statusCode: 403,
-				errorMessage: "org_permission_denied",
-				accountUsed: acc.id,
+				status: 403,
+				error: "org_permission_denied",
+				account_id: acc.id,
 			}),
 		);
 		expect(outcomes).toEqual([{ kind: "org_permission_denied" }]);
@@ -1534,11 +1197,10 @@ describe("Devin binary proxy integration", () => {
 			throw new Error("must not send");
 		}) as never;
 		try {
-			const body = makeRequestBody("swe-2");
+			const body = makeRequestBody("swe-2-high");
 			const account = makeAccount({
 				provider: "devin",
 				custom_endpoint: null,
-				model_mappings: null,
 				auto_pause_on_overage_enabled: true,
 			});
 			const result = await proxyWithAccount(
@@ -1572,12 +1234,11 @@ describe("Devin binary proxy integration", () => {
 			return devinReply(true);
 		}) as typeof fetch;
 		try {
-			const body = makeRequestBody("swe-2");
+			const body = makeRequestBody("swe-2-high");
 			const ctx = makeProxyContext();
 			const account = makeAccount({
 				provider: "devin",
 				custom_endpoint: null,
-				model_mappings: null,
 			});
 			const result = await proxyWithAccount(
 				makeRequest(body),
@@ -1600,6 +1261,16 @@ describe("Devin binary proxy integration", () => {
 				),
 			).toBe(false);
 			expect(account.rate_limited_until).toBeGreaterThan(Date.now());
+			expect(routingAttempts(ctx)).toEqual(
+				expect.arrayContaining([
+					expect.objectContaining({
+						provider: "devin",
+						status: 429,
+						error: expect.any(String),
+						reported_model: null,
+					}),
+				]),
+			);
 		} finally {
 			globalThis.fetch = original;
 			auth.mockRestore();
@@ -1623,7 +1294,6 @@ describe("Devin normal-path authentication recovery", () => {
 		const account = makeAccount({
 			provider: "devin",
 			custom_endpoint: null,
-			model_mappings: null,
 			api_key: "session-private",
 		});
 		const ctx = makeProxyContext();
@@ -1631,7 +1301,7 @@ describe("Devin normal-path authentication recovery", () => {
 		ctx.dbOps.pauseDevinAccountForReauth = pause;
 		const body = new TextEncoder().encode(
 			JSON.stringify({
-				model: "swe-2",
+				model: "swe-2-high",
 				messages: [{ role: "user", content: "hello" }],
 				max_tokens: 10,
 				stream,
@@ -1763,12 +1433,22 @@ describe("Devin normal-path authentication recovery", () => {
 					headers: { "content-type": "application/connect+proto" },
 				}),
 		) as never;
-		const { run, pause } = setup(true);
+		const { run, pause, ctx } = setup(true);
 		const response = await run();
 		expect(response?.status).toBe(200);
 		const text = await response?.text();
 		expect(text).toContain("partial answer");
 		expect(text).toContain("authentication_error");
+		expect(routingAttempts(ctx)).toEqual(
+			expect.arrayContaining([
+				expect.objectContaining({
+					provider: "devin",
+					status: 200,
+					error: "Upstream protocol error",
+					reported_model: null,
+				}),
+			]),
+		);
 		expect(globalThis.fetch).toHaveBeenCalledTimes(1);
 		expect(renew).not.toHaveBeenCalled();
 		expect(pause).not.toHaveBeenCalled();
