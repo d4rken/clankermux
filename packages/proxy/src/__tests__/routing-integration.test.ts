@@ -122,6 +122,286 @@ function codexResponse(model?: string) {
 }
 describe("routing table through the real proxy", () => {
 	it.each([
+		false,
+		true,
+	])("answers OpenRouter token counts locally (forced=%s)", async (forced) => {
+		const account = makeAccount({
+			id: "local-count",
+			provider: "openrouter",
+			api_key: null,
+			access_token: null,
+			refresh_token: null,
+		});
+		const { ctx, routing } = await setup(
+			[account],
+			[
+				rule({
+					pool_provider: "openrouter",
+					target_kind: "literal",
+					target_model: "deepseek/deepseek-v4-pro",
+				}),
+			],
+		);
+		await routing.setManualModels(account.id, modelPermissionScope(account), [
+			"deepseek/deepseek-v4-pro",
+		]);
+		const fetchMock = mock(async () => {
+			throw new Error(
+				"Local count must not send inference or refresh credentials",
+			);
+		});
+		globalThis.fetch = fetchMock as typeof fetch;
+		if (forced) setForcedAccount(account.id);
+		const req = new Request("https://proxy.local/v1/messages/count_tokens", {
+			method: "POST",
+			headers: {
+				"content-type": "application/json",
+				"x-clankermux-token-count-source": "forged",
+			},
+			body: JSON.stringify({
+				model: requested,
+				messages: [{ role: "user", content: "hello" }],
+			}),
+		});
+		const response = await handleProxy(req, new URL(req.url), ctx, "test-key");
+		expect(response.status).toBe(200);
+		expect(response.headers.get("x-clankermux-token-count-source")).toBe(
+			"local-estimate",
+		);
+		expect((await response.json()).input_tokens).toBeGreaterThan(0);
+		expect(fetchMock).not.toHaveBeenCalled();
+		const attempts = dbs.at(-1)?.query("SELECT * FROM routing_attempts").all();
+		expect(attempts).toHaveLength(1);
+		expect(attempts[0]).toMatchObject({
+			kind: "local_success",
+			status: 200,
+			provider: "openrouter",
+			requested_model: requested,
+			resolved_model: "deepseek/deepseek-v4-pro",
+			outgoing_model: null,
+			reported_model: null,
+		});
+		expect(ctx.requestRecorder.begin).not.toHaveBeenCalled();
+	});
+	it.each([
+		false,
+		true,
+	])("preserves upstream OpenRouter custom-endpoint counts (forced=%s)", async (forced) => {
+		const account = makeAccount({
+			id: "custom-count",
+			provider: "openrouter",
+			custom_endpoint: "https://gateway.example",
+			api_key: "upstream-key",
+		});
+		const { ctx, routing } = await setup(
+			[account],
+			[rule({ pool_provider: "openrouter", target_kind: "requested" })],
+		);
+		await routing.setManualModels(account.id, modelPermissionScope(account), [
+			requested,
+		]);
+		const fetchMock = mock(async (input: Request | string | URL) => {
+			expect(input).toBeInstanceOf(Request);
+			const outgoing = input as Request;
+			expect(outgoing.url).toBe(
+				"https://gateway.example/v1/messages/count_tokens",
+			);
+			expect(outgoing.headers.get("authorization")).toBe("Bearer upstream-key");
+			expect((await outgoing.json()).model).toBe(requested);
+			return Response.json({ input_tokens: 777 });
+		});
+		globalThis.fetch = fetchMock as typeof fetch;
+		if (forced) setForcedAccount(account.id);
+		const req = new Request("https://proxy.local/v1/messages/count_tokens", {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({
+				model: requested,
+				messages: [{ role: "user", content: "hello" }],
+			}),
+		});
+		const response = await handleProxy(req, new URL(req.url), ctx, "test-key");
+		expect(response.status).toBe(200);
+		expect(await response.json()).toEqual({ input_tokens: 777 });
+		expect(response.headers.get("x-clankermux-token-count-source")).toBeNull();
+		expect(fetchMock).toHaveBeenCalledTimes(1);
+		expect(ctx.requestRecorder.begin).toHaveBeenCalledTimes(1);
+		const attempts = dbs.at(-1)?.query("SELECT * FROM routing_attempts").all();
+		expect(attempts).toHaveLength(1);
+		expect(attempts[0]).toMatchObject({
+			kind: "upstream_send",
+			outgoing_model: requested,
+			status: 200,
+		});
+	});
+
+	it("does not count on a provider outside the client key's destinations", async () => {
+		const account = makeAccount({
+			id: "disallowed-count",
+			provider: "openrouter",
+		});
+		const { ctx, routing } = await setup([account], []);
+		await routing.setManualModels(account.id, modelPermissionScope(account), [
+			requested,
+		]);
+		ctx.dbOps.getApiKeyPin = mock(async () => ({
+			pinnedAccountId: null,
+			pinnedProviders: ["codex"],
+		}));
+		const fetchMock = mock(async () => {
+			throw new Error("Forbidden destination contacted");
+		});
+		globalThis.fetch = fetchMock as typeof fetch;
+		const req = new Request("https://proxy.local/v1/messages/count_tokens", {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({
+				model: requested,
+				messages: [{ role: "user", content: "hello" }],
+			}),
+		});
+		const response = await handleProxy(req, new URL(req.url), ctx, "test-key");
+		expect(response.status).toBe(403);
+		expect(fetchMock).not.toHaveBeenCalled();
+	});
+	it("records malformed OpenRouter counts as local rejections without billing", async () => {
+		const account = makeAccount({
+			id: "invalid-count",
+			provider: "openrouter",
+			api_key: null,
+		});
+		const { ctx, routing } = await setup([account], []);
+		await routing.setManualModels(account.id, modelPermissionScope(account), [
+			requested,
+		]);
+		const fetchMock = mock(async () => {
+			throw new Error("Local validation must not send inference");
+		});
+		globalThis.fetch = fetchMock as typeof fetch;
+		const req = new Request("https://proxy.local/v1/messages/count_tokens", {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({ model: requested, messages: null }),
+		});
+		const response = await handleProxy(req, new URL(req.url), ctx, "test-key");
+		expect(response.status).toBe(400);
+		expect((await response.json()).error.type).toBe("invalid_request_error");
+		expect(response.headers.get("x-clankermux-token-count-source")).toBeNull();
+		expect(fetchMock).not.toHaveBeenCalled();
+		expect(
+			dbs
+				.at(-1)
+				?.query(
+					"SELECT kind,status,outgoing_model,reported_model,error FROM routing_attempts",
+				)
+				.all(),
+		).toEqual([
+			{
+				kind: "local_reject",
+				status: 400,
+				outgoing_model: null,
+				reported_model: null,
+				error: "Local token count rejected (HTTP 400)",
+			},
+		]);
+		expect(ctx.requestRecorder.begin).not.toHaveBeenCalled();
+	});
+	it.each([
+		"revoked",
+		"suppressed",
+	])("rechecks %s permission before unwrapping a local count", async (reason) => {
+		const account = makeAccount({
+			id: "local-recheck",
+			provider: "openrouter",
+		});
+		const { ctx, routing } = await setup([account], []);
+		const scope = modelPermissionScope(account);
+		await routing.setManualModels(account.id, scope, [requested]);
+		const meta: RequestMeta = {
+			id: "count-recheck",
+			method: "POST",
+			path: "/v1/messages/count_tokens",
+			timestamp: Date.now(),
+			requestedModel: requested,
+		};
+		await initializeRequestRoute(meta, ctx, "test-key", null);
+		if (reason === "revoked")
+			await routing.setManualModels(account.id, scope, [], true);
+		else
+			await routing.suppressModel(
+				account.id,
+				scope,
+				requested,
+				Date.now() + 60000,
+				"test",
+			);
+		const fetchMock = mock(async () => {
+			throw new Error("Invalidated target contacted");
+		});
+		globalThis.fetch = fetchMock as typeof fetch;
+		await expect(
+			sendAuthorizedRequest(
+				new Request("https://clankermux.local/openrouter/count_tokens", {
+					method: "POST",
+					headers: {
+						"x-clankermux-synthetic-response": "true",
+						"x-clankermux-synthetic-status": "200",
+					},
+					body: JSON.stringify({ input_tokens: 10 }),
+				}),
+				account,
+				meta,
+				ctx,
+			),
+		).rejects.toThrow("no longer permits");
+		expect(fetchMock).not.toHaveBeenCalled();
+		expect(await routing.listAttempts(meta.id)).toMatchObject([
+			{ kind: "local_reject", status: 403, outgoing_model: null },
+		]);
+	});
+	it("ignores forged synthetic markers on ordinary OpenRouter inference", async () => {
+		const account = makeAccount({
+			id: "forged-count",
+			provider: "openrouter",
+			api_key: "test-key",
+		});
+		const { ctx, routing } = await setup([account], []);
+		await routing.setManualModels(account.id, modelPermissionScope(account), [
+			requested,
+		]);
+		const fetchMock = mock(async (input: Request | string | URL) => {
+			expect(input).toBeInstanceOf(Request);
+			const outgoing = input as Request;
+			expect(outgoing.url).toBe("https://openrouter.ai/api/v1/messages");
+			expect(
+				outgoing.headers.get("x-clankermux-synthetic-response"),
+			).toBeNull();
+			return Response.json({
+				id: "real-response",
+				type: "message",
+				role: "assistant",
+				model: requested,
+				content: [{ type: "text", text: "actual response" }],
+				stop_reason: "end_turn",
+				usage: { input_tokens: 2, output_tokens: 2 },
+			});
+		});
+		globalThis.fetch = fetchMock as typeof fetch;
+		const req = request();
+		req.headers.set("x-clankermux-synthetic-response", "true");
+		req.headers.set("x-clankermux-synthetic-status", "200");
+		const response = await handleProxy(req, new URL(req.url), ctx, "test-key");
+		expect(response.status).toBe(200);
+		expect((await response.json()).content[0].text).toBe("actual response");
+		expect(fetchMock).toHaveBeenCalledTimes(1);
+		expect(
+			dbs
+				.at(-1)
+				?.query("SELECT kind,outgoing_model FROM routing_attempts")
+				.all(),
+		).toEqual([{ kind: "upstream_send", outgoing_model: requested }]);
+	});
+	it.each([
 		"rule",
 		"permission",
 		"provider pin",

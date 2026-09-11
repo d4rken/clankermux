@@ -53,10 +53,39 @@ describe("OpenRouterProvider", () => {
 			);
 		});
 
-		it("keeps sub-paths below /v1/messages intact", () => {
+		it("routes count_tokens to the local estimate", () => {
 			expect(
 				provider.buildUrl("/v1/messages/count_tokens", "", mockAccount),
-			).toBe("https://openrouter.ai/api/v1/messages/count_tokens");
+			).toBe("https://clankermux.local/openrouter/count_tokens");
+		});
+
+		it.each([
+			"https://proxy.example.com",
+			"https://proxy.example.com/api/v1",
+		])("preserves upstream counts at custom endpoint %s", async (custom_endpoint) => {
+			const account = { ...mockAccount, custom_endpoint };
+			const url = provider.buildUrl("/v1/messages/count_tokens", "", account);
+			expect(url).toBe(
+				custom_endpoint +
+					(custom_endpoint.endsWith("/v1")
+						? "/messages/count_tokens"
+						: "/v1/messages/count_tokens"),
+			);
+			const body = {
+				model: "m",
+				messages: [{ role: "user", content: "hello" }],
+			};
+			const transformed = await provider.transformRequestBody(
+				new Request(url, {
+					method: "POST",
+					headers: { "content-type": "application/json" },
+					body: JSON.stringify(body),
+				}),
+			);
+			expect(
+				transformed.headers.get("x-clankermux-synthetic-response"),
+			).toBeNull();
+			expect(await transformed.json()).toEqual(body);
 		});
 
 		it("dedups /v1 against a custom endpoint whose path ends in /v1", () => {

@@ -801,6 +801,7 @@ async function forwardToClientInner(
 		method,
 		path,
 		providerName: ctx.provider.name,
+		customEndpoint: account?.custom_endpoint,
 		responseStatus: response.status,
 		internal: internalDispatch,
 		getHeader: (name) => requestHeaders.get(name),
