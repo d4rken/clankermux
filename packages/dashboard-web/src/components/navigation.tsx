@@ -48,7 +48,7 @@ interface NavItem {
 const NAV_ITEMS: NavItem[] = [
 	{ label: "Overview", icon: LayoutDashboard, path: "/" },
 	{ label: "Analytics", icon: BarChart3, path: "/analytics" },
-	{ label: "Usage", icon: Gauge, path: "/limits" },
+	{ label: "Usage", icon: Gauge, path: "/usage" },
 	{ label: "Requests", icon: Activity, path: "/requests" },
 	{ label: "Accounts", icon: Users, path: "/accounts" },
 	{ label: "Routing", icon: Zap, path: "/routing" },

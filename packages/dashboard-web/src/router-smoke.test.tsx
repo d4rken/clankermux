@@ -28,7 +28,7 @@ function Probe() {
 		<div>
 			<span data-testid="pathname">{location.pathname}</span>
 			<span data-testid="tab">{searchParams.get("tab") ?? "none"}</span>
-			<Link to="/limits">Limits</Link>
+			<Link to="/usage">Usage</Link>
 		</div>
 	);
 }
@@ -74,7 +74,7 @@ describe("react-router v8 smoke test", () => {
 
 	it("renders a Link as an anchor pointing at its target", () => {
 		const html = renderAt("/analytics");
-		expect(html).toContain('href="/limits"');
-		expect(html).toContain("Limits");
+		expect(html).toContain('href="/usage"');
+		expect(html).toContain("Usage");
 	});
 });
