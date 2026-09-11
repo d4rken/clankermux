@@ -131,29 +131,89 @@ describe("count_tokens last-resort synthesis when pool is exhausted", () => {
 		}
 	});
 	it.each([
-		false,
-		true,
-	])("preserves capacity failures for exhausted pinned keys (account pin=%s)", async (accountPin) => {
+		["codex", false],
+		["codex", true],
+		["openrouter", false],
+		["openrouter", true],
+	] as const)("counts locally for exhausted %s accounts (account pin=%s)", async (provider, accountPin) => {
 		const account = makeAccount({
-			provider: "openrouter",
+			provider,
 			rate_limited_until: Date.now() + 60_000,
+			refresh_token: null,
 		});
 		const ctx = makeContext([account]);
 		ctx.dbOps.getApiKeyPin = mock(async () => ({
 			pinnedAccountId: accountPin ? account.id : null,
-			pinnedProviders: accountPin ? null : ["codex", "openrouter"],
+			pinnedProviders: accountPin ? null : [provider],
 		})) as never;
-		const req = makeCountTokensRequest();
-		const response = await handleProxy(
-			req,
-			new URL(req.url),
-			ctx,
-			"key-pinned",
-		);
-		expect(response.status).toBe(503);
-		expect(response.headers.get("x-clankermux-pool-status")).toBe(
-			"pinned-target-unavailable",
-		);
+		const originalFetch = globalThis.fetch;
+		const fetchMock = mock(async () => {
+			throw new Error("local pinned count contacted upstream");
+		});
+		globalThis.fetch = fetchMock as typeof fetch;
+		try {
+			const req = makeCountTokensRequest();
+			const response = await handleProxy(
+				req,
+				new URL(req.url),
+				ctx,
+				"key-pinned",
+			);
+			expect(response.status).toBe(200);
+			expect(response.headers.get("x-clankermux-token-count-source")).toBe(
+				"local-estimate",
+			);
+			expect((await response.json()).input_tokens).toBeGreaterThan(0);
+			expect(fetchMock).not.toHaveBeenCalled();
+			expect(ctx.requestRecorder.begin).not.toHaveBeenCalled();
+		} finally {
+			globalThis.fetch = originalFetch;
+		}
+	});
+
+	it.each([
+		"paused",
+		"custom-endpoint",
+		"organization-denied",
+	])("does not bypass %s for a pinned local count or substitute an unpinned account", async (reason) => {
+		const account = makeAccount({
+			provider: "openrouter",
+			rate_limited_until: Date.now() + 60_000,
+			paused: reason === "paused",
+			custom_endpoint:
+				reason === "custom-endpoint" ? "https://gateway.example" : null,
+			rate_limited_reason:
+				reason === "organization-denied" ? "org_permission_denied" : null,
+		});
+		const ctx = makeContext([
+			account,
+			makeAccount({ id: "other", provider: "codex" }),
+		]);
+		ctx.dbOps.getApiKeyPin = mock(async () => ({
+			pinnedAccountId: account.id,
+			pinnedProviders: null,
+		})) as never;
+		const originalFetch = globalThis.fetch;
+		const fetchMock = mock(async () => {
+			throw new Error("blocked destination contacted");
+		});
+		globalThis.fetch = fetchMock as typeof fetch;
+		try {
+			const req = makeCountTokensRequest();
+			const response = await handleProxy(
+				req,
+				new URL(req.url),
+				ctx,
+				"key-pinned",
+			);
+			expect(response.status).toBe(503);
+			expect(response.headers.get("x-clankermux-pool-status")).toBe(
+				"pinned-target-unavailable",
+			);
+			expect(fetchMock).not.toHaveBeenCalled();
+		} finally {
+			globalThis.fetch = originalFetch;
+		}
 	});
 
 	it("does not use a paused OpenRouter account for a local count", async () => {

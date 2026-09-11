@@ -182,7 +182,7 @@ export async function resolveZeroAccountsOutcome(
 	//
 	// SKIP count_tokens: it is an advisory "how big is this?" probe answered
 	// locally/quickly (see the count_tokens last-resort below) — holding a live
-	// connection up to 120s for it would be wrong; it keeps its fast terminal.
+	// connection up to 120s for it would be wrong; it keeps its local answer or fast terminal.
 	const activePin = requestMeta.pin;
 	if (
 		url.pathname !== "/v1/messages/count_tokens" &&
@@ -258,32 +258,24 @@ export async function resolveZeroAccountsOutcome(
 		}
 	}
 
-	// A pin strict-failed selection (pinned account/class had no allowed,
-	// available candidate). Return a clean terminal error rather than degrading
-	// to storm-hold / pool_exhausted — never silently answer from a disallowed
-	// account. The /v1/responses adapter converts this non-200 to the OpenAI
-	// error shape, so the Codex CLI surfaces a real error.
-	if (requestMeta.pinFailure) {
-		const pinnedResponse = createPinnedTargetUnavailableResponse(
-			requestMeta.pinFailure,
-		);
-		await recordSyntheticErrorResponse(
-			pinnedResponse,
-			requestMeta.pinFailure.code,
-		);
-		return pinnedResponse;
-	}
-
 	// Local counts need no upstream capacity, but still need an authorized,
-	// non-paused destination. Keep the strict pin failures above and
-	// use the frozen route's current permissions, never an unfiltered pool.
+	// non-paused destination. A pin's capacity failure must not block a local
+	// estimate; recheck the frozen route's current permissions first instead.
+	// Other pin failures remain terminal, and no unfiltered pool is consulted.
 	// Other providers may perform real upstream counting and cannot use this path.
-	if (url.pathname === "/v1/messages/count_tokens") {
+	if (
+		url.pathname === "/v1/messages/count_tokens" &&
+		(!requestMeta.pinFailure ||
+			requestMeta.pinFailure.code === "pinned_no_available_account" ||
+			requestMeta.pinFailure.code === "pinned_account_unavailable")
+	) {
 		const accountForSynthesis = (
 			await eligibleRouteAccounts(requestMeta, ctx)
 		).find(
 			(a) =>
-				!a.paused && supportsLocalTokenCounting(a.provider, a.custom_endpoint),
+				!a.paused &&
+				a.rate_limited_reason !== "org_permission_denied" &&
+				supportsLocalTokenCounting(a.provider, a.custom_endpoint),
 		);
 		if (accountForSynthesis) {
 			log.info(
@@ -310,6 +302,22 @@ export async function resolveZeroAccountsOutcome(
 			);
 			if (syntheticResponse) return syntheticResponse;
 		}
+	}
+
+	// A pin strict-failed selection (pinned account/class had no allowed,
+	// available candidate). Return a clean terminal error rather than degrading
+	// to storm-hold / pool_exhausted — never silently answer from a disallowed
+	// account. The /v1/responses adapter converts this non-200 to the OpenAI
+	// error shape, so the Codex CLI surfaces a real error.
+	if (requestMeta.pinFailure) {
+		const pinnedResponse = createPinnedTargetUnavailableResponse(
+			requestMeta.pinFailure,
+		);
+		await recordSyntheticErrorResponse(
+			pinnedResponse,
+			requestMeta.pinFailure.code,
+		);
+		return pinnedResponse;
 	}
 
 	if (

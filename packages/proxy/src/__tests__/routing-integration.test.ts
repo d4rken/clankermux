@@ -235,6 +235,50 @@ describe("routing table through the real proxy", () => {
 		});
 	});
 
+	it.each([
+		"revoked",
+		"suppressed",
+		"paused",
+	])("does not bypass %s policy after a pinned pool becomes exhausted", async (reason) => {
+		const account = makeAccount({
+			id: "exhausted-policy",
+			provider: "openrouter",
+		});
+		const { ctx, routing } = await setup([account], []);
+		const scope = modelPermissionScope(account);
+		await routing.setManualModels(account.id, scope, [requested]);
+		ctx.strategy.select = mock(async () => {
+			if (reason === "revoked")
+				await routing.setManualModels(account.id, scope, [], true);
+			else if (reason === "suppressed")
+				await routing.suppressModel(
+					account.id,
+					scope,
+					requested,
+					Date.now() + 60000,
+					"test",
+				);
+			else account.paused = true;
+			return [];
+		});
+		const fetchMock = mock(async () => {
+			throw new Error("policy-excluded destination contacted");
+		});
+		globalThis.fetch = fetchMock as typeof fetch;
+		const req = new Request("https://proxy.local/v1/messages/count_tokens", {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({
+				model: requested,
+				messages: [{ role: "user", content: "hello" }],
+			}),
+		});
+		const response = await handleProxy(req, new URL(req.url), ctx, "test-key");
+		expect(response.status).not.toBe(200);
+		expect(fetchMock).not.toHaveBeenCalled();
+		expect(ctx.requestRecorder.begin).not.toHaveBeenCalled();
+	});
+
 	it("does not count on a provider outside the client key's destinations", async () => {
 		const account = makeAccount({
 			id: "disallowed-count",
