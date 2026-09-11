@@ -55,6 +55,8 @@ interface AccountStatusChipsProps {
 	status?: AccountStatus;
 	/** Omit details when the host places them in its account header. */
 	showAccountDetails?: boolean;
+	/** Usage focuses on capacity and active problems, omitting account settings. */
+	variant?: "account" | "usage";
 }
 
 /**
@@ -493,22 +495,26 @@ function formatFamilyLabel(family: string): string {
 
 /**
  * The per-account status chip row shared by the Accounts page (`AccountListItem`)
- * and the Limits page (`AccountUtilizationCard`): Primary / priority / OAuth
- * token health, the rate-limit state, stale-lock and usage-throttle warnings,
- * the provider-overload cooldown and the peak / off-peak window. All flags come
- * from `deriveAccountStatus` so both pages stay in sync. Action buttons (e.g.
- * Force Reset) and request/session stats are intentionally left to the host.
+ * and the Usage page (`AccountUtilizationCard`). Usage omits routing, renewal,
+ * automation settings and routine off-peak / zero-reset indicators. Active
+ * warnings and capacity information share `deriveAccountStatus`. Action buttons
+ * (e.g. Force Reset) and request/session stats are left to the host.
  */
 export function AccountStatusChips({
 	account,
 	status: providedStatus,
 	showAccountDetails = true,
+	variant = "account",
 }: AccountStatusChipsProps) {
 	const status = providedStatus ?? deriveAccountStatus(account);
+	const isUsage = variant === "usage";
+	const includeAccountDetails = showAccountDetails && !isUsage;
 
 	return (
-		<div className="flex flex-wrap items-center gap-item text-sm">
-			{showAccountDetails && <AccountRoutingChips status={status} />}
+		<div
+			className={`flex flex-wrap items-center gap-item text-sm${isUsage ? " empty:hidden" : ""}`}
+		>
+			{includeAccountDetails && <AccountRoutingChips status={status} />}
 			{status.isRateLimited && (
 				<span title="Account is rate-limited - requests will be rejected until the limit resets">
 					<AlertCircle className="h-4 w-4 text-warning-strong" />
@@ -653,8 +659,11 @@ export function AccountStatusChips({
 					{status.creditsPlanType ? ` · ${status.creditsPlanType}` : ""}
 				</StatusChip>
 			)}
-			<CodexUsageResetChip account={account} status={status} />
-			{status.showPeakChip && (
+			{(!isUsage ||
+				(account.codexRateLimitResetCredits?.availableCount ?? 0) > 0) && (
+				<CodexUsageResetChip account={account} status={status} />
+			)}
+			{status.showPeakChip && (!isUsage || status.isPeak) && (
 				<StatusChip
 					className={
 						status.isPeak
@@ -668,7 +677,7 @@ export function AccountStatusChips({
 					{status.peakChipLabel}
 				</StatusChip>
 			)}
-			{showAccountDetails && status.showRenewalChip && (
+			{includeAccountDetails && status.showRenewalChip && (
 				<AccountRenewalInfo account={account} status={status} />
 			)}
 			{status.isDuplicateAccount && (
@@ -683,7 +692,7 @@ export function AccountStatusChips({
 			{/* The account's automation-flag inventory, always last: the pills above
 			    are transient state, these are configuration. A fragment, so they
 			    wrap as individual flex items of this row rather than as a block. */}
-			<AccountPolicyChips account={account} />
+			{!isUsage && <AccountPolicyChips account={account} />}
 		</div>
 	);
 }

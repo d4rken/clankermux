@@ -138,6 +138,64 @@ afterEach(async () => {
 	window.localStorage.removeItem(ACCOUNT_UTILIZATION_SORT_STORAGE_KEY);
 });
 
+describe("AccountUtilizationCard — usage indicators", () => {
+	it("omits account configuration while retaining active availability warnings", async () => {
+		await mount({
+			accounts: [
+				makeAccount({
+					usageData: usageAt(50),
+					isPrimary: true,
+					priority: 7,
+					autoFallbackEnabled: true,
+					autoRefreshEnabled: true,
+					autoPauseOnOverageEnabled: true,
+					renewalAnchor: "2026-09-01",
+					renewalCadence: "monthly",
+					paused: true,
+					pauseReason: "oauth_invalid_grant",
+					providerOverloadedUntil: NOW + 90_000,
+				}),
+			],
+		});
+		const text = host?.textContent ?? "";
+		for (const label of [
+			"Primary",
+			"Priority:",
+			"Auto-fallback",
+			"Auto-refresh",
+			"Renews",
+			"Overage spend",
+		]) {
+			expect(text).not.toContain(label);
+		}
+		expect(text).toContain("Paused");
+		expect(text).toContain("Needs re-authentication");
+		expect(text).toContain("Provider overloaded (2m)");
+		expect(text).toContain("Anthropic");
+	});
+
+	it.each([
+		["anthropic", "Overage spend allowed"],
+		["codex", "Credits allowed past weekly limit"],
+	])("places enabled extra spend in a plain usage note for %s", async (provider, label) => {
+		await mount({
+			accounts: [
+				makeAccount({
+					provider,
+					usageData: usageAt(50),
+					autoPauseOnOverageEnabled: false,
+				}),
+			],
+		});
+		const note = Array.from(host?.querySelectorAll("p") ?? []).find(
+			(p) => p.textContent === label,
+		);
+		expect(note).toBeDefined();
+		expect(note?.title).toContain("When OFF");
+		expect(host?.textContent).not.toContain("Auto-apply:");
+	});
+});
+
 describe("AccountUtilizationCard sort control", () => {
 	it("defaults to utilization high to low", async () => {
 		await mount();
