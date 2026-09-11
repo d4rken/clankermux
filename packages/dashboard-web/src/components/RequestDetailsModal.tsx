@@ -1,7 +1,6 @@
 import { HttpError } from "@clankermux/http-common";
 import {
 	formatBytes,
-	formatCost,
 	formatTimestamp,
 	formatTokens,
 } from "@clankermux/ui-common";
@@ -19,6 +18,7 @@ import {
 } from "../lib/request-model";
 import { ConversationView } from "./ConversationView";
 import { CopyButton } from "./CopyButton";
+import { RequestCostDetails } from "./RequestCostDetails";
 import { RoutingAttempts } from "./routing/RoutingAttempts";
 import { TokenUsageDisplay } from "./TokenUsageDisplay";
 import { Alert } from "./ui/alert";
@@ -280,9 +280,6 @@ export function RequestDetailsModal({
 									)}
 								</Badge>
 							)}
-							{summary?.costUsd && summary.costUsd > 0 && (
-								<Badge variant="default">{formatCost(summary.costUsd)}</Badge>
-							)}
 							{attributionLabel && (
 								<Badge
 									variant="outline"
@@ -304,6 +301,7 @@ export function RequestDetailsModal({
 						</div>
 					</DialogDescription>
 				</DialogHeader>
+				<RequestCostDetails summary={summary} />
 
 				{executionError && (
 					<Alert tone="destructive" title={`Error: ${executionError}`} />

@@ -10,6 +10,7 @@ import {
 import { BunSqlAdapter, ensureSchema } from "@clankermux/database";
 import type { APIContext } from "../../types";
 import { createAnalyticsHandler } from "../analytics-direct";
+import { createPaymentsSummaryDataHandler } from "../payments-summary-direct";
 import {
 	ACCOUNT_A,
 	ACCOUNT_B,
@@ -106,9 +107,52 @@ describe("analytics totals aggregate", () => {
 		if (!raw) throw new Error("empty aggregate must still return a row");
 		for (const [key, value] of Object.entries(raw)) {
 			expect(value).toBe(
-				key === "total_requests" || key === "active_accounts" ? 0 : null,
+				[
+					"total_requests",
+					"active_accounts",
+					"priced_requests",
+					"unpriced_requests",
+					"reported_requests",
+					"estimated_requests",
+					"unknown_source_requests",
+				].includes(key)
+					? 0
+					: null,
 			);
 		}
+	});
+
+	it("reports filtered API cost coverage without counting plan value or losing free requests", async () => {
+		const insert = db.prepare(
+			`INSERT INTO requests (id, timestamp, model, billing_type, cost_usd, cost_source, method, path) VALUES (?, ?, ?, ?, ?, ?, 'POST', '/v1/messages')`,
+		);
+		for (const [id, model, billing, cost, source] of [
+			["cost-reported", "cost-coverage-test", "api", 2, "reported"],
+			["cost-free", "cost-coverage-test", "api", 0, "reported"],
+			["cost-estimate", "cost-coverage-test", "overage", 3, "estimated"],
+			["cost-legacy", "cost-coverage-test", null, 4, null],
+			["cost-unknown", "cost-coverage-test", "api", null, "unknown"],
+			["cost-plan", "cost-coverage-test", "plan", 99, "estimated"],
+			["cost-excluded", "other-model", "api", 999, "reported"],
+		] as const)
+			insert.run(id, FIXED_NOW - 1000, model, billing, cost, source);
+		const body = await fetch(
+			"range=24h&sections=totals&models=cost-coverage-test",
+		);
+		expect(body.totals.apiCostCoverage).toEqual({
+			reportedUsd: 2,
+			estimatedUsd: 3,
+			unknownSourceUsd: 4,
+			pricedRequests: 4,
+			unpricedRequests: 1,
+			reportedRequests: 2,
+			estimatedRequests: 1,
+			unknownSourceRequests: 1,
+		});
+		const empty = await fetch("range=24h&sections=totals&models=absent-model");
+		expect(Object.values(empty.totals.apiCostCoverage)).toEqual(
+			Array(8).fill(0),
+		);
 	});
 
 	it("keeps filter binds ahead of the no-account sentinel and counts NULL accounts", async () => {
@@ -286,4 +330,20 @@ describe("tool-error query plans", () => {
 			{ toolName: "Edit", errorText: "String not found", occurrences: 1 },
 		]);
 	});
+});
+
+it("keeps payment range and per-account cost coverage scans covered by an index", async () => {
+	const response = await createPaymentsSummaryDataHandler(context)(
+		new URLSearchParams("range=24h"),
+	);
+	expect(response.status).toBe(200);
+	const costQueries = statements.filter(({ sql }) =>
+		sql.includes("AS priced_requests"),
+	);
+	expect(costQueries).toHaveLength(3);
+	for (const statement of costQueries) {
+		expect(
+			plan(statement).some((detail) => detail.includes("USING COVERING INDEX")),
+		).toBe(true);
+	}
 });

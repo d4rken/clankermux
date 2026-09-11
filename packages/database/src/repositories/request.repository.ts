@@ -5,6 +5,7 @@ import type {
 	ProjectAttributionSource,
 	ToolCallStat,
 } from "@clankermux/types";
+import { type CostSource, resolveCostSource } from "@clankermux/types";
 import { decryptPayload, encryptPayload } from "../payload-encryption";
 import { BaseRepository } from "./base.repository";
 import {
@@ -80,6 +81,9 @@ export interface RequestData {
 		completionTokens?: number;
 		totalTokens?: number;
 		costUsd?: number;
+		estimatedCostUsd?: number;
+		costSource?: CostSource;
+		costIsByok?: boolean;
 		inputTokens?: number;
 		cacheReadInputTokens?: number;
 		cacheCreationInputTokens?: number;
@@ -172,9 +176,9 @@ export class RequestRepository extends BaseRepository<RequestData> {
 					context_binary_chars, usage_finalized_at,
 					session_key, cache_prefix_hashes,
 					stop_reason, refusal_category, fallback_credit_claimed,
-					fallback_from_model
+					fallback_from_model, estimated_cost_usd, cost_source, cost_is_byok
 				)
-				VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+				VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 				ON CONFLICT (id) DO UPDATE SET
 				timestamp = EXCLUDED.timestamp,
 				method = EXCLUDED.method,
@@ -185,12 +189,15 @@ export class RequestRepository extends BaseRepository<RequestData> {
 				error_message = EXCLUDED.error_message,
 				response_time_ms = EXCLUDED.response_time_ms,
 				failover_attempts = EXCLUDED.failover_attempts,
-				model = EXCLUDED.model,
+				model = COALESCE(EXCLUDED.model, requests.model),
 				requested_model = COALESCE(EXCLUDED.requested_model, requests.requested_model),
 				prompt_tokens = EXCLUDED.prompt_tokens,
 				completion_tokens = EXCLUDED.completion_tokens,
 				total_tokens = EXCLUDED.total_tokens,
-				cost_usd = EXCLUDED.cost_usd,
+				cost_usd = CASE WHEN requests.cost_source = 'reported' THEN requests.cost_usd ELSE COALESCE(EXCLUDED.cost_usd, requests.cost_usd) END,
+				estimated_cost_usd = COALESCE(EXCLUDED.estimated_cost_usd, requests.estimated_cost_usd),
+				cost_source = CASE WHEN requests.cost_source = 'reported' OR EXCLUDED.cost_usd IS NULL THEN requests.cost_source ELSE EXCLUDED.cost_source END,
+				cost_is_byok = CASE WHEN requests.cost_source = 'reported' THEN COALESCE(requests.cost_is_byok, EXCLUDED.cost_is_byok) ELSE COALESCE(EXCLUDED.cost_is_byok, requests.cost_is_byok) END,
 				input_tokens = EXCLUDED.input_tokens,
 				cache_read_input_tokens = EXCLUDED.cache_read_input_tokens,
 				cache_creation_input_tokens = EXCLUDED.cache_creation_input_tokens,
@@ -244,7 +251,7 @@ export class RequestRepository extends BaseRepository<RequestData> {
 				usage?.promptTokens || null,
 				usage?.completionTokens || null,
 				usage?.totalTokens || null,
-				usage?.costUsd || null,
+				usage?.costUsd ?? null,
 				usage?.inputTokens || null,
 				usage?.cacheReadInputTokens || null,
 				usage?.cacheCreationInputTokens || null,
@@ -281,6 +288,9 @@ export class RequestRepository extends BaseRepository<RequestData> {
 				// that mean nothing.
 				data.fallbackCreditClaimed ? 1 : null,
 				data.fallbackFromModel ?? null,
+				usage?.estimatedCostUsd ?? null,
+				resolveCostSource(usage?.costUsd, usage?.costSource),
+				usage?.costIsByok == null ? null : Number(usage.costIsByok),
 			],
 		);
 	}
@@ -384,13 +394,16 @@ export class RequestRepository extends BaseRepository<RequestData> {
 				prompt_tokens = COALESCE(?, prompt_tokens),
 				completion_tokens = COALESCE(?, completion_tokens),
 				total_tokens = COALESCE(?, total_tokens),
-				cost_usd = COALESCE(?, cost_usd),
+				cost_usd = CASE WHEN cost_source = 'reported' THEN cost_usd ELSE COALESCE(?, cost_usd) END,
 				input_tokens = COALESCE(?, input_tokens),
 				cache_read_input_tokens = COALESCE(?, cache_read_input_tokens),
 				cache_creation_input_tokens = COALESCE(?, cache_creation_input_tokens),
 				output_tokens = COALESCE(?, output_tokens),
 				output_tokens_per_second = COALESCE(?, output_tokens_per_second),
-				output_tokens_per_second_approx = COALESCE(?, output_tokens_per_second_approx)
+				output_tokens_per_second_approx = COALESCE(?, output_tokens_per_second_approx),
+				estimated_cost_usd = COALESCE(?, estimated_cost_usd),
+				cost_source = CASE WHEN cost_source = 'reported' OR ? IS NULL THEN cost_source ELSE ? END,
+				cost_is_byok = CASE WHEN cost_source = 'reported' THEN COALESCE(cost_is_byok, ?) ELSE COALESCE(?, cost_is_byok) END
 			WHERE id = ?
 		`,
 				[
@@ -399,13 +412,18 @@ export class RequestRepository extends BaseRepository<RequestData> {
 					usage.promptTokens || null,
 					usage.completionTokens || null,
 					usage.totalTokens || null,
-					usage.costUsd || null,
+					usage.costUsd ?? null,
 					usage.inputTokens || null,
 					usage.cacheReadInputTokens || null,
 					usage.cacheCreationInputTokens || null,
 					usage.outputTokens || null,
 					usage.tokensPerSecond || null,
 					usage.tokensPerSecondApproximate && usage.tokensPerSecond ? 1 : null,
+					usage.estimatedCostUsd ?? null,
+					usage.costUsd ?? null,
+					resolveCostSource(usage.costUsd, usage.costSource),
+					usage.costIsByok == null ? null : Number(usage.costIsByok),
+					usage.costIsByok == null ? null : Number(usage.costIsByok),
 					requestId,
 				],
 			);

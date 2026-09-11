@@ -1,11 +1,11 @@
 # Routing follow-ups — 2026-09-11
 
-Work is on `feat/routing-followups`, based on `30a68011`. These changes have not been merged or deployed.
+Release scope: `2026.9.42`. The implementation started from `30a68011` and was integrated with main `451680da`, which already includes OpenRouter cost tracking. This report records the implementation and investigation results; the serving release is verified separately during promotion.
 
 ## Ownership
 
 - Chat Completions ingress: [handover for another agent](chat-completions-handover.md).
-- OpenRouter request pricing: another agent owns implementation.
+- OpenRouter cost tracking: implemented separately and merged into main as `451680da` (`2026.9.41`); preserved by this release.
 - Legacy database cleanup: postponed by the user.
 
 ## Implemented: local OpenRouter token counting
@@ -20,7 +20,7 @@ The shared helper validates JSON and basic model/messages structure, returning 4
 
 Destination pins, the frozen route, current account/model permissions, suppression, and operator pause still apply. A capacity-exhausted pool can answer locally through an eligible destination; a policy-excluded destination cannot. Existing strict pin failures still take precedence, so account-pinned and provider-pinned keys can receive a capacity error when selection finds no available allowed account. The local capacity fallback applies only when selection has not already produced a pin failure. Other providers' counting behavior is unchanged.
 
-Validation: lint then typecheck passed; full backend suite **10,036 passed, 0 failed, 631 files**. Focused coverage includes normal/forced routing, malformed input, permission revocation, suppression, provider pins, paused/exhausted accounts, forged synthetic headers, unchanged Codex counting, custom-endpoint upstream counting/recording, request-recording exclusions, and dashboard ingress retraction for local 200/400 counts. No UI changes; the separate DOM lane was not run.
+Validation: the original feature passed lint then typecheck and **10,036 backend tests across 631 files**. Release integration with main passed lint then typecheck and **10,065 backend tests across 637 files, 0 failures**. Integration corrected a pre-existing database test that expected a usage-less re-save to erase the reported model; pricing deliberately preserves it. The test now also proves that updating the reported model leaves the requested model unchanged; runtime database behavior was not changed. Focused coverage includes normal/forced routing, malformed input, permission revocation, suppression, provider pins, paused/exhausted accounts, forged synthetic headers, unchanged Codex counting, custom-endpoint upstream counting/recording, request-recording exclusions, and dashboard ingress retraction for local 200/400 counts. No UI changes; the separate DOM lane was not run.
 
 Live CNC checks used an isolated key restricted to Codex/OpenRouter and a rule resolving to `deepseek/deepseek-v4-pro`: text returned 35 tokens; images with 100 and 100,000 base64 characters both returned 2,066. All three returned 200 with the estimate marker, produced local-success audits, no outgoing/reported model, no associated usage rows, and zero observed upstream inference requests. Background metadata discovery is separate from inference.
 

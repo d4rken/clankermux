@@ -216,6 +216,13 @@ export function addPerformanceIndexes(db: Database): void {
 		"Added index: idx_requests_analytics_covering (covering index for analytics aggregate queries)",
 	);
 
+	// Cost coverage also reads provenance. Keep the payments range and per-account
+	// scans covered without changing an existing index definition on upgrades.
+	db.run(`
+		CREATE INDEX IF NOT EXISTS idx_requests_cost_coverage
+		ON requests(timestamp, billing_type, account_used, cost_usd, cost_source)
+	`);
+
 	// 11. Index for billing_type time-range queries used in analytics cost breakdown
 	db.run(`
 		CREATE INDEX IF NOT EXISTS idx_requests_billing_type_timestamp

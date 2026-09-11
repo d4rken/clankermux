@@ -23,8 +23,13 @@ import {
 	jsonResponse,
 } from "@clankermux/http-common";
 import { Logger } from "@clankermux/logger";
-import type { AccountPaymentRow } from "@clankermux/types";
+import type { AccountPaymentRow, CostCoverage } from "@clankermux/types";
 import type { APIContext } from "../types";
+import {
+	type CostCoverageRow,
+	costCoverageSql,
+	toCostCoverage,
+} from "./cost-coverage";
 import { getRangeConfig } from "./range-config";
 
 const log = new Logger("PaymentsSummaryDataHandler");
@@ -50,6 +55,7 @@ export interface RequestCostSplits {
 	planValueUsd: number;
 	/** Σ cost_usd where billing_type = 'overage'. */
 	overageTokenCostUsd: number;
+	apiCostCoverage: CostCoverage;
 }
 
 /**
@@ -69,7 +75,11 @@ export interface PaymentsSummaryData {
 		costs: RequestCostSplits;
 	};
 	perAccountLedgerMicros: { account_id: string; total_micros: number }[];
-	perAccountTokenCostUsd: { accountId: string; costUsd: number }[];
+	perAccountTokenCostUsd: {
+		accountId: string;
+		costUsd: number;
+		costCoverage: CostCoverage;
+	}[];
 	/** Snapshotted names for ledger rows whose account may no longer exist. */
 	ledgerAccountNames: { accountId: string; accountName: string }[];
 	renewalConfigs: Array<{
@@ -90,16 +100,19 @@ export function createPaymentsSummaryDataHandler(context: APIContext) {
 		fromMs: number,
 		toMs: number,
 	): Promise<RequestCostSplits> {
-		const row = await adapter.get<{
-			token_cost: number | null;
-			plan_value: number | null;
-			overage_cost: number | null;
-		}>(
+		const row = await adapter.get<
+			CostCoverageRow & {
+				token_cost: number | null;
+				plan_value: number | null;
+				overage_cost: number | null;
+			}
+		>(
 			`
 			SELECT
 				SUM(CASE WHEN COALESCE(billing_type, 'api') != 'plan' THEN COALESCE(cost_usd, 0) ELSE 0 END) as token_cost,
 				SUM(CASE WHEN billing_type = 'plan' THEN COALESCE(cost_usd, 0) ELSE 0 END) as plan_value,
-				SUM(CASE WHEN billing_type = 'overage' THEN COALESCE(cost_usd, 0) ELSE 0 END) as overage_cost
+				SUM(CASE WHEN billing_type = 'overage' THEN COALESCE(cost_usd, 0) ELSE 0 END) as overage_cost,
+				${costCoverageSql("COALESCE(billing_type, 'api') != 'plan'")}
 			FROM requests
 			WHERE timestamp >= ? AND timestamp < ?
 		`,
@@ -109,6 +122,7 @@ export function createPaymentsSummaryDataHandler(context: APIContext) {
 			tokenCostUsd: row?.token_cost ?? 0,
 			planValueUsd: row?.plan_value ?? 0,
 			overageTokenCostUsd: row?.overage_cost ?? 0,
+			apiCostCoverage: toCostCoverage(row),
 		};
 	}
 
@@ -165,9 +179,11 @@ export function createPaymentsSummaryDataHandler(context: APIContext) {
 				payments.sumByKindInRange(from, to),
 				requestCostSplits(from, to),
 				payments.sumByAccountInRange(from, to),
-				adapter.query<{ account_used: string; cost_usd: number }>(
+				adapter.query<
+					CostCoverageRow & { account_used: string; cost_usd: number }
+				>(
 					`
-					SELECT account_used, SUM(COALESCE(cost_usd, 0)) as cost_usd
+					SELECT account_used, SUM(cost_usd) as cost_usd, ${costCoverageSql()}
 					FROM requests
 					WHERE timestamp >= ? AND timestamp < ?
 						AND COALESCE(billing_type, 'api') != 'plan'
@@ -211,6 +227,7 @@ export function createPaymentsSummaryDataHandler(context: APIContext) {
 				perAccountTokenCostUsd: perAccountTokenRows.map((r) => ({
 					accountId: r.account_used,
 					costUsd: r.cost_usd ?? 0,
+					costCoverage: toCostCoverage(r),
 				})),
 				ledgerAccountNames: ledgerNameRows.map((r) => ({
 					accountId: r.account_id,

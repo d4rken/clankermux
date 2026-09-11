@@ -3,6 +3,7 @@ import {
 	computeWeeklyWorkloads,
 	type RunwayAccountSource,
 } from "@clankermux/core";
+import type { RequestResponse } from "@clankermux/types";
 import { assertPublicSchema } from "../../../../../../scripts/public-api/validate";
 import type {
 	PublicAccountSnapshot,
@@ -12,6 +13,7 @@ import type {
 import {
 	MAX_STRING_BYTES,
 	toPublicAccountsDto,
+	toPublicRequestDoneDto,
 	toPublicStatusDto,
 	toPublicWindowForecastDto,
 	truncateUtf8,
@@ -209,5 +211,28 @@ describe("replacement public contract", () => {
 		assertPublicSchema("workloads", dto);
 		assertInstantsAreIso(dto);
 		assertCountsAreStatedWholeNumbers(dto);
+	});
+});
+
+describe("public request cost provenance", () => {
+	it.each([
+		[0, "reported", 0, "reported"],
+		[0.02, "estimated", 0.02, "estimated"],
+		[0.02, undefined, 0.02, "unknown"],
+		[undefined, "reported", null, "unknown"],
+		[0.02, "untrusted", 0.02, "unknown"],
+	] as const)("maps cost %s with source %s", (costUsd, costSource, expectedCost, expectedSource) => {
+		const dto = toPublicRequestDoneDto(
+			{
+				id: "cost-test",
+				method: "POST",
+				path: "/v1/messages",
+				costUsd,
+				costSource,
+			} as RequestResponse,
+			NOW,
+		);
+		expect(dto.costUsd).toBe(expectedCost);
+		expect(dto.costSource).toBe(expectedSource);
 	});
 });

@@ -37,7 +37,7 @@ describe("requests.requested_model", () => {
 		expect(() => runMigrations(db)).not.toThrow();
 	});
 
-	it("persists independently from provider-reported model and survives a null re-save", async () => {
+	it("preserves known models across null re-saves and updates the reported model independently", async () => {
 		ensureSchema(db);
 		const repository = new RequestRepository(new BunSqlAdapter(db));
 		await repository.save({
@@ -67,13 +67,35 @@ describe("requests.requested_model", () => {
 			requestedModel: null,
 		});
 
-		const row = db
-			.prepare("SELECT model, requested_model FROM requests WHERE id = ?")
-			.get("req-model") as {
-			model: string | null;
-			requested_model: string | null;
-		};
-		expect(row.model).toBeNull();
-		expect(row.requested_model).toBe("claude-haiku-4-5-20251001");
+		const readModels = () =>
+			db
+				.prepare("SELECT model, requested_model FROM requests WHERE id = ?")
+				.get("req-model") as {
+				model: string | null;
+				requested_model: string | null;
+			};
+		// A usage-less re-save retains both known identities.
+		expect(readModels()).toEqual({
+			model: "provider-model",
+			requested_model: "claude-haiku-4-5-20251001",
+		});
+		await repository.save({
+			id: "req-model",
+			method: "POST",
+			path: "/v1/messages",
+			accountUsed: null,
+			statusCode: 200,
+			success: true,
+			errorMessage: null,
+			responseTime: 12,
+			failoverAttempts: 0,
+			requestedModel: null,
+			usage: { model: "other-model" },
+		});
+		// A new reported value changes only that identity, never the client's alias.
+		expect(readModels()).toEqual({
+			model: "other-model",
+			requested_model: "claude-haiku-4-5-20251001",
+		});
 	});
 });

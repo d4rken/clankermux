@@ -101,6 +101,9 @@ export function ensureSchema(db: Database): void {
 			completion_tokens INTEGER DEFAULT 0,
 			total_tokens INTEGER DEFAULT 0,
 			cost_usd REAL DEFAULT 0,
+			estimated_cost_usd REAL,
+			cost_source TEXT,
+			cost_is_byok INTEGER,
 			output_tokens_per_second REAL,
 			output_tokens_per_second_approx INTEGER,
 			input_tokens INTEGER DEFAULT 0,
@@ -1312,6 +1315,22 @@ export const ADDITIVE_COLUMNS: ReadonlyArray<{
 		table: "accounts",
 		column: "openrouter_metadata_json",
 		ddl: "ALTER TABLE accounts ADD COLUMN openrouter_metadata_json TEXT",
+	},
+	// Nullable provenance: old amounts must never become provider-verified.
+	{
+		table: "requests",
+		column: "estimated_cost_usd",
+		ddl: "ALTER TABLE requests ADD COLUMN estimated_cost_usd REAL",
+	},
+	{
+		table: "requests",
+		column: "cost_source",
+		ddl: "ALTER TABLE requests ADD COLUMN cost_source TEXT",
+	},
+	{
+		table: "requests",
+		column: "cost_is_byok",
+		ddl: "ALTER TABLE requests ADD COLUMN cost_is_byok INTEGER",
 	},
 	// Which attribution tier produced the row's `project` (see
 	// ProjectAttributionSource): header / wd_primary / wd_plain / codex_cwd /

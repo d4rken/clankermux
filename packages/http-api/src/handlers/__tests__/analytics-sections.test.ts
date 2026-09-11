@@ -92,7 +92,21 @@ describe("unscoped analytics response (backward compatibility)", () => {
 		const { sections: _goldenSections, ...goldenMeta } = (
 			GOLDEN as unknown as AnalyticsResponse
 		).meta as NonNullable<AnalyticsResponse["meta"]>;
-		expect({ ...body, meta }).toEqual({
+		// Cost provenance was added after this historical fixture. Assert it
+		// independently while retaining the comparison for every original field.
+		if (!body.totals) throw new Error("Missing analytics totals");
+		const { apiCostCoverage, ...totals } = body.totals;
+		expect(apiCostCoverage).toEqual({
+			reportedUsd: 0,
+			estimatedUsd: 0,
+			unknownSourceUsd: 0.064,
+			pricedRequests: 5,
+			unpricedRequests: 0,
+			reportedRequests: 0,
+			estimatedRequests: 0,
+			unknownSourceRequests: 5,
+		});
+		expect({ ...body, totals, meta }).toEqual({
 			...(GOLDEN as unknown as AnalyticsResponse),
 			meta: goldenMeta,
 		});

@@ -3,7 +3,7 @@
  * Instants are ISO strings; durations name their units. Display strings are bounded; IDs are not truncated.
  */
 import type { RequestResponse, StopsHistoryResponse } from "@clankermux/types";
-import { classifyStopCause } from "@clankermux/types";
+import { classifyStopCause, resolveCostSource } from "@clankermux/types";
 import type {
 	PublicAccountSnapshot,
 	PublicSnapshot,
@@ -830,19 +830,13 @@ export interface PublicRequestDoneDto {
 	 */
 	totalTokensBasis: PublicTokenBasisDto | null;
 	/**
-	 * What this request is ESTIMATED to have cost, in USD, from the pricing
-	 * catalogue — not the operator's subscription charge. Most accounts here are
-	 * flat-rate plans, where the true marginal cost of a request is nothing like
-	 * this figure; what it answers is "how much would this have cost at list
-	 * price", which is what makes two requests comparable.
-	 *
-	 * NULL means UNPRICED — the model is missing from the catalogue, or its entry
-	 * has no rate for a bucket this request used. A number always means measured,
-	 * so `0` is a request that consumed no metered tokens. The deployed shape
-	 * published a failed lookup as `0`, and no consumer could tell a free request
-	 * from an unpriceable one.
+	 * Best available request cost in USD: a provider-reported charge or a
+	 * catalogue estimate. Subscription usage is API-equivalent plan value,
+	 * not a subscription payment. NULL is unpriced; zero is a known zero.
 	 */
 	costUsd: number | null;
+	/** Provenance of costUsd. Missing on older servers; never assume reported. */
+	costSource?: "reported" | "estimated" | "unknown";
 	/**
 	 * WHY the request failed, as an allowlisted CATEGORY — never the upstream's
 	 * own text. Null when it did not fail.
@@ -997,6 +991,7 @@ export function toPublicRequestDoneDto(
 		totalTokens: payload.totalTokens ?? null,
 		totalTokensBasis: toPublicTokenBasis(payload.totalTokensBasis),
 		costUsd: payload.costUsd ?? null,
+		costSource: resolveCostSource(payload.costUsd, payload.costSource),
 		// A CATEGORY, not the upstream's prose: this is an unauthenticated wire and
 		// the recorder builds that string out of the provider's response body.
 		errorMessage: toPublicErrorCategory(
