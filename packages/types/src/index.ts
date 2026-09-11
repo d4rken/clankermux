@@ -20,6 +20,7 @@ export * from "./pool-sizing";
 export * from "./pricing";
 export * from "./project-rules";
 export * from "./quota-drift";
+export * from "./reasoning-adaptation";
 export * from "./request";
 export * from "./request-cost";
 export * from "./routing";

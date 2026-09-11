@@ -983,7 +983,8 @@ export function ensureSchema(db: Database): void {
 		account_id TEXT, provider TEXT, requested_model TEXT NOT NULL, resolved_model TEXT,
 		outgoing_model TEXT, reported_model TEXT,
 		kind TEXT NOT NULL CHECK(kind IN ('upstream_send','local_reject','local_success')),
-		started_at INTEGER NOT NULL, finished_at INTEGER, status INTEGER, error TEXT
+		started_at INTEGER NOT NULL, finished_at INTEGER, status INTEGER, error TEXT,
+		reasoning_effort_requested TEXT, reasoning_effort_effective TEXT, reasoning_effort_reason TEXT
 	)`);
 	db.run(
 		`CREATE INDEX IF NOT EXISTS idx_routing_attempts_request ON routing_attempts(request_id, started_at)`,
@@ -1484,6 +1485,35 @@ export const ADDITIVE_COLUMNS: ReadonlyArray<{
 		table: "requests",
 		column: "fallback_from_model",
 		ddl: "ALTER TABLE requests ADD COLUMN fallback_from_model TEXT",
+	},
+	// What the dispatch did to the client's reasoning effort, per attempt (see
+	// the ReasoningEffortAdaptation contract in @clankermux/types).
+	//
+	// requested: the client's own intent in the outgoing vocabulary; NULL means
+	// the client asked for no effort at all, which is deliberately distinct from
+	// asking for one that survived unchanged. Not the same field as
+	// requests.reasoning_effort, whose vocabulary is request-level and wider
+	// ('thinking:24000').
+	{
+		table: "routing_attempts",
+		column: "reasoning_effort_requested",
+		ddl: "ALTER TABLE routing_attempts ADD COLUMN reasoning_effort_requested TEXT",
+	},
+	// effective: the effort actually serialized upstream on this attempt; NULL
+	// means none was sent and the backend's own default applied — never a guess
+	// at what that default is.
+	{
+		table: "routing_attempts",
+		column: "reasoning_effort_effective",
+		ddl: "ALTER TABLE routing_attempts ADD COLUMN reasoning_effort_effective TEXT",
+	},
+	// reason: why the two differ, NULL when they do not. Historical rows carry
+	// NULL throughout: there is no evidence to reconstruct for an attempt that
+	// was recorded before the capture existed.
+	{
+		table: "routing_attempts",
+		column: "reasoning_effort_reason",
+		ddl: "ALTER TABLE routing_attempts ADD COLUMN reasoning_effort_reason TEXT",
 	},
 ];
 

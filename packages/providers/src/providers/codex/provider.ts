@@ -11,9 +11,16 @@ import { Logger } from "@clankermux/logger";
 import { resolveReasoningEffort } from "@clankermux/openai-formats";
 import {
 	type Account,
+	applyReasoningEffortAdaptation,
 	getChatContext,
 	NATIVE_RESPONSES_REQUEST_HEADER,
 	NATIVE_RESPONSES_RESPONSE_HEADER,
+	REASONING_EFFORT_ADAPTATION_HEADER,
+	REASONING_EFFORT_BACKEND_CLAMP,
+	REASONING_EFFORT_PROXY_DEFAULT,
+	REASONING_EFFORT_REASON_SEPARATOR,
+	REASONING_EFFORT_TARGET_MODEL_PROFILE,
+	type ReasoningEffortAdaptation,
 } from "@clankermux/types";
 import { BaseProvider } from "../../base";
 import { localTokenCountUrl } from "../../local-token-count";
@@ -416,6 +423,24 @@ function targetsChatGptCodexBackend(account?: Account): boolean {
 }
 
 /**
+ * The `reasoning.effort` a Responses body carries, or null when it carries
+ * none. A non-string effort reads as none: it is not a value in any effort
+ * vocabulary, and recording it as one would put a number in a column that is
+ * meant to hold what the client asked for.
+ */
+function nativeReasoningEffort(body: Record<string, unknown>): string | null {
+	const reasoning = body.reasoning;
+	if (
+		typeof reasoning !== "object" ||
+		reasoning === null ||
+		Array.isArray(reasoning)
+	)
+		return null;
+	const effort = (reasoning as Record<string, unknown>).effort;
+	return typeof effort === "string" ? effort : null;
+}
+
+/**
  * prompt_cache_key is an OpenAI-specific Responses API field. Custom or
  * self-hosted OpenAI-compatible endpoints may reject the unknown field, so
  * only attach it when the account resolves to OpenAI's own hosts.
@@ -639,7 +664,10 @@ export class CodexProvider extends BaseProvider {
 					ts: Date.now(),
 				});
 			}
-			const codexBody = this.convertToCodexFormat(body, account);
+			const { codexBody, reasoningAdaptation } = this.convertToCodexFormat(
+				body,
+				account,
+			);
 
 			const newHeaders = new Headers(request.headers);
 			newHeaders.set("content-type", "application/json");
@@ -648,6 +676,7 @@ export class CodexProvider extends BaseProvider {
 				body.stream === true ? "true" : "false",
 			);
 			newHeaders.delete("content-length");
+			applyReasoningEffortAdaptation(newHeaders, reasoningAdaptation);
 
 			return new Request(request.url, {
 				method: request.method,
@@ -708,8 +737,15 @@ export class CodexProvider extends BaseProvider {
 			body.stream = true;
 			body.store = false;
 			delete body.previous_response_id;
+			// Read BEFORE the sanitation below rewrites it. On this path the client
+			// names the effort itself and nothing else supplies one, so an absent
+			// value stays absent all the way to the backend — which is why
+			// `effective` is read back off the same body rather than defaulted.
+			const requestedEffort = nativeReasoningEffort(body);
+			let effortClamped = false;
 			if (targetsChatGptCodexBackend(account)) {
 				const sanitation = sanitizeChatGptBackendBody(body);
+				effortClamped = sanitation.clampedEffort !== undefined;
 				// Debug, not warn: dropping `temperature` really does change how the
 				// model samples, but a client that sets it sets it on EVERY request
 				// (opencode does), so a per-request warning would drown the log for a
@@ -748,6 +784,11 @@ export class CodexProvider extends BaseProvider {
 			newHeaders.set("content-type", "application/json");
 			newHeaders.set("x-clankermux-request-stream", "true");
 			newHeaders.delete("content-length");
+			applyReasoningEffortAdaptation(newHeaders, {
+				requested: requestedEffort,
+				effective: nativeReasoningEffort(body),
+				reason: effortClamped ? REASONING_EFFORT_BACKEND_CLAMP : null,
+			});
 
 			// The native flag stays on the returned Request: the proxy reads it
 			// off the transformed request to tag the response, then strips it
@@ -765,6 +806,9 @@ export class CodexProvider extends BaseProvider {
 			// native marker for a request that wasn't natively prepared.
 			const fallbackHeaders = new Headers(request.headers);
 			fallbackHeaders.delete(NATIVE_RESPONSES_REQUEST_HEADER);
+			// Nothing was adapted on a body we never rewrote, and this one is
+			// forwarded as it arrived — so no adaptation may be claimed for it.
+			fallbackHeaders.delete(REASONING_EFFORT_ADAPTATION_HEADER);
 			fallbackHeaders.delete("content-length");
 			return new Request(request.url, {
 				method: request.method,
@@ -1280,10 +1324,20 @@ export class CodexProvider extends BaseProvider {
 			.slice(0, PROMPT_CACHE_KEY_DIGEST_LEN)}`;
 	}
 
+	/**
+	 * Translate an Anthropic body into a Codex Responses body, and report what
+	 * that translation did to the client's reasoning effort. The two travel
+	 * together because the effort is decided here and serialized here: a caller
+	 * reading it back off the finished body could not tell a value the client
+	 * asked for from one this method supplied.
+	 */
 	private convertToCodexFormat(
 		body: AnthropicRequest,
 		account?: Account,
-	): CodexRequest {
+	): {
+		codexBody: CodexRequest;
+		reasoningAdaptation: ReasoningEffortAdaptation;
+	} {
 		const model = body.model;
 		const instructions = this.extractSystemPrompt(body.system);
 
@@ -1399,6 +1453,37 @@ export class CodexProvider extends BaseProvider {
 			? clampChatGptBackendReasoningEffort(resolvedEffort, model)
 			: resolvedEffort;
 
+		// What the attempt row records. `requestedEffort` is the client's own
+		// intent: `reasoning.effort` verbatim, or the effort its `thinking` /
+		// `output_config` fields express, which is still something the client
+		// asked for rather than something this proxy chose. `resolvedEffort` is
+		// NOT a substitute for it — by then the `?? "medium"` above may have
+		// filled in a value for a client that asked for nothing, and recording
+		// that as the client's request would replace one lie with another.
+		//
+		// Two mechanisms can move the value and both are named, because a reader
+		// asking "why did my effort change" needs to know whether the target
+		// model's profile has no such level or the backend refuses the word:
+		// the resolver raises to a model's floor without reporting a downgrade,
+		// so a moved value with no recorded downgrade is still the profile.
+		const reasons: string[] = [];
+		if (reasoningResolution.downgrades.length > 0)
+			reasons.push(REASONING_EFFORT_TARGET_MODEL_PROFILE);
+		if (backendEffort !== resolvedEffort)
+			reasons.push(REASONING_EFFORT_BACKEND_CLAMP);
+		const reasoningAdaptation: ReasoningEffortAdaptation = {
+			requested: requestedEffort ?? null,
+			effective: backendEffort,
+			reason:
+				requestedEffort === undefined
+					? REASONING_EFFORT_PROXY_DEFAULT
+					: backendEffort === requestedEffort
+						? null
+						: reasons.length > 0
+							? reasons.join(REASONING_EFFORT_REASON_SEPARATOR)
+							: REASONING_EFFORT_TARGET_MODEL_PROFILE,
+		};
+
 		// Codex always requires streaming upstream; non-streaming clients are handled
 		// on the response side via transformSseResponseToJson.
 		const codexRequest: CodexRequest = {
@@ -1439,7 +1524,7 @@ export class CodexProvider extends BaseProvider {
 			codexRequest.tools = tools;
 		}
 
-		return codexRequest;
+		return { codexBody: codexRequest, reasoningAdaptation };
 	}
 
 	private async transformSseResponseToJson(

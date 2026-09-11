@@ -288,6 +288,10 @@ export async function handleProxy(
 					finished_at: Date.now(),
 					status: error.statusCode,
 					error: error.message,
+					// Refused before any body was serialized for any destination.
+					reasoning_effort_requested: null,
+					reasoning_effort_effective: null,
+					reasoning_effort_reason: null,
 				});
 			retractIfNeverStarted(error.statusCode);
 			const response = Response.json(

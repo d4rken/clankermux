@@ -38,6 +38,7 @@ import {
 	NATIVE_RESPONSES_REQUEST_HEADER,
 	PROVIDER_NAMES,
 	type RateLimitReason,
+	REASONING_EFFORT_ADAPTATION_HEADER,
 	type RequestMeta,
 	transferChatContext,
 } from "@clankermux/types";
@@ -1190,6 +1191,10 @@ export async function proxyWithAccount(
 		headers.delete("x-clankermux-synthetic-status");
 		headers.delete("x-clankermux-retry-after");
 		headers.delete("x-clankermux-upstream-model");
+		// Same reason: only the provider that serialized the body may say what
+		// happened to the reasoning effort, so a client cannot plant an
+		// adaptation on its own attempt row.
+		headers.delete(REASONING_EFFORT_ADAPTATION_HEADER);
 		const targetUrl = provider.buildUrl(url.pathname, url.search, account);
 
 		// ── Native Responses passthrough (Stage A, request leg) ────────────────
@@ -2907,6 +2912,10 @@ export async function proxyForcedAccount(
 		headers.delete("x-clankermux-synthetic-status");
 		headers.delete("x-clankermux-retry-after");
 		headers.delete("x-clankermux-upstream-model");
+		// Same reason: only the provider that serialized the body may say what
+		// happened to the reasoning effort, so a client cannot plant an
+		// adaptation on its own attempt row.
+		headers.delete(REASONING_EFFORT_ADAPTATION_HEADER);
 		const targetUrl = provider.buildUrl(url.pathname, url.search, account);
 
 		const requestInit: RequestInit & { duplex?: "half" } = {
