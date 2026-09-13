@@ -6,7 +6,6 @@ import {
 } from "@clankermux/proxy";
 import {
 	createAccountTokenHealthHandler,
-	createReauthNeededHandler,
 	createTokenHealthHandler,
 } from "../token-health";
 
@@ -125,13 +124,6 @@ describe("Token Health HTTP API Integration", () => {
 		it("should create token health handler", () => {
 			expect(() => {
 				const handler = createTokenHealthHandler(mockDbOps);
-				expect(typeof handler).toBe("function");
-			}).not.toThrow();
-		});
-
-		it("should create reauth needed handler", () => {
-			expect(() => {
-				const handler = createReauthNeededHandler(mockDbOps);
 				expect(typeof handler).toBe("function");
 			}).not.toThrow();
 		});

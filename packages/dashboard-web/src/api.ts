@@ -127,13 +127,6 @@ export interface TokenHealthAccountResponse {
 	data: TokenHealthResponse;
 }
 
-export interface ReauthNeededResponse {
-	success: boolean;
-	data: {
-		accounts: TokenHealthResponse[];
-	};
-}
-
 /**
  * Listeners notified when the server answers 401 to ANY management call.
  *
@@ -840,29 +833,6 @@ class API extends HttpClient {
 			}
 		});
 		return eventSource;
-	}
-
-	async getRequestsDetail(
-		limit: number = API_LIMITS.requestsDetail,
-	): Promise<RequestPayload[]> {
-		const startTime = Date.now();
-		const url = `/api/requests/detail?limit=${limit}`;
-
-		this.logger.debug(`→ GET ${url}`);
-
-		try {
-			const response = await this.get<RequestPayload[]>(url);
-			const duration = Date.now() - startTime;
-			this.logger.debug(`← GET ${url} - 200 (${duration}ms)`);
-			return response;
-		} catch (error) {
-			const duration = Date.now() - startTime;
-			this.logger.error(`✗ GET ${url} - ERROR (${duration}ms)`, {
-				error: error instanceof Error ? error.message : String(error),
-				stack: error instanceof Error ? error.stack : undefined,
-			});
-			throw error;
-		}
 	}
 
 	async getRequestPayload(id: string): Promise<RequestPayload> {
@@ -1762,71 +1732,6 @@ class API extends HttpClient {
 		}
 	}
 
-	async getStrategy(): Promise<string> {
-		const startTime = Date.now();
-		const url = "/api/config/strategy";
-
-		this.logger.debug(`→ GET ${url}`);
-
-		try {
-			const data = await this.get<{ strategy: string }>(url);
-			const duration = Date.now() - startTime;
-			this.logger.debug(`← GET ${url} - 200 (${duration}ms)`);
-			return data.strategy;
-		} catch (error) {
-			const duration = Date.now() - startTime;
-			this.logger.error(`✗ GET ${url} - ERROR (${duration}ms)`, {
-				error: error instanceof Error ? error.message : String(error),
-				stack: error instanceof Error ? error.stack : undefined,
-			});
-			throw error;
-		}
-	}
-
-	async listStrategies(): Promise<string[]> {
-		const startTime = Date.now();
-		const url = "/api/strategies";
-
-		this.logger.debug(`→ GET ${url}`);
-
-		try {
-			const response = await this.get<string[]>(url);
-			const duration = Date.now() - startTime;
-			this.logger.debug(`← GET ${url} - 200 (${duration}ms)`);
-			return response;
-		} catch (error) {
-			const duration = Date.now() - startTime;
-			this.logger.error(`✗ GET ${url} - ERROR (${duration}ms)`, {
-				error: error instanceof Error ? error.message : String(error),
-				stack: error instanceof Error ? error.stack : undefined,
-			});
-			throw error;
-		}
-	}
-
-	async setStrategy(strategy: string): Promise<void> {
-		const startTime = Date.now();
-		const url = "/api/config/strategy";
-
-		this.logger.debug(`→ POST ${url}`, { strategy });
-
-		try {
-			await this.post(url, { strategy });
-			const duration = Date.now() - startTime;
-			this.logger.debug(`← POST ${url} - 200 (${duration}ms)`);
-		} catch (error) {
-			const duration = Date.now() - startTime;
-			this.logger.error(`✗ POST ${url} - ERROR (${duration}ms)`, {
-				error: error instanceof Error ? error.message : String(error),
-				stack: error instanceof Error ? error.stack : undefined,
-			});
-			if (error instanceof HttpError) {
-				throw new Error(error.message);
-			}
-			throw error;
-		}
-	}
-
 	// The model catalogue the proxy serves on `GET /v1/models`, per wire dialect,
 	// and the operator's curation of it.
 	async getModelCatalog(dialect: ModelDialect): Promise<ModelCatalogResponse> {
@@ -2212,11 +2117,6 @@ class API extends HttpClient {
 			url,
 			"token health",
 		);
-	}
-
-	async getReauthNeeded(): Promise<ReauthNeededResponse> {
-		const url = "/api/token-health/reauth-needed";
-		return this.tokenHealthRequest<ReauthNeededResponse>(url, "reauth needed");
 	}
 
 	async getAccountTokenHealth(
