@@ -122,9 +122,7 @@ export class AccountRepository extends BaseRepository<Account> {
 					Date.now(),
 					planTier,
 					rateLimitTier,
-					// getAppVersionSync, NEVER getVersionSync — see the note in
-					// backfills.ts: getVersionSync's no-environment fallback is the Claude
-					// CLI compat version, which is not the build that made this record.
+					// The ClankerMux build that made this record; null when unknown.
 					getAppVersionSync(),
 				] as never[],
 			);

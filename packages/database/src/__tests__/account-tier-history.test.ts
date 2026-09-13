@@ -109,9 +109,7 @@ describe("account_tier_history — identity-capture chokepoints", () => {
 			// COALESCE-merged: the incoming null kept the stored multiplier.
 			expect(rows[0].rate_limit_tier).toBe("5x");
 			expect(rows[0].source).toBe("identity-capture");
-			// The ClankerMux release version, NOT the Claude CLI compat version that
-			// getVersionSync falls back to when npm_package_version is unset (which
-			// is every systemd start).
+			// The ClankerMux release version, not the Claude CLI compat version.
 			expect(rows[0].app_version).toBe(rootPackageJson.version);
 		});
 

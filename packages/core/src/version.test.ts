@@ -1,9 +1,31 @@
 import { describe, expect, it } from "bun:test";
+import rootPackageJson from "../../../package.json";
 import {
 	extractClaudeVersion,
 	getClientVersion,
+	getVersion,
 	trackClientVersion,
 } from "./version";
+
+describe("getVersion", () => {
+	it("resolves the root package.json version", async () => {
+		expect(await getVersion()).toBe(rootPackageJson.version);
+	});
+
+	it("ignores npm_package_version set by a subpackage script", async () => {
+		const previous = process.env.npm_package_version;
+		process.env.npm_package_version = "0.1.0";
+		try {
+			expect(await getVersion()).toBe(rootPackageJson.version);
+		} finally {
+			if (previous === undefined) {
+				delete process.env.npm_package_version;
+			} else {
+				process.env.npm_package_version = previous;
+			}
+		}
+	});
+});
 
 describe("extractClaudeVersion", () => {
 	it("should extract version from standard claude-cli user-agent", () => {

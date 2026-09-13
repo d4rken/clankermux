@@ -8,74 +8,20 @@
 // a compiled binary.
 import rootPackageJson from "../../../package.json";
 
-// Claude CLI version to use in user-agent headers
-export const CLAUDE_CLI_VERSION = "2.1.143";
+// User-agent version for the requests ClankerMux originates itself, where there
+// is no client user-agent to pass through. Hand-maintained: refresh it from
+// `claude --version`.
+export const CLAUDE_CLI_VERSION = "2.1.270";
 
-// Cache the version to avoid repeated file reads
-let cachedVersion: string | null = null;
-
-export async function getVersion(): Promise<string> {
-	if (cachedVersion) {
-		return cachedVersion;
-	}
-
-	// 1. Runtime env var (set by npm/bun when running via package scripts)
-	if (process.env.npm_package_version) {
-		cachedVersion = process.env.npm_package_version;
-		return cachedVersion;
-	}
-
-	// 2. Try reading from the repo-root package.json (dev environment)
-	try {
-		const packageJsonPath = new URL("../../../package.json", import.meta.url);
-		const packageJson = await fetch(packageJsonPath);
-		const pkg = (await packageJson.json()) as { version?: string };
-		if (pkg.version) {
-			cachedVersion = pkg.version;
-			return cachedVersion;
-		}
-	} catch {
-		// Continue to fallback
-	}
-
-	// 3. Final fallback
-	cachedVersion = CLAUDE_CLI_VERSION;
-	return cachedVersion;
-}
-
-// Synchronous version for contexts where async is not available
-export function getVersionSync(): string {
-	if (cachedVersion) {
-		return cachedVersion;
-	}
-
-	// 1. Runtime env var (set by npm/bun when running via package scripts)
-	if (process.env.npm_package_version) {
-		cachedVersion = process.env.npm_package_version;
-		return cachedVersion;
-	}
-
-	// 2. Final fallback
-	cachedVersion = CLAUDE_CLI_VERSION;
-	return cachedVersion;
-}
-
-/** Cache for {@link getAppVersionSync}; deliberately NOT shared with getVersion. */
+/** The single cache for {@link getAppVersionSync}, which {@link getVersion} reads through. */
 let cachedAppVersion: string | null = null;
 
 /**
  * The ClankerMux release version, or null when it genuinely cannot be read.
  *
- * Deliberately NOT {@link getVersionSync}, and the difference matters wherever
- * the value is RECORDED rather than sent upstream. `getVersionSync` exists to
- * produce a Claude-CLI-shaped version for user-agent purposes, so its
- * no-environment fallback is {@link CLAUDE_CLI_VERSION} — under systemd, where
- * `npm_package_version` is unset, it returns "2.1.x". Stamping that into a
- * provenance column (`account_tier_history.app_version`) records the CLI compat
- * version as the build that made the observation, which is simply false.
- *
- * So: the repo-root package.json only, its own cache, and NO fallback. A null is
- * an honest "unknown build", which the nullable column already allows.
+ * The repo-root package.json only, and NO fallback: a null is an honest "unknown
+ * build", which the nullable provenance column (`account_tier_history.app_version`)
+ * already allows.
  */
 export function getAppVersionSync(): string | null {
 	if (cachedAppVersion !== null) return cachedAppVersion;
@@ -83,6 +29,10 @@ export function getAppVersionSync(): string | null {
 	if (typeof version !== "string" || version.trim() === "") return null;
 	cachedAppVersion = version;
 	return cachedAppVersion;
+}
+
+export async function getVersion(): Promise<string> {
+	return getAppVersionSync() ?? "unknown";
 }
 
 /**
