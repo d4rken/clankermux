@@ -1,0 +1,43 @@
+The MIT License below covers:
+
+  * the code ClankerMux inherited from tombii/better-ccflare and
+    snipeship/ccflare; and
+  * code previously published as part of ClankerMux under the MIT License,
+    which stays available under those grants wherever it sits in the history
+    and however far it survives into later revisions.
+
+This revision is licensed as a whole under the GNU Affero General Public
+License (see LICENSE and COPYING), subject to the portions above and to the
+other terms LICENSE names. The switch added COPYING alongside the AGPL grant in
+LICENSE; `git log --diff-filter=A -- COPYING` locates that commit in this
+repository. It withdraws no permission already granted: a grant made once holds
+for that code, whether or not a later revision ships under different terms.
+
+The notice below must travel with any copy or substantial portion of the
+MIT-licensed code.
+
+----------------------------------------------------------------------
+
+
+MIT License
+
+Copyright (c) 2025 snipeship & tombii
+Copyright (c) 2025 darken (ClankerMux)
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.

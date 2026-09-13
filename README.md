@@ -16,7 +16,7 @@
 [![CI](https://github.com/d4rken/clankermux/actions/workflows/ci.yml/badge.svg)](https://github.com/d4rken/clankermux/actions/workflows/ci.yml)
 [![Bun](https://img.shields.io/badge/runtime-Bun%20%E2%89%A51.4.0-000000?logo=bun&logoColor=white)](https://bun.sh)
 [![TypeScript](https://img.shields.io/badge/TypeScript-3178C6?logo=typescript&logoColor=white)](https://www.typescriptlang.org)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
+[![License: AGPL v3](https://img.shields.io/badge/License-AGPL%20v3-blue.svg)](./LICENSE)
 
 A proxy for the model accounts you already pay for. Point your coding clients at
 one endpoint; ClankerMux spreads requests across the accounts, decides per
@@ -98,13 +98,17 @@ are still accepted.
 
 ## Project notes
 
-ClankerMux began as a fork of [tombii/better-ccflare](https://github.com/tombii/better-ccflare)
-(itself a fork of [snipeship/ccflare](https://github.com/snipeship/ccflare)). After 30+
-upstream PRs I wanted something bespoke: fast iteration, tailored to my use case of
-mostly Anthropic and OpenAI accounts. It has since diverged substantially and is
-developed independently, but stays MIT-licensed and keeps the original authors'
-copyright intact.
+ClankerMux began as a fork of [tombii/better-ccflare](https://github.com/tombii/better-ccflare),
+itself a fork of [snipeship/ccflare](https://github.com/snipeship/ccflare). After
+dozens of upstream PRs I decided to take it in a different direction, and it has
+been developed independently since.
 
 ## License
 
-MIT. See [LICENSE](LICENSE).
+AGPLv3. See [LICENSE](LICENSE), full text in [COPYING](COPYING). If you modify
+ClankerMux and let other people reach it over a network, section 13 obliges you
+to offer them the source of your modified version.
+
+The inherited upstream code, and everything previously published under MIT, stay
+MIT ([LICENSE.MIT](LICENSE.MIT)); the bundled Devin protocol code and the Geist
+fonts keep their own terms.
