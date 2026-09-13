@@ -1,22 +1,19 @@
 ---
 name: fork-workflow
-description: How ClankerMux work is branched, merged and released. Read this when starting a branch, merging into main, cutting a version bump, pulling a fix from the tombii/better-ccflare upstream, or merging an inbound PR from an external contributor.
+description: How ClankerMux work is branched, merged and released. Read this when starting a branch, merging into main, cutting a version bump, or merging an inbound PR from an external contributor.
 ---
 
 # ClankerMux development workflow
 
-The repo (`d4rken/better-ccflare` on GitHub) began as a fork of
-`tombii/better-ccflare`, but it has diverged far enough — and intentionally
-removed things upstream won't take — that **ClankerMux is now its own project**.
-Treat it as such.
+ClankerMux (`d4rken/clankermux` on GitHub) is a standalone project. It has no
+upstream to track and takes nothing from one.
 
-## The one lane: fork-only
+## The one lane
 
 | Aspect | Value |
 |---|---|
-| Branch prefix | `fix/*`, `feat/*`, or `fork/*` (any is fine; they're all fork-only) |
-| Base branch | `origin/main` — never `upstream/main` |
-| PR upstream? | No. We don't contribute to `tombii/better-ccflare`. |
+| Branch prefix | `fix/*`, `feat/*` (any is fine) |
+| Base branch | `origin/main` |
 | Merge style | `--no-ff` into `main` (the merge commit is the undo handle) |
 
 ## Making a change
@@ -70,8 +67,7 @@ Two independent version values — don't confuse them:
   pre-push hook auto-updates it to track the real CLI.
 - **The app version** — the `"version"` field in the **root `package.json`**.
   Single source of truth (dashboard badge and startup log both read it).
-  CalVer `YYYY.M.N`, deliberately diverged from upstream's `3.5.x` lineage so
-  the two can never be numerically compared.
+  CalVer `YYYY.M.N`.
 
 Bump the app version when landing a notable change into `main` — a fix, feature,
 or anything user-visible, but not pure docs/comment tweaks. Same month → bump the
@@ -82,8 +78,7 @@ The string is purely a human-readable label — nothing parses it as semver. The
 dashboard's "is my deploy current?" check is commit-SHA based via
 `/api/version/check`. The `__CLANKERMUX_VERSION__` build define referenced in
 `version.ts` is not currently injected anywhere; the app version resolves from
-the root `package.json` at runtime (legacy `BETTER_CCFLARE_VERSION` env still
-honored if set).
+the root `package.json` at runtime.
 
 ## Commit prefixes
 
@@ -99,33 +94,6 @@ The changelog tooling keys off these:
 ClankerMux is **not published** — build-from-source + systemd only. There is no
 npm publish / release lane (the `release*.yml` and `docker-publish.yml` workflows
 were removed). Don't run `bun publish`.
-
-## The `upstream` remote: fetch-only, cherry-pick-only
-
-`upstream` (`tombii/better-ccflare`) is kept for fetch only; its push URL is
-disabled (`git remote set-url --push upstream DISABLED`).
-
-**Pulling from upstream is rare and opportunistic, and is always a cherry-pick of
-specific commits — never a merge or a re-baseline.** ClankerMux intentionally and
-permanently removes code upstream keeps (Vertex/Bedrock and other unused
-providers). A `git merge upstream/main` or a re-baseline re-adds that removed
-code every time, silently undoing fork-only decisions.
-
-```bash
-git fetch upstream
-git log upstream/main --oneline           # find the commit you want
-# worktree off origin/main, then:
-git cherry-pick <upstream-sha>            # resolve conflicts; drop re-added removals
-bun run lint && bun run typecheck         # lint rewrites; typecheck runs after
-# merge --no-ff into main as above
-```
-
-If a cherry-pick drags in code we deliberately removed, edit it out as part of
-the cherry-pick — the goal is the fix, not upstream's tree.
-
-Cherry-picked upstream code is MIT and stays MIT; `LICENSE.MIT` already covers
-it. Keep the original author on the commit (`cherry-pick` does this) and leave
-any per-file notices alone.
 
 ## Merging inbound PRs from external contributors
 
@@ -168,8 +136,6 @@ for them.
 
 ## Hard constraints
 
-- Never branch off `upstream/main`, never open a PR against
-  `tombii/better-ccflare`, never `git merge upstream/main` or re-baseline.
 - Never `git push --force` (or `--force-with-lease`) to `origin/main` without
   explicit user confirmation for that specific operation.
 - If `git push origin main` fails with `src refspec main matches more than one`

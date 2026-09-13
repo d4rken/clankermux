@@ -22,15 +22,13 @@ import { clearProviderOverloadCooldown } from "../provider-overload-cooldown";
 mock.module("../inline-worker", () => ({ EMBEDDED_WORKER_CODE: "" }));
 
 // Deterministic timing for the burst-retry hold, injected through handleProxy's
-// `burstHoldTimingOverride` seam (forwarded verbatim to holdAndRetryCacheAccount)
-// instead of the retired CCFLARE_DEFAULT_COOLDOWN_NO_RESET_MS env var. The hold
-// waits out the held account's rate-limit cooldown — now the fixed 60s no-reset
-// default — before each re-probe. Rather than shorten that cooldown (the env var
-// used to pin it to ~1s), we drive the hold's injectable clock ~10 minutes ahead
-// so the 60s cooldown always reads as already-elapsed (each re-probe fires
-// immediately, no wall-clock sleep), zero the jitter, and cap the total budget.
-// Same intent as the old env pin — a re-probe fits well within the per-test
-// timeout — with no env var and no change to the 60s production default.
+// `burstHoldTimingOverride` seam (forwarded verbatim to holdAndRetryCacheAccount).
+// The hold waits out the held account's rate-limit cooldown — the fixed 60s
+// no-reset default — before each re-probe. Rather than shorten that cooldown, we
+// drive the hold's injectable clock ~10 minutes ahead so the 60s cooldown always
+// reads as already-elapsed (each re-probe fires immediately, no wall-clock
+// sleep), zero the jitter, and cap the total budget. A re-probe then fits well
+// within the per-test timeout, with no change to the 60s production default.
 const HOLD_TIMING_OVERRIDE = {
 	now: () => Date.now() + 10 * 60 * 1000, // >> 60s no-reset cooldown horizon
 	jitterMs: 0,

@@ -211,10 +211,6 @@ export type ChatGptBackendRejectedParam =
  * only behind `targetsChatGptCodexBackend` and only once a behavioural test
  * (capture and replay `reasoning.encrypted_content` across two requests) shows
  * the setting actually moves something.
- *
- * Upstream better-ccflare v3.5.66 sets `context: "all_turns"` unconditionally.
- * That is accepted, not broken — it is just unsupported by anything else in
- * that request.
  */
 
 /** What {@link sanitizeChatGptBackendBody} actually changed, for logging. */

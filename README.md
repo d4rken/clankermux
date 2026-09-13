@@ -78,9 +78,6 @@ Then add an account, open **Clients**, and add a client. Clients speak either
 wire format: `/wire/anthropic` for the Anthropic Messages API, `/wire/openai`
 for the OpenAI Responses and Chat Completions APIs.
 
-Legacy `BETTER_CCFLARE_*` env vars and the `x-better-ccflare-account-id` header
-are still accepted.
-
 ## Integrations
 
 * [Public widget API](docs/public-api/README.md) for external displays and

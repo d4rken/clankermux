@@ -17,8 +17,8 @@ Fresh installs get the **complete** schema from `ensureSchema()` in
 `runMigrations()` can only carry a DB forward from the oldest schema we declare
 support for. That floor is the schema a fresh install produced from the newest
 `migrations.ts` available when the repository went public on 2026-05-13 —
-commit `0e4ad752`. Anything older (a private pre-public ClankerMux DB, or an
-upstream better-ccflare / ccflare one) is deliberately unsupported.
+commit `0e4ad752`. Anything older — any database predating the public
+repository — is deliberately unsupported.
 
 The floor is not a claim, it is a fixture:
 `packages/database/src/__tests__/schema-floor.fixture.ts` holds the floor DDL,
@@ -122,7 +122,6 @@ on every restart, forever.
 
 - Default: `~/.config/clankermux/clankermux.db`
 - Custom: `CLANKERMUX_DB_PATH=/path/to/dev.db` in env or `.env`
-  (legacy `BETTER_CCFLARE_DB_PATH` still honored)
 
 ```bash
 sqlite3 ~/.config/clankermux/clankermux.db "SELECT name, provider, custom_endpoint FROM accounts;"

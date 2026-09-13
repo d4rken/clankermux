@@ -93,8 +93,6 @@ const OPENAI_PROMPT_CACHE_HOSTS = new Set([
  * OpenAI caps prompt_cache_key at 64 chars; the longest prefix we emit is
  * `clankermux-session-` (19 chars), so 45 hex keeps every key <= 64
  * (session: 19+45=64, convo: 17+45=62) while retaining 180 bits of digest.
- * (Upstream used 48 under the shorter `ccflare-` prefix; our longer fork
- * naming required trimming the digest to preserve the same hard bound.)
  */
 const PROMPT_CACHE_KEY_DIGEST_LEN = 45;
 // Codex CLI version advertised to the ChatGPT/Codex backend via the `Version`
