@@ -1,22 +1,38 @@
-MIT License
+ClankerMux
 
-Copyright (c) 2025 snipeship & tombii
-Copyright (c) 2025 darken (ClankerMux)
+Copyright (C) 2025-2026 darken
 
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
+This program is free software: you can redistribute it and/or modify it under
+the terms of the GNU Affero General Public License as published by the Free
+Software Foundation, either version 3 of the License, or (at your option) any
+later version.
 
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
+This program is distributed in the hope that it will be useful, but WITHOUT ANY
+WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A
+PARTICULAR PURPOSE. See the GNU Affero General Public License for more details.
 
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
+You should have received a copy of the GNU Affero General Public License along
+with this program. The full text is in COPYING; if it is missing, see
+<https://www.gnu.org/licenses/>.
+
+Because this is a network server, section 13 of the AGPL applies: anyone who
+modifies ClankerMux and lets other people reach it over a network must offer
+those users the complete source of the modified version.
+
+
+Portions under other licenses
+-----------------------------
+
+The AGPL covers the work as a whole. These parts carry their own terms, which
+this license does not replace or withdraw:
+
+  * MIT — code inherited from tombii/better-ccflare and snipeship/ccflare, and
+    code previously published as part of ClankerMux under MIT, which stays
+    available under those grants. Those parts stay MIT inside this AGPL whole.
+    See LICENSE.MIT.
+  * MIT — packages/providers/src/providers/devin/vendor/, which has its own
+    copyright holders. See the LICENSE file in that directory.
+  * SIL Open Font License 1.1 — the Geist and Geist Mono font files in
+    packages/dashboard-web/src/fonts/. See the OFL.txt file in that directory.
+
+Keep those notices with the files they cover when you redistribute.

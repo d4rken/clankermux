@@ -123,7 +123,17 @@ bun run lint && bun run typecheck         # lint rewrites; typecheck runs after
 If a cherry-pick drags in code we deliberately removed, edit it out as part of
 the cherry-pick — the goal is the fix, not upstream's tree.
 
+Cherry-picked upstream code is MIT and stays MIT; `LICENSE.MIT` already covers
+it. Keep the original author on the commit (`cherry-pick` does this) and leave
+any per-file notices alone.
+
 ## Merging inbound PRs from external contributors
+
+Pull requests are disabled on GitHub and the repo has no contribution terms, so
+there is no inbound license rule to fall back on. Merging a contribution anyway
+takes it in under AGPL by default, which would cost the option of licensing
+ClankerMux under other terms later. Do not merge one: ask the user, who decides
+whether to set inbound terms first.
 
 Create a merge commit (`git merge --no-ff <branch-name>`) so their history and
 identity are preserved. Don't use `gh pr merge` — it may squash or rebase. If the
