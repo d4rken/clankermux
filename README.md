@@ -24,12 +24,10 @@ client what each can reach, and shows you how much quota is left.
 
 ## Highlights
 
-* **Clients**: Claude Code, Codex, OpenCode, Pi Agent, Oh My Pi, and
-  OpenAI- or Anthropic-compatible clients generally. The dashboard generates
-  each client's key and configuration. Chat Completions is
-  [narrower](docs/chat-completions-implementation-plan.md) than the Responses
-  and Messages APIs: Codex and OpenRouter destinations only, and it rejects
-  several standard fields.
+* **Harnesses**: Claude Code, Codex, OpenCode, Pi Agent, Oh My Pi. Two
+  endpoints: `/wire/anthropic` for the Messages API, `/wire/openai` for
+  Responses and
+  [Chat Completions](docs/chat-completions-implementation-plan.md).
 * **Providers**: Anthropic and Codex OAuth logins, Claude and OpenAI API keys,
   OpenRouter, Ollama, and other compatible endpoints. Experimental ones are
   marked in the dashboard.
@@ -39,6 +37,8 @@ client what each can reach, and shows you how much quota is left.
   and failover.
 * Cross-account failover on any provider, 429 burst retries for Anthropic OAuth
   accounts, and family-scoped 529 breakers for official Anthropic accounts.
+* Pooled 5-hour and 7-day quota with burn-rate forecasts and a runway estimate
+  against each window's reset.
 * Statistics and analytics filterable by account and by client, so a problem can
   be pinned to one provider or one harness: request history by status code,
   per-model latency and token speed, cache effectiveness, tool-call error rates,
