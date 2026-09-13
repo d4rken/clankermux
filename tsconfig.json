@@ -87,9 +87,6 @@
 		"packages/providers/**/*.test.tsx",
 		"packages/http-api/**/__tests__",
 		"packages/http-api/**/*.test.ts",
-		"packages/http-api/**/*.test.tsx",
-		"packages/openai-responses-adapter/**/__tests__",
-		"packages/openai-responses-adapter/**/*.test.ts",
-		"packages/openai-responses-adapter/**/*.test.tsx"
+		"packages/http-api/**/*.test.tsx"
 	]
 }

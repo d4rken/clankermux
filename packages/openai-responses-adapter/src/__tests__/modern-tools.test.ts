@@ -40,6 +40,21 @@ const request = (): ResponsesRequest & { input: ResponseItem[] } => ({
 		},
 	],
 });
+/**
+ * Name of the translated tool at `index`. The translator's `tools` is optional,
+ * so every assertion that compares a name needs it proven present first.
+ */
+function toolNameAt(
+	body: ReturnType<typeof translateRequestToAnthropic>,
+	index: number,
+): string {
+	const name = body.tools?.[index]?.name;
+	if (name === undefined) {
+		throw new Error(`expected a translated tool at index ${index}`);
+	}
+	return name;
+}
+
 describe("modern Responses tools", () => {
 	test("collects conversation tools and separates colliding names", () => {
 		const req = request(),
@@ -54,7 +69,7 @@ describe("modern Responses tools", () => {
 			additionalProperties: false,
 		});
 		expect(body.tools?.[1].description).toContain("lark");
-		expect(ctx.identity(body.tools?.[1].name)).toEqual({
+		expect(ctx.identity(toolNameAt(body, 1))).toEqual({
 			type: "custom",
 			namespace: "functions",
 			name: "exec",
@@ -72,7 +87,7 @@ describe("modern Responses tools", () => {
 		req.tool_choice = { type: "custom", namespace: "functions", name: "exec" };
 		const ctx = createToolTranslation(req),
 			body = translateRequestToAnthropic(req, ctx),
-			name = body.tools?.[1].name;
+			name = toolNameAt(body, 1);
 		expect(body.messages[1].content[0]).toEqual({
 			type: "tool_use",
 			id: "call",
@@ -95,7 +110,7 @@ describe("modern Responses tools", () => {
 					{
 						type: "tool_use",
 						id: "call",
-						name: body.tools?.[1].name,
+						name: toolNameAt(body, 1),
 						input: { input: 'text("hi")' },
 					},
 				],

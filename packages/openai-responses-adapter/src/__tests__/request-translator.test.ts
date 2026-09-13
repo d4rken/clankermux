@@ -2,6 +2,13 @@ import { describe, expect, test } from "bun:test";
 import { translateRequestToAnthropic } from "../request-translator";
 import type { ResponseItem, ResponsesRequest } from "../types";
 
+/**
+ * What {@link translateRequestToAnthropic} accepts: a request whose `input` is
+ * already the item array rather than the bare-string alternative the wire type
+ * also allows. Every fixture here is one of those.
+ */
+type TranslatableRequest = ResponsesRequest & { input: ResponseItem[] };
+
 describe("translateRequestToAnthropic", () => {
 	test.each([
 		{ role: "user" },
@@ -91,7 +98,7 @@ describe("translateRequestToAnthropic", () => {
 	});
 
 	test("simple user message → single messages entry", () => {
-		const req: ResponsesRequest = {
+		const req: TranslatableRequest = {
 			model: "claude-3-5-sonnet-20241022",
 			input: [
 				{
@@ -110,7 +117,7 @@ describe("translateRequestToAnthropic", () => {
 	});
 
 	test("user + assistant exchange → two messages", () => {
-		const req: ResponsesRequest = {
+		const req: TranslatableRequest = {
 			model: "claude-3-5-sonnet-20241022",
 			input: [
 				{
@@ -135,7 +142,7 @@ describe("translateRequestToAnthropic", () => {
 	});
 
 	test("function_call item appended to assistant message", () => {
-		const req: ResponsesRequest = {
+		const req: TranslatableRequest = {
 			model: "claude-3-5-sonnet-20241022",
 			input: [
 				{
@@ -164,7 +171,7 @@ describe("translateRequestToAnthropic", () => {
 	});
 
 	test("function_call_output → new user message with tool_result", () => {
-		const req: ResponsesRequest = {
+		const req: TranslatableRequest = {
 			model: "claude-3-5-sonnet-20241022",
 			input: [
 				{
@@ -187,7 +194,7 @@ describe("translateRequestToAnthropic", () => {
 		// content items, not the JSON string the type used to claim. Passing those
 		// through verbatim left `input_image` blocks inside an Anthropic
 		// tool_result, where nothing downstream recognises them as attachments.
-		const req: ResponsesRequest = {
+		const req: TranslatableRequest = {
 			model: "claude-3-5-sonnet-20241022",
 			input: [
 				{
@@ -200,7 +207,7 @@ describe("translateRequestToAnthropic", () => {
 							image_url: "data:image/png;base64,QUJD",
 						},
 					],
-				} as unknown as ResponsesRequest["input"][number],
+				} as unknown as ResponseItem,
 			],
 		};
 		const result = translateRequestToAnthropic(req);
@@ -220,7 +227,7 @@ describe("translateRequestToAnthropic", () => {
 	});
 
 	test("array-shaped output with a bare image URL keeps the url source", () => {
-		const req: ResponsesRequest = {
+		const req: TranslatableRequest = {
 			model: "claude-3-5-sonnet-20241022",
 			input: [
 				{
@@ -229,7 +236,7 @@ describe("translateRequestToAnthropic", () => {
 					output: [
 						{ type: "input_image", image_url: "https://example.com/a.png" },
 					],
-				} as unknown as ResponsesRequest["input"][number],
+				} as unknown as ResponseItem,
 			],
 		};
 		const result = translateRequestToAnthropic(req);
@@ -253,7 +260,7 @@ describe("translateRequestToAnthropic", () => {
 		// so the content is really there and really costs context. Under-measuring
 		// admits the request to an account it does not fit — the mirror image of
 		// the over-measuring bug this branch exists to fix.
-		const req: ResponsesRequest = {
+		const req: TranslatableRequest = {
 			model: "claude-3-5-sonnet-20241022",
 			input: [
 				{
@@ -262,7 +269,7 @@ describe("translateRequestToAnthropic", () => {
 					output: [
 						{ type: "input_file", file_data: "PAYLOAD", filename: "a.pdf" },
 					],
-				} as unknown as ResponsesRequest["input"][number],
+				} as unknown as ResponseItem,
 			],
 		};
 		const result = translateRequestToAnthropic(req);
@@ -274,14 +281,14 @@ describe("translateRequestToAnthropic", () => {
 	});
 
 	test("empty array output stays an empty array", () => {
-		const req: ResponsesRequest = {
+		const req: TranslatableRequest = {
 			model: "claude-3-5-sonnet-20241022",
 			input: [
 				{
 					type: "function_call_output",
 					call_id: "call_empty",
 					output: [],
-				} as unknown as ResponsesRequest["input"][number],
+				} as unknown as ResponseItem,
 			],
 		};
 		const result = translateRequestToAnthropic(req);
@@ -291,7 +298,7 @@ describe("translateRequestToAnthropic", () => {
 	});
 
 	test("mixed conversation: user, assistant+function_call, function_call_output, user", () => {
-		const req: ResponsesRequest = {
+		const req: TranslatableRequest = {
 			model: "claude-3-5-sonnet-20241022",
 			input: [
 				{
@@ -346,7 +353,7 @@ describe("translateRequestToAnthropic", () => {
 	});
 
 	test("consecutive same-role messages get merged", () => {
-		const req: ResponsesRequest = {
+		const req: TranslatableRequest = {
 			model: "claude-3-5-sonnet-20241022",
 			input: [
 				{
@@ -375,7 +382,7 @@ describe("translateRequestToAnthropic", () => {
 	});
 
 	test("instructions maps to system", () => {
-		const req: ResponsesRequest = {
+		const req: TranslatableRequest = {
 			model: "claude-3-5-sonnet-20241022",
 			input: [],
 			instructions: "You are a helpful assistant.",
@@ -385,7 +392,7 @@ describe("translateRequestToAnthropic", () => {
 	});
 
 	test("max_output_tokens=100 → max_tokens=100", () => {
-		const req: ResponsesRequest = {
+		const req: TranslatableRequest = {
 			model: "claude-3-5-sonnet-20241022",
 			input: [],
 			max_output_tokens: 100,
@@ -395,7 +402,7 @@ describe("translateRequestToAnthropic", () => {
 	});
 
 	test("no max_output_tokens → max_tokens=4096", () => {
-		const req: ResponsesRequest = {
+		const req: TranslatableRequest = {
 			model: "claude-3-5-sonnet-20241022",
 			input: [],
 		};
@@ -411,7 +418,7 @@ describe("translateRequestToAnthropic", () => {
 			parameters: {},
 		};
 
-		const req1: ResponsesRequest = {
+		const req1: TranslatableRequest = {
 			model: "claude-3-5-sonnet-20241022",
 			input: [],
 			tools: [fnTool],
@@ -421,7 +428,7 @@ describe("translateRequestToAnthropic", () => {
 			type: "auto",
 		});
 
-		const req2: ResponsesRequest = {
+		const req2: TranslatableRequest = {
 			model: "claude-3-5-sonnet-20241022",
 			input: [],
 			tools: [fnTool],
@@ -431,7 +438,7 @@ describe("translateRequestToAnthropic", () => {
 			type: "any",
 		});
 
-		const req3: ResponsesRequest = {
+		const req3: TranslatableRequest = {
 			model: "claude-3-5-sonnet-20241022",
 			input: [],
 			tools: [fnTool],
@@ -441,7 +448,7 @@ describe("translateRequestToAnthropic", () => {
 			type: "none",
 		});
 
-		const req4: ResponsesRequest = {
+		const req4: TranslatableRequest = {
 			model: "claude-3-5-sonnet-20241022",
 			input: [],
 			tools: [fnTool],
@@ -452,14 +459,14 @@ describe("translateRequestToAnthropic", () => {
 			name: "my_fn",
 		});
 
-		const req5: ResponsesRequest = {
+		const req5: TranslatableRequest = {
 			model: "claude-3-5-sonnet-20241022",
 			input: [],
 		};
 		expect(translateRequestToAnthropic(req5).tool_choice).toBeUndefined();
 
 		// tool_choice without any function tools (only built-in) → suppressed to avoid Anthropic 400
-		const req6: ResponsesRequest = {
+		const req6: TranslatableRequest = {
 			model: "claude-3-5-sonnet-20241022",
 			input: [],
 			tool_choice: "auto",
@@ -468,7 +475,7 @@ describe("translateRequestToAnthropic", () => {
 	});
 
 	test("tool schema: parameters field becomes input_schema", () => {
-		const req: ResponsesRequest = {
+		const req: TranslatableRequest = {
 			model: "claude-3-5-sonnet-20241022",
 			input: [],
 			tools: [
@@ -490,7 +497,7 @@ describe("translateRequestToAnthropic", () => {
 	});
 
 	test("tool with no parameters → input_schema is empty object", () => {
-		const req: ResponsesRequest = {
+		const req: TranslatableRequest = {
 			model: "claude-3-5-sonnet-20241022",
 			input: [],
 			tools: [
@@ -505,7 +512,7 @@ describe("translateRequestToAnthropic", () => {
 	});
 
 	test("refusal content maps to text", () => {
-		const req: ResponsesRequest = {
+		const req: TranslatableRequest = {
 			model: "claude-3-5-sonnet-20241022",
 			input: [
 				{
@@ -523,7 +530,7 @@ describe("translateRequestToAnthropic", () => {
 	});
 
 	test("input_image URL maps to anthropic image url source", () => {
-		const req: ResponsesRequest = {
+		const req: TranslatableRequest = {
 			model: "claude-3-5-sonnet-20241022",
 			input: [
 				{
@@ -546,7 +553,7 @@ describe("translateRequestToAnthropic", () => {
 	});
 
 	test("input_image data URL maps to anthropic base64 source", () => {
-		const req: ResponsesRequest = {
+		const req: TranslatableRequest = {
 			model: "claude-3-5-sonnet-20241022",
 			input: [
 				{
@@ -573,7 +580,7 @@ describe("translateRequestToAnthropic", () => {
 	});
 
 	test("input_image with only file_id maps to placeholder text", () => {
-		const req: ResponsesRequest = {
+		const req: TranslatableRequest = {
 			model: "claude-3-5-sonnet-20241022",
 			input: [
 				{
@@ -596,7 +603,7 @@ describe("translateRequestToAnthropic", () => {
 	});
 
 	test("mixed text + input_image preserves content order", () => {
-		const req: ResponsesRequest = {
+		const req: TranslatableRequest = {
 			model: "claude-3-5-sonnet-20241022",
 			input: [
 				{
@@ -622,7 +629,7 @@ describe("translateRequestToAnthropic", () => {
 	});
 
 	test("function_call with invalid JSON arguments falls back to {}", () => {
-		const req: ResponsesRequest = {
+		const req: TranslatableRequest = {
 			model: "claude-3-5-sonnet-20241022",
 			input: [
 				{
@@ -642,7 +649,7 @@ describe("translateRequestToAnthropic", () => {
 	});
 
 	test("custom_tool_call preserves its raw input", () => {
-		const req: ResponsesRequest = {
+		const req: TranslatableRequest = {
 			model: "claude-3-5-sonnet-20241022",
 			input: [
 				{
@@ -663,7 +670,7 @@ describe("translateRequestToAnthropic", () => {
 	});
 
 	test("custom_tool_call_output → user message with tool_result", () => {
-		const req: ResponsesRequest = {
+		const req: TranslatableRequest = {
 			model: "claude-3-5-sonnet-20241022",
 			input: [
 				{
@@ -682,7 +689,7 @@ describe("translateRequestToAnthropic", () => {
 	});
 
 	test("model passthrough for non-gpt-5 names", () => {
-		const req: ResponsesRequest = {
+		const req: TranslatableRequest = {
 			model: "claude-opus-4-5",
 			input: [],
 		};
@@ -724,7 +731,7 @@ describe("translateRequestToAnthropic", () => {
 	});
 
 	test("stream passthrough", () => {
-		const req: ResponsesRequest = {
+		const req: TranslatableRequest = {
 			model: "claude-3-5-sonnet-20241022",
 			input: [],
 			stream: true,
@@ -734,7 +741,7 @@ describe("translateRequestToAnthropic", () => {
 });
 
 describe("translateRequestToAnthropic — model passthrough", () => {
-	const reqWithModel = (model: string): ResponsesRequest => ({
+	const reqWithModel = (model: string): TranslatableRequest => ({
 		model,
 		input: [
 			{

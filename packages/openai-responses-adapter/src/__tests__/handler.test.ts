@@ -111,10 +111,12 @@ describe("handleResponsesRequest", () => {
 	});
 
 	test("Test 2: non-streaming path → calls handleProxy with /v1/messages, returns translated response", async () => {
-		let capturedUrl: URL | null = null;
+		// A field rather than a local: the assignment happens inside the proxy
+		// callback, and a `let` stays narrowed to its initializer across it.
+		const captured: { url: URL | null } = { url: null };
 
 		const mockHandleProxy: HandleProxyFn = async (_req, url) => {
-			capturedUrl = url;
+			captured.url = url;
 			return new Response(ANTHROPIC_MESSAGE_BODY, {
 				status: 200,
 				headers: { "Content-Type": "application/json" },
@@ -144,7 +146,7 @@ describe("handleResponsesRequest", () => {
 			{},
 		);
 
-		expect(capturedUrl?.pathname).toBe("/v1/messages");
+		expect(captured.url?.pathname).toBe("/v1/messages");
 		expect(resp.status).toBe(200);
 
 		const body = await resp.json();
@@ -154,10 +156,13 @@ describe("handleResponsesRequest", () => {
 	});
 
 	test("Test 2b: sets the no-official-Anthropic floor header on the synthetic request", async () => {
-		let denyHeader: string | null = null;
+		// See the note on `captured` above: assigned from inside the callback.
+		const observed: { denyHeader: string | null } = { denyHeader: null };
 
 		const mockHandleProxy: HandleProxyFn = async (req) => {
-			denyHeader = req.headers.get("x-clankermux-deny-official-anthropic");
+			observed.denyHeader = req.headers.get(
+				"x-clankermux-deny-official-anthropic",
+			);
 			return new Response(ANTHROPIC_MESSAGE_BODY, {
 				status: 200,
 				headers: { "Content-Type": "application/json" },
@@ -184,7 +189,7 @@ describe("handleResponsesRequest", () => {
 
 		// Codex CLI traffic must be marked so the proxy never routes it to a
 		// Claude account — independent of any API-key pin or auth config.
-		expect(denyHeader).toBe("1");
+		expect(observed.denyHeader).toBe("1");
 	});
 
 	test("Test 3: error passthrough → if handleProxy returns 429, handler returns 429", async () => {
