@@ -1671,8 +1671,6 @@ Available endpoints:
 - DELETE ${protocol}://localhost:${serverInstance.port}/api/accounts/:id → Remove account
 - GET    ${protocol}://localhost:${serverInstance.port}/api/stats       → View statistics
 - POST   ${protocol}://localhost:${serverInstance.port}/api/stats/reset → Reset statistics
-- GET    ${protocol}://localhost:${serverInstance.port}/api/config      → View configuration
-- PATCH  ${protocol}://localhost:${serverInstance.port}/api/config      → Update configuration
 
 ⚡ Ready to proxy requests...
 `);
