@@ -86,16 +86,34 @@ export function buildTargets(repoRoot: string): BuildTarget[] {
 	const dbWorkers: BuildTarget = {
 		name: "db-workers",
 		cwd: repoRoot,
+		// The name is historical: the manifest now spans packages/database/src and
+		// packages/http-api/src/handlers. It stays because promote-release.sh and
+		// the systemd ExecStartPre call `build:db-workers:guarded` by name.
 		markerPath: ".cache/build-guard/db-workers.json",
 		inputGlobs: [
-			"packages/database/src/**/*.ts",
-			"!packages/database/src/inline-*.ts",
+			// Every workspace source a bundled worker can reach, not just the
+			// worker's own package: analytics-worker.ts pulls in @clankermux/database
+			// and the *-direct handlers, which reach core, types, http-common,
+			// logger and proxy; quota-drift-compute.ts takes its statistics from
+			// core. A per-worker-directory glob would let an edit to any of those
+			// leave the marker valid and ship a stale embedded blob. Same trade as
+			// the dashboard target above: over-hashing forces a safe extra rebuild,
+			// under-hashing ships staleness.
+			"packages/*/src/**/*.ts",
+			// The build's own outputs, which no worker imports.
+			"!packages/*/src/**/inline-*.ts",
+			"!**/*.test.ts",
+			"!**/__tests__/**",
+			// Browser-only packages; no worker can reach them.
+			"!packages/dashboard-web/**",
+			"!packages/ui-common/**",
+			"!packages/ui-constants/**",
+			"packages/*/package.json",
 			"packages/database/scripts/build-workers.ts",
 			// The manifest decides which sources get bundled into which inline
 			// output; editing it alone can change the blobs while every source
 			// and output hash stays put, so it has to be hashed too.
 			"packages/database/scripts/workers-manifest.ts",
-			"packages/database/package.json",
 		],
 		outputGlobs: DB_WORKER_INLINE_FILES,
 		checkOutput: async (cwd: string) => {

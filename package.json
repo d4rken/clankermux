@@ -19,7 +19,7 @@
 		"test": "bun test && bun run test:dom",
 		"test:dom": "bun scripts/test-dom.ts",
 		"build": "echo \"🏗️  Building ClankerMux v$(node -p \"require('./package.json').version\")\" && bun run build:db-workers && bun run build:dashboard",
-		"build:server": "bun run --cwd apps/server build",
+		"build:server": "bun run build:db-workers:guarded && bun run build:dashboard:guarded && bun run --cwd apps/server build",
 		"build:db-workers": "bun run --cwd packages/database build:workers",
 		"build:db-workers:guarded": "bun run scripts/guarded-build.ts db-workers",
 		"build:dashboard": "bun run --cwd packages/dashboard-web build",
@@ -30,6 +30,7 @@
 		"lint": "bunx --bun biome check --write --unsafe .",
 		"preview:dashboard": "bun scripts/dashboard-preview.ts",
 		"restart": "./scripts/restart.sh",
+		"smoke:server": "bun run scripts/smoke-server-binary.ts",
 		"public-api:generate": "bun scripts/public-api/generate.ts",
 		"public-api:check": "bun scripts/public-api/generate.ts --check && bun scripts/public-api/validate.ts && bunx tsc --project scripts/public-api/tsconfig.json --noEmit"
 	},

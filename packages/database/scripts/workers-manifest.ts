@@ -1,6 +1,11 @@
 /**
- * workers-manifest.ts — the single source of truth for the SQLite workers that
+ * workers-manifest.ts — the single source of truth for the Worker sources that
  * `bun run build:db-workers` embeds into gitignored `inline-*.ts` files.
+ *
+ * The list is not database-only: each entry names the directory its source
+ * lives in, so a worker in any package can take the embedded path. The build
+ * keeps the name `db-workers` because systemd and promote-release.sh call it by
+ * that name.
  *
  * Three consumers derive from this list, and they must never drift apart:
  *   - build-workers.ts        — bundles + base64-encodes each worker;
@@ -17,6 +22,12 @@ import { existsSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 export interface Worker {
+	/**
+	 * Repo-root-relative directory holding BOTH the worker source and its
+	 * generated inline output. The inline file is always written beside its
+	 * source, so embedding a worker never introduces a cross-package import.
+	 */
+	dir: string;
 	/** Worker source filename (without dir), e.g. "vacuum-worker.ts". */
 	source: string;
 	/** Inline output filename (without dir), e.g. "inline-vacuum-worker.ts". */
@@ -29,47 +40,75 @@ export interface Worker {
 
 export const WORKERS: Worker[] = [
 	{
+		dir: "packages/database/src",
 		source: "vacuum-worker.ts",
 		inline: "inline-vacuum-worker.ts",
 		bundle: "vacuum-worker.js",
 		constName: "EMBEDDED_VACUUM_WORKER_CODE",
 	},
 	{
+		dir: "packages/database/src",
 		source: "integrity-check-worker.ts",
 		inline: "inline-integrity-check-worker.ts",
 		bundle: "integrity-check-worker.js",
 		constName: "EMBEDDED_INTEGRITY_CHECK_WORKER_CODE",
 	},
 	{
+		dir: "packages/database/src",
 		source: "incremental-vacuum-worker.ts",
 		inline: "inline-incremental-vacuum-worker.ts",
 		bundle: "incremental-vacuum-worker.js",
 		constName: "EMBEDDED_INCREMENTAL_VACUUM_WORKER_CODE",
 	},
 	{
+		dir: "packages/database/src",
 		source: "payload-write-worker.ts",
 		inline: "inline-payload-write-worker.ts",
 		bundle: "payload-write-worker.js",
 		constName: "EMBEDDED_PAYLOAD_WRITE_WORKER_CODE",
 	},
 	{
+		dir: "packages/database/src",
 		source: "storage-usage-worker.ts",
 		inline: "inline-storage-usage-worker.ts",
 		bundle: "storage-usage-worker.js",
 		constName: "EMBEDDED_STORAGE_USAGE_WORKER_CODE",
 	},
+	{
+		dir: "packages/http-api/src/handlers",
+		source: "analytics-worker.ts",
+		inline: "inline-analytics-worker.ts",
+		bundle: "analytics-worker.js",
+		constName: "EMBEDDED_ANALYTICS_WORKER_CODE",
+	},
+	{
+		dir: "packages/http-api/src/handlers",
+		source: "quota-drift-worker.ts",
+		inline: "inline-quota-drift-worker.ts",
+		bundle: "quota-drift-worker.js",
+		constName: "EMBEDDED_QUOTA_DRIFT_WORKER_CODE",
+	},
 ];
 
 /**
- * packages/database/src — worker sources and inline outputs live here. Resolved
- * from `import.meta.dir` (this module lives in `packages/database/scripts/`),
- * so it does not depend on process.cwd().
+ * Repo root, resolved from `import.meta.dir` (this module lives in
+ * `packages/database/scripts/`), so nothing here depends on process.cwd().
  */
-export const WORKER_SRC_DIR = join(import.meta.dir, "../src");
+export const REPO_ROOT = join(import.meta.dir, "../../..");
+
+/** Absolute directory holding a worker's source and its inline output. */
+export function workerSrcDir(worker: Worker): string {
+	return join(REPO_ROOT, worker.dir);
+}
+
+/** The distinct directories the manifest spans, in manifest order. */
+export const WORKER_SRC_DIRS: string[] = [
+	...new Set(WORKERS.map((worker) => worker.dir)),
+];
 
 /** Repo-root-relative paths of the inline outputs, for build-hash guards. */
 export const WORKER_INLINE_REPO_PATHS = WORKERS.map(
-	(worker) => `packages/database/src/${worker.inline}`,
+	(worker) => `${worker.dir}/${worker.inline}`,
 );
 
 const HEADER =
@@ -89,7 +128,7 @@ const HEADER =
 export function writeMissingWorkerPlaceholders(): string[] {
 	const written: string[] = [];
 	for (const worker of WORKERS) {
-		const inlinePath = join(WORKER_SRC_DIR, worker.inline);
+		const inlinePath = join(workerSrcDir(worker), worker.inline);
 		if (existsSync(inlinePath)) continue;
 		writeFileSync(
 			inlinePath,

@@ -1,5 +1,6 @@
 import { Logger } from "@clankermux/logger";
 import type { QuotaDriftResponse } from "@clankermux/types";
+import { EMBEDDED_QUOTA_DRIFT_WORKER_CODE } from "./inline-quota-drift-worker";
 import type {
 	QuotaDriftWorkerRequest,
 	QuotaDriftWorkerResponse,
@@ -38,14 +39,66 @@ export type QuotaDriftWorkerLike = {
 	onmessage: ((event: MessageEvent<QuotaDriftWorkerResponse>) => void) | null;
 	onerror: ((event: ErrorEvent) => void) | null;
 	unref?: () => void;
+	/**
+	 * Release the Blob object URL an embedded-path worker was spawned from.
+	 * Idempotent, and absent on the source-path worker and on test stubs.
+	 */
+	releaseSource?: () => void;
 };
 
 let workerFactoryOverride: (() => QuotaDriftWorkerLike) | null = null;
 
+/**
+ * Spawn the real precompute Worker: from the embedded base64 bundle when one
+ * was built, from the on-disk source otherwise (development, tests).
+ *
+ * The embedded path is what makes this worker exist at all in the compiled
+ * single-file binary — `bun build --compile` does not follow a
+ * `new URL("./quota-drift-worker.ts", import.meta.url)` target, so the file URL
+ * resolves to a `/$bunfs/root/…` path that is not there, and the failure
+ * surfaces only through `onerror`.
+ *
+ * The object URL is NOT revoked straight after `new Worker(url)`: Bun resolves
+ * it while the thread boots, and revoking synchronously fails the spawn with
+ * "Blob URL is missing". A pass terminates its worker as soon as it settles, so
+ * `releaseSource` rides that path — one blob per pass would otherwise be leaked
+ * every 30 minutes.
+ */
 function createRealWorker(): QuotaDriftWorkerLike {
-	return new Worker(new URL("./quota-drift-worker.ts", import.meta.url).href, {
-		smol: true,
-	}) as unknown as QuotaDriftWorkerLike;
+	if (!EMBEDDED_QUOTA_DRIFT_WORKER_CODE) {
+		return new Worker(
+			new URL("./quota-drift-worker.ts", import.meta.url).href,
+			{
+				smol: true,
+			},
+		) as unknown as QuotaDriftWorkerLike;
+	}
+
+	const code = Buffer.from(EMBEDDED_QUOTA_DRIFT_WORKER_CODE, "base64").toString(
+		"utf8",
+	);
+	let objectUrl: string | null = URL.createObjectURL(
+		new Blob([code], { type: "text/javascript" }),
+	);
+	let worker: Worker;
+	try {
+		worker = new Worker(objectUrl, { smol: true });
+	} catch (error) {
+		// Nothing will exist to release the URL later, so release it here — a
+		// throwing constructor would otherwise leak the blob for the process
+		// lifetime, once per failed spawn.
+		URL.revokeObjectURL(objectUrl);
+		objectUrl = null;
+		throw error;
+	}
+
+	const workerLike = worker as unknown as QuotaDriftWorkerLike;
+	workerLike.releaseSource = () => {
+		if (objectUrl === null) return;
+		URL.revokeObjectURL(objectUrl);
+		objectUrl = null;
+	};
+	return workerLike;
 }
 
 export interface RunQuotaDriftPassOptions {
@@ -82,6 +135,7 @@ export function runQuotaDriftPass(
 			if (settled) return;
 			settled = true;
 			clearTimeout(timer);
+			worker.releaseSource?.();
 			try {
 				worker.terminate();
 			} catch {
