@@ -123,16 +123,27 @@ export function startIntegrityScheduler(
 	const handles: ReturnType<typeof setTimeout>[] = [];
 	const intervals: ReturnType<typeof setInterval>[] = [];
 
+	// Timers discard the promise an async callback returns, and nothing installs
+	// a process-level unhandledRejection handler, so an escaping rejection ends
+	// the process. A failed integrity check must not do that.
+	const guard = (run: () => Promise<void>, kind: string) => () => {
+		void run().catch((error) => {
+			logger.error(`${kind} integrity check threw`, error);
+		});
+	};
+	const tickQuick = guard(runQuick, "Quick");
+	const tickFull = guard(runFull, "Full");
+
 	if (quickInterval !== null) {
-		handles.push(setTimeout(runQuick, QUICK_INITIAL_DELAY_MS));
-		intervals.push(setInterval(runQuick, quickInterval));
+		handles.push(setTimeout(tickQuick, QUICK_INITIAL_DELAY_MS));
+		intervals.push(setInterval(tickQuick, quickInterval));
 	} else {
 		logger.info("Quick integrity check disabled (interval override = 0)");
 	}
 
 	if (fullInterval !== null) {
-		handles.push(setTimeout(runFull, FULL_INITIAL_DELAY_MS));
-		intervals.push(setInterval(runFull, fullInterval));
+		handles.push(setTimeout(tickFull, FULL_INITIAL_DELAY_MS));
+		intervals.push(setInterval(tickFull, fullInterval));
 	} else {
 		logger.info("Full integrity check disabled (interval override = 0)");
 	}

@@ -15,12 +15,12 @@ const response = (body: unknown, status = 403) =>
 	Response.json(body, { status });
 
 describe("Anthropic organization permission denial", () => {
-	it("recognizes the machine code and both observed no-code messages", async () => {
+	it("recognizes the machine code whatever the message says", async () => {
 		for (const body of [
 			denied("changed wording", "oauth_not_allowed_for_organization"),
-			denied(),
 			denied(
 				"OAuth authentication is currently not allowed for this organization.",
+				"oauth_not_allowed_for_organization",
 			),
 		]) {
 			const res = response(body);
@@ -28,10 +28,24 @@ describe("Anthropic organization permission denial", () => {
 			expect(await res.json()).toEqual(body);
 		}
 	});
-	it("leaves ambiguous, scoped, malformed and unrelated errors alone", async () => {
+	it("treats a permission_error with no machine code as organization-wide", async () => {
+		// Anthropic owns this copy and has reworded it mid-incident, so the
+		// message is not consulted — only the absence of a scoping code.
 		for (const body of [
-			denied("This model is forbidden"),
+			denied(),
+			denied(
+				"OAuth authentication is currently not allowed for this organization.",
+			),
+			denied("wording nobody has seen yet"),
 			denied("Permission denied"),
+		]) {
+			const res = response(body);
+			expect(await isAnthropicOrgPermissionDenied(res)).toBe(true);
+			expect(await res.json()).toEqual(body);
+		}
+	});
+	it("leaves scoped, malformed and unrelated errors alone", async () => {
+		for (const body of [
 			denied(undefined, "model_not_allowed"),
 			denied(undefined, null),
 			{},

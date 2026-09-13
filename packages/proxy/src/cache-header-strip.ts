@@ -8,9 +8,11 @@
  * (cache-body-store.ts already imports session-cache-store.ts).
  *
  * Why these are stripped before storing a replay body:
- *  - Auth headers (authorization, x-api-key, cookie, proxy-auth*) are re-injected
- *    by the provider's prepareHeaders() from account credentials at replay time —
- *    storing the original client credentials would be both stale and a secret leak.
+ *  - Auth headers (authorization, x-api-key, proxy-auth*) are re-injected by the
+ *    provider's prepareHeaders() from account credentials at replay time —
+ *    storing the original client credentials would be both stale and a secret
+ *    leak. `cookie` is stripped for the same secret-leak reason, but nothing
+ *    re-injects it: the outbound path drops the client's cookies outright.
  *  - Internal x-clankermux-* routing/control headers (plus the legacy
  *    x-better-ccflare-account-id alias) are injected fresh by the keepalive
  *    scheduler at replay time, so the stored snapshot must not carry them.

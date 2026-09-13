@@ -38,6 +38,7 @@ import {
 import { isGenuineWindowRoll } from "./window-reset";
 import {
 	fetchZaiUsageData,
+	getRepresentativeZaiTokenWindow,
 	getRepresentativeZaiUtilization,
 	type ZaiUsageData,
 } from "./zai-usage-fetcher";
@@ -363,8 +364,12 @@ export function extractWindowResetTime(
 		return window ? (usage[window]?.resetAt ?? null) : null;
 	}
 	if (provider === "zai") {
+		// Same window the utilization and window-name readers report. Preferring
+		// tokens_limit outright can name a reset belonging to the other window,
+		// because zai's reset order is not its duration order: the week can reset
+		// sooner than the 5h.
 		const zai = data as ZaiUsageData;
-		return (zai.tokens_limit ?? zai.tokens_limit_weekly)?.resetAt ?? null;
+		return getRepresentativeZaiTokenWindow(zai)?.window.resetAt ?? null;
 	}
 	if (provider === "minimax") {
 		const m = data as MinimaxUsageData;
@@ -1279,35 +1284,56 @@ class UsageCache {
 			if (this.pollGenerations.get(accountId) !== generation) return;
 			if (this.tokenProviders.get(accountId) !== tokenProvider) return;
 
-			const {
-				success,
-				retryAfterMs: nextRetryAfterMs,
-				superseded,
-			} = await this.fetchAndCache(
-				accountId,
-				tokenProvider,
-				generation,
-				provider,
-				customEndpoint,
-			);
-			// A superseded result belongs to a poll generation that no longer
-			// exists. It is NOT a failure of the live one — counting it would push
-			// a perfectly healthy replacement poller into exponential backoff and
-			// let its usage data go stale. Drop it entirely (the reschedule guards
-			// below would bail anyway).
-			if (superseded) return;
+			// setTimeout discards this callback's promise and nothing installs a
+			// process-level unhandledRejection handler, so anything escaping here
+			// takes the process down. A throw is recorded as a failed poll and the
+			// reschedule below still runs: polling is the only channel that
+			// observes a locked account recover, so the loop must outlive one bad
+			// tick. _doFetchAndCache has its own catch, but that catch can throw —
+			// it JSON.stringify's a non-Error rejection value, which a circular
+			// object turns into a TypeError.
+			let success = false;
+			let nextRetryAfterMs: number | null = null;
+			try {
+				const outcome = await this.fetchAndCache(
+					accountId,
+					tokenProvider,
+					generation,
+					provider,
+					customEndpoint,
+				);
+				// A superseded result belongs to a poll generation that no longer
+				// exists. It is NOT a failure of the live one — counting it would push
+				// a perfectly healthy replacement poller into exponential backoff and
+				// let its usage data go stale. Drop it entirely (the reschedule guards
+				// below would bail anyway).
+				if (outcome.superseded) return;
+				success = outcome.success;
+				nextRetryAfterMs = outcome.retryAfterMs;
+			} catch (error) {
+				log.error(
+					`Usage poll threw for account ${accountId}; counting it as a failed poll`,
+					error,
+				);
+			}
+			// failureCounts belongs to whichever generation is live NOW. A rejection
+			// carries no `superseded` flag, so without this check a throw from a
+			// poll that was replaced mid-flight would charge its failure to the
+			// replacement and push a healthy poller into backoff.
+			const stillCurrent =
+				this.pollGenerations.get(accountId) === generation &&
+				this.tokenProviders.get(accountId) === tokenProvider;
+			if (!stillCurrent) return;
 			if (success) {
 				this.failureCounts.delete(accountId); // reset streak on success
 			} else {
 				const count = (this.failureCounts.get(accountId) ?? 0) + 1;
 				this.failureCounts.set(accountId, count);
 			}
-			// Schedule the next poll only if this generation is still current
-			// (generation + identity guards — see the bail check above).
-			if (
-				this.pollGenerations.get(accountId) === generation &&
-				this.tokenProviders.get(accountId) === tokenProvider
-			) {
+			// scheduleNextPoll re-checks the generation itself; the catch keeps a
+			// throw here off the process, though it does leave this account unarmed
+			// until something else restarts polling for it.
+			try {
 				this.scheduleNextPoll(
 					accountId,
 					tokenProvider,
@@ -1316,6 +1342,11 @@ class UsageCache {
 					provider,
 					customEndpoint,
 					nextRetryAfterMs,
+				);
+			} catch (error) {
+				log.error(
+					`Failed to arm the next usage poll for account ${accountId}`,
+					error,
 				);
 			}
 		}, delayMs);
@@ -1721,14 +1752,20 @@ class UsageCache {
 			customEndpoint,
 		);
 		this.inFlightFetches.set(accountId, { generation, promise });
-		promise.finally(() => {
-			// Identity-guarded: a restart (stopPolling + startPolling) during this
-			// fetch may have installed a newer in-flight entry for the same account;
-			// only clear our own so we don't wipe the current generation's dedup.
+		// Identity-guarded: a restart (stopPolling + startPolling) during this
+		// fetch may have installed a newer in-flight entry for the same account;
+		// only clear our own so we don't wipe the current generation's dedup.
+		//
+		// then(cleanup, cleanup) rather than finally(cleanup): finally returns a
+		// NEW promise that rejects whenever this one does, and nothing awaits that
+		// copy, so a rejection the caller already handles still escapes as an
+		// unhandledRejection.
+		const clearInFlight = () => {
 			if (this.inFlightFetches.get(accountId)?.promise === promise) {
 				this.inFlightFetches.delete(accountId);
 			}
-		});
+		};
+		void promise.then(clearInFlight, clearInFlight);
 		return promise;
 	}
 
