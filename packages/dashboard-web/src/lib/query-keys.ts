@@ -81,7 +81,6 @@ export const queryKeys = {
 	// un-clearable once it excluded its own option.
 	analyticsFilterOptions: () =>
 		[...queryKeys.all, "analytics", "filter-options"] as const,
-	logs: () => [...queryKeys.all, "logs"] as const,
 	logHistory: () => [...queryKeys.all, "logs", "history"] as const,
 	apiKeys: () => [...queryKeys.all, "api-keys"] as const,
 	storage: () => [...queryKeys.all, "storage"] as const,
