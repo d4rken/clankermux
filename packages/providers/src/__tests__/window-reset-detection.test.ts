@@ -25,6 +25,36 @@ describe("extractWindowResetTime", () => {
 		expect(extractWindowResetTime(data, "zai")).toBeNull();
 	});
 
+	it("returns the weekly reset for zai when the week is the binding window", () => {
+		const data: ZaiUsageData = {
+			time_limit: null,
+			tokens_limit: {
+				percentage: 10,
+				resetAt: 1000,
+				type: "tokens_limit",
+			},
+			tokens_limit_weekly: {
+				percentage: 90,
+				resetAt: 500_000,
+				type: "tokens_limit",
+			},
+		};
+		expect(extractWindowResetTime(data, "zai")).toBe(500_000);
+	});
+
+	it("falls back to the weekly reset for zai when the 5h window is absent", () => {
+		const data: ZaiUsageData = {
+			time_limit: null,
+			tokens_limit: null,
+			tokens_limit_weekly: {
+				percentage: 40,
+				resetAt: 777_000,
+				type: "tokens_limit",
+			},
+		};
+		expect(extractWindowResetTime(data, "zai")).toBe(777_000);
+	});
+
 	it("returns parsed resets_at ms for anthropic provider", () => {
 		const resetIso = "2030-01-01T12:00:00Z";
 		const data: UsageData = {

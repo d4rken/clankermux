@@ -1378,11 +1378,16 @@ export async function consumeCodexResetCreditForAccount(
 		promise,
 	};
 	codexResetCreditConsumeInflight.set(accountId, entry);
-	void promise.finally(() => {
+	// then(cleanup, cleanup) rather than finally(cleanup): finally returns a NEW
+	// promise that rejects whenever this one does, and nothing awaits that copy,
+	// so a rejection the caller already handles still escapes as an
+	// unhandledRejection. See settleInflight in codex-spend-coordinator.ts.
+	const clearConsumeEntry = () => {
 		if (codexResetCreditConsumeInflight.get(accountId) === entry) {
 			codexResetCreditConsumeInflight.delete(accountId);
 		}
-	});
+	};
+	void promise.then(clearConsumeEntry, clearConsumeEntry);
 	return promise;
 }
 
@@ -1436,11 +1441,12 @@ export async function refreshCodexResetCreditsForAccount(
 	})();
 
 	codexResetCreditsInflight.set(accountId, promise);
-	void promise.finally(() => {
+	const clearCreditsEntry = () => {
 		if (codexResetCreditsInflight.get(accountId) === promise) {
 			codexResetCreditsInflight.delete(accountId);
 		}
-	});
+	};
+	void promise.then(clearCreditsEntry, clearCreditsEntry);
 	return promise;
 }
 
@@ -1499,9 +1505,10 @@ export async function refreshCodexUsageForAccount(
 	})();
 
 	codexUsageInflight.set(accountId, promise);
-	promise.finally(() => {
+	const clearUsageEntry = () => {
 		codexUsageInflight.delete(accountId);
-	});
+	};
+	void promise.then(clearUsageEntry, clearUsageEntry);
 	return promise;
 }
 

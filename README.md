@@ -90,12 +90,11 @@ bun run build       # builds the dashboard (required before first run)
 bun start           # serves the proxy + dashboard on http://localhost:8080
 ```
 
-For an OpenAI-compatible account, enter its endpoint and API key, then use
-**Fetch models** to search the available model IDs for the Opus/Sonnet/Haiku
-mappings. Fetching preserves your choices; you can also enter IDs manually if
-discovery is unavailable. Changing the endpoint, key, or provider clears the
-mappings so you can choose them again for the new connection. This preview does
-not change the client-facing Models catalogue.
+For an OpenAI-compatible account, enter its endpoint and API key. ClankerMux
+reads the model list from that endpoint once the account is saved, and the
+account's **Model permissions** dialog is where you narrow it. Which model a
+request reaches is decided by the routing table, not by the account: with no
+rule, the model the client asked for goes upstream as sent.
 
 Add your accounts in the dashboard, then point your client at a wire mount:
 `/wire/anthropic` for the Anthropic Messages API, `/wire/openai` for the OpenAI

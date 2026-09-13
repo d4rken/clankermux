@@ -574,8 +574,6 @@ export function AccountAddForm({
 				onError("API key is required for Anthropic-compatible accounts");
 				return;
 			}
-			// Build model mappings object
-
 			// For Anthropic-compatible accounts, we don't need OAuth flow and use default tier
 			await onAddAnthropicCompatibleAccount({
 				name: newAccount.name,
@@ -608,8 +606,6 @@ export function AccountAddForm({
 				onError("Endpoint URL is required for OpenAI-compatible accounts");
 				return;
 			}
-
-			// Build model mappings object
 
 			// For OpenAI-compatible accounts, we don't need OAuth flow
 			await onAddOpenAIAccount({
