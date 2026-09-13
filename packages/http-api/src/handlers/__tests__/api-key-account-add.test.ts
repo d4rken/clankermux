@@ -28,6 +28,14 @@ describe("createApiKeyAccountAddHandler", () => {
 		);
 		DatabaseFactory.initialize(tmpDb.next());
 		dbOps = DatabaseFactory.getInstance();
+		// A fresh database no longer gets accounts.model_mappings; an upgraded
+		// one still carries it. Add it back here, because that is the database
+		// where writing to it would still be possible — and where the handler
+		// must leave it alone.
+		dbOps
+			.getAdapter()
+			.getSQLiteDb()
+			.run("ALTER TABLE accounts ADD COLUMN model_mappings TEXT");
 	});
 
 	afterEach(() => {

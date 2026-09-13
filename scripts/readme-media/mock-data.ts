@@ -134,16 +134,3 @@ export const MOCK_API_KEYS = [
 	{ id: "key-ci", name: "ci-runner", last8: "77b0d413" },
 	{ id: "key-laptop", name: "laptop", last8: "e0592aa8" },
 ] as const;
-
-export const MOCK_COMBOS = [
-	{
-		id: "combo-frontline",
-		name: "frontline",
-		description: "Opus first, Sonnet behind it, local model as the floor.",
-	},
-	{
-		id: "combo-bulk",
-		name: "bulk",
-		description: "Cheap models for batch and background work.",
-	},
-] as const;

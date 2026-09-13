@@ -487,10 +487,18 @@ export const POST_FLOOR_TABLE_BASELINES: Readonly<
 export const RETIRED_AFTER_FLOOR = {
 	columns: [
 		{ table: "accounts", column: "cross_region_mode" },
+		{ table: "accounts", column: "model_mappings" },
+		{ table: "accounts", column: "model_fallbacks" },
 		{ table: "api_keys", column: "role" },
 		{ table: "requests", column: "agent_used" },
 	],
-	tables: ["agent_preferences", "model_translations"],
+	tables: [
+		"agent_preferences",
+		"model_translations",
+		"combos",
+		"combo_slots",
+		"combo_family_assignments",
+	],
 } as const;
 
 /**

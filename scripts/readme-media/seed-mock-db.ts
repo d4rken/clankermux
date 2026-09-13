@@ -28,7 +28,6 @@ import { scryptPasswordHasher } from "../../packages/http-api/src/services/sessi
 import {
 	MOCK_ACCOUNTS,
 	MOCK_API_KEYS,
-	MOCK_COMBOS,
 	MOCK_PROJECTS,
 	makeRng,
 } from "./mock-data";
@@ -195,33 +194,6 @@ function seedApiKeys(db: Database, now: number): void {
 			0,
 		);
 	}
-}
-
-function seedCombos(db: Database, now: number): void {
-	const insertCombo = db.prepare(`
-		INSERT INTO combos (id, name, description, enabled, created_at, updated_at)
-		VALUES (?, ?, ?, 1, ?, ?)
-	`);
-	const insertSlot = db.prepare(`
-		INSERT INTO combo_slots (id, combo_id, account_id, model, priority, enabled)
-		VALUES (?, ?, ?, ?, ?, 1)
-	`);
-	for (const combo of MOCK_COMBOS) {
-		insertCombo.run(combo.id, combo.name, combo.description, now - 40 * DAY_MS, now - 3 * DAY_MS);
-	}
-	const slots: Array<[string, string, string, number]> = [
-		["combo-frontline", "acct-aurora", "claude-opus-5", 0],
-		["combo-frontline", "acct-borealis", "claude-sonnet-5", 1],
-		["combo-frontline", "acct-dune", "glm-4.6", 2],
-		["combo-bulk", "acct-borealis", "claude-haiku-4.5", 0],
-		["combo-bulk", "acct-cinder", "gpt-5.4-mini", 1],
-	];
-	slots.forEach(([comboId, accountId, model, priority], i) => {
-		insertSlot.run(`slot-${i}`, comboId, accountId, model, priority);
-	});
-	db.run(
-		`UPDATE combo_family_assignments SET combo_id = 'combo-frontline', enabled = 1 WHERE family IN ('opus','sonnet')`,
-	);
 }
 
 function seedPayments(db: Database, now: number): void {
@@ -576,7 +548,6 @@ async function main(): Promise<void> {
 
 	seedAccounts(db, now);
 	seedApiKeys(db, now);
-	seedCombos(db, now);
 	seedPayments(db, now);
 	seedUsageSnapshots(db, now, rng);
 	seedRequests(db, now, rng);

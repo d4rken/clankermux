@@ -284,8 +284,8 @@ describe("createCodexReauthHandler", () => {
 		await dbOps.getAdapter().run(
 			`INSERT INTO accounts (id, name, provider, api_key, refresh_token, access_token,
 			expires_at, created_at, request_count, total_requests, priority,
-			custom_endpoint, model_mappings, model_fallbacks)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, 0, 0, NULL, NULL, NULL)`,
+			custom_endpoint)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, 0, 0, NULL)`,
 			[
 				accountId,
 				"anthropic-account",
@@ -317,8 +317,8 @@ describe("createCodexReauthHandler", () => {
 		await dbOps.getAdapter().run(
 			`INSERT INTO accounts (id, name, provider, api_key, refresh_token, access_token,
 			expires_at, created_at, request_count, total_requests, priority,
-			custom_endpoint, model_mappings, model_fallbacks)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, 0, 0, NULL, NULL, NULL)`,
+			custom_endpoint)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, 0, 0, NULL)`,
 			[
 				accountId,
 				"codex-account",
@@ -357,9 +357,8 @@ describe("createCodexReauthHandler", () => {
 			await dbOps.getAdapter().run(
 				`INSERT INTO accounts (id, name, provider, api_key, refresh_token, access_token,
 				expires_at, created_at, request_count, total_requests, priority,
-				custom_endpoint, model_mappings, model_fallbacks,
-				codex_usage_json, codex_usage_observed_at)
-				VALUES (?, ?, 'codex', NULL, 'old-rt', 'old-at', ?, ?, 0, 0, 0, NULL, NULL, NULL, ?, ?)`,
+				custom_endpoint, codex_usage_json, codex_usage_observed_at)
+				VALUES (?, ?, 'codex', NULL, 'old-rt', 'old-at', ?, ?, 0, 0, 0, NULL, ?, ?)`,
 				[
 					accountId,
 					`codex-${accountId}`,
@@ -538,8 +537,8 @@ describe("createAnthropicReauthInitHandler", () => {
 		await dbOps.getAdapter().run(
 			`INSERT INTO accounts (id, name, provider, api_key, refresh_token, access_token,
 			expires_at, created_at, request_count, total_requests, priority,
-			custom_endpoint, model_mappings, model_fallbacks)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, 0, 0, NULL, NULL, NULL)`,
+			custom_endpoint)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, 0, 0, NULL)`,
 			[
 				accountId,
 				"codex-account-for-anthropic-test",
