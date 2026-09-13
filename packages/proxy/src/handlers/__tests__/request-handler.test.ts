@@ -6,6 +6,7 @@
  */
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { CodexProvider, OpenAICompatibleProvider } from "@clankermux/providers";
+import { chatGptCloudflareCookieJar } from "../../chatgpt-cloudflare-cookies";
 import { makeProxyRequest, validateProviderPath } from "../request-handler";
 
 describe("validateProviderPath", () => {
@@ -185,6 +186,114 @@ describe("makeProxyRequest — internal control header sweep", () => {
 		});
 		await makeProxyRequest(req);
 		expectSwept(getSeen());
+	});
+});
+
+describe("makeProxyRequest — client hop metadata sweep", () => {
+	let originalFetch: typeof globalThis.fetch;
+
+	beforeEach(() => {
+		originalFetch = globalThis.fetch;
+	});
+	afterEach(() => {
+		globalThis.fetch = originalFetch;
+	});
+
+	function captureOutboundHeaders(): () => Headers {
+		let seen: Headers = new Headers();
+		globalThis.fetch = (async (
+			input: RequestInfo | URL,
+			init?: RequestInit,
+		) => {
+			seen =
+				input instanceof Request
+					? new Headers(input.headers)
+					: new Headers(init?.headers);
+			return new Response("{}", { status: 200 });
+		}) as typeof globalThis.fetch;
+		return () => seen;
+	}
+
+	// Caddy sets the x-forwarded-* trio on everything it proxies, and a browser
+	// on the dashboard's own origin sends its session cookie to any path,
+	// /v1/* included. None of it describes the proxy→upstream hop.
+	function withClientHopMetadata(headers: Headers): Headers {
+		headers.set("content-type", "application/json");
+		headers.set("cookie", "cmx_session=secret-session-token");
+		headers.set("x-forwarded-for", "192.168.1.50");
+		headers.set("x-forwarded-proto", "http");
+		headers.set("x-forwarded-host", "clankermux.lan:8080");
+		headers.set("forwarded", "for=192.168.1.50;proto=http");
+		headers.set("x-real-ip", "192.168.1.50");
+		headers.set("true-client-ip", "192.168.1.50");
+		headers.set("cf-connecting-ip", "192.168.1.50");
+		headers.set("cf-ray", "8d0-LHR");
+		headers.set("cdn-loop", "cloudflare");
+		headers.set("accept", "application/json");
+		return headers;
+	}
+
+	function expectHopMetadataSwept(sent: Headers): void {
+		expect(sent.get("cookie")).toBeNull();
+		for (const name of [
+			"x-forwarded-for",
+			"x-forwarded-proto",
+			"x-forwarded-host",
+			"forwarded",
+			"x-real-ip",
+			"true-client-ip",
+			"cf-connecting-ip",
+			"cf-ray",
+			"cdn-loop",
+		]) {
+			expect(sent.get(name)).toBeNull();
+		}
+		// Ordinary headers must be untouched.
+		expect(sent.get("content-type")).toBe("application/json");
+		expect(sent.get("accept")).toBe("application/json");
+	}
+
+	it("strips client hop metadata on the headers-param branch", async () => {
+		const getSeen = captureOutboundHeaders();
+		await makeProxyRequest(
+			"https://example.invalid/v1/messages",
+			"POST",
+			withClientHopMetadata(new Headers()),
+			() => undefined,
+			false,
+		);
+		expectHopMetadataSwept(getSeen());
+	});
+
+	it("strips client hop metadata on the Request-target branch", async () => {
+		const getSeen = captureOutboundHeaders();
+		const req = new Request("https://example.invalid/v1/responses", {
+			method: "POST",
+			headers: withClientHopMetadata(new Headers()),
+			body: "{}",
+		});
+		await makeProxyRequest(req);
+		expectHopMetadataSwept(getSeen());
+	});
+
+	it("keeps the jar's own cookies while dropping the client's", async () => {
+		chatGptCloudflareCookieJar.captureFromResponse(
+			"https://chatgpt.com/backend-api/codex/responses",
+			new Response("{}", {
+				headers: { "set-cookie": "cf_clearance=jar-value; Path=/" },
+			}),
+		);
+		const getSeen = captureOutboundHeaders();
+		const req = new Request("https://chatgpt.com/backend-api/codex/responses", {
+			method: "POST",
+			headers: withClientHopMetadata(new Headers()),
+			body: "{}",
+		});
+		await makeProxyRequest(req);
+
+		const cookie = getSeen().get("cookie");
+		expect(cookie).toContain("cf_clearance=jar-value");
+		expect(cookie).not.toContain("cmx_session");
 	});
 });
 

@@ -2,9 +2,10 @@
 // infrastructure cookies (cf_clearance, __cflb load-balancer affinity, etc.)
 // for chatgpt.com-family hosts and replays them on subsequent requests. Codex
 // OAuth requests to chatgpt.com/backend-api/codex/responses otherwise get 403'd
-// by Cloudflare because makeProxyRequest() discards all cookies between
-// requests, forcing Cloudflare to re-evaluate every connection as a fresh,
-// cookie-less client. This mirrors what OpenAI's own Codex CLI does.
+// by Cloudflare: makeProxyRequest() drops the client's own Cookie header before
+// this jar runs, so without a jar every connection reaches Cloudflare as a
+// fresh, cookie-less client and gets re-evaluated. This mirrors what OpenAI's
+// own Codex CLI does.
 //
 // It NEVER stores ChatGPT account/session/auth cookies — only the Cloudflare
 // infrastructure names on the allowlist below. In-memory only; nothing is
