@@ -139,6 +139,16 @@ describe("client service integration", () => {
 	async function create(draft = blank()) {
 		return service.commit((await service.review(draft)).token);
 	}
+	it("saves setup credentials atomically and excludes them from client views", async () => {
+		const { client, apiKey } = await create();
+		expect(await dbOps.getApiKeySetupSecret(client.apiKeyId)).toBe(apiKey!);
+		expect(JSON.stringify(await service.list())).not.toContain(apiKey!);
+		const changed = edit(client);
+		changed.name = "Renamed";
+		await service.commit((await service.review(changed)).token);
+		expect(await dbOps.getApiKeySetupSecret(client.apiKeyId)).toBe(apiKey!);
+	});
+
 	it("keeps a missing catalogue manageable and repairs it only after review", async () => {
 		const { client, apiKey } = await create();
 		const sql = dbOps.getAdapter().getSQLiteDb();

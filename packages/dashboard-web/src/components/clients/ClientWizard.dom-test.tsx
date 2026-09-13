@@ -45,14 +45,14 @@ const existing: ClientView = {
 };
 async function click(text: string) {
 	const button = [...document.querySelectorAll("button")].find(
-		(b) => b.textContent?.trim() === text,
+		(b) => (b.getAttribute("aria-label") ?? b.textContent?.trim()) === text,
 	);
 	if (!button) throw new Error(`Missing ${text}`);
 	await act(async () => {
 		button.click();
 	});
 }
-async function mount(client = existing) {
+async function mount(client = existing, jump = false) {
 	reviewed = undefined;
 	spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
 		const path = String(input);
@@ -105,8 +105,11 @@ async function mount(client = existing) {
 			/>,
 		);
 	});
-	await click("Next");
-	await click("Next");
+	if (jump) await click("Catalogue");
+	else {
+		await click("Next");
+		await click("Next");
+	}
 }
 afterEach(async () => {
 	await act(async () => root?.unmount());
@@ -114,6 +117,29 @@ afterEach(async () => {
 	mock.restore();
 });
 describe("client catalogue editing", () => {
+	it("jumps straight to catalogues and preserves each format while navigating", async () => {
+		await mount(existing, true);
+		expect(document.body.textContent).toContain("1 selected");
+		await click("Deselect all in tab");
+		const tab = document.querySelector<HTMLButtonElement>(
+			'[role="tab"][data-state="inactive"]',
+		)!;
+		await act(async () => {
+			tab.dispatchEvent(
+				new MouseEvent("mousedown", { bubbles: true, button: 0 }),
+			);
+			tab.click();
+		});
+		await click("Select all in tab");
+		await click("Application");
+		await click("Catalogue");
+		await click("Review");
+		expect(reviewed?.catalogues.openai.models).toEqual([]);
+		expect(reviewed?.catalogues.anthropic.models.map((m) => m.id)).toEqual([
+			"new",
+		]);
+	});
+
 	it("keeps new discoveries unselected during refresh", async () => {
 		await mount();
 		await click("Refresh suggestions");
@@ -254,7 +280,7 @@ describe("client catalogue editing", () => {
 	});
 	it("explicitly empties the list and clears a now-hidden default", async () => {
 		await mount();
-		await click("Deselect all");
+		await click("Deselect all in tab");
 		await click("Review changes");
 		expect(reviewed?.catalogues.openai).toMatchObject({
 			models: [],

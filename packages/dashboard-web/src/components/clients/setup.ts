@@ -138,3 +138,75 @@ export function clientSetup(
 		note: `Use ${base}/responses or ${base}/chat/completions. Anthropic-style clients can use ${origin}/wire/anthropic. The key's destination restrictions apply to every protocol.`,
 	};
 }
+
+export interface ClientSetupExport extends ClientSetupRecipe {
+	id: string;
+	tab: string;
+}
+
+export function clientSetupExports(
+	application: ClientApplication,
+	origin: string,
+	secret: string,
+	model: string | null,
+	models: ClientModel[],
+): ClientSetupExport[] {
+	const recipe = clientSetup(application, origin, secret, model, models);
+	if (application === "claude-code") {
+		const selected = model ?? models[0]?.id;
+		return [
+			{
+				id: "settings",
+				tab: "settings.json",
+				label: "Merge into ~/.claude/settings.json",
+				snippet: JSON.stringify(
+					{
+						env: {
+							ANTHROPIC_BASE_URL: `${origin}/wire/anthropic`,
+							ANTHROPIC_AUTH_TOKEN: secret,
+							CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY: "1",
+							...(selected ? { ANTHROPIC_MODEL: selected } : {}),
+						},
+					},
+					null,
+					2,
+				),
+				note: recipe.note,
+			},
+			{ ...recipe, id: "shell", tab: "Shell environment" },
+		];
+	}
+	const exports: ClientSetupExport[] = [
+		{
+			...recipe,
+			id: "settings",
+			tab:
+				application === "codex"
+					? "config.toml"
+					: application === "opencode"
+						? "opencode.json"
+						: application === "pi"
+							? "models.json"
+							: application === "oh-my-pi"
+								? "models.yml"
+								: "Shell environment",
+		},
+	];
+	if (recipe.environment)
+		exports.push({
+			id: "shell",
+			tab: "Required environment",
+			label: "Required shell environment",
+			snippet: recipe.environment,
+			note: "Save the TOML configuration from the config.toml tab as well, then run this in the shell where you launch Codex.",
+		});
+	if (recipe.command)
+		exports.push({
+			id: "command",
+			tab: "Launch command",
+			label: "Launch client",
+			snippet: recipe.command,
+			note: "Save the model configuration from the first tab before using this command.",
+		});
+	return exports;
+}

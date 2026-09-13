@@ -154,7 +154,11 @@ export class ApiKeyRepository extends BaseRepository<ApiKey> {
 		apiKey: Omit<
 			ApiKeyRow,
 			"usage_count" | "pinned_account_id" | "pinned_providers"
-		> & { pinned_account_id?: string | null; pinned_providers?: string | null },
+		> & {
+			pinned_account_id?: string | null;
+			pinned_providers?: string | null;
+			setup_key?: string | null;
+		},
 	): void {
 		const db = this.adapter.getSQLiteDb();
 		const account = apiKey.pinned_account_id ?? null;
@@ -170,8 +174,8 @@ export class ApiKeyRepository extends BaseRepository<ApiKey> {
 		db.query(`
 		INSERT INTO api_keys (
 			id, name, hashed_key, prefix_last_8, created_at,
-			last_used, is_active, pinned_account_id, pinned_providers
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+			last_used, is_active, pinned_account_id, pinned_providers, setup_key
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`).run(
 			...[
 				apiKey.id,
@@ -183,6 +187,7 @@ export class ApiKeyRepository extends BaseRepository<ApiKey> {
 				apiKey.is_active,
 				apiKey.pinned_account_id ?? null,
 				apiKey.pinned_providers ?? null,
+				apiKey.setup_key ?? null,
 			],
 		);
 	}
@@ -287,18 +292,52 @@ export class ApiKeyRepository extends BaseRepository<ApiKey> {
 		expectedHashedKey: string,
 		newHashedKey: string,
 		newPrefixLast8: string,
+		// Preserve only for a hash-format upgrade of the same verified secret.
+		setupKey: string | null | { preserve: true },
 	): Promise<boolean> {
 		const changes = await this.runWithChanges(
 			`
 			UPDATE api_keys
 			SET hashed_key = ?,
-				prefix_last_8 = ?
+				prefix_last_8 = ?,
+				setup_key = CASE WHEN ? THEN setup_key ELSE ? END
 			WHERE id = ? AND hashed_key = ? AND is_active = 1
 		`,
-			[newHashedKey, newPrefixLast8, id, expectedHashedKey],
+			[
+				newHashedKey,
+				newPrefixLast8,
+				typeof setupKey === "object" && setupKey !== null ? 1 : 0,
+				typeof setupKey === "string" ? setupKey : null,
+				id,
+				expectedHashedKey,
+			],
 		);
 
 		return changes > 0;
+	}
+
+	async getSetupSecret(id: string): Promise<string | null> {
+		return (
+			(
+				await this.get<{ setup_key: string | null }>(
+					"SELECT setup_key FROM api_keys WHERE id = ?",
+					[id],
+				)
+			)?.setup_key ?? null
+		);
+	}
+
+	async saveSetupSecret(
+		id: string,
+		expectedHashedKey: string,
+		secret: string,
+	): Promise<boolean> {
+		return (
+			(await this.runWithChanges(
+				"UPDATE api_keys SET setup_key = ? WHERE id = ? AND hashed_key = ?",
+				[secret, id, expectedHashedKey],
+			)) > 0
+		);
 	}
 
 	/**

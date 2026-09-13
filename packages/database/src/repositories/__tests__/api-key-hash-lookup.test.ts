@@ -94,7 +94,13 @@ describe("migrating a stored hash", () => {
 	it("swaps the hash when the row still holds the expected one", async () => {
 		insertKey("k", LEGACY_HASH);
 
-		const ok = await repo.rotateSecret("k", LEGACY_HASH, NEW_HASH, "abcdefgh");
+		const ok = await repo.rotateSecret(
+			"k",
+			LEGACY_HASH,
+			NEW_HASH,
+			"abcdefgh",
+			null,
+		);
 
 		expect(ok).toBe(true);
 		expect((await repo.findById("k"))?.hashedKey).toBe(NEW_HASH);
@@ -103,7 +109,7 @@ describe("migrating a stored hash", () => {
 	it("makes the row findable by its new hash and not its old one", async () => {
 		insertKey("k", LEGACY_HASH);
 
-		await repo.rotateSecret("k", LEGACY_HASH, NEW_HASH, "abcdefgh");
+		await repo.rotateSecret("k", LEGACY_HASH, NEW_HASH, "abcdefgh", null);
 
 		expect((await repo.findByHashedKey(NEW_HASH))?.id).toBe("k");
 		expect(await repo.findByHashedKey(LEGACY_HASH)).toBeNull();
@@ -114,9 +120,21 @@ describe("migrating a stored hash", () => {
 		// would resurrect a secret the operator had just replaced.
 		insertKey("k", LEGACY_HASH);
 		const rotatedElsewhere = `sha256$${"ee".repeat(32)}`;
-		await repo.rotateSecret("k", LEGACY_HASH, rotatedElsewhere, "zzzzzzzz");
+		await repo.rotateSecret(
+			"k",
+			LEGACY_HASH,
+			rotatedElsewhere,
+			"zzzzzzzz",
+			null,
+		);
 
-		const ok = await repo.rotateSecret("k", LEGACY_HASH, NEW_HASH, "abcdefgh");
+		const ok = await repo.rotateSecret(
+			"k",
+			LEGACY_HASH,
+			NEW_HASH,
+			"abcdefgh",
+			null,
+		);
 
 		expect(ok).toBe(false);
 		expect((await repo.findById("k"))?.hashedKey).toBe(rotatedElsewhere);
@@ -125,14 +143,20 @@ describe("migrating a stored hash", () => {
 	it("refuses on a disabled row", async () => {
 		insertKey("k", LEGACY_HASH, { active: false });
 
-		const ok = await repo.rotateSecret("k", LEGACY_HASH, NEW_HASH, "abcdefgh");
+		const ok = await repo.rotateSecret(
+			"k",
+			LEGACY_HASH,
+			NEW_HASH,
+			"abcdefgh",
+			null,
+		);
 
 		expect(ok).toBe(false);
 	});
 
 	it("refuses when the row does not exist", async () => {
 		expect(
-			await repo.rotateSecret("gone", LEGACY_HASH, NEW_HASH, "abcdefgh"),
+			await repo.rotateSecret("gone", LEGACY_HASH, NEW_HASH, "abcdefgh", null),
 		).toBe(false);
 	});
 
@@ -145,7 +169,7 @@ describe("migrating a stored hash", () => {
 			[LEGACY_HASH],
 		);
 
-		await repo.rotateSecret("k", LEGACY_HASH, NEW_HASH, "abcdefgh");
+		await repo.rotateSecret("k", LEGACY_HASH, NEW_HASH, "abcdefgh", null);
 
 		const after = await repo.findById("k");
 		expect(after?.name).toBe("the name");
@@ -161,7 +185,7 @@ describe("migrating a stored hash", () => {
 		const otherHash = `sha256$${"11".repeat(32)}`;
 		insertKey("untouched", otherHash);
 
-		await repo.rotateSecret("k", LEGACY_HASH, NEW_HASH, "abcdefgh");
+		await repo.rotateSecret("k", LEGACY_HASH, NEW_HASH, "abcdefgh", null);
 
 		expect((await repo.findById("untouched"))?.hashedKey).toBe(otherHash);
 	});

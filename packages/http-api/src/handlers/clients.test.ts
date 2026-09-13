@@ -1,7 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it, spyOn } from "bun:test";
+import { scryptSync } from "node:crypto";
 import { DatabaseOperations } from "@clankermux/database";
 import { tempDbTracker } from "@clankermux/test-support";
 import { NodeCryptoUtils } from "@clankermux/types";
+import { generateApiKey, regenerateApiKey } from "../services/admin/api-keys";
+import { AuthService } from "../services/auth-service";
 import type { ClientManager } from "./clients";
 import { createClientsHandler } from "./clients";
 
@@ -47,9 +50,15 @@ const temp = tempDbTracker("clients-http");
 describe("client lifecycle HTTP boundary", () => {
 	let db: DatabaseOperations;
 	let handle: ReturnType<typeof createClientsHandler>;
-	const request = (suffix: string, method = "POST") => {
+	const request = (suffix: string, method = "POST", body?: unknown) => {
 		const url = new URL(`http://test/api/clients/stable${suffix}`);
-		return handle(new Request(url, { method }), url);
+		return handle(
+			new Request(url, {
+				method,
+				...(body === undefined ? {} : { body: JSON.stringify(body) }),
+			}),
+			url,
+		);
 	};
 	beforeEach(async () => {
 		db = new DatabaseOperations(temp.next());
@@ -90,6 +99,116 @@ describe("client lifecycle HTTP boundary", () => {
 		expect((await request("", "DELETE")).status).toBe(200);
 		expect(await db.getApiKey("stable")).toBeNull();
 	});
+	it("retrieves rotated keys only through the no-store setup endpoint", async () => {
+		expect(
+			(await (await request("/setup-key", "GET")).json()).data.apiKey,
+		).toBeNull();
+		const secret = (await (await request("/rotate")).json()).data.apiKey;
+		const response = await request("/setup-key", "GET");
+		expect(response.status).toBe(200);
+		expect(response.headers.get("cache-control")).toBe("private, no-store");
+		expect((await response.json()).data.apiKey).toBe(secret);
+		expect(JSON.stringify(await db.getApiKeys())).not.toContain(secret);
+		await request("/disable");
+		expect(
+			(await (await request("/setup-key", "GET")).json()).data.apiKey,
+		).toBe(secret);
+		await request("", "DELETE");
+		expect((await request("/setup-key", "GET")).status).toBe(404);
+	});
+	it("remembers a matching legacy key without changing its identity or authentication", async () => {
+		const crypto = new NodeCryptoUtils();
+		const secret = await crypto.generateApiKey();
+		await db.rotateApiKeySecret(
+			"stable",
+			"old-hash",
+			await crypto.hashApiKey(secret),
+			secret.slice(-8),
+		);
+		const before = await db.getApiKey("stable");
+		expect(
+			(await request("/setup-key", "POST", { apiKey: "wrong" })).status,
+		).toBe(400);
+		expect(
+			(await request("/setup-key", "POST", { apiKey: secret })).status,
+		).toBe(200);
+		expect(await db.getApiKey("stable")).toEqual(before);
+		expect(
+			(await (await request("/setup-key", "GET")).json()).data.apiKey,
+		).toBe(secret);
+		const next = (await (await request("/rotate")).json()).data.apiKey;
+		expect(next).not.toBe(secret);
+		expect(
+			(await (await request("/setup-key", "GET")).json()).data.apiKey,
+		).toBe(next);
+		expect(
+			(await request("/setup-key", "POST", { apiKey: secret })).status,
+		).toBe(400);
+	});
+	it("rejects malformed imports and a key rotated during verification", async () => {
+		for (const body of [null, [], {}, { apiKey: 42 }])
+			expect((await request("/setup-key", "POST", body)).status).toBe(400);
+		const verify = spyOn(
+			NodeCryptoUtils.prototype,
+			"verifyApiKey",
+		).mockImplementation(async () => {
+			await db.rotateApiKeySecret(
+				"stable",
+				"old-hash",
+				"racing-hash",
+				"newtoken",
+			);
+			return true;
+		});
+		try {
+			expect(
+				(await request("/setup-key", "POST", { apiKey: "previous" })).status,
+			).toBe(409);
+			expect(
+				(await (await request("/setup-key", "GET")).json()).data.apiKey,
+			).toBeNull();
+		} finally {
+			verify.mockRestore();
+		}
+	});
+
+	it("captures credentials from the compatibility key creation and rotation APIs", async () => {
+		const created = await generateApiKey(db, "Compatibility");
+		expect(await db.getApiKeySetupSecret(created.id)).toBe(created.apiKey);
+		const rotated = await regenerateApiKey(db, "Compatibility");
+		expect(await db.getApiKeySetupSecret(created.id)).toBe(rotated.apiKey);
+		expect(rotated.apiKey).not.toBe(created.apiKey);
+	});
+	it("preserves an imported scrypt key when authentication upgrades its hash", async () => {
+		const secret = "btr-legacy-imported-secret";
+		const salt = "00112233445566778899aabbccddeeff";
+		const hash = `${salt}:${scryptSync(secret, salt, 64).toString("hex")}`;
+		await db.rotateApiKeySecret("stable", "old-hash", hash, secret.slice(-8));
+		expect(
+			(await request("/setup-key", "POST", { apiKey: secret })).status,
+		).toBe(200);
+		const auth = new AuthService(db);
+		const result = await auth.authenticateRequest(
+			new Request("http://test/v1/models", {
+				headers: { "x-api-key": secret },
+			}),
+			"/v1/models",
+			"GET",
+			"api-key",
+		);
+		expect(result.isAuthenticated).toBe(true);
+		for (
+			let i = 0;
+			i < 100 && (await db.getApiKey("stable"))?.hashedKey === hash;
+			i++
+		)
+			await new Promise((r) => setTimeout(r, 1));
+		expect((await db.getApiKey("stable"))?.hashedKey).toBe(
+			await new NodeCryptoUtils().hashApiKey(secret),
+		);
+		expect(await db.getApiKeySetupSecret("stable")).toBe(secret);
+	});
+
 	it("returns 409 without a secret if rotation loses its optimistic swap", async () => {
 		const swap = spyOn(db, "rotateApiKeySecret").mockResolvedValue(false);
 		try {

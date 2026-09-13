@@ -7,10 +7,11 @@ import type {
 	ClientSuggestions,
 	ClientView,
 } from "@clankermux/types";
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { Button } from "../ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "../ui/card";
 import { Input } from "../ui/input";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "../ui/tabs";
 import { clientRequest } from "./api";
 import { APPLICATIONS, preferredFormat } from "./setup";
 
@@ -78,6 +79,9 @@ export function ClientWizard({
 	onCancel: () => void;
 	onSaved: (result: { client: ClientView; apiKey?: string }) => void;
 }) {
+	const busyRef = useRef(false);
+	const suggestionsDestinations = useRef<string | null>(null);
+	const editorRef = useRef<HTMLDetailsElement>(null);
 	const [draft, setDraft] = useState(() => draftFor(client));
 	const [step, setStep] = useState(0);
 	const [format, setFormat] = useState<ClientFormat>(
@@ -149,6 +153,8 @@ export function ClientWizard({
 			})),
 	];
 	const run = async (work: () => Promise<void>) => {
+		if (busyRef.current) return;
+		busyRef.current = true;
 		setBusy(true);
 		setError(null);
 		try {
@@ -156,6 +162,7 @@ export function ClientWizard({
 		} catch (e) {
 			setError(e instanceof Error ? e.message : String(e));
 		} finally {
+			busyRef.current = false;
 			setBusy(false);
 		}
 	};
@@ -181,6 +188,7 @@ export function ClientWizard({
 			refresh,
 		});
 		setSuggestions(result);
+		suggestionsDestinations.current = JSON.stringify(draft.destinations);
 		if (!initialized) {
 			setDraft((d) => ({
 				...d,
@@ -221,55 +229,89 @@ export function ClientWizard({
 		}
 	for (const model of draft.catalogues[format].models)
 		candidates.set(model.id, model);
-	const next = () =>
+	const goToStep = (target: number) =>
 		run(async () => {
-			if (step === 0) {
-				if (!draft.name.trim()) throw new Error("Enter a client name");
-				setStep(1);
-			} else if (step === 1) {
+			if (target > step && !draft.name.trim())
+				throw new Error("Enter a client name");
+			setReview(null);
+			if (
+				target === 2 &&
+				(!suggestions ||
+					suggestionsDestinations.current !==
+						JSON.stringify(draft.destinations))
+			)
 				await loadSuggestions();
-				setStep(2);
-			} else if (step === 2) {
+			if (target === 3) {
+				if (!initialized)
+					throw new Error("Choose your catalogue models before reviewing");
 				setReview(await clientRequest<ClientReview>("/review", draft));
-				setStep(3);
-			} else if (review)
-				onSaved(
-					await clientRequest<{ client: ClientView; apiKey?: string }>(
-						"/commit",
-						{ token: review.token },
-					),
-				);
+			}
+			setStep(target);
 		});
+	const next = () =>
+		step < 3
+			? goToStep(step + 1)
+			: run(async () => {
+					if (review)
+						onSaved(
+							await clientRequest<{ client: ClientView; apiKey?: string }>(
+								"/commit",
+								{ token: review.token },
+							),
+						);
+				});
+
 	return (
 		<Card>
-			<CardHeader>
-				<CardTitle>{client ? "Configure client" : "Add client"}</CardTitle>
+			<CardHeader className="gap-5 border-b px-5 py-5 sm:px-6">
+				<CardTitle className="text-lg leading-6">
+					{client ? `Configure ${client.key.name}` : "Add client"}
+				</CardTitle>
 				<ol
 					aria-label="Setup steps"
-					className="flex flex-wrap gap-group text-sm text-muted-foreground"
+					className="flex flex-wrap gap-x-6 gap-y-3 text-sm text-muted-foreground"
 				>
 					{["Application", "Destinations", "Catalogue", "Review"].map(
 						(label, i) => (
 							<li
 								key={label}
 								aria-current={step === i ? "step" : undefined}
-								className={step === i ? "font-semibold text-foreground" : ""}
+								className={step === i ? "font-medium text-foreground" : ""}
 							>
-								{i + 1}. {label}
+								<button
+									type="button"
+									aria-label={label}
+									disabled={busy}
+									onClick={() => {
+										if (i !== step) void goToStep(i);
+									}}
+									className="flex items-center gap-2 rounded-md text-sm hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-50"
+								>
+									<span
+										aria-hidden="true"
+										className={`flex h-6 w-6 items-center justify-center rounded-full text-xs ${step === i ? "bg-primary text-primary-foreground" : "bg-muted text-muted-foreground"}`}
+									>
+										{i + 1}
+									</span>
+									{label}
+								</button>
 							</li>
 						),
 					)}
 				</ol>
 			</CardHeader>
-			<CardContent className="space-y-group">
+			<CardContent className="space-y-5 px-5 pt-5 pb-0 sm:px-6 sm:pt-6">
 				{error && (
 					<p role="alert" className="text-sm text-destructive">
 						{error}
 					</p>
 				)}
 				{step === 0 && (
-					<div className="grid max-w-xl gap-group">
-						<label className="space-y-2" htmlFor="client-name">
+					<div className="grid max-w-xl gap-3 py-1">
+						<label
+							className="grid gap-2 text-sm font-medium"
+							htmlFor="client-name"
+						>
 							Client name
 							<Input
 								id="client-name"
@@ -280,11 +322,11 @@ export function ClientWizard({
 								onChange={(e) => setDraft({ ...draft, name: e.target.value })}
 							/>
 						</label>
-						<p className="text-sm text-muted-foreground">
+						<p className="text-xs leading-5 text-muted-foreground -mt-1 mb-3">
 							Name this installation, script, or integration. It gets its own
 							API key and model catalogue.
 						</p>
-						<label className="grid gap-2">
+						<label className="grid gap-2 text-sm font-medium">
 							Application
 							<select
 								className={SELECT}
@@ -302,7 +344,7 @@ export function ClientWizard({
 								))}
 							</select>
 						</label>
-						<p className="text-sm text-muted-foreground">
+						<p className="text-xs leading-5 text-muted-foreground -mt-1">
 							The application selects a setup recipe. Every client can use all
 							supported API protocols.
 						</p>
@@ -311,7 +353,7 @@ export function ClientWizard({
 				{step === 1 && (
 					<div className="space-y-group">
 						<p>Choose which upstream destinations this client can use.</p>
-						<label className="grid gap-2 max-w-xl">
+						<label className="grid gap-2 max-w-xl text-sm font-medium">
 							Allowed destinations
 							<select
 								className={SELECT}
@@ -340,7 +382,7 @@ export function ClientWizard({
 							</select>
 						</label>
 						{mode === "account" && (
-							<label className="grid gap-2 max-w-xl">
+							<label className="grid gap-2 max-w-xl text-sm font-medium">
 								Account
 								<select
 									className={SELECT}
@@ -403,22 +445,43 @@ export function ClientWizard({
 					</div>
 				)}
 				{step === 2 && (
-					<div className="space-y-group">
+					<Tabs
+						value={format}
+						onValueChange={(value) => {
+							setFormat(value as ClientFormat);
+							setCustom({
+								id: "",
+								target: "",
+								name: "",
+								accounts: [],
+								editId: null,
+							});
+						}}
+						className="space-y-4"
+					>
 						<div className="flex flex-wrap justify-between gap-group">
-							<label className="grid gap-2">
-								Catalogue format
-								<select
-									className={SELECT}
-									value={format}
-									onChange={(e) => setFormat(e.target.value as ClientFormat)}
-								>
-									{Object.entries(FORMATS).map(([value, label]) => (
-										<option value={value} key={value}>
-											{label}
-										</option>
-									))}
-								</select>
-							</label>
+							<TabsList
+								aria-label="Catalogue format"
+								className="h-auto flex flex-wrap justify-start w-fit gap-1"
+							>
+								{(Object.keys(FORMATS) as ClientFormat[]).map((f) => (
+									<TabsTrigger
+										key={f}
+										value={f}
+										className="px-2 text-xs sm:px-3 sm:text-sm"
+									>
+										{f === "anthropic"
+											? "Anthropic"
+											: f === "openai"
+												? "OpenAI"
+												: "Codex"}
+										<span className="ml-1.5 rounded bg-muted px-1 text-xs tabular-nums">
+											{draft.catalogues[f].models.length}
+										</span>
+									</TabsTrigger>
+								))}
+							</TabsList>
+
 							<Button
 								variant="outline"
 								disabled={busy}
@@ -428,9 +491,9 @@ export function ClientWizard({
 							</Button>
 						</div>
 						<p className="text-sm text-muted-foreground">
-							Selections only control the advertised list. New discoveries
-							remain suggestions until you select and save them. Review all
-							three formats if you use more than one application with this key.
+							Each tab has its own selections. All three catalogues are saved
+							together. Hiding a model only removes it from discovery; it does
+							not block requests.
 						</p>
 						{(conflicts.length > 0 || retainedConflicts.length > 0) && (
 							<div
@@ -447,7 +510,7 @@ export function ClientWizard({
 											allowed destinations. Switch catalogue format to see each
 											entry.
 										</p>
-										<ul className="list-disc pl-5">
+										<ul className="list-disc pl-5 max-h-24 overflow-auto">
 											{conflicts.map((c) => (
 												<li key={c}>{c}</li>
 											))}
@@ -469,7 +532,7 @@ export function ClientWizard({
 											, then reopen this client, or restore the previous
 											destinations:
 										</p>
-										<ul className="list-disc pl-5">
+										<ul className="list-disc pl-5 max-h-24 overflow-auto">
 											{retainedConflicts.map((r) => (
 												<li key={r.id}>{r.name}</li>
 											))}
@@ -478,247 +541,287 @@ export function ClientWizard({
 								)}
 							</div>
 						)}
-						{suggestions?.accounts.map((a) => (
-							<p key={a.id} className="text-xs text-muted-foreground">
-								{a.name}:{" "}
-								{a.completeness === "unknown"
-									? "model list unknown"
-									: a.completeness === "known-empty"
-										? "no discovered models"
-										: "model list discovered"}
-								{a.error ? ` · ${a.error}` : ""}
-							</p>
-						))}
-						{format === "codex" && (
-							<p className="text-sm text-muted-foreground">
-								Only targets with known Codex metadata can be added. Previously
-								copied generic fallback entries remain until you configure this
-								catalogue.
-							</p>
+						{suggestions && (
+							<details className="text-xs text-muted-foreground">
+								<summary className="cursor-pointer w-fit">
+									Discovery from {suggestions.accounts.length}{" "}
+									{suggestions.accounts.length === 1 ? "account" : "accounts"}
+									{suggestions.accounts.some(
+										(a) => a.error || a.completeness === "unknown",
+									)
+										? " · Some model lists unavailable"
+										: ""}
+								</summary>
+								<div className="mt-2 flex flex-wrap gap-x-4 gap-y-1">
+									{suggestions.accounts.map((a) => (
+										<p key={a.id} className="text-xs text-muted-foreground">
+											{a.name}:{" "}
+											{a.completeness === "unknown"
+												? "model list unknown"
+												: a.completeness === "known-empty"
+													? "no discovered models"
+													: "model list discovered"}
+											{a.error ? ` · ${a.error}` : ""}
+										</p>
+									))}
+								</div>
+							</details>
 						)}
-						<div className="flex gap-2">
-							<Button
-								size="sm"
-								variant="outline"
-								onClick={() => updateModels([...candidates.values()])}
-							>
-								Select all
-							</Button>
-							<Button
-								size="sm"
-								variant="outline"
-								onClick={() => updateModels([])}
-							>
-								Deselect all
-							</Button>
-							<span className="text-sm self-center text-muted-foreground">
-								{draft.catalogues[format].models.length} selected
-							</span>
-						</div>
-						<div className="max-h-96 overflow-auto divide-y rounded-md border">
-							{[...candidates.values()].map((model) => (
-								<div
-									key={model.id}
-									className="flex items-start gap-3 p-3 hover:bg-muted/40"
+						<TabsContent key={format} value={format} className="space-y-4 mt-0">
+							{format === "codex" && (
+								<p className="text-sm text-muted-foreground">
+									Only targets with known Codex metadata can be added.
+									Previously copied generic fallback entries remain until you
+									configure this catalogue.
+								</p>
+							)}
+							<div className="flex flex-wrap gap-2">
+								<Button
+									size="sm"
+									variant="outline"
+									onClick={() => updateModels([...candidates.values()])}
 								>
-									<label className="flex flex-1 min-w-0 items-start gap-3">
-										<input
-											className="mt-1"
-											type="checkbox"
-											checked={draft.catalogues[format].models.some(
-												(m) => m.id === model.id,
-											)}
+									Select all in tab
+								</Button>
+								<Button
+									size="sm"
+									variant="outline"
+									onClick={() => updateModels([])}
+								>
+									Deselect all in tab
+								</Button>
+								<span className="text-sm self-center text-muted-foreground">
+									{draft.catalogues[format].models.length} selected
+								</span>
+							</div>
+							{/* Reserve space for the step header, catalogue controls and footer on desktop. */}
+							<section
+								aria-label={`${FORMATS[format]} models`}
+								className="h-[60dvh] min-h-48 md:h-[max(18rem,calc(100dvh-45rem))] overflow-auto divide-y rounded-md border"
+							>
+								{[...candidates.values()].map((model) => {
+									const accountNames = (
+										suggestions?.models.find((m) => m.id === model.targetModel)
+											?.accountIds ??
+										model.accountIds ??
+										[]
+									).map((id) => accounts.find((a) => a.id === id)?.name ?? id);
+									return (
+										<div
+											key={model.id}
+											className="flex items-center gap-3 px-3 py-2 hover:bg-muted/40"
+										>
+											<label className="flex flex-1 min-w-0 items-center gap-3">
+												<input
+													className="shrink-0"
+													type="checkbox"
+													checked={draft.catalogues[format].models.some(
+														(m) => m.id === model.id,
+													)}
+													onChange={(e) =>
+														updateModels(
+															e.target.checked
+																? [...draft.catalogues[format].models, model]
+																: draft.catalogues[format].models.filter(
+																		(m) => m.id !== model.id,
+																	),
+														)
+													}
+												/>
+												<span className="min-w-0 flex-1 grid gap-x-4 sm:grid-cols-[minmax(0,1fr)_minmax(0,0.8fr)]">
+													<span className="font-medium text-sm break-all leading-5">
+														{model.displayName}
+													</span>
+													<code className="text-xs break-all text-muted-foreground sm:col-start-1 sm:row-start-2">
+														{model.id}
+														{model.targetModel !== model.id
+															? ` → ${model.targetModel}`
+															: ""}
+													</code>
+													<span
+														title={accountNames.join(", ")}
+														className="text-xs text-muted-foreground truncate sm:col-start-2 sm:row-start-1 sm:row-span-2 sm:self-center"
+													>
+														{accountNames[0]}
+														{accountNames.length > 1
+															? ` +${accountNames.length - 1}`
+															: ""}
+													</span>
+												</span>
+											</label>
+											<Button
+												variant="ghost"
+												size="sm"
+												className="ml-auto h-7 px-2 text-xs"
+												onClick={(e) => {
+													e.preventDefault();
+													requestAnimationFrame(() =>
+														editorRef.current?.scrollIntoView({
+															block: "nearest",
+															behavior: "smooth",
+														}),
+													);
+													setCustom({
+														id: model.id,
+														target: model.targetModel,
+														name: model.displayName,
+														accounts: model.accountIds ?? [],
+														editId: model.id,
+													});
+												}}
+											>
+												Edit
+											</Button>
+										</div>
+									);
+								})}
+								{!candidates.size && (
+									<p className="p-4 text-sm text-muted-foreground">
+										No known models from these destinations. Refresh discovery
+										or add a model explicitly.
+									</p>
+								)}
+							</section>
+							<label className="grid gap-2 max-w-xl text-sm font-medium">
+								Default model for setup
+								<select
+									className={SELECT}
+									value={draft.catalogues[format].defaultModel ?? ""}
+									onChange={(e) =>
+										setDraft({
+											...draft,
+											catalogues: {
+												...draft.catalogues,
+												[format]: {
+													...draft.catalogues[format],
+													defaultModel: e.target.value || null,
+												},
+											},
+										})
+									}
+								>
+									<option value="">First selected model</option>
+									{draft.catalogues[format].models.map((m) => (
+										<option value={m.id} key={m.id}>
+											{m.displayName}
+										</option>
+									))}
+								</select>
+							</label>
+							<details
+								ref={editorRef}
+								className="rounded-md border p-3"
+								open={custom.editId !== null ? true : undefined}
+							>
+								<summary className="cursor-pointer text-sm font-medium">
+									Add a custom model or alias
+								</summary>
+								<div className="grid gap-4 pt-4 sm:grid-cols-2">
+									<label
+										className="grid gap-2 text-sm font-medium"
+										htmlFor="model-id"
+									>
+										Published model ID
+										<Input
+											id="model-id"
+											value={custom.id}
 											onChange={(e) =>
-												updateModels(
-													e.target.checked
-														? [...draft.catalogues[format].models, model]
-														: draft.catalogues[format].models.filter(
-																(m) => m.id !== model.id,
-															),
-												)
+												setCustom({ ...custom, id: e.target.value })
 											}
 										/>
-										<span className="min-w-0">
-											<span className="block font-medium text-sm">
-												{model.displayName}
-											</span>
-											<code className="text-xs break-all text-muted-foreground">
-												{model.id}
-												{model.targetModel !== model.id
-													? ` → ${model.targetModel}`
-													: ""}
-											</code>
-											<span className="block text-xs text-muted-foreground">
-												{(
-													suggestions?.models.find(
-														(m) => m.id === model.targetModel,
-													)?.accountIds ??
-													model.accountIds ??
-													[]
-												)
-													.map(
-														(id) =>
-															accounts.find((a) => a.id === id)?.name ?? id,
-													)
-													.join(", ")}
-											</span>
-										</span>
 									</label>
+									<label
+										className="grid gap-2 text-sm font-medium"
+										htmlFor="target-id"
+									>
+										Upstream target ID
+										<Input
+											placeholder="Same as published ID for a direct model"
+											id="target-id"
+											value={custom.target}
+											onChange={(e) =>
+												setCustom({ ...custom, target: e.target.value })
+											}
+										/>
+									</label>
+									<label
+										className="grid gap-2 text-sm font-medium"
+										htmlFor="display-name"
+									>
+										Display name
+										<Input
+											id="display-name"
+											value={custom.name}
+											onChange={(e) =>
+												setCustom({ ...custom, name: e.target.value })
+											}
+										/>
+									</label>
+									<fieldset className="sm:col-span-2">
+										<legend className="text-sm mb-2">
+											Alias destinations (required when IDs differ)
+										</legend>
+										<div className="flex flex-wrap gap-3">
+											{editorAccounts.map((a) => (
+												<label key={a.id} className="text-sm flex gap-2">
+													<input
+														type="checkbox"
+														checked={custom.accounts.includes(a.id)}
+														onChange={(e) =>
+															setCustom({
+																...custom,
+																accounts: e.target.checked
+																	? [...custom.accounts, a.id]
+																	: custom.accounts.filter((id) => id !== a.id),
+															})
+														}
+													/>
+													{a.name}
+												</label>
+											))}
+										</div>
+									</fieldset>
 									<Button
-										variant="ghost"
-										size="sm"
-										className="ml-auto"
-										onClick={(e) => {
-											e.preventDefault();
+										variant="outline"
+										onClick={() => {
+											const model = {
+												id: custom.id.trim(),
+												displayName: custom.name.trim() || custom.id.trim(),
+												targetModel: custom.target.trim() || custom.id.trim(),
+												accountIds: custom.accounts.length
+													? custom.accounts
+													: null,
+											};
+											if (
+												!model.id ||
+												draft.catalogues[format].models.some(
+													(m) => m.id === model.id && m.id !== custom.editId,
+												)
+											) {
+												setError("Enter a unique model ID");
+												return;
+											}
+											updateModels([
+												...draft.catalogues[format].models.filter(
+													(m) => m.id !== custom.editId,
+												),
+												model,
+											]);
 											setCustom({
-												id: model.id,
-												target: model.targetModel,
-												name: model.displayName,
-												accounts: model.accountIds ?? [],
-												editId: model.id,
+												id: "",
+												target: "",
+												name: "",
+												accounts: [],
+												editId: null,
 											});
 										}}
 									>
-										Edit
+										{custom.editId ? "Update selection" : "Add to selection"}
 									</Button>
 								</div>
-							))}
-							{!candidates.size && (
-								<p className="p-4 text-sm text-muted-foreground">
-									No known models from these destinations. Refresh discovery or
-									add a model explicitly.
-								</p>
-							)}
-						</div>
-						<label className="grid gap-2 max-w-xl">
-							Default model for setup
-							<select
-								className={SELECT}
-								value={draft.catalogues[format].defaultModel ?? ""}
-								onChange={(e) =>
-									setDraft({
-										...draft,
-										catalogues: {
-											...draft.catalogues,
-											[format]: {
-												...draft.catalogues[format],
-												defaultModel: e.target.value || null,
-											},
-										},
-									})
-								}
-							>
-								<option value="">First selected model</option>
-								{draft.catalogues[format].models.map((m) => (
-									<option value={m.id} key={m.id}>
-										{m.displayName}
-									</option>
-								))}
-							</select>
-						</label>
-						<details
-							className="rounded border p-3"
-							open={custom.editId !== null ? true : undefined}
-						>
-							<summary className="cursor-pointer text-sm font-medium">
-								Add a custom model or alias
-							</summary>
-							<div className="grid gap-3 pt-3">
-								<label htmlFor="model-id">
-									Published model ID
-									<Input
-										id="model-id"
-										value={custom.id}
-										onChange={(e) =>
-											setCustom({ ...custom, id: e.target.value })
-										}
-									/>
-								</label>
-								<label htmlFor="target-id">
-									Upstream target ID
-									<Input
-										placeholder="Same as published ID for a direct model"
-										id="target-id"
-										value={custom.target}
-										onChange={(e) =>
-											setCustom({ ...custom, target: e.target.value })
-										}
-									/>
-								</label>
-								<label htmlFor="display-name">
-									Display name
-									<Input
-										id="display-name"
-										value={custom.name}
-										onChange={(e) =>
-											setCustom({ ...custom, name: e.target.value })
-										}
-									/>
-								</label>
-								<fieldset>
-									<legend className="text-sm mb-2">
-										Alias destinations (required when IDs differ)
-									</legend>
-									<div className="flex flex-wrap gap-3">
-										{editorAccounts.map((a) => (
-											<label key={a.id} className="text-sm flex gap-2">
-												<input
-													type="checkbox"
-													checked={custom.accounts.includes(a.id)}
-													onChange={(e) =>
-														setCustom({
-															...custom,
-															accounts: e.target.checked
-																? [...custom.accounts, a.id]
-																: custom.accounts.filter((id) => id !== a.id),
-														})
-													}
-												/>
-												{a.name}
-											</label>
-										))}
-									</div>
-								</fieldset>
-								<Button
-									variant="outline"
-									onClick={() => {
-										const model = {
-											id: custom.id.trim(),
-											displayName: custom.name.trim() || custom.id.trim(),
-											targetModel: custom.target.trim() || custom.id.trim(),
-											accountIds: custom.accounts.length
-												? custom.accounts
-												: null,
-										};
-										if (
-											!model.id ||
-											draft.catalogues[format].models.some(
-												(m) => m.id === model.id && m.id !== custom.editId,
-											)
-										) {
-											setError("Enter a unique model ID");
-											return;
-										}
-										updateModels([
-											...draft.catalogues[format].models.filter(
-												(m) => m.id !== custom.editId,
-											),
-											model,
-										]);
-										setCustom({
-											id: "",
-											target: "",
-											name: "",
-											accounts: [],
-											editId: null,
-										});
-									}}
-								>
-									{custom.editId ? "Update selection" : "Add to selection"}
-								</Button>
-							</div>
-						</details>
-					</div>
+							</details>
+						</TabsContent>
+					</Tabs>
 				)}
 				{step === 3 && review && (
 					<div className="space-y-group">
@@ -778,7 +881,8 @@ export function ClientWizard({
 						))}
 					</div>
 				)}
-				<div className="flex justify-between border-t pt-4">
+				{/* Leave room below the actions for the shared floating Debug shortcut. */}
+				<div className="sticky bottom-0 z-10 -mx-5 sm:-mx-6 flex justify-between gap-3 border-t rounded-b-lg bg-card px-5 sm:px-6 pt-4 pb-16">
 					<Button variant="ghost" disabled={busy} onClick={onCancel}>
 						Cancel
 					</Button>
@@ -788,8 +892,7 @@ export function ClientWizard({
 								variant="outline"
 								disabled={busy}
 								onClick={() => {
-									setReview(null);
-									setStep(step - 1);
+									void goToStep(step - 1);
 								}}
 							>
 								Back
