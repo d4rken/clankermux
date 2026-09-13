@@ -23,12 +23,24 @@ restriction in `CLAUDE.md`. Use a non-Anthropic account and force-route to it
 with `x-clankermux-account-id` (the legacy `x-better-ccflare-account-id` header
 is also accepted).
 
+Every wire-mount request needs a real client key; there is no keyless mode, and
+an arbitrary bearer such as `test` comes back 401. Create a client in the
+dashboard (**Clients** → new client) and use the key it shows you once, or
+create one over the management API:
+
+```bash
+curl -X POST http://localhost:8081/api/api-keys \
+  -H "Content-Type: application/json" \
+  -d '{"name":"local-test"}'
+```
+
 For OpenRouter, always use model `z-ai/glm-4.5-air:free`:
 
 ```bash
 curl -X POST http://localhost:8081/wire/anthropic/v1/messages \
   -H "Content-Type: application/json" \
-  -H "Authorization: Bearer test" \
+  -H "Authorization: Bearer $CLANKERMUX_TEST_KEY" \
+  -H "x-clankermux-account-id: <non-anthropic account id>" \
   -d '{"model":"z-ai/glm-4.5-air:free","messages":[{"role":"user","content":"test"}],"max_tokens":10}'
 ```
 

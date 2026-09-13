@@ -70,9 +70,9 @@ Requires [Bun](https://bun.sh) 1.4.0 or newer
 
 It binds `0.0.0.0` by default; set `CLANKERMUX_HOST=127.0.0.1` for loopback
 only. The management API is fail-open until a dashboard password exists, so set
-one with `bun run auth:password --set`. That password covers management only:
-proxy authentication is off whenever no client key is active, including after
-you disable the last one.
+one with `bun run auth:password --set`. That password covers management only.
+Agent traffic is gated separately: every request must present a valid client
+key, including on a fresh install where none exists yet.
 
 Then add an account, open **Clients**, and add a client. Clients speak either
 wire format: `/wire/anthropic` for the Anthropic Messages API, `/wire/openai`
