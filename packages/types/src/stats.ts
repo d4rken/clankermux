@@ -854,14 +854,6 @@ export interface HealthResponse {
 }
 
 // Config types
-export interface ConfigResponse {
-	lb_strategy: string;
-	port: number;
-	sessionDurationMs: number;
-	tls_enabled: boolean;
-	usage_throttling_five_hour_enabled: boolean;
-	usage_throttling_weekly_enabled: boolean;
-}
 
 export interface StrategyUpdateRequest {
 	strategy: string;

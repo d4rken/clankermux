@@ -51,8 +51,6 @@ export function ensureSchema(db: Database): void {
 			auto_fallback_enabled INTEGER DEFAULT 0,
 			custom_endpoint TEXT,
 			auto_refresh_enabled INTEGER DEFAULT 0,
-			model_mappings TEXT,
-			model_fallbacks TEXT,
 			billing_type TEXT DEFAULT NULL,
 			refresh_token_issued_at INTEGER,
 			auto_pause_on_overage_enabled INTEGER DEFAULT 1,
@@ -381,65 +379,6 @@ export function ensureSchema(db: Database): void {
 	db.run(
 		`CREATE INDEX IF NOT EXISTS idx_api_keys_active ON api_keys(is_active)`,
 	);
-
-	// Create combos table
-	db.run(`
-		CREATE TABLE IF NOT EXISTS combos (
-			id TEXT PRIMARY KEY,
-			name TEXT NOT NULL UNIQUE,
-			description TEXT,
-			enabled INTEGER DEFAULT 1,
-			created_at INTEGER NOT NULL,
-			updated_at INTEGER NOT NULL
-		)
-	`);
-
-	// Create combo_slots table
-	// account_id CASCADE: deleting an account removes its slots (REQ-17)
-	// combo_id CASCADE: deleting a combo removes all its slots (REQ-18)
-	db.run(`
-		CREATE TABLE IF NOT EXISTS combo_slots (
-			id TEXT PRIMARY KEY,
-			combo_id TEXT NOT NULL,
-			account_id TEXT NOT NULL,
-			model TEXT NOT NULL,
-			priority INTEGER NOT NULL,
-			enabled INTEGER DEFAULT 1,
-			FOREIGN KEY (combo_id) REFERENCES combos(id) ON DELETE CASCADE,
-			FOREIGN KEY (account_id) REFERENCES accounts(id) ON DELETE CASCADE
-		)
-	`);
-
-	// Index for fast slot lookups by combo, ordered by priority
-	db.run(
-		`CREATE INDEX IF NOT EXISTS idx_combo_slots_combo_id ON combo_slots(combo_id, priority)`,
-	);
-
-	// Unique constraint to prevent duplicate (combo_id, account_id, model) slots
-	db.run(
-		`CREATE UNIQUE INDEX IF NOT EXISTS idx_combo_slots_unique ON combo_slots(combo_id, account_id, model)`,
-	);
-
-	// Create combo_family_assignments table
-	// combo_id SET NULL: deleting a combo clears the family assignment without error
-	db.run(`
-		CREATE TABLE IF NOT EXISTS combo_family_assignments (
-			family TEXT PRIMARY KEY,
-			combo_id TEXT,
-			enabled INTEGER DEFAULT 0,
-			FOREIGN KEY (combo_id) REFERENCES combos(id) ON DELETE SET NULL
-		)
-	`);
-
-	// Seed the canonical families so fresh installs have assignment rows.
-	// Re-runs on every startup (ensureSchema), so existing DBs gain new rows too.
-	db.run(`
-		INSERT OR IGNORE INTO combo_family_assignments (family, combo_id, enabled)
-		VALUES ('opus',   NULL, 0),
-		       ('sonnet', NULL, 0),
-		       ('haiku',  NULL, 0),
-		       ('fable',  NULL, 0);
-	`);
 
 	// Create usage_snapshots table — append-only time-series of per-account
 	// rate-limit utilization. Backs the dashboard "sawtooth" graph.

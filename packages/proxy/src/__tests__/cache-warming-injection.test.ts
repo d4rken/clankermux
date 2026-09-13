@@ -132,7 +132,7 @@ function promote(key: string): void {
 }
 
 beforeEach(() => {
-	sessionPromotionTracker.setEnabled(true);
+	sessionPromotionTracker.setMode("dynamic");
 	sessionPromotionTracker.clear();
 	cacheBodyStore.setEnabled(true);
 	sessionCacheStore.setEnabled(true);
@@ -142,7 +142,7 @@ beforeEach(() => {
 
 afterEach(() => {
 	sessionPromotionTracker.clear();
-	sessionPromotionTracker.setEnabled(false);
+	sessionPromotionTracker.setMode("off");
 	cacheBodyStore.setEnabled(false);
 	sessionCacheStore.clear();
 	sessionCacheStore.setEnabled(false);

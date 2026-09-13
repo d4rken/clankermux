@@ -103,7 +103,6 @@ describe("GET /api/payments/summary", () => {
 		expect(data.amortizedDailyUsd).toBe(0);
 		expect(data.amortizedWeeklyUsd).toBe(0);
 		expect(data.currentMonth.ledgerUsd).toBe(0);
-		expect(data.currentMonth.totalUsd).toBe(0);
 		expect(data.range.ledgerUsd).toBe(0);
 		expect(data.range.tokenCostUsd).toBe(0);
 		expect(data.range.valueRatio).toBeNull();
@@ -169,7 +168,6 @@ describe("GET /api/payments/summary", () => {
 		expect(data.currentMonth.creditsUsd).toBeCloseTo(50, 6);
 		expect(data.currentMonth.ledgerUsd).toBeCloseTo(80, 6);
 		expect(data.currentMonth.tokenCostUsd).toBeCloseTo(0.9, 6);
-		expect(data.currentMonth.totalUsd).toBeCloseTo(80, 6);
 
 		// 30d range: 45d-old subscription excluded.
 		expect(data.range.days).toBeCloseTo(30, 3);
@@ -177,7 +175,6 @@ describe("GET /api/payments/summary", () => {
 		expect(data.range.creditsUsd).toBeCloseTo(50, 6);
 		expect(data.range.ledgerUsd).toBeCloseTo(80, 6);
 		expect(data.range.tokenCostUsd).toBeCloseTo(0.9, 6);
-		expect(data.range.totalUsd).toBeCloseTo(80, 6);
 		expect(data.range.amortizedUsd).toBeCloseTo(30, 3);
 		expect(data.range.planValueUsd).toBeCloseTo(1.0, 6);
 		expect(data.range.valueRatio).toBeCloseTo(1.0 / 30, 4);
@@ -387,7 +384,6 @@ it("separates a credit purchase from reported consumption and reports unpriced c
 	const { data } = await fetchSummary();
 	for (const window of [data.currentMonth, data.range]) {
 		expect(window.ledgerUsd).toBe(100);
-		expect(window.totalUsd).toBe(100);
 		expect(window.tokenCostUsd).toBe(25);
 		expect(window.apiCostCoverage).toEqual({
 			reportedUsd: 20,

@@ -18,7 +18,7 @@ describe("Auto-Refresh Token Hierarchy", () => {
 		// Own connection rather than the DatabaseFactory singleton: the
 		// singleton outlives this file and other suites reset it.
 		dbOps = new DatabaseOperations(tmpDb.next());
-		db = dbOps.getDatabase();
+		db = dbOps.getAdapter().getSQLiteDb();
 
 		// Create mock proxy context
 		mockProxyContext = {

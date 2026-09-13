@@ -132,16 +132,3 @@ export function processTokenUsage(
 		sections,
 	};
 }
-
-/**
- * Helper to determine if there are cache tokens to display
- */
-export function hasCacheTokens(data: TokenUsageData | undefined): boolean {
-	if (!data) return false;
-	return (
-		(data.cacheReadInputTokens !== undefined &&
-			data.cacheReadInputTokens > 0) ||
-		(data.cacheCreationInputTokens !== undefined &&
-			data.cacheCreationInputTokens > 0)
-	);
-}

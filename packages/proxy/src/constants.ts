@@ -35,24 +35,6 @@ export const TOKEN_REFRESH_BACKOFF_MS = 60_000; // 60 seconds - backoff after re
  */
 
 /**
- * **Warning Threshold (7 days):** First level of token expiration warning.
- *
- * Triggers when refresh token age reaches 7 days. This provides sufficient time
- * for users to re-authenticate without service interruption, while still being
- * proactive about token management.
- */
-export const REFRESH_TOKEN_WARNING_THRESHOLD_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
-
-/**
- * **Critical Threshold (3 days):** Second level of urgent token expiration warning.
- *
- * Triggers when refresh token age reaches 3 days. This indicates imminent token
- * expiration and requires prompt user attention to prevent service disruption.
- * Users should re-authenticate immediately at this level.
- */
-export const REFRESH_TOKEN_CRITICAL_THRESHOLD_MS = 3 * 24 * 60 * 60 * 1000; // 3 days
-
-/**
  * **Maximum Age (90 days):** Conservative upper bound for refresh token lifespan.
  *
  * While OAuth providers may support tokens with longer lifespans, this constant

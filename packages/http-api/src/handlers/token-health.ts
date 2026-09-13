@@ -3,7 +3,6 @@ import { jsonResponse } from "@clankermux/http-common";
 import {
 	checkAllAccountsHealth,
 	checkRefreshTokenHealth,
-	getAccountsNeedingReauth,
 } from "@clankermux/proxy";
 
 /**
@@ -17,25 +16,6 @@ export function createTokenHealthHandler(dbOps: DatabaseOperations) {
 		return jsonResponse({
 			success: true,
 			data: healthReport,
-		});
-	};
-}
-
-/**
- * Create a re-authentication needed handler
- */
-export function createReauthNeededHandler(dbOps: DatabaseOperations) {
-	return async (): Promise<Response> => {
-		const accounts = await dbOps.getAllAccounts();
-		const needsReauth = getAccountsNeedingReauth(accounts);
-
-		return jsonResponse({
-			success: true,
-			data: {
-				accounts: needsReauth,
-				count: needsReauth.length,
-				needsReauth: needsReauth.length > 0,
-			},
 		});
 	};
 }

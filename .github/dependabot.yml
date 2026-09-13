@@ -18,14 +18,13 @@ updates:
       # Batch low-risk dev/type updates into one PR to cut review noise.
       dev-dependencies:
         dependency-type: development
-      # Keep the React/Radix/dnd-kit dashboard stack together.
+      # Keep the React/Radix dashboard stack together.
       dashboard-ui:
         patterns:
           - "react"
           - "react-dom"
           - "react-router"
           - "@radix-ui/*"
-          - "@dnd-kit/*"
           - "@tanstack/*"
           - "recharts"
           - "tailwind*"

@@ -6,12 +6,11 @@
 	"scripts": {
 		"dev": "bun run --hot src/server.ts",
 		"start": "bun run src/server.ts",
-		"build": "bun build src/server.ts --compile --outfile dist/better-ccflare-server",
+		"build": "bun build src/server.ts --compile --outfile dist/clankermux-server",
 		"typecheck": "bunx tsc --noEmit"
 	},
 	"dependencies": {
 		"@clankermux/core": "workspace:*",
-		"@clankermux/core-di": "workspace:*",
 		"@clankermux/database": "workspace:*",
 		"@clankermux/config": "workspace:*",
 		"@clankermux/logger": "workspace:*",

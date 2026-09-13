@@ -28,7 +28,6 @@ export type CacheWarmingMode = "off" | "static" | "dynamic";
 
 export interface RuntimeConfig {
 	clientId: string;
-	retry: { attempts: number; delayMs: number; backoff: number };
 	sessionDurationMs: number;
 	port: number;
 	database?: {
@@ -52,9 +51,6 @@ export interface ConfigData {
 	chat_completions_max_tokens?: number;
 	lb_strategy?: StrategyName;
 	client_id?: string;
-	retry_attempts?: number;
-	retry_delay_ms?: number;
-	retry_backoff?: number;
 	session_duration_ms?: number;
 	port?: number;
 	/** @deprecated legacy key — converted to payload_retention_hours (×24) at load; never read after normalization. */
@@ -472,11 +468,6 @@ export class Config extends EventEmitter {
 		return 90000; // default: 90 seconds
 	}
 
-	setUsagePollIntervalMs(ms: number): void {
-		const clamped = this.clamp(ms, 10000, 3600000);
-		this.set("usage_poll_interval_ms", clamped);
-	}
-
 	getCacheWarmingMode(): CacheWarmingMode {
 		// 1. File mode field (only if valid).
 		const fromModeFile = this.data.cache_warming_mode;
@@ -651,12 +642,7 @@ export class Config extends EventEmitter {
 		// Default values
 		const defaults: RuntimeConfig = {
 			clientId: "9d1c250a-e61b-44d9-88ed-5944d1962f5e",
-			retry: {
-				attempts: 3,
-				delayMs: TIME_CONSTANTS.RETRY_DELAY_DEFAULT,
-				backoff: 2,
-			},
-			sessionDurationMs: TIME_CONSTANTS.SESSION_DURATION_DEFAULT,
+			sessionDurationMs: TIME_CONSTANTS.ANTHROPIC_SESSION_DURATION_DEFAULT,
 			port: NETWORK.DEFAULT_PORT,
 			database: {
 				walMode: true,
@@ -688,15 +674,6 @@ export class Config extends EventEmitter {
 		// Override with config file settings if present
 		if (this.data.client_id) {
 			defaults.clientId = this.data.client_id;
-		}
-		if (typeof this.data.retry_attempts === "number") {
-			defaults.retry.attempts = this.data.retry_attempts;
-		}
-		if (typeof this.data.retry_delay_ms === "number") {
-			defaults.retry.delayMs = this.data.retry_delay_ms;
-		}
-		if (typeof this.data.retry_backoff === "number") {
-			defaults.retry.backoff = this.data.retry_backoff;
 		}
 		if (typeof this.data.session_duration_ms === "number") {
 			defaults.sessionDurationMs = this.data.session_duration_ms;
@@ -788,8 +765,4 @@ export class Config extends EventEmitter {
 // Re-export types
 export type { StrategyName } from "@clankermux/core";
 export { resolveConfigPath } from "./paths";
-export {
-	getLegacyConfigDir,
-	getLegacyConfigDirs,
-	getPlatformConfigDir,
-} from "./paths-common";
+export { getPlatformConfigDir } from "./paths-common";

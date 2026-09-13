@@ -22,7 +22,6 @@ import {
 	stopEventLoopMonitor,
 	TIME_CONSTANTS,
 } from "@clankermux/core";
-import { container, SERVICE_KEYS } from "@clankermux/core-di";
 import type { DatabaseOperations } from "@clankermux/database";
 import {
 	AsyncDbWriter,
@@ -269,7 +268,6 @@ function serveDashboardFile(
 // Module-level server instance
 let serverInstance: ReturnType<typeof serve> | null = null;
 let registeredServerId: string | null = null;
-let stopRetentionJob: (() => void) | null = null;
 let stopOAuthCleanupJob: (() => void) | null = null;
 let stopManagementSessionSweepJob: (() => void) | null = null;
 let stopRateLimitCleanupJob: (() => void) | null = null;
@@ -297,7 +295,7 @@ let tlsEnabled = false;
 async function runStartupMaintenance(
 	config: Config,
 	dbOps: DatabaseOperations,
-) {
+): Promise<void> {
 	const log = new Logger("StartupMaintenance");
 	try {
 		const payloadHours = config.getPayloadRetentionHours();
@@ -361,8 +359,6 @@ async function runStartupMaintenance(
 	} catch (err) {
 		log.error(`Rate limit cleanup error: ${err}`);
 	}
-	// Return a no-op stopper for compatibility
-	return () => {};
 }
 
 /**
@@ -725,10 +721,6 @@ export default async function startServer(options?: {
 		}
 	}
 
-	// Initialize DI container
-	container.registerInstance(SERVICE_KEYS.Config, new Config());
-	container.registerInstance(SERVICE_KEYS.Logger, new Logger("Server"));
-
 	// Initialize payload encryption (no-op if PAYLOAD_ENCRYPTION_KEY is unset).
 	// This must run before any database operations that read/write payloads.
 	// The RequestRecorder writes payloads on this thread, so initializing the
@@ -736,14 +728,14 @@ export default async function startServer(options?: {
 	await initPayloadEncryption();
 
 	// Initialize components
-	const config = container.resolve<Config>(SERVICE_KEYS.Config);
+	const config = new Config();
 	const runtime = config.getRuntime();
 	// Override port if provided
 	if (port !== runtime.port) {
 		runtime.port = port;
 	}
 	DatabaseFactory.initialize(undefined, runtime);
-	const dbOps = await DatabaseFactory.getInstanceAsync();
+	const dbOps = DatabaseFactory.getInstance();
 
 	// One-time migration: promote pre-existing DBs from auto_vacuum=NONE to
 	// INCREMENTAL. Fresh DBs created since ensureSchema() started issuing
@@ -795,8 +787,7 @@ export default async function startServer(options?: {
 	stopIntegritySchedulerJob = startIntegrityScheduler(dbOps);
 
 	const db = dbOps.getAdapter();
-	const log = container.resolve<Logger>(SERVICE_KEYS.Logger);
-	container.registerInstance(SERVICE_KEYS.Database, dbOps);
+	const log = new Logger("Server");
 
 	// Initialize async DB writer. It owns the off-thread payload writer: the
 	// factory is only invoked on the first payload publication, so a run that
@@ -810,7 +801,6 @@ export default async function startServer(options?: {
 			getPayloadRetentionMs: () => config.getPayloadRetentionMs(),
 		}),
 	});
-	container.registerInstance(SERVICE_KEYS.AsyncWriter, asyncWriter);
 	registerDisposable(asyncWriter);
 
 	// Initialize the main-thread request recorder. It owns all request
@@ -834,7 +824,6 @@ export default async function startServer(options?: {
 
 	// Initialize pricing logger
 	const pricingLogger = new Logger("Pricing");
-	container.registerInstance(SERVICE_KEYS.PricingLogger, pricingLogger);
 	setPricingLogger(pricingLogger);
 
 	// Strategy is constructed below after RuntimeConfig is built. The router
@@ -1013,7 +1002,6 @@ export default async function startServer(options?: {
 	runStartupMaintenance(config, dbOps).catch((err) => {
 		log.error("Startup maintenance failed:", err);
 	});
-	stopRetentionJob = () => {}; // No-op stopper
 
 	// Set up periodic OAuth session cleanup (every hour)
 	const unregisterOAuthCleanup = registerCleanup({
@@ -1214,14 +1202,9 @@ export default async function startServer(options?: {
 			"client_id",
 			"9d1c250a-e61b-44d9-88ed-5944d1962f5e",
 		) as string,
-		retry: {
-			attempts: config.get("retry_attempts", 3) as number,
-			delayMs: config.get("retry_delay_ms", 1000) as number,
-			backoff: config.get("retry_backoff", 2) as number,
-		},
 		sessionDurationMs: config.get(
 			"session_duration_ms",
-			TIME_CONSTANTS.SESSION_DURATION_DEFAULT,
+			TIME_CONSTANTS.ANTHROPIC_SESSION_DURATION_DEFAULT,
 		) as number,
 		port,
 	};
@@ -1676,8 +1659,6 @@ Available endpoints:
 - DELETE ${protocol}://localhost:${serverInstance.port}/api/accounts/:id → Remove account
 - GET    ${protocol}://localhost:${serverInstance.port}/api/stats       → View statistics
 - POST   ${protocol}://localhost:${serverInstance.port}/api/stats/reset → Reset statistics
-- GET    ${protocol}://localhost:${serverInstance.port}/api/config      → View configuration
-- PATCH  ${protocol}://localhost:${serverInstance.port}/api/config      → Update configuration
 
 ⚡ Ready to proxy requests...
 `);
@@ -2042,10 +2023,6 @@ async function handleGracefulShutdown(signal: string) {
 		// Stop scheduler triggers first so they don't add load while draining.
 		// These calls only stop the recurring trigger; any in-flight task they
 		// already kicked off continues until it finishes naturally.
-		if (stopRetentionJob) {
-			stopRetentionJob();
-			stopRetentionJob = null;
-		}
 		if (stopOAuthCleanupJob) {
 			stopOAuthCleanupJob();
 			stopOAuthCleanupJob = null;

@@ -9,8 +9,10 @@ import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { BunSqlAdapter } from "../adapters/bun-sql-adapter";
 import { runOneShotBackfills } from "../backfills";
 import { ensureSchema } from "../migrations";
+import { RoutingRepository } from "../repositories/routing.repository";
 
 const MARKER = "backfill:auto-pause-overage-default";
 
@@ -160,63 +162,38 @@ describe("auto-pause-on-overage default backfill", () => {
 	});
 });
 
-const ROUTING_MARKER = "backfill:routing-default-target-kind";
-
-function insertRule(db: Database, id: string, targetKind: string): void {
-	db.run(
-		`INSERT INTO routing_rules (
-			id, name, enabled, position, match_api_key_id, match_model_kind,
-			match_model_value, pool_kind, pool_provider, pool_account_ids,
-			target_kind, target_model
-		) VALUES (?, ?, 1, ?, NULL, 'any', NULL, 'inherit', NULL, NULL, ?, NULL)`,
-		[id, id, id.length, targetKind],
-	);
-}
-
-function targetKind(db: Database, id: string): string {
-	return (
-		db
-			.prepare(`SELECT target_kind AS v FROM routing_rules WHERE id = ?`)
-			.get(id) as {
-			v: string;
-		}
-	).v;
-}
-
-describe("retired routing target_kind backfill", () => {
-	it("rewrites default to requested once and records what it touched", () => {
+/**
+ * The one-shot pass that physically rewrote `target_kind = 'default'` rows to
+ * `'requested'` is gone. What replaced it is not a rewrite at all: the rule
+ * validator normalizes on read, so a legacy row keeps its stored value and is
+ * still usable. This test covers that path, which the repository tests cannot —
+ * they create rules through saveRule(), which normalizes BEFORE storage.
+ */
+describe("legacy routing target_kind", () => {
+	it("reads a stored 'default' rule as 'requested' without rewriting it", async () => {
 		const db = new Database(dbPath, { create: true });
 		try {
 			ensureSchema(db);
-			insertRule(db, "old", "default");
-			insertRule(db, "keeper", "requested");
+			// Raw SQL on purpose: saveRule() would normalize the value away.
+			db.run(
+				`INSERT INTO routing_rules (
+					id, name, enabled, position, match_api_key_id, match_model_kind,
+					match_model_value, pool_kind, pool_provider, pool_account_ids,
+					target_kind, target_model
+				) VALUES ('legacy', 'legacy', 1, 0, NULL, 'any', NULL, 'inherit', NULL, NULL, 'default', NULL)`,
+			);
 
-			runOneShotBackfills(db);
+			const repo = new RoutingRepository(new BunSqlAdapter(db));
+			const rules = await repo.listRules();
 
-			expect(targetKind(db, "old")).toBe("requested");
-			expect(targetKind(db, "keeper")).toBe("requested");
-			const row = db
-				.prepare(`SELECT config FROM strategies WHERE name = ?`)
-				.get(ROUTING_MARKER) as { config: string } | null;
-			expect(JSON.parse(row?.config ?? "{}").rulesUpdated).toBe(1);
-		} finally {
-			db.close();
-		}
-	});
-
-	it("does not re-apply on a later run", () => {
-		// A rule written as `default` after the pass claimed its marker is the
-		// operator's own row, not a leftover: the validator normalizes it on read
-		// and write, and a second pass must not rewrite data behind their back.
-		const db = new Database(dbPath, { create: true });
-		try {
-			ensureSchema(db);
-			runOneShotBackfills(db);
-			insertRule(db, "later", "default");
-
-			runOneShotBackfills(db);
-
-			expect(targetKind(db, "later")).toBe("default");
+			expect(rules.map((r) => r.target_kind)).toEqual(["requested"]);
+			expect(
+				(
+					db
+						.prepare(`SELECT target_kind AS v FROM routing_rules WHERE id = ?`)
+						.get("legacy") as { v: string }
+				).v,
+			).toBe("default");
 		} finally {
 			db.close();
 		}

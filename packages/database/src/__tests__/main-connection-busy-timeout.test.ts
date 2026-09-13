@@ -41,7 +41,8 @@ describe("configureSqlite: main-connection busy_timeout", () => {
 		const dbOps = new DatabaseOperations(path.join(tmpDir, "default.db"));
 		try {
 			const { timeout } = dbOps
-				.getDatabase()
+				.getAdapter()
+				.getSQLiteDb()
 				.query("PRAGMA busy_timeout")
 				.get() as { timeout: number };
 			expect(timeout).toBe(MAIN_CONNECTION_BUSY_TIMEOUT_MS);
@@ -59,7 +60,8 @@ describe("configureSqlite: main-connection busy_timeout", () => {
 		});
 		try {
 			const { timeout } = dbOps
-				.getDatabase()
+				.getAdapter()
+				.getSQLiteDb()
 				.query("PRAGMA busy_timeout")
 				.get() as { timeout: number };
 			expect(timeout).toBe(MAIN_CONNECTION_BUSY_TIMEOUT_MS);

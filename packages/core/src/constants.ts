@@ -14,12 +14,6 @@ export const TIME_CONSTANTS = {
 	// Session durations - specifically for Anthropic usage windows
 	ANTHROPIC_SESSION_DURATION_DEFAULT: 5 * 60 * 60 * 1000, // 5 hours - default for Anthropic provider session tracking
 	ANTHROPIC_SESSION_DURATION_FALLBACK: 1 * 60 * 60 * 1000, // 1 hour - fallback for Anthropic provider
-	/**
-	 * @deprecated Use ANTHROPIC_SESSION_DURATION_DEFAULT instead.
-	 * This constant is kept for backward compatibility only and should not be used in new code.
-	 */
-	SESSION_DURATION_DEFAULT: 5 * 60 * 60 * 1000, // 5 hours - kept for backward compatibility - new code should use ANTHROPIC_SESSION_DURATION_DEFAULT
-
 	// "Active Sessions" live gauge (Overview) + Analytics time-series: trailing
 	// lookback window for counting a distinct request_routing.affinity_key_hash
 	// (a client session pinned for account affinity) as "currently active". A
@@ -42,7 +36,6 @@ export const TIME_CONSTANTS = {
 	STREAM_FORWARD_TOTAL_TIMEOUT_MS: 30 * 60 * 1000, // 30 minutes (max total stream duration)
 	STREAM_FORWARD_CHUNK_TIMEOUT_MS: 5 * 60 * 1000, // 5 minutes (max silence between chunks)
 	OAUTH_STATE_TTL: 10, // 10 minutes (stored separately as minutes)
-	RETRY_DELAY_DEFAULT: 1000, // 1 second
 	PROXY_REQUEST_TIMEOUT_MS: 30 * 60 * 1000, // 30 minutes — covers long agent calls
 
 	// Cache durations
@@ -156,29 +149,6 @@ export const CACHE = {
 	CACHE_CONTROL_IMMUTABLE: "public, max-age=31536000, immutable",
 	CACHE_CONTROL_STATIC: "public, max-age=31536000",
 	CACHE_CONTROL_NO_CACHE: "no-cache, no-store, must-revalidate",
-} as const;
-
-// Request/Response limits
-export const LIMITS = {
-	// Request history limits
-	REQUEST_HISTORY_DEFAULT: 50,
-	REQUEST_DETAILS_DEFAULT: 100,
-	REQUEST_HISTORY_MAX: 1000,
-	LOG_READ_DEFAULT: 1000,
-
-	// Account name constraints
-	ACCOUNT_NAME_MIN_LENGTH: 1,
-	ACCOUNT_NAME_MAX_LENGTH: 100,
-
-	// UI formatting
-	CONSOLE_SEPARATOR_LENGTH: 100,
-	CONSOLE_COLUMN_PADDING: {
-		NAME: 20,
-		TYPE: 10,
-		REQUESTS: 12,
-		TOKEN: 10,
-		STATUS: 20,
-	},
 } as const;
 
 /**

@@ -2553,54 +2553,6 @@ export function createAccountForceResetRateLimitHandler(
 }
 
 /**
- * Create an account reload handler
- * Clears refresh cache for an account after re-authentication
- */
-export function createAccountReloadHandler(dbOps: DatabaseOperations) {
-	return async (_req: Request, accountId: string): Promise<Response> => {
-		try {
-			// Check if account exists
-			const db = dbOps.getAdapter();
-			const account = await db.get<{ name: string; provider: string }>(
-				"SELECT name, provider FROM accounts WHERE id = ?",
-				[accountId],
-			);
-
-			if (!account) {
-				return errorResponse(NotFound("Account not found"));
-			}
-
-			// Check if account is Anthropic provider (only OAuth accounts need token reload)
-			if (account.provider !== "anthropic") {
-				return errorResponse(
-					BadRequest("Token reload is only available for Anthropic accounts"),
-				);
-			}
-
-			// Clear refresh cache for this account
-			clearAccountRefreshCache(accountId);
-
-			// Clear usage cache for this account to prevent memory leaks
-			usageCache.delete(accountId);
-
-			log.info(`Token reload triggered for account '${account.name}'`);
-
-			return jsonResponse({
-				success: true,
-				message: `Token reload triggered for account '${account.name}'. The next request will use the updated tokens from the database.`,
-			});
-		} catch (error) {
-			log.error("Account reload error:", error);
-			return errorResponse(
-				error instanceof Error
-					? error
-					: new Error("Failed to reload account tokens"),
-			);
-		}
-	};
-}
-
-/**
  * Create a Kilo Gateway account add handler
  */
 export function createAccountRefreshUsageHandler(dbOps: DatabaseOperations) {

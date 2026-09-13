@@ -44,11 +44,6 @@ class LifecycleManager {
 			throw new AggregateError(errors, "Errors occurred during shutdown");
 		}
 	}
-
-	clear(): void {
-		this.disposables.clear();
-		this.isShuttingDown = false;
-	}
 }
 
 // Global lifecycle manager instance
@@ -64,8 +59,4 @@ export function unregisterDisposable(disposable: Disposable): void {
 
 export async function shutdown(): Promise<void> {
 	await lifecycleManager.shutdown();
-}
-
-export function clearDisposables(): void {
-	lifecycleManager.clear();
 }

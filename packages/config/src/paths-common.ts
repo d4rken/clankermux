@@ -26,28 +26,3 @@ function getConfigBaseDir(): string {
 export function getPlatformConfigDir(): string {
 	return join(getConfigBaseDir(), "clankermux");
 }
-
-/**
- * Legacy configuration directory names, newest first. The project was renamed
- * ccflare → better-ccflare → ClankerMux; on first run we adopt data from the
- * most recent legacy directory that still exists. Order matters: prefer the
- * newer "better-ccflare" install over the original "ccflare" one.
- */
-const LEGACY_CONFIG_DIR_NAMES = ["better-ccflare", "ccflare"] as const;
-
-/**
- * Get the legacy configuration directories for migration purposes, ordered
- * newest first.
- */
-export function getLegacyConfigDirs(): string[] {
-	const base = getConfigBaseDir();
-	return LEGACY_CONFIG_DIR_NAMES.map((name) => join(base, name));
-}
-
-/**
- * Get the newest legacy configuration directory for migration purposes.
- * @deprecated prefer {@link getLegacyConfigDirs} which exposes the full chain.
- */
-export function getLegacyConfigDir(): string {
-	return getLegacyConfigDirs()[0];
-}

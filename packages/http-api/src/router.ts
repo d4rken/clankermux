@@ -18,7 +18,6 @@ import {
 	createAccountPeakHoursPauseHandler,
 	createAccountPriorityUpdateHandler,
 	createAccountRefreshUsageHandler,
-	createAccountReloadHandler,
 	createAccountRemoveHandler,
 	createAccountRenameHandler,
 	createAccountRenewalUpdateHandler,
@@ -121,7 +120,6 @@ import {
 } from "./handlers/system";
 import {
 	createAccountTokenHealthHandler,
-	createReauthNeededHandler,
 	createTokenHealthHandler,
 } from "./handlers/token-health";
 import { createToolErrorExampleHandler } from "./handlers/tool-errors-direct";
@@ -355,13 +353,8 @@ export class APIRouter {
 
 		// Token health handlers
 		const tokenHealthHandler = createTokenHealthHandler(dbOps);
-		const reauthNeededHandler = createReauthNeededHandler(dbOps);
 
 		this.handlers.set("GET:/api/token-health", tokenHealthHandler);
-		this.handlers.set(
-			"GET:/api/token-health/reauth-needed",
-			reauthNeededHandler,
-		);
 
 		this.handlers.set("POST:/api/oauth/init", (req) => oauthInitHandler(req));
 		this.handlers.set("POST:/api/oauth/callback", (req) =>
@@ -422,16 +415,6 @@ export class APIRouter {
 		});
 		this.handlers.set("GET:/api/requests/stream", (req) =>
 			requestsStreamHandler(req),
-		);
-		this.handlers.set("GET:/api/config", () => configHandlers.getConfig());
-		this.handlers.set("GET:/api/config/strategy", () =>
-			configHandlers.getStrategy(),
-		);
-		this.handlers.set("POST:/api/config/strategy", (req) =>
-			configHandlers.setStrategy(req),
-		);
-		this.handlers.set("GET:/api/strategies", () =>
-			configHandlers.getStrategies(),
 		);
 		this.handlers.set("GET:/api/config/retention", () =>
 			configHandlers.getRetention(),
@@ -731,15 +714,6 @@ export class APIRouter {
 			if (path.endsWith("/resume") && method === "POST") {
 				const resumeHandler = createAccountResumeHandler(this.context.dbOps);
 				return await this.wrapHandler((req) => resumeHandler(req, accountId))(
-					req,
-					url,
-				);
-			}
-
-			// Account reload
-			if (path.endsWith("/reload") && method === "POST") {
-				const reloadHandler = createAccountReloadHandler(this.context.dbOps);
-				return await this.wrapHandler((req) => reloadHandler(req, accountId))(
 					req,
 					url,
 				);

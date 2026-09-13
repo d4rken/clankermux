@@ -1,12 +1,5 @@
 import type { Config } from "@clankermux/config";
-import {
-	NETWORK,
-	STRATEGIES,
-	type StrategyName,
-	TIME_CONSTANTS,
-	validateNumber,
-	validateString,
-} from "@clankermux/core";
+import { validateNumber } from "@clankermux/core";
 import {
 	BadRequest,
 	errorResponse,
@@ -24,7 +17,6 @@ import {
 } from "@clankermux/proxy";
 import { DEFAULT_PROJECT_ROOTS } from "@clankermux/types";
 import type {
-	ConfigResponse,
 	ProjectRulesGetResponse,
 	RetentionGetResponse,
 	RetentionSetRequest,
@@ -53,71 +45,9 @@ function cacheWarmingResponse(config: Config): Record<string, unknown> {
  */
 export function createConfigHandlers(
 	config: Config,
-	runtime?: { port: number; tlsEnabled: boolean },
+	_runtime?: { port: number; tlsEnabled: boolean },
 ) {
 	return {
-		/**
-		 * Get all configuration settings
-		 */
-		getConfig: (): Response => {
-			const settings = config.getAllSettings();
-			const response: ConfigResponse = {
-				lb_strategy: (settings.lb_strategy as string) || "round_robin",
-				// Use actual running port from runtime, fall back to config
-				port:
-					runtime?.port || (settings.port as number) || NETWORK.DEFAULT_PORT,
-				// Use Anthropic fallback as default since it's the only provider that uses session duration tracking
-				// Non-Anthropic providers don't use fixed-duration sessions but still need a default value
-				sessionDurationMs:
-					(settings.sessionDurationMs as number) ||
-					TIME_CONSTANTS.ANTHROPIC_SESSION_DURATION_FALLBACK,
-				// Include actual TLS status
-				tls_enabled: runtime?.tlsEnabled || false,
-				usage_throttling_five_hour_enabled:
-					config.getUsageThrottlingFiveHourEnabled(),
-				usage_throttling_weekly_enabled:
-					config.getUsageThrottlingWeeklyEnabled(),
-			};
-			return jsonResponse(response);
-		},
-
-		/**
-		 * Get current strategy
-		 */
-		getStrategy: (): Response => {
-			const strategy = config.getStrategy();
-			return jsonResponse({ strategy });
-		},
-
-		/**
-		 * Update strategy
-		 */
-		setStrategy: async (req: Request): Promise<Response> => {
-			const body = await req.json();
-
-			// Validate strategy input
-			const strategyValidation = validateString(body.strategy, "strategy", {
-				required: true,
-				allowedValues: STRATEGIES,
-			});
-
-			if (!strategyValidation) {
-				return errorResponse(BadRequest("Strategy is required"));
-			}
-
-			const strategy = strategyValidation as StrategyName;
-			config.setStrategy(strategy);
-
-			return jsonResponse({ success: true, strategy });
-		},
-
-		/**
-		 * Get available strategies
-		 */
-		getStrategies: (): Response => {
-			return jsonResponse(STRATEGIES);
-		},
-
 		/**
 		 * Get current data retention windows (payloads in hours, the rest in days)
 		 */

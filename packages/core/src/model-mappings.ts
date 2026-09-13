@@ -128,10 +128,6 @@ export function getEndpointUrl(account: Account): string {
 	return defaultEndpoint;
 }
 
-export function createCustomEndpointData(endpoint: string): string {
-	return JSON.stringify({ endpoint });
-}
-
 // ── Context-window-aware routing ─────────────────────────────────────────────
 
 /**

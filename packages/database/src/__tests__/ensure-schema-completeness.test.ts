@@ -7,7 +7,9 @@
  *
  * Also asserts that intentionally-dropped Bedrock artifacts (the
  * accounts.cross_region_mode column and the model_translations table) are
- * absent, and that the retired requests.agent_used column is gone.
+ * absent, that the retired requests.agent_used column is gone, and that the
+ * retired combo tables and per-account model mapping columns are not created.
+ * Existing databases keep all of them: nothing here drops anything.
  */
 import { Database } from "bun:sqlite";
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
@@ -80,8 +82,6 @@ describe("ensureSchema completeness", () => {
 			"auto_fallback_enabled",
 			"custom_endpoint",
 			"auto_refresh_enabled",
-			"model_mappings",
-			"model_fallbacks",
 			"billing_type",
 			"refresh_token_issued_at",
 			"auto_pause_on_overage_enabled",
@@ -107,6 +107,18 @@ describe("ensureSchema completeness", () => {
 	it("does NOT create the intentionally-dropped accounts.cross_region_mode column (Bedrock)", () => {
 		const cols = columnNames(db, "accounts");
 		expect(cols.has("cross_region_mode")).toBe(false);
+	});
+
+	it("does NOT create the retired per-account model mapping columns", () => {
+		const cols = columnNames(db, "accounts");
+		expect(cols.has("model_mappings")).toBe(false);
+		expect(cols.has("model_fallbacks")).toBe(false);
+	});
+
+	it("does NOT create the retired combo tables", () => {
+		expect(tableExists(db, "combos")).toBe(false);
+		expect(tableExists(db, "combo_slots")).toBe(false);
+		expect(tableExists(db, "combo_family_assignments")).toBe(false);
 	});
 
 	it("creates the requests table with current columns and without the retired agent_used column", () => {

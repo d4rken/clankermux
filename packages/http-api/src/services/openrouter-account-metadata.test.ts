@@ -128,7 +128,7 @@ describe("OpenRouter metadata lifecycle", () => {
 		expect(fetchSpy).not.toHaveBeenCalled();
 	});
 	it("adds the snapshot column to an existing database idempotently", () => {
-		const db = dbOps.getDatabase();
+		const db = dbOps.getAdapter().getSQLiteDb();
 		db.run("ALTER TABLE accounts DROP COLUMN openrouter_metadata_json");
 		runMigrations(db);
 		runMigrations(db);

@@ -12,19 +12,10 @@ function makeConfig() {
 		overrides: { prefix: string; name: string }[];
 	} = { roots: ["/home/*"], overrides: [] };
 	return {
-		getAllSettings: () => ({
-			lb_strategy: "session",
-			port: 8080,
-			sessionDurationMs: 18_000_000,
-			usage_throttling_five_hour_enabled: true,
-			usage_throttling_weekly_enabled: true,
-		}),
 		getUsageThrottlingFiveHourEnabled: () => true,
 		getUsageThrottlingWeeklyEnabled: () => true,
 		setUsageThrottlingFiveHourEnabled: mock(() => {}),
 		setUsageThrottlingWeeklyEnabled: mock(() => {}),
-		getStrategy: () => "session",
-		setStrategy: mock(() => {}),
 		getPayloadRetentionHours: () => 72,
 		getRequestRetentionDays: () => 90,
 		getUsageSnapshotRetentionDays: () => 90,
@@ -67,19 +58,6 @@ function makeConfig() {
 }
 
 describe("createConfigHandlers", () => {
-	it("includes per-window usage throttling flags in config payload", async () => {
-		const handlers = createConfigHandlers(makeConfig(), {
-			port: 8080,
-			tlsEnabled: false,
-		});
-
-		const response = handlers.getConfig();
-		const body = (await response.json()) as Record<string, unknown>;
-
-		expect(body.usage_throttling_five_hour_enabled).toBe(true);
-		expect(body.usage_throttling_weekly_enabled).toBe(true);
-	});
-
 	it("updates usage throttling windows from POST body", async () => {
 		const config = makeConfig();
 		const handlers = createConfigHandlers(config, {

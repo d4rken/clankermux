@@ -10,23 +10,15 @@ let instance: DatabaseOperations | null = null;
 let dbPath: string | undefined;
 let runtimeConfig: RuntimeConfig | undefined;
 
-/**
- * The `fastMode` parameter is retained for backward compatibility with
- * callers (CLI commands, tests) that still pass it. It is now a no-op:
- * startup no longer runs `PRAGMA integrity_check`, so there's nothing
- * left to skip. Integrity is verified by the background scheduler — see
- * `packages/proxy/src/integrity-scheduler.ts`.
- */
 export function initialize(
 	dbPathParam?: string,
 	runtimeConfigParam?: RuntimeConfig,
-	_fastMode = false,
 ): void {
 	dbPath = dbPathParam;
 	runtimeConfig = runtimeConfigParam;
 }
 
-export function getInstance(_fastMode?: boolean): DatabaseOperations {
+export function getInstance(): DatabaseOperations {
 	if (!instance) {
 		// Extract database configuration from runtime config
 		const dbConfig: DatabaseConfig | undefined = runtimeConfig?.database
@@ -65,18 +57,7 @@ export function getInstance(_fastMode?: boolean): DatabaseOperations {
 	return instance;
 }
 
-/**
- * Get or create the database instance. Retained as an async wrapper around
- * `getInstance()` so existing `await DatabaseFactory.getInstanceAsync()` call
- * sites (e.g. server startup) keep working; there is no async setup left.
- */
-export async function getInstanceAsync(
-	_fastMode?: boolean,
-): Promise<DatabaseOperations> {
-	return getInstance();
-}
-
-export function closeAll(): void {
+function closeAll(): void {
 	if (instance) {
 		unregisterDisposable(instance);
 		// Fire-and-forget close (sync-compatible)
@@ -92,7 +73,5 @@ export function reset(): void {
 export const DatabaseFactory = {
 	initialize,
 	getInstance,
-	getInstanceAsync,
-	closeAll,
 	reset,
 };

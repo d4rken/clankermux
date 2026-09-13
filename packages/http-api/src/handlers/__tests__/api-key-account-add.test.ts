@@ -28,6 +28,14 @@ describe("createApiKeyAccountAddHandler", () => {
 		);
 		DatabaseFactory.initialize(tmpDb.next());
 		dbOps = DatabaseFactory.getInstance();
+		// A fresh database no longer gets accounts.model_mappings; an upgraded
+		// one still carries it. Add it back here, because that is the database
+		// where writing to it would still be possible — and where the handler
+		// must leave it alone.
+		dbOps
+			.getAdapter()
+			.getSQLiteDb()
+			.run("ALTER TABLE accounts ADD COLUMN model_mappings TEXT");
 	});
 
 	afterEach(() => {
@@ -42,7 +50,8 @@ describe("createApiKeyAccountAddHandler", () => {
 
 	function row(name: string) {
 		return dbOps
-			.getDatabase()
+			.getAdapter()
+			.getSQLiteDb()
 			.query<
 				{
 					provider: string;
@@ -80,7 +89,8 @@ describe("createApiKeyAccountAddHandler", () => {
 				);
 				expect(
 					dbOps
-						.getDatabase()
+						.getAdapter()
+						.getSQLiteDb()
 						.query("SELECT expires_at FROM accounts WHERE name=?")
 						.get(name),
 				).toEqual({ expires_at: expiresAt });
@@ -507,7 +517,8 @@ describe("createApiKeyAccountAddHandler on a database with the old default", () 
 
 	it("enables overage auto-pause explicitly instead of inheriting the default", async () => {
 		const columnDefault = dbOps
-			.getDatabase()
+			.getAdapter()
+			.getSQLiteDb()
 			.query<{ dflt_value: string | null }, []>(
 				`SELECT dflt_value FROM pragma_table_xinfo('accounts')
 				 WHERE name = 'auto_pause_on_overage_enabled'`,
@@ -524,7 +535,8 @@ describe("createApiKeyAccountAddHandler on a database with the old default", () 
 		expect(res.status).toBe(200);
 
 		const stored = dbOps
-			.getDatabase()
+			.getAdapter()
+			.getSQLiteDb()
 			.query<{ auto_pause_on_overage_enabled: number }, [string]>(
 				`SELECT auto_pause_on_overage_enabled FROM accounts WHERE name = ?`,
 			)

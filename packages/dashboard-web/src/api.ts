@@ -124,13 +124,6 @@ export interface TokenHealthAccountResponse {
 	data: TokenHealthResponse;
 }
 
-export interface ReauthNeededResponse {
-	success: boolean;
-	data: {
-		accounts: TokenHealthResponse[];
-	};
-}
-
 /**
  * Listeners notified when the server answers 401 to ANY management call.
  *
@@ -839,29 +832,6 @@ class API extends HttpClient {
 		return eventSource;
 	}
 
-	async getRequestsDetail(
-		limit: number = API_LIMITS.requestsDetail,
-	): Promise<RequestPayload[]> {
-		const startTime = Date.now();
-		const url = `/api/requests/detail?limit=${limit}`;
-
-		this.logger.debug(`→ GET ${url}`);
-
-		try {
-			const response = await this.get<RequestPayload[]>(url);
-			const duration = Date.now() - startTime;
-			this.logger.debug(`← GET ${url} - 200 (${duration}ms)`);
-			return response;
-		} catch (error) {
-			const duration = Date.now() - startTime;
-			this.logger.error(`✗ GET ${url} - ERROR (${duration}ms)`, {
-				error: error instanceof Error ? error.message : String(error),
-				stack: error instanceof Error ? error.stack : undefined,
-			});
-			throw error;
-		}
-	}
-
 	async getRequestPayload(id: string): Promise<RequestPayload> {
 		const startTime = Date.now();
 		const url = `/api/requests/payload/${encodeURIComponent(id)}`;
@@ -1052,41 +1022,6 @@ class API extends HttpClient {
 				});
 			}
 
-			throw error;
-		}
-	}
-
-	// Batch analytics requests for improved performance
-	async getBatchAnalytics(
-		requests: Array<{
-			range?: string;
-			filters?: {
-				accounts?: string[];
-				models?: string[];
-				status?: "all" | "success" | "error";
-			};
-			mode?: "normal" | "cumulative";
-			modelBreakdown?: boolean;
-		}>,
-	): Promise<AnalyticsResponse[]> {
-		const startTime = Date.now();
-		const url = "/api/analytics/batch";
-
-		this.logger.debug(`→ POST ${url}`, { requestCount: requests.length });
-
-		try {
-			const response = await this.post<AnalyticsResponse[]>(url, { requests });
-			const duration = Date.now() - startTime;
-			this.logger.debug(`← POST ${url} - 200 (${duration}ms)`, {
-				responseCount: response.length,
-			});
-			return response;
-		} catch (error) {
-			const duration = Date.now() - startTime;
-			this.logger.error(`✗ POST ${url} - ERROR (${duration}ms)`, {
-				error: error instanceof Error ? error.message : String(error),
-				stack: error instanceof Error ? error.stack : undefined,
-			});
 			throw error;
 		}
 	}
@@ -1794,71 +1729,6 @@ class API extends HttpClient {
 		}
 	}
 
-	async getStrategy(): Promise<string> {
-		const startTime = Date.now();
-		const url = "/api/config/strategy";
-
-		this.logger.debug(`→ GET ${url}`);
-
-		try {
-			const data = await this.get<{ strategy: string }>(url);
-			const duration = Date.now() - startTime;
-			this.logger.debug(`← GET ${url} - 200 (${duration}ms)`);
-			return data.strategy;
-		} catch (error) {
-			const duration = Date.now() - startTime;
-			this.logger.error(`✗ GET ${url} - ERROR (${duration}ms)`, {
-				error: error instanceof Error ? error.message : String(error),
-				stack: error instanceof Error ? error.stack : undefined,
-			});
-			throw error;
-		}
-	}
-
-	async listStrategies(): Promise<string[]> {
-		const startTime = Date.now();
-		const url = "/api/strategies";
-
-		this.logger.debug(`→ GET ${url}`);
-
-		try {
-			const response = await this.get<string[]>(url);
-			const duration = Date.now() - startTime;
-			this.logger.debug(`← GET ${url} - 200 (${duration}ms)`);
-			return response;
-		} catch (error) {
-			const duration = Date.now() - startTime;
-			this.logger.error(`✗ GET ${url} - ERROR (${duration}ms)`, {
-				error: error instanceof Error ? error.message : String(error),
-				stack: error instanceof Error ? error.stack : undefined,
-			});
-			throw error;
-		}
-	}
-
-	async setStrategy(strategy: string): Promise<void> {
-		const startTime = Date.now();
-		const url = "/api/config/strategy";
-
-		this.logger.debug(`→ POST ${url}`, { strategy });
-
-		try {
-			await this.post(url, { strategy });
-			const duration = Date.now() - startTime;
-			this.logger.debug(`← POST ${url} - 200 (${duration}ms)`);
-		} catch (error) {
-			const duration = Date.now() - startTime;
-			this.logger.error(`✗ POST ${url} - ERROR (${duration}ms)`, {
-				error: error instanceof Error ? error.message : String(error),
-				stack: error instanceof Error ? error.stack : undefined,
-			});
-			if (error instanceof HttpError) {
-				throw new Error(error.message);
-			}
-			throw error;
-		}
-	}
-
 	// Retention settings. The shapes are the SHARED types — re-declaring them
 	// inline here would let a server-side field rename pass typecheck with the
 	// client silently disagreeing.
@@ -2174,11 +2044,6 @@ class API extends HttpClient {
 			url,
 			"token health",
 		);
-	}
-
-	async getReauthNeeded(): Promise<ReauthNeededResponse> {
-		const url = "/api/token-health/reauth-needed";
-		return this.tokenHealthRequest<ReauthNeededResponse>(url, "reauth needed");
 	}
 
 	async getAccountTokenHealth(

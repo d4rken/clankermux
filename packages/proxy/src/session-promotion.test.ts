@@ -208,8 +208,8 @@ describe("mode switching", () => {
 		expect(sessionPromotionTracker.isPromoted("s")).toBe(false);
 	});
 
-	test("setEnabled alias maps to dynamic/off", () => {
-		sessionPromotionTracker.setEnabled(true);
+	test('setMode("dynamic") promotes on an idle gap', () => {
+		sessionPromotionTracker.setMode("dynamic");
 		// dynamic: idle gap promotes.
 		sessionPromotionTracker.observeAndShouldInject("s", 0, BIG, MIN);
 		expect(
@@ -220,7 +220,7 @@ describe("mode switching", () => {
 				MIN,
 			),
 		).toBe(true);
-		sessionPromotionTracker.setEnabled(false);
+		sessionPromotionTracker.setMode("off");
 		expect(sessionPromotionTracker.isPromoted("s")).toBe(false);
 		expect(sessionPromotionTracker.getSize()).toBe(0);
 	});
