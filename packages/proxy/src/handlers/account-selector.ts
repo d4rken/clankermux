@@ -121,9 +121,7 @@ export async function selectAccountsForRequest(
 ): Promise<Account[]> {
 	const route = getResolvedRoute(meta);
 	const singleton =
-		meta.pin?.accountId ||
-		meta.headers?.get("x-clankermux-account-id") ||
-		meta.headers?.get("x-better-ccflare-account-id");
+		meta.pin?.accountId || meta.headers?.get("x-clankermux-account-id");
 	meta.pinFailure = null;
 	if (!singleton) {
 		const selected = await getOrderedAccounts(meta, ctx);

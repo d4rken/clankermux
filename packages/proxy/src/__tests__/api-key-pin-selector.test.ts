@@ -35,31 +35,26 @@ describe("API key destination intersection before strategy", () => {
 		]);
 		expect(select.mock.calls[0][0].map((x) => x.id)).toEqual([c.id, o.id]);
 	});
-	for (const header of [
-		"x-clankermux-account-id",
-		"x-better-ccflare-account-id",
-	]) {
-		it(`narrows a provider pin with ${header}`, async () => {
-			const ctx = makeContext([a, c, o]);
-			const m = meta({
-				pin: { accountId: null, providers: ["codex", "openrouter"] },
-				headers: new Headers({ [header]: o.id }),
-			});
-			expect((await selectAccountsForRequest(m, ctx)).map((x) => x.id)).toEqual(
-				[o.id],
-			);
+	it("narrows a provider pin with x-clankermux-account-id", async () => {
+		const ctx = makeContext([a, c, o]);
+		const m = meta({
+			pin: { accountId: null, providers: ["codex", "openrouter"] },
+			headers: new Headers({ "x-clankermux-account-id": o.id }),
 		});
-		it(`rejects ${header} outside the allowed providers`, async () => {
-			const ctx = makeContext([a, c, o]);
-			const m = meta({
-				pin: { accountId: null, providers: ["codex"] },
-				headers: new Headers({ [header]: a.id }),
-			});
-			await expect(selectAccountsForRequest(m, ctx)).rejects.toThrow(
-				"No permitted destination",
-			);
+		expect((await selectAccountsForRequest(m, ctx)).map((x) => x.id)).toEqual([
+			o.id,
+		]);
+	});
+	it("rejects x-clankermux-account-id outside the allowed providers", async () => {
+		const ctx = makeContext([a, c, o]);
+		const m = meta({
+			pin: { accountId: null, providers: ["codex"] },
+			headers: new Headers({ "x-clankermux-account-id": a.id }),
 		});
-	}
+		await expect(selectAccountsForRequest(m, ctx)).rejects.toThrow(
+			"No permitted destination",
+		);
+	});
 	it("reports capacity unavailability for a paused pinned account", async () => {
 		const ctx = makeContext([{ ...c, paused: true }, o]);
 		const m = meta({ pin: { accountId: c.id, providers: null } });
