@@ -19,6 +19,7 @@
 		"test": "bun test && bun run test:dom",
 		"test:dom": "bun scripts/test-dom.ts",
 		"build": "echo \"🏗️  Building ClankerMux v$(node -p \"require('./package.json').version\")\" && bun run build:db-workers && bun run build:dashboard",
+		"build:server": "bun run --cwd apps/server build",
 		"build:db-workers": "bun run --cwd packages/database build:workers",
 		"build:db-workers:guarded": "bun run scripts/guarded-build.ts db-workers",
 		"build:dashboard": "bun run --cwd packages/dashboard-web build",
