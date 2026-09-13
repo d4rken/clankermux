@@ -67,7 +67,7 @@ describe("Kilo Gateway Handler", () => {
 			expect(response.status).toBe(200);
 
 			// Verify the API key was stored
-			const db = dbOps.getDatabase();
+			const db = dbOps.getAdapter().getSQLiteDb();
 			const storedAccount = db
 				.query<{ api_key: string; provider: string }, [string]>(
 					"SELECT api_key, provider FROM accounts WHERE name = ?",
@@ -143,7 +143,7 @@ describe("Kilo Gateway Handler", () => {
 			const response = await handler(request);
 			expect(response.status).toBe(200);
 
-			const db = dbOps.getDatabase();
+			const db = dbOps.getAdapter().getSQLiteDb();
 			const storedAccount = db
 				.query<{ expires_at: number }, [string]>(
 					"SELECT expires_at FROM accounts WHERE name = ?",

@@ -75,14 +75,6 @@ class SessionPromotionTracker {
 	}
 
 	/**
-	 * Back-compat alias for callers that still toggle the tracker as a boolean
-	 * (true → dynamic, false → off).
-	 */
-	setEnabled(enabled: boolean): void {
-		this.setMode(enabled ? "dynamic" : "off");
-	}
-
-	/**
 	 * Record a turn for `sessionKey` and decide whether to inject 1h TTL on this
 	 * request. Updates turn count, idle-gap, promotion (mode-dependent), and
 	 * lastSeenTs, then enforces the size cap. Returns

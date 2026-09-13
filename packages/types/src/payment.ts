@@ -92,8 +92,6 @@ export interface PaymentsSummary {
 		creditsUsd: number;
 		tokenCostUsd: number;
 		apiCostCoverage?: CostCoverage;
-		/** @deprecated Use ledgerUsd. Recorded payments only; never includes usage. */
-		totalUsd: number;
 	};
 	range: {
 		from: number;
@@ -104,8 +102,6 @@ export interface PaymentsSummary {
 		creditsUsd: number;
 		tokenCostUsd: number;
 		apiCostCoverage?: CostCoverage;
-		/** @deprecated Use ledgerUsd. Recorded payments only; never includes usage. */
-		totalUsd: number;
 		amortizedUsd: number;
 		planValueUsd: number;
 		valueRatio: number | null;

@@ -222,7 +222,6 @@ export function assemblePaymentsSummary(
 			creditsUsd: monthCreditsUsd,
 			tokenCostUsd: data.currentMonth.costs.tokenCostUsd,
 			apiCostCoverage: data.currentMonth.costs.apiCostCoverage,
-			totalUsd: monthLedgerUsd,
 		},
 		range: {
 			from,
@@ -233,7 +232,6 @@ export function assemblePaymentsSummary(
 			creditsUsd: rangeCreditsUsd,
 			tokenCostUsd: data.rangeWindow.costs.tokenCostUsd,
 			apiCostCoverage: data.rangeWindow.costs.apiCostCoverage,
-			totalUsd: rangeLedgerUsd,
 			amortizedUsd,
 			planValueUsd: data.rangeWindow.costs.planValueUsd,
 			valueRatio:

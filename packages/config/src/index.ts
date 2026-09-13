@@ -647,7 +647,7 @@ export class Config extends EventEmitter {
 		// Default values
 		const defaults: RuntimeConfig = {
 			clientId: "9d1c250a-e61b-44d9-88ed-5944d1962f5e",
-			sessionDurationMs: TIME_CONSTANTS.SESSION_DURATION_DEFAULT,
+			sessionDurationMs: TIME_CONSTANTS.ANTHROPIC_SESSION_DURATION_DEFAULT,
 			port: NETWORK.DEFAULT_PORT,
 			database: {
 				walMode: true,

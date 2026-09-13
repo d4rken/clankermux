@@ -23,7 +23,6 @@ function summary(over: Partial<Summary> = {}): Summary {
 			subscriptionUsd: 300,
 			creditsUsd: 100,
 			tokenCostUsd: 0,
-			totalUsd: 400,
 		},
 		...over,
 	};
@@ -64,7 +63,6 @@ describe("PaymentsHistoryCard month figures", () => {
 					subscriptionUsd: 300,
 					creditsUsd: 100,
 					tokenCostUsd: 12.5,
-					totalUsd: 400,
 				},
 			}),
 		});
@@ -86,7 +84,6 @@ describe("PaymentsHistoryCard month figures", () => {
 					subscriptionUsd: 0,
 					creditsUsd: 0,
 					tokenCostUsd: 0,
-					totalUsd: 0,
 				},
 			}),
 		});

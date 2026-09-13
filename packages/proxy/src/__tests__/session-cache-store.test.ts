@@ -91,7 +91,7 @@ beforeEach(() => {
 	sessionCacheStore.setRiskFactor(RISK_FACTOR);
 	sessionCacheStore.clear();
 	// Isolate the shared promotion tracker singleton across tests.
-	sessionPromotionTracker.setEnabled(true);
+	sessionPromotionTracker.setMode("dynamic");
 	sessionPromotionTracker.clear();
 });
 
@@ -100,7 +100,7 @@ afterEach(() => {
 	sessionCacheStore.setMinTokens(DEFAULT_MIN_CACHE_TOKENS);
 	sessionCacheStore.setEnabled(false);
 	sessionPromotionTracker.clear();
-	sessionPromotionTracker.setEnabled(false);
+	sessionPromotionTracker.setMode("off");
 });
 
 /**

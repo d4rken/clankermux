@@ -1210,7 +1210,7 @@ export default async function startServer(options?: {
 		) as string,
 		sessionDurationMs: config.get(
 			"session_duration_ms",
-			TIME_CONSTANTS.SESSION_DURATION_DEFAULT,
+			TIME_CONSTANTS.ANTHROPIC_SESSION_DURATION_DEFAULT,
 		) as number,
 		port,
 	};

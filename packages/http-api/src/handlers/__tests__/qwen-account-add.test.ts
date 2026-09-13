@@ -119,7 +119,8 @@ describe("Qwen device flow account creation on a database with the old default",
 
 	it("enables overage auto-pause explicitly instead of inheriting the default", async () => {
 		const columnDefault = dbOps
-			.getDatabase()
+			.getAdapter()
+			.getSQLiteDb()
 			.query<{ dflt_value: string | null }, []>(
 				`SELECT dflt_value FROM pragma_table_xinfo('accounts')
 				 WHERE name = 'auto_pause_on_overage_enabled'`,
@@ -136,7 +137,8 @@ describe("Qwen device flow account creation on a database with the old default",
 		await awaitCompletion(createQwenDeviceFlowStatusHandler(), sessionId);
 
 		const stored = dbOps
-			.getDatabase()
+			.getAdapter()
+			.getSQLiteDb()
 			.query<
 				{ provider: string; auto_pause_on_overage_enabled: number },
 				[string]

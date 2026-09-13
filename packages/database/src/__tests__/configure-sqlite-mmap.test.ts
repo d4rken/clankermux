@@ -44,7 +44,8 @@ describe("configureSqlite: mmap_size handling", () => {
 		const dbOps = new DatabaseOperations(dbPath);
 		try {
 			const { mmap_size } = dbOps
-				.getDatabase()
+				.getAdapter()
+				.getSQLiteDb()
 				.query("PRAGMA mmap_size")
 				.get() as { mmap_size: number };
 			expect(mmap_size).toBe(0);
@@ -63,7 +64,8 @@ describe("configureSqlite: mmap_size handling", () => {
 		});
 		try {
 			const { mmap_size } = dbOps
-				.getDatabase()
+				.getAdapter()
+				.getSQLiteDb()
 				.query("PRAGMA mmap_size")
 				.get() as { mmap_size: number };
 			expect(mmap_size).toBe(16 * 1024 * 1024);
@@ -85,7 +87,8 @@ describe("configureSqlite: mmap_size handling", () => {
 		const dbOps = new DatabaseOperations(dbPath, { mmapSize: undefined });
 		try {
 			const { mmap_size } = dbOps
-				.getDatabase()
+				.getAdapter()
+				.getSQLiteDb()
 				.query("PRAGMA mmap_size")
 				.get() as { mmap_size: number };
 			// Whatever bun:sqlite uses, we just don't want our code to have

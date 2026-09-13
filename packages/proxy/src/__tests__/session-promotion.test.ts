@@ -11,7 +11,7 @@ const BIG = 200_000;
 const SMALL = 50_000;
 
 beforeEach(() => {
-	sessionPromotionTracker.setEnabled(true);
+	sessionPromotionTracker.setMode("dynamic");
 	sessionPromotionTracker.clear();
 });
 
@@ -233,7 +233,7 @@ describe("sessionPromotionTracker eviction / bounds", () => {
 	});
 });
 
-describe("sessionPromotionTracker.setEnabled", () => {
+describe('sessionPromotionTracker.setMode("off")', () => {
 	it("clears the map and no-ops observe/isPromoted when disabled", () => {
 		let now = 0;
 		for (let i = 0; i < PROMOTE_AFTER_TURNS; i++) {
@@ -246,7 +246,7 @@ describe("sessionPromotionTracker.setEnabled", () => {
 			now += 1_000;
 		}
 		expect(sessionPromotionTracker.isPromoted("d1")).toBe(true);
-		sessionPromotionTracker.setEnabled(false);
+		sessionPromotionTracker.setMode("off");
 		expect(sessionPromotionTracker.getSize()).toBe(0);
 		expect(sessionPromotionTracker.isPromoted("d1")).toBe(false);
 		// observe is a no-op returning false while disabled.

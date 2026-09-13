@@ -19,7 +19,6 @@ it("keeps free and unpriced accounts visible and uses the same snapshot for cost
 		subscriptionUsd: 0,
 		creditsUsd: 100,
 		tokenCostUsd: 0,
-		totalUsd: 100,
 	};
 	const payments: PaymentsSummary = {
 		amortizedDailyUsd: 0,

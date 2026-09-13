@@ -650,20 +650,12 @@ export class DatabaseOperations implements StrategyStore, Disposable {
 	}
 
 	/**
-	 * Get the underlying BunSqlAdapter for direct queries.
-	 * Prefer this over getDatabase() — it exposes the async, Promise-returning
-	 * query API with built-in busy-retry.
+	 * Get the underlying BunSqlAdapter for direct queries. It exposes the async,
+	 * Promise-returning query API with built-in busy-retry, and getSQLiteDb()
+	 * for the rare caller that needs the raw synchronous handle.
 	 */
 	getAdapter(): BunSqlAdapter {
 		return this.adapter;
-	}
-
-	/**
-	 * Get the underlying bun:sqlite Database.
-	 * @deprecated Use getAdapter() for the async query API with busy-retry.
-	 */
-	getDatabase(): Database {
-		return this.sqliteDb;
 	}
 
 	async runQuickIntegrityCheck(): Promise<string> {
