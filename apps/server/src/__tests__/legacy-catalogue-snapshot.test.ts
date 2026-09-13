@@ -1,21 +1,27 @@
 /**
- * `GET /v1/models` across both mounts, with and without operator curation.
+ * The one-shot migration snapshot of the pre-2026.9.52 global catalogue.
  *
- * The three reply shapes are not interchangeable and each has a client that
+ * Nothing serves from this module; it exists so a database upgrading from
+ * before per-client catalogues keeps whatever curation its operator had. The
+ * three reply shapes are not interchangeable and each has a client that
  * silently ignores the other two: Claude Code reads Anthropic's `data[]`
  * listing, Codex reads the `{"models":[…]}` catalog, and generic OpenAI clients
  * read `{"object":"list"}`. "Silently" is why every path here is asserted on the
- * body rather than on the status — a wrong shape is a 200 nobody can use.
+ * body rather than on the status — a wrong shape is a 200 nobody can use, and a
+ * profile seeded from one is wrong for the life of that client.
  *
- * The second theme is that curation must never cost availability: an
- * unreadable, slow or unparseable input degrades to the uncurated answer, and
- * the route still returns 200.
+ * The second theme is that curation must never cost the migration: an
+ * unreadable, slow or unparseable input degrades to the uncurated snapshot
+ * rather than failing the backfill.
  */
 
 import { describe, expect, test } from "bun:test";
 import type { AnthropicModelCatalogSnapshot } from "@clankermux/proxy";
-import type { ModelOverride } from "../model-overrides";
-import { handleModelsRoute, type ModelsRouteDeps } from "../models-route";
+import {
+	type LegacyCatalogueDeps,
+	type ModelOverride,
+	renderLegacyCatalogue,
+} from "../legacy-catalogue-snapshot";
 
 const CATALOG_BODY = JSON.stringify({
 	models: [
@@ -80,7 +86,7 @@ function override(over: Partial<ModelOverride> = {}): ModelOverride {
 }
 
 interface HarnessOptions {
-	catalog?: (apiKeyId: string | null) => Promise<{
+	catalog?: () => Promise<{
 		bodyText: string;
 		etag: string | null;
 	} | null>;
@@ -92,16 +98,11 @@ interface HarnessOptions {
 }
 
 function harness(options: HarnessOptions = {}) {
-	const keys: Array<string | null> = [];
 	const dialects: string[] = [];
-	const deps: ModelsRouteDeps = {
-		getCatalog: (apiKeyId) => {
-			keys.push(apiKeyId);
-			return (
-				options.catalog?.(apiKeyId) ??
-				Promise.resolve({ bodyText: CATALOG_BODY, etag: null })
-			);
-		},
+	const deps: LegacyCatalogueDeps = {
+		getCatalog: () =>
+			options.catalog?.() ??
+			Promise.resolve({ bodyText: CATALOG_BODY, etag: null }),
 		staticModels,
 		staticModelIds: STATIC_IDS,
 		getAnthropicCatalog: options.anthropic ?? (async () => snapshot()),
@@ -111,7 +112,7 @@ function harness(options: HarnessOptions = {}) {
 			return options.overrides ?? [];
 		},
 	};
-	return { deps, keys, dialects };
+	return { deps, dialects };
 }
 
 interface AnthropicBody {
@@ -128,18 +129,17 @@ interface AnthropicBody {
 
 async function anthropicBody(
 	options: HarnessOptions = {},
-	url = "http://proxy.local/v1/models",
 ): Promise<AnthropicBody> {
 	const { deps } = harness(options);
-	const resp = await handleModelsRoute(new URL(url), deps, null, "anthropic");
+	const resp = await renderLegacyCatalogue("anthropic", deps);
 	expect(resp.status).toBe(200);
 	return (await resp.json()) as AnthropicBody;
 }
 
-describe("handleModelsRoute: the anthropic dialect", () => {
+describe("renderLegacyCatalogue: the anthropic dialect", () => {
 	// The shape Claude Code's gateway model discovery parses. A missing field or
 	// a wrong envelope leaves it with an empty picker and no error.
-	test("serves Anthropic's own listing shape", async () => {
+	test("snapshots Anthropic's own listing shape", async () => {
 		const body = await anthropicBody();
 
 		expect(body.data).toEqual([
@@ -163,16 +163,11 @@ describe("handleModelsRoute: the anthropic dialect", () => {
 
 	test("reads the overrides for its own dialect only", async () => {
 		const { deps, dialects } = harness();
-		await handleModelsRoute(
-			new URL("http://proxy.local/v1/models"),
-			deps,
-			null,
-			"anthropic",
-		);
+		await renderLegacyCatalogue("anthropic", deps);
 		expect(dialects).toEqual(["anthropic"]);
 	});
 
-	test("serves the bundled list when upstream could not be read", async () => {
+	test("snapshots the bundled list when upstream could not be read", async () => {
 		const body = await anthropicBody({
 			anthropic: async () =>
 				snapshot({
@@ -247,9 +242,9 @@ describe("handleModelsRoute: the anthropic dialect", () => {
 	});
 
 	// A hide-everything state is legitimate (an operator narrowing the pool to
-	// nothing while editing), and it has to produce a valid empty listing rather
-	// than an entry-less object with dangling ids.
-	test("answers an empty listing when every entry is hidden", async () => {
+	// nothing), and it has to produce a valid empty listing rather than an
+	// entry-less object with dangling ids.
+	test("snapshots an empty listing when every entry is hidden", async () => {
 		const body = await anthropicBody({
 			overrides: [
 				override({ modelId: "claude-opus-5", hidden: true }),
@@ -326,18 +321,6 @@ describe("handleModelsRoute: the anthropic dialect", () => {
 		expect(body.data[0].display_name).toBe("First");
 	});
 
-	// The listing is short; a client asking for fewer entries than exist would
-	// then have no way to reach the rest, so the parameter is accepted and
-	// ignored rather than honoured or rejected.
-	test("accepts and ignores a limit parameter", async () => {
-		const body = await anthropicBody(
-			{},
-			"http://proxy.local/v1/models?limit=1",
-		);
-
-		expect(body.data).toHaveLength(2);
-	});
-
 	test("still answers 200 when the catalogue lookup throws", async () => {
 		const body = await anthropicBody({
 			anthropic: async () => {
@@ -356,16 +339,15 @@ describe("handleModelsRoute: the anthropic dialect", () => {
 	});
 });
 
-describe("handleModelsRoute: the openai list shape", () => {
-	test("serves the static list when no client_version is present", async () => {
-		const { deps, keys } = harness();
+describe("renderLegacyCatalogue: the openai list shape", () => {
+	test("snapshots the static list for a plain OpenAI client", async () => {
+		const { deps } = harness({
+			catalog: async () => {
+				throw new Error("the rich catalog is never consulted here");
+			},
+		});
 
-		const resp = await handleModelsRoute(
-			new URL("http://proxy.local/v1/models"),
-			deps,
-			null,
-			"openai",
-		);
+		const resp = await renderLegacyCatalogue("openai", deps);
 		const body = (await resp.json()) as {
 			object?: string;
 			data: Array<{ id: string }>;
@@ -374,8 +356,6 @@ describe("handleModelsRoute: the openai list shape", () => {
 		expect(resp.status).toBe(200);
 		expect(body.object).toBe("list");
 		expect(body.data.map((entry) => entry.id)).toEqual([...STATIC_IDS]);
-		// The catalog is never even consulted for a non-Codex client.
-		expect(keys).toHaveLength(0);
 	});
 
 	test("hides and appends against the static list", async () => {
@@ -386,12 +366,7 @@ describe("handleModelsRoute: the openai list shape", () => {
 			],
 		});
 
-		const resp = await handleModelsRoute(
-			new URL("http://proxy.local/v1/models"),
-			deps,
-			null,
-			"openai",
-		);
+		const resp = await renderLegacyCatalogue("openai", deps);
 		const body = (await resp.json()) as { data: Array<{ id: string }> };
 
 		expect(body.data.map((entry) => entry.id)).toEqual([
@@ -401,18 +376,13 @@ describe("handleModelsRoute: the openai list shape", () => {
 	});
 });
 
-describe("handleModelsRoute: the codex catalog", () => {
-	test("serves the catalog verbatim, ETag included, when nothing is curated", async () => {
+describe("renderLegacyCatalogue: the codex catalog", () => {
+	test("snapshots the catalog verbatim, ETag included, when nothing is curated", async () => {
 		const { deps } = harness({
 			catalog: async () => ({ bodyText: CATALOG_BODY, etag: 'W/"abc"' }),
 		});
 
-		const resp = await handleModelsRoute(
-			new URL("http://proxy.local/v1/models?client_version=0.149.0"),
-			deps,
-			null,
-			"openai",
-		);
+		const resp = await renderLegacyCatalogue("codex", deps);
 
 		expect(resp.status).toBe(200);
 		expect(resp.headers.get("Content-Type")).toBe("application/json");
@@ -423,62 +393,8 @@ describe("handleModelsRoute: the codex catalog", () => {
 	test("omits the ETag header when upstream sent none", async () => {
 		const { deps } = harness();
 
-		const resp = await handleModelsRoute(
-			new URL("http://proxy.local/v1/models?client_version=0.149.0"),
-			deps,
-			null,
-			"openai",
-		);
+		const resp = await renderLegacyCatalogue("codex", deps);
 		expect(resp.headers.has("ETag")).toBe(false);
-	});
-
-	// Entitlement is per-subscription, so the catalog has to be chosen for the
-	// key that asked, not for the pool at large.
-	test("passes the API key id through to the catalog lookup", async () => {
-		const { deps, keys } = harness();
-
-		await handleModelsRoute(
-			new URL("http://proxy.local/v1/models?client_version=0.149.0"),
-			deps,
-			"key-42",
-			"openai",
-		);
-		await handleModelsRoute(
-			new URL("http://proxy.local/v1/models?client_version=0.149.0"),
-			deps,
-			null,
-			"openai",
-		);
-
-		expect(keys).toEqual(["key-42", null]);
-	});
-
-	// The value is never read — only its presence. Forwarding it upstream would
-	// ask OpenAI for a catalog at a version this proxy does not speak, and would
-	// make a client-controlled string into a cache key.
-	test("ignores the client_version value entirely", async () => {
-		const { deps, keys } = harness();
-
-		for (const value of [
-			"0.149.0",
-			"",
-			"latest",
-			"9".repeat(4096),
-			"../../etc/passwd",
-		]) {
-			const resp = await handleModelsRoute(
-				new URL(
-					`http://proxy.local/v1/models?client_version=${encodeURIComponent(value)}`,
-				),
-				deps,
-				"key-1",
-				"openai",
-			);
-			expect(await resp.text()).toBe(CATALOG_BODY);
-		}
-
-		// Every one reached the same lookup, keyed only by the API key.
-		expect(keys).toEqual(["key-1", "key-1", "key-1", "key-1", "key-1"]);
 	});
 
 	test("drops hidden entries and drops the upstream ETag with them", async () => {
@@ -487,12 +403,7 @@ describe("handleModelsRoute: the codex catalog", () => {
 			overrides: [override({ modelId: "gpt-5.5", hidden: true })],
 		});
 
-		const resp = await handleModelsRoute(
-			new URL("http://proxy.local/v1/models?client_version=0.149.0"),
-			deps,
-			null,
-			"openai",
-		);
+		const resp = await renderLegacyCatalogue("codex", deps);
 		const body = (await resp.json()) as {
 			models: Array<{ slug: string }>;
 		};
@@ -510,12 +421,7 @@ describe("handleModelsRoute: the codex catalog", () => {
 			],
 		});
 
-		const resp = await handleModelsRoute(
-			new URL("http://proxy.local/v1/models?client_version=0.149.0"),
-			deps,
-			null,
-			"openai",
-		);
+		const resp = await renderLegacyCatalogue("codex", deps);
 		const body = (await resp.json()) as {
 			models: Array<Record<string, unknown>>;
 		};
@@ -539,12 +445,7 @@ describe("handleModelsRoute: the codex catalog", () => {
 			],
 		});
 
-		const resp = await handleModelsRoute(
-			new URL("http://proxy.local/v1/models?client_version=0.149.0"),
-			deps,
-			null,
-			"openai",
-		);
+		const resp = await renderLegacyCatalogue("codex", deps);
 		const body = (await resp.json()) as {
 			models: Array<Record<string, unknown>>;
 		};
@@ -563,12 +464,7 @@ describe("handleModelsRoute: the codex catalog", () => {
 			],
 		});
 
-		const resp = await handleModelsRoute(
-			new URL("http://proxy.local/v1/models?client_version=0.149.0"),
-			deps,
-			null,
-			"openai",
-		);
+		const resp = await renderLegacyCatalogue("codex", deps);
 		const body = (await resp.json()) as {
 			models: Array<Record<string, unknown>>;
 		};
@@ -585,12 +481,7 @@ describe("handleModelsRoute: the codex catalog", () => {
 			overrides: [override({ modelId: "gpt-house", custom: true })],
 		});
 
-		const resp = await handleModelsRoute(
-			new URL("http://proxy.local/v1/models?client_version=0.149.0"),
-			deps,
-			null,
-			"openai",
-		);
+		const resp = await renderLegacyCatalogue("codex", deps);
 		const body = (await resp.json()) as { models: unknown[] };
 
 		expect(body.models).toEqual([]);
@@ -609,12 +500,7 @@ describe("handleModelsRoute: the codex catalog", () => {
 			],
 		});
 
-		const resp = await handleModelsRoute(
-			new URL("http://proxy.local/v1/models?client_version=0.149.0"),
-			deps,
-			null,
-			"openai",
-		);
+		const resp = await renderLegacyCatalogue("codex", deps);
 		const body = (await resp.json()) as {
 			models: Array<{ slug: string; display_name: string }>;
 		};
@@ -623,35 +509,25 @@ describe("handleModelsRoute: the codex catalog", () => {
 		expect(body.models[1].display_name).toBe("Renamed 5.5");
 	});
 
-	test("serves the catalog unmodified when it cannot be parsed", async () => {
+	test("snapshots the catalog unmodified when it cannot be parsed", async () => {
 		const { deps } = harness({
 			catalog: async () => ({ bodyText: "not json", etag: 'W/"abc"' }),
 			overrides: [override({ modelId: "gpt-5.5", hidden: true })],
 		});
 
-		const resp = await handleModelsRoute(
-			new URL("http://proxy.local/v1/models?client_version=0.149.0"),
-			deps,
-			null,
-			"openai",
-		);
+		const resp = await renderLegacyCatalogue("codex", deps);
 
 		expect(resp.status).toBe(200);
 		expect(await resp.text()).toBe("not json");
 	});
 
-	// The whole point of the fallback: a Codex startup must never be blocked by
-	// our inability to read a catalog. It gets a 200 it cannot use and falls back
-	// to its built-in catalog, exactly as it did before this route existed.
+	// The whole point of the fallback: a migration must never be blocked by our
+	// inability to read a catalog. The profile is seeded from the generic list
+	// instead, and the backfill records a notice saying so.
 	test("falls back to the OpenAI list shape with a 200 when no catalog is available", async () => {
 		const { deps } = harness({ catalog: async () => null });
 
-		const resp = await handleModelsRoute(
-			new URL("http://proxy.local/v1/models?client_version=0.149.0"),
-			deps,
-			null,
-			"openai",
-		);
+		const resp = await renderLegacyCatalogue("codex", deps);
 		const body = (await resp.json()) as { object?: string };
 
 		expect(resp.status).toBe(200);
@@ -665,19 +541,14 @@ describe("handleModelsRoute: the codex catalog", () => {
 			},
 		});
 
-		const resp = await handleModelsRoute(
-			new URL("http://proxy.local/v1/models?client_version=0.149.0"),
-			deps,
-			null,
-			"openai",
-		);
+		const resp = await renderLegacyCatalogue("codex", deps);
 		expect(resp.status).toBe(200);
 		expect(((await resp.json()) as { object?: string }).object).toBe("list");
 	});
 });
 
-describe("handleModelsRoute: the override read never costs availability", () => {
-	test("serves the uncurated catalog when the override read rejects", async () => {
+describe("renderLegacyCatalogue: the override read never costs the migration", () => {
+	test("snapshots the uncurated catalog when the override read rejects", async () => {
 		const { deps } = harness({
 			catalog: async () => ({ bodyText: CATALOG_BODY, etag: 'W/"abc"' }),
 			listOverrides: async () => {
@@ -685,12 +556,7 @@ describe("handleModelsRoute: the override read never costs availability", () => 
 			},
 		});
 
-		const resp = await handleModelsRoute(
-			new URL("http://proxy.local/v1/models?client_version=0.149.0"),
-			deps,
-			null,
-			"openai",
-		);
+		const resp = await renderLegacyCatalogue("codex", deps);
 
 		expect(resp.status).toBe(200);
 		// Byte-identical passthrough: a failed override read is indistinguishable
@@ -699,17 +565,12 @@ describe("handleModelsRoute: the override read never costs availability", () => 
 		expect(resp.headers.get("ETag")).toBe('W/"abc"');
 	});
 
-	test("serves the uncurated listing when the override read never settles", async () => {
+	test("snapshots the uncurated listing when the override read never settles", async () => {
 		const { deps } = harness({
 			listOverrides: () => new Promise<readonly ModelOverride[]>(() => {}),
 		});
 
-		const resp = await handleModelsRoute(
-			new URL("http://proxy.local/v1/models"),
-			deps,
-			null,
-			"anthropic",
-		);
+		const resp = await renderLegacyCatalogue("anthropic", deps);
 		const body = (await resp.json()) as AnthropicBody;
 
 		expect(resp.status).toBe(200);

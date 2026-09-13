@@ -4,10 +4,6 @@
 export { terminateAnalyticsWorker } from "./handlers/analytics-runner";
 // Management session auth: the app-level login behind /api/*
 export type { AuthStatusResponse } from "./handlers/auth";
-export {
-	createModelOverrideHandlers,
-	type ModelOverrideHandlerDeps,
-} from "./handlers/model-overrides";
 export { NO_STORE_HEADERS } from "./handlers/public/cache-headers";
 // The read-only widget API at /public/v1/*
 export * from "./handlers/public/dto";
@@ -28,6 +24,7 @@ export * from "./services/admin/accounts";
 export * from "./services/admin/api-keys";
 // Export services
 export {
+	API_KEY_REQUIRED_ERROR,
 	type AuthenticationResult,
 	type AuthRequirement,
 	AuthService,

@@ -14,10 +14,13 @@ only ever exercised through real Claude Code. To test, use a non-Anthropic
 account (ollama, litellm, omniroute, …) and force-route with
 `x-clankermux-account-id`. See the `running-clankermux` skill.
 
-One sanctioned exception, approved 2026-08-25: the server's own hourly
-`GET api.anthropic.com/v1/models` metadata read behind the Models page
-(`AnthropicModelCatalogCache`). It costs no tokens and starts no quota window.
-Everything else stays forbidden, including curling that endpoint by hand.
+One sanctioned exception, approved 2026-08-25: the server's own
+`GET api.anthropic.com/v1/models` metadata read
+(`AnthropicModelCatalogCache`). It costs no tokens and starts no quota
+window. Since the shared-catalogue page was removed it is demand-driven
+and reached only by the one-shot `client_profiles` backfill, so on a
+database created after 2026.9.52 it never runs at all. Everything else
+stays forbidden, including curling that endpoint by hand.
 
 ## This directory builds the deployment; it is not the deployment
 

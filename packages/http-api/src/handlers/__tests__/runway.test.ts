@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, spyOn } from "bun:test";
-import { RUNWAY_HORIZON_MS } from "@clankermux/core";
+import { RUNWAY_HORIZON_MS, summarizeKeyRunways } from "@clankermux/core";
 import type { DatabaseOperations } from "@clankermux/database";
 import {
 	type AnyUsageData,
@@ -323,9 +323,15 @@ describe("GET /api/runway", () => {
 
 		expect(body.keys).toHaveLength(1);
 		expect(body.keys[0].keyId).toBeNull();
-		expect(body.keys[0].isActive).toBe(true);
-		// The worst row is the synthetic one, which has no key id to name.
+		// Agent traffic needs a client key, so with none active nothing can reach
+		// the pool and the row that describes it may not claim a spendable runway.
+		expect(body.keys[0].isActive).toBe(false);
+		// Not because the worst row has no id to name: the ranking covers active
+		// rows only, so with this one inactive there is no worst row at all.
 		expect(body.worstKeyId).toBeNull();
+		// And the count every headline is built on excludes it too — a key count
+		// beside 'no active clients' is the contradiction this row exists to avoid.
+		expect(summarizeKeyRunways(body.keys, BASE).activeKeyCount).toBe(0);
 	});
 
 	it("serves the response with prediction null when the snapshot query fails", async () => {

@@ -90,7 +90,7 @@ import { Skeleton } from "./ui/skeleton";
 /**
  * Styling for the cost chip in the requests list, keyed off the request's
  * server-derived billing type. Pure and exported so it can be unit-tested
- * without mounting the tab (mirrors `describePinTarget` in ApiKeysTab):
+ * without mounting the tab:
  *   - "overage" / "api" -> orange (the request costs real per-token money)
  *   - "plan"            -> neutral (covered by the subscription plan)
  *   - null / unknown    -> neutral, no title (billing not determined)

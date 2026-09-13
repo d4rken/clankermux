@@ -67,6 +67,39 @@ describe("client service integration", () => {
 	let service: ClientService;
 	let permissions: AccountModelPermissionService;
 	let currentRaw: ReturnType<typeof raw> | null;
+	/**
+	 * A `model_overrides` row as a pre-2026.9.52 database already holds one.
+	 *
+	 * Raw SQL because the table is read-only now: there is no repository write
+	 * left to build the fixture with, and the backfill has to keep working
+	 * against rows that were written before the writer was removed.
+	 */
+	function writeLegacyOverride(row: {
+		dialect: "anthropic" | "openai";
+		modelId: string;
+		hidden?: 0 | 1;
+		custom?: 0 | 1;
+		displayName?: string | null;
+		now: number;
+	}): void {
+		dbOps
+			.getAdapter()
+			.getSQLiteDb()
+			.query(
+				`INSERT INTO model_overrides
+				   (dialect, model_id, hidden, custom, display_name, created_at, updated_at)
+				 VALUES (?, ?, ?, ?, ?, ?, ?)`,
+			)
+			.run(
+				row.dialect,
+				row.modelId,
+				row.hidden ?? 0,
+				row.custom ?? 0,
+				row.displayName ?? null,
+				row.now,
+				row.now,
+			);
+	}
 	beforeEach(() => {
 		dbOps = new DatabaseOperations(temp.next());
 		for (const [id, provider] of [
@@ -117,12 +150,8 @@ describe("client service integration", () => {
 					const pin = id ? await dbOps.getApiKeyPin(id) : null;
 					return pin?.pinnedAccountId === "d" ? null : currentRaw;
 				},
-				getFetchedAt: () => 100,
 			},
 			staticModelIds: ["gpt-static"],
-			listOverrides: (d) => dbOps.listModelOverrides(d),
-			upsertOverride: (i) => dbOps.upsertModelOverride(i),
-			removeOverride: (d, id) => dbOps.removeModelOverride(d, id),
 		});
 		service = new ClientService({
 			dbOps,
@@ -228,11 +257,12 @@ describe("client service integration", () => {
 			isActive: false,
 			pinnedAccountId: "d",
 		});
-		await dbOps.upsertModelOverride({
+		// The table has no writer left; a legacy row is what an upgrading database
+		// arrives holding, so the fixture writes one the way that database does.
+		writeLegacyOverride({
 			dialect: "openai",
 			modelId: "custom",
-			hidden: false,
-			custom: true,
+			custom: 1,
 			displayName: "Custom",
 			now: 123,
 		});
@@ -247,12 +277,10 @@ describe("client service integration", () => {
 				(m: { id: string }) => m.id,
 			),
 		).toEqual(["gpt-static", "custom"]);
-		await dbOps.upsertModelOverride({
+		writeLegacyOverride({
 			dialect: "openai",
 			modelId: "gpt-static",
-			hidden: true,
-			custom: false,
-			displayName: null,
+			hidden: 1,
 			now: 124,
 		});
 		await service.bootstrap();

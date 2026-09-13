@@ -1,6 +1,6 @@
 import { describe, expect, it } from "bun:test";
 import type { KeyRunway } from "@clankermux/core";
-import { UNAUTHENTICATED_POOL_KEY_NAME } from "@clankermux/core";
+import { IDLE_POOL_KEY_NAME } from "@clankermux/core";
 import type { RunwayAccountSummary } from "@clankermux/types";
 import { renderToStaticMarkup } from "react-dom/server";
 import { TONE } from "../../test-utils/tone";
@@ -532,14 +532,24 @@ describe("RunwayCard", () => {
 		expect(expired).not.toContain(">0<");
 	});
 
-	it("summarises the synthetic row when authentication is off", () => {
+	// The tile must not price capacity nothing can spend. With no active client
+	// the pool is unreachable, so the synthetic row's own outcome — a perfectly
+	// real "beyond horizon" — must never surface as a figure or a key count.
+	it("reports no active clients instead of the idle pool's own runway", () => {
 		const html = render({
-			runways: [row({ keyId: null, keyName: UNAUTHENTICATED_POOL_KEY_NAME })],
+			runways: [
+				row({
+					keyId: null,
+					keyName: IDLE_POOL_KEY_NAME,
+					isActive: false,
+				}),
+			],
 		});
 
-		expect(html).toContain("∞");
-		expect(html).toContain("1 key");
-		expect(html).not.toContain(UNAUTHENTICATED_POOL_KEY_NAME);
+		expect(html).toContain("No active clients");
+		expect(html).not.toContain("∞");
+		expect(html).not.toContain("1 key");
+		expect(html).not.toContain(IDLE_POOL_KEY_NAME);
 	});
 
 	describe("assumed reset credits", () => {

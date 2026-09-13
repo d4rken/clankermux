@@ -16,7 +16,7 @@ Backend, API key, or persisted identity changes invalidate evidence; ordinary OA
 
 ## Dashboard and API
 
-The existing Models page is labeled **Client Models** (its `/models` URL is unchanged) and curates the model catalogue presented to harnesses. It does not authorize account destinations. The Routing page has its own `/routing` URL. The Routing tab supports rule creation, editing, enable/disable, deletion, and ordering. Account “Permitted models” shows discovery status and edits manual IDs. API key “Allowed destinations” controls the isolation boundary. Request details include routing attempts and the frozen rule snapshot, separating requested, resolved, outgoing, and upstream-reported models. Failed attempts do not create duplicate usage rows. Raw-response model observation is bounded; an unavailable reported model remains null.
+The **Clients** page curates the model catalogue presented to harnesses, one catalogue per client. It does not authorize account destinations. The Routing page has its own `/routing` URL. The Routing tab supports rule creation, editing, enable/disable, deletion, and ordering. Account “Permitted models” shows discovery status and edits manual IDs. API key “Allowed destinations” controls the isolation boundary. Request details include routing attempts and the frozen rule snapshot, separating requested, resolved, outgoing, and upstream-reported models. Failed attempts do not create duplicate usage rows. Raw-response model observation is bounded; an unavailable reported model remains null.
 
 Admin endpoints:
 

@@ -76,7 +76,6 @@ import {
 	type ModelOverrideDialect,
 	ModelOverrideRepository,
 	type ModelOverrideRow,
-	type ModelOverrideUpsert,
 } from "./repositories/model-override.repository";
 import { OAuthRepository } from "./repositories/oauth.repository";
 import { OpenAiBucketObservationRepository } from "./repositories/openai-bucket-observation.repository";
@@ -2838,23 +2837,14 @@ OAuth tokens will need to be re-authenticated.
 		return this.codexResetCreditEvents.findRecentForAccount(accountId, limit);
 	}
 
-	// Model-catalogue curation. Every read is per dialect: `/wire/anthropic` and
-	// `/wire/openai` are separate catalogues and their overrides never mix.
+	// The retired global model-catalogue curation, read-only. Its one reader is
+	// the pre-2026.9.52 client-catalogue backfill; nothing writes it any more.
+	// Reads stay per dialect: `/wire/anthropic` and `/wire/openai` were separate
+	// catalogues and their overrides never mixed.
 
 	async listModelOverrides(
 		dialect: ModelOverrideDialect,
 	): Promise<ModelOverrideRow[]> {
 		return this.modelOverrides.listByDialect(dialect);
-	}
-
-	async upsertModelOverride(input: ModelOverrideUpsert): Promise<void> {
-		await this.modelOverrides.upsert(input);
-	}
-
-	async removeModelOverride(
-		dialect: ModelOverrideDialect,
-		modelId: string,
-	): Promise<boolean> {
-		return this.modelOverrides.remove(dialect, modelId);
 	}
 }
