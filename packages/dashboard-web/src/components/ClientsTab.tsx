@@ -3,7 +3,6 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { formatDistanceToNow } from "date-fns";
 import { MoreHorizontal, Plus, Settings2 } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
-import { Link } from "react-router";
 import { useAccounts } from "../hooks/queries";
 import { type SortDir, SortIcon } from "./analytics/sort-header";
 import { clientRequest } from "./clients/api";
@@ -399,11 +398,7 @@ export function ClientsTab() {
 			)}
 
 			<p className="text-xs text-muted-foreground">
-				<Link className="underline" to="/clients/defaults">
-					Unauthenticated catalogue
-				</Link>{" "}
-				applies when API key authentication is not configured. Existing clients
-				keep independent catalogue copies.
+				Agent traffic requires a client key. Requests without one are rejected.
 			</p>
 			{setup && (
 				<ClientSetupDialog

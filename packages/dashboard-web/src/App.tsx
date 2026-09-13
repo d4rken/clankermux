@@ -6,7 +6,6 @@ import { AuthGate } from "./components/AuthGate";
 import { ClientsTab } from "./components/ClientsTab";
 import { DebugPanel } from "./components/DebugPanel";
 import { LogsTab } from "./components/LogsTab";
-import { ModelsTab } from "./components/ModelsTab";
 import { Navigation } from "./components/navigation";
 import { OverviewTab } from "./components/OverviewTab";
 import { RequestEventProvider } from "./components/RequestEventProvider";
@@ -95,11 +94,6 @@ export function App() {
 				title: "Routing",
 			},
 			{ path: "/clients", element: <ClientsTab />, title: "Clients" },
-			{
-				path: "/clients/defaults",
-				element: <ModelsTab />,
-				title: "Unauthenticated catalogue",
-			},
 			{
 				path: "/api-keys",
 				element: <Navigate to="/clients" replace />,
