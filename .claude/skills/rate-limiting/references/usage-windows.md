@@ -12,10 +12,11 @@
 
 **Representative utilization** = MAX across the account-wide windows.
 
-`usage_snapshots.five_hour_pct` is stored as an **integer**, so one point is
-roughly three minutes of a five-hour window's life. Anything fitted over a
-handful of snapshots cannot resolve a slope finer than that; sub-quantum
-differences are noise. This is a storage caveat, not a live-database reading.
+`usage_snapshots.five_hour_pct` uses REAL storage and preserves fractional
+percentages — the normalizer, sampler and repository do not round. Any
+quantisation you observe comes from the upstream reading, not from storage,
+so do not assume a one-percentage-point quantum or a three-minute temporal
+floor when fitting over closely-spaced snapshots.
 
 > **Returns `null`, never `0`, when there is no evidence.** A `limits[]`-only
 > payload once collapsed to `0` — read as "plenty of headroom" — and falsely
