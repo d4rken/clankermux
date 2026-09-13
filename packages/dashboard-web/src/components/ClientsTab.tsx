@@ -5,6 +5,7 @@ import { MoreHorizontal, Plus, Settings2 } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { Link } from "react-router";
 import { useAccounts } from "../hooks/queries";
+import { type SortDir, SortIcon } from "./analytics/sort-header";
 import { clientRequest } from "./clients/api";
 import { ClientSetupDialog } from "./clients/ClientSetupDialog";
 import { ClientWizard } from "./clients/ClientWizard";
@@ -27,9 +28,63 @@ import {
 	DropdownMenuTrigger,
 } from "./ui/dropdown-menu";
 
+const SORT_COLUMNS = [
+	{
+		key: "name",
+		label: "Client",
+		description: "Client",
+		defaultDir: "asc",
+		asc: "A to Z",
+		desc: "Z to A",
+	},
+	{
+		key: "destinations",
+		label: "Destinations",
+		description: "Destinations",
+		defaultDir: "asc",
+		asc: "A to Z",
+		desc: "Z to A",
+	},
+	{
+		key: "models",
+		label: "Catalogue models",
+		description: "total catalogue models",
+		defaultDir: "desc",
+		asc: "fewest models first",
+		desc: "most models first",
+	},
+	{
+		key: "lastRequest",
+		label: "Last request",
+		description: "Last request",
+		defaultDir: "desc",
+		asc: "oldest first",
+		desc: "newest first",
+	},
+] as const;
+type SortColumn = (typeof SORT_COLUMNS)[number];
+type SortKey = SortColumn["key"];
+
 export function ClientsTab() {
 	const queryClient = useQueryClient();
 	const [now, setNow] = useState(Date.now);
+	const [sort, setSort] = useState<{ key: SortKey; dir: SortDir }>({
+		key: "name",
+		dir: "asc",
+	});
+	const changeSort = (column: SortColumn) =>
+		setSort((current) => ({
+			key: column.key,
+			dir:
+				current.key === column.key
+					? current.dir === "asc"
+						? "desc"
+						: "asc"
+					: column.defaultDir,
+		}));
+	const activeColumn =
+		SORT_COLUMNS.find((column) => column.key === sort.key) ?? SORT_COLUMNS[0];
+	const sortDescription = activeColumn[sort.dir];
 	useEffect(() => {
 		const timer = setInterval(() => setNow(Date.now()), 60000);
 		return () => clearInterval(timer);
@@ -84,19 +139,51 @@ export function ClientsTab() {
 			setBusy(false);
 		}
 	};
-	const sortedClients = useMemo(
-		() =>
-			[...clients].sort(
-				(a, b) =>
-					a.key.name.localeCompare(b.key.name, undefined, {
-						numeric: true,
-						sensitivity: "base",
-					}) ||
-					a.key.name.localeCompare(b.key.name) ||
-					a.apiKeyId.localeCompare(b.apiKeyId),
-			),
-		[clients],
-	);
+	const sortedClients = useMemo(() => {
+		const compareText = (a: string, b: string) =>
+			a.localeCompare(b, undefined, { numeric: true, sensitivity: "base" }) ||
+			a.localeCompare(b);
+		const rows = clients.map((client) => ({
+			client,
+			destinations: client.key.pinnedAccountId
+				? (accounts.find((a) => a.id === client.key.pinnedAccountId)?.name ??
+					"Unavailable account")
+				: (client.key.pinnedProviders?.join(", ") ?? "All accounts"),
+			models:
+				client.catalogues.anthropic.models.length +
+				client.catalogues.openai.models.length +
+				client.catalogues.codex.models.length,
+			lastRequest: client.key.lastUsed
+				? new Date(client.key.lastUsed).getTime()
+				: null,
+		}));
+		return rows.sort((a, b) => {
+			let comparison = 0;
+			switch (sort.key) {
+				case "name":
+					comparison = compareText(a.client.key.name, b.client.key.name);
+					break;
+				case "destinations":
+					comparison = compareText(a.destinations, b.destinations);
+					break;
+				case "models":
+					comparison = a.models - b.models;
+					break;
+				case "lastRequest": {
+					// Keep clients without requests last in either direction.
+					if (a.lastRequest === null && b.lastRequest !== null) return 1;
+					if (b.lastRequest === null && a.lastRequest !== null) return -1;
+					comparison = (a.lastRequest ?? 0) - (b.lastRequest ?? 0);
+					break;
+				}
+			}
+			return (
+				comparison * (sort.dir === "asc" ? 1 : -1) ||
+				compareText(a.client.key.name, b.client.key.name) ||
+				a.client.apiKeyId.localeCompare(b.client.apiKeyId)
+			);
+		});
+	}, [clients, accounts, sort]);
 	if (editing)
 		return (
 			<ClientWizard
@@ -139,18 +226,38 @@ export function ClientsTab() {
 
 			{sortedClients.length > 0 && (
 				<div className="overflow-hidden rounded-lg border bg-card">
-					<div
-						aria-hidden="true"
-						className="hidden xl:grid xl:grid-cols-[minmax(0,1.15fr)_minmax(0,1fr)_minmax(0,1fr)_10rem_15.5rem] gap-4 border-b bg-muted/30 px-5 py-2.5 text-xs font-medium text-muted-foreground"
-					>
-						<span>Client</span>
-						<span>Destinations</span>
-						<span>Catalogue models</span>
-						<span>Last request</span>
-						<span className="text-right">Actions</span>
+					<div className="flex flex-wrap items-center gap-x-5 gap-y-3 xl:grid xl:grid-cols-[minmax(0,1.15fr)_minmax(0,1fr)_minmax(0,1fr)_10rem_15.5rem] xl:gap-4 border-b bg-muted/30 px-5 py-2.5 text-xs font-medium text-muted-foreground">
+						{SORT_COLUMNS.map((column) => (
+							<button
+								key={column.key}
+								type="button"
+								onClick={() => changeSort(column)}
+								aria-pressed={sort.key === column.key}
+								aria-label={
+									sort.key === column.key
+										? `${column.description}, sorted ${sortDescription}; activate to reverse`
+										: `Sort by ${column.description}`
+								}
+								title={
+									column.key === "models"
+										? "Sort by total models across all catalogues"
+										: undefined
+								}
+								className="inline-flex min-h-11 xl:min-h-0 w-fit items-center gap-tight rounded py-1 text-left hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+							>
+								{column.label}
+								<span aria-hidden="true">
+									<SortIcon active={sort.key === column.key} dir={sort.dir} />
+								</span>
+							</button>
+						))}
+						<span className="hidden xl:block text-right">Actions</span>
 					</div>
+					<p role="status" className="sr-only">
+						Sorted by {activeColumn.description}, {sortDescription}.
+					</p>
 					<ul aria-label="Clients" className="divide-y">
-						{sortedClients.map((client) => (
+						{sortedClients.map(({ client, destinations }) => (
 							<li
 								key={client.apiKeyId}
 								className="px-4 py-4 sm:px-5 hover:bg-muted/20 transition-colors"
@@ -179,14 +286,7 @@ export function ClientsTab() {
 										<p className="xl:sr-only text-xs text-muted-foreground mb-1">
 											Destinations
 										</p>
-										<p className="break-words">
-											{client.key.pinnedAccountId
-												? (accounts.find(
-														(a) => a.id === client.key.pinnedAccountId,
-													)?.name ?? "Unavailable account")
-												: (client.key.pinnedProviders?.join(", ") ??
-													"All accounts")}
-										</p>
+										<p className="break-words">{destinations}</p>
 									</div>
 									<div className="text-xs leading-5 text-muted-foreground">
 										<p className="xl:sr-only mb-1">Catalogue models</p>
