@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { mkdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import {
 	getDefaultAllowedBasePaths,
@@ -9,7 +9,7 @@ import {
 } from "../path-validator";
 
 // Test directory setup - using os.tmpdir() for cross-platform compatibility
-const TEST_DIR = join(tmpdir(), "better-ccflare-security-tests");
+const TEST_DIR = join(tmpdir(), "clankermux-security-tests");
 const SAFE_DIR = join(TEST_DIR, "safe");
 const UNSAFE_DIR = join(tmpdir(), "unsafe-dir");
 
@@ -376,6 +376,19 @@ describe("Path Validator - Core Security Tests", () => {
 				expect(path.startsWith("/")).toBe(true);
 			}
 		});
+
+		test("includes only the clankermux config dir, not the retired names", () => {
+			// Asserted against the returned list, not by validating a path: the
+			// temp dir is on the allow-list independently, so a fixture there
+			// would pass whatever the config-dir entry says.
+			const configBase =
+				process.env.XDG_CONFIG_HOME ?? join(homedir(), ".config");
+			const paths = getDefaultAllowedBasePaths(true);
+
+			expect(paths).toContain(join(configBase, "clankermux"));
+			expect(paths).not.toContain(join(configBase, "better-ccflare"));
+			expect(paths).not.toContain(join(configBase, "ccflare"));
+		});
 	});
 
 	describe("Integration Tests - Real-world Scenarios", () => {
@@ -412,10 +425,7 @@ describe("Path Validator - Core Security Tests", () => {
 
 		test("should handle complex real-world paths", () => {
 			const result = validatePath(
-				join(
-					tmpdir(),
-					"better-ccflare-test/workspace/.claude/agents/my-agent.md",
-				),
+				join(tmpdir(), "clankermux-test/workspace/.claude/agents/my-agent.md"),
 				{
 					description: "agent file path",
 				},
