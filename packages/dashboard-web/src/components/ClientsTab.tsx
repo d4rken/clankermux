@@ -1,10 +1,15 @@
 import type { ClientView } from "@clankermux/types";
-import { useQuery, useQueryClient } from "@tanstack/react-query";
+import {
+	type QueryClient,
+	useQuery,
+	useQueryClient,
+} from "@tanstack/react-query";
 import { formatDistanceToNow } from "date-fns";
 import { MoreHorizontal, Plus, Settings2 } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { Link } from "react-router";
 import { useAccounts } from "../hooks/queries";
+import { invalidateCapacityQueries } from "../lib/query-keys";
 import { type SortDir, SortIcon } from "./analytics/sort-header";
 import { clientRequest } from "./clients/api";
 import { ClientSetupDialog } from "./clients/ClientSetupDialog";
@@ -65,6 +70,18 @@ const SORT_COLUMNS = [
 type SortColumn = (typeof SORT_COLUMNS)[number];
 type SortKey = SortColumn["key"];
 
+/**
+ * Creating, editing, enabling, disabling, rotating or deleting a client moves
+ * server-computed capacity as well as the client list: the runway scan reads
+ * the API keys and their routing pins, and pacing reads the same account array.
+ * So every client mutation refreshes the whole capacity set, not just
+ * `["clients"]`.
+ */
+export function invalidateAfterClientMutation(queryClient: QueryClient): void {
+	void queryClient.invalidateQueries({ queryKey: ["clients"] });
+	invalidateCapacityQueries(queryClient);
+}
+
 export function ClientsTab() {
 	const queryClient = useQueryClient();
 	const [now, setNow] = useState(Date.now);
@@ -110,10 +127,7 @@ export function ClientsTab() {
 	} | null>(null);
 	const [actionError, setActionError] = useState<string | null>(null);
 	const [busy, setBusy] = useState(false);
-	const reload = () => {
-		void queryClient.invalidateQueries({ queryKey: ["clients"] });
-		void queryClient.invalidateQueries({ queryKey: ["apiKeys"] });
-	};
+	const reload = () => invalidateAfterClientMutation(queryClient);
 	const finish = (result: { client: ClientView; apiKey?: string }) => {
 		setEditing(null);
 		setSetup(result);

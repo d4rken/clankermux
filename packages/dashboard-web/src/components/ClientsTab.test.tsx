@@ -1,9 +1,14 @@
 import { expect, it } from "bun:test";
 import type { ClientView } from "@clankermux/types";
-import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import {
+	QueryClient,
+	QueryClientProvider,
+	type QueryClient as QueryClientType,
+} from "@tanstack/react-query";
 import { renderToStaticMarkup } from "react-dom/server";
 import { MemoryRouter } from "react-router";
-import { ClientsTab } from "./ClientsTab";
+import { queryKeys } from "../lib/query-keys";
+import { ClientsTab, invalidateAfterClientMutation } from "./ClientsTab";
 
 it("lists clients by name and highlights requests from the last 24 hours", () => {
 	const client = (name: string, hours: number | null): ClientView => ({
@@ -58,4 +63,28 @@ it("lists clients by name and highlights requests from the last 24 hours", () =>
 		"Alpha 2",
 	]);
 	query.clear();
+});
+
+// A client mutation moves server-computed capacity, not just the client list:
+// computeRunwayScan reads the API keys, computeApiKeyRunways reads their
+// activation state and pins, and pacing reads the same account array. Every one
+// of those lives under its own key, so asserting the api-keys key alone would
+// still let a stale runway number stay on screen.
+it("invalidates the whole capacity set after a client mutation", () => {
+	const invalidated: unknown[] = [];
+	const stub = {
+		invalidateQueries: ({ queryKey }: { queryKey: unknown }) => {
+			invalidated.push(queryKey);
+		},
+	} as unknown as QueryClientType;
+
+	invalidateAfterClientMutation(stub);
+
+	expect(invalidated).toEqual([
+		["clients"],
+		queryKeys.accounts(),
+		queryKeys.apiKeys(),
+		queryKeys.runway(),
+		queryKeys.pacing(),
+	]);
 });
