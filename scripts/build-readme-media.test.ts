@@ -8,17 +8,19 @@ import {
 	BRAND_MARK_SELECTED_PATH,
 	BRAND_MARK_STROKES,
 } from "../packages/dashboard-web/src/brand-mark-geometry";
-import { renderAll } from "./build-readme-media";
+import { NAME, renderAll, SLOGAN } from "./build-readme-media";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const files = renderAll();
 
 /**
- * These two SVGs are the README's brand mark, and nothing in this repo can
+ * These four SVGs are the README's brand assets, and nothing in this repo can
  * render one to look at. That makes silent breakage the realistic failure: a
- * geometry change that puts the mark outside its own 24-unit box, or a stray
- * bit of CSS that GitHub's proxy strips, shows up only on a published page.
- * The checks below stand in for the eye that cannot see the output.
+ * geometry change that puts the mark outside the canvas, a text run placed off
+ * it, or a stray bit of CSS that GitHub's proxy strips, all show up only on a
+ * published page. The checks below stand in for the eye that cannot see the
+ * output. What they cannot cover is rendered text width, which depends on a
+ * font resolved on the reader's machine.
  */
 
 /**
@@ -132,12 +134,17 @@ function viewBox(svg: string): { width: number; height: number } {
 }
 
 describe("README media", () => {
-	it("emits a light and a dark logo, and nothing else", () => {
+	it("emits a light and a dark logo and banner, and nothing else", () => {
 		// The four dashboard mockups this script used to draw are now real
 		// captures from `scripts/capture-readme-screenshots.sh`; if one reappears
 		// here, two pipelines are writing the same figures.
 		const names = files.map((f) => f.name).sort();
-		expect(names).toEqual(["logo-dark.svg", "logo-light.svg"]);
+		expect(names).toEqual([
+			"banner-dark.svg",
+			"banner-light.svg",
+			"logo-dark.svg",
+			"logo-light.svg",
+		]);
 	});
 
 	it("matches what is committed in docs/media", () => {
@@ -202,13 +209,30 @@ describe("README media", () => {
 
 			it("keeps every shape inside the canvas", () => {
 				const { width, height } = viewBox(f.svg);
+				// Coordinates below are written in the mark's own 24-unit space and
+				// placed by the enclosing `translate(tx ty) scale(s)`. Checking them
+				// raw would test the wrong numbers: with the transform ignored, moving
+				// the group to translate(400 20) pushes the mark off the canvas while
+				// every underlying coordinate stays in range and this test still
+				// passes. Parse the transform and apply it.
+				const t = /<g transform="translate\(([-\d.]+) ([-\d.]+)\) scale\(([\d.]+)\)"/.exec(
+					f.svg,
+				);
+				expect(`${f.name}: group transform found`).toBe(
+					t ? `${f.name}: group transform found` : `${f.name}: NO TRANSFORM`,
+				);
+				const tx = Number(t?.[1] ?? 0);
+				const ty = Number(t?.[2] ?? 0);
+				const s = Number(t?.[3] ?? 1);
 				const inX = (v: number) => {
-					expect(v).toBeGreaterThanOrEqual(-0.5);
-					expect(v).toBeLessThanOrEqual(width + 0.5);
+					const p = tx + v * s;
+					expect(p).toBeGreaterThanOrEqual(-0.5);
+					expect(p).toBeLessThanOrEqual(width + 0.5);
 				};
 				const inY = (v: number) => {
-					expect(v).toBeGreaterThanOrEqual(-0.5);
-					expect(v).toBeLessThanOrEqual(height + 0.5);
+					const p = ty + v * s;
+					expect(p).toBeGreaterThanOrEqual(-0.5);
+					expect(p).toBeLessThanOrEqual(height + 0.5);
 				};
 
 				let rects = 0;
@@ -235,6 +259,35 @@ describe("README media", () => {
 					}
 				}
 
+				// Text origins, which sit outside the transformed group and so are
+				// already in canvas units. Only the origin: the rendered width depends
+				// on a font resolved on the reader's machine, which nothing here can
+				// measure, so this catches a run placed off-canvas and not a run that
+				// overflows to the right. That remaining risk is why the layout leaves
+				// horizontal slack rather than fitting the strings.
+				//
+				// Match the element first and parse the numbers second. A pattern that
+				// only accepts digits would not match `y="-1000"` or `y="NaN"` at all,
+				// so an off-canvas origin would be skipped rather than caught — the
+				// exact hole the loop exists to close. The count is asserted for the
+				// same reason: silently matching nothing must not read as a pass.
+				const texts = [...f.svg.matchAll(/<text ([^>]*)>/g)];
+				expect(`${f.name}: text runs`).toBe(
+					texts.length === (f.name.startsWith("banner") ? 2 : 0)
+						? `${f.name}: text runs`
+						: `${f.name}: ${texts.length} text runs`,
+				);
+				for (const m of texts) {
+					// `num` throws on a missing or non-finite value, so `NaN` fails here
+					// rather than slipping past as an unmatched element.
+					const x = num(m[1], "x");
+					const y = num(m[1], "y");
+					expect(x).toBeGreaterThanOrEqual(0);
+					expect(x).toBeLessThanOrEqual(width);
+					expect(y).toBeGreaterThanOrEqual(0);
+					expect(y).toBeLessThanOrEqual(height);
+				}
+
 				// Guards the guard: a regex that stops matching would otherwise turn
 				// this whole test into a pass.
 				expect({ rects: rects > 0, paths: paths > 0 }).toEqual({
@@ -246,12 +299,34 @@ describe("README media", () => {
 	}
 
 	it("uses each palette's own ink, so the pair is not two copies", () => {
-		const dark = files.find((f) => f.name === "logo-dark.svg")?.svg ?? "";
-		const light = files.find((f) => f.name === "logo-light.svg")?.svg ?? "";
-		expect(dark).toContain("#4fb8be");
-		expect(dark).not.toContain("#0f6d74");
-		expect(light).toContain("#0f6d74");
-		expect(light).not.toContain("#4fb8be");
+		// Every emitted file, not just the logos: the banner is the one actually
+		// displayed, and a banner pair generated from one palette would put dark
+		// title text on GitHub's dark background while the logo assertions here
+		// still passed.
+		for (const stem of ["logo", "banner"]) {
+			const dark = files.find((f) => f.name === `${stem}-dark.svg`)?.svg ?? "";
+			const light = files.find((f) => f.name === `${stem}-light.svg`)?.svg ?? "";
+			expect(`${stem}-dark uses dark mark ink`).toBe(
+				dark.includes("#4fb8be") && !dark.includes("#0f6d74")
+					? `${stem}-dark uses dark mark ink`
+					: `${stem}-dark MIXED`,
+			);
+			expect(`${stem}-light uses light mark ink`).toBe(
+				light.includes("#0f6d74") && !light.includes("#4fb8be")
+					? `${stem}-light uses light mark ink`
+					: `${stem}-light MIXED`,
+			);
+		}
+		// The banner's two text runs carry their own inks, which the mark check
+		// above cannot see. Near-black title on light, near-white on dark.
+		const bannerLight =
+			files.find((f) => f.name === "banner-light.svg")?.svg ?? "";
+		const bannerDark =
+			files.find((f) => f.name === "banner-dark.svg")?.svg ?? "";
+		expect(bannerLight).toContain('fill="#0f172a"');
+		expect(bannerLight).toContain('fill="#475569"');
+		expect(bannerDark).toContain('fill="#f1f5f9"');
+		expect(bannerDark).toContain('fill="#94a3b8"');
 	});
 
 	it("is referenced by the README through a closed <picture>, not a bare <img>", () => {
@@ -263,16 +338,23 @@ describe("README media", () => {
 		const readme = readFileSync(join(ROOT, "README.md"), "utf8");
 		const blocks = [
 			...readme.matchAll(
-				/<picture><source media="\(prefers-color-scheme: dark\)" srcset="docs\/media\/logo-dark\.svg"><img src="docs\/media\/logo-light\.svg"([^>]*)><\/picture>/g,
+				/<picture><source media="\(prefers-color-scheme: dark\)" srcset="docs\/media\/banner-dark\.svg"><img src="docs\/media\/banner-light\.svg"([^>]*)><\/picture>/g,
 			),
 		];
 		expect(blocks).toHaveLength(1);
-		expect(existsSync(join(ROOT, "docs", "media", "logo-dark.svg"))).toBe(true);
-		expect(existsSync(join(ROOT, "docs", "media", "logo-light.svg"))).toBe(true);
+		expect(existsSync(join(ROOT, "docs", "media", "banner-dark.svg"))).toBe(true);
+		expect(existsSync(join(ROOT, "docs", "media", "banner-light.svg"))).toBe(true);
 
-		// That <picture> accounts for both mentions of the mark: one srcset, one
+		// That <picture> accounts for both mentions of the banner: one srcset, one
 		// src. A third would be a reference outside it.
-		expect(readme.match(/docs\/media\/logo-/g) ?? []).toHaveLength(2);
+		expect(readme.match(/docs\/media\/banner-/g) ?? []).toHaveLength(2);
+
+		// The standalone mark is still emitted and still shares the routing-core
+		// geometry checked above, but the README no longer places it: the banner
+		// draws its own copy. A logo reference reappearing here means the heading
+		// went back to an inline mark beside Markdown text, which is the
+		// baseline-alignment problem the banner exists to remove.
+		expect(readme.match(/docs\/media\/logo-/g) ?? []).toHaveLength(0);
 	});
 
 	it("references every captured screenshot as a light/dark pair with alt text", () => {
@@ -316,19 +398,41 @@ describe("README media", () => {
 		expect([...new Set(referenced)].sort()).toEqual(expected.sort());
 	});
 
-	it("gives the logo an alt attribute", () => {
-		// Deliberately empty: it sits beside the project name in the heading, so
-		// announcing it would just repeat the word "ClankerMux". Empty is a
-		// decision a screen reader honours; a missing attribute makes it read the
-		// filename instead, which is why presence is asserted separately.
+	it("gives the banner alt text carrying the name and the slogan", () => {
+		// Not empty, which is what the old inline mark used: that one sat beside a
+		// Markdown heading spelling out "ClankerMux", so announcing it would have
+		// repeated the word. The banner replaced that heading, so the image now
+		// carries the heading's text and has to say it. Asserted against the
+		// generator's own constants, so the alt cannot drift from the words the
+		// SVG draws.
 		const readme = readFileSync(join(ROOT, "README.md"), "utf8");
 		const tags = [
-			...readme.matchAll(/<img src="docs\/media\/logo-[^"]+"[^>]*>/g),
+			...readme.matchAll(/<img src="docs\/media\/banner-[^"]+"[^>]*>/g),
 		].map((m) => m[0]);
 		expect(tags).toHaveLength(1);
-		for (const tag of tags) {
-			expect(tag).toMatch(/\salt="/);
-			expect(tag.match(/alt="([^"]*)"/)?.[1]).toBe("");
+		// The leading \s is load-bearing: without it `data-alt="..."` satisfies the
+		// match while the element carries no alt attribute at all.
+		const alt = tags[0]?.match(/\salt="([^"]*)"/)?.[1] ?? null;
+		expect(`alt present: ${alt !== null}`).toBe("alt present: true");
+		expect(alt).toBe(`${NAME}: ${SLOGAN.toLowerCase()}`);
+	});
+
+	it("draws the banner's own text, so the file carries the words its alt claims", () => {
+		// The alt text above is a promise about an image nobody here can render.
+		// These two runs are what it describes; if the banner were ever reduced to
+		// the mark alone, the alt would be describing text that is not in the file.
+		for (const mode of ["light", "dark"]) {
+			const svg = files.find((f) => f.name === `banner-${mode}.svg`)?.svg ?? "";
+			expect(`${mode}: has name`).toBe(
+				svg.includes(`>${NAME}</text>`)
+					? `${mode}: has name`
+					: `${mode}: MISSING name`,
+			);
+			expect(`${mode}: has slogan`).toBe(
+				svg.includes(`>${SLOGAN}</text>`)
+					? `${mode}: has slogan`
+					: `${mode}: MISSING slogan`,
+			);
 		}
 	});
 });
