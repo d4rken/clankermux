@@ -128,6 +128,75 @@ describe("processResponse – JSON (application/json)", () => {
 		expect(body.content[0]).toMatchObject({ type: "text", text: "Hello" });
 	});
 
+	it("names the sent model when upstream omits one", async () => {
+		const provider = makeProvider();
+		const upstream = openaiJsonResponse(
+			{
+				id: "chatcmpl-nomodel",
+				object: "chat.completion",
+				choices: [
+					{
+						message: { role: "assistant", content: "Hello" },
+						finish_reason: "stop",
+					},
+				],
+				usage: { prompt_tokens: 5, completion_tokens: 1, total_tokens: 6 },
+			},
+			200,
+			{ "x-clankermux-resolved-model": "glm-5.1" },
+		);
+
+		const result = await provider.processResponse(upstream, makeAccount());
+		const body = await result.json();
+
+		expect(body.model).toBe("glm-5.1");
+	});
+
+	it("keeps the model upstream reported over the one we sent", async () => {
+		const provider = makeProvider();
+		const upstream = openaiJsonResponse(
+			{
+				id: "chatcmpl-remap",
+				object: "chat.completion",
+				model: "glm-5.1-0930",
+				choices: [
+					{
+						message: { role: "assistant", content: "Hello" },
+						finish_reason: "stop",
+					},
+				],
+				usage: { prompt_tokens: 5, completion_tokens: 1, total_tokens: 6 },
+			},
+			200,
+			{ "x-clankermux-resolved-model": "glm-5.1" },
+		);
+
+		const result = await provider.processResponse(upstream, makeAccount());
+		const body = await result.json();
+
+		expect(body.model).toBe("glm-5.1-0930");
+	});
+
+	it("leaves the model absent when neither upstream nor the header names one", async () => {
+		const provider = makeProvider();
+		const upstream = openaiJsonResponse({
+			id: "chatcmpl-blind",
+			object: "chat.completion",
+			choices: [
+				{
+					message: { role: "assistant", content: "Hello" },
+					finish_reason: "stop",
+				},
+			],
+			usage: { prompt_tokens: 5, completion_tokens: 1, total_tokens: 6 },
+		});
+
+		const result = await provider.processResponse(upstream, makeAccount());
+		const body = await result.json();
+
+		expect(body.model).toBeUndefined();
+	});
+
 	it("tool call response converts to Anthropic tool_use shape", async () => {
 		const provider = makeProvider();
 		const account = makeAccount();
