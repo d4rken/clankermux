@@ -50,7 +50,7 @@ const account = (
 	provider: "anthropic",
 	paused: false,
 	pauseReason: null,
-	cause: null,
+	cause: "ok",
 	availableAtMs: null,
 	credentialState: "valid",
 	credentialExpiresAtMs: null,
@@ -129,10 +129,10 @@ describe("replacement public contract", () => {
 		).toMatchObject({ outcome: "unknown", reason: "reset_elapsed" });
 	});
 	it.each([
-		"no-usage",
-		"unstarted",
-		"short-history",
-	] as const)("explains learning: %s", (reason) => {
+		["no-usage", "no_usage"],
+		["unstarted", "unstarted"],
+		["short-history", "short_history"],
+	] as const)("explains learning: %s", (reason, publicReason) => {
 		const dto = toPublicWindowForecastDto(
 			window({
 				forecast: { state: "learning", reason, readyAtMs: NOW + 3600000 },
@@ -140,7 +140,7 @@ describe("replacement public contract", () => {
 			NOW,
 		);
 		expect(dto.quality).toBe("unavailable");
-		expect(dto.reason).toBe(reason.replaceAll("-", "_"));
+		expect(dto.reason).toBe(publicReason);
 		expect(dto.reassessAt).toBe(
 			reason === "short-history" ? new Date(NOW + 3600000).toISOString() : null,
 		);

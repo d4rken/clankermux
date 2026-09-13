@@ -345,6 +345,7 @@ export interface UsageData {
 export type AnyUsageData =
 	| DevinUsageData
 	| UsageData
+	| AnthropicUsageData
 	| ZaiUsageData
 	| KiloUsageData
 	| AlibabaCodingPlanUsageData

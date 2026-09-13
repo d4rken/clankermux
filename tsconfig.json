@@ -84,9 +84,6 @@
 		"packages/proxy/**/*.test.tsx",
 		"packages/providers/**/__tests__",
 		"packages/providers/**/*.test.ts",
-		"packages/providers/**/*.test.tsx",
-		"packages/http-api/**/__tests__",
-		"packages/http-api/**/*.test.ts",
-		"packages/http-api/**/*.test.tsx"
+		"packages/providers/**/*.test.tsx"
 	]
 }

@@ -48,7 +48,7 @@ const mockGetRepresentativeUtilization = (
 	if (!usageData) return 70;
 	const utils = Object.values(usageData)
 		.filter(
-			(v): v is { utilization: number } =>
+			(v): v is { utilization: number; resets_at: null } =>
 				v != null &&
 				typeof (v as { utilization?: unknown }).utilization === "number",
 		)
@@ -58,10 +58,10 @@ const mockGetRepresentativeUtilization = (
 const mockGetRepresentativeWindow = () => "seven_day";
 
 const mockLog = {
-	info: () => {},
-	warn: () => {},
-	debug: () => {},
-	error: () => {},
+	info: (..._args: unknown[]) => {},
+	warn: (..._args: unknown[]) => {},
+	debug: (..._args: unknown[]) => {},
+	error: (..._args: unknown[]) => {},
 };
 
 const mockClearAccountRefreshCache = (_accountId: string) => {
@@ -69,7 +69,10 @@ const mockClearAccountRefreshCache = (_accountId: string) => {
 };
 
 const mockCliCommands = {
-	removeAccount: () => ({ success: true, message: "Account removed" }),
+	removeAccount: (_dbOps?: unknown, _accountName?: string) => ({
+		success: true,
+		message: "Account removed",
+	}),
 	pauseAccount: () => ({ success: true, message: "Account paused" }),
 	resumeAccount: () => ({ success: true, message: "Account resumed" }),
 };
@@ -79,41 +82,47 @@ const mockDbOps = {
 	updateAccountPriority: () => {},
 	renameAccount: () => {},
 	setAutoFallbackEnabled: () => {},
-	forceResetAccountRateLimit: () => true,
+	forceResetAccountRateLimit: (_accountId: string) => true,
 };
 
 // Mock Database instance
 interface MockDatabase {
-	query: () => typeof mockQuery;
-	run: (sql?: string, args?: unknown[]) => unknown;
+	query: () => MockQuery;
+	run: (sql: string, args: unknown[]) => unknown;
 }
 const mockDatabase: MockDatabase = {
 	query: () => mockQuery,
 	run: () => {},
 };
 
-const mockQuery = {
+/** The row shape the handlers below read off a single-account lookup. */
+interface MockAccountRow {
+	id: string;
+	name: string;
+	provider: string;
+	access_token: string | null;
+}
+
+interface MockQuery {
+	all: (...args: unknown[]) => unknown[];
+	get: (...args: unknown[]) => MockAccountRow | null | undefined;
+}
+
+const mockQuery: MockQuery = {
 	all: () => [],
 	get: () => null,
 };
 
 // Mock response helpers
-const mockJsonResponse = (data: unknown) => ({
-	ok: true,
-	json: async () => data,
-	status: 200,
-	headers: new Headers(),
-});
+const mockJsonResponse = (data: unknown) => Response.json(data);
 
-const mockErrorResponse = (error: unknown) => ({
-	ok: false,
-	json: async () => error,
-	status:
-		(typeof error === "object" && error !== null
-			? (error as { status?: number }).status
-			: undefined) || 400,
-	headers: new Headers(),
-});
+const mockErrorResponse = (error: unknown) =>
+	Response.json(error, {
+		status:
+			(typeof error === "object" && error !== null
+				? (error as { status?: number }).status
+				: undefined) || 400,
+	});
 
 describe("Accounts Handler - Dashboard Usage Data Integration", () => {
 	const CACHE_FRESHNESS_THRESHOLD_MS = 90000; // 90 seconds
@@ -477,7 +486,12 @@ describe("Accounts Handler - Dashboard Usage Data Integration", () => {
 			const removeHandler = createMockAccountRemoveHandler();
 
 			// Setup: Account exists in database
-			mockQuery.get = () => ({ id: "test-account-id" });
+			mockQuery.get = () => ({
+				id: "test-account-id",
+				name: "test-account-name",
+				provider: "anthropic",
+				access_token: "sk-ant-test",
+			});
 
 			// Mock successful removal
 			mockCliCommands.removeAccount = () => ({
@@ -506,8 +520,10 @@ describe("Accounts Handler - Dashboard Usage Data Integration", () => {
 
 			// Setup: Anthropic account exists in database
 			mockQuery.get = () => ({
+				id: "test-account-id",
 				name: "test-account-name",
 				provider: "anthropic",
+				access_token: "sk-ant-test",
 			});
 
 			// Track usageCache.delete calls
@@ -526,12 +542,11 @@ describe("Accounts Handler - Dashboard Usage Data Integration", () => {
 
 			// Setup: Non-Anthropic account exists
 			mockQuery.get = () => ({
+				id: "test-account-id",
 				name: "test-account-name",
 				provider: "openai-compatible",
+				access_token: "sk-other",
 			});
-
-			// Clear any previous calls
-			mockUsageCache.delete.calls = [];
 
 			// Execute the handler
 			const response = await reloadHandler({} as Request, "test-account-id");

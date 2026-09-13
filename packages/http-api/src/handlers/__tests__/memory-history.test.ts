@@ -45,7 +45,7 @@ async function callHandler(
 describe("memory-history handler", () => {
 	describe("range → bucket mapping", () => {
 		it("maps 6h → bucketMs 300000", async () => {
-			let captured: { sinceMs: number; bucketMs: number } | null = null;
+			let captured: { sinceMs: number; bucketMs: number } | undefined;
 			const sources = createSources({
 				points: [],
 				captureOpts: (o) => {
@@ -59,7 +59,7 @@ describe("memory-history handler", () => {
 		});
 
 		it("maps 1h → bucketMs 60000", async () => {
-			let captured: { sinceMs: number; bucketMs: number } | null = null;
+			let captured: { sinceMs: number; bucketMs: number } | undefined;
 			const sources = createSources({
 				points: [],
 				captureOpts: (o) => {
@@ -72,7 +72,7 @@ describe("memory-history handler", () => {
 		});
 
 		it("defaults to 7d (bucketMs 3600000) when range omitted", async () => {
-			let captured: { sinceMs: number; bucketMs: number } | null = null;
+			let captured: { sinceMs: number; bucketMs: number } | undefined;
 			const sources = createSources({
 				points: [],
 				captureOpts: (o) => {
@@ -85,7 +85,7 @@ describe("memory-history handler", () => {
 		});
 
 		it("falls back to the 7d default for an invalid range", async () => {
-			let captured: { sinceMs: number; bucketMs: number } | null = null;
+			let captured: { sinceMs: number; bucketMs: number } | undefined;
 			const sources = createSources({
 				points: [],
 				captureOpts: (o) => {
@@ -98,7 +98,7 @@ describe("memory-history handler", () => {
 		});
 
 		it("maps all → sinceMs 0 with daily buckets (retention-capped)", async () => {
-			let captured: { sinceMs: number; bucketMs: number } | null = null;
+			let captured: { sinceMs: number; bucketMs: number } | undefined;
 			const sources = createSources({
 				points: [],
 				captureOpts: (o) => {
@@ -113,7 +113,7 @@ describe("memory-history handler", () => {
 		});
 
 		it("computes sinceMs as now - windowMs for the range", async () => {
-			let captured: { sinceMs: number; bucketMs: number } | null = null;
+			let captured: { sinceMs: number; bucketMs: number } | undefined;
 			const sources = createSources({
 				points: [],
 				captureOpts: (o) => {

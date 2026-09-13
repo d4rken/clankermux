@@ -2,7 +2,7 @@ import { Database } from "bun:sqlite";
 import { afterEach, beforeEach, describe, expect, it, spyOn } from "bun:test";
 import type { DatabaseOperations } from "@clankermux/database";
 import { DatabaseFactory, ensureSchema } from "@clankermux/database";
-import { tempDbTracker } from "@clankermux/test-support";
+import { mockFetch, tempDbTracker } from "@clankermux/test-support";
 import {
 	API_KEY_PROVIDERS,
 	createApiKeyAccountAddHandler,
@@ -24,7 +24,7 @@ describe("createApiKeyAccountAddHandler", () => {
 
 	beforeEach(() => {
 		fetchSpy = spyOn(globalThis, "fetch").mockImplementation(
-			async () => new Response(null, { status: 401 }),
+			mockFetch(async () => new Response(null, { status: 401 })),
 		);
 		DatabaseFactory.initialize(tmpDb.next());
 		dbOps = DatabaseFactory.getInstance();

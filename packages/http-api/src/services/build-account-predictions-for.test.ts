@@ -26,6 +26,9 @@ function risingSnapshots(accountId: string, resetMs: number) {
 		accountId,
 		provider: "anthropic",
 		sampledAt: NOW - hoursAgo * HOUR_MS,
+		observedAt: null,
+		planTier: null,
+		rateLimitTier: null,
 		fiveHourPct: 10 * (index + 1),
 		fiveHourReset: resetMs,
 		sevenDayPct: 20,
@@ -106,7 +109,10 @@ describe("buildPredictionsForAccounts", () => {
 	});
 
 	it("looks back 24 hours for snapshots", async () => {
-		let seen: { accountIds: string[]; since: number } | null = null;
+		let seen: { accountIds: string[]; since: number } = {
+			accountIds: [],
+			since: 0,
+		};
 		await buildPredictionsForAccounts(
 			makeDbOps({
 				onQuery: (accountIds, since) => {

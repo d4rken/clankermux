@@ -12,7 +12,7 @@ import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import type { Config } from "@clankermux/config";
 import type { DatabaseOperations } from "@clankermux/database";
 import { usageCache } from "@clankermux/providers";
-import type { AccountResponse } from "@clankermux/types";
+import type { AccountResponse, FullUsageData } from "@clankermux/types";
 import { createAccountsListHandler } from "../accounts";
 
 const HOUR_MS = 60 * 60 * 1000;
@@ -190,6 +190,16 @@ function persistedSnapshot(
 beforeEach(() => usageCache.delete(ACCOUNT_ID));
 afterEach(() => usageCache.delete(ACCOUNT_ID));
 
+/**
+ * The Codex usage column stores an Anthropic-shaped payload, so the weekly
+ * reading is the flat `seven_day` key. `FullUsageData` also covers providers
+ * with no such key, hence the narrowing.
+ */
+function sevenDayPct(usage: FullUsageData | null | undefined): number | null {
+	if (!usage || !("seven_day" in usage)) return null;
+	return usage.seven_day?.utilization ?? null;
+}
+
 describe("accounts list — Codex persisted-usage recovery", () => {
 	it("serves the column and skips the payload scan when it is newer than last_used", async () => {
 		const now = Date.now();
@@ -202,7 +212,7 @@ describe("accounts list — Codex persisted-usage recovery", () => {
 			[payloadRow(now - 2 * HOUR_MS, 99)],
 		);
 
-		expect(account?.usageData?.seven_day?.utilization).toBe(100);
+		expect(sevenDayPct(account?.usageData)).toBe(100);
 		// The scan is not merely out-voted — it never runs.
 		expect(payloadQueries).toHaveLength(0);
 	});
@@ -218,7 +228,7 @@ describe("accounts list — Codex persisted-usage recovery", () => {
 			[payloadRow(now - 10 * 60 * 1000, 77)],
 		);
 
-		expect(account?.usageData?.seven_day?.utilization).toBe(77);
+		expect(sevenDayPct(account?.usageData)).toBe(77);
 		expect(payloadQueries).toHaveLength(1);
 	});
 
@@ -233,7 +243,7 @@ describe("accounts list — Codex persisted-usage recovery", () => {
 			[payloadRow(now - 10 * 60 * 1000, 55)],
 		);
 
-		expect(account?.usageData?.seven_day?.utilization).toBe(55);
+		expect(sevenDayPct(account?.usageData)).toBe(55);
 		expect(payloadQueries).toHaveLength(1);
 	});
 
@@ -375,7 +385,7 @@ describe("accounts list — throttle display vs the persisted column", () => {
 		);
 
 		// The reading is served (the bars are honest, annotated with their age)…
-		expect(account?.usageData?.seven_day?.utilization).toBe(NEAR_LIMIT_PCT);
+		expect(sevenDayPct(account?.usageData)).toBe(NEAR_LIMIT_PCT);
 		// …but the delay claim is not made.
 		expect(account?.usageThrottledUntil ?? null).toBeNull();
 		expect(account?.usageThrottledWindows ?? []).toEqual([]);

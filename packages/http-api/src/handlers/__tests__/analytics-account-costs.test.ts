@@ -1,4 +1,5 @@
 import { describe, expect, it } from "bun:test";
+import type { BunSqlAdapter } from "@clankermux/database";
 import type { APIContext } from "../../types";
 import { createAnalyticsHandler } from "../analytics";
 
@@ -19,8 +20,13 @@ type AdditionalDataRow = {
 function createContext(additionalDataRows: AdditionalDataRow[]): APIContext {
 	// Call order: 1 = timeSeries query, 2 = additionalData UNION query, 3 = modelPerfData query
 	let callCount = 0;
-	const mockDb = {
-		get: async () => ({
+
+	// Declared with the adapter's own generic signatures and implemented against
+	// the looser implementation signature an overload allows. The caller picks
+	// `R`, so no single concrete return type can satisfy it directly.
+	function get<R>(sqlStr: string, params?: unknown[]): Promise<R | null>;
+	async function get(): Promise<unknown> {
+		return {
 			total_requests: 0,
 			success_rate: 0,
 			avg_response_time: 0,
@@ -34,16 +40,20 @@ function createContext(additionalDataRows: AdditionalDataRow[]): APIContext {
 			cache_read_input_tokens: 0,
 			cache_creation_input_tokens: 0,
 			output_tokens: 0,
-		}),
-		query: async (_sql: string) => {
-			callCount++;
-			if (callCount === 2) {
-				// Second call is the additionalData UNION query
-				return additionalDataRows;
-			}
-			return [];
-		},
-	};
+		};
+	}
+
+	function query<R>(sqlStr: string, params?: unknown[]): Promise<R[]>;
+	async function query(): Promise<unknown[]> {
+		callCount++;
+		if (callCount === 2) {
+			// Second call is the additionalData UNION query
+			return additionalDataRows;
+		}
+		return [];
+	}
+
+	const mockDb: Pick<BunSqlAdapter, "get" | "query"> = { get, query };
 
 	return {
 		db: {} as APIContext["db"],

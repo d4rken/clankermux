@@ -146,6 +146,20 @@ function requestWithCookie(token?: string): Request {
 	});
 }
 
+/**
+ * `createSession` answers null when a password rotation wins the race with the
+ * INSERT. A fixture store never loses that race, so a null here is a broken
+ * test rather than a case to handle.
+ */
+async function mintSession(
+	svc: SessionAuthService,
+	binding: PasswordBinding,
+): Promise<{ token: string; expiresAt: number }> {
+	const session = await svc.createSession(binding);
+	if (!session) throw new Error("createSession returned null");
+	return session;
+}
+
 describe("fail-open until a password is set", () => {
 	it("reports unconfigured on a fresh deployment", async () => {
 		const { svc } = makeService();
@@ -251,7 +265,7 @@ describe("session validation costs no key derivation", () => {
 	it("performs zero derivations across many validations", async () => {
 		const { svc, store, hasher } = makeService();
 		const binding = await configure(store, hasher, "hunter2");
-		const { token } = await svc.createSession(binding);
+		const { token } = await mintSession(svc, binding);
 		hasher.verifyCalls = 0;
 		for (let i = 0; i < 25; i++) {
 			expect(await svc.authorizeRequest(requestWithCookie(token))).toBe(true);
@@ -263,7 +277,7 @@ describe("session validation costs no key derivation", () => {
 	it("stores only the token's hash, never the token", async () => {
 		const { svc, store, hasher } = makeService();
 		const binding = await configure(store, hasher, "hunter2");
-		const { token } = await svc.createSession(binding);
+		const { token } = await mintSession(svc, binding);
 		expect([...store.sessions.keys()]).toEqual([hashSessionToken(token)]);
 		expect(JSON.stringify([...store.sessions.keys()])).not.toContain(token);
 	});
@@ -273,7 +287,7 @@ describe("session lifetime", () => {
 	it("sets the absolute deadline 30 days out", async () => {
 		const { svc, store, hasher } = makeService({ now: () => 1_000 });
 		const binding = await configure(store, hasher, "pw");
-		const { expiresAt } = await svc.createSession(binding);
+		const { expiresAt } = await mintSession(svc, binding);
 		expect(expiresAt).toBe(1_000 + SESSION_ABSOLUTE_MAX_MS);
 		expect(SESSION_ABSOLUTE_MAX_MS).toBe(30 * 24 * 60 * 60 * 1000);
 	});
@@ -282,7 +296,7 @@ describe("session lifetime", () => {
 		let now = 1_000;
 		const { svc, store, hasher } = makeService({ now: () => now });
 		const binding = await configure(store, hasher, "pw");
-		const { token } = await svc.createSession(binding);
+		const { token } = await mintSession(svc, binding);
 		now += SESSION_ABSOLUTE_MAX_MS;
 		// Activity right up to the deadline does not extend it.
 		const row = store.sessions.get(hashSessionToken(token));
@@ -295,7 +309,7 @@ describe("session lifetime", () => {
 		let now = 1_000;
 		const { svc, store, hasher } = makeService({ now: () => now });
 		const binding = await configure(store, hasher, "pw");
-		const { token } = await svc.createSession(binding);
+		const { token } = await mintSession(svc, binding);
 		now += SESSION_IDLE_MAX_MS;
 		expect(await svc.authorizeRequest(requestWithCookie(token))).toBe(false);
 		expect(SESSION_IDLE_MAX_MS).toBe(7 * 24 * 60 * 60 * 1000);
@@ -306,7 +320,7 @@ describe("session lifetime", () => {
 		let now = 1_000;
 		const { svc, store, hasher } = makeService({ now: () => now });
 		const binding = await configure(store, hasher, "pw");
-		const { token } = await svc.createSession(binding);
+		const { token } = await mintSession(svc, binding);
 		now += SESSION_ABSOLUTE_MAX_MS;
 		await svc.authorizeRequest(requestWithCookie(token));
 		expect(store.sessions.size).toBe(0);
@@ -441,7 +455,7 @@ describe("logout", () => {
 	it("removes the row and reports the hash it removed", async () => {
 		const { svc, store, hasher } = makeService();
 		const binding = await configure(store, hasher, "pw");
-		const { token } = await svc.createSession(binding);
+		const { token } = await mintSession(svc, binding);
 		expect(await svc.destroySession(requestWithCookie(token))).toBe(
 			hashSessionToken(token),
 		);
@@ -456,7 +470,7 @@ describe("logout", () => {
 	it("invalidates the token for every later request", async () => {
 		const { svc, store, hasher } = makeService();
 		const binding = await configure(store, hasher, "pw");
-		const { token } = await svc.createSession(binding);
+		const { token } = await mintSession(svc, binding);
 		await svc.destroySession(requestWithCookie(token));
 		expect(await svc.authorizeRequest(requestWithCookie(token))).toBe(false);
 	});

@@ -100,6 +100,20 @@ afterEach(() => {
 	resetSessionStreamRegistryForTests();
 });
 
+/**
+ * `createSession` answers null when a password rotation wins the race with the
+ * INSERT. A fixture store never loses that race, so a null here is a broken
+ * test rather than a case to handle.
+ */
+async function mintSession(
+	svc: SessionAuthService,
+	binding: PasswordBinding,
+): Promise<{ token: string; expiresAt: number }> {
+	const session = await svc.createSession(binding);
+	if (!session) throw new Error("createSession returned null");
+	return session;
+}
+
 describe("periodic revalidation", () => {
 	it("leaves a stream alone while no password is configured", async () => {
 		const store = new FakeStore();
@@ -118,7 +132,7 @@ describe("periodic revalidation", () => {
 		const store = new FakeStore();
 		store.password = { ...PASSWORD };
 		const svc = new SessionAuthService(store);
-		const { token } = await svc.createSession(BINDING);
+		const { token } = await mintSession(svc, BINDING);
 		const guard = createSessionStreamGuard(svc, TICK_MS);
 		let closed = 0;
 		const detach = guard.attach(streamRequest(token), () => {
@@ -177,7 +191,7 @@ describe("periodic revalidation", () => {
 		const store = new FakeStore();
 		store.password = { ...PASSWORD };
 		const svc = new SessionAuthService(store);
-		const { token } = await svc.createSession(BINDING);
+		const { token } = await mintSession(svc, BINDING);
 		const guard = createSessionStreamGuard(svc, TICK_MS, 0);
 		let closed = 0;
 		const detach = guard.attach(streamRequest(token), () => {
@@ -194,7 +208,7 @@ describe("periodic revalidation", () => {
 		const store = new FakeStore();
 		store.password = { ...PASSWORD };
 		const svc = new SessionAuthService(store);
-		const { token } = await svc.createSession(BINDING);
+		const { token } = await mintSession(svc, BINDING);
 		let liveChecks = 0;
 		const readSession = store.getManagementSession.bind(store);
 		store.getManagementSession = async (tokenHash: string) => {
@@ -231,7 +245,7 @@ describe("periodic revalidation", () => {
 		const store = new FakeStore();
 		store.password = { ...PASSWORD };
 		const svc = new SessionAuthService(store);
-		const { token } = await svc.createSession(BINDING);
+		const { token } = await mintSession(svc, BINDING);
 		const guard = createSessionStreamGuard(svc, TICK_MS);
 		let closed = 0;
 		const detach = guard.attach(streamRequest(token), () => {
@@ -246,7 +260,7 @@ describe("periodic revalidation", () => {
 		const store = new FakeStore();
 		store.password = { ...PASSWORD };
 		const svc = new SessionAuthService(store);
-		const { token } = await svc.createSession(BINDING);
+		const { token } = await mintSession(svc, BINDING);
 		const guard = createSessionStreamGuard(svc, TICK_MS);
 		let closed = 0;
 		const detach = guard.attach(streamRequest(token), () => {
@@ -425,7 +439,7 @@ describe("logout closes that session's streams immediately", () => {
 		const store = new FakeStore();
 		store.password = { ...PASSWORD };
 		const svc = new SessionAuthService(store);
-		const { token } = await svc.createSession(BINDING);
+		const { token } = await mintSession(svc, BINDING);
 		const guard = createSessionStreamGuard(svc, 60_000);
 		let closedA = 0;
 		let closedB = 0;
@@ -446,8 +460,8 @@ describe("logout closes that session's streams immediately", () => {
 		const store = new FakeStore();
 		store.password = { ...PASSWORD };
 		const svc = new SessionAuthService(store);
-		const mine = await svc.createSession(BINDING);
-		const theirs = await svc.createSession(BINDING);
+		const mine = await mintSession(svc, BINDING);
+		const theirs = await mintSession(svc, BINDING);
 		const guard = createSessionStreamGuard(svc, 60_000);
 		let closedTheirs = 0;
 		const detach = guard.attach(streamRequest(theirs.token), () => {
