@@ -15,7 +15,7 @@
 `usage_snapshots.five_hour_pct` uses REAL storage and preserves fractional
 percentages — the normalizer, sampler and repository do not round. Any
 quantisation you observe comes from the upstream reading, not from storage,
-so do not assume a one-percentage-point quantum or a three-minute temporal
+so do not assume a one-percentage-point quantum or a fixed temporal
 floor when fitting over closely-spaced snapshots.
 
 > **Returns `null`, never `0`, when there is no evidence.** A `limits[]`-only
