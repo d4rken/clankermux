@@ -9,6 +9,7 @@ export {
 	accountWideWeeklyResetMs,
 	computeApiKeyRunways,
 	effectiveRunwayOutcome,
+	IDLE_POOL_KEY_NAME,
 	type KeyRunway,
 	type RunwayAccountSource,
 	type RunwayHeadline,
@@ -20,7 +21,6 @@ export {
 	summarizeKeyRunways,
 	toRunwayAccountInput,
 	toScopedFamilyRunwayInput,
-	UNAUTHENTICATED_POOL_KEY_NAME,
 	worstKeyRunway,
 } from "./api-key-runway";
 export {

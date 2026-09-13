@@ -3,10 +3,10 @@ import type { ApiKeyResponse } from "@clankermux/types";
 import {
 	computeApiKeyRunways,
 	effectiveRunwayOutcome,
+	IDLE_POOL_KEY_NAME,
 	type KeyRunway,
 	type RunwayAccountSource,
 	summarizeKeyRunways,
-	UNAUTHENTICATED_POOL_KEY_NAME,
 	worstKeyRunway,
 } from "./api-key-runway";
 
@@ -168,24 +168,45 @@ describe("computeApiKeyRunways", () => {
 		expect(runways[0].outcome).toEqual({ kind: "no-accounts" });
 	});
 
-	it("emits exactly one synthetic row when no key is active", () => {
+	// Two ways to have no active client, and the pool is equally unreachable in
+	// both: a database with no clients at all, and one whose clients are all
+	// disabled.
+	it.each([
+		[
+			"every client is disabled",
+			[
+				mkKey({ id: "k1", name: "Retired", isActive: false }),
+				mkKey({ id: "k2", name: "Also retired", isActive: false }),
+			],
+		],
+		["no client exists", [] as ReturnType<typeof mkKey>[]],
+	])("emits exactly one synthetic row when %s", (_case, keys) => {
 		const accounts = [healthy("acc-1"), healthy("acc-2")];
-		const keys = [
-			mkKey({ id: "k1", name: "Retired", isActive: false }),
-			mkKey({ id: "k2", name: "Also retired", isActive: false }),
-		];
 
 		const runways = computeApiKeyRunways(keys, accounts, NOW);
 
-		// Authentication is off in this state, so every request routes over the
-		// unpinned pool and the disabled keys describe nothing.
+		// The disabled keys describe nothing that can happen, and neither does the
+		// pool: agent traffic requires a client key, so nothing reaches these
+		// accounts. The row still reports what the pool HOLDS, but it is inactive
+		// so no headline counts it as reachable capacity.
 		expect(runways).toHaveLength(1);
 		expect(runways[0].keyId).toBeNull();
-		expect(runways[0].keyName).toBe(UNAUTHENTICATED_POOL_KEY_NAME);
-		expect(runways[0].isActive).toBe(true);
+		expect(runways[0].keyName).toBe(IDLE_POOL_KEY_NAME);
+		expect(runways[0].isActive).toBe(false);
 		expect(runways[0].pin).toEqual({ accountId: null, providers: null });
 		expect(runways[0].eligibleAccountIds).toEqual(["acc-1", "acc-2"]);
 		expect(runways[0].outcome.kind).toBe("beyond-horizon");
+	});
+
+	it("keeps the idle pool out of the headline", () => {
+		const summary = summarizeKeyRunways(
+			computeApiKeyRunways([], [healthy("acc-1")], NOW),
+			NOW,
+		);
+
+		expect(summary.activeKeyCount).toBe(0);
+		expect(summary.statedKeyCount).toBe(0);
+		expect(summary.worst).toBeNull();
 	});
 
 	it("lists inactive keys alongside active ones", () => {

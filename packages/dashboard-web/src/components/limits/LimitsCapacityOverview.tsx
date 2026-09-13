@@ -71,9 +71,9 @@ function RunwayPanel({
 	// Three distinct states, kept apart on purpose:
 	//  - readBlocked: the backing read failed, or is still in flight. The parent
 	//    computes runways from `apiKeys ?? []` either way, so `worst` is a
-	//    SYNTHETIC row then — commonly the unauthenticated-pool one, whose
-	//    outcome would render as a real figure. Nothing derived from it may be
-	//    shown while this holds.
+	//    SYNTHETIC row then — commonly the idle-pool one, whose outcome would
+	//    render as a real figure. Nothing derived from it may be shown while this
+	//    holds.
 	//  - outcomeReason: the read resolved but the outcome cannot be stated. It
 	//    replaces the figure, yet leaves the per-key breakdown standing, because
 	//    one key's missing evidence must not hide another key's definite runway.
@@ -96,7 +96,7 @@ function RunwayPanel({
 	const outcomeReason = dataResolved
 		? worst === null
 			? headline.activeKeyCount === 0
-				? "No active API keys or accounts"
+				? "No active clients"
 				: learningAccounts > 0
 					? `${learningAccounts} account${learningAccounts === 1 ? "" : "s"} not yet projectable`
 					: "No quota evidence for any account"
