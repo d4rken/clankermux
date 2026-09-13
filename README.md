@@ -31,16 +31,14 @@ client what each can reach, and shows you how much quota is left.
   and Messages APIs: Codex and OpenRouter destinations only, and it rejects
   several standard fields.
 * **Providers**: Anthropic and Codex OAuth logins, Claude and OpenAI API keys,
-  OpenRouter, Devin, Qwen, z.ai, Ollama, and generic compatible endpoints. The
-  dashboard marks the ones it has not validated against a live account.
+  OpenRouter, Ollama, and other compatible endpoints. Experimental ones are
+  marked in the dashboard.
 * Priority-based account selection, preferring earlier weekly resets among
   accounts with capacity at the same priority.
 * Sticky session routing for prompt-cache hit rates, surviving priority edits
   and failover.
-* Cross-account failover on any provider. On top of that, 429 burst retries for
-  Anthropic OAuth accounts and family-scoped 529 breakers for official Anthropic
-  accounts.
-* Pooled 5-hour and 7-day quota with burn-rate forecasts and a runway estimate.
+* Cross-account failover on any provider, 429 burst retries for Anthropic OAuth
+  accounts, and family-scoped 529 breakers for official Anthropic accounts.
 
 ## Screenshots
 

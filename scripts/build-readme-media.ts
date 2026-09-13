@@ -5,7 +5,7 @@
  *
  * Two constraints on the output:
  *
- *  - The ink colours are `--primary` from
+ *  - The mark's two inks are `--primary` from
  *    `packages/dashboard-web/styles/globals.css`, duplicated rather than
  *    imported because that file is Tailwind source, not a module, and its value
  *    is `oklch()`, which SVG renderers do not reliably support. When the theme's
@@ -105,9 +105,8 @@ function logo(p: Palette): string {
  * whatever the reader's machine has, and the same string is a different width
  * on every platform. Hence the slack in the layout below rather than a fit:
  * `textLength` would pin the width, but it does so by respacing the glyphs
- * (and, with `lengthAdjust="spacingAndGlyphs"`, by stretching them).
- * Measured across 16 locally installed faces, the slogan ran 213-281px of the
- * 335px available.
+ * (and, with `lengthAdjust="spacingAndGlyphs"`, by stretching them). The widest
+ * of 16 locally measured faces put the slogan at 281 of the 335px available.
  */
 const FONT =
 	"system-ui,-apple-system,'Segoe UI',Roboto,'Helvetica Neue',Arial,sans-serif";

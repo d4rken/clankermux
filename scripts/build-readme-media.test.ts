@@ -14,11 +14,13 @@ const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const files = renderAll();
 
 /**
- * These two SVGs are the README's brand mark, and nothing in this repo can
+ * These four SVGs are the README's brand assets, and nothing in this repo can
  * render one to look at. That makes silent breakage the realistic failure: a
- * geometry change that puts the mark outside its own 24-unit box, or a stray
- * bit of CSS that GitHub's proxy strips, shows up only on a published page.
- * The checks below stand in for the eye that cannot see the output.
+ * geometry change that puts the mark outside the canvas, a text run placed off
+ * it, or a stray bit of CSS that GitHub's proxy strips, all show up only on a
+ * published page. The checks below stand in for the eye that cannot see the
+ * output. What they cannot cover is rendered text width, which depends on a
+ * font resolved on the reader's machine.
  */
 
 /**
@@ -263,9 +265,23 @@ describe("README media", () => {
 				// measure, so this catches a run placed off-canvas and not a run that
 				// overflows to the right. That remaining risk is why the layout leaves
 				// horizontal slack rather than fitting the strings.
-				for (const m of f.svg.matchAll(/<text x="([\d.]+)" y="([\d.]+)"/g)) {
-					const x = Number(m[1]);
-					const y = Number(m[2]);
+				//
+				// Match the element first and parse the numbers second. A pattern that
+				// only accepts digits would not match `y="-1000"` or `y="NaN"` at all,
+				// so an off-canvas origin would be skipped rather than caught — the
+				// exact hole the loop exists to close. The count is asserted for the
+				// same reason: silently matching nothing must not read as a pass.
+				const texts = [...f.svg.matchAll(/<text ([^>]*)>/g)];
+				expect(`${f.name}: text runs`).toBe(
+					texts.length === (f.name.startsWith("banner") ? 2 : 0)
+						? `${f.name}: text runs`
+						: `${f.name}: ${texts.length} text runs`,
+				);
+				for (const m of texts) {
+					// `num` throws on a missing or non-finite value, so `NaN` fails here
+					// rather than slipping past as an unmatched element.
+					const x = num(m[1], "x");
+					const y = num(m[1], "y");
 					expect(x).toBeGreaterThanOrEqual(0);
 					expect(x).toBeLessThanOrEqual(width);
 					expect(y).toBeGreaterThanOrEqual(0);
