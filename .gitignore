@@ -23,6 +23,8 @@ packages/database/src/inline-vacuum-worker.ts
 packages/database/src/inline-incremental-vacuum-worker.ts
 packages/database/src/inline-payload-write-worker.ts
 packages/database/src/inline-storage-usage-worker.ts
+packages/http-api/src/handlers/inline-analytics-worker.ts
+packages/http-api/src/handlers/inline-quota-drift-worker.ts
 CLAUDE.md
 AGENTS.md
 # Disallow .sh files except in .github/scripts/ and project scripts/ dir

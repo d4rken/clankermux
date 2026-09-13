@@ -3,8 +3,9 @@ import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import {
 	WORKER_INLINE_REPO_PATHS,
-	WORKER_SRC_DIR,
+	WORKER_SRC_DIRS,
 	WORKERS,
+	workerSrcDir,
 } from "./workers-manifest.ts";
 
 const REPO_ROOT = join(import.meta.dir, "../../..");
@@ -15,22 +16,27 @@ const REPO_ROOT = join(import.meta.dir, "../../..");
  * shows up only as a *smaller* suite. That is how the payload-write worker went
  * unnoticed on main for a week (70 test files silently failed to load).
  *
- * These tests make the omission fail on the commit that introduces it.
+ * These tests make the omission fail on the commit that introduces it. The
+ * manifest spans several packages, so the completeness check runs per directory
+ * the manifest claims.
  */
-describe("DB worker manifest completeness", () => {
-	/** Worker sources on disk: `<name>-worker.ts`, excluding generated inline outputs. */
-	const sourcesOnDisk = readdirSync(WORKER_SRC_DIR)
-		.filter((f) => f.endsWith("-worker.ts") && !f.startsWith("inline-"))
-		.sort();
-
-	it("has an entry for every *-worker.ts source in packages/database/src", () => {
-		const inManifest = WORKERS.map((w) => w.source).sort();
+describe("worker manifest completeness", () => {
+	it.each(
+		WORKER_SRC_DIRS,
+	)("has an entry for every *-worker.ts source in %s", (dir) => {
+		/** Worker sources on disk: `<name>-worker.ts`, excluding generated inline outputs. */
+		const sourcesOnDisk = readdirSync(join(REPO_ROOT, dir))
+			.filter((f) => f.endsWith("-worker.ts") && !f.startsWith("inline-"))
+			.sort();
+		const inManifest = WORKERS.filter((w) => w.dir === dir)
+			.map((w) => w.source)
+			.sort();
 		expect(inManifest).toEqual(sourcesOnDisk);
 	});
 
 	it("points every entry at a source file that exists", () => {
 		for (const worker of WORKERS) {
-			expect(existsSync(join(WORKER_SRC_DIR, worker.source))).toBe(true);
+			expect(existsSync(join(workerSrcDir(worker), worker.source))).toBe(true);
 		}
 	});
 
@@ -49,7 +55,8 @@ describe("DB worker manifest completeness", () => {
 	});
 
 	it("has no duplicate entries", () => {
-		expect(new Set(WORKERS.map((w) => w.source)).size).toBe(WORKERS.length);
+		const keys = WORKERS.map((w) => `${w.dir}/${w.source}`);
+		expect(new Set(keys).size).toBe(WORKERS.length);
 		expect(new Set(WORKERS.map((w) => w.constName)).size).toBe(WORKERS.length);
 	});
 
@@ -58,7 +65,7 @@ describe("DB worker manifest completeness", () => {
 		// checkout resolves the imports through these stubs instead.
 		for (const worker of WORKERS) {
 			const stubPath = join(
-				WORKER_SRC_DIR,
+				workerSrcDir(worker),
 				worker.inline.replace(/\.ts$/, ".d.ts"),
 			);
 			expect(existsSync(stubPath)).toBe(true);
