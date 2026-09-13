@@ -108,7 +108,6 @@ export async function recoverZaiOverload(
 		"request-id",
 		"x-request-id",
 		"x-clankermux-request-id",
-		"x-better-ccflare-request-id",
 	]) {
 		const value = retried.headers.get(name);
 		if (value) headers.set(name, value);
