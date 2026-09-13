@@ -83,7 +83,7 @@ function makeProxyContext() {
 	};
 }
 
-type SchedulerInternals = AutoRefreshScheduler & {
+type SchedulerInternals = {
 	sendTranslatedClaudePrime(row: AccountRow): Promise<boolean>;
 };
 

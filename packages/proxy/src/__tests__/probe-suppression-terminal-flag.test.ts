@@ -69,9 +69,6 @@ function makeAccount(overrides: Partial<Account> = {}): Account {
 		peak_hours_pause_enabled: false,
 		codex_auto_apply_reset_credits_enabled: false,
 		custom_endpoint: null,
-		model_mappings: null,
-		cross_region_mode: null,
-		model_fallbacks: null,
 		billing_type: null,
 		pause_reason: null,
 		notes: null,
@@ -287,7 +284,7 @@ describe("terminal-attempt flag vs a probe-suppressed remainder", () => {
 		holdCodexProbeLease();
 
 		const state = { anthropicCalls: 0, codexCalls: 0 };
-		let releaseHead: (() => void) | null = null;
+		let releaseHead: (() => void) | undefined;
 		const headInFlight = new Promise<void>((resolve) => {
 			releaseHead = resolve;
 		});
@@ -358,7 +355,7 @@ describe("terminal-attempt flag vs a probe-suppressed remainder", () => {
 		holdCodexProbeLease();
 
 		const state = { anthropicCalls: 0, codexCalls: 0 };
-		let releaseHead: (() => void) | null = null;
+		let releaseHead: (() => void) | undefined;
 		const headInFlight = new Promise<void>((resolve) => {
 			releaseHead = resolve;
 		});

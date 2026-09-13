@@ -39,6 +39,7 @@ interface SaveRequestCall {
 	reasoningEffort: string | null | undefined;
 	requestedModel: string | null | undefined;
 	projectAttributionSource: string | null | undefined;
+	usageFinalizedAt: number | null | undefined;
 	sessionKey: string | null | undefined;
 	cachePrefixHashes: CachePrefixCapture | null | undefined;
 	stopReason: string | null | undefined;
@@ -331,8 +332,10 @@ class FakeTimers {
 		return id;
 	};
 
-	clear = (id: number | undefined): void => {
-		if (id !== undefined) this.timers.delete(id);
+	// `unknown`, matching the recorder's own `clearTimer` dependency: the id it
+	// hands back is whatever `scheduleTimer` returned.
+	clear = (id: unknown): void => {
+		if (typeof id === "number") this.timers.delete(id);
 	};
 
 	/** Advance time and fire any timers that come due. */

@@ -281,6 +281,7 @@ describe("protocol completion before transport close", () => {
 			},
 		);
 		const reader = response.body?.getReader();
+		if (!reader) throw new Error("expected a readable body");
 		await reader.read();
 		await reader.cancel();
 		expect(results).toEqual([{ reportedModel: "astra", error: null }]);

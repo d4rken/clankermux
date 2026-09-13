@@ -26,6 +26,7 @@ import {
 } from "bun:test";
 import { ServiceUnavailableError, TIME_CONSTANTS } from "@clankermux/core";
 import { getProvider, usageCache } from "@clankermux/providers";
+import { makeAccount as canonicalAccount } from "@clankermux/test-support";
 import type { Account } from "@clankermux/types";
 import { cacheBodyStore } from "../cache-body-store";
 import type { ProxyContext } from "../handlers";
@@ -36,45 +37,15 @@ import {
 import { routingAttempts } from "./fixtures/routing-harness";
 
 function makeAccount(overrides: Partial<Account> = {}): Account {
-	return {
-		id: "acc-1",
-		name: "test-account",
-		provider: "anthropic",
+	return canonicalAccount({
 		// An API-key account keeps the OAuth-only transparent burst-retry rung
 		// (classify429Transient step 1) out of the way, so a 429 lands on the
 		// no-fallback cooldown path under test.
 		api_key: "sk-ant-test",
 		refresh_token: "",
-		access_token: null,
-		expires_at: null,
-		request_count: 0,
-		total_requests: 0,
-		last_used: null,
 		created_at: Date.now(),
-		rate_limited_until: null,
-		rate_limited_reason: null,
-		rate_limited_at: null,
-		consecutive_rate_limits: 0,
-		session_start: null,
-		session_request_count: 0,
-		paused: false,
-		rate_limit_reset: null,
-		rate_limit_status: null,
-		rate_limit_remaining: null,
-		priority: 0,
-		auto_fallback_enabled: false,
-		auto_refresh_enabled: false,
-		auto_pause_on_overage_enabled: false,
-		peak_hours_pause_enabled: false,
-		codex_auto_apply_reset_credits_enabled: false,
-		custom_endpoint: null,
-		model_mappings: null,
-		model_fallbacks: null,
-		billing_type: null,
-		pause_reason: null,
-		refresh_token_issued_at: null,
 		...overrides,
-	};
+	});
 }
 
 /** An OAuth account whose token looks valid, so only the reactive-401 path refreshes it. */
@@ -93,6 +64,9 @@ function makeContext(accounts: Account[]): ProxyContext {
 	return {
 		strategy: {
 			select: mock((allAccounts: Account[]) => allAccounts),
+			// Previews mirror `select`: this stub reorders nothing.
+			peekRanked: mock((allAccounts: Account[]) => allAccounts),
+			peek: mock((allAccounts: Account[]) => allAccounts[0]?.id ?? null),
 		},
 		dbOps: {
 			getAllAccounts: mock(async () => accounts),
@@ -137,10 +111,14 @@ function makeContext(accounts: Account[]): ProxyContext {
 	};
 }
 
-/** One directly-written audit row (`dbOps.saveRequest`). */
+/**
+ * One recorded attempt, as the tests below read it. Nullable throughout: these
+ * rows are mapped from `RoutingAttempt`, whose account, status and error are all
+ * nullable (a local reject never reached an upstream).
+ */
 type AuditRow = {
-	accountId: string;
-	status: number;
+	accountId: string | null;
+	status: number | null;
 	reason: string | null;
 };
 
@@ -592,9 +570,6 @@ describe("synthetic-probe trust gate", () => {
 				id: `fallbacks-${Math.random()}`,
 				// TWO models for the requested family: the attempt cycles the list and
 				// exhausts it, landing on the model_fallback_429 path.
-				model_mappings: JSON.stringify({
-					sonnet: ["claude-sonnet-4-5", "claude-haiku-4-5"],
-				}),
 			});
 			const { ctx } = makeAuditContext([account]);
 			await runProxy(ctx, makeRequest(headers), isInternal);

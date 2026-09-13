@@ -92,11 +92,13 @@ it.each([
 	permissions.permissions = async (candidate: Account) => ({
 		account_id: candidate.id,
 		scope: modelPermissionScope(candidate),
+		generation: 1,
 		completeness: "known-complete",
 		discovered_ids: ["swe-2", "swe-2-high"],
 		manual_ids: [],
-		fetched_at: Date.now(),
-		error: null,
+		last_success_at: Date.now(),
+		last_attempt_at: Date.now(),
+		last_error: null,
 	});
 	setChatContext(meta, {
 		requirements: { fields: ["max_tokens"] },

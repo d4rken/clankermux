@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, mock } from "bun:test";
 import { TIME_CONSTANTS } from "@clankermux/core";
 import { usageCache } from "@clankermux/providers";
+import { mockFetch } from "@clankermux/test-support";
 import type { Account, RequestMeta } from "@clankermux/types";
 import {
 	proxyWithAccount,
@@ -53,8 +54,6 @@ function makeOAuthAnthropicAccount(overrides: Partial<Account> = {}): Account {
 		peak_hours_pause_enabled: false,
 		codex_auto_apply_reset_credits_enabled: false,
 		custom_endpoint: null,
-		model_mappings: null,
-		model_fallbacks: null,
 		billing_type: null,
 		pause_reason: null,
 		notes: null,
@@ -203,7 +202,7 @@ describe("proxyWithAccount — out_of_credits 429 (issue #261)", () => {
 	});
 
 	it("applies a long cooldown, records out_of_credits, and audits the model", async () => {
-		globalThis.fetch = mock(async () => outOfCredits429());
+		globalThis.fetch = mockFetch(mock(async () => outOfCredits429()));
 
 		const { ctx, attemptCalls, markCalls } = makeProxyContext();
 		const before = Date.now();

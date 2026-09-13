@@ -13,7 +13,15 @@ const account = {
 
 function makePauser(result = true) {
 	return {
-		pauseAccountIfActive: mock(async () => result),
+		// Declared with the `ReauthPauser` parameters so the recorded call can be
+		// destructured.
+		pauseAccountIfActive: mock(
+			async (
+				_accountId: string,
+				_reason: string,
+				_expectedRefreshToken?: string | null,
+			) => result,
+		),
 	};
 }
 

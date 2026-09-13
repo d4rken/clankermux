@@ -7,6 +7,7 @@ import {
 	it,
 	mock,
 } from "bun:test";
+import { mockFetch } from "@clankermux/test-support";
 import type { Account } from "@clankermux/types";
 import type { ProxyContext } from "../handlers";
 import {
@@ -38,7 +39,7 @@ function makeAccount(overrides: Partial<Account> = {}): Account {
 		name: "codex-suppressed",
 		provider: "codex",
 		api_key: "test-key",
-		refresh_token: null,
+		refresh_token: "",
 		access_token: "at-token",
 		expires_at: null,
 		request_count: 0,
@@ -62,9 +63,6 @@ function makeAccount(overrides: Partial<Account> = {}): Account {
 		peak_hours_pause_enabled: false,
 		codex_auto_apply_reset_credits_enabled: false,
 		custom_endpoint: null,
-		model_mappings: null,
-		cross_region_mode: null,
-		model_fallbacks: null,
 		billing_type: null,
 		pause_reason: null,
 		notes: null,
@@ -241,14 +239,16 @@ describe("recovery-probe suppression must not become a size verdict (CW last res
 		// gpt-5.5 window = 272_000; the gate's margin excludes anything above
 		// floor(272_000 * 0.97) = 263_840, but the unmargined last resort still
 		// fits 268_000 — so this request DOES fit a real backend.
-		const codex = makeAccount({
-			model_mappings: JSON.stringify({ opus: "gpt-5.5" }),
-		});
+		const codex = makeAccount({});
 		holdProbeLease();
-		globalThis.fetch = mock(async (input: RequestInfo | URL) => {
-			if (!isProxyCall(input)) return backgroundStub();
-			throw new Error("no upstream call expected — the attempt is suppressed");
-		});
+		globalThis.fetch = mockFetch(
+			mock(async (input: RequestInfo | URL) => {
+				if (!isProxyCall(input)) return backgroundStub();
+				throw new Error(
+					"no upstream call expected — the attempt is suppressed",
+				);
+			}),
+		);
 
 		const response = await callHandleProxy(
 			makeSizedRequest(268_000),
@@ -272,7 +272,6 @@ describe("recovery-probe suppression must not become a size verdict (CW last res
 		// was about to become usable.
 		const codex = makeAccount({
 			id: "codex-too-small",
-			model_mappings: JSON.stringify({ opus: "gpt-5.5" }),
 		});
 		const anthropic = makeAccount({
 			id: ACCOUNT_ID,
@@ -288,22 +287,24 @@ describe("recovery-probe suppression must not become a size verdict (CW last res
 		// The lease holder finishes after the hold's first (suppressed) wake.
 		setTimeout(() => resetRateLimitProbeGatesForTests(), 700);
 
-		globalThis.fetch = mock(async (input: RequestInfo | URL) => {
-			if (!isProxyCall(input)) return backgroundStub();
-			anthropic.rate_limited_until = null;
-			return new Response(
-				JSON.stringify({
-					id: "msg_1",
-					type: "message",
-					role: "assistant",
-					content: [{ type: "text", text: "hi" }],
-					model: "claude-opus-4-7",
-					stop_reason: "end_turn",
-					usage: { input_tokens: 1, output_tokens: 1 },
-				}),
-				{ status: 200, headers: { "content-type": "application/json" } },
-			);
-		});
+		globalThis.fetch = mockFetch(
+			mock(async (input: RequestInfo | URL) => {
+				if (!isProxyCall(input)) return backgroundStub();
+				anthropic.rate_limited_until = null;
+				return new Response(
+					JSON.stringify({
+						id: "msg_1",
+						type: "message",
+						role: "assistant",
+						content: [{ type: "text", text: "hi" }],
+						model: "claude-opus-4-7",
+						stop_reason: "end_turn",
+						usage: { input_tokens: 1, output_tokens: 1 },
+					}),
+					{ status: 200, headers: { "content-type": "application/json" } },
+				);
+			}),
+		);
 
 		// Sized past gpt-5.5's FULL window so there is no last-resort Codex
 		// candidate: without the fix the request ends at the size 400.
@@ -323,7 +324,6 @@ describe("recovery-probe suppression must not become a size verdict (CW last res
 		// 330s here.
 		const codex = makeAccount({
 			id: "codex-too-small",
-			model_mappings: JSON.stringify({ opus: "gpt-5.5" }),
 		});
 		const suppressed = makeAccount({
 			id: ACCOUNT_ID,
@@ -350,8 +350,8 @@ describe("recovery-probe suppression must not become a size verdict (CW last res
 
 		let brokenCalls = 0;
 		let suppressedCalls = 0;
-		globalThis.fetch = mock(
-			async (input: RequestInfo | URL, init?: RequestInit) => {
+		globalThis.fetch = mockFetch(
+			mock(async (input: RequestInfo | URL, init?: RequestInit) => {
 				if (!isProxyCall(input)) return backgroundStub();
 				const headers =
 					input instanceof Request ? input.headers : new Headers(init?.headers);
@@ -374,7 +374,7 @@ describe("recovery-probe suppression must not become a size verdict (CW last res
 					}),
 					{ status: 200, headers: { "content-type": "application/json" } },
 				);
-			},
+			}),
 		);
 
 		const response = await callHandleProxy(
@@ -391,9 +391,7 @@ describe("recovery-probe suppression must not become a size verdict (CW last res
 	it("still returns the size 400 when NO candidate fits even the full window", async () => {
 		// Same suppressed lease, but 500_000 tokens exceeds gpt-5.5's full window,
 		// so there is no fitting candidate at all — the size verdict is correct.
-		const codex = makeAccount({
-			model_mappings: JSON.stringify({ opus: "gpt-5.5" }),
-		});
+		const codex = makeAccount({});
 		holdProbeLease();
 
 		const response = await callHandleProxy(
@@ -447,22 +445,24 @@ describe("recovery-probe suppression must not abandon an overload hold", () => {
 		applyProviderOverloadCooldown("anthropic", Date.now() + 200, null);
 
 		let upstreamCalls = 0;
-		globalThis.fetch = mock(async (input: RequestInfo | URL) => {
-			if (!isProxyCall(input)) return backgroundStub();
-			upstreamCalls += 1;
-			return new Response(
-				JSON.stringify({
-					id: "msg_1",
-					type: "message",
-					role: "assistant",
-					content: [{ type: "text", text: "hi" }],
-					model: "claude-sonnet-4-5",
-					stop_reason: "end_turn",
-					usage: { input_tokens: 1, output_tokens: 1 },
-				}),
-				{ status: 200, headers: { "content-type": "application/json" } },
-			);
-		});
+		globalThis.fetch = mockFetch(
+			mock(async (input: RequestInfo | URL) => {
+				if (!isProxyCall(input)) return backgroundStub();
+				upstreamCalls += 1;
+				return new Response(
+					JSON.stringify({
+						id: "msg_1",
+						type: "message",
+						role: "assistant",
+						content: [{ type: "text", text: "hi" }],
+						model: "claude-sonnet-4-5",
+						stop_reason: "end_turn",
+						usage: { input_tokens: 1, output_tokens: 1 },
+					}),
+					{ status: 200, headers: { "content-type": "application/json" } },
+				);
+			}),
+		);
 
 		// The lease holder finishes ~700ms in: after the hold's first (suppressed)
 		// wake, but well inside its budget.
@@ -521,8 +521,8 @@ describe("recovery-probe suppression must not abandon an overload hold", () => {
 
 		let brokenCalls = 0;
 		let suppressedCalls = 0;
-		globalThis.fetch = mock(
-			async (input: RequestInfo | URL, init?: RequestInit) => {
+		globalThis.fetch = mockFetch(
+			mock(async (input: RequestInfo | URL, init?: RequestInit) => {
 				if (!isProxyCall(input)) return backgroundStub();
 				const headers =
 					input instanceof Request ? input.headers : new Headers(init?.headers);
@@ -549,7 +549,7 @@ describe("recovery-probe suppression must not abandon an overload hold", () => {
 					}),
 					{ status: 200, headers: { "content-type": "application/json" } },
 				);
-			},
+			}),
 		);
 
 		// Hold the lease long enough for SEVERAL probe-verdict polls to elapse, so

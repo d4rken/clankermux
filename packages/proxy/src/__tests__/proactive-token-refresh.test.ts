@@ -55,7 +55,15 @@ function makeContext(
 	const refreshTokenSpy = mock(refreshToken);
 	const updateTokensSpy = mock(opts.updateAccountTokens ?? (async () => true));
 	const getAccountSpy = mock(opts.getAccount ?? (async () => null));
-	const pauseSpy = mock(async () => opts.pauseResult ?? false);
+	// Declared with the parameters `pauseAccountIfActive` receives so the recorded
+	// call can be indexed.
+	const pauseSpy = mock(
+		async (
+			_accountId: string,
+			_reason: string,
+			_expectedRefreshToken?: string | null,
+		) => opts.pauseResult ?? false,
+	);
 	const proxyContext = {
 		refreshInFlight: new Map<string, Promise<string>>(),
 		runtime: { clientId: "test-client" },

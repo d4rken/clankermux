@@ -73,14 +73,5 @@
 		"scripts/public-api/schema.test.ts",
 		"scripts/redistribution-backtest.test.ts"
 	],
-	"exclude": [
-		"node_modules",
-		"**/node_modules",
-		// Packages whose test files do not typecheck yet. Entries come out as
-		// each package is cleaned; when the list is empty only the node_modules
-		// entries above remain.
-		"packages/proxy/**/__tests__",
-		"packages/proxy/**/*.test.ts",
-		"packages/proxy/**/*.test.tsx"
-	]
+	"exclude": ["node_modules", "**/node_modules"]
 }

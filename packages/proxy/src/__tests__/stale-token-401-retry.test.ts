@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, mock } from "bun:test";
 import { ServiceUnavailableError } from "@clankermux/core";
 import { getProvider } from "@clankermux/providers";
+import { makeAccount as canonicalAccount } from "@clankermux/test-support";
 import type { Account } from "@clankermux/types";
 import type { ProxyContext } from "../handlers";
 import { canAttemptStaleTokenRefresh } from "../handlers/token-manager";
@@ -21,42 +22,11 @@ import { canAttemptStaleTokenRefresh } from "../handlers/token-manager";
  */
 
 function makeAccount(overrides: Partial<Account> = {}): Account {
-	return {
-		id: "acc-1",
-		name: "test-account",
-		provider: "anthropic",
-		api_key: null,
+	return canonicalAccount({
 		refresh_token: "",
-		access_token: null,
-		expires_at: null,
-		request_count: 0,
-		total_requests: 0,
-		last_used: null,
 		created_at: Date.now(),
-		rate_limited_until: null,
-		rate_limited_reason: null,
-		rate_limited_at: null,
-		consecutive_rate_limits: 0,
-		session_start: null,
-		session_request_count: 0,
-		paused: false,
-		rate_limit_reset: null,
-		rate_limit_status: null,
-		rate_limit_remaining: null,
-		priority: 0,
-		auto_fallback_enabled: false,
-		auto_refresh_enabled: false,
-		auto_pause_on_overage_enabled: false,
-		peak_hours_pause_enabled: false,
-		codex_auto_apply_reset_credits_enabled: false,
-		custom_endpoint: null,
-		model_mappings: null,
-		model_fallbacks: null,
-		billing_type: null,
-		pause_reason: null,
-		refresh_token_issued_at: null,
 		...overrides,
-	};
+	});
 }
 
 /**
@@ -94,6 +64,9 @@ function makeContext(accounts: Account[]): ProxyContext {
 	return {
 		strategy: {
 			select: mock((allAccounts: Account[]) => allAccounts),
+			// Previews mirror `select`: this stub reorders nothing.
+			peekRanked: mock((allAccounts: Account[]) => allAccounts),
+			peek: mock((allAccounts: Account[]) => allAccounts[0]?.id ?? null),
 		},
 		dbOps: {
 			getAllAccounts: mock(async () => accounts),

@@ -7,6 +7,7 @@ import {
 } from "@clankermux/database";
 import { handleChatCompletionsRequest } from "@clankermux/openai-chat-adapter";
 import { usageCache } from "@clankermux/providers";
+import { mockFetch } from "@clankermux/test-support";
 import type { Account, RequestMeta, RoutingRule } from "@clankermux/types";
 import {
 	AccountModelPermissionService,
@@ -76,7 +77,7 @@ async function setup(accounts: Account[], rules: RoutingRule[]) {
 		repository: routing,
 		listAccounts: async () => accounts,
 		getAccessToken: async () => "test-token",
-		fetchImpl: (async () => Response.json({ data: [] })) as typeof fetch,
+		fetchImpl: mockFetch(async () => Response.json({ data: [] })),
 	});
 	return { ctx, routing };
 }
@@ -143,7 +144,7 @@ describe("routing table through the real proxy", () => {
 			provider: "openrouter",
 			api_key: null,
 			access_token: null,
-			refresh_token: null,
+			refresh_token: "",
 		});
 		const { ctx, routing } = await setup(
 			[account],
@@ -163,7 +164,7 @@ describe("routing table through the real proxy", () => {
 				"Local count must not send inference or refresh credentials",
 			);
 		});
-		globalThis.fetch = fetchMock as typeof fetch;
+		globalThis.fetch = mockFetch(fetchMock);
 		if (forced) setForcedAccount(account.id);
 		const req = new Request("https://proxy.local/v1/messages/count_tokens", {
 			method: "POST",
@@ -184,6 +185,7 @@ describe("routing table through the real proxy", () => {
 		expect((await response.json()).input_tokens).toBeGreaterThan(0);
 		expect(fetchMock).not.toHaveBeenCalled();
 		const attempts = dbs.at(-1)?.query("SELECT * FROM routing_attempts").all();
+		if (!attempts) throw new Error("no database was opened");
 		expect(attempts).toHaveLength(1);
 		expect(attempts[0]).toMatchObject({
 			kind: "local_success",
@@ -229,7 +231,7 @@ describe("routing table through the real proxy", () => {
 			expect((await outgoing.json()).model).toBe(requested);
 			return Response.json({ input_tokens: 777 });
 		});
-		globalThis.fetch = fetchMock as typeof fetch;
+		globalThis.fetch = mockFetch(fetchMock);
 		if (forced) setForcedAccount(account.id);
 		const req = new Request("https://proxy.local/v1/messages/count_tokens", {
 			method: "POST",
@@ -246,6 +248,7 @@ describe("routing table through the real proxy", () => {
 		expect(fetchMock).toHaveBeenCalledTimes(1);
 		expect(ctx.requestRecorder.begin).toHaveBeenCalledTimes(1);
 		const attempts = dbs.at(-1)?.query("SELECT * FROM routing_attempts").all();
+		if (!attempts) throw new Error("no database was opened");
 		expect(attempts).toHaveLength(1);
 		expect(attempts[0]).toMatchObject({
 			kind: "upstream_send",
@@ -266,7 +269,10 @@ describe("routing table through the real proxy", () => {
 		const { ctx, routing } = await setup([account], []);
 		const scope = modelPermissionScope(account);
 		await routing.setManualModels(account.id, scope, [requested]);
-		ctx.strategy.select = mock(async () => {
+		// Installed through a loosened handle: `select` is declared synchronous but
+		// `selectAccountsForRequest` awaits it, which is what lets this stub apply
+		// a policy change mid-selection.
+		(ctx.strategy as { select: unknown }).select = mock(async () => {
 			if (reason === "revoked")
 				await routing.setManualModels(account.id, scope, [], true);
 			else if (reason === "suppressed")
@@ -283,7 +289,7 @@ describe("routing table through the real proxy", () => {
 		const fetchMock = mock(async () => {
 			throw new Error("policy-excluded destination contacted");
 		});
-		globalThis.fetch = fetchMock as typeof fetch;
+		globalThis.fetch = mockFetch(fetchMock);
 		const req = new Request("https://proxy.local/v1/messages/count_tokens", {
 			method: "POST",
 			headers: { "content-type": "application/json" },
@@ -310,11 +316,12 @@ describe("routing table through the real proxy", () => {
 		ctx.dbOps.getApiKeyPin = mock(async () => ({
 			pinnedAccountId: null,
 			pinnedProviders: ["codex"],
+			malformed: false,
 		}));
 		const fetchMock = mock(async () => {
 			throw new Error("Forbidden destination contacted");
 		});
-		globalThis.fetch = fetchMock as typeof fetch;
+		globalThis.fetch = mockFetch(fetchMock);
 		const req = new Request("https://proxy.local/v1/messages/count_tokens", {
 			method: "POST",
 			headers: { "content-type": "application/json" },
@@ -340,7 +347,7 @@ describe("routing table through the real proxy", () => {
 		const fetchMock = mock(async () => {
 			throw new Error("Local validation must not send inference");
 		});
-		globalThis.fetch = fetchMock as typeof fetch;
+		globalThis.fetch = mockFetch(fetchMock);
 		const req = new Request("https://proxy.local/v1/messages/count_tokens", {
 			method: "POST",
 			headers: { "content-type": "application/json" },
@@ -401,7 +408,7 @@ describe("routing table through the real proxy", () => {
 		const fetchMock = mock(async () => {
 			throw new Error("Invalidated target contacted");
 		});
-		globalThis.fetch = fetchMock as typeof fetch;
+		globalThis.fetch = mockFetch(fetchMock);
 		await expect(
 			sendAuthorizedRequest(
 				new Request("https://clankermux.local/openrouter/count_tokens", {
@@ -449,7 +456,7 @@ describe("routing table through the real proxy", () => {
 				usage: { input_tokens: 2, output_tokens: 2 },
 			});
 		});
-		globalThis.fetch = fetchMock as typeof fetch;
+		globalThis.fetch = mockFetch(fetchMock);
 		const req = request();
 		req.headers.set("x-clankermux-synthetic-response", "true");
 		req.headers.set("x-clankermux-synthetic-status", "200");
@@ -528,21 +535,23 @@ describe("routing table through the real proxy", () => {
 			} as never);
 		}
 		const sent: Request[] = [];
-		globalThis.fetch = mock(async (input: Request | string | URL) => {
-			const outgoing = input instanceof Request ? input : new Request(input);
-			if (!outgoing.url.includes("chatgpt.com"))
-				throw new Error(`Unexpected destination ${outgoing.url}`);
-			sent.push(outgoing);
-			const response = codexResponse("gpt-6-astra");
-			response.headers.set("x-codex-primary-window-minutes", "10080");
-			response.headers.set("x-codex-primary-used-percent", "90");
-			response.headers.set("x-codex-primary-reset-after-seconds", "777");
-			response.headers.set(
-				"x-codex-primary-reset-at",
-				String(Math.floor(reset / 1000)),
-			);
-			return response;
-		}) as typeof fetch;
+		globalThis.fetch = mockFetch(
+			mock(async (input: Request | string | URL) => {
+				const outgoing = input instanceof Request ? input : new Request(input);
+				if (!outgoing.url.includes("chatgpt.com"))
+					throw new Error(`Unexpected destination ${outgoing.url}`);
+				sent.push(outgoing);
+				const response = codexResponse("gpt-6-astra");
+				response.headers.set("x-codex-primary-window-minutes", "10080");
+				response.headers.set("x-codex-primary-used-percent", "90");
+				response.headers.set("x-codex-primary-reset-after-seconds", "777");
+				response.headers.set(
+					"x-codex-primary-reset-at",
+					String(Math.floor(reset / 1000)),
+				);
+				return response;
+			}),
+		);
 		const req = request();
 		const response = await handleProxy(
 			req,
@@ -578,13 +587,15 @@ describe("routing table through the real proxy", () => {
 			"gpt-6-astra",
 		]);
 		const sent: Request[] = [];
-		globalThis.fetch = mock(async (input: Request | string | URL) => {
-			const req = input instanceof Request ? input : new Request(input);
-			if (!req.url.includes("chatgpt.com"))
-				throw new Error(`Unexpected destination ${req.url}`);
-			sent.push(req);
-			return codexResponse();
-		}) as typeof fetch;
+		globalThis.fetch = mockFetch(
+			mock(async (input: Request | string | URL) => {
+				const req = input instanceof Request ? input : new Request(input);
+				if (!req.url.includes("chatgpt.com"))
+					throw new Error(`Unexpected destination ${req.url}`);
+				sent.push(req);
+				return codexResponse();
+			}),
+		);
 		const req = request();
 		const response = await handleProxy(
 			req,
@@ -633,27 +644,29 @@ describe("routing table through the real proxy", () => {
 			"meta/muse-spark-1.3",
 		]);
 		const sent: Record<string, unknown>[] = [];
-		globalThis.fetch = mock(async (input: Request | string | URL) => {
-			const req = input instanceof Request ? input : new Request(input);
-			expect(req.url).toBe("https://openrouter.ai/api/v1/messages");
-			sent.push(await req.clone().json());
-			return Response.json({
-				id: "msg-test",
-				type: "message",
-				role: "assistant",
-				model: "meta/muse-spark-1.3",
-				content: [
-					{
-						type: "tool_use",
-						id: "call-test",
-						name: "lookup",
-						input: { query: "hello" },
-					},
-				],
-				stop_reason: "tool_use",
-				usage: { input_tokens: 3, output_tokens: 2 },
-			});
-		}) as typeof fetch;
+		globalThis.fetch = mockFetch(
+			mock(async (input: Request | string | URL) => {
+				const req = input instanceof Request ? input : new Request(input);
+				expect(req.url).toBe("https://openrouter.ai/api/v1/messages");
+				sent.push(await req.clone().json());
+				return Response.json({
+					id: "msg-test",
+					type: "message",
+					role: "assistant",
+					model: "meta/muse-spark-1.3",
+					content: [
+						{
+							type: "tool_use",
+							id: "call-test",
+							name: "lookup",
+							input: { query: "hello" },
+						},
+					],
+					stop_reason: "tool_use",
+					usage: { input_tokens: 3, output_tokens: 2 },
+				});
+			}),
+		);
 		const req = request({
 			tools: [
 				{
@@ -728,7 +741,7 @@ describe("routing table through the real proxy", () => {
 			metadata: { failed_routing_step: "Filter by Allowed Providers" },
 		};
 		const fetcher = mock(async () => Response.json(envelope, { status: 404 }));
-		globalThis.fetch = fetcher as typeof fetch;
+		globalThis.fetch = mockFetch(fetcher);
 		const req = request();
 		const response = await handleProxy(
 			req,
@@ -768,15 +781,17 @@ describe("routing table through the real proxy", () => {
 		await routing.setManualModels(account.id, modelPermissionScope(account), [
 			"gpt-6-astra",
 		]);
-		globalThis.fetch = mock(async () =>
-			Response.json(
-				{
-					detail:
-						"The gpt-6-astra model is not supported when using Codex with a ChatGPT account.",
-				},
-				{ status: 400 },
+		globalThis.fetch = mockFetch(
+			mock(async () =>
+				Response.json(
+					{
+						detail:
+							"The gpt-6-astra model is not supported when using Codex with a ChatGPT account.",
+					},
+					{ status: 400 },
+				),
 			),
-		) as typeof fetch;
+		);
 		const req = request();
 		await expect(
 			handleProxy(req, new URL(req.url), ctx, "experiment"),
@@ -799,7 +814,7 @@ describe("routing table through the real proxy", () => {
 		const fetcher = mock(async () => {
 			throw new Error("Must not send");
 		});
-		globalThis.fetch = fetcher as typeof fetch;
+		globalThis.fetch = mockFetch(fetcher);
 		const req = request();
 		const response = await handleProxy(
 			req,
@@ -819,7 +834,7 @@ describe("routing table through the real proxy", () => {
 		const fetcher = mock(async () => {
 			throw new Error("Must not send");
 		});
-		globalThis.fetch = fetcher as typeof fetch;
+		globalThis.fetch = mockFetch(fetcher);
 		const req = request({ models: ["other"] });
 		const response = await handleProxy(
 			req,
@@ -860,12 +875,14 @@ describe("routing table through the real proxy", () => {
 			headers: req.headers,
 		};
 		await initializeRequestRoute(meta, ctx, null, null);
-		globalThis.fetch = mock(async () =>
-			Response.json(
-				{ error: { type: "api_error", message: "unavailable" } },
-				{ status: 502 },
+		globalThis.fetch = mockFetch(
+			mock(async () =>
+				Response.json(
+					{ error: { type: "api_error", message: "unavailable" } },
+					{ status: 502 },
+				),
 			),
-		) as typeof fetch;
+		);
 		const body = await req.clone().arrayBuffer();
 		await proxyWithAccount(
 			req,
@@ -1006,9 +1023,9 @@ describe("routing table through the real proxy", () => {
 			headers: new Headers(),
 		};
 		await initializeRequestRoute(meta, ctx, null, null);
-		globalThis.fetch = mock(async () =>
-			Response.json(payload, { status: 403 }),
-		) as typeof fetch;
+		globalThis.fetch = mockFetch(
+			mock(async () => Response.json(payload, { status: 403 })),
+		);
 		const response = await sendAuthorizedRequest(
 			new Request("https://upstream.test/v1/messages", {
 				method: "POST",
@@ -1068,13 +1085,15 @@ describe("routing table through the real proxy", () => {
 			headers: new Headers(),
 		};
 		await initializeRequestRoute(meta, ctx, null, null);
-		globalThis.fetch = mock(
-			async () =>
-				new Response(
-					'data: {"type":"response.failed","response":{"error":{"code":"model_not_entitled"}}}\n\n',
-					{ headers: { "content-type": "text/event-stream" } },
-				),
-		) as typeof fetch;
+		globalThis.fetch = mockFetch(
+			mock(
+				async () =>
+					new Response(
+						'data: {"type":"response.failed","response":{"error":{"code":"model_not_entitled"}}}\n\n',
+						{ headers: { "content-type": "text/event-stream" } },
+					),
+			),
+		);
 		const response = await sendAuthorizedRequest(
 			new Request("https://upstream.test/v1/messages", {
 				method: "POST",
@@ -1163,7 +1182,7 @@ describe("definitive model rejection failover", () => {
 			calls++;
 			return calls === 1 ? accessDenied() : codexResponse("gpt-6-astra");
 		});
-		globalThis.fetch = fetcher as typeof fetch;
+		globalThis.fetch = mockFetch(fetcher);
 		const req = request();
 		const response = await handleProxy(
 			req,
@@ -1204,7 +1223,7 @@ describe("definitive model rejection failover", () => {
 			calls++;
 			return calls === 1 ? accessDenied() : codexResponse("gpt-6-astra");
 		});
-		globalThis.fetch = fetcher as typeof fetch;
+		globalThis.fetch = mockFetch(fetcher);
 		const req = request();
 		const response = await handleProxy(
 			req,
@@ -1273,7 +1292,7 @@ describe("definitive model rejection failover", () => {
 			isModelSuppressed: mock(async () => false),
 		});
 		const fetcher = mock(async () => reject());
-		globalThis.fetch = fetcher as typeof fetch;
+		globalThis.fetch = mockFetch(fetcher);
 		const meta: RequestMeta = {
 			id: "local-exclusion",
 			method: "POST",
@@ -1348,7 +1367,7 @@ describe("definitive model rejection failover", () => {
 			},
 		};
 		const fetcher = mock(async () => Response.json(envelope, { status: 400 }));
-		globalThis.fetch = fetcher as typeof fetch;
+		globalThis.fetch = mockFetch(fetcher);
 		const req = request();
 		const response = await handleProxy(
 			req,
@@ -1384,7 +1403,7 @@ describe("definitive model rejection failover", () => {
 				{ status: 400 },
 			),
 		);
-		globalThis.fetch = fetcher as typeof fetch;
+		globalThis.fetch = mockFetch(fetcher);
 		const meta: RequestMeta = {
 			id: "parameter-rejection",
 			method: "POST",
@@ -1457,7 +1476,7 @@ describe("definitive model rejection failover", () => {
 			metadata: { failed_routing_step: "Filter by Allowed Providers" },
 		};
 		const fetcher = mock(async () => Response.json(envelope, { status: 403 }));
-		globalThis.fetch = fetcher as typeof fetch;
+		globalThis.fetch = mockFetch(fetcher);
 		const req = request();
 		const response = await handleProxy(
 			req,
@@ -1478,7 +1497,7 @@ describe("definitive model rejection failover", () => {
 		const { accounts, ctx } = await codexPool(["forced-403", "spare-403"]);
 		setForcedAccount(accounts[0].id);
 		const fetcher = mock(async () => accessDenied());
-		globalThis.fetch = fetcher as typeof fetch;
+		globalThis.fetch = mockFetch(fetcher);
 		const req = request();
 		const response = await handleProxy(
 			req,
@@ -1536,7 +1555,7 @@ describe("definitive model rejection failover", () => {
 				{ headers: { "content-type": "text/event-stream" } },
 			);
 		});
-		globalThis.fetch = fetcher as typeof fetch;
+		globalThis.fetch = mockFetch(fetcher);
 		const req = request({ stream: true });
 		const response = await handleProxy(
 			req,
@@ -1594,7 +1613,7 @@ describe("definitive model rejection failover", () => {
 
 	it("reports the model rejection, not a generic failure, when the pool is out of accounts", async () => {
 		const { accounts, ctx, routing } = await codexPool(["only-403"]);
-		globalThis.fetch = mock(async () => accessDenied()) as typeof fetch;
+		globalThis.fetch = mockFetch(mock(async () => accessDenied()));
 		const req = request();
 		await expect(
 			handleProxy(req, new URL(req.url), ctx, "experiment"),
@@ -1621,7 +1640,7 @@ describe("Chat ingress through real route and provider conversion", () => {
 						provider,
 						id: `chat-${provider}-${forced}`,
 						access_token: provider === "codex" ? "test" : null,
-						refresh_token: null,
+						refresh_token: "",
 						api_key: provider === "openrouter" ? "test" : null,
 						expires_at: Date.now() + 3600000,
 					});
@@ -1646,53 +1665,57 @@ describe("Chat ingress through real route and provider conversion", () => {
 					);
 					if (forced) setForcedAccount(account.id);
 					const sent: Request[] = [];
-					globalThis.fetch = mock(async (input: Request | string | URL) => {
-						const outgoing =
-							input instanceof Request ? input : new Request(input);
-						if (
-							!outgoing.url.includes(
-								provider === "codex" ? "chatgpt.com" : "openrouter.ai",
+					globalThis.fetch = mockFetch(
+						mock(async (input: Request | string | URL) => {
+							const outgoing =
+								input instanceof Request ? input : new Request(input);
+							if (
+								!outgoing.url.includes(
+									provider === "codex" ? "chatgpt.com" : "openrouter.ai",
+								)
 							)
-						)
-							throw new Error("Denied destination reached");
-						sent.push(outgoing.clone());
-						if (provider === "codex") return codexResponse();
-						const events = [
-							{
-								type: "message_start",
-								message: {
-									id: "msg",
-									type: "message",
-									role: "assistant",
-									content: [],
-									usage: { input_tokens: 3, output_tokens: 0 },
+								throw new Error("Denied destination reached");
+							sent.push(outgoing.clone());
+							if (provider === "codex") return codexResponse();
+							const events = [
+								{
+									type: "message_start",
+									message: {
+										id: "msg",
+										type: "message",
+										role: "assistant",
+										content: [],
+										usage: { input_tokens: 3, output_tokens: 0 },
+									},
 								},
-							},
-							{
-								type: "content_block_start",
-								index: 0,
-								content_block: { type: "text", text: "" },
-							},
-							{
-								type: "content_block_delta",
-								index: 0,
-								delta: { type: "text_delta", text: "hello" },
-							},
-							{ type: "content_block_stop", index: 0 },
-							{
-								type: "message_delta",
-								delta: { stop_reason: "end_turn" },
-								usage: { output_tokens: 2 },
-							},
-							{ type: "message_stop" },
-						];
-						return new Response(
-							events
-								.map((e) => `event: ${e.type}\ndata: ${JSON.stringify(e)}\n\n`)
-								.join(""),
-							{ headers: { "content-type": "text/event-stream" } },
-						);
-					}) as typeof fetch;
+								{
+									type: "content_block_start",
+									index: 0,
+									content_block: { type: "text", text: "" },
+								},
+								{
+									type: "content_block_delta",
+									index: 0,
+									delta: { type: "text_delta", text: "hello" },
+								},
+								{ type: "content_block_stop", index: 0 },
+								{
+									type: "message_delta",
+									delta: { stop_reason: "end_turn" },
+									usage: { output_tokens: 2 },
+								},
+								{ type: "message_stop" },
+							];
+							return new Response(
+								events
+									.map(
+										(e) => `event: ${e.type}\ndata: ${JSON.stringify(e)}\n\n`,
+									)
+									.join(""),
+								{ headers: { "content-type": "text/event-stream" } },
+							);
+						}),
+					);
 					const req = new Request(
 						"http://proxy/wire/openai/v1/chat/completions",
 						{
@@ -1737,6 +1760,7 @@ describe("Chat ingress through real route and provider conversion", () => {
 						.at(-1)
 						?.query("SELECT * FROM routing_attempts")
 						.all();
+					if (!attempts) throw new Error("no database was opened");
 					expect(attempts).toHaveLength(1);
 					expect(attempts[0]).toMatchObject({
 						kind: "upstream_send",
@@ -1767,7 +1791,7 @@ describe("Chat ingress through real route and provider conversion", () => {
 		const fetchMock = mock(async () => {
 			throw new Error("No upstream request expected");
 		});
-		globalThis.fetch = fetchMock as typeof fetch;
+		globalThis.fetch = mockFetch(fetchMock);
 		const req = new Request("http://proxy/wire/openai/v1/chat/completions", {
 			method: "POST",
 			body: JSON.stringify({
@@ -1804,7 +1828,7 @@ describe("Chat cancellation across routing and providers", () => {
 					provider,
 					access_token: provider === "codex" ? "test" : null,
 					api_key: provider === "openrouter" ? "test" : null,
-					refresh_token: null,
+					refresh_token: "",
 					expires_at: Date.now() + 3600000,
 				});
 				const { ctx, routing } = await setup([account], []);
@@ -1931,6 +1955,7 @@ describe("Chat cancellation across routing and providers", () => {
 				} else {
 					const response = await pending;
 					const reader = response.body?.getReader();
+					if (!reader) throw new Error("expected a readable body");
 					let content = "";
 					do {
 						const n = await reader.read();
@@ -2040,7 +2065,7 @@ it("rejects reasoning history for a Codex-only pin before any send", async () =>
 	const fetcher = mock(async () => {
 		throw new Error("Must not send");
 	});
-	globalThis.fetch = fetcher as typeof fetch;
+	globalThis.fetch = mockFetch(fetcher);
 	const req = new Request("http://proxy/wire/openai/v1/chat/completions", {
 		method: "POST",
 		body: JSON.stringify({

@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, mock } from "bun:test";
 import { usageCache } from "@clankermux/providers";
-import type { Account, RequestMeta } from "@clankermux/types";
+import { mockFetch } from "@clankermux/test-support";
+import type { Account, RequestMeta, RoutingAttempt } from "@clankermux/types";
 import {
 	proxyWithAccount,
 	routingAttempts,
@@ -55,8 +56,6 @@ function makeOAuthAnthropicAccount(overrides: Partial<Account> = {}): Account {
 		peak_hours_pause_enabled: false,
 		codex_auto_apply_reset_credits_enabled: false,
 		custom_endpoint: null,
-		model_mappings: null,
-		model_fallbacks: null,
 		billing_type: null,
 		pause_reason: null,
 		notes: null,
@@ -213,8 +212,9 @@ function rejected429() {
 	);
 }
 
-function reasonsFrom(calls: SaveRequestCall[]): unknown[] {
-	return calls.map((row) => row.error);
+/** The `error` column of every routing attempt the harness recorded. */
+function reasonsFrom(attempts: RoutingAttempt[]): Array<string | null> {
+	return attempts.map((row) => row.error);
 }
 
 describe("proxyWithAccount — account-wide weekly-exhausted 429", () => {
@@ -235,7 +235,7 @@ describe("proxyWithAccount — account-wide weekly-exhausted 429", () => {
 	});
 
 	it("records weekly_exhausted_429, keeps the extractCooldownUntil deadline and skips burst-retry", async () => {
-		globalThis.fetch = mock(async () => rejected429());
+		globalThis.fetch = mockFetch(mock(async () => rejected429()));
 		seedWeeklyExhausted();
 
 		const { ctx, attemptCalls, markCalls } = makeProxyContext();
@@ -279,7 +279,7 @@ describe("proxyWithAccount — account-wide weekly-exhausted 429", () => {
 	});
 
 	it("does NOT fire when the weekly window still has headroom", async () => {
-		globalThis.fetch = mock(async () => rejected429());
+		globalThis.fetch = mockFetch(mock(async () => rejected429()));
 		seedWeeklyHealthy();
 
 		const { ctx, attemptCalls } = makeProxyContext();
@@ -301,7 +301,7 @@ describe("proxyWithAccount — account-wide weekly-exhausted 429", () => {
 	});
 
 	it("fails open to today's behaviour when usage is absent/stale", async () => {
-		globalThis.fetch = mock(async () => rejected429());
+		globalThis.fetch = mockFetch(mock(async () => rejected429()));
 		// No usage cache entry ⇒ getFreshCapacity returns null ⇒ no evidence.
 
 		const { ctx, attemptCalls } = makeProxyContext();
@@ -323,7 +323,7 @@ describe("proxyWithAccount — account-wide weekly-exhausted 429", () => {
 	});
 
 	it("is skipped in reprobe mode (the hold orchestrator owns that outcome)", async () => {
-		globalThis.fetch = mock(async () => rejected429());
+		globalThis.fetch = mockFetch(mock(async () => rejected429()));
 		seedWeeklyExhausted();
 
 		const { ctx, attemptCalls } = makeProxyContext();
@@ -354,7 +354,7 @@ describe("proxyWithAccount — account-wide weekly-exhausted 429", () => {
 		// The marker headers are client-spoofable, so this block uses the
 		// trust-gated `isTrustedSyntheticProbe` (which also requires the in-process
 		// `internal` flag) rather than the header-only variant its neighbours use.
-		globalThis.fetch = mock(async () => rejected429());
+		globalThis.fetch = mockFetch(mock(async () => rejected429()));
 		seedWeeklyExhausted();
 
 		const { ctx, attemptCalls } = makeProxyContext();
@@ -376,7 +376,7 @@ describe("proxyWithAccount — account-wide weekly-exhausted 429", () => {
 	});
 
 	it("is skipped for a TRUSTED in-process probe (internal + keepalive marker)", async () => {
-		globalThis.fetch = mock(async () => rejected429());
+		globalThis.fetch = mockFetch(mock(async () => rejected429()));
 		seedWeeklyExhausted();
 
 		const { ctx, attemptCalls } = makeProxyContext();
@@ -398,7 +398,7 @@ describe("proxyWithAccount — account-wide weekly-exhausted 429", () => {
 	});
 
 	it("does not fire for a non-Anthropic account", async () => {
-		globalThis.fetch = mock(async () => rejected429());
+		globalThis.fetch = mockFetch(mock(async () => rejected429()));
 		seedWeeklyExhausted();
 
 		const { ctx, attemptCalls } = makeProxyContext();

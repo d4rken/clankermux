@@ -11,6 +11,10 @@ import { configureLiteralRoute } from "./fixtures/routing-harness";
  */
 
 import { afterEach, beforeEach, describe, expect, it, mock } from "bun:test";
+import {
+	makeAccount as canonicalAccount,
+	mockFetch,
+} from "@clankermux/test-support";
 import type { Account } from "@clankermux/types";
 import type { ProxyContext } from "../handlers";
 import {
@@ -26,43 +30,13 @@ async function callHandleProxy(req: Request, url: URL, ctx: ProxyContext) {
 }
 
 function makeAccount(overrides: Partial<Account> = {}): Account {
-	return {
-		id: "acc-1",
+	return canonicalAccount({
 		name: "account",
-		provider: "anthropic",
 		api_key: "test-key",
-		refresh_token: null,
-		access_token: null,
-		expires_at: null,
-		request_count: 0,
-		total_requests: 0,
-		last_used: null,
+		refresh_token: "",
 		created_at: Date.now(),
-		rate_limited_until: null,
-		rate_limited_reason: null,
-		rate_limited_at: null,
-		consecutive_rate_limits: 0,
-		session_start: null,
-		session_request_count: 0,
-		paused: false,
-		rate_limit_reset: null,
-		rate_limit_status: null,
-		rate_limit_remaining: null,
-		priority: 0,
-		auto_fallback_enabled: false,
-		auto_refresh_enabled: false,
-		auto_pause_on_overage_enabled: false,
-		peak_hours_pause_enabled: false,
-		codex_auto_apply_reset_credits_enabled: false,
-		custom_endpoint: null,
-		model_mappings: null,
-		cross_region_mode: null,
-		model_fallbacks: null,
-		billing_type: null,
-		pause_reason: null,
-		refresh_token_issued_at: null,
 		...overrides,
-	};
+	});
 }
 
 // gpt-5.5 window = 272K, gate threshold = floor(272K * 0.97) = 263840; the
@@ -243,7 +217,6 @@ describe("context-window hold", () => {
 			name: "Codex",
 			provider: "codex",
 			api_key: "cx-key",
-			model_mappings: JSON.stringify({ opus: "gpt-5.5" }),
 		});
 		const ctx = makeSimpleContext([codex]);
 
@@ -268,7 +241,6 @@ describe("context-window hold", () => {
 			name: "Codex",
 			provider: "codex",
 			api_key: "cx-key",
-			model_mappings: JSON.stringify({ opus: "gpt-5.5" }),
 		});
 		const anthropic = makeAccount({
 			id: "opus-1",
@@ -301,7 +273,6 @@ describe("context-window hold", () => {
 			name: "Codex",
 			provider: "codex",
 			api_key: "cx-key",
-			model_mappings: JSON.stringify({ opus: "gpt-5.5" }),
 		});
 		// Anthropic account rate-limited for a short time — within budget
 		const anthropic = makeAccount({
@@ -312,12 +283,12 @@ describe("context-window hold", () => {
 		});
 		const ctx = makeFullContext([codex, anthropic]);
 
-		globalThis.fetch = mock(
-			async (input: RequestInfo | URL, init?: RequestInit) => {
+		globalThis.fetch = mockFetch(
+			mock(async (input: RequestInfo | URL, init?: RequestInit) => {
 				const url = input instanceof Request ? input.url : String(input);
 				if (url.includes("api.anthropic.com")) return ok200();
 				return originalFetch(input as never, init);
-			},
+			}),
 		);
 
 		const response = await callHandleProxy(
@@ -335,7 +306,6 @@ describe("context-window hold", () => {
 			name: "Codex",
 			provider: "codex",
 			api_key: "cx-key",
-			model_mappings: JSON.stringify({ opus: "gpt-5.5" }),
 		});
 		// Long cooldown so the sleep is definitely running when we abort
 		const anthropic = makeAccount({
@@ -372,7 +342,6 @@ describe("context-window hold", () => {
 			name: "Codex",
 			provider: "codex",
 			api_key: "cx-key",
-			model_mappings: JSON.stringify({ opus: "gpt-5.5" }),
 		});
 		// Anthropic NOT rate-limited, but its provider is on a 529 overload cooldown.
 		const anthropic = makeAccount({
@@ -407,7 +376,6 @@ describe("context-window hold", () => {
 			name: "Codex",
 			provider: "codex",
 			api_key: "cx-key",
-			model_mappings: JSON.stringify({ opus: "gpt-5.5" }),
 		});
 		// Anthropic account paused (not rate-limited) — should not be waited for
 		const anthropic = makeAccount({
@@ -450,7 +418,6 @@ describe("context-window hold", () => {
 			name: "Codex",
 			provider: "codex",
 			api_key: "cx-key",
-			model_mappings: JSON.stringify({ opus: "gpt-5.5" }),
 		});
 		const anthropic = makeAccount({
 			id: "opus-1",
@@ -500,7 +467,6 @@ describe("context-window hold", () => {
 			name: "Codex",
 			provider: "codex",
 			api_key: "cx-key",
-			model_mappings: JSON.stringify({ opus: "gpt-5.5" }),
 		});
 		const anthropic = makeAccount({
 			id: "opus-1",
@@ -537,7 +503,6 @@ describe("context-window hold", () => {
 			access_token: "cx-token",
 			refresh_token: "cx-refresh",
 			expires_at: Date.now() + 3_600_000,
-			model_mappings: JSON.stringify({ opus: "gpt-5.5" }),
 		});
 		const ctx = makeFullContext([codex]);
 
@@ -571,7 +536,6 @@ describe("context-window hold", () => {
 			access_token: "cx-token",
 			refresh_token: "cx-refresh",
 			expires_at: Date.now() + 3_600_000,
-			model_mappings: JSON.stringify({ opus: "gpt-5.5" }),
 		});
 		const ctx = makeFullContext([codex]);
 
@@ -607,7 +571,6 @@ describe("context-window hold", () => {
 			access_token: "cx-token",
 			refresh_token: "cx-refresh",
 			expires_at: Date.now() + 3_600_000,
-			model_mappings: JSON.stringify({ opus: "gpt-5.5" }),
 		});
 		const ctx = makeFullContext([codex]);
 
@@ -646,7 +609,6 @@ describe("context-window hold", () => {
 			access_token: "cx-token",
 			refresh_token: "cx-refresh",
 			expires_at: Date.now() + 3_600_000,
-			model_mappings: JSON.stringify({ opus: "gpt-5.5" }),
 		});
 		const ctx = makeFullContext([codex]);
 
@@ -684,7 +646,6 @@ describe("context-window hold", () => {
 			access_token: "cx-token",
 			refresh_token: "cx-refresh",
 			expires_at: Date.now() + 3_600_000,
-			model_mappings: JSON.stringify({ opus: "gpt-5.5" }),
 		});
 		const ctx = makeFullContext([codex]);
 		await configureLiteralRoute(

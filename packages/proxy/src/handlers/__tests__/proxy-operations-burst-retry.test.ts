@@ -1,5 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it, mock } from "bun:test";
 import { usageCache } from "@clankermux/providers";
+import {
+	makeAccount as canonicalAccount,
+	mockFetch,
+} from "@clankermux/test-support";
 import type { Account, RequestMeta } from "@clankermux/types";
 import {
 	type ProxyAttemptOutcome,
@@ -19,43 +23,15 @@ import { BURST_RETRY_COOLDOWN_CAP_MS } from "../transparent-retry";
 // environment (no provider registry registration), so ctx.provider drives the
 // provider behaviour and we can fully control parseRateLimit/processResponse.
 function makeOAuthAnthropicAccount(overrides: Partial<Account> = {}): Account {
-	return {
+	return canonicalAccount({
 		id: "acc-oauth",
 		name: "oauth-cache",
-		provider: "anthropic",
-		api_key: null,
 		refresh_token: "rt-token",
 		access_token: "at-token",
 		expires_at: Date.now() + 3_600_000,
-		request_count: 0,
-		total_requests: 0,
-		last_used: null,
 		created_at: Date.now(),
-		rate_limited_until: null,
-		rate_limited_reason: null,
-		rate_limited_at: null,
-		consecutive_rate_limits: 0,
-		session_start: null,
-		session_request_count: 0,
-		paused: false,
-		rate_limit_reset: null,
-		rate_limit_status: null,
-		rate_limit_remaining: null,
-		priority: 0,
-		auto_fallback_enabled: false,
-		auto_refresh_enabled: false,
-		auto_pause_on_overage_enabled: false,
-		peak_hours_pause_enabled: false,
-		codex_auto_apply_reset_credits_enabled: false,
-		custom_endpoint: null,
-		model_mappings: null,
-		cross_region_mode: null,
-		model_fallbacks: null,
-		billing_type: null,
-		pause_reason: null,
-		refresh_token_issued_at: null,
 		...overrides,
-	};
+	});
 }
 
 function makeRequestMeta(): RequestMeta {
@@ -189,13 +165,16 @@ describe("proxyWithAccount — transparent burst-retry early intercept", () => {
 
 	it("intercepts a transient 429 (x-should-retry) and records retryable_429 WITHOUT cycling model fallbacks", async () => {
 		const fetchCalls: string[] = [];
-		globalThis.fetch = mock(async (input: RequestInfo | URL) => {
-			const req = input instanceof Request ? input : new Request(String(input));
-			const bodyText = await req.text().catch(() => "{}");
-			const body = JSON.parse(bodyText || "{}");
-			fetchCalls.push(body.model ?? "unknown");
-			return rl429Response({ "x-should-retry": "true" });
-		});
+		globalThis.fetch = mockFetch(
+			mock(async (input: RequestInfo | URL) => {
+				const req =
+					input instanceof Request ? input : new Request(String(input));
+				const bodyText = await req.text().catch(() => "{}");
+				const body = JSON.parse(bodyText || "{}");
+				fetchCalls.push(body.model ?? "unknown");
+				return rl429Response({ "x-should-retry": "true" });
+			}),
+		);
 
 		const outcomes: ProxyAttemptOutcome[] = [];
 		const bodyBuffer = makeRequestBody();
@@ -204,10 +183,7 @@ describe("proxyWithAccount — transparent burst-retry early intercept", () => {
 			req,
 			new URL("https://proxy.local/v1/messages"),
 			// Account WITH model fallbacks configured — must NOT be cycled.
-			makeOAuthAnthropicAccount({
-				model_mappings: JSON.stringify({ sonnet: "claude-sonnet-4-5" }),
-				model_fallbacks: JSON.stringify({ sonnet: "claude-haiku-4-5" }),
-			}),
+			makeOAuthAnthropicAccount({}),
 			makeRequestMeta(),
 			bodyBuffer,
 			() => undefined,
@@ -238,8 +214,8 @@ describe("proxyWithAccount — transparent burst-retry early intercept", () => {
 		// still inactive and divert to a sibling. We assert it here purely on the
 		// proxyWithAccount return (no hold orchestrator involved).
 		expect(isAnthropicBurstThrottleActive()).toBe(false);
-		globalThis.fetch = mock(async () =>
-			rl429Response({ "x-should-retry": "true" }),
+		globalThis.fetch = mockFetch(
+			mock(async () => rl429Response({ "x-should-retry": "true" })),
 		);
 
 		const outcomes: ProxyAttemptOutcome[] = [];
@@ -293,11 +269,13 @@ describe("proxyWithAccount — transparent burst-retry early intercept", () => {
 		usageCache.refreshNow = refreshSpy as typeof usageCache.refreshNow;
 
 		try {
-			globalThis.fetch = mock(async () =>
-				// NOTE: no x-should-retry header — so a stale-usage path that did NOT
-				// refresh would classify as non-retryable. A fresh_headroom outcome
-				// therefore proves the refresh ran AND drove the classification.
-				rl429Response(),
+			globalThis.fetch = mockFetch(
+				mock(async () =>
+					// NOTE: no x-should-retry header — so a stale-usage path that did NOT
+					// refresh would classify as non-retryable. A fresh_headroom outcome
+					// therefore proves the refresh ran AND drove the classification.
+					rl429Response(),
+				),
 			);
 
 			const outcomes: ProxyAttemptOutcome[] = [];
@@ -336,11 +314,13 @@ describe("proxyWithAccount — transparent burst-retry early intercept", () => {
 	});
 
 	it("does NOT intercept a hard-limit-status 429 (falls through to normal failover, hard_429)", async () => {
-		globalThis.fetch = mock(async () =>
-			rl429Response({
-				"anthropic-ratelimit-unified-status": "rate_limited",
-				"x-should-retry": "true",
-			}),
+		globalThis.fetch = mockFetch(
+			mock(async () =>
+				rl429Response({
+					"anthropic-ratelimit-unified-status": "rate_limited",
+					"x-should-retry": "true",
+				}),
+			),
 		);
 
 		const outcomes: ProxyAttemptOutcome[] = [];
@@ -369,8 +349,8 @@ describe("proxyWithAccount — transparent burst-retry early intercept", () => {
 	});
 
 	it("does NOT intercept a 429 on a non-OAuth-Anthropic (console) account", async () => {
-		globalThis.fetch = mock(async () =>
-			rl429Response({ "x-should-retry": "true" }),
+		globalThis.fetch = mockFetch(
+			mock(async () => rl429Response({ "x-should-retry": "true" })),
 		);
 
 		const outcomes: ProxyAttemptOutcome[] = [];
@@ -427,8 +407,10 @@ describe("proxyWithAccount — transparent burst-retry early intercept", () => {
 			},
 		} as never);
 
-		globalThis.fetch = mock(async () =>
-			rl429Response({ "x-should-retry": "true", "retry-after": "333111" }),
+		globalThis.fetch = mockFetch(
+			mock(async () =>
+				rl429Response({ "x-should-retry": "true", "retry-after": "333111" }),
+			),
 		);
 
 		const outcomes: ProxyAttemptOutcome[] = [];
@@ -497,8 +479,10 @@ describe("proxyWithAccount — transparent burst-retry early intercept", () => {
 			},
 		} as never);
 
-		globalThis.fetch = mock(async () =>
-			rl429Response({ "x-should-retry": "true", "retry-after": "75" }),
+		globalThis.fetch = mockFetch(
+			mock(async () =>
+				rl429Response({ "x-should-retry": "true", "retry-after": "75" }),
+			),
 		);
 
 		const account = makeOAuthAnthropicAccount();
@@ -544,8 +528,8 @@ describe("proxyWithAccount — transparent burst-retry early intercept", () => {
 		try {
 			// No cached usage (deleted in beforeEach) ⇒ the shared refresh fires and
 			// fails, leaving capacity null for the burst rung too.
-			globalThis.fetch = mock(async () =>
-				rl429Response({ "x-should-retry": "true" }),
+			globalThis.fetch = mockFetch(
+				mock(async () => rl429Response({ "x-should-retry": "true" })),
 			);
 
 			const outcomes: ProxyAttemptOutcome[] = [];
@@ -595,7 +579,9 @@ describe("proxyWithAccount — reprobe mode", () => {
 	});
 
 	it("reprobe 429 leaves consecutive_rate_limits + rate_limited_at intact and returns null", async () => {
-		globalThis.fetch = mock(async () => rl429Response({ "retry-after": "30" }));
+		globalThis.fetch = mockFetch(
+			mock(async () => rl429Response({ "retry-after": "30" })),
+		);
 
 		const account = makeOAuthAnthropicAccount({
 			consecutive_rate_limits: 2,
@@ -643,8 +629,10 @@ describe("proxyWithAccount — reprobe mode", () => {
 		// held account's in-memory rate_limited_until out to that value, which ends
 		// the hold AND becomes the client-facing Retry-After of the give-up terminal
 		// — a 92-hour retry instruction on a response that calls the condition brief.
-		globalThis.fetch = mock(async () =>
-			rl429Response({ "x-should-retry": "true", "retry-after": "333111" }),
+		globalThis.fetch = mockFetch(
+			mock(async () =>
+				rl429Response({ "x-should-retry": "true", "retry-after": "333111" }),
+			),
 		);
 
 		const account = makeOAuthAnthropicAccount({
@@ -688,7 +676,7 @@ describe("proxyWithAccount — reprobe mode", () => {
 	});
 
 	it("reprobe success (200) forwards the response", async () => {
-		globalThis.fetch = mock(async () => ok200Response());
+		globalThis.fetch = mockFetch(mock(async () => ok200Response()));
 
 		const account = makeOAuthAnthropicAccount({
 			rate_limited_until: Date.now() + 5_000,

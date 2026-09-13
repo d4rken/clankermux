@@ -6,6 +6,7 @@
  */
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { CodexProvider, OpenAICompatibleProvider } from "@clankermux/providers";
+import { mockFetch } from "@clankermux/test-support";
 import { chatGptCloudflareCookieJar } from "../../chatgpt-cloudflare-cookies";
 import { makeProxyRequest, validateProviderPath } from "../request-handler";
 
@@ -315,10 +316,10 @@ describe("makeProxyRequest — synthetic local response", () => {
 
 	it("unwraps synthetic response without calling fetch", async () => {
 		let fetchCalled = false;
-		globalThis.fetch = (async () => {
+		globalThis.fetch = mockFetch(async () => {
 			fetchCalled = true;
 			return new Response("{}", { status: 200 });
-		}) as typeof globalThis.fetch;
+		});
 
 		const syntheticHeaders = new Headers();
 		syntheticHeaders.set("content-type", "application/json");
@@ -338,10 +339,10 @@ describe("makeProxyRequest — synthetic local response", () => {
 
 	it("does NOT unwrap a non-clankermux.local request even with synthetic markers", async () => {
 		let fetchCalled = false;
-		globalThis.fetch = (async () => {
+		globalThis.fetch = mockFetch(async () => {
 			fetchCalled = true;
 			return new Response("{}", { status: 200 });
-		}) as typeof globalThis.fetch;
+		});
 
 		const headers = new Headers();
 		headers.set("content-type", "application/json");
@@ -358,10 +359,10 @@ describe("makeProxyRequest — synthetic local response", () => {
 
 	it("does NOT unwrap a host that merely prefixes the trusted origin", async () => {
 		let fetchCalled = false;
-		globalThis.fetch = (async () => {
+		globalThis.fetch = mockFetch(async () => {
 			fetchCalled = true;
 			return new Response("{}", { status: 200 });
-		}) as typeof globalThis.fetch;
+		});
 
 		const headers = new Headers();
 		headers.set("content-type", "application/json");

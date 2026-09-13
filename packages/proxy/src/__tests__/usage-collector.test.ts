@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it } from "bun:test";
-import type { PricingEstimateContext } from "@clankermux/core";
+import type { PricingEstimateContext, TokenBreakdown } from "@clankermux/core";
 import {
 	hashCreditToken,
 	refusalFallbackRegistry,
@@ -30,18 +30,18 @@ function sse(event: string, data: unknown): Uint8Array {
 function fakeCost(): {
 	fn: (
 		model: string,
-		t: Record<string, number | undefined>,
+		t: TokenBreakdown,
 		context?: PricingEstimateContext,
 	) => Promise<number>;
 	calls: Array<{
 		model: string;
-		tokens: Record<string, number | undefined>;
+		tokens: TokenBreakdown;
 		context?: PricingEstimateContext;
 	}>;
 } {
 	const calls: Array<{
 		model: string;
-		tokens: Record<string, number | undefined>;
+		tokens: TokenBreakdown;
 		context?: PricingEstimateContext;
 	}> = [];
 	return {

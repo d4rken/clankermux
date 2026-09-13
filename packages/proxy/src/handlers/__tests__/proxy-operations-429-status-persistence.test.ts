@@ -1,5 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it, mock } from "bun:test";
 import { usageCache } from "@clankermux/providers";
+import {
+	makeAccount as canonicalAccount,
+	mockFetch,
+} from "@clankermux/test-support";
 import type { Account, RequestMeta } from "@clankermux/types";
 import { proxyWithAccount } from "../../__tests__/fixtures/routing-harness";
 import { clearProviderOverloadCooldown } from "../../provider-overload-cooldown";
@@ -23,43 +27,15 @@ import type { ProxyContext } from "../proxy-types";
 // getProvider("anthropic") returns undefined in the test environment, so
 // ctx.provider drives provider behaviour, including parseRateLimit.
 function makeOAuthAnthropicAccount(overrides: Partial<Account> = {}): Account {
-	return {
+	return canonicalAccount({
 		id: "acc-oauth",
 		name: "oauth-cache",
-		provider: "anthropic",
-		api_key: null,
 		refresh_token: "rt-token",
 		access_token: "at-token",
 		expires_at: Date.now() + 3_600_000,
-		request_count: 0,
-		total_requests: 0,
-		last_used: null,
 		created_at: Date.now(),
-		rate_limited_until: null,
-		rate_limited_reason: null,
-		rate_limited_at: null,
-		consecutive_rate_limits: 0,
-		session_start: null,
-		session_request_count: 0,
-		paused: false,
-		rate_limit_reset: null,
-		rate_limit_status: null,
-		rate_limit_remaining: null,
-		priority: 0,
-		auto_fallback_enabled: false,
-		auto_refresh_enabled: false,
-		auto_pause_on_overage_enabled: false,
-		peak_hours_pause_enabled: false,
-		codex_auto_apply_reset_credits_enabled: false,
-		custom_endpoint: null,
-		model_mappings: null,
-		cross_region_mode: null,
-		model_fallbacks: null,
-		billing_type: null,
-		pause_reason: null,
-		refresh_token_issued_at: null,
 		...overrides,
-	};
+	});
 }
 
 function makeRequestMeta(): RequestMeta {
@@ -211,12 +187,14 @@ describe("proxyWithAccount — 429 unified-status persistence on cooldown short-
 	it("no-model-fallbacks 429 path persists the unified-status header (model_fallback_429 site)", async () => {
 		// Hard-limit unified status: the burst-retry early intercept declines
 		// (non-retryable), so the flow reaches the no-fallback hard_429 path.
-		globalThis.fetch = mock(async () =>
-			rl429Response({
-				"anthropic-ratelimit-unified-status": "rate_limited",
-				"anthropic-ratelimit-unified-reset": String(RESET_EPOCH_SEC),
-				"anthropic-ratelimit-unified-remaining": "0",
-			}),
+		globalThis.fetch = mockFetch(
+			mock(async () =>
+				rl429Response({
+					"anthropic-ratelimit-unified-status": "rate_limited",
+					"anthropic-ratelimit-unified-reset": String(RESET_EPOCH_SEC),
+					"anthropic-ratelimit-unified-remaining": "0",
+				}),
+			),
 		);
 
 		const { ctx, metaCalls } = makeProxyContext();
@@ -247,13 +225,15 @@ describe("proxyWithAccount — 429 unified-status persistence on cooldown short-
 	it("burst-retry early intercept persists the unified-status header (transient model_fallback_429 site)", async () => {
 		// Transient burst 429: soft status + x-should-retry → intercept fires
 		// and short-circuits with retryable_429 BEFORE model cycling.
-		globalThis.fetch = mock(async () =>
-			rl429Response({
-				"x-should-retry": "true",
-				"anthropic-ratelimit-unified-status": "allowed_warning",
-				"anthropic-ratelimit-unified-reset": String(RESET_EPOCH_SEC),
-				"anthropic-ratelimit-unified-remaining": "3",
-			}),
+		globalThis.fetch = mockFetch(
+			mock(async () =>
+				rl429Response({
+					"x-should-retry": "true",
+					"anthropic-ratelimit-unified-status": "allowed_warning",
+					"anthropic-ratelimit-unified-reset": String(RESET_EPOCH_SEC),
+					"anthropic-ratelimit-unified-remaining": "3",
+				}),
+			),
 		);
 
 		const { ctx, metaCalls } = makeProxyContext();
@@ -261,10 +241,7 @@ describe("proxyWithAccount — 429 unified-status persistence on cooldown short-
 		const result = await proxyWithAccount(
 			makeRequest(bodyBuffer),
 			new URL("https://proxy.local/v1/messages"),
-			makeOAuthAnthropicAccount({
-				model_mappings: JSON.stringify({ sonnet: "claude-sonnet-4-5" }),
-				model_fallbacks: JSON.stringify({ sonnet: "claude-haiku-4-5" }),
-			}),
+			makeOAuthAnthropicAccount({}),
 			makeRequestMeta(),
 			bodyBuffer,
 			() => undefined,
@@ -286,24 +263,23 @@ describe("proxyWithAccount — 429 unified-status persistence on cooldown short-
 		// Hard status on every attempt: intercept declines, model fallbacks are
 		// cycled and exhausted, landing on the model_fallback_429 site.
 		let fetchCount = 0;
-		globalThis.fetch = mock(async () => {
-			fetchCount++;
-			return rl429Response({
-				"anthropic-ratelimit-unified-status": "rate_limited",
-				"anthropic-ratelimit-unified-reset": String(RESET_EPOCH_SEC),
-				"anthropic-ratelimit-unified-remaining": "0",
-			});
-		});
+		globalThis.fetch = mockFetch(
+			mock(async () => {
+				fetchCount++;
+				return rl429Response({
+					"anthropic-ratelimit-unified-status": "rate_limited",
+					"anthropic-ratelimit-unified-reset": String(RESET_EPOCH_SEC),
+					"anthropic-ratelimit-unified-remaining": "0",
+				});
+			}),
+		);
 
 		const { ctx, metaCalls } = makeProxyContext();
 		const bodyBuffer = makeRequestBody();
 		const result = await proxyWithAccount(
 			makeRequest(bodyBuffer),
 			new URL("https://proxy.local/v1/messages"),
-			makeOAuthAnthropicAccount({
-				model_mappings: JSON.stringify({ sonnet: "claude-sonnet-4-5" }),
-				model_fallbacks: JSON.stringify({ sonnet: "claude-haiku-4-5" }),
-			}),
+			makeOAuthAnthropicAccount({}),
 			makeRequestMeta(),
 			bodyBuffer,
 			() => undefined,
@@ -328,12 +304,14 @@ describe("proxyWithAccount — 429 unified-status persistence on cooldown short-
 		// is deliberately omitted at the reprobe short-circuit site. Lock that in:
 		// a 429 carrying the unified-status header during a re-probe must NOT
 		// touch updateAccountRateLimitMeta.
-		globalThis.fetch = mock(async () =>
-			rl429Response({
-				"anthropic-ratelimit-unified-status": "rate_limited",
-				"anthropic-ratelimit-unified-reset": String(RESET_EPOCH_SEC),
-				"anthropic-ratelimit-unified-remaining": "0",
-			}),
+		globalThis.fetch = mockFetch(
+			mock(async () =>
+				rl429Response({
+					"anthropic-ratelimit-unified-status": "rate_limited",
+					"anthropic-ratelimit-unified-reset": String(RESET_EPOCH_SEC),
+					"anthropic-ratelimit-unified-remaining": "0",
+				}),
+			),
 		);
 
 		const { ctx, metaCalls } = makeProxyContext();

@@ -1,7 +1,12 @@
 import { beforeAll, describe, expect, it } from "bun:test";
 import type { Config } from "@clankermux/config";
 import type { DatabaseOperations } from "@clankermux/database";
-import { AnthropicOAuthProvider, generatePKCE } from "@clankermux/providers";
+import {
+	AnthropicOAuthProvider,
+	generatePKCE,
+	type OAuthProvider,
+} from "@clankermux/providers";
+import { mockFetch } from "@clankermux/test-support";
 
 // Mock database operations for testing
 const _mockDbOps = {
@@ -16,7 +21,7 @@ const _mockConfig = {
 } as unknown as Config;
 
 describe("OAuth Token Health Monitoring Features", () => {
-	let oauthProvider: AnthropicOAuthProvider;
+	let oauthProvider: OAuthProvider;
 
 	beforeAll(() => {
 		oauthProvider = new AnthropicOAuthProvider();
@@ -107,15 +112,17 @@ describe("OAuth Token Health Monitoring Features", () => {
 
 			// Mock successful token response
 			const originalFetch = global.fetch;
-			global.fetch = async () =>
-				({
-					ok: true,
-					json: async () => ({
-						refresh_token: "test-refresh-token",
-						access_token: "test-access-token",
-						expires_in: 3600,
-					}),
-				}) as unknown as Response;
+			global.fetch = mockFetch(
+				async () =>
+					({
+						ok: true,
+						json: async () => ({
+							refresh_token: "test-refresh-token",
+							access_token: "test-access-token",
+							expires_in: 3600,
+						}),
+					}) as unknown as Response,
+			);
 
 			try {
 				const result = await oauthProvider.exchangeCode(
@@ -187,16 +194,18 @@ describe("OAuth Token Health Monitoring Features", () => {
 
 			// Mock error response
 			const originalFetch = global.fetch;
-			global.fetch = async () =>
-				({
-					ok: false,
-					status: 400,
-					statusText: "Bad Request",
-					json: async () => ({
-						error: "invalid_grant",
-						error_description: "Authorization code expired",
-					}),
-				}) as unknown as Response;
+			global.fetch = mockFetch(
+				async () =>
+					({
+						ok: false,
+						status: 400,
+						statusText: "Bad Request",
+						json: async () => ({
+							error: "invalid_grant",
+							error_description: "Authorization code expired",
+						}),
+					}) as unknown as Response,
+			);
 
 			try {
 				await oauthProvider.exchangeCode("expired-code", pkce.verifier, config);
@@ -368,16 +377,18 @@ describe("4. PKCE and State Security Tests", () => {
 			expect(parsedState).not.toBeNull();
 			expect(parsedState).toHaveProperty("csrfToken");
 			expect(parsedState).toHaveProperty("timestamp");
+			if (!parsedState) throw new Error("state did not parse");
+			const { csrfToken, timestamp } = parsedState;
 
 			// CSRF token should be a valid hex string
-			expect(typeof parsedState.csrfToken).toBe("string");
-			expect(parsedState.csrfToken).toMatch(/^[0-9a-f]+$/);
-			expect(parsedState.csrfToken.length).toBe(64);
+			expect(typeof csrfToken).toBe("string");
+			expect(csrfToken).toMatch(/^[0-9a-f]+$/);
+			expect(String(csrfToken).length).toBe(64);
 
 			// Timestamp should be a recent number
-			expect(typeof parsedState.timestamp).toBe("number");
+			expect(typeof timestamp).toBe("number");
 			const now = Date.now();
-			const age = now - parsedState.timestamp;
+			const age = now - Number(timestamp);
 			expect(age).toBeGreaterThanOrEqual(0);
 			expect(age).toBeLessThan(60000); // Should be very recent
 		});

@@ -1,5 +1,17 @@
-import { afterEach, beforeEach, describe, expect, it, mock } from "bun:test";
+import {
+	afterEach,
+	beforeEach,
+	describe,
+	expect,
+	it,
+	mock,
+	spyOn,
+} from "bun:test";
 import { getProvider } from "@clankermux/providers";
+import {
+	makeAccount as canonicalAccount,
+	mockFetch,
+} from "@clankermux/test-support";
 import type { Account } from "@clankermux/types";
 import type { ProxyContext } from "../handlers";
 import { setOverloadHoldBudgetOverrideForTests } from "../overload-hold";
@@ -17,42 +29,12 @@ import {
 } from "../provider-overload-cooldown";
 
 function makeAccount(overrides: Partial<Account> = {}): Account {
-	return {
-		id: "acc-1",
-		name: "test-account",
-		provider: "anthropic",
+	return canonicalAccount({
 		api_key: "test-key",
 		refresh_token: "",
-		access_token: null,
-		expires_at: null,
-		request_count: 0,
-		total_requests: 0,
-		last_used: null,
 		created_at: Date.now(),
-		rate_limited_until: null,
-		rate_limited_reason: null,
-		rate_limited_at: null,
-		consecutive_rate_limits: 0,
-		session_start: null,
-		session_request_count: 0,
-		paused: false,
-		rate_limit_reset: null,
-		rate_limit_status: null,
-		rate_limit_remaining: null,
-		priority: 0,
-		auto_fallback_enabled: false,
-		auto_refresh_enabled: false,
-		auto_pause_on_overage_enabled: false,
-		peak_hours_pause_enabled: false,
-		codex_auto_apply_reset_credits_enabled: false,
-		custom_endpoint: null,
-		model_mappings: null,
-		model_fallbacks: null,
-		billing_type: null,
-		pause_reason: null,
-		refresh_token_issued_at: null,
 		...overrides,
-	};
+	});
 }
 
 function makeRequest(headers: Record<string, string> = {}): Request {
@@ -71,6 +53,9 @@ function makeContext(accounts: Account[]): ProxyContext {
 	return {
 		strategy: {
 			select: mock((allAccounts: Account[]) => allAccounts),
+			// Previews mirror `select`: this stub reorders nothing.
+			peekRanked: mock((allAccounts: Account[]) => allAccounts),
+			peek: mock((allAccounts: Account[]) => allAccounts[0]?.id ?? null),
 		},
 		dbOps: {
 			getAllAccounts: mock(async () => accounts),
@@ -153,57 +138,58 @@ describe("provider overload cooldown", () => {
 			provider: "openai-compatible",
 			api_key: "fallback-key",
 			custom_endpoint: "https://fallback.example/v1",
-			model_mappings: JSON.stringify({ sonnet: "gpt-4o" }),
 		});
 		const calls: string[] = [];
 
-		globalThis.fetch = mock(async (input: RequestInfo | URL) => {
-			const request =
-				input instanceof Request ? input : new Request(String(input));
+		globalThis.fetch = mockFetch(
+			mock(async (input: RequestInfo | URL) => {
+				const request =
+					input instanceof Request ? input : new Request(String(input));
 
-			// Usage cost is now computed inline on the main thread (the worker was
-			// retired), so estimateCostUSD's pricing-catalogue fetch (models.dev)
-			// goes through this mock. Stub it WITHOUT counting it so `calls` still
-			// reflects only the proxied upstream-provider attempts.
-			if (request.url.includes("models.dev")) {
-				return new Response("{}", {
-					status: 200,
-					headers: { "content-type": "application/json" },
-				});
-			}
+				// Usage cost is now computed inline on the main thread (the worker was
+				// retired), so estimateCostUSD's pricing-catalogue fetch (models.dev)
+				// goes through this mock. Stub it WITHOUT counting it so `calls` still
+				// reflects only the proxied upstream-provider attempts.
+				if (request.url.includes("models.dev")) {
+					return new Response("{}", {
+						status: 200,
+						headers: { "content-type": "application/json" },
+					});
+				}
 
-			calls.push(request.url);
+				calls.push(request.url);
 
-			if (request.url.includes("api.anthropic.com")) {
-				return new Response(
-					'{"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}',
-					{
-						status: 529,
-						headers: {
-							"content-type": "application/json",
-							"retry-after": "60",
-						},
-					},
-				);
-			}
-
-			return new Response(
-				JSON.stringify({
-					id: "chatcmpl_1",
-					object: "chat.completion",
-					model: "gpt-4o",
-					choices: [
+				if (request.url.includes("api.anthropic.com")) {
+					return new Response(
+						'{"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}',
 						{
-							index: 0,
-							message: { role: "assistant", content: "fallback ok" },
-							finish_reason: "stop",
+							status: 529,
+							headers: {
+								"content-type": "application/json",
+								"retry-after": "60",
+							},
 						},
-					],
-					usage: { prompt_tokens: 1, completion_tokens: 2, total_tokens: 3 },
-				}),
-				{ status: 200, headers: { "content-type": "application/json" } },
-			);
-		});
+					);
+				}
+
+				return new Response(
+					JSON.stringify({
+						id: "chatcmpl_1",
+						object: "chat.completion",
+						model: "gpt-4o",
+						choices: [
+							{
+								index: 0,
+								message: { role: "assistant", content: "fallback ok" },
+								finish_reason: "stop",
+							},
+						],
+						usage: { prompt_tokens: 1, completion_tokens: 2, total_tokens: 3 },
+					}),
+					{ status: 200, headers: { "content-type": "application/json" } },
+				);
+			}),
+		);
 
 		const ctx = makeContext([anthropicA, anthropicB, consoleAccount, fallback]);
 		const { handleProxy } = await import("./fixtures/routing-harness");
@@ -239,21 +225,23 @@ describe("provider overload cooldown", () => {
 		});
 		const calls: string[] = [];
 
-		globalThis.fetch = mock(async (input: RequestInfo | URL) => {
-			const request =
-				input instanceof Request ? input : new Request(String(input));
-			calls.push(request.url);
-			return new Response(
-				'{"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}',
-				{
-					status: 529,
-					headers: {
-						"content-type": "application/json",
-						"retry-after": "60",
+		globalThis.fetch = mockFetch(
+			mock(async (input: RequestInfo | URL) => {
+				const request =
+					input instanceof Request ? input : new Request(String(input));
+				calls.push(request.url);
+				return new Response(
+					'{"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}',
+					{
+						status: 529,
+						headers: {
+							"content-type": "application/json",
+							"retry-after": "60",
+						},
 					},
-				},
-			);
-		});
+				);
+			}),
+		);
 
 		const ctx = makeContext([anthropicA, anthropicB]);
 		const { handleProxy } = await import("./fixtures/routing-harness");
@@ -276,12 +264,14 @@ describe("provider overload cooldown", () => {
 		const originalDateNow = Date.now;
 		const calls: string[] = [];
 
-		globalThis.fetch = mock(async (input: RequestInfo | URL) => {
-			const request =
-				input instanceof Request ? input : new Request(String(input));
-			calls.push(request.url);
-			return new Response("unexpected", { status: 500 });
-		});
+		globalThis.fetch = mockFetch(
+			mock(async (input: RequestInfo | URL) => {
+				const request =
+					input instanceof Request ? input : new Request(String(input));
+				calls.push(request.url);
+				return new Response("unexpected", { status: 500 });
+			}),
+		);
 
 		Date.now = () => now;
 		try {
@@ -296,9 +286,9 @@ describe("provider overload cooldown", () => {
 				makeAccount({ id: "anthropic-a", provider: "anthropic" }),
 				makeAccount({ id: "console-a", provider: "claude-console-api" }),
 			]);
-			const recordSynthetic = (
-				ctx.requestRecorder as { recordSynthetic: ReturnType<typeof mock> }
-			).recordSynthetic;
+			// Spied rather than cast: `ProxyContext` declares the real recorder, so
+			// the stub's mock is not reachable through its type.
+			const recordSynthetic = spyOn(ctx.requestRecorder, "recordSynthetic");
 			const { handleProxy } = await import("./fixtures/routing-harness");
 			const response = await handleProxy(
 				makeRequest(),
@@ -330,8 +320,10 @@ describe("provider overload cooldown", () => {
 			);
 			expect(recordSynthetic.mock.calls[0][1]).toBe("error");
 			expect(recordSynthetic.mock.calls[0][2]).toBe("provider_overloaded");
+			const details = recordSynthetic.mock.calls[0][3];
+			if (!details) throw new Error("expected synthetic record details");
 			const recordedBody = new TextDecoder().decode(
-				recordSynthetic.mock.calls[0][3].responseBody as ArrayBuffer,
+				details.responseBody as ArrayBuffer,
 			);
 			expect(JSON.parse(recordedBody)).toMatchObject({
 				error: { type: "overloaded_error", providers: ["anthropic"] },
@@ -351,9 +343,9 @@ describe("provider overload cooldown", () => {
 			const ctx = makeContext([
 				makeAccount({ id: "anthropic-a", provider: "anthropic" }),
 			]);
-			const recordSynthetic = (
-				ctx.requestRecorder as { recordSynthetic: ReturnType<typeof mock> }
-			).recordSynthetic;
+			// Spied rather than cast: `ProxyContext` declares the real recorder, so
+			// the stub's mock is not reachable through its type.
+			const recordSynthetic = spyOn(ctx.requestRecorder, "recordSynthetic");
 			const { handleProxy } = await import("./fixtures/routing-harness");
 			const response = await handleProxy(
 				makeRequest({ "x-clankermux-auto-refresh": "true" }),

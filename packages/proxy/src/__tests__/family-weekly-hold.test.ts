@@ -15,6 +15,7 @@
 
 import { afterEach, beforeEach, describe, expect, it, mock } from "bun:test";
 import { usageCache } from "@clankermux/providers";
+import { mockFetch } from "@clankermux/test-support";
 import type { Account } from "@clankermux/types";
 import type { ProxyContext } from "../handlers";
 import { clearProviderOverloadCooldown } from "../provider-overload-cooldown";
@@ -33,7 +34,7 @@ function makeAccount(overrides: Partial<Account> = {}): Account {
 		name: "account",
 		provider: "anthropic",
 		api_key: "test-key",
-		refresh_token: null,
+		refresh_token: "",
 		access_token: null,
 		expires_at: null,
 		request_count: 0,
@@ -57,9 +58,6 @@ function makeAccount(overrides: Partial<Account> = {}): Account {
 		peak_hours_pause_enabled: false,
 		codex_auto_apply_reset_credits_enabled: false,
 		custom_endpoint: null,
-		model_mappings: null,
-		cross_region_mode: null,
-		model_fallbacks: null,
 		billing_type: null,
 		pause_reason: null,
 		refresh_token_issued_at: null,
@@ -218,7 +216,7 @@ describe("family-weekly transient-cooldown hold", () => {
 	});
 
 	it("holds for a briefly-cooled family-capable sibling and serves it once the cooldown lapses", async () => {
-		globalThis.fetch = mock(async () => ok200());
+		globalThis.fetch = mockFetch(mock(async () => ok200()));
 		// Reachable account: Fable exhausted, unified 5h/7d headroom → family-weekly
 		// excluded (not account-wide).
 		seedUsage(EXHAUSTED_ID, {
@@ -252,7 +250,7 @@ describe("family-weekly transient-cooldown hold", () => {
 	});
 
 	it("skips the hold and reports the SIBLING cooldown (not the 5-day family window) when the cooldown exceeds the budget", async () => {
-		globalThis.fetch = mock(async () => ok200());
+		globalThis.fetch = mockFetch(mock(async () => ok200()));
 		seedUsage(EXHAUSTED_ID, {
 			fiveHourUtil: 2,
 			sevenDayUtil: 60,
@@ -292,7 +290,7 @@ describe("family-weekly transient-cooldown hold", () => {
 	});
 
 	it("returns the genuine family-exhausted 429 when NO family-capable sibling exists", async () => {
-		globalThis.fetch = mock(async () => ok200());
+		globalThis.fetch = mockFetch(mock(async () => ok200()));
 		// Both accounts Fable-exhausted; the sibling is also on a cooldown, but it is
 		// NOT family-capable, so there is nothing to hold for.
 		seedUsage(EXHAUSTED_ID, {

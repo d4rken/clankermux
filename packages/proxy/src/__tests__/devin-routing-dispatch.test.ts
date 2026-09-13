@@ -36,11 +36,13 @@ async function setup(quota = false, path = "/v1/messages") {
 		last_error: null,
 	};
 	ctx.modelPermissions = { permissions: async () => permissions } as never;
-	ctx.dbOps.routing = {
+	// `DatabaseOperations.routing` is readonly; the stub goes in through a
+	// loosened handle rather than a cast on the whole context.
+	(ctx.dbOps as { routing: unknown }).routing = {
 		recordAttempt: mock(async () => {}),
 		finishAttempt: mock(async () => {}),
 		isModelSuppressed: mock(async () => false),
-	} as never;
+	};
 	ctx.dbOps.getAccount = mock(async () => account);
 	const meta = {
 		id: crypto.randomUUID(),

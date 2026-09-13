@@ -19,6 +19,7 @@ import {
 	expect,
 	it,
 	mock,
+	spyOn,
 } from "bun:test";
 import type { Account } from "@clankermux/types";
 import type { ProxyContext } from "../handlers";
@@ -54,7 +55,7 @@ function makeAccount(overrides: Partial<Account> = {}): Account {
 		name: "Main-me",
 		provider: "anthropic",
 		api_key: "test-key",
-		refresh_token: null,
+		refresh_token: "",
 		access_token: null,
 		expires_at: null,
 		request_count: 0,
@@ -78,9 +79,6 @@ function makeAccount(overrides: Partial<Account> = {}): Account {
 		peak_hours_pause_enabled: false,
 		codex_auto_apply_reset_credits_enabled: false,
 		custom_endpoint: null,
-		model_mappings: null,
-		cross_region_mode: null,
-		model_fallbacks: null,
 		billing_type: null,
 		pause_reason: null,
 		refresh_token_issued_at: null,
@@ -277,9 +275,9 @@ describe("transparent overload hold", () => {
 		// Open for ~400ms — well within the hold budget.
 		applyProviderOverloadCooldown("anthropic", Date.now() + 400, MODEL);
 		const ctx = makeContext([makeAccount()]);
-		const recordSynthetic = (
-			ctx.requestRecorder as { recordSynthetic: ReturnType<typeof mock> }
-		).recordSynthetic;
+		// Spied rather than cast: `ProxyContext` declares the real recorder, so
+		// the stub's mock is not reachable through its type.
+		const recordSynthetic = spyOn(ctx.requestRecorder, "recordSynthetic");
 
 		const res = await callHandleProxy(
 			modelRequest(MODEL),

@@ -91,6 +91,14 @@ function ingressCtx(): ProxyContext {
 			getCacheWarmingMinTokens: () => 100_000,
 		} as never,
 		server: { timeout: mock(() => {}) } as never,
+		// Required by `ProxyContext`; the ingress path under test reads none of
+		// them.
+		strategy: {} as never,
+		dbOps: {} as never,
+		runtime: {} as never,
+		refreshInFlight: new Map<string, Promise<string>>(),
+		asyncWriter: {} as never,
+		requestRecorder: {} as never,
 	} as ProxyContext;
 }
 

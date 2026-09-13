@@ -87,7 +87,7 @@ describe("Worker SSE parsing", () => {
 		}
 
 		it("extracts usage from Anthropic format (type in JSON)", () => {
-			const state = { usage: {} };
+			const state: { usage: Record<string, unknown> } = { usage: {} };
 			const data = JSON.stringify({
 				type: "message_start",
 				message: {
@@ -101,7 +101,7 @@ describe("Worker SSE parsing", () => {
 		});
 
 		it("extracts usage from alternate format (type in event line)", () => {
-			const state = { usage: {} };
+			const state: { usage: Record<string, unknown> } = { usage: {} };
 			const data = JSON.stringify({
 				message: {
 					model: "glm-5",
@@ -114,7 +114,7 @@ describe("Worker SSE parsing", () => {
 		});
 
 		it("extracts output tokens from message_delta", () => {
-			const state = { usage: {} };
+			const state: { usage: Record<string, unknown> } = { usage: {} };
 			const data = JSON.stringify({
 				usage: { output_tokens: 51 },
 			});
@@ -123,7 +123,7 @@ describe("Worker SSE parsing", () => {
 		});
 
 		it("handles both formats for message_delta", () => {
-			const state = { usage: {} };
+			const state: { usage: Record<string, unknown> } = { usage: {} };
 			const data1 = JSON.stringify({
 				type: "message_delta",
 				usage: { output_tokens: 100 },
@@ -131,7 +131,7 @@ describe("Worker SSE parsing", () => {
 			extractUsageFromData(data1, "some_event", state);
 			expect(state.usage.outputTokens).toBe(100);
 
-			const state2 = { usage: {} };
+			const state2: { usage: Record<string, unknown> } = { usage: {} };
 			const data2 = JSON.stringify({
 				usage: { output_tokens: 200 },
 			});
