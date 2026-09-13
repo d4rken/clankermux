@@ -66,7 +66,7 @@ describe("Devin provider", () => {
 		const result = await provider.transformRequestBody(
 			new Request(provider.buildUrl("/v1/messages", "", account), {
 				method: "POST",
-				body: JSON.stringify({ model: "swe-2", messages: [] }),
+				body: JSON.stringify({ model: "swe-2-high", messages: [] }),
 			}),
 			account,
 		);
@@ -79,7 +79,7 @@ describe("Devin provider", () => {
 			new Request(provider.buildUrl("/v1/messages", "", account), {
 				method: "POST",
 				body: JSON.stringify({
-					model: "swe-2",
+					model: "swe-2-high",
 					messages: [
 						{ role: "user", content: "hello" },
 						{
@@ -110,7 +110,7 @@ describe("Devin provider", () => {
 			new Request(provider.buildUrl("/v1/messages", "", account), {
 				method: "POST",
 				body: JSON.stringify({
-					model: "swe-2",
+					model: "swe-2-high",
 					messages: [{ role: "user", content: "Read x" }],
 					tools: [{ name: "read", input_schema: { type: "object" } }],
 					tool_choice: choice,
@@ -128,7 +128,7 @@ describe("Devin provider", () => {
 				new Request(provider.buildUrl("/v1/messages", "", account), {
 					method: "POST",
 					body: JSON.stringify({
-						model: "swe-2",
+						model: "swe-2-high",
 						messages: [{ role: "user", content: "hello" }],
 						tools: [{ name: "read", input_schema: { type: "object" } }],
 						tool_choice: choice,
@@ -169,7 +169,7 @@ describe("Devin provider", () => {
 			new Request(provider.buildUrl("/v1/messages", "", account), {
 				method: "POST",
 				body: JSON.stringify({
-					model: "swe-2",
+					model: "swe-2-high",
 					messages: [{ role: "user", content: "hello" }],
 				}),
 			});
@@ -187,6 +187,46 @@ describe("Devin provider", () => {
 			).headers.get("content-type"),
 		).toBe("application/connect+proto");
 	});
+	it("sends the exact requested model id and rejects an absent or unknown one", async () => {
+		// Reasoning effort used to pick a variant within the SWE-2 family. It is a
+		// sampling parameter, not a model selector: the id on the wire is the id
+		// the client asked for, even when the account advertises other efforts.
+		class Family extends Client {
+			override async getAccount() {
+				const data = await super.getAccount();
+				const high = data.models[0];
+				if (!high) throw new Error("Missing fixture model");
+				data.models.push({ ...high, id: "swe-2-max", effort: "max" });
+				return data;
+			}
+		}
+		const provider = new DevinProvider(new Family());
+		const send = async (body: Record<string, unknown>) =>
+			provider.transformRequestBody(
+				new Request(provider.buildUrl("/v1/messages", "", account), {
+					method: "POST",
+					headers: { "content-type": "application/json" },
+					body: JSON.stringify({
+						messages: [{ role: "user", content: "hello" }],
+						...body,
+					}),
+				}),
+				account,
+			);
+		const sent = await send({ model: "swe-2-high", reasoning_effort: "max" });
+		expect(
+			fromBinary(
+				GetChatMessageRequestSchema,
+				gunzipSync(new Uint8Array(await sent.arrayBuffer()).subarray(5)),
+			).chatModelUid,
+		).toBe("swe-2-high");
+		expect((await send({})).headers.get("x-clankermux-synthetic-status")).toBe(
+			"400",
+		);
+		expect(await (await send({ model: "swe-2" })).text()).toContain(
+			"Unknown Devin model swe-2",
+		);
+	});
 	it("translates local tool history and schemas into a framed native request", async () => {
 		const provider = new DevinProvider(new Client());
 		const request = new Request(
@@ -195,7 +235,7 @@ describe("Devin provider", () => {
 				method: "POST",
 				headers: { "content-type": "application/json" },
 				body: JSON.stringify({
-					model: "swe-2",
+					model: "swe-2-high",
 					max_tokens: 1000,
 					stream: true,
 					system: "Be helpful",
@@ -275,7 +315,7 @@ describe("Devin provider", () => {
 				method: "POST",
 				headers: { "content-type": "application/json" },
 				body: JSON.stringify({
-					model: "swe-2",
+					model: "swe-2-high",
 					messages: [{ role: "user", content: "hello" }],
 				}),
 			},
@@ -299,7 +339,7 @@ describe("Devin provider", () => {
 		const result = await provider.transformRequestBody(
 			new Request(provider.buildUrl("/v1/messages", "", account), {
 				method: "POST",
-				body: JSON.stringify({ model: "swe-2", messages: [] }),
+				body: JSON.stringify({ model: "swe-2-high", messages: [] }),
 			}),
 			account,
 		);
@@ -323,7 +363,7 @@ it("carries confirmed session rejection only through local request provenance", 
 		new Request("https://example.test/v1/messages", {
 			method: "POST",
 			body: JSON.stringify({
-				model: "swe-2",
+				model: "swe-2-high",
 				messages: [{ role: "user", content: "hello" }],
 			}),
 		}),

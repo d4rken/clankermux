@@ -165,8 +165,6 @@ export {
 	codexAccountFitsRequest,
 	codexAccountFitsRequestUnmargined,
 	createCustomEndpointData,
-	DEFAULT_CODEX_MODEL_BY_FAMILY,
-	DEFAULT_QWEN_MODEL_BY_FAMILY,
 	estimateContextWindowTokens,
 	estimateRequestTokens,
 	FAMILY_PRIORITY,

@@ -1,6 +1,6 @@
 # Devin subscriptions and SWE-2
 
-ClankerMux supports Devin CLI session accounts through its Messages and Responses interfaces. The provider discovers the account's available models and resolves the `swe-2` alias to an enabled SWE-2 variant. Claude family requests map to that alias by default. The central Routing page can select a concrete discovered model, and account model permissions control which models may be sent. Devin aliases resolve to an enabled concrete model before the request’s routing decision is frozen. Adaptive model routing is not supported.
+ClankerMux supports Devin CLI session accounts through its Messages and Responses interfaces. The provider discovers the account's available models and sends the requested model ID exactly as it arrives. Nothing expands a family name: `swe-2` reaches Devin only if the account advertises an enabled model with that exact ID, and an unknown or disabled ID is an error. A Claude model ID reaches a Devin account only when a routing rule with a literal target names a discovered Devin model, and account model permissions must still allow that model. Reasoning effort is a sampling parameter and never selects a different variant. Adaptive model routing is not supported.
 
 ## Connect an account
 
@@ -12,7 +12,7 @@ Account cards show the authenticated email, account ID, plan, and organization n
 
 The separate local development helper, `bun scripts/devin-login.ts`, uses a loopback callback listener instead of the dashboard’s hosted-code flow and prints a browser link. It stores the result in ignored `.cache/devin-login/credentials.json` with mode `0600`. If the browser cannot reach the callback, save its full URL to a private local file and run `bun scripts/devin-login.ts --complete /path/to/callback-url.txt`. When your browser runs on another computer, forward the printed callback port over SSH (`ssh -N -L <port>:127.0.0.1:<port> <user>@<server>`) before opening the link. Keep that tunnel open until sign-in finishes. Do not paste session tokens, login codes, or callback URLs into chat, logs, or issues.
 
-After local sign-in, `bun scripts/devin-check.ts` reads plan and model metadata without inference. `bun scripts/devin-check.ts --smoke` makes two bounded SWE-2 requests to verify a tool-call roundtrip; it consumes a small amount of included quota and keeps quota protection enabled. To check another entitled model, add its discovered ID, for example `--smoke --model swe-1-6-slow` for the verified Free-account model.
+After local sign-in, `bun scripts/devin-check.ts` reads plan and model metadata without inference. `bun scripts/devin-check.ts --smoke --model <discovered ID>` makes two bounded requests to verify a tool-call roundtrip; it consumes a small amount of included quota and keeps quota protection enabled. The model ID is required and must be one the listing above reports as enabled, for example `--smoke --model swe-1-6-slow` for the verified Free-account model.
 
 ## Credential lifecycle
 

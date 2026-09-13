@@ -6,7 +6,7 @@ Routing rules replace active combos and per-account model mappings. Existing leg
 
 A client API key permits one account, a list of providers, or the ordinary unpinned pool. The first enabled rule matching both the key and requested model wins. Its pool intersects the key's destinations and any global/header account selection. Responses requests also exclude official Anthropic destinations. An empty intersection fails locally; no later rule or model fallback widens it.
 
-Targets are resolved once per request for each authorized account. Literal and requested-model rules terminate mapping. Default rules use the central provider defaults: Codex Fable/Mythos → `gpt-6-astra`, Opus → `gpt-5.6-sol`, Sonnet → `gpt-5.6-terra`, Haiku → `gpt-5.6-luna`; Qwen Claude families → `coder-model`; other models/providers retain the requested ID. Adapters preserve that target through format conversion. Retries and recovery waits retain the frozen route, and dispatch checks both current permission and the final serialized model.
+The target is resolved once per request. A literal rule is the only thing that can change a model ID; with no matching rule, or a rule that keeps the requested model, the client's ID goes upstream unchanged for every provider. Adapters preserve that target through format conversion. Retries and recovery waits retain the frozen route, and dispatch checks both current permission and the final serialized model.
 
 ## Account permissions
 

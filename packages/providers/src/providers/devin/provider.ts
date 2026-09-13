@@ -332,15 +332,13 @@ export class DevinProvider extends BaseProvider {
 						"Devin included quota is unavailable; verify the plan before enabling overage",
 					);
 			}
-			const requested = string(body.model) || "swe-2";
-			const effort =
-				string(record(body.output_config ?? {}).effort) ||
-				string(body.reasoning_effort);
-			const model = this.client.resolveModel(
-				info.models,
-				requested,
-				effort || undefined,
-			);
+			const requested = string(body.model);
+			if (!requested)
+				throw new DevinRpcError(
+					"invalid_argument",
+					"Devin requests require a model",
+				);
+			const model = this.client.resolveModel(info.models, requested);
 			// Full history is sent every turn; a fresh cascade prevents equal first prompts
 			// from binding unrelated users or conversations on the upstream service.
 			const cascade = randomUUID();
@@ -483,7 +481,10 @@ export class DevinProvider extends BaseProvider {
 		}
 		const evidence: { model: string | null } = { model: null };
 		const normalized = await convertDevinResponse(response, {
-			model: request.headers.get(DEVIN_UPSTREAM_MODEL) || "swe-2",
+			// Only the label on a converted response, and only when the stream
+			// itself never named a model. A missing header is a bug in the request
+			// path; say so rather than print a model id that may not have run.
+			model: request.headers.get(DEVIN_UPSTREAM_MODEL) ?? "unknown",
 			stream: request.headers.get("x-clankermux-request-stream") === "true",
 			signal: request.signal,
 			onReportedModel: (model) => {

@@ -143,6 +143,9 @@ describe("routing storage", () => {
 			finished_at: null,
 			status: null,
 			error: null,
+			reasoning_effort_requested: null,
+			reasoning_effort_effective: null,
+			reasoning_effort_reason: null,
 		});
 		expect(await repo.listAttempts("request")).toHaveLength(1);
 		expect(
@@ -157,6 +160,74 @@ describe("routing storage", () => {
 		expect(
 			db.query("SELECT COUNT(*) AS n FROM routing_snapshots").get(),
 		).toEqual({ n: 0 });
+	});
+	it("round-trips each reasoning-effort shape an attempt can carry", async () => {
+		db.run(
+			"INSERT INTO accounts(id,name,provider,refresh_token,created_at) VALUES('a','A','codex','',0)",
+		);
+		const base = {
+			request_id: "request",
+			rule_id: null,
+			route_snapshot: "{}",
+			account_id: "a",
+			provider: "codex",
+			requested_model: "claude-fable-5-1",
+			resolved_model: "gpt-6-astra",
+			outgoing_model: "gpt-6-astra",
+			reported_model: null,
+			kind: "upstream_send" as const,
+			finished_at: null,
+			status: null,
+			error: null,
+		};
+		// Adapted, unchanged, proxy-supplied and absent are four distinct rows,
+		// and the read path has to keep them apart.
+		await repo.recordAttempt({
+			...base,
+			id: "adapted",
+			started_at: 10,
+			reasoning_effort_requested: "minimal",
+			reasoning_effort_effective: "low",
+			reasoning_effort_reason: "chatgpt_backend_clamp",
+		});
+		await repo.recordAttempt({
+			...base,
+			id: "unchanged",
+			started_at: 11,
+			reasoning_effort_requested: "high",
+			reasoning_effort_effective: "high",
+			reasoning_effort_reason: null,
+		});
+		await repo.recordAttempt({
+			...base,
+			id: "defaulted",
+			started_at: 12,
+			reasoning_effort_requested: null,
+			reasoning_effort_effective: "medium",
+			reasoning_effort_reason: "proxy_default",
+		});
+		await repo.recordAttempt({
+			...base,
+			id: "absent",
+			started_at: 13,
+			reasoning_effort_requested: null,
+			reasoning_effort_effective: null,
+			reasoning_effort_reason: null,
+		});
+
+		expect(
+			(await repo.listAttempts("request")).map((attempt) => [
+				attempt.id,
+				attempt.reasoning_effort_requested,
+				attempt.reasoning_effort_effective,
+				attempt.reasoning_effort_reason,
+			]),
+		).toEqual([
+			["adapted", "minimal", "low", "chatgpt_backend_clamp"],
+			["unchanged", "high", "high", null],
+			["defaulted", null, "medium", "proxy_default"],
+			["absent", null, null, null],
+		]);
 	});
 	it("manual additions preserve unknown discovery and explicit empty intent is distinct", async () => {
 		const p = await repo.setManualModels("a", "scope", ["manual"]);

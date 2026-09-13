@@ -35,8 +35,8 @@ export function installGateRoute(
 					{
 						upstreamModel:
 							targets.get(a.id) ??
-							resolveRoutingTarget(null, a.provider, model).upstreamModel,
-						targetSource: targets.has(a.id) ? "literal" : "provider_default",
+							resolveRoutingTarget(null, model).upstreamModel,
+						targetSource: targets.has(a.id) ? "literal" : "identity",
 						provider: a.provider,
 						scope: modelPermissionScope(a),
 					},
@@ -61,8 +61,7 @@ export function installGatePermissions(
 			generation: 1,
 			completeness: "known-complete",
 			discovered_ids: [
-				targets.get(a.id) ??
-					resolveRoutingTarget(null, a.provider, model).upstreamModel,
+				targets.get(a.id) ?? resolveRoutingTarget(null, model).upstreamModel,
 			],
 			manual_ids: [],
 		}),

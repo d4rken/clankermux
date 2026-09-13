@@ -55,4 +55,14 @@ export interface RoutingAttempt {
 	finished_at: number | null;
 	status: number | null;
 	error: string | null;
+	/**
+	 * What this dispatch did to the client's reasoning effort — see
+	 * {@link ReasoningEffortAdaptation} for the absent/unchanged/adapted
+	 * contract. Per attempt, because two attempts of one request can target
+	 * backends with different effort vocabularies. NULL on every attempt that
+	 * serialized no effort, and on every row written before the columns existed.
+	 */
+	reasoning_effort_requested: string | null;
+	reasoning_effort_effective: string | null;
+	reasoning_effort_reason: string | null;
 }

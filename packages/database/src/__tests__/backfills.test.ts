@@ -159,3 +159,66 @@ describe("auto-pause-on-overage default backfill", () => {
 		}
 	});
 });
+
+const ROUTING_MARKER = "backfill:routing-default-target-kind";
+
+function insertRule(db: Database, id: string, targetKind: string): void {
+	db.run(
+		`INSERT INTO routing_rules (
+			id, name, enabled, position, match_api_key_id, match_model_kind,
+			match_model_value, pool_kind, pool_provider, pool_account_ids,
+			target_kind, target_model
+		) VALUES (?, ?, 1, ?, NULL, 'any', NULL, 'inherit', NULL, NULL, ?, NULL)`,
+		[id, id, id.length, targetKind],
+	);
+}
+
+function targetKind(db: Database, id: string): string {
+	return (
+		db
+			.prepare(`SELECT target_kind AS v FROM routing_rules WHERE id = ?`)
+			.get(id) as {
+			v: string;
+		}
+	).v;
+}
+
+describe("retired routing target_kind backfill", () => {
+	it("rewrites default to requested once and records what it touched", () => {
+		const db = new Database(dbPath, { create: true });
+		try {
+			ensureSchema(db);
+			insertRule(db, "old", "default");
+			insertRule(db, "keeper", "requested");
+
+			runOneShotBackfills(db);
+
+			expect(targetKind(db, "old")).toBe("requested");
+			expect(targetKind(db, "keeper")).toBe("requested");
+			const row = db
+				.prepare(`SELECT config FROM strategies WHERE name = ?`)
+				.get(ROUTING_MARKER) as { config: string } | null;
+			expect(JSON.parse(row?.config ?? "{}").rulesUpdated).toBe(1);
+		} finally {
+			db.close();
+		}
+	});
+
+	it("does not re-apply on a later run", () => {
+		// A rule written as `default` after the pass claimed its marker is the
+		// operator's own row, not a leftover: the validator normalizes it on read
+		// and write, and a second pass must not rewrite data behind their back.
+		const db = new Database(dbPath, { create: true });
+		try {
+			ensureSchema(db);
+			runOneShotBackfills(db);
+			insertRule(db, "later", "default");
+
+			runOneShotBackfills(db);
+
+			expect(targetKind(db, "later")).toBe("default");
+		} finally {
+			db.close();
+		}
+	});
+});

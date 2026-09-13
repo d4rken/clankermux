@@ -11,7 +11,7 @@ export function newRoutingRule(position: number): RoutingRule {
 		pool_kind: "inherit",
 		pool_provider: null,
 		pool_account_ids: null,
-		target_kind: "default",
+		target_kind: "requested",
 		target_model: null,
 	};
 }

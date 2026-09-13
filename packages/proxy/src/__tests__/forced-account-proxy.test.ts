@@ -9,9 +9,15 @@ import {
 } from "bun:test";
 import { devinClient } from "@clankermux/providers";
 import type { Account } from "@clankermux/types";
+import {
+	getFamilyWeeklyExhaustedUntil,
+	recordFamilyWeeklyExhausted,
+	resetFamilyWeeklyMemoForTests,
+} from "../family-weekly-memo";
 import type { ProxyContext } from "../handlers";
 import { setForcedAccount } from "../handlers";
 import { devinInfo, devinReply } from "./devin-fixtures";
+import { configureLiteralRoute } from "./fixtures/routing-harness";
 
 mock.module("../inline-worker", () => ({
 	EMBEDDED_WORKER_CODE: "",
@@ -279,11 +285,13 @@ describe("force-account proxy override", () => {
 	beforeEach(() => {
 		originalFetch = globalThis.fetch;
 		setForcedAccount(null);
+		resetFamilyWeeklyMemoForTests();
 	});
 
 	afterEach(() => {
 		globalThis.fetch = originalFetch;
 		setForcedAccount(null);
+		resetFamilyWeeklyMemoForTests();
 	});
 
 	it("Codex-CLI floor OVERRIDES a global force to a Claude account (never routes there)", async () => {
@@ -331,6 +339,55 @@ describe("force-account proxy override", () => {
 		const resp = await callHandleProxy(req, new URL(req.url), ctx);
 
 		expect(resp.status).toBe(200);
+	});
+
+	it("a forced 2xx clears the RESOLVED family's memo, not the requested one", async () => {
+		// A literal routing rule sends a sonnet request to the fable family. The
+		// evidence a forced 2xx carries is about the family the account actually
+		// served, so the requested family's memo must survive untouched.
+		const forced = makeAccount({
+			id: "forced-literal",
+			name: "Forced-Literal",
+			provider: "anthropic",
+		});
+		const { ctx } = makeContext([forced], { providerName: "anthropic" });
+		await configureLiteralRoute(
+			ctx,
+			"claude-sonnet-4-5",
+			forced.id,
+			"claude-fable-5",
+		);
+		setForcedAccount(forced.id);
+		globalThis.fetch = mock(async () => jsonResponse({ ok: true }, 200));
+
+		// Recorded BEFORE the request starts, so the observedAt ordering guard in
+		// clearFamilyWeeklyExhausted cannot be what keeps an entry alive.
+		const resetAt = Date.now() + 4 * 3_600_000;
+		recordFamilyWeeklyExhausted(
+			forced.id,
+			"fable",
+			resetAt,
+			Date.now() - 60_000,
+		);
+		recordFamilyWeeklyExhausted(
+			forced.id,
+			"sonnet",
+			resetAt,
+			Date.now() - 60_000,
+		);
+
+		const response = await callHandleProxy(
+			makeRequest(),
+			new URL("https://proxy.local/v1/messages"),
+			ctx,
+		);
+		expect(response.status).toBe(200);
+
+		const now = Date.now();
+		expect(getFamilyWeeklyExhaustedUntil(forced.id, "fable", now)).toBeNull();
+		expect(getFamilyWeeklyExhaustedUntil(forced.id, "sonnet", now)).toBe(
+			resetAt,
+		);
 	});
 
 	it("returns the forced account's 429 as-is with NO failover to a second healthy account", async () => {

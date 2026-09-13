@@ -19,7 +19,7 @@ const rule = (patch: Partial<RoutingRule> = {}): RoutingRule => ({
 	pool_kind: "inherit",
 	pool_provider: null,
 	pool_account_ids: null,
-	target_kind: "default",
+	target_kind: "requested",
 	target_model: null,
 	...patch,
 });
@@ -81,31 +81,26 @@ describe("routing policy", () => {
 		);
 		expect(matchRoutingRule(rows, "key", "claude-sonnet-5")?.id).toBe("late");
 	});
-	it("resolves provider defaults per candidate; literal/requested terminate resolution", () => {
-		expect(resolveRoutingTarget(null, "codex", "claude-fable-5-1")).toEqual({
-			upstreamModel: "gpt-6-astra",
-			targetSource: "provider_default",
-		});
-		expect(
-			resolveRoutingTarget(null, "qwen", "claude-sonnet-5").upstreamModel,
-		).toBe("coder-model");
-		expect(
-			resolveRoutingTarget(null, "openrouter", "claude-sonnet-5").upstreamModel,
-		).toBe("claude-sonnet-5");
-		expect(
-			resolveRoutingTarget(
-				rule({ target_kind: "literal", target_model: "claude-sonnet-5" }),
-				"codex",
-				"claude-fable-5-1",
-			).upstreamModel,
-		).toBe("claude-sonnet-5");
+	it("sends the requested model unchanged without a literal rule", () => {
+		// No rule at all, and the retired-and-normalized "requested" action, both
+		// resolve to identity for every provider: nothing implicit rewrites a model.
+		for (const model of ["claude-fable-5-1", "claude-sonnet-5", "gpt-6-astra"])
+			for (const winning of [null, rule({ target_kind: "requested" })])
+				expect(resolveRoutingTarget(winning, model)).toEqual({
+					upstreamModel: model,
+					targetSource: winning ? "requested" : "identity",
+				});
+	});
+	it("changes the model only through a literal rule", () => {
 		expect(
 			resolveRoutingTarget(
-				rule({ target_kind: "requested" }),
-				"codex",
+				rule({ target_kind: "literal", target_model: "gpt-6-astra" }),
 				"claude-fable-5-1",
-			).upstreamModel,
-		).toBe("claude-fable-5-1");
+			),
+		).toEqual({ upstreamModel: "gpt-6-astra", targetSource: "literal" });
+		expect(() =>
+			resolveRoutingTarget(rule({ target_kind: "literal" }), "claude-sonnet-5"),
+		).toThrow("Literal route requires a target model");
 	});
 	it("only asserts an unknown exact account/model pair through the winning literal account rule", () => {
 		const assertion = rule({
@@ -142,6 +137,17 @@ describe("routing policy", () => {
 	});
 	it("validates tagged fields, bounded strings, and explicit family names", () => {
 		expect(validateRoutingRule(rule())).toEqual(rule());
+		// The retired "default" action is normalized on the way through, so it
+		// cannot be reintroduced by a client that still sends it. The validator
+		// runs on both the read and the write path.
+		expect(validateRoutingRule(rule({ target_kind: "default" }))).toEqual(
+			rule({ target_kind: "requested" }),
+		);
+		expect(() =>
+			validateRoutingRule(
+				rule({ target_kind: "default", target_model: "gpt-6-astra" }),
+			),
+		).toThrow("Target model");
 		for (const bad of [
 			rule({ pool_kind: "accounts", pool_account_ids: [] }),
 			rule({ pool_kind: "provider" }),
@@ -157,31 +163,25 @@ describe("routing policy", () => {
 	});
 });
 
-it("uses Devin defaults only for anchored Claude families and preserves explicit targets", () => {
-	for (const id of [
+it("never rewrites a model id, including the retired Devin alias", () => {
+	for (const model of [
 		"claude-opus-4-6",
 		"claude-sonnet-4-5",
 		"claude-haiku-4-5",
 		"claude-fable-5",
 		"claude-mythos-5",
+		"swe-2",
+		"swe-2-high",
+		"gpt-5.6-terra",
+		"qwen3-coder-plus",
 	])
-		expect(resolveRoutingTarget(null, "devin", id)).toEqual({
-			upstreamModel: "swe-2",
-			targetSource: "provider_default",
+		expect(resolveRoutingTarget(null, model)).toEqual({
+			upstreamModel: model,
+			targetSource: "identity",
 		});
-	for (const id of ["swe-2-high", "my-sonnet-model"])
-		expect(resolveRoutingTarget(null, "devin", id).upstreamModel).toBe(id);
-	expect(
-		resolveRoutingTarget(
-			rule({ target_kind: "requested" }),
-			"devin",
-			"claude-sonnet-4-5",
-		).upstreamModel,
-	).toBe("claude-sonnet-4-5");
 	expect(
 		resolveRoutingTarget(
 			rule({ target_kind: "literal", target_model: "swe-1.6" }),
-			"devin",
 			"claude-opus-4-6",
 		).upstreamModel,
 	).toBe("swe-1.6");

@@ -640,21 +640,21 @@ describe("zero-accounts terminal recorder labels", () => {
 
 	it("context-window size-400 terminal records NOTHING", async () => {
 		// gpt-5.5's window is smaller than the estimate even UNMARGINED, so the
-		// last-resort relaxation has no candidate and the size verdict stands.
+		// last-resort relaxation has no candidate and the size verdict stands. The
+		// request names that model directly: the gate scores what will be sent.
 		const accId = uniqueId("codex");
 		const codex = makeAccount({
 			id: accId,
 			name: "Codex-me",
 			provider: "codex",
 			api_key: null,
-			model_mappings: JSON.stringify({ opus: "gpt-5.5" }),
 		});
 		const { ctx, recordedErrors } = makeContext([codex], {
 			providerName: "codex",
 		});
 
 		const res = await callHandleProxy(
-			makeLargeRequest("claude-opus-4-7", 350_000),
+			makeLargeRequest("gpt-5.5", 350_000),
 			new URL("https://proxy.local/v1/messages"),
 			ctx,
 		);

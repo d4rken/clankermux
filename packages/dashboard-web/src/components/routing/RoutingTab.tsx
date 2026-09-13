@@ -92,24 +92,21 @@ export function RoutingTab() {
 			</div>
 			<div className="rounded-lg border p-4 space-y-2 text-sm">
 				<p>
-					Without a matching rule, API key destinations and provider defaults
-					apply.
+					Without a matching rule, API key destinations apply and the requested
+					model is sent unchanged.
 				</p>
 				<p>
-					Codex defaults: Fable / Mythos → gpt-6-astra; Opus → gpt-5.6-sol;
-					Sonnet → gpt-5.6-terra; Haiku → gpt-5.6-luna.
+					Nothing else rewrites a model ID. To send a different model, add a
+					rule with a literal target.
 				</p>
-				<p>
-					Qwen uses coder-model for Claude families. Other providers keep the
-					requested model. Each account must permit the resolved model.
-				</p>
+				<p>Each account must permit the model it is sent.</p>
 			</div>
 			{rules.isPending ? (
 				<p>Loading routing rules…</p>
 			) : rules.error ? (
 				<p role="alert">{rules.error.message}</p>
 			) : rows.length === 0 ? (
-				<p>No routing rules yet. The defaults above are active.</p>
+				<p>No routing rules yet. Requested models are sent unchanged.</p>
 			) : (
 				<ol className="space-y-3">
 					{rows.map((r, i) => (
@@ -147,9 +144,7 @@ export function RoutingTab() {
 									→{" "}
 									{r.target_kind === "literal"
 										? r.target_model
-										: r.target_kind === "requested"
-											? "Requested model"
-											: "Provider default"}
+										: "Requested model"}
 								</p>
 							</div>
 							<Button
@@ -380,7 +375,6 @@ export function RoutingTab() {
 										)
 									}
 								>
-									<option value="default">Provider default</option>
 									<option value="literal">Literal model ID</option>
 									<option value="requested">Keep requested model</option>
 								</select>

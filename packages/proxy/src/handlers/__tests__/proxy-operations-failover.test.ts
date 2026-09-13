@@ -423,6 +423,57 @@ describe("proxyWithAccount — 429 failover", () => {
 
 		expect(result).toBeNull();
 	});
+
+	// The definitive-model-rejection branch takes 400/403/404 only. A 429 whose
+	// envelope also reads as a model refusal must still take the rate-limit
+	// ladder, cooldown and all, or the account is failed over without ever being
+	// marked limited.
+	it("keeps a 429 on the rate-limit path when its envelope also names a model rejection", async () => {
+		globalThis.fetch = mock(async () =>
+			jsonResponse(
+				{
+					error: {
+						code: "model_access_denied",
+						message: "Your account does not have access to model qwen",
+					},
+				},
+				429,
+			),
+		);
+
+		const bodyBuffer = makeRequestBody();
+		const req = makeRequest(bodyBuffer);
+		const ctx = makeProxyContext();
+		const account = makeAccount();
+		const outcomes: ProxyAttemptOutcome[] = [];
+		const result = await proxyWithAccount(
+			req,
+			new URL("https://proxy.local/v1/messages"),
+			account,
+			makeRequestMeta(),
+			bodyBuffer,
+			() => undefined,
+			0,
+			ctx,
+			undefined,
+			undefined,
+			undefined,
+			undefined,
+			false,
+			{ onOutcome: (outcome) => outcomes.push(outcome) },
+		);
+
+		expect(result).toBeNull();
+		expect(outcomes).toEqual([
+			expect.objectContaining({
+				kind: "hard_429",
+				cooldownUntil: expect.any(Number),
+			}),
+		]);
+		expect(account.rate_limited_until).toBeGreaterThan(Date.now());
+		expect(account.rate_limited_reason).toBe("model_fallback_429");
+		expect(globalThis.fetch).toHaveBeenCalledTimes(1);
+	});
 });
 
 function makeProxyContextWithAsyncExec(): ProxyContext {

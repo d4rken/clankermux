@@ -24,6 +24,7 @@ const log = new Logger("DatabaseBackfills");
 export function runOneShotBackfills(db: Database): void {
 	backfillAutoPauseOverageDefault(db);
 	seedAccountTierHistory(db);
+	retireDefaultRoutingTargetKind(db);
 }
 
 const AUTO_PAUSE_OVERAGE_MARKER = "backfill:auto-pause-overage-default";
@@ -148,5 +149,59 @@ function seedAccountTierHistory(db: Database): void {
 
 	log.info(
 		`Backfill ${ACCOUNT_TIER_HISTORY_SEED_MARKER}: seeded tier history for ${seeded} account(s)`,
+	);
+}
+
+const ROUTING_TARGET_KIND_MARKER = "backfill:routing-default-target-kind";
+
+/**
+ * Rewrite the retired `routing_rules.target_kind = 'default'` action to
+ * `'requested'`, which is now exactly what it means.
+ *
+ * The CHECK constraint already permits both values, so this is data only: no
+ * column change and no table rebuild. The rule validator normalizes the same
+ * way on both the read and the write path, so an older API client cannot
+ * reintroduce a `default` row after this pass.
+ *
+ * One-shot for the usual reason, even though a re-run would currently be
+ * harmless: nothing here may re-derive operator-owned rule state every start.
+ */
+function retireDefaultRoutingTargetKind(db: Database): void {
+	let claimed = false;
+	let updated = 0;
+	const tx = db.transaction(() => {
+		// Marker first, inside the transaction — see the rationale on
+		// backfillAutoPauseOverageDefault.
+		claimed =
+			db
+				.prepare(
+					`INSERT OR IGNORE INTO strategies (name, config, updated_at)
+					 VALUES (?, ?, ?)`,
+				)
+				.run(ROUTING_TARGET_KIND_MARKER, "{}", Date.now()).changes > 0;
+		if (!claimed) return;
+
+		updated = db
+			.prepare(
+				`UPDATE routing_rules SET target_kind = 'requested'
+				 WHERE target_kind = 'default'`,
+			)
+			.run().changes;
+
+		const now = Date.now();
+		db.prepare(
+			`UPDATE strategies SET config = ?, updated_at = ? WHERE name = ?`,
+		).run(
+			JSON.stringify({ rulesUpdated: updated, appliedAt: now }),
+			now,
+			ROUTING_TARGET_KIND_MARKER,
+		);
+	});
+	tx();
+
+	if (!claimed) return;
+
+	log.info(
+		`Backfill ${ROUTING_TARGET_KIND_MARKER}: retired the default target action on ${updated} routing rule(s)`,
 	);
 }

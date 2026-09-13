@@ -152,6 +152,52 @@ it("does not suppress provider routing restrictions even when their prose resemb
 	).toBe(true);
 });
 
+it("reads a parameter complaint as a parameter complaint, however it mentions the model", () => {
+	// The subject is the parameter. Reading it as a model rejection costs the
+	// client the one message that says which parameter to drop, and replaces it
+	// with a pool-wide refusal of a model every account can serve.
+	const message =
+		"The parameter 'temperature' is not supported with this model.";
+	expect(
+		isDefinitiveModelError(
+			{ error: { code: "unsupported_parameter", message } },
+			400,
+		),
+	).toBe(false);
+	// Same envelope with no code at all: the prose alone must not carry it.
+	expect(isDefinitiveModelError({ error: { message } }, 400)).toBe(false);
+	expect(
+		isDefinitiveModelError(
+			{
+				error: {
+					code: "unsupported_value",
+					message:
+						"Unsupported value: 'reasoning.effort' does not exist for this model",
+				},
+			},
+			400,
+		),
+	).toBe(false);
+	// An explicit model code still wins: the two sets do not overlap, and a
+	// backend that names one is not guessing.
+	expect(
+		isDefinitiveModelError(
+			{ error: { code: "model_not_found", message } },
+			400,
+		),
+	).toBe(true);
+});
+
+it("still recognizes the rejections where the model is the subject", () => {
+	for (const message of [
+		"The model `gpt-5.9` does not exist or you do not have access to it.",
+		"model claude-fable-9 not found",
+		"This model is not available for your plan.",
+		"You do not have access to the model gpt-6-astra.",
+	])
+		expect(isDefinitiveModelError({ error: { message } }, 404)).toBe(true);
+});
+
 describe("protocol completion before transport close", () => {
 	const success =
 		'data: {"type":"response.completed","response":{"model":"astra","status":"completed"}}\n\n';
