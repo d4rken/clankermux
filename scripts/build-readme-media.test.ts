@@ -147,12 +147,12 @@ describe("README media", () => {
 		]);
 	});
 
-	it("matches what is committed in docs/media", () => {
+	it("matches what is committed in .assets", () => {
 		// The files are committed rather than built on demand, because GitHub
 		// renders the README straight from the repo. A stale commit means the
 		// published page disagrees with this script.
 		for (const f of files) {
-			const onDisk = readFileSync(join(ROOT, "docs", "media", f.name), "utf8");
+			const onDisk = readFileSync(join(ROOT, ".assets", f.name), "utf8");
 			expect(`${f.name}: up to date`).toBe(
 				onDisk === f.svg ? `${f.name}: up to date` : `${f.name}: STALE`,
 			);
@@ -338,29 +338,29 @@ describe("README media", () => {
 		const readme = readFileSync(join(ROOT, "README.md"), "utf8");
 		const blocks = [
 			...readme.matchAll(
-				/<picture><source media="\(prefers-color-scheme: dark\)" srcset="docs\/media\/banner-dark\.svg"><img src="docs\/media\/banner-light\.svg"([^>]*)><\/picture>/g,
+				/<picture><source media="\(prefers-color-scheme: dark\)" srcset="\.assets\/banner-dark\.svg"><img src="\.assets\/banner-light\.svg"([^>]*)><\/picture>/g,
 			),
 		];
 		expect(blocks).toHaveLength(1);
-		expect(existsSync(join(ROOT, "docs", "media", "banner-dark.svg"))).toBe(true);
-		expect(existsSync(join(ROOT, "docs", "media", "banner-light.svg"))).toBe(true);
+		expect(existsSync(join(ROOT, ".assets", "banner-dark.svg"))).toBe(true);
+		expect(existsSync(join(ROOT, ".assets", "banner-light.svg"))).toBe(true);
 
 		// That <picture> accounts for both mentions of the banner: one srcset, one
 		// src. A third would be a reference outside it.
-		expect(readme.match(/docs\/media\/banner-/g) ?? []).toHaveLength(2);
+		expect(readme.match(/\.assets\/banner-/g) ?? []).toHaveLength(2);
 
 		// The standalone mark is still emitted and still shares the routing-core
 		// geometry checked above, but the README no longer places it: the banner
 		// draws its own copy. A logo reference reappearing here means the heading
 		// went back to an inline mark beside Markdown text, which is the
 		// baseline-alignment problem the banner exists to remove.
-		expect(readme.match(/docs\/media\/logo-/g) ?? []).toHaveLength(0);
+		expect(readme.match(/\.assets\/logo-/g) ?? []).toHaveLength(0);
 	});
 
 	it("references every captured screenshot as a light/dark pair with alt text", () => {
 		// The captures come from `scripts/capture-readme-screenshots.sh`, which
 		// nothing here can run — so this is the only check that the README and
-		// docs/media agree at all. Without it a renamed route, a half-finished
+		// .assets agree at all. Without it a renamed route, a half-finished
 		// capture run, or a dropped dark variant reaches a published page as a
 		// broken image.
 		const readme = readFileSync(join(ROOT, "README.md"), "utf8");
@@ -368,7 +368,7 @@ describe("README media", () => {
 
 		for (const name of names) {
 			for (const theme of ["light", "dark"]) {
-				const file = join(ROOT, "docs", "media", `${name}-${theme}.png`);
+				const file = join(ROOT, ".assets", `${name}-${theme}.png`);
 				expect(`${name}-${theme}.png: ${existsSync(file)}`).toBe(
 					`${name}-${theme}.png: true`,
 				);
@@ -376,7 +376,7 @@ describe("README media", () => {
 
 			const block = readme.match(
 				new RegExp(
-					`<picture><source media="\\(prefers-color-scheme: dark\\)" srcset="docs/media/${name}-dark\\.png"><img src="docs/media/${name}-light\\.png"([^>]*)></picture>`,
+					`<picture><source media="\\(prefers-color-scheme: dark\\)" srcset="\\.assets/${name}-dark\\.png"><img src="\\.assets/${name}-light\\.png"([^>]*)></picture>`,
 				),
 			);
 			expect(`${name}: referenced`).toBe(
@@ -392,7 +392,7 @@ describe("README media", () => {
 
 		// No stray references to figures that no longer exist.
 		const referenced = [
-			...readme.matchAll(/docs\/media\/([a-z-]+)\.png/g),
+			...readme.matchAll(/\.assets\/([a-z-]+)\.png/g),
 		].map((m) => m[1]);
 		const expected = names.flatMap((n) => [`${n}-light`, `${n}-dark`]);
 		expect([...new Set(referenced)].sort()).toEqual(expected.sort());
@@ -407,7 +407,7 @@ describe("README media", () => {
 		// SVG draws.
 		const readme = readFileSync(join(ROOT, "README.md"), "utf8");
 		const tags = [
-			...readme.matchAll(/<img src="docs\/media\/banner-[^"]+"[^>]*>/g),
+			...readme.matchAll(/<img src="\.assets\/banner-[^"]+"[^>]*>/g),
 		].map((m) => m[0]);
 		expect(tags).toHaveLength(1);
 		// The leading \s is load-bearing: without it `data-alt="..."` satisfies the

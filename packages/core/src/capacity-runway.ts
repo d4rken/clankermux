@@ -1001,11 +1001,12 @@ export function computeCapacityRunway(
 		 *
 		 * A narrower set expresses a SCOPED counterfactual — one model family's
 		 * load changing while the rest of the account's load does not. That is a
-		 * bound rather than a measurement, because the share of account-wide burn
-		 * belonging to the scoped workload is not derivable from recorded data
-		 * (`docs/ledger-burn-feasibility.md`); see `workload-headroom.ts`, which is
-		 * the only caller that passes it and carries the argument for which end of
-		 * the share range each side must assume.
+		 * bound rather than a measurement: the share of account-wide burn belonging
+		 * to the scoped workload is not derivable from recorded data — the
+		 * token-to-percent relation measured indistinguishable from a future-token
+		 * placebo, and the resolution it needed, finer than the provider's 1% grid,
+		 * is unmet. See `workload-headroom.ts`, the only caller that passes this, for
+		 * which end of the share range each side must assume.
 		 *
 		 * The BASELINE scan is unaffected either way: it runs at pace 1, where no
 		 * window is scaled and the set cannot change the outcome.

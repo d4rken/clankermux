@@ -16,8 +16,7 @@ import type {
  *
  * This function turns that scan into a display decision. It is a pure
  * predicate so that the redistribution backtest can score EXACTLY the lines a
- * surface would show (`## Failover line` in
- * `docs/prediction-backtest-redistribution.md`, rule `FAILOVER_LINE_RULE` in
+ * surface would show (rule `FAILOVER_LINE_RULE` in
  * `./redistribution-backtest`), and so that a surface, if one ever attaches
  * the result, shows exactly the lines that were scored. Nothing else may
  * decide when the line appears.

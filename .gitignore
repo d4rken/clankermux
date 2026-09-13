@@ -48,5 +48,4 @@ test_*.sh
 *.db-shm
 .gitnexus
 .worktrees/
-docs/superpowers/
 packages/database/src/inline-integrity-check-worker.ts

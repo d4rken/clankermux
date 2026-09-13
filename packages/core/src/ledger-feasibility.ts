@@ -180,11 +180,10 @@ export const ERA_BOOTSTRAP_ITERATIONS = 1000;
 /**
  * Groups that are excluded from the study outright, with the reason.
  *
- * Codex's five-hour window was retired by OpenAI on 2026-07-12. The committed
- * prediction backtest baseline (`docs/prediction-backtest-baseline.md`) records
- * what the column does now: `five_hour_reset` moves forward on every poll while
- * the percent stays 0, so each poll forms its own one-sample window. There is
- * no quota being consumed to correlate tokens against.
+ * Codex's five-hour window was retired by OpenAI on 2026-07-12. What the column
+ * does now: `five_hour_reset` moves forward on every poll while the percent
+ * stays 0, so each poll forms its own one-sample window. There is no quota
+ * being consumed to correlate tokens against.
  */
 export const EXCLUDED_GROUPS: readonly {
 	provider: string;
@@ -195,7 +194,7 @@ export const EXCLUDED_GROUPS: readonly {
 		provider: "codex",
 		windowKind: "five_hour",
 		reason:
-			"OpenAI retired the Codex 5-hour window on 2026-07-12; the stored `five_hour_reset` advances on every poll while the percent stays 0, so each poll forms its own one-sample window (data-quality note, docs/prediction-backtest-baseline.md). There is no consumed quota to correlate tokens against.",
+			"OpenAI retired the Codex 5-hour window on 2026-07-12; the stored `five_hour_reset` advances on every poll while the percent stays 0, so each poll forms its own one-sample window. There is no consumed quota to correlate tokens against.",
 	},
 ];
 

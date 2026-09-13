@@ -11,7 +11,7 @@
   synthetic database in a network namespace and photographs it, see
   scripts/readme-media/.
 -->
-<h1><picture><source media="(prefers-color-scheme: dark)" srcset="docs/media/banner-dark.svg"><img src="docs/media/banner-light.svg" width="400" alt="ClankerMux: a self-hosted gateway for coding agents" /></picture></h1>
+<h1><picture><source media="(prefers-color-scheme: dark)" srcset=".assets/banner-dark.svg"><img src=".assets/banner-light.svg" width="400" alt="ClankerMux: a self-hosted gateway for coding agents" /></picture></h1>
 
 [![CI](https://github.com/d4rken/clankermux/actions/workflows/ci.yml/badge.svg)](https://github.com/d4rken/clankermux/actions/workflows/ci.yml)
 [![Bun](https://img.shields.io/badge/runtime-Bun%20%E2%89%A51.4.0-000000?logo=bun&logoColor=white)](https://bun.sh)
@@ -26,8 +26,7 @@ client what each can reach, and shows you how much quota is left.
 
 * **Harnesses**: Claude Code, Codex, OpenCode, Pi Agent, Oh My Pi. Two
   endpoints: `/wire/anthropic` for the Messages API, `/wire/openai` for
-  Responses and
-  [Chat Completions](docs/chat-completions-implementation-plan.md).
+  Responses and Chat Completions.
 * **Providers**: Anthropic and Codex OAuth logins, Claude and OpenAI API keys,
   OpenRouter, Ollama, and other compatible endpoints. Experimental ones are
   marked in the dashboard.
@@ -48,10 +47,10 @@ client what each can reach, and shows you how much quota is left.
 
 <table>
 <tr>
-<td width="25%"><a href="docs/media/overview-dark.png"><picture><source media="(prefers-color-scheme: dark)" srcset="docs/media/overview-dark.png"><img src="docs/media/overview-light.png" width="100%" alt="Overview: a Live Activity strip plotting the last five minutes of requests by project, coloured by model, above tiles for 5-hour and 7-day pool capacity and quota runway, then request-volume, model, API-key and project usage charts." /></picture></a></td>
-<td width="25%"><a href="docs/media/clients-dark.png"><picture><source media="(prefers-color-scheme: dark)" srcset="docs/media/clients-dark.png"><img src="docs/media/clients-light.png" width="100%" alt="Clients: a row per client installation, each naming the application it is configured for and the last eight characters of its key, the upstream accounts or providers it may reach, how many models its Anthropic, OpenAI and Codex catalogues advertise, how long ago it last sent a request, and buttons to reconfigure it or copy its setup instructions." /></picture></a></td>
-<td width="25%"><a href="docs/media/limits-dark.png"><picture><source media="(prefers-color-scheme: dark)" srcset="docs/media/limits-dark.png"><img src="docs/media/limits-light.png" width="100%" alt="Usage: pooled 5-hour and 7-day quota with next checkpoints and exhaustion warnings, a quota runway estimate, and per-account utilization bars carrying burn-rate projections against each window's reset, and the month's ledger spend with its amortized run rate above the payments history." /></picture></a></td>
-<td width="25%"><a href="docs/media/routing-dark.png"><picture><source media="(prefers-color-scheme: dark)" srcset="docs/media/routing-dark.png"><img src="docs/media/routing-light.png" width="100%" alt="Routing: a numbered list of rules evaluated in order, the first enabled rule matching the API key and the requested model winning. It holds one client's alias rewriting a model id onto a named account, model-family rules restricting Opus and Sonnet to particular accounts, a rule pinning one model to a provider, and a disabled rule." /></picture></a></td>
+<td width="25%"><a href=".assets/overview-dark.png"><picture><source media="(prefers-color-scheme: dark)" srcset=".assets/overview-dark.png"><img src=".assets/overview-light.png" width="100%" alt="Overview: a Live Activity strip plotting the last five minutes of requests by project, coloured by model, above tiles for 5-hour and 7-day pool capacity and quota runway, then request-volume, model, API-key and project usage charts." /></picture></a></td>
+<td width="25%"><a href=".assets/clients-dark.png"><picture><source media="(prefers-color-scheme: dark)" srcset=".assets/clients-dark.png"><img src=".assets/clients-light.png" width="100%" alt="Clients: a row per client installation, each naming the application it is configured for and the last eight characters of its key, the upstream accounts or providers it may reach, how many models its Anthropic, OpenAI and Codex catalogues advertise, how long ago it last sent a request, and buttons to reconfigure it or copy its setup instructions." /></picture></a></td>
+<td width="25%"><a href=".assets/limits-dark.png"><picture><source media="(prefers-color-scheme: dark)" srcset=".assets/limits-dark.png"><img src=".assets/limits-light.png" width="100%" alt="Usage: pooled 5-hour and 7-day quota with next checkpoints and exhaustion warnings, a quota runway estimate, and per-account utilization bars carrying burn-rate projections against each window's reset, and the month's ledger spend with its amortized run rate above the payments history." /></picture></a></td>
+<td width="25%"><a href=".assets/routing-dark.png"><picture><source media="(prefers-color-scheme: dark)" srcset=".assets/routing-dark.png"><img src=".assets/routing-light.png" width="100%" alt="Routing: a numbered list of rules evaluated in order, the first enabled rule matching the API key and the requested model winning. It holds one client's alias rewriting a model id onto a named account, model-family rules restricting Opus and Sonnet to particular accounts, a rule pinning one model to a provider, and a disabled rule." /></picture></a></td>
 </tr>
 </table>
 
@@ -86,6 +85,8 @@ for the OpenAI Responses and Chat Completions APIs.
   a Linux Mint panel applet for pooled quota and exhaustion forecasts.
 * [Clankermux Usage for macOS](https://github.com/d4rken/clankermux-macos-applet),
   the same for the macOS menu bar.
+* [Devin subscriptions and SWE-2](docs/devin-swe2.md), covering how to connect a
+  Devin account, its credential lifecycle and how its quota is reported.
 
 ## Running it persistently
 

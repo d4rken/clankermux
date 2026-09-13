@@ -23,7 +23,7 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-OUT_DIR="${1:-$REPO_ROOT/docs/media}"
+OUT_DIR="${1:-$REPO_ROOT/.assets}"
 BUN="${BUN:-/home/darken/.bun/bin/bun}"
 PORT=8081
 

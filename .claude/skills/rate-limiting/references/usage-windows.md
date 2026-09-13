@@ -12,6 +12,12 @@
 
 **Representative utilization** = MAX across the account-wide windows.
 
+`usage_snapshots.five_hour_pct` uses REAL storage and preserves fractional
+percentages — the normalizer, sampler and repository do not round. Any
+quantisation you observe comes from the upstream reading, not from storage,
+so do not assume a one-percentage-point quantum or a fixed temporal
+floor when fitting over closely-spaced snapshots.
+
 > **Returns `null`, never `0`, when there is no evidence.** A `limits[]`-only
 > payload once collapsed to `0` — read as "plenty of headroom" — and falsely
 > cleared a cooldown. Any new consumer must preserve `null`-means-unknown.

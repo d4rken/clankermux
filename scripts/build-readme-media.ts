@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 /**
- * Generates the README's brand assets: `docs/media/{logo,banner}-{light,dark}.svg`.
+ * Generates the README's brand assets: `.assets/{logo,banner}-{light,dark}.svg`.
  * The banner is what the README displays; the logo is the bare mark.
  *
  * Two constraints on the output:
@@ -33,8 +33,7 @@ import {
 const OUT_DIR = join(
 	dirname(fileURLToPath(import.meta.url)),
 	"..",
-	"docs",
-	"media",
+	".assets",
 );
 
 // ── Palettes ────────────────────────────────────────────────────────────────
@@ -152,6 +151,6 @@ if (import.meta.main) {
 	mkdirSync(OUT_DIR, { recursive: true });
 	const files = renderAll();
 	for (const f of files) writeFileSync(join(OUT_DIR, f.name), f.svg);
-	console.log(`docs/media: wrote ${files.length} files`);
+	console.log(`.assets: wrote ${files.length} files`);
 	for (const f of files) console.log(`  ${f.name}`);
 }

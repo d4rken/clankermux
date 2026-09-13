@@ -110,3 +110,4 @@ breaker, context-window fit, and API-key account/class pinning.
 | `references/429-signals.md` | What Anthropic actually sends on a 429 (measured over 1,145 production 429s), the cooldown-reason taxonomy, known dead code and disproven comments |
 | `references/routing-gates.md` | Soft demotions, the pool-liveness reserve, position-vs-membership, display as a projection |
 | `references/recovery.md` | How a locked account comes back; the capacity-restored path |
+| `references/forecasting-verdicts.md` | Forecasting approaches that were measured and rejected, and why a backtest winner is not the shipped estimator |

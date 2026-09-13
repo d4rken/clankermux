@@ -136,7 +136,22 @@ compare the file and test counts, not just pass/fail. Never commit the generated
 no longer generated or imported. Stale gitignored copies may linger in the live
 checkout; they're dead weight. Don't hand-edit, commit, or recreate them.
 
-The only README is `./README.md` (root).
+`./README.md` (root) is the only user-facing README. The other six —
+`deploy/caddy`, `deploy/systemd`, `docs/public-api`,
+`docs/public-api/examples`,
+`packages/providers/src/providers/anthropic-compatible` and
+`packages/security` — document their own directory and nothing beyond it.
+
+## What goes in `docs/`
+
+Published reference material only: the public API contract
+(`docs/public-api/`) and end-user product documentation. README media lives
+in `.assets/`.
+
+Implementation records, handovers between agents, backtest output and
+investigation reports do **not** get committed there. A durable finding goes
+to `.claude/CLAUDE.md` or a skill under `.claude/skills/`; everything else
+stays out of the repository.
 
 ## Git refspecs
 

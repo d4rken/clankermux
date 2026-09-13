@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 /**
- * Screenshots the dashboard of a locally running ClankerMux into `docs/media/`.
+ * Screenshots the dashboard of a locally running ClankerMux into `.assets/`.
  *
  * Headless Chromium is driven directly over the Chrome DevTools Protocol on a
  * raw WebSocket. There is no puppeteer/playwright here and none is wanted: the
@@ -15,7 +15,7 @@
  *
  * Usage:
  *   bun scripts/readme-media/capture.ts \
- *     --base-url http://127.0.0.1:8081 --out-dir docs/media \
+ *     --base-url http://127.0.0.1:8081 --out-dir .assets \
  *     [--width 1440] [--height 980] [--scale 2] [--settle-ms 2500] \
  *     [--password <management password>]
  */
