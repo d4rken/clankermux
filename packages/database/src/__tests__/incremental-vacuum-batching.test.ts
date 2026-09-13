@@ -30,6 +30,10 @@ function makeTempDir(): string {
 
 function freelistCount(dbPath: string): number {
 	const db = new Database(dbPath);
+	// `terminate()` does not synchronously close the worker's connection, so a
+	// fresh one can land while the just-terminated worker still holds the write
+	// lock. Wait for it rather than failing the read.
+	db.exec("PRAGMA busy_timeout = 5000");
 	try {
 		return (
 			db.query("PRAGMA freelist_count").get() as { freelist_count: number }
@@ -47,6 +51,7 @@ function freelistCount(dbPath: string): number {
  */
 function seedFreelist(dbPath: string, pages: number): void {
 	const db = new Database(dbPath);
+	db.exec("PRAGMA busy_timeout = 5000");
 	try {
 		db.exec("PRAGMA journal_mode = WAL");
 		db.exec("CREATE TABLE bulk (id INTEGER PRIMARY KEY, blob BLOB)");
