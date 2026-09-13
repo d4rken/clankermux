@@ -57,7 +57,7 @@ const FORBIDDEN_PORTS = new Set([8080, 8081, 8090]);
 
 class SmokeFailure extends Error {}
 
-type ExitStatus = { code: number | null; signal: NodeJS.Signals | null };
+export type ExitStatus = { code: number | null; signal: NodeJS.Signals | null };
 
 type Server = {
 	child: ChildProcess;
@@ -170,6 +170,15 @@ async function stopServer(server: Server): Promise<ExitStatus> {
 	} finally {
 		clearTimeout(killer);
 	}
+}
+
+/**
+ * A signal-terminated process reports `{code: null, signal: <name>}`, so the
+ * code alone cannot tell "stopped on SIGTERM" from "had to be SIGKILLed once
+ * the grace period expired". Only a voluntary exit 0 is a clean shutdown.
+ */
+export function isCleanExit(status: ExitStatus): boolean {
+	return status.code === 0 && status.signal === null;
 }
 
 /** Fail the run, quoting everything the server said. */
@@ -431,8 +440,11 @@ async function main(): Promise<void> {
 		// stalls every restart behind the SIGKILL timeout.
 		log("sending SIGTERM");
 		const status = await stopServer(server);
-		if (status.code !== null && status.code !== 0) {
-			fail(server, `server exited with code ${status.code} on SIGTERM`);
+		if (!isCleanExit(status)) {
+			fail(
+				server,
+				`server did not shut down cleanly on SIGTERM (code ${status.code}, signal ${status.signal})`,
+			);
 		}
 		log(`server exited (code ${status.code}, signal ${status.signal})`);
 
@@ -446,13 +458,15 @@ async function main(): Promise<void> {
 	}
 }
 
-try {
-	await main();
-} catch (error) {
-	console.error(
-		error instanceof SmokeFailure
-			? `[smoke] FAIL: ${error.message}`
-			: `[smoke] FAIL: ${error instanceof Error ? error.stack : String(error)}`,
-	);
-	process.exit(1);
+if (import.meta.main) {
+	try {
+		await main();
+	} catch (error) {
+		console.error(
+			error instanceof SmokeFailure
+				? `[smoke] FAIL: ${error.message}`
+				: `[smoke] FAIL: ${error instanceof Error ? error.stack : String(error)}`,
+		);
+		process.exit(1);
+	}
 }
