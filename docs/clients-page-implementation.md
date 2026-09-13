@@ -21,7 +21,7 @@ Each client stores separate selections for Anthropic-style discovery, the plain 
 
 Known Codex metadata is stored with its capture time and account-scope fingerprint. Serving prefers current known metadata without adding model IDs. A changed destination scope invalidates the saved metadata. If no selected entry has valid metadata, the response contains only the client's selected IDs in the generic list shape; Codex may use its built-in list in this case. Explicit empty catalogues are supported, although a harness may choose its own fallback.
 
-The separate unauthenticated catalogue retains global overrides for deployments without API-key authentication. Its page states that it does not configure named clients.
+There is no catalogue outside a client. Agent traffic requires a client key, so every `GET /v1/models` is answered from the catalogue of the key that asked; the former global overrides survive only as the source the one-shot backfill below reads.
 
 ## Migration and atomicity
 

@@ -499,6 +499,32 @@ describe("mounted authentication", () => {
 		expect(calls.dispatch).toEqual([]);
 	});
 
+	// The gate is the enforcement point, but nothing downstream may depend on it
+	// having held: every mounted handler is entitled to an identity, so the
+	// router refuses an authenticated-but-anonymous result rather than routing
+	// it over the unpinned pool, keying its affinity on a shared bucket and
+	// recording it against no client.
+	it("401s a mounted request whose auth result carries no key id", async () => {
+		for (const [path, method] of [
+			["/wire/anthropic/v1/messages", "POST"],
+			["/wire/openai/v1/responses", "POST"],
+			["/wire/openai/v1/chat/completions", "POST"],
+			["/wire/anthropic/v1/models", "GET"],
+		] as const) {
+			const { deps, calls } = makeDeps();
+			deps.authenticate = async () => ({ isAuthenticated: true });
+			const res = await routeRequest(makeRequest(path, { method }), deps);
+
+			expect(res.status).toBe(401);
+			expect(await res.json()).toMatchObject({
+				error: { type: "authentication_error" },
+			});
+			expect(calls.dispatch).toEqual([]);
+			expect(calls.responses).toEqual([]);
+			expect(calls.models).toBe(0);
+		}
+	});
+
 	// The mount's gates sit BEHIND authentication on purpose: an anonymous
 	// caller must not be able to probe which endpoints are refused, and every
 	// request on this mount has to be attributable to a key.

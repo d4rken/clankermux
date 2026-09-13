@@ -257,7 +257,13 @@ export function ensureSchema(db: Database): void {
 		)
 	`);
 
-	// Operator curation of the per-dialect `GET /v1/models` catalogue.
+	// The retired operator curation of the per-dialect `GET /v1/models`
+	// catalogue.
+	//
+	// RETAINED READ-ONLY. Catalogues are per client now and nothing writes here
+	// any more, but the table is not dropped: it is the only source the
+	// `backfill:client-catalogues-v1` migration has for the curation a database
+	// upgrading from before 2026.9.52 already had, and a drop is irreversible.
 	//
 	// One row per (wire dialect, model id), and the row says what the operator
 	// changed about that model — never what the model IS. The baseline stays

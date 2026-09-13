@@ -48,7 +48,10 @@ export {
 	type CacheKeepaliveWindowTotals,
 	sumCounterDeltas,
 } from "./repositories/cache-keepalive-snapshot.repository";
-export { ClientRepository } from "./repositories/client.repository";
+export {
+	ClientRepository,
+	MARKER as CLIENT_CATALOGUE_BACKFILL_MARKER,
+} from "./repositories/client.repository";
 export {
 	type CodexResetCreditAutoClaim,
 	CodexResetCreditEventRepository,
@@ -60,7 +63,6 @@ export {
 	type ModelOverrideDialect,
 	ModelOverrideRepository,
 	type ModelOverrideRow,
-	type ModelOverrideUpsert,
 } from "./repositories/model-override.repository";
 export {
 	QuotaDriftResultRepository,

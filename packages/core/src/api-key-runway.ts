@@ -47,11 +47,15 @@ import {
 
 /**
  * Name of the synthetic row that stands in for the whole pool when no API key
- * is active. `AuthService.isAuthenticationEnabled()` is `countActiveApiKeys() >
- * 0`, so zero active keys means authentication is OFF and every request routes
- * over the unpinned pool.
+ * is active.
+ *
+ * The pool is IDLE in that state, not open: agent traffic requires a client
+ * key, so with none active nothing can reach these accounts. The row exists so
+ * the per-key breakdown can still show what the pool holds; it is emitted
+ * inactive, which keeps it out of the headline count and out of
+ * {@link worstKeyRunway}.
  */
-export const UNAUTHENTICATED_POOL_KEY_NAME = "No API keys (unauthenticated)";
+export const IDLE_POOL_KEY_NAME = "No active clients (pool idle)";
 
 /**
  * The account fields the runway needs, and nothing else. Narrow on purpose so
@@ -505,10 +509,11 @@ function runwayFor(
  * One runway row per API key. Inactive keys are listed (they still describe a
  * configured route) but are excluded from {@link worstKeyRunway}.
  *
- * With no active key at all, authentication is disabled and every request
- * routes over the unpinned pool, so exactly one synthetic row is emitted for
- * that pool and no per-key rows: a disabled key describes nothing that can
- * happen.
+ * With no active key at all, nothing can reach the pool: agent traffic requires
+ * a client key. Exactly one synthetic row is emitted for the unpinned pool and
+ * no per-key rows — a disabled key describes nothing that can happen — and that
+ * row is INACTIVE, because a runway on it would claim reachable capacity no
+ * client has.
  */
 export function computeApiKeyRunways(
 	keys: ApiKeyResponse[],
@@ -521,8 +526,8 @@ export function computeApiKeyRunways(
 		return [
 			{
 				keyId: null,
-				keyName: UNAUTHENTICATED_POOL_KEY_NAME,
-				isActive: true,
+				keyName: IDLE_POOL_KEY_NAME,
+				isActive: false,
 				pin: unpinned,
 				...runwayFor(unpinned, accounts, now),
 			},

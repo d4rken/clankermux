@@ -43,7 +43,6 @@ import { Logger } from "@clankermux/logger";
 import { handleChatCompletionsRequest } from "@clankermux/openai-chat-adapter";
 import {
 	CODEX_MODELS,
-	handleModelsRequest,
 	handleResponsesRequest,
 } from "@clankermux/openai-responses-adapter";
 import {
@@ -880,10 +879,6 @@ export default async function startServer(options?: {
 		anthropicCatalog: anthropicModelCatalog,
 		codexCatalog: codexModelCatalog,
 		staticModelIds: CODEX_MODELS,
-		listOverrides: (dialect) => dbOps.listModelOverrides(dialect),
-		upsertOverride: (input) => dbOps.upsertModelOverride(input),
-		removeOverride: (dialect, modelId) =>
-			dbOps.removeModelOverride(dialect, modelId),
 	});
 
 	const modelPermissions = new AccountModelPermissionService({
@@ -904,7 +899,6 @@ export default async function startServer(options?: {
 		config,
 		dbOps,
 		sessionAuth,
-		modelCatalog: modelCatalogService,
 		clients,
 		modelPermissions,
 		runtime: {
@@ -1512,14 +1506,8 @@ export default async function startServer(options?: {
 				url,
 				{
 					getClientCatalog: (keyId, format) => clients.wire(keyId, format),
-					getCatalog: (keyId) => modelCatalogService.getCodexCatalog(keyId),
-					staticModels: handleModelsRequest,
-					staticModelIds: modelCatalogService.staticModelIds,
-					getAnthropicCatalog: () => modelCatalogService.getAnthropicCatalog(),
-					listOverrides: (forDialect) =>
-						modelCatalogService.listOverrides(forDialect),
 				},
-				apiKeyId ?? null,
+				apiKeyId,
 				dialect,
 			),
 		withDashboard,

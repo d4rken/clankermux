@@ -88,10 +88,16 @@ export function RunwayCard({
 	// and an empty list is what the FIRST fetch looks like. Synthesizing the
 	// reason before the read resolves outranks MetricCard's own loading branch,
 	// so the tile would open on a warning instead of a skeleton.
+	//
+	// Zero active keys lands here too, and that is the whole state: agent traffic
+	// requires a client key, so with none active nothing can reach the pool and
+	// there is no runway to project. The synthetic pool row is emitted inactive
+	// for exactly this reason — counted, it would caption the tile "1 key" over a
+	// figure no client can spend.
 	const unavailable =
 		unavailableReason ??
 		(!loading && headline.activeKeyCount === 0
-			? "No active API keys or accounts"
+			? "No active clients"
 			: undefined);
 	// Only a resolved read may speak. The caption sits ABOVE MetricCard's
 	// value/skeleton/dash branch and renders unconditionally, so anything derived

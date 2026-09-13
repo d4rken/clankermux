@@ -7,7 +7,6 @@ import {
 import { formatDistanceToNow } from "date-fns";
 import { MoreHorizontal, Plus, Settings2 } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
-import { Link } from "react-router";
 import { useAccounts } from "../hooks/queries";
 import { invalidateCapacityQueries } from "../lib/query-keys";
 import { type SortDir, SortIcon } from "./analytics/sort-header";
@@ -325,7 +324,7 @@ export function ClientsTab() {
 												now - new Date(client.key.lastUsed).getTime() >= 0 &&
 												now - new Date(client.key.lastUsed).getTime() < 86400000
 													? "text-green-600 dark:text-green-400"
-													: undefined
+													: "text-foreground"
 											}
 										>
 											{client.key.lastUsed
@@ -413,11 +412,7 @@ export function ClientsTab() {
 			)}
 
 			<p className="text-xs text-muted-foreground">
-				<Link className="underline" to="/clients/defaults">
-					Unauthenticated catalogue
-				</Link>{" "}
-				applies when API key authentication is not configured. Existing clients
-				keep independent catalogue copies.
+				Agent traffic requires a client key. Requests without one are rejected.
 			</p>
 			{setup && (
 				<ClientSetupDialog

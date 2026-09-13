@@ -3,9 +3,9 @@ import type { KeyRunway } from "@clankermux/core";
 import {
 	computePacingFromAccounts,
 	computePoolUsage,
+	IDLE_POOL_KEY_NAME,
 	type PacingSnapshot,
 	type PoolUsageResult,
-	UNAUTHENTICATED_POOL_KEY_NAME,
 } from "@clankermux/core";
 import type { AccountResponse } from "@clankermux/types";
 import { renderToStaticMarkup } from "react-dom/server";
@@ -687,14 +687,21 @@ describe("LimitsCapacityOverview runway panel", () => {
 		expect(expired).not.toContain(">0<");
 	});
 
-	it("labels the synthetic row when authentication is off", () => {
+	// The breakdown still lists the pool — an operator needs to see what it holds
+	// — but the headline above it must not read as a runway anything can spend.
+	it("labels the idle pool row and states no runway for it", () => {
 		const html = renderRunway({
 			runways: [
-				keyRunway({ keyId: null, keyName: UNAUTHENTICATED_POOL_KEY_NAME }),
+				keyRunway({
+					keyId: null,
+					keyName: IDLE_POOL_KEY_NAME,
+					isActive: false,
+				}),
 			],
 		});
 
-		expect(html).toContain(UNAUTHENTICATED_POOL_KEY_NAME);
+		expect(html).toContain(IDLE_POOL_KEY_NAME);
+		expect(html).toContain("No active clients");
 	});
 
 	it("states nothing at all while the key read is in flight", () => {

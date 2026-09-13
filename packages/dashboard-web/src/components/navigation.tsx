@@ -221,7 +221,9 @@ export function Navigation() {
 								<h1 className="display-face font-semibold text-lg">
 									ClankerMux
 								</h1>
-								<p className="text-xs text-muted-foreground">Rate-Unlimiter</p>
+								<p className="text-xs text-muted-foreground">
+									Coding-agent gateway
+								</p>
 							</div>
 						</div>
 					</div>

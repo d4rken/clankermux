@@ -14,6 +14,7 @@ import { Database } from "bun:sqlite";
 import {
 	AuthRepository,
 	BunSqlAdapter,
+	CLIENT_CATALOGUE_BACKFILL_MARKER,
 	runMigrations,
 } from "@clankermux/database";
 // Deep import rather than the `@clankermux/http-api` barrel. The barrel pulls
@@ -28,7 +29,9 @@ import { scryptPasswordHasher } from "../../packages/http-api/src/services/sessi
 import {
 	MOCK_ACCOUNTS,
 	MOCK_API_KEYS,
+	MOCK_CLIENT_PROFILES,
 	MOCK_PROJECTS,
+	MOCK_ROUTING_RULES,
 	makeRng,
 } from "./mock-data";
 
@@ -180,8 +183,10 @@ function seedAccounts(db: Database, now: number): void {
 
 function seedApiKeys(db: Database, now: number): void {
 	const insert = db.prepare(`
-		INSERT INTO api_keys (id, name, hashed_key, prefix_last_8, created_at, last_used, usage_count, is_active)
-		VALUES (?, ?, ?, ?, ?, ?, ?, 1)
+		INSERT INTO api_keys (
+			id, name, hashed_key, prefix_last_8, created_at, last_used, usage_count,
+			is_active, pinned_account_id, pinned_providers
+		) VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
 	`);
 	for (const key of MOCK_API_KEYS) {
 		insert.run(
@@ -192,8 +197,74 @@ function seedApiKeys(db: Database, now: number): void {
 			now - 60 * DAY_MS,
 			now - 6 * 60 * 1000,
 			0,
+			key.pinnedAccountId,
+			// A JSON array, which is the only shape the pin parser accepts; anything
+			// else reads as a malformed pin and the key rejects inference.
+			key.pinnedProviders === null ? null : JSON.stringify(key.pinnedProviders),
 		);
 	}
+}
+
+/**
+ * Client profiles and the routing table, which are the two figures beyond
+ * monitoring.
+ *
+ * The marker row is not decoration. `ClientRepository.bootstrap()` runs at every
+ * boot and, while that row is absent, inserts one profile per API key — which
+ * collides with the rows written here on the primary key and takes the capture
+ * instance down before it serves anything. Writing the marker is how a database
+ * built outside the app says the backfill has already happened.
+ */
+function seedClients(db: Database, now: number): void {
+	const insertProfile = db.prepare(`
+		INSERT INTO client_profiles (api_key_id, application, revision, catalogues, notices)
+		VALUES (?, ?, ?, ?, ?)
+	`);
+	for (const profile of MOCK_CLIENT_PROFILES) {
+		insertProfile.run(
+			profile.apiKeyId,
+			profile.application,
+			profile.revision,
+			JSON.stringify(profile.catalogues),
+			JSON.stringify(profile.notices),
+		);
+	}
+	db.prepare(
+		"INSERT INTO strategies (name, config, updated_at) VALUES (?, ?, ?)",
+	).run(CLIENT_CATALOGUE_BACKFILL_MARKER, "{}", now);
+
+	const insertRule = db.prepare(`
+		INSERT INTO routing_rules (
+			id, name, enabled, position, match_api_key_id, match_model_kind,
+			match_model_value, pool_kind, pool_provider, pool_account_ids,
+			target_kind, target_model
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`);
+	const insertAliasLink = db.prepare(
+		"INSERT INTO client_alias_rules (api_key_id, rule_id) VALUES (?, ?)",
+	);
+	MOCK_ROUTING_RULES.forEach((rule, position) => {
+		insertRule.run(
+			rule.id,
+			rule.name,
+			rule.enabled ? 1 : 0,
+			position,
+			rule.match_api_key_id,
+			rule.match_model_kind,
+			rule.match_model_value,
+			rule.pool_kind,
+			rule.pool_provider,
+			rule.pool_account_ids === null
+				? null
+				: JSON.stringify(rule.pool_account_ids),
+			rule.target_kind,
+			rule.target_model,
+		);
+		// The link is what makes a rule the client's own: the Clients page reads it
+		// back as that client's alias rules, and deleting the client drops them.
+		if (rule.ownedByClient !== null)
+			insertAliasLink.run(rule.ownedByClient, rule.id);
+	});
 }
 
 function seedPayments(db: Database, now: number): void {
@@ -548,6 +619,7 @@ async function main(): Promise<void> {
 
 	seedAccounts(db, now);
 	seedApiKeys(db, now);
+	seedClients(db, now);
 	seedPayments(db, now);
 	seedUsageSnapshots(db, now, rng);
 	seedRequests(db, now, rng);

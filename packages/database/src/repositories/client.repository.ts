@@ -2,7 +2,10 @@ import type { ClientProfile } from "@clankermux/types";
 import { BaseRepository } from "./base.repository";
 import { RoutingConflictError } from "./routing.repository";
 
-const MARKER = "backfill:client-catalogues-v1";
+/** Names the one-shot catalogue backfill in `strategies`; its presence makes
+ * {@link ClientRepository.bootstrap} a no-op. Exported so a database built
+ * outside the app can declare the backfill already done. */
+export const MARKER = "backfill:client-catalogues-v1";
 interface ProfileRow {
 	api_key_id: string;
 	application: ClientProfile["application"];

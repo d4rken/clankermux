@@ -67,13 +67,22 @@ function RunwayPanel({
 	// key can only make the surviving figure longer.
 	const headline = summarizeKeyRunways(runways, now);
 	const worst = headline.worst;
-	const activeRunways = runways.filter((runway) => runway.isActive);
+	// What the breakdown lists. Active keys, plus the idle-pool row, which is
+	// inactive by construction (`keyId === null`, no client can reach it) and
+	// listed anyway because it is the only description of what the pool holds
+	// while nothing can spend it. Everything that would price that capacity —
+	// `activeKeyCount`, the headline figure, `worstKeyRunway` — reads `isActive`
+	// and keeps excluding it.
+	const breakdownRunways = runways.filter(
+		(runway) => runway.isActive || runway.keyId === null,
+	);
 	// Three distinct states, kept apart on purpose:
-	//  - readBlocked: the backing read failed, or is still in flight. The parent
-	//    computes runways from `apiKeys ?? []` either way, so `worst` is a
-	//    SYNTHETIC row then — commonly the unauthenticated-pool one, whose
-	//    outcome would render as a real figure. Nothing derived from it may be
-	//    shown while this holds.
+	//  - readBlocked: the runway read is pending or unavailable with no cached
+	//    response. The parent passes `runway?.keys ?? []`, so the empty array
+	//    yields `worst === null` and `activeKeyCount === 0`. These headline
+	//    values also describe a resolved deployment with no active clients;
+	//    the guard preserves loading/unavailable instead of stating
+	//    "No active clients" before the data is known.
 	//  - outcomeReason: the read resolved but the outcome cannot be stated. It
 	//    replaces the figure, yet leaves the per-key breakdown standing, because
 	//    one key's missing evidence must not hide another key's definite runway.
@@ -96,7 +105,7 @@ function RunwayPanel({
 	const outcomeReason = dataResolved
 		? worst === null
 			? headline.activeKeyCount === 0
-				? "No active API keys or accounts"
+				? "No active clients"
 				: learningAccounts > 0
 					? `${learningAccounts} account${learningAccounts === 1 ? "" : "s"} not yet projectable`
 					: "No quota evidence for any account"
@@ -195,7 +204,7 @@ function RunwayPanel({
 				</div>
 			</InsetPanel>
 
-			{activeRunways.length > 0 && dataResolved && (
+			{breakdownRunways.length > 0 && dataResolved && (
 				<div className="mt-auto pt-group">
 					<details className="group border-t border-border/60 pt-item">
 						<summary className="flex cursor-pointer list-none items-center justify-between gap-item rounded-sm py-tight text-xs font-medium text-muted-foreground hover:text-foreground focus:outline-none focus-visible:ring-2 focus-visible:ring-ring [&::-webkit-details-marker]:hidden">
@@ -204,7 +213,7 @@ function RunwayPanel({
 						</summary>
 						<div className="mt-item border-t border-border/50 pt-row text-xs">
 							<ul className="space-y-tight">
-								{activeRunways.map((runway) => (
+								{breakdownRunways.map((runway) => (
 									<li
 										key={runway.keyId ?? runway.keyName}
 										className="flex items-baseline justify-between gap-item"
@@ -221,10 +230,16 @@ function RunwayPanel({
 													: "accounts"}
 											</span>
 										</span>
+										{/* An unreachable row takes the headline's treatment: the dash,
+										    with the reason stated above it. Its outcome is a real
+										    projection over the pool, and stating it here would offer as
+										    spendable the runway the headline just refused to name. */}
 										<span className="shrink-0 tabular-nums">
-											{formatRunwayValue(runway.outcome, now) ??
-												runwayUnavailableReason(runway.outcome) ??
-												"—"}
+											{runway.isActive
+												? (formatRunwayValue(runway.outcome, now) ??
+													runwayUnavailableReason(runway.outcome) ??
+													"—")
+												: "—"}
 										</span>
 									</li>
 								))}

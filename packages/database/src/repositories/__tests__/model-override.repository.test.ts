@@ -1,18 +1,21 @@
 /**
- * Tests for ModelOverrideRepository — the operator's per-dialect curation of
- * `GET /v1/models`.
+ * Tests for ModelOverrideRepository — the retired per-dialect curation of
+ * `GET /v1/models`, now read-only.
  *
- * Run against a REAL file database built by ensureSchema(), so the CHECK
- * constraints and the composite primary key are the deployed ones rather than a
+ * Nothing writes this table any more, so the fixtures are raw INSERTs: they
+ * stand in for rows an upgrading database already holds, which is the only way
+ * rows get here now. The one caller left is the pre-2026.9.52 client-catalogue
+ * backfill, and what it needs from this repository is the read.
+ *
+ * Run against a REAL file database built by ensureSchema(), so the composite
+ * primary key and the row shape are the deployed ones rather than a
  * hand-written approximation of them.
  *
- * The properties that matter to the callers:
- *  - upsert is a full replacement of the mutable fields, and PRESERVES
- *    created_at, which is the ordering key custom entries are appended by
+ * The properties that matter to that caller:
  *  - the dialect is part of the identity: the same model id in both dialects is
  *    two independent rows
- *  - the flags are constrained (0/1 only, never both set) and the dialect enum
- *    is enforced, so a corrupt row cannot reach the wire route
+ *  - rows come back oldest-first, which is the order custom entries were
+ *    appended to the catalogue in
  */
 import { Database } from "bun:sqlite";
 import {
@@ -39,6 +42,29 @@ describe("ModelOverrideRepository", () => {
 	let db: Database;
 	let repo: ModelOverrideRepository;
 
+	function insert(row: {
+		dialect: string;
+		modelId: string;
+		hidden?: 0 | 1;
+		custom?: 0 | 1;
+		displayName?: string | null;
+		createdAt?: number;
+	}): void {
+		db.query(
+			`INSERT INTO model_overrides
+			   (dialect, model_id, hidden, custom, display_name, created_at, updated_at)
+			 VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		).run(
+			row.dialect,
+			row.modelId,
+			row.hidden ?? 0,
+			row.custom ?? 0,
+			row.displayName ?? null,
+			row.createdAt ?? NOW,
+			row.createdAt ?? NOW,
+		);
+	}
+
 	beforeEach(() => {
 		db = new Database(tempDbs.next());
 		ensureSchema(db);
@@ -53,14 +79,11 @@ describe("ModelOverrideRepository", () => {
 		tempDbs.cleanup();
 	});
 
-	it("stores and lists a hidden baseline row", async () => {
-		await repo.upsert({
+	it("lists a hidden baseline row with every column the caller reads", async () => {
+		insert({
 			dialect: "anthropic",
 			modelId: "claude-opus-4-1-20250805",
-			hidden: true,
-			custom: false,
-			displayName: null,
-			now: NOW,
+			hidden: 1,
 		});
 
 		const rows = await repo.listByDialect("anthropic");
@@ -76,14 +99,12 @@ describe("ModelOverrideRepository", () => {
 		});
 	});
 
-	it("stores a custom row with a display name", async () => {
-		await repo.upsert({
+	it("lists a custom row with its display name", async () => {
+		insert({
 			dialect: "openai",
 			modelId: "gpt-5.6-nova",
-			hidden: false,
-			custom: true,
+			custom: 1,
 			displayName: "GPT-5.6 Nova",
-			now: NOW,
 		});
 
 		const rows = await repo.listByDialect("openai");
@@ -92,72 +113,13 @@ describe("ModelOverrideRepository", () => {
 		expect(rows[0]?.display_name).toBe("GPT-5.6 Nova");
 	});
 
-	// created_at is the order custom entries are appended in, so an edit must not
-	// move a row to the end of the list the operator is looking at.
-	it("preserves created_at across an upsert and advances updated_at", async () => {
-		await repo.upsert({
-			dialect: "openai",
-			modelId: "gpt-5.6-nova",
-			hidden: false,
-			custom: true,
-			displayName: "First",
-			now: NOW,
-		});
-		await repo.upsert({
-			dialect: "openai",
-			modelId: "gpt-5.6-nova",
-			hidden: false,
-			custom: true,
-			displayName: "Second",
-			now: NOW + 60_000,
-		});
-
-		const rows = await repo.listByDialect("openai");
-		expect(rows).toHaveLength(1);
-		expect(rows[0]?.display_name).toBe("Second");
-		expect(rows[0]?.created_at).toBe(NOW);
-		expect(rows[0]?.updated_at).toBe(NOW + 60_000);
-	});
-
-	it("clears a display name when the upsert carries null", async () => {
-		await repo.upsert({
-			dialect: "anthropic",
-			modelId: "claude-opus-5",
-			hidden: false,
-			custom: false,
-			displayName: "Renamed",
-			now: NOW,
-		});
-		await repo.upsert({
-			dialect: "anthropic",
-			modelId: "claude-opus-5",
-			hidden: true,
-			custom: false,
-			displayName: null,
-			now: NOW + 1,
-		});
-
-		const rows = await repo.listByDialect("anthropic");
-		expect(rows[0]?.display_name).toBeNull();
-		expect(rows[0]?.hidden).toBe(1);
-	});
-
 	it("keeps the two dialects independent", async () => {
-		await repo.upsert({
-			dialect: "anthropic",
-			modelId: "shared-id",
-			hidden: true,
-			custom: false,
-			displayName: null,
-			now: NOW,
-		});
-		await repo.upsert({
+		insert({ dialect: "anthropic", modelId: "shared-id", hidden: 1 });
+		insert({
 			dialect: "openai",
 			modelId: "shared-id",
-			hidden: false,
-			custom: true,
+			custom: 1,
 			displayName: "Only here",
-			now: NOW,
 		});
 
 		const anthropic = await repo.listByDialect("anthropic");
@@ -170,13 +132,11 @@ describe("ModelOverrideRepository", () => {
 
 	it("orders rows oldest-first so appended customs keep their order", async () => {
 		for (const [index, id] of ["c", "a", "b"].entries()) {
-			await repo.upsert({
+			insert({
 				dialect: "openai",
 				modelId: id,
-				hidden: false,
-				custom: true,
-				displayName: null,
-				now: NOW + index * 1000,
+				custom: 1,
+				createdAt: NOW + index * 1000,
 			});
 		}
 
@@ -184,56 +144,9 @@ describe("ModelOverrideRepository", () => {
 		expect(rows.map((row) => row.model_id)).toEqual(["c", "a", "b"]);
 	});
 
-	it("removes only the addressed row", async () => {
-		await repo.upsert({
-			dialect: "openai",
-			modelId: "keep",
-			hidden: true,
-			custom: false,
-			displayName: null,
-			now: NOW,
-		});
-		await repo.upsert({
-			dialect: "openai",
-			modelId: "drop",
-			hidden: true,
-			custom: false,
-			displayName: null,
-			now: NOW,
-		});
+	it("answers with nothing for a dialect that was never curated", async () => {
+		insert({ dialect: "anthropic", modelId: "claude-opus-5", hidden: 1 });
 
-		expect(await repo.remove("openai", "drop")).toBe(true);
-		expect(await repo.remove("openai", "drop")).toBe(false);
-		expect((await repo.listByDialect("openai")).map((r) => r.model_id)).toEqual(
-			["keep"],
-		);
-	});
-
-	it("rejects an unknown dialect at the schema level", async () => {
-		await expect(
-			repo.upsert({
-				// A dialect the schema does not know can only come from a bug or a
-				// hand-edited database; the CHECK is what keeps it out of the wire route.
-				dialect: "gemini" as "anthropic",
-				modelId: "gemini-3",
-				hidden: false,
-				custom: true,
-				displayName: null,
-				now: NOW,
-			}),
-		).rejects.toThrow();
-	});
-
-	it("rejects a row that is both hidden and custom", async () => {
-		await expect(
-			repo.upsert({
-				dialect: "openai",
-				modelId: "impossible",
-				hidden: true,
-				custom: true,
-				displayName: null,
-				now: NOW,
-			}),
-		).rejects.toThrow();
+		expect(await repo.listByDialect("openai")).toEqual([]);
 	});
 });
