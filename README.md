@@ -98,12 +98,10 @@ are still accepted.
 
 ## Project notes
 
-ClankerMux began as a fork of [tombii/better-ccflare](https://github.com/tombii/better-ccflare)
-(itself a fork of [snipeship/ccflare](https://github.com/snipeship/ccflare)). After 30+
-upstream PRs I wanted something bespoke: fast iteration, tailored to my use case of
-mostly Anthropic and OpenAI accounts. It has since diverged substantially and is
-developed independently, but stays MIT-licensed and keeps the original authors'
-copyright intact.
+ClankerMux began as a fork of [tombii/better-ccflare](https://github.com/tombii/better-ccflare),
+itself a fork of [snipeship/ccflare](https://github.com/snipeship/ccflare). After
+dozens of upstream PRs I decided to take it in a different direction, and it has
+been developed independently since.
 
 ## License
 
