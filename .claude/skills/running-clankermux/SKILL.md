@@ -43,6 +43,13 @@ curl -X POST http://localhost:8081/wire/anthropic/v1/messages \
   -d '{"model":"z-ai/glm-4.5-air:free","messages":[{"role":"user","content":"test"}],"max_tokens":10}'
 ```
 
+### Testing with OpenCode
+
+Do **not** use OpenCode's pure mode for the profile under test: it disables
+explicit plugins, and any compatibility plugin the test needs goes with them.
+Register a plugin by its absolute `file://` URL in the profile's `plugin` array.
+Give the Codex profile an absolute `file://` URL too.
+
 ## Account management
 
 Managed via the web dashboard (Accounts tab) or the HTTP API — there is no CLI.

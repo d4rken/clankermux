@@ -88,6 +88,14 @@ Those were one-time legacy upgrades and have been removed.
 
 New tables go in `ensureSchema()` with `CREATE TABLE IF NOT EXISTS`.
 
+## Retired combo tables
+
+A fresh database no longer gets `combos`, `combo_slots` or
+`combo_family_assignments`; their `CREATE TABLE` blocks are gone. Databases
+created before that still carry them, inert — nothing reads or writes them.
+`requests.combo_name` is still in the requests table and is still read, but only
+to display historical requests. This is the state, not a cleanup task.
+
 ## Data backfills live in backfills.ts
 
 One-shot data passes go in `packages/database/src/backfills.ts`
