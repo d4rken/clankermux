@@ -205,14 +205,15 @@ describe("paths the session policy must not touch", () => {
 	}
 
 	it("still gates upstream AI traffic on an API key, not a session", async () => {
-		// No keys configured, so the api_key policy fails open — what matters is
-		// that the session policy did not claim it.
+		// The refusal names the api-key requirement, which is the point: the
+		// session policy did not claim this path.
 		const result = await svc.authenticateRequest(
 			req("/v1/messages"),
 			"/v1/messages",
 			"POST",
 		);
-		expect(result.isAuthenticated).toBe(true);
+		expect(result.isAuthenticated).toBe(false);
+		expect(result.error).toContain("API key required");
 	});
 });
 

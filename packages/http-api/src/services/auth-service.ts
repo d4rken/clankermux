@@ -20,14 +20,30 @@ export interface AuthenticationResult {
 }
 
 /**
+ * What a keyless agent request is told, verbatim, wherever it is refused.
+ *
+ * Shared with the router's identity guard so the two refusals a caller can
+ * collect on the same missing credential read identically.
+ */
+export const API_KEY_REQUIRED_ERROR =
+	"API key required. Create a client in the dashboard, then send its key in the 'x-api-key' header or Authorization: Bearer <key>";
+
+/**
  * Authentication policy: what each surface requires.
  *
  * Two independent credentials, gating two independent things:
  *
  *  - `api_key` gates UPSTREAM AI TRAFFIC (`/v1/*`, `/messages/*`, and the
- *    `/wire/*` mounts). Machine clients.
+ *    `/wire/*` mounts). Machine clients. It FAILS CLOSED: a request with no
+ *    valid key is refused however many keys the database holds, including
+ *    none. An identity is what the routing pins, the key-scoped rules, the
+ *    session affinity and the per-key stats are all keyed on, so traffic
+ *    without one has nothing to attribute itself to.
  *  - `session` gates the MANAGEMENT API (`/api/*`) behind the app-level login,
- *    and FAILS OPEN until an operator sets a password.
+ *    and FAILS OPEN until an operator sets a password. That axis is
+ *    independent of this one and is unchanged by the api-key rule above:
+ *    it is what lets an operator reach the dashboard to create the first
+ *    client on a fresh install.
  *
  * `/health` and the read-only widget surface (`/public/v1/*`) are public by
  * design; so is everything the dashboard serves as static assets.
@@ -94,16 +110,9 @@ export class AuthService {
 	}
 
 	/**
-	 * Check if API authentication is enabled (has at least one active API key)
-	 */
-	async isAuthenticationEnabled(): Promise<boolean> {
-		return (await this.dbOps.countActiveApiKeys()) > 0;
-	}
-
-	/**
 	 * Verify a presented API key against the active set. Internal helper for
 	 * `authenticateRequest`; callers are expected to have already confirmed
-	 * the request needs an api-key check and that auth is enabled.
+	 * the request needs an api-key check.
 	 */
 	private async validateApiKey(apiKey: string): Promise<AuthenticationResult> {
 		// A stored hash is the unsalted SHA-256 of the key, so the record can be
@@ -219,8 +228,8 @@ export class AuthService {
 	 * Authenticate a request against the auth policy.
 	 *
 	 * Public paths return authenticated without checking for a key. API-key
-	 * paths require a valid key when at least one is configured; when none are
-	 * configured, authentication is effectively disabled.
+	 * paths require a valid key unconditionally: with no keys configured every
+	 * agent request is refused until an operator creates a client.
 	 *
 	 * `requirement` lets a caller that already classified the route say so
 	 * outright, and it OVERRIDES `policyFor` entirely. The mounted agent
@@ -255,18 +264,11 @@ export class AuthService {
 			};
 		}
 
-		// API-key-gated path. If no keys are configured at all, let everything
-		// through (matches single-user / first-run behavior).
-		if (!(await this.isAuthenticationEnabled())) {
-			return { isAuthenticated: true };
-		}
-
 		const apiKey = this.extractApiKey(req);
 		if (!apiKey) {
 			return {
 				isAuthenticated: false,
-				error:
-					"API key required. Include it in the 'x-api-key' header or Authorization: Bearer <key>",
+				error: API_KEY_REQUIRED_ERROR,
 			};
 		}
 

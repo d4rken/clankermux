@@ -28,6 +28,7 @@ export * from "./services/admin/accounts";
 export * from "./services/admin/api-keys";
 // Export services
 export {
+	API_KEY_REQUIRED_ERROR,
 	type AuthenticationResult,
 	type AuthRequirement,
 	AuthService,

@@ -572,16 +572,15 @@ describe("API key verification must still say no", () => {
 });
 
 describe("API key verification — policy is unchanged", () => {
-	it("goes open when the last key is removed", async () => {
-		// Worth pinning because it is surprising: with zero active keys the proxy
-		// authenticates everything. A test that revokes the only key and then
-		// asserts a rejection is testing this branch, not verification.
+	it("stays closed when the last key is removed", async () => {
+		// Revoking the only key locks the proxy down rather than re-opening it,
+		// so a revoked credential and an arbitrary one are refused alike.
 		db.activeKeys = [migratedKey("real", REAL)];
 		await auth(svc, REAL);
 
 		db.activeKeys = [];
-		expect((await auth(svc, REAL)).isAuthenticated).toBe(true);
-		expect((await auth(svc, "anything-at-all")).isAuthenticated).toBe(true);
+		expect((await auth(svc, REAL)).isAuthenticated).toBe(false);
+		expect((await auth(svc, "anything-at-all")).isAuthenticated).toBe(false);
 	});
 
 	it("lets management and health paths through without a key", async () => {
@@ -595,9 +594,11 @@ describe("API key verification — policy is unchanged", () => {
 		expect(db.lookupCalls).toEqual([]);
 	});
 
-	it("is open when no keys are configured at all", async () => {
+	it("is closed when no keys are configured at all", async () => {
 		db.activeKeys = [];
-		expect((await auth(svc)).isAuthenticated).toBe(true);
+		const r = await auth(svc);
+		expect(r.isAuthenticated).toBe(false);
+		expect(r.error).toContain("API key required");
 	});
 
 	it("refuses a proxy request with no key when keys exist", async () => {

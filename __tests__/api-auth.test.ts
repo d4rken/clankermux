@@ -44,46 +44,45 @@ describe("AuthService", () => {
 		}
 	});
 
-	describe("isAuthenticationEnabled()", () => {
-		test("returns false when no keys are configured", async () => {
-			expect(await authService.isAuthenticationEnabled()).toBe(false);
-		});
-
-		test("returns true when at least one active key exists", async () => {
-			await generateApiKey(dbOps, "first-key");
-			expect(await authService.isAuthenticationEnabled()).toBe(true);
-		});
-
-		test("returns false when the only key is disabled", async () => {
-			await generateApiKey(dbOps, "only-key");
-			await disableApiKey(dbOps, "only-key");
-			expect(await authService.isAuthenticationEnabled()).toBe(false);
-		});
-
-		test("returns true when at least one of several keys is active", async () => {
-			await generateApiKey(dbOps, "active");
-			await generateApiKey(dbOps, "inactive");
-			await disableApiKey(dbOps, "inactive");
-			expect(await authService.isAuthenticationEnabled()).toBe(true);
-		});
-	});
-
 	describe("authenticateRequest() with no keys configured", () => {
-		// When no API keys exist, authentication is effectively disabled — every
-		// path passes through. This matches single-user / first-run behaviour.
+		// The api-key axis fails CLOSED: a deployment that has never created a
+		// client serves no agent traffic at all. The session axis is untouched by
+		// that and still fails open until a password is set, which is what keeps
+		// the dashboard reachable to create the first client.
 		test.each([
 			["/", "GET"],
 			["/dashboard", "GET"],
 			["/health", "GET"],
 			["/api/stats", "GET"],
 			["/api/accounts", "GET"],
-			["/v1/messages", "POST"],
-			["/messages", "POST"],
 		])("%s %s passes through with no key", async (path, method) => {
 			const req = makeRequest({ url: `http://localhost:8080${path}` });
 			const result = await authService.authenticateRequest(req, path, method);
 			expect(result.isAuthenticated).toBe(true);
 			expect(result.apiKeyId).toBeUndefined();
+		});
+
+		test.each([
+			["/v1/messages", "POST"],
+			["/messages", "POST"],
+			["/wire/anthropic/v1/messages", "POST"],
+		])("%s %s is refused with no key", async (path, method) => {
+			const req = makeRequest({ url: `http://localhost:8080${path}` });
+			const result = await authService.authenticateRequest(req, path, method);
+			expect(result.isAuthenticated).toBe(false);
+			expect(result.apiKeyId).toBeUndefined();
+			expect(result.error).toContain("API key required");
+		});
+
+		test("an arbitrary credential is still not a valid key", async () => {
+			const req = makeRequest({ apiKey: "anything-at-all" });
+			const result = await authService.authenticateRequest(
+				req,
+				"/v1/messages",
+				"POST",
+			);
+			expect(result.isAuthenticated).toBe(false);
+			expect(result.error).toBe("Invalid API key");
 		});
 	});
 
@@ -175,17 +174,29 @@ describe("AuthService", () => {
 
 			test("rejects a key that has been disabled", async () => {
 				await disableApiKey(dbOps, "test-key");
-				// Now there are 0 active keys → isAuthenticationEnabled returns
-				// false, so authenticateRequest lets everything through. Verify
-				// that explicitly: this is the documented "no keys configured"
-				// behaviour, even though the row still exists.
+				// Disabling the last key leaves ZERO active keys, and the proxy
+				// stays closed rather than re-opening. The row still exists; it
+				// authenticates nothing.
 				const req = makeRequest({ apiKey: validKey });
 				const result = await authService.authenticateRequest(
 					req,
 					"/v1/messages",
 					"POST",
 				);
-				expect(result.isAuthenticated).toBe(true);
+				expect(result.isAuthenticated).toBe(false);
+				expect(result.error).toBe("Invalid API key");
+			});
+
+			test("keyless traffic stays refused after the last key is disabled", async () => {
+				await disableApiKey(dbOps, "test-key");
+				const req = makeRequest({});
+				const result = await authService.authenticateRequest(
+					req,
+					"/v1/messages",
+					"POST",
+				);
+				expect(result.isAuthenticated).toBe(false);
+				expect(result.error).toContain("API key required");
 			});
 
 			test("with a second key active, disabled key is rejected", async () => {

@@ -141,7 +141,7 @@ describe("authenticateRequest with an explicit requirement", () => {
 		});
 	}
 
-	it("still lets everything through when no keys are configured", async () => {
+	it("still refuses a keyless request when no keys are configured", async () => {
 		db.keys = [];
 		const result = await svc.authenticateRequest(
 			makeRequest(),
@@ -149,8 +149,9 @@ describe("authenticateRequest with an explicit requirement", () => {
 			"POST",
 			"api_key",
 		);
-		expect(result.isAuthenticated).toBe(true);
+		expect(result.isAuthenticated).toBe(false);
 		expect(result.apiKeyId).toBeUndefined();
+		expect(result.error).toContain("API key required");
 	});
 
 	it("overrides the path policy in the other direction too", async () => {

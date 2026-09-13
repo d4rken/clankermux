@@ -87,7 +87,9 @@ function makeDeps(options: Options = {}): {
 					error: "Sign in to use the management API",
 				} satisfies AuthenticationResult;
 			}
-			return { isAuthenticated: true };
+			// The api-key axis. A pass carries the identity the mount's dispatch
+			// chain requires; without one the router refuses before dispatching.
+			return { isAuthenticated: true, apiKeyId: "key-1", apiKeyName: "test" };
 		},
 		async dispatchProxy(_req, url) {
 			calls.dispatch.push({ pathname: url.pathname });

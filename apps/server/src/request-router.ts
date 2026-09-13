@@ -36,6 +36,7 @@ import type {
 	AuthRequirement,
 } from "@clankermux/http-api";
 import {
+	API_KEY_REQUIRED_ERROR,
 	managementAuthRequirement,
 	NO_STORE_HEADERS,
 } from "@clankermux/http-api";
@@ -107,13 +108,16 @@ export interface RequestRouterDeps {
 	 * wants the per-account `{"models": […]}` catalog, and its absence marks an
 	 * ordinary OpenAI-format client, which wants `{"object":"list","data":[…]}`.
 	 *
-	 * Takes the API key id because WHICH catalog is not a free choice: model
-	 * entitlement is per-subscription, so a pinned key must be shown a catalog
-	 * from inside its own pin, exactly as its requests are routed inside it.
+	 * Takes the API key id — never absent, because {@link serveAgentRequest}
+	 * refuses a request without one before dispatching — because WHICH catalog
+	 * is not a free choice: the reply is that client's own saved catalogue, and
+	 * model entitlement is per-subscription, so a pinned key must be shown a
+	 * catalog from inside its own pin, exactly as its requests are routed
+	 * inside it.
 	 */
 	handleModels(
 		url: URL,
-		apiKeyId: string | null | undefined,
+		apiKeyId: string,
 		dialect: WireDialect,
 	): Promise<Response>;
 	withDashboard: boolean;
@@ -509,6 +513,17 @@ async function serveAgentRequest(
 	dialect: WireDialect,
 	deps: RequestRouterDeps,
 ): Promise<Response> {
+	// The identity every handler below is entitled to assume. The auth gate
+	// already refuses a request without a valid key, so this cannot fire in
+	// production — it is here to make the narrowing TRUE rather than asserted,
+	// so a future gate that grows a pass-through cannot silently hand an
+	// anonymous request to routing, to the per-key catalogue, or to the stats
+	// that key on it.
+	const { apiKeyId } = authResult;
+	if (!apiKeyId) {
+		return jsonError(401, "authentication_error", API_KEY_REQUIRED_ERROR);
+	}
+
 	if (
 		dialect === "anthropic" &&
 		req.method === "HEAD" &&
@@ -520,7 +535,7 @@ async function serveAgentRequest(
 		return deps.handleChatCompletions(
 			req,
 			url,
-			authResult.apiKeyId,
+			apiKeyId,
 			authResult.apiKeyName,
 		);
 	}
@@ -545,7 +560,7 @@ async function serveAgentRequest(
 		return await deps.handleResponses(
 			req,
 			url,
-			authResult.apiKeyId,
+			apiKeyId,
 			authResult.apiKeyName,
 		);
 	}
@@ -556,13 +571,8 @@ async function serveAgentRequest(
 	// admits this path only in its exact canonical spelling — an alias would
 	// miss here and fall through to the proxy on a pooled bearer.
 	if (req.method === "GET" && url.pathname === MODELS_PATH) {
-		return await deps.handleModels(url, authResult.apiKeyId, dialect);
+		return await deps.handleModels(url, apiKeyId, dialect);
 	}
 
-	return await deps.dispatchProxy(
-		req,
-		url,
-		authResult.apiKeyId,
-		authResult.apiKeyName,
-	);
+	return await deps.dispatchProxy(req, url, apiKeyId, authResult.apiKeyName);
 }
