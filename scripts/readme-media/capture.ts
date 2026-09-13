@@ -30,17 +30,17 @@ import { join } from "node:path";
 // ---------------------------------------------------------------------------
 
 /**
- * Routes to capture, and the file stem each one is written under.
+ * Routes to capture, and the file stem each one is written under. One per
+ * feature group, plus the landing view.
  *
- * `height` overrides the run's default viewport height for that one route. The
- * account list is the case it exists for: its detailed cards need extra height
- * to keep the representative set visible below the fold.
+ * An entry may carry `height` to override the run's default viewport height for
+ * that one route, for a page whose content would otherwise fall below the fold.
  */
 export const CAPTURES = [
 	{ route: "/", name: "overview" },
-	{ route: "/accounts", name: "accounts", height: 1200 },
+	{ route: "/clients", name: "clients" },
 	{ route: "/usage", name: "limits" },
-	{ route: "/analytics", name: "analytics" },
+	{ route: "/routing", name: "routing" },
 ] as const;
 
 export type Capture = (typeof CAPTURES)[number];

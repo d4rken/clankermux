@@ -45,12 +45,68 @@ function parseArgs(argv: string[]): Args {
 	return { certPath, keyPath, port, headSha };
 }
 
-/** Bearer tokens are seeded as `mock-access-<account id>`; map back. */
+/**
+ * Bearer tokens are seeded as `mock-access-<account id>` on the OAuth providers
+ * and `mock-key-<account id>` on the API-key ones; map either back.
+ */
 function accountForRequest(req: Request): MockAccount | null {
 	const auth = req.headers.get("authorization") ?? "";
 	const token = auth.replace(/^Bearer\s+/i, "").trim();
-	const id = token.replace(/^mock-access-/, "");
+	const id = token.replace(/^mock-(?:access|key)-/, "");
 	return MOCK_ACCOUNTS.find((a) => a.id === id) ?? null;
+}
+
+/**
+ * Display name and creation date per model id, for the catalogue endpoints
+ * below. Keyed by the ids the seeder hands the mock accounts, so no catalogue
+ * advertises a model nothing in the figures can serve.
+ */
+const MODEL_METADATA: Record<
+	string,
+	{ displayName: string; createdAt: string }
+> = {
+	"claude-opus-5": {
+		displayName: "Claude Opus 5",
+		createdAt: "2026-05-19T00:00:00Z",
+	},
+	"claude-sonnet-5": {
+		displayName: "Claude Sonnet 5",
+		createdAt: "2026-05-19T00:00:00Z",
+	},
+	"claude-haiku-4.5": {
+		displayName: "Claude Haiku 4.5",
+		createdAt: "2025-10-01T00:00:00Z",
+	},
+	"claude-fable-5": {
+		displayName: "Claude Fable 5",
+		createdAt: "2026-06-30T00:00:00Z",
+	},
+	"gpt-5.6-sol": {
+		displayName: "GPT-5.6 Sol",
+		createdAt: "2026-07-22T00:00:00Z",
+	},
+	"gpt-5.4-mini": {
+		displayName: "GPT-5.4 Mini",
+		createdAt: "2026-03-11T00:00:00Z",
+	},
+	"glm-4.6": { displayName: "GLM 4.6", createdAt: "2025-09-30T00:00:00Z" },
+};
+
+function modelMeta(id: string): { displayName: string; createdAt: string } {
+	return (
+		MODEL_METADATA[id] ?? { displayName: id, createdAt: "2026-01-01T00:00:00Z" }
+	);
+}
+
+/** Every model the seeded accounts of one provider serve, deduplicated. */
+function providerModels(provider: string): string[] {
+	return [
+		...new Set(
+			MOCK_ACCOUNTS.filter((a) => a.provider === provider).flatMap(
+				(a) => a.models,
+			),
+		),
+	];
 }
 
 function json(body: unknown, status = 200): Response {
@@ -144,6 +200,97 @@ function codexUsage(account: MockAccount, now: number): Response {
 }
 
 /**
+ * `api.anthropic.com/v1/models`, read by two consumers with different
+ * appetites.
+ *
+ * Permission discovery (`account-model-permissions.ts`) is the stricter one: it
+ * throws unless every entry carries an `id` that is a non-empty, already
+ * trimmed string, and unless the page either closes pagination or hands back a
+ * cursor. One page with `has_more: false` therefore satisfies it as well as the
+ * dashboard's catalogue cache (`anthropic-model-catalog-cache.ts`), which wants
+ * `id` plus the optional `display_name` and `created_at`.
+ *
+ * The list is the union over the mock Anthropic accounts rather than the asking
+ * account's own models: upstream this endpoint is not scoped to a subscription,
+ * and the catalogue cache keeps ONE entry for the whole pool, so a per-account
+ * answer would make the dashboard's model list depend on which account happened
+ * to ask first.
+ */
+function anthropicModels(): Response {
+	return json({
+		data: providerModels("anthropic").map((id) => ({
+			type: "model",
+			id,
+			display_name: modelMeta(id).displayName,
+			created_at: modelMeta(id).createdAt,
+		})),
+		has_more: false,
+	});
+}
+
+/**
+ * `chatgpt.com/backend-api/codex/models`, the catalogue the Codex CLI reads at
+ * startup and the one entitlement-scoped list here — hence the asking account's
+ * own models.
+ *
+ * Real entries carry some thirty keys and the fetcher hands the body back
+ * untouched, so nothing downstream needs the rest: `slug` is required of every
+ * entry or the whole body is rejected, and `display_name` is what the Models
+ * page labels the entry with.
+ */
+function codexModels(account: MockAccount): Response {
+	return json({
+		models: account.models.map((id) => ({
+			slug: id,
+			display_name: modelMeta(id).displayName,
+		})),
+	});
+}
+
+/**
+ * `openrouter.ai/api/v1/models/user` — the models this key may call, so again
+ * the asking account's own. No `has_more` and no cursor, which is how the
+ * discovery pager recognizes a single complete page.
+ */
+function openrouterModels(account: MockAccount): Response {
+	return json({
+		data: account.models.map((id) => ({
+			id,
+			name: modelMeta(id).displayName,
+		})),
+	});
+}
+
+/**
+ * `openrouter.ai/api/v1/key`, the free key-metadata read behind the OpenRouter
+ * panel on the account card.
+ *
+ * Fixed figures rather than ones derived from the seeded request rows: nothing
+ * cross-checks the two, and anything computed from the capture time would move
+ * between re-captures for no gain. `limit_remaining` is `limit` minus `usage`,
+ * so the panel's rows agree with each other. The label is invented and never
+ * the key itself — the fetcher redacts a label that echoes the credential, and
+ * a stub leaning on that is a stub exercising the redactor.
+ */
+function openrouterKey(now: number): Response {
+	return json({
+		data: {
+			label: "northwind-ci",
+			creator_user_id: "user_northwind",
+			is_free_tier: false,
+			limit: 250,
+			limit_remaining: 121.56,
+			limit_reset: "monthly",
+			usage: 128.44,
+			usage_daily: 6.12,
+			usage_weekly: 38.9,
+			usage_monthly: 128.44,
+			expires_at: new Date(now + 120 * DAY_MS).toISOString(),
+		},
+	});
+}
+
+/**
  * The update check asks GitHub for the tip of the repo's main branch and
  * compares it to the running checkout's HEAD. Answering with the checkout's own
  * sha makes the sidebar read "up to date"; with no answer at all it reads
@@ -227,6 +374,23 @@ function main(): void {
 						],
 					},
 				});
+			}
+
+			if (url.pathname === "/v1/models") {
+				if (!account) return json({ error: { type: "authentication_error" } }, 401);
+				return anthropicModels();
+			}
+			if (url.pathname === "/backend-api/codex/models") {
+				if (!account) return json({ error: { type: "authentication_error" } }, 401);
+				return codexModels(account);
+			}
+			if (url.pathname === "/api/v1/models/user") {
+				if (!account) return json({ error: { type: "authentication_error" } }, 401);
+				return openrouterModels(account);
+			}
+			if (url.pathname === "/api/v1/key") {
+				if (!account) return json({ error: { type: "authentication_error" } }, 401);
+				return openrouterKey(now);
 			}
 
 			if (url.pathname.startsWith("/repos/") && headSha) {

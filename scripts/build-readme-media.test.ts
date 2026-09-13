@@ -282,7 +282,7 @@ describe("README media", () => {
 		// capture run, or a dropped dark variant reaches a published page as a
 		// broken image.
 		const readme = readFileSync(join(ROOT, "README.md"), "utf8");
-		const names = ["overview", "accounts", "limits", "analytics"];
+		const names = ["overview", "clients", "limits", "routing"];
 
 		for (const name of names) {
 			for (const theme of ["light", "dark"]) {
