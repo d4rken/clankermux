@@ -151,29 +151,6 @@ export const CACHE = {
 	CACHE_CONTROL_NO_CACHE: "no-cache, no-store, must-revalidate",
 } as const;
 
-// Request/Response limits
-export const LIMITS = {
-	// Request history limits
-	REQUEST_HISTORY_DEFAULT: 50,
-	REQUEST_DETAILS_DEFAULT: 100,
-	REQUEST_HISTORY_MAX: 1000,
-	LOG_READ_DEFAULT: 1000,
-
-	// Account name constraints
-	ACCOUNT_NAME_MIN_LENGTH: 1,
-	ACCOUNT_NAME_MAX_LENGTH: 100,
-
-	// UI formatting
-	CONSOLE_SEPARATOR_LENGTH: 100,
-	CONSOLE_COLUMN_PADDING: {
-		NAME: 20,
-		TYPE: 10,
-		REQUESTS: 12,
-		TOKEN: 10,
-		STATUS: 20,
-	},
-} as const;
-
 /**
  * Sanity ceiling for recorded output speed (tokens/sec). Values at or above
  * this threshold are measurement artifacts, not real inference rates — they

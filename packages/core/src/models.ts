@@ -69,11 +69,7 @@ export const MODEL_SHORT_NAMES: Record<string, string> = {
 // Check https://docs.anthropic.com/en/docs/about-claude/models for the current list.
 export const LATEST_OPUS_MODEL = CLAUDE_MODEL_IDS.OPUS_5;
 export const LATEST_SONNET_MODEL = CLAUDE_MODEL_IDS.SONNET_5;
-export const LATEST_HAIKU_MODEL = CLAUDE_MODEL_IDS.HAIKU_4_5;
 export const LATEST_FABLE_MODEL = CLAUDE_MODEL_IDS.FABLE_5_1;
-
-// Default model for various contexts
-export const DEFAULT_MODEL = CLAUDE_MODEL_IDS.SONNET_5;
 
 // Type for all valid model IDs
 export type ClaudeModelId =

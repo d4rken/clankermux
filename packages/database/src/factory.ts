@@ -57,7 +57,7 @@ export function getInstance(): DatabaseOperations {
 	return instance;
 }
 
-export function closeAll(): void {
+function closeAll(): void {
 	if (instance) {
 		unregisterDisposable(instance);
 		// Fire-and-forget close (sync-compatible)
@@ -73,6 +73,5 @@ export function reset(): void {
 export const DatabaseFactory = {
 	initialize,
 	getInstance,
-	closeAll,
 	reset,
 };

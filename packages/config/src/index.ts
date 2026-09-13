@@ -468,11 +468,6 @@ export class Config extends EventEmitter {
 		return 90000; // default: 90 seconds
 	}
 
-	setUsagePollIntervalMs(ms: number): void {
-		const clamped = this.clamp(ms, 10000, 3600000);
-		this.set("usage_poll_interval_ms", clamped);
-	}
-
 	getCacheWarmingMode(): CacheWarmingMode {
 		// 1. File mode field (only if valid).
 		const fromModeFile = this.data.cache_warming_mode;
