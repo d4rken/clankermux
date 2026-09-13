@@ -3,8 +3,7 @@ import { ArrowDown, ArrowUp, ChevronsUpDown } from "lucide-react";
 export type SortDir = "asc" | "desc";
 
 /**
- * Three-state sort chevron shared by the sortable analytics tables
- * (ModelPerformanceTable, ToolErrorsPanel): neutral double-chevron when the
+ * Three-state sort chevron: neutral double-chevron when the
  * column isn't the active sort key, otherwise a direction arrow.
  */
 export function SortIcon({ active, dir }: { active: boolean; dir: SortDir }) {
