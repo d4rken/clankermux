@@ -68,7 +68,7 @@ export class Logger {
 		this.prefix = prefix;
 		this.level = this.getLogLevelFromEnv() ?? level;
 		this.format = this.getFormatFromEnv();
-		// Only show console output in debug mode or if CLANKERMUX_DEBUG (or legacy BETTER_CCFLARE_DEBUG/ccflare_DEBUG) is set
+		// Only show console output in debug mode or if CLANKERMUX_DEBUG is set
 		this.silentConsole = !(isDebugEnabled() || this.level === LogLevel.DEBUG);
 	}
 

@@ -13,9 +13,9 @@
  *    storing the original client credentials would be both stale and a secret
  *    leak. `cookie` is stripped for the same secret-leak reason, but nothing
  *    re-injects it: the outbound path drops the client's cookies outright.
- *  - Internal x-clankermux-* routing/control headers (plus the legacy
- *    x-better-ccflare-account-id alias) are injected fresh by the keepalive
- *    scheduler at replay time, so the stored snapshot must not carry them.
+ *  - Internal x-clankermux-* routing/control headers are injected fresh by the
+ *    keepalive scheduler at replay time, so the stored snapshot must not carry
+ *    them.
  *  - Transport/framing headers (content-length, transfer-encoding, accept/content-
  *    encoding, connection, keep-alive, upgrade, host) describe the original hop and
  *    must not be replayed verbatim — they are recomputed for the synthetic request.
@@ -37,8 +37,6 @@ export const CACHE_REPLAY_STRIP_HEADERS = new Set([
 	"traceparent",
 	"tracestate",
 	"x-clankermux-account-id",
-	// Legacy alias still accepted on inbound requests (dual-accept), strip it too.
-	"x-better-ccflare-account-id",
 	"x-clankermux-bypass-session",
 	"x-clankermux-skip-cache",
 	"x-clankermux-keepalive",

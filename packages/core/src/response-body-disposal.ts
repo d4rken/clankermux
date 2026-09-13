@@ -15,8 +15,8 @@
  *     against a harness that reports a known 71 KB/req retention as 75. Bun
  *     closed the gap upstream; the `body.cancel()` cost fell from ~93 KB/req on
  *     1.3.2 to ~9 KB/req on main well before oven-sh/bun#35093, which is about
- *     `AbortController.abort()` and NOT about `cancel()` (a live misreading in
- *     the wild — better-ccflare v3.5.59 rewrote two call sites citing it).
+ *     `AbortController.abort()` and NOT about `cancel()` — a misreading that is
+ *     live in the wild, so expect to meet it again.
  *
  *     Drain-then-cancel is KEPT anyway: it measures at or below plain cancel on
  *     the current runtime, so there is nothing to win by reverting, and it is

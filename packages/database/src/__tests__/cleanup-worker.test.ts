@@ -25,7 +25,7 @@ import {
 } from "../incremental-vacuum-worker";
 
 function makeTempDir(): string {
-	return fs.mkdtempSync(path.join(os.tmpdir(), "ccflare-cleanup-test-"));
+	return fs.mkdtempSync(path.join(os.tmpdir(), "clankermux-cleanup-test-"));
 }
 
 /**

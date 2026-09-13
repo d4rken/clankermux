@@ -54,11 +54,9 @@ async function tryUnwrapSyntheticResponse(
 }
 
 /**
- * Matches every internal control header this proxy uses, current and future,
- * under both the current (`x-clankermux-*`) and legacy (`x-better-ccflare-*`)
- * prefixes.
+ * Matches every internal control header this proxy uses, current and future.
  */
-const INTERNAL_HEADER_PREFIX_PATTERN = /^x-(clankermux|better-ccflare)-/i;
+const INTERNAL_HEADER_PREFIX_PATTERN = /^x-clankermux-/i;
 
 /**
  * Deletes every internal control header from the FINAL outbound headers, as the

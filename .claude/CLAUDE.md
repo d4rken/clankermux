@@ -2,9 +2,7 @@
 
 ClankerMux (slug `clankermux`) — a multiplexing load-balancer proxy that fans
 requests across multiple backend accounts/providers (Anthropic, Codex/OpenAI, and
-others) through one front door to avoid rate limiting. Formerly
-`better-ccflare`; legacy `BETTER_CCFLARE_*` env vars and the
-`x-better-ccflare-account-id` header are still accepted.
+others) through one front door to avoid rate limiting.
 
 ## Never curl the Anthropic endpoint
 

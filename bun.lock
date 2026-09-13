@@ -3,7 +3,7 @@
   "configVersion": 0,
   "workspaces": {
     "": {
-      "name": "ccflare",
+      "name": "clankermux",
       "devDependencies": {
         "@biomejs/biome": "2.4.10",
         "@clankermux/test-support": "workspace:*",

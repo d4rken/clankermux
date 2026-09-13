@@ -25,7 +25,7 @@ import { DatabaseOperations } from "../database-operations";
 import { INCREMENTAL_VACUUM_BATCH_PAGES } from "../incremental-vacuum-worker";
 
 function makeTempDir(): string {
-	return fs.mkdtempSync(path.join(os.tmpdir(), "ccflare-vac-batch-test-"));
+	return fs.mkdtempSync(path.join(os.tmpdir(), "clankermux-vac-batch-test-"));
 }
 
 function freelistCount(dbPath: string): number {

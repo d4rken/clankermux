@@ -150,15 +150,12 @@ describe("makeProxyRequest — internal control header sweep", () => {
 		headers.set("x-clankermux-keepalive", "true");
 		headers.set("x-clankermux-request-stream", "true");
 		headers.set("x-clankermux-skip-cache", "true");
-		headers.set("x-better-ccflare-account-id", "acct-legacy");
 		headers.set("accept", "application/json");
 		return headers;
 	}
 
 	function expectSwept(sent: Headers): void {
-		const surviving = [...sent.keys()].filter((k) =>
-			/^x-(clankermux|better-ccflare)-/i.test(k),
-		);
+		const surviving = [...sent.keys()].filter((k) => /^x-clankermux-/i.test(k));
 		expect(surviving).toEqual([]);
 		// Ordinary headers must be untouched.
 		expect(sent.get("content-type")).toBe("application/json");

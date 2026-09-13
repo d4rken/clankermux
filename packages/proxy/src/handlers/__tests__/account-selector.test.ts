@@ -110,19 +110,37 @@ describe("forced destination selection", () => {
 		);
 		expect(ctx.strategy.select).not.toHaveBeenCalled();
 	});
-	it("prefers the current header when both header spellings are present", async () => {
+	it("force-routes to the account named by x-clankermux-account-id", async () => {
 		const ctx = makeCtx({
 			accounts: [makeAccount(), makeAccount({ id: "acc-2" })],
 		});
 		const meta = makeRequestMeta({
-			headers: new Headers({
-				"x-clankermux-account-id": "acc-2",
-				"x-better-ccflare-account-id": "acc-1",
-			}),
+			headers: new Headers({ "x-clankermux-account-id": "acc-2" }),
 		});
 		expect(
 			(await selectAccountsForRequest(meta, ctx)).map((a) => a.id),
 		).toEqual(["acc-2"]);
+	});
+	// The retired x-better-ccflare-account-id spelling appears here on purpose:
+	// this is the one place in the tree that still names it, pinning that it no
+	// longer force-routes anything.
+	it("ignores the retired x-better-ccflare-account-id header", async () => {
+		const accounts = [makeAccount(), makeAccount({ id: "acc-2" })];
+		const ctx: ProxyContext = {
+			strategy: { select: mock(() => [accounts[0]]) },
+			dbOps: { getAllAccounts: mock(async () => accounts) },
+			refreshInFlight: new Map(),
+			asyncWriter: { enqueue: mock(() => {}) },
+		} as unknown as ProxyContext;
+		const meta = makeRequestMeta({
+			headers: new Headers({ "x-better-ccflare-account-id": "acc-2" }),
+		});
+
+		// The ordinary pooled pick, not the account the retired header names.
+		expect(
+			(await selectAccountsForRequest(meta, ctx)).map((a) => a.id),
+		).toEqual(["acc-1"]);
+		expect(ctx.strategy.select).toHaveBeenCalled();
 	});
 });
 

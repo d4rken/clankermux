@@ -23,7 +23,9 @@ import {
 } from "../database-operations";
 
 function makeTempDbDir(): string {
-	return fs.mkdtempSync(path.join(os.tmpdir(), "ccflare-busy-timeout-test-"));
+	return fs.mkdtempSync(
+		path.join(os.tmpdir(), "clankermux-busy-timeout-test-"),
+	);
 }
 
 describe("configureSqlite: main-connection busy_timeout", () => {

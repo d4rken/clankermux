@@ -8,8 +8,8 @@
  * produced from the newest `migrations.ts` available when the repository went
  * public on 2026-05-13 — commit `0e4ad752` (2026-05-04). Anyone who cloned
  * between those two dates has exactly that schema, and nothing older is
- * supported: databases predating the public repository, including upstream
- * better-ccflare / ccflare ones, were deliberately dropped by `35b993f0`.
+ * supported: databases predating the public repository were deliberately
+ * dropped by `35b993f0`.
  *
  * ## How it was produced
  *

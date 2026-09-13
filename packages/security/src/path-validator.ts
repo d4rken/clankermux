@@ -232,11 +232,9 @@ export function getDefaultAllowedBasePaths(forceRefresh = false): string[] {
 
 	const paths: string[] = [];
 
-	// ClankerMux config directories (current + legacy), OS-independent.
-	// The project was renamed ccflare → better-ccflare → ClankerMux; allow the
-	// legacy dirs too so files created under a prior install still validate.
-	// (Inlined rather than imported from @clankermux/config to avoid a
-	// config → security → config dependency cycle.)
+	// ClankerMux config directory, OS-independent. Resolved here rather than
+	// imported from @clankermux/config to avoid a config → security → config
+	// dependency cycle.
 	try {
 		const home = homedir();
 		if (home) {
@@ -252,9 +250,7 @@ export function getDefaultAllowedBasePaths(forceRefresh = false): string[] {
 				const xdgConfig = process.env.XDG_CONFIG_HOME;
 				baseDir = xdgConfig ?? join(home, ".config");
 			}
-			for (const name of ["clankermux", "better-ccflare", "ccflare"]) {
-				paths.push(join(baseDir, name));
-			}
+			paths.push(join(baseDir, "clankermux"));
 		}
 	} catch {
 		// homedir() can fail in some environments

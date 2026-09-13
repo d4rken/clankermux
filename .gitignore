@@ -7,12 +7,6 @@ node_modules/
 .claude/scheduled_tasks.lock
 .planning/
 .codex
-ccflare.db
-ccflare.db-wal
-ccflare.db-shm
-better-ccflare.db
-better-ccflare.db-wal
-better-ccflare.db-shm
 clankermux.db
 clankermux.db-wal
 clankermux.db-shm
@@ -37,7 +31,6 @@ AGENTS.md
 !scripts/*.sh
 
 # Build artifacts and test files
-better-ccflare-*
 clankermux-*
 config.json
 ssl-cert-snakeoil.key

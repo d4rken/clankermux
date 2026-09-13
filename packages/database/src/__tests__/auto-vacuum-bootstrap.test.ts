@@ -23,7 +23,7 @@ import { ensureSchema } from "../migrations";
 
 function makeTempDbPath(): string {
 	return path.join(
-		fs.mkdtempSync(path.join(os.tmpdir(), "ccflare-autovac-test-")),
+		fs.mkdtempSync(path.join(os.tmpdir(), "clankermux-autovac-test-")),
 		"test.db",
 	);
 }
@@ -82,7 +82,9 @@ describe("DatabaseOperations.bootstrapAutoVacuum", () => {
 	let tmpDir: string;
 
 	beforeEach(() => {
-		tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "ccflare-bootstrap-test-"));
+		tmpDir = fs.mkdtempSync(
+			path.join(os.tmpdir(), "clankermux-bootstrap-test-"),
+		);
 		dbPath = path.join(tmpDir, "test.db");
 	});
 
@@ -175,7 +177,7 @@ describe("DatabaseOperations.incrementalVacuum: no destructive fallback", () => 
 	let tmpDir: string;
 
 	beforeEach(() => {
-		tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "ccflare-incvac-test-"));
+		tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "clankermux-incvac-test-"));
 		dbPath = path.join(tmpDir, "test.db");
 	});
 

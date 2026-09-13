@@ -20,8 +20,7 @@ on **8081** so you don't collide with the live service.
 
 Never send an automated request to a real Anthropic account — see the testing
 restriction in `CLAUDE.md`. Use a non-Anthropic account and force-route to it
-with `x-clankermux-account-id` (the legacy `x-better-ccflare-account-id` header
-is also accepted).
+with `x-clankermux-account-id`.
 
 Every wire-mount request needs a real client key; there is no keyless mode, and
 an arbitrary bearer such as `test` comes back 401. Create a client in the

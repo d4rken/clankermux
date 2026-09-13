@@ -51,9 +51,7 @@ mkdir -p "$WORK_DIR/config/clankermux" "$WORK_DIR/logs" "$OUT_DIR"
 # /tmp/clankermux-logs/app.log, which is the LIVE instance's log: a capture run
 # would append to it and, past 10 MiB, rotate it. CONFIG_PATH is set explicitly
 # because an inherited CLANKERMUX_CONFIG_PATH takes precedence over the
-# XDG_CONFIG_HOME redirect, which would otherwise be silently bypassed. The
-# legacy prefixes rank below CLANKERMUX_ in readEnv and so cannot win, but they
-# are cleared anyway so a stray one cannot surprise a future reader.
+# XDG_CONFIG_HOME redirect, which would otherwise be silently bypassed.
 export CLANKERMUX_LOG_DIR="$WORK_DIR/logs"
 # Must sit under $XDG_CONFIG_HOME/clankermux/: the config loader runs the path
 # through the security path-validator, which allows only the app's own directory
@@ -61,8 +59,6 @@ export CLANKERMUX_LOG_DIR="$WORK_DIR/logs"
 export CLANKERMUX_CONFIG_PATH="$WORK_DIR/config/clankermux/clankermux.json"
 export CLANKERMUX_DB_PATH="$WORK_DIR/mock.db"
 export XDG_CONFIG_HOME="$WORK_DIR/config"
-unset BETTER_CCFLARE_LOG_DIR BETTER_CCFLARE_CONFIG_PATH BETTER_CCFLARE_DB_PATH
-unset ccflare_LOG_DIR ccflare_CONFIG_PATH ccflare_DB_PATH
 
 # --- TLS: a throwaway CA and one leaf covering every stubbed host -------------
 # A CA rather than a bare self-signed leaf, because NODE_EXTRA_CA_CERTS is a

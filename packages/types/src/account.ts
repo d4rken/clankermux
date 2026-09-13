@@ -82,11 +82,6 @@ export type UsageExhaustionBinding = "weekly" | "session";
  */
 export const RATE_LIMIT_REASONS = [
 	"upstream_429_with_reset",
-	/** @deprecated written by ccflare ≤ v3.5.x when no-reset 429s used a 5h ban.
-	 *  v3.5.2+ emits `upstream_429_no_reset_probe_cooldown` for the same path
-	 *  with a configurable shorter default. Existing DB rows keep the old
-	 *  value for history. */
-	"upstream_429_no_reset_default_5h",
 	"upstream_429_no_reset_probe_cooldown",
 	"model_fallback_429",
 	"all_models_exhausted_429",
@@ -141,8 +136,8 @@ export function isRateLimitReason(value: string): value is RateLimitReason {
  *    synthesizes `now + 60s` for a bare 429, so a per-IP burst inherits it.
  *    Releasing a burst cooldown on account-quota evidence re-storms it.
  *  - `model_fallback_429`, `all_models_exhausted_429` — ambiguous cause.
- *  - `upstream_429_no_reset_probe_cooldown`, `upstream_429_no_reset_default_5h`
- *    — no reset header at all; cause unknown.
+ *  - `upstream_429_no_reset_probe_cooldown` — no reset header at all; cause
+ *    unknown.
  *  - `upstream_529_overloaded_with_reset` / `_no_reset` — provider overload, not
  *    an account quota.
  *  - `out_of_credits` — a billing floor that must expire on its own or clear on

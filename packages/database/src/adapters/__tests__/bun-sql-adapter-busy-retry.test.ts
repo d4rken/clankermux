@@ -208,7 +208,7 @@ describe("BunSqlAdapter withBusyRetry", () => {
 			// to 250ms (see MAIN_CONNECTION_BUSY_TIMEOUT_MS), so a write hitting
 			// a worker-held lock blocks the event loop for at most ~250ms at the
 			// C level, then the JS layer yields and retries via setTimeout.
-			const dir = mkdtempSync(join(tmpdir(), "ccflare-busy-contention-"));
+			const dir = mkdtempSync(join(tmpdir(), "clankermux-busy-contention-"));
 			const dbPath = join(dir, "contention.db");
 			const main = new Database(dbPath, { create: true });
 			const writer = new Database(dbPath);
@@ -262,7 +262,7 @@ describe("BunSqlAdapter withBusyRetry", () => {
 			// busy_timeout that checkpoint can come back busy while a worker
 			// holds the lock — shutdown must degrade gracefully (skip the
 			// truncate), never throw.
-			const dir = mkdtempSync(join(tmpdir(), "ccflare-busy-close-"));
+			const dir = mkdtempSync(join(tmpdir(), "clankermux-busy-close-"));
 			const dbPath = join(dir, "close.db");
 			const main = new Database(dbPath, { create: true });
 			const writer = new Database(dbPath);

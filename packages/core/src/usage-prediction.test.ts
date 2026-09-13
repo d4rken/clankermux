@@ -40,10 +40,7 @@ const MULTI_BOUNDARY_FIXTURE: PredictionPoint[] = [
 	fixturePoint(120, 22, FIXTURE_RESET_2),
 ];
 
-/**
- * Tests for the pure least-squares usage-exhaustion predictor
- * (ported/adapted from robsonek's tombii/better-ccflare#294).
- */
+/** Tests for the pure least-squares usage-exhaustion predictor. */
 describe("computeUsagePrediction", () => {
 	test("empty points -> insufficient_data", () => {
 		const pred = computeUsagePrediction([]);

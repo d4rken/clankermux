@@ -34,10 +34,8 @@ like this:
    non-quota cooldown the current code can write ceilings at 5 min, so a
    long lock that polling actively contradicts is worth one WARN — either
    a misclassified 429 (the Backup-2 model_fallback_429 incident) or a
-   genuine long server-directed penalty that usage cannot express. (The
-   legacy never-emitted `upstream_429_no_reset_default_5h` would draw one
-   WARN per lock if it ever reappeared — accepted.) Report-only — the
-   refusal itself is unchanged. The dedupe map is capped at 64 entries,
+   genuine long server-directed penalty that usage cannot express.
+   Report-only — the refusal itself is unchanged. The dedupe map is capped at 64 entries,
    oldest-evicted.
 3. The DB compare-and-clear re-asserts deadline + write instant + exact reason +
    the causal boundary in ONE `UPDATE`.

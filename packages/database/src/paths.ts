@@ -4,7 +4,7 @@ import { readEnv } from "@clankermux/core";
 
 export function resolveDbPath(): string {
 	// Check for explicit DB path from environment.
-	// readEnv honors CLANKERMUX_DB_PATH and the legacy BETTER_CCFLARE_/ccflare_ names.
+	// readEnv reads the prefixed CLANKERMUX_DB_PATH; a bare DB_PATH is ignored.
 	const explicitPath = readEnv("DB_PATH");
 	if (explicitPath) {
 		return explicitPath;

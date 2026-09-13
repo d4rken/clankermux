@@ -21,7 +21,7 @@ import * as path from "node:path";
 import { DatabaseOperations } from "../database-operations";
 
 function makeTempDbDir(): string {
-	return fs.mkdtempSync(path.join(os.tmpdir(), "ccflare-mmap-test-"));
+	return fs.mkdtempSync(path.join(os.tmpdir(), "clankermux-mmap-test-"));
 }
 
 describe("configureSqlite: mmap_size handling", () => {

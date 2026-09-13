@@ -93,8 +93,7 @@ export function splitSeries(
 /**
  * Pure least-squares usage-window exhaustion predictor.
  *
- * Ported/adapted from robsonek's upstream PR tombii/better-ccflare#294. Unlike
- * the legacy single-snapshot burn-rate (which averages in idle time), this fits
+ * Unlike a single-snapshot burn-rate (which averages in idle time), this fits
  * a regression over the *recent* snapshot segment, with reset/refund
  * segmentation, idle filtering, ±jitter tolerance on `resetsAt`, and confidence
  * gating. It is provider-agnostic: callers pass a normalized

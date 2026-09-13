@@ -1018,8 +1018,7 @@ export const ADDITIVE_COLUMNS: ReadonlyArray<{
 	// (0e4ad752, 2026-05-04), not the refactor's schema. The first seven columns
 	// below are exactly the gap between that floor and the current schema; the
 	// other 39 deleted columns need a database predating the public repository
-	// (private pre-public ClankerMux, or upstream better-ccflare / ccflare) and
-	// stay dropped, as the refactor intended.
+	// and stay dropped, as the refactor intended.
 	//
 	// DDL is copied verbatim from 35b993f0^ — never re-derived from the
 	// CREATE TABLE, whose types and defaults may have moved since.

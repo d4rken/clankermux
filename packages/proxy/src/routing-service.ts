@@ -59,10 +59,7 @@ export async function initializeRequestRoute(
 			providers: pin.pinnedProviders,
 		};
 	}
-	const headerAccountId =
-		meta.headers?.get("x-clankermux-account-id") ??
-		meta.headers?.get("x-better-ccflare-account-id") ??
-		null;
+	const headerAccountId = meta.headers?.get("x-clankermux-account-id") ?? null;
 	let maintenance: BuildRouteInput["maintenance"];
 	if (meta.internal) {
 		if (!headerAccountId)
