@@ -19,6 +19,7 @@ import type {
 } from "./analytics-worker";
 import { createCacheEffectivenessHandler as createDirectCacheEffectivenessHandler } from "./cache-effectiveness-direct";
 import { createCacheKeepaliveHistoryHandler as createDirectCacheKeepaliveHistoryHandler } from "./cache-keepalive-history-direct";
+import { EMBEDDED_ANALYTICS_WORKER_CODE } from "./inline-analytics-worker";
 import { createMemoryHistoryHandler as createDirectMemoryHistoryHandler } from "./memory-history-direct";
 import { createPaymentsSummaryDataHandler as createDirectPaymentsSummaryDataHandler } from "./payments-summary-direct";
 import { createPoolSizingHandler as createDirectPoolSizingHandler } from "./pool-sizing-direct";
@@ -153,6 +154,11 @@ export type DashboardWorkerLike = {
 	onerror: ((event: ErrorEvent) => void) | null;
 	onmessageerror: (() => void) | null;
 	unref?: () => void;
+	/**
+	 * Release the Blob object URL an embedded-path worker was spawned from.
+	 * Idempotent, and absent on the source-path worker and on test stubs.
+	 */
+	releaseSource?: () => void;
 };
 
 /**
@@ -584,10 +590,55 @@ function runDashboardWorker(
 	});
 }
 
+/**
+ * Spawn the real dashboard Worker: from the embedded base64 bundle when one was
+ * built, from the on-disk source otherwise (development, tests).
+ *
+ * The embedded path is what makes this worker exist at all in the compiled
+ * single-file binary — `bun build --compile` does not follow a
+ * `new URL("./analytics-worker.ts", import.meta.url)` target, so the file URL
+ * resolves to a `/$bunfs/root/…` path that is not there, and the failure
+ * surfaces only through `onerror`.
+ *
+ * The object URL is NOT revoked straight after `new Worker(url)`: Bun resolves
+ * it while the thread boots, and revoking synchronously fails the spawn with
+ * "Blob URL is missing". `releaseSource` is called on the worker's first
+ * message (proof its code loaded) or when its lane is torn down, whichever
+ * comes first — without it each lane reset would leak one blob for the process
+ * lifetime.
+ */
 function createRealDashboardWorker(): DashboardWorkerLike {
-	return new Worker(new URL("./analytics-worker.ts", import.meta.url).href, {
-		smol: true,
-	}) as unknown as DashboardWorkerLike;
+	if (!EMBEDDED_ANALYTICS_WORKER_CODE) {
+		return new Worker(new URL("./analytics-worker.ts", import.meta.url).href, {
+			smol: true,
+		}) as unknown as DashboardWorkerLike;
+	}
+
+	const code = Buffer.from(EMBEDDED_ANALYTICS_WORKER_CODE, "base64").toString(
+		"utf8",
+	);
+	let objectUrl: string | null = URL.createObjectURL(
+		new Blob([code], { type: "text/javascript" }),
+	);
+	let worker: Worker;
+	try {
+		worker = new Worker(objectUrl, { smol: true });
+	} catch (error) {
+		// Nothing will exist to release the URL later, so release it here — a
+		// throwing constructor would otherwise leak the blob for the process
+		// lifetime, once per failed spawn.
+		URL.revokeObjectURL(objectUrl);
+		objectUrl = null;
+		throw error;
+	}
+
+	const workerLike = worker as unknown as DashboardWorkerLike;
+	workerLike.releaseSource = () => {
+		if (objectUrl === null) return;
+		URL.revokeObjectURL(objectUrl);
+		objectUrl = null;
+	};
+	return workerLike;
 }
 
 function getDashboardWorker(lane: WorkerLane): DashboardWorkerLike {
@@ -608,6 +659,9 @@ function getDashboardWorker(lane: WorkerLane): DashboardWorkerLike {
 	// occupies the lane — silently reviving a wedged worker's watchdog, or
 	// killing a healthy replacement's in-flight reads.
 	worker.onmessage = (event: MessageEvent<AnalyticsWorkerResponse>) => {
+		// A message is proof the worker's code loaded, so the blob it was spawned
+		// from is no longer needed.
+		worker.releaseSource?.();
 		handleDashboardWorkerMessage(lane, worker, event.data);
 	};
 	worker.onerror = (event: ErrorEvent) => {
@@ -680,6 +734,7 @@ function resetLane(lane: WorkerLane, error: Error): void {
 	state.worker = undefined;
 
 	if (worker) {
+		worker.releaseSource?.();
 		try {
 			worker.terminate();
 		} catch {
