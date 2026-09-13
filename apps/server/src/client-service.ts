@@ -43,8 +43,11 @@ import {
 	readCodexEnvelope,
 	renderClientCatalogue,
 } from "./client-catalogue";
+import {
+	listLegacyOverrides,
+	renderLegacyCatalogue,
+} from "./legacy-catalogue-snapshot";
 import type { ModelCatalogService } from "./model-catalog-service";
-import { handleModelsRoute } from "./models-route";
 
 const FORMATS: ClientFormat[] = ["anthropic", "openai", "codex"];
 interface Deps {
@@ -107,8 +110,8 @@ export class ClientService {
 					},
 					12000,
 				),
-				modelCatalog.listOverrides("anthropic"),
-				modelCatalog.listOverrides("openai"),
+				listLegacyOverrides(this.deps.dbOps, "anthropic"),
+				listLegacyOverrides(this.deps.dbOps, "openai"),
 			]);
 		const rich = readCodexEnvelope(rawResult);
 		const raw = rich ? rawResult : null;
@@ -128,21 +131,14 @@ export class ClientService {
 					);
 		const catalogues = emptyCatalogues();
 		for (const format of FORMATS) {
-			const response = await handleModelsRoute(
-				new URL(
-					`http://migration/v1/models${format === "codex" ? "?client_version=1" : ""}`,
-				),
-				{
-					getCatalog: async () => raw,
-					staticModels: handleModelsRequest,
-					staticModelIds: modelCatalog.staticModelIds,
-					getAnthropicCatalog: async () => anthropic,
-					listOverrides: async (dialect) =>
-						dialect === "anthropic" ? anthropicOverrides : openaiOverrides,
-				},
-				id,
-				format === "anthropic" ? "anthropic" : "openai",
-			);
+			const response = await renderLegacyCatalogue(format, {
+				getCatalog: async () => raw,
+				staticModels: handleModelsRequest,
+				staticModelIds: modelCatalog.staticModelIds,
+				getAnthropicCatalog: async () => anthropic,
+				listOverrides: async (dialect) =>
+					dialect === "anthropic" ? anthropicOverrides : openaiOverrides,
+			});
 			const body = await response.json();
 			const isRich = format === "codex" && Array.isArray(body.models);
 			catalogues[format] = {
