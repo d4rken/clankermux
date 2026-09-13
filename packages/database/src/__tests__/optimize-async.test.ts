@@ -25,7 +25,7 @@ import * as path from "node:path";
 import { DatabaseOperations } from "../database-operations";
 
 function makeTempDir(): string {
-	return fs.mkdtempSync(path.join(os.tmpdir(), "ccflare-optimize-test-"));
+	return fs.mkdtempSync(path.join(os.tmpdir(), "clankermux-optimize-test-"));
 }
 
 describe("DatabaseOperations.optimizeAsync", () => {
