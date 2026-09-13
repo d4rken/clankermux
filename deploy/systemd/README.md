@@ -1,10 +1,9 @@
 # systemd deployment units
 
 `clankermux.service` is the base unit; the `.conf` files in
-`clankermux.service.d/` are drop-ins that modify it. The base unit and every
-drop-in except `runtime-floor.conf`, which is repo-only and not installed, are
-byte-for-byte copies of what is installed under `/etc/systemd/system/`, kept in
-the repo for review and reproducibility. The paths in them are this host's
+`clankermux.service.d/` are drop-ins that modify it. Both are byte-for-byte
+copies of what is installed under `/etc/systemd/system/`, kept in the repo for
+review and reproducibility. The paths in them are this host's
 (`darken`, `/home/darken/clankermux`, `/home/darken/.bun/bin/bun`), so another
 machine needs them edited, not just copied.
 
@@ -28,7 +27,7 @@ line, `00-verify-deps.conf` and `dashboard-build.conf` contribute nothing.
 | `clankermux.service.d/restart-backoff.conf` | Sets `[Unit] StartLimitIntervalSec=0` and `[Service] RestartSec=30`: retry forever, slowly. From the 2026-07-28 disk-full outage, where a crashing proxy tripped the start rate limiter and systemd left the unit dead for ~8.5 minutes after the cause had already cleared. |
 | `clankermux.service.d/backend-port.conf` | Moves the app to `127.0.0.1:8090` behind the Caddy front proxy (client-facing traffic stays on `:8080`, now owned by Caddy). Loopback binding also removes the management-API network exposure warning. **Apply only together with `deploy/caddy/`** — without Caddy on `:8080`, clients reach nothing. |
 | `clankermux.service.d/stop-timeout.conf` | Raises `TimeoutStopSec` to 330s so the in-app shutdown watchdog (`SHUTDOWN_WATCHDOG_MS` = 300s) can let long agentic streams finish draining — systemd's 90s default would SIGKILL mid-drain. Safe because the Caddy front holds new connections for the whole drain. Keep in sync with the watchdog and Caddy's `lb_try_duration 330s`. |
-| `clankermux.service.d/runtime-floor.conf` | Sets `RestartPreventExitStatus=78` so a runtime below the declared Bun floor (`.bun-version`, enforced at boot by `packages/core/src/bun-runtime-floor.ts`) fails once with a readable reason instead of looping. Exit 78 is used by no other path in the app, so ordinary crashes still restart. This drop-in exists only in the repo and is not installed on the live host, so the suppression is not currently in effect: a sub-floor Bun would retry indefinitely at the `RestartSec=30` that `restart-backoff.conf` sets. To apply it: `sudo cp deploy/systemd/clankermux.service.d/runtime-floor.conf /etc/systemd/system/clankermux.service.d/ && sudo systemctl daemon-reload && sudo systemctl restart clankermux.service`. |
+| `clankermux.service.d/runtime-floor.conf` | Sets `RestartPreventExitStatus=78` so a runtime below the declared Bun floor (`.bun-version`, enforced at boot by `packages/core/src/bun-runtime-floor.ts`) fails once with a readable reason instead of looping. Exit 78 is used by no other path in the app, so ordinary crashes still restart. Without it a sub-floor Bun would retry forever, because `restart-backoff.conf` sets `StartLimitIntervalSec=0` and nothing else stops the loop. |
 | `clankermux.service.d/hardening.conf` | Sandbox hardening (`ProtectSystem=strict`, capability/syscall/namespace restriction, etc.). Tuned for a home-dir source install: `ProtectHome` and `MemoryDenyWriteExecute` are intentionally unset (bun JIT needs W+X; the tree + DB live under `/home`). |
 
 ## Applying
@@ -74,10 +73,6 @@ sudo systemctl restart clankermux.service     # or scripts/restart.sh on a pinne
 systemctl is-active clankermux.service
 ```
 
-The glob also installs `runtime-floor.conf` if it is not already there, which is
-the same action the `runtime-floor.conf` row above describes; naming the files
-instead of globbing updates the others without applying it.
-
 The explicit restart is the step that applies the new configuration.
 `enable --now` is not a substitute for it: it starts an inactive unit and does
 nothing to an active one, so `is-active` would report success while the old
@@ -118,8 +113,8 @@ diff -r deploy/systemd/clankermux.service.d /etc/systemd/system/clankermux.servi
 diff deploy/systemd/clankermux.service /etc/systemd/system/clankermux.service
 ```
 
-The first should report only `zz-release.conf`, `debug.conf`,
-`runtime-floor.conf` and any `.bak-*` files; the second should print nothing.
+The first should report only `zz-release.conf`, `debug.conf` and any `.bak-*`
+files; the second should print nothing.
 Neither reaches `/etc/systemd/system.control/`, so a limit changed with
 `systemctl set-property` is invisible to this check.
 
