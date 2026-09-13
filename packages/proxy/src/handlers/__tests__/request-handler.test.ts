@@ -197,6 +197,9 @@ describe("makeProxyRequest — client hop metadata sweep", () => {
 	});
 	afterEach(() => {
 		globalThis.fetch = originalFetch;
+		// The jar makeProxyRequest uses is a process-wide singleton, so a cookie
+		// seeded here would follow every later chatgpt.com request in the run.
+		chatGptCloudflareCookieJar.clear();
 	});
 
 	function captureOutboundHeaders(): () => Headers {

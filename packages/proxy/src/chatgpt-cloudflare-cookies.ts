@@ -109,6 +109,12 @@ function isAllowedChatGptCookieUrl(url: URL): boolean {
 export class ChatGptCloudflareCookieJar {
 	private readonly cookiesByHost = new Map<string, Map<string, string>>();
 
+	/** Drop every stored cookie. Cloudflare re-issues on the next request, so
+	 * this costs one re-evaluation and nothing else. */
+	clear(): void {
+		this.cookiesByHost.clear();
+	}
+
 	captureFromResponse(url: string, response: Response): void {
 		let parsed: URL;
 		try {
