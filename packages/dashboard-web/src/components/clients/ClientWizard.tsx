@@ -93,7 +93,14 @@ export function ClientWizard({
 	const [review, setReview] = useState<ClientReview | null>(null);
 	const [busy, setBusy] = useState(false);
 	const [error, setError] = useState<string | null>(null);
-	const [initialized, setInitialized] = useState(!!client);
+	/** A new client still owes its one automatic catalogue seed. */
+	const [pendingSeed, setPendingSeed] = useState(!client);
+	/** The format that seed wrote, so an application change can withdraw it. */
+	const [seeded, setSeeded] = useState<ClientFormat | null>(null);
+	/** Formats the operator has edited. Sticky: editing back is still intent. */
+	const [touched, setTouched] = useState<ReadonlySet<ClientFormat>>(
+		() => new Set(),
+	);
 	const [custom, setCustom] = useState({
 		id: "",
 		target: "",
@@ -166,7 +173,12 @@ export function ClientWizard({
 			setBusy(false);
 		}
 	};
-	const updateModels = (models: ClientModel[]) =>
+	const markTouched = (f: ClientFormat) =>
+		setTouched((current) =>
+			current.has(f) ? current : new Set(current).add(f),
+		);
+	const updateModels = (models: ClientModel[]) => {
+		markTouched(format);
 		setDraft((d) => ({
 			...d,
 			catalogues: {
@@ -182,38 +194,90 @@ export function ClientWizard({
 				},
 			},
 		}));
-	const loadSuggestions = async (refresh = false) => {
+	};
+	/**
+	 * Suggestions for the current destinations, reusing the cached result when
+	 * they have not changed. Seeding must not depend on a fetch: an application
+	 * change reseeds without touching destinations.
+	 */
+	const ensureSuggestions = async (refresh = false) => {
+		if (
+			!refresh &&
+			suggestions &&
+			suggestionsDestinations.current === JSON.stringify(draft.destinations)
+		)
+			return suggestions;
 		const result = await clientRequest<ClientSuggestions>("/suggestions", {
 			destinations: draft.destinations,
 			refresh,
 		});
 		setSuggestions(result);
 		suggestionsDestinations.current = JSON.stringify(draft.destinations);
-		if (!initialized) {
-			setDraft((d) => ({
-				...d,
-				catalogues: Object.fromEntries(
-					(Object.keys(FORMATS) as ClientFormat[]).map((f) => [
-						f,
-						{
-							defaultModel: null,
-							models: result.models
-								.filter((m) => f !== "codex" || m.codexMetadataAvailable)
-								.map((m) =>
-									suggestedModel(
-										m.id,
-										m.displayName,
-										m.accountIds,
-										d.application,
-										f,
-									),
-								),
-						},
-					]),
-				) as ClientDraft["catalogues"],
-			}));
-			setInitialized(true);
+		return result;
+	};
+	const loadSuggestions = async (refresh = false) => {
+		const result = await ensureSuggestions(refresh);
+		if (!pendingSeed) return;
+		const preferred = preferredFormat(draft.application);
+		// An edited catalogue outranks a seed that is still owed to it.
+		if (touched.has(preferred)) {
+			setPendingSeed(false);
+			return;
 		}
+		setDraft((d) => ({
+			...d,
+			catalogues: {
+				...d.catalogues,
+				[preferred]: {
+					defaultModel: null,
+					models: result.models
+						.filter((m) => preferred !== "codex" || m.codexMetadataAvailable)
+						.map((m) =>
+							suggestedModel(
+								m.id,
+								m.displayName,
+								m.accountIds,
+								d.application,
+								preferred,
+							),
+						),
+				},
+			},
+		}));
+		setSeeded(preferred);
+		setPendingSeed(false);
+	};
+	/**
+	 * Move the automatic seed to the new application's format. Only formats the
+	 * operator has never edited are rewritten, so a hand-built catalogue — an
+	 * emptied one included — survives switching applications.
+	 */
+	const changeApplication = (application: ClientApplication) => {
+		const next = preferredFormat(application);
+		setFormat(next);
+		setDraft((d) => {
+			const previous = preferredFormat(d.application);
+			const drop =
+				previous !== next && seeded === previous && !touched.has(previous);
+			return {
+				...d,
+				application,
+				catalogues: drop
+					? {
+							...d.catalogues,
+							[previous]: { models: [], defaultModel: null },
+						}
+					: d.catalogues,
+			};
+		});
+		if (client) return;
+		const previous = preferredFormat(draft.application);
+		if (previous === next) return;
+		if (seeded === previous) setSeeded(null);
+		// Decide the pending seed in both directions. Returning to a format the
+		// operator has edited must WITHDRAW a seed armed by the trip away from it,
+		// or that seed lands on their work the next time the catalogue opens.
+		setPendingSeed(!touched.has(next));
 	};
 	const candidates = new Map<string, ClientModel>();
 	for (const m of suggestions?.models ?? [])
@@ -234,16 +298,24 @@ export function ClientWizard({
 			if (target > step && !draft.name.trim())
 				throw new Error("Enter a client name");
 			setReview(null);
-			if (
-				target === 2 &&
-				(!suggestions ||
-					suggestionsDestinations.current !==
-						JSON.stringify(draft.destinations))
-			)
-				await loadSuggestions();
+			if (target === 2) await loadSuggestions();
 			if (target === 3) {
-				if (!initialized)
+				if (pendingSeed)
 					throw new Error("Choose your catalogue models before reviewing");
+				const undecided = (Object.keys(FORMATS) as ClientFormat[]).find(
+					(f) =>
+						draft.catalogues[f].models.length > 0 &&
+						!draft.catalogues[f].models.some(
+							(m) => m.id === draft.catalogues[f].defaultModel,
+						),
+				);
+				if (undecided) {
+					setFormat(undecided);
+					setStep(2);
+					throw new Error(
+						`Choose a default model for ${FORMATS[undecided]} before reviewing`,
+					);
+				}
 				setReview(await clientRequest<ClientReview>("/review", draft));
 			}
 			setStep(target);
@@ -330,12 +402,12 @@ export function ClientWizard({
 							Application
 							<select
 								className={SELECT}
+								aria-label="Application"
+								disabled={busy}
 								value={draft.application}
-								onChange={(e) => {
-									const application = e.target.value as ClientApplication;
-									setDraft({ ...draft, application });
-									setFormat(preferredFormat(application));
-								}}
+								onChange={(e) =>
+									changeApplication(e.target.value as ClientApplication)
+								}
 							>
 								{Object.entries(APPLICATIONS).map(([value, label]) => (
 									<option key={value} value={value}>
@@ -357,6 +429,7 @@ export function ClientWizard({
 							Allowed destinations
 							<select
 								className={SELECT}
+								disabled={busy}
 								value={mode}
 								onChange={(e) =>
 									setDraft({
@@ -386,6 +459,7 @@ export function ClientWizard({
 								Account
 								<select
 									className={SELECT}
+									disabled={busy}
 									value={draft.destinations.accountId ?? ""}
 									onChange={(e) =>
 										setDraft({
@@ -412,6 +486,7 @@ export function ClientWizard({
 									<label key={provider} className="flex gap-2 items-center">
 										<input
 											type="checkbox"
+											disabled={busy}
 											checked={
 												draft.destinations.providers?.includes(provider) ??
 												false
@@ -686,8 +761,10 @@ export function ClientWizard({
 								Default model for setup
 								<select
 									className={SELECT}
+									disabled={!draft.catalogues[format].models.length}
 									value={draft.catalogues[format].defaultModel ?? ""}
-									onChange={(e) =>
+									onChange={(e) => {
+										markTouched(format);
 										setDraft({
 											...draft,
 											catalogues: {
@@ -697,10 +774,14 @@ export function ClientWizard({
 													defaultModel: e.target.value || null,
 												},
 											},
-										})
-									}
+										});
+									}}
 								>
-									<option value="">First selected model</option>
+									<option value="">
+										{draft.catalogues[format].models.length
+											? "Choose a default model"
+											: "No selected models"}
+									</option>
 									{draft.catalogues[format].models.map((m) => (
 										<option value={m.id} key={m.id}>
 											{m.displayName}
