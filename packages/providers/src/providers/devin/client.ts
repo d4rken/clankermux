@@ -59,7 +59,7 @@ export function devinMetadata(token: string, userJwt = "", discovery = false) {
 		userJwt,
 		ideName: discovery ? "chisel" : "devin-cli",
 		ideType: "chisel",
-		// Official CLI release manifest inspected 2026-09-11 (see docs/devin-swe2.md).
+		// Pinned to the official CLI release manifest, inspected 2026-09-11.
 		ideVersion: discovery ? "0.0.0-dev" : "3000.10.21",
 		extensionName: "chisel",
 		extensionVersion: discovery ? "0.0.0-dev" : "3000.10.21",

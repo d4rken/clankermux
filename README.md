@@ -85,8 +85,6 @@ for the OpenAI Responses and Chat Completions APIs.
   a Linux Mint panel applet for pooled quota and exhaustion forecasts.
 * [Clankermux Usage for macOS](https://github.com/d4rken/clankermux-macos-applet),
   the same for the macOS menu bar.
-* [Devin subscriptions and SWE-2](docs/devin-swe2.md), covering how to connect a
-  Devin account, its credential lifecycle and how its quota is reported.
 
 ## Running it persistently
 
