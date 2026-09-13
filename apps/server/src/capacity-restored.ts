@@ -29,11 +29,6 @@ export interface CapacityRestoredLogger {
  * headroom two seconds later and could only say so at DEBUG) or the provider
  * really directed a long penalty that usage cannot express — either deserves
  * one WARN. 30 minutes = 6× the largest current ceiling.
- *
- * Known qualification: the legacy `upstream_429_no_reset_default_5h` reason
- * (never emitted since ccflare ≤3.5.x) represented a legitimate 5-hour
- * cooldown. If a row with it ever reappeared it would draw one WARN per lock —
- * accepted noise over an exemption branch for a reason that cannot be written.
  */
 export const LOCK_CONTRADICTION_MIN_REMAINING_MS = 30 * 60 * 1000;
 

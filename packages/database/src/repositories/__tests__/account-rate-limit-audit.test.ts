@@ -115,18 +115,20 @@ describe("AccountRepository — setRateLimited with reason audit (issue #178)", 
 			expect(row.rate_limited_reason).toBe("upstream_429_with_reset");
 		});
 
-		it("stores rate_limited_reason when reason='upstream_429_no_reset_default_5h'", async () => {
+		it("stores rate_limited_reason when reason='upstream_429_no_reset_probe_cooldown'", async () => {
 			insertAccount(db, "acc-3");
 			const until = Date.now() + 5 * 60 * 60 * 1000;
 
 			await repo.setRateLimited(
 				"acc-3",
 				until,
-				"upstream_429_no_reset_default_5h",
+				"upstream_429_no_reset_probe_cooldown",
 			);
 
 			const row = getAudit(db, "acc-3");
-			expect(row.rate_limited_reason).toBe("upstream_429_no_reset_default_5h");
+			expect(row.rate_limited_reason).toBe(
+				"upstream_429_no_reset_probe_cooldown",
+			);
 		});
 
 		it("stores rate_limited_reason when reason='model_fallback_429'", async () => {

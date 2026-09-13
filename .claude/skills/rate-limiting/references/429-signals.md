@@ -38,7 +38,6 @@ Evidence source: `[ProxyOperations] Account X received 429 — headers: {...}`
 | `model_fallback_429` | burst intercept **and** the no-fallback path | ambiguous |
 | `all_models_exhausted_429` | every fallback model 429'd | ambiguous |
 | `upstream_429_no_reset_probe_cooldown` | 429 with no reset | no |
-| `upstream_429_no_reset_default_5h` | legacy (ccflare ≤3.5.x), never emitted now | — |
 | `upstream_529_overloaded_with_reset` / `_no_reset` | provider overload | no |
 | `out_of_credits` | overage header; long floor, bypasses backoff cap | billing |
 | `family_weekly_exhausted_429` | one family spent, account keeps headroom | **applies NO account-wide cooldown** |

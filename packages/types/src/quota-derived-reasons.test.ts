@@ -19,7 +19,6 @@ describe("isQuotaDerivedRateLimitReason", () => {
 		"upstream_429_with_reset",
 		"model_fallback_429",
 		"upstream_429_no_reset_probe_cooldown",
-		"upstream_429_no_reset_default_5h",
 		"upstream_529_overloaded_with_reset",
 		"upstream_529_overloaded_no_reset",
 		"out_of_credits",
