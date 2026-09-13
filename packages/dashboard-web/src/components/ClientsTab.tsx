@@ -311,7 +311,7 @@ export function ClientsTab() {
 												now - new Date(client.key.lastUsed).getTime() >= 0 &&
 												now - new Date(client.key.lastUsed).getTime() < 86400000
 													? "text-green-600 dark:text-green-400"
-													: undefined
+													: "text-foreground"
 											}
 										>
 											{client.key.lastUsed
