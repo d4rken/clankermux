@@ -536,9 +536,7 @@ describe("CodexProvider request conversion", () => {
 
 	it("downgrades efforts unsupported by the resolved Codex model", async () => {
 		const provider = new CodexProvider();
-		const account = {
-			model_mappings: JSON.stringify({ sonnet: "gpt-5.4-mini" }),
-		} as Parameters<typeof provider.transformRequestBody>[1];
+		const account = {} as Parameters<typeof provider.transformRequestBody>[1];
 
 		const request = new Request("https://example.com/v1/messages", {
 			method: "POST",
@@ -2119,9 +2117,7 @@ describe("CodexProvider.transformRequestBody", () => {
 
 	it("ignores a retired account mapping", async () => {
 		const provider = new CodexProvider();
-		const account = {
-			model_mappings: JSON.stringify({ sonnet: "gpt-5.3-codex-spark" }),
-		} as Parameters<typeof provider.transformRequestBody>[1];
+		const account = {} as Parameters<typeof provider.transformRequestBody>[1];
 		const request = new Request("https://example.com/v1/messages", {
 			method: "POST",
 			headers: { "content-type": "application/json" },
@@ -2140,11 +2136,7 @@ describe("CodexProvider.transformRequestBody", () => {
 
 	it("ignores a retired ordered model mapping", async () => {
 		const provider = new CodexProvider();
-		const account = {
-			model_mappings: JSON.stringify({
-				sonnet: ["gpt-5.3-codex-spark", "gpt-5.4"],
-			}),
-		} as Parameters<typeof provider.transformRequestBody>[1];
+		const account = {} as Parameters<typeof provider.transformRequestBody>[1];
 		const request = new Request("https://example.com/v1/messages", {
 			method: "POST",
 			headers: { "content-type": "application/json" },
@@ -2163,9 +2155,7 @@ describe("CodexProvider.transformRequestBody", () => {
 
 	it("does not apply family defaults in the adapter", async () => {
 		const provider = new CodexProvider();
-		const account = {
-			model_mappings: JSON.stringify({ sonnet: "gpt-5.3-codex-spark" }),
-		} as Parameters<typeof provider.transformRequestBody>[1];
+		const account = {} as Parameters<typeof provider.transformRequestBody>[1];
 		const request = new Request("https://example.com/v1/messages", {
 			method: "POST",
 			headers: { "content-type": "application/json" },
@@ -2216,7 +2206,6 @@ describe("CodexProvider prompt_cache_key derivation", () => {
 			request_count: 0,
 			total_requests: 0,
 			priority: 20,
-			model_mappings: null,
 			custom_endpoint: null,
 			...overrides,
 		}) as unknown as Parameters<CodexProvider["transformRequestBody"]>[1];
@@ -2599,7 +2588,6 @@ describe("CodexProvider ChatGPT-backend parameter sanitation", () => {
 			request_count: 0,
 			total_requests: 0,
 			priority: 20,
-			model_mappings: null,
 			custom_endpoint: null,
 			...overrides,
 		}) as unknown as Parameters<CodexProvider["transformRequestBody"]>[1];
@@ -2821,9 +2809,7 @@ describe("CodexProvider ChatGPT-backend parameter sanitation", () => {
 		// would send `none` where the target model's documented minimum is `low`.
 		const body = await translatedTransform(
 			{ model: "gpt-5.4-mini", reasoning: { effort: "minimal" } },
-			codexAccount({
-				model_mappings: JSON.stringify({ sonnet: "gpt-5.4-mini" }),
-			}),
+			codexAccount({}),
 		);
 		expect(body.model).toBe("gpt-5.4-mini");
 		expect(body.reasoning).toEqual({ effort: "low" });
@@ -2842,7 +2828,7 @@ describe("CodexProvider ChatGPT-backend parameter sanitation", () => {
 		// gpt-6-astra's catalog levels start at `low`; `none` is a 5.x-only value.
 		const body = await translatedTransform(
 			{ model: "gpt-6-astra", reasoning: { effort: "none" } },
-			codexAccount({ model_mappings: null }),
+			codexAccount(),
 		);
 		expect(body.model).toBe("gpt-6-astra");
 		expect(body.reasoning).toEqual({ effort: "low" });
@@ -2854,21 +2840,21 @@ describe("CodexProvider ChatGPT-backend parameter sanitation", () => {
 		// generation-aware clamp: preserved for GPT-6, lowered for 5.x.
 		const astraMax = await translatedTransform(
 			{ model: "gpt-6-astra", reasoning: { effort: "max" } },
-			codexAccount({ model_mappings: null }),
+			codexAccount(),
 		);
 		expect(astraMax.model).toBe("gpt-6-astra");
 		expect(astraMax.reasoning).toEqual({ effort: "max" });
 
 		const astraUltra = await translatedTransform(
 			{ model: "gpt-6-astra", reasoning: { effort: "ultra" } },
-			codexAccount({ model_mappings: null }),
+			codexAccount(),
 		);
 		expect(astraUltra.model).toBe("gpt-6-astra");
 		expect(astraUltra.reasoning).toEqual({ effort: "ultra" });
 
 		const solUltra = await translatedTransform(
 			{ model: "gpt-5.6-sol", reasoning: { effort: "ultra" } },
-			codexAccount({ model_mappings: null }),
+			codexAccount(),
 		);
 		expect(solUltra.model).toBe("gpt-5.6-sol");
 		expect(solUltra.reasoning).toEqual({ effort: "xhigh" });

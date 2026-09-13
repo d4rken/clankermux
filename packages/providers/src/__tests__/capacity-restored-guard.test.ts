@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, spyOn } from "bun:test";
+import { mockFetch } from "@clankermux/test-support";
 import {
 	type CapacityRestoredEvidence,
 	shouldReportCapacityRestored,
@@ -81,8 +82,8 @@ describe("usageCache capacity-restored reporting (level-triggered)", () => {
 	it("reports on EVERY healthy poll, without any prior usage-endpoint 429", async () => {
 		// The old gate only fired when the USAGE endpoint itself had 429'd, which
 		// is why the path was dead for two months.
-		fetchSpy = spyOn(globalThis, "fetch").mockImplementation(async () =>
-			usageResponse(healthyBody()),
+		fetchSpy = spyOn(globalThis, "fetch").mockImplementation(
+			mockFetch(async () => usageResponse(healthyBody())),
 		);
 		const calls: CapacityRestoredEvidence[] = [];
 		startPolling((e) => calls.push(e));
@@ -115,29 +116,31 @@ describe("usageCache capacity-restored reporting (level-triggered)", () => {
 		const weekly = new Date(Date.now() + 3 * 24 * 60 * 60 * 1000).toISOString();
 		const fable = new Date(Date.now() + 5 * 24 * 60 * 60 * 1000).toISOString();
 		const elapsed = new Date(Date.now() - 60 * 60 * 1000).toISOString();
-		fetchSpy = spyOn(globalThis, "fetch").mockImplementation(async () =>
-			usageResponse({
-				five_hour: { utilization: 10, resets_at: fiveHour },
-				seven_day: { utilization: 78, resets_at: weekly },
-				limits: [
-					{
-						kind: "weekly_scoped",
-						group: "weekly",
-						percent: 100,
-						resets_at: fable,
-						scope: { model: { id: "fable", display_name: "Fable" } },
-						is_active: true,
-					},
-					{
-						kind: "weekly_scoped",
-						group: "weekly",
-						percent: 0,
-						resets_at: elapsed,
-						scope: { model: { id: "opus", display_name: "Opus" } },
-						is_active: false,
-					},
-				],
-			}),
+		fetchSpy = spyOn(globalThis, "fetch").mockImplementation(
+			mockFetch(async () =>
+				usageResponse({
+					five_hour: { utilization: 10, resets_at: fiveHour },
+					seven_day: { utilization: 78, resets_at: weekly },
+					limits: [
+						{
+							kind: "weekly_scoped",
+							group: "weekly",
+							percent: 100,
+							resets_at: fable,
+							scope: { model: { id: "fable", display_name: "Fable" } },
+							is_active: true,
+						},
+						{
+							kind: "weekly_scoped",
+							group: "weekly",
+							percent: 0,
+							resets_at: elapsed,
+							scope: { model: { id: "opus", display_name: "Opus" } },
+							is_active: false,
+						},
+					],
+				}),
+			),
 		);
 		const calls: CapacityRestoredEvidence[] = [];
 		startPolling((e) => calls.push(e));
@@ -162,10 +165,12 @@ describe("usageCache capacity-restored reporting (level-triggered)", () => {
 	});
 
 	it("reports fetchStartedAt from BEFORE the request, not after it", async () => {
-		fetchSpy = spyOn(globalThis, "fetch").mockImplementation(async () => {
-			await settle(30);
-			return usageResponse(healthyBody());
-		});
+		fetchSpy = spyOn(globalThis, "fetch").mockImplementation(
+			mockFetch(async () => {
+				await settle(30);
+				return usageResponse(healthyBody());
+			}),
+		);
 		const calls: CapacityRestoredEvidence[] = [];
 		const before = Date.now();
 		startPolling((e) => calls.push(e));
@@ -180,11 +185,13 @@ describe("usageCache capacity-restored reporting (level-triggered)", () => {
 	});
 
 	it("reports (not vetoes) a spent extra_usage window — overage is the floor's business", async () => {
-		fetchSpy = spyOn(globalThis, "fetch").mockImplementation(async () =>
-			usageResponse({
-				...healthyBody(),
-				extra_usage: { utilization: 100, resets_at: future() },
-			}),
+		fetchSpy = spyOn(globalThis, "fetch").mockImplementation(
+			mockFetch(async () =>
+				usageResponse({
+					...healthyBody(),
+					extra_usage: { utilization: 100, resets_at: future() },
+				}),
+			),
 		);
 		const calls: CapacityRestoredEvidence[] = [];
 		startPolling((e) => calls.push(e));
@@ -195,11 +202,13 @@ describe("usageCache capacity-restored reporting (level-triggered)", () => {
 	});
 
 	it("does NOT report while the 5h session window is still spent (the representative covers both)", async () => {
-		fetchSpy = spyOn(globalThis, "fetch").mockImplementation(async () =>
-			usageResponse({
-				five_hour: { utilization: 100, resets_at: future() },
-				seven_day: { utilization: 10, resets_at: future() },
-			}),
+		fetchSpy = spyOn(globalThis, "fetch").mockImplementation(
+			mockFetch(async () =>
+				usageResponse({
+					five_hour: { utilization: 100, resets_at: future() },
+					seven_day: { utilization: 10, resets_at: future() },
+				}),
+			),
 		);
 		const calls: CapacityRestoredEvidence[] = [];
 		startPolling((e) => calls.push(e));
@@ -209,11 +218,13 @@ describe("usageCache capacity-restored reporting (level-triggered)", () => {
 	});
 
 	it("does NOT report when the OAuth-apps weekly window is still spent", async () => {
-		fetchSpy = spyOn(globalThis, "fetch").mockImplementation(async () =>
-			usageResponse({
-				...healthyBody(),
-				seven_day_oauth_apps: { utilization: 100, resets_at: future() },
-			}),
+		fetchSpy = spyOn(globalThis, "fetch").mockImplementation(
+			mockFetch(async () =>
+				usageResponse({
+					...healthyBody(),
+					seven_day_oauth_apps: { utilization: 100, resets_at: future() },
+				}),
+			),
 		);
 		const calls: CapacityRestoredEvidence[] = [];
 		startPolling((e) => calls.push(e));
@@ -223,17 +234,19 @@ describe("usageCache capacity-restored reporting (level-triggered)", () => {
 	});
 
 	it("does NOT report for a payload with no account-level evidence (null, never 0)", async () => {
-		fetchSpy = spyOn(globalThis, "fetch").mockImplementation(async () =>
-			usageResponse({
-				limits: [
-					{
-						kind: "weekly_scoped",
-						percent: 5,
-						resets_at: future(),
-						scope: { model: { display_name: "Claude Opus 4.8" } },
-					},
-				],
-			}),
+		fetchSpy = spyOn(globalThis, "fetch").mockImplementation(
+			mockFetch(async () =>
+				usageResponse({
+					limits: [
+						{
+							kind: "weekly_scoped",
+							percent: 5,
+							resets_at: future(),
+							scope: { model: { display_name: "Claude Opus 4.8" } },
+						},
+					],
+				}),
+			),
 		);
 		const calls: CapacityRestoredEvidence[] = [];
 		startPolling((e) => calls.push(e));
@@ -243,17 +256,19 @@ describe("usageCache capacity-restored reporting (level-triggered)", () => {
 	});
 
 	it("a superseded in-flight fetch neither caches nor invokes the callback", async () => {
-		let release: (() => void) | null = null;
+		let release: (() => void) | undefined;
 		let served = 0;
-		fetchSpy = spyOn(globalThis, "fetch").mockImplementation(async () => {
-			served++;
-			if (served === 1) {
-				await new Promise<void>((resolve) => {
-					release = resolve;
-				});
-			}
-			return usageResponse(healthyBody());
-		});
+		fetchSpy = spyOn(globalThis, "fetch").mockImplementation(
+			mockFetch(async () => {
+				served++;
+				if (served === 1) {
+					await new Promise<void>((resolve) => {
+						release = resolve;
+					});
+				}
+				return usageResponse(healthyBody());
+			}),
+		);
 
 		const genOneCalls: CapacityRestoredEvidence[] = [];
 		startPolling((e) => genOneCalls.push(e));
@@ -277,10 +292,10 @@ describe("usageCache capacity-restored reporting (level-triggered)", () => {
 	});
 
 	it("a superseded generation's token-provider rejection cannot halt the live poller", async () => {
-		fetchSpy = spyOn(globalThis, "fetch").mockImplementation(async () =>
-			usageResponse(healthyBody()),
+		fetchSpy = spyOn(globalThis, "fetch").mockImplementation(
+			mockFetch(async () => usageResponse(healthyBody())),
 		);
-		let releaseToken: (() => void) | null = null;
+		let releaseToken: (() => void) | undefined;
 		const slowFailingProvider = async () => {
 			await new Promise<void>((resolve) => {
 				releaseToken = resolve;

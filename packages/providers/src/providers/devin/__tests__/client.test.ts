@@ -44,40 +44,48 @@ describe("Devin account client", () => {
 				tokens.push(body.metadata?.apiKey ?? "");
 				expect(new Headers(init?.headers).has("authorization")).toBe(false);
 				return new Response(
-					toBinary(
-						GetUserJwtResponseSchema,
-						create(GetUserJwtResponseSchema, {
-							userJwt: `jwt-${tokens.length}`,
-						}),
+					new Uint8Array(
+						toBinary(
+							GetUserJwtResponseSchema,
+							create(GetUserJwtResponseSchema, {
+								userJwt: `jwt-${tokens.length}`,
+							}),
+						),
 					),
 				);
 			}
 			if (path.endsWith("GetCliModelConfigs"))
 				return new Response(
-					toBinary(
-						GetCliModelConfigsResponseSchema,
-						create(GetCliModelConfigsResponseSchema, {
-							clientModelConfigs: [
-								create(ClientModelConfigSchema, {
-									modelUid: "swe-2-high",
-									label: "SWE-2 High",
-									isDefaultModelInFamily: true,
-								}),
-								create(ClientModelConfigSchema, {
-									modelUid: "swe-2-max",
-									label: "SWE-2 Max",
-									disabled: true,
-								}),
-							],
-						}),
+					new Uint8Array(
+						toBinary(
+							GetCliModelConfigsResponseSchema,
+							create(GetCliModelConfigsResponseSchema, {
+								clientModelConfigs: [
+									create(ClientModelConfigSchema, {
+										modelUid: "swe-2-high",
+										label: "SWE-2 High",
+										isDefaultModelInFamily: true,
+									}),
+									create(ClientModelConfigSchema, {
+										modelUid: "swe-2-max",
+										label: "SWE-2 Max",
+										disabled: true,
+									}),
+								],
+							}),
+						),
 					),
 				);
 			return new Response(
-				toBinary(
-					GetUserStatusResponseSchema,
-					create(GetUserStatusResponseSchema, {
-						userStatus: create(UserStatusSchema, { email: "test@example.com" }),
-					}),
+				new Uint8Array(
+					toBinary(
+						GetUserStatusResponseSchema,
+						create(GetUserStatusResponseSchema, {
+							userStatus: create(UserStatusSchema, {
+								email: "test@example.com",
+							}),
+						}),
+					),
 				),
 			);
 		});
@@ -157,12 +165,14 @@ describe("Devin client cache and endpoint safety", () => {
 		const client = new DevinClient(async () => {
 			calls++;
 			return new Response(
-				toBinary(
-					GetUserJwtResponseSchema,
-					create(GetUserJwtResponseSchema, {
-						userJwt: "jwt",
-						customApiServerUrl: "https://attacker.example",
-					}),
+				new Uint8Array(
+					toBinary(
+						GetUserJwtResponseSchema,
+						create(GetUserJwtResponseSchema, {
+							userJwt: "jwt",
+							customApiServerUrl: "https://attacker.example",
+						}),
+					),
 				),
 			);
 		});

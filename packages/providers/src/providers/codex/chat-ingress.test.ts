@@ -42,7 +42,7 @@ async function run(
 				},
 			});
 			transferChatContext(synthetic, response);
-			return new CodexProvider().processResponse(response);
+			return new CodexProvider().processResponse(response, null);
 		},
 		{},
 	);
@@ -104,7 +104,7 @@ describe("strict Codex conversion for Chat ingress", () => {
 			requirements: { fields: [] },
 			defaultMaxTokens: 8192,
 		});
-		const r = await new CodexProvider().processResponse(raw);
+		const r = await new CodexProvider().processResponse(raw, null);
 		const reader = r.body?.getReader();
 		if (!reader) throw new Error("Missing stream");
 		const first = await reader.read();
@@ -230,7 +230,10 @@ it("streams interleaved Codex tool arguments without closing earlier calls", asy
 			function: { name: "f", parameters: { type: "object" } },
 		},
 	];
-	const name = translateChatRequest({ ...body, tools }).body.tools[0].name;
+	const translatedTool = translateChatRequest({ ...body, tools }).body
+		.tools?.[0];
+	if (!translatedTool) throw new Error("expected a translated tool");
+	const name = translatedTool.name;
 	const s =
 		frame("response.created", { response: { id: "r" } }) +
 		[0, 1]
@@ -283,7 +286,10 @@ it("bounds streamed Codex arguments before output_item.done", async () => {
 			function: { name: "f", parameters: { type: "object" } },
 		},
 	];
-	const name = translateChatRequest({ ...body, tools }).body.tools[0].name;
+	const translatedTool = translateChatRequest({ ...body, tools }).body
+		.tools?.[0];
+	if (!translatedTool) throw new Error("expected a translated tool");
+	const name = translatedTool.name;
 	const s =
 		frame("response.created", { response: { id: "r" } }) +
 		frame("response.output_item.added", {
@@ -310,7 +316,10 @@ it("rejects a successful terminal with an unfinished Codex call", async () => {
 			function: { name: "f", parameters: { type: "object" } },
 		},
 	];
-	const name = translateChatRequest({ ...body, tools }).body.tools[0].name;
+	const translatedTool = translateChatRequest({ ...body, tools }).body
+		.tools?.[0];
+	if (!translatedTool) throw new Error("expected a translated tool");
+	const name = translatedTool.name;
 	const r = await run(
 		frame("response.created", { response: { id: "r" } }) +
 			frame("response.output_item.added", {
@@ -335,7 +344,10 @@ it("rejects a Codex tool start without an output index", async () => {
 			function: { name: "f", parameters: { type: "object" } },
 		},
 	];
-	const name = translateChatRequest({ ...body, tools }).body.tools[0].name;
+	const translatedTool = translateChatRequest({ ...body, tools }).body
+		.tools?.[0];
+	if (!translatedTool) throw new Error("expected a translated tool");
+	const name = translatedTool.name;
 	const r = await run(
 		frame("response.created", { response: { id: "r" } }) +
 			frame("response.output_item.added", {
@@ -359,7 +371,10 @@ it("preserves partial overlapping Codex calls on output-limit termination", asyn
 			function: { name: "f", parameters: { type: "object" } },
 		},
 	];
-	const name = translateChatRequest({ ...body, tools }).body.tools[0].name;
+	const translatedTool = translateChatRequest({ ...body, tools }).body
+		.tools?.[0];
+	if (!translatedTool) throw new Error("expected a translated tool");
+	const name = translatedTool.name;
 	const s =
 		frame("response.created", { response: { id: "r" } }) +
 		[0, 1]

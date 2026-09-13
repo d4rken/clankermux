@@ -69,6 +69,7 @@ describe("Devin response translation", () => {
 			stream: true,
 		});
 		const reader = response.body?.getReader();
+		if (!reader) throw new Error("expected a readable body");
 		await reader.read();
 		await reader.cancel();
 		expect(cancelled).toBe(true);

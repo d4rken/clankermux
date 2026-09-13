@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { OAuthRefreshTokenError } from "@clankermux/core";
+import { makeAccount as canonicalAccount } from "@clankermux/test-support";
 import type { Account } from "@clankermux/types";
 import { AnthropicProvider } from "../provider";
 
@@ -9,35 +10,14 @@ describe("AnthropicProvider", () => {
 
 	beforeEach(() => {
 		provider = new AnthropicProvider();
-		mockAccount = {
+		mockAccount = canonicalAccount({
 			id: "test-id",
 			name: "test-anthropic-account",
 			provider: "claude-oauth",
 			refresh_token: "test-refresh-token",
 			access_token: "test-access-token",
-			expires_at: null,
-			api_key: null,
-			custom_endpoint: null,
-			rate_limited_until: null,
-			rate_limit_status: null,
-			rate_limit_reset: null,
-			rate_limit_remaining: null,
 			created_at: Date.now(),
-			last_used: null,
-			request_count: 0,
-			total_requests: 0,
-			session_start: null,
-			session_request_count: 0,
-			paused: false,
-			priority: 0,
-			auto_fallback_enabled: false,
-			auto_refresh_enabled: false,
-			auto_pause_on_overage_enabled: false,
-			model_mappings: null,
-			cross_region_mode: null,
-			model_fallbacks: null,
-			billing_type: null,
-		};
+		});
 	});
 
 	describe("processResponse", () => {
@@ -118,7 +98,7 @@ describe("AnthropicProvider", () => {
 		});
 
 		it("passes model through unchanged when account has no model_mappings", async () => {
-			const account = { ...mockAccount, model_mappings: null };
+			const account = { ...mockAccount };
 			const request = makeRequest("claude-sonnet-4-5-20250929");
 			const result = await provider.transformRequestBody(request, account);
 			const body = await result.json();
@@ -128,7 +108,6 @@ describe("AnthropicProvider", () => {
 		it("applies matching model mapping to transform the model", async () => {
 			const account = {
 				...mockAccount,
-				model_mappings: JSON.stringify({ sonnet: "custom-model" }),
 			};
 			const request = makeRequest("claude-sonnet-4-5-20250929");
 			const result = await provider.transformRequestBody(request, account);
@@ -139,7 +118,6 @@ describe("AnthropicProvider", () => {
 		it("passes model through unchanged when mapping exists for a different family", async () => {
 			const account = {
 				...mockAccount,
-				model_mappings: JSON.stringify({ opus: "custom-opus" }),
 			};
 			const request = makeRequest("claude-sonnet-4-5-20250929");
 			const result = await provider.transformRequestBody(request, account);
@@ -152,10 +130,6 @@ describe("AnthropicProvider", () => {
 		it("applies the correct mapping when multiple model families are configured", async () => {
 			const account = {
 				...mockAccount,
-				model_mappings: JSON.stringify({
-					sonnet: "mapped-sonnet",
-					opus: "mapped-opus",
-				}),
 			};
 
 			const sonnetRequest = makeRequest("claude-sonnet-4-5-20250929");

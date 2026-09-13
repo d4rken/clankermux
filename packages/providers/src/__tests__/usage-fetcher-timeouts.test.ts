@@ -8,6 +8,7 @@
  * ONLY channel that observes a locked account recovering.
  */
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { mockFetch } from "@clankermux/test-support";
 import { fetchAlibabaCodingPlanUsageData } from "../alibaba-coding-plan-usage-fetcher";
 import { fetchKiloUsageData } from "../kilo-usage-fetcher";
 import { fetchZaiUsageData } from "../zai-usage-fetcher";
@@ -51,9 +52,9 @@ describe("third-party usage fetchers are timeout-bounded", () => {
 		});
 
 		it(`${name}: an aborted fetch degrades to null, not a throw`, async () => {
-			globalThis.fetch = (async () => {
+			globalThis.fetch = mockFetch(async () => {
 				throw new DOMException("The operation was aborted.", "AbortError");
-			}) as typeof globalThis.fetch;
+			});
 
 			await expect(fetcher("test-key")).resolves.toBeNull();
 		});

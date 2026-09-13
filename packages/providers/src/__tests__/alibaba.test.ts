@@ -1,7 +1,26 @@
 import { beforeEach, describe, expect, it } from "bun:test";
 import type { OpenAIRequest } from "@clankermux/openai-formats";
+import { makeAccount } from "@clankermux/test-support";
 import type { Account } from "@clankermux/types";
 import { OpenAICompatibleProvider } from "../providers/openai/provider";
+
+/**
+ * The two conversion hooks are `protected`; the Alibaba behaviour under test is
+ * entirely inside them, so this subclass widens them to public rather than
+ * driving them through a full request round trip.
+ */
+class ConvertHookProvider extends OpenAICompatibleProvider {
+	public override beforeConvert(
+		body: Record<string, unknown>,
+		account?: Account,
+	): Account | undefined {
+		return super.beforeConvert(body, account);
+	}
+
+	public override afterConvert(body: OpenAIRequest): void {
+		super.afterConvert(body);
+	}
+}
 
 /** Exposes the private injectDashScopeReasoning method for testing. */
 type WithDashScopeReasoning = {
@@ -15,21 +34,19 @@ type WithDashScopeReasoning = {
 type OpenAIRequestWithThinking = OpenAIRequest & { enable_thinking?: boolean };
 
 describe("OpenAICompatibleProvider Alibaba Features", () => {
-	let provider: OpenAICompatibleProvider;
+	let provider: ConvertHookProvider;
 	let mockAccount: Account;
 
 	beforeEach(() => {
-		provider = new OpenAICompatibleProvider();
-		mockAccount = {
+		provider = new ConvertHookProvider();
+		mockAccount = makeAccount({
 			name: "test-dashscope",
 			provider: "openai-compatible",
 			custom_endpoint: "https://dashscope.aliyuncs.com/compatible-mode/v1",
 			refresh_token: "test-api-key",
 			priority: 1,
-			status: "active",
 			created_at: Date.now(),
-			updated_at: Date.now(),
-		} as Account;
+		});
 	});
 
 	describe("Alibaba caching injection", () => {

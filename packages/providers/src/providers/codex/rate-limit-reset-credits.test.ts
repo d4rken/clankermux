@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it } from "bun:test";
+import { mockFetch } from "@clankermux/test-support";
 import {
 	CODEX_RATE_LIMIT_RESET_CREDITS_CONSUME_ENDPOINT,
 	CODEX_RATE_LIMIT_RESET_CREDITS_ENDPOINT,
@@ -114,11 +115,11 @@ describe("fetchCodexRateLimitResetCredits", () => {
 	it("performs only a GET and returns normalized reset metadata", async () => {
 		let seenUrl = "";
 		let seenInit: RequestInit | undefined;
-		globalThis.fetch = (async (input, init) => {
+		globalThis.fetch = mockFetch(async (input, init) => {
 			seenUrl = String(input);
 			seenInit = init;
 			return Response.json({ available_count: 1, credits: [] });
-		}) as typeof fetch;
+		});
 
 		const result = await fetchCodexRateLimitResetCredits("secret-token");
 
@@ -136,10 +137,10 @@ describe("fetchCodexRateLimitResetCredits", () => {
 
 	it("forwards the ChatGPT workspace account id from the OAuth token", async () => {
 		let seenHeaders = new Headers();
-		globalThis.fetch = (async (_input, init) => {
+		globalThis.fetch = mockFetch(async (_input, init) => {
 			seenHeaders = new Headers(init?.headers);
 			return Response.json({ available_count: 0, credits: [] });
-		}) as typeof fetch;
+		});
 		const payload = Buffer.from(
 			JSON.stringify({
 				"https://api.openai.com/auth": {
@@ -154,8 +155,9 @@ describe("fetchCodexRateLimitResetCredits", () => {
 	});
 
 	it("returns a null summary on a non-success response but preserves its status", async () => {
-		globalThis.fetch = (async () =>
-			new Response("nope", { status: 404 })) as typeof fetch;
+		globalThis.fetch = mockFetch(
+			async () => new Response("nope", { status: 404 }),
+		);
 
 		await expect(fetchCodexRateLimitResetCredits("token")).resolves.toEqual({
 			summary: null,
@@ -166,8 +168,9 @@ describe("fetchCodexRateLimitResetCredits", () => {
 	// The 401 status is what lets the coordinator distinguish "this token was
 	// rejected" (force one refresh + retry) from any other failure.
 	it("preserves a 401 status so the caller can force a token refresh", async () => {
-		globalThis.fetch = (async () =>
-			new Response("unauthorized", { status: 401 })) as typeof fetch;
+		globalThis.fetch = mockFetch(
+			async () => new Response("unauthorized", { status: 401 }),
+		);
 
 		await expect(fetchCodexRateLimitResetCredits("token")).resolves.toEqual({
 			summary: null,
@@ -176,8 +179,9 @@ describe("fetchCodexRateLimitResetCredits", () => {
 	});
 
 	it("preserves a 500 status", async () => {
-		globalThis.fetch = (async () =>
-			new Response("boom", { status: 500 })) as typeof fetch;
+		globalThis.fetch = mockFetch(
+			async () => new Response("boom", { status: 500 }),
+		);
 
 		await expect(fetchCodexRateLimitResetCredits("token")).resolves.toEqual({
 			summary: null,
@@ -186,9 +190,9 @@ describe("fetchCodexRateLimitResetCredits", () => {
 	});
 
 	it("reports a null status when no response was received at all", async () => {
-		globalThis.fetch = (async () => {
+		globalThis.fetch = mockFetch(async () => {
 			throw new Error("network down");
-		}) as typeof fetch;
+		});
 
 		await expect(fetchCodexRateLimitResetCredits("token")).resolves.toEqual({
 			summary: null,
@@ -197,8 +201,7 @@ describe("fetchCodexRateLimitResetCredits", () => {
 	});
 
 	it("keeps the status when a 200 carries an unrecognized payload", async () => {
-		globalThis.fetch = (async () =>
-			Response.json({ nonsense: true })) as typeof fetch;
+		globalThis.fetch = mockFetch(async () => Response.json({ nonsense: true }));
 
 		await expect(fetchCodexRateLimitResetCredits("token")).resolves.toEqual({
 			summary: null,
@@ -256,11 +259,11 @@ describe("consumeCodexRateLimitResetCredit", () => {
 	it("posts the official payload and selected credit id", async () => {
 		let seenUrl = "";
 		let seenInit: RequestInit | undefined;
-		globalThis.fetch = (async (input, init) => {
+		globalThis.fetch = mockFetch(async (input, init) => {
 			seenUrl = String(input);
 			seenInit = init;
 			return Response.json({ code: "reset", windows_reset: 2 });
-		}) as typeof fetch;
+		});
 
 		const result = await consumeCodexRateLimitResetCredit("token", {
 			idempotencyKey: "redeem-123",
@@ -284,10 +287,10 @@ describe("consumeCodexRateLimitResetCredit", () => {
 
 	it("omits credit_id so OpenAI can select the next available reset", async () => {
 		let seenBody = "";
-		globalThis.fetch = (async (_input, init) => {
+		globalThis.fetch = mockFetch(async (_input, init) => {
 			seenBody = String(init?.body);
 			return Response.json({ code: "nothing_to_reset", windows_reset: 0 });
-		}) as typeof fetch;
+		});
 
 		await expect(
 			consumeCodexRateLimitResetCredit("token", {
@@ -300,16 +303,18 @@ describe("consumeCodexRateLimitResetCredit", () => {
 	});
 
 	it("throws on transport and contract failures instead of inventing an outcome", async () => {
-		globalThis.fetch = (async () =>
-			new Response("unavailable", { status: 503 })) as typeof fetch;
+		globalThis.fetch = mockFetch(
+			async () => new Response("unavailable", { status: 503 }),
+		);
 		await expect(
 			consumeCodexRateLimitResetCredit("token", {
 				idempotencyKey: "redeem-failure",
 			}),
 		).rejects.toThrow("503");
 
-		globalThis.fetch = (async () =>
-			Response.json({ code: "unexpected" })) as typeof fetch;
+		globalThis.fetch = mockFetch(async () =>
+			Response.json({ code: "unexpected" }),
+		);
 		await expect(
 			consumeCodexRateLimitResetCredit("token", {
 				idempotencyKey: "redeem-contract",

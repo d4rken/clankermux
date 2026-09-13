@@ -1,34 +1,20 @@
 import { describe, expect, it } from "bun:test";
+import { makeAccount as canonicalAccount } from "@clankermux/test-support";
 import type { Account } from "@clankermux/types";
 import { OllamaProvider } from "../provider";
 
 describe("OllamaProvider", () => {
 	const provider = new OllamaProvider();
 
-	const makeAccount = (custom_endpoint: string | null): Account => ({
-		id: "ollama-1",
-		name: "ollama-test",
-		provider: "ollama",
-		api_key: null,
-		refresh_token: "",
-		access_token: null,
-		expires_at: null,
-		request_count: 0,
-		total_requests: 0,
-		last_used: null,
-		created_at: Date.now(),
-		rate_limited_until: null,
-		session_start: null,
-		session_request_count: 0,
-		paused: false,
-		rate_limit_reset: null,
-		rate_limit_status: null,
-		rate_limit_remaining: null,
-		priority: 0,
-		auto_fallback_enabled: false,
-		auto_refresh_enabled: false,
-		custom_endpoint,
-	});
+	const makeAccount = (custom_endpoint: string | null): Account =>
+		canonicalAccount({
+			id: "ollama-1",
+			name: "ollama-test",
+			provider: "ollama",
+			refresh_token: "",
+			created_at: Date.now(),
+			custom_endpoint,
+		});
 
 	describe("constructor", () => {
 		it("instantiates without errors", () => {
@@ -83,7 +69,6 @@ describe("OllamaProvider", () => {
 		it("should map model via account.model_mappings exact match", async () => {
 			const account: Account = {
 				...makeAccount(null),
-				model_mappings: '{"claude-sonnet-4-5":"llama3.1"}',
 			};
 
 			const body = JSON.stringify({
@@ -105,7 +90,6 @@ describe("OllamaProvider", () => {
 		it("should pass through unmapped models unchanged", async () => {
 			const account: Account = {
 				...makeAccount(null),
-				model_mappings: '{"claude-sonnet-4-5":"llama3.1"}',
 			};
 
 			const body = JSON.stringify({
@@ -127,7 +111,6 @@ describe("OllamaProvider", () => {
 		it("should pass through unchanged when request has no model field", async () => {
 			const account: Account = {
 				...makeAccount(null),
-				model_mappings: '{"claude-sonnet-4-5":"llama3.1"}',
 			};
 
 			const body = JSON.stringify({
@@ -148,7 +131,6 @@ describe("OllamaProvider", () => {
 		it("should apply family-level pattern fallback", async () => {
 			const account: Account = {
 				...makeAccount(null),
-				model_mappings: '{"sonnet":"llama3.1","opus":"qwen3"}',
 			};
 
 			const body = JSON.stringify({
@@ -170,7 +152,6 @@ describe("OllamaProvider", () => {
 		it("should apply family-level fallback for opus models", async () => {
 			const account: Account = {
 				...makeAccount(null),
-				model_mappings: '{"opus":"qwen3"}',
 			};
 
 			const body = JSON.stringify({
@@ -231,8 +212,6 @@ describe("OllamaProvider", () => {
 		it("should prefer exact match over family match", async () => {
 			const account: Account = {
 				...makeAccount(null),
-				model_mappings:
-					'{"claude-sonnet-4-5":"llama3.1","claude-opus-4-6":"qwen3","sonnet":"gemma3"}',
 			};
 
 			const body = JSON.stringify({

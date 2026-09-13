@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { makeAccount } from "@clankermux/test-support";
 import { BaseProvider } from "../../../base";
 import {
 	type AnthropicCompatibleConfig,
@@ -49,10 +50,10 @@ describe("AnthropicCompatibleProvider", () => {
 		test("should handle API key authentication", async () => {
 			const provider = new AnthropicCompatibleProvider();
 
-			const mockAccount: Partial<Account> = {
+			const mockAccount = makeAccount({
 				name: "test-account",
 				refresh_token: "test-api-key",
-			};
+			});
 
 			const result = await provider.refreshToken(mockAccount, "test-client");
 
@@ -63,10 +64,10 @@ describe("AnthropicCompatibleProvider", () => {
 		test("should throw error when no API key available", async () => {
 			const provider = new AnthropicCompatibleProvider();
 
-			const mockAccount: Partial<Account> = {
+			const mockAccount = makeAccount({
 				name: "test-account",
 				refresh_token: "",
-			};
+			});
 
 			await expect(
 				provider.refreshToken(mockAccount, "test-client"),
@@ -239,12 +240,7 @@ describe("AnthropicCompatibleProvider", () => {
 
 	describe("Model Mapping", () => {
 		test("should transform request body with model mapping", async () => {
-			const config: AnthropicCompatibleConfig = {
-				modelMappings: {
-					"claude-3-sonnet": "custom-model-v1",
-					"claude-3-haiku": "custom-model-v2",
-				},
-			};
+			const config: AnthropicCompatibleConfig = {};
 
 			const provider = new AnthropicCompatibleProvider(config);
 
@@ -265,11 +261,7 @@ describe("AnthropicCompatibleProvider", () => {
 		});
 
 		test("should not transform request when model not in mapping", async () => {
-			const config: AnthropicCompatibleConfig = {
-				modelMappings: {
-					"claude-3-sonnet": "custom-model-v1",
-				},
-			};
+			const config: AnthropicCompatibleConfig = {};
 
 			const provider = new AnthropicCompatibleProvider(config);
 
@@ -290,11 +282,7 @@ describe("AnthropicCompatibleProvider", () => {
 		});
 
 		test("should not transform non-JSON requests", async () => {
-			const config: AnthropicCompatibleConfig = {
-				modelMappings: {
-					"claude-3-sonnet": "custom-model-v1",
-				},
-			};
+			const config: AnthropicCompatibleConfig = {};
 
 			const provider = new AnthropicCompatibleProvider(config);
 
@@ -384,9 +372,7 @@ describe("AnthropicCompatibleProvider", () => {
 
 	describe("Edge Cases", () => {
 		test("should handle empty model mapping object", async () => {
-			const config: AnthropicCompatibleConfig = {
-				modelMappings: {},
-			};
+			const config: AnthropicCompatibleConfig = {};
 
 			const provider = new AnthropicCompatibleProvider(config);
 
@@ -423,9 +409,6 @@ describe("Type Safety", () => {
 			name: "test-provider",
 			baseUrl: "https://test.api.com",
 			authHeader: "authorization",
-			modelMappings: {
-				"model-a": "mapped-model-a",
-			},
 			supportsStreaming: true,
 			defaultModel: "default-model",
 		};

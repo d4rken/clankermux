@@ -19,6 +19,7 @@
  * real short timers, per-test unique account ids.
  */
 import { afterEach, describe, expect, it, spyOn } from "bun:test";
+import { mockFetch } from "@clankermux/test-support";
 import { usageCache } from "../usage-fetcher";
 
 const wait = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -67,10 +68,12 @@ describe("UsageCache — initialDelayMs defers the first fetch, not registration
 		// even though the account's first scheduled poll has not happened yet.
 		const ACCOUNT = track("initial-delay-refresh-now");
 		let served = 0;
-		fetchSpy = spyOn(globalThis, "fetch").mockImplementation(async () => {
-			served++;
-			return healthyResponse();
-		});
+		fetchSpy = spyOn(globalThis, "fetch").mockImplementation(
+			mockFetch(async () => {
+				served++;
+				return healthyResponse();
+			}),
+		);
 
 		usageCache.startPolling(
 			ACCOUNT,
@@ -99,10 +102,12 @@ describe("UsageCache — initialDelayMs defers the first fetch, not registration
 	it("the deferred first fetch fires after the delay and arms the poll loop", async () => {
 		const ACCOUNT = track("initial-delay-first-fetch");
 		let served = 0;
-		fetchSpy = spyOn(globalThis, "fetch").mockImplementation(async () => {
-			served++;
-			return healthyResponse();
-		});
+		fetchSpy = spyOn(globalThis, "fetch").mockImplementation(
+			mockFetch(async () => {
+				served++;
+				return healthyResponse();
+			}),
+		);
 
 		usageCache.startPolling(
 			ACCOUNT,
@@ -130,10 +135,12 @@ describe("UsageCache — initialDelayMs defers the first fetch, not registration
 	it("stopPolling during the delay cancels the deferred first fetch", async () => {
 		const ACCOUNT = track("initial-delay-stop");
 		let served = 0;
-		fetchSpy = spyOn(globalThis, "fetch").mockImplementation(async () => {
-			served++;
-			return healthyResponse();
-		});
+		fetchSpy = spyOn(globalThis, "fetch").mockImplementation(
+			mockFetch(async () => {
+				served++;
+				return healthyResponse();
+			}),
+		);
 
 		usageCache.startPolling(
 			ACCOUNT,
@@ -157,8 +164,8 @@ describe("UsageCache — initialDelayMs defers the first fetch, not registration
 
 	it("a replacement startPolling during the delay supersedes the deferred first fetch", async () => {
 		const ACCOUNT = track("initial-delay-replace");
-		fetchSpy = spyOn(globalThis, "fetch").mockImplementation(async () =>
-			healthyResponse(),
+		fetchSpy = spyOn(globalThis, "fetch").mockImplementation(
+			mockFetch(async () => healthyResponse()),
 		);
 		let gen1TokenCalls = 0;
 		let gen2TokenCalls = 0;
@@ -208,10 +215,12 @@ describe("UsageCache — initialDelayMs defers the first fetch, not registration
 	it("no initialDelayMs → the first fetch stays immediate (add-account priming path)", async () => {
 		const ACCOUNT = track("initial-delay-absent");
 		let served = 0;
-		fetchSpy = spyOn(globalThis, "fetch").mockImplementation(async () => {
-			served++;
-			return healthyResponse();
-		});
+		fetchSpy = spyOn(globalThis, "fetch").mockImplementation(
+			mockFetch(async () => {
+				served++;
+				return healthyResponse();
+			}),
+		);
 
 		usageCache.startPolling(ACCOUNT, "token-1", "anthropic", HOUR);
 		await wait(30);
@@ -225,10 +234,12 @@ describe("UsageCache — initialDelayMs defers the first fetch, not registration
 		// idle re-arm only touches idle timers.
 		const ACCOUNT = track("initial-delay-note-activity");
 		let served = 0;
-		fetchSpy = spyOn(globalThis, "fetch").mockImplementation(async () => {
-			served++;
-			return healthyResponse();
-		});
+		fetchSpy = spyOn(globalThis, "fetch").mockImplementation(
+			mockFetch(async () => {
+				served++;
+				return healthyResponse();
+			}),
+		);
 
 		usageCache.startPolling(
 			ACCOUNT,
@@ -261,10 +272,12 @@ describe("UsageCache — initialDelayMs defers the first fetch, not registration
 		// 429 would permanently silence the account's polling.
 		const ACCOUNT = track("initial-delay-refresh-then-first");
 		let served = 0;
-		fetchSpy = spyOn(globalThis, "fetch").mockImplementation(async () => {
-			served++;
-			return healthyResponse();
-		});
+		fetchSpy = spyOn(globalThis, "fetch").mockImplementation(
+			mockFetch(async () => {
+				served++;
+				return healthyResponse();
+			}),
+		);
 
 		usageCache.startPolling(
 			ACCOUNT,

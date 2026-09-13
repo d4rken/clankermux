@@ -81,9 +81,6 @@
 		// entries above remain.
 		"packages/proxy/**/__tests__",
 		"packages/proxy/**/*.test.ts",
-		"packages/proxy/**/*.test.tsx",
-		"packages/providers/**/__tests__",
-		"packages/providers/**/*.test.ts",
-		"packages/providers/**/*.test.tsx"
+		"packages/proxy/**/*.test.tsx"
 	]
 }

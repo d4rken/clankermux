@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it } from "bun:test";
+import { makeAccount as canonicalAccount } from "@clankermux/test-support";
 import type { Account } from "@clankermux/types";
 import { KiloProvider } from "../provider";
 
@@ -8,30 +9,14 @@ describe("KiloProvider", () => {
 
 	beforeEach(() => {
 		provider = new KiloProvider();
-		mockAccount = {
+		mockAccount = canonicalAccount({
 			id: "test-id",
 			name: "test-kilo-account",
 			provider: "kilo",
 			refresh_token: "test-api-key",
-			access_token: null,
-			expires_at: null,
 			api_key: "test-api-key",
-			custom_endpoint: null,
-			rate_limited_until: null,
-			rate_limit_status: null,
-			rate_limit_reset: null,
-			rate_limit_remaining: null,
 			created_at: Date.now(),
-			last_used: null,
-			request_count: 0,
-			total_requests: 0,
-			session_start: null,
-			session_request_count: 0,
-			paused: false,
-			priority: 0,
-			auto_fallback_enabled: false,
-			auto_refresh_enabled: false,
-		};
+		});
 	});
 
 	describe("name", () => {

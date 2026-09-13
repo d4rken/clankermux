@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, spyOn } from "bun:test";
+import { mockFetch } from "@clankermux/test-support";
 import { classifyUsageFetchFailure, usageCache } from "../usage-fetcher";
 
 const EXPIRED_BODY = JSON.stringify({
@@ -70,8 +71,10 @@ describe("usageCache usage-permission-denied transitions", () => {
 
 	it("fires onUsagePermissionDenied once per transition and onUsageRecovered on recovery", async () => {
 		let mode: "expired" | "ok" = "expired";
-		fetchSpy = spyOn(globalThis, "fetch").mockImplementation(async () =>
-			mode === "expired" ? expiredResponse() : successResponse(),
+		fetchSpy = spyOn(globalThis, "fetch").mockImplementation(
+			mockFetch(async () =>
+				mode === "expired" ? expiredResponse() : successResponse(),
+			),
 		);
 
 		const expiredCalls: string[] = [];
@@ -107,8 +110,8 @@ describe("usageCache usage-permission-denied transitions", () => {
 	});
 
 	it("fires onUsageRecovered on the first success of the process (restart case)", async () => {
-		fetchSpy = spyOn(globalThis, "fetch").mockImplementation(async () =>
-			successResponse(),
+		fetchSpy = spyOn(globalThis, "fetch").mockImplementation(
+			mockFetch(async () => successResponse()),
 		);
 
 		const recoveredCalls: string[] = [];
