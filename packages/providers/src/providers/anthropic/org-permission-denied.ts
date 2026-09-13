@@ -1,7 +1,13 @@
 /** Organization-wide access denial, adapted from upstream v3.5.77 / PR #435.
- * A generic permission_error can be scoped to a model or feature. Only the
- * known machine code, or observed organization-disabled wording with NO code,
- * is sufficient to take the account out of rotation.
+ * A permission_error carrying a machine code is org-wide only for
+ * `oauth_not_allowed_for_organization`; the other codes scope to a model or
+ * feature. One with NO code is taken as org-wide.
+ *
+ * Matching on `error.message` was tried and dropped: Anthropic owns that copy
+ * and was observed sending two different wordings to one organization inside
+ * the same hour, so a reword would silently stop benching and put the 403 back
+ * in front of the client while healthy accounts sat in the pool. Nothing would
+ * have caught it, since the trigger is a change upstream, not here.
  */
 function isOrgPermissionDeniedBody(value: unknown): boolean {
 	if (!value || typeof value !== "object" || !("error" in value)) return false;
@@ -18,14 +24,7 @@ function isOrgPermissionDeniedBody(value: unknown): boolean {
 		if ("error_code" in error.details)
 			return error.details.error_code === "oauth_not_allowed_for_organization";
 	}
-	if (!("message" in error) || typeof error.message !== "string") return false;
-	return (
-		error.message.startsWith(
-			"Your organization has disabled Claude subscription access for Claude Code.",
-		) ||
-		error.message ===
-			"OAuth authentication is currently not allowed for this organization."
-	);
+	return true;
 }
 
 /** Inspect at most 16 KiB / 500 ms, preserving the original response. Cancel
