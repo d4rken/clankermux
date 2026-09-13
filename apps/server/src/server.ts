@@ -890,10 +890,6 @@ export default async function startServer(options?: {
 		anthropicCatalog: anthropicModelCatalog,
 		codexCatalog: codexModelCatalog,
 		staticModelIds: CODEX_MODELS,
-		listOverrides: (dialect) => dbOps.listModelOverrides(dialect),
-		upsertOverride: (input) => dbOps.upsertModelOverride(input),
-		removeOverride: (dialect, modelId) =>
-			dbOps.removeModelOverride(dialect, modelId),
 	});
 
 	const modelPermissions = new AccountModelPermissionService({
@@ -914,7 +910,6 @@ export default async function startServer(options?: {
 		config,
 		dbOps,
 		sessionAuth,
-		modelCatalog: modelCatalogService,
 		clients,
 		modelPermissions,
 		runtime: {

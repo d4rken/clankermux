@@ -63,7 +63,6 @@ export {
 	type ModelOverrideDialect,
 	ModelOverrideRepository,
 	type ModelOverrideRow,
-	type ModelOverrideUpsert,
 } from "./repositories/model-override.repository";
 export {
 	QuotaDriftResultRepository,
