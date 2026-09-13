@@ -68,8 +68,7 @@ import {
  * this module reuses rather than restating. The I/O lives in
  * `scripts/redistribution-backtest.ts`.
  *
- * WHAT IS SCORED, and why it is not what the handover asked for. Section 4 of
- * `docs/handover-demand-redistribution.md` proposed scoring POOL-OUT truth:
+ * WHAT IS SCORED, and why it is not POOL-OUT truth. The obvious target is
  * instants where every account of a servable class was at 100 % or paused. A
  * read-only scan of the whole recorded history (2026-06-02 to 2026-09-06)
  * found NO such instant for any multi-account class, in either window; the only
@@ -7466,7 +7465,7 @@ function besideBasisSection(scored: readonly BesideBasisScores[]): string[] {
 	return out;
 }
 
-/** The report, in the style of the existing `docs/prediction-backtest-*.md`. */
+/** The report: a Markdown document of parameter, cohort and scoring tables. */
 export function formatRedistributionReport(
 	input: RedistributionReportInput,
 ): string {

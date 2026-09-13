@@ -1735,8 +1735,7 @@ export function createAnalyticsHandler(context: APIContext) {
 			// applies identically to every block. Pin only windows up to the measured
 			// 24h range: request-first joins cut seconds off that view, but the 30d
 			// top-messages query regressed 3–7x. Leave wider ranges to SQLite, even
-			// with filters; their selectivity has not been measured. See
-			// docs/analytics-performance-2026-09-06.md for the paired comparisons.
+			// with filters; their selectivity has not been measured.
 			const pinToolRequestsFirst =
 				bucket.windowMs !== null && bucket.windowMs <= dayMs;
 			const toolErrorRows = await runPhase(

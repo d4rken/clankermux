@@ -152,7 +152,6 @@ export const MODEL_CONTEXT_WINDOWS: Record<string, number> = {
  * Astra's live catalog (client_version=0.153.1, 2026-09-07) reports
  * max_context_window=872000 on both pool accounts. Live requests completed
  * with 300,070 and 850,070 input tokens and correctly returned both markers.
- * See docs/astra-subscription-context-2026-09-07.md for the probe details.
  * The API window and pricing threshold do not define this subscription limit.
  * Other models retain existing routing ceilings until their larger windows
  * are verified.

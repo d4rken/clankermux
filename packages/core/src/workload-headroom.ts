@@ -377,10 +377,10 @@ function absenceFor(outcome: RunwayOutcome): HeadroomAbsence {
  * The question is marginal: if only THIS family's load changes by a factor m,
  * how does the pool fare. That needs f, the family's share of the account-wide
  * burn — the scoped window scales by m, but the account-wide windows scale by
- * only `1 + f(m - 1)`. f is not derivable from what this proxy records:
- * `docs/ledger-burn-feasibility.md` measured the token-to-percent relation as
- * indistinguishable from a future-token placebo, and the entry requirement it
- * failed on (resolution finer than the provider's 1% grid) is still unmet.
+ * only `1 + f(m - 1)`. f is not derivable from what this proxy records: the
+ * token-to-percent relation measured indistinguishable from a future-token
+ * placebo, and the entry requirement it failed on (resolution finer than the
+ * provider's 1% grid) is still unmet. Hence a bound below, not a measurement.
  *
  * f is nonetheless bounded in [0, 1], and the PESSIMISTIC end differs by side:
  *
