@@ -787,6 +787,7 @@ export class ClientService {
 					id: profile.apiKeyId,
 					name: draft.name,
 					hashed_key: hash!,
+					setup_key: apiKey!,
 					prefix_last_8: apiKeyLookupSuffix(apiKey!),
 					created_at: createdAt,
 					last_used: null,

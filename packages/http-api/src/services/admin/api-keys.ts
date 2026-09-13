@@ -57,6 +57,7 @@ export async function generateApiKey(
 	await dbOps.createApiKey({
 		id,
 		name: trimmedName,
+		setupKey: apiKey,
 		hashedKey,
 		prefixLast8,
 		createdAt: now,
@@ -115,6 +116,7 @@ export async function regenerateApiKey(
 		existing.hashedKey,
 		hashedKey,
 		prefixLast8,
+		apiKey,
 	);
 	if (!updated) {
 		// rotateSecret returns false for three distinct conditions covered by its

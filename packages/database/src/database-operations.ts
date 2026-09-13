@@ -2328,6 +2328,7 @@ OAuth tokens will need to be re-authenticated.
 	}
 
 	async createApiKey(apiKey: {
+		setupKey?: string;
 		id: string;
 		name: string;
 		hashedKey: string;
@@ -2347,6 +2348,7 @@ OAuth tokens will need to be re-authenticated.
 				id: apiKey.id,
 				name: apiKey.name,
 				hashed_key: apiKey.hashedKey,
+				setup_key: apiKey.setupKey ?? null,
 				prefix_last_8: apiKey.prefixLast8,
 				created_at: apiKey.createdAt,
 				last_used: apiKey.lastUsed || null,
@@ -2438,13 +2440,27 @@ OAuth tokens will need to be re-authenticated.
 		expectedHashedKey: string,
 		newHashedKey: string,
 		newPrefixLast8: string,
+		setupKey: string | null | { preserve: true } = null,
 	): Promise<boolean> {
 		return this.apiKeys.rotateSecret(
 			id,
 			expectedHashedKey,
 			newHashedKey,
 			newPrefixLast8,
+			setupKey,
 		);
+	}
+
+	async getApiKeySetupSecret(id: string): Promise<string | null> {
+		return this.apiKeys.getSetupSecret(id);
+	}
+
+	async saveApiKeySetupSecret(
+		id: string,
+		expectedHashedKey: string,
+		secret: string,
+	): Promise<boolean> {
+		return this.apiKeys.saveSetupSecret(id, expectedHashedKey, secret);
 	}
 
 	async countActiveApiKeys(): Promise<number> {

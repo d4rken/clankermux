@@ -2,7 +2,7 @@ import {
 	type DatabaseOperations,
 	RoutingConflictError,
 } from "@clankermux/database";
-import { BadRequest, NotFound } from "@clankermux/errors";
+import { BadRequest, Conflict, NotFound } from "@clankermux/errors";
 import type {
 	ClientReview,
 	ClientSuggestions,
@@ -58,11 +58,47 @@ export function createClientsHandler(
 				return ok(await manager.commit(body.token));
 			}
 			const match =
-				/^\/api\/clients\/([^/]+)(?:\/(enable|disable|rotate))?$/.exec(path);
+				/^\/api\/clients\/([^/]+)(?:\/(enable|disable|rotate|setup-key))?$/.exec(
+					path,
+				);
 			if (!match) throw NotFound("Client endpoint not found");
 			const id = decodeURIComponent(match[1]!);
 			const key = await dbOps.getApiKey(id);
 			if (!key) throw NotFound("Client not found");
+			if (match[2] === "setup-key") {
+				if (req.method === "GET")
+					return ok({ apiKey: await dbOps.getApiKeySetupSecret(id) });
+				if (req.method === "POST") {
+					let body: unknown;
+					try {
+						body = await req.json();
+					} catch {
+						throw BadRequest("Invalid JSON body");
+					}
+					if (
+						!body ||
+						typeof body !== "object" ||
+						!("apiKey" in body) ||
+						typeof body.apiKey !== "string" ||
+						!body.apiKey.length ||
+						body.apiKey.length > 512
+					)
+						throw BadRequest("Enter the existing API key for this client");
+					if (
+						!(await new NodeCryptoUtils().verifyApiKey(
+							body.apiKey,
+							key.hashedKey,
+						))
+					)
+						throw BadRequest("This API key does not match the client");
+					if (
+						!(await dbOps.saveApiKeySetupSecret(id, key.hashedKey, body.apiKey))
+					)
+						throw Conflict("Client changed; reopen setup and try again");
+					return ok({ apiKey: body.apiKey });
+				}
+			}
+
 			if (req.method === "DELETE" && !match[2]) {
 				await manager.remove(id);
 				return ok({ deleted: true });
@@ -86,6 +122,7 @@ export function createClientsHandler(
 							key.hashedKey,
 							await crypto.hashApiKey(apiKey),
 							apiKeyLookupSuffix(apiKey),
+							apiKey,
 						))
 					)
 						throw new RoutingConflictError(

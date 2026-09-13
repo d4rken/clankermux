@@ -183,6 +183,7 @@ export class AuthService {
 				keyRecord.hashedKey,
 				newHashedKey,
 				keyRecord.prefixLast8,
+				{ preserve: true },
 			);
 			if (!swapped) {
 				logger.debug(

@@ -355,6 +355,7 @@ export function ensureSchema(db: Database): void {
 			id TEXT PRIMARY KEY,
 			name TEXT NOT NULL UNIQUE,
 			hashed_key TEXT NOT NULL UNIQUE,
+			setup_key TEXT,
 			prefix_last_8 TEXT NOT NULL,
 			created_at INTEGER NOT NULL,
 			last_used INTEGER,
@@ -1128,6 +1129,12 @@ export const ADDITIVE_COLUMNS: ReadonlyArray<{
 		table: "api_keys",
 		column: "pinned_providers",
 		ddl: "ALTER TABLE api_keys ADD COLUMN pinned_providers TEXT",
+	},
+	// Recoverable credential for management setup exports, separate from auth hashes.
+	{
+		table: "api_keys",
+		column: "setup_key",
+		ddl: "ALTER TABLE api_keys ADD COLUMN setup_key TEXT",
 	},
 	// Committed JS heap at sample time; memory_snapshots first shipped with only
 	// rss/heap_used. Defensive rather than reachable from the floor — the table

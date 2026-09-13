@@ -6,7 +6,7 @@ Release candidate: `2026.9.52`. Implemented on `feat/clients-page` from `0e74558
 
 Clients replaces API Keys and Client Models in navigation. `/api-keys` and `/models` redirect to `/clients`. A client is one named installation, script, or integration with one existing API-key identity. Application presets cover Claude Code, Codex, OpenCode, Pi Agent, Oh My Pi, and generic clients.
 
-Setup selects the application, upstream destinations, advertised models and default, then reviews the result before atomically creating the client. The last screen reveals its key once and supplies copyable configuration. Existing clients can edit names, catalogues and destinations, rotate keys, enable/disable access, and delete their configuration. Activity means the last authenticated request, not an installation or connection status.
+Setup selects the application, upstream destinations, advertised models and default, then reviews the result before atomically creating the client. The last screen supplies copyable configuration with the client key filled in. Existing clients can edit names, catalogues and destinations, rotate keys, enable/disable access, and delete their configuration. Activity means the last authenticated request, not an installation or connection status.
 
 The six agreed decisions are implemented:
 
@@ -54,3 +54,14 @@ All five exited 0 and returned the mock response. Gateway routing records showed
 ## Deployment candidate validation
 
 After integrating `2694ce1b`, release candidate `2026.9.52` passed lint, typecheck, all 10,460 backend tests across 668 files, all 184 DOM tests, and the dashboard build. The integration preserves the newer `/usage` route and navigation while adding Clients.
+
+
+## Clients polish (feat/clients-polish)
+
+Clients appear in an alphabetical list with compact action menus. Last-request times are green for activity within the past 24 hours and refresh once per minute. Wizard steps are directly accessible; catalogue tabs show independent selection counts and save together after a fresh review. Model rows are compact, with a scroll area that grows with the viewport and a footer that remains available while scrolling.
+
+Setup instructions load the saved key only while the dialog is open. A nullable `api_keys.setup_key` column follows the existing upstream credential storage convention. Authentication still uses hashes; client/key listings never include the recoverable secret. New-client creation, compatibility API key creation, and rotation persist it atomically. Legacy hash-format upgrades preserve it. Existing hash-only keys cannot be recovered: paste the existing key once to save it without changing the identity, or explicitly rotate it. Imports verify the current hash and reject concurrent rotations. The management setup-key endpoint returns `private, no-store`.
+
+Claude Code offers `settings.json` and shell exports. Other applications retain their native JSON, TOML or YAML configuration. Codex keeps its required environment command alongside the TOML export, with a separate copy button; Pi and Oh My Pi retain launch commands. Setup data is component-local and discarded on closing the dialog.
+
+Validation: 10,469 backend tests and 190 DOM tests pass, including key import/retrieval, rotation races, legacy scrypt upgrades, compatibility API creation, catalogue navigation, per-format edits, and setup dialog lifecycle. Lint, typecheck and dashboard build pass. Isolated Chromium checks use synthetic data and cover desktop/mobile layout, export switching, fetch-on-open, and viewport resizing. The CLI acceptance above belongs to the original release; this polish adds no inference-path changes and did not repeat those harness runs.
