@@ -22,7 +22,6 @@ import {
 	stopEventLoopMonitor,
 	TIME_CONSTANTS,
 } from "@clankermux/core";
-import { container, SERVICE_KEYS } from "@clankermux/core-di";
 import type { DatabaseOperations } from "@clankermux/database";
 import {
 	AsyncDbWriter,
@@ -726,10 +725,6 @@ export default async function startServer(options?: {
 		}
 	}
 
-	// Initialize DI container
-	container.registerInstance(SERVICE_KEYS.Config, new Config());
-	container.registerInstance(SERVICE_KEYS.Logger, new Logger("Server"));
-
 	// Initialize payload encryption (no-op if PAYLOAD_ENCRYPTION_KEY is unset).
 	// This must run before any database operations that read/write payloads.
 	// The RequestRecorder writes payloads on this thread, so initializing the
@@ -737,7 +732,7 @@ export default async function startServer(options?: {
 	await initPayloadEncryption();
 
 	// Initialize components
-	const config = container.resolve<Config>(SERVICE_KEYS.Config);
+	const config = new Config();
 	const runtime = config.getRuntime();
 	// Override port if provided
 	if (port !== runtime.port) {
@@ -796,8 +791,7 @@ export default async function startServer(options?: {
 	stopIntegritySchedulerJob = startIntegrityScheduler(dbOps);
 
 	const db = dbOps.getAdapter();
-	const log = container.resolve<Logger>(SERVICE_KEYS.Logger);
-	container.registerInstance(SERVICE_KEYS.Database, dbOps);
+	const log = new Logger("Server");
 
 	// Initialize async DB writer. It owns the off-thread payload writer: the
 	// factory is only invoked on the first payload publication, so a run that
@@ -811,7 +805,6 @@ export default async function startServer(options?: {
 			getPayloadRetentionMs: () => config.getPayloadRetentionMs(),
 		}),
 	});
-	container.registerInstance(SERVICE_KEYS.AsyncWriter, asyncWriter);
 	registerDisposable(asyncWriter);
 
 	// Initialize the main-thread request recorder. It owns all request
@@ -835,7 +828,6 @@ export default async function startServer(options?: {
 
 	// Initialize pricing logger
 	const pricingLogger = new Logger("Pricing");
-	container.registerInstance(SERVICE_KEYS.PricingLogger, pricingLogger);
 	setPricingLogger(pricingLogger);
 
 	// Strategy is constructed below after RuntimeConfig is built. The router

@@ -22,7 +22,6 @@
       "dependencies": {
         "@clankermux/config": "workspace:*",
         "@clankermux/core": "workspace:*",
-        "@clankermux/core-di": "workspace:*",
         "@clankermux/dashboard-web": "workspace:*",
         "@clankermux/database": "workspace:*",
         "@clankermux/http-api": "workspace:*",
@@ -54,10 +53,6 @@
       "dependencies": {
         "@clankermux/types": "workspace:*",
       },
-    },
-    "packages/core-di": {
-      "name": "@clankermux/core-di",
-      "version": "0.1.0",
     },
     "packages/dashboard-web": {
       "name": "@clankermux/dashboard-web",
@@ -288,8 +283,6 @@
     "@clankermux/config": ["@clankermux/config@workspace:packages/config"],
 
     "@clankermux/core": ["@clankermux/core@workspace:packages/core"],
-
-    "@clankermux/core-di": ["@clankermux/core-di@workspace:packages/core-di"],
 
     "@clankermux/dashboard-web": ["@clankermux/dashboard-web@workspace:packages/dashboard-web"],
 
