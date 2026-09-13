@@ -1,7 +1,7 @@
 /**
  * The fiction behind the README screenshots.
  *
- * Every name here is invented. The screenshots in `docs/media/` are captures of
+ * Every name here is invented. The screenshots in `.assets/` are captures of
  * a REAL ClankerMux instance, so whatever this file says is what the world sees
  * — it must never acquire a real account name, address, organization, project
  * or spend figure. See `scripts/build-readme-screenshots.ts` for how it is used.
