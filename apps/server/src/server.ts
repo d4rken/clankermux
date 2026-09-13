@@ -269,7 +269,6 @@ function serveDashboardFile(
 // Module-level server instance
 let serverInstance: ReturnType<typeof serve> | null = null;
 let registeredServerId: string | null = null;
-let stopRetentionJob: (() => void) | null = null;
 let stopOAuthCleanupJob: (() => void) | null = null;
 let stopManagementSessionSweepJob: (() => void) | null = null;
 let stopRateLimitCleanupJob: (() => void) | null = null;
@@ -297,7 +296,7 @@ let tlsEnabled = false;
 async function runStartupMaintenance(
 	config: Config,
 	dbOps: DatabaseOperations,
-) {
+): Promise<void> {
 	const log = new Logger("StartupMaintenance");
 	try {
 		const payloadHours = config.getPayloadRetentionHours();
@@ -361,8 +360,6 @@ async function runStartupMaintenance(
 	} catch (err) {
 		log.error(`Rate limit cleanup error: ${err}`);
 	}
-	// Return a no-op stopper for compatibility
-	return () => {};
 }
 
 /**
@@ -739,7 +736,7 @@ export default async function startServer(options?: {
 		runtime.port = port;
 	}
 	DatabaseFactory.initialize(undefined, runtime);
-	const dbOps = await DatabaseFactory.getInstanceAsync();
+	const dbOps = DatabaseFactory.getInstance();
 
 	// One-time migration: promote pre-existing DBs from auto_vacuum=NONE to
 	// INCREMENTAL. Fresh DBs created since ensureSchema() started issuing
@@ -1011,7 +1008,6 @@ export default async function startServer(options?: {
 	runStartupMaintenance(config, dbOps).catch((err) => {
 		log.error("Startup maintenance failed:", err);
 	});
-	stopRetentionJob = () => {}; // No-op stopper
 
 	// Set up periodic OAuth session cleanup (every hour)
 	const unregisterOAuthCleanup = registerCleanup({
@@ -1212,11 +1208,6 @@ export default async function startServer(options?: {
 			"client_id",
 			"9d1c250a-e61b-44d9-88ed-5944d1962f5e",
 		) as string,
-		retry: {
-			attempts: config.get("retry_attempts", 3) as number,
-			delayMs: config.get("retry_delay_ms", 1000) as number,
-			backoff: config.get("retry_backoff", 2) as number,
-		},
 		sessionDurationMs: config.get(
 			"session_duration_ms",
 			TIME_CONSTANTS.SESSION_DURATION_DEFAULT,
@@ -2046,10 +2037,6 @@ async function handleGracefulShutdown(signal: string) {
 		// Stop scheduler triggers first so they don't add load while draining.
 		// These calls only stop the recurring trigger; any in-flight task they
 		// already kicked off continues until it finishes naturally.
-		if (stopRetentionJob) {
-			stopRetentionJob();
-			stopRetentionJob = null;
-		}
 		if (stopOAuthCleanupJob) {
 			stopOAuthCleanupJob();
 			stopOAuthCleanupJob = null;

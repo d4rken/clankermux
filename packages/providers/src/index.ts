@@ -15,13 +15,6 @@ export * from "./kilo-usage-fetcher";
 export * from "./minimax-usage-fetcher";
 // Export OAuth utilities
 export * from "./oauth";
-// Factory functions for creating providers
-export {
-	type AnthropicCompatibleConfig,
-	createAnthropicCompatibleProvider,
-	createProviderForService,
-	PresetProviders,
-} from "./providers/anthropic-compatible/factory";
 // Export providers
 export * from "./providers/index";
 // Export registry functions

@@ -42,7 +42,6 @@ export const TIME_CONSTANTS = {
 	STREAM_FORWARD_TOTAL_TIMEOUT_MS: 30 * 60 * 1000, // 30 minutes (max total stream duration)
 	STREAM_FORWARD_CHUNK_TIMEOUT_MS: 5 * 60 * 1000, // 5 minutes (max silence between chunks)
 	OAUTH_STATE_TTL: 10, // 10 minutes (stored separately as minutes)
-	RETRY_DELAY_DEFAULT: 1000, // 1 second
 	PROXY_REQUEST_TIMEOUT_MS: 30 * 60 * 1000, // 30 minutes — covers long agent calls
 
 	// Cache durations

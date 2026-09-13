@@ -3,10 +3,7 @@ import { BaseProvider } from "../../../base";
 import {
 	type AnthropicCompatibleConfig,
 	AnthropicCompatibleProvider,
-	createAnthropicCompatibleProvider,
-	createProviderForService,
-	PresetProviders,
-} from "../factory";
+} from "../provider";
 
 describe("AnthropicCompatibleProvider", () => {
 	describe("Basic Configuration", () => {
@@ -382,40 +379,6 @@ describe("AnthropicCompatibleProvider", () => {
 			});
 
 			expect(provider.isStreamingResponse(streamingResponse)).toBe(false);
-		});
-	});
-
-	describe("Factory Functions", () => {
-		test("should create provider with factory function", () => {
-			const config: AnthropicCompatibleConfig = {
-				name: "factory-provider",
-				baseUrl: "https://factory.api.com",
-			};
-
-			const provider = createAnthropicCompatibleProvider(config);
-
-			expect(provider.name).toBe("factory-provider");
-			expect(provider.getConfig().baseUrl).toBe("https://factory.api.com");
-		});
-
-		test("should create provider for service", () => {
-			const provider = createProviderForService(
-				"test-service",
-				"https://test.api.com",
-				"x-test-key",
-			);
-
-			expect(provider.name).toBe("anthropic-test-service");
-			expect(provider.getConfig().baseUrl).toBe("https://test.api.com");
-			expect(provider.getConfig().authHeader).toBe("x-test-key");
-		});
-
-		test("should create preset providers", () => {
-			const zaiProvider = PresetProviders.createZaiCompatible();
-			const minimaxProvider = PresetProviders.createMinimaxCompatible();
-
-			expect(zaiProvider.name).toBe("anthropic-zai");
-			expect(minimaxProvider.name).toBe("anthropic-minimax");
 		});
 	});
 

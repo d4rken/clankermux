@@ -164,7 +164,6 @@ export {
 	type ContentBlockMeasurement,
 	codexAccountFitsRequest,
 	codexAccountFitsRequestUnmargined,
-	createCustomEndpointData,
 	estimateContextWindowTokens,
 	estimateRequestTokens,
 	FAMILY_PRIORITY,
