@@ -132,12 +132,17 @@ function viewBox(svg: string): { width: number; height: number } {
 }
 
 describe("README media", () => {
-	it("emits a light and a dark logo, and nothing else", () => {
+	it("emits a light and a dark logo and banner, and nothing else", () => {
 		// The four dashboard mockups this script used to draw are now real
 		// captures from `scripts/capture-readme-screenshots.sh`; if one reappears
 		// here, two pipelines are writing the same figures.
 		const names = files.map((f) => f.name).sort();
-		expect(names).toEqual(["logo-dark.svg", "logo-light.svg"]);
+		expect(names).toEqual([
+			"banner-dark.svg",
+			"banner-light.svg",
+			"logo-dark.svg",
+			"logo-light.svg",
+		]);
 	});
 
 	it("matches what is committed in docs/media", () => {
@@ -263,16 +268,23 @@ describe("README media", () => {
 		const readme = readFileSync(join(ROOT, "README.md"), "utf8");
 		const blocks = [
 			...readme.matchAll(
-				/<picture><source media="\(prefers-color-scheme: dark\)" srcset="docs\/media\/logo-dark\.svg"><img src="docs\/media\/logo-light\.svg"([^>]*)><\/picture>/g,
+				/<picture><source media="\(prefers-color-scheme: dark\)" srcset="docs\/media\/banner-dark\.svg"><img src="docs\/media\/banner-light\.svg"([^>]*)><\/picture>/g,
 			),
 		];
 		expect(blocks).toHaveLength(1);
-		expect(existsSync(join(ROOT, "docs", "media", "logo-dark.svg"))).toBe(true);
-		expect(existsSync(join(ROOT, "docs", "media", "logo-light.svg"))).toBe(true);
+		expect(existsSync(join(ROOT, "docs", "media", "banner-dark.svg"))).toBe(true);
+		expect(existsSync(join(ROOT, "docs", "media", "banner-light.svg"))).toBe(true);
 
-		// That <picture> accounts for both mentions of the mark: one srcset, one
+		// That <picture> accounts for both mentions of the banner: one srcset, one
 		// src. A third would be a reference outside it.
-		expect(readme.match(/docs\/media\/logo-/g) ?? []).toHaveLength(2);
+		expect(readme.match(/docs\/media\/banner-/g) ?? []).toHaveLength(2);
+
+		// The standalone mark is still emitted and still shares the routing-core
+		// geometry checked above, but the README no longer places it: the banner
+		// draws its own copy. A logo reference reappearing here means the heading
+		// went back to an inline mark beside Markdown text, which is the
+		// baseline-alignment problem the banner exists to remove.
+		expect(readme.match(/docs\/media\/logo-/g) ?? []).toHaveLength(0);
 	});
 
 	it("references every captured screenshot as a light/dark pair with alt text", () => {
@@ -316,19 +328,39 @@ describe("README media", () => {
 		expect([...new Set(referenced)].sort()).toEqual(expected.sort());
 	});
 
-	it("gives the logo an alt attribute", () => {
-		// Deliberately empty: it sits beside the project name in the heading, so
-		// announcing it would just repeat the word "ClankerMux". Empty is a
-		// decision a screen reader honours; a missing attribute makes it read the
-		// filename instead, which is why presence is asserted separately.
+	it("gives the banner alt text carrying the name and the slogan", () => {
+		// Not empty, which is what the old inline mark used: that one sat beside a
+		// Markdown heading spelling out "ClankerMux", so announcing it would have
+		// repeated the word. The banner replaced the heading, so this image is now
+		// the only place either the project name or the slogan appears as text in
+		// the README. An empty alt here would leave a reader who cannot see it
+		// with a page that never says what the project is called.
 		const readme = readFileSync(join(ROOT, "README.md"), "utf8");
 		const tags = [
-			...readme.matchAll(/<img src="docs\/media\/logo-[^"]+"[^>]*>/g),
+			...readme.matchAll(/<img src="docs\/media\/banner-[^"]+"[^>]*>/g),
 		].map((m) => m[0]);
 		expect(tags).toHaveLength(1);
-		for (const tag of tags) {
-			expect(tag).toMatch(/\salt="/);
-			expect(tag.match(/alt="([^"]*)"/)?.[1]).toBe("");
+		const alt = tags[0]?.match(/alt="([^"]*)"/)?.[1] ?? "";
+		expect(alt).toContain("ClankerMux");
+		expect(alt.length).toBeGreaterThan("ClankerMux".length);
+	});
+
+	it("draws the banner's own text, so the file carries the words its alt claims", () => {
+		// The alt text above is a promise about an image nobody here can render.
+		// These two runs are what it describes; if the banner were ever reduced to
+		// the mark alone, the alt would be describing text that is not in the file.
+		for (const mode of ["light", "dark"]) {
+			const svg = files.find((f) => f.name === `banner-${mode}.svg`)?.svg ?? "";
+			expect(`${mode}: has name`).toBe(
+				svg.includes(">ClankerMux</text>")
+					? `${mode}: has name`
+					: `${mode}: MISSING name`,
+			);
+			expect(`${mode}: has slogan`).toBe(
+				svg.includes(">A self-hosted gateway for coding agents</text>")
+					? `${mode}: has slogan`
+					: `${mode}: MISSING slogan`,
+			);
 		}
 	});
 });
