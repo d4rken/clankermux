@@ -22,7 +22,7 @@ A proxy for the model accounts you already pay for. Point your coding clients at
 one endpoint; ClankerMux spreads requests across the accounts, decides per
 client what each can reach, and shows you how much quota is left.
 
-## What it does
+## Highlights
 
 * **Clients**: Claude Code, Codex, OpenCode, Pi Agent, Oh My Pi, and
   OpenAI- or Anthropic-compatible clients generally. The dashboard generates
@@ -39,6 +39,10 @@ client what each can reach, and shows you how much quota is left.
   and failover.
 * Cross-account failover on any provider, 429 burst retries for Anthropic OAuth
   accounts, and family-scoped 529 breakers for official Anthropic accounts.
+* Statistics and analytics filterable by account and by client, so a problem can
+  be pinned to one provider or one harness: request history by status code,
+  per-model latency and token speed, cache effectiveness, tool-call error rates,
+  and the routing attempts behind an individual request.
 
 ## Screenshots
 
