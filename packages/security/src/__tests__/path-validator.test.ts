@@ -382,7 +382,11 @@ describe("Path Validator - Core Security Tests", () => {
 			// temp dir is on the allow-list independently, so a fixture there
 			// would pass whatever the config-dir entry says.
 			const configBase =
-				process.env.XDG_CONFIG_HOME ?? join(homedir(), ".config");
+				process.platform === "win32"
+					? (process.env.LOCALAPPDATA ??
+						process.env.APPDATA ??
+						join(homedir(), "AppData", "Local"))
+					: (process.env.XDG_CONFIG_HOME ?? join(homedir(), ".config"));
 			const paths = getDefaultAllowedBasePaths(true);
 
 			expect(paths).toContain(join(configBase, "clankermux"));
