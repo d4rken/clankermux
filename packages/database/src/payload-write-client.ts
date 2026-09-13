@@ -595,9 +595,15 @@ export class PayloadWriteClient implements PayloadWriterLike {
 			this.flushBuffered();
 		});
 		this.spawnInFlight = chain;
-		void chain.finally(() => {
+		// then(cleanup, cleanup) rather than finally(cleanup): finally returns a
+		// NEW promise that rejects whenever `chain` does, and nothing awaits that
+		// copy. flushBuffered() can throw synchronously, and raceDeadline — the
+		// only other consumer — attaches then(onFulfilled, onRejected), which does
+		// not cover this branch.
+		const clearSpawnInFlight = () => {
 			if (this.spawnInFlight === chain) this.spawnInFlight = null;
-		});
+		};
+		void chain.then(clearSpawnInFlight, clearSpawnInFlight);
 	}
 
 	private spawnGeneration(): Promise<GenerationState | null> {

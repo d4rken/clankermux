@@ -119,12 +119,17 @@ export class CodexUsagePoller {
 		log.info("Starting Codex usage poller");
 		this.stopped = false;
 		this.unregisterHeartbeat = registerHeartbeat({
+			// Return the promise rather than voiding it: the interval manager awaits
+			// the callback inside its own try/catch, and `void` hands it undefined,
+			// which leaves that catch unable to see anything tick() throws.
 			id: "codex-usage-poller",
-			callback: () => void this.tick(),
+			callback: () => this.tick(),
 			seconds: HEARTBEAT_SECONDS,
 			description: "Zero-cost Codex usage polling (GET /wham/usage)",
 		});
-		void this.tick();
+		void this.tick().catch((error) => {
+			log.error("Initial Codex usage poll failed", error);
+		});
 	}
 
 	stop(): void {
