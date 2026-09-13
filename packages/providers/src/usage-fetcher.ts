@@ -38,6 +38,7 @@ import {
 import { isGenuineWindowRoll } from "./window-reset";
 import {
 	fetchZaiUsageData,
+	getRepresentativeZaiTokenWindow,
 	getRepresentativeZaiUtilization,
 	type ZaiUsageData,
 } from "./zai-usage-fetcher";
@@ -363,8 +364,12 @@ export function extractWindowResetTime(
 		return window ? (usage[window]?.resetAt ?? null) : null;
 	}
 	if (provider === "zai") {
+		// Same window the utilization and window-name readers report. Preferring
+		// tokens_limit outright can name a reset belonging to the other window,
+		// because zai's reset order is not its duration order: the week can reset
+		// sooner than the 5h.
 		const zai = data as ZaiUsageData;
-		return (zai.tokens_limit ?? zai.tokens_limit_weekly)?.resetAt ?? null;
+		return getRepresentativeZaiTokenWindow(zai)?.window.resetAt ?? null;
 	}
 	if (provider === "minimax") {
 		const m = data as MinimaxUsageData;
