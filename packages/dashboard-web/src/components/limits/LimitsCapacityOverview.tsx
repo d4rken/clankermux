@@ -77,12 +77,12 @@ function RunwayPanel({
 		(runway) => runway.isActive || runway.keyId === null,
 	);
 	// Three distinct states, kept apart on purpose:
-	//  - readBlocked: the backing read failed, or is still in flight. The parent
-	//    computes runways from `apiKeys ?? []` either way, which leaves only the
-	//    inactive idle-pool row: `worst` is null and `activeKeyCount` is 0,
-	//    indistinguishable from a resolved read of a deployment with no active
-	//    clients. Falling through to `outcomeReason` would state "No active
-	//    clients" about clients that have merely not been read yet.
+	//  - readBlocked: the runway read is pending or unavailable with no cached
+	//    response. The parent passes `runway?.keys ?? []`, so the empty array
+	//    yields `worst === null` and `activeKeyCount === 0`. These headline
+	//    values also describe a resolved deployment with no active clients;
+	//    the guard preserves loading/unavailable instead of stating
+	//    "No active clients" before the data is known.
 	//  - outcomeReason: the read resolved but the outcome cannot be stated. It
 	//    replaces the figure, yet leaves the per-key breakdown standing, because
 	//    one key's missing evidence must not hide another key's definite runway.
