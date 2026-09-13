@@ -26,8 +26,8 @@ describe("LogFileWriter unserializable-payload guard", () => {
 	let dir: string;
 	let savedLogDir: string | undefined;
 
-	// readEnv resolves LOG_DIR across the CLANKERMUX_/BETTER_CCFLARE_/ccflare_
-	// prefixes (no bare fallback), so the writer only honors the prefixed var.
+	// readEnv resolves LOG_DIR only under the CLANKERMUX_ prefix (no bare
+	// fallback), so the writer only honors the prefixed var.
 	beforeEach(() => {
 		savedLogDir = process.env.CLANKERMUX_LOG_DIR;
 		dir = mkdtempSync(join(tmpdir(), "clankermux-logtest-"));
