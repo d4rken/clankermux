@@ -78,10 +78,11 @@ function RunwayPanel({
 	);
 	// Three distinct states, kept apart on purpose:
 	//  - readBlocked: the backing read failed, or is still in flight. The parent
-	//    computes runways from `apiKeys ?? []` either way, so `worst` is a
-	//    SYNTHETIC row then — commonly the idle-pool one, whose outcome would
-	//    render as a real figure. Nothing derived from it may be shown while this
-	//    holds.
+	//    computes runways from `apiKeys ?? []` either way, which leaves only the
+	//    inactive idle-pool row: `worst` is null and `activeKeyCount` is 0,
+	//    indistinguishable from a resolved read of a deployment with no active
+	//    clients. Falling through to `outcomeReason` would state "No active
+	//    clients" about clients that have merely not been read yet.
 	//  - outcomeReason: the read resolved but the outcome cannot be stated. It
 	//    replaces the figure, yet leaves the per-key breakdown standing, because
 	//    one key's missing evidence must not hide another key's definite runway.
