@@ -146,8 +146,9 @@ function log(message: string): void {
  *
  * Skips the real build only when a marker exists, the output passes its
  * correctness check, and both the source and output hashes match the marker.
- * Otherwise it runs the real build; a non-zero exit propagates via
- * `opts.exit` (default `process.exit`) WITHOUT writing a marker.
+ * Otherwise it runs the real build; a non-zero exit, or a zero exit that left
+ * the output failing its check, propagates via `opts.exit` (default
+ * `process.exit`) WITHOUT writing a marker.
  */
 export async function runGuardedBuild(
 	target: BuildTarget,
@@ -191,6 +192,16 @@ export async function runGuardedBuild(
 		// Fail-closed: do not write a marker, so the next restart rebuilds.
 		log(`${target.name}: build failed (exit ${code})`);
 		exit(code);
+		return;
+	}
+
+	// A zero exit is not proof the artifacts are real: a build that writes empty
+	// placeholders and returns 0 would otherwise get a marker, and every later
+	// run would skip the build and serve those placeholders. Re-check before the
+	// marker, and fail closed so the next run rebuilds.
+	if (!(await target.checkOutput(target.cwd))) {
+		log(`${target.name}: build exited 0 but its output is missing or stale`);
+		exit(1);
 		return;
 	}
 

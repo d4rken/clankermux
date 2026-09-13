@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -11,7 +11,10 @@ import {
 	writeMarker,
 } from "./build-guard.ts";
 import { buildTargets } from "./guarded-build.ts";
-import { WORKERS } from "../packages/database/scripts/workers-manifest.ts";
+import {
+	type Worker as WorkerEntry,
+	WORKERS,
+} from "../packages/database/scripts/workers-manifest.ts";
 
 let root: string;
 
@@ -199,6 +202,44 @@ describe("runGuardedBuild", () => {
 		expect(exitCode).toBe(3);
 		expect(existsSync(join(root, ".cache/build-guard/test.json"))).toBe(false);
 	});
+
+	it("fails closed when a build exits 0 but leaves an invalid output", async () => {
+		// The placeholder case: build-workers.ts writes empty `EMBEDDED_* = ""`
+		// stubs before bundling, so a build that dies after step 1 yet still
+		// returns 0 leaves files that exist and fail checkOutput. Marking that as
+		// built would make every later run skip the build and ship the stubs.
+		await write("src/a.ts", "alpha");
+		const placeholderOnly = makeTarget({
+			checkOutput: async (cwd: string) => {
+				const path = join(cwd, "out/artifact.ts");
+				return existsSync(path) && readFileSync(path, "utf8") !== "placeholder";
+			},
+			buildCommand: [
+				process.execPath,
+				"-e",
+				`
+					const fs = require("node:fs");
+					const path = require("node:path");
+					const out = ${JSON.stringify(join(root, "out/artifact.ts"))};
+					fs.mkdirSync(path.dirname(out), { recursive: true });
+					fs.writeFileSync(out, "placeholder");
+					process.exit(0);
+				`,
+			],
+		});
+
+		let exitCode: number | undefined;
+		await expect(
+			runGuardedBuild(placeholderOnly, {
+				exit: (code) => {
+					exitCode = code;
+					throw new Error(`exit ${code}`);
+				},
+			}),
+		).rejects.toThrow("exit 1");
+		expect(exitCode).toBe(1);
+		expect(existsSync(join(root, ".cache/build-guard/test.json"))).toBe(false);
+	});
 });
 
 describe("dashboard target input globs", () => {
@@ -233,26 +274,25 @@ describe("db-workers target output check", () => {
 		return buildTargets(root).find((t) => t.name === "db-workers") as BuildTarget;
 	}
 
-	async function writeInline(name: string, body: string): Promise<void> {
-		await write(`packages/database/src/${name}`, body);
+	// Each inline output goes under its own manifest `dir`, beneath the FIXTURE
+	// root — workerSrcDir() would resolve into the real checkout instead.
+	async function writeInline(
+		worker: WorkerEntry,
+		body: string,
+	): Promise<void> {
+		await write(`${worker.dir}/${worker.inline}`, body);
 	}
 
 	async function writeAllFilled(): Promise<void> {
 		for (const worker of WORKERS) {
-			await writeInline(
-				worker.inline,
-				`export const ${worker.constName} = "AAAA";`,
-			);
+			await writeInline(worker, `export const ${worker.constName} = "AAAA";`);
 		}
 	}
 
 	it("treats an empty EMBEDDED placeholder as NOT built", async () => {
 		await writeAllFilled();
 		const [first] = WORKERS;
-		await writeInline(
-			first.inline,
-			`export const ${first.constName} = "";`,
-		);
+		await writeInline(first, `export const ${first.constName} = "";`);
 		expect(await dbTarget().checkOutput(root)).toBe(false);
 	});
 
@@ -264,7 +304,7 @@ describe("db-workers target output check", () => {
 	it("treats a missing inline file as NOT built", async () => {
 		await writeAllFilled();
 		const last = WORKERS[WORKERS.length - 1];
-		await rm(join(root, "packages/database/src", last.inline));
+		await rm(join(root, last.dir, last.inline));
 		expect(await dbTarget().checkOutput(root)).toBe(false);
 	});
 
