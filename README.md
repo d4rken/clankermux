@@ -92,7 +92,9 @@ are still accepted.
 
 ## Running it persistently
 
-* [systemd unit](deploy/systemd/README.md) for running it as a service.
+* [systemd unit and drop-ins](deploy/systemd/README.md) for running it as a
+  service. They mirror one host's install, so the user, paths and ports in them
+  need editing before they fit yours.
 * [Caddy front proxy](deploy/caddy/README.md), which holds new connections across
   app restarts while in-flight agent streams drain.
 

@@ -1,0 +1,47 @@
+[Unit]
+Description=ClankerMux proxy (multiplexing load balancer for Claude/Codex)
+Documentation=https://github.com/d4rken/better-ccflare
+After=network-online.target
+Wants=network-online.target
+
+# --- Restart rate-limit (belongs in [Unit], not [Service]) ---
+StartLimitIntervalSec=120
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=darken
+Group=darken
+WorkingDirectory=/home/darken/clankermux
+
+# --- Environment ---
+Environment=PORT=8080
+Environment=NODE_ENV=production
+Environment=CLANKERMUX_DB_PATH=/home/darken/.config/clankermux/clankermux.db
+Environment=PATH=/home/darken/.bun/bin:/usr/local/bin:/usr/bin:/bin
+
+# --- Preflight: strip invalid BUN_JSC_* vars before bun starts ---
+ExecStartPre=/home/darken/clankermux/scripts/preflight-env.sh
+
+# --- Main process ---
+ExecStart=/home/darken/.bun/bin/bun run apps/server/src/server.ts
+
+# --- Resource limits ---
+MemoryHigh=2G
+MemoryMax=4G
+
+# --- Restart policy ---
+Restart=always
+RestartSec=5
+
+# --- Security hardening (only what's compatible with home-dir source install) ---
+NoNewPrivileges=true
+PrivateTmp=true
+
+# --- Logging ---
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=clankermux
+
+[Install]
+WantedBy=multi-user.target
