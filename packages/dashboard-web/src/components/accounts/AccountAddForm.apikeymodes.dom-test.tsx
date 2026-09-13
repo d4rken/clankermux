@@ -128,6 +128,8 @@ afterEach(async () => {
 	mock.restore();
 });
 
+// Mutable, not `as const`: bun's `it.each` single-argument overload takes a
+// `T[]`, so a readonly tuple matches none of its three overloads.
 const modes = [
 	{ provider: "openrouter", option: "OpenRouter (API Key)" },
 	{ provider: "kilo", option: "Kilo Gateway (API Key)" },
@@ -135,7 +137,7 @@ const modes = [
 		provider: "alibaba-coding-plan",
 		option: "Alibaba Coding Plan International (API Key)",
 	},
-] as const;
+];
 
 describe("account add form: API key provider modes", () => {
 	it.each(

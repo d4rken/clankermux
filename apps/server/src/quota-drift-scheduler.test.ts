@@ -23,12 +23,12 @@ import {
 
 const INTERVAL_ID = "quota-drift-scheduler";
 
-const EMPTY_PAYLOAD: QuotaDriftResponse = {
-	status: "ready",
+const EMPTY_PAYLOAD = {
+	status: "ready" as const,
 	computedAt: 1_700_000_000_000,
 	computeMs: 12,
 	cohorts: [],
-};
+} satisfies QuotaDriftResponse;
 
 let scheduler: QuotaDriftScheduler | null = null;
 
@@ -107,7 +107,9 @@ describe("QuotaDriftScheduler", () => {
 
 	it("does not start a second pass while one is still running", async () => {
 		let started = 0;
-		let release: (() => void) | null = null;
+		// Replaced synchronously by the executor below, so the seed is a no-op
+		// rather than null: the gate is always released through the resolver.
+		let release: () => void = () => {};
 		scheduler = new QuotaDriftScheduler({
 			getDbPath: () => "/tmp/does-not-matter.db",
 			storeResult: async () => {},
@@ -128,7 +130,7 @@ describe("QuotaDriftScheduler", () => {
 		await scheduler.tick();
 		expect(started).toBe(1);
 
-		release?.();
+		release();
 		await first;
 		expect(started).toBe(1);
 	});

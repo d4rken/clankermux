@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it } from "bun:test";
 import { SessionStrategy } from "@clankermux/load-balancer";
 import { logBus } from "@clankermux/logger";
+import { makeAccount as canonicalAccount } from "@clankermux/test-support";
 import type {
 	Account,
 	CapacitySignal,
@@ -32,43 +33,14 @@ function captureLogs(fn: () => void): string[] {
 // style as verbose and hard to maintain.
 // ---------------------------------------------------------------------------
 function makeAccount(overrides: Partial<Account> = {}): Account {
-	return {
+	return canonicalAccount({
 		id: "test-account",
-		name: "test-account",
-		provider: "anthropic",
-		api_key: null,
 		refresh_token: "test",
 		access_token: "test",
 		expires_at: Date.now() + 3600_000,
-		request_count: 0,
-		total_requests: 0,
-		last_used: null,
 		created_at: Date.now(),
-		rate_limited_until: null,
-		rate_limited_reason: null,
-		rate_limited_at: null,
-		consecutive_rate_limits: 0,
-		session_start: null,
-		session_request_count: 0,
-		paused: false,
-		rate_limit_reset: null,
-		rate_limit_status: null,
-		rate_limit_remaining: null,
-		priority: 0,
-		auto_fallback_enabled: false,
-		auto_refresh_enabled: false,
-		auto_pause_on_overage_enabled: false,
-		peak_hours_pause_enabled: false,
-		codex_auto_apply_reset_credits_enabled: false,
-		custom_endpoint: null,
-		model_mappings: null,
-		cross_region_mode: null,
-		model_fallbacks: null,
-		billing_type: null,
-		pause_reason: null,
-		refresh_token_issued_at: null,
 		...overrides,
-	};
+	});
 }
 
 // Mock StrategyStore for testing
@@ -2312,6 +2284,8 @@ describe("SessionStrategy — FEFO capacity-aware tie-breaking", () => {
 			weeklyResetMs: 30 * 60_000,
 			bindingWeeklyResetMs: 30 * 60_000,
 			weeklyHeadroom: 40,
+			sessionResetMs: null,
+			extraUsageUtilization: 98,
 		});
 
 		const result = strategy.select([binding, harvestAcct], makeMeta());
@@ -3137,7 +3111,7 @@ describe("active affinity is independent of quota session age", () => {
 				path: "/v1/messages",
 				timestamp: now,
 				affinityKey: "active",
-				affinityScope: "session",
+				affinityScope: "claude_session",
 			});
 			expect(strategy.select([a, b], meta())[0].id).toBe("a");
 			store.utilizationMap.set("a", 30);

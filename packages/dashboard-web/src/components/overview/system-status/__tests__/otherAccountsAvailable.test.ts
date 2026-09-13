@@ -1,7 +1,8 @@
 import { describe, expect, test } from "bun:test";
+import type { AccountForFailoverCheck } from "../otherAccountsAvailable";
 import { otherAccountsAvailable } from "../otherAccountsAvailable";
 
-type Account = Parameters<typeof otherAccountsAvailable>[0][number];
+type Account = AccountForFailoverCheck;
 
 const baseAccount: Account = {
 	id: "acc-1",

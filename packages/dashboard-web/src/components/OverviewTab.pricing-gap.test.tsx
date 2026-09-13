@@ -34,18 +34,20 @@ function systemStatus(gaps: PricingGap[]): SystemStatusResponse {
 		uptime_s: 120,
 		memory: { rss_bytes: 1024, rss_mb: 1 },
 		pool: {
-			total: 1,
+			configured: 1,
 			routable: 1,
 			paused: 0,
 			rate_limited: 0,
 			usage_exhausted: 0,
-		} as SystemStatusResponse["pool"],
+			next_available_at: null,
+		},
 		runtime: {
 			asyncWriterHealthy: true,
 			integrityStatus: "ok",
 			pricingGaps: gaps,
 		},
 		eventLoop: { lastLagMs: 0, maxLagMs: 0, maxRecentLagMs: 0 },
+		providerOverload: [],
 		strategy: "session",
 		timestamp: new Date(1_700_000_060_000).toISOString(),
 	};

@@ -1,7 +1,50 @@
 import { describe, expect, it } from "bun:test";
 import { getChatContext } from "@clankermux/types";
 import { handleChatCompletionsRequest } from "../handler";
+import type { MessagesBody } from "../request";
 import { translateChatRequest } from "../request";
+
+type ChatBlock = MessagesBody["messages"][number]["content"][number];
+
+/** The translated tool list, proven present. */
+function toolsOf(body: MessagesBody): NonNullable<MessagesBody["tools"]> {
+	if (!body.tools)
+		throw new Error("expected the translated body to carry tools");
+	return body.tools;
+}
+
+/** A content block proven to be a `tool_use`. */
+function toolUse(block: ChatBlock): Extract<ChatBlock, { type: "tool_use" }> {
+	if (block.type !== "tool_use") {
+		throw new Error(`expected a tool_use block, got ${block.type}`);
+	}
+	return block;
+}
+
+/** The translated `tool_choice`, proven present. */
+function toolChoiceOf(
+	body: MessagesBody,
+): NonNullable<MessagesBody["tool_choice"]> {
+	if (!body.tool_choice) {
+		throw new Error("expected the translated body to carry a tool_choice");
+	}
+	return body.tool_choice;
+}
+
+/** Walks a JSON-schema record, which is only typed down to `unknown` values. */
+function schemaValue(
+	schema: Record<string, unknown>,
+	...path: string[]
+): unknown {
+	let current: unknown = schema;
+	for (const key of path) {
+		if (current === null || typeof current !== "object") {
+			throw new Error(`expected an object before "${key}" in the tool schema`);
+		}
+		current = Reflect.get(current, key);
+	}
+	return current;
+}
 
 const input = {
 	model: "alias",
@@ -110,16 +153,19 @@ describe("Chat ingress request contract", () => {
 		const b = translated.body;
 		expect(b.model).toBe("alias");
 		expect(b.max_tokens).toBeUndefined();
-		expect(b.tools[0].name).not.toBe("Read");
-		expect(b.messages[1].content[0].name).toBe(b.tools[0].name);
-		expect(b.messages[1].content[0].input).toEqual({ pages: "" });
+		const tools = toolsOf(b);
+		expect(tools[0].name).not.toBe("Read");
+		expect(toolUse(b.messages[1].content[0]).name).toBe(tools[0].name);
+		expect(toolUse(b.messages[1].content[0]).input).toEqual({ pages: "" });
 		expect(
 			b.messages[2].content.map((x) =>
 				x.type === "tool_result" ? x.tool_use_id : null,
 			),
 		).toEqual(["a", "b"]);
-		expect(b.tool_choice.name).toBe(b.tools[0].name);
-		expect(b.tools[0].input_schema.properties.url.format).toBe("uri");
+		expect(toolChoiceOf(b).name).toBe(tools[0].name);
+		expect(
+			schemaValue(tools[0].input_schema, "properties", "url", "format"),
+		).toBe("uri");
 	});
 	for (const patch of [
 		{ n: 2 },
@@ -277,6 +323,7 @@ describe("Chat ingress responses", () => {
 		);
 		const r = await run({ ...input, stream: true }, upstream);
 		const reader = r.body?.getReader();
+		if (!reader) throw new Error("expected a streamed response body");
 		const pending = reader.read();
 		await reader.cancel();
 		await pending;
@@ -292,7 +339,7 @@ describe("Chat ingress responses", () => {
 				},
 			],
 		});
-		const name = b.body.tools[0].name;
+		const name = toolsOf(b.body)[0].name;
 		const s =
 			start() +
 			event("content_block_start", {
@@ -390,7 +437,8 @@ describe("Chat protocol boundaries", () => {
 				function: { name: "f", parameters: { type: "object" } },
 			},
 		];
-		const name = translateChatRequest({ ...input, tools }).body.tools[0].name;
+		const name = toolsOf(translateChatRequest({ ...input, tools }).body)[0]
+			.name;
 		const s =
 			start() +
 			[7, 2]

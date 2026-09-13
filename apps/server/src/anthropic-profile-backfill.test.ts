@@ -52,7 +52,7 @@ describe("isAnthropicProfileBackfillCandidate", () => {
 	it("skips an account paused for a dead/invalid refresh token", () => {
 		expect(
 			isAnthropicProfileBackfillCandidate(
-				makeAccount({ paused: 1, pause_reason: "oauth_invalid_grant" }),
+				makeAccount({ paused: true, pause_reason: "oauth_invalid_grant" }),
 			),
 		).toBe(false);
 	});
@@ -66,7 +66,7 @@ describe("isAnthropicProfileBackfillCandidate", () => {
 	it("still selects an account paused for a NON-dead-token reason (e.g. overage)", () => {
 		expect(
 			isAnthropicProfileBackfillCandidate(
-				makeAccount({ paused: 1, pause_reason: "overage" }),
+				makeAccount({ paused: true, pause_reason: "overage" }),
 			),
 		).toBe(true);
 	});
@@ -100,6 +100,7 @@ describe("runAnthropicProfileBackfill", () => {
 		email: "u@example.com",
 		organizationName: "Org",
 		planTier: "max",
+		rateLimitTier: "20x",
 	};
 
 	it("writes identity for a candidate when the profile fetch returns data", async () => {
@@ -144,7 +145,7 @@ describe("runAnthropicProfileBackfill", () => {
 			makeAccount({
 				id: "dead",
 				name: "dead",
-				paused: 1,
+				paused: true,
 				pause_reason: "oauth_invalid_grant",
 			}),
 		];

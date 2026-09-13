@@ -40,6 +40,7 @@ function sharedNamePool(): PoolUsageResult {
 		earliestResetMs: NOW + DAY,
 		earliestResetAccountName: "claude",
 		atRisk: [],
+		learning: [],
 		familyWeekly: [],
 		classes: [],
 		bindingClass: null,

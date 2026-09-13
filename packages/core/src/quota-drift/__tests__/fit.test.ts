@@ -327,7 +327,9 @@ describe("fitRolling", () => {
 			"claude-opus-5",
 		]);
 		const rare = series.get("claude-haiku-4-5") ?? [];
-		expect(rare.length).toBe(series.get("claude-opus-5")?.length);
+		const common = series.get("claude-opus-5");
+		if (!common) throw new Error("expected a claude-opus-5 series");
+		expect(rare.length).toBe(common.length);
 		expect(rare.every((p) => !p.identified)).toBe(true);
 		expect(rare.every((p) => p.pointEstimate === null)).toBe(true);
 	});

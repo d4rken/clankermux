@@ -17,6 +17,7 @@ import {
 	resolveModelMaxContextWindow,
 	SAFETY_MARGIN,
 } from "@clankermux/core";
+import { makeAccount as canonicalAccount } from "@clankermux/test-support";
 import type { Account, ContextComposition } from "@clankermux/types";
 
 describe("Model Mapping", () => {});
@@ -88,22 +89,15 @@ describe("Model Validation Utilities", () => {
 // ── Context-window-aware routing tests ───────────────────────────────────────
 
 function makeCodexAccount(overrides: Partial<Account> = {}): Account {
-	return {
+	return canonicalAccount({
 		id: "codex-1",
 		name: "codex-test",
 		provider: "codex",
-		api_key: null,
-		refresh_token: null,
-		access_token: null,
-		expires_at: null,
+		refresh_token: "",
 		created_at: Date.now(),
-		request_count: 0,
-		total_requests: 0,
 		priority: 20,
-		model_mappings: null,
-		custom_endpoint: null,
 		...overrides,
-	};
+	});
 }
 
 describe("MODEL_CONTEXT_WINDOWS", () => {

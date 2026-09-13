@@ -44,6 +44,9 @@ function row(overrides: Partial<UsageSnapshotRow>): UsageSnapshotRow {
 		fiveHourReset: 5_000,
 		sevenDayPct: 20,
 		sevenDayReset: 9_000,
+		observedAt: null,
+		planTier: null,
+		rateLimitTier: null,
 		...overrides,
 	};
 }

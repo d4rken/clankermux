@@ -300,7 +300,10 @@ describe("LiveActivityStore window changes", () => {
 		const store = makeStore(() => now);
 		store.applyHistory(
 			[row({ id: "old", timestamp: new Date(T0).toISOString() })],
-			false,
+			{
+				requestedFrom: T0 - WINDOW,
+				saturated: false,
+			},
 		);
 		await settle();
 

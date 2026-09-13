@@ -97,10 +97,13 @@ function makeDeps(options: Options = {}): {
 				status: 200,
 			});
 		},
+		async handleChatCompletions() {
+			return new Response("{}", { status: 200 });
+		},
 		async handleResponses() {
 			return new Response("{}", { status: 200 });
 		},
-		handleModels() {
+		async handleModels() {
 			return new Response("{}", { status: 200 });
 		},
 		withDashboard,

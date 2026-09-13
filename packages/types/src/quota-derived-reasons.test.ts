@@ -3,6 +3,7 @@ import {
 	isQuotaDerivedRateLimitReason,
 	isRateLimitReason,
 	QUOTA_DERIVED_RATE_LIMIT_REASONS,
+	type QuotaDerivedRateLimitReason,
 	RATE_LIMIT_REASONS,
 } from "./account";
 
@@ -14,7 +15,10 @@ import {
  * One case per reason, so a newly-added reason is never silently eligible.
  */
 describe("isQuotaDerivedRateLimitReason", () => {
-	const eligible = ["weekly_exhausted_429", "session_exhausted_429"];
+	const eligible: QuotaDerivedRateLimitReason[] = [
+		"weekly_exhausted_429",
+		"session_exhausted_429",
+	];
 	const ineligible = [
 		"upstream_429_with_reset",
 		"model_fallback_429",

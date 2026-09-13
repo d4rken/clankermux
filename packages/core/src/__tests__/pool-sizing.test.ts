@@ -8,12 +8,11 @@
  * the data, so a floating clock would silently move every cycle boundary.
  */
 import { describe, expect, it } from "bun:test";
-import type { PoolSizingCycle } from "@clankermux/types";
+import type { PoolSizingCycle, PoolSizingRow } from "@clankermux/types";
 import type {
 	PoolSizingAccountInput,
 	PoolSizingComputeInput,
 	PoolSizingResetPeakRow,
-	PoolSizingRow,
 	PoolSizingScopedResetPeakRow,
 } from "../pool-sizing";
 import {

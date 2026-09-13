@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import type { Account, DatabaseOperations } from "@clankermux/database";
+import type { DatabaseOperations } from "@clankermux/database";
 import { isAutoUnpauseCandidate } from "@clankermux/load-balancer";
 import type { CapacityRestoredEvidence } from "@clankermux/providers";
 import {
@@ -8,6 +8,7 @@ import {
 	markCapacityRestoredProbePending,
 	rollbackCapacityRestoredProbePending,
 } from "@clankermux/proxy";
+import type { Account } from "@clankermux/types";
 import { RATE_LIMIT_REASONS } from "@clankermux/types";
 import { resolveLiveAccountQuota429 } from "../../../packages/proxy/src/handlers/anthropic-account-quota";
 import {
@@ -530,7 +531,9 @@ describe("clearRateLimitOnCapacityRestored — level-triggered recovery", () => 
 		};
 		const ID = "acc-overlap";
 		// Gate both CAS calls so their completion order is controlled.
-		let releaseFirst: (() => void) | null = null;
+		// Replaced synchronously by the executor below, which is why the seed is a
+		// no-op rather than null: the gate is always released through the resolver.
+		let releaseFirst: () => void = () => {};
 		const firstGate = new Promise<void>((resolve) => {
 			releaseFirst = resolve;
 		});
@@ -546,7 +549,11 @@ describe("clearRateLimitOnCapacityRestored — level-triggered recovery", () => 
 				return false; // the newer clear is refused
 			},
 		} as unknown as Parameters<typeof clearRateLimitOnCapacityRestored>[0];
-		const logger: CapacityRestoredLogger = { debug: () => {}, info: () => {} };
+		const logger: CapacityRestoredLogger = {
+			debug: () => {},
+			info: () => {},
+			warn: () => {},
+		};
 
 		try {
 			const first = clearRateLimitOnCapacityRestored(
@@ -566,7 +573,7 @@ describe("clearRateLimitOnCapacityRestored — level-triggered recovery", () => 
 				NOW,
 			);
 			await second;
-			releaseFirst?.();
+			releaseFirst();
 			await first;
 
 			expect(hasCapacityRestoredProbePending(ID)).toBe(true);
@@ -1188,8 +1195,9 @@ it("live five-hour quota evidence uses guarded polling recovery and a single pro
 		NOW,
 	);
 	expect(decision).not.toBeNull();
-	account.rate_limited_reason = decision?.reason;
-	account.rate_limited_until = decision?.resetTime;
+	if (!decision) throw new Error("expected a rate-limit decision");
+	account.rate_limited_reason = decision.reason;
+	account.rate_limited_until = decision.resetTime ?? null;
 	const h = makeHarness(account);
 	resetRateLimitProbeGatesForTests();
 	const marker = {

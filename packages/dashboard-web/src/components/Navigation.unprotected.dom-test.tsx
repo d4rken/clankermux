@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, spyOn } from "bun:test";
+import { mockFetch } from "@clankermux/test-support";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
@@ -69,11 +70,13 @@ async function mount(status: AuthStatus | Error | "pending"): Promise<void> {
 	});
 
 	const realFetch = globalThis.fetch;
-	globalThis.fetch = (async () =>
-		new Response(JSON.stringify({ status: "unknown" }), {
-			status: 200,
-			headers: { "content-type": "application/json" },
-		})) as typeof fetch;
+	globalThis.fetch = mockFetch(
+		async () =>
+			new Response(JSON.stringify({ status: "unknown" }), {
+				status: 200,
+				headers: { "content-type": "application/json" },
+			}),
+	);
 	restores.push(() => {
 		globalThis.fetch = realFetch;
 	});

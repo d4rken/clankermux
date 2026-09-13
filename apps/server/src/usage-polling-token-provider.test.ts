@@ -91,13 +91,17 @@ describe("createUsagePollingTokenProvider", () => {
 			refresh_token: "db-refresh",
 			expires_at: 2_000,
 		});
-		let tokensAtCall: {
-			access: string | null | undefined;
-			refresh: string | null | undefined;
-			expires: number | null | undefined;
-		} | null = null;
+		// A field rather than a local: the assignment below happens inside a mock
+		// callback, and a `let` stays narrowed to its initializer across it.
+		const observed: {
+			tokens: {
+				access: string | null | undefined;
+				refresh: string | null | undefined;
+				expires: number | null | undefined;
+			} | null;
+		} = { tokens: null };
 		const getValidAccessToken = mock((acct: Account) => {
-			tokensAtCall = {
+			observed.tokens = {
 				access: acct.access_token,
 				refresh: acct.refresh_token,
 				expires: acct.expires_at,
@@ -116,7 +120,7 @@ describe("createUsagePollingTokenProvider", () => {
 		expect(account.refresh_token).toBe("db-refresh");
 		expect(account.expires_at).toBe(2_000);
 		// The sync happened BEFORE the token getter ran
-		expect(tokensAtCall).toEqual({
+		expect(observed.tokens).toEqual({
 			access: "db-access",
 			refresh: "db-refresh",
 			expires: 2_000,

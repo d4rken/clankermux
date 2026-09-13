@@ -22,6 +22,7 @@ function poolResult(): PoolUsageResult {
 		earliestResetMs: null,
 		earliestResetAccountName: null,
 		atRisk: [],
+		learning: [],
 		familyWeekly: [],
 		classes: [],
 		bindingClass: null,
@@ -47,6 +48,7 @@ describe("LimitsCapacityOverview calculation help", () => {
 					sevenDay={poolResult()}
 					now={Date.UTC(2026, 7, 22, 12, 0, 0)}
 					runways={[]}
+					pacing={undefined}
 					accounts={[{ id: "acc-1", name: "alpha" }]}
 					runwaysLoading={false}
 				/>,

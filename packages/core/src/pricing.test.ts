@@ -9,6 +9,7 @@ import {
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { mockFetch } from "@clankermux/test-support";
 import {
 	__pricingTestHooks,
 	estimateCostUSD,
@@ -22,9 +23,9 @@ import {
 // at a fresh empty dir so a stale/remote models.dev cache can't leak in. This
 // forces the bundled fallback table to be the sole source of truth.
 const originalFetch = globalThis.fetch;
-globalThis.fetch = async () => {
+globalThis.fetch = mockFetch(async () => {
 	throw new Error("pricing test network disabled");
-};
+});
 
 // The catalogue snapshot is rooted at the XDG cache dir, so redirect that to a
 // throwaway location. `bun test` shares one process across all test files, so
@@ -198,10 +199,12 @@ describe("bundled cost fields backfill a partial remote entry", () => {
 		// stub below would never be fetched at all.
 		const remoteCacheHome = mkdtempSync(join(tmpdir(), "cmux-pricing-remote-"));
 		process.env.XDG_CACHE_HOME = remoteCacheHome;
-		globalThis.fetch = (async () =>
-			new Response(JSON.stringify(remote), {
-				headers: { "content-type": "application/json" },
-			})) as typeof globalThis.fetch;
+		globalThis.fetch = mockFetch(
+			async () =>
+				new Response(JSON.stringify(remote), {
+					headers: { "content-type": "application/json" },
+				}),
+		);
 		try {
 			__pricingTestHooks.reset();
 			await __pricingTestHooks.loadPricing();

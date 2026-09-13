@@ -2248,7 +2248,7 @@ describe("isLearningEstimate", () => {
 			windowStartMs: NOW - 3 * HOUR,
 			resetsAtMs: flatReset,
 			prediction: prediction({
-				state: "flat",
+				state: "stable",
 				slopePerHour: 0,
 				etaExhaustMs: null,
 				resetsAtMs: flatReset,
@@ -2551,7 +2551,7 @@ describe("computeCapacityRunway with learning accounts", () => {
 				windowStartMs: NOW - 3 * HOUR,
 				observedAtMs: NOW,
 				prediction: prediction({
-					state: "flat",
+					state: "stable",
 					slopePerHour: 0,
 					etaExhaustMs: null,
 					resetsAtMs: flatReset,

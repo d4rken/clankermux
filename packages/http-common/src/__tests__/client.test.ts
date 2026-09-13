@@ -84,7 +84,9 @@ describe("HttpClient retry policy", () => {
 		);
 		const client = new HttpClient({ retries: 1, retryDelay: 0 });
 
-		expect(await client.get("/api/analytics")).toEqual({ ok: true });
+		expect(await client.get<{ ok: boolean }>("/api/analytics")).toEqual({
+			ok: true,
+		});
 		expect(fetchStub.calls()).toBe(1);
 	});
 });

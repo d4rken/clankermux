@@ -25,12 +25,16 @@ describe("IntervalManager id collision", () => {
 			// Two "cards" register under the SAME id, as the buggy component did.
 			manager.register({
 				id: "rate-limit-progress-update",
-				callback: () => firstFired.push("first"),
+				callback: () => {
+					firstFired.push("first");
+				},
 				intervalMs: 30_000,
 			});
 			manager.register({
 				id: "rate-limit-progress-update",
-				callback: () => secondFired.push("second"),
+				callback: () => {
+					secondFired.push("second");
+				},
 				intervalMs: 30_000,
 			});
 
@@ -102,7 +106,9 @@ describe("IntervalManager id collision", () => {
 				manager.register({
 					id,
 					// immediate:false so we only count real ticks, not the initial run.
-					callback: () => fired.set(id, (fired.get(id) ?? 0) + 1),
+					callback: () => {
+						fired.set(id, (fired.get(id) ?? 0) + 1);
+					},
 					intervalMs: 20,
 				});
 			}

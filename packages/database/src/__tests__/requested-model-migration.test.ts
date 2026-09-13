@@ -50,6 +50,7 @@ describe("requests.requested_model", () => {
 			errorMessage: "overloaded_error",
 			responseTime: 10,
 			failoverAttempts: 0,
+			projectAttributionSource: null,
 			requestedModel: "claude-haiku-4-5-20251001",
 			usage: { model: "provider-model" },
 		});
@@ -64,6 +65,7 @@ describe("requests.requested_model", () => {
 			errorMessage: "overloaded_error",
 			responseTime: 11,
 			failoverAttempts: 0,
+			projectAttributionSource: null,
 			requestedModel: null,
 		});
 
@@ -89,6 +91,7 @@ describe("requests.requested_model", () => {
 			errorMessage: null,
 			responseTime: 12,
 			failoverAttempts: 0,
+			projectAttributionSource: null,
 			requestedModel: null,
 			usage: { model: "other-model" },
 		});

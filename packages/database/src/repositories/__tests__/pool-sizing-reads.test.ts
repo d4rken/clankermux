@@ -9,6 +9,7 @@
  */
 import { Database } from "bun:sqlite";
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import type { UsageSnapshotRow } from "@clankermux/types";
 // Force @clankermux/core to initialise before @clankermux/types resolves its
 // circular dependency. Same pattern as account-payment.repository.test.ts.
 import "@clankermux/core";
@@ -17,6 +18,28 @@ import { ensureSchema } from "../../migrations";
 import { RequestRepository } from "../request.repository";
 import { UsageScopedSnapshotRepository } from "../usage-scoped-snapshot.repository";
 import { UsageSnapshotRepository } from "../usage-snapshot.repository";
+
+/**
+ * A `usage_snapshots` row with every window and identity field the caller does
+ * not state absent — `null`, which is what the repository writes for an
+ * unstated field anyway.
+ */
+function snapshot(
+	row: Partial<UsageSnapshotRow> &
+		Pick<UsageSnapshotRow, "accountId" | "sampledAt">,
+): UsageSnapshotRow {
+	return {
+		provider: null,
+		fiveHourPct: null,
+		fiveHourReset: null,
+		sevenDayPct: null,
+		sevenDayReset: null,
+		observedAt: null,
+		planTier: null,
+		rateLimitTier: null,
+		...row,
+	};
+}
 
 const MINUTE = 60_000;
 const HOUR = 60 * MINUTE;
@@ -45,27 +68,27 @@ afterEach(() => {
 describe("UsageSnapshotRepository.getResetPeakRows", () => {
 	it("groups by reported reset and reports the peak with both edge values", async () => {
 		await usage.insertSnapshots([
-			{
+			snapshot({
 				accountId: "a1",
 				provider: "anthropic",
 				sampledAt: RESET - 3 * DAY,
 				sevenDayPct: 10,
 				sevenDayReset: RESET,
-			},
-			{
+			}),
+			snapshot({
 				accountId: "a1",
 				provider: "anthropic",
 				sampledAt: RESET - 2 * DAY,
 				sevenDayPct: 96,
 				sevenDayReset: RESET,
-			},
-			{
+			}),
+			snapshot({
 				accountId: "a1",
 				provider: "anthropic",
 				sampledAt: RESET - DAY,
 				sevenDayPct: 80,
 				sevenDayReset: RESET,
-			},
+			}),
 		]);
 
 		const rows = await usage.getResetPeakRows(SINCE);
@@ -89,20 +112,20 @@ describe("UsageSnapshotRepository.getResetPeakRows", () => {
 
 	it("keeps one-second reset jitter as separate groups for the caller to cluster", async () => {
 		await usage.insertSnapshots([
-			{
+			snapshot({
 				accountId: "a1",
 				provider: "anthropic",
 				sampledAt: RESET - 2 * DAY,
 				sevenDayPct: 50,
 				sevenDayReset: RESET - 1_000,
-			},
-			{
+			}),
+			snapshot({
 				accountId: "a1",
 				provider: "anthropic",
 				sampledAt: RESET - DAY,
 				sevenDayPct: 60,
 				sevenDayReset: RESET,
-			},
+			}),
 		]);
 
 		const rows = await usage.getResetPeakRows(SINCE);
@@ -114,14 +137,14 @@ describe("UsageSnapshotRepository.getResetPeakRows", () => {
 
 	it("splits a group when the captured tier changes mid-window", async () => {
 		await usage.insertSnapshots([
-			{
+			snapshot({
 				accountId: "a1",
 				provider: "anthropic",
 				sampledAt: RESET - 3 * DAY,
 				sevenDayPct: 20,
 				sevenDayReset: RESET,
-			},
-			{
+			}),
+			snapshot({
 				accountId: "a1",
 				provider: "anthropic",
 				sampledAt: RESET - DAY,
@@ -129,7 +152,7 @@ describe("UsageSnapshotRepository.getResetPeakRows", () => {
 				sevenDayReset: RESET,
 				planTier: "max",
 				rateLimitTier: "20x",
-			},
+			}),
 		]);
 
 		const rows = await usage.getResetPeakRows(SINCE);
@@ -148,20 +171,20 @@ describe("UsageSnapshotRepository.getResetPeakRows", () => {
 
 	it("excludes rows with no reported reset and rows before the cutoff", async () => {
 		await usage.insertSnapshots([
-			{
+			snapshot({
 				accountId: "a1",
 				provider: "anthropic",
 				sampledAt: RESET - DAY,
 				sevenDayPct: 40,
 				sevenDayReset: null,
-			},
-			{
+			}),
+			snapshot({
 				accountId: "a1",
 				provider: "anthropic",
 				sampledAt: SINCE - DAY,
 				sevenDayPct: 40,
 				sevenDayReset: SINCE + DAY,
-			},
+			}),
 		]);
 
 		expect(await usage.getResetPeakRows(SINCE)).toEqual([]);
@@ -174,27 +197,27 @@ describe("UsageSnapshotRepository.getDailyPresence", () => {
 		// Every sample reports the weekly window, which is what presence means:
 		// the last one at 0 % is a placeholder window and still counts.
 		await usage.insertSnapshots([
-			{
+			snapshot({
 				accountId: "a1",
 				provider: "anthropic",
 				sampledAt: day + HOUR,
 				sevenDayPct: 10,
 				sevenDayReset: RESET,
-			},
-			{
+			}),
+			snapshot({
 				accountId: "a1",
 				provider: "anthropic",
 				sampledAt: day + 20 * HOUR,
 				sevenDayPct: 20,
 				sevenDayReset: RESET,
-			},
-			{
+			}),
+			snapshot({
 				accountId: "a1",
 				provider: "anthropic",
 				sampledAt: day + DAY + HOUR,
 				sevenDayPct: 0,
 				sevenDayReset: RESET,
-			},
+			}),
 		]);
 
 		const rows = await usage.getDailyPresence(SINCE);
@@ -217,33 +240,38 @@ describe("UsageSnapshotRepository.getFiveHourSpentTicks", () => {
 	it("counts spent accounts per tick and provider", async () => {
 		const tick = Date.UTC(2026, 7, 10, 12);
 		await usage.insertSnapshots([
-			{
+			snapshot({
 				accountId: "a1",
 				provider: "anthropic",
 				sampledAt: tick,
 				fiveHourPct: 100,
-			},
-			{
+			}),
+			snapshot({
 				accountId: "a2",
 				provider: "anthropic",
 				sampledAt: tick,
 				fiveHourPct: 100,
-			},
-			{ accountId: "c1", provider: "codex", sampledAt: tick, fiveHourPct: 100 },
+			}),
+			snapshot({
+				accountId: "c1",
+				provider: "codex",
+				sampledAt: tick,
+				fiveHourPct: 100,
+			}),
 			// Not spent, and a spent account one tick later: neither joins the
 			// simultaneity count of this tick.
-			{
+			snapshot({
 				accountId: "a3",
 				provider: "anthropic",
 				sampledAt: tick,
 				fiveHourPct: 99,
-			},
-			{
+			}),
+			snapshot({
 				accountId: "a1",
 				provider: "anthropic",
 				sampledAt: tick + HOUR,
 				fiveHourPct: 100,
-			},
+			}),
 		]);
 
 		const rows = await usage.getFiveHourSpentTicks(SINCE);
@@ -449,22 +477,22 @@ describe("pool-sizing presence: samples that carry no weekly window", () => {
 
 	it("omits an account whose weekly reset was never reported", async () => {
 		await usage.insertSnapshots([
-			{
+			snapshot({
 				accountId: "no-weekly",
 				provider: "codex",
 				sampledAt: day + HOUR,
 				fiveHourPct: 40,
 				sevenDayPct: null,
 				sevenDayReset: null,
-			},
-			{
+			}),
+			snapshot({
 				accountId: "no-weekly",
 				provider: "codex",
 				sampledAt: day + 6 * HOUR,
 				fiveHourPct: 55,
 				sevenDayPct: null,
 				sevenDayReset: null,
-			},
+			}),
 		]);
 
 		const rows = await usage.getDailyPresence(SINCE);
