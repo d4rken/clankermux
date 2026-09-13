@@ -14,5 +14,3 @@ const provider = new AnthropicCompatibleProvider({
 ```
 
 Model selection belongs to the central routing table. The adapter preserves the resolved upstream model; it does not apply account mappings, static mappings, or ordered model fallbacks. Configure account model permissions and a routing rule to select a different target.
-
-See [routing setup and acceptance](../../../../../docs/routing-table-implementation.md).
