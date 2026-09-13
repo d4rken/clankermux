@@ -355,7 +355,6 @@ export {
 	getAppVersionSync,
 	getClientVersion,
 	getVersion,
-	getVersionSync,
 	trackClientVersion,
 } from "./version";
 export {
