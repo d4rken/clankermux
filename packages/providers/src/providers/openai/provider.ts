@@ -152,6 +152,7 @@ export class OpenAICompatibleProvider extends BaseProvider {
 				rawBytes = await response.arrayBuffer();
 				const anthropicData = convertOpenAIResponseToAnthropic(
 					JSON.parse(new TextDecoder().decode(rawBytes)),
+					response.headers.get("x-clankermux-resolved-model") ?? undefined,
 				);
 
 				return new Response(JSON.stringify(anthropicData), {

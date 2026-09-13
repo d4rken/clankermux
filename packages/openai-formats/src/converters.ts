@@ -301,10 +301,14 @@ export function convertAnthropicRequestToOpenAI(
 }
 
 /**
- * Convert OpenAI response format to Anthropic format
+ * Convert OpenAI response format to Anthropic format.
+ *
+ * `sentModel` is what this proxy put on the wire, used only where upstream
+ * names no model of its own. With neither naming one the field stays absent.
  */
 export function convertOpenAIResponseToAnthropic(
 	openaiData: OpenAIResponse,
+	sentModel?: string,
 ): AnthropicResponse {
 	// Handle error responses
 	if (openaiData.error) {
@@ -369,7 +373,7 @@ export function convertOpenAIResponseToAnthropic(
 		type: "message",
 		role: "assistant",
 		content,
-		model: openaiData.model,
+		model: openaiData.model || sentModel,
 		stop_reason: mapOpenAIFinishReason(choice.finish_reason),
 		stop_sequence: undefined,
 		usage: {

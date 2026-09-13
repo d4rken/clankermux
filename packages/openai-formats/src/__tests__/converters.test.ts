@@ -670,6 +670,37 @@ describe("convertOpenAIResponseToAnthropic — success cases", () => {
 		expect(content[0]).toEqual({ type: "text", text: "Hello back!" });
 	});
 
+	it("reports the upstream model when the response names one", () => {
+		const result = convertOpenAIResponseToAnthropic(
+			openaiTextResponse({ model: "deepseek-v4-pro" }),
+			"glm-5.1",
+		);
+		expect(result.model).toBe("deepseek-v4-pro");
+	});
+
+	it("falls back to the sent model when the response omits one", () => {
+		const result = convertOpenAIResponseToAnthropic(
+			openaiTextResponse({ model: undefined }),
+			"glm-5.1",
+		);
+		expect(result.model).toBe("glm-5.1");
+	});
+
+	it("treats an empty upstream model the same as an absent one", () => {
+		const result = convertOpenAIResponseToAnthropic(
+			openaiTextResponse({ model: "" }),
+			"glm-5.1",
+		);
+		expect(result.model).toBe("glm-5.1");
+	});
+
+	it("leaves the model absent when neither source names one", () => {
+		const result = convertOpenAIResponseToAnthropic(
+			openaiTextResponse({ model: undefined }),
+		);
+		expect(result.model).toBeUndefined();
+	});
+
 	it("maps finish_reason stop → end_turn", () => {
 		const result = convertOpenAIResponseToAnthropic(openaiTextResponse());
 		expect(result.stop_reason).toBe("end_turn");
