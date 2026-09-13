@@ -63,8 +63,14 @@ keep iterating in it.
 Two independent version values — don't confuse them:
 
 - **`CLAUDE_CLI_VERSION`** (`packages/core/src/version.ts`) — the Claude Code CLI
-  version echoed in upstream user-agent headers. Never bump manually; the
-  pre-push hook auto-updates it to track the real CLI.
+  version sent in the user-agent of the requests ClankerMux originates itself,
+  where there is no client user-agent to pass through: usage polling
+  (`packages/providers/src/usage-fetcher.ts`), the Anthropic profile fetch
+  (`packages/providers/src/providers/anthropic/profile.ts`), and the auto-refresh
+  keepalive (`packages/proxy/src/auto-refresh-scheduler.ts`), which reaches it
+  only through `getClientVersion()`'s fallback and so sends it just until the
+  first inbound client request is tracked. Hand-maintained: nothing automates it,
+  so refresh it yourself from `claude --version`.
 - **The app version** — the `"version"` field in the **root `package.json`**.
   Single source of truth (dashboard badge and startup log both read it).
   CalVer `YYYY.M.N`.
@@ -76,9 +82,8 @@ month and reset (`2026.8.0`).
 
 The string is purely a human-readable label — nothing parses it as semver. The
 dashboard's "is my deploy current?" check is commit-SHA based via
-`/api/version/check`. The `__CLANKERMUX_VERSION__` build define referenced in
-`version.ts` is not currently injected anywhere; the app version resolves from
-the root `package.json` at runtime.
+`/api/version/check`. The app version resolves from the root `package.json` at
+runtime.
 
 ## Commit prefixes
 
