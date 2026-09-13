@@ -86,9 +86,13 @@ function stripInternalControlHeaders(headers: Headers): void {
  * Headers describing the client→proxy hop rather than the proxy→upstream one:
  * the caller's address and the name it dialled. An ingress writes them, so a
  * request carries them whether or not the client sent any.
+ *
+ * The Cloudflare names are listed rather than swept by `cf-` prefix: that prefix
+ * also covers CF-Access-Client-Id / -Secret, which authenticate a request TO an
+ * endpoint behind Cloudflare Access instead of describing where it came from.
  */
 const CLIENT_HOP_HEADER_PATTERN =
-	/^(cookie|forwarded|x-real-ip|true-client-ip|cdn-loop|x-forwarded-.*|cf-.*)$/i;
+	/^(cookie|forwarded|x-real-ip|true-client-ip|cdn-loop|x-forwarded-[^\s]*|cf-(connecting-ip|connecting-ipv6|pseudo-ipv4|ipcountry|ray|visitor|worker|ew-via|request-id))$/i;
 
 /**
  * Deletes the client hop's own metadata from the FINAL outbound headers.

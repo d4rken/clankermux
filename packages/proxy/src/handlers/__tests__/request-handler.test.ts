@@ -231,8 +231,12 @@ describe("makeProxyRequest — client hop metadata sweep", () => {
 		headers.set("true-client-ip", "192.168.1.50");
 		headers.set("cf-connecting-ip", "192.168.1.50");
 		headers.set("cf-ray", "8d0-LHR");
+		headers.set("cf-ipcountry", "GB");
 		headers.set("cdn-loop", "cloudflare");
 		headers.set("accept", "application/json");
+		// Authenticates a request TO an endpoint behind Cloudflare Access; it does
+		// not describe the caller, so it must survive the sweep.
+		headers.set("cf-access-client-id", "access-id.access");
 		return headers;
 	}
 
@@ -247,6 +251,7 @@ describe("makeProxyRequest — client hop metadata sweep", () => {
 			"true-client-ip",
 			"cf-connecting-ip",
 			"cf-ray",
+			"cf-ipcountry",
 			"cdn-loop",
 		]) {
 			expect(sent.get(name)).toBeNull();
@@ -254,6 +259,7 @@ describe("makeProxyRequest — client hop metadata sweep", () => {
 		// Ordinary headers must be untouched.
 		expect(sent.get("content-type")).toBe("application/json");
 		expect(sent.get("accept")).toBe("application/json");
+		expect(sent.get("cf-access-client-id")).toBe("access-id.access");
 	}
 
 	it("strips client hop metadata on the headers-param branch", async () => {

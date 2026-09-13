@@ -1316,29 +1316,33 @@ class UsageCache {
 					error,
 				);
 			}
+			// failureCounts belongs to whichever generation is live NOW. A rejection
+			// carries no `superseded` flag, so without this check a throw from a
+			// poll that was replaced mid-flight would charge its failure to the
+			// replacement and push a healthy poller into backoff.
+			const stillCurrent =
+				this.pollGenerations.get(accountId) === generation &&
+				this.tokenProviders.get(accountId) === tokenProvider;
+			if (!stillCurrent) return;
 			if (success) {
 				this.failureCounts.delete(accountId); // reset streak on success
 			} else {
 				const count = (this.failureCounts.get(accountId) ?? 0) + 1;
 				this.failureCounts.set(accountId, count);
 			}
-			// Schedule the next poll only if this generation is still current
-			// (generation + identity guards — see the bail check above).
+			// scheduleNextPoll re-checks the generation itself; the catch keeps a
+			// throw here off the process, though it does leave this account unarmed
+			// until something else restarts polling for it.
 			try {
-				if (
-					this.pollGenerations.get(accountId) === generation &&
-					this.tokenProviders.get(accountId) === tokenProvider
-				) {
-					this.scheduleNextPoll(
-						accountId,
-						tokenProvider,
-						generation,
-						activeBaseMs,
-						provider,
-						customEndpoint,
-						nextRetryAfterMs,
-					);
-				}
+				this.scheduleNextPoll(
+					accountId,
+					tokenProvider,
+					generation,
+					activeBaseMs,
+					provider,
+					customEndpoint,
+					nextRetryAfterMs,
+				);
 			} catch (error) {
 				log.error(
 					`Failed to arm the next usage poll for account ${accountId}`,
