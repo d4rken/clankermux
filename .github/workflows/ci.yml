@@ -78,6 +78,27 @@ jobs:
       # above. Needs no extra setup beyond the steps already run for `bun test`.
       - run: bun run test:dom
 
+  server-binary:
+    name: Server binary smoke test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version-file: .bun-version
+      - run: bun install --frozen-lockfile
+      # Its own lane because nothing else can catch this class of break: the
+      # compiled binary's Workers and dashboard assets fail SILENTLY at runtime
+      # when they are not embedded (a worker whose module is missing just never
+      # answers, and the error surfaces only through `worker.onerror`). Every
+      # unit test runs from the checkout, where those paths resolve, so the
+      # binary has to be built and actually booted.
+      - run: bun run build:server
+      # Runs ~2 minutes longer than its sibling jobs: the quota-drift assertion
+      # waits out the scheduler's 90 s first-run delay, which has no HTTP
+      # trigger, and a completed pass is the only evidence that worker spawned.
+      - run: bun run smoke:server
+
   audit:
     name: Dependency audit (bun audit)
     runs-on: ubuntu-latest
