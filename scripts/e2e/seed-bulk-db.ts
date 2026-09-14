@@ -25,7 +25,7 @@ import {
 import type { Account, ClientProfile } from "@clankermux/types";
 // Deep imports rather than the package barrels: both barrels pull in the whole
 // server surface, which starts timers, so a seeding run would do all its work
-// and then never exit. tsconfig.tests.json typechecks this file, so a move or a
+// and then never exit. The root tsconfig typechecks this file, so a move or a
 // rename on either side fails here rather than at run time.
 import { modelPermissionScope } from "../../packages/proxy/src/account-model-permissions";
 import { scryptPasswordHasher } from "../../packages/http-api/src/services/session-auth-service";

@@ -16,7 +16,6 @@
 		"dev:dashboard": "bun --hot packages/dashboard-web/src/index.tsx",
 		"auth:password": "bun run scripts/auth-password.ts",
 		"typecheck": "bunx tsc --noEmit",
-		"typecheck:tests": "bunx tsc --project tsconfig.tests.json --noEmit",
 		"test": "bun test && bun run test:dom",
 		"test:dom": "bun scripts/test-dom.ts",
 		"build": "echo \"🏗️  Building ClankerMux v$(node -p \"require('./package.json').version\")\" && bun run build:db-workers && bun run build:dashboard",
@@ -50,5 +49,5 @@
 		"ts-json-schema-generator": "2.9.0",
 		"typescript": "6.0.2"
 	},
-	"version": "2026.9.62"
+	"version": "2026.9.63"
 }
