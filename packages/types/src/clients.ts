@@ -70,3 +70,37 @@ export interface ClientReview {
 	precedingRules: string[];
 	notices: string[];
 }
+export type ClientBulkMode = "add" | "remove" | "replace";
+export interface ClientBulkOperation {
+	format: ClientFormat;
+	mode: ClientBulkMode;
+	/** add/replace: the entries. remove: only `id` is read. */
+	models: ClientModel[];
+	/** replace only; ignored for add/remove. */
+	defaultModel?: string | null;
+}
+export interface ClientBulkClientResult {
+	apiKeyId: string;
+	name: string;
+	status: "changed" | "unchanged" | "rejected";
+	/** Set only when `status` is `rejected`. */
+	reason: string | null;
+	/** Published model IDs this operation would add / drop for this client. */
+	added: string[];
+	removed: string[];
+	/**
+	 * Published IDs kept but altered — `targetModel`, `displayName` or
+	 * `accountIds` differ from the stored entry. Without this a replace that
+	 * repoints `fast` from `target-a` to `target-b` previews as `changed` with
+	 * both other arrays empty, so the operator never sees what changes.
+	 */
+	modified: string[];
+	/** Non-null when the format's default model changes. */
+	defaultModelChange: { from: string | null; to: string | null } | null;
+	notices: string[];
+}
+export interface ClientBulkReview {
+	token: string;
+	operation: ClientBulkOperation;
+	clients: ClientBulkClientResult[];
+}
