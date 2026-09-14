@@ -37,6 +37,8 @@ export const E2E_PASSWORD = "bulk-catalogue-e2e";
 export const SUGGESTED_MODEL = "shared-model";
 /** The ID only the first selected client starts with. */
 export const ALPHA_MODEL = "alpha-model";
+/** The ID the run types by hand: no client and no discovery offers it. */
+export const CUSTOM_ALIAS = "alpha-model[1m]";
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 

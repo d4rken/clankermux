@@ -26,9 +26,10 @@ import {
 	type PageSession,
 	openPageSession,
 	shutdownChromium,
+	typeIntoSelector,
 	waitForSelector,
 } from "../cdp/client";
-import { ALPHA_MODEL, SUGGESTED_MODEL } from "./seed-bulk-db";
+import { ALPHA_MODEL, CUSTOM_ALIAS, SUGGESTED_MODEL } from "./seed-bulk-db";
 
 interface Options {
 	baseUrl: string;
@@ -150,6 +151,19 @@ async function clientRow(
 		`Reading the row for ${name}`,
 	);
 	return typeof value === "string" ? value : null;
+}
+
+/** The candidate IDs the batch panel is rendering, in order. */
+async function candidateIds(page: PageSession): Promise<string[]> {
+	const value = await evaluateInPage(
+		page,
+		`[...document.querySelectorAll("[data-candidate]")].map((n) =>
+			n.getAttribute("data-candidate"),
+		)`,
+		"Reading the candidate list",
+	);
+	assert(Array.isArray(value), "The candidate list did not read back as a list");
+	return value.map(String);
 }
 
 /** How many OpenAI catalogue models the list reports for `name`. */
@@ -311,6 +325,13 @@ async function drive(page: PageSession, options: Options): Promise<void> {
 	);
 	await clickLabelled(page, "button", "Apply to", { prefix: true });
 
+	// --- the panel stays open, reporting what it applied ----------------------
+	await waitUntil(
+		async () => (await pageText(page)).includes("Applied to 2 clients."),
+		"The panel never reported applying to both clients",
+	);
+	await clickLabelled(page, "button", "Close");
+
 	// --- back on the list, with two catalogues changed ------------------------
 	await waitForSelector(page, 'input[aria-label="Select Alpha"]');
 	await waitUntil(
@@ -327,21 +348,80 @@ async function drive(page: PageSession, options: Options): Promise<void> {
 	);
 
 	// --- replace Bravo's whole OpenAI catalogue from Alpha's ------------------
-	await clickSelector(page, 'input[aria-label="Select Alpha"]');
-	await clickSelector(page, 'input[aria-label="Select Bravo"]');
+	assert(
+		(await pageText(page)).includes("2 selected"),
+		"Closing the batch panel dropped the client selection",
+	);
 	await clickLabelled(page, "button", "Edit catalogues");
 	await clickLabelled(page, '[role="tab"]', "OpenAI", { prefix: true });
-	await clickSelector(page, "details > summary");
+	await clickLabelled(page, "summary", "Replace whole catalogue");
 	await chooseOption(page, "Start from", "alpha");
 	await clickLabelled(page, "button", "Replace catalogue for", { prefix: true });
 	await waitForSelector(page, '[role="dialog"]');
 	await clickLabelled(page, "button", "Replace catalogues");
 	await waitForSelector(page, '[aria-label="Bulk edit preview"]');
 	await clickLabelled(page, "button", "Apply to", { prefix: true });
+	// Alpha is the source, so only Bravo changes.
+	await waitUntil(
+		async () => (await pageText(page)).includes("Applied to 1 client."),
+		"The panel never reported applying to the one changed client",
+	);
+
+	// --- narrow the candidate list -------------------------------------------
+	const filter = 'input[aria-label="Filter OpenAI-style discovery models"]';
+	await typeIntoSelector(page, filter, "alpha");
+	await waitUntil(
+		async () => (await candidateIds(page)).join(",") === ALPHA_MODEL,
+		"The filter did not narrow the candidate list to the matching model",
+	);
+	const filtered = await pageText(page);
+	assert(
+		filtered.includes("1 of 2 shown"),
+		`The filter does not report what it is showing: ${filtered}`,
+	);
+	await clickLabelled(page, "button", "Clear");
+	await waitUntil(
+		async () => (await candidateIds(page)).length === 2,
+		"Clearing the filter did not restore the candidate list",
+	);
+
+	// --- publish a model no client and no discovery offers --------------------
+	await clickLabelled(page, "summary", "Add a custom model or alias");
+	await typeIntoSelector(page, "#bulk-model-id", CUSTOM_ALIAS);
+	await typeIntoSelector(page, "#bulk-target-id", ALPHA_MODEL);
+	await typeIntoSelector(page, "#bulk-display-name", "Custom Alias");
+	await clickLabelled(page, "label", "Local One");
+	await clickLabelled(page, "button", "Add to list");
+	await waitForSelector(page, `input[aria-label="Select ${CUSTOM_ALIAS}"]`);
+	await clickLabelled(page, "button", "Add to all selected");
+	await waitForSelector(page, '[aria-label="Bulk edit preview"]');
+	for (const id of ["alpha", "bravo"]) {
+		const row = await evaluateInPage(
+			page,
+			`document.querySelector('[data-preview=${quote(id)}]')?.textContent ?? null`,
+			`Reading the preview row for ${id}`,
+		);
+		assert(
+			typeof row === "string" &&
+				row.includes("changed") &&
+				row.includes(CUSTOM_ALIAS),
+			`The preview row for ${id} does not add ${CUSTOM_ALIAS}: ${String(row)}`,
+		);
+	}
+	await clickLabelled(page, "button", "Apply to", { prefix: true });
+	await waitUntil(
+		async () => (await pageText(page)).includes("Applied to 2 clients."),
+		"The panel never reported applying the custom alias to both clients",
+	);
+	await clickLabelled(page, "button", "Close");
+
+	// --- back on the list, with both catalogues one model larger --------------
 	await waitForSelector(page, 'input[aria-label="Select Alpha"]');
 	await waitUntil(
-		async () => (await openaiCount(page, "Bravo")) === 2,
-		"Bravo's OpenAI catalogue was not replaced with Alpha's",
+		async () =>
+			(await openaiCount(page, "Alpha")) === 3 &&
+			(await openaiCount(page, "Bravo")) === 3,
+		"The custom alias never reached both clients' catalogues",
 	);
 }
 
@@ -372,26 +452,34 @@ function assertDatabase(dbPath: string): void {
 		for (const id of ["alpha", "bravo", "charlie"])
 			assert(by.has(id), `Client ${id} lost its profile`);
 		assert(
-			by.get("alpha")!.revision === 2,
-			`Alpha's revision is ${by.get("alpha")?.revision}, expected 2 (one add, then a replace that changed nothing)`,
+			by.get("alpha")!.revision === 3,
+			`Alpha's revision is ${by.get("alpha")?.revision}, expected 3 (one add, a replace that changed nothing, then the custom alias)`,
 		);
 		assert(
-			by.get("bravo")!.revision === 3,
-			`Bravo's revision is ${by.get("bravo")?.revision}, expected 3 (one add and one replace)`,
+			by.get("bravo")!.revision === 4,
+			`Bravo's revision is ${by.get("bravo")?.revision}, expected 4 (one add, one replace and the custom alias)`,
 		);
 		assert(
 			by.get("charlie")!.revision === 1,
 			`The unselected client's revision moved to ${by.get("charlie")?.revision}`,
 		);
-		const ids = (id: string) =>
+		const published = (id: string) =>
 			(
 				JSON.parse(by.get(id)!.catalogues) as {
-					openai: { models: { id: string }[] };
+					openai: {
+						models: {
+							id: string;
+							targetModel: string;
+							accountIds: string[] | null;
+						}[];
+					};
 				}
-			).openai.models
+			).openai.models;
+		const ids = (id: string) =>
+			published(id)
 				.map((m) => m.id)
 				.sort();
-		const expected = [ALPHA_MODEL, SUGGESTED_MODEL].sort();
+		const expected = [ALPHA_MODEL, SUGGESTED_MODEL, CUSTOM_ALIAS].sort();
 		for (const id of ["alpha", "bravo"])
 			assert(
 				JSON.stringify(ids(id)) === JSON.stringify(expected),
@@ -401,6 +489,31 @@ function assertDatabase(dbPath: string): void {
 			ids("charlie").length === 0,
 			"The unselected client's catalogue was written",
 		);
+		// The alias the run typed: an ID no discovery offered, pointing somewhere
+		// else, pinned to the one account chosen in the editor.
+		for (const id of ["alpha", "bravo"]) {
+			const alias = published(id).find((m) => m.id === CUSTOM_ALIAS);
+			assert(
+				alias?.targetModel === ALPHA_MODEL &&
+					JSON.stringify(alias?.accountIds) === JSON.stringify(["acct-one"]),
+				`${id} stored ${CUSTOM_ALIAS} as ${JSON.stringify(alias)}`,
+			);
+			const routes = db
+				.query(
+					`SELECT r.target_model AS target, r.pool_account_ids AS pool
+					 FROM routing_rules r
+					 JOIN client_alias_rules c ON c.rule_id = r.id
+					 WHERE c.api_key_id = ? AND r.match_model_value = ?`,
+				)
+				.all(id, CUSTOM_ALIAS) as { target: string; pool: string }[];
+			assert(
+				routes.length === 1 &&
+					routes[0]!.target === ALPHA_MODEL &&
+					JSON.stringify(JSON.parse(routes[0]!.pool)) ===
+						JSON.stringify(["acct-one"]),
+				`${id} has ${routes.length} alias routes for ${CUSTOM_ALIAS}: ${JSON.stringify(routes)}`,
+			);
+		}
 
 		const orphans = db
 			.query(
