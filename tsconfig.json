@@ -71,7 +71,8 @@
 		"scripts/build-readme-media.test.ts",
 		"scripts/forecast-confidence-backtest.test.ts",
 		"scripts/public-api/schema.test.ts",
-		"scripts/redistribution-backtest.test.ts"
+		"scripts/redistribution-backtest.test.ts",
+		"scripts/smoke-server-binary.test.ts"
 	],
 	"exclude": ["node_modules", "**/node_modules"]
 }
