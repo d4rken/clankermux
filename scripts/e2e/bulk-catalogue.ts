@@ -161,10 +161,77 @@ async function openaiCount(page: PageSession, name: string): Promise<number> {
 	return Number(match[1]);
 }
 
+/**
+ * Records every `/api/clients/bulk/*` exchange on the page.
+ *
+ * A stalled wait in this script is almost always the server having refused the
+ * batch: the component catches the failure into its error banner and never
+ * leaves the editor. Without the status and body the timeout reports only the
+ * selector it gave up on, which says nothing about why.
+ *
+ * Survives no navigation, so it is reinstalled after each one.
+ */
+async function recordBulkCalls(page: PageSession): Promise<void> {
+	await evaluateInPage(
+		page,
+		`(() => {
+			if (window.__bulkCalls) return true;
+			window.__bulkCalls = [];
+			const original = window.fetch;
+			window.fetch = async (...args) => {
+				const response = await original(...args);
+				const input = args[0];
+				const url = typeof input === "string" ? input : (input?.url ?? "");
+				if (url.includes("/api/clients/bulk/")) {
+					let body;
+					try {
+						body = (await response.clone().text()).slice(0, 1000);
+					} catch (e) {
+						body = "<body unreadable: " + e + ">";
+					}
+					window.__bulkCalls.push({ url, status: response.status, body });
+				}
+				return response;
+			};
+			return true;
+		})()`,
+		"Installing the bulk request recorder",
+	);
+}
+
+/** What the page was showing when a step gave up. */
+async function describePage(page: PageSession): Promise<string> {
+	try {
+		const state = await evaluateInPage(
+			page,
+			`(() => {
+				const calls = window.__bulkCalls ?? [];
+				return {
+					alerts: [...document.querySelectorAll('[role="alert"]')].map((n) =>
+						n.textContent.trim(),
+					),
+					previewMounted:
+						document.querySelector('[aria-label="Bulk edit preview"]') !== null,
+					buttons: [...document.querySelectorAll("button")].map(
+						(b) => b.textContent.trim() + (b.disabled ? " [disabled]" : ""),
+					),
+					lastBulkCall: calls.length ? calls[calls.length - 1] : null,
+					bulkCallCount: calls.length,
+				};
+			})()`,
+			"Collecting page state",
+		);
+		return JSON.stringify(state, null, 2);
+	} catch (error) {
+		return `page state unavailable: ${error instanceof Error ? error.message : String(error)}`;
+	}
+}
+
 async function login(page: PageSession, options: Options): Promise<void> {
 	// The login must run from the app's own origin: a fetch from about:blank has
 	// an opaque origin and its Set-Cookie is dropped.
 	await navigateAndWait(page, options.baseUrl);
+	await recordBulkCalls(page);
 	const result = await evaluateInPage(
 		page,
 		`(async () => {
@@ -191,6 +258,7 @@ async function drive(page: PageSession, options: Options): Promise<void> {
 
 	// --- the list, and the selection -----------------------------------------
 	await navigateAndWait(page, new URL("/clients", options.baseUrl).toString());
+	await recordBulkCalls(page);
 	for (const name of ["Alpha", "Bravo", "Charlie"])
 		await waitForSelector(page, `input[aria-label="Select ${name}"]`);
 	assert(
@@ -370,7 +438,13 @@ async function main(): Promise<void> {
 			{ width: 1440, height: 1200, deviceScaleFactor: 1, mobile: false },
 			page.sessionId,
 		);
-		await drive(page, options);
+		try {
+			await drive(page, options);
+		} catch (error) {
+			// Before the `finally` below takes the browser down with it.
+			const message = error instanceof Error ? error.message : String(error);
+			throw new Error(`${message}\n\nPage state:\n${await describePage(page)}`);
+		}
 	} finally {
 		client?.close();
 		await shutdownChromium(browser);
