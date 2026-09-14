@@ -56,6 +56,7 @@
 		// reaches into packages/http-api for the password hasher and writes raw
 		// SQL against the live schema: a rename on either side should fail here,
 		// not silently produce a database the capture instance cannot serve.
+		"scripts/cdp/client.ts",
 		"scripts/readme-media/capture.ts",
 		"scripts/readme-media/mock-data.ts",
 		"scripts/readme-media/seed-mock-db.ts",
