@@ -15,6 +15,7 @@
 		"packages/http-api/src/handlers/clients.test.ts",
 		"packages/dashboard-web/src/components/ClientsTab.dom-test.tsx",
 		"packages/dashboard-web/src/components/clients/ClientBulkCatalogue.dom-test.tsx",
+		"scripts/cdp/**/*",
 		"scripts/e2e/**/*"
 	]
 }

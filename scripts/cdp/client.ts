@@ -576,58 +576,124 @@ export async function textOf(
 	return value;
 }
 
-/**
- * Clicks the centre of the first match with a real mouse event pair.
- *
- * `element.click()` would be simpler and would be wrong: it skips hit testing,
- * so a control covered by an overlay or scrolled out of view still "clicks",
- * and the run passes against a UI a person could not operate.
- */
-export async function clickSelector(
+/** The centre of a click target, and what a real click there would reach. */
+interface ClickPoint {
+	x: number;
+	y: number;
+	width: number;
+	height: number;
+	/** What `document.elementFromPoint` returned for the centre. */
+	reaches: "target" | "covered" | "outside";
+	/** The covering element, described for an error message. */
+	covering: string | null;
+}
+
+const REACHES = ["target", "covered", "outside"] as const;
+
+/** Why this point cannot be clicked yet, or `null` when it can. */
+function obstructionOf(point: ClickPoint): string | null {
+	const where = `its centre (${Math.round(point.x)}, ${Math.round(point.y)})`;
+	if (point.width === 0 || point.height === 0)
+		return "it has no layout box";
+	if (point.reaches === "outside") return `${where} is outside the viewport`;
+	if (point.reaches === "covered")
+		return `${point.covering ?? "another element"} covers ${where}`;
+	return null;
+}
+
+/** Where the first match would be clicked, and what is on top of that point. */
+async function clickPoint(
 	page: PageSession,
 	selector: string,
-): Promise<void> {
-	await waitForSelector(page, selector);
-	const box = await evaluateInPage(
+): Promise<ClickPoint> {
+	const value = await evaluateInPage(
 		page,
 		`(() => {
 			const node = document.querySelector(${literal(selector)});
+			if (node === null) return null;
 			node.scrollIntoView({ block: "center", inline: "center" });
 			const rect = node.getBoundingClientRect();
+			const x = rect.left + rect.width / 2;
+			const y = rect.top + rect.height / 2;
+			const hit = document.elementFromPoint(x, y);
+			const reached = hit !== null && (hit === node || node.contains(hit));
+			const describe = (el) =>
+				el.tagName.toLowerCase() +
+				(el.id ? "#" + el.id : "") +
+				[...el.classList].slice(0, 3).map((c) => "." + c).join("");
 			return {
-				x: rect.left + rect.width / 2,
-				y: rect.top + rect.height / 2,
+				x,
+				y,
 				width: rect.width,
 				height: rect.height,
+				reaches: reached ? "target" : hit === null ? "outside" : "covered",
+				covering: reached || hit === null ? null : describe(hit),
 			};
 		})()`,
 		`Locating ${selector}`,
 	);
+	if (value === null)
+		throw new Error(`${selector} left the page while waiting to click it`);
 	if (
-		!isRecord(box) ||
-		typeof box.x !== "number" ||
-		typeof box.y !== "number" ||
-		typeof box.width !== "number" ||
-		typeof box.height !== "number"
+		!isRecord(value) ||
+		typeof value.x !== "number" ||
+		typeof value.y !== "number" ||
+		typeof value.width !== "number" ||
+		typeof value.height !== "number" ||
+		!REACHES.includes(value.reaches as ClickPoint["reaches"]) ||
+		!(typeof value.covering === "string" || value.covering === null)
 	)
 		throw new Error(
-			`Locating ${selector} returned an unusable box: ${JSON.stringify(box)}`,
+			`Locating ${selector} returned an unusable box: ${JSON.stringify(value)}`,
 		);
-	if (box.width === 0 || box.height === 0)
-		throw new Error(`${selector} has no layout box, so it cannot be clicked`);
-	for (const type of ["mousePressed", "mouseReleased"] as const)
-		await page.client.send(
-			"Input.dispatchMouseEvent",
-			{
-				type,
-				x: box.x,
-				y: box.y,
-				button: "left",
-				buttons: type === "mousePressed" ? 1 : 0,
-				clickCount: 1,
-			},
-			page.sessionId,
-		);
+	return value as unknown as ClickPoint;
+}
+
+/**
+ * Clicks the centre of the first match with a real mouse event pair, once that
+ * centre actually belongs to it.
+ *
+ * `element.click()` would be simpler and would be wrong: it skips hit testing,
+ * so a control covered by an overlay or scrolled out of view still "clicks",
+ * and the run passes against a UI a person could not operate. Dispatching at a
+ * point without checking it is the same failure one layer down — the event goes
+ * to whatever is on top and the caller never learns the target did not get it.
+ * So the point is hit-tested first and the click waits for it to clear, which
+ * is what makes a click land on the control behind a dismissing modal instead
+ * of into its fading overlay.
+ */
+export async function clickSelector(
+	page: PageSession,
+	selector: string,
+	timeoutMs = SELECTOR_TIMEOUT_MS,
+): Promise<void> {
+	await waitForSelector(page, selector, timeoutMs);
+	const deadline = Date.now() + timeoutMs;
+	for (;;) {
+		const point = await clickPoint(page, selector);
+		const obstruction = obstructionOf(point);
+		if (obstruction === null) {
+			for (const type of ["mousePressed", "mouseReleased"] as const)
+				await page.client.send(
+					"Input.dispatchMouseEvent",
+					{
+						type,
+						x: point.x,
+						y: point.y,
+						button: "left",
+						buttons: type === "mousePressed" ? 1 : 0,
+						clickCount: 1,
+					},
+					page.sessionId,
+				);
+			return;
+		}
+		if (Date.now() >= deadline)
+			throw new Error(
+				`Timed out waiting ${timeoutMs}ms to click ${selector}: ${obstruction}`,
+			);
+		await Bun.sleep(SELECTOR_POLL_MS);
+	}
 }
 
 /** Focuses the first match and inserts `text` as typed input. */
