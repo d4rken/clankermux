@@ -159,8 +159,11 @@ function baseOpts(
 	};
 }
 
-// A Codex 200 response with a primary 5h window header. Uses fractional
+// A Codex 200 response with a MEASURED primary 5h window. Uses fractional
 // epoch-seconds so reset precision survives (parseFloat * 1000). No 7d header.
+// The used-percent header is what makes the window real: a window described
+// only by a duration and a reset is omitted by parseCodexUsageHeaders, and none
+// of the bookkeeping below it would run.
 function codexResponse(
 	fiveHourResetMs: number,
 	extraHeaders: Record<string, string> = {},
@@ -170,6 +173,7 @@ function codexResponse(
 		status,
 		headers: {
 			"content-type": "application/json",
+			"x-codex-primary-used-percent": "12",
 			"x-codex-primary-window-minutes": "300",
 			"x-codex-primary-reset-at": String(fiveHourResetMs / 1000),
 			...extraHeaders,
@@ -177,7 +181,7 @@ function codexResponse(
 	});
 }
 
-// A response with 5h primary + 7d secondary windows.
+// A response with MEASURED 5h primary + 7d secondary windows.
 function codexResponseWithBothWindows(
 	fiveHourResetMs: number,
 	sevenDayResetMs: number,
@@ -186,8 +190,10 @@ function codexResponseWithBothWindows(
 		status: 200,
 		headers: {
 			"content-type": "application/json",
+			"x-codex-primary-used-percent": "12",
 			"x-codex-primary-window-minutes": "300",
 			"x-codex-primary-reset-at": String(fiveHourResetMs / 1000),
+			"x-codex-secondary-used-percent": "34",
 			"x-codex-secondary-window-minutes": String(7 * 24 * 60),
 			"x-codex-secondary-reset-at": String(sevenDayResetMs / 1000),
 		},
@@ -378,6 +384,33 @@ describe("applyCodexObservation — usage cache overwrite gating", () => {
 		expect(usageCache.get(account.id)).toEqual(seeded);
 		expect(result.usage).toBeNull();
 	});
+
+	it("does NOT cache or persist a window that reports a reset but no used-percent", () => {
+		// A reset with no percentage is not a reading. Minting 0% for it wrote an
+		// idle bar into the usage cache and pinned accounts.rate_limit_reset from
+		// evidence that never said how much of the window was spent.
+		const account = makeCodexAccount({ id: track("acct-no-percent") });
+		const resetMs = Date.now() + 4 * 60 * 60 * 1000;
+		const { ctx, calls } = makeCtx();
+
+		const result = applyCodexObservation(
+			account,
+			new Response('{"id":"msg_1"}', {
+				status: 200,
+				headers: {
+					"content-type": "application/json",
+					"x-codex-primary-window-minutes": "300",
+					"x-codex-primary-reset-at": String(resetMs / 1000),
+				},
+			}),
+			ctx,
+			baseOpts(),
+		);
+
+		expect(usageCache.get(account.id)).toBeNull();
+		expect(result.usage).toBeNull();
+		expect(rateLimitResetWrites(calls.runSql)).toHaveLength(0);
+	});
 });
 
 describe("applyCodexObservation — earliest reset persistence", () => {
@@ -551,8 +584,16 @@ describe("applyCodexObservation — cooldown application", () => {
 
 		const result = applyCodexObservation(
 			account,
-			// Primary window header present (meaningful) but no used-percent → 100 on 429.
-			codexResponse(resetMs, {}, 429),
+			// Inline, NOT codexResponse(): this test exists to exercise the 429
+			// fallback, so the response must carry a window with no used-percent.
+			new Response('{"id":"msg_1"}', {
+				status: 429,
+				headers: {
+					"content-type": "application/json",
+					"x-codex-primary-window-minutes": "300",
+					"x-codex-primary-reset-at": String(resetMs / 1000),
+				},
+			}),
 			ctx,
 			baseOpts({
 				rateLimitInfo: rl({ isRateLimited: true, resetTime: resetMs }),

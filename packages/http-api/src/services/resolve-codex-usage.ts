@@ -109,7 +109,7 @@ async function scanCodexUsageFromPayloads(
 			const usage = parseCodexUsageHeaders(new Headers(headerEntries), {
 				baseTimeMs: payloadTimestamp,
 				allowRelativeResetAfter: true,
-				defaultUtilization: codexStatus === 429 ? 100 : 0,
+				...(codexStatus === 429 ? { defaultUtilization: 100 } : {}),
 			});
 			if (!usage) continue;
 

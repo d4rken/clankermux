@@ -481,9 +481,13 @@ export function applyCodexObservation(
 	let earliestResetMs: number | null = null;
 	let windowRolledOver = false;
 
-	const codexUsage = parseCodexUsageHeaders(response.headers, {
-		defaultUtilization: responseStatus === 429 ? 100 : 0,
-	});
+	// Only a 429 is a real "exhausted" signal worth filling a missing percentage
+	// with; on any other status an absent percentage means unknown, and the
+	// window is omitted rather than reported as idle.
+	const codexUsage = parseCodexUsageHeaders(
+		response.headers,
+		responseStatus === 429 ? { defaultUtilization: 100 } : {},
+	);
 	if (codexUsage) {
 		const freshCredits = parseCodexCreditsHeaders(response.headers);
 		const bookkeeping = applyCodexUsageBookkeeping(

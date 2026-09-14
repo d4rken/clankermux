@@ -3265,6 +3265,94 @@ describe("parseCodexUsageHeaders", () => {
 		});
 	});
 
+	it("omits a window that reports a reset but no used-percent", () => {
+		// A reset time says WHEN the window turns over, never how much of it is
+		// spent. Minting 0% here reported an idle account on evidence that carries
+		// no percentage at all — the dashboard drew a 0% bar, the sampler recorded
+		// a 0% observation, and computePoolUsage counted an idle contributor.
+		const headers = new Headers({
+			"x-codex-primary-window-minutes": "10080",
+			"x-codex-primary-reset-at": "1775000000",
+		});
+
+		expect(parseCodexUsageHeaders(headers)).toBeNull();
+	});
+
+	it("honours an explicit defaultUtilization for a percentage-less window", () => {
+		// The traffic path passes 100 on a 429: that IS a real exhausted signal.
+		const headers = new Headers({
+			"x-codex-primary-window-minutes": "10080",
+			"x-codex-primary-reset-at": "1775000000",
+		});
+
+		const usage = parseCodexUsageHeaders(headers, { defaultUtilization: 100 });
+
+		expect(usage?.seven_day).toEqual({
+			utilization: 100,
+			resets_at: new Date(1775000000 * 1000).toISOString(),
+		});
+	});
+
+	it("omits the legacy x-codex-7d-reset-at window when no caller default exists", () => {
+		// The legacy reset headers carry no percentage whatsoever.
+		const headers = new Headers({
+			"x-codex-7d-reset-at": "1775000000",
+		});
+
+		expect(parseCodexUsageHeaders(headers)).toBeNull();
+	});
+
+	it("fills the legacy x-codex-7d-reset-at window from an explicit default", () => {
+		const headers = new Headers({
+			"x-codex-7d-reset-at": "1775000000",
+		});
+
+		const usage = parseCodexUsageHeaders(headers, { defaultUtilization: 100 });
+
+		expect(usage?.five_hour).toBeNull();
+		expect(usage?.seven_day).toEqual({
+			utilization: 100,
+			resets_at: new Date(1775000000 * 1000).toISOString(),
+		});
+	});
+
+	it("keeps a reported weekly window while omitting a percentage-less 5h window", () => {
+		const headers = new Headers({
+			"x-codex-primary-used-percent": "11",
+			"x-codex-primary-window-minutes": "10080",
+			"x-codex-primary-reset-at": "1775000000",
+			"x-codex-secondary-window-minutes": "300",
+			"x-codex-secondary-reset-at": "1774600000",
+		});
+
+		const usage = parseCodexUsageHeaders(headers);
+
+		expect(usage?.five_hour).toBeNull();
+		expect(usage?.seven_day).toEqual({
+			utilization: 11,
+			resets_at: new Date(1775000000 * 1000).toISOString(),
+		});
+	});
+
+	it("drops a per-family window that reports no used-percent", () => {
+		const headers = new Headers({
+			"x-codex-primary-used-percent": "11",
+			"x-codex-primary-window-minutes": "10080",
+			"x-codex-primary-reset-at": "1775000000",
+			"x-codex-foo-limit-name": "Foo",
+			"x-codex-foo-primary-window-minutes": "10080",
+			"x-codex-foo-primary-reset-at": "1775000000",
+		});
+
+		const usage = parseCodexUsageHeaders(headers);
+
+		expect(usage?.limits).toBeUndefined();
+		expect(usage?.seven_day).toEqual({
+			utilization: 11,
+			resets_at: new Date(1775000000 * 1000).toISOString(),
+		});
+	});
+
 	it("drops invalid reset timestamps instead of throwing", () => {
 		const headers = new Headers({
 			"x-codex-primary-used-percent": "12",
