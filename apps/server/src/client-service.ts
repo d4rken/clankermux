@@ -70,9 +70,14 @@ const PENDING_CLIENT_CAP = 128;
 const BULK_MAX_CLIENTS = 50;
 const BULK_MAX_MODELS = 500;
 /**
- * Ceiling on `clients × alias entries`. Applying one client rewrites every
- * routing rule's position twice whenever it contributes alias rules, so the
- * write count grows with the square of a batch's total alias count.
+ * Ceiling on the summed `review.aliasRules.length` of a batch's prepared
+ * records. Applying one client rewrites every routing rule's position twice
+ * whenever it contributes alias rules, so the write count grows with the
+ * square of that sum. Only a prepared record knows that sum: a client's
+ * retained pre-existing rules count towards the write transaction while the
+ * request that triggers them can carry no alias at all. Bounding after
+ * preparation throws away reads, which is the right trade for bounding the
+ * quantity that is actually written.
  */
 const BULK_MAX_ALIAS_WRITES = 500;
 
@@ -1037,13 +1042,6 @@ export class ClientService {
 			if (seen.has(id)) throw BadRequest(`Duplicate model ${id}`);
 			seen.add(id);
 		}
-		const aliases = (models as ClientModel[]).filter(
-			(m) => m.id !== m.targetModel,
-		).length;
-		if (clientIds.length * aliases > BULK_MAX_ALIAS_WRITES)
-			throw BadRequest(
-				"This batch would rewrite too many routing rules; select fewer clients or fewer alias models",
-			);
 		return {
 			clientIds: clientIds as string[],
 			operation: {
@@ -1182,6 +1180,14 @@ export class ClientService {
 				);
 			}
 		}
+		const aliasWrites = records.reduce(
+			(n, r) => n + r.review.aliasRules.length,
+			0,
+		);
+		if (aliasWrites > BULK_MAX_ALIAS_WRITES)
+			throw BadRequest(
+				"This batch would rewrite too many routing rules; select fewer clients or fewer alias models",
+			);
 		if (this.fingerprint() !== fingerprintBefore)
 			throw Conflict(
 				"Routing or account identity changed during review; review again",

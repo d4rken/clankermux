@@ -806,20 +806,67 @@ describe("client service integration", () => {
 		).toBe(400);
 	});
 
-	it("refuses a batch whose alias count would renumber the routing table raw", async () => {
-		const a = await makeClient("Alpha");
-		const b = await makeClient("Bravo");
-		expect(
-			await bulkStatus({
-				clientIds: [a.apiKeyId, b.apiKeyId],
+	it("accepts a plain remove of many entries across many clients", async () => {
+		await service.bootstrap();
+		const ids = Array.from({ length: 51 }, (_, i) => `drop-${i}`);
+		const clients: ClientView[] = [];
+		for (let i = 0; i < 10; i++)
+			clients.push(
+				await makeClient(`Bulk ${i}`, (d) => {
+					d.catalogues.openai.models = ids.map(plain);
+				}),
+			);
+		// The remove contract reads only `id`, so no entry carries a target model
+		// and no alias is involved anywhere in this batch.
+		const review = await service.bulkReview({
+			clientIds: clients.map((c) => c.apiKeyId),
+			operation: {
+				format: "openai",
+				mode: "remove",
+				models: ids.map((id) => ({ id })),
+			},
+		});
+		expect(review.clients.map((r) => r.status)).toEqual(
+			Array(clients.length).fill("changed"),
+		);
+		await service.bulkCommit(review.token);
+		for (const client of clients)
+			expect(
+				(await dbOps.clients.getProfile(client.apiKeyId))?.catalogues.openai
+					.models,
+			).toEqual([]);
+	}, 60000);
+
+	it("counts the alias rules a batch retains against the routing-rewrite bound", async () => {
+		await service.bootstrap();
+		const ids = Array.from({ length: 51 }, (_, i) => `alias-${i}`);
+		const clients: ClientView[] = [];
+		for (let i = 0; i < 10; i++)
+			clients.push(
+				await makeClient(`Bulk ${i}`, (d) => {
+					d.catalogues.openai.models = ids.map((id) => alias(id));
+				}),
+			);
+		expect(rules().length).toBe(510);
+		// Every entry has id === targetModel, so the request declares no aliases.
+		// Hiding the entries keeps all 510 owned rules alive as retained alias
+		// rules, so each client still renumbers the whole table twice.
+		await expect(
+			service.bulkReview({
+				clientIds: clients.map((c) => c.apiKeyId),
 				operation: {
 					format: "openai",
-					mode: "add",
-					models: Array.from({ length: 251 }, (_, i) => alias(`alias-${i}`)),
+					mode: "remove",
+					models: ids.map((id) => ({
+						id,
+						targetModel: id,
+						displayName: id,
+						accountIds: null,
+					})),
 				},
 			}),
-		).toBe(400);
-	});
+		).rejects.toThrow("too many routing rules");
+	}, 60000);
 
 	it("rolls the whole batch back when a later client's revision moved underneath it", async () => {
 		await service.bootstrap();
