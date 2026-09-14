@@ -1,9 +1,11 @@
 import {
 	type DatabaseOperations,
+	isClientInputError,
 	RoutingConflictError,
 } from "@clankermux/database";
 import { BadRequest, Conflict, NotFound } from "@clankermux/errors";
 import type {
+	ClientBulkReview,
 	ClientReview,
 	ClientSuggestions,
 	ClientView,
@@ -16,6 +18,8 @@ export interface ClientManager {
 	suggestions(input: unknown, refresh?: boolean): Promise<ClientSuggestions>;
 	review(input: unknown): Promise<ClientReview>;
 	commit(token: string): Promise<{ client: ClientView; apiKey?: string }>;
+	bulkReview(input: unknown): Promise<ClientBulkReview>;
+	bulkCommit(token: string): Promise<{ clients: ClientView[] }>;
 	remove(id: string): Promise<void>;
 }
 export function createClientsHandler(
@@ -38,6 +42,8 @@ export function createClientsHandler(
 					"/api/clients/suggestions",
 					"/api/clients/review",
 					"/api/clients/commit",
+					"/api/clients/bulk/review",
+					"/api/clients/bulk/commit",
 				].includes(path)
 			) {
 				let body: Record<string, unknown>;
@@ -48,13 +54,21 @@ export function createClientsHandler(
 				}
 				if (!body || typeof body !== "object" || Array.isArray(body))
 					throw BadRequest("Request must be an object");
-				if (path.endsWith("/suggestions"))
+				// Exact paths, not suffixes: "/api/clients/bulk/review" ends with
+				// "/review" too, and a batch handed to the single-client reviewer
+				// fails as a malformed draft.
+				if (path === "/api/clients/suggestions")
 					return ok(
 						await manager.suggestions(body.destinations, body.refresh === true),
 					);
-				if (path.endsWith("/review")) return ok(await manager.review(body));
+				if (path === "/api/clients/review")
+					return ok(await manager.review(body));
+				if (path === "/api/clients/bulk/review")
+					return ok(await manager.bulkReview(body));
 				if (typeof body.token !== "string")
 					throw BadRequest("Review token is required");
+				if (path === "/api/clients/bulk/commit")
+					return ok(await manager.bulkCommit(body.token));
 				return ok(await manager.commit(body.token));
 			}
 			const match =
@@ -133,14 +147,11 @@ export function createClientsHandler(
 			}
 			throw NotFound("Client endpoint not found");
 		} catch (error) {
-			if (
-				error instanceof RoutingConflictError ||
-				(error instanceof Error &&
-					/referenced by routing rules|conflicts with API key destinations|UNIQUE constraint failed/.test(
-						error.message,
-					))
-			)
-				return Response.json({ error: error.message }, { status: 409 });
+			if (isClientInputError(error))
+				return Response.json(
+					{ error: error instanceof Error ? error.message : String(error) },
+					{ status: 409 },
+				);
 			return errorResponse(error);
 		}
 	};
