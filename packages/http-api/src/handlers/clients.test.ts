@@ -277,7 +277,7 @@ describe("client lifecycle HTTP boundary", () => {
 			}),
 			"/v1/models",
 			"GET",
-			"api-key",
+			"api_key",
 		);
 		expect(result.isAuthenticated).toBe(true);
 		for (

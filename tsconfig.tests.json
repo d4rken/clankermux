@@ -1,0 +1,20 @@
+{
+	// The root config excludes every test file in the repository, and `include`
+	// does not override an inherited `exclude`, so `bun run typecheck` checks
+	// none of them. Lifting that repo-wide is a separate project: the untracked
+	// survey counts 1,411 errors across 216 files.
+	//
+	// This is the narrow version. A file enters the list below only when the
+	// change that touches it puts it there, which is why the list is explicit
+	// rather than a glob: a glob would silently pull in the 216 unchecked files
+	// the day someone widens it.
+	"extends": "./tsconfig.json",
+	"exclude": [],
+	"include": [
+		"apps/server/src/__tests__/client-service.test.ts",
+		"packages/http-api/src/handlers/clients.test.ts",
+		"packages/dashboard-web/src/components/ClientsTab.dom-test.tsx",
+		"packages/dashboard-web/src/components/clients/ClientBulkCatalogue.dom-test.tsx",
+		"scripts/e2e/**/*"
+	]
+}

@@ -184,11 +184,11 @@ it("sorts each client header in both directions and retains sorting after refres
 });
 
 it("selects clients, opens the bulk editor, and forgets clients that disappear", async () => {
-	spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+	spyOn(globalThis, "fetch").mockImplementation((async (input: unknown) => {
 		if (String(input).endsWith("/suggestions"))
 			return Response.json({ data: { models: [], accounts: [] } });
 		throw new Error(`Unexpected request ${String(input)}`);
-	});
+	}) as unknown as typeof fetch);
 	query = new QueryClient({
 		defaultOptions: { queries: { staleTime: Infinity, retry: false } },
 	});

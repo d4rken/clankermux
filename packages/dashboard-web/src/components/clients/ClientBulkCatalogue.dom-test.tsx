@@ -116,7 +116,10 @@ const previewWithEverything = {
 async function mount(clients: ClientView[] = [alpha, bravo]) {
 	posted = [];
 	done = 0;
-	spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+	spyOn(globalThis, "fetch").mockImplementation((async (
+		input: unknown,
+		init?: { body?: unknown },
+	) => {
 		const path = String(input);
 		const body = init?.body ? JSON.parse(String(init.body)) : undefined;
 		posted.push({ path, body });
@@ -155,7 +158,7 @@ async function mount(clients: ClientView[] = [alpha, bravo]) {
 		if (path.endsWith("/bulk/commit"))
 			return Response.json({ data: { clients: [] } });
 		throw new Error(`Unexpected request ${path}`);
-	});
+	}) as unknown as typeof fetch);
 	host = document.createElement("div");
 	document.body.append(host);
 	root = createRoot(host);

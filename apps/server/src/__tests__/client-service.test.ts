@@ -213,7 +213,8 @@ describe("client service integration", () => {
 		const repaired = await service.commit(reviewed.token);
 		expect(repaired.apiKey).toBeUndefined();
 		expect(repaired.client.apiKeyId).toBe(client.apiKeyId);
-		expect(repaired.client.key.prefixLast8).toBe(apiKey?.slice(-8));
+		if (!apiKey) throw new Error("Missing fixture key");
+		expect(repaired.client.key.prefixLast8).toBe(apiKey.slice(-8));
 		expect(repaired.client.revision).toBe(1);
 		expect(
 			(await (await service.wire(client.apiKeyId, "openai")).json()).data.map(
@@ -223,7 +224,8 @@ describe("client service integration", () => {
 		await expect(service.commit(stale.token)).rejects.toThrow("Client changed");
 	});
 	it("uses one account snapshot when reviewing and serving multiple Codex entries", async () => {
-		const entry = JSON.parse(currentRaw?.bodyText).models[0];
+		if (!currentRaw) throw new Error("Missing fixture catalogue");
+		const entry = JSON.parse(currentRaw.bodyText).models[0];
 		currentRaw = {
 			bodyText: JSON.stringify({
 				models: Array.from({ length: 20 }, (_, i) => ({
@@ -911,13 +913,14 @@ describe("client service integration", () => {
 			[a.apiKeyId, b.apiKeyId].sort(),
 		);
 		const table = rules();
-		const broadRow = table.find((r) => r.id === "broad");
-		expect(broadRow).toBeDefined();
-		for (const owner of owners) {
-			const row = table.find((r) => r.id === owner.rule_id);
-			expect(row).toBeDefined();
-			expect(row?.position).toBeLessThan(broadRow?.position);
-		}
+		const positionOf = (id: string) => {
+			const row = table.find((r) => r.id === id);
+			if (!row) throw new Error(`No routing rule ${id}`);
+			return row.position;
+		};
+		const broadPosition = positionOf("broad");
+		for (const owner of owners)
+			expect(positionOf(owner.rule_id)).toBeLessThan(broadPosition);
 		for (const id of [a.apiKeyId, b.apiKeyId])
 			expect(
 				matchRoutingRule(await dbOps.routing.listRules(), id, "shared")
