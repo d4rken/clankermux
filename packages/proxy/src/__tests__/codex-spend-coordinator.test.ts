@@ -1731,6 +1731,64 @@ describe("CodexSpendCoordinator.observe — scheduled prime still spends", () =>
 // window-only data), and that fresh credits/window-rolls are still applied.
 // ---------------------------------------------------------------------------
 
+describe("CodexSpendCoordinator.readUsageStatus — window-less read still recovers", () => {
+	it("clears the cooldown on an allowed read whose windows carry no used_percent", async () => {
+		// The free read is the ONLY channel that can observe recovery for an idle
+		// account. A 200 that says `allowed: true` proves the account is no longer
+		// limited even when its windows carry no percentage and therefore parse to
+		// no usage at all — bailing out before the applicator would leave the
+		// account locked until its cooldown expired on its own.
+		const { coordinator, setAccount, runSql } = makeRealCoordinator();
+		const id = seedId("read-no-windows");
+		setAccount(
+			makeCodexAccount({
+				id,
+				name: "codex-cf",
+				rate_limited_until: Date.now() + 60_000,
+				rate_limited_reason: "model_fallback_429",
+			}),
+		);
+
+		fetchImpl = async () =>
+			new Response(
+				JSON.stringify({
+					plan_type: "pro",
+					rate_limit: {
+						allowed: true,
+						limit_reached: false,
+						primary_window: {
+							limit_window_seconds: 7 * 24 * 60 * 60,
+							reset_at: Math.floor((Date.now() + 6 * 24 * 3600_000) / 1000),
+						},
+						secondary_window: {
+							limit_window_seconds: 5 * 60 * 60,
+							reset_at: Math.floor((Date.now() + 4 * 3600_000) / 1000),
+						},
+					},
+				}),
+				{ status: 200, headers: { "content-type": "application/json" } },
+			);
+
+		const outcome = await coordinator.readUsageStatus(id);
+
+		// The read itself produced nothing applicable, and says so with the same
+		// failure outcome the poller backs off on.
+		expect(outcome).toEqual({
+			success: false,
+			message: "Codex returned no usage windows for 'codex-cf' (status 200).",
+		});
+		// …but the cooldown clear ran.
+		expect(
+			runSql.filter((c) => c.sql.includes("rate_limited_until = NULL")),
+		).toHaveLength(1);
+		// Nothing was invented: no cache entry, no persisted reset.
+		expect(usageCache.get(id)).toBeNull();
+		expect(
+			runSql.filter((c) => c.sql.includes("rate_limit_reset")),
+		).toHaveLength(0);
+	});
+});
+
 describe("CodexSpendCoordinator.refreshManual — free-GET application (end-to-end)", () => {
 	it("PRESERVES prior codexCredits when the free GET carries NO credits object", async () => {
 		const { coordinator, setAccount } = makeRealCoordinator();

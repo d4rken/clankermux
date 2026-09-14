@@ -4,10 +4,15 @@ import type { UsageData, UsageWindow } from "../../usage-fetcher";
 export interface ParseCodexUsageHeadersOptions {
 	baseTimeMs?: number;
 	allowRelativeResetAfter?: boolean;
+	/**
+	 * Utilization to assume for a window whose headers carry no
+	 * `x-codex-*-used-percent`. Leave it unset and such a window is OMITTED: a
+	 * reset time alone says nothing about consumption. Only a caller holding a
+	 * real signal supplies it — the traffic path on a 429, which passes 100.
+	 */
 	defaultUtilization?: number;
 }
 
-const DEFAULT_UTILIZATION = 0;
 // Codex's backend reports window durations in SECONDS (RateLimitWindowSnapshot
 // `limit_window_seconds`). The legacy header path reports them in minutes and
 // converts to seconds before slotting, so both sources share one boundary set.
@@ -97,9 +102,13 @@ function toUsageWindow(
 	utilization: number | null,
 	resetsAt: string | null,
 ): UsageWindow | null {
-	if (utilization === null && resetsAt === null) return null;
+	// No percentage, no window. A reset time on its own is a boundary, not a
+	// reading, and minting 0% for it reports an idle account on evidence that
+	// never mentioned consumption. The converse is NOT true: a percentage with a
+	// null reset is a real window (Anthropic's genuine idle-5h shape).
+	if (utilization === null) return null;
 	return {
-		utilization: utilization ?? 0,
+		utilization,
 		resets_at: resetsAt,
 	};
 }
@@ -129,21 +138,23 @@ export function pickWindowSlot(
 /**
  * Normalize a single Codex usage window into a `{ slot, data }` pair. Empty
  * placeholder windows (0%, 0-duration, no reset) collapse to `data: null`,
- * mirroring codex-rs. Reused by both the header parser and the JSON
- * `/wham/usage` parser so window semantics stay identical across sources.
+ * mirroring codex-rs. A window that reports no percentage and whose caller
+ * supplied no `defaultUtilization` collapses to `data: null` as well. Reused by
+ * both the header parser and the JSON `/wham/usage` parser so window semantics
+ * stay identical across sources.
  */
 export function normalizeCodexWindow(
 	utilization: number | null,
 	windowSeconds: number | null,
 	resetsAt: string | null,
-	defaultUtilization: number = DEFAULT_UTILIZATION,
+	defaultUtilization?: number,
 ): { slot: "five_hour" | "seven_day" | null; data: UsageWindow | null } {
 	const hasMeaningfulWindowData =
 		utilization !== 0 || windowSeconds !== 0 || resetsAt !== null;
 	return {
 		slot: pickWindowSlot(windowSeconds),
 		data: hasMeaningfulWindowData
-			? toUsageWindow(utilization ?? defaultUtilization, resetsAt)
+			? toUsageWindow(utilization ?? defaultUtilization ?? null, resetsAt)
 			: null,
 	};
 }
@@ -153,7 +164,7 @@ function readWindow(
 	prefix: string,
 	baseTimeMs: number,
 	allowRelativeResetAfter: boolean,
-	defaultUtilization: number,
+	defaultUtilization: number | undefined,
 ): {
 	window: "five_hour" | "seven_day" | null;
 	data: UsageWindow | null;
@@ -302,14 +313,14 @@ export function parseCodexScopedLimits(
 			`${codename}-primary`,
 			baseTimeMs,
 			allowRelativeResetAfter,
-			DEFAULT_UTILIZATION,
+			undefined,
 		);
 		const secondary = readWindow(
 			headers,
 			`${codename}-secondary`,
 			baseTimeMs,
 			allowRelativeResetAfter,
-			DEFAULT_UTILIZATION,
+			undefined,
 		);
 		// Prefer the primary weekly window; fall back to secondary if that is where
 		// the seven-day window landed. Empty placeholder windows collapse to null.
@@ -544,7 +555,7 @@ export function parseCodexUsageHeaders(
 	const {
 		baseTimeMs = Date.now(),
 		allowRelativeResetAfter = true,
-		defaultUtilization = DEFAULT_UTILIZATION,
+		defaultUtilization,
 	} = options;
 	const primary = readWindow(
 		headers,
@@ -571,12 +582,12 @@ export function parseCodexUsageHeaders(
 	const fiveHour =
 		pickWindowBySlot(primary, secondary, "five_hour") ??
 		(legacyFiveHourReset
-			? toUsageWindow(defaultUtilization, legacyFiveHourReset)
+			? toUsageWindow(defaultUtilization ?? null, legacyFiveHourReset)
 			: null);
 	const sevenDay =
 		pickWindowBySlot(primary, secondary, "seven_day") ??
 		(legacySevenDayReset
-			? toUsageWindow(defaultUtilization, legacySevenDayReset)
+			? toUsageWindow(defaultUtilization ?? null, legacySevenDayReset)
 			: null);
 
 	if (!fiveHour && !sevenDay) {
@@ -594,11 +605,16 @@ export function parseCodexUsageHeaders(
 		// `null` = no 5h window at all (hidden downstream), a real object (even 0%)
 		// = a window at that utilization. Do NOT fabricate a `{0, null}` placeholder
 		// here — that shape is indistinguishable from Anthropic's genuine idle 5h
-		// window and would resurrect the dead-card bug. The `if (!fiveHour &&
-		// !sevenDay) return null` guard above already ensures at least one window
-		// exists, so seven_day keeps its zeroed fallback.
+		// window and would resurrect the dead-card bug. `seven_day` is non-nullable
+		// in UsageData, so it still falls back to a zeroed window (or the caller's
+		// defaultUtilization) — but the `if (!fiveHour && !sevenDay) return null`
+		// guard above means that fallback is only ever reached alongside a real
+		// five_hour, never as the whole reading.
 		five_hour: fiveHour,
-		seven_day: sevenDay ?? { utilization: defaultUtilization, resets_at: null },
+		seven_day: sevenDay ?? {
+			utilization: defaultUtilization ?? 0,
+			resets_at: null,
+		},
 	};
 	// Only attach `limits` when a per-model family surfaced — an empty array would
 	// add noise the downstream filter has to strip.

@@ -900,12 +900,11 @@ export class CodexSpendCoordinator {
 					: `${base}.`,
 			};
 		}
-		if (!status.usage) {
-			return {
-				success: false,
-				message: `Codex returned no usage windows for '${account.name}' (status ${status.status}).`,
-			};
-		}
+		// A read that yielded NO windows is still applied: recovery from a cooldown
+		// is driven by `allowed`/`limit_reached`, not by the windows, and it is the
+		// only channel an idle account has. The window-less outcome is reported
+		// AFTER the applicator has run (see below), so the poller's back-off
+		// semantics are unchanged while the recovery is not lost.
 
 		// Supersession guards. Two independent channels can have written fresher
 		// state while this GET (and its 401 retry) was in flight:
@@ -973,6 +972,12 @@ export class CodexSpendCoordinator {
 			requestAccounting: "none",
 			observationStartedAtMs: issuedAtMs,
 		});
+		if (observation.usage == null) {
+			return {
+				success: false,
+				message: `Codex returned no usage windows for '${account.name}' (status ${status.status}).`,
+			};
+		}
 		const fiveHour = observation.usage?.five_hour?.utilization ?? 0;
 		const sevenDay = observation.usage?.seven_day?.utilization ?? 0;
 		// The read succeeded even when the account is exhausted (the payload is what

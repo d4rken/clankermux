@@ -678,11 +678,14 @@ function codexResponse(fiveHourResetMs: number): Response {
 	// with parseFloat(...) * 1000, so a FRACTIONAL epoch-seconds value preserves
 	// millisecond precision in five_hour.resets_at — letting the drift test feed a
 	// reset that differs from the previous one by sub-second (and stays future).
-	// No 7d header → earliest reset is just the 5h value.
+	// No 7d header → earliest reset is just the 5h value. The used-percent header
+	// is what makes the window a MEASURED reading: without it the parser omits the
+	// window entirely and none of the bookkeeping under test would run.
 	return new Response('{"id":"msg_1"}', {
 		status: 200,
 		headers: {
 			"content-type": "application/json",
+			"x-codex-primary-used-percent": "12",
 			"x-codex-primary-window-minutes": "300",
 			"x-codex-primary-reset-at": String(fiveHourResetMs / 1000),
 		},
@@ -755,6 +758,33 @@ describe("processProxyResponse — Codex window-roll detection (Primary badge fl
 		const writes = rateLimitResetWrites(calls.runSql);
 		expect(writes).toHaveLength(1);
 		expect(writes[0]?.params[0]).toBe(nextResetMs);
+
+		usageCache.delete(account.id);
+	});
+
+	it("does NOT cache or persist a window that reports a reset but no used-percent", async () => {
+		// Production entry point for the same rule the parser enforces: a reset
+		// with no percentage is not a reading, so nothing may be cached and
+		// accounts.rate_limit_reset must not be pinned from it.
+		const account = makeAccount({ id: "codex-no-percent", provider: "codex" });
+		const resetMs = Date.now() + 4 * 60 * 60 * 1000;
+		const { ctx, calls } = makeCodexCtx();
+
+		await processProxyResponse(
+			new Response('{"id":"msg_1"}', {
+				status: 200,
+				headers: {
+					"content-type": "application/json",
+					"x-codex-primary-window-minutes": "300",
+					"x-codex-primary-reset-at": String(resetMs / 1000),
+				},
+			}),
+			account,
+			ctx,
+		);
+
+		expect(usageCache.get(account.id)).toBeNull();
+		expect(rateLimitResetWrites(calls.runSql)).toHaveLength(0);
 
 		usageCache.delete(account.id);
 	});
@@ -937,6 +967,7 @@ describe("processProxyResponse — Codex credits carry-forward", () => {
 			status: 200,
 			headers: {
 				"content-type": "application/json",
+				"x-codex-primary-used-percent": "12",
 				"x-codex-primary-window-minutes": "300",
 				"x-codex-primary-reset-at": String(fiveHourResetMs / 1000),
 				...creditsHeaders,

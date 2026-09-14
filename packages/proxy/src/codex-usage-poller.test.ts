@@ -1,4 +1,5 @@
-import { beforeEach, describe, expect, it } from "bun:test";
+import { beforeEach, describe, expect, it, spyOn } from "bun:test";
+import { Logger } from "@clankermux/logger";
 import {
 	IDLE_REFRESH_LEAD_MS,
 	USAGE_CACHE_TTL_MS,
@@ -53,6 +54,7 @@ function makeAccount(
 		access_token: "tok",
 		refresh_token: "refresh",
 		last_used: null,
+		custom_endpoint: null,
 		...overrides,
 	};
 }
@@ -500,5 +502,86 @@ describe("CodexUsagePoller", () => {
 		await second;
 		release?.();
 		await first;
+	});
+});
+
+// ---------------------------------------------------------------------------
+// Endpoint gating. The free usage read is a GET against chatgpt.com, so an
+// account whose inference endpoint is elsewhere can never be served by it: the
+// poller would spend a failed GET, one forced token refresh, and then back off
+// to the 30-minute cap forever.
+// ---------------------------------------------------------------------------
+
+describe("CodexUsagePoller — non-ChatGPT endpoints", () => {
+	it("never reads an account pointed at a foreign endpoint", async () => {
+		const h = makeHarness([
+			makeAccount({ custom_endpoint: "https://example.com/v1/responses" }),
+		]);
+		await h.poller.tick();
+		h.setNow(T0 + IDLE_MS);
+		await h.poller.tick();
+		h.setNow(T0 + IDLE_MS * 3);
+		await h.poller.tick();
+		expect(h.readCalls).toHaveLength(0);
+	});
+
+	it("reads an account whose custom endpoint is still chatgpt.com", async () => {
+		const h = makeHarness([
+			makeAccount({
+				custom_endpoint: "https://chatgpt.com/backend-api/codex/responses",
+			}),
+		]);
+		await h.poller.tick();
+		expect(h.readCalls).toEqual(["acct-1"]);
+	});
+
+	it("reads an account whose custom endpoint is unparseable", async () => {
+		// buildUrl falls back to the default backend for an invalid endpoint, so
+		// this account really does reach chatgpt.com and really is pollable.
+		const h = makeHarness([makeAccount({ custom_endpoint: "not a url" })]);
+		await h.poller.tick();
+		expect(h.readCalls).toEqual(["acct-1"]);
+	});
+
+	it("starts fresh when an account stops pointing at a foreign endpoint", async () => {
+		const h = makeHarness([
+			makeAccount({ custom_endpoint: "https://example.com/v1/responses" }),
+		]);
+		await h.poller.tick();
+		expect(h.readCalls).toHaveLength(0);
+		// The operator clears the custom endpoint; the account is due immediately
+		// rather than inheriting a schedule it never had.
+		h.accounts[0].custom_endpoint = null;
+		h.setNow(T0 + 1_000);
+		await h.poller.tick();
+		expect(h.readCalls).toEqual(["acct-1"]);
+	});
+
+	it("logs the skip without the endpoint's credentials", async () => {
+		// validateEndpointUrl checks protocol and hostname only, so a stored
+		// endpoint may legitimately carry userinfo or a query string. Logger does
+		// no redaction, so the line must name the HOST and nothing else.
+		const lines: string[] = [];
+		const infoSpy = spyOn(Logger.prototype, "info").mockImplementation(((
+			...args: unknown[]
+		) => {
+			lines.push(args.map((a) => String(a)).join(" "));
+		}) as unknown as Logger["info"]);
+		try {
+			const h = makeHarness([
+				makeAccount({
+					custom_endpoint:
+						"https://gateway.example/v1/responses?api_key=supersecret",
+				}),
+			]);
+			await h.poller.tick();
+		} finally {
+			infoSpy.mockRestore();
+		}
+
+		const joined = lines.join("\n");
+		expect(joined).toContain("gateway.example");
+		expect(joined).not.toContain("supersecret");
+		expect(joined).not.toContain("api_key");
 	});
 });

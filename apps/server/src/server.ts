@@ -1420,12 +1420,12 @@ export default async function startServer(options?: {
 	// policy; the active interval is shared with the Anthropic usage poller.
 	codexUsagePoller = new CodexUsagePoller({
 		// A narrow projection rather than getAllAccounts(): this runs on every 30s
-		// heartbeat, and the poller only needs these five columns.
+		// heartbeat, and the poller only needs these six columns.
 		listCodexAccounts: () =>
 			dbOps
 				.getAdapter()
 				.query<PolledCodexAccount>(
-					"SELECT id, name, access_token, refresh_token, last_used FROM accounts WHERE provider = 'codex'",
+					"SELECT id, name, access_token, refresh_token, last_used, custom_endpoint FROM accounts WHERE provider = 'codex'",
 				),
 		readUsage: (accountId) => codexSpendCoordinator.readUsageStatus(accountId),
 		peekObservedAtMs: (accountId) =>

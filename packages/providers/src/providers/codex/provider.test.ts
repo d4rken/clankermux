@@ -4,7 +4,7 @@ import {
 	NATIVE_RESPONSES_REQUEST_HEADER,
 	NATIVE_RESPONSES_RESPONSE_HEADER,
 } from "@clankermux/types";
-import { CodexProvider } from "./provider";
+import { CodexProvider, targetsChatGptCodexBackend } from "./provider";
 import { normalizeCodexInputUsage, parseCodexUsageHeaders } from "./usage";
 
 const sseBody = (lines: string[]) => `${lines.join("\n")}\n`;
@@ -3167,6 +3167,38 @@ describe("CodexProvider response.incomplete stop reasons", () => {
 	});
 });
 
+describe("targetsChatGptCodexBackend", () => {
+	it("treats a missing account as the default ChatGPT backend", () => {
+		expect(targetsChatGptCodexBackend()).toBe(true);
+	});
+
+	it("treats a null custom_endpoint as the default ChatGPT backend", () => {
+		expect(targetsChatGptCodexBackend({ custom_endpoint: null })).toBe(true);
+	});
+
+	it("accepts a custom endpoint that still points at chatgpt.com", () => {
+		expect(
+			targetsChatGptCodexBackend({
+				custom_endpoint: "https://chatgpt.com/backend-api/codex/responses",
+			}),
+		).toBe(true);
+	});
+
+	it("rejects a custom endpoint on another host", () => {
+		expect(
+			targetsChatGptCodexBackend({
+				custom_endpoint: "https://api.example.com/v1",
+			}),
+		).toBe(false);
+	});
+
+	it("accepts a malformed endpoint, which buildUrl falls back to the default for", () => {
+		expect(targetsChatGptCodexBackend({ custom_endpoint: "not a url" })).toBe(
+			true,
+		);
+	});
+});
+
 describe("parseCodexUsageHeaders", () => {
 	it("normalizes primary and secondary codex quota headers", () => {
 		const headers = new Headers({
@@ -3259,6 +3291,94 @@ describe("parseCodexUsageHeaders", () => {
 
 		expect(usage).not.toBeNull();
 		expect(usage?.five_hour).toBeNull();
+		expect(usage?.seven_day).toEqual({
+			utilization: 11,
+			resets_at: new Date(1775000000 * 1000).toISOString(),
+		});
+	});
+
+	it("omits a window that reports a reset but no used-percent", () => {
+		// A reset time says WHEN the window turns over, never how much of it is
+		// spent. Minting 0% here reported an idle account on evidence that carries
+		// no percentage at all — the dashboard drew a 0% bar, the sampler recorded
+		// a 0% observation, and computePoolUsage counted an idle contributor.
+		const headers = new Headers({
+			"x-codex-primary-window-minutes": "10080",
+			"x-codex-primary-reset-at": "1775000000",
+		});
+
+		expect(parseCodexUsageHeaders(headers)).toBeNull();
+	});
+
+	it("honours an explicit defaultUtilization for a percentage-less window", () => {
+		// The traffic path passes 100 on a 429: that IS a real exhausted signal.
+		const headers = new Headers({
+			"x-codex-primary-window-minutes": "10080",
+			"x-codex-primary-reset-at": "1775000000",
+		});
+
+		const usage = parseCodexUsageHeaders(headers, { defaultUtilization: 100 });
+
+		expect(usage?.seven_day).toEqual({
+			utilization: 100,
+			resets_at: new Date(1775000000 * 1000).toISOString(),
+		});
+	});
+
+	it("omits the legacy x-codex-7d-reset-at window when no caller default exists", () => {
+		// The legacy reset headers carry no percentage whatsoever.
+		const headers = new Headers({
+			"x-codex-7d-reset-at": "1775000000",
+		});
+
+		expect(parseCodexUsageHeaders(headers)).toBeNull();
+	});
+
+	it("fills the legacy x-codex-7d-reset-at window from an explicit default", () => {
+		const headers = new Headers({
+			"x-codex-7d-reset-at": "1775000000",
+		});
+
+		const usage = parseCodexUsageHeaders(headers, { defaultUtilization: 100 });
+
+		expect(usage?.five_hour).toBeNull();
+		expect(usage?.seven_day).toEqual({
+			utilization: 100,
+			resets_at: new Date(1775000000 * 1000).toISOString(),
+		});
+	});
+
+	it("keeps a reported weekly window while omitting a percentage-less 5h window", () => {
+		const headers = new Headers({
+			"x-codex-primary-used-percent": "11",
+			"x-codex-primary-window-minutes": "10080",
+			"x-codex-primary-reset-at": "1775000000",
+			"x-codex-secondary-window-minutes": "300",
+			"x-codex-secondary-reset-at": "1774600000",
+		});
+
+		const usage = parseCodexUsageHeaders(headers);
+
+		expect(usage?.five_hour).toBeNull();
+		expect(usage?.seven_day).toEqual({
+			utilization: 11,
+			resets_at: new Date(1775000000 * 1000).toISOString(),
+		});
+	});
+
+	it("drops a per-family window that reports no used-percent", () => {
+		const headers = new Headers({
+			"x-codex-primary-used-percent": "11",
+			"x-codex-primary-window-minutes": "10080",
+			"x-codex-primary-reset-at": "1775000000",
+			"x-codex-foo-limit-name": "Foo",
+			"x-codex-foo-primary-window-minutes": "10080",
+			"x-codex-foo-primary-reset-at": "1775000000",
+		});
+
+		const usage = parseCodexUsageHeaders(headers);
+
+		expect(usage?.limits).toBeUndefined();
 		expect(usage?.seven_day).toEqual({
 			utilization: 11,
 			resets_at: new Date(1775000000 * 1000).toISOString(),
