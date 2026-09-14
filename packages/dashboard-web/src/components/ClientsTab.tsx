@@ -120,13 +120,22 @@ export function ClientsTab() {
 	const [selectedIds, setSelectedIds] = useState<ReadonlySet<string>>(
 		() => new Set(),
 	);
-	const [bulk, setBulk] = useState<ClientView[] | null>(null);
+	const [bulkIds, setBulkIds] = useState<ReadonlySet<string> | null>(null);
 	// Re-derived from every list refresh, so a client deleted elsewhere cannot
 	// linger in the selection and be sent to the bulk endpoint.
 	const selected = useMemo(() => {
 		const live = new Set(clients.map((c) => c.apiKeyId));
 		return new Set([...selectedIds].filter((id) => live.has(id)));
 	}, [clients, selectedIds]);
+	// The panel stays open across an apply, so it reads the live list rather
+	// than a snapshot taken when it opened.
+	const bulkClients = useMemo(
+		() => (bulkIds ? clients.filter((c) => bulkIds.has(c.apiKeyId)) : []),
+		[clients, bulkIds],
+	);
+	useEffect(() => {
+		if (bulkIds && !bulkClients.length) setBulkIds(null);
+	}, [bulkIds, bulkClients.length]);
 	const selectAllRef = useRef<HTMLInputElement>(null);
 	const [setup, setSetup] = useState<{
 		client: ClientView;
@@ -233,15 +242,20 @@ export function ClientsTab() {
 				onSaved={finish}
 			/>
 		);
-	if (bulk)
+	if (bulkIds && bulkClients.length)
 		return (
 			<ClientBulkCatalogue
-				clients={bulk}
+				clients={bulkClients}
 				accounts={accounts}
-				onCancel={() => setBulk(null)}
-				onDone={() => {
-					setBulk(null);
-					setSelectedIds(new Set());
+				onCancel={() => setBulkIds(null)}
+				onApplied={(committed) => {
+					// Seeding is what closes the stale-read window: an invalidation
+					// only starts a refetch, and the panel renders from this cache
+					// before one can resolve.
+					const byId = new Map(committed.map((c) => [c.apiKeyId, c]));
+					queryClient.setQueryData<ClientView[]>(["clients"], (old) =>
+						(old ?? []).map((c) => byId.get(c.apiKeyId) ?? c),
+					);
 					reload();
 				}}
 			/>
@@ -279,12 +293,7 @@ export function ClientsTab() {
 			{selected.size > 0 && (
 				<div className="flex flex-wrap items-center gap-3 rounded-lg border bg-muted/30 px-4 py-2.5">
 					<span className="text-sm font-medium">{selected.size} selected</span>
-					<Button
-						size="sm"
-						onClick={() =>
-							setBulk(clients.filter((c) => selected.has(c.apiKeyId)))
-						}
-					>
+					<Button size="sm" onClick={() => setBulkIds(new Set(selected))}>
 						Edit catalogues
 					</Button>
 					<Button

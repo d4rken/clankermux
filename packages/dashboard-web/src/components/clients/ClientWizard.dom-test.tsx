@@ -80,6 +80,26 @@ async function type(id: string, value: string) {
 		input.dispatchEvent(new Event("input", { bubbles: true }));
 	});
 }
+async function filterModels(value: string) {
+	const input = document.querySelector<HTMLInputElement>(
+		'input[type="search"]',
+	);
+	if (!input) throw new Error("Missing model filter");
+	await act(async () => {
+		Object.getOwnPropertyDescriptor(
+			HTMLInputElement.prototype,
+			"value",
+		)?.set?.call(input, value);
+		input.dispatchEvent(new Event("input", { bubbles: true }));
+	});
+}
+function listedModels() {
+	return [
+		...document.querySelectorAll(
+			'[aria-label="OpenAI-style discovery models"] > div',
+		),
+	].map((row) => row.querySelector("code")?.textContent ?? "");
+}
 function catalogueOf(format: string) {
 	return reviewed?.catalogues[format as keyof ClientDraft["catalogues"]];
 }
@@ -603,5 +623,35 @@ describe("new client setup defaults", () => {
 		await click("Review");
 		expect(catalogueOf("anthropic")?.defaultModel).toBe("new");
 		expect(catalogueOf("openai")?.defaultModel).toBe("old");
+	});
+});
+
+describe("catalogue filtering", () => {
+	it("narrows the rendered list and reports how many it shows", async () => {
+		await mount(existing, false, RICH);
+		expect(listedModels()).toEqual(["new", "rich", "old"]);
+		await filterModels("rich");
+		expect(listedModels()).toEqual(["rich"]);
+		expect(document.body.textContent).toContain("1 of 3 shown");
+		await filterModels("no such model");
+		expect(listedModels()).toEqual([]);
+		expect(document.body.textContent).toContain("No models match this filter.");
+	});
+
+	it("selects and deselects only what the filter shows", async () => {
+		await mount(existing, false, RICH);
+		await filterModels("rich");
+		await click("Select all shown");
+		await click("Review changes");
+		expect(reviewed?.catalogues.openai.models.map((m) => m.id)).toEqual([
+			"old",
+			"rich",
+		]);
+		await click("Catalogue");
+		await click("Deselect all shown");
+		await click("Review changes");
+		expect(reviewed?.catalogues.openai.models.map((m) => m.id)).toEqual([
+			"old",
+		]);
 	});
 });

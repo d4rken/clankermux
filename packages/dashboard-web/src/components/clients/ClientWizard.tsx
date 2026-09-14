@@ -13,6 +13,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "../ui/card";
 import { Input } from "../ui/input";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "../ui/tabs";
 import { clientRequest } from "./api";
+import { ModelFilterField, matchesModelQuery } from "./model-filter";
 import { APPLICATIONS, FORMATS, preferredFormat } from "./setup";
 
 export interface DestinationAccount {
@@ -103,6 +104,8 @@ export function ClientWizard({
 		accounts: [] as string[],
 		editId: null as string | null,
 	});
+	/** Kept across format tabs: narrowing the list is a view, not catalogue data. */
+	const [query, setQuery] = useState("");
 	const mode =
 		draft.destinations.accountId !== null
 			? "account"
@@ -288,6 +291,13 @@ export function ClientWizard({
 		}
 	for (const model of draft.catalogues[format].models)
 		candidates.set(model.id, model);
+	const filtering = query.trim().length > 0;
+	const visibleCandidates = [...candidates.values()].filter((m) =>
+		matchesModelQuery(m, query),
+	);
+	// Bulk selection acts on what the filter shows; a selected entry the filter
+	// hides keeps its place in the catalogue.
+	const visibleIds = new Set(visibleCandidates.map((m) => m.id));
 	const goToStep = (target: number) =>
 		run(async () => {
 			if (target > step && !draft.name.trim())
@@ -649,27 +659,47 @@ export function ClientWizard({
 								<Button
 									size="sm"
 									variant="outline"
-									onClick={() => updateModels([...candidates.values()])}
+									onClick={() =>
+										updateModels([
+											...draft.catalogues[format].models.filter(
+												(m) => !visibleIds.has(m.id),
+											),
+											...visibleCandidates,
+										])
+									}
 								>
-									Select all in tab
+									{filtering ? "Select all shown" : "Select all in tab"}
 								</Button>
 								<Button
 									size="sm"
 									variant="outline"
-									onClick={() => updateModels([])}
+									onClick={() =>
+										updateModels(
+											draft.catalogues[format].models.filter(
+												(m) => !visibleIds.has(m.id),
+											),
+										)
+									}
 								>
-									Deselect all in tab
+									{filtering ? "Deselect all shown" : "Deselect all in tab"}
 								</Button>
 								<span className="text-sm self-center text-muted-foreground">
 									{draft.catalogues[format].models.length} selected
 								</span>
 							</div>
+							<ModelFilterField
+								value={query}
+								onChange={setQuery}
+								shown={visibleCandidates.length}
+								total={candidates.size}
+								label={`Filter ${FORMATS[format]} models`}
+							/>
 							{/* Reserve space for the step header, catalogue controls and footer on desktop. */}
 							<section
 								aria-label={`${FORMATS[format]} models`}
 								className="h-[60dvh] min-h-48 md:h-[max(18rem,calc(100dvh-45rem))] overflow-auto divide-y rounded-md border"
 							>
-								{[...candidates.values()].map((model) => {
+								{visibleCandidates.map((model) => {
 									const accountNames = (
 										suggestions?.models.find((m) => m.id === model.targetModel)
 											?.accountIds ??
@@ -749,6 +779,11 @@ export function ClientWizard({
 									<p className="p-4 text-sm text-muted-foreground">
 										No known models from these destinations. Refresh discovery
 										or add a model explicitly.
+									</p>
+								)}
+								{!!candidates.size && !visibleCandidates.length && (
+									<p className="p-4 text-sm text-muted-foreground">
+										No models match this filter.
 									</p>
 								)}
 							</section>
