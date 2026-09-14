@@ -22,6 +22,7 @@ import { Tabs, TabsList, TabsTrigger } from "../ui/tabs";
 import { clientRequest } from "./api";
 import type { DestinationAccount } from "./ClientWizard";
 import { suggestedModel } from "./ClientWizard";
+import { ModelFilterField, matchesModelQuery } from "./model-filter";
 import { FORMATS } from "./setup";
 
 const SELECT = "h-9 rounded-md border border-input bg-background px-3 text-sm";
@@ -70,6 +71,8 @@ export function ClientBulkCatalogue({
 		null,
 	);
 	const [checked, setChecked] = useState<ReadonlySet<string>>(() => new Set());
+	/** Kept across format tabs: narrowing the list is a view, not an operation. */
+	const [query, setQuery] = useState("");
 	const [source, setSource] = useState<{
 		id: string;
 		models: ClientModel[];
@@ -140,7 +143,14 @@ export function ClientBulkCatalogue({
 			a.model.id.localeCompare(b.model.id),
 		);
 	}, [clients, format, suggestions]);
+	// Every operation reads the unfiltered candidates: hiding a row must not
+	// change what is applied.
 	const checkedCandidates = candidates.filter((c) => checked.has(c.model.id));
+	const visible = candidates.filter((c) => matchesModelQuery(c.model, query));
+	const visibleIds = new Set(visible.map((c) => c.model.id));
+	const hiddenChecked = checkedCandidates.filter(
+		(c) => !visibleIds.has(c.model.id),
+	).length;
 	const addable =
 		checkedCandidates.length > 0 &&
 		!checkedCandidates.some((c) => c.conflicted);
@@ -246,6 +256,13 @@ export function ClientBulkCatalogue({
 								))}
 							</TabsList>
 						</Tabs>
+						<ModelFilterField
+							value={query}
+							onChange={setQuery}
+							shown={visible.length}
+							total={candidates.length}
+							label={`Filter ${FORMATS[format]} models`}
+						/>
 						<section
 							aria-label={`${FORMATS[format]} models`}
 							className="h-[50dvh] min-h-48 overflow-auto divide-y rounded-md border"
@@ -255,7 +272,12 @@ export function ClientBulkCatalogue({
 									No models to choose from in this format yet.
 								</p>
 							)}
-							{candidates.map(({ model, coverage, conflicted }) => (
+							{candidates.length > 0 && visible.length === 0 && (
+								<p className="p-3 text-sm text-muted-foreground">
+									No models match this filter.
+								</p>
+							)}
+							{visible.map(({ model, coverage, conflicted }) => (
 								<div
 									key={model.id}
 									data-candidate={model.id}
@@ -290,6 +312,12 @@ export function ClientBulkCatalogue({
 								</div>
 							))}
 						</section>
+						{hiddenChecked > 0 && (
+							<p className="text-sm text-muted-foreground">
+								{checkedCandidates.length} selected · {hiddenChecked} hidden by
+								the filter
+							</p>
+						)}
 						<div className="flex flex-wrap gap-2">
 							<Button
 								disabled={busy || !addable}

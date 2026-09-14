@@ -220,6 +220,22 @@ async function choose(label: string, value: string) {
 		el.dispatchEvent(new Event("change", { bubbles: true }));
 	});
 }
+async function typeInto(selector: string, value: string) {
+	const input = document.querySelector<HTMLInputElement>(selector);
+	if (!input) throw new Error(`Missing input ${selector}`);
+	await act(async () => {
+		Object.getOwnPropertyDescriptor(
+			HTMLInputElement.prototype,
+			"value",
+		)?.set?.call(input, value);
+		input.dispatchEvent(new Event("input", { bubbles: true }));
+	});
+}
+const filterModels = (value: string) => typeInto('input[type="search"]', value);
+const rows = () =>
+	[...document.querySelectorAll("[data-candidate]")].map((n) =>
+		n.getAttribute("data-candidate"),
+	);
 const rowText = (id: string) =>
 	document.querySelector(`[data-candidate="${id}"]`)?.textContent ?? "";
 
@@ -242,11 +258,7 @@ describe("bulk catalogue editing", () => {
 				},
 			},
 		]);
-		expect(
-			[...document.querySelectorAll("[data-candidate]")].map((n) =>
-				n.getAttribute("data-candidate"),
-			),
-		).toEqual(["fast", "new", "shared"]);
+		expect(rows()).toEqual(["fast", "new", "shared"]);
 		expect(rowText("shared")).toContain("In 2 of 2");
 		expect(rowText("new")).toContain("In 0 of 2");
 		expect(document.body.textContent).toContain("Edit catalogues");
@@ -286,6 +298,32 @@ describe("bulk catalogue editing", () => {
 					],
 				},
 			},
+		});
+	});
+
+	it("narrows the rendered rows to the filter and reports how many it shows", async () => {
+		await mount();
+		await filterModels("FAST");
+		expect(rows()).toEqual(["fast"]);
+		expect(document.body.textContent).toContain("1 of 3 shown");
+		await filterModels("no such model");
+		expect(rows()).toEqual([]);
+		expect(document.body.textContent).toContain("No models match this filter.");
+		await click("Clear");
+		expect(rows()).toEqual(["fast", "new", "shared"]);
+	});
+
+	it("keeps a checked entry the filter hides in the posted operation", async () => {
+		await mount();
+		await check("Select new");
+		await filterModels("shared");
+		expect(rows()).toEqual(["shared"]);
+		expect(document.body.textContent).toContain(
+			"1 selected · 1 hidden by the filter",
+		);
+		await click("Add to all selected");
+		expect(posted.at(-1)?.body).toMatchObject({
+			operation: { mode: "add", models: [{ id: "new" }] },
 		});
 	});
 
