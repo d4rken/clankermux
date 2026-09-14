@@ -162,6 +162,14 @@ async function mount(clients: ClientView[] = [alpha, bravo]) {
 	host = document.createElement("div");
 	document.body.append(host);
 	root = createRoot(host);
+	await rerender(clients);
+	// Let the suggestions request settle before anything reads the candidates.
+	await act(async () => {
+		await new Promise((resolve) => setTimeout(resolve, 0));
+	});
+}
+/** Re-render the open panel with a different set of selected clients. */
+async function rerender(clients: ClientView[]) {
 	await act(async () => {
 		root?.render(
 			<ClientBulkCatalogue
@@ -175,10 +183,6 @@ async function mount(clients: ClientView[] = [alpha, bravo]) {
 				}}
 			/>,
 		);
-	});
-	// Let the suggestions request settle before anything reads the candidates.
-	await act(async () => {
-		await new Promise((resolve) => setTimeout(resolve, 0));
 	});
 }
 function button(label: string): HTMLButtonElement {
@@ -232,6 +236,27 @@ async function typeInto(selector: string, value: string) {
 	});
 }
 const filterModels = (value: string) => typeInto('input[type="search"]', value);
+async function stageCustom(fields: {
+	id: string;
+	target?: string;
+	name?: string;
+	destination?: string;
+}) {
+	await typeInto("#bulk-model-id", fields.id);
+	await typeInto("#bulk-target-id", fields.target ?? "");
+	await typeInto("#bulk-display-name", fields.name ?? "");
+	if (fields.destination) {
+		const label = [...document.querySelectorAll("label")].find(
+			(l) => l.textContent?.trim() === fields.destination,
+		);
+		const box = label?.querySelector("input");
+		if (!box) throw new Error(`Missing destination ${fields.destination}`);
+		await act(async () => {
+			box.click();
+		});
+	}
+	await click("Add to list");
+}
 const rows = () =>
 	[...document.querySelectorAll("[data-candidate]")].map((n) =>
 		n.getAttribute("data-candidate"),
@@ -408,5 +433,89 @@ describe("bulk catalogue editing", () => {
 				},
 			},
 		});
+	});
+});
+
+describe("custom batch entries", () => {
+	it("stages an alias no client publishes, checks it, and posts it whole", async () => {
+		await mount();
+		await stageCustom({
+			id: "shared[1m]",
+			target: "shared",
+			name: "Shared long context",
+			destination: "Account A",
+		});
+		expect(rows()).toEqual(["fast", "new", "shared", "shared[1m]"]);
+		expect(checkbox("Select shared[1m]").checked).toBe(true);
+		expect(rowText("shared[1m]")).toContain("Custom");
+		expect(rowText("shared[1m]")).toContain("In 0 of 2");
+		await click("Add to all selected");
+		expect(posted.at(-1)).toEqual({
+			path: "/api/clients/bulk/review",
+			body: {
+				clientIds: ["alpha", "bravo"],
+				operation: {
+					format: "openai",
+					mode: "add",
+					models: [
+						{
+							id: "shared[1m]",
+							displayName: "Shared long context",
+							targetModel: "shared",
+							accountIds: ["a"],
+						},
+					],
+				},
+			},
+		});
+	});
+
+	it("takes a staged entry back out of the list and the selection", async () => {
+		await mount();
+		await stageCustom({ id: "typo" });
+		expect(checkbox("Select typo").checked).toBe(true);
+		await click("Remove typo from the list");
+		expect(rows()).toEqual(["fast", "new", "shared"]);
+		expect(button("Add to all selected").disabled).toBe(true);
+	});
+
+	it("refuses a colliding ID and an alias with no destination", async () => {
+		await mount();
+		const requests = posted.length;
+		await stageCustom({ id: "shared" });
+		expect(document.body.textContent).toContain(
+			"shared is already in this list",
+		);
+		await stageCustom({ id: "shared-1m", target: "shared" });
+		expect(document.body.textContent).toContain(
+			"Choose at least one destination for an alias",
+		);
+		expect(rows()).toEqual(["fast", "new", "shared"]);
+		expect(posted.length).toBe(requests);
+	});
+
+	it("keeps the staged definition when a client turns up publishing that ID", async () => {
+		await mount();
+		await stageCustom({
+			id: "late",
+			target: "late-target",
+			destination: "Account A",
+		});
+		await rerender([
+			client("alpha", [
+				shared,
+				{
+					id: "late",
+					displayName: "Late",
+					targetModel: "elsewhere",
+					accountIds: ["a"],
+				},
+			]),
+			bravo,
+		]);
+		expect(rowText("late")).toContain("late → late-target");
+		expect(rowText("late")).toContain("In 1 of 2");
+		expect(rowText("late")).toContain("Defined differently in 1 client");
+		expect(button("Add to all selected").disabled).toBe(true);
 	});
 });

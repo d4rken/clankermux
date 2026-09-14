@@ -18,6 +18,7 @@ import {
 	DialogHeader,
 	DialogTitle,
 } from "../ui/dialog";
+import { Input } from "../ui/input";
 import { Tabs, TabsList, TabsTrigger } from "../ui/tabs";
 import { clientRequest } from "./api";
 import type { DestinationAccount } from "./ClientWizard";
@@ -47,7 +48,11 @@ interface Candidate {
 	coverage: number;
 	/** Those clients do not agree on what the ID means. */
 	conflicted: boolean;
+	/** Staged in this panel rather than read from a client or discovery. */
+	staged?: boolean;
 }
+
+const EMPTY_CUSTOM = { id: "", target: "", name: "", accounts: [] as string[] };
 
 export function ClientBulkCatalogue({
 	clients,
@@ -73,6 +78,10 @@ export function ClientBulkCatalogue({
 	const [checked, setChecked] = useState<ReadonlySet<string>>(() => new Set());
 	/** Kept across format tabs: narrowing the list is a view, not an operation. */
 	const [query, setQuery] = useState("");
+	const [custom, setCustom] = useState(EMPTY_CUSTOM);
+	const [customError, setCustomError] = useState<string | null>(null);
+	/** Entries the operator typed, which no client and no discovery offers. */
+	const [stagedModels, setStagedModels] = useState<ClientModel[]>([]);
 	const [source, setSource] = useState<{
 		id: string;
 		models: ClientModel[];
@@ -139,10 +148,29 @@ export function ClientBulkCatalogue({
 			if (!union.has(model.id))
 				union.set(model.id, { model, coverage: 0, conflicted: false });
 		}
+		// A staged definition outranks both: the operator typed it, and a
+		// definition that arrived after they checked the row must not be applied
+		// in its place. Coverage stays honest about who already publishes the ID.
+		for (const model of stagedModels) {
+			const covering = clients.filter((c) =>
+				c.catalogues[format].models.some((m) => m.id === model.id),
+			);
+			union.set(model.id, {
+				model,
+				coverage: covering.length,
+				conflicted: covering.some((c) => {
+					const stored = c.catalogues[format].models.find(
+						(m) => m.id === model.id,
+					);
+					return !!stored && !sameDefinition(stored, model);
+				}),
+				staged: true,
+			});
+		}
 		return [...union.values()].sort((a, b) =>
 			a.model.id.localeCompare(b.model.id),
 		);
-	}, [clients, format, suggestions]);
+	}, [clients, format, suggestions, stagedModels]);
 	// Every operation reads the unfiltered candidates: hiding a row must not
 	// change what is applied.
 	const checkedCandidates = candidates.filter((c) => checked.has(c.model.id));
@@ -159,6 +187,8 @@ export function ClientBulkCatalogue({
 		setChecked(new Set());
 		setSource(null);
 		setReplaceDefault("");
+		setStagedModels([]);
+		setCustomError(null);
 	};
 	const toggle = (id: string) =>
 		setChecked((current) => {
@@ -166,6 +196,44 @@ export function ClientBulkCatalogue({
 			if (!next.delete(id)) next.add(id);
 			return next;
 		});
+	const stage = () => {
+		const id = custom.id.trim();
+		const target = custom.target.trim() || id;
+		if (!id) {
+			setCustomError("Enter a model ID");
+			return;
+		}
+		if (candidates.some((c) => c.model.id === id)) {
+			// Adding an ID a client already has is a no-op for that client, so a
+			// collision would apply to some of the batch and silently skip the rest.
+			setCustomError(`${id} is already in this list`);
+			return;
+		}
+		if (target !== id && !custom.accounts.length) {
+			setCustomError("Choose at least one destination for an alias");
+			return;
+		}
+		setStagedModels((current) => [
+			...current,
+			{
+				id,
+				displayName: custom.name.trim() || id,
+				targetModel: target,
+				accountIds: custom.accounts.length ? custom.accounts : null,
+			},
+		]);
+		setChecked((current) => new Set(current).add(id));
+		setCustom(EMPTY_CUSTOM);
+		setCustomError(null);
+	};
+	const unstage = (id: string) => {
+		setStagedModels((current) => current.filter((m) => m.id !== id));
+		setChecked((current) => {
+			const next = new Set(current);
+			next.delete(id);
+			return next;
+		});
+	};
 	const propose = (operation: ClientBulkOperation) =>
 		run(async () => {
 			setReview(
@@ -277,7 +345,7 @@ export function ClientBulkCatalogue({
 									No models match this filter.
 								</p>
 							)}
-							{visible.map(({ model, coverage, conflicted }) => (
+							{visible.map(({ model, coverage, conflicted, staged }) => (
 								<div
 									key={model.id}
 									data-candidate={model.id}
@@ -294,6 +362,11 @@ export function ClientBulkCatalogue({
 										<span className="min-w-0 flex-1 grid gap-x-4 sm:grid-cols-[minmax(0,1fr)_minmax(0,0.8fr)]">
 											<span className="font-medium text-sm break-all leading-5">
 												{model.displayName}
+												{staged && (
+													<span className="ml-2 rounded bg-muted px-1.5 py-0.5 text-[11px] font-normal text-muted-foreground">
+														Custom
+													</span>
+												)}
 											</span>
 											<code className="text-xs break-all text-muted-foreground sm:col-start-1 sm:row-start-2">
 												{model.id}
@@ -304,11 +377,22 @@ export function ClientBulkCatalogue({
 											<span className="text-xs text-muted-foreground sm:col-start-2 sm:row-start-1 sm:row-span-2 sm:self-center">
 												In {coverage} of {clients.length}
 												{conflicted
-													? ` · Defined differently in ${coverage} clients — edit these individually`
+													? ` · Defined differently in ${coverage} ${coverage === 1 ? "client" : "clients"} — edit these individually`
 													: ""}
 											</span>
 										</span>
 									</label>
+									{staged && (
+										<Button
+											variant="ghost"
+											size="sm"
+											className="ml-auto h-7 px-2 text-xs"
+											aria-label={`Remove ${model.id} from the list`}
+											onClick={() => unstage(model.id)}
+										>
+											Remove
+										</Button>
+									)}
 								</div>
 							))}
 						</section>
@@ -324,7 +408,7 @@ export function ClientBulkCatalogue({
 								title={
 									addable
 										? undefined
-										: "Selected IDs that different clients define differently cannot be added in bulk"
+										: "Selected IDs that different clients define differently, or that a client already publishes against another target, cannot be added in bulk"
 								}
 								onClick={() =>
 									propose({
@@ -350,6 +434,102 @@ export function ClientBulkCatalogue({
 								Remove from all selected
 							</Button>
 						</div>
+						<details className="rounded-md border p-3">
+							<summary className="cursor-pointer w-fit text-sm font-medium">
+								Add a custom model or alias
+							</summary>
+							<div className="mt-3 grid gap-4 max-w-xl sm:grid-cols-2">
+								<p className="text-sm text-muted-foreground sm:col-span-2">
+									Publish an entry no client offers yet. It joins the list
+									above, already selected, and is applied like any other
+									selection.
+								</p>
+								<label
+									className="grid gap-2 text-sm font-medium"
+									htmlFor="bulk-model-id"
+								>
+									Published model ID
+									<Input
+										id="bulk-model-id"
+										disabled={busy}
+										value={custom.id}
+										onChange={(e) =>
+											setCustom({ ...custom, id: e.target.value })
+										}
+									/>
+								</label>
+								<label
+									className="grid gap-2 text-sm font-medium"
+									htmlFor="bulk-target-id"
+								>
+									Upstream target ID
+									<Input
+										id="bulk-target-id"
+										placeholder="Same as published ID for a direct model"
+										disabled={busy}
+										value={custom.target}
+										onChange={(e) =>
+											setCustom({ ...custom, target: e.target.value })
+										}
+									/>
+								</label>
+								<label
+									className="grid gap-2 text-sm font-medium"
+									htmlFor="bulk-display-name"
+								>
+									Display name
+									<Input
+										id="bulk-display-name"
+										disabled={busy}
+										value={custom.name}
+										onChange={(e) =>
+											setCustom({ ...custom, name: e.target.value })
+										}
+									/>
+								</label>
+								<fieldset className="sm:col-span-2">
+									<legend className="text-sm mb-2">
+										Alias destinations (required when IDs differ)
+									</legend>
+									<div className="flex flex-wrap gap-3">
+										{accounts.map((a) => (
+											<label key={a.id} className="text-sm flex gap-2">
+												<input
+													type="checkbox"
+													disabled={busy}
+													checked={custom.accounts.includes(a.id)}
+													onChange={(e) =>
+														setCustom({
+															...custom,
+															accounts: e.target.checked
+																? [...custom.accounts, a.id]
+																: custom.accounts.filter((id) => id !== a.id),
+														})
+													}
+												/>
+												{a.name}
+											</label>
+										))}
+									</div>
+								</fieldset>
+								{customError && (
+									<p
+										role="alert"
+										className="text-sm text-destructive sm:col-span-2"
+									>
+										{customError}
+									</p>
+								)}
+								<Button
+									variant="outline"
+									className="w-fit"
+									disabled={busy}
+									onClick={stage}
+								>
+									Add to list
+								</Button>
+							</div>
+						</details>
 						<details className="rounded-md border p-3">
 							<summary className="cursor-pointer w-fit text-sm font-medium">
 								Replace whole catalogue
