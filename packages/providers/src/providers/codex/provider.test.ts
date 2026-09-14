@@ -4,7 +4,7 @@ import {
 	NATIVE_RESPONSES_REQUEST_HEADER,
 	NATIVE_RESPONSES_RESPONSE_HEADER,
 } from "@clankermux/types";
-import { CodexProvider } from "./provider";
+import { CodexProvider, targetsChatGptCodexBackend } from "./provider";
 import { normalizeCodexInputUsage, parseCodexUsageHeaders } from "./usage";
 
 const sseBody = (lines: string[]) => `${lines.join("\n")}\n`;
@@ -3164,6 +3164,38 @@ describe("CodexProvider response.incomplete stop reasons", () => {
 		>;
 		expect(payload.stop_reason).toBe("end_turn");
 		expect(payload).not.toHaveProperty("stop_details");
+	});
+});
+
+describe("targetsChatGptCodexBackend", () => {
+	it("treats a missing account as the default ChatGPT backend", () => {
+		expect(targetsChatGptCodexBackend()).toBe(true);
+	});
+
+	it("treats a null custom_endpoint as the default ChatGPT backend", () => {
+		expect(targetsChatGptCodexBackend({ custom_endpoint: null })).toBe(true);
+	});
+
+	it("accepts a custom endpoint that still points at chatgpt.com", () => {
+		expect(
+			targetsChatGptCodexBackend({
+				custom_endpoint: "https://chatgpt.com/backend-api/codex/responses",
+			}),
+		).toBe(true);
+	});
+
+	it("rejects a custom endpoint on another host", () => {
+		expect(
+			targetsChatGptCodexBackend({
+				custom_endpoint: "https://api.example.com/v1",
+			}),
+		).toBe(false);
+	});
+
+	it("accepts a malformed endpoint, which buildUrl falls back to the default for", () => {
+		expect(targetsChatGptCodexBackend({ custom_endpoint: "not a url" })).toBe(
+			true,
+		);
 	});
 });
 

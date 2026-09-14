@@ -20,6 +20,7 @@ export {
 	CODEX_USER_AGENT,
 	CODEX_VERSION,
 	CodexProvider,
+	targetsChatGptCodexBackend,
 } from "./provider";
 export type {
 	CodexRateLimitResetCredit,

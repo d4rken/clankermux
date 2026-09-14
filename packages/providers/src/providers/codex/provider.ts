@@ -392,7 +392,9 @@ interface StreamState {
  * since it may be called on every request just to decide prompt_cache_key
  * eligibility.
  */
-function resolveCodexPromptCacheEndpoint(account?: Account): string {
+function resolveCodexPromptCacheEndpoint(account?: {
+	custom_endpoint?: string | null;
+}): string {
 	if (account?.custom_endpoint) {
 		try {
 			return validateEndpointUrl(account.custom_endpoint, "custom_endpoint");
@@ -410,8 +412,13 @@ function resolveCodexPromptCacheEndpoint(account?: Account): string {
  * endpoint has its own parameter vocabulary, and deleting a client's
  * `max_output_tokens` there would silently remove an output cap — i.e. uncap
  * spend — for a backend that may well accept it.
+ *
+ * Also gates the Codex usage poller: the free `GET /wham/usage` read lives on
+ * the same host, so an account that does not reach it cannot be polled either.
  */
-function targetsChatGptCodexBackend(account?: Account): boolean {
+export function targetsChatGptCodexBackend(account?: {
+	custom_endpoint?: string | null;
+}): boolean {
 	try {
 		const { hostname } = new URL(resolveCodexPromptCacheEndpoint(account));
 		return hostname === CHATGPT_BACKEND_HOST;
