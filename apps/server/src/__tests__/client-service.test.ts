@@ -868,6 +868,103 @@ describe("client service integration", () => {
 		).rejects.toThrow("too many routing rules");
 	}, 60000);
 
+	it("rejects the client whose entry carries a non-array account pin instead of failing the batch", async () => {
+		await service.bootstrap();
+		const a = await makeClient("Alpha", (d) => {
+			d.catalogues.openai.models = [
+				{
+					id: "fast",
+					displayName: "Fast",
+					targetModel: "fast",
+					accountIds: null,
+				},
+			];
+		});
+		const b = await makeClient("Bravo");
+		// Alpha already publishes `fast` under the same display name and target,
+		// so the modified-diff compares the pins of the two entries.
+		const review = await service.bulkReview({
+			clientIds: [a.apiKeyId, b.apiKeyId],
+			operation: {
+				format: "openai",
+				mode: "replace",
+				models: [
+					{
+						id: "fast",
+						displayName: "Fast",
+						targetModel: "fast",
+						accountIds: {},
+					},
+				],
+			},
+		});
+		expect(review.clients.map((r) => r.status)).toEqual([
+			"rejected",
+			"rejected",
+		]);
+		expect(review.clients[0]?.reason).toBe("Choose allowed accounts for fast");
+		expect(review.clients[1]?.reason).toBe("Choose allowed accounts for fast");
+	});
+
+	it("reports no change when an Anthropic replacement differs only in stored createdAt", async () => {
+		await service.bootstrap();
+		const shape = (d: ClientDraft) => {
+			d.catalogues.anthropic.models = [
+				{
+					id: "claude-alias",
+					displayName: "Claude Alias",
+					targetModel: "claude-known",
+					accountIds: ["c"],
+				},
+			];
+			d.catalogues.anthropic.defaultModel = "claude-alias";
+		};
+		const source = await makeClient("Source", shape);
+		const dest = await makeClient("Dest", shape);
+		const sql = dbOps.getAdapter().getSQLiteDb();
+		// prepareDraft stamps createdAt per client from the wall clock, so force
+		// the two apart rather than hoping the creates land in different
+		// milliseconds.
+		for (const [id, stamp] of [
+			[source.apiKeyId, "2020-01-01T00:00:00.000Z"],
+			[dest.apiKeyId, "2021-01-01T00:00:00.000Z"],
+		] as const) {
+			const row = sql
+				.query("SELECT catalogues FROM client_profiles WHERE api_key_id=?")
+				.get(id) as { catalogues: string };
+			const parsed = JSON.parse(row.catalogues);
+			parsed.anthropic.models[0].createdAt = stamp;
+			sql
+				.query("UPDATE client_profiles SET catalogues=? WHERE api_key_id=?")
+				.run(JSON.stringify(parsed), id);
+		}
+		const sourceProfile = (await dbOps.clients.getProfile(source.apiKeyId))!;
+		const from = sourceProfile.catalogues.anthropic;
+		const before = (await dbOps.clients.getProfile(dest.apiKeyId))!;
+		const ownedBefore = aliasOwners().find(
+			(o) => o.api_key_id === dest.apiKeyId,
+		)!;
+		const review = await service.bulkReview({
+			clientIds: [dest.apiKeyId],
+			operation: {
+				format: "anthropic",
+				mode: "replace",
+				models: structuredClone(from.models),
+				defaultModel: from.defaultModel,
+			},
+		});
+		// Both catalogues publish the same ID, target, display name and pin, and
+		// preparation restamps createdAt from Dest's own entry regardless.
+		expect(review.clients[0]?.status).toBe("unchanged");
+		await service.bulkCommit(review.token);
+		const after = (await dbOps.clients.getProfile(dest.apiKeyId))!;
+		expect(after.revision).toBe(before.revision);
+		expect(after.catalogues).toEqual(before.catalogues);
+		expect(aliasOwners().find((o) => o.api_key_id === dest.apiKeyId)).toEqual(
+			ownedBefore,
+		);
+	});
+
 	it("rolls the whole batch back when a later client's revision moved underneath it", async () => {
 		await service.bootstrap();
 		await dbOps.routing.saveRule(broad);

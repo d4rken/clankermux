@@ -1124,21 +1124,6 @@ export class ClientService {
 			const afterById = new Map(after.models.map((m) => [m.id, m]));
 			const added = [...afterById.keys()].filter((k) => !beforeById.has(k));
 			const removed = [...beforeById.keys()].filter((k) => !afterById.has(k));
-			const modified = [...afterById.keys()].filter((k) => {
-				const old = beforeById.get(k);
-				const next = afterById.get(k);
-				return (
-					!!old &&
-					!!next &&
-					(old.targetModel !== next.targetModel ||
-						old.displayName !== next.displayName ||
-						pinOf(old) !== pinOf(next))
-				);
-			});
-			const defaultModelChange =
-				before.defaultModel === after.defaultModel
-					? null
-					: { from: before.defaultModel, to: after.defaultModel };
 			const result: ClientBulkClientResult = {
 				apiKeyId: id,
 				name: key.name,
@@ -1146,20 +1131,51 @@ export class ClientService {
 				reason: null,
 				added,
 				removed,
-				modified,
-				defaultModelChange,
+				modified: [],
+				defaultModelChange: null,
 				notices,
 			};
+			// An identical raw draft prepares to an identical record for every
+			// format, so this fast path only ever skips work.
 			if (deepEqual(after, before)) {
 				clients.push(result);
 				continue;
 			}
 			try {
 				const record = await this.prepareDraft(draft);
+				// Everything past here diffs the prepared catalogue rather than
+				// the raw draft: preparation is what validates an entry,
+				// normalizes its account pin, and resolves an Anthropic entry's
+				// `createdAt` from this client's own stored one. Diffing the raw
+				// draft would both read unvalidated fields and call a
+				// replacement carrying another client's timestamps a change.
+				const prepared = record.profile.catalogues[operation.format];
+				if (deepEqual(prepared, before)) {
+					clients.push(result);
+					continue;
+				}
+				const preparedById = new Map(prepared.models.map((m) => [m.id, m]));
 				records.push(record);
 				clients.push({
 					...result,
 					status: "changed",
+					added: [...preparedById.keys()].filter((k) => !beforeById.has(k)),
+					removed: [...beforeById.keys()].filter((k) => !preparedById.has(k)),
+					modified: [...preparedById.keys()].filter((k) => {
+						const old = beforeById.get(k);
+						const next = preparedById.get(k);
+						return (
+							!!old &&
+							!!next &&
+							(old.targetModel !== next.targetModel ||
+								old.displayName !== next.displayName ||
+								pinOf(old) !== pinOf(next))
+						);
+					}),
+					defaultModelChange:
+						before.defaultModel === prepared.defaultModel
+							? null
+							: { from: before.defaultModel, to: prepared.defaultModel },
 					notices: [...notices, ...record.review.notices],
 				});
 			} catch (error) {
