@@ -105,8 +105,14 @@ describe("getCachedOrPersistedCodexUsage — stored-payload recovery", () => {
 		]);
 
 		expect(recovered.source).toBe("payload");
-		expect(recovered.data?.seven_day.utilization).toBe(100);
-		expect(recovered.data?.seven_day.resets_at).toBe(
+		const data = recovered.data;
+		if (data === null || !("seven_day" in data)) {
+			throw new Error(
+				`expected Anthropic-shaped usage data with a weekly window, got ${JSON.stringify(data)}`,
+			);
+		}
+		expect(data.seven_day?.utilization).toBe(100);
+		expect(data.seven_day?.resets_at).toBe(
 			new Date(resetSec * 1000).toISOString(),
 		);
 	});
