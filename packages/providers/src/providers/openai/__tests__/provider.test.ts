@@ -1,3 +1,5 @@
+import { beforeEach, describe, expect, it } from "bun:test";
+import { makeAccount as canonicalAccount } from "@clankermux/test-support";
 import type { Account } from "@clankermux/types";
 import { OpenAICompatibleProvider } from "../provider";
 
@@ -7,32 +9,15 @@ describe("OpenAICompatibleProvider", () => {
 
 	beforeEach(() => {
 		provider = new OpenAICompatibleProvider();
-		mockAccount = {
+		mockAccount = canonicalAccount({
 			id: "test-id",
-			name: "test-account",
 			provider: "openai-compatible",
 			refresh_token: "test-api-key",
-			access_token: null,
-			expires_at: null,
-			api_key: null,
 			custom_endpoint: JSON.stringify({
 				endpoint: "https://api.openrouter.ai/api/v1",
 			}),
-			rate_limited_until: null,
-			rate_limit_status: null,
-			rate_limit_reset: null,
-			rate_limit_remaining: null,
 			created_at: Date.now(),
-			last_used: null,
-			request_count: 0,
-			total_requests: 0,
-			session_start: null,
-			session_request_count: 0,
-			paused: false,
-			priority: 0,
-			auto_fallback_enabled: false,
-			auto_refresh_enabled: false,
-		};
+		});
 	});
 
 	describe("name", () => {
@@ -58,7 +43,7 @@ describe("OpenAICompatibleProvider", () => {
 		it("should use default endpoint when no custom endpoint", () => {
 			const accountWithoutEndpoint = {
 				...mockAccount,
-				custom_endpoint: undefined,
+				custom_endpoint: null,
 			};
 			const url = provider.buildUrl("/v1/messages", "", accountWithoutEndpoint);
 			expect(url).toBe("https://api.openai.com/v1/chat/completions");
@@ -91,9 +76,7 @@ describe("OpenAICompatibleProvider", () => {
 		it("should fall back to default when JSON endpoint is missing", () => {
 			const accountWithMappingsOnly = {
 				...mockAccount,
-				custom_endpoint: JSON.stringify({
-					modelMappings: { opus: "custom-model" },
-				}),
+				custom_endpoint: JSON.stringify({}),
 			};
 			const url = provider.buildUrl(
 				"/v1/messages",
@@ -281,7 +264,7 @@ describe("OpenAICompatibleProvider", () => {
 		});
 
 		it("should throw error when no API key is available", async () => {
-			const accountWithoutKey = { ...mockAccount, refresh_token: null };
+			const accountWithoutKey = { ...mockAccount, refresh_token: "" };
 
 			await expect(
 				provider.refreshToken(accountWithoutKey, "client-id"),
@@ -374,11 +357,6 @@ describe("OpenAICompatibleProvider", () => {
 
 			const accountWithMappings: Account = {
 				...mockAccount,
-				model_mappings: JSON.stringify({
-					opus: "openai/gpt-5",
-					sonnet: "openai/gpt-5",
-					haiku: "openai/gpt-5-mini",
-				}),
 			};
 
 			const transformed = await provider.transformRequestBody(
@@ -405,9 +383,6 @@ describe("OpenAICompatibleProvider", () => {
 
 			const accountWithMappings: Account = {
 				...mockAccount,
-				model_mappings: JSON.stringify({
-					sonnet: "openai/gpt-5",
-				}),
 			};
 
 			const transformed = await provider.transformRequestBody(
@@ -434,9 +409,6 @@ describe("OpenAICompatibleProvider", () => {
 
 			const accountWithMappings: Account = {
 				...mockAccount,
-				model_mappings: JSON.stringify({
-					haiku: "openai/gpt-5-mini",
-				}),
 			};
 
 			const transformed = await provider.transformRequestBody(
@@ -510,9 +482,6 @@ describe("OpenAICompatibleProvider", () => {
 				...mockAccount,
 				custom_endpoint: JSON.stringify({
 					endpoint: "https://api.customprovider.com/v1",
-					modelMappings: {
-						haiku: "custom/haiku-model",
-					},
 				}),
 			};
 

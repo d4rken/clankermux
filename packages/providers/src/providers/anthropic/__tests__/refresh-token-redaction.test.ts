@@ -11,6 +11,7 @@
 // vacuously silent in that case.)
 import { afterEach, describe, expect, it, spyOn } from "bun:test";
 import { Logger } from "@clankermux/logger";
+import { makeAccount as canonicalAccount } from "@clankermux/test-support";
 import type { Account } from "@clankermux/types";
 import { AnthropicProvider } from "../provider";
 
@@ -18,36 +19,15 @@ const SECRET =
 	"sk-ant-ort01-THISISAVERYLONGSECRETREFRESHTOKENVALUE-0123456789abcdefABCDEF";
 
 function makeAccount(overrides: Partial<Account> = {}): Account {
-	return {
+	return canonicalAccount({
 		id: "test-id",
 		name: "test-anthropic-account",
 		provider: "claude-oauth",
 		refresh_token: SECRET,
 		access_token: "test-access-token",
-		expires_at: null,
-		api_key: null,
-		custom_endpoint: null,
-		rate_limited_until: null,
-		rate_limit_status: null,
-		rate_limit_reset: null,
-		rate_limit_remaining: null,
 		created_at: Date.now(),
-		last_used: null,
-		request_count: 0,
-		total_requests: 0,
-		session_start: null,
-		session_request_count: 0,
-		paused: false,
-		priority: 0,
-		auto_fallback_enabled: false,
-		auto_refresh_enabled: false,
-		auto_pause_on_overage_enabled: false,
-		model_mappings: null,
-		cross_region_mode: null,
-		model_fallbacks: null,
-		billing_type: null,
 		...overrides,
-	};
+	});
 }
 
 describe("AnthropicProvider.refreshToken — refresh-token redaction", () => {

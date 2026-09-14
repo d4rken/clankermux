@@ -19,6 +19,7 @@ import {
 	type UsageData,
 	usageCache,
 } from "@clankermux/providers";
+import { makeAccount as canonicalAccount } from "@clankermux/test-support";
 import type {
 	Account,
 	CodexRateLimitResetCreditConsumeRequest,
@@ -30,6 +31,7 @@ import {
 	decideResetCreditAction,
 	RESET_CREDIT_AUTO_APPLY_LEAD_MS,
 	RESET_CREDIT_WEEKLY_LIMIT_COOLDOWN_MS,
+	type ResetCreditApplyDecision,
 } from "../codex-reset-credit-applier";
 import type { CodexResetCreditConsumeDispatchOutcome } from "../handlers/token-manager";
 
@@ -52,44 +54,18 @@ function expirySec(msFromNow: number): number {
 }
 
 function makeCodexAccount(overrides: Partial<Account> = {}): Account {
-	return {
+	return canonicalAccount({
 		id: "acct-1",
 		name: "codex-account",
 		provider: "codex",
-		api_key: null,
 		refresh_token: "rt",
 		access_token: "at",
 		expires_at: NOW + 3600_000,
-		request_count: 0,
-		total_requests: 0,
-		last_used: null,
 		created_at: NOW,
-		rate_limited_until: null,
-		rate_limited_reason: null,
-		rate_limited_at: null,
-		consecutive_rate_limits: 0,
-		session_start: null,
-		session_request_count: 0,
-		paused: false,
-		rate_limit_reset: null,
-		rate_limit_status: null,
-		rate_limit_remaining: null,
-		priority: 0,
-		auto_fallback_enabled: false,
 		auto_refresh_enabled: true,
-		auto_pause_on_overage_enabled: false,
-		peak_hours_pause_enabled: false,
 		codex_auto_apply_reset_credits_enabled: true,
-		codex_auto_apply_reset_on_weekly_limit_enabled: false,
-		custom_endpoint: null,
-		model_mappings: null,
-		cross_region_mode: null,
-		model_fallbacks: null,
-		billing_type: null,
-		pause_reason: null,
-		refresh_token_issued_at: null,
 		...overrides,
-	};
+	});
 }
 
 function makeCredit(
@@ -158,7 +134,7 @@ describe("decideResetCreditAction — skip gates", () => {
 		account?: Partial<Account>;
 		credits?: CodexRateLimitResetCredit[] | null;
 		resolved?: ReadonlySet<string>;
-		reason: string;
+		reason: Extract<ResetCreditApplyDecision, { action: "skip" }>["reason"];
 	}> = [
 		{
 			label: "toggle disabled",
@@ -185,7 +161,7 @@ describe("decideResetCreditAction — skip gates", () => {
 		},
 		{
 			label: "no refresh token",
-			account: { refresh_token: null },
+			account: { refresh_token: "" },
 			reason: "no-tokens",
 		},
 		{
@@ -1733,13 +1709,13 @@ describe("weekly reset conservation with the production pool check", () => {
 		},
 		{
 			label: "the other account has no credentials",
-			other: { refresh_token: null, access_token: null },
+			other: { refresh_token: "", access_token: null },
 			usage: usage(),
 			consume: true,
 		},
 		{
 			label: "the other account has only an expired access token",
-			other: { refresh_token: null, expires_at: NOW - 1 },
+			other: { refresh_token: "", expires_at: NOW - 1 },
 			usage: usage(),
 			consume: true,
 		},

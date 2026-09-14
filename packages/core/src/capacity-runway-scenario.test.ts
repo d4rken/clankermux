@@ -675,6 +675,11 @@ describe("computeCapacityRunwayScenario", () => {
 		// A's weekly kind is measured by B, and an exhausted window is a fact
 		// rather than a projection, so A stays in and takes half the class at its
 		// first alive assignment (its 5h reset, one hour out).
+		// `unprojectableAccountIds` only exists on the kinds that projected
+		// something; on `unknown`/`no-accounts` the assertion below would be vacuous.
+		if (withPeer.kind === "unknown" || withPeer.kind === "no-accounts") {
+			throw new Error(`unexpected outcome kind ${withPeer.kind}`);
+		}
 		expect(withPeer.unprojectableAccountIds).toEqual([]);
 		expect(withPeer.includedLearningAccounts).toHaveLength(1);
 		expect(withPeer.includedLearningAccounts[0].accountId).toBe("A");

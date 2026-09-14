@@ -96,7 +96,7 @@ async function callHandler(
 describe("usage-history handler", () => {
 	describe("range → bucket mapping", () => {
 		it("maps 6h → bucketMs 300000", async () => {
-			let captured: { sinceMs: number; bucketMs: number } | null = null;
+			let captured: { sinceMs: number; bucketMs: number } | undefined;
 			const sources = createSources({
 				snapshots: [],
 				accounts: [],
@@ -111,7 +111,7 @@ describe("usage-history handler", () => {
 		});
 
 		it("maps 1h → bucketMs 60000", async () => {
-			let captured: { sinceMs: number; bucketMs: number } | null = null;
+			let captured: { sinceMs: number; bucketMs: number } | undefined;
 			const sources = createSources({
 				snapshots: [],
 				accounts: [],
@@ -125,7 +125,7 @@ describe("usage-history handler", () => {
 		});
 
 		it("defaults to 7d (bucketMs 3600000) when range omitted", async () => {
-			let captured: { sinceMs: number; bucketMs: number } | null = null;
+			let captured: { sinceMs: number; bucketMs: number } | undefined;
 			const sources = createSources({
 				snapshots: [],
 				accounts: [],
@@ -139,7 +139,7 @@ describe("usage-history handler", () => {
 		});
 
 		it("falls back to the 7d default for an invalid range", async () => {
-			let captured: { sinceMs: number; bucketMs: number } | null = null;
+			let captured: { sinceMs: number; bucketMs: number } | undefined;
 			const sources = createSources({
 				snapshots: [],
 				accounts: [],
@@ -153,7 +153,7 @@ describe("usage-history handler", () => {
 		});
 
 		it("maps all → sinceMs 0 with daily buckets (retention-capped)", async () => {
-			let captured: { sinceMs: number; bucketMs: number } | null = null;
+			let captured: { sinceMs: number; bucketMs: number } | undefined;
 			const sources = createSources({
 				snapshots: [],
 				accounts: [],
@@ -169,7 +169,7 @@ describe("usage-history handler", () => {
 		});
 
 		it("computes sinceMs as now - windowMs for the range", async () => {
-			let captured: { sinceMs: number; bucketMs: number } | null = null;
+			let captured: { sinceMs: number; bucketMs: number } | undefined;
 			const sources = createSources({
 				snapshots: [],
 				accounts: [],
@@ -606,7 +606,7 @@ describe("usage-history handler", () => {
 
 describe("usage-history handler — predecessor lookback bound", () => {
 	it("asks for at most one seven-day window before the range start", async () => {
-		let captured: { beforeMs: number; lookbackMs: number } | null = null;
+		let captured: { beforeMs: number; lookbackMs: number } | undefined;
 		const sources = createSources({
 			snapshots: [],
 			accounts: [],

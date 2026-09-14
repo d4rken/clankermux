@@ -226,9 +226,10 @@ describe("AnthropicOAuthProvider - Claude OAuth Fixes", () => {
 
 			try {
 				await provider.exchangeCode(code, verifier, config);
-				expect.fail("Should have thrown OAuthError");
+				throw new Error("Should have thrown OAuthError");
 			} catch (error) {
 				expect(error).toBeInstanceOf(OAuthError);
+				if (!(error instanceof OAuthError)) throw error;
 				expect(error.message).toBe("The request format is invalid");
 				expect(error.provider).toBe("anthropic");
 			}
@@ -249,9 +250,10 @@ describe("AnthropicOAuthProvider - Claude OAuth Fixes", () => {
 
 			try {
 				await provider.exchangeCode(code, verifier, config);
-				expect.fail("Should have thrown OAuthError");
+				throw new Error("Should have thrown OAuthError");
 			} catch (error) {
 				expect(error).toBeInstanceOf(OAuthError);
+				if (!(error instanceof OAuthError)) throw error;
 				expect(error.message).toBe("Invalid request format");
 				expect(error.provider).toBe("anthropic");
 			}
@@ -274,9 +276,10 @@ describe("AnthropicOAuthProvider - Claude OAuth Fixes", () => {
 
 			try {
 				await provider.exchangeCode(code, verifier, config);
-				expect.fail("Should have thrown OAuthError");
+				throw new Error("Should have thrown OAuthError");
 			} catch (error) {
 				expect(error).toBeInstanceOf(OAuthError);
+				if (!(error instanceof OAuthError)) throw error;
 				// Should fall back to stringified object or status text
 				expect(error.message).toMatch(/Bad Request|UNKNOWN_ERROR/);
 			}
@@ -300,9 +303,10 @@ describe("AnthropicOAuthProvider - Claude OAuth Fixes", () => {
 
 			try {
 				await provider.exchangeCode(code, verifier, config);
-				expect.fail("Should have thrown OAuthError");
+				throw new Error("Should have thrown OAuthError");
 			} catch (error) {
 				expect(error).toBeInstanceOf(OAuthError);
+				if (!(error instanceof OAuthError)) throw error;
 				expect(error.message).toBe("Internal Server Error");
 			}
 			mockFetch.mockRestore();

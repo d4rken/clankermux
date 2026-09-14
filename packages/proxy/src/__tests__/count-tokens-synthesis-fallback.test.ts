@@ -1,41 +1,19 @@
 import { describe, expect, it, mock } from "bun:test";
+import {
+	makeAccount as canonicalAccount,
+	mockFetch,
+} from "@clankermux/test-support";
 import type { Account } from "@clankermux/types";
 import type { ProxyContext } from "../handlers";
 import { handleProxy } from "./fixtures/routing-harness";
 
 function makeAccount(overrides: Partial<Account> = {}): Account {
-	return {
-		id: "acc-1",
-		name: "test-account",
+	return canonicalAccount({
 		provider: "codex",
-		api_key: null,
 		refresh_token: "refresh-token",
-		access_token: null,
-		expires_at: null,
-		request_count: 0,
-		total_requests: 0,
-		last_used: null,
 		created_at: Date.now(),
-		rate_limited_until: null,
-		session_start: null,
-		session_request_count: 0,
-		paused: false,
-		rate_limit_reset: null,
-		rate_limit_status: null,
-		rate_limit_remaining: null,
-		priority: 0,
-		auto_fallback_enabled: false,
-		auto_refresh_enabled: false,
-		auto_pause_on_overage_enabled: false,
-		custom_endpoint: null,
-		model_mappings: null,
-		cross_region_mode: null,
-		model_fallbacks: null,
-		billing_type: null,
-		pause_reason: null,
-		refresh_token_issued_at: null,
 		...overrides,
-	};
+	});
 }
 
 function makeContext(accounts: Account[]): ProxyContext {
@@ -102,7 +80,7 @@ describe("count_tokens last-resort synthesis when pool is exhausted", () => {
 			throw new Error("count_tokens synthesis must not hit upstream");
 		});
 		const originalFetch = globalThis.fetch;
-		globalThis.fetch = fetchMock as typeof globalThis.fetch;
+		globalThis.fetch = mockFetch(fetchMock);
 		try {
 			const rateLimitedCodex = makeAccount({
 				id: "acc-codex",
@@ -139,7 +117,7 @@ describe("count_tokens last-resort synthesis when pool is exhausted", () => {
 		const account = makeAccount({
 			provider,
 			rate_limited_until: Date.now() + 60_000,
-			refresh_token: null,
+			refresh_token: "",
 		});
 		const ctx = makeContext([account]);
 		ctx.dbOps.getApiKeyPin = mock(async () => ({
@@ -150,7 +128,7 @@ describe("count_tokens last-resort synthesis when pool is exhausted", () => {
 		const fetchMock = mock(async () => {
 			throw new Error("local pinned count contacted upstream");
 		});
-		globalThis.fetch = fetchMock as typeof fetch;
+		globalThis.fetch = mockFetch(fetchMock);
 		try {
 			const req = makeCountTokensRequest();
 			const response = await handleProxy(
@@ -197,7 +175,7 @@ describe("count_tokens last-resort synthesis when pool is exhausted", () => {
 		const fetchMock = mock(async () => {
 			throw new Error("blocked destination contacted");
 		});
-		globalThis.fetch = fetchMock as typeof fetch;
+		globalThis.fetch = mockFetch(fetchMock);
 		try {
 			const req = makeCountTokensRequest();
 			const response = await handleProxy(
@@ -224,7 +202,7 @@ describe("count_tokens last-resort synthesis when pool is exhausted", () => {
 		const fetchMock = mock(async () => {
 			throw new Error("Paused account contacted");
 		});
-		globalThis.fetch = fetchMock as typeof fetch;
+		globalThis.fetch = mockFetch(fetchMock);
 		try {
 			const req = makeCountTokensRequest();
 			const response = await handleProxy(req, new URL(req.url), ctx);
@@ -271,7 +249,7 @@ describe("count_tokens last-resort synthesis when pool is exhausted", () => {
 			throw new Error("pinned count_tokens must not synthesize from Codex");
 		});
 		const originalFetch = globalThis.fetch;
-		globalThis.fetch = fetchMock as typeof globalThis.fetch;
+		globalThis.fetch = mockFetch(fetchMock);
 		try {
 			const rateLimitedAnthropic = makeAccount({
 				id: "acc-anthropic",

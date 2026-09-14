@@ -160,7 +160,9 @@ describe("quota availability evidence", () => {
 				{
 					family: "fable",
 					displayName: "Fable",
-					series: [{ accountId: "a", name: "a", points: [] }],
+					series: [
+						{ accountId: "a", name: "a", provider: "anthropic", points: [] },
+					],
 					pool: [],
 				},
 			],

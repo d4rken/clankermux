@@ -25,6 +25,7 @@ import {
 import { afterEach, beforeEach, describe, expect, it, mock } from "bun:test";
 import { logBus } from "@clankermux/logger";
 import { usageCache } from "@clankermux/providers";
+import { makeAccount as canonicalAccount } from "@clankermux/test-support";
 import type { Account, RequestMeta } from "@clankermux/types";
 import { createAdmissionGates } from "../admission-gates";
 import { cacheBodyStore } from "../cache-body-store";
@@ -77,44 +78,25 @@ const HOLD_TIMING_OVERRIDE = {
 	maxHoldMs: 2_000,
 };
 
-function makeAccount(overrides: Partial<Account> = {}): Account {
+/**
+ * The harness's own per-account model override. `Account` no longer declares
+ * `model_mappings`; the gate fixtures below still read it back off the account
+ * to decide which model each one resolves to.
+ */
+type MappedAccount = Account & { model_mappings?: string };
+
+function makeAccount(overrides: Partial<MappedAccount> = {}): MappedAccount {
 	return {
-		id: "acc-1",
-		name: "account",
-		provider: "anthropic",
-		api_key: null,
-		refresh_token: "rt-token",
-		access_token: "at-token",
-		expires_at: Date.now() + 3_600_000,
-		request_count: 0,
-		total_requests: 0,
-		last_used: null,
-		created_at: Date.now(),
-		rate_limited_until: null,
-		rate_limited_reason: null,
-		rate_limited_at: null,
-		consecutive_rate_limits: 0,
-		session_start: null,
-		session_request_count: 0,
-		paused: false,
-		rate_limit_reset: null,
-		rate_limit_status: null,
-		rate_limit_remaining: null,
-		priority: 0,
-		auto_fallback_enabled: false,
-		auto_refresh_enabled: false,
-		auto_pause_on_overage_enabled: false,
-		peak_hours_pause_enabled: false,
-		codex_auto_apply_reset_credits_enabled: false,
-		custom_endpoint: null,
-		model_mappings: null,
-		cross_region_mode: null,
-		model_fallbacks: null,
-		billing_type: null,
-		pause_reason: null,
-		refresh_token_issued_at: null,
+		...canonicalAccount({
+			id: "acc-1",
+			name: "account",
+			refresh_token: "rt-token",
+			access_token: "at-token",
+			expires_at: Date.now() + 3_600_000,
+			created_at: Date.now(),
+		}),
 		...overrides,
-	} as Account;
+	};
 }
 
 function makeMeta(overrides: Partial<RequestMeta> = {}): RequestMeta {
@@ -240,8 +222,6 @@ function makeHolds(
 	installGatePermissions(ctx, accounts, MODEL, targets);
 	const gates = createAdmissionGates({
 		requestMeta,
-		initialComboInfo: null,
-		effectiveRequestModel: MODEL,
 		gateTokenEstimate: 100,
 		isSyntheticProbeRequest: false,
 		config: ctx.config,

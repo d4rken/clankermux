@@ -194,6 +194,7 @@ describe("RunwayCard", () => {
 				kind: "seven_day",
 				utilizationPct: 0,
 				resetsAtMs: NOW + 7 * DAY,
+				prediction: null,
 				unstarted: true,
 			},
 		]);
@@ -215,11 +216,17 @@ describe("RunwayCard", () => {
 				kind: "seven_day",
 				utilizationPct: 0,
 				resetsAtMs: NOW + 7 * DAY,
+				prediction: null,
 				unstarted: true,
 			},
 		]);
 		const running = account("acc-4", "Running", [
-			{ kind: "seven_day", utilizationPct: 20, resetsAtMs: NOW + 2 * DAY },
+			{
+				kind: "seven_day",
+				utilizationPct: 20,
+				resetsAtMs: NOW + 2 * DAY,
+				prediction: null,
+			},
 		]);
 		const html = render({
 			runways: [row({ eligibleAccountIds: ["acc-3", "acc-4"] })],

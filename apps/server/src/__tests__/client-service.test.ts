@@ -186,6 +186,7 @@ describe("client service integration", () => {
 
 	it("keeps a missing catalogue manageable and repairs it only after review", async () => {
 		const { client, apiKey } = await create();
+		if (!apiKey) throw new Error("expected create() to return a plaintext key");
 		const sql = dbOps.getAdapter().getSQLiteDb();
 		sql
 			.query("DELETE FROM client_profiles WHERE api_key_id=?")
@@ -213,7 +214,6 @@ describe("client service integration", () => {
 		const repaired = await service.commit(reviewed.token);
 		expect(repaired.apiKey).toBeUndefined();
 		expect(repaired.client.apiKeyId).toBe(client.apiKeyId);
-		if (!apiKey) throw new Error("Missing fixture key");
 		expect(repaired.client.key.prefixLast8).toBe(apiKey.slice(-8));
 		expect(repaired.client.revision).toBe(1);
 		expect(
@@ -224,7 +224,7 @@ describe("client service integration", () => {
 		await expect(service.commit(stale.token)).rejects.toThrow("Client changed");
 	});
 	it("uses one account snapshot when reviewing and serving multiple Codex entries", async () => {
-		if (!currentRaw) throw new Error("Missing fixture catalogue");
+		if (!currentRaw) throw new Error("expected a seeded catalogue payload");
 		const entry = JSON.parse(currentRaw.bodyText).models[0];
 		currentRaw = {
 			bodyText: JSON.stringify({

@@ -130,8 +130,10 @@ describe("RequestDetailsModal response tab", () => {
 			() => new Promise<RequestPayload>(() => {}),
 		);
 		await mount(
+			// `undefined`, not `null`: `RequestPayload.request` is non-nullable, and
+			// the modal only ever tests it for truthiness.
 			payload({
-				request: null,
+				request: undefined,
 				response: null,
 			}),
 		);
@@ -168,7 +170,7 @@ describe("RequestDetailsModal request tab", () => {
 		spyOn(api, "getRequestPayload").mockImplementation(
 			() => new Promise<RequestPayload>(() => {}),
 		);
-		await mount(payload({ request: null, response: null }));
+		await mount(payload({ request: undefined, response: null }));
 		await openTab("Request");
 
 		const busy =

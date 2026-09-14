@@ -4,6 +4,7 @@ import {
 	checkAllAccountsHealth,
 	getAccountsNeedingReauth,
 } from "@clankermux/proxy";
+import { makeAccount } from "@clankermux/test-support";
 import {
 	createAccountTokenHealthHandler,
 	createTokenHealthHandler,
@@ -11,96 +12,31 @@ import {
 
 // Mock database operations for testing
 const mockAccounts = [
-	{
+	makeAccount({
 		id: "1",
 		name: "test-account-1",
-		provider: "anthropic",
 		refresh_token: "valid-refresh-token",
 		created_at: Date.now() - 120 * 24 * 60 * 60 * 1000, // 120 days ago (account is old)
 		refresh_token_issued_at: Date.now() - 30 * 24 * 60 * 60 * 1000, // token refreshed 30 days ago (healthy)
 		expires_at: Date.now() + 14 * 24 * 60 * 60 * 1000, // 14 days from now (healthy)
-		paused: false,
-		api_key: null,
 		access_token: "access-token",
-		request_count: 0,
-		total_requests: 0,
-		last_used: null,
-		rate_limited_until: null,
-		session_start: null,
-		session_request_count: 0,
-		rate_limit_reset: null,
-		rate_limit_status: null,
-		rate_limit_remaining: null,
-		priority: 0,
-		auto_fallback_enabled: false,
-		auto_refresh_enabled: false,
-		auto_pause_on_overage_enabled: false,
-		custom_endpoint: null,
-		model_mappings: null,
-		model_fallbacks: null,
-		billing_type: null,
-		pause_reason: null,
-	},
-	{
+	}),
+	makeAccount({
 		id: "2",
 		name: "test-account-2",
-		provider: "anthropic",
 		refresh_token: "expiring-soon-token",
 		created_at: Date.now() - 95 * 24 * 60 * 60 * 1000, // 95 days ago
 		refresh_token_issued_at: null, // No refresh_token_issued_at — falls back to created_at (past 90 day max, will be expired)
 		expires_at: Date.now() - 2 * 24 * 60 * 60 * 1000, // 2 days ago (expired)
-		paused: false,
-		api_key: null,
 		access_token: "access-token",
-		request_count: 0,
-		total_requests: 0,
-		last_used: null,
-		rate_limited_until: null,
-		session_start: null,
-		session_request_count: 0,
-		rate_limit_reset: null,
-		rate_limit_status: null,
-		rate_limit_remaining: null,
-		priority: 0,
-		auto_fallback_enabled: false,
-		auto_refresh_enabled: false,
-		auto_pause_on_overage_enabled: false,
-		custom_endpoint: null,
-		model_mappings: null,
-		model_fallbacks: null,
-		billing_type: null,
-		pause_reason: null,
-	},
-	{
+	}),
+	makeAccount({
 		id: "3",
 		name: "test-account-3",
-		provider: "anthropic",
-		refresh_token: null, // No refresh token (console mode)
+		refresh_token: "", // No refresh token (console mode)
 		created_at: Date.now() - 30 * 24 * 60 * 60 * 1000,
-		refresh_token_issued_at: null,
-		expires_at: null,
-		paused: false,
 		api_key: "api-key", // API key account
-		access_token: null,
-		request_count: 0,
-		total_requests: 0,
-		last_used: null,
-		rate_limited_until: null,
-		session_start: null,
-		session_request_count: 0,
-		rate_limit_reset: null,
-		rate_limit_status: null,
-		rate_limit_remaining: null,
-		priority: 0,
-		auto_fallback_enabled: false,
-		auto_refresh_enabled: false,
-		auto_pause_on_overage_enabled: false,
-		custom_endpoint: null,
-		model_mappings: null,
-		model_fallbacks: null,
-		billing_type: null,
-		pause_reason: null,
-	},
+	}),
 ];
 
 const mockDbOps = {
@@ -198,19 +134,18 @@ describe("Token Health HTTP API Integration", () => {
 			const healthReport = checkAllAccountsHealth(mockAccounts);
 
 			const account1 = healthReport.accounts.find(
-				(acc) => acc.name === "test-account-1",
+				(acc) => acc.accountName === "test-account-1",
 			);
 			const account2 = healthReport.accounts.find(
-				(acc) => acc.name === "test-account-2",
+				(acc) => acc.accountName === "test-account-2",
 			);
 
-			// OAuth accounts should have daysUntilExpiration if they have expiration dates
-			if (account1?.daysUntilExpiration !== undefined) {
-				expect(account1?.daysUntilExpiration).toBeGreaterThan(0);
-			}
-			if (account2?.daysUntilExpiration !== undefined) {
-				expect(account2?.daysUntilExpiration).toBeGreaterThan(0);
-			}
+			// Both are OAuth accounts, so both carry an estimate. test-account-1's
+			// token was issued 30 days ago, leaving 60 of the 90-day maximum;
+			// test-account-2 has no issue date and its account was created 95 days
+			// ago, so its estimate is already past zero.
+			expect(account1?.daysUntilExpiration).toBeGreaterThan(0);
+			expect(account2?.daysUntilExpiration).toBeLessThanOrEqual(0);
 		});
 	});
 
@@ -271,7 +206,7 @@ describe("Error Handling", () => {
 	it("should handle missing account gracefully", () => {
 		const healthReport = checkAllAccountsHealth(mockAccounts);
 		const missingAccount = healthReport.accounts.find(
-			(acc) => acc.name === "nonexistent-account",
+			(acc) => acc.accountName === "nonexistent-account",
 		);
 
 		expect(missingAccount).toBeUndefined();
@@ -279,36 +214,14 @@ describe("Error Handling", () => {
 
 	it("should handle malformed account data", () => {
 		const malformedAccounts = [
-			{
+			makeAccount({
 				id: "1",
 				name: "",
-				provider: "anthropic",
 				refresh_token: "token",
 				created_at: Date.now(),
-				refresh_token_issued_at: null,
 				expires_at: Date.now(),
-				paused: false,
-				api_key: null,
 				access_token: "access-token",
-				request_count: 0,
-				total_requests: 0,
-				last_used: null,
-				rate_limited_until: null,
-				session_start: null,
-				session_request_count: 0,
-				rate_limit_reset: null,
-				rate_limit_status: null,
-				rate_limit_remaining: null,
-				priority: 0,
-				auto_fallback_enabled: false,
-				auto_refresh_enabled: false,
-				auto_pause_on_overage_enabled: false,
-				custom_endpoint: null,
-				model_mappings: null,
-				model_fallbacks: null,
-				billing_type: null,
-				pause_reason: null,
-			},
+			}),
 		];
 
 		expect(() => {

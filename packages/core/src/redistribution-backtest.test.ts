@@ -471,41 +471,67 @@ describe("transitionsAt", () => {
 
 describe("headroomShareRule", () => {
 	test("weights remaining headroom in capacity units", () => {
-		const weights = headroomShareRule([
-			{
-				accountId: "A",
-				demandClass: "anthropic",
-				capacityUnits: 20,
-				windows: [
-					{ windowKind: "seven_day", utilizationPct: 50 },
-					{ windowKind: "five_hour", utilizationPct: 10 },
-				],
-			},
-			{
-				accountId: "B",
-				demandClass: "anthropic",
-				capacityUnits: 5,
-				windows: [{ windowKind: "seven_day", utilizationPct: 20 }],
-			},
-		]);
+		const weights = headroomShareRule(
+			[
+				{
+					accountId: "A",
+					demandClass: "anthropic",
+					capacityUnits: 20,
+					windows: [
+						{
+							windowKind: "seven_day",
+							utilizationPct: 50,
+							measuredUnitsPerHour: null,
+						},
+						{
+							windowKind: "five_hour",
+							utilizationPct: 10,
+							measuredUnitsPerHour: null,
+						},
+					],
+				},
+				{
+					accountId: "B",
+					demandClass: "anthropic",
+					capacityUnits: 5,
+					windows: [
+						{
+							windowKind: "seven_day",
+							utilizationPct: 20,
+							measuredUnitsPerHour: null,
+						},
+					],
+				},
+			],
+			"seven_day",
+		);
 		expect(weights).toEqual([1000, 400]);
 	});
 
 	test("falls back to the equal split when nothing is left to weight by", () => {
-		const weights = headroomShareRule([
-			{
-				accountId: "A",
-				demandClass: "anthropic",
-				capacityUnits: 20,
-				windows: [{ windowKind: "seven_day", utilizationPct: 100 }],
-			},
-			{
-				accountId: "B",
-				demandClass: "anthropic",
-				capacityUnits: null,
-				windows: [],
-			},
-		]);
+		const weights = headroomShareRule(
+			[
+				{
+					accountId: "A",
+					demandClass: "anthropic",
+					capacityUnits: 20,
+					windows: [
+						{
+							windowKind: "seven_day",
+							utilizationPct: 100,
+							measuredUnitsPerHour: null,
+						},
+					],
+				},
+				{
+					accountId: "B",
+					demandClass: "anthropic",
+					capacityUnits: null,
+					windows: [],
+				},
+			],
+			"seven_day",
+		);
 		expect(weights).toEqual([1, 1]);
 	});
 });
@@ -1818,6 +1844,7 @@ describe("knownLimitsFor", () => {
 			replay,
 			cohorts,
 			evaluateVerdict(cohorts, replay),
+			null,
 		);
 		expect(limits).toContain(
 			"`anthropic` supplies 100.0 % of the overall common-cohort records.",
@@ -1830,6 +1857,7 @@ describe("knownLimitsFor", () => {
 			replay,
 			cohorts,
 			evaluateVerdict(cohorts, replay),
+			null,
 		);
 		expect(
 			limits.some((limit) => limit.includes("of the overall common-cohort")),
@@ -1845,6 +1873,7 @@ describe("knownLimitsFor", () => {
 			replay,
 			cohorts,
 			evaluateVerdict(cohorts, replay),
+			null,
 		);
 		const basisLimit = limits.find((limit) =>
 			limit.startsWith("The verdict basis weights each account"),
@@ -3983,8 +4012,9 @@ describe("observationLagChecks", () => {
 		const summed =
 			(combined?.buckets.reduce((sum, bucket) => sum + bucket.records, 0) ??
 				0) + (combined?.unknown.records ?? 0);
-		expect(summed).toBe(combined?.eligible);
-		expect(combined?.eligible).toBe(6);
+		if (!combined) throw new Error("expected a combined age group");
+		expect(summed).toBe(combined.eligible);
+		expect(combined.eligible).toBe(6);
 	});
 
 	test("the fixed subset takes only records every model dated", () => {
@@ -4837,6 +4867,7 @@ describe("the absorption measurements section", () => {
 			replay,
 			cohorts,
 			evaluateVerdict(cohorts, replay),
+			null,
 		);
 		expect(limits.some((limit) => limit.includes("sampled crossing"))).toBe(
 			true,

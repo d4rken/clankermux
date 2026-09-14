@@ -13,7 +13,7 @@ import { installGateRoute } from "./fixtures/gate-routing";
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { SessionStrategy } from "@clankermux/load-balancer";
 import { usageCache } from "@clankermux/providers";
-import type { Account, ComboSlotInfo, RequestMeta } from "@clankermux/types";
+import type { Account, RequestMeta } from "@clankermux/types";
 import { createAdmissionGates as makeAdmissionGates } from "../admission-gates";
 import {
 	recordFamilyWeeklyExhausted,
@@ -41,7 +41,7 @@ function makeAccount(
 		name: "account",
 		provider: "anthropic",
 		api_key: "key",
-		refresh_token: null,
+		refresh_token: "",
 		access_token: null,
 		expires_at: null,
 		request_count: 0,
@@ -65,9 +65,6 @@ function makeAccount(
 		peak_hours_pause_enabled: false,
 		codex_auto_apply_reset_credits_enabled: false,
 		custom_endpoint: null,
-		model_mappings: null,
-		cross_region_mode: null,
-		model_fallbacks: null,
 		billing_type: null,
 		pause_reason: null,
 		refresh_token_issued_at: null,
@@ -100,7 +97,6 @@ function makeConfig(switches: ThrottleSwitches): ProxyContext["config"] {
 
 type GateOverrides = {
 	requestMeta?: RequestMeta;
-	initialComboInfo?: ComboSlotInfo | null;
 	requestModel?: string;
 	gateTokenEstimate?: number;
 	isSyntheticProbeRequest?: boolean;
@@ -134,7 +130,6 @@ function makeGates(overrides: GateOverrides = {}) {
 	return createAdmissionGates(
 		{
 			requestMeta: overrides.requestMeta ?? makeRequestMeta(),
-			initialComboInfo: overrides.initialComboInfo ?? null,
 			gateTokenEstimate: overrides.gateTokenEstimate ?? 1_000,
 			isSyntheticProbeRequest: overrides.isSyntheticProbeRequest ?? false,
 			config:
@@ -605,13 +600,12 @@ describe("affinity after durable request exclusions", () => {
 			preferred = pref;
 			const meta = makeRequestMeta({
 				affinityKey: "conversation",
-				affinityScope: "session",
+				affinityScope: "claude_session",
 			});
 			const selected = strategy.select(accounts, meta);
 			const gates = createAdmissionGates(
 				{
 					requestMeta: meta,
-					initialComboInfo: null,
 					gateTokenEstimate: 150_000,
 					isSyntheticProbeRequest: false,
 					config: makeConfig({ fiveHour: false, weekly: false }),
@@ -635,14 +629,13 @@ describe("affinity after durable request exclusions", () => {
 			const strategy = new SessionStrategy();
 			const meta = makeRequestMeta({
 				affinityKey: "family-conversation",
-				affinityScope: "session",
+				affinityScope: "claude_session",
 			});
 			const selected = strategy.select(accounts, meta);
 			expect(selected[0].id).toBe(accounts[0].id);
 			const gates = createAdmissionGates(
 				{
 					requestMeta: meta,
-					initialComboInfo: null,
 					gateTokenEstimate: 1,
 					isSyntheticProbeRequest: false,
 					config: makeConfig({ fiveHour: false, weekly: false }),
@@ -655,7 +648,7 @@ describe("affinity after durable request exclusions", () => {
 			gates.reconcileAffinity(candidates);
 			const next = makeRequestMeta({
 				affinityKey: "family-conversation",
-				affinityScope: "session",
+				affinityScope: "claude_session",
 			});
 			expect(strategy.select(accounts, next)[0].id).toBe(accounts[1].id);
 		} finally {
@@ -671,13 +664,12 @@ describe("affinity after durable request exclusions", () => {
 		const strategy = new SessionStrategy();
 		const meta = makeRequestMeta({
 			affinityKey: "conversation",
-			affinityScope: "session",
+			affinityScope: "claude_session",
 		});
 		strategy.select(accounts, meta);
 		const gates = createAdmissionGates(
 			{
 				requestMeta: meta,
-				initialComboInfo: null,
 				gateTokenEstimate: 1,
 				isSyntheticProbeRequest: false,
 				config: makeConfig({ fiveHour: false, weekly: false }),
@@ -688,7 +680,7 @@ describe("affinity after durable request exclusions", () => {
 		gates.reconcileAffinity([accounts[1]]);
 		const next = makeRequestMeta({
 			affinityKey: "conversation",
-			affinityScope: "session",
+			affinityScope: "claude_session",
 		});
 		expect(strategy.select(accounts, next)[0].id).toBe("a");
 	});

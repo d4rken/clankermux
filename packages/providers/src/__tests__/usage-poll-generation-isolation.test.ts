@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, spyOn } from "bun:test";
+import { mockFetch } from "@clankermux/test-support";
 import { usageCache } from "../usage-fetcher";
 
 /**
@@ -43,18 +44,20 @@ describe("UsageCache — superseded fetches cannot corrupt the live generation",
 		// Without the superseded result, the stale failure was counted against the
 		// live generation, pushing a perfectly healthy poller into exponential
 		// backoff (up to a 30-minute wake) and letting its usage data go stale.
-		let release: (() => void) | null = null;
+		let release: (() => void) | undefined;
 		let served = 0;
-		fetchSpy = spyOn(globalThis, "fetch").mockImplementation(async () => {
-			served++;
-			if (served === 1) {
-				await new Promise<void>((resolve) => {
-					release = resolve;
-				});
-				return new Response("boom", { status: 500 });
-			}
-			return healthyResponse();
-		});
+		fetchSpy = spyOn(globalThis, "fetch").mockImplementation(
+			mockFetch(async () => {
+				served++;
+				if (served === 1) {
+					await new Promise<void>((resolve) => {
+						release = resolve;
+					});
+					return new Response("boom", { status: 500 });
+				}
+				return healthyResponse();
+			}),
+		);
 
 		// Generation 1: its immediate fetch parks in flight.
 		usageCache.startPolling(ACCOUNT, "token-1", "anthropic", 60 * 60 * 1000);
@@ -80,12 +83,12 @@ describe("UsageCache — superseded fetches cannot corrupt the live generation",
 		// let the OLD generation's verdict call stopPolling() on the LIVE one,
 		// deleting its token provider, callbacks and cache — polling stayed dead
 		// until an explicit restart.
-		fetchSpy = spyOn(globalThis, "fetch").mockImplementation(async () =>
-			healthyResponse(),
+		fetchSpy = spyOn(globalThis, "fetch").mockImplementation(
+			mockFetch(async () => healthyResponse()),
 		);
 
 		let handlerEntered = false;
-		let releaseHandler: (() => void) | null = null;
+		let releaseHandler: (() => void) | undefined;
 		const handlerGate = new Promise<void>((resolve) => {
 			releaseHandler = resolve;
 		});

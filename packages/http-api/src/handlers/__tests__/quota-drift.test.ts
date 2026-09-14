@@ -1379,10 +1379,32 @@ describe("collectWindowObservations", () => {
 		return observation;
 	}
 
+	/**
+	 * `observationsFor` for fixtures that DO report the window, with the three
+	 * instants narrowed. They are nullable on `WindowObservation` for the cohort
+	 * that never observed the window at all, which these fixtures are not.
+	 */
+	function reportingObservationsFor(opts: FlatFixture): WindowObservation & {
+		firstObservedMs: number;
+		lastObservedMs: number;
+		flatStartMs: number;
+	} {
+		const observation = observationsFor(opts);
+		const { firstObservedMs, lastObservedMs, flatStartMs } = observation;
+		if (
+			firstObservedMs === null ||
+			lastObservedMs === null ||
+			flatStartMs === null
+		) {
+			throw new Error("the fixture reported no value for the window");
+		}
+		return { ...observation, firstObservedMs, lastObservedMs, flatStartMs };
+	}
+
 	it("breaks the flat streak at a null sample rather than bridging it", () => {
 		// Absence of evidence is never a flat line: the readings either side of a
 		// blank may be hours apart in meaning.
-		const observation = observationsFor({
+		const observation = reportingObservationsFor({
 			days: 43,
 			pct: 0,
 			withTraffic: true,
@@ -1401,7 +1423,7 @@ describe("collectWindowObservations", () => {
 	it("breaks the flat streak at a sampling gap rather than bridging it", () => {
 		// Two hours unobserved: the window may have moved and come back, and
 		// nothing here can rule that out.
-		const observation = observationsFor({
+		const observation = reportingObservationsFor({
 			days: 43,
 			pct: 0,
 			withTraffic: true,
@@ -1417,7 +1439,7 @@ describe("collectWindowObservations", () => {
 		// The sampler is still polling and the row is still written; the reading
 		// just no longer carries this window. That is account activity, and losing
 		// it is what let a live account be silently dropped from a cohort claim.
-		const observation = observationsFor({
+		const observation = reportingObservationsFor({
 			days: 43,
 			pct: 0,
 			withTraffic: true,
@@ -1498,7 +1520,7 @@ describe("collectWindowObservations", () => {
 		// A window that has not moved because nobody has looked at it for 30 days
 		// is not a provider fact. The percentage series cannot tell the two apart,
 		// so the panel is handed the date and has to disclose it.
-		const observation = observationsFor({
+		const observation = reportingObservationsFor({
 			days: 43,
 			pct: 0,
 			withTraffic: true,

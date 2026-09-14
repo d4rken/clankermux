@@ -26,7 +26,6 @@
  */
 import { describe, expect, it, mock } from "bun:test";
 import { USAGE_CACHE_TTL_MS } from "@clankermux/providers";
-import type { AutoRefreshScheduler } from "../auto-refresh-scheduler";
 
 function makeDb() {
 	return {
@@ -77,7 +76,7 @@ type Row = {
 	custom_endpoint: string | null;
 };
 
-type SchedulerInternals = AutoRefreshScheduler & {
+type SchedulerInternals = {
 	fiveHourDue(account: Row, now: number): boolean;
 	isFiveHourPrimeCoolingDown(accountId: string, now: number): boolean;
 	primeAccount(account: Row): Promise<boolean>;
@@ -105,7 +104,9 @@ function willPrime(
 /** Minimal coordinator fake: `observe` resolves to the given canned result. */
 function makeCoordinator(status: "skipped" | "completed" | "failed") {
 	return {
-		observe: mock(async () => ({
+		// Declared with `CodexSpendCoordinator.observe`'s parameters so the recorded
+		// call can be compared.
+		observe: mock(async (_accountId: string, _cause: string) => ({
 			status,
 			reason: "test",
 			responseOk: true,

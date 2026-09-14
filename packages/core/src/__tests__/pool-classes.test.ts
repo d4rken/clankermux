@@ -218,6 +218,7 @@ describe("scopeResultToClass", () => {
 					exhaustedCount: 1,
 					elevatedCount: 1,
 					atRiskCount: 0,
+					learningCount: 0,
 					soonestExhaustsAtMs: null,
 					accounts: [
 						{

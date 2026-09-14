@@ -1,4 +1,5 @@
 import { describe, expect, it } from "bun:test";
+import type { AnthropicUsageData } from "@clankermux/types";
 import type { AnyUsageData, UsageData } from "../usage-fetcher";
 import { getAccountCapacitySignal, getFreshCapacity } from "../usage-fetcher";
 
@@ -215,7 +216,7 @@ describe("getAccountCapacitySignal", () => {
 	});
 
 	it("reports no weekly deadline and full weekly headroom when only five_hour is present", () => {
-		const data: UsageData = {
+		const data: AnthropicUsageData = {
 			five_hour: { utilization: 20, resets_at: iso(3_600_000) },
 		};
 		const signal = getAccountCapacitySignal(data, "anthropic", NOW);
@@ -329,7 +330,7 @@ describe("getAccountCapacitySignal", () => {
 	});
 
 	it("reports sessionHeadroom 100 when no session window is present (weekly only)", () => {
-		const data: UsageData = {
+		const data: AnthropicUsageData = {
 			// No five_hour / limits[] session window — only a weekly window.
 			seven_day: { utilization: 40, resets_at: iso(600_000_000) },
 		};
@@ -377,7 +378,7 @@ describe("getAccountCapacitySignal", () => {
 	});
 
 	it("reports sessionResetMs null when the session window is absent", () => {
-		const data: UsageData = {
+		const data: AnthropicUsageData = {
 			seven_day: { utilization: 40, resets_at: iso(600_000_000) },
 		};
 		const signal = getAccountCapacitySignal(data, "anthropic", NOW);

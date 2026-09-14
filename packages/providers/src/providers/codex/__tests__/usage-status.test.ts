@@ -179,6 +179,58 @@ describe("parseCodexUsageStatus", () => {
 		expect(status.allowed).toBe(true);
 	});
 
+	it("returns usage null when the only window reports no used_percent", () => {
+		// The JSON path shares normalizeCodexWindow with the header parser: a
+		// window described only by a duration and a reset carries no evidence of
+		// consumption, so it is omitted rather than minted at 0%.
+		const body = {
+			plan_type: "pro",
+			rate_limit: {
+				allowed: true,
+				limit_reached: false,
+				primary_window: {
+					limit_window_seconds: 7 * 24 * 60 * 60,
+					reset_at: 1_700_100_000,
+				},
+				secondary_window: {
+					used_percent: 0,
+					limit_window_seconds: 0,
+					reset_at: 0,
+				},
+			},
+		};
+
+		const status = parseCodexUsageStatus(body, 200, NOW_MS);
+
+		expect(status.ok).toBe(true);
+		expect(status.usage).toBeNull();
+	});
+
+	it("keeps a reported weekly window while omitting a percentage-less 5h window", () => {
+		const body = {
+			plan_type: "pro",
+			rate_limit: {
+				allowed: true,
+				limit_reached: false,
+				primary_window: {
+					used_percent: 73,
+					limit_window_seconds: 7 * 24 * 60 * 60,
+					reset_at: 1_700_100_000,
+				},
+				secondary_window: {
+					limit_window_seconds: 5 * 60 * 60,
+					reset_at: 1_700_000_500,
+				},
+			},
+		};
+
+		const status = parseCodexUsageStatus(body, 200, NOW_MS);
+
+		expect(status.usage).not.toBeNull();
+		expect(status.usage?.five_hour).toBeNull();
+		expect(status.usage?.seven_day.utilization).toBe(73);
+	});
+
 	it("omits codexCredits when the credits object is absent", () => {
 		const { credits: _omitted, ...body } = fullBody();
 		const status = parseCodexUsageStatus(body, 200, NOW_MS);

@@ -47,8 +47,6 @@ function makeAccount(overrides: Partial<Account> = {}): Account {
 		peak_hours_pause_enabled: false,
 		codex_auto_apply_reset_credits_enabled: false,
 		custom_endpoint: null,
-		model_mappings: null,
-		model_fallbacks: null,
 		billing_type: null,
 		pause_reason: null,
 		...overrides,

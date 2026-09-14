@@ -22,7 +22,13 @@ const clear: Pick<
 };
 const shortfall: typeof clear = {
 	...clear,
-	outcome: { kind: "runway", exhaustsAtMs: 500, durationMs: 500, causes: [] },
+	outcome: {
+		kind: "runway",
+		exhaustsAtMs: 500,
+		durationMs: 500,
+		causes: [],
+		unprojectableAccountIds: [],
+	},
 	headroom: { pct: 20, direction: "deficit" },
 };
 
@@ -43,7 +49,11 @@ describe("workload guidance", () => {
 			classifyWorkloadGuidance(partial, {
 				...clear,
 				headroom: null,
-				outcome: { kind: "out-now", causes: [] },
+				outcome: {
+					kind: "out-now",
+					causes: [],
+					unprojectableAccountIds: [],
+				},
 			}),
 		).toBe("uncertain");
 	});
@@ -88,7 +98,11 @@ describe("workload guidance", () => {
 		expect(
 			classifyWorkloadGuidance(coverage, {
 				...clear,
-				outcome: { kind: "out-now", causes: [] },
+				outcome: {
+					kind: "out-now",
+					causes: [],
+					unprojectableAccountIds: [],
+				},
 				headroom: null,
 			}),
 		).toBe("exhausted");

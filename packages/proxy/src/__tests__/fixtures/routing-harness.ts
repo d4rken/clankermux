@@ -7,6 +7,7 @@ import type {
 	AccountModelPermissions,
 	RequestMeta,
 	RoutingAttempt,
+	RoutingRule,
 } from "@clankermux/types";
 import { getNativeResponsesRequestContext } from "@clankermux/types";
 import { modelPermissionScope } from "../../account-model-permissions";
@@ -221,20 +222,22 @@ export async function configureLiteralRoute(
 		const row = fixturePermissions.get(ctx)?.get(id);
 		if (row) row.manual_ids.push(target);
 	}
-	ctx.dbOps.routing.listRules = mock(async () => [
-		{
-			id: "test-literal",
-			name: "Test literal",
-			enabled: true,
-			position: 0,
-			match_api_key_id: null,
-			match_model_kind: "any",
-			match_model_value: null,
-			pool_kind: "accounts",
-			pool_provider: null,
-			pool_account_ids: accountIds,
-			target_kind: "literal",
-			target_model: target,
-		},
-	]);
+	ctx.dbOps.routing.listRules = mock(
+		async (): Promise<RoutingRule[]> => [
+			{
+				id: "test-literal",
+				name: "Test literal",
+				enabled: true,
+				position: 0,
+				match_api_key_id: null,
+				match_model_kind: "any",
+				match_model_value: null,
+				pool_kind: "accounts",
+				pool_provider: null,
+				pool_account_ids: accountIds,
+				target_kind: "literal",
+				target_model: target,
+			},
+		],
+	);
 }

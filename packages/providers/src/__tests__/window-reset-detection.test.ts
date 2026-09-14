@@ -29,11 +29,15 @@ describe("extractWindowResetTime", () => {
 		const data: ZaiUsageData = {
 			time_limit: null,
 			tokens_limit: {
+				used: 0,
+				remaining: 0,
 				percentage: 10,
 				resetAt: 1000,
 				type: "tokens_limit",
 			},
 			tokens_limit_weekly: {
+				used: 0,
+				remaining: 0,
 				percentage: 90,
 				resetAt: 500_000,
 				type: "tokens_limit",
@@ -47,6 +51,8 @@ describe("extractWindowResetTime", () => {
 			time_limit: null,
 			tokens_limit: null,
 			tokens_limit_weekly: {
+				used: 0,
+				remaining: 0,
 				percentage: 40,
 				resetAt: 777_000,
 				type: "tokens_limit",

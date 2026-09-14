@@ -73,6 +73,7 @@ describe("createApiKeyRenameHandler", () => {
 	it("success resolving by id: 200 with the new name; secret/stats preserved", async () => {
 		const keyId = await insertApiKey(dbOps, "old-name");
 		const before = await dbOps.getApiKey(keyId);
+		if (!before) throw new Error("the inserted key was not readable back");
 
 		const response = await handler(makeRequest({ name: "new-name" }), keyId);
 		const { success, data } = (await response.json()) as {
@@ -85,14 +86,14 @@ describe("createApiKeyRenameHandler", () => {
 		expect(data.id).toBe(keyId);
 		expect(data.name).toBe("new-name");
 		// Secret prefix and stats are preserved.
-		expect(data.prefixLast8).toBe(before?.prefixLast8);
-		expect(data.usageCount).toBe(before?.usageCount ?? 0);
+		expect(data.prefixLast8).toBe(before.prefixLast8);
+		expect(data.usageCount).toBe(before.usageCount ?? 0);
 		expect(data.isActive).toBe(true);
 
 		// Confirm persistence.
 		const after = await dbOps.getApiKey(keyId);
 		expect(after?.name).toBe("new-name");
-		expect(after?.hashedKey).toBe(before?.hashedKey);
+		expect(after?.hashedKey).toBe(before.hashedKey);
 	});
 
 	it("success resolving by name (idOrName can be the current name)", async () => {

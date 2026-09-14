@@ -1,5 +1,6 @@
 import { describe, expect, it } from "bun:test";
 import type { OpenAIMessage, OpenAIRequest } from "@clankermux/openai-formats";
+import { makeAccount as canonicalAccount } from "@clankermux/test-support";
 import type { Account } from "@clankermux/types";
 import { QwenProvider } from "../provider";
 
@@ -8,35 +9,16 @@ import { QwenProvider } from "../provider";
 // ---------------------------------------------------------------------------
 
 function makeAccount(overrides: Partial<Account> = {}): Account {
-	return {
+	return canonicalAccount({
 		id: "qwen-1",
 		name: "qwen-test",
 		provider: "qwen",
-		api_key: null,
 		refresh_token: "",
 		access_token: "at-xyz",
 		expires_at: Date.now() + 3_600_000,
-		request_count: 0,
-		total_requests: 0,
-		last_used: null,
 		created_at: Date.now(),
-		rate_limited_until: null,
-		session_start: null,
-		session_request_count: 0,
-		paused: false,
-		rate_limit_reset: null,
-		rate_limit_status: null,
-		rate_limit_remaining: null,
-		priority: 0,
-		auto_fallback_enabled: false,
-		auto_refresh_enabled: false,
-		custom_endpoint: null,
-		model_mappings: null,
-		cross_region_mode: null,
-		model_fallbacks: null,
-		billing_type: null,
 		...overrides,
-	};
+	});
 }
 
 function makeOpenAIRequest(systemContent: unknown): OpenAIRequest {
@@ -202,7 +184,7 @@ describe("QwenProvider", () => {
 		}
 
 		it("preserves literal Claude family targets", async () => {
-			const account = makeAccount({ model_mappings: null });
+			const account = makeAccount();
 			expect(await transformedModel("claude-opus-4-8", account)).toBe(
 				"claude-opus-4-8",
 			);
@@ -215,7 +197,7 @@ describe("QwenProvider", () => {
 		});
 
 		it("preserves literal Fable and Mythos targets", async () => {
-			const account = makeAccount({ model_mappings: null });
+			const account = makeAccount();
 			expect(await transformedModel("claude-fable-5", account)).toBe(
 				"claude-fable-5",
 			);
@@ -225,9 +207,7 @@ describe("QwenProvider", () => {
 		});
 
 		it("ignores retired mappings", async () => {
-			const account = makeAccount({
-				model_mappings: JSON.stringify({ opus: "my-opus" }),
-			});
+			const account = makeAccount({});
 			expect(await transformedModel("claude-opus-4-8", account)).toBe(
 				"claude-opus-4-8",
 			);

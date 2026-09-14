@@ -22,7 +22,8 @@ import {
 
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { NETWORK } from "@clankermux/core";
-import type { Account, ComboSlotInfo, RequestMeta } from "@clankermux/types";
+import { makeAccount as canonicalAccount } from "@clankermux/test-support";
+import type { Account, RequestMeta } from "@clankermux/types";
 import type { AdmissionGates } from "../admission-gates";
 import { cacheBodyStore } from "../cache-body-store";
 import { setForcedAccount } from "../handlers";
@@ -53,44 +54,25 @@ function uniqueId(prefix: string): string {
 	return `${prefix}-${idCounter}`;
 }
 
-function makeAccount(overrides: Partial<Account> = {}): Account {
+/**
+ * The harness's own per-account model override. `Account` no longer declares
+ * `model_mappings`; the gate fixtures below still read it back off the account
+ * to decide which model each one resolves to.
+ */
+type MappedAccount = Account & { model_mappings?: string };
+
+function makeAccount(overrides: Partial<MappedAccount> = {}): MappedAccount {
 	return {
-		id: "acc-1",
-		name: "account",
-		provider: "anthropic",
-		api_key: null,
-		refresh_token: "rt-token",
-		access_token: "at-token",
-		expires_at: Date.now() + 3_600_000,
-		request_count: 0,
-		total_requests: 0,
-		last_used: null,
-		created_at: Date.now(),
-		rate_limited_until: null,
-		rate_limited_reason: null,
-		rate_limited_at: null,
-		consecutive_rate_limits: 0,
-		session_start: null,
-		session_request_count: 0,
-		paused: false,
-		rate_limit_reset: null,
-		rate_limit_status: null,
-		rate_limit_remaining: null,
-		priority: 0,
-		auto_fallback_enabled: false,
-		auto_refresh_enabled: false,
-		auto_pause_on_overage_enabled: false,
-		peak_hours_pause_enabled: false,
-		codex_auto_apply_reset_credits_enabled: false,
-		custom_endpoint: null,
-		model_mappings: null,
-		cross_region_mode: null,
-		model_fallbacks: null,
-		billing_type: null,
-		pause_reason: null,
-		refresh_token_issued_at: null,
+		...canonicalAccount({
+			id: "acc-1",
+			name: "account",
+			refresh_token: "rt-token",
+			access_token: "at-token",
+			expires_at: Date.now() + 3_600_000,
+			created_at: Date.now(),
+		}),
 		...overrides,
-	} as Account;
+	};
 }
 
 interface Harness {
@@ -121,12 +103,20 @@ interface HarnessOptions {
 	}>;
 	holds?: Partial<RecoveryHolds>;
 	requestId?: string;
-	/** Combo snapshot frozen at gate construction. */
-	initialComboInfo?: ComboSlotInfo | null;
 	/** Combo name on the request meta, plus the CURRENT (post-wake) slot info. */
 	comboName?: string | null;
 	currentComboInfo?: ComboSlotInfo | null;
 }
+
+/**
+ * The harness's own combo snapshot. `@clankermux/types` no longer declares one
+ * and the terminal takes no combo dependency; what remains is the per-account
+ * model override this file feeds to `installGateRoute`.
+ */
+type ComboSlotInfo = {
+	comboName: string;
+	slots: Array<{ accountId: string; modelOverride: string }>;
+};
 
 function makeHarness(opts: HarnessOptions = {}): Harness {
 	const {
@@ -139,7 +129,6 @@ function makeHarness(opts: HarnessOptions = {}): Harness {
 		familyWeeklyPacedAccounts = [],
 		holds = {},
 		requestId = uniqueId("req"),
-		initialComboInfo = null,
 		comboName = null,
 		currentComboInfo = null,
 	} = opts;
@@ -210,7 +199,6 @@ function makeHarness(opts: HarnessOptions = {}): Harness {
 		finalCreateBodyStream: () => undefined,
 		effectiveRequestModel: MODEL,
 		gateTokenEstimate,
-		initialComboInfo,
 		selectedAccounts: [],
 		throttledAccounts: [],
 		providerAvailableAccounts: [],
@@ -223,6 +211,8 @@ function makeHarness(opts: HarnessOptions = {}): Harness {
 		recordSyntheticErrorResponse: async (_response, error) => {
 			recorded.push(error);
 		},
+		// No real upstream attempt is made through this harness.
+		getUpstreamAttempts: () => 0,
 		createProviderOverloadedResponse: async () =>
 			new Response("{}", { status: 529 }),
 		logFinalOrderOnce: () => {},
@@ -440,12 +430,7 @@ describe("resolveZeroAccountsOutcome contracts", () => {
 					},
 				],
 				comboName: "combo-a",
-				// Frozen at gate construction: the slot pointed at Haiku.
-				initialComboInfo: {
-					comboName: "combo-a",
-					slots: [{ accountId: siblingId, modelOverride: HAIKU }],
-				},
-				// What a hold wake's re-selection wrote: the slot now sends Sonnet.
+				// What a hold wake's re-selection wrote: the slot sends Sonnet.
 				currentComboInfo: {
 					comboName: "combo-a",
 					slots: [{ accountId: siblingId, modelOverride: SONNET }],

@@ -4,7 +4,7 @@ import {
 	type DatabaseOperations,
 	runMigrations,
 } from "@clankermux/database";
-import { tempDbTracker } from "@clankermux/test-support";
+import { mockFetch, tempDbTracker } from "@clankermux/test-support";
 import { createAccountRefreshUsageHandler } from "../handlers/accounts";
 import {
 	API_KEY_PROVIDERS,
@@ -22,17 +22,19 @@ let fetchSpy: ReturnType<typeof spyOn>;
 beforeEach(() => {
 	DatabaseFactory.initialize(tmp.next());
 	dbOps = DatabaseFactory.getInstance();
-	fetchSpy = spyOn(globalThis, "fetch").mockImplementation(async () =>
-		Response.json({
-			data: {
-				label: "redacted...key",
-				creator_user_id: "user_123",
-				is_free_tier: false,
-				limit: 100,
-				limit_remaining: 75,
-				usage: 25,
-			},
-		}),
+	fetchSpy = spyOn(globalThis, "fetch").mockImplementation(
+		mockFetch(async () =>
+			Response.json({
+				data: {
+					label: "redacted...key",
+					creator_user_id: "user_123",
+					is_free_tier: false,
+					limit: 100,
+					limit_remaining: 75,
+					usage: 25,
+				},
+			}),
+		),
 	);
 });
 afterEach(() => {

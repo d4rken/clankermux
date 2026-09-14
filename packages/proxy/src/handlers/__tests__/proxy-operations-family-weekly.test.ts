@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, mock } from "bun:test";
 import { usageCache } from "@clankermux/providers";
+import { mockFetch } from "@clankermux/test-support";
 import type { Account, RequestMeta } from "@clankermux/types";
 import {
 	proxyWithAccount,
@@ -58,8 +59,6 @@ function makeOAuthAnthropicAccount(overrides: Partial<Account> = {}): Account {
 		peak_hours_pause_enabled: false,
 		codex_auto_apply_reset_credits_enabled: false,
 		custom_endpoint: null,
-		model_mappings: null,
-		model_fallbacks: null,
 		billing_type: null,
 		pause_reason: null,
 		notes: null,
@@ -244,7 +243,7 @@ describe("proxyWithAccount — reactive family-weekly 429 guard", () => {
 	});
 
 	it("fails over without an account-wide cooldown and records family_weekly_exhausted_429", async () => {
-		globalThis.fetch = mock(async () => plain429());
+		globalThis.fetch = mockFetch(mock(async () => plain429()));
 		seedUsage(0, 83); // Fable exhausted, unified 5h/7d have headroom
 
 		const { ctx, attemptCalls, markCalls } = makeProxyContext();
@@ -277,7 +276,7 @@ describe("proxyWithAccount — reactive family-weekly 429 guard", () => {
 	});
 
 	it("defers to a hard account-level unified status (does NOT skip the cooldown)", async () => {
-		globalThis.fetch = mock(async () => hardLimit429());
+		globalThis.fetch = mockFetch(mock(async () => hardLimit429()));
 		// Cache still shows Fable exhausted + unified headroom, but the LIVE 429
 		// asserts a hard account-level limit — that is authoritative.
 		seedUsage(0, 83);
@@ -307,7 +306,7 @@ describe("proxyWithAccount — reactive family-weekly 429 guard", () => {
 	});
 
 	it("fails open to normal handling when unified headroom is also gone", async () => {
-		globalThis.fetch = mock(async () => plain429());
+		globalThis.fetch = mockFetch(mock(async () => plain429()));
 		seedUsage(100, 83); // 5h ALSO exhausted ⇒ minHeadroom 0 ⇒ guard must NOT fire
 
 		const { ctx, attemptCalls } = makeProxyContext();
@@ -333,7 +332,7 @@ describe("proxyWithAccount — reactive family-weekly 429 guard", () => {
 	});
 
 	it("does not fire for a family that is not exhausted (Opus request)", async () => {
-		globalThis.fetch = mock(async () => plain429());
+		globalThis.fetch = mockFetch(mock(async () => plain429()));
 		seedUsage(0, 83); // only Fable exhausted; Opus has room
 
 		const { ctx, attemptCalls } = makeProxyContext();
@@ -404,22 +403,24 @@ describe("proxyWithAccount — reactive family-weekly 429 guard", () => {
 		try {
 			// The production headers verbatim: a 92.5h retry-after alongside unified
 			// 5h/7d headroom — the shape that produced the multi-day lock.
-			globalThis.fetch = mock(
-				async () =>
-					new Response(
-						JSON.stringify({
-							type: "error",
-							error: { type: "rate_limit_error", message: "rate limited" },
-						}),
-						{
-							status: 429,
-							headers: {
-								"content-type": "application/json",
-								"x-should-retry": "true",
-								"retry-after": "333111",
+			globalThis.fetch = mockFetch(
+				mock(
+					async () =>
+						new Response(
+							JSON.stringify({
+								type: "error",
+								error: { type: "rate_limit_error", message: "rate limited" },
+							}),
+							{
+								status: 429,
+								headers: {
+									"content-type": "application/json",
+									"x-should-retry": "true",
+									"retry-after": "333111",
+								},
 							},
-						},
-					),
+						),
+				),
 			);
 
 			const { ctx, attemptCalls, markCalls } = makeProxyContext();
@@ -474,41 +475,44 @@ describe("proxyWithAccount — reactive family-weekly 429 guard", () => {
 
 		try {
 			// The production 429 of 2026-08-02T15:36:28Z, headers verbatim.
-			globalThis.fetch = mock(
-				async () =>
-					new Response(
-						JSON.stringify({
-							type: "error",
-							error: { type: "rate_limit_error", message: "rate limited" },
-						}),
-						{
-							status: 429,
-							headers: {
-								"content-type": "application/json",
-								"anthropic-ratelimit-unified-5h-reset": "1785685200",
-								"anthropic-ratelimit-unified-5h-status": "allowed",
-								"anthropic-ratelimit-unified-5h-utilization": "0.0",
-								"anthropic-ratelimit-unified-7d-reset": "1785736800",
-								"anthropic-ratelimit-unified-7d-status": "allowed_warning",
-								"anthropic-ratelimit-unified-7d-surpassed-threshold": "0.75",
-								"anthropic-ratelimit-unified-7d-utilization": "0.94",
-								"anthropic-ratelimit-unified-7d_oi-reset": "1785736800",
-								"anthropic-ratelimit-unified-7d_oi-status": "rejected",
-								"anthropic-ratelimit-unified-7d_oi-surpassed-threshold": "1.0",
-								"anthropic-ratelimit-unified-7d_oi-utilization": "1.0",
-								"anthropic-ratelimit-unified-fallback-percentage": "0.5",
-								"anthropic-ratelimit-unified-overage-disabled-reason":
-									"org_level_disabled",
-								"anthropic-ratelimit-unified-overage-status": "rejected",
-								"anthropic-ratelimit-unified-representative-claim":
-									"seven_day_overage_included",
-								"anthropic-ratelimit-unified-reset": "1785736800",
-								"anthropic-ratelimit-unified-status": "rejected",
-								"retry-after": "51811",
-								"x-should-retry": "true",
+			globalThis.fetch = mockFetch(
+				mock(
+					async () =>
+						new Response(
+							JSON.stringify({
+								type: "error",
+								error: { type: "rate_limit_error", message: "rate limited" },
+							}),
+							{
+								status: 429,
+								headers: {
+									"content-type": "application/json",
+									"anthropic-ratelimit-unified-5h-reset": "1785685200",
+									"anthropic-ratelimit-unified-5h-status": "allowed",
+									"anthropic-ratelimit-unified-5h-utilization": "0.0",
+									"anthropic-ratelimit-unified-7d-reset": "1785736800",
+									"anthropic-ratelimit-unified-7d-status": "allowed_warning",
+									"anthropic-ratelimit-unified-7d-surpassed-threshold": "0.75",
+									"anthropic-ratelimit-unified-7d-utilization": "0.94",
+									"anthropic-ratelimit-unified-7d_oi-reset": "1785736800",
+									"anthropic-ratelimit-unified-7d_oi-status": "rejected",
+									"anthropic-ratelimit-unified-7d_oi-surpassed-threshold":
+										"1.0",
+									"anthropic-ratelimit-unified-7d_oi-utilization": "1.0",
+									"anthropic-ratelimit-unified-fallback-percentage": "0.5",
+									"anthropic-ratelimit-unified-overage-disabled-reason":
+										"org_level_disabled",
+									"anthropic-ratelimit-unified-overage-status": "rejected",
+									"anthropic-ratelimit-unified-representative-claim":
+										"seven_day_overage_included",
+									"anthropic-ratelimit-unified-reset": "1785736800",
+									"anthropic-ratelimit-unified-status": "rejected",
+									"retry-after": "51811",
+									"x-should-retry": "true",
+								},
 							},
-						},
-					),
+						),
+				),
 			);
 
 			const { ctx, attemptCalls, markCalls } = makeProxyContext();
@@ -552,31 +556,33 @@ describe("proxyWithAccount — reactive family-weekly 429 guard", () => {
 		usageCache.refreshNow = refreshSpy as typeof usageCache.refreshNow;
 
 		try {
-			globalThis.fetch = mock(
-				async () =>
-					new Response(
-						JSON.stringify({
-							type: "error",
-							error: { type: "rate_limit_error", message: "rate limited" },
-						}),
-						{
-							status: 429,
-							headers: {
-								"content-type": "application/json",
-								"anthropic-ratelimit-unified-5h-status": "allowed",
-								"anthropic-ratelimit-unified-5h-utilization": "0.2",
-								"anthropic-ratelimit-unified-7d-reset": "1785736800",
-								"anthropic-ratelimit-unified-7d-status": "rejected",
-								"anthropic-ratelimit-unified-7d-utilization": "1.0",
-								"anthropic-ratelimit-unified-7d_oi-status": "rejected",
-								"anthropic-ratelimit-unified-7d_oi-utilization": "1.0",
-								"anthropic-ratelimit-unified-reset": "1785736800",
-								"anthropic-ratelimit-unified-status": "rejected",
-								"retry-after": "51811",
-								"x-should-retry": "true",
+			globalThis.fetch = mockFetch(
+				mock(
+					async () =>
+						new Response(
+							JSON.stringify({
+								type: "error",
+								error: { type: "rate_limit_error", message: "rate limited" },
+							}),
+							{
+								status: 429,
+								headers: {
+									"content-type": "application/json",
+									"anthropic-ratelimit-unified-5h-status": "allowed",
+									"anthropic-ratelimit-unified-5h-utilization": "0.2",
+									"anthropic-ratelimit-unified-7d-reset": "1785736800",
+									"anthropic-ratelimit-unified-7d-status": "rejected",
+									"anthropic-ratelimit-unified-7d-utilization": "1.0",
+									"anthropic-ratelimit-unified-7d_oi-status": "rejected",
+									"anthropic-ratelimit-unified-7d_oi-utilization": "1.0",
+									"anthropic-ratelimit-unified-reset": "1785736800",
+									"anthropic-ratelimit-unified-status": "rejected",
+									"retry-after": "51811",
+									"x-should-retry": "true",
+								},
 							},
-						},
-					),
+						),
+				),
 			);
 
 			const { ctx, attemptCalls } = makeProxyContext();
@@ -609,28 +615,30 @@ describe("proxyWithAccount — reactive family-weekly 429 guard", () => {
 		// unified headroom" while the LIVE 429 reports the account-wide 7d window
 		// itself rejecting. Live evidence outranks the cache: the family rung must
 		// stand down and let the normal cooldown handling run.
-		globalThis.fetch = mock(
-			async () =>
-				new Response(
-					JSON.stringify({
-						type: "error",
-						error: { type: "rate_limit_error", message: "rate limited" },
-					}),
-					{
-						status: 429,
-						headers: {
-							"content-type": "application/json",
-							"anthropic-ratelimit-unified-5h-status": "allowed",
-							"anthropic-ratelimit-unified-5h-utilization": "0.1",
-							"anthropic-ratelimit-unified-7d-reset": "1785736800",
-							"anthropic-ratelimit-unified-7d-status": "rejected",
-							"anthropic-ratelimit-unified-7d-utilization": "1.0",
-							"anthropic-ratelimit-unified-status": "rejected",
-							"retry-after": "3600",
-							"x-should-retry": "true",
+		globalThis.fetch = mockFetch(
+			mock(
+				async () =>
+					new Response(
+						JSON.stringify({
+							type: "error",
+							error: { type: "rate_limit_error", message: "rate limited" },
+						}),
+						{
+							status: 429,
+							headers: {
+								"content-type": "application/json",
+								"anthropic-ratelimit-unified-5h-status": "allowed",
+								"anthropic-ratelimit-unified-5h-utilization": "0.1",
+								"anthropic-ratelimit-unified-7d-reset": "1785736800",
+								"anthropic-ratelimit-unified-7d-status": "rejected",
+								"anthropic-ratelimit-unified-7d-utilization": "1.0",
+								"anthropic-ratelimit-unified-status": "rejected",
+								"retry-after": "3600",
+								"x-should-retry": "true",
+							},
 						},
-					},
-				),
+					),
+			),
 		);
 		seedUsage(0, 83); // fresh cache: fable exhausted + unified headroom
 
@@ -655,7 +663,19 @@ describe("proxyWithAccount — reactive family-weekly 429 guard", () => {
 		expect(account.rate_limited_until).not.toBeNull();
 	});
 
-	it.each([
+	/**
+	 * Declared so every row carries the same optional fields: an array literal
+	 * mixing shapes infers a union, and the destructuring below reads two
+	 * properties only some members have.
+	 */
+	type ScopedRejectionCase = {
+		reprobe: boolean;
+		unifiedPercent: number;
+		familyPercent: number;
+		headerReset?: string;
+		memoized?: boolean;
+	};
+	const scopedRejectionCases: ScopedRejectionCase[] = [
 		{ reprobe: false, unifiedPercent: 61, familyPercent: 50 },
 		{ reprobe: true, unifiedPercent: 61, familyPercent: 50 },
 		{ reprobe: false, unifiedPercent: 100, familyPercent: 50 },
@@ -675,7 +695,10 @@ describe("proxyWithAccount — reactive family-weekly 429 guard", () => {
 				headerReset,
 			})),
 		),
-	])("live scoped rejection overrides fresh cache: %j", async ({
+	];
+	it.each(
+		scopedRejectionCases,
+	)("live scoped rejection overrides fresh cache: %j", async ({
 		reprobe,
 		unifiedPercent,
 		familyPercent,
@@ -686,41 +709,43 @@ describe("proxyWithAccount — reactive family-weekly 429 guard", () => {
 		// 7d_oi claim rejects. This must never enter the 90-second burst hold.
 		const resetAt = Math.floor(Date.now() / 1000) * 1000 + 40_698_000;
 		const cachedResetAt = Date.now() + 16 * 3_600_000;
-		globalThis.fetch = mock(
-			async () =>
-				new Response(
-					JSON.stringify({
-						type: "error",
-						error: { type: "rate_limit_error", message: "rate limited" },
-					}),
-					{
-						status: 429,
-						headers: {
-							"content-type": "application/json",
-							"anthropic-ratelimit-unified-5h-status": "allowed",
-							"anthropic-ratelimit-unified-5h-utilization": "0.61",
-							"anthropic-ratelimit-unified-7d-status": "allowed",
-							"anthropic-ratelimit-unified-7d-utilization": "0.57",
-							"anthropic-ratelimit-unified-7d_oi-status": "rejected",
-							"anthropic-ratelimit-unified-7d_oi-utilization": "1.0",
-							...(headerReset === "missing"
-								? {}
-								: {
-										"anthropic-ratelimit-unified-7d_oi-reset":
-											headerReset === "invalid"
-												? "garbled"
-												: headerReset === "past"
-													? "1"
-													: String(resetAt / 1000),
-									}),
-							"anthropic-ratelimit-unified-representative-claim":
-								"seven_day_overage_included",
-							"retry-after": "40698",
-							"anthropic-ratelimit-unified-status": "rejected",
-							"x-should-retry": "true",
+		globalThis.fetch = mockFetch(
+			mock(
+				async () =>
+					new Response(
+						JSON.stringify({
+							type: "error",
+							error: { type: "rate_limit_error", message: "rate limited" },
+						}),
+						{
+							status: 429,
+							headers: {
+								"content-type": "application/json",
+								"anthropic-ratelimit-unified-5h-status": "allowed",
+								"anthropic-ratelimit-unified-5h-utilization": "0.61",
+								"anthropic-ratelimit-unified-7d-status": "allowed",
+								"anthropic-ratelimit-unified-7d-utilization": "0.57",
+								"anthropic-ratelimit-unified-7d_oi-status": "rejected",
+								"anthropic-ratelimit-unified-7d_oi-utilization": "1.0",
+								...(headerReset === "missing"
+									? {}
+									: {
+											"anthropic-ratelimit-unified-7d_oi-reset":
+												headerReset === "invalid"
+													? "garbled"
+													: headerReset === "past"
+														? "1"
+														: String(resetAt / 1000),
+										}),
+								"anthropic-ratelimit-unified-representative-claim":
+									"seven_day_overage_included",
+								"retry-after": "40698",
+								"anthropic-ratelimit-unified-status": "rejected",
+								"x-should-retry": "true",
+							},
 						},
-					},
-				),
+					),
+			),
 		);
 		// Fresh snapshots may lag either exhaustion or account-wide recovery.
 		usageCache.set(ACCOUNT_ID, {
@@ -810,7 +835,7 @@ describe("proxyWithAccount — reactive family-weekly 429 guard", () => {
 		usageCache.refreshNow = refreshSpy as typeof usageCache.refreshNow;
 
 		try {
-			globalThis.fetch = mock(async () => plain429());
+			globalThis.fetch = mockFetch(mock(async () => plain429()));
 			// Same payload seedUsage writes, aged into the band.
 			usageCache.setWithAgeForTests(
 				ACCOUNT_ID,

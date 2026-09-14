@@ -448,7 +448,7 @@ describe("CacheKeepaliveScheduler", () => {
 		});
 
 		it("unrelated config key change is ignored", () => {
-			let listener: ConfigChangeListener | null = null;
+			let listener: ConfigChangeListener | undefined;
 			const config = {
 				getCacheWarmingMode: () => "dynamic" as const,
 				getCacheWarmingEnabled: () => true,

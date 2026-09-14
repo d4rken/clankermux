@@ -23,6 +23,8 @@ function row(
 		failures: 0,
 		spentUsd: 0,
 		savedUsd: 0,
+		warmResumes: 0,
+		savedUsd5m: 0,
 		...overrides,
 	};
 }
@@ -56,7 +58,7 @@ async function callHandler(
 describe("cache-keepalive-history direct handler", () => {
 	describe("range → bucket mapping", () => {
 		it("maps 6h → bucketMs 300000 and surfaces it in the response", async () => {
-			let captured: { sinceMs: number; bucketMs: number } | null = null;
+			let captured: { sinceMs: number; bucketMs: number } | undefined;
 			const sources = createSources({
 				rows: [],
 				captureOpts: (o) => {
@@ -70,7 +72,7 @@ describe("cache-keepalive-history direct handler", () => {
 		});
 
 		it("maps all → sinceMs 0 with daily buckets", async () => {
-			let captured: { sinceMs: number; bucketMs: number } | null = null;
+			let captured: { sinceMs: number; bucketMs: number } | undefined;
 			const sources = createSources({
 				rows: [],
 				captureOpts: (o) => {

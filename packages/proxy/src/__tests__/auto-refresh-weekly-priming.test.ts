@@ -15,7 +15,6 @@
  */
 import { afterEach, describe, expect, it, mock, spyOn } from "bun:test";
 import { toEpochMs, type UsageData, usageCache } from "@clankermux/providers";
-import type { AutoRefreshScheduler } from "../auto-refresh-scheduler";
 import { summarizeAnthropicUsageForLog } from "../auto-refresh-scheduler";
 
 // ── helpers ───────────────────────────────────────────────────────────────────
@@ -49,7 +48,7 @@ type WeeklyRow = {
 };
 
 /** Private-method surface we reach into for these unit tests. */
-type SchedulerInternals = AutoRefreshScheduler & {
+type SchedulerInternals = {
 	isWeeklyDormant(accountId: string, now: number): boolean;
 	selectWeeklyPrimeCandidate(
 		candidates: WeeklyRow[],

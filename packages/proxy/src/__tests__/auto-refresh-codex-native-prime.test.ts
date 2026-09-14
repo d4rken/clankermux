@@ -32,7 +32,6 @@
 import { afterEach, describe, expect, it, mock } from "bun:test";
 import type { CodexCreditsInfo, UsageData } from "@clankermux/providers";
 import { usageCache } from "@clankermux/providers";
-import type { AutoRefreshScheduler } from "../auto-refresh-scheduler";
 import type { CodexSpendResult } from "../codex-spend-coordinator";
 import type { CodexObservationResult } from "../handlers/codex-observation";
 
@@ -136,7 +135,7 @@ function makeProxyContext() {
 	};
 }
 
-type SchedulerInternals = AutoRefreshScheduler & {
+type SchedulerInternals = {
 	primeAccount(row: Row): Promise<void>;
 	sendTranslatedClaudePrime(row: Row): Promise<boolean>;
 	consecutiveFailures: Map<string, number>;

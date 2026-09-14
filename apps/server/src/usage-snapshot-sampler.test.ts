@@ -816,6 +816,9 @@ function risingSeries(opts: {
 			fiveHourReset: null,
 			sevenDayPct: opts.startPct + (opts.count - 1 - i) * opts.pctPerStep,
 			sevenDayReset: opts.resetMs,
+			observedAt: null,
+			planTier: null,
+			rateLimitTier: null,
 		});
 	}
 	return rows;
@@ -1025,6 +1028,9 @@ describe("UsageSnapshotSampler weekly burn-slope feed", () => {
 				fiveHourReset: null,
 				sevenDayPct: 52,
 				sevenDayReset: resetMs,
+				observedAt: null,
+				planTier: null,
+				rateLimitTier: null,
 			},
 		];
 		await h.sampler.refreshBurnSlopes();

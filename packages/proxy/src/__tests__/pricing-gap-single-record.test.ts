@@ -10,6 +10,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { __pricingTestHooks, getPricingGaps } from "@clankermux/core";
+import { mockFetch } from "@clankermux/test-support";
 import {
 	createUsageState,
 	feedNonStreamBody,
@@ -27,9 +28,9 @@ import {
 // Offline + disposable disk cache, so the bundled table is the sole source of
 // truth and no models.dev response can accidentally supply the missing price.
 const originalFetch = globalThis.fetch;
-globalThis.fetch = async () => {
+globalThis.fetch = mockFetch(async () => {
 	throw new Error("pricing test network disabled");
-};
+});
 // The catalogue snapshot is rooted at the XDG cache dir, not the OS temp dir.
 const originalCacheHome = process.env.XDG_CACHE_HOME;
 const pricingCacheHome = mkdtempSync(join(tmpdir(), "cmux-proxy-pricing-"));

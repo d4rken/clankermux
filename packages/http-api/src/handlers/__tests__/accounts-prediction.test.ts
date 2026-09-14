@@ -146,6 +146,9 @@ describe("accounts list usage prediction wiring", () => {
 				fiveHourReset: reset,
 				sevenDayPct: 20,
 				sevenDayReset: reset,
+				observedAt: null,
+				planTier: null,
+				rateLimitTier: null,
 			},
 			{
 				accountId: RISING_ID,
@@ -155,6 +158,9 @@ describe("accounts list usage prediction wiring", () => {
 				fiveHourReset: reset,
 				sevenDayPct: 20,
 				sevenDayReset: reset,
+				observedAt: null,
+				planTier: null,
+				rateLimitTier: null,
 			},
 			{
 				accountId: RISING_ID,
@@ -164,6 +170,9 @@ describe("accounts list usage prediction wiring", () => {
 				fiveHourReset: reset,
 				sevenDayPct: 20,
 				sevenDayReset: reset,
+				observedAt: null,
+				planTier: null,
+				rateLimitTier: null,
 			},
 		];
 

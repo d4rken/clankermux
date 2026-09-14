@@ -29,7 +29,6 @@ function codexAccount(): Account {
 		session_start: null,
 		session_request_count: 0,
 		custom_endpoint: null,
-		model_mappings: null,
 	} as unknown as Account;
 }
 

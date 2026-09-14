@@ -137,13 +137,14 @@ it("enforces every filter on group selection and example membership", async () =
 		"UPDATE requests SET account_used='account-a',api_key_id='key-a',model='model-a',success=0,status_code=500 WHERE id='a'",
 	);
 	const h = createToolErrorsHandler(context());
-	for (const filter of [
+	const filters: Record<string, string>[] = [
 		{ accounts: "account-a" },
 		{ apiKeys: "key-a" },
 		{ models: "model-a" },
 		{ projects: "alpha" },
 		{ status: "error" },
-	]) {
+	];
+	for (const filter of filters) {
 		const list = await (await h(params(filter))).json();
 		expect(list.totalErrors).toBe(5);
 		expect(list.capturedTexts).toBe(3);

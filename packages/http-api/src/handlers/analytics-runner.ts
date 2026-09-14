@@ -522,6 +522,13 @@ function runDashboardWorker(
 	const hardMs = workerTimeoutOverrideMs?.hard ?? HARD_WORKER_TIMEOUT_MS;
 
 	return new Promise<Response>((resolve, reject) => {
+		// Stamped immediately after this request's postMessage below. The hard
+		// watchdog asks "has this lane said anything SINCE we posted?", which an
+		// elapsed-duration comparison cannot answer: creating the worker writes
+		// `lastActivityAt` after these timers are armed, so `now - lastActivityAt`
+		// is always short of `hardMs` by however long the spawn took.
+		let postedAt = 0;
+
 		const softTimeoutHandle = setTimeout(() => {
 			const pending = state.pending.get(id);
 			if (!pending || pending.settled) return;
@@ -544,7 +551,7 @@ function runDashboardWorker(
 			// abandoned entry and let the late result (if any) be dropped.
 			// Scoped to THIS lane: a wedged heavy worker must not take the light
 			// worker's healthy in-flight reads down with it.
-			if (Date.now() - state.lastActivityAt >= hardMs) {
+			if (state.lastActivityAt <= postedAt) {
 				resetLane(lane, new DashboardWorkerTimeoutError(hardMs));
 				return;
 			}
@@ -573,6 +580,7 @@ function runDashboardWorker(
 				params: params.toString(),
 				busyTimeoutMs: SQLITE_BUSY_TIMEOUT_MS,
 			} satisfies AnalyticsWorkerRequest);
+			postedAt = Date.now();
 		} catch (error) {
 			const pending = state.pending.get(id);
 			if (pending) {

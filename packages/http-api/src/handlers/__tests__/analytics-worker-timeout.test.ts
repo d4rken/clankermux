@@ -197,13 +197,19 @@ describe("worker lanes", () => {
 	});
 
 	it("light-lane traffic does not keep a wedged heavy worker alive", async () => {
-		const created = trackWorkers(
-			() =>
-				new FakeDashboardWorker({
-					shouldReply: repliesExcept("analytics"),
-					replyDelayMs: 2,
-				}),
-		);
+		const created = trackWorkers(() => {
+			// Burn the rest of the current millisecond, so the lane's activity
+			// clock — stamped after construction returns — is strictly later than
+			// the instant the watchdog timers were armed. A real Worker always
+			// takes that long to spawn; this fake does not, and without the gap
+			// the wedge this case asserts on is not the one production sees.
+			const startedAt = Date.now();
+			while (Date.now() === startedAt) {}
+			return new FakeDashboardWorker({
+				shouldReply: repliesExcept("analytics"),
+				replyDelayMs: 2,
+			});
+		});
 		__setDashboardWorkerTimeoutsForTests({ soft: 20, hard: 60 });
 
 		const analyticsPromise = createIsolatedAnalyticsHandler(fakeContext)(

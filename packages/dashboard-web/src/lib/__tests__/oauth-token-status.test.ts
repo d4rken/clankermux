@@ -97,7 +97,7 @@ describe("tokenStatusTooltip", () => {
 describe("fetchAccountTokenStatus", () => {
 	const okAccount = (status: TokenStatus, message: string) => ({
 		success: true,
-		data: { status, message },
+		data: { accountName: "acct-1", status, message },
 	});
 
 	it("(a) returns the primary result and does not call global on success", async () => {

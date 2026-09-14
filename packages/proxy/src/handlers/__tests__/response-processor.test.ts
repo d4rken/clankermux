@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { type CodexCreditsInfo, usageCache } from "@clankermux/providers";
+import { makeAccount as canonicalAccount } from "@clankermux/test-support";
 import type { Account } from "@clankermux/types";
 import {
 	clearAnthropicBurstThrottle,
@@ -17,43 +18,14 @@ import { processProxyResponse } from "../response-processor";
 // the response-processor actually reads matter — the rest exist to satisfy
 // the type checker.
 function makeAccount(overrides: Partial<Account> = {}): Account {
-	return {
+	return canonicalAccount({
 		id: "acct-1",
-		name: "test-account",
-		provider: "anthropic",
-		api_key: null,
 		refresh_token: "rt",
 		access_token: "at",
 		expires_at: Date.now() + 3600_000,
-		request_count: 0,
-		total_requests: 0,
-		last_used: null,
 		created_at: Date.now(),
-		rate_limited_until: null,
-		rate_limited_reason: null,
-		rate_limited_at: null,
-		consecutive_rate_limits: 0,
-		session_start: null,
-		session_request_count: 0,
-		paused: false,
-		rate_limit_reset: null,
-		rate_limit_status: null,
-		rate_limit_remaining: null,
-		priority: 0,
-		auto_fallback_enabled: false,
-		auto_refresh_enabled: false,
-		auto_pause_on_overage_enabled: false,
-		peak_hours_pause_enabled: false,
-		codex_auto_apply_reset_credits_enabled: false,
-		custom_endpoint: null,
-		model_mappings: null,
-		cross_region_mode: null,
-		model_fallbacks: null,
-		billing_type: null,
-		pause_reason: null,
-		refresh_token_issued_at: null,
 		...overrides,
-	};
+	});
 }
 
 // Spy-style ProxyContext. We don't try to construct a full DatabaseOperations
@@ -678,11 +650,14 @@ function codexResponse(fiveHourResetMs: number): Response {
 	// with parseFloat(...) * 1000, so a FRACTIONAL epoch-seconds value preserves
 	// millisecond precision in five_hour.resets_at — letting the drift test feed a
 	// reset that differs from the previous one by sub-second (and stays future).
-	// No 7d header → earliest reset is just the 5h value.
+	// No 7d header → earliest reset is just the 5h value. The used-percent header
+	// is what makes the window a MEASURED reading: without it the parser omits the
+	// window entirely and none of the bookkeeping under test would run.
 	return new Response('{"id":"msg_1"}', {
 		status: 200,
 		headers: {
 			"content-type": "application/json",
+			"x-codex-primary-used-percent": "12",
 			"x-codex-primary-window-minutes": "300",
 			"x-codex-primary-reset-at": String(fiveHourResetMs / 1000),
 		},
@@ -755,6 +730,33 @@ describe("processProxyResponse — Codex window-roll detection (Primary badge fl
 		const writes = rateLimitResetWrites(calls.runSql);
 		expect(writes).toHaveLength(1);
 		expect(writes[0]?.params[0]).toBe(nextResetMs);
+
+		usageCache.delete(account.id);
+	});
+
+	it("does NOT cache or persist a window that reports a reset but no used-percent", async () => {
+		// Production entry point for the same rule the parser enforces: a reset
+		// with no percentage is not a reading, so nothing may be cached and
+		// accounts.rate_limit_reset must not be pinned from it.
+		const account = makeAccount({ id: "codex-no-percent", provider: "codex" });
+		const resetMs = Date.now() + 4 * 60 * 60 * 1000;
+		const { ctx, calls } = makeCodexCtx();
+
+		await processProxyResponse(
+			new Response('{"id":"msg_1"}', {
+				status: 200,
+				headers: {
+					"content-type": "application/json",
+					"x-codex-primary-window-minutes": "300",
+					"x-codex-primary-reset-at": String(resetMs / 1000),
+				},
+			}),
+			account,
+			ctx,
+		);
+
+		expect(usageCache.get(account.id)).toBeNull();
+		expect(rateLimitResetWrites(calls.runSql)).toHaveLength(0);
 
 		usageCache.delete(account.id);
 	});
@@ -937,6 +939,7 @@ describe("processProxyResponse — Codex credits carry-forward", () => {
 			status: 200,
 			headers: {
 				"content-type": "application/json",
+				"x-codex-primary-used-percent": "12",
 				"x-codex-primary-window-minutes": "300",
 				"x-codex-primary-reset-at": String(fiveHourResetMs / 1000),
 				...creditsHeaders,

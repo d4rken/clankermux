@@ -91,7 +91,7 @@ async function callHandler(
 describe("usage-scoped-history handler", () => {
 	describe("range → bucket mapping", () => {
 		it("maps 6h → bucketMs 300000", async () => {
-			let captured: { sinceMs: number; bucketMs: number } | null = null;
+			let captured: { sinceMs: number; bucketMs: number } | undefined;
 			const sources = createSources({
 				snapshots: [],
 				accounts: [],
@@ -316,7 +316,7 @@ describe("usage-scoped-history handler", () => {
 
 describe("usage-scoped-history handler — predecessor lookback bound", () => {
 	it("asks for at most one scoped weekly window before the range start", async () => {
-		let captured: { beforeMs: number; lookbackMs: number } | null = null;
+		let captured: { beforeMs: number; lookbackMs: number } | undefined;
 		const sources = createSources({
 			snapshots: [],
 			accounts: [],

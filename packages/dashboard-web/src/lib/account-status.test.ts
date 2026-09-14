@@ -22,6 +22,9 @@ function makeAccount(
 		tokenStatus: "valid",
 		tokenExpiresAt: null,
 		rateLimitStatus: "OK",
+		rateLimitCause: "ok",
+		rateLimitCauseResetMs: null,
+		rateLimitProviderStatus: null,
 		rateLimitReset: null,
 		rateLimitRemaining: null,
 		rateLimitedUntil: null,
@@ -32,7 +35,6 @@ function makeAccount(
 		autoFallbackEnabled: false,
 		autoRefreshEnabled: false,
 		customEndpoint: null,
-		modelMappings: null,
 		usageUtilization: null,
 		usageWindow: null,
 		usageData: null,
@@ -40,18 +42,39 @@ function makeAccount(
 		usageThrottledUntil: null,
 		usageThrottledWindows: [],
 		hasRefreshToken: false,
+		notes: null,
 		sessionStats: null,
 		isPrimary: false,
 		autoPauseOnOverageEnabled: false,
 		peakHoursPauseEnabled: false,
 		providerOverloadKey: null,
 		providerOverloadedUntil: null,
-		modelFallbacks: null,
 		billingType: null,
 		renewalAnchor: null,
 		renewalCadence: null,
+		identityExternalId: null,
+		identityEmail: null,
+		identityOrganizationName: null,
+		identityPlanTier: null,
+		identityRateLimitTier: null,
+		identityCapturedAt: null,
+		identityProfileFetchedAt: null,
+		isDuplicateAccount: false,
+		duplicateAccountIds: [],
 		...overrides,
 	};
+}
+
+/**
+ * A payload from before the structured `rateLimitCause` trio existed, which is
+ * what `deriveAccountStatus`'s display-string fallback is for: a cached payload
+ * an older release wrote still renders. Spelled as an explicit `undefined`
+ * because `AccountResponse` declares the field.
+ */
+function legacyAccount(
+	overrides: Partial<AccountResponse> = {},
+): AccountResponse {
+	return makeAccount({ rateLimitCause: undefined, ...overrides });
 }
 
 describe("deriveAccountStatus — identity fields", () => {
@@ -99,7 +122,7 @@ describe("deriveAccountStatus — identity fields", () => {
 describe("deriveAccountStatus — rate-limit status", () => {
 	it("flags a hard rate_limited status as limited and offers Force Reset", () => {
 		const status = deriveAccountStatus(
-			makeAccount({ rateLimitStatus: "rate_limited (30m)" }),
+			legacyAccount({ rateLimitStatus: "rate_limited (30m)" }),
 			NOW,
 		);
 		expect(status.isHardLimited).toBe(true);
@@ -110,7 +133,7 @@ describe("deriveAccountStatus — rate-limit status", () => {
 
 	it("treats a soft warning as usable: chip shows, no hard-limit, no Force Reset", () => {
 		const status = deriveAccountStatus(
-			makeAccount({ rateLimitStatus: "allowed_warning (10m)" }),
+			legacyAccount({ rateLimitStatus: "allowed_warning (10m)" }),
 			NOW,
 		);
 		expect(status.isHardLimited).toBe(false);
@@ -123,7 +146,7 @@ describe("deriveAccountStatus — rate-limit status", () => {
 
 	it("shows the health chip for an 'allowed' status without the warning icon", () => {
 		const status = deriveAccountStatus(
-			makeAccount({ rateLimitStatus: "allowed (242m)" }),
+			legacyAccount({ rateLimitStatus: "allowed (242m)" }),
 			NOW,
 		);
 		expect(status.isRateLimited).toBe(false);
@@ -141,18 +164,18 @@ describe("deriveAccountStatus — rate-limit status", () => {
 
 	it("recognizes blocked, payment_required and queueing_hard as hard limits", () => {
 		expect(
-			deriveAccountStatus(makeAccount({ rateLimitStatus: "blocked" }), NOW)
+			deriveAccountStatus(legacyAccount({ rateLimitStatus: "blocked" }), NOW)
 				.isHardLimited,
 		).toBe(true);
 		expect(
 			deriveAccountStatus(
-				makeAccount({ rateLimitStatus: "payment_required" }),
+				legacyAccount({ rateLimitStatus: "payment_required" }),
 				NOW,
 			).isHardLimited,
 		).toBe(true);
 		expect(
 			deriveAccountStatus(
-				makeAccount({ rateLimitStatus: "queueing_hard (15m)" }),
+				legacyAccount({ rateLimitStatus: "queueing_hard (15m)" }),
 				NOW,
 			).isHardLimited,
 		).toBe(true);
@@ -235,7 +258,7 @@ describe("deriveAccountStatus — rate-limit status", () => {
 
 	it("treats queueing_soft as a soft limit, not a hard one", () => {
 		const status = deriveAccountStatus(
-			makeAccount({ rateLimitStatus: "queueing_soft (5m)" }),
+			legacyAccount({ rateLimitStatus: "queueing_soft (5m)" }),
 			NOW,
 		);
 		expect(status.isHardLimited).toBe(false);
@@ -248,7 +271,7 @@ describe("deriveAccountStatus — rate-limit status", () => {
 describe("deriveAccountStatus — paused gating", () => {
 	it("suppresses the chip and Force Reset while paused", () => {
 		const status = deriveAccountStatus(
-			makeAccount({ paused: true, rateLimitStatus: "rate_limited (30m)" }),
+			legacyAccount({ paused: true, rateLimitStatus: "rate_limited (30m)" }),
 			NOW,
 		);
 		expect(status.isPaused).toBe(true);
@@ -284,7 +307,7 @@ describe("deriveAccountStatus — legacy lock", () => {
 describe("deriveAccountStatus — stale lock detection", () => {
 	it("fires when locked but usage shows capacity below 100%", () => {
 		const status = deriveAccountStatus(
-			makeAccount({
+			legacyAccount({
 				rateLimitStatus: "rate_limited (30m)",
 				usageUtilization: 50,
 			}),
@@ -295,7 +318,7 @@ describe("deriveAccountStatus — stale lock detection", () => {
 
 	it("fires at 0% utilization (the clearest stale case, guarding against falsy 0)", () => {
 		const status = deriveAccountStatus(
-			makeAccount({
+			legacyAccount({
 				rateLimitStatus: "rate_limited (30m)",
 				usageUtilization: 0,
 			}),
@@ -306,7 +329,7 @@ describe("deriveAccountStatus — stale lock detection", () => {
 
 	it("does not fire at exactly 100% utilization", () => {
 		const status = deriveAccountStatus(
-			makeAccount({
+			legacyAccount({
 				rateLimitStatus: "rate_limited (30m)",
 				usageUtilization: 100,
 			}),
@@ -317,7 +340,7 @@ describe("deriveAccountStatus — stale lock detection", () => {
 
 	it("does not fire without numeric usage data", () => {
 		const status = deriveAccountStatus(
-			makeAccount({
+			legacyAccount({
 				rateLimitStatus: "rate_limited (30m)",
 				usageUtilization: null,
 			}),

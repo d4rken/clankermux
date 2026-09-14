@@ -39,7 +39,6 @@ function openaiTextResponse(
 		model: "gpt-4",
 		choices: [
 			{
-				index: 0,
 				message: { role: "assistant", content: "Hello back!" },
 				finish_reason: "stop",
 			},
@@ -89,7 +88,9 @@ describe("convertAnthropicRequestToOpenAI — basic fields", () => {
 			anthropicRequest({ max_tokens: 512 }),
 		);
 		expect(result.max_tokens).toBe(512);
-		expect(result.max_completion_tokens).toBeUndefined();
+		// The converter must not invent the newer OpenAI field name; `OpenAIRequest`
+		// does not declare it, so read it reflectively rather than through the type.
+		expect(Reflect.get(result, "max_completion_tokens")).toBeUndefined();
 	});
 
 	it("passes temperature through", () => {
@@ -711,7 +712,6 @@ describe("convertOpenAIResponseToAnthropic — success cases", () => {
 			openaiTextResponse({
 				choices: [
 					{
-						index: 0,
 						message: { role: "assistant", content: "..." },
 						finish_reason: "length",
 					},
@@ -726,7 +726,6 @@ describe("convertOpenAIResponseToAnthropic — success cases", () => {
 			openaiTextResponse({
 				choices: [
 					{
-						index: 0,
 						message: {
 							role: "assistant",
 							content: null,
@@ -761,7 +760,6 @@ describe("convertOpenAIResponseToAnthropic — success cases", () => {
 			openaiTextResponse({
 				choices: [
 					{
-						index: 0,
 						message: { role: "assistant", content: "Filtered" },
 						finish_reason: "content_filter",
 					},
@@ -789,7 +787,6 @@ describe("convertOpenAIResponseToAnthropic — success cases", () => {
 			openaiTextResponse({
 				choices: [
 					{
-						index: 0,
 						message: {
 							role: "assistant",
 							content: "Let me search for that.",
@@ -816,7 +813,6 @@ describe("convertOpenAIResponseToAnthropic — success cases", () => {
 			openaiTextResponse({
 				choices: [
 					{
-						index: 0,
 						message: {
 							role: "assistant",
 							content: "The answer is 4.",
@@ -865,7 +861,6 @@ describe("convertOpenAIResponseToAnthropic — error cases", () => {
 			openaiTextResponse({
 				choices: [
 					{
-						index: 0,
 						message: {
 							role: "assistant",
 							content: null,

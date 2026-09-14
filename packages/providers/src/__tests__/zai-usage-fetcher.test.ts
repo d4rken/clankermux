@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it } from "bun:test";
+import { mockFetch } from "@clankermux/test-support";
 import { getRepresentativeUtilizationForProvider } from "../usage-fetcher";
 import {
 	fetchZaiUsageData,
@@ -26,8 +27,9 @@ const weekly = {
 	nextResetTime: 10000,
 };
 async function fetchLimits(limits: unknown[]) {
-	globalThis.fetch = (async () =>
-		Response.json({ success: true, data: { limits } })) as typeof fetch;
+	globalThis.fetch = mockFetch(async () =>
+		Response.json({ success: true, data: { limits } }),
+	);
 	return fetchZaiUsageData("test-key");
 }
 

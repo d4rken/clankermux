@@ -23,6 +23,9 @@ function sample(
 		fiveHourReset: null,
 		sevenDayPct: null,
 		sevenDayReset: null,
+		observedAt: null,
+		planTier: null,
+		rateLimitTier: null,
 		...over,
 	};
 }

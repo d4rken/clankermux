@@ -8,6 +8,10 @@ import {
 	setSystemTime,
 } from "bun:test";
 import { usageCache } from "@clankermux/providers";
+import {
+	makeAccount as canonicalAccount,
+	mockFetch,
+} from "@clankermux/test-support";
 import type { Account, RequestMeta } from "@clankermux/types";
 import {
 	capResidualRung429Cooldown,
@@ -65,43 +69,15 @@ function scopedIncidentHeaders(): Record<string, string> {
 }
 
 function makeAccount(overrides: Partial<Account> = {}): Account {
-	return {
+	return canonicalAccount({
 		id: "acc-oauth",
 		name: "oauth-cache",
-		provider: "anthropic",
-		api_key: null,
 		refresh_token: "rt-token",
 		access_token: "at-token",
 		expires_at: INCIDENT_NOW + 3_600_000,
-		request_count: 0,
-		total_requests: 0,
-		last_used: null,
 		created_at: INCIDENT_NOW,
-		rate_limited_until: null,
-		rate_limited_reason: null,
-		rate_limited_at: null,
-		consecutive_rate_limits: 0,
-		session_start: null,
-		session_request_count: 0,
-		paused: false,
-		rate_limit_reset: null,
-		rate_limit_status: null,
-		rate_limit_remaining: null,
-		priority: 0,
-		auto_fallback_enabled: false,
-		auto_refresh_enabled: false,
-		auto_pause_on_overage_enabled: false,
-		peak_hours_pause_enabled: false,
-		codex_auto_apply_reset_credits_enabled: false,
-		custom_endpoint: null,
-		model_mappings: null,
-		cross_region_mode: null,
-		model_fallbacks: null,
-		billing_type: null,
-		pause_reason: null,
-		refresh_token_issued_at: null,
 		...overrides,
-	};
+	});
 }
 
 function makeRequestMeta(): RequestMeta {
@@ -329,8 +305,9 @@ describe("proxyWithAccount — residual rung 429 cooldown caps", () => {
 		{ fallbacks: true, scope: "7d_oi" },
 		{ fallbacks: false, scope: "5h_unknown" },
 		{ fallbacks: true, scope: "5h_unknown" },
+		// `fallbacks` no longer selects anything — the account field it used to set
+		// is gone from `Account` — but it still names the four cases.
 	])("unknown-family scoped rejection has no cooldown: %j", async ({
-		fallbacks,
 		scope,
 	}) => {
 		const headers = Object.fromEntries(
@@ -339,16 +316,10 @@ describe("proxyWithAccount — residual rung 429 cooldown caps", () => {
 				value,
 			]),
 		);
-		globalThis.fetch = mock(async () => rl429(headers));
+		globalThis.fetch = mockFetch(mock(async () => rl429(headers)));
 		const { ctx, deadlineCalls, escalatingCalls, metaCalls, auditCalls } =
 			makeProxyContext();
-		const account = makeAccount({
-			model_mappings: fallbacks
-				? JSON.stringify({
-						"totally-unknown-model": ["unknown-primary", "unknown-fallback"],
-					})
-				: null,
-		});
+		const account = makeAccount({});
 		markCapacityRestoredProbePending(account.id);
 		expect(getRateLimitProbeAdmission(account)).toBe("admitted");
 		expect(getRateLimitProbeAdmission(account)).toBe("suppressed");
@@ -376,7 +347,9 @@ describe("proxyWithAccount — residual rung 429 cooldown caps", () => {
 	});
 
 	it("same scoped 429 on a custom-endpoint account: flat 24h cap (headers untrusted)", async () => {
-		globalThis.fetch = mock(async () => rl429(scopedIncidentHeaders()));
+		globalThis.fetch = mockFetch(
+			mock(async () => rl429(scopedIncidentHeaders())),
+		);
 		const { ctx, deadlineCalls, escalatingCalls } = makeProxyContext();
 
 		const result = await drive(
@@ -394,13 +367,15 @@ describe("proxyWithAccount — residual rung 429 cooldown caps", () => {
 	});
 
 	it("account-wide rejection without a claim reset gets a short quota probe, not the summary retry-after", async () => {
-		globalThis.fetch = mock(async () =>
-			rl429({
-				"anthropic-ratelimit-unified-7d-status": "rejected",
-				"anthropic-ratelimit-unified-7d-utilization": "1.0",
-				"anthropic-ratelimit-unified-status": "rejected",
-				"retry-after": "3600",
-			}),
+		globalThis.fetch = mockFetch(
+			mock(async () =>
+				rl429({
+					"anthropic-ratelimit-unified-7d-status": "rejected",
+					"anthropic-ratelimit-unified-7d-utilization": "1.0",
+					"anthropic-ratelimit-unified-status": "rejected",
+					"retry-after": "3600",
+				}),
+			),
 		);
 		const { ctx, deadlineCalls, escalatingCalls } = makeProxyContext();
 
@@ -415,8 +390,10 @@ describe("proxyWithAccount — residual rung 429 cooldown caps", () => {
 	});
 
 	it("headerless multi-day retry-after is bounded by the 24h ceiling", async () => {
-		globalThis.fetch = mock(
-			async () => rl429({ "retry-after": "2592000" }), // 30 days, no unified headers
+		globalThis.fetch = mockFetch(
+			mock(
+				async () => rl429({ "retry-after": "2592000" }), // 30 days, no unified headers
+			),
 		);
 		const { ctx, deadlineCalls, escalatingCalls } = makeProxyContext();
 
@@ -433,8 +410,10 @@ describe("proxyWithAccount — residual rung 429 cooldown caps", () => {
 	});
 
 	it("all-models-exhausted rung is capped too (custom-endpoint scoped shape, 24h)", async () => {
-		globalThis.fetch = mock(async () =>
-			rl429({ ...scopedIncidentHeaders(), "retry-after": "2592000" }),
+		globalThis.fetch = mockFetch(
+			mock(async () =>
+				rl429({ ...scopedIncidentHeaders(), "retry-after": "2592000" }),
+			),
 		);
 		const { ctx, deadlineCalls, escalatingCalls } = makeProxyContext();
 
@@ -442,8 +421,6 @@ describe("proxyWithAccount — residual rung 429 cooldown caps", () => {
 			ctx,
 			makeAccount({
 				custom_endpoint: "https://proxy.example",
-				model_mappings: JSON.stringify({ sonnet: "claude-sonnet-4-5" }),
-				model_fallbacks: JSON.stringify({ sonnet: "claude-haiku-4-5" }),
 			}),
 			"claude-sonnet-4-5",
 		);

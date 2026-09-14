@@ -56,7 +56,6 @@ const account = {
 	name: "Devin",
 	provider: "devin",
 	api_key: "session-secret",
-	model_mappings: null,
 	auto_pause_on_overage_enabled: true,
 } as Account;
 

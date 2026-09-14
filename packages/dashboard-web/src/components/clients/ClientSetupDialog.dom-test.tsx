@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, mock, spyOn } from "bun:test";
+import { mockFetch } from "@clankermux/test-support";
 import type { ClientView } from "@clankermux/types";
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
@@ -69,12 +70,13 @@ describe("client setup credentials", () => {
 	});
 	it("remembers a pasted legacy key and then fills the recipe", async () => {
 		const fetch = spyOn(globalThis, "fetch").mockImplementation(
-			async (_input, init) =>
+			mockFetch(async (_input, init) =>
 				Response.json({
 					data: {
 						apiKey: init?.method === "POST" ? "btr-legacy-secret" : null,
 					},
 				}),
+			),
 		);
 		await mount();
 		expect(document.body.textContent).toContain("Paste the existing key once");
@@ -121,10 +123,12 @@ describe("client setup credentials", () => {
 	it("ignores a pending retrieval after the dialog closes", async () => {
 		let resolve!: (response: Response) => void;
 		spyOn(globalThis, "fetch").mockImplementation(
-			() =>
-				new Promise((r) => {
-					resolve = r;
-				}),
+			mockFetch(
+				() =>
+					new Promise((r) => {
+						resolve = r;
+					}),
+			),
 		);
 		await mount();
 		await click("Done");

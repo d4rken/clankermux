@@ -11,6 +11,10 @@ import {
 	DevinSessionAuthenticationError,
 	devinClient,
 } from "@clankermux/providers";
+import {
+	makeAccount as canonicalAccount,
+	mockFetch,
+} from "@clankermux/test-support";
 import type { Account, RequestMeta } from "@clankermux/types";
 import { encodeConnect } from "../../../../providers/src/providers/devin/connect";
 import { GetChatMessageResponseSchema } from "../../../../providers/src/providers/devin/vendor/devin-proto";
@@ -78,13 +82,10 @@ describe("Zai 1305 recovery through the account/model loop", () => {
 			{ onOutcome },
 		);
 	}
-	const account = (fallbacks = false) =>
+	const account = (_fallbacks = false) =>
 		makeAccount({
 			provider: "zai",
 			custom_endpoint: null,
-			model_mappings: JSON.stringify({
-				sonnet: fallbacks ? ["glm-primary", "glm-fallback"] : "glm-primary",
-			}),
 		});
 	it("fails over after one retry without mutating quota cooldowns", async () => {
 		const fetcher = mock(async () => overloaded());
@@ -97,7 +98,7 @@ describe("Zai 1305 recovery through the account/model loop", () => {
 		expect(acc.rate_limited_until).toBeNull();
 	});
 	it("does not seed an Anthropic recovery hold or exclude other models on the account", async () => {
-		globalThis.fetch = (async () => overloaded()) as typeof fetch;
+		globalThis.fetch = mockFetch(async () => overloaded());
 		const outcomes: ProxyAttemptOutcome[] = [];
 		await run(
 			account(),
@@ -111,7 +112,7 @@ describe("Zai 1305 recovery through the account/model loop", () => {
 		expect(isAccountWideFailure(outcomes[0])).toBe(false);
 	});
 	it("returns an overload terminal rather than successful SSE when all accounts are exhausted", async () => {
-		globalThis.fetch = (async () => overloaded()) as typeof fetch;
+		globalThis.fetch = mockFetch(async () => overloaded());
 		const ctx = makeProxyContext();
 		const response = await run(account(), ctx, true);
 		expect(response?.status).toBe(529);
@@ -186,43 +187,15 @@ describe("Zai 1305 recovery through the account/model loop", () => {
 
 // Minimal Account fixture for openai-compatible provider
 function makeAccount(overrides: Partial<Account> = {}): Account {
-	return {
-		id: "acc-1",
+	return canonicalAccount({
 		name: "kilo-test",
 		provider: "openai-compatible",
 		api_key: "test-key",
 		refresh_token: "",
-		access_token: null,
-		expires_at: null,
-		request_count: 0,
-		total_requests: 0,
-		last_used: null,
 		created_at: Date.now(),
-		rate_limited_until: null,
-		rate_limited_reason: null,
-		rate_limited_at: null,
-		consecutive_rate_limits: 0,
-		session_start: null,
-		session_request_count: 0,
-		paused: false,
-		rate_limit_reset: null,
-		rate_limit_status: null,
-		rate_limit_remaining: null,
-		priority: 0,
-		auto_fallback_enabled: false,
-		auto_refresh_enabled: false,
-		auto_pause_on_overage_enabled: false,
-		peak_hours_pause_enabled: false,
-		codex_auto_apply_reset_credits_enabled: false,
 		custom_endpoint: "https://openrouter.ai/api/v1",
-		model_mappings: JSON.stringify({ sonnet: "qwen/qwen3.6-plus:free" }),
-		cross_region_mode: null,
-		model_fallbacks: null,
-		billing_type: null,
-		pause_reason: null,
-		refresh_token_issued_at: null,
 		...overrides,
-	};
+	});
 }
 
 function makeRequestMeta(): RequestMeta {
@@ -326,16 +299,18 @@ describe("proxyWithAccount — 429 failover", () => {
 	});
 
 	it("returns null (failover) when upstream returns 429 and no fallback is configured", async () => {
-		globalThis.fetch = mock(async () =>
-			jsonResponse(
-				{
-					error: {
-						type: "api_error",
-						message:
-							"Rate limit exceeded: limit_rpm/qwen/qwen3.6-plus:free/abc123",
+		globalThis.fetch = mockFetch(
+			mock(async () =>
+				jsonResponse(
+					{
+						error: {
+							type: "api_error",
+							message:
+								"Rate limit exceeded: limit_rpm/qwen/qwen3.6-plus:free/abc123",
+						},
 					},
-				},
-				429,
+					429,
+				),
 			),
 		);
 
@@ -356,15 +331,17 @@ describe("proxyWithAccount — 429 failover", () => {
 	});
 
 	it("returns null (failover) when both primary and fallback model return 429", async () => {
-		globalThis.fetch = mock(async () =>
-			jsonResponse(
-				{
-					error: {
-						type: "api_error",
-						message: "Rate limit exceeded: limit_rpm/model/abc",
+		globalThis.fetch = mockFetch(
+			mock(async () =>
+				jsonResponse(
+					{
+						error: {
+							type: "api_error",
+							message: "Rate limit exceeded: limit_rpm/model/abc",
+						},
 					},
-				},
-				429,
+					429,
+				),
 			),
 		);
 
@@ -373,11 +350,7 @@ describe("proxyWithAccount — 429 failover", () => {
 		const result = await proxyWithAccount(
 			req,
 			new URL("https://proxy.local/v1/messages"),
-			makeAccount({
-				model_fallbacks: JSON.stringify({
-					sonnet: "bytedance-seed/dola-seed-2.0-pro:free",
-				}),
-			}),
+			makeAccount({}),
 			makeRequestMeta(),
 			bodyBuffer,
 			() => undefined,
@@ -389,15 +362,17 @@ describe("proxyWithAccount — 429 failover", () => {
 	});
 
 	it("returns null when all models in the array are exhausted", async () => {
-		globalThis.fetch = mock(async () =>
-			jsonResponse(
-				{
-					error: {
-						type: "api_error",
-						message: "Rate limit exceeded: limit_rpm/model/abc",
+		globalThis.fetch = mockFetch(
+			mock(async () =>
+				jsonResponse(
+					{
+						error: {
+							type: "api_error",
+							message: "Rate limit exceeded: limit_rpm/model/abc",
+						},
 					},
-				},
-				429,
+					429,
+				),
 			),
 		);
 
@@ -406,14 +381,7 @@ describe("proxyWithAccount — 429 failover", () => {
 		const result = await proxyWithAccount(
 			req,
 			new URL("https://proxy.local/v1/messages"),
-			makeAccount({
-				model_mappings: JSON.stringify({
-					sonnet: [
-						"qwen/qwen3.6-plus:free",
-						"bytedance-seed/dola-seed-2.0-pro:free",
-					],
-				}),
-			}),
+			makeAccount({}),
 			makeRequestMeta(),
 			bodyBuffer,
 			() => undefined,
@@ -429,15 +397,17 @@ describe("proxyWithAccount — 429 failover", () => {
 	// ladder, cooldown and all, or the account is failed over without ever being
 	// marked limited.
 	it("keeps a 429 on the rate-limit path when its envelope also names a model rejection", async () => {
-		globalThis.fetch = mock(async () =>
-			jsonResponse(
-				{
-					error: {
-						code: "model_access_denied",
-						message: "Your account does not have access to model qwen",
+		globalThis.fetch = mockFetch(
+			mock(async () =>
+				jsonResponse(
+					{
+						error: {
+							code: "model_access_denied",
+							message: "Your account does not have access to model qwen",
+						},
 					},
-				},
-				429,
+					429,
+				),
 			),
 		);
 
@@ -500,16 +470,18 @@ describe("proxyWithAccount — rate limit audit trail (issue #178)", () => {
 	});
 
 	it("calls markAccountRateLimited with reason='model_fallback_429' on no-fallback 429", async () => {
-		globalThis.fetch = mock(async () =>
-			jsonResponse(
-				{
-					error: {
-						type: "api_error",
-						message:
-							"Rate limit exceeded: limit_rpm/qwen/qwen3.6-plus:free/abc",
+		globalThis.fetch = mockFetch(
+			mock(async () =>
+				jsonResponse(
+					{
+						error: {
+							type: "api_error",
+							message:
+								"Rate limit exceeded: limit_rpm/qwen/qwen3.6-plus:free/abc",
+						},
 					},
-				},
-				429,
+					429,
+				),
 			),
 		);
 
@@ -548,15 +520,17 @@ describe("proxyWithAccount — rate limit audit trail (issue #178)", () => {
 
 	it("calls markAccountRateLimited with reason='model_fallback_429' when the resolved target fails despite a legacy fallback array", async () => {
 		// All fetch calls return 429 — primary + every fallback model
-		globalThis.fetch = mock(async () =>
-			jsonResponse(
-				{
-					error: {
-						type: "api_error",
-						message: "Rate limit exceeded: limit_rpm/model/abc",
+		globalThis.fetch = mockFetch(
+			mock(async () =>
+				jsonResponse(
+					{
+						error: {
+							type: "api_error",
+							message: "Rate limit exceeded: limit_rpm/model/abc",
+						},
 					},
-				},
-				429,
+					429,
+				),
 			),
 		);
 
@@ -567,14 +541,7 @@ describe("proxyWithAccount — rate limit audit trail (issue #178)", () => {
 		await proxyWithAccount(
 			req,
 			new URL("https://proxy.local/v1/messages"),
-			makeAccount({
-				model_mappings: JSON.stringify({
-					sonnet: [
-						"qwen/qwen3.6-plus:free",
-						"bytedance-seed/dola-seed-2.0-pro:free",
-					],
-				}),
-			}),
+			makeAccount({}),
 			makeRequestMeta(),
 			bodyBuffer,
 			() => undefined,
@@ -609,16 +576,18 @@ describe("proxyWithAccount — in-memory cooldown mutation (issue #178 fix)", ()
 	});
 
 	it("sets account.rate_limited_until on model_fallback_429 path", async () => {
-		globalThis.fetch = mock(async () =>
-			jsonResponse(
-				{
-					error: {
-						type: "api_error",
-						message:
-							"Rate limit exceeded: limit_rpm/qwen/qwen3.6-plus:free/abc",
+		globalThis.fetch = mockFetch(
+			mock(async () =>
+				jsonResponse(
+					{
+						error: {
+							type: "api_error",
+							message:
+								"Rate limit exceeded: limit_rpm/qwen/qwen3.6-plus:free/abc",
+						},
 					},
-				},
-				429,
+					429,
+				),
 			),
 		);
 
@@ -649,27 +618,22 @@ describe("proxyWithAccount — in-memory cooldown mutation (issue #178 fix)", ()
 	});
 
 	it("sets account.rate_limited_until on all_models_exhausted_429 path", async () => {
-		globalThis.fetch = mock(async () =>
-			jsonResponse(
-				{
-					error: {
-						type: "api_error",
-						message: "Rate limit exceeded: limit_rpm/model/abc",
+		globalThis.fetch = mockFetch(
+			mock(async () =>
+				jsonResponse(
+					{
+						error: {
+							type: "api_error",
+							message: "Rate limit exceeded: limit_rpm/model/abc",
+						},
 					},
-				},
-				429,
+					429,
+				),
 			),
 		);
 
 		const ctx = makeProxyContextWithAsyncExec();
-		const account = makeAccount({
-			model_mappings: JSON.stringify({
-				sonnet: [
-					"qwen/qwen3.6-plus:free",
-					"bytedance-seed/dola-seed-2.0-pro:free",
-				],
-			}),
-		});
+		const account = makeAccount({});
 		const before = Date.now();
 		const bodyBuffer = makeRequestBody();
 		const req = makeRequest(bodyBuffer);
@@ -710,15 +674,17 @@ describe("proxyWithAccount — 529 failover", () => {
 	});
 
 	it("returns null (failover) when upstream returns 529 and provider parseRateLimit says isRateLimited:true", async () => {
-		globalThis.fetch = mock(
-			async () =>
-				new Response(
-					'{"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}',
-					{
-						status: 529,
-						headers: { "content-type": "application/json" },
-					},
-				),
+		globalThis.fetch = mockFetch(
+			mock(
+				async () =>
+					new Response(
+						'{"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}',
+						{
+							status: 529,
+							headers: { "content-type": "application/json" },
+						},
+					),
+			),
 		);
 
 		const bodyBuffer = makeRequestBody();
@@ -756,18 +722,20 @@ describe("proxyWithAccount — 529 failover", () => {
 	});
 
 	it("marks provider overloaded without marking the individual account rate-limited", async () => {
-		globalThis.fetch = mock(
-			async () =>
-				new Response(
-					'{"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}',
-					{
-						status: 529,
-						headers: {
-							"content-type": "application/json",
-							"retry-after": "45",
+		globalThis.fetch = mockFetch(
+			mock(
+				async () =>
+					new Response(
+						'{"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}',
+						{
+							status: 529,
+							headers: {
+								"content-type": "application/json",
+								"retry-after": "45",
+							},
 						},
-					},
-				),
+					),
+			),
 		);
 
 		const bodyBuffer = makeRequestBody();
@@ -801,18 +769,20 @@ describe("proxyWithAccount — 529 failover", () => {
 	});
 
 	it("shares the official Anthropic overload group with Claude console API accounts", async () => {
-		globalThis.fetch = mock(
-			async () =>
-				new Response(
-					'{"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}',
-					{
-						status: 529,
-						headers: {
-							"content-type": "application/json",
-							"retry-after": "45",
+		globalThis.fetch = mockFetch(
+			mock(
+				async () =>
+					new Response(
+						'{"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}',
+						{
+							status: 529,
+							headers: {
+								"content-type": "application/json",
+								"retry-after": "45",
+							},
 						},
-					},
-				),
+					),
+			),
 		);
 
 		const bodyBuffer = makeRequestBody();
@@ -856,15 +826,17 @@ describe("proxyWithAccount — 529 failover", () => {
 	});
 
 	it("returns upstream 529 on the final account attempt instead of pool exhaustion", async () => {
-		globalThis.fetch = mock(
-			async () =>
-				new Response(
-					'{"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}',
-					{
-						status: 529,
-						headers: { "content-type": "application/json" },
-					},
-				),
+		globalThis.fetch = mockFetch(
+			mock(
+				async () =>
+					new Response(
+						'{"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}',
+						{
+							status: 529,
+							headers: { "content-type": "application/json" },
+						},
+					),
+			),
 		);
 
 		const bodyBuffer = makeRequestBody();
@@ -988,10 +960,14 @@ describe("proxyWithAccount — 401 failover", () => {
 	});
 
 	it("returns null (failover) when upstream returns 401", async () => {
-		globalThis.fetch = mock(async () =>
-			jsonResponse(
-				{ error: { type: "authentication_error", message: "Invalid API key" } },
-				401,
+		globalThis.fetch = mockFetch(
+			mock(async () =>
+				jsonResponse(
+					{
+						error: { type: "authentication_error", message: "Invalid API key" },
+					},
+					401,
+				),
 			),
 		);
 
@@ -1012,18 +988,20 @@ describe("proxyWithAccount — 401 failover", () => {
 	});
 
 	it("does not failover on successful 200 response", async () => {
-		globalThis.fetch = mock(async () =>
-			jsonResponse(
-				{
-					id: "msg_1",
-					type: "message",
-					role: "assistant",
-					content: [{ type: "text", text: "hello" }],
-					model: "qwen/qwen3.6-plus:free",
-					stop_reason: "end_turn",
-					usage: { input_tokens: 1, output_tokens: 1 },
-				},
-				200,
+		globalThis.fetch = mockFetch(
+			mock(async () =>
+				jsonResponse(
+					{
+						id: "msg_1",
+						type: "message",
+						role: "assistant",
+						content: [{ type: "text", text: "hello" }],
+						model: "qwen/qwen3.6-plus:free",
+						stop_reason: "end_turn",
+						usage: { input_tokens: 1, output_tokens: 1 },
+					},
+					200,
+				),
 			),
 		);
 
@@ -1098,19 +1076,20 @@ describe("proxyWithAccount — Codex entitlement model error fails over", () => 
 			access_token: "at-token",
 			expires_at: Date.now() + 3_600_000,
 			custom_endpoint: null,
-			model_mappings: JSON.stringify({ sonnet: "gpt-5.3-codex" }),
 			...overrides,
 		});
 	}
 
 	it("returns null (failover) when the plan does not entitle the account to the model", async () => {
-		globalThis.fetch = mock(async () =>
-			jsonResponse(
-				{
-					detail:
-						"The 'gpt-5.3-codex' model is not supported when using Codex with a ChatGPT account.",
-				},
-				400,
+		globalThis.fetch = mockFetch(
+			mock(async () =>
+				jsonResponse(
+					{
+						detail:
+							"The 'gpt-5.3-codex' model is not supported when using Codex with a ChatGPT account.",
+					},
+					400,
+				),
 			),
 		);
 
@@ -1133,10 +1112,14 @@ describe("proxyWithAccount — Codex entitlement model error fails over", () => 
 	});
 
 	it("fails over on a generic model-not-found 400", async () => {
-		globalThis.fetch = mock(async () =>
-			jsonResponse(
-				{ error: { code: "model_not_found", message: "model does not exist" } },
-				400,
+		globalThis.fetch = mockFetch(
+			mock(async () =>
+				jsonResponse(
+					{
+						error: { code: "model_not_found", message: "model does not exist" },
+					},
+					400,
+				),
 			),
 		);
 
@@ -1176,10 +1159,6 @@ describe("Anthropic organization access denial", () => {
 		const acc = makeAccount({
 			provider: "anthropic",
 			custom_endpoint: null,
-			model_mappings: null,
-			model_fallbacks: JSON.stringify({
-				"claude-sonnet-4-5": "claude-haiku-4-5",
-			}),
 		});
 		const ctx = makeProxyContextWithAsyncExec();
 		const outcomes: ProxyAttemptOutcome[] = [];

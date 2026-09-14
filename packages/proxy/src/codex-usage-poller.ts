@@ -4,6 +4,7 @@ import {
 	computeDemandAwareInterval,
 	computePollDelay,
 	IDLE_REFRESH_LEAD_MS,
+	targetsChatGptCodexBackend,
 	USAGE_CACHE_TTL_MS,
 } from "@clankermux/providers";
 
@@ -18,6 +19,22 @@ const log = new Logger("CodexUsagePoller");
  */
 const HEARTBEAT_SECONDS = 30;
 
+/**
+ * The host of a stored endpoint, for the skip log line.
+ *
+ * The VALUE never reaches the log: `validateEndpointUrl` checks only protocol
+ * and hostname, so a legitimate `custom_endpoint` may carry userinfo or a query
+ * string such as `?api_key=…`, and Logger performs no redaction of its own.
+ */
+function endpointHost(customEndpoint: string | null): string {
+	if (!customEndpoint) return "an unparseable endpoint";
+	try {
+		return new URL(customEndpoint).hostname;
+	} catch {
+		return "an unparseable endpoint";
+	}
+}
+
 /** The slice of an account row the poller needs. */
 export interface PolledCodexAccount {
 	id: string;
@@ -26,6 +43,12 @@ export interface PolledCodexAccount {
 	refresh_token: string | null;
 	/** Persisted last-request time — the demand-aware activity signal. */
 	last_used: number | null;
+	/**
+	 * The account's INFERENCE endpoint. The poller skips an account whose
+	 * endpoint is not the ChatGPT backend, because the free usage read lives
+	 * there and nowhere else.
+	 */
+	custom_endpoint: string | null;
 }
 
 /**
@@ -89,6 +112,9 @@ interface AccountPollState {
  *    periods no longer break runs.
  *  - Failures back off exponentially (computePollDelay, 30min cap), so a dead
  *    or reauth-needing account costs one lightweight failed GET per half hour.
+ *  - Accounts whose inference endpoint is not the ChatGPT backend are skipped
+ *    entirely: the free read is a GET against chatgpt.com, so for them every
+ *    poll is a guaranteed failure plus one forced token refresh.
  *
  * Scheduling is a 30s heartbeat over per-account due times rather than
  * per-account timers: with a handful of codex accounts the heartbeat is cheap,
@@ -98,6 +124,12 @@ interface AccountPollState {
 export class CodexUsagePoller {
 	private readonly deps: CodexUsagePollerDeps;
 	private readonly state = new Map<string, AccountPollState>();
+	/**
+	 * Accounts currently skipped for their endpoint. Transition-only logging:
+	 * the skip is a permanent condition for as long as the endpoint stands, and
+	 * a line per account per heartbeat would be noise the operator cannot act on.
+	 */
+	private readonly skipped = new Set<string>();
 	private unregisterHeartbeat: (() => void) | null = null;
 	private tickInFlight = false;
 	/**
@@ -171,13 +203,41 @@ export class CodexUsagePoller {
 	}
 
 	private async evaluate(): Promise<void> {
-		const accounts = await this.deps.listCodexAccounts();
+		const listed = await this.deps.listCodexAccounts();
+		// The free read is a GET against chatgpt.com. An account whose inference
+		// endpoint is elsewhere can never be served by it, so polling it buys a
+		// failed request and one forced token refresh per attempt, then backs off
+		// to the 30min cap forever. Excluded from `liveIds` too, so a poll schedule
+		// is pruned exactly as it would be for a removed account and the account
+		// starts fresh if its endpoint ever comes back.
+		const accounts: PolledCodexAccount[] = [];
+		for (const account of listed) {
+			if (targetsChatGptCodexBackend(account)) {
+				if (this.skipped.delete(account.id)) {
+					log.info(`Resuming usage polling for ${account.name}`);
+				}
+				accounts.push(account);
+				continue;
+			}
+			if (!this.skipped.has(account.id)) {
+				this.skipped.add(account.id);
+				log.info(
+					`Skipping usage polling for ${account.name}: endpoint host ${endpointHost(
+						account.custom_endpoint,
+					)} is not the ChatGPT backend`,
+				);
+			}
+		}
 
 		// Prune state for accounts that no longer exist, so a later re-add starts
 		// fresh (due immediately) instead of inheriting a stale schedule.
 		const liveIds = new Set(accounts.map((a) => a.id));
 		for (const id of this.state.keys()) {
 			if (!liveIds.has(id)) this.state.delete(id);
+		}
+		const listedIds = new Set(listed.map((a) => a.id));
+		for (const id of this.skipped) {
+			if (!listedIds.has(id)) this.skipped.delete(id);
 		}
 
 		for (const account of accounts) {

@@ -4,7 +4,7 @@ import {
 	NATIVE_RESPONSES_REQUEST_HEADER,
 	NATIVE_RESPONSES_RESPONSE_HEADER,
 } from "@clankermux/types";
-import { CodexProvider } from "./provider";
+import { CodexProvider, targetsChatGptCodexBackend } from "./provider";
 import { normalizeCodexInputUsage, parseCodexUsageHeaders } from "./usage";
 
 const sseBody = (lines: string[]) => `${lines.join("\n")}\n`;
@@ -536,9 +536,7 @@ describe("CodexProvider request conversion", () => {
 
 	it("downgrades efforts unsupported by the resolved Codex model", async () => {
 		const provider = new CodexProvider();
-		const account = {
-			model_mappings: JSON.stringify({ sonnet: "gpt-5.4-mini" }),
-		} as Parameters<typeof provider.transformRequestBody>[1];
+		const account = {} as Parameters<typeof provider.transformRequestBody>[1];
 
 		const request = new Request("https://example.com/v1/messages", {
 			method: "POST",
@@ -2119,9 +2117,7 @@ describe("CodexProvider.transformRequestBody", () => {
 
 	it("ignores a retired account mapping", async () => {
 		const provider = new CodexProvider();
-		const account = {
-			model_mappings: JSON.stringify({ sonnet: "gpt-5.3-codex-spark" }),
-		} as Parameters<typeof provider.transformRequestBody>[1];
+		const account = {} as Parameters<typeof provider.transformRequestBody>[1];
 		const request = new Request("https://example.com/v1/messages", {
 			method: "POST",
 			headers: { "content-type": "application/json" },
@@ -2140,11 +2136,7 @@ describe("CodexProvider.transformRequestBody", () => {
 
 	it("ignores a retired ordered model mapping", async () => {
 		const provider = new CodexProvider();
-		const account = {
-			model_mappings: JSON.stringify({
-				sonnet: ["gpt-5.3-codex-spark", "gpt-5.4"],
-			}),
-		} as Parameters<typeof provider.transformRequestBody>[1];
+		const account = {} as Parameters<typeof provider.transformRequestBody>[1];
 		const request = new Request("https://example.com/v1/messages", {
 			method: "POST",
 			headers: { "content-type": "application/json" },
@@ -2163,9 +2155,7 @@ describe("CodexProvider.transformRequestBody", () => {
 
 	it("does not apply family defaults in the adapter", async () => {
 		const provider = new CodexProvider();
-		const account = {
-			model_mappings: JSON.stringify({ sonnet: "gpt-5.3-codex-spark" }),
-		} as Parameters<typeof provider.transformRequestBody>[1];
+		const account = {} as Parameters<typeof provider.transformRequestBody>[1];
 		const request = new Request("https://example.com/v1/messages", {
 			method: "POST",
 			headers: { "content-type": "application/json" },
@@ -2202,7 +2192,6 @@ describe("CodexProvider.transformRequestBody", () => {
 });
 
 describe("CodexProvider prompt_cache_key derivation", () => {
-	// Test files are excluded from typecheck, so a minimal account shape is fine.
 	const codexAccount = (overrides: Record<string, unknown> = {}) =>
 		({
 			id: "codex-1",
@@ -2216,7 +2205,6 @@ describe("CodexProvider prompt_cache_key derivation", () => {
 			request_count: 0,
 			total_requests: 0,
 			priority: 20,
-			model_mappings: null,
 			custom_endpoint: null,
 			...overrides,
 		}) as unknown as Parameters<CodexProvider["transformRequestBody"]>[1];
@@ -2585,7 +2573,6 @@ describe("CodexProvider native Responses passthrough", () => {
 });
 
 describe("CodexProvider ChatGPT-backend parameter sanitation", () => {
-	// Test files are excluded from typecheck, so a minimal account shape is fine.
 	const codexAccount = (overrides: Record<string, unknown> = {}) =>
 		({
 			id: "codex-1",
@@ -2599,7 +2586,6 @@ describe("CodexProvider ChatGPT-backend parameter sanitation", () => {
 			request_count: 0,
 			total_requests: 0,
 			priority: 20,
-			model_mappings: null,
 			custom_endpoint: null,
 			...overrides,
 		}) as unknown as Parameters<CodexProvider["transformRequestBody"]>[1];
@@ -2821,9 +2807,7 @@ describe("CodexProvider ChatGPT-backend parameter sanitation", () => {
 		// would send `none` where the target model's documented minimum is `low`.
 		const body = await translatedTransform(
 			{ model: "gpt-5.4-mini", reasoning: { effort: "minimal" } },
-			codexAccount({
-				model_mappings: JSON.stringify({ sonnet: "gpt-5.4-mini" }),
-			}),
+			codexAccount({}),
 		);
 		expect(body.model).toBe("gpt-5.4-mini");
 		expect(body.reasoning).toEqual({ effort: "low" });
@@ -2842,7 +2826,7 @@ describe("CodexProvider ChatGPT-backend parameter sanitation", () => {
 		// gpt-6-astra's catalog levels start at `low`; `none` is a 5.x-only value.
 		const body = await translatedTransform(
 			{ model: "gpt-6-astra", reasoning: { effort: "none" } },
-			codexAccount({ model_mappings: null }),
+			codexAccount(),
 		);
 		expect(body.model).toBe("gpt-6-astra");
 		expect(body.reasoning).toEqual({ effort: "low" });
@@ -2854,21 +2838,21 @@ describe("CodexProvider ChatGPT-backend parameter sanitation", () => {
 		// generation-aware clamp: preserved for GPT-6, lowered for 5.x.
 		const astraMax = await translatedTransform(
 			{ model: "gpt-6-astra", reasoning: { effort: "max" } },
-			codexAccount({ model_mappings: null }),
+			codexAccount(),
 		);
 		expect(astraMax.model).toBe("gpt-6-astra");
 		expect(astraMax.reasoning).toEqual({ effort: "max" });
 
 		const astraUltra = await translatedTransform(
 			{ model: "gpt-6-astra", reasoning: { effort: "ultra" } },
-			codexAccount({ model_mappings: null }),
+			codexAccount(),
 		);
 		expect(astraUltra.model).toBe("gpt-6-astra");
 		expect(astraUltra.reasoning).toEqual({ effort: "ultra" });
 
 		const solUltra = await translatedTransform(
 			{ model: "gpt-5.6-sol", reasoning: { effort: "ultra" } },
-			codexAccount({ model_mappings: null }),
+			codexAccount(),
 		);
 		expect(solUltra.model).toBe("gpt-5.6-sol");
 		expect(solUltra.reasoning).toEqual({ effort: "xhigh" });
@@ -3167,6 +3151,38 @@ describe("CodexProvider response.incomplete stop reasons", () => {
 	});
 });
 
+describe("targetsChatGptCodexBackend", () => {
+	it("treats a missing account as the default ChatGPT backend", () => {
+		expect(targetsChatGptCodexBackend()).toBe(true);
+	});
+
+	it("treats a null custom_endpoint as the default ChatGPT backend", () => {
+		expect(targetsChatGptCodexBackend({ custom_endpoint: null })).toBe(true);
+	});
+
+	it("accepts a custom endpoint that still points at chatgpt.com", () => {
+		expect(
+			targetsChatGptCodexBackend({
+				custom_endpoint: "https://chatgpt.com/backend-api/codex/responses",
+			}),
+		).toBe(true);
+	});
+
+	it("rejects a custom endpoint on another host", () => {
+		expect(
+			targetsChatGptCodexBackend({
+				custom_endpoint: "https://api.example.com/v1",
+			}),
+		).toBe(false);
+	});
+
+	it("accepts a malformed endpoint, which buildUrl falls back to the default for", () => {
+		expect(targetsChatGptCodexBackend({ custom_endpoint: "not a url" })).toBe(
+			true,
+		);
+	});
+});
+
 describe("parseCodexUsageHeaders", () => {
 	it("normalizes primary and secondary codex quota headers", () => {
 		const headers = new Headers({
@@ -3259,6 +3275,94 @@ describe("parseCodexUsageHeaders", () => {
 
 		expect(usage).not.toBeNull();
 		expect(usage?.five_hour).toBeNull();
+		expect(usage?.seven_day).toEqual({
+			utilization: 11,
+			resets_at: new Date(1775000000 * 1000).toISOString(),
+		});
+	});
+
+	it("omits a window that reports a reset but no used-percent", () => {
+		// A reset time says WHEN the window turns over, never how much of it is
+		// spent. Minting 0% here reported an idle account on evidence that carries
+		// no percentage at all — the dashboard drew a 0% bar, the sampler recorded
+		// a 0% observation, and computePoolUsage counted an idle contributor.
+		const headers = new Headers({
+			"x-codex-primary-window-minutes": "10080",
+			"x-codex-primary-reset-at": "1775000000",
+		});
+
+		expect(parseCodexUsageHeaders(headers)).toBeNull();
+	});
+
+	it("honours an explicit defaultUtilization for a percentage-less window", () => {
+		// The traffic path passes 100 on a 429: that IS a real exhausted signal.
+		const headers = new Headers({
+			"x-codex-primary-window-minutes": "10080",
+			"x-codex-primary-reset-at": "1775000000",
+		});
+
+		const usage = parseCodexUsageHeaders(headers, { defaultUtilization: 100 });
+
+		expect(usage?.seven_day).toEqual({
+			utilization: 100,
+			resets_at: new Date(1775000000 * 1000).toISOString(),
+		});
+	});
+
+	it("omits the legacy x-codex-7d-reset-at window when no caller default exists", () => {
+		// The legacy reset headers carry no percentage whatsoever.
+		const headers = new Headers({
+			"x-codex-7d-reset-at": "1775000000",
+		});
+
+		expect(parseCodexUsageHeaders(headers)).toBeNull();
+	});
+
+	it("fills the legacy x-codex-7d-reset-at window from an explicit default", () => {
+		const headers = new Headers({
+			"x-codex-7d-reset-at": "1775000000",
+		});
+
+		const usage = parseCodexUsageHeaders(headers, { defaultUtilization: 100 });
+
+		expect(usage?.five_hour).toBeNull();
+		expect(usage?.seven_day).toEqual({
+			utilization: 100,
+			resets_at: new Date(1775000000 * 1000).toISOString(),
+		});
+	});
+
+	it("keeps a reported weekly window while omitting a percentage-less 5h window", () => {
+		const headers = new Headers({
+			"x-codex-primary-used-percent": "11",
+			"x-codex-primary-window-minutes": "10080",
+			"x-codex-primary-reset-at": "1775000000",
+			"x-codex-secondary-window-minutes": "300",
+			"x-codex-secondary-reset-at": "1774600000",
+		});
+
+		const usage = parseCodexUsageHeaders(headers);
+
+		expect(usage?.five_hour).toBeNull();
+		expect(usage?.seven_day).toEqual({
+			utilization: 11,
+			resets_at: new Date(1775000000 * 1000).toISOString(),
+		});
+	});
+
+	it("drops a per-family window that reports no used-percent", () => {
+		const headers = new Headers({
+			"x-codex-primary-used-percent": "11",
+			"x-codex-primary-window-minutes": "10080",
+			"x-codex-primary-reset-at": "1775000000",
+			"x-codex-foo-limit-name": "Foo",
+			"x-codex-foo-primary-window-minutes": "10080",
+			"x-codex-foo-primary-reset-at": "1775000000",
+		});
+
+		const usage = parseCodexUsageHeaders(headers);
+
+		expect(usage?.limits).toBeUndefined();
 		expect(usage?.seven_day).toEqual({
 			utilization: 11,
 			resets_at: new Date(1775000000 * 1000).toISOString(),
@@ -3886,7 +3990,6 @@ describe("CodexProvider refreshToken auth-error classification", () => {
 		spyOn(globalThis, "fetch").mockRestore();
 	});
 
-	// Test files are excluded from typecheck, so a minimal account shape is fine.
 	const account = (overrides: Record<string, unknown> = {}) =>
 		({
 			id: "codex-1",

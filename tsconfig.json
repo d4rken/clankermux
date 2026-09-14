@@ -60,15 +60,20 @@
 		"scripts/readme-media/capture.ts",
 		"scripts/readme-media/mock-data.ts",
 		"scripts/readme-media/seed-mock-db.ts",
-		"scripts/readme-media/stub-upstream.ts"
+		"scripts/readme-media/stub-upstream.ts",
+		// Test files that live outside the globs above. `include` is an
+		// allowlist, so no `exclude` change can reach them; they are named here
+		// so "every test file is typechecked" is literally true.
+		"__tests__/api-auth.test.ts",
+		"packages/database/scripts/workers-manifest.test.ts",
+		"scripts/alignment-study.test.ts",
+		"scripts/backfill-missing-projects.test.ts",
+		"scripts/build-guard.test.ts",
+		"scripts/build-readme-media.test.ts",
+		"scripts/forecast-confidence-backtest.test.ts",
+		"scripts/public-api/schema.test.ts",
+		"scripts/redistribution-backtest.test.ts",
+		"scripts/smoke-server-binary.test.ts"
 	],
-	"exclude": [
-		"**/__tests__",
-		"packages/**/*.test.ts",
-		"packages/**/*.test.tsx",
-		"apps/**/*.test.ts",
-		"apps/**/*.test.tsx",
-		"**/*.dom-test.ts",
-		"**/*.dom-test.tsx"
-	]
+	"exclude": ["node_modules", "**/node_modules"]
 }

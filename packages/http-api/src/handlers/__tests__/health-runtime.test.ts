@@ -123,14 +123,16 @@ describe("health runtime payload", () => {
 		expect(body.accounts).toBe(3);
 		expect(body.strategy).toBe("session");
 		expect(body.runtime).toBeDefined();
-		expect(body.runtime.asyncWriter).toEqual({
+		const { runtime } = body;
+		if (!runtime) throw new Error("runtime health block missing");
+		expect(runtime.asyncWriter).toEqual({
 			healthy: true,
 			failureCount: 0,
 			recentDrops: 0,
 			queuedJobs: 2,
 		});
 		// The usage worker has been retired — only asyncWriter (+ storage) remain.
-		expect(body.runtime.usageWorker).toBeUndefined();
+		expect(runtime.usageWorker).toBeUndefined();
 	});
 
 	it("omits runtime health when callbacks are not provided", async () => {

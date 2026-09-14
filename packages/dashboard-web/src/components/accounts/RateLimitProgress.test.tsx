@@ -5,6 +5,7 @@
  * See LICENSE.md in the project root for license terms.
  */
 import { describe, expect, it } from "bun:test";
+import type { AnthropicLimitEntry } from "@clankermux/types";
 import { renderToStaticMarkup } from "react-dom/server";
 import { RateLimitProgress } from "./RateLimitProgress";
 
@@ -12,6 +13,7 @@ describe("RateLimitProgress", () => {
 	it("shows Zai's weekly quota and explicitly reports its missing reset", () => {
 		const html = renderToStaticMarkup(
 			<RateLimitProgress
+				resetIso={null}
 				provider="zai"
 				showWeekly
 				usageData={{
@@ -38,8 +40,11 @@ describe("RateLimitProgress", () => {
 				usageWindow="tokens_limit"
 				usageData={{
 					tokens_limit: {
+						used: 92,
+						remaining: 8,
 						percentage: 92,
 						resetAt: Date.now() + 60 * 60 * 1000,
+						type: "tokens_limit",
 					},
 					time_limit: null,
 				}}
@@ -343,7 +348,7 @@ describe("RateLimitProgress", () => {
 			{ family: "fable", displayName: "Fable" },
 		] as const;
 
-		function renderWith(limits: unknown[]) {
+		function renderWith(limits: AnthropicLimitEntry[]) {
 			return renderToStaticMarkup(
 				<RateLimitProgress
 					resetIso={future()}
@@ -504,7 +509,7 @@ describe("RateLimitProgress", () => {
 					usageWindow="five_hour"
 					usageData={{
 						five_hour: { utilization: 40, resets_at: reset.toISOString() },
-						seven_day: null,
+						seven_day: undefined,
 					}}
 					provider="anthropic"
 					showWeekly
@@ -529,7 +534,7 @@ describe("RateLimitProgress", () => {
 					usageWindow="five_hour"
 					usageData={{
 						five_hour: { utilization: 20, resets_at: reset.toISOString() },
-						seven_day: null,
+						seven_day: undefined,
 					}}
 					provider="anthropic"
 					showWeekly
@@ -558,7 +563,7 @@ describe("RateLimitProgress", () => {
 					usageWindow="five_hour"
 					usageData={{
 						five_hour: { utilization: 5, resets_at: reset },
-						seven_day: null,
+						seven_day: undefined,
 					}}
 					provider="anthropic"
 					showWeekly
@@ -589,7 +594,7 @@ describe("RateLimitProgress", () => {
 					usageWindow="five_hour"
 					usageData={{
 						five_hour: { utilization: 90, resets_at: reset },
-						seven_day: null,
+						seven_day: undefined,
 					}}
 					provider="anthropic"
 					showWeekly
@@ -650,7 +655,7 @@ describe("RateLimitProgress", () => {
 				usageWindow: "five_hour" as const,
 				usageData: {
 					five_hour: { utilization, resets_at: reset },
-					seven_day: null,
+					seven_day: undefined,
 				},
 				provider: "anthropic",
 				showWeekly: true,
@@ -1012,7 +1017,7 @@ describe("RateLimitProgress", () => {
 						utilization: 120,
 						resets_at: new Date(resetAt).toISOString(),
 					},
-					seven_day: null,
+					seven_day: undefined,
 				}}
 				usageThrottledUntil={resetAt}
 				usageThrottledWindows={["five_hour"]}
@@ -1274,7 +1279,9 @@ describe("RateLimitProgress", () => {
 						resetIso={null}
 						usageData={{
 							remainingUsd: 12.5,
+							microdollarsUsed: 37_500_000,
 							totalMicrodollarsAcquired: 50_000_000,
+							utilizationPercent: 75,
 						}}
 						usageAsOfIso={new Date(Date.now() - 20 * 60 * 1000).toISOString()}
 						provider="kilo"
@@ -1291,7 +1298,9 @@ describe("RateLimitProgress", () => {
 						resetIso={null}
 						usageData={{
 							remainingUsd: 12.5,
+							microdollarsUsed: 37_500_000,
 							totalMicrodollarsAcquired: 50_000_000,
+							utilizationPercent: 75,
 						}}
 						usageAsOfIso={new Date(Date.now() - 60 * 1000).toISOString()}
 						provider="kilo"
@@ -1449,6 +1458,7 @@ describe("RateLimitProgress", () => {
 						limits: [
 							{
 								kind: "weekly_scoped",
+								group: "weekly",
 								percent: 63,
 								resets_at: future(),
 								scope: {
@@ -1457,6 +1467,7 @@ describe("RateLimitProgress", () => {
 										display_name: "GPT-5.3-Codex-Spark",
 									},
 								},
+								is_active: true,
 							},
 						],
 					}}
@@ -1498,9 +1509,11 @@ describe("RateLimitProgress", () => {
 						limits: [
 							{
 								kind: "weekly_scoped",
+								group: "weekly",
 								percent: 63,
 								resets_at: future(),
 								scope: { model: { id: "fable", display_name: "Fable" } },
+								is_active: true,
 							},
 						],
 					}}
@@ -1749,7 +1762,7 @@ describe("projection wording", () => {
 						utilization: 100,
 						resets_at: new Date(resetMs).toISOString(),
 					},
-					seven_day: null,
+					seven_day: undefined,
 				}}
 				usageAsOfIso={new Date(now).toISOString()}
 				provider="anthropic"

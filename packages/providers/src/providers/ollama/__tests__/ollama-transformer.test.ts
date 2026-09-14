@@ -259,8 +259,10 @@ describe("ollama-transformer", () => {
 			});
 			expect(result.type).toBe("message");
 			expect(result.role).toBe("assistant");
-			expect(result.content).toHaveLength(1);
-			expect(result.content?.[0]).toEqual({
+			const content = result.content;
+			expect(content).toHaveLength(1);
+			if (!Array.isArray(content)) throw new Error("expected content blocks");
+			expect(content[0]).toEqual({
 				type: "text",
 				text: "Hello world",
 			});

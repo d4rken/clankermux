@@ -98,6 +98,7 @@ describe("weekly-only workload evidence", () => {
 				displayName: "Fable",
 				percent: 100,
 				resetsAtMs: NOW + 5 * DAY,
+				isActive: true,
 			},
 		];
 		const row = computeWeeklyWorkloads([s], NOW).find(
@@ -120,6 +121,7 @@ describe("weekly-only workload evidence", () => {
 				displayName: "Fable",
 				percent: 50,
 				resetsAtMs: NOW + 4 * DAY,
+				isActive: true,
 			},
 		];
 		const row = computeWeeklyWorkloads([s], NOW).find(
@@ -199,6 +201,7 @@ it("rejects elapsed family evidence even inside the reset matching tolerance", (
 					displayName: "Fable",
 					percent: 100,
 					resetsAtMs: NOW - 10000,
+					isActive: true,
 				},
 			],
 		},
@@ -240,6 +243,7 @@ it("an unopened family account still contributes its weekly planning checkpoint"
 			displayName: "Fable",
 			percent: 60,
 			resetsAtMs: NOW + 5 * DAY,
+			isActive: true,
 		},
 	];
 	const b = {

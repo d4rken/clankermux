@@ -10,6 +10,7 @@
  * global `fetch`, so no Anthropic endpoint is ever contacted.
  */
 import { afterEach, beforeEach, describe, expect, it, spyOn } from "bun:test";
+import { mockFetch } from "@clankermux/test-support";
 import {
 	computeDemandAwareInterval,
 	computePollDelay,
@@ -410,17 +411,19 @@ describe("demand-aware cadence — noteActivity re-arm (integration)", () => {
 	beforeEach(() => {
 		fetchCalls = 0;
 		fetchFails = false;
-		fetchSpy = spyOn(globalThis, "fetch").mockImplementation(async () => {
-			fetchCalls++;
-			if (fetchFails) return new Response("nope", { status: 500 });
-			return new Response(
-				JSON.stringify({
-					five_hour: { utilization: 10, resets_at: null },
-					seven_day: { utilization: 20, resets_at: null },
-				}),
-				{ status: 200, headers: { "content-type": "application/json" } },
-			);
-		});
+		fetchSpy = spyOn(globalThis, "fetch").mockImplementation(
+			mockFetch(async () => {
+				fetchCalls++;
+				if (fetchFails) return new Response("nope", { status: 500 });
+				return new Response(
+					JSON.stringify({
+						five_hour: { utilization: 10, resets_at: null },
+						seven_day: { utilization: 20, resets_at: null },
+					}),
+					{ status: 200, headers: { "content-type": "application/json" } },
+				);
+			}),
+		);
 	});
 	afterEach(() => {
 		for (const id of ids.splice(0)) usageCache.stopPolling(id);

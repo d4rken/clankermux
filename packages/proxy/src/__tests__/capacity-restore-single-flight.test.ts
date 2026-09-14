@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, mock } from "bun:test";
 import { usageCache } from "@clankermux/providers";
+import { mockFetch } from "@clankermux/test-support";
 import type { Account, RequestMeta } from "@clankermux/types";
 import type { ProxyContext } from "../handlers";
 import {
@@ -74,9 +75,6 @@ function makeAccount(overrides: Partial<Account> = {}): Account {
 		peak_hours_pause_enabled: false,
 		codex_auto_apply_reset_credits_enabled: false,
 		custom_endpoint: null,
-		model_mappings: null,
-		cross_region_mode: null,
-		model_fallbacks: null,
 		billing_type: null,
 		pause_reason: null,
 		refresh_token_issued_at: null,
@@ -237,8 +235,8 @@ function makeGatedFetch(originalFetch: typeof globalThis.fetch) {
 	const gate = new Promise<void>((resolve) => {
 		state.release = resolve;
 	});
-	globalThis.fetch = mock(
-		async (input: RequestInfo | URL, init?: RequestInit) => {
+	globalThis.fetch = mockFetch(
+		mock(async (input: RequestInfo | URL, init?: RequestInit) => {
 			if (!isProxyCall(input)) return originalFetch(input as never, init);
 			const headers =
 				input instanceof Request ? input.headers : new Headers(init?.headers);
@@ -253,7 +251,7 @@ function makeGatedFetch(originalFetch: typeof globalThis.fetch) {
 			}
 			state.siblingCalls += 1;
 			return ok200();
-		},
+		}),
 	);
 	return state;
 }

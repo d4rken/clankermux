@@ -163,6 +163,7 @@ describe("buildPermutation", () => {
 	it("gives every unit a different unit of the same account", () => {
 		const units: AlignmentUnit[] = [0, 1, 2, 3, 4].map((i) => ({
 			accountId: i % 2 === 0 ? "A" : "B",
+			resetAt: RESET,
 			fromMs: T0 + i * INTERVAL_MS,
 			toMs: T0 + (i + 1) * INTERVAL_MS,
 			deltaPct: 1,

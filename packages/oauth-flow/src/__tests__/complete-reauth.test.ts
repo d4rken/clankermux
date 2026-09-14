@@ -46,8 +46,8 @@ function makeConfig(): Config {
 
 const testOauthConfig: OAuthProviderConfig = {
 	clientId: "test-client-id",
-	authorizationEndpoint: "https://example.com/oauth/authorize",
-	tokenEndpoint: "https://example.com/oauth/token",
+	authorizeUrl: "https://example.com/oauth/authorize",
+	tokenUrl: "https://example.com/oauth/token",
 	redirectUri: "http://localhost/callback",
 	scopes: ["openid"],
 };
@@ -177,7 +177,9 @@ describe("OAuthFlow.completeReauth", () => {
 		// Override exchangeCode to return tokens without refreshToken (console mode)
 		mockExchangeCode.mockImplementation(async () => ({
 			accessToken: "console-access-token",
-			refreshToken: null,
+			// Console mode returns no refresh token at all; `OAuthTokens` makes the
+			// field optional rather than nullable.
+			refreshToken: undefined,
 			expiresAt: Date.now() + 3_600_000,
 		}));
 
@@ -243,7 +245,7 @@ describe("OAuthFlow.completeReauth", () => {
 			refreshToken: "new-refresh-token",
 			expiresAt: Date.now() + 3_600_000,
 		}));
-		const resumeSpy = mock(async () => true);
+		const resumeSpy = mock(async (_accountId: string) => true);
 		const flow = new OAuthFlow(makeDbOps(runSpy, resumeSpy), makeConfig());
 		const accountId = "cccccccc-0000-0000-0000-000000000003";
 

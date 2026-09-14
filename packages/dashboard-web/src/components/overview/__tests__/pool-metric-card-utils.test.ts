@@ -15,16 +15,22 @@ function makeFamily(
 	const merged: FamilyWeeklyUsage = {
 		family: "fable",
 		label: "Fable",
-		worstPct,
 		worstAccountName: "acct-a",
 		earliestResetMs: 0,
 		elevated: worstPct >= FAMILY_WEEKLY_ELEVATED_THRESHOLD_PCT,
 		accounts: [
-			{ name: "acct-a", pct: worstPct, resetMs: 0, exhaustsAtMs: null },
+			{
+				accountId: "acct-a",
+				name: "acct-a",
+				pct: worstPct,
+				resetMs: 0,
+				exhaustsAtMs: null,
+			},
 		],
 		exhaustedCount: 0,
 		elevatedCount: 0,
 		atRiskCount: 0,
+		learningCount: 0,
 		soonestExhaustsAtMs: null,
 		...overrides,
 	};
@@ -63,6 +69,7 @@ function makeFamily(
 /** N account rows: the first `elevatedPcts.length` take those pcts, rest are 5%. */
 function accountRows(total: number, elevatedPcts: number[]) {
 	return Array.from({ length: total }, (_, i) => ({
+		accountId: `acct-${i}`,
 		name: `acct-${i}`,
 		pct: elevatedPcts[i] ?? 5,
 		resetMs: 0,
@@ -238,7 +245,15 @@ describe("familyScopeSummary", () => {
 		const f = makeFamily({
 			worstPct: 100,
 			earliestResetMs: 500,
-			accounts: [{ name: "solo", pct: 100, resetMs: 500 }],
+			accounts: [
+				{
+					accountId: "solo",
+					name: "solo",
+					pct: 100,
+					resetMs: 500,
+					exhaustsAtMs: null,
+				},
+			],
 		});
 		expect(familyScopeSummary(f)).toEqual({ prefix: "solo · ", resetMs: 500 });
 	});
@@ -250,9 +265,27 @@ describe("familyScopeSummary", () => {
 			worstPct: 100,
 			earliestResetMs: 100,
 			accounts: [
-				{ name: "spent", pct: 100, resetMs: 900 },
-				{ name: "healthy-a", pct: 10, resetMs: 100 },
-				{ name: "healthy-b", pct: 20, resetMs: 300 },
+				{
+					accountId: "spent",
+					name: "spent",
+					pct: 100,
+					resetMs: 900,
+					exhaustsAtMs: null,
+				},
+				{
+					accountId: "healthy-a",
+					name: "healthy-a",
+					pct: 10,
+					resetMs: 100,
+					exhaustsAtMs: null,
+				},
+				{
+					accountId: "healthy-b",
+					name: "healthy-b",
+					pct: 20,
+					resetMs: 300,
+					exhaustsAtMs: null,
+				},
 			],
 		});
 		expect(familyScopeSummary(f)).toEqual({
@@ -266,9 +299,27 @@ describe("familyScopeSummary", () => {
 			worstPct: 90,
 			earliestResetMs: 100,
 			accounts: [
-				{ name: "hot-a", pct: 90, resetMs: 800 },
-				{ name: "hot-b", pct: 85, resetMs: 600 },
-				{ name: "healthy", pct: 10, resetMs: 100 },
+				{
+					accountId: "hot-a",
+					name: "hot-a",
+					pct: 90,
+					resetMs: 800,
+					exhaustsAtMs: null,
+				},
+				{
+					accountId: "hot-b",
+					name: "hot-b",
+					pct: 85,
+					resetMs: 600,
+					exhaustsAtMs: null,
+				},
+				{
+					accountId: "healthy",
+					name: "healthy",
+					pct: 10,
+					resetMs: 100,
+					exhaustsAtMs: null,
+				},
 			],
 		});
 		expect(familyScopeSummary(f)).toEqual({
@@ -283,8 +334,20 @@ describe("familyScopeSummary", () => {
 			elevated: false,
 			earliestResetMs: 100,
 			accounts: [
-				{ name: "a", pct: 30, resetMs: 700 },
-				{ name: "b", pct: 10, resetMs: 100 },
+				{
+					accountId: "a",
+					name: "a",
+					pct: 30,
+					resetMs: 700,
+					exhaustsAtMs: null,
+				},
+				{
+					accountId: "b",
+					name: "b",
+					pct: 10,
+					resetMs: 100,
+					exhaustsAtMs: null,
+				},
 			],
 		});
 		expect(familyScopeSummary(f)).toEqual({

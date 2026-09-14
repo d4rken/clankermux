@@ -12,7 +12,7 @@ const encoder = new TextEncoder();
 const decoder = new TextDecoder();
 
 describe("RequestBodyContext.getBuffer — encode without the defensive slice", () => {
-	function naive(body: unknown): Uint8Array {
+	function naive(body: unknown): Uint8Array<ArrayBuffer> {
 		return encoder.encode(JSON.stringify(body));
 	}
 

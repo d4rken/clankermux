@@ -642,13 +642,19 @@ describe("event translation", () => {
 			},
 		];
 
+		// Widened to the element type `idsOf` produces: an event that carried a
+		// null or absent id must fail `toContain`, not fail to compile.
+		const truncatedIds: Array<string | null | undefined> = [
+			longId,
+			longAccountId,
+		];
 		for (const { label, evt, idsOf } of cases) {
 			const mapped = toPublicStreamEvent(evt, 0) as unknown as IdBearing | null;
 			expect(mapped, label).not.toBeNull();
 			const ids = idsOf(mapped as IdBearing);
 			expect(ids.length, label).toBeGreaterThan(0);
 			for (const id of ids) {
-				expect([longId, longAccountId], label).toContain(id);
+				expect(truncatedIds, label).toContain(id);
 			}
 		}
 	});

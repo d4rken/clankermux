@@ -48,7 +48,7 @@ function makeAccount(overrides: Partial<Account> = {}): Account {
 		name: "Main-me",
 		provider: "anthropic",
 		api_key: "test-key",
-		refresh_token: null,
+		refresh_token: "",
 		access_token: null,
 		expires_at: null,
 		request_count: 0,
@@ -72,9 +72,6 @@ function makeAccount(overrides: Partial<Account> = {}): Account {
 		peak_hours_pause_enabled: false,
 		codex_auto_apply_reset_credits_enabled: false,
 		custom_endpoint: null,
-		model_mappings: null,
-		cross_region_mode: null,
-		model_fallbacks: null,
 		billing_type: null,
 		pause_reason: null,
 		refresh_token_issued_at: null,
@@ -707,9 +704,7 @@ describe("half-open overload probe lifecycle", () => {
 		// The account maps the haiku family to a model with NO Claude family —
 		// the 529 must be attributed to the LOGICAL haiku bucket, not the
 		// provider-wide bucket that would gate every family.
-		const account = makeAccount({
-			model_mappings: JSON.stringify({ haiku: "qwen/qwen-2.5" }),
-		});
+		const account = makeAccount({});
 		const ctx = makeContext([account]);
 
 		const res = await callHandleProxy(
@@ -749,9 +744,7 @@ describe("half-open overload probe lifecycle", () => {
 			throw new Error("expected an admitted sonnet probe");
 		}
 
-		const account = makeAccount({
-			model_mappings: JSON.stringify({ haiku: "qwen/qwen-2.5" }),
-		});
+		const account = makeAccount({});
 		const ctx = makeContext([account]);
 
 		const res = await callHandleProxy(

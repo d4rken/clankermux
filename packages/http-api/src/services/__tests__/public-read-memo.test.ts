@@ -80,7 +80,7 @@ describe("the shared public read memo", () => {
 
 	it("collapses concurrent cold callers onto one read", async () => {
 		let reads = 0;
-		let release: (() => void) | null = null;
+		let release: (() => void) | undefined;
 		const gate = new Promise<void>((resolve) => {
 			release = resolve;
 		});

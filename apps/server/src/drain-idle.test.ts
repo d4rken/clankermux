@@ -46,7 +46,9 @@ describe("waitForDrainIdle", () => {
 		const BUSY_ON_CALL = 3;
 		let calls = 0;
 		let virtualNow = 0;
-		let callsAtResolve: number | null = null;
+		// A field rather than a local: the assignment below happens inside a
+		// callback, and a `let` stays narrowed to its initializer across it.
+		const resolve: { calls: number | null } = { calls: null };
 		const watcher = waitForDrainIdle({
 			getPendingCount: () => {
 				calls++;
@@ -58,14 +60,14 @@ describe("waitForDrainIdle", () => {
 			graceMs: GRACE_MS,
 		});
 		void watcher.promise.then(() => {
-			callsAtResolve = calls;
+			resolve.calls = calls;
 		});
 		await watcher.promise;
 		// Call 3 is busy, so the streak restarts at call 4 and a full grace
 		// (GRACE_MS / POLL_MS = 5 polls) has to elapse from there. Had the busy
 		// sample not reset the streak, this would have resolved at call 6.
 		const pollsPerGrace = GRACE_MS / POLL_MS;
-		expect(callsAtResolve).toBe(BUSY_ON_CALL + 1 + pollsPerGrace);
+		expect(resolve.calls).toBe(BUSY_ON_CALL + 1 + pollsPerGrace);
 	});
 
 	it("stops polling after cancel and never resolves", async () => {

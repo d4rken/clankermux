@@ -183,9 +183,6 @@ describe("model-not-served terminal", () => {
 		});
 		const account = makeAccount({
 			name: "WithFallbacks",
-			model_mappings: JSON.stringify({
-				haiku: [MODEL, "claude-haiku-fallback"],
-			}),
 		});
 		usageCache.delete(account.id);
 		const ctx = makeContext([account]);

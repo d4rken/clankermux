@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import type { FullUsageData } from "@clankermux/types";
+import type { AnthropicLimitEntry, FullUsageData } from "@clankermux/types";
 import {
 	classifyUsageCard,
 	computeSoonestWindowResets,
@@ -51,7 +51,11 @@ const inHours = (hours: number) =>
 /** What a list-level caller supplies: the families this account's class reports. */
 const FABLE = [{ family: "fable", displayName: "Fable" }] as const;
 
-function scopedEntry(displayName: string, resetsAt: string, percent = 42) {
+function scopedEntry(
+	displayName: string,
+	resetsAt: string,
+	percent = 42,
+): AnthropicLimitEntry {
 	return {
 		kind: "weekly_scoped",
 		group: "weekly",
@@ -66,7 +70,7 @@ function anthropicAccount(
 	overrides: Partial<UsageCardSource> & {
 		fiveHourResetsAt?: string | null;
 		sevenDayResetsAt?: string | null;
-		scoped?: ReturnType<typeof scopedEntry>[];
+		scoped?: AnthropicLimitEntry[];
 	} = {},
 ): UsageCardSource {
 	const {
@@ -109,11 +113,13 @@ describe("classifyUsageCard", () => {
 	});
 
 	it("prefers the last-known snapshot over the 429 note", () => {
-		const staleUsage = {
+		// `undefined`, not `null`: `StaleUsageInfo`'s windows are optional rather
+		// than nullable, and every reader only tests them for truthiness.
+		const staleUsage: UsageCardSource["staleUsage"] = {
 			asOfIso: inHours(-1),
-			fiveHour: null,
+			fiveHour: undefined,
 			sevenDay: { utilization: 12, resetIso: inHours(20) },
-		} as UsageCardSource["staleUsage"];
+		};
 		const card = classifyUsageCard(
 			{
 				resetIso: null,
@@ -352,8 +358,8 @@ describe("computeSoonestWindowResets", () => {
 					staleUsage: {
 						asOfIso: inHours(-1),
 						fiveHour: { utilization: 80, resetIso: inHours(1) },
-						sevenDay: null,
-					} as UsageCardSource["staleUsage"],
+						sevenDay: undefined,
+					},
 				},
 			],
 			NOW,

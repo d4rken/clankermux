@@ -1,6 +1,6 @@
 import { describe, expect, it } from "bun:test";
 import { type FamilyRow, listFamilyRows } from "@clankermux/core";
-import type { AccountResponse } from "@clankermux/types";
+import type { AccountResponse, AnthropicLimitEntry } from "@clankermux/types";
 import { renderToStaticMarkup } from "react-dom/server";
 import { buildQuotaSummary } from "../../lib/quota-summary";
 import { FamilyWeeklyCard } from "./FamilyWeeklyCard";
@@ -13,7 +13,7 @@ function scopedEntry(
 	displayName: string,
 	percent: number,
 	resetMs: number = NOW + 3 * DAY,
-) {
+): AnthropicLimitEntry {
 	return {
 		kind: "weekly_scoped",
 		group: "weekly",
@@ -31,7 +31,7 @@ function scopedEntry(
 
 function scopedAccount(
 	name: string,
-	entries: ReturnType<typeof scopedEntry>[],
+	entries: AnthropicLimitEntry[],
 	over: Partial<AccountResponse> = {},
 ): AccountResponse {
 	return {
@@ -55,7 +55,7 @@ function scopedAccount(
  */
 function windowedAccount(
 	name: string,
-	entries: ReturnType<typeof scopedEntry>[],
+	entries: AnthropicLimitEntry[],
 	over: Partial<AccountResponse> = {},
 ): AccountResponse {
 	return scopedAccount(name, entries, {
@@ -199,7 +199,7 @@ describe("FamilyWeeklyCard", () => {
 
 	for (const idle of [false, true]) {
 		it(`includes ${idle ? "idle" : "omitted"} zero-use accounts in the headline, bars and exhaustion count`, () => {
-			const entries = idle
+			const entries: AnthropicLimitEntry[] = idle
 				? [{ ...scopedEntry("Fable", 0), resets_at: null, is_active: false }]
 				: [];
 			const html = render(
@@ -208,10 +208,7 @@ describe("FamilyWeeklyCard", () => {
 					windowedAccount("Claude-3", [scopedEntry("Fable", 99)]),
 					windowedAccount("Claude-4", [scopedEntry("Fable", 40)]),
 					windowedAccount("Claude-5", [scopedEntry("Fable", 100)]),
-					windowedAccount(
-						"Claude-1",
-						entries as ReturnType<typeof scopedEntry>[],
-					),
+					windowedAccount("Claude-1", entries),
 				]),
 			);
 

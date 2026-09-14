@@ -8,6 +8,10 @@ import {
 	spyOn,
 } from "bun:test";
 import { devinClient } from "@clankermux/providers";
+import {
+	makeAccount as canonicalAccount,
+	mockFetch,
+} from "@clankermux/test-support";
 import type { Account } from "@clankermux/types";
 import {
 	getFamilyWeeklyExhaustedUntil,
@@ -34,41 +38,16 @@ async function callHandleProxy(
 }
 
 function makeAccount(overrides: Partial<Account> = {}): Account {
-	return {
-		id: "acc-1",
-		name: "test-account",
+	return canonicalAccount({
 		// Unknown provider name → getProvider() returns undefined → handleProxy
 		// falls back to ctx.provider (our mock), giving deterministic upstream
 		// behaviour with no real provider transforms.
 		provider: "test-provider" as Account["provider"],
 		api_key: "test-key",
 		refresh_token: "",
-		access_token: null,
-		expires_at: null,
-		request_count: 0,
-		total_requests: 0,
-		last_used: null,
 		created_at: Date.now(),
-		rate_limited_until: null,
-		session_start: null,
-		session_request_count: 0,
-		paused: false,
-		rate_limit_reset: null,
-		rate_limit_status: null,
-		rate_limit_remaining: null,
-		priority: 0,
-		auto_fallback_enabled: false,
-		auto_refresh_enabled: false,
-		auto_pause_on_overage_enabled: false,
-		custom_endpoint: null,
-		model_mappings: null,
-		cross_region_mode: null,
-		model_fallbacks: null,
-		billing_type: null,
-		pause_reason: null,
-		refresh_token_issued_at: null,
 		...overrides,
-	};
+	});
 }
 
 /**
@@ -358,7 +337,9 @@ describe("force-account proxy override", () => {
 			"claude-fable-5",
 		);
 		setForcedAccount(forced.id);
-		globalThis.fetch = mock(async () => jsonResponse({ ok: true }, 200));
+		globalThis.fetch = mockFetch(
+			mock(async () => jsonResponse({ ok: true }, 200)),
+		);
 
 		// Recorded BEFORE the request starts, so the observedAt ordering guard in
 		// clearFamilyWeeklyExhausted cannot be what keeps an entry alive.
@@ -397,13 +378,15 @@ describe("force-account proxy override", () => {
 		// Track which target each fetch hit. Only the forced account should be
 		// called — never the second healthy account.
 		let fetchCount = 0;
-		globalThis.fetch = mock(async () => {
-			fetchCount++;
-			return jsonResponse(
-				{ error: { type: "rate_limit_error", message: "Rate limited" } },
-				429,
-			);
-		});
+		globalThis.fetch = mockFetch(
+			mock(async () => {
+				fetchCount++;
+				return jsonResponse(
+					{ error: { type: "rate_limit_error", message: "Rate limited" } },
+					429,
+				);
+			}),
+		);
 
 		const { ctx } = makeContext([forced, healthy]);
 		setForcedAccount("forced-1");
@@ -432,13 +415,15 @@ describe("force-account proxy override", () => {
 	it("returns the forced account's 529 as-is without provider-overload cooldown", async () => {
 		const forced = makeAccount({ id: "forced-1", name: "Forced-1" });
 		let fetchCount = 0;
-		globalThis.fetch = mock(async () => {
-			fetchCount++;
-			return jsonResponse(
-				{ error: { type: "overloaded_error", message: "Overloaded" } },
-				529,
-			);
-		});
+		globalThis.fetch = mockFetch(
+			mock(async () => {
+				fetchCount++;
+				return jsonResponse(
+					{ error: { type: "overloaded_error", message: "Overloaded" } },
+					529,
+				);
+			}),
+		);
 
 		const { ctx } = makeContext([forced]);
 		setForcedAccount("forced-1");
@@ -465,25 +450,26 @@ describe("force-account proxy override", () => {
 			// forced path never reaches the gate. getProvider("codex") returns the
 			// real codex provider; we mock fetch so the upstream call is captured.
 			provider: "codex",
-			model_mappings: JSON.stringify({ opus: "gpt-5.5" }),
 		});
 
 		let fetchCount = 0;
-		globalThis.fetch = mock(async () => {
-			fetchCount++;
-			return jsonResponse(
-				{
-					id: "msg_1",
-					type: "message",
-					role: "assistant",
-					content: [{ type: "text", text: "ok" }],
-					model: "gpt-5.5",
-					stop_reason: "end_turn",
-					usage: { input_tokens: 1, output_tokens: 1 },
-				},
-				200,
-			);
-		});
+		globalThis.fetch = mockFetch(
+			mock(async () => {
+				fetchCount++;
+				return jsonResponse(
+					{
+						id: "msg_1",
+						type: "message",
+						role: "assistant",
+						content: [{ type: "text", text: "ok" }],
+						model: "gpt-5.5",
+						stop_reason: "end_turn",
+						usage: { input_tokens: 1, output_tokens: 1 },
+					},
+					200,
+				);
+			}),
+		);
 
 		const { ctx } = makeContext([forcedCodex], { providerName: "codex" });
 		setForcedAccount("codex-forced");
@@ -519,7 +505,9 @@ describe("force-account proxy override", () => {
 			getAccountMock;
 		setForcedAccount("forced-1");
 
-		globalThis.fetch = mock(async () => jsonResponse({ ok: true }, 200));
+		globalThis.fetch = mockFetch(
+			mock(async () => jsonResponse({ ok: true }, 200)),
+		);
 
 		await callHandleProxy(
 			makeRequest(),
@@ -539,7 +527,9 @@ describe("force-account proxy override", () => {
 		// Force points at an account that does not exist.
 		setForcedAccount("ghost-account");
 
-		globalThis.fetch = mock(async () => jsonResponse({ ok: true }, 200));
+		globalThis.fetch = mockFetch(
+			mock(async () => jsonResponse({ ok: true }, 200)),
+		);
 
 		const response = await callHandleProxy(
 			makeRequest(),
@@ -571,10 +561,12 @@ describe("force-account proxy override", () => {
 		});
 
 		let fetchCount = 0;
-		globalThis.fetch = mock(async () => {
-			fetchCount++;
-			return jsonResponse({ ok: true }, 200);
-		});
+		globalThis.fetch = mockFetch(
+			mock(async () => {
+				fetchCount++;
+				return jsonResponse({ ok: true }, 200);
+			}),
+		);
 
 		const { ctx } = makeContext([forced], { providerName: "anthropic" });
 		setForcedAccount("forced-oauth");
@@ -609,7 +601,9 @@ describe("force-account proxy override", () => {
 			expires_at: 1, // already expired → triggers refresh attempt → throw
 		});
 
-		globalThis.fetch = mock(async () => jsonResponse({ ok: true }, 200));
+		globalThis.fetch = mockFetch(
+			mock(async () => jsonResponse({ ok: true }, 200)),
+		);
 
 		const { ctx } = makeContext([forced], { providerName: "anthropic" });
 		setForcedAccount("forced-oauth-rec");

@@ -24,7 +24,7 @@ import {
 	registerCodexResetCreditsRefresher,
 	unregisterCodexResetCreditsRefresher,
 } from "@clankermux/proxy";
-import type { AccountResponse } from "@clankermux/types";
+import type { AccountResponse, FullUsageData } from "@clankermux/types";
 
 import { listAccountResponses } from "../accounts";
 
@@ -142,7 +142,7 @@ beforeEach(() => {
 	codexRateLimitResetCreditsCache.clear();
 	registerCodexResetCreditsRefresher(REFRESHER_ID, async (accountId) => {
 		refreshed.push(accountId);
-		return { success: true };
+		return { success: true, message: "refreshed" };
 	});
 });
 
@@ -151,6 +151,16 @@ afterEach(() => {
 	usageCache.delete(ACCOUNT_ID);
 	codexRateLimitResetCreditsCache.clear();
 });
+
+/**
+ * The Codex usage column stores an Anthropic-shaped payload, so the weekly
+ * reading is the flat `seven_day` key. `FullUsageData` also covers providers
+ * with no such key, hence the narrowing.
+ */
+function sevenDayPct(usage: FullUsageData | null | undefined): number | null {
+	if (!usage || !("seven_day" in usage)) return null;
+	return usage.seven_day?.utilization ?? null;
+}
 
 describe("account assembly side effects — management (the default)", () => {
 	it("refreshes Codex reset credits upstream", async () => {
@@ -191,7 +201,7 @@ describe("account assembly side effects — read-only", () => {
 		usageCache.delete(ACCOUNT_ID);
 		codexRateLimitResetCreditsCache.clear();
 		const readOnly = await run("read-only");
-		expect(readOnly?.usageData?.seven_day?.utilization).toBe(33);
+		expect(sevenDayPct(readOnly?.usageData)).toBe(33);
 		expect(readOnly?.usageData).toEqual(managed?.usageData ?? null);
 	});
 });

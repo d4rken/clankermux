@@ -43,13 +43,28 @@ beforeEach(() => {
 	db.exec("ANALYZE sqlite_schema");
 	statements = [];
 	const adapter = new BunSqlAdapter(db);
-	for (const method of ["get", "query"] as const) {
-		const original = adapter[method].bind(adapter);
-		adapter[method] = (async (sql: string, binds: unknown[] = []) => {
-			statements.push({ sql, binds: binds as SQLQueryBindings[] });
-			return original(sql, binds);
-		}) as (typeof adapter)[typeof method];
+	// Recorded per method rather than in a loop over both: the two carry
+	// different generic signatures, and one wrapper cannot satisfy both.
+	const originalGet = adapter.get.bind(adapter);
+	const originalQuery = adapter.query.bind(adapter);
+	function recordingGet<R>(sql: string, binds?: unknown[]): Promise<R | null>;
+	async function recordingGet(
+		sql: string,
+		binds: unknown[] = [],
+	): Promise<unknown> {
+		statements.push({ sql, binds: binds as SQLQueryBindings[] });
+		return originalGet(sql, binds);
 	}
+	function recordingQuery<R>(sql: string, binds?: unknown[]): Promise<R[]>;
+	async function recordingQuery(
+		sql: string,
+		binds: unknown[] = [],
+	): Promise<unknown[]> {
+		statements.push({ sql, binds: binds as SQLQueryBindings[] });
+		return originalQuery(sql, binds);
+	}
+	adapter.get = recordingGet;
+	adapter.query = recordingQuery;
 	context = {
 		db: adapter,
 		config: {},

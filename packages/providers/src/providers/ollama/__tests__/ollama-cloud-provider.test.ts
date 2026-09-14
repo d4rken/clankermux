@@ -1,35 +1,26 @@
 import { describe, expect, it } from "bun:test";
+import { makeAccount as canonicalAccount } from "@clankermux/test-support";
 import type { Account } from "@clankermux/types";
 import { OllamaCloudProvider } from "../ollama-cloud-provider";
+
+/** `config` is protected on the base class; the constructor sets it. */
+class ConfigReadableProvider extends OllamaCloudProvider {
+	get streamingConfigured(): boolean | undefined {
+		return this.config.supportsStreaming;
+	}
+}
 
 describe("OllamaCloudProvider", () => {
 	const provider = new OllamaCloudProvider();
 
-	const makeAccount = (model_mappings: string | null = null): Account => ({
-		id: "ollama-cloud-1",
-		name: "ollama-cloud-test",
-		provider: "ollama-cloud",
-		api_key: null,
-		refresh_token: "sk-test-token",
-		access_token: null,
-		expires_at: null,
-		request_count: 0,
-		total_requests: 0,
-		last_used: null,
-		created_at: Date.now(),
-		rate_limited_until: null,
-		session_start: null,
-		session_request_count: 0,
-		paused: false,
-		rate_limit_reset: null,
-		rate_limit_status: null,
-		rate_limit_remaining: null,
-		priority: 0,
-		auto_fallback_enabled: false,
-		auto_refresh_enabled: false,
-		custom_endpoint: null,
-		model_mappings,
-	});
+	const makeAccount = (): Account =>
+		canonicalAccount({
+			id: "ollama-cloud-1",
+			name: "ollama-cloud-test",
+			provider: "ollama-cloud",
+			refresh_token: "sk-test-token",
+			created_at: Date.now(),
+		});
 
 	describe("constructor", () => {
 		it("instantiates without errors", () => {
@@ -156,7 +147,7 @@ describe("OllamaCloudProvider", () => {
 
 	describe("supportsStreaming", () => {
 		it("supports streaming", () => {
-			expect(provider.config.supportsStreaming).toBe(true);
+			expect(new ConfigReadableProvider().streamingConfigured).toBe(true);
 		});
 
 		it("detects streaming responses by content-type", () => {
@@ -169,9 +160,7 @@ describe("OllamaCloudProvider", () => {
 
 	describe("transformRequestBody (model mapping)", () => {
 		it("maps model name via model_mappings", async () => {
-			const account = makeAccount(
-				JSON.stringify({ "claude-sonnet-4-5": "gemma3:4b" }),
-			);
+			const account = makeAccount();
 			const request = new Request("https://ollama.com/v1/messages", {
 				method: "POST",
 				headers: { "Content-Type": "application/json" },
@@ -189,7 +178,7 @@ describe("OllamaCloudProvider", () => {
 		});
 
 		it("passes through model unchanged without model_mappings", async () => {
-			const account = makeAccount(null);
+			const account = makeAccount();
 			const request = new Request("https://ollama.com/v1/messages", {
 				method: "POST",
 				headers: { "Content-Type": "application/json" },

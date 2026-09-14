@@ -26,6 +26,7 @@ function makeStatus(
 			pricingGaps: [],
 		},
 		eventLoop: { lastLagMs: 0.8, maxLagMs: 12, maxRecentLagMs: 3 },
+		providerOverload: [],
 		strategy: "session",
 		timestamp: new Date(1_700_000_000_000).toISOString(),
 		...overrides,

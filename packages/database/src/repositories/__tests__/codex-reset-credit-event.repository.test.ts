@@ -236,6 +236,7 @@ describe("CodexResetCreditEventRepository", () => {
 			// Simulate the loser of a claim race: the winner's row already exists,
 			// so a duplicate manual INSERT of the same auto attempt is ignored.
 			const first = await repo.claimAutoAttempt(CLAIM_INPUT);
+			if (!first) throw new Error("expected the race winner's claim");
 			expect(() =>
 				db.run(
 					`INSERT OR IGNORE INTO codex_reset_credit_events (
@@ -249,8 +250,8 @@ describe("CodexResetCreditEventRepository", () => {
 			// The duplicate row was ignored; the original claim is intact.
 			const rows = await repo.findRecentForAccount("acc-1", 10);
 			expect(rows.length).toBe(1);
-			expect(rows[0]?.id).toBe(first?.id);
-			expect(rows[0]?.idempotency_key).toBe(first?.idempotencyKey);
+			expect(rows[0]?.id).toBe(first.id);
+			expect(rows[0]?.idempotency_key).toBe(first.idempotencyKey);
 		});
 	});
 

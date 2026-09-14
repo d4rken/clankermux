@@ -369,6 +369,7 @@ describe("API Key lifecycle", () => {
 			row.hashedKey, // matching hash — only is_active=1 predicate should block
 			"new:hash",
 			"newprefx",
+			null,
 		);
 		expect(ok).toBe(false);
 	});
@@ -389,6 +390,7 @@ describe("API Key lifecycle", () => {
 			"stale:hash", // pretend we read this before `first` ran
 			"new:hash",
 			"newprefx",
+			null,
 		);
 		expect(updated).toBe(false);
 	});

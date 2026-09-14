@@ -1,9 +1,9 @@
-import type { ApiKeyResponse, RoutingRule } from "@clankermux/types";
+import type { RoutingRule } from "@clankermux/types";
 import { PROVIDER_NAMES } from "@clankermux/types";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 import { api } from "../../api";
-import { useAccounts } from "../../hooks/queries";
+import { useAccounts, useApiKeys } from "../../hooks/queries";
 import { Button } from "../ui/button";
 import {
 	Dialog,
@@ -29,10 +29,7 @@ export function RoutingTab() {
 		queryFn: () => api.get<{ data: RoutingRule[] }>("/api/routing-rules"),
 	});
 	const accounts = useAccounts();
-	const keys = useQuery({
-		queryKey: ["api-keys"],
-		queryFn: () => api.get<{ data: ApiKeyResponse[] }>("/api/api-keys"),
-	});
+	const keys = useApiKeys();
 	const [draft, setDraft] = useState<RoutingRule | null>(null);
 	const mutate = useMutation({
 		mutationFn: async (op: {
@@ -121,7 +118,7 @@ export function RoutingTab() {
 								<p className="text-sm text-muted-foreground">
 									{r.enabled ? "Enabled" : "Disabled"} ·{" "}
 									{r.match_api_key_id
-										? (keys.data?.data.find((k) => k.id === r.match_api_key_id)
+										? (keys.data?.find((k) => k.id === r.match_api_key_id)
 												?.name ?? "Missing key")
 										: "Any API key"}{" "}
 									·{" "}
@@ -239,7 +236,7 @@ export function RoutingTab() {
 									}
 								>
 									<option value="">Any API key</option>
-									{keys.data?.data.map((k) => (
+									{keys.data?.map((k) => (
 										<option value={k.id} key={k.id}>
 											{k.name}
 										</option>

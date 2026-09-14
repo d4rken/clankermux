@@ -9,6 +9,10 @@ import {
 } from "bun:test";
 import { Logger, LogLevel } from "@clankermux/logger";
 import { usageCache } from "@clankermux/providers";
+import {
+	makeAccount as canonicalAccount,
+	mockFetch,
+} from "@clankermux/test-support";
 import type { Account, RequestMeta } from "@clankermux/types";
 import type { ProxyContext } from "../handlers";
 import {
@@ -49,43 +53,14 @@ async function callHandleProxy(req: Request, url: URL, ctx: ProxyContext) {
 }
 
 function makeAccount(overrides: Partial<Account> = {}): Account {
-	return {
-		id: "acc-1",
+	return canonicalAccount({
 		name: "account",
-		provider: "anthropic",
-		api_key: null,
 		refresh_token: "rt-token",
 		access_token: "at-token",
 		expires_at: Date.now() + HOUR,
-		request_count: 0,
-		total_requests: 0,
-		last_used: null,
 		created_at: Date.now(),
-		rate_limited_until: null,
-		rate_limited_reason: null,
-		rate_limited_at: null,
-		consecutive_rate_limits: 0,
-		session_start: null,
-		session_request_count: 0,
-		paused: false,
-		rate_limit_reset: null,
-		rate_limit_status: null,
-		rate_limit_remaining: null,
-		priority: 0,
-		auto_fallback_enabled: false,
-		auto_refresh_enabled: false,
-		auto_pause_on_overage_enabled: false,
-		peak_hours_pause_enabled: false,
-		codex_auto_apply_reset_credits_enabled: false,
-		custom_endpoint: null,
-		model_mappings: null,
-		cross_region_mode: null,
-		model_fallbacks: null,
-		billing_type: null,
-		pause_reason: null,
-		refresh_token_issued_at: null,
 		...overrides,
-	};
+	});
 }
 
 /**
@@ -285,8 +260,8 @@ function ok200() {
  */
 function recordAttempts(originalFetch: typeof globalThis.fetch): string[] {
 	const attempts: string[] = [];
-	globalThis.fetch = mock(
-		async (input: RequestInfo | URL, init?: RequestInit) => {
+	globalThis.fetch = mockFetch(
+		mock(async (input: RequestInfo | URL, init?: RequestInit) => {
 			if (!isProxyCall(input)) return originalFetch(input as never, init);
 			const headers =
 				input instanceof Request ? input.headers : new Headers(init?.headers);
@@ -297,7 +272,7 @@ function recordAttempts(originalFetch: typeof globalThis.fetch): string[] {
 				headers.get("authorization") ?? headers.get("x-api-key") ?? "";
 			attempts.push(auth.replace(/^Bearer\s+/i, ""));
 			return ok200();
-		},
+		}),
 	);
 	return attempts;
 }
@@ -763,7 +738,7 @@ describe("pool-liveness reserve — composite soft-demotion reorder (handleProxy
 			name: "Codex",
 			provider: "codex",
 			api_key: "cx-key",
-			refresh_token: null,
+			refresh_token: "",
 			access_token: null,
 		});
 		seedUsage(healthy.id, 10, 10);
@@ -828,16 +803,13 @@ describe("pool-liveness reserve — composite soft-demotion reorder (handleProxy
 			id: "first",
 			name: "First",
 			access_token: "at-first",
-			model_mappings: JSON.stringify({
-				"claude-sonnet-4-5": "claude-opus-4-5",
-			}),
 		});
 		const second = makeAccount({
 			id: "second",
 			name: "Second",
 			provider: "anthropic-compatible",
 			api_key: "ak-second",
-			refresh_token: null,
+			refresh_token: "",
 			access_token: null,
 		});
 		// Healthy on every window: no soft demotion, so the candidate order is

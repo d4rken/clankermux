@@ -118,6 +118,20 @@ function loginRequest(body: unknown, raw?: string): Request {
 	});
 }
 
+/**
+ * `createSession` answers null when a password rotation wins the race with the
+ * INSERT. A fixture store never loses that race, so a null here is a broken
+ * test rather than a case to handle.
+ */
+async function mintSession(
+	svc: SessionAuthService,
+	binding: PasswordBinding,
+): Promise<{ token: string; expiresAt: number }> {
+	const session = await svc.createSession(binding);
+	if (!session) throw new Error("createSession returned null");
+	return session;
+}
+
 describe("POST /api/auth/login", () => {
 	it("issues a session cookie for the right password", async () => {
 		await configure("hunter2");
@@ -446,7 +460,7 @@ describe("a login that races a password rotation", () => {
 describe("POST /api/auth/logout", () => {
 	it("deletes the session and clears the cookie", async () => {
 		const binding = await configure("hunter2");
-		const { token } = await svc.createSession(binding);
+		const { token } = await mintSession(svc, binding);
 		const res = await createAuthLogoutHandler(svc)(
 			new Request("http://localhost/api/auth/logout", {
 				method: "POST",
@@ -501,14 +515,14 @@ describe("GET /api/auth/status", () => {
 
 	it("reports a live session once one exists", async () => {
 		const binding = await configure("hunter2");
-		const { token } = await svc.createSession(binding);
+		const { token } = await mintSession(svc, binding);
 		const res = await createAuthStatusHandler(svc)(statusRequest(token));
 		expect(await res.json()).toEqual({ configured: true, authenticated: true });
 	});
 
 	it("stops reporting a session after logout", async () => {
 		const binding = await configure("hunter2");
-		const { token } = await svc.createSession(binding);
+		const { token } = await mintSession(svc, binding);
 		await svc.destroySession(statusRequest(token));
 		const res = await createAuthStatusHandler(svc)(statusRequest(token));
 		expect(await res.json()).toEqual({

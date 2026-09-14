@@ -1,5 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it, mock } from "bun:test";
 import { usageCache } from "@clankermux/providers";
+import {
+	makeAccount as canonicalAccount,
+	mockFetch,
+} from "@clankermux/test-support";
 import type { Account, RequestMeta } from "@clankermux/types";
 import { cacheBodyStore } from "../cache-body-store";
 import {
@@ -64,43 +68,14 @@ async function configureCrossFamilyRoute(
 }
 
 function makeAccount(overrides: Partial<Account> = {}): Account {
-	return {
-		id: "acc-1",
+	return canonicalAccount({
 		name: "account",
-		provider: "anthropic",
-		api_key: null,
 		refresh_token: "rt-token",
 		access_token: "at-token",
 		expires_at: Date.now() + 3_600_000,
-		request_count: 0,
-		total_requests: 0,
-		last_used: null,
 		created_at: Date.now(),
-		rate_limited_until: null,
-		rate_limited_reason: null,
-		rate_limited_at: null,
-		consecutive_rate_limits: 0,
-		session_start: null,
-		session_request_count: 0,
-		paused: false,
-		rate_limit_reset: null,
-		rate_limit_status: null,
-		rate_limit_remaining: null,
-		priority: 0,
-		auto_fallback_enabled: false,
-		auto_refresh_enabled: false,
-		auto_pause_on_overage_enabled: false,
-		peak_hours_pause_enabled: false,
-		codex_auto_apply_reset_credits_enabled: false,
-		custom_endpoint: null,
-		model_mappings: null,
-		cross_region_mode: null,
-		model_fallbacks: null,
-		billing_type: null,
-		pause_reason: null,
-		refresh_token_issued_at: null,
 		...overrides,
-	};
+	});
 }
 
 /**
@@ -426,15 +401,15 @@ describe("burst-retry hold integration (handleProxy)", () => {
 
 		const calls: string[] = [];
 		let n = 0;
-		globalThis.fetch = mock(
-			async (input: RequestInfo | URL, init?: RequestInit) => {
+		globalThis.fetch = mockFetch(
+			mock(async (input: RequestInfo | URL, init?: RequestInit) => {
 				if (!isProxyCall(input)) return originalFetch(input as never, init);
 				const r = input instanceof Request ? input : new Request(String(input));
 				calls.push(r.url);
 				n += 1;
 				// Call 1 = held first attempt (429); call 2 = held re-probe (200).
 				return n === 1 ? rl429({ "x-should-retry": "true" }) : ok200();
-			},
+			}),
 		);
 
 		const ctx = makeContext([held, sibling], "held");
@@ -463,14 +438,14 @@ describe("burst-retry hold integration (handleProxy)", () => {
 		markAnthropicBurstThrottle();
 
 		const calls: string[] = [];
-		globalThis.fetch = mock(
-			async (input: RequestInfo | URL, init?: RequestInit) => {
+		globalThis.fetch = mockFetch(
+			mock(async (input: RequestInfo | URL, init?: RequestInit) => {
 				if (!isProxyCall(input)) return originalFetch(input as never, init);
 				const r = input instanceof Request ? input : new Request(String(input));
 				calls.push(r.url);
 				// The held account's re-probe succeeds.
 				return ok200();
-			},
+			}),
 		);
 
 		const ctx = makeContext([held, sibling], "held");
@@ -495,8 +470,8 @@ describe("burst-retry hold integration (handleProxy)", () => {
 		const originalUntil = observedAt + 120_000;
 		let renewedUntil: number | null = null;
 		let calls = 0;
-		globalThis.fetch = mock(
-			async (input: RequestInfo | URL, init?: RequestInit) => {
+		globalThis.fetch = mockFetch(
+			mock(async (input: RequestInfo | URL, init?: RequestInit) => {
 				if (!isProxyCall(input)) return originalFetch(input as never, init);
 				calls += 1;
 				if (calls === 1) {
@@ -509,7 +484,7 @@ describe("burst-retry hold integration (handleProxy)", () => {
 				expect(renewedUntil).toBeGreaterThan(originalUntil);
 				expect(renewedUntil).toBeLessThanOrEqual(Date.now() + 120_000);
 				return ok200();
-			},
+			}),
 		);
 		const res = await callHandleProxy(
 			makeRequest(),
@@ -541,8 +516,8 @@ describe("burst-retry hold integration (handleProxy)", () => {
 		const markerUntil = getAnthropicBurstThrottleUntil();
 		let heldProbes = 0;
 		let siblingCalls = 0;
-		globalThis.fetch = mock(
-			async (input: RequestInfo | URL, init?: RequestInit) => {
+		globalThis.fetch = mockFetch(
+			mock(async (input: RequestInfo | URL, init?: RequestInit) => {
 				if (!isProxyCall(input)) return originalFetch(input as never, init);
 				const headers =
 					input instanceof Request ? input.headers : new Headers(init?.headers);
@@ -563,7 +538,7 @@ describe("burst-retry hold integration (handleProxy)", () => {
 				}
 				siblingCalls += 1;
 				return ok200();
-			},
+			}),
 		);
 		const ctx = makeContext([held, sibling], held.id);
 		const res = await callHandleProxy(
@@ -605,8 +580,8 @@ describe("burst-retry hold integration (handleProxy)", () => {
 
 		let heldProbes = 0;
 		let siblingServed = false;
-		globalThis.fetch = mock(
-			async (input: RequestInfo | URL, init?: RequestInit) => {
+		globalThis.fetch = mockFetch(
+			mock(async (input: RequestInfo | URL, init?: RequestInit) => {
 				if (!isProxyCall(input)) return originalFetch(input as never, init);
 				const reqHeaders =
 					input instanceof Request ? input.headers : new Headers(init?.headers);
@@ -617,7 +592,7 @@ describe("burst-retry hold integration (handleProxy)", () => {
 				}
 				siblingServed = true;
 				return ok200();
-			},
+			}),
 		);
 
 		const ctx = makeContext([held, sibling], "held");
@@ -650,8 +625,8 @@ describe("burst-retry hold integration (handleProxy)", () => {
 		// Every upstream call 429s — held never recovers, and the siblings also 429.
 		let proxyCalls = 0;
 		const headers = new Set<string>();
-		globalThis.fetch = mock(
-			async (input: RequestInfo | URL, init?: RequestInit) => {
+		globalThis.fetch = mockFetch(
+			mock(async (input: RequestInfo | URL, init?: RequestInit) => {
 				if (!isProxyCall(input)) return originalFetch(input as never, init);
 				proxyCalls += 1;
 				const reqHeaders =
@@ -659,7 +634,7 @@ describe("burst-retry hold integration (handleProxy)", () => {
 				const auth = reqHeaders.get("authorization") ?? "";
 				headers.add(auth);
 				return rl429({ "x-should-retry": "true" });
-			},
+			}),
 		);
 
 		const ctx = makeContext([held, siblingA, siblingB], "held");
@@ -693,15 +668,14 @@ describe("burst-retry hold integration (handleProxy)", () => {
 			refresh_token: "rt",
 			access_token: "at-codex",
 			expires_at: Date.now() + 3_600_000,
-			model_mappings: JSON.stringify({ sonnet: "gpt-5.5" }),
 		});
 		seedFreshHeadroom("held");
 
 		let codexHit = false;
 		let heldCalls = 0;
 		let siblingServed = false;
-		globalThis.fetch = mock(
-			async (input: RequestInfo | URL, init?: RequestInit) => {
+		globalThis.fetch = mockFetch(
+			mock(async (input: RequestInfo | URL, init?: RequestInit) => {
 				if (!isProxyCall(input)) return originalFetch(input as never, init);
 				const target = callTarget(input);
 				if (target === "codex") {
@@ -720,7 +694,7 @@ describe("burst-retry hold integration (handleProxy)", () => {
 				}
 				heldCalls += 1;
 				return rl429({ "x-should-retry": "true" });
-			},
+			}),
 		);
 
 		sibling.access_token = "at-sibling";
@@ -754,14 +728,13 @@ describe("burst-retry hold integration (handleProxy)", () => {
 			refresh_token: "rt",
 			access_token: "at-codex",
 			expires_at: Date.now() + 3_600_000,
-			model_mappings: JSON.stringify({ sonnet: "gpt-5.5" }),
 		});
 		seedFreshHeadroom("held");
 
 		let codexHit = false;
 		let anthropicCalls = 0;
-		globalThis.fetch = mock(
-			async (input: RequestInfo | URL, init?: RequestInit) => {
+		globalThis.fetch = mockFetch(
+			mock(async (input: RequestInfo | URL, init?: RequestInit) => {
 				if (!isProxyCall(input)) return originalFetch(input as never, init);
 				if (callTarget(input) === "codex") {
 					codexHit = true;
@@ -769,7 +742,7 @@ describe("burst-retry hold integration (handleProxy)", () => {
 				}
 				anthropicCalls += 1;
 				return rl429({ "x-should-retry": "true" });
-			},
+			}),
 		);
 
 		const ctx = makeContext([held, codex], "held");
@@ -800,14 +773,13 @@ describe("burst-retry hold integration (handleProxy)", () => {
 			refresh_token: "rt",
 			access_token: "at-codex",
 			expires_at: Date.now() + 3_600_000,
-			model_mappings: JSON.stringify({ sonnet: "gpt-5.5" }),
 		});
 		seedFreshHeadroom("held");
 
 		let codexHit = false;
 		let anthropicCalls = 0;
-		globalThis.fetch = mock(
-			async (input: RequestInfo | URL, init?: RequestInit) => {
+		globalThis.fetch = mockFetch(
+			mock(async (input: RequestInfo | URL, init?: RequestInit) => {
 				if (!isProxyCall(input)) return originalFetch(input as never, init);
 				if (callTarget(input) === "codex") {
 					codexHit = true;
@@ -815,7 +787,7 @@ describe("burst-retry hold integration (handleProxy)", () => {
 				}
 				anthropicCalls += 1;
 				return rl429({ "x-should-retry": "true" });
-			},
+			}),
 		);
 
 		// Oversized body: ~1.2M chars ⇒ estimate ~400K tokens > the gpt-5.5 cap.
@@ -865,20 +837,19 @@ describe("burst-retry hold integration (handleProxy)", () => {
 			refresh_token: "rt",
 			access_token: "at-codex",
 			expires_at: Date.now() + 3_600_000,
-			model_mappings: JSON.stringify({ sonnet: "gpt-5.5" }),
 		});
 		seedFreshHeadroom("held");
 
 		let codexHit = false;
-		globalThis.fetch = mock(
-			async (input: RequestInfo | URL, init?: RequestInit) => {
+		globalThis.fetch = mockFetch(
+			mock(async (input: RequestInfo | URL, init?: RequestInit) => {
 				if (!isProxyCall(input)) return originalFetch(input as never, init);
 				if (callTarget(input) === "codex") {
 					codexHit = true;
 					return ok200();
 				}
 				return rl429({ "x-should-retry": "true" });
-			},
+			}),
 		);
 
 		const ctx = makeContext([held, sibling, codex], "held");
@@ -900,8 +871,8 @@ describe("burst-retry hold integration (handleProxy)", () => {
 
 		const calls: Array<"anthropic" | "codex" | "other"> = [];
 		let anthropicCalls = 0;
-		globalThis.fetch = mock(
-			async (input: RequestInfo | URL, init?: RequestInit) => {
+		globalThis.fetch = mockFetch(
+			mock(async (input: RequestInfo | URL, init?: RequestInit) => {
 				if (!isProxyCall(input)) return originalFetch(input as never, init);
 				calls.push(callTarget(input));
 				anthropicCalls += 1;
@@ -909,7 +880,7 @@ describe("burst-retry hold integration (handleProxy)", () => {
 				return anthropicCalls === 1
 					? rl429({ "anthropic-ratelimit-unified-status": "rate_limited" })
 					: ok200();
-			},
+			}),
 		);
 
 		const ctx = makeContext([held, sibling], "held");
@@ -942,18 +913,17 @@ describe("burst-retry hold integration (handleProxy)", () => {
 			refresh_token: "rt",
 			access_token: "at-codex",
 			expires_at: Date.now() + 3_600_000,
-			model_mappings: JSON.stringify({ sonnet: "gpt-5.5" }),
 		});
 		seedFreshHeadroom("held");
 
 		// EVERY upstream call 429s — held never recovers, and the Codex last-resort
 		// 429s too → give-up. Both the held first attempt and the Codex last-resort
 		// stage/​re-stage the same request id.
-		globalThis.fetch = mock(
-			async (input: RequestInfo | URL, init?: RequestInit) => {
+		globalThis.fetch = mockFetch(
+			mock(async (input: RequestInfo | URL, init?: RequestInit) => {
 				if (!isProxyCall(input)) return originalFetch(input as never, init);
 				return rl429({ "x-should-retry": "true" });
-			},
+			}),
 		);
 
 		const ctx = makeContext([held, codex], "held");
@@ -989,14 +959,14 @@ describe("burst-retry hold integration (handleProxy)", () => {
 
 		let n = 0;
 		const targets: Array<"anthropic" | "codex" | "other"> = [];
-		globalThis.fetch = mock(
-			async (input: RequestInfo | URL, init?: RequestInit) => {
+		globalThis.fetch = mockFetch(
+			mock(async (input: RequestInfo | URL, init?: RequestInit) => {
 				if (!isProxyCall(input)) return originalFetch(input as never, init);
 				targets.push(callTarget(input));
 				n += 1;
 				// The sibling (only available account) serves the request.
 				return ok200();
-			},
+			}),
 		);
 
 		const ctx = makeContext([held, sibling], "held");
@@ -1045,8 +1015,8 @@ describe("burst-retry hold integration (handleProxy)", () => {
 		// fresh_headroom would re-probe the held account up to 3 times.
 		let heldProbes = 0;
 		let siblingCalls = 0;
-		globalThis.fetch = mock(
-			async (input: RequestInfo | URL, init?: RequestInit) => {
+		globalThis.fetch = mockFetch(
+			mock(async (input: RequestInfo | URL, init?: RequestInit) => {
 				if (!isProxyCall(input)) return originalFetch(input as never, init);
 				const reqHeaders =
 					input instanceof Request ? input.headers : new Headers(init?.headers);
@@ -1054,7 +1024,7 @@ describe("burst-retry hold integration (handleProxy)", () => {
 				if (auth.includes("at-sibling")) siblingCalls += 1;
 				else heldProbes += 1;
 				return rl429({ "x-should-retry": "true" });
-			},
+			}),
 		);
 
 		const ctx = makeContext([held, sibling], "held");
@@ -1100,15 +1070,14 @@ describe("burst-retry hold integration (handleProxy)", () => {
 			refresh_token: "rt",
 			access_token: "at-codex",
 			expires_at: Date.now() + 3_600_000,
-			model_mappings: JSON.stringify({ sonnet: "gpt-5.5" }),
 		});
 		seedFreshHeadroom("held");
 
 		let codexHit = false;
 		let siblingServed = false;
 		let heldAttempts = 0;
-		globalThis.fetch = mock(
-			async (input: RequestInfo | URL, init?: RequestInit) => {
+		globalThis.fetch = mockFetch(
+			mock(async (input: RequestInfo | URL, init?: RequestInit) => {
 				if (!isProxyCall(input)) return originalFetch(input as never, init);
 				if (callTarget(input) === "codex") {
 					codexHit = true;
@@ -1124,7 +1093,7 @@ describe("burst-retry hold integration (handleProxy)", () => {
 				// The held account (at-held) always 429s.
 				heldAttempts += 1;
 				return rl429({ "x-should-retry": "true" });
-			},
+			}),
 		);
 
 		const ctx = makeContext([held, sibling, codex], "held");
@@ -1173,8 +1142,8 @@ describe("burst-retry hold integration (handleProxy)", () => {
 		let heldProbes = 0;
 		let siblingCalls = 0;
 		let n = 0;
-		globalThis.fetch = mock(
-			async (input: RequestInfo | URL, init?: RequestInit) => {
+		globalThis.fetch = mockFetch(
+			mock(async (input: RequestInfo | URL, init?: RequestInit) => {
 				if (!isProxyCall(input)) return originalFetch(input as never, init);
 				const reqHeaders =
 					input instanceof Request ? input.headers : new Headers(init?.headers);
@@ -1184,7 +1153,7 @@ describe("burst-retry hold integration (handleProxy)", () => {
 				n += 1;
 				// First held re-probe 429s, second succeeds.
 				return n === 1 ? rl429({ "x-should-retry": "true" }) : ok200();
-			},
+			}),
 		);
 
 		const ctx = makeContext([held, sibling], "held");
@@ -1220,15 +1189,15 @@ describe("burst-retry hold integration (handleProxy)", () => {
 		// Held never recovers; the sibling is cooled (excluded) so it is never even
 		// resolved — there is no normal-loop fall-through in the zero-accounts case.
 		let siblingCalls = 0;
-		globalThis.fetch = mock(
-			async (input: RequestInfo | URL, init?: RequestInit) => {
+		globalThis.fetch = mockFetch(
+			mock(async (input: RequestInfo | URL, init?: RequestInit) => {
 				if (!isProxyCall(input)) return originalFetch(input as never, init);
 				const reqHeaders =
 					input instanceof Request ? input.headers : new Headers(init?.headers);
 				const auth = reqHeaders.get("authorization") ?? "";
 				if (auth.includes("at-sibling")) siblingCalls += 1;
 				return rl429({ "x-should-retry": "true" });
-			},
+			}),
 		);
 
 		const ctx = makeContext([held, sibling], "held");
@@ -1259,12 +1228,12 @@ describe("burst-retry hold integration (handleProxy)", () => {
 		markAnthropicBurstThrottle();
 
 		let upstreamCalls = 0;
-		globalThis.fetch = mock(
-			async (input: RequestInfo | URL, init?: RequestInit) => {
+		globalThis.fetch = mockFetch(
+			mock(async (input: RequestInfo | URL, init?: RequestInit) => {
 				if (!isProxyCall(input)) return originalFetch(input as never, init);
 				upstreamCalls += 1;
 				return rl429();
-			},
+			}),
 		);
 
 		const ctx = makeContext([held], "held");
@@ -1302,7 +1271,6 @@ describe("burst-retry hold integration (handleProxy)", () => {
 			refresh_token: "rt",
 			access_token: "at-codex",
 			expires_at: Date.now() + 3_600_000,
-			model_mappings: JSON.stringify({ sonnet: "gpt-5.5" }),
 		});
 		seedFreshHeadroom("held");
 
@@ -1310,8 +1278,8 @@ describe("burst-retry hold integration (handleProxy)", () => {
 		let heldProbes = 0;
 		let siblingCalls = 0;
 		let codexCalls = 0;
-		globalThis.fetch = mock(
-			async (input: RequestInfo | URL, init?: RequestInit) => {
+		globalThis.fetch = mockFetch(
+			mock(async (input: RequestInfo | URL, init?: RequestInit) => {
 				if (!isProxyCall(input)) return originalFetch(input as never, init);
 				const target = callTarget(input);
 				if (target === "codex") {
@@ -1330,7 +1298,7 @@ describe("burst-retry hold integration (handleProxy)", () => {
 				heldProbes += 1;
 				controller.abort();
 				return rl429({ "x-should-retry": "true" });
-			},
+			}),
 		);
 
 		const req = new Request("https://proxy.local/v1/messages", {
@@ -1385,12 +1353,12 @@ describe("burst-retry hold integration (handleProxy)", () => {
 		markAnthropicBurstThrottle();
 
 		let upstreamCalls = 0;
-		globalThis.fetch = mock(
-			async (input: RequestInfo | URL, init?: RequestInit) => {
+		globalThis.fetch = mockFetch(
+			mock(async (input: RequestInfo | URL, init?: RequestInit) => {
 				if (!isProxyCall(input)) return originalFetch(input as never, init);
 				upstreamCalls += 1;
 				return ok200();
-			},
+			}),
 		);
 
 		const ctx = makeThrottledHitContext([held], "held");
@@ -1432,8 +1400,8 @@ describe("burst-retry hold integration (handleProxy)", () => {
 
 		let heldProbes = 0;
 		let siblingServed = false;
-		globalThis.fetch = mock(
-			async (input: RequestInfo | URL, init?: RequestInit) => {
+		globalThis.fetch = mockFetch(
+			mock(async (input: RequestInfo | URL, init?: RequestInit) => {
 				if (!isProxyCall(input)) return originalFetch(input as never, init);
 				const reqHeaders =
 					input instanceof Request ? input.headers : new Headers(init?.headers);
@@ -1444,7 +1412,7 @@ describe("burst-retry hold integration (handleProxy)", () => {
 				}
 				heldProbes += 1;
 				return rl429({ "x-should-retry": "true" });
-			},
+			}),
 		);
 
 		const ctx = makeThrottledHitContext([held, sibling], "held");
@@ -1487,8 +1455,8 @@ describe("burst-retry hold integration (handleProxy)", () => {
 
 		let heldProbes = 0;
 		let siblingCalls = 0;
-		globalThis.fetch = mock(
-			async (input: RequestInfo | URL, init?: RequestInit) => {
+		globalThis.fetch = mockFetch(
+			mock(async (input: RequestInfo | URL, init?: RequestInit) => {
 				if (!isProxyCall(input)) return originalFetch(input as never, init);
 				const reqHeaders =
 					input instanceof Request ? input.headers : new Headers(init?.headers);
@@ -1496,7 +1464,7 @@ describe("burst-retry hold integration (handleProxy)", () => {
 					siblingCalls += 1;
 				else heldProbes += 1;
 				return ok200("claude-fable-5");
-			},
+			}),
 		);
 
 		const ctx = makeContext([held, sibling], "family-held");
@@ -1544,8 +1512,8 @@ describe("burst-retry hold integration (handleProxy)", () => {
 
 		let heldProbes = 0;
 		let siblingCalls = 0;
-		globalThis.fetch = mock(
-			async (input: RequestInfo | URL, init?: RequestInit) => {
+		globalThis.fetch = mockFetch(
+			mock(async (input: RequestInfo | URL, init?: RequestInit) => {
 				if (!isProxyCall(input)) return originalFetch(input as never, init);
 				const reqHeaders =
 					input instanceof Request ? input.headers : new Headers(init?.headers);
@@ -1553,7 +1521,7 @@ describe("burst-retry hold integration (handleProxy)", () => {
 					siblingCalls += 1;
 				else heldProbes += 1;
 				return ok200("claude-fable-5");
-			},
+			}),
 		);
 
 		const ctx = makeContext([held, sibling], "family-held");
@@ -1592,12 +1560,12 @@ describe("burst-retry hold integration (handleProxy)", () => {
 		markAnthropicBurstThrottle();
 
 		let upstreamCalls = 0;
-		globalThis.fetch = mock(
-			async (input: RequestInfo | URL, init?: RequestInit) => {
+		globalThis.fetch = mockFetch(
+			mock(async (input: RequestInfo | URL, init?: RequestInit) => {
 				if (!isProxyCall(input)) return originalFetch(input as never, init);
 				upstreamCalls += 1;
 				return rl429({ "x-should-retry": "true" });
-			},
+			}),
 		);
 
 		const ctx = makeContext([held], "family-held");

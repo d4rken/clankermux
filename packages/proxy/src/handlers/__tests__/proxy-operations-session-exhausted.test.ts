@@ -8,7 +8,8 @@ import {
 	setSystemTime,
 } from "bun:test";
 import { usageCache } from "@clankermux/providers";
-import type { Account, RequestMeta } from "@clankermux/types";
+import { mockFetch } from "@clankermux/test-support";
+import type { Account, RequestMeta, RoutingAttempt } from "@clankermux/types";
 import {
 	proxyWithAccount,
 	routingAttempts,
@@ -78,8 +79,6 @@ function makeOAuthAnthropicAccount(overrides: Partial<Account> = {}): Account {
 		peak_hours_pause_enabled: false,
 		codex_auto_apply_reset_credits_enabled: false,
 		custom_endpoint: null,
-		model_mappings: null,
-		model_fallbacks: null,
 		billing_type: null,
 		pause_reason: null,
 		notes: null,
@@ -258,8 +257,9 @@ function rejected429() {
 	);
 }
 
-function reasonsFrom(calls: SaveRequestCall[]): unknown[] {
-	return calls.map((row) => row.error);
+/** The `error` column of every routing attempt the harness recorded. */
+function reasonsFrom(attempts: RoutingAttempt[]): Array<string | null> {
+	return attempts.map((row) => row.error);
 }
 
 async function run(
@@ -307,7 +307,7 @@ describe("proxyWithAccount — account-wide session-exhausted 429", () => {
 	});
 
 	it("records session_exhausted_429, keeps the extractCooldownUntil deadline and skips burst-retry", async () => {
-		globalThis.fetch = mock(async () => rejected429());
+		globalThis.fetch = mockFetch(mock(async () => rejected429()));
 		seedSessionExhausted();
 
 		const { ctx, attemptCalls, markCalls } = makeProxyContext();
@@ -331,7 +331,7 @@ describe("proxyWithAccount — account-wide session-exhausted 429", () => {
 	});
 
 	it("still reports weekly_exhausted_429 when BOTH windows are spent (v2026.7.28 behaviour)", async () => {
-		globalThis.fetch = mock(async () => rejected429());
+		globalThis.fetch = mockFetch(mock(async () => rejected429()));
 		seedBothExhausted();
 
 		const { ctx, attemptCalls } = makeProxyContext();
@@ -342,7 +342,7 @@ describe("proxyWithAccount — account-wide session-exhausted 429", () => {
 	});
 
 	it("fails open to today's behaviour when usage is absent/stale", async () => {
-		globalThis.fetch = mock(async () => rejected429());
+		globalThis.fetch = mockFetch(mock(async () => rejected429()));
 		// No usage cache entry ⇒ getFreshCapacity returns null ⇒ no evidence.
 
 		const { ctx, attemptCalls } = makeProxyContext();
@@ -353,7 +353,7 @@ describe("proxyWithAccount — account-wide session-exhausted 429", () => {
 	});
 
 	it("is skipped in reprobe mode (the hold orchestrator owns that outcome)", async () => {
-		globalThis.fetch = mock(async () => rejected429());
+		globalThis.fetch = mockFetch(mock(async () => rejected429()));
 		seedSessionExhausted();
 
 		const { ctx, attemptCalls } = makeProxyContext();
@@ -365,7 +365,7 @@ describe("proxyWithAccount — account-wide session-exhausted 429", () => {
 	});
 
 	it("is skipped for a TRUSTED in-process probe but NOT for a spoofed header", async () => {
-		globalThis.fetch = mock(async () => rejected429());
+		globalThis.fetch = mockFetch(mock(async () => rejected429()));
 		seedSessionExhausted();
 
 		const trusted = makeProxyContext();
@@ -395,7 +395,7 @@ describe("proxyWithAccount — account-wide session-exhausted 429", () => {
 	});
 
 	it("does not fire for a non-Anthropic account", async () => {
-		globalThis.fetch = mock(async () => rejected429());
+		globalThis.fetch = mockFetch(mock(async () => rejected429()));
 		seedSessionExhausted();
 
 		const { ctx, attemptCalls } = makeProxyContext();
@@ -405,7 +405,7 @@ describe("proxyWithAccount — account-wide session-exhausted 429", () => {
 	});
 
 	it("leaves the family-weekly rung reachable when only a FAMILY is spent", async () => {
-		globalThis.fetch = mock(async () => rejected429());
+		globalThis.fetch = mockFetch(mock(async () => rejected429()));
 		seedFamilyOnlyExhausted();
 
 		const { ctx, attemptCalls } = makeProxyContext();
@@ -464,7 +464,7 @@ describe("live account-wide quota rejection with lagging usage", () => {
 	});
 
 	it("replays Claude-1's mixed rejection with its actual session deadline and a recoverable cause", async () => {
-		globalThis.fetch = mock(async () => quotaIncidentResponse());
+		globalThis.fetch = mockFetch(mock(async () => quotaIncidentResponse()));
 		const { ctx, markCalls, attemptCalls } = makeProxyContext();
 		const account = makeOAuthAnthropicAccount();
 		const outcomes: string[] = [];
@@ -488,7 +488,7 @@ describe("live account-wide quota rejection with lagging usage", () => {
 
 	it("honors live account quota with no usage cache and without an extra usage fetch", async () => {
 		usageCache.delete(ACCOUNT_ID);
-		globalThis.fetch = mock(async () => quotaIncidentResponse());
+		globalThis.fetch = mockFetch(mock(async () => quotaIncidentResponse()));
 		const { ctx, markCalls } = makeProxyContext();
 		await run(ctx, makeOAuthAnthropicAccount());
 		expect(globalThis.fetch).toHaveBeenCalledTimes(1);
@@ -500,7 +500,7 @@ describe("live account-wide quota rejection with lagging usage", () => {
 	});
 
 	it("persists quota exhaustion discovered during a burst reprobe and ends the hold", async () => {
-		globalThis.fetch = mock(async () => quotaIncidentResponse());
+		globalThis.fetch = mockFetch(mock(async () => quotaIncidentResponse()));
 		const { ctx, markCalls } = makeProxyContext();
 		const outcomes: string[] = [];
 		const account = makeOAuthAnthropicAccount({
@@ -535,10 +535,13 @@ describe("live account-wide quota rejection with lagging usage", () => {
 	});
 
 	it("keeps billing depletion ahead of live quota exhaustion", async () => {
-		globalThis.fetch = mock(async () =>
-			quotaIncidentResponse({
-				"anthropic-ratelimit-unified-overage-disabled-reason": "out_of_credits",
-			}),
+		globalThis.fetch = mockFetch(
+			mock(async () =>
+				quotaIncidentResponse({
+					"anthropic-ratelimit-unified-overage-disabled-reason":
+						"out_of_credits",
+				}),
+			),
 		);
 		const { ctx, markCalls } = makeProxyContext();
 		await run(ctx, makeOAuthAnthropicAccount());
@@ -546,7 +549,7 @@ describe("live account-wide quota rejection with lagging usage", () => {
 	});
 
 	it("does not trust custom endpoint claims", async () => {
-		globalThis.fetch = mock(async () => quotaIncidentResponse());
+		globalThis.fetch = mockFetch(mock(async () => quotaIncidentResponse()));
 		const { ctx, markCalls } = makeProxyContext();
 		await run(
 			ctx,
@@ -557,7 +560,7 @@ describe("live account-wide quota rejection with lagging usage", () => {
 	});
 
 	it("preserves trusted keepalive exemptions while rejecting spoofed ones", async () => {
-		globalThis.fetch = mock(async () => quotaIncidentResponse());
+		globalThis.fetch = mockFetch(mock(async () => quotaIncidentResponse()));
 		const trusted = makeProxyContext();
 		await run(
 			trusted.ctx,
@@ -580,10 +583,12 @@ describe("live account-wide quota rejection with lagging usage", () => {
 	});
 
 	it("backs off repeated quota rejections with malformed resets instead of treating defaults as upstream deadlines", async () => {
-		globalThis.fetch = mock(async () =>
-			quotaIncidentResponse({
-				"anthropic-ratelimit-unified-5h-reset": "invalid",
-			}),
+		globalThis.fetch = mockFetch(
+			mock(async () =>
+				quotaIncidentResponse({
+					"anthropic-ratelimit-unified-5h-reset": "invalid",
+				}),
+			),
 		);
 		const { ctx, markCalls } = makeProxyContext();
 		const account = makeOAuthAnthropicAccount();
@@ -608,7 +613,7 @@ describe("live account-wide quota rejection with lagging usage", () => {
 	});
 
 	it("classifies an internal auto-refresh quota rejection without writing a client request-history row", async () => {
-		globalThis.fetch = mock(async () => quotaIncidentResponse());
+		globalThis.fetch = mockFetch(mock(async () => quotaIncidentResponse()));
 		const { ctx, markCalls, attemptCalls } = makeProxyContext();
 		await run(
 			ctx,
@@ -626,11 +631,13 @@ describe("live account-wide quota rejection with lagging usage", () => {
 	});
 
 	it("keeps a both-rejecting account locked after 5h resets while weekly remains exhausted", async () => {
-		globalThis.fetch = mock(async () =>
-			quotaIncidentResponse({
-				"anthropic-ratelimit-unified-7d-status": "rejected",
-				"anthropic-ratelimit-unified-7d-utilization": "1.0",
-			}),
+		globalThis.fetch = mockFetch(
+			mock(async () =>
+				quotaIncidentResponse({
+					"anthropic-ratelimit-unified-7d-status": "rejected",
+					"anthropic-ratelimit-unified-7d-utilization": "1.0",
+				}),
+			),
 		);
 		const { ctx } = makeProxyContext();
 		const account = makeOAuthAnthropicAccount();
@@ -638,18 +645,20 @@ describe("live account-wide quota rejection with lagging usage", () => {
 		expect(account.rate_limited_until).toBe(WEEKLY_RESET);
 		expect(account.rate_limited_reason).toBe("weekly_exhausted_429");
 		setSystemTime(new Date(SESSION_RESET + 1));
-		globalThis.fetch = mock(
-			async () =>
-				new Response(
-					JSON.stringify({
-						five_hour: { utilization: 0, resets_at: null },
-						seven_day: {
-							utilization: 100,
-							resets_at: new Date(WEEKLY_RESET).toISOString(),
-						},
-					}),
-					{ status: 200, headers: { "content-type": "application/json" } },
-				),
+		globalThis.fetch = mockFetch(
+			mock(
+				async () =>
+					new Response(
+						JSON.stringify({
+							five_hour: { utilization: 0, resets_at: null },
+							seven_day: {
+								utilization: 100,
+								resets_at: new Date(WEEKLY_RESET).toISOString(),
+							},
+						}),
+						{ status: 200, headers: { "content-type": "application/json" } },
+					),
+			),
 		);
 		let recoveryReports = 0;
 		try {
@@ -674,7 +683,7 @@ describe("live account-wide quota rejection with lagging usage", () => {
 	});
 
 	it("natural session expiry uses ordinary admission and can then discover a scoped-only rejection", async () => {
-		globalThis.fetch = mock(async () => quotaIncidentResponse());
+		globalThis.fetch = mockFetch(mock(async () => quotaIncidentResponse()));
 		const { ctx } = makeProxyContext();
 		const account = makeOAuthAnthropicAccount();
 		await run(ctx, account, "claude-fable-5-1");
@@ -682,11 +691,13 @@ describe("live account-wide quota rejection with lagging usage", () => {
 		account.expires_at = Date.now() + 3_600_000;
 		expect(account.rate_limited_until).toBeLessThan(Date.now());
 		expect(getRateLimitProbeAdmission(account)).toBe("not_required");
-		globalThis.fetch = mock(async () =>
-			quotaIncidentResponse({
-				"anthropic-ratelimit-unified-5h-status": "allowed",
-				"anthropic-ratelimit-unified-5h-utilization": "0.0",
-			}),
+		globalThis.fetch = mockFetch(
+			mock(async () =>
+				quotaIncidentResponse({
+					"anthropic-ratelimit-unified-5h-status": "allowed",
+					"anthropic-ratelimit-unified-5h-utilization": "0.0",
+				}),
+			),
 		);
 		const next = makeProxyContext();
 		await run(next.ctx, account, "claude-fable-5-1");

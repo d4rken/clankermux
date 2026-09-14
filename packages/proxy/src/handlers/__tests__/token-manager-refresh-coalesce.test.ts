@@ -71,7 +71,17 @@ function makeContext(
 	// The durable token write is AWAITED inside the refresh promise; the normal
 	// path returns a resolved true (persisted). Callers override with false (CAS
 	// loss), a rejection (write failure), or a gated promise (settlement order).
-	const updateTokensSpy = mock(opts.updateAccountTokens ?? (async () => true));
+	const updateTokensSpy = mock<
+		(
+			accountId: string,
+			accessToken: string,
+			expiresAt: number,
+			refreshToken?: string,
+			identity?: unknown,
+			expectedRefreshToken?: string | null,
+			options?: { refreshTokenExpiresAt?: number | null },
+		) => Promise<boolean>
+	>(opts.updateAccountTokens ?? (async () => true));
 	const getAccountSpy = mock(opts.getAccount ?? (async () => null));
 	// The refresh path must NOT route the token write through the async writer
 	// (a droppable queue); tests assert this spy is never called.
@@ -92,6 +102,10 @@ function makeContext(
 			pauseAccountIfActive: pauseSpy,
 		} as never,
 		provider: { refreshToken: refreshTokenSpy } as never,
+		// Required by `ProxyContext`; the token-refresh path reads none of them.
+		strategy: {} as never,
+		config: {} as never,
+		requestRecorder: {} as never,
 	} as ProxyContext;
 	return {
 		ctx,
@@ -223,12 +237,14 @@ describe("refreshAccessTokenSafe catch-block log gating", () => {
 
 	function errorCallsMatching(substr: string): number {
 		return errorSpy.mock.calls.filter(
-			(args) => typeof args[0] === "string" && args[0].includes(substr),
+			(args: unknown[]) =>
+				typeof args[0] === "string" && args[0].includes(substr),
 		).length;
 	}
 	function infoCallsMatching(substr: string): number {
 		return infoSpy.mock.calls.filter(
-			(args) => typeof args[0] === "string" && args[0].includes(substr),
+			(args: unknown[]) =>
+				typeof args[0] === "string" && args[0].includes(substr),
 		).length;
 	}
 
@@ -719,7 +735,7 @@ describe("refreshAccessTokenSafe pre-refresh DB adoption", () => {
 
 	it("adopts a rotated refresh token from the DB before refreshing (never replays a consumed token)", async () => {
 		const acctId = "adopt-rotated-rt";
-		let refreshTokenAtCall: string | null = null;
+		let refreshTokenAtCall: string | undefined;
 		const { ctx, refreshTokenSpy, updateTokensSpy } = makeContext(
 			async (account) => {
 				refreshTokenAtCall = account.refresh_token;
@@ -930,7 +946,7 @@ describe("refreshAccessTokenSafe pre-refresh DB adoption", () => {
 
 	it("does NOT adopt a DB refresh token that is OLDER than the in-memory one (issued_at guard)", async () => {
 		const acctId = "adopt-stale-rt-guard";
-		let refreshTokenAtCall: string | null = null;
+		let refreshTokenAtCall: string | undefined;
 		const { ctx } = makeContext(
 			async (account) => {
 				refreshTokenAtCall = account.refresh_token;
@@ -1409,7 +1425,7 @@ describe("refreshAccessTokenSafe pending-rotation registry", () => {
 			attemptedRefreshToken: "rt-anchor",
 		});
 		let persistCalls = 0;
-		let refreshTokenAtCall: string | null = null;
+		let refreshTokenAtCall: string | undefined;
 		const { ctx, updateTokensSpy } = makeContext(
 			async (account) => {
 				refreshTokenAtCall = account.refresh_token;

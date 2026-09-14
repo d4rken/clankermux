@@ -55,6 +55,13 @@ function makeCtx(options: CtxOptions = {}): ProxyContext {
 			options.withServer === false
 				? undefined
 				: ({ timeout: mock(options.timeout ?? (() => {})) } as never),
+		// Required by `ProxyContext`; the prologue reads none of them.
+		strategy: {} as never,
+		dbOps: {} as never,
+		runtime: {} as never,
+		refreshInFlight: new Map<string, Promise<string>>(),
+		asyncWriter: {} as never,
+		requestRecorder: {} as never,
 	} as ProxyContext;
 }
 

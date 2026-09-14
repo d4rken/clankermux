@@ -111,6 +111,20 @@ function req(path: string, token?: string): Request {
 	});
 }
 
+/**
+ * `createSession` answers null when a password rotation wins the race with the
+ * INSERT. A fixture store never loses that race, so a null here is a broken
+ * test rather than a case to handle.
+ */
+async function mintSession(
+	svc: SessionAuthService,
+	binding: PasswordBinding,
+): Promise<{ token: string; expiresAt: number }> {
+	const session = await svc.createSession(binding);
+	if (!session) throw new Error("createSession returned null");
+	return session;
+}
+
 describe("path policy maps the management surface to session", () => {
 	const gated = [
 		"/api",
@@ -140,7 +154,7 @@ describe("path policy maps the management surface to session", () => {
 		const stored = await cheapHasher.hash("pw");
 		store.password = { ...stored, updatedAt: 0 };
 		// Minted the way a login mints it: against the pair that authorized it.
-		const { token } = await sessionAuth.createSession(stored);
+		const { token } = await mintSession(sessionAuth, stored);
 		const result = await svc.authenticateRequest(
 			req("/api/accounts", token),
 			"/api/accounts",
@@ -153,7 +167,7 @@ describe("path policy maps the management surface to session", () => {
 		const stored = await cheapHasher.hash("pw");
 		store.password = { ...stored, updatedAt: 0 };
 		// Minted the way a login mints it: against the pair that authorized it.
-		const { token } = await sessionAuth.createSession(stored);
+		const { token } = await mintSession(sessionAuth, stored);
 		store.sessions.clear();
 		const result = await svc.authenticateRequest(
 			req("/api/accounts", token),
@@ -167,7 +181,7 @@ describe("path policy maps the management surface to session", () => {
 		const stored = await cheapHasher.hash("pw");
 		store.password = { ...stored, updatedAt: 0 };
 		// Minted the way a login mints it: against the pair that authorized it.
-		const { token } = await sessionAuth.createSession(stored);
+		const { token } = await mintSession(sessionAuth, stored);
 		const result = await svc.authenticateRequest(
 			req("/api/accounts", token),
 			"/api/accounts",

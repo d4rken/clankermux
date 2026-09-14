@@ -113,7 +113,7 @@ describe("the public snapshot memo", () => {
 
 	it("collapses concurrent cold polls onto one build", async () => {
 		let builds = 0;
-		let release: (() => void) | null = null;
+		let release: (() => void) | undefined;
 		const gate = new Promise<void>((resolve) => {
 			release = resolve;
 		});

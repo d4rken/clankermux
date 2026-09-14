@@ -16,5 +16,8 @@
 		"@clankermux/core": "workspace:*",
 		"@clankermux/openai-formats": "workspace:*",
 		"@clankermux/types": "workspace:*"
+	},
+	"devDependencies": {
+		"@clankermux/test-support": "workspace:*"
 	}
 }

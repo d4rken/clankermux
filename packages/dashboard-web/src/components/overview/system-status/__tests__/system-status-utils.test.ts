@@ -29,6 +29,7 @@ function makeStatus(
 			lastLagMs: 0,
 			maxRecentLagMs: 0,
 		} as SystemStatusResponse["eventLoop"],
+		providerOverload: [],
 		strategy: "session",
 		timestamp: new Date(RECOVERS_AT).toISOString(),
 	};

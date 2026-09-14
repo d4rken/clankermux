@@ -14,11 +14,13 @@ import {
 } from "../usage-fetcher";
 
 const now = Date.now();
+const DAILY_RESET = now + 86_400_000;
+const WEEKLY_RESET = now + 604_800_000;
 const usage: DevinUsageData = {
 	kind: "devin",
 	quotaBased: true,
-	daily: { utilization: 70, resetAt: now + 86_400_000 },
-	weekly: { utilization: 30, resetAt: now + 604_800_000 },
+	daily: { utilization: 70, resetAt: DAILY_RESET },
+	weekly: { utilization: 30, resetAt: WEEKLY_RESET },
 	planName: "Pro",
 	email: null,
 	accountId: null,
@@ -128,14 +130,14 @@ describe("Devin calendar quota", () => {
 	it("ranks the daily hard constraint without inventing a five-hour session", () => {
 		expect(getRepresentativeDevinWindow(usage)).toBe("daily");
 		expect(getRepresentativeUtilizationForProvider(usage, "devin")).toBe(70);
-		expect(extractWindowResetTime(usage, "devin")).toBe(usage.daily?.resetAt);
+		expect(extractWindowResetTime(usage, "devin")).toBe(DAILY_RESET);
 		expect(getAccountCapacitySignal(usage, "devin", now)).toEqual({
 			minHeadroom: 30,
 			sessionHeadroom: 100,
-			soonestResetMs: usage.daily?.resetAt,
+			soonestResetMs: DAILY_RESET,
 			bindingUtilization: 70,
-			weeklyResetMs: usage.weekly?.resetAt,
-			bindingWeeklyResetMs: usage.weekly?.resetAt,
+			weeklyResetMs: WEEKLY_RESET,
+			bindingWeeklyResetMs: WEEKLY_RESET,
 			weeklyHeadroom: 70,
 			sessionResetMs: null,
 			extraUsageUtilization: null,

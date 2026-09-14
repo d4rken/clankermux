@@ -8,8 +8,35 @@ import type { ProxyContext } from "./fixtures/routing-harness";
 // Test database path
 const tmpDb = tempDbTracker("test-token-refresh-hierarchy");
 
+/** The private decision this file drives directly, with its real signature. */
+type SchedulerInternals = {
+	shouldRefreshAccount(
+		account: {
+			id: string;
+			name: string;
+			provider: string;
+			refresh_token: string;
+			access_token: string | null;
+			expires_at: number | null;
+			rate_limit_reset: number | null;
+			custom_endpoint: string | null;
+		},
+		now: number,
+	): boolean;
+};
+
+/**
+ * `shouldRefreshAccount` is private, so it is read reflectively and bound to its
+ * instance rather than reached through a cast the access modifier defeats.
+ */
+function shouldRefreshAccountOf(
+	scheduler: AutoRefreshScheduler,
+): SchedulerInternals["shouldRefreshAccount"] {
+	return Reflect.get(scheduler, "shouldRefreshAccount").bind(scheduler);
+}
+
 describe("Auto-Refresh Token Hierarchy", () => {
-	let db: Database;
+	let _db: Database;
 	let dbOps: DatabaseOperations;
 	let scheduler: AutoRefreshScheduler;
 	let mockProxyContext: ProxyContext;
@@ -18,7 +45,7 @@ describe("Auto-Refresh Token Hierarchy", () => {
 		// Own connection rather than the DatabaseFactory singleton: the
 		// singleton outlives this file and other suites reset it.
 		dbOps = new DatabaseOperations(tmpDb.next());
-		db = dbOps.getAdapter().getSQLiteDb();
+		_db = dbOps.getAdapter().getSQLiteDb();
 
 		// Create mock proxy context
 		mockProxyContext = {
@@ -29,7 +56,7 @@ describe("Auto-Refresh Token Hierarchy", () => {
 		} as ProxyContext;
 
 		// Initialize scheduler
-		scheduler = new AutoRefreshScheduler(db, mockProxyContext);
+		scheduler = new AutoRefreshScheduler(dbOps.getAdapter(), mockProxyContext);
 	});
 
 	afterAll(async () => {
@@ -69,12 +96,9 @@ describe("Auto-Refresh Token Hierarchy", () => {
 			};
 
 			// Access private method for testing
-			const shouldRefreshStale = (
-				scheduler as { shouldRefreshAccount: unknown }
-			).shouldRefreshAccount(accountStale, now);
-			const shouldRefreshCurrent = (
-				scheduler as { shouldRefreshAccount: unknown }
-			).shouldRefreshAccount(accountCurrent, now);
+			const shouldRefreshAccount = shouldRefreshAccountOf(scheduler);
+			const shouldRefreshStale = shouldRefreshAccount(accountStale, now);
+			const shouldRefreshCurrent = shouldRefreshAccount(accountCurrent, now);
 
 			expect(shouldRefreshStale).toBe(true); // Should refresh (stale reset time)
 			expect(shouldRefreshCurrent).toBe(true); // Should refresh (first-time check regardless of reset time)
@@ -96,9 +120,10 @@ describe("Auto-Refresh Token Hierarchy", () => {
 			};
 
 			// Access private method for testing
-			const shouldRefreshFirstTime = (
-				scheduler as { shouldRefreshAccount: unknown }
-			).shouldRefreshAccount(accountFirstTime, now);
+			const shouldRefreshFirstTime = shouldRefreshAccountOf(scheduler)(
+				accountFirstTime,
+				now,
+			);
 
 			expect(shouldRefreshFirstTime).toBe(true); // Should refresh (first time)
 		});

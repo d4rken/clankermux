@@ -98,6 +98,12 @@ describe("detectMissingMessageStop — end-to-end via SSE parsing", () => {
 		enc.encode(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
 	// Deterministic, hermetic cost so finalize never touches the pricing catalogue.
 	const deps = { estimateCostUSD: async () => 0 };
+	/**
+	 * One instant for every chunk: these tests assert only on
+	 * `detectMissingMessageStop`, and a zero streaming window keeps the speed
+	 * computation on its total-duration path rather than the windowed one.
+	 */
+	const CHUNK_AT = 1_000_000;
 
 	it("fires when a real Anthropic stream omits the final message_stop", async () => {
 		const state = createUsageState();
@@ -107,6 +113,7 @@ describe("detectMissingMessageStop — end-to-end via SSE parsing", () => {
 				type: "message_start",
 				message: { model: "claude-opus-4-8", usage: { input_tokens: 10 } },
 			}),
+			CHUNK_AT,
 		);
 		feedChunk(
 			state,
@@ -114,6 +121,7 @@ describe("detectMissingMessageStop — end-to-end via SSE parsing", () => {
 				type: "message_delta",
 				usage: { output_tokens: 42 },
 			}),
+			CHUNK_AT,
 		);
 		// NO message_stop — the anomaly under investigation.
 		await finalizeUsage(
@@ -132,6 +140,7 @@ describe("detectMissingMessageStop — end-to-end via SSE parsing", () => {
 				type: "message_start",
 				message: { model: "claude-opus-4-8", usage: { input_tokens: 10 } },
 			}),
+			CHUNK_AT,
 		);
 		feedChunk(
 			state,
@@ -139,8 +148,9 @@ describe("detectMissingMessageStop — end-to-end via SSE parsing", () => {
 				type: "message_delta",
 				usage: { output_tokens: 42 },
 			}),
+			CHUNK_AT,
 		);
-		feedChunk(state, sse("message_stop", { type: "message_stop" }));
+		feedChunk(state, sse("message_stop", { type: "message_stop" }), CHUNK_AT);
 		await finalizeUsage(
 			state,
 			{ ...ANTH_STREAM_CLEAN, responseTimeMs: 10 },
@@ -159,11 +169,13 @@ describe("detectMissingMessageStop — end-to-end via SSE parsing", () => {
 				type: "message_delta",
 				usage: { output_tokens: 7 },
 			}),
+			CHUNK_AT,
 		);
 		// message_stop arrives WITHOUT a trailing "\n\n" (stream closed mid-line).
 		feedChunk(
 			state,
 			enc.encode(`event: message_stop\ndata: {"type":"message_stop"}`),
+			CHUNK_AT,
 		);
 		await finalizeUsage(
 			state,

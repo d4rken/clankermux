@@ -6,7 +6,6 @@
  * router (SessionStrategy) skips it until an operator resumes it.
  */
 import { describe, expect, it, mock } from "bun:test";
-import type { AutoRefreshScheduler } from "../auto-refresh-scheduler";
 
 // ── helpers ───────────────────────────────────────────────────────────────────
 
@@ -58,17 +57,24 @@ function makeProxyContext() {
 	};
 }
 
+/**
+ * The private surface these tests drive directly. Declared standalone rather
+ * than intersected with the class: TypeScript reduces an intersection whose
+ * members collide with `private` ones of the same name to `never`.
+ */
+type SchedulerInternals = {
+	recordRefreshFailure(id: string, name: string, ctx: string): Promise<void>;
+	consecutiveFailures: Map<string, number>;
+	FAILURE_THRESHOLD: number;
+};
+
 /** Instantiate the scheduler without starting the interval. */
 async function makeScheduler(db: ReturnType<typeof makeDb>) {
 	const { AutoRefreshScheduler } = await import("../auto-refresh-scheduler");
 	return new AutoRefreshScheduler(
 		db as never,
 		makeProxyContext() as never,
-	) as AutoRefreshScheduler & {
-		recordRefreshFailure(id: string, name: string, ctx: string): Promise<void>;
-		consecutiveFailures: Map<string, number>;
-		FAILURE_THRESHOLD: number;
-	};
+	) as never as SchedulerInternals;
 }
 
 // ── tests ─────────────────────────────────────────────────────────────────────
@@ -201,15 +207,7 @@ describe("AutoRefreshScheduler — consecutive failure threshold", () => {
 		const scheduler = new AutoRefreshScheduler(
 			db as never,
 			makeProxyContext() as never,
-		) as AutoRefreshScheduler & {
-			recordRefreshFailure(
-				id: string,
-				name: string,
-				ctx: string,
-			): Promise<void>;
-			consecutiveFailures: Map<string, number>;
-			FAILURE_THRESHOLD: number;
-		};
+		) as never as SchedulerInternals;
 
 		// Drive to threshold — the DB run will throw on the pause UPDATE
 		const callThreshold = async () => {

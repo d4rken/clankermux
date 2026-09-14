@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, mock, spyOn } from "bun:test";
+import { mockFetch } from "@clankermux/test-support";
 import type { ClientDraft, ClientView } from "@clankermux/types";
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
@@ -116,41 +117,43 @@ async function mount(
 	suggestionFetches = 0;
 	suggestionBodies = [];
 	gate = null;
-	spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
-		const path = String(input);
-		if (path.endsWith("/suggestions")) {
-			suggestionFetches += 1;
-			suggestionBodies.push(JSON.parse(String(init?.body)));
-			if (gate) await gate.opened;
-			return Response.json({
-				data: {
-					models: suggested,
-					accounts: [
-						{
-							id: "a",
-							name: "Account",
-							provider: "openai-compatible",
-							completeness: "known-complete",
-							error: null,
-						},
-					],
-				},
-			});
-		}
-		if (path.endsWith("/review")) {
-			reviewed = JSON.parse(String(init?.body));
-			return Response.json({
-				data: {
-					token: "review",
-					draft: reviewed,
-					aliasRules: [],
-					precedingRules: [],
-					notices: [],
-				},
-			});
-		}
-		throw new Error(`Unexpected request ${path}`);
-	});
+	spyOn(globalThis, "fetch").mockImplementation(
+		mockFetch(async (input, init) => {
+			const path = String(input);
+			if (path.endsWith("/suggestions")) {
+				suggestionFetches += 1;
+				suggestionBodies.push(JSON.parse(String(init?.body)));
+				if (gate) await gate.opened;
+				return Response.json({
+					data: {
+						models: suggested,
+						accounts: [
+							{
+								id: "a",
+								name: "Account",
+								provider: "openai-compatible",
+								completeness: "known-complete",
+								error: null,
+							},
+						],
+					},
+				});
+			}
+			if (path.endsWith("/review")) {
+				reviewed = JSON.parse(String(init?.body));
+				return Response.json({
+					data: {
+						token: "review",
+						draft: reviewed,
+						aliasRules: [],
+						precedingRules: [],
+						notices: [],
+					},
+				});
+			}
+			throw new Error(`Unexpected request ${path}`);
+		}),
+	);
 	host = document.createElement("div");
 	document.body.append(host);
 	root = createRoot(host);

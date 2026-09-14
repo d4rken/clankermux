@@ -145,6 +145,9 @@ function makeAccount(provider: string): Account {
 		tokenStatus: "valid",
 		tokenExpiresAt: null,
 		rateLimitStatus: "OK",
+		rateLimitCause: "ok",
+		rateLimitCauseResetMs: null,
+		rateLimitProviderStatus: null,
 		rateLimitReset: null,
 		rateLimitRemaining: null,
 		rateLimitedUntil: null,
@@ -155,7 +158,6 @@ function makeAccount(provider: string): Account {
 		autoFallbackEnabled: false,
 		autoRefreshEnabled: false,
 		customEndpoint: null,
-		modelMappings: null,
 		usageUtilization: null,
 		usageWindow: null,
 		usageData: null,
@@ -239,12 +241,11 @@ function capturePoll(): { fire: () => Promise<void> } {
 		if (typeof handler === "function" && ms === POLL_INTERVAL_MS) {
 			captured.poll = handler as (...args: unknown[]) => unknown;
 		}
-		return realSetInterval.call(
-			globalThis,
-			handler as () => void,
-			ms as number,
-			...args,
-		);
+		// `Reflect.apply` rather than `.call(...spread)`: the chosen `setInterval`
+		// overload fixes its parameter list, so a spread argument has no rest slot
+		// to land in. The receiver still has to be the global — happy-dom's timer
+		// is a window method.
+		return Reflect.apply(realSetInterval, globalThis, [handler, ms, ...args]);
 	}) as unknown as typeof globalThis.setInterval);
 
 	return {

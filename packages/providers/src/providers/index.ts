@@ -58,6 +58,7 @@ export {
 	parseCodexUsageStatus,
 	readChatgptAccountId,
 	sendCodexNativePing,
+	targetsChatGptCodexBackend,
 } from "./codex/index";
 export { KiloProvider } from "./kilo/index";
 export { MinimaxProvider } from "./minimax/index";

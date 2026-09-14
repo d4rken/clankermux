@@ -106,8 +106,11 @@ describe("unscoped analytics response (backward compatibility)", () => {
 			estimatedRequests: 0,
 			unknownSourceRequests: 5,
 		});
+		const golden = GOLDEN as unknown as AnalyticsResponse;
+		if (!golden.totals) throw new Error("Missing golden totals");
 		expect({ ...body, totals, meta }).toEqual({
-			...(GOLDEN as unknown as AnalyticsResponse),
+			...golden,
+			totals: golden.totals,
 			meta: goldenMeta,
 		});
 		expect(sections).toEqual([...ANALYTICS_SECTIONS].sort());
@@ -263,14 +266,17 @@ const FILTERED_QUERY =
 	`&apiKeys=${API_KEY_LIVE},${API_KEY_RENAMED}` +
 	`&projects=${PROJECT_ALPHA},${PROJECT_BETA}`;
 
-const UNION_SECTIONS: AnalyticsSection[] = [
+// `as const satisfies` rather than a plain annotation: the branch-comparison
+// test below indexes the response with one of these names, and the whole
+// `AnalyticsSection` union contains names that are not response fields.
+const UNION_SECTIONS = [
 	"modelDistribution",
 	"accountPerformance",
 	"costByModel",
 	"apiKeyPerformance",
 	"accountModelUsage",
 	"projectBreakdown",
-];
+] as const satisfies readonly AnalyticsSection[];
 
 describe("conditional additional-data UNION (branch-local bind order)", () => {
 	it("the filtered fixture actually exercises the filters", async () => {
@@ -284,9 +290,9 @@ describe("conditional additional-data UNION (branch-local bind order)", () => {
 		);
 	});
 
-	it.each(
-		UNION_SECTIONS,
-	)("branch '%s' alone returns the same rows as the full UNION", async (section) => {
+	it.each([
+		...UNION_SECTIONS,
+	])("branch '%s' alone returns the same rows as the full UNION", async (section) => {
 		const full = await fetchAnalytics(
 			`${FILTERED_QUERY}&sections=${UNION_SECTIONS.join(",")}`,
 		);

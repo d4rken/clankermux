@@ -28,6 +28,7 @@ import {
 	resetRequestEventRegistry,
 } from "@clankermux/core";
 import { usageCache } from "@clankermux/providers";
+import { mockFetch } from "@clankermux/test-support";
 import type { Account } from "@clankermux/types";
 import { cacheBodyStore } from "../cache-body-store";
 import type { ProxyContext } from "../handlers";
@@ -56,7 +57,7 @@ function makeAccount(overrides: Partial<Account> = {}): Account {
 		name: "Ingress-evt-main",
 		provider: "anthropic",
 		api_key: "test-key",
-		refresh_token: null,
+		refresh_token: "",
 		access_token: null,
 		expires_at: null,
 		request_count: 0,
@@ -80,9 +81,6 @@ function makeAccount(overrides: Partial<Account> = {}): Account {
 		peak_hours_pause_enabled: false,
 		codex_auto_apply_reset_credits_enabled: false,
 		custom_endpoint: null,
-		model_mappings: null,
-		cross_region_mode: null,
-		model_fallbacks: null,
 		billing_type: null,
 		pause_reason: null,
 		refresh_token_issued_at: null,
@@ -257,7 +255,7 @@ describe("handleProxy live-dashboard ingress events", () => {
 		const fetchMock = mock(async () => {
 			throw new Error("local count reached upstream");
 		});
-		globalThis.fetch = fetchMock as typeof fetch;
+		globalThis.fetch = mockFetch(fetchMock);
 		const ctx = makeContext([
 			makeAccount({ provider: "openrouter", api_key: null }),
 		]);

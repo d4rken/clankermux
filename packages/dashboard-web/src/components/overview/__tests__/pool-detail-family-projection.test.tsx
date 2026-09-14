@@ -17,6 +17,8 @@ function emptyPool(familyWeekly: FamilyWeeklyUsage[]): PoolUsageResult {
 		atRisk: [],
 		learning: [],
 		familyWeekly,
+		classes: [],
+		bindingClass: null,
 	};
 }
 
