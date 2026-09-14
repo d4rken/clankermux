@@ -57,8 +57,8 @@
  * ## What "ok" does and does not mean
  *
  * It means "this version string is a release at or above the floor". It does
- * NOT mean the binary is a stable build: the binary this repo is deployed on
- * reports `Bun.version === "1.4.0"` while `bun --revision` prints
+ * NOT mean the binary is a stable build: a 1.4.0 canary measured 2026-08-23
+ * reported `Bun.version === "1.4.0"` while `bun --revision` printed
  * `1.4.0-canary.1+8326d1bd3`. Bun does not expose the canary suffix through
  * `Bun.version` or `process.versions.bun`, so a canary of the floor version is
  * indistinguishable from the release through the API this check can read. That
