@@ -79,6 +79,9 @@ function pickEphemeralPort(): number {
 	const probe = Bun.serve({ port: 0, fetch: () => new Response("") });
 	const port = probe.port;
 	probe.stop(true);
+	if (port === undefined) {
+		throw new SmokeFailure("Bun.serve did not report a bound port");
+	}
 	if (FORBIDDEN_PORTS.has(port)) {
 		throw new SmokeFailure(`the OS handed out a reserved port (${port})`);
 	}
