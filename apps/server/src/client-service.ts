@@ -4,14 +4,16 @@ import {
 	isAccountAllowedByPin,
 	MODEL_DISPLAY_NAMES,
 	matchRoutingRule,
+	validateRoutingRule,
 } from "@clankermux/core";
 import {
 	ApiKeyRepository,
 	type DatabaseOperations,
+	isClientInputError,
 	RoutingConflictError,
 	RoutingRepository,
 } from "@clankermux/database";
-import { BadRequest, Conflict, NotFound } from "@clankermux/errors";
+import { BadRequest, Conflict, HttpError, NotFound } from "@clankermux/errors";
 import { handleModelsRequest } from "@clankermux/openai-responses-adapter";
 import type {
 	AccountModelPermissionService,
@@ -25,6 +27,10 @@ import {
 	type Account,
 	type ApiKey,
 	apiKeyLookupSuffix,
+	type ClientBulkClientResult,
+	type ClientBulkMode,
+	type ClientBulkOperation,
+	type ClientBulkReview,
 	type ClientDestinations,
 	type ClientDraft,
 	type ClientFormat,
@@ -56,16 +62,84 @@ interface Deps {
 	permissions: AccountModelPermissionService;
 	codexCatalog: CodexModelCatalogCache;
 }
-interface Prepared {
-	review: ClientReview;
+const BULK_MODES: ClientBulkMode[] = ["add", "remove", "replace"];
+/** How long a review token stays redeemable. */
+const PENDING_TTL_MS = 600000;
+/** Prepared client records held across all pending reviews. */
+const PENDING_CLIENT_CAP = 128;
+const BULK_MAX_CLIENTS = 50;
+const BULK_MAX_MODELS = 500;
+/**
+ * Ceiling on `clients × alias entries`. Applying one client rewrites every
+ * routing rule's position twice whenever it contributes alias rules, so the
+ * write count grows with the square of a batch's total alias count.
+ */
+const BULK_MAX_ALIAS_WRITES = 500;
+
+/** One client's reviewed outcome, ready to be written. */
+interface PreparedDraft {
+	review: Omit<ClientReview, "token">;
 	profile: ClientProfile;
-	fingerprint: string;
-	expires: number;
 }
+/**
+ * Single-client and bulk reviews share one pending map, so the expiry sweep and
+ * the retention cap cover both, and a token can never be redeemed through the
+ * commit path it was not issued for.
+ */
+type Prepared = { fingerprint: string; expires: number } & (
+	| { kind: "single"; record: PreparedDraft }
+	| {
+			kind: "bulk";
+			operation: ClientBulkOperation;
+			records: PreparedDraft[];
+	  }
+);
 const emptyCatalogues = (): ClientProfile["catalogues"] => ({
 	anthropic: { models: [], defaultModel: null },
 	openai: { models: [], defaultModel: null },
 	codex: { models: [], defaultModel: null },
+});
+
+/**
+ * Structural equality over JSON-shaped values. A stored catalogue arrives from
+ * `JSON.parse` and a proposed one is built here, so their keys can be in
+ * different orders while the two describe the same catalogue.
+ */
+function deepEqual(a: unknown, b: unknown): boolean {
+	if (a === b) return true;
+	if (Array.isArray(a) || Array.isArray(b))
+		return (
+			Array.isArray(a) &&
+			Array.isArray(b) &&
+			a.length === b.length &&
+			a.every((value, index) => deepEqual(value, b[index]))
+		);
+	if (typeof a !== "object" || typeof b !== "object" || !a || !b) return false;
+	const left = a as Record<string, unknown>;
+	const right = b as Record<string, unknown>;
+	for (const key of new Set([...Object.keys(left), ...Object.keys(right)]))
+		if (!deepEqual(left[key], right[key])) return false;
+	return true;
+}
+
+/** Sorted account pin, as a comparable string. `null` stays distinct from `[]`. */
+const pinOf = (model: ClientModel): string =>
+	JSON.stringify(model.accountIds ? [...model.accountIds].sort() : null);
+
+const rejectedClient = (
+	apiKeyId: string,
+	name: string,
+	reason: string,
+): ClientBulkClientResult => ({
+	apiKeyId,
+	name,
+	status: "rejected",
+	reason,
+	added: [],
+	removed: [],
+	modified: [],
+	defaultModelChange: null,
+	notices: [],
 });
 
 export class ClientService {
@@ -484,10 +558,15 @@ export class ClientService {
 			)
 			.digest("hex");
 	}
-	async review(input: unknown): Promise<ClientReview> {
+	/**
+	 * Validates one draft against the current database and builds everything a
+	 * commit needs, without reserving a token or reading the fingerprint. A
+	 * batch prepares many drafts under one fingerprint reading, so neither can
+	 * belong here.
+	 */
+	private async prepareDraft(input: unknown): Promise<PreparedDraft> {
 		if (!input || typeof input !== "object" || Array.isArray(input))
 			throw BadRequest("Client must be an object");
-		const fingerprintBefore = this.fingerprint();
 		const draft = structuredClone(input) as ClientDraft;
 		if (
 			typeof draft.name !== "string" ||
@@ -708,6 +787,16 @@ export class ClientService {
 					? null
 					: JSON.stringify(draft.destinations.providers),
 			);
+		// The same checks the write path runs, run here instead of inside the
+		// commit transaction.
+		for (const rule of aliasRules)
+			try {
+				validateRoutingRule(rule);
+			} catch (error) {
+				throw BadRequest(
+					error instanceof Error ? error.message : String(error),
+				);
+			}
 		const precedingRules = [
 			...new Set(
 				aliasRules
@@ -733,109 +822,148 @@ export class ClientService {
 			catalogues: catalogue,
 			notices: [],
 		};
-		const token = crypto.randomUUID();
-		const review: ClientReview = {
-			token,
-			draft: { ...draft, catalogues: catalogue },
-			aliasRules,
-			precedingRules,
-			notices,
+		return {
+			review: {
+				draft: { ...draft, catalogues: catalogue },
+				aliasRules,
+				precedingRules,
+				notices,
+			},
+			profile,
 		};
+	}
+	/**
+	 * Writes one prepared client. The caller owns the transaction and the
+	 * fingerprint check, so a batch can hold many of these under one of each.
+	 *
+	 * The position renumbering re-reads the table on every call, which is what
+	 * keeps repeated passes correct under `routing_rules`' unique position.
+	 */
+	private applyPreparedInTransaction(
+		prepared: PreparedDraft,
+		created: { apiKey?: string; hash?: string | null; createdAt: number },
+	): void {
+		const { review, profile } = prepared;
+		const { draft } = review;
+		const { dbOps } = this.deps;
+		const adapter = dbOps.getAdapter();
+		const routing = new RoutingRepository(adapter);
+		const db = adapter.getSQLiteDb();
+		if (!draft.id) {
+			new ApiKeyRepository(adapter).createInTransaction({
+				id: profile.apiKeyId,
+				name: draft.name,
+				hashed_key: created.hash!,
+				setup_key: created.apiKey!,
+				prefix_last_8: apiKeyLookupSuffix(created.apiKey!),
+				created_at: created.createdAt,
+				last_used: null,
+				is_active: 1,
+				pinned_account_id: draft.destinations.accountId,
+				pinned_providers:
+					draft.destinations.providers === null
+						? null
+						: JSON.stringify(draft.destinations.providers),
+			});
+			dbOps.clients.insertInTransaction(profile);
+		} else {
+			dbOps.clients.saveInTransaction(profile, draft.revision!);
+			db.query("UPDATE api_keys SET name=? WHERE id=?").run(
+				draft.name,
+				draft.id,
+			);
+		}
+		const owned = db
+			.query("SELECT rule_id FROM client_alias_rules WHERE api_key_id=?")
+			.all(profile.apiKeyId) as { rule_id: string }[];
+		for (const row of owned)
+			db.query("DELETE FROM routing_rules WHERE id=?").run(row.rule_id);
+		db.query("DELETE FROM client_alias_rules WHERE api_key_id=?").run(
+			profile.apiKeyId,
+		);
+		routing.updateDestinationsInTransaction(
+			profile.apiKeyId,
+			draft.destinations.accountId,
+			draft.destinations.providers,
+		);
+		const remaining = db
+			.query("SELECT id FROM routing_rules ORDER BY position")
+			.all() as { id: string }[];
+		if (review.aliasRules.length) {
+			for (const [index, row] of remaining.entries())
+				db.query("UPDATE routing_rules SET position=? WHERE id=?").run(
+					-index - 1,
+					row.id,
+				);
+			for (const [index, row] of remaining.entries())
+				db.query("UPDATE routing_rules SET position=? WHERE id=?").run(
+					index + review.aliasRules.length,
+					row.id,
+				);
+		}
+		for (const rule of review.aliasRules) {
+			routing.saveRuleInTransaction(rule);
+			db.query(
+				"INSERT INTO client_alias_rules(api_key_id,rule_id) VALUES(?,?)",
+			).run(profile.apiKeyId, rule.id);
+		}
+	}
+	/** Drops expired reviews, then oldest-first until the client cap holds. */
+	private trimPending(): void {
 		for (const [key, value] of this.pending)
 			if (value.expires < Date.now()) this.pending.delete(key);
-		if (this.pending.size >= 128)
-			this.pending.delete(this.pending.keys().next().value!);
+		const held = (entry: Prepared) =>
+			entry.kind === "bulk" ? entry.records.length : 1;
+		let total = 0;
+		for (const [, entry] of this.pending) total += held(entry);
+		for (const [key, entry] of this.pending) {
+			if (total <= PENDING_CLIENT_CAP) break;
+			total -= held(entry);
+			this.pending.delete(key);
+		}
+	}
+	async review(input: unknown): Promise<ClientReview> {
+		const fingerprintBefore = this.fingerprint();
+		const record = await this.prepareDraft(input);
+		const token = crypto.randomUUID();
 		if (this.fingerprint() !== fingerprintBefore)
 			throw Conflict(
 				"Routing or account identity changed during review; review again",
 			);
 		this.pending.set(token, {
-			review,
-			profile,
+			kind: "single",
+			record,
 			fingerprint: fingerprintBefore,
-			expires: Date.now() + 600000,
+			expires: Date.now() + PENDING_TTL_MS,
 		});
-		return review;
+		this.trimPending();
+		return { token, ...record.review };
 	}
 	async commit(
 		token: string,
 	): Promise<{ client: ClientView; apiKey?: string }> {
 		const prepared = this.pending.get(token);
-		if (!prepared || prepared.expires < Date.now())
+		if (
+			!prepared ||
+			prepared.expires < Date.now() ||
+			prepared.kind !== "single"
+		)
 			throw Conflict("Review expired; review the client again");
-		const { review, profile, fingerprint } = prepared;
-		const { draft } = review;
+		const { record, fingerprint } = prepared;
+		const { profile } = record;
+		const { draft } = record.review;
 		const { dbOps } = this.deps;
 		const cryptoUtils = new NodeCryptoUtils();
 		const apiKey = draft.id ? undefined : await cryptoUtils.generateApiKey();
 		const hash = apiKey ? await cryptoUtils.hashApiKey(apiKey) : null;
 		const adapter = dbOps.getAdapter();
 		const createdAt = Date.now();
-		const routing = new RoutingRepository(adapter);
 		await adapter.runTransaction(() => {
 			if (this.fingerprint() !== fingerprint)
 				throw new RoutingConflictError(
 					"Routing or destinations changed; review the client again",
 				);
-			const db = adapter.getSQLiteDb();
-			if (!draft.id) {
-				new ApiKeyRepository(adapter).createInTransaction({
-					id: profile.apiKeyId,
-					name: draft.name,
-					hashed_key: hash!,
-					setup_key: apiKey!,
-					prefix_last_8: apiKeyLookupSuffix(apiKey!),
-					created_at: createdAt,
-					last_used: null,
-					is_active: 1,
-					pinned_account_id: draft.destinations.accountId,
-					pinned_providers:
-						draft.destinations.providers === null
-							? null
-							: JSON.stringify(draft.destinations.providers),
-				});
-				dbOps.clients.insertInTransaction(profile);
-			} else {
-				dbOps.clients.saveInTransaction(profile, draft.revision!);
-				db.query("UPDATE api_keys SET name=? WHERE id=?").run(
-					draft.name,
-					draft.id,
-				);
-			}
-			const owned = db
-				.query("SELECT rule_id FROM client_alias_rules WHERE api_key_id=?")
-				.all(profile.apiKeyId) as { rule_id: string }[];
-			for (const row of owned)
-				db.query("DELETE FROM routing_rules WHERE id=?").run(row.rule_id);
-			db.query("DELETE FROM client_alias_rules WHERE api_key_id=?").run(
-				profile.apiKeyId,
-			);
-			routing.updateDestinationsInTransaction(
-				profile.apiKeyId,
-				draft.destinations.accountId,
-				draft.destinations.providers,
-			);
-			const remaining = db
-				.query("SELECT id FROM routing_rules ORDER BY position")
-				.all() as { id: string }[];
-			if (review.aliasRules.length) {
-				for (const [index, row] of remaining.entries())
-					db.query("UPDATE routing_rules SET position=? WHERE id=?").run(
-						-index - 1,
-						row.id,
-					);
-				for (const [index, row] of remaining.entries())
-					db.query("UPDATE routing_rules SET position=? WHERE id=?").run(
-						index + review.aliasRules.length,
-						row.id,
-					);
-			}
-			for (const rule of review.aliasRules) {
-				routing.saveRuleInTransaction(rule);
-				db.query(
-					"INSERT INTO client_alias_rules(api_key_id,rule_id) VALUES(?,?)",
-				).run(profile.apiKeyId, rule.id);
-			}
+			this.applyPreparedInTransaction(record, { apiKey, hash, createdAt });
 		});
 		this.pending.delete(token);
 		return {
@@ -845,6 +973,267 @@ export class ClientService {
 			),
 			...(apiKey ? { apiKey } : {}),
 		};
+	}
+	/**
+	 * Validates the request shape. Everything here is refused outright, before
+	 * any client is looked at, because none of it can be true for one client and
+	 * false for another.
+	 */
+	private bulkRequest(input: unknown): {
+		clientIds: string[];
+		operation: ClientBulkOperation;
+	} {
+		if (!input || typeof input !== "object" || Array.isArray(input))
+			throw BadRequest("Bulk request must be an object");
+		const body = structuredClone(input) as {
+			clientIds?: unknown;
+			operation?: unknown;
+		};
+		const clientIds = body.clientIds;
+		if (
+			!Array.isArray(clientIds) ||
+			!clientIds.length ||
+			clientIds.length > BULK_MAX_CLIENTS ||
+			clientIds.some((id) => typeof id !== "string" || !id)
+		)
+			throw BadRequest(`Select 1 to ${BULK_MAX_CLIENTS} clients`);
+		if (new Set(clientIds as string[]).size !== clientIds.length)
+			throw BadRequest("A client can appear only once in a bulk edit");
+		if (
+			!body.operation ||
+			typeof body.operation !== "object" ||
+			Array.isArray(body.operation)
+		)
+			throw BadRequest("Bulk operation must be an object");
+		const operation = body.operation as {
+			format?: unknown;
+			mode?: unknown;
+			models?: unknown;
+			defaultModel?: unknown;
+		};
+		if (!FORMATS.includes(operation.format as ClientFormat))
+			throw BadRequest("Unknown catalogue format");
+		if (!BULK_MODES.includes(operation.mode as ClientBulkMode))
+			throw BadRequest("Unknown bulk operation");
+		const models = operation.models;
+		if (!Array.isArray(models) || models.length > BULK_MAX_MODELS)
+			throw BadRequest(`Choose at most ${BULK_MAX_MODELS} models`);
+		// Only `id` is checked here: all three modes read it while merging and
+		// while diffing, so a malformed entry would throw out of the request
+		// before any validation ran. The rest of an entry is per-client and
+		// stays prepareDraft's job.
+		const seen = new Set<string>();
+		for (const value of models) {
+			if (!value || typeof value !== "object" || Array.isArray(value))
+				throw BadRequest("Invalid model entry");
+			const id = (value as ClientModel).id;
+			if (
+				typeof id !== "string" ||
+				!id.trim() ||
+				id !== id.trim() ||
+				id.length > 256
+			)
+				throw BadRequest("Invalid model ID");
+			if (seen.has(id)) throw BadRequest(`Duplicate model ${id}`);
+			seen.add(id);
+		}
+		const aliases = (models as ClientModel[]).filter(
+			(m) => m.id !== m.targetModel,
+		).length;
+		if (clientIds.length * aliases > BULK_MAX_ALIAS_WRITES)
+			throw BadRequest(
+				"This batch would rewrite too many routing rules; select fewer clients or fewer alias models",
+			);
+		return {
+			clientIds: clientIds as string[],
+			operation: {
+				format: operation.format as ClientFormat,
+				mode: operation.mode as ClientBulkMode,
+				models: models as ClientModel[],
+				defaultModel: (operation.defaultModel ?? null) as string | null,
+			},
+		};
+	}
+	/**
+	 * Proposes one catalogue operation to many clients. Catalogue entries are
+	 * not portable verbatim — account pins, Claude Code's compatible-alias rule
+	 * and Codex metadata are all properties of the target client — so every
+	 * client re-validates the proposal and the ones that refuse it are reported
+	 * and skipped rather than failing the batch.
+	 */
+	async bulkReview(input: unknown): Promise<ClientBulkReview> {
+		const { clientIds, operation } = this.bulkRequest(input);
+		const { dbOps } = this.deps;
+		const fingerprintBefore = this.fingerprint();
+		const operationIds = new Set(operation.models.map((m) => m.id));
+		const clients: ClientBulkClientResult[] = [];
+		const records: PreparedDraft[] = [];
+		for (const id of clientIds) {
+			const key = await dbOps.getApiKey(id);
+			if (!key) {
+				clients.push(rejectedClient(id, id, "Client not found"));
+				continue;
+			}
+			// A bulk edit must not resurrect a missing profile: `missingProfile()`
+			// carries revision 0, which prepareDraft reads as a create.
+			const profile = await dbOps.clients.getProfile(id);
+			if (!profile) {
+				clients.push(
+					rejectedClient(
+						id,
+						key.name,
+						"Client catalogue is missing; configure this client first",
+					),
+				);
+				continue;
+			}
+			const draft: ClientDraft = {
+				id,
+				revision: profile.revision,
+				name: key.name,
+				application: profile.application,
+				destinations: {
+					accountId: key.pinnedAccountId,
+					providers: key.pinnedProviders,
+				},
+				catalogues: structuredClone(profile.catalogues),
+			};
+			const before = profile.catalogues[operation.format];
+			const after = draft.catalogues[operation.format];
+			const notices: string[] = [];
+			if (operation.mode === "replace") {
+				after.models = structuredClone(operation.models);
+				after.defaultModel = operation.defaultModel ?? null;
+			} else {
+				if (operation.mode === "add") {
+					const present = new Set(after.models.map((m) => m.id));
+					for (const model of operation.models)
+						if (!present.has(model.id))
+							after.models.push(structuredClone(model));
+				} else
+					after.models = after.models.filter((m) => !operationIds.has(m.id));
+				if (
+					after.defaultModel !== null &&
+					!after.models.some((m) => m.id === after.defaultModel)
+				) {
+					notices.push(
+						`Default model cleared: ${after.defaultModel} is no longer in this catalogue.`,
+					);
+					after.defaultModel = null;
+				}
+			}
+			const beforeById = new Map(before.models.map((m) => [m.id, m]));
+			const afterById = new Map(after.models.map((m) => [m.id, m]));
+			const added = [...afterById.keys()].filter((k) => !beforeById.has(k));
+			const removed = [...beforeById.keys()].filter((k) => !afterById.has(k));
+			const modified = [...afterById.keys()].filter((k) => {
+				const old = beforeById.get(k);
+				const next = afterById.get(k);
+				return (
+					!!old &&
+					!!next &&
+					(old.targetModel !== next.targetModel ||
+						old.displayName !== next.displayName ||
+						pinOf(old) !== pinOf(next))
+				);
+			});
+			const defaultModelChange =
+				before.defaultModel === after.defaultModel
+					? null
+					: { from: before.defaultModel, to: after.defaultModel };
+			const result: ClientBulkClientResult = {
+				apiKeyId: id,
+				name: key.name,
+				status: "unchanged",
+				reason: null,
+				added,
+				removed,
+				modified,
+				defaultModelChange,
+				notices,
+			};
+			if (deepEqual(after, before)) {
+				clients.push(result);
+				continue;
+			}
+			try {
+				const record = await this.prepareDraft(draft);
+				records.push(record);
+				clients.push({
+					...result,
+					status: "changed",
+					notices: [...notices, ...record.review.notices],
+				});
+			} catch (error) {
+				if (
+					!isClientInputError(error) &&
+					!(
+						error instanceof HttpError &&
+						(error.status === 400 || error.status === 409)
+					)
+				)
+					throw error;
+				clients.push(
+					rejectedClient(
+						id,
+						key.name,
+						error instanceof Error ? error.message : String(error),
+					),
+				);
+			}
+		}
+		if (this.fingerprint() !== fingerprintBefore)
+			throw Conflict(
+				"Routing or account identity changed during review; review again",
+			);
+		const token = crypto.randomUUID();
+		this.pending.set(token, {
+			kind: "bulk",
+			operation,
+			records,
+			fingerprint: fingerprintBefore,
+			expires: Date.now() + PENDING_TTL_MS,
+		});
+		this.trimPending();
+		return { token, operation, clients };
+	}
+	/**
+	 * Applies every client the review prepared, in one transaction under one
+	 * fingerprint check. Committing a single client moves `routing_rules`, so N
+	 * separate commits would invalidate each other's reviews.
+	 */
+	async bulkCommit(token: string): Promise<{ clients: ClientView[] }> {
+		const prepared = this.pending.get(token);
+		if (!prepared || prepared.expires < Date.now() || prepared.kind !== "bulk")
+			throw Conflict("Review expired; review the client again");
+		const { records, fingerprint } = prepared;
+		const { dbOps } = this.deps;
+		const adapter = dbOps.getAdapter();
+		const createdAt = Date.now();
+		// Applying in a fixed order keeps the routing-rule renumbering the same
+		// run to run, whatever order the operator selected the clients in.
+		const ordered = [...records].sort((a, b) =>
+			a.profile.apiKeyId.localeCompare(b.profile.apiKeyId),
+		);
+		await adapter.runTransaction(() => {
+			if (this.fingerprint() !== fingerprint)
+				throw new RoutingConflictError(
+					"Routing or destinations changed; review the client again",
+				);
+			for (const record of ordered)
+				this.applyPreparedInTransaction(record, { createdAt });
+		});
+		this.pending.delete(token);
+		const rules = await dbOps.routing.listRules();
+		const clients: ClientView[] = [];
+		for (const record of records)
+			clients.push(
+				await this.view(
+					(await dbOps.getApiKey(record.profile.apiKeyId))!,
+					rules,
+				),
+			);
+		return { clients };
 	}
 	async remove(id: string): Promise<void> {
 		const adapter = this.deps.dbOps.getAdapter();
