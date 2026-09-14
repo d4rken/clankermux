@@ -46,6 +46,89 @@ describe("client management boundary", () => {
 	});
 });
 
+describe("client endpoint dispatch", () => {
+	const calls: { method: string; argument: unknown }[] = [];
+	const record = <T>(method: string, result: T) => {
+		return async (argument: unknown, refresh?: boolean) => {
+			calls.push({
+				method,
+				argument: refresh === undefined ? argument : { argument, refresh },
+			});
+			return result;
+		};
+	};
+	const handle = createClientsHandler(
+		{
+			suggestions: record("suggestions", { models: [], accounts: [] }),
+			review: record("review", { token: "single-review" }),
+			commit: record("commit", { client: {} }),
+			bulkReview: record("bulkReview", { token: "bulk-review" }),
+			bulkCommit: record("bulkCommit", { clients: [] }),
+		} as unknown as ClientManager,
+		{} as DatabaseOperations,
+	);
+	const post = async (path: string, body: unknown) => {
+		const url = new URL(`http://test${path}`);
+		const response = await handle(
+			new Request(url, { method: "POST", body: JSON.stringify(body) }),
+			url,
+		);
+		return { status: response.status, data: (await response.json()).data };
+	};
+	beforeEach(() => {
+		calls.length = 0;
+	});
+	// `/api/clients/bulk/review` also ends with "/review": a suffix match would
+	// hand the batch to the single-client reviewer, and the bulk commit token to
+	// the single-client commit.
+	it("keeps the bulk paths away from the single-client methods", async () => {
+		expect(
+			await post("/api/clients/bulk/review", { clientIds: ["a"] }),
+		).toEqual({ status: 200, data: { token: "bulk-review" } });
+		expect(await post("/api/clients/bulk/commit", { token: "t" })).toEqual({
+			status: 200,
+			data: { clients: [] },
+		});
+		expect(calls).toEqual([
+			{ method: "bulkReview", argument: { clientIds: ["a"] } },
+			{ method: "bulkCommit", argument: "t" },
+		]);
+	});
+	it("still routes the single-client paths and passes suggestions destinations", async () => {
+		expect(await post("/api/clients/review", { name: "One" })).toEqual({
+			status: 200,
+			data: { token: "single-review" },
+		});
+		expect((await post("/api/clients/commit", { token: "s" })).status).toBe(
+			200,
+		);
+		expect(
+			(
+				await post("/api/clients/suggestions", {
+					destinations: { accountId: null, providers: null },
+					refresh: true,
+				})
+			).status,
+		).toBe(200);
+		expect(calls).toEqual([
+			{ method: "review", argument: { name: "One" } },
+			{ method: "commit", argument: "s" },
+			{
+				method: "suggestions",
+				argument: {
+					argument: { accountId: null, providers: null },
+					refresh: true,
+				},
+			},
+		]);
+	});
+	it("requires a token on either commit path", async () => {
+		expect((await post("/api/clients/commit", {})).status).toBe(400);
+		expect((await post("/api/clients/bulk/commit", {})).status).toBe(400);
+		expect(calls).toEqual([]);
+	});
+});
+
 const temp = tempDbTracker("clients-http");
 describe("client lifecycle HTTP boundary", () => {
 	let db: DatabaseOperations;

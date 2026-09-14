@@ -11,6 +11,11 @@ export const APPLICATIONS: Record<ClientApplication, string> = {
 	"oh-my-pi": "Oh My Pi",
 	pi: "Pi Agent",
 };
+export const FORMATS: Record<ClientFormat, string> = {
+	anthropic: "Anthropic-style discovery",
+	openai: "OpenAI-style discovery",
+	codex: "Codex rich catalogue",
+};
 export const preferredFormat = (
 	application: ClientApplication,
 ): ClientFormat =>

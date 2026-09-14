@@ -37,6 +37,22 @@ function modelIds(ids: string[]): string[] {
 }
 export class RoutingConflictError extends Error {}
 
+/**
+ * Whether an error means "this input does not fit this client" rather than a
+ * server fault. {@link RoutingRepository.assertPinCompatible} and the
+ * rule-reference guards throw plain `Error`s, so the class alone cannot tell
+ * the two apart and the message has to be read.
+ */
+export function isClientInputError(error: unknown): boolean {
+	return (
+		error instanceof RoutingConflictError ||
+		(error instanceof Error &&
+			/referenced by routing rules|conflicts with API key destinations|UNIQUE constraint failed/.test(
+				error.message,
+			))
+	);
+}
+
 export class RoutingRepository extends BaseRepository<RoutingRule> {
 	async listRules(): Promise<RoutingRule[]> {
 		return (

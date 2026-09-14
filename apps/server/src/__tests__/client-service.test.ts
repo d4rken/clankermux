@@ -2,13 +2,19 @@ import { afterEach, beforeEach, describe, expect, it, spyOn } from "bun:test";
 import "@clankermux/core";
 import { matchRoutingRule } from "@clankermux/core";
 import { DatabaseOperations } from "@clankermux/database";
+import { HttpError } from "@clankermux/errors";
 import {
 	AccountModelPermissionService,
 	type CodexModelCatalogCache,
 	modelPermissionScope,
 } from "@clankermux/proxy";
 import { tempDbTracker } from "@clankermux/test-support";
-import type { ClientDraft, ClientView, RoutingRule } from "@clankermux/types";
+import type {
+	ClientDraft,
+	ClientModel,
+	ClientView,
+	RoutingRule,
+} from "@clankermux/types";
 import { ClientService } from "../client-service";
 import { ModelCatalogService } from "../model-catalog-service";
 
@@ -462,5 +468,607 @@ describe("client service integration", () => {
 		expect(
 			(await dbOps.clients.getProfile("legacy"))?.notices.length,
 		).toBeGreaterThan(0);
+	});
+
+	// --- bulk catalogue edits -------------------------------------------------
+
+	/** A committed client under `name`, optionally with a shaped draft. */
+	async function makeClient(
+		name: string,
+		shape?: (draft: ClientDraft) => void,
+	): Promise<ClientView> {
+		const draft = blank();
+		draft.name = name;
+		shape?.(draft);
+		return (await create(draft)).client;
+	}
+	const plain = (id: string): ClientModel => ({
+		id,
+		displayName: id,
+		targetModel: id,
+		accountIds: null,
+	});
+	const alias = (id: string, target = "gpt-static"): ClientModel => ({
+		id,
+		displayName: id,
+		targetModel: target,
+		accountIds: ["c"],
+	});
+	const bulkStatus = async (input: unknown): Promise<number> => {
+		try {
+			await service.bulkReview(input);
+		} catch (error) {
+			return error instanceof HttpError ? error.status : -1;
+		}
+		return 0;
+	};
+	const rules = () =>
+		dbOps
+			.getAdapter()
+			.getSQLiteDb()
+			.query("SELECT id,name,position FROM routing_rules ORDER BY position")
+			.all() as { id: string; name: string; position: number }[];
+	const aliasOwners = () =>
+		dbOps
+			.getAdapter()
+			.getSQLiteDb()
+			.query(
+				"SELECT api_key_id,rule_id FROM client_alias_rules ORDER BY rule_id",
+			)
+			.all() as { api_key_id: string; rule_id: string }[];
+
+	it("adds one entry to the selected clients and leaves the rest untouched", async () => {
+		await service.bootstrap();
+		const a = await makeClient("Alpha");
+		const b = await makeClient("Bravo");
+		const c = await makeClient("Charlie");
+		const review = await service.bulkReview({
+			clientIds: [a.apiKeyId, b.apiKeyId],
+			operation: { format: "openai", mode: "add", models: [plain("shared")] },
+		});
+		expect(review.clients.map((r) => r.apiKeyId)).toEqual([
+			a.apiKeyId,
+			b.apiKeyId,
+		]);
+		expect(review.clients.map((r) => r.status)).toEqual(["changed", "changed"]);
+		expect(review.clients[0]?.added).toEqual(["shared"]);
+		expect(review.clients[0]?.removed).toEqual([]);
+		expect(review.clients[0]?.modified).toEqual([]);
+		expect(review.clients[0]?.notices.length).toBeGreaterThan(0);
+		const committed = await service.bulkCommit(review.token);
+		expect(committed.clients.map((v) => v.apiKeyId)).toEqual([
+			a.apiKeyId,
+			b.apiKeyId,
+		]);
+		for (const id of [a.apiKeyId, b.apiKeyId]) {
+			const profile = await dbOps.clients.getProfile(id);
+			expect(profile?.catalogues.openai.models.map((m) => m.id)).toEqual([
+				"shared",
+			]);
+			expect(profile?.revision).toBe(2);
+		}
+		const untouched = await dbOps.clients.getProfile(c.apiKeyId);
+		expect(untouched?.catalogues.openai.models).toEqual([]);
+		expect(untouched?.revision).toBe(1);
+	});
+
+	it("reports a client that already publishes the added ID as unchanged", async () => {
+		await service.bootstrap();
+		const a = await makeClient("Alpha", (d) => {
+			d.catalogues.openai.models = [plain("shared")];
+		});
+		const b = await makeClient("Bravo");
+		const review = await service.bulkReview({
+			clientIds: [a.apiKeyId, b.apiKeyId],
+			operation: {
+				format: "openai",
+				mode: "add",
+				models: [
+					{
+						id: "shared",
+						displayName: "Rewritten",
+						targetModel: "somewhere-else",
+						accountIds: ["c"],
+					},
+				],
+			},
+		});
+		expect(review.clients.map((r) => r.status)).toEqual([
+			"unchanged",
+			"changed",
+		]);
+		expect(review.clients[0]?.added).toEqual([]);
+		expect(review.clients[0]?.modified).toEqual([]);
+		await service.bulkCommit(review.token);
+		// An add never overwrites an entry the operator already tuned by hand.
+		expect(
+			(await dbOps.clients.getProfile(a.apiKeyId))?.catalogues.openai.models,
+		).toEqual([plain("shared")]);
+		expect((await dbOps.clients.getProfile(a.apiKeyId))?.revision).toBe(1);
+	});
+
+	it("clears a default model that the removal took away, and says so", async () => {
+		await service.bootstrap();
+		const a = await makeClient("Alpha", (d) => {
+			d.catalogues.openai.models = [plain("keep"), plain("drop")];
+			d.catalogues.openai.defaultModel = "drop";
+		});
+		const review = await service.bulkReview({
+			clientIds: [a.apiKeyId],
+			operation: {
+				format: "openai",
+				mode: "remove",
+				models: [{ id: "drop" }],
+			},
+		});
+		const result = review.clients[0];
+		expect(result?.status).toBe("changed");
+		expect(result?.removed).toEqual(["drop"]);
+		expect(result?.added).toEqual([]);
+		expect(result?.defaultModelChange).toEqual({ from: "drop", to: null });
+		expect(result?.notices).toContain(
+			"Default model cleared: drop is no longer in this catalogue.",
+		);
+		await service.bulkCommit(review.token);
+		const catalogue = (await dbOps.clients.getProfile(a.apiKeyId))?.catalogues
+			.openai;
+		expect(catalogue?.models.map((m) => m.id)).toEqual(["keep"]);
+		expect(catalogue?.defaultModel).toBeNull();
+	});
+
+	it("replaces one format wholesale and leaves the other two alone", async () => {
+		await service.bootstrap();
+		const a = await makeClient("Alpha", (d) => {
+			d.catalogues.anthropic.models = [plain("claude-known")];
+			d.catalogues.openai.models = [plain("old-one"), plain("old-two")];
+		});
+		const review = await service.bulkReview({
+			clientIds: [a.apiKeyId],
+			operation: {
+				format: "openai",
+				mode: "replace",
+				models: [plain("fresh")],
+				defaultModel: "fresh",
+			},
+		});
+		expect(review.clients[0]?.added).toEqual(["fresh"]);
+		expect(review.clients[0]?.removed).toEqual(["old-one", "old-two"]);
+		expect(review.clients[0]?.defaultModelChange).toEqual({
+			from: null,
+			to: "fresh",
+		});
+		await service.bulkCommit(review.token);
+		const catalogues = (await dbOps.clients.getProfile(a.apiKeyId))?.catalogues;
+		expect(catalogues?.openai.models.map((m) => m.id)).toEqual(["fresh"]);
+		expect(catalogues?.openai.defaultModel).toBe("fresh");
+		expect(catalogues?.anthropic.models.map((m) => m.id)).toEqual([
+			"claude-known",
+		]);
+		expect(catalogues?.codex.models).toEqual([]);
+	});
+
+	it("reports a repointed ID as modified rather than as no change at all", async () => {
+		await service.bootstrap();
+		const a = await makeClient("Alpha", (d) => {
+			d.catalogues.openai.models = [alias("fast", "target-a")];
+		});
+		const review = await service.bulkReview({
+			clientIds: [a.apiKeyId],
+			operation: {
+				format: "openai",
+				mode: "replace",
+				models: [alias("fast", "target-b")],
+			},
+		});
+		const result = review.clients[0];
+		expect(result?.status).toBe("changed");
+		expect(result?.modified).toEqual(["fast"]);
+		expect(result?.added).toEqual([]);
+		expect(result?.removed).toEqual([]);
+		await service.bulkCommit(review.token);
+		expect(
+			(await dbOps.clients.getProfile(a.apiKeyId))?.catalogues.openai.models[0]
+				?.targetModel,
+		).toBe("target-b");
+	});
+
+	it("skips a client whose own routing conflicts with its destinations and commits the rest", async () => {
+		await service.bootstrap();
+		const pinned = await makeClient("Pinned", (d) => {
+			d.destinations = { accountId: "d", providers: null };
+		});
+		const open = await makeClient("Open");
+		// A manual rule pooling an account the key's pin excludes. This is the
+		// ordinary-conflict case: `assertPinCompatible` throws a plain Error, so a
+		// catch filtering on typed errors alone would abort the whole batch.
+		dbOps
+			.getAdapter()
+			.getSQLiteDb()
+			.query(
+				`INSERT INTO routing_rules
+				   (id,name,enabled,position,match_api_key_id,match_model_kind,match_model_value,
+				    pool_kind,pool_provider,pool_account_ids,target_kind,target_model)
+				 VALUES ('manual','Manual pin',1,0,?,'any',NULL,'accounts',NULL,'["c"]','requested',NULL)`,
+			)
+			.run(pinned.apiKeyId);
+		const before = await dbOps.clients.getProfile(pinned.apiKeyId);
+		const review = await service.bulkReview({
+			clientIds: [pinned.apiKeyId, open.apiKeyId],
+			operation: { format: "openai", mode: "add", models: [plain("shared")] },
+		});
+		expect(review.clients[0]?.status).toBe("rejected");
+		expect(review.clients[0]?.reason).toContain(
+			"conflicts with API key destinations",
+		);
+		expect(review.clients[1]?.status).toBe("changed");
+		const committed = await service.bulkCommit(review.token);
+		expect(committed.clients.map((v) => v.apiKeyId)).toEqual([open.apiKeyId]);
+		expect(await dbOps.clients.getProfile(pinned.apiKeyId)).toEqual(before!);
+		expect(
+			(
+				await dbOps.clients.getProfile(open.apiKeyId)
+			)?.catalogues.openai.models.map((m) => m.id),
+		).toEqual(["shared"]);
+	});
+
+	it("rejects an incompatible Anthropic ID for Claude Code while a generic client takes it", async () => {
+		await service.bootstrap();
+		const cc = await makeClient("Claude Code", (d) => {
+			d.application = "claude-code";
+		});
+		const generic = await makeClient("Generic");
+		const review = await service.bulkReview({
+			clientIds: [cc.apiKeyId, generic.apiKeyId],
+			operation: {
+				format: "anthropic",
+				mode: "add",
+				models: [plain("gpt-fast")],
+			},
+		});
+		expect(review.clients[0]?.status).toBe("rejected");
+		expect(review.clients[0]?.reason).toBe(
+			"Claude Code requires a compatible alias for gpt-fast",
+		);
+		expect(review.clients[1]?.status).toBe("changed");
+		await service.bulkCommit(review.token);
+		expect(
+			(await dbOps.clients.getProfile(cc.apiKeyId))?.catalogues.anthropic
+				.models,
+		).toEqual([]);
+		expect(
+			(
+				await dbOps.clients.getProfile(generic.apiKeyId)
+			)?.catalogues.anthropic.models.map((m) => m.id),
+		).toEqual(["gpt-fast"]);
+	});
+
+	it("refuses an over-long generated rule name at review, for one client or many", async () => {
+		await service.bootstrap();
+		const longId = "a".repeat(200);
+		const short = await makeClient("Short");
+		const long = await makeClient("N".repeat(100));
+		const draft = edit(long);
+		draft.catalogues.openai.models = [alias(longId)];
+		// Without a review-time check this only fails inside the commit
+		// transaction, after a batch has already applied other clients' work.
+		await expect(service.review(draft)).rejects.toThrow("Invalid rule name");
+		expect(rules()).toEqual([]);
+		const review = await service.bulkReview({
+			clientIds: [short.apiKeyId, long.apiKeyId],
+			operation: { format: "openai", mode: "add", models: [alias(longId)] },
+		});
+		expect(review.clients[0]?.status).toBe("changed");
+		expect(review.clients[1]?.status).toBe("rejected");
+		expect(review.clients[1]?.reason).toBe("Invalid rule name");
+		await service.bulkCommit(review.token);
+		expect(rules().map((r) => r.name)).toEqual([`Short: ${longId}`]);
+	});
+
+	it("rejects malformed bulk requests before touching any client", async () => {
+		const a = await makeClient("Alpha");
+		const operation = (models: unknown) => ({
+			clientIds: [a.apiKeyId],
+			operation: { format: "openai", mode: "add", models },
+		});
+		expect(await bulkStatus(operation([null]))).toBe(400);
+		expect(
+			await bulkStatus(
+				operation([
+					{ displayName: "No ID", targetModel: "x", accountIds: null },
+				]),
+			),
+		).toBe(400);
+		expect(await bulkStatus(operation([plain("dup"), plain("dup")]))).toBe(400);
+		expect(await bulkStatus(operation("not-an-array"))).toBe(400);
+		expect(
+			await bulkStatus({
+				clientIds: [],
+				operation: { format: "openai", mode: "add", models: [] },
+			}),
+		).toBe(400);
+		expect(
+			await bulkStatus({
+				clientIds: [a.apiKeyId, a.apiKeyId],
+				operation: { format: "openai", mode: "add", models: [] },
+			}),
+		).toBe(400);
+		expect(
+			await bulkStatus({
+				clientIds: [a.apiKeyId],
+				operation: { format: "sideways", mode: "add", models: [] },
+			}),
+		).toBe(400);
+		expect(
+			await bulkStatus({
+				clientIds: [a.apiKeyId],
+				operation: { format: "openai", mode: "merge", models: [] },
+			}),
+		).toBe(400);
+	});
+
+	it("accepts a plain remove of many entries across many clients", async () => {
+		await service.bootstrap();
+		const ids = Array.from({ length: 51 }, (_, i) => `drop-${i}`);
+		const clients: ClientView[] = [];
+		for (let i = 0; i < 10; i++)
+			clients.push(
+				await makeClient(`Bulk ${i}`, (d) => {
+					d.catalogues.openai.models = ids.map(plain);
+				}),
+			);
+		// The remove contract reads only `id`, so no entry carries a target model
+		// and no alias is involved anywhere in this batch.
+		const review = await service.bulkReview({
+			clientIds: clients.map((c) => c.apiKeyId),
+			operation: {
+				format: "openai",
+				mode: "remove",
+				models: ids.map((id) => ({ id })),
+			},
+		});
+		expect(review.clients.map((r) => r.status)).toEqual(
+			Array(clients.length).fill("changed"),
+		);
+		await service.bulkCommit(review.token);
+		for (const client of clients)
+			expect(
+				(await dbOps.clients.getProfile(client.apiKeyId))?.catalogues.openai
+					.models,
+			).toEqual([]);
+	}, 60000);
+
+	it("counts the alias rules a batch retains against the routing-rewrite bound", async () => {
+		await service.bootstrap();
+		const ids = Array.from({ length: 51 }, (_, i) => `alias-${i}`);
+		const clients: ClientView[] = [];
+		for (let i = 0; i < 10; i++)
+			clients.push(
+				await makeClient(`Bulk ${i}`, (d) => {
+					d.catalogues.openai.models = ids.map((id) => alias(id));
+				}),
+			);
+		expect(rules().length).toBe(510);
+		// Every entry has id === targetModel, so the request declares no aliases.
+		// Hiding the entries keeps all 510 owned rules alive as retained alias
+		// rules, so each client still renumbers the whole table twice.
+		await expect(
+			service.bulkReview({
+				clientIds: clients.map((c) => c.apiKeyId),
+				operation: {
+					format: "openai",
+					mode: "remove",
+					models: ids.map((id) => ({
+						id,
+						targetModel: id,
+						displayName: id,
+						accountIds: null,
+					})),
+				},
+			}),
+		).rejects.toThrow("too many routing rules");
+	}, 60000);
+
+	it("rejects the client whose entry carries a non-array account pin instead of failing the batch", async () => {
+		await service.bootstrap();
+		const a = await makeClient("Alpha", (d) => {
+			d.catalogues.openai.models = [
+				{
+					id: "fast",
+					displayName: "Fast",
+					targetModel: "fast",
+					accountIds: null,
+				},
+			];
+		});
+		const b = await makeClient("Bravo");
+		// Alpha already publishes `fast` under the same display name and target,
+		// so the modified-diff compares the pins of the two entries.
+		const review = await service.bulkReview({
+			clientIds: [a.apiKeyId, b.apiKeyId],
+			operation: {
+				format: "openai",
+				mode: "replace",
+				models: [
+					{
+						id: "fast",
+						displayName: "Fast",
+						targetModel: "fast",
+						accountIds: {},
+					},
+				],
+			},
+		});
+		expect(review.clients.map((r) => r.status)).toEqual([
+			"rejected",
+			"rejected",
+		]);
+		expect(review.clients[0]?.reason).toBe("Choose allowed accounts for fast");
+		expect(review.clients[1]?.reason).toBe("Choose allowed accounts for fast");
+	});
+
+	it("reports no change when an Anthropic replacement differs only in stored createdAt", async () => {
+		await service.bootstrap();
+		const shape = (d: ClientDraft) => {
+			d.catalogues.anthropic.models = [
+				{
+					id: "claude-alias",
+					displayName: "Claude Alias",
+					targetModel: "claude-known",
+					accountIds: ["c"],
+				},
+			];
+			d.catalogues.anthropic.defaultModel = "claude-alias";
+		};
+		const source = await makeClient("Source", shape);
+		const dest = await makeClient("Dest", shape);
+		const sql = dbOps.getAdapter().getSQLiteDb();
+		// prepareDraft stamps createdAt per client from the wall clock, so force
+		// the two apart rather than hoping the creates land in different
+		// milliseconds.
+		for (const [id, stamp] of [
+			[source.apiKeyId, "2020-01-01T00:00:00.000Z"],
+			[dest.apiKeyId, "2021-01-01T00:00:00.000Z"],
+		] as const) {
+			const row = sql
+				.query("SELECT catalogues FROM client_profiles WHERE api_key_id=?")
+				.get(id) as { catalogues: string };
+			const parsed = JSON.parse(row.catalogues);
+			parsed.anthropic.models[0].createdAt = stamp;
+			sql
+				.query("UPDATE client_profiles SET catalogues=? WHERE api_key_id=?")
+				.run(JSON.stringify(parsed), id);
+		}
+		const sourceProfile = (await dbOps.clients.getProfile(source.apiKeyId))!;
+		const from = sourceProfile.catalogues.anthropic;
+		const before = (await dbOps.clients.getProfile(dest.apiKeyId))!;
+		const ownedBefore = aliasOwners().find(
+			(o) => o.api_key_id === dest.apiKeyId,
+		)!;
+		const review = await service.bulkReview({
+			clientIds: [dest.apiKeyId],
+			operation: {
+				format: "anthropic",
+				mode: "replace",
+				models: structuredClone(from.models),
+				defaultModel: from.defaultModel,
+			},
+		});
+		// Both catalogues publish the same ID, target, display name and pin, and
+		// preparation restamps createdAt from Dest's own entry regardless.
+		expect(review.clients[0]?.status).toBe("unchanged");
+		await service.bulkCommit(review.token);
+		const after = (await dbOps.clients.getProfile(dest.apiKeyId))!;
+		expect(after.revision).toBe(before.revision);
+		expect(after.catalogues).toEqual(before.catalogues);
+		expect(aliasOwners().find((o) => o.api_key_id === dest.apiKeyId)).toEqual(
+			ownedBefore,
+		);
+	});
+
+	it("rolls the whole batch back when a later client's revision moved underneath it", async () => {
+		await service.bootstrap();
+		await dbOps.routing.saveRule(broad);
+		const a = await makeClient("Alpha");
+		const b = await makeClient("Bravo");
+		const review = await service.bulkReview({
+			clientIds: [a.apiKeyId, b.apiKeyId],
+			operation: { format: "openai", mode: "add", models: [alias("shared")] },
+		});
+		expect(review.clients.map((r) => r.status)).toEqual(["changed", "changed"]);
+		const before = {
+			a: await dbOps.clients.getProfile(a.apiKeyId),
+			b: await dbOps.clients.getProfile(b.apiKeyId),
+		};
+		const rulesBefore = rules();
+		// The batch applies in apiKeyId order, so bumping the last one's revision
+		// fails the CAS only after the earlier client has already been written.
+		const last = [a.apiKeyId, b.apiKeyId].sort().at(-1)!;
+		const first = last === a.apiKeyId ? b.apiKeyId : a.apiKeyId;
+		dbOps
+			.getAdapter()
+			.getSQLiteDb()
+			.query(
+				"UPDATE client_profiles SET revision=revision+1 WHERE api_key_id=?",
+			)
+			.run(last);
+		await expect(service.bulkCommit(review.token)).rejects.toThrow(
+			"Client changed",
+		);
+		const after = await dbOps.clients.getProfile(first);
+		expect(after).toEqual(
+			(first === a.apiKeyId ? before.a : before.b) as NonNullable<typeof after>,
+		);
+		expect(rules()).toEqual(rulesBefore);
+		expect(aliasOwners()).toEqual([]);
+	});
+
+	it("refuses a bulk commit whose routing moved after the review", async () => {
+		await service.bootstrap();
+		const a = await makeClient("Alpha");
+		const review = await service.bulkReview({
+			clientIds: [a.apiKeyId],
+			operation: { format: "openai", mode: "add", models: [plain("shared")] },
+		});
+		await dbOps.routing.saveRule(broad);
+		await expect(service.bulkCommit(review.token)).rejects.toThrow("changed");
+		expect(
+			(await dbOps.clients.getProfile(a.apiKeyId))?.catalogues.openai.models,
+		).toEqual([]);
+	});
+
+	it("refuses an expired token and a token fed to the wrong commit", async () => {
+		await service.bootstrap();
+		const a = await makeClient("Alpha");
+		const expired = await service.bulkReview({
+			clientIds: [a.apiKeyId],
+			operation: { format: "openai", mode: "add", models: [plain("shared")] },
+		});
+		const pending = (
+			service as unknown as { pending: Map<string, { expires: number }> }
+		).pending;
+		pending.get(expired.token)!.expires = Date.now() - 1;
+		await expect(service.bulkCommit(expired.token)).rejects.toThrow(
+			"Review expired",
+		);
+
+		const bulk = await service.bulkReview({
+			clientIds: [a.apiKeyId],
+			operation: { format: "openai", mode: "add", models: [plain("shared")] },
+		});
+		await expect(service.commit(bulk.token)).rejects.toThrow("Review expired");
+		const single = await service.review(edit(a));
+		await expect(service.bulkCommit(single.token)).rejects.toThrow(
+			"Review expired",
+		);
+	});
+
+	it("gives every client its own alias rule, all ahead of the pre-existing rule", async () => {
+		await service.bootstrap();
+		await dbOps.routing.saveRule(broad);
+		const a = await makeClient("Alpha");
+		const b = await makeClient("Bravo");
+		const review = await service.bulkReview({
+			clientIds: [a.apiKeyId, b.apiKeyId],
+			operation: { format: "openai", mode: "add", models: [alias("shared")] },
+		});
+		await service.bulkCommit(review.token);
+		const owners = aliasOwners();
+		expect(owners.map((o) => o.api_key_id).sort()).toEqual(
+			[a.apiKeyId, b.apiKeyId].sort(),
+		);
+		const table = rules();
+		const positionOf = (id: string) => {
+			const row = table.find((r) => r.id === id);
+			if (!row) throw new Error(`No routing rule ${id}`);
+			return row.position;
+		};
+		const broadPosition = positionOf("broad");
+		for (const owner of owners)
+			expect(positionOf(owner.rule_id)).toBeLessThan(broadPosition);
+		for (const id of [a.apiKeyId, b.apiKeyId])
+			expect(
+				matchRoutingRule(await dbOps.routing.listRules(), id, "shared")
+					?.target_model,
+			).toBe("gpt-static");
 	});
 });

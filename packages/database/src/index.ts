@@ -77,6 +77,7 @@ export {
 	type RequestFilters,
 } from "./repositories/request-filters";
 export {
+	isClientInputError,
 	RoutingConflictError,
 	RoutingRepository,
 } from "./repositories/routing.repository";

@@ -25,6 +25,7 @@
 		"build:dashboard": "bun run --cwd packages/dashboard-web build",
 		"build:dashboard:guarded": "bun run scripts/guarded-build.ts dashboard",
 		"build:readme-media": "bun run scripts/build-readme-media.ts",
+		"e2e:bulk-catalogue": "bun run build:dashboard && scripts/e2e/run-bulk-catalogue.sh",
 		"build:readme-screenshots": "bun run build:dashboard && scripts/capture-readme-screenshots.sh",
 		"format": "bunx biome format --write .",
 		"lint": "bunx --bun biome check --write --unsafe .",
@@ -48,5 +49,5 @@
 		"ts-json-schema-generator": "2.9.0",
 		"typescript": "6.0.2"
 	},
-	"version": "2026.9.62"
+	"version": "2026.9.63"
 }

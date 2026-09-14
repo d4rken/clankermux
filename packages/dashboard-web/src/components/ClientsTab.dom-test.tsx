@@ -1,4 +1,4 @@
-import { afterEach, expect, it } from "bun:test";
+import { afterEach, expect, it, mock, spyOn } from "bun:test";
 import type { ClientView } from "@clankermux/types";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { act } from "react";
@@ -6,6 +6,32 @@ import { createRoot, type Root } from "react-dom/client";
 import { MemoryRouter } from "react-router";
 import { queryKeys } from "../lib/query-keys";
 import { ClientsTab } from "./ClientsTab";
+
+function makeClient(name: string): ClientView {
+	return {
+		apiKeyId: name,
+		application: "generic",
+		revision: 1,
+		aliasRules: [],
+		notices: [],
+		key: {
+			id: name,
+			name,
+			prefixLast8: "12345678",
+			createdAt: "2026-01-01",
+			lastUsed: null,
+			usageCount: 0,
+			isActive: true,
+			pinnedAccountId: null,
+			pinnedProviders: null,
+		},
+		catalogues: {
+			anthropic: { models: [], defaultModel: null },
+			openai: { models: [], defaultModel: null },
+			codex: { models: [], defaultModel: null },
+		},
+	};
+}
 
 (
 	globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }
@@ -17,6 +43,7 @@ afterEach(async () => {
 	await act(async () => root?.unmount());
 	host?.remove();
 	query?.clear();
+	mock.restore();
 });
 
 it("sorts each client header in both directions and retains sorting after refresh", async () => {
@@ -154,4 +181,73 @@ it("sorts each client header in both directions and retains sorting after refres
 		"Alpha 10",
 		"Alpha 2",
 	]);
+});
+
+it("selects clients, opens the bulk editor, and forgets clients that disappear", async () => {
+	spyOn(globalThis, "fetch").mockImplementation((async (input: unknown) => {
+		if (String(input).endsWith("/suggestions"))
+			return Response.json({ data: { models: [], accounts: [] } });
+		throw new Error(`Unexpected request ${String(input)}`);
+	}) as unknown as typeof fetch);
+	query = new QueryClient({
+		defaultOptions: { queries: { staleTime: Infinity, retry: false } },
+	});
+	query.setQueryData(
+		["clients"],
+		[makeClient("One"), makeClient("Two"), makeClient("Three")],
+	);
+	query.setQueryData(queryKeys.accounts(), []);
+	const container = document.createElement("div");
+	host = container;
+	document.body.append(host);
+	root = createRoot(host);
+	await act(async () =>
+		root?.render(
+			<QueryClientProvider client={query}>
+				<MemoryRouter>
+					<ClientsTab />
+				</MemoryRouter>
+			</QueryClientProvider>,
+		),
+	);
+	const box = (label: string) => {
+		const found = container.querySelector<HTMLInputElement>(
+			`input[type="checkbox"][aria-label="${label}"]`,
+		);
+		if (!found) throw new Error(`Missing checkbox ${label}`);
+		return found;
+	};
+	const clickBox = async (label: string) => {
+		const target = box(label);
+		await act(async () => target.click());
+	};
+	const clickButton = async (label: string) => {
+		const target = [...container.querySelectorAll("button")].find(
+			(b) => (b.getAttribute("aria-label") ?? b.textContent?.trim()) === label,
+		);
+		if (!target) throw new Error(`Missing button ${label}`);
+		await act(async () => target.click());
+	};
+	await clickBox("Select One");
+	await clickBox("Select Two");
+	expect(container.textContent).toContain("2 selected");
+	// React has no `indeterminate` prop, so this is set through a ref; a header
+	// box that never leaves "unchecked" misreports a partial selection.
+	expect(box("Select all clients").indeterminate).toBe(true);
+	await clickBox("Select all clients");
+	expect(box("Clear client selection").checked).toBe(true);
+	expect(container.textContent).toContain("3 selected");
+
+	await clickBox("Clear client selection");
+	await clickBox("Select One");
+	await clickBox("Select Two");
+	await act(async () => {
+		query.setQueryData(["clients"], [makeClient("One"), makeClient("Three")]);
+		await new Promise((resolve) => setTimeout(resolve, 0));
+	});
+	expect(container.textContent).toContain("1 selected");
+
+	await clickButton("Edit catalogues");
+	expect(container.querySelector('ul[aria-label="Clients"]')).toBeNull();
+	expect(container.textContent).toContain("Edit catalogues · 1 client");
 });

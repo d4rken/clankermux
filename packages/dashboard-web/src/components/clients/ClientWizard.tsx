@@ -13,7 +13,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "../ui/card";
 import { Input } from "../ui/input";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "../ui/tabs";
 import { clientRequest } from "./api";
-import { APPLICATIONS, preferredFormat } from "./setup";
+import { APPLICATIONS, FORMATS, preferredFormat } from "./setup";
 
 export interface DestinationAccount {
 	id: string;
@@ -21,11 +21,6 @@ export interface DestinationAccount {
 	provider: string;
 }
 const SELECT = "h-9 rounded-md border border-input bg-background px-3 text-sm";
-const FORMATS: Record<ClientFormat, string> = {
-	anthropic: "Anthropic-style discovery",
-	openai: "OpenAI-style discovery",
-	codex: "Codex rich catalogue",
-};
 export function draftFor(client?: ClientView): ClientDraft {
 	return client
 		? {

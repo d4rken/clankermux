@@ -30,7 +30,7 @@ AGENTS.md
 # Disallow .sh files except in .github/scripts/ and project scripts/ dir
 **/*.sh
 !.github/scripts/*.sh
-!scripts/*.sh
+!scripts/**/*.sh
 
 # Build artifacts and test files
 clankermux-*

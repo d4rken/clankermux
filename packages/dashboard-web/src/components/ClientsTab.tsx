@@ -6,11 +6,12 @@ import {
 } from "@tanstack/react-query";
 import { formatDistanceToNow } from "date-fns";
 import { MoreHorizontal, Plus, Settings2 } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useAccounts } from "../hooks/queries";
 import { invalidateCapacityQueries } from "../lib/query-keys";
 import { type SortDir, SortIcon } from "./analytics/sort-header";
 import { clientRequest } from "./clients/api";
+import { ClientBulkCatalogue } from "./clients/ClientBulkCatalogue";
 import { ClientSetupDialog } from "./clients/ClientSetupDialog";
 import { ClientWizard } from "./clients/ClientWizard";
 import { APPLICATIONS } from "./clients/setup";
@@ -116,6 +117,17 @@ export function ClientsTab() {
 	});
 	const { data: accounts = [] } = useAccounts();
 	const [editing, setEditing] = useState<ClientView | "new" | null>(null);
+	const [selectedIds, setSelectedIds] = useState<ReadonlySet<string>>(
+		() => new Set(),
+	);
+	const [bulk, setBulk] = useState<ClientView[] | null>(null);
+	// Re-derived from every list refresh, so a client deleted elsewhere cannot
+	// linger in the selection and be sent to the bulk endpoint.
+	const selected = useMemo(() => {
+		const live = new Set(clients.map((c) => c.apiKeyId));
+		return new Set([...selectedIds].filter((id) => live.has(id)));
+	}, [clients, selectedIds]);
+	const selectAllRef = useRef<HTMLInputElement>(null);
 	const [setup, setSetup] = useState<{
 		client: ClientView;
 		apiKey?: string;
@@ -197,6 +209,20 @@ export function ClientsTab() {
 			);
 		});
 	}, [clients, accounts, sort]);
+	const allSelected = clients.length > 0 && selected.size === clients.length;
+	// React has no `indeterminate` prop; a partial selection is only visible on
+	// the element itself.
+	useEffect(() => {
+		if (selectAllRef.current)
+			selectAllRef.current.indeterminate =
+				selected.size > 0 && selected.size < clients.length;
+	}, [selected, clients.length]);
+	const toggleClient = (id: string) =>
+		setSelectedIds((current) => {
+			const next = new Set(current);
+			if (!next.delete(id)) next.add(id);
+			return next;
+		});
 	if (editing)
 		return (
 			<ClientWizard
@@ -205,6 +231,19 @@ export function ClientsTab() {
 				accounts={accounts}
 				onCancel={() => setEditing(null)}
 				onSaved={finish}
+			/>
+		);
+	if (bulk)
+		return (
+			<ClientBulkCatalogue
+				clients={bulk}
+				accounts={accounts}
+				onCancel={() => setBulk(null)}
+				onDone={() => {
+					setBulk(null);
+					setSelectedIds(new Set());
+					reload();
+				}}
 			/>
 		);
 	return (
@@ -237,9 +276,46 @@ export function ClientsTab() {
 				</Card>
 			)}
 
+			{selected.size > 0 && (
+				<div className="flex flex-wrap items-center gap-3 rounded-lg border bg-muted/30 px-4 py-2.5">
+					<span className="text-sm font-medium">{selected.size} selected</span>
+					<Button
+						size="sm"
+						onClick={() =>
+							setBulk(clients.filter((c) => selected.has(c.apiKeyId)))
+						}
+					>
+						Edit catalogues
+					</Button>
+					<Button
+						variant="ghost"
+						size="sm"
+						onClick={() => setSelectedIds(new Set())}
+					>
+						Clear selection
+					</Button>
+				</div>
+			)}
+
 			{sortedClients.length > 0 && (
 				<div className="overflow-hidden rounded-lg border bg-card">
-					<div className="flex flex-wrap items-center gap-x-5 gap-y-3 xl:grid xl:grid-cols-[minmax(0,1.15fr)_minmax(0,1fr)_minmax(0,1fr)_10rem_15.5rem] xl:gap-4 border-b bg-muted/30 px-5 py-2.5 text-xs font-medium text-muted-foreground">
+					<div className="flex flex-wrap items-center gap-x-5 gap-y-3 xl:grid xl:grid-cols-[2rem_minmax(0,1.15fr)_minmax(0,1fr)_minmax(0,1fr)_10rem_15.5rem] xl:gap-4 border-b bg-muted/30 px-5 py-2.5 text-xs font-medium text-muted-foreground">
+						<input
+							ref={selectAllRef}
+							type="checkbox"
+							className="shrink-0"
+							aria-label={
+								allSelected ? "Clear client selection" : "Select all clients"
+							}
+							checked={allSelected}
+							onChange={() =>
+								setSelectedIds(
+									allSelected
+										? new Set()
+										: new Set(clients.map((c) => c.apiKeyId)),
+								)
+							}
+						/>
 						{SORT_COLUMNS.map((column) => (
 							<button
 								key={column.key}
@@ -275,7 +351,14 @@ export function ClientsTab() {
 								key={client.apiKeyId}
 								className="px-4 py-4 sm:px-5 hover:bg-muted/20 transition-colors"
 							>
-								<div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-[minmax(0,1.15fr)_minmax(0,1fr)_minmax(0,1fr)_10rem_15.5rem] xl:items-center xl:gap-4">
+								<div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-[2rem_minmax(0,1.15fr)_minmax(0,1fr)_minmax(0,1fr)_10rem_15.5rem] xl:items-center xl:gap-4">
+									<input
+										type="checkbox"
+										className="shrink-0 justify-self-start"
+										aria-label={`Select ${client.key.name}`}
+										checked={selected.has(client.apiKeyId)}
+										onChange={() => toggleClient(client.apiKeyId)}
+									/>
 									<div className="min-w-0">
 										<div className="flex items-center gap-2">
 											<h2 className="font-semibold text-sm break-words min-w-0">
