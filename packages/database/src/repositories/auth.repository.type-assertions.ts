@@ -3,10 +3,9 @@
  * declarations are ambient and the file is imported by no one, so `tsc` is the
  * only thing that ever reads it.
  *
- * It cannot live in `auth.repository.test.ts`, which is where the matching
- * runtime tests are. The project tsconfig excludes `packages/**\/*.test.ts`, so
- * a `@ts-expect-error` written there is never evaluated — it would sit in the
- * file looking like a guarantee while `bun run typecheck` skipped over it.
+ * The assertions could equally live beside the runtime tests in
+ * `auth.repository.test.ts`, which is typechecked as well; they sit in their
+ * own module so the pin stays separate from the runtime suite.
  *
  * What it pins: the PasswordBinding on `createSession` is REQUIRED. Making it
  * optional again is what reopens the race the binding exists to close — a login

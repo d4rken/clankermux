@@ -2192,7 +2192,6 @@ describe("CodexProvider.transformRequestBody", () => {
 });
 
 describe("CodexProvider prompt_cache_key derivation", () => {
-	// Test files are excluded from typecheck, so a minimal account shape is fine.
 	const codexAccount = (overrides: Record<string, unknown> = {}) =>
 		({
 			id: "codex-1",
@@ -2574,7 +2573,6 @@ describe("CodexProvider native Responses passthrough", () => {
 });
 
 describe("CodexProvider ChatGPT-backend parameter sanitation", () => {
-	// Test files are excluded from typecheck, so a minimal account shape is fine.
 	const codexAccount = (overrides: Record<string, unknown> = {}) =>
 		({
 			id: "codex-1",
@@ -3992,7 +3990,6 @@ describe("CodexProvider refreshToken auth-error classification", () => {
 		spyOn(globalThis, "fetch").mockRestore();
 	});
 
-	// Test files are excluded from typecheck, so a minimal account shape is fine.
 	const account = (overrides: Record<string, unknown> = {}) =>
 		({
 			id: "codex-1",
