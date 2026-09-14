@@ -58,12 +58,13 @@ export function ClientBulkCatalogue({
 	clients,
 	accounts,
 	onCancel,
-	onDone,
+	onApplied,
 }: {
 	clients: ClientView[];
 	accounts: DestinationAccount[];
 	onCancel: () => void;
-	onDone: () => void;
+	/** The committed views, freshly read by the server. */
+	onApplied: (clients: ClientView[]) => void;
 }) {
 	const busyRef = useRef(false);
 	const [format, setFormat] = useState<ClientFormat>(
@@ -91,11 +92,13 @@ export function ClientBulkCatalogue({
 	const [review, setReview] = useState<ClientBulkReview | null>(null);
 	const [busy, setBusy] = useState(false);
 	const [error, setError] = useState<string | null>(null);
+	const [notice, setNotice] = useState<string | null>(null);
 	const run = async (work: () => Promise<void>) => {
 		if (busyRef.current) return;
 		busyRef.current = true;
 		setBusy(true);
 		setError(null);
+		setNotice(null);
 		try {
 			await work();
 		} catch (e) {
@@ -243,16 +246,35 @@ export function ClientBulkCatalogue({
 				}),
 			);
 		});
+	const changed =
+		review?.clients.filter((c) => c.status === "changed").length ?? 0;
+	/**
+	 * Commit, hand the committed views up, and stay open for the next operation
+	 * — swapping an official ID for a variant is a remove and an add. The commit
+	 * response is what the panel then reads: an invalidation only starts a
+	 * refetch, so without it the next operation would work from pre-apply
+	 * catalogues.
+	 */
 	const apply = (token: string) =>
 		run(async () => {
-			await clientRequest("/bulk/commit", { token });
-			onDone();
+			const applied = changed;
+			const committed = await clientRequest<{ clients: ClientView[] }>(
+				"/bulk/commit",
+				{ token },
+			);
+			onApplied(committed.clients);
+			setReview(null);
+			setChecked(new Set());
+			setStagedModels([]);
+			setSource(null);
+			setReplaceDefault("");
+			setNotice(
+				`Applied to ${applied} ${applied === 1 ? "client" : "clients"}.`,
+			);
 		});
 	const accountName = (id: string) =>
 		accounts.find((a) => a.id === id)?.name ?? id;
 	const shown = clients.slice(0, 3).map((c) => c.key.name);
-	const changed =
-		review?.clients.filter((c) => c.status === "changed").length ?? 0;
 
 	return (
 		<Card>
@@ -275,6 +297,11 @@ export function ClientBulkCatalogue({
 				{error && (
 					<p role="alert" className="text-sm text-destructive">
 						{error}
+					</p>
+				)}
+				{notice && (
+					<p role="status" className="text-sm text-muted-foreground">
+						{notice}
 					</p>
 				)}
 				{review ? (
@@ -608,7 +635,7 @@ export function ClientBulkCatalogue({
 				{/* Leave room below the actions for the shared floating Debug shortcut. */}
 				<div className="sticky bottom-0 z-10 -mx-5 sm:-mx-6 flex justify-between gap-3 border-t rounded-b-lg bg-card px-5 sm:px-6 pt-4 pb-16">
 					<Button variant="ghost" disabled={busy} onClick={onCancel}>
-						Cancel
+						Close
 					</Button>
 					{review && (
 						<div className="flex gap-2">

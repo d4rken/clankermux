@@ -251,3 +251,103 @@ it("selects clients, opens the bulk editor, and forgets clients that disappear",
 	expect(container.querySelector('ul[aria-label="Clients"]')).toBeNull();
 	expect(container.textContent).toContain("Edit catalogues · 1 client");
 });
+
+it("keeps the bulk panel open on the committed catalogues, then closes with the selection intact", async () => {
+	const publishing = (name: string, ids: string[]): ClientView => {
+		const view = makeClient(name);
+		view.catalogues.openai.models = ids.map((id) => ({
+			id,
+			displayName: id,
+			targetModel: id,
+			accountIds: null,
+		}));
+		return view;
+	};
+	let listRequests = 0;
+	spyOn(globalThis, "fetch").mockImplementation((async (
+		input: unknown,
+		init?: { body?: unknown },
+	) => {
+		const path = String(input);
+		if (path.endsWith("/suggestions"))
+			return Response.json({ data: { models: [], accounts: [] } });
+		if (path.endsWith("/bulk/review"))
+			return Response.json({
+				data: {
+					token: "bulk-token",
+					operation: JSON.parse(String(init?.body)).operation,
+					clients: [
+						{
+							apiKeyId: "One",
+							name: "One",
+							status: "changed",
+							reason: null,
+							added: ["added-model"],
+							removed: [],
+							modified: [],
+							defaultModelChange: null,
+							notices: [],
+						},
+					],
+				},
+			});
+		if (path.endsWith("/bulk/commit"))
+			return Response.json({
+				data: { clients: [publishing("One", ["kept-model", "added-model"])] },
+			});
+		if (path.endsWith("/api/clients")) {
+			// The list refetch the apply invalidates, held open: what the panel
+			// renders afterwards has to come from the seeded cache.
+			listRequests += 1;
+			return new Promise(() => {});
+		}
+		throw new Error(`Unexpected request ${path}`);
+	}) as unknown as typeof fetch);
+	query = new QueryClient({
+		defaultOptions: { queries: { staleTime: Infinity, retry: false } },
+	});
+	query.setQueryData(
+		["clients"],
+		[publishing("One", ["kept-model"]), makeClient("Two")],
+	);
+	query.setQueryData(queryKeys.accounts(), []);
+	const container = document.createElement("div");
+	host = container;
+	document.body.append(host);
+	root = createRoot(host);
+	await act(async () =>
+		root?.render(
+			<QueryClientProvider client={query}>
+				<MemoryRouter>
+					<ClientsTab />
+				</MemoryRouter>
+			</QueryClientProvider>,
+		),
+	);
+	const clickLabelled = async (selector: string, label: string) => {
+		const target = [...container.querySelectorAll(selector)].find(
+			(n) => (n.getAttribute("aria-label") ?? n.textContent?.trim()) === label,
+		);
+		if (!(target instanceof HTMLElement))
+			throw new Error(`Missing ${selector} ${label}`);
+		await act(async () => target.click());
+	};
+	await clickLabelled("input", "Select One");
+	await clickLabelled("button", "Edit catalogues");
+	await act(async () => {
+		await new Promise((resolve) => setTimeout(resolve, 0));
+	});
+	await clickLabelled("input", "Select kept-model");
+	await clickLabelled("button", "Remove from all selected");
+	await clickLabelled("button", "Apply to 1 client");
+	expect(container.textContent).toContain("Applied to 1 client.");
+	expect(
+		[...container.querySelectorAll("[data-candidate]")].map((n) =>
+			n.getAttribute("data-candidate"),
+		),
+	).toEqual(["added-model", "kept-model"]);
+	expect(listRequests).toBe(1);
+	await clickLabelled("button", "Close");
+	expect(container.querySelector('ul[aria-label="Clients"]')).not.toBeNull();
+	expect(container.textContent).toContain("1 selected");
+});

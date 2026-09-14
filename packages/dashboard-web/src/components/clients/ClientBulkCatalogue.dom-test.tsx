@@ -10,8 +10,10 @@ import { ClientBulkCatalogue } from "./ClientBulkCatalogue";
 let root: Root | undefined;
 let host: HTMLDivElement | undefined;
 let done = 0;
+let appliedWith: ClientView[] | null = null;
 let posted: { path: string; body: unknown }[] = [];
 let reviewResponse: unknown = null;
+let commitResponse: ClientView[] = [];
 
 const client = (id: string, models: ClientModel[]): ClientView => ({
 	apiKeyId: id,
@@ -116,6 +118,7 @@ const previewWithEverything = {
 async function mount(clients: ClientView[] = [alpha, bravo]) {
 	posted = [];
 	done = 0;
+	appliedWith = null;
 	spyOn(globalThis, "fetch").mockImplementation((async (
 		input: unknown,
 		init?: { body?: unknown },
@@ -156,7 +159,7 @@ async function mount(clients: ClientView[] = [alpha, bravo]) {
 				},
 			});
 		if (path.endsWith("/bulk/commit"))
-			return Response.json({ data: { clients: [] } });
+			return Response.json({ data: { clients: commitResponse } });
 		throw new Error(`Unexpected request ${path}`);
 	}) as unknown as typeof fetch);
 	host = document.createElement("div");
@@ -178,8 +181,9 @@ async function rerender(clients: ClientView[]) {
 					{ id: "a", name: "Account A", provider: "openai-compatible" },
 				]}
 				onCancel={() => {}}
-				onDone={() => {
+				onApplied={(clients) => {
 					done += 1;
+					appliedWith = clients;
 				}}
 			/>,
 		);
@@ -268,6 +272,7 @@ afterEach(async () => {
 	await act(async () => root?.unmount());
 	host?.remove();
 	reviewResponse = null;
+	commitResponse = [];
 	mock.restore();
 });
 
@@ -377,6 +382,19 @@ describe("bulk catalogue editing", () => {
 			body: { token: "bulk-token" },
 		});
 		expect(done).toBe(1);
+		// Still open, ready for the second half of a remove-then-add swap.
+		expect(document.body.textContent).toContain("Applied to 1 client.");
+		expect(rows()).toEqual(["fast", "new", "shared"]);
+		expect(checkbox("Select shared").checked).toBe(false);
+	});
+
+	it("hands the committed clients to the caller", async () => {
+		commitResponse = [client("alpha", [shared])];
+		await mount();
+		await check("Select shared");
+		await click("Add to all selected");
+		await click("Apply to 2 clients");
+		expect(appliedWith).toEqual(commitResponse);
 	});
 
 	it("disables apply when no client would change, and goes back with the selection intact", async () => {
