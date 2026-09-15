@@ -140,9 +140,14 @@ describe("AccountListItem — Force Reset placement", () => {
 	});
 
 	it("lets the strip wrap so it cannot crowd the account name", () => {
-		// The narrow-width result is not observable in static markup; this class
-		// is the mechanism behind it.
-		expect(region(render(LIMITED), "account-actions")).toContain("flex-wrap");
+		// The narrow-width result is not observable in static markup; these
+		// classes are the mechanism behind it. The cap is what makes the wrap
+		// effective: a `shrink-0` strip with no maximum width sizes to its
+		// single-line content and never wraps.
+		const actions = region(render(LIMITED), "account-actions");
+
+		expect(actions).toContain("flex-wrap");
+		expect(actions).toContain("max-w-[50%]");
 	});
 });
 

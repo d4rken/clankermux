@@ -193,7 +193,7 @@ export function AccountListItem({
 				</div>
 				<div
 					data-testid="account-actions"
-					className="flex flex-wrap items-center justify-end gap-tight shrink-0"
+					className="flex flex-wrap items-center justify-end gap-tight shrink-0 max-w-[50%]"
 				>
 					{(account.provider === "anthropic" ||
 						account.provider === "codex" ||
@@ -492,9 +492,12 @@ export function AccountListItem({
 					</Button>
 					{status.showForceReset && (
 						// The one labelled button among ghost icons, so it keeps the
-						// outline that tells it apart. It is also the widest, which is why
-						// the strip wraps: at ~400px it would otherwise squeeze the account
-						// name beside it toward nothing.
+						// outline that tells it apart. It is also the widest, so at ~400px
+						// it would otherwise squeeze the account name beside it toward
+						// nothing. The strip's `max-w-[50%]` is what makes its `flex-wrap`
+						// effective: a `shrink-0` strip with no maximum width sizes to its
+						// single-line max-content width, so nothing ever forces a second
+						// line and the name absorbs the whole overflow.
 						<Button
 							variant="outline"
 							size="sm"
