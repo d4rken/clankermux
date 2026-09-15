@@ -447,8 +447,10 @@ export class SessionStrategy implements LoadBalancingStrategy {
 	 *  - ANY pause, whatever the reason. Operator pauses (manual,
 	 *    failure_threshold) and re-auth pauses (oauth_invalid_grant,
 	 *    subscription_expired) need a human; the self-healing ones (overage,
-	 *    peak_hours, rate_limit_window) clear on a usage-window reset, which is
-	 *    hours away. Either way the pause outlives
+	 *    rate_limit_window — see `isSelfHealingPauseReason`) clear on a
+	 *    usage-window reset, which is hours away; `peak_hours` is NOT one of
+	 *    those, and clears on its own schedule when peak hours end rather than on
+	 *    any reset. Either way the pause outlives
 	 *    AFFINITY_REASSIGN_MIN_COOLDOWN_MS, the threshold above which the
 	 *    rate-limit branch below already treats the prompt cache as cold, so
 	 *    there is nothing left to hold the slot for.

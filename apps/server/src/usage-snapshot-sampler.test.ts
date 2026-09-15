@@ -452,6 +452,7 @@ interface SamplerHarness {
 	insertedRows: () => UsageSnapshotRow[];
 	insertedScopedRows: () => ScopedUsageSnapshotRow[];
 	snapshotQueries: () => Array<{ accountIds: string[]; sinceMs: number }>;
+	resetWrites: () => Array<{ accountId: string; resetMs: number }>;
 }
 
 /**
@@ -469,10 +470,13 @@ function makeSampler(opts: {
 	getAccounts?: () => Account[];
 	/** Awaited inside the history read, so a test can hold a tick open. */
 	beforeHistory?: () => Promise<void>;
+	/** Awaited inside the reset mirror, so a test can make the write fail. */
+	onPersistWindowReset?: () => Promise<void>;
 }): SamplerHarness {
 	const inserted: UsageSnapshotRow[] = [];
 	const insertedScoped: ScopedUsageSnapshotRow[] = [];
 	const queries: Array<{ accountIds: string[]; sinceMs: number }> = [];
+	const resetWrites: Array<{ accountId: string; resetMs: number }> = [];
 	const sampler = new UsageSnapshotSampler({
 		getAccounts: async () => opts.getAccounts?.() ?? opts.accounts,
 		insertSnapshots: async (rows) => {
@@ -480,6 +484,11 @@ function makeSampler(opts: {
 		},
 		insertScopedSnapshots: async (rows) => {
 			insertedScoped.push(...rows);
+		},
+		persistWindowReset: async (accountId, resetMs) => {
+			resetWrites.push({ accountId, resetMs });
+			await opts.onPersistWindowReset?.();
+			return true;
 		},
 		getRecentSnapshots: async (accountIds, sinceMs) => {
 			queries.push({ accountIds, sinceMs });
@@ -497,6 +506,7 @@ function makeSampler(opts: {
 		insertedRows: () => inserted,
 		insertedScopedRows: () => insertedScoped,
 		snapshotQueries: () => queries,
+		resetWrites: () => resetWrites,
 	};
 }
 
@@ -1205,6 +1215,7 @@ describe("UsageSnapshotSampler weekly burn-slope feed", () => {
 				throw new Error("db down");
 			},
 			insertScopedSnapshots: async () => {},
+			persistWindowReset: async () => true,
 			getRecentSnapshots: async () =>
 				risingSeries({
 					accountId: id,
@@ -1234,6 +1245,7 @@ describe("UsageSnapshotSampler weekly burn-slope feed", () => {
 			getAccounts: async () => [acct(id, "anthropic")],
 			insertSnapshots: async () => {},
 			insertScopedSnapshots: async () => {},
+			persistWindowReset: async () => true,
 			getRecentSnapshots: async () => {
 				throw new Error("db down");
 			},

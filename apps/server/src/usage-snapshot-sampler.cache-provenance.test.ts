@@ -73,6 +73,7 @@ function makeSampler(): Harness {
 		insertScopedSnapshots: async (batch) => {
 			scopedRows.push(...batch);
 		},
+		persistWindowReset: async () => true,
 		getRecentSnapshots: async () => [],
 		cache: usageCache,
 		getFreshnessMs: () => FRESHNESS,

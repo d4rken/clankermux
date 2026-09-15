@@ -10,6 +10,19 @@ const RATE_LIMIT_RESET_BUFFER_MS = 1000;
  * definition: the capacity-restored path in `apps/server` consults it before
  * correcting a paused account's reset, so it never promises an unpause the gate
  * here would refuse.
+ *
+ * "Maintained" differs by provider, and Z.AI is the weakest of the three.
+ * Anthropic and Codex write the column from a real response (unified headers /
+ * the Codex observation). Z.AI has no such channel at all, so the usage-snapshot
+ * sampler mirrors its representative window's reset instead, and does that only
+ * while the account is ACTIVE. A paused Z.AI account therefore carries whatever
+ * was last observed before the pause, never a fresher reading.
+ *
+ * In practice that has no consequence yet: {@link wouldAutoUnpause} also
+ * requires `isSelfHealingPauseReason`, and no pause a Z.AI account currently
+ * reaches satisfies it — `peak_hours` (which resumes itself when peak ends),
+ * `manual` and `failure_threshold` are all durable. Read the Z.AI entry as
+ * "ready if such a pause is ever added", not as a live recovery path.
  */
 export function supportsWindowResetUnpause(provider: string): boolean {
 	return (

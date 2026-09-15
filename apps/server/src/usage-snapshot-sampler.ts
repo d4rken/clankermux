@@ -52,7 +52,11 @@ import {
 	USAGE_HISTORY_PROVIDERS,
 } from "@clankermux/core";
 import { Logger } from "@clankermux/logger";
-import type { AnyUsageData, UsageData } from "@clankermux/providers";
+import {
+	type AnyUsageData,
+	extractWindowResetTime,
+	type UsageData,
+} from "@clankermux/providers";
 import {
 	observeUsageReading,
 	pruneWeeklyBurnSlopes,
@@ -154,6 +158,14 @@ export interface SamplerRows {
 	rows: UsageSnapshotRow[];
 	/** Per-model-family weekly rows for `usage_scoped_snapshots`. */
 	scopedRows: ScopedUsageSnapshotRow[];
+	/**
+	 * Window resets to mirror onto `accounts.rate_limit_reset`, for the providers
+	 * in {@link RESET_MIRROR_PROVIDERS}. Produced here rather than derived from
+	 * `rows` so the reset comes from the SAME cache entry the row did (see the
+	 * "ONE read" note in the loop) and from the provider's own
+	 * representative-window rule rather than a second, parallel one.
+	 */
+	mirrors: Array<{ accountId: string; resetMs: number }>;
 }
 
 /**
@@ -194,6 +206,7 @@ export function buildSamplerRows(
 ): SamplerRows {
 	const rows: UsageSnapshotRow[] = [];
 	const scopedRows: ScopedUsageSnapshotRow[] = [];
+	const mirrors: Array<{ accountId: string; resetMs: number }> = [];
 
 	for (const account of accounts) {
 		const { id, provider } = account;
@@ -221,6 +234,17 @@ export function buildSamplerRows(
 		);
 		const fiveHourPct = fiveHour?.pct ?? null;
 		const sevenDayPct = sevenDay?.pct ?? null;
+
+		// The reset to mirror comes from the provider's OWN representative-window
+		// rule, not from the two extracted windows above. For Z.AI those are not
+		// interchangeable: `extractWindowResetTime`'s zai arm warns that the reset
+		// order is not the duration order, so the week can reset sooner than the 5h
+		// and picking either window outright (or the earlier of the two) can name a
+		// boundary belonging to a window that is not the binding one.
+		if (RESET_MIRROR_PROVIDERS.has(provider)) {
+			const resetMs = extractWindowResetTime(entry.data, provider);
+			if (resetMs != null) mirrors.push({ accountId: id, resetMs });
+		}
 
 		// If neither window contributes a utilization, there is nothing to plot.
 		if (fiveHourPct !== null || sevenDayPct !== null) {
@@ -253,13 +277,37 @@ export function buildSamplerRows(
 		}
 	}
 
-	return { rows, scopedRows };
+	return { rows, scopedRows, mirrors };
 }
 
 /** The sample cadence shared by the usage and cache-keepalive samplers. */
 export function resolveSampleIntervalMs(): number {
 	return SAMPLE_INTERVAL_MS;
 }
+
+/**
+ * Providers whose `accounts.rate_limit_reset` has no other writer, so this
+ * sampler is what keeps it current.
+ *
+ * Anthropic gets the column from the unified rate-limit headers on real
+ * responses, and Codex from its own observation path. Z.AI has neither:
+ * `ZaiProvider.parseRateLimit` returns `{isRateLimited:false}` for anything that
+ * is not a 429 and never sets a status header, so `persistRateLimitStatusMeta`
+ * early-returns and the column stays NULL for the account's whole life.
+ * `bindingWindowResetElapsed` reads that NULL as "the window already rolled",
+ * so the auto-refresh scheduler primes the account on every cooldown forever.
+ *
+ * Scoped to ACTIVE accounts — see the `paused` filter in `mirrorWindowResets`
+ * for why the paused ones are deliberately left alone.
+ */
+export const RESET_MIRROR_PROVIDERS: ReadonlySet<string> = new Set(["zai"]);
+
+/**
+ * Smallest change worth a write. The reset is a window boundary, not a clock,
+ * so sub-second drift between two readings of the SAME window is noise; writing
+ * it back every tick would churn the row for nothing.
+ */
+const RESET_MIRROR_EPSILON_MS = 1000;
 
 /** Dependencies the sampler needs from the host server. */
 export interface UsageSnapshotSamplerDeps {
@@ -273,6 +321,16 @@ export interface UsageSnapshotSamplerDeps {
 	 * own failure boundary: neither write may suppress the other.
 	 */
 	insertScopedSnapshots: (rows: ScopedUsageSnapshotRow[]) => Promise<void>;
+	/**
+	 * Mirror an observed window reset onto `accounts.rate_limit_reset` for a
+	 * provider that has no header channel of its own — see
+	 * {@link RESET_MIRROR_PROVIDERS}.
+	 */
+	persistWindowReset: (
+		accountId: string,
+		resetMs: number,
+		expectedReset: number | null,
+	) => Promise<boolean>;
 	/**
 	 * Read back the raw (un-bucketed) snapshots sampled at/after `sinceMs` for the
 	 * given accounts — the history the weekly burn-slope fit regresses over.
@@ -411,6 +469,75 @@ export class UsageSnapshotSampler {
 		}
 	}
 
+	/**
+	 * Write each mirrored provider's earliest observed reset onto its account row
+	 * when it differs from what the row already holds.
+	 *
+	 * Skipping an unchanged value is not just an optimization: the write is the
+	 * signal `bindingWindowResetElapsed` reads, and re-issuing it on a 2-minute
+	 * clock would rewrite the column for every mirrored account on every tick.
+	 *
+	 * A failed write is logged and dropped. The next tick reads the same account
+	 * list and retries on its own, so nothing here needs to be transactional with
+	 * the series inserts — and a DB error must never kill the interval.
+	 */
+	private async mirrorWindowResets(
+		mirrors: ReadonlyArray<{ accountId: string; resetMs: number }>,
+		accounts: ReadonlyArray<Account>,
+	): Promise<void> {
+		const mirrorable = new Map(
+			accounts
+				// PAUSED accounts are deliberately out of scope. While an account is
+				// paused the column belongs to the stale-reset corrector
+				// (`stampStaleResetIfStranded`), which moves a reset BACKWARDS on
+				// purpose; a tick landing on top of that would replace a deliberate
+				// correction with a cache reading. Writing only while active keeps the
+				// two out of each other's way.
+				//
+				// This bounds WHEN the sampler writes, not how long the value lives:
+				// pausing preserves `rate_limit_reset`, so a reset written while active
+				// survives a later pause and the paused-only readers can still consume
+				// it. That is acceptable because both of them additionally require
+				// `isSelfHealingPauseReason`, which no reachable Z.AI pause satisfies.
+				//
+				// Nothing is lost for the prime loop either: the scheduler admits a
+				// paused account only under `auto_pause_on_overage_enabled` with
+				// pause_reason NULL/'overage', and the prime-recording fix in
+				// sendTranslatedClaudePrime already ends the loop for it.
+				.filter((a) => !a.paused)
+				.map((a) => [a.id, a.rate_limit_reset ?? null] as const),
+		);
+
+		for (const { accountId, resetMs } of mirrors) {
+			if (!mirrorable.has(accountId)) continue;
+
+			const stored = mirrorable.get(accountId) ?? null;
+			if (
+				stored !== null &&
+				Math.abs(resetMs - stored) < RESET_MIRROR_EPSILON_MS
+			) {
+				continue;
+			}
+
+			try {
+				const written = await this.deps.persistWindowReset(
+					accountId,
+					resetMs,
+					stored,
+				);
+				log.debug(
+					written
+						? `Snapshot sampler: mirrored window reset for ${accountId} to ${new Date(resetMs).toISOString()}`
+						: `Snapshot sampler: skipped mirroring ${accountId} — it was paused or its reset changed under this tick`,
+				);
+			} catch (err) {
+				log.warn(
+					`Snapshot sampler: failed to mirror window reset for ${accountId}: ${err}`,
+				);
+			}
+		}
+	}
+
 	/** The cache → `usage_snapshots` write half of a tick. */
 	private async recordSnapshots(): Promise<void> {
 		const now = Date.now();
@@ -424,7 +551,7 @@ export class UsageSnapshotSampler {
 		}
 
 		const freshnessMs = this.deps.getFreshnessMs();
-		const { rows, scopedRows } = buildSamplerRows(
+		const { rows, scopedRows, mirrors } = buildSamplerRows(
 			accounts,
 			this.deps.cache,
 			now,
@@ -448,6 +575,12 @@ export class UsageSnapshotSampler {
 				observedAtMs: row.observedAt,
 			});
 		}
+
+		// Mirror observed window boundaries onto the account row for the providers
+		// that have no other writer. Driven off `rows` so it inherits the gates the
+		// series already passed: fresh cache entry, real observation time, at least
+		// one window carrying a utilization.
+		await this.mirrorWindowResets(mirrors, accounts);
 
 		if (rows.length === 0 && scopedRows.length === 0) {
 			log.debug("Snapshot sampler: no fresh windowed accounts this tick");
