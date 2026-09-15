@@ -48,6 +48,7 @@ import {
 import {
 	AccountRepository,
 	type DevinCredentialReplacement,
+	type ZaiCredentialReplacement,
 } from "./repositories/account.repository";
 import { AccountPaymentRepository } from "./repositories/account-payment.repository";
 import { ApiKeyRepository } from "./repositories/api-key.repository";
@@ -1261,6 +1262,13 @@ OAuth tokens will need to be re-authenticated.
 		replacement: DevinCredentialReplacement,
 	): Promise<boolean> {
 		return this.accounts.reconnectDevinAccount(accountId, replacement);
+	}
+
+	async reconnectZaiAccount(
+		accountId: string,
+		replacement: ZaiCredentialReplacement,
+	): Promise<boolean> {
+		return this.accounts.reconnectZaiAccount(accountId, replacement);
 	}
 
 	async updateDevinSessionExpiry(

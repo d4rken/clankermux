@@ -45,6 +45,15 @@ export interface DevinCredentialReplacement {
 	expectedExternalId: string | null;
 }
 
+export interface ZaiCredentialReplacement {
+	apiKey: string;
+	expiresAt: number;
+	/** Absent when the sign-in reported neither an account id nor an email. */
+	identity?: AccountIdentity;
+	expectedApiKey: string | null;
+	expectedExternalId: string | null;
+}
+
 export class AccountRepository extends BaseRepository<Account> {
 	/**
 	 * Run an identity-bearing account UPDATE and, when it actually changed the
@@ -700,6 +709,49 @@ export class AccountRepository extends BaseRepository<Account> {
 				],
 			)) > 0
 		);
+	}
+
+	/**
+	 * Re-key a Z.AI account in place, replacing only the credential generation
+	 * the reconnect flow observed.
+	 *
+	 * All three credential columns carry the key because the add path mirrors it
+	 * into `refresh_token` and `access_token`, and `expires_at` is restamped
+	 * because a non-devin account reports `token_valid` from that column alone.
+	 */
+	async reconnectZaiAccount(
+		accountId: string,
+		replacement: ZaiCredentialReplacement,
+	): Promise<boolean> {
+		const { apiKey, expiresAt, identity, expectedApiKey, expectedExternalId } =
+			replacement;
+		const now = Date.now();
+		const changes = await this.writeIdentityWithTierHistory(
+			accountId,
+			`UPDATE accounts SET api_key = ?, refresh_token = ?, access_token = ?, expires_at = ?,
+    ${
+			identity
+				? `${IDENTITY_COALESCE_SET}, identity_captured_at = ?, identity_profile_fetched_at = ?,`
+				: ""
+		}
+    paused = CASE WHEN pause_reason = ? THEN 0 ELSE paused END,
+    pause_reason = CASE WHEN pause_reason = ? THEN NULL ELSE pause_reason END
+    WHERE id = ? AND provider = 'zai' AND api_key IS ? AND identity_external_id IS ?`,
+			[
+				apiKey,
+				apiKey,
+				apiKey,
+				expiresAt,
+				...(identity ? [...identityBindParams(identity), now, now] : []),
+				PAUSE_REASON_NEEDS_REAUTH,
+				PAUSE_REASON_NEEDS_REAUTH,
+				accountId,
+				expectedApiKey,
+				expectedExternalId,
+			],
+			identity,
+		);
+		return changes > 0;
 	}
 
 	async pauseIfActive(
