@@ -2,8 +2,12 @@ import { createHash } from "node:crypto";
 import type { ChatRequirements } from "@clankermux/types";
 import { ChatError, keys, object, string } from "./errors";
 
+type ImageSource =
+	| { type: "base64"; media_type: string; data: string }
+	| { type: "url"; url: string };
 type Block =
 	| { type: "text"; text: string }
+	| { type: "image"; source: ImageSource }
 	| { type: "thinking"; thinking: string; signature: "" }
 	| {
 			type: "tool_use";
@@ -220,6 +224,84 @@ export function translateChatRequest(value: unknown): TranslatedChat {
 			return text.length ? [{ type: "text" as const, text }] : [];
 		});
 	};
+	/**
+	 * Anthropic's image block from an OpenAI `image_url`.
+	 *
+	 *   "data:image/png;base64,iVBOR…"              → {type:"base64", media_type:"image/png", data:"iVBOR…"}
+	 *   "data:image/png;charset=utf-8;base64,iVBOR…" → same; parameters are dropped
+	 *   "https://example.com/a.png"                  → {type:"url", url:"https://example.com/a.png"}
+	 *
+	 * Only those two forms translate. A `file:` or `blob:` URL would make the
+	 * upstream fetch a local path on whichever host serves the request, and a
+	 * non-base64 data URL has no field to land in.
+	 */
+	const imageSource = (url: string, path: string): ImageSource => {
+		if (url.startsWith("data:")) {
+			const match = /^data:([^;,]+)(?:;[^;,]+)*;base64,(.*)$/s.exec(url);
+			if (match?.[1] && match[2])
+				return { type: "base64", media_type: match[1], data: match[2] };
+			throw new ChatError(
+				"Unsupported image url: expected a base64 data url",
+				path,
+				400,
+				"unsupported_parameter",
+			);
+		}
+		if (url.startsWith("https://") || url.startsWith("http://"))
+			return { type: "url", url };
+		throw new ChatError(
+			"Unsupported image url: expected data:, http: or https:",
+			path,
+			400,
+			"unsupported_parameter",
+		);
+	};
+	/**
+	 * User and assistant content, where an `image_url` part is also legal. The
+	 * `system` field stays on {@link textParts}: it carries text blocks only.
+	 */
+	const contentParts = (
+		content: unknown,
+		path: string,
+		role: "user" | "assistant",
+	): Block[] => {
+		if (!Array.isArray(content)) return textParts(content, path);
+		return content.flatMap((v, i): Block[] => {
+			const p = `${path}[${i}]`,
+				part = object(v, p);
+			if (part.type === "text") {
+				keys(part, ["type", "text"], p);
+				const text = string(part.text, `${p}.text`, true);
+				return text.length ? [{ type: "text" as const, text }] : [];
+			}
+			if (part.type !== "image_url")
+				throw new ChatError(
+					"Only text and image content is supported",
+					p,
+					400,
+					"unsupported_parameter",
+				);
+			if (role !== "user")
+				throw new ChatError(
+					`Image content is only supported on user messages, not ${role}`,
+					p,
+					400,
+					"unsupported_parameter",
+				);
+			keys(part, ["type", "image_url"], p);
+			const image = object(part.image_url, `${p}.image_url`);
+			keys(image, ["url", "detail"], `${p}.image_url`);
+			return [
+				{
+					type: "image",
+					source: imageSource(
+						string(image.url, `${p}.image_url.url`),
+						`${p}.image_url.url`,
+					),
+				},
+			];
+		});
+	};
 	for (const [i, v] of req.messages.entries()) {
 		const p = `messages[${i}]`,
 			m = object(v, p);
@@ -285,7 +367,7 @@ export function translateChatRequest(value: unknown): TranslatedChat {
 		const content: Block[] =
 			m.content === null || m.content === undefined
 				? []
-				: textParts(m.content, `${p}.content`);
+				: contentParts(m.content, `${p}.content`, role);
 		if ("reasoning_content" in m) {
 			const thinking = string(
 				m.reasoning_content,
