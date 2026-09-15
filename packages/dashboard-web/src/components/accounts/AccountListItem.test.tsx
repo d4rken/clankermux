@@ -108,8 +108,6 @@ function region(html: string, id: string): string {
 	throw new Error(`${id} never closed`);
 }
 
-const infoRow = (html: string) => region(html, "account-info-row");
-
 it("leads the heading row's routing cluster with the pause state", () => {
 	const html = render(makeAccount({ paused: true, priority: 3 }));
 	const heading = region(html, "account-heading-row");
@@ -123,102 +121,49 @@ it("leads the heading row's routing cluster with the pause state", () => {
 		heading.indexOf("Priority: 3"),
 	);
 	// And nowhere else: not in the chip row below it, beside the causes that
-	// explain the pause, and not in the statistics panel under that.
+	// explain the pause.
 	expect(region(html, "account-status-chips")).not.toContain("Paused");
-	expect(infoRow(html)).not.toContain("Paused");
 });
 
-describe("AccountListItem — session stats", () => {
-	it("drops the standalone session token line", () => {
-		const html = render(makeAccount({ sessionStats: SESSION_STATS }));
-
-		// The dense second row is gone; its request count already appears in the
-		// first row as the server-rendered "Active: 324 reqs".
-		expect(html).not.toContain("Session: 324 req");
-		expect(html).toContain("Active: 324 reqs");
+describe("AccountListItem — Force Reset placement", () => {
+	// Hard-limited and unpaused: what `showForceReset` is derived from.
+	const LIMITED = makeAccount({
+		rateLimitStatus: "Rate limited",
+		rateLimitedUntil: Date.now() + 60 * 60 * 1000,
 	});
 
-	it("folds the session cost into the first info row", () => {
-		const row = infoRow(render(makeAccount({ sessionStats: SESSION_STATS })));
+	it("offers the action in the header strip, not a panel of its own", () => {
+		const html = render(LIMITED);
 
-		// Placement, not presence: the cost has to sit in the same row as the
-		// request counts, which is precisely what the old standalone row did not.
-		expect(row).toContain("Active: 324 reqs");
-		expect(row).toContain("$98.15 plan");
+		expect(region(html, "account-actions")).toContain("Force Reset");
+		expect(html).not.toContain('data-testid="account-info-row"');
 	});
 
-	it("pads the card and separates its four groups by the row step", () => {
-		const html = render(makeAccount({}));
+	it("lets the strip wrap so it cannot crowd the account name", () => {
+		// The narrow-width result is not observable in static markup; these
+		// classes are the mechanism behind it. The cap is what makes the wrap
+		// effective: a `shrink-0` strip with no maximum width sizes to its
+		// single-line content and never wraps.
+		const actions = region(render(LIMITED), "account-actions");
 
-		expect(html).toContain("p-group border rounded-lg");
-		expect(html).toContain("space-y-row border-border");
+		expect(actions).toContain("flex-wrap");
+		expect(actions).toContain("max-w-[50%]");
 	});
+});
 
-	it("shows api cost alongside plan cost when both are non-zero", () => {
-		const row = infoRow(
-			render(
-				makeAccount({
-					sessionStats: { ...SESSION_STATS, apiCostUsd: 1.2 },
-				}),
-			),
-		);
+it("pads the card and separates its groups by the row step", () => {
+	const html = render(makeAccount({}));
 
-		expect(row).toContain("$98.15 plan");
-		expect(row).toContain("$1.20 api");
-	});
+	expect(html).toContain("p-group border rounded-lg");
+	expect(html).toContain("space-y-row border-border");
+});
 
-	it("omits a cost segment that is zero", () => {
-		const row = infoRow(
-			render(
-				makeAccount({
-					sessionStats: { ...SESSION_STATS, planCostUsd: 0 },
-				}),
-			),
-		);
+it("leaves the activity figures to the Usage page", () => {
+	const html = render(makeAccount({ sessionStats: SESSION_STATS }));
 
-		expect(row).not.toContain("plan");
-		expect(row).not.toContain("api");
-	});
-
-	it("advertises the token breakdown as a click-open detail", () => {
-		const html = render(makeAccount({ sessionStats: SESSION_STATS }));
-
-		// The dotted underline and button semantics make the hidden detail
-		// discoverable without relying on hover-only native title text.
-		expect(html).toContain('aria-label="Show active session details"');
-		expect(html).toContain("underline decoration-dotted");
-		expect(html).not.toContain("cursor-help");
-	});
-
-	it("renders no session segments at all without session stats", () => {
-		const html = render(makeAccount({ sessionStats: null }));
-
-		expect(html).not.toContain("cache↑");
-		// Scoped to the info row, like the sibling assertion above: the anthropic
-		// extra-spend policy chip's tooltip says "past its plan limit", which is
-		// nothing to do with a session cost segment.
-		expect(infoRow(html)).not.toContain(" plan");
-		// With nothing behind it, the session text advertises no tooltip either.
-		expect(html).not.toContain("cursor-help");
-		expect(html).toContain("Requests</dt><dd");
-		expect(html).toContain(">1,204</dd>");
-	});
-
-	it("groups the headline figures in an inset metrics panel", () => {
-		const html = render(
-			makeAccount({
-				requestCount: 130_012,
-				activeSessionCount: 1,
-				sessionStats: SESSION_STATS,
-			}),
-		);
-
-		expect(html).toContain("bg-muted/30");
-		expect(html).toContain(">130,012</dd>");
-		expect(html).toContain("Clients · 15m");
-		expect(html).toContain("Active: 324 reqs");
-		expect(html).toContain("$98.15 plan");
-	});
+	expect(html).not.toContain("Active: 324 reqs");
+	expect(html).not.toContain("$98.15 plan");
+	expect(html).not.toContain('aria-label="Show active session details"');
 });
 
 describe("AccountListItem — compact quota cards", () => {

@@ -1,6 +1,5 @@
-import { type LiveScopedFamily, TIME_CONSTANTS } from "@clankermux/core";
-import { type SessionStats, supportsCustomEndpoint } from "@clankermux/types";
-import { AccountPresenter } from "@clankermux/ui-common";
+import type { LiveScopedFamily } from "@clankermux/core";
+import { supportsCustomEndpoint } from "@clankermux/types";
 import {
 	CalendarClock,
 	Crosshair,
@@ -18,7 +17,7 @@ import {
 	Unlink,
 	Zap,
 } from "lucide-react";
-import { type ReactNode, useState } from "react";
+import { useState } from "react";
 import type { Account } from "../../api";
 import {
 	type AccountPolicyKey,
@@ -43,8 +42,6 @@ import {
 	DropdownMenuSeparator,
 	DropdownMenuTrigger,
 } from "../ui/dropdown-menu";
-import { InsetPanel } from "../ui/inset-panel";
-import { Popover, PopoverContent, PopoverTrigger } from "../ui/popover";
 import { Textarea } from "../ui/textarea";
 import { AccountIdentityLine } from "./AccountIdentity";
 import {
@@ -56,81 +53,6 @@ import {
 import { OpenRouterAccountDetails } from "./OpenRouterAccountDetails";
 import { ProviderChip } from "./ProviderChip";
 import { RateLimitProgress } from "./RateLimitProgress";
-
-function formatTokenCount(n: number): string {
-	if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
-	if (n >= 1_000) return `${(n / 1_000).toFixed(1)}k`;
-	return String(n);
-}
-
-const ACTIVE_SESSION_WINDOW_MINUTES = Math.round(
-	TIME_CONSTANTS.ACTIVE_SESSION_WINDOW_MS / 60000,
-);
-
-interface SessionCost {
-	kind: "plan" | "api";
-	usd: number;
-}
-
-/** Click-open detail for the compact active-session figure. */
-function SessionDetailsPopover({
-	stats,
-	costs,
-	children,
-}: {
-	stats: SessionStats;
-	costs: readonly SessionCost[];
-	children: ReactNode;
-}) {
-	const tokenRows = [
-		["Input", stats.inputTokens],
-		["Cache write", stats.cacheCreationInputTokens],
-		["Cache read", stats.cacheReadInputTokens],
-		["Output", stats.outputTokens],
-	] as const;
-
-	return (
-		<Popover>
-			<PopoverTrigger asChild>
-				<button
-					type="button"
-					className="cursor-pointer text-left font-medium tabular-nums text-foreground underline decoration-dotted underline-offset-4 transition-colors hover:text-primary focus:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-					aria-label="Show active session details"
-				>
-					{children}
-				</button>
-			</PopoverTrigger>
-			<PopoverContent align="start" className="w-72 p-row text-xs">
-				<p className="font-medium">Active session</p>
-				<p className="mt-tight text-muted-foreground">
-					Usage since the current session window started.
-				</p>
-				<dl className="mt-row grid grid-cols-2 gap-row">
-					<div>
-						<dt className="text-muted-foreground">Requests</dt>
-						<dd className="font-medium tabular-nums">
-							{stats.requests.toLocaleString()}
-						</dd>
-					</div>
-					{tokenRows.map(([label, value]) => (
-						<div key={label}>
-							<dt className="text-muted-foreground">{label}</dt>
-							<dd className="font-medium tabular-nums">
-								{formatTokenCount(value)} tokens
-							</dd>
-						</div>
-					))}
-					{costs.map(({ kind, usd }) => (
-						<div key={kind}>
-							<dt className="capitalize text-muted-foreground">{kind} cost</dt>
-							<dd className="font-medium tabular-nums">${usd.toFixed(2)}</dd>
-						</div>
-					))}
-				</dl>
-			</PopoverContent>
-		</Popover>
-	);
-}
 
 interface AccountListItemProps {
 	account: Account;
@@ -204,24 +126,12 @@ export function AccountListItem({
 	const [isEditingNotes, setIsEditingNotes] = useState(false);
 	const [notesDraft, setNotesDraft] = useState("");
 	const [isSavingNotes, setIsSavingNotes] = useState(false);
-	const presenter = new AccountPresenter(account);
 	// Header details, status chips and Force Reset gating share derived status.
 	const status = deriveAccountStatus(account);
 	// zai, minimax and ollama-cloud pin their endpoint in the provider, so
 	// offering the control would let an operator set something that is stored,
 	// badged here, and then ignored on every request.
 	const endpointIsConfigurable = supportsCustomEndpoint(account.provider);
-	// Spend inside the current session window. Both kinds can be non-zero at
-	// once (a plan account that spilled into overage), and a zero is omitted
-	// rather than rendered as "$0.00" — an unused billing mode is not news.
-	const sessionCosts = account.sessionStats
-		? (
-				[
-					{ kind: "plan", usd: account.sessionStats.planCostUsd },
-					{ kind: "api", usd: account.sessionStats.apiCostUsd },
-				] as const
-			).filter((entry) => entry.usd > 0)
-		: [];
 	const hasReauth =
 		(account.provider === "qwen" && !!onReauth) ||
 		(account.provider === "anthropic" &&
@@ -249,7 +159,7 @@ export function AccountListItem({
 			(!!onAutoApplyResetCreditsToggle ||
 				!!onAutoApplyResetOnWeeklyLimitToggle));
 
-	// Four groups, and the rhythm has to say so: identity, status, counts, quota.
+	// Three groups, and the rhythm has to say so: identity, status, quota.
 	// `space-y-row` between them, tighter steps inside each. A single
 	// `space-y-item` for everything gave the name→email pair — which is one
 	// group — exactly as much air as the boundary between two, so six of these
@@ -281,7 +191,10 @@ export function AccountListItem({
 						}
 					/>
 				</div>
-				<div className="flex items-center gap-tight shrink-0">
+				<div
+					data-testid="account-actions"
+					className="flex flex-wrap items-center justify-end gap-tight shrink-0 max-w-[50%]"
+				>
 					{(account.provider === "anthropic" ||
 						account.provider === "codex" ||
 						account.provider === "devin" ||
@@ -577,6 +490,29 @@ export function AccountListItem({
 					<Button variant="ghost" size="sm" onClick={() => onRemove(account)}>
 						<Trash2 className="h-4 w-4" />
 					</Button>
+					{status.showForceReset && (
+						// The one labelled button among ghost icons, so it keeps the
+						// outline that tells it apart. It is also the widest, so at ~400px
+						// it would otherwise squeeze the account name beside it toward
+						// nothing. The strip's `max-w-[50%]` is what makes its `flex-wrap`
+						// effective: a `shrink-0` strip with no maximum width sizes to its
+						// single-line max-content width, so nothing ever forces a second
+						// line and the name absorbs the whole overflow.
+						<Button
+							variant="outline"
+							size="sm"
+							className="h-7 gap-tight text-xs"
+							onClick={() => onForceResetRateLimit(account)}
+							title={
+								status.staleLockDetected
+									? "Reset stale rate limit lock (usage shows capacity available)"
+									: "Force clear rate limit state from database"
+							}
+						>
+							<RefreshCw className="h-3.5 w-3.5" />
+							Force Reset
+						</Button>
+					)}
 				</div>
 			</div>
 			{isEditingNotes ? (
@@ -637,98 +573,13 @@ export function AccountListItem({
 					</Button>
 				</div>
 			) : null}
-			{/* Status flags and the counts they qualify: one group, so they sit a
-			    step closer to each other than to the identity above or the quota
-			    bars below. */}
-			<div className="space-y-item">
-				<AccountStatusChips
-					account={account}
-					status={status}
-					showAccountDetails={false}
-				/>
-				<InsetPanel data-testid="account-info-row">
-					<div className="flex flex-wrap items-center gap-row">
-						<dl className="flex min-w-0 flex-1 flex-wrap items-center gap-x-section gap-y-item text-xs">
-							<div className="flex items-baseline gap-tight">
-								<dt className="text-muted-foreground">Requests</dt>
-								<dd className="font-medium tabular-nums">
-									{presenter.requestCount.toLocaleString()}
-								</dd>
-							</div>
-							{presenter.activeSessionCount > 0 && (
-								<div className="flex items-baseline gap-tight">
-									<dt className="text-muted-foreground">
-										Clients · {ACTIVE_SESSION_WINDOW_MINUTES}m
-									</dt>
-									<dd className="font-medium tabular-nums">
-										{presenter.activeSessionCount.toLocaleString()}
-									</dd>
-								</div>
-							)}
-							<div className="flex min-w-0 items-baseline gap-tight">
-								<dt className="shrink-0 text-muted-foreground">Session</dt>
-								<dd className="min-w-0">
-									{account.sessionStats ? (
-										<SessionDetailsPopover
-											stats={account.sessionStats}
-											costs={sessionCosts}
-										>
-											<span>{presenter.sessionInfo}</span>
-											{sessionCosts.map(({ kind, usd }) => (
-												<span key={kind}>
-													· ${usd.toFixed(2)} {kind}
-												</span>
-											))}
-										</SessionDetailsPopover>
-									) : (
-										<span className="font-medium tabular-nums">
-											{presenter.sessionInfo}
-										</span>
-									)}
-								</dd>
-							</div>
-							{status.reauthDeadlineMs !== null && (
-								// Always shown once known, not only inside the warning window: the
-								// point of capturing the deadline is that it stops being a
-								// surprise, and a date that only appears in its final week is
-								// still a surprise for the other eleven.
-								<div
-									className="flex items-baseline gap-tight"
-									title="When this account's OAuth refresh token expires. Rotating tokens does not extend it — the account auto-pauses and needs a manual re-auth once it passes."
-								>
-									<dt className="text-muted-foreground">Re-auth by</dt>
-									<dd className="font-medium tabular-nums">
-										{new Date(status.reauthDeadlineMs).toLocaleDateString(
-											undefined,
-											{
-												year: "numeric",
-												month: "short",
-												day: "numeric",
-											},
-										)}
-									</dd>
-								</div>
-							)}
-						</dl>
-						{status.showForceReset && (
-							<Button
-								variant="outline"
-								size="sm"
-								className="h-7 gap-tight text-xs"
-								onClick={() => onForceResetRateLimit(account)}
-								title={
-									status.staleLockDetected
-										? "Reset stale rate limit lock (usage shows capacity available)"
-										: "Force clear rate limit state from database"
-								}
-							>
-								<RefreshCw className="h-3.5 w-3.5" />
-								Force Reset
-							</Button>
-						)}
-					</div>
-				</InsetPanel>
-			</div>
+			{/* Status flags: their own group, a step away from the identity above
+			    and the quota bars below. */}
+			<AccountStatusChips
+				account={account}
+				status={status}
+				showAccountDetails={false}
+			/>
 			{account.provider === "openrouter" && !account.customEndpoint && (
 				<OpenRouterAccountDetails metadata={account.openRouterMetadata} />
 			)}

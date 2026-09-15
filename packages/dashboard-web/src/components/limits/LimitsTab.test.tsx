@@ -192,7 +192,7 @@ describe("LimitsTab per-section gating", () => {
 		// ones that go dark.
 		expect(html).toContain("Account data unavailable");
 		expect(html).not.toContain("No reported account-wide average");
-		expect(html).not.toContain("No windowed accounts reporting usage yet.");
+		expect(html).not.toContain("No accounts configured yet.");
 	});
 
 	it("does not claim usage history is still being collected while it is in flight", () => {
@@ -276,6 +276,12 @@ describe("LimitsTab per-family weekly panels", () => {
 			id: "acc-1",
 			name: "Primary",
 			provider: "anthropic",
+			// Required by the contract and rendered by the row's activity figures,
+			// so the stub carries them rather than leaving the card to read
+			// undefined off a field the server always sends.
+			requestCount: 0,
+			totalRequests: 0,
+			sessionInfo: "",
 			usageData: {
 				limits: [
 					{

@@ -222,6 +222,16 @@ describe("AccountStatusChips — renewal chip wording", () => {
 describe("AccountStatusChips — refresh-token re-auth chip", () => {
 	const DAY = 24 * 60 * 60 * 1000;
 
+	function renderUsageVariant(account: AccountResponse): string {
+		return renderToStaticMarkup(
+			<AccountStatusChips
+				account={account}
+				status={deriveAccountStatus(account, NOW)}
+				variant="usage"
+			/>,
+		);
+	}
+
 	it("counts down in days inside the warning window", () => {
 		const html = render(
 			makeAccount({
@@ -245,13 +255,35 @@ describe("AccountStatusChips — refresh-token re-auth chip", () => {
 		expect(html).not.toContain("Re-auth today");
 	});
 
-	it("renders no chip while the deadline is far out", () => {
+	it("renders the absolute date in neutral tone while the deadline is far out", () => {
 		const html = render(
 			makeAccount({
 				refreshTokenExpiresAt: new Date(NOW + 60 * DAY).toISOString(),
 			}),
 		);
+		expect(html).toContain("Re-auth by");
+		expect(html).toContain("bg-secondary text-secondary-foreground");
+		// A day count this far out is noise; the date is the useful form.
+		expect(html).not.toContain("Re-auth in");
+	});
+
+	it("omits the far-out date on Usage, which reports capacity and problems", () => {
+		const html = renderUsageVariant(
+			makeAccount({
+				refreshTokenExpiresAt: new Date(NOW + 60 * DAY).toISOString(),
+			}),
+		);
 		expect(html).not.toContain("Re-auth");
+	});
+
+	it("keeps the warning-window chip on Usage", () => {
+		const html = renderUsageVariant(
+			makeAccount({
+				refreshTokenExpiresAt: new Date(NOW + 5 * DAY).toISOString(),
+			}),
+		);
+		expect(html).toContain("Re-auth in 5 days");
+		expect(html).toContain("bg-warning/15 text-warning-strong");
 	});
 
 	it("renders no chip for a provider that reports no deadline", () => {
@@ -260,16 +292,19 @@ describe("AccountStatusChips — refresh-token re-auth chip", () => {
 	});
 
 	it("shows only the terminal chip once the account is already paused for reauth", () => {
-		const html = render(
-			makeAccount({
-				paused: true,
-				pauseReason: "oauth_invalid_grant",
-				refreshTokenExpiresAt: new Date(NOW - DAY).toISOString(),
-			}),
-		);
-		expect(html).toContain("Needs re-authentication");
-		expect(html).not.toContain("Re-auth in");
-		expect(html).not.toContain("Re-auth overdue");
+		const account = makeAccount({
+			paused: true,
+			pauseReason: "oauth_invalid_grant",
+			refreshTokenExpiresAt: new Date(NOW - DAY).toISOString(),
+		});
+		for (const html of [render(account), renderUsageVariant(account)]) {
+			expect(html).toContain("Needs re-authentication");
+			expect(html).not.toContain("Re-auth in");
+			expect(html).not.toContain("Re-auth overdue");
+			// The deadline form too: a rejected token has no deadline left to plan
+			// around, and two chips saying the same thing is the regression here.
+			expect(html).not.toContain("Re-auth by");
+		}
 	});
 });
 
