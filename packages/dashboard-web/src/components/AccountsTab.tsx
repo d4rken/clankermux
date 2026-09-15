@@ -24,6 +24,7 @@ import {
 	QwenReauthDialog,
 	RecordPaymentDialog,
 	RenameAccountDialog,
+	ZaiReauthDialog,
 } from "./accounts";
 import { Button } from "./ui/button";
 import {
@@ -162,6 +163,9 @@ export function AccountsTab() {
 		account: null,
 	});
 	const [devinReauthAccount, setDevinReauthAccount] = useState<Account | null>(
+		null,
+	);
+	const [zaiReauthAccount, setZaiReauthAccount] = useState<Account | null>(
 		null,
 	);
 	const [actionError, setActionError] = useState<string | null>(null);
@@ -799,6 +803,7 @@ export function AccountsTab() {
 						onAnthropicReauth={handleAnthropicReauth}
 						onCodexReauth={handleCodexReauth}
 						onDevinReauth={setDevinReauthAccount}
+						onZaiReauth={setZaiReauthAccount}
 					/>
 				</CardContent>
 			</Card>
@@ -923,6 +928,14 @@ export function AccountsTab() {
 				isOpen={devinReauthAccount !== null}
 				account={devinReauthAccount}
 				onClose={() => setDevinReauthAccount(null)}
+				onSuccess={() => {
+					loadAccounts();
+				}}
+			/>
+			<ZaiReauthDialog
+				isOpen={zaiReauthAccount !== null}
+				account={zaiReauthAccount}
+				onClose={() => setZaiReauthAccount(null)}
 				onSuccess={() => {
 					loadAccounts();
 				}}

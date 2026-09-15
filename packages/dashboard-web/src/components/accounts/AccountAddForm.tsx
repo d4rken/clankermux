@@ -18,6 +18,7 @@ import {
 import { AccountSetupSection } from "./AccountSetupSection";
 import { AuthorizationHandoff } from "./AuthorizationHandoff";
 import { DevinAccountFields } from "./DevinAccountFields";
+import { ZaiAccountFields } from "./ZaiAccountFields";
 
 /**
  * Stable providers: exercised against a live account. Everything not listed
@@ -34,7 +35,7 @@ const STABLE_ACCOUNT_MODES = [
 
 const EXPERIMENTAL_ACCOUNT_MODES = [
 	{ value: "qwen", label: "Qwen (Alibaba Cloud OAuth)" },
-	{ value: "zai", label: "z.ai (API Key)" },
+	{ value: "zai", label: "z.ai (Subscription or API Key)" },
 	{ value: "minimax", label: "Minimax (API Key)" },
 	{ value: "anthropic-compatible", label: "Anthropic-Compatible (API Key)" },
 	{ value: "openai-compatible", label: "OpenAI-Compatible (API Key)" },
@@ -1043,21 +1044,16 @@ export function AccountAddForm({
 						</div>
 					)}
 					{newAccount.mode === "zai" && (
-						<div className="flex flex-col gap-item">
-							<Label htmlFor="apiKey">z.ai API Key</Label>
-							<Input
-								id="apiKey"
-								type="password"
-								value={newAccount.apiKey}
-								onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
-									setNewAccount({
-										...newAccount,
-										apiKey: (e.target as HTMLInputElement).value,
-									})
-								}
-								placeholder="Enter your z.ai API key"
-							/>
-						</div>
+						<ZaiAccountFields
+							name={newAccount.name}
+							priority={newAccount.priority}
+							apiKey={newAccount.apiKey}
+							onApiKeyChange={(value) => {
+								updateAccountSource({ apiKey: value });
+							}}
+							onSuccess={onSuccess}
+							onError={onError}
+						/>
 					)}
 					{newAccount.mode === "minimax" && (
 						<div className="flex flex-col gap-item">

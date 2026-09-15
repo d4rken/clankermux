@@ -92,6 +92,7 @@ interface AccountListItemProps {
 	onAnthropicReauth?: (account: Account) => void;
 	onCodexReauth?: (account: Account) => void;
 	onDevinReauth?: (account: Account) => void;
+	onZaiReauth?: (account: Account) => void;
 }
 
 export function AccountListItem({
@@ -124,6 +125,7 @@ export function AccountListItem({
 	onAnthropicReauth,
 	onCodexReauth,
 	onDevinReauth,
+	onZaiReauth,
 }: AccountListItemProps) {
 	const [isRefreshingUsage, setIsRefreshingUsage] = useState(false);
 	const [isEditingNotes, setIsEditingNotes] = useState(false);
@@ -141,7 +143,8 @@ export function AccountListItem({
 			account.hasRefreshToken &&
 			!!onAnthropicReauth) ||
 		(account.provider === "codex" && !!onCodexReauth) ||
-		(account.provider === "devin" && !!onDevinReauth);
+		(account.provider === "devin" && !!onDevinReauth) ||
+		(account.provider === "zai" && !!onZaiReauth);
 
 	// Menu copy for one automation flag. Sourced from the shared descriptors the
 	// policy chips render from, so an item's label and explanation cannot drift
@@ -476,6 +479,15 @@ export function AccountListItem({
 								<DropdownMenuItem
 									onClick={() => onDevinReauth(account)}
 									title="Reconnect this Devin account (preserves all metadata)"
+								>
+									<KeyRound className="mr-item h-4 w-4" />
+									Reconnect
+								</DropdownMenuItem>
+							)}
+							{account.provider === "zai" && onZaiReauth && (
+								<DropdownMenuItem
+									onClick={() => onZaiReauth(account)}
+									title="Reconnect this z.ai account (preserves all metadata)"
 								>
 									<KeyRound className="mr-item h-4 w-4" />
 									Reconnect

@@ -134,6 +134,17 @@ export interface TokenHealthAccountResponse {
 const unauthorizedListeners = new Set<() => void>();
 
 /**
+ * Per-call options for a sign-in completion.
+ *
+ * A completion is single-use and consumes its server session, so the client
+ * default of one silent retry would re-send it against a session the first
+ * attempt already deleted and report a confusing failure for a sign-in that may
+ * have succeeded. The ceiling sits above the server's own exchange budget plus
+ * account creation, so the server decides when the attempt is over.
+ */
+const SIGN_IN_COMPLETION = { retries: 0, timeout: 60_000 } as const;
+
+/**
  * Subscribe to "this browser is not signed in". Returns an unsubscribe.
  *
  * The auth gate uses this to switch to the login screen the moment a session
@@ -589,6 +600,35 @@ class API extends HttpClient {
 		apiKey: string;
 	}): Promise<{ success: boolean }> {
 		return this.post("/api/accounts/devin/reauth/token", data);
+	}
+	async startZaiLogin(data: {
+		name: string;
+		priority: number;
+	}): Promise<{ sessionId: string; authUrl: string; expiresAt: number }> {
+		return this.post("/api/accounts/zai/login", data);
+	}
+	async completeZaiLogin(data: {
+		sessionId: string;
+		code: string;
+	}): Promise<{ message: string; account: Account }> {
+		return this.post("/api/accounts/zai/login/complete", data, {
+			...SIGN_IN_COMPLETION,
+		});
+	}
+	async startZaiReauth(data: { accountId: string }): Promise<{
+		sessionId: string;
+		authUrl: string;
+		expiresAt: number;
+	}> {
+		return this.post("/api/accounts/zai/reauth/start", data);
+	}
+	async completeZaiReauth(data: {
+		sessionId: string;
+		code: string;
+	}): Promise<{ success: boolean }> {
+		return this.post("/api/accounts/zai/reauth/complete", data, {
+			...SIGN_IN_COMPLETION,
+		});
 	}
 	async addOpenRouterAccount(data: {
 		name: string;
