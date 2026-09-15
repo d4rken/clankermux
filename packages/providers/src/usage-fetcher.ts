@@ -41,6 +41,7 @@ import {
 	getRepresentativeZaiTokenWindow,
 	getRepresentativeZaiUtilization,
 	type ZaiUsageData,
+	type ZaiUsageWindow,
 } from "./zai-usage-fetcher";
 
 const log = new Logger("UsageFetcher");
@@ -840,6 +841,59 @@ function devinCapacity(
 }
 
 /**
+ * Zai's capacity signal, built on the SESSION/WEEKLY split the Anthropic branch
+ * uses rather than on `devinCapacity`'s calendar shape. Devin hardcodes
+ * `sessionHeadroom: 100` and `sessionResetMs: null` because its windows are
+ * daily/weekly; copied here, a Zai account with a spent five-hour window would
+ * get `recoveryDeadline = Infinity` in the FEFO comparator and sort behind
+ * every other near-limit account despite recovering within five hours.
+ *
+ * Model quotas only — `time_limit` caps the web tools, not inference, exactly
+ * as `getRepresentativeZaiTokenWindow` reads it.
+ */
+function zaiCapacity(usage: ZaiUsageData, now: number): CapacitySignal | null {
+	const session = readZaiWindow(usage.tokens_limit);
+	const weekly = readZaiWindow(usage.tokens_limit_weekly);
+	const hard = [session, weekly].filter(
+		(w): w is { util: number; resetMs: number | null } => w !== null,
+	);
+	if (hard.length === 0) return null;
+	// Content-staleness, as on the Anthropic branch: a present window already
+	// past its reset means the cached datum predates a window roll, so the
+	// answer is "unknown" rather than a number the caller would act on.
+	for (const w of hard) {
+		if (w.resetMs !== null && w.resetMs <= now) return null;
+	}
+	const resets = hard.flatMap((w) => (w.resetMs !== null ? [w.resetMs] : []));
+	return {
+		minHeadroom: Math.min(...hard.map((w) => 100 - w.util)),
+		sessionHeadroom: session ? 100 - session.util : 100,
+		soonestResetMs: resets.length ? Math.min(...resets) : null,
+		bindingUtilization: Math.max(...hard.map((w) => w.util)),
+		weeklyResetMs: weekly?.resetMs ?? null,
+		// One weekly window, so it is the binding one by construction; an unknown
+		// reset on it leaves the deadline ambiguous and the gates fail open.
+		bindingWeeklyResetMs: weekly?.resetMs ?? null,
+		weeklyHeadroom: weekly ? 100 - weekly.util : 100,
+		sessionResetMs: session?.resetMs ?? null,
+		// Zai has no overage axis: nothing here is resetless.
+		extraUsageUtilization: null,
+	};
+}
+
+/** One Zai window as {util, resetMs}, or null when absent / non-numeric. */
+function readZaiWindow(
+	window: ZaiUsageWindow | null | undefined,
+): { util: number; resetMs: number | null } | null {
+	if (!window || !Number.isFinite(window.percentage)) return null;
+	const resetMs = window.resetAt;
+	return {
+		util: window.percentage,
+		resetMs: resetMs !== null && Number.isFinite(resetMs) ? resetMs : null,
+	};
+}
+
+/**
  * Reduce a flat `UsageWindow` to {util, resetMs}, or null when absent / its
  * utilization is non-numeric. Used for the flat OAuth-apps weekly window, which
  * the normalizer's account-wide windows do not capture.
@@ -862,6 +916,7 @@ export function getAccountCapacitySignal(
 ): CapacitySignal | null {
 	if (!data) return null;
 	if (provider === "devin") return devinCapacity(data as DevinUsageData, now);
+	if (provider === "zai") return zaiCapacity(data as ZaiUsageData, now);
 	// Only Anthropic and Codex share the windowed UsageData shape. Others map later.
 	if (provider !== "anthropic" && provider !== "codex") return null;
 	const d = data as UsageData;
