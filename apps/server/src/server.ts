@@ -45,6 +45,7 @@ import {
 	CODEX_MODELS,
 	handleResponsesRequest,
 } from "@clankermux/openai-responses-adapter";
+import type { CapacityRestoredEvidence } from "@clankermux/providers";
 import {
 	extractCodexIdentity,
 	fetchAnthropicProfile,
@@ -379,6 +380,31 @@ const capacityRestoredProbeMarker: CapacityRestoredProbeMarker = {
 };
 
 /**
+ * Hand one poll's account-wide headroom reading to the listener that decides
+ * whether the account's cooldown may be released early. Level-triggered: every
+ * healthy poll reports, so a refused or missed clear heals on the next one. The
+ * listener decides whether the lock may actually be released (reason-gated,
+ * causally guarded, and atomic at the DB layer) — never wiping an intentional
+ * `out_of_credits` floor. See clearRateLimitOnCapacityRestored.
+ */
+function reportCapacityRestored(
+	dbOps: DatabaseOperations,
+	logger: Logger,
+	evidence: CapacityRestoredEvidence,
+): void {
+	clearRateLimitOnCapacityRestored(
+		dbOps,
+		logger,
+		evidence,
+		capacityRestoredProbeMarker,
+	).catch((err) =>
+		logger.warn(
+			`Failed to check/clear rate_limited_until for account ${evidence.accountId} on capacity restore: ${err}`,
+		),
+	);
+}
+
+/**
  * Start usage polling for an account with automatic token refresh
  */
 function startUsagePollingWithRefresh(
@@ -418,24 +444,8 @@ function startUsagePollingWithRefresh(
 							),
 						);
 				},
-				(evidence) => {
-					// Polling observed account-wide headroom (<100%) on this account.
-					// Level-triggered: reported on EVERY healthy poll, so a refused or
-					// missed clear heals on the next one. The handler decides whether the
-					// lock may actually be released (reason-gated, causally guarded, and
-					// atomic at the DB layer) — never wiping an intentional
-					// `out_of_credits` floor. See clearRateLimitOnCapacityRestored.
-					clearRateLimitOnCapacityRestored(
-						proxyContext.dbOps,
-						logger,
-						evidence,
-						capacityRestoredProbeMarker,
-					).catch((err) =>
-						logger.warn(
-							`Failed to check/clear rate_limited_until for account ${evidence.accountId} on capacity restore: ${err}`,
-						),
-					);
-				},
+				(evidence) =>
+					reportCapacityRestored(proxyContext.dbOps, logger, evidence),
 				(accountId) => {
 					// Usage endpoint denies access (403 permission_error), which may
 					// be an org policy or seat problem. Auto-pause to stop selecting and
@@ -1341,6 +1351,8 @@ export default async function startServer(options?: {
 					),
 				);
 		},
+		onCapacityRestored: (evidence) =>
+			reportCapacityRestored(dbOps, log, evidence),
 		getApiKey: (accountId) =>
 			dbOps
 				.getAccount(accountId)

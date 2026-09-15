@@ -1,4 +1,5 @@
 import { Logger } from "@clankermux/logger";
+import type { CapacityRestoredEvidence } from "@clankermux/providers";
 import { usageCache } from "@clankermux/providers";
 import type { Account } from "@clankermux/types";
 import { supportsUsagePolling } from "@clankermux/types";
@@ -30,6 +31,11 @@ export interface UsagePollingStarters {
 	startDevin: (account: Account) => boolean;
 	/** Resets the account's session window when a usage window rolls over. */
 	resetAccountSession: (accountId: string) => void;
+	/**
+	 * Hands a poll's account-wide headroom reading to the listener that decides
+	 * whether a quota-derived cooldown may be released before its deadline.
+	 */
+	onCapacityRestored: (evidence: CapacityRestoredEvidence) => void;
 	/** Reads the CURRENT stored key, so a credential edit is picked up. */
 	getApiKey: (accountId: string) => Promise<string | null>;
 	intervalMs: () => number;
@@ -41,6 +47,14 @@ export interface UsagePollingStarters {
  * session reset there would zero counters nothing re-establishes.
  */
 const SESSION_WINDOW_PROVIDERS: ReadonlySet<string> = new Set(["zai"]);
+
+/**
+ * Providers whose usage payload reports an ACCOUNT-WIDE utilization, so a poll
+ * that sees headroom is evidence the account as a whole recovered and a
+ * quota-derived cooldown can be released early. Kilo reports a credit balance,
+ * which is not a window and says nothing about a lock.
+ */
+const ACCOUNT_WIDE_WINDOW_PROVIDERS: ReadonlySet<string> = new Set(["zai"]);
 
 /**
  * Start usage polling for one account.
@@ -101,6 +115,9 @@ export function startUsagePollingFor(
 		undefined, // customEndpoint: these providers pin their own usage endpoint
 		SESSION_WINDOW_PROVIDERS.has(account.provider)
 			? (accountId) => starters.resetAccountSession(accountId)
+			: undefined,
+		ACCOUNT_WIDE_WINDOW_PROVIDERS.has(account.provider)
+			? (evidence) => starters.onCapacityRestored(evidence)
 			: undefined,
 	);
 	log.info(

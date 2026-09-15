@@ -4,14 +4,15 @@
  * capacity-restored evidence, and the listener must release a cooldown whose
  * reason is quota-derived.
  *
- * The two halves were separately inert. The zai poll branch never fired
- * `capacityRestoredCallbacks`, so nothing was ever reported; and the only
- * reasons the listener will act on are written by the proxy's account-wide
- * exhaustion rung, which excluded zai (pinned in
+ * Polling is started through `startUsagePollingFor`, the way the server starts
+ * it, because the registration is the joint: an emitter and a listener that are
+ * each correct still do nothing if the poller was never handed the callback.
+ * The only reasons the listener will act on are written by the proxy's
+ * account-wide exhaustion rung, which covers zai (pinned in
  * `packages/proxy/src/handlers/__tests__/proxy-operations-zai-exhausted.test.ts`).
  * Polling is the ONLY channel that observes a locked account recovering, so
- * without both a Z.AI cooldown ran to its deadline however early the quota came
- * back.
+ * without every link a Z.AI cooldown runs to its deadline however early the
+ * quota came back.
  */
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import type { DatabaseOperations } from "@clankermux/database";
@@ -24,6 +25,7 @@ import {
 	type CapacityRestoredProbeMarker,
 	clearRateLimitOnCapacityRestored,
 } from "./capacity-restored";
+import { startUsagePollingFor } from "./usage-polling-dispatch";
 
 const ACCOUNT_ID = "acc-zai-locked";
 const HOUR = 60 * 60 * 1000;
@@ -124,6 +126,7 @@ function lockedAccount(reason: string, until: number, at: number): Account {
 		id: ACCOUNT_ID,
 		name: "Z.AI-1",
 		provider: "zai",
+		api_key: "zai-key",
 		rate_limited_until: until,
 		rate_limited_at: at,
 		rate_limited_reason: reason,
@@ -133,29 +136,41 @@ function lockedAccount(reason: string, until: number, at: number): Account {
 }
 
 /**
- * Run one real Z.AI usage poll against a stubbed endpoint and return whatever
- * evidence it reported, or null when it reported none.
+ * Run one real Z.AI usage poll against a stubbed endpoint, started through the
+ * dispatcher the server itself uses, and settle whatever the listener did with
+ * the evidence. Returns the reported evidence, or null when none was reported.
  */
-async function pollForEvidence(
+async function pollThroughDispatch(
 	percentage: number,
+	account: Account,
+	h: ReturnType<typeof makeHarness>,
 ): Promise<CapacityRestoredEvidence | null> {
 	let reported: CapacityRestoredEvidence | null = null;
+	const listening: Promise<void>[] = [];
 	globalThis.fetch = mockFetch(async () =>
 		quotaResponse(percentage, Date.now() + 2 * HOUR),
 	);
-	usageCache.startPolling(
-		ACCOUNT_ID,
-		"zai-key",
-		"zai",
-		3_600_000,
-		undefined,
-		undefined,
-		(evidence) => {
-			reported = evidence;
+	const started = startUsagePollingFor(account, {
+		startAnthropic: () => {
+			throw new Error("a zai account must not take the Anthropic path");
 		},
-	);
+		startDevin: () => {
+			throw new Error("a zai account must not take the Devin path");
+		},
+		resetAccountSession: () => {},
+		onCapacityRestored: (evidence) => {
+			reported = evidence;
+			listening.push(
+				clearRateLimitOnCapacityRestored(h.dbOps, h.logger, evidence, h.marker),
+			);
+		},
+		getApiKey: async () => "zai-key",
+		intervalMs: () => 3_600_000,
+	});
+	expect(started).toBe(true);
 	try {
 		expect(await usageCache.refreshNow(ACCOUNT_ID)).toBe(true);
+		await Promise.all(listening);
 	} finally {
 		usageCache.stopPolling(ACCOUNT_ID);
 	}
@@ -176,7 +191,15 @@ describe("a Z.AI poll releases a quota-derived cooldown early", () => {
 	});
 
 	it("clears a weekly_exhausted_429 lock when the poll sees headroom", async () => {
-		const evidence = await pollForEvidence(20);
+		// The cooldown was written BEFORE the poll goes out, so it is orderable
+		// against the evidence that poll reports.
+		const account = lockedAccount(
+			"weekly_exhausted_429",
+			Date.now() + 48 * HOUR,
+			Date.now() - 5_000,
+		);
+		const h = makeHarness(account);
+		const evidence = await pollThroughDispatch(20, account, h);
 		if (!evidence) throw new Error("the poll reported no evidence");
 		expect(evidence.accountId).toBe(ACCOUNT_ID);
 		expect(evidence.utilization).toBe(20);
@@ -184,21 +207,6 @@ describe("a Z.AI poll releases a quota-derived cooldown early", () => {
 		// Two windows with resets, so the listener's staleness test has something
 		// to match a recorded reset against.
 		expect(evidence.observedWindows).toHaveLength(2);
-
-		// The cooldown was written BEFORE the poll went out, so it is orderable
-		// against this evidence.
-		const account = lockedAccount(
-			"weekly_exhausted_429",
-			Date.now() + 48 * HOUR,
-			evidence.fetchStartedAt - 5_000,
-		);
-		const h = makeHarness(account);
-		await clearRateLimitOnCapacityRestored(
-			h.dbOps,
-			h.logger,
-			evidence,
-			h.marker,
-		);
 
 		expect(h.clearCalls).toEqual([
 			{
@@ -212,25 +220,24 @@ describe("a Z.AI poll releases a quota-derived cooldown early", () => {
 	});
 
 	it("reports nothing at all while a window is still spent", async () => {
-		expect(await pollForEvidence(100)).toBeNull();
+		const account = lockedAccount(
+			"weekly_exhausted_429",
+			Date.now() + 48 * HOUR,
+			Date.now() - 5_000,
+		);
+		const h = makeHarness(account);
+		expect(await pollThroughDispatch(100, account, h)).toBeNull();
+		expect(h.clearCalls).toEqual([]);
 	});
 
 	it("refuses to release a lock whose reason is not quota-derived", async () => {
-		const evidence = await pollForEvidence(20);
-		if (!evidence) throw new Error("the poll reported no evidence");
-		const h = makeHarness(
-			lockedAccount(
-				"upstream_429_with_reset",
-				Date.now() + 60_000,
-				evidence.fetchStartedAt - 5_000,
-			),
+		const account = lockedAccount(
+			"upstream_429_with_reset",
+			Date.now() + 60_000,
+			Date.now() - 5_000,
 		);
-		await clearRateLimitOnCapacityRestored(
-			h.dbOps,
-			h.logger,
-			evidence,
-			h.marker,
-		);
+		const h = makeHarness(account);
+		expect(await pollThroughDispatch(20, account, h)).not.toBeNull();
 		expect(h.clearCalls).toEqual([]);
 	});
 });
