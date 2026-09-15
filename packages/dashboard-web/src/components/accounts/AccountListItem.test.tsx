@@ -108,8 +108,6 @@ function region(html: string, id: string): string {
 	throw new Error(`${id} never closed`);
 }
 
-const infoRow = (html: string) => region(html, "account-info-row");
-
 it("leads the heading row's routing cluster with the pause state", () => {
 	const html = render(makeAccount({ paused: true, priority: 3 }));
 	const heading = region(html, "account-heading-row");
@@ -123,9 +121,29 @@ it("leads the heading row's routing cluster with the pause state", () => {
 		heading.indexOf("Priority: 3"),
 	);
 	// And nowhere else: not in the chip row below it, beside the causes that
-	// explain the pause, and not in the statistics panel under that.
+	// explain the pause.
 	expect(region(html, "account-status-chips")).not.toContain("Paused");
-	expect(infoRow(html)).not.toContain("Paused");
+});
+
+describe("AccountListItem — Force Reset placement", () => {
+	// Hard-limited and unpaused: what `showForceReset` is derived from.
+	const LIMITED = makeAccount({
+		rateLimitStatus: "Rate limited",
+		rateLimitedUntil: Date.now() + 60 * 60 * 1000,
+	});
+
+	it("offers the action in the header strip, not a panel of its own", () => {
+		const html = render(LIMITED);
+
+		expect(region(html, "account-actions")).toContain("Force Reset");
+		expect(html).not.toContain('data-testid="account-info-row"');
+	});
+
+	it("lets the strip wrap so it cannot crowd the account name", () => {
+		// The narrow-width result is not observable in static markup; this class
+		// is the mechanism behind it.
+		expect(region(render(LIMITED), "account-actions")).toContain("flex-wrap");
+	});
 });
 
 it("pads the card and separates its groups by the row step", () => {

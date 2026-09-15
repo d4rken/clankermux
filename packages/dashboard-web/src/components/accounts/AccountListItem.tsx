@@ -42,7 +42,6 @@ import {
 	DropdownMenuSeparator,
 	DropdownMenuTrigger,
 } from "../ui/dropdown-menu";
-import { InsetPanel } from "../ui/inset-panel";
 import { Textarea } from "../ui/textarea";
 import { AccountIdentityLine } from "./AccountIdentity";
 import {
@@ -160,7 +159,7 @@ export function AccountListItem({
 			(!!onAutoApplyResetCreditsToggle ||
 				!!onAutoApplyResetOnWeeklyLimitToggle));
 
-	// Four groups, and the rhythm has to say so: identity, status, counts, quota.
+	// Three groups, and the rhythm has to say so: identity, status, quota.
 	// `space-y-row` between them, tighter steps inside each. A single
 	// `space-y-item` for everything gave the name→email pair — which is one
 	// group — exactly as much air as the boundary between two, so six of these
@@ -192,7 +191,10 @@ export function AccountListItem({
 						}
 					/>
 				</div>
-				<div className="flex items-center gap-tight shrink-0">
+				<div
+					data-testid="account-actions"
+					className="flex flex-wrap items-center justify-end gap-tight shrink-0"
+				>
 					{(account.provider === "anthropic" ||
 						account.provider === "codex" ||
 						account.provider === "devin" ||
@@ -488,6 +490,26 @@ export function AccountListItem({
 					<Button variant="ghost" size="sm" onClick={() => onRemove(account)}>
 						<Trash2 className="h-4 w-4" />
 					</Button>
+					{status.showForceReset && (
+						// The one labelled button among ghost icons, so it keeps the
+						// outline that tells it apart. It is also the widest, which is why
+						// the strip wraps: at ~400px it would otherwise squeeze the account
+						// name beside it toward nothing.
+						<Button
+							variant="outline"
+							size="sm"
+							className="h-7 gap-tight text-xs"
+							onClick={() => onForceResetRateLimit(account)}
+							title={
+								status.staleLockDetected
+									? "Reset stale rate limit lock (usage shows capacity available)"
+									: "Force clear rate limit state from database"
+							}
+						>
+							<RefreshCw className="h-3.5 w-3.5" />
+							Force Reset
+						</Button>
+					)}
 				</div>
 			</div>
 			{isEditingNotes ? (
@@ -548,36 +570,13 @@ export function AccountListItem({
 					</Button>
 				</div>
 			) : null}
-			{/* Status flags and the counts they qualify: one group, so they sit a
-			    step closer to each other than to the identity above or the quota
-			    bars below. */}
-			<div className="space-y-item">
-				<AccountStatusChips
-					account={account}
-					status={status}
-					showAccountDetails={false}
-				/>
-				<InsetPanel data-testid="account-info-row">
-					<div className="flex flex-wrap items-center gap-row">
-						{status.showForceReset && (
-							<Button
-								variant="outline"
-								size="sm"
-								className="h-7 gap-tight text-xs"
-								onClick={() => onForceResetRateLimit(account)}
-								title={
-									status.staleLockDetected
-										? "Reset stale rate limit lock (usage shows capacity available)"
-										: "Force clear rate limit state from database"
-								}
-							>
-								<RefreshCw className="h-3.5 w-3.5" />
-								Force Reset
-							</Button>
-						)}
-					</div>
-				</InsetPanel>
-			</div>
+			{/* Status flags: their own group, a step away from the identity above
+			    and the quota bars below. */}
+			<AccountStatusChips
+				account={account}
+				status={status}
+				showAccountDetails={false}
+			/>
 			{account.provider === "openrouter" && !account.customEndpoint && (
 				<OpenRouterAccountDetails metadata={account.openRouterMetadata} />
 			)}
