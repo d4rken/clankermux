@@ -114,6 +114,13 @@ function trimmedString(value: unknown): string | undefined {
 		: undefined;
 }
 
+/** Identity fields arrive as either a string or a numeric id. */
+function identityString(value: unknown): string | undefined {
+	return typeof value === "string" || typeof value === "number"
+		? String(value)
+		: undefined;
+}
+
 async function requestJson(
 	url: string,
 	init: RequestInit,
@@ -320,11 +327,9 @@ export async function exchangeZaiLogin(
 	if (!oauthAccessToken)
 		throw new Error("Z.AI token response is missing an access token");
 	const user = asRecord(data?.user);
-	const id = user?.id;
 	return {
 		apiKey: await mintZaiApiKey(oauthAccessToken, fetcher, deadline),
 		email: trimmedString(user?.email),
-		accountId:
-			typeof id === "string" || typeof id === "number" ? String(id) : undefined,
+		accountId: identityString(user?.user_id) ?? identityString(user?.id),
 	};
 }

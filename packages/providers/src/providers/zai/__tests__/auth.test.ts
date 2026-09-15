@@ -34,7 +34,10 @@ const DEFAULTS: Required<WalkResponses> = {
 		code: 0,
 		data: {
 			zai: { access_token: "oauth-access-token" },
-			user: { email: "person@example.test", id: 4242 },
+			user: {
+				email: "person@example.test",
+				user_id: "6f1c2a34-5b6d-4e7f-8a9b-0c1d2e3f4a5b",
+			},
 		},
 	},
 	login: { code: 200, data: { access_token: "biz-token" } },
@@ -170,7 +173,7 @@ describe("Z.AI browser login", () => {
 		expect(credential).toEqual({
 			apiKey: "key-1.secret-1",
 			email: "person@example.test",
-			accountId: "4242",
+			accountId: "6f1c2a34-5b6d-4e7f-8a9b-0c1d2e3f4a5b",
 		});
 		expect(calls.map((call) => `${call.method} ${call.url}`)).toEqual([
 			`POST ${TOKEN_URL}`,
@@ -188,6 +191,26 @@ describe("Z.AI browser login", () => {
 		expect(calls[1]?.body).toEqual({ token: "oauth-access-token" });
 		for (const call of calls.slice(2))
 			expect(call.auth).toBe("Bearer biz-token");
+	});
+
+	it.each([
+		[
+			"user_id",
+			{ user_id: "6f1c2a34-5b6d-4e7f-8a9b-0c1d2e3f4a5b", id: 4242 },
+			"6f1c2a34-5b6d-4e7f-8a9b-0c1d2e3f4a5b",
+		],
+		["id when the user carries no user_id", { id: 4242 }, "4242"],
+	])("takes the account identity from %s", async (_field, user, expected) => {
+		const login = createZaiLogin();
+		const { fetcher } = walk({
+			token: {
+				code: 0,
+				data: { zai: { access_token: "oauth-access-token" }, user },
+			},
+		});
+		expect(
+			(await exchangeZaiLogin(login, redirect(login), fetcher)).accountId,
+		).toBe(expected);
 	});
 
 	it("creates the key when the project has none of its own", async () => {
