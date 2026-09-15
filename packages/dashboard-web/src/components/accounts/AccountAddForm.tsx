@@ -8,13 +8,47 @@ import { Label } from "../ui/label";
 import {
 	Select,
 	SelectContent,
+	SelectGroup,
 	SelectItem,
+	SelectLabel,
+	SelectSeparator,
 	SelectTrigger,
 	SelectValue,
 } from "../ui/select";
 import { AccountSetupSection } from "./AccountSetupSection";
 import { AuthorizationHandoff } from "./AuthorizationHandoff";
 import { DevinAccountFields } from "./DevinAccountFields";
+
+/**
+ * Stable providers: exercised against a live account. Everything not listed
+ * here is experimental, which drives both the grouping in the account-type
+ * picker and the warning shown once one is selected.
+ */
+const STABLE_ACCOUNT_MODES = [
+	{ value: "claude-oauth", label: "Claude CLI OAuth (Recommended)" },
+	{ value: "console", label: "Claude API" },
+	{ value: "codex", label: "Codex (OpenAI OAuth)" },
+	{ value: "devin", label: "Devin (Subscription)" },
+	{ value: "openrouter", label: "OpenRouter (API Key)" },
+] as const;
+
+const EXPERIMENTAL_ACCOUNT_MODES = [
+	{ value: "qwen", label: "Qwen (Alibaba Cloud OAuth)" },
+	{ value: "zai", label: "z.ai (API Key)" },
+	{ value: "minimax", label: "Minimax (API Key)" },
+	{ value: "anthropic-compatible", label: "Anthropic-Compatible (API Key)" },
+	{ value: "openai-compatible", label: "OpenAI-Compatible (API Key)" },
+	{ value: "kilo", label: "Kilo Gateway (API Key)" },
+	{
+		value: "alibaba-coding-plan",
+		label: "Alibaba Coding Plan International (API Key)",
+	},
+	{ value: "ollama", label: "Ollama (v0.14.0+, local)" },
+	{ value: "ollama-cloud", label: "Ollama Cloud (ollama.com)" },
+] as const;
+
+const isExperimentalMode = (mode: string) =>
+	!STABLE_ACCOUNT_MODES.some((entry) => entry.value === mode);
 
 interface AccountAddFormProps {
 	onAddAccount: (params: {
@@ -809,50 +843,31 @@ export function AccountAddForm({
 								<SelectValue />
 							</SelectTrigger>
 							<SelectContent className="max-w-[calc(100vw-2rem)]">
-								<SelectItem value="claude-oauth">
-									Claude CLI OAuth (Recommended)
-								</SelectItem>
-								<SelectItem value="console">Claude API</SelectItem>
-								<SelectItem value="codex">Codex (OpenAI OAuth)</SelectItem>
-								<SelectItem value="devin">Devin (Subscription)</SelectItem>
-								<SelectItem value="qwen">
-									Qwen (Alibaba Cloud OAuth) — Experimental
-								</SelectItem>
-								<SelectItem value="zai">
-									z.ai (API Key) — Experimental
-								</SelectItem>
-								<SelectItem value="minimax">
-									Minimax (API Key) — Experimental
-								</SelectItem>
-								<SelectItem value="anthropic-compatible">
-									Anthropic-Compatible (API Key) — Experimental
-								</SelectItem>
-								<SelectItem value="openai-compatible">
-									OpenAI-Compatible (API Key) — Experimental
-								</SelectItem>
-								<SelectItem value="kilo">
-									Kilo Gateway (API Key) — Experimental
-								</SelectItem>
-								<SelectItem value="openrouter">OpenRouter (API Key)</SelectItem>
-								<SelectItem value="alibaba-coding-plan">
-									Alibaba Coding Plan International (API Key) — Experimental
-								</SelectItem>
-								<SelectItem value="ollama">
-									Ollama (v0.14.0+, local) — Experimental
-								</SelectItem>
-								<SelectItem value="ollama-cloud">
-									Ollama Cloud (ollama.com) — Experimental
-								</SelectItem>
+								<SelectGroup>
+									<SelectLabel className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+										Stable
+									</SelectLabel>
+									{STABLE_ACCOUNT_MODES.map((entry) => (
+										<SelectItem key={entry.value} value={entry.value}>
+											{entry.label}
+										</SelectItem>
+									))}
+								</SelectGroup>
+								<SelectSeparator />
+								<SelectGroup>
+									<SelectLabel className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+										Experimental
+									</SelectLabel>
+									{EXPERIMENTAL_ACCOUNT_MODES.map((entry) => (
+										<SelectItem key={entry.value} value={entry.value}>
+											{entry.label}
+										</SelectItem>
+									))}
+								</SelectGroup>
 							</SelectContent>
 						</Select>
 					</div>
-					{![
-						"claude-oauth",
-						"console",
-						"codex",
-						"devin",
-						"openrouter",
-					].includes(newAccount.mode) && (
+					{isExperimentalMode(newAccount.mode) && (
 						<Alert size="form" title="Experimental provider" tone="warning">
 							This integration has not been validated by us with a live account.
 							Authentication, usage tracking, and recovery may have issues.
