@@ -20,6 +20,21 @@ function usage(fivePct: number, resetMs: number): AnyUsageData {
 	} as unknown as AnyUsageData;
 }
 
+/** A Z.AI reading: the 5-hour window is `tokens_limit`, the weekly one is separate. */
+function zaiUsage(fivePct: number, resetMs: number): AnyUsageData {
+	return {
+		time_limit: null,
+		tokens_limit: {
+			used: 0,
+			remaining: 0,
+			percentage: fivePct,
+			resetAt: resetMs,
+			type: "TOKENS_LIMIT",
+		},
+		tokens_limit_weekly: null,
+	} as unknown as AnyUsageData;
+}
+
 /** Rising 5h history: 10/20/30 over the last three hours. */
 function risingSnapshots(accountId: string, resetMs: number) {
 	return [3, 2, 1].map((hoursAgo, index) => ({
@@ -130,7 +145,7 @@ describe("buildPredictionsForAccounts", () => {
 		});
 	});
 
-	it("only considers anthropic and codex accounts", async () => {
+	it("considers only accounts whose provider records usage history", async () => {
 		let seen: string[] = [];
 		const reset = NOW + 3 * HOUR_MS;
 		const predictions = await buildPredictionsForAccounts(
@@ -139,6 +154,7 @@ describe("buildPredictionsForAccounts", () => {
 					...risingSnapshots("anthropic-1", reset),
 					...risingSnapshots("codex-1", reset),
 					...risingSnapshots("zai-1", reset),
+					...risingSnapshots("kilo-1", reset),
 				],
 				onQuery: (accountIds) => {
 					seen = accountIds;
@@ -148,20 +164,28 @@ describe("buildPredictionsForAccounts", () => {
 				{ id: "anthropic-1", provider: "anthropic" },
 				{ id: "codex-1", provider: "codex" },
 				{ id: "zai-1", provider: "zai" },
+				// Outside USAGE_HISTORY_PROVIDERS: no recorded series to fit.
+				{ id: "kilo-1", provider: "kilo" },
 				// A null provider is the legacy Anthropic default.
 				{ id: "legacy-1", provider: null },
 			],
 			new Map([
 				["anthropic-1", usage(60, reset)],
 				["codex-1", usage(60, reset)],
-				["zai-1", usage(60, reset)],
+				["zai-1", zaiUsage(60, reset)],
+				["kilo-1", usage(60, reset)],
 				["legacy-1", usage(60, reset)],
 			]),
 			NOW,
 		);
 
-		expect(seen.sort()).toEqual(["anthropic-1", "codex-1", "legacy-1"]);
-		expect(predictions.has("zai-1")).toBe(false);
+		expect(seen.sort()).toEqual([
+			"anthropic-1",
+			"codex-1",
+			"legacy-1",
+			"zai-1",
+		]);
+		expect(predictions.has("kilo-1")).toBe(false);
 	});
 
 	it("skips an account whose cached reading has neither window", async () => {
@@ -259,7 +283,17 @@ describe("buildPredictionsForAccounts", () => {
 				},
 			}),
 			[{ id: "zai-1", provider: "zai" }],
-			new Map([["zai-1", usage(60, NOW + 3 * HOUR_MS)]]),
+			// A recognised Z.AI reading that names no window at all.
+			new Map([
+				[
+					"zai-1",
+					{
+						time_limit: null,
+						tokens_limit: null,
+						tokens_limit_weekly: null,
+					} as unknown as AnyUsageData,
+				],
+			]),
 			NOW,
 		);
 

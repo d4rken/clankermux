@@ -1,6 +1,8 @@
 import type { Config } from "@clankermux/config";
 import {
-	accountWideExhaustion,
+	accountWideExhaustionFor,
+	extractFiveHour,
+	extractSevenDay,
 	FIVE_HOUR_ELIGIBLE_PROVIDERS,
 	isAccountAvailable,
 	normalizeAnthropicUsage,
@@ -27,6 +29,7 @@ import {
 import type {
 	Account,
 	AnthropicUsageData,
+	FullUsageData,
 	LoadBalancingStrategy,
 	RateLimitCause,
 	RunwayWindowForecast,
@@ -444,13 +447,22 @@ export function attachWindowForecasts(
  */
 function buildWindows(
 	provider: string,
-	usage: AnthropicUsageData | null,
+	usage: FullUsageData | null,
 	observedAtMs: number | null,
 	prediction: { fiveHour?: UsagePrediction; sevenDay?: UsagePrediction } | null,
 	now: number,
 ): PublicWindowSnapshot[] {
 	if (!isMetered(provider)) return [];
-	const normalized = normalizeAnthropicUsage(usage, now);
+	// The two account-wide windows read through the shape-dispatching
+	// extractors, so a metered provider whose payload is not Anthropic-shaped
+	// reports real numbers instead of a pair of nulls that would contradict the
+	// exhaustion verdict computed from the same reading.
+	const fiveHour = usage ? extractFiveHour(usage) : null;
+	const sevenDay = usage ? extractSevenDay(usage) : null;
+	// The scoped windows and the Claude-Code allowance are Anthropic keys, and
+	// resolve to nothing on any other shape.
+	const anthropic = usage as AnthropicUsageData | null;
+	const normalized = normalizeAnthropicUsage(anthropic, now);
 	const windows: PublicWindowSnapshot[] = [];
 
 	if (hasFiveHourWindow(provider)) {
@@ -458,9 +470,9 @@ function buildWindows(
 			kind: "five_hour",
 			scopeId: null,
 			label: "5-hour",
-			utilizationPct: clampPct(normalized.session?.utilization ?? null),
+			utilizationPct: clampPct(fiveHour?.pct ?? null),
 			observedAtMs,
-			resetsAtMs: normalized.session?.resetMs ?? null,
+			resetsAtMs: fiveHour?.resetMs ?? null,
 			forecast: null,
 			prediction: servablePrediction(prediction?.fiveHour),
 		});
@@ -470,9 +482,9 @@ function buildWindows(
 			kind: "seven_day",
 			scopeId: null,
 			label: "Weekly",
-			utilizationPct: clampPct(normalized.weeklyAll?.utilization ?? null),
+			utilizationPct: clampPct(sevenDay?.pct ?? null),
 			observedAtMs,
-			resetsAtMs: normalized.weeklyAll?.resetMs ?? null,
+			resetsAtMs: sevenDay?.resetMs ?? null,
 			forecast: null,
 			prediction: servablePrediction(prediction?.sevenDay),
 		});
@@ -505,7 +517,7 @@ function buildWindows(
 	// account-wide windows above follow. Requiring a number here would delete the
 	// record entirely, which is exactly the "absent means the provider has no
 	// such window" confusion this vocabulary exists to prevent.
-	const oauthApps = usage?.seven_day_oauth_apps;
+	const oauthApps = anthropic?.seven_day_oauth_apps;
 	if (oauthApps) {
 		windows.push({
 			kind: "seven_day_oauth_apps",
@@ -995,9 +1007,10 @@ export function createPublicSnapshotReader(
 			// Same two-view split as `/api/accounts`: the weekly windows move over
 			// days so a display-horizon reading is honest evidence for them, while
 			// the 5h session moves fast enough that a half-hour-old 100% is not.
-			const exhaustion = metered
-				? accountWideExhaustion(usage, now, fresh)
-				: { exhausted: false, binding: null, resetMs: null };
+			// Dispatched on provider, like the other three surfaces that report this
+			// verdict — `/api/accounts` and this response describe the same account
+			// and must not disagree about whether it is exhausted.
+			const exhaustion = accountWideExhaustionFor(provider, usage, now, fresh);
 			const accountWideExhausted =
 				exhaustion.exhausted && exhaustion.binding !== null
 					? { resetMs: exhaustion.resetMs, binding: exhaustion.binding }

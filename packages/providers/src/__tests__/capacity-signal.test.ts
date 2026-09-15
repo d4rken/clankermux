@@ -441,6 +441,113 @@ describe("getAccountCapacitySignal", () => {
 	});
 });
 
+/**
+ * Without a signal the FEFO comparator buckets every Z.AI account as UNKNOWN.
+ * The session/weekly split matters: modelled on Devin's calendar shape instead,
+ * a spent five-hour window would carry `sessionResetMs: null` and sort behind
+ * every other near-limit account despite recovering within five hours.
+ */
+describe("getAccountCapacitySignal for zai", () => {
+	function zaiData(
+		fiveHour: { pct: number; resetMs: number | null } | null,
+		weekly: { pct: number; resetMs: number | null } | null,
+	): AnyUsageData {
+		const window = (
+			w: { pct: number; resetMs: number | null },
+			type: string,
+		) => ({
+			used: w.pct,
+			remaining: 100 - w.pct,
+			percentage: w.pct,
+			resetAt: w.resetMs,
+			type,
+		});
+		return {
+			time_limit: null,
+			tokens_limit: fiveHour ? window(fiveHour, "tokens_limit") : null,
+			tokens_limit_weekly: weekly
+				? window(weekly, "tokens_limit_weekly")
+				: null,
+		} as unknown as AnyUsageData;
+	}
+
+	it("splits the session and weekly axes across both windows", () => {
+		const signal = getAccountCapacitySignal(
+			zaiData(
+				{ pct: 70, resetMs: NOW + 3_600_000 },
+				{ pct: 30, resetMs: NOW + 600_000_000 },
+			),
+			"zai",
+			NOW,
+		);
+		expect(signal?.minHeadroom).toBe(30);
+		expect(signal?.bindingUtilization).toBe(70);
+		expect(signal?.soonestResetMs).toBe(NOW + 3_600_000);
+		expect(signal?.sessionHeadroom).toBe(30);
+		expect(signal?.sessionResetMs).toBe(NOW + 3_600_000);
+		expect(signal?.weeklyHeadroom).toBe(70);
+		expect(signal?.weeklyResetMs).toBe(NOW + 600_000_000);
+		expect(signal?.bindingWeeklyResetMs).toBe(NOW + 600_000_000);
+		// Zai has no overage axis to report.
+		expect(signal?.extraUsageUtilization).toBeNull();
+	});
+
+	it("reports full session headroom when only the weekly window exists", () => {
+		const signal = getAccountCapacitySignal(
+			zaiData(null, { pct: 90, resetMs: NOW + 600_000_000 }),
+			"zai",
+			NOW,
+		);
+		expect(signal?.sessionHeadroom).toBe(100);
+		expect(signal?.sessionResetMs).toBeNull();
+		expect(signal?.minHeadroom).toBe(10);
+		expect(signal?.weeklyHeadroom).toBe(10);
+	});
+
+	it("reports full weekly headroom and no weekly deadline with only the 5h window", () => {
+		const signal = getAccountCapacitySignal(
+			zaiData({ pct: 80, resetMs: NOW + 3_600_000 }, null),
+			"zai",
+			NOW,
+		);
+		expect(signal?.weeklyHeadroom).toBe(100);
+		expect(signal?.weeklyResetMs).toBeNull();
+		expect(signal?.bindingWeeklyResetMs).toBeNull();
+		expect(signal?.sessionHeadroom).toBe(20);
+	});
+
+	it("returns null when a present window is already past its reset", () => {
+		expect(
+			getAccountCapacitySignal(
+				zaiData(
+					{ pct: 20, resetMs: NOW - 1 },
+					{ pct: 30, resetMs: NOW + 600_000_000 },
+				),
+				"zai",
+				NOW,
+			),
+		).toBeNull();
+	});
+
+	it("returns null when the payload reports no model quota at all", () => {
+		expect(
+			getAccountCapacitySignal(zaiData(null, null), "zai", NOW),
+		).toBeNull();
+		expect(getAccountCapacitySignal(null, "zai", NOW)).toBeNull();
+	});
+
+	it("keeps a window with no reset deadline-less rather than unknown", () => {
+		const signal = getAccountCapacitySignal(
+			zaiData({ pct: 70, resetMs: null }, { pct: 30, resetMs: null }),
+			"zai",
+			NOW,
+		);
+		expect(signal?.minHeadroom).toBe(30);
+		expect(signal?.soonestResetMs).toBeNull();
+		expect(signal?.bindingWeeklyResetMs).toBeNull();
+	});
+});
+
 describe("getFreshCapacity", () => {
 	const makeCache = (
 		age: number | null,

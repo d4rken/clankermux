@@ -1,4 +1,5 @@
 import { describe, expect, it } from "bun:test";
+import { getAccountCapacitySignal } from "@clankermux/providers";
 import type { CapacitySignal } from "@clankermux/types";
 import {
 	isAbsorbablePeer,
@@ -493,5 +494,51 @@ describe("incident replay: fail-open while the pool is degraded", () => {
 				opts(),
 			),
 		).toBe(false);
+	});
+});
+
+/**
+ * The Zai capacity signal switches this gate on for a provider it could never
+ * reach before (a null signal fails open at rule 1). With ONE Zai account in
+ * the pool the model-permission filter leaves a glm candidate list of exactly
+ * that account, so there is no peer to absorb the traffic and rule 4 holds it.
+ * A second Zai account would make demotion reachable — correctly, since that is
+ * what the reserve exists for.
+ */
+describe("a Zai capacity signal at the pool-liveness gate", () => {
+	const weeklyReset = farWeeklyReset;
+	const zaiSignal = () =>
+		getAccountCapacitySignal(
+			{
+				time_limit: null,
+				tokens_limit: {
+					used: 10,
+					remaining: 90,
+					percentage: 10,
+					resetAt: NOW + HOUR,
+					type: "tokens_limit",
+				},
+				// Deep inside the reserve band: every other rule passes, so the peer
+				// count is the only thing left to decide it.
+				tokens_limit_weekly: {
+					used: 97,
+					remaining: 3,
+					percentage: 97,
+					resetAt: weeklyReset,
+					type: "tokens_limit_weekly",
+				},
+			} as never,
+			"zai",
+			NOW,
+		);
+
+	it("is not demoted when it is the only account that can serve the request", () => {
+		expect(resolvePoolLivenessDemotion(zaiSignal(), 0, NOW, opts())).toBe(
+			false,
+		);
+	});
+
+	it("is demoted once a peer can absorb the traffic", () => {
+		expect(resolvePoolLivenessDemotion(zaiSignal(), 1, NOW, opts())).toBe(true);
 	});
 });

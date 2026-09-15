@@ -2,7 +2,7 @@ import crypto from "node:crypto";
 import type { Config } from "@clankermux/config";
 import {
 	ACCOUNT_WIDE_HARD_STATUSES,
-	accountWideExhaustion,
+	accountWideExhaustionFor,
 	extractFiveHour,
 	extractSevenDay,
 	isAnthropicUsageShape,
@@ -13,6 +13,7 @@ import {
 	type RateLimitCause,
 	sanitizers,
 	TIME_CONSTANTS,
+	USAGE_HISTORY_PROVIDERS,
 	validateNumber,
 	validatePriority,
 	validateString,
@@ -720,16 +721,24 @@ export async function listAccountResponses(
 			}
 		}
 
-		// Last-known usage fallback: for Anthropic accounts whose live usage
-		// cache is empty (e.g. polling fails after the subscription lapsed),
-		// serve the most recent persisted usage snapshot so the dashboard can
-		// still show the weekly utilization and its reset date.
+		// Last-known usage fallback: for Anthropic and Zai accounts whose live
+		// usage cache is empty (e.g. polling fails after the subscription
+		// lapsed), serve the most recent persisted usage snapshot so the
+		// dashboard can still show the weekly utilization and its reset date.
+		// The snapshot row carries only provider-agnostic percentages and
+		// resets, so nothing below needs to know which provider it came from.
+		//
+		// Codex is deliberately NOT here: it has its own persisted fallback via
+		// the `codex_usage_json` column, and serving it from both would put two
+		// recoveries on one reading.
 		const staleCandidateIds = accounts
-			.filter(
-				(a) =>
-					(a.provider || "anthropic") === "anthropic" &&
-					!liveUsageByAccount.get(a.id),
-			)
+			.filter((a) => {
+				const provider = a.provider || "anthropic";
+				return (
+					(provider === "anthropic" || provider === "zai") &&
+					!liveUsageByAccount.get(a.id)
+				);
+			})
 			.map((a) => a.id);
 		const latestSnapshotByAccount = new Map(
 			(staleCandidateIds.length
@@ -827,12 +836,14 @@ export async function listAccountResponses(
 					persistedCodexCredits = resolved.persistedCredits;
 				}
 
-				// Account-wide exhaustion (anthropic/codex only): the weeklyAll window,
-				// the flat seven_day_oauth_apps (Claude Code weekly quota) OR the
-				// rolling 5-hour session at/above 100% with a future reset, reported
-				// with WHICH class bound. Shared with /health via
-				// `accountWideExhaustion`, keeping the display consistent with the
-				// account-wide representative used for the cooldown-clear guard.
+				// Account-wide exhaustion: any window that sidelines the whole account
+				// — for Anthropic/Codex the weeklyAll window, the flat
+				// seven_day_oauth_apps (Claude Code weekly quota) or the rolling
+				// 5-hour session; for Zai its own two windows — at/above 100% with a
+				// future reset, reported with WHICH class bound. Shared with /health
+				// and the public snapshot via `accountWideExhaustionFor`, keeping the
+				// display consistent with the account-wide representative used for
+				// the cooldown-clear guard.
 				// Surfaced in rateLimitStatus so an exhausted-but-not-yet-cooled
 				// account stops reading "OK", and so a session-exhausted account
 				// reports the CAUSE rather than the cooldown MECHANISM.
@@ -841,21 +852,20 @@ export async function listAccountResponses(
 				// TWO VIEWS (see the note above `liveUsageByAccount`): the weekly class
 				// is read from the 30-minute display horizon, the fast-moving session
 				// class from the 10-minute routing-fresh view.
-				let accountWideExhausted: {
+				const exhaustion = accountWideExhaustionFor(
+					account.provider ?? "anthropic",
+					usageData as FullUsageData | null,
+					now,
+					(routingFreshUsageByAccount.get(account.id) ??
+						null) as FullUsageData | null,
+				);
+				const accountWideExhausted: {
 					resetMs: number | null;
 					binding: UsageExhaustionBinding;
-				} | null = null;
-				if (account.provider === "anthropic" || account.provider === "codex") {
-					const { exhausted, resetMs, binding } = accountWideExhaustion(
-						usageData as AnthropicUsageData | null,
-						now,
-						(routingFreshUsageByAccount.get(account.id) ??
-							null) as AnthropicUsageData | null,
-					);
-					if (exhausted && binding !== null) {
-						accountWideExhausted = { resetMs, binding };
-					}
-				}
+				} | null =
+					exhaustion.exhausted && exhaustion.binding !== null
+						? { resetMs: exhaustion.resetMs, binding: exhaustion.binding }
+						: null;
 
 				const rateLimitPresentation = resolveRateLimitPresentation(
 					{
@@ -1112,13 +1122,10 @@ export async function listAccountResponses(
 
 				// Revision anchors for the reading this response actually serves,
 				// keyed to ITS window resets — an anchor from another window instance
-				// must not ship with a reading it cannot re-anchor. Only the windowed
-				// providers ever have registry state.
+				// must not ship with a reading it cannot re-anchor. The registry is
+				// fed from the sampler, so only recorded providers have state in it.
 				let burnAnchors: AccountResponse["burnAnchors"] = null;
-				if (
-					(provider === "anthropic" || provider === "codex") &&
-					usageData != null
-				) {
+				if (USAGE_HISTORY_PROVIDERS.has(provider) && usageData != null) {
 					const fiveHourAnchor = getUsageRevisionAnchor(
 						account.id,
 						"five_hour",

@@ -152,6 +152,7 @@ export {
 } from "./interval-manager";
 export * from "./lifecycle";
 export {
+	canonicalWindowKind,
 	usageObservedAtMs,
 	WEEKLY_RED_MIN_WINDOW_AGE_MS,
 	weeklyLifetimeConfidence,
@@ -338,6 +339,7 @@ export {
 	isZaiShape,
 	normalizeResetMs,
 	SEVEN_DAY_ELIGIBLE_PROVIDERS,
+	USAGE_HISTORY_PROVIDERS,
 } from "./usage-window-extract";
 export { levenshteinDistance } from "./utils";
 export {
@@ -359,11 +361,14 @@ export {
 } from "./version";
 export {
 	type AccountWideExhaustionBinding,
+	type AccountWideExhaustionVerdict,
 	type AccountWideWindow,
 	accountWideExhaustion,
+	accountWideExhaustionFor,
 	flatOauthAppsWindow,
 	type WeeklyWindow,
 	weeklyExhaustion,
+	zaiAccountWideExhaustion,
 } from "./weekly-exhaustion";
 export {
 	computeWeeklyWorkloads,

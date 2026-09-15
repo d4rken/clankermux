@@ -35,6 +35,7 @@ import type {
 	Account,
 	AnthropicUsageData,
 	LoadBalancingStrategy,
+	ZaiUsageData,
 } from "@clankermux/types";
 import { toPublicAccountsDto } from "../../handlers/public/dto";
 import {
@@ -201,6 +202,27 @@ function anthropicUsage(
 	};
 }
 
+/** A Z.AI reading, in the shape the usage cache holds one. */
+function zaiUsage(fiveHourPct: number, weeklyPct: number): ZaiUsageData {
+	return {
+		time_limit: null,
+		tokens_limit: {
+			used: fiveHourPct,
+			remaining: 100 - fiveHourPct,
+			percentage: fiveHourPct,
+			resetAt: NOW + 3_600_000,
+			type: "tokens_limit",
+		},
+		tokens_limit_weekly: {
+			used: weeklyPct,
+			remaining: 100 - weeklyPct,
+			percentage: weeklyPct,
+			resetAt: NOW + 5 * 86_400_000,
+			type: "tokens_limit_weekly",
+		},
+	};
+}
+
 beforeEach(() => {
 	db = new Database(":memory:");
 	ensureSchema(db);
@@ -356,6 +378,36 @@ describe("windows replace three representations of one observation", () => {
 		});
 	});
 
+	it("reads a Z.AI payload into the SAME vocabulary", async () => {
+		insertAccount({ provider: "zai" });
+		usageCache.set("acct-1", zaiUsage(10, 40));
+		const snapshot = await read();
+		expect(windowOf(snapshot, "five_hour")).toMatchObject({
+			utilizationPct: 10,
+			resetsAtMs: NOW + 3_600_000,
+		});
+		expect(windowOf(snapshot, "seven_day")).toMatchObject({
+			utilizationPct: 40,
+			resetsAtMs: NOW + 5 * 86_400_000,
+		});
+	});
+
+	it("reports a spent Z.AI account and the window it spent in ONE payload", async () => {
+		// The verdict and the windows are two readings of the same reading. A
+		// response that calls the account exhausted while its weekly window
+		// carries no value contradicts itself, and a consumer cannot tell which
+		// half to believe.
+		insertAccount({ provider: "zai" });
+		usageCache.set("acct-1", zaiUsage(10, 100));
+		const snapshot = await read();
+		expect(snapshot.accounts[0]?.cause).toBe("usage_exhausted");
+		expect(snapshot.accounts[0]?.availableAtMs).toBe(NOW + 5 * 86_400_000);
+		expect(windowOf(snapshot, "seven_day")).toMatchObject({
+			utilizationPct: 100,
+			resetsAtMs: NOW + 5 * 86_400_000,
+		});
+	});
+
 	it("emits a window the provider HAS but we could not read, with a null value", async () => {
 		// An ABSENT window means "this provider has no such window". A present
 		// one with a null utilization means "we could not read it". Those must
@@ -467,6 +519,32 @@ describe("availability and credential are orthogonal axes", () => {
 	it("reports an account-wide spent window as usage_exhausted", async () => {
 		insertAccount();
 		usageCache.set("acct-1", anthropicUsage(10, 100));
+		expect((await read()).accounts[0]?.cause).toBe("usage_exhausted");
+	});
+
+	it("reports a spent Z.AI window as usage_exhausted too", async () => {
+		// `isMetered` is true for zai, so this account always reached the verdict;
+		// what it reached was the Anthropic normalizer, which reads nothing in a
+		// Z.AI payload and silently answered "not exhausted". The management
+		// accounts endpoint and this response describe the same account.
+		insertAccount({ provider: "zai" });
+		usageCache.set("acct-1", {
+			time_limit: null,
+			tokens_limit: {
+				used: 10,
+				remaining: 90,
+				percentage: 10,
+				resetAt: NOW + 3_600_000,
+				type: "tokens_limit",
+			},
+			tokens_limit_weekly: {
+				used: 100,
+				remaining: 0,
+				percentage: 100,
+				resetAt: NOW + 5 * 86_400_000,
+				type: "tokens_limit_weekly",
+			},
+		} as never);
 		expect((await read()).accounts[0]?.cause).toBe("usage_exhausted");
 	});
 

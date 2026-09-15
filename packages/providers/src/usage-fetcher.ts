@@ -37,10 +37,11 @@ import {
 } from "./providers/devin/client";
 import { isGenuineWindowRoll } from "./window-reset";
 import {
-	fetchZaiUsageData,
+	fetchZaiUsage,
 	getRepresentativeZaiTokenWindow,
 	getRepresentativeZaiUtilization,
 	type ZaiUsageData,
+	type ZaiUsageWindow,
 } from "./zai-usage-fetcher";
 
 const log = new Logger("UsageFetcher");
@@ -840,6 +841,80 @@ function devinCapacity(
 }
 
 /**
+ * Zai's capacity signal, built on the SESSION/WEEKLY split the Anthropic branch
+ * uses rather than on `devinCapacity`'s calendar shape. Devin hardcodes
+ * `sessionHeadroom: 100` and `sessionResetMs: null` because its windows are
+ * daily/weekly; copied here, a Zai account with a spent five-hour window would
+ * get `recoveryDeadline = Infinity` in the FEFO comparator and sort behind
+ * every other near-limit account despite recovering within five hours.
+ *
+ * Model quotas only — `time_limit` caps the web tools, not inference, exactly
+ * as `getRepresentativeZaiTokenWindow` reads it.
+ */
+function zaiCapacity(usage: ZaiUsageData, now: number): CapacitySignal | null {
+	const session = readZaiWindow(usage.tokens_limit);
+	const weekly = readZaiWindow(usage.tokens_limit_weekly);
+	const hard = [session, weekly].filter(
+		(w): w is { util: number; resetMs: number | null } => w !== null,
+	);
+	if (hard.length === 0) return null;
+	// Content-staleness, as on the Anthropic branch: a present window already
+	// past its reset means the cached datum predates a window roll, so the
+	// answer is "unknown" rather than a number the caller would act on.
+	for (const w of hard) {
+		if (w.resetMs !== null && w.resetMs <= now) return null;
+	}
+	const resets = hard.flatMap((w) => (w.resetMs !== null ? [w.resetMs] : []));
+	return {
+		minHeadroom: Math.min(...hard.map((w) => 100 - w.util)),
+		sessionHeadroom: session ? 100 - session.util : 100,
+		soonestResetMs: resets.length ? Math.min(...resets) : null,
+		bindingUtilization: Math.max(...hard.map((w) => w.util)),
+		weeklyResetMs: weekly?.resetMs ?? null,
+		// One weekly window, so it is the binding one by construction; an unknown
+		// reset on it leaves the deadline ambiguous and the gates fail open.
+		bindingWeeklyResetMs: weekly?.resetMs ?? null,
+		weeklyHeadroom: weekly ? 100 - weekly.util : 100,
+		sessionResetMs: session?.resetMs ?? null,
+		// Zai has no overage axis: nothing here is resetless.
+		extraUsageUtilization: null,
+	};
+}
+
+/**
+ * Every Zai MODEL window this reading reports with a reset, as the listener's
+ * staleness test sees them. {@link ObservedWindow} carries no window name — the
+ * consumer matches by reset-timestamp proximity plus utilization — so Zai's own
+ * window names never enter the payload and cannot mismatch.
+ *
+ * `time_limit` is left out for the same reason it is left out of the
+ * representative utilization: it caps the web tools, and no account-wide
+ * cooldown is ever written from it.
+ */
+function collectZaiObservedWindows(usage: ZaiUsageData): ObservedWindow[] {
+	const out: ObservedWindow[] = [];
+	for (const window of [usage.tokens_limit, usage.tokens_limit_weekly]) {
+		const read = readZaiWindow(window);
+		if (read?.resetMs != null) {
+			out.push({ resetMs: read.resetMs, utilization: read.util });
+		}
+	}
+	return out;
+}
+
+/** One Zai window as {util, resetMs}, or null when absent / non-numeric. */
+function readZaiWindow(
+	window: ZaiUsageWindow | null | undefined,
+): { util: number; resetMs: number | null } | null {
+	if (!window || !Number.isFinite(window.percentage)) return null;
+	const resetMs = window.resetAt;
+	return {
+		util: window.percentage,
+		resetMs: resetMs !== null && Number.isFinite(resetMs) ? resetMs : null,
+	};
+}
+
+/**
  * Reduce a flat `UsageWindow` to {util, resetMs}, or null when absent / its
  * utilization is non-numeric. Used for the flat OAuth-apps weekly window, which
  * the normalizer's account-wide windows do not capture.
@@ -862,6 +937,7 @@ export function getAccountCapacitySignal(
 ): CapacitySignal | null {
 	if (!data) return null;
 	if (provider === "devin") return devinCapacity(data as DevinUsageData, now);
+	if (provider === "zai") return zaiCapacity(data as ZaiUsageData, now);
 	// Only Anthropic and Codex share the windowed UsageData shape. Others map later.
 	if (provider !== "anthropic" && provider !== "codex") return null;
 	const d = data as UsageData;
@@ -1934,10 +2010,21 @@ class UsageCache {
 				this.writeFetchedEntry(accountId, data);
 				return { success: true, retryAfterMs: null };
 			} else if (provider === "zai") {
-				// Fetch Zai usage data
-				data = await fetchZaiUsageData(token);
+				// Fetch Zai usage data. `fetchStartedAt` is the causal boundary the
+				// capacity-restored listener compares a cooldown's write instant
+				// against, so it is captured BEFORE the request goes out.
+				const fetchStartedAt = Date.now();
+				const outcome = await fetchZaiUsage(token);
 				if (!this.isLiveFetchGeneration(accountId, generation, tokenProvider))
 					return superseded;
+				if (outcome.status === "unrecognized") {
+					// The endpoint answered; we could not read its quota rows. Nothing to
+					// cache, but nothing failed — a failure here would back the poller
+					// off toward MAX_BACKOFF_MS and space out the very warning that
+					// names the unreadable type.
+					return { success: true, retryAfterMs: null };
+				}
+				data = outcome.status === "ok" ? outcome.data : null;
 				if (data) {
 					// Import Zai helper functions
 					const {
@@ -1956,6 +2043,26 @@ class UsageCache {
 					const utilization = getRepresentativeZaiUtilization(
 						data as ZaiUsageData,
 					);
+					// Report capacity-restored evidence on EVERY successful poll that
+					// sees account-wide headroom, exactly as the Anthropic arm does:
+					// polling is the ONLY channel that observes a locked account
+					// recovering, so without this a Zai cooldown is never released
+					// early. The poller REPORTS; the listener decides.
+					if (shouldReportCapacityRestored(utilization)) {
+						const capacityCallback =
+							this.capacityRestoredCallbacks.get(accountId);
+						if (capacityCallback)
+							capacityCallback({
+								accountId,
+								utilization,
+								// Zai has no overage axis.
+								extraUsageUtilization: null,
+								fetchStartedAt,
+								observedWindows: collectZaiObservedWindows(
+									data as ZaiUsageData,
+								),
+							});
+					}
 					const window = getRepresentativeZaiWindow(data as ZaiUsageData);
 					log.debug(
 						`Successfully fetched Zai usage data for account ${accountId}: ${utilization}% (${window} window)`,

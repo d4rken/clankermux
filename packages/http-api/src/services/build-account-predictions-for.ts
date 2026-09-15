@@ -1,10 +1,13 @@
+import {
+	type ExtractedValue,
+	extractFiveHour,
+	extractSevenDay,
+	USAGE_HISTORY_PROVIDERS,
+} from "@clankermux/core";
 import type { DatabaseOperations } from "@clankermux/database";
 import { Logger } from "@clankermux/logger";
 import type { AnyUsageData } from "@clankermux/providers";
-import type {
-	AccountUsagePrediction,
-	AnthropicUsageData,
-} from "@clankermux/types";
+import type { AccountUsagePrediction, FullUsageData } from "@clankermux/types";
 import {
 	type AccountPredictionInput,
 	buildAccountUsagePredictions,
@@ -23,10 +26,15 @@ const log = new Logger("AccountPredictions");
  */
 const PREDICTION_LOOKBACK_MS = 24 * 60 * 60 * 1000;
 
-function isoToMs(s: string | null | undefined): number | null {
-	if (s == null) return null;
-	const ms = Date.parse(s);
-	return Number.isFinite(ms) ? ms : null;
+/**
+ * Whether an extracted window carries anything to predict from. A recognised
+ * payload that names no window still extracts to a value object with null
+ * fields, so presence has to be decided on the fields.
+ */
+function hasWindowReading(extracted: ExtractedValue | null): boolean {
+	return (
+		extracted != null && (extracted.pct != null || extracted.resetMs != null)
+	);
 }
 
 /**
@@ -59,25 +67,28 @@ export async function buildPredictionsForAccounts(
 	const inputs: AccountPredictionInput[] = [];
 	for (const account of accounts) {
 		const provider = account.provider || "anthropic";
-		// Only Anthropic-style providers expose the 5h/7d windows the prediction
-		// model consumes.
-		if (provider !== "anthropic" && provider !== "codex") continue;
+		// The regression itself is provider-agnostic; what it needs is a recorded
+		// snapshot series to fit, which is exactly what this set names.
+		if (!USAGE_HISTORY_PROVIDERS.has(provider)) continue;
 		const live = routingFreshUsageByAccount.get(account.id);
 		if (!live || typeof live !== "object") continue;
-		const fiveHour = (live as AnthropicUsageData).five_hour;
-		const sevenDay = (live as AnthropicUsageData).seven_day;
-		// Skip accounts with neither window (e.g. non-Anthropic-shaped cache
-		// data) — they fall through to no prediction. Only the 5-hour reading is
-		// carried forward (the weekly window has no regression any more), but an
-		// account showing just a weekly reading still enters: its 5-hour history
-		// may be in the snapshots even when the live payload has no 5h block.
-		if (!fiveHour && !sevenDay) continue;
+		// Read the windows through the shared extractors: each provider names them
+		// differently, and reading the Anthropic keys directly dropped every
+		// account whose payload has neither, one line after the filter admitted it.
+		const fiveHour = extractFiveHour(live as FullUsageData);
+		const sevenDay = extractSevenDay(live as FullUsageData);
+		// Skip accounts with neither window — they fall through to no prediction.
+		// Only the 5-hour reading is carried forward (the weekly window has no
+		// regression any more), but an account showing just a weekly reading still
+		// enters: its 5-hour history may be in the snapshots even when the live
+		// payload has no 5h block.
+		if (!hasWindowReading(fiveHour) && !hasWindowReading(sevenDay)) continue;
 		inputs.push({
 			accountId: account.id,
 			fiveHour: fiveHour
 				? {
-						utilization: fiveHour.utilization ?? null,
-						resetsAtMs: isoToMs(fiveHour.resets_at),
+						utilization: fiveHour.pct,
+						resetsAtMs: fiveHour.resetMs,
 					}
 				: null,
 		});

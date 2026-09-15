@@ -1,6 +1,10 @@
 import { describe, expect, it } from "bun:test";
-import type { AnthropicUsageData } from "@clankermux/types";
-import { flatOauthAppsWindow, weeklyExhaustion } from "../weekly-exhaustion";
+import type { AnthropicUsageData, ZaiUsageData } from "@clankermux/types";
+import {
+	flatOauthAppsWindow,
+	weeklyExhaustion,
+	zaiAccountWideExhaustion,
+} from "../weekly-exhaustion";
 
 const NOW = 1_750_000_000_000;
 const MIN = 60_000;
@@ -178,5 +182,105 @@ describe("flatOauthAppsWindow", () => {
 				seven_day_oauth_apps: { utilization: 73, resets_at: "not-a-date" },
 			} as AnthropicUsageData),
 		).toEqual({ utilization: 73, resetMs: null });
+	});
+});
+
+/**
+ * The Zai sibling answers the same question about the same two classes. Without
+ * it a Zai account sitting at 100% keeps reporting `rateLimitStatus: "OK"`
+ * until a real 429 writes a cooldown, and `/health` never counts it.
+ */
+describe("zaiAccountWideExhaustion", () => {
+	const DAY = 24 * 60 * MIN;
+	function zaiUsage(
+		fiveHour: { pct: number; resetMs: number | null } | null,
+		weekly: { pct: number; resetMs: number | null } | null,
+	): ZaiUsageData {
+		const window = (
+			w: { pct: number; resetMs: number | null },
+			type: string,
+		) => ({
+			used: w.pct,
+			remaining: 100 - w.pct,
+			percentage: w.pct,
+			resetAt: w.resetMs,
+			type,
+		});
+		return {
+			time_limit: null,
+			tokens_limit: fiveHour ? window(fiveHour, "tokens_limit") : null,
+			tokens_limit_weekly: weekly
+				? window(weekly, "tokens_limit_weekly")
+				: null,
+		};
+	}
+
+	it("binds weekly when the weekly window is spent with a future reset", () => {
+		expect(
+			zaiAccountWideExhaustion(
+				zaiUsage(
+					{ pct: 100, resetMs: NOW + 30 * MIN },
+					{ pct: 100, resetMs: NOW + 3 * DAY },
+				),
+				NOW,
+			),
+		).toEqual({ exhausted: true, binding: "weekly", resetMs: NOW + 3 * DAY });
+	});
+
+	it("binds session when only the five-hour window is spent", () => {
+		expect(
+			zaiAccountWideExhaustion(
+				zaiUsage(
+					{ pct: 100, resetMs: NOW + 30 * MIN },
+					{ pct: 20, resetMs: NOW + 3 * DAY },
+				),
+				NOW,
+			),
+		).toEqual({ exhausted: true, binding: "session", resetMs: NOW + 30 * MIN });
+	});
+
+	it("reports no exhaustion below 100%", () => {
+		expect(
+			zaiAccountWideExhaustion(
+				zaiUsage(
+					{ pct: 99, resetMs: NOW + 30 * MIN },
+					{ pct: 99, resetMs: NOW + 3 * DAY },
+				),
+				NOW,
+			),
+		).toEqual({ exhausted: false, binding: null, resetMs: null });
+	});
+
+	it("treats an elapsed or absent reset as stale rather than as exhaustion", () => {
+		// Ambiguous evidence must never sideline an account: a spent window whose
+		// reset has already passed is a reading that predates a window roll.
+		for (const resetMs of [NOW - MIN, null]) {
+			expect(
+				zaiAccountWideExhaustion(
+					zaiUsage({ pct: 100, resetMs }, { pct: 100, resetMs }),
+					NOW,
+				),
+			).toEqual({ exhausted: false, binding: null, resetMs: null });
+		}
+	});
+
+	it("reads the fast-moving session window from the narrower view when given one", () => {
+		// Same split `/api/accounts` uses: the weekly classes render from a
+		// display horizon too generous to assert a five-hour window with.
+		expect(
+			zaiAccountWideExhaustion(
+				zaiUsage({ pct: 100, resetMs: NOW + 30 * MIN }, null),
+				NOW,
+				zaiUsage({ pct: 10, resetMs: NOW + 30 * MIN }, null),
+			),
+		).toEqual({ exhausted: false, binding: null, resetMs: null });
+	});
+
+	it("reports nothing for an absent reading", () => {
+		expect(zaiAccountWideExhaustion(null, NOW)).toEqual({
+			exhausted: false,
+			binding: null,
+			resetMs: null,
+		});
 	});
 });

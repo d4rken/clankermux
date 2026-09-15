@@ -44,6 +44,7 @@ const starters = (): UsagePollingStarters => ({
 		return true;
 	},
 	resetAccountSession: (id) => sessionResets.push(id),
+	onCapacityRestored: () => {},
 	getApiKey: async (id) => keys[id] ?? null,
 	intervalMs: () => 60_000,
 });

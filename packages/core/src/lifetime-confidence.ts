@@ -2,6 +2,26 @@ import type { AccountBurnAnchors, UsageBurnAnchor } from "@clankermux/types";
 import type { LifetimeConfidence } from "./capacity-runway";
 
 /**
+ * The account-wide window kind a provider's own window name denotes.
+ *
+ * Zai's render loop emits `tokens_limit` / `tokens_limit_weekly` for the same
+ * rolling 5-hour and rolling weekly windows Anthropic reports as `five_hour` /
+ * `seven_day`. Those names are load-bearing where they are: the proxy's usage
+ * throttle maps them to its 5h/weekly toggles and `throttle-utils` carries
+ * their durations under them. So they are translated here rather than renamed,
+ * and every policy below keys on the canonical kind — the projection a window
+ * gets must not depend on which provider's vocabulary named it.
+ *
+ * Any other name (including `null`) is returned unchanged: a provider whose
+ * window has no account-wide counterpart must not be mapped onto one.
+ */
+export function canonicalWindowKind(windowKind: string | null): string | null {
+	if (windowKind === "tokens_limit") return "five_hour";
+	if (windowKind === "tokens_limit_weekly") return "seven_day";
+	return windowKind;
+}
+
+/**
  * Which windows the dashboard trusts the lifetime average on.
  *
  * `estimateWindowExhaustion` takes this as an input and never derives it, so
@@ -25,7 +45,7 @@ import type { LifetimeConfidence } from "./capacity-runway";
 export function weeklyLifetimeConfidence(
 	windowKind: string | null,
 ): LifetimeConfidence | undefined {
-	return windowKind === "seven_day" ? "full" : undefined;
+	return canonicalWindowKind(windowKind) === "seven_day" ? "full" : undefined;
 }
 
 /**
@@ -71,8 +91,9 @@ export function windowBurnAnchor(
 	windowKind: string | null,
 ): UsageBurnAnchor | null {
 	if (!burnAnchors || !windowKind) return null;
-	if (windowKind === "five_hour") return burnAnchors.fiveHour ?? null;
-	if (windowKind === "seven_day") return burnAnchors.sevenDay ?? null;
+	const kind = canonicalWindowKind(windowKind);
+	if (kind === "five_hour") return burnAnchors.fiveHour ?? null;
+	if (kind === "seven_day") return burnAnchors.sevenDay ?? null;
 	return null;
 }
 
@@ -129,7 +150,7 @@ export function weeklyRedEligible(
 	windowKind: string | null,
 	windowAgeMs: number | null | undefined,
 ): boolean {
-	if (windowKind !== "seven_day") return true;
+	if (canonicalWindowKind(windowKind) !== "seven_day") return true;
 	if (windowAgeMs == null || !Number.isFinite(windowAgeMs)) return false;
 	return windowAgeMs >= WEEKLY_RED_MIN_WINDOW_AGE_MS;
 }

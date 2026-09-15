@@ -1,8 +1,11 @@
 import type {
 	AnthropicUsageData,
+	FullUsageData,
 	UsageExhaustionBinding,
+	ZaiUsageData,
 } from "@clankermux/types";
 import { normalizeAnthropicUsage } from "./usage-normalizer";
+import { extractFiveHour, extractSevenDay } from "./usage-window-extract";
 
 /** An account-level weekly window reduced to utilization + parsed reset ms. */
 export interface WeeklyWindow {
@@ -143,4 +146,95 @@ export function accountWideExhaustion(
 		return { exhausted: true, binding: "session", resetMs: session.resetMs };
 	}
 	return { exhausted: false, binding: null, resetMs: null };
+}
+
+/** The verdict shape every account-wide exhaustion helper here returns. */
+export interface AccountWideExhaustionVerdict {
+	exhausted: boolean;
+	binding: AccountWideExhaustionBinding | null;
+	resetMs: number | null;
+}
+
+const NOT_EXHAUSTED: AccountWideExhaustionVerdict = {
+	exhausted: false,
+	binding: null,
+	resetMs: null,
+};
+
+/** A window counts as spent only at >=100% with a KNOWN FUTURE reset. */
+function spentWindow(
+	window: { pct: number | null; resetMs: number | null } | null,
+	now: number,
+): number | null {
+	if (!window || window.pct === null || window.pct < 100) return null;
+	if (window.resetMs === null || window.resetMs <= now) return null;
+	return window.resetMs;
+}
+
+/**
+ * {@link accountWideExhaustion} for a Zai reading, which reports the same two
+ * account-wide classes under its own window names and has neither the
+ * `seven_day_oauth_apps` window nor any family-scoped one.
+ *
+ * A sibling rather than a branch inside `accountWideExhaustion`: that function
+ * is typed to the Anthropic payload and delegates the weekly class to
+ * `weeklyExhaustion`, and neither reads anything a Zai payload carries.
+ * Precedence and the spent-window rule are identical — weekly outranks session,
+ * and a past/absent reset is stale rather than exhausted, because we never
+ * sideline an account on ambiguous evidence.
+ */
+export function zaiAccountWideExhaustion(
+	usage: ZaiUsageData | null | undefined,
+	now: number,
+	/**
+	 * Optional NARROWER/FRESHER view consulted for the five-hour window only,
+	 * mirroring {@link accountWideExhaustion}'s parameter of the same name.
+	 */
+	sessionUsage: ZaiUsageData | null | undefined = usage,
+): AccountWideExhaustionVerdict {
+	if (!usage) return NOT_EXHAUSTED;
+	const weeklyReset = spentWindow(extractSevenDay(usage), now);
+	if (weeklyReset !== null) {
+		return { exhausted: true, binding: "weekly", resetMs: weeklyReset };
+	}
+	const sessionReset = sessionUsage
+		? spentWindow(extractFiveHour(sessionUsage), now)
+		: null;
+	if (sessionReset !== null) {
+		return { exhausted: true, binding: "session", resetMs: sessionReset };
+	}
+	return NOT_EXHAUSTED;
+}
+
+/**
+ * The account-wide exhaustion verdict for ONE account, dispatched on its
+ * provider, so the four surfaces that report it — `/api/accounts`, `/health`,
+ * the public snapshot and the proxy's 429 classification — cannot disagree
+ * about which helper a provider's payload belongs to.
+ *
+ * A provider with no helper here is reported as not exhausted: it either has no
+ * account-wide window at all, or its payload has not been verified against this
+ * verdict. Both are "no evidence", which is not evidence of exhaustion.
+ */
+export function accountWideExhaustionFor(
+	provider: string,
+	usage: FullUsageData | null | undefined,
+	now: number,
+	sessionUsage: FullUsageData | null | undefined = usage,
+): AccountWideExhaustionVerdict {
+	if (provider === "anthropic" || provider === "codex") {
+		return accountWideExhaustion(
+			usage as AnthropicUsageData | null | undefined,
+			now,
+			sessionUsage as AnthropicUsageData | null | undefined,
+		);
+	}
+	if (provider === "zai") {
+		return zaiAccountWideExhaustion(
+			usage as ZaiUsageData | null | undefined,
+			now,
+			sessionUsage as ZaiUsageData | null | undefined,
+		);
+	}
+	return NOT_EXHAUSTED;
 }

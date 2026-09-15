@@ -6,10 +6,6 @@ const log = new Logger("ZaiUsageFetcher");
 export type { ZaiUsageData, ZaiUsageWindow } from "@clankermux/types";
 
 /**
- * Fetch usage data from Zai's monitoring usage endpoint
- * This is non-blocking - failures return null and won't affect provider operation
- */
-/**
  * Hard bound on the usage fetch, mirroring the Anthropic fetcher's guard.
  *
  * Without a signal the request could hang indefinitely. `usage-fetcher.ts`
@@ -20,9 +16,86 @@ export type { ZaiUsageData, ZaiUsageWindow } from "@clankermux/types";
  */
 const USAGE_FETCH_TIMEOUT_MS = 5000;
 
-export async function fetchZaiUsageData(
+/**
+ * Quota rows that cap MODEL usage. Both spellings are accepted: the `lite` tier
+ * serves `CREDIT_LIMIT`, other tiers may still serve `TOKENS_LIMIT`, and
+ * nothing establishes the rename is complete.
+ */
+const TOKEN_QUOTA_TYPES: ReadonlySet<string> = new Set([
+	"TOKENS_LIMIT",
+	"CREDIT_LIMIT",
+]);
+
+/** Quota rows that cap the web tools rather than inference. */
+const TIME_QUOTA_TYPES: ReadonlySet<string> = new Set([
+	"TIME_LIMIT",
+	"MCP_LIMIT",
+]);
+
+/** One entry of the `data.limits[]` array, as the endpoint serves it. */
+interface ZaiLimitEntry {
+	type?: string | null;
+	unit?: number | null;
+	number?: number | null;
+	usage?: number | null;
+	currentValue?: number | null;
+	remaining?: number | null;
+	percentage?: number | null;
+	nextResetTime?: number | null;
+}
+
+/**
+ * Outcome of one usage read.
+ *
+ * `unrecognized` is a THIRD state, distinct from data and failure: the endpoint
+ * answered and every quota row it carried used a type this parser does not
+ * know. There is nothing to cache, but nothing failed either — folding it into
+ * a failure would back the poller off toward its 30-minute ceiling, spacing out
+ * the warning that names the unknown type and aging the cache past its TTL.
+ */
+export type ZaiUsageFetchOutcome =
+	| { status: "ok"; data: ZaiUsageData }
+	| { status: "unrecognized" }
+	| { status: "failed" };
+
+const FAILED = { status: "failed" } as const;
+
+/**
+ * One quota row as a window, shared by every recognised type so the renamed and
+ * legacy payloads cannot diverge.
+ *
+ * `used` is `usage - remaining`, the denominator minus what is left. The live
+ * reading `{usage: 2000, currentValue: 0, remaining: 1999}` has one credit spent
+ * with `currentValue` still reading 0, so `currentValue` is only the fallback
+ * for a payload carrying no totals.
+ */
+function windowFrom(limit: ZaiLimitEntry, type: string): ZaiUsageWindow {
+	const total = limit.usage;
+	const remaining = limit.remaining;
+	const used =
+		typeof total === "number" &&
+		Number.isFinite(total) &&
+		typeof remaining === "number" &&
+		Number.isFinite(remaining)
+			? total - remaining
+			: (limit.currentValue ?? 0);
+	return {
+		used,
+		remaining: limit.remaining ?? 0,
+		percentage: limit.percentage ?? 0,
+		resetAt: limit.nextResetTime ?? null,
+		type,
+	};
+}
+
+/**
+ * Read the account's quota windows from Zai's monitoring endpoint. Never
+ * throws: every failure mode degrades to an outcome so provider operation is
+ * unaffected.
+ */
+export async function fetchZaiUsage(
 	apiKey: string,
-): Promise<ZaiUsageData | null> {
+): Promise<ZaiUsageFetchOutcome> {
 	const controller = new AbortController();
 	const timeoutId = setTimeout(
 		() => controller.abort(),
@@ -69,7 +142,7 @@ export async function fetchZaiUsageData(
 					},
 				);
 			}
-			return null;
+			return FAILED;
 		}
 
 		const json = await response.json();
@@ -77,31 +150,31 @@ export async function fetchZaiUsageData(
 		// Validate response structure
 		if (!json.success || !json.data || !Array.isArray(json.data.limits)) {
 			log.warn("Invalid Zai usage response structure");
-			return null;
+			return FAILED;
 		}
 
-		const limits = json.data.limits;
+		const limits = json.data.limits as ZaiLimitEntry[];
 		const result: ZaiUsageData = {
 			time_limit: null,
 			tokens_limit: null,
 			tokens_limit_weekly: null,
 		};
 
-		const tokenCount = limits.filter(
-			(limit: { type?: string }) => limit.type === "TOKENS_LIMIT",
+		const tokenCount = limits.filter((limit) =>
+			TOKEN_QUOTA_TYPES.has(limit.type ?? ""),
 		).length;
+
+		let recognized = 0;
+		const unknownTypes = new Set<string>();
 
 		// Parse each limit type
 		for (const limit of limits) {
-			if (limit.type === "TIME_LIMIT") {
-				result.time_limit = {
-					used: limit.currentValue ?? 0,
-					remaining: limit.remaining ?? 0,
-					percentage: limit.percentage ?? 0,
-					resetAt: limit.nextResetTime ?? null,
-					type: "time_limit",
-				};
-			} else if (limit.type === "TOKENS_LIMIT") {
+			const type = limit.type ?? "";
+			if (TIME_QUOTA_TYPES.has(type)) {
+				recognized++;
+				result.time_limit = windowFrom(limit, "time_limit");
+			} else if (TOKEN_QUOTA_TYPES.has(type)) {
+				recognized++;
 				// The upstream fixture identifies hours as unit 3 and weeks as unit 6.
 				// Reset order is NOT duration order: the week can reset sooner.
 				const key =
@@ -115,24 +188,32 @@ export async function fetchZaiUsageData(
 					// Dropping an unknown quota could hide an exhausted window.
 					// Report unavailable rather than publishing partial capacity.
 					log.warn("Unrecognized or duplicate Zai token quota duration");
-					return null;
+					return FAILED;
 				}
-				result[key] = {
-					used: limit.currentValue ?? 0,
-					remaining: limit.remaining ?? 0,
-					percentage: limit.percentage ?? 0,
-					resetAt: limit.nextResetTime ?? null,
-					type: key,
-				};
+				result[key] = windowFrom(limit, key);
+			} else {
+				unknownTypes.add(type || "(missing)");
 			}
 		}
 
-		return result;
+		// Named on every payload, not only when nothing matched: a mixed payload
+		// carrying one known and one renamed type would otherwise drop the renamed
+		// window in silence.
+		if (unknownTypes.size > 0) {
+			log.warn(
+				`Unrecognized Zai quota limit type(s): ${[...unknownTypes].join(", ")}`,
+			);
+		}
+		if (recognized === 0 && limits.length > 0) {
+			return { status: "unrecognized" };
+		}
+
+		return { status: "ok", data: result };
 	} catch (error) {
 		// An abort lands here too, so a timeout degrades to the existing
-		// failure path (null) rather than propagating.
+		// failure path rather than propagating.
 		log.warn("Error fetching Zai usage data:", error);
-		return null;
+		return FAILED;
 	} finally {
 		clearTimeout(timeoutId);
 	}
