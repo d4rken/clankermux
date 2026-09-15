@@ -40,19 +40,35 @@ function formatCodexCreditBalance(credits: number): string {
 }
 
 /**
- * "Re-auth in 5 days" — days, not `formatDuration`'s hours, because the chip
+ * "Re-auth in 5 days" — days, not `formatDuration`'s hours, because this label
  * only ever appears inside the final week and "144.0h" is a worse way to say
  * "six days". Takes the already-derived day count rather than a deadline plus
  * its own `Date.now()`, so the label cannot drift from the status flag that
- * decides whether the chip renders at all.
+ * decides which form of the chip renders.
  */
 function formatReauthDeadline(daysRemaining: number): string {
 	if (daysRemaining <= 0) return "Re-auth overdue";
 	// "within 24h", not "today": the count is a duration, so at 23:30 a deadline
-	// of 00:30 would read "today" while the date rendered beside it in the
-	// account row says tomorrow. Naming the duration keeps the two consistent.
+	// of 00:30 reads "today" while it in fact falls tomorrow. Naming the duration
+	// keeps the label true on either side of midnight.
 	if (daysRemaining === 1) return "Re-auth within 24h";
 	return `Re-auth in ${daysRemaining} days`;
+}
+
+/** "Re-auth by Mar 4, 2026" — the far-out form, where a day count is noise. */
+function formatReauthDeadlineDate(deadlineMs: number): string {
+	return `Re-auth by ${new Date(deadlineMs).toLocaleDateString(undefined, {
+		year: "numeric",
+		month: "short",
+		day: "numeric",
+	})}`;
+}
+
+/** Tooltip shared by both forms of the re-auth chip. */
+function reauthDeadlineTitle(deadlineMs: number): string {
+	return `This account's OAuth refresh token expires on ${new Date(
+		deadlineMs,
+	).toLocaleString()}. Token rotation does not extend that deadline, so the account will auto-pause mid-rotation unless it is re-authenticated first. Re-authenticate it from the Accounts tab at any time before then.`;
 }
 
 interface AccountStatusChipsProps {
@@ -555,19 +571,36 @@ export function AccountStatusChips({
 					Needs re-authentication
 				</StatusChip>
 			)}
-			{status.isReauthDueSoon &&
+			{/* One chip for the whole life of the deadline: neutral with the date
+			    while it is far out, amber once inside the warning window. The point
+			    of capturing the deadline is that it stops being a surprise, and a
+			    date that only surfaces in its final week is still a surprise for the
+			    months before it. Suppressed once the token has actually been
+			    rejected — the terminal chip above already says so, and there is no
+			    deadline left to plan around. */}
+			{!status.isNeedsReauth &&
 				status.reauthDeadlineMs !== null &&
-				status.reauthDaysRemaining !== null && (
+				(status.isReauthDueSoon && status.reauthDaysRemaining !== null ? (
 					<StatusChip
 						className="bg-warning/15 text-warning-strong"
-						title={`This account's OAuth refresh token expires on ${new Date(
-							status.reauthDeadlineMs,
-						).toLocaleString()}. Token rotation does not extend that deadline, so the account will auto-pause mid-rotation unless it is re-authenticated first. Re-authenticate it from the Accounts tab at any time before then.`}
+						title={reauthDeadlineTitle(status.reauthDeadlineMs)}
 					>
 						<CalendarClock className="h-3.5 w-3.5" />
 						{formatReauthDeadline(status.reauthDaysRemaining)}
 					</StatusChip>
-				)}
+				) : (
+					// Usage reports capacity and active problems; a deadline three
+					// weeks out is neither, so the far-out form is Accounts-only.
+					!isUsage && (
+						<StatusChip
+							className="bg-secondary text-secondary-foreground"
+							title={reauthDeadlineTitle(status.reauthDeadlineMs)}
+						>
+							<CalendarClock className="h-3.5 w-3.5" />
+							{formatReauthDeadlineDate(status.reauthDeadlineMs)}
+						</StatusChip>
+					)
+				))}
 			{status.showRateLimitChip && (
 				<RateLimitStatusChip
 					status={status.rateLimitStatus}
