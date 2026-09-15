@@ -1,4 +1,5 @@
 import {
+	type ExtractedValue,
 	extractFiveHour,
 	extractSevenDay,
 	USAGE_HISTORY_PROVIDERS,
@@ -24,6 +25,17 @@ const log = new Logger("AccountPredictions");
  * Inline named constant (no env knobs, per project rule).
  */
 const PREDICTION_LOOKBACK_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * Whether an extracted window carries anything to predict from. A recognised
+ * payload that names no window still extracts to a value object with null
+ * fields, so presence has to be decided on the fields.
+ */
+function hasWindowReading(extracted: ExtractedValue | null): boolean {
+	return (
+		extracted != null && (extracted.pct != null || extracted.resetMs != null)
+	);
+}
 
 /**
  * The WHOLE best-effort prediction operation for a set of accounts: which
@@ -70,7 +82,7 @@ export async function buildPredictionsForAccounts(
 		// regression any more), but an account showing just a weekly reading still
 		// enters: its 5-hour history may be in the snapshots even when the live
 		// payload has no 5h block.
-		if (!fiveHour && !sevenDay) continue;
+		if (!hasWindowReading(fiveHour) && !hasWindowReading(sevenDay)) continue;
 		inputs.push({
 			accountId: account.id,
 			fiveHour: fiveHour
