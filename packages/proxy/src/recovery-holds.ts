@@ -574,6 +574,15 @@ export function createRecoveryHolds(deps: RecoveryHoldsDeps): RecoveryHolds {
 					false,
 					{
 						...(options?.signal ? { signal: options.signal } : {}),
+						// A transient 5xx is reported to this sweep as an ordinary
+						// failure, NEVER forwarded — the sweep cannot declare the
+						// request exhausted from its own array index. Being last in
+						// THIS round is not being last for the request: an earlier
+						// candidate may have been skipped behind an in-flight probe
+						// whose verdict the hold is still waiting for, and the
+						// context-window hold has Codex relaxation candidates behind
+						// it. Forwarding here would end the hold and skip both.
+						forwardTransientServerError: () => false,
 						// Log-level only: inside a hold an admission refusal is the
 						// expected steady state, and the hold logs its own exit summary.
 						fromHold: true,
@@ -1193,6 +1202,14 @@ export function createRecoveryHolds(deps: RecoveryHoldsDeps): RecoveryHolds {
 					reprobe: true,
 					signal,
 					fromHold: true,
+					// No `forwardTransientServerError`: a 5xx on the held account is
+					// forwarded, as it is today. This closure is shared by BOTH
+					// `runBurstHold` callers and they disagree about what a failover
+					// would mean — the ordinary caller has a sibling loop behind it,
+					// while the zero-accounts storm-degrade path explicitly has none
+					// and would replace the real upstream error with the synthetic
+					// burst-retry give-up 429. Expressing that split needs the
+					// caller's disposition threaded in, which is not this change.
 					onOutcome: (outcome) => {
 						captured.outcome = outcome;
 					},
