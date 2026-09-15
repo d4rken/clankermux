@@ -1,5 +1,5 @@
 import {
-	accountWideExhaustion,
+	accountWideExhaustionFor,
 	getModelFamily,
 	isDebugEnabled,
 	isProtectedFamily,
@@ -32,7 +32,7 @@ import {
 import { supportsLocalTokenCounting } from "@clankermux/providers/local-token-count";
 import {
 	type Account,
-	type AnthropicUsageData,
+	type FullUsageData,
 	getChatContext,
 	getNativeResponsesMetaContext,
 	NATIVE_RESPONSES_REQUEST_HEADER,
@@ -1854,17 +1854,19 @@ export async function proxyWithAccount(
 			}
 
 			// ── Cached account-wide exhaustion: fallback when live claims are absent ─────────
-			// A 429 on an Anthropic account whose ACCOUNT-WIDE window is already
-			// spent (per FRESH usage data) is not a transient burst: the window is
+			// A 429 on an account whose ACCOUNT-WIDE window is already spent (per
+			// FRESH usage data) is not a transient burst: the window is
 			// spent right now, so holding and re-probing the account only burns
 			// latency. Record the truthful reason — `weekly_exhausted_429` when the
 			// weekly class binds, `session_exhausted_429` when only the 5h session
 			// window is spent — and fail over immediately. Both reasons are
 			// quota-derived BY CONSTRUCTION (we read the window ourselves rather
 			// than inferring the cause from headers), which is what makes them
-			// eligible for the poller's early capacity-restored release.
+			// eligible for the poller's early capacity-restored release. A Zai 429
+			// that is NOT quota-derived cannot be misclassified as one: it fails
+			// either the freshness gate or the exhaustion verdict.
 			//
-			// Weekly outranks session (see `accountWideExhaustion`), so whenever the
+			// Weekly outranks session (see `accountWideExhaustionFor`), so whenever the
 			// weekly window is spent this behaves exactly as it did when the block
 			// was weekly-only; the session-only case is the new behaviour.
 			//
@@ -1873,19 +1875,19 @@ export async function proxyWithAccount(
 			// own validated resets; a scoped summary cannot override them here.
 			//
 			// Fails open: with stale/absent usage every existing path behaves
-			// exactly as before. Anthropic only — Codex windows belong to
-			// the CodexSpendCoordinator. Trusted-probe gated because the marker
+			// exactly as before. Codex is excluded — its windows belong to the
+			// CodexSpendCoordinator. Trusted-probe gated because the marker
 			// headers are client-spoofable.
 			if (
 				rawResponse.status === 429 &&
-				account.provider === "anthropic" &&
+				(account.provider === "anthropic" || account.provider === "zai") &&
 				!liveScopedOnlyRejection &&
 				!options?.reprobe &&
 				!isTrustedProbe("any")
 			) {
 				const now = Date.now();
 				// getFreshCapacity is only the 180s FRESHNESS gate here; the
-				// exhaustion verdict itself comes from accountWideExhaustion.
+				// exhaustion verdict itself comes from accountWideExhaustionFor.
 				const usageIsFresh =
 					getFreshCapacity(
 						usageCache,
@@ -1895,8 +1897,9 @@ export async function proxyWithAccount(
 						FAMILY_WEEKLY_MAX_USAGE_AGE_MS,
 					) !== null;
 				const exhaustion = usageIsFresh
-					? accountWideExhaustion(
-							usageCache.get(account.id) as AnthropicUsageData | null,
+					? accountWideExhaustionFor(
+							account.provider,
+							usageCache.get(account.id) as FullUsageData | null,
 							now,
 						)
 					: { exhausted: false, binding: null, resetMs: null };

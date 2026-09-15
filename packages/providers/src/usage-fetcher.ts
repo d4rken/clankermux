@@ -881,6 +881,27 @@ function zaiCapacity(usage: ZaiUsageData, now: number): CapacitySignal | null {
 	};
 }
 
+/**
+ * Every Zai MODEL window this reading reports with a reset, as the listener's
+ * staleness test sees them. {@link ObservedWindow} carries no window name — the
+ * consumer matches by reset-timestamp proximity plus utilization — so Zai's own
+ * window names never enter the payload and cannot mismatch.
+ *
+ * `time_limit` is left out for the same reason it is left out of the
+ * representative utilization: it caps the web tools, and no account-wide
+ * cooldown is ever written from it.
+ */
+function collectZaiObservedWindows(usage: ZaiUsageData): ObservedWindow[] {
+	const out: ObservedWindow[] = [];
+	for (const window of [usage.tokens_limit, usage.tokens_limit_weekly]) {
+		const read = readZaiWindow(window);
+		if (read?.resetMs != null) {
+			out.push({ resetMs: read.resetMs, utilization: read.util });
+		}
+	}
+	return out;
+}
+
 /** One Zai window as {util, resetMs}, or null when absent / non-numeric. */
 function readZaiWindow(
 	window: ZaiUsageWindow | null | undefined,
@@ -1989,7 +2010,10 @@ class UsageCache {
 				this.writeFetchedEntry(accountId, data);
 				return { success: true, retryAfterMs: null };
 			} else if (provider === "zai") {
-				// Fetch Zai usage data
+				// Fetch Zai usage data. `fetchStartedAt` is the causal boundary the
+				// capacity-restored listener compares a cooldown's write instant
+				// against, so it is captured BEFORE the request goes out.
+				const fetchStartedAt = Date.now();
 				const outcome = await fetchZaiUsage(token);
 				if (!this.isLiveFetchGeneration(accountId, generation, tokenProvider))
 					return superseded;
@@ -2019,6 +2043,26 @@ class UsageCache {
 					const utilization = getRepresentativeZaiUtilization(
 						data as ZaiUsageData,
 					);
+					// Report capacity-restored evidence on EVERY successful poll that
+					// sees account-wide headroom, exactly as the Anthropic arm does:
+					// polling is the ONLY channel that observes a locked account
+					// recovering, so without this a Zai cooldown is never released
+					// early. The poller REPORTS; the listener decides.
+					if (shouldReportCapacityRestored(utilization)) {
+						const capacityCallback =
+							this.capacityRestoredCallbacks.get(accountId);
+						if (capacityCallback)
+							capacityCallback({
+								accountId,
+								utilization,
+								// Zai has no overage axis.
+								extraUsageUtilization: null,
+								fetchStartedAt,
+								observedWindows: collectZaiObservedWindows(
+									data as ZaiUsageData,
+								),
+							});
+					}
 					const window = getRepresentativeZaiWindow(data as ZaiUsageData);
 					log.debug(
 						`Successfully fetched Zai usage data for account ${accountId}: ${utilization}% (${window} window)`,
