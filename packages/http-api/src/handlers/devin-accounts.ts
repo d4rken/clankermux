@@ -106,7 +106,10 @@ export function createDevinAccountHandlers(
 					);
 				}
 			}
-			await primeUsagePollingForNewAccount(account);
+			// No priming call here: the shared add handler above already primed
+			// this account. UsageCache does not dedupe across poll generations, so
+			// a second start would issue a second metadata call and supersede the
+			// first one's result.
 		}
 		return response;
 	};

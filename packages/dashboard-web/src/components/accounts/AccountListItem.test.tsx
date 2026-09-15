@@ -201,6 +201,39 @@ it("renders Devin account identity and a metadata-only refresh action", () => {
 	);
 });
 
+describe("AccountListItem — usage refresh control", () => {
+	it("offers usage refresh for a Z.AI account", () => {
+		// The control used to be hidden for zai, so the only way to recover an
+		// unpolled account was a service restart.
+		const html = render(makeAccount({ provider: "zai" }));
+		expect(html).toContain("Refresh usage data (restarts usage polling)");
+		// An API-key account has no token to refresh; that wording is Anthropic's.
+		expect(html).not.toContain("refreshes token if expired");
+	});
+
+	it("offers usage refresh for a Kilo account", () => {
+		const html = render(makeAccount({ provider: "kilo" }));
+		expect(html).toContain("Refresh usage data (restarts usage polling)");
+	});
+
+	it("keeps the Anthropic wording about token refresh", () => {
+		const html = render(makeAccount({ provider: "anthropic" }));
+		expect(html).toContain(
+			"Refresh usage data (restarts usage polling and refreshes token if expired)",
+		);
+	});
+
+	it("does not offer usage refresh where no poller can be started", () => {
+		// Minimax has a fetcher branch but no starter, and qwen has neither; a
+		// button here could only ever report failure.
+		for (const provider of ["minimax", "qwen", "ollama"]) {
+			expect(render(makeAccount({ provider }))).not.toContain(
+				"Refresh usage data",
+			);
+		}
+	});
+});
+
 describe("AccountListItem — OpenRouter details", () => {
 	it("offers metadata refresh for API-key accounts without OAuth tokens", () => {
 		const html = render(

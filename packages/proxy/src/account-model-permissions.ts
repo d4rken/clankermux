@@ -37,6 +37,24 @@ interface DiscoveryDeps {
 	backgroundBudgetMs?: number;
 }
 
+/**
+ * Whole-attempt discovery budget for providers whose catalogue endpoint is
+ * INFERRED from protocol compatibility rather than a published contract.
+ *
+ * Z.ai speaks the Anthropic Messages protocol, so `/v1/models` on its base is a
+ * reasonable guess — but only a guess. A guess that hangs is worse than one that
+ * 404s, because an in-flight attempt is joined by every request that arrives
+ * during it. One second is long enough for a catalogue that exists and short
+ * enough that one that does not costs little.
+ */
+const ASSUMED_CATALOGUE_BUDGET_MS: Record<string, number> = { zai: 1000 };
+
+/**
+ * Providers that authenticate discovery with a stored API key and have no OAuth
+ * path, so discovery must never reach for an access token on their behalf.
+ */
+const API_KEY_ONLY_PROVIDERS: ReadonlySet<string> = new Set(["zai"]);
+
 /** Permission discovery never borrows a provider-wide or pin-wide catalogue. */
 export class AccountModelPermissionService {
 	private readonly inFlight = new Map<string, Promise<void>>();
@@ -97,11 +115,22 @@ export class AccountModelPermissionService {
 		const controller = new AbortController();
 		this.controllers.add(controller);
 		let timer: ReturnType<typeof setTimeout> | undefined;
+		// A miss is refreshed ON THE REQUEST PATH for every account in the pool
+		// (routing-service), and `refresh` joins an in-flight attempt before it
+		// consults the backoff — so while one attempt hangs, arriving requests wait
+		// out the caller's budget even when a higher-priority account already
+		// permits the model. Providers whose catalogue contract is assumed rather
+		// than published get a tighter whole-attempt bound so a wrong guess costs
+		// one short wait per backoff window instead of the full background budget.
+		const budgetMs = Math.min(
+			this.deps.backgroundBudgetMs ?? 10000,
+			ASSUMED_CATALOGUE_BUDGET_MS[account.provider] ?? Number.POSITIVE_INFINITY,
+		);
 		const deadline = new Promise<never>((_, reject) => {
 			timer = setTimeout(() => {
 				controller.abort();
 				reject(new Error("Model discovery timed out"));
-			}, this.deps.backgroundBudgetMs ?? 10000);
+			}, budgetMs);
 		});
 		let permissions: AccountModelPermissions | undefined;
 		try {
@@ -158,6 +187,12 @@ export class AccountModelPermissionService {
 		account: Account,
 		signal: AbortSignal,
 	): Promise<string[]> {
+		// Before token acquisition, not inside the provider branch below: these
+		// providers authenticate with a stored key and have no OAuth path at all,
+		// so a keyless account must fail here rather than fall through to the
+		// generic access-token helper and ask it to mint one.
+		if (API_KEY_ONLY_PROVIDERS.has(account.provider) && !account.api_key)
+			throw new Error(`${account.provider} account requires an API key`);
 		const token = account.api_key || (await this.deps.getAccessToken(account));
 		signal.throwIfAborted();
 		const fetchImpl = this.deps.fetchImpl ?? fetch;
@@ -198,6 +233,11 @@ export class AccountModelPermissionService {
 		const anthropic =
 			account.provider === "anthropic" ||
 			account.provider === "claude-console-api";
+		// Cursor style is NOT the same question as "is this the official Anthropic
+		// backend". `anthropic` selects the api.anthropic.com URL above; this
+		// selects only the pagination parameter, so an Anthropic-SHAPED third
+		// party can page correctly without being pointed at Anthropic's host.
+		let cursorParam: "after_id" | "after" = anthropic ? "after_id" : "after";
 		if (anthropic) {
 			if (endpoint && !endpoint.startsWith("https://api.anthropic.com/"))
 				throw new Error("Custom backend requires manual models");
@@ -209,6 +249,24 @@ export class AccountModelPermissionService {
 				headers.set("anthropic-beta", "oauth-2025-04-20");
 			}
 			url.searchParams.set("limit", "1000");
+		} else if (account.provider === "zai") {
+			// Z.ai speaks the Anthropic Messages protocol on a FIXED base that its
+			// provider pins and its buildUrl never overrides (supportsCustomEndpoint
+			// is false for zai), so the endpoint is hardcoded here rather than read
+			// from the account: a stored custom_endpoint must not redirect a
+			// credential.
+			//
+			// The catalogue path and its pagination are assumed from that Messages
+			// compatibility, not from a published Z.ai contract. If the assumption is
+			// wrong the fetch fails and failDiscovery records it, leaving previously
+			// discovered and manual ids untouched — the account stays exactly as
+			// routable as it was, and manual model ids remain the way through.
+			url = new URL("https://api.z.ai/api/anthropic/v1/models");
+			// Non-null by the API_KEY_ONLY_PROVIDERS check above.
+			headers.set("x-api-key", token);
+			headers.set("anthropic-version", "2023-06-01");
+			url.searchParams.set("limit", "1000");
+			cursorParam = "after_id";
 		} else if (account.provider === "openrouter") {
 			if (endpoint && !endpoint.startsWith("https://openrouter.ai/"))
 				throw new Error("Custom backend requires manual models");
@@ -274,7 +332,7 @@ export class AccountModelPermissionService {
 			)
 				throw new Error("Incomplete model pagination");
 			cursors.add(body.last_id);
-			url.searchParams.set(anthropic ? "after_id" : "after", body.last_id);
+			url.searchParams.set(cursorParam, body.last_id);
 		}
 		throw new Error("Model pagination exceeded limit");
 	}

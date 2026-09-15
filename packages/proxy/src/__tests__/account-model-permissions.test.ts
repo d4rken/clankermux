@@ -38,6 +38,7 @@ function setup(
 		init?: RequestInit,
 	) => Promise<Response>,
 	token?: () => Promise<string>,
+	budgets?: { requestBudgetMs?: number; backgroundBudgetMs?: number },
 ) {
 	const db = new Database(":memory:");
 	databases.push(db);
@@ -48,8 +49,8 @@ function setup(
 		listAccounts: async () => accounts,
 		getAccessToken: token ?? (async () => "token"),
 		fetchImpl: fetcher as typeof fetch,
-		requestBudgetMs: 25,
-		backgroundBudgetMs: 40,
+		requestBudgetMs: budgets?.requestBudgetMs ?? 25,
+		backgroundBudgetMs: budgets?.backgroundBudgetMs ?? 40,
 	});
 	return { repo, service };
 }
@@ -389,4 +390,262 @@ it("discovers only enabled concrete Devin models from native account metadata", 
 	expect((await service.permissions(a)).discovered_ids).toEqual(["swe-2-high"]);
 	expect(paths).toHaveLength(3);
 	expect(paths.some((p) => p.endsWith("/models"))).toBe(false);
+});
+
+/**
+ * Z.ai discovery. The endpoint is INFERRED from Z.ai's Anthropic Messages
+ * compatibility, not from a published catalogue contract, so these pin the
+ * request this proxy makes and — more importantly — that every way it can fail
+ * leaves the account's existing permissions alone.
+ */
+describe("zai model discovery", () => {
+	const zai = (id = "zai", patch: Partial<Account> = {}) =>
+		account(id, {
+			provider: "zai",
+			api_key: "zai-key",
+			custom_endpoint: null,
+			...patch,
+		});
+
+	it("reads the fixed Z.ai catalogue with the account's own API key", async () => {
+		const a = zai();
+		const seen: { url: string; headers: Headers; redirect?: string }[] = [];
+		const { service } = setup([a], async (input, init) => {
+			seen.push({
+				url: String(input),
+				headers: new Headers(init?.headers),
+				redirect: init?.redirect,
+			});
+			return Response.json({ data: [{ id: "glm-4.6" }] });
+		});
+		await service.refresh(a);
+		expect(seen).toHaveLength(1);
+		expect(seen[0].url).toBe(
+			"https://api.z.ai/api/anthropic/v1/models?limit=1000",
+		);
+		expect(seen[0].headers.get("x-api-key")).toBe("zai-key");
+		expect(seen[0].headers.get("anthropic-version")).toBe("2023-06-01");
+		// An Anthropic OAuth bearer on a Z.ai request would be a credential leak.
+		expect(seen[0].headers.get("authorization")).toBeNull();
+		expect(seen[0].headers.get("anthropic-beta")).toBeNull();
+		expect(seen[0].redirect).toBe("error");
+		expect((await service.permissions(a)).discovered_ids).toEqual(["glm-4.6"]);
+	});
+
+	it("ignores a stored custom endpoint rather than redirecting the key to it", async () => {
+		// zai pins its endpoint (supportsCustomEndpoint === false), but a value
+		// stored before that gate existed must not become a credential redirect.
+		const a = zai("zai-endpoint", {
+			custom_endpoint: "https://attacker.example/v1",
+		});
+		const hosts: string[] = [];
+		const { service } = setup([a], async (input) => {
+			hosts.push(new URL(String(input)).hostname);
+			return Response.json({ data: [{ id: "glm-4.6" }] });
+		});
+		await service.refresh(a);
+		expect(hosts).toEqual(["api.z.ai"]);
+	});
+
+	it("pages with after_id and commits only the complete list", async () => {
+		const a = zai("zai-pages");
+		const urls: string[] = [];
+		const { repo, service } = setup([a], async (input) => {
+			const url = String(input);
+			urls.push(url);
+			return url.includes("after_id=glm-4.6")
+				? Response.json({ data: [{ id: "glm-4.5" }], has_more: false })
+				: Response.json({
+						data: [{ id: "glm-4.6" }],
+						has_more: true,
+						last_id: "glm-4.6",
+					});
+		});
+		await service.refresh(a);
+		expect(urls).toHaveLength(2);
+		// `after`, the OpenAI-style cursor, would silently re-request page one.
+		expect(urls[1]).toContain("after_id=glm-4.6");
+		expect(new URL(urls[1]).hostname).toBe("api.z.ai");
+		// Stored deduped and sorted, not in page order (repository `modelIds`).
+		expect(await repo.getPermissions(a.id)).toMatchObject({
+			discovered_ids: ["glm-4.5", "glm-4.6"],
+			completeness: "known-complete",
+		});
+	});
+
+	it("records an empty catalogue as known-empty, not as unknown", async () => {
+		const a = zai("zai-empty");
+		const { repo, service } = setup([a], async () =>
+			Response.json({ data: [], has_more: false }),
+		);
+		await service.refresh(a);
+		expect(await repo.getPermissions(a.id)).toMatchObject({
+			discovered_ids: [],
+			completeness: "known-empty",
+		});
+	});
+
+	it("never reaches for a token or a request when the account has no API key", async () => {
+		const a = zai("zai-nokey", { api_key: null });
+		let fetches = 0;
+		let tokenCalls = 0;
+		const { repo, service } = setup(
+			[a],
+			async () => {
+				fetches++;
+				return Response.json({ data: [{ id: "never-reached" }] });
+			},
+			// A Z.ai account has no OAuth path, so discovery must not ask the
+			// generic helper to mint a token. This RECORDS the call and returns a
+			// usable token rather than throwing: `discover` catches everything, so
+			// a throwing stub would produce the same failed-discovery state whether
+			// or not the helper ran, and the assertion below would prove nothing.
+			async () => {
+				tokenCalls++;
+				return "token-that-should-never-be-requested";
+			},
+		);
+		await service.refresh(a);
+		expect({ tokenCalls, fetches }).toEqual({ tokenCalls: 0, fetches: 0 });
+		expect((await repo.getPermissions(a.id))?.last_error).not.toBeNull();
+	});
+
+	it("keeps prior permissions when the guessed endpoint does not exist", async () => {
+		const a = zai("zai-404");
+		let ok = true;
+		const { repo, service } = setup([a], async () =>
+			ok
+				? Response.json({ data: [{ id: "glm-4.6" }] })
+				: new Response("not found", { status: 404 }),
+		);
+		await service.refresh(a, true);
+		ok = false;
+		await service.refresh(a, true);
+		// The degradation argument this branch rests on: a wrong URL costs an
+		// error string, never the models the account was already allowed to serve.
+		expect(await repo.getPermissions(a.id)).toMatchObject({
+			discovered_ids: ["glm-4.6"],
+			completeness: "known-complete",
+		});
+		expect((await repo.getPermissions(a.id))?.last_error).not.toBeNull();
+	});
+
+	it("keeps prior permissions when a later page fails", async () => {
+		const a = zai("zai-page2");
+		let failSecond = false;
+		const { repo, service } = setup([a], async (input) => {
+			if (String(input).includes("after_id")) {
+				if (failSecond) return new Response("boom", { status: 500 });
+				return Response.json({ data: [{ id: "glm-4.5" }], has_more: false });
+			}
+			return Response.json({
+				data: [{ id: "glm-4.6" }],
+				has_more: true,
+				last_id: "glm-4.6",
+			});
+		});
+		await service.refresh(a, true);
+		failSecond = true;
+		await service.refresh(a, true);
+		expect(await repo.getPermissions(a.id)).toMatchObject({
+			discovered_ids: ["glm-4.5", "glm-4.6"],
+		});
+	});
+
+	it("rejects a malformed catalogue instead of committing a partial list", async () => {
+		const a = zai("zai-malformed");
+		const { repo, service } = setup([a], async () =>
+			Response.json({ data: [{ id: "glm-4.6" }, { id: 42 }] }),
+		);
+		await service.refresh(a);
+		const permissions = await repo.getPermissions(a.id);
+		expect(permissions?.discovered_ids).toEqual([]);
+		expect(permissions?.last_error).not.toBeNull();
+	});
+
+	it("gives two Z.ai accounts their own key and their own result", async () => {
+		const one = zai("zai-one", { api_key: "key-one" });
+		const two = zai("zai-two", { api_key: "key-two" });
+		const keys: string[] = [];
+		const { service } = setup([one, two], async (_input, init) => {
+			const key = new Headers(init?.headers).get("x-api-key") ?? "";
+			keys.push(key);
+			return Response.json({ data: [{ id: `model-for-${key}` }] });
+		});
+		await Promise.all([service.refresh(one), service.refresh(two)]);
+		expect([...keys].sort()).toEqual(["key-one", "key-two"]);
+		expect((await service.permissions(one)).discovered_ids).toEqual([
+			"model-for-key-one",
+		]);
+		expect((await service.permissions(two)).discovered_ids).toEqual([
+			"model-for-key-two",
+		]);
+	});
+
+	it("abandons a hung Z.ai catalogue on its OWN budget, well before the general one", async () => {
+		const a = zai("zai-hang");
+		let entered!: () => void;
+		const ready = new Promise<void>((r) => (entered = r));
+		let settle!: () => void;
+		let aborted = false;
+		// The general budget is deliberately far ABOVE the 1s Z.ai cap. With the
+		// usual 40ms test budget this test would pass with the cap deleted, since
+		// min(40, 1000) is 40 either way — it would prove nothing about the cap.
+		const { repo, service } = setup(
+			[a],
+			async (_input, init) => {
+				entered();
+				init?.signal?.addEventListener("abort", () => {
+					aborted = true;
+				});
+				await new Promise<void>((r) => (settle = r));
+				return Response.json({ data: [{ id: "too-late" }] });
+			},
+			undefined,
+			{ backgroundBudgetMs: 30_000 },
+		);
+		const started = Date.now();
+		const pending = service.refresh(a);
+		await ready;
+		await pending;
+		const elapsed = Date.now() - started;
+		// Bounded by the Z.ai cap, not the 30s general budget.
+		expect(elapsed).toBeLessThan(5_000);
+		expect(aborted).toBe(true);
+		expect(await repo.getPermissions(a.id)).toMatchObject({
+			discovered_ids: [],
+			last_error: "Model discovery timed out",
+		});
+
+		// The abandoned request completing later must not resurrect its result.
+		settle();
+		await Promise.resolve();
+		expect(await repo.getPermissions(a.id)).toMatchObject({
+			discovered_ids: [],
+			last_error: "Model discovery timed out",
+		});
+	});
+
+	it("still honours a smaller injected general budget", async () => {
+		// The cap is a ceiling, not a floor: min() must keep the smaller value so
+		// a short test budget is not silently widened to a second.
+		const a = zai("zai-short-budget");
+		let settle!: () => void;
+		const { repo, service } = setup(
+			[a],
+			async () => {
+				await new Promise<void>((r) => (settle = r));
+				return Response.json({ data: [{ id: "too-late" }] });
+			},
+			undefined,
+			{ backgroundBudgetMs: 30 },
+		);
+		const started = Date.now();
+		await service.refresh(a);
+		expect(Date.now() - started).toBeLessThan(900);
+		expect((await repo.getPermissions(a.id))?.last_error).toBe(
+			"Model discovery timed out",
+		);
+		settle();
+	});
 });

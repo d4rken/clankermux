@@ -1,5 +1,6 @@
 import { Logger } from "@clankermux/logger";
 import { restartUsagePollingForAccount } from "@clankermux/proxy";
+import { supportsUsagePolling } from "@clankermux/types";
 
 const log = new Logger("AccountUsagePriming");
 
@@ -18,11 +19,12 @@ const log = new Logger("AccountUsagePriming");
  * (`restartUsagePollingForAccount`, whose first fetch is immediate) into the
  * account-creation path.
  *
- * Anthropic OAuth and Devin accounts have pollable usage windows: Codex usage is
- * warmed separately by the CodexSpendCoordinator, and API-key ("claude-console-api")
- * and Qwen accounts have no pollable usage windows. `restartUsagePollingForAccount`
- * also guards on provider internally, but short-circuiting here keeps the intent
- * explicit and avoids a needless dispatch + DB lookup for those providers.
+ * Which providers qualify is decided by `supportsUsagePolling`, not by a list
+ * kept here: Codex usage is warmed separately by the CodexSpendCoordinator, and
+ * console API-key, Qwen and the other pass-through providers have no pollable
+ * usage window. `restartUsagePollingForAccount` also guards on provider
+ * internally, but short-circuiting here keeps the intent explicit and avoids a
+ * needless dispatch + DB lookup for those providers.
  *
  * Never throws — a priming failure must not fail account creation; polling will
  * still begin on the next service restart.
@@ -32,7 +34,7 @@ export async function primeUsagePollingForNewAccount(account: {
 	provider: string;
 	name: string;
 }): Promise<void> {
-	if (account.provider !== "anthropic" && account.provider !== "devin") {
+	if (!supportsUsagePolling(account.provider)) {
 		return;
 	}
 	try {

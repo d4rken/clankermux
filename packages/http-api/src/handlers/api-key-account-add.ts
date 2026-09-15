@@ -20,6 +20,7 @@ import { Logger } from "@clankermux/logger";
 import { devinSessionExpiresAt } from "@clankermux/providers";
 import { supportsCustomEndpoint } from "@clankermux/types";
 import { refreshOpenRouterAccountMetadata } from "../services/openrouter-account-metadata";
+import { primeUsagePollingForNewAccount } from "./account-usage-priming";
 
 const log = new Logger("API:Accounts");
 
@@ -316,6 +317,16 @@ export function createApiKeyAccountAddHandler(
 				provider: spec.provider,
 				api_key: apiKey,
 				custom_endpoint: customEndpoint,
+			});
+
+			// Start polling here rather than in each caller: every API-key provider
+			// with a pollable window gets its usage bars filled on creation instead
+			// of staying blank until the next service restart. Best-effort by
+			// contract — it never throws, so a failed prime cannot fail the add.
+			await primeUsagePollingForNewAccount({
+				id: accountId,
+				provider: spec.provider,
+				name,
 			});
 
 			log.info(

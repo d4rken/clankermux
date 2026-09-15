@@ -100,6 +100,7 @@ import {
 	type ProviderOverloadStatus,
 	StrategyName,
 	type StrategyStore,
+	supportsUsagePolling,
 } from "@clankermux/types";
 import { type Server, serve } from "bun";
 import { runAnthropicProfileBackfill } from "./anthropic-profile-backfill";
@@ -125,6 +126,10 @@ import { handleModelsRoute } from "./models-route";
 import { QuotaDriftScheduler } from "./quota-drift-scheduler";
 import { type RequestRouterDeps, routeRequest } from "./request-router";
 import { SubscriptionPaymentRecorder } from "./subscription-payment-recorder";
+import {
+	startUsagePollingFor,
+	type UsagePollingStarters,
+} from "./usage-polling-dispatch";
 import { shouldStopPollingPausedAccount } from "./usage-polling-halt";
 import { createUsagePollingTokenProvider } from "./usage-polling-token-provider";
 import { UsageSnapshotSampler } from "./usage-snapshot-sampler";
@@ -1308,6 +1313,41 @@ export default async function startServer(options?: {
 				);
 		},
 	};
+	// The single set of provider starters the dispatcher delegates to. Both the
+	// boot sweep below and the restarter above use this, so a provider cannot be
+	// pollable after a restart but not after being added.
+	const usagePollingStarters: UsagePollingStarters = {
+		startAnthropic: (account, initialDelayMs) =>
+			startUsagePollingWithRefresh(
+				account,
+				proxyContext,
+				initialDelayMs,
+				config.getUsagePollIntervalMs(),
+			),
+		startDevin: (account) =>
+			startDevinUsagePolling(
+				account,
+				dbOps,
+				config.getUsagePollIntervalMs(),
+				undefined,
+				devinPollingEffects,
+			),
+		resetAccountSession: (accountId) => {
+			dbOps
+				.resetAccountSession(accountId, Date.now())
+				.catch((err) =>
+					log.warn(
+						`Failed to reset session for account ${accountId} on window reset: ${err}`,
+					),
+				);
+		},
+		getApiKey: (accountId) =>
+			dbOps
+				.getAccount(accountId)
+				.then((a) => a?.api_key ?? null)
+				.catch(() => null),
+		intervalMs: () => config.getUsagePollIntervalMs(),
+	};
 	registerPollingRestarter(serverId, async (accountId: string) => {
 		const account = await dbOps.getAccount(accountId);
 		if (!account) {
@@ -1316,39 +1356,18 @@ export default async function startServer(options?: {
 			);
 			return false;
 		}
-		if (account.provider === "devin") {
-			usageCache.stopPolling(accountId);
-			return startDevinUsagePolling(
-				account,
-				dbOps,
-				config.getUsagePollIntervalMs(),
-				undefined,
-				devinPollingEffects,
-			);
-		}
-		if (account.provider !== "anthropic") {
-			log.warn(
-				`Cannot restart usage polling: account ${account.name} is not an Anthropic OAuth account`,
-			);
-			return false;
-		}
-		if (!account.access_token && !account.refresh_token) {
-			log.warn(
-				`Cannot restart usage polling: account ${account.name} has no tokens`,
-			);
-			return false;
-		}
 		log.info(
 			`Restarting usage polling for account ${account.name} on ${serverId}`,
 		);
-		usageCache.stopPolling(accountId);
-		startUsagePollingWithRefresh(
-			account,
-			proxyContext,
-			0,
-			config.getUsagePollIntervalMs(),
-		);
-		return true;
+		// `startPolling` already supersedes any existing poller, so this is not
+		// about leaks. It DROPS the cached usage and callbacks first, which is
+		// what a re-auth or a replaced key wants: the old window's numbers should
+		// not survive a credential change. The API-key providers keep their cache
+		// so rollover comparison still has a baseline.
+		if (account.provider === "anthropic") usageCache.stopPolling(accountId);
+		// First fetch is immediate: this path serves account creation and the
+		// manual refresh button, where the caller is waiting to see the bars fill.
+		return startUsagePollingFor(account, usagePollingStarters, 0);
 	});
 
 	// Register this server's codex on-demand usage refresher. Delegates to the
@@ -1707,12 +1726,7 @@ Available endpoints:
 				// 429s on boot; registration itself is immediate so refreshNow works
 				// during the stagger window.
 				const startupDelayMs = index * 5000;
-				startUsagePollingWithRefresh(
-					account,
-					proxyContext,
-					startupDelayMs,
-					config.getUsagePollIntervalMs(),
-				);
+				startUsagePollingFor(account, usagePollingStarters, startupDelayMs);
 				log.info(
 					`Started usage polling for account ${account.name}${startupDelayMs > 0 ? ` (first fetch delayed ${startupDelayMs / 1000}s)` : ""}`,
 				);
@@ -1726,93 +1740,23 @@ Available endpoints:
 		log.info(`No Anthropic accounts found, usage polling will not start`);
 	}
 
-	// Start usage polling for Zai accounts
-	const zaiAccounts = accounts.filter((a) => a.provider === "zai");
-	if (zaiAccounts.length > 0) {
-		log.info(
-			`Found ${zaiAccounts.length} Zai accounts, starting usage polling...`,
-		);
-		for (const account of zaiAccounts) {
-			log.debug(`Processing Zai account: ${account.name}`, {
-				accountId: account.id,
-				hasApiKey: !!account.api_key,
-				paused: account.paused,
-			});
-
-			if (account.api_key) {
-				// Zai uses API key authentication, no token refresh needed
-				// Create a simple token provider that returns the API key
-				const apiKeyProvider = async () => account.api_key || "";
-
-				// Start usage polling with the API key
-				usageCache.startPolling(
-					account.id,
-					apiKeyProvider,
-					account.provider,
-					config.getUsagePollIntervalMs(),
-					undefined, // customEndpoint
-					(accountId) => {
-						dbOps
-							.resetAccountSession(accountId, Date.now())
-							.catch((err) =>
-								log.warn(
-									`Failed to reset session for Zai account ${accountId} on window reset: ${err}`,
-								),
-							);
-					},
-				);
-				log.info(`Started usage polling for Zai account ${account.name}`);
-			} else {
-				log.warn(
-					`Zai account ${account.name} has no API key, skipping usage polling`,
-				);
-			}
-		}
-	} else {
-		log.info(`No Zai accounts found, usage polling will not start`);
-	}
-
-	// Start usage polling for Kilo Gateway accounts
-	const kiloAccounts = accounts.filter((a) => a.provider === "kilo");
-	if (kiloAccounts.length > 0) {
-		log.info(
-			`Found ${kiloAccounts.length} Kilo Gateway accounts, starting usage polling...`,
-		);
-		for (const account of kiloAccounts) {
-			if (account.api_key) {
-				const apiKeyProvider = async () => account.api_key || "";
-				usageCache.startPolling(
-					account.id,
-					apiKeyProvider,
-					account.provider,
-					config.getUsagePollIntervalMs(),
-				);
-				log.info(
-					`Started usage polling for Kilo Gateway account ${account.name}`,
-				);
-			} else {
-				log.warn(
-					`Kilo Gateway account ${account.name} has no API key, skipping usage polling`,
-				);
-			}
-		}
-	} else {
-		log.info(`No Kilo Gateway accounts found, usage polling will not start`);
+	// Start usage polling for the API-key providers that have a pollable window.
+	// The dispatcher owns the per-provider differences (which of them gets a
+	// session-reset callback, how the key is read), so this loop stays a plain
+	// "every account the capability covers" sweep and cannot drift from the
+	// runtime path in the restarter above.
+	for (const account of accounts) {
+		if (account.provider === "anthropic" || account.provider === "devin")
+			continue; // started by their own sweeps, which pass a per-account delay
+		if (!supportsUsagePolling(account.provider)) continue;
+		startUsagePollingFor(account, usagePollingStarters);
 	}
 
 	// Devin's native metadata API exposes calendar-day/week quota without inference.
 	for (const account of accounts.filter(
 		(account) => account.provider === "devin",
 	)) {
-		if (
-			startDevinUsagePolling(
-				account,
-				dbOps,
-				config.getUsagePollIntervalMs(),
-				undefined,
-				devinPollingEffects,
-			)
-		) {
+		if (startUsagePollingFor(account, usagePollingStarters)) {
 			log.info(`Started usage polling for Devin account ${account.name}`);
 		}
 	}
