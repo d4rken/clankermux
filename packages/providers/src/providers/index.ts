@@ -60,6 +60,7 @@ export {
 	sendCodexNativePing,
 	targetsChatGptCodexBackend,
 } from "./codex/index";
+export { GrokProvider } from "./grok/index";
 export { KiloProvider } from "./kilo/index";
 export { MinimaxProvider } from "./minimax/index";
 export { OllamaCloudProvider, OllamaProvider } from "./ollama/index";
