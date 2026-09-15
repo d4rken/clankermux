@@ -1,6 +1,6 @@
 import type { Config } from "@clankermux/config";
 import {
-	accountWideExhaustion,
+	accountWideExhaustionFor,
 	FIVE_HOUR_ELIGIBLE_PROVIDERS,
 	isAccountAvailable,
 	normalizeAnthropicUsage,
@@ -995,9 +995,10 @@ export function createPublicSnapshotReader(
 			// Same two-view split as `/api/accounts`: the weekly windows move over
 			// days so a display-horizon reading is honest evidence for them, while
 			// the 5h session moves fast enough that a half-hour-old 100% is not.
-			const exhaustion = metered
-				? accountWideExhaustion(usage, now, fresh)
-				: { exhausted: false, binding: null, resetMs: null };
+			// Dispatched on provider, like the other three surfaces that report this
+			// verdict — `/api/accounts` and this response describe the same account
+			// and must not disagree about whether it is exhausted.
+			const exhaustion = accountWideExhaustionFor(provider, usage, now, fresh);
 			const accountWideExhausted =
 				exhaustion.exhausted && exhaustion.binding !== null
 					? { resetMs: exhaustion.resetMs, binding: exhaustion.binding }

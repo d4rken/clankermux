@@ -470,6 +470,32 @@ describe("availability and credential are orthogonal axes", () => {
 		expect((await read()).accounts[0]?.cause).toBe("usage_exhausted");
 	});
 
+	it("reports a spent Z.AI window as usage_exhausted too", async () => {
+		// `isMetered` is true for zai, so this account always reached the verdict;
+		// what it reached was the Anthropic normalizer, which reads nothing in a
+		// Z.AI payload and silently answered "not exhausted". The management
+		// accounts endpoint and this response describe the same account.
+		insertAccount({ provider: "zai" });
+		usageCache.set("acct-1", {
+			time_limit: null,
+			tokens_limit: {
+				used: 10,
+				remaining: 90,
+				percentage: 10,
+				resetAt: NOW + 3_600_000,
+				type: "tokens_limit",
+			},
+			tokens_limit_weekly: {
+				used: 100,
+				remaining: 0,
+				percentage: 100,
+				resetAt: NOW + 5 * 86_400_000,
+				type: "tokens_limit_weekly",
+			},
+		} as never);
+		expect((await read()).accounts[0]?.cause).toBe("usage_exhausted");
+	});
+
 	it("reports an active cooldown as rate_limited with a lift instant", async () => {
 		insertAccount({
 			rate_limited_until: NOW + 60_000,

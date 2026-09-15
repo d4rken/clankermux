@@ -1,13 +1,13 @@
 import type { Config } from "@clankermux/config";
 import {
-	accountWideExhaustion,
+	accountWideExhaustionFor,
 	isAccountAvailable,
 	TtlCache,
 } from "@clankermux/core";
 import type { DatabaseOperations } from "@clankermux/database";
 import { jsonResponse } from "@clankermux/http-common";
 import { usageCache } from "@clankermux/providers";
-import type { Account, AnthropicUsageData } from "@clankermux/types";
+import type { Account, FullUsageData } from "@clankermux/types";
 import type { HealthResponse, IntegrityStatus, PoolStatus } from "../types";
 
 type AsyncWriterHealthFn = () => {
@@ -19,32 +19,33 @@ type AsyncWriterHealthFn = () => {
 type IntegrityStatusFn = () => IntegrityStatus;
 
 /**
- * Resolves an account's raw Anthropic-style usage payload (or null). Injected so
- * `computePoolStatus` stays pure/testable; the handler passes a reader backed by
- * the live `usageCache`.
+ * Resolves an account's raw usage payload (or null), in whatever shape its
+ * provider reports. Injected so `computePoolStatus` stays pure/testable; the
+ * handler passes a reader backed by the live `usageCache`.
  */
 export type AccountUsageResolver = (
 	account: Account,
-) => AnthropicUsageData | null | undefined;
+) => FullUsageData | null | undefined;
 
 /**
- * The default account-usage resolver backed by the live `usageCache`. Reads usage
- * only for the windowed providers (anthropic/codex); the normalizer safely
- * returns "no evidence" for anything else, but this keeps the resolver honest.
- * Shared by `/health` and the dashboard's System Status so the two never disagree
- * about which accounts are usage-exhausted.
+ * The default account-usage resolver backed by the live `usageCache`. Shared by
+ * `/health` and the dashboard's System Status so the two never disagree about
+ * which accounts are usage-exhausted.
+ *
+ * It reads whatever the cache holds and does NOT filter by provider: the
+ * verdict below dispatches on the provider itself and reports "not exhausted"
+ * for anything it cannot judge, so a second list here would be a copy of that
+ * one that nothing keeps in step.
  *
  * FRESHNESS: `usageCache.peek()` is already TTL-gated at `USAGE_CACHE_TTL_MS`
  * (10 min), so everything reached from here is on the ROUTING-fresh view. That
- * is why `/health` calls `accountWideExhaustion` with two arguments while
- * `/api/accounts` passes a third: the accounts endpoint renders from a 30-minute
+ * is why `/health` asks for the verdict without a narrower session view while
+ * `/api/accounts` passes one: the accounts endpoint renders from a 30-minute
  * display horizon that is too generous to assert the fast-moving 5h session
  * window, and has to narrow it explicitly. Here there is nothing to narrow.
  */
 export const usageCacheResolver: AccountUsageResolver = (account) =>
-	account.provider === "anthropic" || account.provider === "codex"
-		? (usageCache.peek(account.id) as AnthropicUsageData | null)
-		: null;
+	usageCache.peek(account.id) as FullUsageData | null;
 
 export function computePoolStatus(
 	accounts: Account[],
@@ -67,7 +68,8 @@ export function computePoolStatus(
 	for (const account of accounts) {
 		if (!isAccountAvailable(account, now)) continue;
 		if (getUsage) {
-			const { exhausted, resetMs } = accountWideExhaustion(
+			const { exhausted, resetMs } = accountWideExhaustionFor(
+				account.provider ?? "anthropic",
 				getUsage(account),
 				now,
 			);

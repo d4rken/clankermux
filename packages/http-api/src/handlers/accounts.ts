@@ -2,7 +2,7 @@ import crypto from "node:crypto";
 import type { Config } from "@clankermux/config";
 import {
 	ACCOUNT_WIDE_HARD_STATUSES,
-	accountWideExhaustion,
+	accountWideExhaustionFor,
 	extractFiveHour,
 	extractSevenDay,
 	isAnthropicUsageShape,
@@ -836,12 +836,14 @@ export async function listAccountResponses(
 					persistedCodexCredits = resolved.persistedCredits;
 				}
 
-				// Account-wide exhaustion (anthropic/codex only): the weeklyAll window,
-				// the flat seven_day_oauth_apps (Claude Code weekly quota) OR the
-				// rolling 5-hour session at/above 100% with a future reset, reported
-				// with WHICH class bound. Shared with /health via
-				// `accountWideExhaustion`, keeping the display consistent with the
-				// account-wide representative used for the cooldown-clear guard.
+				// Account-wide exhaustion: any window that sidelines the whole account
+				// — for Anthropic/Codex the weeklyAll window, the flat
+				// seven_day_oauth_apps (Claude Code weekly quota) or the rolling
+				// 5-hour session; for Zai its own two windows — at/above 100% with a
+				// future reset, reported with WHICH class bound. Shared with /health
+				// and the public snapshot via `accountWideExhaustionFor`, keeping the
+				// display consistent with the account-wide representative used for
+				// the cooldown-clear guard.
 				// Surfaced in rateLimitStatus so an exhausted-but-not-yet-cooled
 				// account stops reading "OK", and so a session-exhausted account
 				// reports the CAUSE rather than the cooldown MECHANISM.
@@ -854,12 +856,13 @@ export async function listAccountResponses(
 					resetMs: number | null;
 					binding: UsageExhaustionBinding;
 				} | null = null;
-				if (account.provider === "anthropic" || account.provider === "codex") {
-					const { exhausted, resetMs, binding } = accountWideExhaustion(
-						usageData as AnthropicUsageData | null,
+				{
+					const { exhausted, resetMs, binding } = accountWideExhaustionFor(
+						account.provider ?? "anthropic",
+						usageData as FullUsageData | null,
 						now,
 						(routingFreshUsageByAccount.get(account.id) ??
-							null) as AnthropicUsageData | null,
+							null) as FullUsageData | null,
 					);
 					if (exhausted && binding !== null) {
 						accountWideExhausted = { resetMs, binding };

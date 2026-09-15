@@ -361,11 +361,14 @@ export {
 } from "./version";
 export {
 	type AccountWideExhaustionBinding,
+	type AccountWideExhaustionVerdict,
 	type AccountWideWindow,
 	accountWideExhaustion,
+	accountWideExhaustionFor,
 	flatOauthAppsWindow,
 	type WeeklyWindow,
 	weeklyExhaustion,
+	zaiAccountWideExhaustion,
 } from "./weekly-exhaustion";
 export {
 	computeWeeklyWorkloads,
