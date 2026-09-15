@@ -107,8 +107,14 @@ export function parseCustomEndpointData(
 /**
  * Get endpoint URL from account, falling back to default
  */
-export function getEndpointUrl(account: Account): string {
-	const defaultEndpoint = "https://api.openai.com";
+export function getEndpointUrl(
+	account: Account,
+	/**
+	 * Where to land when the account names no endpoint. Callers whose upstream is
+	 * not OpenAI pass their own — see OpenAICompatibleProvider.defaultEndpoint.
+	 */
+	defaultEndpoint = "https://api.openai.com",
+): string {
 	const customEndpointData = parseCustomEndpointData(account.custom_endpoint);
 
 	if (customEndpointData?.endpoint) {

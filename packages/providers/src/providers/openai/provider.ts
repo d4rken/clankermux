@@ -44,18 +44,38 @@ export class OpenAICompatibleProvider extends BaseProvider {
 		};
 	}
 
+	/**
+	 * Where a request goes when the account names no endpoint, or names one that
+	 * fails validation.
+	 *
+	 * Subclasses whose upstream is NOT OpenAI must override this. Falling back to
+	 * `api.openai.com` for them does not degrade gracefully — it sends that
+	 * provider's bearer token to a third party. Qwen is the live case: it keeps
+	 * its DashScope host in `custom_endpoint`, so an account that never received
+	 * one would otherwise hand a DashScope credential to OpenAI.
+	 *
+	 * Deliberately a hook rather than a per-provider lookup of
+	 * `PROVIDER_CONFIG.defaultEndpoint`: that table gives `openai-compatible`
+	 * itself `https://api.anthropic.com`, so a generic lookup here would
+	 * misroute the very provider this class exists to serve.
+	 */
+	protected defaultEndpoint(): string {
+		return "https://api.openai.com";
+	}
+
 	buildUrl(path: string, query: string, account?: Account): string {
 		// Get endpoint URL with validation
+		const fallback = this.defaultEndpoint();
 		let endpoint: string;
 		try {
-			endpoint = account ? getEndpointUrl(account) : "https://api.openai.com";
+			endpoint = account ? getEndpointUrl(account, fallback) : fallback;
 			// Validate the endpoint
 			endpoint = validateEndpointUrl(endpoint, "endpoint");
 		} catch (error) {
 			log.error(
 				`Invalid endpoint for account ${account?.name || "unknown"}, using default: ${error instanceof Error ? error.message : String(error)}`,
 			);
-			endpoint = "https://api.openai.com";
+			endpoint = fallback;
 		}
 
 		// Store endpoint for provider-specific transformations (e.g., Alibaba caching)

@@ -18,6 +18,7 @@ import {
 } from "@clankermux/http-common";
 import { Logger } from "@clankermux/logger";
 import { devinSessionExpiresAt } from "@clankermux/providers";
+import { supportsCustomEndpoint } from "@clankermux/types";
 import { refreshOpenRouterAccountMetadata } from "../services/openrouter-account-metadata";
 
 const log = new Logger("API:Accounts");
@@ -84,7 +85,10 @@ export const API_KEY_PROVIDERS = {
 		provider: "zai",
 		label: "z.ai",
 		apiKey: { from: "body" },
-		endpoint: { from: "body", required: false },
+		// `fixed`, not `body`: ZaiProvider pins its endpoint and its buildUrl
+		// discards the account, so a value accepted here would be stored, echoed
+		// back, and never used. See supportsCustomEndpoint.
+		endpoint: { from: "fixed", value: null },
 		mirrorKeyToTokens: true,
 	},
 	openai: {
@@ -239,6 +243,23 @@ export function createApiKeyAccountAddHandler(
 					max: 100,
 					integer: true,
 				}) || 0;
+
+			// `readEndpoint` returns the spec's fixed value without looking at the
+			// body, so a provider that pins its endpoint would accept an operator's
+			// value with a 200 and drop it. Say no instead: silently discarding the
+			// request is the same "intent quietly unmet" the gate exists to stop,
+			// just moved from the database to the wire.
+			if (
+				!supportsCustomEndpoint(spec.provider) &&
+				typeof body.customEndpoint === "string" &&
+				body.customEndpoint.trim() !== ""
+			) {
+				return errorResponse(
+					BadRequest(
+						`Provider ${spec.provider} does not use a custom endpoint; its endpoint is fixed`,
+					),
+				);
+			}
 
 			const customEndpoint = readEndpoint(body, spec);
 			if (spec.endpoint.from === "body" && spec.endpoint.required) {

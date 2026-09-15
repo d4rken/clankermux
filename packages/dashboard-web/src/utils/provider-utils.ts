@@ -3,7 +3,6 @@
  */
 import {
 	getDefaultEndpoint,
-	isKnownProvider,
 	PROVIDER_NAMES,
 	requiresSessionDurationTracking,
 } from "@clankermux/types";
@@ -72,14 +71,6 @@ export function providerShowsWeeklyUsage(provider: string): boolean {
  */
 export function providerShowsCreditsBalance(provider: string): boolean {
 	return provider === PROVIDER_NAMES.KILO;
-}
-
-/**
- * Check if a provider supports custom endpoints
- */
-export function providerSupportsCustomEndpoints(provider: string): boolean {
-	// Most providers support custom endpoints, but we can add specific logic if needed
-	return isKnownProvider(provider);
 }
 
 /**

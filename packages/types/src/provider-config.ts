@@ -37,6 +37,23 @@ export interface ProviderConfig {
 	supportsUsageTracking: boolean;
 	/** Whether the provider supports OAuth authentication */
 	supportsOAuth: boolean;
+	/**
+	 * Whether this provider's `buildUrl` actually reads `account.custom_endpoint`.
+	 *
+	 * False means the endpoint is fixed in the provider and an operator's value
+	 * would be stored, echoed back by the API, badged in the dashboard, and then
+	 * ignored on every request. Every surface that can SET one gates on this, so
+	 * no NEW operator override reaches a provider that would ignore it.
+	 *
+	 * It does not promise the column is empty for those providers: values stored
+	 * before the gate are left alone rather than rewritten on upgrade, and the
+	 * ollama-cloud add spec writes its own fixed host. Both are inert.
+	 *
+	 * `provider-custom-endpoint.test.ts` in `@clankermux/providers` probes each
+	 * registered provider's real `buildUrl` and fails if a flag here disagrees
+	 * with it, so this cannot drift when a provider changes how it resolves URLs.
+	 */
+	honoursCustomEndpoint: boolean;
 	/** Default API endpoint for the provider */
 	defaultEndpoint?: string;
 }
@@ -49,24 +66,28 @@ export const PROVIDER_CONFIG: Record<ProviderName, ProviderConfig> = {
 		requiresSessionTracking: false,
 		supportsUsageTracking: true,
 		supportsOAuth: false,
+		honoursCustomEndpoint: true,
 		defaultEndpoint: "https://server.codeium.com",
 	},
 	[PROVIDER_NAMES.ANTHROPIC]: {
 		requiresSessionTracking: true, // Anthropic OAuth has 5-hour usage windows
 		supportsUsageTracking: true, // Anthropic OAuth supports usage tracking
 		supportsOAuth: true, // Anthropic OAuth uses OAuth authentication
+		honoursCustomEndpoint: true,
 		defaultEndpoint: "https://api.anthropic.com",
 	},
 	[PROVIDER_NAMES.CLAUDE_CONSOLE_API]: {
 		requiresSessionTracking: false, // Claude console API is pay-as-you-go
 		supportsUsageTracking: false, // Claude console API doesn't support usage tracking
 		supportsOAuth: false, // Claude console API uses API key authentication
+		honoursCustomEndpoint: true,
 		defaultEndpoint: "https://api.anthropic.com",
 	},
 	[PROVIDER_NAMES.ZAI]: {
 		requiresSessionTracking: true, // Zai has 5-hour session windows
 		supportsUsageTracking: true, // Zai supports usage tracking via monitoring API
 		supportsOAuth: false, // Zai uses API key authentication
+		honoursCustomEndpoint: false,
 		defaultEndpoint: "https://api.z.ai/api/anthropic",
 	},
 	[PROVIDER_NAMES.MINIMAX]: {
@@ -76,36 +97,42 @@ export const PROVIDER_CONFIG: Record<ProviderName, ProviderConfig> = {
 		// anthropic-compatible path.
 		supportsUsageTracking: true,
 		supportsOAuth: false, // Minimax uses API key authentication
+		honoursCustomEndpoint: false,
 		defaultEndpoint: "https://api.minimax.io/anthropic",
 	},
 	[PROVIDER_NAMES.ANTHROPIC_COMPATIBLE]: {
 		requiresSessionTracking: false, // Anthropic-compatible is pay-as-you-go
 		supportsUsageTracking: false, // Anthropic-compatible providers typically don't support usage tracking
 		supportsOAuth: false, // Anthropic-compatible uses API key authentication
+		honoursCustomEndpoint: true,
 		defaultEndpoint: "https://api.anthropic.com", // Default, can be overridden via custom endpoint
 	},
 	[PROVIDER_NAMES.OPENAI_COMPATIBLE]: {
 		requiresSessionTracking: false, // OpenAI-compatible is typically pay-as-you-go
 		supportsUsageTracking: false, // OpenAI-compatible providers typically don't support usage tracking
 		supportsOAuth: false, // OpenAI-compatible uses API key authentication
+		honoursCustomEndpoint: true,
 		defaultEndpoint: "https://api.anthropic.com", // Default, can be overridden via custom endpoint
 	},
 	[PROVIDER_NAMES.KILO]: {
 		requiresSessionTracking: false, // Kilo is credit-based, no session windows
 		supportsUsageTracking: true, // Kilo supports credit balance via /api/user
 		supportsOAuth: false, // Kilo uses API key authentication
+		honoursCustomEndpoint: true,
 		defaultEndpoint: "https://api.kilo.ai/api/gateway",
 	},
 	[PROVIDER_NAMES.OPENROUTER]: {
 		requiresSessionTracking: false, // OpenRouter is pay-as-you-go
 		supportsUsageTracking: false, // Credits endpoint requires a separate management key
 		supportsOAuth: false, // OpenRouter uses API key authentication
+		honoursCustomEndpoint: true,
 		defaultEndpoint: "https://openrouter.ai/api/v1",
 	},
 	[PROVIDER_NAMES.ALIBABA_CODING_PLAN]: {
 		requiresSessionTracking: false, // Alibaba Coding Plan uses quota windows, not session stickiness
 		supportsUsageTracking: false, // Usage endpoint requires session cookies, not API key
 		supportsOAuth: false, // Uses API key authentication
+		honoursCustomEndpoint: true,
 		defaultEndpoint:
 			"https://coding-intl.dashscope.aliyuncs.com/apps/anthropic",
 	},
@@ -113,24 +140,28 @@ export const PROVIDER_CONFIG: Record<ProviderName, ProviderConfig> = {
 		requiresSessionTracking: true, // Codex has a weekly usage window (the 5h one was retired 2026-07-12)
 		supportsUsageTracking: false, // Usage tracked via response headers, not a polling API
 		supportsOAuth: true, // Codex uses OpenAI OAuth with PKCE
+		honoursCustomEndpoint: true,
 		defaultEndpoint: "https://chatgpt.com/backend-api/codex/responses",
 	},
 	[PROVIDER_NAMES.QWEN]: {
 		requiresSessionTracking: false, // Qwen OAuth is quota-based, no session stickiness
 		supportsUsageTracking: true, // Usage tracked via response body (OpenAI-compatible)
 		supportsOAuth: true, // Qwen uses OAuth 2.0 device code flow
+		honoursCustomEndpoint: true,
 		defaultEndpoint: "https://dashscope.aliyuncs.com/compatible-mode/v1",
 	},
 	[PROVIDER_NAMES.OLLAMA]: {
 		requiresSessionTracking: false,
 		supportsUsageTracking: false,
 		supportsOAuth: false,
+		honoursCustomEndpoint: true,
 		defaultEndpoint: "http://localhost:11434",
 	},
 	[PROVIDER_NAMES.OLLAMA_CLOUD]: {
 		requiresSessionTracking: false,
 		supportsUsageTracking: false,
 		supportsOAuth: false,
+		honoursCustomEndpoint: false,
 		defaultEndpoint: "https://ollama.com",
 	},
 } as const satisfies Record<ProviderName, ProviderConfig>;
@@ -183,6 +214,25 @@ export function supportsUsageTracking(provider: string): boolean {
 
 	// Default to false for any provider not explicitly configured (security through default denial)
 	return false;
+}
+
+/**
+ * Check whether a custom endpoint set on an account of this provider would
+ * actually be used.
+ *
+ * Gate every surface that lets an operator SET one on this: the dashboard menu
+ * item, the HTTP update handler, and the account-add specs. Storing a value the
+ * provider's `buildUrl` never reads produces a setting that looks applied — it
+ * is echoed back by the API and badged in the UI — while every request still
+ * goes to the fixed endpoint, with no log line and no error.
+ *
+ * @param provider - The provider name to check
+ * @returns boolean - True if the provider's buildUrl reads account.custom_endpoint
+ *                    Unknown providers default to false (security through default denial)
+ */
+export function supportsCustomEndpoint(provider: string): boolean {
+	if (!isKnownProvider(provider)) return false;
+	return PROVIDER_CONFIG[provider].honoursCustomEndpoint;
 }
 
 /**

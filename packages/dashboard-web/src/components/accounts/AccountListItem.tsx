@@ -1,5 +1,5 @@
 import { type LiveScopedFamily, TIME_CONSTANTS } from "@clankermux/core";
-import type { SessionStats } from "@clankermux/types";
+import { type SessionStats, supportsCustomEndpoint } from "@clankermux/types";
 import { AccountPresenter } from "@clankermux/ui-common";
 import {
 	CalendarClock,
@@ -207,6 +207,10 @@ export function AccountListItem({
 	const presenter = new AccountPresenter(account);
 	// Header details, status chips and Force Reset gating share derived status.
 	const status = deriveAccountStatus(account);
+	// zai, minimax and ollama-cloud pin their endpoint in the provider, so
+	// offering the control would let an operator set something that is stored,
+	// badged here, and then ignored on every request.
+	const endpointIsConfigurable = supportsCustomEndpoint(account.provider);
 	// Spend inside the current session window. Both kinds can be non-zero at
 	// once (a plan account that spilled into overage), and a zero is omitted
 	// rather than rendered as "$0.00" — an unused billing mode is not news.
@@ -498,10 +502,9 @@ export function AccountListItem({
 									Reset session stickiness
 								</DropdownMenuItem>
 							)}
-							{(onCustomEndpointChange || onModelPermissionsChange) && (
-								<DropdownMenuSeparator />
-							)}
-							{onCustomEndpointChange && (
+							{((onCustomEndpointChange && endpointIsConfigurable) ||
+								onModelPermissionsChange) && <DropdownMenuSeparator />}
+							{onCustomEndpointChange && endpointIsConfigurable && (
 								<DropdownMenuItem
 									onClick={() => onCustomEndpointChange(account)}
 									title={

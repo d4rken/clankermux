@@ -60,6 +60,17 @@ export function UsageThrottlingCard() {
 					summary="Throttle requests when weekly usage is ahead of its pacing line."
 					detail="Disable this if you expect usage to recover overnight — the weekly pacing line assumes an even burn across the whole week, which penalises a heavy day that a quiet night would have offset anyway."
 				/>
+
+				{/* Both switches share one mutation. Without this a rejected toggle
+				    just snapped back with no explanation. Same neutral wording as the
+				    other cards: a timeout after the write landed, or a failed initial
+				    read showing defaults, would both make a "shows the server's
+				    values" claim false. */}
+				{setUsageThrottling.isError && (
+					<p role="alert" className="text-xs text-destructive-strong">
+						Could not save that change. Please try again.
+					</p>
+				)}
 			</CardContent>
 		</Card>
 	);

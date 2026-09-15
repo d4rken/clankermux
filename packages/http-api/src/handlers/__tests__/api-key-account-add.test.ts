@@ -272,7 +272,7 @@ describe("createApiKeyAccountAddHandler", () => {
 		it("accepts a missing endpoint when the spec makes it optional", async () => {
 			const handler = createApiKeyAccountAddHandler(
 				dbOps,
-				API_KEY_PROVIDERS.zai,
+				API_KEY_PROVIDERS.anthropicCompatible,
 			);
 
 			const res = await handler(post({ name: "acct", apiKey: "k" }));
@@ -284,7 +284,7 @@ describe("createApiKeyAccountAddHandler", () => {
 		it("rejects a malformed endpoint URL", async () => {
 			const handler = createApiKeyAccountAddHandler(
 				dbOps,
-				API_KEY_PROVIDERS.zai,
+				API_KEY_PROVIDERS.anthropicCompatible,
 			);
 
 			const res = await handler(
@@ -294,13 +294,58 @@ describe("createApiKeyAccountAddHandler", () => {
 			expect(res.status).toBe(400);
 		});
 
-		it("writes the fixed endpoint and ignores any body value", async () => {
+		it("refuses a body endpoint for a provider that pins its own", async () => {
+			// ZaiProvider.buildUrl discards the account, so an endpoint accepted
+			// here could never take effect. Refusing beats accepting-and-dropping:
+			// a 200 that quietly ignores what the operator asked for is the same
+			// defect as storing a value nothing reads.
+			const handler = createApiKeyAccountAddHandler(
+				dbOps,
+				API_KEY_PROVIDERS.zai,
+			);
+
+			const res = await handler(
+				post({
+					name: "acct",
+					apiKey: "k",
+					customEndpoint: "https://mirror.example.com",
+				}),
+			);
+
+			expect(res.status).toBe(400);
+			expect(row("acct")).toBeNull();
+		});
+
+		it("creates the account when such a provider is sent no endpoint", async () => {
+			const handler = createApiKeyAccountAddHandler(
+				dbOps,
+				API_KEY_PROVIDERS.zai,
+			);
+
+			const res = await handler(post({ name: "acct", apiKey: "k" }));
+
+			expect(res.status).toBe(200);
+			expect(row("acct")?.custom_endpoint).toBeNull();
+		});
+
+		it("writes the fixed endpoint when the spec supplies one", async () => {
 			const handler = createApiKeyAccountAddHandler(
 				dbOps,
 				API_KEY_PROVIDERS.ollamaCloud,
 			);
 
-			await handler(
+			await handler(post({ name: "acct", apiKey: "k" }));
+
+			expect(row("acct")?.custom_endpoint).toBe("https://ollama.com");
+		});
+
+		it("never lets a body value reach a fixed endpoint", async () => {
+			const handler = createApiKeyAccountAddHandler(
+				dbOps,
+				API_KEY_PROVIDERS.ollamaCloud,
+			);
+
+			const res = await handler(
 				post({
 					name: "acct",
 					apiKey: "k",
@@ -308,7 +353,8 @@ describe("createApiKeyAccountAddHandler", () => {
 				}),
 			);
 
-			expect(row("acct")?.custom_endpoint).toBe("https://ollama.com");
+			expect(res.status).toBe(400);
+			expect(row("acct")).toBeNull();
 		});
 
 		it("writes NULL for providers with no endpoint", async () => {

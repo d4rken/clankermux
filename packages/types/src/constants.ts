@@ -7,6 +7,7 @@ import {
 	PROVIDER_NAMES,
 	type ProviderName,
 	requiresSessionDurationTracking,
+	supportsCustomEndpoint,
 	supportsOAuth,
 	supportsUsageTracking,
 } from "./provider-config";
@@ -19,6 +20,7 @@ export {
 	PROVIDER_NAMES,
 	type ProviderName,
 	requiresSessionDurationTracking,
+	supportsCustomEndpoint,
 	supportsOAuth,
 	supportsUsageTracking,
 };
