@@ -1,11 +1,11 @@
 import { Logger } from "@clankermux/logger";
 import type { OpenAIRequest } from "@clankermux/openai-formats";
+import { getDefaultEndpoint, PROVIDER_NAMES } from "@clankermux/types";
 import type { RateLimitInfo } from "../../types";
 import { OpenAICompatibleProvider } from "../openai/provider";
 
 const _log = new Logger("QwenProvider");
 
-const _DEFAULT_ENDPOINT = "https://dashscope.aliyuncs.com/compatible-mode/v1";
 const QWEN_USER_AGENT = "QwenCode/sdk-typescript-v0.1.7 (darwin; arm64)";
 
 // Stainless SDK headers injected by the official OpenAI Node SDK (v5.x).
@@ -75,6 +75,16 @@ function sanitizeForQwen(text: string): string {
 
 export class QwenProvider extends OpenAICompatibleProvider {
 	override name = "qwen";
+
+	/**
+	 * A qwen account's DashScope host lives in `custom_endpoint`, written from the
+	 * OAuth token response's `resource_url`. A token response that carries none,
+	 * or a value an operator cleared, would otherwise inherit the parent's
+	 * `api.openai.com` and send a DashScope bearer token to OpenAI.
+	 */
+	protected override defaultEndpoint(): string {
+		return getDefaultEndpoint(PROVIDER_NAMES.QWEN);
+	}
 
 	/*
 	 * Override to save raw Qwen SSE to /tmp for debugging tool call chunks.

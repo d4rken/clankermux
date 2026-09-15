@@ -90,6 +90,7 @@ import {
 	isRateLimitReason,
 	microsToUsd,
 	requiresSessionDurationTracking,
+	supportsCustomEndpoint,
 	usdToMicros,
 } from "@clankermux/types";
 import {
@@ -2430,6 +2431,22 @@ export function createAccountCustomEndpointUpdateHandler(
 	return async (req: Request, accountId: string): Promise<Response> => {
 		try {
 			const body = await req.json();
+
+			// Refuse providers whose buildUrl pins the endpoint and discards the
+			// account. Without this the write succeeds, the API echoes the value
+			// back and the dashboard badges it, while every request still goes to
+			// the fixed host — a setting that looks applied and does nothing.
+			const account = await dbOps.getAccount(accountId);
+			if (!account) {
+				return errorResponse(NotFound("Account not found"));
+			}
+			if (!supportsCustomEndpoint(account.provider)) {
+				return errorResponse(
+					BadRequest(
+						`Provider ${account.provider} does not use a custom endpoint; its endpoint is fixed`,
+					),
+				);
+			}
 
 			// Validate custom endpoint
 			const customEndpoint = validateString(
