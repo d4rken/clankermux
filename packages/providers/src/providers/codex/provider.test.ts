@@ -4369,3 +4369,143 @@ it.each([
 		expect(transformed.status).toBe(type === "permission_error" ? 403 : 502);
 	}
 });
+
+describe("CodexProvider.parseRateLimit exhausted windows", () => {
+	const hour = 60 * 60 * 1000;
+	const resets = () => {
+		const now = Math.floor(Date.now() / 1000) * 1000;
+		return { now, session: now + hour, weekly: now + 4 * 24 * hour };
+	};
+	const response = (
+		status: number,
+		sessionPercent: string | null,
+		weeklyPercent: string | null,
+		sessionReset: number,
+		weeklyReset: number,
+	) => {
+		const headers = new Headers({
+			"x-codex-primary-window-minutes": "300",
+			"x-codex-primary-reset-at": String(sessionReset / 1000),
+			"x-codex-secondary-window-minutes": "10080",
+			"x-codex-secondary-reset-at": String(weeklyReset / 1000),
+		});
+		if (sessionPercent !== null)
+			headers.set("x-codex-primary-used-percent", sessionPercent);
+		if (weeklyPercent !== null)
+			headers.set("x-codex-secondary-used-percent", weeklyPercent);
+		return new Response(null, { status, headers });
+	};
+
+	it.each([
+		["0", "100", "weekly"],
+		["100", "100", "weekly"],
+		["100", "30", "session"],
+		[null, null, "session"],
+		["0", "99", "session"],
+	] as const)("429 with session=%s weekly=%s uses %s reset", (sessionPct, weeklyPct, winner) => {
+		const reset = resets();
+		expect(
+			new CodexProvider().parseRateLimit(
+				response(429, sessionPct, weeklyPct, reset.session, reset.weekly),
+			),
+		).toEqual({
+			isRateLimited: true,
+			resetTime: reset[winner],
+		});
+	});
+
+	it("keeps earliest-reset tracking on successful responses", () => {
+		const reset = resets();
+		expect(
+			new CodexProvider().parseRateLimit(
+				response(200, "0", "100", reset.session, reset.weekly),
+			),
+		).toEqual({
+			isRateLimited: false,
+			resetTime: reset.session,
+		});
+	});
+
+	it("ignores an elapsed exhausted window when another exhausted window is live", () => {
+		const reset = resets();
+		expect(
+			new CodexProvider().parseRateLimit(
+				response(429, "100", "100", reset.session, reset.now - hour),
+			).resetTime,
+		).toBe(reset.session);
+	});
+
+	it("recognizes the weekly window in the primary slot with relative reset headers", () => {
+		const before = Date.now();
+		const info = new CodexProvider().parseRateLimit(
+			new Response(null, {
+				status: 429,
+				headers: {
+					"x-codex-primary-window-minutes": "10080",
+					"x-codex-primary-used-percent": "100",
+					"x-codex-primary-reset-after-seconds": "345600",
+					"x-codex-secondary-window-minutes": "0",
+					"x-codex-secondary-used-percent": "0",
+					"x-codex-secondary-reset-after-seconds": "0",
+				},
+			}),
+		);
+		expect(info.resetTime).toBeGreaterThanOrEqual(before + 4 * 24 * hour);
+		expect(info.resetTime).toBeLessThanOrEqual(Date.now() + 4 * 24 * hour);
+	});
+
+	it("ignores an elapsed reset in the legacy fallback", () => {
+		const reset = resets();
+		expect(
+			new CodexProvider().parseRateLimit(
+				response(429, null, null, reset.now - hour, reset.weekly),
+			).resetTime,
+		).toBe(reset.weekly);
+	});
+
+	it("falls back one hour when all reported resets have elapsed", () => {
+		const before = Date.now();
+		const info = new CodexProvider().parseRateLimit(
+			response(429, "100", "100", before - 2 * hour, before - hour),
+		);
+		expect(info.resetTime).toBeGreaterThanOrEqual(before + hour);
+		expect(info.resetTime).toBeLessThanOrEqual(Date.now() + hour);
+	});
+
+	it("uses the legacy fallback when window durations are missing", () => {
+		const reset = resets();
+		const res = response(429, "0", "100", reset.session, reset.weekly);
+		res.headers.delete("x-codex-primary-window-minutes");
+		res.headers.delete("x-codex-secondary-window-minutes");
+		expect(new CodexProvider().parseRateLimit(res).resetTime).toBe(
+			reset.session,
+		);
+	});
+
+	it("retains reset-only legacy header support", () => {
+		const reset = resets();
+		expect(
+			new CodexProvider().parseRateLimit(
+				new Response(null, {
+					status: 429,
+					headers: {
+						"x-codex-5h-reset-at": String(reset.session / 1000),
+						"x-codex-7d-reset-at": String(reset.weekly / 1000),
+					},
+				}),
+			).resetTime,
+		).toBe(reset.session);
+	});
+
+	it.each([{}, { "x-codex-primary-reset-at": "invalid" }] as Record<
+		string,
+		string
+	>[])("uses the one-hour fallback without a valid reset: %j", (headers) => {
+		const before = Date.now();
+		const info = new CodexProvider().parseRateLimit(
+			new Response(null, { status: 429, headers }),
+		);
+		expect(info.resetTime).toBeGreaterThanOrEqual(before + hour);
+		expect(info.resetTime).toBeLessThanOrEqual(Date.now() + hour);
+	});
+});

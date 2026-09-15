@@ -1338,6 +1338,31 @@ describe("CodexSpendCoordinator.observe — rate-limit action", () => {
 		}
 		expect(applyCalls[0]?.opts.rateLimitAction.kind).toBe("apply");
 	});
+	it("passes the exhausted weekly reset to the scheduled-prime cooldown", async () => {
+		const { coordinator, setAccount } = makeCoordinator();
+		setAccount(makeCodexAccount({ id: "a", auto_refresh_enabled: true }));
+		const now = Math.floor(Date.now() / 1000) * 1000;
+		const weeklyReset = now + 4 * 24 * 60 * 60 * 1000;
+		fetchImpl = async () =>
+			new Response("rate limited", {
+				status: 429,
+				headers: {
+					"x-codex-primary-window-minutes": "300",
+					"x-codex-primary-used-percent": "0",
+					"x-codex-primary-reset-at": String((now + 3600000) / 1000),
+					"x-codex-secondary-window-minutes": "10080",
+					"x-codex-secondary-used-percent": "100",
+					"x-codex-secondary-reset-at": String(weeklyReset / 1000),
+				},
+			});
+
+		await coordinator.observe("a", "scheduled-prime");
+
+		expect(fetchCalls).toHaveLength(1);
+		expect(applyCalls).toHaveLength(1);
+		expect(applyCalls[0]?.opts.rateLimitAction).toEqual({ kind: "apply" });
+		expect(applyCalls[0]?.opts.rateLimitInfo.resetTime).toBe(weeklyReset);
+	});
 });
 
 // ---------------------------------------------------------------------------

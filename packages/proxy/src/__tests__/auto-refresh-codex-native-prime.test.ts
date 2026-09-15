@@ -16,7 +16,7 @@
  *   - completed + responseOk  → prime success: update lastRefreshResetTime from
  *                 observation.earliestResetMs, clear the failure counter, and run
  *                 the same overage-resume the old translated path did.
- *   - completed + !responseOk → recordRefreshFailure. The scheduler MUST NOT
+ *   - completed + !responseOk → quota/overload is neutral, other errors recordRefreshFailure. The scheduler MUST NOT
  *                 re-apply the cooldown / re-write rate_limited_until — the
  *                 coordinator/applicator already did.
  *
@@ -235,14 +235,17 @@ describe("AutoRefreshScheduler — codex native prime via coordinator", () => {
 		expect(scheduler.consecutiveFailures.get("codex-fail")).toBe(1);
 	});
 
-	it("completed + responseOk=false (429) records a failure and does NOT set rate_limited_until (coordinator owns cooldown)", async () => {
+	it("repeated native 429s do not pause the account or re-apply its cooldown", async () => {
 		const db = makeDb();
 		const coordinator = makeCoordinator(completed(false, 429));
 		const scheduler = await makeScheduler(db, coordinator);
 
-		await scheduler.primeAccount(makeRow({ id: "codex-429" }));
+		for (let attempt = 0; attempt < 6; attempt++) {
+			await scheduler.primeAccount(makeRow({ id: "codex-429" }));
+		}
 
-		expect(scheduler.consecutiveFailures.get("codex-429")).toBe(1);
+		expect(scheduler.consecutiveFailures.get("codex-429")).toBeUndefined();
+		expect(db.runWithChanges).not.toHaveBeenCalled();
 		// The scheduler must NOT re-write rate_limited_until / rate_limit_reset for
 		// codex — the applicator already handled the cooldown.
 		const cooldownWrite = db.runCalls.find(
@@ -251,6 +254,34 @@ describe("AutoRefreshScheduler — codex native prime via coordinator", () => {
 				c.sql.includes("rate_limit_reset"),
 		);
 		expect(cooldownWrite).toBeUndefined();
+	});
+
+	it("a native 429 preserves a prior genuine failure streak", async () => {
+		const db = makeDb();
+		const coordinator = makeCoordinator(completed(false, 429));
+		const scheduler = await makeScheduler(db, coordinator);
+		scheduler.consecutiveFailures.set("codex-429-mix", 4);
+
+		await scheduler.primeAccount(makeRow({ id: "codex-429-mix" }));
+
+		expect(scheduler.consecutiveFailures.get("codex-429-mix")).toBe(4);
+		expect(db.runWithChanges).not.toHaveBeenCalled();
+	});
+
+	it.each([
+		401, 500, 503,
+	])("native %s still counts toward failure-threshold pausing", async (status) => {
+		const db = makeDb();
+		const coordinator = makeCoordinator(completed(false, status));
+		const scheduler = await makeScheduler(db, coordinator);
+		scheduler.consecutiveFailures.set("codex-broken", 4);
+
+		await scheduler.primeAccount(makeRow({ id: "codex-broken" }));
+
+		expect(db.runWithChanges).toHaveBeenCalledTimes(1);
+		expect(
+			db.runCalls.some((call) => call.sql.includes("failure_threshold")),
+		).toBe(true);
 	});
 
 	it("completed + responseOk=false (529) is NEUTRAL — no failure recorded, no pause", async () => {
