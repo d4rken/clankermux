@@ -214,6 +214,11 @@ export class AccountModelPermissionService {
 				throw new Error("Custom backend requires manual models");
 			url = new URL("https://openrouter.ai/api/v1/models/user");
 			headers.set("authorization", `Bearer ${token}`);
+		} else if (account.provider === "grok") {
+			if (endpoint && !endpoint.startsWith("https://api.x.ai/"))
+				throw new Error("Custom backend requires manual models");
+			url = new URL("https://api.x.ai/v1/models");
+			headers.set("authorization", `Bearer ${token}`);
 		} else if (
 			endpoint &&
 			["openai-compatible", "anthropic-compatible"].includes(account.provider)
