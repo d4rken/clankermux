@@ -34,7 +34,10 @@ const DEFAULTS: Required<WalkResponses> = {
 		code: 0,
 		data: {
 			zai: { access_token: "oauth-access-token" },
-			user: { email: "person@example.test", id: 4242 },
+			user: {
+				email: "person@example.test",
+				user_id: "6f1c2a34-5b6d-4e7f-8a9b-0c1d2e3f4a5b",
+			},
 		},
 	},
 	login: { code: 200, data: { access_token: "biz-token" } },
@@ -92,7 +95,7 @@ function walk(responses: WalkResponses = {}) {
 }
 
 const redirect = (login: ZaiLogin, code = "auth-code") =>
-	`http://localhost:54548/callback?code=${code}&state=${login.state}`;
+	`https://zcode.z.ai/cn/oauth/callback?code=${code}&state=${login.state}`;
 
 const rejection = async (work: Promise<unknown>): Promise<Error> =>
 	work.then(
@@ -101,7 +104,7 @@ const rejection = async (work: Promise<unknown>): Promise<Error> =>
 	);
 
 describe("Z.AI browser login", () => {
-	it("authorizes against chat.z.ai with a per-login state and the loopback redirect", () => {
+	it("authorizes against chat.z.ai with a per-login state and the registered redirect", () => {
 		const login = createZaiLogin();
 		const url = new URL(login.url);
 		expect(url.origin + url.pathname).toBe(
@@ -112,7 +115,7 @@ describe("Z.AI browser login", () => {
 			"client_P8X5CMWmlaRO9gyO-KSqtg",
 		);
 		expect(url.searchParams.get("redirect_uri")).toBe(
-			"http://localhost:54548/callback",
+			"https://zcode.z.ai/oauth/callback",
 		);
 		expect(url.searchParams.get("state")).toBe(login.state);
 		expect(login.state.length).toBeGreaterThan(8);
@@ -130,14 +133,14 @@ describe("Z.AI browser login", () => {
 		await expect(
 			exchangeZaiLogin(
 				login,
-				"http://localhost:54548/callback?code=auth-code&state=someone-else",
+				"https://zcode.z.ai/cn/oauth/callback?code=auth-code&state=someone-else",
 				fetcher,
 			),
 		).rejects.toThrow("state mismatch");
 		await expect(
 			exchangeZaiLogin(
 				login,
-				"http://localhost:54548/callback?code=auth-code",
+				"https://zcode.z.ai/cn/oauth/callback?code=auth-code",
 				fetcher,
 			),
 		).rejects.toThrow("state mismatch");
@@ -147,7 +150,7 @@ describe("Z.AI browser login", () => {
 		await expect(
 			exchangeZaiLogin(
 				login,
-				`http://localhost:54548/callback?state=${login.state}`,
+				`https://zcode.z.ai/cn/oauth/callback?state=${login.state}`,
 				fetcher,
 			),
 		).rejects.toThrow("authorization code");
@@ -170,7 +173,7 @@ describe("Z.AI browser login", () => {
 		expect(credential).toEqual({
 			apiKey: "key-1.secret-1",
 			email: "person@example.test",
-			accountId: "4242",
+			accountId: "6f1c2a34-5b6d-4e7f-8a9b-0c1d2e3f4a5b",
 		});
 		expect(calls.map((call) => `${call.method} ${call.url}`)).toEqual([
 			`POST ${TOKEN_URL}`,
@@ -182,12 +185,32 @@ describe("Z.AI browser login", () => {
 		expect(calls[0]?.body).toEqual({
 			provider: "zai",
 			code: "auth-code",
-			redirect_uri: "http://localhost:54548/callback",
+			redirect_uri: "https://zcode.z.ai/oauth/callback",
 			state: login.state,
 		});
 		expect(calls[1]?.body).toEqual({ token: "oauth-access-token" });
 		for (const call of calls.slice(2))
 			expect(call.auth).toBe("Bearer biz-token");
+	});
+
+	it.each([
+		[
+			"user_id",
+			{ user_id: "6f1c2a34-5b6d-4e7f-8a9b-0c1d2e3f4a5b", id: 4242 },
+			"6f1c2a34-5b6d-4e7f-8a9b-0c1d2e3f4a5b",
+		],
+		["id when the user carries no user_id", { id: 4242 }, "4242"],
+	])("takes the account identity from %s", async (_field, user, expected) => {
+		const login = createZaiLogin();
+		const { fetcher } = walk({
+			token: {
+				code: 0,
+				data: { zai: { access_token: "oauth-access-token" }, user },
+			},
+		});
+		expect(
+			(await exchangeZaiLogin(login, redirect(login), fetcher)).accountId,
+		).toBe(expected);
 	});
 
 	it("creates the key when the project has none of its own", async () => {

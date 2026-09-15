@@ -147,9 +147,9 @@ function ZaiReauthSession({
 								id="zai-reauth-redirect-help"
 								className="text-sm text-muted-foreground"
 							>
-								Open the link in a browser signed in to this account. It ends on
-								a localhost:54548 address the browser cannot load; copy that
-								whole URL out of the address bar and paste it here.
+								Open the link in a browser signed in to this account. After
+								signing in it lands on a zcode.z.ai page; copy that whole URL
+								out of the address bar and paste it here.
 							</p>
 							<p className="text-sm text-muted-foreground">
 								Finish this sign-in by:{" "}

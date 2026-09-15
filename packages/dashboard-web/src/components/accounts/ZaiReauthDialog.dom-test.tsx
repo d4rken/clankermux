@@ -59,7 +59,7 @@ const login = {
 	expiresAt: Date.now() + 600_000,
 };
 const REDIRECT_URL =
-	"http://localhost:54548/callback?code=one-use-code&state=test";
+	"https://zcode.z.ai/cn/oauth/callback?code=one-use-code&state=test";
 let root: Root | null = null;
 let host: HTMLElement | null = null;
 let onClose = mock(() => {});
@@ -128,7 +128,7 @@ describe("Z.AI account reconnect", () => {
 		await click("Sign in with Z.AI");
 		expect(start).toHaveBeenCalledWith({ accountId: account.id });
 		expect(document.querySelector(`a[href="${login.authUrl}"]`)).not.toBeNull();
-		expect(document.body.textContent).toContain("localhost:54548");
+		expect(document.body.textContent).toContain("zcode.z.ai");
 		expect(
 			document.querySelector<HTMLInputElement>("#zai-reauth-redirect"),
 		).not.toBeNull();

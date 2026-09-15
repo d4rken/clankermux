@@ -17,7 +17,7 @@ const TOKEN_URL = "https://zcode.z.ai/api/v1/oauth/token";
 const BIZ_BASE = "https://api.z.ai";
 /** Exchanges the OAuth access token for the token the business API accepts. */
 const BUSINESS_LOGIN_URL = `${BIZ_BASE}/api/auth/z/login`;
-const REDIRECT_URI = "http://localhost:54548/callback";
+const REDIRECT_URI = "https://zcode.z.ai/oauth/callback";
 /** Our own key name, so sign-in never mutates ZCode's `zcode-api-key`. */
 const KEY_NAME = "clankermux";
 const LOGIN_TTL_MS = 10 * 60_000;
@@ -111,6 +111,13 @@ function asKeyArray(value: unknown): Array<Record<string, unknown>> {
 function trimmedString(value: unknown): string | undefined {
 	return typeof value === "string" && value.trim().length > 0
 		? value.trim()
+		: undefined;
+}
+
+/** Identity fields arrive as either a string or a numeric id. */
+function identityString(value: unknown): string | undefined {
+	return typeof value === "string" || typeof value === "number"
+		? String(value)
 		: undefined;
 }
 
@@ -320,11 +327,9 @@ export async function exchangeZaiLogin(
 	if (!oauthAccessToken)
 		throw new Error("Z.AI token response is missing an access token");
 	const user = asRecord(data?.user);
-	const id = user?.id;
 	return {
 		apiKey: await mintZaiApiKey(oauthAccessToken, fetcher, deadline),
 		email: trimmedString(user?.email),
-		accountId:
-			typeof id === "string" || typeof id === "number" ? String(id) : undefined,
+		accountId: identityString(user?.user_id) ?? identityString(user?.id),
 	};
 }
