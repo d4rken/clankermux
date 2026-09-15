@@ -2,6 +2,7 @@ import type { PaymentKind } from "@clankermux/types";
 import { useEffect, useState } from "react";
 import type { Account } from "../../api";
 import { useCreatePayment } from "../../hooks/queries";
+import { useApiError } from "../../hooks/useApiError";
 import { Button } from "../ui/button";
 import {
 	Dialog,
@@ -43,10 +44,12 @@ export function RecordPaymentDialog({
 	onOpenChange,
 }: RecordPaymentDialogProps) {
 	const createPayment = useCreatePayment();
+	const { formatError } = useApiError();
 	const [kind, setKind] = useState<PaymentKind>("credits");
 	const [paidDate, setPaidDate] = useState(todayIso);
 	const [amount, setAmount] = useState("");
 	const [notes, setNotes] = useState("");
+	const [saveError, setSaveError] = useState<string | null>(null);
 
 	// Reset fields when the account changes or the dialog reopens.
 	useEffect(() => {
@@ -55,6 +58,7 @@ export function RecordPaymentDialog({
 			setPaidDate(todayIso());
 			setAmount("");
 			setNotes("");
+			setSaveError(null);
 		}
 	}, [account, isOpen]);
 
@@ -64,6 +68,9 @@ export function RecordPaymentDialog({
 
 	const handleSave = async () => {
 		if (!isValid || !account) return;
+		// Cleared on every attempt so a retry that succeeds cannot leave the
+		// previous failure on screen, and a second failure reads as new.
+		setSaveError(null);
 		try {
 			await createPayment.mutateAsync({
 				accountId: account.id,
@@ -74,7 +81,10 @@ export function RecordPaymentDialog({
 			});
 			onOpenChange(false);
 		} catch (error) {
-			console.error("Failed to record payment:", error);
+			// The dialog stays open with everything typed still in it. Without this
+			// the only signal was the Save button ceasing to spin: there is no toast
+			// system and the mutation has no onError, so the failure was invisible.
+			setSaveError(formatError(error));
 		}
 	};
 
@@ -149,6 +159,11 @@ export function RecordPaymentDialog({
 						/>
 					</div>
 				</div>
+				{saveError && (
+					<p role="alert" className="text-sm text-destructive-strong">
+						{saveError}
+					</p>
+				)}
 				<DialogFooter>
 					<Button
 						type="button"

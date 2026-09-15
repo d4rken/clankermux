@@ -282,6 +282,26 @@ export function DataRetentionCard() {
 					/>
 				</div>
 
+				{/* Every control above shares one mutation, so this cannot name which
+				    setting failed — only that the last attempt did not land. It is a
+				    sibling of the rows rather than part of SettingRow's grid, and is
+				    kept separate from the cleanup error below, which reports a
+				    different operation.
+
+				    It deliberately makes no claim about what the controls now show:
+				    the numeric rows hold a local draft, so after a rejection they
+				    display the operator's value, while the switch reads back from the
+				    query. One sentence cannot describe both. */}
+				{setRetention.isError && (
+					<p
+						role="alert"
+						className="flex items-center gap-tight text-xs text-destructive-strong"
+					>
+						<AlertCircle className="h-3.5 w-3.5 shrink-0" />
+						Could not save that change. Please try again.
+					</p>
+				)}
+
 				<div className="flex flex-wrap items-center gap-item border-t pt-row">
 					<Button
 						variant="secondary"

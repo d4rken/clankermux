@@ -484,6 +484,12 @@ export function AccountsTab() {
 	};
 
 	const handleUpdatePriority = async (accountId: string, priority: number) => {
+		// Cleared when the attempt STARTS, not when it succeeds. `actionError` is
+		// one field shared by every handler here and nothing serializes them, so
+		// clearing on completion lets a slow action that eventually succeeds wipe
+		// a newer, unrelated failure that is the only thing on screen explaining
+		// it. Clearing on entry drops only this action's own stale message.
+		setActionError(null);
 		try {
 			await api.updateAccountPriority(accountId, priority);
 			await loadAccounts();
@@ -515,6 +521,8 @@ export function AccountsTab() {
 		cadence: "monthly" | "yearly" | "none",
 		priceUsd: number | null,
 	) => {
+		// Cleared on entry, not on success — see handleUpdatePriority.
+		setActionError(null);
 		try {
 			await api.updateAccountRenewal(accountId, anchor, cadence, priceUsd);
 			await loadAccounts();

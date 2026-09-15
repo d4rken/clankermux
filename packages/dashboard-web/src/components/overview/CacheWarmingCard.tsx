@@ -199,6 +199,16 @@ export function CacheWarmingCard() {
 					summary="How long an idle, promoted (1-hour) session is kept warm."
 					detail={`Longer recovers older idle sessions (an overnight gap, say) cheaply on return, since a refresh costs ~20× less than rebuilding the cache — but you pay that hold cost on every session you never come back to. Max ~${maxBridgeHours.toFixed(1)}h: beyond the break-even point it is cheaper to let the cache rebuild.`}
 				/>
+
+				{/* The mode selector and both numeric saves share one mutation, so
+				    this reports only that the last attempt failed. No claim about
+				    what is displayed: the numeric rows keep the operator's draft
+				    after a rejection, the selector reads back from the query. */}
+				{setCacheWarming.isError && (
+					<p role="alert" className="text-xs text-destructive-strong">
+						Could not save that change. Please try again.
+					</p>
+				)}
 			</CardContent>
 		</Card>
 	);

@@ -3,6 +3,7 @@ import { formatUsd } from "@clankermux/ui-common";
 import { AlertCircle, Trash2 } from "lucide-react";
 import { useState } from "react";
 import { useDeletePayment } from "../../hooks/queries";
+import { useApiError } from "../../hooks/useApiError";
 import { CostCoverageNote, formatKnownCost } from "../CostCoverage";
 import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
@@ -80,17 +81,37 @@ export function PaymentsHistoryCard({
 		summary.amortizedMonthlyUsd === 0 &&
 		summary.currentMonth.ledgerUsd === 0;
 	const deletePayment = useDeletePayment();
-	const [confirmTarget, setConfirmTarget] = useState<AccountPayment | null>(
-		null,
-	);
+	// Target and error in ONE piece of state: they must move together, or a
+	// confirm opened for a different payment inherits the previous failure.
+	const [confirm, setConfirm] = useState<{
+		target: AccountPayment;
+		error: string | null;
+	} | null>(null);
+
+	const { formatError } = useApiError();
 
 	const handleConfirmDelete = async () => {
-		if (!confirmTarget) return;
+		if (!confirm) return;
+		// Captured because Cancel and Escape stay live while the request is in
+		// flight. Without it, a rejection landing after the operator dismissed
+		// this confirm and opened another would publish its message against the
+		// wrong payment, and a late success would close the wrong one. Every
+		// settlement below is applied only if this is still the open target.
+		const target = confirm.target.id;
+		setConfirm((current) => (current ? { ...current, error: null } : current));
 		try {
-			await deletePayment.mutateAsync(confirmTarget.id);
-			setConfirmTarget(null);
+			await deletePayment.mutateAsync(target);
+			setConfirm((current) => (current?.target.id === target ? null : current));
 		} catch (error) {
-			console.error("Failed to delete payment:", error);
+			// The confirm stays open and says why. Previously it just sat there
+			// looking inert, which reads as "nothing happened" rather than "that
+			// failed".
+			const message = formatError(error);
+			setConfirm((current) =>
+				current?.target.id === target
+					? { ...current, error: message }
+					: current,
+			);
 		}
 	};
 
@@ -202,7 +223,7 @@ export function PaymentsHistoryCard({
 									size="sm"
 									className="h-7 w-7 p-0 shrink-0"
 									title="Delete payment"
-									onClick={() => setConfirmTarget(payment)}
+									onClick={() => setConfirm({ target: payment, error: null })}
 								>
 									<Trash2 className="h-3.5 w-3.5" />
 								</Button>
@@ -212,27 +233,32 @@ export function PaymentsHistoryCard({
 				)}
 			</CardContent>
 			<Dialog
-				open={confirmTarget !== null}
+				open={confirm !== null}
 				onOpenChange={(open) => {
-					if (!open) setConfirmTarget(null);
+					if (!open) setConfirm(null);
 				}}
 			>
 				<DialogContent className="sm:max-w-[425px]">
 					<DialogHeader>
 						<DialogTitle>Delete payment?</DialogTitle>
 						<DialogDescription>
-							{confirmTarget
-								? `Remove the ${confirmTarget.kind} payment of ${formatUsd(
-										confirmTarget.amountUsd,
-									)} for ${confirmTarget.accountName} (${confirmTarget.paidDate}) from the ledger.`
+							{confirm
+								? `Remove the ${confirm.target.kind} payment of ${formatUsd(
+										confirm.target.amountUsd,
+									)} for ${confirm.target.accountName} (${confirm.target.paidDate}) from the ledger.`
 								: ""}
 						</DialogDescription>
 					</DialogHeader>
+					{confirm?.error && (
+						<p role="alert" className="text-sm text-destructive-strong">
+							{confirm.error}
+						</p>
+					)}
 					<DialogFooter>
 						<Button
 							type="button"
 							variant="outline"
-							onClick={() => setConfirmTarget(null)}
+							onClick={() => setConfirm(null)}
 						>
 							Cancel
 						</Button>

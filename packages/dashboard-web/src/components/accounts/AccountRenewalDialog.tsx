@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import type { Account } from "../../api";
+import { useApiError } from "../../hooks/useApiError";
 import type { RenewalCadence } from "../../lib/renewal";
 import { Button } from "../ui/button";
 import {
@@ -46,6 +47,8 @@ export function AccountRenewalDialog({
 		account?.renewalPriceUsd != null ? String(account.renewalPriceUsd) : "",
 	);
 	const [isUpdating, setIsUpdating] = useState(false);
+	const [saveError, setSaveError] = useState<string | null>(null);
+	const { formatError } = useApiError();
 
 	// Reset fields when the account changes or the dialog opens.
 	useEffect(() => {
@@ -55,6 +58,7 @@ export function AccountRenewalDialog({
 			setPrice(
 				account.renewalPriceUsd != null ? String(account.renewalPriceUsd) : "",
 			);
+			setSaveError(null);
 		}
 	}, [account]);
 
@@ -75,11 +79,14 @@ export function AccountRenewalDialog({
 		const priceOrNull =
 			priceDisabled || price.trim() === "" ? null : parsedPrice;
 		setIsUpdating(true);
+		setSaveError(null);
 		try {
 			await onUpdateRenewal(account.id, anchorOrNull, cadence, priceOrNull);
 			onOpenChange(false);
 		} catch (error) {
-			console.error("Failed to update renewal date:", error);
+			// In-dialog, not the parent's `actionError`: that renders behind this
+			// dialog's overlay and is only visible once the dialog is dismissed.
+			setSaveError(formatError(error));
 		} finally {
 			setIsUpdating(false);
 		}
@@ -88,11 +95,12 @@ export function AccountRenewalDialog({
 	const handleClear = async () => {
 		if (!account) return;
 		setIsUpdating(true);
+		setSaveError(null);
 		try {
 			await onUpdateRenewal(account.id, null, "none", null);
 			onOpenChange(false);
 		} catch (error) {
-			console.error("Failed to clear renewal date:", error);
+			setSaveError(formatError(error));
 		} finally {
 			setIsUpdating(false);
 		}
@@ -163,6 +171,11 @@ export function AccountRenewalDialog({
 						</div>
 					</div>
 				</div>
+				{saveError && (
+					<p role="alert" className="text-sm text-destructive-strong">
+						{saveError}
+					</p>
+				)}
 				<DialogFooter>
 					<Button
 						type="button"

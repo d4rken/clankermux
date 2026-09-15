@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import type { Account } from "../../api";
+import { useApiError } from "../../hooks/useApiError";
 import { Button } from "../ui/button";
 import {
 	Dialog,
@@ -29,11 +30,14 @@ export function AccountPriorityDialog({
 		account?.priority?.toString() || "0",
 	);
 	const [isUpdating, setIsUpdating] = useState(false);
+	const [saveError, setSaveError] = useState<string | null>(null);
+	const { formatError } = useApiError();
 
 	// Reset priority when account changes or dialog opens
 	useEffect(() => {
 		if (account) {
 			setPriority(account.priority?.toString() || "0");
+			setSaveError(null);
 		}
 	}, [account]);
 
@@ -50,11 +54,15 @@ export function AccountPriorityDialog({
 		}
 
 		setIsUpdating(true);
+		setSaveError(null);
 		try {
 			await onUpdatePriority(account.id, priorityValue);
 			onOpenChange(false);
 		} catch (error) {
-			console.error("Failed to update priority:", error);
+			// Reported HERE rather than relying on the parent's `actionError`: that
+			// renders in the page body, behind this dialog's own overlay, so the
+			// operator only met it after closing the dialog.
+			setSaveError(formatError(error));
 		} finally {
 			setIsUpdating(false);
 		}
@@ -89,6 +97,11 @@ export function AccountPriorityDialog({
 						Current priority: {account?.priority || 0}
 					</div>
 				</div>
+				{saveError && (
+					<p role="alert" className="text-sm text-destructive-strong">
+						{saveError}
+					</p>
+				)}
 				<DialogFooter>
 					<Button
 						type="button"
