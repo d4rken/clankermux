@@ -127,6 +127,7 @@ import { createToolErrorExampleHandler } from "./handlers/tool-errors-direct";
 import { createUsageHistoryHandler } from "./handlers/usage-history";
 import { createUsageScopedHistoryHandler } from "./handlers/usage-scoped-history";
 import { createVersionCheckHandler } from "./handlers/version";
+import { createZaiAccountHandlers } from "./handlers/zai-accounts";
 import { SessionAuthService } from "./services/session-auth-service";
 import { createSessionStreamGuard } from "./services/session-stream-registry";
 import type { APIContext } from "./types";
@@ -191,6 +192,7 @@ export class APIRouter {
 		const pacingHandler = createPacingHandler(dbOps, config, getStrategy);
 		const accountAddHandler = createAccountAddHandler(dbOps, config);
 		const devinHandlers = createDevinAccountHandlers(dbOps);
+		const zaiHandlers = createZaiAccountHandlers(dbOps);
 		const zaiAccountAddHandler = createZaiAccountAddHandler(dbOps);
 		const minimaxAccountAddHandler = createMinimaxAccountAddHandler(dbOps);
 		const alibabaCodingPlanAccountAddHandler =
@@ -292,6 +294,19 @@ export class APIRouter {
 		this.handlers.set("POST:/api/accounts", (req) => accountAddHandler(req));
 		this.handlers.set("POST:/api/accounts/zai", (req) =>
 			zaiAccountAddHandler(req),
+		);
+		this.handlers.set("POST:/api/accounts/zai/login", zaiHandlers.login);
+		this.handlers.set(
+			"POST:/api/accounts/zai/login/complete",
+			zaiHandlers.complete,
+		);
+		this.handlers.set(
+			"POST:/api/accounts/zai/reauth/start",
+			zaiHandlers.reauthStart,
+		);
+		this.handlers.set(
+			"POST:/api/accounts/zai/reauth/complete",
+			zaiHandlers.reauthComplete,
 		);
 		this.handlers.set("POST:/api/accounts/minimax", (req) =>
 			minimaxAccountAddHandler(req),
