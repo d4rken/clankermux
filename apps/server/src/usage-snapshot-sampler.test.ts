@@ -1249,7 +1249,7 @@ describe("UsageSnapshotSampler weekly burn-slope feed", () => {
 	it("ignores providers that have no windowed usage series", async () => {
 		const id = slopeAccountId();
 		const h = makeSampler({
-			accounts: [acct(id, "zai")],
+			accounts: [acct(id, "kilo")],
 			cache: makeCache({}),
 			storedSnapshots: () => [],
 		});
