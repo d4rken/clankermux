@@ -446,6 +446,46 @@ function nativeReasoningEffort(body: Record<string, unknown>): string | null {
 }
 
 /**
+ * The ChatGPT Codex backend keys prompt caching on the `session-id` REQUEST
+ * HEADER and ignores the body's `prompt_cache_key`, so the documented body
+ * field is translated into the header the backend reads.
+ *
+ * Usable means: a string that is non-empty and printable ASCII after trim().
+ * The upper bound is U+007E rather than "no control characters" because
+ * `Headers.set` throws on code points above U+00FF, and a throw on this path
+ * would drop the request onto the passthrough fallback.
+ */
+const USABLE_SESSION_ID = /^[\x20-\x7E]+$/;
+
+function usableSessionId(value: unknown): string | undefined {
+	if (typeof value !== "string") return undefined;
+	const trimmed = value.trim();
+	if (trimmed.length === 0 || !USABLE_SESSION_ID.test(trimmed))
+		return undefined;
+	return trimmed;
+}
+
+/**
+ * Derives `session-id` from `promptCacheKey` unless the client already supplied
+ * a usable one of its own, which is never overwritten. An inbound value that is
+ * present but unusable is DELETED, not forwarded: `headers` is a copy of the
+ * inbound set, so skipping it would relay the very value that was rejected.
+ * Only call this for accounts that reach the ChatGPT backend.
+ */
+function applyCodexSessionIdHeader(
+	headers: Headers,
+	promptCacheKey: unknown,
+): void {
+	if (usableSessionId(headers.get("session-id"))) return;
+	const derived = usableSessionId(promptCacheKey);
+	if (derived) {
+		headers.set("session-id", derived);
+	} else {
+		headers.delete("session-id");
+	}
+}
+
+/**
  * prompt_cache_key is an OpenAI-specific Responses API field. Custom or
  * self-hosted OpenAI-compatible endpoints may reject the unknown field, so
  * only attach it when the account resolves to OpenAI's own hosts.
@@ -681,6 +721,9 @@ export class CodexProvider extends BaseProvider {
 				body.stream === true ? "true" : "false",
 			);
 			newHeaders.delete("content-length");
+			if (targetsChatGptCodexBackend(account)) {
+				applyCodexSessionIdHeader(newHeaders, codexBody.prompt_cache_key);
+			}
 			applyReasoningEffortAdaptation(newHeaders, reasoningAdaptation);
 
 			return new Request(request.url, {
@@ -748,7 +791,8 @@ export class CodexProvider extends BaseProvider {
 			// `effective` is read back off the same body rather than defaulted.
 			const requestedEffort = nativeReasoningEffort(body);
 			let effortClamped = false;
-			if (targetsChatGptCodexBackend(account)) {
+			const chatGptBackend = targetsChatGptCodexBackend(account);
+			if (chatGptBackend) {
 				const sanitation = sanitizeChatGptBackendBody(body);
 				effortClamped = sanitation.clampedEffort !== undefined;
 				// Debug, not warn: dropping `temperature` really does change how the
@@ -789,6 +833,9 @@ export class CodexProvider extends BaseProvider {
 			newHeaders.set("content-type", "application/json");
 			newHeaders.set("x-clankermux-request-stream", "true");
 			newHeaders.delete("content-length");
+			if (chatGptBackend) {
+				applyCodexSessionIdHeader(newHeaders, body.prompt_cache_key);
+			}
 			applyReasoningEffortAdaptation(newHeaders, {
 				requested: requestedEffort,
 				effective: nativeReasoningEffort(body),

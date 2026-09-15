@@ -2572,6 +2572,215 @@ describe("CodexProvider native Responses passthrough", () => {
 	});
 });
 
+describe("CodexProvider session-id prompt-cache header", () => {
+	const codexAccount = (overrides: Record<string, unknown> = {}) =>
+		({
+			id: "codex-1",
+			name: "codex-test",
+			provider: "codex",
+			api_key: null,
+			refresh_token: null,
+			access_token: null,
+			expires_at: null,
+			created_at: Date.now(),
+			request_count: 0,
+			total_requests: 0,
+			priority: 20,
+			custom_endpoint: null,
+			...overrides,
+		}) as unknown as Parameters<CodexProvider["transformRequestBody"]>[1];
+
+	const nativeTransform = async (
+		payload: Record<string, unknown>,
+		extraHeaders: Record<string, string> = {},
+		account?: Parameters<CodexProvider["transformRequestBody"]>[1],
+	) => {
+		const request = new Request(
+			"https://chatgpt.com/backend-api/codex/responses",
+			{
+				method: "POST",
+				headers: {
+					"content-type": "application/json",
+					[NATIVE_RESPONSES_REQUEST_HEADER]: "1",
+					...extraHeaders,
+				},
+				body: JSON.stringify({
+					model: "gpt-5.5-codex",
+					input: [
+						{
+							type: "message",
+							role: "user",
+							content: [{ type: "input_text", text: "Hi" }],
+						},
+					],
+					previous_response_id: "resp_prev",
+					store: true,
+					stream: false,
+					...payload,
+				}),
+			},
+		);
+		const transformed = await new CodexProvider().transformRequestBody(
+			request,
+			account,
+		);
+		return { transformed, body: await transformed.json() };
+	};
+
+	const translatedTransform = async (
+		payload: Record<string, unknown>,
+		account?: Parameters<CodexProvider["transformRequestBody"]>[1],
+	) => {
+		const request = new Request("https://example.com/v1/messages", {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({
+				model: "gpt-5.6-terra",
+				max_tokens: 10,
+				metadata: {
+					user_id: JSON.stringify({
+						session_id: "11111111-1111-4111-8111-111111111111",
+					}),
+				},
+				messages: [{ role: "user", content: "hello" }],
+				...payload,
+			}),
+		});
+		const transformed = await new CodexProvider().transformRequestBody(
+			request,
+			account,
+		);
+		return { transformed, body: await transformed.json() };
+	};
+
+	it("native: derives session-id from the body prompt_cache_key, leaving the body alone", async () => {
+		const { transformed, body } = await nativeTransform({
+			prompt_cache_key: "client-key-1",
+		});
+
+		expect(transformed.headers.get("session-id")).toBe("client-key-1");
+		// The documented body field is forwarded untouched — it is what
+		// api.openai.com reads, and nothing here rewrites or drops it.
+		expect(body.prompt_cache_key).toBe("client-key-1");
+	});
+
+	it("native: a usable inbound session-id is preserved and outranks the body key", async () => {
+		const { transformed, body } = await nativeTransform(
+			{ prompt_cache_key: "body-key" },
+			{ "session-id": "client-session-42" },
+		);
+
+		expect(transformed.headers.get("session-id")).toBe("client-session-42");
+		expect(body.prompt_cache_key).toBe("body-key");
+	});
+
+	it("native: unusable body keys yield no session-id and leave the transport patches intact", async () => {
+		const unusable: Array<[string, Record<string, unknown>]> = [
+			["absent", {}],
+			["null", { prompt_cache_key: null }],
+			["non-string", { prompt_cache_key: 42 }],
+			["empty", { prompt_cache_key: "" }],
+			["whitespace-only", { prompt_cache_key: "   " }],
+			["CR/LF", { prompt_cache_key: "key\r\nInjected: 1" }],
+			["control chars", { prompt_cache_key: `a${String.fromCharCode(1)}b` }],
+			["DEL", { prompt_cache_key: `a${String.fromCharCode(127)}b` }],
+			["above ASCII", { prompt_cache_key: `a${String.fromCharCode(256)}b` }],
+			["emoji", { prompt_cache_key: String.fromCodePoint(0x1f642) }],
+		];
+
+		for (const [label, payload] of unusable) {
+			const { transformed, body } = await nativeTransform(payload);
+			// Asserted as one object so a failure names the case that broke.
+			expect({
+				label,
+				sessionId: transformed.headers.get("session-id"),
+				native: transformed.headers.get(NATIVE_RESPONSES_REQUEST_HEADER),
+				stream: body.stream,
+				store: body.store,
+				hasPreviousResponseId: "previous_response_id" in body,
+				promptCacheKey: body.prompt_cache_key ?? null,
+			}).toEqual({
+				label,
+				sessionId: null,
+				native: "1",
+				stream: true,
+				store: false,
+				hasPreviousResponseId: false,
+				// A rejected key is still forwarded in the body untouched.
+				promptCacheKey: payload.prompt_cache_key ?? null,
+			});
+		}
+	});
+
+	it("native: an unusable inbound session-id is dropped, not forwarded", async () => {
+		const { transformed } = await nativeTransform(
+			{},
+			{ "session-id": `bad${String.fromCharCode(1)}value` },
+		);
+
+		expect(transformed.headers.get("session-id")).toBeNull();
+	});
+
+	it("native: an unusable inbound session-id falls back to the body key", async () => {
+		const { transformed } = await nativeTransform(
+			{ prompt_cache_key: "body-key" },
+			{ "session-id": `bad${String.fromCharCode(1)}value` },
+		);
+
+		expect(transformed.headers.get("session-id")).toBe("body-key");
+	});
+
+	it("native: a padded body key emits the trimmed header and keeps the padded body value", async () => {
+		const { transformed, body } = await nativeTransform({
+			prompt_cache_key: "  padded-key  ",
+		});
+
+		expect(transformed.headers.get("session-id")).toBe("padded-key");
+		expect(body.prompt_cache_key).toBe("  padded-key  ");
+	});
+
+	it("native: a non-chatgpt.com endpoint gets no session-id and keeps inbound headers as they arrived", async () => {
+		const account = codexAccount({
+			custom_endpoint: "https://my-openai-proxy.example.com/v1",
+		});
+
+		const derived = await nativeTransform(
+			{ prompt_cache_key: "body-key" },
+			{},
+			account,
+		);
+		expect(derived.transformed.headers.get("session-id")).toBeNull();
+		expect(derived.body.prompt_cache_key).toBe("body-key");
+
+		const inbound = await nativeTransform(
+			{ prompt_cache_key: "body-key" },
+			{ "session-id": `bad${String.fromCharCode(1)}value` },
+			account,
+		);
+		expect(inbound.transformed.headers.get("session-id")).toBe(
+			`bad${String.fromCharCode(1)}value`,
+		);
+		expect(inbound.body.prompt_cache_key).toBe("body-key");
+	});
+
+	it("translated: the derived key is sent as session-id and stays in the body", async () => {
+		const { transformed, body } = await translatedTransform({});
+
+		expect(body.prompt_cache_key).toMatch(/^clankermux-convo-[0-9a-f]{45}$/);
+		expect(transformed.headers.get("session-id")).toBe(body.prompt_cache_key);
+	});
+
+	it("translated: api.openai.com keeps the body key and gets no session-id header", async () => {
+		const { transformed, body } = await translatedTransform(
+			{},
+			codexAccount({ custom_endpoint: "https://api.openai.com/v1" }),
+		);
+
+		expect(body.prompt_cache_key).toMatch(/^clankermux-convo-[0-9a-f]{45}$/);
+		expect(transformed.headers.get("session-id")).toBeNull();
+	});
+});
+
 describe("CodexProvider ChatGPT-backend parameter sanitation", () => {
 	const codexAccount = (overrides: Record<string, unknown> = {}) =>
 		({
