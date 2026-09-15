@@ -25,7 +25,7 @@ import { primeUsagePollingForNewAccount } from "./account-usage-priming";
 const log = new Logger("API:Accounts");
 
 /** API-key accounts get a nominal 1-year expiry; there is no token to refresh. */
-const API_KEY_ACCOUNT_TTL_MS = 365 * 24 * 60 * 60 * 1000;
+export const API_KEY_ACCOUNT_TTL_MS = 365 * 24 * 60 * 60 * 1000;
 
 /** Where the value written to `accounts.api_key` comes from. */
 type ApiKeySource =

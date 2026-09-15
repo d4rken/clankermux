@@ -15,3 +15,4 @@ export { QwenReauthDialog } from "./QwenReauthDialog";
 export { RateLimitProgress } from "./RateLimitProgress";
 export { RecordPaymentDialog } from "./RecordPaymentDialog";
 export { RenameAccountDialog } from "./RenameAccountDialog";
+export { ZaiReauthDialog } from "./ZaiReauthDialog";

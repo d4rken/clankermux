@@ -9,7 +9,7 @@ import {
 } from "bun:test";
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
-import { api } from "../../api";
+import { type Account, api } from "../../api";
 import { AccountAddForm } from "./AccountAddForm";
 
 /**
@@ -20,8 +20,9 @@ import { AccountAddForm } from "./AccountAddForm";
  * `window.open` is therefore counted, not merely stubbed — zero calls is the
  * guarantee.
  *
- * All three legs are covered: the Anthropic/console code flow and the Codex and
- * Qwen device flows (which also surface a user code to copy).
+ * All four legs are covered: the Anthropic/console code flow, the Codex and
+ * Qwen device flows (which also surface a user code to copy), and the Z.AI
+ * sign-in whose redirect URL comes back by paste.
  *
  * Mounted for real rather than rendered to static markup: the link only exists
  * after the init call resolves, which needs a click and a state transition.
@@ -68,6 +69,10 @@ function byText<T extends Element>(selector: string, text: string): T {
 
 function renderForm(
 	onAddAccount: () => Promise<{ authUrl: string; sessionId: string }>,
+	callbacks: {
+		onSuccess?: () => void;
+		onError?: (message: string) => void;
+	} = {},
 ): Promise<void> {
 	host = document.createElement("div");
 	document.body.appendChild(host);
@@ -88,8 +93,8 @@ function renderForm(
 				onAddOllamaCloudAccount={async () => {}}
 				onAddGrokAccount={async () => {}}
 				onCancel={() => {}}
-				onSuccess={() => {}}
-				onError={() => {}}
+				onSuccess={callbacks.onSuccess ?? (() => {})}
+				onError={callbacks.onError ?? (() => {})}
 			/>,
 		);
 	});
@@ -383,5 +388,120 @@ describe.each(
 
 		expect(document.querySelector(`a[href="${AUTH_URL}"]`)).not.toBeNull();
 		expect(openCalls).toBe(0);
+	});
+});
+
+const ZAI_LOGIN = {
+	sessionId: "zai-session-1",
+	authUrl: "https://chat.z.ai/api/oauth/authorize?client_id=abc&state=xyz",
+	expiresAt: Date.now() + 600_000,
+};
+const REDIRECT_URL =
+	"http://localhost:54548/callback?code=one-use-code&state=xyz";
+
+/** Mount the form on the Z.AI leg with an account name already entered. */
+async function mountZaiLeg(
+	callbacks: {
+		onSuccess?: () => void;
+		onError?: (message: string) => void;
+	} = {},
+): Promise<void> {
+	await renderForm(
+		async () => ({ authUrl: AUTH_URL, sessionId: "session-1" }),
+		callbacks,
+	);
+	await selectMode("z.ai");
+	await act(async () => {
+		typeInto(
+			document.querySelector("#name") as HTMLInputElement,
+			"work-account",
+		);
+	});
+}
+
+describe("AccountAddForm — Z.AI sign-in hand-off", () => {
+	it("hands over the authorization link and asks for the redirect URL, opening nothing", async () => {
+		const start = spyOn(api, "startZaiLogin").mockResolvedValue(ZAI_LOGIN);
+		await renderForm(async () => ({ authUrl: AUTH_URL, sessionId: "s" }));
+		await selectMode("z.ai");
+		expect(
+			byText<HTMLButtonElement>("button", "Sign in with Z.AI").disabled,
+		).toBe(true);
+		await act(async () => {
+			typeInto(
+				document.querySelector("#name") as HTMLInputElement,
+				"work-account",
+			);
+		});
+		await act(async () => {
+			byText<HTMLButtonElement>("button", "Sign in with Z.AI").click();
+		});
+
+		expect(start).toHaveBeenCalledWith({ name: "work-account", priority: 0 });
+		const link = document.querySelector<HTMLAnchorElement>(
+			`a[href="${ZAI_LOGIN.authUrl}"]`,
+		);
+		expect(link?.textContent).toBe("Open authorization page");
+		expect(
+			document.querySelector('button[title="Copy authorization link"]'),
+		).not.toBeNull();
+		expect(document.querySelector("#zai-redirect")).not.toBeNull();
+		expect(document.body.textContent).toContain("localhost:54548");
+		expect(openCalls).toBe(0);
+	});
+
+	it("completes the sign-in with the pasted redirect URL", async () => {
+		spyOn(api, "startZaiLogin").mockResolvedValue(ZAI_LOGIN);
+		const complete = spyOn(api, "completeZaiLogin").mockResolvedValue({
+			message: "added",
+			account: {} as Account,
+		});
+		const onSuccess = mock(() => {});
+		await mountZaiLeg({ onSuccess });
+		await act(async () => {
+			byText<HTMLButtonElement>("button", "Sign in with Z.AI").click();
+		});
+		expect(
+			byText<HTMLButtonElement>("button", "Complete Z.AI sign-in").disabled,
+		).toBe(true);
+		await act(async () => {
+			typeInto(
+				document.querySelector("#zai-redirect") as HTMLInputElement,
+				` ${REDIRECT_URL} `,
+			);
+		});
+		await act(async () => {
+			byText<HTMLButtonElement>("button", "Complete Z.AI sign-in").click();
+		});
+
+		expect(complete).toHaveBeenCalledWith({
+			sessionId: ZAI_LOGIN.sessionId,
+			code: REDIRECT_URL,
+		});
+		expect(onSuccess).toHaveBeenCalledTimes(1);
+		expect(openCalls).toBe(0);
+	});
+
+	it("reports a failed sign-in through the form's error channel", async () => {
+		spyOn(api, "startZaiLogin").mockRejectedValue(
+			new Error("Z.AI login limit reached; wait for existing links to expire"),
+		);
+		const onError = mock((_message: string) => {});
+		await mountZaiLeg({ onError });
+		await act(async () => {
+			byText<HTMLButtonElement>("button", "Sign in with Z.AI").click();
+		});
+
+		expect(onError).toHaveBeenCalledWith(
+			"Z.AI login limit reached; wait for existing links to expire",
+		);
+		expect(document.querySelector("#zai-redirect")).toBeNull();
+	});
+
+	it("keeps the paste-an-API-key path available", async () => {
+		await mountZaiLeg();
+		const key = document.querySelector<HTMLInputElement>("#apiKey");
+		expect(key?.type).toBe("password");
+		expect(key?.getAttribute("placeholder")).toBe("Enter your z.ai API key");
 	});
 });
