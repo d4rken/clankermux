@@ -169,6 +169,7 @@ export const PROVIDER_CONFIG: Record<ProviderName, ProviderConfig> = {
 		requiresSessionTracking: false, // xAI is pay-as-you-go; no session windows
 		supportsUsageTracking: false, // balance lives behind management-api.x.ai and needs a Management Key
 		supportsOAuth: false,
+		honoursCustomEndpoint: false,
 		defaultEndpoint: "https://api.x.ai",
 	},
 } as const satisfies Record<ProviderName, ProviderConfig>;
