@@ -37,7 +37,7 @@ import {
 } from "./providers/devin/client";
 import { isGenuineWindowRoll } from "./window-reset";
 import {
-	fetchZaiUsageData,
+	fetchZaiUsage,
 	getRepresentativeZaiTokenWindow,
 	getRepresentativeZaiUtilization,
 	type ZaiUsageData,
@@ -1935,9 +1935,17 @@ class UsageCache {
 				return { success: true, retryAfterMs: null };
 			} else if (provider === "zai") {
 				// Fetch Zai usage data
-				data = await fetchZaiUsageData(token);
+				const outcome = await fetchZaiUsage(token);
 				if (!this.isLiveFetchGeneration(accountId, generation, tokenProvider))
 					return superseded;
+				if (outcome.status === "unrecognized") {
+					// The endpoint answered; we could not read its quota rows. Nothing to
+					// cache, but nothing failed — a failure here would back the poller
+					// off toward MAX_BACKOFF_MS and space out the very warning that
+					// names the unreadable type.
+					return { success: true, retryAfterMs: null };
+				}
+				data = outcome.status === "ok" ? outcome.data : null;
 				if (data) {
 					// Import Zai helper functions
 					const {

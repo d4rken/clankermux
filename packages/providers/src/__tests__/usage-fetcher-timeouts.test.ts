@@ -11,14 +11,15 @@ import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { mockFetch } from "@clankermux/test-support";
 import { fetchAlibabaCodingPlanUsageData } from "../alibaba-coding-plan-usage-fetcher";
 import { fetchKiloUsageData } from "../kilo-usage-fetcher";
-import { fetchZaiUsageData } from "../zai-usage-fetcher";
+import { fetchZaiUsage } from "../zai-usage-fetcher";
 
 type Fetcher = (apiKey: string) => Promise<unknown>;
 
-const FETCHERS: Array<[string, Fetcher]> = [
-	["zai", fetchZaiUsageData],
-	["kilo", fetchKiloUsageData],
-	["alibaba-coding-plan", fetchAlibabaCodingPlanUsageData],
+/** Each fetcher paired with the value it degrades to when the fetch fails. */
+const FETCHERS: Array<[string, Fetcher, unknown]> = [
+	["zai", fetchZaiUsage, { status: "failed" }],
+	["kilo", fetchKiloUsageData, null],
+	["alibaba-coding-plan", fetchAlibabaCodingPlanUsageData, null],
 ];
 
 describe("third-party usage fetchers are timeout-bounded", () => {
@@ -31,7 +32,7 @@ describe("third-party usage fetchers are timeout-bounded", () => {
 		globalThis.fetch = originalFetch;
 	});
 
-	for (const [name, fetcher] of FETCHERS) {
+	for (const [name, fetcher, degraded] of FETCHERS) {
 		it(`${name}: passes an AbortSignal to fetch`, async () => {
 			let seenSignal: AbortSignal | null | undefined;
 			globalThis.fetch = (async (
@@ -51,12 +52,12 @@ describe("third-party usage fetchers are timeout-bounded", () => {
 			expect(seenSignal?.aborted).toBe(false);
 		});
 
-		it(`${name}: an aborted fetch degrades to null, not a throw`, async () => {
+		it(`${name}: an aborted fetch degrades to a value, not a throw`, async () => {
 			globalThis.fetch = mockFetch(async () => {
 				throw new DOMException("The operation was aborted.", "AbortError");
 			});
 
-			await expect(fetcher("test-key")).resolves.toBeNull();
+			await expect(fetcher("test-key")).resolves.toEqual(degraded);
 		});
 
 		it(`${name}: clears the timer so the process is not held open`, async () => {
