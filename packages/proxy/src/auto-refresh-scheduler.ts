@@ -557,9 +557,8 @@ export class AutoRefreshScheduler {
 	 *                   update lastRefreshResetTime from observation.earliestResetMs
 	 *                   when present, clear the consecutive-failure counter, and run
 	 *                   the SAME overage-resume the translated path did.
-	 *   - `completed` + !responseOk (429/5xx) → recordRefreshFailure. The cooldown /
-	 *                   rate_limit_reset were already applied by the applicator; the
-	 *                   scheduler MUST NOT touch them here.
+	 *   - `completed` + !responseOk → quota/overload refusals are neutral;
+	 *                   other failures count toward the pause threshold.
 	 */
 	private async handleCodexPrimeOutcome(
 		accountRow: AutoRefreshAccountRow,
@@ -580,19 +579,14 @@ export class AutoRefreshScheduler {
 				return;
 			case "completed": {
 				if (!result.responseOk) {
-					// A 529 (overloaded) is a transient capacity signal, not a broken
-					// endpoint — same provider-independent rule as the translated
-					// auto-refresh path. Treat it as neutral: neither count it toward
-					// the re-auth threshold nor reset a prior genuine failure streak.
-					if (result.responseStatus === 529) {
+					// Quota and overload refusals do not prove the account is broken.
+					// Preserve any genuine failure streak without advancing it.
+					if (result.responseStatus === 429 || result.responseStatus === 529) {
 						log.warn(
-							`Codex scheduled prime for ${accountRow.name} received 529 (overloaded); treating as neutral, not a failure`,
+							`Codex scheduled prime for ${accountRow.name} received ${result.responseStatus}; treating as neutral, not a failure`,
 						);
 						return;
 					}
-					// 429/5xx: the coordinator/applicator already persisted any reset and
-					// applied the 429 cooldown — do NOT re-apply it here. Just count the
-					// failure toward the re-auth threshold, matching the old failure path.
 					await this.recordRefreshFailure(
 						accountRow.id,
 						accountRow.name,

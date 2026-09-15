@@ -31,7 +31,7 @@ import {
 	sanitizeChatGptBackendBody,
 } from "./backend-params";
 import { extractCodexIdentity } from "./identity";
-import { normalizeCodexInputUsage } from "./usage";
+import { normalizeCodexInputUsage, parseCodexUsageHeaders } from "./usage";
 
 const log = new Logger("CodexProvider");
 
@@ -1020,7 +1020,7 @@ export class CodexProvider extends BaseProvider {
 			parseReset(response.headers.get("x-codex-secondary-reset-at")),
 			parseReset(response.headers.get("x-codex-5h-reset-at")),
 			parseReset(response.headers.get("x-codex-7d-reset-at")),
-		].filter((v): v is number => v !== undefined);
+		].filter((v): v is number => v !== undefined && Number.isFinite(v));
 
 		// Use the sooner (smallest) reset time
 		const resetTime = resets.length > 0 ? Math.min(...resets) : undefined;
@@ -1030,9 +1030,23 @@ export class CodexProvider extends BaseProvider {
 			return { isRateLimited: false, resetTime };
 		}
 
+		const now = Date.now();
+		const futureResets = resets.filter((reset) => reset > now);
+		const fallbackReset =
+			futureResets.length > 0 ? Math.min(...futureResets) : undefined;
+		const usage = parseCodexUsageHeaders(response.headers, { baseTimeMs: now });
+		let exhaustedReset: number | undefined;
+		// A weekly 100% window with four days left still blocks after an empty
+		// 5h window resets. All exhausted windows must reset before retrying.
+		for (const window of [usage?.five_hour, usage?.seven_day]) {
+			if (!window || window.utilization < 100 || !window.resets_at) continue;
+			const reset = Date.parse(window.resets_at);
+			if (!Number.isFinite(reset) || reset <= now) continue;
+			exhaustedReset = Math.max(exhaustedReset ?? reset, reset);
+		}
 		return {
 			isRateLimited: true,
-			resetTime: resetTime ?? Date.now() + 60 * 60 * 1000,
+			resetTime: exhaustedReset ?? fallbackReset ?? now + 60 * 60 * 1000,
 		};
 	}
 
