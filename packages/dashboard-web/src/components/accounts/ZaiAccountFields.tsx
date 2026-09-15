@@ -69,11 +69,10 @@ export function ZaiAccountFields({
 							id="zai-redirect-help"
 							className="text-sm leading-relaxed text-muted-foreground"
 						>
-							After signing in, the browser is sent to a localhost:54548 address
-							it cannot load. That failed page is the result: copy its whole URL
-							out of the address bar and paste it below. The whole URL is
-							needed, not just the code. Finish this sign-in within 10 minutes
-							of generating the link.
+							After signing in, the browser lands on a zcode.z.ai page whose
+							address bar carries the code: copy that whole URL and paste it
+							below. The whole URL is needed, not just the code. Finish this
+							sign-in within 10 minutes of generating the link.
 						</p>
 						<div className="flex flex-col gap-item">
 							<Label htmlFor="zai-redirect">Redirect URL</Label>

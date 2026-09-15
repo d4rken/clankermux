@@ -397,7 +397,7 @@ const ZAI_LOGIN = {
 	expiresAt: Date.now() + 600_000,
 };
 const REDIRECT_URL =
-	"http://localhost:54548/callback?code=one-use-code&state=xyz";
+	"https://zcode.z.ai/cn/oauth/callback?code=one-use-code&state=xyz";
 
 /** Mount the form on the Z.AI leg with an account name already entered. */
 async function mountZaiLeg(
@@ -446,7 +446,7 @@ describe("AccountAddForm — Z.AI sign-in hand-off", () => {
 			document.querySelector('button[title="Copy authorization link"]'),
 		).not.toBeNull();
 		expect(document.querySelector("#zai-redirect")).not.toBeNull();
-		expect(document.body.textContent).toContain("localhost:54548");
+		expect(document.body.textContent).toContain("zcode.z.ai");
 		expect(openCalls).toBe(0);
 	});
 

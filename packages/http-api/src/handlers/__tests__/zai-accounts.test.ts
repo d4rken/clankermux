@@ -103,7 +103,7 @@ describe("Z.AI account sign-in", () => {
 		const response = await handlers.complete(
 			post({
 				sessionId,
-				code: "http://localhost:54548/callback?code=c&state=s",
+				code: "https://zcode.z.ai/cn/oauth/callback?code=c&state=s",
 			}),
 		);
 		expect(response.status).toBe(200);

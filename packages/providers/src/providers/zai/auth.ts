@@ -17,7 +17,7 @@ const TOKEN_URL = "https://zcode.z.ai/api/v1/oauth/token";
 const BIZ_BASE = "https://api.z.ai";
 /** Exchanges the OAuth access token for the token the business API accepts. */
 const BUSINESS_LOGIN_URL = `${BIZ_BASE}/api/auth/z/login`;
-const REDIRECT_URI = "http://localhost:54548/callback";
+const REDIRECT_URI = "https://zcode.z.ai/oauth/callback";
 /** Our own key name, so sign-in never mutates ZCode's `zcode-api-key`. */
 const KEY_NAME = "clankermux";
 const LOGIN_TTL_MS = 10 * 60_000;
