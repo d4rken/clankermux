@@ -181,12 +181,7 @@ describe("Chat ingress request contract", () => {
 			messages: [
 				{
 					role: "user",
-					content: [
-						{
-							type: "image_url",
-							image_url: { url: "https://example.test/a.png" },
-						},
-					],
+					content: [{ type: "input_audio", input_audio: { data: "AA" } }],
 				},
 			],
 		},

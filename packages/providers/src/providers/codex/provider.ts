@@ -164,6 +164,20 @@ export const CODEX_PING_MODEL = "gpt-5.4-mini";
 // subsequent turn bloats context and destroys prompt-cache reuse.
 const CODEX_MAX_STRUCTURED_BLOCK_CHARS = 8_192;
 
+/**
+ * Documents have no Responses item shape this backend is known to accept, so
+ * they are announced instead of translated. The marker is what the model reads
+ * in place of the attachment, so it says the removal happened rather than
+ * leaving the turn looking as though nothing was attached.
+ *
+ *   media_type "application/pdf" →
+ *     "[application/pdf document removed: not supported on this backend]"
+ */
+const documentRemovalMarker = (mediaType: string | undefined) => {
+	const label = mediaType?.trim();
+	return `[${label ? `${label} ` : ""}document removed: not supported on this backend]`;
+};
+
 const _normalizeUsage = (value: unknown): Record<string, number> => {
 	const usage =
 		typeof value === "object" && value !== null
@@ -225,6 +239,11 @@ interface CodexOutputTextItem {
 	text: string;
 }
 
+interface CodexInputImageItem {
+	type: "input_image";
+	image_url: string;
+}
+
 interface CodexFunctionCallItem {
 	type: "function_call";
 	call_id: string;
@@ -243,6 +262,7 @@ interface CodexFunctionCallOutputItem {
 type CodexContentItem =
 	| CodexInputTextItem
 	| CodexOutputTextItem
+	| CodexInputImageItem
 	| CodexFunctionCallItem
 	| CodexFunctionCallOutputItem;
 
@@ -302,8 +322,27 @@ interface AnthropicToolResult {
 		  }>;
 }
 
+interface AnthropicAttachmentSource {
+	type?: string;
+	media_type?: string;
+	data?: string;
+	url?: string;
+}
+
+interface AnthropicImageContent {
+	type: "image";
+	source?: AnthropicAttachmentSource;
+}
+
+interface AnthropicDocumentContent {
+	type: "document";
+	source?: AnthropicAttachmentSource;
+}
+
 type AnthropicContentBlock =
 	| AnthropicTextContent
+	| AnthropicImageContent
+	| AnthropicDocumentContent
 	| AnthropicToolUse
 	| AnthropicToolResult;
 
@@ -1100,6 +1139,38 @@ export class CodexProvider extends BaseProvider {
 		return parts.join("\n");
 	}
 
+	/**
+	 * Build the `image_url` a Responses `input_image` item carries from an
+	 * Anthropic image source. Base64 sources become a data URL; url sources are
+	 * forwarded once their scheme is one the backend can fetch over the network.
+	 * A `file:` or `blob:` url would otherwise be handed to whatever host serves
+	 * the request. Anything else throws rather than degrading, because the two
+	 * ways to degrade are both worse than a stated error: dropping the block
+	 * makes the model answer as if no image was sent, and an empty item is a body
+	 * the backend rejects with a message that says nothing about the cause.
+	 */
+	private imageUrlFromSource(source: AnthropicAttachmentSource | undefined) {
+		if (source?.type === "base64") {
+			const mediaType = source.media_type?.trim();
+			const data = source.data;
+			if (mediaType && typeof data === "string" && data.length > 0) {
+				return `data:${mediaType};base64,${data}`;
+			}
+		}
+		if (source?.type === "url") {
+			const url = source.url?.trim();
+			if (url) {
+				if (url.startsWith("https://") || url.startsWith("http://")) return url;
+				throw new ValidationError(
+					`unsupported image source url scheme: ${url.split(":", 1)[0]}`,
+				);
+			}
+		}
+		throw new ValidationError(
+			`unsupported image source: ${String(source?.type ?? "missing")}`,
+		);
+	}
+
 	private convertMessage(
 		msg: AnthropicMessage,
 	): (CodexMessage | CodexFunctionCallItem | CodexFunctionCallOutputItem)[] {
@@ -1122,27 +1193,42 @@ export class CodexProvider extends BaseProvider {
 			return items;
 		}
 
-		// Complex content array: may contain tool_use, tool_result, text.
-		// Preserve source order so Codex sees the same block chronology the client
-		// sent — outputs stay adjacent to their calls, and follow-up text stays
-		// after the results it refers to. Consecutive text blocks batch into one
-		// message wrapper; function_call* items are top-level.
-		let pendingText: CodexContentItem[] = [];
-		const flushText = () => {
-			if (pendingText.length === 0) return;
-			items.push({ role, content: pendingText } as CodexMessage);
-			pendingText = [];
+		// Complex content array: may contain tool_use, tool_result, text, image,
+		// document. Preserve source order so Codex sees the same block chronology
+		// the client sent — outputs stay adjacent to their calls, and follow-up
+		// text stays after the results it refers to. Consecutive message-content
+		// blocks batch into one wrapper; function_call* items are top-level.
+		let pendingContent: CodexContentItem[] = [];
+		const flushContent = () => {
+			if (pendingContent.length === 0) return;
+			items.push({ role, content: pendingContent } as CodexMessage);
+			pendingContent = [];
 		};
 
 		for (const block of msg.content) {
 			if (!block || typeof block !== "object") continue;
 			if (block.type === "text") {
-				pendingText.push({
+				pendingContent.push({
 					type: textType,
 					text: block.text,
 				} as CodexContentItem);
+			} else if (block.type === "image") {
+				if (role !== "user") {
+					throw new ValidationError(
+						`image content is only supported on user messages, not ${role}`,
+					);
+				}
+				pendingContent.push({
+					type: "input_image",
+					image_url: this.imageUrlFromSource(block.source),
+				});
+			} else if (block.type === "document") {
+				pendingContent.push({
+					type: textType,
+					text: documentRemovalMarker(block.source?.media_type),
+				} as CodexContentItem);
 			} else if (block.type === "tool_use") {
-				flushText();
+				flushContent();
 				items.push({
 					type: "function_call",
 					call_id: block.id,
@@ -1153,7 +1239,7 @@ export class CodexProvider extends BaseProvider {
 					status: "completed",
 				});
 			} else if (block.type === "tool_result") {
-				flushText();
+				flushContent();
 				const serialized = this.serializeToolResultContent(block.content);
 				items.push({
 					type: "function_call_output",
@@ -1164,7 +1250,7 @@ export class CodexProvider extends BaseProvider {
 				});
 			}
 		}
-		flushText();
+		flushContent();
 
 		return items;
 	}
