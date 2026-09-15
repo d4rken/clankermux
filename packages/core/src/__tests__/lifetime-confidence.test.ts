@@ -1,7 +1,11 @@
 import { describe, expect, it } from "bun:test";
 import {
+	canonicalWindowKind,
 	usageObservedAtMs,
+	WEEKLY_RED_MIN_WINDOW_AGE_MS,
 	weeklyLifetimeConfidence,
+	weeklyRedEligible,
+	windowBurnAnchor,
 } from "../lifetime-confidence";
 
 /**
@@ -52,5 +56,64 @@ describe("usageObservedAtMs", () => {
 		expect(usageObservedAtMs(undefined)).toBeNull();
 		expect(usageObservedAtMs("")).toBeNull();
 		expect(usageObservedAtMs("not a date")).toBeNull();
+	});
+});
+
+const HOUR_MS = 60 * 60_000;
+
+describe("canonicalWindowKind", () => {
+	it("maps Zai's render-loop names onto the account-wide window kinds", () => {
+		expect(canonicalWindowKind("tokens_limit")).toBe("five_hour");
+		expect(canonicalWindowKind("tokens_limit_weekly")).toBe("seven_day");
+	});
+
+	it("leaves every other name, and null, exactly as given", () => {
+		for (const kind of [
+			"five_hour",
+			"seven_day",
+			"seven_day_opus",
+			"weekly_scoped:fable",
+			"time_limit",
+			"weekly",
+			"monthly",
+			null,
+		]) {
+			expect(canonicalWindowKind(kind)).toBe(kind);
+		}
+	});
+});
+
+/**
+ * Zai reports the same two account-wide windows Anthropic does, under its own
+ * names. Each policy below keys on the canonical kind, so the projection an
+ * account gets does not depend on which provider's vocabulary named the window.
+ */
+describe("Zai window kinds reach the account-wide policies", () => {
+	it("gives the Zai weekly window the same full-confidence lifetime average", () => {
+		expect(weeklyLifetimeConfidence("tokens_limit_weekly")).toBe("full");
+		// The five-hour window keeps the regression and the amber cap, under
+		// either name.
+		expect(weeklyLifetimeConfidence("tokens_limit")).toBeUndefined();
+	});
+
+	it("resolves a burn anchor for both Zai windows", () => {
+		const anchors = {
+			fiveHour: { anchorMs: 1, anchorPct: 3, windowResetMs: 2 },
+			sevenDay: { anchorMs: 4, anchorPct: 5, windowResetMs: 6 },
+		};
+		expect(windowBurnAnchor(anchors, "tokens_limit")).toBe(anchors.fiveHour);
+		expect(windowBurnAnchor(anchors, "tokens_limit_weekly")).toBe(
+			anchors.sevenDay,
+		);
+	});
+
+	it("holds the Zai weekly window to the same 72-hour red floor", () => {
+		expect(weeklyRedEligible("tokens_limit_weekly", 71 * HOUR_MS)).toBe(false);
+		expect(
+			weeklyRedEligible("tokens_limit_weekly", WEEKLY_RED_MIN_WINDOW_AGE_MS),
+		).toBe(true);
+		expect(weeklyRedEligible("tokens_limit_weekly", null)).toBe(false);
+		// The five-hour window is not this rule's business under either name.
+		expect(weeklyRedEligible("tokens_limit", 2 * HOUR_MS)).toBe(true);
 	});
 });

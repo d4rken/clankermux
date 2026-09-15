@@ -61,6 +61,50 @@ describe("RateLimitProgress", () => {
 		expect(html).toContain("5-hour");
 	});
 
+	it("serves Zai's weekly window the server's regression prediction", () => {
+		// Zai names its account-wide windows `tokens_limit` / `tokens_limit_weekly`.
+		// The margin below is the server prediction's; the single-snapshot fallback
+		// projects from 70% over an elapsed 96h and cannot produce it.
+		const HOUR = 60 * 60 * 1000;
+		const now = Date.now();
+		const weeklyResetMs = now + 72 * HOUR;
+		const html = renderToStaticMarkup(
+			<RateLimitProgress
+				resetIso={new Date(weeklyResetMs).toISOString()}
+				usageUtilization={70}
+				usageWindow="tokens_limit_weekly"
+				usageData={{
+					time_limit: null,
+					tokens_limit: null,
+					tokens_limit_weekly: {
+						used: 7000,
+						remaining: 3000,
+						percentage: 70,
+						resetAt: weeklyResetMs,
+						type: "tokens_limit_weekly",
+					},
+				}}
+				provider="zai"
+				showWeekly
+				inlineProjection
+				prediction={{
+					fiveHour: undefined,
+					sevenDay: {
+						state: "rising",
+						slopePerHour: 1,
+						etaExhaustMs: weeklyResetMs - 10 * HOUR,
+						predictedAtReset: null,
+						resetsAtMs: weeklyResetMs,
+						willExhaustBeforeReset: true,
+						lowConfidence: false,
+					},
+				}}
+			/>,
+		);
+
+		expect(html).toContain("Runs out 10h 0m before reset");
+	});
+
 	it("says a window the provider has not started yet is not a deadline", () => {
 		// Nothing spent AND the structural start tracks the reading: the provider
 		// re-stamps `resets_at = now + 5h` on every poll until the first request

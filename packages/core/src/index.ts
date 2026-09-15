@@ -152,6 +152,7 @@ export {
 } from "./interval-manager";
 export * from "./lifecycle";
 export {
+	canonicalWindowKind,
 	usageObservedAtMs,
 	WEEKLY_RED_MIN_WINDOW_AGE_MS,
 	weeklyLifetimeConfidence,

@@ -1,4 +1,5 @@
 import {
+	canonicalWindowKind,
 	computeExpectedPct as computeExpectedPctForReset,
 	computeThrottleResumeAt,
 	computeWindowStartMs,
@@ -71,16 +72,17 @@ interface RateLimitProgressProps {
 }
 
 // Maps a render-loop window name to its server-computed prediction. Only the
-// primary Anthropic 5-hour and (unscoped) weekly windows have a server
-// prediction; scoped-weekly and all non-Anthropic windows return undefined and
-// fall through to the legacy single-snapshot projection.
+// two account-wide windows have one; scoped-weekly and every window with no
+// account-wide counterpart return undefined and fall through to the legacy
+// single-snapshot projection.
 function predictionForWindow(
 	prediction: AccountUsagePrediction | null | undefined,
 	window: string | null,
 ): UsagePrediction | undefined {
 	if (!prediction || !window) return undefined;
-	if (window === "five_hour") return prediction.fiveHour;
-	if (window === "seven_day") return prediction.sevenDay;
+	const kind = canonicalWindowKind(window);
+	if (kind === "five_hour") return prediction.fiveHour;
+	if (kind === "seven_day") return prediction.sevenDay;
 	return undefined;
 }
 
