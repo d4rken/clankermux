@@ -1212,6 +1212,18 @@ OAuth tokens will need to be re-authenticated.
 		);
 	}
 
+	async setObservedAccountWindowReset(
+		accountId: string,
+		resetMs: number,
+		expectedReset: number | null,
+	): Promise<boolean> {
+		return this.accounts.setObservedWindowReset(
+			accountId,
+			resetMs,
+			expectedReset,
+		);
+	}
+
 	async forceResetAccountRateLimit(accountId: string): Promise<boolean> {
 		const changes = await this.accounts.clearRateLimitState(accountId);
 		return changes >= 0;

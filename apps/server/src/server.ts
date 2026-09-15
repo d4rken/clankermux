@@ -1790,6 +1790,13 @@ Available endpoints:
 		// still state its family windows instead of looking like an account that
 		// reports none.
 		insertScopedSnapshots: (rows) => dbOps.insertScopedUsageSnapshots(rows),
+		// The only writer of `rate_limit_reset` for providers that report no
+		// rate-limit headers. Without it the column stays NULL for the account's
+		// whole life, which the auto-refresh scheduler reads as "window elapsed"
+		// (priming forever) and auto-unpause reads as "no window" (never
+		// resuming).
+		persistWindowReset: (accountId, resetMs, expectedReset) =>
+			dbOps.setObservedAccountWindowReset(accountId, resetMs, expectedReset),
 		// Persisted history for the weekly burn-slope fit that sizes the
 		// pool-liveness reserve's release horizon.
 		getRecentSnapshots: (accountIds, sinceMs) =>

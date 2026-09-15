@@ -479,6 +479,50 @@ export class AccountRepository extends BaseRepository<Account> {
 		);
 	}
 
+	/**
+	 * Write ONLY `rate_limit_reset`, from a window boundary the usage poller
+	 * observed. For providers that report no rate-limit headers, this is the sole
+	 * writer of the column — see `RESET_MIRROR_PROVIDERS` in the snapshot sampler.
+	 *
+	 * Deliberately NOT `updateRateLimitMeta`: that one also writes
+	 * `rate_limit_status` and `rate_limit_remaining`, which a usage observation
+	 * has nothing to say about, so reusing it would overwrite header-derived
+	 * values with nulls.
+	 *
+	 * Compare-and-set on `expectedReset` — the value the caller read before it
+	 * went away to observe. The sampler reads the account list, then awaits, so
+	 * anything that writes the column in that gap (notably
+	 * {@link stampObservedRateLimitReset}, which deliberately moves a reset
+	 * BACKWARDS to correct a stranded one) would otherwise be silently undone by
+	 * a write carrying the older cached reading. Losing the CAS is not an error:
+	 * the other writer had newer evidence, and the next tick re-reads.
+	 *
+	 * `IS` rather than `=` so the null case — the column's normal state for a
+	 * provider this is the first writer for — compares correctly in SQLite.
+	 *
+	 * `paused = 0` is pinned in the same statement rather than checked by the
+	 * caller. A pause does NOT clear this column, so comparing the reset alone
+	 * would still let a write land on an account that paused mid-tick. The caller
+	 * only observes ACTIVE accounts, so make that a condition of the write rather
+	 * than an assumption about timing.
+	 *
+	 * Returns true iff a row actually changed.
+	 */
+	async setObservedWindowReset(
+		accountId: string,
+		resetMs: number,
+		expectedReset: number | null,
+	): Promise<boolean> {
+		const changes = await this.runWithChanges(
+			`UPDATE accounts SET rate_limit_reset = ?
+			 WHERE id = ?
+			 	AND rate_limit_reset IS ?
+			 	AND COALESCE(paused, 0) = 0`,
+			[resetMs, accountId, expectedReset],
+		);
+		return changes > 0;
+	}
+
 	async clearRateLimitState(accountId: string): Promise<number> {
 		return this.runWithChanges(
 			`UPDATE accounts
