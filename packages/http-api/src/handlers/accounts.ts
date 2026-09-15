@@ -852,22 +852,20 @@ export async function listAccountResponses(
 				// TWO VIEWS (see the note above `liveUsageByAccount`): the weekly class
 				// is read from the 30-minute display horizon, the fast-moving session
 				// class from the 10-minute routing-fresh view.
-				let accountWideExhausted: {
+				const exhaustion = accountWideExhaustionFor(
+					account.provider ?? "anthropic",
+					usageData as FullUsageData | null,
+					now,
+					(routingFreshUsageByAccount.get(account.id) ??
+						null) as FullUsageData | null,
+				);
+				const accountWideExhausted: {
 					resetMs: number | null;
 					binding: UsageExhaustionBinding;
-				} | null = null;
-				{
-					const { exhausted, resetMs, binding } = accountWideExhaustionFor(
-						account.provider ?? "anthropic",
-						usageData as FullUsageData | null,
-						now,
-						(routingFreshUsageByAccount.get(account.id) ??
-							null) as FullUsageData | null,
-					);
-					if (exhausted && binding !== null) {
-						accountWideExhausted = { resetMs, binding };
-					}
-				}
+				} | null =
+					exhaustion.exhausted && exhaustion.binding !== null
+						? { resetMs: exhaustion.resetMs, binding: exhaustion.binding }
+						: null;
 
 				const rateLimitPresentation = resolveRateLimitPresentation(
 					{
