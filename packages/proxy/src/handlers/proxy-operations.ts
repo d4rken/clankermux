@@ -208,6 +208,14 @@ export function reportAbandonedRateLimitedBody(
  *  - `overload_529`    — provider overload (529) → provider-overload cooldown.
  *  - `model_not_found` — a forwarded model-not-found (404/400). (Not a `null`
  *                         return — recorded for completeness when applicable.)
+ *  - `server_error`    — a transient upstream 5xx (500/502/503/504). No cooldown
+ *                         is written: a server error is a fact about the request
+ *                         that just failed, not evidence about the account's
+ *                         quota, and the reason column feeds the dashboard and
+ *                         the auto-refresh scheduler. It is an ordinary
+ *                         account-wide failure, so the normal failover loop and
+ *                         the pre-hold seeding both keep the account out of the
+ *                         rest of the request (see isAccountWideFailure).
  *  - `network_error`   — a thrown error in the attempt (caught failover).
  *  - `overload_suppressed` — the attempt was refused BEFORE any upstream fetch
  *                         because the overload breaker denied admission: either
@@ -233,6 +241,7 @@ export type ProxyAttemptOutcome =
 	| { kind: "model_route_restricted" }
 	/** The model exists, but the account plan cannot serve it. */
 	| { kind: "model_not_entitled" }
+	| { kind: "server_error"; status: number }
 	| { kind: "network_error" }
 	| { kind: "other" };
 
@@ -251,6 +260,21 @@ const MODEL_REJECTION_OUTCOMES: ReadonlySet<ProxyAttemptOutcome["kind"]> =
  * callers and tests are unaffected.
  */
 export interface ProxyAttemptOptions {
+	/**
+	 * Whether a transient upstream 5xx (see TRANSIENT_SERVER_ERROR_STATUSES)
+	 * should be FORWARDED to the client rather than failed over.
+	 *
+	 * Deliberately NOT `isLastAccountAttempt`, even though the failover loop
+	 * passes the same expression to both. That predicate also governs the
+	 * `org_permission_denied` 403 policy, so a caller that supplied it purely to
+	 * describe its 5xx policy would silently change where a 403 fails over.
+	 * Two decisions, two options.
+	 *
+	 * Absent means forward — the caller has expressed no 5xx policy, so the
+	 * honest upstream error goes to the client instead of being converted into a
+	 * synthetic terminal. A caller that loops over candidates supplies it.
+	 */
+	forwardTransientServerError?: () => boolean;
 	/** True only when no account failover remains. Separate from the 529 flag,
 	 * which can stop early when all remaining accounts share the overloaded provider. */
 	isLastAccountAttempt?: () => boolean;
@@ -610,6 +634,20 @@ function filterThinkingBlocks(
 		return null;
 	}
 }
+
+/**
+ * Statuses treated as a transient upstream server error: the backend (or the
+ * organization behind this account) failed to serve the request, and a
+ * different account may well succeed.
+ *
+ * 529 is deliberately absent — Anthropic's overload has its own breaker,
+ * cooldown and probe lease. So is 501: it names a capability the endpoint does
+ * not implement, which is a deterministic answer rather than the transient
+ * condition this policy is about.
+ */
+const TRANSIENT_SERVER_ERROR_STATUSES: ReadonlySet<number> = new Set([
+	500, 502, 503, 504,
+]);
 
 /**
  * Checks if a response error is due to invalid thinking block signatures or thinking-related errors
@@ -2627,6 +2665,43 @@ export async function proxyWithAccount(
 			);
 		}
 
+		// Transient upstream server error. Sits BELOW the rate-limit ladder on
+		// purpose: a 5xx that carries hard quota headers is classified by
+		// `parseRateLimit` and handled above as the quota rejection it is, and
+		// `processProxyResponse` has already settled this account's recovery
+		// probe. What is left here is a plain server failure, which says nothing
+		// about the account and everything about the attempt.
+		//
+		// No cooldown is written. `applyRateLimitCooldown` replaces the deadline
+		// AND the reason with no max(), so benching a server error could shorten a
+		// live `out_of_credits` or `org_permission_denied` lock that is newer and
+		// longer — and `rate_limited_reason` is read by the dashboard and the
+		// auto-refresh scheduler, which would then describe a server outage as a
+		// quota state. Failing over is the whole remedy: the outcome is an ordinary
+		// account-wide failure, which the normal failover loop and the pre-hold
+		// seeding both use to keep this account out of the rest of the request.
+		// (`holdForNonCodexRecovery` deliberately ignores that bookkeeping for
+		// EVERY ordinary failure — see its comment — so a 5xx account can still be
+		// re-attempted by that hold on a later cooldown-driven pass.)
+		//
+		// The disposition comes from `forwardTransientServerError`, never from
+		// `isLastAccountAttempt`: see the option's doc for why the two must not be
+		// the same switch. Absent means forward, which is what every caller that
+		// does not loop over candidates wants.
+		if (
+			TRANSIENT_SERVER_ERROR_STATUSES.has(response.status) &&
+			options?.forwardTransientServerError &&
+			!options.forwardTransientServerError()
+		) {
+			log.warn(
+				`Account ${account.name} returned HTTP ${response.status} from ${account.provider} — failing over to the next account`,
+			);
+			return await fail(
+				{ kind: "server_error", status: response.status },
+				response,
+			);
+		}
+
 		if (
 			response.ok &&
 			isProtectedFamily(getModelFamily(activeUpstreamModel ?? ""))
@@ -2681,7 +2756,26 @@ export async function proxyWithAccount(
 			{ ...ctx, provider },
 		);
 	} catch (err) {
-		if (err instanceof RoutingPolicyError) throw err;
+		if (err instanceof RoutingPolicyError) {
+			// A policy rejection is not a failover: it propagates to dispatch and
+			// ends the request, carrying its own audit row (routing-dispatch sets
+			// `attemptRecorded`). So it must NOT go through `fail()` — that would
+			// emit a second outcome into the sink and a duplicate audit write.
+			//
+			// It still owns this attempt's cleanup, and `fail()` is the only place
+			// that used to do it. Two things are live at this point: a half-open
+			// overload-probe lease acquired before the send, and any upstream body
+			// acquired before the rejection (`sendAuthorizedRequest` re-checks
+			// account identity, model exclusion and permissions on EVERY send, so a
+			// body-repair retry can be rejected with the original response still
+			// owned). Leaving the lease held is the worse of the two: it is
+			// single-flight, so until its TTL expires — request timeout + stream
+			// timeout + margin — every other request is refused admission and fails
+			// over, precisely while the breaker is half-open and trying to recover.
+			settleOverloadProbe("abandoned", "attempt_failed");
+			discardUpstreamBody(liveUpstream);
+			throw err;
+		}
 		handleProxyError(err, account, log);
 		// Release any upstream body owned at the point of failure so a thrown
 		// error (e.g. mid-processResponse) doesn't leak its socket/read buffer.

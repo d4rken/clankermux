@@ -909,6 +909,11 @@ async function handleIngestedProxy(
 								isLastAccountAttempt: () =>
 									accounts.length === 1 ||
 									gates.everyRemainingCandidateUnattemptable(accounts, 0),
+								// Same expression, separate option on purpose: see
+								// ProxyAttemptOptions.forwardTransientServerError.
+								forwardTransientServerError: () =>
+									accounts.length === 1 ||
+									gates.everyRemainingCandidateUnattemptable(accounts, 0),
 								onOutcome: (o) => {
 									firstOutcome = o;
 									noteAttemptOutcome(o);
@@ -1153,6 +1158,11 @@ async function handleIngestedProxy(
 					{
 						signal: req.signal,
 						isLastAccountAttempt: () =>
+							i === list.length - 1 ||
+							gates.everyRemainingCandidateUnattemptable(list, i),
+						// Same expression, separate option on purpose: see
+						// ProxyAttemptOptions.forwardTransientServerError.
+						forwardTransientServerError: () =>
 							i === list.length - 1 ||
 							gates.everyRemainingCandidateUnattemptable(list, i),
 						onOutcome: (o) => {

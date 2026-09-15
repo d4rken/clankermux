@@ -503,9 +503,17 @@ export async function resolveZeroAccountsOutcome(
 						// rate-limit/overload as the honest terminal rather than
 						// collapsing it to null.
 						i === relaxCandidates.length - 1,
-						// Thread the client signal so a disconnect aborts the in-flight
-						// attempt instead of waiting for the upstream timeout.
-						{ signal: req.signal },
+						{
+							// Thread the client signal so a disconnect aborts the in-flight
+							// attempt instead of waiting for the upstream timeout.
+							signal: req.signal,
+							// This loop is a failover loop too: a transient 5xx on one
+							// relaxation candidate must try the next one rather than be
+							// forwarded as this path's answer. This IS the request's last
+							// resort, so the final candidate's 5xx is forwarded.
+							forwardTransientServerError: () =>
+								i === relaxCandidates.length - 1,
+						},
 					);
 				});
 				if (gated.suppressed) {
