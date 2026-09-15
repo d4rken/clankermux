@@ -35,6 +35,7 @@ import type {
 	Account,
 	AnthropicUsageData,
 	LoadBalancingStrategy,
+	ZaiUsageData,
 } from "@clankermux/types";
 import { toPublicAccountsDto } from "../../handlers/public/dto";
 import {
@@ -201,6 +202,27 @@ function anthropicUsage(
 	};
 }
 
+/** A Z.AI reading, in the shape the usage cache holds one. */
+function zaiUsage(fiveHourPct: number, weeklyPct: number): ZaiUsageData {
+	return {
+		time_limit: null,
+		tokens_limit: {
+			used: fiveHourPct,
+			remaining: 100 - fiveHourPct,
+			percentage: fiveHourPct,
+			resetAt: NOW + 3_600_000,
+			type: "tokens_limit",
+		},
+		tokens_limit_weekly: {
+			used: weeklyPct,
+			remaining: 100 - weeklyPct,
+			percentage: weeklyPct,
+			resetAt: NOW + 5 * 86_400_000,
+			type: "tokens_limit_weekly",
+		},
+	};
+}
+
 beforeEach(() => {
 	db = new Database(":memory:");
 	ensureSchema(db);
@@ -353,6 +375,36 @@ describe("windows replace three representations of one observation", () => {
 		expect(windowOf(snapshot, "seven_day")).toMatchObject({
 			utilizationPct: 44,
 			resetsAtMs: NOW + 2_000,
+		});
+	});
+
+	it("reads a Z.AI payload into the SAME vocabulary", async () => {
+		insertAccount({ provider: "zai" });
+		usageCache.set("acct-1", zaiUsage(10, 40));
+		const snapshot = await read();
+		expect(windowOf(snapshot, "five_hour")).toMatchObject({
+			utilizationPct: 10,
+			resetsAtMs: NOW + 3_600_000,
+		});
+		expect(windowOf(snapshot, "seven_day")).toMatchObject({
+			utilizationPct: 40,
+			resetsAtMs: NOW + 5 * 86_400_000,
+		});
+	});
+
+	it("reports a spent Z.AI account and the window it spent in ONE payload", async () => {
+		// The verdict and the windows are two readings of the same reading. A
+		// response that calls the account exhausted while its weekly window
+		// carries no value contradicts itself, and a consumer cannot tell which
+		// half to believe.
+		insertAccount({ provider: "zai" });
+		usageCache.set("acct-1", zaiUsage(10, 100));
+		const snapshot = await read();
+		expect(snapshot.accounts[0]?.cause).toBe("usage_exhausted");
+		expect(snapshot.accounts[0]?.availableAtMs).toBe(NOW + 5 * 86_400_000);
+		expect(windowOf(snapshot, "seven_day")).toMatchObject({
+			utilizationPct: 100,
+			resetsAtMs: NOW + 5 * 86_400_000,
 		});
 	});
 
