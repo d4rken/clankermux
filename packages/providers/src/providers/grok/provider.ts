@@ -12,8 +12,6 @@ export class GrokProvider extends BaseAnthropicCompatibleProvider {
 	}
 
 	getEndpoint(): string {
-		// No /v1 suffix: buildUrl concatenates this with the incoming path, which
-		// already carries one.
 		return "https://api.x.ai";
 	}
 }

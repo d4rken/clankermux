@@ -397,8 +397,6 @@ BUNDLED_PRICING.openai = {
 };
 
 // Verbatim from the models.dev `xai` base tier, snapshotted 2026-09-15.
-// `cache_write` is omitted wherever models.dev omits it, which is everywhere
-// under this key.
 BUNDLED_PRICING.xai = {
 	models: {
 		"grok-4.6": {
