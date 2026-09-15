@@ -13,6 +13,7 @@ import {
 	type RateLimitCause,
 	sanitizers,
 	TIME_CONSTANTS,
+	USAGE_HISTORY_PROVIDERS,
 	validateNumber,
 	validatePriority,
 	validateString,
@@ -720,16 +721,24 @@ export async function listAccountResponses(
 			}
 		}
 
-		// Last-known usage fallback: for Anthropic accounts whose live usage
-		// cache is empty (e.g. polling fails after the subscription lapsed),
-		// serve the most recent persisted usage snapshot so the dashboard can
-		// still show the weekly utilization and its reset date.
+		// Last-known usage fallback: for Anthropic and Zai accounts whose live
+		// usage cache is empty (e.g. polling fails after the subscription
+		// lapsed), serve the most recent persisted usage snapshot so the
+		// dashboard can still show the weekly utilization and its reset date.
+		// The snapshot row carries only provider-agnostic percentages and
+		// resets, so nothing below needs to know which provider it came from.
+		//
+		// Codex is deliberately NOT here: it has its own persisted fallback via
+		// the `codex_usage_json` column, and serving it from both would put two
+		// recoveries on one reading.
 		const staleCandidateIds = accounts
-			.filter(
-				(a) =>
-					(a.provider || "anthropic") === "anthropic" &&
-					!liveUsageByAccount.get(a.id),
-			)
+			.filter((a) => {
+				const provider = a.provider || "anthropic";
+				return (
+					(provider === "anthropic" || provider === "zai") &&
+					!liveUsageByAccount.get(a.id)
+				);
+			})
 			.map((a) => a.id);
 		const latestSnapshotByAccount = new Map(
 			(staleCandidateIds.length
@@ -1112,13 +1121,10 @@ export async function listAccountResponses(
 
 				// Revision anchors for the reading this response actually serves,
 				// keyed to ITS window resets — an anchor from another window instance
-				// must not ship with a reading it cannot re-anchor. Only the windowed
-				// providers ever have registry state.
+				// must not ship with a reading it cannot re-anchor. The registry is
+				// fed from the sampler, so only recorded providers have state in it.
 				let burnAnchors: AccountResponse["burnAnchors"] = null;
-				if (
-					(provider === "anthropic" || provider === "codex") &&
-					usageData != null
-				) {
+				if (USAGE_HISTORY_PROVIDERS.has(provider) && usageData != null) {
 					const fiveHourAnchor = getUsageRevisionAnchor(
 						account.id,
 						"five_hour",

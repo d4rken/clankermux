@@ -44,6 +44,24 @@ export const SEVEN_DAY_ELIGIBLE_PROVIDERS: ReadonlySet<string> = new Set([
 	"alibaba-coding-plan",
 ]);
 
+/**
+ * Providers whose account-wide readings are RECORDED into `usage_snapshots` and
+ * derived from afterwards: the history series, the exhaustion regression, the
+ * revision-anchor registry and the weekly burn slopes all read that one series,
+ * so they must agree on who is in it.
+ *
+ * Deliberately narrower than the two sets above. Reporting a window is not the
+ * same as having had the derivation layer verified against it — a provider
+ * joins this set when someone has checked what the snapshots, the regression
+ * and the anchors do with its payload, not merely because a percentage can be
+ * read out of it.
+ */
+export const USAGE_HISTORY_PROVIDERS: ReadonlySet<string> = new Set([
+	"anthropic",
+	"codex",
+	"zai",
+]);
+
 export function normalizeResetMs(
 	value: string | number | null | undefined,
 ): number | null {

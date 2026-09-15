@@ -339,6 +339,7 @@ export {
 	isZaiShape,
 	normalizeResetMs,
 	SEVEN_DAY_ELIGIBLE_PROVIDERS,
+	USAGE_HISTORY_PROVIDERS,
 } from "./usage-window-extract";
 export { levenshteinDistance } from "./utils";
 export {

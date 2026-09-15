@@ -8,8 +8,9 @@
  * spends quota or starts a dormant window.
  *
  * Design notes:
- *  - Only `anthropic` and `codex` accounts have the windowed `UsageData`
- *    (five_hour / seven_day). All other providers are excluded.
+ *  - Only the providers in `USAGE_HISTORY_PROVIDERS` are recorded; the rest have
+ *    no account-wide quota window, or none whose derived surfaces have been
+ *    verified against their payload.
  *  - The cache is kept warm WITHOUT the sampler's help, but the source differs by
  *    provider. For CODEX, real user traffic warms it: `updateAccountMetadata`
  *    writes `usageCache` through `applyCodexObservation` (Codex usage rides on
@@ -44,8 +45,11 @@
 
 import {
 	computeUsagePrediction,
+	extractFiveHour,
+	extractSevenDay,
 	intervalManager,
 	normalizeAnthropicUsage,
+	USAGE_HISTORY_PROVIDERS,
 } from "@clankermux/core";
 import { Logger } from "@clankermux/logger";
 import type { AnyUsageData, UsageData } from "@clankermux/providers";
@@ -57,6 +61,7 @@ import {
 import type {
 	Account,
 	AnthropicUsageData,
+	FullUsageData,
 	PredictionPoint,
 	ScopedUsageSnapshotRow,
 	UsageSnapshotRow,
@@ -121,12 +126,12 @@ interface SamplerAccount {
  * rows for one tick. All rows share the single `now` timestamp.
  *
  * Per account:
- *  - skip non-(anthropic|codex) providers entirely;
+ *  - skip providers outside `USAGE_HISTORY_PROVIDERS` entirely;
  *  - skip when the cache entry is absent or older than `freshnessMs` (no
  *    carry-forward);
  *  - skip when the entry carries NO observation time (see `buildSamplerRows`);
  *  - pull the session (5h) / account-wide weekly (7d) utilization + reset via
- *    `normalizeAnthropicUsage`, so a `limits[]`-only payload (upstream is
+ *    the shared extractors, so a `limits[]`-only Anthropic payload (upstream is
  *    dropping the flat five_hour/seven_day keys) still yields a row — otherwise
  *    the sawtooth graph and stale-usage recovery go blank for those accounts;
  *  - skip when BOTH windows are absent/null (nothing meaningful to record);
@@ -192,7 +197,7 @@ export function buildSamplerRows(
 
 	for (const account of accounts) {
 		const { id, provider } = account;
-		if (provider !== "anthropic" && provider !== "codex") continue;
+		if (!USAGE_HISTORY_PROVIDERS.has(provider)) continue;
 
 		// ONE read: data, age and provenance must describe the same entry.
 		const entry = cache.peekWithAge(id);
@@ -204,12 +209,18 @@ export function buildSamplerRows(
 		const data = entry.data as UsageData;
 		const observedAt = entry.observedAtMs;
 
+		// The account-wide windows come from the shared extractors, which read
+		// each provider's own payload shape. The scoped series stays on the
+		// Anthropic normalizer: it iterates `limits[]`, which no other shape has,
+		// so it is already a no-op elsewhere.
+		const fiveHour = extractFiveHour(entry.data as FullUsageData);
+		const sevenDay = extractSevenDay(entry.data as FullUsageData);
 		const normalized = normalizeAnthropicUsage(
 			data as unknown as AnthropicUsageData,
 			now,
 		);
-		const fiveHourPct = normalized.session?.utilization ?? null;
-		const sevenDayPct = normalized.weeklyAll?.utilization ?? null;
+		const fiveHourPct = fiveHour?.pct ?? null;
+		const sevenDayPct = sevenDay?.pct ?? null;
 
 		// If neither window contributes a utilization, there is nothing to plot.
 		if (fiveHourPct !== null || sevenDayPct !== null) {
@@ -218,9 +229,9 @@ export function buildSamplerRows(
 				provider,
 				sampledAt: now,
 				fiveHourPct,
-				fiveHourReset: normalized.session?.resetMs ?? null,
+				fiveHourReset: fiveHour?.resetMs ?? null,
 				sevenDayPct,
-				sevenDayReset: normalized.weeklyAll?.resetMs ?? null,
+				sevenDayReset: sevenDay?.resetMs ?? null,
 				// The entry's OWN observation time, never the tick clock and never
 				// reconstructed from an age: the cache is the only place that knows
 				// when this reading was actually observed.
@@ -481,7 +492,7 @@ export class UsageSnapshotSampler {
 	 * about the snapshot write depends on it, and vice versa.
 	 *
 	 * Details that matter:
-	 *  - Only accounts with WINDOWED usage (anthropic/codex) have a series at all.
+	 *  - Only accounts in `USAGE_HISTORY_PROVIDERS` have a series at all.
 	 *  - `observedAt` is the newest CONTRIBUTING sample, never `Date.now()`: the
 	 *    store's staleness check is about the age of the evidence.
 	 *  - An account whose newest sample has not advanced since its last fit is
@@ -507,7 +518,7 @@ export class UsageSnapshotSampler {
 		try {
 			const now = Date.now();
 			const accountIds = (await this.deps.getAccounts())
-				.filter((a) => a.provider === "anthropic" || a.provider === "codex")
+				.filter((a) => USAGE_HISTORY_PROVIDERS.has(a.provider))
 				.map((a) => a.id);
 
 			if (accountIds.length === 0) return;
@@ -549,7 +560,7 @@ export class UsageSnapshotSampler {
 			const now = Date.now();
 
 			const accountIds = (await this.deps.getAccounts())
-				.filter((a) => a.provider === "anthropic" || a.provider === "codex")
+				.filter((a) => USAGE_HISTORY_PROVIDERS.has(a.provider))
 				.map((a) => a.id);
 
 			// Reconcile BOTH per-account maps against the live roster, before the

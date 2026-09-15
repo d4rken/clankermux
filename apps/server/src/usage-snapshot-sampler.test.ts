@@ -171,16 +171,15 @@ describe("buildSnapshotRows", () => {
 		expect(codex?.fiveHourReset).toBe(new Date(fiveReset).getTime());
 	});
 
-	it("excludes zai/kilo/other providers entirely", () => {
+	it("excludes kilo/alibaba/other providers entirely", () => {
 		const accounts: Acct[] = [
-			{ id: "zai-1", provider: "zai" },
 			{ id: "kilo-1", provider: "kilo" },
 			{ id: "alibaba-1", provider: "alibaba-coding-plan" },
 			{ id: "anth-1", provider: "anthropic" },
 		];
 		const cache = makeCache({
-			// Even with fresh, window-shaped data, non-anthropic/codex are dropped.
-			"zai-1": { ageMs: 100, data: usageData({ fiveHourUtil: 50 }) },
+			// Even with fresh, window-shaped data, providers outside
+			// USAGE_HISTORY_PROVIDERS are dropped.
 			"kilo-1": { ageMs: 100, data: usageData({ fiveHourUtil: 50 }) },
 			"alibaba-1": { ageMs: 100, data: usageData({ fiveHourUtil: 50 }) },
 			"anth-1": { ageMs: 100, data: usageData({ fiveHourUtil: 50 }) },
@@ -320,10 +319,10 @@ describe("buildSnapshotRows", () => {
 		expect(rows.every((r) => r.sampledAt === NOW)).toBe(true);
 	});
 
-	it("returns an empty array when there are no anthropic/codex accounts", () => {
-		const accounts: Acct[] = [{ id: "zai-1", provider: "zai" }];
+	it("returns an empty array when no account's provider is recorded", () => {
+		const accounts: Acct[] = [{ id: "kilo-1", provider: "kilo" }];
 		const cache = makeCache({
-			"zai-1": { ageMs: 1_000, data: usageData({ fiveHourUtil: 50 }) },
+			"kilo-1": { ageMs: 1_000, data: usageData({ fiveHourUtil: 50 }) },
 		});
 		expect(buildSnapshotRows(accounts, cache, NOW, FRESHNESS)).toEqual([]);
 	});
@@ -500,6 +499,101 @@ function makeSampler(opts: {
 		snapshotQueries: () => queries,
 	};
 }
+
+/**
+ * Zai reports the same two account-wide windows under its own names. The row is
+ * provider-agnostic, so once the reading is extracted the rest of the series —
+ * history, regression, anchors, burn slopes — needs no Zai-specific shape.
+ */
+describe("buildSamplerRows for Zai", () => {
+	const FIVE_RESET = NOW + 100_000;
+	const SEVEN_RESET = NOW + 3 * 24 * 60 * 60 * 1000;
+
+	function zaiUsageData(): AnyUsageData {
+		return {
+			time_limit: {
+				used: 1,
+				remaining: 9,
+				percentage: 10,
+				resetAt: FIVE_RESET,
+				type: "time_limit",
+			},
+			tokens_limit: {
+				used: 42,
+				remaining: 58,
+				percentage: 42,
+				resetAt: FIVE_RESET,
+				type: "tokens_limit",
+			},
+			tokens_limit_weekly: {
+				used: 7,
+				remaining: 93,
+				percentage: 7,
+				resetAt: SEVEN_RESET,
+				type: "tokens_limit_weekly",
+			},
+		} as unknown as AnyUsageData;
+	}
+
+	it("records both account-wide windows with the reading's own observation time", () => {
+		const accounts: Acct[] = [{ id: "zai-1", provider: "zai" }];
+		const cache = makeCache({
+			"zai-1": { ageMs: 1_000, data: zaiUsageData() },
+		});
+
+		const { rows } = buildSamplerRows(accounts, cache, NOW, FRESHNESS);
+
+		expect(rows).toEqual([
+			{
+				accountId: "zai-1",
+				provider: "zai",
+				sampledAt: NOW,
+				fiveHourPct: 42,
+				fiveHourReset: FIVE_RESET,
+				sevenDayPct: 7,
+				sevenDayReset: SEVEN_RESET,
+				observedAt: NOW - 1_000,
+				planTier: null,
+				rateLimitTier: null,
+			},
+		]);
+	});
+
+	it("emits no scoped rows — Zai reports no per-model-family windows", () => {
+		const accounts: Acct[] = [{ id: "zai-1", provider: "zai" }];
+		const cache = makeCache({
+			"zai-1": { ageMs: 1_000, data: zaiUsageData() },
+		});
+
+		const { scopedRows } = buildSamplerRows(accounts, cache, NOW, FRESHNESS);
+
+		expect(scopedRows).toEqual([]);
+	});
+
+	it("writes nothing for a Zai account whose payload carries no windows", () => {
+		const accounts: Acct[] = [{ id: "zai-1", provider: "zai" }];
+		const cache = makeCache({
+			"zai-1": {
+				ageMs: 1_000,
+				data: {
+					time_limit: null,
+					tokens_limit: null,
+					tokens_limit_weekly: null,
+				} as unknown as AnyUsageData,
+			},
+		});
+
+		const { rows, scopedRows } = buildSamplerRows(
+			accounts,
+			cache,
+			NOW,
+			FRESHNESS,
+		);
+
+		expect(rows).toEqual([]);
+		expect(scopedRows).toEqual([]);
+	});
+});
 
 describe("buildSamplerRows scoped (per-family weekly) projection", () => {
 	const RESET = "2023-11-21T22:13:20.000Z";
