@@ -228,10 +228,15 @@ describe("AutoRefreshScheduler — five-hour prime cooldown", () => {
 	});
 
 	/**
-	 * Same storm, different trigger: an account whose prime never yields a reset
-	 * at all leaves lastRefreshResetTime unset, so shouldRefreshAccount's
-	 * first-time branch returns true on every single cycle. The cooldown is keyed
-	 * on the prime, not on the reset value, so it covers this too.
+	 * Same storm, different trigger: while lastRefreshResetTime holds no entry
+	 * for the account, shouldRefreshAccount's first-time branch returns true on
+	 * every single cycle. The cooldown is keyed on the prime, not on the reset
+	 * value, so it throttles this too.
+	 *
+	 * Throttling is all it does. What ENDS this loop is
+	 * sendTranslatedClaudePrime recording the prime even when the response
+	 * carries no reset — see auto-refresh-no-reset-prime.test.ts. This test
+	 * therefore describes the window before the first prime completes.
 	 */
 	it("throttles a first-time prime that never produced a reset", async () => {
 		const scheduler = await makeScheduler();

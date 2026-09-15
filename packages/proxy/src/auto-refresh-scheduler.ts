@@ -968,6 +968,20 @@ export class AutoRefreshScheduler {
 						"UPDATE accounts SET rate_limited_until = NULL, consecutive_rate_limits = 0, rate_limited_at = NULL WHERE id = ?",
 						[accountRow.id],
 					);
+					// Record the prime even though it yielded nothing to advance the
+					// column by. shouldRefreshAccount's first branch is keyed on the
+					// PRESENCE of an entry, so leaving the map empty makes every later
+					// tick look like the first one and the account primes forever at the
+					// cooldown's cadence — see FIVE_HOUR_PRIME_COOLDOWN_MS. With an entry
+					// present, a null rate_limit_reset falls through to the
+					// "no reset available" skip instead. Storing the column's CURRENT
+					// value (not `now`) keeps the map's meaning intact: it is the
+					// rate_limit_reset we last primed against, so a later observation
+					// writing a newer reset still trips isNewerThanLastRefresh.
+					this.lastRefreshResetTime.set(
+						accountRow.id,
+						accountRow.rate_limit_reset ?? Date.now(),
+					);
 					log.info(
 						`Cleared rate_limited_until for ${accountRow.name} as account has been refreshed (no new reset time)`,
 					);
