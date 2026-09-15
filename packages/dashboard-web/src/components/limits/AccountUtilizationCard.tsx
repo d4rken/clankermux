@@ -19,6 +19,7 @@ import {
 } from "../../lib/account-utilization-sort";
 import { computeWindowResetExtremes } from "../../lib/usage-windows";
 import { providerShowsWeeklyUsage } from "../../utils/provider-utils";
+import { AccountActivityStats } from "../accounts/AccountActivityStats";
 import {
 	AccountPausedChip,
 	AccountStatusChips,
@@ -62,27 +63,10 @@ interface AccountUtilizationCardProps {
 }
 
 /**
- * Windowed-quota accounts (or rate-limited ones) that RateLimitProgress can render.
- *
- * `staleUsage` counts: an account whose live usage read failed still carries a
- * persisted snapshot, which `classifyUsageCard` classifies as `stale` and
- * RateLimitProgress renders as a "last known as of HH:MM" row. Leaving it out
- * of this predicate made the filter and the renderer disagree, and the filter
- * was the one that was wrong.
- */
-function hasWindowedUsage(account: AccountResponse): boolean {
-	return (
-		account.usageData != null ||
-		account.staleUsage != null ||
-		account.usageRateLimitedUntil != null ||
-		account.rateLimitReset != null
-	);
-}
-
-/**
- * Per-account utilization for the Limits page: every windowed account shows
- * both its 5-hour and 7-day bars with the expected-pace marker and an inline
- * burn-rate projection (no hover), reusing the Accounts-page RateLimitProgress.
+ * Per-account utilization for the Limits page: every account lists its request
+ * and session activity, and a windowed one adds its 5-hour and 7-day bars with
+ * the expected-pace marker and an inline burn-rate projection (no hover),
+ * reusing the Accounts-page RateLimitProgress.
  */
 export function AccountUtilizationCard({
 	accounts,
@@ -115,15 +99,11 @@ export function AccountUtilizationCard({
 	};
 
 	const pending = loading && unavailableReason == null;
-	const rows = sortAccountsByUtilization(
-		accounts.filter(hasWindowedUsage),
-		sortMode,
-		now,
-	);
+	const rows = sortAccountsByUtilization(accounts, sortMode, now);
 
-	// Built from `rows`, not `accounts`: an account filtered out of this card has
-	// no countdown here to emphasize, and letting it define either endpoint
-	// would leave a visible category incorrectly marked.
+	// Only a row classified as `windows` contributes an endpoint: an account with
+	// nothing to count down to cannot define either extreme, so the rows that
+	// render no bars pass through this without marking a category.
 	const resetExtremes = computeWindowResetExtremes(
 		rows.map(accountToUsageCardSource),
 		now,
@@ -131,9 +111,7 @@ export function AccountUtilizationCard({
 
 	// Which model families each servable class currently reports, from UNPAUSED
 	// accounts only — the same set the server's family scan builds its class gate
-	// from, so both surfaces call the same accounts untouched. Built from every
-	// account rather than from `rows`: an account filtered out of this card can
-	// still be the one proving the family exists for the class.
+	// from, so both surfaces call the same accounts untouched.
 	const familiesByClass = useMemo(
 		() =>
 			listLiveScopedFamiliesByClass(
@@ -171,7 +149,8 @@ export function AccountUtilizationCard({
 								expected pace; a bar turns amber when it is projected to run out
 								before its reset, and red once that projection is well clear of
 								the reset. Green reset times come back first; red reset times
-								come back last.
+								come back last. An account with no quota window lists its
+								request and session counts alone.
 							</CardDescription>
 						</div>
 						{showSortControl && (
@@ -221,7 +200,7 @@ export function AccountUtilizationCard({
 					</div>
 				) : rows.length === 0 ? (
 					<p className="text-sm text-muted-foreground">
-						No windowed accounts reporting usage yet.
+						No accounts configured yet.
 					</p>
 				) : (
 					<div className="space-y-section">
@@ -261,6 +240,7 @@ export function AccountUtilizationCard({
 										status={status}
 										variant="usage"
 									/>
+									<AccountActivityStats account={account} />
 									<RateLimitProgress
 										resetIso={account.rateLimitReset}
 										usageUtilization={account.usageUtilization}

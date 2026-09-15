@@ -3,7 +3,7 @@ import type { AccountResponse } from "@clankermux/types";
 import { act, type ReactNode } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import type { Account } from "../../api";
-import { AccountListItem } from "./AccountListItem";
+import { AccountActivityStats } from "./AccountActivityStats";
 import { RateLimitProgress } from "./RateLimitProgress";
 
 (
@@ -12,8 +12,6 @@ import { RateLimitProgress } from "./RateLimitProgress";
 
 let root: Root | null = null;
 let host: HTMLElement | null = null;
-
-const noop = () => {};
 
 function makeAccount(overrides: Partial<AccountResponse> = {}): Account {
 	return {
@@ -89,23 +87,7 @@ afterEach(async () => {
 
 describe("account detail popovers", () => {
 	it("opens the active-session token and cost breakdown on click", async () => {
-		await mount(
-			<AccountListItem
-				account={makeAccount()}
-				onPauseToggle={noop}
-				onForceResetRateLimit={noop}
-				onRefreshUsage={async () => {}}
-				onRemove={noop}
-				onRename={noop}
-				onPriorityChange={noop}
-				onSaveNotes={noop}
-				onRenewalChange={noop}
-				onRecordPayment={noop}
-				onAutoFallbackToggle={noop}
-				onAutoRefreshToggle={noop}
-				onBillingTypeToggle={noop}
-			/>,
-		);
+		await mount(<AccountActivityStats account={makeAccount()} />);
 
 		const trigger = document.querySelector<HTMLButtonElement>(
 			'button[aria-label="Show active session details"]',

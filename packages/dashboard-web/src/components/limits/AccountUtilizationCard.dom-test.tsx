@@ -86,8 +86,15 @@ const MIKE = makeAccount({
 	name: "mike",
 	usageData: usageAt(50),
 });
+/** No usage reading of any kind — only activity counts to show. */
+const QUIET = makeAccount({
+	id: "a-quiet",
+	name: "quiet",
+	requestCount: 4071,
+	sessionInfo: "No active session",
+});
 const ACCOUNTS = [ALPHA, MIKE, ZULU];
-const FIXTURE_NAMES = new Set(["zulu", "alpha", "mike", "stale-only"]);
+const FIXTURE_NAMES = new Set(["zulu", "alpha", "mike", "stale-only", "quiet"]);
 
 async function mount(
 	props: Partial<Parameters<typeof AccountUtilizationCard>[0]> = {},
@@ -266,7 +273,7 @@ describe("AccountUtilizationCard sort control visibility", () => {
 	it("is absent on the empty state", async () => {
 		await mount({ accounts: [] });
 		expect(sortTrigger()).toBeNull();
-		expect(host?.textContent).toContain("No windowed accounts reporting usage");
+		expect(host?.textContent).toContain("No accounts configured yet.");
 	});
 
 	it("is absent with a single row", async () => {
@@ -276,7 +283,18 @@ describe("AccountUtilizationCard sort control visibility", () => {
 	});
 });
 
-describe("AccountUtilizationCard row filter", () => {
+describe("AccountUtilizationCard row coverage", () => {
+	/** The row element carrying the given account name. */
+	function rowFor(name: string): HTMLElement {
+		const label = Array.from(
+			host?.querySelectorAll<HTMLElement>("span[title]") ?? [],
+		).find((span) => span.getAttribute("title") === name);
+		// name span -> heading cluster -> row.
+		const row = label?.parentElement?.parentElement;
+		expect(row).toBeDefined();
+		return row as HTMLElement;
+	}
+
 	it("renders an account whose only reading is a stale snapshot", async () => {
 		const staleOnly = makeAccount({
 			id: "a-stale",
@@ -296,5 +314,24 @@ describe("AccountUtilizationCard row filter", () => {
 		await mount({ accounts: [MIKE, staleOnly] });
 		expect(renderedOrder()).toContain("stale-only");
 		expect(host?.textContent).toContain("last known as of");
+	});
+
+	it("lists an account with no quota window for its activity alone", async () => {
+		await mount({ accounts: [MIKE, QUIET] });
+		expect(renderedOrder()).toContain("quiet");
+
+		const row = rowFor("quiet");
+		expect(
+			row.querySelector('[data-testid="account-activity-stats"]')?.textContent,
+		).toContain("4,071");
+		// No window to draw: the bars and their labels belong to rows that have a
+		// reading, and this account reports none.
+		expect(row.textContent).not.toContain("5-hour");
+		expect(row.textContent).not.toContain("Weekly");
+	});
+
+	it("sorts an account with no reading last under utilization high to low", async () => {
+		await mount({ accounts: [QUIET, ALPHA, MIKE] });
+		expect(renderedOrder()).toEqual(["mike", "alpha", "quiet"]);
 	});
 });
