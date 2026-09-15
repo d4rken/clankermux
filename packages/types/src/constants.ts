@@ -9,6 +9,7 @@ import {
 	requiresSessionDurationTracking,
 	supportsCustomEndpoint,
 	supportsOAuth,
+	supportsUsagePolling,
 	supportsUsageTracking,
 } from "./provider-config";
 
@@ -22,6 +23,7 @@ export {
 	requiresSessionDurationTracking,
 	supportsCustomEndpoint,
 	supportsOAuth,
+	supportsUsagePolling,
 	supportsUsageTracking,
 };
 

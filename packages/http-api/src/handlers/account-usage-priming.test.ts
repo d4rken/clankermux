@@ -47,6 +47,37 @@ describe("primeUsagePollingForNewAccount", () => {
 		expect(restarterCalls).toEqual(["acc-anthropic"]);
 	});
 
+	it("starts usage polling for a new Z.AI account", async () => {
+		// The gap this fixes: a Z.AI account added at runtime was never polled,
+		// so its usage stayed blank until the next service restart.
+		await primeUsagePollingForNewAccount({
+			id: "acc-zai",
+			provider: "zai",
+			name: "Z.AI-1",
+		});
+		expect(restarterCalls).toEqual(["acc-zai"]);
+	});
+
+	it("starts usage polling for a new Kilo account", async () => {
+		await primeUsagePollingForNewAccount({
+			id: "acc-kilo",
+			provider: "kilo",
+			name: "New Kilo",
+		});
+		expect(restarterCalls).toEqual(["acc-kilo"]);
+	});
+
+	it("does not start polling for Minimax while nothing can start one", async () => {
+		// Minimax has a working fetcher branch but no starter; priming it would
+		// register nothing and leave a refresh control that can only fail.
+		await primeUsagePollingForNewAccount({
+			id: "acc-minimax",
+			provider: "minimax",
+			name: "New Minimax",
+		});
+		expect(restarterCalls).toEqual([]);
+	});
+
 	it("does not start polling for Codex accounts (warmed separately)", async () => {
 		await primeUsagePollingForNewAccount({
 			id: "acc-codex",

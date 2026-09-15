@@ -1,5 +1,8 @@
 import type { LiveScopedFamily } from "@clankermux/core";
-import { supportsCustomEndpoint } from "@clankermux/types";
+import {
+	supportsCustomEndpoint,
+	supportsUsagePolling,
+} from "@clankermux/types";
 import {
 	CalendarClock,
 	Crosshair,
@@ -195,9 +198,8 @@ export function AccountListItem({
 					data-testid="account-actions"
 					className="flex flex-wrap items-center justify-end gap-tight shrink-0 max-w-[50%]"
 				>
-					{(account.provider === "anthropic" ||
+					{(supportsUsagePolling(account.provider) ||
 						account.provider === "codex" ||
-						account.provider === "devin" ||
 						(account.provider === "openrouter" && !account.customEndpoint)) && (
 						<Button
 							variant="ghost"
@@ -219,7 +221,10 @@ export function AccountListItem({
 										? "Refresh OpenRouter account details and usage"
 										: account.provider === "codex"
 											? "Refresh usage data (free usage read — does not consume quota)"
-											: "Refresh usage data (restarts usage polling and refreshes token if expired)"
+											: account.provider === "anthropic"
+												? "Refresh usage data (restarts usage polling and refreshes token if expired)"
+												: // API-key providers have no token to refresh.
+													"Refresh usage data (restarts usage polling)"
 							}
 						>
 							<RefreshCw

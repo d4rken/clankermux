@@ -91,6 +91,8 @@ import {
 	microsToUsd,
 	requiresSessionDurationTracking,
 	supportsCustomEndpoint,
+	supportsOAuth,
+	supportsUsagePolling,
 	usdToMicros,
 } from "@clankermux/types";
 import {
@@ -2596,23 +2598,33 @@ export function createAccountRefreshUsageHandler(dbOps: DatabaseOperations) {
 				});
 			}
 
+			// Codex keeps its own branch below (the spend coordinator reads its
+			// usage, not the poller); everything else must have a pollable window.
 			if (
-				account.provider !== "anthropic" &&
-				account.provider !== "codex" &&
-				account.provider !== "devin"
+				!supportsUsagePolling(account.provider) &&
+				account.provider !== "codex"
 			) {
 				return errorResponse(
 					BadRequest(
-						"Usage refresh is available for Anthropic OAuth, Codex, and Devin accounts",
+						`Usage refresh is not available for ${account.provider} accounts`,
 					),
 				);
 			}
 
-			if (
-				!account.access_token &&
-				!account.refresh_token &&
-				!(account.provider === "devin" && account.api_key)
-			) {
+			// Credentials are checked per AUTH STYLE, not per provider name. An
+			// API-key provider has no token to refresh — Kilo in particular stores
+			// NULL in both token columns, so a token test would reject an account
+			// whose key is perfectly good.
+			const usesApiKeyAuth = !supportsOAuth(account.provider);
+			if (usesApiKeyAuth) {
+				if (!account.api_key) {
+					return errorResponse(
+						BadRequest(
+							`Account '${account.name}' has no API key - please re-enter it`,
+						),
+					);
+				}
+			} else if (!account.access_token && !account.refresh_token) {
 				return errorResponse(
 					BadRequest(
 						`Account '${account.name}' has no tokens - please re-authenticate`,
@@ -2645,13 +2657,20 @@ export function createAccountRefreshUsageHandler(dbOps: DatabaseOperations) {
 				`Usage refresh requested for account '${account.name}' (polling restarted: ${pollingRestarted}, cache refreshed: ${cacheRefreshed})`,
 			);
 
+			// `success` tracks whether usage was actually READ, not whether a poller
+			// was installed. `refreshNow` awaits the fetch (joining the first poll
+			// if one is already in flight), so a false here means the read failed
+			// or no poller is configured — never merely "not warm yet". Reporting
+			// the restart as success hid a bad API key behind "Fresh usage data is
+			// now available"; lib/refresh-usage.ts surfaces success:false to the
+			// operator, which is the point.
 			return jsonResponse({
-				success: true,
-				message: pollingRestarted
-					? `Usage polling restarted for account '${account.name}'. Fresh usage data is now available.`
-					: cacheRefreshed
-						? `Usage cache refreshed for account '${account.name}'.`
-						: `Polling could not be restarted for account '${account.name}' — usage data may not update.`,
+				success: cacheRefreshed,
+				message: cacheRefreshed
+					? `Usage data refreshed for account '${account.name}'.`
+					: pollingRestarted
+						? `Usage polling restarted for account '${account.name}', but its usage could not be read. Polling will retry.`
+						: `Usage could not be refreshed for account '${account.name}'.`,
 				pollingRestarted,
 				cacheRefreshed,
 			});

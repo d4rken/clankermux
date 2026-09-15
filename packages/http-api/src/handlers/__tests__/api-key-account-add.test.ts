@@ -2,6 +2,7 @@ import { Database } from "bun:sqlite";
 import { afterEach, beforeEach, describe, expect, it, spyOn } from "bun:test";
 import type { DatabaseOperations } from "@clankermux/database";
 import { DatabaseFactory, ensureSchema } from "@clankermux/database";
+import { registerPollingRestarter } from "@clankermux/proxy";
 import { mockFetch, tempDbTracker } from "@clankermux/test-support";
 import {
 	API_KEY_PROVIDERS,
@@ -517,6 +518,95 @@ describe("createApiKeyAccountAddHandler", () => {
 		it("has a unique provider string per entry", () => {
 			const providers = Object.values(API_KEY_PROVIDERS).map((s) => s.provider);
 			expect(new Set(providers).size).toBe(providers.length);
+		});
+	});
+
+	/**
+	 * These assert at the HANDLER boundary on purpose. Testing
+	 * `primeUsagePollingForNewAccount` directly cannot catch the bug this fixes:
+	 * the helper was already correct, and what was missing was the CALL from
+	 * this handler. Delete that call and only these tests go red.
+	 */
+	describe("usage polling priming", () => {
+		// The restarter registry has no unregister hook and
+		// `restartUsagePollingForAccount` fans out to every entry, so register
+		// exactly one for this file and reset its recorder per test.
+		let primed: string[] = [];
+		let primingThrows = false;
+		beforeEach(() => {
+			primed = [];
+			primingThrows = false;
+			registerPollingRestarter("api-key-account-add-test", async (id) => {
+				if (primingThrows) throw new Error("restarter exploded");
+				primed.push(id);
+				return true;
+			});
+		});
+
+		it("primes a new Z.AI account exactly once, after the row exists", async () => {
+			const handler = createApiKeyAccountAddHandler(
+				dbOps,
+				API_KEY_PROVIDERS.zai,
+			);
+			const response = await handler(post({ name: "zai-1", apiKey: "k" }));
+			expect(response.status).toBe(200);
+			const { account } = (await response.json()) as {
+				account: { id: string };
+			};
+			// Primed with the id of a row that already exists: the restarter looks
+			// the account up and would find nothing if this ran before the insert.
+			expect(primed).toEqual([account.id]);
+			expect(row("zai-1")?.provider).toBe("zai");
+		});
+
+		it("primes a new Kilo account", async () => {
+			const handler = createApiKeyAccountAddHandler(
+				dbOps,
+				API_KEY_PROVIDERS.kilo,
+			);
+			const response = await handler(post({ name: "kilo-1", apiKey: "k" }));
+			expect(response.status).toBe(200);
+			expect(primed).toHaveLength(1);
+		});
+
+		it("does not prime a provider with no pollable usage window", async () => {
+			const handler = createApiKeyAccountAddHandler(
+				dbOps,
+				API_KEY_PROVIDERS.openai,
+			);
+			const response = await handler(
+				post({
+					name: "oai-1",
+					apiKey: "k",
+					customEndpoint: "https://oai.example/v1",
+				}),
+			);
+			expect(response.status).toBe(200);
+			expect(primed).toEqual([]);
+		});
+
+		it("still creates the account when priming fails", async () => {
+			primingThrows = true;
+			const handler = createApiKeyAccountAddHandler(
+				dbOps,
+				API_KEY_PROVIDERS.zai,
+			);
+			const response = await handler(post({ name: "zai-2", apiKey: "k" }));
+			// Priming is best-effort: a poller that will not start is a worse
+			// dashboard, not a failed account creation.
+			expect(response.status).toBe(200);
+			expect(row("zai-2")?.provider).toBe("zai");
+		});
+
+		it("does not prime when creation is rejected", async () => {
+			const handler = createApiKeyAccountAddHandler(
+				dbOps,
+				API_KEY_PROVIDERS.zai,
+			);
+			// Missing apiKey — validation refuses before any row is written.
+			const response = await handler(post({ name: "zai-3" }));
+			expect(response.status).not.toBe(200);
+			expect(primed).toEqual([]);
 		});
 	});
 });
