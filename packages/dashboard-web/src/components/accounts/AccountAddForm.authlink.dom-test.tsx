@@ -86,6 +86,7 @@ function renderForm(
 				onAddOpenRouterAccount={async () => {}}
 				onAddOllamaAccount={async () => {}}
 				onAddOllamaCloudAccount={async () => {}}
+				onAddGrokAccount={async () => {}}
 				onCancel={() => {}}
 				onSuccess={() => {}}
 				onError={() => {}}

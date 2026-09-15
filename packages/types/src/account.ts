@@ -706,7 +706,8 @@ export interface AccountListItem {
 		| "codex"
 		| "qwen"
 		| "ollama"
-		| "ollama-cloud";
+		| "ollama-cloud"
+		| "grok";
 	priority: number;
 	autoFallbackEnabled: boolean;
 	autoRefreshEnabled: boolean;
