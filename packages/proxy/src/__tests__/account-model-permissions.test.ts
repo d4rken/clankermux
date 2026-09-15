@@ -240,6 +240,42 @@ describe("account model discovery", () => {
 			"second",
 		]);
 	});
+	it("discovers Grok models from the xAI catalogue", async () => {
+		const a = account("grok", {
+			provider: "grok",
+			api_key: "xai-key",
+			custom_endpoint: null,
+		});
+		const seen: Headers[] = [];
+		const { service } = setup([a], async (input, init) => {
+			seen.push(new Headers(init?.headers));
+			expect(String(input)).toBe("https://api.x.ai/v1/models");
+			return Response.json({ object: "list", data: [{ id: "grok-4.6" }] });
+		});
+		await service.refresh(a);
+		expect(seen).toHaveLength(1);
+		expect(seen[0].get("authorization")).toBe("Bearer xai-key");
+		expect((await service.permissions(a)).discovered_ids).toEqual(["grok-4.6"]);
+	});
+
+	it("refuses to discover Grok models from a custom backend", async () => {
+		const a = account("grok-custom", {
+			provider: "grok",
+			api_key: "xai-key",
+			custom_endpoint: "https://proxy.example/v1",
+		});
+		let calls = 0;
+		const { service } = setup([a], async () => {
+			calls++;
+			return Response.json({ data: [{ id: "never-reached" }] });
+		});
+		await service.refresh(a);
+		expect(calls).toBe(0);
+		const permissions = await service.permissions(a);
+		expect(permissions.discovered_ids).toEqual([]);
+		expect(permissions.last_error).not.toBeNull();
+	});
+
 	it("does not overwrite a manual edit completed while discovery was in flight", async () => {
 		const a = account();
 		let finish!: (r: Response) => void;

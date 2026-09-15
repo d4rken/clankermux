@@ -45,6 +45,7 @@ const EXPERIMENTAL_ACCOUNT_MODES = [
 	},
 	{ value: "ollama", label: "Ollama (v0.14.0+, local)" },
 	{ value: "ollama-cloud", label: "Ollama Cloud (ollama.com)" },
+	{ value: "grok", label: "Grok (API Key)" },
 ] as const;
 
 const isExperimentalMode = (mode: string) =>
@@ -126,6 +127,11 @@ interface AccountAddFormProps {
 		apiKey: string;
 		priority: number;
 	}) => Promise<void>;
+	onAddGrokAccount: (params: {
+		name: string;
+		apiKey: string;
+		priority: number;
+	}) => Promise<void>;
 	onCancel: () => void;
 	onSuccess: () => void;
 	onError: (error: string) => void;
@@ -144,6 +150,7 @@ export function AccountAddForm({
 	onAddDevinAccount,
 	onAddOllamaAccount,
 	onAddOllamaCloudAccount,
+	onAddGrokAccount,
 	onCancel,
 	onSuccess,
 	onError,
@@ -175,6 +182,7 @@ export function AccountAddForm({
 			| "qwen"
 			| "ollama"
 			| "ollama-cloud"
+			| "grok"
 			| "devin",
 		priority: 0,
 		apiKey: "",
@@ -712,6 +720,32 @@ export function AccountAddForm({
 			return;
 		}
 
+		if (newAccount.mode === "grok") {
+			if (!newAccount.apiKey) {
+				onError("API key is required for Grok accounts");
+				return;
+			}
+
+			await onAddGrokAccount({
+				name: newAccount.name,
+				apiKey: newAccount.apiKey,
+				priority: newAccount.priority,
+			});
+			setNewAccount({
+				name: "",
+				mode: "claude-oauth",
+				priority: 0,
+				apiKey: "",
+				customEndpoint: "",
+				projectId: "",
+				region: "global",
+				profile: "",
+				awsRegion: "",
+			});
+			onSuccess();
+			return;
+		}
+
 		// Step 1: Initialize OAuth flow for Max/Console accounts
 		const result = await onAddAccount(accountParams);
 		setSessionId(result.sessionId);
@@ -833,6 +867,7 @@ export function AccountAddForm({
 									| "qwen"
 									| "ollama"
 									| "ollama-cloud"
+									| "grok"
 									| "devin",
 							) => updateAccountSource({ mode: value })}
 						>
@@ -1180,6 +1215,22 @@ export function AccountAddForm({
 									})
 								}
 								placeholder="Enter your Kilo Gateway API key"
+							/>
+						</div>
+					)}
+					{newAccount.mode === "grok" && (
+						<div className="flex flex-col gap-item">
+							<Label htmlFor="apiKey">Grok API Key</Label>
+							<Input
+								id="apiKey"
+								type="password"
+								value={newAccount.apiKey}
+								onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
+									updateAccountSource({
+										apiKey: (e.target as HTMLInputElement).value,
+									})
+								}
+								placeholder="Enter your xAI API key"
 							/>
 						</div>
 					)}

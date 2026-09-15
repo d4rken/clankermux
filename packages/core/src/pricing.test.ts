@@ -263,6 +263,45 @@ describe("bundled cost fields backfill a partial remote entry", () => {
 		);
 	});
 
+	it("prices Grok from the xai catalogue, not a reseller listed first", async () => {
+		await withRemoteCatalogue(
+			{
+				bothub: {
+					models: {
+						"grok-4.6": {
+							id: "grok-4.6",
+							name: "Grok 4.6",
+							cost: { input: 0.5, output: 1.5, cache_read: 0.05 },
+						},
+					},
+				},
+				xai: {
+					models: {
+						"grok-4.6": {
+							id: "grok-4.6",
+							name: "Grok 4.6",
+							cost: { input: 2, output: 6, cache_read: 0.5 },
+						},
+					},
+				},
+			},
+			async () => {
+				expect(
+					await estimateCostUSD(
+						"grok-4.6",
+						{
+							inputTokens: 1_000_000,
+							outputTokens: 1_000_000,
+							cacheReadInputTokens: 1_000_000,
+						},
+						{ provider: "grok", reportGaps: true },
+					),
+				).toBeCloseTo(8.5, 6);
+				expect(getPricingGaps()).toEqual([]);
+			},
+		);
+	});
+
 	it("does not price an unknown Codex model from a reseller", async () => {
 		await withRemoteCatalogue(
 			{

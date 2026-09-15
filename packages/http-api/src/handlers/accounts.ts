@@ -1942,6 +1942,10 @@ export function createOllamaCloudAccountAddHandler(dbOps: DatabaseOperations) {
 	return createApiKeyAccountAddHandler(dbOps, API_KEY_PROVIDERS.ollamaCloud);
 }
 
+export function createGrokAccountAddHandler(dbOps: DatabaseOperations) {
+	return createApiKeyAccountAddHandler(dbOps, API_KEY_PROVIDERS.grok);
+}
+
 export function createKiloAccountAddHandler(dbOps: DatabaseOperations) {
 	return createApiKeyAccountAddHandler(dbOps, API_KEY_PROVIDERS.kilo);
 }

@@ -372,6 +372,22 @@ export function AccountsTab() {
 		}
 	};
 
+	const handleAddGrokAccount = async (params: {
+		name: string;
+		apiKey: string;
+		priority: number;
+	}) => {
+		try {
+			await api.addGrokAccount(params);
+			await loadAccounts();
+			setAdding(false);
+			setActionError(null);
+		} catch (err) {
+			setActionError(formatError(err));
+			throw err;
+		}
+	};
+
 	const handleRemoveAccount = (account: Account) => {
 		deleteTargetRef.current = account.id;
 		setConfirmDelete({
@@ -741,6 +757,7 @@ export function AccountsTab() {
 							onAddOpenAIAccount={handleAddOpenAIAccount}
 							onAddOllamaAccount={handleAddOllamaAccount}
 							onAddOllamaCloudAccount={handleAddOllamaCloudAccount}
+							onAddGrokAccount={handleAddGrokAccount}
 							onCancel={() => {
 								setAdding(false);
 								setActionError(null);

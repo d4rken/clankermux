@@ -396,6 +396,75 @@ BUNDLED_PRICING.openai = {
 	},
 };
 
+// Verbatim from the models.dev `xai` base tier, snapshotted 2026-09-15.
+BUNDLED_PRICING.xai = {
+	models: {
+		"grok-4.6": {
+			id: "grok-4.6",
+			name: "Grok 4.6",
+			cost: {
+				input: 2,
+				output: 6,
+				cache_read: 0.5,
+			},
+		},
+		"grok-4.5": {
+			id: "grok-4.5",
+			name: "Grok 4.5",
+			cost: {
+				input: 2,
+				output: 6,
+				cache_read: 0.3,
+			},
+		},
+		"grok-4.3": {
+			id: "grok-4.3",
+			name: "Grok 4.3",
+			cost: {
+				input: 1.25,
+				output: 2.5,
+				cache_read: 0.2,
+			},
+		},
+		"grok-4.20-0309-reasoning": {
+			id: "grok-4.20-0309-reasoning",
+			name: "Grok 4.20 Reasoning",
+			cost: {
+				input: 1.25,
+				output: 2.5,
+				cache_read: 0.2,
+			},
+		},
+		"grok-4.20-0309-non-reasoning": {
+			id: "grok-4.20-0309-non-reasoning",
+			name: "Grok 4.20 Non-Reasoning",
+			cost: {
+				input: 1.25,
+				output: 2.5,
+				cache_read: 0.2,
+			},
+		},
+		"grok-4.20-multi-agent-0309": {
+			id: "grok-4.20-multi-agent-0309",
+			name: "Grok 4.20 Multi-Agent",
+			cost: {
+				input: 1.25,
+				output: 2.5,
+				cache_read: 0.2,
+			},
+		},
+		"grok-build-0.1": {
+			id: "grok-build-0.1",
+			name: "Grok Build 0.1",
+			cost: {
+				input: 1,
+				output: 2,
+				cache_read: 0.2,
+			},
+		},
+	},
+};
+
 interface Logger {
 	warn(message: string, ...args: unknown[]): void;
 	debug(message: string, ...args: unknown[]): void;
@@ -1664,7 +1733,9 @@ function selectModelEntry(
 			? "openai"
 			: provider === PROVIDER_NAMES.CLAUDE_CONSOLE_API
 				? PROVIDER_NAMES.ANTHROPIC
-				: provider;
+				: provider === PROVIDER_NAMES.GROK
+					? "xai"
+					: provider;
 	// A matching account/catalogue provider uses only its own entries, including
 	// dated fallbacks. Bundled zai/minimax entries make those scopes available
 	// offline too. Account types without a catalogue key (generic compatible

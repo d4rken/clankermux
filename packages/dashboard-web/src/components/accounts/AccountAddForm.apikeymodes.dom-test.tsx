@@ -66,6 +66,7 @@ function renderForm(): Promise<void> {
 				onAddDevinAccount={record("devin")}
 				onAddOllamaAccount={async () => {}}
 				onAddOllamaCloudAccount={async () => {}}
+				onAddGrokAccount={record("grok")}
 				onCancel={() => {}}
 				onSuccess={() => {}}
 				onError={(message: string) => {
@@ -137,6 +138,7 @@ const modes = [
 		provider: "alibaba-coding-plan",
 		option: "Alibaba Coding Plan International (API Key)",
 	},
+	{ provider: "grok", option: "Grok (API Key)" },
 ];
 
 describe("account add form: API key provider modes", () => {
