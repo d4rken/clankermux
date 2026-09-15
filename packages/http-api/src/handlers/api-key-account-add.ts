@@ -147,6 +147,13 @@ export const API_KEY_PROVIDERS = {
 		endpoint: { from: "fixed", value: null },
 		mirrorKeyToTokens: false,
 	},
+	grok: {
+		provider: "grok",
+		label: "Grok",
+		apiKey: { from: "body" },
+		endpoint: { from: "fixed", value: null },
+		mirrorKeyToTokens: true,
+	},
 } as const satisfies Record<string, ApiKeyProviderSpec>;
 
 /**

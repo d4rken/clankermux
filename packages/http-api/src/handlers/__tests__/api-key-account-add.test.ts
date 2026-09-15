@@ -173,6 +173,24 @@ describe("createApiKeyAccountAddHandler", () => {
 			expect(data.account.customEndpoint).toBeNull();
 		});
 
+		it("stores a Grok key under its own provider with no endpoint", async () => {
+			const handler = createApiKeyAccountAddHandler(
+				dbOps,
+				API_KEY_PROVIDERS.grok,
+			);
+
+			const res = await handler(post({ name: "grok-acct", apiKey: "xai-key" }));
+
+			expect(res.status).toBe(200);
+			expect(row("grok-acct")).toMatchObject({
+				provider: "grok",
+				api_key: "xai-key",
+				refresh_token: "xai-key",
+				access_token: "xai-key",
+				custom_endpoint: null,
+			});
+		});
+
 		it("uses the spec's label in the success message", async () => {
 			const handler = createApiKeyAccountAddHandler(
 				dbOps,
