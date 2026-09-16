@@ -1063,3 +1063,29 @@ it("shows Devin quota override state with provider-specific spending consequence
 	expect(html).not.toContain("Anthropic reporting overage");
 	expect(html).not.toContain("Auto-refresh");
 });
+
+describe("AccountStatusChips — D5 Devin grace period", () => {
+	it("D5: names the grace-period state the provider reported", () => {
+		const html = render(
+			makeAccount({
+				provider: "devin",
+				usageData: {
+					kind: "devin",
+					quotaBased: true,
+					daily: null,
+					weekly: null,
+					planName: "Team",
+					email: "seat@example.com",
+					accountId: "acct-1",
+					canUseCli: true,
+					overageBalanceUsd: 0,
+					includedCreditsRemaining: 10,
+					gracePeriodStatus: "expired",
+					gracePeriodEndMs: NOW - 86_400_000,
+				},
+			}),
+		);
+
+		expect(html.toLowerCase()).toContain("grace");
+	});
+});

@@ -2,6 +2,7 @@ import type {
 	AccountResponse,
 	CodexRateLimitResetCreditConsumeOutcome,
 	CodexResetCreditEventResponse,
+	DevinGracePeriodStatus,
 } from "@clankermux/types";
 import { formatUsd } from "@clankermux/ui-common";
 import {
@@ -729,6 +730,7 @@ export function AccountStatusChips({
 			{includeAccountDetails && status.showRenewalChip && (
 				<AccountRenewalInfo account={account} status={status} />
 			)}
+			<DevinGracePeriodChip account={account} />
 			{status.isDuplicateAccount && (
 				<StatusChip
 					className="bg-warning/15 text-warning-strong"
@@ -911,6 +913,69 @@ export function AccountRenewalInfo({
 
 	return (
 		<StatusChip className={colorClasses} title={title}>
+			<CalendarClock className="h-3.5 w-3.5" />
+			{label}
+		</StatusChip>
+	);
+}
+
+const DEVIN_GRACE_CHIP_CLASSES: Record<DevinGracePeriodStatus, string> = {
+	none: "border border-border text-muted-foreground",
+	active: "bg-warning/15 text-warning-strong",
+	expired: "bg-destructive/15 text-destructive-strong",
+};
+
+/**
+ * Devin's reported `PlanStatus.gracePeriodStatus`, with its end date when the
+ * message carried one. DISPLAY ONLY: the enum's semantics are undocumented and
+ * no public consumer branches on it, so it never feeds a pause, a routing
+ * decision or eligibility — a lapse that matters arrives separately, as the
+ * request-path refusal that sets `subscription_expired`.
+ *
+ *   active  → "Grace period until Aug 17"
+ *   expired → "Grace period ended Aug 17"
+ *   none    → "No grace period"
+ */
+function DevinGracePeriodChip({ account }: { account: AccountResponse }) {
+	const usage = account.usageData;
+	// `FullUsageData` is not discriminated on `kind` — AnthropicUsageData
+	// carries no such field — so the presence test comes before the comparison.
+	if (!usage || !("kind" in usage) || usage.kind !== "devin") return null;
+	const graceStatus = usage.gracePeriodStatus ?? null;
+	if (graceStatus === null) return null;
+
+	const endsAtMs = usage.gracePeriodEndMs ?? null;
+	const endsAt = endsAtMs !== null ? new Date(endsAtMs) : null;
+	const shortDate =
+		endsAt?.toLocaleDateString(undefined, {
+			month: "short",
+			day: "numeric",
+		}) ?? null;
+	// en-CA renders a local Date as YYYY-MM-DD without the UTC shift
+	// toISOString() causes.
+	const isoDate = endsAt?.toLocaleDateString("en-CA") ?? null;
+
+	let label: string;
+	let title: string;
+	if (graceStatus === "active") {
+		label = shortDate ? `Grace period until ${shortDate}` : "Grace period";
+		title = isoDate
+			? `Devin reports this seat is in a grace period until ${isoDate}. Billing state only — it does not pause the account or change routing.`
+			: "Devin reports this seat is in a grace period, with no end date. Billing state only — it does not pause the account or change routing.";
+	} else if (graceStatus === "expired") {
+		label = shortDate
+			? `Grace period ended ${shortDate}`
+			: "Grace period ended";
+		title = isoDate
+			? `Devin reports this seat's grace period ended on ${isoDate}. Billing state only — the account is paused, if at all, by the provider refusing a request.`
+			: "Devin reports this seat's grace period has ended. Billing state only — the account is paused, if at all, by the provider refusing a request.";
+	} else {
+		label = "No grace period";
+		title = "Devin reports no grace period is running on this seat.";
+	}
+
+	return (
+		<StatusChip className={DEVIN_GRACE_CHIP_CLASSES[graceStatus]} title={title}>
 			<CalendarClock className="h-3.5 w-3.5" />
 			{label}
 		</StatusChip>
