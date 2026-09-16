@@ -48,6 +48,8 @@ const account: Account = {
 	isPrimary: false,
 	identityOrganizationName: null,
 	identityRateLimitTier: null,
+	identitySubscriptionStatus: null,
+	identitySubscriptionStartedAt: null,
 	identityCapturedAt: null,
 	identityProfileFetchedAt: null,
 	isDuplicateAccount: false,

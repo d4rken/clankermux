@@ -1,4 +1,6 @@
+import type { Database } from "bun:sqlite";
 import { getAppVersionSync, PAUSE_REASON_NEEDS_REAUTH } from "@clankermux/core";
+import { anchorDateFromInstant } from "@clankermux/core/renewal";
 import {
 	type Account,
 	type AccountIdentity,
@@ -17,9 +19,13 @@ const IDENTITY_COALESCE_SET = `identity_external_id = COALESCE(?, identity_exter
 				identity_email = COALESCE(?, identity_email),
 				identity_organization_name = COALESCE(?, identity_organization_name),
 				identity_plan_tier = COALESCE(?, identity_plan_tier),
-				identity_rate_limit_tier = COALESCE(?, identity_rate_limit_tier)`;
+				identity_rate_limit_tier = COALESCE(?, identity_rate_limit_tier),
+				identity_subscription_status = COALESCE(?, identity_subscription_status),
+				identity_subscription_started_at = COALESCE(?, identity_subscription_started_at)`;
 
-function identityBindParams(identity: AccountIdentity): Array<string | null> {
+function identityBindParams(
+	identity: AccountIdentity,
+): Array<string | number | null> {
 	// Order MUST match the `?` placeholders in IDENTITY_COALESCE_SET above.
 	return [
 		identity.externalAccountId,
@@ -27,6 +33,8 @@ function identityBindParams(identity: AccountIdentity): Array<string | null> {
 		identity.organizationName,
 		identity.planTier,
 		identity.rateLimitTier,
+		identity.subscriptionStatus ?? null,
+		identity.subscriptionStartedAt ?? null,
 	];
 }
 
@@ -34,6 +42,64 @@ function identityBindParams(identity: AccountIdentity): Array<string | null> {
 interface StoredTiers {
 	plan_tier: string | null;
 	rate_limit_tier: string | null;
+}
+
+/**
+ * Cadence a seeded anchor is given. No provider reports one — Anthropic's
+ * profile says `stripe_subscription` and nothing about the interval — so this is
+ * the majority guess, not an observation, which is why the row is marked
+ * `derived` and why seeding never touches `renewal_price_usd_micros`: the
+ * payments auto-recorder requires a price, so a guessed date can never invent a
+ * ledger entry.
+ */
+const SEEDED_RENEWAL_CADENCE = "monthly";
+
+/** The account's renewal anchor and its provenance, before a seeding attempt. */
+interface StoredAnchor {
+	renewal_anchor: string | null;
+	renewal_anchor_source: string | null;
+}
+
+/**
+ * Seed a renewal anchor from a provider-reported subscription START, on an
+ * account that has never had one either way.
+ *
+ * Both halves of the gate matter, and they are not the same condition:
+ *
+ *   anchor IS NULL          — never overwrite what is already there.
+ *   anchor_source IS NULL   — never re-seed what the operator CLEARED. A clear
+ *                             writes source='manual' with a null anchor, so a
+ *                             gate on the anchor alone would re-seed the date on
+ *                             the next profile fetch, forever.
+ *
+ * That is what makes this one-shot per account rather than level-triggered.
+ * Runs inside the caller's transaction.
+ */
+function seedRenewalAnchorFromSubscription(
+	db: Database,
+	accountId: string,
+	identity: AccountIdentity,
+): void {
+	const startedAt = identity.subscriptionStartedAt;
+	if (startedAt == null) return;
+	const anchor = anchorDateFromInstant(startedAt);
+	if (anchor === null) return;
+
+	const stored = db
+		.query(
+			`SELECT renewal_anchor, renewal_anchor_source
+			 FROM accounts WHERE id = ?`,
+		)
+		.get(accountId) as StoredAnchor | null | undefined;
+	if (!stored || stored.renewal_anchor !== null) return;
+	if (stored.renewal_anchor_source !== null) return;
+
+	db.run(
+		`UPDATE accounts
+		 SET renewal_anchor = ?, renewal_cadence = ?, renewal_anchor_source = 'derived'
+		 WHERE id = ?`,
+		[anchor, SEEDED_RENEWAL_CADENCE, accountId] as never[],
+	);
 }
 
 export interface DevinCredentialReplacement {
@@ -112,6 +178,8 @@ export class AccountRepository extends BaseRepository<Account> {
 			const changes = db.run(sql, params as never[]).changes;
 			if (changes === 0 || !before) return changes;
 
+			seedRenewalAnchorFromSubscription(db, accountId, identity);
+
 			// COALESCE-merged effective values — exactly what the UPDATE just wrote.
 			const planTier = identity.planTier ?? before.plan_tier;
 			const rateLimitTier = identity.rateLimitTier ?? before.rate_limit_tier;
@@ -161,6 +229,7 @@ export class AccountRepository extends BaseRepository<Account> {
 				refresh_token_issued_at,
 				refresh_token_expires_at,
 				renewal_anchor,
+				renewal_anchor_source,
 				renewal_cadence,
 				renewal_price_usd_micros,
 				renewal_auto_start_date,
@@ -169,6 +238,8 @@ export class AccountRepository extends BaseRepository<Account> {
 				identity_organization_name,
 				identity_plan_tier,
 				identity_rate_limit_tier,
+				identity_subscription_status,
+				identity_subscription_started_at,
 				identity_captured_at,
 				identity_profile_fetched_at,
 				COALESCE(consecutive_rate_limits, 0) as consecutive_rate_limits
@@ -201,6 +272,7 @@ export class AccountRepository extends BaseRepository<Account> {
 				refresh_token_issued_at,
 				refresh_token_expires_at,
 				renewal_anchor,
+				renewal_anchor_source,
 				renewal_cadence,
 				renewal_price_usd_micros,
 				renewal_auto_start_date,
@@ -209,6 +281,8 @@ export class AccountRepository extends BaseRepository<Account> {
 				identity_organization_name,
 				identity_plan_tier,
 				identity_rate_limit_tier,
+				identity_subscription_status,
+				identity_subscription_started_at,
 				identity_captured_at,
 				identity_profile_fetched_at,
 				COALESCE(consecutive_rate_limits, 0) as consecutive_rate_limits
@@ -950,10 +1024,14 @@ export class AccountRepository extends BaseRepository<Account> {
 		priceUsdMicros: number | null,
 		autoStartDate: string | null,
 	): Promise<void> {
+		// Always 'manual', including when `anchor` is null: a clear is a decision,
+		// and the source column is what stops the seeder reinstating the date on
+		// the next profile fetch.
 		await this.run(
 			`UPDATE accounts
 			 SET renewal_anchor = ?, renewal_cadence = ?,
-			     renewal_price_usd_micros = ?, renewal_auto_start_date = ?
+			     renewal_price_usd_micros = ?, renewal_auto_start_date = ?,
+			     renewal_anchor_source = 'manual'
 			 WHERE id = ?`,
 			[anchor, cadence, priceUsdMicros, autoStartDate, accountId],
 		);

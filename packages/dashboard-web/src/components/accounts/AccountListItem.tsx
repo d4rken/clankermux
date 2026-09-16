@@ -393,7 +393,11 @@ export function AccountListItem({
 								onClick={() => onRenewalChange(account)}
 								title={
 									account.renewalAnchor
-										? `Renewal date: ${account.renewalAnchor} (${account.renewalCadence ?? "none"})`
+										? `Renewal date: ${account.renewalAnchor} (${account.renewalCadence ?? "none"})${
+												account.renewalAnchorSource === "derived"
+													? " — estimated from the subscription start"
+													: ""
+											}`
 										: "Set subscription renewal date"
 								}
 							>
@@ -403,7 +407,9 @@ export function AccountListItem({
 								Set Renewal Date
 								{account.renewalAnchor && (
 									<span className="ml-auto text-xs text-muted-foreground">
-										set
+										{account.renewalAnchorSource === "derived"
+											? "estimated"
+											: "set"}
 									</span>
 								)}
 							</DropdownMenuItem>

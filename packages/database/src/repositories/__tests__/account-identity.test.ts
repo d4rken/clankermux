@@ -61,6 +61,7 @@ function makeDb(): { db: Database; repo: AccountRepository } {
 			consecutive_rate_limits INTEGER DEFAULT 0,
 			notes TEXT,
 			renewal_anchor TEXT,
+			renewal_anchor_source TEXT,
 			renewal_cadence TEXT,
 			renewal_price_usd_micros INTEGER,
 			renewal_auto_start_date TEXT,
@@ -69,6 +70,8 @@ function makeDb(): { db: Database; repo: AccountRepository } {
 			identity_organization_name TEXT,
 			identity_plan_tier TEXT,
 			identity_rate_limit_tier TEXT,
+			identity_subscription_status TEXT,
+			identity_subscription_started_at INTEGER,
 			identity_captured_at INTEGER,
 			identity_profile_fetched_at INTEGER
 		)
@@ -429,5 +432,141 @@ describe("AccountRepository — updateTokens compare-and-swap (expectedRefreshTo
 		const row = await repo.findById("cas-1");
 		expect(row?.access_token).toBe("tok-uncond");
 		expect(row?.refresh_token).toBe("rt-uncond");
+	});
+});
+
+describe("AccountRepository — subscription capture and anchor seeding", () => {
+	let db: Database;
+	let repo: AccountRepository;
+
+	/** 2026-04-10, local midday so the local calendar day is unambiguous. */
+	const SUB_START = new Date(2026, 3, 10, 12, 0).getTime();
+
+	const withSubscription = (
+		overrides: Partial<AccountIdentity> = {},
+	): AccountIdentity => ({
+		externalAccountId: "ext-sub",
+		email: null,
+		organizationName: null,
+		planTier: "max",
+		rateLimitTier: null,
+		subscriptionStatus: "active",
+		subscriptionStartedAt: SUB_START,
+		...overrides,
+	});
+
+	beforeEach(() => {
+		({ db, repo } = makeDb());
+	});
+
+	afterEach(() => {
+		db.close();
+	});
+
+	it("stores the subscription status and start", async () => {
+		insertAccount(db, "sub-1");
+		await repo.setAccountIdentityFromProfile("sub-1", withSubscription());
+
+		const account = await repo.findById("sub-1");
+		expect(account?.identity_subscription_status).toBe("active");
+		expect(account?.identity_subscription_started_at).toBe(SUB_START);
+	});
+
+	it("seeds the renewal anchor from the subscription start, marked derived", async () => {
+		insertAccount(db, "sub-2");
+		await repo.setAccountIdentityFromProfile("sub-2", withSubscription());
+
+		const account = await repo.findById("sub-2");
+		expect(account?.renewal_anchor).toBe("2026-04-10");
+		expect(account?.renewal_cadence).toBe("monthly");
+		expect(account?.renewal_anchor_source).toBe("derived");
+		// A derived date must never feed the payments auto-recorder, which is
+		// gated on a price being set.
+		expect(account?.renewal_price_usd_micros).toBeNull();
+	});
+
+	it("never overwrites an anchor the operator already set", async () => {
+		insertAccount(db, "sub-3");
+		await repo.setRenewal("sub-3", "2026-01-02", "yearly", null, null);
+
+		await repo.setAccountIdentityFromProfile("sub-3", withSubscription());
+
+		const account = await repo.findById("sub-3");
+		expect(account?.renewal_anchor).toBe("2026-01-02");
+		expect(account?.renewal_cadence).toBe("yearly");
+		expect(account?.renewal_anchor_source).toBe("manual");
+	});
+
+	it("never re-seeds an anchor the operator cleared", async () => {
+		insertAccount(db, "sub-4");
+		await repo.setAccountIdentityFromProfile("sub-4", withSubscription());
+		await repo.setRenewal("sub-4", null, null, null, null);
+
+		// Second profile fetch: the cleared state has to survive it, or the
+		// seeding is level-triggered and the operator can never turn it off.
+		await repo.setAccountIdentityFromProfile("sub-4", withSubscription());
+
+		const account = await repo.findById("sub-4");
+		expect(account?.renewal_anchor).toBeNull();
+		expect(account?.renewal_anchor_source).toBe("manual");
+	});
+
+	it("seeds once and leaves the derived anchor alone on later fetches", async () => {
+		insertAccount(db, "sub-5");
+		await repo.setAccountIdentityFromProfile("sub-5", withSubscription());
+		// A later subscription start (a plan switch) must not move a date the
+		// operator may have been looking at.
+		await repo.setAccountIdentityFromProfile(
+			"sub-5",
+			withSubscription({
+				subscriptionStartedAt: new Date(2026, 6, 20, 12, 0).getTime(),
+			}),
+		);
+
+		const account = await repo.findById("sub-5");
+		expect(account?.renewal_anchor).toBe("2026-04-10");
+	});
+
+	it("leaves the anchor untouched when the provider reports no subscription start", async () => {
+		insertAccount(db, "sub-6");
+		await repo.setAccountIdentityFromProfile(
+			"sub-6",
+			withSubscription({ subscriptionStartedAt: null }),
+		);
+
+		const account = await repo.findById("sub-6");
+		expect(account?.renewal_anchor).toBeNull();
+		expect(account?.renewal_anchor_source).toBeNull();
+		expect(account?.identity_subscription_status).toBe("active");
+	});
+
+	it("COALESCE-merges the subscription fields like the rest of the identity", async () => {
+		insertAccount(db, "sub-7");
+		await repo.setAccountIdentityFromProfile("sub-7", withSubscription());
+		// A later capture without the organization block (the token envelope)
+		// must not erase what the profile fetch established.
+		await repo.setAccountIdentityFromProfile("sub-7", {
+			externalAccountId: "ext-sub",
+			email: null,
+			organizationName: null,
+			planTier: null,
+			rateLimitTier: null,
+		});
+
+		const account = await repo.findById("sub-7");
+		expect(account?.identity_subscription_status).toBe("active");
+		expect(account?.identity_subscription_started_at).toBe(SUB_START);
+	});
+
+	it("records a status change (an expiring subscription is visible)", async () => {
+		insertAccount(db, "sub-8");
+		await repo.setAccountIdentityFromProfile("sub-8", withSubscription());
+		await repo.setAccountIdentityFromProfile(
+			"sub-8",
+			withSubscription({ subscriptionStatus: "canceled" }),
+		);
+
+		const account = await repo.findById("sub-8");
+		expect(account?.identity_subscription_status).toBe("canceled");
 	});
 });

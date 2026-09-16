@@ -63,6 +63,25 @@ export function AccountRenewalDialog({
 	}, [account]);
 
 	const hasAnchorSet = !!account?.renewalAnchor;
+
+	// What the provider actually reports: a subscription START and a status.
+	// Neither is a renewal date, so a date filled in from it is an estimate
+	// until the operator saves, which flips the anchor's source to manual.
+	const subscriptionStart =
+		account?.identitySubscriptionStartedAt != null
+			? new Date(account.identitySubscriptionStartedAt).toLocaleDateString(
+					"en-CA",
+				)
+			: null;
+	const subscriptionNote = !subscriptionStart
+		? null
+		: account?.renewalAnchorSource === "derived"
+			? `Estimated from the subscription start (${subscriptionStart}). Saving confirms it.`
+			: `Subscription started ${subscriptionStart}${
+					account?.identitySubscriptionStatus
+						? ` · ${account.identitySubscriptionStatus}`
+						: ""
+				}.`;
 	// One-time dates aren't auto-recorded, so a price would be inert — the
 	// input is disabled and the save sends null.
 	const priceDisabled = cadence === "none";
@@ -122,13 +141,19 @@ export function AccountRenewalDialog({
 						<Label htmlFor="renewal-anchor" className="text-right">
 							Date
 						</Label>
-						<Input
-							id="renewal-anchor"
-							type="date"
-							value={anchor}
-							onChange={(e) => setAnchor(e.target.value)}
-							className="col-span-3"
-						/>
+						<div className="col-span-3">
+							<Input
+								id="renewal-anchor"
+								type="date"
+								value={anchor}
+								onChange={(e) => setAnchor(e.target.value)}
+							/>
+							{subscriptionNote && (
+								<p className="mt-tight text-xs text-muted-foreground">
+									{subscriptionNote}
+								</p>
+							)}
+						</div>
 					</div>
 					<div className="grid grid-cols-4 items-center gap-group">
 						<Label htmlFor="renewal-cadence" className="text-right">

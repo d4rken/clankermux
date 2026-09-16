@@ -62,6 +62,7 @@ export function ensureSchema(db: Database): void {
 			rate_limited_at INTEGER,
 			consecutive_rate_limits INTEGER NOT NULL DEFAULT 0,
 			renewal_anchor TEXT,
+			renewal_anchor_source TEXT,
 			renewal_cadence TEXT,
 			renewal_price_usd_micros INTEGER,
 			renewal_auto_start_date TEXT,
@@ -71,6 +72,8 @@ export function ensureSchema(db: Database): void {
 			identity_organization_name TEXT,
 			identity_plan_tier TEXT,
 			identity_rate_limit_tier TEXT,
+			identity_subscription_status TEXT,
+			identity_subscription_started_at INTEGER,
 			identity_captured_at INTEGER,
 			identity_profile_fetched_at INTEGER,
 			openrouter_metadata_json TEXT,
@@ -1502,6 +1505,31 @@ export const ADDITIVE_COLUMNS: ReadonlyArray<{
 		table: "routing_attempts",
 		column: "reasoning_effort_reason",
 		ddl: "ALTER TABLE routing_attempts ADD COLUMN reasoning_effort_reason TEXT",
+	},
+	// Upstream subscription state as the provider reports it (Anthropic's
+	// `organization.subscription_status`: "active", "canceled", …). Display and
+	// lapse evidence only — nothing routes on it.
+	{
+		table: "accounts",
+		column: "identity_subscription_status",
+		ddl: "ALTER TABLE accounts ADD COLUMN identity_subscription_status TEXT",
+	},
+	// ms-epoch the upstream subscription started
+	// (`organization.subscription_created_at`). A START date: no Anthropic
+	// endpoint reports a renewal date or a period end.
+	{
+		table: "accounts",
+		column: "identity_subscription_started_at",
+		ddl: "ALTER TABLE accounts ADD COLUMN identity_subscription_started_at INTEGER",
+	},
+	// Provenance of renewal_anchor: 'manual' (operator-entered, including a
+	// deliberate clear) or 'derived' (seeded from the subscription start). NULL
+	// means neither has happened, which is also the gate that keeps seeding
+	// one-shot: once a row carries a source, the seeder never touches it again.
+	{
+		table: "accounts",
+		column: "renewal_anchor_source",
+		ddl: "ALTER TABLE accounts ADD COLUMN renewal_anchor_source TEXT",
 	},
 ];
 

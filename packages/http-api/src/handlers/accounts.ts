@@ -487,6 +487,7 @@ export async function listAccountResponses(
 			pause_reason: string | null;
 			notes: string | null;
 			renewal_anchor: string | null;
+			renewal_anchor_source: string | null;
 			renewal_cadence: string | null;
 			renewal_price_usd_micros: number | null;
 			identity_external_id: string | null;
@@ -494,6 +495,8 @@ export async function listAccountResponses(
 			identity_organization_name: string | null;
 			identity_plan_tier: string | null;
 			identity_rate_limit_tier: string | null;
+			identity_subscription_status: string | null;
+			identity_subscription_started_at: number | null;
 			identity_captured_at: number | null;
 			identity_profile_fetched_at: number | null;
 			openrouter_metadata_json: string | null;
@@ -535,6 +538,7 @@ export async function listAccountResponses(
 					pause_reason,
 					notes,
 					renewal_anchor,
+					renewal_anchor_source,
 					renewal_cadence,
 					renewal_price_usd_micros,
 					identity_external_id,
@@ -542,6 +546,8 @@ export async function listAccountResponses(
 					identity_organization_name,
 					identity_plan_tier,
 					identity_rate_limit_tier,
+					identity_subscription_status,
+					identity_subscription_started_at,
 					identity_captured_at,
 					identity_profile_fetched_at,
 					openrouter_metadata_json,
@@ -1248,6 +1254,9 @@ export async function listAccountResponses(
 					billingType: account.billing_type,
 					notes: account.notes,
 					renewalAnchor: account.renewal_anchor ?? null,
+					renewalAnchorSource:
+						(account.renewal_anchor_source as "manual" | "derived" | null) ??
+						null,
 					renewalCadence:
 						(account.renewal_cadence as "monthly" | "yearly" | "none" | null) ??
 						null,
@@ -1276,6 +1285,12 @@ export async function listAccountResponses(
 					identityPlanTier:
 						devinIdentity?.planTier ?? account.identity_plan_tier ?? null,
 					identityRateLimitTier: account.identity_rate_limit_tier ?? null,
+					identitySubscriptionStatus:
+						account.identity_subscription_status ?? null,
+					identitySubscriptionStartedAt:
+						account.identity_subscription_started_at != null
+							? Number(account.identity_subscription_started_at)
+							: null,
 					identityCapturedAt:
 						devinIdentity && liveUsageEntry?.observedAtMs != null
 							? liveUsageEntry.observedAtMs

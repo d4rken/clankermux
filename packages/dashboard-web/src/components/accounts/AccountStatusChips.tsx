@@ -827,6 +827,11 @@ export function AccountRenewalInfo({
 
 	const isPast = status.renewalUrgency === "past";
 	const daysLeft = status.renewalDaysLeft;
+	// A derived anchor is the subscription's START day-of-month, not a billing
+	// date the provider reported — no Anthropic endpoint exposes one. The "~"
+	// is the only thing separating a guess from an operator-confirmed date.
+	const isDerived = account.renewalAnchorSource === "derived";
+	const dateMark = isDerived ? "~" : "";
 
 	let label: string;
 	if (isPast) {
@@ -836,19 +841,24 @@ export function AccountRenewalInfo({
 		// always resolve to a future date.)
 		label = `Renewal date passed (${shortDate})`;
 	} else if (daysLeft === 0) {
-		label = `Renews ${shortDate} (today)`;
+		label = `Renews ${dateMark}${shortDate} (today)`;
 	} else {
-		label = `Renews ${shortDate} (${daysLeft}d)`;
+		label = `Renews ${dateMark}${shortDate} (${daysLeft}d)`;
 	}
 
 	const priceSuffix =
 		account.renewalPriceUsd != null
 			? ` · ${formatUsd(account.renewalPriceUsd)}/renewal`
 			: "";
+	const derivedSuffix = isDerived
+		? " · Estimated from the subscription start; the provider reports no renewal date. Set it to confirm."
+		: "";
 	const title =
 		(isPast
 			? `Configured one-time renewal date passed on ${isoDate}; provider renewal was not verified`
-			: `Subscription renews ${isoDate} (${cadence})`) + priceSuffix;
+			: `Subscription renews ${isoDate} (${cadence})`) +
+		priceSuffix +
+		derivedSuffix;
 
 	const colorClasses =
 		RENEWAL_URGENCY_CLASSES[status.renewalUrgency] ??

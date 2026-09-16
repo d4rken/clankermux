@@ -64,6 +64,8 @@ function makeAccount(overrides: Partial<Account> = {}): Account {
 		identityOrganizationName: "Acme Inc",
 		identityPlanTier: "max",
 		identityRateLimitTier: "20x",
+		identitySubscriptionStatus: null,
+		identitySubscriptionStartedAt: null,
 		identityCapturedAt: 1_700_000_000_000,
 		identityProfileFetchedAt: 1_700_000_000_000,
 		isDuplicateAccount: false,

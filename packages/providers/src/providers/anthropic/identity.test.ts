@@ -21,7 +21,47 @@ describe("extractAnthropicIdentity", () => {
 			organizationName: "Acme Inc",
 			planTier: "max",
 			rateLimitTier: "20x",
+			subscriptionStatus: null,
+			subscriptionStartedAt: null,
 		});
+	});
+
+	it("captures subscription status and start from the organization block", () => {
+		const identity = extractAnthropicIdentity({
+			account: { uuid: "u", email_address: "o@example.com" },
+			organization: {
+				organization_type: "claude_max",
+				billing_type: "stripe_subscription",
+				subscription_status: "Active",
+				subscription_created_at: "2026-04-10T15:53:44.244879Z",
+			},
+		});
+		expect(identity?.subscriptionStatus).toBe("active");
+		expect(identity?.subscriptionStartedAt).toBe(
+			Date.parse("2026-04-10T15:53:44.244Z"),
+		);
+	});
+
+	it("passes an unrecognized subscription status through, lowercased", () => {
+		const identity = extractAnthropicIdentity({
+			organization: { subscription_status: "PAST_DUE" },
+		});
+		expect(identity?.subscriptionStatus).toBe("past_due");
+	});
+
+	it("reports a null subscription start for an unparseable date", () => {
+		const identity = extractAnthropicIdentity({
+			organization: { subscription_created_at: "not-a-date" },
+		});
+		expect(identity?.subscriptionStartedAt).toBeNull();
+	});
+
+	it("reports nulls when the organization omits the subscription fields", () => {
+		const identity = extractAnthropicIdentity({
+			organization: { name: "Org", organization_type: "claude_pro" },
+		});
+		expect(identity?.subscriptionStatus).toBeNull();
+		expect(identity?.subscriptionStartedAt).toBeNull();
 	});
 
 	it("normalizes rate_limit_tier multiplier suffixes to a short token", () => {
@@ -100,6 +140,8 @@ describe("extractAnthropicIdentity", () => {
 			organizationName: null,
 			planTier: null,
 			rateLimitTier: null,
+			subscriptionStatus: null,
+			subscriptionStartedAt: null,
 		});
 	});
 });

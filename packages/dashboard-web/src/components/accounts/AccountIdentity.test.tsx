@@ -50,6 +50,8 @@ function makeAccount(overrides: Partial<Account> = {}): Account {
 		identityOrganizationName: null,
 		identityPlanTier: null,
 		identityRateLimitTier: null,
+		identitySubscriptionStatus: null,
+		identitySubscriptionStartedAt: null,
 		identityCapturedAt: null,
 		identityProfileFetchedAt: null,
 		isDuplicateAccount: false,

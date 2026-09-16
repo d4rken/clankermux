@@ -27,6 +27,8 @@ describe("fetchAnthropicProfile", () => {
 			organizationName: "Acme",
 			planTier: "pro",
 			rateLimitTier: "5x",
+			subscriptionStatus: null,
+			subscriptionStartedAt: null,
 		});
 	});
 

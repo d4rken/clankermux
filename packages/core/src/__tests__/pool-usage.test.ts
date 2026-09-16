@@ -62,6 +62,8 @@ function mkAccount(partial: Partial<AccountResponse>): AccountResponse {
 		identityOrganizationName: null,
 		identityPlanTier: null,
 		identityRateLimitTier: null,
+		identitySubscriptionStatus: null,
+		identitySubscriptionStartedAt: null,
 		identityCapturedAt: null,
 		identityProfileFetchedAt: null,
 		notes: null,
