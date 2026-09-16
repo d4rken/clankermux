@@ -13,7 +13,11 @@ import type { Account, AccountIdentity } from "@clankermux/types";
 export const ANTHROPIC_SUBSCRIPTION_REFRESH_INTERVAL_MS = 6 * 60 * 60 * 1000;
 
 export interface AnthropicSubscriptionRefreshDeps {
-	/** Re-read the row: the throttle and the provider gate need CURRENT state. */
+	/**
+	 * Read the row. Called twice, both times for CURRENT state: once before the
+	 * claim, and again after the fetch to confirm the account is still one this
+	 * may write to.
+	 */
 	getAccount: (accountId: string) => Promise<Account | null>;
 	/** Fetch + normalize a profile identity; fails open (null on any error). */
 	fetchProfile: (accessToken: string) => Promise<AccountIdentity | null>;
@@ -41,11 +45,21 @@ export interface AnthropicSubscriptionRefreshDeps {
 }
 
 /**
- * Whether this account's subscription state is stale enough to re-read.
+ * Whether this row is an account this module may read a profile for and write
+ * an identity to, with no throttle in it.
  *
- * The provider gate is `anthropic` plus a refresh token: `claude-console-api`
- * accounts are a different provider and have no OAuth profile endpoint, and an
- * Anthropic row without a refresh token is an API-key account.
+ * `claude-console-api` accounts are a different provider and have no OAuth
+ * profile endpoint, and an Anthropic row without a refresh token is an API-key
+ * account.
+ */
+export function isAnthropicSubscriptionRefreshEligible(
+	account: Account,
+): boolean {
+	return account.provider === "anthropic" && Boolean(account.refresh_token);
+}
+
+/**
+ * Whether this account's subscription state is stale enough to re-read.
  *
  * The throttle gates on `identity_subscription_checked_at`, which records the
  * last capture ATTEMPT rather than the last success — see
@@ -61,8 +75,7 @@ export function isAnthropicSubscriptionRefreshDue(
 	account: Account,
 	nowMs: number,
 ): boolean {
-	if (account.provider !== "anthropic") return false;
-	if (!account.refresh_token) return false;
+	if (!isAnthropicSubscriptionRefreshEligible(account)) return false;
 	const checkedAt = account.identity_subscription_checked_at;
 	return (
 		checkedAt == null ||
@@ -119,13 +132,32 @@ export async function refreshAnthropicSubscription(
 			);
 			return;
 		}
+		// The fetch above ran detached from the poll that resolved the token, and
+		// `usageCache.stopPolling` drops the token provider but cannot cancel a
+		// continuation already awaiting it. So re-read before writing: the account
+		// may have been deleted (the write would target a row that is gone) or had
+		// its provider changed (Anthropic identity onto a row that is no longer
+		// Anthropic).
+		//
+		// Bounded on purpose. The alternative — a cancellation signal threaded
+		// through `usageCache.startPolling` — widens a surface shared with zai,
+		// kilo and devin for a concern that is Anthropic's alone. What it leaves
+		// uncovered is a read landing during shutdown teardown, which writes the
+		// value it would have written moments earlier.
+		const current = await deps.getAccount(accountId);
+		if (!current || !isAnthropicSubscriptionRefreshEligible(current)) {
+			log.debug(
+				`discarding subscription read for ${account.name}: no longer an Anthropic OAuth account`,
+			);
+			return;
+		}
 		// Written through the identity COALESCE merge, so the Anthropic-gated
 		// renewal-anchor seeding still runs for an account that has no anchor. The
 		// merge cannot CLEAR a column: a status that changes (active → canceled)
 		// is a new non-null value and lands, a status the profile stops reporting
 		// altogether stays at its last observed value.
 		await deps.setIdentity(accountId, identity);
-		log.debug(`refreshed subscription state for ${account.name}`);
+		log.debug(`refreshed subscription state for ${current.name}`);
 	} catch (err) {
 		log.warn(
 			`subscription refresh failed for account ${accountId}: ${

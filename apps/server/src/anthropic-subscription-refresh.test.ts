@@ -231,6 +231,52 @@ describe("refreshAnthropicSubscription", () => {
 		expect(store.row.identity_subscription_status).toBe("canceled");
 	});
 
+	// The fetch is detached from the poll that resolved the token, and
+	// stopPolling cannot cancel one already in flight — so the row it is about to
+	// be written to has to be re-checked, not assumed.
+	it("does not write when the account is deleted during the fetch", async () => {
+		const store = fakeStore(
+			makeAccount({
+				identity_subscription_status: "active",
+				identity_subscription_checked_at: null,
+			}),
+		);
+
+		await refreshAnthropicSubscription(
+			"acc-1",
+			"t-live",
+			store.deps(async () => {
+				store.remove();
+				return CANCELED;
+			}),
+		);
+
+		expect(store.fetches).toEqual(["t-live"]);
+		expect(store.row.identity_subscription_status).toBe("active");
+	});
+
+	it("does not write when the provider changed during the fetch", async () => {
+		const store = fakeStore(
+			makeAccount({
+				identity_subscription_status: "active",
+				identity_subscription_checked_at: null,
+			}),
+		);
+
+		await refreshAnthropicSubscription(
+			"acc-1",
+			"t-live",
+			store.deps(async () => {
+				store.row.provider = "zai";
+				return CANCELED;
+			}),
+		);
+
+		expect(store.fetches).toEqual(["t-live"]);
+		// Anthropic identity must never land on a row that is no longer Anthropic.
+		expect(store.row.identity_subscription_status).toBe("active");
+	});
+
 	// Without this a failing account is re-read on every 90s poll tick, which is
 	// the load the throttle exists to prevent.
 	it("advances the throttle on a fetch that fails open (null)", async () => {
