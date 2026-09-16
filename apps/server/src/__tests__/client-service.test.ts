@@ -1,6 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it, spyOn } from "bun:test";
 import "@clankermux/core";
-import { matchRoutingRule } from "@clankermux/core";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { __pricingTestHooks, matchRoutingRule } from "@clankermux/core";
 import { DatabaseOperations } from "@clankermux/database";
 import { HttpError } from "@clankermux/errors";
 import {
@@ -1070,5 +1073,199 @@ describe("client service integration", () => {
 				matchRoutingRule(await dbOps.routing.listRules(), id, "shared")
 					?.target_model,
 			).toBe("gpt-static");
+	});
+
+	// --- published model metadata ---------------------------------------------
+
+	describe("published model metadata", () => {
+		const originalCacheHome = process.env.XDG_CACHE_HOME;
+		const originalFetch = globalThis.fetch;
+		let cacheDir: string;
+		/**
+		 * Two providers publishing the same slug at different figures, so a test
+		 * can tell "both routes counted" from "only the eligible one did".
+		 */
+		const catalogue = {
+			openai: {
+				models: {
+					"gpt-6-astra": {
+						id: "gpt-6-astra",
+						name: "Astra",
+						limit: { context: 400_000, output: 128_000 },
+						reasoning: true,
+						modalities: { input: ["text", "image"] },
+						cost: { input: 10, output: 50 },
+					},
+					// One id the bundled seed has never heard of, which is what marks
+					// the merged table a real catalogue rather than the fallback.
+					"gpt-9-unlisted": {
+						id: "gpt-9-unlisted",
+						name: "Unlisted",
+						cost: { input: 1, output: 2 },
+					},
+				},
+			},
+			devin: {
+				models: {
+					"gpt-6-astra": {
+						id: "gpt-6-astra",
+						name: "Astra via Devin",
+						limit: { context: 200_000, output: 64_000 },
+						reasoning: false,
+						modalities: { input: ["text"] },
+						cost: { input: 9, output: 49 },
+					},
+				},
+			},
+		};
+		/** Give an account a completed discovery listing exactly `ids`. */
+		async function discovered(accountId: string, ids: string[]): Promise<void> {
+			const account = await dbOps.getAccount(accountId);
+			if (!account) throw new Error(`fixture account ${accountId}`);
+			const scope = modelPermissionScope(account);
+			const row = await dbOps.routing.ensurePermissionScope(accountId, scope);
+			await dbOps.routing.completeDiscovery(
+				accountId,
+				scope,
+				row.generation,
+				ids,
+				100,
+			);
+		}
+		/** A client publishing `gpt-6-astra` under its own name. */
+		async function astraClient(
+			accountIds: string[] | null = null,
+			destinations = { accountId: null, providers: null },
+		): Promise<string> {
+			const draft = blank();
+			draft.destinations = destinations;
+			draft.catalogues.openai.models = [
+				{
+					id: "gpt-6-astra",
+					displayName: "Astra",
+					targetModel: "gpt-6-astra",
+					accountIds,
+				},
+			];
+			return (await create(draft)).client.apiKeyId;
+		}
+		beforeEach(async () => {
+			cacheDir = mkdtempSync(join(tmpdir(), "cmux-client-metadata-"));
+			process.env.XDG_CACHE_HOME = cacheDir;
+			__pricingTestHooks.reset();
+			globalThis.fetch = (async () =>
+				new Response(JSON.stringify(catalogue), {
+					status: 200,
+					headers: { "content-type": "application/json" },
+				})) as unknown as typeof fetch;
+			await __pricingTestHooks.loadPricing();
+		});
+		afterEach(() => {
+			globalThis.fetch = originalFetch;
+			__pricingTestHooks.reset();
+			if (originalCacheHome === undefined) delete process.env.XDG_CACHE_HOME;
+			else process.env.XDG_CACHE_HOME = originalCacheHome;
+			rmSync(cacheDir, { recursive: true, force: true });
+		});
+
+		it("describes the route a literal rule sends the alias to", async () => {
+			await discovered("c", ["gpt-6-astra"]);
+			const draft = blank();
+			draft.destinations = { accountId: "c", providers: null };
+			draft.catalogues.openai.models = [
+				{
+					id: "fast",
+					displayName: "Fast",
+					targetModel: "fast",
+					accountIds: null,
+				},
+			];
+			const id = (await create(draft)).client.apiKeyId;
+			await dbOps.routing.saveRule({
+				...broad,
+				id: "remap",
+				match_api_key_id: id,
+				match_model_kind: "exact",
+				match_model_value: "fast",
+				target_kind: "literal",
+				target_model: "gpt-6-astra",
+			});
+			const result = await service.modelMetadata(id, "openai");
+			// `fast` is permitted on no account; the rule's target is, and it is the
+			// model the client's requests would actually reach.
+			expect(result.models.fast?.contextWindow).toBe(872_000);
+			expect(result.models.fast?.maxOutputTokens).toBe(128_000);
+			expect(result.catalogueLoaded).toBe(true);
+		});
+
+		it("narrows the eligible accounts to a rule's pool", async () => {
+			await discovered("c", ["gpt-6-astra"]);
+			await discovered("d", ["gpt-6-astra"]);
+			const id = await astraClient();
+			// Both accounts serve the model, so both routes count.
+			const pooled = await service.modelMetadata(id, "openai");
+			expect(pooled.models["gpt-6-astra"]).toEqual({
+				contextWindow: 200_000,
+				maxOutputTokens: 64_000,
+				reasoning: false,
+				inputModalities: ["text"],
+			});
+			await dbOps.routing.saveRule({
+				...broad,
+				id: "codex-only",
+				match_api_key_id: id,
+				pool_kind: "accounts",
+				pool_account_ids: ["c"],
+			});
+			const narrowed = await service.modelMetadata(id, "openai");
+			expect(narrowed.models["gpt-6-astra"]).toEqual({
+				contextWindow: 872_000,
+				maxOutputTokens: 128_000,
+				reasoning: true,
+				inputModalities: ["text", "image"],
+				// cacheRead/cacheWrite come from the bundled table backfilling the
+				// rates models.dev leaves out of this entry.
+				cost: { input: 10, output: 50, cacheRead: 1, cacheWrite: 12.5 },
+			});
+		});
+
+		it("excludes an account whose permissions do not list the target", async () => {
+			await discovered("c", ["gpt-6-astra"]);
+			await discovered("d", ["swe-2-high"]);
+			const result = await service.modelMetadata(await astraClient(), "openai");
+			expect(result.models["gpt-6-astra"]?.maxOutputTokens).toBe(128_000);
+		});
+
+		it("says nothing while an account's permissions are unknown", async () => {
+			await discovered("c", ["gpt-6-astra"]);
+			const account = await dbOps.getAccount("d");
+			if (!account) throw new Error("fixture account d");
+			// A row exists but discovery never completed: this account may or may not
+			// serve the model, so the alias cannot be described from `c` alone.
+			await dbOps.routing.ensurePermissionScope(
+				"d",
+				modelPermissionScope(account),
+			);
+			const result = await service.modelMetadata(await astraClient(), "openai");
+			expect(result.models["gpt-6-astra"]).toEqual({});
+			expect(result.catalogueLoaded).toBe(false);
+		});
+
+		it("says nothing when the saved account pin names no live account", async () => {
+			await discovered("c", ["gpt-6-astra"]);
+			await discovered("d", ["gpt-6-astra"]);
+			const id = await astraClient(["d"]);
+			// The pinned account goes away after the catalogue was saved, leaving the
+			// entry pointing at nothing — `wire()` treats that as no route, and so
+			// does this.
+			dbOps
+				.getAdapter()
+				.getSQLiteDb()
+				.query("DELETE FROM accounts WHERE id=?")
+				.run("d");
+			const result = await service.modelMetadata(id, "openai");
+			expect(result.models["gpt-6-astra"]).toEqual({});
+			expect(result.catalogueLoaded).toBe(false);
+		});
 	});
 });

@@ -1908,6 +1908,23 @@ export interface CatalogueLookupResult {
  * report every non-cost field absent milliseconds before the real catalogue
  * lands. Reads only; never starts a load.
  */
+/**
+ * Catalogue provenance as it stands right now, read without waiting for or
+ * starting any work — what a caller that has already done its lookups needs to
+ * say whether a real catalogue backed them.
+ *
+ * {@link loadPricingCatalogue} answers the same question but settles both load
+ * stages first, which is right for a tool writing durable prices and wrong for
+ * a read that has already waited as long as it is going to.
+ */
+export function pricingCatalogueStatus(): { loaded: boolean; stale: boolean } {
+	const catalogue = PriceCatalogue.get();
+	return {
+		loaded: catalogue.isCatalogueLoaded(),
+		stale: catalogue.isCatalogueStale(),
+	};
+}
+
 export async function lookupCatalogueEntry(
 	modelId: string,
 	provider: string,

@@ -263,6 +263,7 @@ export {
 	getPricingGaps,
 	loadPricingCatalogue,
 	type PricingEstimateContext,
+	pricingCatalogueStatus,
 	setPricingLogger,
 	type TokenBreakdown,
 } from "./pricing";
