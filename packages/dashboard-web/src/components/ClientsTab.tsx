@@ -238,6 +238,7 @@ export function ClientsTab() {
 			<ClientWizard
 				key={editing === "new" ? "new" : editing.apiKeyId}
 				client={editing === "new" ? undefined : editing}
+				clients={clients}
 				accounts={accounts}
 				onCancel={() => setEditing(null)}
 				onSaved={finish}

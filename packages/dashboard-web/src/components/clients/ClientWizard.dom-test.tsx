@@ -44,6 +44,40 @@ const existing: ClientView = {
 		codex: { models: [], defaultModel: null },
 	},
 };
+/** A second client to copy from: another application, a pin, another catalogue. */
+const source: ClientView = {
+	apiKeyId: "source",
+	application: "claude-code",
+	revision: 3,
+	notices: [],
+	aliasRules: [],
+	key: {
+		id: "source",
+		name: "Source",
+		prefixLast8: "12345678",
+		createdAt: "2026-01-01",
+		lastUsed: null,
+		usageCount: 0,
+		isActive: true,
+		pinnedAccountId: "a",
+		pinnedProviders: null,
+	},
+	catalogues: {
+		anthropic: {
+			models: [
+				{
+					id: "src",
+					targetModel: "src",
+					displayName: "Source model",
+					accountIds: null,
+				},
+			],
+			defaultModel: "src",
+		},
+		openai: { models: [], defaultModel: null },
+		codex: { models: [], defaultModel: null },
+	},
+};
 async function click(text: string) {
 	const button = [...document.querySelectorAll("button")].find(
 		(b) => (b.getAttribute("aria-label") ?? b.textContent?.trim()) === text,
@@ -68,6 +102,15 @@ async function choose(label: string, value: string) {
 			"value",
 		)?.set?.call(el, value);
 		el.dispatchEvent(new Event("change", { bubbles: true }));
+	});
+}
+async function untick(label: string) {
+	const box = [...document.querySelectorAll("label")]
+		.find((l) => l.textContent?.trim() === label)
+		?.querySelector<HTMLInputElement>('input[type="checkbox"]');
+	if (!box) throw new Error(`Missing ${label} checkbox`);
+	await act(async () => {
+		box.click();
 	});
 }
 async function type(id: string, value: string) {
@@ -131,6 +174,7 @@ async function mount(
 	client: ClientView | null = existing,
 	jump = false,
 	models = DEFAULT_SUGGESTIONS,
+	others: ClientView[] = [],
 ) {
 	reviewed = undefined;
 	suggested = models;
@@ -181,6 +225,7 @@ async function mount(
 		root?.render(
 			<ClientWizard
 				client={client ? structuredClone(client) : undefined}
+				clients={structuredClone(client ? [client, ...others] : others)}
 				accounts={[{ id: "a", name: "Account", provider: "openai-compatible" }]}
 				onCancel={() => {}}
 				onSaved={() => {}}
@@ -195,8 +240,11 @@ async function mount(
 	}
 }
 /** Mount a brand-new client, name it, and stop on the Application step. */
-async function mountNew(models = DEFAULT_SUGGESTIONS) {
-	await mount(null, false, models);
+async function mountNew(
+	models = DEFAULT_SUGGESTIONS,
+	others: ClientView[] = [],
+) {
+	await mount(null, false, models, others);
 	await type("client-name", "Fresh");
 }
 afterEach(async () => {
@@ -680,5 +728,75 @@ describe("catalogue filtering", () => {
 		expect(reviewed?.catalogues.openai.models.map((m) => m.id)).toEqual([
 			"old",
 		]);
+	});
+});
+
+describe("copying another client's setup", () => {
+	it("replaces the application, destinations and every catalogue", async () => {
+		await mount(existing, true, DEFAULT_SUGGESTIONS, [source]);
+		await choose("Copy from", "source");
+		await click("Copy into this draft");
+		await click("Review");
+		expect(reviewed?.application).toBe("claude-code");
+		expect(reviewed?.destinations).toEqual({ accountId: "a", providers: null });
+		expect(reviewed?.catalogues.anthropic.models.map((m) => m.id)).toEqual([
+			"src",
+		]);
+		expect(reviewed?.catalogues.anthropic.defaultModel).toBe("src");
+		expect(reviewed?.catalogues.openai.models).toEqual([]);
+	});
+
+	it("never offers the client being edited as a source", async () => {
+		await mount(existing, true, DEFAULT_SUGGESTIONS, [source]);
+		expect([...select("Copy from").options].map((o) => o.value)).toEqual([
+			"",
+			"source",
+		]);
+	});
+
+	it("copies only the parts left ticked", async () => {
+		await mount(existing, true, DEFAULT_SUGGESTIONS, [source]);
+		await choose("Copy from", "source");
+		await untick("Application recipe");
+		await untick("Allowed destinations");
+		await click("Copy into this draft");
+		await click("Review");
+		expect(reviewed?.application).toBe("generic");
+		expect(reviewed?.destinations).toEqual({
+			accountId: null,
+			providers: null,
+		});
+		expect(reviewed?.catalogues.anthropic.models.map((m) => m.id)).toEqual([
+			"src",
+		]);
+	});
+
+	it("rediscovers models for the copied destinations", async () => {
+		await mount(existing, true, DEFAULT_SUGGESTIONS, [source]);
+		await choose("Copy from", "source");
+		await untick("Application recipe");
+		await untick("All three catalogues");
+		await click("Copy into this draft");
+		expect(suggestionBodies.at(-1)).toEqual({
+			destinations: { accountId: "a", providers: null },
+			refresh: false,
+		});
+	});
+
+	it("keeps a copied catalogue when the application changes afterwards", async () => {
+		await mountNew(DEFAULT_SUGGESTIONS, [source]);
+		await click("Next");
+		await click("Next");
+		await choose("Copy from", "source");
+		await untick("Application recipe");
+		await untick("Allowed destinations");
+		await click("Copy into this draft");
+		await click("Application");
+		await choose("Application", "claude-code");
+		await click("Review");
+		expect(reviewed?.catalogues.anthropic.models.map((m) => m.id)).toEqual([
+			"src",
+		]);
+		expect(reviewed?.catalogues.openai.models).toEqual([]);
 	});
 });

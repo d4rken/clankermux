@@ -14,7 +14,7 @@ import { Input } from "../ui/input";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "../ui/tabs";
 import { clientRequest } from "./api";
 import { ModelFilterField, matchesModelQuery } from "./model-filter";
-import { APPLICATIONS, FORMATS, preferredFormat } from "./setup";
+import { APPLICATIONS, FORMAT_LABELS, FORMATS, preferredFormat } from "./setup";
 
 export interface DestinationAccount {
 	id: string;
@@ -22,6 +22,12 @@ export interface DestinationAccount {
 	provider: string;
 }
 const SELECT = "h-9 rounded-md border border-input bg-background px-3 text-sm";
+const FORMAT_KEYS = Object.keys(FORMATS) as ClientFormat[];
+const COPY_PARTS = [
+	{ key: "application", label: "Application recipe" },
+	{ key: "destinations", label: "Allowed destinations" },
+	{ key: "catalogues", label: "All three catalogues" },
+] as const;
 export function draftFor(client?: ClientView): ClientDraft {
 	return client
 		? {
@@ -66,11 +72,14 @@ export function suggestedModel(
 }
 export function ClientWizard({
 	client,
+	clients,
 	accounts,
 	onCancel,
 	onSaved,
 }: {
 	client?: ClientView;
+	/** Every client, so this draft can be seeded from one of the others. */
+	clients: ClientView[];
 	accounts: DestinationAccount[];
 	onCancel: () => void;
 	onSaved: (result: { client: ClientView; apiKey?: string }) => void;
@@ -106,6 +115,13 @@ export function ClientWizard({
 	});
 	/** Kept across format tabs: narrowing the list is a view, not catalogue data. */
 	const [query, setQuery] = useState("");
+	const [copy, setCopy] = useState({
+		sourceId: "",
+		application: true,
+		destinations: true,
+		catalogues: true,
+	});
+	const [copied, setCopied] = useState<string | null>(null);
 	const mode =
 		draft.destinations.accountId !== null
 			? "account"
@@ -169,6 +185,7 @@ export function ClientWizard({
 		busyRef.current = true;
 		setBusy(true);
 		setError(null);
+		setCopied(null);
 		try {
 			await work();
 		} catch (e) {
@@ -205,19 +222,19 @@ export function ClientWizard({
 	 * they have not changed. Seeding must not depend on a fetch: an application
 	 * change reseeds without touching destinations.
 	 */
-	const ensureSuggestions = async (refresh = false) => {
-		if (
-			!refresh &&
-			suggestions &&
-			suggestionsDestinations.current === JSON.stringify(draft.destinations)
-		)
+	const ensureSuggestions = async (
+		refresh = false,
+		destinations = draft.destinations,
+	) => {
+		const stamp = JSON.stringify(destinations);
+		if (!refresh && suggestions && suggestionsDestinations.current === stamp)
 			return suggestions;
 		const result = await clientRequest<ClientSuggestions>("/suggestions", {
-			destinations: draft.destinations,
+			destinations,
 			refresh,
 		});
 		setSuggestions(result);
-		suggestionsDestinations.current = JSON.stringify(draft.destinations);
+		suggestionsDestinations.current = stamp;
 		return result;
 	};
 	const loadSuggestions = async (refresh = false) => {
@@ -284,6 +301,56 @@ export function ClientWizard({
 		// or that seed lands on their work the next time the catalogue opens.
 		setPendingSeed(!touched.has(next));
 	};
+	const copySources = clients
+		.filter((c) => c.apiKeyId !== client?.apiKeyId)
+		.sort((a, b) => a.key.name.localeCompare(b.key.name));
+	const copySource = copySources.find((c) => c.apiKeyId === copy.sourceId);
+	const copyParts = COPY_PARTS.filter((part) => copy[part.key]);
+	const destinationsOf = (view: ClientView) =>
+		view.key.pinnedAccountId
+			? (accounts.find((a) => a.id === view.key.pinnedAccountId)?.name ??
+				"Unavailable account")
+			: (view.key.pinnedProviders?.join(", ") ?? "All accounts");
+	/**
+	 * Seed this draft from another client. The name and the API key are the
+	 * client's identity, so they are never part of a copy; everything else is
+	 * replaced outright rather than merged, because a half-copied catalogue is
+	 * not a configuration either client has ever run.
+	 */
+	const applyCopy = () =>
+		run(async () => {
+			const source = copySource;
+			if (!source) return;
+			const destinations = copy.destinations
+				? {
+						accountId: source.key.pinnedAccountId,
+						providers: source.key.pinnedProviders,
+					}
+				: draft.destinations;
+			if (copy.application) changeApplication(source.application);
+			setDraft((d) => ({
+				...d,
+				destinations,
+				...(copy.catalogues
+					? { catalogues: structuredClone(source.catalogues) }
+					: {}),
+			}));
+			if (copy.catalogues) {
+				// A copied catalogue is the operator's answer for every format, so
+				// the automatic seed is spent and an application change must not
+				// discard what was copied.
+				setTouched(new Set(FORMAT_KEYS));
+				setSeeded(null);
+				setPendingSeed(false);
+			}
+			setCustom({ id: "", target: "", name: "", accounts: [], editId: null });
+			setCopied(
+				`Copied ${copyParts.map((part) => part.label.toLowerCase()).join(", ")} from ${source.key.name}. Nothing is saved until you review.`,
+			);
+			// Discovery is scoped to the destinations, so copied ones need their
+			// own suggestions before the candidate list means anything.
+			if (copy.destinations) await ensureSuggestions(false, destinations);
+		});
 	const candidates = new Map<string, ClientModel>();
 	for (const m of suggestions?.models ?? [])
 		if (format !== "codex" || m.codexMetadataAvailable) {
@@ -314,7 +381,7 @@ export function ClientWizard({
 			if (target === 3) {
 				if (pendingSeed)
 					throw new Error("Choose your catalogue models before reviewing");
-				const undecided = (Object.keys(FORMATS) as ClientFormat[]).find(
+				const undecided = FORMAT_KEYS.find(
 					(f) =>
 						draft.catalogues[f].models.length > 0 &&
 						!draft.catalogues[f].models.some(
@@ -551,17 +618,13 @@ export function ClientWizard({
 								aria-label="Catalogue format"
 								className="h-auto flex flex-wrap justify-start w-fit gap-1"
 							>
-								{(Object.keys(FORMATS) as ClientFormat[]).map((f) => (
+								{FORMAT_KEYS.map((f) => (
 									<TabsTrigger
 										key={f}
 										value={f}
 										className="px-2 text-xs sm:px-3 sm:text-sm"
 									>
-										{f === "anthropic"
-											? "Anthropic"
-											: f === "openai"
-												? "OpenAI"
-												: "Codex"}
+										{FORMAT_LABELS[f]}
 										<span className="ml-1.5 rounded bg-muted px-1 text-xs tabular-nums">
 											{draft.catalogues[f].models.length}
 										</span>
@@ -582,6 +645,87 @@ export function ClientWizard({
 							together. Hiding a model only removes it from discovery; it does
 							not block requests.
 						</p>
+						<details className="rounded-md border p-3">
+							<summary className="cursor-pointer w-fit text-sm font-medium">
+								Copy setup from another client
+							</summary>
+							{copySources.length === 0 ? (
+								<p className="mt-3 text-sm text-muted-foreground">
+									There is no other client to copy from yet.
+								</p>
+							) : (
+								<div className="mt-3 grid gap-3 max-w-xl">
+									<p className="text-sm text-muted-foreground">
+										Load another client's configuration into this draft. The
+										client name and API key are never copied, and nothing is
+										saved until you review.
+									</p>
+									<label className="grid gap-2 text-sm font-medium">
+										Copy from
+										<select
+											className={SELECT}
+											aria-label="Copy from"
+											disabled={busy}
+											value={copy.sourceId}
+											onChange={(e) =>
+												setCopy({ ...copy, sourceId: e.target.value })
+											}
+										>
+											<option value="">Choose a client</option>
+											{copySources.map((c) => (
+												<option key={c.apiKeyId} value={c.apiKeyId}>
+													{c.key.name}
+												</option>
+											))}
+										</select>
+									</label>
+									{copySource && (
+										<p className="text-xs leading-5 text-muted-foreground -mt-1">
+											{APPLICATIONS[copySource.application]} ·{" "}
+											{destinationsOf(copySource)} ·{" "}
+											{FORMAT_KEYS.map(
+												(f) =>
+													`${copySource.catalogues[f].models.length} ${FORMAT_LABELS[f]}`,
+											).join(", ")}
+										</p>
+									)}
+									<fieldset>
+										<legend className="text-sm mb-2">What to copy</legend>
+										<div className="flex flex-wrap gap-3">
+											{COPY_PARTS.map((part) => (
+												<label key={part.key} className="text-sm flex gap-2">
+													<input
+														type="checkbox"
+														disabled={busy}
+														checked={copy[part.key]}
+														onChange={(e) =>
+															setCopy({
+																...copy,
+																[part.key]: e.target.checked,
+															})
+														}
+													/>
+													{part.label}
+												</label>
+											))}
+										</div>
+									</fieldset>
+									<Button
+										variant="outline"
+										className="w-fit"
+										disabled={busy || !copySource || !copyParts.length}
+										onClick={applyCopy}
+									>
+										Copy into this draft
+									</Button>
+								</div>
+							)}
+						</details>
+						{copied && (
+							<p role="status" className="text-sm text-muted-foreground">
+								{copied}
+							</p>
+						)}
 						{(conflicts.length > 0 || retainedConflicts.length > 0) && (
 							<div
 								role="alert"

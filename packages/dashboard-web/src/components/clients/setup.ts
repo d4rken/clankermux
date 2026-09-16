@@ -17,6 +17,12 @@ export const FORMATS: Record<ClientFormat, string> = {
 	openai: "OpenAI-style discovery",
 	codex: "Codex rich catalogue",
 };
+/** Tab-width names for the same formats. */
+export const FORMAT_LABELS: Record<ClientFormat, string> = {
+	anthropic: "Anthropic",
+	openai: "OpenAI",
+	codex: "Codex",
+};
 export const preferredFormat = (
 	application: ClientApplication,
 ): ClientFormat =>
