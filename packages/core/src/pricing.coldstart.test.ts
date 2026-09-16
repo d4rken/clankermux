@@ -9,7 +9,12 @@ import {
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { MODEL_CONTEXT_WINDOWS } from "./model-mappings";
-import { __pricingTestHooks, estimateCostUSD, getPricingGaps } from "./pricing";
+import {
+	__pricingTestHooks,
+	estimateCostUSD,
+	getPricingGaps,
+	lookupCatalogueEntry,
+} from "./pricing";
 
 /**
  * Cold-start pricing: a request that finalizes before the models.dev catalogue
@@ -645,6 +650,171 @@ describe("bundled catalogue coverage", () => {
 		}
 		// Not one of them was reported as unpriced.
 		expect(getPricingGaps()).toEqual([]);
+	});
+});
+
+describe("catalogue entry lookup", () => {
+	/** Entries carrying the non-cost fields the metadata resolver reads. */
+	function richCatalogue(): unknown {
+		return {
+			openai: {
+				models: {
+					"gpt-9-rich": {
+						id: "gpt-9-rich",
+						name: "openai entry",
+						cost: {
+							input: 2,
+							output: 8,
+							tiers: [
+								{
+									tier: { type: "context", size: 272_000 },
+									input: 4,
+									output: 16,
+								},
+							],
+						},
+						limit: { context: 400_000, output: 128_000 },
+						reasoning: true,
+						modalities: { input: ["text", "image"] },
+					},
+				},
+			},
+			anthropic: {
+				models: {
+					"gpt-9-rich": {
+						id: "gpt-9-rich",
+						name: "anthropic entry",
+						cost: { input: 1, output: 3 },
+					},
+					"claude-9-rich": {
+						id: "claude-9-rich",
+						name: "claude",
+						cost: { input: 5, output: 25 },
+						limit: { context: 1_000_000, output: 64_000 },
+					},
+				},
+			},
+			xai: {
+				models: {
+					"gpt-9-rich": {
+						id: "gpt-9-rich",
+						name: "xai entry",
+						cost: { input: 1, output: 3 },
+					},
+				},
+			},
+		};
+	}
+
+	beforeEach(async () => {
+		globalThis.fetch = (async () =>
+			new Response(JSON.stringify(richCatalogue()), {
+				status: 200,
+				headers: { "content-type": "application/json" },
+			})) as unknown as typeof fetch;
+		await __pricingTestHooks.loadPricing();
+	});
+
+	it("scopes a provider to the same catalogue key the cost path uses", async () => {
+		// One id published by three providers: the account's provider decides which
+		// entry answers, exactly as it decides which one prices the request.
+		const scopes: Array<[provider: string, name: string]> = [
+			["codex", "openai entry"],
+			["claude-console-api", "anthropic entry"],
+			["grok", "xai entry"],
+		];
+		for (const [provider, name] of scopes) {
+			const result = await lookupCatalogueEntry("gpt-9-rich", provider);
+			expect(result.entry?.name).toBe(name);
+		}
+		const scoped = await lookupCatalogueEntry("gpt-9-rich", "codex");
+		expect(scoped.entry?.limit).toEqual({ context: 400_000, output: 128_000 });
+		expect(scoped.entry?.reasoning).toBe(true);
+		expect(scoped.entry?.modalities?.input).toEqual(["text", "image"]);
+		expect(scoped.loaded).toBe(true);
+	});
+
+	it("answers unknown for a provider the catalogue has no key for", async () => {
+		// Never another provider's entry: devin publishes MODEL_* ids of its own.
+		expect(
+			(await lookupCatalogueEntry("gpt-9-rich", "devin")).entry,
+		).toBeNull();
+	});
+
+	it("falls back to the base slug of a dated id", async () => {
+		expect(
+			(await lookupCatalogueEntry("gpt-9-rich-2026-01-01", "codex")).entry
+				?.name,
+		).toBe("openai entry");
+	});
+
+	it("prices a tiered entry from its base rates", async () => {
+		// The widened declarations expose `tiers` to readers; they must not reach
+		// the cost computation, which charges the base card for the whole request.
+		const cost = await estimateCostUSD(
+			"gpt-9-rich",
+			{ inputTokens: 1_000_000, outputTokens: 1_000_000 },
+			{ provider: "codex" },
+		);
+		expect(cost).toBeCloseTo(10, 6);
+	});
+});
+
+describe("catalogue entry lookup during a cold load", () => {
+	it("waits out an in-flight load instead of answering from the bundled seed", async () => {
+		// The bundled seed carries rates and nothing else, so a miss answered from
+		// it reports every limit absent milliseconds before the real catalogue
+		// lands — the metadata equivalent of the NULL-cost cold-start bug.
+		globalThis.fetch = (async () => {
+			await new Promise((r) => setTimeout(r, 40));
+			return new Response(JSON.stringify(remoteCatalogue()), {
+				status: 200,
+				headers: { "content-type": "application/json" },
+			});
+		}) as unknown as typeof fetch;
+
+		expect(__pricingTestHooks.isCatalogueLoaded()).toBe(false);
+		const result = await lookupCatalogueEntry(REMOTE_ONLY_MODEL, "codex");
+		expect(result.entry?.id).toBe(REMOTE_ONLY_MODEL);
+		expect(result.loaded).toBe(true);
+		expect(result.stale).toBe(false);
+	});
+
+	it("waits out an in-flight load for a model the bundled seed already prices", async () => {
+		// `gpt-6-astra` ships in BUNDLED_PRICING with rates and NO `limit`, so the
+		// cold-start wait never fires for it: an entry is found on the first pass,
+		// the loop's `!entry` guard is already false, and the alias is published
+		// with no context window milliseconds before the real catalogue — which
+		// does carry `limit.output` — lands.
+		globalThis.fetch = (async () => {
+			await new Promise((r) => setTimeout(r, 40));
+			return new Response(
+				JSON.stringify({
+					openai: {
+						models: {
+							"gpt-6-astra": {
+								id: "gpt-6-astra",
+								name: "GPT-6 Astra",
+								cost: { input: 10, output: 50 },
+								limit: { context: 1_050_000, input: 922_000, output: 128_000 },
+							},
+							// Adds coverage the bundled table lacks, so the merge counts as
+							// a real catalogue rather than the fallback.
+							[REMOTE_ONLY_MODEL]: {
+								id: REMOTE_ONLY_MODEL,
+								name: "GPT-9 remote only",
+								cost: { input: 2, output: 8 },
+							},
+						},
+					},
+				}),
+				{ status: 200, headers: { "content-type": "application/json" } },
+			);
+		}) as unknown as typeof fetch;
+
+		expect(__pricingTestHooks.isCatalogueLoaded()).toBe(false);
+		const bundled = await lookupCatalogueEntry("gpt-6-astra", "codex");
+		expect(bundled.entry?.limit?.output).toBe(128_000);
 	});
 });
 

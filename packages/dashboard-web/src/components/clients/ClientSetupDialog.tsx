@@ -1,4 +1,8 @@
-import type { ClientView } from "@clankermux/types";
+import type {
+	ClientApplication,
+	ClientModelMetadataMap,
+	ClientView,
+} from "@clankermux/types";
 import { useEffect, useState } from "react";
 import { CopyButton } from "../CopyButton";
 import { Button } from "../ui/button";
@@ -12,8 +16,18 @@ import {
 } from "../ui/dialog";
 import { Input } from "../ui/input";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "../ui/tabs";
-import { clientRequest } from "./api";
+import { clientModelMetadata, clientRequest } from "./api";
 import { clientSetupExports, preferredFormat } from "./setup";
+
+/**
+ * The recipes that declare per-model entries. The others name no models at
+ * all, so resolving their limits would buy nothing.
+ */
+const MODEL_METADATA_APPLICATIONS: ReadonlySet<ClientApplication> = new Set([
+	"pi",
+	"oh-my-pi",
+	"opencode",
+]);
 
 export function ClientSetupDialog({
 	client,
@@ -30,6 +44,11 @@ export function ClientSetupDialog({
 	const [attempt, setAttempt] = useState(0);
 	const [existingKey, setExistingKey] = useState("");
 	const [saving, setSaving] = useState(false);
+	const format = preferredFormat(client.application);
+	const needsMetadata = MODEL_METADATA_APPLICATIONS.has(client.application);
+	const [metadata, setMetadata] = useState<ClientModelMetadataMap | null>(null);
+	const [metadataSettled, setMetadataSettled] = useState(!needsMetadata);
+	const [metadataFailed, setMetadataFailed] = useState(false);
 	// biome-ignore lint/correctness/useExhaustiveDependencies: attempt explicitly retries the same setup-key URL.
 	useEffect(() => {
 		if (initialApiKey) return;
@@ -52,6 +71,42 @@ export function ClientSetupDialog({
 			ignore = true;
 		};
 	}, [client.apiKeyId, initialApiKey, attempt]);
+	// Its own effect, and one that runs even when the key was handed in: the key
+	// effect returns early for a freshly created client, and sharing it would
+	// leave exactly that client's snippet without limits.
+	useEffect(() => {
+		if (!needsMetadata) return;
+		let ignore = false;
+		setMetadata(null);
+		setMetadataFailed(false);
+		setMetadataSettled(false);
+		void clientModelMetadata(client.apiKeyId, format)
+			.then((result) => {
+				if (ignore) return;
+				// The server's timeout fallback answers with an empty map and
+				// `catalogueLoaded` false. In the snippet that is indistinguishable
+				// from a resolved answer, so it is treated as a failure and said out
+				// loud rather than copied as a configuration that looks complete.
+				if (
+					!result ||
+					typeof result.models !== "object" ||
+					result.models === null ||
+					Array.isArray(result.models) ||
+					!result.catalogueLoaded
+				)
+					setMetadataFailed(true);
+				else setMetadata(result.models);
+			})
+			.catch(() => {
+				if (!ignore) setMetadataFailed(true);
+			})
+			.finally(() => {
+				if (!ignore) setMetadataSettled(true);
+			});
+		return () => {
+			ignore = true;
+		};
+	}, [client.apiKeyId, format, needsMetadata]);
 	const saveKey = async () => {
 		setSaving(true);
 		setError(null);
@@ -68,18 +123,26 @@ export function ClientSetupDialog({
 			setSaving(false);
 		}
 	};
-	const catalogue = client.catalogues[preferredFormat(client.application)];
-	const exports = apiKey
-		? clientSetupExports(
-				client.application,
-				typeof window === "undefined"
-					? "http://localhost:8080"
-					: window.location.origin,
-				apiKey,
-				catalogue.defaultModel,
-				catalogue.models,
-			)
-		: [];
+	const catalogue = client.catalogues[format];
+	const ready = Boolean(apiKey) && metadataSettled;
+	const exports =
+		apiKey && metadataSettled
+			? clientSetupExports(
+					client.application,
+					typeof window === "undefined"
+						? "http://localhost:8080"
+						: window.location.origin,
+					apiKey,
+					catalogue.defaultModel,
+					metadata
+						? catalogue.models.map((model) =>
+								metadata[model.id]
+									? { ...model, metadata: metadata[model.id] }
+									: model,
+							)
+						: catalogue.models,
+				)
+			: [];
 	return (
 		<Dialog
 			open
@@ -95,9 +158,9 @@ export function ClientSetupDialog({
 						filled in whenever you open setup.
 					</DialogDescription>
 				</DialogHeader>
-				{loading && (
+				{(loading || (Boolean(apiKey) && !metadataSettled)) && (
 					<p role="status" className="text-sm text-muted-foreground">
-						Loading API key…
+						{loading ? "Loading API key…" : "Resolving model limits…"}
 					</p>
 				)}
 				{error && (
@@ -154,11 +217,19 @@ export function ClientSetupDialog({
 					</form>
 				)}
 				{apiKey && (
+					<div className="rounded-md border bg-muted/20 p-3 flex items-center gap-3">
+						<code className="text-xs break-all flex-1">{apiKey}</code>
+						<CopyButton value={apiKey}>Copy key</CopyButton>
+					</div>
+				)}
+				{ready && apiKey && (
 					<>
-						<div className="rounded-md border bg-muted/20 p-3 flex items-center gap-3">
-							<code className="text-xs break-all flex-1">{apiKey}</code>
-							<CopyButton value={apiKey}>Copy key</CopyButton>
-						</div>
+						{metadataFailed && (
+							<p className="text-sm text-muted-foreground">
+								Model limits could not be resolved, so this configuration
+								declares none and each model uses the client's own defaults.
+							</p>
+						)}
 						<Tabs defaultValue={exports[0]?.id}>
 							{exports.length > 1 && (
 								<TabsList

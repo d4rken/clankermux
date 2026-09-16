@@ -19,6 +19,44 @@ export interface ClientModel {
 	metadataCapturedAt?: number;
 	metadataScope?: string;
 }
+export interface ClientModelCostTier {
+	inputTokensAbove: number;
+	input: number;
+	output: number;
+	cacheRead?: number;
+	cacheWrite?: number;
+}
+export interface ClientModelCost {
+	input: number;
+	output: number;
+	cacheRead?: number;
+	cacheWrite?: number;
+	/** Rates replacing the base set above `inputTokensAbove`, ascending. */
+	tiers?: ClientModelCostTier[];
+}
+/**
+ * What ClankerMux can substantiate about one published alias, resolved per
+ * request and never persisted: a stored copy would describe the route the
+ * catalogue had when it was written, not the one serving now.
+ *
+ * Every field is optional and absence means unknown — a client falling back to
+ * its own documented default beats an invented number.
+ */
+export interface ClientModelMetadata {
+	/** Tokens this alias's route admits. */
+	contextWindow?: number;
+	maxOutputTokens?: number;
+	reasoning?: boolean;
+	inputModalities?: Array<"text" | "image">;
+	cost?: ClientModelCost;
+}
+export type ClientModelMetadataMap = Record<string, ClientModelMetadata>;
+export interface ClientModelMetadataResponse {
+	models: ClientModelMetadataMap;
+	/** False when a real catalogue did not back the lookup (cold start, timeout). */
+	catalogueLoaded: boolean;
+	catalogueStale: boolean;
+}
 export interface ClientCatalogue {
 	models: ClientModel[];
 	defaultModel: string | null;

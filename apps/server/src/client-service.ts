@@ -2,8 +2,12 @@ import { createHash } from "node:crypto";
 import {
 	CLAUDE_MODEL_IDS,
 	isAccountAllowedByPin,
+	isModelPermitted,
 	MODEL_DISPLAY_NAMES,
 	matchRoutingRule,
+	pricingCatalogueStatus,
+	resolveClientModelMetadata,
+	resolveRoutingTarget,
 	validateRoutingRule,
 } from "@clankermux/core";
 import {
@@ -35,6 +39,8 @@ import {
 	type ClientDraft,
 	type ClientFormat,
 	type ClientModel,
+	type ClientModelMetadata,
+	type ClientModelMetadataResponse,
 	type ClientProfile,
 	type ClientReview,
 	type ClientSuggestions,
@@ -80,6 +86,18 @@ const BULK_MAX_MODELS = 500;
  * quantity that is actually written.
  */
 const BULK_MAX_ALIAS_WRITES = 500;
+
+/**
+ * Ceiling on resolving one client's published model metadata.
+ *
+ * Deliberately above `@clankermux/core`'s 6s catalogue wait, so a normal cold
+ * models.dev load is not cut short — the shorter budget the catalogue reads use
+ * would report every limit unknown for exactly the requests that arrive first
+ * after a restart. The fallback is an empty map marked unloaded, which the
+ * setup dialog renders as "limits could not be resolved" rather than as a
+ * snippet that looks complete.
+ */
+const MODEL_METADATA_BUDGET_MS = 8_000;
 
 /** One client's reviewed outcome, ready to be written. */
 interface PreparedDraft {
@@ -382,6 +400,113 @@ export class ClientService {
 				scopes.set(key, scope);
 			}
 			return scope;
+		};
+	}
+	/**
+	 * What this client's setup snippets may declare about each published model.
+	 *
+	 * Resolved per call and never stored: the answer depends on the routing rules
+	 * and account permissions in force right now, and a saved copy would describe
+	 * the route the catalogue had when it was written.
+	 */
+	async modelMetadata(
+		id: string,
+		format: ClientFormat,
+	): Promise<ClientModelMetadataResponse> {
+		const profile = await this.deps.dbOps.clients.getProfile(id);
+		const key = await this.deps.dbOps.getApiKeyPin(id);
+		if (!profile || !key || key.malformed)
+			throw new Error("Client catalogue not found");
+		return catalogueWithin(
+			this.resolveModelMetadata(id, key, profile.catalogues[format].models),
+			{ models: {}, catalogueLoaded: false, catalogueStale: false },
+			MODEL_METADATA_BUDGET_MS,
+		);
+	}
+	private async resolveModelMetadata(
+		id: string,
+		key: { pinnedAccountId: string | null; pinnedProviders: string[] | null },
+		models: ClientModel[],
+	): Promise<ClientModelMetadataResponse> {
+		const rules = await this.deps.dbOps.routing.listRules();
+		const accounts = await this.accounts({
+			accountId: key.pinnedAccountId,
+			providers: key.pinnedProviders,
+		});
+		// Stored rows only. Discovery is never triggered from here: opening a setup
+		// dialog must not put requests on the operator's accounts.
+		const permissions = new Map(
+			await Promise.all(
+				accounts.map(
+					async (account) =>
+						[
+							account.id,
+							await this.deps.permissions
+								.permissions(account)
+								.catch(() => null),
+						] as const,
+				),
+			),
+		);
+		const resolved = new Map<string, Promise<ClientModelMetadata>>();
+		let lookups = 0;
+		const entries = await Promise.all(
+			models.map(async (model) => {
+				const winning = matchRoutingRule(rules, id, model.id);
+				// The live route, not the stored `targetModel`: a literal rule matching
+				// `any` or this model's family remaps the published id, and the stored
+				// value would then describe a route that no longer exists.
+				const target = resolveRoutingTarget(winning, model.id).upstreamModel;
+				const pool =
+					winning?.pool_kind === "accounts"
+						? (winning.pool_account_ids ?? [])
+						: null;
+				const providers = new Set<string>();
+				let unresolvedRoutes = false;
+				for (const account of accounts) {
+					if (pool && !pool.includes(account.id)) continue;
+					if (
+						winning?.pool_kind === "provider" &&
+						account.provider !== winning.pool_provider
+					)
+						continue;
+					const permission = permissions.get(account.id) ?? null;
+					if (isModelPermitted(permission, account.id, target, winning))
+						providers.add(account.provider);
+					// Neither eligible nor dismissible: an account whose permissions were
+					// never read may or may not serve this model, so the whole alias goes
+					// unresolved rather than being described from the accounts we can see.
+					else if (!permission || permission.completeness === "unknown")
+						unresolvedRoutes = true;
+				}
+				// Aliases share targets, and the pin and the rule pool are the same for
+				// most of them, so one catalogue resolution usually covers several.
+				const cacheKey = JSON.stringify([
+					target,
+					[...providers].sort(),
+					unresolvedRoutes,
+				]);
+				let work = resolved.get(cacheKey);
+				if (!work) {
+					if (providers.size && !unresolvedRoutes) lookups++;
+					work = resolveClientModelMetadata({
+						targetModel: target,
+						providers: [...providers],
+						unresolvedRoutes,
+					});
+					resolved.set(cacheKey, work);
+				}
+				return [model.id, await work] as const;
+			}),
+		);
+		// Read once the lookups are done rather than per lookup: they all consult
+		// the same process-wide catalogue, so this is what every one of them saw,
+		// only fresher. With no lookups at all nothing was consulted.
+		const status = pricingCatalogueStatus();
+		return {
+			models: Object.fromEntries(entries),
+			catalogueLoaded: lookups > 0 && status.loaded,
+			catalogueStale: lookups > 0 && status.stale,
 		};
 	}
 	async wire(id: string, format: ClientFormat): Promise<Response> {

@@ -1,5 +1,37 @@
 import { expect, it } from "bun:test";
-import { clientSetup, clientSetupExports } from "./setup";
+import type { ClientModelMetadata } from "@clankermux/types";
+import {
+	type ClientSetupModel,
+	clientSetup,
+	clientSetupExports,
+} from "./setup";
+
+const model = (
+	id: string,
+	metadata?: ClientModelMetadata,
+): ClientSetupModel => ({
+	id,
+	displayName: id.toUpperCase(),
+	targetModel: id,
+	accountIds: null,
+	...(metadata ? { metadata } : {}),
+});
+const full: ClientModelMetadata = {
+	contextWindow: 872_000,
+	maxOutputTokens: 128_000,
+	reasoning: true,
+	inputModalities: ["text", "image"],
+	cost: {
+		input: 10,
+		output: 50,
+		cacheRead: 1,
+		cacheWrite: 12.5,
+		tiers: [
+			{ inputTokensAbove: 200_000, input: 20, output: 100 },
+			{ inputTokensAbove: 272_000, input: 30, output: 150 },
+		],
+	},
+};
 
 it("escapes model names and secrets in copied setup", () => {
 	const setup = clientSetup(
@@ -120,3 +152,174 @@ for (const [application, tab, count] of [
 		}
 	});
 }
+
+it("declares Pi's limits, modalities and tiered rates under Pi's own names", () => {
+	const snippet = clientSetup("pi", "http://host", "key", "a", [
+		model("a", full),
+		model("b"),
+	]).snippet;
+	const [first, second] = JSON.parse(snippet).providers.clankermux.models;
+	expect(first).toEqual({
+		id: "a",
+		name: "A",
+		reasoning: true,
+		input: ["text", "image"],
+		contextWindow: 872_000,
+		maxTokens: 128_000,
+		cost: {
+			input: 10,
+			output: 50,
+			cacheRead: 1,
+			cacheWrite: 12.5,
+			tiers: [
+				{ inputTokensAbove: 200_000, input: 20, output: 100 },
+				{ inputTokensAbove: 272_000, input: 30, output: 150 },
+			],
+		},
+	});
+	// A model nothing is known about keeps Pi's own defaults.
+	expect(second).toEqual({ id: "b", name: "B" });
+});
+
+it("writes the same fields as Oh My Pi YAML, without the tiers it does not document", () => {
+	const snippet = clientSetup("oh-my-pi", "http://host", "key", "a", [
+		model("a", full),
+		model("b"),
+	]).snippet;
+	expect(snippet).toContain(
+		[
+			'      - id: "a"',
+			'        name: "A"',
+			"        reasoning: true",
+			'        input: ["text","image"]',
+			"        contextWindow: 872000",
+			"        maxTokens: 128000",
+			"        cost:",
+			"          input: 10",
+			"          output: 50",
+			"          cacheRead: 1",
+			"          cacheWrite: 12.5",
+			'      - id: "b"',
+			'        name: "B"',
+		].join("\n"),
+	);
+	expect(snippet).not.toContain("tiers");
+	expect(snippet).not.toContain("inputTokensAbove");
+});
+
+it("nests OpenCode's limit and renames its cache rates", () => {
+	const models = clientSetup("opencode", "http://host", "key", "a", [
+		model("a", full),
+		model("b"),
+	]).snippet;
+	expect(JSON.parse(models).provider.clankermux.models).toEqual({
+		a: {
+			name: "A",
+			reasoning: true,
+			attachment: true,
+			limit: { context: 872_000, output: 128_000 },
+			cost: {
+				input: 10,
+				output: 50,
+				cache_read: 1,
+				cache_write: 12.5,
+				context_over_200k: { input: 20, output: 100 },
+			},
+		},
+		b: { name: "B" },
+	});
+});
+
+it("omits an OpenCode limit that is only half known, and a tier that is not the 200k one", () => {
+	const entry = (metadata: ClientModelMetadata) =>
+		JSON.parse(
+			clientSetup("opencode", "http://host", "key", "a", [model("a", metadata)])
+				.snippet,
+		).provider.clankermux.models.a;
+	// OpenCode marks context and output both required inside `limit`.
+	expect(entry({ contextWindow: 872_000 }).limit).toBeUndefined();
+	expect(entry({ maxOutputTokens: 128_000 }).limit).toBeUndefined();
+	// `context_over_200k` is a fixed threshold: Astra's tier starts at 272k and
+	// describes something else.
+	expect(
+		entry({
+			cost: {
+				input: 10,
+				output: 50,
+				tiers: [{ inputTokensAbove: 272_000, input: 30, output: 150 }],
+			},
+		}).cost,
+	).toEqual({ input: 10, output: 50 });
+	// An image-less model is still an answer: attachment is false, not absent.
+	expect(entry({ inputModalities: ["text"] }).attachment).toBe(false);
+	expect(entry({}).attachment).toBeUndefined();
+});
+
+it("emits the pre-metadata snippets when nothing is known", () => {
+	const models = [model("a"), model("b")];
+	expect(
+		clientSetup("pi", "http://host:8080", "secret", "a", models).snippet,
+	).toBe(`{
+  "providers": {
+    "clankermux": {
+      "baseUrl": "http://host:8080/wire/openai/v1",
+      "api": "openai-responses",
+      "apiKey": "secret",
+      "models": [
+        {
+          "id": "a",
+          "name": "A"
+        },
+        {
+          "id": "b",
+          "name": "B"
+        }
+      ]
+    }
+  }
+}`);
+	expect(
+		clientSetup("oh-my-pi", "http://host:8080", "secret", "a", models).snippet,
+	).toBe(`providers:
+  clankermux:
+    baseUrl: "http://host:8080/wire/openai/v1"
+    api: openai-responses
+    apiKey: "secret"
+    models:
+      - id: "a"
+        name: "A"
+      - id: "b"
+        name: "B"`);
+	expect(
+		clientSetup("opencode", "http://host:8080", "secret", "a", models).snippet,
+	).toBe(`{
+  "$schema": "https://opencode.ai/config.json",
+  "model": "clankermux/a",
+  "provider": {
+    "clankermux": {
+      "npm": "@ai-sdk/openai",
+      "name": "ClankerMux",
+      "options": {
+        "baseURL": "http://host:8080/wire/openai/v1",
+        "apiKey": "secret"
+      },
+      "models": {
+        "a": {
+          "name": "A"
+        },
+        "b": {
+          "name": "B"
+        }
+      }
+    }
+  }
+}`);
+});
+
+it("tells the operator what an omitted field and a published rate mean", () => {
+	for (const application of ["pi", "oh-my-pi", "opencode"] as const) {
+		const note = clientSetup(application, "http://host", "key", "a", []).note;
+		expect(note).toContain("defaults");
+		expect(note).toContain("list prices");
+	}
+});

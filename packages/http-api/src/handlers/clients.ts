@@ -6,6 +6,8 @@ import {
 import { BadRequest, Conflict, NotFound } from "@clankermux/errors";
 import type {
 	ClientBulkReview,
+	ClientFormat,
+	ClientModelMetadataResponse,
 	ClientReview,
 	ClientSuggestions,
 	ClientView,
@@ -20,8 +22,13 @@ export interface ClientManager {
 	commit(token: string): Promise<{ client: ClientView; apiKey?: string }>;
 	bulkReview(input: unknown): Promise<ClientBulkReview>;
 	bulkCommit(token: string): Promise<{ clients: ClientView[] }>;
+	modelMetadata(
+		id: string,
+		format: ClientFormat,
+	): Promise<ClientModelMetadataResponse>;
 	remove(id: string): Promise<void>;
 }
+const FORMATS: ClientFormat[] = ["anthropic", "openai", "codex"];
 export function createClientsHandler(
 	manager: ClientManager,
 	dbOps: DatabaseOperations,
@@ -72,7 +79,7 @@ export function createClientsHandler(
 				return ok(await manager.commit(body.token));
 			}
 			const match =
-				/^\/api\/clients\/([^/]+)(?:\/(enable|disable|rotate|setup-key))?$/.exec(
+				/^\/api\/clients\/([^/]+)(?:\/(enable|disable|rotate|setup-key|model-metadata))?$/.exec(
 					path,
 				);
 			if (!match) throw NotFound("Client endpoint not found");
@@ -111,6 +118,16 @@ export function createClientsHandler(
 						throw Conflict("Client changed; reopen setup and try again");
 					return ok({ apiKey: body.apiKey });
 				}
+			}
+
+			// Its own endpoint rather than a field on the client list: resolving this
+			// settles the pricing catalogue and reads every pinned account's model
+			// permissions, and it is wanted only while a setup dialog is open.
+			if (match[2] === "model-metadata" && req.method === "GET") {
+				const format = url.searchParams.get("format");
+				if (!FORMATS.includes(format as ClientFormat))
+					throw BadRequest("Choose a catalogue format");
+				return ok(await manager.modelMetadata(id, format as ClientFormat));
 			}
 
 			if (req.method === "DELETE" && !match[2]) {

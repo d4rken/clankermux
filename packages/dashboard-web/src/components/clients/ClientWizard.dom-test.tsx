@@ -367,6 +367,31 @@ describe("client catalogue editing", () => {
 			"Provider route",
 		);
 	});
+	it("records no destinations for a model published under its own name", async () => {
+		await mount();
+		await type("model-id", "own-name");
+		await type("target-id", "own-name");
+		await type("display-name", "Own name");
+		const destinations = [...document.querySelectorAll("fieldset")].find((el) =>
+			el.querySelector("legend")?.textContent?.includes("Alias destinations"),
+		);
+		const box = destinations?.querySelector<HTMLInputElement>(
+			'input[type="checkbox"]',
+		);
+		if (!box) throw new Error("Missing destination checkbox");
+		if (!box.disabled)
+			await act(async () => {
+				box.click();
+			});
+		await click("Add to selection");
+		await click("Review changes");
+		expect(reviewed?.catalogues.openai.models).toContainEqual({
+			id: "own-name",
+			targetModel: "own-name",
+			displayName: "Own name",
+			accountIds: null,
+		});
+	});
 	it("explicitly empties the list and clears a now-hidden default", async () => {
 		await mount();
 		await click("Deselect all in tab");
