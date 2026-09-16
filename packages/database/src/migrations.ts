@@ -74,6 +74,10 @@ export function ensureSchema(db: Database): void {
 			identity_rate_limit_tier TEXT,
 			identity_subscription_status TEXT,
 			identity_subscription_started_at INTEGER,
+			identity_subscription_ends_at INTEGER,
+			identity_subscription_will_renew INTEGER,
+			identity_subscription_grace_ends_at INTEGER,
+			identity_subscription_checked_at INTEGER,
 			identity_captured_at INTEGER,
 			identity_profile_fetched_at INTEGER,
 			openrouter_metadata_json TEXT,
@@ -1530,6 +1534,43 @@ export const ADDITIVE_COLUMNS: ReadonlyArray<{
 		table: "accounts",
 		column: "renewal_anchor_source",
 		ddl: "ALTER TABLE accounts ADD COLUMN renewal_anchor_source TEXT",
+	},
+	// ms-epoch END of the provider-reported CURRENT subscription period (Codex
+	// `active_until`, Devin `planEnd`). A recurring billing-cycle end, not an
+	// expiry — it rolls forward on every capture. Never set for Anthropic, whose
+	// profile reports no period end at all.
+	{
+		table: "accounts",
+		column: "identity_subscription_ends_at",
+		ddl: "ALTER TABLE accounts ADD COLUMN identity_subscription_ends_at INTEGER",
+	},
+	// 1 / 0 / NULL for the provider's renewal intent. NULL means NOT REPORTED and
+	// is distinct from 0 ("reported as not renewing"); never collapse the two —
+	// only 0 is evidence, and only 0 changes "Renews" to "Ends" on the chip.
+	{
+		table: "accounts",
+		column: "identity_subscription_will_renew",
+		ddl: "ALTER TABLE accounts ADD COLUMN identity_subscription_will_renew INTEGER",
+	},
+	// ms-epoch end of a provider grace period (Codex
+	// `grace_period_end_timestamp`, Devin `gracePeriodEnd`). Display only: it
+	// never pauses an account and never routes.
+	{
+		table: "accounts",
+		column: "identity_subscription_grace_ends_at",
+		ddl: "ALTER TABLE accounts ADD COLUMN identity_subscription_grace_ends_at INTEGER",
+	},
+	// ms of the last subscription-capture ATTEMPT, success or failure. This
+	// column alone gates the Codex capture throttle. It cannot reuse
+	// `identity_captured_at` (every identity write advances that, including
+	// token refreshes carrying JWT identity), and it cannot gate on
+	// `identity_subscription_ends_at IS NULL`, which stays null forever on an
+	// account whose subscription GET 404s — the usage poller runs on a 30s
+	// heartbeat, so that would issue the GET on every poll.
+	{
+		table: "accounts",
+		column: "identity_subscription_checked_at",
+		ddl: "ALTER TABLE accounts ADD COLUMN identity_subscription_checked_at INTEGER",
 	},
 ];
 

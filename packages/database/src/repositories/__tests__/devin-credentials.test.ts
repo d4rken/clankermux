@@ -12,7 +12,7 @@ describe("Devin credential replacement", () => {
 		db = new Database(":memory:");
 		repo = new AccountRepository(new BunSqlAdapter(db));
 		db.run(
-			`CREATE TABLE accounts (id TEXT PRIMARY KEY, provider TEXT, api_key TEXT, custom_endpoint TEXT, expires_at INTEGER, paused INTEGER, pause_reason TEXT, name TEXT, priority INTEGER, total_requests INTEGER, rate_limited_until INTEGER, identity_external_id TEXT, identity_email TEXT, identity_organization_name TEXT, identity_plan_tier TEXT, identity_rate_limit_tier TEXT, identity_subscription_status TEXT, identity_subscription_started_at INTEGER, renewal_anchor TEXT, renewal_anchor_source TEXT, renewal_cadence TEXT, identity_captured_at INTEGER, identity_profile_fetched_at INTEGER)`,
+			`CREATE TABLE accounts (id TEXT PRIMARY KEY, provider TEXT, api_key TEXT, custom_endpoint TEXT, expires_at INTEGER, paused INTEGER, pause_reason TEXT, name TEXT, priority INTEGER, total_requests INTEGER, rate_limited_until INTEGER, identity_external_id TEXT, identity_email TEXT, identity_organization_name TEXT, identity_plan_tier TEXT, identity_rate_limit_tier TEXT, identity_subscription_status TEXT, identity_subscription_started_at INTEGER, identity_subscription_ends_at INTEGER, identity_subscription_will_renew INTEGER, identity_subscription_grace_ends_at INTEGER, identity_subscription_checked_at INTEGER, renewal_anchor TEXT, renewal_anchor_source TEXT, renewal_cadence TEXT, identity_captured_at INTEGER, identity_profile_fetched_at INTEGER)`,
 		);
 		db.run(
 			`CREATE TABLE account_tier_history (id INTEGER PRIMARY KEY, account_id TEXT, observed_at INTEGER, plan_tier TEXT, rate_limit_tier TEXT, source TEXT, app_version TEXT)`,

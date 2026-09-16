@@ -497,6 +497,10 @@ export async function listAccountResponses(
 			identity_rate_limit_tier: string | null;
 			identity_subscription_status: string | null;
 			identity_subscription_started_at: number | null;
+			identity_subscription_ends_at: number | null;
+			identity_subscription_will_renew: number | null;
+			identity_subscription_grace_ends_at: number | null;
+			identity_subscription_checked_at: number | null;
 			identity_captured_at: number | null;
 			identity_profile_fetched_at: number | null;
 			openrouter_metadata_json: string | null;
@@ -548,6 +552,10 @@ export async function listAccountResponses(
 					identity_rate_limit_tier,
 					identity_subscription_status,
 					identity_subscription_started_at,
+					identity_subscription_ends_at,
+					identity_subscription_will_renew,
+					identity_subscription_grace_ends_at,
+					identity_subscription_checked_at,
 					identity_captured_at,
 					identity_profile_fetched_at,
 					openrouter_metadata_json,
@@ -1255,8 +1263,11 @@ export async function listAccountResponses(
 					notes: account.notes,
 					renewalAnchor: account.renewal_anchor ?? null,
 					renewalAnchorSource:
-						(account.renewal_anchor_source as "manual" | "derived" | null) ??
-						null,
+						(account.renewal_anchor_source as
+							| "manual"
+							| "derived"
+							| "provider"
+							| null) ?? null,
 					renewalCadence:
 						(account.renewal_cadence as "monthly" | "yearly" | "none" | null) ??
 						null,
@@ -1290,6 +1301,24 @@ export async function listAccountResponses(
 					identitySubscriptionStartedAt:
 						account.identity_subscription_started_at != null
 							? Number(account.identity_subscription_started_at)
+							: null,
+					identitySubscriptionEndsAt:
+						account.identity_subscription_ends_at != null
+							? Number(account.identity_subscription_ends_at)
+							: null,
+					// NULL stays NULL: the provider not reporting renewal intent is
+					// a different fact from it reporting "will not renew".
+					identitySubscriptionWillRenew:
+						account.identity_subscription_will_renew != null
+							? Number(account.identity_subscription_will_renew) === 1
+							: null,
+					identitySubscriptionGraceEndsAt:
+						account.identity_subscription_grace_ends_at != null
+							? Number(account.identity_subscription_grace_ends_at)
+							: null,
+					identitySubscriptionCheckedAt:
+						account.identity_subscription_checked_at != null
+							? Number(account.identity_subscription_checked_at)
 							: null,
 					identityCapturedAt:
 						devinIdentity && liveUsageEntry?.observedAtMs != null
