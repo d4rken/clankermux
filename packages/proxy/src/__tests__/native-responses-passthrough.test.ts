@@ -191,6 +191,148 @@ const rawCodexSse = [
 	"",
 ].join("\n");
 
+describe("native Codex stream failure routing", () => {
+	let originalFetch: typeof globalThis.fetch;
+	beforeEach(() => {
+		originalFetch = globalThis.fetch;
+	});
+	afterEach(() => {
+		globalThis.fetch = originalFetch;
+	});
+
+	it("remembers an HTTP 503 after failing over within the request", async () => {
+		const first = makeCodexAccount({
+			id: crypto.randomUUID(),
+			access_token: "first",
+		});
+		const second = makeCodexAccount({
+			id: crypto.randomUUID(),
+			access_token: "second",
+		});
+		const ctx = makeContext([first, second]);
+		const calls: string[] = [];
+		globalThis.fetch = mock(async (input: RequestInfo | URL) => {
+			const auth = (input as Request).headers.get("authorization") ?? "";
+			calls.push(auth);
+			return auth === "Bearer first"
+				? Response.json(
+						{ error: { code: "server_error", message: "Unavailable" } },
+						{ status: 503 },
+					)
+				: new Response(rawCodexSse);
+		}) as never;
+		for (let i = 0; i < 2; i++) {
+			const req = makeTranslatedRequest(makeNativeContext());
+			const res = await callHandleProxy(req, new URL(req.url), ctx);
+			expect(await res.text()).toBe(rawCodexSse);
+		}
+		expect(calls).toEqual(["Bearer first", "Bearer second", "Bearer second"]);
+		expect(ctx.dbOps.markAccountRateLimited).not.toHaveBeenCalled();
+	});
+
+	for (const [event, payload] of [
+		["error", { type: "error", error: { type: "server_error" } }],
+		["error", { type: "error", code: "service_unavailable_error" }],
+		[
+			"response.failed",
+			{
+				type: "response.failed",
+				response: { error: { code: "server_error" } },
+			},
+		],
+	] as const) {
+		it(`routes the next request away from ${event} ${JSON.stringify(payload)}`, async () => {
+			const id = crypto.randomUUID();
+			const first = makeCodexAccount({ id, access_token: "first" });
+			const second = makeCodexAccount({
+				id: `${id}-sibling`,
+				access_token: "second",
+			});
+			const ctx = makeContext([first, second]);
+			const calls: string[] = [];
+			const failedSse =
+				'event: response.output_text.delta\ndata: {"type":"response.output_text.delta","delta":"partial output"}\n\n' +
+				`event: ${event}\ndata: ${JSON.stringify(payload)}\n\n`;
+			globalThis.fetch = mock(async (input: RequestInfo | URL) => {
+				const auth = (input as Request).headers.get("authorization") ?? "";
+				calls.push(auth);
+				return new Response(auth === "Bearer first" ? failedSse : rawCodexSse);
+			}) as never;
+
+			const req = makeTranslatedRequest(makeNativeContext());
+			const res = await callHandleProxy(req, new URL(req.url), ctx);
+			expect(await res.text()).toBe(failedSse);
+			expect(calls).toEqual(["Bearer first"]);
+
+			const retry = makeTranslatedRequest(makeNativeContext());
+			const retried = await callHandleProxy(retry, new URL(retry.url), ctx);
+			expect(await retried.text()).toBe(rawCodexSse);
+			expect(calls).toEqual(["Bearer first", "Bearer second"]);
+			expect(first.rate_limited_until).toBeNull();
+			expect(ctx.dbOps.markAccountRateLimited).not.toHaveBeenCalled();
+		});
+	}
+
+	it("keeps a failed account available when it is the only eligible account", async () => {
+		const account = makeCodexAccount({ id: crypto.randomUUID() });
+		const ctx = makeContext([account]);
+		let calls = 0;
+		globalThis.fetch = mock(async () => {
+			calls++;
+			return new Response(
+				calls === 1
+					? 'event: error\ndata: {"type":"error","error":{"type":"server_error"}}\n\n'
+					: rawCodexSse,
+			);
+		}) as never;
+		for (let i = 0; i < 2; i++) {
+			const req = makeTranslatedRequest(makeNativeContext());
+			const res = await callHandleProxy(req, new URL(req.url), ctx);
+			const body = await res.text();
+			if (i === 1) expect(body).toBe(rawCodexSse);
+		}
+		expect(calls).toBe(2);
+	});
+
+	for (const [label, body] of [
+		[
+			"permission error",
+			'event: error\ndata: {"type":"error","error":{"type":"permission_error"}}\n\n',
+		],
+		[
+			"incomplete response",
+			'event: response.incomplete\ndata: {"type":"response.incomplete","response":{"incomplete_details":{"reason":"max_output_tokens"}}}\n\n',
+		],
+		[
+			"literal error text",
+			`event: response.output_text.delta\ndata: {"type":"response.output_text.delta","delta":"server_error service_unavailable_error"}\n\n${rawCodexSse}`,
+		],
+	] as const) {
+		it(`does not demote an account for ${label}`, async () => {
+			const first = makeCodexAccount({
+				id: crypto.randomUUID(),
+				access_token: "first",
+			});
+			const second = makeCodexAccount({
+				id: crypto.randomUUID(),
+				access_token: "second",
+			});
+			const ctx = makeContext([first, second]);
+			const calls: string[] = [];
+			globalThis.fetch = mock(async (input: RequestInfo | URL) => {
+				calls.push((input as Request).headers.get("authorization") ?? "");
+				return new Response(calls.length === 1 ? body : rawCodexSse);
+			}) as never;
+			for (let i = 0; i < 2; i++) {
+				const req = makeTranslatedRequest(makeNativeContext());
+				const res = await callHandleProxy(req, new URL(req.url), ctx);
+				await res.text();
+			}
+			expect(calls).toEqual(["Bearer first", "Bearer first"]);
+		});
+	}
+});
+
 function codexSseResponse() {
 	// Deliberately NO content-type header: the real Codex backend frequently
 	// omits it on SSE responses (the provider applies a fix-up). Mocking it

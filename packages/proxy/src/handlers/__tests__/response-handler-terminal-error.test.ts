@@ -19,6 +19,11 @@ import { afterEach, beforeEach, describe, expect, it, spyOn } from "bun:test";
 import { Logger } from "@clankermux/logger";
 import type { Account } from "@clankermux/types";
 import {
+	getCodexTransientFailureUntil,
+	recordCodexTransientFailure,
+	resetCodexTransientHealthForTests,
+} from "../../codex-transient-health";
+import {
 	applyProviderOverloadCooldown,
 	clearProviderOverloadCooldown,
 	inspectProviderOverload,
@@ -33,6 +38,102 @@ import { clearAnthropicBurstThrottle } from "../burst-cooldown";
 import type { ProxyContext } from "../proxy-types";
 
 const enc = new TextEncoder();
+
+describe("Codex transient stream health", () => {
+	beforeEach(resetCodexTransientHealthForTests);
+	afterEach(resetCodexTransientHealthForTests);
+	const transient =
+		'event: error\ndata: {"type":"error","error":{"type":"api_error","code":"server_error"}}\n\n';
+
+	it("demotes as soon as the error frame is read, even while the upstream stays open", async () => {
+		const { ctx } = makeStreamCtx("codex");
+		const response = await forward(
+			streamFrom([transient], { hang: true }),
+			ctx,
+			{
+				requestId: "transient-open",
+				accountProvider: "codex",
+			},
+		);
+		if (!response.body) throw new Error("Expected a streaming response");
+		const reader = response.body.getReader();
+		await reader.read();
+		expect(getCodexTransientFailureUntil("acct-term-1")).not.toBeNull();
+		await reader.cancel();
+	});
+
+	it("flushes an unterminated failure when the transport errors", async () => {
+		const { ctx } = makeStreamCtx("codex");
+		const response = await forward(
+			streamFrom([transient.trimEnd()], { error: readError() }),
+			ctx,
+			{
+				requestId: "transient-cut",
+				accountProvider: "codex",
+			},
+		);
+		await response.text().catch(() => {});
+		expect(getCodexTransientFailureUntil("acct-term-1")).not.toBeNull();
+	});
+
+	for (const opts of [
+		{ accountProvider: "anthropic" },
+		{ accountProvider: "codex", disableCooldown: true },
+		{ accountProvider: "codex", internal: true },
+	]) {
+		it(`leaves health unchanged for ${JSON.stringify(opts)}`, async () => {
+			const { ctx } = makeStreamCtx(opts.accountProvider);
+			const response = await forward(streamFrom([transient]), ctx, {
+				requestId: "excluded-health",
+				...opts,
+			});
+			await response.text();
+			expect(getCodexTransientFailureUntil("acct-term-1")).toBeNull();
+		});
+	}
+
+	it("does not interpret a cancellation or transport failure as an account failure", async () => {
+		const { ctx } = makeStreamCtx("codex");
+		const response = await forward(codexStream({ terminalEvent: false }), ctx, {
+			requestId: "read-error-health",
+			accountProvider: "codex",
+			nativeResponses: true,
+		});
+		await response.text().catch(() => {});
+		expect(getCodexTransientFailureUntil("acct-term-1")).toBeNull();
+		const cancelled = await forward(streamFrom([], { hang: true }), ctx, {
+			requestId: "cancel-health",
+			accountProvider: "codex",
+			nativeResponses: true,
+		});
+		if (!cancelled.body) throw new Error("Expected a streaming response");
+		await cancelled.body.cancel();
+		expect(getCodexTransientFailureUntil("acct-term-1")).toBeNull();
+	});
+
+	it("200 headers and an older success cannot clear a newer failure; a later completion can", async () => {
+		const { ctx } = makeStreamCtx("codex");
+		const failedAt = Date.now();
+		recordCodexTransientFailure("acct-term-1", failedAt);
+		const older = await forward(codexStream({ terminalEvent: true }), ctx, {
+			requestId: "old-success-health",
+			accountProvider: "codex",
+			nativeResponses: true,
+			timestamp: failedAt - 100,
+		});
+		expect(getCodexTransientFailureUntil("acct-term-1")).not.toBeNull();
+		await older.text().catch(() => {});
+		expect(getCodexTransientFailureUntil("acct-term-1")).not.toBeNull();
+		const newer = await forward(codexStream({ terminalEvent: true }), ctx, {
+			requestId: "new-success-health",
+			accountProvider: "codex",
+			nativeResponses: true,
+			timestamp: failedAt + 1,
+		});
+		await newer.text().catch(() => {});
+		expect(getCodexTransientFailureUntil("acct-term-1")).toBeNull();
+	});
+});
 
 function makeAccount(overrides: Partial<Account> = {}): Account {
 	return {
@@ -234,6 +335,8 @@ function forward(
 		retryAttempt?: number;
 		overloadProbeToken?: unknown;
 		accountProvider?: string;
+		disableCooldown?: boolean;
+		timestamp?: number;
 	},
 ) {
 	const headers: Record<string, string> = {
@@ -252,7 +355,8 @@ function forward(
 			requestHeaders: new Headers({ "content-type": "application/json" }),
 			requestBody: enc.encode("{}").buffer as ArrayBuffer,
 			response: new Response(body, { status: 200, headers }),
-			timestamp: Date.now(),
+			timestamp: opts.timestamp ?? Date.now(),
+			disableCooldown: opts.disableCooldown,
 			internal: opts.internal,
 			retryAttempt: opts.retryAttempt ?? 0,
 			failoverAttempts: 0,

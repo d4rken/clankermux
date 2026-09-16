@@ -830,7 +830,7 @@ export function createRecoveryHolds(deps: RecoveryHoldsDeps): RecoveryHolds {
 					gates.applyProviderOverloadGate(reSelected);
 				const { available: rePostThrottle } =
 					gates.applyUsageThrottling(reAvailable);
-				const candidates = gates.applyFamilyMemoDemotion(
+				const candidates = gates.applyFailureMemoDemotion(
 					gates.applySoftDemotionReorder(
 						gates.applyContextWindowGate(
 							gates.applyFamilyWeeklyGate(rePostThrottle),
@@ -1113,7 +1113,7 @@ export function createRecoveryHolds(deps: RecoveryHoldsDeps): RecoveryHolds {
 				gates.applyProviderOverloadGate(reSelected);
 			const { available: rePostThrottle } =
 				gates.applyUsageThrottling(reAvailable);
-			const candidates = gates.applyFamilyMemoDemotion(
+			const candidates = gates.applyFailureMemoDemotion(
 				gates.applyFamilyWeeklyGate(
 					rePostThrottle.filter((a) => isEligible(a)),
 				),

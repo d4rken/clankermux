@@ -127,6 +127,8 @@ export interface UsageState {
 	sawMessageStop: boolean;
 	/** First parsed in-band error; independent of quota/cooldown classification. */
 	sseErrorType: string | null;
+	/** First explicit upstream error code, separate from accounting/outcome classification. */
+	streamFailureCode: string | null;
 	/**
 	 * Which Responses terminal was seen FIRST, or null if none has arrived.
 	 *
@@ -211,6 +213,7 @@ export function createUsageState(): UsageState {
 		currentEvent: undefined,
 		sawMessageStop: false,
 		sseErrorType: null,
+		streamFailureCode: null,
 		responsesTerminalKind: null,
 		sawMessageStart: false,
 		skippingOverlongLine: false,
@@ -267,7 +270,8 @@ interface ReportedCharge {
 
 interface SseParsed {
 	type?: string;
-	error?: { type?: unknown };
+	code?: unknown;
+	error?: { type?: unknown; code?: unknown };
 	model?: string;
 	message?: {
 		model?: string;
@@ -294,6 +298,7 @@ interface SseParsed {
 	 */
 	response?: {
 		model?: string;
+		error?: { type?: unknown; code?: unknown };
 		usage?: ReportedCharge & {
 			input_tokens?: number;
 			output_tokens?: number;
@@ -399,6 +404,9 @@ function applySseData(
 		eventType === "error" ||
 		(parsed.type === "error" && responsesTerminalKindOf(eventType) === null)
 	) {
+		if (!state.sawMessageStop && state.responsesTerminalKind === null) {
+			state.streamFailureCode ??= streamFailureCode(parsed);
+		}
 		const type = parsed.error?.type;
 		state.sseErrorType ??=
 			typeof type === "string" && /^[a-z][a-z0-9_]{0,127}$/.test(type)
@@ -497,6 +505,9 @@ function applySseData(
 		responsesTerminalKindOf(parsed.type) ?? responsesTerminalKindOf(eventType);
 	if (terminalKind && state.responsesTerminalKind === null) {
 		state.responsesTerminalKind = terminalKind;
+		if (terminalKind === "failed" && !state.sawMessageStop) {
+			state.streamFailureCode ??= streamFailureCode(parsed);
+		}
 		const usage = parsed.response?.usage;
 		if (usage) {
 			captureReportedCharge(state, usage);
@@ -547,6 +558,14 @@ function applySseData(
 			state.sawMessageStop = true;
 		}
 	}
+}
+
+function streamFailureCode(parsed: SseParsed): string {
+	const error = parsed.response?.error ?? parsed.error;
+	const code = error?.code ?? parsed.code ?? error?.type;
+	return typeof code === "string" && /^[a-z][a-z0-9_]{0,127}$/.test(code)
+		? code
+		: "upstream_stream_error";
 }
 
 /** Count content deltas without retaining the generated text. Hidden reasoning

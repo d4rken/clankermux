@@ -54,6 +54,57 @@ function fakeCost(): {
 }
 
 describe("usage-collector", () => {
+	describe("stream failure codes for routing", () => {
+		for (const [event, payload] of [
+			["error", { type: "error", error: { type: "server_error" } }],
+			["error", { type: "error", code: "server_error" }],
+			[
+				"error",
+				{ type: "error", error: { type: "api_error", code: "server_error" } },
+			],
+			[
+				"response.failed",
+				{
+					type: "response.failed",
+					response: { error: { code: "server_error" } },
+				},
+			],
+			["response.failed", { type: "error", error: { type: "server_error" } }],
+		] as const) {
+			it(`captures ${event} ${JSON.stringify(payload)} across chunks`, () => {
+				const state = createUsageState();
+				const bytes = sse(event, payload);
+				for (let i = 0; i < bytes.length; i++)
+					feedChunk(state, bytes.subarray(i, i + 1), 1000);
+				expect(state.streamFailureCode).toBe("server_error");
+			});
+		}
+
+		it("preserves the first failure and ignores errors after a successful terminal", () => {
+			const state = createUsageState();
+			feedChunk(
+				state,
+				sse("error", {
+					error: { code: "context_length_exceeded", type: "server_error" },
+				}),
+				1000,
+			);
+			feedChunk(state, sse("error", { error: { type: "server_error" } }), 1001);
+			expect(state.streamFailureCode).toBe("context_length_exceeded");
+			const complete = createUsageState();
+			feedChunk(
+				complete,
+				sse("response.completed", { type: "response.completed" }),
+				1000,
+			);
+			feedChunk(
+				complete,
+				sse("error", { error: { type: "server_error" } }),
+				1001,
+			);
+			expect(complete.streamFailureCode).toBeNull();
+		});
+	});
 	describe("parsed SSE errors", () => {
 		it("remembers an error type without requiring usage or a message and keeps the first error", () => {
 			const state = createUsageState();
