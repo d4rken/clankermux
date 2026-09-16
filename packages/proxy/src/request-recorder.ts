@@ -129,6 +129,13 @@ export interface RecordMeta {
 	 * Optional: synthetic/audit rows may omit it and stay NULL.
 	 */
 	cachePrefixHashes?: CachePrefixCapture | null;
+	/**
+	 * Inbound client identity (see RequestMeta.clientUserAgent /
+	 * RequestMeta.clientHarness). Optional: synthetic/audit rows may omit them
+	 * and stay NULL.
+	 */
+	clientUserAgent?: string | null;
+	clientHarness?: string | null;
 	routing: RecordRouting | null;
 	timestamp: number;
 	/** Pre-capped request body copy, or null when not captured / over budget. */
@@ -291,6 +298,10 @@ interface SaveRequestData {
 	sessionKey?: string | null;
 	/** Cache-measurement prefix digests — mirrors `RequestData.cachePrefixHashes`. */
 	cachePrefixHashes?: CachePrefixCapture | null;
+	/** Inbound user-agent — mirrors `RequestData.clientUserAgent`. */
+	clientUserAgent?: string | null;
+	/** Observed harness family — mirrors `RequestData.clientHarness`. */
+	clientHarness?: string | null;
 	/** Provider terminal stop reason — mirrors `RequestData.stopReason`. */
 	stopReason?: string | null;
 	/** Refusal category — mirrors `RequestData.refusalCategory`. */
@@ -990,6 +1001,8 @@ export class RequestRecorder {
 					usageFinalizedAt: record.usageFinalizedAt,
 					sessionKey: meta.sessionKey ?? null,
 					cachePrefixHashes: meta.cachePrefixHashes ?? null,
+					clientUserAgent: meta.clientUserAgent ?? null,
+					clientHarness: meta.clientHarness ?? null,
 					// Response-side facts come off the finalized usage summary; the
 					// two credit marks are ingress facts carried on the meta.
 					stopReason: record.usage?.stopReason,
