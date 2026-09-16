@@ -63,6 +63,25 @@ export const HARNESS_LABEL_FOR_APPLICATION: Record<
 };
 
 /**
+ * Did a client of the Codex family send this request?
+ *
+ * Both surfaces a Codex client announces itself on are matched against the same
+ * family pattern. Pinning either one to a single literal is what this rule
+ * exists to prevent: `originator` moved from `codex_cli_rs` to `codex-tui` in a
+ * client upgrade, and every check written against the old literal went quietly
+ * false for traffic that was still Codex.
+ *
+ * `originator` gets the same sanitizing pass as the user-agent so an inbound
+ * header cannot smuggle control characters past the pattern.
+ */
+export function isCodexClient(headers: Headers): boolean {
+	const userAgent = normalizeClientUserAgent(headers.get("user-agent"));
+	if (userAgent !== null && CODEX_USER_AGENT.test(userAgent)) return true;
+	const originator = normalizeClientUserAgent(headers.get("originator"));
+	return originator !== null && CODEX_USER_AGENT.test(originator);
+}
+
+/**
  * Which agent harness is behind this request, read from its own headers.
  *
  * The rules run in order and stop at the first match. The last one is the point
@@ -82,10 +101,7 @@ export function detectHarness(headers: Headers): HarnessDetection {
 	if (userAgent && /claude-cli\/\d/i.test(userAgent)) {
 		return { harness: "claude-code", userAgent };
 	}
-	if (
-		(userAgent !== null && CODEX_USER_AGENT.test(userAgent)) ||
-		headers.get("originator") === "codex_cli_rs"
-	) {
+	if (isCodexClient(headers)) {
 		return { harness: "codex", userAgent };
 	}
 	if (userAgent?.startsWith("QwenCode/")) {

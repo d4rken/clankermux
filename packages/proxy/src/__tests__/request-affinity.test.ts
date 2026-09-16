@@ -45,6 +45,43 @@ describe("extractRequestAffinity", () => {
 		});
 	});
 
+	// The inbound header set of a real production Codex request, quoted verbatim
+	// out of the payload store. `originator` is `codex-tui` here, so a check
+	// pinned to the single literal `codex_cli_rs` matches nothing these clients
+	// send and drops their stickiness entirely.
+	it("uses Codex thread id for the production codex-tui header set", () => {
+		const result = extractRequestAffinity(
+			new Headers({
+				originator: "codex-tui",
+				"user-agent":
+					"codex-tui/0.154.0 (Linux Mint 22.3.0; x86_64) gnome-terminal (codex-tui; 0.154.0)",
+				"thread-id": "codex-thread-from-production",
+			}),
+		);
+
+		expect(result).toEqual({
+			key: "codex-thread-from-production",
+			scope: "codex_thread",
+		});
+	});
+
+	it("keeps Claude Code session id ahead of the production Codex headers", () => {
+		const result = extractRequestAffinity(
+			new Headers({
+				"x-claude-code-session-id": "claude-session",
+				originator: "codex-tui",
+				"user-agent":
+					"codex-tui/0.154.0 (Linux Mint 22.3.0; x86_64) gnome-terminal (codex-tui; 0.154.0)",
+				"thread-id": "codex-thread-from-production",
+			}),
+		);
+
+		expect(result).toEqual({
+			key: "claude-session",
+			scope: "claude_session",
+		});
+	});
+
 	it("does not use broader or per-turn Codex identifiers as affinity", () => {
 		const result = extractRequestAffinity(
 			new Headers({
