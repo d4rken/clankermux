@@ -350,6 +350,7 @@ export const ANALYTICS_SECTIONS = [
 	"apiKeyModelUsage",
 	"apiKeyPerformance",
 	"cacheFlow",
+	"clientEfficiency",
 	"contextComposition",
 	"costByModel",
 	"modelDistribution",
@@ -395,6 +396,78 @@ export interface AnalyticsTotals {
 	avgWeeklyPlanCostUsd?: number;
 	avgDailyApiCostUsd?: number;
 	avgWeeklyApiCostUsd?: number;
+}
+
+/**
+ * One (API key × resolved harness) group of the client-efficiency read.
+ *
+ * A single key can appear more than once: a key used by two harnesses produces
+ * one row each, which is what lets the dashboard say so instead of silently
+ * picking one.
+ */
+export interface ClientEfficiencyRow {
+	/** The identity. `null` = the requests carried no API key. */
+	apiKeyId: string | null;
+	/**
+	 * Display label, same rule as `apiKeyModelUsage.apiKey`: the key's current
+	 * name, else the record-time snapshot for a hard-deleted key, else the
+	 * no-key label. Identity is `apiKeyId` and never this string.
+	 */
+	apiKey: string;
+	/**
+	 * The RESOLVED harness: observed from the requests' own headers when any
+	 * were, else inferred from session identity, else from the client's
+	 * configured application. `null` = none of the three said anything.
+	 */
+	harness: string | null;
+	/** `client_profiles.application` for this key, when it has a profile. */
+	declaredApplication: string | null;
+	requests: number;
+	successfulRequests: number;
+	/**
+	 * The three provenance counts, kept SEPARATE rather than collapsed into one
+	 * "source" label. A single label over a mixed group loses the distinction
+	 * that matters: 99 inferred rows beside one observed row would read as
+	 * "observed" and the inferred marking would disappear from the UI.
+	 */
+	observedRequests: number;
+	inferredSessionRequests: number;
+	inferredDeclaredRequests: number;
+	inputTokens: number;
+	outputTokens: number;
+	cacheReadTokens: number;
+	cacheCreationTokens: number;
+	/** Summed cost of the PRICED rows only. */
+	costUsd: number;
+	/**
+	 * Rows carrying a cost. Unpriced rows are counted separately instead of
+	 * being coerced to zero, which would make a client whose models lack
+	 * pricing look free.
+	 */
+	pricedRequests: number;
+	unpricedRequests: number;
+	/** Denominator for the four context sums below (rows with the columns recorded). */
+	contextCoveredRequests: number;
+	contextTokensSum: number;
+	contextToolsCharsSum: number;
+	contextSystemCharsSum: number;
+	contextToolCountSum: number;
+}
+
+/** One (API key × model) group of the within-model comparison. */
+export interface ClientModelEfficiencyRow {
+	apiKeyId: string | null;
+	apiKey: string;
+	/** "Unknown" for rows with no recorded model. */
+	model: string;
+	requests: number;
+	inputTokens: number;
+	outputTokens: number;
+	cacheReadTokens: number;
+	cacheCreationTokens: number;
+	costUsd: number;
+	pricedRequests: number;
+	unpricedRequests: number;
 }
 
 /**
@@ -456,6 +529,40 @@ export interface AnalyticsResponse {
 		model: string;
 		count: number;
 	}>;
+	/**
+	 * Per-client efficiency, at the (API key × resolved harness) grain.
+	 *
+	 * EVERY NUMBER IS A SUM OR A COUNT — never a pre-divided average. The
+	 * dashboard rolls these rows up by client and by harness, and an average
+	 * cannot be re-averaged across groups without its own denominator: 100
+	 * requests with one covered row averaging 100 tokens, combined with 10 fully
+	 * covered requests averaging 1,000, give 918.18 if you average the averages
+	 * against a true 181.82. Divide after the rollup, never here.
+	 *
+	 * Optional because an older server may not populate it — consumers should
+	 * treat absence as undefined ("not computed"), which is distinct from a
+	 * computed section with no rows.
+	 */
+	clientEfficiency?: {
+		/**
+		 * The server's row cap was reached, so the rows are a top-N slice and any
+		 * rollup over them is incomplete. Truncation happens BEFORE the
+		 * client-side rollup, so a harness spread thinly across many small keys
+		 * would otherwise be understated with no visible sign.
+		 */
+		truncated: boolean;
+		rows: ClientEfficiencyRow[];
+	};
+	/**
+	 * Per-client × model sums, for comparing two clients ON THE SAME MODEL —
+	 * the only comparison that is not confounded by model mix. Rows with fewer
+	 * than the server's minimum request count are dropped as noise.
+	 *
+	 * Belongs to the `clientEfficiency` section (a separate field rather than a
+	 * nested one because it has its own grain). Optional for the same reason as
+	 * the section's other field.
+	 */
+	clientModelEfficiency?: ClientModelEfficiencyRow[];
 	modelPerformance?: ModelPerformance[];
 	// Per-model median output-speed time series (artifact-filtered). Optional
 	// because an older server may not populate it; consumers should `?? []`.
