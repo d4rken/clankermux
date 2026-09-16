@@ -270,6 +270,10 @@ export class AccountRepository extends BaseRepository<Account> {
 				identity_rate_limit_tier,
 				identity_subscription_status,
 				identity_subscription_started_at,
+				identity_subscription_ends_at,
+				identity_subscription_will_renew,
+				identity_subscription_grace_ends_at,
+				identity_subscription_checked_at,
 				identity_captured_at,
 				identity_profile_fetched_at,
 				COALESCE(consecutive_rate_limits, 0) as consecutive_rate_limits
@@ -313,6 +317,10 @@ export class AccountRepository extends BaseRepository<Account> {
 				identity_rate_limit_tier,
 				identity_subscription_status,
 				identity_subscription_started_at,
+				identity_subscription_ends_at,
+				identity_subscription_will_renew,
+				identity_subscription_grace_ends_at,
+				identity_subscription_checked_at,
 				identity_captured_at,
 				identity_profile_fetched_at,
 				COALESCE(consecutive_rate_limits, 0) as consecutive_rate_limits

@@ -850,6 +850,18 @@ function toNumOrNull(v: unknown): number | null {
 function toNullableBoolean(v: unknown): boolean | null {
 	return v == null ? null : Number(v) === 1;
 }
+/**
+ * SQLite tri-state INTEGER flag → `1`/`0`/null, keeping the row's own shape.
+ *
+ *   1 → 1 · 0 → 0 · null/undefined → null
+ *
+ * `toNumOrNull` cannot carry this column: it folds 0 into null, which is right
+ * for the ms-epoch columns it was written for and wrong here, where 0 is
+ * "reported as not renewing" and null is "not reported".
+ */
+function toFlagOrNull(v: unknown): number | null {
+	return v == null ? null : Number(v) === 1 ? 1 : 0;
+}
 
 // Type mappers
 export function toAccount(row: AccountRow): Account {
@@ -907,7 +919,7 @@ export function toAccount(row: AccountRow): Account {
 		identity_subscription_ends_at: toNumOrNull(
 			row.identity_subscription_ends_at,
 		),
-		identity_subscription_will_renew: toNumOrNull(
+		identity_subscription_will_renew: toFlagOrNull(
 			row.identity_subscription_will_renew,
 		),
 		identity_subscription_grace_ends_at: toNumOrNull(
