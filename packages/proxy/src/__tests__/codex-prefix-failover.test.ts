@@ -179,6 +179,17 @@ const preludeFailureSse =
 		error: { type: "service_unavailable_error", code: "server_is_overloaded" },
 	})}\n\n`;
 
+/**
+ * The failure as the very first event, with no prelude in front of it. This is
+ * the shape whose translation keeps a transient code: the provider returns on
+ * the upstream error before `ensureMessageStart()`, so the translated stream has
+ * no `message_start` either, and `toAnthropicErrorPayload` rewrites the error's
+ * `type` while carrying its `code` through untouched.
+ */
+const errorFirstSse =
+	"event: error\n" +
+	'data: {"type":"error","error":{"type":"server_error","code":"server_error","message":"capacity"}}\n\n';
+
 /** Content first, then the same failure — must never be discarded. */
 const contentThenFailureSse =
 	"event: response.created\n" +
@@ -196,6 +207,17 @@ const contentThenFailureSse =
  */
 function codexResponse(body: string): Response {
 	return new Response(body, { status: 200 });
+}
+
+/** The parsed payload of the first SSE frame named `event: <name>`, else null. */
+function parseSseEvent(body: string, name: string): unknown {
+	for (const frame of body.split(/\r?\n\r?\n/)) {
+		const lines = frame.split(/\r?\n/);
+		if (!lines.includes(`event: ${name}`)) continue;
+		const data = lines.find((line) => line.startsWith("data:"));
+		if (data) return JSON.parse(data.slice(5).trim());
+	}
+	return null;
 }
 
 describe("Codex stream-prefix failover", () => {
@@ -309,6 +331,26 @@ describe("Codex stream-prefix failover", () => {
 		expect(getCodexTransientFailureUntil(only.id)).not.toBeNull();
 	});
 
+	it("fails over an error-first stream that never sent a prelude", async () => {
+		const first = makeCodexAccount({
+			id: crypto.randomUUID(),
+			access_token: "first",
+		});
+		const second = makeCodexAccount({
+			id: crypto.randomUUID(),
+			access_token: "second",
+		});
+		const ctx = makeContext([first, second]);
+		const calls: string[] = [];
+		globalThis.fetch = routeByAuth({ "Bearer first": errorFirstSse }, calls);
+
+		const res = await callHandleProxy(makeRequest(), ctx);
+
+		expect(calls).toEqual(["Bearer first", "Bearer second"]);
+		expect(await res.text()).toBe(healthySse);
+		expect(getCodexTransientFailureUntil(first.id)).not.toBeNull();
+	});
+
 	it("does not peek a translated (non-native) codex response", async () => {
 		const first = makeCodexAccount({
 			id: crypto.randomUUID(),
@@ -320,23 +362,25 @@ describe("Codex stream-prefix failover", () => {
 		});
 		const ctx = makeContext([first, second]);
 		const calls: string[] = [];
-		globalThis.fetch = routeByAuth(
-			{ "Bearer first": preludeFailureSse },
-			calls,
-		);
+		globalThis.fetch = routeByAuth({ "Bearer first": errorFirstSse }, calls);
 
 		const res = await callHandleProxy(makeRequest(false), ctx);
 		const body = await res.text();
 
-		// Same upstream bytes as the failover test above. Without the native
-		// marker `processResponse` has already rewritten them into Anthropic
-		// shape, where the Codex event names the peek reads do not exist, so the
-		// rung leaves the response alone and the translated error is forwarded.
-		// That path keeps its post-commit `observeCodexStreamHealth` demotion.
+		// The same fixture the native test above fails over on, so the single
+		// fetch here is the native-marker gate's doing and not the fixture going
+		// undetected. It has to be THIS fixture: translation rewrites the error's
+		// `type` but carries its `code` through, and `streamFailureCode` prefers
+		// the code, so these translated bytes still read as transient — the peek
+		// would discard them if it ran. That path keeps its post-commit
+		// `observeCodexStreamHealth` demotion instead.
 		expect(calls).toEqual(["Bearer first"]);
 		expect(res.headers.get(NATIVE_RESPONSES_RESPONSE_HEADER)).toBeNull();
-		expect(body).toContain("message_start");
 		expect(body).not.toContain("response.created");
+		expect(parseSseEvent(body, "error")).toMatchObject({
+			type: "error",
+			error: { type: "api_error", code: "server_error" },
+		});
 	});
 
 	it("skips the peek entirely on an internal dispatch", async () => {
