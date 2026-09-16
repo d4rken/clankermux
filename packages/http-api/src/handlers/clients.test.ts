@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, spyOn } from "bun:test";
 import { scryptSync } from "node:crypto";
 import { DatabaseOperations } from "@clankermux/database";
 import { tempDbTracker } from "@clankermux/test-support";
+import type { ClientFormat } from "@clankermux/types";
 import { NodeCryptoUtils } from "@clankermux/types";
 import { generateApiKey, regenerateApiKey } from "../services/admin/api-keys";
 import { AuthService } from "../services/auth-service";
@@ -158,6 +159,11 @@ describe("client lifecycle HTTP boundary", () => {
 				remove: async (id: string) => {
 					await db.deleteApiKey(id);
 				},
+				modelMetadata: async (id: string, format: ClientFormat) => ({
+					models: { [`${id}:${format}`]: { contextWindow: 872_000 } },
+					catalogueLoaded: true,
+					catalogueStale: false,
+				}),
 			} as ClientManager,
 			db,
 		);
@@ -165,6 +171,25 @@ describe("client lifecycle HTTP boundary", () => {
 	afterEach(async () => {
 		await db.dispose();
 		temp.cleanup();
+	});
+	it("serves model metadata for one catalogue format at a time", async () => {
+		const response = await request("/model-metadata?format=openai", "GET");
+		expect(response.status).toBe(200);
+		expect(response.headers.get("cache-control")).toBe("private, no-store");
+		expect((await response.json()).data).toEqual({
+			models: { "stable:openai": { contextWindow: 872_000 } },
+			catalogueLoaded: true,
+			catalogueStale: false,
+		});
+		// A format the catalogue has no shape for never reaches the service.
+		expect((await request("/model-metadata", "GET")).status).toBe(400);
+		expect(
+			(await request("/model-metadata?format=responses", "GET")).status,
+		).toBe(400);
+		await request("", "DELETE");
+		expect((await request("/model-metadata?format=openai", "GET")).status).toBe(
+			404,
+		);
 	});
 	it("disables, enables, rotates and deletes by stable identity", async () => {
 		expect((await request("/disable")).status).toBe(200);
