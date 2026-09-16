@@ -384,13 +384,17 @@ export function ClientWizard({
 			 * the application has already moved and the arming condition alone is
 			 * false.
 			 */
-			const seedOwed =
+			const seedArmed =
 				!client &&
 				!copy.catalogues &&
-				!touched.has(nextPreferred) &&
 				(pendingSeed ||
 					(copy.application &&
 						nextPreferred !== preferredFormat(draft.application)));
+			// An edited catalogue outranks a seed that is still owed to it, and the
+			// debt has to be retired rather than merely skipped: leaving
+			// `pendingSeed` set holds Review for a seed nobody will ever write.
+			// `loadSuggestions` retires it the same way on step entry.
+			const seedOwed = seedArmed && !touched.has(nextPreferred);
 			if (copy.application) changeApplication(source.application);
 			setDraft((d) => ({
 				...d,
@@ -404,7 +408,7 @@ export function ClientWizard({
 				setTouched(new Set(FORMAT_KEYS));
 				setSeeded(null);
 				setPendingSeed(false);
-			}
+			} else if (seedArmed && !seedOwed) setPendingSeed(false);
 			setCustom({ id: "", target: "", name: "", accounts: [], editId: null });
 			// Discovery is scoped to the destinations, so copied ones need their own
 			// suggestions before the candidate list — or a seed — means anything.
@@ -1066,6 +1070,7 @@ export function ClientWizard({
 										Published model ID
 										<Input
 											id="model-id"
+											disabled={busy}
 											value={custom.id}
 											onChange={(e) =>
 												setCustom({ ...custom, id: e.target.value })
@@ -1080,6 +1085,7 @@ export function ClientWizard({
 										<Input
 											placeholder="Same as published ID for a direct model"
 											id="target-id"
+											disabled={busy}
 											value={custom.target}
 											onChange={(e) =>
 												setCustom({ ...custom, target: e.target.value })
@@ -1093,6 +1099,7 @@ export function ClientWizard({
 										Display name
 										<Input
 											id="display-name"
+											disabled={busy}
 											value={custom.name}
 											onChange={(e) =>
 												setCustom({ ...custom, name: e.target.value })
@@ -1110,7 +1117,7 @@ export function ClientWizard({
 												<label key={a.id} className="text-sm flex gap-2">
 													<input
 														type="checkbox"
-														disabled={!customIsAlias}
+														disabled={busy || !customIsAlias}
 														checked={custom.accounts.includes(a.id)}
 														onChange={(e) =>
 															setCustom({
@@ -1128,6 +1135,7 @@ export function ClientWizard({
 									</fieldset>
 									<Button
 										variant="outline"
+										disabled={busy}
 										onClick={() => {
 											const model = {
 												id: custom.id.trim(),

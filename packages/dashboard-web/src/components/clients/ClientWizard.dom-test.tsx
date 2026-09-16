@@ -925,6 +925,26 @@ describe("copying another client's setup", () => {
 			)?.disabled,
 		).toBe(true);
 		expect(select("Default model for setup").disabled).toBe(true);
+		// The custom editor writes through `updateModels` like any selection, so
+		// it has to be shut too.
+		expect(
+			[...document.querySelectorAll("button")].find(
+				(b) => b.textContent?.trim() === "Add to selection",
+			)?.disabled,
+		).toBe(true);
+		expect(
+			(document.getElementById("model-id") as HTMLInputElement).disabled,
+		).toBe(true);
+		expect(
+			document.querySelector<HTMLInputElement>(
+				'[aria-label="Anthropic-style discovery models"] input[type="checkbox"]',
+			)?.disabled,
+		).toBe(true);
+		expect(
+			[...document.querySelectorAll("button")].find(
+				(b) => b.textContent?.trim() === "Edit",
+			)?.disabled,
+		).toBe(true);
 		await act(async () => release());
 		await act(async () => {});
 		expect(
@@ -932,5 +952,28 @@ describe("copying another client's setup", () => {
 				(b) => b.textContent?.trim() === "Select all in tab",
 			)?.disabled,
 		).toBe(false);
+	});
+
+	it("retires a seed the operator's own selections have superseded", async () => {
+		await mountNew(DEFAULT_SUGGESTIONS, [source]);
+		await click("Next");
+		await click("Next");
+		await choose("Copy from", "source");
+		await untick("All three catalogues");
+		suggestionFailures = 1;
+		await click("Copy into this draft");
+		expect(document.body.textContent).toContain("Discovery unavailable");
+		// The failed copy left the seed armed on Anthropic. Answering it by hand
+		// has to retire it, not just skip it.
+		await click("Select all in tab");
+		await choose("Default model for setup", "claude-new");
+		await click("Copy into this draft");
+		await click("Review");
+		expect(document.body.textContent).not.toContain(
+			"Choose your catalogue models before reviewing",
+		);
+		expect(reviewed?.catalogues.anthropic.models.map((m) => m.id)).toEqual([
+			"claude-new",
+		]);
 	});
 });
