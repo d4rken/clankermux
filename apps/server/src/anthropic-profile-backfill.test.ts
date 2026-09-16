@@ -6,6 +6,7 @@ import type { Account, AccountIdentity } from "@clankermux/types";
 import {
 	type AnthropicProfileBackfillDeps,
 	isAnthropicProfileBackfillCandidate,
+	isAnthropicSubscriptionRecaptureCandidate,
 	runAnthropicProfileBackfill,
 } from "./anthropic-profile-backfill";
 
@@ -21,9 +22,19 @@ function makeAccount(overrides: Partial<Account>): Account {
 		refresh_token: "refresh",
 		access_token: "access",
 		identity_profile_fetched_at: null,
+		identity_subscription_started_at: null,
 		pause_reason: null,
 		...overrides,
 	} as Account;
+}
+
+/** An account whose profile was captured before the subscription fields were. */
+function makeRecaptureAccount(overrides: Partial<Account> = {}): Account {
+	return makeAccount({
+		identity_profile_fetched_at: 1_700_000_000_000,
+		identity_subscription_started_at: null,
+		...overrides,
+	});
 }
 
 const noopSleep = async (): Promise<void> => {};
@@ -176,5 +187,187 @@ describe("runAnthropicProfileBackfill", () => {
 
 		// The healthy account was still processed.
 		expect(writes.map((w) => w.accountId)).toEqual(["good"]);
+	});
+});
+
+describe("isAnthropicSubscriptionRecaptureCandidate", () => {
+	it("selects an account whose profile was fetched but holds no subscription start", () => {
+		expect(
+			isAnthropicSubscriptionRecaptureCandidate(makeRecaptureAccount()),
+		).toBe(true);
+	});
+
+	it("skips an account that already has a subscription start", () => {
+		expect(
+			isAnthropicSubscriptionRecaptureCandidate(
+				makeRecaptureAccount({
+					identity_subscription_started_at: 1_690_000_000_000,
+				}),
+			),
+		).toBe(false);
+	});
+
+	// A never-fetched account belongs to the other population, which has its own
+	// self-clearing gate; selecting it here would fetch it twice in one pass.
+	it("skips an account that has never had a profile fetch", () => {
+		expect(
+			isAnthropicSubscriptionRecaptureCandidate(
+				makeAccount({ identity_profile_fetched_at: null }),
+			),
+		).toBe(false);
+	});
+
+	it("skips an api-key account, a non-anthropic provider and a dead token", () => {
+		expect(
+			isAnthropicSubscriptionRecaptureCandidate(
+				makeRecaptureAccount({ refresh_token: "", access_token: null }),
+			),
+		).toBe(false);
+		expect(
+			isAnthropicSubscriptionRecaptureCandidate(
+				makeRecaptureAccount({ provider: "codex" }),
+			),
+		).toBe(false);
+		expect(
+			isAnthropicSubscriptionRecaptureCandidate(
+				makeRecaptureAccount({
+					paused: true,
+					pause_reason: "oauth_invalid_grant",
+				}),
+			),
+		).toBe(false);
+	});
+});
+
+describe("runAnthropicProfileBackfill — subscription re-capture", () => {
+	const identityWithSubscription: AccountIdentity = {
+		externalAccountId: "ext-1",
+		email: "u@example.com",
+		organizationName: "Org",
+		planTier: "max",
+		rateLimitTier: "20x",
+		subscriptionStatus: "active",
+		subscriptionStartedAt: 1_690_000_000_000,
+	};
+
+	function depsFor(
+		accounts: Account[],
+		claim: AnthropicProfileBackfillDeps["claimSubscriptionRecapture"],
+	): {
+		deps: AnthropicProfileBackfillDeps;
+		writes: string[];
+	} {
+		const writes: string[] = [];
+		return {
+			writes,
+			deps: {
+				getAccounts: async () => accounts,
+				fetchProfile: async () => identityWithSubscription,
+				setIdentity: async (accountId) => {
+					writes.push(accountId);
+				},
+				claimSubscriptionRecapture: claim,
+				sleep: noopSleep,
+				initialDelayMs: 0,
+				staggerMs: 0,
+			},
+		};
+	}
+
+	it("re-fetches an already-stamped account when it claims the marker", async () => {
+		const { deps, writes } = depsFor(
+			[makeRecaptureAccount({ id: "stamped", name: "stamped" })],
+			async () => true,
+		);
+
+		await runAnthropicProfileBackfill(deps);
+
+		expect(writes).toEqual(["stamped"]);
+	});
+
+	// The gate is the marker, NOT the null subscription column: the profile of an
+	// account that reports no subscription data still leaves that column null, so
+	// a predicate-only gate would re-fetch it on every boot forever.
+	it("never re-fetches once the marker is held, even with the column still null", async () => {
+		const { deps, writes } = depsFor(
+			[makeRecaptureAccount({ id: "stamped", name: "stamped" })],
+			async () => false,
+		);
+
+		await runAnthropicProfileBackfill(deps);
+
+		expect(writes).toEqual([]);
+	});
+
+	it("does not spend the claim when nothing needs re-capturing", async () => {
+		let claims = 0;
+		const { deps } = depsFor(
+			[
+				makeRecaptureAccount({
+					id: "done",
+					name: "done",
+					identity_subscription_started_at: 1_690_000_000_000,
+				}),
+			],
+			async () => {
+				claims++;
+				return true;
+			},
+		);
+
+		await runAnthropicProfileBackfill(deps);
+
+		expect(claims).toBe(0);
+	});
+
+	it("leaves the population alone when no claim dep is wired", async () => {
+		const { deps, writes } = depsFor(
+			[makeRecaptureAccount({ id: "stamped", name: "stamped" })],
+			undefined,
+		);
+
+		await runAnthropicProfileBackfill(deps);
+
+		expect(writes).toEqual([]);
+	});
+
+	// Fail-closed: an unavailable database must skip the population, not slip it
+	// past the gate.
+	it("skips re-capture when the claim throws, still covering never-fetched accounts", async () => {
+		const { deps, writes } = depsFor(
+			[
+				makeAccount({ id: "fresh", name: "fresh" }),
+				makeRecaptureAccount({ id: "stamped", name: "stamped" }),
+			],
+			async () => {
+				throw new Error("db locked");
+			},
+		);
+
+		await runAnthropicProfileBackfill(deps);
+
+		expect(writes).toEqual(["fresh"]);
+	});
+
+	// One loop for both populations: the profile endpoint shares the usage
+	// endpoint's rate-limit bucket, so the stagger has to cover every fetch.
+	it("covers both populations in a single staggered pass", async () => {
+		const staggers: number[] = [];
+		const { deps, writes } = depsFor(
+			[
+				makeAccount({ id: "fresh", name: "fresh" }),
+				makeRecaptureAccount({ id: "stamped", name: "stamped" }),
+			],
+			async () => true,
+		);
+		deps.staggerMs = 2_500;
+		deps.sleep = async (ms: number) => {
+			staggers.push(ms);
+		};
+
+		await runAnthropicProfileBackfill(deps);
+
+		expect(writes).toEqual(["fresh", "stamped"]);
+		expect(staggers).toEqual([2_500]);
 	});
 });
