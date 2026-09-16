@@ -98,6 +98,13 @@ function rowLabels(): string[] {
 	);
 }
 
+/** The harness chip's tooltip, one per body row. */
+function chipTitles(): string[] {
+	return Array.from(host?.querySelectorAll("tbody tr") ?? []).map(
+		(tr) => tr.querySelector("td span[title]")?.getAttribute("title") ?? "",
+	);
+}
+
 describe("ClientEfficiencyTable grouping toggle", () => {
 	it("opens grouped by client, with the dominant harness and a +N", async () => {
 		await mount();
@@ -157,5 +164,70 @@ describe("ClientEfficiencyTable grouping toggle", () => {
 		});
 
 		expect(rowLabels()[0]).toContain("+1");
+	});
+});
+
+/**
+ * Two keys on ONE harness, one of them session-inferred. Under `By harness`
+ * they collapse into a single group that is partly inferred.
+ */
+const INFERRED_ROWS: ClientEfficiencyRow[] = [
+	row({
+		harness: "claude-code",
+		requests: 8,
+		successfulRequests: 8,
+		observedRequests: 0,
+		inferredSessionRequests: 8,
+	}),
+	row({
+		apiKeyId: "key-2",
+		apiKey: "server-key",
+		harness: "claude-code",
+		requests: 5,
+		successfulRequests: 5,
+		observedRequests: 5,
+	}),
+];
+
+/** One key across two harnesses, where the busier one is session-inferred. */
+const MIXED_ROWS: ClientEfficiencyRow[] = [
+	row({
+		harness: "claude-code",
+		requests: 8,
+		successfulRequests: 8,
+		observedRequests: 0,
+		inferredSessionRequests: 8,
+	}),
+	row({
+		harness: "codex",
+		requests: 2,
+		successfulRequests: 2,
+		observedRequests: 2,
+	}),
+];
+
+describe("ClientEfficiencyTable provenance marking", () => {
+	it("keeps the inferred marking under the harness grouping", async () => {
+		await mount(INFERRED_ROWS);
+		await act(async () => {
+			toggle("By harness").click();
+		});
+
+		const labels = rowLabels();
+		expect(labels.length).toBe(1);
+		// The harness name IS the row label here, so the chip is the only thing
+		// left that can say the label was guessed rather than measured.
+		expect(labels[0]).toContain("claude-code");
+		expect(labels[0]).toContain("(inferred)");
+	});
+
+	it("names both the harness list and the inference tier in one title", async () => {
+		await mount(MIXED_ROWS);
+
+		// Spanning several harnesses and holding inferred rows are independent
+		// facts; a group can carry both at once.
+		const title = chipTitles()[0] ?? "";
+		expect(title).toContain("Harnesses in this group: claude-code, codex");
+		expect(title).toContain("Inferred from session identity");
 	});
 });

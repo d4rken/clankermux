@@ -123,12 +123,15 @@ function HarnessChip({ group }: { group: ClientEfficiencyGroup }) {
 	const name = group.harness ?? UNKNOWN_HARNESS_LABEL;
 	const suffix =
 		group.otherHarnessCount > 0 ? ` +${group.otherHarnessCount}` : "";
+	// Spanning several harnesses and holding inferred rows are independent facts,
+	// so the title composes them rather than choosing between them.
+	const facts: string[] = [];
+	if (group.otherHarnessCount > 0) {
+		facts.push(`Harnesses in this group: ${group.allHarnesses.join(", ")}`);
+	}
+	if (inferred) facts.push(...inferenceTiers(group));
 	const title =
-		group.otherHarnessCount > 0
-			? `Harnesses in this group: ${group.allHarnesses.join(", ")}`
-			: inferred
-				? inferenceTiers(group).join(" · ")
-				: "Detected from request headers";
+		facts.length > 0 ? facts.join(" · ") : "Detected from request headers";
 
 	if (!group.harness && !inferred) {
 		return (
@@ -286,11 +289,14 @@ export function ClientEfficiencyTable({
 									return (
 										<TableRow key={group.key} className="hover:bg-muted/40">
 											<TableCell className="align-top">
-												<div className="font-medium">{group.label}</div>
+												{/* Under the harness grouping the chip IS the label:
+												    it renders the harness name itself, so a separate
+												    label line would print that name twice. */}
+												{grouping === "client" && (
+													<div className="font-medium">{group.label}</div>
+												)}
 												<div className="mt-tight flex flex-wrap items-center gap-tight">
-													{grouping === "client" && (
-														<HarnessChip group={group} />
-													)}
+													<HarnessChip group={group} />
 													{mismatch && (
 														<span
 															className="text-xs text-warning-strong"
