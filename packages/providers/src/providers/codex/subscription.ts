@@ -102,6 +102,23 @@ function unixSecondsToMs(value: unknown): number | null {
 	return Number.isFinite(new Date(ms).getTime()) ? ms : null;
 }
 
+/**
+ * `active_start` / `active_until` → ms. These two arrive as RFC3339 strings
+ * (`"2026-09-04T10:22:17Z"`) while the delinquency timestamps beside them are
+ * unix seconds, so the shape has to be decided per value rather than per
+ * payload. A number is always unix seconds; a string is an instant unless it
+ * is all digits, in which case it is unix seconds quoted.
+ *
+ *   "2026-09-04T10:22:17Z" → 1788517337000 · "1791367200" → 1791367200000
+ */
+function isoOrUnixSecondsToMs(value: unknown): number | null {
+	if (typeof value === "string" && !/^\s*\d+(\.\d+)?\s*$/.test(value)) {
+		const ms = Date.parse(value);
+		return Number.isFinite(ms) && ms > 0 ? ms : null;
+	}
+	return unixSecondsToMs(value);
+}
+
 function failedSubscription(
 	status: number | null,
 	unsupported = false,
@@ -137,13 +154,13 @@ export function parseCodexSubscription(
 	if (!root) return failedSubscription(status);
 
 	const planType = nullableString(root.plan_type);
-	const activeUntilMs = unixSecondsToMs(root.active_until);
+	const activeUntilMs = isoOrUnixSecondsToMs(root.active_until);
 	if (planType === null && activeUntilMs === null) {
 		return failedSubscription(status);
 	}
 
 	return {
-		activeStartMs: unixSecondsToMs(root.active_start),
+		activeStartMs: isoOrUnixSecondsToMs(root.active_start),
 		activeUntilMs,
 		billingPeriod: nullableString(root.billing_period),
 		willRenew: nullableBoolean(root.will_renew),

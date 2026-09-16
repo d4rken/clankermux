@@ -117,6 +117,16 @@ describe("parseCodexSubscription", () => {
 		expect(parseCodexSubscription("plus", 200).ok).toBe(false);
 		expect(parseCodexSubscription([healthyBody()], 200).ok).toBe(false);
 	});
+
+	it("D1: parses an RFC3339 active_until as that instant", () => {
+		const subscription = parseCodexSubscription(
+			{ plan_type: "plus", active_until: "2026-09-04T10:22:17Z" },
+			200,
+		);
+
+		expect(subscription.ok).toBe(true);
+		expect(subscription.activeUntilMs).toBe(Date.parse("2026-09-04T10:22:17Z"));
+	});
 });
 
 describe("renewalCadenceFromBillingPeriod", () => {
