@@ -12,6 +12,7 @@ import type {
 	Account,
 	AccountIdentity,
 	AccountPaymentRow,
+	AccountSubscriptionState,
 	ClientDestinations,
 	ClientProfile,
 	CodexWindowObservationRow,
@@ -48,6 +49,7 @@ import {
 import {
 	AccountRepository,
 	type DevinCredentialReplacement,
+	type ProviderRenewalAnchorSync,
 	type ZaiCredentialReplacement,
 } from "./repositories/account.repository";
 import { AccountPaymentRepository } from "./repositories/account-payment.repository";
@@ -1410,6 +1412,28 @@ OAuth tokens will need to be re-authenticated.
 			priceUsdMicros,
 			autoStartDate,
 		);
+	}
+
+	/**
+	 * Persist what a provider reported about the current subscription period.
+	 * See {@link AccountRepository.setAccountSubscriptionState}.
+	 */
+	async setAccountSubscriptionState(
+		accountId: string,
+		state: AccountSubscriptionState,
+	): Promise<void> {
+		await this.accounts.setAccountSubscriptionState(accountId, state);
+	}
+
+	/**
+	 * Move the renewal anchor onto a provider-reported period end, unless the
+	 * operator owns it. See {@link AccountRepository.syncProviderRenewalAnchor}.
+	 */
+	async syncProviderRenewalAnchor(
+		accountId: string,
+		sync: ProviderRenewalAnchorSync,
+	): Promise<boolean> {
+		return this.accounts.syncProviderRenewalAnchor(accountId, sync);
 	}
 
 	async getAccountRenewalConfigs(): Promise<

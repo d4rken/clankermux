@@ -300,6 +300,23 @@ export interface AccountIdentity {
 	subscriptionStartedAt?: number | null;
 }
 
+/**
+ * What a provider reported about the CURRENT subscription period, as the
+ * account row stores it. Every field is stated by each capture — an omitted
+ * value CLEARS the column, because a provider dropping a grace-period end is
+ * how a lapsed grace period is reported.
+ */
+export interface AccountSubscriptionState {
+	/** ms-epoch end of the reported current period; null when unreported. */
+	endsAtMs: number | null;
+	/** null = the provider did not report renewal intent; false = it reported none. */
+	willRenew: boolean | null;
+	/** ms-epoch end of a provider grace period; null when none is running. */
+	graceEndsAtMs: number | null;
+	/** ms of this capture ATTEMPT, success or failure. */
+	checkedAtMs: number;
+}
+
 // Database row types that match the actual database schema
 export interface AccountRow {
 	id: string;
