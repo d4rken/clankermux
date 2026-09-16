@@ -954,6 +954,27 @@ describe("copying another client's setup", () => {
 		).toBe(false);
 	});
 
+	it("reaches Review after answering a failed copy's seed by hand", async () => {
+		await mountNew(DEFAULT_SUGGESTIONS, [source]);
+		await click("Next");
+		await click("Next");
+		await choose("Copy from", "source");
+		await untick("All three catalogues");
+		suggestionFailures = 1;
+		await click("Copy into this draft");
+		expect(document.body.textContent).toContain("Discovery unavailable");
+		// No second copy: filling the catalogue in is the whole recovery.
+		await click("Select all in tab");
+		await choose("Default model for setup", "claude-new");
+		await click("Review");
+		expect(document.body.textContent).not.toContain(
+			"Choose your catalogue models before reviewing",
+		);
+		expect(reviewed?.catalogues.anthropic.models.map((m) => m.id)).toEqual([
+			"claude-new",
+		]);
+	});
+
 	it("retires a seed the operator's own selections have superseded", async () => {
 		await mountNew(DEFAULT_SUGGESTIONS, [source]);
 		await click("Next");

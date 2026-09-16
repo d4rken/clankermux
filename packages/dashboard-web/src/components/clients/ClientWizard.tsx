@@ -225,10 +225,16 @@ export function ClientWizard({
 			setBusy(false);
 		}
 	};
-	const markTouched = (f: ClientFormat) =>
+	const markTouched = (f: ClientFormat) => {
 		setTouched((current) =>
 			current.has(f) ? current : new Set(current).add(f),
 		);
+		// Answering the seed's own format by hand supersedes it, and the debt has
+		// to be retired here rather than at the next discovery: Review refuses
+		// while `pendingSeed` stands, so a seed nothing will ever write would hold
+		// the operator's own catalogue hostage.
+		if (f === preferredFormat(draft.application)) setPendingSeed(false);
+	};
 	const updateModels = (models: ClientModel[]) => {
 		markTouched(format);
 		setDraft((d) => ({
