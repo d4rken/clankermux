@@ -222,7 +222,8 @@ export function ClientBulkCatalogue({
 				id,
 				displayName: custom.name.trim() || id,
 				targetModel: target,
-				accountIds: custom.accounts.length ? custom.accounts : null,
+				accountIds:
+					target !== id && custom.accounts.length ? custom.accounts : null,
 			},
 		]);
 		setChecked((current) => new Set(current).add(id));

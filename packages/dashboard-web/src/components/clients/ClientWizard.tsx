@@ -147,6 +147,13 @@ export function ClientWizard({
 						? !eligible.some((a) => a.provider === r.pool_provider)
 						: !draft.destinations.providers?.includes(r.pool_provider ?? ""))),
 	);
+	/**
+	 * Destinations are only recorded for an alias. An entry published under its
+	 * own name writes no routing rule, so a saved account list would reach
+	 * nothing the proxy reads.
+	 */
+	const customIsAlias =
+		custom.target.trim() !== "" && custom.target.trim() !== custom.id.trim();
 	const editorAccounts = [
 		...eligible,
 		...custom.accounts
@@ -870,13 +877,16 @@ export function ClientWizard({
 									</label>
 									<fieldset className="sm:col-span-2">
 										<legend className="text-sm mb-2">
-											Alias destinations (required when IDs differ)
+											Alias destinations (required when IDs differ). A model
+											published under its own name always uses the client's own
+											destinations.
 										</legend>
 										<div className="flex flex-wrap gap-3">
 											{editorAccounts.map((a) => (
 												<label key={a.id} className="text-sm flex gap-2">
 													<input
 														type="checkbox"
+														disabled={!customIsAlias}
 														checked={custom.accounts.includes(a.id)}
 														onChange={(e) =>
 															setCustom({
@@ -899,9 +909,10 @@ export function ClientWizard({
 												id: custom.id.trim(),
 												displayName: custom.name.trim() || custom.id.trim(),
 												targetModel: custom.target.trim() || custom.id.trim(),
-												accountIds: custom.accounts.length
-													? custom.accounts
-													: null,
+												accountIds:
+													customIsAlias && custom.accounts.length
+														? custom.accounts
+														: null,
 											};
 											if (
 												!model.id ||

@@ -1,3 +1,4 @@
+import { isCodexClient } from "@clankermux/core";
 import type { RequestAffinityScope } from "@clankermux/types";
 
 function sanitizeAffinityHeader(value: string | null): string | null {
@@ -19,10 +20,11 @@ export function extractRequestAffinity(headers: Headers): {
 		return { key: claudeSession, scope: "claude_session" };
 	}
 
-	const isCodexClient =
-		headers.get("originator") === "codex_cli_rs" ||
-		headers.get("user-agent")?.startsWith("codex_cli_rs/") === true;
-	const codexThread = isCodexClient
+	// Shared with harness detection deliberately. A client upgrade changed
+	// `originator` from `codex_cli_rs` to `codex-tui`, which silently switched
+	// Codex thread affinity off for two days; the literal living in two files is
+	// what kept the second one from being fixed with the first.
+	const codexThread = isCodexClient(headers)
 		? sanitizeAffinityHeader(headers.get("thread-id"))
 		: null;
 	if (codexThread) {

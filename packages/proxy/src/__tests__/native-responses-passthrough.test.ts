@@ -240,6 +240,25 @@ describe("native Codex stream failure routing", () => {
 				response: { error: { code: "server_error" } },
 			},
 		],
+		// Codex's overload pair, verbatim off the wire: the code is what the
+		// collector reports, and it does not repeat the type.
+		[
+			"error",
+			{
+				type: "error",
+				error: {
+					type: "service_unavailable_error",
+					code: "server_is_overloaded",
+				},
+			},
+		],
+		[
+			"response.failed",
+			{
+				type: "response.failed",
+				response: { error: { code: "server_is_overloaded" } },
+			},
+		],
 	] as const) {
 		it(`routes the next request away from ${event} ${JSON.stringify(payload)}`, async () => {
 			const id = crypto.randomUUID();

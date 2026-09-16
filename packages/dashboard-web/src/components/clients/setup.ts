@@ -2,6 +2,7 @@ import type {
 	ClientApplication,
 	ClientFormat,
 	ClientModel,
+	ClientModelMetadata,
 } from "@clankermux/types";
 export const APPLICATIONS: Record<ClientApplication, string> = {
 	generic: "Generic / script",
@@ -25,6 +26,65 @@ export const preferredFormat = (
 			? "codex"
 			: "openai";
 const shell = (value: string) => `'${value.replaceAll("'", "'\\''")}'`;
+/**
+ * A published model plus whatever ClankerMux could substantiate about its
+ * route. Metadata is resolved per dialog and never stored with the catalogue.
+ */
+export interface ClientSetupModel extends ClientModel {
+	metadata?: ClientModelMetadata;
+}
+/**
+ * Pi and Oh My Pi take the same field set; only the syntax differs. Every key
+ * is omitted where the value is unknown — the client's own documented default
+ * beats a number this proxy cannot stand behind.
+ */
+function piFields(metadata: ClientModelMetadata | undefined) {
+	return {
+		...(metadata?.reasoning === undefined
+			? {}
+			: { reasoning: metadata.reasoning }),
+		...(metadata?.inputModalities ? { input: metadata.inputModalities } : {}),
+		...(metadata?.contextWindow === undefined
+			? {}
+			: { contextWindow: metadata.contextWindow }),
+		...(metadata?.maxOutputTokens === undefined
+			? {}
+			: { maxTokens: metadata.maxOutputTokens }),
+	};
+}
+/** OpenCode's cost keys, which are snake_case where Pi's are camelCase. */
+function openCodeCost(metadata: ClientModelMetadata | undefined) {
+	const cost = metadata?.cost;
+	if (!cost) return {};
+	// A fixed-threshold field, so only a tier that starts exactly there fits it:
+	// gpt-6-astra's tier starts at 272k and is correctly left out rather than
+	// filed under a 200k threshold it does not describe.
+	const over200k = cost.tiers?.find((t) => t.inputTokensAbove === 200_000);
+	return {
+		cost: {
+			input: cost.input,
+			output: cost.output,
+			...(cost.cacheRead === undefined ? {} : { cache_read: cost.cacheRead }),
+			...(cost.cacheWrite === undefined
+				? {}
+				: { cache_write: cost.cacheWrite }),
+			...(over200k
+				? {
+						context_over_200k: {
+							input: over200k.input,
+							output: over200k.output,
+							...(over200k.cacheRead === undefined
+								? {}
+								: { cache_read: over200k.cacheRead }),
+							...(over200k.cacheWrite === undefined
+								? {}
+								: { cache_write: over200k.cacheWrite }),
+						},
+					}
+				: {}),
+		},
+	};
+}
 export interface ClientSetupRecipe {
 	label: string;
 	snippet: string;
@@ -37,7 +97,7 @@ export function clientSetup(
 	origin: string,
 	secret: string,
 	model: string | null,
-	models: ClientModel[],
+	models: ClientSetupModel[],
 ): ClientSetupRecipe {
 	const base = `${origin}/wire/openai/v1`;
 	const selected = model ?? models[0]?.id;
@@ -81,7 +141,33 @@ export function clientSetup(
 							name: "ClankerMux",
 							options: { baseURL: base, apiKey: secret },
 							models: Object.fromEntries(
-								models.map((m) => [m.id, { name: m.displayName }]),
+								models.map((m) => [
+									m.id,
+									{
+										name: m.displayName,
+										...(m.metadata?.reasoning === undefined
+											? {}
+											: { reasoning: m.metadata.reasoning }),
+										...(m.metadata?.inputModalities
+											? {
+													attachment:
+														m.metadata.inputModalities.includes("image"),
+												}
+											: {}),
+										// `context` and `output` are both required inside `limit`,
+										// so a half-known pair is no limit at all.
+										...(m.metadata?.contextWindow !== undefined &&
+										m.metadata.maxOutputTokens !== undefined
+											? {
+													limit: {
+														context: m.metadata.contextWindow,
+														output: m.metadata.maxOutputTokens,
+													},
+												}
+											: {}),
+										...openCodeCost(m.metadata),
+									},
+								]),
 							),
 						},
 					},
@@ -89,7 +175,7 @@ export function clientSetup(
 				null,
 				2,
 			),
-			note: "This preset uses Responses. OpenCode keeps its model definitions in this configuration; recopy the model section when you change the client catalogue.",
+			note: "This preset uses Responses. OpenCode keeps its model definitions in this configuration, so recopy the model section after catalogue edits; omitted limits fall back to its own defaults, and the rates are the catalogue's public list prices rather than what a pooled subscription bills.",
 		};
 	if (application === "pi")
 		return {
@@ -104,14 +190,19 @@ export function clientSetup(
 							baseUrl: base,
 							api: "openai-responses",
 							apiKey: secret,
-							models: models.map((m) => ({ id: m.id, name: m.displayName })),
+							models: models.map((m) => ({
+								id: m.id,
+								name: m.displayName,
+								...piFields(m.metadata),
+								...(m.metadata?.cost ? { cost: m.metadata.cost } : {}),
+							})),
 						},
 					},
 				},
 				null,
 				2,
 			),
-			note: "Choose ClankerMux and a model in Pi. Pi uses this local model list; recopy it after catalogue edits.",
+			note: "Choose ClankerMux and a model in Pi. Pi uses this local model list, so recopy it after catalogue edits; omitted limits fall back to Pi's own defaults, and the rates are the catalogue's public list prices rather than what a pooled subscription bills.",
 		};
 	if (application === "oh-my-pi")
 		return {
@@ -129,9 +220,30 @@ export function clientSetup(
 				...models.flatMap((m) => [
 					`      - id: ${JSON.stringify(m.id)}`,
 					`        name: ${JSON.stringify(m.displayName)}`,
+					...Object.entries(piFields(m.metadata)).map(
+						([key, value]) => `        ${key}: ${JSON.stringify(value)}`,
+					),
+					// `tiers` is left out on purpose: Oh My Pi documents cost as
+					// input/output/cacheRead/cacheWrite with no such key, and whether its
+					// loader ignores or rejects an unknown one is unverified — a rejected
+					// key could fail the whole provider block.
+					...(m.metadata?.cost
+						? [
+								"        cost:",
+								...(
+									["input", "output", "cacheRead", "cacheWrite"] as const
+								).flatMap((key) =>
+									m.metadata?.cost?.[key] === undefined
+										? []
+										: [
+												`          ${key}: ${JSON.stringify(m.metadata.cost[key])}`,
+											],
+								),
+							]
+						: []),
 				]),
 			].join("\n"),
-			note: "Choose ClankerMux and a model in Oh My Pi. Its local list must be recopied after catalogue edits.",
+			note: "Choose ClankerMux and a model in Oh My Pi, whose local list must be recopied after catalogue edits. Omitted limits fall back to its own defaults, and the rates are the catalogue's public list prices rather than what a pooled subscription bills.",
 		};
 	return {
 		label: "OpenAI-compatible environment",
@@ -154,7 +266,7 @@ export function clientSetupExports(
 	origin: string,
 	secret: string,
 	model: string | null,
-	models: ClientModel[],
+	models: ClientSetupModel[],
 ): ClientSetupExport[] {
 	const recipe = clientSetup(application, origin, secret, model, models);
 	if (application === "claude-code") {
