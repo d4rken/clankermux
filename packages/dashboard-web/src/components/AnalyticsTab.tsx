@@ -9,6 +9,7 @@ import {
 } from "../lib/analytics-tabs";
 import { EMPTY_FILTERS, type FilterState } from "./analytics/AnalyticsFilters";
 import { CachingTab } from "./analytics/tabs/CachingTab";
+import { ClientEfficiencyTab } from "./analytics/tabs/ClientEfficiencyTab";
 import { ModelsTab } from "./analytics/tabs/ModelsTab";
 import { ProjectsReliabilityTab } from "./analytics/tabs/ProjectsReliabilityTab";
 import { QuotaTab } from "./analytics/tabs/QuotaTab";
@@ -90,10 +91,11 @@ export const AnalyticsTab = React.memo(() => {
 				value={activeTab}
 				onValueChange={(v) => setActiveTab(v as AnalyticsTabId)}
 			>
-				<TabsList className="grid w-full grid-cols-5">
+				<TabsList className="grid w-full grid-cols-6">
 					<TabsTrigger value="traffic">Traffic</TabsTrigger>
 					<TabsTrigger value="models">Models & Speed</TabsTrigger>
 					<TabsTrigger value="caching">Caching</TabsTrigger>
+					<TabsTrigger value="clients">Clients</TabsTrigger>
 					<TabsTrigger value="projects">Projects & Reliability</TabsTrigger>
 					<TabsTrigger value="quota">Quota</TabsTrigger>
 				</TabsList>
@@ -119,6 +121,13 @@ export const AnalyticsTab = React.memo(() => {
 					<CachingTab
 						range={ranges.caching}
 						onRangeChange={(r) => setRange("caching", r)}
+					/>
+				</TabsContent>
+				<TabsContent value="clients" className="space-y-section">
+					<ClientEfficiencyTab
+						{...sharedFilterProps}
+						range={ranges.clients}
+						onRangeChange={(r) => setRange("clients", r)}
 					/>
 				</TabsContent>
 				<TabsContent value="projects" className="space-y-section">

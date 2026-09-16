@@ -4,6 +4,7 @@ export const TAB_IDS = [
 	"traffic",
 	"models",
 	"caching",
+	"clients",
 	"projects",
 	"quota",
 ] as const;
@@ -20,6 +21,7 @@ export const DEFAULT_RANGES: Record<AnalyticsTabId, TimeRange> = {
 	traffic: "1h",
 	models: "7d",
 	caching: "7d",
+	clients: "7d",
 	projects: "7d",
 	quota: "all",
 };
