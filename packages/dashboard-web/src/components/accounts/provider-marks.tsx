@@ -11,7 +11,7 @@
  * unset and inherit the pill's text color instead.
  */
 
-interface ProviderMark {
+export interface ProviderMark {
 	/** Single-path outline against a 24x24 viewBox. */
 	path: string;
 	/**
@@ -58,16 +58,27 @@ const ZAI_PATH =
 const CLAUDE_FILL = "fill-[#CE6B4C] dark:fill-[#D97757]";
 
 /**
+ * The two brands that also name a client harness, exported so the Clients list
+ * can render the same mark without vendoring a second copy of the path that
+ * would drift from this one.
+ */
+export const CLAUDE_MARK: ProviderMark = {
+	path: CLAUDE_PATH,
+	fill: CLAUDE_FILL,
+};
+export const OPENAI_MARK: ProviderMark = { path: OPENAI_PATH };
+
+/**
  * Provider key -> brand mark. Providers absent from this map (Devin, Kilo, and any
  * custom endpoint) have no published single-color logo we can vendor, so their
  * pill renders as text only.
  */
 const PROVIDER_MARKS: Record<string, ProviderMark> = {
-	anthropic: { path: CLAUDE_PATH, fill: CLAUDE_FILL },
-	"claude-console-api": { path: CLAUDE_PATH, fill: CLAUDE_FILL },
+	anthropic: CLAUDE_MARK,
+	"claude-console-api": CLAUDE_MARK,
 	"anthropic-compatible": { path: ANTHROPIC_PATH },
-	codex: { path: OPENAI_PATH },
-	"openai-compatible": { path: OPENAI_PATH },
+	codex: OPENAI_MARK,
+	"openai-compatible": OPENAI_MARK,
 	qwen: { path: QWEN_PATH, fill: "fill-[#6950EF] dark:fill-[#9182F5]" },
 	"alibaba-coding-plan": {
 		path: ALIBABA_CLOUD_PATH,
