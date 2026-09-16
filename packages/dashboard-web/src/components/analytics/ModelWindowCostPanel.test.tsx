@@ -45,6 +45,8 @@ describe("ModelWindowCostPanel", () => {
 		expect(html).toContain("claude-opus-5");
 		// 100 / 45 = 2.22 points per 1M eq-tokens.
 		expect(html).toContain("2.22%");
+		expect(html).toMatch(/^<details[^>]*>/);
+		expect(html).not.toMatch(/^<details[^>]*\bopen/);
 		expect(html).toContain("2.04 – 2.40%");
 		expect(html).toContain("45.0M eq-tokens");
 		expect(html).toContain("64.0%");

@@ -26,6 +26,7 @@ import {
 	summarizeModelGaps,
 } from "../../lib/quota-drift-display";
 import { formatAxisTime } from "../../lib/time-format";
+import { cn } from "../../lib/utils";
 import { ChartContainer } from "../charts/ChartContainer";
 import { getTooltipStyles } from "../charts/chart-utils";
 import { legendLabelFormatter } from "../charts/legend-format";
@@ -36,6 +37,7 @@ import {
 	CardHeader,
 	CardTitle,
 } from "../ui/card";
+import { InfoPopover } from "../ui/info-popover";
 
 /**
  * Implied full-window capacity over time, per model, with its interval.
@@ -64,19 +66,36 @@ export function QuotaDriftPanel({
 	return (
 		<Card>
 			<CardHeader>
-				<CardTitle className="flex items-center gap-item">
-					<Activity className="h-5 w-5" />
-					Implied Capacity Over Time
-				</CardTitle>
-				<CardDescription className="text-xs">
-					Millions of equivalent tokens the full window would buy at each
-					rolling fit's rate. Shaded bands are 90% intervals; the line breaks
-					wherever the model could not be separated from the traffic beside it.
-					Dashed markers are detected changes in implied cost, not confirmed
-					provider actions.
-				</CardDescription>
+				<div className="flex items-start justify-between gap-item">
+					<div className="min-w-0">
+						<CardTitle className="flex items-center gap-item">
+							<Activity className="h-4 w-4 shrink-0" aria-hidden="true" />
+							Implied Capacity Over Time
+						</CardTitle>
+						<CardDescription>
+							Millions of price-equivalent tokens · 90% intervals
+						</CardDescription>
+					</div>
+					<InfoPopover label="How to read this chart">
+						<p>
+							Millions of equivalent tokens the full window would buy at each
+							rolling fit's rate. Shaded bands are 90% intervals; the line
+							breaks wherever the model could not be separated from the traffic
+							beside it.
+						</p>
+						<p>
+							Dashed markers are detected changes in implied cost, not confirmed
+							provider actions.
+						</p>
+					</InfoPopover>
+				</div>
 			</CardHeader>
-			<CardContent className="space-y-section">
+			<CardContent
+				className={cn(
+					"grid gap-section",
+					(cohort?.windows.length ?? 0) > 1 && "xl:grid-cols-2",
+				)}
+			>
 				{!loading && (!cohort || cohort.windows.length === 0) ? (
 					<p className="text-sm text-muted-foreground">
 						No fitted windows for this group yet.
@@ -167,7 +186,7 @@ function WindowSeries({
 	const lastValueNotice = window ? lastObservedValueNotice(window) : null;
 
 	return (
-		<div className="space-y-item">
+		<div className="min-w-0 space-y-item">
 			<h3 className="text-sm font-medium">
 				{window ? quotaWindowLabel(window.window) : "Loading"}
 			</h3>
@@ -194,12 +213,10 @@ function WindowSeries({
 							type="number"
 							domain={["dataMin", "dataMax"]}
 							scale="time"
-							tick={{ ...CHART_PROPS.axis.tick, fontSize: 11 }}
 							tickFormatter={(v: number) => formatAxisTime(v, "all")}
 						/>
 						<YAxis
 							{...CHART_PROPS.axis}
-							tick={{ ...CHART_PROPS.axis.tick, fontSize: 11 }}
 							tickFormatter={(v: number) => `${v.toFixed(0)}M`}
 						/>
 						<Tooltip

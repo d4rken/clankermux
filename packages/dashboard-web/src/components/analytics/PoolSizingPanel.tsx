@@ -188,9 +188,11 @@ export function PoolSizingPanel({
 						) : (
 							<>
 								<SummaryTable rows={rows} />
-								{rows.map((row) => (
-									<CycleDetails key={rowKey(row)} row={row} />
-								))}
+								<div className="grid items-start gap-item sm:grid-cols-2 xl:grid-cols-3">
+									{rows.map((row) => (
+										<CycleDetails key={rowKey(row)} row={row} />
+									))}
+								</div>
 							</>
 						)}
 						{/*
@@ -300,7 +302,7 @@ function SummaryTable({ rows }: { rows: PoolSizingRow[] }) {
 
 function CycleDetails({ row }: { row: PoolSizingRow }) {
 	return (
-		<details className="rounded-lg border p-row">
+		<details className="min-w-0 rounded-lg border p-row open:col-span-full">
 			<summary className="text-sm font-medium cursor-pointer">
 				{rowLabel(row)} cycles
 			</summary>

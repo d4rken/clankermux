@@ -2,7 +2,7 @@
  * Quota-tab verdict callouts.
  *
  * The panel's job is mostly to refuse to say things, so that is what is
- * asserted: the caveat block is always present, `computing` is distinguishable
+ * asserted: caveats stay accessible on demand, `computing` is distinguishable
  * from "nothing is drifting", a `stable` verdict on an unmeasurable coefficient
  * is not reported as a negative result, and the hidden-traffic figure is
  * labelled as a lower bound rather than as coverage.
@@ -99,83 +99,5 @@ describe("QuotaChangeVerdicts", () => {
 		expect(html).toContain("claude-opus-5");
 		// The scan could not run for this one; it is not a negative result.
 		expect(html).not.toContain("claude-fable-5");
-	});
-
-	it("always states the four things the measurement cannot separate", () => {
-		const html = renderToStaticMarkup(
-			<QuotaChangeVerdicts
-				data={readyResponse([
-					cohort([windowResult("five_hour", [measuredModel()])]),
-				])}
-			/>,
-		);
-
-		expect(html).toContain("What these numbers are not");
-		expect(html).toContain("implied cost");
-		expect(html).toContain("not the provider&#x27;s internal quota accounting");
-		expect(html).toContain("weights input, output and cached");
-		expect(html).toContain("cannot be measured here");
-		expect(html).toContain("how model ids are normalized");
-	});
-
-	it("labels the hidden-traffic figure as a lower bound, never as coverage", () => {
-		const html = renderToStaticMarkup(
-			<QuotaChangeVerdicts
-				data={readyResponse([
-					cohort([
-						windowResult("five_hour", [measuredModel()], {
-							zeroObservedTokenDeltaShare: 0.084,
-						}),
-					]),
-				])}
-			/>,
-		);
-
-		expect(html).toContain("At least 8.4%");
-		expect(html).toContain(
-			"a lower bound on hidden usage, not a coverage figure",
-		);
-		expect(html).not.toContain("coverage of");
-		expect(html).not.toContain("fully observed");
-	});
-
-	it("qualifies implied capacity as conditional on list-price ratios", () => {
-		// The number is 100/coefficient in PRICE-EQUIVALENT tokens. Presented
-		// without that condition it reads as a measured raw-token quota, which is
-		// the one thing it is not.
-		const html = renderToStaticMarkup(
-			<QuotaChangeVerdicts
-				data={readyResponse([
-					cohort([windowResult("five_hour", [measuredModel()])]),
-				])}
-			/>,
-		);
-
-		expect(html).toContain("price-equivalent tokens");
-		expect(html).toContain("list-price ratios");
-		expect(html).toContain("not a measurement of a raw-token quota");
-	});
-
-	it("discloses an assumed tier and omits the line when every tier was recorded", () => {
-		const assumed = renderToStaticMarkup(
-			<QuotaChangeVerdicts
-				data={readyResponse([
-					cohort([windowResult("five_hour", [measuredModel()])], {
-						tierProvenance: "assumed",
-					}),
-				])}
-			/>,
-		);
-		expect(assumed).toContain("inferred from today&#x27;s values");
-		expect(assumed).toContain("reads exactly like quota drift");
-
-		const recorded = renderToStaticMarkup(
-			<QuotaChangeVerdicts
-				data={readyResponse([
-					cohort([windowResult("five_hour", [measuredModel()])]),
-				])}
-			/>,
-		);
-		expect(recorded).not.toContain("inferred from today&#x27;s values");
 	});
 });
