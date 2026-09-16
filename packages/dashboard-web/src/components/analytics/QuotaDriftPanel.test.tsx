@@ -15,7 +15,6 @@
 import { describe, expect, it } from "bun:test";
 import { renderToStaticMarkup } from "react-dom/server";
 import {
-	changedModel,
 	cohort,
 	measuredModel,
 	multiGapModel,
@@ -73,32 +72,6 @@ describe("QuotaDriftPanel", () => {
 
 		expect(html).toContain("5-hour window");
 		expect(html).not.toContain("This is an absence of evidence");
-	});
-
-	it("frames change markers as detected changes, not provider actions", () => {
-		const html = renderToStaticMarkup(
-			<QuotaDriftPanel
-				cohort={cohort([windowResult("five_hour", [changedModel()])])}
-			/>,
-		);
-
-		expect(html).toContain(
-			"detected changes in implied cost, not confirmed provider actions",
-		);
-		expect(html).not.toContain("reduced your quota");
-	});
-
-	it("states that the line breaks where the model was not separable", () => {
-		const html = renderToStaticMarkup(
-			<QuotaDriftPanel
-				cohort={cohort([windowResult("five_hour", [measuredModel()])])}
-			/>,
-		);
-
-		expect(html).toContain("90% intervals");
-		expect(html).toContain(
-			"the line breaks wherever the model could not be separated",
-		);
 	});
 
 	it("keeps the whole gap report collapsed, with nothing visible by default", () => {

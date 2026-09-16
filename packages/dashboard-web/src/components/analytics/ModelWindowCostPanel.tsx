@@ -1,5 +1,5 @@
 import type { QuotaDriftCohort, QuotaDriftModel } from "@clankermux/types";
-import { Coins, Loader2 } from "lucide-react";
+import { ChevronDown, Coins, Loader2 } from "lucide-react";
 import {
 	formatCapacity,
 	formatCoefficient,
@@ -8,13 +8,7 @@ import {
 	supportText,
 	unidentifiedReasonText,
 } from "../../lib/quota-drift-display";
-import {
-	Card,
-	CardContent,
-	CardDescription,
-	CardHeader,
-	CardTitle,
-} from "../ui/card";
+import { CardTitle } from "../ui/card";
 import {
 	Table,
 	TableBody,
@@ -45,13 +39,19 @@ export function ModelWindowCostPanel({
 	loading?: boolean;
 }) {
 	return (
-		<Card>
-			<CardHeader>
+		<details className="group rounded-lg border bg-card text-card-foreground shadow-card">
+			<summary className="cursor-pointer list-none rounded-lg p-group focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring [&::-webkit-details-marker]:hidden">
 				<CardTitle className="flex items-center gap-item">
-					<Coins className="h-5 w-5" />
+					<Coins className="h-4 w-4 shrink-0" aria-hidden="true" />
 					Window Cost per Model
+					<ChevronDown
+						className="ml-auto h-4 w-4 shrink-0 transition-transform group-open:rotate-180"
+						aria-hidden="true"
+					/>
 				</CardTitle>
-				<CardDescription className="text-xs">
+			</summary>
+			<div className="px-group pb-group space-y-group">
+				<p className="max-w-prose text-sm text-muted-foreground">
 					Percentage of the window consumed per 1M price-equivalent tokens
 					(input, output and cache weighted by the provider's own list-price
 					ratios), with a 90% interval. "Implied capacity" is what the whole
@@ -64,9 +64,7 @@ export function ModelWindowCostPanel({
 							recorded per sample.
 						</>
 					) : null}
-				</CardDescription>
-			</CardHeader>
-			<CardContent className="space-y-group">
+				</p>
 				{loading ? (
 					<p className="flex items-center gap-item text-sm text-muted-foreground">
 						<Loader2 className="h-4 w-4 animate-spin" />
@@ -120,8 +118,8 @@ export function ModelWindowCostPanel({
 						</div>
 					))
 				)}
-			</CardContent>
-		</Card>
+			</div>
+		</details>
 	);
 }
 

@@ -42,26 +42,20 @@ export function QuotaTab() {
 
 	return (
 		<div className="space-y-section">
-			<section className="space-y-section">
-				<SectionHeading title="Pool sizing" />
-				<PoolSizingPanel
-					data={poolSizingQuery.data}
-					loading={poolSizing.state === "loading"}
-					unavailableReason={
-						poolSizing.state === "unavailable"
-							? "Pool sizing data is unavailable"
-							: undefined
-					}
-				/>
-			</section>
+			<PoolSizingPanel
+				data={poolSizingQuery.data}
+				loading={poolSizing.state === "loading"}
+				unavailableReason={
+					poolSizing.state === "unavailable"
+						? "Pool sizing data is unavailable"
+						: undefined
+				}
+			/>
 
 			<QuotaChangeVerdicts data={data} loading={isLoading} />
 
 			{isLoading && cohorts.length === 0 ? (
-				<>
-					<ModelWindowCostPanel loading />
-					<QuotaDriftPanel loading />
-				</>
+				<QuotaDriftPanel loading />
 			) : (
 				cohorts.map((cohort) => (
 					<section key={cohort.key} className="space-y-section">
@@ -72,13 +66,13 @@ export function QuotaTab() {
 									{cohort.accountIds.length} account
 									{cohort.accountIds.length === 1 ? "" : "s"} fitted together.
 									{cohort.tierProvenance === "assumed"
-										? " Tier inferred from today's account values rather than recorded per sample."
+										? " Tier inferred."
 										: null}
 								</>
 							}
 						/>
-						<ModelWindowCostPanel cohort={cohort} />
 						<QuotaDriftPanel cohort={cohort} />
+						<ModelWindowCostPanel cohort={cohort} />
 					</section>
 				))
 			)}

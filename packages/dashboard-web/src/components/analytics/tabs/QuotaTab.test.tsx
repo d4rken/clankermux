@@ -10,6 +10,12 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { renderToStaticMarkup } from "react-dom/server";
 import { queryKeys } from "../../../lib/query-keys";
 import { poolSizingFixture } from "../__fixtures__/pool-sizing";
+import {
+	cohort,
+	measuredModel,
+	readyResponse,
+	windowResult,
+} from "../__fixtures__/quota-drift";
 import { QuotaTab } from "./QuotaTab";
 
 function client(): QueryClient {
@@ -32,14 +38,22 @@ describe("QuotaTab", () => {
 	it("renders the pool sizing section above the quota verdicts", () => {
 		const queryClient = client();
 		queryClient.setQueryData(queryKeys.poolSizing(), poolSizingFixture());
+		queryClient.setQueryData(
+			queryKeys.quotaDrift(),
+			readyResponse([cohort([windowResult("five_hour", [measuredModel()])])]),
+		);
 
 		const html = render(queryClient);
 
 		expect(html).toContain("Pool sizing");
 		expect(html).toContain("Account-weeks consumed per completed weekly cycle");
 		expect(html.indexOf("Pool sizing")).toBeLessThan(
-			html.indexOf("Implied Window Cost"),
+			html.indexOf("Detected events"),
 		);
+		expect(html.indexOf("Implied Capacity Over Time")).toBeLessThan(
+			html.indexOf("Window Cost per Model"),
+		);
+		expect(html.match(/>Pool sizing</g)).toHaveLength(1);
 		// The panel really got the payload, not just its heading.
 		expect(html).toContain("4.79 of 5");
 	});
