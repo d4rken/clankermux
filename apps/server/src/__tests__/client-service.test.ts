@@ -1288,21 +1288,30 @@ describe("client service integration", () => {
 			expect(result.catalogueLoaded).toBe(true);
 		});
 
-		it("says nothing when the saved account pin names no live account", async () => {
+		it("describes the surviving route when a saved account pin names no live account", async () => {
 			await discovered("c", ["gpt-6-astra"]);
 			await discovered("d", ["gpt-6-astra"]);
 			const id = await astraClient(["d"]);
-			// The pinned account goes away after the catalogue was saved, leaving the
-			// entry pointing at nothing — `wire()` treats that as no route, and so
-			// does this.
+			// `gpt-6-astra` is published under its own name, so committing this
+			// catalogue wrote no routing rule: the stored `accountIds` reach nothing
+			// the proxy reads, and its pool stays every pin-allowed account that
+			// permits the target. Dropping `d` therefore leaves `c` serving the
+			// model, and the dialog has to describe that route instead of reporting
+			// no route at all.
 			dbOps
 				.getAdapter()
 				.getSQLiteDb()
 				.query("DELETE FROM accounts WHERE id=?")
 				.run("d");
 			const result = await service.modelMetadata(id, "openai");
-			expect(result.models["gpt-6-astra"]).toEqual({});
-			expect(result.catalogueLoaded).toBe(false);
+			expect(result.models["gpt-6-astra"]).toEqual({
+				contextWindow: 872_000,
+				maxOutputTokens: 128_000,
+				reasoning: true,
+				inputModalities: ["text", "image"],
+				cost: { input: 10, output: 50, cacheRead: 1, cacheWrite: 12.5 },
+			});
+			expect(result.catalogueLoaded).toBe(true);
 		});
 	});
 });

@@ -457,7 +457,6 @@ export class ClientService {
 				// `any` or this model's family remaps the published id, and the stored
 				// value would then describe a route that no longer exists.
 				const target = resolveRoutingTarget(winning, model.id).upstreamModel;
-				const pinned = model.accountIds;
 				const pool =
 					winning?.pool_kind === "accounts"
 						? (winning.pool_account_ids ?? [])
@@ -465,7 +464,6 @@ export class ClientService {
 				const providers = new Set<string>();
 				let unresolvedRoutes = false;
 				for (const account of accounts) {
-					if (pinned && !pinned.includes(account.id)) continue;
 					if (pool && !pool.includes(account.id)) continue;
 					if (
 						winning?.pool_kind === "provider" &&
