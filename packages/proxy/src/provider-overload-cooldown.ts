@@ -124,7 +124,8 @@ export type OverloadProbeEvidence =
 	| "attempt_failed"
 	| "model_not_found"
 	| "model_switch"
-	| "stale_token_retry";
+	| "stale_token_retry"
+	| "codex_transient_hold";
 
 export type ProbeAdmission =
 	| { admitted: true; token: OverloadProbeToken | null }
