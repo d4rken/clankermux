@@ -553,6 +553,15 @@ export function AccountStatusChips({
 					Usage access denied
 				</StatusChip>
 			)}
+			{status.isSubscriptionExpired && (
+				<StatusChip
+					className="bg-destructive/15 text-destructive-strong"
+					title="The provider refused this account because its subscription no longer covers the service — a lapsed plan, a cancelled subscription, or a seat removed from a team. It was auto-paused and no retries are scheduled against it. Renew or restore the seat; the pause lifts on its own once the provider reports an active subscription again."
+				>
+					<AlertCircle className="h-3.5 w-3.5" />
+					Subscription expired
+				</StatusChip>
+			)}
 			{account.rateLimitedReason === "org_permission_denied" && (
 				<StatusChip
 					className="bg-destructive/15 text-destructive-strong"
@@ -801,8 +810,14 @@ const RENEWAL_URGENCY_CLASSES: Record<string, string> = {
  * Subscription renewal, optionally rendered as plain inline text. Amber when
  * renewal is near, red when imminent,
  * muted for far-off or already-elapsed one-time dates. Only rendered when
- * `status.showRenewalChip` is true (a renewal date is set and the subscription
- * is not reported expired — see `deriveAccountStatus`).
+ * `status.showRenewalChip` is true (a renewal date is set and no live refusal
+ * contradicts it — see `deriveAccountStatus`).
+ *
+ * Three wordings, by what is actually known:
+ *
+ *   "Renews Oct 3 (17d)"  — a date, with no report that it will not recur.
+ *   "Ends Oct 3 (17d)"    — the provider reported `will_renew: false`.
+ *   "Ended Aug 3"         — a provider-reported period end that has passed.
  */
 export function AccountRenewalInfo({
 	account,
@@ -829,9 +844,15 @@ export function AccountRenewalInfo({
 	const daysLeft = status.renewalDaysLeft;
 	// A derived anchor is the subscription's START day-of-month, not a billing
 	// date the provider reported — no Anthropic endpoint exposes one. The "~"
-	// is the only thing separating a guess from an operator-confirmed date.
+	// is the only thing separating a guess from an operator-confirmed date. A
+	// provider anchor IS a reported date, so it carries no mark.
 	const isDerived = account.renewalAnchorSource === "derived";
+	const isProviderReported = account.renewalAnchorSource === "provider";
 	const dateMark = isDerived ? "~" : "";
+	// Only a reported `false` relabels the date: null means the provider said
+	// nothing about renewing, which is not the same as saying it will not.
+	const willNotRenew =
+		isProviderReported && account.identitySubscriptionWillRenew === false;
 
 	let label: string;
 	if (isPast) {
@@ -839,11 +860,13 @@ export function AccountRenewalInfo({
 		// system never verifies the provider actually renewed, so don't claim
 		// "Renewed". (`past` only occurs for cadence='none'; recurring cadences
 		// always resolve to a future date.)
-		label = `Renewal date passed (${shortDate})`;
-	} else if (daysLeft === 0) {
-		label = `Renews ${dateMark}${shortDate} (today)`;
+		label = isProviderReported
+			? `Ended ${shortDate}`
+			: `Renewal date passed (${shortDate})`;
 	} else {
-		label = `Renews ${dateMark}${shortDate} (${daysLeft}d)`;
+		const verb = willNotRenew ? "Ends" : "Renews";
+		const when = daysLeft === 0 ? "today" : `${daysLeft}d`;
+		label = `${verb} ${dateMark}${shortDate} (${when})`;
 	}
 
 	const priceSuffix =
@@ -853,12 +876,20 @@ export function AccountRenewalInfo({
 	const derivedSuffix = isDerived
 		? " · Estimated from the subscription start; the provider reports no renewal date. Set it to confirm."
 		: "";
-	const title =
-		(isPast
-			? `Configured one-time renewal date passed on ${isoDate}; provider renewal was not verified`
-			: `Subscription renews ${isoDate} (${cadence})`) +
-		priceSuffix +
-		derivedSuffix;
+
+	let titleBase: string;
+	if (isProviderReported) {
+		titleBase = isPast
+			? `The provider-reported subscription period ended on ${isoDate}`
+			: `The provider reports the current subscription period ends ${isoDate}${
+					willNotRenew ? ", and that it will not renew" : ""
+				}`;
+	} else if (isPast) {
+		titleBase = `Configured one-time renewal date passed on ${isoDate}; provider renewal was not verified`;
+	} else {
+		titleBase = `Subscription renews ${isoDate} (${cadence})`;
+	}
+	const title = titleBase + priceSuffix + derivedSuffix;
 
 	const colorClasses =
 		RENEWAL_URGENCY_CLASSES[status.renewalUrgency] ??

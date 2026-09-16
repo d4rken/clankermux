@@ -665,7 +665,7 @@ describe("deriveAccountStatus — renewal", () => {
 			}),
 			NOW,
 		);
-		expect(status.isUsagePermissionDenied).toBe(true);
+		expect(status.isSubscriptionExpired).toBe(true);
 		// The underlying renewal facts are still derived…
 		expect(status.renewalNextDate).not.toBeNull();
 		// …but the chip is suppressed.
@@ -682,19 +682,45 @@ describe("deriveAccountStatus — renewal", () => {
 			}),
 			NOW,
 		);
+		expect(status.isSubscriptionExpired).toBe(true);
+		expect(status.showRenewalChip).toBe(false);
+	});
+
+	it("suppresses the renewal chip while usage access is denied", () => {
+		const status = deriveAccountStatus(
+			makeAccount({
+				paused: true,
+				pauseReason: "usage_permission_denied",
+				renewalAnchor: "2024-02-01",
+				renewalCadence: "monthly",
+			}),
+			NOW,
+		);
 		expect(status.isUsagePermissionDenied).toBe(true);
 		expect(status.showRenewalChip).toBe(false);
 	});
 });
 
 describe("deriveAccountStatus — subscription expired", () => {
-	it("flags isUsagePermissionDenied when paused with pause_reason subscription_expired", () => {
+	it("flags isSubscriptionExpired, and not the usage-access reason", () => {
+		// Two different facts: one is the usage endpoint refusing, the other is
+		// the plan no longer covering the service. They get separate chips.
 		const status = deriveAccountStatus(
 			makeAccount({ paused: true, pauseReason: "subscription_expired" }),
 			NOW,
 		);
 		expect(status.isPaused).toBe(true);
+		expect(status.isSubscriptionExpired).toBe(true);
+		expect(status.isUsagePermissionDenied).toBe(false);
+	});
+
+	it("keeps usage_permission_denied on its own flag", () => {
+		const status = deriveAccountStatus(
+			makeAccount({ paused: true, pauseReason: "usage_permission_denied" }),
+			NOW,
+		);
 		expect(status.isUsagePermissionDenied).toBe(true);
+		expect(status.isSubscriptionExpired).toBe(false);
 	});
 
 	it("does not flag manually paused accounts", () => {
@@ -703,6 +729,7 @@ describe("deriveAccountStatus — subscription expired", () => {
 			NOW,
 		);
 		expect(status.isUsagePermissionDenied).toBe(false);
+		expect(status.isSubscriptionExpired).toBe(false);
 	});
 
 	it("does not flag unpaused accounts even with a stale reason", () => {
@@ -710,7 +737,69 @@ describe("deriveAccountStatus — subscription expired", () => {
 			makeAccount({ paused: false, pauseReason: "subscription_expired" }),
 			NOW,
 		);
-		expect(status.isUsagePermissionDenied).toBe(false);
+		expect(status.isSubscriptionExpired).toBe(false);
+	});
+});
+
+describe("deriveAccountStatus — provider-reported renewal anchor", () => {
+	/** 2024-01-20 noon UTC — 17 days after NOW. */
+	const PERIOD_END = Date.UTC(2024, 0, 20, 12, 0, 0);
+
+	it("renders the reported period end rather than the next recurrence", () => {
+		// The anchor and the cadence both say "monthly", but the only date the
+		// provider actually reported is this one. A capture that stopped
+		// succeeding must not invent the next month's date and label it "Renews".
+		const status = deriveAccountStatus(
+			makeAccount({
+				renewalAnchor: "2023-12-20",
+				renewalCadence: "monthly",
+				renewalAnchorSource: "provider",
+				identitySubscriptionEndsAt: Date.UTC(2023, 11, 20, 12, 0, 0),
+			}),
+			NOW,
+		);
+		expect(status.renewalNextDate?.getFullYear()).toBe(2023);
+		expect(status.renewalUrgency).toBe("past");
+	});
+
+	it("keeps a future reported end as the renewal date", () => {
+		const status = deriveAccountStatus(
+			makeAccount({
+				renewalAnchor: "2024-01-20",
+				renewalCadence: "monthly",
+				renewalAnchorSource: "provider",
+				identitySubscriptionEndsAt: PERIOD_END,
+			}),
+			NOW,
+		);
+		expect(status.renewalDaysLeft).toBe(17);
+		expect(status.showRenewalChip).toBe(true);
+	});
+
+	it("falls back to the stored anchor when no period end was captured", () => {
+		const status = deriveAccountStatus(
+			makeAccount({
+				renewalAnchor: "2024-01-20",
+				renewalCadence: "monthly",
+				renewalAnchorSource: "provider",
+				identitySubscriptionEndsAt: null,
+			}),
+			NOW,
+		);
+		expect(status.renewalDaysLeft).toBe(17);
+	});
+
+	it("leaves a derived anchor on the recurrence", () => {
+		const status = deriveAccountStatus(
+			makeAccount({
+				renewalAnchor: "2023-12-20",
+				renewalCadence: "monthly",
+				renewalAnchorSource: "derived",
+			}),
+			NOW,
+		);
+		expect(status.renewalNextDate?.getFullYear()).toBe(2024);
+		expect(status.renewalUrgency).not.toBe("past");
 	});
 });
 

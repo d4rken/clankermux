@@ -315,7 +315,7 @@ describe("AccountStatusChips — refresh-token re-auth chip", () => {
 });
 
 describe("AccountStatusChips — expired suppresses renewal chip", () => {
-	it("shows 'Usage access denied' for the legacy expiration label and no renewal chip when expired with a past date", () => {
+	it("shows 'Subscription expired' and no renewal chip when expired with a past date", () => {
 		const html = render(
 			makeAccount({
 				paused: true,
@@ -324,7 +324,10 @@ describe("AccountStatusChips — expired suppresses renewal chip", () => {
 				renewalCadence: "none",
 			}),
 		);
-		expect(html).toContain("Usage access denied");
+		expect(html).toContain("Subscription expired");
+		// The two reasons are different facts and must not borrow each other's
+		// chip: one is the usage endpoint refusing, the other is the plan.
+		expect(html).not.toContain("Usage access denied");
 		// No renewal chip text at all — real provider state dominates.
 		expect(html).not.toContain("Renewal date passed");
 		expect(html).not.toContain("Renewed");
@@ -340,7 +343,65 @@ describe("AccountStatusChips — expired suppresses renewal chip", () => {
 				renewalCadence: "monthly",
 			}),
 		);
+		expect(html).toContain("Subscription expired");
+		expect(html).not.toContain("Renews");
+	});
+
+	it("keeps 'Usage access denied' on its own reason", () => {
+		const html = render(
+			makeAccount({ paused: true, pauseReason: "usage_permission_denied" }),
+		);
 		expect(html).toContain("Usage access denied");
+		expect(html).not.toContain("Subscription expired");
+	});
+});
+
+describe("AccountRenewalInfo — provider-reported period", () => {
+	/** 2024-01-20 noon UTC: 17 days after NOW. */
+	const PERIOD_END = Date.UTC(2024, 0, 20, 12, 0, 0);
+
+	const providerAccount = (overrides: Partial<AccountResponse> = {}) =>
+		makeAccount({
+			renewalAnchor: "2024-01-20",
+			renewalCadence: "monthly",
+			renewalAnchorSource: "provider",
+			identitySubscriptionEndsAt: PERIOD_END,
+			...overrides,
+		});
+
+	it("says 'Renews' with no estimate marker while nothing says otherwise", () => {
+		const html = render(providerAccount());
+		expect(html).toContain("Renews");
+		expect(html).not.toContain("~");
+	});
+
+	it("says 'Ends' once the provider reports it will not renew", () => {
+		const html = render(
+			providerAccount({ identitySubscriptionWillRenew: false }),
+		);
+		expect(html).toContain("Ends");
+		expect(html).not.toContain("Renews");
+	});
+
+	it("keeps saying 'Renews' when renewal intent was never reported", () => {
+		// null is "not reported", which is not the same claim as false.
+		const html = render(
+			providerAccount({ identitySubscriptionWillRenew: null }),
+		);
+		expect(html).toContain("Renews");
+	});
+
+	it("says 'Ended' once the reported period end has passed", () => {
+		const past = Date.UTC(2023, 11, 20, 12, 0, 0);
+		const html = render(
+			providerAccount({
+				renewalAnchor: "2023-12-20",
+				identitySubscriptionEndsAt: past,
+			}),
+		);
+		expect(html).toContain("Ended");
+		// NOT the recurrence: a monthly cadence would have advanced this to a
+		// future date the provider never reported.
 		expect(html).not.toContain("Renews");
 	});
 });

@@ -10,7 +10,11 @@ import type {
 import { HARD_RATE_LIMIT_CAUSES } from "@clankermux/types";
 import { AccountPresenter } from "@clankermux/ui-common";
 import { isZaiPeakHour } from "../utils/provider-utils";
-import { computeRenewal, type RenewalUrgency } from "./renewal";
+import {
+	anchorDateFromInstant,
+	computeRenewal,
+	type RenewalUrgency,
+} from "./renewal";
 import { getExhaustedScopedFamilies } from "./secondary-limits";
 
 /**
@@ -48,8 +52,14 @@ export interface AccountStatus {
 	isRateLimited: boolean;
 	/** Account is paused. */
 	isPaused: boolean;
-	/** Auto-paused because usage access was denied (including legacy expiration labels). */
+	/** Auto-paused because the usage endpoint denied access (403 permission_error). */
 	isUsagePermissionDenied: boolean;
+	/**
+	 * Auto-paused because the request path confirmed the subscription no longer
+	 * covers the service. Terminal — it needs a renewal, a re-subscribe or a
+	 * restored seat; it lifts when a capture reports an active subscription.
+	 */
+	isSubscriptionExpired: boolean;
 	/**
 	 * Auto-paused because the OAuth refresh token was rejected (`invalid_grant`).
 	 * Terminal — requires re-authentication; auto-resumes once reauth succeeds.
@@ -150,9 +160,9 @@ export interface AccountStatus {
 	renewalUrgency: RenewalUrgency;
 	/**
 	 * Whether to render the renewal chip. False when no anchor is set, and also
-	 * suppressed while `isUsagePermissionDenied` — usage access state (OAuth
-	 * refused) dominates static, unverified renewal metadata, so we don't show a
-	 * reassuring renewal chip next to the red "Usage access denied" badge.
+	 * suppressed while `isUsagePermissionDenied` or `isSubscriptionExpired` — a
+	 * live refusal dominates static renewal metadata, so a reassuring "Renews …"
+	 * never sits beside the red badge that says access is gone.
 	 */
 	showRenewalChip: boolean;
 	/** Codex account is on purchased credits past its weekly limit (real spend). */
@@ -191,9 +201,9 @@ export function deriveAccountStatus(
 	const presenter = new AccountPresenter(account);
 	const isPaused = presenter.isPaused;
 	const isUsagePermissionDenied =
-		isPaused &&
-		(account.pauseReason === "usage_permission_denied" ||
-			account.pauseReason === "subscription_expired");
+		isPaused && account.pauseReason === "usage_permission_denied";
+	const isSubscriptionExpired =
+		isPaused && account.pauseReason === "subscription_expired";
 	const isNeedsReauth =
 		isPaused && account.pauseReason === "oauth_invalid_grant";
 	const parsedReauthDeadline = account.refreshTokenExpiresAt
@@ -319,11 +329,23 @@ export function deriveAccountStatus(
 		? "Peak hours (14:00–18:00 SGT)"
 		: "Off-peak hours";
 
-	const renewal = computeRenewal(
-		account.renewalAnchor,
-		account.renewalCadence,
-		now,
-	);
+	// A `provider` anchor renders from the reported period end DIRECTLY, via the
+	// literal-date path instead of the recurrence. computeRenewal advances a
+	// recurring anchor to its next occurrence, so a capture that stopped
+	// succeeding would invent a date a month or a year past the last thing the
+	// provider actually said and label it "Renews".
+	const providerReportedEndMs =
+		account.renewalAnchorSource === "provider"
+			? (account.identitySubscriptionEndsAt ?? null)
+			: null;
+	const renewal =
+		providerReportedEndMs !== null
+			? computeRenewal(
+					anchorDateFromInstant(providerReportedEndMs),
+					"none",
+					now,
+				)
+			: computeRenewal(account.renewalAnchor, account.renewalCadence, now);
 
 	// On-credits predicate — mirrors the server's exactly so the chip and the
 	// pause/failover logic agree on when a codex account is drawing on purchased
@@ -377,6 +399,7 @@ export function deriveAccountStatus(
 		isRateLimited: presenter.isRateLimited,
 		isPaused,
 		isUsagePermissionDenied,
+		isSubscriptionExpired,
 		isNeedsReauth,
 		reauthDeadlineMs,
 		isReauthDueSoon,
@@ -407,7 +430,10 @@ export function deriveAccountStatus(
 		renewalNextDate: renewal.nextDate,
 		renewalDaysLeft: renewal.daysLeft,
 		renewalUrgency: renewal.urgency,
-		showRenewalChip: renewal.nextDate !== null && !isUsagePermissionDenied,
+		showRenewalChip:
+			renewal.nextDate !== null &&
+			!isUsagePermissionDenied &&
+			!isSubscriptionExpired,
 		isOnCredits,
 		creditsBalance,
 		creditsPlanType,

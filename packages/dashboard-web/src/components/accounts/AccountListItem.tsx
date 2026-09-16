@@ -95,6 +95,24 @@ interface AccountListItemProps {
 	onZaiReauth?: (account: Account) => void;
 }
 
+/**
+ * What the menu says about where the anchor came from. "set" means a human
+ * confirmed this date, so a provider-reported one must not borrow the word.
+ */
+const RENEWAL_SOURCE_LABEL: Record<"manual" | "derived" | "provider", string> =
+	{
+		manual: "set",
+		derived: "estimated",
+		provider: "from provider",
+	};
+
+const RENEWAL_SOURCE_TITLE: Record<"manual" | "derived" | "provider", string> =
+	{
+		manual: "",
+		derived: " — estimated from the subscription start",
+		provider: " — the period end the provider reported",
+	};
+
 export function AccountListItem({
 	account,
 	isForced = false,
@@ -393,11 +411,7 @@ export function AccountListItem({
 								onClick={() => onRenewalChange(account)}
 								title={
 									account.renewalAnchor
-										? `Renewal date: ${account.renewalAnchor} (${account.renewalCadence ?? "none"})${
-												account.renewalAnchorSource === "derived"
-													? " — estimated from the subscription start"
-													: ""
-											}`
+										? `Renewal date: ${account.renewalAnchor} (${account.renewalCadence ?? "none"})${RENEWAL_SOURCE_TITLE[account.renewalAnchorSource ?? "manual"]}`
 										: "Set subscription renewal date"
 								}
 							>
@@ -407,9 +421,11 @@ export function AccountListItem({
 								Set Renewal Date
 								{account.renewalAnchor && (
 									<span className="ml-auto text-xs text-muted-foreground">
-										{account.renewalAnchorSource === "derived"
-											? "estimated"
-											: "set"}
+										{
+											RENEWAL_SOURCE_LABEL[
+												account.renewalAnchorSource ?? "manual"
+											]
+										}
 									</span>
 								)}
 							</DropdownMenuItem>
