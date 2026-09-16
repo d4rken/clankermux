@@ -29,8 +29,9 @@ import type { SessionProjectCache } from "./session-project-cache";
  *      than deducing which path segment was likely to be one.
  *   4. The operator-configured project roots applied to the working directory,
  *      which comes from an anchored label in the system prompt ("Primary
- *      working directory:" wins over plain "Working directory:") or from a
- *      Codex-style `<cwd>…</cwd>` tag in the FIRST user message only. The
+ *      working directory:" wins over plain "Working directory:" or Pi's
+ *      "Current working directory:") or from a Codex-style `<cwd>…</cwd>` tag
+ *      in the FIRST user message only. The
  *      recorded source says which of those supplied the path.
  *   5. Session inheritance: requests with no anchored signal (Claude Code
  *      sidechains, title generation, count_tokens) inherit the project last
@@ -52,12 +53,12 @@ import type { SessionProjectCache } from "./session-project-cache";
  * false positives (e.g. `.claude` memory paths, harness headings).
  */
 
-// Line-anchored, case-sensitive label regexes. Pass 1 (Primary) runs to
-// completion before pass 2; the lowercase "working" in "Primary working
-// directory" keeps it from also matching the plain pass. Non-global,
-// no nested quantifiers — linear-time per call (ReDoS-safe).
+// Line-anchored, case-sensitive labels. Primary is checked first and matches
+// neither plain alternative (capital Working or the Current prefix).
+// Non-global, with no nested quantifiers.
 const PRIMARY_WORKING_DIR_RE = /^.*\bPrimary working directory\s*:\s*(.+)$/m;
-const WORKING_DIR_RE = /^.*\bWorking directory\s*:\s*(.+)$/m;
+const WORKING_DIR_RE =
+	/^.*\b(?:Working directory|Current working directory)\s*:\s*(.+)$/m;
 
 // Codex environment context: <cwd>/path/to/project</cwd>
 const CODEX_CWD_RE = /<cwd>([^<]+)<\/cwd>/;

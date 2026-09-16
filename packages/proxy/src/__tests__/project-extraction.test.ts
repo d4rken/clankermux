@@ -198,6 +198,78 @@ describe("mapWorkingDirToProject", () => {
 });
 
 describe("extractProjectFromBody", () => {
+	it("maps Pi's current working directory through the configured override", () => {
+		expect(
+			extractProjectFromBody(
+				{
+					system: [
+						{
+							type: "text",
+							text: "Current working directory: /home/darken/.pi",
+						},
+					],
+				},
+				{
+					...RULES,
+					overrides: [{ prefix: "/home/darken/.pi", name: "pi-agent" }],
+				},
+			),
+		).toEqual({ project: "pi-agent", source: "path_override" });
+	});
+
+	it("maps Pi's current working directory through project roots", () => {
+		expect(
+			extractProjectFromBody({
+				system:
+					"Current working directory: /home/darken/clankermux\nCurrent date: 2026-09-16",
+			}),
+		).toEqual({ project: "clankermux", source: "wd_plain" });
+	});
+
+	it("keeps primary working directory precedence over Pi's label", () => {
+		expect(
+			extractProjectFromBody({
+				system:
+					"Current working directory: /home/u/other\nPrimary working directory: /home/u/repo",
+			}),
+		).toEqual({ project: "repo", source: "wd_primary" });
+	});
+
+	it("retains path validation and unmatched-path reporting for Pi's label", () => {
+		for (const path of [
+			"relative/repo",
+			"/home/u/repo unexpected prose",
+			"/home/u/repo/../other",
+		]) {
+			expect(
+				extractProjectFromBody({
+					system: `Current working directory: ${path}`,
+				}),
+			).toEqual({ project: null, source: "none" });
+		}
+		expect(
+			extractProjectFromBody({
+				system: "Current working directory: /unknown/repo",
+			}),
+		).toEqual({
+			project: null,
+			source: "none",
+			unmatchedPath: "/unknown/repo",
+		});
+	});
+
+	it("ignores Pi working-directory labels in conversation and tool output", () => {
+		for (const role of ["user", "assistant", "tool"]) {
+			expect(
+				extractProjectFromBody({
+					messages: [
+						{ role, content: "Current working directory: /home/u/wrong" },
+					],
+				}),
+			).toEqual({ project: null, source: "none" });
+		}
+	});
+
 	it("reads the Claude Code environment system message after user instructions", () => {
 		const body = {
 			system: [{ type: "text", text: "You are Claude Code." }],

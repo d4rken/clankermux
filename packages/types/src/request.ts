@@ -12,7 +12,8 @@ import { type CostSource, resolveCostSource } from "./request-cost";
  *                          instruction files, validated against the working
  *                          directory
  *  - `wd_primary`        — "Primary working directory:" system-prompt label
- *  - `wd_plain`          — plain "Working directory:" system-prompt label
+ *  - `wd_plain`          — "Working directory:" or Pi's
+ *                          "Current working directory:" system-prompt label
  *  - `codex_cwd`         — Codex `<cwd>…</cwd>` tag in the first user message
  *
  * The three path-derived labels above (`wd_primary`, `wd_plain`, `codex_cwd`)
