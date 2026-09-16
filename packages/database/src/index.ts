@@ -23,7 +23,10 @@ export {
 	isEncryptionEnabled,
 } from "./payload-encryption";
 export { analyzeIndexUsage } from "./performance-indexes";
-export { AccountRepository } from "./repositories/account.repository";
+export {
+	AccountRepository,
+	type ProviderRenewalAnchorSync,
+} from "./repositories/account.repository";
 export {
 	type AccountInsertAdapter,
 	buildNameGuardedInsert,

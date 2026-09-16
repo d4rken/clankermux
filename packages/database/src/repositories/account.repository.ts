@@ -1,8 +1,11 @@
+import type { Database } from "bun:sqlite";
 import { getAppVersionSync, PAUSE_REASON_NEEDS_REAUTH } from "@clankermux/core";
+import { anchorDateFromInstant } from "@clankermux/core/renewal";
 import {
 	type Account,
 	type AccountIdentity,
 	type AccountRow,
+	type AccountSubscriptionState,
 	type RateLimitReason,
 	toAccount,
 } from "@clankermux/types";
@@ -17,9 +20,13 @@ const IDENTITY_COALESCE_SET = `identity_external_id = COALESCE(?, identity_exter
 				identity_email = COALESCE(?, identity_email),
 				identity_organization_name = COALESCE(?, identity_organization_name),
 				identity_plan_tier = COALESCE(?, identity_plan_tier),
-				identity_rate_limit_tier = COALESCE(?, identity_rate_limit_tier)`;
+				identity_rate_limit_tier = COALESCE(?, identity_rate_limit_tier),
+				identity_subscription_status = COALESCE(?, identity_subscription_status),
+				identity_subscription_started_at = COALESCE(?, identity_subscription_started_at)`;
 
-function identityBindParams(identity: AccountIdentity): Array<string | null> {
+function identityBindParams(
+	identity: AccountIdentity,
+): Array<string | number | null> {
 	// Order MUST match the `?` placeholders in IDENTITY_COALESCE_SET above.
 	return [
 		identity.externalAccountId,
@@ -27,6 +34,8 @@ function identityBindParams(identity: AccountIdentity): Array<string | null> {
 		identity.organizationName,
 		identity.planTier,
 		identity.rateLimitTier,
+		identity.subscriptionStatus ?? null,
+		identity.subscriptionStartedAt ?? null,
 	];
 }
 
@@ -34,6 +43,93 @@ function identityBindParams(identity: AccountIdentity): Array<string | null> {
 interface StoredTiers {
 	plan_tier: string | null;
 	rate_limit_tier: string | null;
+}
+
+/**
+ * Cadence a seeded anchor is given. No provider reports one — Anthropic's
+ * profile says `stripe_subscription` and nothing about the interval — so this is
+ * the majority guess, not an observation, which is why the row is marked
+ * `derived` and why seeding never touches `renewal_price_usd_micros`: the
+ * payments auto-recorder requires a price, so a guessed date can never invent a
+ * ledger entry.
+ */
+const SEEDED_RENEWAL_CADENCE = "monthly";
+
+/**
+ * Cadence recorded for a provider-reported anchor when the provider states a
+ * period end but no period LENGTH (Devin reports `planEnd` and nothing about
+ * the interval). The anchor itself is still an observation; only the interval
+ * is the majority guess.
+ */
+const PROVIDER_FALLBACK_CADENCE = "monthly";
+
+/** Arguments for {@link AccountRepository.syncProviderRenewalAnchor}. */
+export interface ProviderRenewalAnchorSync {
+	/** ms-epoch period end the provider reported. */
+	endsAtMs: number | null;
+	/** Reported billing period; null when the provider states none. */
+	cadence: "monthly" | "yearly" | null;
+	/** ms-epoch end of a running grace period, which keeps a past end usable. */
+	graceEndsAtMs: number | null;
+}
+
+/** The account's renewal anchor and its provenance, before a seeding attempt. */
+interface StoredAnchor {
+	provider: string | null;
+	renewal_anchor: string | null;
+	renewal_anchor_source: string | null;
+}
+
+/**
+ * Seed a renewal anchor from a provider-reported subscription START, on an
+ * ANTHROPIC account that has never had one either way.
+ *
+ * Both halves of the anchor gate matter, and they are not the same condition:
+ *
+ *   anchor IS NULL          — never overwrite what is already there.
+ *   anchor_source IS NULL   — never re-seed what the operator CLEARED. A clear
+ *                             writes source='manual' with a null anchor, so a
+ *                             gate on the anchor alone would re-seed the date on
+ *                             the next profile fetch, forever.
+ *
+ * That is what makes this one-shot per account rather than level-triggered.
+ *
+ * The provider gate is the third condition, and it is why the row's own
+ * `provider` is read here rather than taken from the caller: a start date is
+ * only worth guessing a cycle from when the provider reports NOTHING better.
+ * Codex and Devin report an actual period end, and
+ * {@link AccountRepository.syncProviderRenewalAnchor} writes that observation —
+ * a guess stamped here first would be an estimate standing in front of a
+ * measurement.
+ *
+ * Runs inside the caller's transaction.
+ */
+function seedRenewalAnchorFromSubscription(
+	db: Database,
+	accountId: string,
+	identity: AccountIdentity,
+): void {
+	const startedAt = identity.subscriptionStartedAt;
+	if (startedAt == null) return;
+	const anchor = anchorDateFromInstant(startedAt);
+	if (anchor === null) return;
+
+	const stored = db
+		.query(
+			`SELECT provider, renewal_anchor, renewal_anchor_source
+			 FROM accounts WHERE id = ?`,
+		)
+		.get(accountId) as StoredAnchor | null | undefined;
+	if (!stored || stored.renewal_anchor !== null) return;
+	if (stored.renewal_anchor_source !== null) return;
+	if ((stored.provider || "anthropic") !== "anthropic") return;
+
+	db.run(
+		`UPDATE accounts
+		 SET renewal_anchor = ?, renewal_cadence = ?, renewal_anchor_source = 'derived'
+		 WHERE id = ?`,
+		[anchor, SEEDED_RENEWAL_CADENCE, accountId] as never[],
+	);
 }
 
 export interface DevinCredentialReplacement {
@@ -112,6 +208,8 @@ export class AccountRepository extends BaseRepository<Account> {
 			const changes = db.run(sql, params as never[]).changes;
 			if (changes === 0 || !before) return changes;
 
+			seedRenewalAnchorFromSubscription(db, accountId, identity);
+
 			// COALESCE-merged effective values — exactly what the UPDATE just wrote.
 			const planTier = identity.planTier ?? before.plan_tier;
 			const rateLimitTier = identity.rateLimitTier ?? before.rate_limit_tier;
@@ -161,6 +259,7 @@ export class AccountRepository extends BaseRepository<Account> {
 				refresh_token_issued_at,
 				refresh_token_expires_at,
 				renewal_anchor,
+				renewal_anchor_source,
 				renewal_cadence,
 				renewal_price_usd_micros,
 				renewal_auto_start_date,
@@ -169,6 +268,12 @@ export class AccountRepository extends BaseRepository<Account> {
 				identity_organization_name,
 				identity_plan_tier,
 				identity_rate_limit_tier,
+				identity_subscription_status,
+				identity_subscription_started_at,
+				identity_subscription_ends_at,
+				identity_subscription_will_renew,
+				identity_subscription_grace_ends_at,
+				identity_subscription_checked_at,
 				identity_captured_at,
 				identity_profile_fetched_at,
 				COALESCE(consecutive_rate_limits, 0) as consecutive_rate_limits
@@ -201,6 +306,7 @@ export class AccountRepository extends BaseRepository<Account> {
 				refresh_token_issued_at,
 				refresh_token_expires_at,
 				renewal_anchor,
+				renewal_anchor_source,
 				renewal_cadence,
 				renewal_price_usd_micros,
 				renewal_auto_start_date,
@@ -209,6 +315,12 @@ export class AccountRepository extends BaseRepository<Account> {
 				identity_organization_name,
 				identity_plan_tier,
 				identity_rate_limit_tier,
+				identity_subscription_status,
+				identity_subscription_started_at,
+				identity_subscription_ends_at,
+				identity_subscription_will_renew,
+				identity_subscription_grace_ends_at,
+				identity_subscription_checked_at,
 				identity_captured_at,
 				identity_profile_fetched_at,
 				COALESCE(consecutive_rate_limits, 0) as consecutive_rate_limits
@@ -950,13 +1062,125 @@ export class AccountRepository extends BaseRepository<Account> {
 		priceUsdMicros: number | null,
 		autoStartDate: string | null,
 	): Promise<void> {
+		// Always 'manual', including when `anchor` is null: a clear is a decision,
+		// and the source column is what stops the seeder reinstating the date on
+		// the next profile fetch.
 		await this.run(
 			`UPDATE accounts
 			 SET renewal_anchor = ?, renewal_cadence = ?,
-			     renewal_price_usd_micros = ?, renewal_auto_start_date = ?
+			     renewal_price_usd_micros = ?, renewal_auto_start_date = ?,
+			     renewal_anchor_source = 'manual'
 			 WHERE id = ?`,
 			[anchor, cadence, priceUsdMicros, autoStartDate, accountId],
 		);
+	}
+
+	/**
+	 * Persist what a provider reported about the CURRENT subscription period.
+	 *
+	 * A plain `SET`, deliberately NOT the identity COALESCE merge: a grace period
+	 * that has lapsed is reported by its ABSENCE, and COALESCE cannot clear a
+	 * column, so the dashboard would keep showing a grace period the provider
+	 * stopped reporting. Each capture states the whole period.
+	 *
+	 * `checkedAtMs` is stamped by every ATTEMPT, including the failed and the
+	 * "this account has no subscription record" ones — it is a throttle input,
+	 * not a success marker.
+	 */
+	async setAccountSubscriptionState(
+		accountId: string,
+		state: AccountSubscriptionState,
+	): Promise<void> {
+		await this.run(
+			`UPDATE accounts
+			 SET identity_subscription_ends_at = ?,
+			     identity_subscription_will_renew = ?,
+			     identity_subscription_grace_ends_at = ?,
+			     identity_subscription_checked_at = ?
+			 WHERE id = ?`,
+			[
+				state.endsAtMs,
+				// Tri-state, preserved: null is "not reported", 0 is "reported as
+				// not renewing", and only the second may ever change a label.
+				state.willRenew == null ? null : state.willRenew ? 1 : 0,
+				state.graceEndsAtMs,
+				state.checkedAtMs,
+				accountId,
+			],
+		);
+	}
+
+	/**
+	 * Record that a subscription capture was ATTEMPTED and reported nothing
+	 * usable — a transport failure, a rejected status, an unparseable body.
+	 *
+	 * Separate from {@link setAccountSubscriptionState} because that one states
+	 * the whole period: running it after a failed read would clear a period a
+	 * previous read did observe. The throttle still has to advance, or a
+	 * provider outage turns into a request on every poll.
+	 */
+	async touchAccountSubscriptionCheck(
+		accountId: string,
+		checkedAtMs: number,
+	): Promise<void> {
+		await this.run(
+			`UPDATE accounts SET identity_subscription_checked_at = ? WHERE id = ?`,
+			[checkedAtMs, accountId],
+		);
+	}
+
+	/**
+	 * Move the renewal anchor onto the period end the provider itself reported.
+	 *
+	 * Unlike {@link seedRenewalAnchorFromSubscription} this is NOT one-shot: a
+	 * reported cycle end rolls forward, so every capture re-syncs it.
+	 *
+	 * Ownership is decided by the stored `renewal_anchor_source`, and the four
+	 * cases are not the same rule:
+	 *
+	 *   'manual'   — never touched. The operator's decision wins, always.
+	 *   'provider' — updated. This is how the anchor follows the cycle.
+	 *   'derived'  — OVERWRITTEN. A derived anchor is an estimate from a start
+	 *                date; a reported period end is an observation, and an
+	 *                observation replaces a guess.
+	 *   NULL       — written only when `renewal_anchor` is ALSO null. A non-null
+	 *                anchor with a null source is an operator's date from before
+	 *                the source column existed, which no migration backfills;
+	 *                overwriting it would silently move a real, possibly priced,
+	 *                renewal schedule.
+	 *
+	 * The predicate lives in the WHERE so the row is re-checked at write time.
+	 * `renewal_price_usd_micros` is never touched, which is what keeps the
+	 * payments auto-recorder (gated on a price) unable to fire from a
+	 * provider-reported date.
+	 *
+	 * Returns true when this call moved the anchor.
+	 */
+	async syncProviderRenewalAnchor(
+		accountId: string,
+		sync: ProviderRenewalAnchorSync,
+		nowMs: number = Date.now(),
+	): Promise<boolean> {
+		const { endsAtMs, cadence, graceEndsAtMs } = sync;
+		if (endsAtMs == null || !Number.isFinite(endsAtMs)) return false;
+		// A period end already in the past is a stale reading unless a grace
+		// period is still running against it — writing one would let the chip
+		// flap between "Ends" and "Ended" on every capture.
+		const inGracePeriod = graceEndsAtMs != null && graceEndsAtMs > nowMs;
+		if (endsAtMs < nowMs && !inGracePeriod) return false;
+		const anchor = anchorDateFromInstant(endsAtMs);
+		if (anchor === null) return false;
+
+		const changes = await this.runWithChanges(
+			`UPDATE accounts
+			 SET renewal_anchor = ?, renewal_cadence = ?,
+			     renewal_anchor_source = 'provider'
+			 WHERE id = ?
+			   AND (renewal_anchor_source IN ('provider', 'derived')
+			        OR (renewal_anchor_source IS NULL AND renewal_anchor IS NULL))`,
+			[anchor, cadence ?? PROVIDER_FALLBACK_CADENCE, accountId],
+		);
+		return changes > 0;
 	}
 
 	/**

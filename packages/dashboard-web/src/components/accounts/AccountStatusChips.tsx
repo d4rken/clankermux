@@ -2,6 +2,7 @@ import type {
 	AccountResponse,
 	CodexRateLimitResetCreditConsumeOutcome,
 	CodexResetCreditEventResponse,
+	DevinGracePeriodStatus,
 } from "@clankermux/types";
 import { formatUsd } from "@clankermux/ui-common";
 import {
@@ -516,6 +517,26 @@ function formatFamilyLabel(family: string): string {
 }
 
 /**
+ * Providers that lift a `subscription_expired` pause themselves once the
+ * subscription is live again: Codex when its spend capture reads an active
+ * plan, Anthropic when usage polling recovers. No other provider has a resume
+ * path — a Devin seat restored upstream looks identical to a lapsed one — so
+ * its seat stays paused until someone resumes it.
+ *
+ * Pinned by the D8 case in `AccountStatusChips.test.tsx`.
+ */
+const SELF_RESUMING_SUBSCRIPTION_PROVIDERS = new Set(["codex", "anthropic"]);
+
+/** Tooltip of the "Subscription expired" chip; the recovery clause is per provider. */
+function subscriptionExpiredTitle(provider: string): string {
+	const cause =
+		"The provider refused this account because its subscription no longer covers the service — a lapsed plan, a cancelled subscription, or a seat removed from a team. It was auto-paused and no retries are scheduled against it.";
+	return SELF_RESUMING_SUBSCRIPTION_PROVIDERS.has(provider)
+		? `${cause} Renew or restore the seat; the pause lifts on its own once the provider reports an active subscription again.`
+		: `${cause} Renew or restore the seat, then resume the account by hand — nothing here lifts this pause for you.`;
+}
+
+/**
  * The per-account status chip row shared by the Accounts page (`AccountListItem`)
  * and the Usage page (`AccountUtilizationCard`). Usage omits routing, renewal,
  * automation settings and routine off-peak / zero-reset indicators. Active
@@ -551,6 +572,15 @@ export function AccountStatusChips({
 				>
 					<AlertCircle className="h-3.5 w-3.5" />
 					Usage access denied
+				</StatusChip>
+			)}
+			{status.isSubscriptionExpired && (
+				<StatusChip
+					className="bg-destructive/15 text-destructive-strong"
+					title={subscriptionExpiredTitle(account.provider)}
+				>
+					<AlertCircle className="h-3.5 w-3.5" />
+					Subscription expired
 				</StatusChip>
 			)}
 			{account.rateLimitedReason === "org_permission_denied" && (
@@ -720,6 +750,7 @@ export function AccountStatusChips({
 			{includeAccountDetails && status.showRenewalChip && (
 				<AccountRenewalInfo account={account} status={status} />
 			)}
+			<DevinGracePeriodChip account={account} />
 			{status.isDuplicateAccount && (
 				<StatusChip
 					className="bg-warning/15 text-warning-strong"
@@ -801,8 +832,14 @@ const RENEWAL_URGENCY_CLASSES: Record<string, string> = {
  * Subscription renewal, optionally rendered as plain inline text. Amber when
  * renewal is near, red when imminent,
  * muted for far-off or already-elapsed one-time dates. Only rendered when
- * `status.showRenewalChip` is true (a renewal date is set and the subscription
- * is not reported expired — see `deriveAccountStatus`).
+ * `status.showRenewalChip` is true (a renewal date is set and no live refusal
+ * contradicts it — see `deriveAccountStatus`).
+ *
+ * Three wordings, by what is actually known:
+ *
+ *   "Renews Oct 3 (17d)"  — a date, with no report that it will not recur.
+ *   "Ends Oct 3 (17d)"    — the provider reported `will_renew: false`.
+ *   "Ended Aug 3"         — a provider-reported period end that has passed.
  */
 export function AccountRenewalInfo({
 	account,
@@ -827,6 +864,17 @@ export function AccountRenewalInfo({
 
 	const isPast = status.renewalUrgency === "past";
 	const daysLeft = status.renewalDaysLeft;
+	// A derived anchor is the subscription's START day-of-month, not a billing
+	// date the provider reported — no Anthropic endpoint exposes one. The "~"
+	// is the only thing separating a guess from an operator-confirmed date. A
+	// provider anchor IS a reported date, so it carries no mark.
+	const isDerived = account.renewalAnchorSource === "derived";
+	const isProviderReported = account.renewalAnchorSource === "provider";
+	const dateMark = isDerived ? "~" : "";
+	// Only a reported `false` relabels the date: null means the provider said
+	// nothing about renewing, which is not the same as saying it will not.
+	const willNotRenew =
+		isProviderReported && account.identitySubscriptionWillRenew === false;
 
 	let label: string;
 	if (isPast) {
@@ -834,21 +882,36 @@ export function AccountRenewalInfo({
 		// system never verifies the provider actually renewed, so don't claim
 		// "Renewed". (`past` only occurs for cadence='none'; recurring cadences
 		// always resolve to a future date.)
-		label = `Renewal date passed (${shortDate})`;
-	} else if (daysLeft === 0) {
-		label = `Renews ${shortDate} (today)`;
+		label = isProviderReported
+			? `Ended ${shortDate}`
+			: `Renewal date passed (${shortDate})`;
 	} else {
-		label = `Renews ${shortDate} (${daysLeft}d)`;
+		const verb = willNotRenew ? "Ends" : "Renews";
+		const when = daysLeft === 0 ? "today" : `${daysLeft}d`;
+		label = `${verb} ${dateMark}${shortDate} (${when})`;
 	}
 
 	const priceSuffix =
 		account.renewalPriceUsd != null
 			? ` · ${formatUsd(account.renewalPriceUsd)}/renewal`
 			: "";
-	const title =
-		(isPast
-			? `Configured one-time renewal date passed on ${isoDate}; provider renewal was not verified`
-			: `Subscription renews ${isoDate} (${cadence})`) + priceSuffix;
+	const derivedSuffix = isDerived
+		? " · Estimated from the subscription start; the provider reports no renewal date. Set it to confirm."
+		: "";
+
+	let titleBase: string;
+	if (isProviderReported) {
+		titleBase = isPast
+			? `The provider-reported subscription period ended on ${isoDate}`
+			: `The provider reports the current subscription period ends ${isoDate}${
+					willNotRenew ? ", and that it will not renew" : ""
+				}`;
+	} else if (isPast) {
+		titleBase = `Configured one-time renewal date passed on ${isoDate}; provider renewal was not verified`;
+	} else {
+		titleBase = `Subscription renews ${isoDate} (${cadence})`;
+	}
+	const title = titleBase + priceSuffix + derivedSuffix;
 
 	const colorClasses =
 		RENEWAL_URGENCY_CLASSES[status.renewalUrgency] ??
@@ -870,6 +933,69 @@ export function AccountRenewalInfo({
 
 	return (
 		<StatusChip className={colorClasses} title={title}>
+			<CalendarClock className="h-3.5 w-3.5" />
+			{label}
+		</StatusChip>
+	);
+}
+
+const DEVIN_GRACE_CHIP_CLASSES: Record<
+	Exclude<DevinGracePeriodStatus, "none">,
+	string
+> = {
+	active: "bg-warning/15 text-warning-strong",
+	expired: "bg-destructive/15 text-destructive-strong",
+};
+
+/**
+ * Devin's reported `PlanStatus.gracePeriodStatus`, with its end date when the
+ * message carried one. DISPLAY ONLY: the enum's semantics are undocumented and
+ * no public consumer branches on it, so it never feeds a pause, a routing
+ * decision or eligibility — a lapse that matters arrives separately, as the
+ * request-path refusal that sets `subscription_expired`.
+ *
+ *   active  → "Grace period until Aug 17"
+ *   expired → "Grace period ended Aug 17"
+ *
+ * `none` is the enum's healthy member, not an absence, and renders nothing.
+ */
+function DevinGracePeriodChip({ account }: { account: AccountResponse }) {
+	const usage = account.usageData;
+	// `FullUsageData` is not discriminated on `kind` — AnthropicUsageData
+	// carries no such field — so the presence test comes before the comparison.
+	if (!usage || !("kind" in usage) || usage.kind !== "devin") return null;
+	const graceStatus = usage.gracePeriodStatus ?? null;
+	if (graceStatus === null || graceStatus === "none") return null;
+
+	const endsAtMs = usage.gracePeriodEndMs ?? null;
+	const endsAt = endsAtMs !== null ? new Date(endsAtMs) : null;
+	const shortDate =
+		endsAt?.toLocaleDateString(undefined, {
+			month: "short",
+			day: "numeric",
+		}) ?? null;
+	// en-CA renders a local Date as YYYY-MM-DD without the UTC shift
+	// toISOString() causes.
+	const isoDate = endsAt?.toLocaleDateString("en-CA") ?? null;
+
+	let label: string;
+	let title: string;
+	if (graceStatus === "active") {
+		label = shortDate ? `Grace period until ${shortDate}` : "Grace period";
+		title = isoDate
+			? `Devin reports this seat is in a grace period until ${isoDate}. Billing state only — it does not pause the account or change routing.`
+			: "Devin reports this seat is in a grace period, with no end date. Billing state only — it does not pause the account or change routing.";
+	} else {
+		label = shortDate
+			? `Grace period ended ${shortDate}`
+			: "Grace period ended";
+		title = isoDate
+			? `Devin reports this seat's grace period ended on ${isoDate}. Billing state only — the account is paused, if at all, by the provider refusing a request.`
+			: "Devin reports this seat's grace period has ended. Billing state only — the account is paused, if at all, by the provider refusing a request.";
+	}
+
+	return (
+		<StatusChip className={DEVIN_GRACE_CHIP_CLASSES[graceStatus]} title={title}>
 			<CalendarClock className="h-3.5 w-3.5" />
 			{label}
 		</StatusChip>

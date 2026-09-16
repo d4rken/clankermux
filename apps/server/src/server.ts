@@ -104,7 +104,10 @@ import {
 	supportsUsagePolling,
 } from "@clankermux/types";
 import { type Server, serve } from "bun";
-import { runAnthropicProfileBackfill } from "./anthropic-profile-backfill";
+import {
+	runAnthropicProfileBackfill,
+	SUBSCRIPTION_RECAPTURE_MARKER,
+} from "./anthropic-profile-backfill";
 import {
 	CacheKeepaliveSnapshotSampler,
 	liveGauges,
@@ -1888,17 +1891,32 @@ Available endpoints:
 
 	// One-time, staggered, fail-open profile backfill: fetch GET /api/oauth/profile
 	// for Anthropic OAuth accounts that have never had a successful profile fetch
-	// (identity_profile_fetched_at IS NULL) and merge the identity into their
-	// columns. Fire-and-forget AFTER the server is already listening — the routine
-	// self-guards (never throws) and sleeps an initial delay + staggers between
-	// accounts, so it neither blocks startup nor bursts the shared profile/usage
-	// rate-limit bucket. Gated on identity_profile_fetched_at, so it's idempotent
-	// across restarts (successes never re-fetch; failures retry next boot).
+	// (identity_profile_fetched_at IS NULL), plus a once-per-database re-capture
+	// of accounts whose profile was read before the subscription fields were, and
+	// merge the identity into their columns. Fire-and-forget AFTER the server is
+	// already listening — the routine self-guards (never throws) and sleeps an
+	// initial delay + staggers between accounts, so it neither blocks startup nor
+	// bursts the shared profile/usage rate-limit bucket. Idempotent across
+	// restarts: the first population by identity_profile_fetched_at (successes
+	// never re-fetch; failures retry next boot), the second by its strategies
+	// marker.
 	void runAnthropicProfileBackfill({
 		getAccounts: () => dbOps.getAllAccounts(),
+		// Re-read the row and refresh through the proxy context, so each fetch uses
+		// the token that is current when it runs rather than the one the pass
+		// snapshotted before its initial delay. Same resolution the model
+		// catalogues use via `catalogAccessToken`; null when the account is gone,
+		// which skips it.
+		getAccessToken: async (accountId) => {
+			const account = await dbOps.getAccount(accountId);
+			if (!account) return null;
+			return getValidAccessToken(account, proxyContext);
+		},
 		fetchProfile: fetchAnthropicProfile,
 		setIdentity: (accountId, identity) =>
 			dbOps.setAccountIdentityFromProfile(accountId, identity),
+		claimSubscriptionRecapture: () =>
+			dbOps.claimOneShotBackfillMarker(SUBSCRIPTION_RECAPTURE_MARKER),
 	});
 
 	void refreshOpenRouterAccountsOnStartup(dbOps);

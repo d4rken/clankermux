@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { gzipSync } from "node:zlib";
+import { isDevinSubscriptionLapse } from "@clankermux/core";
 import type { Account, DevinUsageData } from "@clankermux/types";
 import { BaseProvider } from "../../base";
 import { localTokenCountUrl } from "../../local-token-count";
@@ -225,6 +226,18 @@ async function attestRequest(
 }
 
 const sessionAuthenticationFailures = new WeakSet<Request>();
+
+/**
+ * Synthetic error requests whose upstream message reported a lapsed or removed
+ * seat. Marked here because this is the only point that still has the message:
+ * the synthetic response carries the status and a display string, and the proxy
+ * cannot re-derive the reason from either.
+ */
+const subscriptionLapses = new WeakSet<Request>();
+
+export function isDevinSubscriptionLapseFailure(request: Request): boolean {
+	return subscriptionLapses.has(request);
+}
 
 export function isDevinSessionAuthenticationFailure(request: Request): boolean {
 	return sessionAuthenticationFailures.has(request);
@@ -461,6 +474,9 @@ export class DevinProvider extends BaseProvider {
 			);
 			if (error instanceof DevinSessionAuthenticationError) {
 				sessionAuthenticationFailures.add(result);
+			}
+			if (error instanceof Error && isDevinSubscriptionLapse(error.message)) {
+				subscriptionLapses.add(result);
 			}
 			return await attestRequest(result, account, {
 				kind: "synthetic",

@@ -30,8 +30,10 @@ import {
 	CODEX_PING_MODEL,
 	type CodexCreditsInfo,
 	type CodexRateLimitResetCreditsFetchResult,
+	type CodexSubscription,
 	type CodexUsageStatus,
 	codexRateLimitResetCreditsCache,
+	type FetchCodexSubscriptionArgs,
 	type FetchCodexUsageStatusArgs,
 	type UsageData,
 	usageCache,
@@ -39,6 +41,7 @@ import {
 import { makeAccount as canonicalAccount } from "@clankermux/test-support";
 import type {
 	Account,
+	AccountSubscriptionState,
 	CodexRateLimitResetCreditConsumeRequest,
 	CodexRateLimitResetCreditConsumeResult,
 	InternalDispatchSpendRow,
@@ -134,6 +137,23 @@ const mockFetchCodexUsageStatus = mock(
 	},
 );
 
+// fetchCodexSubscription (the FREE subscription GET the usage read piggybacks
+// on): injected so no test ever issues a real request to the billing endpoint,
+// and so the throttle can be observed by counting calls. The default answers a
+// transport failure, i.e. "captured nothing", which is the quietest outcome for
+// the tests that are not about subscriptions.
+let subscriptionResult: CodexSubscription = makeSubscription({
+	ok: false,
+	status: null,
+});
+const fetchSubscriptionCalls: FetchCodexSubscriptionArgs[] = [];
+const mockFetchCodexSubscription = mock(
+	async (args: FetchCodexSubscriptionArgs) => {
+		fetchSubscriptionCalls.push(args);
+		return subscriptionResult;
+	},
+);
+
 // applyCodexUsageStatus (the JSON applicator): records the opts it was called with
 // and returns a pluggable observation (reuses observationResult so isRateLimited
 // drives the message wording).
@@ -192,6 +212,25 @@ function makeUsageStatus(
 	};
 }
 
+function makeSubscription(
+	overrides: Partial<CodexSubscription> = {},
+): CodexSubscription {
+	return {
+		activeStartMs: null,
+		activeUntilMs: null,
+		billingPeriod: null,
+		willRenew: null,
+		isDelinquent: null,
+		graceEndsAtMs: null,
+		becameDelinquentAtMs: null,
+		planType: null,
+		ok: false,
+		unsupported: false,
+		status: null,
+		...overrides,
+	};
+}
+
 function makeObservation(
 	overrides: Partial<CodexObservationResult> = {},
 ): CodexObservationResult {
@@ -235,6 +274,13 @@ function makeCtx() {
 		errorMessage: string | null;
 	}> = [];
 	const manualLedgerEvents: Array<Record<string, unknown>> = [];
+	const subscriptionWrites: Array<{
+		id: string;
+		state: AccountSubscriptionState;
+	}> = [];
+	const subscriptionTouches: Array<{ id: string; checkedAtMs: number }> = [];
+	const anchorSyncs: Array<{ id: string; sync: Record<string, unknown> }> = [];
+	const resumeReasonCalls: Array<{ id: string; reason: string }> = [];
 	// Every internal_dispatch_spend row the coordinator booked — one per native
 	// ping, the record of the proxy's own quota burn.
 	const spendRows: InternalDispatchSpendRow[] = [];
@@ -273,6 +319,38 @@ function makeCtx() {
 				a.pause_reason = null;
 				return true;
 			}),
+			setAccountSubscriptionState: mock(
+				async (id: string, state: AccountSubscriptionState) => {
+					subscriptionWrites.push({ id, state });
+					const a = accounts.get(id);
+					if (a) a.identity_subscription_checked_at = state.checkedAtMs;
+				},
+			),
+			touchAccountSubscriptionCheck: mock(
+				async (id: string, checkedAtMs: number) => {
+					subscriptionTouches.push({ id, checkedAtMs });
+					const a = accounts.get(id);
+					if (a) a.identity_subscription_checked_at = checkedAtMs;
+				},
+			),
+			syncProviderRenewalAnchor: mock(
+				async (id: string, sync: Record<string, unknown>) => {
+					anchorSyncs.push({ id, sync });
+					return true;
+				},
+			),
+			// Compare-and-resume double: lifts the pause only when the stored row
+			// carries that exact reason, mirroring the SQL predicate.
+			resumeAccountIfPausedWithReason: mock(
+				async (id: string, reason: string) => {
+					resumeReasonCalls.push({ id, reason });
+					const a = accounts.get(id);
+					if (!a?.paused || a.pause_reason !== reason) return false;
+					a.paused = false;
+					a.pause_reason = null;
+					return true;
+				},
+			),
 			resolveCodexResetCreditAttempt: mock(
 				async (
 					id: string,
@@ -304,6 +382,10 @@ function makeCtx() {
 		resumeOverageCalls,
 		resolveLedgerCalls,
 		manualLedgerEvents,
+		subscriptionWrites,
+		subscriptionTouches,
+		anchorSyncs,
+		resumeReasonCalls,
 		spendRows,
 		ledgerFailure,
 		setAccount: (a: Account) => accounts.set(a.id, a),
@@ -325,6 +407,7 @@ function makeCoordinator() {
 		applyCodexObservation: mockApplyCodexObservation,
 		applyCodexUsageStatus: mockApplyCodexUsageStatus,
 		fetchCodexUsageStatus: mockFetchCodexUsageStatus,
+		fetchCodexSubscription: mockFetchCodexSubscription,
 		readChatgptAccountId: () => "acct-123",
 		fetchCodexRateLimitResetCredits: mockFetchCodexRateLimitResetCredits,
 		consumeCodexRateLimitResetCredit: mockConsumeCodexRateLimitResetCredit,
@@ -354,6 +437,10 @@ function makeRealCoordinator() {
 				return a ? { ...a } : null;
 			},
 			saveInternalDispatchSpend: async () => {},
+			setAccountSubscriptionState: async () => {},
+			touchAccountSubscriptionCheck: async () => {},
+			syncProviderRenewalAnchor: async () => false,
+			resumeAccountIfPausedWithReason: async () => false,
 			updateAccountUsage: () => {},
 			updateAccountRateLimitMeta: () => {},
 			resetConsecutiveRateLimits: async () => {},
@@ -387,6 +474,10 @@ function makeRealCoordinator() {
 	const coordinator = new CodexSpendCoordinator(ctx, {
 		getValidAccessToken: mockGetValidAccessToken,
 		fetchCodexRateLimitResetCredits: mockFetchCodexRateLimitResetCredits,
+		// Stubbed even here: an unstubbed subscription read would issue a real
+		// request to the billing endpoint and consume one of this harness's
+		// queued fetch responses.
+		fetchCodexSubscription: mockFetchCodexSubscription,
 	});
 	return {
 		coordinator,
@@ -455,10 +546,12 @@ beforeEach(() => {
 	fetchCalls.length = 0;
 	applyCalls.length = 0;
 	fetchStatusCalls.length = 0;
+	fetchSubscriptionCalls.length = 0;
 	applyStatusCalls.length = 0;
 	mockApplyCodexObservation.mockClear();
 	mockApplyCodexUsageStatus.mockClear();
 	mockFetchCodexUsageStatus.mockClear();
+	mockFetchCodexSubscription.mockClear();
 	mockGetValidAccessToken.mockClear();
 	mockRefreshAccessTokenSafe.mockClear();
 	mockFetchCodexRateLimitResetCredits.mockClear();
@@ -474,6 +567,7 @@ beforeEach(() => {
 	observationResult = makeObservation();
 	usageStatusResult = makeUsageStatus();
 	usageStatusImpl = null;
+	subscriptionResult = makeSubscription({ ok: false, status: null });
 	fetchImpl = async () =>
 		new Response("event: ignored\n\n", {
 			status: 200,
@@ -1647,6 +1741,223 @@ describe("CodexSpendCoordinator.refreshManual — GET-only (zero-cost)", () => {
 // ---------------------------------------------------------------------------
 // readUsageStatus in-flight dedup + isolation from the spend dedup
 // ---------------------------------------------------------------------------
+
+describe("CodexSpendCoordinator.readUsageStatus — subscription capture", () => {
+	const SIX_HOURS_MS = 6 * 60 * 60 * 1000;
+	const activeSubscription = (overrides: Partial<CodexSubscription> = {}) =>
+		makeSubscription({
+			planType: "plus",
+			activeUntilMs: Date.now() + 20 * 86_400_000,
+			billingPeriod: "monthly",
+			willRenew: true,
+			isDelinquent: false,
+			ok: true,
+			status: 200,
+			...overrides,
+		});
+
+	it("persists the period and syncs the anchor after a successful read", async () => {
+		const { coordinator, setAccount, subscriptionWrites, anchorSyncs } =
+			makeCoordinator();
+		const id = seedId("sub-capture-ok");
+		setAccount(makeCodexAccount({ id }));
+		const subscription = activeSubscription();
+		subscriptionResult = subscription;
+
+		const outcome = await coordinator.readUsageStatus(id);
+
+		expect(outcome.success).toBe(true);
+		expect(subscriptionWrites).toEqual([
+			{
+				id,
+				state: {
+					endsAtMs: subscription.activeUntilMs,
+					willRenew: true,
+					graceEndsAtMs: null,
+					checkedAtMs: expect.any(Number),
+				},
+			},
+		]);
+		expect(anchorSyncs).toEqual([
+			{
+				id,
+				sync: {
+					endsAtMs: subscription.activeUntilMs,
+					cadence: "monthly",
+					graceEndsAtMs: null,
+				},
+			},
+		]);
+	});
+
+	it("uses the token the read actually used, not the rejected one", async () => {
+		// On the 401 path the retry token is never assigned back to the local
+		// variable, so a capture reading that variable would present the token the
+		// provider has just rejected.
+		const { coordinator, setAccount } = makeCoordinator();
+		const id = seedId("sub-capture-401");
+		setAccount(makeCodexAccount({ id }));
+		forcedRefreshImpl = async () => "rotated-token";
+		let attempt = 0;
+		usageStatusImpl = async () => {
+			attempt++;
+			return attempt === 1
+				? makeUsageStatus({ ok: false, status: 401, usage: null })
+				: makeUsageStatus();
+		};
+		subscriptionResult = activeSubscription();
+
+		await coordinator.readUsageStatus(id);
+
+		expect(fetchSubscriptionCalls).toHaveLength(1);
+		expect(fetchSubscriptionCalls[0]?.accessToken).toBe("rotated-token");
+	});
+
+	it("throttles on checked_at alone, including after a 404", async () => {
+		const { coordinator, setAccount, mutateAccount, subscriptionWrites } =
+			makeCoordinator();
+		const id = seedId("sub-capture-throttle");
+		setAccount(makeCodexAccount({ id }));
+		// The 404 account: no subscription record, so the period stays null
+		// forever. Gating on the period instead of on checked_at would re-issue
+		// the GET on every poll.
+		subscriptionResult = makeSubscription({ unsupported: true, status: 404 });
+
+		await coordinator.readUsageStatus(id);
+		expect(fetchSubscriptionCalls).toHaveLength(1);
+		expect(subscriptionWrites).toHaveLength(1);
+		expect(subscriptionWrites[0]?.state.endsAtMs).toBeNull();
+
+		await coordinator.readUsageStatus(id);
+		expect(fetchSubscriptionCalls).toHaveLength(1);
+
+		mutateAccount(id, {
+			identity_subscription_checked_at: Date.now() - SIX_HOURS_MS - 1,
+		});
+		await coordinator.readUsageStatus(id);
+		expect(fetchSubscriptionCalls).toHaveLength(2);
+	});
+
+	it("advances only the throttle when the read failed", async () => {
+		const { coordinator, setAccount, subscriptionWrites, subscriptionTouches } =
+			makeCoordinator();
+		const id = seedId("sub-capture-failed");
+		setAccount(makeCodexAccount({ id }));
+		subscriptionResult = makeSubscription({ ok: false, status: 502 });
+
+		await coordinator.readUsageStatus(id);
+
+		// Writing the empty state would erase a period an earlier read observed.
+		expect(subscriptionWrites).toEqual([]);
+		expect(subscriptionTouches).toEqual([
+			{ id, checkedAtMs: expect.any(Number) },
+		]);
+	});
+
+	it("never issues the GET without a workspace id, and leaves the throttle alone", async () => {
+		const harness = makeCtx();
+		const coordinator = new CodexSpendCoordinator(harness.ctx, {
+			getValidAccessToken: mockGetValidAccessToken,
+			applyCodexUsageStatus: mockApplyCodexUsageStatus,
+			fetchCodexUsageStatus: mockFetchCodexUsageStatus,
+			fetchCodexSubscription: mockFetchCodexSubscription,
+			readChatgptAccountId: () => null,
+		});
+		const id = seedId("sub-capture-no-account-id");
+		harness.setAccount(makeCodexAccount({ id }));
+
+		const outcome = await coordinator.readUsageStatus(id);
+
+		expect(outcome.success).toBe(true);
+		expect(fetchSubscriptionCalls).toEqual([]);
+		expect(harness.subscriptionTouches).toEqual([]);
+	});
+
+	it("resumes an account paused for a lapsed subscription, and nothing else", async () => {
+		const { coordinator, setAccount, resumeReasonCalls } = makeCoordinator();
+		const id = seedId("sub-capture-resume");
+		const account = makeCodexAccount({
+			id,
+			paused: true,
+			pause_reason: "subscription_expired",
+		});
+		setAccount(account);
+		subscriptionResult = activeSubscription();
+
+		await coordinator.readUsageStatus(id);
+
+		expect(resumeReasonCalls).toEqual([{ id, reason: "subscription_expired" }]);
+		expect(account.paused).toBe(false);
+	});
+
+	it("does not resume on a delinquent or lapsed subscription", async () => {
+		for (const subscription of [
+			activeSubscription({ isDelinquent: true }),
+			activeSubscription({ activeUntilMs: Date.now() - 86_400_000 }),
+			makeSubscription({ unsupported: true, status: 404 }),
+		]) {
+			const { coordinator, setAccount, resumeReasonCalls } = makeCoordinator();
+			const id = seedId(`sub-capture-no-resume-${subscription.status}`);
+			setAccount(
+				makeCodexAccount({
+					id,
+					paused: true,
+					pause_reason: "subscription_expired",
+				}),
+			);
+			subscriptionResult = subscription;
+
+			await coordinator.readUsageStatus(id);
+
+			expect(resumeReasonCalls).toEqual([]);
+		}
+	});
+
+	it("keeps the usage read successful when the capture throws", async () => {
+		const { coordinator, setAccount, ctx } = makeCoordinator();
+		const id = seedId("sub-capture-throws");
+		setAccount(makeCodexAccount({ id }));
+		subscriptionResult = activeSubscription();
+		(
+			ctx.dbOps as { setAccountSubscriptionState: unknown }
+		).setAccountSubscriptionState = async () => {
+			throw new Error("database busy");
+		};
+
+		const outcome = await coordinator.readUsageStatus(id);
+
+		expect(outcome.success).toBe(true);
+	});
+});
+
+describe("CodexSpendCoordinator.readUsageStatus — D3 resume evidence", () => {
+	it("D3: does not resume on an ok read that states no period and no delinquency", async () => {
+		// `ok` only means the body was parseable. A body carrying plan_type but
+		// neither is_delinquent nor active_until says nothing about whether the
+		// plan covers Codex, so it is not evidence that lifts the pause the
+		// request path set.
+		const { coordinator, setAccount, resumeReasonCalls } = makeCoordinator();
+		const id = seedId("sub-capture-no-evidence");
+		const account = makeCodexAccount({
+			id,
+			paused: true,
+			pause_reason: "subscription_expired",
+		});
+		setAccount(account);
+		subscriptionResult = makeSubscription({
+			ok: true,
+			status: 200,
+			planType: "plus",
+			isDelinquent: null,
+			activeUntilMs: null,
+		});
+
+		await coordinator.readUsageStatus(id);
+
+		expect(resumeReasonCalls).toEqual([]);
+		expect(account.paused).toBe(true);
+	});
+});
 
 describe("CodexSpendCoordinator.readUsageStatus — in-flight isolation", () => {
 	it("a concurrent read and scheduled prime do NOT join (separate in-flight maps)", async () => {

@@ -30,11 +30,18 @@ function makeAdapter(runSpy: ReturnType<typeof mock>) {
 function makeDbOps(
 	runSpy: ReturnType<typeof mock>,
 	resumeSpy: ReturnType<typeof mock> = mock(async () => true),
+	identitySpies: {
+		fromProfile?: ReturnType<typeof mock>;
+		fromToken?: ReturnType<typeof mock>;
+	} = {},
 ): DatabaseOperations {
 	return {
 		getAdapter: () => makeAdapter(runSpy),
 		getAllAccounts: mock(async () => []),
 		resumeAccountIfNeedsReauth: resumeSpy,
+		setAccountIdentityFromProfile:
+			identitySpies.fromProfile ?? mock(async () => {}),
+		setAccountIdentity: identitySpies.fromToken ?? mock(async () => {}),
 	} as unknown as DatabaseOperations;
 }
 
@@ -136,7 +143,12 @@ describe("OAuthFlow.completeReauth", () => {
 	});
 
 	it("should UPDATE refresh_token, access_token, expires_at for claude-oauth mode", async () => {
-		const flow = new OAuthFlow(makeDbOps(runSpy), makeConfig());
+		const fromProfile = mock(async () => {});
+		const fromToken = mock(async () => {});
+		const flow = new OAuthFlow(
+			makeDbOps(runSpy, undefined, { fromProfile, fromToken }),
+			makeConfig(),
+		);
 		const accountId = "aaaaaaaa-0000-0000-0000-000000000001";
 
 		await flow.completeReauth(
@@ -157,20 +169,20 @@ describe("OAuthFlow.completeReauth", () => {
 		expect(sql).toMatch(/refresh_token/i);
 		expect(sql).toMatch(/access_token/i);
 		expect(sql).toMatch(/expires_at/i);
-		// The UPDATE now also COALESCE-merges the identity columns.
-		expect(sql).toMatch(/identity_email\s*=\s*COALESCE/i);
 		// Params: [refreshToken, accessToken, expiresAt, refreshTokenIssuedAt,
-		//          identityExternalId, identityEmail, identityOrganizationName,
-		//          identityPlanTier, identityRateLimitTier, identityCapturedAt,
-		//          identityProfileFetchedAt, accountId]. Profile fetch failed open
-		// (null), so all identity params are null and the account id is the LAST
-		// bind param.
+		//          refreshTokenExpiresAt, accountId]. The identity columns are not
+		//          here: they go through the repository's identity writers.
 		expect(params[0]).toBe("new-refresh-token");
 		expect(params[1]).toBe("new-access-token");
 		expect(typeof params[2]).toBe("number");
 		expect(typeof params[3]).toBe("number");
-		expect(params[4]).toBeNull();
 		expect(params[params.length - 1]).toBe(accountId);
+		// Profile fetch failed open (401 → null) and the token envelope carries no
+		// identity, so nothing was captured — and in particular nothing stamped
+		// identity_profile_fetched_at, which would have retired this account from
+		// the startup profile backfill without ever reading its profile.
+		expect(fromProfile).not.toHaveBeenCalled();
+		expect(fromToken).not.toHaveBeenCalled();
 	});
 
 	it("should UPDATE api_key for console mode (no refreshToken)", async () => {

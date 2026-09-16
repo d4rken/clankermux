@@ -29,6 +29,12 @@ function makeDb(): { db: Database; repo: AccountRepository } {
 			identity_organization_name TEXT,
 			identity_plan_tier TEXT,
 			identity_rate_limit_tier TEXT,
+			identity_subscription_status TEXT,
+			identity_subscription_started_at INTEGER,
+			identity_subscription_ends_at INTEGER,
+			identity_subscription_will_renew INTEGER,
+			identity_subscription_grace_ends_at INTEGER,
+			identity_subscription_checked_at INTEGER,
 			identity_captured_at INTEGER,
 			identity_profile_fetched_at INTEGER
 		)

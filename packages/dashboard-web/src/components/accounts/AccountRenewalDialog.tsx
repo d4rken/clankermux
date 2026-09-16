@@ -63,6 +63,34 @@ export function AccountRenewalDialog({
 	}, [account]);
 
 	const hasAnchorSet = !!account?.renewalAnchor;
+
+	// Two different things a provider can report, and they say different amounts.
+	// A subscription START is not a renewal date, so a date derived from it is an
+	// estimate until the operator saves. A period END is an observation, re-synced
+	// on every capture — saving replaces it with a fixed date that stops moving.
+	const localDate = (ms: number | null | undefined) =>
+		ms != null ? new Date(ms).toLocaleDateString("en-CA") : null;
+	const subscriptionStart = localDate(account?.identitySubscriptionStartedAt);
+	const periodEnd = localDate(account?.identitySubscriptionEndsAt);
+
+	let subscriptionNote: string | null = null;
+	if (account?.renewalAnchorSource === "provider" && periodEnd) {
+		subscriptionNote =
+			`The provider reports the current period ends ${periodEnd}` +
+			(account.identitySubscriptionWillRenew === false
+				? " and that it will not renew."
+				: ".") +
+			" It follows the billing cycle until you save, which replaces it with a fixed date of your own.";
+	} else if (subscriptionStart) {
+		subscriptionNote =
+			account?.renewalAnchorSource === "derived"
+				? `Estimated from the subscription start (${subscriptionStart}). Saving confirms it.`
+				: `Subscription started ${subscriptionStart}${
+						account?.identitySubscriptionStatus
+							? ` · ${account.identitySubscriptionStatus}`
+							: ""
+					}.`;
+	}
 	// One-time dates aren't auto-recorded, so a price would be inert — the
 	// input is disabled and the save sends null.
 	const priceDisabled = cadence === "none";
@@ -122,13 +150,19 @@ export function AccountRenewalDialog({
 						<Label htmlFor="renewal-anchor" className="text-right">
 							Date
 						</Label>
-						<Input
-							id="renewal-anchor"
-							type="date"
-							value={anchor}
-							onChange={(e) => setAnchor(e.target.value)}
-							className="col-span-3"
-						/>
+						<div className="col-span-3">
+							<Input
+								id="renewal-anchor"
+								type="date"
+								value={anchor}
+								onChange={(e) => setAnchor(e.target.value)}
+							/>
+							{subscriptionNote && (
+								<p className="mt-tight text-xs text-muted-foreground">
+									{subscriptionNote}
+								</p>
+							)}
+						</div>
 					</div>
 					<div className="grid grid-cols-4 items-center gap-group">
 						<Label htmlFor="renewal-cadence" className="text-right">

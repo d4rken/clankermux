@@ -113,6 +113,12 @@ function makeAccount(
 		identityOrganizationName: null,
 		identityPlanTier: null,
 		identityRateLimitTier: null,
+		identitySubscriptionStatus: null,
+		identitySubscriptionStartedAt: null,
+		identitySubscriptionEndsAt: null,
+		identitySubscriptionWillRenew: null,
+		identitySubscriptionGraceEndsAt: null,
+		identitySubscriptionCheckedAt: null,
 		identityCapturedAt: null,
 		identityProfileFetchedAt: null,
 		isDuplicateAccount: false,
@@ -309,7 +315,7 @@ describe("AccountStatusChips — refresh-token re-auth chip", () => {
 });
 
 describe("AccountStatusChips — expired suppresses renewal chip", () => {
-	it("shows 'Usage access denied' for the legacy expiration label and no renewal chip when expired with a past date", () => {
+	it("shows 'Subscription expired' and no renewal chip when expired with a past date", () => {
 		const html = render(
 			makeAccount({
 				paused: true,
@@ -318,7 +324,10 @@ describe("AccountStatusChips — expired suppresses renewal chip", () => {
 				renewalCadence: "none",
 			}),
 		);
-		expect(html).toContain("Usage access denied");
+		expect(html).toContain("Subscription expired");
+		// The two reasons are different facts and must not borrow each other's
+		// chip: one is the usage endpoint refusing, the other is the plan.
+		expect(html).not.toContain("Usage access denied");
 		// No renewal chip text at all — real provider state dominates.
 		expect(html).not.toContain("Renewal date passed");
 		expect(html).not.toContain("Renewed");
@@ -334,7 +343,65 @@ describe("AccountStatusChips — expired suppresses renewal chip", () => {
 				renewalCadence: "monthly",
 			}),
 		);
+		expect(html).toContain("Subscription expired");
+		expect(html).not.toContain("Renews");
+	});
+
+	it("keeps 'Usage access denied' on its own reason", () => {
+		const html = render(
+			makeAccount({ paused: true, pauseReason: "usage_permission_denied" }),
+		);
 		expect(html).toContain("Usage access denied");
+		expect(html).not.toContain("Subscription expired");
+	});
+});
+
+describe("AccountRenewalInfo — provider-reported period", () => {
+	/** 2024-01-20 noon UTC: 17 days after NOW. */
+	const PERIOD_END = Date.UTC(2024, 0, 20, 12, 0, 0);
+
+	const providerAccount = (overrides: Partial<AccountResponse> = {}) =>
+		makeAccount({
+			renewalAnchor: "2024-01-20",
+			renewalCadence: "monthly",
+			renewalAnchorSource: "provider",
+			identitySubscriptionEndsAt: PERIOD_END,
+			...overrides,
+		});
+
+	it("says 'Renews' with no estimate marker while nothing says otherwise", () => {
+		const html = render(providerAccount());
+		expect(html).toContain("Renews");
+		expect(html).not.toContain("~");
+	});
+
+	it("says 'Ends' once the provider reports it will not renew", () => {
+		const html = render(
+			providerAccount({ identitySubscriptionWillRenew: false }),
+		);
+		expect(html).toContain("Ends");
+		expect(html).not.toContain("Renews");
+	});
+
+	it("keeps saying 'Renews' when renewal intent was never reported", () => {
+		// null is "not reported", which is not the same claim as false.
+		const html = render(
+			providerAccount({ identitySubscriptionWillRenew: null }),
+		);
+		expect(html).toContain("Renews");
+	});
+
+	it("says 'Ended' once the reported period end has passed", () => {
+		const past = Date.UTC(2023, 11, 20, 12, 0, 0);
+		const html = render(
+			providerAccount({
+				renewalAnchor: "2023-12-20",
+				identitySubscriptionEndsAt: past,
+			}),
+		);
+		expect(html).toContain("Ended");
+		// NOT the recurrence: a monthly cadence would have advanced this to a
+		// future date the provider never reported.
 		expect(html).not.toContain("Renews");
 	});
 });
@@ -995,4 +1062,91 @@ it("shows Devin quota override state with provider-specific spending consequence
 	expect(html).toContain("CLI, Desktop, and cloud");
 	expect(html).not.toContain("Anthropic reporting overage");
 	expect(html).not.toContain("Auto-refresh");
+});
+
+describe("AccountStatusChips — D5 Devin grace period", () => {
+	it("D5: names the grace-period state the provider reported", () => {
+		const html = render(
+			makeAccount({
+				provider: "devin",
+				usageData: {
+					kind: "devin",
+					quotaBased: true,
+					daily: null,
+					weekly: null,
+					planName: "Team",
+					email: "seat@example.com",
+					accountId: "acct-1",
+					canUseCli: true,
+					overageBalanceUsd: 0,
+					includedCreditsRemaining: 10,
+					gracePeriodStatus: "expired",
+					gracePeriodEndMs: NOW - 86_400_000,
+				},
+			}),
+		);
+
+		expect(html.toLowerCase()).toContain("grace");
+	});
+
+	// Devin's proto maps `GracePeriodStatus.NONE = 1`, so a healthy seat arrives
+	// as the string "none" rather than as an absent field. Only "active" and
+	// "expired" describe something running; "none" must render no chip at all.
+	it("D6: renders no grace chip for a seat Devin reports as not in one", () => {
+		const html = render(
+			makeAccount({
+				provider: "devin",
+				usageData: {
+					kind: "devin",
+					quotaBased: true,
+					daily: null,
+					weekly: null,
+					planName: "Team",
+					email: "seat@example.com",
+					accountId: "acct-1",
+					canUseCli: true,
+					overageBalanceUsd: 0,
+					includedCreditsRemaining: 10,
+					gracePeriodStatus: "none",
+					gracePeriodEndMs: null,
+				},
+			}),
+		);
+
+		expect(html.toLowerCase()).not.toContain("grace");
+	});
+});
+
+describe("AccountStatusChips — D8 subscription-expired auto-resume claim", () => {
+	/**
+	 * The tooltip of the chip whose label is `label`: the nearest `title`
+	 * attribute preceding the label text. Anchored on the visible label rather
+	 * than on any phrase inside the tooltip, so rewording the tooltip does not
+	 * silently turn this into a vacuous pass.
+	 */
+	function chipTitle(html: string, label: string): string {
+		const index = html.indexOf(label);
+		expect(index).toBeGreaterThan(-1);
+		const titles = [...html.slice(0, index).matchAll(/title="([^"]*)"/g)];
+		return titles[titles.length - 1]?.[1] ?? "";
+	}
+
+	// Only the Codex spend coordinator resumes a `subscription_expired` pause
+	// (`resumeAccountIfPausedWithReason`). A Devin seat paused this way stays
+	// paused until a human resumes it, so the chip must not promise otherwise.
+	it("D8: does not promise a self-lifting pause on a Devin seat", () => {
+		const html = render(
+			makeAccount({
+				provider: "devin",
+				paused: true,
+				pauseReason: "subscription_expired",
+			}),
+		);
+
+		expect(html).toContain("Subscription expired");
+		const title = chipTitle(html, "Subscription expired");
+		expect(title).not.toMatch(
+			/lifts? (on its own|itself|automatically)|resumes? (on its own|itself|automatically)|automatically/i,
+		);
+	});
 });

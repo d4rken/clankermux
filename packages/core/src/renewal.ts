@@ -248,3 +248,23 @@ export function computeAllDueDates(
 	}
 	return dueDates;
 }
+
+/**
+ * Local-calendar "YYYY-MM-DD" for an instant, for seeding a renewal anchor from
+ * a provider-reported subscription start (an ISO instant, e.g. Anthropic's
+ * `organization.subscription_created_at`).
+ *
+ * The instant is rendered in the LOCAL calendar because that is the calendar
+ * every other anchor in this module is parsed and compared in; a UTC rendering
+ * would be off by a day for evening subscriptions west of Greenwich.
+ *
+ *   1710000000000 (2024-03-09T16:40Z), TZ=Europe/Berlin → "2024-03-09"
+ *
+ * Returns null for a non-finite input.
+ */
+export function anchorDateFromInstant(ms: number): string | null {
+	if (!Number.isFinite(ms)) return null;
+	const d = new Date(ms);
+	if (Number.isNaN(d.getTime())) return null;
+	return formatLocalDate(d.getFullYear(), d.getMonth(), d.getDate());
+}

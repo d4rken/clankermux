@@ -43,6 +43,16 @@ export {
 	readChatgptAccountId,
 } from "./rate-limit-reset-credits";
 export type {
+	CodexSubscription,
+	FetchCodexSubscriptionArgs,
+} from "./subscription";
+export {
+	CODEX_SUBSCRIPTION_ENDPOINT,
+	fetchCodexSubscription,
+	parseCodexSubscription,
+	renewalCadenceFromBillingPeriod,
+} from "./subscription";
+export type {
 	CodexCreditsInfo,
 	CodexWindowScope,
 	CodexWindowSlot,

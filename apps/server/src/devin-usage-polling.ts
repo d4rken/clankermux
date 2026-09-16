@@ -2,11 +2,13 @@ import { Logger } from "@clankermux/logger";
 import {
 	devinSessionExpiresAt,
 	extractDevinIdentity,
+	extractDevinSubscriptionState,
 	usageCache,
 } from "@clankermux/providers";
 import type {
 	Account,
 	AccountIdentity,
+	AccountSubscriptionState,
 	DevinUsageData,
 } from "@clankermux/types";
 
@@ -35,6 +37,18 @@ export function startDevinUsagePolling(
 			expectedApiKey: string,
 			expectedEndpoint: string | null,
 			expiresAt: number | null,
+		): Promise<boolean>;
+		setAccountSubscriptionState(
+			id: string,
+			state: AccountSubscriptionState,
+		): Promise<void>;
+		syncProviderRenewalAnchor(
+			id: string,
+			sync: {
+				endsAtMs: number | null;
+				cadence: "monthly" | "yearly" | null;
+				graceEndsAtMs: number | null;
+			},
 		): Promise<boolean>;
 	},
 	intervalMs: number,
@@ -99,6 +113,28 @@ export function startDevinUsagePolling(
 					} catch {
 						log.warn(
 							`Could not reconcile Devin quota for account ${account.id}`,
+						);
+					}
+					if (!isCurrent()) return;
+					// BEFORE the identity short-circuit below, which returns early when
+					// email, external id, plan tier and organization are all unchanged —
+					// exactly the case on an ordinary billing-cycle rollover, the one
+					// event this capture exists to see.
+					try {
+						const subscription = extractDevinSubscriptionState(
+							usage,
+							Date.now(),
+						);
+						await db.setAccountSubscriptionState(account.id, subscription);
+						await db.syncProviderRenewalAnchor(account.id, {
+							endsAtMs: subscription.endsAtMs,
+							// Devin reports the period END and nothing about its LENGTH.
+							cadence: null,
+							graceEndsAtMs: subscription.graceEndsAtMs,
+						});
+					} catch {
+						log.warn(
+							`Could not persist Devin subscription state for account ${account.id}`,
 						);
 					}
 					if (!identity || !isCurrent()) return;

@@ -11,6 +11,7 @@ import {
 	type OAuthTokens,
 	type PKCEChallenge,
 } from "@clankermux/providers";
+import type { AccountIdentity } from "@clankermux/types";
 
 export interface BeginOptions {
 	name: string;
@@ -40,6 +41,19 @@ export interface AccountCreated {
 	name: string;
 	provider: "anthropic" | "claude-console-api";
 	authType: "oauth" | "api_key"; // Track authentication type
+}
+
+/**
+ * An add/reauth identity capture: the merged identity itself, plus the two
+ * facts the write path needs about it — whether anything was captured at all,
+ * and whether the profile endpoint is what produced it.
+ */
+interface ResolvedAnthropicIdentity {
+	identity: AccountIdentity;
+	/** Any merged field is non-null. */
+	hasIdentity: boolean;
+	/** ms of the capture, or null when the profile fetch returned nothing. */
+	profileFetchedAt: number | null;
 }
 
 export interface OAuthFlowResult {
@@ -224,12 +238,9 @@ export class OAuthFlow {
 			return;
 		}
 
-		// Handle claude-oauth mode — update OAuth tokens in place.
-		// Re-enrich identity: merge the envelope identity with a fresh profile
-		// fetch (fails open), then COALESCE-merge so a null never erases a
-		// previously-captured value. identity_captured_at advances only when this
-		// reauth captured something; identity_profile_fetched_at advances only when
-		// the profile fetch returned data.
+		// Handle claude-oauth mode — update OAuth tokens in place, then re-enrich
+		// identity through the shared identity writer (see
+		// {@link persistResolvedIdentity}).
 		const identity = await this.resolveAnthropicIdentity(tokens);
 		const now = Date.now();
 		await adapter.run(
@@ -238,14 +249,7 @@ export class OAuthFlow {
 				access_token = ?,
 				expires_at = ?,
 				refresh_token_issued_at = ?,
-				refresh_token_expires_at = ?,
-				identity_external_id = COALESCE(?, identity_external_id),
-				identity_email = COALESCE(?, identity_email),
-				identity_organization_name = COALESCE(?, identity_organization_name),
-				identity_plan_tier = COALESCE(?, identity_plan_tier),
-				identity_rate_limit_tier = COALESCE(?, identity_rate_limit_tier),
-				identity_captured_at = COALESCE(?, identity_captured_at),
-				identity_profile_fetched_at = COALESCE(?, identity_profile_fetched_at)
+				refresh_token_expires_at = ?
 			WHERE id = ?`,
 			[
 				tokens.refreshToken,
@@ -253,16 +257,10 @@ export class OAuthFlow {
 				tokens.expiresAt,
 				now,
 				tokens.refreshTokenExpiresAt ?? null,
-				identity.externalAccountId,
-				identity.email,
-				identity.organizationName,
-				identity.planTier,
-				identity.rateLimitTier,
-				identity.hasIdentity ? now : null,
-				identity.profileFetchedAt,
 				id,
 			],
 		);
+		await this.persistResolvedIdentity(id, identity);
 		await this.clearNeedsReauthPause(id);
 	}
 
@@ -297,46 +295,83 @@ export class OAuthFlow {
 	 * This flow is anthropic-only — the OAuthFlow class only ever creates/updates
 	 * provider="anthropic" OAuth accounts — so the profile fetch is unconditional.
 	 *
+	 * The merged value is a whole {@link AccountIdentity}: narrowing it to the
+	 * fields one caller happens to write is what dropped the subscription pair on
+	 * both of these paths, and a narrower type would drop the next field too.
+	 *
 	 * `hasIdentity` is true when any merged field is non-null (drives whether
 	 * `identity_captured_at` advances); `profileFetchedAt` is now-ms only when the
 	 * profile fetch actually returned data (drives `identity_profile_fetched_at`).
 	 */
-	private async resolveAnthropicIdentity(tokens: OAuthTokens): Promise<{
-		externalAccountId: string | null;
-		email: string | null;
-		organizationName: string | null;
-		planTier: string | null;
-		rateLimitTier: string | null;
-		hasIdentity: boolean;
-		profileFetchedAt: number | null;
-	}> {
+	private async resolveAnthropicIdentity(
+		tokens: OAuthTokens,
+	): Promise<ResolvedAnthropicIdentity> {
 		const profileIdentity = await fetchAnthropicProfile(
 			tokens.accessToken,
 		).catch(() => null);
 		const envelope = tokens.identity ?? null;
-		const externalAccountId =
-			profileIdentity?.externalAccountId ?? envelope?.externalAccountId ?? null;
-		const email = profileIdentity?.email ?? envelope?.email ?? null;
-		const organizationName =
-			profileIdentity?.organizationName ?? envelope?.organizationName ?? null;
-		const planTier = profileIdentity?.planTier ?? envelope?.planTier ?? null;
-		const rateLimitTier =
-			profileIdentity?.rateLimitTier ?? envelope?.rateLimitTier ?? null;
-		const hasIdentity =
-			externalAccountId !== null ||
-			email !== null ||
-			organizationName !== null ||
-			planTier !== null ||
-			rateLimitTier !== null;
+		const identity: AccountIdentity = {
+			externalAccountId:
+				profileIdentity?.externalAccountId ??
+				envelope?.externalAccountId ??
+				null,
+			email: profileIdentity?.email ?? envelope?.email ?? null,
+			organizationName:
+				profileIdentity?.organizationName ?? envelope?.organizationName ?? null,
+			planTier: profileIdentity?.planTier ?? envelope?.planTier ?? null,
+			rateLimitTier:
+				profileIdentity?.rateLimitTier ?? envelope?.rateLimitTier ?? null,
+			subscriptionStatus:
+				profileIdentity?.subscriptionStatus ??
+				envelope?.subscriptionStatus ??
+				null,
+			subscriptionStartedAt:
+				profileIdentity?.subscriptionStartedAt ??
+				envelope?.subscriptionStartedAt ??
+				null,
+		};
 		return {
-			externalAccountId,
-			email,
-			organizationName,
-			planTier,
-			rateLimitTier,
-			hasIdentity,
+			identity,
+			// Every field is written as `?? null` above, so this stays true for
+			// fields added to AccountIdentity later.
+			hasIdentity: Object.values(identity).some((value) => value !== null),
 			profileFetchedAt: profileIdentity ? Date.now() : null,
 		};
+	}
+
+	/**
+	 * Write a resolved identity through the repository's identity writers rather
+	 * than a column list of this module's own. Those writers own the COALESCE
+	 * merge, the tier-history append and the Anthropic renewal-anchor seeding, so
+	 * add/reauth capture exactly what the startup profile backfill captures.
+	 *
+	 * Which writer is not cosmetic. Only a successful PROFILE fetch may stamp
+	 * `identity_profile_fetched_at`: that column is the backfill's one-time gate,
+	 * so stamping it from an envelope-only capture would retire the account from
+	 * the backfill without its profile ever having been read.
+	 *
+	 * Best-effort, like the fetch it follows: the tokens are already written and
+	 * an enrichment failure must not fail the add or the reauth.
+	 */
+	private async persistResolvedIdentity(
+		accountId: string,
+		resolved: ResolvedAnthropicIdentity,
+	): Promise<void> {
+		try {
+			if (resolved.profileFetchedAt !== null) {
+				await this.dbOps.setAccountIdentityFromProfile(
+					accountId,
+					resolved.identity,
+				);
+			} else if (resolved.hasIdentity) {
+				await this.dbOps.setAccountIdentity(accountId, resolved.identity);
+			}
+		} catch (err) {
+			console.error(
+				`[OAuthFlow] Failed to persist identity for account ${accountId}:`,
+				err,
+			);
+		}
 	}
 
 	/**
@@ -392,8 +427,12 @@ export class OAuthFlow {
 		const adapter = this.dbOps.getAdapter();
 
 		// Enrich identity at creation: merge the envelope identity on the OAuth
-		// tokens with a live Anthropic profile fetch (fails open). First creation
-		// writes the merged values directly (nothing to preserve).
+		// tokens with a live Anthropic profile fetch (fails open). The row is
+		// inserted without identity columns and enriched by the shared writer
+		// immediately after, so creation and the profile backfill capture the same
+		// columns from the same code. The insert stays the atomic name-guarded
+		// statement it has to be; the identity write follows it, so a duplicate
+		// name still writes nothing.
 		const identity = await this.resolveAnthropicIdentity(tokens);
 		const now = Date.now();
 
@@ -404,11 +443,8 @@ export class OAuthFlow {
 				id, name, provider, api_key, refresh_token, access_token, expires_at,
 				created_at, request_count, total_requests, priority, custom_endpoint,
 				refresh_token_issued_at, refresh_token_expires_at,
-				identity_external_id, identity_email, identity_organization_name,
-				identity_plan_tier, identity_rate_limit_tier,
-				identity_captured_at, identity_profile_fetched_at,
 				auto_pause_on_overage_enabled
-			) VALUES (?, ?, ?, NULL, ?, ?, ?, ?, 0, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
+			) VALUES (?, ?, ?, NULL, ?, ?, ?, ?, 0, 0, ?, ?, ?, ?, 1)
 			`,
 			[
 				id,
@@ -422,16 +458,10 @@ export class OAuthFlow {
 				customEndpoint || null,
 				now,
 				tokens.refreshTokenExpiresAt ?? null,
-				identity.externalAccountId,
-				identity.email,
-				identity.organizationName,
-				identity.planTier,
-				identity.rateLimitTier,
-				identity.hasIdentity ? now : null,
-				identity.profileFetchedAt,
 			],
 			name,
 		);
+		await this.persistResolvedIdentity(id, identity);
 
 		return {
 			id,

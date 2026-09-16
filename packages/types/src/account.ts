@@ -244,6 +244,13 @@ export interface AlibabaCodingPlanUsageData {
 }
 
 // Combined usage data type that supports all providers
+/**
+ * Devin's `PlanStatus.gracePeriodStatus`, lowercased. Captured and DISPLAYED
+ * only: the enum's semantics are undocumented and no public consumer branches
+ * on it, so it must never drive a pause or a routing decision.
+ */
+export type DevinGracePeriodStatus = "none" | "active" | "expired";
+
 export interface DevinUsageData {
 	kind: "devin";
 	quotaBased: boolean;
@@ -258,6 +265,20 @@ export interface DevinUsageData {
 	canUseCli: boolean | null;
 	overageBalanceUsd: number;
 	includedCreditsRemaining: number | null;
+	/**
+	 * ms-epoch of `PlanStatus.planStart`; optional for older snapshots, null
+	 * when the message omits it (a free account reports neither plan bound).
+	 */
+	planStartMs?: number | null;
+	/**
+	 * ms-epoch of `PlanStatus.planEnd` — a recurring billing-cycle END, not an
+	 * expiry. Trial end (`UserStatus.windsurfProTrialEndTime`) and lapse
+	 * (`gracePeriodStatus`) are separate fields in the same message.
+	 */
+	planEndMs?: number | null;
+	gracePeriodStatus?: DevinGracePeriodStatus | null;
+	/** ms-epoch of `PlanStatus.gracePeriodEnd`; null when no grace period runs. */
+	gracePeriodEndMs?: number | null;
 }
 
 export type FullUsageData =
@@ -286,6 +307,35 @@ export interface AccountIdentity {
 	 * concept).
 	 */
 	rateLimitTier: string | null;
+	/**
+	 * Upstream subscription state (e.g. "active", "canceled"). OPTIONAL because
+	 * only the Anthropic profile endpoint reports it; every other producer omits
+	 * the field rather than asserting a null it cannot observe.
+	 */
+	subscriptionStatus?: string | null;
+	/**
+	 * ms-epoch when the upstream subscription STARTED. Not a renewal date and not
+	 * a period end — the profile payload carries neither; see
+	 * `renewal_anchor_source` on the account row for how it is used.
+	 */
+	subscriptionStartedAt?: number | null;
+}
+
+/**
+ * What a provider reported about the CURRENT subscription period, as the
+ * account row stores it. Every field is stated by each capture — an omitted
+ * value CLEARS the column, because a provider dropping a grace-period end is
+ * how a lapsed grace period is reported.
+ */
+export interface AccountSubscriptionState {
+	/** ms-epoch end of the reported current period; null when unreported. */
+	endsAtMs: number | null;
+	/** null = the provider did not report renewal intent; false = it reported none. */
+	willRenew: boolean | null;
+	/** ms-epoch end of a provider grace period; null when none is running. */
+	graceEndsAtMs: number | null;
+	/** ms of this capture ATTEMPT, success or failure. */
+	checkedAtMs: number;
 }
 
 // Database row types that match the actual database schema
@@ -325,6 +375,7 @@ export interface AccountRow {
 	refresh_token_issued_at?: number | null; // Timestamp when the current refresh token was issued (updated on each token refresh)
 	refresh_token_expires_at?: number | null; // When the current refresh token stops being accepted; null=provider reports no deadline (unknown, not distant)
 	renewal_anchor?: string | null; // Original subscription renewal anchor date (YYYY-MM-DD); null=renewal tracking off
+	renewal_anchor_source?: string | null; // 'manual'=operator-entered, 'derived'=seeded from the provider's subscription start; null=never set either way
 	renewal_cadence?: string | null; // 'monthly' | 'yearly' | 'none'; null when no anchor
 	renewal_price_usd_micros?: number | null; // Subscription price in USD micros (1 USD = 1_000_000); null=no price configured
 	renewal_auto_start_date?: string | null; // Lower bound (YYYY-MM-DD) for auto-recorded payments; due dates before it are never backfilled
@@ -333,6 +384,12 @@ export interface AccountRow {
 	identity_organization_name?: string | null; // Organization/workspace name captured from profile
 	identity_plan_tier?: string | null; // Plan tier captured from profile (e.g. "pro", "max")
 	identity_rate_limit_tier?: string | null; // Anthropic rate-limit multiplier token (e.g. "20x", "5x"); null for Codex
+	identity_subscription_status?: string | null; // Upstream subscription state (e.g. "active", "canceled"); Anthropic profile only
+	identity_subscription_started_at?: number | null; // ms-epoch the upstream subscription started; NOT a renewal or expiry date
+	identity_subscription_ends_at?: number | null; // ms-epoch END of the provider-reported current period (Codex active_until, Devin planEnd); never set for Anthropic
+	identity_subscription_will_renew?: number | null; // 1/0/null; null=not reported, distinct from 0 (reported as not renewing)
+	identity_subscription_grace_ends_at?: number | null; // ms-epoch end of a provider grace period; display only
+	identity_subscription_checked_at?: number | null; // ms of the last subscription-capture ATTEMPT (success or failure); gates the capture throttle
 	identity_captured_at?: number | null; // ms-epoch when identity fields were last captured/updated
 	identity_profile_fetched_at?: number | null; // ms-epoch of last successful profile-endpoint fetch
 }
@@ -374,6 +431,7 @@ export interface Account {
 	refresh_token_issued_at: number | null; // Timestamp when the current refresh token was issued (updated on each token refresh)
 	refresh_token_expires_at: number | null; // When the current refresh token stops being accepted; null=provider reports no deadline (unknown, not distant)
 	renewal_anchor: string | null; // Original subscription renewal anchor date (YYYY-MM-DD); null=renewal tracking off
+	renewal_anchor_source: string | null; // 'manual'=operator-entered, 'derived'=seeded from the provider's subscription start; null=never set either way
 	renewal_cadence: string | null; // 'monthly' | 'yearly' | 'none'; null when no anchor
 	renewal_price_usd_micros: number | null; // Subscription price in USD micros (1 USD = 1_000_000); null=no price configured
 	renewal_auto_start_date: string | null; // Lower bound (YYYY-MM-DD) for auto-recorded payments; due dates before it are never backfilled
@@ -382,6 +440,12 @@ export interface Account {
 	identity_organization_name: string | null; // Organization/workspace name captured from profile
 	identity_plan_tier: string | null; // Plan tier captured from profile (e.g. "pro", "max")
 	identity_rate_limit_tier: string | null; // Anthropic rate-limit multiplier token (e.g. "20x", "5x"); null for Codex
+	identity_subscription_status: string | null; // Upstream subscription state (e.g. "active", "canceled"); Anthropic profile only
+	identity_subscription_started_at: number | null; // ms-epoch the upstream subscription started; NOT a renewal or expiry date
+	identity_subscription_ends_at: number | null; // ms-epoch END of the provider-reported current period (Codex active_until, Devin planEnd); never set for Anthropic
+	identity_subscription_will_renew: number | null; // 1/0/null; null=not reported, distinct from 0 (reported as not renewing)
+	identity_subscription_grace_ends_at: number | null; // ms-epoch end of a provider grace period; display only
+	identity_subscription_checked_at: number | null; // ms of the last subscription-capture ATTEMPT (success or failure); gates the capture throttle
 	identity_captured_at: number | null; // ms-epoch when identity fields were last captured/updated
 	identity_profile_fetched_at: number | null; // ms-epoch of last successful profile-endpoint fetch
 }
@@ -557,6 +621,20 @@ export interface AccountResponse {
 	billingType?: string | null;
 	notes: string | null; // Free-text per-account operator notes
 	renewalAnchor?: string | null;
+	/**
+	 * How `renewalAnchor` got its value:
+	 *
+	 *   "manual"   — operator-entered, including a deliberate clear.
+	 *   "derived"  — seeded from the provider's reported subscription START. A
+	 *                SUGGESTION: it is the start's day-of-month, which a plan
+	 *                switch or a yearly plan invalidates.
+	 *   "provider" — the period END the provider itself reported (Codex
+	 *                `active_until`, Devin `planEnd`). An observation, re-synced
+	 *                on every capture.
+	 *
+	 * Null when no anchor was ever set any of those ways.
+	 */
+	renewalAnchorSource?: "manual" | "derived" | "provider" | null;
 	renewalCadence?: "monthly" | "yearly" | "none" | null;
 	renewalPriceUsd?: number | null; // Subscription price in USD (API boundary speaks USD floats)
 	sessionStats: SessionStats | null;
@@ -573,6 +651,27 @@ export interface AccountResponse {
 	identityPlanTier: string | null;
 	/** Anthropic rate-limit multiplier token (e.g. "20x", "5x"); null for Codex or when uncaptured. */
 	identityRateLimitTier: string | null;
+	/** Upstream subscription state (e.g. "active", "canceled"); null unless the provider reports one. */
+	identitySubscriptionStatus: string | null;
+	/** ms-epoch the upstream subscription started. A START date: no provider reports a renewal or expiry. */
+	identitySubscriptionStartedAt: number | null;
+	/**
+	 * ms-epoch END of the provider-reported CURRENT subscription period (Codex
+	 * `active_until`, Devin `planEnd`). A recurring billing-cycle end, not an
+	 * expiry: a healthy account that keeps renewing rolls this forward. Null for
+	 * Anthropic, which reports no period end at all.
+	 */
+	identitySubscriptionEndsAt: number | null;
+	/**
+	 * Whether the provider says the subscription will renew at
+	 * `identitySubscriptionEndsAt`. NULL means NOT REPORTED, which is distinct
+	 * from `false` ("reported as not renewing") — only `false` is evidence.
+	 */
+	identitySubscriptionWillRenew: boolean | null;
+	/** ms-epoch end of a provider grace period; display only, never routes. */
+	identitySubscriptionGraceEndsAt: number | null;
+	/** ms of the last subscription-capture ATTEMPT, success or failure. */
+	identitySubscriptionCheckedAt: number | null;
 	identityCapturedAt: number | null; // ms-epoch when identity fields were last captured
 	openRouterMetadata?: OpenRouterAccountMetadata | null;
 	identityProfileFetchedAt: number | null; // ms-epoch of last successful profile fetch
@@ -741,6 +840,28 @@ function toNumOrNull(v: unknown): number | null {
 	const n = Number(v);
 	return Number.isFinite(n) && n !== 0 ? n : v != null && v !== 0 ? n : null;
 }
+/**
+ * SQLite tri-state INTEGER flag → boolean. NULL stays NULL: on a subscription
+ * column it means the provider did not report the flag at all, which is a
+ * different fact from a reported `0`.
+ *
+ *   1 → true · 0 → false · null/undefined → null
+ */
+function toNullableBoolean(v: unknown): boolean | null {
+	return v == null ? null : Number(v) === 1;
+}
+/**
+ * SQLite tri-state INTEGER flag → `1`/`0`/null, keeping the row's own shape.
+ *
+ *   1 → 1 · 0 → 0 · null/undefined → null
+ *
+ * `toNumOrNull` cannot carry this column: it folds 0 into null, which is right
+ * for the ms-epoch columns it was written for and wrong here, where 0 is
+ * "reported as not renewing" and null is "not reported".
+ */
+function toFlagOrNull(v: unknown): number | null {
+	return v == null ? null : Number(v) === 1 ? 1 : 0;
+}
 
 // Type mappers
 export function toAccount(row: AccountRow): Account {
@@ -782,6 +903,7 @@ export function toAccount(row: AccountRow): Account {
 		refresh_token_issued_at: toNumOrNull(row.refresh_token_issued_at),
 		refresh_token_expires_at: toNumOrNull(row.refresh_token_expires_at),
 		renewal_anchor: row.renewal_anchor || null,
+		renewal_anchor_source: row.renewal_anchor_source || null,
 		renewal_cadence: row.renewal_cadence || null,
 		renewal_price_usd_micros: toNumOrNull(row.renewal_price_usd_micros),
 		renewal_auto_start_date: row.renewal_auto_start_date || null,
@@ -790,6 +912,22 @@ export function toAccount(row: AccountRow): Account {
 		identity_organization_name: row.identity_organization_name ?? null,
 		identity_plan_tier: row.identity_plan_tier ?? null,
 		identity_rate_limit_tier: row.identity_rate_limit_tier ?? null,
+		identity_subscription_status: row.identity_subscription_status ?? null,
+		identity_subscription_started_at: toNumOrNull(
+			row.identity_subscription_started_at,
+		),
+		identity_subscription_ends_at: toNumOrNull(
+			row.identity_subscription_ends_at,
+		),
+		identity_subscription_will_renew: toFlagOrNull(
+			row.identity_subscription_will_renew,
+		),
+		identity_subscription_grace_ends_at: toNumOrNull(
+			row.identity_subscription_grace_ends_at,
+		),
+		identity_subscription_checked_at: toNumOrNull(
+			row.identity_subscription_checked_at,
+		),
 		identity_captured_at: toNumOrNull(row.identity_captured_at),
 		identity_profile_fetched_at: toNumOrNull(row.identity_profile_fetched_at),
 	};
@@ -867,6 +1005,12 @@ export function toAccountResponse(account: Account): AccountResponse {
 		billingType: account.billing_type,
 		notes: account.notes,
 		renewalAnchor: account.renewal_anchor,
+		renewalAnchorSource:
+			(account.renewal_anchor_source as
+				| "manual"
+				| "derived"
+				| "provider"
+				| null) ?? null,
 		renewalCadence:
 			(account.renewal_cadence as "monthly" | "yearly" | "none" | null) ?? null,
 		renewalPriceUsd:
@@ -880,6 +1024,15 @@ export function toAccountResponse(account: Account): AccountResponse {
 		identityOrganizationName: account.identity_organization_name,
 		identityPlanTier: account.identity_plan_tier,
 		identityRateLimitTier: account.identity_rate_limit_tier,
+		identitySubscriptionStatus: account.identity_subscription_status,
+		identitySubscriptionStartedAt: account.identity_subscription_started_at,
+		identitySubscriptionEndsAt: account.identity_subscription_ends_at,
+		identitySubscriptionWillRenew: toNullableBoolean(
+			account.identity_subscription_will_renew,
+		),
+		identitySubscriptionGraceEndsAt:
+			account.identity_subscription_grace_ends_at,
+		identitySubscriptionCheckedAt: account.identity_subscription_checked_at,
 		identityCapturedAt: account.identity_captured_at,
 		identityProfileFetchedAt: account.identity_profile_fetched_at,
 		// Duplicate detection needs sibling context; a single-account mapping

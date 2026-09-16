@@ -56,6 +56,7 @@ function makeDb(): { db: Database; repo: AccountRepository } {
 			refresh_token_issued_at INTEGER,
 			refresh_token_expires_at INTEGER,
 			renewal_anchor TEXT,
+			renewal_anchor_source TEXT,
 			renewal_cadence TEXT,
 			renewal_price_usd_micros INTEGER,
 			renewal_auto_start_date TEXT,
@@ -66,6 +67,12 @@ function makeDb(): { db: Database; repo: AccountRepository } {
 			identity_organization_name TEXT,
 			identity_plan_tier TEXT,
 			identity_rate_limit_tier TEXT,
+			identity_subscription_status TEXT,
+			identity_subscription_started_at INTEGER,
+			identity_subscription_ends_at INTEGER,
+			identity_subscription_will_renew INTEGER,
+			identity_subscription_grace_ends_at INTEGER,
+			identity_subscription_checked_at INTEGER,
 			identity_captured_at INTEGER,
 			identity_profile_fetched_at INTEGER
 		)
@@ -150,5 +157,19 @@ describe("AccountRepository — setRenewal", () => {
 		expect(account).not.toBeNull();
 		expect(account?.renewal_anchor).toBe("2026-06-09");
 		expect(account?.renewal_cadence).toBe("none");
+	});
+
+	it("marks the anchor manual, including when the call clears it", async () => {
+		insertAccount(db, "acc-4");
+
+		await repo.setRenewal("acc-4", "2026-06-09", "monthly", null, null);
+		expect((await repo.findById("acc-4"))?.renewal_anchor_source).toBe(
+			"manual",
+		);
+
+		await repo.setRenewal("acc-4", null, null, null, null);
+		expect((await repo.findById("acc-4"))?.renewal_anchor_source).toBe(
+			"manual",
+		);
 	});
 });

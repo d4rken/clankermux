@@ -58,6 +58,30 @@ function normalizeRateLimitTier(value: unknown): string | null {
 }
 
 /**
+ * Parse an ISO-8601 instant to ms-epoch. Anthropic writes microsecond precision
+ * ("2026-04-10T15:53:44.244879Z"), which `Date.parse` truncates to ms — the
+ * sub-ms digits carry nothing we use.
+ */
+function isoToEpochMs(value: unknown): number | null {
+	const raw = nullableString(value);
+	if (raw === null) return null;
+	const ms = Date.parse(raw);
+	return Number.isFinite(ms) ? ms : null;
+}
+
+/**
+ * Normalize `organization.subscription_status` ("active", "canceled", …) to a
+ * lowercase token. Values are passed through rather than mapped: an unknown
+ * status is still worth displaying, and nothing routes on this field.
+ */
+function normalizeSubscriptionStatus(value: unknown): string | null {
+	const raw = nullableString(value);
+	if (raw === null) return null;
+	const normalized = raw.trim().toLowerCase();
+	return normalized === "" ? null : normalized;
+}
+
+/**
  * Resolve a normalized {@link AccountIdentity} from an Anthropic OAuth profile
  * payload (the `GET /api/oauth/profile` response, which nests `account` and
  * `organization`).
@@ -95,11 +119,23 @@ export function extractAnthropicIdentity(
 	// by a token-refresh envelope that lacks it (COALESCE preserves the prior).
 	const rateLimitTier = normalizeRateLimitTier(organization?.rate_limit_tier);
 
+	// Billing state. `subscription_created_at` is the only date the profile
+	// carries — a START, not a renewal: the payload has no period end and no
+	// next-charge date, so anything cycle-shaped is derived, never read.
+	const subscriptionStatus = normalizeSubscriptionStatus(
+		organization?.subscription_status,
+	);
+	const subscriptionStartedAt = isoToEpochMs(
+		organization?.subscription_created_at,
+	);
+
 	return {
 		externalAccountId,
 		email,
 		organizationName,
 		planTier,
 		rateLimitTier,
+		subscriptionStatus,
+		subscriptionStartedAt,
 	};
 }

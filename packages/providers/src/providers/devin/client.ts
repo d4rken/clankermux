@@ -1,6 +1,11 @@
 import { createHash } from "node:crypto";
 import { gunzipSync } from "node:zlib";
-import type { AccountIdentity, DevinUsageData } from "@clankermux/types";
+import type {
+	AccountIdentity,
+	AccountSubscriptionState,
+	DevinGracePeriodStatus,
+	DevinUsageData,
+} from "@clankermux/types";
 import { decodeJwtPayloadSafe } from "../../oauth/jwt";
 import type { DevinFetch } from "./auth";
 import { DevinRpcError } from "./connect";
@@ -15,8 +20,10 @@ import {
 	GetUserStatusRequestSchema,
 	type GetUserStatusResponse,
 	GetUserStatusResponseSchema,
+	GracePeriodStatus,
 	MetadataSchema,
 	TeamsTier,
+	type Timestamp,
 } from "./vendor/devin-proto";
 import {
 	create,
@@ -31,6 +38,12 @@ export const DEVIN_CHAT_PATH =
 	"/exa.api_server_pb.ApiServerService/GetChatMessage";
 export const DEVIN_UPSTREAM_MODEL = "x-clankermux-upstream-model";
 const MAX_UNARY_BYTES = 8 * 1024 * 1024;
+/**
+ * Cap on a non-2xx Connect error body. Errors are a short `{code, message}`
+ * JSON; anything larger is not one, and reading it unbounded would let an
+ * upstream fault become a memory problem.
+ */
+const MAX_ERROR_BYTES = 8 * 1024;
 
 /** A session rejected by two consecutive authenticated metadata attempts. */
 export class DevinSessionAuthenticationError extends DevinRpcError {
@@ -136,6 +149,103 @@ export function extractDevinIdentity(
 	};
 }
 
+/**
+ * The subscription period the Devin account metadata already carries, in the
+ * shape the account row stores.
+ *
+ * `willRenew` is ALWAYS null: Devin reports a period end and says nothing about
+ * renewal intent, and null ("not reported") is a different claim from false
+ * ("reported as not renewing") — only the latter may ever relabel a date.
+ *
+ * `gracePeriodStatus` is deliberately absent from the result: it is display
+ * metadata on the usage snapshot, not something the row branches on.
+ */
+export function extractDevinSubscriptionState(
+	usage: Pick<DevinUsageData, "planEndMs" | "gracePeriodEndMs">,
+	checkedAtMs: number,
+): AccountSubscriptionState {
+	return {
+		endsAtMs: usage.planEndMs ?? null,
+		willRenew: null,
+		graceEndsAtMs: usage.gracePeriodEndMs ?? null,
+		checkedAtMs,
+	};
+}
+
+/**
+ * Proto `Timestamp` → ms-epoch. An absent or zero timestamp is null, never the
+ * epoch: Devin omits `planEnd` on a free account, and 1970 rendered as a
+ * billing date would be a fabricated reading rather than a missing one.
+ */
+function timestampMs(ts: Timestamp | undefined): number | null {
+	if (!ts) return null;
+	const seconds = Number(ts.seconds ?? 0n);
+	if (!Number.isFinite(seconds) || seconds <= 0) return null;
+	return seconds * 1000 + Math.trunc((ts.nanos || 0) / 1_000_000);
+}
+
+/** Enum → lowercased name; UNSPECIFIED (and anything unknown) is null. */
+function gracePeriodStatusName(
+	value: GracePeriodStatus | undefined,
+): DevinGracePeriodStatus | null {
+	if (value == null || value === GracePeriodStatus.UNSPECIFIED) return null;
+	const name = GracePeriodStatus[value]?.toLowerCase();
+	return name === "none" || name === "active" || name === "expired"
+		? name
+		: null;
+}
+
+/**
+ * The upstream `message` from a non-2xx Connect response, read under
+ * {@link MAX_ERROR_BYTES} and always leaving the body cancelled.
+ *
+ * It is the only place the reason survives: the status alone collapses several
+ * unrelated refusals into one `permission_denied`, and a lapsed seat and a
+ * disabled account are told apart by wording.
+ *
+ * Returns null on anything unreadable or unparseable, which keeps the caller's
+ * status-derived message.
+ */
+async function readDevinErrorMessage(
+	response: Response,
+): Promise<string | null> {
+	if (!response.body) return null;
+	const reader = response.body.getReader();
+	const parts: Uint8Array[] = [];
+	let size = 0;
+	let truncated = false;
+	try {
+		for (;;) {
+			const { value, done } = await reader.read();
+			if (done) break;
+			size += value.length;
+			if (size > MAX_ERROR_BYTES) {
+				truncated = true;
+				break;
+			}
+			parts.push(value);
+		}
+	} catch {
+		return null;
+	} finally {
+		await reader.cancel().catch(() => {});
+		reader.releaseLock();
+	}
+	if (truncated) return null;
+	try {
+		const parsed: unknown = JSON.parse(Buffer.concat(parts).toString("utf8"));
+		const message =
+			parsed && typeof parsed === "object"
+				? (parsed as Record<string, unknown>).message
+				: null;
+		return typeof message === "string" && message.trim() !== ""
+			? message
+			: null;
+	} catch {
+		return null;
+	}
+}
+
 function accountCacheKey(token: string, endpoint: string): string {
 	return createHash("sha256").update(`${endpoint}\0${token}`).digest("hex");
 }
@@ -218,6 +328,10 @@ export function normalizeDevinUsage(
 			? Math.max(0, status.availablePromptCredits) +
 				Math.max(0, status.availableFlowCredits)
 			: null,
+		planStartMs: timestampMs(status?.planStart),
+		planEndMs: timestampMs(status?.planEnd),
+		gracePeriodStatus: gracePeriodStatusName(status?.gracePeriodStatus),
+		gracePeriodEndMs: timestampMs(status?.gracePeriodEnd),
 	};
 }
 
@@ -256,7 +370,10 @@ export class DevinClient {
 			},
 		);
 		if (!response.ok) {
-			await response.body?.cancel();
+			// Read BEFORE cancelling: the upstream message is what distinguishes a
+			// lapsed seat from a quota that recovers on its own, and the status
+			// cannot. The code stays status-derived.
+			const upstream = await readDevinErrorMessage(response);
 			throw new DevinRpcError(
 				response.status === 401
 					? "unauthenticated"
@@ -265,7 +382,7 @@ export class DevinClient {
 						: response.status === 429
 							? "resource_exhausted"
 							: "unavailable",
-				`Devin account request failed (${response.status})`,
+				upstream ?? `Devin account request failed (${response.status})`,
 			);
 		}
 		if (!response.body)

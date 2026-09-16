@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import { computeAllDueDates } from "../renewal";
+import { anchorDateFromInstant, computeAllDueDates } from "../renewal";
 
 /** Local-midnight ms for a calendar date (timezone-independent assertions). */
 function localMs(y: number, m: number, d: number): number {
@@ -145,5 +145,28 @@ describe("computeAllDueDates — yearly cadence", () => {
 				localMs(2026, 5, 9),
 			),
 		).toEqual(["2026-03-10"]);
+	});
+});
+
+describe("anchorDateFromInstant", () => {
+	it("renders the instant in the local calendar", () => {
+		expect(anchorDateFromInstant(localMs(2026, 3, 10))).toBe("2026-04-10");
+	});
+
+	it("zero-pads month and day", () => {
+		expect(anchorDateFromInstant(localMs(2026, 0, 5))).toBe("2026-01-05");
+	});
+
+	it("keeps the local day for a late-evening local instant", () => {
+		// 23:30 local on the 10th: a UTC rendering rolls to the 11th anywhere east
+		// of Greenwich.
+		expect(anchorDateFromInstant(new Date(2026, 3, 10, 23, 30).getTime())).toBe(
+			"2026-04-10",
+		);
+	});
+
+	it("returns null for a non-finite input", () => {
+		expect(anchorDateFromInstant(Number.NaN)).toBeNull();
+		expect(anchorDateFromInstant(Number.POSITIVE_INFINITY)).toBeNull();
 	});
 });

@@ -1,11 +1,13 @@
 import {
 	accountWideExhaustionFor,
 	getModelFamily,
+	isCodexSubscriptionLapse,
 	isDebugEnabled,
 	isProtectedFamily,
 	isScopedOnlyUnifiedRejection,
 	NETWORK,
 	PAUSE_REASON_NEEDS_REAUTH,
+	PAUSE_REASON_SUBSCRIPTION_EXPIRED,
 	resolveModelMaxContextWindow,
 	TIME_CONSTANTS,
 	ValidationError,
@@ -27,6 +29,7 @@ import {
 	isAnthropicOrgPermissionDenied,
 	isAnthropicOutOfCredits,
 	isDevinSessionAuthenticationFailure,
+	isDevinSubscriptionLapseFailure,
 	usageCache,
 } from "@clankermux/providers";
 import { supportsLocalTokenCounting } from "@clankermux/providers/local-token-count";
@@ -749,6 +752,62 @@ async function isCacheControlRejectionError(
 	}
 }
 
+/**
+ * Bounds on the lapse classification read. A `usage_not_included` envelope is a
+ * few hundred bytes and arrives with the headers; `makeProxyRequest` clears its
+ * own timeout once headers land, so without a deadline here an upstream that
+ * answers 429 and then stalls holds the attempt open instead of failing over.
+ */
+const CODEX_LAPSE_READ_MAX_BYTES = 8 * 1024;
+const CODEX_LAPSE_READ_TIMEOUT_MS = 300;
+
+/**
+ * Whether a RAW Codex 429 is the provider saying the plan does not include
+ * Codex at all.
+ *
+ * Must run on the raw upstream response: by the time `processResponse` is done,
+ * `usage_not_included` has been rewritten to `permission_error` and the code is
+ * no longer there to match on.
+ */
+async function isCodexSubscriptionLapseResponse(
+	response: Response,
+): Promise<boolean> {
+	if (!response.headers.get("content-type")?.includes("application/json"))
+		return false;
+	// Clone only AFTER the content-type guard: a clone() tees the body, so
+	// cloning before an early return orphans an unconsumed tee branch (leak).
+	const reader = response.clone().body?.getReader();
+	if (!reader) return false;
+	let timer: ReturnType<typeof setTimeout> | undefined;
+	const deadline = new Promise<null>((resolve) => {
+		timer = setTimeout(() => resolve(null), CODEX_LAPSE_READ_TIMEOUT_MS);
+	});
+	const decoder = new TextDecoder();
+	let text = "";
+	let bytes = 0;
+	try {
+		while (true) {
+			const next = await Promise.race([reader.read(), deadline]);
+			if (!next) return false; // deadline: an upstream that stalled mid-body
+			if (next.done) break;
+			bytes += next.value.byteLength;
+			if (bytes > CODEX_LAPSE_READ_MAX_BYTES) return false;
+			text += decoder.decode(next.value, { stream: true });
+		}
+		return isCodexSubscriptionLapse(JSON.parse(text + decoder.decode()));
+	} catch {
+		return false;
+	} finally {
+		clearTimeout(timer);
+		// Cancelled and NEVER awaited: with the twin the caller may still forward
+		// left unread, a tee's cancel promise does not settle at all. The cancel
+		// marks this branch cancelled synchronously, which is all that is needed.
+		void reader.cancel().catch(() => {});
+		reader.releaseLock();
+		// `response` itself stays untouched, so fail()'s disposal still owns it.
+	}
+}
+
 async function isModelRouteRestrictedError(
 	response: Response,
 ): Promise<boolean> {
@@ -1154,6 +1213,38 @@ export async function proxyWithAccount(
 		discardUpstreamBody(response, onDrained);
 		return null;
 	};
+	/**
+	 * Take the account out of rotation on CONFIRMED request-path evidence that
+	 * its subscription no longer covers the service.
+	 *
+	 * Terminal by construction: no cooldown is set anywhere near this, because a
+	 * cooldown schedules retries against an account that cannot serve until a
+	 * human renews, re-subscribes or restores the seat. The pause lifts when a
+	 * later subscription capture reports an active subscription.
+	 *
+	 * `pauseIfActive` is a compare-and-set, so it cannot re-pause an account an
+	 * operator resumed while this request was in flight, and a failure here never
+	 * stops the failover.
+	 */
+	const pauseForSubscriptionLapse = async (evidence: string): Promise<void> => {
+		try {
+			const applied = await ctx.dbOps.pauseAccountIfActive(
+				account.id,
+				PAUSE_REASON_SUBSCRIPTION_EXPIRED,
+			);
+			if (applied) {
+				account.paused = true;
+				account.pause_reason = PAUSE_REASON_SUBSCRIPTION_EXPIRED;
+				log.warn(
+					`Paused account ${account.name}: ${evidence} — failing over without a cooldown`,
+				);
+			}
+		} catch {
+			log.warn(
+				`Could not pause account ${account.name} after a subscription lapse`,
+			);
+		}
+	};
 	// Tracks the live, uncancelled upstream response body at each stage so the
 	// catch below can release it on a thrown error (e.g. a provider
 	// processResponse / processProxyResponse failure after the fetch succeeded)
@@ -1346,6 +1437,11 @@ export async function proxyWithAccount(
 		const devinSessionRejected =
 			account.provider === "devin" &&
 			isDevinSessionAuthenticationFailure(transformedRequest);
+		// Same capture-before-the-clones reason as above: the mark rides the
+		// synthetic request object, whose identity wrappers and retries lose.
+		const devinSubscriptionLapsed =
+			account.provider === "devin" &&
+			isDevinSubscriptionLapseFailure(transformedRequest);
 
 		// Pre-strip cache_control for (account, model) pairs known to reject it
 		// Binary transports may carry credentials in protobuf metadata. Never decode
@@ -1655,6 +1751,23 @@ export async function proxyWithAccount(
 			} catch (error) {
 				log.warn("Could not persist routing restriction outcome", error);
 			}
+		}
+		// A Codex 429 whose body says `usage_not_included` is not a rate limit: the
+		// plan on this account does not cover Codex, and no amount of waiting
+		// changes that. It has to be classified BEFORE isModelUnavailableError,
+		// which returns true for every 429 without reading the body, and before
+		// the reprobe shortcut. No cooldown is applied — a cooldown schedules
+		// retries against an account that cannot serve until a human acts.
+		if (
+			!routeRestricted &&
+			rawResponse.status === 429 &&
+			account.provider === "codex" &&
+			(await isCodexSubscriptionLapseResponse(rawResponse))
+		) {
+			await pauseForSubscriptionLapse(
+				`Codex reports this account's plan does not include Codex`,
+			);
+			return await fail({ kind: "auth" }, rawResponse);
 		}
 		if (!routeRestricted && (await isModelUnavailableError(rawResponse))) {
 			// Log 429 response headers for debugging upstream rate-limit info
@@ -2381,6 +2494,18 @@ export async function proxyWithAccount(
 		// account before failing over; only fail over if the retry also 401s or the
 		// refresh fails. Skipped for synthetic internal requests (keepalive replays,
 		// auto-refresh probes) and for accounts with no refreshable OAuth token.
+		// The seat check runs before any inference request is built, so this
+		// response was synthesised from a refusal the upstream made before
+		// forwarding began — which is what makes failing over legitimate here.
+		// A Connect error arriving mid-stream is deliberately out of scope: the
+		// response has already begun forwarding and cannot be failed over.
+		if (devinSubscriptionLapsed) {
+			await pauseForSubscriptionLapse(
+				"Devin reports this account's seat is lapsed or removed",
+			);
+			return await fail({ kind: "auth" }, response);
+		}
+
 		if (response.status === 401) {
 			if (account.provider === "devin") {
 				const pauseConfirmedSession = async () => {
