@@ -6,6 +6,15 @@ const MAX_USER_AGENT_CHARS = 256;
 /** Longest generic harness label derived from an unrecognized user-agent. */
 const MAX_HARNESS_CHARS = 64;
 
+/**
+ * User-agents of the Codex client family: `codex-tui`, `codex_exec` and the
+ * `codex_cli_rs` the `originator` header names are surfaces of ONE harness,
+ * which is why the rule matches the family prefix and not a single surface.
+ * Which surface sent a request stays recoverable from the stored
+ * `client_user_agent`, so collapsing them here loses nothing.
+ */
+const CODEX_USER_AGENT = /^codex[-_]/i;
+
 export interface HarnessDetection {
 	/**
 	 * The harness family this request's own headers name, or `null` when they
@@ -74,7 +83,7 @@ export function detectHarness(headers: Headers): HarnessDetection {
 		return { harness: "claude-code", userAgent };
 	}
 	if (
-		userAgent?.startsWith("codex_cli_rs/") ||
+		(userAgent !== null && CODEX_USER_AGENT.test(userAgent)) ||
 		headers.get("originator") === "codex_cli_rs"
 	) {
 		return { harness: "codex", userAgent };
