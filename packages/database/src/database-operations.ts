@@ -1426,6 +1426,18 @@ OAuth tokens will need to be re-authenticated.
 	}
 
 	/**
+	 * Advance only the subscription-capture throttle, after an attempt that
+	 * reported nothing usable.
+	 * See {@link AccountRepository.touchAccountSubscriptionCheck}.
+	 */
+	async touchAccountSubscriptionCheck(
+		accountId: string,
+		checkedAtMs: number,
+	): Promise<void> {
+		await this.accounts.touchAccountSubscriptionCheck(accountId, checkedAtMs);
+	}
+
+	/**
 	 * Move the renewal anchor onto a provider-reported period end, unless the
 	 * operator owns it. See {@link AccountRepository.syncProviderRenewalAnchor}.
 	 */

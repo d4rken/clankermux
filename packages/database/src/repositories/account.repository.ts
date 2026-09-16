@@ -1103,6 +1103,25 @@ export class AccountRepository extends BaseRepository<Account> {
 	}
 
 	/**
+	 * Record that a subscription capture was ATTEMPTED and reported nothing
+	 * usable — a transport failure, a rejected status, an unparseable body.
+	 *
+	 * Separate from {@link setAccountSubscriptionState} because that one states
+	 * the whole period: running it after a failed read would clear a period a
+	 * previous read did observe. The throttle still has to advance, or a
+	 * provider outage turns into a request on every poll.
+	 */
+	async touchAccountSubscriptionCheck(
+		accountId: string,
+		checkedAtMs: number,
+	): Promise<void> {
+		await this.run(
+			`UPDATE accounts SET identity_subscription_checked_at = ? WHERE id = ?`,
+			[checkedAtMs, accountId],
+		);
+	}
+
+	/**
 	 * Move the renewal anchor onto the period end the provider itself reported.
 	 *
 	 * Unlike {@link seedRenewalAnchorFromSubscription} this is NOT one-shot: a

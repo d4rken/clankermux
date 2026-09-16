@@ -1,4 +1,7 @@
-import { PAUSE_REASON_NEEDS_REAUTH } from "@clankermux/core";
+import {
+	PAUSE_REASON_NEEDS_REAUTH,
+	PAUSE_REASON_SUBSCRIPTION_EXPIRED,
+} from "@clankermux/core";
 import { Logger } from "@clankermux/logger";
 import {
 	CODEX_DEFAULT_ENDPOINT,
@@ -6,9 +9,11 @@ import {
 	codexRateLimitResetCreditsCache,
 	consumeCodexRateLimitResetCredit,
 	fetchCodexRateLimitResetCredits,
+	fetchCodexSubscription,
 	fetchCodexUsageStatus,
 	getProvider,
 	readChatgptAccountId,
+	renewalCadenceFromBillingPeriod,
 	sendCodexNativePing,
 	usageCache,
 } from "@clankermux/providers";
@@ -36,6 +41,14 @@ import {
 } from "./handlers/token-manager";
 
 const log = new Logger("CodexSpendCoordinator");
+
+/**
+ * How long a captured subscription stays fresh. The read is free, but the
+ * usage poller runs on a 30s heartbeat and a billing period moves once a month
+ * — six hours is four readings a day for a fact that changes twelve times a
+ * year.
+ */
+const CODEX_SUBSCRIPTION_CHECK_INTERVAL_MS = 6 * 60 * 60 * 1000;
 
 /**
  * Why a Codex spend (a single quota-consuming native `/responses` ping) is being
@@ -112,6 +125,7 @@ export interface CodexSpendCoordinatorDeps {
 	applyCodexUsageStatus?: typeof applyCodexUsageStatus;
 	sendCodexNativePing?: typeof sendCodexNativePing;
 	fetchCodexUsageStatus?: typeof fetchCodexUsageStatus;
+	fetchCodexSubscription?: typeof fetchCodexSubscription;
 	readChatgptAccountId?: typeof readChatgptAccountId;
 	fetchCodexRateLimitResetCredits?: typeof fetchCodexRateLimitResetCredits;
 	consumeCodexRateLimitResetCredit?: typeof consumeCodexRateLimitResetCredit;
@@ -147,6 +161,7 @@ export class CodexSpendCoordinator {
 	private readonly applyCodexUsageStatus: typeof applyCodexUsageStatus;
 	private readonly sendCodexNativePing: typeof sendCodexNativePing;
 	private readonly fetchCodexUsageStatus: typeof fetchCodexUsageStatus;
+	private readonly fetchCodexSubscription: typeof fetchCodexSubscription;
 	private readonly readChatgptAccountId: typeof readChatgptAccountId;
 	private readonly fetchCodexRateLimitResetCredits: typeof fetchCodexRateLimitResetCredits;
 	private readonly consumeCodexRateLimitResetCredit: typeof consumeCodexRateLimitResetCredit;
@@ -200,6 +215,8 @@ export class CodexSpendCoordinator {
 		this.sendCodexNativePing = deps.sendCodexNativePing ?? sendCodexNativePing;
 		this.fetchCodexUsageStatus =
 			deps.fetchCodexUsageStatus ?? fetchCodexUsageStatus;
+		this.fetchCodexSubscription =
+			deps.fetchCodexSubscription ?? fetchCodexSubscription;
 		this.readChatgptAccountId =
 			deps.readChatgptAccountId ?? readChatgptAccountId;
 		this.fetchCodexRateLimitResetCredits =
@@ -850,6 +867,11 @@ export class CodexSpendCoordinator {
 		// retry is the same logical read, and the FIRST issue instant is the
 		// conservative bound.
 		const issuedAtMs = Date.now();
+		// The token the read actually used. The 401 path below passes
+		// `refresh.token` straight into the retry and never assigns it back to
+		// `accessToken`, so the local variable can still hold the token the
+		// provider just rejected — useless to anything that runs afterwards.
+		let usedAccessToken = accessToken;
 		let status = await this.fetchCodexUsageStatus({
 			accessToken,
 			chatgptAccountId,
@@ -873,6 +895,7 @@ export class CodexSpendCoordinator {
 				// is also fire-and-forget).
 				tokenGenerations.add(refresh.token);
 				chatgptAccountId = this.readChatgptAccountId(refresh.token);
+				usedAccessToken = refresh.token;
 				status = await this.fetchCodexUsageStatus({
 					accessToken: refresh.token,
 					chatgptAccountId,
@@ -972,6 +995,17 @@ export class CodexSpendCoordinator {
 			requestAccounting: "none",
 			observationStartedAtMs: issuedAtMs,
 		});
+
+		// Strictly additive metadata, on the credentials this read just proved
+		// work. It never fails the usage read and never touches credential
+		// health; `currentAccount` is the row re-read under the supersession
+		// guards above, so the throttle sees the freshest checked-at.
+		await this.captureSubscription(
+			currentAccount,
+			usedAccessToken,
+			chatgptAccountId,
+		);
+
 		if (observation.usage == null) {
 			return {
 				success: false,
@@ -986,6 +1020,95 @@ export class CodexSpendCoordinator {
 			? `Usage refreshed for '${account.name}' — account is rate limited (5h: ${fiveHour}%, 7d: ${sevenDay}%).`
 			: `Usage refreshed for '${account.name}' (5h: ${fiveHour}%, 7d: ${sevenDay}%).`;
 		return { success: true, message };
+	}
+
+	/**
+	 * Capture the account's subscription period, at most once per
+	 * {@link CODEX_SUBSCRIPTION_CHECK_INTERVAL_MS}.
+	 *
+	 * The throttle gates on `identity_subscription_checked_at` and nothing else,
+	 * and every ATTEMPT stamps it — success, failure and the 404 "this workspace
+	 * has no subscription record" alike. Gating on the captured period instead
+	 * would re-issue the GET on every 30s poll for an account whose subscription
+	 * endpoint 404s, and `identity_captured_at` is unusable because any identity
+	 * write advances it, including a token refresh carrying JWT identity.
+	 *
+	 * Never throws: a fetch or persistence failure is not a usage-read failure,
+	 * and it must not touch credential health.
+	 */
+	private async captureSubscription(
+		account: Account,
+		accessToken: string,
+		chatgptAccountId: string | null,
+	): Promise<void> {
+		const now = Date.now();
+		const checkedAt = account.identity_subscription_checked_at;
+		if (
+			checkedAt != null &&
+			now - checkedAt < CODEX_SUBSCRIPTION_CHECK_INTERVAL_MS
+		)
+			return;
+		// No workspace id means no callable endpoint (it answers 200 with a detail
+		// body). Left unstamped deliberately: this costs no request, and a later
+		// token rotation may supply the claim.
+		if (!chatgptAccountId) return;
+
+		try {
+			const subscription = await this.fetchCodexSubscription({
+				accessToken,
+				chatgptAccountId,
+			});
+
+			if (!subscription.ok && !subscription.unsupported) {
+				// A failed read states nothing about the period, so only the
+				// throttle advances — writing the empty state would erase what an
+				// earlier successful read observed.
+				await this.ctx.dbOps.touchAccountSubscriptionCheck(account.id, now);
+				return;
+			}
+
+			// `unsupported` is a reachable negative answer: the absence IS the
+			// reading, so it is stored rather than merged away.
+			await this.ctx.dbOps.setAccountSubscriptionState(account.id, {
+				endsAtMs: subscription.activeUntilMs,
+				willRenew: subscription.willRenew,
+				graceEndsAtMs: subscription.graceEndsAtMs,
+				checkedAtMs: now,
+			});
+
+			if (subscription.ok) {
+				await this.ctx.dbOps.syncProviderRenewalAnchor(account.id, {
+					endsAtMs: subscription.activeUntilMs,
+					cadence: renewalCadenceFromBillingPeriod(subscription.billingPeriod),
+					graceEndsAtMs: subscription.graceEndsAtMs,
+				});
+			}
+
+			// An active, non-delinquent subscription is the evidence that lifts a
+			// pause the request path set. Scoped to that one reason, so a manual or
+			// overage pause is never lifted here.
+			const isActive =
+				subscription.ok &&
+				subscription.isDelinquent !== true &&
+				(subscription.activeUntilMs === null ||
+					subscription.activeUntilMs > now);
+			if (isActive) {
+				const resumed = await this.ctx.dbOps.resumeAccountIfPausedWithReason(
+					account.id,
+					PAUSE_REASON_SUBSCRIPTION_EXPIRED,
+				);
+				if (resumed) {
+					log.info(
+						`Resumed '${account.name}': the provider reports an active subscription again`,
+					);
+				}
+			}
+		} catch (error) {
+			log.warn(
+				`Could not capture the subscription for '${account.name}':`,
+				error instanceof Error ? error.message : String(error),
+			);
+		}
 	}
 
 	/**
