@@ -36,6 +36,7 @@ import {
 	getChatContext,
 	getNativeResponsesMetaContext,
 	NATIVE_RESPONSES_REQUEST_HEADER,
+	NATIVE_RESPONSES_RESPONSE_HEADER,
 	PROVIDER_NAMES,
 	type RateLimitReason,
 	REASONING_EFFORT_ADAPTATION_HEADER,
@@ -87,6 +88,7 @@ import { markAnthropicBurstThrottle } from "./burst-cooldown";
 // module) — see the module comment.
 import { createClientAbortResponse } from "./client-abort-response";
 import { applyCodexObservation } from "./codex-observation";
+import { peekCodexStreamPrefix } from "./codex-stream-prefix";
 import {
 	FAMILY_WEEKLY_MAX_USAGE_AGE_MS,
 	hasAccountWideUnifiedRejection,
@@ -209,11 +211,13 @@ export function reportAbandonedRateLimitedBody(
  *  - `overload_529`    — provider overload (529) → provider-overload cooldown.
  *  - `model_not_found` — a forwarded model-not-found (404/400). (Not a `null`
  *                         return — recorded for completeness when applicable.)
- *  - `server_error`    — a transient upstream 5xx (500/502/503/504). No cooldown
- *                         is written: a server error is a fact about the request
- *                         that just failed, not evidence about the account's
- *                         quota, and the reason column feeds the dashboard and
- *                         the auto-refresh scheduler. It is an ordinary
+ *  - `server_error`    — a transient upstream 5xx (500/502/503/504), or the
+ *                         Codex in-band failure the stream-prefix peek catches
+ *                         on a nominal HTTP 200 — `status` is then 200, not a
+ *                         5xx. No cooldown is written: a server error is a fact
+ *                         about the request that just failed, not evidence about
+ *                         the account's quota, and the reason column feeds the
+ *                         dashboard and the auto-refresh scheduler. It is an ordinary
  *                         account-wide failure, so the normal failover loop and
  *                         the pre-hold seeding both keep the account out of the
  *                         rest of the request (see isAccountWideFailure).
@@ -1090,6 +1094,11 @@ export async function proxyWithAccount(
 	// when updateAccountMetadata cloned the response for usage extraction; usage
 	// is now collected inline off the bytes already being forwarded, so no such
 	// clone exists and there is no tee variant here any more.
+	//
+	// The Codex stream-prefix rung DOES hand over a response it cloned, and the
+	// property still holds: the peek cancels its branch in its own `finally`
+	// before returning, which marks the branch cancelled synchronously in the tee
+	// state machine, so nothing is reading the twin by the time the drain starts.
 	//
 	// `onDrained` is a pure OBSERVER handed to the drain (see
 	// discardUpstreamBody): it is invoked after this function has already
@@ -2568,6 +2577,57 @@ export async function proxyWithAccount(
 				{ kind: "overload_529", cooldownUntil: rateLimitInfo.resetTime },
 				response,
 			);
+		}
+
+		// Codex in-band stream failure, caught BEFORE the response is committed.
+		// The backend signals some failures as HTTP 200 followed by an SSE `error`
+		// event (or a `response.failed` terminal) with nothing generated yet;
+		// forwarding that makes the Codex CLI report "Selected model is at capacity"
+		// while healthy siblings sit idle. The peek reads a CLONE of the leading
+		// events and reports a code only while the stream is still in its prelude,
+		// so a response that already produced content is never discarded.
+		//
+		// NATIVE PASSTHROUGH ONLY, and this is why the rung sits here rather than
+		// inside the attempt: `processResponse` has just run, so the provider's
+		// fix-up has supplied the `text/event-stream` the Codex backend routinely
+		// omits (the peek's guard needs it) and the native branch handed back the
+		// raw upstream body, so the Codex event names are intact. The translated
+		// path is already Anthropic-shaped, where those names do not exist, and
+		// keeps the post-commit `observeCodexStreamHealth` demotion it has today.
+		// Sitting ahead of `processProxyResponse` also means a response about to be
+		// discarded has not yet mutated account metadata or settled the probe.
+		//
+		// Skipped for internal dispatches: a cache-keepalive replay or auto-refresh
+		// probe has no client to protect from the error, and demoting a live account
+		// off one would reorder candidates for real traffic.
+		if (
+			account.provider === "codex" &&
+			!requestMeta.internal &&
+			response.headers.get(NATIVE_RESPONSES_RESPONSE_HEADER) === "1"
+		) {
+			const prefixFailure = await peekCodexStreamPrefix(response, req.signal);
+			if (prefixFailure) {
+				recordCodexTransientFailure(account.id);
+				// The disposition comes from `forwardTransientServerError`, never from
+				// `isLastAccountAttempt` — see that option's doc for why the two must
+				// not be the same switch. Absent means forward. No cooldown is written,
+				// for the reason spelled out at the transient 5xx rung below.
+				if (
+					options?.forwardTransientServerError &&
+					!options.forwardTransientServerError()
+				) {
+					log.warn(
+						`Account ${account.name} failed in-band (${prefixFailure}) before generating content — failing over to the next account`,
+					);
+					return await fail(
+						{ kind: "server_error", status: response.status },
+						response,
+					);
+				}
+				log.warn(
+					`Account ${account.name} failed in-band (${prefixFailure}) before generating content; nobody left to try, forwarding it`,
+				);
+			}
 		}
 
 		// Check for rate limit using account-specific provider
