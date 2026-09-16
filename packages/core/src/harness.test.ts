@@ -13,6 +13,7 @@ import type { ClientApplication } from "@clankermux/types";
 import {
 	detectHarness,
 	HARNESS_LABEL_FOR_APPLICATION,
+	isCodexClient,
 	normalizeClientUserAgent,
 } from "./harness";
 
@@ -139,6 +140,53 @@ describe("detectHarness", () => {
 			harness: null,
 			userAgent: null,
 		});
+	});
+});
+
+describe("isCodexClient", () => {
+	// `codex-tui` is the `originator` production sends today; `codex_cli_rs` is
+	// what it sent until a client upgrade changed it. Both are the same harness,
+	// which is why the predicate matches the family on this header too.
+	it("matches the production originator codex-tui", () => {
+		expect(isCodexClient(headers({ originator: "codex-tui" }))).toBe(true);
+	});
+
+	it("matches the legacy originator codex_cli_rs", () => {
+		expect(isCodexClient(headers({ originator: "codex_cli_rs" }))).toBe(true);
+	});
+
+	it("matches a codex-tui user-agent with no originator header", () => {
+		expect(
+			isCodexClient(
+				headers({
+					"user-agent":
+						"codex-tui/0.154.0 (Linux Mint 22.3.0; x86_64) gnome-terminal (codex-tui; 0.154.0)",
+				}),
+			),
+		).toBe(true);
+	});
+
+	it("matches a codex_exec user-agent", () => {
+		expect(
+			isCodexClient(
+				headers({
+					"user-agent":
+						"codex_exec/0.154.0 (Linux Mint 22.3.0; x86_64) gnome-terminal (codex_exec; 0.154.0)",
+				}),
+			),
+		).toBe(true);
+	});
+
+	it("is false for an unrelated client that sends no originator", () => {
+		expect(
+			isCodexClient(
+				headers({ "user-agent": "claude-cli/2.1.272 (external, cli)" }),
+			),
+		).toBe(false);
+	});
+
+	it("only matches the Codex family at the start of the originator", () => {
+		expect(isCodexClient(headers({ originator: "notcodex-tui" }))).toBe(false);
 	});
 });
 
