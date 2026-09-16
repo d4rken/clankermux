@@ -79,48 +79,26 @@ export function suggestedModel(
 	};
 }
 /**
- * The two server rules a copy can break that the draft alone cannot repair,
- * phrased for the operator. Selecting models by hand cannot reach either: the
- * Anthropic rule is applied by `suggestedModel` as entries are offered, and the
- * Codex tab only ever offers targets discovery could substantiate. Copying
- * takes another client's entries verbatim, so it can carry in both.
+ * Copied Anthropic IDs this application cannot publish. Hand-selection cannot
+ * reach this state, because `suggestedModel` aliases a non-Claude ID as it
+ * offers it; a copy takes the source's entries verbatim, so one click can
+ * stage a Claude Code catalogue the server refuses outright.
  *
- * Review is still the authority; this only moves the refusal forward to the
- * click that caused it.
+ * Deliberately only this rule. Review remains the authority for everything
+ * else, and the Codex metadata rule in particular cannot be decided here: the
+ * server looks for metadata among an entry's own allowed accounts, and also
+ * accepts an unchanged entry it already stores, neither of which the
+ * suggestions payload can answer.
  */
-function uncommittable(
+function unpublishable(
 	application: ClientApplication,
 	catalogues: Record<ClientFormat, ClientCatalogue>,
-	discovered: ClientSuggestions | null,
 ): string[] {
-	const messages: string[] = [];
-	const unaliased =
-		application === "claude-code"
-			? catalogues.anthropic.models
-					.filter((m) => needsClaudeAlias(m.id))
-					.map((m) => m.id)
-			: [];
-	if (unaliased.length)
-		messages.push(
-			`Claude Code cannot publish ${unaliased.join(", ")} under ${unaliased.length === 1 ? "that ID" : "those IDs"}; each needs a claude-* alias.`,
-		);
-	// Undiscovered is not the same as unavailable, so this stays silent until
-	// discovery has actually answered for these destinations.
-	const rich = new Set(
-		(discovered?.models ?? [])
-			.filter((m) => m.codexMetadataAvailable)
-			.map((m) => m.id),
-	);
-	const bare = discovered
-		? catalogues.codex.models
-				.filter((m) => !rich.has(m.targetModel))
+	return application === "claude-code"
+		? catalogues.anthropic.models
+				.filter((m) => needsClaudeAlias(m.id))
 				.map((m) => m.id)
 		: [];
-	if (bare.length)
-		messages.push(
-			`These destinations have no Codex metadata for ${bare.join(", ")}.`,
-		);
-	return messages;
 }
 export function ClientWizard({
 	client,
@@ -400,13 +378,19 @@ export function ClientWizard({
 			 * one. A copy runs with step 2 already open, so an armed seed nobody
 			 * writes would leave Review refusing with "Choose your catalogue models
 			 * before reviewing" until the operator left the step and came back.
+			 *
+			 * `pendingSeed` is read as well as the arming condition, so a seed
+			 * stranded by an earlier failed copy is picked up by the retry. By then
+			 * the application has already moved and the arming condition alone is
+			 * false.
 			 */
 			const seedOwed =
 				!client &&
-				copy.application &&
 				!copy.catalogues &&
-				nextPreferred !== preferredFormat(draft.application) &&
-				!touched.has(nextPreferred);
+				!touched.has(nextPreferred) &&
+				(pendingSeed ||
+					(copy.application &&
+						nextPreferred !== preferredFormat(draft.application)));
 			if (copy.application) changeApplication(source.application);
 			setDraft((d) => ({
 				...d,
@@ -429,11 +413,16 @@ export function ClientWizard({
 					? await ensureSuggestions(false, destinations)
 					: suggestions;
 			if (seedOwed) seedPreferred(application, discovered?.models ?? []);
-			const rejected = uncommittable(application, catalogues, discovered);
+			// Only what this copy staged. Entries the draft already held are the
+			// operator's own, and a seed writes IDs `suggestedModel` has already
+			// made publishable.
+			const rejected = copy.catalogues
+				? unpublishable(application, catalogues)
+				: [];
 			setCopied(
 				`Copied ${copyParts.map((part) => part.label.toLowerCase()).join(", ")} from ${source.key.name}. Nothing is saved until you review.${
 					rejected.length
-						? ` ${rejected.join(" ")} Fix that on the affected tab, or Review will refuse the whole client.`
+						? ` Claude Code cannot publish ${rejected.join(", ")} under ${rejected.length === 1 ? "that ID" : "those IDs"}; give each a claude-* alias on the Anthropic tab, or Review will refuse the whole client.`
 						: ""
 				}`,
 			);
@@ -897,6 +886,7 @@ export function ClientWizard({
 								<Button
 									size="sm"
 									variant="outline"
+									disabled={busy}
 									onClick={() =>
 										updateModels([
 											...draft.catalogues[format].models.filter(
@@ -911,6 +901,7 @@ export function ClientWizard({
 								<Button
 									size="sm"
 									variant="outline"
+									disabled={busy}
 									onClick={() =>
 										updateModels(
 											draft.catalogues[format].models.filter(
@@ -953,6 +944,7 @@ export function ClientWizard({
 												<input
 													className="shrink-0"
 													type="checkbox"
+													disabled={busy}
 													checked={draft.catalogues[format].models.some(
 														(m) => m.id === model.id,
 													)}
@@ -991,6 +983,7 @@ export function ClientWizard({
 												variant="ghost"
 												size="sm"
 												className="ml-auto h-7 px-2 text-xs"
+												disabled={busy}
 												onClick={(e) => {
 													e.preventDefault();
 													requestAnimationFrame(() =>
@@ -1029,7 +1022,7 @@ export function ClientWizard({
 								Default model for setup
 								<select
 									className={SELECT}
-									disabled={!draft.catalogues[format].models.length}
+									disabled={busy || !draft.catalogues[format].models.length}
 									value={draft.catalogues[format].defaultModel ?? ""}
 									onChange={(e) => {
 										markTouched(format);

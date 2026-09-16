@@ -157,6 +157,8 @@ const DEFAULT_SUGGESTIONS = [
 let suggested = DEFAULT_SUGGESTIONS;
 let suggestionFetches = 0;
 let suggestionBodies: unknown[] = [];
+/** Number of upcoming `/suggestions` calls that answer 503 instead. */
+let suggestionFailures = 0;
 /** Set to hold the next suggestions response open until it is resolved. */
 let gate: { release: () => void; opened: Promise<void> } | null = null;
 function holdSuggestions() {
@@ -180,6 +182,7 @@ async function mount(
 	suggested = models;
 	suggestionFetches = 0;
 	suggestionBodies = [];
+	suggestionFailures = 0;
 	gate = null;
 	spyOn(globalThis, "fetch").mockImplementation(
 		mockFetch(async (input, init) => {
@@ -188,6 +191,13 @@ async function mount(
 				suggestionFetches += 1;
 				suggestionBodies.push(JSON.parse(String(init?.body)));
 				if (gate) await gate.opened;
+				if (suggestionFailures > 0) {
+					suggestionFailures -= 1;
+					return Response.json(
+						{ error: { message: "Discovery unavailable" } },
+						{ status: 503 },
+					);
+				}
 				return Response.json({
 					data: {
 						models: suggested,
@@ -856,5 +866,71 @@ describe("copying another client's setup", () => {
 		expect(document.body.textContent).toContain(
 			"Claude Code cannot publish old under that ID",
 		);
+	});
+
+	it("picks up a seed stranded by a failed copy on the retry", async () => {
+		await mountNew(DEFAULT_SUGGESTIONS, [source]);
+		await click("Next");
+		await click("Next");
+		await choose("Copy from", "source");
+		await untick("All three catalogues");
+		suggestionFailures = 1;
+		await click("Copy into this draft");
+		expect(document.body.textContent).toContain("Discovery unavailable");
+		// The retry sees an application that has already moved, so the arming
+		// condition alone no longer holds; only `pendingSeed` still says a seed
+		// is owed.
+		await click("Copy into this draft");
+		await click("Review");
+		expect(document.body.textContent).not.toContain(
+			"Choose your catalogue models before reviewing",
+		);
+		await choose("Default model for setup", "claude-new");
+		await click("Review");
+		expect(reviewed?.catalogues.anthropic.models.map((m) => m.id)).toEqual([
+			"claude-new",
+		]);
+	});
+
+	it("seeds an application-only copy without refetching discovery", async () => {
+		await mountNew(DEFAULT_SUGGESTIONS, [source]);
+		await click("Next");
+		await click("Next");
+		const before = suggestionFetches;
+		await choose("Copy from", "source");
+		await untick("All three catalogues");
+		await untick("Allowed destinations");
+		await click("Copy into this draft");
+		expect(suggestionFetches).toBe(before);
+		await choose("Default model for setup", "claude-new");
+		await click("Review");
+		expect(reviewed?.catalogues.anthropic.models.map((m) => m.id)).toEqual([
+			"claude-new",
+		]);
+	});
+
+	it("leaves the catalogue untouchable while a copy is in flight", async () => {
+		await mountNew(DEFAULT_SUGGESTIONS, [source]);
+		await click("Next");
+		await click("Next");
+		await choose("Copy from", "source");
+		await untick("All three catalogues");
+		const release = holdSuggestions();
+		await click("Copy into this draft");
+		// The seed lands when discovery answers, so anything selected here would
+		// be overwritten by it.
+		expect(
+			[...document.querySelectorAll("button")].find(
+				(b) => b.textContent?.trim() === "Select all in tab",
+			)?.disabled,
+		).toBe(true);
+		expect(select("Default model for setup").disabled).toBe(true);
+		await act(async () => release());
+		await act(async () => {});
+		expect(
+			[...document.querySelectorAll("button")].find(
+				(b) => b.textContent?.trim() === "Select all in tab",
+			)?.disabled,
+		).toBe(false);
 	});
 });
