@@ -108,6 +108,7 @@ import {
 	runAnthropicProfileBackfill,
 	SUBSCRIPTION_RECAPTURE_MARKER,
 } from "./anthropic-profile-backfill";
+import { withAnthropicSubscriptionRefresh } from "./anthropic-subscription-refresh";
 import {
 	CacheKeepaliveSnapshotSampler,
 	liveGauges,
@@ -423,10 +424,29 @@ function startUsagePollingWithRefresh(
 	// Initial polling with token refresh
 	const pollWithRefresh = async () => {
 		try {
-			// Create a token provider function that gets a fresh token each time
-			const tokenProvider = createUsagePollingTokenProvider(
-				account,
-				proxyContext,
+			// Create a token provider function that gets a fresh token each time,
+			// composed with the throttled subscription re-read. Anthropic reports
+			// subscription state on the profile endpoint only, and it is mutable, so
+			// a capture taken at account-add goes stale. The read rides this poll's
+			// own lifecycle: ~6h throttled, detached (it can neither delay nor fail
+			// the poll), and gone as soon as stopPolling drops the token provider.
+			const tokenProvider = withAnthropicSubscriptionRefresh(
+				account.id,
+				createUsagePollingTokenProvider(account, proxyContext),
+				{
+					getAccount: (accountId) => proxyContext.dbOps.getAccount(accountId),
+					fetchProfile: fetchAnthropicProfile,
+					setIdentity: (accountId, identity) =>
+						proxyContext.dbOps.setAccountIdentityFromProfile(
+							accountId,
+							identity,
+						),
+					touchSubscriptionCheck: (accountId, checkedAtMs) =>
+						proxyContext.dbOps.touchAccountSubscriptionCheck(
+							accountId,
+							checkedAtMs,
+						),
+				},
 			);
 
 			// Start usage polling with the token provider
