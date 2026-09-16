@@ -187,6 +187,10 @@ export {
 	SAFETY_MARGIN,
 } from "./model-mappings";
 export {
+	type ModelMetadataRequest,
+	resolveClientModelMetadata,
+} from "./model-metadata";
+export {
 	CLAUDE_MODEL_IDS,
 	type ClaudeModelId,
 	getModelDisplayName,

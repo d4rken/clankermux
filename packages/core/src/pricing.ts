@@ -26,12 +26,44 @@ interface ModelCost {
 	output: number;
 	cache_read?: number;
 	cache_write?: number;
+	/**
+	 * Rate cards that replace the base set above a threshold. Declared, not
+	 * charged: every cost computation here reads the base rates only.
+	 */
+	tiers?: ModelCostTier[];
 }
 
+interface ModelCostTier {
+	input?: number;
+	output?: number;
+	cache_read?: number;
+	cache_write?: number;
+	tier?: { type?: string; size?: number };
+}
+
+interface ModelLimit {
+	context?: number;
+	input?: number;
+	output?: number;
+}
+
+/**
+ * The fields of a models.dev entry this codebase reads.
+ *
+ * `limit`, `reasoning` and `modalities` are carried through the merge already —
+ * provider objects are copied wholesale — so declaring them adds no data, only
+ * a type for what is physically there. They are unvalidated JSON like the rest
+ * of the document: {@link asUsableCatalogue} proves one entry SOMEWHERE has a
+ * usable rate and nothing about any particular entry, so every consumer
+ * validates each value at its own boundary.
+ */
 interface ModelDef {
 	id: string;
 	name: string;
 	cost?: ModelCost;
+	limit?: ModelLimit;
+	reasoning?: boolean;
+	modalities?: { input?: string[]; output?: string[] };
 }
 
 interface ApiResponse {
@@ -1818,6 +1850,84 @@ function firstEntryFor(pricing: ApiResponse, modelId: string): ModelDef | null {
 		if (entry) return entry;
 	}
 	return null;
+}
+
+/**
+ * The catalogue key a serving provider's entries live under, or null when the
+ * catalogue has no key for it. Same mapping {@link selectModelEntry} uses.
+ */
+function catalogueKeyFor(
+	pricing: ApiResponse,
+	provider: string,
+): string | null {
+	const key =
+		provider === PROVIDER_NAMES.CODEX
+			? "openai"
+			: provider === PROVIDER_NAMES.CLAUDE_CONSOLE_API
+				? PROVIDER_NAMES.ANTHROPIC
+				: provider === PROVIDER_NAMES.GROK
+					? "xai"
+					: provider;
+	return Object.hasOwn(pricing, key) ? key : null;
+}
+
+/** Exact id within one provider's catalogue, falling back to its base slug. */
+function scopedEntryFor(
+	pricing: ApiResponse,
+	modelId: string,
+	provider: string,
+): ModelDef | null {
+	const key = catalogueKeyFor(pricing, provider);
+	if (key === null) return null;
+	const models = pricing[key]?.models;
+	if (!models) return null;
+	const exact = models[modelId];
+	if (exact) return exact;
+	const base = stripDatedModelSuffix(modelId);
+	return (base === null ? undefined : models[base]) ?? null;
+}
+
+export interface CatalogueLookupResult {
+	entry: ModelDef | null;
+	/** A real catalogue answered, not the bundled cold-start seed. */
+	loaded: boolean;
+	stale: boolean;
+}
+
+/**
+ * Read one model's catalogue entry, scoped to the provider that would serve it.
+ *
+ * `provider` is required and there is no unscoped form: an unscoped search walks
+ * providers in merged order and would answer a Codex slug from whichever
+ * reseller happens to come first — the silent blend {@link selectModelEntry}
+ * refuses. A provider the catalogue has no key for is UNKNOWN, never another
+ * provider's entry.
+ *
+ * Cold start is waited out the way {@link estimateCostUSD} waits it out: the
+ * bundled seed carries rates and nothing else, so answering a miss from it would
+ * report every non-cost field absent milliseconds before the real catalogue
+ * lands. Reads only; never starts a load.
+ */
+export async function lookupCatalogueEntry(
+	modelId: string,
+	provider: string,
+): Promise<CatalogueLookupResult> {
+	const catalogue = PriceCatalogue.get();
+	let entry = scopedEntryFor(await catalogue.getPricing(), modelId, provider);
+	for (
+		let round = 0;
+		round < 2 && !entry && catalogue.hasPendingCatalogueWork();
+		round++
+	) {
+		const waited = await catalogue.awaitInFlightLoad();
+		entry = scopedEntryFor(waited.pricing, modelId, provider);
+		if (!waited.settled) break;
+	}
+	return {
+		entry,
+		loaded: catalogue.isCatalogueLoaded(),
+		stale: catalogue.isCatalogueStale(),
+	};
 }
 
 /** Does this entry price every rate the request needs? */
