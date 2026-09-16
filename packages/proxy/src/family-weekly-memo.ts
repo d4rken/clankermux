@@ -20,7 +20,7 @@
  *
  * Entries expire at the family's own reset time, so a wrong entry cannot
  * outlive the window it describes, and the gate that reads this only ever
- * REORDERS candidates (see `applyFamilyMemoDemotion`) — it can never shrink the
+ * REORDERS candidates (see `applyFailureMemoDemotion`) — it can never shrink the
  * pool, so a wrong entry costs ordering, never a refusal.
  *
  * Coverage is not universal, and the gap is the repeat cost this map exists to

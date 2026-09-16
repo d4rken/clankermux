@@ -29,6 +29,11 @@ import {
 	type UnifiedSummaryObservationRow,
 } from "@clankermux/types";
 import { cacheBodyStore } from "./cache-body-store";
+import {
+	clearCodexTransientFailure,
+	isCodexTransientError,
+	recordCodexTransientFailure,
+} from "./codex-transient-health";
 import type { ProxyContext } from "./handlers";
 import { markAnthropicBurstThrottle } from "./handlers/burst-cooldown";
 import { isTrustedSyntheticProbe } from "./handlers/proxy-operations";
@@ -934,6 +939,37 @@ async function forwardToClientInner(
 	 *  at client pace, so there is no second buffer.
 	 *********************************************************************/
 	if (isStream && response.body) {
+		let codexHealthObserved = false;
+		const observeCodexStreamHealth = (): void => {
+			if (
+				codexHealthObserved ||
+				account?.provider !== "codex" ||
+				disableCooldown ||
+				internalDispatch ||
+				!usageState
+			)
+				return;
+			if (usageState.streamFailureCode !== null) {
+				codexHealthObserved = true;
+				if (!isCodexTransientError(usageState.streamFailureCode)) return;
+				recordCodexTransientFailure(account.id);
+				log.warn(
+					"Codex account temporarily demoted after upstream stream failure",
+					{
+						accountId: account.id,
+						accountName: account.name,
+						requestId,
+						reason: usageState.streamFailureCode,
+					},
+				);
+			} else if (
+				usageState.sawMessageStop &&
+				usageState.sseErrorType === null
+			) {
+				codexHealthObserved = true;
+				clearCodexTransientFailure(account.id, timestamp);
+			}
+		};
 		// Detection is independent of cooldown mutation: even anonymous/forced
 		// requests must be recorded as failures when a nominal HTTP 200 stream ends
 		// in an SSE error frame. `disableCooldown` only suppresses account state.
@@ -1047,6 +1083,7 @@ async function forwardToClientInner(
 					// Nothing crosses a worker boundary, so there is no off-heap
 					// structured-clone retention (Bun #5709).
 					feedChunk(usageState, value, Date.now());
+					observeCodexStreamHealth();
 					// The recorder captures the (256KB-capped) response body for
 					// Request History.
 					ctx.requestRecorder.captureResponseChunk(requestId, value);
@@ -1214,6 +1251,7 @@ async function forwardToClientInner(
 				// finalizeUsage's own flush then no-ops. Hoisted above the probe
 				// settle because the native verdict below reads the flushed state.
 				if (usageState) flushPendingSseLine(usageState);
+				observeCodexStreamHealth();
 				// Native passthrough: the backend returned 200 headers and streamed,
 				// but the stream itself can still declare failure. Nothing else here
 				// can see that — the sniffer matches only Anthropic error types, and
@@ -1322,6 +1360,7 @@ async function forwardToClientInner(
 				if (usageState) {
 					flushPendingSseLine(usageState);
 				}
+				observeCodexStreamHealth();
 				const outcome = streamErrorToOutcome(err, options.clientSignal);
 				// A stream whose terminal event was already parsed (`message_stop`, or
 				// `response.completed` on the Codex native path — both set

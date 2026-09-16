@@ -16,6 +16,10 @@ import { usageCache } from "@clankermux/providers";
 import type { Account, RequestMeta } from "@clankermux/types";
 import { createAdmissionGates as makeAdmissionGates } from "../admission-gates";
 import {
+	recordCodexTransientFailure,
+	resetCodexTransientHealthForTests,
+} from "../codex-transient-health";
+import {
 	recordFamilyWeeklyExhausted,
 	resetFamilyWeeklyMemoForTests,
 } from "../family-weekly-memo";
@@ -205,6 +209,7 @@ describe("createAdmissionGates", () => {
 		clearProviderOverloadCooldown();
 		resetRateLimitProbeGatesForTests();
 		resetFamilyWeeklyMemoForTests();
+		resetCodexTransientHealthForTests();
 		for (const id of SEEDED_IDS) usageCache.delete(id);
 	};
 
@@ -411,7 +416,7 @@ describe("createAdmissionGates", () => {
 			// Demoted, not dropped: the healthy sibling is what gets asked, while
 			// the refused account stays available as a last resort.
 			expect(
-				gates.applyFamilyMemoDemotion([account, other]).map((a) => a.id),
+				gates.applyFailureMemoDemotion([account, other]).map((a) => a.id),
 			).toEqual(["acc-b", "acc-a"]);
 		});
 
@@ -426,7 +431,7 @@ describe("createAdmissionGates", () => {
 			const gates = makeGates({ requestModel: MODEL });
 
 			expect(
-				gates.applyFamilyMemoDemotion([account, other]).map((a) => a.id),
+				gates.applyFailureMemoDemotion([account, other]).map((a) => a.id),
 			).toEqual(["acc-a", "acc-b"]);
 		});
 
@@ -437,12 +442,12 @@ describe("createAdmissionGates", () => {
 
 			const gates = makeGates({ requestModel: FABLE });
 			expect(
-				gates.applyFamilyMemoDemotion([account, other]).map((a) => a.id),
+				gates.applyFailureMemoDemotion([account, other]).map((a) => a.id),
 			).toEqual(["acc-b", "acc-a"]);
 
 			await Bun.sleep(60);
 			expect(
-				gates.applyFamilyMemoDemotion([account, other]).map((a) => a.id),
+				gates.applyFailureMemoDemotion([account, other]).map((a) => a.id),
 			).toEqual(["acc-a", "acc-b"]);
 		});
 
@@ -457,7 +462,7 @@ describe("createAdmissionGates", () => {
 
 			const gates = makeGates({ requestModel: FABLE });
 
-			expect(gates.applyFamilyMemoDemotion([a, b]).map((x) => x.id)).toEqual([
+			expect(gates.applyFailureMemoDemotion([a, b]).map((x) => x.id)).toEqual([
 				"acc-a",
 				"acc-b",
 			]);
@@ -469,7 +474,7 @@ describe("createAdmissionGates", () => {
 
 			const gates = makeGates({ requestModel: FABLE });
 
-			expect(gates.applyFamilyMemoDemotion([account])).toEqual([account]);
+			expect(gates.applyFailureMemoDemotion([account])).toEqual([account]);
 		});
 
 		// Demoted accounts are still in the pool, so they must not appear in the
@@ -480,7 +485,7 @@ describe("createAdmissionGates", () => {
 			memo("acc-a");
 
 			const gates = makeGates({ requestModel: FABLE });
-			gates.applyFamilyMemoDemotion([account, other]);
+			gates.applyFailureMemoDemotion([account, other]);
 
 			expect(gates.familyWeeklyExcludedAccounts).toHaveLength(0);
 		});
@@ -491,7 +496,7 @@ describe("createAdmissionGates", () => {
 
 			const gates = makeGates({ requestModel: FABLE });
 
-			expect(gates.applyFamilyMemoDemotion([codex])).toEqual([codex]);
+			expect(gates.applyFailureMemoDemotion([codex])).toEqual([codex]);
 		});
 
 		// A literal routing rule points this account at a DIFFERENT family from the
@@ -516,7 +521,7 @@ describe("createAdmissionGates", () => {
 			const gates = makeGates({ requestModel: MODEL });
 
 			expect(
-				gates.applyFamilyMemoDemotion([mapped, other]).map((a) => a.id),
+				gates.applyFailureMemoDemotion([mapped, other]).map((a) => a.id),
 			).toEqual(["acc-b", "acc-a"]);
 		});
 
@@ -542,7 +547,7 @@ describe("createAdmissionGates", () => {
 
 			// Untouched — identity, which is what "nothing was demoted" looks like.
 			const candidates = [mapped, other];
-			expect(gates.applyFamilyMemoDemotion(candidates)).toBe(candidates);
+			expect(gates.applyFailureMemoDemotion(candidates)).toBe(candidates);
 		});
 
 		it("returns the candidate list untouched when nothing is memo'd", () => {
@@ -551,7 +556,7 @@ describe("createAdmissionGates", () => {
 			const gates = makeGates({ requestModel: FABLE });
 			const candidates = [a, b];
 
-			expect(gates.applyFamilyMemoDemotion(candidates)).toBe(candidates);
+			expect(gates.applyFailureMemoDemotion(candidates)).toBe(candidates);
 		});
 
 		// Combo slots are positional; reordering desyncs the account-to-slot
@@ -573,8 +578,55 @@ describe("createAdmissionGates", () => {
 
 			// Applied last, the memo still wins: the refused account ends up behind.
 			expect(
-				gates.applyFamilyMemoDemotion(softReordered).map((a) => a.id),
+				gates.applyFailureMemoDemotion(softReordered).map((a) => a.id),
 			).toEqual(["acc-b", "acc-a"]);
+		});
+	});
+
+	describe("transient Codex failure demotion", () => {
+		it("partitions both failure reasons together and preserves an entirely demoted pool", () => {
+			const codex = makeAccount({ id: "codex-1", provider: "codex" });
+			const claude = makeAccount({ id: "acc-a" });
+			const healthy = makeAccount({ id: "acc-b" });
+			recordCodexTransientFailure(codex.id);
+			recordFamilyWeeklyExhausted(
+				claude.id,
+				"sonnet",
+				Date.now() + HOUR,
+				Date.now(),
+			);
+			const gates = makeGates();
+			expect(gates.applyFailureMemoDemotion([codex, claude, healthy])).toEqual([
+				healthy,
+				codex,
+				claude,
+			]);
+			expect(gates.applyFailureMemoDemotion([codex, claude])).toEqual([
+				codex,
+				claude,
+			]);
+			expect(gates.applyFailureMemoDemotion([claude, codex])).toEqual([
+				claude,
+				codex,
+			]);
+			expect(gates.applyFailureMemoDemotion([codex])).toEqual([codex]);
+		});
+
+		it("ignores expired hints and leaves synthetic selections alone", () => {
+			const first = makeAccount({ id: "codex-1", provider: "codex" });
+			const second = makeAccount({ id: "codex-2", provider: "codex" });
+			recordCodexTransientFailure(first.id, Date.now() - 60_001);
+			expect(makeGates().applyFailureMemoDemotion([first, second])).toEqual([
+				first,
+				second,
+			]);
+			recordCodexTransientFailure(first.id);
+			expect(
+				makeGates({ isSyntheticProbeRequest: true }).applyFailureMemoDemotion([
+					first,
+					second,
+				]),
+			).toEqual([first, second]);
 		});
 	});
 });
