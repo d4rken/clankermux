@@ -11,6 +11,7 @@ import { useAccounts } from "../hooks/queries";
 import { invalidateCapacityQueries } from "../lib/query-keys";
 import { type SortDir, SortIcon } from "./analytics/sort-header";
 import { clientRequest } from "./clients/api";
+import { ApplicationMarkIcon } from "./clients/application-marks";
 import { ClientBulkCatalogue } from "./clients/ClientBulkCatalogue";
 import { ClientSetupDialog } from "./clients/ClientSetupDialog";
 import { ClientWizard } from "./clients/ClientWizard";
@@ -368,24 +369,30 @@ export function ClientsTab() {
 										checked={selected.has(client.apiKeyId)}
 										onChange={() => toggleClient(client.apiKeyId)}
 									/>
-									<div className="min-w-0">
-										<div className="flex items-center gap-2">
-											<h2 className="font-semibold text-sm break-words min-w-0">
-												{client.key.name}
-											</h2>
-											{!client.key.isActive && (
-												<span className="rounded bg-muted px-1.5 py-0.5 text-[11px] text-muted-foreground">
-													Disabled
+									<div className="flex min-w-0 items-center gap-2.5">
+										<ApplicationMarkIcon
+											application={client.application}
+											className="h-5 w-5 shrink-0"
+										/>
+										<div className="min-w-0">
+											<div className="flex items-center gap-2">
+												<h2 className="font-semibold text-sm break-words min-w-0">
+													{client.key.name}
+												</h2>
+												{!client.key.isActive && (
+													<span className="rounded bg-muted px-1.5 py-0.5 text-[11px] text-muted-foreground">
+														Disabled
+													</span>
+												)}
+											</div>
+											<p className="text-xs text-muted-foreground mt-1">
+												{APPLICATIONS[client.application]}{" "}
+												<span className="mx-1">·</span>{" "}
+												<span className="font-mono">
+													…{client.key.prefixLast8}
 												</span>
-											)}
+											</p>
 										</div>
-										<p className="text-xs text-muted-foreground mt-1">
-											{APPLICATIONS[client.application]}{" "}
-											<span className="mx-1">·</span>{" "}
-											<span className="font-mono">
-												…{client.key.prefixLast8}
-											</span>
-										</p>
 									</div>
 									<div className="min-w-0 text-sm">
 										<p className="xl:sr-only text-xs text-muted-foreground mb-1">
