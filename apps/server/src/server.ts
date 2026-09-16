@@ -104,10 +104,7 @@ import {
 	supportsUsagePolling,
 } from "@clankermux/types";
 import { type Server, serve } from "bun";
-import {
-	runAnthropicProfileBackfill,
-	SUBSCRIPTION_RECAPTURE_MARKER,
-} from "./anthropic-profile-backfill";
+import { runAnthropicProfileBackfill } from "./anthropic-profile-backfill";
 import { withAnthropicSubscriptionRefresh } from "./anthropic-subscription-refresh";
 import {
 	CacheKeepaliveSnapshotSampler,
@@ -1911,15 +1908,13 @@ Available endpoints:
 
 	// One-time, staggered, fail-open profile backfill: fetch GET /api/oauth/profile
 	// for Anthropic OAuth accounts that have never had a successful profile fetch
-	// (identity_profile_fetched_at IS NULL), plus a once-per-database re-capture
-	// of accounts whose profile was read before the subscription fields were, and
-	// merge the identity into their columns. Fire-and-forget AFTER the server is
-	// already listening — the routine self-guards (never throws) and sleeps an
-	// initial delay + staggers between accounts, so it neither blocks startup nor
-	// bursts the shared profile/usage rate-limit bucket. Idempotent across
-	// restarts: the first population by identity_profile_fetched_at (successes
-	// never re-fetch; failures retry next boot), the second by its strategies
-	// marker.
+	// (identity_profile_fetched_at IS NULL) and merge the identity into their
+	// columns. Fire-and-forget AFTER the server is already listening — the
+	// routine self-guards (never throws) and sleeps an initial delay + staggers
+	// between accounts, so it neither blocks startup nor bursts the shared
+	// profile/usage rate-limit bucket. Idempotent across restarts: successes
+	// never re-fetch, failures retry next boot. Keeping an already-captured
+	// identity current is the usage poller's throttled re-read, not this pass.
 	void runAnthropicProfileBackfill({
 		getAccounts: () => dbOps.getAllAccounts(),
 		// Re-read the row and refresh through the proxy context, so each fetch uses
@@ -1935,8 +1930,6 @@ Available endpoints:
 		fetchProfile: fetchAnthropicProfile,
 		setIdentity: (accountId, identity) =>
 			dbOps.setAccountIdentityFromProfile(accountId, identity),
-		claimSubscriptionRecapture: () =>
-			dbOps.claimOneShotBackfillMarker(SUBSCRIPTION_RECAPTURE_MARKER),
 	});
 
 	void refreshOpenRouterAccountsOnStartup(dbOps);

@@ -1725,15 +1725,6 @@ OAuth tokens will need to be re-authenticated.
 		return this.strategy.delete(name);
 	}
 
-	/**
-	 * Claim a one-shot `backfill:` marker in `strategies`; true means THIS call
-	 * claimed it and owns the pass.
-	 * See {@link StrategyRepository.claimMarker}.
-	 */
-	async claimOneShotBackfillMarker(name: string): Promise<boolean> {
-		return this.strategy.claimMarker(name);
-	}
-
 	// Analytics methods delegated to request repository
 	async getRecentRequests(limit = 100): Promise<
 		Array<{
