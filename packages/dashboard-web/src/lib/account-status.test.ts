@@ -803,6 +803,27 @@ describe("deriveAccountStatus — provider-reported renewal anchor", () => {
 	});
 });
 
+describe("deriveAccountStatus — D4 provider anchor with no captured period", () => {
+	it("D4: renders a past provider anchor literally instead of advancing it", () => {
+		// `provider` says the anchor is a date the provider reported, not a
+		// recurrence to project forward. With no captured period end, the last
+		// reported date is all there is — 2023-12-20, already past — so
+		// advancing it to the next month invents a renewal nobody stated.
+		const status = deriveAccountStatus(
+			makeAccount({
+				renewalAnchor: "2023-12-20",
+				renewalCadence: "monthly",
+				renewalAnchorSource: "provider",
+				identitySubscriptionEndsAt: null,
+			}),
+			NOW,
+		);
+
+		expect(status.renewalNextDate?.getFullYear()).toBe(2023);
+		expect(status.renewalUrgency).toBe("past");
+	});
+});
+
 describe("deriveAccountStatus — refresh-token re-auth deadline", () => {
 	const DAY = 24 * 60 * 60 * 1000;
 

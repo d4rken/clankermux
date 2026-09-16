@@ -329,23 +329,30 @@ export function deriveAccountStatus(
 		? "Peak hours (14:00–18:00 SGT)"
 		: "Off-peak hours";
 
-	// A `provider` anchor renders from the reported period end DIRECTLY, via the
-	// literal-date path instead of the recurrence. computeRenewal advances a
-	// recurring anchor to its next occurrence, so a capture that stopped
-	// succeeding would invent a date a month or a year past the last thing the
-	// provider actually said and label it "Renews".
-	const providerReportedEndMs =
-		account.renewalAnchorSource === "provider"
-			? (account.identitySubscriptionEndsAt ?? null)
-			: null;
-	const renewal =
-		providerReportedEndMs !== null
-			? computeRenewal(
-					anchorDateFromInstant(providerReportedEndMs),
-					"none",
-					now,
-				)
-			: computeRenewal(account.renewalAnchor, account.renewalCadence, now);
+	// A `provider` anchor is a date the provider REPORTED, never a recurrence to
+	// project forward: computeRenewal advances a recurring anchor to its next
+	// occurrence, which would invent a date a month or a year past the last
+	// thing the provider actually said and label it "Renews" — with no estimate
+	// marker, since provider anchors deliberately render without the `~`.
+	//
+	// The provenance alone decides that, not whether a period end survived. The
+	// capture writes `identity_subscription_ends_at` with a plain SET, so a
+	// later 404 clears the column while the anchor and its cadence stay put.
+	// The reported end is preferred when present; otherwise the stored anchor's
+	// literal date is the last thing the provider said.
+	const isProviderAnchor = account.renewalAnchorSource === "provider";
+	const providerReportedEndMs = isProviderAnchor
+		? (account.identitySubscriptionEndsAt ?? null)
+		: null;
+	const renewal = isProviderAnchor
+		? computeRenewal(
+				providerReportedEndMs !== null
+					? anchorDateFromInstant(providerReportedEndMs)
+					: account.renewalAnchor,
+				"none",
+				now,
+			)
+		: computeRenewal(account.renewalAnchor, account.renewalCadence, now);
 
 	// On-credits predicate — mirrors the server's exactly so the chip and the
 	// pause/failover logic agree on when a codex account is drawing on purchased
