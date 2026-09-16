@@ -68,7 +68,20 @@ function openCodeCost(metadata: ClientModelMetadata | undefined) {
 			...(cost.cacheWrite === undefined
 				? {}
 				: { cache_write: cost.cacheWrite }),
-			...(over200k ? { context_over_200k: over200k.input } : {}),
+			...(over200k
+				? {
+						context_over_200k: {
+							input: over200k.input,
+							output: over200k.output,
+							...(over200k.cacheRead === undefined
+								? {}
+								: { cache_read: over200k.cacheRead }),
+							...(over200k.cacheWrite === undefined
+								? {}
+								: { cache_write: over200k.cacheWrite }),
+						},
+					}
+				: {}),
 		},
 	};
 }

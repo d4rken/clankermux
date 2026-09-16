@@ -223,7 +223,7 @@ it("nests OpenCode's limit and renames its cache rates", () => {
 				output: 50,
 				cache_read: 1,
 				cache_write: 12.5,
-				context_over_200k: 20,
+				context_over_200k: { input: 20, output: 100 },
 			},
 		},
 		b: { name: "B" },
