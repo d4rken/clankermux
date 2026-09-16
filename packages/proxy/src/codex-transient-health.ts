@@ -3,8 +3,18 @@ const failures = new Map<string, { until: number; observedAt: number }>();
 const DEMOTION_MS = 60_000;
 const MAX_ENTRIES = 1_000;
 
+/**
+ * `streamFailureCode` reports the error's `code` whenever one is present, so a
+ * bare type only ever arrives on a payload that carries none:
+ *   {"error":{"type":"server_error","code":"server_error"}}
+ *   {"error":{"type":"service_unavailable_error","code":"server_is_overloaded"}}
+ */
 export function isCodexTransientError(reason: string | null): boolean {
-	return reason === "server_error" || reason === "service_unavailable_error";
+	return (
+		reason === "server_error" ||
+		reason === "service_unavailable_error" ||
+		reason === "server_is_overloaded"
+	);
 }
 
 export function recordCodexTransientFailure(
