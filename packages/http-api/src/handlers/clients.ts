@@ -83,6 +83,7 @@ export function createClientsHandler(
 					path,
 				);
 			if (!match) throw NotFound("Client endpoint not found");
+			// biome-ignore lint/style/noNonNullAssertion: capture group 1 of the route pattern is not optional, so a match always fills it
 			const id = decodeURIComponent(match[1]!);
 			const key = await dbOps.getApiKey(id);
 			if (!key) throw NotFound("Client not found");

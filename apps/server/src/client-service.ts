@@ -930,7 +930,7 @@ export class ClientService {
 		const precedingRules = [
 			...new Set(
 				aliasRules
-					.map((r) => matchRoutingRule(rules, id, r.match_model_value!)?.name)
+					.map((r) => matchRoutingRule(rules, id, r.match_model_value)?.name)
 					.filter((n): n is string => !!n),
 			),
 		];
@@ -983,8 +983,11 @@ export class ClientService {
 			new ApiKeyRepository(adapter).createInTransaction({
 				id: profile.apiKeyId,
 				name: draft.name,
+				// biome-ignore lint/style/noNonNullAssertion: commit() hashes the key it generates, and only a draft with no id reaches this branch
 				hashed_key: created.hash!,
+				// biome-ignore lint/style/noNonNullAssertion: commit() generates the plaintext key for exactly the no-id case this branch tests
 				setup_key: created.apiKey!,
+				// biome-ignore lint/style/noNonNullAssertion: the same generated key as setup_key above
 				prefix_last_8: apiKeyLookupSuffix(created.apiKey!),
 				created_at: created.createdAt,
 				last_used: null,
@@ -997,6 +1000,7 @@ export class ClientService {
 			});
 			dbOps.clients.insertInTransaction(profile);
 		} else {
+			// biome-ignore lint/style/noNonNullAssertion: prepareDraft refuses a draft carrying an id unless its revision equals the stored profile's, or is 0 when no profile exists
 			dbOps.clients.saveInTransaction(profile, draft.revision!);
 			db.query("UPDATE api_keys SET name=? WHERE id=?").run(
 				draft.name,
@@ -1098,6 +1102,7 @@ export class ClientService {
 		this.pending.delete(token);
 		return {
 			client: await this.view(
+				// biome-ignore lint/style/noNonNullAssertion: the transaction above wrote a client_profiles row for this id, and that row is a cascading reference to api_keys
 				(await dbOps.getApiKey(profile.apiKeyId))!,
 				await dbOps.routing.listRules(),
 			),
@@ -1376,6 +1381,7 @@ export class ClientService {
 		for (const record of records)
 			clients.push(
 				await this.view(
+					// biome-ignore lint/style/noNonNullAssertion: the transaction above wrote a client_profiles row for this id, and that row is a cascading reference to api_keys
 					(await dbOps.getApiKey(record.profile.apiKeyId))!,
 					rules,
 				),

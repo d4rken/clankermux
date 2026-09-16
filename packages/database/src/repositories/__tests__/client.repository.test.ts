@@ -53,6 +53,7 @@ describe("independent client catalogues", () => {
 	it("copies every format independently, including disabled keys, and preserves credentials", async () => {
 		const keysBefore = db.query("SELECT * FROM api_keys ORDER BY id").all();
 		expect(await repo.bootstrap([profile("a"), profile("b")])).toBe(true);
+		// biome-ignore lint/style/noNonNullAssertion: bootstrap() inserted a profile for key a on the line above
 		const a = (await repo.getProfile("a"))!;
 		a.catalogues.openai.models = [];
 		a.catalogues.openai.defaultModel = null;
@@ -70,6 +71,7 @@ describe("independent client catalogues", () => {
 	});
 	it("never recopies on restart, including an explicit empty catalogue", async () => {
 		await repo.bootstrap([profile("a"), profile("b")]);
+		// biome-ignore lint/style/noNonNullAssertion: bootstrap() inserted a profile for key a on the line above
 		const a = (await repo.getProfile("a"))!;
 		a.catalogues.anthropic.models = [];
 		await repo.saveProfile(a, 1);

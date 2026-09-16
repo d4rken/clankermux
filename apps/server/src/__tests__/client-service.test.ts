@@ -179,11 +179,14 @@ describe("client service integration", () => {
 	}
 	it("saves setup credentials atomically and excludes them from client views", async () => {
 		const { client, apiKey } = await create();
+		// biome-ignore lint/style/noNonNullAssertion: create() commits a draft with no id, so commit() returned the generated plaintext key
 		expect(await dbOps.getApiKeySetupSecret(client.apiKeyId)).toBe(apiKey!);
+		// biome-ignore lint/style/noNonNullAssertion: the same create() key asserted on the line above
 		expect(JSON.stringify(await service.list())).not.toContain(apiKey!);
 		const changed = edit(client);
 		changed.name = "Renamed";
 		await service.commit((await service.review(changed)).token);
+		// biome-ignore lint/style/noNonNullAssertion: the same create() key asserted above
 		expect(await dbOps.getApiKeySetupSecret(client.apiKeyId)).toBe(apiKey!);
 	});
 
@@ -195,6 +198,7 @@ describe("client service integration", () => {
 			.query("DELETE FROM client_profiles WHERE api_key_id=?")
 			.run(client.apiKeyId);
 		const views = await service.list();
+		// biome-ignore lint/style/noNonNullAssertion: only the client_profiles row was deleted above, so list() still reports this api_keys row
 		const missing = views.find((c) => c.apiKeyId === client.apiKeyId)!;
 		expect(missing.revision).toBe(0);
 		expect(missing.notices.join(" ")).toContain("missing");
@@ -706,6 +710,7 @@ describe("client service integration", () => {
 		expect(review.clients[1]?.status).toBe("changed");
 		const committed = await service.bulkCommit(review.token);
 		expect(committed.clients.map((v) => v.apiKeyId)).toEqual([open.apiKeyId]);
+		// biome-ignore lint/style/noNonNullAssertion: makeClient wrote Pinned's profile, so the read above returned one
 		expect(await dbOps.clients.getProfile(pinned.apiKeyId)).toEqual(before!);
 		expect(
 			(
@@ -941,9 +946,12 @@ describe("client service integration", () => {
 				.query("UPDATE client_profiles SET catalogues=? WHERE api_key_id=?")
 				.run(JSON.stringify(parsed), id);
 		}
+		// biome-ignore lint/style/noNonNullAssertion: makeClient wrote Source's profile
 		const sourceProfile = (await dbOps.clients.getProfile(source.apiKeyId))!;
 		const from = sourceProfile.catalogues.anthropic;
+		// biome-ignore lint/style/noNonNullAssertion: makeClient wrote Dest's profile
 		const before = (await dbOps.clients.getProfile(dest.apiKeyId))!;
+		// biome-ignore lint/style/noNonNullAssertion: Dest's catalogue publishes the claude-alias alias, so it owns a client_alias_rules row
 		const ownedBefore = aliasOwners().find(
 			(o) => o.api_key_id === dest.apiKeyId,
 		)!;
@@ -960,6 +968,7 @@ describe("client service integration", () => {
 		// preparation restamps createdAt from Dest's own entry regardless.
 		expect(review.clients[0]?.status).toBe("unchanged");
 		await service.bulkCommit(review.token);
+		// biome-ignore lint/style/noNonNullAssertion: makeClient wrote Dest's profile and bulkCommit never deletes one
 		const after = (await dbOps.clients.getProfile(dest.apiKeyId))!;
 		expect(after.revision).toBe(before.revision);
 		expect(after.catalogues).toEqual(before.catalogues);
@@ -985,6 +994,7 @@ describe("client service integration", () => {
 		const rulesBefore = rules();
 		// The batch applies in apiKeyId order, so bumping the last one's revision
 		// fails the CAS only after the earlier client has already been written.
+		// biome-ignore lint/style/noNonNullAssertion: a two-element array always has a last element
 		const last = [a.apiKeyId, b.apiKeyId].sort().at(-1)!;
 		const first = last === a.apiKeyId ? b.apiKeyId : a.apiKeyId;
 		dbOps
@@ -1029,6 +1039,7 @@ describe("client service integration", () => {
 		const pending = (
 			service as unknown as { pending: Map<string, { expires: number }> }
 		).pending;
+		// biome-ignore lint/style/noNonNullAssertion: bulkReview registered this token in pending on the line above
 		pending.get(expired.token)!.expires = Date.now() - 1;
 		await expect(service.bulkCommit(expired.token)).rejects.toThrow(
 			"Review expired",
