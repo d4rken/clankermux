@@ -19,11 +19,16 @@ export interface AnthropicSubscriptionRefreshDeps {
 	fetchProfile: (accessToken: string) => Promise<AccountIdentity | null>;
 	/** Persist a captured identity through the shared identity write. */
 	setIdentity: (accountId: string, identity: AccountIdentity) => Promise<void>;
-	/** Advance the throttle alone, with no claim about what was observed. */
-	touchSubscriptionCheck: (
+	/**
+	 * Claim this account's next read: stamp `identity_subscription_checked_at`
+	 * only if the row is still an Anthropic OAuth account whose stamp is null or
+	 * older than the throttle, in ONE statement, and report whether the stamp
+	 * moved. False means another invocation owns this window.
+	 */
+	claimSubscriptionCheck: (
 		accountId: string,
-		checkedAtMs: number,
-	) => Promise<void>;
+		nowMs: number,
+	) => Promise<boolean>;
 	now?: () => number;
 	logger?: Logger;
 	/**
@@ -46,6 +51,11 @@ export interface AnthropicSubscriptionRefreshDeps {
  * last capture ATTEMPT rather than the last success — see
  * {@link refreshAnthropicSubscription} for why that distinction is what keeps a
  * failing account off every poll tick.
+ *
+ * This is a predicate over a row that was read at some earlier instant, so it
+ * answers "worth trying", never "mine". The claim in
+ * {@link AnthropicSubscriptionRefreshDeps.claimSubscriptionCheck} decides that,
+ * against the same window.
  */
 export function isAnthropicSubscriptionRefreshDue(
 	account: Account,
@@ -71,10 +81,10 @@ export function isAnthropicSubscriptionRefreshDue(
  * the staleness that makes a read 401 against credentials that have since
  * rotated.
  *
- * Every attempt stamps the throttle, success and failure alike. Stamping only
- * on success would re-issue the profile GET on every 90s poll for an account
- * whose profile endpoint is failing, which is the load this throttle exists to
- * prevent.
+ * The attempt is claimed BEFORE the fetch, and the claim is what stamps the
+ * throttle — success and failure alike. Stamping only on success would re-issue
+ * the profile GET on every 90s poll for an account whose profile endpoint is
+ * failing, which is the load this throttle exists to prevent.
  */
 export async function refreshAnthropicSubscription(
 	accountId: string,
@@ -88,29 +98,34 @@ export async function refreshAnthropicSubscription(
 		if (!accessToken) return;
 		const account = await deps.getAccount(accountId);
 		if (!account) return;
+		// A read, so it cannot settle the question — but it is false on all but
+		// one poll in 240, and it keeps every account that can never be claimed
+		// away from the claim's write statement.
 		if (!isAnthropicSubscriptionRefreshDue(account, nowMs)) return;
+		// The claim settles it. Between the check above and this line a second
+		// invocation — a dashboard-driven refreshNow resolving a token while a
+		// poll's read is still in flight — can have taken the same window, and
+		// only one conditional UPDATE can change the row. The loser stops here
+		// having spent nothing.
+		if (!(await deps.claimSubscriptionCheck(accountId, nowMs))) return;
 
-		try {
-			const identity = await deps.fetchProfile(accessToken);
-			if (identity) {
-				// Written through the identity COALESCE merge, so the Anthropic-gated
-				// renewal-anchor seeding still runs for an account that has no anchor.
-				// The merge cannot CLEAR a column: a status that changes (active →
-				// canceled) is a new non-null value and lands, a status the profile
-				// stops reporting altogether stays at its last observed value.
-				await deps.setIdentity(accountId, identity);
-				log.debug(`refreshed subscription state for ${account.name}`);
-			} else {
-				// Fail-open: the read says nothing about the subscription, so only the
-				// throttle moves — writing the empty state would erase what an earlier
-				// successful read observed.
-				log.debug(
-					`subscription refresh returned nothing for ${account.name} (retrying after the throttle)`,
-				);
-			}
-		} finally {
-			await deps.touchSubscriptionCheck(accountId, nowMs);
+		const identity = await deps.fetchProfile(accessToken);
+		if (!identity) {
+			// Fail-open: the read says nothing about the subscription, so only the
+			// claim's stamp stands — writing the empty state would erase what an
+			// earlier successful read observed.
+			log.debug(
+				`subscription refresh returned nothing for ${account.name} (retrying after the throttle)`,
+			);
+			return;
 		}
+		// Written through the identity COALESCE merge, so the Anthropic-gated
+		// renewal-anchor seeding still runs for an account that has no anchor. The
+		// merge cannot CLEAR a column: a status that changes (active → canceled)
+		// is a new non-null value and lands, a status the profile stops reporting
+		// altogether stays at its last observed value.
+		await deps.setIdentity(accountId, identity);
+		log.debug(`refreshed subscription state for ${account.name}`);
 	} catch (err) {
 		log.warn(
 			`subscription refresh failed for account ${accountId}: ${

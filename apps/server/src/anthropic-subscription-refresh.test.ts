@@ -27,22 +27,47 @@ const ACTIVE: AccountIdentity = {
 const CANCELED: AccountIdentity = { ...ACTIVE, subscriptionStatus: "canceled" };
 
 /**
- * A stand-in for the account row plus the two writes the refresh performs, so a
+ * A stand-in for the account row plus the writes the refresh performs, so a
  * test can assert what the row looks like AFTER a read the way the database
  * would hold it — including the columns the refresh must never touch.
+ *
+ * `getAccount` hands back a COPY, like a real row read: an invocation that read
+ * the row before another one claimed keeps holding what it read, which is the
+ * premise of the race the claim has to settle.
  */
 function fakeStore(account: Account) {
 	const row: Account = { ...account };
+	const state = { present: true };
 	const fetches: string[] = [];
 	return {
 		row,
 		fetches,
+		/** Model the account being deleted out from under an in-flight read. */
+		remove() {
+			state.present = false;
+		},
 		deps(
 			fetchProfile: (accessToken: string) => Promise<AccountIdentity | null>,
 			now: () => number = () => NOW,
 		): AnthropicSubscriptionRefreshDeps {
 			return {
-				getAccount: async () => row,
+				getAccount: async () => (state.present ? { ...row } : null),
+				// Mirrors the repository's single conditional statement: the window
+				// predicate and the stamp are one step with no await between them, so
+				// a second caller holding the same expired stamp cannot also claim.
+				claimSubscriptionCheck: async (_accountId, nowMs) => {
+					if (!state.present) return false;
+					if (row.provider !== "anthropic" || !row.refresh_token) return false;
+					const checkedAt = row.identity_subscription_checked_at;
+					if (
+						checkedAt != null &&
+						nowMs - checkedAt < ANTHROPIC_SUBSCRIPTION_REFRESH_INTERVAL_MS
+					) {
+						return false;
+					}
+					row.identity_subscription_checked_at = nowMs;
+					return true;
+				},
 				fetchProfile: (accessToken) => {
 					fetches.push(accessToken);
 					return fetchProfile(accessToken);
@@ -54,9 +79,6 @@ function fakeStore(account: Account) {
 					row.identity_subscription_started_at =
 						identity.subscriptionStartedAt ??
 						row.identity_subscription_started_at;
-				},
-				touchSubscriptionCheck: async (_accountId, checkedAtMs) => {
-					row.identity_subscription_checked_at = checkedAtMs;
 				},
 				now,
 			};
@@ -148,6 +170,49 @@ describe("refreshAnthropicSubscription", () => {
 		expect(store.row.identity_subscription_checked_at).toBe(NOW - 60_000);
 	});
 
+	// The 6h throttle was justified by bucket economy — four profile reads a day
+	// against the usage poller's ~960, into the bucket they share. A throttle two
+	// invocations can both pass spends more than it claims to, so the claim, not
+	// the read that precedes it, is what decides who fetches.
+	it("issues exactly one fetch when two invocations race the same expired stamp", async () => {
+		const store = fakeStore(
+			makeAccount({ identity_subscription_checked_at: null }),
+		);
+		let releaseFetch: () => void = () => {};
+		const inFlight = new Promise<void>((resolve) => {
+			releaseFetch = resolve;
+		});
+		const deps = store.deps(async () => {
+			await inFlight;
+			return ACTIVE;
+		});
+
+		// Both read the row before either claims — a dashboard-driven refreshNow
+		// resolving a token while a poll's read is still in flight.
+		const first = refreshAnthropicSubscription("acc-1", "t-first", deps);
+		const second = refreshAnthropicSubscription("acc-1", "t-second", deps);
+		releaseFetch();
+		await Promise.all([first, second]);
+
+		expect(store.fetches).toHaveLength(1);
+		expect(store.row.identity_subscription_checked_at).toBe(NOW);
+	});
+
+	it("issues no read when the claim does not land", async () => {
+		const store = fakeStore(
+			makeAccount({ identity_subscription_checked_at: null }),
+		);
+
+		await refreshAnthropicSubscription("acc-1", "t-live", {
+			...store.deps(async () => ACTIVE),
+			// The row read as due, then someone else took the window.
+			claimSubscriptionCheck: async () => false,
+		});
+
+		expect(store.fetches).toEqual([]);
+		expect(store.row.identity_subscription_checked_at).toBeNull();
+	});
+
 	it("persists a status transition (active → canceled)", async () => {
 		const store = fakeStore(
 			makeAccount({
@@ -187,7 +252,9 @@ describe("refreshAnthropicSubscription", () => {
 		expect(store.row.identity_subscription_status).toBe("active");
 	});
 
-	it("advances the throttle when the fetch throws", async () => {
+	// The claim moved the stamp before the fetch, so a read that then throws is
+	// not retried until the window elapses.
+	it("leaves the throttle claimed when the fetch throws", async () => {
 		const store = fakeStore(
 			makeAccount({ identity_subscription_checked_at: null }),
 		);
@@ -252,7 +319,9 @@ describe("refreshAnthropicSubscription", () => {
 				return ACTIVE;
 			},
 			setIdentity: async () => {},
-			touchSubscriptionCheck: async () => {},
+			// Stubbed to SUCCEED, so the assertion below pins the read gate rather
+			// than passing on a claim a vanished row could never grant.
+			claimSubscriptionCheck: async () => true,
 			now: () => NOW,
 		});
 
@@ -267,7 +336,7 @@ describe("refreshAnthropicSubscription", () => {
 				},
 				fetchProfile: async () => ACTIVE,
 				setIdentity: async () => {},
-				touchSubscriptionCheck: async () => {},
+				claimSubscriptionCheck: async () => true,
 				now: () => NOW,
 			}),
 		).resolves.toBeUndefined();

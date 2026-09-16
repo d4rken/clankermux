@@ -1,6 +1,7 @@
 /**
  * Tests for the provider-reported subscription period:
- * `setAccountSubscriptionState` (the plain-SET column write) and
+ * `setAccountSubscriptionState` (the plain-SET column write),
+ * `claimAnthropicSubscriptionCheck` (the conditional throttle claim) and
  * `syncProviderRenewalAnchor` (the ownership-gated anchor write), plus the
  * Anthropic gate on the start-date seeder.
  */
@@ -90,10 +91,15 @@ function makeDb(): { db: Database; repo: AccountRepository } {
 	return { db, repo: new AccountRepository(adapter) };
 }
 
-function insertAccount(db: Database, id: string, provider = "anthropic"): void {
+function insertAccount(
+	db: Database,
+	id: string,
+	provider = "anthropic",
+	refreshToken = "",
+): void {
 	db.run(
-		`INSERT INTO accounts (id, name, provider, created_at) VALUES (?, ?, ?, ?)`,
-		[id, id, provider, Date.now()],
+		`INSERT INTO accounts (id, name, provider, refresh_token, created_at) VALUES (?, ?, ?, ?, ?)`,
+		[id, id, provider, refreshToken, Date.now()],
 	);
 }
 
@@ -378,5 +384,94 @@ describe("Anchor provenance — seeder vs provider report", () => {
 		const account = await repo.findById("seed-3");
 		expect(account?.renewal_anchor).toBe("2026-10-03");
 		expect(account?.renewal_anchor_source).toBe("provider");
+	});
+});
+
+/** The window the Anthropic subscription re-read passes into the claim. */
+const THROTTLE_MS = 6 * 60 * 60 * 1000;
+
+describe("AccountRepository — claimAnthropicSubscriptionCheck", () => {
+	let db: Database;
+	let repo: AccountRepository;
+
+	beforeEach(() => {
+		({ db, repo } = makeDb());
+	});
+	afterEach(() => {
+		db.close();
+	});
+
+	it("claims an account that has never been checked, and stamps it", async () => {
+		insertAccount(db, "clm-a", "anthropic", "r");
+
+		expect(
+			await repo.claimAnthropicSubscriptionCheck("clm-a", NOW, THROTTLE_MS),
+		).toBe(true);
+		expect(
+			(await repo.findById("clm-a"))?.identity_subscription_checked_at,
+		).toBe(NOW);
+	});
+
+	// The point of the single statement: the second caller re-tests the window
+	// against what the first one wrote, not against what it read earlier.
+	it("refuses a second claim inside the window, and leaves the stamp alone", async () => {
+		insertAccount(db, "clm-b", "anthropic", "r");
+
+		expect(
+			await repo.claimAnthropicSubscriptionCheck("clm-b", NOW, THROTTLE_MS),
+		).toBe(true);
+		expect(
+			await repo.claimAnthropicSubscriptionCheck("clm-b", NOW + 1, THROTTLE_MS),
+		).toBe(false);
+		expect(
+			(await repo.findById("clm-b"))?.identity_subscription_checked_at,
+		).toBe(NOW);
+	});
+
+	it("claims again the instant the window has elapsed", async () => {
+		insertAccount(db, "clm-c", "anthropic", "r");
+		await repo.claimAnthropicSubscriptionCheck("clm-c", NOW, THROTTLE_MS);
+
+		expect(
+			await repo.claimAnthropicSubscriptionCheck(
+				"clm-c",
+				NOW + THROTTLE_MS - 1,
+				THROTTLE_MS,
+			),
+		).toBe(false);
+		expect(
+			await repo.claimAnthropicSubscriptionCheck(
+				"clm-c",
+				NOW + THROTTLE_MS,
+				THROTTLE_MS,
+			),
+		).toBe(true);
+	});
+
+	it("refuses a non-Anthropic account", async () => {
+		insertAccount(db, "clm-d", "codex", "r");
+
+		expect(
+			await repo.claimAnthropicSubscriptionCheck("clm-d", NOW, THROTTLE_MS),
+		).toBe(false);
+		expect(
+			(await repo.findById("clm-d"))?.identity_subscription_checked_at,
+		).toBeNull();
+	});
+
+	// An Anthropic row with no refresh token is an API-key account: no OAuth
+	// profile endpoint to read.
+	it("refuses an Anthropic account with no refresh token", async () => {
+		insertAccount(db, "clm-e", "anthropic", "");
+
+		expect(
+			await repo.claimAnthropicSubscriptionCheck("clm-e", NOW, THROTTLE_MS),
+		).toBe(false);
+	});
+
+	it("refuses an account that no longer exists", async () => {
+		expect(
+			await repo.claimAnthropicSubscriptionCheck("gone", NOW, THROTTLE_MS),
+		).toBe(false);
 	});
 });

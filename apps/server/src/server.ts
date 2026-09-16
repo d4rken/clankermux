@@ -105,7 +105,10 @@ import {
 } from "@clankermux/types";
 import { type Server, serve } from "bun";
 import { runAnthropicProfileBackfill } from "./anthropic-profile-backfill";
-import { withAnthropicSubscriptionRefresh } from "./anthropic-subscription-refresh";
+import {
+	ANTHROPIC_SUBSCRIPTION_REFRESH_INTERVAL_MS,
+	withAnthropicSubscriptionRefresh,
+} from "./anthropic-subscription-refresh";
 import {
 	CacheKeepaliveSnapshotSampler,
 	liveGauges,
@@ -438,10 +441,11 @@ function startUsagePollingWithRefresh(
 							accountId,
 							identity,
 						),
-					touchSubscriptionCheck: (accountId, checkedAtMs) =>
-						proxyContext.dbOps.touchAccountSubscriptionCheck(
+					claimSubscriptionCheck: (accountId, nowMs) =>
+						proxyContext.dbOps.claimAnthropicSubscriptionCheck(
 							accountId,
-							checkedAtMs,
+							nowMs,
+							ANTHROPIC_SUBSCRIPTION_REFRESH_INTERVAL_MS,
 						),
 				},
 			);

@@ -1130,6 +1130,44 @@ export class AccountRepository extends BaseRepository<Account> {
 	}
 
 	/**
+	 * Claim the next Anthropic subscription re-read, or report that someone else
+	 * holds the window.
+	 *
+	 * One conditional statement, which is the whole point: the window test and
+	 * the stamp cannot be separated, so two callers that both read the same
+	 * expired timestamp still produce exactly one claim — the second one's UPDATE
+	 * matches no row and reports zero changes. A claim taken before the profile
+	 * GET is what keeps a raced read from spending a second request into the
+	 * rate-limit bucket the usage poller depends on.
+	 *
+	 * The stamp records an ATTEMPT, not a success: a claimed read that then fails
+	 * stays claimed until the window elapses, which is what keeps a failing
+	 * profile endpoint off every poll tick.
+	 *
+	 * `throttleMs` is the caller's own window rather than a constant duplicated
+	 * here, so the caller's due-check and this claim cannot disagree about it.
+	 * The provider gate matches that due-check too: `anthropic` with a refresh
+	 * token, since an Anthropic row without one is an API-key account with no
+	 * OAuth profile endpoint to read.
+	 */
+	async claimAnthropicSubscriptionCheck(
+		accountId: string,
+		nowMs: number,
+		throttleMs: number,
+	): Promise<boolean> {
+		return (
+			(await this.runWithChanges(
+				`UPDATE accounts SET identity_subscription_checked_at = ?
+				 WHERE id = ? AND provider = 'anthropic'
+				   AND refresh_token IS NOT NULL AND refresh_token != ''
+				   AND (identity_subscription_checked_at IS NULL
+				        OR identity_subscription_checked_at <= ?)`,
+				[nowMs, accountId, nowMs - throttleMs],
+			)) > 0
+		);
+	}
+
+	/**
 	 * Move the renewal anchor onto the period end the provider itself reported.
 	 *
 	 * Unlike {@link seedRenewalAnchorFromSubscription} this is NOT one-shot: a

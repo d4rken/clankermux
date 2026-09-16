@@ -1438,6 +1438,23 @@ OAuth tokens will need to be re-authenticated.
 	}
 
 	/**
+	 * Claim the next Anthropic subscription re-read for one account, stamping the
+	 * throttle in the same statement that tests it.
+	 * See {@link AccountRepository.claimAnthropicSubscriptionCheck}.
+	 */
+	async claimAnthropicSubscriptionCheck(
+		accountId: string,
+		nowMs: number,
+		throttleMs: number,
+	): Promise<boolean> {
+		return this.accounts.claimAnthropicSubscriptionCheck(
+			accountId,
+			nowMs,
+			throttleMs,
+		);
+	}
+
+	/**
 	 * Move the renewal anchor onto a provider-reported period end, unless the
 	 * operator owns it. See {@link AccountRepository.syncProviderRenewalAnchor}.
 	 */
