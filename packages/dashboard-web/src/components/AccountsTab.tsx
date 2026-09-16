@@ -8,6 +8,15 @@ import {
 	useRenameAccount,
 } from "../hooks/queries";
 import { useApiError } from "../hooks/useApiError";
+import {
+	ACCOUNT_LIST_SORT_DESCRIPTIONS,
+	ACCOUNT_LIST_SORT_LABELS,
+	ACCOUNT_LIST_SORT_MODES,
+	ACCOUNT_LIST_SORT_STORAGE_KEY,
+	type AccountListSortMode,
+	DEFAULT_ACCOUNT_LIST_SORT_MODE,
+	parseAccountListSortMode,
+} from "../lib/account-list-sort";
 import { invalidateCapacityQueries, queryKeys } from "../lib/query-keys";
 import { resolveRefreshUsageError } from "../lib/refresh-usage";
 import {
@@ -34,6 +43,14 @@ import {
 	CardHeader,
 	CardTitle,
 } from "./ui/card";
+import { Label } from "./ui/label";
+import {
+	Select,
+	SelectContent,
+	SelectItem,
+	SelectTrigger,
+	SelectValue,
+} from "./ui/select";
 
 export function AccountsTab() {
 	const { formatError } = useApiError();
@@ -81,6 +98,29 @@ export function AccountsTab() {
 	};
 
 	const [adding, setAdding] = useState(false);
+	// Row order, persisted so the choice survives reloads. localStorage can throw
+	// (e.g. Safari private mode) — degrade to the in-memory default.
+	const [sortMode, setSortMode] = useState<AccountListSortMode>(() => {
+		if (typeof window === "undefined") return DEFAULT_ACCOUNT_LIST_SORT_MODE;
+		try {
+			return parseAccountListSortMode(
+				window.localStorage.getItem(ACCOUNT_LIST_SORT_STORAGE_KEY),
+			);
+		} catch {
+			return DEFAULT_ACCOUNT_LIST_SORT_MODE;
+		}
+	});
+
+	const handleSortModeChange = (value: string) => {
+		const mode = parseAccountListSortMode(value);
+		setSortMode(mode);
+		try {
+			window.localStorage.setItem(ACCOUNT_LIST_SORT_STORAGE_KEY, mode);
+		} catch {
+			// ignore — degrade to in-memory
+		}
+	};
+
 	const [confirmDelete, setConfirmDelete] = useState<{
 		show: boolean;
 		/** The row to delete, keyed by PRIMARY KEY — the name is display/confirm only. */
@@ -699,6 +739,9 @@ export function AccountsTab() {
 		: undefined;
 	const forcedAccountLabel = forcedAccount?.name ?? forcedAccountId;
 
+	// A sort control over the empty state or a single row is a dead affordance.
+	const showSortControl = (accounts?.length ?? 0) > 1;
+
 	return (
 		<div className="space-y-section">
 			{displayError && (
@@ -731,17 +774,53 @@ export function AccountsTab() {
 
 			<Card>
 				<CardHeader>
-					<div className="flex items-center justify-between">
-						<div>
+					{/* Wraps rather than holding one line: at phone width the title, the
+					    sort cluster and the add button do not fit together, and a
+					    `justify-between` row that cannot wrap squeezes the description
+					    toward nothing. */}
+					<div className="flex flex-wrap items-center justify-between gap-item">
+						<div className="min-w-0">
 							<CardTitle>Accounts</CardTitle>
 							<CardDescription>Manage your provider accounts</CardDescription>
 						</div>
-						{!adding && (
-							<Button onClick={() => setAdding(true)} size="sm">
-								<Plus className="mr-item h-4 w-4" />
-								Add Account
-							</Button>
-						)}
+						<div className="flex flex-wrap items-center justify-end gap-item">
+							{showSortControl && (
+								<div className="flex items-center gap-item">
+									<Label
+										htmlFor="account-list-sort"
+										className="text-xs text-muted-foreground whitespace-nowrap"
+									>
+										Sort by
+									</Label>
+									<Select value={sortMode} onValueChange={handleSortModeChange}>
+										<SelectTrigger
+											id="account-list-sort"
+											className="h-9 w-[210px]"
+											title={ACCOUNT_LIST_SORT_DESCRIPTIONS[sortMode]}
+										>
+											<SelectValue />
+										</SelectTrigger>
+										<SelectContent>
+											{ACCOUNT_LIST_SORT_MODES.map((mode) => (
+												<SelectItem
+													key={mode}
+													value={mode}
+													title={ACCOUNT_LIST_SORT_DESCRIPTIONS[mode]}
+												>
+													{ACCOUNT_LIST_SORT_LABELS[mode]}
+												</SelectItem>
+											))}
+										</SelectContent>
+									</Select>
+								</div>
+							)}
+							{!adding && (
+								<Button onClick={() => setAdding(true)} size="sm">
+									<Plus className="mr-item h-4 w-4" />
+									Add Account
+								</Button>
+							)}
+						</div>
 					</div>
 				</CardHeader>
 				<CardContent>
@@ -776,6 +855,7 @@ export function AccountsTab() {
 
 					<AccountList
 						accounts={accounts}
+						sortMode={sortMode}
 						forcedAccountId={forcedAccountId}
 						onForceAccount={handleForceAccount}
 						onPauseToggle={handlePauseToggle}

@@ -5,12 +5,24 @@ import {
 } from "@clankermux/core";
 import { useEffect, useMemo, useState } from "react";
 import type { Account } from "../../api";
+import {
+	type AccountListSortMode,
+	sortAccountList,
+} from "../../lib/account-list-sort";
 import { computeWindowResetExtremes } from "../../lib/usage-windows";
 import { providerShowsWeeklyUsage } from "../../utils/provider-utils";
 import { AccountListItem } from "./AccountListItem";
 
 interface AccountListProps {
 	accounts: Account[] | undefined;
+	/**
+	 * Row order. Applied HERE rather than in the tab that owns the picker: the
+	 * renewal key resolves an anchor against today, so it has to be recomputed on
+	 * the same clock the countdowns use. The tab re-renders only when a query's
+	 * data changes identity, which an idle pool can go a whole night without —
+	 * long enough to serve yesterday's order beside today's dates.
+	 */
+	sortMode: AccountListSortMode;
 	forcedAccountId?: string | null;
 	onForceAccount?: (account: Account) => void;
 	onPauseToggle: (account: Account) => void;
@@ -41,6 +53,7 @@ interface AccountListProps {
 
 export function AccountList({
 	accounts,
+	sortMode,
 	forcedAccountId,
 	onForceAccount,
 	onPauseToggle,
@@ -121,12 +134,16 @@ export function AccountList({
 		return <p className="text-muted-foreground">No accounts configured</p>;
 	}
 
+	// Order only — the two memos above read every account either way, so neither
+	// depends on this and neither has to be recomputed when the picker moves.
+	const rows = sortAccountList(accounts, sortMode, now);
+
 	// One step wider than the widest gap INSIDE a card (`space-y-row`), so the
 	// boundary between two accounts always reads as larger than any boundary
 	// within one. At the old `space-y-item` the hierarchy was inverted.
 	return (
 		<div className="space-y-group">
-			{accounts.map((account) => (
+			{rows.map((account) => (
 				<AccountListItem
 					key={account.name}
 					account={account}

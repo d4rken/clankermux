@@ -235,6 +235,7 @@ describe("Z.AI account reconnect", () => {
 			root?.render(
 				<AccountList
 					accounts={[account]}
+					sortMode="default"
 					onAutoFallbackToggle={noop}
 					onAutoRefreshToggle={noop}
 					onBillingTypeToggle={noop}

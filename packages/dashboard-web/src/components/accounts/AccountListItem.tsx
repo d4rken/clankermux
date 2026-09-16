@@ -20,7 +20,7 @@ import {
 	Unlink,
 	Zap,
 } from "lucide-react";
-import { useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import type { Account } from "../../api";
 import {
 	type AccountPolicyKey,
@@ -131,6 +131,34 @@ export function AccountListItem({
 	const [isEditingNotes, setIsEditingNotes] = useState(false);
 	const [notesDraft, setNotesDraft] = useState("");
 	const [isSavingNotes, setIsSavingNotes] = useState(false);
+	const notesRef = useRef<HTMLTextAreaElement>(null);
+	// Set when the note editor is opened FROM the overflow menu. Radix restores
+	// focus to the menu trigger when the menu closes, which happens after the
+	// editor has mounted and taken focus — so without suppressing that restore
+	// the caret lands back on the "…" button and the first keystroke is lost.
+	const notesOpenedFromMenu = useRef(false);
+
+	/** Focus the note editor with the caret after any existing text. */
+	const focusNotesEditor = useCallback(() => {
+		const field = notesRef.current;
+		if (!field) return;
+		field.focus();
+		field.setSelectionRange(field.value.length, field.value.length);
+	}, []);
+
+	const startEditingNotes = (initial: string, fromMenu: boolean) => {
+		setNotesDraft(initial);
+		setIsEditingNotes(true);
+		notesOpenedFromMenu.current = fromMenu;
+	};
+
+	// Covers the pencil button, where nothing competes for focus. The menu path
+	// needs `onCloseAutoFocus` below as well: this effect runs while the menu is
+	// still closing, so its focus restore would land after it.
+	useEffect(() => {
+		if (isEditingNotes) focusNotesEditor();
+	}, [isEditingNotes, focusNotesEditor]);
+
 	// Header details, status chips and Force Reset gating share derived status.
 	const status = deriveAccountStatus(account);
 	// zai, minimax and ollama-cloud pin their endpoint in the provider, so
@@ -270,7 +298,15 @@ export function AccountListItem({
 								<MoreHorizontal className="h-4 w-4" />
 							</Button>
 						</DropdownMenuTrigger>
-						<DropdownMenuContent align="end">
+						<DropdownMenuContent
+							align="end"
+							onCloseAutoFocus={(event) => {
+								if (!notesOpenedFromMenu.current) return;
+								notesOpenedFromMenu.current = false;
+								event.preventDefault();
+								focusNotesEditor();
+							}}
+						>
 							{hasAutomationToggles && (
 								<>
 									<DropdownMenuLabel>Automation</DropdownMenuLabel>
@@ -371,10 +407,7 @@ export function AccountListItem({
 							)}
 							{!account.notes && (
 								<DropdownMenuItem
-									onClick={() => {
-										setNotesDraft("");
-										setIsEditingNotes(true);
-									}}
+									onClick={() => startEditingNotes("", true)}
 									title="Add a note for this account"
 								>
 									<StickyNote className="mr-item h-4 w-4" />
@@ -502,11 +535,17 @@ export function AccountListItem({
 									Re-authenticate
 								</DropdownMenuItem>
 							)}
+							<DropdownMenuSeparator />
+							<DropdownMenuItem
+								onClick={() => onRemove(account)}
+								className="text-destructive-strong focus:bg-destructive/10 focus:text-destructive-strong"
+								title="Delete this account and everything stored for it"
+							>
+								<Trash2 className="mr-item h-4 w-4" />
+								Delete Account
+							</DropdownMenuItem>
 						</DropdownMenuContent>
 					</DropdownMenu>
-					<Button variant="ghost" size="sm" onClick={() => onRemove(account)}>
-						<Trash2 className="h-4 w-4" />
-					</Button>
 					{status.showForceReset && (
 						// The one labelled button among ghost icons, so it keeps the
 						// outline that tells it apart. It is also the widest, so at ~400px
@@ -535,11 +574,11 @@ export function AccountListItem({
 			{isEditingNotes ? (
 				<div className="space-y-item">
 					<Textarea
+						ref={notesRef}
 						value={notesDraft}
 						onChange={(e) => setNotesDraft(e.target.value)}
 						placeholder="Add a note for this account…"
 						disabled={isSavingNotes}
-						autoFocus
 					/>
 					<div className="flex items-center gap-item">
 						<Button
@@ -581,10 +620,7 @@ export function AccountListItem({
 						size="sm"
 						className="h-6 w-6 p-0 shrink-0"
 						title="Edit note"
-						onClick={() => {
-							setNotesDraft(account.notes ?? "");
-							setIsEditingNotes(true);
-						}}
+						onClick={() => startEditingNotes(account.notes ?? "", false)}
 					>
 						<Edit2 className="h-3.5 w-3.5" />
 					</Button>

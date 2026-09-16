@@ -5,6 +5,10 @@ import {
 } from "@clankermux/core";
 import type { FullUsageData, StaleUsageInfo } from "@clankermux/types";
 import { providerShowsWeeklyUsage } from "../utils/provider-utils";
+import {
+	compareAccountIdentity,
+	compareSortKeys,
+} from "./account-sort-identity";
 import { classifyUsageCard, type UsageCardSource } from "./usage-windows";
 
 /**
@@ -170,40 +174,11 @@ export function soonestResetMs(
 	}
 }
 
-/** Subtraction-free numeric compare, so `Infinity` against `Infinity` is 0, not NaN. */
-function compareNumbers(a: number, b: number): number {
-	if (a === b) return 0;
-	return a < b ? -1 : 1;
-}
-
 interface DecoratedAccount<T> {
 	account: T;
 	utilization: number;
 	reset: number;
 	providerLabel: string;
-}
-
-/**
- * The total tiebreak chain every mode ends in.
- *
- * Case-insensitive name alone is NOT total: account-name uniqueness is enforced
- * with `SELECT id FROM accounts WHERE name = ?` under SQLite's BINARY
- * collation, so `Alpha` and `alpha` can both exist and compare equal at base
- * sensitivity — leaving those rows to fall back to input order. The exact-name
- * and id links close the chain.
- */
-function compareTiebreak<T extends SortableUtilizationAccount>(
-	a: DecoratedAccount<T>,
-	b: DecoratedAccount<T>,
-): number {
-	const byBase = a.account.name.localeCompare(b.account.name, undefined, {
-		sensitivity: "base",
-	});
-	if (byBase !== 0) return byBase;
-	const byExact = a.account.name.localeCompare(b.account.name);
-	if (byExact !== 0) return byExact;
-	if (a.account.id === b.account.id) return 0;
-	return a.account.id < b.account.id ? -1 : 1;
 }
 
 /**
@@ -245,22 +220,25 @@ export function sortAccountsByUtilization<T extends SortableUtilizationAccount>(
 			case "utilization-desc":
 				return (
 					compareNoUsagePartition(a, b) ||
-					compareNumbers(b.utilization, a.utilization) ||
-					compareTiebreak(a, b)
+					compareSortKeys(b.utilization, a.utilization) ||
+					compareAccountIdentity(a.account, b.account)
 				);
 			case "utilization-asc":
 				return (
 					compareNoUsagePartition(a, b) ||
-					compareNumbers(a.utilization, b.utilization) ||
-					compareTiebreak(a, b)
+					compareSortKeys(a.utilization, b.utilization) ||
+					compareAccountIdentity(a.account, b.account)
 				);
 			case "reset":
-				return compareNumbers(a.reset, b.reset) || compareTiebreak(a, b);
+				return (
+					compareSortKeys(a.reset, b.reset) ||
+					compareAccountIdentity(a.account, b.account)
+				);
 			case "provider":
 				return (
 					a.providerLabel.localeCompare(b.providerLabel) ||
 					a.account.provider.localeCompare(b.account.provider) ||
-					compareTiebreak(a, b)
+					compareAccountIdentity(a.account, b.account)
 				);
 			case "priority":
 				// Ascending = preferred first: the load balancer takes
@@ -268,12 +246,12 @@ export function sortAccountsByUtilization<T extends SortableUtilizationAccount>(
 				// wins. That is the inverse of the API list order (priority DESC),
 				// and is expected.
 				return (
-					compareNumbers(a.account.priority, b.account.priority) ||
-					compareTiebreak(a, b)
+					compareSortKeys(a.account.priority, b.account.priority) ||
+					compareAccountIdentity(a.account, b.account)
 				);
 			default:
 				// "name" — the tiebreak chain used as the primary key.
-				return compareTiebreak(a, b);
+				return compareAccountIdentity(a.account, b.account);
 		}
 	});
 
