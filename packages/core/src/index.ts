@@ -295,6 +295,11 @@ export {
 } from "./scoped-limits";
 export * from "./strategy";
 export {
+	isCodexSubscriptionLapse,
+	isDevinSubscriptionLapse,
+	PAUSE_REASON_SUBSCRIPTION_EXPIRED,
+} from "./subscription-expiry";
+export {
 	computeExpectedPct,
 	computeThrottleResumeAt,
 	computeWindowStartMs,
