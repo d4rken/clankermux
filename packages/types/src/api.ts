@@ -75,6 +75,19 @@ export interface RequestMeta {
 	 * body). Threaded to the recorder like `contextComposition`.
 	 */
 	cachePrefixHashes?: CachePrefixCapture | null;
+	/**
+	 * The inbound `user-agent`, sanitized and capped (see
+	 * `normalizeClientUserAgent` in @clankermux/core). Null/absent when the
+	 * request carried none. Threaded to the recorder like `sessionKey`.
+	 */
+	clientUserAgent?: string | null;
+	/**
+	 * The harness family OBSERVED from this request's own headers (see
+	 * `detectHarness` in @clankermux/core). Null/absent when the headers named
+	 * none — analytics infers a label for those rows at query time, so this is
+	 * never a guess. Threaded to the recorder like `sessionKey`.
+	 */
+	clientHarness?: string | null;
 	headers?: Headers;
 	/** True only for in-process scheduler/probe requests, never from client headers */
 	internal?: boolean;

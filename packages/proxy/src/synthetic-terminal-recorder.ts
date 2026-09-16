@@ -83,6 +83,8 @@ export function createSyntheticTerminalRecorder(
 			reasoningEffort: requestMeta.reasoningEffort ?? null,
 			sessionKey: requestMeta.sessionKey ?? null,
 			cachePrefixHashes: requestMeta.cachePrefixHashes ?? null,
+			clientUserAgent: requestMeta.clientUserAgent ?? null,
+			clientHarness: requestMeta.clientHarness ?? null,
 			routing: requestMeta.routing
 				? {
 						strategy: requestMeta.routing.strategy,

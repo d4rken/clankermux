@@ -559,6 +559,10 @@ export interface ResponseHandlerOptions {
 	sessionKey?: string | null;
 	/** Cache-measurement prefix digests (see RequestMeta.cachePrefixHashes). */
 	cachePrefixHashes?: CachePrefixCapture | null;
+	/** Inbound user-agent (see RequestMeta.clientUserAgent). */
+	clientUserAgent?: string | null;
+	/** Observed harness family (see RequestMeta.clientHarness). */
+	clientHarness?: string | null;
 	response: Response;
 	timestamp: number;
 	retryAttempt: number;
@@ -737,6 +741,8 @@ async function forwardToClientInner(
 		reasoningEffort,
 		sessionKey,
 		cachePrefixHashes,
+		clientUserAgent,
+		clientHarness,
 		response: responseRaw,
 		timestamp,
 		retryAttempt, // Always 0 in new flow, but kept for message compatibility
@@ -888,6 +894,8 @@ async function forwardToClientInner(
 			reasoningEffort: reasoningEffort ?? null,
 			sessionKey: sessionKey ?? null,
 			cachePrefixHashes: cachePrefixHashes ?? null,
+			clientUserAgent: clientUserAgent ?? null,
+			clientHarness: clientHarness ?? null,
 			routing: routingRecord,
 			timestamp,
 			requestBody:

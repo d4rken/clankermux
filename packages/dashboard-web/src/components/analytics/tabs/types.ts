@@ -34,6 +34,7 @@ export type TrafficTabProps = SharedFilterProps &
 		modelBreakdown: boolean;
 		setModelBreakdown: (b: boolean) => void;
 	};
+export type ClientEfficiencyTabProps = SharedFilterProps & RangeProps;
 export type ModelsTabProps = SharedFilterProps & RangeProps;
 export type ProjectsReliabilityTabProps = SharedFilterProps & RangeProps;
 export type CachingTabProps = RangeProps; // (used by a later step; export it here for a single source of truth)

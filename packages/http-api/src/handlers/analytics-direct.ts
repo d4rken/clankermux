@@ -14,6 +14,8 @@ import type {
 	AnalyticsResponse,
 	APIContext,
 	CacheFlowPoint,
+	ClientEfficiencyRow,
+	ClientModelEfficiencyRow,
 	FullAnalyticsResponse,
 	RefusalFallbackAnalytics,
 	SpeedTimePoint,
@@ -42,6 +44,19 @@ const PROJECT_BREAKDOWN_LIMIT = 20;
 
 // Max per-account rows in the activeSessions.perAccount breakdown.
 const ACTIVE_SESSIONS_BY_ACCOUNT_LIMIT = 50;
+
+// Max (API key × resolved harness) rows in the client-efficiency read. The cap
+// is REPORTED rather than silently applied: the dashboard rolls these rows up
+// itself, so a harness spread thinly across many small keys would be
+// understated by a truncation nobody could see.
+const CLIENT_EFFICIENCY_ROW_LIMIT = 500;
+
+// Max (API key × model) rows in the within-model comparison, and the request
+// floor a pair must clear to appear at all. The floor keeps single-request
+// noise out of a panel whose whole point is comparing two clients on one model;
+// the panel's caption states it.
+const CLIENT_MODEL_EFFICIENCY_ROW_LIMIT = 60;
+const CLIENT_MODEL_EFFICIENCY_MIN_REQUESTS = 5;
 
 // Context composition limits.
 const CONTEXT_BY_PROJECT_LIMIT = 10;
@@ -124,6 +139,8 @@ const FULL_RESPONSE_FIELDS: Record<keyof FullAnalyticsResponse, true> = {
 	speedTimeSeries: true,
 	routing: true,
 	cacheFlow: true,
+	clientEfficiency: true,
+	clientModelEfficiency: true,
 	projectBreakdown: true,
 	projectAttributionCoverage: true,
 	contextComposition: true,
@@ -1563,6 +1580,218 @@ export function createAnalyticsHandler(context: APIContext) {
 						uncachedTokens: Number(row.uncached_tokens) || 0,
 					}));
 
+			// Per-client efficiency, at the (API key × RESOLVED harness) grain.
+			//
+			// The harness is resolved in three tiers, first non-NULL wins:
+			//   1. `client_harness` — OBSERVED from the request's own headers.
+			//   2. a `session_key` — only Claude Code's metadata.user_id produces
+			//      one, so its presence identifies the harness on rows written
+			//      before the column existed.
+			//   3. the key's configured `client_profiles.application`, excluding
+			//      'generic' (which declares nothing).
+			//
+			// Tiers 2 and 3 are inferences and are never written back to the row;
+			// the per-source counts below are what lets the dashboard mark them as
+			// such. Two standalone queries rather than UNION branches: the shared
+			// 14-column contract carries two string columns and this grain needs
+			// far more.
+			const clientEfficiencyRows =
+				(await runPhase("client_efficiency", want("clientEfficiency"), () =>
+					db.query<
+						CostCoverageRow & {
+							api_key_id: string | null;
+							api_key_name: string;
+							resolved_harness: string | null;
+							declared_application: string | null;
+							requests: number;
+							successful_requests: number;
+							observed_requests: number;
+							inferred_session_requests: number;
+							inferred_declared_requests: number;
+							input_tokens: number | null;
+							output_tokens: number | null;
+							cache_read_tokens: number | null;
+							cache_creation_tokens: number | null;
+							context_covered_requests: number;
+							context_tokens_sum: number | null;
+							context_tools_chars_sum: number | null;
+							context_system_chars_sum: number | null;
+							context_tool_count_sum: number | null;
+						}
+					>(
+						`
+				WITH resolved AS (
+					SELECT
+						r.api_key_id AS api_key_id,
+						r.api_key_name AS api_key_name,
+						r.success AS success,
+						r.client_harness AS client_harness,
+						r.session_key AS session_key,
+						r.input_tokens AS input_tokens,
+						r.output_tokens AS output_tokens,
+						r.cache_read_input_tokens AS cache_read_input_tokens,
+						r.cache_creation_input_tokens AS cache_creation_input_tokens,
+						r.cost_usd AS cost_usd,
+						r.cost_source AS cost_source,
+						r.context_messages_chars AS context_messages_chars,
+						r.context_tools_chars AS context_tools_chars,
+						r.context_system_chars AS context_system_chars,
+						r.context_tool_count AS context_tool_count,
+						-- Computed HERE, where the \`r\` alias exists, so the shared
+						-- token definition is not copied a fourth time.
+						${CONTEXT_TOKENS_SQL} AS context_tokens,
+						cp.application AS declared_application,
+						COALESCE(
+							r.client_harness,
+							CASE WHEN r.session_key IS NOT NULL THEN 'claude-code' END,
+							CASE WHEN cp.application IS NOT NULL AND cp.application <> 'generic'
+								THEN cp.application END
+						) AS resolved_harness
+					FROM requests r
+					-- client_profiles.api_key_id is that table's PRIMARY KEY, so this
+					-- join can never multiply a request row.
+					LEFT JOIN client_profiles cp ON cp.api_key_id = r.api_key_id
+					WHERE ${whereClause}
+				)
+				SELECT
+					resolved.api_key_id AS api_key_id,
+					MAX(COALESCE(k.name, resolved.api_key_name, 'No key')) AS api_key_name,
+					resolved.resolved_harness AS resolved_harness,
+					MAX(resolved.declared_application) AS declared_application,
+					COUNT(*) AS requests,
+					SUM(CASE WHEN resolved.success = TRUE THEN 1 ELSE 0 END) AS successful_requests,
+					SUM(CASE WHEN resolved.client_harness IS NOT NULL THEN 1 ELSE 0 END) AS observed_requests,
+					SUM(CASE WHEN resolved.client_harness IS NULL AND resolved.session_key IS NOT NULL
+						THEN 1 ELSE 0 END) AS inferred_session_requests,
+					SUM(CASE WHEN resolved.client_harness IS NULL AND resolved.session_key IS NULL
+						AND resolved.resolved_harness IS NOT NULL THEN 1 ELSE 0 END) AS inferred_declared_requests,
+					SUM(COALESCE(resolved.input_tokens, 0)) AS input_tokens,
+					SUM(COALESCE(resolved.output_tokens, 0)) AS output_tokens,
+					SUM(COALESCE(resolved.cache_read_input_tokens, 0)) AS cache_read_tokens,
+					SUM(COALESCE(resolved.cache_creation_input_tokens, 0)) AS cache_creation_tokens,
+					${costCoverageSql()},
+					COUNT(resolved.context_messages_chars) AS context_covered_requests,
+					SUM(CASE WHEN resolved.context_messages_chars IS NOT NULL
+						THEN resolved.context_tokens END) AS context_tokens_sum,
+					SUM(resolved.context_tools_chars) AS context_tools_chars_sum,
+					SUM(resolved.context_system_chars) AS context_system_chars_sum,
+					SUM(resolved.context_tool_count) AS context_tool_count_sum
+				FROM resolved
+				LEFT JOIN api_keys k ON k.id = resolved.api_key_id
+				GROUP BY resolved.api_key_id, resolved.resolved_harness
+				ORDER BY COUNT(*) DESC
+				LIMIT ${CLIENT_EFFICIENCY_ROW_LIMIT}
+			`,
+						queryParams,
+					),
+				)) ?? [];
+
+			// Within-model comparison: the same two clients on the SAME model, the
+			// only comparison a difference in model mix cannot confound.
+			const clientModelEfficiencyRows =
+				(await runPhase(
+					"client_model_efficiency",
+					want("clientEfficiency"),
+					() =>
+						db.query<
+							CostCoverageRow & {
+								api_key_id: string | null;
+								api_key_name: string;
+								model: string;
+								requests: number;
+								input_tokens: number | null;
+								output_tokens: number | null;
+								cache_read_tokens: number | null;
+								cache_creation_tokens: number | null;
+							}
+						>(
+							`
+				SELECT
+					r.api_key_id AS api_key_id,
+					MAX(COALESCE(k.name, r.api_key_name, 'No key')) AS api_key_name,
+					COALESCE(r.model, 'Unknown') AS model,
+					COUNT(*) AS requests,
+					SUM(COALESCE(r.input_tokens, 0)) AS input_tokens,
+					SUM(COALESCE(r.output_tokens, 0)) AS output_tokens,
+					SUM(COALESCE(r.cache_read_input_tokens, 0)) AS cache_read_tokens,
+					SUM(COALESCE(r.cache_creation_input_tokens, 0)) AS cache_creation_tokens,
+					${costCoverageSql()}
+				FROM requests r
+				LEFT JOIN api_keys k ON k.id = r.api_key_id
+				WHERE ${whereClause} AND r.api_key_id IS NOT NULL
+				GROUP BY r.api_key_id, COALESCE(r.model, 'Unknown')
+				HAVING COUNT(*) >= ${CLIENT_MODEL_EFFICIENCY_MIN_REQUESTS}
+				ORDER BY COUNT(*) DESC
+				LIMIT ${CLIENT_MODEL_EFFICIENCY_ROW_LIMIT}
+			`,
+							queryParams,
+						),
+				)) ?? [];
+
+			/** Priced-only cost: the three cost_source buckets summed. */
+			const coveredCostUsd = (row: CostCoverageRow): number => {
+				const coverage = toCostCoverage(row);
+				return (
+					coverage.reportedUsd +
+					coverage.estimatedUsd +
+					coverage.unknownSourceUsd
+				);
+			};
+
+			const clientEfficiency = !want("clientEfficiency")
+				? undefined
+				: {
+						truncated:
+							clientEfficiencyRows.length >= CLIENT_EFFICIENCY_ROW_LIMIT,
+						rows: clientEfficiencyRows.map(
+							(row): ClientEfficiencyRow => ({
+								apiKeyId: row.api_key_id,
+								apiKey: row.api_key_name,
+								harness: row.resolved_harness,
+								declaredApplication: row.declared_application,
+								requests: Number(row.requests) || 0,
+								successfulRequests: Number(row.successful_requests) || 0,
+								observedRequests: Number(row.observed_requests) || 0,
+								inferredSessionRequests:
+									Number(row.inferred_session_requests) || 0,
+								inferredDeclaredRequests:
+									Number(row.inferred_declared_requests) || 0,
+								inputTokens: Number(row.input_tokens) || 0,
+								outputTokens: Number(row.output_tokens) || 0,
+								cacheReadTokens: Number(row.cache_read_tokens) || 0,
+								cacheCreationTokens: Number(row.cache_creation_tokens) || 0,
+								costUsd: coveredCostUsd(row),
+								pricedRequests: Number(row.priced_requests) || 0,
+								unpricedRequests: Number(row.unpriced_requests) || 0,
+								contextCoveredRequests:
+									Number(row.context_covered_requests) || 0,
+								contextTokensSum: Number(row.context_tokens_sum) || 0,
+								contextToolsCharsSum: Number(row.context_tools_chars_sum) || 0,
+								contextSystemCharsSum:
+									Number(row.context_system_chars_sum) || 0,
+								contextToolCountSum: Number(row.context_tool_count_sum) || 0,
+							}),
+						),
+					};
+
+			const clientModelEfficiency = !want("clientEfficiency")
+				? undefined
+				: clientModelEfficiencyRows.map(
+						(row): ClientModelEfficiencyRow => ({
+							apiKeyId: row.api_key_id,
+							apiKey: row.api_key_name,
+							model: row.model,
+							requests: Number(row.requests) || 0,
+							inputTokens: Number(row.input_tokens) || 0,
+							outputTokens: Number(row.output_tokens) || 0,
+							cacheReadTokens: Number(row.cache_read_tokens) || 0,
+							cacheCreationTokens: Number(row.cache_creation_tokens) || 0,
+							costUsd: coveredCostUsd(row),
+							pricedRequests: Number(row.priced_requests) || 0,
+							unpricedRequests: Number(row.unpriced_requests) || 0,
+						}),
+					);
+
 			// Context composition (1/3): char-bucket totals/averages plus the
 			// per-project split, over COVERED rows only (context columns recorded
 			// at ingest; NULL = not recorded). One UNION query with a shared
@@ -2108,6 +2337,8 @@ export function createAnalyticsHandler(context: APIContext) {
 				speedTimeSeries,
 				routing,
 				cacheFlow,
+				clientEfficiency,
+				clientModelEfficiency,
 				projectBreakdown,
 				projectAttributionCoverage,
 				contextComposition,

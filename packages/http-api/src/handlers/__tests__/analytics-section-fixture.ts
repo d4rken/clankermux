@@ -48,6 +48,24 @@ export const API_KEY_DELETED_NAME = "retired-key";
 export const PROJECT_ALPHA = "alpha";
 export const PROJECT_BETA = "beta";
 
+/** The inbound user-agent on the fixture's observed Claude Code rows. */
+export const CLAUDE_CODE_USER_AGENT = "claude-cli/2.1.270 (external, cli)";
+
+/**
+ * Configured application per key, for the third harness-inference tier.
+ *
+ * The live key declares claude-code while one of its rows is OBSERVED as codex
+ * — the declared/detected mismatch. The renamed key declares codex and has no
+ * observed harness at all, so it exercises the declared tier on its own.
+ */
+export const CLIENT_PROFILES: ReadonlyArray<{
+	apiKeyId: string;
+	application: string;
+}> = [
+	{ apiKeyId: API_KEY_LIVE, application: "claude-code" },
+	{ apiKeyId: API_KEY_RENAMED, application: "codex" },
+];
+
 type RequestRow = {
 	id: string;
 	timestamp: number;
@@ -83,6 +101,16 @@ type RequestRow = {
 	refusalCategory: string | null;
 	fallbackCreditClaimed: boolean;
 	fallbackFromModel: string | null;
+	/** Inbound user-agent; null = the row predates the column or carried none. */
+	clientUserAgent: string | null;
+	/** Harness OBSERVED from the row's own headers; null = never observed. */
+	clientHarness: string | null;
+	/**
+	 * Cache-measurement session identity. Only Claude Code produces one, so it
+	 * is the second harness-inference tier — set on rows that must resolve to
+	 * claude-code without an observed harness.
+	 */
+	sessionKey: string | null;
 };
 
 function row(overrides: Partial<RequestRow> & { id: string }): RequestRow {
@@ -117,6 +145,9 @@ function row(overrides: Partial<RequestRow> & { id: string }): RequestRow {
 		refusalCategory: null,
 		fallbackCreditClaimed: false,
 		fallbackFromModel: null,
+		clientUserAgent: null,
+		clientHarness: null,
+		sessionKey: null,
 		...overrides,
 	};
 }
@@ -133,6 +164,8 @@ const REQUESTS: RequestRow[] = [
 	row({
 		id: "r-01",
 		timestamp: FIXED_NOW - 1 * HOUR,
+		clientUserAgent: CLAUDE_CODE_USER_AGENT,
+		clientHarness: "claude-code",
 		stopReason: "refusal",
 		refusalCategory: "cyber",
 	}),
@@ -140,6 +173,8 @@ const REQUESTS: RequestRow[] = [
 	row({
 		id: "r-02",
 		timestamp: FIXED_NOW - 2 * HOUR,
+		clientUserAgent: CLAUDE_CODE_USER_AGENT,
+		clientHarness: "claude-code",
 		outputTokensPerSecond: 55,
 		responseTimeMs: 900,
 		costUsd: 0.07,
@@ -151,6 +186,9 @@ const REQUESTS: RequestRow[] = [
 	row({
 		id: "r-03",
 		timestamp: FIXED_NOW - 3 * HOUR,
+		// No observed harness, but a session key: the tier-2 inference, and the
+		// row that makes the live key's claude-code group a MIXED one.
+		sessionKey: `${API_KEY_LIVE}:11111111-2222-3333-4444-555555555555`,
 		outputTokensPerSecond: 25,
 		responseTimeMs: 2400,
 		success: false,
@@ -261,6 +299,11 @@ const REQUESTS: RequestRow[] = [
 	row({
 		id: "r-09",
 		timestamp: FIXED_NOW - 3 * DAY,
+		// The live key seen under a SECOND harness, and one its profile does not
+		// declare: the split-key rollup and the declared/detected mismatch in one
+		// row.
+		clientUserAgent: "codex_cli_rs/0.104.0",
+		clientHarness: "codex",
 		outputTokensPerSecond: 35,
 		costUsd: 0.09,
 		stopReason: "refusal",
@@ -463,8 +506,9 @@ export function seedAnalyticsFixture(db: Database): void {
 			context_messages_chars, context_tool_result_chars,
 			context_message_count, context_largest_tool_name,
 			context_largest_tool_chars, requested_model, stop_reason,
-			refusal_category, fallback_credit_claimed, fallback_from_model
-		) VALUES (?, ?, 'POST', '/v1/messages', ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			refusal_category, fallback_credit_claimed, fallback_from_model,
+			client_user_agent, client_harness, session_key
+		) VALUES (?, ?, 'POST', '/v1/messages', ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 	);
 	for (const r of REQUESTS) {
 		insertRequest.run(
@@ -500,7 +544,18 @@ export function seedAnalyticsFixture(db: Database): void {
 			r.refusalCategory,
 			r.fallbackCreditClaimed ? 1 : null,
 			r.fallbackFromModel,
+			r.clientUserAgent,
+			r.clientHarness,
+			r.sessionKey,
 		);
+	}
+
+	const insertClientProfile = db.prepare(
+		`INSERT INTO client_profiles (api_key_id, application, revision, catalogues, notices)
+		 VALUES (?, ?, 1, '{}', '[]')`,
+	);
+	for (const profile of CLIENT_PROFILES) {
+		insertClientProfile.run(profile.apiKeyId, profile.application);
 	}
 
 	const requestTimestamps = new Map(REQUESTS.map((r) => [r.id, r.timestamp]));
