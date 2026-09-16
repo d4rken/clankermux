@@ -467,6 +467,11 @@ export class ClientService {
 				for (const account of accounts) {
 					if (pinned && !pinned.includes(account.id)) continue;
 					if (pool && !pool.includes(account.id)) continue;
+					if (
+						winning?.pool_kind === "provider" &&
+						account.provider !== winning.pool_provider
+					)
+						continue;
 					const permission = permissions.get(account.id) ?? null;
 					if (isModelPermitted(permission, account.id, target, winning))
 						providers.add(account.provider);

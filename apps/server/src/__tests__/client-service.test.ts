@@ -1135,7 +1135,10 @@ describe("client service integration", () => {
 		/** A client publishing `gpt-6-astra` under its own name. */
 		async function astraClient(
 			accountIds: string[] | null = null,
-			destinations = { accountId: null, providers: null },
+			destinations: ClientDraft["destinations"] = {
+				accountId: null,
+				providers: null,
+			},
 		): Promise<string> {
 			const draft = blank();
 			draft.destinations = destinations;
@@ -1249,6 +1252,40 @@ describe("client service integration", () => {
 			const result = await service.modelMetadata(await astraClient(), "openai");
 			expect(result.models["gpt-6-astra"]).toEqual({});
 			expect(result.catalogueLoaded).toBe(false);
+		});
+
+		it("narrows the eligible accounts to a rule's provider pool", async () => {
+			await discovered("c", ["gpt-6-astra"]);
+			const account = await dbOps.getAccount("d");
+			if (!account) throw new Error("fixture account d");
+			// `d` is a devin account whose discovery never completed, so it is
+			// neither eligible nor dismissible on its own.
+			await dbOps.routing.ensurePermissionScope(
+				"d",
+				modelPermissionScope(account),
+			);
+			const id = await astraClient(null, {
+				accountId: null,
+				providers: ["codex", "devin"],
+			});
+			await dbOps.routing.saveRule({
+				...broad,
+				id: "codex-provider-only",
+				match_api_key_id: id,
+				pool_kind: "provider",
+				pool_provider: "codex",
+			});
+			// The rule routes only to codex accounts, so `d` is off the route
+			// entirely and its unread permissions say nothing about this alias.
+			const result = await service.modelMetadata(id, "openai");
+			expect(result.models["gpt-6-astra"]).toEqual({
+				contextWindow: 872_000,
+				maxOutputTokens: 128_000,
+				reasoning: true,
+				inputModalities: ["text", "image"],
+				cost: { input: 10, output: 50, cacheRead: 1, cacheWrite: 12.5 },
+			});
+			expect(result.catalogueLoaded).toBe(true);
 		});
 
 		it("says nothing when the saved account pin names no live account", async () => {
