@@ -190,8 +190,10 @@ type UpstreamStep = string | { status: number; body: string };
 /**
  * Mocked upstream keyed by Authorization header: each bearer consumes its own
  * `steps` in order and serves `healthySse` once they run out. `refreshedToken`
- * is what the mocked Codex OAuth exchange installs; the token endpoint is never
- * recorded in `calls`, which holds upstream attempts only.
+ * is what the mocked Codex OAuth exchange installs; neither the token endpoint
+ * nor the pricing catalogue is recorded in `calls`, which holds upstream
+ * attempts only. The catalogue is fetched lazily once per process, so a test
+ * that recorded it would fail or pass depending on which one ran first.
  */
 function installFetch(
 	steps: Record<string, UpstreamStep[]>,
@@ -203,6 +205,12 @@ function installFetch(
 		async (input: RequestInfo | URL, init?: RequestInit) => {
 			const request =
 				input instanceof Request ? input : new Request(String(input), init);
+			if (request.url.includes("models.dev")) {
+				return new Response("{}", {
+					status: 200,
+					headers: { "content-type": "application/json" },
+				});
+			}
 			if (request.url.includes(CODEX_TOKEN_URL)) {
 				return new Response(
 					JSON.stringify({

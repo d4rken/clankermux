@@ -10,6 +10,7 @@ import {
 	getCodexTransientFailureUntil,
 	resetCodexTransientHealthForTests,
 } from "../codex-transient-health";
+import { setCodexTransientHoldOverrideForTests } from "../codex-transient-hold";
 import type { ProxyContext } from "../handlers";
 
 /**
@@ -226,11 +227,16 @@ describe("Codex stream-prefix failover", () => {
 	beforeEach(() => {
 		originalFetch = globalThis.fetch;
 		resetCodexTransientHealthForTests();
+		// Every discarded prefix now buys the account one held retry first. At the
+		// real 30s these tests would each outrun bun's per-test timeout; the order
+		// they assert is what they are here for, not the wait.
+		setCodexTransientHoldOverrideForTests(1);
 	});
 
 	afterEach(() => {
 		globalThis.fetch = originalFetch;
 		resetCodexTransientHealthForTests();
+		setCodexTransientHoldOverrideForTests(null);
 	});
 
 	function routeByAuth(bodies: Record<string, string>, calls: string[]) {
@@ -260,7 +266,9 @@ describe("Codex stream-prefix failover", () => {
 		const res = await callHandleProxy(makeRequest(), ctx);
 		const body = await res.text();
 
-		expect(calls).toEqual(["Bearer first", "Bearer second"]);
+		// The failing account is held and retried once; the sibling takes over only
+		// after that retry fails too.
+		expect(calls).toEqual(["Bearer first", "Bearer first", "Bearer second"]);
 		// The client never sees the failure — it gets the sibling's answer.
 		expect(body).toBe(healthySse);
 		expect(body).not.toContain("server_is_overloaded");
@@ -322,7 +330,8 @@ describe("Codex stream-prefix failover", () => {
 
 		const res = await callHandleProxy(makeRequest(), ctx);
 
-		expect(calls).toEqual(["Bearer only"]);
+		// Held and retried once even with nobody to fail over to, then forwarded.
+		expect(calls).toEqual(["Bearer only", "Bearer only"]);
 		// The upstream stream, not a synthetic proxy error.
 		expect(res.status).toBe(200);
 		expect(await res.text()).toBe(preludeFailureSse);
@@ -346,7 +355,7 @@ describe("Codex stream-prefix failover", () => {
 
 		const res = await callHandleProxy(makeRequest(), ctx);
 
-		expect(calls).toEqual(["Bearer first", "Bearer second"]);
+		expect(calls).toEqual(["Bearer first", "Bearer first", "Bearer second"]);
 		expect(await res.text()).toBe(healthySse);
 		expect(getCodexTransientFailureUntil(first.id)).not.toBeNull();
 	});

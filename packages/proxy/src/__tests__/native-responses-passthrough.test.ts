@@ -9,6 +9,7 @@ import {
 	setNativeResponsesMetaContext,
 	setNativeResponsesRequestContext,
 } from "@clankermux/types";
+import { setCodexTransientHoldOverrideForTests } from "../codex-transient-hold";
 import type { ProxyContext } from "../handlers";
 import { configureLiteralRoute } from "./fixtures/routing-harness";
 
@@ -195,9 +196,14 @@ describe("native Codex stream failure routing", () => {
 	let originalFetch: typeof globalThis.fetch;
 	beforeEach(() => {
 		originalFetch = globalThis.fetch;
+		// A native stream that fails before any content buys its account one held
+		// retry (codex-transient-hold.ts). At the real 30s the only-account case
+		// below would outrun bun's per-test timeout.
+		setCodexTransientHoldOverrideForTests(1);
 	});
 	afterEach(() => {
 		globalThis.fetch = originalFetch;
+		setCodexTransientHoldOverrideForTests(null);
 	});
 
 	it("remembers an HTTP 503 after failing over within the request", async () => {
@@ -310,7 +316,9 @@ describe("native Codex stream failure routing", () => {
 			const body = await res.text();
 			if (i === 1) expect(body).toBe(rawCodexSse);
 		}
-		expect(calls).toBe(2);
+		// Three: the first request holds and retries the same account (nobody else
+		// to try), which succeeds, and the second request goes to it again.
+		expect(calls).toBe(3);
 	});
 
 	for (const [label, body] of [

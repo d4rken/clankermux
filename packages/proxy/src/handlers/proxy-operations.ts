@@ -46,6 +46,11 @@ import {
 import { cacheBodyStore } from "../cache-body-store";
 import { recordCodexTransientFailure } from "../codex-transient-health";
 import {
+	CODEX_TRANSIENT_MAX_RETRY,
+	codexTransientHoldMs,
+	holdBeforeCodexRetry,
+} from "../codex-transient-hold";
+import {
 	clearFamilyWeeklyExhausted,
 	recordFamilyWeeklyExhausted,
 } from "../family-weekly-memo";
@@ -280,6 +285,13 @@ export interface ProxyAttemptOptions {
 	 * synthetic terminal. A caller that loops over candidates supplies it.
 	 */
 	forwardTransientServerError?: () => boolean;
+	/**
+	 * Consume `ms` of this request's shared Codex hold budget; false when the
+	 * budget or the connection deadline is exhausted. Absent means no hold — the
+	 * forced-account path and the burst re-probe have no candidate loop behind
+	 * them, so a hold there would delay a response nothing else will improve.
+	 */
+	codexHoldBudget?: (ms: number) => boolean;
 	/** True only when no account failover remains. Separate from the 529 flag,
 	 * which can stop early when all remaining accounts share the overloaded provider. */
 	isLastAccountAttempt?: () => boolean;
@@ -1021,6 +1033,7 @@ export async function proxyWithAccount(
 	returnRateLimitedResponseOnExhaustion: boolean | (() => boolean) = false,
 	options?: ProxyAttemptOptions,
 	staleTokenRetryAttempt = 0,
+	codexTransientRetryAttempt = 0,
 ): Promise<Response | null> {
 	// The one model this attempt may send, frozen by the route. Named so the
 	// failure chokepoint below can record a rejection against it.
@@ -2437,6 +2450,11 @@ export async function proxyWithAccount(
 							returnRateLimitedResponseOnExhaustion,
 							options,
 							staleTokenRetryAttempt + 1,
+							// Carried, not reset: a refresh does not refund the held retry
+							// this attempt may already have spent, or "fail in-band, hold,
+							// retry, 401, refresh, fail in-band again" would hold twice on
+							// one account and eat the budget the next one needs.
+							codexTransientRetryAttempt,
 						);
 					}
 				}
@@ -2502,6 +2520,8 @@ export async function proxyWithAccount(
 						returnRateLimitedResponseOnExhaustion,
 						options,
 						staleTokenRetryAttempt + 1,
+						// Carried for the same reason as the Devin recursion above.
+						codexTransientRetryAttempt,
 					);
 				}
 			}
@@ -2607,6 +2627,61 @@ export async function proxyWithAccount(
 		) {
 			const prefixFailure = await peekCodexStreamPrefix(response, req.signal);
 			if (prefixFailure) {
+				// A backend that fails in-band is usually serving again within
+				// seconds, and the sibling this would otherwise move to has a cold
+				// prompt cache. Wait once and re-attempt the SAME account; only a
+				// second failure hands the request on. The budget is the request's,
+				// not the account's, so a pool of failing accounts cannot turn one
+				// request into a chain of holds.
+				if (
+					codexTransientRetryAttempt < CODEX_TRANSIENT_MAX_RETRY &&
+					!req.signal.aborted &&
+					options?.codexHoldBudget?.(codexTransientHoldMs()) === true
+				) {
+					// The failed body is abandoned the moment we choose to hold —
+					// release it BEFORE the wait, or the hold pins the socket and its
+					// ~512 KB native read buffer. The peek already cancelled its clone
+					// branch, so there is no live twin; discardUpstreamBody is
+					// idempotent, so `fail` below may discard again.
+					discardUpstreamBody(response);
+					liveUpstream = null;
+					// The recursion acquires its own admission, so this attempt's lease
+					// must be released first or the retry suppresses itself as
+					// probe-active. Same reason as the stale-token retry above.
+					settleOverloadProbe("abandoned", "codex_transient_hold");
+					log.warn(
+						`Account ${account.name} failed in-band (${prefixFailure}) before generating content; holding ${codexTransientHoldMs()}ms before retrying the same account`,
+					);
+					await holdBeforeCodexRetry(codexTransientHoldMs(), req.signal);
+					if (req.signal.aborted)
+						return await fail(
+							{ kind: "server_error", status: response.status },
+							response,
+						);
+					return await proxyWithAccount(
+						req,
+						url,
+						account,
+						requestMeta,
+						requestBodyBuffer,
+						_createBodyStream,
+						failoverAttempts,
+						ctx,
+						modelOverride,
+						apiKeyId,
+						apiKeyName,
+						requestBodyContext,
+						returnRateLimitedResponseOnExhaustion,
+						options,
+						staleTokenRetryAttempt,
+						codexTransientRetryAttempt + 1,
+					);
+				}
+				// Below the hold, not above it: the memo demotes the account for the
+				// next 60s, and `clearCodexTransientFailure` refuses to clear an
+				// observation newer than the request that would clear it — so an
+				// account recorded here could never shed the mark by succeeding on
+				// its own retry. Only the paths that give up record it.
 				recordCodexTransientFailure(account.id);
 				// The disposition comes from `forwardTransientServerError`, never from
 				// `isLastAccountAttempt` — see that option's doc for why the two must

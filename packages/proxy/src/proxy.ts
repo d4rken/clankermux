@@ -23,6 +23,7 @@ import {
 	isBurstHoldEligible,
 } from "./burst-retry-policy";
 import { cacheBodyStore } from "./cache-body-store";
+import { codexTransientHoldTotalBudgetMs } from "./codex-transient-hold";
 import { isFamilyWeeklyMemoExhausted } from "./family-weekly-memo";
 import {
 	BURST_RETRY_MAX_USAGE_AGE_MS,
@@ -48,6 +49,7 @@ import {
 	completeRateLimitProbe,
 	getRateLimitProbeAdmission,
 } from "./handlers/rate-limit-cooldown";
+import { OVERLOAD_HOLD_MAX_MS_NO_REARM } from "./overload-hold";
 import { setPoolHeadroomCandidates } from "./pool-headroom";
 import {
 	ANTHROPIC_UPSTREAM_OVERLOAD_KEY,
@@ -1019,6 +1021,29 @@ async function handleIngestedProxy(
 		}
 	}
 
+	// Shared Codex hold budget for this request: an attempt that fails in-band
+	// before generating content may wait and retry the same account, and this is
+	// what stops a pool of failing accounts from turning one request into a chain
+	// of waits. First-come — whichever attempts reach it spend it.
+	let codexHoldMsUsed = 0;
+	const codexHoldBudget = (ms: number): boolean => {
+		if (codexHoldMsUsed + ms > codexTransientHoldTotalBudgetMs()) return false;
+		// Elapsed-time ceiling, not a sum of sleeps. An attempt may wait up to
+		// TIME_CONSTANTS.PROXY_REQUEST_TIMEOUT_MS (30 minutes) for headers, so the
+		// holds alone say nothing about how much of the connection's life is left.
+		// A connection that cannot re-arm its Bun idle timer is capped by the flat
+		// 180s NETWORK.SERVER_IDLE_TIMEOUT_SECONDS, and every byte-free wait counts
+		// against it. Charge loop holds against the same request-level ceiling the
+		// overload hold already respects.
+		if (
+			!canRearmIdleTimeout &&
+			Date.now() - requestMeta.timestamp + ms > OVERLOAD_HOLD_MAX_MS_NO_REARM
+		)
+			return false;
+		codexHoldMsUsed += ms;
+		return true;
+	};
+
 	// --- Attempt loop --------------------------------------------------------
 	//
 	// A candidate the single-flight recovery-probe gate SUPPRESSES was never
@@ -1165,6 +1190,7 @@ async function handleIngestedProxy(
 						forwardTransientServerError: () =>
 							i === list.length - 1 ||
 							gates.everyRemainingCandidateUnattemptable(list, i),
+						codexHoldBudget,
 						onOutcome: (o) => {
 							noteAttemptOutcome(o);
 							holds.noteOverloadSuppression(list[i], o);
