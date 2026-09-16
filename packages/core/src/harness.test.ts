@@ -37,9 +37,9 @@ describe("normalizeClientUserAgent", () => {
 	});
 
 	it("strips control characters and trims", () => {
-		expect(
-			normalizeClientUserAgent(`  claude${NUL}-cli/2.1.270${DEL} `),
-		).toBe("claude-cli/2.1.270");
+		expect(normalizeClientUserAgent(`  claude${NUL}-cli/2.1.270${DEL} `)).toBe(
+			"claude-cli/2.1.270",
+		);
 	});
 
 	it("returns null when only control characters remain", () => {
