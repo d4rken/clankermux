@@ -29,13 +29,18 @@ describe("Codex transient account health", () => {
 	});
 
 	it("recognizes only explicit transient server errors", () => {
-		for (const reason of ["server_error", "service_unavailable_error"]) {
+		for (const reason of [
+			"server_error",
+			"service_unavailable_error",
+			"server_is_overloaded",
+		]) {
 			expect(isCodexTransientError(reason)).toBe(true);
 		}
 		for (const reason of [
 			null,
 			"api_error",
 			"rate_limit_exceeded",
+			"slow_down",
 			"insufficient_quota",
 			"context_length_exceeded",
 			"invalid_request_error",

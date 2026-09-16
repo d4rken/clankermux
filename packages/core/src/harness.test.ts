@@ -71,6 +71,31 @@ describe("detectHarness", () => {
 		expect(
 			detectHarness(headers({ "user-agent": "codex_cli_rs/0.104.0" })).harness,
 		).toBe("codex");
+		expect(
+			detectHarness(headers({ "user-agent": "codex_cli_rs/1.2.3" })).harness,
+		).toBe("codex");
+	});
+
+	// Copied verbatim out of the `client_user_agent` column: the strings real
+	// Codex clients send. Every surface of the family is one harness, so a
+	// paraphrase here would stop proving the rule matches production traffic.
+	it.each([
+		"codex-tui/0.154.0 (Linux Mint 22.3.0; x86_64) gnome-terminal (codex-tui; 0.154.0)",
+		"codex-tui/0.154.0 (Debian 13.0.0; x86_64) xterm-256color (codex-tui; 0.154.0)",
+		"codex_exec/0.154.0 (Linux Mint 22.3.0; x86_64) gnome-terminal (codex_exec; 0.154.0)",
+	])("labels the production Codex user-agent %s codex", (userAgent) => {
+		expect(detectHarness(headers({ "user-agent": userAgent })).harness).toBe(
+			"codex",
+		);
+	});
+
+	it("only matches the Codex family at the start of the user-agent", () => {
+		expect(
+			detectHarness(headers({ "user-agent": "notcodex-tui/1.0" })).harness,
+		).toBe("notcodex-tui");
+		expect(
+			detectHarness(headers({ "user-agent": "my-codex-thing/1.0" })).harness,
+		).toBe("my-codex-thing");
 	});
 
 	it("falls back to the originator header when the user-agent is generic", () => {
