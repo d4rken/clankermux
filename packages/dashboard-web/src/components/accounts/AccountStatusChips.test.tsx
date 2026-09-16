@@ -1088,4 +1088,31 @@ describe("AccountStatusChips — D5 Devin grace period", () => {
 
 		expect(html.toLowerCase()).toContain("grace");
 	});
+
+	// Devin's proto maps `GracePeriodStatus.NONE = 1`, so a healthy seat arrives
+	// as the string "none" rather than as an absent field. Only "active" and
+	// "expired" describe something running; "none" must render no chip at all.
+	it("D6: renders no grace chip for a seat Devin reports as not in one", () => {
+		const html = render(
+			makeAccount({
+				provider: "devin",
+				usageData: {
+					kind: "devin",
+					quotaBased: true,
+					daily: null,
+					weekly: null,
+					planName: "Team",
+					email: "seat@example.com",
+					accountId: "acct-1",
+					canUseCli: true,
+					overageBalanceUsd: 0,
+					includedCreditsRemaining: 10,
+					gracePeriodStatus: "none",
+					gracePeriodEndMs: null,
+				},
+			}),
+		);
+
+		expect(html.toLowerCase()).not.toContain("grace");
+	});
 });

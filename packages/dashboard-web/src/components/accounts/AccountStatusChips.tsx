@@ -919,8 +919,10 @@ export function AccountRenewalInfo({
 	);
 }
 
-const DEVIN_GRACE_CHIP_CLASSES: Record<DevinGracePeriodStatus, string> = {
-	none: "border border-border text-muted-foreground",
+const DEVIN_GRACE_CHIP_CLASSES: Record<
+	Exclude<DevinGracePeriodStatus, "none">,
+	string
+> = {
 	active: "bg-warning/15 text-warning-strong",
 	expired: "bg-destructive/15 text-destructive-strong",
 };
@@ -934,7 +936,8 @@ const DEVIN_GRACE_CHIP_CLASSES: Record<DevinGracePeriodStatus, string> = {
  *
  *   active  → "Grace period until Aug 17"
  *   expired → "Grace period ended Aug 17"
- *   none    → "No grace period"
+ *
+ * `none` is the enum's healthy member, not an absence, and renders nothing.
  */
 function DevinGracePeriodChip({ account }: { account: AccountResponse }) {
 	const usage = account.usageData;
@@ -942,7 +945,7 @@ function DevinGracePeriodChip({ account }: { account: AccountResponse }) {
 	// carries no such field — so the presence test comes before the comparison.
 	if (!usage || !("kind" in usage) || usage.kind !== "devin") return null;
 	const graceStatus = usage.gracePeriodStatus ?? null;
-	if (graceStatus === null) return null;
+	if (graceStatus === null || graceStatus === "none") return null;
 
 	const endsAtMs = usage.gracePeriodEndMs ?? null;
 	const endsAt = endsAtMs !== null ? new Date(endsAtMs) : null;
@@ -962,16 +965,13 @@ function DevinGracePeriodChip({ account }: { account: AccountResponse }) {
 		title = isoDate
 			? `Devin reports this seat is in a grace period until ${isoDate}. Billing state only — it does not pause the account or change routing.`
 			: "Devin reports this seat is in a grace period, with no end date. Billing state only — it does not pause the account or change routing.";
-	} else if (graceStatus === "expired") {
+	} else {
 		label = shortDate
 			? `Grace period ended ${shortDate}`
 			: "Grace period ended";
 		title = isoDate
 			? `Devin reports this seat's grace period ended on ${isoDate}. Billing state only — the account is paused, if at all, by the provider refusing a request.`
 			: "Devin reports this seat's grace period has ended. Billing state only — the account is paused, if at all, by the provider refusing a request.";
-	} else {
-		label = "No grace period";
-		title = "Devin reports no grace period is running on this seat.";
 	}
 
 	return (
