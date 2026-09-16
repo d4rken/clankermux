@@ -2,6 +2,16 @@ import { describe, expect, it, mock } from "bun:test";
 import type { Account } from "@clankermux/types";
 import { startDevinUsagePolling } from "./devin-usage-polling";
 
+/**
+ * The subscription writes every db literal below has to supply. They are
+ * exercised on their own in "Devin polled subscription period"; elsewhere they
+ * are noise.
+ */
+const subscriptionWrites = {
+	setAccountSubscriptionState: async () => {},
+	syncProviderRenewalAnchor: async () => false,
+};
+
 describe("Devin usage polling setup", () => {
 	it("uses current persisted credentials each poll, including for paused accounts", async () => {
 		const account = {
@@ -19,6 +29,7 @@ describe("Devin usage polling setup", () => {
 				{
 					getAccount: async () => current,
 					setAccountIdentityFromProfile: async () => {},
+					...subscriptionWrites,
 				},
 				90_000,
 				{ startPolling },
@@ -44,6 +55,7 @@ describe("Devin usage polling setup", () => {
 			account,
 			{
 				setAccountIdentityFromProfile: async () => {},
+				...subscriptionWrites,
 				getAccount: async () => ({
 					...account,
 					api_key: "new",
@@ -70,6 +82,7 @@ describe("Devin usage polling setup", () => {
 				{
 					getAccount: async () => account,
 					setAccountIdentityFromProfile: async () => {},
+					...subscriptionWrites,
 				},
 				90_000,
 				{ startPolling },
@@ -102,7 +115,11 @@ describe("Devin polled identity", () => {
 		const startPolling = mock((..._args: unknown[]) => {});
 		startDevinUsagePolling(
 			account,
-			{ getAccount: current, setAccountIdentityFromProfile: persist },
+			{
+				getAccount: current,
+				setAccountIdentityFromProfile: persist,
+				...subscriptionWrites,
+			},
 			90_000,
 			{ startPolling },
 		);
@@ -224,6 +241,151 @@ describe("Devin polled identity", () => {
 	});
 });
 
+describe("Devin polled subscription period", () => {
+	const account = {
+		id: "devin-sub",
+		provider: "devin",
+		api_key: "session",
+		custom_endpoint: null,
+	} as Account;
+	/** 2026-10-03 12:00 local. */
+	const PLAN_END = new Date(2026, 9, 3, 12, 0).getTime();
+
+	function setup(current: Account) {
+		const startPolling = mock((..._args: unknown[]) => {});
+		const setAccountSubscriptionState = mock(async () => {});
+		const syncProviderRenewalAnchor = mock(async () => true);
+		startDevinUsagePolling(
+			account,
+			{
+				getAccount: async () => current,
+				setAccountIdentityFromProfile: async () => {},
+				setAccountSubscriptionState,
+				syncProviderRenewalAnchor,
+			},
+			90_000,
+			{ startPolling },
+		);
+		const callbacks = startPolling.mock
+			.calls[0]?.[11] as import("@clankermux/providers").DevinPollingCallbacks;
+		return {
+			onMetadata: callbacks.onMetadata,
+			setAccountSubscriptionState,
+			syncProviderRenewalAnchor,
+		};
+	}
+
+	const usage = (
+		overrides: Partial<import("@clankermux/types").DevinUsageData> = {},
+	) =>
+		({
+			kind: "devin",
+			email: "seat@example.test",
+			accountId: "external-devin",
+			planName: "Team",
+			planEndMs: PLAN_END,
+			gracePeriodEndMs: null,
+			...overrides,
+		}) as import("@clankermux/types").DevinUsageData;
+
+	it("persists the period on a poll where the identity is unchanged", async () => {
+		// The rollover case: email, external id, plan tier and organization are
+		// all identical, which is exactly what the identity write short-circuits
+		// on. The period write has to happen before that return.
+		const current = {
+			...account,
+			identity_profile_fetched_at: 123,
+			identity_email: "seat@example.test",
+			identity_external_id: "external-devin",
+			identity_plan_tier: "Team",
+		};
+		const harness = setup(current);
+
+		await harness.onMetadata?.(usage(), "session", () => true);
+
+		expect(harness.setAccountSubscriptionState).toHaveBeenCalledWith(
+			account.id,
+			{
+				endsAtMs: PLAN_END,
+				willRenew: null,
+				graceEndsAtMs: null,
+				checkedAtMs: expect.any(Number),
+			},
+		);
+		expect(harness.syncProviderRenewalAnchor).toHaveBeenCalledWith(account.id, {
+			endsAtMs: PLAN_END,
+			cadence: null,
+			graceEndsAtMs: null,
+		});
+	});
+
+	it("passes a running grace period through to both writes", async () => {
+		const graceEnd = PLAN_END + 3 * 86_400_000;
+		const harness = setup(account);
+
+		await harness.onMetadata?.(
+			usage({ gracePeriodStatus: "active", gracePeriodEndMs: graceEnd }),
+			"session",
+			() => true,
+		);
+
+		expect(harness.setAccountSubscriptionState).toHaveBeenCalledWith(
+			account.id,
+			expect.objectContaining({ graceEndsAtMs: graceEnd }),
+		);
+		expect(harness.syncProviderRenewalAnchor).toHaveBeenCalledWith(
+			account.id,
+			expect.objectContaining({ graceEndsAtMs: graceEnd }),
+		);
+	});
+
+	it("still records the attempt when the account reports no plan end", async () => {
+		const harness = setup(account);
+
+		await harness.onMetadata?.(
+			usage({ planEndMs: null }),
+			"session",
+			() => true,
+		);
+
+		expect(harness.setAccountSubscriptionState).toHaveBeenCalledWith(
+			account.id,
+			expect.objectContaining({ endsAtMs: null }),
+		);
+	});
+
+	it("rejects a period from superseded credentials", async () => {
+		const harness = setup({ ...account, api_key: "replacement" });
+
+		await harness.onMetadata?.(usage(), "session", () => true);
+
+		expect(harness.setAccountSubscriptionState).not.toHaveBeenCalled();
+	});
+
+	it("keeps the poll usable when the period write fails", async () => {
+		const startPolling = mock((..._args: unknown[]) => {});
+		startDevinUsagePolling(
+			account,
+			{
+				getAccount: async () => account,
+				setAccountIdentityFromProfile: async () => {},
+				setAccountSubscriptionState: async () => {
+					throw new Error("database busy");
+				},
+				syncProviderRenewalAnchor: async () => false,
+			},
+			90_000,
+			{ startPolling },
+		);
+		const callbacks = startPolling.mock
+			.calls[0]?.[11] as import("@clankermux/providers").DevinPollingCallbacks;
+
+		await expect(
+			callbacks.onMetadata?.(usage(), "session", () => true),
+		).resolves.toBeUndefined();
+	});
+});
+
 describe("Devin polling effects", () => {
 	const account = {
 		id: "effects",
@@ -242,6 +404,7 @@ describe("Devin polling effects", () => {
 				{
 					getAccount: async () => current,
 					setAccountIdentityFromProfile: async () => {},
+					...subscriptionWrites,
 					updateDevinSessionExpiry,
 				},
 				90_000,
@@ -275,6 +438,7 @@ describe("Devin polling effects", () => {
 			{
 				getAccount: async () => current,
 				setAccountIdentityFromProfile: async () => {},
+				...subscriptionWrites,
 			},
 			90_000,
 			{ startPolling },
@@ -299,6 +463,7 @@ describe("Devin polling effects", () => {
 			{
 				getAccount: async () => current,
 				setAccountIdentityFromProfile: async () => {},
+				...subscriptionWrites,
 			},
 			90_000,
 			{ startPolling },

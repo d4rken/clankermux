@@ -244,6 +244,13 @@ export interface AlibabaCodingPlanUsageData {
 }
 
 // Combined usage data type that supports all providers
+/**
+ * Devin's `PlanStatus.gracePeriodStatus`, lowercased. Captured and DISPLAYED
+ * only: the enum's semantics are undocumented and no public consumer branches
+ * on it, so it must never drive a pause or a routing decision.
+ */
+export type DevinGracePeriodStatus = "none" | "active" | "expired";
+
 export interface DevinUsageData {
 	kind: "devin";
 	quotaBased: boolean;
@@ -258,6 +265,20 @@ export interface DevinUsageData {
 	canUseCli: boolean | null;
 	overageBalanceUsd: number;
 	includedCreditsRemaining: number | null;
+	/**
+	 * ms-epoch of `PlanStatus.planStart`; optional for older snapshots, null
+	 * when the message omits it (a free account reports neither plan bound).
+	 */
+	planStartMs?: number | null;
+	/**
+	 * ms-epoch of `PlanStatus.planEnd` — a recurring billing-cycle END, not an
+	 * expiry. Trial end (`UserStatus.windsurfProTrialEndTime`) and lapse
+	 * (`gracePeriodStatus`) are separate fields in the same message.
+	 */
+	planEndMs?: number | null;
+	gracePeriodStatus?: DevinGracePeriodStatus | null;
+	/** ms-epoch of `PlanStatus.gracePeriodEnd`; null when no grace period runs. */
+	gracePeriodEndMs?: number | null;
 }
 
 export type FullUsageData =
