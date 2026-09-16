@@ -741,6 +741,15 @@ async function isCacheControlRejectionError(
 }
 
 /**
+ * Bounds on the lapse classification read. A `usage_not_included` envelope is a
+ * few hundred bytes and arrives with the headers; `makeProxyRequest` clears its
+ * own timeout once headers land, so without a deadline here an upstream that
+ * answers 429 and then stalls holds the attempt open instead of failing over.
+ */
+const CODEX_LAPSE_READ_MAX_BYTES = 8 * 1024;
+const CODEX_LAPSE_READ_TIMEOUT_MS = 300;
+
+/**
  * Whether a RAW Codex 429 is the provider saying the plan does not include
  * Codex at all.
  *
@@ -753,12 +762,37 @@ async function isCodexSubscriptionLapseResponse(
 ): Promise<boolean> {
 	if (!response.headers.get("content-type")?.includes("application/json"))
 		return false;
+	// Clone only AFTER the content-type guard: a clone() tees the body, so
+	// cloning before an early return orphans an unconsumed tee branch (leak).
+	const reader = response.clone().body?.getReader();
+	if (!reader) return false;
+	let timer: ReturnType<typeof setTimeout> | undefined;
+	const deadline = new Promise<null>((resolve) => {
+		timer = setTimeout(() => resolve(null), CODEX_LAPSE_READ_TIMEOUT_MS);
+	});
+	const decoder = new TextDecoder();
+	let text = "";
+	let bytes = 0;
 	try {
-		// Clone only AFTER the content-type guard: a clone() tees the body, so
-		// cloning before an early return orphans an unconsumed tee branch (leak).
-		return isCodexSubscriptionLapse(await response.clone().json());
+		while (true) {
+			const next = await Promise.race([reader.read(), deadline]);
+			if (!next) return false; // deadline: an upstream that stalled mid-body
+			if (next.done) break;
+			bytes += next.value.byteLength;
+			if (bytes > CODEX_LAPSE_READ_MAX_BYTES) return false;
+			text += decoder.decode(next.value, { stream: true });
+		}
+		return isCodexSubscriptionLapse(JSON.parse(text + decoder.decode()));
 	} catch {
 		return false;
+	} finally {
+		clearTimeout(timer);
+		// Cancelled and NEVER awaited: with the twin the caller may still forward
+		// left unread, a tee's cancel promise does not settle at all. The cancel
+		// marks this branch cancelled synchronously, which is all that is needed.
+		void reader.cancel().catch(() => {});
+		reader.releaseLock();
+		// `response` itself stays untouched, so fail()'s disposal still owns it.
 	}
 }
 

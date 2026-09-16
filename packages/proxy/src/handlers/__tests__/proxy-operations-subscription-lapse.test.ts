@@ -293,3 +293,74 @@ describe("proxyWithAccount — Devin subscription lapse", () => {
 		expect(account.paused).toBe(false);
 	});
 });
+
+describe("proxyWithAccount — lapse classification on a stalled 429 body", () => {
+	let stall: ReadableStreamDefaultController<Uint8Array> | null = null;
+
+	beforeEach(() => {
+		clearProviderOverloadCooldown();
+	});
+	afterEach(() => {
+		try {
+			stall?.close();
+		} catch {}
+		stall = null;
+		globalThis.fetch = originalFetch;
+		clearProviderOverloadCooldown();
+		cacheBodyStore.discardStaged("req-lapse-1");
+	});
+
+	it("D2: settles the attempt when the 429 body never reaches EOF", async () => {
+		// A JSON 429 whose body emits one partial chunk and then stays open
+		// forever — a stalled upstream, not a closed one.
+		const stalled = new ReadableStream<Uint8Array>({
+			start(controller) {
+				stall = controller;
+				controller.enqueue(
+					new TextEncoder().encode('{"error":{"code":"usage_not_inc'),
+				);
+			},
+		});
+		globalThis.fetch = mock(
+			async () =>
+				new Response(stalled, {
+					status: 429,
+					headers: { "content-type": "application/json" },
+				}),
+		) as never;
+
+		const { ctx } = makeProxyContext();
+		const account = canonicalAccount({
+			id: "codex-stalled",
+			name: "codex-stalled",
+			provider: "codex",
+			access_token: "at",
+			refresh_token: "rt",
+			expires_at: Date.now() + 3_600_000,
+		});
+		const body = makeRequestBody("gpt-5.1-codex");
+
+		const settled = proxyWithAccount(
+			makeRequest(body),
+			new URL("https://proxy.local/v1/messages"),
+			account,
+			makeRequestMeta(),
+			body,
+			() => undefined,
+			0,
+			ctx,
+		).then(
+			() => "settled" as const,
+			() => "settled" as const,
+		);
+
+		const outcome = await Promise.race([
+			settled,
+			new Promise<"timeout">((resolve) =>
+				setTimeout(() => resolve("timeout"), 1_000),
+			),
+		]);
+
+		expect(outcome).toBe("settled");
+	});
+});
