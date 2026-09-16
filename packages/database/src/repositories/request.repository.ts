@@ -124,6 +124,15 @@ export interface RequestData {
 	fallbackCreditClaimed?: boolean;
 	/** The model whose refusal this retry redeems; null when unresolved. */
 	fallbackFromModel?: string | null;
+	/**
+	 * Inbound client identity, both ingress-derived and both absent on the
+	 * usage-patch re-upsert — so both COALESCE the stored value, like
+	 * `sessionKey`. `clientUserAgent` is the sanitized `user-agent`;
+	 * `clientHarness` is the harness OBSERVED from the request's own headers and
+	 * is never an inferred label.
+	 */
+	clientUserAgent?: string | null;
+	clientHarness?: string | null;
 }
 
 /** Fails to compile unless `T` is exactly `true`. */
@@ -175,10 +184,11 @@ export class RequestRepository extends BaseRepository<RequestData> {
 					context_largest_tool_chars, context_largest_tool_name,
 					context_binary_chars, usage_finalized_at,
 					session_key, cache_prefix_hashes,
+					client_user_agent, client_harness,
 					stop_reason, refusal_category, fallback_credit_claimed,
 					fallback_from_model, estimated_cost_usd, cost_source, cost_is_byok
 				)
-				VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+				VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 				ON CONFLICT (id) DO UPDATE SET
 				timestamp = EXCLUDED.timestamp,
 				method = EXCLUDED.method,
@@ -226,6 +236,8 @@ export class RequestRepository extends BaseRepository<RequestData> {
 				usage_finalized_at = COALESCE(requests.usage_finalized_at, EXCLUDED.usage_finalized_at),
 				session_key = COALESCE(EXCLUDED.session_key, requests.session_key),
 				cache_prefix_hashes = COALESCE(EXCLUDED.cache_prefix_hashes, requests.cache_prefix_hashes),
+				client_user_agent = COALESCE(EXCLUDED.client_user_agent, requests.client_user_agent),
+				client_harness = COALESCE(EXCLUDED.client_harness, requests.client_harness),
 				-- All four are facts that, once known, never become unknown again:
 				-- the usage-patch re-upsert carries no ingress facts and the ingress
 				-- upsert carries no response facts, so each side must preserve what
@@ -281,6 +293,8 @@ export class RequestRepository extends BaseRepository<RequestData> {
 				data.usageFinalizedAt ?? null,
 				data.sessionKey ?? null,
 				data.cachePrefixHashes ? JSON.stringify(data.cachePrefixHashes) : null,
+				data.clientUserAgent ?? null,
+				data.clientHarness ?? null,
 				data.stopReason ?? null,
 				data.refusalCategory ?? null,
 				// NULL, not 0, for "no credit": the column is a marker, and a 0

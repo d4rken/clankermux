@@ -146,6 +146,18 @@ export function ensureSchema(db: Database): void {
 			-- when analyzing.
 			session_key TEXT,
 			cache_prefix_hashes TEXT,
+			-- Inbound client identity, captured at ingress.
+			-- client_user_agent: the request's own user-agent header, control
+			-- characters stripped and truncated to 256 chars. NULL when it carried
+			-- none, and on every row written before this column existed.
+			client_user_agent TEXT,
+			-- client_harness: the harness family OBSERVED from this request's own
+			-- headers (see detectHarness in @clankermux/core). Non-NULL therefore
+			-- means observed. Analytics infers a label for NULL rows at query time
+			-- from session identity and the client's configured application, and
+			-- never writes one back — which is what keeps this column's meaning
+			-- "measured" rather than "best guess at the time".
+			client_harness TEXT,
 			-- Safety-refusal / fallback-credit capture.
 			-- stop_reason: the provider's terminal stop_reason, stored raw for
 			-- every provider and every reason ('end_turn', 'tool_use',
@@ -1446,6 +1458,21 @@ export const ADDITIVE_COLUMNS: ReadonlyArray<{
 		table: "requests",
 		column: "fallback_from_model",
 		ddl: "ALTER TABLE requests ADD COLUMN fallback_from_model TEXT",
+	},
+	// The inbound `user-agent`, sanitized and capped at 256 chars. NULL = the
+	// request carried none, or the row predates the column.
+	{
+		table: "requests",
+		column: "client_user_agent",
+		ddl: "ALTER TABLE requests ADD COLUMN client_user_agent TEXT",
+	},
+	// The harness family observed from the request's own headers. Non-NULL means
+	// OBSERVED; analytics infers labels for NULL rows at query time rather than
+	// backfilling them, so this column never carries a guess.
+	{
+		table: "requests",
+		column: "client_harness",
+		ddl: "ALTER TABLE requests ADD COLUMN client_harness TEXT",
 	},
 	// What the dispatch did to the client's reasoning effort, per attempt (see
 	// the ReasoningEffortAdaptation contract in @clankermux/types).

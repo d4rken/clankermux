@@ -566,8 +566,8 @@ async function handleIngestedProxy(
 		gates.applyFamilyWeeklyGate(postThrottleAccounts);
 	// The memo demotion is applied LAST, after every gate and reorder — running
 	// it earlier lets the soft-demotion partition promote a 429-refused account
-	// back to the front (see applyFamilyMemoDemotion).
-	const accounts = gates.applyFamilyMemoDemotion(
+	// back to the front (see applyFailureMemoDemotion).
+	const accounts = gates.applyFailureMemoDemotion(
 		gates.applySoftDemotionReorder(
 			gates.applyContextWindowGate(postFamilyGateAccounts),
 		),

@@ -43,6 +43,7 @@ import {
 	transferChatContext,
 } from "@clankermux/types";
 import { cacheBodyStore } from "../cache-body-store";
+import { recordCodexTransientFailure } from "../codex-transient-health";
 import {
 	clearFamilyWeeklyExhausted,
 	recordFamilyWeeklyExhausted,
@@ -1502,6 +1503,8 @@ export async function proxyWithAccount(
 						reasoningEffort: requestMeta.reasoningEffort,
 						sessionKey: requestMeta.sessionKey,
 						cachePrefixHashes: requestMeta.cachePrefixHashes,
+						clientUserAgent: requestMeta.clientUserAgent,
+						clientHarness: requestMeta.clientHarness,
 						response,
 						timestamp: requestMeta.timestamp,
 						retryAttempt: 0,
@@ -2541,6 +2544,8 @@ export async function proxyWithAccount(
 						reasoningEffort: requestMeta.reasoningEffort,
 						sessionKey: requestMeta.sessionKey,
 						cachePrefixHashes: requestMeta.cachePrefixHashes,
+						clientUserAgent: requestMeta.clientUserAgent,
+						clientHarness: requestMeta.clientHarness,
 						response,
 						timestamp: requestMeta.timestamp,
 						retryAttempt: 0,
@@ -2626,6 +2631,8 @@ export async function proxyWithAccount(
 						reasoningEffort: requestMeta.reasoningEffort,
 						sessionKey: requestMeta.sessionKey,
 						cachePrefixHashes: requestMeta.cachePrefixHashes,
+						clientUserAgent: requestMeta.clientUserAgent,
+						clientHarness: requestMeta.clientHarness,
 						response,
 						timestamp: requestMeta.timestamp,
 						retryAttempt: 0,
@@ -2671,18 +2678,16 @@ export async function proxyWithAccount(
 		// Transient upstream server error. Sits BELOW the rate-limit ladder on
 		// purpose: a 5xx that carries hard quota headers is classified by
 		// `parseRateLimit` and handled above as the quota rejection it is, and
-		// `processProxyResponse` has already settled this account's recovery
-		// probe. What is left here is a plain server failure, which says nothing
-		// about the account and everything about the attempt.
+		// `processProxyResponse` has already settled this account's recovery probe.
 		//
 		// No cooldown is written. `applyRateLimitCooldown` replaces the deadline
 		// AND the reason with no max(), so benching a server error could shorten a
 		// live `out_of_credits` or `org_permission_denied` lock that is newer and
 		// longer — and `rate_limited_reason` is read by the dashboard and the
 		// auto-refresh scheduler, which would then describe a server outage as a
-		// quota state. Failing over is the whole remedy: the outcome is an ordinary
-		// account-wide failure, which the normal failover loop and the pre-hold
-		// seeding both use to keep this account out of the rest of the request.
+		// quota state. Codex's separate transient-failure memo changes candidate
+		// order without changing those fields. The ordinary account-wide failure
+		// keeps this account out of the rest of the request.
 		// (`holdForNonCodexRecovery` deliberately ignores that bookkeeping for
 		// EVERY ordinary failure — see its comment — so a 5xx account can still be
 		// re-attempted by that hold on a later cooldown-driven pass.)
@@ -2691,6 +2696,13 @@ export async function proxyWithAccount(
 		// `isLastAccountAttempt`: see the option's doc for why the two must not be
 		// the same switch. Absent means forward, which is what every caller that
 		// does not loop over candidates wants.
+		if (
+			account.provider === "codex" &&
+			!requestMeta.internal &&
+			TRANSIENT_SERVER_ERROR_STATUSES.has(response.status)
+		) {
+			recordCodexTransientFailure(account.id);
+		}
 		if (
 			TRANSIENT_SERVER_ERROR_STATUSES.has(response.status) &&
 			options?.forwardTransientServerError &&
@@ -2744,6 +2756,8 @@ export async function proxyWithAccount(
 				reasoningEffort: requestMeta.reasoningEffort,
 				sessionKey: requestMeta.sessionKey,
 				cachePrefixHashes: requestMeta.cachePrefixHashes,
+				clientUserAgent: requestMeta.clientUserAgent,
+				clientHarness: requestMeta.clientHarness,
 				response,
 				timestamp: requestMeta.timestamp,
 				retryAttempt: 0,
@@ -2939,6 +2953,8 @@ export async function proxyForcedAccount(
 				reasoningEffort: requestMeta.reasoningEffort,
 				sessionKey: requestMeta.sessionKey,
 				cachePrefixHashes: requestMeta.cachePrefixHashes,
+				clientUserAgent: requestMeta.clientUserAgent,
+				clientHarness: requestMeta.clientHarness,
 				response: errorResponse,
 				timestamp: requestMeta.timestamp,
 				retryAttempt: 0,
@@ -3180,6 +3196,8 @@ export async function proxyForcedAccount(
 				reasoningEffort: requestMeta.reasoningEffort,
 				sessionKey: requestMeta.sessionKey,
 				cachePrefixHashes: requestMeta.cachePrefixHashes,
+				clientUserAgent: requestMeta.clientUserAgent,
+				clientHarness: requestMeta.clientHarness,
 				response,
 				timestamp: requestMeta.timestamp,
 				retryAttempt: 0,

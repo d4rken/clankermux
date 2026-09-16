@@ -1,4 +1,5 @@
 import {
+	detectHarness,
 	estimateContextWindowTokens,
 	estimateRequestTokens,
 	NETWORK,
@@ -384,6 +385,13 @@ export async function ingestProxyRequest(
 	// resolveProject) + the prefix digests, persisted with the request row.
 	requestMeta.sessionKey = resolved.sessionKey;
 	requestMeta.cachePrefixHashes = cachePrefixHashes;
+	// Inbound client identity, read from this request's own headers and stored
+	// as observed fact. A null harness stays null: the analytics read infers a
+	// label for those rows at query time, and writing a guess here would make
+	// that inference indistinguishable from a measurement forever after.
+	const harness = detectHarness(req.headers);
+	requestMeta.clientUserAgent = harness.userAgent;
+	requestMeta.clientHarness = harness.harness;
 	// Per-request reasoning effort, derived once for all failover attempts. The
 	// Codex path's translated Anthropic body loses reasoning.effort, so fall
 	// back to the value captured from the ORIGINAL Responses body (Stage A).

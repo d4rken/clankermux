@@ -18,8 +18,13 @@
  * a user choose their own key string, this file is the one that should fail.
  */
 
-import { describe, expect, it } from "bun:test";
-import { createHash, randomBytes, scryptSync } from "node:crypto";
+import { describe, expect, it, mock } from "bun:test";
+import {
+	createHash,
+	randomBytes,
+	scryptSync,
+	timingSafeEqual,
+} from "node:crypto";
 import { apiKeyHashScheme, NodeCryptoUtils } from "../api-key";
 
 const crypto = new NodeCryptoUtils();
@@ -193,47 +198,48 @@ describe("verifying against a stored hash", () => {
 		}
 	});
 
-	it("checks a legacy key without blocking the event loop", async () => {
-		// scryptSync costs ~35ms of CPU and freezes the loop for all of it, which
-		// is the stall this whole change exists to remove. The stored lookup
-		// suffix is public, so an attacker can force this path with a wrong key as
-		// often as they like; it must cost threadpool time, not serving time.
+	it("checks a legacy key through asynchronous scrypt", async () => {
 		const stored = legacyScryptHash("btr-legacylegacylegacylegacyLEG1");
+		const wrongKey = "btr-legacylegacylegacylegacyLEG2";
+		const [salt] = stored.split(":");
+		const derived = scryptSync(wrongKey, salt, 64);
+		let complete!: (error: Error | null, derivedKey: Buffer) => void;
+		const asyncScrypt = mock(
+			(
+				_key: string,
+				_salt: string,
+				_length: number,
+				callback: typeof complete,
+			) => {
+				complete = callback;
+			},
+		);
+		const syncScrypt = mock(scryptSync);
+		const verifier = new NodeCryptoUtils();
+		// Keep the controlled callback local to this instance, not node:crypto.
+		Object.defineProperty(verifier, "crypto", {
+			value: { scrypt: asyncScrypt, scryptSync: syncScrypt, timingSafeEqual },
+		});
 
-		let ticks = 0;
-		let worstLagMs = 0;
-		let last = performance.now();
-		const ticker = setInterval(() => {
-			ticks++;
-			const now = performance.now();
-			worstLagMs = Math.max(worstLagMs, now - last - 5);
-			last = now;
-		}, 5);
+		let settled = false;
+		const verification = verifier
+			.verifyApiKey(wrongKey, stored)
+			.then((valid) => {
+				settled = true;
+				return valid;
+			});
 
-		try {
-			// Let the timer actually start ticking BEFORE the work. Without this
-			// the loop never runs the callback at all: a synchronous hash would
-			// block from the first line to the last, the ticker would record
-			// nothing, and zero samples would read as zero lag. That is exactly
-			// how this test passed against scryptSync when it was first written.
-			await new Promise((r) => setTimeout(r, 40));
+		expect(asyncScrypt).toHaveBeenCalledWith(
+			wrongKey,
+			salt,
+			64,
+			expect.any(Function),
+		);
+		await Promise.resolve();
+		expect(settled).toBe(false);
 
-			// Wrong key, so this runs the hash and then fails: the attacker's case.
-			await crypto.verifyApiKey("btr-legacylegacylegacylegacyLEG2", stored);
-
-			// And let it observe the aftermath, since a block is only visible on
-			// the first tick that manages to run once the loop is free again.
-			await new Promise((r) => setTimeout(r, 40));
-		} finally {
-			clearInterval(ticker);
-		}
-
-		// Silence is not success: assert the instrument was alive before trusting
-		// what it did not see.
-		expect(ticks).toBeGreaterThan(5);
-		// A synchronous scrypt parks the loop for tens of milliseconds. Generous
-		// bound so this cannot flake on a loaded machine while still failing
-		// loudly if the implementation goes back to scryptSync.
-		expect(worstLagMs).toBeLessThan(20);
+		complete(null, derived);
+		expect(await verification).toBe(false);
+		expect(syncScrypt).not.toHaveBeenCalled();
 	});
 });

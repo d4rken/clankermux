@@ -92,11 +92,13 @@ describe("unscoped analytics response (backward compatibility)", () => {
 		const { sections: _goldenSections, ...goldenMeta } = (
 			GOLDEN as unknown as AnalyticsResponse
 		).meta as NonNullable<AnalyticsResponse["meta"]>;
-		// Cost provenance was added after this historical fixture. Assert it
-		// independently while retaining the comparison for every original field.
+		// Cost provenance is now part of the captured fixture, so the field-for-
+		// field comparison already covers it. Spelled out here as well: these
+		// eight numbers are the whole cost-attribution contract, and reading them
+		// out of a 900-line JSON blob is not the same as stating them.
 		if (!body.totals) throw new Error("Missing analytics totals");
-		const { apiCostCoverage, ...totals } = body.totals;
-		expect(apiCostCoverage).toEqual({
+		const totals = body.totals;
+		expect(totals.apiCostCoverage).toEqual({
 			reportedUsd: 0,
 			estimatedUsd: 0,
 			unknownSourceUsd: 0.064,

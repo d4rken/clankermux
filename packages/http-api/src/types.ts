@@ -68,6 +68,8 @@ export type {
 	AnalyticsTotals,
 	CacheFlowPoint,
 	CleanupResponse,
+	ClientEfficiencyRow,
+	ClientModelEfficiencyRow,
 	FullAnalyticsResponse,
 	HealthResponse,
 	IntegrityStatus,

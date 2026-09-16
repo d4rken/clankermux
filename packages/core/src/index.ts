@@ -144,6 +144,12 @@ export {
 	type FiveHourPacing,
 } from "./five-hour-pacing";
 export {
+	detectHarness,
+	HARNESS_LABEL_FOR_APPLICATION,
+	type HarnessDetection,
+	normalizeClientUserAgent,
+} from "./harness";
+export {
 	type IntervalConfig,
 	intervalManager,
 	registerCleanup,
