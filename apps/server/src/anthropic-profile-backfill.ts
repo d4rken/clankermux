@@ -90,6 +90,13 @@ export interface AnthropicProfileBackfillDeps {
 	/** Fetch + normalize a profile identity; MUST fail open (null on any error). */
 	fetchProfile: (accessToken: string) => Promise<AccountIdentity | null>;
 	/**
+	 * Resolve a live access token for one account, called immediately before that
+	 * account's fetch. Returning null or empty — the account is gone, or holds no
+	 * usable token — SKIPS the account; the pass never falls back to the
+	 * snapshot's copy. Omit the dep and the snapshot's `access_token` is used.
+	 */
+	getAccessToken?: (accountId: string) => Promise<string | null>;
+	/**
 	 * Persist a captured identity, stamping `identity_profile_fetched_at` (the
 	 * one-time gate). Called ONLY on a non-null fetch result.
 	 */
@@ -188,16 +195,29 @@ export async function runAnthropicProfileBackfill(
 			// already covered that).
 			if (index > 0 && staggerMs > 0) await sleep(staggerMs);
 			try {
-				const accessToken = account.access_token;
+				// Resolved here rather than read off the snapshot: the snapshot was
+				// taken before the initial delay, and a token refresh landing in that
+				// window (usage polling reviving expired credentials while this pass
+				// sleeps) supersedes it. A superseded token 401s, and the re-capture
+				// population has already spent its marker, so that account would
+				// never be selected again.
+				const accessToken = deps.getAccessToken
+					? await deps.getAccessToken(account.id)
+					: account.access_token;
 				if (!accessToken) {
-					// Shouldn't happen (predicate requires a truthy token), but stay safe.
+					// Nothing usable to fetch with. Skipped, never retried against the
+					// snapshot's copy — that is the staleness the resolver exists to
+					// avoid.
 					failed++;
 					continue;
 				}
 				const identity = await deps.fetchProfile(accessToken);
 				if (!identity) {
-					// Fail-open: leave identity_profile_fetched_at null so it retries
-					// on a future restart.
+					// Fail-open. For the never-fetched population that leaves
+					// identity_profile_fetched_at null, so the account stays a candidate
+					// and is retried on a future restart. The re-capture population has
+					// no retry — its marker is already claimed — and waits for the
+					// account's next re-authentication.
 					failed++;
 					log.debug(
 						`profile backfill: fetch returned null for ${account.name} (will retry next restart)`,

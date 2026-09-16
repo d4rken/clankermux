@@ -370,4 +370,76 @@ describe("runAnthropicProfileBackfill — subscription re-capture", () => {
 		expect(writes).toEqual(["fresh", "stamped"]);
 		expect(staggers).toEqual([2_500]);
 	});
+
+	// D9: the pass snapshots every account up front, then waits out an initial
+	// delay before its first fetch. A token refresh during that window — routine
+	// on a restart with expired credentials, where usage polling refreshes
+	// credentials while the backfill sleeps — leaves the snapshot's copy stale.
+	// For the never-fetched population the resulting 401 is harmless: the account
+	// stays eligible next boot. For re-capture it is terminal, because the marker
+	// is already claimed and the account is never selected again.
+	it("D9: fetches a re-capture candidate with the stored token, not the snapshot's", async () => {
+		// `stored` is the row as the database holds it. getAccounts hands out a
+		// COPY, which is what a real query does, so a write landing after the
+		// snapshot is invisible to anything still reading the snapshotted object.
+		// getAccessToken reads `stored` live, which is the seam the fix uses.
+		const stored = makeRecaptureAccount({
+			id: "stamped",
+			name: "stamped",
+			access_token: "t-stale",
+		});
+		const tokensSeen: string[] = [];
+
+		const deps: AnthropicProfileBackfillDeps = {
+			getAccounts: async () => [{ ...stored }],
+			getAccessToken: async () => stored.access_token,
+			fetchProfile: async (token) => {
+				tokensSeen.push(token);
+				// Upstream 401s on the superseded token; the profile fetch contract is
+				// fail-open, so that surfaces as null.
+				return token === stored.access_token ? identityWithSubscription : null;
+			},
+			setIdentity: async () => {},
+			claimSubscriptionRecapture: async () => true,
+			initialDelayMs: 15_000,
+			staggerMs: 0,
+			// The refresh lands while the pass is waiting out its initial delay.
+			sleep: async () => {
+				stored.access_token = "t-fresh";
+			},
+		};
+
+		await runAnthropicProfileBackfill(deps);
+
+		expect(tokensSeen).toEqual(["t-fresh"]);
+	});
+
+	// The resolver is the only token source once it is wired: a null from it
+	// (the account deleted, or its token cleared, mid-pass) skips the account
+	// rather than falling back to the snapshot's copy.
+	it("skips a re-capture candidate whose token resolver yields null", async () => {
+		const tokensSeen: string[] = [];
+		const writes: string[] = [];
+
+		await runAnthropicProfileBackfill({
+			getAccounts: async () => [
+				makeRecaptureAccount({ id: "stamped", name: "stamped" }),
+			],
+			getAccessToken: async () => null,
+			fetchProfile: async (token) => {
+				tokensSeen.push(token);
+				return identityWithSubscription;
+			},
+			setIdentity: async (accountId) => {
+				writes.push(accountId);
+			},
+			claimSubscriptionRecapture: async () => true,
+			initialDelayMs: 0,
+			staggerMs: 0,
+			sleep: noopSleep,
+		});
+
+		expect(tokensSeen).toEqual([]);
+		expect(writes).toEqual([]);
+	});
 });

@@ -1902,6 +1902,16 @@ Available endpoints:
 	// marker.
 	void runAnthropicProfileBackfill({
 		getAccounts: () => dbOps.getAllAccounts(),
+		// Re-read the row and refresh through the proxy context, so each fetch uses
+		// the token that is current when it runs rather than the one the pass
+		// snapshotted before its initial delay. Same resolution the model
+		// catalogues use via `catalogAccessToken`; null when the account is gone,
+		// which skips it.
+		getAccessToken: async (accountId) => {
+			const account = await dbOps.getAccount(accountId);
+			if (!account) return null;
+			return getValidAccessToken(account, proxyContext);
+		},
 		fetchProfile: fetchAnthropicProfile,
 		setIdentity: (accountId, identity) =>
 			dbOps.setAccountIdentityFromProfile(accountId, identity),
