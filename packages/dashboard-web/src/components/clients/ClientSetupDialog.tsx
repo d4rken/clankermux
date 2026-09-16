@@ -216,12 +216,14 @@ export function ClientSetupDialog({
 						</div>
 					</form>
 				)}
+				{apiKey && (
+					<div className="rounded-md border bg-muted/20 p-3 flex items-center gap-3">
+						<code className="text-xs break-all flex-1">{apiKey}</code>
+						<CopyButton value={apiKey}>Copy key</CopyButton>
+					</div>
+				)}
 				{ready && apiKey && (
 					<>
-						<div className="rounded-md border bg-muted/20 p-3 flex items-center gap-3">
-							<code className="text-xs break-all flex-1">{apiKey}</code>
-							<CopyButton value={apiKey}>Copy key</CopyButton>
-						</div>
 						{metadataFailed && (
 							<p className="text-sm text-muted-foreground">
 								Model limits could not be resolved, so this configuration

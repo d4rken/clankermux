@@ -219,6 +219,32 @@ describe("client setup credentials", () => {
 		}
 	});
 
+	it("hands over the key while the model limits are still resolving", async () => {
+		// The key is the one thing the dialog exists to deliver; the limits are a
+		// separate enrichment of the snippet. A slow or hung /model-metadata must
+		// not withhold the key and its copy button.
+		spyOn(globalThis, "fetch").mockImplementation(
+			mockFetch(async (input) => {
+				const url = String(input);
+				// Never settles: the metadata request is still in flight.
+				if (url.includes("/model-metadata"))
+					return await new Promise<Response>(() => {});
+				return Response.json({ data: { apiKey: "btr-pending-secret" } });
+			}),
+		);
+		await mount(undefined, piClient);
+		// Precondition: the lookup really is still outstanding.
+		expect(document.querySelector('[role="status"]')?.textContent).toContain(
+			"Resolving model limits",
+		);
+		expect(document.body.textContent).toContain("btr-pending-secret");
+		expect(
+			[...document.querySelectorAll("button")].some(
+				(b) => b.textContent?.trim() === "Copy key",
+			),
+		).toBe(true);
+	});
+
 	it("ignores a pending retrieval after the dialog closes", async () => {
 		let resolve!: (response: Response) => void;
 		spyOn(globalThis, "fetch").mockImplementation(
