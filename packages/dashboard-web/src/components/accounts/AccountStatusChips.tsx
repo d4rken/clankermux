@@ -517,6 +517,26 @@ function formatFamilyLabel(family: string): string {
 }
 
 /**
+ * Providers that lift a `subscription_expired` pause themselves once the
+ * subscription is live again: Codex when its spend capture reads an active
+ * plan, Anthropic when usage polling recovers. No other provider has a resume
+ * path — a Devin seat restored upstream looks identical to a lapsed one — so
+ * its seat stays paused until someone resumes it.
+ *
+ * Pinned by the D8 case in `AccountStatusChips.test.tsx`.
+ */
+const SELF_RESUMING_SUBSCRIPTION_PROVIDERS = new Set(["codex", "anthropic"]);
+
+/** Tooltip of the "Subscription expired" chip; the recovery clause is per provider. */
+function subscriptionExpiredTitle(provider: string): string {
+	const cause =
+		"The provider refused this account because its subscription no longer covers the service — a lapsed plan, a cancelled subscription, or a seat removed from a team. It was auto-paused and no retries are scheduled against it.";
+	return SELF_RESUMING_SUBSCRIPTION_PROVIDERS.has(provider)
+		? `${cause} Renew or restore the seat; the pause lifts on its own once the provider reports an active subscription again.`
+		: `${cause} Renew or restore the seat, then resume the account by hand — nothing here lifts this pause for you.`;
+}
+
+/**
  * The per-account status chip row shared by the Accounts page (`AccountListItem`)
  * and the Usage page (`AccountUtilizationCard`). Usage omits routing, renewal,
  * automation settings and routine off-peak / zero-reset indicators. Active
@@ -557,7 +577,7 @@ export function AccountStatusChips({
 			{status.isSubscriptionExpired && (
 				<StatusChip
 					className="bg-destructive/15 text-destructive-strong"
-					title="The provider refused this account because its subscription no longer covers the service — a lapsed plan, a cancelled subscription, or a seat removed from a team. It was auto-paused and no retries are scheduled against it. Renew or restore the seat; the pause lifts on its own once the provider reports an active subscription again."
+					title={subscriptionExpiredTitle(account.provider)}
 				>
 					<AlertCircle className="h-3.5 w-3.5" />
 					Subscription expired

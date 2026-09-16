@@ -1116,3 +1116,37 @@ describe("AccountStatusChips — D5 Devin grace period", () => {
 		expect(html.toLowerCase()).not.toContain("grace");
 	});
 });
+
+describe("AccountStatusChips — D8 subscription-expired auto-resume claim", () => {
+	/**
+	 * The tooltip of the chip whose label is `label`: the nearest `title`
+	 * attribute preceding the label text. Anchored on the visible label rather
+	 * than on any phrase inside the tooltip, so rewording the tooltip does not
+	 * silently turn this into a vacuous pass.
+	 */
+	function chipTitle(html: string, label: string): string {
+		const index = html.indexOf(label);
+		expect(index).toBeGreaterThan(-1);
+		const titles = [...html.slice(0, index).matchAll(/title="([^"]*)"/g)];
+		return titles[titles.length - 1]?.[1] ?? "";
+	}
+
+	// Only the Codex spend coordinator resumes a `subscription_expired` pause
+	// (`resumeAccountIfPausedWithReason`). A Devin seat paused this way stays
+	// paused until a human resumes it, so the chip must not promise otherwise.
+	it("D8: does not promise a self-lifting pause on a Devin seat", () => {
+		const html = render(
+			makeAccount({
+				provider: "devin",
+				paused: true,
+				pauseReason: "subscription_expired",
+			}),
+		);
+
+		expect(html).toContain("Subscription expired");
+		const title = chipTitle(html, "Subscription expired");
+		expect(title).not.toMatch(
+			/lifts? (on its own|itself|automatically)|resumes? (on its own|itself|automatically)|automatically/i,
+		);
+	});
+});
