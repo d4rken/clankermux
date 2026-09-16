@@ -101,6 +101,7 @@ it("offers Claude JSON settings and shell exports with the same credentials", ()
 		"claude-test",
 		[],
 	);
+	// biome-ignore lint/style/noNonNullAssertion: clientSetupExports always emits a settings entry for claude-code
 	const json = exports.find((e) => e.id === "settings")!;
 	expect(JSON.parse(json.snippet).env).toEqual({
 		ANTHROPIC_BASE_URL: "http://host/wire/anthropic",

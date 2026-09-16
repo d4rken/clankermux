@@ -8,6 +8,7 @@ import {
 	refusalFallbackRegistry,
 } from "./refusal-fallback-registry";
 import type { SlimUsageSummary } from "./request-recorder";
+import { streamFailureCode } from "./stream-failure-code";
 
 /**
  * usage-collector — main-thread, per-request usage/cost computer.
@@ -558,14 +559,6 @@ function applySseData(
 			state.sawMessageStop = true;
 		}
 	}
-}
-
-function streamFailureCode(parsed: SseParsed): string {
-	const error = parsed.response?.error ?? parsed.error;
-	const code = error?.code ?? parsed.code ?? error?.type;
-	return typeof code === "string" && /^[a-z][a-z0-9_]{0,127}$/.test(code)
-		? code
-		: "upstream_stream_error";
 }
 
 /** Count content deltas without retaining the generated text. Hidden reasoning

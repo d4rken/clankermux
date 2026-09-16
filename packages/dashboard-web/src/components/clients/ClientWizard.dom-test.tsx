@@ -209,6 +209,7 @@ describe("client catalogue editing", () => {
 		await mount(existing, true);
 		expect(document.body.textContent).toContain("1 selected");
 		await click("Deselect all in tab");
+		// biome-ignore lint/style/noNonNullAssertion: the catalogue step renders one tab per FORMATS entry, so two of the three are inactive
 		const tab = document.querySelector<HTMLButtonElement>(
 			'[role="tab"][data-state="inactive"]',
 		)!;
@@ -629,6 +630,7 @@ describe("new client setup defaults", () => {
 
 	it("requires a default for a side catalogue the operator opted into", async () => {
 		await mount(existing, true);
+		// biome-ignore lint/style/noNonNullAssertion: the catalogue step renders one tab per FORMATS entry, so two of the three are inactive
 		const tab = document.querySelector<HTMLButtonElement>(
 			'[role="tab"][data-state="inactive"]',
 		)!;

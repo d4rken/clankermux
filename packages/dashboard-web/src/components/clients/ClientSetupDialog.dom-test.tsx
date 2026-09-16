@@ -119,6 +119,7 @@ describe("client setup credentials", () => {
 		await mount();
 		expect(document.body.textContent).toContain("Paste the existing key once");
 		expect(document.querySelector("pre")).toBeNull();
+		// biome-ignore lint/style/noNonNullAssertion: the dialog is in its paste-the-existing-key state, which renders #existing-client-key
 		const input = document.querySelector<HTMLInputElement>(
 			"#existing-client-key",
 		)!;
