@@ -38,6 +38,12 @@ export const DEVIN_CHAT_PATH =
 	"/exa.api_server_pb.ApiServerService/GetChatMessage";
 export const DEVIN_UPSTREAM_MODEL = "x-clankermux-upstream-model";
 const MAX_UNARY_BYTES = 8 * 1024 * 1024;
+/**
+ * Cap on a non-2xx Connect error body. Errors are a short `{code, message}`
+ * JSON; anything larger is not one, and reading it unbounded would let an
+ * upstream fault become a memory problem.
+ */
+const MAX_ERROR_BYTES = 8 * 1024;
 
 /** A session rejected by two consecutive authenticated metadata attempts. */
 export class DevinSessionAuthenticationError extends DevinRpcError {
@@ -189,6 +195,57 @@ function gracePeriodStatusName(
 		: null;
 }
 
+/**
+ * The upstream `message` from a non-2xx Connect response, read under
+ * {@link MAX_ERROR_BYTES} and always leaving the body cancelled.
+ *
+ * It is the only place the reason survives: the status alone collapses several
+ * unrelated refusals into one `permission_denied`, and a lapsed seat and a
+ * disabled account are told apart by wording.
+ *
+ * Returns null on anything unreadable or unparseable, which keeps the caller's
+ * status-derived message.
+ */
+async function readDevinErrorMessage(
+	response: Response,
+): Promise<string | null> {
+	if (!response.body) return null;
+	const reader = response.body.getReader();
+	const parts: Uint8Array[] = [];
+	let size = 0;
+	let truncated = false;
+	try {
+		for (;;) {
+			const { value, done } = await reader.read();
+			if (done) break;
+			size += value.length;
+			if (size > MAX_ERROR_BYTES) {
+				truncated = true;
+				break;
+			}
+			parts.push(value);
+		}
+	} catch {
+		return null;
+	} finally {
+		await reader.cancel().catch(() => {});
+		reader.releaseLock();
+	}
+	if (truncated) return null;
+	try {
+		const parsed: unknown = JSON.parse(Buffer.concat(parts).toString("utf8"));
+		const message =
+			parsed && typeof parsed === "object"
+				? (parsed as Record<string, unknown>).message
+				: null;
+		return typeof message === "string" && message.trim() !== ""
+			? message
+			: null;
+	} catch {
+		return null;
+	}
+}
+
 function accountCacheKey(token: string, endpoint: string): string {
 	return createHash("sha256").update(`${endpoint}\0${token}`).digest("hex");
 }
@@ -313,7 +370,10 @@ export class DevinClient {
 			},
 		);
 		if (!response.ok) {
-			await response.body?.cancel();
+			// Read BEFORE cancelling: the upstream message is what distinguishes a
+			// lapsed seat from a quota that recovers on its own, and the status
+			// cannot. The code stays status-derived.
+			const upstream = await readDevinErrorMessage(response);
 			throw new DevinRpcError(
 				response.status === 401
 					? "unauthenticated"
@@ -322,7 +382,7 @@ export class DevinClient {
 						: response.status === 429
 							? "resource_exhausted"
 							: "unavailable",
-				`Devin account request failed (${response.status})`,
+				upstream ?? `Devin account request failed (${response.status})`,
 			);
 		}
 		if (!response.body)
