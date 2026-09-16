@@ -1087,11 +1087,17 @@ export class CodexSpendCoordinator {
 			// An active, non-delinquent subscription is the evidence that lifts a
 			// pause the request path set. Scoped to that one reason, so a manual or
 			// overage pause is never lifted here.
+			//
+			// Every clause demands a POSITIVE reading: `ok` means only that the
+			// body parsed, so an unknown delinquency and a missing period end are
+			// silence, not an all-clear. A partial `{"plan_type":"team"}` — which
+			// the parser accepts by design — must leave the pause standing; an
+			// operator can always resume by hand.
 			const isActive =
 				subscription.ok &&
-				subscription.isDelinquent !== true &&
-				(subscription.activeUntilMs === null ||
-					subscription.activeUntilMs > now);
+				subscription.isDelinquent === false &&
+				subscription.activeUntilMs !== null &&
+				subscription.activeUntilMs > now;
 			if (isActive) {
 				const resumed = await this.ctx.dbOps.resumeAccountIfPausedWithReason(
 					account.id,

@@ -1930,6 +1930,35 @@ describe("CodexSpendCoordinator.readUsageStatus — subscription capture", () =>
 	});
 });
 
+describe("CodexSpendCoordinator.readUsageStatus — D3 resume evidence", () => {
+	it("D3: does not resume on an ok read that states no period and no delinquency", async () => {
+		// `ok` only means the body was parseable. A body carrying plan_type but
+		// neither is_delinquent nor active_until says nothing about whether the
+		// plan covers Codex, so it is not evidence that lifts the pause the
+		// request path set.
+		const { coordinator, setAccount, resumeReasonCalls } = makeCoordinator();
+		const id = seedId("sub-capture-no-evidence");
+		const account = makeCodexAccount({
+			id,
+			paused: true,
+			pause_reason: "subscription_expired",
+		});
+		setAccount(account);
+		subscriptionResult = makeSubscription({
+			ok: true,
+			status: 200,
+			planType: "plus",
+			isDelinquent: null,
+			activeUntilMs: null,
+		});
+
+		await coordinator.readUsageStatus(id);
+
+		expect(resumeReasonCalls).toEqual([]);
+		expect(account.paused).toBe(true);
+	});
+});
+
 describe("CodexSpendCoordinator.readUsageStatus — in-flight isolation", () => {
 	it("a concurrent read and scheduled prime do NOT join (separate in-flight maps)", async () => {
 		const { coordinator, setAccount } = makeCoordinator();
