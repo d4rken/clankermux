@@ -241,6 +241,12 @@ describe("proxyWithAccount — Devin subscription lapse", () => {
 			name: "devin-lapsed",
 			provider: "devin",
 			api_key: "session",
+			// A Devin seat is an api-key account: API_KEY_PROVIDERS.devin sets
+			// mirrorKeyToTokens: false and no write path stores a refresh token.
+			// With one present, getValidAccessToken would try a refresh that
+			// DevinProvider rejects by design, and the request would die before
+			// the seat lookup under test ever runs.
+			refresh_token: "",
 			custom_endpoint: null,
 		});
 		const body = makeRequestBody("swe-2-high");
