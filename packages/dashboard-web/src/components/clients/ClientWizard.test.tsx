@@ -4,7 +4,12 @@ import { ClientWizard } from "./ClientWizard";
 
 it("starts with a named installation and leaves creation until review", () => {
 	const html = renderToStaticMarkup(
-		<ClientWizard accounts={[]} onCancel={() => {}} onSaved={() => {}} />,
+		<ClientWizard
+			clients={[]}
+			accounts={[]}
+			onCancel={() => {}}
+			onSaved={() => {}}
+		/>,
 	);
 	expect(html).toContain("Client name");
 	expect(html).toContain("Generic / script");

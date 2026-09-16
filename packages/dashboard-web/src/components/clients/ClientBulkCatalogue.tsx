@@ -24,15 +24,10 @@ import { clientRequest } from "./api";
 import type { DestinationAccount } from "./ClientWizard";
 import { suggestedModel } from "./ClientWizard";
 import { ModelFilterField, matchesModelQuery } from "./model-filter";
-import { FORMATS } from "./setup";
+import { FORMAT_LABELS, FORMATS } from "./setup";
 
 const SELECT = "h-9 rounded-md border border-input bg-background px-3 text-sm";
 const FORMAT_KEYS = Object.keys(FORMATS) as ClientFormat[];
-const SHORT: Record<ClientFormat, string> = {
-	anthropic: "Anthropic",
-	openai: "OpenAI",
-	codex: "Codex",
-};
 
 /** Comparable account pin. `null` (any allowed account) stays distinct from a list. */
 const pinOf = (model: ClientModel) =>
@@ -341,7 +336,7 @@ export function ClientBulkCatalogue({
 										value={f}
 										className="px-2 text-xs sm:px-3 sm:text-sm"
 									>
-										{SHORT[f]}
+										{FORMAT_LABELS[f]}
 										<span className="ml-1.5 rounded bg-muted px-1 text-xs tabular-nums">
 											{
 												clients.filter((c) => c.catalogues[f].models.length)

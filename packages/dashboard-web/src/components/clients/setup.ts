@@ -17,6 +17,26 @@ export const FORMATS: Record<ClientFormat, string> = {
 	openai: "OpenAI-style discovery",
 	codex: "Codex rich catalogue",
 };
+/** Tab-width names for the same formats. */
+export const FORMAT_LABELS: Record<ClientFormat, string> = {
+	anthropic: "Anthropic",
+	openai: "OpenAI",
+	codex: "Codex",
+};
+/**
+ * Claude Code only accepts an Anthropic-style ID that reads as one. The server
+ * rejects the rest outright, so this is the same rule on both sides of the
+ * wire; `client-service.test.ts` pins the server half.
+ */
+export const needsClaudeAlias = (id: string) => !/claude|anthropic/i.test(id);
+export const destinationsLabel = (
+	key: { pinnedAccountId: string | null; pinnedProviders: string[] | null },
+	accounts: { id: string; name: string }[],
+) =>
+	key.pinnedAccountId
+		? (accounts.find((a) => a.id === key.pinnedAccountId)?.name ??
+			"Unavailable account")
+		: (key.pinnedProviders?.join(", ") ?? "All accounts");
 export const preferredFormat = (
 	application: ClientApplication,
 ): ClientFormat =>

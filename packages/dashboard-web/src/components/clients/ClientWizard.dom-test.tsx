@@ -44,6 +44,40 @@ const existing: ClientView = {
 		codex: { models: [], defaultModel: null },
 	},
 };
+/** A second client to copy from: another application, a pin, another catalogue. */
+const source: ClientView = {
+	apiKeyId: "source",
+	application: "claude-code",
+	revision: 3,
+	notices: [],
+	aliasRules: [],
+	key: {
+		id: "source",
+		name: "Source",
+		prefixLast8: "12345678",
+		createdAt: "2026-01-01",
+		lastUsed: null,
+		usageCount: 0,
+		isActive: true,
+		pinnedAccountId: "a",
+		pinnedProviders: null,
+	},
+	catalogues: {
+		anthropic: {
+			models: [
+				{
+					id: "claude-src",
+					targetModel: "src",
+					displayName: "Source model",
+					accountIds: ["a"],
+				},
+			],
+			defaultModel: "claude-src",
+		},
+		openai: { models: [], defaultModel: null },
+		codex: { models: [], defaultModel: null },
+	},
+};
 async function click(text: string) {
 	const button = [...document.querySelectorAll("button")].find(
 		(b) => (b.getAttribute("aria-label") ?? b.textContent?.trim()) === text,
@@ -68,6 +102,15 @@ async function choose(label: string, value: string) {
 			"value",
 		)?.set?.call(el, value);
 		el.dispatchEvent(new Event("change", { bubbles: true }));
+	});
+}
+async function untick(label: string) {
+	const box = [...document.querySelectorAll("label")]
+		.find((l) => l.textContent?.trim() === label)
+		?.querySelector<HTMLInputElement>('input[type="checkbox"]');
+	if (!box) throw new Error(`Missing ${label} checkbox`);
+	await act(async () => {
+		box.click();
 	});
 }
 async function type(id: string, value: string) {
@@ -114,6 +157,8 @@ const DEFAULT_SUGGESTIONS = [
 let suggested = DEFAULT_SUGGESTIONS;
 let suggestionFetches = 0;
 let suggestionBodies: unknown[] = [];
+/** Number of upcoming `/suggestions` calls that answer 503 instead. */
+let suggestionFailures = 0;
 /** Set to hold the next suggestions response open until it is resolved. */
 let gate: { release: () => void; opened: Promise<void> } | null = null;
 function holdSuggestions() {
@@ -131,11 +176,13 @@ async function mount(
 	client: ClientView | null = existing,
 	jump = false,
 	models = DEFAULT_SUGGESTIONS,
+	others: ClientView[] = [],
 ) {
 	reviewed = undefined;
 	suggested = models;
 	suggestionFetches = 0;
 	suggestionBodies = [];
+	suggestionFailures = 0;
 	gate = null;
 	spyOn(globalThis, "fetch").mockImplementation(
 		mockFetch(async (input, init) => {
@@ -144,6 +191,13 @@ async function mount(
 				suggestionFetches += 1;
 				suggestionBodies.push(JSON.parse(String(init?.body)));
 				if (gate) await gate.opened;
+				if (suggestionFailures > 0) {
+					suggestionFailures -= 1;
+					return Response.json(
+						{ error: { message: "Discovery unavailable" } },
+						{ status: 503 },
+					);
+				}
 				return Response.json({
 					data: {
 						models: suggested,
@@ -181,6 +235,7 @@ async function mount(
 		root?.render(
 			<ClientWizard
 				client={client ? structuredClone(client) : undefined}
+				clients={structuredClone(client ? [client, ...others] : others)}
 				accounts={[{ id: "a", name: "Account", provider: "openai-compatible" }]}
 				onCancel={() => {}}
 				onSaved={() => {}}
@@ -195,8 +250,11 @@ async function mount(
 	}
 }
 /** Mount a brand-new client, name it, and stop on the Application step. */
-async function mountNew(models = DEFAULT_SUGGESTIONS) {
-	await mount(null, false, models);
+async function mountNew(
+	models = DEFAULT_SUGGESTIONS,
+	others: ClientView[] = [],
+) {
+	await mount(null, false, models, others);
 	await type("client-name", "Fresh");
 }
 afterEach(async () => {
@@ -679,6 +737,264 @@ describe("catalogue filtering", () => {
 		await click("Review changes");
 		expect(reviewed?.catalogues.openai.models.map((m) => m.id)).toEqual([
 			"old",
+		]);
+	});
+});
+
+describe("copying another client's setup", () => {
+	it("replaces the application, destinations and every catalogue", async () => {
+		await mount(existing, true, DEFAULT_SUGGESTIONS, [source]);
+		await choose("Copy from", "source");
+		await click("Copy into this draft");
+		await click("Review");
+		expect(reviewed?.application).toBe("claude-code");
+		expect(reviewed?.destinations).toEqual({ accountId: "a", providers: null });
+		expect(reviewed?.catalogues.anthropic.models.map((m) => m.id)).toEqual([
+			"claude-src",
+		]);
+		expect(reviewed?.catalogues.anthropic.defaultModel).toBe("claude-src");
+		expect(reviewed?.catalogues.openai.models).toEqual([]);
+	});
+
+	it("never offers the client being edited as a source", async () => {
+		await mount(existing, true, DEFAULT_SUGGESTIONS, [source]);
+		expect([...select("Copy from").options].map((o) => o.value)).toEqual([
+			"",
+			"source",
+		]);
+	});
+
+	it("copies only the parts left ticked", async () => {
+		await mount(existing, true, DEFAULT_SUGGESTIONS, [source]);
+		await choose("Copy from", "source");
+		await untick("Application recipe");
+		await untick("Allowed destinations");
+		await click("Copy into this draft");
+		await click("Review");
+		expect(reviewed?.application).toBe("generic");
+		expect(reviewed?.destinations).toEqual({
+			accountId: null,
+			providers: null,
+		});
+		expect(reviewed?.catalogues.anthropic.models.map((m) => m.id)).toEqual([
+			"claude-src",
+		]);
+	});
+
+	it("rediscovers models for the copied destinations", async () => {
+		await mount(existing, true, DEFAULT_SUGGESTIONS, [source]);
+		await choose("Copy from", "source");
+		await untick("Application recipe");
+		await untick("All three catalogues");
+		await click("Copy into this draft");
+		expect(suggestionBodies.at(-1)).toEqual({
+			destinations: { accountId: "a", providers: null },
+			refresh: false,
+		});
+	});
+
+	it("keeps a copied catalogue when the application changes afterwards", async () => {
+		await mountNew(DEFAULT_SUGGESTIONS, [source]);
+		await click("Next");
+		await click("Next");
+		await choose("Copy from", "source");
+		await untick("Application recipe");
+		await untick("Allowed destinations");
+		await click("Copy into this draft");
+		await click("Application");
+		await choose("Application", "claude-code");
+		await click("Review");
+		expect(reviewed?.catalogues.anthropic.models.map((m) => m.id)).toEqual([
+			"claude-src",
+		]);
+		expect(reviewed?.catalogues.openai.models).toEqual([]);
+	});
+
+	it("delivers the seed a copied application arms, so Review is reachable", async () => {
+		await mountNew(DEFAULT_SUGGESTIONS, [source]);
+		await click("Next");
+		await click("Next");
+		await choose("Copy from", "source");
+		await untick("All three catalogues");
+		await click("Copy into this draft");
+		// Straight to Review: leaving and re-entering the step would deliver the
+		// seed on its own and hide the regression.
+		await click("Review");
+		expect(document.body.textContent).not.toContain(
+			"Choose your catalogue models before reviewing",
+		);
+		await choose("Default model for setup", "claude-new");
+		await click("Review");
+		expect(reviewed?.application).toBe("claude-code");
+		expect(reviewed?.catalogues.anthropic.models.map((m) => m.id)).toEqual([
+			"claude-new",
+		]);
+		expect(reviewed?.catalogues.openai.models).toEqual([]);
+	});
+
+	it("names copied entries the server will refuse before Review does", async () => {
+		const generic: ClientView = {
+			...source,
+			apiKeyId: "generic",
+			application: "generic",
+			key: { ...source.key, id: "generic", name: "Generic" },
+			catalogues: {
+				...source.catalogues,
+				anthropic: {
+					models: [
+						{
+							id: "old",
+							targetModel: "old",
+							displayName: "Old model",
+							accountIds: null,
+						},
+					],
+					defaultModel: "old",
+				},
+			},
+		};
+		await mount(existing, true, DEFAULT_SUGGESTIONS, [source, generic]);
+		await choose("Copy from", "generic");
+		await untick("Application recipe");
+		await click("Copy into this draft");
+		// The draft is still generic, so publishing `old` under its own ID is fine.
+		expect(document.body.textContent).not.toContain("claude-* alias");
+		await click("Application");
+		await choose("Application", "claude-code");
+		await click("Catalogue");
+		await click("Copy into this draft");
+		expect(document.body.textContent).toContain(
+			"Claude Code cannot publish old under that ID",
+		);
+	});
+
+	it("picks up a seed stranded by a failed copy on the retry", async () => {
+		await mountNew(DEFAULT_SUGGESTIONS, [source]);
+		await click("Next");
+		await click("Next");
+		await choose("Copy from", "source");
+		await untick("All three catalogues");
+		suggestionFailures = 1;
+		await click("Copy into this draft");
+		expect(document.body.textContent).toContain("Discovery unavailable");
+		// The retry sees an application that has already moved, so the arming
+		// condition alone no longer holds; only `pendingSeed` still says a seed
+		// is owed.
+		await click("Copy into this draft");
+		await click("Review");
+		expect(document.body.textContent).not.toContain(
+			"Choose your catalogue models before reviewing",
+		);
+		await choose("Default model for setup", "claude-new");
+		await click("Review");
+		expect(reviewed?.catalogues.anthropic.models.map((m) => m.id)).toEqual([
+			"claude-new",
+		]);
+	});
+
+	it("seeds an application-only copy without refetching discovery", async () => {
+		await mountNew(DEFAULT_SUGGESTIONS, [source]);
+		await click("Next");
+		await click("Next");
+		const before = suggestionFetches;
+		await choose("Copy from", "source");
+		await untick("All three catalogues");
+		await untick("Allowed destinations");
+		await click("Copy into this draft");
+		expect(suggestionFetches).toBe(before);
+		await choose("Default model for setup", "claude-new");
+		await click("Review");
+		expect(reviewed?.catalogues.anthropic.models.map((m) => m.id)).toEqual([
+			"claude-new",
+		]);
+	});
+
+	it("leaves the catalogue untouchable while a copy is in flight", async () => {
+		await mountNew(DEFAULT_SUGGESTIONS, [source]);
+		await click("Next");
+		await click("Next");
+		await choose("Copy from", "source");
+		await untick("All three catalogues");
+		const release = holdSuggestions();
+		await click("Copy into this draft");
+		// The seed lands when discovery answers, so anything selected here would
+		// be overwritten by it.
+		expect(
+			[...document.querySelectorAll("button")].find(
+				(b) => b.textContent?.trim() === "Select all in tab",
+			)?.disabled,
+		).toBe(true);
+		expect(select("Default model for setup").disabled).toBe(true);
+		// The custom editor writes through `updateModels` like any selection, so
+		// it has to be shut too.
+		expect(
+			[...document.querySelectorAll("button")].find(
+				(b) => b.textContent?.trim() === "Add to selection",
+			)?.disabled,
+		).toBe(true);
+		expect(
+			(document.getElementById("model-id") as HTMLInputElement).disabled,
+		).toBe(true);
+		expect(
+			document.querySelector<HTMLInputElement>(
+				'[aria-label="Anthropic-style discovery models"] input[type="checkbox"]',
+			)?.disabled,
+		).toBe(true);
+		expect(
+			[...document.querySelectorAll("button")].find(
+				(b) => b.textContent?.trim() === "Edit",
+			)?.disabled,
+		).toBe(true);
+		await act(async () => release());
+		await act(async () => {});
+		expect(
+			[...document.querySelectorAll("button")].find(
+				(b) => b.textContent?.trim() === "Select all in tab",
+			)?.disabled,
+		).toBe(false);
+	});
+
+	it("reaches Review after answering a failed copy's seed by hand", async () => {
+		await mountNew(DEFAULT_SUGGESTIONS, [source]);
+		await click("Next");
+		await click("Next");
+		await choose("Copy from", "source");
+		await untick("All three catalogues");
+		suggestionFailures = 1;
+		await click("Copy into this draft");
+		expect(document.body.textContent).toContain("Discovery unavailable");
+		// No second copy: filling the catalogue in is the whole recovery.
+		await click("Select all in tab");
+		await choose("Default model for setup", "claude-new");
+		await click("Review");
+		expect(document.body.textContent).not.toContain(
+			"Choose your catalogue models before reviewing",
+		);
+		expect(reviewed?.catalogues.anthropic.models.map((m) => m.id)).toEqual([
+			"claude-new",
+		]);
+	});
+
+	it("retires a seed the operator's own selections have superseded", async () => {
+		await mountNew(DEFAULT_SUGGESTIONS, [source]);
+		await click("Next");
+		await click("Next");
+		await choose("Copy from", "source");
+		await untick("All three catalogues");
+		suggestionFailures = 1;
+		await click("Copy into this draft");
+		expect(document.body.textContent).toContain("Discovery unavailable");
+		// The failed copy left the seed armed on Anthropic. Answering it by hand
+		// has to retire it, not just skip it.
+		await click("Select all in tab");
+		await choose("Default model for setup", "claude-new");
+		await click("Copy into this draft");
+		await click("Review");
+		expect(document.body.textContent).not.toContain(
+			"Choose your catalogue models before reviewing",
+		);
+		expect(reviewed?.catalogues.anthropic.models.map((m) => m.id)).toEqual([
+			"claude-new",
 		]);
 	});
 });
