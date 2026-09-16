@@ -1,5 +1,6 @@
 import type {
 	ClientApplication,
+	ClientCatalogue,
 	ClientDraft,
 	ClientFormat,
 	ClientModel,
@@ -14,7 +15,14 @@ import { Input } from "../ui/input";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "../ui/tabs";
 import { clientRequest } from "./api";
 import { ModelFilterField, matchesModelQuery } from "./model-filter";
-import { APPLICATIONS, FORMAT_LABELS, FORMATS, preferredFormat } from "./setup";
+import {
+	APPLICATIONS,
+	destinationsLabel,
+	FORMAT_LABELS,
+	FORMATS,
+	needsClaudeAlias,
+	preferredFormat,
+} from "./setup";
 
 export interface DestinationAccount {
 	id: string;
@@ -62,13 +70,57 @@ export function suggestedModel(
 	const alias =
 		application === "claude-code" &&
 		format === "anthropic" &&
-		!/claude|anthropic/i.test(id);
+		needsClaudeAlias(id);
 	return {
 		id: alias ? `claude-${id}` : id,
 		displayName,
 		targetModel: id,
 		accountIds: alias ? accountIds : null,
 	};
+}
+/**
+ * The two server rules a copy can break that the draft alone cannot repair,
+ * phrased for the operator. Selecting models by hand cannot reach either: the
+ * Anthropic rule is applied by `suggestedModel` as entries are offered, and the
+ * Codex tab only ever offers targets discovery could substantiate. Copying
+ * takes another client's entries verbatim, so it can carry in both.
+ *
+ * Review is still the authority; this only moves the refusal forward to the
+ * click that caused it.
+ */
+function uncommittable(
+	application: ClientApplication,
+	catalogues: Record<ClientFormat, ClientCatalogue>,
+	discovered: ClientSuggestions | null,
+): string[] {
+	const messages: string[] = [];
+	const unaliased =
+		application === "claude-code"
+			? catalogues.anthropic.models
+					.filter((m) => needsClaudeAlias(m.id))
+					.map((m) => m.id)
+			: [];
+	if (unaliased.length)
+		messages.push(
+			`Claude Code cannot publish ${unaliased.join(", ")} under ${unaliased.length === 1 ? "that ID" : "those IDs"}; each needs a claude-* alias.`,
+		);
+	// Undiscovered is not the same as unavailable, so this stays silent until
+	// discovery has actually answered for these destinations.
+	const rich = new Set(
+		(discovered?.models ?? [])
+			.filter((m) => m.codexMetadataAvailable)
+			.map((m) => m.id),
+	);
+	const bare = discovered
+		? catalogues.codex.models
+				.filter((m) => !rich.has(m.targetModel))
+				.map((m) => m.id)
+		: [];
+	if (bare.length)
+		messages.push(
+			`These destinations have no Codex metadata for ${bare.join(", ")}.`,
+		);
+	return messages;
 }
 export function ClientWizard({
 	client,
@@ -237,6 +289,40 @@ export function ClientWizard({
 		suggestionsDestinations.current = stamp;
 		return result;
 	};
+	/**
+	 * Write the owed seed into `application`'s preferred format and spend it.
+	 * The application is passed rather than read off the draft: a seed is armed
+	 * by the change that selects a new application, so the state holding it has
+	 * not landed by the time the seed is written.
+	 */
+	const seedPreferred = (
+		application: ClientApplication,
+		models: ClientSuggestions["models"],
+	) => {
+		const preferred = preferredFormat(application);
+		setDraft((d) => ({
+			...d,
+			catalogues: {
+				...d.catalogues,
+				[preferred]: {
+					defaultModel: null,
+					models: models
+						.filter((m) => preferred !== "codex" || m.codexMetadataAvailable)
+						.map((m) =>
+							suggestedModel(
+								m.id,
+								m.displayName,
+								m.accountIds,
+								application,
+								preferred,
+							),
+						),
+				},
+			},
+		}));
+		setSeeded(preferred);
+		setPendingSeed(false);
+	};
 	const loadSuggestions = async (refresh = false) => {
 		const result = await ensureSuggestions(refresh);
 		if (!pendingSeed) return;
@@ -246,28 +332,7 @@ export function ClientWizard({
 			setPendingSeed(false);
 			return;
 		}
-		setDraft((d) => ({
-			...d,
-			catalogues: {
-				...d.catalogues,
-				[preferred]: {
-					defaultModel: null,
-					models: result.models
-						.filter((m) => preferred !== "codex" || m.codexMetadataAvailable)
-						.map((m) =>
-							suggestedModel(
-								m.id,
-								m.displayName,
-								m.accountIds,
-								d.application,
-								preferred,
-							),
-						),
-				},
-			},
-		}));
-		setSeeded(preferred);
-		setPendingSeed(false);
+		seedPreferred(draft.application, result.models);
 	};
 	/**
 	 * Move the automatic seed to the new application's format. Only formats the
@@ -306,11 +371,6 @@ export function ClientWizard({
 		.sort((a, b) => a.key.name.localeCompare(b.key.name));
 	const copySource = copySources.find((c) => c.apiKeyId === copy.sourceId);
 	const copyParts = COPY_PARTS.filter((part) => copy[part.key]);
-	const destinationsOf = (view: ClientView) =>
-		view.key.pinnedAccountId
-			? (accounts.find((a) => a.id === view.key.pinnedAccountId)?.name ??
-				"Unavailable account")
-			: (view.key.pinnedProviders?.join(", ") ?? "All accounts");
 	/**
 	 * Seed this draft from another client. The name and the API key are the
 	 * client's identity, so they are never part of a copy; everything else is
@@ -321,19 +381,37 @@ export function ClientWizard({
 		run(async () => {
 			const source = copySource;
 			if (!source) return;
+			const application = copy.application
+				? source.application
+				: draft.application;
 			const destinations = copy.destinations
 				? {
 						accountId: source.key.pinnedAccountId,
 						providers: source.key.pinnedProviders,
 					}
 				: draft.destinations;
+			const catalogues = copy.catalogues
+				? structuredClone(source.catalogues)
+				: draft.catalogues;
+			const nextPreferred = preferredFormat(application);
+			/**
+			 * `changeApplication` arms a seed whenever it moves a new client to a
+			 * format they have never edited, and only the step-2 entry consumes
+			 * one. A copy runs with step 2 already open, so an armed seed nobody
+			 * writes would leave Review refusing with "Choose your catalogue models
+			 * before reviewing" until the operator left the step and came back.
+			 */
+			const seedOwed =
+				!client &&
+				copy.application &&
+				!copy.catalogues &&
+				nextPreferred !== preferredFormat(draft.application) &&
+				!touched.has(nextPreferred);
 			if (copy.application) changeApplication(source.application);
 			setDraft((d) => ({
 				...d,
 				destinations,
-				...(copy.catalogues
-					? { catalogues: structuredClone(source.catalogues) }
-					: {}),
+				...(copy.catalogues ? { catalogues } : {}),
 			}));
 			if (copy.catalogues) {
 				// A copied catalogue is the operator's answer for every format, so
@@ -344,12 +422,21 @@ export function ClientWizard({
 				setPendingSeed(false);
 			}
 			setCustom({ id: "", target: "", name: "", accounts: [], editId: null });
+			// Discovery is scoped to the destinations, so copied ones need their own
+			// suggestions before the candidate list — or a seed — means anything.
+			const discovered =
+				copy.destinations || seedOwed
+					? await ensureSuggestions(false, destinations)
+					: suggestions;
+			if (seedOwed) seedPreferred(application, discovered?.models ?? []);
+			const rejected = uncommittable(application, catalogues, discovered);
 			setCopied(
-				`Copied ${copyParts.map((part) => part.label.toLowerCase()).join(", ")} from ${source.key.name}. Nothing is saved until you review.`,
+				`Copied ${copyParts.map((part) => part.label.toLowerCase()).join(", ")} from ${source.key.name}. Nothing is saved until you review.${
+					rejected.length
+						? ` ${rejected.join(" ")} Fix that on the affected tab, or Review will refuse the whole client.`
+						: ""
+				}`,
 			);
-			// Discovery is scoped to the destinations, so copied ones need their
-			// own suggestions before the candidate list means anything.
-			if (copy.destinations) await ensureSuggestions(false, destinations);
 		});
 	const candidates = new Map<string, ClientModel>();
 	for (const m of suggestions?.models ?? [])
@@ -682,7 +769,7 @@ export function ClientWizard({
 									{copySource && (
 										<p className="text-xs leading-5 text-muted-foreground -mt-1">
 											{APPLICATIONS[copySource.application]} ·{" "}
-											{destinationsOf(copySource)} ·{" "}
+											{destinationsLabel(copySource.key, accounts)} ·{" "}
 											{FORMAT_KEYS.map(
 												(f) =>
 													`${copySource.catalogues[f].models.length} ${FORMAT_LABELS[f]}`,

@@ -15,7 +15,7 @@ import { ApplicationMarkIcon } from "./clients/application-marks";
 import { ClientBulkCatalogue } from "./clients/ClientBulkCatalogue";
 import { ClientSetupDialog } from "./clients/ClientSetupDialog";
 import { ClientWizard } from "./clients/ClientWizard";
-import { APPLICATIONS } from "./clients/setup";
+import { APPLICATIONS, destinationsLabel } from "./clients/setup";
 import { Button } from "./ui/button";
 import { Card, CardContent } from "./ui/card";
 import {
@@ -180,10 +180,7 @@ export function ClientsTab() {
 			a.localeCompare(b);
 		const rows = clients.map((client) => ({
 			client,
-			destinations: client.key.pinnedAccountId
-				? (accounts.find((a) => a.id === client.key.pinnedAccountId)?.name ??
-					"Unavailable account")
-				: (client.key.pinnedProviders?.join(", ") ?? "All accounts"),
+			destinations: destinationsLabel(client.key, accounts),
 			models:
 				client.catalogues.anthropic.models.length +
 				client.catalogues.openai.models.length +

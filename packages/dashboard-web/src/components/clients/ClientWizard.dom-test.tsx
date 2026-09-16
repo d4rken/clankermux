@@ -66,13 +66,13 @@ const source: ClientView = {
 		anthropic: {
 			models: [
 				{
-					id: "src",
+					id: "claude-src",
 					targetModel: "src",
 					displayName: "Source model",
-					accountIds: null,
+					accountIds: ["a"],
 				},
 			],
-			defaultModel: "src",
+			defaultModel: "claude-src",
 		},
 		openai: { models: [], defaultModel: null },
 		codex: { models: [], defaultModel: null },
@@ -740,9 +740,9 @@ describe("copying another client's setup", () => {
 		expect(reviewed?.application).toBe("claude-code");
 		expect(reviewed?.destinations).toEqual({ accountId: "a", providers: null });
 		expect(reviewed?.catalogues.anthropic.models.map((m) => m.id)).toEqual([
-			"src",
+			"claude-src",
 		]);
-		expect(reviewed?.catalogues.anthropic.defaultModel).toBe("src");
+		expect(reviewed?.catalogues.anthropic.defaultModel).toBe("claude-src");
 		expect(reviewed?.catalogues.openai.models).toEqual([]);
 	});
 
@@ -767,7 +767,7 @@ describe("copying another client's setup", () => {
 			providers: null,
 		});
 		expect(reviewed?.catalogues.anthropic.models.map((m) => m.id)).toEqual([
-			"src",
+			"claude-src",
 		]);
 	});
 
@@ -795,8 +795,66 @@ describe("copying another client's setup", () => {
 		await choose("Application", "claude-code");
 		await click("Review");
 		expect(reviewed?.catalogues.anthropic.models.map((m) => m.id)).toEqual([
-			"src",
+			"claude-src",
 		]);
 		expect(reviewed?.catalogues.openai.models).toEqual([]);
+	});
+
+	it("delivers the seed a copied application arms, so Review is reachable", async () => {
+		await mountNew(DEFAULT_SUGGESTIONS, [source]);
+		await click("Next");
+		await click("Next");
+		await choose("Copy from", "source");
+		await untick("All three catalogues");
+		await click("Copy into this draft");
+		// Straight to Review: leaving and re-entering the step would deliver the
+		// seed on its own and hide the regression.
+		await click("Review");
+		expect(document.body.textContent).not.toContain(
+			"Choose your catalogue models before reviewing",
+		);
+		await choose("Default model for setup", "claude-new");
+		await click("Review");
+		expect(reviewed?.application).toBe("claude-code");
+		expect(reviewed?.catalogues.anthropic.models.map((m) => m.id)).toEqual([
+			"claude-new",
+		]);
+		expect(reviewed?.catalogues.openai.models).toEqual([]);
+	});
+
+	it("names copied entries the server will refuse before Review does", async () => {
+		const generic: ClientView = {
+			...source,
+			apiKeyId: "generic",
+			application: "generic",
+			key: { ...source.key, id: "generic", name: "Generic" },
+			catalogues: {
+				...source.catalogues,
+				anthropic: {
+					models: [
+						{
+							id: "old",
+							targetModel: "old",
+							displayName: "Old model",
+							accountIds: null,
+						},
+					],
+					defaultModel: "old",
+				},
+			},
+		};
+		await mount(existing, true, DEFAULT_SUGGESTIONS, [source, generic]);
+		await choose("Copy from", "generic");
+		await untick("Application recipe");
+		await click("Copy into this draft");
+		// The draft is still generic, so publishing `old` under its own ID is fine.
+		expect(document.body.textContent).not.toContain("claude-* alias");
+		await click("Application");
+		await choose("Application", "claude-code");
+		await click("Catalogue");
+		await click("Copy into this draft");
+		expect(document.body.textContent).toContain(
+			"Claude Code cannot publish old under that ID",
+		);
 	});
 });
