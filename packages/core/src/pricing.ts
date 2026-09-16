@@ -1895,20 +1895,6 @@ export interface CatalogueLookupResult {
 }
 
 /**
- * Read one model's catalogue entry, scoped to the provider that would serve it.
- *
- * `provider` is required and there is no unscoped form: an unscoped search walks
- * providers in merged order and would answer a Codex slug from whichever
- * reseller happens to come first — the silent blend {@link selectModelEntry}
- * refuses. A provider the catalogue has no key for is UNKNOWN, never another
- * provider's entry.
- *
- * Cold start is waited out the way {@link estimateCostUSD} waits it out: the
- * bundled seed carries rates and nothing else, so answering a miss from it would
- * report every non-cost field absent milliseconds before the real catalogue
- * lands. Reads only; never starts a load.
- */
-/**
  * Catalogue provenance as it stands right now, read without waiting for or
  * starting any work — what a caller that has already done its lookups needs to
  * say whether a real catalogue backed them.
@@ -1925,6 +1911,20 @@ export function pricingCatalogueStatus(): { loaded: boolean; stale: boolean } {
 	};
 }
 
+/**
+ * Read one model's catalogue entry, scoped to the provider that would serve it.
+ *
+ * `provider` is required and there is no unscoped form: an unscoped search walks
+ * providers in merged order and would answer a Codex slug from whichever
+ * reseller happens to come first — the silent blend {@link selectModelEntry}
+ * refuses. A provider the catalogue has no key for is UNKNOWN, never another
+ * provider's entry.
+ *
+ * Cold start is waited out the way {@link estimateCostUSD} waits it out: the
+ * bundled seed carries rates and nothing else, so answering a miss from it would
+ * report every non-cost field absent milliseconds before the real catalogue
+ * lands. Reads only; never starts a load.
+ */
 export async function lookupCatalogueEntry(
 	modelId: string,
 	provider: string,
@@ -1933,7 +1933,9 @@ export async function lookupCatalogueEntry(
 	let entry = scopedEntryFor(await catalogue.getPricing(), modelId, provider);
 	for (
 		let round = 0;
-		round < 2 && !entry && catalogue.hasPendingCatalogueWork();
+		round < 2 &&
+		(!entry || !catalogue.isCatalogueLoaded()) &&
+		catalogue.hasPendingCatalogueWork();
 		round++
 	) {
 		const waited = await catalogue.awaitInFlightLoad();

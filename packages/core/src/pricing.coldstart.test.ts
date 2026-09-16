@@ -779,6 +779,43 @@ describe("catalogue entry lookup during a cold load", () => {
 		expect(result.loaded).toBe(true);
 		expect(result.stale).toBe(false);
 	});
+
+	it("waits out an in-flight load for a model the bundled seed already prices", async () => {
+		// `gpt-6-astra` ships in BUNDLED_PRICING with rates and NO `limit`, so the
+		// cold-start wait never fires for it: an entry is found on the first pass,
+		// the loop's `!entry` guard is already false, and the alias is published
+		// with no context window milliseconds before the real catalogue — which
+		// does carry `limit.output` — lands.
+		globalThis.fetch = (async () => {
+			await new Promise((r) => setTimeout(r, 40));
+			return new Response(
+				JSON.stringify({
+					openai: {
+						models: {
+							"gpt-6-astra": {
+								id: "gpt-6-astra",
+								name: "GPT-6 Astra",
+								cost: { input: 10, output: 50 },
+								limit: { context: 1_050_000, input: 922_000, output: 128_000 },
+							},
+							// Adds coverage the bundled table lacks, so the merge counts as
+							// a real catalogue rather than the fallback.
+							[REMOTE_ONLY_MODEL]: {
+								id: REMOTE_ONLY_MODEL,
+								name: "GPT-9 remote only",
+								cost: { input: 2, output: 8 },
+							},
+						},
+					},
+				}),
+				{ status: 200, headers: { "content-type": "application/json" } },
+			);
+		}) as unknown as typeof fetch;
+
+		expect(__pricingTestHooks.isCatalogueLoaded()).toBe(false);
+		const bundled = await lookupCatalogueEntry("gpt-6-astra", "codex");
+		expect(bundled.entry?.limit?.output).toBe(128_000);
+	});
 });
 
 describe("catalogue cache", () => {
