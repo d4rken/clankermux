@@ -1634,6 +1634,34 @@ class API extends HttpClient {
 		}
 	}
 
+	/**
+	 * Withdraw the operator's renewal decision so the server's estimate takes
+	 * over again. Distinct from `updateAccountRenewal(id, null, ...)`, which
+	 * records "no date" as a decision of its own.
+	 */
+	async updateAccountRenewalToAutomatic(accountId: string): Promise<void> {
+		const startTime = Date.now();
+		const url = `/api/accounts/${accountId}/renewal`;
+
+		this.logger.debug(`→ POST ${url}`, { renewalTracking: "automatic" });
+
+		try {
+			await this.post(url, { renewalTracking: "automatic" });
+			const duration = Date.now() - startTime;
+			this.logger.debug(`← POST ${url} - 200 (${duration}ms)`);
+		} catch (error) {
+			const duration = Date.now() - startTime;
+			this.logger.error(`✗ POST ${url} - ERROR (${duration}ms)`, {
+				error: error instanceof Error ? error.message : String(error),
+				stack: error instanceof Error ? error.stack : undefined,
+			});
+			if (error instanceof HttpError) {
+				throw new Error(error.message);
+			}
+			throw error;
+		}
+	}
+
 	async updateAccountAutoFallback(
 		accountId: string,
 		enabled: boolean,

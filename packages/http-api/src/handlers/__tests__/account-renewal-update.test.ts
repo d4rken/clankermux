@@ -60,6 +60,20 @@ async function readRenewal(
 	);
 }
 
+/** Read the provenance column that decides whether the seeder may act. */
+async function readAnchorSource(
+	dbOps: DatabaseOperations,
+	id: string,
+): Promise<string | null> {
+	const row = await dbOps
+		.getAdapter()
+		.get<{ renewal_anchor_source: string | null }>(
+			`SELECT renewal_anchor_source FROM accounts WHERE id = ?`,
+			[id],
+		);
+	return row?.renewal_anchor_source ?? null;
+}
+
 /** Local "YYYY-MM-DD" of today (matches the handler's auto-start stamping). */
 function localToday(): string {
 	const d = new Date();
@@ -372,6 +386,107 @@ describe("createAccountRenewalUpdateHandler", () => {
 				id,
 			);
 			expect(response.status).toBe(400);
+		});
+	});
+
+	describe("renewalTracking: 'automatic'", () => {
+		it("hands the account back to automatic: all five columns null", async () => {
+			const id = await insertAccount(dbOps, "auto1");
+			await dbOps.setAccountRenewal(
+				id,
+				"2026-01-14",
+				"monthly",
+				20_000_000,
+				"2026-02-01",
+			);
+
+			// No cadence in the body: asking for automatic is asking for no
+			// operator schedule at all, so requiring one would be nonsense.
+			const response = await handler(
+				makeRequest({ renewalTracking: "automatic" }),
+				id,
+			);
+			expect(response.status).toBe(200);
+
+			const stored = await readRenewal(dbOps, id);
+			expect(stored.renewal_anchor).toBeNull();
+			expect(stored.renewal_cadence).toBeNull();
+			expect(stored.renewal_price_usd_micros).toBeNull();
+			expect(stored.renewal_auto_start_date).toBeNull();
+			expect(await readAnchorSource(dbOps, id)).toBeNull();
+		});
+
+		it("hands back an account the operator had cleared", async () => {
+			const id = await insertAccount(dbOps, "auto2");
+			await dbOps.setAccountRenewal(id, null, null, null, null);
+			expect(await readAnchorSource(dbOps, id)).toBe("manual");
+
+			const response = await handler(
+				makeRequest({ renewalTracking: "automatic" }),
+				id,
+			);
+			expect(response.status).toBe(200);
+			expect(await readAnchorSource(dbOps, id)).toBeNull();
+		});
+
+		it("still writes 'manual' when renewalTracking says manual", async () => {
+			const id = await insertAccount(dbOps, "auto3");
+
+			const response = await handler(
+				makeRequest({
+					renewalTracking: "manual",
+					renewalAnchor: "2026-01-14",
+					renewalCadence: "monthly",
+				}),
+				id,
+			);
+			expect(response.status).toBe(200);
+
+			const stored = await readRenewal(dbOps, id);
+			expect(stored.renewal_anchor).toBe("2026-01-14");
+			expect(await readAnchorSource(dbOps, id)).toBe("manual");
+		});
+
+		it("rejects an unknown renewalTracking with 400", async () => {
+			const id = await insertAccount(dbOps, "auto4");
+
+			const response = await handler(
+				makeRequest({ renewalTracking: "provider" }),
+				id,
+			);
+			expect(response.status).toBe(400);
+		});
+
+		it("rejects automatic carrying an anchor or a price with 400", async () => {
+			const id = await insertAccount(dbOps, "auto5");
+
+			expect(
+				(
+					await handler(
+						makeRequest({
+							renewalTracking: "automatic",
+							renewalAnchor: "2026-01-14",
+						}),
+						id,
+					)
+				).status,
+			).toBe(400);
+			expect(
+				(
+					await handler(
+						makeRequest({ renewalTracking: "automatic", renewalPriceUsd: 20 }),
+						id,
+					)
+				).status,
+			).toBe(400);
+		});
+
+		it("returns 404 for an unknown account", async () => {
+			const response = await handler(
+				makeRequest({ renewalTracking: "automatic" }),
+				"nonexistent-id",
+			);
+			expect(response.status).toBe(404);
 		});
 	});
 });

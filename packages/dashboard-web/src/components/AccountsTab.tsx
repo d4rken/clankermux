@@ -596,6 +596,22 @@ export function AccountsTab() {
 		}
 	};
 
+	const handleUseAutomaticRenewal = async (accountId: string) => {
+		setActionError(null);
+		try {
+			await api.updateAccountRenewalToAutomatic(accountId);
+			await loadAccounts();
+			// The price is cleared with the anchor, and the price feeds the
+			// amortized spend figures.
+			await queryClient.invalidateQueries({
+				queryKey: queryKeys.paymentsSummaries(),
+			});
+		} catch (err) {
+			setActionError(formatError(err));
+			throw err;
+		}
+	};
+
 	const handleRecordPayment = (account: Account) => {
 		setRecordPaymentDialog({ isOpen: true, account });
 	};
@@ -943,6 +959,7 @@ export function AccountsTab() {
 						})
 					}
 					onUpdateRenewal={handleUpdateRenewal}
+					onUseAutomaticRenewal={handleUseAutomaticRenewal}
 				/>
 			)}
 

@@ -1422,6 +1422,14 @@ OAuth tokens will need to be re-authenticated.
 	}
 
 	/**
+	 * Hand the account's renewal schedule back to automatic tracking.
+	 * See {@link AccountRepository.resetRenewalToAutomatic}.
+	 */
+	async resetAccountRenewalToAutomatic(accountId: string): Promise<void> {
+		await this.accounts.resetRenewalToAutomatic(accountId);
+	}
+
+	/**
 	 * Persist what a provider reported about the current subscription period.
 	 * See {@link AccountRepository.setAccountSubscriptionState}.
 	 */

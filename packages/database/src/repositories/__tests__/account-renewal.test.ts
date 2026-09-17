@@ -1,10 +1,13 @@
 /**
- * Tests for AccountRepository.setRenewal — subscription renewal date storage.
+ * Tests for AccountRepository renewal writes — the operator's date
+ * (setRenewal) and the hand-back to automatic tracking
+ * (resetRenewalToAutomatic).
  *
  * Verifies that:
  *  - setRenewal(id, anchor, cadence, priceUsdMicros, autoStartDate) writes all four columns
  *  - setRenewal(id, null, null, null, null) clears the renewal
  *  - findById() surfaces the columns as renewal_anchor / renewal_cadence
+ *  - resetRenewalToAutomatic(id) nulls all five renewal columns, price included
  */
 import { Database } from "bun:sqlite";
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
@@ -93,6 +96,7 @@ function insertAccount(db: Database, id: string): void {
 
 interface RawRenewal {
 	renewal_anchor: string | null;
+	renewal_anchor_source: string | null;
 	renewal_cadence: string | null;
 	renewal_price_usd_micros: number | null;
 	renewal_auto_start_date: string | null;
@@ -101,7 +105,7 @@ interface RawRenewal {
 function getRaw(db: Database, id: string): RawRenewal {
 	return db
 		.query<RawRenewal, [string]>(
-			"SELECT renewal_anchor, renewal_cadence, renewal_price_usd_micros, renewal_auto_start_date FROM accounts WHERE id = ?",
+			"SELECT renewal_anchor, renewal_anchor_source, renewal_cadence, renewal_price_usd_micros, renewal_auto_start_date FROM accounts WHERE id = ?",
 		)
 		.get(id) as RawRenewal;
 }
@@ -171,5 +175,64 @@ describe("AccountRepository — setRenewal", () => {
 		expect((await repo.findById("acc-4"))?.renewal_anchor_source).toBe(
 			"manual",
 		);
+	});
+});
+
+describe("AccountRepository — resetRenewalToAutomatic", () => {
+	let db: Database;
+	let repo: AccountRepository;
+
+	beforeEach(() => {
+		({ db, repo } = makeDb());
+	});
+
+	afterEach(() => {
+		db.close();
+	});
+
+	it("nulls all five renewal columns, price included", async () => {
+		insertAccount(db, "auto-1");
+		await repo.setRenewal(
+			"auto-1",
+			"2026-01-14",
+			"monthly",
+			20_000_000,
+			"2026-01-14",
+		);
+
+		await repo.resetRenewalToAutomatic("auto-1");
+
+		const row = getRaw(db, "auto-1");
+		expect(row.renewal_anchor).toBeNull();
+		expect(row.renewal_anchor_source).toBeNull();
+		expect(row.renewal_cadence).toBeNull();
+		// The price is the safety half: the payments auto-recorder fires on
+		// anchor + cadence + price, and the anchor is about to become a guess
+		// again. A price left behind would let that guess invent ledger entries.
+		expect(row.renewal_price_usd_micros).toBeNull();
+		expect(row.renewal_auto_start_date).toBeNull();
+	});
+
+	it("hands back an account the operator cleared, not just one with a date", async () => {
+		insertAccount(db, "auto-2");
+		await repo.setRenewal("auto-2", null, null, null, null);
+		expect(getRaw(db, "auto-2").renewal_anchor_source).toBe("manual");
+
+		await repo.resetRenewalToAutomatic("auto-2");
+
+		expect(getRaw(db, "auto-2").renewal_anchor_source).toBeNull();
+	});
+
+	it("touches only the named account", async () => {
+		insertAccount(db, "auto-3");
+		insertAccount(db, "auto-4");
+		await repo.setRenewal("auto-3", "2026-01-14", "monthly", null, null);
+		await repo.setRenewal("auto-4", "2026-02-20", "yearly", null, null);
+
+		await repo.resetRenewalToAutomatic("auto-3");
+
+		const other = getRaw(db, "auto-4");
+		expect(other.renewal_anchor).toBe("2026-02-20");
+		expect(other.renewal_anchor_source).toBe("manual");
 	});
 });

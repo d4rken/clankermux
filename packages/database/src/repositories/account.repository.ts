@@ -1096,6 +1096,29 @@ export class AccountRepository extends BaseRepository<Account> {
 	}
 
 	/**
+	 * Hand the renewal schedule back to automatic tracking: every renewal column
+	 * NULL, so {@link seedRenewalAnchorFromSubscription} may act again on the
+	 * next capture.
+	 *
+	 * `renewal_anchor_source` is the half that reopens the gate, but the price
+	 * has to go with it and that is a safety requirement rather than tidiness:
+	 * the payments auto-recorder fires on anchor + cadence + price, and the
+	 * anchor this account is about to receive is a guess. Leaving a price behind
+	 * would let that guess invent ledger entries — exactly what seeding's refusal
+	 * to touch the price exists to prevent.
+	 */
+	async resetRenewalToAutomatic(accountId: string): Promise<void> {
+		await this.run(
+			`UPDATE accounts
+			 SET renewal_anchor = NULL, renewal_cadence = NULL,
+			     renewal_price_usd_micros = NULL, renewal_auto_start_date = NULL,
+			     renewal_anchor_source = NULL
+			 WHERE id = ?`,
+			[accountId],
+		);
+	}
+
+	/**
 	 * Persist what a provider reported about the CURRENT subscription period.
 	 *
 	 * A plain `SET`, deliberately NOT the identity COALESCE merge: a grace period

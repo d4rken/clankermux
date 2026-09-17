@@ -31,6 +31,8 @@ interface AccountRenewalDialogProps {
 		cadence: RenewalCadence,
 		priceUsd: number | null,
 	) => Promise<void>;
+	/** Withdraws the operator's date so the server estimates one again. */
+	onUseAutomaticRenewal: (accountId: string) => Promise<void>;
 }
 
 export function AccountRenewalDialog({
@@ -38,6 +40,7 @@ export function AccountRenewalDialog({
 	isOpen,
 	onOpenChange,
 	onUpdateRenewal,
+	onUseAutomaticRenewal,
 }: AccountRenewalDialogProps) {
 	const [anchor, setAnchor] = useState(account?.renewalAnchor ?? "");
 	const [cadence, setCadence] = useState<RenewalCadence>(
@@ -63,6 +66,31 @@ export function AccountRenewalDialog({
 	}, [account]);
 
 	const hasAnchorSet = !!account?.renewalAnchor;
+	const anchorSource = account?.renewalAnchorSource ?? null;
+
+	// Three states, and two of them show an empty date field: a date you set, an
+	// estimate, or nothing at all. A cleared account and a never-configured one
+	// are told apart by the source alone, so this line is the only thing that
+	// says which one you are looking at. Null for a provider-reported anchor,
+	// whose note below already states it in more detail.
+	let trackingNote: string | null;
+	if (anchorSource === "provider") {
+		trackingNote = null;
+	} else if (anchorSource === "derived") {
+		trackingNote =
+			"Tracking an automatic estimate from the subscription start.";
+	} else if (hasAnchorSet) {
+		trackingNote = "Tracking a date you set. It stays until you change it.";
+	} else if (anchorSource === null) {
+		trackingNote =
+			"Tracking is automatic. An estimate appears once the provider reports a subscription start.";
+	} else {
+		trackingNote =
+			"Renewal tracking is off. You cleared the date, so nothing is estimated.";
+	}
+
+	// An account already on automatic has nothing to hand back.
+	const canUseAutomatic = anchorSource !== null;
 
 	// Two different things a provider can report, and they say different amounts.
 	// A subscription START is not a renewal date, so a date derived from it is an
@@ -83,8 +111,8 @@ export function AccountRenewalDialog({
 			" It follows the billing cycle until you save, which replaces it with a fixed date of your own.";
 	} else if (subscriptionStart) {
 		subscriptionNote =
-			account?.renewalAnchorSource === "derived"
-				? `Estimated from the subscription start (${subscriptionStart}). Saving confirms it.`
+			anchorSource === "derived"
+				? `Subscription started ${subscriptionStart}. Saving confirms the estimate as a date of your own.`
 				: `Subscription started ${subscriptionStart}${
 						account?.identitySubscriptionStatus
 							? ` · ${account.identitySubscriptionStatus}`
@@ -114,6 +142,20 @@ export function AccountRenewalDialog({
 		} catch (error) {
 			// In-dialog, not the parent's `actionError`: that renders behind this
 			// dialog's overlay and is only visible once the dialog is dismissed.
+			setSaveError(formatError(error));
+		} finally {
+			setIsUpdating(false);
+		}
+	};
+
+	const handleUseAutomatic = async () => {
+		if (!account) return;
+		setIsUpdating(true);
+		setSaveError(null);
+		try {
+			await onUseAutomaticRenewal(account.id);
+			onOpenChange(false);
+		} catch (error) {
 			setSaveError(formatError(error));
 		} finally {
 			setIsUpdating(false);
@@ -157,10 +199,27 @@ export function AccountRenewalDialog({
 								value={anchor}
 								onChange={(e) => setAnchor(e.target.value)}
 							/>
+							{trackingNote && (
+								<p className="mt-tight text-xs text-muted-foreground">
+									{trackingNote}
+								</p>
+							)}
 							{subscriptionNote && (
 								<p className="mt-tight text-xs text-muted-foreground">
 									{subscriptionNote}
 								</p>
+							)}
+							{canUseAutomatic && (
+								<Button
+									type="button"
+									variant="link"
+									size="sm"
+									className="mt-tight h-auto px-0"
+									onClick={handleUseAutomatic}
+									disabled={isUpdating}
+								>
+									Use the automatic estimate
+								</Button>
 							)}
 						</div>
 					</div>
