@@ -122,6 +122,16 @@ describe("AccountRenewalDialog — handing tracking back to automatic", () => {
 		expect(findButton(AUTOMATIC_LABEL)).toBeUndefined();
 	});
 
+	// A date saved before the provenance column existed: anchor set, source NULL.
+	// Nothing estimates over it, so the account is not on automatic.
+	it("offers the hand-back for a date that predates the provenance column", async () => {
+		await mount(
+			account({ renewalAnchor: "2026-01-14", renewalAnchorSource: null }),
+		);
+
+		expect(findButton(AUTOMATIC_LABEL)).toBeDefined();
+	});
+
 	it("keeps the dialog open when the hand-back fails, and shows why", async () => {
 		const opens: boolean[] = [];
 		await mount(

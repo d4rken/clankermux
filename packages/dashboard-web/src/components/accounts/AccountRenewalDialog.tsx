@@ -89,8 +89,10 @@ export function AccountRenewalDialog({
 			"Renewal tracking is off. You cleared the date, so nothing is estimated.";
 	}
 
-	// An account already on automatic has nothing to hand back.
-	const canUseAutomatic = anchorSource !== null;
+	// Only an account that is genuinely on automatic — no anchor and no source —
+	// has nothing to hand back. An anchor with no source is a date saved before
+	// the provenance column existed, and it still overrides any estimate.
+	const canUseAutomatic = anchorSource !== null || hasAnchorSet;
 
 	// Two different things a provider can report, and they say different amounts.
 	// A subscription START is not a renewal date, so a date derived from it is an
