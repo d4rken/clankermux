@@ -1,7 +1,9 @@
 /**
  * Tests for the provider-reported subscription period:
- * `setAccountSubscriptionState` (the plain-SET column write) and
- * `syncProviderRenewalAnchor` (the ownership-gated anchor write), plus the
+ * `setAccountSubscriptionState` (the plain-SET column write),
+ * `claimAnthropicSubscriptionCheck` (the conditional throttle claim),
+ * `syncProviderRenewalAnchor` (the ownership-gated anchor write) and
+ * `setAccountIdentityFromProfile`'s access-token compare-and-swap, plus the
  * Anthropic gate on the start-date seeder.
  */
 import { Database } from "bun:sqlite";
@@ -90,10 +92,16 @@ function makeDb(): { db: Database; repo: AccountRepository } {
 	return { db, repo: new AccountRepository(adapter) };
 }
 
-function insertAccount(db: Database, id: string, provider = "anthropic"): void {
+function insertAccount(
+	db: Database,
+	id: string,
+	provider = "anthropic",
+	refreshToken = "",
+	accessToken: string | null = null,
+): void {
 	db.run(
-		`INSERT INTO accounts (id, name, provider, created_at) VALUES (?, ?, ?, ?)`,
-		[id, id, provider, Date.now()],
+		`INSERT INTO accounts (id, name, provider, refresh_token, access_token, created_at) VALUES (?, ?, ?, ?, ?, ?)`,
+		[id, id, provider, refreshToken, accessToken, Date.now()],
 	);
 }
 
@@ -378,5 +386,178 @@ describe("Anchor provenance — seeder vs provider report", () => {
 		const account = await repo.findById("seed-3");
 		expect(account?.renewal_anchor).toBe("2026-10-03");
 		expect(account?.renewal_anchor_source).toBe("provider");
+	});
+});
+
+/** The window the Anthropic subscription re-read passes into the claim. */
+const THROTTLE_MS = 6 * 60 * 60 * 1000;
+
+describe("AccountRepository — claimAnthropicSubscriptionCheck", () => {
+	let db: Database;
+	let repo: AccountRepository;
+
+	beforeEach(() => {
+		({ db, repo } = makeDb());
+	});
+	afterEach(() => {
+		db.close();
+	});
+
+	it("claims an account that has never been checked, and stamps it", async () => {
+		insertAccount(db, "clm-a", "anthropic", "r");
+
+		expect(
+			await repo.claimAnthropicSubscriptionCheck("clm-a", NOW, THROTTLE_MS),
+		).toBe(true);
+		expect(
+			(await repo.findById("clm-a"))?.identity_subscription_checked_at,
+		).toBe(NOW);
+	});
+
+	// The point of the single statement: the second caller re-tests the window
+	// against what the first one wrote, not against what it read earlier.
+	it("refuses a second claim inside the window, and leaves the stamp alone", async () => {
+		insertAccount(db, "clm-b", "anthropic", "r");
+
+		expect(
+			await repo.claimAnthropicSubscriptionCheck("clm-b", NOW, THROTTLE_MS),
+		).toBe(true);
+		expect(
+			await repo.claimAnthropicSubscriptionCheck("clm-b", NOW + 1, THROTTLE_MS),
+		).toBe(false);
+		expect(
+			(await repo.findById("clm-b"))?.identity_subscription_checked_at,
+		).toBe(NOW);
+	});
+
+	it("claims again the instant the window has elapsed", async () => {
+		insertAccount(db, "clm-c", "anthropic", "r");
+		await repo.claimAnthropicSubscriptionCheck("clm-c", NOW, THROTTLE_MS);
+
+		expect(
+			await repo.claimAnthropicSubscriptionCheck(
+				"clm-c",
+				NOW + THROTTLE_MS - 1,
+				THROTTLE_MS,
+			),
+		).toBe(false);
+		expect(
+			await repo.claimAnthropicSubscriptionCheck(
+				"clm-c",
+				NOW + THROTTLE_MS,
+				THROTTLE_MS,
+			),
+		).toBe(true);
+	});
+
+	it("refuses a non-Anthropic account", async () => {
+		insertAccount(db, "clm-d", "codex", "r");
+
+		expect(
+			await repo.claimAnthropicSubscriptionCheck("clm-d", NOW, THROTTLE_MS),
+		).toBe(false);
+		expect(
+			(await repo.findById("clm-d"))?.identity_subscription_checked_at,
+		).toBeNull();
+	});
+
+	// An Anthropic row with no refresh token is an API-key account: no OAuth
+	// profile endpoint to read.
+	it("refuses an Anthropic account with no refresh token", async () => {
+		insertAccount(db, "clm-e", "anthropic", "");
+
+		expect(
+			await repo.claimAnthropicSubscriptionCheck("clm-e", NOW, THROTTLE_MS),
+		).toBe(false);
+	});
+
+	it("refuses an account that no longer exists", async () => {
+		expect(
+			await repo.claimAnthropicSubscriptionCheck("gone", NOW, THROTTLE_MS),
+		).toBe(false);
+	});
+});
+
+/**
+ * The compare-and-swap the periodic subscription re-read passes: the profile it
+ * fetched describes whichever account those credentials belonged to, so the
+ * write must not land once they have been replaced.
+ */
+describe("AccountRepository — setAccountIdentityFromProfile access-token CAS", () => {
+	let db: Database;
+	let repo: AccountRepository;
+
+	/** 2026-04-10 local midday, so the derived anchor's calendar day is unambiguous. */
+	const SUB_START = new Date(2026, 3, 10, 12, 0).getTime();
+
+	const identity = (): AccountIdentity => ({
+		externalAccountId: "ext-cas",
+		email: "u@example.test",
+		organizationName: null,
+		planTier: "max",
+		rateLimitTier: "20x",
+		subscriptionStatus: "active",
+		subscriptionStartedAt: SUB_START,
+	});
+
+	const tierHistoryCount = (): number =>
+		(
+			db.query(`SELECT COUNT(*) AS n FROM account_tier_history`).get() as {
+				n: number;
+			}
+		).n;
+
+	beforeEach(() => {
+		({ db, repo } = makeDb());
+	});
+	afterEach(() => {
+		db.close();
+	});
+
+	it("writes while the row still holds the token the profile was read with", async () => {
+		insertAccount(db, "cas-a", "anthropic", "r", "t-live");
+
+		expect(
+			await repo.setAccountIdentityFromProfile("cas-a", identity(), "t-live"),
+		).toBe(true);
+
+		const account = await repo.findById("cas-a");
+		expect(account?.identity_email).toBe("u@example.test");
+		// The anchor seeding and the tier-history append ride the same write.
+		expect(account?.renewal_anchor).toBe("2026-04-10");
+		expect(account?.renewal_anchor_source).toBe("derived");
+		expect(tierHistoryCount()).toBe(1);
+	});
+
+	// A re-auth installs new credentials AND the identity of the account they
+	// belong to. Rejecting here is what keeps the previously-read account's
+	// email, organization and subscription state off that row.
+	it("rejects the write once the access token has changed", async () => {
+		insertAccount(db, "cas-b", "anthropic", "r", "t-reauthed");
+
+		expect(
+			await repo.setAccountIdentityFromProfile("cas-b", identity(), "t-live"),
+		).toBe(false);
+
+		const account = await repo.findById("cas-b");
+		expect(account?.identity_email).toBeNull();
+		expect(account?.identity_captured_at).toBeNull();
+		expect(account?.identity_profile_fetched_at).toBeNull();
+		// Nothing behind the write may run against a row it did not touch.
+		expect(account?.renewal_anchor).toBeNull();
+		expect(tierHistoryCount()).toBe(0);
+	});
+
+	// Account add and reauth hold the credentials they just installed, so they
+	// expect no token and keep writing unconditionally.
+	it("writes unconditionally when no token is expected", async () => {
+		insertAccount(db, "cas-c", "anthropic", "r", "t-reauthed");
+
+		expect(await repo.setAccountIdentityFromProfile("cas-c", identity())).toBe(
+			true,
+		);
+		expect((await repo.findById("cas-c"))?.identity_email).toBe(
+			"u@example.test",
+		);
 	});
 });

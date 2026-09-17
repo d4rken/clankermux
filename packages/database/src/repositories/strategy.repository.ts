@@ -36,30 +36,6 @@ export class StrategyRepository extends BaseRepository<StrategyData> {
 		);
 	}
 
-	/**
-	 * Claim a one-shot marker row, returning true only for the caller that
-	 * actually inserted it.
-	 *
-	 * `INSERT OR IGNORE` makes the check and the write ONE statement, which is
-	 * what a claim needs: two processes opening the same database would both pass
-	 * a separate pre-check, and the loser would then take startup down with
-	 * `UNIQUE constraint failed: strategies.name`.
-	 *
-	 * This is the async sibling of the in-transaction claim `runOneShotBackfills`
-	 * uses. A pass whose work is network-bound (a profile fetch per account)
-	 * cannot run inside that transaction, so it claims here first and then works:
-	 * a crash mid-pass leaves the marker claimed, which costs the remaining
-	 * accounts their pass but can never turn it into a pass that repeats forever.
-	 */
-	async claimMarker(name: string): Promise<boolean> {
-		const changes = await this.runWithChanges(
-			`INSERT OR IGNORE INTO strategies (name, config, updated_at)
-			 VALUES (?, ?, ?)`,
-			[name, "{}", Date.now()],
-		);
-		return changes > 0;
-	}
-
 	async list(): Promise<StrategyData[]> {
 		const rows = await this.query<{
 			name: string;

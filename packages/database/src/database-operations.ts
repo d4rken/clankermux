@@ -1140,13 +1140,20 @@ OAuth tokens will need to be re-authenticated.
 	/**
 	 * Persist an account identity captured from a successful profile-endpoint
 	 * fetch, stamping `identity_profile_fetched_at` (the one-time-backfill gate).
+	 * With `expectedAccessToken` the write is a compare-and-swap on the token the
+	 * profile was read with, and returns whether it landed.
 	 * See {@link AccountRepository.setAccountIdentityFromProfile}.
 	 */
 	async setAccountIdentityFromProfile(
 		accountId: string,
 		identity: AccountIdentity,
-	): Promise<void> {
-		await this.accounts.setAccountIdentityFromProfile(accountId, identity);
+		expectedAccessToken?: string | null,
+	): Promise<boolean> {
+		return this.accounts.setAccountIdentityFromProfile(
+			accountId,
+			identity,
+			expectedAccessToken,
+		);
 	}
 
 	/**
@@ -1438,6 +1445,23 @@ OAuth tokens will need to be re-authenticated.
 	}
 
 	/**
+	 * Claim the next Anthropic subscription re-read for one account, stamping the
+	 * throttle in the same statement that tests it.
+	 * See {@link AccountRepository.claimAnthropicSubscriptionCheck}.
+	 */
+	async claimAnthropicSubscriptionCheck(
+		accountId: string,
+		nowMs: number,
+		throttleMs: number,
+	): Promise<boolean> {
+		return this.accounts.claimAnthropicSubscriptionCheck(
+			accountId,
+			nowMs,
+			throttleMs,
+		);
+	}
+
+	/**
 	 * Move the renewal anchor onto a provider-reported period end, unless the
 	 * operator owns it. See {@link AccountRepository.syncProviderRenewalAnchor}.
 	 */
@@ -1723,15 +1747,6 @@ OAuth tokens will need to be re-authenticated.
 
 	async deleteStrategy(name: string): Promise<boolean> {
 		return this.strategy.delete(name);
-	}
-
-	/**
-	 * Claim a one-shot `backfill:` marker in `strategies`; true means THIS call
-	 * claimed it and owns the pass.
-	 * See {@link StrategyRepository.claimMarker}.
-	 */
-	async claimOneShotBackfillMarker(name: string): Promise<boolean> {
-		return this.strategy.claimMarker(name);
 	}
 
 	// Analytics methods delegated to request repository
