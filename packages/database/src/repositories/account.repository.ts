@@ -435,22 +435,42 @@ export class AccountRepository extends BaseRepository<Account> {
 	 * Each identity field is COALESCE-merged so a null arriving in a later fetch
 	 * never erases a previously-captured value; `identity_captured_at` advances
 	 * whenever this write runs (it always carries identity).
+	 *
+	 * When `expectedAccessToken` is provided this becomes a compare-and-swap on
+	 * the access token, the same guard {@link updateTokens} applies to the
+	 * refresh token: the write lands ONLY while the row still holds the token the
+	 * profile was read with. A profile describes whichever account those
+	 * credentials belonged to, so a read that completes after they were replaced
+	 * would otherwise write one account's email, organization, tier and
+	 * subscription state onto another account's row. A caller that installed the
+	 * credentials itself (account add, reauth) knows this cannot have happened
+	 * and passes nothing, leaving the write unconditional on `id = ?`.
+	 *
+	 * Returns true iff a row was written — false means the CAS rejected it, and
+	 * the anchor seeding and tier-history append behind the write are skipped
+	 * with it.
 	 */
 	async setAccountIdentityFromProfile(
 		accountId: string,
 		identity: AccountIdentity,
-	): Promise<void> {
+		expectedAccessToken?: string | null,
+	): Promise<boolean> {
 		const now = Date.now();
-		await this.writeIdentityWithTierHistory(
+		const casClause =
+			expectedAccessToken != null ? " AND access_token = ?" : "";
+		const casParams: string[] =
+			expectedAccessToken != null ? [expectedAccessToken] : [];
+		const changes = await this.writeIdentityWithTierHistory(
 			accountId,
 			`UPDATE accounts SET
 				${IDENTITY_COALESCE_SET},
 				identity_captured_at = ?,
 				identity_profile_fetched_at = ?
-			WHERE id = ?`,
-			[...identityBindParams(identity), now, now, accountId],
+			WHERE id = ?${casClause}`,
+			[...identityBindParams(identity), now, now, accountId, ...casParams],
 			identity,
 		);
+		return changes > 0;
 	}
 
 	/**
@@ -1126,6 +1146,44 @@ export class AccountRepository extends BaseRepository<Account> {
 		await this.run(
 			`UPDATE accounts SET identity_subscription_checked_at = ? WHERE id = ?`,
 			[checkedAtMs, accountId],
+		);
+	}
+
+	/**
+	 * Claim the next Anthropic subscription re-read, or report that someone else
+	 * holds the window.
+	 *
+	 * One conditional statement, which is the whole point: the window test and
+	 * the stamp cannot be separated, so two callers that both read the same
+	 * expired timestamp still produce exactly one claim — the second one's UPDATE
+	 * matches no row and reports zero changes. A claim taken before the profile
+	 * GET is what keeps a raced read from spending a second request into the
+	 * rate-limit bucket the usage poller depends on.
+	 *
+	 * The stamp records an ATTEMPT, not a success: a claimed read that then fails
+	 * stays claimed until the window elapses, which is what keeps a failing
+	 * profile endpoint off every poll tick.
+	 *
+	 * `throttleMs` is the caller's own window rather than a constant duplicated
+	 * here, so the caller's due-check and this claim cannot disagree about it.
+	 * The provider gate matches that due-check too: `anthropic` with a refresh
+	 * token, since an Anthropic row without one is an API-key account with no
+	 * OAuth profile endpoint to read.
+	 */
+	async claimAnthropicSubscriptionCheck(
+		accountId: string,
+		nowMs: number,
+		throttleMs: number,
+	): Promise<boolean> {
+		return (
+			(await this.runWithChanges(
+				`UPDATE accounts SET identity_subscription_checked_at = ?
+				 WHERE id = ? AND provider = 'anthropic'
+				   AND refresh_token IS NOT NULL AND refresh_token != ''
+				   AND (identity_subscription_checked_at IS NULL
+				        OR identity_subscription_checked_at <= ?)`,
+				[nowMs, accountId, nowMs - throttleMs],
+			)) > 0
 		);
 	}
 
