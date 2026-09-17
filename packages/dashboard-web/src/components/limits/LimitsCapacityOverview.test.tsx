@@ -122,6 +122,7 @@ function pools(accounts: AccountResponse[] = DEFAULT_ACCOUNTS, now = NOW) {
 	return {
 		fiveHour: computePoolUsage(accounts, "five_hour", now),
 		sevenDay: computePoolUsage(accounts, "seven_day", now),
+		daily: computePoolUsage(accounts, "daily", now),
 		pacing: computePacingFromAccounts(accounts, now),
 		summaryRows: buildQuotaSummary(accounts, now),
 	};
@@ -131,6 +132,7 @@ function renderOverview(
 	windows: {
 		fiveHour: PoolUsageResult;
 		sevenDay: PoolUsageResult;
+		daily: PoolUsageResult;
 		pacing: PacingSnapshot;
 		summaryRows?: QuotaSummaryRow[];
 	} = pools(),
@@ -149,6 +151,7 @@ function renderOverview(
 			summaryRows={windows.summaryRows}
 			fiveHour={windows.fiveHour}
 			sevenDay={windows.sevenDay}
+			daily={windows.daily}
 			now={runwayProps.now ?? NOW}
 			runways={runwayProps.runways ?? [keyRunway()]}
 			accounts={RUNWAY_ACCOUNTS}
@@ -476,9 +479,12 @@ describe("LimitsCapacityOverview", () => {
 				summary={summary}
 				now={NOW}
 				weekly={binding}
-				fiveHour={
-					fiveHour.classes.find((c) => c.classId === binding.classId) ?? null
-				}
+				shortWindow={(() => {
+					const pool = fiveHour.classes.find(
+						(c) => c.classId === binding.classId,
+					);
+					return pool ? { pool, window: "five_hour" as const } : null;
+				})()}
 				weeklyResult={sevenDay}
 			/>,
 		);
@@ -756,5 +762,47 @@ describe("LimitsCapacityOverview runway panel", () => {
 		expect(html).toContain("4h");
 		expect(countOccurrences(html, "Full breakdown")).toBe(1);
 		expect(html).not.toContain(">0<");
+	});
+});
+
+describe("LimitsCapacityOverview unmeasured accounts", () => {
+	const devinAccount = account({
+		id: "acc-devin",
+		name: "Devin-1",
+		provider: "devin",
+		usageData: {
+			kind: "devin",
+			quotaBased: true,
+			daily: { utilization: 40, resetAt: NOW + 6 * HOUR },
+			weekly: { utilization: 65, resetAt: NOW + 3 * DAY },
+			planName: "Team",
+			email: null,
+			accountId: null,
+		} as never,
+	});
+
+	it("does not list an account that one window measures and another does not", () => {
+		// Devin reports weekly and daily windows and no 5-hour one, so it is in
+		// the 5-hour fallback list and in neither of the other two. The card takes
+		// all three so the line describes accounts NO window measures.
+		const withDevin = pools([...DEFAULT_ACCOUNTS, devinAccount]);
+		expect(withDevin.fiveHour.fallback.map((f) => f.accountId)).toContain(
+			"acc-devin",
+		);
+		expect(withDevin.sevenDay.fallback).toEqual([]);
+		expect(withDevin.daily.fallback.map((f) => f.accountId)).not.toContain(
+			"acc-devin",
+		);
+		expect(renderOverview(withDevin)).not.toContain("Not on a rolling quota");
+	});
+
+	it("still lists an account no window measures at all", () => {
+		const html = renderOverview(
+			pools([
+				...DEFAULT_ACCOUNTS,
+				account({ id: "acc-ollama", name: "local", provider: "ollama" }),
+			]),
+		);
+		expect(html).toContain("Not on a rolling quota: local (ollama)");
 	});
 });

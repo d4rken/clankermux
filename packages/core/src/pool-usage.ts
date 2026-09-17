@@ -35,6 +35,9 @@ import type { ScopedFamilyLimit } from "./scoped-limits";
 import { computeWindowStartMs } from "./throttle-utils";
 import { normalizeAnthropicUsage } from "./usage-normalizer";
 import {
+	DAILY_ELIGIBLE_PROVIDERS,
+	type ExtractedValue,
+	extractDaily,
 	extractFiveHour,
 	extractSevenDay,
 	FIVE_HOUR_ELIGIBLE_PROVIDERS,
@@ -42,7 +45,14 @@ import {
 	SEVEN_DAY_ELIGIBLE_PROVIDERS,
 } from "./usage-window-extract";
 
-export type PoolWindow = "five_hour" | "seven_day";
+/**
+ * `daily` is a third ACCOUNT-WIDE window, not a coarser `five_hour`. A provider
+ * runs one or the other as its short window — Devin's is a calendar day — and
+ * the distinction is load-bearing: `computeWindowStartMs` reads the window name
+ * to get its length, so treating a 24-hour window as a 5-hour one would place
+ * its start 19 hours late.
+ */
+export type PoolWindow = "five_hour" | "seven_day" | "daily";
 
 export type ExcludedReason =
 	| "paused"
@@ -51,6 +61,7 @@ export type ExcludedReason =
 	| "usage_rate_limited"
 	| "five_hour_exhausted"
 	| "seven_day_exhausted"
+	| "daily_exhausted"
 	| "no_usage_data";
 
 export interface PoolUsageContribution {
@@ -456,9 +467,19 @@ export interface PoolUsageResult {
 }
 
 function eligibleProvidersFor(window: PoolWindow): ReadonlySet<string> {
-	return window === "five_hour"
-		? FIVE_HOUR_ELIGIBLE_PROVIDERS
-		: SEVEN_DAY_ELIGIBLE_PROVIDERS;
+	if (window === "five_hour") return FIVE_HOUR_ELIGIBLE_PROVIDERS;
+	if (window === "daily") return DAILY_ELIGIBLE_PROVIDERS;
+	return SEVEN_DAY_ELIGIBLE_PROVIDERS;
+}
+
+/** The reading for `window`, or null when the payload carries no such window. */
+function extractWindow(
+	usageData: NonNullable<AccountResponse["usageData"]>,
+	window: PoolWindow,
+): ExtractedValue | null {
+	if (window === "five_hour") return extractFiveHour(usageData);
+	if (window === "daily") return extractDaily(usageData);
+	return extractSevenDay(usageData);
 }
 
 function classifyExclusion(
@@ -492,13 +513,17 @@ function classifyExclusion(
  * Whether an account is spent, and on which window.
  *
  * WHICH accounts this excludes does not depend on `window` — an account spent on
- * either window cannot serve a request right now, and that is the semantics
+ * ANY of its windows cannot serve a request right now, and that is the semantics
  * every surface wants. The window decides only which reason is REPORTED when the
- * account is spent on both: the window being computed is tested first, so an
- * account out of both reads "weekly spent" on the weekly surfaces and
+ * account is spent on more than one: the window being computed is tested first,
+ * so an account out of both reads "weekly spent" on the weekly surfaces and
  * "waiting on 5h" on the 5-hour ones. Reporting the 5-hour reason on a weekly
  * panel told the reader to wait for a lift that would not restore weekly
  * capacity.
+ *
+ * No provider reports both a 5-hour and a daily window, so their relative order
+ * in the fallback chain never decides anything; it is fixed only so the result
+ * does not depend on which one was written first.
  */
 function classifyQuotaExhaustion(
 	account: AccountResponse,
@@ -506,20 +531,32 @@ function classifyQuotaExhaustion(
 ): { reason: ExcludedReason; resetMs: number | null } | null {
 	if (!account.usageData) return null;
 
-	const fiveHour = extractFiveHour(account.usageData);
-	const sevenDay = extractSevenDay(account.usageData);
-	const spentFiveHour =
-		fiveHour?.pct != null && fiveHour.pct >= 100
-			? ({ reason: "five_hour_exhausted", resetMs: fiveHour.resetMs } as const)
-			: null;
-	const spentSevenDay =
-		sevenDay?.pct != null && sevenDay.pct >= 100
-			? ({ reason: "seven_day_exhausted", resetMs: sevenDay.resetMs } as const)
+	const spent = (
+		reading: ExtractedValue | null,
+		reason: ExcludedReason,
+	): { reason: ExcludedReason; resetMs: number | null } | null =>
+		reading?.pct != null && reading.pct >= 100
+			? { reason, resetMs: reading.resetMs }
 			: null;
 
-	return window === "seven_day"
-		? (spentSevenDay ?? spentFiveHour)
-		: (spentFiveHour ?? spentSevenDay);
+	const spentFiveHour = spent(
+		extractFiveHour(account.usageData),
+		"five_hour_exhausted",
+	);
+	const spentSevenDay = spent(
+		extractSevenDay(account.usageData),
+		"seven_day_exhausted",
+	);
+	const spentDaily = spent(extractDaily(account.usageData), "daily_exhausted");
+
+	// The window being computed first, then the rest in a fixed order.
+	const order =
+		window === "seven_day"
+			? [spentSevenDay, spentFiveHour, spentDaily]
+			: window === "daily"
+				? [spentDaily, spentSevenDay, spentFiveHour]
+				: [spentFiveHour, spentSevenDay, spentDaily];
+	return order.find((candidate) => candidate !== null) ?? null;
 }
 
 /**
@@ -1154,10 +1191,7 @@ export function computePoolUsage(
 			continue;
 		}
 
-		const extracted =
-			window === "five_hour"
-				? extractFiveHour(account.usageData)
-				: extractSevenDay(account.usageData);
+		const extracted = extractWindow(account.usageData, window);
 
 		if (extracted === null) {
 			fallback.push({
@@ -1204,11 +1238,17 @@ export function computePoolUsage(
 				? { unstarted: true }
 				: {}),
 		});
+		// `daily` gets none: the server predicts the two windows it records into
+		// `usage_snapshots`, and no daily-window provider is in that set. Undefined
+		// is the honest value — the projection falls back to the lifetime slope
+		// rather than inheriting another window's forecast.
 		predictions.set(
 			account.id,
 			window === "five_hour"
 				? account.prediction?.fiveHour
-				: account.prediction?.sevenDay,
+				: window === "seven_day"
+					? account.prediction?.sevenDay
+					: undefined,
 		);
 		observedAt.set(account.id, observedAtMs);
 		anchors.set(account.id, windowBurnAnchor(account.burnAnchors, window));

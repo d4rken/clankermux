@@ -32,6 +32,7 @@ const REASON_LABELS: Record<ExcludedReason, string> = {
 	usage_rate_limited: "Usage data unavailable (provider 429)",
 	five_hour_exhausted: "5h quota exhausted",
 	seven_day_exhausted: "7d quota exhausted",
+	daily_exhausted: "Daily quota exhausted",
 	no_usage_data: "No usage data yet",
 };
 
@@ -41,6 +42,7 @@ const REASON_ORDER: ExcludedReason[] = [
 	"token_expired",
 	"usage_rate_limited",
 	"five_hour_exhausted",
+	"daily_exhausted",
 	"seven_day_exhausted",
 	"no_usage_data",
 ];

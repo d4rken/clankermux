@@ -6,7 +6,6 @@ import {
 	extractSevenDay,
 	isAnthropicStyleShape,
 	normalizeAnthropicUsage,
-	type PoolWindow,
 	pickBindingScopedLimit,
 	usageObservedAtMs,
 	weeklyLifetimeConfidence,
@@ -51,9 +50,15 @@ type ForecastWindowKind = keyof typeof FORECAST_POST_RESET_TAIL_MS;
 /**
  * Which window a forecast is asked for: one of the account-wide windows, or
  * one model family's scoped weekly window (the "Fable weekly window" panel).
+ *
+ * Spelled out rather than reusing `PoolWindow`. A forecast line cannot be drawn
+ * without a post-reset tail length, so a window belongs here once
+ * {@link FORECAST_POST_RESET_TAIL_MS} has an entry for it — not the moment the
+ * pool learns to compute it.
  */
 export type ForecastWindow =
-	| PoolWindow
+	| "five_hour"
+	| "seven_day"
 	| { kind: "family"; family: ModelFamily };
 
 function forecastWindowKind(window: ForecastWindow): ForecastWindowKind {

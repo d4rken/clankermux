@@ -1796,3 +1796,46 @@ describe("per-window forecasts", () => {
 		expect(mismatch[0]?.forecast).toBeNull();
 	});
 });
+
+describe("a provider whose short window is a calendar day", () => {
+	const devinUsage = (dailyPct: number, weeklyPct: number) =>
+		({
+			kind: "devin",
+			quotaBased: true,
+			daily: { utilization: dailyPct, resetAt: NOW + 6 * 60 * 60 * 1000 },
+			weekly: {
+				utilization: weeklyPct,
+				resetAt: NOW + 3 * 24 * 60 * 60 * 1000,
+			},
+			planName: "Team",
+			email: null,
+			accountId: null,
+		}) as never;
+
+	it("publishes BOTH of Devin's windows, not just the weekly one", async () => {
+		// Publishing the weekly alone would let a consumer pace off 65% while the
+		// daily window it actually stops on sat at 100%.
+		insertAccount({ id: "acct-1", provider: "devin" });
+		usageCache.set("acct-1", devinUsage(100, 65));
+		const snapshot = await read();
+
+		expect(snapshot.accounts[0]?.measurementState).toBe("fresh");
+		expect(snapshot.accounts[0]?.windows.map((w) => w.kind)).toEqual([
+			"seven_day",
+			"daily",
+		]);
+		expect(windowOf(snapshot, "daily")?.utilizationPct).toBe(100);
+		expect(windowOf(snapshot, "seven_day")?.utilizationPct).toBe(65);
+		// No 5-hour window is invented for a provider that runs none.
+		expect(windowOf(snapshot, "five_hour")).toBeUndefined();
+	});
+
+	it("reaches the wire as `other` with a null scope, not as a new enum value", async () => {
+		insertAccount({ id: "acct-1", provider: "devin" });
+		usageCache.set("acct-1", devinUsage(40, 65));
+		const dto = toPublicAccountsDto(await read());
+		const daily = dto.accounts[0]?.windows.find((w) => w.label === "Daily");
+		expect(daily?.kind).toBe("other");
+		expect(daily?.scopeId).toBeNull();
+	});
+});

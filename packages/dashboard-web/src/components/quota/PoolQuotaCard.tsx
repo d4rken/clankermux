@@ -3,6 +3,7 @@ import {
 	computeBurnRatio,
 	formatBurnRatio,
 	type PoolUsageResult,
+	type PoolWindow,
 	type ServableClassPool,
 	scopeResultToClass,
 	willRunOutCount,
@@ -21,13 +22,31 @@ import {
 	windowTimeLabel,
 } from "./PoolDetailSection";
 
+/**
+ * How each short window is named in the pace row. `seven_day` is here only
+ * because `PoolWindow` includes it; the weekly window is the headline figure
+ * above, never the pace row, so it is never looked up.
+ */
+const SHORT_WINDOW_LABEL: Record<PoolWindow, string> = {
+	five_hour: "5h",
+	daily: "24h",
+	seven_day: "7d",
+};
+
 interface PoolQuotaCardProps {
 	/** The weekly pool for ONE servable class. The budget. */
 	weekly: ServableClassPool;
 	/** All configured provider accounts, independent of temporary availability. */
 	summary?: QuotaSummaryRow;
-	/** The same class's 5-hour pool, or null when it reports none. */
-	fiveHour: ServableClassPool | null;
+	/**
+	 * The same class's SHORT window — the rate governor that paces it through the
+	 * weekly budget — or null when it runs none.
+	 *
+	 * Which window that is comes in alongside the pool rather than being inferred
+	 * here: Anthropic and Codex pace on a rolling 5 hours, Devin on a calendar
+	 * day, and the pace row names the one it is actually showing.
+	 */
+	shortWindow: { pool: ServableClassPool; window: PoolWindow } | null;
 	/** Whole-window results, for the shared breakdown and the family badge. */
 	weeklyResult: PoolUsageResult;
 	/**
@@ -45,7 +64,7 @@ interface PoolQuotaCardProps {
 export function PoolQuotaCard({
 	weekly,
 	summary,
-	fiveHour,
+	shortWindow,
 	weeklyResult,
 	now,
 	loading = false,
@@ -106,17 +125,19 @@ export function PoolQuotaCard({
 	// one-account card, how many accounts across every class will run out.
 	const { willRunOut, capacity, spent } = willRunOutCount(scoped, "seven_day");
 
-	const fiveHourRemaining = average(
+	const shortWindowRemaining = average(
 		summary
-			? summary.accounts.map((account) => account.fiveHourRemainingPct)
-			: (fiveHour?.accounts ?? []).map((bar) =>
+			? summary.accounts.map((account) => account.shortWindowRemainingPct)
+			: (shortWindow?.pool.accounts ?? []).map((bar) =>
 					bar.pct === null ? null : 100 - bar.pct,
 				),
 	);
 	const paceText =
-		fiveHourRemaining == null
+		shortWindow == null || shortWindowRemaining == null
 			? null
-			: `5h: ${Math.round(100 - fiveHourRemaining)}% used · account average`;
+			: `${SHORT_WINDOW_LABEL[shortWindow.window]}: ${Math.round(
+					100 - shortWindowRemaining,
+				)}% used · account average`;
 	// Compare each account against its own weekly window before averaging pace.
 	const burns = bars.map((bar) =>
 		bar.pct === null

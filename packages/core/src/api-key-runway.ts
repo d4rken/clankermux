@@ -22,7 +22,9 @@ import type { ScopedFamilyLimit } from "./scoped-limits";
 import { computeWindowStartMs } from "./throttle-utils";
 import { normalizeAnthropicUsage } from "./usage-normalizer";
 import {
+	DAILY_ELIGIBLE_PROVIDERS,
 	type ExtractedValue,
+	extractDaily,
 	extractFiveHour,
 	extractSevenDay,
 	FIVE_HOUR_ELIGIBLE_PROVIDERS,
@@ -122,6 +124,17 @@ export interface RunwayAccountSource {
 export interface RunwayWindowObservations {
 	fiveHour: ExtractedValue | null;
 	sevenDay: ExtractedValue | null;
+	/**
+	 * The account-wide daily window, for the providers that run one.
+	 *
+	 * Optional, like the scoped readings below and for the same reason: the
+	 * persisted `usage_snapshots` history stores the two other account-wide
+	 * scalars and nothing else, so a reading restored from it genuinely has no
+	 * daily evidence. No daily-window provider is recorded into that history, so
+	 * in practice the field is absent exactly when the resolution came from a
+	 * snapshot.
+	 */
+	daily?: ExtractedValue | null;
 	/**
 	 * Per-model-family scoped weekly readings from the SAME resolution as the
 	 * account-wide windows above, or absent when the resolution carried none.
@@ -347,7 +360,7 @@ function scopedWeeklyWindowFor(
 }
 
 function windowInput(
-	windowKind: "five_hour" | "seven_day",
+	windowKind: "five_hour" | "seven_day" | "daily",
 	extracted: ExtractedValue | null,
 	prediction: RunwayWindowInput["prediction"],
 	observedAtMs: number | null,
@@ -396,7 +409,8 @@ export function toRunwayAccountInput(
 ): RunwayAccountInput {
 	const hasFiveHour = FIVE_HOUR_ELIGIBLE_PROVIDERS.has(account.provider);
 	const hasSevenDay = SEVEN_DAY_ELIGIBLE_PROVIDERS.has(account.provider);
-	if (!hasFiveHour && !hasSevenDay) {
+	const hasDaily = DAILY_ELIGIBLE_PROVIDERS.has(account.provider);
+	if (!hasFiveHour && !hasSevenDay && !hasDaily) {
 		return { accountId: account.id, unmetered: true, windows: [] };
 	}
 
@@ -432,6 +446,21 @@ export function toRunwayAccountInput(
 			// is anchored to `observedAtMs` above; with no observation time it
 			// degrades back to the amber-capped now-anchored estimate.
 			"full",
+		);
+		if (window) windows.push(window);
+	}
+	if (hasDaily) {
+		// No prediction and no anchor: the daily window is not recorded into
+		// `usage_snapshots`, so there is no series behind either. The runway falls
+		// back to the low-confidence lifetime slope, which is the honest answer —
+		// and without this window a Devin account spent for the next six hours
+		// projected a runway off its weekly reading alone.
+		const window = windowInput(
+			"daily",
+			usageData ? extractDaily(usageData) : (observations?.daily ?? null),
+			undefined,
+			observedAtMs,
+			null,
 		);
 		if (window) windows.push(window);
 	}

@@ -92,7 +92,12 @@ export const LimitsTab = React.memo(() => {
 	// One computation and one clock, shared with the Overview. Both pages used to
 	// run their own `computePoolUsage` against their own 30s interval, so the
 	// same two numbers could differ between tabs by up to a refresh period.
-	const { now, fiveHour: fiveHourPool, sevenDay: weeklyPool } = usePoolUsage();
+	const {
+		now,
+		fiveHour: fiveHourPool,
+		sevenDay: weeklyPool,
+		daily: dailyPool,
+	} = usePoolUsage();
 	const { rows: summaryRows } = useQuotaSummary();
 	// Which per-family panels exist: the union of what the pool reports right now
 	// and what has been recorded. Live-only would blink the panel out at every
@@ -212,6 +217,7 @@ export const LimitsTab = React.memo(() => {
 				pacing={pacing}
 				fiveHour={fiveHourPool}
 				sevenDay={weeklyPool}
+				daily={dailyPool}
 				now={now}
 				runways={runway?.keys ?? []}
 				accounts={runway?.accounts ?? []}

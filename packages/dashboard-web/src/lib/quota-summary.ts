@@ -1,10 +1,14 @@
 import {
 	computeWindowStartMs,
+	DAILY_ELIGIBLE_PROVIDERS,
+	extractDaily,
 	extractFiveHour,
 	extractSevenDay,
+	FIVE_HOUR_ELIGIBLE_PROVIDERS,
 	getModelFamily,
 	isUnstartedWindow,
 	normalizeResetMs,
+	type PoolWindow,
 	providerDisplayName,
 	SEVEN_DAY_ELIGIBLE_PROVIDERS,
 	usageObservedAtMs,
@@ -20,9 +24,15 @@ export interface QuotaAccount {
 	id: string;
 	name: string;
 	remainingPct: number | null;
-	fiveHourRemainingPct: number | null;
+	/**
+	 * The account's SHORT window — a rolling 5 hours for most providers, a
+	 * calendar day for Devin. Which one it is comes from the row's
+	 * {@link QuotaSummaryRow.shortWindow}, so a reader never has to infer the
+	 * length from the number.
+	 */
+	shortWindowRemainingPct: number | null;
 	resetMs: number | null;
-	fiveHourResetMs: number | null;
+	shortWindowResetMs: number | null;
 	available: boolean;
 	unknown: boolean;
 	status: string;
@@ -40,6 +50,12 @@ export interface QuotaSummaryRow {
 	unknownCount: number;
 	recoveryMs: number | null;
 	metered: boolean;
+	/**
+	 * Which window `shortWindowRemainingPct` measures, or null when the provider
+	 * runs none. Never inferred from the provider at the render site: a caller
+	 * that guessed would label Devin's 24-hour allowance "5h".
+	 */
+	shortWindow: PoolWindow | null;
 }
 interface Reading {
 	pct: number | null;
@@ -90,12 +106,26 @@ export function buildQuotaSummary(
 			[null, providerDisplayName(provider)],
 			...[...models].sort((a, b) => a[0].localeCompare(b[0])),
 		];
+		// The short window is a property of the PROVIDER, not of any one account:
+		// every account of a provider runs the same one, and a provider that runs
+		// none must not be given a row that implies otherwise.
+		const shortWindow: PoolWindow | null = FIVE_HOUR_ELIGIBLE_PROVIDERS.has(
+			provider,
+		)
+			? "five_hour"
+			: DAILY_ELIGIBLE_PROVIDERS.has(provider)
+				? "daily"
+				: null;
 		for (const [model, label] of scopes) {
 			const metered =
 				model !== null || SEVEN_DAY_ELIGIBLE_PROVIDERS.has(provider);
 			const rows = members.map((a): QuotaAccount => {
 				const week = a.usageData ? extractSevenDay(a.usageData) : null;
-				const five = a.usageData ? extractFiveHour(a.usageData) : null;
+				const short = !a.usageData
+					? null
+					: shortWindow === "daily"
+						? extractDaily(a.usageData)
+						: extractFiveHour(a.usageData);
 				let reading = week;
 				if (model !== null) {
 					const entries = scopedEntries(a).filter(
@@ -148,7 +178,10 @@ export function buildQuotaSummary(
 						gates.push({ status, reset: value.resetMs });
 				};
 				exhausted(week, "Weekly limit reached");
-				exhausted(five, "5h limit reached");
+				exhausted(
+					short,
+					shortWindow === "daily" ? "Daily limit reached" : "5h limit reached",
+				);
 				if (model !== null) exhausted(reading, "Model limit reached");
 				if (a.rateLimitedUntil && a.rateLimitedUntil > now)
 					gates.push({ status: "Cooling down", reset: a.rateLimitedUntil });
@@ -188,7 +221,7 @@ export function buildQuotaSummary(
 					(pct === null ||
 						(SEVEN_DAY_ELIGIBLE_PROVIDERS.has(provider) &&
 							remaining(week, now) === null) ||
-						(five?.resetMs != null && five.resetMs <= now))
+						(short?.resetMs != null && short.resetMs <= now))
 				)
 					gates.push({ status: "Awaiting quota reading", reset: null });
 				const recoveryMs =
@@ -197,7 +230,7 @@ export function buildQuotaSummary(
 						: null;
 				const displayReset = (
 					value: Reading | null,
-					window: "five_hour" | "seven_day" | "seven_day_scoped",
+					window: PoolWindow | "seven_day_scoped",
 				) => {
 					if (value?.resetMs == null || value.resetMs <= now) return null;
 					if (
@@ -215,12 +248,13 @@ export function buildQuotaSummary(
 					id: a.id,
 					name: a.name,
 					remainingPct: pct,
-					fiveHourRemainingPct: remaining(five, now),
+					shortWindowRemainingPct: remaining(short, now),
 					resetMs: displayReset(
 						reading,
 						model === null ? "seven_day" : "seven_day_scoped",
 					),
-					fiveHourResetMs: displayReset(five, "five_hour"),
+					shortWindowResetMs:
+						shortWindow === null ? null : displayReset(short, shortWindow),
 					available: !gates.length,
 					unknown:
 						gates.length > 0 &&
@@ -244,6 +278,7 @@ export function buildQuotaSummary(
 				label,
 				accounts: rows,
 				metered,
+				shortWindow,
 				remainingPct:
 					known.length === rows.length && known.length > 0
 						? known.reduce((sum, a) => sum + (a.remainingPct ?? 0), 0) /

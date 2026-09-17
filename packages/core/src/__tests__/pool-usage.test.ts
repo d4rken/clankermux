@@ -2487,3 +2487,216 @@ describe("listLiveScopedFamiliesByClass", () => {
 		]);
 	});
 });
+
+describe("the daily window", () => {
+	const HOUR = 60 * 60 * 1000;
+	const devin = (
+		daily: { utilization: number; resetAt: number | null } | null,
+		weekly: { utilization: number; resetAt: number | null } | null,
+	) =>
+		mkAccount({
+			name: "Devin-1",
+			provider: "devin",
+			usageData: {
+				kind: "devin",
+				quotaBased: true,
+				daily,
+				weekly,
+				planName: "Team",
+				email: null,
+				accountId: null,
+			} as never,
+		});
+
+	it("gives a devin account its own class on both its windows", () => {
+		const accounts = [
+			devin(
+				{ utilization: 40, resetAt: NOW + 6 * HOUR },
+				{ utilization: 65, resetAt: NOW + 3 * 24 * HOUR },
+			),
+		];
+
+		const daily = computePoolUsage(accounts, "daily", NOW);
+		expect(daily.classes.map((c) => c.classId)).toEqual(["devin"]);
+		expect(daily.contributing).toEqual([
+			{
+				accountId: "Devin-1",
+				name: "Devin-1",
+				pct: 40,
+				resetMs: NOW + 6 * HOUR,
+			},
+		]);
+		expect(daily.fallback).toEqual([]);
+
+		const weekly = computePoolUsage(accounts, "seven_day", NOW);
+		expect(weekly.classes.map((c) => c.classId)).toEqual(["devin"]);
+		expect(weekly.contributing[0]?.pct).toBe(65);
+	});
+
+	it("keeps devin out of the 5-hour pool rather than reading daily as one", () => {
+		const fiveHour = computePoolUsage(
+			[
+				devin(
+					{ utilization: 40, resetAt: NOW + 6 * HOUR },
+					{ utilization: 65, resetAt: NOW + 3 * 24 * HOUR },
+				),
+			],
+			"five_hour",
+			NOW,
+		);
+		expect(fiveHour.classes).toEqual([]);
+		expect(fiveHour.fallback.map((f) => f.provider)).toEqual(["devin"]);
+	});
+
+	it("keeps a 5-hour provider out of the daily pool", () => {
+		const daily = computePoolUsage(
+			[
+				mkAccount({
+					name: "Claude-1",
+					usageData: {
+						five_hour: {
+							utilization: 30,
+							resets_at: new Date(NOW + HOUR).toISOString(),
+						},
+						seven_day: {
+							utilization: 50,
+							resets_at: new Date(NOW + 3 * 24 * HOUR).toISOString(),
+						},
+					} as never,
+				}),
+			],
+			"daily",
+			NOW,
+		);
+		expect(daily.classes).toEqual([]);
+		expect(daily.fallback.map((f) => f.provider)).toEqual(["anthropic"]);
+	});
+
+	it("reports the daily reason on the daily surface and weekly on the weekly one", () => {
+		const accounts = [
+			devin(
+				{ utilization: 100, resetAt: NOW + 6 * HOUR },
+				{ utilization: 100, resetAt: NOW + 3 * 24 * HOUR },
+			),
+		];
+		expect(computePoolUsage(accounts, "daily", NOW).exhausted[0]?.reason).toBe(
+			"daily_exhausted",
+		);
+		expect(
+			computePoolUsage(accounts, "seven_day", NOW).exhausted[0]?.reason,
+		).toBe("seven_day_exhausted");
+	});
+
+	it("excludes an account spent on its weekly window from the daily pool too", () => {
+		const daily = computePoolUsage(
+			[
+				devin(
+					{ utilization: 20, resetAt: NOW + 6 * HOUR },
+					{ utilization: 100, resetAt: NOW + 3 * 24 * HOUR },
+				),
+			],
+			"daily",
+			NOW,
+		);
+		expect(daily.contributing).toEqual([]);
+		expect(daily.exhausted[0]?.reason).toBe("seven_day_exhausted");
+	});
+
+	it("excludes an account spent on its daily window from the weekly pool too", () => {
+		// Spent on one window, room on the other: it still cannot serve a request
+		// right now, so the weekly pool must not count it as capacity.
+		const weekly = computePoolUsage(
+			[
+				devin(
+					{ utilization: 100, resetAt: NOW + 6 * HOUR },
+					{ utilization: 20, resetAt: NOW + 3 * 24 * HOUR },
+				),
+			],
+			"seven_day",
+			NOW,
+		);
+		expect(weekly.contributing).toEqual([]);
+		expect(weekly.exhausted[0]?.reason).toBe("daily_exhausted");
+	});
+
+	it("holds a nulled daily window as unknown, never as unconstrained", () => {
+		// Devin does not say whether a nulled window is one the plan lacks or one
+		// it could not read, so the account is withheld from capacity rather than
+		// dropped from the pool as having nothing to spend.
+		const daily = computePoolUsage(
+			[devin(null, { utilization: 20, resetAt: NOW + 3 * 24 * HOUR })],
+			"daily",
+			NOW,
+		);
+		expect(daily.fallback).toEqual([]);
+		expect(daily.contributing).toEqual([]);
+		expect(daily.excluded[0]?.reason).toBe("no_usage_data");
+		expect(daily.classes[0]?.capacityCount).toBe(0);
+
+		// Its weekly window still reports, so the account is not invisible.
+		const weekly = computePoolUsage(
+			[devin(null, { utilization: 20, resetAt: NOW + 3 * 24 * HOUR })],
+			"seven_day",
+			NOW,
+		);
+		expect(weekly.contributing[0]?.pct).toBe(20);
+	});
+
+	it("dates the daily window by a day, so an unstarted one is caught", () => {
+		// A 0% window whose start tracks the reading has not been opened: its reset
+		// is a placeholder the provider re-stamps every poll, and must never be
+		// offered as a deadline. Recovering the start needs the window's LENGTH,
+		// which comes from its name — read as five hours, this reset would date the
+		// start 19 hours into the future and the placeholder would escape.
+		const unstarted = computePoolUsage(
+			[
+				mkAccount({
+					name: "Devin-1",
+					provider: "devin",
+					usageAsOfIso: new Date(NOW).toISOString(),
+					usageData: {
+						kind: "devin",
+						quotaBased: true,
+						daily: { utilization: 0, resetAt: NOW + 24 * HOUR },
+						weekly: { utilization: 10, resetAt: NOW + 3 * 24 * HOUR },
+						planName: "Team",
+						email: null,
+						accountId: null,
+					} as never,
+				}),
+			],
+			"daily",
+			NOW,
+		);
+		expect(unstarted.classes[0]?.unstartedCount).toBe(1);
+		expect(unstarted.earliestResetMs).toBeNull();
+
+		// A day already running keeps its reset: the start is in the past.
+		const running = computePoolUsage(
+			[
+				devin(
+					{ utilization: 0, resetAt: NOW + 6 * HOUR },
+					{ utilization: 10, resetAt: NOW + 3 * 24 * HOUR },
+				),
+			],
+			"daily",
+			NOW,
+		);
+		expect(running.classes[0]?.unstartedCount).toBe(0);
+		expect(running.earliestResetMs).toBe(NOW + 6 * HOUR);
+	});
+
+	it("withholds a plan reporting no window from capacity on both its windows", () => {
+		for (const window of ["daily", "seven_day"] as const) {
+			const result = computePoolUsage([devin(null, null)], window, NOW);
+			expect(result.contributing).toEqual([]);
+			expect(result.classes[0]?.capacityCount).toBe(0);
+			expect(result.excluded[0]?.reason).toBe("no_usage_data");
+		}
+		// The 5-hour pool is a different statement: Devin runs no such window, so
+		// the account is absent from it rather than unknown within it.
+		const fiveHour = computePoolUsage([devin(null, null)], "five_hour", NOW);
+		expect(fiveHour.classes).toEqual([]);
+		expect(fiveHour.fallback.map((f) => f.provider)).toEqual(["devin"]);
+	});
+});

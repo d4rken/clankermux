@@ -1,6 +1,8 @@
 import type { Config } from "@clankermux/config";
 import {
 	accountWideExhaustionFor,
+	DAILY_ELIGIBLE_PROVIDERS,
+	extractDaily,
 	extractFiveHour,
 	extractSevenDay,
 	FIVE_HOUR_ELIGIBLE_PROVIDERS,
@@ -54,9 +56,15 @@ const log = new Logger("PublicSnapshot");
  * Whether a provider reports the account-wide quota windows at all.
  *
  * The sets are core's, shared with the runway scan, so "this provider has no
- * such window" is decided in exactly one place. A provider in NEITHER set
+ * such window" is decided in exactly one place. A provider in NONE of them
  * (ollama, a pay-as-you-go key) has no measurement to be missing or stale — it
  * is `not_applicable`, which is a different answer from "we could not read it".
+ *
+ * Every window a metered provider runs has to be emitted below. Calling a
+ * provider metered and then publishing a subset of its windows is worse than
+ * calling it unmetered: a consumer pacing off this surface reads the windows it
+ * is given as the whole constraint, and would pace Devin off a weekly allowance
+ * at 65% while the daily one it actually stops on sat at 100%.
  */
 function hasFiveHourWindow(provider: string): boolean {
 	return FIVE_HOUR_ELIGIBLE_PROVIDERS.has(provider);
@@ -64,8 +72,15 @@ function hasFiveHourWindow(provider: string): boolean {
 function hasSevenDayWindow(provider: string): boolean {
 	return SEVEN_DAY_ELIGIBLE_PROVIDERS.has(provider);
 }
+function hasDailyWindow(provider: string): boolean {
+	return DAILY_ELIGIBLE_PROVIDERS.has(provider);
+}
 function isMetered(provider: string): boolean {
-	return hasFiveHourWindow(provider) || hasSevenDayWindow(provider);
+	return (
+		hasFiveHourWindow(provider) ||
+		hasSevenDayWindow(provider) ||
+		hasDailyWindow(provider)
+	);
 }
 
 /**
@@ -487,6 +502,24 @@ function buildWindows(
 			resetsAtMs: sevenDay?.resetMs ?? null,
 			forecast: null,
 			prediction: servablePrediction(prediction?.sevenDay),
+		});
+	}
+	if (hasDailyWindow(provider)) {
+		const daily = usage ? extractDaily(usage) : null;
+		windows.push({
+			// Not a member of the published window enum, so it reaches the wire
+			// through the `other` escape hatch and the contract stays unwidened.
+			// `public-snapshot.test.ts` pins what a client actually receives.
+			kind: "daily",
+			scopeId: null,
+			label: "Daily",
+			utilizationPct: clampPct(daily?.pct ?? null),
+			observedAtMs,
+			resetsAtMs: daily?.resetMs ?? null,
+			forecast: null,
+			// No server-side prediction: the daily window is not recorded into
+			// `usage_snapshots`, so there is no series to project from.
+			prediction: null,
 		});
 	}
 	for (const scoped of normalized.weeklyScoped) {

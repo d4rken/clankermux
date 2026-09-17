@@ -113,7 +113,7 @@ function poolCard(props: Partial<Parameters<typeof PoolQuotaCard>[0]> = {}) {
 	return renderToStaticMarkup(
 		<PoolQuotaCard
 			weekly={weekly}
-			fiveHour={null}
+			shortWindow={null}
 			weeklyResult={weeklyResult}
 			now={NOW}
 			{...props}

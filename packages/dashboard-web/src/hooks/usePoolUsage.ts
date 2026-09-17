@@ -8,6 +8,12 @@ export interface PoolUsageSnapshot {
 	now: number;
 	fiveHour: PoolUsageResult;
 	sevenDay: PoolUsageResult;
+	/**
+	 * The daily window, which only Devin reports. Empty of classes for a pool
+	 * with no daily-window account, which is the normal case — a consumer looks
+	 * its class up and gets nothing.
+	 */
+	daily: PoolUsageResult;
 }
 
 /**
@@ -36,6 +42,10 @@ export function usePoolUsage(): PoolUsageSnapshot {
 		() => computePoolUsage(accounts ?? [], "seven_day", now),
 		[accounts, now],
 	);
+	const daily = useMemo(
+		() => computePoolUsage(accounts ?? [], "daily", now),
+		[accounts, now],
+	);
 
-	return { now, fiveHour, sevenDay };
+	return { now, fiveHour, sevenDay, daily };
 }

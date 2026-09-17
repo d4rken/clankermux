@@ -97,6 +97,7 @@ export function formatRunwayValue(
 export function runwayWindowLabel(windowKind: string): string {
 	if (windowKind === "five_hour") return "5-hour";
 	if (windowKind === "seven_day") return "weekly";
+	if (windowKind === "daily") return "daily";
 	return windowKind.replace(/_/g, " ");
 }
 

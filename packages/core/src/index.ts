@@ -347,12 +347,15 @@ export {
 	splitSeries,
 } from "./usage-prediction";
 export {
+	DAILY_ELIGIBLE_PROVIDERS,
 	type ExtractedValue,
+	extractDaily,
 	extractFiveHour,
 	extractSevenDay,
 	FIVE_HOUR_ELIGIBLE_PROVIDERS,
 	isAlibabaShape,
 	isAnthropicStyleShape,
+	isDevinShape,
 	isZaiShape,
 	normalizeResetMs,
 	SEVEN_DAY_ELIGIBLE_PROVIDERS,
