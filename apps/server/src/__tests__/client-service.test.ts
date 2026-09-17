@@ -1474,7 +1474,7 @@ describe("client service integration", () => {
 			await discovered("c", ["gpt-6-astra"]);
 			const account = await dbOps.getAccount("d");
 			if (!account) throw new Error("fixture account d");
-			// `d` is a devin account whose discovery never completed, so it is
+			// `d` is an openai-compatible account whose discovery never completed, so it is
 			// neither eligible nor dismissible on its own.
 			await dbOps.routing.ensurePermissionScope(
 				"d",
@@ -1482,7 +1482,7 @@ describe("client service integration", () => {
 			);
 			const id = await astraClient(null, {
 				accountId: null,
-				providers: ["codex", "devin"],
+				providers: ["codex", "openai-compatible"],
 			});
 			await dbOps.routing.saveRule({
 				...broad,

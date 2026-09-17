@@ -62,6 +62,7 @@ interface DiscoveryDeps {
  */
 const ASSUMED_CATALOGUE_BUDGET_MS: Record<string, number> = { zai: 1000 };
 
+/** Providers whose client metadata requires an account discovery snapshot. */
 export const NATIVE_DISCOVERY_PROVIDERS: ReadonlySet<string> = new Set([
 	"devin",
 ]);
@@ -243,7 +244,7 @@ export class AccountModelPermissionService {
 		signal.throwIfAborted();
 		const fetchImpl = this.deps.fetchImpl ?? fetch;
 		const endpoint = parseCustomEndpointData(account.custom_endpoint)?.endpoint;
-		if (NATIVE_DISCOVERY_PROVIDERS.has(account.provider)) {
+		if (account.provider === "devin") {
 			const info = await this.devin.getAccount(token, endpoint, signal);
 			const models = info.models.filter(
 				(m) => !m.disabled && m.id !== "adaptive",
