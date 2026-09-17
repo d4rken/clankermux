@@ -7,6 +7,7 @@ import {
 	type KeyRunway,
 	type RunwayAccountSource,
 	summarizeKeyRunways,
+	toRunwayAccountInput,
 	worstKeyRunway,
 } from "./api-key-runway";
 
@@ -895,5 +896,77 @@ describe("runway band on each key row", () => {
 
 		expect(byId(runways, "k1").outcome.kind).toBe("no-accounts");
 		expect(byId(runways, "k1").band).toBeNull();
+	});
+});
+
+describe("toRunwayAccountInput for a provider with a daily window", () => {
+	const devin = (
+		daily: { utilization: number; resetAt: number | null } | null,
+		weekly: { utilization: number; resetAt: number | null } | null,
+	) =>
+		mkAccount({
+			id: "devin-1",
+			name: "Devin-1",
+			provider: "devin",
+			usageObservedAtMs: NOW,
+			usageData: {
+				kind: "devin",
+				quotaBased: true,
+				daily,
+				weekly,
+				planName: "Team",
+				email: null,
+				accountId: null,
+			} as never,
+		});
+
+	it("models the daily window, so a spent day is not projected off the week", () => {
+		// Spent for the next six hours, with a weekly window three days out that
+		// on its own would project a runway well past the horizon.
+		const input = toRunwayAccountInput(
+			devin(
+				{ utilization: 100, resetAt: NOW + 6 * HOUR },
+				{ utilization: 20, resetAt: NOW + 3 * DAY },
+			),
+		);
+
+		expect(input.unmetered).toBe(false);
+		const daily = input.windows.find((w) => w.windowKind === "daily");
+		expect(daily?.utilizationPct).toBe(100);
+		expect(daily?.resetsAtMs).toBe(NOW + 6 * HOUR);
+		// The window's LENGTH comes from its name, so a 24-hour window's start is
+		// a day before its reset, not five hours.
+		expect(daily?.windowStartMs).toBe(NOW + 6 * HOUR - DAY);
+		// No 5-hour window is invented for a provider that runs none.
+		expect(input.windows.map((w) => w.windowKind).sort()).toEqual([
+			"daily",
+			"seven_day",
+		]);
+	});
+
+	it("stays metered on a plan whose only window is the daily one", () => {
+		const input = toRunwayAccountInput(
+			devin({ utilization: 30, resetAt: NOW + 6 * HOUR }, null),
+		);
+		expect(input.unmetered).toBe(false);
+		expect(input.windows.map((w) => w.windowKind)).toEqual(["daily"]);
+	});
+
+	it("never claims a window-less plan is unmetered", () => {
+		// `unmetered` means "never runs out on quota grounds", and neither a
+		// credit-billed Devin plan nor an unreadable one earns that: the provider
+		// itself refuses to serve a window-less account with no included credits,
+		// so its capacity is finite. The payload cannot tell the two apart anyway
+		// — Devin nulls a window for a hidden allowance, a non-quota plan AND a
+		// missing plan status — so the account stays metered and simply carries
+		// no projectable window.
+		for (const account of [
+			devin(null, null),
+			mkAccount({ id: "devin-2", name: "Devin-2", provider: "devin" }),
+		]) {
+			const input = toRunwayAccountInput(account);
+			expect(input.unmetered).toBe(false);
+			expect(input.windows).toEqual([]);
+		}
 	});
 });

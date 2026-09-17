@@ -317,8 +317,13 @@ export interface RunwayScenarioBasis {
  */
 export type RunwayScenarioOutcome = RunwayOutcome & RunwayScenarioBasis;
 
-/** The account-wide quota windows the runway scan models. */
-export type RunwayWindowKind = "five_hour" | "seven_day";
+/**
+ * The account-wide quota windows the runway scan models.
+ *
+ * Internal to `/api/runway` and the dashboard: `/public/v1` does not re-serve
+ * this field, so widening it does not touch the published contract.
+ */
+export type RunwayWindowKind = "five_hour" | "seven_day" | "daily";
 
 /**
  * One API key's runway row.

@@ -188,5 +188,5 @@ it("does not display an unopened window's sliding reset as a deadline", () => {
 	const row = buildQuotaSummary([a], NOW)[0];
 	expect(row.remainingPct).toBe(100);
 	expect(row.accounts[0].resetMs).toBeNull();
-	expect(row.accounts[0].fiveHourResetMs).toBeNull();
+	expect(row.accounts[0].shortWindowResetMs).toBeNull();
 });

@@ -533,7 +533,7 @@ const MAX_CATALOGUE_WAIT_MS = 6_000;
  * keeps live gaps and drops one-shot junk.
  *
  * Only misses that are actually surfaced by {@link getPricingGaps} occupy this
- * capacity: suppressed providers (Ollama) and calls that never opted into
+ * capacity: suppressed providers (Ollama, Devin) and calls that never opted into
  * reporting are deliberately kept out, so they cannot evict a genuine finding.
  * Warn de-duplication lives in its own separately-bounded cache.
  */
@@ -2002,10 +2002,15 @@ export interface PricingEstimateContext {
 }
 
 /**
- * Providers whose models are free by definition, so a missing catalogue entry is
+ * Providers that are not billed per token, so a missing catalogue entry is
  * expected rather than a costing failure worth surfacing. Built from the
  * canonical constants — never string literals, where a typo silently disables
  * suppression.
+ *
+ * Two kinds sit here for the same reason. Ollama is free by definition. Devin
+ * meters credits per prompt against a daily/weekly allowance — the same numbers
+ * its usage windows report — and publishes no per-token rate, so models.dev
+ * carries no `swe-2-*` entry to find.
  *
  * `openai-compatible` is deliberately NOT suppressed: it fronts both free local
  * endpoints and paid ones, so a gap there is real information.
@@ -2013,6 +2018,7 @@ export interface PricingEstimateContext {
 const PRICING_GAP_SUPPRESSED_PROVIDERS: ReadonlySet<string> = new Set<string>([
 	PROVIDER_NAMES.OLLAMA,
 	PROVIDER_NAMES.OLLAMA_CLOUD,
+	PROVIDER_NAMES.DEVIN,
 ]);
 
 /** Outcome of {@link loadPricingCatalogue}. */

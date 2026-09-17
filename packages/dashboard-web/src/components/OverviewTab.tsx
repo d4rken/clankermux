@@ -1,5 +1,7 @@
 import {
 	listFamilyRows,
+	type PoolUsageResult,
+	type PoolWindow,
 	RUNWAY_HORIZON_MS,
 	type ServableClassPool,
 } from "@clankermux/core";
@@ -57,6 +59,25 @@ const PLACEHOLDER_CLASS_POOL: ServableClassPool = {
 	earliestResetAccountName: null,
 	earliestResetAccountId: null,
 } as const;
+
+/**
+ * The short window that paces a servable class through its weekly budget, and
+ * which window that is.
+ *
+ * A class appears in at most one of the two pools: a provider is eligible for
+ * the 5-hour window or the daily one, never both. The 5-hour pool is consulted
+ * first so the common case costs one lookup.
+ */
+function shortWindowFor(
+	classId: string,
+	fiveHourPool: PoolUsageResult,
+	dailyPool: PoolUsageResult,
+): { pool: ServableClassPool; window: PoolWindow } | null {
+	const fiveHour = fiveHourPool.classes.find((c) => c.classId === classId);
+	if (fiveHour) return { pool: fiveHour, window: "five_hour" };
+	const daily = dailyPool.classes.find((c) => c.classId === classId);
+	return daily ? { pool: daily, window: "daily" } : null;
+}
 
 /**
  * The Overview's metric tiles and charts. `activeSessions` is not optional
@@ -142,7 +163,12 @@ export const OverviewTab = React.memo(() => {
 	// One computation and one clock, shared with the Usage page — see
 	// usePoolUsage. `now` also drives the stale-age captions below, so every
 	// duration on this page advances on the same tick.
-	const { now, fiveHour: fiveHourPool, sevenDay: weeklyPool } = usePoolUsage();
+	const {
+		now,
+		fiveHour: fiveHourPool,
+		sevenDay: weeklyPool,
+		daily: dailyPool,
+	} = usePoolUsage();
 	const { rows: summaryRows } = useQuotaSummary();
 	// Recomputed against `now` so the age keeps ticking with the 30s refresh
 	// below rather than freezing at the moment the read first failed.
@@ -230,7 +256,7 @@ export const OverviewTab = React.memo(() => {
 				{accountsPending || accountsUnavailable ? (
 					<PoolQuotaCard
 						weekly={PLACEHOLDER_CLASS_POOL}
-						fiveHour={null}
+						shortWindow={null}
 						weeklyResult={weeklyPool}
 						now={now}
 						loading={accountsPending}
@@ -247,11 +273,11 @@ export const OverviewTab = React.memo(() => {
 								(row) =>
 									row.model === null && row.provider === weeklyClass.classId,
 							)}
-							fiveHour={
-								fiveHourPool.classes.find(
-									(c) => c.classId === weeklyClass.classId,
-								) ?? null
-							}
+							shortWindow={shortWindowFor(
+								weeklyClass.classId,
+								fiveHourPool,
+								dailyPool,
+							)}
 							weeklyResult={weeklyPool}
 							now={now}
 							staleNote={accountsStaleNote}

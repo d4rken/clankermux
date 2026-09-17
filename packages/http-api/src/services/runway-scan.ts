@@ -1,7 +1,9 @@
 import {
 	computeApiKeyRunways,
 	computeWindowStartMs,
+	DAILY_ELIGIBLE_PROVIDERS,
 	type ExtractedValue,
+	extractDaily,
 	extractFiveHour,
 	extractSevenDay,
 	FIVE_HOUR_ELIGIBLE_PROVIDERS,
@@ -279,6 +281,7 @@ function observationsFrom(
 	return {
 		fiveHour: extractFiveHour(usageData),
 		sevenDay: extractSevenDay(usageData),
+		daily: extractDaily(usageData),
 		// From the same payload as the two windows above, so a per-family scan
 		// cannot pair a scoped reading with an account-wide one resolved at a
 		// different instant. Non-Anthropic payloads normalize to an empty list,
@@ -318,6 +321,7 @@ function accountSummary(
 	const provider = account.provider || "anthropic";
 	const hasFiveHour = FIVE_HOUR_ELIGIBLE_PROVIDERS.has(provider);
 	const hasSevenDay = SEVEN_DAY_ELIGIBLE_PROVIDERS.has(provider);
+	const hasDaily = DAILY_ELIGIBLE_PROVIDERS.has(provider);
 
 	const windows: RunwayWindowSummary[] = [];
 	if (hasFiveHour) {
@@ -336,6 +340,18 @@ function accountSummary(
 				"seven_day",
 				observations?.sevenDay ?? null,
 				prediction?.sevenDay,
+				sampledAtMs,
+			),
+		);
+	}
+	if (hasDaily) {
+		// No prediction: the daily window is not in USAGE_HISTORY_PROVIDERS, so
+		// nothing records the series a regression would need.
+		windows.push(
+			windowSummary(
+				"daily",
+				observations?.daily ?? null,
+				undefined,
 				sampledAtMs,
 			),
 		);

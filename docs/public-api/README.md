@@ -126,6 +126,12 @@ routing-candidate flag. `windows[]` retains each window's `kind`, `scopeId`,
 label, utilization, observation time and reset. There is one `forecast` object;
 the regression-only `prediction` object is removed.
 
+`kind` is `other` for any window class outside the named enum, so the enum is
+never widened under a client that switches on it. Read `scopeId` to tell those
+apart: a model family's allowance carries one, an account-wide window such as a
+daily quota carries `null`. An account reports every window its provider runs,
+so an account with two windows is constrained by whichever binds first.
+
 Window forecast outcomes are `exhausted`, `exhausts_before_reset`,
 `lasts_until_reset`, `unknown` or `other`. An extrapolation after reset is not
 published as exhaustion. `quality` and `reason` explain whether evidence is

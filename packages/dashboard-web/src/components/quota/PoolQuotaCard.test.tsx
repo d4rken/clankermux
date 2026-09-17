@@ -55,13 +55,22 @@ function bothAt(
 function render(accounts: AccountResponse[]) {
 	const result = computePoolUsage(accounts, "seven_day", NOW);
 	const fiveHourResult = computePoolUsage(accounts, "five_hour", NOW);
+	const dailyResult = computePoolUsage(accounts, "daily", NOW);
 	const weekly = result.classes[0];
 	if (!weekly) throw new Error("no class");
+	const fiveHour = fiveHourResult.classes.find(
+		(c) => c.classId === weekly.classId,
+	);
+	const daily = dailyResult.classes.find((c) => c.classId === weekly.classId);
 	return renderToStaticMarkup(
 		<PoolQuotaCard
 			weekly={weekly}
-			fiveHour={
-				fiveHourResult.classes.find((c) => c.classId === weekly.classId) ?? null
+			shortWindow={
+				fiveHour
+					? { pool: fiveHour, window: "five_hour" }
+					: daily
+						? { pool: daily, window: "daily" }
+						: null
 			}
 			weeklyResult={result}
 			summary={buildQuotaSummary(accounts, NOW)[0]}
@@ -220,5 +229,35 @@ describe("PoolQuotaCard quota used", () => {
 		expect(html).toContain("Weekly quota incomplete");
 		expect(html).not.toContain(">20% used</p>");
 		expect(html).toContain("1 of 2 accounts reporting");
+	});
+});
+
+describe("PoolQuotaCard short window", () => {
+	it("names the 5-hour window on a provider that runs one", () => {
+		expect(
+			render([account({ usageData: bothAt(30, NOW + HOUR, 60, NOW + DAY) })]),
+		).toContain("5h: 30% used · account average");
+	});
+
+	it("names Devin's 24-hour window rather than calling it 5h", () => {
+		const html = render([
+			account({
+				id: "devin-1",
+				name: "Devin-1",
+				provider: "devin",
+				usageData: {
+					kind: "devin",
+					quotaBased: true,
+					daily: { utilization: 40, resetAt: NOW + 6 * HOUR },
+					weekly: { utilization: 65, resetAt: NOW + 3 * DAY },
+					planName: "Team",
+					email: null,
+					accountId: null,
+				} as never,
+			}),
+		]);
+		expect(html).toContain("65% used");
+		expect(html).toContain("24h: 40% used · account average");
+		expect(html).not.toContain("5h:");
 	});
 });

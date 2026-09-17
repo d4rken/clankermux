@@ -46,6 +46,7 @@ describe("LimitsCapacityOverview calculation help", () => {
 				<LimitsCapacityOverview
 					fiveHour={poolResult()}
 					sevenDay={poolResult()}
+					daily={poolResult()}
 					now={Date.UTC(2026, 7, 22, 12, 0, 0)}
 					runways={[]}
 					pacing={undefined}

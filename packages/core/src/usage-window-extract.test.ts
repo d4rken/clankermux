@@ -1,9 +1,11 @@
 import { describe, expect, it } from "bun:test";
 import {
+	extractDaily,
 	extractFiveHour,
 	extractSevenDay,
 	isAlibabaShape,
 	isAnthropicStyleShape,
+	isDevinShape,
 	isZaiShape,
 	normalizeResetMs,
 } from "./usage-window-extract";
@@ -190,5 +192,76 @@ describe("extractSevenDay", () => {
 
 	it("returns null for a payload it does not recognise", () => {
 		expect(extractSevenDay({ something_else: 1 } as never)).toBeNull();
+	});
+});
+
+/**
+ * Devin reports calendar daily and weekly windows and no 5-hour one. A payload
+ * shaped like this used to reach none of the extractors, which is why a Devin
+ * account had no Overview quota tile.
+ */
+const DEVIN_USAGE = {
+	kind: "devin",
+	quotaBased: true,
+	daily: { utilization: 40, resetAt: NOW + 6 * HOUR },
+	weekly: { utilization: 65, resetAt: NOW + 3 * 24 * HOUR },
+	planName: "Team",
+	email: null,
+	accountId: null,
+} as const;
+
+describe("devin windows", () => {
+	it("isDevinShape keys off the discriminant, not the window names", () => {
+		expect(isDevinShape(DEVIN_USAGE as never)).toBe(true);
+		expect(isDevinShape({ daily: null, weekly: null } as never)).toBe(false);
+		expect(isDevinShape(null)).toBe(false);
+	});
+
+	it("is not mistaken for an Anthropic-style payload", () => {
+		expect(isAnthropicStyleShape(DEVIN_USAGE as never)).toBe(false);
+		expect(isAlibabaShape(DEVIN_USAGE as never)).toBe(false);
+		expect(isZaiShape(DEVIN_USAGE as never)).toBe(false);
+	});
+
+	it("extractDaily reads the daily window", () => {
+		expect(extractDaily(DEVIN_USAGE as never)).toEqual({
+			pct: 40,
+			resetMs: NOW + 6 * HOUR,
+		});
+	});
+
+	it("extractSevenDay reads the weekly window", () => {
+		expect(extractSevenDay(DEVIN_USAGE as never)).toEqual({
+			pct: 65,
+			resetMs: NOW + 3 * 24 * HOUR,
+		});
+	});
+
+	it("reports no 5-hour window rather than inventing one from daily", () => {
+		expect(extractFiveHour(DEVIN_USAGE as never)).toBeNull();
+	});
+
+	it("reports a nulled window as unread, not as absent", () => {
+		// Devin nulls a window for a hidden allowance, a credit-billed plan, an
+		// unreadable percentage AND a response with no plan status, without
+		// saying which. Absence and failure are indistinguishable here, so the
+		// answer is `{ pct: null }` — standing unknown — rather than the `null`
+		// that would announce an account quota never constrains.
+		const noWindows = {
+			...DEVIN_USAGE,
+			quotaBased: false,
+			daily: null,
+			weekly: null,
+		};
+		expect(extractDaily(noWindows as never)).toEqual({
+			pct: null,
+			resetMs: null,
+		});
+		expect(extractSevenDay(noWindows as never)).toEqual({
+			pct: null,
+			resetMs: null,
+		});
+		// A shape nobody recognises is still a different answer from that.
+		expect(extractDaily({ something_else: 1 } as never)).toBeNull();
 	});
 });

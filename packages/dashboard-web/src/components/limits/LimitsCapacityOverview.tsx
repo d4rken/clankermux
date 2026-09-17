@@ -304,6 +304,8 @@ interface LimitsCapacityOverviewProps {
 	 */
 	fiveHour: PoolUsageResult;
 	sevenDay: PoolUsageResult;
+	/** The daily window, which only Devin reports. */
+	daily: PoolUsageResult;
 	summaryRows?: QuotaSummaryRow[];
 	now: number;
 	/** Per-key runway rows, straight from `/api/runway`. */
@@ -330,6 +332,7 @@ export function LimitsCapacityOverview({
 	pacing,
 	fiveHour,
 	sevenDay,
+	daily,
 	summaryRows,
 	now,
 	runways,
@@ -339,21 +342,24 @@ export function LimitsCapacityOverview({
 	runwaysLoading,
 	runwaysUnavailableReason,
 }: LimitsCapacityOverviewProps) {
-	// Union of both windows' fallbacks. An account outside the 5-hour window is
-	// not necessarily outside the weekly one — Codex reports a weekly window and
-	// no 5-hour one — so listing either window's fallbacks alone would silently
-	// drop accounts the panels above do not account for. Deduped by ACCOUNT ID,
-	// since the same account appears in both lists when it has neither window —
-	// and never by name, which is user-set and need not be unique: keying on it
-	// dropped every account after the first that shared one.
-	const fallbackNames = [
-		...new Map(
-			[...fiveHour.fallback, ...sevenDay.fallback].map((f) => [
-				f.accountId,
-				`${f.name} (${f.provider})`,
-			]),
-		).values(),
-	];
+	// Accounts the panels above measure on NO window: the INTERSECTION of every
+	// window's fallback list. An account absent from one window is still
+	// accounted for as long as another panel shows it — a Devin account reports
+	// a weekly and a daily allowance and no 5-hour one, and belongs in two of
+	// the three panels above rather than in this line.
+	//
+	// Keyed by ACCOUNT ID, never by name, which is user-set and need not be
+	// unique: keying on it drops every account after the first that shares one.
+	const unmeasured = new Map(
+		fiveHour.fallback.map((f) => [f.accountId, `${f.name} (${f.provider})`]),
+	);
+	for (const window of [sevenDay, daily]) {
+		const inThisWindow = new Set(window.fallback.map((f) => f.accountId));
+		for (const accountId of [...unmeasured.keys()]) {
+			if (!inThisWindow.has(accountId)) unmeasured.delete(accountId);
+		}
+	}
+	const fallbackNames = [...unmeasured.values()];
 
 	return (
 		<Card>

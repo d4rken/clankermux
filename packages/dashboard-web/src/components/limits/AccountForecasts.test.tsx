@@ -70,3 +70,70 @@ it("distinguishes a zero reading from a missing reading", () => {
 		"no usable reading",
 	);
 });
+
+it("gives a daily window its own column instead of dropping it", () => {
+	// Devin's short window is a calendar day. With the columns fixed at 5-hour
+	// and weekly, this row would show only the comfortable weekly forecast and
+	// silently omit the day it has already spent.
+	const html = renderToStaticMarkup(
+		<AccountForecasts
+			now={NOW}
+			accounts={[
+				{
+					id: "devin-1",
+					name: "Devin-1",
+					windows: [
+						{
+							...session,
+							kind: "daily",
+							utilizationPct: 100,
+							resetsAtMs: NOW + 6 * 3_600_000,
+							forecast: {
+								state: "projected",
+								exhaustsAtMs: NOW,
+								lowConfidence: false,
+							},
+						},
+						{
+							...session,
+							kind: "seven_day",
+							utilizationPct: 20,
+							forecast: {
+								state: "projected",
+								exhaustsAtMs: NOW + 5 * 24 * 3_600_000,
+								lowConfidence: false,
+							},
+						},
+					],
+				},
+			]}
+		/>,
+	);
+	expect(html).toContain("daily forecast");
+	expect(html).toContain("weekly forecast");
+	// No 5-hour column: nothing listed reports one, so it is left out rather
+	// than printed as a column of "Not reported".
+	expect(html).not.toContain("5-hour forecast");
+});
+
+it("keeps one column set across accounts that report different windows", () => {
+	const html = renderToStaticMarkup(
+		<AccountForecasts
+			now={NOW}
+			accounts={[
+				{ id: "a", name: "Claude-5", windows: [session] },
+				{
+					id: "devin-1",
+					name: "Devin-1",
+					windows: [{ ...session, kind: "daily" }],
+				},
+			]}
+		/>,
+	);
+	// Shortest first, so a row reads from the constraint that bites soonest.
+	expect(html.indexOf("5-hour forecast")).toBeLessThan(
+		html.indexOf("daily forecast"),
+	);
+	// The account that reports neither column still gets a cell in each.
+	expect(html).toContain("Not reported");
+});
