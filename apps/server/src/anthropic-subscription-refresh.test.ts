@@ -27,6 +27,20 @@ const ACTIVE: AccountIdentity = {
 const CANCELED: AccountIdentity = { ...ACTIVE, subscriptionStatus: "canceled" };
 
 /**
+ * A DIFFERENT Anthropic account's identity — what a re-authentication installs
+ * when the operator points the row at another account.
+ */
+const OTHER_ACCOUNT: AccountIdentity = {
+	externalAccountId: "ext-2",
+	email: "other@example.com",
+	organizationName: "Other Org",
+	planTier: "pro",
+	rateLimitTier: "1x",
+	subscriptionStatus: "canceled",
+	subscriptionStartedAt: 1_700_000_000_000,
+};
+
+/**
  * A stand-in for the account row plus the writes the refresh performs, so a
  * test can assert what the row looks like AFTER a read the way the database
  * would hold it — including the columns the refresh must never touch.
@@ -36,7 +50,12 @@ const CANCELED: AccountIdentity = { ...ACTIVE, subscriptionStatus: "canceled" };
  * premise of the race the claim has to settle.
  */
 function fakeStore(account: Account) {
-	const row: Account = { ...account };
+	// The row holds the token the read is issued with, the way a real row does:
+	// the poll persists its refreshed token before handing it to the read.
+	const row: Account = {
+		...account,
+		access_token: account.access_token ?? "t-live",
+	};
 	const state = { present: true };
 	const fetches: string[] = [];
 	return {
@@ -45,6 +64,21 @@ function fakeStore(account: Account) {
 		/** Model the account being deleted out from under an in-flight read. */
 		remove() {
 			state.present = false;
+		},
+		/**
+		 * Model a re-authentication landing mid-read: new credentials, plus the
+		 * identity of the account those credentials belong to. Provider and
+		 * refresh token are both still set afterwards, which is why the
+		 * eligibility re-check cannot see this.
+		 */
+		reauthenticate(accessToken: string, identity: AccountIdentity) {
+			row.access_token = accessToken;
+			row.refresh_token = "r-reauthed";
+			row.identity_external_id = identity.externalAccountId;
+			row.identity_email = identity.email;
+			row.identity_subscription_status = identity.subscriptionStatus ?? null;
+			row.identity_subscription_started_at =
+				identity.subscriptionStartedAt ?? null;
 		},
 		deps(
 			fetchProfile: (accessToken: string) => Promise<AccountIdentity | null>,
@@ -72,13 +106,27 @@ function fakeStore(account: Account) {
 					fetches.push(accessToken);
 					return fetchProfile(accessToken);
 				},
-				setIdentity: async (_accountId, identity) => {
+				setIdentity: async (_accountId, identity, expectedAccessToken) => {
+					// Mirrors the repository's compare-and-swap, including its optional
+					// half: an expected token makes the write conditional on the row
+					// still holding it, and no expected token writes unconditionally.
+					if (!state.present) return false;
+					if (
+						expectedAccessToken != null &&
+						row.access_token !== expectedAccessToken
+					) {
+						return false;
+					}
 					// COALESCE merge, like the real identity write.
+					row.identity_external_id =
+						identity.externalAccountId ?? row.identity_external_id;
+					row.identity_email = identity.email ?? row.identity_email;
 					row.identity_subscription_status =
 						identity.subscriptionStatus ?? row.identity_subscription_status;
 					row.identity_subscription_started_at =
 						identity.subscriptionStartedAt ??
 						row.identity_subscription_started_at;
+					return true;
 				},
 				now,
 			};
@@ -255,6 +303,79 @@ describe("refreshAnthropicSubscription", () => {
 		expect(store.row.identity_subscription_status).toBe("active");
 	});
 
+	// Provider and refresh token both survive a re-authentication, so the
+	// eligibility re-check cannot see one — and a re-auth can point the row at a
+	// DIFFERENT Anthropic account. The access-token CAS is what stops the
+	// previous account's identity landing on the new credentials' row.
+	it("does not overwrite an identity a re-auth installed during the fetch", async () => {
+		const store = fakeStore(
+			makeAccount({
+				identity_external_id: "ext-1",
+				identity_email: "u@example.com",
+				identity_subscription_status: "active",
+				identity_subscription_checked_at: null,
+			}),
+		);
+
+		await refreshAnthropicSubscription(
+			"acc-1",
+			"t-live",
+			store.deps(async () => {
+				store.reauthenticate("t-reauthed", OTHER_ACCOUNT);
+				// What the profile endpoint answered for the PREVIOUS account.
+				return ACTIVE;
+			}),
+		);
+
+		expect(store.fetches).toEqual(["t-live"]);
+		expect(store.row.identity_external_id).toBe("ext-2");
+		expect(store.row.identity_email).toBe("other@example.com");
+		expect(store.row.identity_subscription_status).toBe("canceled");
+	});
+
+	// An ordinary token rotation fails the same CAS, which is accepted: the claim
+	// stays stamped, so the account is re-read once the window elapses rather
+	// than on the next poll tick.
+	it("leaves the throttle claimed when the write is rejected", async () => {
+		const store = fakeStore(
+			makeAccount({
+				identity_subscription_status: "active",
+				identity_subscription_checked_at: null,
+			}),
+		);
+
+		await refreshAnthropicSubscription(
+			"acc-1",
+			"t-live",
+			store.deps(async () => {
+				store.row.access_token = "t-rotated";
+				return CANCELED;
+			}),
+		);
+
+		expect(store.row.identity_subscription_status).toBe("active");
+		expect(store.row.identity_subscription_checked_at).toBe(NOW);
+	});
+
+	it("writes against the token the profile was read with", async () => {
+		const store = fakeStore(
+			makeAccount({ identity_subscription_checked_at: null }),
+		);
+		const deps = store.deps(async () => ACTIVE);
+		const expected: Array<string | undefined> = [];
+
+		await refreshAnthropicSubscription("acc-1", "t-live", {
+			...deps,
+			setIdentity: (accountId, identity, expectedAccessToken) => {
+				expected.push(expectedAccessToken);
+				return deps.setIdentity(accountId, identity, expectedAccessToken);
+			},
+		});
+
+		expect(expected).toEqual(["t-live"]);
+		expect(store.row.identity_subscription_status).toBe("active");
+	});
+
 	it("does not write when the provider changed during the fetch", async () => {
 		const store = fakeStore(
 			makeAccount({
@@ -364,7 +485,7 @@ describe("refreshAnthropicSubscription", () => {
 				fetches.push(token);
 				return ACTIVE;
 			},
-			setIdentity: async () => {},
+			setIdentity: async () => true,
 			// Stubbed to SUCCEED, so the assertion below pins the read gate rather
 			// than passing on a claim a vanished row could never grant.
 			claimSubscriptionCheck: async () => true,
@@ -381,7 +502,7 @@ describe("refreshAnthropicSubscription", () => {
 					throw new Error("database busy");
 				},
 				fetchProfile: async () => ACTIVE,
-				setIdentity: async () => {},
+				setIdentity: async () => true,
 				claimSubscriptionCheck: async () => true,
 				now: () => NOW,
 			}),

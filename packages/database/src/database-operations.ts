@@ -1140,13 +1140,20 @@ OAuth tokens will need to be re-authenticated.
 	/**
 	 * Persist an account identity captured from a successful profile-endpoint
 	 * fetch, stamping `identity_profile_fetched_at` (the one-time-backfill gate).
+	 * With `expectedAccessToken` the write is a compare-and-swap on the token the
+	 * profile was read with, and returns whether it landed.
 	 * See {@link AccountRepository.setAccountIdentityFromProfile}.
 	 */
 	async setAccountIdentityFromProfile(
 		accountId: string,
 		identity: AccountIdentity,
-	): Promise<void> {
-		await this.accounts.setAccountIdentityFromProfile(accountId, identity);
+		expectedAccessToken?: string | null,
+	): Promise<boolean> {
+		return this.accounts.setAccountIdentityFromProfile(
+			accountId,
+			identity,
+			expectedAccessToken,
+		);
 	}
 
 	/**

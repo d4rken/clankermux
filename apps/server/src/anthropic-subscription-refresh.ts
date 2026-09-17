@@ -21,8 +21,17 @@ export interface AnthropicSubscriptionRefreshDeps {
 	getAccount: (accountId: string) => Promise<Account | null>;
 	/** Fetch + normalize a profile identity; fails open (null on any error). */
 	fetchProfile: (accessToken: string) => Promise<AccountIdentity | null>;
-	/** Persist a captured identity through the shared identity write. */
-	setIdentity: (accountId: string, identity: AccountIdentity) => Promise<void>;
+	/**
+	 * Persist a captured identity through the shared identity write, as a
+	 * compare-and-swap on `expectedAccessToken`: the row must still hold the
+	 * token this profile was read with. False means it no longer does and
+	 * nothing was written.
+	 */
+	setIdentity: (
+		accountId: string,
+		identity: AccountIdentity,
+		expectedAccessToken: string,
+	) => Promise<boolean>;
 	/**
 	 * Claim this account's next read: stamp `identity_subscription_checked_at`
 	 * only if the row is still an Anthropic OAuth account whose stamp is null or
@@ -141,9 +150,7 @@ export async function refreshAnthropicSubscription(
 		//
 		// Bounded on purpose. The alternative — a cancellation signal threaded
 		// through `usageCache.startPolling` — widens a surface shared with zai,
-		// kilo and devin for a concern that is Anthropic's alone. What it leaves
-		// uncovered is a read landing during shutdown teardown, which writes the
-		// value it would have written moments earlier.
+		// kilo and devin for a concern that is Anthropic's alone.
 		const current = await deps.getAccount(accountId);
 		if (!current || !isAnthropicSubscriptionRefreshEligible(current)) {
 			log.debug(
@@ -151,12 +158,31 @@ export async function refreshAnthropicSubscription(
 			);
 			return;
 		}
+		// The write is a compare-and-swap on the token this profile was read with,
+		// because the re-check above cannot see a re-authentication: provider and
+		// refresh token are both still set afterwards, while the row may now hold
+		// a different Anthropic account's credentials — and then this identity is
+		// someone else's. An ordinary token rotation fails the same CAS, which is
+		// accepted: rejecting costs one skipped refresh cycle, accepting would
+		// reintroduce the overwrite.
+		//
+		// What remains uncovered is a read landing during shutdown teardown with
+		// the credentials unchanged, which writes the value it would have written
+		// moments earlier.
+		//
 		// Written through the identity COALESCE merge, so the Anthropic-gated
 		// renewal-anchor seeding still runs for an account that has no anchor. The
 		// merge cannot CLEAR a column: a status that changes (active → canceled)
 		// is a new non-null value and lands, a status the profile stops reporting
 		// altogether stays at its last observed value.
-		await deps.setIdentity(accountId, identity);
+		if (!(await deps.setIdentity(accountId, identity, accessToken))) {
+			// Not an error, and not a retry signal: the claim stays stamped, so the
+			// account is simply re-read once the window elapses.
+			log.debug(
+				`discarding subscription read for ${account.name}: credentials changed during the read`,
+			);
+			return;
+		}
 		log.debug(`refreshed subscription state for ${current.name}`);
 	} catch (err) {
 		log.warn(

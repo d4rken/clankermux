@@ -436,10 +436,11 @@ function startUsagePollingWithRefresh(
 				{
 					getAccount: (accountId) => proxyContext.dbOps.getAccount(accountId),
 					fetchProfile: fetchAnthropicProfile,
-					setIdentity: (accountId, identity) =>
+					setIdentity: (accountId, identity, expectedAccessToken) =>
 						proxyContext.dbOps.setAccountIdentityFromProfile(
 							accountId,
 							identity,
+							expectedAccessToken,
 						),
 					claimSubscriptionCheck: (accountId, nowMs) =>
 						proxyContext.dbOps.claimAnthropicSubscriptionCheck(
@@ -1932,8 +1933,9 @@ Available endpoints:
 			return getValidAccessToken(account, proxyContext);
 		},
 		fetchProfile: fetchAnthropicProfile,
-		setIdentity: (accountId, identity) =>
-			dbOps.setAccountIdentityFromProfile(accountId, identity),
+		setIdentity: async (accountId, identity) => {
+			await dbOps.setAccountIdentityFromProfile(accountId, identity);
+		},
 	});
 
 	void refreshOpenRouterAccountsOnStartup(dbOps);

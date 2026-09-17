@@ -28,10 +28,11 @@ export function startDevinUsagePolling(
 	account: Account,
 	db: {
 		getAccount(id: string): Promise<Account | null>;
+		// Resolves to whether the write landed; this poller never conditions on it.
 		setAccountIdentityFromProfile(
 			id: string,
 			identity: AccountIdentity,
-		): Promise<void>;
+		): Promise<unknown>;
 		updateDevinSessionExpiry?(
 			id: string,
 			expectedApiKey: string,
