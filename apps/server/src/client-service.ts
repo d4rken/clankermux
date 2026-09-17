@@ -26,6 +26,7 @@ import type {
 import {
 	ANTHROPIC_BUNDLED_MODEL_CREATED_AT,
 	modelPermissionScope,
+	NATIVE_DISCOVERY_PROVIDERS,
 } from "@clankermux/proxy";
 import {
 	type Account,
@@ -450,6 +451,8 @@ export class ClientService {
 		);
 		const resolved = new Map<string, Promise<ClientModelMetadata>>();
 		let lookups = 0;
+		let nativeLoaded = false;
+		let nativeStale = false;
 		const entries = await Promise.all(
 			models.map(async (model) => {
 				const winning = matchRoutingRule(rules, id, model.id);
@@ -462,6 +465,9 @@ export class ClientService {
 						? (winning.pool_account_ids ?? [])
 						: null;
 				const providers = new Set<string>();
+				const discoveredMetadata: ClientModelMetadata[] = [];
+				const nativeAccountIds: string[] = [];
+				let staleNativeRoute = false;
 				let unresolvedRoutes = false;
 				for (const account of accounts) {
 					if (pool && !pool.includes(account.id)) continue;
@@ -471,19 +477,35 @@ export class ClientService {
 					)
 						continue;
 					const permission = permissions.get(account.id) ?? null;
-					if (isModelPermitted(permission, account.id, target, winning))
-						providers.add(account.provider);
+					if (isModelPermitted(permission, account.id, target, winning)) {
+						const native = this.deps.permissions.discoveredMetadata(
+							account,
+							permission,
+						);
+						if (native) {
+							discoveredMetadata.push(native.models[target] ?? {});
+							nativeAccountIds.push(account.id);
+							staleNativeRoute ||= native.stale;
+						} else if (NATIVE_DISCOVERY_PROVIDERS.has(account.provider)) {
+							unresolvedRoutes = true;
+						} else providers.add(account.provider);
+					}
 					// Neither eligible nor dismissible: an account whose permissions were
 					// never read may or may not serve this model, so the whole alias goes
 					// unresolved rather than being described from the accounts we can see.
 					else if (!permission || permission.completeness === "unknown")
 						unresolvedRoutes = true;
 				}
+				if (!unresolvedRoutes && nativeAccountIds.length) {
+					nativeLoaded = true;
+					nativeStale ||= staleNativeRoute;
+				}
 				// Aliases share targets, and the pin and the rule pool are the same for
 				// most of them, so one catalogue resolution usually covers several.
 				const cacheKey = JSON.stringify([
 					target,
 					[...providers].sort(),
+					nativeAccountIds.sort(),
 					unresolvedRoutes,
 				]);
 				let work = resolved.get(cacheKey);
@@ -492,6 +514,7 @@ export class ClientService {
 					work = resolveClientModelMetadata({
 						targetModel: target,
 						providers: [...providers],
+						discoveredMetadata,
 						unresolvedRoutes,
 					});
 					resolved.set(cacheKey, work);
@@ -505,8 +528,9 @@ export class ClientService {
 		const status = pricingCatalogueStatus();
 		return {
 			models: Object.fromEntries(entries),
-			catalogueLoaded: lookups > 0 && status.loaded,
-			catalogueStale: lookups > 0 && status.stale,
+			catalogueLoaded:
+				(nativeLoaded || lookups > 0) && (lookups === 0 || status.loaded),
+			catalogueStale: nativeStale || (lookups > 0 && status.stale),
 		};
 	}
 	async wire(id: string, format: ClientFormat): Promise<Response> {

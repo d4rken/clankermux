@@ -1116,11 +1116,11 @@ describe("client service integration", () => {
 					},
 				},
 			},
-			devin: {
+			"openai-compatible": {
 				models: {
 					"gpt-6-astra": {
 						id: "gpt-6-astra",
-						name: "Astra via Devin",
+						name: "Astra via compatible provider",
 						limit: { context: 200_000, output: 64_000 },
 						reasoning: false,
 						modalities: { input: ["text"] },
@@ -1164,6 +1164,11 @@ describe("client service integration", () => {
 			return (await create(draft)).client.apiKeyId;
 		}
 		beforeEach(async () => {
+			dbOps
+				.getAdapter()
+				.getSQLiteDb()
+				.query("UPDATE accounts SET provider='openai-compatible' WHERE id='d'")
+				.run();
 			cacheDir = mkdtempSync(join(tmpdir(), "cmux-client-metadata-"));
 			process.env.XDG_CACHE_HOME = cacheDir;
 			__pricingTestHooks.reset();
@@ -1180,6 +1185,206 @@ describe("client service integration", () => {
 			if (originalCacheHome === undefined) delete process.env.XDG_CACHE_HOME;
 			else process.env.XDG_CACHE_HOME = originalCacheHome;
 			rmSync(cacheDir, { recursive: true, force: true });
+		});
+
+		it("publishes native Devin limits without a models.dev entry or account requests", async () => {
+			dbOps
+				.getAdapter()
+				.getSQLiteDb()
+				.query("UPDATE accounts SET provider='devin' WHERE id='d'")
+				.run();
+			await discovered("d", ["swe-2-high"]);
+			const native = spyOn(
+				permissions,
+				"discoveredMetadata",
+			).mockImplementation((account) =>
+				account.id === "d"
+					? {
+							models: {
+								"swe-2-high": {
+									contextWindow: 200_000,
+									maxOutputTokens: 64_000,
+									reasoning: true,
+									inputModalities: ["text", "image"],
+								},
+							},
+							stale: false,
+						}
+					: undefined,
+			);
+			try {
+				const draft = blank();
+				draft.destinations = { accountId: "d", providers: null };
+				draft.catalogues.openai.models = [
+					{
+						id: "swe",
+						displayName: "SWE",
+						targetModel: "swe-2-high",
+						accountIds: ["d"],
+					},
+				];
+				const id = (await create(draft)).client.apiKeyId;
+				// Make models.dev unavailable, including its previously loaded snapshot.
+				__pricingTestHooks.reset();
+				globalThis.fetch = (async () => {
+					throw new Error("No network during native metadata lookup");
+				}) as unknown as typeof fetch;
+				const result = await service.modelMetadata(id, "openai");
+				expect(result.models.swe).toEqual({
+					contextWindow: 200_000,
+					maxOutputTokens: 64_000,
+					reasoning: true,
+					inputModalities: ["text", "image"],
+				});
+				expect(result.catalogueLoaded).toBe(true);
+				expect(result.catalogueStale).toBe(false);
+			} finally {
+				native.mockRestore();
+			}
+		});
+
+		it("keeps native account pools distinct when aliases share a Devin target", async () => {
+			dbOps
+				.getAdapter()
+				.getSQLiteDb()
+				.query("UPDATE accounts SET provider='devin' WHERE id='d'")
+				.run();
+			await discovered("c", ["swe-2-high"]);
+			await discovered("d", ["swe-2-high"]);
+			dbOps
+				.getAdapter()
+				.getSQLiteDb()
+				.query("UPDATE accounts SET provider='devin' WHERE id='c'")
+				.run();
+			await discovered("c", ["swe-2-high"]);
+			const native = spyOn(
+				permissions,
+				"discoveredMetadata",
+			).mockImplementation((account) => ({
+				models: {
+					"swe-2-high": {
+						contextWindow: account.id === "c" ? 100_000 : 200_000,
+						maxOutputTokens: account.id === "c" ? 32_000 : 64_000,
+						inputModalities: account.id === "c" ? ["text"] : ["text", "image"],
+					},
+				},
+				stale: account.id === "c",
+			}));
+			try {
+				const draft = blank();
+				draft.catalogues.openai.models = [
+					{
+						id: "pooled",
+						displayName: "Pooled",
+						targetModel: "swe-2-high",
+						accountIds: ["c", "d"],
+					},
+					{
+						id: "large",
+						displayName: "Large",
+						targetModel: "swe-2-high",
+						accountIds: ["d"],
+					},
+				];
+				const id = (await create(draft)).client.apiKeyId;
+				const result = await service.modelMetadata(id, "openai");
+				expect(result.models.pooled).toEqual({
+					contextWindow: 100_000,
+					maxOutputTokens: 32_000,
+					inputModalities: ["text"],
+				});
+				expect(result.models.large).toEqual({
+					contextWindow: 200_000,
+					maxOutputTokens: 64_000,
+					inputModalities: ["text", "image"],
+				});
+				expect(result.catalogueStale).toBe(true);
+			} finally {
+				native.mockRestore();
+			}
+		});
+
+		it("reports a mixed native and catalogue client unresolved when models.dev fails", async () => {
+			dbOps
+				.getAdapter()
+				.getSQLiteDb()
+				.query("UPDATE accounts SET provider='devin' WHERE id='d'")
+				.run();
+			await discovered("d", ["swe-2-high"]);
+			await discovered("c", ["gpt-6-astra"]);
+			const native = spyOn(
+				permissions,
+				"discoveredMetadata",
+			).mockImplementation((account) =>
+				account.id === "d"
+					? {
+							models: {
+								"swe-2-high": {
+									contextWindow: 262_000,
+									maxOutputTokens: 128_000,
+								},
+							},
+							stale: false,
+						}
+					: undefined,
+			);
+			try {
+				const draft = blank();
+				draft.catalogues.openai.models = [
+					{
+						id: "swe",
+						displayName: "SWE",
+						targetModel: "swe-2-high",
+						accountIds: ["d"],
+					},
+					{
+						id: "astra",
+						displayName: "Astra",
+						targetModel: "gpt-6-astra",
+						accountIds: ["c"],
+					},
+				];
+				const id = (await create(draft)).client.apiKeyId;
+				rmSync(join(cacheDir, "clankermux", "models.dev.json"), {
+					force: true,
+				});
+				__pricingTestHooks.reset();
+				globalThis.fetch = (async () => {
+					throw new Error("Catalogue unavailable");
+				}) as unknown as typeof fetch;
+				const result = await service.modelMetadata(id, "openai");
+				expect(result.models.swe).toEqual({
+					contextWindow: 262_000,
+					maxOutputTokens: 128_000,
+				});
+				expect(result.models.astra?.contextWindow).toBe(872_000);
+				expect(result.catalogueLoaded).toBe(false);
+			} finally {
+				native.mockRestore();
+			}
+		});
+
+		it("reports missing native snapshots as unresolved despite a loaded models.dev catalogue", async () => {
+			dbOps
+				.getAdapter()
+				.getSQLiteDb()
+				.query("UPDATE accounts SET provider='devin' WHERE id='d'")
+				.run();
+			await discovered("d", ["swe-2-high"]);
+			const draft = blank();
+			draft.destinations = { accountId: "d", providers: null };
+			draft.catalogues.openai.models = [
+				{
+					id: "swe",
+					displayName: "SWE",
+					targetModel: "swe-2-high",
+					accountIds: ["d"],
+				},
+			];
+			const id = (await create(draft)).client.apiKeyId;
+			const result = await service.modelMetadata(id, "openai");
+			expect(result.models.swe).toEqual({});
+			expect(result.catalogueLoaded).toBe(false);
 		});
 
 		it("describes the route a literal rule sends the alias to", async () => {
@@ -1269,7 +1474,7 @@ describe("client service integration", () => {
 			await discovered("c", ["gpt-6-astra"]);
 			const account = await dbOps.getAccount("d");
 			if (!account) throw new Error("fixture account d");
-			// `d` is a devin account whose discovery never completed, so it is
+			// `d` is an openai-compatible account whose discovery never completed, so it is
 			// neither eligible nor dismissible on its own.
 			await dbOps.routing.ensurePermissionScope(
 				"d",
@@ -1277,7 +1482,7 @@ describe("client service integration", () => {
 			);
 			const id = await astraClient(null, {
 				accountId: null,
-				providers: ["codex", "devin"],
+				providers: ["codex", "openai-compatible"],
 			});
 			await dbOps.routing.saveRule({
 				...broad,

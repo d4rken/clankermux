@@ -7,7 +7,11 @@ import {
 	fetchCodexModelCatalog,
 	readChatgptAccountId,
 } from "@clankermux/providers";
-import type { Account, AccountModelPermissions } from "@clankermux/types";
+import type {
+	Account,
+	AccountModelPermissions,
+	ClientModelMetadataMap,
+} from "@clankermux/types";
 
 /** No credential is persisted in provenance; OAuth refresh keeps the principal stable. */
 export function modelPermissionScope(account: Account): string {
@@ -26,6 +30,15 @@ export function modelPermissionScope(account: Account): string {
 			]),
 		)
 		.digest("hex");
+}
+interface DiscoveredCatalog {
+	ids: string[];
+	metadata?: ClientModelMetadataMap;
+}
+interface NativeMetadataSnapshot {
+	generation: number;
+	fetchedAt: number;
+	models: ClientModelMetadataMap;
 }
 interface DiscoveryDeps {
 	repository: RoutingRepository;
@@ -49,6 +62,11 @@ interface DiscoveryDeps {
  */
 const ASSUMED_CATALOGUE_BUDGET_MS: Record<string, number> = { zai: 1000 };
 
+/** Providers whose client metadata requires an account discovery snapshot. */
+export const NATIVE_DISCOVERY_PROVIDERS: ReadonlySet<string> = new Set([
+	"devin",
+]);
+
 /**
  * Providers that authenticate discovery with a stored API key and have no OAuth
  * path, so discovery must never reach for an access token on their behalf.
@@ -61,6 +79,7 @@ export class AccountModelPermissionService {
 	private readonly retryAt = new Map<string, number>();
 	private readonly failures = new Map<string, number>();
 	private readonly nextRefresh = new Map<string, number>();
+	private readonly nativeMetadata = new Map<string, NativeMetadataSnapshot>();
 	private readonly controllers = new Set<AbortController>();
 	private timer: ReturnType<typeof setInterval> | undefined;
 	private readonly now: () => number;
@@ -85,6 +104,28 @@ export class AccountModelPermissionService {
 		);
 		if (next.scope !== scope) throw new Error("Account identity changed");
 		return next;
+	}
+	/** Read the account's committed discovery snapshot without issuing upstream requests. */
+	discoveredMetadata(
+		account: Account,
+		permissions: AccountModelPermissions | null,
+	): { models: ClientModelMetadataMap; stale: boolean } | undefined {
+		const scope = modelPermissionScope(account);
+		if (
+			!permissions ||
+			permissions.account_id !== account.id ||
+			permissions.scope !== scope
+		)
+			return undefined;
+		const snapshot = this.nativeMetadata.get(`${account.id}:${scope}`);
+		if (!snapshot || snapshot.generation !== permissions.generation)
+			return undefined;
+		return {
+			models: snapshot.models,
+			stale:
+				permissions.last_error !== null ||
+				this.now() >= snapshot.fetchedAt + 3600000,
+		};
 	}
 	async refreshMisses(accounts: readonly Account[]): Promise<void> {
 		// One race over the entire operation, never N sequential account deadlines.
@@ -135,11 +176,11 @@ export class AccountModelPermissionService {
 		let permissions: AccountModelPermissions | undefined;
 		try {
 			// Credential acquisition is INSIDE the deadline; a late operation never commits.
-			const ids = await Promise.race([
+			const catalog = await Promise.race([
 				deadline,
 				(async () => {
 					permissions = await this.permissions(account);
-					const result = await this.fetchIds(account, controller.signal);
+					const result = await this.fetchCatalog(account, controller.signal);
 					controller.signal.throwIfAborted();
 					return result;
 				})(),
@@ -149,10 +190,16 @@ export class AccountModelPermissionService {
 				account.id,
 				scope,
 				permissions.generation,
-				ids,
+				catalog.ids,
 				this.now(),
 			);
 			if (!committed) return;
+			if (catalog.metadata)
+				this.nativeMetadata.set(key, {
+					generation: permissions.generation,
+					fetchedAt: this.now(),
+					models: catalog.metadata,
+				});
 			this.failures.delete(key);
 			this.nextRefresh.set(
 				key,
@@ -183,10 +230,10 @@ export class AccountModelPermissionService {
 			this.controllers.delete(controller);
 		}
 	}
-	private async fetchIds(
+	private async fetchCatalog(
 		account: Account,
 		signal: AbortSignal,
-	): Promise<string[]> {
+	): Promise<DiscoveredCatalog> {
 		// Before token acquisition, not inside the provider branch below: these
 		// providers authenticate with a stored key and have no OAuth path at all,
 		// so a keyless account must fail here rather than fall through to the
@@ -199,13 +246,29 @@ export class AccountModelPermissionService {
 		const endpoint = parseCustomEndpointData(account.custom_endpoint)?.endpoint;
 		if (account.provider === "devin") {
 			const info = await this.devin.getAccount(token, endpoint, signal);
-			return [
-				...new Set(
-					info.models
-						.filter((m) => !m.disabled && m.id !== "adaptive")
-						.map((m) => m.id),
-				),
-			];
+			const models = info.models.filter(
+				(m) => !m.disabled && m.id !== "adaptive",
+			);
+			const metadata: ClientModelMetadataMap = Object.fromEntries(
+				models.map((model) => {
+					const entry: ClientModelMetadataMap[string] = {
+						inputModalities: model.supportsImages
+							? ["text", "image"]
+							: ["text"],
+					};
+					for (const [field, value] of [
+						["contextWindow", model.contextWindow],
+						["maxOutputTokens", model.maxOutputTokens],
+					] as const) {
+						if (value !== null && Number.isInteger(value) && value > 0)
+							entry[field] = value;
+					}
+					if (model.supportsThinking !== undefined)
+						entry.reasoning = model.supportsThinking;
+					return [model.id, entry];
+				}),
+			);
+			return { ids: [...new Set(models.map((m) => m.id))], metadata };
 		}
 		if (account.provider === "codex") {
 			if (endpoint && !endpoint.startsWith("https://chatgpt.com/"))
@@ -226,7 +289,7 @@ export class AccountModelPermissionService {
 			const body = JSON.parse(result.bodyText);
 			if (body.has_more || body.next_page)
 				throw new Error("Incomplete Codex catalogue");
-			return body.models.map((m: { slug: string }) => m.slug);
+			return { ids: body.models.map((m: { slug: string }) => m.slug) };
 		}
 		let url: URL;
 		const headers = new Headers({ accept: "application/json" });
@@ -323,7 +386,7 @@ export class AccountModelPermissionService {
 				body.has_more === false ||
 				(body.has_more === undefined && !body.next_page && !body.next)
 			)
-				return [...ids];
+				return { ids: [...ids] };
 			if (
 				body.has_more !== true ||
 				typeof body.last_id !== "string" ||
@@ -341,7 +404,12 @@ export class AccountModelPermissionService {
 		const live = new Set(
 			accounts.map((a) => `${a.id}:${modelPermissionScope(a)}`),
 		);
-		for (const map of [this.retryAt, this.failures, this.nextRefresh])
+		for (const map of [
+			this.retryAt,
+			this.failures,
+			this.nextRefresh,
+			this.nativeMetadata,
+		])
 			for (const key of map.keys()) if (!live.has(key)) map.delete(key);
 		await Promise.allSettled(
 			accounts.map(async (account) => {
@@ -349,6 +417,8 @@ export class AccountModelPermissionService {
 				const key = `${account.id}:${p.scope}`;
 				if (
 					p.last_success_at === null ||
+					(NATIVE_DISCOVERY_PROVIDERS.has(account.provider) &&
+						!this.discoveredMetadata(account, p)) ||
 					this.now() >=
 						(this.nextRefresh.get(key) ?? p.last_success_at + 3600000)
 				)

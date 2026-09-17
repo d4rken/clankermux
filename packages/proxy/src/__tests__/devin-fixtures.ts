@@ -21,6 +21,7 @@ export function devinInfo(): DevinAccountInfo {
 				disabledReason: null,
 				contextWindow: 200000,
 				maxTokens: 64000,
+				maxOutputTokens: 64000,
 				supportsImages: false,
 				defaultInFamily: true,
 				effort: "high",

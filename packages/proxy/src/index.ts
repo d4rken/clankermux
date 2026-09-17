@@ -12,6 +12,7 @@ export {
 export {
 	AccountModelPermissionService,
 	modelPermissionScope,
+	NATIVE_DISCOVERY_PROVIDERS,
 } from "./account-model-permissions";
 export {
 	ANTHROPIC_BUNDLED_MODEL_CREATED_AT,

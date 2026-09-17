@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import type { ClientModelMetadata } from "@clankermux/types";
 import { resolveClientModelMetadata } from "../model-metadata";
 import { __pricingTestHooks } from "../pricing";
 
@@ -111,6 +112,103 @@ afterEach(() => {
 });
 
 describe("published model metadata", () => {
+	it("publishes native account metadata without a catalogue route", async () => {
+		const discovered: ClientModelMetadata = {
+			contextWindow: 131_072,
+			maxOutputTokens: 16_384,
+			inputModalities: ["text", "image"],
+		};
+		expect(
+			await resolveClientModelMetadata({
+				targetModel: "swe-2",
+				providers: [],
+				discoveredMetadata: [discovered],
+			}),
+		).toEqual(discovered);
+	});
+
+	it("reduces native accounts to their smallest limits and shared modalities", async () => {
+		const discoveredMetadata: ClientModelMetadata[] = [
+			{
+				contextWindow: 131_072,
+				maxOutputTokens: 32_768,
+				reasoning: true,
+				inputModalities: ["text", "image"],
+			},
+			{
+				contextWindow: 262_144,
+				maxOutputTokens: 16_384,
+				reasoning: false,
+				inputModalities: ["text"],
+			},
+		];
+		const original = structuredClone(discoveredMetadata);
+		expect(
+			await resolveClientModelMetadata({
+				targetModel: "swe-2",
+				providers: [],
+				discoveredMetadata,
+			}),
+		).toEqual({
+			contextWindow: 131_072,
+			maxOutputTokens: 16_384,
+			reasoning: false,
+			inputModalities: ["text"],
+		});
+		expect(discoveredMetadata).toEqual(original);
+	});
+
+	it("drops fields that an unknown native account cannot substantiate", async () => {
+		expect(
+			await resolveClientModelMetadata({
+				targetModel: "swe-2",
+				providers: [],
+				discoveredMetadata: [
+					{
+						contextWindow: 131_072,
+						maxOutputTokens: 16_384,
+						inputModalities: ["text", "image"],
+					},
+					{},
+				],
+			}),
+		).toEqual({});
+	});
+
+	it("reduces native account metadata together with catalogue routes", async () => {
+		await loadCatalogue();
+		expect(
+			await resolveClientModelMetadata({
+				targetModel: "shared-model",
+				providers: ["openrouter"],
+				discoveredMetadata: [
+					{
+						contextWindow: 131_072,
+						maxOutputTokens: 64_000,
+						reasoning: true,
+						inputModalities: ["text"],
+					},
+				],
+			}),
+		).toEqual({
+			contextWindow: 131_072,
+			maxOutputTokens: 32_000,
+			reasoning: true,
+			inputModalities: ["text"],
+		});
+	});
+
+	it("publishes no native metadata when routes remain unresolved", async () => {
+		expect(
+			await resolveClientModelMetadata({
+				targetModel: "swe-2",
+				providers: [],
+				discoveredMetadata: [{ contextWindow: 131_072 }],
+				unresolvedRoutes: true,
+			}),
+		).toEqual({});
+	});
+
 	it("publishes the verified Codex ceiling rather than the client default", async () => {
 		await loadCatalogue();
 		const metadata = await resolveClientModelMetadata({

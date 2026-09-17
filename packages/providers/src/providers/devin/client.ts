@@ -114,7 +114,10 @@ export interface DevinModel {
 	disabledReason: string | null;
 	contextWindow: number | null;
 	maxTokens: number | null;
+	/** Explicit output ceiling, separate from the CLI configuration token budget. */
+	maxOutputTokens: number | null;
 	supportsImages: boolean;
+	supportsThinking?: boolean;
 	defaultInFamily: boolean;
 	effort: string | null;
 }
@@ -264,7 +267,11 @@ function modelInfo(config: ClientModelConfig): DevinModel {
 			null,
 		contextWindow: config.modelInfo?.maxTokens || null,
 		maxTokens: config.maxTokens || config.modelInfo?.maxOutputTokens || null,
+		maxOutputTokens: config.modelInfo?.maxOutputTokens || null,
 		supportsImages: config.supportsImages,
+		...(config.modelInfo?.modelFeatures
+			? { supportsThinking: config.modelInfo.modelFeatures.supportsThinking }
+			: {}),
 		defaultInFamily:
 			config.isDefaultModelInFamily || family?.isDefaultModelInFamily === true,
 		effort,

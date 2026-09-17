@@ -24,8 +24,10 @@ type InputModality = (typeof INPUT_MODALITIES)[number];
 
 export interface ModelMetadataRequest {
 	targetModel: string;
-	/** Distinct providers of the accounts eligible to serve this target. */
+	/** Distinct providers of eligible accounts that need catalogue metadata. */
 	providers: string[];
+	/** Normalized native metadata for each eligible account with discovery. */
+	discoveredMetadata?: ClientModelMetadata[];
 	/** True when any eligible account's permissions are `unknown`. */
 	unresolvedRoutes?: boolean;
 }
@@ -34,7 +36,7 @@ export interface ModelMetadataRequest {
  * What can be said about one published alias, given every route that may serve
  * it.
  *
- * A field survives only when EVERY eligible provider substantiates it, reduced
+ * A field survives only when EVERY eligible route substantiates it, reduced
  * to the value that holds for all of them: the smallest window, the logical AND
  * of `reasoning`, the shared modalities, one common rate card. A client picks
  * the route it is given, not the best one, so a figure that is only true of some
@@ -44,9 +46,14 @@ export async function resolveClientModelMetadata(
 	request: ModelMetadataRequest,
 ): Promise<ClientModelMetadata> {
 	const providers = [...new Set(request.providers)];
+	const discoveredMetadata = request.discoveredMetadata ?? [];
 	// No route is evidence of nothing, not evidence of defaults — and an account
 	// whose permissions have never been read cannot be counted out.
-	if (request.unresolvedRoutes || providers.length === 0) return {};
+	if (
+		request.unresolvedRoutes ||
+		(providers.length === 0 && discoveredMetadata.length === 0)
+	)
+		return {};
 	const candidates = await Promise.all(
 		providers.map(async (provider) => {
 			const { entry } = await lookupCatalogueEntry(
@@ -56,7 +63,7 @@ export async function resolveClientModelMetadata(
 			return candidateFor(request.targetModel, provider, entry);
 		}),
 	);
-	return reduce(candidates);
+	return reduce([...candidates, ...discoveredMetadata]);
 }
 
 function candidateFor(
@@ -195,9 +202,9 @@ function reduce(candidates: ClientModelMetadata[]): ClientModelMetadata {
 	}
 	const costs = candidates.map((c) => c.cost);
 	// Blending two rate cards produces a number matching no real bill, so a
-	// disagreement drops the cost entirely. Comparing serialisations is sound
-	// because every candidate was built field-by-field by `costFrom`, in one key
-	// order.
+	// disagreement drops the cost entirely. Catalogue costs have a consistent
+	// field order from `costFrom`; differently ordered native costs conservatively
+	// drop the rate card as well.
 	if (
 		costs.every((c) => c !== undefined) &&
 		new Set(costs.map((c) => JSON.stringify(c))).size === 1
