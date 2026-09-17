@@ -74,7 +74,15 @@ function classBadges(
 			label:
 				budget.willRunOutCapacity === 1
 					? "1 account, no failover"
-					: "No account can serve this",
+					: // `willRunOutCapacity` counts contributors plus accounts spent ON
+						// THIS window, so its zero covers two different classes: one held
+						// out entirely for KNOWN reasons (cooling down, token expired),
+						// where nothing can serve and saying so is earned, and one holding
+						// any account whose window went unread, which may be serving right
+						// now. A single unknown is enough to lose the claim.
+						budget.unknownCount > 0
+						? "Capacity unknown"
+						: "No account can serve this",
 			colorClass: "text-warning-strong",
 		});
 	}

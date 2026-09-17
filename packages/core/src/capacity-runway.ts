@@ -12,6 +12,7 @@ import {
 	RESET_JITTER_TOLERANCE_MS,
 } from "@clankermux/types";
 import { TIME_CONSTANTS } from "./constants";
+import { windowResetsOnCalendar } from "./throttle-utils";
 
 /**
  * The outcome vocabulary lives in `@clankermux/types` (see `types/runway.ts`)
@@ -97,6 +98,13 @@ export interface WindowExhaustionInput {
 	resetsAtMs: number | null;
 	/** From `computeWindowStartMs`. */
 	windowStartMs: number | null;
+	/**
+	 * The window's name, forwarded to {@link isUnstartedWindow} so a CALENDAR
+	 * cycle is not mistaken for an unopened sliding one. Only that test reads it;
+	 * every other branch treats windows alike. Absent keeps the sliding
+	 * interpretation.
+	 */
+	windowKind?: string | null;
 	/** Passed UNGATED — the estimator applies `isUsablePrediction` itself. */
 	prediction: UsagePrediction | null | undefined;
 	/** Absent means `"low"` — see {@link LifetimeConfidence}. */
@@ -298,7 +306,12 @@ export function estimateWindowExhaustion(
 		// poll of a sliding window is an `isResetBoundary`, so no usable
 		// prediction can exist for one.
 		if (
-			isUnstartedWindow({ utilizationPct: pct, windowStartMs, observedAtMs })
+			isUnstartedWindow({
+				utilizationPct: pct,
+				windowStartMs,
+				observedAtMs,
+				windowKind: input.windowKind,
+			})
 		) {
 			return {
 				source: "unstarted",
@@ -417,13 +430,22 @@ export function estimateWindowExhaustion(
  *
  * The consequence a caller must respect: `resetsAtMs` on such a window is NOT a
  * deadline, so it must never be offered as an earliest reset or a "next reset".
+ *
+ * `windowKind` opts a CALENDAR window out of the test entirely (see
+ * {@link windowResetsOnCalendar}): its cycle rolls over at a fixed hour whether
+ * or not anything was spent, so for the first few minutes of every cycle an
+ * untouched one reproduces the coincidence exactly while its reset is a real
+ * deadline. Omitting the kind keeps the sliding interpretation, which is right
+ * for every window that has one.
  */
 export function isUnstartedWindow(input: {
 	utilizationPct: number;
 	windowStartMs: number | null | undefined;
 	observedAtMs?: number | null;
+	windowKind?: string | null;
 }): boolean {
 	const { utilizationPct, windowStartMs, observedAtMs } = input;
+	if (windowResetsOnCalendar(input.windowKind)) return false;
 	if (!Number.isFinite(utilizationPct) || utilizationPct > 0) return false;
 	if (windowStartMs == null || !Number.isFinite(windowStartMs)) return false;
 	if (observedAtMs == null || !Number.isFinite(observedAtMs)) return false;
@@ -1342,6 +1364,7 @@ function buildPool(
 						utilizationPct: window.utilizationPct,
 						resetsAtMs: window.resetsAtMs,
 						windowStartMs: window.windowStartMs,
+						windowKind: window.windowKind,
 						prediction: window.prediction,
 						lifetimeConfidence: window.lifetimeConfidence,
 						observedAtMs: window.observedAtMs,

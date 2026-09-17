@@ -1274,6 +1274,7 @@ function prepareWindow(
 			utilizationPct: window.utilizationPct,
 			resetsAtMs: window.resetsAtMs,
 			windowStartMs: window.windowStartMs,
+			windowKind: window.windowKind,
 			prediction: window.prediction,
 			lifetimeConfidence: window.lifetimeConfidence,
 			observedAtMs: window.observedAtMs,

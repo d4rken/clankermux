@@ -251,6 +251,7 @@ function windowSummary(
 					? null
 					: computeWindowStartMs(extracted.resetMs, kind),
 			observedAtMs: sampledAtMs,
+			windowKind: kind,
 		});
 	return {
 		kind,

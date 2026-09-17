@@ -146,6 +146,7 @@ export function computeWeeklyWorkloads(
 						utilizationPct: w.utilizationPct,
 						windowStartMs: w.windowStartMs,
 						observedAtMs: w.observedAtMs,
+						windowKind: w.windowKind,
 					}),
 			)
 			.map((w) => w.resetsAtMs as number);

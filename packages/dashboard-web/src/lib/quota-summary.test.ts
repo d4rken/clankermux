@@ -190,3 +190,63 @@ it("does not display an unopened window's sliding reset as a deadline", () => {
 	expect(row.accounts[0].resetMs).toBeNull();
 	expect(row.accounts[0].shortWindowResetMs).toBeNull();
 });
+
+describe("short-window evidence", () => {
+	const devin = (
+		daily: { utilization: number; resetAt: number } | null,
+	): AccountResponse =>
+		account("Devin-1", 0, {
+			provider: "devin",
+			usageAsOfIso: new Date(NOW).toISOString(),
+			usageData: {
+				kind: "devin",
+				quotaBased: true,
+				daily,
+				weekly: { utilization: 20, resetAt: NOW + 3 * 24 * HOUR },
+				planName: "Team",
+				email: null,
+				accountId: null,
+			},
+		} as Partial<AccountResponse>);
+
+	it("keeps an account available on its readable weekly window alone", () => {
+		// A short window with no reading does NOT withhold availability. The
+		// extractors return `{ pct: null }` both for a window that could not be
+		// read and for one the plan does not run, and Codex's absent 5-hour window
+		// is the second: gating on it marks every healthy Codex account
+		// unavailable. See the sibling case below, which pins that.
+		expect(buildQuotaSummary([devin(null)], NOW)[0].accounts[0].available).toBe(
+			true,
+		);
+		expect(
+			buildQuotaSummary(
+				[devin({ utilization: 5, resetAt: NOW + 6 * HOUR })],
+				NOW,
+			)[0].accounts[0].available,
+		).toBe(true);
+	});
+
+	it("keeps a Codex account with no 5-hour window available", () => {
+		// Codex retired its rolling 5-hour window, so `five_hour: null` is
+		// routinely the window not existing rather than one that went unread —
+		// and a gate that cannot tell the two apart takes every such account
+		// offline. A readable weekly window is the whole of the evidence here.
+		const row = buildQuotaSummary(
+			[
+				account("Codex-me", 20, {
+					provider: "codex",
+					usageData: {
+						five_hour: null,
+						seven_day: {
+							utilization: 20,
+							resets_at: new Date(NOW + 3 * 24 * HOUR).toISOString(),
+						},
+					},
+				} as Partial<AccountResponse>),
+			],
+			NOW,
+		)[0];
+		expect(row.accounts[0].status).toBe("Available");
+		expect(row.availableCount).toBe(1);
+	});
+});

@@ -2642,13 +2642,13 @@ describe("the daily window", () => {
 		expect(weekly.contributing[0]?.pct).toBe(20);
 	});
 
-	it("dates the daily window by a day, so an unstarted one is caught", () => {
-		// A 0% window whose start tracks the reading has not been opened: its reset
-		// is a placeholder the provider re-stamps every poll, and must never be
-		// offered as a deadline. Recovering the start needs the window's LENGTH,
-		// which comes from its name — read as five hours, this reset would date the
-		// start 19 hours into the future and the placeholder would escape.
-		const unstarted = computePoolUsage(
+	it("keeps a calendar day's reset even when nothing has been spent on it", () => {
+		// The unstarted heuristic reads a 0% window whose derived start coincides
+		// with the reading as a sliding placeholder, and suppresses its reset. A
+		// calendar day reproduces that coincidence honestly for the first minutes
+		// of every cycle — Devin's day rolls over at a fixed hour whether or not
+		// anything was spent — so the reset stays a real deadline.
+		const justRolledOver = computePoolUsage(
 			[
 				mkAccount({
 					name: "Devin-1",
@@ -2668,22 +2668,33 @@ describe("the daily window", () => {
 			"daily",
 			NOW,
 		);
-		expect(unstarted.classes[0]?.unstartedCount).toBe(1);
-		expect(unstarted.earliestResetMs).toBeNull();
+		expect(justRolledOver.classes[0]?.unstartedCount).toBe(0);
+		expect(justRolledOver.earliestResetMs).toBe(NOW + 24 * HOUR);
 
-		// A day already running keeps its reset: the start is in the past.
-		const running = computePoolUsage(
+		// A rolling window with the same shape IS still treated as unstarted, so
+		// the opt-out is the calendar window's and not a blanket loosening.
+		const rolling = computePoolUsage(
 			[
-				devin(
-					{ utilization: 0, resetAt: NOW + 6 * HOUR },
-					{ utilization: 10, resetAt: NOW + 3 * 24 * HOUR },
-				),
+				mkAccount({
+					name: "Claude-1",
+					usageAsOfIso: new Date(NOW).toISOString(),
+					usageData: {
+						five_hour: {
+							utilization: 0,
+							resets_at: new Date(NOW + 5 * HOUR).toISOString(),
+						},
+						seven_day: {
+							utilization: 10,
+							resets_at: new Date(NOW + 3 * 24 * HOUR).toISOString(),
+						},
+					} as never,
+				}),
 			],
-			"daily",
+			"five_hour",
 			NOW,
 		);
-		expect(running.classes[0]?.unstartedCount).toBe(0);
-		expect(running.earliestResetMs).toBe(NOW + 6 * HOUR);
+		expect(rolling.classes[0]?.unstartedCount).toBe(1);
+		expect(rolling.earliestResetMs).toBeNull();
 	});
 
 	it("withholds a plan reporting no window from capacity on both its windows", () => {

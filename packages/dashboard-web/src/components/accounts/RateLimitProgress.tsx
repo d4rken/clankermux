@@ -232,6 +232,7 @@ function computeProjectedMessage(
 			utilizationPct: percentage,
 			resetsAtMs: Number.isFinite(resetMs) ? resetMs : null,
 			windowStartMs,
+			windowKind: window,
 			prediction,
 			lifetimeConfidence: weeklyLifetimeConfidence(window),
 			observedAtMs,
@@ -793,6 +794,7 @@ export function RateLimitProgress({
 						utilizationPct: percentage,
 						windowStartMs: computeWindowStartMs(liveResetMs, usage.window),
 						observedAtMs,
+						windowKind: usage.window,
 					});
 				// The one tone every surface reads: the bar's fill, the click popover
 				// and the inline line all derive from this, so none of them can
