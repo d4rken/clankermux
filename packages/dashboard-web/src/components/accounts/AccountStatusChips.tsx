@@ -19,6 +19,7 @@ import {
 	deriveAccountStatus,
 	type ResetCreditUrgency,
 } from "../../lib/account-status";
+import { randomUUID } from "../../lib/uuid";
 import { Button } from "../ui/button";
 import { Popover, PopoverContent, PopoverTrigger } from "../ui/popover";
 import { AccountPolicyChips } from "./AccountPolicyChips";
@@ -154,7 +155,7 @@ function formatEventTime(iso: string): string {
 /**
  * Presentational body of the reset-credit history popover. Exported (pure,
  * state-in) so the loading / error / empty / list states are unit-testable
- * with static markup — the repo has no DOM test harness to click the trigger.
+ * with static markup.
  */
 export function ResetCreditEventsPanel({
 	state,
@@ -419,7 +420,7 @@ function CodexUsageResetChip({
 	};
 
 	const handleArm = () => {
-		const key = crypto.randomUUID();
+		const key = randomUUID();
 		setApplyIdempotencyKey(key);
 		setApplyState({ kind: "confirm" });
 	};
