@@ -1,4 +1,4 @@
-import { describe, expect, it } from "bun:test";
+import { describe, expect, it, spyOn } from "bun:test";
 import type {
 	CachePrefixCapture,
 	ContextComposition,
@@ -2326,4 +2326,78 @@ describe("RequestRecorder — cost provenance", () => {
 			costIsByok: false,
 		});
 	});
+});
+
+describe("RequestRecorder gateway hints", () => {
+	for (const failed of [false, true]) {
+		it(`persists and emits hints with payload storage disabled (failed=${failed})`, async () => {
+			const h = makeHarness();
+			h.storePayloads.value = false;
+			const saved = spyOn(h.dbOps, "saveRequest");
+			h.recorder.begin(
+				makeMeta({
+					responseStatus: failed ? 429 : 200,
+					requestHeaders: {
+						"x-claude-code-request-class": "primary",
+						"x-claude-code-agent-type": "explore",
+						"x-claude-code-prev-tool-durations": "[42]",
+						"x-claude-code-compaction": "false",
+						"x-claude-code-context-compacted": "true",
+					},
+				}),
+			);
+			h.recorder.attachUsageSummary("req-1", makeSummary());
+			h.recorder.finishTransport("req-1", failed ? "error" : "success");
+			await h.flush();
+			const expected = {
+				gatewayHintRequestClass: "primary",
+				gatewayHintAgentType: "explore",
+				gatewayHintPrevToolDurations: "[42]",
+				gatewayHintCompaction: "false",
+				gatewayHintContextCompacted: "true",
+			};
+			expect(saved.mock.calls[0]?.[0]).toMatchObject(expected);
+			expect(h.emitted[0]).toMatchObject(expected);
+			expect(h.dbOps.savePayloadCalls).toHaveLength(0);
+			h.recorder.dispose();
+		});
+	}
+});
+
+it("keeps gateway hints on the late-usage summary", async () => {
+	const h = makeHarness();
+	h.storePayloads.value = false;
+	h.recorder.begin(
+		makeMeta({ requestHeaders: { "x-claude-code-agent-type": "explore" } }),
+	);
+	h.recorder.finishTransport("req-1", "success");
+	h.timers.advance(101);
+	await h.flush();
+	expect(h.emitted[0]?.gatewayHintAgentType).toBe("explore");
+	h.recorder.attachUsageSummary("req-1", makeSummary());
+	await h.flush();
+	expect(h.emitted).toHaveLength(2);
+	expect(h.emitted[1]?.gatewayHintAgentType).toBe("explore");
+	h.recorder.dispose();
+});
+
+it("emits gateway hints for a synthetic rejection without payload storage", async () => {
+	const h = makeHarness();
+	h.storePayloads.value = false;
+	const saved = spyOn(h.dbOps, "saveRequest");
+	h.recorder.recordSynthetic(
+		makeMeta({
+			responseStatus: 503,
+			requestHeaders: { "x-claude-code-compaction": "false" },
+		}),
+		"error",
+		"pool exhausted",
+	);
+	await h.flush();
+	expect(saved.mock.calls[0]?.[0]).toMatchObject({
+		gatewayHintCompaction: "false",
+	});
+	expect(h.emitted[0]?.gatewayHintCompaction).toBe("false");
+	expect(h.dbOps.savePayloadCalls).toHaveLength(0);
+	h.recorder.dispose();
 });

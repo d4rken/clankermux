@@ -218,6 +218,14 @@ export function RequestDetailsModal({
 		),
 	);
 
+	const gatewayHints = [
+		["Request class", summary?.gatewayHintRequestClass],
+		["Agent type", summary?.gatewayHintAgentType],
+		["Previous tool durations", summary?.gatewayHintPrevToolDurations],
+		["Compaction", summary?.gatewayHintCompaction],
+		["Context compacted", summary?.gatewayHintContextCompacted],
+	].filter((entry): entry is [string, string] => !!entry[1]);
+
 	return (
 		<Dialog open={isOpen} onOpenChange={onClose}>
 			<DialogContent className="max-w-4xl max-h-[90vh] overflow-hidden flex flex-col">
@@ -262,6 +270,22 @@ export function RequestDetailsModal({
 							{refusalBadge && (
 								<Badge variant="outline" title={refusalBadge.title}>
 									{refusalBadge.label}
+								</Badge>
+							)}
+							{summary?.gatewayHintRequestClass && (
+								<Badge
+									variant="secondary"
+									className="max-w-full break-all whitespace-normal"
+								>
+									Request class: {summary.gatewayHintRequestClass}
+								</Badge>
+							)}
+							{summary?.gatewayHintAgentType && (
+								<Badge
+									variant="secondary"
+									className="max-w-full break-all whitespace-normal"
+								>
+									Agent type: {summary.gatewayHintAgentType}
 								</Badge>
 							)}
 							{summary?.totalTokens && (
@@ -440,8 +464,25 @@ export function RequestDetailsModal({
 
 					<TabsContent
 						value="metadata"
-						className="mt-group overflow-y-auto max-h-[60vh]"
+						className="mt-group space-y-group overflow-y-auto max-h-[60vh]"
 					>
+						{gatewayHints.length > 0 && (
+							<section aria-label="Claude Code hints">
+								<h3 className="display-face font-semibold mb-item">
+									Claude Code hints
+								</h3>
+								<dl className="grid grid-cols-[auto_minmax(0,1fr)] gap-x-group gap-y-item text-sm">
+									{gatewayHints.map(([label, value]) => (
+										<div key={label} className="contents">
+											<dt className="text-muted-foreground">{label}</dt>
+											<dd className="font-mono whitespace-pre-wrap break-all">
+												{value}
+											</dd>
+										</div>
+									))}
+								</dl>
+							</section>
+						)}
 						<PayloadSection
 							title="Request Metadata"
 							getValue={() =>

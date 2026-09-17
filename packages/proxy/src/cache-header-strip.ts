@@ -1,3 +1,5 @@
+import { GATEWAY_HINT_HEADERS } from "./gateway-hint-headers";
+
 /**
  * Headers stripped from a captured client request before it is stored as a warm
  * replay body for the Session Cache Bridge / per-account keepalive path.
@@ -19,10 +21,12 @@
  *  - Transport/framing headers (content-length, transfer-encoding, accept/content-
  *    encoding, connection, keep-alive, upgrade, host) describe the original hop and
  *    must not be replayed verbatim — they are recomputed for the synthetic request.
+ *  - Gateway hints describe the original client turn, not a synthetic replay.
  *  - Session/trace correlation headers are per-request identifiers that would be
  *    wrong on a replay.
  */
 export const CACHE_REPLAY_STRIP_HEADERS = new Set([
+	...GATEWAY_HINT_HEADERS,
 	"authorization",
 	"x-api-key",
 	"cookie",
