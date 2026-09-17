@@ -456,7 +456,7 @@ it("discovers only enabled concrete Devin models from native account metadata", 
 	expect(paths).toHaveLength(3);
 	expect(paths.some((p) => p.endsWith("/models"))).toBe(false);
 	const first = service.discoveredMetadata(a, permission)?.models;
-	expect(first).toBeDefined();
+	if (!first) throw new Error("Expected native metadata snapshot");
 	const now = Date.now();
 	const clock = spyOn(Date, "now").mockReturnValue(now + 31_000);
 	try {

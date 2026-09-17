@@ -1345,6 +1345,9 @@ describe("client service integration", () => {
 					},
 				];
 				const id = (await create(draft)).client.apiKeyId;
+				rmSync(join(cacheDir, "clankermux", "models.dev.json"), {
+					force: true,
+				});
 				__pricingTestHooks.reset();
 				globalThis.fetch = (async () => {
 					throw new Error("Catalogue unavailable");
