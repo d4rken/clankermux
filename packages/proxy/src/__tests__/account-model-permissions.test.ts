@@ -1,5 +1,5 @@
 import { Database } from "bun:sqlite";
-import { afterEach, describe, expect, it } from "bun:test";
+import { afterEach, describe, expect, it, spyOn } from "bun:test";
 import {
 	BunSqlAdapter,
 	ensureSchema,
@@ -11,6 +11,8 @@ import {
 	GetCliModelConfigsResponseSchema,
 	GetUserJwtResponseSchema,
 	GetUserStatusResponseSchema,
+	ModelFeaturesSchema,
+	ModelInfoSchema,
 } from "../../../providers/src/providers/devin/vendor/devin-proto";
 import {
 	create,
@@ -344,9 +346,11 @@ describe("account model discovery", () => {
 it("discovers only enabled concrete Devin models from native account metadata", async () => {
 	const a = account("devin", { provider: "devin", custom_endpoint: null });
 	const paths: string[] = [];
-	const { service } = setup([a], async (input) => {
+	let fail = false;
+	const { service, repo } = setup([a], async (input) => {
 		const path = new URL(String(input)).pathname;
 		paths.push(path);
+		if (fail) return new Response(null, { status: 503 });
 		if (path.endsWith("GetUserJwt"))
 			return new Response(
 				new Uint8Array(
@@ -366,10 +370,30 @@ it("discovers only enabled concrete Devin models from native account metadata", 
 								create(ClientModelConfigSchema, {
 									modelUid: "swe-2-high",
 									label: "SWE-2 High",
+									maxTokens: 200_000,
+									supportsImages: true,
+									modelInfo: create(ModelInfoSchema, {
+										maxTokens: 200_000,
+										maxOutputTokens: 64_000,
+										modelFeatures: create(ModelFeaturesSchema, {
+											supportsThinking: true,
+										}),
+									}),
 								}),
 								create(ClientModelConfigSchema, {
 									modelUid: "swe-2-max",
 									disabled: true,
+								}),
+								create(ClientModelConfigSchema, {
+									modelUid: "swe-2-medium",
+									maxTokens: 200_000,
+								}),
+								create(ClientModelConfigSchema, {
+									modelUid: "swe-2-invalid",
+									modelInfo: create(ModelInfoSchema, {
+										maxTokens: -1,
+										maxOutputTokens: -1,
+									}),
 								}),
 								create(ClientModelConfigSchema, { modelUid: "adaptive" }),
 							],
@@ -386,10 +410,76 @@ it("discovers only enabled concrete Devin models from native account metadata", 
 			),
 		);
 	});
-	await service.refresh(a);
-	expect((await service.permissions(a)).discovered_ids).toEqual(["swe-2-high"]);
+	const scope = modelPermissionScope(a);
+	const initial = await repo.ensurePermissionScope(a.id, scope);
+	await repo.completeDiscovery(
+		a.id,
+		scope,
+		initial.generation,
+		["swe-2-high"],
+		Date.now(),
+	);
+	// Even a recently persisted ID list needs its native metadata hydrated after restart.
+	await service.tick();
+	const permission = await service.permissions(a);
+	expect(permission.discovered_ids).toEqual([
+		"swe-2-high",
+		"swe-2-invalid",
+		"swe-2-medium",
+	]);
+	expect(service.discoveredMetadata(a, permission)?.models).toEqual({
+		"swe-2-medium": { inputModalities: ["text"] },
+		"swe-2-invalid": { inputModalities: ["text"] },
+		"swe-2-high": {
+			contextWindow: 200_000,
+			maxOutputTokens: 64_000,
+			reasoning: true,
+			inputModalities: ["text", "image"],
+		},
+	});
+	expect(service.discoveredMetadata(a, permission)?.stale).toBe(false);
+	expect(
+		service.discoveredMetadata({ ...a, api_key: "replacement" }, permission),
+	).toBeUndefined();
+	expect(
+		service.discoveredMetadata(a, {
+			...permission,
+			generation: permission.generation + 1,
+		}),
+	).toBeUndefined();
+	expect(
+		service.discoveredMetadata(a, {
+			...permission,
+			last_error: "refresh failed",
+		})?.stale,
+	).toBe(true);
 	expect(paths).toHaveLength(3);
 	expect(paths.some((p) => p.endsWith("/models"))).toBe(false);
+	const first = service.discoveredMetadata(a, permission)?.models;
+	const now = Date.now();
+	const clock = spyOn(Date, "now").mockReturnValue(now + 31_000);
+	try {
+		fail = true;
+		await service.refresh(a, true);
+		const failed = await service.permissions(a);
+		expect(failed.last_error).not.toBeNull();
+		expect(failed.discovered_ids).toEqual(permission.discovered_ids);
+		expect(service.discoveredMetadata(a, failed)).toEqual({
+			models: first,
+			stale: true,
+		});
+		clock.mockReturnValue(now + 62_000);
+		fail = false;
+		await service.refresh(a, true);
+		const recovered = await service.permissions(a);
+		expect(recovered.last_error).toBeNull();
+		expect(service.discoveredMetadata(a, recovered)).toEqual({
+			models: first,
+			stale: false,
+		});
+	} finally {
+		clock.mockRestore();
+	}
 });
 
 /**

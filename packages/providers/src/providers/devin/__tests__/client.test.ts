@@ -14,6 +14,7 @@ import {
 	GetUserJwtRequestSchema,
 	GetUserJwtResponseSchema,
 	GetUserStatusResponseSchema,
+	ModelInfoSchema,
 	PlanInfoSchema,
 	PlanStatusSchema,
 	TeamsTier,
@@ -64,6 +65,11 @@ describe("Devin account client", () => {
 									create(ClientModelConfigSchema, {
 										modelUid: "swe-2-high",
 										label: "SWE-2 High",
+										maxTokens: 262_000,
+										modelInfo: create(ModelInfoSchema, {
+											maxTokens: 262_000,
+											maxOutputTokens: 128_000,
+										}),
 										isDefaultModelInFamily: true,
 									}),
 									create(ClientModelConfigSchema, {
@@ -94,6 +100,12 @@ describe("Devin account client", () => {
 			client.getAccount("beta"),
 		]);
 		expect(a.userJwt).not.toBe(b.userJwt);
+		expect(a.models[0]).toMatchObject({
+			contextWindow: 262_000,
+			maxTokens: 262_000,
+			maxOutputTokens: 128_000,
+		});
+		expect(a.models[1]?.maxOutputTokens).toBeNull();
 		expect(tokens.sort()).toEqual([
 			"devin-session-token$alpha",
 			"devin-session-token$beta",
