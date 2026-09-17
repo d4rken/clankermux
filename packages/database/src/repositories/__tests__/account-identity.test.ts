@@ -515,11 +515,13 @@ describe("AccountRepository — subscription capture and anchor seeding", () => 
 		expect(account?.renewal_anchor_source).toBe("manual");
 	});
 
-	it("seeds once and leaves the derived anchor alone on later fetches", async () => {
+	it("re-derives the estimate when the subscription start moves", async () => {
 		insertAccount(db, "sub-5");
 		await repo.setAccountIdentityFromProfile("sub-5", withSubscription());
-		// A later subscription start (a plan switch) must not move a date the
-		// operator may have been looking at.
+
+		// Cancel and re-subscribe on another day of the month. A derived anchor
+		// IS the estimate from the start, so once the start moves the stored date
+		// is stale by construction and re-deriving overwrites nobody's decision.
 		await repo.setAccountIdentityFromProfile(
 			"sub-5",
 			withSubscription({
@@ -528,7 +530,58 @@ describe("AccountRepository — subscription capture and anchor seeding", () => 
 		);
 
 		const account = await repo.findById("sub-5");
+		expect(account?.renewal_anchor).toBe("2026-07-20");
+		expect(account?.renewal_anchor_source).toBe("derived");
+		// Re-deriving stays as far from the payments auto-recorder as the first
+		// seed does: still a guess, still no price.
+		expect(account?.renewal_price_usd_micros).toBeNull();
+	});
+
+	it("leaves a derived anchor alone when the start is unchanged", async () => {
+		insertAccount(db, "sub-5b");
+		await repo.setAccountIdentityFromProfile("sub-5b", withSubscription());
+		// A marker only a re-run of the seeder would erase: it always stamps the
+		// seeded cadence, so a surviving 'yearly' proves it did not write.
+		db.run(`UPDATE accounts SET renewal_cadence = 'yearly' WHERE id = ?`, [
+			"sub-5b",
+		] as never[]);
+
+		await repo.setAccountIdentityFromProfile("sub-5b", withSubscription());
+
+		const account = await repo.findById("sub-5b");
 		expect(account?.renewal_anchor).toBe("2026-04-10");
+		expect(account?.renewal_cadence).toBe("yearly");
+	});
+
+	it("never re-derives a manual anchor, even when the start moves", async () => {
+		insertAccount(db, "sub-5c");
+		await repo.setRenewal("sub-5c", "2026-01-02", "yearly", null, null);
+
+		await repo.setAccountIdentityFromProfile(
+			"sub-5c",
+			withSubscription({
+				subscriptionStartedAt: new Date(2026, 6, 20, 12, 0).getTime(),
+			}),
+		);
+
+		const account = await repo.findById("sub-5c");
+		expect(account?.renewal_anchor).toBe("2026-01-02");
+		expect(account?.renewal_cadence).toBe("yearly");
+		expect(account?.renewal_anchor_source).toBe("manual");
+	});
+
+	it("re-seeds an account handed back to automatic tracking", async () => {
+		insertAccount(db, "sub-5d");
+		await repo.setRenewal("sub-5d", "2026-01-02", "yearly", 20_000_000, null);
+
+		await repo.resetRenewalToAutomatic("sub-5d");
+		await repo.setAccountIdentityFromProfile("sub-5d", withSubscription());
+
+		const account = await repo.findById("sub-5d");
+		expect(account?.renewal_anchor).toBe("2026-04-10");
+		expect(account?.renewal_cadence).toBe("monthly");
+		expect(account?.renewal_anchor_source).toBe("derived");
+		expect(account?.renewal_price_usd_micros).toBeNull();
 	});
 
 	it("leaves the anchor untouched when the provider reports no subscription start", async () => {

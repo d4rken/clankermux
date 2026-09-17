@@ -2269,11 +2269,68 @@ function localTodayDate(): string {
 }
 
 /**
+ * Withdraw the operator's renewal decision: all five renewal columns NULL, so
+ * the start-date seeder may estimate again on the next profile capture.
+ *
+ * A request for automatic tracking that also carries an anchor or a price is
+ * contradictory — it asks for a schedule and for no schedule in the same
+ * breath — and is refused rather than silently resolved one way. A dangling
+ * cadence is not: the manual path already drops one that has no anchor, so it
+ * claims nothing.
+ */
+async function handOverRenewalToAutomatic(
+	dbOps: DatabaseOperations,
+	accountId: string,
+	body: { renewalAnchor?: unknown; renewalPriceUsd?: unknown },
+): Promise<Response> {
+	const carriesAnchor = body.renewalAnchor != null && body.renewalAnchor !== "";
+	const carriesPrice =
+		body.renewalPriceUsd != null && body.renewalPriceUsd !== "";
+	if (carriesAnchor || carriesPrice) {
+		return errorResponse(
+			BadRequest(
+				"renewalTracking 'automatic' cannot be combined with renewalAnchor or renewalPriceUsd",
+			),
+		);
+	}
+
+	const account = await dbOps
+		.getAdapter()
+		.get<{ name: string }>(`SELECT name FROM accounts WHERE id = ?`, [
+			accountId,
+		]);
+	if (!account) {
+		return errorResponse(NotFound("Account not found"));
+	}
+
+	await dbOps.resetAccountRenewalToAutomatic(accountId);
+
+	// The price goes away with the anchor, and the price is what the amortized
+	// spend figures are computed from.
+	invalidateDashboardCache("payments-summary");
+
+	return jsonResponse({
+		success: true,
+		message: `Renewal tracking for account '${account.name}' handed back to the automatic estimate`,
+		renewalAnchor: null,
+		renewalCadence: null,
+		renewalPriceUsd: null,
+	});
+}
+
+/**
  * Create an account renewal date update handler.
  * Stores a manually-entered subscription renewal anchor date, cadence, and
  * optional price (`renewalPriceUsd`, USD float → stored as integer micros).
  * Sending renewalAnchor: null (or empty) clears everything (cadence, price,
  * auto-start all NULL).
+ *
+ * `renewalTracking` names which of the two intentions the call carries, and
+ * they are not the same: "manual" (the default, and what every date/clear call
+ * means) records the operator's decision, while "automatic" withdraws it and
+ * hands the account back to the seeder. A clear alone cannot express the
+ * second — it is itself a decision, recorded as `manual`, which is exactly what
+ * stops the next profile fetch reinstating a date the operator removed.
  *
  * `renewal_auto_start_date` transitions (the auto-recorder's lower bound, so
  * it never invents history):
@@ -2285,6 +2342,14 @@ export function createAccountRenewalUpdateHandler(dbOps: DatabaseOperations) {
 	return async (req: Request, accountId: string): Promise<Response> => {
 		try {
 			const body = await req.json();
+
+			const tracking = validateString(body.renewalTracking, "renewalTracking", {
+				allowedValues: ["manual", "automatic"],
+			});
+
+			if (tracking === "automatic") {
+				return await handOverRenewalToAutomatic(dbOps, accountId, body);
+			}
 
 			const cadence = validateString(body.renewalCadence, "renewalCadence", {
 				required: true,

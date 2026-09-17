@@ -371,6 +371,25 @@ describe("Anchor provenance — seeder vs provider report", () => {
 		expect(account?.renewal_anchor_source).toBe("derived");
 	});
 
+	it("never re-derives over a provider-reported anchor", async () => {
+		// An Anthropic row, so only the SOURCE gate can stop the seeder: the
+		// provider gate would mask the check on a Codex or Devin account.
+		insertAccount(db, "seed-4", "anthropic");
+		db.run(
+			`UPDATE accounts SET renewal_anchor = '2026-10-03',
+			 renewal_cadence = 'yearly', renewal_anchor_source = 'provider'
+			 WHERE id = ?`,
+			["seed-4"],
+		);
+
+		await repo.setAccountIdentityFromProfile("seed-4", identity());
+
+		const account = await repo.findById("seed-4");
+		expect(account?.renewal_anchor).toBe("2026-10-03");
+		expect(account?.renewal_cadence).toBe("yearly");
+		expect(account?.renewal_anchor_source).toBe("provider");
+	});
+
 	it("a first capture carrying both a start and a period end keeps the period end", async () => {
 		insertAccount(db, "seed-3", "codex");
 
