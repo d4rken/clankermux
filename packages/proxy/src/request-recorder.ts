@@ -8,6 +8,7 @@ import {
 	type CachePrefixCapture,
 	type ContextComposition,
 	type CostSource,
+	type GatewayHintMetadata,
 	NO_ACCOUNT_ID,
 	type ProjectAttributionSource,
 	parseUpstreamError,
@@ -15,6 +16,8 @@ import {
 	resolveCostSource,
 	type ToolCallStat,
 } from "@clankermux/types";
+
+import { extractGatewayHints } from "./gateway-hint-headers";
 
 const log = new Logger("RequestRecorder");
 
@@ -261,7 +264,7 @@ interface SaveRoutingData {
  * (database/src/repositories/request.repository.ts) — see SaveRoutingData for
  * why these shapes are duplicated rather than imported.
  */
-interface SaveRequestData {
+interface SaveRequestData extends GatewayHintMetadata {
 	id: string;
 	method: string;
 	path: string;
@@ -420,6 +423,7 @@ const PLAN_PROVIDERS = new Set([
 // ---------------------------------------------------------------------------
 
 interface InternalRecord {
+	gatewayHints: GatewayHintMetadata;
 	meta: RecordMeta;
 	billingType: string;
 	/** Captured request body bytes (base64-encodable), null when discarded. */
@@ -579,6 +583,7 @@ export class RequestRecorder {
 		}
 
 		const record: InternalRecord = {
+			gatewayHints: extractGatewayHints(meta.requestHeaders),
 			meta,
 			billingType,
 			reqBytes,
@@ -780,6 +785,7 @@ export class RequestRecorder {
 		// so request -> routing -> payload FK ordering and payload admission remain
 		// identical to upstream responses.
 		const record: InternalRecord = {
+			gatewayHints: extractGatewayHints(meta.requestHeaders),
 			meta,
 			billingType,
 			reqBytes,
@@ -802,7 +808,7 @@ export class RequestRecorder {
 		this.persistOrdered(record, success, responseTime, error, undefined);
 
 		this.emitSummaryEvent(
-			this.buildEventResponse(meta, billingType, success, responseTime, null, {
+			this.buildEventResponse(record, success, responseTime, null, {
 				outcome,
 				errorMessage: error,
 			}),
@@ -891,14 +897,10 @@ export class RequestRecorder {
 		// Emit the dashboard event — carry the outcome so a non-success terminal
 		// (disconnect/timeout/error) populates errorMessage instead of blank.
 		this.emitSummaryEvent(
-			this.buildEventResponse(
-				record.meta,
-				record.billingType,
-				success,
-				responseTime,
-				record.usage,
-				{ outcome: record.transport?.outcome, errorMessage },
-			),
+			this.buildEventResponse(record, success, responseTime, record.usage, {
+				outcome: record.transport?.outcome,
+				errorMessage,
+			}),
 		);
 
 		record.persistedAt = this.now();
@@ -979,6 +981,7 @@ export class RequestRecorder {
 			let requestRowSaved = false;
 			try {
 				await this.dbOps.saveRequest({
+					...record.gatewayHints,
 					id: meta.requestId,
 					method: meta.method,
 					path: meta.path,
@@ -1122,17 +1125,10 @@ export class RequestRecorder {
 		const success = this.outcomeToSuccess(record);
 		const responseTime = this.computeResponseTime(record, summary);
 		this.emitSummaryEvent(
-			this.buildEventResponse(
-				record.meta,
-				record.billingType,
-				success,
-				responseTime,
-				summary,
-				{
-					outcome: record.transport?.outcome,
-					errorMessage: record.errorMessage ?? null,
-				},
-			),
+			this.buildEventResponse(record, success, responseTime, summary, {
+				outcome: record.transport?.outcome,
+				errorMessage: record.errorMessage ?? null,
+			}),
 		);
 		// Stop the patch-TTL drop timer and drop now — usage is in.
 		if (record.patchTimer !== null) {
@@ -1218,13 +1214,13 @@ export class RequestRecorder {
 	 * blank on disconnect/timeout/error.
 	 */
 	private buildEventResponse(
-		meta: RecordMeta,
-		billingType: string,
+		record: InternalRecord,
 		success: boolean,
 		responseTime: number,
 		summary: SlimUsageSummary | null,
 		errorSource?: { outcome?: TransportOutcome; errorMessage?: string | null },
 	): RequestResponse {
+		const { meta, billingType } = record;
 		const usage = summary?.usage;
 		const composition = meta.contextComposition;
 		// Same 0/NULL collapse as the REST list handler: a request without
@@ -1234,6 +1230,7 @@ export class RequestRecorder {
 				undefined
 			: undefined;
 		return {
+			...record.gatewayHints,
 			id: meta.requestId,
 			timestamp: new Date(meta.timestamp).toISOString(),
 			method: meta.method,

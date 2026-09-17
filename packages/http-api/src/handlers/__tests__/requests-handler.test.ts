@@ -281,3 +281,41 @@ describe("createRequestPayloadHandler", () => {
 		expect(await res.json()).toEqual(payload);
 	});
 });
+
+it("returns every gateway hint in summaries and omits absent hints", async () => {
+	const base = {
+		id: "hints",
+		timestamp: 1_700_000_000_000,
+		method: "POST",
+		path: "/v1/messages",
+	};
+	const { db } = mockDb([
+		{
+			...base,
+			gateway_hint_request_class: "primary",
+			gateway_hint_agent_type: "explore",
+			gateway_hint_prev_tool_durations: "[12,34]",
+			gateway_hint_compaction: "false",
+			gateway_hint_context_compacted: "0",
+		},
+		{
+			...base,
+			id: "old",
+			gateway_hint_request_class: null,
+			gateway_hint_agent_type: null,
+			gateway_hint_prev_tool_durations: null,
+			gateway_hint_compaction: null,
+			gateway_hint_context_compacted: null,
+		},
+	]);
+	const rows = await (await createRequestsSummaryHandler(db)()).json();
+	const hints = {
+		gatewayHintRequestClass: "primary",
+		gatewayHintAgentType: "explore",
+		gatewayHintPrevToolDurations: "[12,34]",
+		gatewayHintCompaction: "false",
+		gatewayHintContextCompacted: "0",
+	};
+	expect(rows[0]).toMatchObject(hints);
+	for (const key of Object.keys(hints)) expect(rows[1]).not.toHaveProperty(key);
+});

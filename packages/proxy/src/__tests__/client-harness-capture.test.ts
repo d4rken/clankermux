@@ -25,7 +25,7 @@ import {
 	mock,
 } from "bun:test";
 import { usageCache } from "@clankermux/providers";
-import type { Account } from "@clankermux/types";
+import type { Account, GatewayHintMetadata } from "@clankermux/types";
 import { cacheBodyStore } from "../cache-body-store";
 import type { ProxyContext } from "../handlers";
 import { setForcedAccount } from "../handlers";
@@ -40,7 +40,7 @@ const ACCOUNT_ID = "acc-harness-capture";
 const CLAUDE_CODE_UA = "claude-cli/2.1.270 (external, cli)";
 
 /** The columns under test, as the repository would receive them. */
-interface SavedRow {
+interface SavedRow extends GatewayHintMetadata {
 	id: string;
 	clientUserAgent?: string | null;
 	clientHarness?: string | null;
@@ -271,7 +271,11 @@ describe("client user-agent / harness capture", () => {
 		const { ctx, saved } = makeContext([makeAccount()]);
 
 		const res = await callHandleProxy(
-			messagesRequest({ "User-Agent": CLAUDE_CODE_UA }),
+			messagesRequest({
+				"User-Agent": CLAUDE_CODE_UA,
+				"X-Claude-Code-Agent-Type": "explore",
+				"x-claude-code-request-class": "primary",
+			}),
 			ctx,
 		);
 		expect(res.status).toBe(200);
@@ -279,6 +283,8 @@ describe("client user-agent / harness capture", () => {
 		const row = await waitForSave(saved);
 		expect(row.clientUserAgent).toBe(CLAUDE_CODE_UA);
 		expect(row.clientHarness).toBe("claude-code");
+		expect(row.gatewayHintAgentType).toBe("explore");
+		expect(row.gatewayHintRequestClass).toBe("primary");
 	});
 
 	it("lands both columns on a synthetic terminal row", async () => {
@@ -293,6 +299,7 @@ describe("client user-agent / harness capture", () => {
 			messagesRequest({
 				"User-Agent": "codex_cli_rs/0.104.0",
 				originator: "codex_cli_rs",
+				"x-claude-code-compaction": "false",
 			}),
 			ctx,
 		);
@@ -301,6 +308,7 @@ describe("client user-agent / harness capture", () => {
 		const row = await waitForSave(saved);
 		expect(row.clientUserAgent).toBe("codex_cli_rs/0.104.0");
 		expect(row.clientHarness).toBe("codex");
+		expect(row.gatewayHintCompaction).toBe("false");
 	});
 
 	it("writes NULL for both when the request carried no user-agent", async () => {

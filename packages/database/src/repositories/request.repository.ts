@@ -2,6 +2,7 @@ import { Logger } from "@clankermux/logger";
 import type {
 	CachePrefixCapture,
 	ContextComposition,
+	GatewayHintMetadata,
 	ProjectAttributionSource,
 	ToolCallStat,
 } from "@clankermux/types";
@@ -38,7 +39,7 @@ async function decryptForList(id: string, json: string): Promise<string> {
 	}
 }
 
-export interface RequestData {
+export interface RequestData extends GatewayHintMetadata {
 	id: string;
 	method: string;
 	path: string;
@@ -186,9 +187,10 @@ export class RequestRepository extends BaseRepository<RequestData> {
 					session_key, cache_prefix_hashes,
 					client_user_agent, client_harness,
 					stop_reason, refusal_category, fallback_credit_claimed,
-					fallback_from_model, estimated_cost_usd, cost_source, cost_is_byok
+					fallback_from_model, estimated_cost_usd, cost_source, cost_is_byok,
+					gateway_hint_request_class, gateway_hint_agent_type, gateway_hint_prev_tool_durations, gateway_hint_compaction, gateway_hint_context_compacted
 				)
-				VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+				VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 				ON CONFLICT (id) DO UPDATE SET
 				timestamp = EXCLUDED.timestamp,
 				method = EXCLUDED.method,
@@ -245,7 +247,12 @@ export class RequestRepository extends BaseRepository<RequestData> {
 				stop_reason = COALESCE(EXCLUDED.stop_reason, requests.stop_reason),
 				refusal_category = COALESCE(EXCLUDED.refusal_category, requests.refusal_category),
 				fallback_credit_claimed = COALESCE(EXCLUDED.fallback_credit_claimed, requests.fallback_credit_claimed),
-				fallback_from_model = COALESCE(EXCLUDED.fallback_from_model, requests.fallback_from_model)
+				fallback_from_model = COALESCE(EXCLUDED.fallback_from_model, requests.fallback_from_model),
+				gateway_hint_request_class = COALESCE(EXCLUDED.gateway_hint_request_class, requests.gateway_hint_request_class),
+				gateway_hint_agent_type = COALESCE(EXCLUDED.gateway_hint_agent_type, requests.gateway_hint_agent_type),
+				gateway_hint_prev_tool_durations = COALESCE(EXCLUDED.gateway_hint_prev_tool_durations, requests.gateway_hint_prev_tool_durations),
+				gateway_hint_compaction = COALESCE(EXCLUDED.gateway_hint_compaction, requests.gateway_hint_compaction),
+				gateway_hint_context_compacted = COALESCE(EXCLUDED.gateway_hint_context_compacted, requests.gateway_hint_context_compacted)
 		`,
 			[
 				data.id,
@@ -305,6 +312,11 @@ export class RequestRepository extends BaseRepository<RequestData> {
 				usage?.estimatedCostUsd ?? null,
 				resolveCostSource(usage?.costUsd, usage?.costSource),
 				usage?.costIsByok == null ? null : Number(usage.costIsByok),
+				data.gatewayHintRequestClass ?? null,
+				data.gatewayHintAgentType ?? null,
+				data.gatewayHintPrevToolDurations ?? null,
+				data.gatewayHintCompaction ?? null,
+				data.gatewayHintContextCompacted ?? null,
 			],
 		);
 	}

@@ -119,8 +119,23 @@ export interface ToolCallStat {
 	errorSamples: string[];
 }
 
+/** Opaque, opt-in Claude Code diagnostics. Absence means no hint was reported. */
+export interface GatewayHintMetadata {
+	gatewayHintRequestClass?: string;
+	gatewayHintAgentType?: string;
+	gatewayHintPrevToolDurations?: string;
+	gatewayHintCompaction?: string;
+	gatewayHintContextCompacted?: string;
+}
+
 // Database row type
 export interface RequestRow {
+	gateway_hint_request_class?: string | null;
+	gateway_hint_agent_type?: string | null;
+	gateway_hint_prev_tool_durations?: string | null;
+	gateway_hint_compaction?: string | null;
+	gateway_hint_context_compacted?: string | null;
+
 	id: string;
 	timestamp: number;
 	method: string;
@@ -205,7 +220,7 @@ export interface RequestRow {
 export type TokenCountBasis = "provider" | "estimated";
 
 // Domain model
-export interface Request {
+export interface Request extends GatewayHintMetadata {
 	id: string;
 	timestamp: number;
 	method: string;
@@ -258,7 +273,7 @@ export interface Request {
 }
 
 // API response type
-export interface RequestResponse {
+export interface RequestResponse extends GatewayHintMetadata {
 	id: string;
 	timestamp: string;
 	method: string;
@@ -399,6 +414,14 @@ export interface RequestPayload {
 // Type mappers
 export function toRequest(row: RequestRow): Request {
 	return {
+		gatewayHintRequestClass: row.gateway_hint_request_class ?? undefined,
+		gatewayHintAgentType: row.gateway_hint_agent_type ?? undefined,
+		gatewayHintPrevToolDurations:
+			row.gateway_hint_prev_tool_durations ?? undefined,
+		gatewayHintCompaction: row.gateway_hint_compaction ?? undefined,
+		gatewayHintContextCompacted:
+			row.gateway_hint_context_compacted ?? undefined,
+
 		id: row.id,
 		timestamp: Number(row.timestamp),
 		method: row.method,
@@ -463,6 +486,12 @@ export function toRequest(row: RequestRow): Request {
 
 export function toRequestResponse(request: Request): RequestResponse {
 	return {
+		gatewayHintRequestClass: request.gatewayHintRequestClass,
+		gatewayHintAgentType: request.gatewayHintAgentType,
+		gatewayHintPrevToolDurations: request.gatewayHintPrevToolDurations,
+		gatewayHintCompaction: request.gatewayHintCompaction,
+		gatewayHintContextCompacted: request.gatewayHintContextCompacted,
+
 		id: request.id,
 		timestamp: new Date(request.timestamp).toISOString(),
 		method: request.method,

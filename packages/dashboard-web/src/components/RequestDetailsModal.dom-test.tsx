@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, spyOn } from "bun:test";
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
-import { api, type RequestPayload } from "../api";
+import { api, type RequestPayload, type RequestSummary } from "../api";
 import { RequestDetailsModal } from "./RequestDetailsModal";
 
 /**
@@ -41,7 +41,10 @@ async function settle(rounds = 3): Promise<void> {
 	}
 }
 
-async function mount(request: RequestPayload): Promise<void> {
+async function mount(
+	request: RequestPayload,
+	summary?: RequestSummary,
+): Promise<void> {
 	host = document.createElement("div");
 	document.body.appendChild(host);
 	root = createRoot(host);
@@ -49,7 +52,7 @@ async function mount(request: RequestPayload): Promise<void> {
 		root?.render(
 			<RequestDetailsModal
 				request={request}
-				summary={undefined}
+				summary={summary}
 				isOpen={true}
 				onClose={() => {}}
 			/>,
@@ -202,5 +205,52 @@ describe("RequestDetailsModal notices", () => {
 		expect(alert?.className).toContain("rounded-lg");
 		expect(alert?.className).toContain("p-row");
 		expect(alert?.textContent).toContain("provider_overloaded");
+	});
+});
+
+describe("RequestDetailsModal gateway hints", () => {
+	it("shows all five hints from the summary without a retained payload", async () => {
+		spyOn(api, "getRequestPayload").mockImplementation(
+			async () => payload() as never,
+		);
+		const summary: RequestSummary = {
+			id: "req-1",
+			timestamp: "2026-09-17T00:00:00Z",
+			method: "POST",
+			path: "/v1/messages",
+			accountUsed: null,
+			statusCode: 429,
+			success: false,
+			errorMessage: "limited",
+			responseTimeMs: 1,
+			failoverAttempts: 0,
+			gatewayHintRequestClass: "primary",
+			gatewayHintAgentType: "<script>explore</script>",
+			gatewayHintPrevToolDurations: "[12,34]",
+			gatewayHintCompaction: "false",
+			gatewayHintContextCompacted: "0",
+		};
+		await mount(payload(), summary);
+		expect(document.body.textContent).toContain("Request class: primary");
+		expect(document.body.textContent).toContain(
+			"Agent type: <script>explore</script>",
+		);
+		await openTab("Metadata");
+		const hints = document.body.querySelector(
+			'[aria-label="Claude Code hints"]',
+		);
+		expect(hints?.textContent).toContain("[12,34]");
+		expect(hints?.textContent).toContain("false");
+		expect(hints?.textContent).toContain("0");
+		expect(hints?.querySelectorAll("dt")).toHaveLength(5);
+		expect(document.body.querySelector("script")).toBeNull();
+	});
+	it("omits the hints block for older clients", async () => {
+		await mount(payload());
+		await openTab("Metadata");
+		expect(
+			document.body.querySelector('[aria-label="Claude Code hints"]'),
+		).toBeNull();
+		expect(document.body.textContent).not.toContain("Request class:");
 	});
 });

@@ -77,6 +77,11 @@ Then add an account, open **Clients**, and add a client. Clients speak either
 wire format: `/wire/anthropic` for the Anthropic Messages API, `/wire/openai`
 for the OpenAI Responses and Chat Completions APIs.
 
+Claude Code 2.1.273 or newer can send extra request diagnostics when launched
+with `CLAUDE_CODE_GATEWAY_HINT_HEADERS=1`. Request Details shows the request
+class and agent type; its Metadata tab also shows tool-duration and compaction
+hints. These remain available when payload storage is disabled.
+
 ## Integrations
 
 * [Public widget API](docs/public-api/README.md) for external displays and

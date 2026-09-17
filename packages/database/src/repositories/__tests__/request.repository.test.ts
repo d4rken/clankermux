@@ -8,8 +8,14 @@
  * blanks the harness of every request whose usage arrived late, which is most
  * of them.
  */
+
 import { Database } from "bun:sqlite";
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import {
+	type RequestRow,
+	toRequest,
+	toRequestResponse,
+} from "@clankermux/types";
 import { BunSqlAdapter } from "../../adapters/bun-sql-adapter";
 import { ensureSchema } from "../../migrations";
 import { type RequestData, RequestRepository } from "../request.repository";
@@ -134,5 +140,40 @@ describe("requests client-identity columns", () => {
 		const row = readRow(db);
 		expect(row?.client_user_agent).toBe("claude-cli/2.1.270");
 		expect(row?.client_harness).toBe("claude-code");
+	});
+});
+
+describe("gateway hint persistence", () => {
+	it("round-trips all hints through SQL and type mappers after a metadata-free upsert", async () => {
+		const db = makeDb();
+		try {
+			const adapter = new BunSqlAdapter(db);
+			const repo = new RequestRepository(adapter);
+			const hints = {
+				gatewayHintRequestClass: "primary",
+				gatewayHintAgentType: "explore",
+				gatewayHintPrevToolDurations: "[12,34]",
+				gatewayHintCompaction: "false",
+				gatewayHintContextCompacted: "0",
+			};
+			await repo.save(requestData(hints));
+			await repo.save(
+				requestData({ usage: { model: "claude", outputTokens: 3 } }),
+			);
+			const row = db
+				.query("SELECT * FROM requests WHERE id = ?")
+				.get("req-1") as RequestRow;
+			expect(toRequestResponse(toRequest(row))).toMatchObject(hints);
+			await repo.save(requestData({ id: "no-hints" }));
+			const absent = db
+				.query("SELECT * FROM requests WHERE id = ?")
+				.get("no-hints") as RequestRow;
+			expect(absent.gateway_hint_agent_type).toBeNull();
+			expect(
+				JSON.parse(JSON.stringify(toRequestResponse(toRequest(absent)))),
+			).not.toHaveProperty("gatewayHintAgentType");
+		} finally {
+			db.close();
+		}
 	});
 });

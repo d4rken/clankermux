@@ -185,7 +185,13 @@ export function ensureSchema(db: Database): void {
 			-- The model that produced the refusal this retry redeems, resolved by
 			-- correlating the credit token against the refusals seen within the
 			-- credit lifetime. NULL when the token was never seen on a refusal.
-			fallback_from_model TEXT
+			fallback_from_model TEXT,
+			-- Opt-in Claude Code diagnostics; NULL when no hint was captured.
+			gateway_hint_request_class TEXT,
+			gateway_hint_agent_type TEXT,
+			gateway_hint_prev_tool_durations TEXT,
+			gateway_hint_compaction TEXT,
+			gateway_hint_context_compacted TEXT
 		)
 	`);
 
@@ -1480,6 +1486,32 @@ export const ADDITIVE_COLUMNS: ReadonlyArray<{
 		table: "requests",
 		column: "client_harness",
 		ddl: "ALTER TABLE requests ADD COLUMN client_harness TEXT",
+	},
+	// Opaque Claude Code diagnostics. NULL means absent or recorded before support.
+	{
+		table: "requests",
+		column: "gateway_hint_request_class",
+		ddl: "ALTER TABLE requests ADD COLUMN gateway_hint_request_class TEXT",
+	},
+	{
+		table: "requests",
+		column: "gateway_hint_agent_type",
+		ddl: "ALTER TABLE requests ADD COLUMN gateway_hint_agent_type TEXT",
+	},
+	{
+		table: "requests",
+		column: "gateway_hint_prev_tool_durations",
+		ddl: "ALTER TABLE requests ADD COLUMN gateway_hint_prev_tool_durations TEXT",
+	},
+	{
+		table: "requests",
+		column: "gateway_hint_compaction",
+		ddl: "ALTER TABLE requests ADD COLUMN gateway_hint_compaction TEXT",
+	},
+	{
+		table: "requests",
+		column: "gateway_hint_context_compacted",
+		ddl: "ALTER TABLE requests ADD COLUMN gateway_hint_context_compacted TEXT",
 	},
 	// What the dispatch did to the client's reasoning effort, per attempt (see
 	// the ReasoningEffortAdaptation contract in @clankermux/types).

@@ -84,6 +84,11 @@ export function createRequestsSummaryHandler(db: BunSqlAdapter) {
 			refusal_category: string | null;
 			fallback_credit_claimed: number | null;
 			fallback_from_model: string | null;
+			gateway_hint_request_class: string | null;
+			gateway_hint_agent_type: string | null;
+			gateway_hint_prev_tool_durations: string | null;
+			gateway_hint_compaction: string | null;
+			gateway_hint_context_compacted: string | null;
 		}>(
 			`
 			SELECT r.*, a.name as account_name,
@@ -157,6 +162,13 @@ export function createRequestsSummaryHandler(db: BunSqlAdapter) {
 			fallbackCreditClaimed:
 				request.fallback_credit_claimed === 1 ? true : undefined,
 			fallbackFromModel: request.fallback_from_model || undefined,
+			gatewayHintRequestClass: request.gateway_hint_request_class ?? undefined,
+			gatewayHintAgentType: request.gateway_hint_agent_type ?? undefined,
+			gatewayHintPrevToolDurations:
+				request.gateway_hint_prev_tool_durations ?? undefined,
+			gatewayHintCompaction: request.gateway_hint_compaction ?? undefined,
+			gatewayHintContextCompacted:
+				request.gateway_hint_context_compacted ?? undefined,
 		}));
 
 		return jsonResponse(response);
