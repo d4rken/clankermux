@@ -796,7 +796,7 @@ describe("pricing-miss registry", () => {
 		expect(gaps[0].occurrences).toBe(1);
 	});
 
-	it("suppresses ollama and ollama-cloud but not openai-compatible", async () => {
+	it("suppresses ollama, ollama-cloud and devin but not openai-compatible", async () => {
 		await estimateCostUSD("llama-local", io, {
 			provider: "ollama",
 			...report,
@@ -805,6 +805,15 @@ describe("pricing-miss registry", () => {
 			provider: "ollama-cloud",
 			...report,
 		});
+		// Devin meters credits per prompt, not tokens, and no catalogue carries a
+		// per-token rate for swe-2-*. Suppressing the GAP does not invent a price:
+		// the request is still unpriced, which is null and not a measured zero.
+		expect(
+			await estimateCostUSD("swe-2-high", io, {
+				provider: "devin",
+				...report,
+			}),
+		).toBeNull();
 		expect(getPricingGaps()).toEqual([]);
 
 		// openai-compatible fronts paid endpoints too, so a gap there is real
