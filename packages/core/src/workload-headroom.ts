@@ -298,6 +298,7 @@ export function projectionBasisFor(
 				utilizationPct: window.utilizationPct,
 				resetsAtMs: window.resetsAtMs,
 				windowStartMs: window.windowStartMs,
+				windowKind: window.windowKind,
 				prediction: window.prediction,
 				lifetimeConfidence: window.lifetimeConfidence,
 				observedAtMs: window.observedAtMs,
@@ -474,6 +475,7 @@ function nextResetGuidance(
 					utilizationPct: window.utilizationPct,
 					windowStartMs: window.windowStartMs,
 					observedAtMs: window.observedAtMs,
+					windowKind: window.windowKind,
 				}),
 		)
 		.map((window) => window.resetsAtMs)

@@ -261,3 +261,30 @@ describe("PoolQuotaCard short window", () => {
 		expect(html).not.toContain("5h:");
 	});
 });
+
+describe("PoolQuotaCard capacity claims", () => {
+	it("says capacity is unknown rather than that nothing can serve", () => {
+		// The account is configured and not paused; its weekly window simply has
+		// no reading. "No account can serve this" asserts an inability nothing
+		// here established — it may well be serving right now.
+		const html = render([account({ usageData: undefined })]);
+		expect(html).toContain("Capacity unknown");
+		expect(html).not.toContain("No account can serve this");
+	});
+
+	it("claims no inability when the readings are spent rather than absent", () => {
+		// Two spent accounts are capacity, not a gap, so neither badge applies —
+		// the at-risk line above already states what happened to them.
+		const html = render([
+			account({ usageData: weeklyAt(100, NOW + DAY) as never }),
+			account({
+				id: "acc-2",
+				name: "beta",
+				usageData: weeklyAt(100, NOW + DAY) as never,
+			}),
+		]);
+		expect(html).not.toContain("No account can serve this");
+		expect(html).not.toContain("Capacity unknown");
+		expect(html).toContain("2 of 2 accounts spent or projected");
+	});
+});

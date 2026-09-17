@@ -239,6 +239,7 @@ export function buildQuotaSummary(
 							utilizationPct: value.pct ?? Number.NaN,
 							windowStartMs: computeWindowStartMs(value.resetMs, window),
 							observedAtMs: usageObservedAtMs(a.usageAsOfIso),
+							windowKind: window,
 						})
 					)
 						return null;

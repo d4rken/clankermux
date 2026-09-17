@@ -1226,7 +1226,8 @@ export function computePoolUsage(
 			resetMs: extracted.resetMs,
 			// A 0% window whose structural start tracks the reading is one the
 			// provider has not started: its reset slides forward every poll, so it
-			// must never be offered as a deadline.
+			// must never be offered as a deadline. `window` is passed so a calendar
+			// cycle, which rolls over untouched, keeps its real reset.
 			...(isUnstartedWindow({
 				utilizationPct: extracted.pct,
 				windowStartMs:
@@ -1234,6 +1235,7 @@ export function computePoolUsage(
 						? null
 						: computeWindowStartMs(extracted.resetMs, window),
 				observedAtMs,
+				windowKind: window,
 			})
 				? { unstarted: true }
 				: {}),
@@ -1293,6 +1295,7 @@ export function computePoolUsage(
 				utilizationPct: c.pct,
 				resetsAtMs: c.resetMs,
 				windowStartMs: computeWindowStartMs(c.resetMs, window),
+				windowKind: window,
 				prediction: predictions.get(c.accountId),
 				lifetimeConfidence: weeklyLifetimeConfidence(window),
 				observedAtMs: observedAt.get(c.accountId) ?? null,

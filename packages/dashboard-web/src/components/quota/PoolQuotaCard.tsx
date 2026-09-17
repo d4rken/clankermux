@@ -284,7 +284,12 @@ export function PoolQuotaCard({
 							<AlertTriangle className="h-3.5 w-3.5 shrink-0" />
 							{weekly.capacityCount === 1
 								? "1 account, no failover"
-								: "No account can serve this"}
+								: // The other branch is `capacityCount === 0`, and capacity is
+									// reporting + exhausted — so it means every eligible account is
+									// UNKNOWN, never that their readings came back spent. An
+									// account whose window could not be read may be serving right
+									// now, so this states the gap rather than an inability.
+									"Capacity unknown"}
 						</p>
 					)}
 					{resolved && paceText && (

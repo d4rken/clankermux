@@ -35,6 +35,34 @@ export const FIXED_WINDOW_DURATION_MS: Record<string, number> = {
 };
 
 /**
+ * Windows that reset at a fixed clock instant rather than `duration` after the
+ * account's first request.
+ *
+ * The distinction matters to {@link isUnstartedWindow}, which reads a zero
+ * reading whose derived start coincides with the observation as the signature
+ * of a sliding placeholder. A calendar window produces that coincidence
+ * honestly for the first few minutes of every cycle — Devin's day rolls over at
+ * a fixed hour whether or not anything was spent — so the signature means
+ * nothing there and its reset is a real deadline throughout.
+ *
+ * Membership is by window NAME, which is what limits it. `daily` is Devin's and
+ * nobody else's — no other provider emits that name, and the proactive
+ * throttle's `daily` arm has no producer — so naming it here is safe. Devin's
+ * WEEKLY allowance is calendar-aligned as well, but it arrives as `seven_day`,
+ * the same name Anthropic, Codex and Z.AI use for windows that do slide; adding
+ * it would opt those out too. Telling them apart needs the provider, which this
+ * lookup does not have.
+ */
+const CALENDAR_RESET_WINDOWS: ReadonlySet<string> = new Set(["daily"]);
+
+/** See {@link CALENDAR_RESET_WINDOWS}. Unknown names are assumed to slide. */
+export function windowResetsOnCalendar(
+	window: string | null | undefined,
+): boolean {
+	return window != null && CALENDAR_RESET_WINDOWS.has(window);
+}
+
+/**
  * Calculate the start time of a usage window given its reset time and window type.
  *
  * For monthly windows: uses preceding month's duration to handle 28/29/30/31 day variations.
