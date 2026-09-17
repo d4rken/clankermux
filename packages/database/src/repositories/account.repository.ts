@@ -82,9 +82,13 @@ interface StoredAnchor {
 
 /**
  * Seed a renewal anchor from a provider-reported subscription START, on an
- * ANTHROPIC account that has never had one either way.
+ * ANTHROPIC account that has never had one either way — or re-seed one this
+ * function itself derived, once the start it was derived from has moved.
  *
- * Both halves of the anchor gate matter, and they are not the same condition:
+ * Two dispositions write, and nothing else does.
+ *
+ * FIRST SEED — anchor and source both NULL. Both halves matter, and they are
+ * not the same condition:
  *
  *   anchor IS NULL          — never overwrite what is already there.
  *   anchor_source IS NULL   — never re-seed what the operator CLEARED. A clear
@@ -92,7 +96,23 @@ interface StoredAnchor {
  *                             gate on the anchor alone would re-seed the date on
  *                             the next profile fetch, forever.
  *
- * That is what makes this one-shot per account rather than level-triggered.
+ * RE-DERIVE — source is 'derived' and the anchor disagrees with the current
+ * start. A derived anchor IS the estimate from the subscription start, so a
+ * start that has moved (cancel and re-subscribe on another day of the month)
+ * leaves it stale by construction: the dialog would show the new start beside a
+ * chip still counting from the old one, and nothing would ever refresh it.
+ * Anthropic reports no period end, so `syncProviderRenewalAnchor` never runs
+ * for these accounts and cannot correct it either.
+ *
+ * The comparison is against the CURRENT start, not against a previous value:
+ * this runs inside the same transaction as the identity write, so the new start
+ * is already stored by the time it reads. Being stateless also makes it
+ * idempotent — an unchanged start writes nothing, so a capture every few hours
+ * causes no churn — and self-correcting for any derived anchor that drifted
+ * from its start for any other reason.
+ *
+ * `manual` is never touched, either way: the operator's decision wins, always.
+ * `provider` is never touched either, since an observation outranks a guess.
  *
  * The provider gate is the third condition, and it is why the row's own
  * `provider` is read here rather than taken from the caller: a start date is
@@ -120,10 +140,19 @@ function seedRenewalAnchorFromSubscription(
 			 FROM accounts WHERE id = ?`,
 		)
 		.get(accountId) as StoredAnchor | null | undefined;
-	if (!stored || stored.renewal_anchor !== null) return;
-	if (stored.renewal_anchor_source !== null) return;
+	if (!stored) return;
 	if ((stored.provider || "anthropic") !== "anthropic") return;
 
+	const isFirstSeed =
+		stored.renewal_anchor === null && stored.renewal_anchor_source === null;
+	const isStaleDerivation =
+		stored.renewal_anchor_source === "derived" &&
+		stored.renewal_anchor !== anchor;
+	if (!isFirstSeed && !isStaleDerivation) return;
+
+	// The cadence is re-stamped on both paths. A derived anchor's cadence is
+	// never operator-chosen: changing it goes through Save, which makes the
+	// anchor manual and puts the row out of reach of this function.
 	db.run(
 		`UPDATE accounts
 		 SET renewal_anchor = ?, renewal_cadence = ?, renewal_anchor_source = 'derived'
