@@ -7,8 +7,10 @@ import type {
 	ClientReview,
 	ClientSuggestions,
 	ClientView,
+	ModelAlias,
 } from "@clankermux/types";
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
+import { api } from "../../api";
 import { Button } from "../ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "../ui/card";
 import { Input } from "../ui/input";
@@ -119,6 +121,29 @@ export function ClientWizard({
 	const editorRef = useRef<HTMLDetailsElement>(null);
 	const [draft, setDraft] = useState(() => draftFor(client));
 	const [step, setStep] = useState(0);
+	const [aliases, setAliases] = useState<ModelAlias[]>([]);
+	const [aliasesError, setAliasesError] = useState<string | null>(null);
+	useEffect(() => {
+		if (step !== 2) return;
+		let active = true;
+		api
+			.get<{ data: ModelAlias[] }>("/api/model-aliases")
+			.then((result) => {
+				if (active) {
+					setAliases(result.data);
+					setAliasesError(null);
+				}
+			})
+			.catch((error) => {
+				if (active)
+					setAliasesError(
+						error instanceof Error ? error.message : String(error),
+					);
+			});
+		return () => {
+			active = false;
+		};
+	}, [step]);
 	const [format, setFormat] = useState<ClientFormat>(
 		preferredFormat(draft.application),
 	);
@@ -171,7 +196,9 @@ export function ClientWizard({
 		c.models
 			.filter(
 				(m) =>
-					(m.id !== m.targetModel && !m.accountIds?.length) ||
+					(m.id !== m.targetModel &&
+						!m.targetModel.startsWith("alias:") &&
+						!m.accountIds?.length) ||
 					m.accountIds?.some((id) => !eligibleIds.has(id)),
 			)
 			.map((m) => `${FORMATS[f as ClientFormat]}: ${m.id}`),
@@ -1068,6 +1095,63 @@ export function ClientWizard({
 								<summary className="cursor-pointer text-sm font-medium">
 									Add a custom model or alias
 								</summary>
+								<div className="space-y-2 pt-4">
+									<label className="grid gap-2 text-sm font-medium">
+										Reusable model alias
+										<select
+											className={SELECT}
+											disabled={busy}
+											value={
+												aliases.some((a) => a.id === custom.target)
+													? custom.target
+													: ""
+											}
+											onChange={(e) => {
+												const alias = aliases.find(
+													(a) => a.id === e.target.value,
+												);
+												if (!alias) {
+													setCustom({ ...custom, target: "" });
+													return;
+												}
+												const id = alias.id.slice("alias:".length);
+												setCustom({
+													...custom,
+													id: custom.editId
+														? custom.id
+														: draft.application === "claude-code" &&
+																format === "anthropic" &&
+																needsClaudeAlias(id)
+															? `claude-${id}`
+															: id,
+													target: alias.id,
+													name: alias.displayName,
+													accounts: [],
+												});
+											}}
+										>
+											<option value="">
+												Choose an alias or enter a concrete model below
+											</option>
+											{aliases.map((alias) => (
+												<option key={alias.id} value={alias.id}>
+													{alias.displayName} (
+													{alias.targets.map((t) => t.model).join(", ")})
+												</option>
+											))}
+										</select>
+									</label>
+									<p className="text-xs text-muted-foreground">
+										Manage reusable aliases on the Routing tab. Selecting an
+										alias accepts its configured model fallbacks. Published IDs
+										and display names can be customized below.
+									</p>
+									{aliasesError && (
+										<p role="alert">
+											Could not load model aliases: {aliasesError}
+										</p>
+									)}
+								</div>
 								<div className="grid gap-4 pt-4 sm:grid-cols-2">
 									<label
 										className="grid gap-2 text-sm font-medium"
@@ -1087,7 +1171,7 @@ export function ClientWizard({
 										className="grid gap-2 text-sm font-medium"
 										htmlFor="target-id"
 									>
-										Upstream target ID
+										Target model or alias ID
 										<Input
 											placeholder="Same as published ID for a direct model"
 											id="target-id"
@@ -1114,9 +1198,10 @@ export function ClientWizard({
 									</label>
 									<fieldset className="sm:col-span-2">
 										<legend className="text-sm mb-2">
-											Alias destinations (required when IDs differ). A model
-											published under its own name always uses the client's own
-											destinations.
+											Account restrictions are optional for reusable model
+											aliases. Concrete models published under a different ID
+											require selected accounts. A model published under its own
+											name uses the client's destinations.
 										</legend>
 										<div className="flex flex-wrap gap-3">
 											{editorAccounts.map((a) => (

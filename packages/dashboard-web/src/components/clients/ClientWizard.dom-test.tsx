@@ -187,6 +187,20 @@ async function mount(
 	spyOn(globalThis, "fetch").mockImplementation(
 		mockFetch(async (input, init) => {
 			const path = String(input);
+			if (path.endsWith("/api/model-aliases"))
+				return Response.json({
+					data: [
+						{
+							id: "alias:good-model",
+							displayName: "Good model",
+							revision: 1,
+							targets: [
+								{ model: "fable", accountIds: null },
+								{ model: "gpt-6-astra", accountIds: null },
+							],
+						},
+					],
+				});
 			if (path.endsWith("/suggestions")) {
 				suggestionFetches += 1;
 				suggestionBodies.push(JSON.parse(String(init?.body)));
@@ -432,7 +446,7 @@ describe("client catalogue editing", () => {
 		await type("target-id", "own-name");
 		await type("display-name", "Own name");
 		const destinations = [...document.querySelectorAll("fieldset")].find((el) =>
-			el.querySelector("legend")?.textContent?.includes("Alias destinations"),
+			el.querySelector("legend")?.textContent?.includes("Account restrictions"),
 		);
 		const box = destinations?.querySelector<HTMLInputElement>(
 			'input[type="checkbox"]',
@@ -997,4 +1011,20 @@ describe("copying another client's setup", () => {
 			"claude-new",
 		]);
 	});
+});
+
+it("publishes a reusable alias using inherited client destinations", async () => {
+	await mount(existing, true);
+	await choose("Reusable model alias", "alias:good-model");
+	await click("Add to selection");
+	await click("Review");
+	expect(catalogueOf("openai")?.models).toContainEqual({
+		id: "good-model",
+		targetModel: "alias:good-model",
+		displayName: "Good model",
+		accountIds: null,
+	});
+	expect(document.body.textContent).not.toContain(
+		"Some model destinations need attention",
+	);
 });

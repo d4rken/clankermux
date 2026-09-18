@@ -184,7 +184,7 @@ describe("proxyWithAccount — 429 unified-status persistence on cooldown short-
 		usageCache.delete("acc-oauth");
 	});
 
-	it("no-model-fallbacks 429 path persists the unified-status header (model_fallback_429 site)", async () => {
+	it("residual 429 path persists the unified-status header (model_fallback_429 site)", async () => {
 		// Hard-limit unified status: the burst-retry early intercept declines
 		// (non-retryable), so the flow reaches the no-fallback hard_429 path.
 		globalThis.fetch = mockFetch(
@@ -202,7 +202,7 @@ describe("proxyWithAccount — 429 unified-status persistence on cooldown short-
 		const result = await proxyWithAccount(
 			makeRequest(bodyBuffer),
 			new URL("https://proxy.local/v1/messages"),
-			makeOAuthAnthropicAccount(), // no model fallbacks
+			makeOAuthAnthropicAccount(),
 			makeRequestMeta(),
 			bodyBuffer,
 			() => undefined,
@@ -224,7 +224,7 @@ describe("proxyWithAccount — 429 unified-status persistence on cooldown short-
 
 	it("burst-retry early intercept persists the unified-status header (transient model_fallback_429 site)", async () => {
 		// Transient burst 429: soft status + x-should-retry → intercept fires
-		// and short-circuits with retryable_429 BEFORE model cycling.
+		// and short-circuits with retryable_429 before residual cooldown handling.
 		globalThis.fetch = mockFetch(
 			mock(async () =>
 				rl429Response({
@@ -259,9 +259,9 @@ describe("proxyWithAccount — 429 unified-status persistence on cooldown short-
 		});
 	});
 
-	it("all-models-exhausted 429 path persists the unified-status header (model_fallback_429 site)", async () => {
-		// Hard status on every attempt: intercept declines, model fallbacks are
-		// cycled and exhausted, landing on the model_fallback_429 site.
+	it("hard-status 429 path persists the unified-status header (model_fallback_429 site)", async () => {
+		// The hard status makes the burst intercept decline, reaching the
+		// residual cooldown site with its historical model_fallback_429 reason.
 		let fetchCount = 0;
 		globalThis.fetch = mockFetch(
 			mock(async () => {

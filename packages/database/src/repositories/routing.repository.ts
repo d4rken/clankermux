@@ -1,4 +1,8 @@
-import { isAccountAllowedByPin, validateRoutingRule } from "@clankermux/core";
+import {
+	isAccountAllowedByPin,
+	isModelAliasId,
+	validateRoutingRule,
+} from "@clankermux/core";
 import type {
 	AccountModelPermissions,
 	RoutingAttempt,
@@ -99,6 +103,13 @@ export class RoutingRepository extends BaseRepository<RoutingRule> {
 		for (const id of r.pool_account_ids ?? [])
 			if (!db.query("SELECT id FROM accounts WHERE id = ?").get(id))
 				throw new Error(`Routing rule references missing account ${id}`);
+		if (
+			r.target_kind === "literal" &&
+			r.target_model &&
+			isModelAliasId(r.target_model) &&
+			!db.query("SELECT id FROM model_aliases WHERE id=?").get(r.target_model)
+		)
+			throw new Error("Routing rule references a missing model alias");
 		if (r.pool_provider !== null && !isKnownProvider(r.pool_provider))
 			throw new Error("Unknown pool provider");
 		if (r.match_api_key_id !== null) {
@@ -450,8 +461,10 @@ export class RoutingRepository extends BaseRepository<RoutingRule> {
 	}
 
 	async listAttempts(requestId: string): Promise<RoutingAttempt[]> {
+		// Millisecond timestamps can tie; SQLite row order preserves dispatch
+		// insertion order while random attempt UUIDs do not.
 		return this.query(
-			"SELECT a.*,s.content AS route_snapshot FROM routing_attempts a LEFT JOIN routing_snapshots s ON s.id=a.route_snapshot_id WHERE request_id=? ORDER BY started_at,a.id",
+			"SELECT a.*,s.content AS route_snapshot FROM routing_attempts a LEFT JOIN routing_snapshots s ON s.id=a.route_snapshot_id WHERE request_id=? ORDER BY started_at,a.rowid",
 			[requestId],
 		);
 	}

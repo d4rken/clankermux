@@ -74,6 +74,7 @@ import { createLogsStreamHandler } from "./handlers/logs";
 import { createLogsHistoryHandler } from "./handlers/logs-history";
 import { createCleanupHandler } from "./handlers/maintenance";
 import { createMemoryHistoryHandler } from "./handlers/memory-history";
+import { createModelAliasesHandler } from "./handlers/model-aliases";
 import {
 	createAnthropicReauthCallbackHandler,
 	createAnthropicReauthInitHandler,
@@ -598,6 +599,8 @@ export class APIRouter {
 		const method = req.method;
 		const key = `${method}:${path}`;
 
+		if (path === "/api/model-aliases" || path.startsWith("/api/model-aliases/"))
+			return createModelAliasesHandler(this.context.dbOps.modelAliases)(req);
 		if (path === "/api/routing-rules" || path.startsWith("/api/routing-rules/"))
 			return createRoutingHandler(this.context.dbOps.routing)(req);
 		const permissionMatch =

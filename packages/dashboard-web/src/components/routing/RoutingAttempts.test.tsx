@@ -163,3 +163,34 @@ for (const [label, overrides] of [
 		expect(html).not.toContain("Reasoning effort");
 	});
 }
+
+it("explains an alias fallback outside the raw routing snapshot", () => {
+	const html = renderToStaticMarkup(
+		<RoutingAttemptList
+			attempts={[
+				attempt({
+					route_snapshot: JSON.stringify({
+						alias: {
+							id: "alias:good-model",
+							revision: 3,
+							targetIndex: 1,
+							reason: "quota_exhausted",
+						},
+					}),
+				}),
+			]}
+		/>,
+	);
+	expect(html).toContain("Model alias: alias:good-model");
+	expect(html).toContain("target 2");
+	expect(html).toContain("quota exhausted");
+});
+for (const snapshot of ["null", "[]", '{"alias":{"id":{},"targetIndex":1}}']) {
+	it(`ignores malformed alias details: ${snapshot}`, () => {
+		const html = renderToStaticMarkup(
+			<RoutingAttemptList attempts={[attempt({ route_snapshot: snapshot })]} />,
+		);
+		expect(html).not.toContain("Model alias:");
+		expect(html).toContain("Sent upstream");
+	});
+}

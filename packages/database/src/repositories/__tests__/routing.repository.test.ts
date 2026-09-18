@@ -161,6 +161,39 @@ describe("routing storage", () => {
 			db.query("SELECT COUNT(*) AS n FROM routing_snapshots").get(),
 		).toEqual({ n: 0 });
 	});
+	it("keeps dispatch order when multiple attempts start in the same millisecond", async () => {
+		// Random attempt IDs do not encode dispatch order. A lexicographic tie
+		// breaker would put the backup before the second primary account.
+		for (const [id, model, account] of [
+			["a-primary-first", "primary", "account-1"],
+			["z-primary-second", "primary", "account-2"],
+			["m-backup", "backup", "account-3"],
+		] as const) {
+			await repo.recordAttempt({
+				id,
+				request_id: "request",
+				rule_id: null,
+				route_snapshot: "{}",
+				account_id: account,
+				provider: "codex",
+				requested_model: "alias:good",
+				resolved_model: model,
+				outgoing_model: model,
+				reported_model: null,
+				kind: "upstream_send",
+				started_at: 10,
+				finished_at: null,
+				status: null,
+				error: null,
+				reasoning_effort_requested: null,
+				reasoning_effort_effective: null,
+				reasoning_effort_reason: null,
+			});
+		}
+		expect(
+			(await repo.listAttempts("request")).map((attempt) => attempt.id),
+		).toEqual(["a-primary-first", "z-primary-second", "m-backup"]);
+	});
 	it("round-trips each reasoning-effort shape an attempt can carry", async () => {
 		db.run(
 			"INSERT INTO accounts(id,name,provider,refresh_token,created_at) VALUES('a','A','codex','',0)",

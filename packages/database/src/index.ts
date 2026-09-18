@@ -63,6 +63,10 @@ export {
 } from "./repositories/codex-reset-credit-event.repository";
 export { MemorySnapshotRepository } from "./repositories/memory-snapshot.repository";
 export {
+	ModelAliasConflictError,
+	ModelAliasRepository,
+} from "./repositories/model-alias.repository";
+export {
 	type ModelOverrideDialect,
 	ModelOverrideRepository,
 	type ModelOverrideRow,

@@ -36,6 +36,12 @@ client what each can reach, and shows you how much quota is left.
   and failover.
 * Cross-account failover on any provider, 429 burst retries for Anthropic OAuth
   accounts, and family-scoped 529 breakers for official Anthropic accounts.
+* Reusable model aliases, such as `good-model` or `fast-model`, with ordered
+  fallback targets. Manage aliases on the Routing tab, then publish them in each
+  client's model editor for discovery. Eligible accounts for one target are
+  exhausted before trying the next model on quota or temporary availability
+  failures; client destination restrictions still apply. Concrete model IDs keep
+  their selected model, and streaming output is never restarted on a fallback.
 * Pooled 5-hour and 7-day quota with burn-rate forecasts and a runway estimate
   against each window's reset.
 * Statistics and analytics filterable by account and by client, so a problem can

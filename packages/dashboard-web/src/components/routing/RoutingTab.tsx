@@ -14,6 +14,7 @@ import {
 } from "../ui/dialog";
 import { Input } from "../ui/input";
 import { SectionHeading } from "../ui/section-heading";
+import { ModelAliases, useModelAliases } from "./ModelAliases";
 import {
 	changeRulePool,
 	changeRuleTarget,
@@ -29,6 +30,7 @@ export function RoutingTab() {
 		queryFn: () => api.get<{ data: RoutingRule[] }>("/api/routing-rules"),
 	});
 	const accounts = useAccounts();
+	const aliases = useModelAliases();
 	const keys = useApiKeys();
 	const [draft, setDraft] = useState<RoutingRule | null>(null);
 	const mutate = useMutation({
@@ -90,11 +92,10 @@ export function RoutingTab() {
 			<div className="rounded-lg border p-4 space-y-2 text-sm">
 				<p>
 					Without a matching rule, API key destinations apply and the requested
-					model is sent unchanged.
+					model is used. Model aliases resolve to their configured targets.
 				</p>
 				<p>
-					Nothing else rewrites a model ID. To send a different model, add a
-					rule with a literal target.
+					To send a different model or alias, add a rule with a literal target.
 				</p>
 				<p>Each account must permit the model it is sent.</p>
 			</div>
@@ -103,7 +104,10 @@ export function RoutingTab() {
 			) : rules.error ? (
 				<p role="alert">{rules.error.message}</p>
 			) : rows.length === 0 ? (
-				<p>No routing rules yet. Requested models are sent unchanged.</p>
+				<p>
+					No routing rules yet. Requested models and aliases use their own
+					destinations.
+				</p>
 			) : (
 				<ol className="space-y-3">
 					{rows.map((r, i) => (
@@ -192,6 +196,14 @@ export function RoutingTab() {
 					))}
 				</ol>
 			)}
+			<ModelAliases />
+			<datalist id="route-model-aliases">
+				{aliases.data?.data.map((alias) => (
+					<option key={alias.id} value={alias.id}>
+						{alias.displayName}
+					</option>
+				))}
+			</datalist>
 			{mutate.error && !draft && <p role="alert">{mutate.error.message}</p>}
 			<Dialog
 				open={draft !== null}
@@ -372,15 +384,16 @@ export function RoutingTab() {
 										)
 									}
 								>
-									<option value="literal">Literal model ID</option>
+									<option value="literal">Model or alias ID</option>
 									<option value="requested">Keep requested model</option>
 								</select>
 							</label>
 							{draft.target_kind === "literal" && (
 								<label className="block" htmlFor="route-target-model">
-									Upstream model ID
+									Model or alias ID
 									<Input
 										id="route-target-model"
+										list="route-model-aliases"
 										required
 										value={draft.target_model ?? ""}
 										onChange={(e) => patch({ target_model: e.target.value })}

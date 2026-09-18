@@ -61,6 +61,7 @@ async function mount(keys: ApiKeyResponse[] = [makeKey()]) {
 			keyFetches++;
 			return { data: keys } as never;
 		}
+		if (path === "/api/model-aliases") return { data: [] } as never;
 		if (path === "/api/routing-rules") return { data: [RULE] } as never;
 		throw new Error(`Unexpected GET ${path}`);
 	});
