@@ -1109,7 +1109,7 @@ interface UsageCacheEntry {
 export interface AnthropicUsageObservation {
 	accountId: string;
 	accessToken: string;
-	outcome: "success" | "permission_denied";
+	outcome: "success" | "permission_denied" | "unavailable";
 	firstPermissionDenial: boolean;
 	isCurrent: () => boolean;
 }
@@ -1563,6 +1563,7 @@ class UsageCache {
 			);
 		else this.anthropicUsageObservers.delete(accountId);
 		this.anthropicObservationVersions.set(accountId, 0);
+		this.anthropicObservationTasks.delete(accountId);
 
 		// Store the token provider (either a static token or a function)
 		const tokenProvider: AccessTokenProvider =
@@ -1696,6 +1697,12 @@ class UsageCache {
 		);
 	}
 
+	/** Wait for the latest profile diagnosis so management can return its saved state. */
+	async waitForAnthropicUsageObservation(accountId: string): Promise<void> {
+		const task = this.anthropicObservationTasks.get(accountId);
+		if (task) await task;
+	}
+
 	/**
 	 * Trigger an immediate usage fetch for an account that already has polling configured.
 	 * Returns false when no polling/token provider is configured or when the fetch fails.
@@ -1703,11 +1710,6 @@ class UsageCache {
 	 * On success the failure streak is cleared and a backed-off poll loop is
 	 * re-armed to the healthy cadence — see {@link rearmAfterOnDemandSuccess}.
 	 */
-	async waitForAnthropicUsageObservation(accountId: string): Promise<void> {
-		const task = this.anthropicObservationTasks.get(accountId);
-		if (task) await task;
-	}
-
 	async refreshNow(accountId: string): Promise<boolean> {
 		const tokenProvider = this.tokenProviders.get(accountId);
 		if (!tokenProvider) {
@@ -2173,19 +2175,20 @@ class UsageCache {
 				if (!this.isLiveFetchGeneration(accountId, generation, tokenProvider))
 					return superseded;
 				const observer = this.anthropicUsageObservers.get(accountId);
-				if (
-					observer &&
-					(result.data || result.failureKind === "usage_permission_denied")
-				) {
+				if (observer) {
 					const version =
 						(this.anthropicObservationVersions.get(accountId) ?? 0) + 1;
 					this.anthropicObservationVersions.set(accountId, version);
 					const observation = {
 						accountId,
 						accessToken: token,
-						outcome: result.data ? "success" : "permission_denied",
+						outcome: result.data
+							? "success"
+							: result.failureKind === "usage_permission_denied"
+								? "permission_denied"
+								: "unavailable",
 						firstPermissionDenial:
-							!result.data &&
+							result.failureKind === "usage_permission_denied" &&
 							!this.usagePermissionDeniedAccounts.has(accountId),
 						isCurrent: () =>
 							this.isLiveFetchGeneration(

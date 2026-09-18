@@ -102,7 +102,12 @@ describe("Anthropic usage observation", () => {
 		expect(event?.isCurrent()).toBe(true);
 		start(async () => {});
 		expect(event?.isCurrent()).toBe(false);
+		const replacementWait = await Promise.race([
+			usageCache.waitForAnthropicUsageObservation(ACCOUNT).then(() => "ready"),
+			new Promise<string>((resolve) => setTimeout(() => resolve("stale"), 50)),
+		]);
 		release();
+		expect(replacementWait).toBe("ready");
 		await old;
 		expect(usageCache.get(ACCOUNT)).toBeNull();
 	});
@@ -116,7 +121,7 @@ describe("Anthropic usage observation", () => {
 		expect(await usageCache.refreshNow(ACCOUNT)).toBe(true);
 		expect(usageCache.get(ACCOUNT)).not.toBeNull();
 	});
-	it("does not spend a profile request after a shared-bucket rate limit", async () => {
+	it("reports unavailable usage on 429 so profile diagnosis can proceed independently", async () => {
 		fetchSpy = spyOn(globalThis, "fetch").mockImplementation(
 			mockFetch(
 				async () =>
@@ -126,12 +131,17 @@ describe("Anthropic usage observation", () => {
 					}),
 			),
 		);
-		let observations = 0;
-		start(async () => {
-			observations++;
+		const events: AnthropicUsageObservation[] = [];
+		start(async (event) => {
+			events.push(event);
 		});
 		expect(await usageCache.refreshNow(ACCOUNT)).toBe(false);
-		expect(observations).toBe(0);
+		await usageCache.waitForAnthropicUsageObservation(ACCOUNT);
+		expect(
+			events.map((event) => [event.outcome, event.firstPermissionDenial]),
+		).toEqual([["unavailable", false]]);
+		expect(usageCache.get(ACCOUNT)).toBeNull();
+		expect(events[0]?.isCurrent()).toBe(true);
 	});
 	it("marks recovery then subsequent denial as a fresh diagnosis", async () => {
 		let denied = true;
