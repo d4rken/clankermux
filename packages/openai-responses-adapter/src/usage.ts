@@ -19,6 +19,10 @@ export function mergeAnthropicUsage(
 }
 
 export function translateAnthropicUsage(usage: AnthropicUsage): ResponsesUsage {
+	// Apply the same validation to JSON responses and stream usage updates.
+	const normalized: AnthropicUsage = { input_tokens: 0, output_tokens: 0 };
+	mergeAnthropicUsage(normalized, { ...usage });
+	usage = normalized;
 	// Anthropic input_tokens excludes cached input; Responses includes it.
 	const input =
 		usage.input_tokens +
@@ -28,12 +32,14 @@ export function translateAnthropicUsage(usage: AnthropicUsage): ResponsesUsage {
 		input_tokens: input,
 		output_tokens: usage.output_tokens,
 		total_tokens: input + usage.output_tokens,
-		...(usage.cache_read_input_tokens !== undefined ||
-		usage.cache_creation_input_tokens !== undefined
+		...(usage.cache_read_input_tokens != null ||
+		usage.cache_creation_input_tokens != null
 			? {
 					input_tokens_details: {
-						cached_tokens: usage.cache_read_input_tokens ?? 0,
-						...(usage.cache_creation_input_tokens !== undefined
+						...(usage.cache_read_input_tokens != null
+							? { cached_tokens: usage.cache_read_input_tokens }
+							: {}),
+						...(usage.cache_creation_input_tokens != null
 							? { cache_write_tokens: usage.cache_creation_input_tokens }
 							: {}),
 					},

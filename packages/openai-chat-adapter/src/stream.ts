@@ -17,7 +17,10 @@ export interface ChatUsage {
 	prompt_tokens: number;
 	completion_tokens: number;
 	total_tokens: number;
-	prompt_tokens_details?: { cached_tokens: number };
+	prompt_tokens_details?: {
+		cached_tokens?: number;
+		cache_write_tokens?: number;
+	};
 }
 export interface ChatChunk {
 	id: string;
@@ -49,7 +52,7 @@ export async function* chatChunks(
 	let input: number | undefined,
 		output: number | undefined,
 		cached: number | undefined,
-		creation = 0;
+		creation: number | undefined;
 	const blocks = new Map<
 		number,
 		{
@@ -269,13 +272,20 @@ export async function* chatChunks(
 				input !== undefined &&
 				output !== undefined
 			) {
-				const prompt = input + (cached ?? 0) + creation; // Both supported provider legs use additive Messages usage.
+				const prompt = input + (cached ?? 0) + (creation ?? 0); // Both supported provider legs use additive Messages usage.
 				result.usage = {
 					prompt_tokens: prompt,
 					completion_tokens: output,
 					total_tokens: prompt + output,
-					...(cached !== undefined
-						? { prompt_tokens_details: { cached_tokens: cached } }
+					...(cached !== undefined || creation !== undefined
+						? {
+								prompt_tokens_details: {
+									...(cached !== undefined ? { cached_tokens: cached } : {}),
+									...(creation !== undefined
+										? { cache_write_tokens: creation }
+										: {}),
+								},
+							}
 						: {}),
 				};
 			}

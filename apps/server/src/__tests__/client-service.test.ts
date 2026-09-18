@@ -1264,7 +1264,7 @@ describe("client service integration", () => {
 			rmSync(cacheDir, { recursive: true, force: true });
 		});
 
-		it("publishes the shared limits of every fallback and refreshes them after alias edits", async () => {
+		it("reduces limits and retention across fallback targets, pins, and live alias edits", async () => {
 			await discovered("c", ["gpt-6-astra"]);
 			await discovered("d", ["fast-backup"]);
 			const alias = await dbOps.modelAliases.save({
@@ -1292,6 +1292,11 @@ describe("client service integration", () => {
 				maxOutputTokens: 32_000,
 				reasoning: false,
 				inputModalities: ["text"],
+				cacheRetention: expect.objectContaining({
+					basis: "heuristic",
+					retentionMs: 300_000,
+					confidence: "low",
+				}),
 				cachePolicy: {
 					mode: "unknown",
 					expiry: "unavailable",
@@ -1312,12 +1317,21 @@ describe("client service integration", () => {
 				(await service.modelMetadata(pinnedId, "openai")).models.good
 					?.contextWindow,
 			).toBe(872_000);
+			expect(
+				(await service.modelMetadata(pinnedId, "openai")).models.good
+					?.cacheRetention,
+			).toMatchObject({ basis: "inferred", retentionMs: 1_800_000 });
 			await dbOps.modelAliases.save({
 				...alias,
 				targets: alias.targets.slice(0, 1),
 			});
 			const after = await (await service.wire(id, "codex")).json();
 			expect(after.models[0].context_window).toBe(872_000);
+			const enriched = await (await service.wire(id, "openai", true)).json();
+			expect(enriched.data[0].clankermux.cacheRetention).toMatchObject({
+				basis: "inferred",
+				retentionMs: 1_800_000,
+			});
 		});
 
 		it("enriches only this client's aliases and resolves cache policy per endpoint and dialect", async () => {
@@ -1376,7 +1390,7 @@ describe("client service integration", () => {
 				source: "unknown",
 			});
 		});
-		it("publishes Codex cache capability for a discovered Astra alias without claiming API retention", async () => {
+		it("publishes a labelled inferred Astra retention estimate without changing verified policy", async () => {
 			await discovered("c", ["gpt-6-astra"]);
 			const id = await astraClient(["c"], { accountId: "c", providers: null });
 			const native = await (await service.wire(id, "openai")).json();
@@ -1387,9 +1401,102 @@ describe("client service integration", () => {
 				expiry: "unavailable",
 				source: "gateway-policy",
 			});
+			expect(enriched.data[0].clankermux.cacheRetention).toMatchObject({
+				basis: "inferred",
+				retentionMs: 1_800_000,
+				anchor: "request_start",
+				anchorBasis: "assumed",
+			});
+			expect(enriched.data[0].clankermux.cacheRetention.sources).toEqual(
+				expect.arrayContaining([
+					expect.objectContaining({
+						url: "https://developers.openai.com/api/docs/guides/prompt-caching",
+					}),
+				]),
+			);
 			expect(enriched.data.map((model: { id: string }) => model.id)).toEqual([
 				"gpt-6-astra",
 			]);
+		});
+
+		it("gives an unfamiliar custom model a heuristic without exposing private route state", async () => {
+			dbOps
+				.getAdapter()
+				.getSQLiteDb()
+				.query(
+					"UPDATE accounts SET custom_endpoint='https://private-route.example/v1' WHERE id='d'",
+				)
+				.run();
+			await discovered("d", ["unfamiliar-model"]);
+			const draft = blank();
+			draft.destinations = { accountId: "d", providers: null };
+			draft.catalogues.openai.models = [
+				{
+					id: "friendly",
+					displayName: "Friendly",
+					targetModel: "unfamiliar-model",
+					accountIds: ["d"],
+				},
+			];
+			const id = (await create(draft)).client.apiKeyId;
+			const before = await dbOps.clients.getProfile(id);
+			const plain = await (await service.wire(id, "openai")).json();
+			const enriched = await (await service.wire(id, "openai", true)).json();
+			const metadata = enriched.data[0].clankermux;
+			expect(metadata.cacheRetention).toMatchObject({
+				basis: "heuristic",
+				retentionMs: 300_000,
+				confidence: "low",
+				semantics: "heuristic",
+				anchorBasis: "assumed",
+				refreshBasis: "assumed",
+			});
+			for (const forbidden of [
+				"private-route.example",
+				"unfamiliar-model",
+				"accountIds",
+				"account_id",
+				"thinkingLevels",
+				"session",
+				"estimatedExpiresAt",
+			]) {
+				expect(JSON.stringify(enriched)).not.toContain(forbidden);
+			}
+			delete enriched.data[0].clankermux;
+			expect(enriched).toEqual(plain);
+			expect(await dbOps.clients.getProfile(id)).toEqual(before);
+		});
+
+		it("recomputes retention when a routing rule excludes an unknown endpoint", async () => {
+			dbOps
+				.getAdapter()
+				.getSQLiteDb()
+				.query(
+					"UPDATE accounts SET custom_endpoint='https://private-route.example/v1' WHERE id='d'",
+				)
+				.run();
+			await discovered("c", ["gpt-6-astra"]);
+			await discovered("d", ["gpt-6-astra"]);
+			const id = await astraClient();
+			const pooled = await (await service.wire(id, "openai", true)).json();
+			expect(pooled.data[0].clankermux.cacheRetention).toMatchObject({
+				basis: "heuristic",
+				retentionMs: 300_000,
+				confidence: "low",
+			});
+			await dbOps.routing.saveRule({
+				...broad,
+				id: "codex-retention-only",
+				match_api_key_id: id,
+				pool_kind: "accounts",
+				pool_account_ids: ["c"],
+			});
+			const narrowed = await (await service.wire(id, "openai", true)).json();
+			expect(narrowed.data[0].clankermux.cacheRetention).toMatchObject({
+				basis: "inferred",
+				retentionMs: 1_800_000,
+			});
+			expect(JSON.stringify(pooled)).not.toContain("private-route.example");
 		});
 
 		it("serves the native catalogue with empty metadata when enrichment stalls", async () => {
@@ -1454,6 +1561,7 @@ describe("client service integration", () => {
 				}) as unknown as typeof fetch;
 				const result = await service.modelMetadata(id, "openai");
 				expect(result.models.swe).toEqual({
+					cacheRetention: expect.any(Object),
 					cachePolicy: {
 						mode: "unknown",
 						expiry: "unavailable",
@@ -1517,6 +1625,7 @@ describe("client service integration", () => {
 				const id = (await create(draft)).client.apiKeyId;
 				const result = await service.modelMetadata(id, "openai");
 				expect(result.models.pooled).toEqual({
+					cacheRetention: expect.any(Object),
 					cachePolicy: {
 						mode: "unknown",
 						expiry: "unavailable",
@@ -1527,6 +1636,7 @@ describe("client service integration", () => {
 					inputModalities: ["text"],
 				});
 				expect(result.models.large).toEqual({
+					cacheRetention: expect.any(Object),
 					cachePolicy: {
 						mode: "unknown",
 						expiry: "unavailable",
@@ -1592,6 +1702,7 @@ describe("client service integration", () => {
 				}) as unknown as typeof fetch;
 				const result = await service.modelMetadata(id, "openai");
 				expect(result.models.swe).toEqual({
+					cacheRetention: expect.any(Object),
 					cachePolicy: {
 						mode: "unknown",
 						expiry: "unavailable",
@@ -1626,7 +1737,13 @@ describe("client service integration", () => {
 			];
 			const id = (await create(draft)).client.apiKeyId;
 			const result = await service.modelMetadata(id, "openai");
-			expect(result.models.swe).toEqual({});
+			expect(result.models.swe).toEqual({
+				cacheRetention: expect.objectContaining({
+					basis: "heuristic",
+					retentionMs: 300_000,
+					confidence: "low",
+				}),
+			});
 			expect(result.catalogueLoaded).toBe(false);
 		});
 
@@ -1667,6 +1784,7 @@ describe("client service integration", () => {
 			// Both accounts serve the model, so both routes count.
 			const pooled = await service.modelMetadata(id, "openai");
 			expect(pooled.models["gpt-6-astra"]).toEqual({
+				cacheRetention: expect.any(Object),
 				cachePolicy: {
 					mode: "implicit",
 					expiry: "unavailable",
@@ -1686,6 +1804,7 @@ describe("client service integration", () => {
 			});
 			const narrowed = await service.modelMetadata(id, "openai");
 			expect(narrowed.models["gpt-6-astra"]).toEqual({
+				cacheRetention: expect.any(Object),
 				cachePolicy: {
 					mode: "implicit",
 					expiry: "unavailable",
@@ -1708,7 +1827,7 @@ describe("client service integration", () => {
 			expect(result.models["gpt-6-astra"]?.maxOutputTokens).toBe(128_000);
 		});
 
-		it("says nothing while an account's permissions are unknown", async () => {
+		it("offers only a labelled heuristic while account permissions are unknown", async () => {
 			await discovered("c", ["gpt-6-astra"]);
 			const account = await dbOps.getAccount("d");
 			if (!account) throw new Error("fixture account d");
@@ -1719,7 +1838,13 @@ describe("client service integration", () => {
 				modelPermissionScope(account),
 			);
 			const result = await service.modelMetadata(await astraClient(), "openai");
-			expect(result.models["gpt-6-astra"]).toEqual({});
+			expect(result.models["gpt-6-astra"]).toEqual({
+				cacheRetention: expect.objectContaining({
+					basis: "heuristic",
+					retentionMs: 300_000,
+					confidence: "low",
+				}),
+			});
 			expect(result.catalogueLoaded).toBe(false);
 		});
 
@@ -1748,6 +1873,7 @@ describe("client service integration", () => {
 			// entirely and its unread permissions say nothing about this alias.
 			const result = await service.modelMetadata(id, "openai");
 			expect(result.models["gpt-6-astra"]).toEqual({
+				cacheRetention: expect.any(Object),
 				cachePolicy: {
 					mode: "implicit",
 					expiry: "unavailable",
@@ -1779,6 +1905,7 @@ describe("client service integration", () => {
 				.run("d");
 			const result = await service.modelMetadata(id, "openai");
 			expect(result.models["gpt-6-astra"]).toEqual({
+				cacheRetention: expect.any(Object),
 				cachePolicy: {
 					mode: "implicit",
 					expiry: "unavailable",

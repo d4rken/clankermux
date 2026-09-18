@@ -1075,8 +1075,8 @@ describe("CodexProvider.processResponse", () => {
 		);
 		expect(payload.usage.input_tokens).toBe(5);
 		expect(payload.usage.output_tokens).toBe(2);
-		expect(payload.usage.cache_read_input_tokens).toBe(0);
-		expect(payload.usage.cache_creation_input_tokens).toBe(0);
+		expect(payload.usage.cache_read_input_tokens).toBeNull();
+		expect(payload.usage.cache_creation_input_tokens).toBeNull();
 		expect(payload.delta.stop_reason).toBe("end_turn");
 		expect(payload.delta.stop_sequence).toBe(null);
 	});
@@ -1159,8 +1159,8 @@ describe("CodexProvider.processResponse", () => {
 		expect(payload.usage).toEqual({
 			input_tokens: 7,
 			output_tokens: 2,
-			cache_read_input_tokens: 0,
-			cache_creation_input_tokens: 0,
+			cache_read_input_tokens: null,
+			cache_creation_input_tokens: null,
 		});
 	});
 
@@ -1387,8 +1387,8 @@ describe("CodexProvider.processResponse", () => {
 		);
 		expect(payload.usage.input_tokens).toBe(0);
 		expect(payload.usage.output_tokens).toBe(0);
-		expect(payload.usage.cache_read_input_tokens).toBe(0);
-		expect(payload.usage.cache_creation_input_tokens).toBe(0);
+		expect(payload.usage.cache_read_input_tokens).toBeNull();
+		expect(payload.usage.cache_creation_input_tokens).toBeNull();
 		expect(payload.message.usage.input_tokens).toBe(0);
 		expect(payload.message.usage.output_tokens).toBe(0);
 		expect(messageDeltaLine).not.toBeUndefined();
@@ -1525,8 +1525,8 @@ describe("CodexProvider.processResponse", () => {
 		expect(payload.usage).toEqual({
 			input_tokens: 2,
 			output_tokens: 1,
-			cache_read_input_tokens: 0,
-			cache_creation_input_tokens: 0,
+			cache_read_input_tokens: null,
+			cache_creation_input_tokens: null,
 		});
 	});
 
@@ -3079,6 +3079,43 @@ describe("CodexProvider ChatGPT-backend parameter sanitation", () => {
 });
 
 describe("normalizeCodexInputUsage", () => {
+	it("subtracts writes and reads from the inclusive total, clamping writes to remaining input", () => {
+		expect(normalizeCodexInputUsage(100, 30, 20)).toEqual({
+			totalInputTokens: 100,
+			inputTokens: 50,
+			cacheReadInputTokens: 30,
+			cacheCreationInputTokens: 20,
+		});
+		expect(normalizeCodexInputUsage(10, 8, 20)).toEqual({
+			totalInputTokens: 10,
+			inputTokens: 0,
+			cacheReadInputTokens: 8,
+			cacheCreationInputTokens: 2,
+		});
+	});
+	it("keeps unreported or malformed cache fields absent, preserving explicit zero", () => {
+		for (const invalid of [
+			undefined,
+			null,
+			-1,
+			Number.NaN,
+			Number.POSITIVE_INFINITY,
+			"10",
+		]) {
+			expect(normalizeCodexInputUsage(100, invalid, invalid)).toEqual({
+				totalInputTokens: 100,
+				inputTokens: 100,
+				cacheReadInputTokens: undefined,
+				cacheCreationInputTokens: undefined,
+			});
+		}
+		expect(normalizeCodexInputUsage(100, 0, 0)).toEqual({
+			totalInputTokens: 100,
+			inputTokens: 100,
+			cacheReadInputTokens: 0,
+			cacheCreationInputTokens: 0,
+		});
+	});
 	it("subtracts cached tokens from the cache-inclusive total", () => {
 		const result = normalizeCodexInputUsage(100, 30);
 		expect(result.totalInputTokens).toBe(100);
@@ -3091,24 +3128,28 @@ describe("normalizeCodexInputUsage", () => {
 			totalInputTokens: 0,
 			inputTokens: 0,
 			cacheReadInputTokens: 0,
+			cacheCreationInputTokens: undefined,
 		});
 		expect(normalizeCodexInputUsage(Number.NaN, 5)).toEqual({
 			totalInputTokens: 0,
 			inputTokens: 0,
 			cacheReadInputTokens: 0,
+			cacheCreationInputTokens: undefined,
 		});
 	});
 
-	it("treats a missing or negative cached count as zero", () => {
+	it("keeps a missing or negative cached count unknown", () => {
 		expect(normalizeCodexInputUsage(10, undefined)).toEqual({
 			totalInputTokens: 10,
 			inputTokens: 10,
-			cacheReadInputTokens: 0,
+			cacheReadInputTokens: undefined,
+			cacheCreationInputTokens: undefined,
 		});
 		expect(normalizeCodexInputUsage(10, -5)).toEqual({
 			totalInputTokens: 10,
 			inputTokens: 10,
-			cacheReadInputTokens: 0,
+			cacheReadInputTokens: undefined,
+			cacheCreationInputTokens: undefined,
 		});
 	});
 
@@ -4508,4 +4549,95 @@ describe("CodexProvider.parseRateLimit exhausted windows", () => {
 		expect(info.resetTime).toBeGreaterThanOrEqual(before + hour);
 		expect(info.resetTime).toBeLessThanOrEqual(Date.now() + hour);
 	});
+});
+
+describe("Codex cache write evidence", () => {
+	for (const stream of [true, false]) {
+		it(`preserves native cache writes, absence, explicit zero, and additive totals (stream=${stream})`, async () => {
+			for (const details of [
+				{ cache_write_tokens: 20, cached_tokens: 30 },
+				{ cache_write_tokens: 20 },
+				{ cache_write_tokens: 20, cached_tokens: 0 },
+				{ cache_creation_input_tokens: 20, cached_tokens: 30 },
+				{
+					cache_write_tokens: 0,
+					cache_creation_input_tokens: 20,
+					cached_tokens: 30,
+				},
+				{ cache_write_tokens: -5, cached_tokens: -1 },
+				{ cache_write_tokens: 90, cached_tokens: 30 },
+			]) {
+				const provider = new CodexProvider();
+				const response = new Response(
+					sseBody([
+						...eventLine("response.created", {
+							response: { id: "resp_cache", model: "gpt-6-astra" },
+						}),
+						...eventLine("response.completed", {
+							response: {
+								model: "gpt-6-astra",
+								usage: {
+									input_tokens: 100,
+									output_tokens: 2,
+									input_tokens_details: details,
+								},
+							},
+						}),
+					]),
+					{
+						headers: {
+							"content-type": "text/event-stream",
+							"x-clankermux-request-stream": String(stream),
+						},
+					},
+				);
+				const transformed = await provider.processResponse(response, null);
+				const body = await transformed.text();
+				const payload = stream
+					? JSON.parse(
+							body
+								.split("\n")
+								.find((line) => line.includes('"type":"message_delta"'))
+								?.slice(6) ?? "null",
+						)
+					: JSON.parse(body);
+				const reads =
+					details.cached_tokens !== undefined && details.cached_tokens >= 0
+						? details.cached_tokens
+						: undefined;
+				const rawWrites =
+					details.cache_write_tokens ?? details.cache_creation_input_tokens;
+				const writes =
+					rawWrites !== undefined && rawWrites >= 0
+						? Math.min(rawWrites, 100 - (reads ?? 0))
+						: undefined;
+				expect(payload.usage).toEqual({
+					input_tokens: 100 - (reads ?? 0) - (writes ?? 0),
+					output_tokens: 2,
+					cache_read_input_tokens: reads ?? null,
+					cache_creation_input_tokens: writes ?? null,
+				});
+				if (stream) {
+					expect(payload.context_window.current_usage).toEqual({
+						input_tokens: 100 - (reads ?? 0) - (writes ?? 0),
+						cache_read_input_tokens: reads ?? 0,
+						cache_creation_input_tokens: writes ?? 0,
+					});
+					const initial = JSON.parse(
+						body
+							.split("\n")
+							.find((line) => line.includes('"type":"message_start"'))
+							?.slice(6) ?? "null",
+					);
+					expect(initial.message.usage).toEqual({
+						input_tokens: 0,
+						output_tokens: 0,
+						cache_read_input_tokens: null,
+						cache_creation_input_tokens: null,
+					});
+					expect(initial.usage).toEqual(initial.message.usage);
+				}
+			}
+		});
+	}
 });

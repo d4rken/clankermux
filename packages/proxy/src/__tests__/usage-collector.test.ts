@@ -1155,19 +1155,15 @@ describe("usage-collector", () => {
 					output_tokens: 215,
 					input_tokens_details: {
 						cached_tokens: 1024,
-						cache_creation_input_tokens: 64,
+						cache_write_tokens: 64,
 					},
 				}),
 				1300,
 			);
 
 			expect(state.model).toBe("gpt-5.5-codex");
-			// Codex's input_tokens (1117) is cache-inclusive; it is normalized to
-			// Anthropic's additive semantics so inputTokens excludes the 1024
-			// cached tokens (1117 - 1024 = 93), which are reported separately as
-			// cacheReadInputTokens. Without this, cost estimation double-charged
-			// the cached tokens (once at input rate, once at cache_read rate).
-			expect(state.inputTokens).toBe(93);
+			// The inclusive total splits into 29 fresh, 1024 read, and 64 written.
+			expect(state.inputTokens).toBe(29);
 			expect(state.providerFinalOutputTokens).toBe(215);
 			expect(state.providerReportedOutput).toBe(true);
 			expect(state.cacheReadInputTokens).toBe(1024);
@@ -1180,12 +1176,12 @@ describe("usage-collector", () => {
 				{ estimateCostUSD: cost.fn },
 			);
 			expect(summary.usage.model).toBe("gpt-5.5-codex");
-			expect(summary.usage.inputTokens).toBe(93);
+			expect(summary.usage.inputTokens).toBe(29);
 			expect(summary.usage.outputTokens).toBe(215);
 			expect(summary.usage.cacheReadInputTokens).toBe(1024);
 			expect(summary.usage.cacheCreationInputTokens).toBe(64);
-			// inputTokens (93) + cacheRead (1024) reconstructs the 1117 total.
-			expect(summary.usage.totalTokens).toBe(93 + 1024 + 64 + 215);
+			// All three additive input fields reconstruct the original 1117 total.
+			expect(summary.usage.totalTokens).toBe(1117 + 215);
 			// The provider reported — the content-chars/4 fallback must NOT have been used.
 			expect(summary.outputApproximate).toBe(false);
 			expect(summary.usage.outputTokens).not.toBe(
@@ -1221,6 +1217,32 @@ describe("usage-collector", () => {
 			// double-counted in the input leg.
 			expect(cost.calls[0].tokens.inputTokens).toBe(70);
 			expect(cost.calls[0].tokens.cacheReadInputTokens).toBe(30);
+		});
+
+		it("preserves native write zero over legacy writes and clamps inconsistent totals", () => {
+			for (const [writes, expectedInput, expectedWrites] of [
+				[0, 70, 0],
+				[90, 0, 70],
+				[-5, 70, 0],
+			]) {
+				const state = createUsageState();
+				feedChunk(
+					state,
+					codexCompleted({
+						input_tokens: 100,
+						output_tokens: 2,
+						input_tokens_details: {
+							cached_tokens: 30,
+							cache_write_tokens: writes,
+							cache_creation_input_tokens: 20,
+						},
+					}),
+					1000,
+				);
+				expect(state.inputTokens).toBe(expectedInput);
+				expect(state.cacheReadInputTokens).toBe(30);
+				expect(state.cacheCreationInputTokens).toBe(expectedWrites);
+			}
 		});
 
 		it("handles a usage object without input_tokens_details (no cached info)", async () => {

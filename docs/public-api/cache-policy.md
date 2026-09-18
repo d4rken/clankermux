@@ -35,7 +35,8 @@ TTLs even on Codex-adapter routes that can pass native Responses through.
 
 `configured` describes a specified lifetime, `minimum` a lower bound rather
 than an eviction deadline, and `typical` an observation in provider documentation
-that cannot support an expiry estimate. Missing fields remain unknown.
+that cannot support a verified expiry estimate. Missing fields remain unknown.
+Advisory `cacheRetention` metadata below can still provide a labelled display window.
 `expiry: "unavailable"` can coexist with a TTL when the timestamp anchor is
 undocumented. No route currently reports `exact` expiry.
 
@@ -112,25 +113,122 @@ listing of `qwen3.6-plus` does not establish implicit caching. Coding Plan and
 Qwen OAuth never inherit these API policies.
 OpenRouter's ten-minute sticky-routing timeout is also not a prompt-cache TTL.
 
+## Advisory retention estimates
+
+Read `data[i].clankermux.cacheRetention` (or
+`models[i].clankermux.cacheRetention` in Codex discovery) alongside `cachePolicy`.
+Every enriched model receives an advisory estimate, including unfamiliar models
+and unresolved routes. An enrichment timeout still returns `clankermux: {}`.
+Estimates never change verified policy, routing, cache bridging or paid background
+requests. They are display advice, not selectable upstream TTLs.
+
+```ts
+interface ModelCacheRetention {
+  basis: "documented" | "inferred" | "heuristic";
+  retentionMs: number;
+  typicalRangeMs?: [number, number];
+  semantics: "configured" | "minimum" | "typical" | "heuristic";
+  confidence: "high" | "medium" | "low";
+  anchor: "request_start" | "request_end";
+  anchorBasis: "documented" | "assumed";
+  refreshOnReuse: boolean;
+  refreshBasis: "documented" | "assumed";
+  sources: Array<{ url: string; note: string }>;
+  note: string;
+}
+```
+
+`basis` describes the numerical duration's provenance. `documented` means the
+source applies to the resolved service and model; it does not guarantee a future
+hit. `inferred` borrows another product's documented behavior or interprets a
+qualitative range. `heuristic` is a gateway display default with no supporting
+numerical evidence. Unsourced heuristics have an empty `sources` array.
+`anchorBasis` and `refreshBasis` independently disclose timing assumptions.
+Confidence describes the quality of the evidence, not a calibrated probability
+of a hit. A documented duration with an assumed anchor is still an estimate.
+
+| Applicable service/model | Display window | Basis |
+|---|---|---|
+| Known Anthropic explicit caching | 5 minutes, request-start anchor | Documented minimum; promotion can retain longer |
+| Modern direct OpenAI API models | 30 minutes | Documented minimum after write/reuse; request-start anchor assumed |
+| Codex GPT-5.6+ and GPT-6 Astra | 30 minutes | Inferred from OpenAI API documentation; subscription applicability and refresh unverified |
+| Earlier OpenAI / Codex models | 5 minutes, typical range 5–10 minutes | Documented API behavior or inferred subscription behavior; account retention settings may differ |
+| Supported Groq GPT-OSS models | 2 hours | Documented inactivity period; request-start anchor assumed |
+| Known MiniMax/DashScope explicit caching | 5 minutes | Documented duration; request-start anchor assumed |
+| OpenRouter Gemini implicit caching | 3 minutes, typical range 3–5 minutes | Documented typical behavior; refresh and request-start timing assumed |
+| Direct Gemini implicit caching | 3 minutes, typical range 3–5 minutes | Inferred from OpenRouter's description; applicability unverified |
+| DeepSeek direct/API routes and OpenRouter DeepSeek | 1 hour | Inferred from “hours to days”; one hour is not a documented minimum |
+| Z.ai, Grok, Kimi, automatic MiniMax/DashScope, Qwen OAuth, Alibaba Coding Plan, Ollama, Ollama Cloud, Kilo, Devin, Mistral, arbitrary compatible services and all other models | 5 minutes | Low-confidence gateway heuristic; numeric lifetime and sometimes caching availability unverified |
+
+Unknown or conflicting routes cannot borrow a verified policy. Their advisory
+estimate instead uses the shortest candidate window and the weakest evidence
+classification, with low confidence and a note explaining uncertainty. If route
+eligibility cannot be resolved, use only the generic heuristic. Source text in a
+combined estimate may describe only some requests. No estimate contains account
+IDs, custom endpoints, route listings or session state.
+
 ## Client display and observations
 
-A Codex-routed `gpt-6-astra` now reports:
+A Codex-routed `gpt-6-astra` retains its verified policy:
 
 ```json
 {"mode":"implicit","expiry":"unavailable","source":"gateway-policy"}
 ```
 
-Display "Automatic caching; expiration unavailable". Keep session observations
-separate, in memory. A cache read proves that some prefix was reused on that
-request, not that all current context is warm. Cache creation alone does not
-prove expiry. First writes, changed prefixes, account changes and eviction can
-all produce new writes.
+Its separate `cacheRetention` now supplies `retentionMs: 1800000`,
+`basis: "inferred"`, `confidence: "low"`, the OpenAI documentation URL and a note
+that API retention is being borrowed for the subscription backend. Display
+“Estimated retention: 30 minutes (inferred from OpenAI API; Codex unverified)”.
+Do not present that duration as a verified default TTL or exact expiry.
+Clients must parse the new field to show it; a client that only reads
+`cachePolicy.defaultTtlMs` will still display unknown.
 
-Only calculate an estimate when the policy's expiry, effective TTL, semantics,
-anchor and comparable prefix observations support it. A minimum TTL is a lower
-bound on retention, not an exact eviction date. Gateway TTL promotion and
-background refreshes are not reported by discovery. An unavailable expiry must
-never become a countdown merely because a TTL number is present.
+Keep observations in client memory, separate from discovery and persistence.
+`SessionCacheEstimate` and `readCacheUsage` in
+`packages/core/src/session-cache-estimate.ts` provide a tested client reference.
+They have no server-side session store or background activity. Supply opaque
+identities for provider, model, session, branch, prefix, tools/system prompt and
+route policy. Changing any identity or retention metadata resets the estimate.
+Capture a request handle before sending; responses arriving after a reset or an
+already observed newer request cannot revive stale state. Do not persist prompt
+prefixes or upstream cache keys.
+
+Read the merged final usage object from the existing stream result:
+
+| Wire format | Read evidence | Write evidence |
+|---|---|---|
+| Anthropic | `cache_read_input_tokens` | `cache_creation_input_tokens` |
+| Responses | `input_tokens_details.cached_tokens` | `input_tokens_details.cache_write_tokens` (legacy `cache_creation_input_tokens` fallback) |
+| Chat Completions | `prompt_tokens_details.cached_tokens` | `prompt_tokens_details.cache_write_tokens` |
+| Native DeepSeek | `prompt_cache_hit_tokens` | Unavailable unless separately supplied |
+| Native Gemini | `cachedContentTokenCount` | Unavailable unless separately supplied |
+
+`prompt_tokens_details.cache_write_tokens` is a ClankerMux extension to Chat
+Completions, not a standard OpenAI Chat field. On Anthropic-shaped Codex
+responses, unknown cache counters are `null`; translated Responses/Chat
+counters are omitted when unknown. Neither representation means zero.
+
+A positive cache read proves some prefix was reused on that request. Display
+its token count; never claim the whole current context is warm. A positive
+write supports `warm_write`. Missing counters mean unknown, not zero. Cache
+creation alone cannot prove expiry. Even an explicit zero read followed by a
+write for a previously warm, comparable prefix only establishes that the prefix
+was unavailable on that request; eviction and account routing remain possible.
+The reference tracker never reports `expired`.
+
+A write starts a new advisory window. A hit updates it only when
+`refreshOnReuse` is true, retaining the documented/assumed label. No usage,
+uncached prompts, prompt submission alone and cache prices do not refresh it.
+For a non-refreshing cache, a read alone cannot reveal when its entry was created.
+A later explicit zero read clears an old window unless a new write is observed.
+A positive hit/write does not promote the static retention estimate's provenance
+or establish a measured lifetime.
+
+`estimatedUntil` is the request anchor plus `retentionMs`, in epoch milliseconds.
+Show “estimated warm window remaining”, not “context expires in”. At the end of
+the window the state becomes `unknown`, never proven expired. Gateway background
+refreshes, routing and prefix changes can invalidate the estimate at any point.
+Keep Pi's existing conservative ReCAP/autotitle gate unchanged.
 
 ## Sources
 

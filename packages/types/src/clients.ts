@@ -47,13 +47,26 @@ export interface ModelCachePolicy {
 	ttlSemantics?: "configured" | "minimum" | "typical" | "unknown";
 }
 
+/** Advisory retention window; elapsed time means uncertain warmth, never proven expiry. */
+export interface ModelCacheRetention {
+	basis: "documented" | "inferred" | "heuristic";
+	retentionMs: number;
+	typicalRangeMs?: [number, number];
+	semantics: "configured" | "minimum" | "typical" | "heuristic";
+	confidence: "high" | "medium" | "low";
+	anchor: "request_start" | "request_end";
+	anchorBasis: "documented" | "assumed";
+	refreshOnReuse: boolean;
+	refreshBasis: "documented" | "assumed";
+	sources: Array<{ url: string; note: string }>;
+	note: string;
+}
+
 /**
- * What ClankerMux can substantiate about one published alias, resolved per
+ * Metadata for one published alias, resolved per
  * request and never persisted: a stored copy would describe the route the
  * catalogue had when it was written, not the one serving now.
- *
- * Every field is optional and absence means unknown — a client falling back to
- * its own documented default beats an invented number.
+ * Advisory assumptions are labelled separately from verified cache policy.
  */
 export interface ClientModelMetadata {
 	/** Tokens this alias's route admits. */
@@ -63,6 +76,7 @@ export interface ClientModelMetadata {
 	inputModalities?: Array<"text" | "image">;
 	cost?: ClientModelCost;
 	cachePolicy?: ModelCachePolicy;
+	cacheRetention?: ModelCacheRetention;
 }
 export type ClientModelMetadataMap = Record<string, ClientModelMetadata>;
 export interface ClientModelMetadataResponse {
