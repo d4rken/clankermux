@@ -16,7 +16,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "../ui/card";
 import { Input } from "../ui/input";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "../ui/tabs";
 import { clientRequest } from "./api";
-import { ModelFilterField, matchesModelQuery } from "./model-filter";
+import { CatalogueSelector } from "./CatalogueSelector";
 import {
 	APPLICATIONS,
 	destinationsLabel,
@@ -169,7 +169,30 @@ export function ClientWizard({
 		editId: null as string | null,
 	});
 	/** Kept across format tabs: narrowing the list is a view, not catalogue data. */
-	const [query, setQuery] = useState("");
+	const [queries, setQueries] = useState({ available: "", selected: "" });
+	const [removedModels, setRemovedModels] = useState<
+		Record<ClientFormat, ClientModel[]>
+	>({
+		anthropic: [],
+		openai: [],
+		codex: [],
+	});
+	const removedContext = useRef({
+		application: draft.application,
+		destinations: draft.destinations,
+	});
+	useEffect(() => {
+		if (
+			removedContext.current.application === draft.application &&
+			removedContext.current.destinations === draft.destinations
+		)
+			return;
+		removedContext.current = {
+			application: draft.application,
+			destinations: draft.destinations,
+		};
+		setRemovedModels({ anthropic: [], openai: [], codex: [] });
+	}, [draft.application, draft.destinations]);
 	const [copy, setCopy] = useState({
 		sourceId: "",
 		application: true,
@@ -392,6 +415,7 @@ export function ClientWizard({
 		run(async () => {
 			const source = copySource;
 			if (!source) return;
+			setRemovedModels({ anthropic: [], openai: [], codex: [] });
 			const application = copy.application
 				? source.application
 				: draft.application;
@@ -476,15 +500,12 @@ export function ClientWizard({
 			);
 			candidates.set(model.id, model);
 		}
-	for (const model of draft.catalogues[format].models)
-		candidates.set(model.id, model);
-	const filtering = query.trim().length > 0;
-	const visibleCandidates = [...candidates.values()].filter((m) =>
-		matchesModelQuery(m, query),
+	// Re-adding restores the operator's definition, even after discovery refresh.
+	for (const model of removedModels[format]) candidates.set(model.id, model);
+	const selectedIds = new Set(draft.catalogues[format].models.map((m) => m.id));
+	const availableModels = [...candidates.values()].filter(
+		(m) => !selectedIds.has(m.id),
 	);
-	// Bulk selection acts on what the filter shows; a selected entry the filter
-	// hides keeps its place in the catalogue.
-	const visibleIds = new Set(visibleCandidates.map((m) => m.id));
 	const goToStep = (target: number) =>
 		run(async () => {
 			if (target > step && !draft.name.trim())
@@ -919,174 +940,95 @@ export function ClientWizard({
 									configure this catalogue.
 								</p>
 							)}
-							<div className="flex flex-wrap gap-2">
-								<Button
-									size="sm"
-									variant="outline"
-									disabled={busy}
-									onClick={() =>
-										updateModels([
-											...draft.catalogues[format].models.filter(
-												(m) => !visibleIds.has(m.id),
-											),
-											...visibleCandidates,
-										])
-									}
-								>
-									{filtering ? "Select all shown" : "Select all in tab"}
-								</Button>
-								<Button
-									size="sm"
-									variant="outline"
-									disabled={busy}
-									onClick={() =>
-										updateModels(
-											draft.catalogues[format].models.filter(
-												(m) => !visibleIds.has(m.id),
-											),
-										)
-									}
-								>
-									{filtering ? "Deselect all shown" : "Deselect all in tab"}
-								</Button>
-								<span className="text-sm self-center text-muted-foreground">
-									{draft.catalogues[format].models.length} selected
-								</span>
-							</div>
-							<ModelFilterField
-								value={query}
-								onChange={setQuery}
-								shown={visibleCandidates.length}
-								total={candidates.size}
-								label={`Filter ${FORMATS[format]} models`}
-							/>
-							{/* Reserve space for the step header, catalogue controls and footer on desktop. */}
-							<section
-								aria-label={`${FORMATS[format]} models`}
-								className="h-[60dvh] min-h-48 md:h-[max(18rem,calc(100dvh-45rem))] overflow-auto divide-y rounded-md border"
-							>
-								{visibleCandidates.map((model) => {
-									const accountNames = (
+							<CatalogueSelector
+								formatLabel={FORMATS[format]}
+								available={availableModels}
+								selected={draft.catalogues[format].models}
+								queries={queries}
+								onQueryChange={(side, value) =>
+									setQueries((current) => ({ ...current, [side]: value }))
+								}
+								busy={busy}
+								accountNames={(model) =>
+									(
+										model.accountIds ??
 										suggestions?.models.find((m) => m.id === model.targetModel)
 											?.accountIds ??
-										model.accountIds ??
 										[]
-									).map((id) => accounts.find((a) => a.id === id)?.name ?? id);
-									return (
-										<div
-											key={model.id}
-											className="flex items-center gap-3 px-3 py-2 hover:bg-muted/40"
-										>
-											<label className="flex flex-1 min-w-0 items-center gap-3">
-												<input
-													className="shrink-0"
-													type="checkbox"
-													disabled={busy}
-													checked={draft.catalogues[format].models.some(
-														(m) => m.id === model.id,
-													)}
-													onChange={(e) =>
-														updateModels(
-															e.target.checked
-																? [...draft.catalogues[format].models, model]
-																: draft.catalogues[format].models.filter(
-																		(m) => m.id !== model.id,
-																	),
-														)
-													}
-												/>
-												<span className="min-w-0 flex-1 grid gap-x-4 sm:grid-cols-[minmax(0,1fr)_minmax(0,0.8fr)]">
-													<span className="font-medium text-sm break-all leading-5">
-														{model.displayName}
-													</span>
-													<code className="text-xs break-all text-muted-foreground sm:col-start-1 sm:row-start-2">
-														{model.id}
-														{model.targetModel !== model.id
-															? ` → ${model.targetModel}`
-															: ""}
-													</code>
-													<span
-														title={accountNames.join(", ")}
-														className="text-xs text-muted-foreground truncate sm:col-start-2 sm:row-start-1 sm:row-span-2 sm:self-center"
-													>
-														{accountNames[0]}
-														{accountNames.length > 1
-															? ` +${accountNames.length - 1}`
-															: ""}
-													</span>
-												</span>
-											</label>
-											<Button
-												variant="ghost"
-												size="sm"
-												className="ml-auto h-7 px-2 text-xs"
-												disabled={busy}
-												onClick={(e) => {
-													e.preventDefault();
-													requestAnimationFrame(() =>
-														editorRef.current?.scrollIntoView({
-															block: "nearest",
-															behavior: "smooth",
-														}),
-													);
-													setCustom({
-														id: model.id,
-														target: model.targetModel,
-														name: model.displayName,
-														accounts: model.accountIds ?? [],
-														editId: model.id,
-													});
-												}}
-											>
-												Edit
-											</Button>
-										</div>
+									).map((id) => accounts.find((a) => a.id === id)?.name ?? id)
+								}
+								onAdd={(models) => {
+									const ids = new Set(models.map((m) => m.id));
+									setRemovedModels((current) => ({
+										...current,
+										[format]: current[format].filter((m) => !ids.has(m.id)),
+									}));
+									updateModels([...draft.catalogues[format].models, ...models]);
+								}}
+								onRemove={(models) => {
+									const ids = new Set(models.map((m) => m.id));
+									setRemovedModels((current) => ({
+										...current,
+										[format]: [
+											...current[format].filter((m) => !ids.has(m.id)),
+											...models,
+										],
+									}));
+									updateModels(
+										draft.catalogues[format].models.filter(
+											(m) => !ids.has(m.id),
+										),
 									);
-								})}
-								{!candidates.size && (
-									<p className="p-4 text-sm text-muted-foreground">
-										No known models from these destinations. Refresh discovery
-										or add a model explicitly.
-									</p>
-								)}
-								{!!candidates.size && !visibleCandidates.length && (
-									<p className="p-4 text-sm text-muted-foreground">
-										No models match this filter.
-									</p>
-								)}
-							</section>
-							<label className="grid gap-2 max-w-xl text-sm font-medium">
-								Default model for setup
-								<select
-									className={SELECT}
-									disabled={busy || !draft.catalogues[format].models.length}
-									value={draft.catalogues[format].defaultModel ?? ""}
-									onChange={(e) => {
-										markTouched(format);
-										setDraft({
-											...draft,
-											catalogues: {
-												...draft.catalogues,
-												[format]: {
-													...draft.catalogues[format],
-													defaultModel: e.target.value || null,
+								}}
+								onEdit={(model) => {
+									requestAnimationFrame(() =>
+										editorRef.current?.scrollIntoView({
+											block: "nearest",
+											behavior: "smooth",
+										}),
+									);
+									setCustom({
+										id: model.id,
+										target: model.targetModel,
+										name: model.displayName,
+										accounts: model.accountIds ?? [],
+										editId: model.id,
+									});
+								}}
+							>
+								<label className="grid gap-2 max-w-xl text-sm font-medium">
+									Default model for setup
+									<select
+										className={`${SELECT} min-w-0 w-full`}
+										disabled={busy || !draft.catalogues[format].models.length}
+										value={draft.catalogues[format].defaultModel ?? ""}
+										onChange={(e) => {
+											markTouched(format);
+											setDraft({
+												...draft,
+												catalogues: {
+													...draft.catalogues,
+													[format]: {
+														...draft.catalogues[format],
+														defaultModel: e.target.value || null,
+													},
 												},
-											},
-										});
-									}}
-								>
-									<option value="">
-										{draft.catalogues[format].models.length
-											? "Choose a default model"
-											: "No selected models"}
-									</option>
-									{draft.catalogues[format].models.map((m) => (
-										<option value={m.id} key={m.id}>
-											{m.displayName}
+											});
+										}}
+									>
+										<option value="">
+											{draft.catalogues[format].models.length
+												? "Choose a default model"
+												: "No selected models"}
 										</option>
-									))}
-								</select>
-							</label>
+										{draft.catalogues[format].models.map((m) => (
+											<option value={m.id} key={m.id}>
+												{m.displayName}
+											</option>
+										))}
+									</select>
+								</label>
+							</CatalogueSelector>
 							<details
 								ref={editorRef}
 								className="rounded-md border p-3"

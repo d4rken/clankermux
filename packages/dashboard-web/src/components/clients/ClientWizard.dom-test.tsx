@@ -123,9 +123,9 @@ async function type(id: string, value: string) {
 		input.dispatchEvent(new Event("input", { bubbles: true }));
 	});
 }
-async function filterModels(value: string) {
+async function filterModels(value: string, pane = "Available") {
 	const input = document.querySelector<HTMLInputElement>(
-		'input[type="search"]',
+		`[aria-label="${pane} models"] input[type="search"]`,
 	);
 	if (!input) throw new Error("Missing model filter");
 	await act(async () => {
@@ -136,12 +136,28 @@ async function filterModels(value: string) {
 		input.dispatchEvent(new Event("input", { bubbles: true }));
 	});
 }
-function listedModels() {
+function listedModels(pane = "Available") {
 	return [
 		...document.querySelectorAll(
-			'[aria-label="OpenAI-style discovery models"] > div',
+			`[aria-label="${pane} models"] [data-model-id]`,
 		),
-	].map((row) => row.querySelector("code")?.textContent ?? "");
+	].map((row) => row.getAttribute("data-model-id"));
+}
+async function check(label: string) {
+	const box = document.querySelector<HTMLInputElement>(
+		`input[aria-label="${label}"]`,
+	);
+	if (!box) throw new Error(`Missing ${label}`);
+	await act(async () => box.click());
+}
+async function transferShown(pane: "available" | "selected") {
+	await check(`Check all shown ${pane} models`);
+	const prefix = pane === "available" ? "Add checked" : "Remove checked";
+	const button = [...document.querySelectorAll("button")].find((b) =>
+		b.textContent?.startsWith(prefix),
+	);
+	if (!button || button.disabled) throw new Error(`Missing enabled ${prefix}`);
+	await act(async () => button.click());
 }
 function catalogueOf(format: string) {
 	return reviewed?.catalogues[format as keyof ClientDraft["catalogues"]];
@@ -280,7 +296,7 @@ describe("client catalogue editing", () => {
 	it("jumps straight to catalogues and preserves each format while navigating", async () => {
 		await mount(existing, true);
 		expect(document.body.textContent).toContain("1 selected");
-		await click("Deselect all in tab");
+		await transferShown("selected");
 		// biome-ignore lint/style/noNonNullAssertion: the catalogue step renders one tab per FORMATS entry, so two of the three are inactive
 		const tab = document.querySelector<HTMLButtonElement>(
 			'[role="tab"][data-state="inactive"]',
@@ -291,7 +307,7 @@ describe("client catalogue editing", () => {
 			);
 			tab.click();
 		});
-		await click("Select all in tab");
+		await transferShown("available");
 		await choose("Default model for setup", "new");
 		await click("Application");
 		await click("Catalogue");
@@ -313,13 +329,7 @@ describe("client catalogue editing", () => {
 	});
 	it("edits an existing display name and preserves its model identity", async () => {
 		await mount();
-		const buttons = [...document.querySelectorAll("button")].filter(
-			(b) => b.textContent?.trim() === "Edit",
-		);
-		expect(buttons.length).toBe(2);
-		await act(async () => {
-			buttons.at(-1)?.click();
-		});
+		await click("Edit old");
 		expect(
 			(document.getElementById("model-id") as HTMLInputElement).value,
 		).toBe("old");
@@ -467,7 +477,7 @@ describe("client catalogue editing", () => {
 	});
 	it("explicitly empties the list and clears a now-hidden default", async () => {
 		await mount();
-		await click("Deselect all in tab");
+		await transferShown("selected");
 		await click("Review changes");
 		expect(reviewed?.catalogues.openai).toMatchObject({
 			models: [],
@@ -538,7 +548,7 @@ describe("new client setup defaults", () => {
 		await mountNew(RICH);
 		await click("Next");
 		await click("Next");
-		await click("Deselect all in tab");
+		await transferShown("selected");
 		await click("Application");
 		await choose("Application", "opencode");
 		await click("Catalogue");
@@ -567,7 +577,7 @@ describe("new client setup defaults", () => {
 		await mountNew(RICH);
 		await click("Next");
 		await click("Next");
-		await click("Deselect all in tab");
+		await transferShown("selected");
 		await click("Application");
 		// Away and straight back, never opening the catalogue in between.
 		await choose("Application", "codex");
@@ -654,12 +664,7 @@ describe("new client setup defaults", () => {
 		await click("Next");
 		await click("Next");
 		await choose("Default model for setup", "rich");
-		const row = [...document.querySelectorAll("label")].find((el) =>
-			el.textContent?.includes("Rich model"),
-		);
-		await act(async () => {
-			row?.querySelector("input")?.click();
-		});
+		await click("Remove rich");
 		await click("Review");
 		expect(document.querySelector('[role="alert"]')?.textContent).toContain(
 			"OpenAI-style discovery",
@@ -712,7 +717,7 @@ describe("new client setup defaults", () => {
 			);
 			tab.click();
 		});
-		await click("Select all in tab");
+		await transferShown("available");
 		await click("Review");
 		expect(document.querySelector('[role="alert"]')?.textContent).toContain(
 			"Anthropic-style discovery",
@@ -728,10 +733,11 @@ describe("new client setup defaults", () => {
 describe("catalogue filtering", () => {
 	it("narrows the rendered list and reports how many it shows", async () => {
 		await mount(existing, false, RICH);
-		expect(listedModels()).toEqual(["new", "rich", "old"]);
+		expect(listedModels()).toEqual(["new", "rich"]);
+		expect(listedModels("Selected")).toEqual(["old"]);
 		await filterModels("rich");
 		expect(listedModels()).toEqual(["rich"]);
-		expect(document.body.textContent).toContain("1 of 3 shown");
+		expect(document.body.textContent).toContain("1 of 2 shown");
 		await filterModels("no such model");
 		expect(listedModels()).toEqual([]);
 		expect(document.body.textContent).toContain("No models match this filter.");
@@ -740,18 +746,134 @@ describe("catalogue filtering", () => {
 	it("selects and deselects only what the filter shows", async () => {
 		await mount(existing, false, RICH);
 		await filterModels("rich");
-		await click("Select all shown");
+		await transferShown("available");
 		await click("Review changes");
 		expect(reviewed?.catalogues.openai.models.map((m) => m.id)).toEqual([
 			"old",
 			"rich",
 		]);
 		await click("Catalogue");
-		await click("Deselect all shown");
+		await filterModels("rich", "Selected");
+		await transferShown("selected");
 		await click("Review changes");
 		expect(reviewed?.catalogues.openai.models.map((m) => m.id)).toEqual([
 			"old",
 		]);
+	});
+});
+
+describe("two-pane catalogue transfers", () => {
+	it("stages multiple checkboxes without changing catalogue membership", async () => {
+		await mount(existing, false, RICH);
+		await check("Check new");
+		const all = document.querySelector<HTMLInputElement>(
+			'input[aria-label="Check all shown available models"]',
+		);
+		expect(all?.indeterminate).toBe(true);
+		expect(listedModels("Selected")).toEqual(["old"]);
+		await check("Check rich");
+		expect(all?.checked).toBe(true);
+		await click("Add checked (2)");
+		expect(listedModels()).toEqual([]);
+		expect(new Set(listedModels("Selected"))).toEqual(
+			new Set(["old", "new", "rich"]),
+		);
+		await check("Check new");
+		await check("Check rich");
+		await click("Remove checked (2)");
+		expect(listedModels("Selected")).toEqual(["old"]);
+		await click("Review changes");
+		expect(catalogueOf("openai")?.models.map((m) => m.id)).toEqual(["old"]);
+	});
+
+	it("keeps searches independent and clears staged checks when filtering", async () => {
+		await mount(existing, false, RICH);
+		await check("Check new");
+		await filterModels("rich");
+		expect(document.body.textContent).toContain("Add checked (0)");
+		expect(listedModels("Selected")).toEqual(["old"]);
+		await transferShown("available");
+		await filterModels("old", "Selected");
+		expect(listedModels("Selected")).toEqual(["old"]);
+		await transferShown("selected");
+		await filterModels("", "Selected");
+		expect(listedModels("Selected")).toEqual(["rich"]);
+		await choose("Default model for setup", "rich");
+		await click("Review changes");
+		expect(catalogueOf("openai")?.models.map((m) => m.id)).toEqual(["rich"]);
+		expect(catalogueOf("openai")?.defaultModel).toBe("rich");
+	});
+
+	it("preserves an alias definition when removing, refreshing and re-adding it", async () => {
+		const client = structuredClone(existing);
+		const alias = {
+			id: "custom-alias",
+			displayName: "My alias",
+			targetModel: "new",
+			accountIds: ["a"],
+		};
+		client.catalogues.openai.models = [alias];
+		client.catalogues.openai.defaultModel = alias.id;
+		await mount(client, false, [
+			...DEFAULT_SUGGESTIONS,
+			{
+				id: alias.id,
+				displayName: "Discovered definition",
+				accountIds: ["a"],
+				codexMetadataAvailable: false,
+			},
+		]);
+		await click("Remove custom-alias");
+		await click("Refresh suggestions");
+		expect(listedModels()).toContain("custom-alias");
+		expect(select("Default model for setup").value).toBe("");
+		await click("Add custom-alias");
+		await choose("Default model for setup", alias.id);
+		await click("Review changes");
+		expect(catalogueOf("openai")?.models).toEqual([alias]);
+	});
+
+	it("drops removed candidates when the application recipe changes", async () => {
+		const client = structuredClone(existing);
+		client.catalogues.anthropic = structuredClone(client.catalogues.openai);
+		await mount(client);
+		const tab = [
+			...document.querySelectorAll<HTMLButtonElement>('[role="tab"]'),
+		].find((t) => t.textContent?.startsWith("Anthropic"));
+		if (!tab) throw new Error("Missing Anthropic tab");
+		await act(async () => {
+			tab.dispatchEvent(
+				new MouseEvent("mousedown", { bubbles: true, button: 0 }),
+			);
+			tab.click();
+		});
+		await click("Remove old");
+		expect(listedModels()).toContain("old");
+		await click("Application");
+		await choose("Application", "claude-code");
+		await click("Catalogue");
+		expect(listedModels()).toEqual(["claude-new"]);
+	});
+
+	it("clears staged checks on tab changes without moving any models", async () => {
+		await mount(existing, false, RICH);
+		await check("Check new");
+		for (const name of ["Anthropic", "OpenAI"]) {
+			const tab = [
+				...document.querySelectorAll<HTMLButtonElement>('[role="tab"]'),
+			].find((t) => t.textContent?.startsWith(name));
+			if (!tab) throw new Error(`Missing ${name}`);
+			await act(async () => {
+				tab.dispatchEvent(
+					new MouseEvent("mousedown", { bubbles: true, button: 0 }),
+				);
+				tab.click();
+			});
+		}
+		expect(document.body.textContent).toContain("Add checked (0)");
+		expect(listedModels("Selected")).toEqual(["old"]);
+		await click("Review changes");
+		expect(catalogueOf("anthropic")?.models).toEqual([]);
 	});
 });
 
@@ -934,8 +1056,8 @@ describe("copying another client's setup", () => {
 		// The seed lands when discovery answers, so anything selected here would
 		// be overwritten by it.
 		expect(
-			[...document.querySelectorAll("button")].find(
-				(b) => b.textContent?.trim() === "Select all in tab",
+			[...document.querySelectorAll("button")].find((b) =>
+				b.textContent?.startsWith("Add checked"),
 			)?.disabled,
 		).toBe(true);
 		expect(select("Default model for setup").disabled).toBe(true);
@@ -951,7 +1073,7 @@ describe("copying another client's setup", () => {
 		).toBe(true);
 		expect(
 			document.querySelector<HTMLInputElement>(
-				'[aria-label="Anthropic-style discovery models"] input[type="checkbox"]',
+				'[aria-label="Selected models"] input[type="checkbox"]',
 			)?.disabled,
 		).toBe(true);
 		expect(
@@ -962,8 +1084,8 @@ describe("copying another client's setup", () => {
 		await act(async () => release());
 		await act(async () => {});
 		expect(
-			[...document.querySelectorAll("button")].find(
-				(b) => b.textContent?.trim() === "Select all in tab",
+			document.querySelector<HTMLInputElement>(
+				'input[aria-label="Check all shown selected models"]',
 			)?.disabled,
 		).toBe(false);
 	});
@@ -978,7 +1100,7 @@ describe("copying another client's setup", () => {
 		await click("Copy into this draft");
 		expect(document.body.textContent).toContain("Discovery unavailable");
 		// No second copy: filling the catalogue in is the whole recovery.
-		await click("Select all in tab");
+		await transferShown("available");
 		await choose("Default model for setup", "claude-new");
 		await click("Review");
 		expect(document.body.textContent).not.toContain(
@@ -1000,7 +1122,7 @@ describe("copying another client's setup", () => {
 		expect(document.body.textContent).toContain("Discovery unavailable");
 		// The failed copy left the seed armed on Anthropic. Answering it by hand
 		// has to retire it, not just skip it.
-		await click("Select all in tab");
+		await transferShown("available");
 		await choose("Default model for setup", "claude-new");
 		await click("Copy into this draft");
 		await click("Review");
