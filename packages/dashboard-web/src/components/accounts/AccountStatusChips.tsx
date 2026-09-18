@@ -930,7 +930,7 @@ export function AccountRenewalInfo({
 					: "text-muted-foreground";
 		return (
 			<span className={`whitespace-nowrap ${textColor}`} title={title}>
-				{label}
+				{label + priceSuffix}
 			</span>
 		);
 	}
@@ -938,7 +938,7 @@ export function AccountRenewalInfo({
 	return (
 		<StatusChip className={colorClasses} title={title}>
 			<CalendarClock className="h-3.5 w-3.5" />
-			{label}
+			{label + priceSuffix}
 		</StatusChip>
 	);
 }
