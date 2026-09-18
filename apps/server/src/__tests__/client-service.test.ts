@@ -1187,6 +1187,72 @@ describe("client service integration", () => {
 			rmSync(cacheDir, { recursive: true, force: true });
 		});
 
+		it("enriches only this client's aliases and resolves cache policy per endpoint and dialect", async () => {
+			const sql = dbOps.getAdapter().getSQLiteDb();
+			sql.query("UPDATE accounts SET provider='anthropic' WHERE id='d'").run();
+			await discovered("d", ["claude-haiku-4-5-20251001"]);
+			const draft = blank();
+			draft.destinations = { accountId: "d", providers: null };
+			for (const format of ["anthropic", "openai"] as const)
+				draft.catalogues[format].models = [
+					{
+						id: "friendly",
+						displayName: "Friendly",
+						targetModel: "claude-haiku-4-5-20251001",
+						accountIds: ["d"],
+					},
+				];
+			const id = (await create(draft)).client.apiKeyId;
+			const policy = {
+				mode: "explicit",
+				expiry: "estimated",
+				source: "gateway-policy",
+				defaultTtlMs: 300000,
+				supportedTtlMs: [300000, 3600000],
+				refreshOnReuse: true,
+				ttlAnchor: "request_start",
+				ttlSemantics: "minimum",
+			};
+			const before = await dbOps.clients.getProfile(id);
+			const plain = await (await service.wire(id, "anthropic")).json();
+			expect(plain.data[0].clankermux).toBeUndefined();
+			const enriched = await (await service.wire(id, "anthropic", true)).json();
+			expect(enriched.data.map((m: { id: string }) => m.id)).toEqual([
+				"friendly",
+			]);
+			expect(enriched.data[0].clankermux.cachePolicy).toEqual(policy);
+			expect(JSON.stringify(enriched)).not.toContain("accountIds");
+			expect(await dbOps.clients.getProfile(id)).toEqual(before);
+			const openai = await (await service.wire(id, "openai", true)).json();
+			expect(openai.data[0].clankermux.cachePolicy).toBeUndefined();
+			// A configured custom host does not inherit the official provider's TTL.
+			sql
+				.query(
+					"UPDATE accounts SET custom_endpoint='https://custom.example' WHERE id='d'",
+				)
+				.run();
+			await discovered("d", ["claude-haiku-4-5-20251001"]);
+			const custom = await (await service.wire(id, "anthropic", true)).json();
+			expect(custom.data[0].clankermux.cachePolicy).toBeUndefined();
+		});
+		it("serves the native catalogue with empty metadata when enrichment stalls", async () => {
+			await discovered("c", ["gpt-6-astra"]);
+			const id = await astraClient(["c"], { accountId: "c", providers: null });
+			const stalled = spyOn(permissions, "permissions").mockImplementation(
+				() => new Promise(() => {}),
+			);
+			try {
+				const response = await service.wire(id, "openai", true);
+				expect(response.status).toBe(200);
+				expect(await response.json()).toMatchObject({
+					object: "list",
+					data: [{ id: "gpt-6-astra", clankermux: {} }],
+				});
+			} finally {
+				stalled.mockRestore();
+			}
+		});
+
 		it("publishes native Devin limits without a models.dev entry or account requests", async () => {
 			dbOps
 				.getAdapter()

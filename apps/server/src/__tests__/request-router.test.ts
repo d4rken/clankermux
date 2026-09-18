@@ -488,6 +488,27 @@ describe("mount gating", () => {
 });
 
 describe("mounted authentication", () => {
+	it("keeps metadata discovery behind client authentication on both mounts", async () => {
+		for (const dialect of ["openai", "anthropic"] as const) {
+			const path = `/wire/${dialect}/v1/models?clankermux_metadata=1`;
+			const denied = makeDeps({ authenticated: false });
+			expect((await routeRequest(makeRequest(path), denied.deps)).status).toBe(
+				401,
+			);
+			expect(denied.calls.models).toBe(0);
+			const allowed = makeDeps();
+			await routeRequest(makeRequest(path, { headers: withKey }), allowed.deps);
+			expect(allowed.calls.modelUrls).toEqual([
+				{
+					pathname: "/v1/models",
+					search: "?clankermux_metadata=1",
+					apiKeyId: "key-1",
+					dialect,
+				},
+			]);
+		}
+	});
+
 	it("401s a mounted request that carries no key", async () => {
 		const { deps, calls } = makeDeps({ authenticated: false });
 		const res = await routeRequest(

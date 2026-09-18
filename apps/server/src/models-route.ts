@@ -19,10 +19,15 @@ const CLIENT_VERSION_PARAM = "client_version";
 
 /** Bound the catalogue read so client startup cannot wait on SQLite retries. */
 const CATALOGUE_READ_BUDGET_MS = 2_000;
+const CATALOGUE_METADATA_READ_BUDGET_MS = 3_000;
 
 export interface ModelsRouteDeps {
 	/** Saved per-key catalogue; failures return 503 without substituting a shared list. */
-	getClientCatalog(apiKeyId: string, format: ClientFormat): Promise<Response>;
+	getClientCatalog(
+		apiKeyId: string,
+		format: ClientFormat,
+		includeMetadata?: boolean,
+	): Promise<Response>;
 }
 
 /**
@@ -60,11 +65,14 @@ export async function handleModelsRoute(
 					: url.searchParams.has(CLIENT_VERSION_PARAM)
 						? "codex"
 						: "openai",
+				url.searchParams.get("clankermux_metadata") === "1",
 			),
 			new Promise<never>((_, reject) => {
 				timer = setTimeout(
 					() => reject(new Error("Catalogue read timed out")),
-					CATALOGUE_READ_BUDGET_MS,
+					url.searchParams.get("clankermux_metadata") === "1"
+						? CATALOGUE_METADATA_READ_BUDGET_MS
+						: CATALOGUE_READ_BUDGET_MS,
 				);
 			}),
 		]);

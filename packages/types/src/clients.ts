@@ -34,6 +34,19 @@ export interface ClientModelCost {
 	/** Rates replacing the base set above `inputTokensAbove`, ascending. */
 	tiers?: ClientModelCostTier[];
 }
+
+/** Cache lifetime policy that is common to every route serving an alias. */
+export interface ModelCachePolicy {
+	mode: "explicit" | "implicit" | "none" | "unknown";
+	defaultTtlMs?: number;
+	supportedTtlMs?: number[];
+	refreshOnReuse?: boolean;
+	expiry: "unavailable" | "estimated" | "exact";
+	source: "gateway-policy" | "unknown";
+	ttlAnchor?: "request_start" | "request_end" | "unknown";
+	ttlSemantics?: "configured" | "minimum" | "typical" | "unknown";
+}
+
 /**
  * What ClankerMux can substantiate about one published alias, resolved per
  * request and never persisted: a stored copy would describe the route the
@@ -49,6 +62,7 @@ export interface ClientModelMetadata {
 	reasoning?: boolean;
 	inputModalities?: Array<"text" | "image">;
 	cost?: ClientModelCost;
+	cachePolicy?: ModelCachePolicy;
 }
 export type ClientModelMetadataMap = Record<string, ClientModelMetadata>;
 export interface ClientModelMetadataResponse {
